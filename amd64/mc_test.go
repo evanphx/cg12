@@ -28,6 +28,11 @@ _start:
 // _start stub via lld, runs the result under qemu-x86_64, and returns the exit
 // code. The module must export a function named "runtest" returning a word.
 func runObj(t *testing.T, m *ir.Module) int {
+	return runObjWith(t, m, amd64.Options{})
+}
+
+// runObjWith is runObj with explicit compilation options (e.g. a GC strategy).
+func runObjWith(t *testing.T, m *ir.Module, opts amd64.Options) int {
 	t.Helper()
 	clang, err := exec.LookPath("clang")
 	if err != nil {
@@ -41,7 +46,7 @@ func runObj(t *testing.T, m *ir.Module) int {
 		t.Skip("qemu-x86_64 not available")
 	}
 
-	code, err := amd64.CompileObject(m)
+	code, err := amd64.CompileObjectWith(m, opts)
 	require.NoError(t, err)
 
 	dir := t.TempDir()

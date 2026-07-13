@@ -10,14 +10,22 @@ import (
 	"github.com/evanphx/cg12/obj"
 )
 
-// Options is reserved for future object-emission hooks (such as a pluggable GC
-// strategy for safepoint code). DWARF and GC stack maps are emitted automatically.
-type Options struct{}
+// Options controls object emission. GC supplies a pluggable garbage-collector
+// strategy that emits safepoint (and optionally prologue) code late during
+// emission; nil leaves safepoints as code-free stack-map markers.
+type Options struct {
+	GC GCStrategy
+}
 
 // CompileObject compiles a module straight to ELF x86-64 relocatable-object
 // bytes with the machine-code emitter (no external assembler).
 func CompileObject(m *ir.Module) ([]byte, error) {
-	o, err := CompileToObject(m)
+	return CompileObjectWith(m, Options{})
+}
+
+// CompileObjectWith compiles a module to ELF bytes with the given options.
+func CompileObjectWith(m *ir.Module, opts Options) ([]byte, error) {
+	o, err := CompileToObjectWith(m, opts)
 	if err != nil {
 		return nil, err
 	}
@@ -26,6 +34,12 @@ func CompileObject(m *ir.Module) ([]byte, error) {
 
 // CompileToObject compiles a module to an in-memory relocatable object.
 func CompileToObject(m *ir.Module) (*obj.Object, error) {
+	return CompileToObjectWith(m, Options{})
+}
+
+// CompileToObjectWith compiles a module to an in-memory relocatable object with
+// the given options.
+func CompileToObjectWith(m *ir.Module, opts Options) (*obj.Object, error) {
 	o := &obj.Object{Machine: obj.EM_X86_64}
 	var smFuncs []stackMapFunc
 	var rows []obj.LineRow
@@ -34,6 +48,7 @@ func CompileToObject(m *ir.Module) (*obj.Object, error) {
 	for _, f := range m.Funcs {
 		name := sanitize(f.Name)
 		params := dwarfParams(f) // captured before lowering rewrites the params
+		paramTemps := paramTempIDs(f)
 		ir.LowerPointers(f, ir.ClsL)
 		if err := lower(f); err != nil {
 			return nil, fmt.Errorf("function %s: %w", f.Name, err)
@@ -42,7 +57,7 @@ func CompileToObject(m *ir.Module) (*obj.Object, error) {
 		if err != nil {
 			return nil, fmt.Errorf("function %s: %w", f.Name, err)
 		}
-		mc, err := emitMachine(f, alloc)
+		mc, err := emitMachine(f, alloc, opts.GC)
 		if err != nil {
 			return nil, fmt.Errorf("function %s: %w", f.Name, err)
 		}
@@ -59,9 +74,13 @@ func CompileToObject(m *ir.Module) (*obj.Object, error) {
 			Name: name, Section: obj.SecText, Value: uint64(base),
 			Size: uint64(len(mc.code)), Global: f.Linkage.Export, Func: true,
 		})
+		for i := range params {
+			params[i].Loc = mc.m.varLoc(paramTemps[i])
+		}
 		df := obj.DwarfFunc{
 			Name: name, Sym: name, Size: uint64(len(mc.code)),
 			HasRet: f.HasRet, RetType: dwarfRetType(f), Params: params, External: f.Linkage.Export,
+			Inlines: buildInlineTree(mc.inl, uint64(len(mc.code))),
 		}
 		if len(mc.rows) > 0 {
 			df.DeclFile, df.DeclLine = mc.rows[0].File, mc.rows[0].Line
@@ -79,7 +98,7 @@ func CompileToObject(m *ir.Module) (*obj.Object, error) {
 		addData(o, d)
 	}
 	if len(m.Files) > 0 && anchor != "" {
-		o.SetDWARF(m.Files, rows, dfuncs, uint64(len(o.Text)), anchor, "cg12", ".", m.Files[0], obj.R_X86_64_64)
+		o.SetDWARF(m.Files, rows, dfuncs, uint64(len(o.Text)), anchor, "cg12", ".", m.Files[0], obj.R_X86_64_64, 0x56) // DW_OP_reg6 (rbp)
 	}
 	if len(smFuncs) > 0 {
 		setStackMap(o, smFuncs)
@@ -122,6 +141,157 @@ func dwarfParams(f *ir.Func) []obj.DwarfParam {
 		ps = append(ps, obj.DwarfParam{Name: p.Name, Type: dwarfType(cls)})
 	}
 	return ps
+}
+
+// paramTempIDs returns each parameter's temporary id, captured before lowering
+// (ids are stable across it).
+func paramTempIDs(f *ir.Func) []int {
+	ids := make([]int, len(f.Params))
+	for i, p := range f.Params {
+		ids[i] = p.ID
+	}
+	return ids
+}
+
+// tempInterval returns a temporary's live range, or nil.
+func (m *mc) tempInterval(id int) *interval {
+	for _, iv := range m.alloc.intervals {
+		if iv.temp == id {
+			return iv
+		}
+	}
+	return nil
+}
+
+// pcRange maps an interval (in the allocator's numbering) to the [lo, hi) PC
+// range spanned by its instructions, taking min start / max end so it is robust
+// to block-emission order.
+func (m *mc) pcRange(start, end int) (lo, hi uint64, ok bool) {
+	pi := m.alloc.posInstr
+	lo = ^uint64(0)
+	for q := start; q <= end && q < len(pi); q++ {
+		if q < 0 {
+			continue
+		}
+		if in := pi[q]; in != nil {
+			if pc, o := m.instrPC[in]; o {
+				if pc[0] < lo {
+					lo = pc[0]
+				}
+				if pc[1] > hi {
+					hi = pc[1]
+				}
+				ok = true
+			}
+		}
+	}
+	return lo, hi, ok
+}
+
+// varLoc computes a temporary's DWARF location (register or frame slot) over its
+// live PC range, or nil when it has no determinable range.
+func (m *mc) varLoc(tempID int) *obj.VarLoc {
+	iv := m.tempInterval(tempID)
+	if iv == nil {
+		return nil
+	}
+	lo, hi, ok := m.pcRange(iv.start, iv.end)
+	if !ok {
+		return nil
+	}
+	t := m.f.Temps[tempID]
+	var expr []byte
+	if t.Reg != ir.NoReg {
+		expr = obj.LocReg(dwarfRegNum(Reg(t.Reg)))
+	} else {
+		expr = obj.LocFrameBase(int64(-(m.spillBase + 8 + t.Slot)))
+	}
+	return &obj.VarLoc{Lo: lo, Hi: hi, Expr: expr}
+}
+
+// dwarfGP maps the native GP encoding (rax=0..r15=15) to its x86-64 DWARF number.
+var dwarfGP = [16]uint32{0, 2, 1, 3, 7, 6, 4, 5, 8, 9, 10, 11, 12, 13, 14, 15}
+
+// dwarfRegNum maps a physical register to its x86-64 DWARF register number
+// (rax=0, rdx=1, rcx=2, rbx=3, rsi=4, rdi=5, rbp=6, rsp=7, r8..r15=8..15,
+// xmm0..xmm15=17..32).
+func dwarfRegNum(r Reg) uint32 {
+	if r >= XMM0 {
+		return 17 + uint32(r-XMM0)
+	}
+	return dwarfGP[r]
+}
+
+// inlineNode is an inlined region under construction.
+type inlineNode struct {
+	site     *ir.InlineSite
+	lo, hi   uint64
+	children []*inlineNode
+}
+
+// buildInlineTree turns inline-context samples into a nested tree of
+// inlined-subroutine ranges. Samples mark where the context changes; the final
+// context runs to size. Sites are interned, so compared by pointer.
+func buildInlineTree(samples []inlSample, size uint64) []obj.InlineRange {
+	if len(samples) == 0 {
+		return nil
+	}
+	chainOf := func(s *ir.InlineSite) []*ir.InlineSite {
+		var c []*ir.InlineSite
+		for ; s != nil; s = s.Parent {
+			c = append(c, s)
+		}
+		for i, j := 0, len(c)-1; i < j; i, j = i+1, j-1 {
+			c[i], c[j] = c[j], c[i]
+		}
+		return c
+	}
+	var roots, stack []*inlineNode
+	addChild := func(n *inlineNode) {
+		if len(stack) == 0 {
+			roots = append(roots, n)
+		} else {
+			top := stack[len(stack)-1]
+			top.children = append(top.children, n)
+		}
+	}
+	for _, s := range samples {
+		chain := chainOf(s.site)
+		k := 0
+		for k < len(stack) && k < len(chain) && stack[k].site == chain[k] {
+			k++
+		}
+		for len(stack) > k {
+			top := stack[len(stack)-1]
+			top.hi = s.off
+			stack = stack[:len(stack)-1]
+		}
+		for _, site := range chain[k:] {
+			n := &inlineNode{site: site, lo: s.off}
+			addChild(n)
+			stack = append(stack, n)
+		}
+	}
+	for len(stack) > 0 {
+		top := stack[len(stack)-1]
+		top.hi = size
+		stack = stack[:len(stack)-1]
+	}
+	return convInlineNodes(roots)
+}
+
+func convInlineNodes(ns []*inlineNode) []obj.InlineRange {
+	var out []obj.InlineRange
+	for _, n := range ns {
+		out = append(out, obj.InlineRange{
+			Callee:   sanitize(n.site.Callee),
+			CallFile: int(n.site.Call.File),
+			CallLine: int(n.site.Call.Line),
+			Lo:       n.lo, Hi: n.hi,
+			Children: convInlineNodes(n.children),
+		})
+	}
+	return out
 }
 
 // stackMapFunc groups one function's safepoints under its symbol.
@@ -188,17 +358,29 @@ type mc struct {
 	allocOff    map[*ir.Instr]int // each stack allocation's distance below RBP
 	frame       int               // bytes subtracted from RSP (16-aligned)
 
+	gc GCStrategy // pluggable GC strategy, or nil
+
 	blockDone bool // a tail call already emitted the block's exit; skip the terminator
 
 	// Variadic support: the System V register save area (rdi..r9 then xmm0..xmm7),
 	// at [rbp - regSaveDist].
 	regSaveDist int
 	vaSeq       int // counter for unique va_arg branch labels
+	gcSeq       int // counter for unique GC poll labels
 
 	safepoints []safepoint // GC safepoints recorded during emission
 
-	rows    []obj.LineRow // DWARF line-table rows
-	lastPos ir.SrcPos     // last emitted source position
+	rows    []obj.LineRow           // DWARF line-table rows
+	lastPos ir.SrcPos               // last emitted source position
+	instrPC map[*ir.Instr][2]uint64 // each instruction's [start, end) PC
+	inl     []inlSample             // inline-context change samples
+	lastInl *ir.InlineSite          // last emitted inline context
+}
+
+// inlSample marks the PC offset at which the inline context changed.
+type inlSample struct {
+	off  uint64
+	site *ir.InlineSite
 }
 
 // System V register save area geometry: 6 GP registers (8 bytes each) followed by
@@ -219,8 +401,9 @@ type rootLoc struct {
 }
 
 const (
-	rootReg   uint8 = 0
-	rootFrame uint8 = 1
+	rootReg   uint8 = 0 // val is a physical register number
+	rootFrame uint8 = 1 // val is a byte offset from the frame pointer (rbp)
+	rootSP    uint8 = 2 // val is a byte offset from the stack pointer at the safepoint
 )
 
 // safepoint is a call site's return address (function-relative) and the GC roots
@@ -235,10 +418,12 @@ type machineCode struct {
 	relocs     []obj.Reloc
 	safepoints []safepoint
 	rows       []obj.LineRow
+	inl        []inlSample
+	m          *mc // retained so callers can query variable locations
 }
 
-func emitMachine(f *ir.Func, alloc *allocation) (*machineCode, error) {
-	m := &mc{f: f, alloc: alloc, prog: x64.NewProgram(), allocOff: map[*ir.Instr]int{}}
+func emitMachine(f *ir.Func, alloc *allocation, gc GCStrategy) (*machineCode, error) {
+	m := &mc{f: f, alloc: alloc, gc: gc, prog: x64.NewProgram(), allocOff: map[*ir.Instr]int{}, instrPC: map[*ir.Instr][2]uint64{}}
 	m.planFrame()
 	m.prologue()
 	for _, b := range f.Blocks {
@@ -252,7 +437,17 @@ func emitMachine(f *ir.Func, alloc *allocation) (*machineCode, error) {
 	if err != nil {
 		return nil, err
 	}
-	return &machineCode{code: code, relocs: m.relocs, safepoints: m.safepoints, rows: m.rows}, nil
+	return &machineCode{code: code, relocs: m.relocs, safepoints: m.safepoints, rows: m.rows, inl: m.inl, m: m}, nil
+}
+
+// recordInline samples the inline context whenever it changes, keyed by PC. A
+// nil site (returning to non-inlined code) is also recorded, to close regions.
+func (m *mc) recordInline(site *ir.InlineSite) {
+	if site == m.lastInl {
+		return
+	}
+	m.lastInl = site
+	m.inl = append(m.inl, inlSample{off: uint64(m.prog.Len()), site: site})
 }
 
 // recordLoc appends a DWARF line-table row when the source position changes.
@@ -366,6 +561,12 @@ func (m *mc) slotAddr(s int) int32 { return int32(-(m.spillBase + 8 + s)) }
 func (m *mc) savedAddr(k int) int32 { return int32(-8 * (k + 1)) }
 
 func (m *mc) prologue() {
+	// A strategy may emit a stack-growth guard before the frame is set up; its slow
+	// path branches back to this label to re-check after the stack grows.
+	if pe, ok := m.gc.(PrologueEmitter); ok {
+		m.prog.Label("__cg12_prologue")
+		pe.EmitPrologue(&PrologueContext{mc: m, retry: "__cg12_prologue"})
+	}
 	m.emit(x64.Push(RBP.mreg()))
 	m.emit(x64.MovReg(true, RBP.mreg(), RSP.mreg()))
 	if m.frame > 0 {
@@ -779,7 +980,9 @@ func (m *mc) block(b *ir.Block) {
 	var argPending []*ir.Instr
 	for ; i < len(b.Instrs); i++ {
 		in := &b.Instrs[i]
+		start := uint64(m.prog.Len())
 		m.recordLoc(in.Pos)
+		m.recordInline(in.Inl)
 		switch in.Op {
 		case ir.OArg:
 			argPending = append(argPending, in)
@@ -807,6 +1010,7 @@ func (m *mc) block(b *ir.Block) {
 		default:
 			m.instr(in)
 		}
+		m.instrPC[in] = [2]uint64{start, uint64(m.prog.Len())}
 	}
 	m.term(b)
 }
@@ -943,7 +1147,10 @@ func (m *mc) instr(in *ir.Instr) {
 	case ir.OVaArg:
 		m.vaArg(in)
 	case ir.OSafepoint:
-		// No machine code; record the live GC roots at this PC.
+		// Let the strategy emit poll code, then record the roots at the resulting PC.
+		if m.gc != nil {
+			m.gc.EmitSafepoint(&GCContext{mc: m, roots: m.gcRoots(in)})
+		}
 		m.recordSafepoint(in)
 	default:
 		m.fail(fmt.Errorf("amd64: unsupported op %s", in.Op))

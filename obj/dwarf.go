@@ -164,7 +164,10 @@ const (
 // line-number program. anchorSym is the symbol text addresses are measured from
 // (the first function, at .text offset 0); relocAbs64 is the architecture's
 // 64-bit absolute relocation type. rows must be sorted by TextOff.
-func (o *Object) SetDWARF(files []string, rows []LineRow, funcs []DwarfFunc, textSize uint64, anchorSym, producer, compDir, unitName string, relocAbs64 uint32) {
+// SetDWARF builds the debug sections. frameBaseOp is the DW_OP_regN opcode for
+// the subprogram frame base (the frame-pointer register): DW_OP_reg29 (0x6d) on
+// AArch64, DW_OP_reg6 (0x56, rbp) on x86-64.
+func (o *Object) SetDWARF(files []string, rows []LineRow, funcs []DwarfFunc, textSize uint64, anchorSym, producer, compDir, unitName string, relocAbs64 uint32, frameBaseOp byte) {
 	o.DebugAbbrev = buildAbbrev()
 
 	line, setAddrOff := buildLineProgram(files, rows, textSize)
@@ -174,7 +177,7 @@ func (o *Object) SetDWARF(files []string, rows []LineRow, funcs []DwarfFunc, tex
 	loc, locOff := buildLoc(funcs)
 	o.DebugLoc = loc
 
-	info, relocs := buildInfo(funcs, locOff, textSize, anchorSym, producer, compDir, unitName, relocAbs64)
+	info, relocs := buildInfo(funcs, locOff, textSize, anchorSym, producer, compDir, unitName, relocAbs64, frameBaseOp)
 	o.DebugInfo = info
 	o.DebugInfoRelocs = relocs
 }
@@ -259,7 +262,7 @@ func buildAbbrev() []byte {
 
 // buildInfo builds the compilation-unit DIE tree (base types + subprograms) and
 // returns the section bytes and the relocations for every low_pc address.
-func buildInfo(funcs []DwarfFunc, locOff map[*VarLoc]uint32, textSize uint64, anchorSym, producer, compDir, unitName string, relocAbs64 uint32) ([]byte, []Reloc) {
+func buildInfo(funcs []DwarfFunc, locOff map[*VarLoc]uint32, textSize uint64, anchorSym, producer, compDir, unitName string, relocAbs64 uint32, frameBaseOp byte) ([]byte, []Reloc) {
 	b := &dbuf{}
 	var relocs []Reloc
 	addrOff := func(sym string, addend int64) {
@@ -344,7 +347,7 @@ func buildInfo(funcs []DwarfFunc, locOff map[*VarLoc]uint32, textSize uint64, an
 		addrOff(f.Sym, 0) // low_pc
 		b.u64(f.Size)     // high_pc
 		b.uleb(1)         // frame_base exprloc: length 1...
-		b.u8(dwOpReg29)
+		b.u8(frameBaseOp)
 		if f.HasRet {
 			b.u32(typeOff[f.RetType.Name])
 		}

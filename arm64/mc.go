@@ -110,7 +110,7 @@ func CompileToObjectWith(m *ir.Module, opts Options) (*obj.Object, error) {
 	}
 	// Emit DWARF when the module carries a source-file table.
 	if len(m.Files) > 0 && anchor != "" {
-		o.SetDWARF(m.Files, rows, dfuncs, uint64(len(o.Text)), anchor, "cg12", ".", m.Files[0], obj.R_AARCH64_ABS64)
+		o.SetDWARF(m.Files, rows, dfuncs, uint64(len(o.Text)), anchor, "cg12", ".", m.Files[0], obj.R_AARCH64_ABS64, 0x6d) // DW_OP_reg29 (x29)
 	}
 	// Emit GC stack maps when any safepoint carries a live root.
 	if len(smFuncs) > 0 {
