@@ -1,0 +1,130 @@
+package ir
+
+// Instr is a single non-phi SSA instruction.
+//
+// Args holds the operands (0-2 for every modelled op except calls, whose extra
+// arguments are carried by preceding OArg instructions). Keeping Args a slice
+// rather than a fixed array trades a little density for a builder API that reads
+// naturally and for uniform iteration in the passes.
+type Instr struct {
+	Op   Op
+	Cls  Cls   // class of the result (and of integer operands, where relevant)
+	To   Ref   // result temporary, or R when the op has no result
+	Args []Ref // operands
+	Cmp  Cmp   // predicate, valid only when Op == OCmp
+	Aux  int64 // op-specific immediate: blit size, vaarg type id, call stack bytes
+
+	// AggArgs types by-value aggregate call arguments: for an OCall, AggArgs[k]
+	// (when non-nil) is the aggregate type of the value argument Args[1+k],
+	// which is a pointer to that aggregate. nil entries are scalar arguments.
+	AggArgs []*AggType
+
+	// Defs lists physical-register results an OCall produces beyond To — the
+	// extra registers of a multi-register aggregate return. They are defined at
+	// the call for liveness/allocation.
+	Defs []Ref
+
+	// RetAgg is the aggregate type of an OCall's result (the result temporary is
+	// a pointer to it), or nil for a scalar result.
+	RetAgg *AggType
+
+	// Pos is the source position this instruction was generated from, or the
+	// zero SrcPos when unknown. Backends emit it as debug-line info.
+	Pos SrcPos
+
+	// Tail marks an OCall as a mandatory tail call: the call is in tail position
+	// (the last instruction of its block, whose result the block immediately
+	// returns) and the backend must emit a real tail call — reusing the frame —
+	// or report an error. It is not a best-effort optimisation, so an author can
+	// rely on it (e.g. for guaranteed tail-call elimination) and learn at compile
+	// time when a target cannot honour it.
+	Tail bool
+
+	// Inl records inline provenance: when the inliner splices a callee's body in,
+	// each cloned instruction points at the InlineSite describing which function
+	// it came from and where it was called. nil for ordinary (non-inlined) code.
+	// Backends turn it into DWARF DW_TAG_inlined_subroutine records.
+	Inl *InlineSite
+}
+
+// InlineSite describes one level of inlining: a call to Callee at the source
+// position Call was replaced by the callee's body. Parent is the enclosing
+// InlineSite when this inline happened inside already-inlined code, forming a
+// chain from the outermost inline down to this one.
+type InlineSite struct {
+	Callee string // name of the inlined function (the abstract origin)
+	Call   SrcPos // the call-site position (where the inline happened)
+	Parent *InlineSite
+}
+
+// TailCall reports whether block b is terminated by a tail call: its last
+// instruction is a tail-marked call whose result the block immediately returns
+// (or a void tail call followed by a bare return). It returns that call. A
+// tail-marked call in any other position is invalid; ok is false there so a
+// backend can reject it.
+func TailCall(b *Block) (call *Instr, ok bool) {
+	if len(b.Instrs) == 0 || b.Jmp.Kind != JmpRet {
+		return nil, false
+	}
+	in := &b.Instrs[len(b.Instrs)-1]
+	if in.Op != OCall || !in.Tail {
+		return nil, false
+	}
+	if in.To.IsNone() {
+		return in, b.Jmp.Arg.IsNone()
+	}
+	return in, b.Jmp.Arg == in.To
+}
+
+// HasTailCall reports whether the block contains a tail-marked call anywhere.
+// A backend uses it to detect an ill-placed tail call (one HasTailCall finds but
+// TailCall rejects) and error rather than silently miscompile.
+func HasTailCall(b *Block) bool {
+	for i := range b.Instrs {
+		if b.Instrs[i].Op == OCall && b.Instrs[i].Tail {
+			return true
+		}
+	}
+	return false
+}
+
+// Arg returns operand i, or R if out of range.
+func (in *Instr) Arg(i int) Ref {
+	if i < 0 || i >= len(in.Args) {
+		return R
+	}
+	return in.Args[i]
+}
+
+// Phi is an SSA phi node: at block entry it selects Args[k] when control arrived
+// from Blocks[k]. Args and Blocks are parallel and equal length.
+type Phi struct {
+	Cls    Cls
+	To     Ref
+	Args   []Ref
+	Blocks []*Block
+}
+
+// JmpKind is the terminator kind of a block.
+type JmpKind uint8
+
+const (
+	JmpNone JmpKind = iota // unterminated (under construction)
+	JmpJmp                 // unconditional jump to To
+	JmpJnz                 // if Arg != 0 goto To else To2
+	JmpRet                 // return Arg (R for void)
+	JmpHlt                 // trap / unreachable
+)
+
+// Jmp is a block terminator. Successor blocks are referenced directly so the
+// CFG is navigable without a separate edge table.
+type Jmp struct {
+	Kind JmpKind
+	Arg  Ref    // jnz condition or return value
+	To   *Block // primary successor (jmp target, jnz true edge)
+	To2  *Block // jnz false edge
+
+	// Args lists additional values live at the terminator — the extra registers
+	// of a multi-register aggregate return, beyond Arg.
+	Args []Ref
+}

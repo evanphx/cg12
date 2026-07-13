@@ -1,0 +1,290 @@
+package ir
+
+// Op identifies an instruction's operation. Unlike QBE, which defines a
+// distinct opcode per operand class (addw/addl/...), we keep operations
+// polymorphic over Cls: the class of the result comes from Instr.Cls and the
+// class of the operands is recovered from the operands themselves. This keeps
+// the opcode set small and the passes uniform.
+type Op uint16
+
+const (
+	ONop Op = iota
+
+	// Arithmetic (binary; result & integer operands share Instr.Cls).
+	OAdd
+	OSub
+	OMul
+	ODiv  // signed / float division
+	OUDiv // unsigned division
+	ORem  // signed remainder
+	OURem // unsigned remainder
+
+	// Bitwise / shifts (integer).
+	OAnd
+	OOr
+	OXor
+	OShl // logical left shift
+	OShr // logical right shift
+	OSar // arithmetic right shift
+
+	// Unary.
+	ONeg
+
+	// Comparison. The predicate lives in Instr.Cmp; the operand class is read
+	// from the operands, and Instr.Cls is the (integer) result class.
+	OCmp
+
+	// Memory stores. The op fixes the width; the value is Args[0], address
+	// Args[1].
+	OStoreb
+	OStoreh
+	OStorew
+	OStorel
+	OStores
+	OStored
+
+	// Memory loads. The op fixes width and signedness; Instr.Cls is the
+	// destination class and Args[0] is the address.
+	OLoadsb
+	OLoadub
+	OLoadsh
+	OLoaduh
+	OLoadsw
+	OLoaduw
+	OLoadl
+	OLoads
+	OLoadd
+
+	// Stack allocation with the given alignment; result is a pointer (ClsL).
+	// The byte size is Args[0] (usually a constant).
+	OAlloc4
+	OAlloc8
+	OAlloc16
+
+	// Memory-to-memory copy of Aux bytes from Args[1] to Args[0].
+	OBlit
+
+	// Integer width conversions (result class Instr.Cls).
+	OExtsb // sign-extend byte
+	OExtub // zero-extend byte
+	OExtsh // sign-extend halfword
+	OExtuh // zero-extend halfword
+	OExtsw // sign-extend word to long
+	OExtuw // zero-extend word to long
+
+	// Float width conversions.
+	OExts   // single -> double
+	OTruncd // double -> single
+
+	// Float <-> integer conversions.
+	OStosi // float -> signed integer
+	OStoui // float -> unsigned integer
+	OSltof // signed integer -> float
+	OUltof // unsigned integer -> float
+
+	// Bitwise reinterpretation between an integer and float of equal width.
+	OCast
+
+	// Plain copy (may re-type between equal-size classes).
+	OCopy
+
+	// Calls and arguments.
+	OCall   // Args[0] is the callee; Instr.Cls is the return class
+	OArg    // an outgoing call argument (materialised before the OCall)
+	OArgEnv // the outgoing environment argument
+	OPar    // an incoming parameter placeholder
+	OParEnv // the incoming environment parameter
+
+	// Variadic support.
+	OVaStart
+	OVaArg
+
+	// OSafepoint marks a point where the garbage collector may stop the thread:
+	// the backend emits a stack map describing the managed references live here.
+	// Calls are safepoints implicitly; this marks the ones that are not calls —
+	// inlined-allocation fast paths, loop back-edge polls, and the like. It emits
+	// no machine code.
+	OSafepoint
+
+	numOps
+)
+
+// opInfo carries static metadata about an opcode.
+type opInfo struct {
+	name        string // IL mnemonic; empty when computed (OCmp)
+	hasResult   bool   // defines Instr.To
+	commutative bool   // operands may be swapped freely
+}
+
+var opTable = [numOps]opInfo{
+	ONop: {name: "nop"},
+
+	OAdd:  {name: "add", hasResult: true, commutative: true},
+	OSub:  {name: "sub", hasResult: true},
+	OMul:  {name: "mul", hasResult: true, commutative: true},
+	ODiv:  {name: "div", hasResult: true},
+	OUDiv: {name: "udiv", hasResult: true},
+	ORem:  {name: "rem", hasResult: true},
+	OURem: {name: "urem", hasResult: true},
+
+	OAnd: {name: "and", hasResult: true, commutative: true},
+	OOr:  {name: "or", hasResult: true, commutative: true},
+	OXor: {name: "xor", hasResult: true, commutative: true},
+	OShl: {name: "shl", hasResult: true},
+	OShr: {name: "shr", hasResult: true},
+	OSar: {name: "sar", hasResult: true},
+
+	ONeg: {name: "neg", hasResult: true},
+
+	OCmp: {name: "", hasResult: true},
+
+	OStoreb: {name: "storeb"},
+	OStoreh: {name: "storeh"},
+	OStorew: {name: "storew"},
+	OStorel: {name: "storel"},
+	OStores: {name: "stores"},
+	OStored: {name: "stored"},
+
+	OLoadsb: {name: "loadsb", hasResult: true},
+	OLoadub: {name: "loadub", hasResult: true},
+	OLoadsh: {name: "loadsh", hasResult: true},
+	OLoaduh: {name: "loaduh", hasResult: true},
+	OLoadsw: {name: "loadsw", hasResult: true},
+	OLoaduw: {name: "loaduw", hasResult: true},
+	OLoadl:  {name: "loadl", hasResult: true},
+	OLoads:  {name: "loads", hasResult: true},
+	OLoadd:  {name: "loadd", hasResult: true},
+
+	OAlloc4:  {name: "alloc4", hasResult: true},
+	OAlloc8:  {name: "alloc8", hasResult: true},
+	OAlloc16: {name: "alloc16", hasResult: true},
+
+	OBlit: {name: "blit"},
+
+	OExtsb: {name: "extsb", hasResult: true},
+	OExtub: {name: "extub", hasResult: true},
+	OExtsh: {name: "extsh", hasResult: true},
+	OExtuh: {name: "extuh", hasResult: true},
+	OExtsw: {name: "extsw", hasResult: true},
+	OExtuw: {name: "extuw", hasResult: true},
+
+	OExts:   {name: "exts", hasResult: true},
+	OTruncd: {name: "truncd", hasResult: true},
+
+	OStosi: {name: "stosi", hasResult: true},
+	OStoui: {name: "stoui", hasResult: true},
+	OSltof: {name: "sltof", hasResult: true},
+	OUltof: {name: "ultof", hasResult: true},
+
+	OCast: {name: "cast", hasResult: true},
+	OCopy: {name: "copy", hasResult: true},
+
+	OCall:   {name: "call", hasResult: true},
+	OArg:    {name: "arg"},
+	OArgEnv: {name: "argenv"},
+	OPar:    {name: "par", hasResult: true},
+	OParEnv: {name: "parenv", hasResult: true},
+
+	OVaStart: {name: "vastart"},
+	OVaArg:   {name: "vaarg", hasResult: true},
+
+	OSafepoint: {name: "safept"},
+}
+
+// Info returns the static metadata for an opcode.
+func (o Op) Info() opInfo { return opTable[o] }
+
+// opByName maps IL mnemonics back to opcodes (excluding OCmp, whose mnemonic is
+// computed from a predicate and operand class).
+var opByName = func() map[string]Op {
+	m := make(map[string]Op, numOps)
+	for o := Op(0); o < numOps; o++ {
+		if n := opTable[o].name; n != "" {
+			m[n] = o
+		}
+	}
+	return m
+}()
+
+// OpFromString returns the opcode with the given IL mnemonic. Comparison
+// mnemonics (which encode a predicate and operand class) are not covered here.
+func OpFromString(name string) (Op, bool) {
+	o, ok := opByName[name]
+	return o, ok
+}
+
+// HasResult reports whether the op defines a result temporary.
+func (o Op) HasResult() bool { return opTable[o].hasResult }
+
+// IsCommutative reports whether the op's operands may be swapped.
+func (o Op) IsCommutative() bool { return opTable[o].commutative }
+
+// IsLoad reports whether the op reads memory.
+func (o Op) IsLoad() bool { return o >= OLoadsb && o <= OLoadd }
+
+// IsStore reports whether the op writes memory.
+func (o Op) IsStore() bool { return o >= OStoreb && o <= OStored }
+
+// IsAlloc reports whether the op allocates a stack slot.
+func (o Op) IsAlloc() bool { return o >= OAlloc4 && o <= OAlloc16 }
+
+// String returns the op's IL mnemonic (empty for OCmp, whose mnemonic is
+// derived from its predicate and operand class at print time).
+func (o Op) String() string { return opTable[o].name }
+
+// Cmp is a comparison predicate carried by an OCmp instruction.
+type Cmp uint8
+
+const (
+	// Integer predicates.
+	CmpEq  Cmp = iota // ==
+	CmpNe             // !=
+	CmpSle            // signed <=
+	CmpSlt            // signed <
+	CmpSge            // signed >=
+	CmpSgt            // signed >
+	CmpUle            // unsigned <=
+	CmpUlt            // unsigned <
+	CmpUge            // unsigned >=
+	CmpUgt            // unsigned >
+
+	// Float predicates (operand class S or D).
+	CmpFeq // ordered ==
+	CmpFne // unordered != (true if either NaN)
+	CmpFle // ordered <=
+	CmpFlt // ordered <
+	CmpFge // ordered >=
+	CmpFgt // ordered >
+	CmpFo  // ordered (neither operand NaN)
+	CmpFuo // unordered (some operand NaN)
+
+	numCmps
+)
+
+// IsFloat reports whether the predicate is a floating-point comparison.
+func (c Cmp) IsFloat() bool { return c >= CmpFeq }
+
+var cmpNames = [numCmps]string{
+	CmpEq:  "eq",
+	CmpNe:  "ne",
+	CmpSle: "sle",
+	CmpSlt: "slt",
+	CmpSge: "sge",
+	CmpSgt: "sgt",
+	CmpUle: "ule",
+	CmpUlt: "ult",
+	CmpUge: "uge",
+	CmpUgt: "ugt",
+	CmpFeq: "eq",
+	CmpFne: "ne",
+	CmpFle: "le",
+	CmpFlt: "lt",
+	CmpFge: "ge",
+	CmpFgt: "gt",
+	CmpFo:  "o",
+	CmpFuo: "uo",
+}
+
+// String returns the predicate mnemonic (without the leading 'c' or the operand
+// class suffix that together form a full compare mnemonic like "csltw").
+func (c Cmp) String() string { return cmpNames[c] }

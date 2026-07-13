@@ -1,0 +1,70 @@
+package a64
+
+// Additional loads and stores: register pairs, signed sub-word loads, and
+// floating-point loads/stores.
+
+// PairMode is the addressing mode of a load/store pair.
+type PairMode uint32
+
+const (
+	SignedOffset PairMode = 2 // [rn, #imm]
+	PostIndex    PairMode = 1 // [rn], #imm   (writeback after)
+	PreIndex     PairMode = 3 // [rn, #imm]!  (writeback before)
+)
+
+func ldStPair(w64 bool, load uint32, mode PairMode, rt, rt2, rn Reg, imm int) uint32 {
+	opc, scale := uint32(0), 4
+	if w64 {
+		opc, scale = 2, 8
+	}
+	imm7 := uint32(imm/scale) & 0x7f
+	return opc<<30 | 0b101<<27 | uint32(mode)<<23 | load<<22 | imm7<<15 | r(rt2)<<10 | r(rn)<<5 | r(rt)
+}
+
+// Stp encodes STP rt, rt2, [rn ...] with the given addressing mode.
+func Stp(w64 bool, rt, rt2, rn Reg, imm int, mode PairMode) uint32 {
+	return ldStPair(w64, 0, mode, rt, rt2, rn, imm)
+}
+
+// Ldp encodes LDP rt, rt2, [rn ...].
+func Ldp(w64 bool, rt, rt2, rn Reg, imm int, mode PairMode) uint32 {
+	return ldStPair(w64, 1, mode, rt, rt2, rn, imm)
+}
+
+// signedLoadOpc is opc for a sign-extending load: 10 for an X destination, 11
+// for a W destination.
+func signedLoadOpc(w64 bool) uint32 {
+	if w64 {
+		return 2
+	}
+	return 3
+}
+
+// LdrsbImm / LdrshImm load a byte/halfword and sign-extend into rt.
+func LdrsbImm(w64 bool, rt, rn Reg, imm uint32) uint32 {
+	return ldStr(0, signedLoadOpc(w64), rt, rn, imm)
+}
+func LdrshImm(w64 bool, rt, rn Reg, imm uint32) uint32 {
+	return ldStr(1, signedLoadOpc(w64), rt, rn, imm/2)
+}
+
+// FP loads and stores (unsigned offset). The size field selects S (word) or D
+// (doubleword); V=1 (bit in the fixed 0x3d field) marks the SIMD/FP variant.
+func ldStrFP(size, opc uint32, rt, rn Reg, imm uint32) uint32 {
+	return size<<30 | 0x3d<<24 | opc<<22 | (imm&0xfff)<<10 | r(rn)<<5 | r(rt)
+}
+
+// StrFP / LdrFP store/load an S or D register. imm is a byte offset scaled by
+// the access width.
+func StrFP(dbl bool, rt, rn Reg, imm uint32) uint32 {
+	if dbl {
+		return ldStrFP(3, 0, rt, rn, imm/8)
+	}
+	return ldStrFP(2, 0, rt, rn, imm/4)
+}
+func LdrFP(dbl bool, rt, rn Reg, imm uint32) uint32 {
+	if dbl {
+		return ldStrFP(3, 1, rt, rn, imm/8)
+	}
+	return ldStrFP(2, 1, rt, rn, imm/4)
+}

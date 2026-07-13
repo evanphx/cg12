@@ -1,0 +1,240 @@
+package ir
+
+// Cls is the class (base type) of an SSA value. Every temporary and constant
+// has exactly one class. QBE calls this "cls"; it is the fundamental type over
+// which most operations are polymorphic.
+type Cls uint8
+
+const (
+	ClsW Cls = iota // 32-bit integer ("word")
+	ClsL            // 64-bit integer ("long")
+	ClsS            // 32-bit IEEE float ("single")
+	ClsD            // 64-bit IEEE float ("double")
+
+	// ClsP is the abstract pointer class. Its concrete width is target-defined
+	// and is always exactly the target's word-register class: a pointer is an
+	// integer that fits a general register, so pointer size and register size
+	// cannot diverge. Each backend resolves ClsP to that class up front with
+	// [LowerPointers] (arm64 -> ClsL, wasm32 -> ClsW), after which no ClsP
+	// remains. Sizing/lowering must therefore never see a live ClsP.
+	ClsP
+)
+
+// IsInt reports whether the class is integer-valued (W, L, or a pointer).
+func (c Cls) IsInt() bool { return c == ClsW || c == ClsL || c == ClsP }
+
+// IsFloat reports whether the class is a floating-point class (S or D).
+func (c Cls) IsFloat() bool { return c == ClsS || c == ClsD }
+
+// IsPtr reports whether the class is the abstract pointer class.
+func (c Cls) IsPtr() bool { return c == ClsP }
+
+// Size returns the width of a value of this class in bytes. ClsP has no width
+// of its own — a target's pointer size is exactly its resolved word-register
+// class's size (see [LowerPointers]); the fallback here is the widest pointer
+// so an accidental pre-resolution query never under-allocates.
+func (c Cls) Size() int {
+	switch c {
+	case ClsW, ClsS:
+		return 4
+	case ClsL, ClsD, ClsP:
+		return 8
+	}
+	return 0
+}
+
+// String returns the single-character IL mnemonic for the class.
+func (c Cls) String() string {
+	switch c {
+	case ClsW:
+		return "w"
+	case ClsL:
+		return "l"
+	case ClsS:
+		return "s"
+	case ClsD:
+		return "d"
+	case ClsP:
+		return "p"
+	}
+	return "?"
+}
+
+// SubCls is an extended type used only in a handful of positions where a value
+// narrower than a full class matters: aggregate fields, function parameters,
+// and the memory width of loads/stores. QBE calls these "sub-word" types.
+type SubCls uint8
+
+const (
+	SubB  SubCls = iota // signed byte
+	SubUB               // unsigned byte
+	SubH                // signed halfword (16-bit)
+	SubUH               // unsigned halfword
+	SubW                // word
+	SubL                // long
+	SubS                // single
+	SubD                // double
+)
+
+// Cls returns the register class a sub-class is materialised into.
+func (s SubCls) Cls() Cls {
+	switch s {
+	case SubS:
+		return ClsS
+	case SubD:
+		return ClsD
+	case SubL:
+		return ClsL
+	default:
+		return ClsW
+	}
+}
+
+// Size returns the in-memory width of the sub-class in bytes.
+func (s SubCls) Size() int {
+	switch s {
+	case SubB, SubUB:
+		return 1
+	case SubH, SubUH:
+		return 2
+	case SubW, SubS:
+		return 4
+	case SubL, SubD:
+		return 8
+	}
+	return 0
+}
+
+// ElemString returns the unsigned element-type mnemonic used in data
+// definitions and aggregate type fields (b/h/w/l/s/d), where signedness is not
+// expressed.
+func (s SubCls) ElemString() string {
+	switch s {
+	case SubB, SubUB:
+		return "b"
+	case SubH, SubUH:
+		return "h"
+	case SubL:
+		return "l"
+	case SubS:
+		return "s"
+	case SubD:
+		return "d"
+	default:
+		return "w"
+	}
+}
+
+// String returns the IL mnemonic for the sub-class.
+func (s SubCls) String() string {
+	switch s {
+	case SubB:
+		return "sb"
+	case SubUB:
+		return "ub"
+	case SubH:
+		return "sh"
+	case SubUH:
+		return "uh"
+	case SubW:
+		return "w"
+	case SubL:
+		return "l"
+	case SubS:
+		return "s"
+	case SubD:
+		return "d"
+	}
+	return "?"
+}
+
+// AggType is a user-defined aggregate type (struct, union, or opaque), referred
+// to by an instruction's type operand (chiefly calls and typed allocations).
+type AggType struct {
+	Name   string
+	Align  int  // explicit alignment in bytes; 0 means natural
+	Size   int  // total size in bytes (opaque types only)
+	Opaque bool // opaque type: only Size/Align are known
+	Fields []Field
+	Union  bool      // union: Cases overlap (Fields unused)
+	Cases  [][]Field // one field list per union case
+}
+
+// Field is one member of an aggregate type. Count > 1 denotes an inline array.
+type Field struct {
+	Sub   SubCls
+	Type  *AggType // non-nil for nested aggregate fields (Sub ignored)
+	Count int
+}
+
+// count returns the element count of a field (1 unless it is an inline array).
+func (f Field) count() int {
+	if f.Count > 1 {
+		return f.Count
+	}
+	return 1
+}
+
+// sizeAlign returns the size and alignment of a single field element.
+func (f Field) sizeAlign() (size, align int) {
+	if f.Type != nil {
+		return f.Type.Layout()
+	}
+	s := f.Sub.Size()
+	return s, s
+}
+
+// Layout returns the total size and alignment of an aggregate, following the C
+// struct/union layout rules (fields placed at their natural alignment, the whole
+// rounded up to the aggregate's alignment; a union is the largest of its cases).
+// Opaque types report their declared size and alignment.
+func (t *AggType) Layout() (size, align int) {
+	if t.Opaque {
+		align = t.Align
+		if align == 0 {
+			align = 1
+		}
+		return t.Size, align
+	}
+	if t.Union {
+		align = 1
+		for _, c := range t.Cases {
+			s, a := layoutFields(c)
+			if s > size {
+				size = s
+			}
+			if a > align {
+				align = a
+			}
+		}
+	} else {
+		size, align = layoutFields(t.Fields)
+	}
+	if t.Align > align {
+		align = t.Align // explicit alignment raises the minimum
+	}
+	return roundUpInt(size, align), align
+}
+
+// layoutFields lays out a sequence of struct fields, returning the size (before
+// final rounding) and alignment.
+func layoutFields(fields []Field) (size, align int) {
+	align = 1
+	off := 0
+	for _, f := range fields {
+		fs, fa := f.sizeAlign()
+		if fa > align {
+			align = fa
+		}
+		off = roundUpInt(off, fa)
+		off += fs * f.count()
+	}
+	return off, align
+}
+
+func roundUpInt(n, a int) int {
+	if a <= 0 {
+		return n
+	}
+	return ((n + a - 1) / a) * a
+}

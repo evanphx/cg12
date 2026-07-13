@@ -1,0 +1,14 @@
+# Core dumps
+core
+core.*
+
+# Test / build binaries
+*.o
+*.a
+*.out
+*.exe
+*.test
+
+# Editor / OS cruft
+*~
+.DS_Store

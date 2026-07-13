@@ -1,0 +1,309 @@
+package opt_test
+
+import (
+	"testing"
+
+	"github.com/evanphx/cg12/ir"
+	"github.com/evanphx/cg12/opt"
+	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
+)
+
+func countCalls(m *ir.Module) int {
+	n := 0
+	for _, f := range m.Funcs {
+		for _, b := range f.Blocks {
+			for i := range b.Instrs {
+				if b.Instrs[i].Op == ir.OCall {
+					n++
+				}
+			}
+		}
+	}
+	return n
+}
+
+func hasFunc(m *ir.Module, name string) bool {
+	for _, f := range m.Funcs {
+		if f.Name == name {
+			return true
+		}
+	}
+	return false
+}
+
+// addHelper defines add3(x) = x + 3.
+func addHelper(m *ir.Module) {
+	f := m.NewFunc("add3", ir.ClsW)
+	x := f.Param("x", ir.ClsW)
+	f.Entry().Ret(f.Entry().Add(ir.ClsW, x, f.Word(3)))
+}
+
+// maxHelper defines maxi(a, b) with a branch and a phi-carried return.
+func maxHelper(m *ir.Module) {
+	f := m.NewFunc("maxi", ir.ClsW)
+	a, b := f.Param("a", ir.ClsW), f.Param("b", ir.ClsW)
+	e := f.Entry()
+	ra, rb := f.NewBlock("ra"), f.NewBlock("rb")
+	e.Jnz(e.Cmp(ir.CmpSgt, ir.ClsW, a, b), ra, rb)
+	ra.Ret(a)
+	rb.Ret(b)
+}
+
+func TestInlineStraightLineAndControlFlow(t *testing.T) {
+	m := ir.NewModule()
+	maxHelper(m)
+	addHelper(m)
+	mn := m.NewFunc("go", ir.ClsW).Export()
+	p := mn.Param("p", ir.ClsW)
+	e := mn.Entry()
+	t1 := e.Call(ir.ClsW, mn.Sym("add3", 0), p)                // p + 3
+	e.Ret(e.Call(ir.ClsW, mn.Sym("maxi", 0), t1, mn.Word(10))) // max(p+3, 10)
+
+	require.Equal(t, 2, countCalls(m))
+	opt.OptimizeModule(m)
+
+	assert.Equal(t, 0, countCalls(m), "both calls inlined")
+	assert.False(t, hasFunc(m, "add3"), "dead helper removed")
+	assert.False(t, hasFunc(m, "maxi"), "dead helper removed")
+
+	// go(p) = max(p+3, 10)
+	code := runModule(t, m, `
+extern int go(int);
+int main(void){ return (go(5) == 10 && go(20) == 23) ? 0 : 1; }`)
+	assert.Equal(t, 0, code)
+}
+
+func TestInlineRecordsProvenance(t *testing.T) {
+	m := ir.NewModule()
+	addHelper(m) // add3(x) = x + 3
+	f := m.NewFunc("go", ir.ClsW).Export()
+	p := f.Param("p", ir.ClsW)
+	fi := m.File("go.src")
+	e := f.Entry()
+	e.At(ir.SrcPos{File: fi, Line: 7, Col: 2}) // stamps the call
+	e.Ret(e.Call(ir.ClsW, f.Sym("add3", 0), p))
+
+	require.True(t, opt.Inline(m))
+
+	// The inlined Add (from add3) records where it came from and where it was
+	// called, with no parent (a single, top-level inline).
+	var site *ir.InlineSite
+	for _, fn := range m.Funcs {
+		if fn.Name != "go" {
+			continue
+		}
+		for _, b := range fn.Blocks {
+			for i := range b.Instrs {
+				if in := &b.Instrs[i]; in.Op == ir.OAdd && in.Inl != nil {
+					site = in.Inl
+				}
+			}
+		}
+	}
+	require.NotNil(t, site, "inlined instruction carries provenance")
+	assert.Equal(t, "add3", site.Callee)
+	assert.Equal(t, uint32(fi), site.Call.File)
+	assert.EqualValues(t, 7, site.Call.Line)
+	assert.Nil(t, site.Parent, "a top-level inline has no parent")
+}
+
+func TestInlineRecursiveNotInlined(t *testing.T) {
+	// A self-recursive callee is never inlined (it would not terminate).
+	m := ir.NewModule()
+	fac := m.NewFunc("fac", ir.ClsW)
+	n := fac.Param("n", ir.ClsW)
+	e := fac.Entry()
+	rec, base := fac.NewBlock("rec"), fac.NewBlock("base")
+	e.Jnz(e.Cmp(ir.CmpSle, ir.ClsW, n, fac.Word(1)), base, rec)
+	base.Ret(fac.Word(1))
+	sub := rec.Call(ir.ClsW, fac.Sym("fac", 0), rec.Sub(ir.ClsW, n, fac.Word(1)))
+	rec.Ret(rec.Mul(ir.ClsW, n, sub))
+
+	mn := m.NewFunc("go", ir.ClsW).Export()
+	p := mn.Param("p", ir.ClsW)
+	mn.Entry().Ret(mn.Entry().Call(ir.ClsW, mn.Sym("fac", 0), p))
+
+	opt.OptimizeModule(m)
+	assert.True(t, countCalls(m) >= 1, "recursive callee not inlined")
+	assert.True(t, hasFunc(m, "fac"), "still-called function kept")
+
+	code := runModule(t, m, `
+extern int go(int);
+int main(void){ return go(5) == 120 ? 0 : 1; }`)
+	assert.Equal(t, 0, code)
+}
+
+func TestInlineSkipsIndirectAndOversized(t *testing.T) {
+	// Indirect call: the callee is a computed value, not a symbol.
+	m := ir.NewModule()
+	addHelper(m)
+	mn := m.NewFunc("go", ir.ClsW).Export()
+	fp := mn.Param("fp", ir.ClsP)
+	x := mn.Param("x", ir.ClsW)
+	mn.Entry().Ret(mn.Entry().Call(ir.ClsW, fp, x))
+	opt.OptimizeModule(m)
+	assert.Equal(t, 1, countCalls(m), "indirect call not inlined")
+
+	// Oversized callee: a body past the instruction budget stays a call.
+	m2 := ir.NewModule()
+	big := m2.NewFunc("big", ir.ClsW)
+	bx := big.Param("x", ir.ClsW)
+	be := big.Entry()
+	acc := bx
+	for i := 0; i < 40; i++ {
+		acc = be.Add(ir.ClsW, acc, big.Word(int64(i)))
+	}
+	be.Ret(acc)
+	caller := m2.NewFunc("go", ir.ClsW).Export()
+	cp := caller.Param("p", ir.ClsW)
+	caller.Entry().Ret(caller.Entry().Call(ir.ClsW, caller.Sym("big", 0), cp))
+	opt.OptimizeModule(m2)
+	assert.Equal(t, 1, countCalls(m2), "oversized callee not inlined")
+}
+
+func TestDeadFuncElim(t *testing.T) {
+	m := ir.NewModule()
+	// used: called by exported main. dead: never referenced. keep: exported.
+	used := m.NewFunc("used", ir.ClsW)
+	ux := used.Param("x", ir.ClsW)
+	used.Entry().Ret(used.Entry().Add(ir.ClsW, ux, used.Word(1)))
+	dead := m.NewFunc("dead", ir.ClsW)
+	dx := dead.Param("x", ir.ClsW)
+	dead.Entry().Ret(dx)
+	keep := m.NewFunc("keep", ir.ClsW).Export()
+	kx := keep.Param("x", ir.ClsW)
+	keep.Entry().Ret(kx)
+	mn := m.NewFunc("main2", ir.ClsW).Export()
+	mp := mn.Param("p", ir.ClsW)
+	// Reference `used` indirectly (as a function pointer) so inlining can't erase
+	// the reference and DeadFuncElim must keep it.
+	mn.Entry().Ret(mn.Entry().Call(ir.ClsW, mn.Sym("used", 0), mp))
+
+	changed := opt.DeadFuncElim(m)
+	assert.True(t, changed)
+	assert.False(t, hasFunc(m, "dead"), "unreferenced non-exported function removed")
+	assert.True(t, hasFunc(m, "keep"), "exported function kept")
+	assert.True(t, hasFunc(m, "used"), "referenced function kept")
+}
+
+func TestInlineConstantKinds(t *testing.T) {
+	// A callee whose constant pool holds a symbol, a double, and a single, so
+	// inlining clones all three constant kinds.
+	m := ir.NewModule()
+	m.Data = append(m.Data, &ir.Data{
+		Name: "tbl", Align: 4, Items: []ir.DataItem{{Sub: ir.SubW, Ints: []int64{100}}},
+	})
+	h := m.NewFunc("h", ir.ClsW)
+	x := h.Param("x", ir.ClsW)
+	e := h.Entry()
+	g := e.Load(ir.ClsW, h.Sym("tbl", 0)) // 100, a ConstSym
+	s := e.Add(ir.ClsW, x, g)
+	df := e.Mul(ir.ClsD, e.Sltof(ir.ClsD, e.Extsw(ir.ClsL, s)), h.Double(1.0)) // ClsD const
+	sf := e.Add(ir.ClsS, e.Truncd(df), h.Single(0.0))                          // ClsS const
+	e.Ret(e.Stosi(ir.ClsW, sf))
+
+	mn := m.NewFunc("go", ir.ClsW).Export()
+	p := mn.Param("p", ir.ClsW)
+	mn.Entry().Ret(mn.Entry().Call(ir.ClsW, mn.Sym("h", 0), p))
+
+	opt.OptimizeModule(m)
+	assert.Equal(t, 0, countCalls(m), "callee inlined, all constant kinds cloned")
+	code := runModule(t, m, `
+extern int go(int);
+int main(void){ return go(5) == 105 ? 0 : 1; }`) // (5+100) round-tripped through float
+	assert.Equal(t, 0, code)
+}
+
+func TestInlineVoidCall(t *testing.T) {
+	// A void callee: inlining leaves no result phi.
+	m := ir.NewModule()
+	st := m.NewFuncVoid("store1")
+	p, v := st.Param("p", ir.ClsP), st.Param("v", ir.ClsW)
+	se := st.Entry()
+	se.Store(se.Add(ir.ClsW, v, st.Word(1)), p)
+	se.RetVoid()
+
+	mn := m.NewFunc("go", ir.ClsW).Export()
+	x := mn.Param("x", ir.ClsW)
+	me := mn.Entry()
+	buf := me.Alloc(4, 4)
+	me.CallVoid(mn.Sym("store1", 0), buf, x)
+	me.Ret(me.Load(ir.ClsW, buf))
+
+	opt.OptimizeModule(m)
+	assert.Equal(t, 0, countCalls(m), "void call inlined")
+	code := runModule(t, m, `
+extern int go(int);
+int main(void){ return go(41) == 42 ? 0 : 1; }`)
+	assert.Equal(t, 0, code)
+}
+
+func TestUnrollMutualRecursion(t *testing.T) {
+	// iseven <-> isodd is a two-function recursion cycle. Bounded unrolling
+	// expands the cycle a fixed number of levels and leaves a residual recursive
+	// call, so the program still terminates and stays correct.
+	m := ir.NewModule()
+
+	parity := func(name, other string, base int64) {
+		f := m.NewFunc(name, ir.ClsW)
+		n := f.Param("n", ir.ClsW)
+		e := f.Entry()
+		ret, rec := f.NewBlock("ret"), f.NewBlock("rec")
+		e.Jnz(e.Cmp(ir.CmpEq, ir.ClsW, n, f.Word(0)), ret, rec)
+		ret.Ret(f.Word(base))
+		rec.Ret(rec.Call(ir.ClsW, f.Sym(other, 0), rec.Sub(ir.ClsW, n, f.Word(1))))
+	}
+	parity("iseven", "isodd", 1)
+	parity("isodd", "iseven", 0)
+
+	mn := m.NewFunc("test", ir.ClsW).Export()
+	p := mn.Param("p", ir.ClsW)
+	mn.Entry().Ret(mn.Entry().Call(ir.ClsW, mn.Sym("iseven", 0), p))
+
+	opt.OptimizeModule(m)
+
+	// Unrolling stays bounded (a residual recursive call always remains) and
+	// preserves semantics; termination is implied by the run completing.
+	assert.LessOrEqual(t, countCalls(m), 30, "unrolling bounded, not runaway")
+	assert.GreaterOrEqual(t, countCalls(m), 1, "recursion not fully eliminated")
+
+	code := runModule(t, m, `
+extern int test(int);
+int main(void){ return (test(4) == 1 && test(5) == 0 && test(7) == 0) ? 0 : 1; }`)
+	assert.Equal(t, 0, code)
+}
+
+func TestUnrollDirectRecursion(t *testing.T) {
+	// fac calls itself; bounded unrolling expands the recursion in place (more
+	// multiplies) while leaving a residual call so it still terminates.
+	m := ir.NewModule()
+	fac := m.NewFunc("fac", ir.ClsW).Export()
+	n := fac.Param("n", ir.ClsW)
+	e := fac.Entry()
+	rec, base := fac.NewBlock("rec"), fac.NewBlock("base")
+	e.Jnz(e.Cmp(ir.CmpSle, ir.ClsW, n, fac.Word(1)), base, rec)
+	base.Ret(fac.Word(1))
+	sub := rec.Call(ir.ClsW, fac.Sym("fac", 0), rec.Sub(ir.ClsW, n, fac.Word(1)))
+	rec.Ret(rec.Mul(ir.ClsW, n, sub))
+
+	opt.OptimizeModule(m)
+
+	muls := 0
+	for _, f := range m.Funcs {
+		for _, b := range f.Blocks {
+			for i := range b.Instrs {
+				if b.Instrs[i].Op == ir.OMul {
+					muls++
+				}
+			}
+		}
+	}
+	assert.Greater(t, muls, 1, "recursion unrolled in place")
+	assert.GreaterOrEqual(t, countCalls(m), 1, "residual recursive call kept")
+
+	code := runModule(t, m, `
+extern int fac(int);
+int main(void){ return (fac(5) == 120 && fac(6) == 720 && fac(1) == 1) ? 0 : 1; }`)
+	assert.Equal(t, 0, code)
+}
