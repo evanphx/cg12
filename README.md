@@ -32,6 +32,7 @@ compiler backend. cg12 starts as an idiomatic-Go re-imagining of
 | `arm64/a64` — direct A64 instruction encoder (integer, float, loads/stores, branches), validated byte-for-byte vs a reference assembler | ✅ implemented, 94% covered |
 | `obj` — ELF64 relocatable-object writer (symbols, .text/.data, relocations) | ✅ links + runs with `ld`/`gcc` |
 | `arm64.CompileObject` — machine-code path: IR → A64 bytes → ELF `.o`, **no external assembler** | ✅ at parity with the text emitter (integers, floats, calls, tail calls, variadics, aggregates, data) |
+| `link` — partial linker: merges objects from IR modules and `.o` files, resolves cross-object references | ✅ merges .text/.data, symbol resolution, PC-relative branch resolution |
 
 ## Example
 
@@ -113,6 +114,28 @@ argument values. Positions round-trip through the textual IL as `dbgfile`/
 	%t2 =w mul %t1, %a
 	ret %t2
 ```
+
+## Linking
+
+The `link` package combines relocatable objects into one, from either front-end:
+
+```go
+l := link.New()
+l.AddModule(irModule)      // compile IR and add
+l.AddObjectFile(dotO)      // parse an architecture .o and add
+merged, err := l.Link()    // one relocatable object
+```
+
+Both inputs become the same in-memory object model — an IR module through
+`arm64.CompileToObject`, an `.o` file through `obj.ReadELF` (the inverse of the
+ELF writer). The linker concatenates their `.text`/`.data`, resolves symbols
+across them (erroring on a duplicate definition), and re-bases their
+relocations. Cross-object references it can settle now — PC-relative branches
+whose target is in the combined `.text` — are patched directly into the
+instruction and their relocations dropped; the relative distance is final
+regardless of where `.text` is ultimately loaded. Everything else (absolute,
+page-relative, and TLS relocations) is carried forward for a final link. The
+result is another relocatable object, so a system linker can finish the job.
 
 ## Garbage-collector stack maps
 

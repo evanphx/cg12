@@ -32,6 +32,22 @@ func CompileObject(m *ir.Module) ([]byte, error) {
 // CompileObjectWith emits an ELF relocatable object for m, applying opts (such as
 // a GC strategy).
 func CompileObjectWith(m *ir.Module, opts Options) ([]byte, error) {
+	o, err := CompileToObjectWith(m, opts)
+	if err != nil {
+		return nil, err
+	}
+	return o.MarshalELF()
+}
+
+// CompileToObject builds the in-memory relocatable object for m (without
+// serializing it to ELF). It is how the linker ingests an IR module: the result
+// is the same Object model that ReadELF produces for an on-disk .o.
+func CompileToObject(m *ir.Module) (*obj.Object, error) {
+	return CompileToObjectWith(m, Options{})
+}
+
+// CompileToObjectWith is CompileToObject with options (e.g. a GC strategy).
+func CompileToObjectWith(m *ir.Module, opts Options) (*obj.Object, error) {
 	o := &obj.Object{Machine: obj.EM_AARCH64}
 	var rows []obj.LineRow
 	var dfuncs []obj.DwarfFunc
@@ -100,7 +116,7 @@ func CompileObjectWith(m *ir.Module, opts Options) ([]byte, error) {
 	if len(smFuncs) > 0 {
 		setStackMap(o, smFuncs)
 	}
-	return o.MarshalELF()
+	return o, nil
 }
 
 // paramTempIDs returns the temporary id of each parameter, in order, captured
