@@ -106,6 +106,7 @@ func hasTextReloc(t *testing.T, data []byte, sym string) bool {
 type smRoot struct {
 	kind byte
 	val  int32
+	typ  uint32
 }
 
 // parseStackMap decodes the .cg12_stackmaps section into per-safepoint roots.
@@ -119,7 +120,7 @@ func parseStackMap(t *testing.T, data []byte) [][]smRoot {
 	require.NoError(t, err)
 
 	require.Equal(t, "SMAP", string(b[0:4]))
-	assert.Equal(t, uint16(1), binary.LittleEndian.Uint16(b[4:]))
+	assert.Equal(t, uint16(2), binary.LittleEndian.Uint16(b[4:]))
 	count := binary.LittleEndian.Uint32(b[8:])
 	p := 12
 	var out [][]smRoot
@@ -129,8 +130,12 @@ func parseStackMap(t *testing.T, data []byte) [][]smRoot {
 		p += 4
 		var roots []smRoot
 		for j := uint32(0); j < nroots; j++ {
-			roots = append(roots, smRoot{kind: b[p], val: int32(binary.LittleEndian.Uint32(b[p+4:]))})
-			p += 8
+			roots = append(roots, smRoot{
+				kind: b[p],
+				val:  int32(binary.LittleEndian.Uint32(b[p+4:])),
+				typ:  binary.LittleEndian.Uint32(b[p+8:]),
+			})
+			p += 12
 		}
 		out = append(out, roots)
 	}
@@ -294,6 +299,25 @@ int main(void) {
 	return 0;
 }`)
 	require.Equal(t, 0, code)
+}
+
+// A typed managed reference carries its type descriptor into the stack map.
+func TestObjEmitStackMapCarriesType(t *testing.T) {
+	m := ir.NewModule()
+	f := m.NewFunc("scan3", ir.ClsL).Export()
+	p := f.ParamRef("obj")
+	f.MarkGCRefType(p, 0xABCD) // tag the reference with a runtime type id
+	n := f.Param("n", ir.ClsW)
+	e := f.Entry()
+	e.Call(ir.ClsW, f.Sym("sink", 0), n)
+	e.Ret(p)
+
+	data, err := arm64.CompileObject(m)
+	require.NoError(t, err)
+	points := parseStackMap(t, data)
+	require.Len(t, points, 1)
+	require.Len(t, points[0], 1)
+	assert.Equal(t, uint32(0xABCD), points[0][0].typ, "root carries its type")
 }
 
 // A pointer that is NOT marked as a managed reference is not reported as a root,

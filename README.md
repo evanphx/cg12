@@ -149,10 +149,37 @@ the `__cg12_stackmaps` symbol and uses it to locate (and, for a moving collector
 relocate) roots. Roots are precise: the allocator's per-value live ranges exclude
 a call's own arguments and result, and only `GCRef`-flagged values are reported.
 
+Each root carries a **type descriptor** (`f.MarkGCRefType(ref, typeID)`) into the
+stack map, so the runtime knows how to process the pointer — which fields to
+scan, and whether it may point into the stack (which a copying stack collector
+must adjust).
+
 Calls are safepoints implicitly. For the ones that are *not* calls — an inlined
 allocation fast path, a loop back-edge poll — mark them with `b.Safepoint()`, an
 `OSafepoint` marker that emits no code but pins a stack map at its PC. It
 round-trips through the textual IL as `safept`.
+
+### Growable stacks
+
+A strategy can also emit a **prologue stack-growth guard** (Go-style growable
+stacks) by implementing `EmitPrologue`. The built-in `StackGrowth` strategy emits
+a check against a per-thread stack limit at the start of every function; if the
+frame would overflow, it preserves the argument registers, calls a runtime
+routine that reallocates and copies the stack, and re-checks:
+
+```
+mrs  x16, tpidr_el0 ; ...              ; load the per-thread stack limit
+mov  x17, sp ; sub x17, x17, #frame
+cmp  x17, x16
+b.hi ok                                ; enough space
+stp  x29,x30,... ; stp x0,x1,... x6,x7 ; preserve fp/lr and arg registers
+mov  x0, #frame ; bl morestack ; ...   ; grow + copy, then
+b    <retry>                           ; re-check from the top
+ok:  <normal prologue>
+```
+
+The typed stack maps are exactly what the copying runtime needs to fix up
+pointers into the stack as it moves them.
 
 To keep the consuming side simple, a managed reference that is live across a
 safepoint is spilled to a stack slot for its lifetime, so every root is reported

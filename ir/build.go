@@ -63,6 +63,17 @@ func (f *Func) MarkGCRef(r Ref) Ref {
 	return r
 }
 
+// MarkGCRefType flags a temporary as a managed reference and tags it with a type
+// descriptor, carried into the stack map for the runtime to interpret.
+func (f *Func) MarkGCRefType(r Ref, typeID uint32) Ref {
+	if r.Kind == RefTemp {
+		t := f.Temps[r.ID]
+		t.GCRef = true
+		t.GCType = typeID
+	}
+	return r
+}
+
 // NewBlock creates a fresh basic block. The first block created becomes the
 // function entry.
 func (f *Func) NewBlock(name string) *Block {

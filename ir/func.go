@@ -25,6 +25,12 @@ type Temp struct {
 	// survives pointer lowering, so backends can report the value's location in
 	// stack maps at each safepoint.
 	GCRef bool
+
+	// GCType is an optional type descriptor for a GCRef root, carried into the
+	// stack map so the runtime knows how to process the pointer — which fields to
+	// scan, whether it may point into the stack (for a copying stack), and so on.
+	// Zero means an untyped reference. Its meaning is defined by the runtime.
+	GCType uint32
 }
 
 // ConstKind distinguishes the flavours of constant.

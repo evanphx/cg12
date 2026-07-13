@@ -107,6 +107,24 @@ int main(void){ return mccaller(14)==14*3+1 ? 0 : 1; }`)
 	require.Equal(t, 0, code)
 }
 
+// A frame larger than a 12-bit immediate must adjust sp with the immediate forms
+// (sp cannot be a register operand of add/sub) — regression for a mis-encoded
+// `sub sp, sp, xN` that wrote to xzr.
+func TestObjEmitLargeFrame(t *testing.T) {
+	m := ir.NewModule()
+	f := m.NewFunc("bigf", ir.ClsW).Export()
+	n := f.Param("n", ir.ClsW)
+	e := f.Entry()
+	buf := e.Alloc(8, 6000) // ~6 KiB frame, past the 4095 immediate
+	e.Store(n, buf)
+	e.Ret(e.Load(ir.ClsW, buf))
+
+	_, code := buildObjAndRun(t, m, `
+extern int bigf(int);
+int main(void){ return bigf(7) == 7 ? 0 : 1; }`)
+	require.Equal(t, 0, code)
+}
+
 func TestObjEmitSubwordMemory(t *testing.T) {
 	m := ir.NewModule()
 	f := m.NewFunc("mcround", ir.ClsW).Export()

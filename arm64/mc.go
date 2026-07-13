@@ -144,13 +144,13 @@ type stackMapFunc struct {
 // Format (little-endian):
 //
 //	magic  "SMAP"                  (4 bytes)
-//	version u16 = 1, reserved u16
+//	version u16 = 2, reserved u16
 //	count   u32                    (number of safepoints)
 //	repeated count times:
 //	  pc     u64                   (return address; relocated)
 //	  nroots u32
 //	  repeated nroots times:
-//	    kind u8 (0=register, 1=frame), reserved u8[3], value i32
+//	    kind u8 (0=register, 1=frame), reserved u8[3], value i32, type u32
 func setStackMap(o *obj.Object, funcs []stackMapFunc) {
 	var b []byte
 	put16 := func(v uint16) { b = append(b, byte(v), byte(v>>8)) }
@@ -166,7 +166,7 @@ func setStackMap(o *obj.Object, funcs []stackMapFunc) {
 		total += len(f.points)
 	}
 	b = append(b, 'S', 'M', 'A', 'P')
-	put16(1)
+	put16(2)
 	put16(0)
 	put32(uint32(total))
 	for _, f := range funcs {
@@ -179,6 +179,7 @@ func setStackMap(o *obj.Object, funcs []stackMapFunc) {
 			for _, r := range sp.roots {
 				b = append(b, r.kind, 0, 0, 0)
 				put32(uint32(r.val))
+				put32(r.typ)
 			}
 		}
 	}
@@ -353,10 +354,11 @@ func floatBitsOf(sub ir.SubCls, v float64) int64 {
 
 // rootLoc is where a live GC reference sits at a safepoint: a register (kind 0,
 // val = physical register number) or a frame slot (kind 1, val = byte offset
-// from the frame pointer x29).
+// from the frame pointer x29), plus its type descriptor.
 type rootLoc struct {
 	kind uint8
 	val  int32
+	typ  uint32
 }
 
 // safepoint is a call site's return address (func-relative) and the GC roots
@@ -501,6 +503,12 @@ const (
 // --- prologue / epilogue ---------------------------------------------------
 
 func (m *mc) prologue() {
+	// A strategy may emit a stack-growth guard before the frame is set up; its
+	// slow path branches back to this label to re-check after the stack grows.
+	if pe, ok := m.gc.(PrologueEmitter); ok {
+		m.prog.Label("__cg12_prologue")
+		pe.EmitPrologue(&PrologueContext{mc: m, retry: "__cg12_prologue"})
+	}
 	m.allocFrame()
 	for i, r := range m.calleeSaved {
 		m.spillStore(mreg(r), r.IsFloat(), 16+i*8, 8)
@@ -543,27 +551,37 @@ func (m *mc) epilogue() {
 }
 
 // adjustSP subtracts (sub=true) or adds n to sp.
+// adjustSP adds or subtracts n from sp. It uses only the immediate forms (a
+// shifted #hi12<<12 plus a #lo12), because the register form of add/sub cannot
+// target sp — register 31 there denotes the zero register, so `sub sp, sp, xN`
+// would silently write to xzr. Splitting the immediate reaches any frame up to
+// ~16 MiB.
 func (m *mc) adjustSP(sub bool, n int) {
-	switch {
-	case n <= 4095:
-		if sub {
-			m.emit(a64.SubImm(true, mcSP, mcSP, uint32(n)))
-		} else {
-			m.emit(a64.AddImm(true, mcSP, mcSP, uint32(n)))
+	if n == 0 {
+		return
+	}
+	hi, lo := n>>12, n&0xfff
+	if hi > 4095 {
+		m.fail("arm64: frame size %d too large for the machine-code emitter", n)
+		return
+	}
+	imm := func(v uint32, lsl12 bool) {
+		switch {
+		case sub && lsl12:
+			m.emit(a64.SubImmLSL12(true, mcSP, mcSP, v))
+		case sub:
+			m.emit(a64.SubImm(true, mcSP, mcSP, v))
+		case lsl12:
+			m.emit(a64.AddImmLSL12(true, mcSP, mcSP, v))
+		default:
+			m.emit(a64.AddImm(true, mcSP, mcSP, v))
 		}
-	case n%4096 == 0 && n>>12 <= 4095:
-		if sub {
-			m.emit(a64.SubImmLSL12(true, mcSP, mcSP, uint32(n>>12)))
-		} else {
-			m.emit(a64.AddImmLSL12(true, mcSP, mcSP, uint32(n>>12)))
-		}
-	default:
-		m.movImm(mcGP0, int64(n), true)
-		if sub {
-			m.emit(a64.SubReg(true, mcSP, mcSP, mcGP0))
-		} else {
-			m.emit(a64.AddReg(true, mcSP, mcSP, mcGP0))
-		}
+	}
+	if hi > 0 {
+		imm(uint32(hi), true)
+	}
+	if lo > 0 {
+		imm(uint32(lo), false)
 	}
 }
 
@@ -951,9 +969,9 @@ func (m *mc) recordSafepoint(in *ir.Instr) {
 	for _, id := range roots {
 		t := m.f.Temps[id]
 		if t.Reg != ir.NoReg {
-			locs = append(locs, rootLoc{kind: rootReg, val: int32(mreg(Reg(t.Reg)))})
+			locs = append(locs, rootLoc{kind: rootReg, val: int32(mreg(Reg(t.Reg))), typ: t.GCType})
 		} else {
-			locs = append(locs, rootLoc{kind: rootFrame, val: int32(m.spillBase + t.Slot)})
+			locs = append(locs, rootLoc{kind: rootFrame, val: int32(m.spillBase + t.Slot), typ: t.GCType})
 		}
 	}
 	m.safepoints = append(m.safepoints, safepoint{pc: uint64(m.prog.Len() * 4), roots: locs})
