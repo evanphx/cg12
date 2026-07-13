@@ -9,6 +9,9 @@ core.*
 *.exe
 *.test
 
+# ...but .out files under testdata are expected-output fixtures, not build output
+!**/testdata/**/*.out
+
 # Editor / OS cruft
 *~
 .DS_Store

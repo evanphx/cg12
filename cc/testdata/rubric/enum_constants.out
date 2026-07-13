@@ -1,0 +1,5 @@
+days: 0 2 4 6
+flags: 1 2 4 3
+big: 100 101 102
+weekend: 0 1 1
+exec

@@ -76,8 +76,9 @@ func (g *gen) promote(v ir.Ref, t cc.Type) ir.Ref {
 	return v
 }
 
-// strSym interns a string literal as read-only data and returns its address.
-func (g *gen) strSym(s string) ir.Ref {
+// internStr interns a string literal as read-only data and returns its symbol
+// name (independent of any function, so globals can point at it too).
+func (g *gen) internStr(s string) string {
 	name, ok := g.strs[s]
 	if !ok {
 		name = fmt.Sprintf("cstr%d", len(g.strs))
@@ -88,7 +89,12 @@ func (g *gen) strSym(s string) ir.Ref {
 			Items: []ir.DataItem{{Str: s + "\x00"}},
 		})
 	}
-	return g.fn.Sym(name, 0)
+	return name
+}
+
+// strSym interns a string literal and returns its address in the current function.
+func (g *gen) strSym(s string) ir.Ref {
+	return g.fn.Sym(g.internStr(s), 0)
 }
 
 // funcTypeOf extracts a function type from t (following one pointer level).
@@ -113,7 +119,7 @@ func (g *gen) genCall(n *cc.PostfixExpression) ir.Ref {
 	var callee ir.Ref
 	if pe, ok := calleeNode.(*cc.PrimaryExpression); ok && pe.Case == cc.PrimaryExpressionIdent {
 		if v, found := g.lookup(pe.Token.SrcStr()); found {
-			callee = g.loadVal(v.addr, v.typ) // a function-pointer variable
+			callee = g.loadVal(g.addrOf(v), v.typ) // a function-pointer variable
 		} else {
 			callee = g.fn.Sym(pe.Token.SrcStr(), 0)
 		}

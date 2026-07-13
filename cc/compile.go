@@ -6,6 +6,7 @@ package cc
 
 import (
 	"fmt"
+	"sort"
 
 	"github.com/evanphx/cg12/ir"
 	"modernc.org/cc/v4"
@@ -13,23 +14,39 @@ import (
 
 // gen holds the state of translating one translation unit to a cg12 module.
 type gen struct {
-	mod    *ir.Module
-	fn     *ir.Func
-	curRet cc.Type
-	cur    *ir.Block
-	scopes []map[string]lval
-	strs   map[string]string // decoded string literal -> data symbol name
-	names  map[string]int    // per-function temp-name uniquifier
-	nblk   int               // block-name counter
-	brk    []*ir.Block       // break targets
-	cont   []*ir.Block       // continue targets
-	err    error
+	mod     *ir.Module
+	fn      *ir.Func
+	curRet  cc.Type
+	cur     *ir.Block
+	scopes  []map[string]lval
+	strs    map[string]string                  // decoded string literal -> data symbol name
+	names   map[string]int                     // per-function temp-name uniquifier
+	labels  map[string]*ir.Block               // goto label -> block (per function)
+	caseBlk map[*cc.LabeledStatement]*ir.Block // switch case/default -> block
+	nblk    int                                // block-name counter
+	nstatic int                                // static-local mangling counter
+	brk     []*ir.Block                        // break targets
+	cont    []*ir.Block                        // continue targets
+	err     error
 }
 
-// lval is a named lvalue: the address of its storage and its C type.
+// lval is a named lvalue: its storage and its C type. A local or parameter is
+// held in a stack slot (addr); a global lives at a symbol (sym) resolved lazily
+// per function, since a symbol ref is interned in the referencing function.
 type lval struct {
 	addr ir.Ref
+	sym  string
 	typ  cc.Type
+}
+
+// addrOf returns the address of an lvalue, resolving a global symbol in the
+// current function (symbol refs are interned per function, so a global cannot
+// carry a prebuilt ref across function boundaries).
+func (g *gen) addrOf(v lval) ir.Ref {
+	if v.sym != "" {
+		return g.fn.Sym(v.sym, 0)
+	}
+	return v.addr
 }
 
 // Compile parses C source and returns the equivalent cg12 module.
@@ -48,6 +65,7 @@ func Compile(name, src string) (*ir.Module, error) {
 	}
 
 	g := &gen{mod: ir.NewModule(), strs: map[string]string{}}
+	g.push() // file scope: holds globals, visible to every function
 	for tu := ast.TranslationUnit; tu != nil; tu = tu.TranslationUnit {
 		ed := tu.ExternalDeclaration
 		if ed == nil || ed.Position().Filename != name {
@@ -207,6 +225,9 @@ func (g *gen) genFunc(fd *cc.FunctionDefinition) {
 	g.cur = g.fn.Entry()
 	g.nblk = 0
 	g.names = map[string]int{}
+	g.labels = map[string]*ir.Block{}
+	g.caseBlk = map[*cc.LabeledStatement]*ir.Block{}
+	g.collectLabels(fd.CompoundStatement)
 	g.push()
 	defer g.pop()
 
@@ -221,7 +242,7 @@ func (g *gen) genFunc(fd *cc.FunctionDefinition) {
 		addr := g.cur.Alloc(align(pt), int(pt.Size()))
 		g.setName(addr, p.Name()+".addr")
 		g.storeVal(addr, pref, pt)
-		g.define(p.Name(), lval{addr, pt})
+		g.define(p.Name(), lval{addr: addr, typ: pt})
 	}
 
 	g.genCompound(fd.CompoundStatement)
@@ -272,8 +293,8 @@ func (g *gen) zero(t cc.Type) ir.Ref {
 	}
 }
 
-// genGlobalDecl handles a file-scope declaration (currently: prototypes and
-// simple scalar globals with constant initializers).
+// genGlobalDecl handles a file-scope declaration: prototypes and globals with
+// constant scalar, aggregate, or string initializers.
 func (g *gen) genGlobalDecl(d *cc.Declaration) {
 	if d.Case != cc.DeclarationDecl {
 		return
@@ -290,17 +311,88 @@ func (g *gen) genGlobalDecl(d *cc.Declaration) {
 		}
 		data := &ir.Data{Name: dcl.Name(), Align: align(t)}
 		if id.Case == cc.InitDeclaratorInit {
-			if v, ok := constInt(id.Initializer.AssignmentExpression); ok {
-				data.Items = []ir.DataItem{{Sub: subFor(int(t.Size())), Ints: []int64{v}}}
-			}
+			data.Items = g.globalItems(t, id.Initializer)
 		}
 		if len(data.Items) == 0 {
 			data.Items = []ir.DataItem{{Zero: int(t.Size())}}
 		}
 		g.mod.Data = append(g.mod.Data, data)
-		g.define(dcl.Name(), lval{g.fn.Sym(dcl.Name(), 0), t}) // reachable via symbol
+		g.define(dcl.Name(), lval{sym: dcl.Name(), typ: t}) // reachable via symbol
 	}
 }
+
+// globalItems lays out a constant initializer as an ordered list of data items,
+// filling gaps between initialized fields (and the trailing remainder) with
+// zero. Each leaf initializer carries its absolute byte offset within the
+// aggregate, so nested braces and designated initializers need no special care.
+func (g *gen) globalItems(t cc.Type, init *cc.Initializer) []ir.DataItem {
+	type leaf struct {
+		off, sz int
+		item    ir.DataItem
+	}
+	var leaves []leaf
+	add := func(off int, et cc.Type, e cc.ExpressionNode) {
+		sz := int(et.Size())
+		switch {
+		case isArray(et):
+			if s, ok := e.Value().(cc.StringValue); ok {
+				b := append([]byte(s), 0)
+				if len(b) > sz {
+					b = b[:sz]
+				}
+				leaves = append(leaves, leaf{off, len(b), ir.DataItem{Str: string(b)}})
+			}
+		case isPointer(et):
+			if s, ok := e.Value().(cc.StringValue); ok {
+				leaves = append(leaves, leaf{off, sz, ir.DataItem{Sub: subFor(sz), Sym: g.internStr(string(s))}})
+			} else if v, ok := constInt(e); ok {
+				leaves = append(leaves, leaf{off, sz, ir.DataItem{Sub: subFor(sz), Ints: []int64{v}}})
+			}
+		case isFloat(et):
+			if v, ok := e.Value().(cc.Float64Value); ok {
+				leaves = append(leaves, leaf{off, sz, ir.DataItem{Sub: subFor(sz), Flts: []float64{float64(v)}}})
+			}
+		default:
+			if v, ok := constInt(e); ok {
+				leaves = append(leaves, leaf{off, sz, ir.DataItem{Sub: subFor(sz), Ints: []int64{v}}})
+			}
+		}
+	}
+	var walk func(il *cc.InitializerList)
+	walk = func(il *cc.InitializerList) {
+		for ; il != nil; il = il.InitializerList {
+			in := il.Initializer
+			if in.Case == cc.InitializerInitList {
+				walk(in.InitializerList)
+			} else {
+				add(int(in.Offset()), in.Type(), in.AssignmentExpression)
+			}
+		}
+	}
+	if init.Case == cc.InitializerInitList {
+		walk(init.InitializerList)
+	} else {
+		add(0, t, init.AssignmentExpression)
+	}
+	sort.SliceStable(leaves, func(i, j int) bool { return leaves[i].off < leaves[j].off })
+
+	var items []ir.DataItem
+	pos := 0
+	for _, lf := range leaves {
+		if lf.off > pos {
+			items = append(items, ir.DataItem{Zero: lf.off - pos})
+		}
+		items = append(items, lf.item)
+		pos = lf.off + lf.sz
+	}
+	if size := int(t.Size()); pos < size {
+		items = append(items, ir.DataItem{Zero: size - pos})
+	}
+	return items
+}
+
+func isArray(t cc.Type) bool   { _, ok := t.(*cc.ArrayType); return ok }
+func isPointer(t cc.Type) bool { _, ok := t.(*cc.PointerType); return ok }
 
 func subFor(size int) ir.SubCls {
 	switch size {

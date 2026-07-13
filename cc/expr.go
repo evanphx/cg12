@@ -124,12 +124,18 @@ func (g *gen) constOf(v int64, t cc.Type) ir.Ref {
 func (g *gen) loadLval(n *cc.PrimaryExpression) ir.Ref {
 	name := n.Token.SrcStr()
 	if v, ok := g.lookup(name); ok {
+		addr := g.addrOf(v)
 		if _, isArr := v.typ.(*cc.ArrayType); isArr {
-			return v.addr // arrays decay to their address
+			return addr // arrays decay to their address
 		}
-		val := g.loadVal(v.addr, v.typ)
+		val := g.loadVal(addr, v.typ)
 		g.setName(val, name) // this value is a read of the C variable
 		return val
+	}
+	// An enumeration constant (or any identifier the type checker folded to a
+	// constant) is used by value.
+	if val, ok := constInt(n); ok {
+		return g.constOf(val, n.Type())
 	}
 	// An unknown identifier is a global function or object referenced by symbol.
 	return g.fn.Sym(name, 0)
@@ -143,7 +149,7 @@ func (g *gen) genAddr(e cc.ExpressionNode) (ir.Ref, cc.Type) {
 	case *cc.PrimaryExpression:
 		if n.Case == cc.PrimaryExpressionIdent {
 			if v, ok := g.lookup(n.Token.SrcStr()); ok {
-				return v.addr, v.typ
+				return g.addrOf(v), v.typ
 			}
 			return g.fn.Sym(n.Token.SrcStr(), 0), n.Type()
 		}

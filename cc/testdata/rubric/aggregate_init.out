@@ -1,0 +1,8 @@
+table: 10 20 30 40
+sparse: 7 99 0
+origin: 1 2
+line: 7 8 9 0
+strings: hello hi
+local: 1 2 3
+part: 5 0 0 0
+pts: 7 8 9 0
