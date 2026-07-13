@@ -201,6 +201,16 @@ b    <retry>                           ; re-check from the top
 ok:  <normal prologue>
 ```
 
+Because of register variables, the runtime side of this can be written in cg12
+IR rather than assembly. The backend's tests build, in the IR, both hard parts of
+a `morestack`: a **stack switch** (`run_on_stack` saves `sp`, switches it to a
+new region, runs a function there, and switches back) and a **map-driven pointer
+fixup engine** (`gc_move` reads its frame pointer via a register variable, walks
+to the caller's frame and its return address, looks that PC up in
+`__cg12_stackmaps`, and relocates each interior stack pointer) — both linked and
+run natively. Assembling them into a guard-triggered copying growth is the
+remaining integration.
+
 The typed stack maps are exactly what the copying runtime needs to fix up
 pointers into the stack as it moves them, and the growth call carries an
 argument pointer-map (the growing function's managed-reference parameters,
