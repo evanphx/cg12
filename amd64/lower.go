@@ -1,0 +1,498 @@
+package amd64
+
+import (
+	"fmt"
+
+	"github.com/evanphx/cg12/analysis"
+	"github.com/evanphx/cg12/ir"
+)
+
+// lower rewrites f from SSA into a form ready for register allocation and
+// emission: critical edges are split, phis are replaced by copies, and the
+// System V AMD64 calling convention is made explicit with copies to and from
+// pre-coloured physical-register temporaries.
+//
+// The scalar subset (integer classes w/l and float classes s/d) is handled;
+// by-value aggregates, variadics, and tail calls return an explicit error rather
+// than emitting silently wrong code.
+func lower(f *ir.Func) error {
+	splitCriticalEdges(f)
+	destructSSA(f)
+	return lowerABI(f)
+}
+
+// roundUp rounds n up to the next multiple of a.
+func roundUp(n, a int) int {
+	if a <= 0 {
+		return n
+	}
+	return ((n + a - 1) / a) * a
+}
+
+// argLoc is where one argument is passed: a physical register or a stack slot at
+// the given byte offset in the outgoing/incoming argument area.
+type argLoc struct {
+	reg     Reg
+	onStack bool
+	stacky  int
+}
+
+// argAssigner walks a sequence of argument classes and assigns each to a register
+// or, once a bank is exhausted, to the stack. Integer and floating-point
+// arguments consume independent register banks (rdi.. and xmm0..).
+type argAssigner struct {
+	ngrn, nsrn int
+	nsaa       int // next stacked-argument byte offset
+}
+
+func (a *argAssigner) assign(cls ir.Cls) argLoc {
+	if cls.IsFloat() {
+		if a.nsrn < len(argFP) {
+			r := argFP[a.nsrn]
+			a.nsrn++
+			return argLoc{reg: r}
+		}
+	} else if a.ngrn < len(argGP) {
+		r := argGP[a.ngrn]
+		a.ngrn++
+		return argLoc{reg: r}
+	}
+	off := a.nsaa
+	a.nsaa += 8 // scalars occupy one 8-byte stack slot
+	return argLoc{onStack: true, stacky: off}
+}
+
+// stackBytes returns the 16-aligned size of the stacked-argument area.
+func (a *argAssigner) stackBytes() int { return roundUp(a.nsaa, 16) }
+
+// retReg returns the register a value of the given class is returned in.
+func retReg(cls ir.Cls) Reg {
+	if cls.IsFloat() {
+		return XMM0
+	}
+	return RAX
+}
+
+// newPinned creates a fresh temporary hard-bound to physical register r.
+func newPinned(f *ir.Func, r Reg, cls ir.Cls) ir.Ref {
+	ref := f.NewTemp(fmt.Sprintf("R%d", int(r)), cls)
+	t := f.Temp(ref)
+	t.Fixed = true
+	t.Reg = int(r)
+	return ref
+}
+
+// splitCriticalEdges inserts a block on every edge from a block with multiple
+// successors to a block with multiple predecessors, so phi copies always have a
+// dedicated home.
+func splitCriticalEdges(f *ir.Func) {
+	analysis.BuildCFG(f) // fills Preds
+	blocks := append([]*ir.Block(nil), f.Blocks...)
+	for _, u := range blocks {
+		if u.Jmp.Kind != ir.JmpJnz {
+			continue
+		}
+		if u.Jmp.To == u.Jmp.To2 {
+			continue
+		}
+		for _, edge := range []**ir.Block{&u.Jmp.To, &u.Jmp.To2} {
+			v := *edge
+			if len(v.Preds) < 2 {
+				continue
+			}
+			s := f.NewBlock(u.Name + "_" + v.Name + "_edge")
+			s.Goto(v)
+			*edge = s
+			for _, p := range v.Phis {
+				for k, b := range p.Blocks {
+					if b == u {
+						p.Blocks[k] = s
+					}
+				}
+			}
+		}
+	}
+}
+
+// destructSSA replaces phi nodes with copies at the end of each predecessor,
+// resolving the simultaneous assignment on each edge into a safe move sequence.
+func destructSSA(f *ir.Func) {
+	for _, v := range f.Blocks {
+		if len(v.Phis) == 0 {
+			continue
+		}
+		perPred := map[*ir.Block][]movePair{}
+		var order []*ir.Block
+		for _, p := range v.Phis {
+			for k, pred := range p.Blocks {
+				if _, ok := perPred[pred]; !ok {
+					order = append(order, pred)
+				}
+				perPred[pred] = append(perPred[pred], movePair{dst: p.To, src: p.Args[k]})
+			}
+		}
+		for _, pred := range order {
+			seq := sequentializeCopies(f, perPred[pred])
+			for _, mv := range seq {
+				pred.Instrs = append(pred.Instrs, ir.Instr{
+					Op:   ir.OCopy,
+					Cls:  f.ClassOf(mv.dst),
+					To:   mv.dst,
+					Args: []ir.Ref{mv.src},
+				})
+			}
+		}
+		v.Phis = nil
+	}
+}
+
+type movePair struct{ dst, src ir.Ref }
+
+// sequentializeCopies turns a set of parallel copies (all dsts distinct) into an
+// ordered sequence with the same effect, breaking cycles with a fresh temp.
+func sequentializeCopies(f *ir.Func, pairs []movePair) []movePair {
+	var work []movePair
+	for _, p := range pairs {
+		if p.dst != p.src {
+			work = append(work, p)
+		}
+	}
+	var out []movePair
+	for len(work) > 0 {
+		idx := -1
+		for i, p := range work {
+			needed := false
+			for _, q := range work {
+				if q.src == p.dst {
+					needed = true
+					break
+				}
+			}
+			if !needed {
+				idx = i
+				break
+			}
+		}
+		if idx >= 0 {
+			out = append(out, work[idx])
+			work = append(work[:idx], work[idx+1:]...)
+			continue
+		}
+		p := work[0]
+		tmp := f.NewTemp("", f.ClassOf(p.dst))
+		out = append(out, movePair{dst: tmp, src: p.dst})
+		for i := range work {
+			if work[i].src == p.dst {
+				work[i].src = tmp
+			}
+		}
+	}
+	return out
+}
+
+// lowerABI makes the calling convention explicit: parameters are copied out of
+// their incoming registers, return values into rax/xmm0, and call
+// arguments/results through the argument/result registers.
+func lowerABI(f *ir.Func) error {
+	if err := lowerTailCalls(f); err != nil {
+		return err
+	}
+	// A function returning a MEMORY-class aggregate is given the result buffer's
+	// address in rdi (the first integer argument); capture it so returns can write
+	// there and return the pointer in rax.
+	var retBuf ir.Ref
+	if f.RetAgg != nil && classifyAgg(f.RetAgg).memory {
+		retBuf = f.NewTemp("retbuf", ir.ClsL)
+	}
+	if err := lowerParams(f, retBuf); err != nil {
+		return err
+	}
+	if err := lowerCalls(f); err != nil {
+		return err
+	}
+	return lowerReturns(f, retBuf)
+}
+
+// lowerTailCalls neutralizes each tail-call block so the callee provides the
+// return value directly: the block's return move is dropped and the call's result
+// left uncaptured. The frame-reusing branch itself is emitted later. A tail-marked
+// call anywhere but in tail position is rejected.
+func lowerTailCalls(f *ir.Func) error {
+	for _, b := range f.Blocks {
+		call, ok := ir.TailCall(b)
+		if !ok {
+			if ir.HasTailCall(b) {
+				return fmt.Errorf("amd64: tail call must be the last instruction and have its result returned")
+			}
+			continue
+		}
+		if call.RetAgg != nil {
+			return fmt.Errorf("amd64: aggregate-returning tail call is not supported")
+		}
+		b.Jmp = ir.Jmp{Kind: ir.JmpRet} // the callee provides the return value
+		call.To = ir.R                  // do not capture the result
+	}
+	return nil
+}
+
+func lowerParams(f *ir.Func, retBuf ir.Ref) error {
+	var a argAssigner
+	// Register/stack parameter moves (OPar) must precede aggregate reconstruction,
+	// so the emitter can treat the OPar run as one parallel move.
+	var pars, recon []ir.Instr
+	if !retBuf.IsNone() {
+		// The sret pointer arrives in rdi, ahead of the arguments.
+		pin := newPinned(f, argGP[0], ir.ClsL)
+		a.ngrn = 1
+		pars = append(pars, ir.Instr{Op: ir.OPar, Cls: ir.ClsL, To: retBuf, Args: []ir.Ref{pin}})
+	}
+	for _, p := range f.Params {
+		if p.Agg != nil {
+			ps, rs := lowerAggParam(f, p, &a)
+			pars = append(pars, ps...)
+			recon = append(recon, rs...)
+			continue
+		}
+		loc := a.assign(p.Cls)
+		if loc.onStack {
+			pars = append(pars, ir.Instr{Op: ir.OPar, Cls: p.Cls, To: p.Ref(), Aux: int64(loc.stacky)})
+			continue
+		}
+		pin := newPinned(f, loc.reg, p.Cls)
+		pars = append(pars, ir.Instr{Op: ir.OPar, Cls: p.Cls, To: p.Ref(), Args: []ir.Ref{pin}})
+	}
+	f.Start.Instrs = append(append(pars, recon...), f.Start.Instrs...)
+	return nil
+}
+
+// lowerAggParam handles one by-value aggregate parameter, returning the OPar
+// instructions and the reconstruction instructions (register-class aggregates are
+// rebuilt into a stack slot; MEMORY/stack aggregates are addressed in place).
+func lowerAggParam(f *ir.Func, p *ir.Temp, a *argAssigner) (pars, recon []ir.Instr) {
+	cls := classifyAgg(p.Agg)
+	regs, onStack, off := a.assignAgg(cls)
+	if cls.memory || onStack {
+		// The aggregate sits in the incoming argument area; the parameter is its
+		// address (the emitter leas an aggregate stack param).
+		return []ir.Instr{{Op: ir.OPar, Cls: ir.ClsL, To: p.Ref(), Aux: int64(off)}}, nil
+	}
+	slot := f.NewTemp("", ir.ClsL)
+	recon = append(recon, ir.Instr{Op: ir.OAlloc16, Cls: ir.ClsL, To: slot, Args: []ir.Ref{f.Long(int64(len(regs) * 8))}})
+	for i, r := range regs {
+		_, storeOp, elemCls := ebOps(r.float, ebBytes(cls.size, i))
+		pin := newPinned(f, r.reg, elemCls)
+		addr := offsetAddr(f, slot, i*8, &recon)
+		recon = append(recon, ir.Instr{Op: storeOp, Cls: elemCls, Args: []ir.Ref{pin, addr}})
+	}
+	recon = append(recon, ir.Instr{Op: ir.OCopy, Cls: ir.ClsL, To: p.Ref(), Args: []ir.Ref{slot}})
+	return nil, recon
+}
+
+func lowerReturns(f *ir.Func, retBuf ir.Ref) error {
+	for _, b := range f.Blocks {
+		if b.Jmp.Kind != ir.JmpRet || b.Jmp.Arg.IsNone() {
+			continue
+		}
+		if f.RetAgg != nil {
+			lowerAggReturn(f, b, retBuf)
+			continue
+		}
+		v := b.Jmp.Arg
+		cls := f.ClassOf(v)
+		pin := newPinned(f, retReg(cls), cls)
+		b.Instrs = append(b.Instrs, ir.Instr{Op: ir.OCopy, Cls: cls, To: pin, Args: []ir.Ref{v}})
+		b.Jmp.Arg = pin
+	}
+	return nil
+}
+
+// retIntRegs / retSSERegs are the aggregate-return register sequences.
+var retIntRegs = []Reg{RAX, RDX}
+var retSSERegs = []Reg{XMM0, XMM(1)}
+
+// lowerAggReturn returns an aggregate: a MEMORY result is copied into the caller's
+// buffer and the sret pointer returned in rax; a register result is loaded from
+// the pointer into the return registers (rax/rdx, xmm0/xmm1).
+func lowerAggReturn(f *ir.Func, b *ir.Block, retBuf ir.Ref) {
+	ptr := b.Jmp.Arg
+	cls := classifyAgg(f.RetAgg)
+	if cls.memory {
+		emitMemcpy(f, retBuf, ptr, cls.size, &b.Instrs)
+		pin := newPinned(f, RAX, ir.ClsL)
+		b.Instrs = append(b.Instrs, ir.Instr{Op: ir.OCopy, Cls: ir.ClsL, To: pin, Args: []ir.Ref{retBuf}})
+		b.Jmp.Arg = pin
+		return
+	}
+	ni, ns := 0, 0
+	var pins []ir.Ref
+	for i, part := range cls.parts {
+		float := part == ebSSE
+		loadOp, _, elemCls := ebOps(float, ebBytes(cls.size, i))
+		var rr Reg
+		if float {
+			rr, ns = retSSERegs[ns], ns+1
+		} else {
+			rr, ni = retIntRegs[ni], ni+1
+		}
+		addr := offsetAddr(f, ptr, i*8, &b.Instrs)
+		val := f.NewTemp("", elemCls)
+		b.Instrs = append(b.Instrs, ir.Instr{Op: loadOp, Cls: elemCls, To: val, Args: []ir.Ref{addr}})
+		pin := newPinned(f, rr, elemCls)
+		b.Instrs = append(b.Instrs, ir.Instr{Op: ir.OCopy, Cls: elemCls, To: pin, Args: []ir.Ref{val}})
+		pins = append(pins, pin)
+	}
+	b.Jmp.Arg = pins[0]
+	b.Jmp.Args = pins[1:]
+}
+
+func lowerCalls(f *ir.Func) error {
+	for _, b := range f.Blocks {
+		var out []ir.Instr
+		for i := range b.Instrs {
+			in := b.Instrs[i]
+			if in.Op != ir.OCall {
+				out = append(out, in)
+				continue
+			}
+			callee := in.Args[0]
+			callArgs := in.Args[1:]
+			pins := make([]ir.Ref, 0, len(callArgs))
+			var argSetup, post []ir.Instr
+			var callTo ir.Ref
+			var callCls ir.Cls
+			var callDefs []ir.Ref
+			var a argAssigner
+
+			// A MEMORY-class result reserves rdi for the sret buffer pointer, ahead of
+			// the arguments.
+			retMem := in.RetAgg != nil && classifyAgg(in.RetAgg).memory
+			if retMem {
+				buf := f.NewTemp("", ir.ClsL)
+				out = append(out, ir.Instr{Op: ir.OAlloc16, Cls: ir.ClsL, To: buf, Args: []ir.Ref{f.Long(int64(classifyAgg(in.RetAgg).size))}})
+				pin := newPinned(f, argGP[0], ir.ClsL)
+				a.ngrn = 1
+				argSetup = append(argSetup, ir.Instr{Op: ir.OArg, Cls: ir.ClsL, To: pin, Args: []ir.Ref{buf}})
+				pins = append(pins, pin)
+				post = append(post, ir.Instr{Op: ir.OCopy, Cls: ir.ClsL, To: in.To, Args: []ir.Ref{buf}})
+			}
+
+			for k, arg := range callArgs {
+				if agg := aggArgAt(&in, k); agg != nil {
+					argSetup, pins = lowerAggArg(f, arg, agg, &a, &out, argSetup, pins)
+					continue
+				}
+				cls := f.ClassOf(arg)
+				loc := a.assign(cls)
+				if loc.onStack {
+					argSetup = append(argSetup, ir.Instr{Op: ir.OArg, Cls: cls, To: ir.R, Aux: int64(loc.stacky), Args: []ir.Ref{arg}})
+					continue
+				}
+				pin := newPinned(f, loc.reg, cls)
+				argSetup = append(argSetup, ir.Instr{Op: ir.OArg, Cls: cls, To: pin, Args: []ir.Ref{arg}})
+				pins = append(pins, pin)
+			}
+
+			switch {
+			case in.To.IsNone():
+				// no result
+			case retMem:
+				// handled above (result buffer)
+			case in.RetAgg != nil:
+				callTo, callCls, callDefs, post = lowerAggResultReg(f, in.To, in.RetAgg, &out)
+			default:
+				pres := newPinned(f, retReg(in.Cls), in.Cls)
+				callTo, callCls = pres, in.Cls
+				post = append(post, ir.Instr{Op: ir.OCopy, Cls: in.Cls, To: in.To, Args: []ir.Ref{pres}})
+			}
+
+			if in.Tail && a.stackBytes() > 0 {
+				return fmt.Errorf("amd64: tail call with stack arguments is not yet supported")
+			}
+
+			out = append(out, argSetup...)
+			out = append(out, ir.Instr{
+				Op: ir.OCall, Args: append([]ir.Ref{callee}, pins...),
+				Aux: int64(a.stackBytes()), To: callTo, Cls: callCls, Defs: callDefs,
+				Tail: in.Tail, Pos: in.Pos, Inl: in.Inl,
+			})
+			out = append(out, post...)
+		}
+		b.Instrs = out
+	}
+	return nil
+}
+
+// aggArgAt returns the aggregate type of the k-th value argument, or nil.
+func aggArgAt(in *ir.Instr, k int) *ir.AggType {
+	if k < len(in.AggArgs) {
+		return in.AggArgs[k]
+	}
+	return nil
+}
+
+// lowerAggArg lowers one by-value aggregate call argument. Value computation
+// (loads/address arithmetic) is appended to *out; the OArg moves are appended to
+// argSetup (returned) so they form one contiguous run before the call.
+func lowerAggArg(f *ir.Func, argRef ir.Ref, agg *ir.AggType, a *argAssigner, out *[]ir.Instr, argSetup []ir.Instr, pins []ir.Ref) ([]ir.Instr, []ir.Ref) {
+	cls := classifyAgg(agg)
+	regs, onStack, off := a.assignAgg(cls)
+	if cls.memory || onStack {
+		// MEMORY class: copy the aggregate bytes into the outgoing stack area, chunk
+		// by chunk, via stacked OArg stores at [rsp+off+coff].
+		coff := 0
+		emit := func(loadOp ir.Op, elemCls ir.Cls, w int) {
+			for cls.size-coff >= w {
+				addr := offsetAddr(f, argRef, coff, out)
+				v := f.NewTemp("", elemCls)
+				*out = append(*out, ir.Instr{Op: loadOp, Cls: elemCls, To: v, Args: []ir.Ref{addr}})
+				argSetup = append(argSetup, ir.Instr{Op: ir.OArg, Cls: elemCls, To: ir.R, Aux: int64(off + coff), Args: []ir.Ref{v}})
+				coff += w
+			}
+		}
+		emit(ir.OLoadl, ir.ClsL, 8)
+		emit(ir.OLoaduw, ir.ClsW, 4)
+		emit(ir.OLoaduh, ir.ClsW, 2)
+		emit(ir.OLoadub, ir.ClsW, 1)
+		return argSetup, pins
+	}
+	for i, r := range regs {
+		loadOp, _, elemCls := ebOps(r.float, ebBytes(cls.size, i))
+		addr := offsetAddr(f, argRef, i*8, out)
+		val := f.NewTemp("", elemCls)
+		*out = append(*out, ir.Instr{Op: loadOp, Cls: elemCls, To: val, Args: []ir.Ref{addr}})
+		pin := newPinned(f, r.reg, elemCls)
+		argSetup = append(argSetup, ir.Instr{Op: ir.OArg, Cls: elemCls, To: pin, Args: []ir.Ref{val}})
+		pins = append(pins, pin)
+	}
+	return argSetup, pins
+}
+
+// lowerAggResultReg prepares a call returning a register-class aggregate: the
+// returned eightbyte registers are stored into a fresh slot, and the result
+// temporary points at it.
+func lowerAggResultReg(f *ir.Func, dst ir.Ref, agg *ir.AggType, out *[]ir.Instr) (callTo ir.Ref, callCls ir.Cls, defs []ir.Ref, post []ir.Instr) {
+	cls := classifyAgg(agg)
+	slot := f.NewTemp("", ir.ClsL)
+	*out = append(*out, ir.Instr{Op: ir.OAlloc16, Cls: ir.ClsL, To: slot, Args: []ir.Ref{f.Long(int64(len(cls.parts) * 8))}})
+	ni, ns := 0, 0
+	for i, part := range cls.parts {
+		float := part == ebSSE
+		_, storeOp, elemCls := ebOps(float, ebBytes(cls.size, i))
+		var rr Reg
+		if float {
+			rr, ns = retSSERegs[ns], ns+1
+		} else {
+			rr, ni = retIntRegs[ni], ni+1
+		}
+		pin := newPinned(f, rr, elemCls)
+		if i == 0 {
+			callTo, callCls = pin, elemCls
+		} else {
+			defs = append(defs, pin)
+		}
+		addr := offsetAddr(f, slot, i*8, &post)
+		post = append(post, ir.Instr{Op: storeOp, Cls: elemCls, Args: []ir.Ref{pin, addr}})
+	}
+	post = append(post, ir.Instr{Op: ir.OCopy, Cls: ir.ClsL, To: dst, Args: []ir.Ref{slot}})
+	return callTo, callCls, defs, post
+}

@@ -27,6 +27,22 @@ const (
 	R_AARCH64_TLSLE_ADD_TPREL_LO12_NC = 550
 )
 
+// A few x86-64 relocation types the backend needs.
+const (
+	R_X86_64_64    = 1  // 64-bit absolute address (data pointers, stack-map PCs)
+	R_X86_64_PC32  = 2  // 32-bit PC-relative (RIP-relative data/code references)
+	R_X86_64_PLT32 = 4  // 32-bit PC-relative to the PLT (call/jmp targets)
+	R_X86_64_32    = 10 // 32-bit zero-extended absolute
+	R_X86_64_32S   = 11 // 32-bit sign-extended absolute
+
+	// Thread-local storage, local-exec model: a 32-bit offset from the thread
+	// pointer (read via %fs).
+	R_X86_64_TPOFF32 = 23
+)
+
+// isX86TLSReloc reports whether typ references a thread-local x86-64 symbol.
+func isX86TLSReloc(typ uint32) bool { return typ == R_X86_64_TPOFF32 }
+
 // isTLSReloc reports whether typ references a thread-local symbol (so the symbol
 // must be typed STT_TLS).
 func isTLSReloc(typ uint32) bool {
@@ -143,7 +159,7 @@ func (o *Object) MarshalELF() ([]byte, error) {
 	tlsSym := map[string]bool{}
 	allRelocs := append(append(append([]Reloc{}, o.Relocs...), o.DataRelocs...), o.DebugInfoRelocs...)
 	for _, rl := range allRelocs {
-		if isTLSReloc(rl.Type) {
+		if isTLSReloc(rl.Type) || isX86TLSReloc(rl.Type) {
 			tlsSym[rl.Sym] = true
 		}
 	}
