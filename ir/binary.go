@@ -314,7 +314,7 @@ func (e *enc) encBlock(b *Block, blockRef func(*Block)) {
 	}
 	e.uv(uint64(len(b.Instrs)))
 	for i := range b.Instrs {
-		e.encInstr(&b.Instrs[i])
+		e.encInstr(&b.Instrs[i], blockRef)
 	}
 	// terminator
 	e.u8(byte(b.Jmp.Kind))
@@ -325,9 +325,13 @@ func (e *enc) encBlock(b *Block, blockRef func(*Block)) {
 	for _, a := range b.Jmp.Args {
 		e.ref(a)
 	}
+	e.uv(uint64(len(b.Jmp.Targets)))
+	for _, t := range b.Jmp.Targets {
+		blockRef(t)
+	}
 }
 
-func (e *enc) encInstr(in *Instr) {
+func (e *enc) encInstr(in *Instr, blockRef func(*Block)) {
 	e.uv(uint64(in.Op))
 	e.u8(byte(in.Cls))
 	e.ref(in.To)
@@ -348,6 +352,7 @@ func (e *enc) encInstr(in *Instr) {
 	e.typeRef(in.RetAgg)
 	e.srcPos(in.Pos)
 	e.boolean(in.Tail)
+	blockRef(in.Blk) // OBlockAddr target (nil for every other op)
 }
 
 // --- decoder --------------------------------------------------------------
@@ -566,7 +571,7 @@ func (d *dec) decBlock(b *Block, blockRef func() *Block) {
 	}
 	b.Instrs = make([]Instr, int(d.uv()))
 	for i := range b.Instrs {
-		b.Instrs[i] = d.decInstr()
+		b.Instrs[i] = d.decInstr(blockRef)
 	}
 	b.Jmp = Jmp{Kind: JmpKind(d.u8()), Arg: d.ref()}
 	b.Jmp.To = blockRef()
@@ -575,9 +580,15 @@ func (d *dec) decBlock(b *Block, blockRef func() *Block) {
 	for i := range b.Jmp.Args {
 		b.Jmp.Args[i] = d.ref()
 	}
+	if n := int(d.uv()); n > 0 {
+		b.Jmp.Targets = make([]*Block, n)
+		for i := range b.Jmp.Targets {
+			b.Jmp.Targets[i] = blockRef()
+		}
+	}
 }
 
-func (d *dec) decInstr() Instr {
+func (d *dec) decInstr(blockRef func() *Block) Instr {
 	in := Instr{Op: Op(d.uv()), Cls: Cls(d.u8()), To: d.ref()}
 	in.Args = make([]Ref, int(d.uv()))
 	for i := range in.Args {
@@ -600,5 +611,6 @@ func (d *dec) decInstr() Instr {
 	in.RetAgg = d.typeRef()
 	in.Pos = d.srcPos()
 	in.Tail = d.boolean()
+	in.Blk = blockRef()
 	return in
 }

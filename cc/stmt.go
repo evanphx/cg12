@@ -2,6 +2,7 @@ package cc
 
 import (
 	"fmt"
+	"sort"
 
 	"github.com/evanphx/cg12/ir"
 	"modernc.org/cc/v4"
@@ -376,6 +377,18 @@ func (g *gen) collectLabels(cs *cc.CompoundStatement) {
 	}
 }
 
+// labelBlocks returns every label's block, sorted by name for determinism. It is
+// the conservative target set for a computed goto: any address-taken label is a
+// possible destination, and listing the rest only over-approximates the CFG.
+func (g *gen) labelBlocks() []*ir.Block {
+	blocks := make([]*ir.Block, 0, len(g.labels))
+	for _, b := range g.labels {
+		blocks = append(blocks, b)
+	}
+	sort.Slice(blocks, func(i, j int) bool { return blocks[i].Name < blocks[j].Name })
+	return blocks
+}
+
 func (g *gen) labelsIn(s *cc.Statement) {
 	if s == nil {
 		return
@@ -501,6 +514,8 @@ func (g *gen) genJump(js *cc.JumpStatement) {
 		if b, ok := g.labels[js.Token2.SrcStr()]; ok {
 			g.cur.Goto(b)
 		}
+	case cc.JumpStatementGotoExpr: // computed goto: goto *expr
+		g.cur.BrIndirect(g.genExpr(js.ExpressionList), g.labelBlocks()...)
 	}
 }
 

@@ -1164,6 +1164,10 @@ func (m *mc) instr(in *ir.Instr) {
 		d, done := m.dst(in.To, 8)
 		m.emit(a64.AddImm(true, d, mcX29, uint32(m.allocOff[in])))
 		done()
+	case ir.OBlockAddr:
+		d, done := m.dst(in.To, 8)
+		m.prog.Adr(d, in.Blk.Name) // PC-relative label address (&&label)
+		done()
 	default:
 		if in.Op.IsLoad() {
 			m.load(in)
@@ -1362,6 +1366,9 @@ func (m *mc) term(b *ir.Block) {
 		m.prog.B(b.Jmp.To2.Name)
 	case ir.JmpHlt:
 		m.emit(a64.Brk(0))
+	case ir.JmpBr:
+		r := m.src(b.Jmp.Arg, 0, 8)
+		m.emit(a64.Br(r)) // computed goto: branch to the address register
 	default:
 		m.fail("arm64: block %q has no terminator", b.Name)
 	}

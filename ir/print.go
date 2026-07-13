@@ -210,6 +210,14 @@ func (f *Func) printInstr(sb *strings.Builder, in *Instr) {
 	} else {
 		sb.WriteString(f.mnemonic(in))
 	}
+	if in.Op == OBlockAddr {
+		name := "?"
+		if in.Blk != nil {
+			name = in.Blk.Name
+		}
+		fmt.Fprintf(sb, " @%s\n", name)
+		return
+	}
 	if in.Op == OCall {
 		fmt.Fprintf(sb, " %s(", f.refString(in.Args[0]))
 		for i, a := range in.Args[1:] {
@@ -260,6 +268,20 @@ func (f *Func) printJmp(sb *strings.Builder, j Jmp) {
 		fmt.Fprintf(sb, "\tjnz %s, @%s, @%s\n", f.refString(j.Arg), j.To.Name, j.To2.Name)
 	case JmpHlt:
 		sb.WriteString("\thlt\n")
+	case JmpBr:
+		fmt.Fprintf(sb, "\tjmp *%s", f.refString(j.Arg))
+		for i, t := range j.Targets {
+			if i == 0 {
+				sb.WriteString(" [")
+			} else {
+				sb.WriteString(", ")
+			}
+			fmt.Fprintf(sb, "@%s", t.Name)
+			if i == len(j.Targets)-1 {
+				sb.WriteString("]")
+			}
+		}
+		sb.WriteByte('\n')
 	}
 }
 

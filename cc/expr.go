@@ -312,6 +312,11 @@ func (g *gen) genUnary(n *cc.UnaryExpression) ir.Ref {
 	case cc.UnaryExpressionSizeofExpr, cc.UnaryExpressionSizeofType:
 		v, _ := constInt(n)
 		return g.fn.Long(v)
+	case cc.UnaryExpressionLabelAddr: // &&label
+		if b, ok := g.labels[n.Token2.SrcStr()]; ok {
+			return g.cur.BlockAddr(b)
+		}
+		return g.fail("cc: &&%s: unknown label", n.Token2.SrcStr())
 	}
 	return g.fail("cc: unsupported unary case %v", n.Case)
 }

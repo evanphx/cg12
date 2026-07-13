@@ -58,6 +58,12 @@ func (p *Program) Cbnz(w64 bool, rt Reg, label string) {
 	p.branch(label, 21, "cbnz", func(off int32) uint32 { return Cbnz(w64, rt, off) })
 }
 
+// Adr materializes a label's PC-relative address into rd (an ADR fixup: a 21-bit
+// signed byte offset, not scaled by 4).
+func (p *Program) Adr(rd Reg, label string) {
+	p.branch(label, 21, "adr", func(off int32) uint32 { return Adr(rd, off) })
+}
+
 // Bytes resolves every branch and returns the assembled machine code.
 func (p *Program) Bytes() ([]byte, error) {
 	if p.err != nil {

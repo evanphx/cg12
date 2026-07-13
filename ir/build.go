@@ -408,6 +408,20 @@ func (b *Block) Jnz(cond Ref, ifTrue, ifFalse *Block) {
 // Hlt terminates the block as unreachable.
 func (b *Block) Hlt() { b.Jmp = Jmp{Kind: JmpHlt} }
 
+// BlockAddr yields the code address of target (the &&label GNU extension), for
+// use as an indirect branch destination.
+func (b *Block) BlockAddr(target *Block) Ref {
+	res := b.fn.newTemp("", ClsP)
+	b.Instrs = append(b.Instrs, Instr{Op: OBlockAddr, Cls: ClsP, To: res, Blk: target, Pos: b.curPos})
+	return res
+}
+
+// BrIndirect terminates the block with a computed goto to the address in addr;
+// targets lists every block the branch may reach (all address-taken labels).
+func (b *Block) BrIndirect(addr Ref, targets ...*Block) {
+	b.Jmp = Jmp{Kind: JmpBr, Arg: addr, Targets: targets}
+}
+
 // --- phis -----------------------------------------------------------------
 
 // PhiEdge pairs an incoming value with the predecessor it arrives from.

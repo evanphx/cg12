@@ -85,6 +85,8 @@ func (b *Block) Succs() []*Block {
 		}
 	case JmpJnz:
 		return []*Block{b.Jmp.To, b.Jmp.To2}
+	case JmpBr:
+		return b.Jmp.Targets
 	}
 	return nil
 }

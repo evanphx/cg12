@@ -239,6 +239,7 @@ func TestMoreEncodingsMatchAssembler(t *testing.T) {
 		{"ldrsh w4, [x5, #2]", LdrshImm(false, 4, 5, 2)},
 		// address, shifted immediate
 		{"adrp x0, .", Adrp(0, 0)},
+		{"adr x0, .", Adr(0, 0)},
 		{"add sp, sp, #1, lsl #12", AddImmLSL12(true, SP, SP, 1)},
 		{"sub x0, x1, #2, lsl #12", SubImmLSL12(true, 0, 1, 2)},
 		// extends

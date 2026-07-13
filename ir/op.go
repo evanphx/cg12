@@ -99,6 +99,9 @@ const (
 	OVaStart
 	OVaArg
 
+	// OBlockAddr yields the code address of Instr.Blk (the &&label extension).
+	OBlockAddr
+
 	// Register variables: read and write a specific machine register directly.
 	// Reading (OGetReg) yields the register's current value; writing (OSetReg)
 	// sets it. The register operand is a RefReg naming the target register number,
@@ -193,8 +196,9 @@ var opTable = [numOps]opInfo{
 	OPar:    {name: "par", hasResult: true},
 	OParEnv: {name: "parenv", hasResult: true},
 
-	OVaStart: {name: "vastart"},
-	OVaArg:   {name: "vaarg", hasResult: true},
+	OVaStart:   {name: "vastart"},
+	OVaArg:     {name: "vaarg", hasResult: true},
+	OBlockAddr: {name: "blockaddr", hasResult: true},
 
 	OSafepoint: {name: "safept"},
 

@@ -376,6 +376,9 @@ func (e *emitter) emitTerm(b *ir.Block) {
 		e.line("b %s", e.blockLabel(b.Jmp.To2))
 	case ir.JmpHlt:
 		e.line("brk #0")
+	case ir.JmpBr:
+		r := e.srcReg(b.Jmp.Arg, 0, 8)
+		e.line("br %s", r) // computed goto
 	default:
 		e.fail("arm64: block %q has no terminator", b.Name)
 	}
@@ -460,6 +463,10 @@ func (e *emitter) emitInstr(b *ir.Block, in *ir.Instr) {
 	case ir.OAlloc4, ir.OAlloc8, ir.OAlloc16:
 		d, done := e.dstReg(in.To, 8)
 		e.line("add %s, x29, #%d", d, e.allocOff[in])
+		done()
+	case ir.OBlockAddr:
+		d, done := e.dstReg(in.To, 8)
+		e.line("adr %s, %s", d, e.blockLabel(in.Blk)) // &&label
 		done()
 	default:
 		if in.Op.IsLoad() {

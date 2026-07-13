@@ -40,6 +40,10 @@ type Instr struct {
 	// time when a target cannot honour it.
 	Tail bool
 
+	// Blk names the target block of an OBlockAddr (the address of a label taken
+	// with the &&label extension), whose result is that block's code address.
+	Blk *Block
+
 	// Inl records inline provenance: when the inliner splices a callee's body in,
 	// each cloned instruction points at the InlineSite describing which function
 	// it came from and where it was called. nil for ordinary (non-inlined) code.
@@ -114,6 +118,7 @@ const (
 	JmpJnz                 // if Arg != 0 goto To else To2
 	JmpRet                 // return Arg (R for void)
 	JmpHlt                 // trap / unreachable
+	JmpBr                  // computed goto: branch to the address in Arg, reaching one of Targets
 )
 
 // Jmp is a block terminator. Successor blocks are referenced directly so the
@@ -127,4 +132,8 @@ type Jmp struct {
 	// Args lists additional values live at the terminator — the extra registers
 	// of a multi-register aggregate return, beyond Arg.
 	Args []Ref
+
+	// Targets lists the possible successor blocks of a JmpBr (every label whose
+	// address is taken), so the CFG and liveness see the indirect edges.
+	Targets []*Block
 }

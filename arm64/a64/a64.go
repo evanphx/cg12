@@ -260,6 +260,13 @@ func Adrp(rd Reg, imm int32) uint32 {
 	return 1<<31 | (u&3)<<29 | 0x10<<24 | (u>>2)<<5 | r(rd)
 }
 
+// Adr encodes ADR rd, <label>: the PC-relative byte address. imm is the signed
+// 21-bit byte offset from the instruction (±1 MiB).
+func Adr(rd Reg, imm int32) uint32 {
+	u := uint32(imm) & 0x1fffff
+	return (u&3)<<29 | 0x10<<24 | (u>>2)<<5 | r(rd)
+}
+
 // AddImmLSL12 / SubImmLSL12 encode ADD/SUB rd, rn, #imm12, LSL #12.
 func AddImmLSL12(w64 bool, rd, rn Reg, imm12 uint32) uint32 {
 	return addSubImm(w64, 0, 0, rd, rn, imm12) | 1<<22
