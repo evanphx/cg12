@@ -158,8 +158,8 @@ func (g *gen) genAddr(e cc.ExpressionNode) (ir.Ref, cc.Type) {
 		switch n.Case {
 		case cc.PostfixExpressionIndex: // a[i]
 			base, elemT := g.arrayBase(n.PostfixExpression)
-			idx := g.toLong(g.genExpr(n.ExpressionList), n.ExpressionList.Type())
-			off := g.cur.Mul(ir.ClsL, idx, g.fn.Long(int64(elemT.Size())))
+			idx := g.toPtr(g.genExpr(n.ExpressionList), n.ExpressionList.Type())
+			off := g.cur.Mul(ir.ClsP, idx, g.fn.ConstInt(ir.ClsP, int64(elemT.Size())))
 			return g.cur.Add(ir.ClsP, base, off), elemT
 		case cc.PostfixExpressionSelect: // s.field
 			base, _ := g.genAddr(n.PostfixExpression)
@@ -324,8 +324,8 @@ func (g *gen) arith(op string, ln, rn cc.ExpressionNode, resT cc.Type) ir.Ref {
 
 func (g *gen) ptrArith(op string, ln, rn cc.ExpressionNode, pt *cc.PointerType) ir.Ref {
 	base := g.genExpr(ln)
-	idx := g.toLong(g.genExpr(rn), rn.Type())
-	off := g.cur.Mul(ir.ClsL, idx, g.fn.Long(int64(pt.Elem().Size())))
+	idx := g.toPtr(g.genExpr(rn), rn.Type())
+	off := g.cur.Mul(ir.ClsP, idx, g.fn.ConstInt(ir.ClsP, int64(pt.Elem().Size())))
 	if op == "-" {
 		return g.cur.Sub(ir.ClsP, base, off)
 	}

@@ -49,15 +49,22 @@ func (g *gen) convert(v ir.Ref, from, to cc.Type) ir.Ref {
 	}
 }
 
-// toLong widens an integer value to a 64-bit long (for index/pointer scaling).
-func (g *gen) toLong(v ir.Ref, t cc.Type) ir.Ref {
-	if wide(clsOf(t)) {
+// toPtr converts an integer index to the abstract pointer class so that address
+// arithmetic computes at the target's pointer width. LowerPointers resolves the
+// widen to a real word->long extend on a 64-bit target and to a no-op on wasm32
+// (where the pointer and a word are the same width); a wider-than-pointer long
+// index is reclassified with Copy, which truncates on a 32-bit target.
+func (g *gen) toPtr(v ir.Ref, t cc.Type) ir.Ref {
+	switch c := clsOf(t); {
+	case c == ir.ClsP:
 		return v
+	case wide(c): // a long index: already >= pointer width
+		return g.cur.Copy(ir.ClsP, v)
+	case signed(t):
+		return g.cur.Extsw(ir.ClsP, v)
+	default:
+		return g.cur.Extuw(ir.ClsP, v)
 	}
-	if signed(t) {
-		return g.cur.Extsw(ir.ClsL, v)
-	}
-	return g.cur.Extuw(ir.ClsL, v)
 }
 
 // promote applies the default argument promotions for a variadic argument
