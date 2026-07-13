@@ -13,6 +13,14 @@ func (g *gen) convert(v ir.Ref, from, to cc.Type) ir.Ref {
 	if from == nil || to == nil {
 		return v
 	}
+	// A conversion to _Bool normalizes to 0/1 (any nonzero value becomes 1),
+	// which a plain width change would not do.
+	if to.Kind() == cc.Bool && from.Kind() != cc.Bool {
+		if isFloat(from) {
+			return g.cur.Cmp(ir.CmpFne, ir.ClsW, v, g.floatOf(0, from))
+		}
+		return g.cur.Cmp(ir.CmpNe, ir.ClsW, v, g.constOf(0, from))
+	}
 	fc, tc := clsOf(from), clsOf(to)
 	ff, tf := isFloat(from), isFloat(to)
 	if fc == tc && ff == tf {
@@ -113,6 +121,9 @@ func funcTypeOf(t cc.Type) *cc.FunctionType {
 // genCall emits a function call, handling direct/indirect callees, fixed-argument
 // coercion, and default promotions for variadic arguments.
 func (g *gen) genCall(n *cc.PostfixExpression) ir.Ref {
+	if r, ok := g.vaBuiltin(n); ok {
+		return r
+	}
 	calleeNode := n.PostfixExpression
 	ft := funcTypeOf(calleeNode.Type())
 

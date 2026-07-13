@@ -178,8 +178,8 @@ func (g *gen) terminated() bool { return g.cur.Jmp.Kind != ir.JmpNone }
 // address, and a by-value aggregate is likewise represented by its address (it
 // is too big for a register); everything else loads.
 func (g *gen) rvalue(addr ir.Ref, t cc.Type) ir.Ref {
-	if isArray(t) || isAggType(t) {
-		return addr
+	if isArray(t) || isAggType(t) || isVaList(t) {
+		return addr // an array, aggregate, or va_list is its address (va_list decays like an array)
 	}
 	return g.loadVal(addr, t)
 }

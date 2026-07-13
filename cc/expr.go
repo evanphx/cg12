@@ -125,8 +125,8 @@ func (g *gen) loadLval(n *cc.PrimaryExpression) ir.Ref {
 	name := n.Token.SrcStr()
 	if v, ok := g.lookup(name); ok {
 		addr := g.addrOf(v)
-		if isArray(v.typ) || isAggType(v.typ) {
-			return addr // an array or aggregate value is its address
+		if isArray(v.typ) || isAggType(v.typ) || isVaList(v.typ) {
+			return addr // an array, aggregate, or va_list value is its address
 		}
 		val := g.loadVal(addr, v.typ)
 		g.setName(val, name) // this value is a read of the C variable
@@ -276,6 +276,9 @@ func (g *gen) genUnary(n *cc.UnaryExpression) ir.Ref {
 		}
 		return g.cur.Xor(cls, v, g.fn.Word(-1))
 	case cc.UnaryExpressionDeref: // *p
+		if r, ok := g.vaArgExpr(n); ok { // *(T*)__builtin_va_arg_impl(ap)
+			return r
+		}
 		p := g.genExpr(n.CastExpression)
 		return g.rvalue(p, n.Type())
 	case cc.UnaryExpressionAddrof: // &x

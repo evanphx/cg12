@@ -57,7 +57,11 @@ func (g *gen) genLocalDecl(d *cc.Declaration) {
 			g.genStaticLocal(id, dcl, t)
 			continue
 		}
-		addr := g.cur.Alloc(align(t), int(t.Size()))
+		size := int(t.Size())
+		if isVaList(t) {
+			size = vaListBytes // hold the target's larger va_list state, not a pointer
+		}
+		addr := g.cur.Alloc(align(t), size)
 		g.setName(addr, dcl.Name()+".addr")
 		g.define(dcl.Name(), lval{addr: addr, typ: t})
 		if id.Case == cc.InitDeclaratorInit {
