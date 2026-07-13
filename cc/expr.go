@@ -97,9 +97,9 @@ func (g *gen) genPrimary(n *cc.PrimaryExpression) ir.Ref {
 		return g.constOf(v, n.Type())
 	case cc.PrimaryExpressionFloat:
 		if v, ok := n.Value().(cc.Float64Value); ok {
-			return g.fn.Double(float64(v))
+			return g.floatOf(float64(v), n.Type())
 		}
-		return g.fn.Double(0)
+		return g.floatOf(0, n.Type())
 	case cc.PrimaryExpressionString:
 		s, _ := n.Value().(cc.StringValue)
 		return g.strSym(string(s))
@@ -125,8 +125,8 @@ func (g *gen) loadLval(n *cc.PrimaryExpression) ir.Ref {
 	name := n.Token.SrcStr()
 	if v, ok := g.lookup(name); ok {
 		addr := g.addrOf(v)
-		if _, isArr := v.typ.(*cc.ArrayType); isArr {
-			return addr // arrays decay to their address
+		if isArray(v.typ) || isAggType(v.typ) {
+			return addr // an array or aggregate value is its address
 		}
 		val := g.loadVal(addr, v.typ)
 		g.setName(val, name) // this value is a read of the C variable
@@ -209,10 +209,10 @@ func (g *gen) genPostfix(n *cc.PostfixExpression) ir.Ref {
 		return g.genCall(n)
 	case cc.PostfixExpressionIndex:
 		addr, t := g.genAddr(n)
-		return g.loadVal(addr, t)
+		return g.rvalue(addr, t)
 	case cc.PostfixExpressionSelect, cc.PostfixExpressionPSelect:
 		addr, t := g.genAddr(n)
-		return g.loadVal(addr, t)
+		return g.rvalue(addr, t)
 	case cc.PostfixExpressionInc, cc.PostfixExpressionDec:
 		addr, t := g.genAddr(n.PostfixExpression)
 		old := g.loadVal(addr, t)
@@ -252,7 +252,7 @@ func (g *gen) genUnary(n *cc.UnaryExpression) ir.Ref {
 		v := g.genExpr(n.CastExpression)
 		t := n.CastExpression.Type()
 		if isFloat(t) {
-			return g.cur.Cmp(ir.CmpFeq, clsOf(t), v, g.fn.Double(0))
+			return g.cur.Cmp(ir.CmpFeq, ir.ClsW, v, g.floatOf(0, t))
 		}
 		return g.cur.Cmp(ir.CmpEq, clsOf(t), v, g.constOf(0, t))
 	case cc.UnaryExpressionCpl: // ~x
@@ -264,7 +264,7 @@ func (g *gen) genUnary(n *cc.UnaryExpression) ir.Ref {
 		return g.cur.Xor(cls, v, g.fn.Word(-1))
 	case cc.UnaryExpressionDeref: // *p
 		p := g.genExpr(n.CastExpression)
-		return g.loadVal(p, n.Type())
+		return g.rvalue(p, n.Type())
 	case cc.UnaryExpressionAddrof: // &x
 		addr, _ := g.genAddr(n.CastExpression)
 		return addr
@@ -351,7 +351,9 @@ func (g *gen) compare(op string, ln, rn cc.ExpressionNode) ir.Ref {
 	l := g.convert(g.genExpr(ln), ln.Type(), ct)
 	r := g.convert(g.genExpr(rn), rn.Type(), ct)
 	pred := cmpPred(op, signed(ct), isFloat(ct))
-	return g.cur.Cmp(pred, clsOf(ct), l, r)
+	// A comparison yields an int; the operand class is carried by l and r, and
+	// the predicate encodes signedness and float-ness.
+	return g.cur.Cmp(pred, ir.ClsW, l, r)
 }
 
 func cmpPred(op string, signed, flt bool) ir.Cmp {
@@ -443,6 +445,10 @@ func (g *gen) genCond3(n *cc.ConditionalExpression) ir.Ref {
 func (g *gen) genAssign(n *cc.AssignmentExpression) ir.Ref {
 	addr, t := g.genAddr(n.UnaryExpression)
 	if n.Case == cc.AssignmentExpressionAssign {
+		if isAggType(t) { // struct/union assignment is a byte copy
+			g.copyAgg(addr, g.genExpr(n.AssignmentExpression), int(t.Size()))
+			return addr
+		}
 		v := g.convert(g.genExpr(n.AssignmentExpression), n.AssignmentExpression.Type(), t)
 		g.storeVal(addr, v, t)
 		return v

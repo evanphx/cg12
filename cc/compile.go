@@ -20,6 +20,7 @@ type gen struct {
 	cur     *ir.Block
 	scopes  []map[string]lval
 	strs    map[string]string                  // decoded string literal -> data symbol name
+	aggs    map[cc.Type]*ir.AggType            // memoized C struct/union -> cg12 aggregate type
 	names   map[string]int                     // per-function temp-name uniquifier
 	labels  map[string]*ir.Block               // goto label -> block (per function)
 	caseBlk map[*cc.LabeledStatement]*ir.Block // switch case/default -> block
@@ -64,7 +65,7 @@ func Compile(name, src string) (*ir.Module, error) {
 		return nil, fmt.Errorf("cc parse: %w", err)
 	}
 
-	g := &gen{mod: ir.NewModule(), strs: map[string]string{}}
+	g := &gen{mod: ir.NewModule(), strs: map[string]string{}, aggs: map[cc.Type]*ir.AggType{}}
 	g.push() // file scope: holds globals, visible to every function
 	for tu := ast.TranslationUnit; tu != nil; tu = tu.TranslationUnit {
 		ed := tu.ExternalDeclaration
@@ -102,8 +103,8 @@ func clsOf(t cc.Type) ir.Cls {
 		return ir.ClsS
 	case cc.Double, cc.LongDouble:
 		return ir.ClsD
-	case cc.Ptr, cc.Function, cc.Array:
-		return ir.ClsP
+	case cc.Ptr, cc.Function, cc.Array, cc.Struct, cc.Union:
+		return ir.ClsP // an aggregate value is handled as a pointer to its storage
 	case cc.Long, cc.ULong, cc.LongLong, cc.ULongLong:
 		return ir.ClsL
 	default: // Bool, Char, SChar, UChar, Short, UShort, Int, UInt, Enum
@@ -173,6 +174,16 @@ func (g *gen) terminated() bool { return g.cur.Jmp.Kind != ir.JmpNone }
 
 // --- memory helpers --------------------------------------------------------
 
+// rvalue reads the value of an lvalue at addr. An array decays to its own
+// address, and a by-value aggregate is likewise represented by its address (it
+// is too big for a register); everything else loads.
+func (g *gen) rvalue(addr ir.Ref, t cc.Type) ir.Ref {
+	if isArray(t) || isAggType(t) {
+		return addr
+	}
+	return g.loadVal(addr, t)
+}
+
 // loadVal loads a value of type t from addr, sign/zero-extending narrow types.
 func (g *gen) loadVal(addr ir.Ref, t cc.Type) ir.Ref {
 	cls := clsOf(t)
@@ -215,9 +226,16 @@ func (g *gen) genFunc(fd *cc.FunctionDefinition) {
 	}
 	ret := ft.Result()
 	g.curRet = ret
-	if ret.Kind() == cc.Void {
+	switch {
+	case ret.Kind() == cc.Void:
 		g.fn = g.mod.NewFuncVoid(d.Name())
-	} else {
+	case isAggType(ret):
+		// Returning a struct/union by value: the function yields a pointer the
+		// backend copies into the caller's buffer (or registers).
+		g.fn = g.mod.NewFuncVoid(d.Name())
+		g.fn.HasRet = true
+		g.fn.RetAgg = g.aggOf(ret)
+	default:
 		g.fn = g.mod.NewFunc(d.Name(), clsOf(ret))
 	}
 	g.fn.Export()
@@ -237,8 +255,16 @@ func (g *gen) genFunc(fd *cc.FunctionDefinition) {
 			continue
 		}
 		pt := p.Type()
-		pref := g.fn.Param(p.Name(), clsOf(pt))
 		g.names[p.Name()] = 1 // the incoming parameter value already holds this name
+		if isAggType(pt) {
+			// A by-value aggregate parameter arrives as a pointer to a slot the
+			// backend reconstructs; use that address as the lvalue directly.
+			pref := g.aggParam(p.Name(), g.aggOf(pt))
+			g.setName(pref, p.Name())
+			g.define(p.Name(), lval{addr: pref, typ: pt})
+			continue
+		}
+		pref := g.fn.Param(p.Name(), clsOf(pt))
 		addr := g.cur.Alloc(align(pt), int(pt.Size()))
 		g.setName(addr, p.Name()+".addr")
 		g.storeVal(addr, pref, pt)
@@ -285,12 +311,22 @@ func align(t cc.Type) int {
 func (g *gen) zero(t cc.Type) ir.Ref {
 	switch cls := clsOf(t); {
 	case cls == ir.ClsS || cls == ir.ClsD:
-		return g.fn.Double(0)
+		return g.floatOf(0, t)
 	case wide(cls):
 		return g.fn.Long(0)
 	default:
 		return g.fn.Word(0)
 	}
+}
+
+// floatOf builds a floating-point constant of t's class: a single for float, a
+// double for double. Using the wrong width both stores the wrong number of bytes
+// and mismatches the class of neighbouring float operations.
+func (g *gen) floatOf(v float64, t cc.Type) ir.Ref {
+	if clsOf(t) == ir.ClsS {
+		return g.fn.Single(v)
+	}
+	return g.fn.Double(v)
 }
 
 // genGlobalDecl handles a file-scope declaration: prototypes and globals with

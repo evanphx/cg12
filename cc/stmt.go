@@ -102,6 +102,10 @@ func (g *gen) genInit(addr ir.Ref, t cc.Type, init *cc.Initializer) {
 			return
 		}
 	}
+	if isAggType(t) { // struct/union initialized from another aggregate value
+		g.copyAgg(addr, g.genExpr(e), int(t.Size()))
+		return
+	}
 	val := g.convert(g.genExpr(e), e.Type(), t)
 	g.storeVal(addr, val, t)
 }
@@ -188,7 +192,7 @@ func (g *gen) genStmt(s *cc.Statement) {
 func (g *gen) genCond(e cc.ExpressionNode) ir.Ref {
 	v := g.genExpr(e)
 	if isFloat(e.Type()) {
-		return g.cur.Cmp(ir.CmpFne, clsOf(e.Type()), v, g.fn.Double(0))
+		return g.cur.Cmp(ir.CmpFne, ir.ClsW, v, g.floatOf(0, e.Type()))
 	}
 	return v
 }

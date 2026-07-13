@@ -139,9 +139,17 @@ func (g *gen) genCall(n *cc.PostfixExpression) ir.Ref {
 		nfixed = len(ft.Parameters())
 	}
 	args := make([]ir.Ref, 0, len(argNodes))
+	var aggArgs []*ir.AggType // parallel to args; non-nil where an arg is by-value aggregate
 	for i, an := range argNodes {
 		v := g.genExpr(an)
-		if ft != nil && i < nfixed {
+		if isAggType(an.Type()) {
+			// A by-value aggregate argument is passed as a pointer to its storage
+			// (v is that address), tagged so the backend loads it per the ABI.
+			for len(aggArgs) <= i {
+				aggArgs = append(aggArgs, nil)
+			}
+			aggArgs[i] = g.aggOf(an.Type())
+		} else if ft != nil && i < nfixed {
 			v = g.convert(v, an.Type(), ft.Parameters()[i].Type())
 		} else {
 			v = g.promote(v, an.Type())
@@ -149,13 +157,30 @@ func (g *gen) genCall(n *cc.PostfixExpression) ir.Ref {
 		args = append(args, v)
 	}
 
+	// A call returning a struct/union by value yields a pointer to the result.
+	if ft != nil && isAggType(ft.Result()) {
+		r := g.cur.Call(ir.ClsL, callee, args...)
+		call := g.lastInstr()
+		call.RetAgg = g.aggOf(ft.Result())
+		call.AggArgs = aggArgs
+		return r
+	}
 	if ft != nil && ft.Result().Kind() == cc.Void {
 		g.cur.CallVoid(callee, args...)
+		g.lastInstr().AggArgs = aggArgs
 		return ir.R
 	}
 	retCls := ir.ClsW
 	if ft != nil {
 		retCls = clsOf(ft.Result())
 	}
-	return g.cur.Call(retCls, callee, args...)
+	r := g.cur.Call(retCls, callee, args...)
+	g.lastInstr().AggArgs = aggArgs
+	return r
+}
+
+// lastInstr returns the instruction most recently emitted into the current
+// block, so a call's aggregate metadata can be attached after it is built.
+func (g *gen) lastInstr() *ir.Instr {
+	return &g.cur.Instrs[len(g.cur.Instrs)-1]
 }

@@ -1,0 +1,4 @@
+add: (2,6)
+manhattan: 7 3
+copy: c=(2,6) d=(100,6)
+box: first=10 last=15 sum=75
