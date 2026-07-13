@@ -115,11 +115,101 @@ int main(void){
 	require.Equal(t, 0, code)
 }
 
-// buildGrowIR builds grow(cur_sp), the copying half of a Go-style morestack, in
-// cg12 IR: it allocates a larger stack, memcpy's the frames [cur_sp, base) onto
-// it, and precisely relocates the saved frame-pointer chain (every frame's saved
-// x29 that points back into the old stack is adjusted by the move delta). It
-// returns the delta; the caller switches to the new stack by adding it to sp/x29.
+// buildAdjustIR builds adjust(addr, delta, lo, hi): the shared "relocate one
+// stack pointer" primitive. It reads the pointer at addr; if that pointer points
+// into the old stack [lo, hi) it stores the moved pointer (value + delta) into
+// the copy (at addr + delta). Both saved frame pointers and interior roots are
+// relocated through it.
+func buildAdjustIR(m *ir.Module) {
+	f := m.NewFuncVoid("adjust")
+	addr := f.Param("addr", ir.ClsL)
+	delta := f.Param("delta", ir.ClsL)
+	lo := f.Param("lo", ir.ClsL)
+	hi := f.Param("hi", ir.ClsL)
+	e := f.Entry()
+	do := f.NewBlock("do")
+	done := f.NewBlock("done")
+	val := e.Load(ir.ClsL, addr)
+	in := e.And(ir.ClsW, e.Cmp(ir.CmpUge, ir.ClsL, val, lo), e.Cmp(ir.CmpUlt, ir.ClsL, val, hi))
+	e.Jnz(in, do, done)
+	do.Store(do.Add(ir.ClsL, val, delta), do.Add(ir.ClsL, addr, delta))
+	do.Goto(done)
+	done.RetVoid()
+}
+
+// buildFixframeIR builds fixframe(fp, pc, delta, lo, hi): for the frame at fp
+// suspended at pc, look pc up in __cg12_stackmaps and relocate each interior
+// stack root (adjust(fp + off, ...)). It is the gc_move map-walk, generalized to
+// relocate by a move delta rather than copy the pointee.
+func buildFixframeIR(m *ir.Module) {
+	f := m.NewFuncVoid("fixframe")
+	fp := f.Param("fp", ir.ClsL)
+	pc := f.Param("pc", ir.ClsL)
+	delta := f.Param("delta", ir.ClsL)
+	lo := f.Param("lo", ir.ClsL)
+	hi := f.Param("hi", ir.ClsL)
+	smap := f.Sym("__cg12_stackmaps", 0)
+	twelve := f.Long(12)
+
+	entry := f.Entry()
+	loop := f.NewBlock("loop")
+	body := f.NewBlock("body")
+	next := f.NewBlock("next")
+	found := f.NewBlock("found")
+	roots := f.NewBlock("roots")
+	rbody := f.NewBlock("rbody")
+	doadj := f.NewBlock("doadj")
+	rnext := f.NewBlock("rnext")
+	done := f.NewBlock("done")
+
+	count := entry.Load(ir.ClsW, entry.Add(ir.ClsL, smap, f.Long(8)))
+	entry.Goto(loop)
+
+	i := loop.Phi(ir.ClsW, ir.PhiEdge{From: entry, Val: f.Word(0)})
+	p := loop.Phi(ir.ClsL, ir.PhiEdge{From: entry, Val: entry.Add(ir.ClsL, smap, twelve)})
+	loop.Jnz(loop.Cmp(ir.CmpUge, ir.ClsW, i, count), done, body)
+
+	epc := body.Load(ir.ClsL, p)
+	nroots := body.Load(ir.ClsW, body.Add(ir.ClsL, p, f.Long(8)))
+	r0 := body.Add(ir.ClsL, p, twelve)
+	body.Jnz(body.Cmp(ir.CmpEq, ir.ClsL, epc, pc), found, next)
+
+	skip := next.Mul(ir.ClsL, next.Extuw(ir.ClsL, next.Add(ir.ClsW, nroots, f.Word(1))), twelve)
+	iN := next.Add(ir.ClsW, i, f.Word(1))
+	pN := next.Add(ir.ClsL, p, skip)
+	next.Goto(loop)
+	loop.Phis[0].Add(next, iN)
+	loop.Phis[1].Add(next, pN)
+
+	found.Goto(roots)
+	j := roots.Phi(ir.ClsW, ir.PhiEdge{From: found, Val: f.Word(0)})
+	r := roots.Phi(ir.ClsL, ir.PhiEdge{From: found, Val: r0})
+	roots.Jnz(roots.Cmp(ir.CmpUge, ir.ClsW, j, nroots), done, rbody)
+
+	kind := rbody.LoadSub(ir.ClsW, ir.SubUB, r)
+	typ := rbody.Load(ir.ClsW, rbody.Add(ir.ClsL, r, f.Long(8)))
+	isStack := rbody.And(ir.ClsW, rbody.Cmp(ir.CmpEq, ir.ClsW, kind, f.Word(1)),
+		rbody.Cmp(ir.CmpEq, ir.ClsW, typ, f.Word(int64(gcStack))))
+	rbody.Jnz(isStack, doadj, rnext)
+
+	off := doadj.LoadSub(ir.ClsL, ir.SubW, doadj.Add(ir.ClsL, r, f.Long(4)))
+	doadj.CallVoid(f.Sym("adjust", 0), doadj.Add(ir.ClsL, fp, off), delta, lo, hi)
+	doadj.Goto(rnext)
+
+	jN := rnext.Add(ir.ClsW, j, f.Word(1))
+	rN := rnext.Add(ir.ClsL, r, twelve)
+	rnext.Goto(roots)
+	roots.Phis[0].Add(rnext, jN)
+	roots.Phis[1].Add(rnext, rN)
+
+	done.RetVoid()
+}
+
+// buildGrowIR builds grow(cur_sp), a Go-style morestack in cg12 IR: allocate a
+// larger stack, memcpy the frames [cur_sp, base) onto it, and — for every frame
+// in the chain — relocate its saved frame pointer and its interior stack roots
+// by the move delta (one pass over the chain, adjust for both). It poisons the
+// old stack and returns the delta; the caller switches by adding it to sp/x29.
 func buildGrowIR(m *ir.Module) {
 	f := m.NewFunc("grow", ir.ClsL).Export()
 	curSP := f.Param("cur_sp", ir.ClsL)
@@ -129,8 +219,6 @@ func buildGrowIR(m *ir.Module) {
 	entry := f.Entry()
 	fwalk := f.NewBlock("fwalk")
 	fbody := f.NewBlock("fbody")
-	fixdo := f.NewBlock("fixdo")
-	fadv := f.NewBlock("fadv")
 	fdone := f.NewBlock("fdone")
 
 	base := entry.Load(ir.ClsL, base0)      // top of the current stack
@@ -142,22 +230,18 @@ func buildGrowIR(m *ir.Module) {
 	entry.Call(ir.ClsL, f.Sym("memcpy", 0), newsp, curSP, size) // copy the frames
 	entry.Goto(fwalk)
 
-	// Walk the frame-pointer chain; child holds the frame below the one we fix.
+	// Walk the frame-pointer chain; child holds the frame below the one we fix, so
+	// this frame's saved fp is [child] and its suspension PC is [child + 8].
 	child := fwalk.Phi(ir.ClsL, ir.PhiEdge{From: entry, Val: entry.Load(ir.ClsL, fpReg)})
-	fp := fwalk.Load(ir.ClsL, child) // the caller frame this child links to
+	fp := fwalk.Load(ir.ClsL, child)
 	inRange := fwalk.And(ir.ClsW, fwalk.Cmp(ir.CmpUge, ir.ClsL, fp, curSP), fwalk.Cmp(ir.CmpUlt, ir.ClsL, fp, base))
 	fwalk.Jnz(inRange, fbody, fdone)
 
-	savedFP := fbody.Load(ir.ClsL, fp) // fp's own saved frame pointer
-	savedIn := fbody.And(ir.ClsW, fbody.Cmp(ir.CmpUge, ir.ClsL, savedFP, curSP), fbody.Cmp(ir.CmpUlt, ir.ClsL, savedFP, base))
-	fbody.Jnz(savedIn, fixdo, fadv)
-
-	// Adjust this frame's saved fp, in the copy, by the move delta.
-	fixdo.Store(fixdo.Add(ir.ClsL, savedFP, delta), fixdo.Add(ir.ClsL, fp, delta))
-	fixdo.Goto(fadv)
-
-	fadv.Goto(fwalk)
-	fwalk.Phis[0].Add(fadv, fp)
+	pc := fbody.Load(ir.ClsL, fbody.Add(ir.ClsL, child, f.Long(8)))  // this frame's suspension PC
+	fbody.CallVoid(f.Sym("adjust", 0), fp, delta, curSP, base)       // relocate its saved fp
+	fbody.CallVoid(f.Sym("fixframe", 0), fp, pc, delta, curSP, base) // relocate its interior roots
+	fbody.Goto(fwalk)
+	fwalk.Phis[0].Add(fbody, fp)
 
 	// The old fp-chain is now fully walked, so poison the old stack: anything that
 	// still reads it (an unrelocated pointer) reads garbage instead of stale-but-
@@ -168,13 +252,17 @@ func buildGrowIR(m *ir.Module) {
 	fdone.Ret(delta)
 }
 
-// TestStackGrowthEndToEnd is the full mechanism: a mutator running on a small
-// heap stack (via the IR trampoline) grows onto a larger one and continues. mid
-// triggers the growth and switches sp/x29 to the new stack; outer, suspended one
-// frame up, resumes on the relocated copy — reading its own local proves its
-// frame was moved and its frame-pointer link relocated correctly.
+// TestStackGrowthEndToEnd is the full mechanism, in one pass: a mutator running
+// on a small heap stack (via the IR trampoline) grows onto a larger one and
+// continues. mid triggers the growth and switches sp/x29; outer, suspended one
+// frame up, holds an interior pointer into its own frame across the growth. grow
+// relocates both the frame-pointer chain and that interior pointer, so outer
+// resumes on the relocated copy and both its local *and* its interior pointer
+// read correctly.
 func TestStackGrowthEndToEnd(t *testing.T) {
 	m := ir.NewModule()
+	buildAdjustIR(m)
+	buildFixframeIR(m)
 	buildGrowIR(m)
 
 	// mid(): grow the stack, switch this frame onto it, return a marker.
@@ -187,13 +275,16 @@ func TestStackGrowthEndToEnd(t *testing.T) {
 	me.Store(me.Add(ir.ClsL, me.Load(ir.ClsL, fp), d), fp)          // x29 += delta (now on new stack)
 	me.Ret(mid.Word(7))
 
-	// outer(seed): keep a local live across the growth, then use it afterward.
+	// outer(seed): keep both a local and an interior pointer to it live across the
+	// growth, then use them afterward.
 	outer := m.NewFunc("outer", ir.ClsW)
 	seed := outer.Param("seed", ir.ClsW)
 	oe := outer.Entry()
-	lo := oe.Add(ir.ClsW, seed, outer.Word(100)) // lives across the call to mid
+	cell := oe.Alloc(4, 4)             // an int in outer's frame
+	outer.MarkGCRefType(cell, gcStack) // ...pointed at by an interior stack root
+	oe.Store(oe.Add(ir.ClsW, seed, outer.Word(100)), cell)
 	r := oe.Call(ir.ClsW, outer.Sym("mid", 0))
-	oe.Ret(oe.Add(ir.ClsW, lo, r)) // (seed+100) + 7, if outer's frame survived the move
+	oe.Ret(oe.Add(ir.ClsW, oe.Load(ir.ClsW, cell), r)) // *cell + 7, via the relocated pointer
 
 	// run_on_stack(top, seed): set the stack top, switch to it, run outer, switch back.
 	ros := m.NewFunc("run_on_stack", ir.ClsW).Export()
