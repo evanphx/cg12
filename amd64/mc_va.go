@@ -10,9 +10,9 @@ import (
 // namedCounts replays argument assignment over the named parameters, returning
 // how many arrived in GP and SSE registers and the byte size of the named stack
 // arguments — the starting state for a va_list.
-func (m *mc) namedCounts() (ngp, nfp, stackBytes int) {
+func namedCounts(f *ir.Func) (ngp, nfp, stackBytes int) {
 	var a argAssigner
-	for _, p := range m.f.Params {
+	for _, p := range f.Params {
 		if p.Agg != nil {
 			a.assignAgg(classifyAgg(p.Agg))
 			continue
@@ -27,7 +27,7 @@ func (m *mc) namedCounts() (ngp, nfp, stackBytes int) {
 func (m *mc) vaStart(in *ir.Instr) {
 	m.gpInto(gpScratch0, in.Arg(0)) // r10 = &va_list
 	ap := gpScratch0.mreg()
-	ngp, nfp, stackBytes := m.namedCounts()
+	ngp, nfp, stackBytes := namedCounts(m.f)
 
 	m.emit(x64.StoreImm32(32, x64.At(ap, 0), int32(8*ngp)))            // gp_offset
 	m.emit(x64.StoreImm32(32, x64.At(ap, 4), int32(vaGPBytes+16*nfp))) // fp_offset

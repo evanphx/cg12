@@ -344,6 +344,61 @@ func setStackMap(o *obj.Object, funcs []stackMapFunc) {
 	})
 }
 
+// frameLayout is the stack-frame plan for one function, shared by the machine and
+// text emitters. All offsets are relative to RBP (which points at the saved RBP).
+type frameLayout struct {
+	calleeSaved []Reg             // callee-saved registers to preserve, in save order
+	spillBase   int               // bytes below RBP where spill slots begin
+	allocOff    map[*ir.Instr]int // each stack allocation's distance below RBP
+	frame       int               // bytes subtracted from RSP (16-aligned)
+	regSaveDist int               // variadic register save area, at [rbp - regSaveDist]
+}
+
+// computeFrame lays out a function's stack frame from its allocation.
+func computeFrame(f *ir.Func, alloc *allocation) frameLayout {
+	var lay frameLayout
+	lay.allocOff = map[*ir.Instr]int{}
+
+	// Collect the callee-saved registers the allocator actually used.
+	used := map[Reg]bool{}
+	for _, t := range f.Temps {
+		if t.Reg != ir.NoReg && calleeSavedReg(Reg(t.Reg)) {
+			used[Reg(t.Reg)] = true
+		}
+	}
+	for r := range used {
+		lay.calleeSaved = append(lay.calleeSaved, r)
+	}
+	sort.Slice(lay.calleeSaved, func(i, j int) bool { return lay.calleeSaved[i] < lay.calleeSaved[j] })
+
+	calleeArea := 8 * len(lay.calleeSaved)
+	lay.spillBase = calleeArea
+	acc := calleeArea + alloc.spillBytes
+
+	// Place each stack allocation below the spills.
+	maxCall := 0
+	for _, b := range f.Blocks {
+		for k := range b.Instrs {
+			in := &b.Instrs[k]
+			if in.Op.IsAlloc() {
+				align, size := allocShape(f, in)
+				acc += size
+				acc = roundUp(acc, align)
+				lay.allocOff[in] = acc
+			}
+			if in.Op == ir.OCall && int(in.Aux) > maxCall {
+				maxCall = int(in.Aux)
+			}
+		}
+	}
+	if f.Variadic {
+		acc += vaRegSaveSz
+		lay.regSaveDist = acc
+	}
+	lay.frame = roundUp(acc+maxCall, 16)
+	return lay
+}
+
 // mc holds the state of emitting one function to machine code.
 type mc struct {
 	f      *ir.Func
@@ -352,21 +407,14 @@ type mc struct {
 	relocs []obj.Reloc
 	err    error
 
-	// Frame layout, all relative to RBP (which points at the saved RBP).
-	calleeSaved []Reg             // callee-saved registers to preserve, in save order
-	spillBase   int               // bytes below RBP where spill slots begin
-	allocOff    map[*ir.Instr]int // each stack allocation's distance below RBP
-	frame       int               // bytes subtracted from RSP (16-aligned)
+	frameLayout // the shared stack-frame plan
 
 	gc GCStrategy // pluggable GC strategy, or nil
 
 	blockDone bool // a tail call already emitted the block's exit; skip the terminator
 
-	// Variadic support: the System V register save area (rdi..r9 then xmm0..xmm7),
-	// at [rbp - regSaveDist].
-	regSaveDist int
-	vaSeq       int // counter for unique va_arg branch labels
-	gcSeq       int // counter for unique GC poll labels
+	vaSeq int // counter for unique va_arg branch labels
+	gcSeq int // counter for unique GC poll labels
 
 	safepoints []safepoint // GC safepoints recorded during emission
 
@@ -423,7 +471,7 @@ type machineCode struct {
 }
 
 func emitMachine(f *ir.Func, alloc *allocation, gc GCStrategy) (*machineCode, error) {
-	m := &mc{f: f, alloc: alloc, gc: gc, prog: x64.NewProgram(), allocOff: map[*ir.Instr]int{}, instrPC: map[*ir.Instr][2]uint64{}}
+	m := &mc{f: f, alloc: alloc, gc: gc, prog: x64.NewProgram(), instrPC: map[*ir.Instr][2]uint64{}}
 	m.planFrame()
 	m.prologue()
 	for _, b := range f.Blocks {
@@ -514,51 +562,13 @@ func allocShape(f *ir.Func, in *ir.Instr) (align, size int) {
 	return align, roundUp(size, align)
 }
 
-func (m *mc) planFrame() {
-	// Collect the callee-saved registers the allocator actually used.
-	used := map[Reg]bool{}
-	for _, t := range m.f.Temps {
-		if t.Reg != ir.NoReg && calleeSavedReg(Reg(t.Reg)) {
-			used[Reg(t.Reg)] = true
-		}
-	}
-	for r := range used {
-		m.calleeSaved = append(m.calleeSaved, r)
-	}
-	sort.Slice(m.calleeSaved, func(i, j int) bool { return m.calleeSaved[i] < m.calleeSaved[j] })
-
-	calleeArea := 8 * len(m.calleeSaved)
-	m.spillBase = calleeArea
-	acc := calleeArea + m.alloc.spillBytes
-
-	// Place each stack allocation below the spills.
-	maxCall := 0
-	for _, b := range m.f.Blocks {
-		for k := range b.Instrs {
-			in := &b.Instrs[k]
-			if in.Op.IsAlloc() {
-				align, size := allocShape(m.f, in)
-				acc += size
-				acc = roundUp(acc, align)
-				m.allocOff[in] = acc
-			}
-			if in.Op == ir.OCall && int(in.Aux) > maxCall {
-				maxCall = int(in.Aux)
-			}
-		}
-	}
-	if m.f.Variadic {
-		acc += vaRegSaveSz
-		m.regSaveDist = acc
-	}
-	m.frame = roundUp(acc+maxCall, 16)
-}
+func (m *mc) planFrame() { m.frameLayout = computeFrame(m.f, m.alloc) }
 
 // slotAddr returns the RBP-relative address of spill slot s.
-func (m *mc) slotAddr(s int) int32 { return int32(-(m.spillBase + 8 + s)) }
+func (l *frameLayout) slotAddr(s int) int32 { return int32(-(l.spillBase + 8 + s)) }
 
 // savedAddr returns the RBP-relative address of the k-th saved callee register.
-func (m *mc) savedAddr(k int) int32 { return int32(-8 * (k + 1)) }
+func (l *frameLayout) savedAddr(k int) int32 { return int32(-8 * (k + 1)) }
 
 func (m *mc) prologue() {
 	// A strategy may emit a stack-growth guard before the frame is set up; its slow

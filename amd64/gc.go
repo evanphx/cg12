@@ -131,7 +131,7 @@ func (c *PrologueContext) SubFrame(reg Reg) {
 // at entry: the ones the parameters (and a MEMORY-return sret pointer) consume —
 // all of them for a variadic function, whose registers are not yet spilled.
 func (c *PrologueContext) liveArgGP() []Reg {
-	ngp, _, _ := c.mc.namedCounts()
+	ngp, _, _ := namedCounts(c.mc.f)
 	if c.mc.f.RetAgg != nil && classifyAgg(c.mc.f.RetAgg).memory {
 		ngp++ // the sret pointer occupies rdi
 	}
@@ -145,7 +145,7 @@ func (c *PrologueContext) liveArgGP() []Reg {
 }
 
 func (c *PrologueContext) liveArgFP() []Reg {
-	_, nfp, _ := c.mc.namedCounts()
+	_, nfp, _ := namedCounts(c.mc.f)
 	if c.mc.f.Variadic {
 		nfp = len(argFP)
 	}
