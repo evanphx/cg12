@@ -228,6 +228,9 @@ func TestMoreEncodingsMatchAssembler(t *testing.T) {
 		// FP loads/stores
 		{"str s0, [x1, #4]", StrFP(false, 0, 1, 4)},
 		{"ldr d2, [x3, #8]", LdrFP(true, 2, 3, 8)},
+		{"str q0, [x1]", StrQ(0, 1, 0)},
+		{"ldr q2, [x3, #16]", LdrQ(2, 3, 16)},
+		{"mov v0.16b, v1.16b", MovVec16b(0, 1)},
 		// load/store pairs
 		{"stp x29, x30, [sp, #-16]!", Stp(true, 29, 30, SP, -16, PreIndex)},
 		{"ldp x29, x30, [sp], #16", Ldp(true, 29, 30, SP, 16, PostIndex)},

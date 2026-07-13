@@ -588,17 +588,23 @@ func (m *mc) adjustSP(sub bool, n int) {
 // spillLoad / spillStore move a value between a register and a frame slot at
 // [x29, #off], selecting the FP or GP form.
 func (m *mc) spillLoad(r a64.Reg, float bool, off, size int) {
-	if float {
+	switch {
+	case size == 16:
+		m.emit(a64.LdrQ(r, mcX29, uint32(off))) // 128-bit quad
+	case float:
 		m.emit(a64.LdrFP(size == 8, r, mcX29, uint32(off)))
-	} else {
+	default:
 		m.emit(a64.LdrImm(size == 8, r, mcX29, uint32(off)))
 	}
 }
 
 func (m *mc) spillStore(r a64.Reg, float bool, off, size int) {
-	if float {
+	switch {
+	case size == 16:
+		m.emit(a64.StrQ(r, mcX29, uint32(off)))
+	case float:
 		m.emit(a64.StrFP(size == 8, r, mcX29, uint32(off)))
-	} else {
+	default:
 		m.emit(a64.StrImm(size == 8, r, mcX29, uint32(off)))
 	}
 }
@@ -608,6 +614,8 @@ func (m *mc) spillStore(r a64.Reg, float bool, off, size int) {
 // add-#0 is used when it is involved; floats use fmov.
 func (m *mc) emitReg(cls ir.Cls, dst, src a64.Reg) {
 	switch {
+	case cls == ir.ClsQ:
+		m.emit(a64.MovVec16b(dst, src)) // full 128-bit SIMD copy
 	case cls.IsFloat():
 		m.emit(a64.FmovReg(cls.Size() == 8, dst, src))
 	case dst == 31 || src == 31:
@@ -799,6 +807,8 @@ func (m *mc) emitMoveLoc(dst, src loc) {
 			}
 		case src.mem:
 			m.spillLoad(dr, dst.reg.IsFloat(), m.spillBase+src.slot, size)
+		case size == 16:
+			m.emit(a64.MovVec16b(dr, mreg(src.reg))) // full 128-bit SIMD copy
 		case dst.reg.IsFloat():
 			m.emit(a64.FmovReg(w64, dr, mreg(src.reg)))
 		default:
@@ -1217,9 +1227,12 @@ func (m *mc) copy(in *ir.Instr) {
 	s := m.src(in.Args[0], 0, sz)
 	d, done := m.dst(in.To, sz)
 	if d != s {
-		if in.Cls.IsFloat() {
+		switch {
+		case in.Cls == ir.ClsQ:
+			m.emit(a64.MovVec16b(d, s)) // full 128-bit SIMD copy
+		case in.Cls.IsFloat():
 			m.emit(a64.FmovReg(sz == 8, d, s))
-		} else {
+		default:
 			m.emit(a64.MovReg(sz == 8, d, s))
 		}
 	}
@@ -1321,6 +1334,8 @@ func (m *mc) load(in *ir.Instr) {
 		m.emit(a64.LdrFP(false, d, addr, 0))
 	case ir.OLoadd:
 		m.emit(a64.LdrFP(true, d, addr, 0))
+	case ir.OLoadq:
+		m.emit(a64.LdrQ(d, addr, 0))
 	default:
 		m.fail("arm64: unsupported load %s", in.Op)
 	}
@@ -1344,6 +1359,8 @@ func (m *mc) store(in *ir.Instr) {
 		m.emit(a64.StrFP(false, val, addr, 0))
 	case ir.OStored:
 		m.emit(a64.StrFP(true, val, addr, 0))
+	case ir.OStoreq:
+		m.emit(a64.StrQ(val, addr, 0))
 	default:
 		m.fail("arm64: unsupported store %s", in.Op)
 	}

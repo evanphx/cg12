@@ -6,6 +6,7 @@ package cc
 
 import (
 	"fmt"
+	"math/big"
 	"sort"
 
 	"github.com/evanphx/cg12/ir"
@@ -14,21 +15,23 @@ import (
 
 // gen holds the state of translating one translation unit to a cg12 module.
 type gen struct {
-	mod     *ir.Module
-	fn      *ir.Func
-	curRet  cc.Type
-	cur     *ir.Block
-	scopes  []map[string]lval
-	strs    map[string]string                  // decoded string literal -> data symbol name
-	aggs    map[cc.Type]*ir.AggType            // memoized C struct/union -> cg12 aggregate type
-	names   map[string]int                     // per-function temp-name uniquifier
-	labels  map[string]*ir.Block               // goto label -> block (per function)
-	caseBlk map[*cc.LabeledStatement]*ir.Block // switch case/default -> block
-	nblk    int                                // block-name counter
-	nstatic int                                // static-local mangling counter
-	brk     []*ir.Block                        // break targets
-	cont    []*ir.Block                        // continue targets
-	err     error
+	mod      *ir.Module
+	fn       *ir.Func
+	curRet   cc.Type
+	cur      *ir.Block
+	scopes   []map[string]lval
+	strs     map[string]string                  // decoded string literal -> data symbol name
+	ldconsts map[string]string                  // quad constant bytes -> data symbol name
+	quad     *ir.AggType                        // the canonical long-double (quad) aggregate type
+	aggs     map[cc.Type]*ir.AggType            // memoized C struct/union -> cg12 aggregate type
+	names    map[string]int                     // per-function temp-name uniquifier
+	labels   map[string]*ir.Block               // goto label -> block (per function)
+	caseBlk  map[*cc.LabeledStatement]*ir.Block // switch case/default -> block
+	nblk     int                                // block-name counter
+	nstatic  int                                // static-local mangling counter
+	brk      []*ir.Block                        // break targets
+	cont     []*ir.Block                        // continue targets
+	err      error
 }
 
 // lval is a named lvalue: its storage and its C type. A local or parameter is
@@ -65,7 +68,7 @@ func Compile(name, src string) (*ir.Module, error) {
 		return nil, fmt.Errorf("cc parse: %w", err)
 	}
 
-	g := &gen{mod: ir.NewModule(), strs: map[string]string{}, aggs: map[cc.Type]*ir.AggType{}}
+	g := &gen{mod: ir.NewModule(), strs: map[string]string{}, ldconsts: map[string]string{}, aggs: map[cc.Type]*ir.AggType{}}
 	g.push() // file scope: holds globals, visible to every function
 	for tu := ast.TranslationUnit; tu != nil; tu = tu.TranslationUnit {
 		ed := tu.ExternalDeclaration
@@ -101,8 +104,10 @@ func clsOf(t cc.Type) ir.Cls {
 	switch t.Kind() {
 	case cc.Float:
 		return ir.ClsS
-	case cc.Double, cc.LongDouble:
+	case cc.Double:
 		return ir.ClsD
+	case cc.LongDouble:
+		return ir.ClsQ // 128-bit quad (handled entirely via memory + soft-float calls)
 	case cc.Ptr, cc.Function, cc.Array, cc.Struct, cc.Union:
 		return ir.ClsP // an aggregate value is handled as a pointer to its storage
 	case cc.Long, cc.ULong, cc.LongLong, cc.ULongLong:
@@ -178,11 +183,16 @@ func (g *gen) terminated() bool { return g.cur.Jmp.Kind != ir.JmpNone }
 // address, and a by-value aggregate is likewise represented by its address (it
 // is too big for a register); everything else loads.
 func (g *gen) rvalue(addr ir.Ref, t cc.Type) ir.Ref {
-	if isArray(t) || isAggType(t) || isVaList(t) {
-		return addr // an array, aggregate, or va_list is its address (va_list decays like an array)
+	if isArray(t) || isMemValue(t) || isVaList(t) {
+		return addr // an array, aggregate, long double, or va_list is its address
 	}
 	return g.loadVal(addr, t)
 }
+
+// isMemValue reports whether a value of type t is represented by the address of
+// its storage rather than loaded into a register: a struct/union or a long
+// double (a 128-bit quad), both of which are passed and copied through memory.
+func isMemValue(t cc.Type) bool { return isAggType(t) || isLongDouble(t) }
 
 // loadVal loads a value of type t from addr, sign/zero-extending narrow types.
 func (g *gen) loadVal(addr ir.Ref, t cc.Type) ir.Ref {
@@ -229,12 +239,12 @@ func (g *gen) genFunc(fd *cc.FunctionDefinition) {
 	switch {
 	case ret.Kind() == cc.Void:
 		g.fn = g.mod.NewFuncVoid(d.Name())
-	case isAggType(ret):
-		// Returning a struct/union by value: the function yields a pointer the
-		// backend copies into the caller's buffer (or registers).
+	case isMemValue(ret):
+		// Returning a struct/union or long double by value: the function yields a
+		// pointer the backend copies into the caller's buffer (or registers).
 		g.fn = g.mod.NewFuncVoid(d.Name())
 		g.fn.HasRet = true
-		g.fn.RetAgg = g.aggOf(ret)
+		g.fn.RetAgg = g.aggTypeOf(ret)
 	default:
 		g.fn = g.mod.NewFunc(d.Name(), clsOf(ret))
 	}
@@ -256,10 +266,10 @@ func (g *gen) genFunc(fd *cc.FunctionDefinition) {
 		}
 		pt := p.Type()
 		g.names[p.Name()] = 1 // the incoming parameter value already holds this name
-		if isAggType(pt) {
-			// A by-value aggregate parameter arrives as a pointer to a slot the
-			// backend reconstructs; use that address as the lvalue directly.
-			pref := g.aggParam(p.Name(), g.aggOf(pt))
+		if isMemValue(pt) {
+			// A by-value aggregate or long double parameter arrives as a pointer to a
+			// slot the backend reconstructs; use that address as the lvalue directly.
+			pref := g.aggParam(p.Name(), g.aggTypeOf(pt))
 			g.setName(pref, p.Name())
 			g.define(p.Name(), lval{addr: pref, typ: pt})
 			continue
@@ -309,6 +319,9 @@ func align(t cc.Type) int {
 
 // zero returns a zero constant of the given type's class.
 func (g *gen) zero(t cc.Type) ir.Ref {
+	if isLongDouble(t) {
+		return g.quadZero()
+	}
 	switch cls := clsOf(t); {
 	case cls == ir.ClsS || cls == ir.ClsD:
 		return g.floatOf(0, t)
@@ -385,6 +398,10 @@ func (g *gen) globalItems(t cc.Type, init *cc.Initializer) []ir.DataItem {
 				leaves = append(leaves, leaf{off, sz, ir.DataItem{Sub: subFor(sz), Sym: sym, Off: symOff}})
 			} else if v, ok := constInt(e); ok {
 				leaves = append(leaves, leaf{off, sz, ir.DataItem{Sub: subFor(sz), Ints: []int64{v}}})
+			}
+		case isLongDouble(et):
+			if ldv, ok := e.Value().(*cc.LongDoubleValue); ok {
+				leaves = append(leaves, leaf{off, 16, ir.DataItem{Str: string(quadBytes((*big.Float)(ldv)))}})
 			}
 		case isFloat(et):
 			if v, ok := e.Value().(cc.Float64Value); ok {

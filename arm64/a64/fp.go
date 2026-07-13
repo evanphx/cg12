@@ -34,6 +34,10 @@ func Fneg(dbl bool, rd, rn Reg) uint32 { return fpDP1(ftype(dbl), 0b000010, rd, 
 // FmovReg encodes FMOV rd, rn (register-to-register float copy).
 func FmovReg(dbl bool, rd, rn Reg) uint32 { return fpDP1(ftype(dbl), 0b000000, rd, rn) }
 
+// MovVec16b encodes MOV Vd.16B, Vn.16B (a full 128-bit SIMD register copy, an
+// alias of ORR Vd.16B, Vn.16B, Vn.16B).
+func MovVec16b(rd, rn Reg) uint32 { return 0x4ea01c00 | r(rn)<<16 | r(rn)<<5 | r(rd) }
+
 // FcvtStoD encodes FCVT Dd, Sn (single -> double).
 func FcvtStoD(rd, rn Reg) uint32 { return fpDP1(0, 0b000101, rd, rn) }
 

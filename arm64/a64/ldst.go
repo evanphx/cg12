@@ -68,3 +68,8 @@ func LdrFP(dbl bool, rt, rn Reg, imm uint32) uint32 {
 	}
 	return ldStrFP(2, 1, rt, rn, imm/4)
 }
+
+// StrQ / LdrQ store/load a 128-bit Q register (size=00, opc=10/11). imm is a
+// byte offset scaled by 16.
+func StrQ(rt, rn Reg, imm uint32) uint32 { return ldStrFP(0, 0b10, rt, rn, imm/16) }
+func LdrQ(rt, rn Reg, imm uint32) uint32 { return ldStrFP(0, 0b11, rt, rn, imm/16) }

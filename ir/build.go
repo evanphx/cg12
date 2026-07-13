@@ -259,6 +259,8 @@ func (b *Block) Load(cls Cls, addr Ref) Ref {
 		op = OLoads
 	case ClsD:
 		op = OLoadd
+	case ClsQ:
+		op = OLoadq
 	}
 	return b.emit(op, cls, addr)
 }
@@ -305,6 +307,8 @@ func (b *Block) Store(val, addr Ref) {
 		op = OStores
 	case ClsD:
 		op = OStored
+	case ClsQ:
+		op = OStoreq
 	}
 	b.emit(op, cls, val, addr)
 }

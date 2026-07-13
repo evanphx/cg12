@@ -26,6 +26,10 @@ type aggClass struct {
 // classifyAgg classifies an aggregate type per the AAPCS64 rules.
 func classifyAgg(t *ir.AggType) aggClass {
 	size, _ := t.Layout()
+	if isQuadAgg(t) {
+		// A 128-bit quad (long double) travels in a single SIMD register.
+		return aggClass{kind: aggHFA, nregs: 1, elem: ir.ClsQ, size: 16}
+	}
 	if elem, n, ok := hfaOf(t); ok {
 		return aggClass{kind: aggHFA, nregs: n, elem: elem, size: size}
 	}
@@ -33,6 +37,13 @@ func classifyAgg(t *ir.AggType) aggClass {
 		return aggClass{kind: aggGP, nregs: (size + 7) / 8, size: size}
 	}
 	return aggClass{kind: aggMemory, size: size}
+}
+
+// isQuadAgg reports whether t is the aggregate that models a 128-bit quad (a
+// single SubQ field), which AAPCS64 passes in one full SIMD register.
+func isQuadAgg(t *ir.AggType) bool {
+	return !t.Union && !t.Opaque && len(t.Fields) == 1 &&
+		t.Fields[0].Type == nil && t.Fields[0].Sub == ir.SubQ && t.Fields[0].Count <= 1
 }
 
 // hfaOf reports whether t is a Homogeneous Floating-point Aggregate — every leaf
@@ -63,7 +74,7 @@ func hfaOf(t *ir.AggType) (ir.Cls, int, bool) {
 				}
 				continue
 			}
-			if f.Sub != ir.SubS && f.Sub != ir.SubD {
+			if f.Sub != ir.SubS && f.Sub != ir.SubD && f.Sub != ir.SubQ {
 				return false
 			}
 			cls := f.Sub.Cls()
@@ -267,6 +278,8 @@ func storeOpFor(cls ir.Cls) ir.Op {
 		return ir.OStores
 	case ir.ClsD:
 		return ir.OStored
+	case ir.ClsQ:
+		return ir.OStoreq
 	default:
 		return ir.OStorew
 	}
@@ -280,6 +293,8 @@ func loadOpFor(cls ir.Cls) ir.Op {
 		return ir.OLoads
 	case ir.ClsD:
 		return ir.OLoadd
+	case ir.ClsQ:
+		return ir.OLoadq
 	default:
 		return ir.OLoaduw
 	}

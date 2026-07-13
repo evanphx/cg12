@@ -134,8 +134,9 @@ func (g *gen) genInit(addr ir.Ref, t cc.Type, init *cc.Initializer) {
 			return
 		}
 	}
-	if isAggType(t) { // struct/union initialized from another aggregate value
-		g.copyAgg(addr, g.genExpr(e), int(t.Size()))
+	if isMemValue(t) { // struct/union/long-double initialized from another value
+		src := g.convert(g.genExpr(e), e.Type(), t)
+		g.copyAgg(addr, src, int(t.Size()))
 		return
 	}
 	val := g.convert(g.genExpr(e), e.Type(), t)
@@ -177,7 +178,12 @@ func (g *gen) genBraceInit(addr ir.Ref, il *cc.InitializerList) {
 				continue
 			}
 		}
-		g.storeVal(dst, g.convert(g.genExpr(e), e.Type(), et), et)
+		val := g.convert(g.genExpr(e), e.Type(), et)
+		if isMemValue(et) { // a struct/union/long-double element is a byte copy
+			g.copyAgg(dst, val, int(et.Size()))
+			continue
+		}
+		g.storeVal(dst, val, et)
 	}
 }
 

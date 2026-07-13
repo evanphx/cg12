@@ -196,6 +196,8 @@ func loadInfo(op ir.Op, cls ir.Cls) (string, int) {
 		return "ldr", 4
 	case ir.OLoadd:
 		return "ldr", 8
+	case ir.OLoadq:
+		return "ldr", 16
 	}
 	return "", 0
 }
@@ -215,6 +217,8 @@ func storeInfo(op ir.Op) (string, int) {
 		return "str", 4
 	case ir.OStored:
 		return "str", 8
+	case ir.OStoreq:
+		return "str", 16
 	}
 	return "", 0
 }

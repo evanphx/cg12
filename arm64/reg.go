@@ -93,12 +93,25 @@ func (r Reg) wName() string {
 	return "<badreg>"
 }
 
-// Name returns the assembler name of r viewed at the given width (4 or 8 bytes).
-func (r Reg) Name(size int) string {
-	if size == 4 {
-		return r.wName()
+// qName returns the 128-bit SIMD register name.
+func (r Reg) qName() string {
+	if r >= V0 && r <= vLast {
+		return fmt.Sprintf("q%d", int(r-V0))
 	}
-	return r.xName()
+	return "<badreg>"
+}
+
+// Name returns the assembler name of r viewed at the given width (4, 8, or 16
+// bytes; 16 names a 128-bit Q register).
+func (r Reg) Name(size int) string {
+	switch size {
+	case 4:
+		return r.wName()
+	case 16:
+		return r.qName()
+	default:
+		return r.xName()
+	}
 }
 
 // intAllocOrder is the integer allocation order: caller-saved temporaries first

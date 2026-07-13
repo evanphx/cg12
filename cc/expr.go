@@ -1,6 +1,8 @@
 package cc
 
 import (
+	"math/big"
+
 	"github.com/evanphx/cg12/ir"
 	"modernc.org/cc/v4"
 )
@@ -102,6 +104,9 @@ func (g *gen) genPrimary(n *cc.PrimaryExpression) ir.Ref {
 		v, _ := constInt(n)
 		return g.constOf(v, n.Type())
 	case cc.PrimaryExpressionFloat:
+		if ldv, ok := n.Value().(*cc.LongDoubleValue); ok {
+			return g.quadConst((*big.Float)(ldv))
+		}
 		if v, ok := n.Value().(cc.Float64Value); ok {
 			return g.floatOf(float64(v), n.Type())
 		}
@@ -140,8 +145,8 @@ func (g *gen) loadLval(n *cc.PrimaryExpression) ir.Ref {
 	name := n.Token.SrcStr()
 	if v, ok := g.lookup(name); ok {
 		addr := g.addrOf(v)
-		if isArray(v.typ) || isAggType(v.typ) || isVaList(v.typ) {
-			return addr // an array, aggregate, or va_list value is its address
+		if isArray(v.typ) || isMemValue(v.typ) || isVaList(v.typ) {
+			return addr // an array, aggregate, long double, or va_list value is its address
 		}
 		val := g.loadVal(addr, v.typ)
 		g.setName(val, name) // this value is a read of the C variable
@@ -272,17 +277,24 @@ func (g *gen) incDec(v ir.Ref, t cc.Type, inc bool) ir.Ref {
 func (g *gen) genUnary(n *cc.UnaryExpression) ir.Ref {
 	switch n.Case {
 	case cc.UnaryExpressionMinus:
+		if isLongDouble(n.Type()) {
+			return g.softcall("__negtf2", true, 0, qa(g.genExpr(n.CastExpression)))
+		}
 		v := g.genExpr(n.CastExpression)
 		return g.cur.Neg(clsOf(n.Type()), v)
 	case cc.UnaryExpressionPlus:
 		return g.genExpr(n.CastExpression)
 	case cc.UnaryExpressionNot: // !x  ==  x == 0
-		v := g.genExpr(n.CastExpression)
 		t := n.CastExpression.Type()
+		if isLongDouble(t) { // !x  ==  (x == 0.0L)
+			c := g.softcall("__eqtf2", false, ir.ClsW, qa(g.genExpr(n.CastExpression)), qa(g.quadZero()))
+			return g.cur.Cmp(ir.CmpEq, ir.ClsW, c, g.fn.Word(0))
+		}
+		v := g.genExpr(n.CastExpression)
 		if isFloat(t) {
 			return g.cur.Cmp(ir.CmpFeq, ir.ClsW, v, g.floatOf(0, t))
 		}
-		return g.cur.Cmp(ir.CmpEq, clsOf(t), v, g.constOf(0, t))
+		return g.cur.Cmp(ir.CmpEq, ir.ClsW, v, g.constOf(0, t))
 	case cc.UnaryExpressionCpl: // ~x
 		v := g.genExpr(n.CastExpression)
 		cls := clsOf(n.Type())
@@ -327,6 +339,12 @@ func (g *gen) arith(op string, ln, rn cc.ExpressionNode, resT cc.Type) ir.Ref {
 	// Pointer arithmetic: p +/- n scales n by the element size.
 	if pt, ok := resT.(*cc.PointerType); ok && (op == "+" || op == "-") {
 		return g.ptrArith(op, ln, rn, pt)
+	}
+	// long double arithmetic is a soft-float call on the operands' addresses.
+	if isLongDouble(resT) {
+		l := g.convert(g.genExpr(ln), ln.Type(), resT)
+		r := g.convert(g.genExpr(rn), rn.Type(), resT)
+		return g.quadArith(op, l, r)
 	}
 	cls := clsOf(resT)
 	l := g.convert(g.genExpr(ln), ln.Type(), resT)
@@ -381,16 +399,26 @@ func (g *gen) ptrArith(op string, ln, rn cc.ExpressionNode, pt *cc.PointerType) 
 
 // compare emits a relational/equality comparison producing a 0/1 int.
 func (g *gen) compare(op string, ln, rn cc.ExpressionNode) ir.Ref {
-	// Compare in the common type of the operands.
+	// Compare in the common type of the operands. long double dominates.
 	ct := ln.Type()
-	if wide(clsOf(rn.Type())) || isFloat(rn.Type()) {
+	switch {
+	case isLongDouble(ln.Type()):
+		ct = ln.Type()
+	case isLongDouble(rn.Type()):
 		ct = rn.Type()
-	}
-	if wide(clsOf(ln.Type())) {
+	case wide(clsOf(rn.Type())) || isFloat(rn.Type()):
+		ct = rn.Type()
+		if wide(clsOf(ln.Type())) {
+			ct = ln.Type()
+		}
+	case wide(clsOf(ln.Type())):
 		ct = ln.Type()
 	}
 	l := g.convert(g.genExpr(ln), ln.Type(), ct)
 	r := g.convert(g.genExpr(rn), rn.Type(), ct)
+	if isLongDouble(ct) { // soft-float comparison
+		return g.quadCompare(op, l, r)
+	}
 	pred := cmpPred(op, signed(ct), isFloat(ct))
 	// A comparison yields an int; the operand class is carried by l and r, and
 	// the predicate encodes signedness and float-ness.
@@ -472,13 +500,24 @@ func (g *gen) genCond3(n *cc.ConditionalExpression) ir.Ref {
 	thenB, elseB, endB := g.block("qt"), g.block("qf"), g.block("qend")
 	g.cur.Jnz(g.genCond(n.LogicalOrExpression), thenB, elseB)
 	g.cur = thenB
-	g.storeVal(res, g.convert(g.genExpr(n.ExpressionList), n.ExpressionList.Type(), n.Type()), n.Type())
+	g.condArm(res, n.ExpressionList, n.Type())
 	g.cur.Goto(endB)
 	g.cur = elseB
-	g.storeVal(res, g.convert(g.genExpr(n.ConditionalExpression), n.ConditionalExpression.Type(), n.Type()), n.Type())
+	g.condArm(res, n.ConditionalExpression, n.Type())
 	g.cur.Goto(endB)
 	g.cur = endB
-	return g.loadVal(res, n.Type())
+	return g.rvalue(res, n.Type())
+}
+
+// condArm stores one arm of a ?: into the result slot: a byte copy for a
+// memory value (struct/union/long double), a plain store otherwise.
+func (g *gen) condArm(res ir.Ref, e cc.ExpressionNode, t cc.Type) {
+	v := g.convert(g.genExpr(e), e.Type(), t)
+	if isMemValue(t) {
+		g.copyAgg(res, v, int(t.Size()))
+		return
+	}
+	g.storeVal(res, v, t)
 }
 
 // --- assignment ------------------------------------------------------------
@@ -497,8 +536,9 @@ func (g *gen) genAssign(n *cc.AssignmentExpression) ir.Ref {
 	}
 	addr, t := g.genAddr(n.UnaryExpression)
 	if n.Case == cc.AssignmentExpressionAssign {
-		if isAggType(t) { // struct/union assignment is a byte copy
-			g.copyAgg(addr, g.genExpr(n.AssignmentExpression), int(t.Size()))
+		if isMemValue(t) { // struct/union/long-double assignment is a byte copy
+			src := g.convert(g.genExpr(n.AssignmentExpression), n.AssignmentExpression.Type(), t)
+			g.copyAgg(addr, src, int(t.Size()))
 			return addr
 		}
 		v := g.convert(g.genExpr(n.AssignmentExpression), n.AssignmentExpression.Type(), t)
@@ -506,11 +546,34 @@ func (g *gen) genAssign(n *cc.AssignmentExpression) ir.Ref {
 		return v
 	}
 	// Compound assignment: load, combine, store.
+	if isLongDouble(t) { // r op= x  is a soft-float op on the operands' addresses
+		old := g.rvalue(addr, t)
+		rhs := g.convert(g.genExpr(n.AssignmentExpression), n.AssignmentExpression.Type(), t)
+		v := g.quadArith(compoundArithOp(n.Case), old, rhs)
+		g.copyAgg(addr, v, int(t.Size()))
+		return addr
+	}
 	old := g.loadVal(addr, t)
 	rhs := g.convert(g.genExpr(n.AssignmentExpression), n.AssignmentExpression.Type(), t)
 	v := g.combineOp(n.Case, old, rhs, t)
 	g.storeVal(addr, v, t)
 	return v
+}
+
+// compoundArithOp maps a compound-assignment case to its binary operator (only
+// the arithmetic cases that apply to floating types).
+func compoundArithOp(c cc.AssignmentExpressionCase) string {
+	switch c {
+	case cc.AssignmentExpressionAdd:
+		return "+"
+	case cc.AssignmentExpressionSub:
+		return "-"
+	case cc.AssignmentExpressionMul:
+		return "*"
+	case cc.AssignmentExpressionDiv:
+		return "/"
+	}
+	return ""
 }
 
 func (g *gen) combineOp(c cc.AssignmentExpressionCase, l, r ir.Ref, t cc.Type) ir.Ref {

@@ -29,8 +29,10 @@ func subOfType(t cc.Type) ir.SubCls {
 	switch t.Kind() {
 	case cc.Float:
 		return ir.SubS
-	case cc.Double, cc.LongDouble:
+	case cc.Double:
 		return ir.SubD
+	case cc.LongDouble:
+		return ir.SubQ
 	default:
 		return subFor(int(t.Size()))
 	}

@@ -42,6 +42,7 @@ const (
 	OStorel
 	OStores
 	OStored
+	OStoreq // 128-bit (quad) store
 
 	// Memory loads. The op fixes width and signedness; Instr.Cls is the
 	// destination class and Args[0] is the address.
@@ -54,6 +55,7 @@ const (
 	OLoadl
 	OLoads
 	OLoadd
+	OLoadq // 128-bit (quad) load
 
 	// Stack allocation with the given alignment; result is a pointer (ClsL).
 	// The byte size is Args[0] (usually a constant).
@@ -155,6 +157,7 @@ var opTable = [numOps]opInfo{
 	OStorel: {name: "storel"},
 	OStores: {name: "stores"},
 	OStored: {name: "stored"},
+	OStoreq: {name: "storeq"},
 
 	OLoadsb: {name: "loadsb", hasResult: true},
 	OLoadub: {name: "loadub", hasResult: true},
@@ -165,6 +168,7 @@ var opTable = [numOps]opInfo{
 	OLoadl:  {name: "loadl", hasResult: true},
 	OLoads:  {name: "loads", hasResult: true},
 	OLoadd:  {name: "loadd", hasResult: true},
+	OLoadq:  {name: "loadq", hasResult: true},
 
 	OAlloc4:  {name: "alloc4", hasResult: true},
 	OAlloc8:  {name: "alloc8", hasResult: true},
@@ -235,10 +239,10 @@ func (o Op) HasResult() bool { return opTable[o].hasResult }
 func (o Op) IsCommutative() bool { return opTable[o].commutative }
 
 // IsLoad reports whether the op reads memory.
-func (o Op) IsLoad() bool { return o >= OLoadsb && o <= OLoadd }
+func (o Op) IsLoad() bool { return o >= OLoadsb && o <= OLoadq }
 
 // IsStore reports whether the op writes memory.
-func (o Op) IsStore() bool { return o >= OStoreb && o <= OStored }
+func (o Op) IsStore() bool { return o >= OStoreb && o <= OStoreq }
 
 // IsAlloc reports whether the op allocates a stack slot.
 func (o Op) IsAlloc() bool { return o >= OAlloc4 && o <= OAlloc16 }

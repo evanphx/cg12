@@ -13,6 +13,18 @@ func (g *gen) convert(v ir.Ref, from, to cc.Type) ir.Ref {
 	if from == nil || to == nil {
 		return v
 	}
+	// long double conversions are soft-float calls; a quad-to-quad "conversion"
+	// is a no-op on the value's address.
+	if isLongDouble(from) || isLongDouble(to) {
+		switch {
+		case isLongDouble(from) && isLongDouble(to):
+			return v
+		case isLongDouble(to):
+			return g.toQuad(v, from)
+		default:
+			return g.fromQuad(v, to)
+		}
+	}
 	// A conversion to _Bool normalizes to 0/1 (any nonzero value becomes 1),
 	// which a plain width change would not do.
 	if to.Kind() == cc.Bool && from.Kind() != cc.Bool {
@@ -153,13 +165,17 @@ func (g *gen) genCall(n *cc.PostfixExpression) ir.Ref {
 	var aggArgs []*ir.AggType // parallel to args; non-nil where an arg is by-value aggregate
 	for i, an := range argNodes {
 		v := g.genExpr(an)
-		if isAggType(an.Type()) {
-			// A by-value aggregate argument is passed as a pointer to its storage
-			// (v is that address), tagged so the backend loads it per the ABI.
+		if isMemValue(an.Type()) {
+			// A by-value aggregate or long double argument is passed as a pointer to
+			// its storage (v is that address), tagged so the backend loads it per
+			// the ABI. A fixed long double parameter still needs the conversion below.
+			if ft != nil && i < nfixed {
+				v = g.convert(v, an.Type(), ft.Parameters()[i].Type())
+			}
 			for len(aggArgs) <= i {
 				aggArgs = append(aggArgs, nil)
 			}
-			aggArgs[i] = g.aggOf(an.Type())
+			aggArgs[i] = g.aggTypeOf(an.Type())
 		} else if ft != nil && i < nfixed {
 			v = g.convert(v, an.Type(), ft.Parameters()[i].Type())
 		} else {
@@ -168,11 +184,12 @@ func (g *gen) genCall(n *cc.PostfixExpression) ir.Ref {
 		args = append(args, v)
 	}
 
-	// A call returning a struct/union by value yields a pointer to the result.
-	if ft != nil && isAggType(ft.Result()) {
+	// A call returning a struct/union or long double by value yields a pointer to
+	// the result.
+	if ft != nil && isMemValue(ft.Result()) {
 		r := g.cur.Call(ir.ClsL, callee, args...)
 		call := g.lastInstr()
-		call.RetAgg = g.aggOf(ft.Result())
+		call.RetAgg = g.aggTypeOf(ft.Result())
 		call.AggArgs = aggArgs
 		return r
 	}

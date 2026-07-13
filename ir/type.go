@@ -18,13 +18,19 @@ const (
 	// [LowerPointers] (arm64 -> ClsL, wasm32 -> ClsW), after which no ClsP
 	// remains. Sizing/lowering must therefore never see a live ClsP.
 	ClsP
+
+	// ClsQ is a 128-bit IEEE quad ("long double" on AArch64). It has no hardware
+	// arithmetic; the front end lowers every quad operation to a libgcc soft-float
+	// call. The value occupies a full SIMD (V) register or a 16-byte memory slot.
+	ClsQ
 )
 
 // IsInt reports whether the class is integer-valued (W, L, or a pointer).
 func (c Cls) IsInt() bool { return c == ClsW || c == ClsL || c == ClsP }
 
-// IsFloat reports whether the class is a floating-point class (S or D).
-func (c Cls) IsFloat() bool { return c == ClsS || c == ClsD }
+// IsFloat reports whether the class is a floating-point class (S, D, or Q) — one
+// that lives in a SIMD/FP register.
+func (c Cls) IsFloat() bool { return c == ClsS || c == ClsD || c == ClsQ }
 
 // IsPtr reports whether the class is the abstract pointer class.
 func (c Cls) IsPtr() bool { return c == ClsP }
@@ -39,6 +45,8 @@ func (c Cls) Size() int {
 		return 4
 	case ClsL, ClsD, ClsP:
 		return 8
+	case ClsQ:
+		return 16
 	}
 	return 0
 }
@@ -56,6 +64,8 @@ func (c Cls) String() string {
 		return "d"
 	case ClsP:
 		return "p"
+	case ClsQ:
+		return "q"
 	}
 	return "?"
 }
@@ -74,6 +84,7 @@ const (
 	SubL                // long
 	SubS                // single
 	SubD                // double
+	SubQ                // quad (128-bit)
 )
 
 // Cls returns the register class a sub-class is materialised into.
@@ -83,6 +94,8 @@ func (s SubCls) Cls() Cls {
 		return ClsS
 	case SubD:
 		return ClsD
+	case SubQ:
+		return ClsQ
 	case SubL:
 		return ClsL
 	default:
@@ -101,6 +114,8 @@ func (s SubCls) Size() int {
 		return 4
 	case SubL, SubD:
 		return 8
+	case SubQ:
+		return 16
 	}
 	return 0
 }
@@ -120,6 +135,8 @@ func (s SubCls) ElemString() string {
 		return "s"
 	case SubD:
 		return "d"
+	case SubQ:
+		return "q"
 	default:
 		return "w"
 	}
@@ -144,6 +161,8 @@ func (s SubCls) String() string {
 		return "s"
 	case SubD:
 		return "d"
+	case SubQ:
+		return "q"
 	}
 	return "?"
 }
