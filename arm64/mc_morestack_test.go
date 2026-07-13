@@ -115,6 +115,117 @@ int main(void){
 	require.Equal(t, 0, code)
 }
 
+// buildGrowIR builds grow(cur_sp), the copying half of a Go-style morestack, in
+// cg12 IR: it allocates a larger stack, memcpy's the frames [cur_sp, base) onto
+// it, and precisely relocates the saved frame-pointer chain (every frame's saved
+// x29 that points back into the old stack is adjusted by the move delta). It
+// returns the delta; the caller switches to the new stack by adding it to sp/x29.
+func buildGrowIR(m *ir.Module) {
+	f := m.NewFunc("grow", ir.ClsL).Export()
+	curSP := f.Param("cur_sp", ir.ClsL)
+	fpReg := f.RegVar("fp", int(arm64.X29))
+	base0 := f.Sym("g_stack_base", 0)
+
+	entry := f.Entry()
+	fwalk := f.NewBlock("fwalk")
+	fbody := f.NewBlock("fbody")
+	fixdo := f.NewBlock("fixdo")
+	fadv := f.NewBlock("fadv")
+	fdone := f.NewBlock("fdone")
+
+	base := entry.Load(ir.ClsL, base0)      // top of the current stack
+	size := entry.Sub(ir.ClsL, base, curSP) // bytes in use
+	region := entry.Call(ir.ClsL, f.Sym("malloc", 0), entry.Add(ir.ClsL, size, f.Long(1<<16)))
+	newtop := entry.And(ir.ClsL, entry.Add(ir.ClsL, region, entry.Add(ir.ClsL, size, f.Long(1<<16))), f.Long(-16))
+	newsp := entry.Sub(ir.ClsL, newtop, size)
+	delta := entry.Sub(ir.ClsL, newsp, curSP)
+	entry.Call(ir.ClsL, f.Sym("memcpy", 0), newsp, curSP, size) // copy the frames
+	entry.Goto(fwalk)
+
+	// Walk the frame-pointer chain; child holds the frame below the one we fix.
+	child := fwalk.Phi(ir.ClsL, ir.PhiEdge{From: entry, Val: entry.Load(ir.ClsL, fpReg)})
+	fp := fwalk.Load(ir.ClsL, child) // the caller frame this child links to
+	inRange := fwalk.And(ir.ClsW, fwalk.Cmp(ir.CmpUge, ir.ClsL, fp, curSP), fwalk.Cmp(ir.CmpUlt, ir.ClsL, fp, base))
+	fwalk.Jnz(inRange, fbody, fdone)
+
+	savedFP := fbody.Load(ir.ClsL, fp) // fp's own saved frame pointer
+	savedIn := fbody.And(ir.ClsW, fbody.Cmp(ir.CmpUge, ir.ClsL, savedFP, curSP), fbody.Cmp(ir.CmpUlt, ir.ClsL, savedFP, base))
+	fbody.Jnz(savedIn, fixdo, fadv)
+
+	// Adjust this frame's saved fp, in the copy, by the move delta.
+	fixdo.Store(fixdo.Add(ir.ClsL, savedFP, delta), fixdo.Add(ir.ClsL, fp, delta))
+	fixdo.Goto(fadv)
+
+	fadv.Goto(fwalk)
+	fwalk.Phis[0].Add(fadv, fp)
+
+	// The old fp-chain is now fully walked, so poison the old stack: anything that
+	// still reads it (an unrelocated pointer) reads garbage instead of stale-but-
+	// valid data, making the relocation's correctness a hard requirement.
+	fdone.Call(ir.ClsL, f.Sym("memset", 0), curSP, f.Word(0xEE), size)
+	fdone.Store(newtop, base0)                 // publish the new stack top
+	fdone.Store(f.Word(1), f.Sym("g_grew", 0)) // record that a growth happened
+	fdone.Ret(delta)
+}
+
+// TestStackGrowthEndToEnd is the full mechanism: a mutator running on a small
+// heap stack (via the IR trampoline) grows onto a larger one and continues. mid
+// triggers the growth and switches sp/x29 to the new stack; outer, suspended one
+// frame up, resumes on the relocated copy — reading its own local proves its
+// frame was moved and its frame-pointer link relocated correctly.
+func TestStackGrowthEndToEnd(t *testing.T) {
+	m := ir.NewModule()
+	buildGrowIR(m)
+
+	// mid(): grow the stack, switch this frame onto it, return a marker.
+	mid := m.NewFunc("mid", ir.ClsW)
+	sp := mid.RegVar("sp", int(arm64.SP))
+	fp := mid.RegVar("fp", int(arm64.X29))
+	me := mid.Entry()
+	d := me.Call(ir.ClsL, mid.Sym("grow", 0), me.Load(ir.ClsL, sp)) // grow(cur_sp) -> delta
+	me.Store(me.Add(ir.ClsL, me.Load(ir.ClsL, sp), d), sp)          // sp  += delta
+	me.Store(me.Add(ir.ClsL, me.Load(ir.ClsL, fp), d), fp)          // x29 += delta (now on new stack)
+	me.Ret(mid.Word(7))
+
+	// outer(seed): keep a local live across the growth, then use it afterward.
+	outer := m.NewFunc("outer", ir.ClsW)
+	seed := outer.Param("seed", ir.ClsW)
+	oe := outer.Entry()
+	lo := oe.Add(ir.ClsW, seed, outer.Word(100)) // lives across the call to mid
+	r := oe.Call(ir.ClsW, outer.Sym("mid", 0))
+	oe.Ret(oe.Add(ir.ClsW, lo, r)) // (seed+100) + 7, if outer's frame survived the move
+
+	// run_on_stack(top, seed): set the stack top, switch to it, run outer, switch back.
+	ros := m.NewFunc("run_on_stack", ir.ClsW).Export()
+	top := ros.Param("top", ir.ClsL)
+	sd := ros.Param("seed", ir.ClsW)
+	rsp := ros.RegVar("sp", int(arm64.SP))
+	re := ros.Entry()
+	re.Store(top, ros.Sym("g_stack_base", 0)) // this stack's top
+	saved := re.Load(ir.ClsL, rsp)
+	re.Store(top, rsp) // switch to the heap stack
+	result := re.Call(ir.ClsW, ros.Sym("outer", 0), sd)
+	re.Store(saved, rsp) // switch back to the C stack
+	re.Ret(result)
+
+	_, code := buildObjAndRun(t, m, `
+#include <stdlib.h>
+#include <stdint.h>
+long g_stack_base = 0;
+int  g_grew = 0;
+extern int run_on_stack(long top, int seed);
+int main(void){
+  size_t sz = 1<<14;                       // a small initial stack
+  char *region = malloc(sz);
+  long top = ((long)(region + sz)) & ~15L;
+  int r = run_on_stack(top, 5);
+  if (r != 105 + 7) return 1;              // outer's frame survived the move
+  if (g_grew != 1)  return 2;              // ...and the stack actually grew
+  return 0;
+}`)
+	require.Equal(t, 0, code)
+}
+
 // TestStackSwitchInIR is the foundational primitive for a growable-stack runtime,
 // written entirely in cg12 IR with register variables: run_on_stack saves sp,
 // switches it to a caller-provided region, runs a function there, and switches

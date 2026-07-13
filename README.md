@@ -201,15 +201,26 @@ b    <retry>                           ; re-check from the top
 ok:  <normal prologue>
 ```
 
-Because of register variables, the runtime side of this can be written in cg12
-IR rather than assembly. The backend's tests build, in the IR, both hard parts of
-a `morestack`: a **stack switch** (`run_on_stack` saves `sp`, switches it to a
-new region, runs a function there, and switches back) and a **map-driven pointer
-fixup engine** (`gc_move` reads its frame pointer via a register variable, walks
-to the caller's frame and its return address, looks that PC up in
-`__cg12_stackmaps`, and relocates each interior stack pointer) — both linked and
-run natively. Assembling them into a guard-triggered copying growth is the
-remaining integration.
+Because of register variables, the runtime side of this is written in cg12 IR
+rather than assembly, and the backend's tests exercise the *whole* mechanism —
+compiled, linked, and run natively:
+
+- A **stack switch** (`run_on_stack` saves `sp`, switches it to a new region,
+  runs a function there, and switches back).
+- A **map-driven pointer fixup engine** (`gc_move` reads its frame pointer via a
+  register variable, walks to the caller's frame and its return address, looks
+  that PC up in `__cg12_stackmaps`, and relocates each interior stack pointer).
+- A complete **copying stack growth** (`grow`, in IR): allocate a larger stack,
+  `memcpy` the frames, precisely relocate the saved frame-pointer chain (each
+  frame's saved `x29` that still points into the old stack, adjusted by the move
+  delta), and return the delta; the growing frame then adds it to `sp`/`x29` to
+  continue on the new stack. In the end-to-end test a mutator running on a small
+  heap stack grows onto a larger one and continues correctly — and the old stack
+  is *poisoned* after copying, so the relocation's correctness is a hard
+  requirement, not an accident of stale-but-valid data.
+
+So `morestack` — including the stack switch that people usually write in
+assembly — is expressible and working in cg12's own IR.
 
 The typed stack maps are exactly what the copying runtime needs to fix up
 pointers into the stack as it moves them, and the growth call carries an
