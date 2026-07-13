@@ -44,12 +44,20 @@ int main(void){ int s=0; for(int i=1;i<=100;i++) s+=i; printf("%d\n", s); return
 		t.Fatalf("-c did not produce an object: %v", err)
 	}
 
-	// -S: produces assembly text.
+	// -S: produces assembly text that assembles, links, and runs correctly
+	// (exercising string-data escaping and symbol naming in the text emitter).
 	asm := filepath.Join(dir, "prog.s")
 	if out, err := exec.Command(bin, "-S", "-o", asm, srcPath).CombinedOutput(); err != nil {
 		t.Fatalf("-S: %v\n%s", err, out)
 	}
 	if b, err := os.ReadFile(asm); err != nil || len(b) == 0 {
 		t.Fatalf("-S did not produce assembly: %v", err)
+	}
+	asmExe := filepath.Join(dir, "prog_s")
+	if out, err := exec.Command("gcc", asm, "-o", asmExe).CombinedOutput(); err != nil {
+		t.Fatalf("assembling -S output: %v\n%s", err, out)
+	}
+	if out, err := exec.Command(asmExe).Output(); err != nil || string(out) != "5050\n" {
+		t.Fatalf("-S program output = %q (err %v), want %q", out, err, "5050\n")
 	}
 }

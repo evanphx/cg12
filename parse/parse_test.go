@@ -31,7 +31,7 @@ data $fs = { d d_1.5 d_2.5, s s_3.5 }
 `)
 	require.NoError(t, err)
 	require.Len(t, m.Data, 2)
-	assert.Equal(t, "hi\\n", m.Data[0].Items[0].Str)
+	assert.Equal(t, "hi\n", m.Data[0].Items[0].Str) // escapes are decoded to bytes
 	assert.Equal(t, []float64{1.5, 2.5}, m.Data[1].Items[0].Flts)
 	assert.Equal(t, []float64{3.5}, m.Data[1].Items[1].Flts)
 }

@@ -101,6 +101,15 @@ func (r Reg) qName() string {
 	return "<badreg>"
 }
 
+// vec16Name returns the register's .16B vector-arrangement name, used by the
+// full-width SIMD register move (mov Vd.16B, Vn.16B).
+func (r Reg) vec16Name() string {
+	if r >= V0 && r <= vLast {
+		return fmt.Sprintf("v%d.16b", int(r-V0))
+	}
+	return "<badreg>"
+}
+
 // Name returns the assembler name of r viewed at the given width (4, 8, or 16
 // bytes; 16 names a 128-bit Q register).
 func (r Reg) Name(size int) string {

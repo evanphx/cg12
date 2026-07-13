@@ -194,7 +194,7 @@ func (e *emitter) emitTailBranch(in *ir.Instr) {
 			return
 		}
 		e.frameTeardown()
-		e.line("b %s", c.Sym)
+		e.line("b %s", sanitize(c.Sym))
 	case ir.RefTemp:
 		r := e.srcReg(callee, 0, 8)
 		e.line("mov %s, %s", scratch1.xName(), r) // survive the teardown
@@ -519,9 +519,22 @@ func (e *emitter) emitCopy(in *ir.Instr, sz int) {
 	s := e.srcReg(in.Args[0], 0, sz)
 	d, done := e.dstReg(in.To, sz)
 	if d != s {
-		e.line("%s %s, %s", fltMn(in.Cls, "mov", "fmov"), d, s)
+		if in.Cls == ir.ClsQ {
+			e.line("mov %s, %s", vec16(d), vec16(s)) // full 128-bit copy
+		} else {
+			e.line("%s %s, %s", fltMn(in.Cls, "mov", "fmov"), d, s)
+		}
 	}
 	done()
+}
+
+// vec16 turns a Q register name ("q5") into its .16B vector form ("v5.16b") for
+// a full-width SIMD move.
+func vec16(qName string) string {
+	if len(qName) >= 2 && qName[0] == 'q' {
+		return "v" + qName[1:] + ".16b"
+	}
+	return qName
 }
 
 func (e *emitter) emitCmp(in *ir.Instr) {
@@ -565,7 +578,7 @@ func (e *emitter) emitCall(in *ir.Instr) {
 			e.fail("arm64: call target must be a symbol or register")
 			return
 		}
-		e.line("bl %s", c.Sym)
+		e.line("bl %s", sanitize(c.Sym))
 	case ir.RefTemp:
 		r := e.srcReg(callee, 0, 8)
 		e.line("blr %s", r)
@@ -693,8 +706,9 @@ func (e *emitter) isConstSym(ref ir.Ref) bool {
 
 // materializeSym loads a symbol address (plus offset) into r via adrp/add.
 func (e *emitter) materializeSym(r Reg, c ir.Const) {
-	e.line("adrp %s, %s", r.xName(), c.Sym)
-	e.line("add %s, %s, :lo12:%s", r.xName(), r.xName(), c.Sym)
+	sym := sanitize(c.Sym) // match the sanitized symbol emitted by emitData
+	e.line("adrp %s, %s", r.xName(), sym)
+	e.line("add %s, %s, :lo12:%s", r.xName(), r.xName(), sym)
 	if c.Int != 0 {
 		e.line("add %s, %s, #%d", r.xName(), r.xName(), c.Int)
 	}

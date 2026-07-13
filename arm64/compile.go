@@ -66,9 +66,9 @@ func emitData(sb *strings.Builder, d *ir.Data) {
 		case it.Zero > 0:
 			fmt.Fprintf(sb, "\t.zero %d\n", it.Zero)
 		case it.Str != "":
-			fmt.Fprintf(sb, "\t.ascii \"%s\"\n", it.Str)
+			fmt.Fprintf(sb, "\t.ascii \"%s\"\n", asciiEscape(it.Str))
 		case it.Sym != "":
-			fmt.Fprintf(sb, "\t.quad %s+%d\n", it.Sym, it.Off)
+			fmt.Fprintf(sb, "\t.quad %s+%d\n", sanitize(it.Sym), it.Off)
 		default:
 			directive := dataDirective(it.Sub)
 			for _, v := range it.Ints {
@@ -76,6 +76,36 @@ func emitData(sb *strings.Builder, d *ir.Data) {
 			}
 		}
 	}
+}
+
+// asciiEscape renders raw bytes as the body of a GNU-as .ascii string: printable
+// ASCII passes through, the special characters are C-escaped, and every other
+// byte becomes a fixed three-digit octal escape (so binary data — a NUL
+// terminator, a quad constant's bytes — survives assembly intact).
+func asciiEscape(s string) string {
+	var b strings.Builder
+	for i := 0; i < len(s); i++ {
+		c := s[i]
+		switch c {
+		case '"':
+			b.WriteString(`\"`)
+		case '\\':
+			b.WriteString(`\\`)
+		case '\n':
+			b.WriteString(`\n`)
+		case '\t':
+			b.WriteString(`\t`)
+		case '\r':
+			b.WriteString(`\r`)
+		default:
+			if c >= 0x20 && c < 0x7f {
+				b.WriteByte(c)
+			} else {
+				fmt.Fprintf(&b, `\%03o`, c)
+			}
+		}
+	}
+	return b.String()
 }
 
 func dataDirective(s ir.SubCls) string {

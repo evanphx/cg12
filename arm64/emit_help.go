@@ -104,6 +104,8 @@ func (e *emitter) emitMoveLoc(dst, src loc) {
 			}
 		case src.mem:
 			e.line("ldr %s, [x29, #%d]", dst.reg.Name(size), e.spillBase+src.slot)
+		case size == 16:
+			e.line("mov %s, %s", dst.reg.vec16Name(), src.reg.vec16Name()) // full 128-bit copy
 		case dst.reg.IsFloat():
 			e.line("fmov %s, %s", dst.reg.Name(size), src.reg.Name(size))
 		default:

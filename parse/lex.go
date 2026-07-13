@@ -150,9 +150,35 @@ func (l *lexer) str() (token, error) {
 			return token{kind: tStr, s: sb.String(), line: line}, nil
 		}
 		if c == '\\' && l.pos+1 < len(l.src) {
-			sb.WriteByte(c)
-			sb.WriteByte(l.src[l.pos+1])
-			l.pos += 2
+			// Decode the escape into the byte it denotes, so a string datum holds
+			// the actual bytes to emit (the text and object emitters both re-encode
+			// as needed). This matches how the assembler would decode a raw string.
+			l.pos++
+			e := l.src[l.pos]
+			switch e {
+			case 'n':
+				sb.WriteByte('\n')
+			case 't':
+				sb.WriteByte('\t')
+			case 'r':
+				sb.WriteByte('\r')
+			case 'b':
+				sb.WriteByte('\b')
+			case 'f':
+				sb.WriteByte('\f')
+			case '"', '\\':
+				sb.WriteByte(e)
+			case '0', '1', '2', '3', '4', '5', '6', '7':
+				val := int(e - '0')
+				for n := 1; n < 3 && l.pos+1 < len(l.src) && l.src[l.pos+1] >= '0' && l.src[l.pos+1] <= '7'; n++ {
+					l.pos++
+					val = val*8 + int(l.src[l.pos]-'0')
+				}
+				sb.WriteByte(byte(val))
+			default:
+				sb.WriteByte(e) // unknown escape: keep the char, drop the backslash
+			}
+			l.pos++
 			continue
 		}
 		if c == '\n' {
