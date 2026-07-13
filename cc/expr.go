@@ -41,8 +41,14 @@ func (g *gen) genExpr(e cc.ExpressionNode) ir.Ref {
 	case *cc.AssignmentExpression:
 		return g.genAssign(n)
 	case *cc.ExpressionList:
-		g.genExpr(n.ExpressionList) // comma: evaluate the left for effect
-		return g.genExpr(n.AssignmentExpression)
+		// A comma expression, stored head-first: AssignmentExpression is the
+		// earlier operand (evaluated for effect), ExpressionList the rest, whose
+		// value is the value of the whole expression.
+		if n.ExpressionList == nil {
+			return g.genExpr(n.AssignmentExpression)
+		}
+		g.genExpr(n.AssignmentExpression)
+		return g.genExpr(n.ExpressionList)
 	}
 	return g.fail("cc: unsupported expression %T", e)
 }
@@ -107,6 +113,15 @@ func (g *gen) genPrimary(n *cc.PrimaryExpression) ir.Ref {
 		return g.loadLval(n)
 	case cc.PrimaryExpressionExpr:
 		return g.genExpr(n.ExpressionList)
+	case cc.PrimaryExpressionGeneric:
+		// _Generic: the type checker already picked the matching association.
+		if a := n.GenericSelection.Associated(); a != nil {
+			return g.genExpr(a.AssignmentExpression)
+		}
+		return g.fail("cc: _Generic with no matching association")
+	case cc.PrimaryExpressionStmt:
+		// A GNU statement expression ({ ... }): its value is the last statement.
+		return g.genStmtExpr(n.CompoundStatement)
 	}
 	return g.fail("cc: unsupported primary expression case %v", n.Case)
 }

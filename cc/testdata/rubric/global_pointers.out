@@ -1,0 +1,6 @@
+array: 10 30
+struct: 24 name=box
+string: hello
+name[0]=alpha
+name[1]=beta
+name[2]=gamma

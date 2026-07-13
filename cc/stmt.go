@@ -30,6 +30,33 @@ func labeledItem(bi *cc.BlockItem) bool {
 		bi.Statement.Case == cc.StatementLabeled
 }
 
+// genStmtExpr evaluates a GNU statement expression ({ ... }): its statements run
+// in a fresh scope, and the value of the whole expression is the value of the
+// final expression statement.
+func (g *gen) genStmtExpr(cs *cc.CompoundStatement) ir.Ref {
+	if cs == nil {
+		return ir.R
+	}
+	g.push()
+	defer g.pop()
+	result := ir.R
+	for l := cs.BlockItemList; l != nil; l = l.BlockItemList {
+		bi := l.BlockItem
+		if l.BlockItemList == nil && bi.Case == cc.BlockItemStmt &&
+			bi.Statement != nil && bi.Statement.Case == cc.StatementExpr {
+			if es := bi.Statement.ExpressionStatement; es != nil && es.ExpressionList != nil {
+				result = g.genExpr(es.ExpressionList) // the trailing expression is the value
+				break
+			}
+		}
+		g.genBlockItem(bi)
+		if g.terminated() {
+			break
+		}
+	}
+	return result
+}
+
 func (g *gen) genBlockItem(bi *cc.BlockItem) {
 	switch bi.Case {
 	case cc.BlockItemDecl:

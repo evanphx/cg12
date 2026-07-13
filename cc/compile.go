@@ -381,6 +381,8 @@ func (g *gen) globalItems(t cc.Type, init *cc.Initializer) []ir.DataItem {
 		case isPointer(et):
 			if s, ok := e.Value().(cc.StringValue); ok {
 				leaves = append(leaves, leaf{off, sz, ir.DataItem{Sub: subFor(sz), Sym: g.internStr(string(s))}})
+			} else if sym, symOff, ok := g.constAddr(e); ok {
+				leaves = append(leaves, leaf{off, sz, ir.DataItem{Sub: subFor(sz), Sym: sym, Off: symOff}})
 			} else if v, ok := constInt(e); ok {
 				leaves = append(leaves, leaf{off, sz, ir.DataItem{Sub: subFor(sz), Ints: []int64{v}}})
 			}
@@ -453,6 +455,56 @@ func (g *gen) globalItems(t cc.Type, init *cc.Initializer) []ir.DataItem {
 
 func isArray(t cc.Type) bool   { _, ok := t.(*cc.ArrayType); return ok }
 func isPointer(t cc.Type) bool { _, ok := t.(*cc.PointerType); return ok }
+
+// constAddr evaluates a constant address expression — the address of a global
+// object, optionally displaced by array indexing or member selection — to a
+// symbol name and byte offset, for a global pointer initializer that a compiler
+// resolves to a relocation rather than code.
+func (g *gen) constAddr(e cc.ExpressionNode) (string, int64, bool) {
+	switch n := e.(type) {
+	case *cc.PrimaryExpression:
+		switch n.Case {
+		case cc.PrimaryExpressionIdent: // a global object (an array here decays to its address)
+			name := n.Token.SrcStr()
+			if v, ok := g.lookup(name); ok && v.sym != "" {
+				return v.sym, 0, true
+			}
+		case cc.PrimaryExpressionExpr:
+			return g.constAddr(n.ExpressionList)
+		}
+	case *cc.CastExpression:
+		return g.constAddr(n.CastExpression)
+	case *cc.UnaryExpression:
+		if n.Case == cc.UnaryExpressionAddrof { // &lvalue
+			return g.constAddr(n.CastExpression)
+		}
+	case *cc.PostfixExpression:
+		switch n.Case {
+		case cc.PostfixExpressionIndex: // base[i]
+			if sym, off, ok := g.constAddr(n.PostfixExpression); ok {
+				if idx, ok := constInt(n.ExpressionList); ok {
+					return sym, off + idx*elemSize(n.PostfixExpression.Type()), true
+				}
+			}
+		case cc.PostfixExpressionSelect: // base.field
+			if sym, off, ok := g.constAddr(n.PostfixExpression); ok {
+				return sym, off + n.Field().Offset(), true
+			}
+		}
+	}
+	return "", 0, false
+}
+
+// elemSize returns the element size of an array or pointer type.
+func elemSize(t cc.Type) int64 {
+	switch x := t.(type) {
+	case *cc.ArrayType:
+		return int64(x.Elem().Size())
+	case *cc.PointerType:
+		return int64(x.Elem().Size())
+	}
+	return 1
+}
 
 func subFor(size int) ir.SubCls {
 	switch size {
