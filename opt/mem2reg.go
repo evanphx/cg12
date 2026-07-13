@@ -1,9 +1,24 @@
 package opt
 
 import (
+	"fmt"
+	"strings"
+
 	"github.com/evanphx/cg12/analysis"
 	"github.com/evanphx/cg12/ir"
 )
+
+// varBase returns the source-variable base of an alloc temp's name, stripping a
+// trailing ".addr"/".ptr" suffix that front ends use for a variable's storage
+// slot (so a phi for the variable's value reads as the variable, not its slot).
+func varBase(name string) string {
+	for _, suf := range []string{".addr", ".ptr"} {
+		if strings.HasSuffix(name, suf) {
+			return name[:len(name)-len(suf)]
+		}
+	}
+	return name
+}
 
 // Mem2Reg promotes stack slots that never escape and are accessed only through
 // full-width loads and stores into SSA temporaries, inserting phi nodes at the
@@ -19,6 +34,39 @@ func Mem2Reg(f *ir.Func) bool {
 	dom := cfg.Dominators()
 	df := cfg.DominanceFrontier(dom)
 
+	// A phi merging a promoted variable inherits that variable's name, so the SSA
+	// reads like the source. uniq keeps names distinct within the function. The
+	// alloc and load temps mem2reg is about to remove are excluded, so a variable's
+	// name is free for its phi/value rather than pushed to a ".N" suffix.
+	removed := map[uint32]bool{}
+	for _, b := range f.Blocks {
+		for k := range b.Instrs {
+			in := &b.Instrs[k]
+			if in.Op.IsAlloc() && in.To.Kind == ir.RefTemp && isVarAlloc(in.To.ID, varOf) {
+				removed[in.To.ID] = true
+			} else if loadVar(in, varOf) >= 0 {
+				removed[in.To.ID] = true
+			}
+		}
+	}
+	used := map[string]bool{}
+	for _, t := range f.Temps {
+		if !removed[uint32(t.ID)] {
+			used[t.Name] = true
+		}
+	}
+	uniq := func(base string) string {
+		if base == "" {
+			return ""
+		}
+		name := base
+		for i := 1; used[name]; i++ {
+			name = fmt.Sprintf("%s.%d", base, i)
+		}
+		used[name] = true
+		return name
+	}
+
 	// Insert phi placeholders at the iterated dominance frontier of each
 	// variable's defining blocks.
 	phiOf := map[*ir.Block]map[int]*ir.Phi{}
@@ -33,12 +81,25 @@ func Mem2Reg(f *ir.Func) bool {
 			}
 		}
 		for b := range analysis.IteratedFrontier(df, defs) {
-			p := &ir.Phi{Cls: v.cls, To: f.NewTemp("", v.cls)}
+			p := &ir.Phi{Cls: v.cls, To: f.NewTemp(uniq(varBase(v.name)), v.cls)}
 			b.Phis = append(b.Phis, p)
 			if phiOf[b] == nil {
 				phiOf[b] = map[int]*ir.Phi{}
 			}
 			phiOf[b][vi] = p
+		}
+	}
+
+	// nameVal names an anonymous (compiler-generated) value after the variable it
+	// is stored into, so a single-assignment local like `int sum = a+b` reads as
+	// %sum rather than a generic temp. Values that already carry a name (params,
+	// phis, other variables' reads) are left alone.
+	nameVal := func(v ir.Ref, vi int) {
+		if v.Kind != ir.RefTemp {
+			return
+		}
+		if t := f.Temps[v.ID]; isDefaultName(t.Name) {
+			t.Name = uniq(varBase(vars[vi].name))
 		}
 	}
 
@@ -50,7 +111,7 @@ func Mem2Reg(f *ir.Func) bool {
 	for vi, v := range vars {
 		init[vi] = zeroConst(f, v.cls)
 	}
-	renameBlock(f, cfg.RPO[0], init, vars, varOf, phiOf, children, sub)
+	renameBlock(f, cfg.RPO[0], init, vars, varOf, phiOf, children, sub, nameVal)
 
 	applySubst(f, sub)
 	return true
@@ -58,7 +119,8 @@ func Mem2Reg(f *ir.Func) bool {
 
 // promotable describes one alloc-backed variable being promoted.
 type promotable struct {
-	cls ir.Cls
+	cls  ir.Cls
+	name string // the alloc temp's name, so phis can inherit it (readability)
 }
 
 // findPromotable identifies alloc slots that can be promoted and returns them
@@ -142,7 +204,7 @@ func findPromotable(f *ir.Func) ([]promotable, map[uint32]int) {
 				continue
 			}
 			varOf[id] = len(vars)
-			vars = append(vars, promotable{cls: class[id]})
+			vars = append(vars, promotable{cls: class[id], name: f.Temps[id].Name})
 		}
 	}
 	return vars, varOf
@@ -157,6 +219,7 @@ func renameBlock(
 	phiOf map[*ir.Block]map[int]*ir.Phi,
 	children map[*ir.Block][]*ir.Block,
 	sub subst,
+	nameVal func(ir.Ref, int),
 ) {
 	// Phis defined here become the reaching definition for their variable.
 	for vi, p := range phiOf[b] {
@@ -169,7 +232,9 @@ func renameBlock(
 		case in.Op.IsAlloc() && in.To.Kind == ir.RefTemp && isVarAlloc(in.To.ID, varOf):
 			// drop the allocation
 		case in.Op.IsStore() && addrVar(&in, varOf) >= 0:
-			curDef[addrVar(&in, varOf)] = in.Args[0]
+			vi := addrVar(&in, varOf)
+			nameVal(in.Args[0], vi)
+			curDef[vi] = in.Args[0]
 		case in.Op.IsLoad() && loadVar(&in, varOf) >= 0:
 			sub[in.To.ID] = curDef[loadVar(&in, varOf)]
 		default:
@@ -193,8 +258,22 @@ func renameBlock(
 
 	for _, c := range children[b] {
 		child := copyDefs(curDef)
-		renameBlock(f, c, child, vars, varOf, phiOf, children, sub)
+		renameBlock(f, c, child, vars, varOf, phiOf, children, sub, nameVal)
 	}
+}
+
+// isDefaultName reports whether s is a builder-generated temp name (t followed by
+// digits), i.e. an anonymous value with no source-level name yet.
+func isDefaultName(s string) bool {
+	if len(s) < 2 || s[0] != 't' {
+		return false
+	}
+	for _, c := range s[1:] {
+		if c < '0' || c > '9' {
+			return false
+		}
+	}
+	return true
 }
 
 // domChildren builds the dominator-tree children lists.

@@ -59,6 +59,29 @@ func foldInstr(f *ir.Func, in *ir.Instr) (ir.Ref, bool) {
 			return f.ConstInt(in.Cls, truncCls(in.Cls, -c)), true
 		}
 
+	case ir.OExtsw, ir.OExtuw, ir.OExtsb, ir.OExtub, ir.OExtsh, ir.OExtuh:
+		// Fold an integer width extension of a constant; this collapses the
+		// constant-offset address arithmetic (extsw i; mul _,sz; add base,_) that a
+		// front end emits for a[i], so alias analysis can resolve the elements.
+		if c, ok := constInt(f, in.Args[0]); ok {
+			var v int64
+			switch in.Op {
+			case ir.OExtsw:
+				v = int64(int32(c))
+			case ir.OExtuw:
+				v = int64(uint32(c))
+			case ir.OExtsb:
+				v = int64(int8(c))
+			case ir.OExtub:
+				v = int64(uint8(c))
+			case ir.OExtsh:
+				v = int64(int16(c))
+			case ir.OExtuh:
+				v = int64(uint16(c))
+			}
+			return f.ConstInt(in.Cls, v), true
+		}
+
 	case ir.OCmp:
 		a, b := in.Args[0], in.Args[1]
 		if a == b && !in.Cmp.IsFloat() {

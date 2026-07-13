@@ -106,6 +106,53 @@ func SimplifyCFG(f *ir.Func) bool {
 		applySubst(f, s)
 	}
 
+	// 6. Coalesce a block into its sole predecessor when that predecessor jumps to
+	// it unconditionally: the two are straight-line, so fuse them (appending the
+	// successor's body and taking its terminator) and redirect any phis that named
+	// the absorbed block to name the survivor.
+	analysis.BuildCFG(f)
+	for {
+		fused := false
+		for _, a := range f.Blocks {
+			if a.Jmp.Kind != ir.JmpJmp {
+				continue
+			}
+			b := a.Jmp.To
+			if b == nil || b == a || len(b.Preds) != 1 || len(b.Phis) != 0 {
+				continue
+			}
+			a.Instrs = append(a.Instrs, b.Instrs...)
+			a.Jmp = b.Jmp
+			for _, succ := range a.Succs() {
+				for _, p := range succ.Phis {
+					for k := range p.Blocks {
+						if p.Blocks[k] == b {
+							p.Blocks[k] = a
+						}
+					}
+				}
+			}
+			removeBlock(f, b)
+			changed, fused = true, true
+			break
+		}
+		if !fused {
+			break
+		}
+		analysis.BuildCFG(f)
+	}
+
 	analysis.BuildCFG(f) // refresh predecessor lists
 	return changed
+}
+
+// removeBlock drops b from the function's block list.
+func removeBlock(f *ir.Func, b *ir.Block) {
+	kept := f.Blocks[:0]
+	for _, x := range f.Blocks {
+		if x != b {
+			kept = append(kept, x)
+		}
+	}
+	f.Blocks = kept
 }

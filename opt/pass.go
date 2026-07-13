@@ -101,6 +101,7 @@ func DefaultPipeline() []Pass {
 		FuncPass("fold", Fold),
 		FuncPass("copy", Copy),
 		FuncPass("loadelim", LoadElim),
+		FuncPass("deadalloc", DeadAlloc),
 		FuncPass("gvn", GVN),
 		FuncPass("simplifycfg", SimplifyCFG),
 		FuncPass("dce", DCE),

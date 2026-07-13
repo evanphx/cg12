@@ -18,10 +18,11 @@ func TestSimplifyConstantBranch(t *testing.T) {
 	b.Ret(f.Word(20))
 
 	assert.True(t, SimplifyCFG(f))
-	assert.Equal(t, ir.JmpJmp, start.Jmp.Kind)
-	assert.Same(t, a, start.Jmp.To)
-	// b became unreachable and was removed.
-	assert.Len(t, f.Blocks, 2)
+	// jnz(1) folds to jmp a; b became unreachable and was removed; a (now start's
+	// sole successor with one predecessor) coalesced into start.
+	assert.Len(t, f.Blocks, 1)
+	assert.Same(t, start, f.Blocks[0])
+	assert.Equal(t, ir.JmpRet, start.Jmp.Kind)
 	for _, blk := range f.Blocks {
 		assert.NotSame(t, b, blk)
 	}
@@ -37,7 +38,10 @@ func TestSimplifyConstantBranchFalse(t *testing.T) {
 	b.Ret(f.Word(20))
 
 	SimplifyCFG(f)
-	assert.Same(t, b, start.Jmp.To)
+	// The branch takes b; a is removed and b coalesces into start.
+	assert.Len(t, f.Blocks, 1)
+	assert.Same(t, start, f.Blocks[0])
+	assert.Equal(t, ir.JmpRet, start.Jmp.Kind)
 }
 
 func TestSimplifyDegenerateBranch(t *testing.T) {
@@ -49,8 +53,11 @@ func TestSimplifyDegenerateBranch(t *testing.T) {
 	only.Ret(f.Word(1))
 
 	assert.True(t, SimplifyCFG(f))
-	assert.Equal(t, ir.JmpJmp, start.Jmp.Kind)
-	assert.Same(t, only, start.Jmp.To)
+	// The degenerate branch folds to an unconditional jump, then `only` — its sole
+	// successor, with a single predecessor — is coalesced into start.
+	assert.Len(t, f.Blocks, 1)
+	assert.Same(t, start, f.Blocks[0])
+	assert.Equal(t, ir.JmpRet, start.Jmp.Kind)
 }
 
 func TestSimplifyPhiRepairAfterDeadBranch(t *testing.T) {
