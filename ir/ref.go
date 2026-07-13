@@ -11,6 +11,7 @@ const (
 	RefSlot                   // a stack slot; ID is a per-function slot number
 	RefCallArg                // ABI descriptor emitted between isel and regalloc
 	RefMem                    // an addressing mode; ID indexes Func.Mems (target lowering)
+	RefReg                    // a physical machine register; ID is the target register number
 )
 
 // Ref is a compact, comparable operand reference. It is deliberately a small

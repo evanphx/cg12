@@ -115,6 +115,29 @@ argument values. Positions round-trip through the textual IL as `dbgfile`/
 	ret %t2
 ```
 
+## Architecture-specific IR: register variables
+
+Low-level runtime code — a stack switch, a trampoline, the copying half of a
+growable-stack `morestack` — needs to touch machine registers directly. A
+**register variable** binds an IR variable to a specific physical register:
+reading it (a `Load`) reads that register, writing it (a `Store`) writes it.
+
+```go
+sp := f.RegVar("sp", int(arm64.SP))
+cur := e.Load(ir.ClsL, sp)                 // read the stack pointer
+e.Store(e.Sub(ir.ClsL, cur, f.Long(64)), sp) // move it down 64 bytes
+```
+
+This makes the IR deliberately architecture-specific (the register number is the
+backend's), and it is the primitive that lets the *entire* fixup-and-switch logic
+of a growable stack be written in cg12 IR rather than hand assembly: allocate,
+copy, walk the frames, adjust pointers via the stack maps, then read/write `sp`
+to switch stacks. The non-allocatable registers (`sp`, `fp`, `lr`, the platform
+register) are always safe to bind; binding a register the allocator uses is the
+author's responsibility. Register reads and writes are volatile — the optimizer
+never removes, reorders, or CSEs them. In the textual IL they are `getreg`/
+`setreg`.
+
 ## Linking
 
 The `link` package combines relocatable objects into one, from either front-end:
@@ -179,7 +202,19 @@ ok:  <normal prologue>
 ```
 
 The typed stack maps are exactly what the copying runtime needs to fix up
-pointers into the stack as it moves them.
+pointers into the stack as it moves them, and the growth call carries an
+argument pointer-map (the growing function's managed-reference parameters,
+described in the guard's save area) so pointer arguments can be fixed up before
+the frame exists.
+
+The backend's tests include a proof-of-concept collector: a cg12 function holds
+an interior pointer to one of its own stack slots (`f.MarkGCRefType(alloca,
+stackType)`) across a call; a C "stack mover", invoked at that safepoint, walks
+the frame-pointer chain — past intermediate frames — looks up each frame's typed
+stack map, relocates what an interior pointer points at, and rewrites the spilled
+pointer. The mutator then transparently uses the updated pointer, while heap
+roots are left untouched. It demonstrates that the emitted metadata is sufficient
+to find and update every spilled pointer a moving stack must adjust.
 
 To keep the consuming side simple, a managed reference that is live across a
 safepoint is spilled to a stack slot for its lifetime, so every root is reported

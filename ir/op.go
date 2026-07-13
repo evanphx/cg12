@@ -99,6 +99,14 @@ const (
 	OVaStart
 	OVaArg
 
+	// Register variables: read and write a specific machine register directly.
+	// Reading (OGetReg) yields the register's current value; writing (OSetReg)
+	// sets it. The register operand is a RefReg naming the target register number,
+	// making these ops architecture-specific — for low-level runtime code that
+	// must touch the stack pointer, frame pointer, or other machine registers.
+	OGetReg // result = register Args[0] (a RefReg)
+	OSetReg // register Args[1] (a RefReg) = Args[0]
+
 	// OSafepoint marks a point where the garbage collector may stop the thread:
 	// the backend emits a stack map describing the managed references live here.
 	// Calls are safepoints implicitly; this marks the ones that are not calls —
@@ -189,6 +197,9 @@ var opTable = [numOps]opInfo{
 	OVaArg:   {name: "vaarg", hasResult: true},
 
 	OSafepoint: {name: "safept"},
+
+	OGetReg: {name: "getreg", hasResult: true},
+	OSetReg: {name: "setreg"},
 }
 
 // Info returns the static metadata for an opcode.

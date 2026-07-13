@@ -603,6 +603,20 @@ func (m *mc) spillStore(r a64.Reg, float bool, off, size int) {
 	}
 }
 
+// emitReg emits `mov dst, src` for a register-variable read or write. The
+// stack pointer (register 31) cannot use the orr-based mov encoding, so an
+// add-#0 is used when it is involved; floats use fmov.
+func (m *mc) emitReg(cls ir.Cls, dst, src a64.Reg) {
+	switch {
+	case cls.IsFloat():
+		m.emit(a64.FmovReg(cls.Size() == 8, dst, src))
+	case dst == 31 || src == 31:
+		m.emit(a64.AddImm(true, dst, src, 0)) // works with sp, unlike mov/orr
+	default:
+		m.emit(a64.MovReg(cls.Size() == 8, dst, src))
+	}
+}
+
 func (m *mc) movImm(r a64.Reg, val int64, w64 bool) {
 	u := uint64(val)
 	chunks := 4
@@ -980,6 +994,7 @@ func (m *mc) recordSafepoint(in *ir.Instr) {
 const (
 	rootReg   uint8 = 0 // val is a physical register number
 	rootFrame uint8 = 1 // val is a byte offset from the frame pointer (x29)
+	rootSP    uint8 = 2 // val is a byte offset from the stack pointer at the safepoint
 )
 
 // tempInterval returns a temporary's live range, or nil if it has none.
@@ -1125,6 +1140,15 @@ func (m *mc) instr(in *ir.Instr) {
 		} else {
 			m.emitCall(in)
 		}
+	case ir.OGetReg:
+		phys := mreg(Reg(in.Args[0].ID))
+		d, done := m.dst(in.To, in.Cls.Size())
+		m.emitReg(in.Cls, d, phys)
+		done()
+	case ir.OSetReg:
+		phys := mreg(Reg(in.Args[1].ID))
+		v := m.src(in.Args[0], 0, in.Cls.Size())
+		m.emitReg(in.Cls, phys, v)
 	case ir.OSafepoint:
 		// Let the GC strategy emit code here (e.g. a poll); the stack map is then
 		// recorded at the resulting PC — the point a collection would resume at.

@@ -130,6 +130,51 @@ func (c *PrologueContext) PushCallerState() int {
 	return size
 }
 
+// RecordArgRoots records a growth safepoint at the current PC (the morestack
+// return address) whose roots are the managed-reference parameters, located in
+// the guard's save area relative to the stack pointer. It must follow
+// PushCallerState (whose layout it mirrors) and lets a copying runtime fix up a
+// growing function's pointer arguments — which are saved, but not yet in a
+// frame, at the growth point.
+func (c *PrologueContext) RecordArgRoots() {
+	gpOff := map[a64.Reg]int{}
+	off := 16 // after saved x29/x30
+	for _, r := range c.liveArgGP() {
+		gpOff[r] = off
+		off += 8
+	}
+	fpOff := map[a64.Reg]int{}
+	for _, r := range c.liveArgFP() {
+		fpOff[r] = off
+		off += 8
+	}
+
+	// The entry block's OPar instructions are the actual parameter-to-register
+	// assignment; use them to place each managed-reference parameter.
+	var roots []rootLoc
+	for i := range c.mc.f.Start.Instrs {
+		in := &c.mc.f.Start.Instrs[i]
+		if in.Op != ir.OPar || in.To.Kind != ir.RefTemp || len(in.Args) == 0 {
+			continue
+		}
+		t := c.mc.f.Temps[in.To.ID]
+		if !t.GCRef || in.Args[0].Kind != ir.RefTemp {
+			continue
+		}
+		reg := Reg(c.mc.f.Temps[in.Args[0].ID].Reg)
+		o, ok := gpOff[mreg(reg)]
+		if reg >= V0 {
+			o, ok = fpOff[mreg(reg)]
+		}
+		if ok {
+			roots = append(roots, rootLoc{kind: rootSP, val: int32(o), typ: t.GCType})
+		}
+	}
+	if len(roots) > 0 {
+		c.mc.safepoints = append(c.mc.safepoints, safepoint{pc: uint64(c.mc.prog.Len() * 4), roots: roots})
+	}
+}
+
 // PopCallerState restores what PushCallerState saved and releases the space.
 func (c *PrologueContext) PopCallerState(size int) {
 	gp, fp := c.liveArgGP(), c.liveArgFP()
@@ -182,6 +227,7 @@ func (s StackGrowth) EmitPrologue(cx *PrologueContext) {
 	size := cx.PushCallerState()
 	cx.MovImm(a64.Reg(0), int64(cx.FrameSize())) // frame size -> x0 (runtime arg)
 	cx.Call(s.MorestackSym)
+	cx.RecordArgRoots() // describe the saved pointer arguments to the runtime
 	cx.PopCallerState(size)
 	cx.B(cx.RetryLabel())
 

@@ -234,7 +234,21 @@ func (b *Block) Sltof(cls Cls, x Ref) Ref { return b.emit(OSltof, cls, x) } // s
 func (b *Block) Ultof(cls Cls, x Ref) Ref { return b.emit(OUltof, cls, x) } // unsigned int -> float
 
 // Load reads a full-width value of class cls from address addr.
+// RegVar declares a variable bound to a specific machine register: a Load of it
+// reads that register and a Store to it writes it. reg is the backend's physical
+// register number, so a RegVar makes the IR architecture-specific — it is for
+// low-level runtime code (a stack switch, a trampoline) that must touch the
+// stack pointer, frame pointer, or other registers directly. Binding a register
+// the allocator uses is the author's responsibility; the non-allocatable
+// registers (sp, fp, lr, the platform register) are always safe.
+func (f *Func) RegVar(name string, reg int) Ref {
+	return Ref{Kind: RefReg, ID: uint32(reg)}
+}
+
 func (b *Block) Load(cls Cls, addr Ref) Ref {
+	if addr.Kind == RefReg {
+		return b.emit(OGetReg, cls, addr) // read a machine register
+	}
 	var op Op
 	switch cls {
 	case ClsW:
@@ -276,6 +290,10 @@ func (b *Block) LoadSub(cls Cls, sub SubCls, addr Ref) Ref {
 
 // Store writes val (its class fixes the width) to address addr.
 func (b *Block) Store(val, addr Ref) {
+	if addr.Kind == RefReg {
+		b.emit(OSetReg, b.fn.ClassOf(val), val, addr) // write a machine register
+		return
+	}
 	cls := b.fn.ClassOf(val)
 	var op Op
 	switch cls {

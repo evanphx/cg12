@@ -278,6 +278,8 @@ func (f *Func) refString(r Ref) string {
 		return fmt.Sprintf(":t%d", r.ID)
 	case RefSlot:
 		return fmt.Sprintf("%%.slot%d", r.ID)
+	case RefReg:
+		return fmt.Sprintf("reg%d", r.ID)
 	}
 	return fmt.Sprintf("<ref %d:%d>", r.Kind, r.ID)
 }

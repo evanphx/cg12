@@ -5,6 +5,7 @@ import (
 
 	"github.com/evanphx/cg12/arm64"
 	"github.com/evanphx/cg12/ir"
+	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
 
@@ -45,6 +46,31 @@ int main(void){
   return 0;
 }`)
 	require.Equal(t, 0, code)
+}
+
+// The growth call carries an argument pointer-map: the growing function's
+// managed-reference parameters are described (sp-relative, in the guard's save
+// area) so a copying runtime can fix up pointer arguments before the frame
+// exists.
+func TestStackGrowthArgPointerMap(t *testing.T) {
+	m := ir.NewModule()
+	f := m.NewFunc("grow", ir.ClsL).Export()
+	obj := f.ParamRef("obj") // a managed-reference pointer argument
+	f.MarkGCRefType(obj, gcHeap)
+	f.Entry().Ret(obj)
+
+	opts := arm64.Options{GC: arm64.StackGrowth{
+		LimitSym: "stack_limit", MorestackSym: "morestack", ThreadLocal: true,
+	}}
+	data, err := arm64.CompileObjectWith(m, opts)
+	require.NoError(t, err)
+
+	points := parseStackMap(t, data)
+	require.Len(t, points, 1, "the growth safepoint")
+	require.Len(t, points[0], 1, "obj is a pointer argument")
+	assert.Equal(t, byte(2), points[0][0].kind, "sp-relative (in the guard save area)")
+	assert.Equal(t, int32(16), points[0][0].val, "just past the saved x29/x30")
+	assert.Equal(t, uint32(gcHeap), points[0][0].typ, "carries its type")
 }
 
 // The guard preserves floating-point argument registers across the runtime call,
