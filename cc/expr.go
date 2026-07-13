@@ -175,6 +175,8 @@ func (g *gen) genAddr(e cc.ExpressionNode) (ir.Ref, cc.Type) {
 			ptr := g.genExpr(n.PostfixExpression)
 			fld := n.Field()
 			return g.offset(ptr, int(fld.Offset())), fld.Type()
+		case cc.PostfixExpressionComplit: // (T){ ... }
+			return g.complit(n)
 		}
 	}
 	g.fail("cc: expression is not an lvalue: %T", e)
@@ -211,9 +213,20 @@ func (g *gen) genPostfix(n *cc.PostfixExpression) ir.Ref {
 		addr, t := g.genAddr(n)
 		return g.rvalue(addr, t)
 	case cc.PostfixExpressionSelect, cc.PostfixExpressionPSelect:
+		if f, unit, ok := g.asBitfield(n); ok {
+			return g.readBitfield(unit, f)
+		}
 		addr, t := g.genAddr(n)
 		return g.rvalue(addr, t)
+	case cc.PostfixExpressionComplit:
+		addr, t := g.complit(n)
+		return g.rvalue(addr, t)
 	case cc.PostfixExpressionInc, cc.PostfixExpressionDec:
+		if f, unit, ok := g.asBitfield(n.PostfixExpression); ok {
+			old := g.readBitfield(unit, f)
+			g.writeBitfield(unit, g.incDec(old, f.Type(), n.Case == cc.PostfixExpressionInc), f)
+			return old
+		}
 		addr, t := g.genAddr(n.PostfixExpression)
 		old := g.loadVal(addr, t)
 		g.storeVal(addr, g.incDec(old, t, n.Case == cc.PostfixExpressionInc), t)
@@ -269,6 +282,11 @@ func (g *gen) genUnary(n *cc.UnaryExpression) ir.Ref {
 		addr, _ := g.genAddr(n.CastExpression)
 		return addr
 	case cc.UnaryExpressionInc, cc.UnaryExpressionDec:
+		if f, unit, ok := g.asBitfield(n.UnaryExpression); ok {
+			v := g.incDec(g.readBitfield(unit, f), f.Type(), n.Case == cc.UnaryExpressionInc)
+			g.writeBitfield(unit, v, f)
+			return v
+		}
 		addr, t := g.genAddr(n.UnaryExpression)
 		v := g.incDec(g.loadVal(addr, t), t, n.Case == cc.UnaryExpressionInc)
 		g.storeVal(addr, v, t)
@@ -443,6 +461,17 @@ func (g *gen) genCond3(n *cc.ConditionalExpression) ir.Ref {
 // --- assignment ------------------------------------------------------------
 
 func (g *gen) genAssign(n *cc.AssignmentExpression) ir.Ref {
+	// A bit-field target is spliced into its access unit rather than stored.
+	if f, unit, ok := g.asBitfield(n.UnaryExpression); ok {
+		rhs := g.convert(g.genExpr(n.AssignmentExpression), n.AssignmentExpression.Type(), f.Type())
+		if n.Case == cc.AssignmentExpressionAssign {
+			g.writeBitfield(unit, rhs, f)
+			return rhs
+		}
+		v := g.combineOp(n.Case, g.readBitfield(unit, f), rhs, f.Type())
+		g.writeBitfield(unit, v, f)
+		return v
+	}
 	addr, t := g.genAddr(n.UnaryExpression)
 	if n.Case == cc.AssignmentExpressionAssign {
 		if isAggType(t) { // struct/union assignment is a byte copy

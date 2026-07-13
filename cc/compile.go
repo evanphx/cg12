@@ -394,13 +394,34 @@ func (g *gen) globalItems(t cc.Type, init *cc.Initializer) []ir.DataItem {
 			}
 		}
 	}
+	// Bit fields sharing an access unit are OR-ed together into one integer image
+	// rather than emitted as overlapping items.
+	bitUnits := map[int]*struct {
+		bytes int
+		val   uint64
+	}{}
 	var walk func(il *cc.InitializerList)
 	walk = func(il *cc.InitializerList) {
 		for ; il != nil; il = il.InitializerList {
 			in := il.Initializer
-			if in.Case == cc.InitializerInitList {
+			switch {
+			case in.Case == cc.InitializerInitList:
 				walk(in.InitializerList)
-			} else {
+			case in.Field() != nil && in.Field().IsBitfield():
+				f := in.Field()
+				if v, ok := constInt(in.AssignmentExpression); ok {
+					off := int(in.Offset())
+					u := bitUnits[off]
+					if u == nil {
+						u = &struct {
+							bytes int
+							val   uint64
+						}{bytes: int(f.AccessBytes())}
+						bitUnits[off] = u
+					}
+					u.val |= (uint64(v) << f.OffsetBits()) & f.Mask()
+				}
+			default:
 				add(int(in.Offset()), in.Type(), in.AssignmentExpression)
 			}
 		}
@@ -409,6 +430,9 @@ func (g *gen) globalItems(t cc.Type, init *cc.Initializer) []ir.DataItem {
 		walk(init.InitializerList)
 	} else {
 		add(0, t, init.AssignmentExpression)
+	}
+	for off, u := range bitUnits {
+		leaves = append(leaves, leaf{off, u.bytes, ir.DataItem{Sub: subFor(u.bytes), Ints: []int64{int64(u.val)}}})
 	}
 	sort.SliceStable(leaves, func(i, j int) bool { return leaves[i].off < leaves[j].off })
 

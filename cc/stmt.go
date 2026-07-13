@@ -110,6 +110,19 @@ func (g *gen) genInit(addr ir.Ref, t cc.Type, init *cc.Initializer) {
 	g.storeVal(addr, val, t)
 }
 
+// complit materializes a compound literal (T){...}: it reserves storage, zeroes
+// it, and runs the brace initializer, yielding the object's address and type so
+// the literal can be read, indexed, or have its address taken like any lvalue.
+func (g *gen) complit(n *cc.PostfixExpression) (ir.Ref, cc.Type) {
+	// Use the declared type, not n.Type(): an array literal's expression type has
+	// already decayed to a pointer, which would under-allocate the storage.
+	t := n.TypeName.Type()
+	addr := g.cur.Alloc(align(t), int(t.Size()))
+	g.zeroFill(addr, int(t.Size()))
+	g.genBraceInit(addr, n.InitializerList)
+	return addr, t
+}
+
 // genBraceInit stores each leaf of a brace initializer at its absolute offset.
 func (g *gen) genBraceInit(addr ir.Ref, il *cc.InitializerList) {
 	for ; il != nil; il = il.InitializerList {
@@ -120,6 +133,11 @@ func (g *gen) genBraceInit(addr ir.Ref, il *cc.InitializerList) {
 		}
 		et := in.Type()
 		e := in.AssignmentExpression
+		if f := in.Field(); f != nil && f.IsBitfield() {
+			v := g.convert(g.genExpr(e), e.Type(), f.Type())
+			g.writeBitfield(g.offset(addr, int(in.Offset())), v, f)
+			continue
+		}
 		dst := g.offset(addr, int(in.Offset()))
 		if isArray(et) {
 			if s, ok := e.Value().(cc.StringValue); ok {
