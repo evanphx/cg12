@@ -1185,6 +1185,14 @@ func (m *mc) instr(in *ir.Instr) {
 		d, commit := m.gpDst(in.To)
 		m.emit(x64.Lea(true, d.mreg(), x64.At(RBP.mreg(), int32(-m.allocOff[in]))))
 		commit()
+	case ir.OAllocN:
+		// Variable-length array: grow the stack by the (16-aligned) size and
+		// return the new stack top. The epilogue's `mov rsp, rbp` frees it.
+		size := m.gpValue(in.Args[0], gpScratch0)
+		d, commit := m.gpDst(in.To)
+		m.emit(x64.SubReg(true, RSP.mreg(), size.mreg())) // sub rsp, size
+		m.emit(x64.MovReg(true, d.mreg(), RSP.mreg()))    // d = rsp
+		commit()
 	case ir.OExtsb, ir.OExtub, ir.OExtsh, ir.OExtuh, ir.OExtsw, ir.OExtuw:
 		m.extend(in)
 	case ir.OExts, ir.OTruncd, ir.OStosi, ir.OStoui, ir.OSltof, ir.OUltof, ir.OCast:

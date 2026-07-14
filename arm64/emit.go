@@ -19,6 +19,7 @@ type emitter struct {
 	calleeSaved []Reg             // callee-saved registers to preserve
 	spillBase   int               // byte offset of the spill area within the frame
 	allocOff    map[*ir.Instr]int // OAlloc instruction -> frame offset
+	hasDynAlloc bool              // the function has a VLA (dynamic) alloca
 	label       string            // sanitized function label
 	err         error             // first emission error, if any
 	blockDone   bool              // the current block emitted its own terminator (a tail branch)
@@ -107,6 +108,9 @@ func (e *emitter) planFrame() {
 				e.allocOff[in] = off
 				off += size
 			}
+			if in.Op == ir.OAllocN {
+				e.hasDynAlloc = true
+			}
 		}
 	}
 
@@ -165,6 +169,9 @@ func (e *emitter) allocFrame() {
 // frameTeardown restores callee-saved registers and the frame pointer and pops
 // the frame, leaving lr set to the caller's return address but not returning.
 func (e *emitter) frameTeardown() {
+	if e.hasDynAlloc {
+		e.line("mov sp, x29") // undo any VLA growth before the sp-relative reloads
+	}
 	for i, r := range e.calleeSaved {
 		e.line("ldr %s, [sp, #%d]", r.xName(), 16+i*8)
 	}
@@ -501,6 +508,13 @@ func (e *emitter) emitInstr(b *ir.Block, in *ir.Instr) {
 	case ir.OAlloc4, ir.OAlloc8, ir.OAlloc16:
 		d, done := e.dstReg(in.To, 8)
 		e.frameAddr(d, e.allocOff[in])
+		done()
+	case ir.OAllocN:
+		size := e.srcReg(in.Args[0], 1, 8)
+		d, done := e.dstReg(in.To, 8)
+		e.line("mov x15, sp")
+		e.line("sub %s, x15, %s", d, size)
+		e.line("mov sp, %s", d)
 		done()
 	case ir.OBlockAddr:
 		d, done := e.dstReg(in.To, 8)

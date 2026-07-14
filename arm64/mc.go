@@ -395,13 +395,14 @@ type mc struct {
 	gpSaveOff, fpSaveOff         int
 	namedGr, namedSr, namedStack int
 
-	blockDone bool
-	vaSeq     int
-	rows      []obj.LineRow // source positions, keyed by func-relative byte offset
-	lastPos   ir.SrcPos
-	inl       []inlSample // inline-context changes, keyed by func-relative offset
-	lastInl   *ir.InlineSite
-	err       error
+	blockDone   bool
+	hasDynAlloc bool // the function contains a variable-length-array alloca
+	vaSeq       int
+	rows        []obj.LineRow // source positions, keyed by func-relative byte offset
+	lastPos     ir.SrcPos
+	inl         []inlSample // inline-context changes, keyed by func-relative offset
+	lastInl     *ir.InlineSite
+	err         error
 }
 
 // inlSample records that, from byte offset off onward, emitted code belongs to
@@ -439,6 +440,13 @@ func emitMachine(f *ir.Func, alloc *allocation, gc GCStrategy) (*machineCode, er
 		frame: lay.frame, spillBase: lay.spillBase, calleeSaved: lay.calleeSaved, allocOff: lay.allocOff,
 		variadic: lay.variadic, gpSaveOff: lay.gpSaveOff, fpSaveOff: lay.fpSaveOff,
 		namedGr: lay.namedGr, namedSr: lay.namedSr, namedStack: lay.namedStack,
+	}
+	for _, b := range f.Blocks { // a VLA alloca means the epilogue must restore sp from x29
+		for i := range b.Instrs {
+			if b.Instrs[i].Op == ir.OAllocN {
+				m.hasDynAlloc = true
+			}
+		}
 	}
 	m.prologue()
 	for _, b := range f.Blocks {
@@ -557,6 +565,9 @@ func (m *mc) allocFrame() {
 }
 
 func (m *mc) frameTeardown() {
+	if m.hasDynAlloc {
+		m.emit(a64.AddImm(true, mcSP, mcX29, 0)) // mov sp, x29: undo any VLA growth
+	}
 	for i, r := range m.calleeSaved {
 		m.spillLoad(mreg(r), r.IsFloat(), 16+i*8, 8)
 	}
@@ -1317,6 +1328,16 @@ func (m *mc) instr(in *ir.Instr) {
 	case ir.OAlloc4, ir.OAlloc8, ir.OAlloc16:
 		d, done := m.dst(in.To, 8)
 		m.frameAddr(d, m.allocOff[in])
+		done()
+	case ir.OAllocN:
+		// Variable-length array: grow the stack by the (16-aligned) size and
+		// return the new stack top. x29 stays put, so fixed locals/spills remain
+		// addressable; the epilogue restores sp from x29.
+		size := m.src(in.Args[0], 1, 8)
+		d, done := m.dst(in.To, 8)
+		m.emit(a64.AddImm(true, mcGP2, mcSP, 0)) // x15 = sp
+		m.emit(a64.SubReg(true, d, mcGP2, size)) // d = sp - size (safe if d == size)
+		m.emit(a64.AddImm(true, mcSP, d, 0))     // sp = d
 		done()
 	case ir.OBlockAddr:
 		d, done := m.dst(in.To, 8)

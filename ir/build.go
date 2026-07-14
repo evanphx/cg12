@@ -353,6 +353,13 @@ func (b *Block) Alloc(align, size int) Ref {
 	return b.emit(op, ClsP, b.fn.Long(int64(size)))
 }
 
+// AllocN allocates size bytes on the stack at run time (a variable-length
+// array). size must already be rounded up to a multiple of 16 so the stack
+// pointer stays aligned. The result is a 16-aligned pointer.
+func (b *Block) AllocN(size Ref) Ref {
+	return b.emit(OAllocN, ClsP, size)
+}
+
 // Call invokes callee with args and returns the result (class retCls). For a
 // void call use CallVoid.
 func (b *Block) Call(retCls Cls, callee Ref, args ...Ref) Ref {

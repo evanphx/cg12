@@ -1,0 +1,4 @@
+sum1d(5)=30 sum1d(10)=285
+diag2d(4,5)=36
+dot=70
+sizeof=24 loops=70

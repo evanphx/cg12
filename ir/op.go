@@ -63,6 +63,11 @@ const (
 	OAlloc8
 	OAlloc16
 
+	// OAllocN allocates Args[0] bytes on the stack at run time (a VLA), moving
+	// the stack pointer; the size must be a multiple of 16. The result is a
+	// 16-aligned pointer, valid until the function returns.
+	OAllocN
+
 	// Memory-to-memory copy of Aux bytes from Args[1] to Args[0].
 	OBlit
 
@@ -190,6 +195,7 @@ var opTable = [numOps]opInfo{
 	OAlloc4:  {name: "alloc4", hasResult: true},
 	OAlloc8:  {name: "alloc8", hasResult: true},
 	OAlloc16: {name: "alloc16", hasResult: true},
+	OAllocN:  {name: "allocn", hasResult: true},
 
 	OBlit: {name: "blit"},
 

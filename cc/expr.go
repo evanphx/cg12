@@ -191,6 +191,12 @@ func (g *gen) genAddr(e cc.ExpressionNode) (ir.Ref, cc.Type) {
 				arrN, idxN = idxN, arrN
 			}
 			base, elemT := g.arrayBase(arrN)
+			if at, ok := elemT.(*cc.ArrayType); ok && at.IsVLA() {
+				// Indexing a multi-dimensional VLA: the row stride is a runtime value.
+				idx := g.toPtr(g.genExpr(idxN), idxN.Type())
+				off := g.cur.Mul(ir.ClsP, idx, g.vlaBytes(at))
+				return g.cur.Add(ir.ClsP, base, off), elemT
+			}
 			return g.ptrIndex(base, false, g.genExpr(idxN), idxN.Type(), int64(elemT.Size())), elemT
 		case cc.PostfixExpressionSelect: // s.field
 			base, _ := g.genAddr(n.PostfixExpression)
@@ -334,6 +340,19 @@ func (g *gen) genUnary(n *cc.UnaryExpression) ir.Ref {
 		g.storeVal(addr, v, t)
 		return v
 	case cc.UnaryExpressionSizeofExpr, cc.UnaryExpressionSizeofType:
+		var t cc.Type
+		if n.Case == cc.UnaryExpressionSizeofType {
+			t = n.TypeName.Type()
+		} else {
+			// sizeof does not decay its array operand; recover the array type.
+			t = n.UnaryExpression.Type()
+			if pt, ok := t.(*cc.PointerType); ok && pt.Undecay() != nil {
+				t = pt.Undecay()
+			}
+		}
+		if at, ok := t.(*cc.ArrayType); ok && at.IsVLA() {
+			return g.vlaBytes(at) // sizeof a VLA is its runtime byte size
+		}
 		v, _ := constInt(n)
 		return g.fn.Long(v)
 	case cc.UnaryExpressionAlignofType: // _Alignof(type)

@@ -86,6 +86,12 @@ func (g *gen) genLocalDecl(d *cc.Declaration) {
 			g.genStaticLocal(id, dcl, t)
 			continue
 		}
+		if at, ok := t.(*cc.ArrayType); ok && at.IsVLA() {
+			addr := g.vlaAlloc(at) // runtime-sized stack storage; no initializer allowed
+			g.setName(addr, dcl.Name()+".addr")
+			g.define(dcl.Name(), lval{addr: addr, typ: t})
+			continue
+		}
 		size := int(t.Size())
 		if isVaList(t) {
 			size = vaListBytes // hold the target's larger va_list state, not a pointer
@@ -97,6 +103,27 @@ func (g *gen) genLocalDecl(d *cc.Declaration) {
 			g.genInit(addr, t, id.Initializer)
 		}
 	}
+}
+
+// vlaAlloc allocates a variable-length array on the stack. Its size is the
+// runtime length times the element size, rounded up to keep the stack 16-aligned;
+// the storage lives until the function returns.
+func (g *gen) vlaAlloc(at *cc.ArrayType) ir.Ref {
+	raw := g.vlaBytes(at)
+	up := g.cur.Add(ir.ClsP, raw, g.fn.ConstInt(ir.ClsP, 15))
+	sz := g.cur.And(ir.ClsP, up, g.fn.ConstInt(ir.ClsP, ^int64(15)))
+	return g.cur.AllocN(sz)
+}
+
+// vlaBytes computes a VLA type's total byte size at run time: the product of its
+// variable dimensions and the innermost fixed element size.
+func (g *gen) vlaBytes(at *cc.ArrayType) ir.Ref {
+	e := at.SizeExpression()
+	n := g.toPtr(g.genExpr(e), e.Type())
+	if inner, ok := at.Elem().(*cc.ArrayType); ok && inner.IsVLA() {
+		return g.cur.Mul(ir.ClsP, n, g.vlaBytes(inner))
+	}
+	return g.cur.Mul(ir.ClsP, n, g.fn.ConstInt(ir.ClsP, int64(at.Elem().Size())))
 }
 
 // genStaticLocal gives a static local its own module-level storage under a
