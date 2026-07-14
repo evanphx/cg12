@@ -124,6 +124,11 @@ const (
 	// rotate idiom (currently arm64) and has a single-instruction rotate.
 	ORotr
 
+	// OBic computes Args[0] AND NOT Args[1] (a bit clear). It is produced by a
+	// backend that recognizes the and-not idiom (currently arm64) and has a
+	// single-instruction form.
+	OBic
+
 	numOps
 )
 
@@ -152,6 +157,7 @@ var opTable = [numOps]opInfo{
 	OShr:  {name: "shr", hasResult: true},
 	OSar:  {name: "sar", hasResult: true},
 	ORotr: {name: "rotr", hasResult: true},
+	OBic:  {name: "bic", hasResult: true},
 
 	ONeg: {name: "neg", hasResult: true},
 

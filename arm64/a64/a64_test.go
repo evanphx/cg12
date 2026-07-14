@@ -159,6 +159,23 @@ func TestEncodingsMatchAssembler(t *testing.T) {
 		{"orr w5, w6, #0xf0f0f0f0", orrBits(false, 5, 6, 0xf0f0f0f0)},
 		{"eor x7, x8, #0x1", eorBits(true, 7, 8, 0x1)},
 		{"and w9, w10, #0xfffffff8", andBits(false, 9, 10, 0xfffffff8)},
+		// bic / orn / mvn
+		{"bic w1, w2, w3", BicReg(false, 1, 2, 3)},
+		{"bic x4, x5, x6", BicReg(true, 4, 5, 6)},
+		{"orn w7, w8, w9", OrnReg(false, 7, 8, 9)},
+		{"mvn w10, w11", MvnReg(false, 10, 11)},
+		{"mvn x12, x13", MvnReg(true, 12, 13)},
+		// register-offset (indexed) loads and stores
+		{"ldr w1, [x2, w3, sxtw #2]", LdrReg(false, 1, 2, 3, ExtSXTW, 1)},
+		{"ldr w4, [x5, x6, lsl #2]", LdrReg(false, 4, 5, 6, ExtLSL, 1)},
+		{"ldr x7, [x8, x9, lsl #3]", LdrReg(true, 7, 8, 9, ExtLSL, 1)},
+		{"str w1, [x2, w3, sxtw #2]", StrReg(false, 1, 2, 3, ExtSXTW, 1)},
+		{"str w4, [x5, x6, lsl #2]", StrReg(false, 4, 5, 6, ExtLSL, 1)},
+		{"ldrb w1, [x2, w3, sxtw]", LdrbReg(1, 2, 3, ExtSXTW, 0)},
+		{"ldrb w4, [x5, x6]", LdrbReg(4, 5, 6, ExtLSL, 0)},
+		{"strb w1, [x2, w3, sxtw]", StrbReg(1, 2, 3, ExtSXTW, 0)},
+		{"ldrsw x1, [x2, w3, sxtw #2]", LdrswReg(1, 2, 3, ExtSXTW, 1)},
+		{"ldrh w4, [x5, w6, uxtw #1]", LdrhReg(4, 5, 6, ExtUXTW, 1)},
 	}
 
 	lines := make([]string, len(cases))

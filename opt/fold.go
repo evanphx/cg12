@@ -23,6 +23,10 @@ func Fold(f *ir.Func) bool {
 				s[in.To.ID] = r
 				b.Instrs[i] = ir.Instr{Op: ir.ONop}
 				changed = true
+				continue
+			}
+			if strengthReduce(f, in) {
+				changed = true
 			}
 		}
 	}
@@ -31,6 +35,41 @@ func Fold(f *ir.Func) bool {
 		removeNops(f)
 	}
 	return changed
+}
+
+// strengthReduce rewrites a multiply by a power of two into a left shift, in
+// place (x * 2^k -> x << k). The two are identical in two's complement for every
+// x, and a shift is cheaper than a multiply on every target. It returns whether
+// it rewrote in.
+func strengthReduce(f *ir.Func, in *ir.Instr) bool {
+	if in.Op != ir.OMul || in.Cls.IsFloat() {
+		return false
+	}
+	a, b := in.Args[0], in.Args[1]
+	if cb, ok := constInt(f, b); ok && isPow2(cb) {
+		in.Op = ir.OShl
+		in.Args = []ir.Ref{a, f.ConstInt(in.Cls, log2(cb))}
+		return true
+	}
+	if ca, ok := constInt(f, a); ok && isPow2(ca) {
+		in.Op = ir.OShl
+		in.Args = []ir.Ref{b, f.ConstInt(in.Cls, log2(ca))}
+		return true
+	}
+	return false
+}
+
+// isPow2 reports whether v is a power of two greater than one.
+func isPow2(v int64) bool { return v > 1 && v&(v-1) == 0 }
+
+// log2 returns the exponent of a power of two.
+func log2(v int64) int64 {
+	n := int64(0)
+	for v > 1 {
+		v >>= 1
+		n++
+	}
+	return n
 }
 
 // foldInstr returns the replacement reference for an instruction, if any.

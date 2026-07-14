@@ -43,6 +43,34 @@ int main(void){ return f(0x80) == 101 ? 0 : 1; }`)
 	assert.Equal(t, 0, code)
 }
 
+// TestIndexedAddressingCodegen checks that a scaled array index (base +
+// sext(i)*4) folds into an AArch64 register-offset load, and that the folded
+// code loads the right element.
+func TestIndexedAddressingCodegen(t *testing.T) {
+	build := func() *ir.Module {
+		m := ir.NewModule()
+		f := m.NewFunc("elem", ir.ClsW).Export()
+		a := f.Param("a", ir.ClsL) // int *a
+		i := f.Param("i", ir.ClsW) // int i
+		e := f.Entry()
+		// a[i]: addr = a + sext(i) * 4; load the signed word there.
+		off := e.Shl(ir.ClsL, e.Extsw(ir.ClsL, i), f.Long(2))
+		e.Ret(e.LoadSub(ir.ClsW, ir.SubW, e.Add(ir.ClsL, a, off)))
+		return m
+	}
+
+	asm, err := arm64.CompileModule(build())
+	require.NoError(t, err)
+	assert.Contains(t, asm, "sxtw #2]", "the scaled int index folds into a register offset")
+	assert.NotContains(t, asm, "\tmul ", "the scale is a fold, not a multiply")
+
+	// a[2] of {10,20,30,40,50} is 30.
+	_, code := buildAndRun(t, build(), `
+extern int elem(const int *, int);
+int main(void){ int a[5] = {10,20,30,40,50}; return elem(a, 2) == 30 ? 0 : 1; }`)
+	assert.Equal(t, 0, code)
+}
+
 // TestBinaryUnitCompilesAndRuns caches a module to bytes, reloads it, and
 // compiles the reloaded unit — proving a cached unit is a complete, usable
 // module (the point of the format: skip the front end on a cache hit).

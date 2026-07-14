@@ -521,8 +521,11 @@ func TestMovImmPatterns(t *testing.T) {
 	e.movImm(X0, 0x1234, 8)
 	e.movImm(X1, -1, 4)
 	e.movImm(X2, 0xABCD0000, 8)
+	e.movImm(X3, 0x1234ABCD, 8)
 	out := sb.String()
-	assert.Contains(t, out, "movz x0, #4660") // 0x1234
-	assert.Contains(t, out, "movz w1, #65535")
-	assert.Contains(t, out, "movk x2, #43981, lsl #16") // 0xABCD << 16
+	assert.Contains(t, out, "movz x0, #4660")           // 0x1234, single chunk
+	assert.Contains(t, out, "movn w1, #0")              // -1 in one instruction
+	assert.Contains(t, out, "movz x2, #43981, lsl #16") // 0xABCD << 16, low chunk skipped
+	assert.Contains(t, out, "movz x3, #43981")          // 0x1234ABCD: low chunk
+	assert.Contains(t, out, "movk x3, #4660, lsl #16")  // ... then high chunk
 }

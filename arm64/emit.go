@@ -413,7 +413,11 @@ func (e *emitter) emitInstr(b *ir.Block, in *ir.Instr) {
 	case ir.OOr:
 		e.logicalImm(in, "orr", sz)
 	case ir.OXor:
-		e.logicalImm(in, "eor", sz)
+		if !e.tryMvn(in, sz) {
+			e.logicalImm(in, "eor", sz)
+		}
+	case ir.OBic:
+		e.binop("bic", in, sz)
 	case ir.OShl:
 		e.shiftImm(in, "lsl", sz)
 	case ir.OShr:
@@ -572,6 +576,24 @@ func (e *emitter) logicalImm(in *ir.Instr, mn string, sz int) {
 	e.binop(mn, in, sz)
 }
 
+// tryMvn emits a bitwise NOT (MVN) when in is xor(x, all-ones).
+func (e *emitter) tryMvn(in *ir.Instr, sz int) bool {
+	var x ir.Ref
+	switch {
+	case allOnes(e.f, in.Cls, in.Args[1]):
+		x = in.Args[0]
+	case allOnes(e.f, in.Cls, in.Args[0]):
+		x = in.Args[1]
+	default:
+		return false
+	}
+	s := e.srcReg(x, 0, sz)
+	d, done := e.dstReg(in.To, sz)
+	e.line("mvn %s, %s", d, s)
+	done()
+	return true
+}
+
 // rotrImm emits a rotate-right by a constant amount (ORotr).
 func (e *emitter) rotrImm(in *ir.Instr, sz int) {
 	v, _ := intConst(e.f, in.Args[1])
@@ -691,8 +713,17 @@ func (e *emitter) emitCall(in *ir.Instr) {
 }
 
 func (e *emitter) emitLoad(in *ir.Instr) {
-	addr := e.srcReg(in.Args[0], 1, 8)
 	mn, sz := loadInfo(in.Op, in.Cls)
+	if len(in.Args) == 2 { // indexed
+		base := e.srcReg(in.Args[0], 1, 8)
+		option, s := decodeAmode(in.Aux)
+		index := e.srcReg(in.Args[1], 0, indexSize(option))
+		d, done := e.dstReg(in.To, sz)
+		e.line("%s %s, [%s, %s%s]", mn, d, base, index, amodeSuffix(option, s, in.Op))
+		done()
+		return
+	}
+	addr := e.srcReg(in.Args[0], 1, 8)
 	d, done := e.dstReg(in.To, sz)
 	e.line("%s %s, [%s]", mn, d, addr)
 	done()
@@ -701,12 +732,38 @@ func (e *emitter) emitLoad(in *ir.Instr) {
 func (e *emitter) emitStore(in *ir.Instr) {
 	mn, valSz := storeInfo(in.Op)
 	v := e.srcReg(in.Args[0], 0, valSz)
+	if len(in.Args) == 3 { // indexed
+		base := e.srcReg(in.Args[1], 1, 8)
+		option, s := decodeAmode(in.Aux)
+		index := e.srcReg(in.Args[2], 2, indexSize(option))
+		e.line("%s %s, [%s, %s%s]", mn, v, base, index, amodeSuffix(option, s, in.Op))
+		return
+	}
 	addr := e.srcReg(in.Args[1], 1, 8)
 	e.line("%s %s, [%s]", mn, v, addr)
 }
 
-// intScratch and fscratch map a slot (0 or 1) to a reserved scratch register.
-var intScratchRegs = [2]Reg{scratch0, scratch1}
+// amodeSuffix renders the ", <extend> #shift" part of a register-offset operand.
+func amodeSuffix(option, s uint32, op ir.Op) string {
+	kw := "lsl"
+	switch option {
+	case a64.ExtSXTW:
+		kw = "sxtw"
+	case a64.ExtUXTW:
+		kw = "uxtw"
+	}
+	if s == 0 {
+		if kw == "lsl" {
+			return "" // [base, index]
+		}
+		return ", " + kw // [base, index, sxtw]
+	}
+	return fmt.Sprintf(", %s #%d", kw, log2Bytes(accessBytes(op)))
+}
+
+// intScratch and fscratch map a slot to a reserved scratch register. Slot 2
+// (x15) is used only by 3-operand indexed stores.
+var intScratchRegs = [3]Reg{scratch0, scratch1, scratch2}
 var floatScratchRegs = [2]Reg{fscratch0, fscratch1}
 
 // srcReg returns the assembler name of a register holding ref's value at the
@@ -851,19 +908,56 @@ func (e *emitter) locOf(ref ir.Ref) loc {
 
 func (e *emitter) movImm(r Reg, val int64, size int) {
 	u := uint64(val)
-	if size == 4 {
-		u &= 0xffffffff
-	}
-	name := r.Name(size)
-	e.line("movz %s, #%d", name, u&0xffff)
 	chunks := 4
 	if size == 4 {
+		u &= 0xffffffff
 		chunks = 2
 	}
-	for i := 1; i < chunks; i++ {
-		part := (u >> (16 * i)) & 0xffff
-		if part != 0 {
-			e.line("movk %s, #%d, lsl #%d", name, part, 16*i)
+	name := r.Name(size)
+	// Prefer a MOVN base when the value is dominated by set bits, so constants
+	// like -1 cost a single instruction.
+	ones, zeros := 0, 0
+	for i := 0; i < chunks; i++ {
+		switch (u >> (16 * i)) & 0xffff {
+		case 0xffff:
+			ones++
+		case 0:
+			zeros++
 		}
+	}
+	if ones > zeros {
+		first := true
+		for i := 0; i < chunks; i++ {
+			c := (u >> (16 * i)) & 0xffff
+			if c == 0xffff {
+				continue
+			}
+			if first {
+				e.line("movn %s, #%d, lsl #%d", name, (^c)&0xffff, 16*i)
+				first = false
+			} else {
+				e.line("movk %s, #%d, lsl #%d", name, c, 16*i)
+			}
+		}
+		if first {
+			e.line("movn %s, #0", name)
+		}
+		return
+	}
+	first := true
+	for i := 0; i < chunks; i++ {
+		c := (u >> (16 * i)) & 0xffff
+		if c == 0 {
+			continue
+		}
+		if first {
+			e.line("movz %s, #%d, lsl #%d", name, c, 16*i)
+			first = false
+		} else {
+			e.line("movk %s, #%d, lsl #%d", name, c, 16*i)
+		}
+	}
+	if first {
+		e.line("movz %s, #0", name)
 	}
 }

@@ -487,7 +487,7 @@ func mreg(r Reg) a64.Reg {
 
 // scratch registers, mirroring reg.go: x16/x17 (+ x15) for GP, v30/v31 for FP.
 var (
-	mcIntScratch = [2]a64.Reg{16, 17}
+	mcIntScratch = [3]a64.Reg{16, 17, 15} // slot 2 (x15) is used by 3-operand indexed stores
 	mcFPScratch  = [2]a64.Reg{30, 31}
 )
 
@@ -632,11 +632,52 @@ func (m *mc) movImm(r a64.Reg, val int64, w64 bool) {
 		u &= 0xffffffff
 		chunks = 2
 	}
-	m.emit(a64.Movz(w64, r, uint16(u&0xffff), 0))
-	for i := 1; i < chunks; i++ {
-		if part := uint16((u >> (16 * i)) & 0xffff); part != 0 {
-			m.emit(a64.Movk(w64, r, part, uint32(16*i)))
+	// Choose a MOVZ or MOVN base by whichever leaves fewer 16-bit chunks to fill:
+	// MOVZ starts from zero (skip 0x0000 chunks), MOVN starts from all-ones (skip
+	// 0xffff chunks). A value dominated by set bits (e.g. -1) then costs one insn.
+	ones, zeros := 0, 0
+	for i := 0; i < chunks; i++ {
+		switch (u >> (16 * i)) & 0xffff {
+		case 0xffff:
+			ones++
+		case 0:
+			zeros++
 		}
+	}
+	if ones > zeros {
+		first := true
+		for i := 0; i < chunks; i++ {
+			c := uint16((u >> (16 * i)) & 0xffff)
+			if c == 0xffff {
+				continue
+			}
+			if first {
+				m.emit(a64.Movn(w64, r, ^c, uint32(16*i)))
+				first = false
+			} else {
+				m.emit(a64.Movk(w64, r, c, uint32(16*i)))
+			}
+		}
+		if first { // every chunk was 0xffff: the value is all ones
+			m.emit(a64.Movn(w64, r, 0, 0))
+		}
+		return
+	}
+	first := true
+	for i := 0; i < chunks; i++ {
+		c := uint16((u >> (16 * i)) & 0xffff)
+		if c == 0 {
+			continue
+		}
+		if first {
+			m.emit(a64.Movz(w64, r, c, uint32(16*i)))
+			first = false
+		} else {
+			m.emit(a64.Movk(w64, r, c, uint32(16*i)))
+		}
+	}
+	if first { // the value is zero
+		m.emit(a64.Movz(w64, r, 0, 0))
 	}
 }
 
@@ -1125,7 +1166,11 @@ func (m *mc) instr(in *ir.Instr) {
 	case ir.OOr:
 		m.logical(in, a64.OrrReg, a64.OrrImm)
 	case ir.OXor:
-		m.logical(in, a64.EorReg, a64.EorImm)
+		if !m.tryMvn(in) {
+			m.logical(in, a64.EorReg, a64.EorImm)
+		}
+	case ir.OBic:
+		m.binInt(in, a64.BicReg)
 	case ir.OShl:
 		m.shift(in, a64.Lslv, a64.LslImm)
 	case ir.OShr:
@@ -1293,6 +1338,26 @@ func (m *mc) logical(in *ir.Instr, rEnc func(w64 bool, rd, rn, rm a64.Reg) uint3
 	m.binInt(in, rEnc)
 }
 
+// tryMvn emits a bitwise NOT (MVN) when `in` is xor(x, all-ones); it reports
+// whether it did.
+func (m *mc) tryMvn(in *ir.Instr) bool {
+	var x ir.Ref
+	switch {
+	case allOnes(m.f, in.Cls, in.Args[1]):
+		x = in.Args[0]
+	case allOnes(m.f, in.Cls, in.Args[0]):
+		x = in.Args[1]
+	default:
+		return false
+	}
+	sz := in.Cls.Size()
+	s := m.src(x, 0, sz)
+	d, done := m.dst(in.To, sz)
+	m.emit(a64.MvnReg(sz == 8, d, s))
+	done()
+	return true
+}
+
 func (m *mc) binFP(in *ir.Instr, iEnc func(w64 bool, rd, rn, rm a64.Reg) uint32, fEnc func(dbl bool, rd, rn, rm a64.Reg) uint32) {
 	if !in.Cls.IsFloat() {
 		m.binInt(in, iEnc)
@@ -1418,8 +1483,34 @@ func (m *mc) conv(in *ir.Instr) {
 }
 
 func (m *mc) load(in *ir.Instr) {
-	addr := m.src(in.Args[0], 1, 8)
 	sz := loadSize(in.Op, in.Cls)
+	if len(in.Args) == 2 { // indexed: [base, index] with extend/scale in Aux
+		base := m.src(in.Args[0], 1, 8)
+		option, s := decodeAmode(in.Aux)
+		index := m.src(in.Args[1], 0, indexSize(option))
+		d, done := m.dst(in.To, sz)
+		switch in.Op {
+		case ir.OLoadl:
+			m.emit(a64.LdrReg(true, d, base, index, option, s))
+		case ir.OLoaduw:
+			m.emit(a64.LdrReg(false, d, base, index, option, s))
+		case ir.OLoadsw:
+			m.emit(a64.LdrswReg(d, base, index, option, s))
+		case ir.OLoadub:
+			m.emit(a64.LdrbReg(d, base, index, option, s))
+		case ir.OLoadsb:
+			m.emit(a64.LdrsbReg(sz == 8, d, base, index, option, s))
+		case ir.OLoaduh:
+			m.emit(a64.LdrhReg(d, base, index, option, s))
+		case ir.OLoadsh:
+			m.emit(a64.LdrshReg(sz == 8, d, base, index, option, s))
+		default:
+			m.fail("arm64: unsupported indexed load %s", in.Op)
+		}
+		done()
+		return
+	}
+	addr := m.src(in.Args[0], 1, 8)
 	d, done := m.dst(in.To, sz)
 	switch in.Op {
 	case ir.OLoadl:
@@ -1451,6 +1542,24 @@ func (m *mc) load(in *ir.Instr) {
 func (m *mc) store(in *ir.Instr) {
 	valSz := storeSize(in.Op)
 	val := m.src(in.Args[0], 0, valSz)
+	if len(in.Args) == 3 { // indexed: [value, base, index]
+		base := m.src(in.Args[1], 1, 8)
+		option, s := decodeAmode(in.Aux)
+		index := m.src(in.Args[2], 2, indexSize(option))
+		switch in.Op {
+		case ir.OStorel:
+			m.emit(a64.StrReg(true, val, base, index, option, s))
+		case ir.OStorew:
+			m.emit(a64.StrReg(false, val, base, index, option, s))
+		case ir.OStoreb:
+			m.emit(a64.StrbReg(val, base, index, option, s))
+		case ir.OStoreh:
+			m.emit(a64.StrhReg(val, base, index, option, s))
+		default:
+			m.fail("arm64: unsupported indexed store %s", in.Op)
+		}
+		return
+	}
 	addr := m.src(in.Args[1], 1, 8)
 	switch in.Op {
 	case ir.OStorel:
@@ -1470,6 +1579,21 @@ func (m *mc) store(in *ir.Instr) {
 	default:
 		m.fail("arm64: unsupported store %s", in.Op)
 	}
+}
+
+// decodeAmode unpacks the extend option and scale bit an addressing fold stored
+// in a memory op's Aux.
+func decodeAmode(aux int64) (option, s uint32) {
+	return uint32(aux>>1) & 7, uint32(aux & 1)
+}
+
+// indexSize is the spill-reload width of an index register: 32-bit for an SXTW
+// index, 64-bit for a directly-used (LSL) index.
+func indexSize(option uint32) int {
+	if option == a64.ExtSXTW || option == a64.ExtUXTW {
+		return 4
+	}
+	return 8
 }
 
 // loadSize / storeSize give the access width; they reuse the text emitter's

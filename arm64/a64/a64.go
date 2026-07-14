@@ -86,6 +86,19 @@ func EorReg(w64 bool, rd, rn, rm Reg) uint32 { return logicalReg(w64, 2, rd, rn,
 // MovReg encodes MOV rd, rm (ORR rd, ZR, rm).
 func MovReg(w64 bool, rd, rm Reg) uint32 { return OrrReg(w64, rd, ZR, rm) }
 
+func logicalRegN(w64 bool, opc, n uint32, rd, rn, rm Reg) uint32 {
+	return sf(w64)<<31 | opc<<29 | 0x0a<<24 | (n&1)<<21 | r(rm)<<16 | r(rn)<<5 | r(rd)
+}
+
+// BicReg encodes BIC rd, rn, rm (rd = rn AND NOT rm).
+func BicReg(w64 bool, rd, rn, rm Reg) uint32 { return logicalRegN(w64, 0, 1, rd, rn, rm) }
+
+// OrnReg encodes ORN rd, rn, rm (rd = rn OR NOT rm).
+func OrnReg(w64 bool, rd, rn, rm Reg) uint32 { return logicalRegN(w64, 1, 1, rd, rn, rm) }
+
+// MvnReg encodes MVN rd, rm (ORN rd, ZR, rm) — the bitwise NOT.
+func MvnReg(w64 bool, rd, rm Reg) uint32 { return OrnReg(w64, rd, ZR, rm) }
+
 // --- move wide immediate ---------------------------------------------------
 
 func moveWide(w64 bool, opc uint32, rd Reg, imm16 uint16, shift uint32) uint32 {
@@ -250,6 +263,52 @@ func LdrhImm(rt, rn Reg, imm uint32) uint32 { return ldStr(1, 1, rt, rn, imm/2) 
 
 // LdrswImm encodes LDRSW rt, [rn, #imm] (load word, sign-extend to 64 bits).
 func LdrswImm(rt, rn Reg, imm uint32) uint32 { return ldStr(2, 2, rt, rn, imm/4) }
+
+// Extend options for a register-offset load/store: how the index register Rm is
+// widened to an address. LSL uses a 64-bit index directly; SXTW/UXTW sign- or
+// zero-extend a 32-bit index.
+const (
+	ExtUXTW uint32 = 0b010
+	ExtLSL  uint32 = 0b011 // UXTX for an X register: no extend
+	ExtSXTW uint32 = 0b110
+	ExtSXTX uint32 = 0b111
+)
+
+// ldStrReg encodes a load/store with a register offset: [Rn, Rm, <extend> #S*log2(size)].
+// S=1 scales the index by the access width, S=0 leaves it unscaled.
+func ldStrReg(size, opc uint32, rt, rn, rm Reg, option, s uint32) uint32 {
+	return size<<30 | 0x38<<24 | opc<<22 | 1<<21 | r(rm)<<16 | (option&7)<<13 | (s&1)<<12 | 0b10<<10 | r(rn)<<5 | r(rt)
+}
+
+func regSize(w64 bool) uint32 {
+	if w64 {
+		return 3
+	}
+	return 2
+}
+
+// LdrReg / StrReg encode a word/doubleword load/store with a register offset.
+func LdrReg(w64 bool, rt, rn, rm Reg, option, s uint32) uint32 {
+	return ldStrReg(regSize(w64), 1, rt, rn, rm, option, s)
+}
+func StrReg(w64 bool, rt, rn, rm Reg, option, s uint32) uint32 {
+	return ldStrReg(regSize(w64), 0, rt, rn, rm, option, s)
+}
+
+// LdrbReg / StrbReg / LdrhReg / StrhReg: byte and halfword register-offset forms.
+func LdrbReg(rt, rn, rm Reg, option, s uint32) uint32 { return ldStrReg(0, 1, rt, rn, rm, option, s) }
+func StrbReg(rt, rn, rm Reg, option, s uint32) uint32 { return ldStrReg(0, 0, rt, rn, rm, option, s) }
+func LdrhReg(rt, rn, rm Reg, option, s uint32) uint32 { return ldStrReg(1, 1, rt, rn, rm, option, s) }
+func StrhReg(rt, rn, rm Reg, option, s uint32) uint32 { return ldStrReg(1, 0, rt, rn, rm, option, s) }
+
+// Sign-extending register-offset loads.
+func LdrswReg(rt, rn, rm Reg, option, s uint32) uint32 { return ldStrReg(2, 2, rt, rn, rm, option, s) }
+func LdrsbReg(w64 bool, rt, rn, rm Reg, option, s uint32) uint32 {
+	return ldStrReg(0, signedLoadOpc(w64), rt, rn, rm, option, s)
+}
+func LdrshReg(w64 bool, rt, rn, rm Reg, option, s uint32) uint32 {
+	return ldStrReg(1, signedLoadOpc(w64), rt, rn, rm, option, s)
+}
 
 // --- address, shifted immediate, bitfield, neg -----------------------------
 

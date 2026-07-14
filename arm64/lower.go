@@ -4,6 +4,7 @@ import (
 	"fmt"
 
 	"github.com/evanphx/cg12/analysis"
+	"github.com/evanphx/cg12/arm64/a64"
 	"github.com/evanphx/cg12/ir"
 )
 
@@ -15,21 +16,124 @@ import (
 // Only the integer subset (classes w and l) is handled; anything outside it
 // returns an explicit error rather than emitting silently wrong code.
 func lower(f *ir.Func) error {
-	foldRotates(f)
+	foldIdioms(f)
+	foldAddressing(f)
 	splitCriticalEdges(f)
 	destructSSA(f)
 	return lowerABI(f)
 }
 
-// foldRotates rewrites the shift-or rotate idiom into a single ORotr, which the
-// emitters turn into an AArch64 ROR. It matches
+// foldAddressing folds a load/store's address computation into an AArch64
+// register-offset addressing mode. It matches
 //
-//	t1 = shr x, c1 ; t2 = shl x, c2 ; t3 = or t1, t2   (c1+c2 = width)
+//	off = shl(sext(i), k) ; a = add(base, off) ; load/store [a]
 //
-// (either shift order) and, when both shifts feed only the or, replaces the or
-// with `rotr x, c1` and drops the now-dead shifts.
-func foldRotates(f *ir.Func) {
-	uses := map[uint32]int{}
+// (with the sext and shift optional, and k matching the access width for a
+// scaled index) and rewrites the memory op to carry (base, index) plus the
+// extend/scale in Aux, dropping the now-dead address arithmetic. A load then
+// carries [base, index]; a store carries [value, base, index].
+func foldAddressing(f *ir.Func) {
+	uses, defOf := defUse(f)
+	single := func(r ir.Ref) bool { return r.Kind == ir.RefTemp && uses[r.ID] == 1 }
+
+	for _, b := range f.Blocks {
+		for i := range b.Instrs {
+			in := &b.Instrs[i]
+			var ai int
+			switch {
+			case in.Op.IsLoad():
+				ai = 0
+			case in.Op.IsStore():
+				ai = 1
+			default:
+				continue
+			}
+			access := accessBytes(in.Op)
+			if access == 0 || in.Cls.IsFloat() { // skip FP and 128-bit
+				continue
+			}
+			addr := in.Args[ai]
+			if !single(addr) {
+				continue
+			}
+			add := defOf(addr)
+			if add == nil || add.Op != ir.OAdd {
+				continue
+			}
+			base, off := add.Args[0], add.Args[1]
+			// The index side is whichever operand is a shift or sign-extension; a
+			// plain add folds too (base + index, no scale).
+			if isIndexExpr(defOf(add.Args[0])) && !isIndexExpr(defOf(add.Args[1])) {
+				base, off = add.Args[1], add.Args[0]
+			}
+
+			option, s := a64.ExtLSL, uint32(0)
+			index := off
+			// Peel a scale shift when it matches the access width.
+			if sd := defOf(index); sd != nil && sd.Op == ir.OShl && single(index) {
+				if sh, ok := intConst(f, sd.Args[1]); ok && sh == log2Bytes(access) && access > 1 {
+					s = 1
+					index = sd.Args[0]
+					nop(sd)
+				}
+			}
+			// Peel a 32-bit sign extension into an SXTW index.
+			if ed := defOf(index); ed != nil && ed.Op == ir.OExtsw && single(index) {
+				option = a64.ExtSXTW
+				index = ed.Args[0]
+				nop(ed)
+			}
+
+			nop(add)
+			in.Aux = int64(option)<<1 | int64(s)
+			if in.Op.IsLoad() {
+				in.Args = []ir.Ref{base, index}
+			} else {
+				in.Args = []ir.Ref{in.Args[0], base, index}
+			}
+		}
+	}
+}
+
+// isIndexExpr reports whether an instruction looks like the index side of an
+// address (a scale shift or a sign extension).
+func isIndexExpr(d *ir.Instr) bool {
+	return d != nil && (d.Op == ir.OShl || d.Op == ir.OExtsw)
+}
+
+// accessBytes returns the memory-access width in bytes of a load/store op, or 0
+// for the 128-bit ops this fold skips.
+func accessBytes(op ir.Op) int {
+	switch op {
+	case ir.OLoadub, ir.OLoadsb, ir.OStoreb:
+		return 1
+	case ir.OLoaduh, ir.OLoadsh, ir.OStoreh:
+		return 2
+	case ir.OLoaduw, ir.OLoadsw, ir.OStorew, ir.OLoads:
+		return 4
+	case ir.OLoadl, ir.OStorel, ir.OLoadd:
+		return 8
+	}
+	return 0
+}
+
+func log2Bytes(n int) int64 {
+	switch n {
+	case 2:
+		return 1
+	case 4:
+		return 2
+	case 8:
+		return 3
+	}
+	return 0
+}
+
+// defUse returns, for f, a use count per temporary and a lookup from a ref to
+// its defining instruction — enough to recognize and rewrite small multi-
+// instruction idioms while still in SSA form.
+func defUse(f *ir.Func) (uses map[uint32]int, defOf func(ir.Ref) *ir.Instr) {
+	uses = map[uint32]int{}
 	def := map[uint32]*ir.Instr{}
 	mark := func(r ir.Ref) {
 		if r.Kind == ir.RefTemp {
@@ -56,31 +160,96 @@ func foldRotates(f *ir.Func) {
 			mark(a)
 		}
 	}
-	defOf := func(r ir.Ref) *ir.Instr {
+	return uses, func(r ir.Ref) *ir.Instr {
 		if r.Kind != ir.RefTemp {
 			return nil
 		}
 		return def[r.ID]
 	}
+}
+
+// foldIdioms rewrites the shift-or rotate and and-not (bic) idioms into the
+// single ORotr / OBic ops the emitters lower to one AArch64 instruction.
+func foldIdioms(f *ir.Func) {
+	uses, defOf := defUse(f)
 	for _, b := range f.Blocks {
 		for i := range b.Instrs {
 			in := &b.Instrs[i]
-			x, ror, ok := rotateMatch(f, in, defOf)
-			if !ok {
-				continue
+			switch in.Op {
+			case ir.OOr:
+				foldRotate(f, in, uses, defOf)
+			case ir.OAnd:
+				foldBic(f, in, uses, defOf)
 			}
-			// Only fold when each shift result is consumed solely by this or, so
-			// dropping the shifts changes nothing else.
-			if uses[in.Args[0].ID] != 1 || uses[in.Args[1].ID] != 1 {
-				continue
-			}
-			s1, s2 := defOf(in.Args[0]), defOf(in.Args[1])
-			in.Op = ir.ORotr
-			in.Args = []ir.Ref{x, f.ConstInt(in.Cls, int64(ror))}
-			nop(s1)
-			nop(s2)
 		}
 	}
+}
+
+// foldRotate rewrites the shift-or rotate idiom into a single ORotr, which the
+// emitters turn into an AArch64 ROR. It matches
+//
+//	t1 = shr x, c1 ; t2 = shl x, c2 ; t3 = or t1, t2   (c1+c2 = width)
+//
+// (either shift order) and, when both shifts feed only the or, replaces the or
+// with `rotr x, c1` and drops the now-dead shifts.
+func foldRotate(f *ir.Func, in *ir.Instr, uses map[uint32]int, defOf func(ir.Ref) *ir.Instr) {
+	x, ror, ok := rotateMatch(f, in, defOf)
+	if !ok {
+		return
+	}
+	// Only fold when each shift result is consumed solely by this or, so dropping
+	// the shifts changes nothing else.
+	if uses[in.Args[0].ID] != 1 || uses[in.Args[1].ID] != 1 {
+		return
+	}
+	s1, s2 := defOf(in.Args[0]), defOf(in.Args[1])
+	in.Op = ir.ORotr
+	in.Args = []ir.Ref{x, f.ConstInt(in.Cls, int64(ror))}
+	nop(s1)
+	nop(s2)
+}
+
+// foldBic rewrites and(a, ~b) into a single OBic (a AND NOT b), when the NOT —
+// a xor with an all-ones constant — feeds only this and.
+func foldBic(f *ir.Func, in *ir.Instr, uses map[uint32]int, defOf func(ir.Ref) *ir.Instr) {
+	notOf := func(r ir.Ref) (ir.Ref, bool) {
+		if uses[r.ID] != 1 {
+			return ir.Ref{}, false
+		}
+		d := defOf(r)
+		if d == nil || d.Op != ir.OXor {
+			return ir.Ref{}, false
+		}
+		if allOnes(f, d.Cls, d.Args[1]) {
+			return d.Args[0], true
+		}
+		if allOnes(f, d.Cls, d.Args[0]) {
+			return d.Args[1], true
+		}
+		return ir.Ref{}, false
+	}
+	a, b := in.Args[0], in.Args[1]
+	if x, ok := notOf(b); ok {
+		in.Op = ir.OBic
+		in.Args = []ir.Ref{a, x}
+		nop(defOf(b))
+	} else if x, ok := notOf(a); ok {
+		in.Op = ir.OBic
+		in.Args = []ir.Ref{b, x}
+		nop(defOf(a))
+	}
+}
+
+// allOnes reports whether ref is the all-ones constant for cls's width.
+func allOnes(f *ir.Func, cls ir.Cls, ref ir.Ref) bool {
+	v, ok := intConst(f, ref)
+	if !ok {
+		return false
+	}
+	if cls.Size() == 4 {
+		return uint32(v) == 0xffffffff
+	}
+	return uint64(v) == ^uint64(0)
 }
 
 // nop turns an instruction into a no-op that defines nothing.
