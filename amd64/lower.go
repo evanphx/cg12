@@ -5,6 +5,7 @@ import (
 
 	"github.com/evanphx/cg12/analysis"
 	"github.com/evanphx/cg12/ir"
+	lowerpass "github.com/evanphx/cg12/lower"
 )
 
 // lower rewrites f from SSA into a form ready for register allocation and
@@ -16,6 +17,8 @@ import (
 // by-value aggregates, variadics, and tail calls return an explicit error rather
 // than emitting silently wrong code.
 func lower(f *ir.Func) error {
+	lowerpass.JumpTables(f) // dense switches -> indexed branch (JmpTable)
+	lowerpass.Switches(f)   // remaining multiway branches -> conditional branches
 	splitCriticalEdges(f)
 	destructSSA(f)
 	return lowerABI(f)

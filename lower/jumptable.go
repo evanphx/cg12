@@ -1,4 +1,4 @@
-package arm64
+package lower
 
 import "github.com/evanphx/cg12/ir"
 
@@ -12,10 +12,10 @@ const (
 	jtMaxRatio = 4    // span may be at most this multiple of the case count
 )
 
-// jumpTables rewrites eligible JmpSwitch terminators into a bounds check plus a
+// JumpTables rewrites eligible JmpSwitch terminators into a bounds check plus a
 // JmpTable. It runs before the shared switch lowering, which handles whatever is
 // left.
-func jumpTables(f *ir.Func) {
+func JumpTables(f *ir.Func) {
 	for _, b := range append([]*ir.Block(nil), f.Blocks...) {
 		if b.Jmp.Kind == ir.JmpSwitch {
 			tryJumpTable(f, b)

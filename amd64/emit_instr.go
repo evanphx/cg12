@@ -54,6 +54,9 @@ func (e *emitter) instr(in *ir.Instr) {
 		e.extend(in)
 	case ir.OExts, ir.OTruncd, ir.OStosi, ir.OStoui, ir.OSltof, ir.OUltof, ir.OCast:
 		e.convert(in)
+	case ir.OBlockAddr:
+		e.line("leaq %s(%%rip), %s", e.blabel(in.Blk), gpn(gpScratch0, 8))
+		e.move(e.refLoc(in.To), regLoc(gpScratch0, 8, false))
 	case ir.OGetReg:
 		src := regLoc(Reg(in.Arg(0).ID), in.Cls.Size(), in.Cls.IsFloat())
 		e.move(e.refLoc(in.To), src)

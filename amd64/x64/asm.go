@@ -18,12 +18,15 @@ type Program struct {
 	err    error
 }
 
-// fixup is an unresolved branch: a disp32 at byte offset `at`, relative to the
-// instruction end `end`, targeting a label.
+// fixup is an unresolved disp32 at byte offset `at`. The value stored is
+// (target - ref), where ref is `end` (the instruction end, for RIP-relative
+// branches and leas) unless `base` names a label to measure from (for a
+// jump-table data word).
 type fixup struct {
 	at     int
 	end    int
 	target string
+	base   string
 }
 
 // NewProgram returns an empty program.
@@ -56,6 +59,22 @@ func (p *Program) Jmp(label string) { p.branch([]byte{0xe9}, label) }
 // Jcc emits Jcc to a label (0F 80+cc cd).
 func (p *Program) Jcc(c Cond, label string) { p.branch([]byte{0x0f, 0x80 | byte(c)}, label) }
 
+// LeaLabel emits LEA dst, [rip + label]: it materializes a label's address
+// (RIP-relative), patching the disp32 like a branch does.
+func (p *Program) LeaLabel(w bool, dst Reg, label string) {
+	code := Lea(w, dst, RIPRel(0)) // disp32 placeholder is the last 4 bytes
+	p.Emit(code)
+	p.fixups = append(p.fixups, fixup{at: len(p.code) - 4, end: len(p.code), target: label})
+}
+
+// DataWord emits a 32-bit data word (never executed) equal to the signed byte
+// distance from base to target -- a jump-table offset entry.
+func (p *Program) DataWord(target, base string) {
+	at := len(p.code)
+	p.code = append(p.code, 0, 0, 0, 0)
+	p.fixups = append(p.fixups, fixup{at: at, end: at, target: target, base: base})
+}
+
 // branch emits an opcode followed by a 4-byte displacement placeholder and
 // records a fixup so Bytes can fill in (labelOffset - instructionEnd).
 func (p *Program) branch(opcode []byte, label string) {
@@ -81,7 +100,15 @@ func (p *Program) Bytes() ([]byte, error) {
 		if !ok {
 			return nil, fmt.Errorf("x64: undefined label %q", f.target)
 		}
-		rel := int32(target - f.end)
+		ref := f.end
+		if f.base != "" {
+			b, ok := p.labels[f.base]
+			if !ok {
+				return nil, fmt.Errorf("x64: undefined base label %q", f.base)
+			}
+			ref = b
+		}
+		rel := int32(target - ref)
 		b := p.code[f.at:]
 		b[0] = byte(rel)
 		b[1] = byte(rel >> 8)

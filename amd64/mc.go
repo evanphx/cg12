@@ -1099,6 +1099,26 @@ func (m *mc) term(b *ir.Block) {
 		m.epilogue()
 	case ir.JmpHlt:
 		m.emit(x64.Ud2())
+	case ir.JmpBr:
+		r := m.gpValue(b.Jmp.Arg, gpScratch0)
+		m.emit(x64.JmpReg(r.mreg())) // computed goto
+	case ir.JmpTable:
+		// Indexed branch through a PC-relative offset table placed just past the
+		// jump: target = table + (int32)table[idx]. R10 holds the table base and
+		// R11 the loaded offset; the index comes from R11 or an allocated reg
+		// (movsxd reads its address before writing R11, so reusing it is safe).
+		idx := m.gpValue(b.Jmp.Arg, gpScratch1)
+		tbl := b.Name + ".tbl"
+		m.prog.LeaLabel(true, gpScratch0.mreg(), tbl) // lea  R10, [rip+tbl]
+		m.emit(x64.MovsxdLoad(gpScratch1.mreg(), x64.Mem{Base: gpScratch0.mreg(), Index: idx.mreg(), Scale: 4, HasIndex: true}))
+		m.emit(x64.AddReg(true, gpScratch0.mreg(), gpScratch1.mreg())) // add  R10, R11
+		m.emit(x64.JmpReg(gpScratch0.mreg()))                          // jmp  *R10
+		m.prog.Label(tbl)
+		for _, t := range b.Jmp.Targets {
+			m.prog.DataWord(t.Name, tbl) // .long t - tbl
+		}
+	default:
+		m.fail(fmt.Errorf("amd64: block %q has an unsupported terminator %d", b.Name, b.Jmp.Kind))
 	}
 }
 
@@ -1144,6 +1164,10 @@ func (m *mc) instr(in *ir.Instr) {
 		m.extend(in)
 	case ir.OExts, ir.OTruncd, ir.OStosi, ir.OStoui, ir.OSltof, ir.OUltof, ir.OCast:
 		m.convert(in)
+	case ir.OBlockAddr:
+		// &&label: materialize a block's address (RIP-relative) then place it.
+		m.prog.LeaLabel(true, gpScratch0.mreg(), in.Blk.Name)
+		m.move(m.refLoc(in.To), regLoc(gpScratch0, 8, false))
 	case ir.OGetReg:
 		// Read a physical register directly (Args[0] is a RefReg naming it).
 		src := regLoc(Reg(in.Arg(0).ID), in.Cls.Size(), in.Cls.IsFloat())
