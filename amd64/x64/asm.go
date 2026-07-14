@@ -37,6 +37,12 @@ func NewProgram() *Program {
 // Len returns the current byte length, i.e. the offset of the next instruction.
 func (p *Program) Len() int { return len(p.code) }
 
+// LabelOffset returns a label's byte offset, and whether it is defined.
+func (p *Program) LabelOffset(name string) (int, bool) {
+	i, ok := p.labels[name]
+	return i, ok
+}
+
 // Emit appends raw encoded bytes and returns the offset at which they began.
 func (p *Program) Emit(b []byte) int {
 	off := len(p.code)

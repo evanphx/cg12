@@ -569,6 +569,16 @@ func isFuncDesignator(t cc.Type) bool {
 	return false
 }
 
+// blockSym assigns b a unique object-symbol name (once) and returns it, so a
+// static initializer that takes b's address (&&label) can reference the block
+// via a relocation the backend resolves to its code address.
+func (g *gen) blockSym(b *ir.Block) string {
+	if b.Sym == "" {
+		b.Sym = fmt.Sprintf("%s.blk.%s", g.fn.Name, b.Name)
+	}
+	return b.Sym
+}
+
 func (g *gen) constAddr(e cc.ExpressionNode) (string, int64, bool) {
 	switch n := e.(type) {
 	case *cc.PrimaryExpression:
@@ -593,8 +603,13 @@ func (g *gen) constAddr(e cc.ExpressionNode) (string, int64, bool) {
 	case *cc.CastExpression:
 		return g.constAddr(n.CastExpression)
 	case *cc.UnaryExpression:
-		if n.Case == cc.UnaryExpressionAddrof { // &lvalue
+		switch n.Case {
+		case cc.UnaryExpressionAddrof: // &lvalue
 			return g.constAddr(n.CastExpression)
+		case cc.UnaryExpressionLabelAddr: // &&label as a static initializer
+			if b, ok := g.labels[n.Token2.SrcStr()]; ok {
+				return g.blockSym(b), 0, true
+			}
 		}
 	case *cc.PostfixExpression:
 		switch n.Case {

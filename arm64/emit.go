@@ -225,6 +225,9 @@ func (e *emitter) blockLabel(b *ir.Block) string {
 }
 
 func (e *emitter) emitBlock(b *ir.Block) {
+	if b.Sym != "" { // object symbol for an address-taken block (&&label in data)
+		fmt.Fprintf(e.sb, "%s:\n", sanitize(b.Sym))
+	}
 	fmt.Fprintf(e.sb, "%s:\n", e.blockLabel(b))
 	i := 0
 	// Entry parameter materialisation: register params are a parallel move out

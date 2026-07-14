@@ -91,6 +91,9 @@ func emitFunc(f *ir.Func, alloc *allocation, sb *strings.Builder) {
 	fmt.Fprintf(sb, "\t.type %s,@function\n%s:\n", e.fname, e.fname)
 	e.prologue()
 	for _, b := range f.Blocks {
+		if b.Sym != "" { // object symbol for an address-taken block (&&label in data)
+			fmt.Fprintf(sb, "%s:\n", sanitize(b.Sym))
+		}
 		fmt.Fprintf(sb, "%s:\n", e.blabel(b))
 		e.block(b)
 	}

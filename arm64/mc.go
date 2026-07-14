@@ -78,6 +78,12 @@ func CompileToObjectWith(m *ir.Module, opts Options) (*obj.Object, error) {
 			Name: name, Section: obj.SecText, Value: base,
 			Size: uint64(len(mc.code)), Global: f.Linkage.Export, Func: true,
 		})
+		// Local symbols at address-taken blocks (&&label used in static data).
+		for _, bs := range mc.blockSyms {
+			o.Syms = append(o.Syms, obj.Sym{
+				Name: bs.name, Section: obj.SecText, Value: base + uint64(bs.off),
+			})
+		}
 		for _, rl := range mc.relocs {
 			rl.Offset += base
 			o.Relocs = append(o.Relocs, rl)
@@ -413,7 +419,14 @@ type machineCode struct {
 	rows       []obj.LineRow
 	inl        []inlSample
 	safepoints []safepoint
-	m          *mc // retained so callers can query variable locations
+	blockSyms  []blockSym // local symbols for address-taken blocks (&&label in data)
+	m          *mc        // retained so callers can query variable locations
+}
+
+// blockSym is a local symbol placed at a block's byte offset within its function.
+type blockSym struct {
+	name string
+	off  int
 }
 
 func emitMachine(f *ir.Func, alloc *allocation, gc GCStrategy) (*machineCode, error) {
@@ -439,7 +452,16 @@ func emitMachine(f *ir.Func, alloc *allocation, gc GCStrategy) (*machineCode, er
 	if err != nil {
 		return nil, err
 	}
-	return &machineCode{code: code, relocs: m.relocs, rows: m.rows, inl: m.inl, safepoints: m.safepoints, m: m}, nil
+	var blockSyms []blockSym
+	for _, b := range f.Blocks {
+		if b.Sym == "" {
+			continue
+		}
+		if off, ok := m.prog.LabelOffset(b.Name); ok {
+			blockSyms = append(blockSyms, blockSym{name: sanitize(b.Sym), off: off})
+		}
+	}
+	return &machineCode{code: code, relocs: m.relocs, rows: m.rows, inl: m.inl, safepoints: m.safepoints, blockSyms: blockSyms, m: m}, nil
 }
 
 // recordLoc appends a line-table row when the source position changes, mirroring

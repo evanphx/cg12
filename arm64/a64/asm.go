@@ -42,6 +42,13 @@ func (p *Program) Label(name string) {
 // Len returns the number of instructions emitted so far.
 func (p *Program) Len() int { return len(p.words) }
 
+// LabelOffset returns a label's byte offset in the assembled code, and whether
+// it is defined. Each instruction is 4 bytes.
+func (p *Program) LabelOffset(name string) (int, bool) {
+	i, ok := p.labels[name]
+	return i * 4, ok
+}
+
 func (p *Program) branch(label string, bits uint, kind string, enc func(int32) uint32) {
 	p.fixups = append(p.fixups, fixup{at: len(p.words), label: label, enc: enc, kind: kind, bits: bits})
 	p.words = append(p.words, 0) // placeholder, patched in Bytes

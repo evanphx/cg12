@@ -72,6 +72,12 @@ type Block struct {
 
 	Preds []*Block // filled by the CFG pass
 
+	// Sym, when non-empty, is a local object symbol the backend defines at this
+	// block's code address. It is set when the block's address is taken in static
+	// data (the &&label extension used as an initializer), so the data can hold a
+	// relocation to the block.
+	Sym string
+
 	Pos    SrcPos // source position of the block (e.g. its label), if known
 	curPos SrcPos // builder state: position stamped onto newly emitted instructions
 }

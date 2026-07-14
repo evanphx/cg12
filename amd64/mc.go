@@ -74,6 +74,12 @@ func CompileToObjectWith(m *ir.Module, opts Options) (*obj.Object, error) {
 			Name: name, Section: obj.SecText, Value: uint64(base),
 			Size: uint64(len(mc.code)), Global: f.Linkage.Export, Func: true,
 		})
+		// Local symbols at address-taken blocks (&&label used in static data).
+		for _, bs := range mc.blockSyms {
+			o.Syms = append(o.Syms, obj.Sym{
+				Name: bs.name, Section: obj.SecText, Value: uint64(base + bs.off),
+			})
+		}
 		for i := range params {
 			params[i].Loc = mc.m.varLoc(paramTemps[i])
 		}
@@ -467,7 +473,14 @@ type machineCode struct {
 	safepoints []safepoint
 	rows       []obj.LineRow
 	inl        []inlSample
-	m          *mc // retained so callers can query variable locations
+	blockSyms  []blockSym // local symbols for address-taken blocks (&&label in data)
+	m          *mc        // retained so callers can query variable locations
+}
+
+// blockSym is a local symbol placed at a block's byte offset within its function.
+type blockSym struct {
+	name string
+	off  int
 }
 
 func emitMachine(f *ir.Func, alloc *allocation, gc GCStrategy) (*machineCode, error) {
@@ -485,7 +498,16 @@ func emitMachine(f *ir.Func, alloc *allocation, gc GCStrategy) (*machineCode, er
 	if err != nil {
 		return nil, err
 	}
-	return &machineCode{code: code, relocs: m.relocs, safepoints: m.safepoints, rows: m.rows, inl: m.inl, m: m}, nil
+	var blockSyms []blockSym
+	for _, b := range f.Blocks {
+		if b.Sym == "" {
+			continue
+		}
+		if off, ok := m.prog.LabelOffset(b.Name); ok {
+			blockSyms = append(blockSyms, blockSym{name: sanitize(b.Sym), off: off})
+		}
+	}
+	return &machineCode{code: code, relocs: m.relocs, safepoints: m.safepoints, rows: m.rows, inl: m.inl, blockSyms: blockSyms, m: m}, nil
 }
 
 // recordInline samples the inline context whenever it changes, keyed by PC. A
@@ -538,8 +560,11 @@ func (m *mc) fail(err error) {
 func (m *mc) emit(b []byte) int { return m.prog.Emit(b) }
 
 // recordReloc notes a relocation to be applied to the function's text at off.
+// The symbol name is sanitized to match how symbols are registered (a raw name
+// like "t.static.2" is registered as "t_static_2"); sanitize is idempotent, so
+// already-clean names are unaffected.
 func (m *mc) recordReloc(off int, sym string, typ uint32, addend int64) {
-	m.relocs = append(m.relocs, obj.Reloc{Offset: uint64(off), Sym: sym, Type: typ, Addend: addend})
+	m.relocs = append(m.relocs, obj.Reloc{Offset: uint64(off), Sym: sanitize(sym), Type: typ, Addend: addend})
 }
 
 // --- frame layout ----------------------------------------------------------

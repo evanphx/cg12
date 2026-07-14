@@ -296,6 +296,7 @@ func (e *enc) encConst(c Const) {
 
 func (e *enc) encBlock(b *Block, blockRef func(*Block)) {
 	e.str(b.Name)
+	e.str(b.Sym)
 	e.iv(int64(b.ID))
 	e.srcPos(b.Pos)
 
@@ -559,6 +560,7 @@ func (d *dec) decConst() Const {
 
 func (d *dec) decBlock(b *Block, blockRef func() *Block) {
 	b.Name = d.str()
+	b.Sym = d.str()
 	b.ID = int(d.iv())
 	b.Pos = d.srcPos()
 
