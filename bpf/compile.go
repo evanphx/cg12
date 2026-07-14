@@ -12,20 +12,21 @@ import (
 // the ABI's result / first-argument registers. Values live across a helper call
 // are placed in the kernel-preserved registers r6-r9.
 func Compile(f *ir.Func) (*Prog, error) {
-	c := newComp(f, nil)
+	c := newComp(f, nil, nil)
 	if err := c.run(); err != nil {
 		return nil, err
 	}
 	return &Prog{Insns: c.insns}, nil
 }
 
-func newComp(f *ir.Func, maps map[string]bool) *comp {
+func newComp(f *ir.Func, maps map[string]bool, data map[string]int32) *comp {
 	return &comp{
 		f:          f,
 		allocaAt:   map[*ir.Instr]int16{},
 		blockStart: map[*ir.Block]int{},
 		spillOff:   map[int]int16{},
 		maps:       maps,
+		data:       data,
 	}
 }
 
@@ -55,12 +56,17 @@ type comp struct {
 	stackTop   int16 // most-negative stack offset used (allocas + spills)
 	allocaAt   map[*ir.Instr]int16
 	blockStart map[*ir.Block]int
-	spillOff   map[int]int16   // temp ID -> stack byte offset (negative), for spilled temps
-	maps       map[string]bool // names of module maps, for resolving &map references
-	relocs     []MapReloc      // ld_imm64 slots to patch with a map fd at load time
+	spillOff   map[int]int16    // temp ID -> stack byte offset (negative), for spilled temps
+	maps       map[string]bool  // names of module maps, for resolving &map references
+	data       map[string]int32 // read-only global name -> byte offset within .rodata
+	relocs     []MapReloc       // ld_imm64 slots to patch with a map fd at load time
 	fixups     []fixup
 	err        error
 }
+
+// rodataName is the synthetic map that backs read-only global data (strings and
+// const globals), mirroring how libbpf exposes a program's .rodata section.
+const rodataName = ".rodata"
 
 type fixup struct {
 	at     int
@@ -130,8 +136,9 @@ const (
 	locReg locKind = iota
 	locSlot
 	locImm
-	locMapFD // the address of a module map (&map): a relocated map-fd load
-	locNone  // a dead value with no assigned location
+	locMapFD   // the address of a module map (&map): a relocated map-fd load
+	locDataVal // the address of a read-only global (&str): a relocated map-value load
+	locNone    // a dead value with no assigned location
 )
 
 func regLoc(r Reg) loc     { return loc{kind: locReg, reg: r} }
@@ -159,8 +166,10 @@ func (c *comp) locOf(ref ir.Ref) loc {
 			return immLoc(cst.Int)
 		case cst.Kind == ir.ConstSym && c.maps[cst.Sym]:
 			return loc{kind: locMapFD, sym: cst.Sym}
+		case cst.Kind == ir.ConstSym && hasKey(c.data, cst.Sym):
+			return loc{kind: locDataVal, imm: int64(c.data[cst.Sym]) + cst.Int}
 		default:
-			c.fail("bpf: unsupported operand %v (a symbol that is not a map, or a float)", cst.Sym)
+			c.fail("bpf: unsupported operand %v (a symbol that is not a map or read-only global, or a float)", cst.Sym)
 		}
 	}
 	return immLoc(0)
@@ -191,6 +200,8 @@ func (c *comp) into(dst Reg, ref ir.Ref) {
 		c.ldImm(dst, l.imm)
 	case locMapFD:
 		c.emitMapFD(dst, l.sym)
+	case locDataVal:
+		c.emitDataVal(dst, int32(l.imm))
 	}
 }
 
@@ -201,6 +212,17 @@ func (c *comp) emitMapFD(dst Reg, sym string) {
 	w := LdMapFD(dst, 0) // fd patched in at load time
 	c.emit(w[0], w[1])
 }
+
+// emitDataVal loads the address of a read-only global (at off within .rodata)
+// into dst, recording the relocation for the .rodata map's fd.
+func (c *comp) emitDataVal(dst Reg, off int32) {
+	c.relocs = append(c.relocs, MapReloc{Insn: len(c.insns), Map: rodataName})
+	w := LdMapValue(dst, 0, off) // fd patched in at load time; off fixed
+	c.emit(w[0], w[1])
+}
+
+// hasKey reports whether m contains key k (nil-safe).
+func hasKey(m map[string]int32, k string) bool { _, ok := m[k]; return ok }
 
 // regOf returns a register holding ref: its own if allocated to one, otherwise
 // scratch after loading ref into it.
@@ -313,6 +335,8 @@ func (c *comp) emitMove(dst, src loc) {
 			c.ldImm(dst.reg, src.imm)
 		case locMapFD:
 			c.emitMapFD(dst.reg, src.sym)
+		case locDataVal:
+			c.emitDataVal(dst.reg, int32(src.imm))
 		}
 	case locSlot:
 		switch src.kind {

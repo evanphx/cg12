@@ -46,7 +46,7 @@ func TestKernelVerifier(t *testing.T) {
 			f := compileC(t, c.src)
 			p, err := Compile(f)
 			require.NoError(t, err)
-			fd, log, err := LoadProgram(c.progType, p.Bytes())
+			fd, log, err := LoadProgram(c.progType, p.Bytes(), "GPL")
 			if err != nil {
 				skipUnprivileged(t, err)
 				t.Fatalf("verifier rejected the program:\n%s", log)
@@ -93,4 +93,33 @@ __attribute__((section("xdp"))) int count(void *ctx) {
 	val := make([]byte, 8)
 	require.NoError(t, MapLookup(lo.Maps["counts"], key, val))
 	require.Equal(t, uint64(5), binary.LittleEndian.Uint64(val), "counter incremented once per run")
+}
+
+// TestKernelRodataPrintk loads a program that reads a format string from .rodata
+// (a frozen array map) and calls bpf_trace_printk — exercising the whole
+// string-constant path against the verifier. Skipped without privileges.
+func TestKernelRodataPrintk(t *testing.T) {
+	const src = `
+long bpf_trace_printk(const char *fmt, unsigned sz, ...);
+char _license[] __attribute__((section("license"))) = "GPL";
+__attribute__((section("xdp"))) int say(void *ctx) {
+    bpf_trace_printk("cg12 %d\n", 9, 42);
+    return 2;
+}`
+	obj := compileModule(t, src)
+	require.Equal(t, "GPL", obj.License)
+	// The .rodata map (holding the format string) must be present.
+	rodata, ok := obj.MapByName(".rodata")
+	require.True(t, ok, "the format string must live in a .rodata map")
+	require.NotEmpty(t, rodata.Initial)
+
+	lo, err := Load(obj, 6 /*XDP*/)
+	if err != nil {
+		skipUnprivileged(t, err)
+		t.Fatalf("load failed: %v", err)
+	}
+	defer lo.Close()
+	ret, err := lo.TestRun(make([]byte, 14), 1)
+	require.NoError(t, err)
+	require.Equal(t, uint32(2), ret)
 }

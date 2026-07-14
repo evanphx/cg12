@@ -24,6 +24,7 @@ const (
 	cmdMapUpdate   = 2
 	cmdProgLoad    = 5
 	cmdProgTestRun = 10
+	cmdMapFreeze   = 22
 )
 
 // sysBPFNum is the bpf(2) syscall number per architecture.
@@ -107,16 +108,31 @@ func MapUpdate(fd int, key, value []byte, flags uint64) error {
 	return nil
 }
 
-// LoadProgram asks the verifier to load raw bytecode of the given program type,
-// returning its fd or the verifier log on rejection.
-func LoadProgram(progType uint32, code []byte) (int, string, error) {
-	license := append([]byte("GPL"), 0)
+// Freeze marks a map read-only to eBPF programs (they may then load values from
+// it as known constants). Used for .rodata.
+func Freeze(fd int) error {
+	attr := make([]byte, 16)
+	binary.LittleEndian.PutUint32(attr[0:], uint32(fd))
+	if _, errno := bpf(cmdMapFreeze, attr); errno != 0 {
+		return fmt.Errorf("bpf map freeze: %w", errno)
+	}
+	return nil
+}
+
+// LoadProgram asks the verifier to load raw bytecode of the given program type
+// under the given license (empty defaults to GPL), returning its fd or the
+// verifier log on rejection.
+func LoadProgram(progType uint32, code []byte, license string) (int, string, error) {
+	if license == "" {
+		license = "GPL"
+	}
+	lic := append([]byte(license), 0)
 	log := make([]byte, 1<<16)
 	attr := make([]byte, 120)
 	binary.LittleEndian.PutUint32(attr[0:], progType)
 	binary.LittleEndian.PutUint32(attr[4:], uint32(len(code)/8))
 	binary.LittleEndian.PutUint64(attr[8:], ptr(code))
-	binary.LittleEndian.PutUint64(attr[16:], ptr(license))
+	binary.LittleEndian.PutUint64(attr[16:], ptr(lic))
 	binary.LittleEndian.PutUint32(attr[24:], 1) // log_level
 	binary.LittleEndian.PutUint32(attr[28:], uint32(len(log)))
 	binary.LittleEndian.PutUint64(attr[32:], ptr(log))
@@ -142,6 +158,17 @@ func Load(obj *Object, progType uint32) (*LoadedObject, error) {
 			closeAll(maps)
 			return nil, err
 		}
+		if m.Initial != nil { // .rodata: seed the single entry and freeze it
+			key := make([]byte, 4)
+			if err := MapUpdate(fd, key, m.Initial, 0); err != nil {
+				closeAll(maps)
+				return nil, err
+			}
+			if err := Freeze(fd); err != nil {
+				closeAll(maps)
+				return nil, err
+			}
+		}
 		maps[m.Name] = fd
 	}
 
@@ -156,7 +183,7 @@ func Load(obj *Object, progType uint32) (*LoadedObject, error) {
 		insns[r.Insn].Imm = int32(fd) // the ld_imm64's first slot carries the fd
 	}
 
-	fd, log, err := LoadProgram(progType, (&Prog{Insns: insns}).Bytes())
+	fd, log, err := LoadProgram(progType, (&Prog{Insns: insns}).Bytes(), obj.License)
 	if err != nil {
 		closeAll(maps)
 		return nil, fmt.Errorf("%w\n%s", err, log)

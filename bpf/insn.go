@@ -169,9 +169,12 @@ func LdImm64(dst Reg, imm int64) [2]Insn {
 	}
 }
 
-// pseudoMapFD marks a 64-bit immediate load whose immediate is a map file
-// descriptor, resolved when the program is loaded.
-const pseudoMapFD = 1
+// A 64-bit-immediate load's source register selects a special immediate: a map
+// file descriptor, or the address of a value inside a map (used for .rodata).
+const (
+	pseudoMapFD    = 1
+	pseudoMapValue = 2
+)
 
 // LdMapFD loads a map's file descriptor into dst (a two-slot instruction with a
 // BPF_PSEUDO_MAP_FD source). fd is 0 until the loader patches in the real map fd.
@@ -179,6 +182,16 @@ func LdMapFD(dst Reg, fd int32) [2]Insn {
 	return [2]Insn{
 		{Op: clsLD | modeIMM | sizeDW, Dst: dst, Src: pseudoMapFD, Imm: fd},
 		{Imm: 0},
+	}
+}
+
+// LdMapValue loads the address of offset off inside a map's single value into
+// dst (a BPF_PSEUDO_MAP_VALUE load), for reading .rodata. fd is patched at load;
+// off is fixed at compile time.
+func LdMapValue(dst Reg, fd, off int32) [2]Insn {
+	return [2]Insn{
+		{Op: clsLD | modeIMM | sizeDW, Dst: dst, Src: pseudoMapValue, Imm: fd},
+		{Imm: off},
 	}
 }
 
