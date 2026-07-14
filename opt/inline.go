@@ -212,6 +212,18 @@ func spliceCall(caller *ir.Func, b *ir.Block, idx int, callee *ir.Func, cg *call
 			tb.Jmp = ir.Jmp{Kind: ir.JmpJmp, To: blockMap[s.jmp.To]}
 		case ir.JmpJnz:
 			tb.Jmp = ir.Jmp{Kind: ir.JmpJnz, Arg: mapRef(s.jmp.Arg), To: blockMap[s.jmp.To], To2: blockMap[s.jmp.To2]}
+		case ir.JmpSwitch:
+			nc := make([]ir.SwitchCase, len(s.jmp.Cases))
+			for k, c := range s.jmp.Cases {
+				nc[k] = ir.SwitchCase{Val: c.Val, Blk: blockMap[c.Blk]}
+			}
+			tb.Jmp = ir.Jmp{Kind: ir.JmpSwitch, Arg: mapRef(s.jmp.Arg), To: blockMap[s.jmp.To], Signed: s.jmp.Signed, Cases: nc}
+		case ir.JmpBr:
+			nt := make([]*ir.Block, len(s.jmp.Targets))
+			for k, t := range s.jmp.Targets {
+				nt[k] = blockMap[t]
+			}
+			tb.Jmp = ir.Jmp{Kind: ir.JmpBr, Arg: mapRef(s.jmp.Arg), Targets: nt}
 		case ir.JmpHlt:
 			tb.Jmp = ir.Jmp{Kind: ir.JmpHlt}
 		}

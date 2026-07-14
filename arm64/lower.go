@@ -6,6 +6,7 @@ import (
 	"github.com/evanphx/cg12/analysis"
 	"github.com/evanphx/cg12/arm64/a64"
 	"github.com/evanphx/cg12/ir"
+	lowerpass "github.com/evanphx/cg12/lower"
 )
 
 // lower rewrites f from SSA into a form ready for register allocation and
@@ -16,6 +17,7 @@ import (
 // Only the integer subset (classes w and l) is handled; anything outside it
 // returns an explicit error rather than emitting silently wrong code.
 func lower(f *ir.Func) error {
+	lowerpass.Switches(f) // multiway branches -> conditional branches, before edge splitting
 	hoistAllocas(f)
 	foldIdioms(f)
 	foldAddressing(f)

@@ -45,7 +45,25 @@ func richModule() *Module {
 	v.Variadic = true
 	v.Param("k", ClsW)
 	v.Entry().Ret(v.Double(1.5))
+
+	// sw(k): a multiway switch, to exercise the JmpSwitch terminator round-trip.
+	sw := m.NewFunc("sw", ClsW).Export()
+	k := sw.Param("k", ClsW)
+	c1, c2, dflt := sw.NewBlock("c1"), sw.NewBlock("c2"), sw.NewBlock("dflt")
+	sw.Entry().Switch(k, dflt, true, []SwitchCase{{Val: -1, Blk: c1}, {Val: 100, Blk: c2}})
+	c1.Ret(sw.ConstInt(ClsW, 10))
+	c2.Ret(sw.ConstInt(ClsW, 20))
+	dflt.Ret(sw.ConstInt(ClsW, 0))
 	return m
+}
+
+func TestSwitchSuccs(t *testing.T) {
+	f := NewModule().NewFunc("f", ClsW)
+	k := f.Param("k", ClsW)
+	a, b, d := f.NewBlock("a"), f.NewBlock("b"), f.NewBlock("d")
+	f.Entry().Switch(k, d, false, []SwitchCase{{Val: 1, Blk: a}, {Val: 2, Blk: b}})
+	// Successors are the default followed by every case block.
+	assert.Equal(t, []*Block{d, a, b}, f.Entry().Succs())
 }
 
 func TestBinaryRoundTrip(t *testing.T) {

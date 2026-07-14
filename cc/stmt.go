@@ -298,24 +298,23 @@ type switchCase struct {
 func (g *gen) genSwitch(ss *cc.SelectionStatement) {
 	ct := ss.ExpressionList.Type()
 	cond := g.genExpr(ss.ExpressionList)
-	cls := clsOf(ct)
 
 	var cases []switchCase
 	var defBlk *ir.Block
 	g.collectCases(ss.Statement, &cases, &defBlk)
 
 	endB := g.block("swend")
-	for _, c := range cases {
-		nextB := g.block("swtest")
-		eq := g.cur.Cmp(ir.CmpEq, cls, cond, g.constOf(c.val, ct))
-		g.cur.Jnz(eq, c.blk, nextB)
-		g.cur = nextB
+	deflt := defBlk
+	if deflt == nil {
+		deflt = endB
 	}
-	if defBlk != nil {
-		g.cur.Goto(defBlk)
-	} else {
-		g.cur.Goto(endB)
+	// Emit one multiway branch; a backend lowering pass chooses the dispatch
+	// form (if-chain, binary search, or jump table).
+	scases := make([]ir.SwitchCase, len(cases))
+	for i, c := range cases {
+		scases[i] = ir.SwitchCase{Val: c.val, Blk: c.blk}
 	}
+	g.cur.Switch(cond, deflt, signed(ct), scases)
 
 	// Generate the body. The prologue block before the first label is
 	// unreachable (dispatch jumps straight to the case blocks); dead code there

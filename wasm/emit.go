@@ -6,6 +6,7 @@ import (
 	"strings"
 
 	"github.com/evanphx/cg12/ir"
+	"github.com/evanphx/cg12/lower"
 )
 
 // emitter accumulates WAT text for one function with simple indentation.
@@ -27,6 +28,7 @@ type emitter struct {
 
 // emitFunc writes the (func ...) form for f into sb.
 func emitFunc(f *ir.Func, sb *strings.Builder, ctx *modCtx) error {
+	lower.Switches(f) // multiway branches -> conditional branches before relooping
 	e := &emitter{f: f, sb: sb, ctx: ctx, depth: 1}
 	e.planFrame()
 	e.signature()

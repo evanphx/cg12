@@ -113,13 +113,20 @@ type Phi struct {
 type JmpKind uint8
 
 const (
-	JmpNone JmpKind = iota // unterminated (under construction)
-	JmpJmp                 // unconditional jump to To
-	JmpJnz                 // if Arg != 0 goto To else To2
-	JmpRet                 // return Arg (R for void)
-	JmpHlt                 // trap / unreachable
-	JmpBr                  // computed goto: branch to the address in Arg, reaching one of Targets
+	JmpNone   JmpKind = iota // unterminated (under construction)
+	JmpJmp                   // unconditional jump to To
+	JmpJnz                   // if Arg != 0 goto To else To2
+	JmpRet                   // return Arg (R for void)
+	JmpHlt                   // trap / unreachable
+	JmpBr                    // computed goto: branch to the address in Arg, reaching one of Targets
+	JmpSwitch                // multiway branch: dispatch Arg to a matching Case, else To (default)
 )
+
+// SwitchCase pairs a case's constant value with the block it dispatches to.
+type SwitchCase struct {
+	Val int64
+	Blk *Block
+}
 
 // Jmp is a block terminator. Successor blocks are referenced directly so the
 // CFG is navigable without a separate edge table.
@@ -136,4 +143,9 @@ type Jmp struct {
 	// Targets lists the possible successor blocks of a JmpBr (every label whose
 	// address is taken), so the CFG and liveness see the indirect edges.
 	Targets []*Block
+
+	// Cases holds the value->block arms of a JmpSwitch; To is its default block.
+	// Signed selects signed vs unsigned comparison when the switch is lowered.
+	Cases  []SwitchCase
+	Signed bool
 }

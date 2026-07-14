@@ -282,6 +282,15 @@ func (f *Func) printJmp(sb *strings.Builder, j Jmp) {
 			}
 		}
 		sb.WriteByte('\n')
+	case JmpSwitch:
+		fmt.Fprintf(sb, "\tswitch %s, @%s [", f.refString(j.Arg), j.To.Name)
+		for i, c := range j.Cases {
+			if i > 0 {
+				sb.WriteString(", ")
+			}
+			fmt.Fprintf(sb, "%d: @%s", c.Val, c.Blk.Name)
+		}
+		sb.WriteString("]\n")
 	}
 }
 

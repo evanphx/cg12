@@ -429,6 +429,14 @@ func (b *Block) BrIndirect(addr Ref, targets ...*Block) {
 	b.Jmp = Jmp{Kind: JmpBr, Arg: addr, Targets: targets}
 }
 
+// Switch terminates the block with a multiway branch: control goes to the arm
+// whose value equals val, or to deflt when none matches. signed selects signed
+// vs unsigned comparison for the ordered lowering. A backend or lowering pass
+// turns this into an if-chain, a binary search, or a jump table.
+func (b *Block) Switch(val Ref, deflt *Block, signed bool, cases []SwitchCase) {
+	b.Jmp = Jmp{Kind: JmpSwitch, Arg: val, To: deflt, Signed: signed, Cases: cases}
+}
+
 // --- phis -----------------------------------------------------------------
 
 // PhiEdge pairs an incoming value with the predecessor it arrives from.

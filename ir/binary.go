@@ -329,6 +329,12 @@ func (e *enc) encBlock(b *Block, blockRef func(*Block)) {
 	for _, t := range b.Jmp.Targets {
 		blockRef(t)
 	}
+	e.boolean(b.Jmp.Signed)
+	e.uv(uint64(len(b.Jmp.Cases)))
+	for _, c := range b.Jmp.Cases {
+		e.iv(c.Val)
+		blockRef(c.Blk)
+	}
 }
 
 func (e *enc) encInstr(in *Instr, blockRef func(*Block)) {
@@ -584,6 +590,14 @@ func (d *dec) decBlock(b *Block, blockRef func() *Block) {
 		b.Jmp.Targets = make([]*Block, n)
 		for i := range b.Jmp.Targets {
 			b.Jmp.Targets[i] = blockRef()
+		}
+	}
+	b.Jmp.Signed = d.boolean()
+	if n := int(d.uv()); n > 0 {
+		b.Jmp.Cases = make([]SwitchCase, n)
+		for i := range b.Jmp.Cases {
+			b.Jmp.Cases[i].Val = d.iv()
+			b.Jmp.Cases[i].Blk = blockRef()
 		}
 	}
 }
