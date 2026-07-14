@@ -205,12 +205,12 @@ func (g *gen) genInit(addr ir.Ref, t cc.Type, init *cc.Initializer) {
 			return
 		}
 	}
-	if isMemValue(t) { // struct/union/long-double initialized from another value
-		src := g.convert(g.genExpr(e), e.Type(), t)
+	if isMemValue(t) { // struct/union/long-double/complex initialized from another value
+		src := g.rval(e, t)
 		g.copyAgg(addr, src, int(t.Size()))
 		return
 	}
-	val := g.convert(g.genExpr(e), e.Type(), t)
+	val := g.rval(e, t)
 	g.storeVal(addr, val, t)
 }
 
@@ -249,8 +249,8 @@ func (g *gen) genBraceInit(addr ir.Ref, il *cc.InitializerList) {
 				continue
 			}
 		}
-		val := g.convert(g.genExpr(e), e.Type(), et)
-		if isMemValue(et) { // a struct/union/long-double element is a byte copy
+		val := g.rval(e, et)
+		if isMemValue(et) { // a struct/union/long-double/complex element is a byte copy
 			g.copyAgg(dst, val, int(et.Size()))
 			continue
 		}
@@ -599,7 +599,7 @@ func (g *gen) genJump(js *cc.JumpStatement) {
 			g.cur.RetVoid()
 			return
 		}
-		v := g.convert(g.genExpr(js.ExpressionList), js.ExpressionList.Type(), g.retType())
+		v := g.rval(js.ExpressionList, g.retType())
 		g.cur.Ret(v)
 	case cc.JumpStatementBreak:
 		if len(g.brk) > 0 {

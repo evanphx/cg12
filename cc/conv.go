@@ -13,6 +13,13 @@ func (g *gen) convert(v ir.Ref, from, to cc.Type) ir.Ref {
 	if from == nil || to == nil {
 		return v
 	}
+	// A conversion touching a complex type is lowered on the {re,im} components.
+	if isComplex(from) || isComplex(to) {
+		return g.complexConvert(v, from, to)
+	}
+	if cc.IsComplexType(from) || cc.IsComplexType(to) {
+		return g.fail("cc: unsupported complex conversion %v -> %v", from, to)
+	}
 	// long double conversions are soft-float calls; a quad-to-quad "conversion"
 	// is a no-op on the value's address.
 	if isLongDouble(from) || isLongDouble(to) {
@@ -168,22 +175,36 @@ func (g *gen) genCall(n *cc.PostfixExpression) ir.Ref {
 	args := make([]ir.Ref, 0, len(argNodes))
 	var aggArgs []*ir.AggType // parallel to args; non-nil where an arg is by-value aggregate
 	for i, an := range argNodes {
-		v := g.genExpr(an)
-		if isMemValue(an.Type()) {
-			// A by-value aggregate or long double argument is passed as a pointer to
-			// its storage (v is that address), tagged so the backend loads it per
-			// the ABI. A fixed long double parameter still needs the conversion below.
-			if ft != nil && i < nfixed {
-				v = g.convert(v, an.Type(), ft.Parameters()[i].Type())
+		var pt cc.Type
+		if ft != nil && i < nfixed {
+			pt = ft.Parameters()[i].Type()
+		}
+		// A by-value aggregate, long double, or complex argument is passed as a
+		// pointer to its storage, tagged so the backend loads it per the ABI. The
+		// effective type accounts for modernc dropping the complex kind from a
+		// `real op _Complex float` argument.
+		_, argComplex := g.effComplex(an)
+		var v ir.Ref
+		switch {
+		case isMemValue(an.Type()) || (pt != nil && isMemValue(pt)) || argComplex:
+			byValT := an.Type()
+			if pt != nil {
+				v = g.rval(an, pt) // coerce to the fixed parameter type
+				byValT = pt
+			} else {
+				if argComplex && !isComplex(an.Type()) {
+					return g.fail("cc: passing a %v-idiom complex through a variadic parameter is unsupported", an.Type())
+				}
+				v = g.genExpr(an) // variadic aggregate/complex: pass as-is
 			}
 			for len(aggArgs) <= i {
 				aggArgs = append(aggArgs, nil)
 			}
-			aggArgs[i] = g.aggTypeOf(an.Type())
-		} else if ft != nil && i < nfixed {
-			v = g.convert(v, an.Type(), ft.Parameters()[i].Type())
-		} else {
-			v = g.promote(v, an.Type())
+			aggArgs[i] = g.aggTypeOf(byValT)
+		case pt != nil:
+			v = g.rval(an, pt)
+		default:
+			v = g.promote(g.genExpr(an), an.Type())
 		}
 		args = append(args, v)
 	}

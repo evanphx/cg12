@@ -24,6 +24,7 @@ type gen struct {
 	strs     map[string]string                  // decoded string literal -> data symbol name
 	ldconsts map[string]string                  // quad constant bytes -> data symbol name
 	quad     *ir.AggType                        // the canonical long-double (quad) aggregate type
+	cplx     map[ir.SubCls]*ir.AggType          // memoized _Complex {re,im} aggregate types
 	aggs     map[cc.Type]*ir.AggType            // memoized C struct/union -> cg12 aggregate type
 	names    map[string]int                     // per-function temp-name uniquifier
 	labels   map[string]*ir.Block               // goto label -> block (per function)
@@ -105,7 +106,7 @@ func Compile(name, src string) (*ir.Module, error) {
 		return nil, fmt.Errorf("cc parse: %w", err)
 	}
 
-	g := &gen{mod: ir.NewModule(), strs: map[string]string{}, ldconsts: map[string]string{}, aggs: map[cc.Type]*ir.AggType{}}
+	g := &gen{mod: ir.NewModule(), strs: map[string]string{}, ldconsts: map[string]string{}, cplx: map[ir.SubCls]*ir.AggType{}, aggs: map[cc.Type]*ir.AggType{}}
 	g.push() // file scope: holds globals, visible to every function
 	for tu := ast.TranslationUnit; tu != nil; tu = tu.TranslationUnit {
 		ed := tu.ExternalDeclaration
@@ -138,6 +139,9 @@ func (g *gen) fail(format string, a ...any) ir.Ref {
 // use the abstract pointer class ClsP, which each backend resolves to its native
 // pointer width with LowerPointers (ClsL on 64-bit targets, ClsW on wasm32).
 func clsOf(t cc.Type) ir.Cls {
+	if cc.IsComplexType(t) {
+		return ir.ClsP // a complex value is the address of its {re,im} storage
+	}
 	switch t.Kind() {
 	case cc.Float:
 		return ir.ClsS
@@ -243,7 +247,7 @@ func (g *gen) rvalue(addr ir.Ref, t cc.Type) ir.Ref {
 // isMemValue reports whether a value of type t is represented by the address of
 // its storage rather than loaded into a register: a struct/union or a long
 // double (a 128-bit quad), both of which are passed and copied through memory.
-func isMemValue(t cc.Type) bool { return isAggType(t) || isLongDouble(t) }
+func isMemValue(t cc.Type) bool { return isAggType(t) || isLongDouble(t) || cc.IsComplexType(t) }
 
 // loadVal loads a value of type t from addr, sign/zero-extending narrow types.
 func (g *gen) loadVal(addr ir.Ref, t cc.Type) ir.Ref {
@@ -468,6 +472,12 @@ func (g *gen) globalItems(t cc.Type, init *cc.Initializer) []ir.DataItem {
 		case isLongDouble(et):
 			if ldv, ok := e.Value().(*cc.LongDoubleValue); ok {
 				leaves = append(leaves, leaf{off, 16, ir.DataItem{Str: string(quadBytes((*big.Float)(ldv)))}})
+			}
+		case isComplex(et):
+			if cv, ok := constComplex(e); ok {
+				cs := compSize(complexCls(et))
+				leaves = append(leaves, leaf{off, cs, ir.DataItem{Sub: subFor(cs), Flts: []float64{real(cv)}}})
+				leaves = append(leaves, leaf{off + cs, cs, ir.DataItem{Sub: subFor(cs), Flts: []float64{imag(cv)}}})
 			}
 		case isFloat(et):
 			if v, ok := e.Value().(cc.Float64Value); ok {

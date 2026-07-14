@@ -34,6 +34,9 @@ func (g *gen) aggTypeOf(t cc.Type) *ir.AggType {
 	if isLongDouble(t) {
 		return g.quadAgg()
 	}
+	if cc.IsComplexType(t) {
+		return g.complexAgg(t)
+	}
 	return g.aggOf(t)
 }
 

@@ -17,7 +17,7 @@ func (g *gen) genExpr(e cc.ExpressionNode) ir.Ref {
 	case *cc.UnaryExpression:
 		return g.genUnary(n)
 	case *cc.CastExpression:
-		return g.convert(g.genExpr(n.CastExpression), n.CastExpression.Type(), n.Type())
+		return g.rval(n.CastExpression, n.Type())
 	case *cc.MultiplicativeExpression:
 		return g.arith(mulOp(n.Case), n.MultiplicativeExpression, n.CastExpression, n.Type())
 	case *cc.AdditiveExpression:
@@ -99,6 +99,13 @@ func eqOp(c cc.EqualityExpressionCase) string {
 // --- primary expressions ---------------------------------------------------
 
 func (g *gen) genPrimary(n *cc.PrimaryExpression) ir.Ref {
+	// A folded complex constant (an imaginary literal like 2.0i, or _Complex_I)
+	// materializes into a {re,im} slot.
+	if isComplex(n.Type()) {
+		if cv, ok := complexConstVal(n); ok {
+			return g.complexConst(cv, complexCls(n.Type()))
+		}
+	}
 	switch n.Case {
 	case cc.PrimaryExpressionInt, cc.PrimaryExpressionChar, cc.PrimaryExpressionLChar:
 		v, _ := constInt(n)
@@ -294,11 +301,18 @@ func (g *gen) incDec(v ir.Ref, t cc.Type, inc bool) ir.Ref {
 func (g *gen) genUnary(n *cc.UnaryExpression) ir.Ref {
 	switch n.Case {
 	case cc.UnaryExpressionMinus:
+		if comp, ok := g.effComplex(n.CastExpression); ok {
+			return g.complexNeg(n.CastExpression, comp)
+		}
 		if isLongDouble(n.Type()) {
 			return g.softcall("__negtf2", true, 0, qa(g.genExpr(n.CastExpression)))
 		}
 		v := g.genExpr(n.CastExpression)
 		return g.cur.Neg(clsOf(n.Type()), v)
+	case cc.UnaryExpressionReal: // __real__ z
+		return g.complexReal(complexOperand(n))
+	case cc.UnaryExpressionImag: // __imag__ z
+		return g.complexImag(complexOperand(n))
 	case cc.UnaryExpressionPlus:
 		return g.genExpr(n.CastExpression)
 	case cc.UnaryExpressionNot: // !x  ==  x == 0
@@ -387,6 +401,17 @@ func (g *gen) arith(op string, ln, rn cc.ExpressionNode, resT cc.Type) ir.Ref {
 	if op == "-" && isPtrOrArray(ln.Type()) && isPtrOrArray(rn.Type()) {
 		diff := g.ptrDiff(g.genExpr(ln), g.genExpr(rn), elemSize(ln.Type()))
 		return g.convert(diff, ln.Type(), resT)
+	}
+	// Complex arithmetic lowers to component operations on the {re,im} pair.
+	// effComplex also recovers the cases modernc mis-types as real.
+	switch op {
+	case "+", "-", "*", "/":
+		if comp, ok := g.complexArithComp(ln, rn, resT); ok {
+			return g.complexArith(op, ln, rn, comp)
+		}
+		if cc.IsComplexType(resT) {
+			return g.fail("cc: unsupported complex type %v", resT)
+		}
 	}
 	// long double arithmetic is a soft-float call on the operands' addresses.
 	if isLongDouble(resT) {
@@ -479,6 +504,10 @@ func (g *gen) ptrArith(op string, ln, rn cc.ExpressionNode, pt *cc.PointerType) 
 
 // compare emits a relational/equality comparison producing a 0/1 int.
 func (g *gen) compare(op string, ln, rn cc.ExpressionNode) ir.Ref {
+	// Complex operands admit only == and !=, comparing both components.
+	if isComplex(ln.Type()) || isComplex(rn.Type()) {
+		return g.complexCompare(op, ln, rn)
+	}
 	// Compare in the common type of the operands, following the usual
 	// arithmetic conversions: long double > double > float > wider integer. A
 	// floating operand always dominates an integer one -- comparing e.g. a
@@ -638,16 +667,19 @@ func (g *gen) genAssign(n *cc.AssignmentExpression) ir.Ref {
 	}
 	addr, t := g.genAddr(n.UnaryExpression)
 	if n.Case == cc.AssignmentExpressionAssign {
-		if isMemValue(t) { // struct/union/long-double assignment is a byte copy
-			src := g.convert(g.genExpr(n.AssignmentExpression), n.AssignmentExpression.Type(), t)
+		if isMemValue(t) { // struct/union/long-double/complex assignment is a byte copy
+			src := g.rval(n.AssignmentExpression, t)
 			g.copyAgg(addr, src, int(t.Size()))
 			return addr
 		}
-		v := g.convert(g.genExpr(n.AssignmentExpression), n.AssignmentExpression.Type(), t)
+		v := g.rval(n.AssignmentExpression, t)
 		g.storeVal(addr, v, t)
 		return v
 	}
 	// Compound assignment: load, combine, store.
+	if isComplex(t) { // z op= x  combines both components (op is +, -, *, /)
+		return g.complexCompound(compoundArithOp(n.Case), addr, t, n.AssignmentExpression)
+	}
 	if isLongDouble(t) { // r op= x  is a soft-float op on the operands' addresses
 		old := g.rvalue(addr, t)
 		rhs := g.convert(g.genExpr(n.AssignmentExpression), n.AssignmentExpression.Type(), t)
