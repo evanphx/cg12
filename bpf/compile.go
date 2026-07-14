@@ -66,6 +66,8 @@ type comp struct {
 	subRelocs  []subReloc         // BPF-to-BPF call slots to patch with a pc-relative offset
 	fixups     []fixup
 	used       map[uint32]bool // temp IDs consumed somewhere (as an arg, phi input, or terminator)
+	poss       []ir.SrcPos     // source position of each emitted instruction (parallel to insns)
+	curPos     ir.SrcPos       // position stamped onto instructions emitted next
 	err        error
 }
 
@@ -132,7 +134,12 @@ func (c *comp) fail(format string, a ...any) {
 	}
 }
 
-func (c *comp) emit(in ...Insn) { c.insns = append(c.insns, in...) }
+func (c *comp) emit(in ...Insn) {
+	c.insns = append(c.insns, in...)
+	for range in {
+		c.poss = append(c.poss, c.curPos)
+	}
+}
 
 // allocStack reserves stack space for every OAlloc, below which register spills
 // are placed by the allocator.

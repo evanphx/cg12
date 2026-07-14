@@ -61,6 +61,7 @@ func (g *gen) genStmtExpr(cs *cc.CompoundStatement) ir.Ref {
 func (g *gen) genBlockItem(bi *cc.BlockItem) {
 	switch bi.Case {
 	case cc.BlockItemDecl:
+		g.at(bi.Declaration)
 		g.genLocalDecl(bi.Declaration)
 	case cc.BlockItemStmt:
 		g.genStmt(bi.Statement)
@@ -225,6 +226,7 @@ func (g *gen) genStmt(s *cc.Statement) {
 	if s == nil {
 		return
 	}
+	g.at(s)
 	switch s.Case {
 	case cc.StatementExpr:
 		if s.ExpressionStatement != nil && s.ExpressionStatement.ExpressionList != nil {

@@ -4,6 +4,9 @@ import "github.com/evanphx/cg12/ir"
 
 // instr lowers one non-terminator instruction to eBPF.
 func (c *comp) instr(in *ir.Instr) {
+	if in.Pos.Valid() {
+		c.curPos = in.Pos
+	}
 	switch {
 	case in.Op == ir.ONop:
 	case in.Op == ir.OCopy:

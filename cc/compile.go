@@ -159,6 +159,20 @@ func (g *gen) block(prefix string) *ir.Block {
 	return g.fn.NewBlock(fmt.Sprintf("%s%d", prefix, g.nblk))
 }
 
+// at stamps the current block's emit position from an AST node's source
+// location, so instructions emitted next carry a line and column for debug info
+// (DWARF on native backends, BTF.ext line_info on eBPF).
+func (g *gen) at(n cc.Node) {
+	if n == nil || g.cur == nil {
+		return
+	}
+	p := n.Position()
+	if p.Line == 0 {
+		return
+	}
+	g.cur.At(ir.SrcPos{File: g.mod.File(p.Filename), Line: uint32(p.Line), Col: uint32(p.Column)})
+}
+
 // setName names a temporary after the C construct it came from, keeping names
 // unique within the function so the printed IR reads like the source (the first
 // use of a base name gets it verbatim, later ones get a ".N" suffix).

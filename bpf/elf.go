@@ -196,8 +196,23 @@ func (o *Object) ELF() []byte {
 		}
 		dataSecIdx[m.Name] = w.addSection(elfSection{name: m.Name, typ: shtProgbits, flags: flags, data: m.Initial, align: 8})
 	}
-	if len(mapSyms) > 0 || len(o.DataVars) > 0 {
-		w.addSection(elfSection{name: ".BTF", typ: shtProgbits, data: buildBTF(o), align: 4})
+	// BTF: types for maps, data sections, and a FUNC per function; then .BTF.ext
+	// with func_info/line_info. Build .BTF.ext first so its section and file-name
+	// strings are interned into the shared string section before .BTF is rendered.
+	btf, funcTypes := buildBTF(o)
+	var extFuncs []btfExtFunc
+	for _, f := range o.Funcs {
+		sec := f.Section
+		if sec == "" {
+			sec = ".text"
+		}
+		p := loc[f.Name]
+		extFuncs = append(extFuncs, btfExtFunc{section: sec, name: f.Name, insnOff: uint32(p.off / 8), poss: f.Poss})
+	}
+	ext := buildBTFExt(btf, funcTypes, o.Files, extFuncs)
+	w.addSection(elfSection{name: ".BTF", typ: shtProgbits, data: btf.blob(), align: 4})
+	if ext != nil {
+		w.addSection(elfSection{name: ".BTF.ext", typ: shtProgbits, data: ext, align: 4})
 	}
 
 	// Symbols: a FUNC per function, an OBJECT per map and data global.

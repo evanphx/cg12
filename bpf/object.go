@@ -2,6 +2,7 @@ package bpf
 
 import (
 	"encoding/binary"
+	"fmt"
 
 	"github.com/evanphx/cg12/ir"
 )
@@ -40,6 +41,7 @@ type Program struct {
 	Name    string
 	Section string
 	Insns   []Insn
+	Poss    []ir.SrcPos // source position of each instruction (parallel to Insns)
 	Relocs  []MapReloc
 }
 
@@ -72,8 +74,20 @@ type CompiledFunc struct {
 	Name       string
 	Section    string
 	Insns      []Insn
+	Poss       []ir.SrcPos // source position of each instruction (for .BTF.ext line info)
+	Sig        FuncSig     // signature, for the function's BTF FUNC type
 	MapRelocs  []MapReloc
 	CallRelocs []CallReloc
+}
+
+// FuncSig is a function's signature in terms of value classes, enough to emit a
+// BTF FUNC_PROTO. Params holds one class per register parameter, ParamNames the
+// matching names (the kernel requires a global FUNC's parameters to be named).
+type FuncSig struct {
+	HasRet     bool
+	Ret        ir.Cls
+	Params     []ir.Cls
+	ParamNames []string
 }
 
 // Object is a whole compiled module: the maps it needs and the programs that use
@@ -84,6 +98,7 @@ type Object struct {
 	Funcs    []CompiledFunc // every function, for the ELF's .text + relocations
 	DataVars []DataVar      // layout of the .rodata / .data sections (for the ELF)
 	License  string         // from the "license" global, or "GPL"
+	Files    []string       // source file names, indexed by ir.SrcPos.File-1 (for .BTF.ext)
 }
 
 // MapByName returns the map with the given name.
@@ -176,16 +191,17 @@ func CompileModule(m *ir.Module) (*Object, error) {
 		if err := c.run(); err != nil {
 			return nil, err
 		}
-		compiled[f.Name] = &compiledFunc{insns: c.insns, relocs: c.relocs, subs: c.subRelocs}
+		compiled[f.Name] = &compiledFunc{insns: c.insns, poss: c.poss, relocs: c.relocs, subs: c.subRelocs}
 		calls := make([]CallReloc, len(c.subRelocs))
 		for i, s := range c.subRelocs {
 			calls[i] = CallReloc{Insn: s.Insn, Func: s.Func}
 		}
 		obj.Funcs = append(obj.Funcs, CompiledFunc{
 			Name: f.Name, Section: f.Linkage.Section,
-			Insns: c.insns, MapRelocs: c.relocs, CallRelocs: calls,
+			Insns: c.insns, Poss: c.poss, Sig: sigOf(f), MapRelocs: c.relocs, CallRelocs: calls,
 		})
 	}
+	obj.Files = append([]string(nil), m.Files...)
 
 	// Each function with an attach section is an entry program; link it with the
 	// subprograms it (transitively) calls.
@@ -202,6 +218,7 @@ func CompileModule(m *ir.Module) (*Object, error) {
 // program together with its subprograms.
 type compiledFunc struct {
 	insns  []Insn
+	poss   []ir.SrcPos
 	relocs []MapReloc
 	subs   []subReloc
 }
@@ -227,6 +244,7 @@ func linkProgram(entry *ir.Func, compiled map[string]*compiledFunc) *Program {
 
 	start := map[string]int{}
 	var insns []Insn
+	var poss []ir.SrcPos
 	var relocs []MapReloc
 	for _, name := range order {
 		cf := compiled[name]
@@ -236,6 +254,7 @@ func linkProgram(entry *ir.Func, compiled map[string]*compiledFunc) *Program {
 			relocs = append(relocs, r)
 		}
 		insns = append(insns, cf.insns...)
+		poss = append(poss, cf.poss...)
 	}
 	for _, name := range order {
 		cf := compiled[name]
@@ -244,10 +263,24 @@ func linkProgram(entry *ir.Func, compiled map[string]*compiledFunc) *Program {
 			insns[at].Imm = int32(start[s.Func] - (at + 1))
 		}
 	}
-	return &Program{Name: entry.Name, Section: entry.Linkage.Section, Insns: insns, Relocs: relocs}
+	return &Program{Name: entry.Name, Section: entry.Linkage.Section, Insns: insns, Poss: poss, Relocs: relocs}
 }
 
 func align8(n int) int { return (n + 7) &^ 7 }
+
+// sigOf captures a function's signature classes for its BTF FUNC_PROTO.
+func sigOf(f *ir.Func) FuncSig {
+	s := FuncSig{HasRet: f.HasRet, Ret: f.Retty}
+	for i, p := range f.Params {
+		name := p.Name
+		if name == "" {
+			name = fmt.Sprintf("arg%d", i)
+		}
+		s.Params = append(s.Params, p.Cls)
+		s.ParamNames = append(s.ParamNames, name)
+	}
+	return s
+}
 
 func trimNUL(s string) string {
 	if i := indexByte(s, 0); i >= 0 {
