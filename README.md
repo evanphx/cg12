@@ -4,6 +4,43 @@ A machine-code generation package for Go: a small, embeddable, SSA-based
 compiler backend. cg12 starts as an idiomatic-Go re-imagining of
 [QBE](https://c9x.me/compile/) and grows beyond it.
 
+The repository also includes two source frontends: `cc`, built with
+`modernc.org/cc`, and `goc`, built almost entirely on Go's standard
+`go/parser`, `go/ast`, `go/types`, and `go/constant` packages. The Go frontend
+currently compiles fixed-width and native integer/boolean functions, explicit
+scalar conversions, local and package variables, direct calls and recursion,
+short-circuit Boolean expressions, `if`, `for`, and expression or expressionless
+`switch` statements (including `fallthrough`). Unsupported language features
+are diagnosed with source positions.
+
+The `goc` test corpus is arranged as a complexity ladder. It compiles, links,
+and executes constants, signed and unsigned arithmetic, overflow at each scalar
+width, parallel assignment and shadowing, branches, loops, calls, recursion,
+short-circuit side effects, switches, constants, and mutable globals. Core cases
+run through both unoptimized and optimized cg12 IR. This is an intentionally
+sound subset rather than a claim of full Go compatibility. The frontend now
+has the initial array, struct, slice, pointer, method, multiple-result, builtin,
+and interface-devirtualization support needed by SHA-256. Maps, closures,
+goroutines, general interface dispatch, and a complete Go runtime remain future
+work.
+
+Imports are resolved from build-selected source in the repository-owned
+`stdlib/src` tree with `go/build` and type-checked through `go/types`. The first
+ten copied packages and their activation order are documented in
+`stdlib/README.md`. The `crypto/sha256` execution test uses the unchanged public
+`Sum256([]byte) [32]byte` implementation selected with the `purego` build tag.
+Its wrapper, FIPS implementation,
+byte-order helpers, and `math/bits` dependencies are lowered into the same cg12
+module as the importing program. The test hashes `"abc"` at runtime and checks a
+fingerprint covering all 32 expected digest bytes; host hashing and generated
+SHA substitutes are not used.
+
+```sh
+go run ./cmd/goc -emit-ir program.go
+go run ./cmd/goc -O -c program.go
+go run ./cmd/goc -run program.go
+```
+
 ## Goals
 
 - **Library-first.** cg12 is designed to be embedded. You construct IR through a
