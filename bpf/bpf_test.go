@@ -26,6 +26,13 @@ func compileC(t *testing.T, src string) *ir.Func {
 	return nil
 }
 
+// ccCompile compiles a C source to unoptimized cg12 IR (so subprogram calls are
+// not inlined away).
+func ccCompile(t *testing.T, src string) (*ir.Module, error) {
+	t.Helper()
+	return cc.Compile("prog.c", src)
+}
+
 // compileModule compiles a C source to an optimized eBPF Object (programs + maps).
 func compileModule(t *testing.T, src string) *Object {
 	t.Helper()

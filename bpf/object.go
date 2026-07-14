@@ -54,13 +54,32 @@ type RodataVar struct {
 	Size uint32
 }
 
+// CallReloc records a BPF-to-BPF call to another function by name (for the ELF's
+// R_BPF_64_32 relocations).
+type CallReloc struct {
+	Insn int
+	Func string
+}
+
+// CompiledFunc is one lowered function kept for the ELF emitter: an entry
+// program (Section set) or a subprogram (Section empty), with its map and call
+// relocations at per-function instruction positions.
+type CompiledFunc struct {
+	Name       string
+	Section    string
+	Insns      []Insn
+	MapRelocs  []MapReloc
+	CallRelocs []CallReloc
+}
+
 // Object is a whole compiled module: the maps it needs and the programs that use
 // them.
 type Object struct {
 	Maps     []MapDef
-	Programs []*Program
-	Rodata   []RodataVar // layout of the .rodata map's contents (for the ELF)
-	License  string      // from the "license" global, or "GPL"
+	Programs []*Program     // entry programs, each linked with its subprograms (for the direct loader)
+	Funcs    []CompiledFunc // every function, for the ELF's .text + relocations
+	Rodata   []RodataVar    // layout of the .rodata map's contents (for the ELF)
+	License  string         // from the "license" global, or "GPL"
 }
 
 // MapByName returns the map with the given name.
@@ -128,22 +147,92 @@ func CompileModule(m *ir.Module) (*Object, error) {
 		})
 	}
 
+	// Compile every function with a body. A call to one of these names is a
+	// BPF-to-BPF call rather than a helper.
+	funcNames := map[string]bool{}
+	for _, f := range m.Funcs {
+		if f.Start != nil {
+			funcNames[f.Name] = true
+		}
+	}
+	compiled := map[string]*compiledFunc{}
 	for _, f := range m.Funcs {
 		if f.Start == nil {
-			continue // a declaration with no body
+			continue
 		}
-		c := newComp(f, names, dataOff)
+		c := newComp(f, names, dataOff, funcNames)
 		if err := c.run(); err != nil {
 			return nil, err
 		}
-		obj.Programs = append(obj.Programs, &Program{
-			Name:    f.Name,
-			Section: f.Linkage.Section,
-			Insns:   c.insns,
-			Relocs:  c.relocs,
+		compiled[f.Name] = &compiledFunc{insns: c.insns, relocs: c.relocs, subs: c.subRelocs}
+		calls := make([]CallReloc, len(c.subRelocs))
+		for i, s := range c.subRelocs {
+			calls[i] = CallReloc{Insn: s.Insn, Func: s.Func}
+		}
+		obj.Funcs = append(obj.Funcs, CompiledFunc{
+			Name: f.Name, Section: f.Linkage.Section,
+			Insns: c.insns, MapRelocs: c.relocs, CallRelocs: calls,
 		})
 	}
+
+	// Each function with an attach section is an entry program; link it with the
+	// subprograms it (transitively) calls.
+	for _, f := range m.Funcs {
+		if f.Start == nil || f.Linkage.Section == "" {
+			continue
+		}
+		obj.Programs = append(obj.Programs, linkProgram(f, compiled))
+	}
 	return obj, nil
+}
+
+// compiledFunc is one function's lowered code, before it is linked into a
+// program together with its subprograms.
+type compiledFunc struct {
+	insns  []Insn
+	relocs []MapReloc
+	subs   []subReloc
+}
+
+// linkProgram concatenates an entry function with the subprograms it reaches
+// (entry first) and patches every BPF-to-BPF call with its pc-relative offset,
+// adjusting map/rodata relocations to their positions in the joined stream.
+func linkProgram(entry *ir.Func, compiled map[string]*compiledFunc) *Program {
+	order := []string{entry.Name}
+	seen := map[string]bool{entry.Name: true}
+	for i := 0; i < len(order); i++ {
+		cf := compiled[order[i]]
+		if cf == nil {
+			continue
+		}
+		for _, s := range cf.subs {
+			if !seen[s.Func] {
+				seen[s.Func] = true
+				order = append(order, s.Func)
+			}
+		}
+	}
+
+	start := map[string]int{}
+	var insns []Insn
+	var relocs []MapReloc
+	for _, name := range order {
+		cf := compiled[name]
+		start[name] = len(insns)
+		for _, r := range cf.relocs {
+			r.Insn += start[name]
+			relocs = append(relocs, r)
+		}
+		insns = append(insns, cf.insns...)
+	}
+	for _, name := range order {
+		cf := compiled[name]
+		for _, s := range cf.subs {
+			at := start[name] + s.Insn
+			insns[at].Imm = int32(start[s.Func] - (at + 1))
+		}
+	}
+	return &Program{Name: entry.Name, Section: entry.Linkage.Section, Insns: insns, Relocs: relocs}
 }
 
 func align8(n int) int { return (n + 7) &^ 7 }

@@ -123,3 +123,31 @@ __attribute__((section("xdp"))) int say(void *ctx) {
 	require.NoError(t, err)
 	require.Equal(t, uint32(2), ret)
 }
+
+// TestKernelSubprograms compiles a multi-function program (unoptimized, so the
+// BPF-to-BPF calls survive), links it, and runs it — checking the call chain
+// produces the right result. Skipped without privileges.
+func TestKernelSubprograms(t *testing.T) {
+	const src = `
+static int square(int x) { return x * x; }
+static int sum_squares(int a, int b) { return square(a) + square(b); }
+char _license[] __attribute__((section("license"))) = "GPL";
+__attribute__((section("xdp"))) int prog(void *ctx) { return sum_squares(3, 4); }`
+	// Compile without the optimizer so the subprogram calls are not inlined away.
+	m, err := ccCompile(t, src)
+	require.NoError(t, err)
+	obj, err := CompileModule(m)
+	require.NoError(t, err)
+	require.Len(t, obj.Programs, 1)
+	require.Greater(t, len(obj.Programs[0].Insns), 20, "entry + two subprograms concatenated")
+
+	lo, err := Load(obj, 6 /*XDP*/)
+	if err != nil {
+		skipUnprivileged(t, err)
+		t.Fatalf("load failed: %v", err)
+	}
+	defer lo.Close()
+	ret, err := lo.TestRun(make([]byte, 14), 1)
+	require.NoError(t, err)
+	require.Equal(t, uint32(25), ret, "sum_squares(3,4) = 3*3 + 4*4")
+}

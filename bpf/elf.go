@@ -23,7 +23,8 @@ const (
 	stbGlobal   = 1
 	sttObject   = 1
 	sttFunc     = 2
-	rBPF6464    = 1
+	rBPF6464    = 1  // 64-bit ld_imm64 data reference (map / rodata)
+	rBPF6432    = 10 // 32-bit call reference (BPF-to-BPF)
 )
 
 // elfSection is one output section, in the order it will appear in the file.
@@ -94,115 +95,160 @@ func (w *elfWriter) addSym(name string, styp uint8, shndx uint32, value, size ui
 	return idx
 }
 
-// ELF renders the object as a relocatable eBPF ELF object file.
+// secReloc collects one output section's relocations while symbols are still
+// being assigned; they are encoded once every symbol index is known.
+type secReloc struct {
+	offset uint64 // byte offset within the section
+	sym    string // referenced symbol name
+	typ    uint32 // rBPF6464 (data) or rBPF6432 (call)
+}
+
+// ELF renders the object as a relocatable eBPF ELF object file, in the layout
+// libbpf expects: each entry program in its own section, all subprograms in one
+// .text section, FUNC symbols for every function, and R_BPF_64_64 / R_BPF_64_32
+// relocations for map/rodata references and BPF-to-BPF calls.
 func (o *Object) ELF() []byte {
 	w := newELFWriter()
 	w.addSection(elfSection{name: ""}) // section 0 is null
 
-	// One section per program, plus a symbol naming it.
-	type progInfo struct {
-		sec    uint32
-		code   []byte
-		relocs []MapReloc
+	// The section a function lands in and its byte offset there.
+	type placed struct {
+		sec uint32
+		off uint64
 	}
-	var progs []progInfo
-	for i, p := range o.Programs {
-		name := p.Section
-		if name == "" {
-			name = ".text"
+	loc := map[string]placed{}
+	relBySec := map[uint32][]secReloc{}
+
+	// One PROGBITS section per entry program; subprograms are gathered into .text.
+	var textFuncs []CompiledFunc
+	for _, f := range o.Funcs {
+		if f.Section == "" {
+			textFuncs = append(textFuncs, f)
+			continue
 		}
-		code := elfCode(p) // map/rodata loads cleared for libbpf to fill
-		sec := w.addSection(elfSection{
-			name: name, typ: shtProgbits, flags: shfAlloc | shfExec,
-			data: code, align: 8,
-		})
-		w.addSym(p.Name, sttFunc, sec, 0, uint64(len(code)))
-		progs = append(progs, progInfo{sec: sec, code: code, relocs: p.Relocs})
-		_ = i
+		code := elfFuncCode(f)
+		sec := w.addSection(elfSection{name: f.Section, typ: shtProgbits, flags: shfAlloc | shfExec, data: code, align: 8})
+		loc[f.Name] = placed{sec, 0}
+		relBySec[sec] = funcRelocs(f, 0)
+	}
+	if len(textFuncs) > 0 {
+		var text []byte
+		var rels []secReloc
+		for _, f := range textFuncs {
+			off := uint64(len(text))
+			loc[f.Name] = placed{0, off} // section filled in below
+			rels = append(rels, funcRelocs(f, off)...)
+			text = append(text, elfFuncCode(f)...)
+		}
+		sec := w.addSection(elfSection{name: ".text", typ: shtProgbits, flags: shfAlloc | shfExec, data: text, align: 8})
+		for i := range textFuncs {
+			p := loc[textFuncs[i].Name]
+			p.sec = sec
+			loc[textFuncs[i].Name] = p
+		}
+		relBySec[sec] = rels
 	}
 
-	// license
 	if o.License != "" {
 		lic := append([]byte(o.License), 0)
 		w.addSection(elfSection{name: "license", typ: shtProgbits, flags: shfAlloc, data: lic, align: 1})
 	}
 
-	// .maps: a placeholder value per map; each map gets a symbol at its offset.
 	var mapSyms []MapDef
 	for _, m := range o.Maps {
 		if m.Name != rodataName {
 			mapSyms = append(mapSyms, m)
 		}
 	}
+	mapsSec := uint32(0)
 	if len(mapSyms) > 0 {
-		sec := w.addSection(elfSection{name: ".maps", typ: shtProgbits, flags: shfAlloc, data: make([]byte, len(mapSyms)*32), align: 8})
-		for i, m := range mapSyms {
-			w.addSym(m.Name, sttObject, sec, uint64(i*32), 32)
-		}
+		mapsSec = w.addSection(elfSection{name: ".maps", typ: shtProgbits, flags: shfAlloc, data: make([]byte, len(mapSyms)*32), align: 8})
 	}
-
-	// .rodata: the read-only blob; each global gets a symbol at its offset.
+	rodataSec := uint32(0)
 	for _, m := range o.Maps {
-		if m.Name != rodataName {
-			continue
-		}
-		sec := w.addSection(elfSection{name: rodataName, typ: shtProgbits, flags: shfAlloc, data: m.Initial, align: 8})
-		for _, rv := range o.Rodata {
-			w.addSym(rv.Name, sttObject, sec, uint64(rv.Off), uint64(rv.Size))
+		if m.Name == rodataName {
+			rodataSec = w.addSection(elfSection{name: rodataName, typ: shtProgbits, flags: shfAlloc, data: m.Initial, align: 8})
 		}
 	}
-
-	// .BTF
 	if len(mapSyms) > 0 || len(o.Rodata) > 0 {
 		w.addSection(elfSection{name: ".BTF", typ: shtProgbits, data: buildBTF(o), align: 4})
 	}
 
-	// .symtab + .strtab (added after all symbols are known).
-	strtabIdx := uint32(len(w.secs)) + 1 // symtab is next, strtab after it
+	// Symbols: a FUNC per function, an OBJECT per map and rodata global.
+	for _, f := range o.Funcs {
+		p := loc[f.Name]
+		w.addSym(f.Name, sttFunc, p.sec, p.off, uint64(len(f.Insns)*8))
+	}
+	for i, m := range mapSyms {
+		w.addSym(m.Name, sttObject, mapsSec, uint64(i*32), 32)
+	}
+	for _, rv := range o.Rodata {
+		w.addSym(rv.Name, sttObject, rodataSec, uint64(rv.Off), uint64(rv.Size))
+	}
+
+	strtabIdx := uint32(len(w.secs)) + 1
 	symtabIdx := w.addSection(elfSection{
 		name: ".symtab", typ: shtSymtab, data: w.symtab,
 		link: strtabIdx, info: uint32(w.localSyms), align: 8, entsize: 24,
 	})
 	w.addSection(elfSection{name: ".strtab", typ: shtStrtab, data: w.symStr, align: 1})
 
-	// A relocation section per program that references maps or rodata.
-	for _, pi := range progs {
-		if len(pi.relocs) == 0 {
+	// A relocation section per code section that has references (in section order
+	// for a deterministic file).
+	nCode := uint32(len(w.secs))
+	for sec := uint32(0); sec < nCode; sec++ {
+		rels := relBySec[sec]
+		if len(rels) == 0 {
 			continue
 		}
-		var rel []byte
-		for _, r := range pi.relocs {
-			sym, ok := w.symName[r.Sym]
+		var data []byte
+		for _, r := range rels {
+			sym, ok := w.symName[r.sym]
 			if !ok {
 				continue
 			}
 			var b [16]byte
-			binary.LittleEndian.PutUint64(b[0:], uint64(r.Insn*8))         // r_offset
-			binary.LittleEndian.PutUint64(b[8:], uint64(sym)<<32|rBPF6464) // r_info
-			rel = append(rel, b[:]...)
+			binary.LittleEndian.PutUint64(b[0:], r.offset)
+			binary.LittleEndian.PutUint64(b[8:], uint64(sym)<<32|uint64(r.typ))
+			data = append(data, b[:]...)
 		}
 		w.addSection(elfSection{
-			name: ".rel" + w.secs[pi.sec].name, typ: shtRel, data: rel,
-			link: symtabIdx, info: pi.sec, align: 8, entsize: 16,
+			name: ".rel" + w.secs[sec].name, typ: shtRel, data: data,
+			link: symtabIdx, info: sec, align: 8, entsize: 16,
 		})
 	}
-
 	return w.render()
 }
 
-// elfCode returns a program's bytecode with each map/rodata ld_imm64 cleared to
-// a bare load, so libbpf fills in the map fd (and value offset) from the
-// relocation.
-func elfCode(p *Program) []byte {
-	insns := append([]Insn(nil), p.Insns...)
-	for _, r := range p.Relocs {
+// elfFuncCode returns a function's bytecode with map/rodata loads and BPF-to-BPF
+// calls left as bare placeholders for libbpf to fill from the relocations.
+func elfFuncCode(f CompiledFunc) []byte {
+	insns := append([]Insn(nil), f.Insns...)
+	for _, r := range f.MapRelocs {
 		insns[r.Insn].Src = 0
 		insns[r.Insn].Imm = 0
 		if r.Insn+1 < len(insns) {
 			insns[r.Insn+1].Imm = 0
 		}
 	}
+	for _, r := range f.CallRelocs {
+		insns[r.Insn].Imm = -1 // src stays BPF_PSEUDO_CALL; the reloc supplies the target
+	}
 	return (&Prog{Insns: insns}).Bytes()
+}
+
+// funcRelocs returns a function's relocations at their byte offsets within a
+// section that begins at baseInsn instructions (base bytes = baseInsn*8... here
+// base is a byte offset already).
+func funcRelocs(f CompiledFunc, base uint64) []secReloc {
+	var out []secReloc
+	for _, r := range f.MapRelocs {
+		out = append(out, secReloc{offset: base + uint64(r.Insn)*8, sym: r.Sym, typ: rBPF6464})
+	}
+	for _, r := range f.CallRelocs {
+		out = append(out, secReloc{offset: base + uint64(r.Insn)*8, sym: r.Func, typ: rBPF6432})
+	}
+	return out
 }
 
 // render lays out the ELF header, section data, the section-header string table,

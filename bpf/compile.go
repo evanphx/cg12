@@ -12,14 +12,14 @@ import (
 // the ABI's result / first-argument registers. Values live across a helper call
 // are placed in the kernel-preserved registers r6-r9.
 func Compile(f *ir.Func) (*Prog, error) {
-	c := newComp(f, nil, nil)
+	c := newComp(f, nil, nil, nil)
 	if err := c.run(); err != nil {
 		return nil, err
 	}
 	return &Prog{Insns: c.insns}, nil
 }
 
-func newComp(f *ir.Func, maps map[string]bool, data map[string]int32) *comp {
+func newComp(f *ir.Func, maps map[string]bool, data map[string]int32, funcs map[string]bool) *comp {
 	return &comp{
 		f:          f,
 		allocaAt:   map[*ir.Instr]int16{},
@@ -27,6 +27,7 @@ func newComp(f *ir.Func, maps map[string]bool, data map[string]int32) *comp {
 		spillOff:   map[int]int16{},
 		maps:       maps,
 		data:       data,
+		funcs:      funcs,
 	}
 }
 
@@ -59,9 +60,18 @@ type comp struct {
 	spillOff   map[int]int16    // temp ID -> stack byte offset (negative), for spilled temps
 	maps       map[string]bool  // names of module maps, for resolving &map references
 	data       map[string]int32 // read-only global name -> byte offset within .rodata
+	funcs      map[string]bool  // names of module functions, for BPF-to-BPF calls
 	relocs     []MapReloc       // ld_imm64 slots to patch with a map fd at load time
+	subRelocs  []subReloc       // BPF-to-BPF call slots to patch with a pc-relative offset
 	fixups     []fixup
 	err        error
+}
+
+// subReloc records a BPF-to-BPF call whose offset is patched once the callee's
+// position in the concatenated program is known.
+type subReloc struct {
+	Insn int
+	Func string
 }
 
 // rodataName is the synthetic map that backs read-only global data (strings and

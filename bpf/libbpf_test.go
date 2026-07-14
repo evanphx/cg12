@@ -38,6 +38,25 @@ __attribute__((section("kprobe/do_nanosleep"))) int trace(void *ctx) {
     return 0;
 }`,
 	}
+	// A multi-function program: subprograms land in .text, calls become
+	// R_BPF_64_32 relocations, which libbpf relocates.
+	if m, err := ccCompile(t, `
+static int square(int x) { return x * x; }
+char _license[] __attribute__((section("license"))) = "GPL";
+__attribute__((section("xdp"))) int prog(void *ctx) { return square(6); }`); err == nil {
+		if obj, err := CompileModule(m); err == nil {
+			t.Run("subprograms", func(t *testing.T) {
+				switch r := libbpfload.Load(obj.ELF()); {
+				case r <= -1000:
+					t.Skip("libbpf not available at runtime")
+				case r == -1 || r == -13:
+					t.Skip("no privilege to load eBPF")
+				default:
+					require.Equal(t, 0, r)
+				}
+			})
+		}
+	}
 	for name, src := range cases {
 		t.Run(name, func(t *testing.T) {
 			obj := compileModule(t, src)

@@ -178,17 +178,24 @@ func (c *comp) lowerCall(in *ir.Instr) {
 
 	callee := in.Arg(0)
 	if callee.Kind != ir.RefConst || c.f.Consts[callee.ID].Kind != ir.ConstSym {
-		c.fail("bpf: only direct calls to named helpers are supported")
+		c.fail("bpf: only direct calls to named helpers or functions are supported")
 		return
 	}
-	id, ok := helperID(c.f.Consts[callee.ID].Sym)
-	if !ok {
-		c.fail("bpf: unknown helper %q", c.f.Consts[callee.ID].Sym)
-		return
+	name := c.f.Consts[callee.ID].Sym
+	switch {
+	case c.funcs[name]: // a BPF-to-BPF call to another module function
+		c.subRelocs = append(c.subRelocs, subReloc{Insn: len(c.insns), Func: name})
+		c.emit(CallRel(0)) // pc-relative offset patched once the callee is placed
+	default:
+		id, ok := helperID(name)
+		if !ok {
+			c.fail("bpf: unknown helper or function %q", name)
+			return
+		}
+		c.emit(Call(id))
 	}
-	c.emit(Call(id))
 	if !in.To.IsNone() {
-		c.emitMove(c.locOf(in.To), regLoc(R0)) // helper result is in r0
+		c.emitMove(c.locOf(in.To), regLoc(R0)) // result is in r0
 	}
 }
 

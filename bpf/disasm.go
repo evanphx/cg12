@@ -54,6 +54,9 @@ func disasmOne(in Insn) string {
 		case jmpJA:
 			return fmt.Sprintf("goto %+d", in.Off)
 		case jmpCALL:
+			if in.Src == pseudoCall {
+				return fmt.Sprintf("call pc%+d", in.Imm)
+			}
 			return fmt.Sprintf("call %d", in.Imm)
 		case jmpEXIT:
 			return "exit"

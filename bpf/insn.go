@@ -158,6 +158,14 @@ func JmpCondImm(op uint8, dst Reg, imm int32, off int16) Insn {
 // Call invokes helper function number helper.
 func Call(helper int32) Insn { return Insn{Op: clsJMP | jmpCALL, Imm: helper} }
 
+// pseudoCall marks a call as a BPF-to-BPF call whose immediate is a
+// pc-relative instruction offset to another function in the same program.
+const pseudoCall = 1
+
+// CallRel invokes another function in the same program: off is the signed
+// instruction offset from the slot after the call.
+func CallRel(off int32) Insn { return Insn{Op: clsJMP | jmpCALL, Src: pseudoCall, Imm: off} }
+
 // Exit returns from the program (or function); the value is in r0.
 func Exit() Insn { return Insn{Op: clsJMP | jmpEXIT} }
 
