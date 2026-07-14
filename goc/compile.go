@@ -104,6 +104,9 @@ func Compile(name string, src []byte) (*ir.Module, error) {
 	if loader.units["crypto/internal/fips140"] != nil {
 		addFIPSRuntimeStubs(mod)
 	}
+	if loader.units["crypto/sha1"] != nil || loader.units["crypto/md5"] != nil {
+		addLegacyCryptoRuntimeStubs(mod)
+	}
 	if g.err != nil {
 		return nil, g.err
 	}
@@ -117,6 +120,14 @@ func addFIPSRuntimeStubs(mod *ir.Module) {
 	set := mod.NewFuncVoid("crypto/internal/fips140.setIndicator")
 	set.Param("indicator", ir.ClsW)
 	set.Entry().RetVoid()
+}
+
+func addLegacyCryptoRuntimeStubs(mod *ir.Module) {
+	enforced := mod.NewFunc("crypto/internal/fips140only.Enforced", ir.ClsW)
+	enforced.Entry().Ret(enforced.Word(0))
+
+	unreachable := mod.NewFuncVoid("crypto/internal/boring.Unreachable")
+	unreachable.Entry().RetVoid()
 }
 
 type gen struct {
@@ -448,6 +459,10 @@ func (g *gen) stmt(s ast.Stmt) {
 					continue
 				}
 				v := g.fn.ConstInt(c, 0)
+				if _, ok := obj.Type().Underlying().(*types.Slice); ok {
+					zero := g.fn.Long(0)
+					v = g.sliceDescriptor(g.fn.ConstInt(ir.ClsP, 0), zero, zero)
+				}
 				if i < len(vs.Values) {
 					v = g.expr(vs.Values[i])
 				}
@@ -544,24 +559,40 @@ func (g *gen) stmt(s ast.Stmt) {
 }
 
 func (g *gen) rangeStmt(statement *ast.RangeStmt) {
-	if statement.Value != nil {
-		g.fail(statement, "two-value range is not supported")
-		return
+	indexType := types.Typ[types.Int]
+	indexSlot := g.alloc(indexType)
+	g.store(g.fn.Long(0), indexSlot, indexType)
+
+	if key, ok := statement.Key.(*ast.Ident); ok && key.Name != "_" {
+		object := g.info.Defs[key]
+		if object == nil {
+			object = g.info.Uses[key]
+		}
+		g.vars[object] = indexSlot
 	}
-	key, ok := statement.Key.(*ast.Ident)
-	if !ok {
-		g.fail(statement.Key, "unsupported range variable")
-		return
+
+	rangeType := g.info.Types[statement.X].Type
+	var upper ir.Ref
+	var slice ir.Ref
+	if _, ok := rangeType.Underlying().(*types.Slice); ok {
+		slice = g.expr(statement.X)
+		upper = g.cur.Load(ir.ClsL, g.offset(slice, 8))
+	} else {
+		upper = g.expr(statement.X)
+		upper = g.convert(upper, rangeType, indexType)
 	}
-	object := g.info.Defs[key]
-	if object == nil {
-		object = g.info.Uses[key]
+
+	var valueSlot ir.Ref
+	var valueType types.Type
+	if value, ok := statement.Value.(*ast.Ident); ok && value.Name != "_" {
+		object := g.info.Defs[value]
+		if object == nil {
+			object = g.info.Uses[value]
+		}
+		valueType = object.Type()
+		valueSlot = g.alloc(valueType)
+		g.vars[object] = valueSlot
 	}
-	slot := g.alloc(object.Type())
-	g.vars[object] = slot
-	g.store(g.fn.Long(0), slot, object.Type())
-	upper := g.expr(statement.X)
-	upper = g.convert(upper, g.info.Types[statement.X].Type, object.Type())
 
 	test := g.block("rangetest")
 	body := g.block("rangebody")
@@ -570,22 +601,31 @@ func (g *gen) rangeStmt(statement *ast.RangeStmt) {
 	g.cur.Goto(test)
 
 	g.cur = test
-	index := g.load(slot, object.Type())
+	index := g.load(indexSlot, indexType)
 	condition := g.cur.Cmp(ir.CmpSlt, ir.ClsW, index, upper)
 	g.cur.Jnz(condition, body, done)
 
 	g.breaks = append(g.breaks, done)
 	g.continues = append(g.continues, post)
 	g.cur = body
+	if valueSlot != ir.R {
+		data := g.cur.Load(ir.ClsP, slice)
+		elementOffset := index
+		if size := typeSize(valueType); size != 1 {
+			elementOffset = g.cur.Mul(ir.ClsL, index, g.fn.Long(size))
+		}
+		address := g.cur.Add(ir.ClsP, data, elementOffset)
+		g.store(g.load(address, valueType), valueSlot, valueType)
+	}
 	g.stmts(statement.Body.List)
 	if g.live() {
 		g.cur.Goto(post)
 	}
 
 	g.cur = post
-	index = g.load(slot, object.Type())
+	index = g.load(indexSlot, indexType)
 	index = g.cur.Add(ir.ClsL, index, g.fn.Long(1))
-	g.store(index, slot, object.Type())
+	g.store(index, indexSlot, indexType)
 	g.cur.Goto(test)
 	g.breaks = g.breaks[:len(g.breaks)-1]
 	g.continues = g.continues[:len(g.continues)-1]
@@ -648,6 +688,8 @@ func (g *gen) lvalue(expression ast.Expr) ir.Ref {
 			index = g.cur.Mul(ir.ClsL, index, g.fn.Long(size))
 		}
 		return g.cur.Add(ir.ClsP, base, index)
+	case *ast.StarExpr:
+		return g.expr(expression.X)
 	default:
 		g.fail(expression, "unsupported assignment target %T", expression)
 		return ir.R
@@ -827,6 +869,9 @@ func (g *gen) expr(e ast.Expr) ir.Ref {
 		return g.binary(n.Op, g.expr(n.X), g.expr(n.Y), g.info.Types[n.X].Type, n)
 	case *ast.UnaryExpr:
 		if n.Op == token.AND {
+			if _, ok := n.X.(*ast.CompositeLit); ok {
+				return g.expr(n.X)
+			}
 			return g.lvalue(n.X)
 		}
 		x := g.expr(n.X)
@@ -846,6 +891,8 @@ func (g *gen) expr(e ast.Expr) ir.Ref {
 			return pointer
 		}
 		return g.load(pointer, g.info.Types[n].Type)
+	case *ast.CompositeLit:
+		return g.compositeLiteral(n)
 	case *ast.CallExpr:
 		if g.info.Types[n.Fun].IsType() {
 			if len(n.Args) != 1 {
@@ -950,6 +997,56 @@ func (g *gen) expr(e ast.Expr) ir.Ref {
 	}
 	g.fail(e, "unsupported expression %T", e)
 	return ir.R
+}
+
+func (g *gen) compositeLiteral(literal *ast.CompositeLit) ir.Ref {
+	t := g.info.Types[literal].Type
+	array, isArray := t.Underlying().(*types.Array)
+	structure, isStruct := t.Underlying().(*types.Struct)
+	if !isArray && !isStruct {
+		g.fail(literal, "unsupported composite literal type %s", t)
+		return ir.R
+	}
+	size := typeSize(t)
+	align := 8
+	if size < 8 {
+		align = 4
+	}
+	backing := g.cur.Alloc(align, int(size))
+	memset := g.fn.Sym("memset", 0)
+	g.cur.Call(ir.ClsP, memset, backing, g.fn.Word(0), g.fn.Long(size))
+	if isStruct {
+		offsets := types.SizesFor("gc", runtime.GOARCH).Offsetsof(structFields(structure))
+		for i, expression := range literal.Elts {
+			fieldIndex := i
+			if keyed, ok := expression.(*ast.KeyValueExpr); ok {
+				name := keyed.Key.(*ast.Ident).Name
+				for candidate := 0; candidate < structure.NumFields(); candidate++ {
+					if structure.Field(candidate).Name() == name {
+						fieldIndex = candidate
+						break
+					}
+				}
+				expression = keyed.Value
+			}
+			fieldType := structure.Field(fieldIndex).Type()
+			g.store(g.expr(expression), g.offset(backing, offsets[fieldIndex]), fieldType)
+		}
+		return backing
+	}
+
+	elementType := array.Elem()
+	elementSize := typeSize(elementType)
+	for i, expression := range literal.Elts {
+		index := int64(i)
+		if keyed, ok := expression.(*ast.KeyValueExpr); ok {
+			index = constInt(g.info.Types[keyed.Key].Value)
+			expression = keyed.Value
+		}
+		address := g.offset(backing, index*elementSize)
+		g.store(g.expr(expression), address, elementType)
+	}
+	return backing
 }
 
 func (g *gen) stringSlice(expression ast.Expr) ir.Ref {

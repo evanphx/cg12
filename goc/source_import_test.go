@@ -64,6 +64,16 @@ func TestRepositoryStandardLibraryInventory(t *testing.T) {
 		"crypto/internal/fips140",
 		"crypto/internal/fips140/sha256",
 		"crypto/sha256",
+		"encoding/binary",
+		"encoding/hex",
+		"hash/adler32",
+		"hash/crc32",
+		"hash/fnv",
+		"crypto/md5",
+		"crypto/sha1",
+		"crypto/sha512",
+		"unicode/utf16",
+		"path",
 	}
 	for _, path := range packages {
 		directory := filepath.Join(loader.root, "src", filepath.FromSlash(path))

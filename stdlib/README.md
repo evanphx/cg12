@@ -28,3 +28,16 @@ type-checked, and lowered from this tree. Other copied packages remain available
 for the next compiler rung; they may temporarily use host export data when
 mixing source and export-data versions would create incompatible Go type
 identities.
+
+The second ten-package progression is:
+
+1. `encoding/binary`
+2. `encoding/hex`
+3. `hash/adler32`
+4. `hash/crc32`
+5. `hash/fnv`
+6. `crypto/md5`
+7. `crypto/sha1`
+8. `crypto/sha512`
+9. `unicode/utf16`
+10. `path`

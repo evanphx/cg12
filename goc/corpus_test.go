@@ -99,6 +99,88 @@ func Test() int {
 `, 3, false)
 }
 
+func TestRepositoryStandardLibraryUTF16(t *testing.T) {
+	runCase(t, `package main
+
+import "unicode/utf16"
+
+func Test() int {
+	return utf16.RuneLen('😀')
+}
+`, 2, false)
+}
+
+func TestRepositoryStandardLibraryHex(t *testing.T) {
+	runCase(t, `package main
+
+import "encoding/hex"
+
+func Test() int {
+	return hex.EncodedLen(17) + hex.DecodedLen(18)
+}
+`, 43, false)
+}
+
+func TestRepositoryStandardLibraryAdler32(t *testing.T) {
+	runCase(t, `package main
+
+import "hash/adler32"
+
+func Test() int {
+	return int(adler32.Checksum([]byte("abc")))
+}
+`, 38600999, false)
+}
+
+func TestRepositoryStandardLibraryBinary(t *testing.T) {
+	runCase(t, `package main
+
+import "encoding/binary"
+
+func Test() int {
+	var buf [10]byte
+	n := binary.PutUvarint(buf[:], 300)
+	return n + int(buf[0]) + int(buf[1])
+}
+`, 176, false)
+}
+
+func TestRepositoryStandardLibraryMD5(t *testing.T) {
+	runCase(t, `package main
+
+import "crypto/md5"
+
+func Test() int {
+	sum := md5.Sum([]byte("abc"))
+	return int(sum[0]) + int(sum[15])
+}
+`, 258, false)
+}
+
+func TestRepositoryStandardLibrarySHA1(t *testing.T) {
+	runCase(t, `package main
+
+import "crypto/sha1"
+
+func Test() int {
+	sum := sha1.Sum([]byte("abc"))
+	return int(sum[0]) + int(sum[19])
+}
+`, 326, false)
+}
+
+func TestRepositoryStandardLibraryFNVConstructor(t *testing.T) {
+	runCase(t, `package main
+
+import "hash/fnv"
+
+func Test() int {
+	fnv.New32a()
+	return 1
+}
+`, 1, false)
+}
+
 func runCase(t *testing.T, src string, want int, optimized bool) {
 	t.Helper()
 	if runtime.GOOS != "linux" {
