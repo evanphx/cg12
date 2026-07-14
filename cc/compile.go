@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"math/big"
 	"sort"
+	"strings"
 
 	"github.com/evanphx/cg12/ir"
 	"modernc.org/cc/v4"
@@ -249,6 +250,7 @@ func (g *gen) genFunc(fd *cc.FunctionDefinition) {
 		g.fn = g.mod.NewFunc(d.Name(), clsOf(ret))
 	}
 	g.fn.Export()
+	g.fn.Linkage.Section = sectionOf(ft) // eBPF attach section (xdp, kprobe/..., ...)
 	g.fn.Variadic = ft.IsVariadic()
 	g.cur = g.fn.Entry()
 	g.nblk = 0
@@ -358,7 +360,7 @@ func (g *gen) genGlobalDecl(d *cc.Declaration) {
 		if t.Kind() == cc.Function {
 			continue // a prototype needs no storage
 		}
-		data := &ir.Data{Name: dcl.Name(), Align: align(t)}
+		data := &ir.Data{Name: dcl.Name(), Align: align(t), Linkage: ir.Linkage{Section: sectionOf(t)}}
 		if id.Case == cc.InitDeclaratorInit {
 			data.Items = g.globalItems(t, id.Initializer)
 		}
@@ -472,6 +474,23 @@ func (g *gen) globalItems(t cc.Type, init *cc.Initializer) []ir.DataItem {
 
 func isArray(t cc.Type) bool   { _, ok := t.(*cc.ArrayType); return ok }
 func isPointer(t cc.Type) bool { _, ok := t.(*cc.PointerType); return ok }
+
+// sectionOf returns the __attribute__((section("..."))) name attached to t, with
+// its trailing NUL trimmed, or "" if none. It carries eBPF placement — a map
+// ("maps"), a program's attach type ("xdp", "kprobe/..."), the license, etc. —
+// through to the backend as ir.Linkage.Section.
+func sectionOf(t cc.Type) string {
+	a := t.Attributes()
+	if a == nil {
+		return ""
+	}
+	for _, v := range a.AttrValue("section") {
+		if s, ok := v.(cc.StringValue); ok {
+			return strings.TrimRight(string(s), "\x00")
+		}
+	}
+	return ""
+}
 
 // constAddr evaluates a constant address expression — the address of a global
 // object, optionally displaced by array indexing or member selection — to a

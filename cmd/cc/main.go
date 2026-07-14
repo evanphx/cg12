@@ -57,13 +57,17 @@ func main() {
 	case *emitIR:
 		fmt.Print(mod.String())
 	case *emitBPF:
-		for _, f := range mod.Funcs {
-			if f.Start == nil {
-				continue
+		obj, err := bpf.CompileModule(mod)
+		check(err)
+		for _, m := range obj.Maps {
+			fmt.Printf("// map %s: type=%d key=%d value=%d max_entries=%d\n", m.Name, m.Type, m.KeySize, m.ValueSize, m.MaxEntries)
+		}
+		for _, p := range obj.Programs {
+			sec := p.Section
+			if sec == "" {
+				sec = "(no section)"
 			}
-			p, err := bpf.Compile(f)
-			check(err)
-			fmt.Printf("// %s: %d eBPF instructions\n%s", f.Name, p.Len(), p.Asm())
+			fmt.Printf("// %s [%s]: %d eBPF instructions\n%s", p.Name, sec, len(p.Insns), p.Asm())
 		}
 	case *emitAsm:
 		asm, err := arm64.CompileModule(mod)

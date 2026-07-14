@@ -26,6 +26,17 @@ func compileC(t *testing.T, src string) *ir.Func {
 	return nil
 }
 
+// compileModule compiles a C source to an optimized eBPF Object (programs + maps).
+func compileModule(t *testing.T, src string) *Object {
+	t.Helper()
+	m, err := cc.Compile("prog.c", src)
+	require.NoError(t, err)
+	opt.OptimizeModule(m)
+	obj, err := CompileModule(m)
+	require.NoError(t, err)
+	return obj
+}
+
 // TestEncode checks a handful of instructions against their known eBPF encodings
 // (opcode, packed registers, offset, immediate).
 func TestEncode(t *testing.T) {

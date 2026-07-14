@@ -12,15 +12,33 @@ import (
 // the ABI's result / first-argument registers. Values live across a helper call
 // are placed in the kernel-preserved registers r6-r9.
 func Compile(f *ir.Func) (*Prog, error) {
-	ir.LowerPointers(f, ir.ClsL) // eBPF is 64-bit; pointers are longs
-	c := &comp{f: f, allocaAt: map[*ir.Instr]int16{}, blockStart: map[*ir.Block]int{}, spillOff: map[int]int16{}}
+	c := newComp(f, nil)
+	if err := c.run(); err != nil {
+		return nil, err
+	}
+	return &Prog{Insns: c.insns}, nil
+}
+
+func newComp(f *ir.Func, maps map[string]bool) *comp {
+	return &comp{
+		f:          f,
+		allocaAt:   map[*ir.Instr]int16{},
+		blockStart: map[*ir.Block]int{},
+		spillOff:   map[int]int16{},
+		maps:       maps,
+	}
+}
+
+// run lowers, allocates, and emits the function, returning the first error.
+func (c *comp) run() error {
+	ir.LowerPointers(c.f, ir.ClsL) // eBPF is 64-bit; pointers are longs
 	c.allocStack()
 	c.regAlloc()
 	if -c.stackTop > 512 {
-		return nil, fmt.Errorf("bpf: function %s needs %d stack bytes, over the 512-byte eBPF limit", f.Name, -c.stackTop)
+		return fmt.Errorf("bpf: function %s needs %d stack bytes, over the 512-byte eBPF limit", c.f.Name, -c.stackTop)
 	}
 	c.prologue()
-	for _, b := range f.Blocks {
+	for _, b := range c.f.Blocks {
 		c.blockStart[b] = len(c.insns)
 		for i := range b.Instrs {
 			c.instr(&b.Instrs[i])
@@ -28,7 +46,7 @@ func Compile(f *ir.Func) (*Prog, error) {
 		c.term(b)
 	}
 	c.resolve()
-	return &Prog{Insns: c.insns}, c.err
+	return c.err
 }
 
 type comp struct {
@@ -37,7 +55,9 @@ type comp struct {
 	stackTop   int16 // most-negative stack offset used (allocas + spills)
 	allocaAt   map[*ir.Instr]int16
 	blockStart map[*ir.Block]int
-	spillOff   map[int]int16 // temp ID -> stack byte offset (negative), for spilled temps
+	spillOff   map[int]int16   // temp ID -> stack byte offset (negative), for spilled temps
+	maps       map[string]bool // names of module maps, for resolving &map references
+	relocs     []MapReloc      // ld_imm64 slots to patch with a map fd at load time
 	fixups     []fixup
 	err        error
 }
@@ -94,11 +114,13 @@ func (c *comp) prologue() {
 
 // --- locations -------------------------------------------------------------
 
-// loc is where a value lives: a register, a stack slot, or an immediate.
+// loc is where a value lives: a register, a stack slot, an immediate, or a map
+// file descriptor (materialized with a relocated ld_imm64).
 type loc struct {
 	reg  Reg
 	slot int16
 	imm  int64
+	sym  string
 	kind locKind
 }
 
@@ -108,7 +130,8 @@ const (
 	locReg locKind = iota
 	locSlot
 	locImm
-	locNone // a dead value with no assigned location
+	locMapFD // the address of a module map (&map): a relocated map-fd load
+	locNone  // a dead value with no assigned location
 )
 
 func regLoc(r Reg) loc     { return loc{kind: locReg, reg: r} }
@@ -131,10 +154,14 @@ func (c *comp) locOf(ref ir.Ref) loc {
 		return loc{kind: locNone} // a dead temporary with no location
 	case ir.RefConst:
 		cst := c.f.Consts[ref.ID]
-		if cst.Kind == ir.ConstInt {
+		switch {
+		case cst.Kind == ir.ConstInt:
 			return immLoc(cst.Int)
+		case cst.Kind == ir.ConstSym && c.maps[cst.Sym]:
+			return loc{kind: locMapFD, sym: cst.Sym}
+		default:
+			c.fail("bpf: unsupported operand %v (a symbol that is not a map, or a float)", cst.Sym)
 		}
-		c.fail("bpf: unsupported constant %v (symbols/floats are not supported)", cst.Kind)
 	}
 	return immLoc(0)
 }
@@ -162,7 +189,17 @@ func (c *comp) into(dst Reg, ref ir.Ref) {
 		c.emit(LdxMem(sizeDW, dst, R10, l.slot))
 	case locImm:
 		c.ldImm(dst, l.imm)
+	case locMapFD:
+		c.emitMapFD(dst, l.sym)
 	}
+}
+
+// emitMapFD loads a map's fd into dst, recording the relocation the loader
+// patches with the real descriptor.
+func (c *comp) emitMapFD(dst Reg, sym string) {
+	c.relocs = append(c.relocs, MapReloc{Insn: len(c.insns), Map: sym})
+	w := LdMapFD(dst, 0) // fd patched in at load time
+	c.emit(w[0], w[1])
 }
 
 // regOf returns a register holding ref: its own if allocated to one, otherwise
@@ -274,6 +311,8 @@ func (c *comp) emitMove(dst, src loc) {
 			c.emit(LdxMem(sizeDW, dst.reg, R10, src.slot))
 		case locImm:
 			c.ldImm(dst.reg, src.imm)
+		case locMapFD:
+			c.emitMapFD(dst.reg, src.sym)
 		}
 	case locSlot:
 		switch src.kind {
