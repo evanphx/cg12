@@ -354,6 +354,22 @@ func (g *gen) collectCases(s *cc.Statement, cases *[]switchCase, defBlk **ir.Blo
 			blk := g.block("case")
 			g.caseBlk[ls] = blk
 			*cases = append(*cases, switchCase{v, blk})
+		case cc.LabeledStatementRange: // GNU "case lo ... hi:"
+			lo, _ := constInt(ls.ConstantExpression)
+			hi, _ := constInt(ls.ConstantExpression2)
+			blk := g.block("case")
+			g.caseBlk[ls] = blk
+			if hi < lo {
+				break // an inverted range matches nothing
+			}
+			const maxRange = 1 << 16
+			if n := uint64(hi) - uint64(lo); n >= maxRange {
+				g.fail("cc: case range %d ... %d spans too many values", lo, hi)
+			} else {
+				for i := uint64(0); i <= n; i++ {
+					*cases = append(*cases, switchCase{lo + int64(i), blk})
+				}
+			}
 		case cc.LabeledStatementDefault:
 			blk := g.block("default")
 			g.caseBlk[ls] = blk
@@ -424,7 +440,7 @@ func (g *gen) genLabeled(ls *cc.LabeledStatement) {
 	switch ls.Case {
 	case cc.LabeledStatementLabel:
 		target = g.labels[ls.Token.SrcStr()]
-	case cc.LabeledStatementCaseLabel, cc.LabeledStatementDefault:
+	case cc.LabeledStatementCaseLabel, cc.LabeledStatementRange, cc.LabeledStatementDefault:
 		target = g.caseBlk[ls]
 	}
 	if target != nil {

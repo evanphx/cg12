@@ -1,0 +1,15 @@
+0 -> zero
+1 -> digit
+5 -> digit
+9 -> digit
+10 -> two-digit
+42 -> two-digit
+99 -> two-digit
+100 -> big
+-1 -> negative
+-50 -> negative
+-51 -> big
+m -> lower
+Q -> upper
+7 -> digit
++ -> other

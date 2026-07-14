@@ -1,0 +1,8 @@
+i<u=0 i>u=1
+i<=u=0 i==u=1
+i<ul=0
+l<u=1
+neg1==umax=1
+both_signed=1
+both_unsigned=1
+loop=3

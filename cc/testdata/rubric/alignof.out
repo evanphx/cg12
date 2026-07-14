@@ -1,0 +1,5 @@
+char=1 short=2 int=4
+long=8 double=8 ptr=8
+struct=8
+expr_double=8 expr_long=8
+buf=16

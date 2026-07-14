@@ -336,6 +336,10 @@ func (g *gen) genUnary(n *cc.UnaryExpression) ir.Ref {
 	case cc.UnaryExpressionSizeofExpr, cc.UnaryExpressionSizeofType:
 		v, _ := constInt(n)
 		return g.fn.Long(v)
+	case cc.UnaryExpressionAlignofType: // _Alignof(type)
+		return g.fn.Long(int64(n.TypeName.Type().Align()))
+	case cc.UnaryExpressionAlignofExpr: // _Alignof expr (GNU)
+		return g.fn.Long(int64(n.UnaryExpression.Type().Align()))
 	case cc.UnaryExpressionLabelAddr: // &&label
 		if b, ok := g.labels[n.Token2.SrcStr()]; ok {
 			return g.cur.BlockAddr(b)
@@ -471,15 +475,21 @@ func (g *gen) compare(op string, ln, rn cc.ExpressionNode) ir.Ref {
 		ct = lt
 	case isFloat(rt):
 		ct = rt
-	case wide(clsOf(rt)):
-		ct = rt
-		if wide(clsOf(lt)) {
-			ct = lt
-		}
-	case wide(clsOf(lt)):
-		ct = lt
 	default:
-		ct = lt
+		// Both operands are integer (or pointer). The usual arithmetic
+		// conversions pick the wider type; at equal width an unsigned operand
+		// makes the comparison unsigned -- so -1 < 1u is false, not true.
+		switch lc, rc := clsOf(lt).Size(), clsOf(rt).Size(); {
+		case lc > rc:
+			ct = lt
+		case rc > lc:
+			ct = rt
+		default:
+			ct = lt
+			if signed(lt) && !signed(rt) {
+				ct = rt
+			}
+		}
 	}
 	l := g.convert(g.genExpr(ln), lt, ct)
 	r := g.convert(g.genExpr(rn), rt, ct)
