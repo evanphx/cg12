@@ -8,6 +8,7 @@
 //	cc -S hello.c         # -> hello.s (assembly text)
 //	cc -emit-ir hello.c   # print the cg12 IR to stdout
 //	cc -O -emit-ir hello.c # ... after running the optimizer
+//	cc -O -bpf prog.c     # compile to eBPF and print the disassembly
 package main
 
 import (
@@ -19,6 +20,7 @@ import (
 	"strings"
 
 	"github.com/evanphx/cg12/arm64"
+	"github.com/evanphx/cg12/bpf"
 	"github.com/evanphx/cg12/cc"
 	"github.com/evanphx/cg12/ir"
 	"github.com/evanphx/cg12/opt"
@@ -29,6 +31,7 @@ func main() {
 	emitObj := flag.Bool("c", false, "compile to a relocatable object (.o), do not link")
 	emitAsm := flag.Bool("S", false, "emit assembly text (.s), do not assemble")
 	emitIR := flag.Bool("emit-ir", false, "print the cg12 IR to stdout")
+	emitBPF := flag.Bool("bpf", false, "compile each function to eBPF and print the disassembly")
 	run := flag.Bool("run", false, "compile, link, and run; propagate the exit code")
 	optimize := flag.Bool("O", false, "run the cg12 optimizer before code generation")
 	flag.Usage = usage
@@ -53,6 +56,15 @@ func main() {
 	switch {
 	case *emitIR:
 		fmt.Print(mod.String())
+	case *emitBPF:
+		for _, f := range mod.Funcs {
+			if f.Start == nil {
+				continue
+			}
+			p, err := bpf.Compile(f)
+			check(err)
+			fmt.Printf("// %s: %d eBPF instructions\n%s", f.Name, p.Len(), p.Asm())
+		}
 	case *emitAsm:
 		asm, err := arm64.CompileModule(mod)
 		check(err)
