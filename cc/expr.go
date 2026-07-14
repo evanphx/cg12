@@ -210,6 +210,12 @@ func (g *gen) genAddr(e cc.ExpressionNode) (ir.Ref, cc.Type) {
 			return g.complit(n)
 		}
 	}
+	// An aggregate rvalue -- a call result, a statement expression, a ?: of
+	// structs -- is materialized in memory, and genExpr yields a pointer to that
+	// storage. That pointer is its address, so f().field and the like work.
+	if isMemValue(e.Type()) {
+		return g.genExpr(e), e.Type()
+	}
 	g.fail("cc: expression is not an lvalue: %T", e)
 	return ir.R, e.Type()
 }
