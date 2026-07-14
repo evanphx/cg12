@@ -167,7 +167,7 @@ func (c *comp) locOf(ref ir.Ref) loc {
 		case cst.Kind == ir.ConstSym && c.maps[cst.Sym]:
 			return loc{kind: locMapFD, sym: cst.Sym}
 		case cst.Kind == ir.ConstSym && hasKey(c.data, cst.Sym):
-			return loc{kind: locDataVal, imm: int64(c.data[cst.Sym]) + cst.Int}
+			return loc{kind: locDataVal, sym: cst.Sym, imm: int64(c.data[cst.Sym]) + cst.Int}
 		default:
 			c.fail("bpf: unsupported operand %v (a symbol that is not a map or read-only global, or a float)", cst.Sym)
 		}
@@ -201,22 +201,23 @@ func (c *comp) into(dst Reg, ref ir.Ref) {
 	case locMapFD:
 		c.emitMapFD(dst, l.sym)
 	case locDataVal:
-		c.emitDataVal(dst, int32(l.imm))
+		c.emitDataVal(dst, l.sym, int32(l.imm))
 	}
 }
 
 // emitMapFD loads a map's fd into dst, recording the relocation the loader
 // patches with the real descriptor.
 func (c *comp) emitMapFD(dst Reg, sym string) {
-	c.relocs = append(c.relocs, MapReloc{Insn: len(c.insns), Map: sym})
+	c.relocs = append(c.relocs, MapReloc{Insn: len(c.insns), Map: sym, Sym: sym})
 	w := LdMapFD(dst, 0) // fd patched in at load time
 	c.emit(w[0], w[1])
 }
 
-// emitDataVal loads the address of a read-only global (at off within .rodata)
-// into dst, recording the relocation for the .rodata map's fd.
-func (c *comp) emitDataVal(dst Reg, off int32) {
-	c.relocs = append(c.relocs, MapReloc{Insn: len(c.insns), Map: rodataName})
+// emitDataVal loads the address of read-only global sym (at off within .rodata)
+// into dst, recording a relocation on the .rodata map (direct loader) or the
+// global's symbol (ELF).
+func (c *comp) emitDataVal(dst Reg, sym string, off int32) {
+	c.relocs = append(c.relocs, MapReloc{Insn: len(c.insns), Map: rodataName, Sym: sym})
 	w := LdMapValue(dst, 0, off) // fd patched in at load time; off fixed
 	c.emit(w[0], w[1])
 }
@@ -336,7 +337,7 @@ func (c *comp) emitMove(dst, src loc) {
 		case locMapFD:
 			c.emitMapFD(dst.reg, src.sym)
 		case locDataVal:
-			c.emitDataVal(dst.reg, int32(src.imm))
+			c.emitDataVal(dst.reg, src.sym, int32(src.imm))
 		}
 	case locSlot:
 		switch src.kind {

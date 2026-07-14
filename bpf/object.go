@@ -22,11 +22,13 @@ type MapDef struct {
 	Initial []byte
 }
 
-// MapReloc records a two-slot ld_imm64 instruction whose immediate must be
-// patched with a map's file descriptor at load time.
+// MapReloc records a two-slot ld_imm64 instruction that references a map or a
+// read-only global. The direct loader patches the map's file descriptor into the
+// immediate; the ELF emitter turns it into an R_BPF_64_64 relocation on Sym.
 type MapReloc struct {
 	Insn int    // index of the ld_imm64's first slot
-	Map  string // referenced map name
+	Map  string // the map to take a descriptor from (".rodata" for global data)
+	Sym  string // the referenced symbol (the map, or the specific global for data)
 }
 
 // Program is one compiled eBPF program: its bytecode, the ELF-style section that
@@ -44,12 +46,21 @@ func (p *Program) Bytes() []byte { return (&Prog{Insns: p.Insns}).Bytes() }
 // Asm returns the program's disassembly.
 func (p *Program) Asm() string { return (&Prog{Insns: p.Insns}).Asm() }
 
+// RodataVar locates one read-only global within the .rodata blob, for the ELF's
+// BTF DATASEC.
+type RodataVar struct {
+	Name string
+	Off  uint32
+	Size uint32
+}
+
 // Object is a whole compiled module: the maps it needs and the programs that use
 // them.
 type Object struct {
 	Maps     []MapDef
 	Programs []*Program
-	License  string // from the "license" global, or "GPL"
+	Rodata   []RodataVar // layout of the .rodata map's contents (for the ELF)
+	License  string      // from the "license" global, or "GPL"
 }
 
 // MapByName returns the map with the given name.
@@ -103,8 +114,11 @@ func CompileModule(m *ir.Module) (*Object, error) {
 			continue
 		}
 		rodata = append(rodata, make([]byte, align8(len(rodata))-len(rodata))...)
-		dataOff[d.Name] = int32(len(rodata))
-		rodata = append(rodata, dataImage(d, int(d.Align))...)
+		off := int32(len(rodata))
+		dataOff[d.Name] = off
+		img := dataImage(d, int(d.Align))
+		rodata = append(rodata, img...)
+		obj.Rodata = append(obj.Rodata, RodataVar{Name: d.Name, Off: uint32(off), Size: uint32(len(img))})
 	}
 	if len(rodata) > 0 {
 		// A single-value, frozen array map holds the read-only data.

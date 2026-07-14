@@ -32,6 +32,7 @@ func main() {
 	emitAsm := flag.Bool("S", false, "emit assembly text (.s), do not assemble")
 	emitIR := flag.Bool("emit-ir", false, "print the cg12 IR to stdout")
 	emitBPF := flag.Bool("bpf", false, "compile each function to eBPF and print the disassembly")
+	emitBPFELF := flag.Bool("bpf-elf", false, "compile to a loadable eBPF ELF object (.bpf.o)")
 	run := flag.Bool("run", false, "compile, link, and run; propagate the exit code")
 	optimize := flag.Bool("O", false, "run the cg12 optimizer before code generation")
 	flag.Usage = usage
@@ -69,6 +70,10 @@ func main() {
 			}
 			fmt.Printf("// %s [%s]: %d eBPF instructions\n%s", p.Name, sec, len(p.Insns), p.Asm())
 		}
+	case *emitBPFELF:
+		obj, err := bpf.CompileModule(mod)
+		check(err)
+		writeOut(outputPath(*out, input, ".bpf.o"), obj.ELF())
 	case *emitAsm:
 		asm, err := arm64.CompileModule(mod)
 		check(err)
