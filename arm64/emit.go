@@ -5,6 +5,7 @@ import (
 	"math"
 	"strings"
 
+	"github.com/evanphx/cg12/arm64/a64"
 	"github.com/evanphx/cg12/ir"
 )
 
@@ -387,10 +388,20 @@ func (e *emitter) emitTerm(b *ir.Block) {
 func (e *emitter) emitInstr(b *ir.Block, in *ir.Instr) {
 	sz := in.Cls.Size()
 	switch in.Op {
+	case ir.ONop:
+		return
 	case ir.OAdd:
-		e.binop(fltMn(in.Cls, "add", "fadd"), in, sz)
+		if in.Cls.IsFloat() {
+			e.binop("fadd", in, sz)
+		} else {
+			e.addSubImm(in, false, sz)
+		}
 	case ir.OSub:
-		e.binop(fltMn(in.Cls, "sub", "fsub"), in, sz)
+		if in.Cls.IsFloat() {
+			e.binop("fsub", in, sz)
+		} else {
+			e.addSubImm(in, true, sz)
+		}
 	case ir.OMul:
 		e.binop(fltMn(in.Cls, "mul", "fmul"), in, sz)
 	case ir.ODiv:
@@ -398,17 +409,19 @@ func (e *emitter) emitInstr(b *ir.Block, in *ir.Instr) {
 	case ir.OUDiv:
 		e.binop("udiv", in, sz)
 	case ir.OAnd:
-		e.binop("and", in, sz)
+		e.logicalImm(in, "and", sz)
 	case ir.OOr:
-		e.binop("orr", in, sz)
+		e.logicalImm(in, "orr", sz)
 	case ir.OXor:
-		e.binop("eor", in, sz)
+		e.logicalImm(in, "eor", sz)
 	case ir.OShl:
-		e.binop("lsl", in, sz)
+		e.shiftImm(in, "lsl", sz)
 	case ir.OShr:
-		e.binop("lsr", in, sz)
+		e.shiftImm(in, "lsr", sz)
 	case ir.OSar:
-		e.binop("asr", in, sz)
+		e.shiftImm(in, "asr", sz)
+	case ir.ORotr:
+		e.rotrImm(in, sz)
 	case ir.ORem:
 		e.remop("sdiv", in, sz)
 	case ir.OURem:
@@ -489,6 +502,85 @@ func (e *emitter) binop(mn string, in *ir.Instr, sz int) {
 	done()
 }
 
+// shiftImm emits a shift, using the immediate form for a constant amount.
+func (e *emitter) shiftImm(in *ir.Instr, mn string, sz int) {
+	if v, ok := intConst(e.f, in.Args[1]); ok {
+		if sh, ok := shiftImm(v, sz); ok {
+			s1 := e.srcReg(in.Args[0], 0, sz)
+			d, done := e.dstReg(in.To, sz)
+			e.line("%s %s, %s, #%d", mn, d, s1, sh)
+			done()
+			return
+		}
+	}
+	e.binop(mn, in, sz)
+}
+
+// addSubImm emits an add/sub, folding a constant operand into a 12-bit
+// immediate and flipping add<->sub for a negative constant.
+func (e *emitter) addSubImm(in *ir.Instr, sub bool, sz int) {
+	aRef, bRef := in.Args[0], in.Args[1]
+	if !sub {
+		if _, ok := intConst(e.f, bRef); !ok {
+			if _, ok := intConst(e.f, aRef); ok {
+				aRef, bRef = bRef, aRef
+			}
+		}
+	}
+	if v, ok := intConst(e.f, bRef); ok {
+		if imm, lsl12, flip, ok := addSubImm(v); ok {
+			s1 := e.srcReg(aRef, 0, sz)
+			d, done := e.dstReg(in.To, sz)
+			mn := "add"
+			if sub != flip {
+				mn = "sub"
+			}
+			if lsl12 {
+				e.line("%s %s, %s, #%d, lsl #12", mn, d, s1, imm)
+			} else {
+				e.line("%s %s, %s, #%d", mn, d, s1, imm)
+			}
+			done()
+			return
+		}
+	}
+	e.binop(map[bool]string{false: "add", true: "sub"}[sub], in, sz)
+}
+
+// logicalImm emits a bitwise op, folding a constant operand into a logical
+// (bitmask) immediate when it encodes as one.
+func (e *emitter) logicalImm(in *ir.Instr, mn string, sz int) {
+	aRef, bRef := in.Args[0], in.Args[1]
+	if _, ok := intConst(e.f, bRef); !ok {
+		if _, ok := intConst(e.f, aRef); ok {
+			aRef, bRef = bRef, aRef
+		}
+	}
+	if v, ok := intConst(e.f, bRef); ok {
+		val := uint64(v)
+		if sz == 4 {
+			val &= 0xffffffff
+		}
+		if _, _, _, ok := a64.EncodeBitmask(val, sz); ok {
+			s1 := e.srcReg(aRef, 0, sz)
+			d, done := e.dstReg(in.To, sz)
+			e.line("%s %s, %s, #%d", mn, d, s1, int64(val))
+			done()
+			return
+		}
+	}
+	e.binop(mn, in, sz)
+}
+
+// rotrImm emits a rotate-right by a constant amount (ORotr).
+func (e *emitter) rotrImm(in *ir.Instr, sz int) {
+	v, _ := intConst(e.f, in.Args[1])
+	s := e.srcReg(in.Args[0], 0, sz)
+	d, done := e.dstReg(in.To, sz)
+	e.line("ror %s, %s, #%d", d, s, v)
+	done()
+}
+
 // remop computes a remainder as a - (a/b)*b using div + msub (integer only).
 func (e *emitter) remop(divmn string, in *ir.Instr, sz int) {
 	a := e.srcReg(in.Args[0], 0, sz)
@@ -540,16 +632,27 @@ func vec16(qName string) string {
 func (e *emitter) emitCmp(in *ir.Instr) {
 	argCls := e.f.ClassOf(in.Args[0])
 	sz := argCls.Size()
-	s1 := e.srcReg(in.Args[0], 0, sz)
-	s2 := e.srcReg(in.Args[1], 1, sz)
 
 	var cond string
 	var ok bool
 	if argCls.IsFloat() {
+		s1 := e.srcReg(in.Args[0], 0, sz)
+		s2 := e.srcReg(in.Args[1], 1, sz)
 		e.line("fcmp %s, %s", s1, s2)
 		cond, ok = fpCondCode(in.Cmp)
 	} else {
-		e.line("cmp %s, %s", s1, s2)
+		s1 := e.srcReg(in.Args[0], 0, sz)
+		folded := false
+		if v, vok := intConst(e.f, in.Args[1]); vok {
+			if imm, lsl12, flip, iok := addSubImm(v); iok && !lsl12 && !flip {
+				e.line("cmp %s, #%d", s1, imm)
+				folded = true
+			}
+		}
+		if !folded {
+			s2 := e.srcReg(in.Args[1], 1, sz)
+			e.line("cmp %s, %s", s1, s2)
+		}
 		cond, ok = condCode(in.Cmp)
 	}
 	if !ok {

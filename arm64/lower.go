@@ -15,9 +15,79 @@ import (
 // Only the integer subset (classes w and l) is handled; anything outside it
 // returns an explicit error rather than emitting silently wrong code.
 func lower(f *ir.Func) error {
+	foldRotates(f)
 	splitCriticalEdges(f)
 	destructSSA(f)
 	return lowerABI(f)
+}
+
+// foldRotates rewrites the shift-or rotate idiom into a single ORotr, which the
+// emitters turn into an AArch64 ROR. It matches
+//
+//	t1 = shr x, c1 ; t2 = shl x, c2 ; t3 = or t1, t2   (c1+c2 = width)
+//
+// (either shift order) and, when both shifts feed only the or, replaces the or
+// with `rotr x, c1` and drops the now-dead shifts.
+func foldRotates(f *ir.Func) {
+	uses := map[uint32]int{}
+	def := map[uint32]*ir.Instr{}
+	mark := func(r ir.Ref) {
+		if r.Kind == ir.RefTemp {
+			uses[r.ID]++
+		}
+	}
+	for _, b := range f.Blocks {
+		for _, p := range b.Phis {
+			for _, a := range p.Args {
+				mark(a)
+			}
+		}
+		for i := range b.Instrs {
+			in := &b.Instrs[i]
+			for _, a := range in.Args {
+				mark(a)
+			}
+			if in.To.Kind == ir.RefTemp {
+				def[in.To.ID] = in
+			}
+		}
+		mark(b.Jmp.Arg)
+		for _, a := range b.Jmp.Args {
+			mark(a)
+		}
+	}
+	defOf := func(r ir.Ref) *ir.Instr {
+		if r.Kind != ir.RefTemp {
+			return nil
+		}
+		return def[r.ID]
+	}
+	for _, b := range f.Blocks {
+		for i := range b.Instrs {
+			in := &b.Instrs[i]
+			x, ror, ok := rotateMatch(f, in, defOf)
+			if !ok {
+				continue
+			}
+			// Only fold when each shift result is consumed solely by this or, so
+			// dropping the shifts changes nothing else.
+			if uses[in.Args[0].ID] != 1 || uses[in.Args[1].ID] != 1 {
+				continue
+			}
+			s1, s2 := defOf(in.Args[0]), defOf(in.Args[1])
+			in.Op = ir.ORotr
+			in.Args = []ir.Ref{x, f.ConstInt(in.Cls, int64(ror))}
+			nop(s1)
+			nop(s2)
+		}
+	}
+}
+
+// nop turns an instruction into a no-op that defines nothing.
+func nop(in *ir.Instr) {
+	in.Op = ir.ONop
+	in.To = ir.Ref{}
+	in.Args = nil
 }
 
 // argLoc is where one AAPCS64 argument is passed: either a physical register or

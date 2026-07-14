@@ -119,6 +119,11 @@ const (
 	// no machine code.
 	OSafepoint
 
+	// ORotr rotates Args[0] right by Args[1] (a constant amount) within the width
+	// of Instr.Cls. It is produced by a backend that recognizes the shift-or
+	// rotate idiom (currently arm64) and has a single-instruction rotate.
+	ORotr
+
 	numOps
 )
 
@@ -140,12 +145,13 @@ var opTable = [numOps]opInfo{
 	ORem:  {name: "rem", hasResult: true},
 	OURem: {name: "urem", hasResult: true},
 
-	OAnd: {name: "and", hasResult: true, commutative: true},
-	OOr:  {name: "or", hasResult: true, commutative: true},
-	OXor: {name: "xor", hasResult: true, commutative: true},
-	OShl: {name: "shl", hasResult: true},
-	OShr: {name: "shr", hasResult: true},
-	OSar: {name: "sar", hasResult: true},
+	OAnd:  {name: "and", hasResult: true, commutative: true},
+	OOr:   {name: "or", hasResult: true, commutative: true},
+	OXor:  {name: "xor", hasResult: true, commutative: true},
+	OShl:  {name: "shl", hasResult: true},
+	OShr:  {name: "shr", hasResult: true},
+	OSar:  {name: "sar", hasResult: true},
+	ORotr: {name: "rotr", hasResult: true},
 
 	ONeg: {name: "neg", hasResult: true},
 

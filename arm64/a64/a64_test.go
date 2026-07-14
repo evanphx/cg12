@@ -56,6 +56,30 @@ func assemble(t *testing.T, as, objcopy string, lines []string) []byte {
 // TestEncodingsMatchAssembler is the correctness proof: every encoding function
 // produces exactly the bytes the reference assembler emits for the same
 // instruction.
+// andBits/orrBits/eorBits encode a logical-immediate instruction from a raw
+// value via EncodeBitmask, for the reference-assembler comparison.
+func andBits(w64 bool, rd, rn Reg, v uint64) uint32 {
+	n, immr, imms, ok := EncodeBitmask(v, sizeOf(w64))
+	if !ok {
+		panic("not a bitmask immediate")
+	}
+	return AndImm(w64, rd, rn, n, immr, imms)
+}
+func orrBits(w64 bool, rd, rn Reg, v uint64) uint32 {
+	n, immr, imms, _ := EncodeBitmask(v, sizeOf(w64))
+	return OrrImm(w64, rd, rn, n, immr, imms)
+}
+func eorBits(w64 bool, rd, rn Reg, v uint64) uint32 {
+	n, immr, imms, _ := EncodeBitmask(v, sizeOf(w64))
+	return EorImm(w64, rd, rn, n, immr, imms)
+}
+func sizeOf(w64 bool) int {
+	if w64 {
+		return 8
+	}
+	return 4
+}
+
 func TestEncodingsMatchAssembler(t *testing.T) {
 	as, objcopy := tools(t)
 
@@ -117,6 +141,24 @@ func TestEncodingsMatchAssembler(t *testing.T) {
 		{"strh w4, [x5, #2]", StrhImm(4, 5, 2)},
 		{"ldrh w6, [x7, #4]", LdrhImm(6, 7, 4)},
 		{"ldrsw x1, [x2, #8]", LdrswImm(1, 2, 8)},
+		// immediate cmp, shifts, rotate
+		{"cmp w1, #16", CmpImm(false, 1, 16)},
+		{"cmp x2, #4095", CmpImm(true, 2, 4095)},
+		{"lsl w1, w2, #7", LslImm(false, 1, 2, 7)},
+		{"lsl x3, x4, #40", LslImm(true, 3, 4, 40)},
+		{"lsr w5, w6, #25", LsrImm(false, 5, 6, 25)},
+		{"lsr x7, x8, #1", LsrImm(true, 7, 8, 1)},
+		{"asr w1, w2, #3", AsrImm(false, 1, 2, 3)},
+		{"asr x3, x4, #10", AsrImm(true, 3, 4, 10)},
+		{"ror w9, w10, #7", RorImm(false, 9, 10, 7)},
+		{"ror x11, x12, #40", RorImm(true, 11, 12, 40)},
+		{"extr w1, w2, w3, #5", Extr(false, 1, 2, 3, 5)},
+		// logical immediates (bitmask encoded)
+		{"and w1, w2, #0xff", andBits(false, 1, 2, 0xff)},
+		{"and x3, x4, #0xffff", andBits(true, 3, 4, 0xffff)},
+		{"orr w5, w6, #0xf0f0f0f0", orrBits(false, 5, 6, 0xf0f0f0f0)},
+		{"eor x7, x8, #0x1", eorBits(true, 7, 8, 0x1)},
+		{"and w9, w10, #0xfffffff8", andBits(false, 9, 10, 0xfffffff8)},
 	}
 
 	lines := make([]string, len(cases))

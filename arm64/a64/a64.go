@@ -298,3 +298,112 @@ func Uxth(rd, rn Reg) uint32           { return Ubfm(false, rd, rn, 0, 15) }
 
 // NegReg encodes NEG rd, rm (SUB rd, ZR, rm).
 func NegReg(w64 bool, rd, rm Reg) uint32 { return SubReg(w64, rd, ZR, rm) }
+
+// --- immediate forms: cmp, shifts, logical, rotate ------------------------
+
+// SubsImm encodes SUBS rd, rn, #imm12 (sets flags).
+func SubsImm(w64 bool, rd, rn Reg, imm12 uint32) uint32 { return addSubImm(w64, 1, 1, rd, rn, imm12) }
+
+// CmpImm encodes CMP rn, #imm12 (SUBS ZR, rn, #imm12).
+func CmpImm(w64 bool, rn Reg, imm12 uint32) uint32 { return SubsImm(w64, ZR, rn, imm12) }
+
+// LslImm encodes LSL rd, rn, #sh (an alias of UBFM). sh is 0..width-1.
+func LslImm(w64 bool, rd, rn Reg, sh uint32) uint32 {
+	width := uint32(32)
+	if w64 {
+		width = 64
+	}
+	return Ubfm(w64, rd, rn, (width-sh)&(width-1), width-1-sh)
+}
+
+// LsrImm encodes LSR rd, rn, #sh (an alias of UBFM).
+func LsrImm(w64 bool, rd, rn Reg, sh uint32) uint32 {
+	width := uint32(32)
+	if w64 {
+		width = 64
+	}
+	return Ubfm(w64, rd, rn, sh, width-1)
+}
+
+// AsrImm encodes ASR rd, rn, #sh (an alias of SBFM).
+func AsrImm(w64 bool, rd, rn Reg, sh uint32) uint32 {
+	width := uint32(32)
+	if w64 {
+		width = 64
+	}
+	return Sbfm(w64, rd, rn, sh, width-1)
+}
+
+func logicalImm(w64 bool, opc uint32, rd, rn Reg, n, immr, imms uint32) uint32 {
+	return sf(w64)<<31 | opc<<29 | 0x24<<23 | (n&1)<<22 | (immr&0x3f)<<16 | (imms&0x3f)<<10 | r(rn)<<5 | r(rd)
+}
+
+// AndImm/OrrImm/EorImm encode the logical-immediate instructions; the caller
+// supplies the (N, immr, imms) bitmask fields from EncodeBitmask.
+func AndImm(w64 bool, rd, rn Reg, n, immr, imms uint32) uint32 {
+	return logicalImm(w64, 0, rd, rn, n, immr, imms)
+}
+func OrrImm(w64 bool, rd, rn Reg, n, immr, imms uint32) uint32 {
+	return logicalImm(w64, 1, rd, rn, n, immr, imms)
+}
+func EorImm(w64 bool, rd, rn Reg, n, immr, imms uint32) uint32 {
+	return logicalImm(w64, 2, rd, rn, n, immr, imms)
+}
+
+// Extr encodes EXTR rd, rn, rm, #lsb (the low bits are taken from rm, the high
+// bits from rn). ROR is EXTR rd, rn, rn, #shift.
+func Extr(w64 bool, rd, rn, rm Reg, lsb uint32) uint32 {
+	return sf(w64)<<31 | 0x27<<23 | sf(w64)<<22 | r(rm)<<16 | (lsb&0x3f)<<10 | r(rn)<<5 | r(rd)
+}
+
+// RorImm encodes ROR rd, rn, #sh (EXTR rd, rn, rn, #sh) — a rotate right.
+func RorImm(w64 bool, rd, rn Reg, sh uint32) uint32 { return Extr(w64, rd, rn, rn, sh) }
+
+// EncodeBitmask returns the (N, immr, imms) fields for val as an AArch64 logical
+// (bitmask) immediate over a regSize-byte register, or ok=false if val is not a
+// representable bitmask (all-zeros, all-ones, and non-repeating patterns are
+// not). The search is over the definition of the encoding — every element size,
+// run length, and rotation — so it is correct by construction.
+func EncodeBitmask(val uint64, regSize int) (n, immr, imms uint32, ok bool) {
+	bits := regSize * 8
+	if bits < 64 {
+		val &= (uint64(1) << uint(bits)) - 1
+	}
+	var full uint64 = ^uint64(0)
+	if bits < 64 {
+		full = (uint64(1) << uint(bits)) - 1
+	}
+	if val == 0 || val == full {
+		return 0, 0, 0, false // all-zeros / all-ones are not encodable
+	}
+	for esize := 2; esize <= bits; esize <<= 1 {
+		emask := (uint64(1) << uint(esize)) - 1
+		for nones := 1; nones < esize; nones++ {
+			base := (uint64(1) << uint(nones)) - 1 // nones ones at the bottom
+			for rot := 0; rot < esize; rot++ {
+				elem := ((base >> uint(rot)) | (base << uint(esize-rot))) & emask
+				// Replicate the element across the whole register.
+				v := elem
+				for w := esize; w < bits; w <<= 1 {
+					v |= v << uint(w)
+				}
+				if bits < 64 {
+					v &= full
+				}
+				if v != val {
+					continue
+				}
+				log2e := 0
+				for (1 << uint(log2e)) < esize {
+					log2e++
+				}
+				if esize == 64 {
+					return 1, uint32(rot), uint32(nones - 1), true
+				}
+				high := uint32((1<<uint(6-log2e))-2) << uint(log2e)
+				return 0, uint32(rot), high | uint32(nones-1), true
+			}
+		}
+	}
+	return 0, 0, 0, false
+}

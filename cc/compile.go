@@ -263,7 +263,9 @@ func (g *gen) genFunc(fd *cc.FunctionDefinition) {
 	default:
 		g.fn = g.mod.NewFunc(d.Name(), clsOf(ret))
 	}
-	g.fn.Export()
+	if d.Linkage() != cc.Internal { // a `static` function keeps internal linkage
+		g.fn.Export()
+	}
 	g.fn.Linkage.Section = sectionOf(ft) // eBPF attach section (xdp, kprobe/..., ...)
 	g.fn.Variadic = ft.IsVariadic()
 	g.cur = g.fn.Entry()

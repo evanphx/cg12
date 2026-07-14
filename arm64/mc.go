@@ -1103,9 +1103,17 @@ func (m *mc) instr(in *ir.Instr) {
 	case ir.OCopy, ir.OPar, ir.OArg:
 		m.copy(in)
 	case ir.OAdd:
-		m.binFP(in, a64.AddReg, a64.Fadd)
+		if in.Cls.IsFloat() {
+			m.binFP(in, a64.AddReg, a64.Fadd)
+		} else {
+			m.addSub(in, false)
+		}
 	case ir.OSub:
-		m.binFP(in, a64.SubReg, a64.Fsub)
+		if in.Cls.IsFloat() {
+			m.binFP(in, a64.SubReg, a64.Fsub)
+		} else {
+			m.addSub(in, true)
+		}
 	case ir.OMul:
 		m.binFP(in, func(w bool, d, n, mm a64.Reg) uint32 { return a64.Mul(w, d, n, mm) }, a64.Fmul)
 	case ir.ODiv:
@@ -1113,17 +1121,24 @@ func (m *mc) instr(in *ir.Instr) {
 	case ir.OUDiv:
 		m.binInt(in, a64.Udiv)
 	case ir.OAnd:
-		m.binInt(in, a64.AndReg)
+		m.logical(in, a64.AndReg, a64.AndImm)
 	case ir.OOr:
-		m.binInt(in, a64.OrrReg)
+		m.logical(in, a64.OrrReg, a64.OrrImm)
 	case ir.OXor:
-		m.binInt(in, a64.EorReg)
+		m.logical(in, a64.EorReg, a64.EorImm)
 	case ir.OShl:
-		m.binInt(in, a64.Lslv)
+		m.shift(in, a64.Lslv, a64.LslImm)
 	case ir.OShr:
-		m.binInt(in, a64.Lsrv)
+		m.shift(in, a64.Lsrv, a64.LsrImm)
 	case ir.OSar:
-		m.binInt(in, a64.Asrv)
+		m.shift(in, a64.Asrv, a64.AsrImm)
+	case ir.ORotr:
+		sz := in.Cls.Size()
+		v, _ := intConst(m.f, in.Args[1])
+		s := m.src(in.Args[0], 0, sz)
+		d, done := m.dst(in.To, sz)
+		m.emit(a64.RorImm(sz == 8, d, s, uint32(v)))
+		done()
 	case ir.ORem:
 		m.rem(in, a64.Sdiv)
 	case ir.OURem:
@@ -1198,6 +1213,86 @@ func (m *mc) binInt(in *ir.Instr, enc func(w64 bool, rd, rn, rm a64.Reg) uint32)
 	done()
 }
 
+// shift emits an integer shift, using the immediate form when the amount is a
+// constant in range and the variable form otherwise.
+func (m *mc) shift(in *ir.Instr, vEnc func(w64 bool, rd, rn, rm a64.Reg) uint32, iEnc func(w64 bool, rd, rn a64.Reg, sh uint32) uint32) {
+	sz := in.Cls.Size()
+	if v, ok := intConst(m.f, in.Args[1]); ok {
+		if sh, ok := shiftImm(v, sz); ok {
+			s1 := m.src(in.Args[0], 0, sz)
+			d, done := m.dst(in.To, sz)
+			m.emit(iEnc(sz == 8, d, s1, sh))
+			done()
+			return
+		}
+	}
+	m.binInt(in, vEnc)
+}
+
+// addSub emits an integer add or sub, folding a constant operand into a 12-bit
+// (optionally << 12) immediate, flipping add<->sub for a negative constant.
+func (m *mc) addSub(in *ir.Instr, sub bool) {
+	sz := in.Cls.Size()
+	aRef, bRef := in.Args[0], in.Args[1]
+	if !sub { // add is commutative: fold whichever operand is the constant
+		if _, ok := intConst(m.f, bRef); !ok {
+			if _, ok := intConst(m.f, aRef); ok {
+				aRef, bRef = bRef, aRef
+			}
+		}
+	}
+	if v, ok := intConst(m.f, bRef); ok {
+		if imm, lsl12, flip, ok := addSubImm(v); ok {
+			s1 := m.src(aRef, 0, sz)
+			d, done := m.dst(in.To, sz)
+			w64 := sz == 8
+			switch useSub := sub != flip; {
+			case useSub && lsl12:
+				m.emit(a64.SubImmLSL12(w64, d, s1, imm))
+			case useSub:
+				m.emit(a64.SubImm(w64, d, s1, imm))
+			case lsl12:
+				m.emit(a64.AddImmLSL12(w64, d, s1, imm))
+			default:
+				m.emit(a64.AddImm(w64, d, s1, imm))
+			}
+			done()
+			return
+		}
+	}
+	if sub {
+		m.binInt(in, a64.SubReg)
+	} else {
+		m.binInt(in, a64.AddReg)
+	}
+}
+
+// logical emits a bitwise and/orr/eor, folding a constant operand into a
+// logical (bitmask) immediate when it encodes as one.
+func (m *mc) logical(in *ir.Instr, rEnc func(w64 bool, rd, rn, rm a64.Reg) uint32, iEnc func(w64 bool, rd, rn a64.Reg, n, immr, imms uint32) uint32) {
+	sz := in.Cls.Size()
+	aRef, bRef := in.Args[0], in.Args[1]
+	if _, ok := intConst(m.f, bRef); !ok { // commutative: put the constant second
+		if _, ok := intConst(m.f, aRef); ok {
+			aRef, bRef = bRef, aRef
+		}
+	}
+	if v, ok := intConst(m.f, bRef); ok {
+		val := uint64(v)
+		if sz == 4 {
+			val &= 0xffffffff
+		}
+		if n, immr, imms, ok := a64.EncodeBitmask(val, sz); ok {
+			s1 := m.src(aRef, 0, sz)
+			d, done := m.dst(in.To, sz)
+			m.emit(iEnc(sz == 8, d, s1, n, immr, imms))
+			done()
+			return
+		}
+	}
+	m.binInt(in, rEnc)
+}
+
 func (m *mc) binFP(in *ir.Instr, iEnc func(w64 bool, rd, rn, rm a64.Reg) uint32, fEnc func(dbl bool, rd, rn, rm a64.Reg) uint32) {
 	if !in.Cls.IsFloat() {
 		m.binInt(in, iEnc)
@@ -1242,15 +1337,26 @@ func (m *mc) copy(in *ir.Instr) {
 func (m *mc) cmp(in *ir.Instr) {
 	argCls := m.f.ClassOf(in.Args[0])
 	sz := argCls.Size()
-	s1 := m.src(in.Args[0], 0, sz)
-	s2 := m.src(in.Args[1], 1, sz)
 	var cond a64.Cond
 	var ok bool
 	if argCls.IsFloat() {
+		s1 := m.src(in.Args[0], 0, sz)
+		s2 := m.src(in.Args[1], 1, sz)
 		m.emit(a64.Fcmp(sz == 8, s1, s2))
 		cond, ok = fpCondOf(in.Cmp)
 	} else {
-		m.emit(a64.CmpReg(sz == 8, s1, s2))
+		s1 := m.src(in.Args[0], 0, sz)
+		folded := false
+		if v, vok := intConst(m.f, in.Args[1]); vok {
+			if imm, lsl12, flip, iok := addSubImm(v); iok && !lsl12 && !flip {
+				m.emit(a64.CmpImm(sz == 8, s1, imm))
+				folded = true
+			}
+		}
+		if !folded {
+			s2 := m.src(in.Args[1], 1, sz)
+			m.emit(a64.CmpReg(sz == 8, s1, s2))
+		}
 		cond, ok = intCondOf(in.Cmp)
 	}
 	if !ok {
