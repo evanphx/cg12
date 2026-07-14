@@ -37,6 +37,9 @@ func (g *gen) aggTypeOf(t cc.Type) *ir.AggType {
 	if cc.IsComplexType(t) {
 		return g.complexAgg(t)
 	}
+	if isInt128(t) {
+		return g.int128Agg()
+	}
 	return g.aggOf(t)
 }
 

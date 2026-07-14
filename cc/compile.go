@@ -24,6 +24,7 @@ type gen struct {
 	strs     map[string]string                  // decoded string literal -> data symbol name
 	ldconsts map[string]string                  // quad constant bytes -> data symbol name
 	quad     *ir.AggType                        // the canonical long-double (quad) aggregate type
+	ti128    *ir.AggType                        // the canonical __int128 {lo,hi} aggregate type
 	cplx     map[ir.SubCls]*ir.AggType          // memoized _Complex {re,im} aggregate types
 	aggs     map[cc.Type]*ir.AggType            // memoized C struct/union -> cg12 aggregate type
 	names    map[string]int                     // per-function temp-name uniquifier
@@ -142,6 +143,9 @@ func clsOf(t cc.Type) ir.Cls {
 	if cc.IsComplexType(t) {
 		return ir.ClsP // a complex value is the address of its {re,im} storage
 	}
+	if isInt128(t) {
+		return ir.ClsP // a 128-bit integer is the address of its {lo,hi} storage
+	}
 	switch t.Kind() {
 	case cc.Float:
 		return ir.ClsS
@@ -166,7 +170,7 @@ func wide(c ir.Cls) bool { return c == ir.ClsL || c == ir.ClsP }
 // on this target (aarch64).
 func signed(t cc.Type) bool {
 	switch t.Kind() {
-	case cc.Bool, cc.Char, cc.UChar, cc.UShort, cc.UInt, cc.ULong, cc.ULongLong, cc.Ptr:
+	case cc.Bool, cc.Char, cc.UChar, cc.UShort, cc.UInt, cc.ULong, cc.ULongLong, cc.UInt128, cc.Ptr:
 		return false
 	default:
 		return true
@@ -247,7 +251,9 @@ func (g *gen) rvalue(addr ir.Ref, t cc.Type) ir.Ref {
 // isMemValue reports whether a value of type t is represented by the address of
 // its storage rather than loaded into a register: a struct/union or a long
 // double (a 128-bit quad), both of which are passed and copied through memory.
-func isMemValue(t cc.Type) bool { return isAggType(t) || isLongDouble(t) || cc.IsComplexType(t) }
+func isMemValue(t cc.Type) bool {
+	return isAggType(t) || isLongDouble(t) || cc.IsComplexType(t) || isInt128(t)
+}
 
 // loadVal loads a value of type t from addr, sign/zero-extending narrow types.
 func (g *gen) loadVal(addr ir.Ref, t cc.Type) ir.Ref {
@@ -478,6 +484,12 @@ func (g *gen) globalItems(t cc.Type, init *cc.Initializer) []ir.DataItem {
 				cs := compSize(complexCls(et))
 				leaves = append(leaves, leaf{off, cs, ir.DataItem{Sub: subFor(cs), Flts: []float64{real(cv)}}})
 				leaves = append(leaves, leaf{off + cs, cs, ir.DataItem{Sub: subFor(cs), Flts: []float64{imag(cv)}}})
+			}
+		case isInt128(et):
+			if bi, ok := constInt128(e); ok {
+				lo, hi := split128(bi)
+				leaves = append(leaves, leaf{off, 8, ir.DataItem{Sub: ir.SubL, Ints: []int64{lo}}})
+				leaves = append(leaves, leaf{off + 8, 8, ir.DataItem{Sub: ir.SubL, Ints: []int64{hi}}})
 			}
 		case isFloat(et):
 			if v, ok := e.Value().(cc.Float64Value); ok {

@@ -20,6 +20,10 @@ func (g *gen) convert(v ir.Ref, from, to cc.Type) ir.Ref {
 	if cc.IsComplexType(from) || cc.IsComplexType(to) {
 		return g.fail("cc: unsupported complex conversion %v -> %v", from, to)
 	}
+	// A conversion touching a 128-bit integer is lowered on its {lo,hi} halves.
+	if isInt128(from) || isInt128(to) {
+		return g.int128Convert(v, from, to)
+	}
 	// long double conversions are soft-float calls; a quad-to-quad "conversion"
 	// is a no-op on the value's address.
 	if isLongDouble(from) || isLongDouble(to) {

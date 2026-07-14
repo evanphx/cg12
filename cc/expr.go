@@ -272,6 +272,11 @@ func (g *gen) genPostfix(n *cc.PostfixExpression) ir.Ref {
 			return old
 		}
 		addr, t := g.genAddr(n.PostfixExpression)
+		if isInt128(t) {
+			old := g.int128Copy(addr)
+			g.copyAgg(addr, g.int128IncDec(addr, n.Case == cc.PostfixExpressionInc), 16)
+			return old
+		}
 		old := g.loadVal(addr, t)
 		g.storeVal(addr, g.incDec(old, t, n.Case == cc.PostfixExpressionInc), t)
 		return old // post-inc/dec yields the old value
@@ -301,6 +306,9 @@ func (g *gen) incDec(v ir.Ref, t cc.Type, inc bool) ir.Ref {
 func (g *gen) genUnary(n *cc.UnaryExpression) ir.Ref {
 	switch n.Case {
 	case cc.UnaryExpressionMinus:
+		if isInt128(n.Type()) {
+			return g.int128Neg(n.CastExpression)
+		}
 		if comp, ok := g.effComplex(n.CastExpression); ok {
 			return g.complexNeg(n.CastExpression, comp)
 		}
@@ -327,6 +335,9 @@ func (g *gen) genUnary(n *cc.UnaryExpression) ir.Ref {
 		}
 		return g.cur.Cmp(ir.CmpEq, ir.ClsW, v, g.constOf(0, t))
 	case cc.UnaryExpressionCpl: // ~x
+		if isInt128(n.Type()) {
+			return g.int128Cpl(n.CastExpression)
+		}
 		v := g.genExpr(n.CastExpression)
 		cls := clsOf(n.Type())
 		if wide(cls) {
@@ -356,6 +367,10 @@ func (g *gen) genUnary(n *cc.UnaryExpression) ir.Ref {
 			return v
 		}
 		addr, t := g.genAddr(n.UnaryExpression)
+		if isInt128(t) {
+			g.copyAgg(addr, g.int128IncDec(addr, n.Case == cc.UnaryExpressionInc), 16)
+			return addr // prefix yields the new value
+		}
 		v := g.incDec(g.loadVal(addr, t), t, n.Case == cc.UnaryExpressionInc)
 		g.storeVal(addr, v, t)
 		return v
@@ -412,6 +427,11 @@ func (g *gen) arith(op string, ln, rn cc.ExpressionNode, resT cc.Type) ir.Ref {
 		if cc.IsComplexType(resT) {
 			return g.fail("cc: unsupported complex type %v", resT)
 		}
+	}
+	// 128-bit integer arithmetic lowers to 64-bit half operations (and libgcc
+	// helpers for multiply, divide, remainder, and shifts).
+	if isInt128(resT) {
+		return g.int128Arith(op, ln, rn, resT)
 	}
 	// long double arithmetic is a soft-float call on the operands' addresses.
 	if isLongDouble(resT) {
@@ -507,6 +527,13 @@ func (g *gen) compare(op string, ln, rn cc.ExpressionNode) ir.Ref {
 	// Complex operands admit only == and !=, comparing both components.
 	if isComplex(ln.Type()) || isComplex(rn.Type()) {
 		return g.complexCompare(op, ln, rn)
+	}
+	// A 128-bit integer comparison (unless a float operand dominates, making the
+	// common type floating) is done on the {lo,hi} halves. The comparison is
+	// unsigned when either operand is an unsigned __int128.
+	if (isInt128(ln.Type()) || isInt128(rn.Type())) && !isFloat(ln.Type()) && !isFloat(rn.Type()) {
+		signedCmp := ln.Type().Kind() != cc.UInt128 && rn.Type().Kind() != cc.UInt128
+		return g.int128Compare(op, ln, rn, signedCmp)
 	}
 	// Compare in the common type of the operands, following the usual
 	// arithmetic conversions: long double > double > float > wider integer. A
@@ -680,6 +707,9 @@ func (g *gen) genAssign(n *cc.AssignmentExpression) ir.Ref {
 	if isComplex(t) { // z op= x  combines both components (op is +, -, *, /)
 		return g.complexCompound(compoundArithOp(n.Case), addr, t, n.AssignmentExpression)
 	}
+	if isInt128(t) { // 128-bit op= combines the {lo,hi} halves
+		return g.int128Compound(compoundAllOp(n.Case), addr, t, n.AssignmentExpression)
+	}
 	if isLongDouble(t) { // r op= x  is a soft-float op on the operands' addresses
 		old := g.rvalue(addr, t)
 		rhs := g.convert(g.genExpr(n.AssignmentExpression), n.AssignmentExpression.Type(), t)
@@ -716,6 +746,26 @@ func compoundArithOp(c cc.AssignmentExpressionCase) string {
 		return "/"
 	}
 	return ""
+}
+
+// compoundAllOp maps every compound-assignment case to its binary operator,
+// including the integer-only ones (%, shifts, bitwise) that __int128 admits.
+func compoundAllOp(c cc.AssignmentExpressionCase) string {
+	switch c {
+	case cc.AssignmentExpressionMod:
+		return "%"
+	case cc.AssignmentExpressionLsh:
+		return "<<"
+	case cc.AssignmentExpressionRsh:
+		return ">>"
+	case cc.AssignmentExpressionAnd:
+		return "&"
+	case cc.AssignmentExpressionOr:
+		return "|"
+	case cc.AssignmentExpressionXor:
+		return "^"
+	}
+	return compoundArithOp(c)
 }
 
 func (g *gen) combineOp(c cc.AssignmentExpressionCase, l, r ir.Ref, t cc.Type) ir.Ref {
