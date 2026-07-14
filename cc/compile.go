@@ -583,6 +583,10 @@ func (g *gen) constAddr(e cc.ExpressionNode) (string, int64, bool) {
 			if isFuncDesignator(n.Type()) {
 				return name, 0, true
 			}
+		case cc.PrimaryExpressionString: // a string literal decays to its data symbol
+			if s, ok := n.Value().(cc.StringValue); ok {
+				return g.internStr(string(s)), 0, true
+			}
 		case cc.PrimaryExpressionExpr:
 			return g.constAddr(n.ExpressionList)
 		}
@@ -618,6 +622,16 @@ func elemSize(t cc.Type) int64 {
 		return int64(x.Elem().Size())
 	}
 	return 1
+}
+
+// isPtrOrArray reports whether t participates in pointer arithmetic as the
+// pointer operand: a pointer, or an array that decays to one.
+func isPtrOrArray(t cc.Type) bool {
+	switch t.(type) {
+	case *cc.PointerType, *cc.ArrayType:
+		return true
+	}
+	return false
 }
 
 func subFor(size int) ir.SubCls {

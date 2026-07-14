@@ -493,6 +493,7 @@ var (
 
 const (
 	mcGP0 = a64.Reg(16)
+	mcGP1 = a64.Reg(17)
 	mcGP2 = a64.Reg(15)
 	mcFP0 = a64.Reg(30)
 	mcX29 = a64.Reg(29)
@@ -600,28 +601,62 @@ func (m *mc) adjustSP(sub bool, n int) {
 	}
 }
 
-// spillLoad / spillStore move a value between a register and a frame slot at
-// [x29, #off], selecting the FP or GP form.
-func (m *mc) spillLoad(r a64.Reg, float bool, off, size int) {
+// spillImmFits reports whether a byte offset encodes directly in the scaled
+// 12-bit unsigned-immediate field of a load/store of the given access width.
+func spillImmFits(off, size int) bool {
+	return off >= 0 && off%size == 0 && off/size <= 4095
+}
+
+// ldFrom / stTo emit a load/store of r from/to [base, #off], selecting the quad,
+// FP, or GP form. off must fit the scaled immediate.
+func (m *mc) ldFrom(r a64.Reg, float bool, base a64.Reg, off, size int) {
 	switch {
 	case size == 16:
-		m.emit(a64.LdrQ(r, mcX29, uint32(off))) // 128-bit quad
+		m.emit(a64.LdrQ(r, base, uint32(off))) // 128-bit quad
 	case float:
-		m.emit(a64.LdrFP(size == 8, r, mcX29, uint32(off)))
+		m.emit(a64.LdrFP(size == 8, r, base, uint32(off)))
 	default:
-		m.emit(a64.LdrImm(size == 8, r, mcX29, uint32(off)))
+		m.emit(a64.LdrImm(size == 8, r, base, uint32(off)))
 	}
 }
 
-func (m *mc) spillStore(r a64.Reg, float bool, off, size int) {
+func (m *mc) stTo(r a64.Reg, float bool, base a64.Reg, off, size int) {
 	switch {
 	case size == 16:
-		m.emit(a64.StrQ(r, mcX29, uint32(off)))
+		m.emit(a64.StrQ(r, base, uint32(off)))
 	case float:
-		m.emit(a64.StrFP(size == 8, r, mcX29, uint32(off)))
+		m.emit(a64.StrFP(size == 8, r, base, uint32(off)))
 	default:
-		m.emit(a64.StrImm(size == 8, r, mcX29, uint32(off)))
+		m.emit(a64.StrImm(size == 8, r, base, uint32(off)))
 	}
+}
+
+// spillLoad / spillStore move a value between a register and a frame slot at
+// [x29, #off]. A frame large enough to push a slot past the scaled 12-bit
+// immediate range is handled by materializing the address in a scratch: a GP
+// load reuses its own destination (an FP load borrows x16, which is never live
+// across an FP operand load), and a store uses x17 (never a spill value and dead
+// at every store point, so it cannot alias r).
+func (m *mc) spillLoad(r a64.Reg, float bool, off, size int) {
+	if spillImmFits(off, size) {
+		m.ldFrom(r, float, mcX29, off, size)
+		return
+	}
+	addr := r
+	if float {
+		addr = mcGP0
+	}
+	m.frameAddr(addr, off)
+	m.ldFrom(r, float, addr, 0, size)
+}
+
+func (m *mc) spillStore(r a64.Reg, float bool, off, size int) {
+	if spillImmFits(off, size) {
+		m.stTo(r, float, mcX29, off, size)
+		return
+	}
+	m.frameAddr(mcGP1, off)
+	m.stTo(r, float, mcGP1, 0, size)
 }
 
 // emitReg emits `mov dst, src` for a register-variable read or write. The
@@ -952,11 +987,16 @@ func (m *mc) stackParam(in *ir.Instr) {
 // spillFromFrame loads from an arbitrary [x29, #off] (the incoming-argument
 // area), unlike spillLoad which reads the local spill area.
 func (m *mc) spillFromFrame(r a64.Reg, float bool, off, size int) {
-	if float {
-		m.emit(a64.LdrFP(size == 8, r, mcX29, uint32(off)))
-	} else {
-		m.emit(a64.LdrImm(size == 8, r, mcX29, uint32(off)))
+	if spillImmFits(off, size) {
+		m.ldFrom(r, float, mcX29, off, size)
+		return
 	}
+	addr := r
+	if float {
+		addr = mcGP0
+	}
+	m.frameAddr(addr, off)
+	m.ldFrom(r, float, addr, 0, size)
 }
 
 func (m *mc) callSequence(b *ir.Block, i int) int {
@@ -1020,13 +1060,14 @@ func (m *mc) emitCall(in *ir.Instr) {
 	callee := in.Args[0]
 	switch callee.Kind {
 	case ir.RefConst:
-		c := m.f.Consts[callee.ID]
-		if c.Kind != ir.ConstSym {
-			m.fail("arm64: call target must be a symbol or register")
-			return
+		if c := m.f.Consts[callee.ID]; c.Kind == ir.ConstSym {
+			m.reloc(sanitize(c.Sym), obj.R_AARCH64_CALL26)
+			m.emit(a64.Bl(0))
+			break
 		}
-		m.reloc(sanitize(c.Sym), obj.R_AARCH64_CALL26)
-		m.emit(a64.Bl(0))
+		// A call through a constant address (e.g. a function pointer the
+		// optimizer folded to a literal): materialize it and branch indirectly.
+		m.emit(a64.Blr(m.src(callee, 0, 8)))
 	case ir.RefTemp:
 		r := m.src(callee, 0, 8)
 		m.emit(a64.Blr(r))

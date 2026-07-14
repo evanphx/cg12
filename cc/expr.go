@@ -185,11 +185,13 @@ func (g *gen) genAddr(e cc.ExpressionNode) (ir.Ref, cc.Type) {
 		}
 	case *cc.PostfixExpression:
 		switch n.Case {
-		case cc.PostfixExpressionIndex: // a[i]
-			base, elemT := g.arrayBase(n.PostfixExpression)
-			idx := g.toPtr(g.genExpr(n.ExpressionList), n.ExpressionList.Type())
-			off := g.cur.Mul(ir.ClsP, idx, g.fn.ConstInt(ir.ClsP, int64(elemT.Size())))
-			return g.cur.Add(ir.ClsP, base, off), elemT
+		case cc.PostfixExpressionIndex: // a[i], equivalently i[a]
+			var arrN, idxN cc.ExpressionNode = n.PostfixExpression, n.ExpressionList
+			if !isPtrOrArray(arrN.Type()) {
+				arrN, idxN = idxN, arrN
+			}
+			base, elemT := g.arrayBase(arrN)
+			return g.ptrIndex(base, false, g.genExpr(idxN), idxN.Type(), int64(elemT.Size())), elemT
 		case cc.PostfixExpressionSelect: // s.field
 			base, _ := g.genAddr(n.PostfixExpression)
 			fld := n.Field()
@@ -310,6 +312,13 @@ func (g *gen) genUnary(n *cc.UnaryExpression) ir.Ref {
 			return r
 		}
 		p := g.genExpr(n.CastExpression)
+		// Dereferencing a function pointer yields a function designator, which
+		// decays right back to the same address -- there is no load. This makes
+		// the explicit (*fp)(args) call form equivalent to fp(args). cc decays
+		// the deref's own result type back to a pointer, so test the operand.
+		if funcTypeOf(n.CastExpression.Type()) != nil {
+			return p
+		}
 		return g.rvalue(p, n.Type())
 	case cc.UnaryExpressionAddrof: // &x
 		addr, _ := g.genAddr(n.CastExpression)
@@ -342,6 +351,13 @@ func (g *gen) arith(op string, ln, rn cc.ExpressionNode, resT cc.Type) ir.Ref {
 	// Pointer arithmetic: p +/- n scales n by the element size.
 	if pt, ok := resT.(*cc.PointerType); ok && (op == "+" || op == "-") {
 		return g.ptrArith(op, ln, rn, pt)
+	}
+	// Pointer difference: p - q is the byte distance divided by the element
+	// size, yielding a signed ptrdiff_t. The result type is an integer (not a
+	// pointer), so this is not caught by the pointer-arithmetic case above.
+	if op == "-" && isPtrOrArray(ln.Type()) && isPtrOrArray(rn.Type()) {
+		diff := g.ptrDiff(g.genExpr(ln), g.genExpr(rn), elemSize(ln.Type()))
+		return g.convert(diff, ln.Type(), resT)
 	}
 	// long double arithmetic is a soft-float call on the operands' addresses.
 	if isLongDouble(resT) {
@@ -390,35 +406,83 @@ func (g *gen) arith(op string, ln, rn cc.ExpressionNode, resT cc.Type) ir.Ref {
 	return g.fail("cc: bad arith op %q", op)
 }
 
-func (g *gen) ptrArith(op string, ln, rn cc.ExpressionNode, pt *cc.PointerType) ir.Ref {
-	base := g.genExpr(ln)
-	idx := g.toPtr(g.genExpr(rn), rn.Type())
-	off := g.cur.Mul(ir.ClsP, idx, g.fn.ConstInt(ir.ClsP, int64(pt.Elem().Size())))
-	if op == "-" {
+// ptrOffset scales an integer index by the element size, producing a byte
+// offset in the pointer class. A unit element size needs no multiply.
+func (g *gen) ptrOffset(idx ir.Ref, idxType cc.Type, elem int64) ir.Ref {
+	off := g.toPtr(idx, idxType)
+	if elem != 1 {
+		off = g.cur.Mul(ir.ClsP, off, g.fn.ConstInt(ir.ClsP, elem))
+	}
+	return off
+}
+
+// ptrIndex computes the address of the idx-th element from base:
+// base +/- idx*elem in the pointer class (subtracting when sub is true).
+func (g *gen) ptrIndex(base ir.Ref, sub bool, idx ir.Ref, idxType cc.Type, elem int64) ir.Ref {
+	off := g.ptrOffset(idx, idxType, elem)
+	if sub {
 		return g.cur.Sub(ir.ClsP, base, off)
 	}
 	return g.cur.Add(ir.ClsP, base, off)
 }
 
+// ptrDiff computes p - q for two pointers to the same element type: the byte
+// distance between them divided by the element size, a signed ptrdiff_t.
+func (g *gen) ptrDiff(l, r ir.Ref, elem int64) ir.Ref {
+	diff := g.cur.Sub(ir.ClsL, g.cur.Copy(ir.ClsL, l), g.cur.Copy(ir.ClsL, r))
+	if elem > 1 {
+		diff = g.cur.Div(ir.ClsL, diff, g.fn.ConstInt(ir.ClsL, elem))
+	}
+	return diff
+}
+
+// ptrArith emits pointer +/- integer. For subtraction the pointer is the left
+// operand (p - n); for addition either operand may be the pointer, since C
+// makes p + n and n + p equivalent. The element size comes from the result
+// (pointer) type, which matches whichever operand is the pointer.
+func (g *gen) ptrArith(op string, ln, rn cc.ExpressionNode, pt *cc.PointerType) ir.Ref {
+	baseN, idxN := ln, rn
+	if op == "+" && !isPtrOrArray(ln.Type()) {
+		baseN, idxN = rn, ln
+	}
+	return g.ptrIndex(g.genExpr(baseN), op == "-", g.genExpr(idxN), idxN.Type(), int64(pt.Elem().Size()))
+}
+
 // compare emits a relational/equality comparison producing a 0/1 int.
 func (g *gen) compare(op string, ln, rn cc.ExpressionNode) ir.Ref {
-	// Compare in the common type of the operands. long double dominates.
-	ct := ln.Type()
+	// Compare in the common type of the operands, following the usual
+	// arithmetic conversions: long double > double > float > wider integer. A
+	// floating operand always dominates an integer one -- comparing e.g. a
+	// double against a long must widen the long to double, not truncate the
+	// double to long.
+	lt, rt := ln.Type(), rn.Type()
+	var ct cc.Type
 	switch {
-	case isLongDouble(ln.Type()):
-		ct = ln.Type()
-	case isLongDouble(rn.Type()):
-		ct = rn.Type()
-	case wide(clsOf(rn.Type())) || isFloat(rn.Type()):
-		ct = rn.Type()
-		if wide(clsOf(ln.Type())) {
-			ct = ln.Type()
+	case isLongDouble(lt):
+		ct = lt
+	case isLongDouble(rt):
+		ct = rt
+	case isFloat(lt) && isFloat(rt):
+		ct = lt
+		if rt.Kind() == cc.Double {
+			ct = rt // double dominates float
 		}
-	case wide(clsOf(ln.Type())):
-		ct = ln.Type()
+	case isFloat(lt):
+		ct = lt
+	case isFloat(rt):
+		ct = rt
+	case wide(clsOf(rt)):
+		ct = rt
+		if wide(clsOf(lt)) {
+			ct = lt
+		}
+	case wide(clsOf(lt)):
+		ct = lt
+	default:
+		ct = lt
 	}
-	l := g.convert(g.genExpr(ln), ln.Type(), ct)
-	r := g.convert(g.genExpr(rn), rn.Type(), ct)
+	l := g.convert(g.genExpr(ln), lt, ct)
+	r := g.convert(g.genExpr(rn), rt, ct)
 	if isLongDouble(ct) { // soft-float comparison
 		return g.quadCompare(op, l, r)
 	}
@@ -559,12 +623,8 @@ func (g *gen) genAssign(n *cc.AssignmentExpression) ir.Ref {
 	// p += n / p -= n on a pointer scales n by the element size, like p = p +/- n.
 	if pt, ok := t.(*cc.PointerType); ok && (n.Case == cc.AssignmentExpressionAdd || n.Case == cc.AssignmentExpressionSub) {
 		old := g.loadVal(addr, t)
-		idx := g.toPtr(g.genExpr(n.AssignmentExpression), n.AssignmentExpression.Type())
-		off := g.cur.Mul(ir.ClsP, idx, g.fn.ConstInt(ir.ClsP, int64(pt.Elem().Size())))
-		v := g.cur.Add(ir.ClsP, old, off)
-		if n.Case == cc.AssignmentExpressionSub {
-			v = g.cur.Sub(ir.ClsP, old, off)
-		}
+		v := g.ptrIndex(old, n.Case == cc.AssignmentExpressionSub,
+			g.genExpr(n.AssignmentExpression), n.AssignmentExpression.Type(), int64(pt.Elem().Size()))
 		g.storeVal(addr, v, t)
 		return v
 	}

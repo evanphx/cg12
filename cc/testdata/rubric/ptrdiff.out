@@ -1,0 +1,10 @@
+sizeof=32
+wide=5
+int=6
+char=7
+double=8
+neg=-5
+p+n=30 n+p=30
+aidx=50 idxa=50
+padd=50 pdiff=5
+psub=30

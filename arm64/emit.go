@@ -718,12 +718,13 @@ func (e *emitter) emitCall(in *ir.Instr) {
 	callee := in.Args[0]
 	switch callee.Kind {
 	case ir.RefConst:
-		c := e.f.Consts[callee.ID]
-		if c.Kind != ir.ConstSym {
-			e.fail("arm64: call target must be a symbol or register")
-			return
+		if c := e.f.Consts[callee.ID]; c.Kind == ir.ConstSym {
+			e.line("bl %s", sanitize(c.Sym))
+			break
 		}
-		e.line("bl %s", sanitize(c.Sym))
+		// A call through a constant address (e.g. a function pointer the
+		// optimizer folded to a literal): materialize it and branch indirectly.
+		e.line("blr %s", e.srcReg(callee, 0, 8))
 	case ir.RefTemp:
 		r := e.srcReg(callee, 0, 8)
 		e.line("blr %s", r)

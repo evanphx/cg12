@@ -474,10 +474,13 @@ func TestEmitCallErrors(t *testing.T) {
 	f := ir.NewModule().NewFunc("x", ir.ClsW)
 	var sb strings.Builder
 
+	// A constant integer address is a legal indirect call target: it is
+	// materialized and branched to (blr), so no error.
 	e := newEmitter(f, &sb)
-	e.emitCall(&ir.Instr{Op: ir.OCall, Args: []ir.Ref{f.Word(5)}}) // int const target
-	require.Error(t, e.err)
+	e.emitCall(&ir.Instr{Op: ir.OCall, Args: []ir.Ref{f.Word(5)}})
+	require.NoError(t, e.err)
 
+	// A slot reference cannot be a call target.
 	e2 := newEmitter(f, &sb)
 	e2.emitCall(&ir.Instr{Op: ir.OCall, Args: []ir.Ref{{Kind: ir.RefSlot}}})
 	require.Error(t, e2.err)

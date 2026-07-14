@@ -22,6 +22,13 @@ func DeadFuncElim(m *ir.Module) bool {
 					mark(f, a)
 				}
 			}
+			// Phi operands can carry a function's address too (mem2reg turns a
+			// stored function pointer into a phi), so they must be scanned.
+			for _, p := range b.Phis {
+				for _, a := range p.Args {
+					mark(f, a)
+				}
+			}
 			mark(f, b.Jmp.Arg)
 			for _, a := range b.Jmp.Args {
 				mark(f, a)

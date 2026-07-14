@@ -1,0 +1,2 @@
+after set42: x=42
+after noop: x=42
