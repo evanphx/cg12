@@ -156,7 +156,7 @@ func (o *Object) ELF() []byte {
 
 	var mapSyms []MapDef
 	for _, m := range o.Maps {
-		if m.Name != rodataName {
+		if !isDataSection(m.Name) {
 			mapSyms = append(mapSyms, m)
 		}
 	}
@@ -164,17 +164,22 @@ func (o *Object) ELF() []byte {
 	if len(mapSyms) > 0 {
 		mapsSec = w.addSection(elfSection{name: ".maps", typ: shtProgbits, flags: shfAlloc, data: make([]byte, len(mapSyms)*32), align: 8})
 	}
-	rodataSec := uint32(0)
+	dataSecIdx := map[string]uint32{} // .rodata/.data section name -> ELF section index
 	for _, m := range o.Maps {
-		if m.Name == rodataName {
-			rodataSec = w.addSection(elfSection{name: rodataName, typ: shtProgbits, flags: shfAlloc, data: m.Initial, align: 8})
+		if !isDataSection(m.Name) {
+			continue
 		}
+		flags := uint32(shfAlloc)
+		if !m.Frozen {
+			flags |= shfWrite
+		}
+		dataSecIdx[m.Name] = w.addSection(elfSection{name: m.Name, typ: shtProgbits, flags: flags, data: m.Initial, align: 8})
 	}
-	if len(mapSyms) > 0 || len(o.Rodata) > 0 {
+	if len(mapSyms) > 0 || len(o.DataVars) > 0 {
 		w.addSection(elfSection{name: ".BTF", typ: shtProgbits, data: buildBTF(o), align: 4})
 	}
 
-	// Symbols: a FUNC per function, an OBJECT per map and rodata global.
+	// Symbols: a FUNC per function, an OBJECT per map and data global.
 	for _, f := range o.Funcs {
 		p := loc[f.Name]
 		w.addSym(f.Name, sttFunc, p.sec, p.off, uint64(len(f.Insns)*8))
@@ -182,8 +187,8 @@ func (o *Object) ELF() []byte {
 	for i, m := range mapSyms {
 		w.addSym(m.Name, sttObject, mapsSec, uint64(i*32), 32)
 	}
-	for _, rv := range o.Rodata {
-		w.addSym(rv.Name, sttObject, rodataSec, uint64(rv.Off), uint64(rv.Size))
+	for _, rv := range o.DataVars {
+		w.addSym(rv.Name, sttObject, dataSecIdx[rv.Section], uint64(rv.Off), uint64(rv.Size))
 	}
 
 	strtabIdx := uint32(len(w.secs)) + 1

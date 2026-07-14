@@ -145,8 +145,8 @@ func buildBTF(obj *Object) []byte {
 	var mapVars [][3]uint32
 	off := uint32(0)
 	for _, m := range obj.Maps {
-		if m.Name == rodataName {
-			continue // .rodata is a DATASEC, not a BTF-defined map
+		if isDataSection(m.Name) {
+			continue // .rodata / .data are DATASECs, not BTF-defined maps
 		}
 		st := b.structType(32, [][3]uint32{
 			{b.str("type"), b.ptr(b.array(intT, idxT, m.Type)), 0},
@@ -161,13 +161,22 @@ func buildBTF(obj *Object) []byte {
 		b.datasec(".maps", mapVars)
 	}
 
-	if len(obj.Rodata) > 0 {
-		var rvars [][3]uint32
-		for _, rv := range obj.Rodata {
+	// One DATASEC per data section, holding a VAR for each global it contains.
+	for _, sec := range []string{rodataName, dataName} {
+		var vars [][3]uint32
+		for _, rv := range obj.DataVars {
+			if rv.Section != sec {
+				continue
+			}
 			v := b.varType(rv.Name, byteArr(rv.Size), btfVarGlobal)
-			rvars = append(rvars, [3]uint32{v, rv.Off, rv.Size})
+			vars = append(vars, [3]uint32{v, rv.Off, rv.Size})
 		}
-		b.datasec(rodataName, rvars)
+		if len(vars) > 0 {
+			b.datasec(sec, vars)
+		}
 	}
 	return b.blob()
 }
+
+// isDataSection reports whether name is one of the synthetic data-section maps.
+func isDataSection(name string) bool { return name == rodataName || name == dataName }

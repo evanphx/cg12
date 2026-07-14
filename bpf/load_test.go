@@ -124,6 +124,35 @@ __attribute__((section("xdp"))) int say(void *ctx) {
 	require.Equal(t, uint32(2), ret)
 }
 
+// TestKernelDataGlobal exercises a mutable global (.data): a program that adds a
+// const step (.rodata) to a running total (.data) must accumulate across runs.
+func TestKernelDataGlobal(t *testing.T) {
+	const src = `
+int total = 0;
+const int step = 5;
+char _license[] __attribute__((section("license"))) = "GPL";
+__attribute__((section("xdp"))) int prog(void *ctx) { total += step; return total; }`
+	obj := compileModule(t, src)
+	_, hasRodata := obj.MapByName(".rodata")
+	_, hasData := obj.MapByName(".data")
+	require.True(t, hasRodata, "const step in .rodata")
+	require.True(t, hasData, "mutable total in .data")
+
+	lo, err := Load(obj, 6 /*XDP*/)
+	if err != nil {
+		skipUnprivileged(t, err)
+		t.Fatalf("load failed: %v", err)
+	}
+	defer lo.Close()
+	ret, err := lo.TestRun(make([]byte, 14), 3)
+	require.NoError(t, err)
+	require.Equal(t, uint32(15), ret, "3 runs * step 5")
+
+	val := make([]byte, 4)
+	require.NoError(t, MapLookup(lo.Maps[".data"], make([]byte, 4), val))
+	require.Equal(t, uint32(15), binary.LittleEndian.Uint32(val), ".data total persisted across runs")
+}
+
 // TestKernelSubprograms compiles a multi-function program (unoptimized, so the
 // BPF-to-BPF calls survive), links it, and runs it — checking the call chain
 // produces the right result. Skipped without privileges.

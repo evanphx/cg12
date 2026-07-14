@@ -360,7 +360,16 @@ func (g *gen) genGlobalDecl(d *cc.Declaration) {
 		if t.Kind() == cc.Function {
 			continue // a prototype needs no storage
 		}
-		data := &ir.Data{Name: dcl.Name(), Align: align(t), Linkage: ir.Linkage{Section: sectionOf(t)}}
+		sec := sectionOf(t)
+		if sec == "" {
+			// Classify by const-ness so a backend can place it in read-only (.rodata)
+			// or writable (.data) storage, as eBPF requires.
+			sec = ".data"
+			if a := t.Attributes(); a != nil && a.IsConst() {
+				sec = ".rodata"
+			}
+		}
+		data := &ir.Data{Name: dcl.Name(), Align: align(t), Linkage: ir.Linkage{Section: sec}}
 		if id.Case == cc.InitDeclaratorInit {
 			data.Items = g.globalItems(t, id.Initializer)
 		}

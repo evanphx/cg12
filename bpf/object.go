@@ -16,10 +16,13 @@ type MapDef struct {
 	MaxEntries uint32
 	Flags      uint32
 
-	// Initial, when set, is written into the map's single entry and the map is
-	// then frozen read-only. It backs the .rodata section (string and const-global
-	// data), which the program reads through map-value addresses.
+	// Initial, when set, is written into the map's single entry. It backs an
+	// internal data section (.rodata or .data), which programs read (and, for
+	// .data, write) through map-value addresses.
 	Initial []byte
+	// Frozen marks the map read-only to programs after Initial is written (used
+	// for .rodata, so the verifier treats the data as constant).
+	Frozen bool
 }
 
 // MapReloc records a two-slot ld_imm64 instruction that references a map or a
@@ -46,12 +49,13 @@ func (p *Program) Bytes() []byte { return (&Prog{Insns: p.Insns}).Bytes() }
 // Asm returns the program's disassembly.
 func (p *Program) Asm() string { return (&Prog{Insns: p.Insns}).Asm() }
 
-// RodataVar locates one read-only global within the .rodata blob, for the ELF's
-// BTF DATASEC.
-type RodataVar struct {
-	Name string
-	Off  uint32
-	Size uint32
+// DataVar locates one global within a data section (.rodata or .data), for the
+// ELF's BTF DATASEC and symbols.
+type DataVar struct {
+	Name    string
+	Section string
+	Off     uint32
+	Size    uint32
 }
 
 // CallReloc records a BPF-to-BPF call to another function by name (for the ELF's
@@ -78,7 +82,7 @@ type Object struct {
 	Maps     []MapDef
 	Programs []*Program     // entry programs, each linked with its subprograms (for the direct loader)
 	Funcs    []CompiledFunc // every function, for the ELF's .text + relocations
-	Rodata   []RodataVar    // layout of the .rodata map's contents (for the ELF)
+	DataVars []DataVar      // layout of the .rodata / .data sections (for the ELF)
 	License  string         // from the "license" global, or "GPL"
 }
 
@@ -98,10 +102,9 @@ func (o *Object) MapByName(name string) (MapDef, bool) {
 func CompileModule(m *ir.Module) (*Object, error) {
 	obj := &Object{License: "GPL"}
 	names := map[string]bool{}
-	dataOff := map[string]int32{}
-	var rodata []byte
+	dataOff := map[string]dataRef{}
 
-	// A data global is a candidate for .rodata unless it is a map or the license.
+	// A global is data (bound for .rodata or .data) unless it is a map or license.
 	isData := map[string]bool{}
 	for _, d := range m.Data {
 		switch d.Linkage.Section {
@@ -115,8 +118,8 @@ func CompileModule(m *ir.Module) (*Object, error) {
 		}
 	}
 
-	// Only globals a program actually references go into .rodata (this drops
-	// unused synthetics like the compiler's __func__ strings).
+	// Only globals a program actually references get storage (this drops unused
+	// synthetics like the compiler's __func__ strings).
 	used := map[string]bool{}
 	for _, f := range m.Funcs {
 		if f.Start == nil {
@@ -128,22 +131,31 @@ func CompileModule(m *ir.Module) (*Object, error) {
 			}
 		}
 	}
+	blobs := map[string][]byte{}
 	for _, d := range m.Data {
 		if !used[d.Name] {
 			continue
 		}
-		rodata = append(rodata, make([]byte, align8(len(rodata))-len(rodata))...)
-		off := int32(len(rodata))
-		dataOff[d.Name] = off
+		sec := dataName // mutable by default; const globals and strings are .rodata
+		if d.Linkage.Section == rodataName {
+			sec = rodataName
+		}
+		blob := blobs[sec]
+		blob = append(blob, make([]byte, align8(len(blob))-len(blob))...)
+		off := int32(len(blob))
 		img := dataImage(d, int(d.Align))
-		rodata = append(rodata, img...)
-		obj.Rodata = append(obj.Rodata, RodataVar{Name: d.Name, Off: uint32(off), Size: uint32(len(img))})
+		blob = append(blob, img...)
+		blobs[sec] = blob
+		dataOff[d.Name] = dataRef{sec: sec, off: off}
+		obj.DataVars = append(obj.DataVars, DataVar{Name: d.Name, Section: sec, Off: uint32(off), Size: uint32(len(img))})
 	}
-	if len(rodata) > 0 {
-		// A single-value, frozen array map holds the read-only data.
+	for _, sec := range []string{rodataName, dataName} {
+		if len(blobs[sec]) == 0 {
+			continue
+		}
 		obj.Maps = append(obj.Maps, MapDef{
-			Name: rodataName, Type: 2 /*ARRAY*/, KeySize: 4,
-			ValueSize: uint32(len(rodata)), MaxEntries: 1, Initial: rodata,
+			Name: sec, Type: 2 /*ARRAY*/, KeySize: 4,
+			ValueSize: uint32(len(blobs[sec])), MaxEntries: 1, Initial: blobs[sec], Frozen: sec == rodataName,
 		})
 	}
 

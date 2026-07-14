@@ -19,7 +19,7 @@ func Compile(f *ir.Func) (*Prog, error) {
 	return &Prog{Insns: c.insns}, nil
 }
 
-func newComp(f *ir.Func, maps map[string]bool, data map[string]int32, funcs map[string]bool) *comp {
+func newComp(f *ir.Func, maps map[string]bool, data map[string]dataRef, funcs map[string]bool) *comp {
 	return &comp{
 		f:          f,
 		allocaAt:   map[*ir.Instr]int16{},
@@ -57,12 +57,12 @@ type comp struct {
 	stackTop   int16 // most-negative stack offset used (allocas + spills)
 	allocaAt   map[*ir.Instr]int16
 	blockStart map[*ir.Block]int
-	spillOff   map[int]int16    // temp ID -> stack byte offset (negative), for spilled temps
-	maps       map[string]bool  // names of module maps, for resolving &map references
-	data       map[string]int32 // read-only global name -> byte offset within .rodata
-	funcs      map[string]bool  // names of module functions, for BPF-to-BPF calls
-	relocs     []MapReloc       // ld_imm64 slots to patch with a map fd at load time
-	subRelocs  []subReloc       // BPF-to-BPF call slots to patch with a pc-relative offset
+	spillOff   map[int]int16      // temp ID -> stack byte offset (negative), for spilled temps
+	maps       map[string]bool    // names of module maps, for resolving &map references
+	data       map[string]dataRef // global name -> its data section and offset
+	funcs      map[string]bool    // names of module functions, for BPF-to-BPF calls
+	relocs     []MapReloc         // ld_imm64 slots to patch with a map fd at load time
+	subRelocs  []subReloc         // BPF-to-BPF call slots to patch with a pc-relative offset
 	fixups     []fixup
 	err        error
 }
@@ -74,9 +74,18 @@ type subReloc struct {
 	Func string
 }
 
-// rodataName is the synthetic map that backs read-only global data (strings and
-// const globals), mirroring how libbpf exposes a program's .rodata section.
-const rodataName = ".rodata"
+// The synthetic maps that back a program's global data, as libbpf exposes them:
+// .rodata (read-only, frozen) and .data (writable).
+const (
+	rodataName = ".rodata"
+	dataName   = ".data"
+)
+
+// dataRef locates a global within one of the data sections.
+type dataRef struct {
+	sec string // .rodata or .data
+	off int32  // byte offset within that section
+}
 
 type fixup struct {
 	at     int
@@ -133,11 +142,12 @@ func (c *comp) prologue() {
 // loc is where a value lives: a register, a stack slot, an immediate, or a map
 // file descriptor (materialized with a relocated ld_imm64).
 type loc struct {
-	reg  Reg
-	slot int16
-	imm  int64
-	sym  string
-	kind locKind
+	reg     Reg
+	slot    int16
+	imm     int64
+	sym     string
+	mapName string // the data section for a locDataVal (.rodata / .data)
+	kind    locKind
 }
 
 type locKind uint8
@@ -177,7 +187,8 @@ func (c *comp) locOf(ref ir.Ref) loc {
 		case cst.Kind == ir.ConstSym && c.maps[cst.Sym]:
 			return loc{kind: locMapFD, sym: cst.Sym}
 		case cst.Kind == ir.ConstSym && hasKey(c.data, cst.Sym):
-			return loc{kind: locDataVal, sym: cst.Sym, imm: int64(c.data[cst.Sym]) + cst.Int}
+			d := c.data[cst.Sym]
+			return loc{kind: locDataVal, sym: cst.Sym, mapName: d.sec, imm: int64(d.off) + cst.Int}
 		default:
 			c.fail("bpf: unsupported operand %v (a symbol that is not a map or read-only global, or a float)", cst.Sym)
 		}
@@ -211,7 +222,7 @@ func (c *comp) into(dst Reg, ref ir.Ref) {
 	case locMapFD:
 		c.emitMapFD(dst, l.sym)
 	case locDataVal:
-		c.emitDataVal(dst, l.sym, int32(l.imm))
+		c.emitDataVal(dst, l.sym, l.mapName, int32(l.imm))
 	}
 }
 
@@ -223,17 +234,17 @@ func (c *comp) emitMapFD(dst Reg, sym string) {
 	c.emit(w[0], w[1])
 }
 
-// emitDataVal loads the address of read-only global sym (at off within .rodata)
-// into dst, recording a relocation on the .rodata map (direct loader) or the
+// emitDataVal loads the address of global sym (at off within data section sec)
+// into dst, recording a relocation on that section's map (direct loader) or the
 // global's symbol (ELF).
-func (c *comp) emitDataVal(dst Reg, sym string, off int32) {
-	c.relocs = append(c.relocs, MapReloc{Insn: len(c.insns), Map: rodataName, Sym: sym})
+func (c *comp) emitDataVal(dst Reg, sym, sec string, off int32) {
+	c.relocs = append(c.relocs, MapReloc{Insn: len(c.insns), Map: sec, Sym: sym})
 	w := LdMapValue(dst, 0, off) // fd patched in at load time; off fixed
 	c.emit(w[0], w[1])
 }
 
 // hasKey reports whether m contains key k (nil-safe).
-func hasKey(m map[string]int32, k string) bool { _, ok := m[k]; return ok }
+func hasKey(m map[string]dataRef, k string) bool { _, ok := m[k]; return ok }
 
 // regOf returns a register holding ref: its own if allocated to one, otherwise
 // scratch after loading ref into it.
@@ -347,7 +358,7 @@ func (c *comp) emitMove(dst, src loc) {
 		case locMapFD:
 			c.emitMapFD(dst.reg, src.sym)
 		case locDataVal:
-			c.emitDataVal(dst.reg, src.sym, int32(src.imm))
+			c.emitDataVal(dst.reg, src.sym, src.mapName, int32(src.imm))
 		}
 	case locSlot:
 		switch src.kind {

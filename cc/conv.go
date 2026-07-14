@@ -104,9 +104,10 @@ func (g *gen) internStr(s string) string {
 		name = fmt.Sprintf("cstr%d", len(g.strs))
 		g.strs[s] = name
 		g.mod.Data = append(g.mod.Data, &ir.Data{
-			Name:  name,
-			Align: 1,
-			Items: []ir.DataItem{{Str: s + "\x00"}},
+			Name:    name,
+			Align:   1,
+			Linkage: ir.Linkage{Section: ".rodata"}, // string literals are read-only
+			Items:   []ir.DataItem{{Str: s + "\x00"}},
 		})
 	}
 	return name

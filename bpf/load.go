@@ -158,15 +158,17 @@ func Load(obj *Object, progType uint32) (*LoadedObject, error) {
 			closeAll(maps)
 			return nil, err
 		}
-		if m.Initial != nil { // .rodata: seed the single entry and freeze it
+		if m.Initial != nil { // .rodata/.data: seed the single entry
 			key := make([]byte, 4)
 			if err := MapUpdate(fd, key, m.Initial, 0); err != nil {
 				closeAll(maps)
 				return nil, err
 			}
-			if err := Freeze(fd); err != nil {
-				closeAll(maps)
-				return nil, err
+			if m.Frozen { // .rodata is frozen read-only for the verifier
+				if err := Freeze(fd); err != nil {
+					closeAll(maps)
+					return nil, err
+				}
 			}
 		}
 		maps[m.Name] = fd
