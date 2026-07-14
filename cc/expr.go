@@ -556,6 +556,18 @@ func (g *gen) genAssign(n *cc.AssignmentExpression) ir.Ref {
 		g.copyAgg(addr, v, int(t.Size()))
 		return addr
 	}
+	// p += n / p -= n on a pointer scales n by the element size, like p = p +/- n.
+	if pt, ok := t.(*cc.PointerType); ok && (n.Case == cc.AssignmentExpressionAdd || n.Case == cc.AssignmentExpressionSub) {
+		old := g.loadVal(addr, t)
+		idx := g.toPtr(g.genExpr(n.AssignmentExpression), n.AssignmentExpression.Type())
+		off := g.cur.Mul(ir.ClsP, idx, g.fn.ConstInt(ir.ClsP, int64(pt.Elem().Size())))
+		v := g.cur.Add(ir.ClsP, old, off)
+		if n.Case == cc.AssignmentExpressionSub {
+			v = g.cur.Sub(ir.ClsP, old, off)
+		}
+		g.storeVal(addr, v, t)
+		return v
+	}
 	old := g.loadVal(addr, t)
 	rhs := g.convert(g.genExpr(n.AssignmentExpression), n.AssignmentExpression.Type(), t)
 	v := g.combineOp(n.Case, old, rhs, t)
