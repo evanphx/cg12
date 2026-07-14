@@ -119,17 +119,38 @@ func (o *Object) ELF() []byte {
 	loc := map[string]placed{}
 	relBySec := map[uint32][]secReloc{}
 
-	// One PROGBITS section per entry program; subprograms are gathered into .text.
+	// One PROGBITS section per attach section, holding every program that shares
+	// it (as with tail-call targets, libbpf resolves each by its FUNC symbol);
+	// subprograms are gathered into .text.
 	var textFuncs []CompiledFunc
+	bySection := map[string][]CompiledFunc{}
+	var secOrder []string
 	for _, f := range o.Funcs {
 		if f.Section == "" {
 			textFuncs = append(textFuncs, f)
 			continue
 		}
-		code := elfFuncCode(f)
-		sec := w.addSection(elfSection{name: f.Section, typ: shtProgbits, flags: shfAlloc | shfExec, data: code, align: 8})
-		loc[f.Name] = placed{sec, 0}
-		relBySec[sec] = funcRelocs(f, 0)
+		if _, seen := bySection[f.Section]; !seen {
+			secOrder = append(secOrder, f.Section)
+		}
+		bySection[f.Section] = append(bySection[f.Section], f)
+	}
+	for _, secName := range secOrder {
+		var code []byte
+		var rels []secReloc
+		for _, f := range bySection[secName] {
+			off := uint64(len(code))
+			loc[f.Name] = placed{0, off} // section index filled in below
+			rels = append(rels, funcRelocs(f, off)...)
+			code = append(code, elfFuncCode(f)...)
+		}
+		sec := w.addSection(elfSection{name: secName, typ: shtProgbits, flags: shfAlloc | shfExec, data: code, align: 8})
+		for _, f := range bySection[secName] {
+			p := loc[f.Name]
+			p.sec = sec
+			loc[f.Name] = p
+		}
+		relBySec[sec] = rels
 	}
 	if len(textFuncs) > 0 {
 		var text []byte

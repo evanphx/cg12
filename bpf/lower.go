@@ -194,9 +194,12 @@ func (c *comp) lowerCall(in *ir.Instr) {
 		}
 		c.emit(Call(id))
 	}
-	if !in.To.IsNone() {
+	if !in.To.IsNone() && c.isUsed(in.To) {
 		c.emitMove(c.locOf(in.To), regLoc(R0)) // result is in r0
 	}
+	// A call result that is never read stays in r0. This is required for
+	// bpf_tail_call: on the fall-through path the verifier treats r0 as
+	// uninitialized, so emitting "rN = r0" would be rejected as reading r0.
 }
 
 // term lowers a block's terminator, resolving phis on each out-edge.

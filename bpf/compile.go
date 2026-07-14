@@ -34,6 +34,7 @@ func newComp(f *ir.Func, maps map[string]bool, data map[string]dataRef, funcs ma
 // run lowers, allocates, and emits the function, returning the first error.
 func (c *comp) run() error {
 	ir.LowerPointers(c.f, ir.ClsL) // eBPF is 64-bit; pointers are longs
+	c.buildUsed()
 	c.allocStack()
 	c.regAlloc()
 	if -c.stackTop > 512 {
@@ -64,8 +65,41 @@ type comp struct {
 	relocs     []MapReloc         // ld_imm64 slots to patch with a map fd at load time
 	subRelocs  []subReloc         // BPF-to-BPF call slots to patch with a pc-relative offset
 	fixups     []fixup
+	used       map[uint32]bool // temp IDs consumed somewhere (as an arg, phi input, or terminator)
 	err        error
 }
+
+// buildUsed records every temporary that is read somewhere. A call result that
+// is never read must not be moved out of r0 — for bpf_tail_call the verifier
+// even forbids reading r0 on the fall-through path, so a dead move is a hard
+// error, not just waste.
+func (c *comp) buildUsed() {
+	c.used = map[uint32]bool{}
+	mark := func(r ir.Ref) {
+		if r.Kind == ir.RefTemp {
+			c.used[r.ID] = true
+		}
+	}
+	for _, b := range c.f.Blocks {
+		for _, phi := range b.Phis {
+			for _, a := range phi.Args {
+				mark(a)
+			}
+		}
+		for i := range b.Instrs {
+			for _, a := range b.Instrs[i].Args {
+				mark(a)
+			}
+		}
+		mark(b.Jmp.Arg)
+		for _, a := range b.Jmp.Args {
+			mark(a)
+		}
+	}
+}
+
+// isUsed reports whether ref is a temporary that is read somewhere.
+func (c *comp) isUsed(ref ir.Ref) bool { return ref.Kind == ir.RefTemp && c.used[ref.ID] }
 
 // subReloc records a BPF-to-BPF call whose offset is patched once the callee's
 // position in the concatenated program is known.

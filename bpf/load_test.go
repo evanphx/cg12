@@ -153,6 +153,68 @@ __attribute__((section("xdp"))) int prog(void *ctx) { total += step; return tota
 	require.Equal(t, uint32(15), binary.LittleEndian.Uint32(val), ".data total persisted across runs")
 }
 
+// TestKernelPerCPUMap exercises a BPF_MAP_TYPE_PERCPU_ARRAY (type 6): the map
+// type is just a number in the definition, so the whole map machinery must work
+// unchanged. A lookup returns this CPU's slot, which the program bumps.
+func TestKernelPerCPUMap(t *testing.T) {
+	const src = `
+struct bpf_map_def { unsigned type, key_size, value_size, max_entries, flags; };
+struct bpf_map_def pc __attribute__((section("maps"))) = { 6 /*PERCPU_ARRAY*/, 4, 8, 1, 0 };
+void *bpf_map_lookup_elem(void *map, void *key);
+char _license[] __attribute__((section("license"))) = "GPL";
+__attribute__((section("xdp"))) int prog(void *ctx) {
+    unsigned k = 0;
+    unsigned long *v = bpf_map_lookup_elem(&pc, &k);
+    if (v) { *v += 3; return (int)*v; }
+    return 0;
+}`
+	obj := compileModule(t, src)
+	require.Len(t, obj.Maps, 1)
+	require.Equal(t, uint32(6), obj.Maps[0].Type, "PERCPU_ARRAY")
+
+	lo, err := Load(obj, 6 /*XDP*/)
+	if err != nil {
+		skipUnprivileged(t, err)
+		t.Fatalf("load failed: %v", err)
+	}
+	defer lo.Close()
+	ret, err := lo.TestRun(make([]byte, 14), 1)
+	require.NoError(t, err)
+	require.Equal(t, uint32(3), ret)
+}
+
+// TestKernelTailCall wires a real tail call: an entry program jumps through a
+// PROG_ARRAY (type 3) into a target program that returns 42. The loader loads
+// both programs, stores the target's fd at index 0 of the array, and the tail
+// call transfers control — proving multi-program objects and bpf_tail_call work.
+func TestKernelTailCall(t *testing.T) {
+	const src = `
+struct bpf_map_def { unsigned type, key_size, value_size, max_entries, flags; };
+struct bpf_map_def jmp __attribute__((section("maps"))) = { 3 /*PROG_ARRAY*/, 4, 4, 4, 0 };
+long bpf_tail_call(void *ctx, void *map, unsigned index);
+char _license[] __attribute__((section("license"))) = "GPL";
+__attribute__((section("xdp"))) int target(void *ctx) { return 42; }
+__attribute__((section("xdp"))) int entry(void *ctx) { bpf_tail_call(ctx, &jmp, 0); return 1; }`
+	obj := compileModule(t, src)
+	require.Len(t, obj.Programs, 2)
+
+	lo, err := Load(obj, 6 /*XDP*/)
+	if err != nil {
+		skipUnprivileged(t, err)
+		t.Fatalf("load failed: %v", err)
+	}
+	defer lo.Close()
+
+	// Install the target program at index 0 of the jump table.
+	val := make([]byte, 4)
+	binary.LittleEndian.PutUint32(val, uint32(lo.Progs["target"]))
+	require.NoError(t, MapUpdate(lo.Maps["jmp"], make([]byte, 4), val, 0))
+
+	ret, err := lo.TestRunProg("entry", make([]byte, 14), 1)
+	require.NoError(t, err)
+	require.Equal(t, uint32(42), ret, "the tail call transferred control to target")
+}
+
 // TestKernelSubprograms compiles a multi-function program (unoptimized, so the
 // BPF-to-BPF calls survive), links it, and runs it — checking the call chain
 // produces the right result. Skipped without privileges.

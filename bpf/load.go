@@ -50,13 +50,16 @@ func ptr(b []byte) uint64 {
 // LoadedObject holds the kernel file descriptors of a loaded program and its
 // maps. Close it to release them.
 type LoadedObject struct {
-	Prog int
-	Maps map[string]int
+	Prog  int            // the first program's fd (the entry, for single-program objects)
+	Maps  map[string]int // map name -> fd
+	Progs map[string]int // program name -> fd (every entry program in the object)
 }
 
 // Close releases the program and map file descriptors.
 func (l *LoadedObject) Close() {
-	syscall.Close(l.Prog)
+	for _, fd := range l.Progs {
+		syscall.Close(fd)
+	}
 	for _, fd := range l.Maps {
 		syscall.Close(fd)
 	}
@@ -174,31 +177,52 @@ func Load(obj *Object, progType uint32) (*LoadedObject, error) {
 		maps[m.Name] = fd
 	}
 
-	prog := obj.Programs[0]
-	insns := append([]Insn(nil), prog.Insns...)
-	for _, r := range prog.Relocs {
-		fd, ok := maps[r.Map]
-		if !ok {
-			closeAll(maps)
-			return nil, fmt.Errorf("bpf: program references unknown map %q", r.Map)
+	progs := map[string]int{}
+	var first int
+	for i, prog := range obj.Programs {
+		insns := append([]Insn(nil), prog.Insns...)
+		for _, r := range prog.Relocs {
+			fd, ok := maps[r.Map]
+			if !ok {
+				closeProgs(progs)
+				closeAll(maps)
+				return nil, fmt.Errorf("bpf: program %q references unknown map %q", prog.Name, r.Map)
+			}
+			insns[r.Insn].Imm = int32(fd) // the ld_imm64's first slot carries the fd
 		}
-		insns[r.Insn].Imm = int32(fd) // the ld_imm64's first slot carries the fd
+		fd, log, err := LoadProgram(progType, (&Prog{Insns: insns}).Bytes(), obj.License)
+		if err != nil {
+			closeProgs(progs)
+			closeAll(maps)
+			return nil, fmt.Errorf("loading program %q: %w\n%s", prog.Name, err, log)
+		}
+		progs[prog.Name] = fd
+		if i == 0 {
+			first = fd
+		}
 	}
-
-	fd, log, err := LoadProgram(progType, (&Prog{Insns: insns}).Bytes(), obj.License)
-	if err != nil {
-		closeAll(maps)
-		return nil, fmt.Errorf("%w\n%s", err, log)
-	}
-	return &LoadedObject{Prog: fd, Maps: maps}, nil
+	return &LoadedObject{Prog: first, Maps: maps, Progs: progs}, nil
 }
 
-// TestRun executes the loaded program repeat times with dataIn as its context
-// input, returning the program's return value.
+// TestRun executes the first loaded program repeat times with dataIn as its
+// context input, returning the program's return value.
 func (l *LoadedObject) TestRun(dataIn []byte, repeat uint32) (retval uint32, err error) {
+	return l.testRunFD(l.Prog, dataIn, repeat)
+}
+
+// TestRunProg runs a specific named program from the object.
+func (l *LoadedObject) TestRunProg(name string, dataIn []byte, repeat uint32) (uint32, error) {
+	fd, ok := l.Progs[name]
+	if !ok {
+		return 0, fmt.Errorf("bpf: no loaded program named %q", name)
+	}
+	return l.testRunFD(fd, dataIn, repeat)
+}
+
+func (l *LoadedObject) testRunFD(progFD int, dataIn []byte, repeat uint32) (retval uint32, err error) {
 	dataOut := make([]byte, len(dataIn)+256)
 	attr := make([]byte, 64)
-	binary.LittleEndian.PutUint32(attr[0:], uint32(l.Prog))
+	binary.LittleEndian.PutUint32(attr[0:], uint32(progFD))
 	binary.LittleEndian.PutUint32(attr[8:], uint32(len(dataIn)))   // data_size_in
 	binary.LittleEndian.PutUint32(attr[12:], uint32(len(dataOut))) // data_size_out
 	binary.LittleEndian.PutUint64(attr[16:], ptr(dataIn))
@@ -211,6 +235,12 @@ func (l *LoadedObject) TestRun(dataIn []byte, repeat uint32) (retval uint32, err
 }
 
 func closeAll(fds map[string]int) {
+	for _, fd := range fds {
+		syscall.Close(fd)
+	}
+}
+
+func closeProgs(fds map[string]int) {
 	for _, fd := range fds {
 		syscall.Close(fd)
 	}
