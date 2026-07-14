@@ -272,10 +272,10 @@ func (e *emitter) emitStackParam(in *ir.Instr) {
 	if t.Agg != nil {
 		// A stacked aggregate parameter is the address of the incoming bytes.
 		if t.Reg != ir.NoReg {
-			e.line("add %s, x29, #%d", Reg(t.Reg).xName(), off)
+			e.frameAddr(Reg(t.Reg).xName(), off)
 			return
 		}
-		e.line("add %s, x29, #%d", scratch0.xName(), off)
+		e.frameAddr(scratch0.xName(), off)
 		e.line("str %s, [x29, #%d]", scratch0.xName(), e.spillBase+t.Slot)
 		return
 	}
@@ -418,6 +418,11 @@ func (e *emitter) emitInstr(b *ir.Block, in *ir.Instr) {
 		}
 	case ir.OBic:
 		e.binop("bic", in, sz)
+	case ir.OClz:
+		s := e.srcReg(in.Args[0], 1, sz)
+		d, done := e.dstReg(in.To, sz)
+		e.line("clz %s, %s", d, s)
+		done()
 	case ir.OShl:
 		e.shiftImm(in, "lsl", sz)
 	case ir.OShr:
@@ -479,7 +484,7 @@ func (e *emitter) emitInstr(b *ir.Block, in *ir.Instr) {
 		e.emitVaArg(in)
 	case ir.OAlloc4, ir.OAlloc8, ir.OAlloc16:
 		d, done := e.dstReg(in.To, 8)
-		e.line("add %s, x29, #%d", d, e.allocOff[in])
+		e.frameAddr(d, e.allocOff[in])
 		done()
 	case ir.OBlockAddr:
 		d, done := e.dstReg(in.To, 8)
@@ -494,6 +499,21 @@ func (e *emitter) emitInstr(b *ir.Block, in *ir.Instr) {
 			e.fail("arm64: unsupported op %q", in.Op)
 		}
 	}
+}
+
+// frameAddr emits reg = x29 + off, splitting a large offset into a shifted-high
+// and low add since the ADD immediate is only 12 bits — otherwise a frame offset
+// above 4095 wraps and aliases another slot.
+func (e *emitter) frameAddr(reg string, off int) {
+	hi, lo := off>>12, off&0xfff
+	if hi > 0 {
+		e.line("add %s, x29, #%d, lsl #12", reg, hi)
+		if lo > 0 {
+			e.line("add %s, %s, #%d", reg, reg, lo)
+		}
+		return
+	}
+	e.line("add %s, x29, #%d", reg, lo)
 }
 
 // binop emits a three-operand instruction, loading spilled/immediate operands

@@ -129,6 +129,10 @@ const (
 	// single-instruction form.
 	OBic
 
+	// OClz counts the leading zero bits of Args[0], at the width of Instr.Cls
+	// (32 or 64). It backs __builtin_clz / __builtin_clzll.
+	OClz
+
 	numOps
 )
 
@@ -158,6 +162,7 @@ var opTable = [numOps]opInfo{
 	OSar:  {name: "sar", hasResult: true},
 	ORotr: {name: "rotr", hasResult: true},
 	OBic:  {name: "bic", hasResult: true},
+	OClz:  {name: "clz", hasResult: true},
 
 	ONeg: {name: "neg", hasResult: true},
 

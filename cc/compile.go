@@ -42,6 +42,21 @@ type lval struct {
 	addr ir.Ref
 	sym  string
 	typ  cc.Type
+	// vaRef marks a va_list that is a parameter: its storage holds a pointer to
+	// the actual __va_list state (which lives in the caller), rather than being
+	// the state itself as a local va_list is.
+	vaRef bool
+}
+
+// vaStorage returns the address of a va_list's __va_list state. A local va_list
+// is that state, so its own address is used; a va_list parameter holds a pointer
+// to state elsewhere, so the pointer is loaded.
+func (g *gen) vaStorage(v lval) ir.Ref {
+	a := g.addrOf(v)
+	if v.vaRef {
+		return g.cur.Load(ir.ClsP, a)
+	}
+	return a
 }
 
 // addrOf returns the address of an lvalue, resolving a global symbol in the
@@ -54,6 +69,24 @@ func (g *gen) addrOf(v lval) ir.Ref {
 	return v.addr
 }
 
+// headerCompat makes the host's glibc system headers parseable by
+// modernc.org/cc/v4, which does not model two GCC extensions glibc leans on:
+// the AArch64 SIMD/SVE vector math declarations (gated on __GNUC__ >= 9) and the
+// ISO/IEC 60559 _FloatN extended floating types. Pretending to be an older GCC
+// without the _FloatN types skips both; the affected declarations are library
+// vector intrinsics that ordinary C never references.
+const headerCompat = `
+#undef __GNUC__
+#define __GNUC__ 8
+#define __HAVE_FLOAT128 0
+#define __HAVE_DISTINCT_FLOAT128 0
+#define __HAVE_FLOAT64X 0
+#define __HAVE_FLOAT32 0
+#define __HAVE_FLOAT64 0
+#define __HAVE_FLOAT32X 0
+#define __HAVE_FLOAT16 0
+`
+
 // Compile parses C source and returns the equivalent cg12 module.
 func Compile(name, src string) (*ir.Module, error) {
 	cfg, err := cc.NewConfig("linux", "arm64")
@@ -61,7 +94,7 @@ func Compile(name, src string) (*ir.Module, error) {
 		return nil, fmt.Errorf("cc config: %w", err)
 	}
 	ast, err := cc.Translate(cfg, []cc.Source{
-		{Name: "<predefined>", Value: cfg.Predefined},
+		{Name: "<predefined>", Value: cfg.Predefined + headerCompat},
 		{Name: "<builtin>", Value: cc.Builtin},
 		{Name: name, Value: src},
 	})
@@ -296,7 +329,10 @@ func (g *gen) genFunc(fd *cc.FunctionDefinition) {
 		addr := g.cur.Alloc(align(pt), int(pt.Size()))
 		g.setName(addr, p.Name()+".addr")
 		g.storeVal(addr, pref, pt)
-		g.define(p.Name(), lval{addr: addr, typ: pt})
+		// A va_list parameter's slot holds a pointer to the caller's __va_list
+		// state; mark it so va_arg loads the pointer rather than treating the slot
+		// as the state itself.
+		g.define(p.Name(), lval{addr: addr, typ: pt, vaRef: isVaList(pt)})
 	}
 
 	g.genCompound(fd.CompoundStatement)
@@ -521,6 +557,18 @@ func sectionOf(t cc.Type) string {
 // object, optionally displaced by array indexing or member selection — to a
 // symbol name and byte offset, for a global pointer initializer that a compiler
 // resolves to a relocation rather than code.
+// isFuncDesignator reports whether t is a function type or a pointer to one — as
+// a bare function name has after its function-to-pointer decay.
+func isFuncDesignator(t cc.Type) bool {
+	if t.Kind() == cc.Function {
+		return true
+	}
+	if pt, ok := t.(*cc.PointerType); ok {
+		return pt.Elem().Kind() == cc.Function
+	}
+	return false
+}
+
 func (g *gen) constAddr(e cc.ExpressionNode) (string, int64, bool) {
 	switch n := e.(type) {
 	case *cc.PrimaryExpression:
@@ -529,6 +577,11 @@ func (g *gen) constAddr(e cc.ExpressionNode) (string, int64, bool) {
 			name := n.Token.SrcStr()
 			if v, ok := g.lookup(name); ok && v.sym != "" {
 				return v.sym, 0, true
+			}
+			// A function name isn't in the variable scope; used as a value it decays
+			// to a pointer to the function, so the initializer references its symbol.
+			if isFuncDesignator(n.Type()) {
+				return name, 0, true
 			}
 		case cc.PrimaryExpressionExpr:
 			return g.constAddr(n.ExpressionList)

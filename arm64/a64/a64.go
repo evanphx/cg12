@@ -9,6 +9,47 @@
 // tests; the reference is used only to check correctness, never at runtime.
 package a64
 
+import "fmt"
+
+// field checks that v fits in the low `bits` bits and returns it. An
+// out-of-range value is a compiler bug — silently masking it would emit a
+// valid-looking instruction that addresses the wrong thing (e.g. a frame offset
+// above 4095 wrapping into another slot), so we panic loudly instead.
+func field(v uint32, bits uint, what string) uint32 {
+	if v>>bits != 0 {
+		panic(fmt.Sprintf("a64: %s immediate %d (%#x) does not fit in %d bits", what, v, v, bits))
+	}
+	return v
+}
+
+// scaled divides a byte offset by its access width, checking it divides evenly
+// and fits the 12-bit unsigned-offset field.
+func scaled(off, scale uint32, what string) uint32 {
+	if off%scale != 0 {
+		panic(fmt.Sprintf("a64: %s offset %d is not a multiple of %d", what, off, scale))
+	}
+	return field(off/scale, 12, what)
+}
+
+// sfield checks that a signed value fits a `bits`-wide two's-complement field and
+// returns its low bits. Masking the two's-complement form is intentional; a value
+// outside the representable range is a bug.
+func sfield(v int32, bits uint, what string) uint32 {
+	if v < -(1<<(bits-1)) || v >= 1<<(bits-1) {
+		panic(fmt.Sprintf("a64: %s offset %d does not fit in a signed %d-bit field", what, v, bits))
+	}
+	return uint32(v) & (1<<bits - 1)
+}
+
+// branchOff checks a PC-relative byte offset (a multiple of 4) and returns the
+// signed instruction-count field of the given width.
+func branchOff(off int32, bits uint, what string) uint32 {
+	if off%4 != 0 {
+		panic(fmt.Sprintf("a64: %s offset %d is not a multiple of 4", what, off))
+	}
+	return sfield(off/4, bits, what)
+}
+
 // Reg is a raw 5-bit register number (0..31).
 type Reg uint32
 
@@ -26,7 +67,7 @@ func sf(w64 bool) uint32 {
 	return 0
 }
 
-func r(x Reg) uint32 { return uint32(x) & 0x1f }
+func r(x Reg) uint32 { return field(uint32(x), 5, "reg") }
 
 // --- data processing: add/subtract ----------------------------------------
 
@@ -59,7 +100,7 @@ func SubsReg(w64 bool, rd, rn, rm Reg) uint32 { return addSubReg(w64, 1, 1, rd, 
 func CmpReg(w64 bool, rn, rm Reg) uint32 { return SubsReg(w64, ZR, rn, rm) }
 
 func addSubImm(w64 bool, op, s uint32, rd, rn Reg, imm12 uint32) uint32 {
-	return sf(w64)<<31 | op<<30 | s<<29 | 0x11<<24 | (imm12&0xfff)<<10 | r(rn)<<5 | r(rd)
+	return sf(w64)<<31 | op<<30 | s<<29 | 0x11<<24 | field(imm12, 12, "add/sub")<<10 | r(rn)<<5 | r(rd)
 }
 
 // AddImm encodes ADD rd, rn, #imm12 (0..4095, unshifted).
@@ -87,7 +128,7 @@ func EorReg(w64 bool, rd, rn, rm Reg) uint32 { return logicalReg(w64, 2, rd, rn,
 func MovReg(w64 bool, rd, rm Reg) uint32 { return OrrReg(w64, rd, ZR, rm) }
 
 func logicalRegN(w64 bool, opc, n uint32, rd, rn, rm Reg) uint32 {
-	return sf(w64)<<31 | opc<<29 | 0x0a<<24 | (n&1)<<21 | r(rm)<<16 | r(rn)<<5 | r(rd)
+	return sf(w64)<<31 | opc<<29 | 0x0a<<24 | field(n, 1, "logical N")<<21 | r(rm)<<16 | r(rn)<<5 | r(rd)
 }
 
 // BicReg encodes BIC rd, rn, rm (rd = rn AND NOT rm).
@@ -102,7 +143,10 @@ func MvnReg(w64 bool, rd, rm Reg) uint32 { return OrnReg(w64, rd, ZR, rm) }
 // --- move wide immediate ---------------------------------------------------
 
 func moveWide(w64 bool, opc uint32, rd Reg, imm16 uint16, shift uint32) uint32 {
-	hw := (shift / 16) & 3
+	if shift%16 != 0 {
+		panic(fmt.Sprintf("a64: movw shift %d is not a multiple of 16", shift))
+	}
+	hw := field(shift/16, 2, "movw shift")
 	return sf(w64)<<31 | opc<<29 | 0x25<<23 | hw<<21 | uint32(imm16)<<5 | r(rd)
 }
 
@@ -126,6 +170,14 @@ func Movn(w64 bool, rd Reg, imm16 uint16, shift uint32) uint32 {
 func dataProc2(w64 bool, opcode uint32, rd, rn, rm Reg) uint32 {
 	return sf(w64)<<31 | 0xd6<<21 | r(rm)<<16 | opcode<<10 | r(rn)<<5 | r(rd)
 }
+
+// dataProc1 encodes a one-source data-processing instruction (e.g. CLZ).
+func dataProc1(w64 bool, opcode uint32, rd, rn Reg) uint32 {
+	return sf(w64)<<31 | 1<<30 | 0xd6<<21 | field(opcode, 6, "dp1 opcode")<<10 | r(rn)<<5 | r(rd)
+}
+
+// Clz encodes CLZ rd, rn (count leading zeros).
+func Clz(w64 bool, rd, rn Reg) uint32 { return dataProc1(w64, 0b000100, rd, rn) }
 
 // Udiv encodes UDIV rd, rn, rm.
 func Udiv(w64 bool, rd, rn, rm Reg) uint32 { return dataProc2(w64, 0b000010, rd, rn, rm) }
@@ -195,7 +247,7 @@ func Cset(w64 bool, rd Reg, c Cond) uint32 {
 // --- branches --------------------------------------------------------------
 
 func branchImm(link uint32, off int32) uint32 {
-	return 0x05<<26 | link<<31 | uint32(off/4)&0x03ffffff
+	return 0x05<<26 | link<<31 | branchOff(off, 26, "b/bl")
 }
 
 // B encodes B to a PC-relative byte offset (a multiple of 4).
@@ -206,11 +258,11 @@ func Bl(off int32) uint32 { return branchImm(1, off) }
 
 // Bcond encodes B.cond to a PC-relative byte offset.
 func Bcond(c Cond, off int32) uint32 {
-	return 0x54<<24 | (uint32(off/4)&0x7ffff)<<5 | uint32(c)
+	return 0x54<<24 | branchOff(off, 19, "b.cond")<<5 | uint32(c)
 }
 
 func cmpBranch(w64 bool, nz uint32, rt Reg, off int32) uint32 {
-	return sf(w64)<<31 | 0x1a<<25 | nz<<24 | (uint32(off/4)&0x7ffff)<<5 | r(rt)
+	return sf(w64)<<31 | 0x1a<<25 | nz<<24 | branchOff(off, 19, "cbz/cbnz")<<5 | r(rt)
 }
 
 // Cbz encodes CBZ rt, offset.
@@ -235,34 +287,34 @@ func Brk(imm16 uint16) uint32 { return 0xd4200000 | uint32(imm16)<<5 }
 
 // size selects the access width: 0=byte, 1=halfword, 2=word(32), 3=doubleword(64).
 func ldStr(size, opc uint32, rt, rn Reg, imm12 uint32) uint32 {
-	return size<<30 | 0x39<<24 | opc<<22 | (imm12&0xfff)<<10 | r(rn)<<5 | r(rt)
+	return size<<30 | 0x39<<24 | opc<<22 | field(imm12, 12, "ldr/str")<<10 | r(rn)<<5 | r(rt)
 }
 
 // StrImm encodes STR rt, [rn, #imm]; imm is a byte offset, scaled by the width.
 func StrImm(w64 bool, rt, rn Reg, imm uint32) uint32 {
 	if w64 {
-		return ldStr(3, 0, rt, rn, imm/8)
+		return ldStr(3, 0, rt, rn, scaled(imm, 8, "str"))
 	}
-	return ldStr(2, 0, rt, rn, imm/4)
+	return ldStr(2, 0, rt, rn, scaled(imm, 4, "str"))
 }
 
 // LdrImm encodes LDR rt, [rn, #imm].
 func LdrImm(w64 bool, rt, rn Reg, imm uint32) uint32 {
 	if w64 {
-		return ldStr(3, 1, rt, rn, imm/8)
+		return ldStr(3, 1, rt, rn, scaled(imm, 8, "ldr"))
 	}
-	return ldStr(2, 1, rt, rn, imm/4)
+	return ldStr(2, 1, rt, rn, scaled(imm, 4, "ldr"))
 }
 
 // StrbImm / StrhImm store the low byte / halfword; LdrbImm / LdrhImm load and
 // zero-extend. imm is an unscaled byte offset (byte) or /2 (halfword).
 func StrbImm(rt, rn Reg, imm uint32) uint32 { return ldStr(0, 0, rt, rn, imm) }
 func LdrbImm(rt, rn Reg, imm uint32) uint32 { return ldStr(0, 1, rt, rn, imm) }
-func StrhImm(rt, rn Reg, imm uint32) uint32 { return ldStr(1, 0, rt, rn, imm/2) }
-func LdrhImm(rt, rn Reg, imm uint32) uint32 { return ldStr(1, 1, rt, rn, imm/2) }
+func StrhImm(rt, rn Reg, imm uint32) uint32 { return ldStr(1, 0, rt, rn, scaled(imm, 2, "strh")) }
+func LdrhImm(rt, rn Reg, imm uint32) uint32 { return ldStr(1, 1, rt, rn, scaled(imm, 2, "ldrh")) }
 
 // LdrswImm encodes LDRSW rt, [rn, #imm] (load word, sign-extend to 64 bits).
-func LdrswImm(rt, rn Reg, imm uint32) uint32 { return ldStr(2, 2, rt, rn, imm/4) }
+func LdrswImm(rt, rn Reg, imm uint32) uint32 { return ldStr(2, 2, rt, rn, scaled(imm, 4, "ldrsw")) }
 
 // Extend options for a register-offset load/store: how the index register Rm is
 // widened to an address. LSL uses a 64-bit index directly; SXTW/UXTW sign- or
@@ -277,7 +329,7 @@ const (
 // ldStrReg encodes a load/store with a register offset: [Rn, Rm, <extend> #S*log2(size)].
 // S=1 scales the index by the access width, S=0 leaves it unscaled.
 func ldStrReg(size, opc uint32, rt, rn, rm Reg, option, s uint32) uint32 {
-	return size<<30 | 0x38<<24 | opc<<22 | 1<<21 | r(rm)<<16 | (option&7)<<13 | (s&1)<<12 | 0b10<<10 | r(rn)<<5 | r(rt)
+	return size<<30 | 0x38<<24 | opc<<22 | 1<<21 | r(rm)<<16 | field(option, 3, "ext option")<<13 | field(s, 1, "ext scale")<<12 | 0b10<<10 | r(rn)<<5 | r(rt)
 }
 
 func regSize(w64 bool) uint32 {
@@ -315,14 +367,14 @@ func LdrshReg(w64 bool, rt, rn, rm Reg, option, s uint32) uint32 {
 // Adrp encodes ADRP rd, <page>: the PC-relative page address. imm is the signed
 // 21-bit page offset; pass 0 with an ADR_PREL_PG_HI21 relocation for a symbol.
 func Adrp(rd Reg, imm int32) uint32 {
-	u := uint32(imm) & 0x1fffff
+	u := sfield(imm, 21, "adrp")
 	return 1<<31 | (u&3)<<29 | 0x10<<24 | (u>>2)<<5 | r(rd)
 }
 
 // Adr encodes ADR rd, <label>: the PC-relative byte address. imm is the signed
 // 21-bit byte offset from the instruction (±1 MiB).
 func Adr(rd Reg, imm int32) uint32 {
-	u := uint32(imm) & 0x1fffff
+	u := sfield(imm, 21, "adr")
 	return (u&3)<<29 | 0x10<<24 | (u>>2)<<5 | r(rd)
 }
 
@@ -335,7 +387,7 @@ func SubImmLSL12(w64 bool, rd, rn Reg, imm12 uint32) uint32 {
 }
 
 func bitfield(w64 bool, opc uint32, rd, rn Reg, immr, imms uint32) uint32 {
-	return sf(w64)<<31 | opc<<29 | 0x26<<23 | sf(w64)<<22 | (immr&0x3f)<<16 | (imms&0x3f)<<10 | r(rn)<<5 | r(rd)
+	return sf(w64)<<31 | opc<<29 | 0x26<<23 | sf(w64)<<22 | field(immr, 6, "bitfield immr")<<16 | field(imms, 6, "bitfield imms")<<10 | r(rn)<<5 | r(rd)
 }
 
 // Sbfm / Ubfm encode the signed/unsigned bitfield-move instructions the extends
@@ -394,7 +446,7 @@ func AsrImm(w64 bool, rd, rn Reg, sh uint32) uint32 {
 }
 
 func logicalImm(w64 bool, opc uint32, rd, rn Reg, n, immr, imms uint32) uint32 {
-	return sf(w64)<<31 | opc<<29 | 0x24<<23 | (n&1)<<22 | (immr&0x3f)<<16 | (imms&0x3f)<<10 | r(rn)<<5 | r(rd)
+	return sf(w64)<<31 | opc<<29 | 0x24<<23 | field(n, 1, "logical N")<<22 | field(immr, 6, "logical immr")<<16 | field(imms, 6, "logical imms")<<10 | r(rn)<<5 | r(rd)
 }
 
 // AndImm/OrrImm/EorImm encode the logical-immediate instructions; the caller
@@ -412,7 +464,7 @@ func EorImm(w64 bool, rd, rn Reg, n, immr, imms uint32) uint32 {
 // Extr encodes EXTR rd, rn, rm, #lsb (the low bits are taken from rm, the high
 // bits from rn). ROR is EXTR rd, rn, rn, #shift.
 func Extr(w64 bool, rd, rn, rm Reg, lsb uint32) uint32 {
-	return sf(w64)<<31 | 0x27<<23 | sf(w64)<<22 | r(rm)<<16 | (lsb&0x3f)<<10 | r(rn)<<5 | r(rd)
+	return sf(w64)<<31 | 0x27<<23 | sf(w64)<<22 | r(rm)<<16 | field(lsb, 6, "extr lsb")<<10 | r(rn)<<5 | r(rd)
 }
 
 // RorImm encodes ROR rd, rn, #sh (EXTR rd, rn, rn, #sh) — a rotate right.

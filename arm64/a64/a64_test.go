@@ -176,6 +176,9 @@ func TestEncodingsMatchAssembler(t *testing.T) {
 		{"strb w1, [x2, w3, sxtw]", StrbReg(1, 2, 3, ExtSXTW, 0)},
 		{"ldrsw x1, [x2, w3, sxtw #2]", LdrswReg(1, 2, 3, ExtSXTW, 1)},
 		{"ldrh w4, [x5, w6, uxtw #1]", LdrhReg(4, 5, 6, ExtUXTW, 1)},
+		// count leading zeros
+		{"clz w1, w2", Clz(false, 1, 2)},
+		{"clz x3, x4", Clz(true, 3, 4)},
 	}
 
 	lines := make([]string, len(cases))
@@ -327,5 +330,34 @@ func TestMoreEncodingsMatchAssembler(t *testing.T) {
 	for i, c := range cases {
 		got := binary.LittleEndian.Uint32(text[4*i:])
 		assert.Equalf(t, got, c.word, "%s: assembler=%#08x ours=%#08x", c.asm, got, c.word)
+	}
+}
+
+// TestImmediateGuards checks that out-of-range immediates panic rather than
+// silently truncating into a wrong-but-valid-looking instruction.
+func TestImmediateGuards(t *testing.T) {
+	cases := []struct {
+		name string
+		fn   func()
+	}{
+		{"add imm > 4095", func() { AddImm(true, 0, 1, 4096) }},
+		{"str offset > range", func() { StrImm(true, 0, 1, 8*4096) }},
+		{"str misaligned", func() { StrImm(true, 0, 1, 4) }},
+		{"ldr misaligned", func() { LdrImm(true, 0, 1, 12) }},
+		{"branch too far", func() { B(1 << 28) }},
+		{"branch misaligned", func() { B(2) }},
+		{"cbz too far", func() { Cbz(true, 0, 1<<21) }},
+		{"bad register", func() { AddReg(true, 40, 1, 2) }},
+		{"movz bad shift", func() { Movz(true, 0, 1, 8) }},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			defer func() {
+				if recover() == nil {
+					t.Fatalf("%s: expected a panic, got none", c.name)
+				}
+			}()
+			c.fn()
+		})
 	}
 }

@@ -71,12 +71,39 @@ func (g *gen) vaArgExpr(n *cc.UnaryExpression) (ir.Ref, bool) {
 	return g.cur.VaArg(clsOf(n.Type()), ap), true // n.Type() is the dereferenced type T
 }
 
-// vaListAddr returns the address of the va_list storage named by e. The builtins
-// receive the va_list by value (modernc models it as a pointer), but cg12's
-// VaStart/VaArg operate on the state in place, so we take the object's address.
+// vaListAddr returns the address of the __va_list state named by e. A local
+// va_list is that state (its address is used); a va_list parameter holds a
+// pointer to state in the caller (the pointer is loaded).
 func (g *gen) vaListAddr(e cc.ExpressionNode) ir.Ref {
+	if name, ok := identName(e); ok {
+		if v, found := g.lookup(name); found {
+			return g.vaStorage(v)
+		}
+	}
 	addr, _ := g.genAddr(e)
 	return addr
+}
+
+// identName peels casts and parentheses to reach a bare identifier, returning
+// its name.
+func identName(e cc.ExpressionNode) (string, bool) {
+	for {
+		switch x := e.(type) {
+		case *cc.PrimaryExpression:
+			switch x.Case {
+			case cc.PrimaryExpressionIdent:
+				return x.Token.SrcStr(), true
+			case cc.PrimaryExpressionExpr:
+				e = x.ExpressionList
+			default:
+				return "", false
+			}
+		case *cc.CastExpression:
+			e = x.CastExpression
+		default:
+			return "", false
+		}
+	}
 }
 
 // unwrapToCall peels casts and parentheses off e to reach the call it wraps, if

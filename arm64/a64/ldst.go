@@ -1,5 +1,7 @@
 package a64
 
+import "fmt"
+
 // Additional loads and stores: register pairs, signed sub-word loads, and
 // floating-point loads/stores.
 
@@ -17,7 +19,10 @@ func ldStPair(w64 bool, load uint32, mode PairMode, rt, rt2, rn Reg, imm int) ui
 	if w64 {
 		opc, scale = 2, 8
 	}
-	imm7 := uint32(imm/scale) & 0x7f
+	if imm%scale != 0 {
+		panic(fmt.Sprintf("a64: ldp/stp offset %d is not a multiple of %d", imm, scale))
+	}
+	imm7 := sfield(int32(imm/scale), 7, "ldp/stp")
 	return opc<<30 | 0b101<<27 | uint32(mode)<<23 | load<<22 | imm7<<15 | r(rt2)<<10 | r(rn)<<5 | r(rt)
 }
 
@@ -51,7 +56,7 @@ func LdrshImm(w64 bool, rt, rn Reg, imm uint32) uint32 {
 // FP loads and stores (unsigned offset). The size field selects S (word) or D
 // (doubleword); V=1 (bit in the fixed 0x3d field) marks the SIMD/FP variant.
 func ldStrFP(size, opc uint32, rt, rn Reg, imm uint32) uint32 {
-	return size<<30 | 0x3d<<24 | opc<<22 | (imm&0xfff)<<10 | r(rn)<<5 | r(rt)
+	return size<<30 | 0x3d<<24 | opc<<22 | field(imm, 12, "fp ldr/str")<<10 | r(rn)<<5 | r(rt)
 }
 
 // StrFP / LdrFP store/load an S or D register. imm is a byte offset scaled by

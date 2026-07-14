@@ -556,6 +556,21 @@ func (m *mc) epilogue() {
 // target sp — register 31 there denotes the zero register, so `sub sp, sp, xN`
 // would silently write to xzr. Splitting the immediate reaches any frame up to
 // ~16 MiB.
+// frameAddr computes x29 + off into d. The ADD immediate is only 12 bits (0..4095),
+// so a larger frame offset is split into a shifted-high and a low add — otherwise
+// the immediate silently wraps and the address collides with another frame slot.
+func (m *mc) frameAddr(d a64.Reg, off int) {
+	hi, lo := off>>12, off&0xfff
+	if hi > 0 {
+		m.emit(a64.AddImmLSL12(true, d, mcX29, uint32(hi)))
+		if lo > 0 {
+			m.emit(a64.AddImm(true, d, d, uint32(lo)))
+		}
+		return
+	}
+	m.emit(a64.AddImm(true, d, mcX29, uint32(lo)))
+}
+
 func (m *mc) adjustSP(sub bool, n int) {
 	if n == 0 {
 		return
@@ -913,10 +928,10 @@ func (m *mc) stackParam(in *ir.Instr) {
 	t := m.f.Temps[in.To.ID]
 	if t.Agg != nil {
 		if t.Reg != ir.NoReg {
-			m.emit(a64.AddImm(true, mreg(Reg(t.Reg)), mcX29, uint32(off)))
+			m.frameAddr(mreg(Reg(t.Reg)), off)
 			return
 		}
-		m.emit(a64.AddImm(true, mcGP0, mcX29, uint32(off)))
+		m.frameAddr(mcGP0, off)
 		m.spillStore(mcGP0, false, m.spillBase+t.Slot, 8)
 		return
 	}
@@ -1171,6 +1186,12 @@ func (m *mc) instr(in *ir.Instr) {
 		}
 	case ir.OBic:
 		m.binInt(in, a64.BicReg)
+	case ir.OClz:
+		sz := in.Cls.Size()
+		s := m.src(in.Args[0], 1, sz)
+		d, done := m.dst(in.To, sz)
+		m.emit(a64.Clz(sz == 8, d, s))
+		done()
 	case ir.OShl:
 		m.shift(in, a64.Lslv, a64.LslImm)
 	case ir.OShr:
@@ -1232,7 +1253,7 @@ func (m *mc) instr(in *ir.Instr) {
 		m.vaArg(in)
 	case ir.OAlloc4, ir.OAlloc8, ir.OAlloc16:
 		d, done := m.dst(in.To, 8)
-		m.emit(a64.AddImm(true, d, mcX29, uint32(m.allocOff[in])))
+		m.frameAddr(d, m.allocOff[in])
 		done()
 	case ir.OBlockAddr:
 		d, done := m.dst(in.To, 8)
@@ -1683,11 +1704,11 @@ func (m *mc) vaPtr(ref ir.Ref) a64.Reg {
 func (m *mc) vaStart(in *ir.Instr) {
 	vp := m.vaPtr(in.Args[0])
 	s := mreg(scratch1)
-	m.emit(a64.AddImm(true, s, mcX29, uint32(m.frame+roundUp(m.namedStack, 8))))
+	m.frameAddr(s, m.frame+roundUp(m.namedStack, 8))
 	m.emit(a64.StrImm(true, s, vp, 0)) // __stack
-	m.emit(a64.AddImm(true, s, mcX29, uint32(m.gpSaveOff+8*8)))
+	m.frameAddr(s, m.gpSaveOff+8*8)
 	m.emit(a64.StrImm(true, s, vp, 8)) // __gr_top
-	m.emit(a64.AddImm(true, s, mcX29, uint32(m.fpSaveOff+8*16)))
+	m.frameAddr(s, m.fpSaveOff+8*16)
 	m.emit(a64.StrImm(true, s, vp, 16)) // __vr_top
 	m.movImm(mreg(scratch1), int64(-(8-m.namedGr)*8), false)
 	m.emit(a64.StrImm(false, s, vp, 24)) // __gr_offs

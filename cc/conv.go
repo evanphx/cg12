@@ -137,6 +137,9 @@ func (g *gen) genCall(n *cc.PostfixExpression) ir.Ref {
 	if r, ok := g.vaBuiltin(n); ok {
 		return r
 	}
+	if r, ok := g.builtinCall(n); ok {
+		return r
+	}
 	calleeNode := n.PostfixExpression
 	ft := funcTypeOf(calleeNode.Type())
 

@@ -48,11 +48,11 @@ func (e *emitter) emitVaStart(in *ir.Instr) {
 	s := scratch1.xName()
 	w := scratch1.wName()
 
-	e.line("add %s, x29, #%d", s, e.frame+roundUp(e.namedStack, 8))
+	e.frameAddr(s, e.frame+roundUp(e.namedStack, 8))
 	e.line("str %s, [%s, #0]", s, vp) // __stack
-	e.line("add %s, x29, #%d", s, e.gpSaveOff+8*8)
+	e.frameAddr(s, e.gpSaveOff+8*8)
 	e.line("str %s, [%s, #8]", s, vp) // __gr_top
-	e.line("add %s, x29, #%d", s, e.fpSaveOff+8*16)
+	e.frameAddr(s, e.fpSaveOff+8*16)
 	e.line("str %s, [%s, #16]", s, vp) // __vr_top
 	e.movImm(scratch1, int64(-(8-e.namedGr)*8), 4)
 	e.line("str %s, [%s, #24]", w, vp) // __gr_offs

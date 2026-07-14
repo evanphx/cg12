@@ -201,6 +201,9 @@ func (b *Block) Sar(cls Cls, x, y Ref) Ref  { return b.emit(OSar, cls, x, y) }
 // Neg negates an integer or float value.
 func (b *Block) Neg(cls Cls, x Ref) Ref { return b.emit(ONeg, cls, x) }
 
+// Clz counts the leading zero bits of x at cls's width (32 or 64).
+func (b *Block) Clz(cls Cls, x Ref) Ref { return b.emit(OClz, cls, x) }
+
 // Cmp emits a comparison with the given predicate; the result has class resCls
 // (an integer class) and the operands are compared at their own class.
 func (b *Block) Cmp(pred Cmp, resCls Cls, x, y Ref) Ref {
