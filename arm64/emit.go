@@ -380,6 +380,19 @@ func (e *emitter) emitTerm(b *ir.Block) {
 	case ir.JmpBr:
 		r := e.srcReg(b.Jmp.Arg, 0, 8)
 		e.line("br %s", r) // computed goto
+	case ir.JmpTable:
+		// Indexed branch through a PC-relative offset table (see the machine-code
+		// emitter). The assembler computes each entry as (case - table).
+		idx := e.srcReg(b.Jmp.Arg, 0, 4)
+		tbl := e.blockLabel(b) + "_tbl"
+		e.line("adr x17, %s", tbl)
+		e.line("ldrsw x15, [x17, %s, uxtw #2]", idx)
+		e.line("add x15, x17, x15")
+		e.line("br x15")
+		e.line("%s:", tbl)
+		for _, t := range b.Jmp.Targets {
+			e.line(".word %s - %s", e.blockLabel(t), tbl)
+		}
 	default:
 		e.fail("arm64: block %q has no terminator", b.Name)
 	}

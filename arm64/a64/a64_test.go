@@ -361,3 +361,23 @@ func TestImmediateGuards(t *testing.T) {
 		})
 	}
 }
+
+// TestProgramDataWord checks that a DataWord entry resolves to the signed byte
+// distance from its base label to its target label -- the jump-table offset.
+func TestProgramDataWord(t *testing.T) {
+	p := NewProgram()
+	p.Label("back")             // word 0
+	p.Emit(Ret(30))             // word 0
+	p.Emit(Ret(30))             // word 1
+	p.Label("table")            // word 2
+	p.DataWord("back", "table") // word 2: back(0) - table(2) = -8
+	p.DataWord("fwd", "table")  // word 3: fwd(5) - table(2) = +12
+	p.Emit(Ret(30))             // word 4
+	p.Label("fwd")              // word 5
+	p.Emit(Ret(30))             // word 5
+
+	got, err := p.Bytes()
+	require.NoError(t, err)
+	assert.Equal(t, int32(-8), int32(binary.LittleEndian.Uint32(got[8:12])))
+	assert.Equal(t, int32(12), int32(binary.LittleEndian.Uint32(got[12:16])))
+}

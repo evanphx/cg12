@@ -291,6 +291,15 @@ func (f *Func) printJmp(sb *strings.Builder, j Jmp) {
 			fmt.Fprintf(sb, "%d: @%s", c.Val, c.Blk.Name)
 		}
 		sb.WriteString("]\n")
+	case JmpTable:
+		fmt.Fprintf(sb, "\tjumptable %s [", f.refString(j.Arg))
+		for i, t := range j.Targets {
+			if i > 0 {
+				sb.WriteString(", ")
+			}
+			fmt.Fprintf(sb, "@%s", t.Name)
+		}
+		sb.WriteString("]\n")
 	}
 }
 

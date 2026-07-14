@@ -85,7 +85,7 @@ func (b *Block) Succs() []*Block {
 		}
 	case JmpJnz:
 		return []*Block{b.Jmp.To, b.Jmp.To2}
-	case JmpBr:
+	case JmpBr, JmpTable:
 		return b.Jmp.Targets
 	case JmpSwitch:
 		succs := make([]*Block, 0, len(b.Jmp.Cases)+1)

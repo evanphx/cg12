@@ -120,6 +120,7 @@ const (
 	JmpHlt                   // trap / unreachable
 	JmpBr                    // computed goto: branch to the address in Arg, reaching one of Targets
 	JmpSwitch                // multiway branch: dispatch Arg to a matching Case, else To (default)
+	JmpTable                 // indexed branch: go to Targets[Arg]; Arg is a bounds-checked 0-based index
 )
 
 // SwitchCase pairs a case's constant value with the block it dispatches to.

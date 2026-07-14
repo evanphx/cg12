@@ -17,7 +17,8 @@ import (
 // Only the integer subset (classes w and l) is handled; anything outside it
 // returns an explicit error rather than emitting silently wrong code.
 func lower(f *ir.Func) error {
-	lowerpass.Switches(f) // multiway branches -> conditional branches, before edge splitting
+	jumpTables(f)         // dense switches -> indexed branch (JmpTable)
+	lowerpass.Switches(f) // remaining multiway branches -> conditional branches
 	hoistAllocas(f)
 	foldIdioms(f)
 	foldAddressing(f)

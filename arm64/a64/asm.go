@@ -14,11 +14,13 @@ type Program struct {
 }
 
 type fixup struct {
-	at    int                    // word index of the branch to patch
+	at    int                    // word index of the branch/data word to patch
 	label string                 // target label
+	base  string                 // reference label the offset is measured from (empty: fx.at)
 	enc   func(off int32) uint32 // re-encode the branch given a byte offset
 	kind  string                 // for range-check diagnostics
 	bits  uint                   // signed offset width (imm bits + 2 for the /4 scale)
+	data  bool                   // emit the raw byte offset as a data word (no encoding)
 }
 
 // NewProgram returns an empty program.
@@ -64,6 +66,14 @@ func (p *Program) Adr(rd Reg, label string) {
 	p.branch(label, 21, "adr", func(off int32) uint32 { return Adr(rd, off) })
 }
 
+// DataWord emits a 32-bit data word (occupying one instruction slot, never
+// executed) equal to the signed byte distance from base to target, resolved at
+// assembly time. It is the offset entry of a PC-relative jump table.
+func (p *Program) DataWord(target, base string) {
+	p.fixups = append(p.fixups, fixup{at: len(p.words), label: target, base: base, data: true, kind: "jumptable"})
+	p.words = append(p.words, 0)
+}
+
 // Bytes resolves every branch and returns the assembled machine code.
 func (p *Program) Bytes() ([]byte, error) {
 	if p.err != nil {
@@ -74,7 +84,19 @@ func (p *Program) Bytes() ([]byte, error) {
 		if !ok {
 			return nil, fmt.Errorf("a64: undefined label %q", fx.label)
 		}
-		off := int32(target-fx.at) * 4
+		ref := fx.at
+		if fx.base != "" {
+			b, ok := p.labels[fx.base]
+			if !ok {
+				return nil, fmt.Errorf("a64: undefined base label %q", fx.base)
+			}
+			ref = b
+		}
+		off := int32(target-ref) * 4
+		if fx.data {
+			p.words[fx.at] = uint32(off) // raw offset entry, not an instruction
+			continue
+		}
 		// The signed offset must fit the branch's field (imm bits + 2 scale bits).
 		lim := int32(1) << (fx.bits - 1)
 		if off < -lim || off >= lim {
