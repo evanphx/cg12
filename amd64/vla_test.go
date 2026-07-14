@@ -28,3 +28,17 @@ int runtest(void){
 }`
 	require.Equal(t, 0, runC(t, src))
 }
+
+// TestVLANoLeak checks that a VLA in a loop is reclaimed each iteration: many
+// iterations of a sizeable VLA would overflow the stack if it leaked. A continue
+// (a non-fall-through exit) also has to unwind.
+func TestVLANoLeak(t *testing.T) {
+	src := `
+int f(int n){
+	long acc=0;
+	for(int k=0;k<2000000;k++){ int a[n]; a[0]=k; a[n-1]=k; if(k&1)continue; acc+=a[0]+a[n-1]; }
+	return (int)(acc & 1);
+}
+int runtest(void){ return f(96); }` // 2M * ~384 bytes = ~768MB if it leaked
+	require.Equal(t, 0, runC(t, src))
+}

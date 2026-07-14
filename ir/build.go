@@ -360,6 +360,13 @@ func (b *Block) AllocN(size Ref) Ref {
 	return b.emit(OAllocN, ClsP, size)
 }
 
+// StackSave captures the current stack pointer, and StackRestore sets it back to
+// a saved value, reclaiming any VLAs allocated in between.
+func (b *Block) StackSave() Ref { return b.emit(OStackSave, ClsP) }
+func (b *Block) StackRestore(sp Ref) {
+	b.Instrs = append(b.Instrs, Instr{Op: OStackRestore, Args: []Ref{sp}, Pos: b.curPos})
+}
+
 // Call invokes callee with args and returns the result (class retCls). For a
 // void call use CallVoid.
 func (b *Block) Call(retCls Cls, callee Ref, args ...Ref) Ref {

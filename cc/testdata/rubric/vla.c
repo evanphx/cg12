@@ -40,6 +40,21 @@ int loops(int n) {
 	return last;
 }
 
+/* Many iterations, each allocating a VLA. Without per-scope reclamation the
+ * stack would grow ~3M * 512 bytes and overflow; with it, the stack is flat.
+ * A `continue` (which also unwinds) exercises the non-fall-through exit. */
+int noleak(int n) {
+	long acc = 0;
+	for (int k = 0; k < 3000000; k++) {
+		int a[n];
+		a[0] = k;
+		a[n - 1] = k;
+		if (k & 1) continue;
+		acc += a[0] + a[n - 1];
+	}
+	return (int)(acc & 0x3ff);
+}
+
 int main(void) {
 	printf("sum1d(5)=%d sum1d(10)=%d\n", sum1d(5), sum1d(10));
 	printf("diag2d(4,5)=%d\n", diag2d(4, 5));
@@ -50,5 +65,6 @@ int main(void) {
 	int n = 6;
 	int buf[n];
 	printf("sizeof=%zu loops=%d\n", sizeof(buf), loops(7));
+	printf("noleak=%d\n", noleak(128));
 	return 0;
 }

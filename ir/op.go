@@ -68,6 +68,12 @@ const (
 	// 16-aligned pointer, valid until the function returns.
 	OAllocN
 
+	// OStackSave captures the current stack pointer (result is a pointer);
+	// OStackRestore sets the stack pointer to Args[0]. Together they bracket a
+	// scope so its variable-length arrays are reclaimed on exit.
+	OStackSave
+	OStackRestore
+
 	// Memory-to-memory copy of Aux bytes from Args[1] to Args[0].
 	OBlit
 
@@ -192,10 +198,12 @@ var opTable = [numOps]opInfo{
 	OLoadd:  {name: "loadd", hasResult: true},
 	OLoadq:  {name: "loadq", hasResult: true},
 
-	OAlloc4:  {name: "alloc4", hasResult: true},
-	OAlloc8:  {name: "alloc8", hasResult: true},
-	OAlloc16: {name: "alloc16", hasResult: true},
-	OAllocN:  {name: "allocn", hasResult: true},
+	OAlloc4:       {name: "alloc4", hasResult: true},
+	OAlloc8:       {name: "alloc8", hasResult: true},
+	OAlloc16:      {name: "alloc16", hasResult: true},
+	OAllocN:       {name: "allocn", hasResult: true},
+	OStackSave:    {name: "stacksave", hasResult: true},
+	OStackRestore: {name: "stackrestore"},
 
 	OBlit: {name: "blit"},
 

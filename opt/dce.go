@@ -67,6 +67,8 @@ func hasSideEffect(op ir.Op) bool {
 		return true // a safepoint pins the stack map; never remove it
 	case op == ir.OGetReg, op == ir.OSetReg:
 		return true // reads/writes of a live machine register are volatile
+	case op == ir.OAllocN, op == ir.OStackSave, op == ir.OStackRestore:
+		return true // these move or snapshot the stack pointer; never remove them
 	}
 	return false
 }

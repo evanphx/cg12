@@ -56,6 +56,13 @@ func (e *emitter) instr(in *ir.Instr) {
 		e.line("subq %s, %%rsp", gpn(size, 8)) // sub rsp, size (16-aligned)
 		e.line("movq %%rsp, %s", gpn(d, 8))    // d = rsp
 		commit()
+	case ir.OStackSave:
+		d, commit := e.gpDst(in.To)
+		e.line("movq %%rsp, %s", gpn(d, 8)) // mov d, rsp
+		commit()
+	case ir.OStackRestore:
+		r := e.gpValue(in.Args[0], gpScratch0)
+		e.line("movq %s, %%rsp", gpn(r, 8)) // mov rsp, r
 	case ir.OExtsb, ir.OExtub, ir.OExtsh, ir.OExtuh, ir.OExtsw, ir.OExtuw:
 		e.extend(in)
 	case ir.OExts, ir.OTruncd, ir.OStosi, ir.OStoui, ir.OSltof, ir.OUltof, ir.OCast:

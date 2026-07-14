@@ -31,7 +31,10 @@ type gen struct {
 	nblk     int                                // block-name counter
 	nstatic  int                                // static-local mangling counter
 	brk      []*ir.Block                        // break targets
+	brkVla   []int                              // vlaScope depth at each break target
 	cont     []*ir.Block                        // continue targets
+	contVla  []int                              // vlaScope depth at each continue target
+	vlaScope []ir.Ref                           // saved stack pointers of active VLA scopes
 	err      error
 }
 

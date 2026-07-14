@@ -1339,6 +1339,13 @@ func (m *mc) instr(in *ir.Instr) {
 		m.emit(a64.SubReg(true, d, mcGP2, size)) // d = sp - size (safe if d == size)
 		m.emit(a64.AddImm(true, mcSP, d, 0))     // sp = d
 		done()
+	case ir.OStackSave:
+		d, done := m.dst(in.To, 8)
+		m.emit(a64.AddImm(true, d, mcSP, 0)) // mov d, sp
+		done()
+	case ir.OStackRestore:
+		r := m.src(in.Args[0], 0, 8)
+		m.emit(a64.AddImm(true, mcSP, r, 0)) // mov sp, r
 	case ir.OBlockAddr:
 		d, done := m.dst(in.To, 8)
 		m.prog.Adr(d, in.Blk.Name) // PC-relative label address (&&label)

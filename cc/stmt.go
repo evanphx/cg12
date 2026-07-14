@@ -14,6 +14,13 @@ func (g *gen) genCompound(cs *cc.CompoundStatement) {
 	}
 	g.push()
 	defer g.pop()
+	// A block that declares a VLA saves the stack pointer on entry and restores it
+	// on exit, so the array is reclaimed when the scope ends (crucial for a VLA in
+	// a loop, which would otherwise grow the stack each iteration).
+	vla := blockDeclaresVLA(cs)
+	if vla {
+		g.vlaScope = append(g.vlaScope, g.cur.StackSave())
+	}
 	for l := cs.BlockItemList; l != nil; l = l.BlockItemList {
 		// After a terminator the rest of the block is unreachable, but a label or
 		// case ahead can resume a new block, so keep scanning for one.
@@ -21,6 +28,42 @@ func (g *gen) genCompound(cs *cc.CompoundStatement) {
 			continue
 		}
 		g.genBlockItem(l.BlockItem)
+	}
+	if vla {
+		if !g.terminated() {
+			g.cur.StackRestore(g.vlaScope[len(g.vlaScope)-1])
+		}
+		g.vlaScope = g.vlaScope[:len(g.vlaScope)-1]
+	}
+}
+
+// blockDeclaresVLA reports whether a compound statement directly declares a
+// variable-length array (a nested block has its own scope handling).
+func blockDeclaresVLA(cs *cc.CompoundStatement) bool {
+	for l := cs.BlockItemList; l != nil; l = l.BlockItemList {
+		bi := l.BlockItem
+		if bi.Case != cc.BlockItemDecl || bi.Declaration == nil || bi.Declaration.Case != cc.DeclarationDecl {
+			continue
+		}
+		for il := bi.Declaration.InitDeclaratorList; il != nil; il = il.InitDeclaratorList {
+			dcl := il.InitDeclarator.Declarator
+			if dcl == nil || dcl.IsStatic() {
+				continue
+			}
+			if at, ok := dcl.Type().(*cc.ArrayType); ok && at.IsVLA() {
+				return true
+			}
+		}
+	}
+	return false
+}
+
+// vlaUnwind restores the stack pointer to the value saved when the VLA scope at
+// the given depth was entered, reclaiming every VLA allocated since. It is used
+// when break/continue jumps out of one or more VLA scopes.
+func (g *gen) vlaUnwind(depth int) {
+	if len(g.vlaScope) > depth {
+		g.cur.StackRestore(g.vlaScope[depth])
 	}
 }
 
@@ -348,8 +391,10 @@ func (g *gen) genSwitch(ss *cc.SelectionStatement) {
 	// is dropped by the optimizer.
 	g.cur = g.block("swbody")
 	g.brk = append(g.brk, endB)
+	g.brkVla = append(g.brkVla, len(g.vlaScope))
 	g.genStmt(ss.Statement)
 	g.brk = g.brk[:len(g.brk)-1]
+	g.brkVla = g.brkVla[:len(g.brkVla)-1]
 	if !g.terminated() {
 		g.cur.Goto(endB)
 	}
@@ -534,10 +579,14 @@ func (g *gen) genIteration(is *cc.IterationStatement) {
 func (g *gen) loopBody(body *cc.Statement, bodyB, contB, endB, next *ir.Block) {
 	g.cur = bodyB
 	g.brk = append(g.brk, endB)
+	g.brkVla = append(g.brkVla, len(g.vlaScope))
 	g.cont = append(g.cont, contB)
+	g.contVla = append(g.contVla, len(g.vlaScope))
 	g.genStmt(body)
 	g.brk = g.brk[:len(g.brk)-1]
+	g.brkVla = g.brkVla[:len(g.brkVla)-1]
 	g.cont = g.cont[:len(g.cont)-1]
+	g.contVla = g.contVla[:len(g.contVla)-1]
 	if !g.terminated() {
 		g.cur.Goto(next)
 	}
@@ -554,10 +603,12 @@ func (g *gen) genJump(js *cc.JumpStatement) {
 		g.cur.Ret(v)
 	case cc.JumpStatementBreak:
 		if len(g.brk) > 0 {
+			g.vlaUnwind(g.brkVla[len(g.brkVla)-1]) // reclaim VLAs left by the break
 			g.cur.Goto(g.brk[len(g.brk)-1])
 		}
 	case cc.JumpStatementContinue:
 		if len(g.cont) > 0 {
+			g.vlaUnwind(g.contVla[len(g.contVla)-1]) // reclaim VLAs left by the continue
 			g.cur.Goto(g.cont[len(g.cont)-1])
 		}
 	case cc.JumpStatementGoto:

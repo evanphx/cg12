@@ -516,6 +516,12 @@ func (e *emitter) emitInstr(b *ir.Block, in *ir.Instr) {
 		e.line("sub %s, x15, %s", d, size)
 		e.line("mov sp, %s", d)
 		done()
+	case ir.OStackSave:
+		d, done := e.dstReg(in.To, 8)
+		e.line("mov %s, sp", d)
+		done()
+	case ir.OStackRestore:
+		e.line("mov sp, %s", e.srcReg(in.Args[0], 0, 8))
 	case ir.OBlockAddr:
 		d, done := e.dstReg(in.To, 8)
 		e.line("adr %s, %s", d, e.blockLabel(in.Blk)) // &&label
