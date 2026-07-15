@@ -2,6 +2,7 @@
 package main
 
 import (
+	_ "embed"
 	"flag"
 	"fmt"
 	"os"
@@ -16,6 +17,12 @@ import (
 	"github.com/evanphx/cg12/ir"
 	"github.com/evanphx/cg12/opt"
 )
+
+//go:embed runtime_arm64.S
+var runtimeARM64Assembly string
+
+//go:embed bootstrap_arm64.S
+var bootstrapARM64Assembly string
 
 func main() {
 	out := flag.String("o", "", "output file")
@@ -99,9 +106,54 @@ func link(m *ir.Module, exe string) {
 	check(f.Close())
 	cc, err := exec.LookPath("cc")
 	check(err)
-	cmd := exec.Command(cc, "-no-pie", "-o", exe, f.Name())
+	inputs := []string{f.Name()}
+	if runtime.GOARCH == "arm64" {
+		assembly := runtimeARM64Assembly
+		if usesGoRuntime(m) {
+			assembly += "\n" + bootstrapARM64Assembly
+		}
+		support, cleanup := compileRuntimeSupport(cc, assembly)
+		defer cleanup()
+		inputs = append(inputs, support)
+	}
+	args := append([]string{"-no-pie", "-o", exe}, inputs...)
+	cmd := exec.Command(cc, args...)
 	cmd.Stderr = os.Stderr
 	check(cmd.Run())
+}
+
+func usesGoRuntime(module *ir.Module) bool {
+	for _, function := range module.Funcs {
+		if function.Name == "runtime.schedinit" {
+			return true
+		}
+	}
+	return false
+}
+
+func compileRuntimeSupport(cc, assembly string) (string, func()) {
+	source, err := os.CreateTemp("", "cg12-goc-runtime-*.S")
+	check(err)
+	object := strings.TrimSuffix(source.Name(), ".S") + ".o"
+	cleanup := func() {
+		os.Remove(source.Name())
+		os.Remove(object)
+	}
+	_, err = source.WriteString(assembly)
+	if err == nil {
+		err = source.Close()
+	}
+	if err != nil {
+		cleanup()
+		check(err)
+	}
+	cmd := exec.Command(cc, "-c", "-o", object, source.Name())
+	cmd.Stderr = os.Stderr
+	if err := cmd.Run(); err != nil {
+		cleanup()
+		check(err)
+	}
+	return object, cleanup
 }
 
 func runProgram(name string) int {

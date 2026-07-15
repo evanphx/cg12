@@ -44,6 +44,11 @@ func TestExecutionCorpus(t *testing.T) {
 		{"recursion", `func fib(n int) int { if n<2 { return n }; return fib(n-1)+fib(n-2) }; func Test() int { return fib(10) }`, 55},
 		{"range array", `func Test() int { values := [4]int{2, 3, 5, 7}; sum := 0; for _, value := range values { sum += value }; return sum }`, 17},
 		{"range pointer to array", `func Test() int { values := [4]int{2, 3, 5, 7}; sum := 0; for _, value := range &values { sum += value }; return sum }`, 17},
+		{"slice pointer to array", `func Test() int { values := [4]int{2, 3, 5, 7}; slice := (&values)[:]; return len(slice)*10 + slice[2] }`, 45},
+		{"pointer array struct field", `type pair struct { left, right int }; func Test() int { var values [2]pair; values[1].left = 7; values[1].right = 11; pointer := &values; return pointer[1].left*10 + pointer[1].right }`, 81},
+		{"range array of structs", `type pair struct { left, right int }; func Test() int { var values [2]pair; values[0].left = 3; values[0].right = 5; values[1].left = 7; values[1].right = 11; total := 0; for _, value := range values { total += value.left + value.right }; return total }`, 26},
+		{"returned array survives callee frame", `func makeValues() [3]int { return [3]int{7, 11, 13} }; func disturb() int { values := [3]int{100, 200, 300}; return values[0] }; func Test() int { values := makeValues(); disturb(); return values[0] + values[1] + values[2] }`, 31},
+		{"returned struct survives callee frame", `type pair struct { left, right int }; func makePair() pair { return pair{17, 25} }; func disturb() int { value := pair{100, 200}; return value.left }; func Test() int { value := makePair(); disturb(); return value.left + value.right }`, 42},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
@@ -69,6 +74,9 @@ func TestAdvancedExecutionCorpus(t *testing.T) {
 		{"switch fallthrough", `func Test() int { n:=0; switch 2 { case 2: n+=2; fallthrough; case 3: n+=3 }; return n }`, 5},
 		{"package constants", `const base=40; const two int=2; func Test() int { return base+two }`, 42},
 		{"mutable globals", `var total=3; func add(x int){ total+=x }; func Test() int { add(4); add(5); return total }`, 12},
+		{"global slice assignment", `var values []byte; func set(){ values = []byte{7, 11, 13} }; func Test() int { set(); return len(values)*1000 + cap(values)*100 + int(values[0]+values[1]+values[2]) }`, 3331},
+		{"forward multiple results", `func pair() (int, int) { return 17, 25 }; func forward() (int, int) { return pair() }; func Test() int { left, right := forward(); return left + right }`, 42},
+		{"implicit pointer method receiver", `type counter int; func (value *counter) add(amount int) { *value += counter(amount) }; func Test() int { var value counter = 17; value.add(25); return int(value) }`, 42},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) { runCase(t, "package main\n"+tc.body, tc.want, false) })

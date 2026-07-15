@@ -4,6 +4,7 @@ import (
 	"go/ast"
 	"go/token"
 	"go/types"
+	"strings"
 )
 
 type functionDecl struct {
@@ -19,6 +20,8 @@ func reachableFunctions(roots []*ast.FuncDecl, rootInfo *types.Info, rootPkg *ty
 	declarations := make(map[*types.Func]functionDecl)
 	methods := make(map[string][]functionDecl)
 	runtimeFunctions := make(map[string]functionDecl)
+	var genericRuntimeMethods []functionDecl
+	var runtimeSupportFunctions []functionDecl
 	for _, unit := range units {
 		for _, file := range unit.files {
 			for _, declaration := range file.Decls {
@@ -31,12 +34,21 @@ func reachableFunctions(roots []*ast.FuncDecl, rootInfo *types.Info, rootPkg *ty
 					continue
 				}
 				declarations[object] = functionDecl{decl: function, info: unit.info, pkg: unit.pkg}
-				if unit.path == "runtime" {
-					runtimeFunctions[object.Name()] = declarations[object]
+				if unit.path == "internal/chacha8rand" && object.Name() == "block_generic" {
+					runtimeSupportFunctions = append(runtimeSupportFunctions, declarations[object])
 				}
 				signature := object.Type().(*types.Signature)
+				if unit.path == "runtime" && signature.Recv() == nil {
+					runtimeFunctions[object.Name()] = declarations[object]
+				}
 				if signature.Recv() != nil {
 					methods[object.Name()] = append(methods[object.Name()], declarations[object])
+					if unit.path == "internal/runtime/atomic" || unit.path == "internal/runtime/gc/scan" {
+						receiver := types.TypeString(signature.Recv().Type(), nil)
+						if strings.Contains(receiver, "[") {
+							genericRuntimeMethods = append(genericRuntimeMethods, declarations[object])
+						}
+					}
 				}
 			}
 		}
@@ -45,6 +57,20 @@ func reachableFunctions(roots []*ast.FuncDecl, rootInfo *types.Info, rootPkg *ty
 	var queue []functionDecl
 	for _, root := range roots {
 		queue = append(queue, functionDecl{decl: root, info: rootInfo, pkg: rootPkg})
+	}
+	if runtimeAllocation {
+		queue = append(queue, genericRuntimeMethods...)
+		queue = append(queue, runtimeSupportFunctions...)
+		for _, name := range []string{"args", "check", "osinit", "schedinit"} {
+			if declaration, exists := runtimeFunctions[name]; exists {
+				queue = append(queue, declaration)
+			}
+		}
+		for name, declaration := range runtimeFunctions {
+			if name == "mallocPanic" || strings.HasPrefix(name, "mallocgcSmall") || strings.HasPrefix(name, "mallocgcTiny") || hasRuntimeMapsLinkName(declaration.decl) {
+				queue = append(queue, declaration)
+			}
+		}
 	}
 	seen := make(map[*ast.FuncDecl]bool)
 	var reachable []functionDecl
@@ -120,4 +146,17 @@ func reachableFunctions(roots []*ast.FuncDecl, rootInfo *types.Info, rootPkg *ty
 		})
 	}
 	return reachable
+}
+
+func hasRuntimeMapsLinkName(function *ast.FuncDecl) bool {
+	if function.Doc == nil {
+		return false
+	}
+	for _, comment := range function.Doc.List {
+		fields := strings.Fields(strings.TrimPrefix(comment.Text, "//"))
+		if len(fields) == 3 && fields[0] == "go:linkname" && strings.HasPrefix(fields[2], "internal/runtime/maps.") {
+			return true
+		}
+	}
+	return false
 }
