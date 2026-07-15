@@ -168,13 +168,28 @@ func CompileToObjectWith(m *ir.Module, opts Options) (*obj.Object, error) {
 			smFuncs = append(smFuncs, stackMapFunc{sym: name, points: mc.safepoints})
 		}
 	}
+	var moduledata *ir.Data
+	var dataPointerOffsets []uint64
 	for _, d := range m.Data {
 		if goRuntime && d.Name == "runtime.firstmoduledata" {
-			addGoRuntimeObjectMetadata(o, goFunctions, d)
+			moduledata = d
 			continue
 		}
 		if err := addData(o, d); err != nil {
 			return nil, fmt.Errorf("data %s: %w", d.Name, err)
+		}
+		if goRuntime {
+			symbol := o.Syms[len(o.Syms)-1]
+			offsets, err := goDataPointerOffsets(d, symbol.Value, symbol.Size)
+			if err != nil {
+				return nil, fmt.Errorf("data %s: %w", d.Name, err)
+			}
+			dataPointerOffsets = append(dataPointerOffsets, offsets...)
+		}
+	}
+	if moduledata != nil {
+		if err := addGoRuntimeObjectMetadata(o, goFunctions, moduledata, dataPointerOffsets); err != nil {
+			return nil, err
 		}
 	}
 	if err := addAliases(o, m.Aliases); err != nil {
@@ -189,6 +204,43 @@ func CompileToObjectWith(m *ir.Module, opts Options) (*obj.Object, error) {
 		setStackMap(o, smFuncs)
 	}
 	return o, nil
+}
+
+func goDataPointerOffsets(data *ir.Data, base, size uint64) ([]uint64, error) {
+	pointers := make(map[uint64]bool)
+	for _, word := range data.PointerWords {
+		if word < 0 || uint64(word)*8+8 > size {
+			return nil, fmt.Errorf("pointer word %d lies outside %d-byte definition", word, size)
+		}
+		pointers[base+uint64(word)*8] = true
+	}
+
+	cursor := uint64(0)
+	for _, item := range data.Items {
+		switch {
+		case item.Zero > 0:
+			cursor += uint64(item.Zero)
+		case item.Str != "":
+			cursor += uint64(len(item.Str))
+		case item.Sym != "":
+			if cursor%8 != 0 {
+				return nil, fmt.Errorf("pointer relocation at unaligned byte offset %d", cursor)
+			}
+			pointers[base+cursor] = true
+			cursor += 8
+		case len(item.Flts) > 0:
+			cursor += uint64(len(item.Flts) * item.Sub.Size())
+		default:
+			cursor += uint64(len(item.Ints) * item.Sub.Size())
+		}
+	}
+
+	offsets := make([]uint64, 0, len(pointers))
+	for offset := range pointers {
+		offsets = append(offsets, offset)
+	}
+	sort.Slice(offsets, func(i, j int) bool { return offsets[i] < offsets[j] })
+	return offsets, nil
 }
 
 // paramTempIDs returns the temporary id of each parameter, in order, captured

@@ -70,9 +70,13 @@ func main() {
 func compileAsm(m *ir.Module) (string, error) {
 	switch runtime.GOARCH {
 	case "amd64":
-		return amd64.CompileModule(m)
+		return "", fmt.Errorf("assembly display is not available for the object-only amd64 backend")
 	case "arm64":
-		return arm64.CompileModule(m)
+		object, err := arm64.CompileToObject(m)
+		if err != nil {
+			return "", err
+		}
+		return arm64.Disassemble(object), nil
 	}
 	return "", fmt.Errorf("unsupported host architecture %s", runtime.GOARCH)
 }

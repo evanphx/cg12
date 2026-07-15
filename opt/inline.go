@@ -307,6 +307,9 @@ func findInlinable(caller *ir.Func, cg *callGraph, scc *sccInfo, sites map[*ir.F
 			if !accept(callee) {
 				continue // this pass (large-forced vs budgeted) is not handling this callee
 			}
+			if len(in.Args)-1 != len(callee.Params) {
+				continue
+			}
 			if worthInlining(callee, sites[callee]) {
 				return b, i, callee
 			}
@@ -445,8 +448,27 @@ func spliceCall(caller *ir.Func, b *ir.Block, idx int, callee *ir.Func, cg *call
 	}
 	for id := 0; id < nTemps; id++ {
 		if t := callee.Temps[id]; t != nil && !isParam[id] {
-			tempMap[id] = caller.NewTemp(t.Name, t.Cls)
+			mapped := caller.NewTemp(t.Name, t.Cls)
+			cloned := caller.Temp(mapped)
+			cloned.Agg = t.Agg
+			cloned.GCRef = t.GCRef
+			cloned.GCType = t.GCType
+			tempMap[id] = mapped
 		}
+	}
+	for id, words := range callee.StackPointerWords {
+		mapped := tempMap[id]
+		if mapped.Kind != ir.RefTemp {
+			continue
+		}
+		if caller.StackPointerWords == nil {
+			caller.StackPointerWords = make(map[uint32]map[int]bool)
+		}
+		clonedWords := make(map[int]bool, len(words))
+		for offset, pointer := range words {
+			clonedWords[offset] = pointer
+		}
+		caller.StackPointerWords[mapped.ID] = clonedWords
 	}
 	constMap := make([]ir.Ref, nConsts)
 	for i := 0; i < nConsts; i++ {

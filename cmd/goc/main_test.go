@@ -5,8 +5,18 @@ import (
 	"os/exec"
 	"path/filepath"
 	"runtime"
+	"strings"
 	"testing"
 )
+
+func TestARM64RuntimeExitTerminatesTheProcess(t *testing.T) {
+	if !strings.Contains(runtimeARM64Assembly, "runtime_exit:\n\tmov x8, 94") {
+		t.Fatal("runtime_exit must use Linux exit_group")
+	}
+	if !strings.Contains(runtimeARM64Assembly, "runtime_exitThread:\n\tstlr wzr, [x0]\n\tmov x0, 0\n\tmov x8, 93") {
+		t.Fatal("runtime_exitThread must use Linux thread exit")
+	}
+}
 
 func TestDriverIRAndRun(t *testing.T) {
 	if _, err := exec.LookPath("cc"); err != nil {

@@ -17,7 +17,8 @@ func richModule() *Module {
 	m.Types = append(m.Types, pair, un)
 	m.Data = append(m.Data, &Data{
 		Name: "tbl", Linkage: Linkage{Export: true}, Align: 8,
-		Items: []DataItem{{Sub: SubW, Ints: []int64{1, 2, 3}}, {Sym: "tbl", Off: 4}, {Str: "hi"}, {Zero: 4}},
+		Items:        []DataItem{{Sub: SubW, Ints: []int64{1, 2, 3}}, {Sym: "tbl", Off: 4}, {Str: "hi"}, {Zero: 4}},
+		PointerWords: []int{2, 5},
 	})
 	fi := m.File("prog.src")
 
@@ -78,6 +79,7 @@ func TestBinaryRoundTrip(t *testing.T) {
 	// Textual printing is a strong structural comparison of the whole module.
 	assert.Equal(t, m.String(), m2.String())
 	assert.Equal(t, m.Files, m2.Files)
+	assert.Equal(t, m.Data[0].PointerWords, m2.Data[0].PointerWords)
 	// The decoded aggregate reference is resolved, not nil.
 	require.NotNil(t, m2.Funcs[0].Params[0].Agg)
 	assert.Equal(t, "pair", m2.Funcs[0].Params[0].Agg.Name)

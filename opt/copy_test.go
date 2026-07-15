@@ -44,3 +44,16 @@ func TestCopyRewritesInsideInstrs(t *testing.T) {
 	assert.Equal(t, a, add.Args[0], "copy source substituted into the add")
 	assert.Equal(t, b, add.Args[1])
 }
+
+func TestCopyPreservesClassConversion(t *testing.T) {
+	f := ir.NewModule().NewFunc("convert", ir.ClsW)
+	value := f.Param("value", ir.ClsD)
+	entry := f.Entry()
+	converted := entry.Copy(ir.ClsW, value)
+	entry.Ret(converted)
+
+	assert.False(t, Copy(f))
+	assert.Len(t, entry.Instrs, 1)
+	assert.Equal(t, ir.OCopy, entry.Instrs[0].Op)
+	assert.Equal(t, ir.ClsW, entry.Instrs[0].Cls)
+}

@@ -1,6 +1,7 @@
 package goc
 
 import (
+	"fmt"
 	"go/ast"
 	"go/token"
 	"go/types"
@@ -11,6 +12,35 @@ type functionDecl struct {
 	decl *ast.FuncDecl
 	info *types.Info
 	pkg  *types.Package
+}
+
+func runtimeInitDeclarations(units map[string]*sourceUnit) ([]functionDecl, map[*types.Func]string) {
+	unit := units["runtime"]
+	initSymbols := make(map[*types.Func]string)
+	if unit == nil {
+		return nil, initSymbols
+	}
+
+	var declarations []functionDecl
+	for _, file := range unit.files {
+		for _, declaration := range file.Decls {
+			function, ok := declaration.(*ast.FuncDecl)
+			if !ok || function.Body == nil || function.Name.Name != "init" {
+				continue
+			}
+			object, ok := unit.info.Defs[function.Name].(*types.Func)
+			if !ok {
+				continue
+			}
+			signature, ok := object.Type().(*types.Signature)
+			if !ok || signature.Recv() != nil {
+				continue
+			}
+			initSymbols[object] = fmt.Sprintf("runtime.init.%d", len(declarations))
+			declarations = append(declarations, functionDecl{decl: function, info: unit.info, pkg: unit.pkg})
+		}
+	}
+	return declarations, initSymbols
 }
 
 // reachableFunctions follows statically named function calls across source
@@ -59,6 +89,8 @@ func reachableFunctions(roots []*ast.FuncDecl, rootInfo *types.Info, rootPkg *ty
 		queue = append(queue, functionDecl{decl: root, info: rootInfo, pkg: rootPkg})
 	}
 	if runtimeAllocation {
+		runtimeInits, _ := runtimeInitDeclarations(units)
+		queue = append(queue, runtimeInits...)
 		queue = append(queue, genericRuntimeMethods...)
 		queue = append(queue, runtimeSupportFunctions...)
 		for _, name := range []string{"args", "check", "growslice", "main", "makeslice", "mallocgc", "mstart0", "newobject", "newstack", "osinit", "persistentalloc", "schedinit"} {

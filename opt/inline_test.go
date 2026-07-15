@@ -469,6 +469,38 @@ func TestInlinePreservesVolatile(t *testing.T) {
 	assert.True(t, vol, "inlined store stayed volatile")
 }
 
+func TestInlinePreservesGCTemporaryAndStackAllocationMetadata(t *testing.T) {
+	m := ir.NewModule()
+	callee := m.NewFunc("callee", ir.ClsP)
+	entry := callee.Entry()
+	allocation := entry.Alloc(8, 16)
+	callee.StackPointerWords = map[uint32]map[int]bool{
+		allocation.ID: {8: true},
+	}
+	managed := entry.Copy(ir.ClsP, allocation)
+	callee.Temp(managed).GCRef = true
+	callee.Temp(managed).GCType = 7
+	entry.Ret(managed)
+
+	caller := m.NewFunc("caller", ir.ClsP)
+	caller.Entry().Ret(caller.Entry().Call(ir.ClsP, caller.Sym("callee", 0)))
+
+	require.True(t, opt.Inline(m))
+	var clonedManaged *ir.Temp
+	for _, temp := range caller.Temps {
+		if temp.GCRef {
+			clonedManaged = temp
+			break
+		}
+	}
+	require.NotNil(t, clonedManaged)
+	assert.Equal(t, uint32(7), clonedManaged.GCType)
+	require.Len(t, caller.StackPointerWords, 1)
+	for _, words := range caller.StackPointerWords {
+		assert.Equal(t, map[int]bool{8: true}, words)
+	}
+}
+
 func TestUnrollMutualRecursion(t *testing.T) {
 	// iseven <-> isodd is a two-function recursion cycle. Bounded unrolling
 	// expands the cycle a fixed number of levels and leaves a residual recursive

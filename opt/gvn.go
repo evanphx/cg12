@@ -25,7 +25,10 @@ func GVN(f *ir.Func) bool {
 		var added []valueKey
 		for i := range b.Instrs {
 			in := &b.Instrs[i]
-			if !movable(in) || in.To.Kind != ir.RefTemp {
+			// Pointer temporaries carry GC root identity and stack-copy location
+			// metadata in addition to their numeric value. Merging them requires
+			// merging that metadata and its lifetime as well.
+			if !movable(in) || in.To.Kind != ir.RefTemp || in.Cls == ir.ClsP {
 				continue
 			}
 			k := makeKey(in, sub)

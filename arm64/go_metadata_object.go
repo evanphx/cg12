@@ -2,6 +2,7 @@ package arm64
 
 import (
 	"encoding/binary"
+	"fmt"
 
 	"github.com/evanphx/cg12/ir"
 	"github.com/evanphx/cg12/obj"
@@ -34,23 +35,96 @@ type goMetadataBuilder struct {
 	relocs []obj.Reloc
 }
 
-func addGoRuntimeObjectMetadata(object *obj.Object, functions []goFunctionInfo, moduledata *ir.Data) {
+func addGoRuntimeObjectMetadata(object *obj.Object, functions []goFunctionInfo, moduledata *ir.Data, pointerOffsets []uint64) error {
 	if len(functions) == 0 {
-		_ = addData(object, moduledata)
-		return
+		return addData(object, moduledata)
+	}
+	dataStart, ok := dataSymbolValue(object, sanitize(".goc.runtime.datastart"))
+	if !ok {
+		return fmt.Errorf("Go runtime metadata: missing data-start symbol")
+	}
+	dataEnd, ok := dataSymbolValue(object, sanitize(".goc.runtime.dataend"))
+	if !ok {
+		return fmt.Errorf("Go runtime metadata: missing data-end symbol")
+	}
+	gcProgram, err := goGCProgram(dataStart, dataEnd, pointerOffsets)
+	if err != nil {
+		return fmt.Errorf("Go runtime metadata: %w", err)
+	}
+	noptrBSSName := sanitize(".goc.runtime.dataend")
+	noptrBSSSize := uint64(0)
+	if symbol, found := dataSymbol(object, sanitize("runtime.methodValueCallFrameObjs")); found {
+		noptrBSSName = symbol.Name
+		noptrBSSSize = symbol.Size
 	}
 	for len(object.Data)%8 != 0 {
 		object.Data = append(object.Data, 0)
 	}
 	builder := &goMetadataBuilder{object: object, base: uint64(len(object.Data)), labels: make(map[string]uint64)}
-	builder.build(functions, moduledata)
+	builder.build(functions, moduledata, gcProgram, noptrBSSName, noptrBSSSize)
 	object.Data = append(object.Data, builder.data...)
 	object.DataRelocs = append(object.DataRelocs, builder.relocs...)
+	return nil
 }
 
-func (builder *goMetadataBuilder) build(functions []goFunctionInfo, moduledata *ir.Data) {
+func dataSymbolValue(object *obj.Object, name string) (uint64, bool) {
+	symbol, ok := dataSymbol(object, name)
+	return symbol.Value, ok
+}
+
+func dataSymbol(object *obj.Object, name string) (obj.Sym, bool) {
+	for _, symbol := range object.Syms {
+		if symbol.Name == name && (symbol.Section == obj.SecData || symbol.Section == obj.SecBss) {
+			return symbol, true
+		}
+	}
+	return obj.Sym{}, false
+}
+
+func goGCProgram(dataStart, dataEnd uint64, pointerOffsets []uint64) ([]byte, error) {
+	if dataEnd < dataStart || (dataEnd-dataStart)%8 != 0 {
+		return nil, fmt.Errorf("data range [%d, %d) is not word aligned", dataStart, dataEnd)
+	}
+	words := int((dataEnd - dataStart) / 8)
+	bitmap := make([]byte, (words+7)/8)
+	for _, offset := range pointerOffsets {
+		if offset < dataStart || offset >= dataEnd {
+			continue
+		}
+		if (offset-dataStart)%8 != 0 {
+			return nil, fmt.Errorf("pointer at byte offset %d is not word aligned", offset-dataStart)
+		}
+		word := int((offset - dataStart) / 8)
+		bitmap[word/8] |= 1 << (word % 8)
+	}
+
+	// A GC program literal holds at most 127 bits. Use byte-aligned chunks so
+	// each instruction can copy directly from the packed bitmap.
+	program := make([]byte, 0, len(bitmap)+len(bitmap)/15+2)
+	for first := 0; first < words; {
+		count := words - first
+		if count > 120 {
+			count = 120
+		}
+		program = append(program, byte(count))
+		bytes := (count + 7) / 8
+		program = append(program, bitmap[first/8:first/8+bytes]...)
+		first += count
+	}
+	program = append(program, 0)
+	return program, nil
+}
+
+func (builder *goMetadataBuilder) build(functions []goFunctionInfo, moduledata *ir.Data, gcProgram []byte, noptrBSSName string, noptrBSSSize uint64) {
 	const findFuncBuckets = 4096
 	functions = append(functions, goAssemblyFunctionInfo()...)
+
+	builder.label(".goc.go.gcbss")
+	builder.bytes(0)
+	builder.align(8)
+	builder.label(".goc.go.gcdata")
+	builder.data = append(builder.data, gcProgram...)
+	builder.align(8)
 
 	builder.label(".goc.go.pcheader")
 	builder.u32(0xfffffff1)
@@ -77,14 +151,7 @@ func (builder *goMetadataBuilder) build(functions []goFunctionInfo, moduledata *
 	pcspOffsets := make([]uint32, len(functions))
 	for index, function := range functions {
 		pcspOffsets[index] = uint32(builder.offset(".goc.go.pctab"))
-		if function.frameStart > 0 {
-			builder.uvarint(2) // initial value: -1 -> 0 before frame allocation
-			builder.uvarint(uint32(function.frameStart / 4))
-			builder.uvarint(uint32(function.frameSize) * 2)
-		} else {
-			builder.uvarint(uint32(function.frameSize+1) * 2)
-		}
-		builder.uvarint(^uint32(0))
+		builder.data = append(builder.data, goPCSP(function.frameStart, function.frameSize)...)
 	}
 	builder.label(".goc.go.pctab.end")
 	builder.align(4)
@@ -166,22 +233,22 @@ func (builder *goMetadataBuilder) build(functions []goFunctionInfo, moduledata *
 	builder.externalPointer(endSymbol)
 	builder.u64(0) // text base: function entry offsets contain absolute addresses
 	builder.externalPointer(endSymbol)
-	builder.externalPointer(sanitize(".goc.runtime.datastart")) // noptrdata
-	builder.externalPointer(sanitize(".goc.runtime.dataend"))   // enoptrdata
-	builder.u64(0)                                              // data
-	builder.u64(0)                                              // edata
-	builder.u64(0)                                              // bss
-	builder.u64(0)                                              // ebss
-	builder.externalPointer(sanitize(".goc.runtime.datastart")) // noptrbss
-	builder.externalPointer(sanitize(".goc.runtime.dataend"))   // enoptrbss
-	builder.u64(0)                                              // covctrs
-	builder.u64(0)                                              // ecovctrs
-	builder.externalPointer(sanitize(".goc.runtime.dataend"))   // end
-	builder.u64(0)                                              // gcdata
-	builder.u64(0)                                              // gcbss
-	builder.externalPointer(sanitize(".goc.runtime.datastart")) // types
-	builder.externalPointer(sanitize(".goc.runtime.dataend"))   // etypes
-	builder.externalPointer(sanitize(".goc.runtime.datastart")) // rodata
+	builder.externalPointer(sanitize(".goc.runtime.datastart"))      // noptrdata
+	builder.externalPointer(sanitize(".goc.runtime.datastart"))      // enoptrdata
+	builder.externalPointer(sanitize(".goc.runtime.datastart"))      // data
+	builder.externalPointer(sanitize(".goc.runtime.dataend"))        // edata
+	builder.externalPointer(sanitize(".goc.runtime.dataend"))        // bss
+	builder.externalPointer(sanitize(".goc.runtime.dataend"))        // ebss
+	builder.externalPointer(noptrBSSName)                            // noptrbss
+	builder.externalPointerOffset(noptrBSSName, int64(noptrBSSSize)) // enoptrbss
+	builder.u64(0)                                                   // covctrs
+	builder.u64(0)                                                   // ecovctrs
+	builder.externalPointer(sanitize(".goc.runtime.dataend"))        // end
+	builder.pointer(".goc.go.gcdata")                                // gcdata
+	builder.pointer(".goc.go.gcbss")                                 // gcbss (empty bss)
+	builder.externalPointer(sanitize(".goc.runtime.datastart"))      // types
+	builder.externalPointer(sanitize(".goc.runtime.dataend"))        // etypes
+	builder.externalPointer(sanitize(".goc.runtime.datastart"))      // rodata
 	builder.pointer(".goc.go.gofunc")
 	builder.pointer(".goc.go.pclntable.end")
 	builder.data = append(builder.data, make([]byte, 256)...)
@@ -199,6 +266,27 @@ func (builder *goMetadataBuilder) build(functions []goFunctionInfo, moduledata *
 		offset := builder.labels[label] - builder.labels[".goc.go.pcheader"]
 		binary.LittleEndian.PutUint64(builder.data[header+32+uint64(index*8):], offset)
 	}
+}
+
+func goPCSP(frameStart, frameSize int) []byte {
+	var data []byte
+	appendUvarint := func(value uint32) {
+		for value >= 0x80 {
+			data = append(data, byte(value)|0x80)
+			value >>= 7
+		}
+		data = append(data, byte(value))
+	}
+	if frameStart > 0 {
+		appendUvarint(2) // initial value: -1 -> 0 before frame allocation
+		appendUvarint(uint32(frameStart / 4))
+		appendUvarint(uint32(frameSize) * 2)
+	} else {
+		appendUvarint(uint32(frameSize+1) * 2)
+	}
+	appendUvarint(^uint32(0))
+	appendUvarint(0) // end of this function's pc-value table
+	return data
 }
 
 // goAssemblyFunctionInfo splits the assembly support code at every function
@@ -298,6 +386,11 @@ func (builder *goMetadataBuilder) pointer(label string) {
 
 func (builder *goMetadataBuilder) externalPointer(symbol string) {
 	builder.relocs = append(builder.relocs, obj.Reloc{Offset: builder.position(), Sym: symbol, Type: obj.R_AARCH64_ABS64})
+	builder.u64(0)
+}
+
+func (builder *goMetadataBuilder) externalPointerOffset(symbol string, offset int64) {
+	builder.relocs = append(builder.relocs, obj.Reloc{Offset: builder.position(), Sym: symbol, Type: obj.R_AARCH64_ABS64, Addend: offset})
 	builder.u64(0)
 }
 

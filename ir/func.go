@@ -242,10 +242,11 @@ type Alias struct {
 
 // Data is a global data definition (initialised or zeroed memory).
 type Data struct {
-	Name    string
-	Linkage Linkage
-	Align   int
-	Items   []DataItem
+	Name         string
+	Linkage      Linkage
+	Align        int
+	Items        []DataItem
+	PointerWords []int // pointer-bearing word indices relative to this datum
 }
 
 // HoldsAddress reports whether any of the definition's items is the address of a

@@ -416,7 +416,7 @@ runtime_getpid:
 .global runtime_exit
 .type runtime_exit, %function
 runtime_exit:
-	mov x8, 93
+	mov x8, 94
 	svc 0
 	brk 0
 
@@ -637,6 +637,7 @@ runtime_mcall:
 	blr x9
 	brk 0
 
+.weak runtime_newstack
 .global runtime_morestack
 .type runtime_morestack, %function
 runtime_morestack:

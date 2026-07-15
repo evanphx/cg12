@@ -1,12 +1,88 @@
 package goc
 
 import (
+	"fmt"
 	"go/ast"
 	"go/parser"
 	"go/token"
 	"go/types"
+	"path/filepath"
+	"reflect"
 	"testing"
+
+	"github.com/evanphx/cg12/ir"
 )
+
+func TestRuntimeInitDeclarationsHaveUniqueOrderedSymbols(t *testing.T) {
+	fset := token.NewFileSet()
+	loader := newSourceLoader(fset)
+	if _, err := loader.Import("runtime"); err != nil {
+		t.Fatal(err)
+	}
+
+	declarations, symbols := runtimeInitDeclarations(loader.units)
+	if len(declarations) == 0 {
+		t.Fatal("runtime has no init declarations")
+	}
+	seen := make(map[string]bool)
+	for index, declaration := range declarations {
+		object, ok := declaration.info.Defs[declaration.decl.Name].(*types.Func)
+		if !ok {
+			t.Fatalf("runtime init %d has no function object", index)
+		}
+		if object.Type().(*types.Signature).Recv() != nil {
+			t.Errorf("runtime init %d is a method", index)
+		}
+		want := fmt.Sprintf("runtime.init.%d", index)
+		if symbols[object] != want {
+			t.Errorf("runtime init %d symbol = %q, want %q", index, symbols[object], want)
+		}
+		if seen[symbols[object]] {
+			t.Errorf("duplicate runtime init symbol %q", symbols[object])
+		}
+		seen[symbols[object]] = true
+		position := fset.Position(declaration.decl.Pos())
+		t.Logf("%s = %s:%d", symbols[object], filepath.Base(position.Filename), position.Line)
+	}
+}
+
+func TestRuntimeInitTaskContainsEveryPackageInitializer(t *testing.T) {
+	fset := token.NewFileSet()
+	loader := newSourceLoader(fset)
+	if _, err := loader.Import("runtime"); err != nil {
+		t.Fatal(err)
+	}
+
+	declarations, symbols := runtimeInitDeclarations(loader.units)
+	module := ir.NewModule()
+	descriptor := &ir.Data{Name: "runtime.runtime_inittasks.descriptor"}
+	module.Data = append(module.Data, descriptor)
+	if err := addRuntimeInitTask(module, declarations, symbols); err != nil {
+		t.Fatal(err)
+	}
+
+	task := module.Data[1]
+	if task.Name != ".goc.runtime.inittask.runtime" {
+		t.Fatalf("task name = %q", task.Name)
+	}
+	if !reflect.DeepEqual(task.Items[0].Ints, []int64{0, int64(len(declarations))}) {
+		t.Errorf("task header = %v", task.Items[0].Ints)
+	}
+	for index, declaration := range declarations {
+		object := declaration.info.Defs[declaration.decl.Name].(*types.Func)
+		if task.Items[index+1].Sym != symbols[object] {
+			t.Errorf("task function %d = %q, want %q", index, task.Items[index+1].Sym, symbols[object])
+		}
+	}
+
+	backing := module.Data[2]
+	if backing.Name != ".goc.runtime.inittasks.backing" || !reflect.DeepEqual(backing.PointerWords, []int{0}) {
+		t.Errorf("runtime init backing = %#v", backing)
+	}
+	if len(descriptor.Items) != 2 || descriptor.Items[0].Sym != backing.Name || !reflect.DeepEqual(descriptor.Items[1].Ints, []int64{1, 1}) {
+		t.Errorf("runtime init slice descriptor = %#v", descriptor.Items)
+	}
+}
 
 func TestSHA256ReachabilityUsesExactSource(t *testing.T) {
 	fset := token.NewFileSet()

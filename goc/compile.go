@@ -13,6 +13,7 @@ import (
 	"go/types"
 	"path/filepath"
 	"runtime"
+	"sort"
 	"strings"
 
 	"github.com/evanphx/cg12/ir"
@@ -63,8 +64,9 @@ func Compile(name string, src []byte) (*ir.Module, error) {
 		collectLinkNames(unit.files, unit.info, linkNames)
 	}
 	functionDecls := collectFunctionDeclarations(info, pkg, []*ast.File{file}, loader.units)
+	runtimeInits, initSymbols := runtimeInitDeclarations(loader.units)
 	noWriteBarriers := collectNoWriteBarrierFunctions(functionDecls)
-	g := &gen{fset: fset, file: file, info: info, pkg: pkg, mod: mod, globals: map[types.Object]string{}, emitRuntimeTables: emitRuntimeTables, runtimeAllocation: compileRuntime, typeTags: typeTags, linkNames: linkNames, functionDecls: functionDecls, noWriteBarrierFunctions: noWriteBarriers}
+	g := &gen{fset: fset, file: file, info: info, pkg: pkg, mod: mod, globals: map[types.Object]string{}, emitRuntimeTables: emitRuntimeTables, runtimeAllocation: compileRuntime, typeTags: typeTags, linkNames: linkNames, initSymbols: initSymbols, functionDecls: functionDecls, noWriteBarrierFunctions: noWriteBarriers}
 	g.mod.File(name)
 	for _, d := range file.Decls {
 		if gd, ok := d.(*ast.GenDecl); ok && gd.Tok == token.VAR {
@@ -75,7 +77,7 @@ func Compile(name string, src []byte) (*ir.Module, error) {
 	for path, unit := range loader.units {
 		globals := make(map[types.Object]string)
 		packageGlobals[path] = globals
-		generator := &gen{fset: fset, info: unit.info, pkg: unit.pkg, mod: mod, globals: globals, emitRuntimeTables: emitRuntimeTables, runtimeAllocation: compileRuntime, typeTags: typeTags, linkNames: linkNames, functionDecls: functionDecls, noWriteBarrierFunctions: noWriteBarriers}
+		generator := &gen{fset: fset, info: unit.info, pkg: unit.pkg, mod: mod, globals: globals, emitRuntimeTables: emitRuntimeTables, runtimeAllocation: compileRuntime, typeTags: typeTags, linkNames: linkNames, initSymbols: initSymbols, functionDecls: functionDecls, noWriteBarrierFunctions: noWriteBarriers}
 		for _, sourceFile := range unit.files {
 			for _, declaration := range sourceFile.Decls {
 				global, ok := declaration.(*ast.GenDecl)
@@ -122,6 +124,7 @@ func Compile(name string, src []byte) (*ir.Module, error) {
 				runtimeAllocation:       compileRuntime,
 				typeTags:                typeTags,
 				linkNames:               linkNames,
+				initSymbols:             initSymbols,
 				functionDecls:           functionDecls,
 				noWriteBarrierFunctions: noWriteBarriers,
 			}
@@ -141,6 +144,9 @@ func Compile(name string, src []byte) (*ir.Module, error) {
 		return nil, g.err
 	}
 	if compileRuntime {
+		if err := addRuntimeInitTask(mod, runtimeInits, initSymbols); err != nil {
+			return nil, err
+		}
 		mod.Data = append(mod.Data, &ir.Data{Name: ".goc.runtime.dataend", Align: 8, Items: []ir.DataItem{{Sub: ir.SubUB, Ints: []int64{0}}}})
 	}
 	addMemoryHelpers(mod)
@@ -151,6 +157,46 @@ func Compile(name string, src []byte) (*ir.Module, error) {
 	}
 	opt.LowerHeapAllocations(mod)
 	return g.mod, nil
+}
+
+func addRuntimeInitTask(mod *ir.Module, declarations []functionDecl, initSymbols map[*types.Func]string) error {
+	if len(declarations) == 0 {
+		return nil
+	}
+
+	taskItems := []ir.DataItem{{Sub: ir.SubW, Ints: []int64{0, int64(len(declarations))}}}
+	for _, declaration := range declarations {
+		object, ok := declaration.info.Defs[declaration.decl.Name].(*types.Func)
+		if !ok || initSymbols[object] == "" {
+			return fmt.Errorf("goc: runtime init function has no unique symbol")
+		}
+		taskItems = append(taskItems, ir.DataItem{Sub: ir.SubL, Sym: initSymbols[object]})
+	}
+
+	const taskName = ".goc.runtime.inittask.runtime"
+	const backingName = ".goc.runtime.inittasks.backing"
+	mod.Data = append(mod.Data,
+		&ir.Data{Name: taskName, Align: 8, Items: taskItems},
+		&ir.Data{
+			Name:         backingName,
+			Align:        8,
+			Items:        []ir.DataItem{{Sub: ir.SubL, Sym: taskName}},
+			PointerWords: []int{0},
+		},
+	)
+
+	for _, data := range mod.Data {
+		if data.Name != "runtime.runtime_inittasks.descriptor" {
+			continue
+		}
+		data.Items = []ir.DataItem{
+			{Sub: ir.SubL, Sym: backingName},
+			{Sub: ir.SubL, Ints: []int64{1, 1}},
+		}
+		data.PointerWords = []int{0}
+		return nil
+	}
+	return fmt.Errorf("goc: runtime init-task slice was not emitted")
 }
 
 // addMemoryHelpers keeps compiler-generated aggregate operations inside the
@@ -298,6 +344,7 @@ type gen struct {
 	runtimeAllocation       bool
 	typeTags                map[string]string
 	linkNames               map[*types.Func]string
+	initSymbols             map[*types.Func]string
 	stackAddresses          map[uint32]bool
 	heapCaptures            map[types.Object]ir.Ref
 	noWriteBarrier          bool
@@ -587,23 +634,29 @@ func (g *gen) globalDecl(gd *ast.GenDecl) {
 			if g.runtimeAllocation && g.pkg.Path() == "runtime" && id.Name == "lastmoduledatap" {
 				name := g.pkg.Path() + "." + id.Name
 				g.mod.Data = append(g.mod.Data, &ir.Data{
-					Name:  name,
-					Align: 8,
-					Items: []ir.DataItem{{Sub: ir.SubL, Sym: "runtime.firstmoduledata"}},
+					Name:         name,
+					Align:        8,
+					Items:        []ir.DataItem{{Sub: ir.SubL, Sym: "runtime.firstmoduledata"}},
+					PointerWords: []int{0},
 				})
 				g.globals[obj] = name
 				continue
 			}
 			if _, ok := obj.Type().Underlying().(*types.Interface); ok {
 				g.globalInterface(id, obj, vs, i)
+				g.markDataPointerCell(g.pkg.Path() + "." + id.Name)
 				continue
 			}
 			if basic, ok := obj.Type().Underlying().(*types.Basic); ok && basic.Kind() == types.String {
 				g.globalString(id, obj, vs, i)
+				name := g.pkg.Path() + "." + id.Name
+				g.markDataPointerCell(name)
+				g.markDataPointerWords(name+".descriptor", obj.Type())
 				continue
 			}
 			if array, ok := obj.Type().Underlying().(*types.Array); ok {
 				g.globalArray(id, obj, array, vs, i)
+				g.markDataPointerWords(g.pkg.Path()+"."+id.Name, obj.Type())
 				if g.err != nil {
 					return
 				}
@@ -611,6 +664,7 @@ func (g *gen) globalDecl(gd *ast.GenDecl) {
 			}
 			if _, ok := obj.Type().Underlying().(*types.Struct); ok {
 				g.globalStruct(id, obj, vs, i)
+				g.markDataPointerWords(g.pkg.Path()+"."+id.Name, obj.Type())
 				if g.err != nil {
 					return
 				}
@@ -618,6 +672,9 @@ func (g *gen) globalDecl(gd *ast.GenDecl) {
 			}
 			if slice, ok := obj.Type().Underlying().(*types.Slice); ok {
 				g.globalSlice(id, obj, slice, vs, i)
+				name := g.pkg.Path() + "." + id.Name
+				g.markDataPointerCell(name)
+				g.markDataPointerWords(name+".descriptor", obj.Type())
 				continue
 			}
 			cls, ok := scalar(obj.Type())
@@ -645,7 +702,7 @@ func (g *gen) globalDecl(gd *ast.GenDecl) {
 						}
 						backingName := name + ".value"
 						g.mod.Data = append(g.mod.Data,
-							&ir.Data{Name: backingName, Align: 8, Items: g.staticStructItems(backingName, structure, literal)},
+							&ir.Data{Name: backingName, Align: 8, Items: g.staticStructItems(backingName, structure, literal), PointerWords: pointerWordIndices(structure)},
 							d,
 						)
 						d.Items = []ir.DataItem{{Sub: ir.SubL, Sym: backingName}}
@@ -674,6 +731,7 @@ func (g *gen) globalDecl(gd *ast.GenDecl) {
 				d.Align = 4
 				d.Items = []ir.DataItem{{Sub: ir.SubW, Ints: []int64{v}}}
 			}
+			d.PointerWords = pointerWordIndices(obj.Type())
 			g.mod.Data = append(g.mod.Data, d)
 			g.globals[obj] = name
 		}
@@ -798,11 +856,16 @@ func (g *gen) globalSlice(id *ast.Ident, object types.Object, slice *types.Slice
 					continue
 				}
 				elementName := fmt.Sprintf("%s.element.%d", backingName, index)
-				g.mod.Data = append(g.mod.Data, &ir.Data{Name: elementName, Align: 8, Items: g.staticStructItems(elementName, structure, value)})
+				g.mod.Data = append(g.mod.Data, &ir.Data{
+					Name:         elementName,
+					Align:        8,
+					Items:        g.staticStructItems(elementName, structure, value),
+					PointerWords: pointerWordIndices(structure),
+				})
 				items = append(items, ir.DataItem{Sub: ir.SubL, Sym: elementName})
 			}
 			g.mod.Data = append(g.mod.Data,
-				&ir.Data{Name: backingName, Align: 8, Items: items},
+				&ir.Data{Name: backingName, Align: 8, Items: items, PointerWords: pointerWordIndices(types.NewArray(slice.Elem(), int64(len(literal.Elts))))},
 				&ir.Data{Name: name + ".descriptor", Align: 8, Items: []ir.DataItem{
 					{Sub: ir.SubL, Sym: backingName},
 					{Sub: ir.SubL, Ints: []int64{int64(len(literal.Elts)), int64(len(literal.Elts))}},
@@ -832,11 +895,13 @@ func (g *gen) globalSlice(id *ast.Ident, object types.Object, slice *types.Slice
 		)
 		items = append(items, ir.DataItem{Sub: ir.SubL, Sym: descriptorName})
 	}
+	var backingPointerWords []int
 	if _, stringElements := slice.Elem().Underlying().(*types.Basic); !stringElements {
 		items = []ir.DataItem{{Zero: int(typeSize(slice.Elem())) * len(literal.Elts)}}
+		backingPointerWords = pointerWordIndices(types.NewArray(slice.Elem(), int64(len(literal.Elts))))
 	}
 	g.mod.Data = append(g.mod.Data,
-		&ir.Data{Name: backingName, Align: 8, Items: items},
+		&ir.Data{Name: backingName, Align: 8, Items: items, PointerWords: backingPointerWords},
 		&ir.Data{Name: name + ".descriptor", Align: 8, Items: []ir.DataItem{
 			{Sub: ir.SubL, Sym: backingName},
 			{Sub: ir.SubL, Ints: []int64{int64(len(literal.Elts)), int64(len(literal.Elts))}},
@@ -1176,6 +1241,25 @@ func (g *gen) store(v, addr ir.Ref, t types.Type) {
 	g.cur.Store(v, addr)
 }
 
+// assignLocal stores a Go value into a frontend variable slot. Struct and
+// array variables use an indirect slot so their address remains stable across
+// assignments; assigning one of these values must copy into that backing
+// storage rather than replace the slot with an alias of the source value.
+func (g *gen) assignLocal(value, slot ir.Ref, valueType types.Type) {
+	if isMemoryValue(valueType) {
+		destination := g.load(slot, valueType)
+		g.cur.Call(
+			ir.ClsP,
+			g.fn.Sym("goc_memcpy", 0),
+			destination,
+			value,
+			g.fn.Long(typeSize(valueType)),
+		)
+		return
+	}
+	g.store(value, slot, valueType)
+}
+
 func (g *gen) localAlloc(align, size int) ir.Ref {
 	address := g.cur.Alloc(align, size)
 	if g.stackAddresses == nil {
@@ -1226,7 +1310,11 @@ func (g *gen) assignmentValue(expression ast.Expr, targetType types.Type) ir.Ref
 		return g.zeroValue(targetType)
 	}
 	if _, isInterface := targetType.Underlying().(*types.Interface); !isInterface {
-		return g.expr(expression)
+		value := g.expr(expression)
+		if isMemoryValue(targetType) {
+			return g.copyInlineValue(value, targetType)
+		}
+		return value
 	}
 	if identifier, ok := expression.(*ast.Ident); ok && identifier.Name == "nil" {
 		return g.fn.ConstInt(ir.ClsP, 0)
@@ -1286,6 +1374,7 @@ func (g *gen) funcDecl(fd *ast.FuncDecl) {
 		g.fail(fd, "unsupported return type %s", sig.Results().At(0).Type())
 		return
 	}
+	g.fn.Variadic = sig.Variadic()
 	exportRuntimeBootstrap := g.pkg.Path() == "runtime" && (fd.Name.Name == "args" || fd.Name.Name == "check" || fd.Name.Name == "main" || fd.Name.Name == "mstart0" || fd.Name.Name == "newproc" || fd.Name.Name == "newstack" || fd.Name.Name == "osinit" || fd.Name.Name == "schedinit" || fd.Name.Name == "throw")
 	if ast.IsExported(fd.Name.Name) || isMain || exportRuntimeBootstrap || (g.pkg.Path() == "internal/chacha8rand" && fd.Name.Name == "block_generic") {
 		g.fn.Export()
@@ -1508,6 +1597,7 @@ func (g *gen) multiValueAssignment(statement *ast.AssignStmt, call *ast.CallExpr
 		}
 
 		var slot ir.Ref
+		localIdentifier := false
 		if identifier, ok := lhs.(*ast.Ident); ok {
 			variable := g.info.Uses[identifier]
 			if statement.Tok == token.DEFINE && variable == nil {
@@ -1519,10 +1609,21 @@ func (g *gen) multiValueAssignment(statement *ast.AssignStmt, call *ast.CallExpr
 				slot = g.allocLocal(resultType)
 				g.vars[variable] = slot
 			}
+			_, global := g.globals[variable]
+			localIdentifier = !global && !g.directValues[variable]
 		} else {
 			slot = g.lvalue(lhs)
 		}
-		g.store(g.coerce(value, resultType), slot, resultType)
+		value = g.coerce(value, resultType)
+		if localIdentifier && isMemoryValue(resultType) {
+			g.assignLocal(value, slot, resultType)
+		} else if localIdentifier && isDescriptorValue(resultType) {
+			g.store(value, slot, resultType)
+		} else if isInlineAggregate(resultType) {
+			g.cur.Call(ir.ClsP, g.fn.Sym("goc_memcpy", 0), slot, value, g.fn.Long(typeSize(resultType)))
+		} else {
+			g.store(value, slot, resultType)
+		}
 	}
 }
 
@@ -1565,7 +1666,7 @@ func (g *gen) stmt(s ast.Stmt) {
 				if isDescriptorValue(obj.Type()) {
 					v = g.copyInlineValue(v, obj.Type())
 				}
-				g.store(v, slot, obj.Type())
+				g.assignLocal(v, slot, obj.Type())
 			}
 		}
 	case *ast.AssignStmt:
@@ -1628,7 +1729,7 @@ func (g *gen) stmt(s ast.Stmt) {
 				var exists bool
 				slot, exists = g.addr(obj)
 				if !exists {
-					slot = g.alloc(typ)
+					slot = g.allocLocal(typ)
 					g.vars[obj] = slot
 				}
 				_, global := g.globals[obj]
@@ -1653,6 +1754,10 @@ func (g *gen) stmt(s ast.Stmt) {
 			v = g.coerce(v, typ)
 			if localIdentifier && isDescriptorValue(typ) {
 				v = g.copyInlineValue(v, typ)
+			}
+			if localIdentifier && isMemoryValue(typ) {
+				g.assignLocal(v, slot, typ)
+				continue
 			}
 			if destinationIsInline && isInlineAggregate(typ) {
 				g.cur.Call(ir.ClsP, g.fn.Sym("goc_memcpy", 0), slot, v, g.fn.Long(typeSize(typ)))
@@ -1990,7 +2095,7 @@ func (g *gen) rangeStmt(statement *ast.RangeStmt, label string) {
 			object = g.info.Uses[value]
 		}
 		valueType = object.Type()
-		valueSlot = g.alloc(valueType)
+		valueSlot = g.allocLocal(valueType)
 		g.vars[object] = valueSlot
 	}
 
@@ -2019,7 +2124,7 @@ func (g *gen) rangeStmt(statement *ast.RangeStmt, label string) {
 		if !isInlineAggregate(valueType) {
 			value = g.load(address, valueType)
 		}
-		g.store(value, valueSlot, valueType)
+		g.assignLocal(value, valueSlot, valueType)
 	}
 	g.stmts(statement.Body.List)
 	if g.live() {
@@ -3047,6 +3152,7 @@ func (g *gen) functionLiteral(literal *ast.FuncLit) ir.Ref {
 		labels:                  make(map[string]*ir.Block),
 		deferSlots:              make(map[*ast.DeferStmt]ir.Ref),
 		functionDecls:           g.functionDecls,
+		initSymbols:             g.initSymbols,
 		noWriteBarrierFunctions: g.noWriteBarrierFunctions,
 		noWriteBarrier:          g.noWriteBarrier,
 		stackAddresses:          make(map[uint32]bool),
@@ -3680,36 +3786,74 @@ func (g *gen) runtimeType(valueType types.Type) ir.Ref {
 	return g.fn.Sym(name, 0)
 }
 
+func (g *gen) markDataPointerCell(name string) {
+	for index := len(g.mod.Data) - 1; index >= 0; index-- {
+		if g.mod.Data[index].Name == name {
+			g.mod.Data[index].PointerWords = []int{0}
+			return
+		}
+	}
+}
+
+func (g *gen) markDataPointerWords(name string, valueType types.Type) {
+	words := pointerWordIndices(valueType)
+	if len(words) == 0 {
+		return
+	}
+	for index := len(g.mod.Data) - 1; index >= 0; index-- {
+		if g.mod.Data[index].Name == name {
+			g.mod.Data[index].PointerWords = words
+			return
+		}
+	}
+}
+
+func pointerWordIndices(valueType types.Type) []int {
+	seen := make(map[int]bool)
+	visitPointerWords(valueType, 0, func(offset int64) {
+		seen[int(offset/8)] = true
+	})
+	words := make([]int, 0, len(seen))
+	for word := range seen {
+		words = append(words, word)
+	}
+	sort.Ints(words)
+	return words
+}
+
 func markPointerWords(valueType types.Type, base int64, mask []int64, lastPointer *int64) {
-	mark := func(offset int64) {
+	visitPointerWords(valueType, base, func(offset int64) {
 		word := offset / 8
 		mask[word/8] |= 1 << (word % 8)
 		if end := offset + 8; end > *lastPointer {
 			*lastPointer = end
 		}
-	}
+	})
+}
+
+func visitPointerWords(valueType types.Type, base int64, visit func(int64)) {
 	switch value := valueType.Underlying().(type) {
 	case *types.Pointer, *types.Map, *types.Chan, *types.Signature:
-		mark(base)
+		visit(base)
 	case *types.Slice:
-		mark(base)
+		visit(base)
 	case *types.Interface:
-		mark(base)
-		mark(base + 8)
+		visit(base)
+		visit(base + 8)
 	case *types.Array:
 		elementSize := typeSize(value.Elem())
 		for index := int64(0); index < value.Len(); index++ {
-			markPointerWords(value.Elem(), base+index*elementSize, mask, lastPointer)
+			visitPointerWords(value.Elem(), base+index*elementSize, visit)
 		}
 	case *types.Struct:
 		fields := structFields(value)
 		offsets := types.SizesFor("gc", runtime.GOARCH).Offsetsof(fields)
 		for index, field := range fields {
-			markPointerWords(field.Type(), base+offsets[index], mask, lastPointer)
+			visitPointerWords(field.Type(), base+offsets[index], visit)
 		}
 	case *types.Basic:
 		if value.Kind() == types.UnsafePointer || value.Kind() == types.String {
-			mark(base)
+			visit(base)
 		}
 	}
 }
@@ -4268,6 +4412,9 @@ func (g *gen) functionSymbol(function *types.Func) string {
 	if name := g.linkNames[function]; name != "" {
 		return name
 	}
+	if name := g.initSymbols[function]; name != "" {
+		return name
+	}
 	return functionSymbol(function)
 }
 
@@ -4277,6 +4424,13 @@ func (g *gen) binary(op token.Token, x, y ir.Ref, t types.Type, n ast.Node) ir.R
 
 func (g *gen) binaryRaw(op token.Token, x, y ir.Ref, t types.Type, n ast.Node) ir.Ref {
 	c, _ := scalar(t)
+	if isMemoryValue(t) && (op == token.EQL || op == token.NEQ) {
+		equal := g.memoryValuesEqual(x, y, t)
+		if op == token.NEQ {
+			return g.cur.Cmp(ir.CmpEq, ir.ClsW, equal, g.fn.Word(0))
+		}
+		return equal
+	}
 	if op == token.EQL || op == token.NEQ {
 		if _, ok := t.Underlying().(*types.Slice); ok {
 			x = g.cur.Load(ir.ClsP, x)
@@ -4378,6 +4532,44 @@ func (g *gen) binaryRaw(op token.Token, x, y ir.Ref, t types.Type, n ast.Node) i
 		g.fail(n, "unsupported operator %s", op)
 	}
 	return g.cur.Cmp(pred, ir.ClsW, x, y)
+}
+
+func (g *gen) memoryValuesEqual(left, right ir.Ref, valueType types.Type) ir.Ref {
+	equal := g.fn.Word(1)
+	compare := func(leftAddress, rightAddress ir.Ref, fieldType types.Type) {
+		var fieldEqual ir.Ref
+		if isMemoryValue(fieldType) {
+			fieldEqual = g.memoryValuesEqual(leftAddress, rightAddress, fieldType)
+		} else if basic, ok := fieldType.Underlying().(*types.Basic); ok && basic.Kind() == types.String {
+			fieldEqual = g.stringsEqual(leftAddress, rightAddress)
+		} else {
+			leftValue := g.load(leftAddress, fieldType)
+			rightValue := g.load(rightAddress, fieldType)
+			class, _ := scalar(fieldType)
+			predicate := ir.CmpEq
+			if class.IsFloat() {
+				predicate = ir.CmpFeq
+			}
+			fieldEqual = g.cur.Cmp(predicate, ir.ClsW, leftValue, rightValue)
+		}
+		equal = g.cur.And(ir.ClsW, equal, fieldEqual)
+	}
+
+	switch value := valueType.Underlying().(type) {
+	case *types.Array:
+		elementSize := typeSize(value.Elem())
+		for index := int64(0); index < value.Len(); index++ {
+			offset := index * elementSize
+			compare(g.offset(left, offset), g.offset(right, offset), value.Elem())
+		}
+	case *types.Struct:
+		fields := structFields(value)
+		offsets := types.SizesFor("gc", runtime.GOARCH).Offsetsof(fields)
+		for index, field := range fields {
+			compare(g.offset(left, offsets[index]), g.offset(right, offsets[index]), field.Type())
+		}
+	}
+	return equal
 }
 
 func (g *gen) shift(op token.Token, class ir.Cls, value, count ir.Ref, valueType types.Type, node ast.Node) ir.Ref {

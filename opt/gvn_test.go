@@ -118,3 +118,15 @@ func TestGVNNoChange(t *testing.T) {
 	e.Ret(e.Add(ir.ClsW, a, b))
 	assert.False(t, GVN(f))
 }
+
+func TestGVNPreservesPointerTemporaryIdentity(t *testing.T) {
+	f := ir.NewModule().NewFunc("pointers", ir.ClsP)
+	base := f.Param("base", ir.ClsP)
+	entry := f.Entry()
+	entry.Add(ir.ClsP, base, f.Long(8))
+	second := entry.Add(ir.ClsP, base, f.Long(8))
+	entry.Ret(second)
+
+	assert.False(t, GVN(f))
+	assert.Equal(t, 2, countOp(f, ir.OAdd))
+}

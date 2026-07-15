@@ -191,6 +191,33 @@ func TestExecutionCorpus(t *testing.T) {
 		{"compare nil slice", `func Test() int { var values []int; if values == nil { return 42 }; return 0 }`, 42},
 		{"compare nil slice struct field", `type holder struct { values []int }; func Test() int { var value holder; if value.values == nil { return 42 }; return 0 }`, 42},
 		{"pointer array struct field", `type pair struct { left, right int }; func Test() int { var values [2]pair; values[1].left = 7; values[1].right = 11; pointer := &values; return pointer[1].left*10 + pointer[1].right }`, 81},
+		{"struct assignment copies value and preserves address", `type pair struct { left, right int }; func Test() int {
+			source := pair{left: 7, right: 11}
+			copy := source
+			pointer := &copy
+			source.left = 17
+			if copy.left != 7 { return 0 }
+			copy = source
+			return pointer.left + pointer.right
+		}`, 28},
+		{"parallel struct assignment snapshots values", `type pair struct { left, right int }; func Test() int {
+			left := pair{left: 1, right: 2}
+			right := pair{left: 3, right: 4}
+			left, right = right, left
+			return left.left*1000 + left.right*100 + right.left*10 + right.right
+		}`, 3412},
+		{"struct equality compares fields", `type mask struct { count int32; data *byte }; func Test() int {
+			var left mask
+			var right mask
+			if left != right { return 0 }
+			right.count = 7
+			if left == right { return 0 }
+			right.count = 0
+			value := byte(1)
+			right.data = &value
+			if left == right { return 0 }
+			return 42
+		}`, 42},
 		{"range array of structs", `type pair struct { left, right int }; func Test() int { var values [2]pair; values[0].left = 3; values[0].right = 5; values[1].left = 7; values[1].right = 11; total := 0; for _, value := range values { total += value.left + value.right }; return total }`, 26},
 		{"returned array survives callee frame", `func makeValues() [3]int { return [3]int{7, 11, 13} }; func disturb() int { values := [3]int{100, 200, 300}; return values[0] }; func Test() int { values := makeValues(); disturb(); return values[0] + values[1] + values[2] }`, 31},
 		{"returned struct survives callee frame", `type pair struct { left, right int }; func makePair() pair { return pair{17, 25} }; func disturb() int { value := pair{100, 200}; return value.left }; func Test() int { value := makePair(); disturb(); return value.left + value.right }`, 42},

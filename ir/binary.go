@@ -18,7 +18,7 @@ import (
 // references. Value references (ir.Ref) already index Temps/Consts by ID.
 const (
 	binMagic   = "cg12"
-	binVersion = 1
+	binVersion = 2
 )
 
 // MarshalBinary encodes the module to cg12's binary unit format.
@@ -226,6 +226,10 @@ func (e *enc) encData(d *Data) {
 	e.str(d.Name)
 	e.linkage(d.Linkage)
 	e.iv(int64(d.Align))
+	e.uv(uint64(len(d.PointerWords)))
+	for _, word := range d.PointerWords {
+		e.iv(int64(word))
+	}
 	e.uv(uint64(len(d.Items)))
 	for _, it := range d.Items {
 		e.u8(byte(it.Sub))
@@ -533,6 +537,10 @@ func (d *dec) decField() Field {
 
 func (d *dec) decData() *Data {
 	dt := &Data{Name: d.str(), Linkage: d.linkage(), Align: int(d.iv())}
+	dt.PointerWords = make([]int, int(d.uv()))
+	for i := range dt.PointerWords {
+		dt.PointerWords[i] = int(d.iv())
+	}
 	dt.Items = make([]DataItem, int(d.uv()))
 	for i := range dt.Items {
 		it := DataItem{Sub: SubCls(d.u8()), Zero: int(d.iv())}
