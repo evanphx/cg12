@@ -33,6 +33,7 @@ func TestExecutionCorpus(t *testing.T) {
 		{"unsigned byte overflow", `func Test() int { var x uint8=255; x+=2; return int(x) }`, 1},
 		{"word overflow", `func Test() int { var x uint32=0xffffffff; x++; return int(x) }`, 0},
 		{"comparisons", `func Test() int { n:=0; if -1 < 1 { n+=1 }; if uint(1) < uint(2) { n+=2 }; if 3 != 4 { n+=4 }; return n }`, 7},
+		{"float comparisons", `func Test() int { a, b := 1.5, 2.5; if a < b && b >= a && a != b { return 42 }; return 0 }`, 42},
 		{"locals and compound assignment", `func Test() int { x:=3; x+=4; x*=5; x-=2; return x }`, 33},
 		{"parallel assignment", `func Test() int { x,y:=3,8; x,y=y,x; return x*10+y }`, 83},
 		{"lexical shadowing", `func Test() int { x:=2; { x:=9; x++ }; return x }`, 2},
@@ -41,6 +42,8 @@ func TestExecutionCorpus(t *testing.T) {
 		{"break and continue", `func Test() int { s:=0; for i:=0; ; i++ { if i==8 { break }; if i%2==0 { continue }; s+=i }; return s }`, 16},
 		{"function call", `func twice(x int) int { return x*2 }; func Test() int { return twice(21) }`, 42},
 		{"recursion", `func fib(n int) int { if n<2 { return n }; return fib(n-1)+fib(n-2) }; func Test() int { return fib(10) }`, 55},
+		{"range array", `func Test() int { values := [4]int{2, 3, 5, 7}; sum := 0; for _, value := range values { sum += value }; return sum }`, 17},
+		{"range pointer to array", `func Test() int { values := [4]int{2, 3, 5, 7}; sum := 0; for _, value := range &values { sum += value }; return sum }`, 17},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
@@ -179,6 +182,93 @@ func Test() int {
 	return 1
 }
 `, 1, false)
+}
+
+func TestRepositoryStandardLibraryRuntimeNumCPU(t *testing.T) {
+	runCase(t, `package main
+
+import "runtime"
+
+func Test() int {
+	return runtime.NumCPU()
+}
+`, 0, false)
+}
+
+func TestMapExecution(t *testing.T) {
+	runCase(t, `package main
+
+func Test() int {
+	var empty map[int]int
+	_, emptyOK := empty[1]
+	if emptyOK || len(empty) != 0 {
+		return -1
+	}
+	values := make(map[int]int, 2)
+	for i := 0; i < 40; i++ {
+		values[i] = i * 2
+	}
+	delete(values, 7)
+	values[3] = 100
+	present, ok := values[3]
+	last, lastOK := values[39]
+	missing, missingOK := values[70]
+	if !ok || missingOK {
+		return -1
+	}
+	if !lastOK {
+		return -2
+	}
+	cleared := make(map[int]int)
+	cleared[1] = 9
+	clear(cleared)
+	_, clearedOK := cleared[1]
+	if clearedOK || len(cleared) != 0 {
+		return -3
+	}
+	clear(empty)
+	return present + last + missing + len(values)
+}
+`, 217, false)
+}
+
+func TestTypeSwitchExecution(t *testing.T) {
+	runCase(t, `package main
+
+func classify(value any) int {
+	switch value := value.(type) {
+	case nil:
+		return 1
+	case int:
+		return value + 10
+	case bool:
+		if value {
+			return 30
+		}
+		return 31
+	default:
+		return 40
+	}
+}
+
+func Test() int {
+	return classify(nil) + classify(7) + classify(true)
+}
+`, 48, false)
+}
+
+func TestCapturedClosureExecution(t *testing.T) {
+	runCase(t, `package main
+
+func Test() int {
+	base := 7
+	add := func(value int) int {
+		return base + value
+	}
+	base = 10
+	return add(32)
+}
+`, 42, false)
 }
 
 func runCase(t *testing.T, src string, want int, optimized bool) {

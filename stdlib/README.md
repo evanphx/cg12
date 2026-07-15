@@ -41,3 +41,10 @@ The second ten-package progression is:
 8. `crypto/sha512`
 9. `unicode/utf16`
 10. `path`
+
+The complete Go 1.26.1 `runtime` source tree is also mirrored here unchanged.
+The cg12 loader build-selects and type-checks it from this repository, and the
+execution corpus lowers `runtime.NumCPU` from that source into a cg12 module.
+Runtime startup, scheduler initialization, heap allocation, and garbage
+collection are separate implementation milestones; until startup exists,
+`NumCPU` observes the zero-initialized `numCPUStartup` global.

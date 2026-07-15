@@ -99,7 +99,7 @@ func link(m *ir.Module, exe string) {
 	check(f.Close())
 	cc, err := exec.LookPath("cc")
 	check(err)
-	cmd := exec.Command(cc, "-o", exe, f.Name())
+	cmd := exec.Command(cc, "-no-pie", "-o", exe, f.Name())
 	cmd.Stderr = os.Stderr
 	check(cmd.Run())
 }

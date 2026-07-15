@@ -21,8 +21,8 @@ run through both unoptimized and optimized cg12 IR. This is an intentionally
 sound subset rather than a claim of full Go compatibility. The frontend now
 has the initial array, struct, slice, pointer, method, multiple-result, builtin,
 and interface-devirtualization support needed by SHA-256. Maps, closures,
-goroutines, general interface dispatch, and a complete Go runtime remain future
-work.
+goroutines, general interface dispatch, runtime startup, and garbage collection
+remain future work.
 
 Imports are resolved from build-selected source in the repository-owned
 `stdlib/src` tree with `go/build` and type-checked through `go/types`. The first
@@ -34,6 +34,12 @@ byte-order helpers, and `math/bits` dependencies are lowered into the same cg12
 module as the importing program. The test hashes `"abc"` at runtime and checks a
 fingerprint covering all 32 expected digest bytes; host hashing and generated
 SHA substitutes are not used.
+
+The repository also contains an unchanged copy of the Go 1.26.1 `runtime`
+package. It is build-selected and type-checked from source, and a first execution
+test lowers the public `runtime.NumCPU` function through cg12. This establishes
+the package boundary without claiming runtime initialization yet: scheduler,
+allocator, and collector bootstrap are the next runtime layers.
 
 ```sh
 go run ./cmd/goc -emit-ir program.go

@@ -51,6 +51,29 @@ func TestLoadExactStandardSHA256Source(t *testing.T) {
 	}
 }
 
+func TestLoadExactStandardRuntimeSource(t *testing.T) {
+	loader := newSourceLoader(token.NewFileSet())
+	pkg, err := loader.Import("runtime")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if pkg.Path() != "runtime" {
+		t.Fatalf("path = %q", pkg.Path())
+	}
+
+	unit := loader.units[pkg.Path()]
+	if unit == nil || len(unit.files) == 0 {
+		t.Fatal("source AST was not retained")
+	}
+	for _, file := range unit.files {
+		position := loader.fset.Position(file.Package)
+		stdlibSource := filepath.Join("stdlib", "src", "runtime")
+		if !strings.Contains(position.Filename, stdlibSource) {
+			t.Errorf("loaded runtime from %q, want repository stdlib", position.Filename)
+		}
+	}
+}
+
 func TestRepositoryStandardLibraryInventory(t *testing.T) {
 	loader := newSourceLoader(token.NewFileSet())
 	packages := []string{
@@ -74,6 +97,7 @@ func TestRepositoryStandardLibraryInventory(t *testing.T) {
 		"crypto/sha512",
 		"unicode/utf16",
 		"path",
+		"runtime",
 	}
 	for _, path := range packages {
 		directory := filepath.Join(loader.root, "src", filepath.FromSlash(path))

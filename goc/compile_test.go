@@ -21,9 +21,9 @@ func main() { if sum(5) != 12 { for { break } } }
 	}
 }
 
-func TestRejectUnsupportedType(t *testing.T) {
-	_, err := Compile("bad.go", []byte("package p\nfunc f(s string) {}"))
-	if err == nil || !strings.Contains(err.Error(), "unsupported parameter type string") {
+func TestRejectUnsupportedSelect(t *testing.T) {
+	_, err := Compile("bad.go", []byte("package p\nfunc f() { select {} }"))
+	if err == nil || !strings.Contains(err.Error(), "unsupported statement *ast.SelectStmt") {
 		t.Fatalf("error = %v", err)
 	}
 }

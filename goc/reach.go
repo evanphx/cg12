@@ -2,6 +2,7 @@ package goc
 
 import (
 	"go/ast"
+	"go/token"
 	"go/types"
 )
 
@@ -14,9 +15,10 @@ type functionDecl struct {
 // reachableFunctions follows statically named function calls across source
 // units. Calls through interfaces are recorded by their interface method and
 // resolved later by interface lowering.
-func reachableFunctions(roots []*ast.FuncDecl, rootInfo *types.Info, rootPkg *types.Package, units map[string]*sourceUnit) []functionDecl {
+func reachableFunctions(roots []*ast.FuncDecl, rootInfo *types.Info, rootPkg *types.Package, units map[string]*sourceUnit, runtimeAllocation bool) []functionDecl {
 	declarations := make(map[*types.Func]functionDecl)
 	methods := make(map[string][]functionDecl)
+	runtimeFunctions := make(map[string]functionDecl)
 	for _, unit := range units {
 		for _, file := range unit.files {
 			for _, declaration := range file.Decls {
@@ -29,6 +31,9 @@ func reachableFunctions(roots []*ast.FuncDecl, rootInfo *types.Info, rootPkg *ty
 					continue
 				}
 				declarations[object] = functionDecl{decl: function, info: unit.info, pkg: unit.pkg}
+				if unit.path == "runtime" {
+					runtimeFunctions[object.Name()] = declarations[object]
+				}
 				signature := object.Type().(*types.Signature)
 				if signature.Recv() != nil {
 					methods[object.Name()] = append(methods[object.Name()], declarations[object])
@@ -53,6 +58,51 @@ func reachableFunctions(roots []*ast.FuncDecl, rootInfo *types.Info, rootPkg *ty
 		reachable = append(reachable, current)
 
 		ast.Inspect(current.decl.Body, func(node ast.Node) bool {
+			if runtimeAllocation {
+				if expression, ok := node.(*ast.UnaryExpr); ok && expression.Op == token.AND {
+					if _, composite := expression.X.(*ast.CompositeLit); composite {
+						if newobject, exists := runtimeFunctions["newobject"]; exists {
+							queue = append(queue, newobject)
+						}
+					}
+				}
+			}
+			if _, ok := node.(*ast.GoStmt); ok {
+				if newproc, exists := runtimeFunctions["newproc"]; exists {
+					queue = append(queue, newproc)
+				}
+			}
+			if expression, ok := node.(*ast.UnaryExpr); ok && expression.Op == token.ARROW {
+				if chanrecv, exists := runtimeFunctions["chanrecv1"]; exists {
+					queue = append(queue, chanrecv)
+				}
+			}
+			if _, ok := node.(*ast.SendStmt); ok {
+				if chansend, exists := runtimeFunctions["chansend1"]; exists {
+					queue = append(queue, chansend)
+				}
+			}
+			if call, ok := node.(*ast.CallExpr); ok {
+				if identifier, ok := call.Fun.(*ast.Ident); ok {
+					if builtin, ok := current.info.Uses[identifier].(*types.Builtin); ok {
+						switch builtin.Name() {
+						case "new":
+							if !runtimeAllocation {
+								break
+							}
+							if newobject, exists := runtimeFunctions["newobject"]; exists {
+								queue = append(queue, newobject)
+							}
+						case "make":
+							if _, channel := current.info.Types[call].Type.Underlying().(*types.Chan); channel {
+								if makechan, exists := runtimeFunctions["makechan"]; exists {
+									queue = append(queue, makechan)
+								}
+							}
+						}
+					}
+				}
+			}
 			identifier, ok := node.(*ast.Ident)
 			if !ok {
 				return true
