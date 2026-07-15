@@ -16,49 +16,64 @@ func (t *arm64Translator) translateVectorLoad(instruction *Instruction) error {
 		return fmt.Errorf("unsupported %s operands %q, %q", instruction.Opcode, memory.Text, list.Text)
 	}
 
+	registers, postIncrement, err := formatARM64VectorList(list)
+	if err != nil {
+		return err
+	}
+	address, err := t.vectorMemoryAddress(memory, instruction.Suffix, postIncrement)
+	if err != nil {
+		return err
+	}
+
+	mnemonic := map[string]string{"VLD1": "ld1", "VLD1R": "ld1r", "VLD4R": "ld4r"}[instruction.Opcode]
+	fmt.Fprintf(&t.output, "\t%s {%s}, %s\n", mnemonic, strings.Join(registers, ", "), address)
+	return nil
+}
+
+func (t *arm64Translator) translateVectorStore(instruction *Instruction) error {
+	if len(instruction.Operands) != 2 {
+		return fmt.Errorf("%s requires a vector list and address", instruction.Opcode)
+	}
+	list := instruction.Operands[0]
+	memory := instruction.Operands[1]
+	if list.Kind != OperandVectorList || memory.Kind != OperandMemory || memory.Base == "SB" {
+		return fmt.Errorf("unsupported %s operands %q, %q", instruction.Opcode, list.Text, memory.Text)
+	}
+	registers, postIncrement, err := formatARM64VectorList(list)
+	if err != nil {
+		return err
+	}
+	address, err := t.vectorMemoryAddress(memory, instruction.Suffix, postIncrement)
+	if err != nil {
+		return err
+	}
+	fmt.Fprintf(&t.output, "\tst1 {%s}, %s\n", strings.Join(registers, ", "), address)
+	return nil
+}
+
+func formatARM64VectorList(list Operand) ([]string, int, error) {
 	registers := make([]string, 0, len(list.Vectors))
-	postIncrement := 0
+	totalWidth := 0
 	for _, vector := range list.Vectors {
 		formatted, err := formatARM64Vector(vector)
 		if err != nil {
-			return err
+			return nil, 0, err
 		}
 		registers = append(registers, formatted)
 		width, err := vectorArrangementBytes(vector.Arrangement)
 		if err != nil {
-			return err
+			return nil, 0, err
 		}
-		postIncrement += width
+		totalWidth += width
 	}
-	base, err := arm64Register(memory.Base, 64)
-	if err != nil {
-		return err
-	}
-	address := fmt.Sprintf("[%s]", base)
-	switch instruction.Suffix {
-	case "":
-		if memory.Index != "" || (memory.Offset != "" && memory.Offset != "0") {
-			return fmt.Errorf("unsupported %s address %q", instruction.Opcode, memory.Text)
-		}
-	case "P":
-		switch {
-		case memory.Index != "":
-			index, err := arm64Register(memory.Index, 64)
-			if err != nil {
-				return err
-			}
-			address += ", " + index
-		case memory.Offset != "" && memory.Offset != "0":
-			address += ", #" + memory.Offset
-		default:
-			address += ", #" + strconv.Itoa(postIncrement)
-		}
-	default:
-		return fmt.Errorf("unsupported %s addressing suffix .%s", instruction.Opcode, instruction.Suffix)
-	}
+	return registers, totalWidth, nil
+}
 
-	fmt.Fprintf(&t.output, "\tld1 {%s}, %s\n", strings.Join(registers, ", "), address)
-	return nil
+func (t *arm64Translator) vectorMemoryAddress(memory Operand, suffix string, postIncrement int) (string, error) {
+	if suffix == "P" && memory.Offset == "" && memory.Index == "" {
+		memory.Offset = strconv.Itoa(postIncrement)
+	}
+	return t.memoryAddress(memory, suffix)
 }
 
 func (t *arm64Translator) translateVectorBinary(instruction *Instruction) error {
@@ -128,6 +143,19 @@ func (t *arm64Translator) translateVectorMove(instruction *Instruction) error {
 	}
 	source := instruction.Operands[0]
 	destination := instruction.Operands[1]
+	if source.Kind == OperandVectorRegister && source.Vector.Arrangement != "" && source.Vector.Index == "" &&
+		destination.Kind == OperandVectorRegister && destination.Vector.Arrangement != "" && destination.Vector.Index == "" {
+		sourceRegister, err := formatARM64Vector(source.Vector)
+		if err != nil {
+			return err
+		}
+		destinationRegister, err := formatARM64Vector(destination.Vector)
+		if err != nil {
+			return err
+		}
+		fmt.Fprintf(&t.output, "\tmov %s, %s\n", destinationRegister, sourceRegister)
+		return nil
+	}
 
 	if source.Kind == OperandVectorRegister && source.Vector.Index != "" && destination.Kind == OperandRegister {
 		width := vectorElementRegisterWidth(source.Vector.Arrangement)
@@ -159,6 +187,60 @@ func (t *arm64Translator) translateVectorMove(instruction *Instruction) error {
 	}
 
 	return fmt.Errorf("unsupported VMOV operands %q, %q", source.Text, destination.Text)
+}
+
+func (t *arm64Translator) translateVectorUnary(instruction *Instruction) error {
+	if len(instruction.Operands) != 2 {
+		return fmt.Errorf("%s requires a source and destination", instruction.Opcode)
+	}
+	source, err := vectorOperand(instruction.Operands[0])
+	if err != nil {
+		return err
+	}
+	destination, err := vectorOperand(instruction.Operands[1])
+	if err != nil {
+		return err
+	}
+	mnemonic := strings.ToLower(strings.TrimPrefix(instruction.Opcode, "V"))
+	fmt.Fprintf(&t.output, "\t%s %s, %s\n", mnemonic, destination, source)
+	return nil
+}
+
+func (t *arm64Translator) translateVectorImmediate(instruction *Instruction) error {
+	if len(instruction.Operands) != 3 || instruction.Operands[0].Kind != OperandImmediate {
+		return fmt.Errorf("%s requires an immediate, source, and destination", instruction.Opcode)
+	}
+	source, err := vectorOperand(instruction.Operands[1])
+	if err != nil {
+		return err
+	}
+	destination, err := vectorOperand(instruction.Operands[2])
+	if err != nil {
+		return err
+	}
+	mnemonic := map[string]string{"VSHL": "shl", "VSRI": "sri"}[instruction.Opcode]
+	fmt.Fprintf(&t.output, "\t%s %s, %s, #%s\n", mnemonic, destination, source, instruction.Operands[0].Immediate)
+	return nil
+}
+
+func (t *arm64Translator) translateVectorTable(instruction *Instruction) error {
+	if len(instruction.Operands) != 3 || instruction.Operands[1].Kind != OperandVectorList {
+		return fmt.Errorf("VTBL requires an index, table list, and destination")
+	}
+	index, err := vectorOperand(instruction.Operands[0])
+	if err != nil {
+		return err
+	}
+	table, _, err := formatARM64VectorList(instruction.Operands[1])
+	if err != nil {
+		return err
+	}
+	destination, err := vectorOperand(instruction.Operands[2])
+	if err != nil {
+		return err
+	}
+	fmt.Fprintf(&t.output, "\ttbl %s, {%s}, %s\n", destination, strings.Join(table, ", "), index)
+	return nil
 }
 
 func vectorOperand(operand Operand) (string, error) {

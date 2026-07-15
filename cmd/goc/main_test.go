@@ -26,10 +26,18 @@ func TestRuntimeSupportDoesNotShadowTranslatedStandardLibraryAssembly(t *testing
 		"internal_bytealg_Count",
 		"internal_bytealg_IndexByte",
 		"internal_bytealg_IndexByteString",
+		"internal_chacha8rand_block",
+		"internal_cpu_getMIDR",
+		"internal_runtime_sys_DITEnabled",
+		"internal_runtime_sys_DisableDIT",
+		"internal_runtime_sys_EnableDIT",
+		"internal_runtime_syscall_linux_Syscall6",
 		"runtime_memequal",
 		"runtime_memmove",
 		"runtime_memclrNoHeapPointers",
 		"runtime_publicationBarrier",
+		"syscall_rawSyscallNoError",
+		"syscall_rawVforkSyscall",
 	} {
 		if strings.Contains(runtimeARM64Assembly, ".global "+symbol) {
 			t.Errorf("handwritten runtime support still defines %s", symbol)
@@ -186,6 +194,8 @@ func TestARM64StandardLibraryIOAndFmtExecute(t *testing.T) {
 		source string
 		output string
 	}{
+		{name: "ABI0 assembly", source: "abi0_assembly.go"},
+		{name: "ChaCha8 assembly", source: "chacha8rand_assembly.go"},
 		{name: "internal/bytealg assembly", source: "bytealg_compare.go"},
 		{name: "io.WriteString", source: "io_write_string.go"},
 		{name: "fmt.Sprintf", source: "fmt_sprintf.go"},

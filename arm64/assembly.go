@@ -42,9 +42,10 @@ func prepareAssembly(module *ir.Module) (assemblyBundle, error) {
 				}
 			}
 			bundle.functions = append(bundle.functions, goFunctionInfo{
-				name:      function.Name,
-				frameSize: function.Frame,
-				funcFlag:  flags,
+				name:       function.Name,
+				frameSize:  function.Frame,
+				frameStart: function.FrameStart,
+				funcFlag:   flags,
 			})
 		}
 	}

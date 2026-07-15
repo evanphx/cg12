@@ -60,6 +60,29 @@ func TestParseSplitsSemicolonStatements(t *testing.T) {
 	assert.True(t, ok)
 }
 
+func TestParseExpandsMultilineFunctionMacro(t *testing.T) {
+	file, err := Parse(strings.NewReader(`#define QR(A, B, C) \
+	VADD A.S4, B.S4, A.S4; \
+	VEOR C.B16, A.B16, C.B16
+TEXT ·block<ABIInternal>(SB), NOSPLIT, $0
+	QR(V0, V4, V8)
+`))
+	require.NoError(t, err)
+	require.Len(t, file.Statements, 3)
+
+	add, ok := file.Statements[1].(*Instruction)
+	require.True(t, ok)
+	assert.Equal(t, "VADD", add.Opcode)
+	assert.Equal(t, "V0.S4", add.Operands[0].Text)
+	assert.Equal(t, "V4.S4", add.Operands[1].Text)
+
+	xor, ok := file.Statements[2].(*Instruction)
+	require.True(t, ok)
+	assert.Equal(t, "VEOR", xor.Opcode)
+	assert.Equal(t, "V8.B16", xor.Operands[0].Text)
+	assert.Equal(t, "V0.B16", xor.Operands[1].Text)
+}
+
 func TestParseIndexedMemoryOperand(t *testing.T) {
 	file, err := Parse(strings.NewReader("MOVD (R0)(R6), R4\n"))
 	require.NoError(t, err)

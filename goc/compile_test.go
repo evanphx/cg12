@@ -84,14 +84,18 @@ func main() {
 		}
 	}
 	wantAssembly := map[string]string{
-		"internal/bytealg/compare_arm64.s":   "internal/bytealg",
-		"internal/bytealg/count_arm64.s":     "internal/bytealg",
-		"internal/bytealg/equal_arm64.s":     "internal/bytealg",
-		"internal/bytealg/index_arm64.s":     "internal/bytealg",
-		"internal/bytealg/indexbyte_arm64.s": "internal/bytealg",
-		"runtime/atomic_arm64.s":             "runtime",
-		"runtime/memclr_arm64.s":             "runtime",
-		"runtime/memmove_arm64.s":            "runtime",
+		"internal/bytealg/compare_arm64.s":                 "internal/bytealg",
+		"internal/bytealg/count_arm64.s":                   "internal/bytealg",
+		"internal/bytealg/equal_arm64.s":                   "internal/bytealg",
+		"internal/bytealg/index_arm64.s":                   "internal/bytealg",
+		"internal/bytealg/indexbyte_arm64.s":               "internal/bytealg",
+		"internal/cpu/cpu_arm64.s":                         "internal/cpu",
+		"internal/chacha8rand/chacha8_arm64.s":             "internal/chacha8rand",
+		"internal/runtime/sys/dit_arm64.s":                 "internal/runtime/sys",
+		"internal/runtime/syscall/linux/asm_linux_arm64.s": "internal/runtime/syscall/linux",
+		"runtime/atomic_arm64.s":                           "runtime",
+		"runtime/memclr_arm64.s":                           "runtime",
+		"runtime/memmove_arm64.s":                          "runtime",
 	}
 	if len(module.Assembly) != len(wantAssembly) {
 		t.Fatalf("executable assembly files = %d, want %d", len(module.Assembly), len(wantAssembly))
@@ -128,6 +132,27 @@ func main() {
 	if initTasks == nil || len(initTasks.Items) != 1 || initTasks.Items[0].Sym != ".goc.module.inittask.0" {
 		t.Errorf("module init tasks = %#v", initTasks)
 	}
+}
+
+func TestCompileExecutableIncludesReachableSyscallAssembly(t *testing.T) {
+	module, err := CompileExecutable("main.go", []byte(`package main
+import "syscall"
+func main() {
+	if syscall.Getpid() <= 0 {
+		panic("getpid returned an invalid process ID")
+	}
+}
+`))
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	for _, assembly := range module.Assembly {
+		if assembly.Path == "syscall/asm_linux_arm64.s" && assembly.PackagePath == "syscall" && assembly.Source != "" {
+			return
+		}
+	}
+	t.Fatal("reachable syscall/asm_linux_arm64.s was not retained")
 }
 
 func TestCompileRecordsExactGlobalPointerWords(t *testing.T) {

@@ -2118,7 +2118,7 @@ func (g *gen) funcDecl(fd *ast.FuncDecl) {
 	}
 	g.fn.NoSplit = hasCompilerDirective(fd, "go:nosplit")
 	exportRuntimeBootstrap := g.pkg.Path() == "runtime" && (fd.Name.Name == "args" || fd.Name.Name == "check" || fd.Name.Name == "main" || fd.Name.Name == "mstart0" || fd.Name.Name == "newproc" || fd.Name.Name == "newstack" || fd.Name.Name == "osinit" || fd.Name.Name == "schedinit" || fd.Name.Name == "throw")
-	if ast.IsExported(fd.Name.Name) || isMain || exportRuntimeBootstrap || (g.pkg.Path() == "internal/chacha8rand" && fd.Name.Name == "block_generic") {
+	if ast.IsExported(fd.Name.Name) || isMain || exportRuntimeBootstrap {
 		g.fn.Export()
 	}
 	g.vars = map[types.Object]ir.Ref{}

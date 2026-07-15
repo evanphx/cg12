@@ -134,6 +134,53 @@ func TestLoadExactStandardBytealgAssembly(t *testing.T) {
 	}
 }
 
+func TestLoadExactAdditionalStandardAssembly(t *testing.T) {
+	loader := newSourceLoader(token.NewFileSet())
+	tests := []struct {
+		path string
+		file string
+	}{
+		{path: "internal/cpu", file: "cpu_arm64.s"},
+		{path: "internal/chacha8rand", file: "chacha8_arm64.s"},
+		{path: "internal/runtime/sys", file: "dit_arm64.s"},
+		{path: "internal/runtime/syscall/linux", file: "asm_linux_arm64.s"},
+		{path: "syscall", file: "asm_linux_arm64.s"},
+	}
+
+	for _, test := range tests {
+		t.Run(test.path, func(t *testing.T) {
+			_, err := loader.Import(test.path)
+			if err != nil {
+				t.Fatal(err)
+			}
+
+			unit := loader.units[test.path]
+			if unit == nil {
+				t.Fatalf("%s source unit was not retained", test.path)
+			}
+
+			var got string
+			for _, assembly := range unit.assembly {
+				if filepath.Base(assembly.path) == test.file {
+					got = assembly.source
+					break
+				}
+			}
+			if got == "" {
+				t.Fatalf("%s was not retained for %s", test.file, test.path)
+			}
+
+			want, err := os.ReadFile(filepath.Join(loader.root, "src", filepath.FromSlash(test.path), test.file))
+			if err != nil {
+				t.Fatal(err)
+			}
+			if got != string(want) {
+				t.Errorf("%s was modified while loading", test.file)
+			}
+		})
+	}
+}
+
 func TestRepositoryStandardLibraryInventory(t *testing.T) {
 	loader := newSourceLoader(token.NewFileSet())
 	packages := []string{

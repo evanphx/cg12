@@ -12,7 +12,11 @@ type arm64Translator struct {
 	functionIndex int
 	labels        map[int]map[string]string
 	references    map[string]bool
+	abi0Layouts   map[int]abi0Layout
+	currentABI0   bool
+	currentFrame  int
 	functions     []ARM64Function
+	data          map[string][]arm64DataValue
 	output        strings.Builder
 }
 
@@ -61,15 +65,26 @@ func (t *arm64Translator) translateInstruction(instruction *Instruction) error {
 		}
 	}
 	opcode := instruction.Opcode
+	if t.currentFrame != 0 && opcode == "BL" {
+		return fmt.Errorf("calls from framed Plan 9 assembly are not supported yet")
+	}
 	switch opcode {
 	case "MOVD", "MOVW", "MOVWU", "MOVH", "MOVHU", "MOVB", "MOVBU":
 		return t.translateMove(instruction)
 	case "VMOV":
 		return t.translateVectorMove(instruction)
-	case "VLD1":
+	case "VLD1", "VLD1R", "VLD4R":
 		return t.translateVectorLoad(instruction)
+	case "VST1":
+		return t.translateVectorStore(instruction)
 	case "VCMEQ", "VAND", "VORR", "VEOR", "VADD", "VADDP":
 		return t.translateVectorBinary(instruction)
+	case "VREV32":
+		return t.translateVectorUnary(instruction)
+	case "VSHL", "VSRI":
+		return t.translateVectorImmediate(instruction)
+	case "VTBL":
+		return t.translateVectorTable(instruction)
 	case "VUADDLV":
 		return t.translateVectorAddLongAcross(instruction)
 	case "LDP", "LDPW", "STP", "STPW":
@@ -92,6 +107,8 @@ func (t *arm64Translator) translateInstruction(instruction *Instruction) error {
 		return t.translateConditionalSet(instruction)
 	case "REV", "REVW", "REV16", "REV16W", "REV32":
 		return t.translateReverse(instruction)
+	case "UBFX", "UBFXW", "SBFX", "SBFXW":
+		return t.translateBitfieldExtract(instruction)
 	case "B", "BL", "BEQ", "BNE", "BCS", "BCC", "BHS", "BLO", "BMI", "BPL", "BVS", "BVC", "BHI", "BLS", "BGE", "BLT", "BGT", "BLE":
 		return t.translateBranch(instruction)
 	case "CBZ", "CBZW", "CBNZ", "CBNZW":
@@ -100,13 +117,23 @@ func (t *arm64Translator) translateInstruction(instruction *Instruction) error {
 		return t.translateTestBranch(instruction)
 	case "DMB":
 		return t.translateDMB(instruction)
+	case "DSB", "ISB":
+		return t.translateBarrier(instruction)
 	case "MRS":
 		return t.translateMRS(instruction)
+	case "MSR":
+		return t.translateMSR(instruction)
 	case "DC":
 		return t.translateDC(instruction)
+	case "SVC":
+		return t.translateSVC(instruction)
 	case "RET":
 		if len(instruction.Operands) != 0 {
 			return fmt.Errorf("RET operands are not supported yet")
+		}
+		if t.currentFrame != 0 {
+			fmt.Fprintf(&t.output, "\tadd x29, sp, #%d\n", t.currentFrame-8)
+			fmt.Fprintf(&t.output, "\tadd sp, sp, #%d\n", t.currentFrame)
 		}
 		t.output.WriteString("\tret\n")
 		return nil
@@ -139,6 +166,13 @@ func (t *arm64Translator) translateMove(instruction *Instruction) error {
 			fmt.Fprintf(&t.output, "\tmov %s, %s\n", destinationRegister, sourceRegister)
 			return nil
 		case OperandImmediate:
+			if symbolOperand := parseOperand(source.Immediate); symbolOperand.Kind == OperandMemory && symbolOperand.Base == "SB" {
+				name := t.symbol(symbolOperand.Symbol)
+				t.references[name] = true
+				fmt.Fprintf(&t.output, "\tadrp %s, %s\n", destinationRegister, name)
+				fmt.Fprintf(&t.output, "\tadd %s, %s, :lo12:%s\n", destinationRegister, destinationRegister, name)
+				return nil
+			}
 			return t.emitMoveImmediate(destinationRegister, width, source.Immediate)
 		case OperandMemory:
 			return t.emitLoad(instruction, source, destinationRegister)
@@ -227,7 +261,13 @@ func (t *arm64Translator) emitLoad(instruction *Instruction, source Operand, des
 		fmt.Fprintf(&t.output, "\t%s %s, [x27, :lo12:%s]\n", mnemonic, destination, name)
 		return nil
 	}
-	address, err := memoryAddress(source, instruction.Suffix)
+	var address string
+	var err error
+	if source.Base == "FP" && t.currentABI0 {
+		address, err = t.abi0FrameAddress(source, instruction.Suffix)
+	} else {
+		address, err = t.memoryAddress(source, instruction.Suffix)
+	}
 	if err != nil {
 		return err
 	}
@@ -254,7 +294,13 @@ func (t *arm64Translator) emitStore(instruction *Instruction, sourceRegister str
 		fmt.Fprintf(&t.output, "\t%s %s, [x27, :lo12:%s]\n", mnemonic, sourceRegister, name)
 		return nil
 	}
-	address, err := memoryAddress(destination, instruction.Suffix)
+	var address string
+	var err error
+	if destination.Base == "FP" && t.currentABI0 {
+		address, err = t.abi0FrameAddress(destination, instruction.Suffix)
+	} else {
+		address, err = t.memoryAddress(destination, instruction.Suffix)
+	}
 	if err != nil {
 		return err
 	}
@@ -291,7 +337,7 @@ func (t *arm64Translator) translateRegisterPair(instruction *Instruction) error 
 	if err != nil {
 		return err
 	}
-	address, err := memoryAddress(memory, instruction.Suffix)
+	address, err := t.memoryAddress(memory, instruction.Suffix)
 	if err != nil {
 		return err
 	}
@@ -484,6 +530,29 @@ func (t *arm64Translator) translateReverse(instruction *Instruction) error {
 	return nil
 }
 
+func (t *arm64Translator) translateBitfieldExtract(instruction *Instruction) error {
+	if len(instruction.Operands) != 4 {
+		return fmt.Errorf("%s requires a bit offset, source, width, and destination", instruction.Opcode)
+	}
+	bitOffset := instruction.Operands[0]
+	bitWidth := instruction.Operands[2]
+	if bitOffset.Kind != OperandImmediate || bitWidth.Kind != OperandImmediate {
+		return fmt.Errorf("%s bit offset and width must be immediate", instruction.Opcode)
+	}
+	width := instructionWidth(instruction.Opcode)
+	source, err := registerOperand(instruction.Operands[1], width)
+	if err != nil {
+		return err
+	}
+	destination, err := registerOperand(instruction.Operands[3], width)
+	if err != nil {
+		return err
+	}
+	mnemonic := strings.ToLower(strings.TrimSuffix(instruction.Opcode, "W"))
+	fmt.Fprintf(&t.output, "\t%s %s, %s, #%s, #%s\n", mnemonic, destination, source, bitOffset.Immediate, bitWidth.Immediate)
+	return nil
+}
+
 func (t *arm64Translator) translateBranch(instruction *Instruction) error {
 	if len(instruction.Operands) != 1 {
 		return fmt.Errorf("%s requires one target", instruction.Opcode)
@@ -543,6 +612,36 @@ func (t *arm64Translator) translateDMB(instruction *Instruction) error {
 	return nil
 }
 
+func (t *arm64Translator) translateBarrier(instruction *Instruction) error {
+	if len(instruction.Operands) != 1 || instruction.Operands[0].Kind != OperandImmediate {
+		return fmt.Errorf("%s requires one immediate", instruction.Opcode)
+	}
+	options := map[string]string{
+		"2":   "oshst",
+		"0x2": "oshst",
+		"3":   "osh",
+		"0x3": "osh",
+		"6":   "nshst",
+		"0x6": "nshst",
+		"7":   "nsh",
+		"0x7": "nsh",
+		"10":  "ishst",
+		"0xa": "ishst",
+		"11":  "ish",
+		"0xb": "ish",
+		"14":  "st",
+		"0xe": "st",
+		"15":  "sy",
+		"0xf": "sy",
+	}
+	option := options[strings.ToLower(instruction.Operands[0].Immediate)]
+	if option == "" {
+		return fmt.Errorf("unsupported %s option $%s", instruction.Opcode, instruction.Operands[0].Immediate)
+	}
+	fmt.Fprintf(&t.output, "\t%s %s\n", strings.ToLower(instruction.Opcode), option)
+	return nil
+}
+
 func (t *arm64Translator) translateMRS(instruction *Instruction) error {
 	if len(instruction.Operands) != 2 {
 		return fmt.Errorf("MRS requires a system register and destination")
@@ -551,8 +650,37 @@ func (t *arm64Translator) translateMRS(instruction *Instruction) error {
 	if err != nil {
 		return err
 	}
-	fmt.Fprintf(&t.output, "\tmrs %s, %s\n", destination, strings.ToLower(instruction.Operands[0].Text))
+	systemRegister := strings.ToLower(instruction.Operands[0].Text)
+	if systemRegister == "dit" {
+		t.output.WriteString("\t.arch armv8.4-a\n")
+	}
+	fmt.Fprintf(&t.output, "\tmrs %s, %s\n", destination, systemRegister)
 	return nil
+}
+
+func (t *arm64Translator) translateMSR(instruction *Instruction) error {
+	if len(instruction.Operands) != 2 {
+		return fmt.Errorf("MSR requires a source and system register")
+	}
+	systemRegister := strings.ToLower(instruction.Operands[1].Text)
+	if systemRegister == "dit" {
+		t.output.WriteString("\t.arch armv8.4-a\n")
+	}
+	source := instruction.Operands[0]
+	switch source.Kind {
+	case OperandImmediate:
+		fmt.Fprintf(&t.output, "\tmsr %s, #%s\n", systemRegister, normalizeImmediate(source.Immediate))
+		return nil
+	case OperandRegister:
+		register, err := registerOperand(source, 64)
+		if err != nil {
+			return err
+		}
+		fmt.Fprintf(&t.output, "\tmsr %s, %s\n", systemRegister, register)
+		return nil
+	default:
+		return fmt.Errorf("unsupported MSR source %q", source.Text)
+	}
 }
 
 func (t *arm64Translator) translateDC(instruction *Instruction) error {
@@ -564,6 +692,18 @@ func (t *arm64Translator) translateDC(instruction *Instruction) error {
 		return err
 	}
 	fmt.Fprintf(&t.output, "\tdc %s, %s\n", strings.ToLower(instruction.Operands[0].Text), register)
+	return nil
+}
+
+func (t *arm64Translator) translateSVC(instruction *Instruction) error {
+	if len(instruction.Operands) == 0 {
+		t.output.WriteString("\tsvc #0\n")
+		return nil
+	}
+	if len(instruction.Operands) != 1 || instruction.Operands[0].Kind != OperandImmediate {
+		return fmt.Errorf("SVC accepts at most one immediate")
+	}
+	fmt.Fprintf(&t.output, "\tsvc #%s\n", instruction.Operands[0].Immediate)
 	return nil
 }
 

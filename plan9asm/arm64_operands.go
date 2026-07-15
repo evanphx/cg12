@@ -44,6 +44,17 @@ func memoryAddress(operand Operand, suffix string) (string, error) {
 	}
 }
 
+func (t *arm64Translator) memoryAddress(operand Operand, suffix string) (string, error) {
+	if t.currentFrame == 0 || operand.Base != "RSP" {
+		return memoryAddress(operand, suffix)
+	}
+	if suffix != "" || operand.Index != "" {
+		return "", fmt.Errorf("framed RSP operand %q does not accept indexed or update addressing", operand.Text)
+	}
+	operand.Base = "SP"
+	return memoryAddress(operand, suffix)
+}
+
 func formatALUSource(operand Operand, width int) (string, error) {
 	switch operand.Kind {
 	case OperandRegister:

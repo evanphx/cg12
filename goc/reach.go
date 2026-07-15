@@ -92,7 +92,6 @@ func reachableFunctions(roots []*ast.FuncDecl, rootInfo *types.Info, rootPkg *ty
 	methods := make(map[string][]functionDecl)
 	runtimeFunctions := make(map[string]functionDecl)
 	var genericRuntimeMethods []functionDecl
-	var runtimeSupportFunctions []functionDecl
 	for _, unit := range units {
 		for _, file := range unit.files {
 			for _, declaration := range file.Decls {
@@ -105,9 +104,6 @@ func reachableFunctions(roots []*ast.FuncDecl, rootInfo *types.Info, rootPkg *ty
 					continue
 				}
 				declarations[object] = functionDecl{decl: function, info: unit.info, pkg: unit.pkg}
-				if unit.path == "internal/chacha8rand" && object.Name() == "block_generic" {
-					runtimeSupportFunctions = append(runtimeSupportFunctions, declarations[object])
-				}
 				signature := object.Type().(*types.Signature)
 				if unit.path == "runtime" && signature.Recv() == nil {
 					runtimeFunctions[object.Name()] = declarations[object]
@@ -207,7 +203,6 @@ func reachableFunctions(roots []*ast.FuncDecl, rootInfo *types.Info, rootPkg *ty
 		queue = append(queue, runtimeInits...)
 		queue = append(queue, initializers...)
 		queue = append(queue, genericRuntimeMethods...)
-		queue = append(queue, runtimeSupportFunctions...)
 		for _, name := range []string{"args", "check", "growslice", "main", "makeslice", "mallocgc", "mstart0", "newobject", "newstack", "osinit", "persistentalloc", "schedinit"} {
 			if declaration, exists := runtimeFunctions[name]; exists {
 				queue = append(queue, declaration)

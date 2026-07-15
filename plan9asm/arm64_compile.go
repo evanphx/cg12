@@ -16,9 +16,10 @@ type ARM64Options struct {
 
 // ARM64Function describes one translated TEXT declaration in source order.
 type ARM64Function struct {
-	Name  string
-	Frame int
-	Flags []string
+	Name       string
+	Frame      int
+	FrameStart int
+	Flags      []string
 }
 
 // ARM64Translation is the complete result of parsing one source file for the
@@ -37,10 +38,25 @@ var supportedARM64Files = map[string]map[string]bool{
 		"index_arm64.s":     true,
 		"indexbyte_arm64.s": true,
 	},
+	"internal/cpu": {
+		"cpu_arm64.s": true,
+	},
+	"internal/chacha8rand": {
+		"chacha8_arm64.s": true,
+	},
+	"internal/runtime/sys": {
+		"dit_arm64.s": true,
+	},
+	"internal/runtime/syscall/linux": {
+		"asm_linux_arm64.s": true,
+	},
 	"runtime": {
 		"atomic_arm64.s":  true,
 		"memclr_arm64.s":  true,
 		"memmove_arm64.s": true,
+	},
+	"syscall": {
+		"asm_linux_arm64.s": true,
 	},
 }
 
@@ -54,11 +70,23 @@ func SupportsARM64File(packagePath, filename string) bool {
 // returns the symbol metadata needed when the generated code is assembled into
 // a separate object.
 func CompileARM64(file *File, options ARM64Options) (ARM64Translation, error) {
+	filename := strings.TrimSuffix(filepath.Base(options.Filename), filepath.Ext(options.Filename))
 	translator := arm64Translator{
-		options:    options,
-		fileTag:    sanitizeSymbol(strings.TrimSuffix(filepath.Base(options.Filename), filepath.Ext(options.Filename))),
-		labels:     make(map[int]map[string]string),
-		references: make(map[string]bool),
+		options:     options,
+		fileTag:     sanitizeSymbol(options.PackagePath + "_" + filename),
+		labels:      make(map[int]map[string]string),
+		references:  make(map[string]bool),
+		abi0Layouts: collectABI0Layouts(file),
+		data:        make(map[string][]arm64DataValue),
+	}
+	for _, statement := range file.Statements {
+		directive, ok := statement.(*Directive)
+		if !ok || directive.Name != "DATA" {
+			continue
+		}
+		if err := translator.recordData(directive); err != nil {
+			return ARM64Translation{}, fmt.Errorf("%s:%d: %w", options.Filename, statement.Position().Line, err)
+		}
 	}
 	translator.collectLabels(file)
 

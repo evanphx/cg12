@@ -45,8 +45,17 @@ tree and translated to GNU AArch64 syntax. The currently enabled unchanged
 standard-library files are `runtime/atomic_arm64.s`, `runtime/memclr_arm64.s`,
 `runtime/memmove_arm64.s`, and all five ARM64 files in `internal/bytealg`:
 `compare_arm64.s`, `count_arm64.s`, `equal_arm64.s`, `index_arm64.s`, and
-`indexbyte_arm64.s`. Unsupported files are kept out of the build until the
-translator accepts every construct they contain.
+`indexbyte_arm64.s`. The compiler also adapts ABI0 stack operands to its
+ABIInternal call path, allowing the exact `internal/cpu/cpu_arm64.s`,
+`internal/runtime/sys/dit_arm64.s`, and
+`internal/runtime/syscall/linux/asm_linux_arm64.s` files to compile and run.
+The same ABI0 adapter compiles `syscall/asm_linux_arm64.s`, replacing the
+handwritten syscall shims with the copied standard-library implementations.
+The exact `internal/chacha8rand/chacha8_arm64.s` implementation is also active,
+including its multiline `QR` macro, local frame, SIMD structure operations,
+and `DATA`/`GLOBL RODATA` constant tables.
+Unsupported files are kept out of the build until the translator accepts every
+construct they contain.
 
 The runtime-assembly demo grows slices, validates their copied contents, clears
 memory, runs the collector, and prints a checksum:

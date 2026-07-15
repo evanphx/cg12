@@ -13,13 +13,45 @@ import (
 func Parse(reader io.Reader) (*File, error) {
 	file := &File{}
 	scanner := bufio.NewScanner(reader)
+	macros := make(map[string]sourceMacro)
 	lineNumber := 0
+	logicalLine := 0
+	var logicalLineSource strings.Builder
 	inBlockComment := false
 	for scanner.Scan() {
 		lineNumber++
 		line := stripComments(scanner.Text(), &inBlockComment)
-		for _, sourceStatement := range splitStatements(line) {
-			statement, err := parseStatement(sourceStatement, lineNumber)
+		if logicalLineSource.Len() == 0 {
+			logicalLine = lineNumber
+		}
+		trimmed := strings.TrimSpace(line)
+		continued := strings.HasSuffix(trimmed, "\\")
+		if continued {
+			line = strings.TrimSpace(strings.TrimSuffix(trimmed, "\\"))
+		}
+		if logicalLineSource.Len() > 0 && line != "" {
+			logicalLineSource.WriteByte(' ')
+		}
+		logicalLineSource.WriteString(line)
+		if continued {
+			logicalLineSource.WriteByte('\n')
+			continue
+		}
+
+		source := logicalLineSource.String()
+		logicalLineSource.Reset()
+		if macro, ok, err := parseSourceMacro(source); err != nil {
+			return nil, fmt.Errorf("plan9asm:%d: %w", logicalLine, err)
+		} else if ok {
+			macros[macro.name] = macro
+			continue
+		}
+		expanded, err := expandSourceMacro(source, macros)
+		if err != nil {
+			return nil, fmt.Errorf("plan9asm:%d: %w", logicalLine, err)
+		}
+		for _, sourceStatement := range splitStatements(expanded) {
+			statement, err := parseStatement(sourceStatement, logicalLine)
 			if err != nil {
 				return nil, err
 			}
@@ -34,7 +66,115 @@ func Parse(reader io.Reader) (*File, error) {
 	if inBlockComment {
 		return nil, fmt.Errorf("plan9asm: unterminated block comment")
 	}
+	if logicalLineSource.Len() != 0 {
+		return nil, fmt.Errorf("plan9asm:%d: unterminated line continuation", logicalLine)
+	}
 	return file, nil
+}
+
+type sourceMacro struct {
+	name       string
+	parameters []string
+	body       string
+}
+
+func parseSourceMacro(source string) (sourceMacro, bool, error) {
+	source = strings.TrimSpace(source)
+	const prefix = "#define "
+	if !strings.HasPrefix(source, prefix) {
+		return sourceMacro{}, false, nil
+	}
+	source = strings.TrimSpace(strings.TrimPrefix(source, prefix))
+	open := strings.IndexByte(source, '(')
+	if open <= 0 {
+		return sourceMacro{}, false, nil
+	}
+	close := strings.IndexByte(source[open+1:], ')')
+	if close < 0 {
+		return sourceMacro{}, false, fmt.Errorf("unterminated macro parameter list")
+	}
+	close += open + 1
+	name := strings.TrimSpace(source[:open])
+	if !isIdentifier(name) {
+		return sourceMacro{}, false, fmt.Errorf("invalid macro name %q", name)
+	}
+
+	parameterSource := strings.TrimSpace(source[open+1 : close])
+	var parameters []string
+	if parameterSource != "" {
+		for _, parameter := range strings.Split(parameterSource, ",") {
+			parameter = strings.TrimSpace(parameter)
+			if !isIdentifier(parameter) {
+				return sourceMacro{}, false, fmt.Errorf("invalid macro parameter %q", parameter)
+			}
+			parameters = append(parameters, parameter)
+		}
+	}
+	body := strings.ReplaceAll(source[close+1:], "\n", "; ")
+	return sourceMacro{name: name, parameters: parameters, body: strings.TrimSpace(body)}, true, nil
+}
+
+func expandSourceMacro(source string, macros map[string]sourceMacro) (string, error) {
+	trimmed := strings.TrimSpace(source)
+	open := strings.IndexByte(trimmed, '(')
+	if open <= 0 || !strings.HasSuffix(trimmed, ")") {
+		return source, nil
+	}
+	macro, ok := macros[strings.TrimSpace(trimmed[:open])]
+	if !ok {
+		return source, nil
+	}
+	arguments, err := splitCommaSeparated(trimmed[open+1 : len(trimmed)-1])
+	if err != nil {
+		return "", err
+	}
+	if len(arguments) != len(macro.parameters) {
+		return "", fmt.Errorf("macro %s requires %d arguments, got %d", macro.name, len(macro.parameters), len(arguments))
+	}
+	values := make(map[string]string, len(arguments))
+	for index, parameter := range macro.parameters {
+		values[parameter] = strings.TrimSpace(arguments[index])
+	}
+
+	var expanded strings.Builder
+	for index := 0; index < len(macro.body); {
+		if !isIdentifierByte(macro.body[index], true) {
+			expanded.WriteByte(macro.body[index])
+			index++
+			continue
+		}
+		end := index + 1
+		for end < len(macro.body) && isIdentifierByte(macro.body[end], false) {
+			end++
+		}
+		identifier := macro.body[index:end]
+		if value, ok := values[identifier]; ok {
+			expanded.WriteString(value)
+		} else {
+			expanded.WriteString(identifier)
+		}
+		index = end
+	}
+	return expanded.String(), nil
+}
+
+func isIdentifier(source string) bool {
+	if source == "" {
+		return false
+	}
+	for index := 0; index < len(source); index++ {
+		if !isIdentifierByte(source[index], index == 0) {
+			return false
+		}
+	}
+	return true
+}
+
+func isIdentifierByte(value byte, first bool) bool {
+	if value == '_' || value >= 'A' && value <= 'Z' || value >= 'a' && value <= 'z' {
+		return true
+	}
+	return !first && value >= '0' && value <= '9'
 }
 
 func parseStatement(source string, line int) (Statement, error) {

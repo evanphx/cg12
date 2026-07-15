@@ -382,22 +382,6 @@ runtime_exit:
 	svc 0
 	brk 0
 
-.text
-.global internal_runtime_sys_DITEnabled
-.type internal_runtime_sys_DITEnabled, %function
-internal_runtime_sys_DITEnabled:
-	mov w0, 0
-	ret
-
-.global internal_runtime_sys_DisableDIT
-.type internal_runtime_sys_DisableDIT, %function
-internal_runtime_sys_DisableDIT:
-	ret
-.global internal_runtime_sys_EnableDIT
-.type internal_runtime_sys_EnableDIT, %function
-internal_runtime_sys_EnableDIT:
-	ret
-
 // reflect.methodValueCall is only entered by reflection-created method
 // closures. Keep a hard failure for that unsupported assembly trampoline while
 // allowing ordinary reflect users to link; silently returning would corrupt
@@ -421,45 +405,6 @@ runtime_setg:
 .type runtime_reflectcall, %function
 runtime_reflectcall:
 	brk 0
-
-// func rawVforkSyscall(trap, a1, a2, a3 uintptr) (r1, err uintptr)
-// The second result uses cg12's hidden-result pointer in x4.
-.global syscall_rawVforkSyscall
-.type syscall_rawVforkSyscall, %function
-syscall_rawVforkSyscall:
-	mov x8, x0
-	mov x0, x1
-	mov x1, x2
-	mov x2, x3
-	mov x3, 0
-	mov x5, 0
-	mov x6, 0
-	svc 0
-	cmn x0, 4095
-	b.cc 1f
-	mov x1, -1
-	neg x0, x0
-	str x0, [x4]
-	mov x0, x1
-	ret
-1:	str xzr, [x4]
-	ret
-
-// func rawSyscallNoError(trap, a1, a2, a3 uintptr) (r1, r2 uintptr)
-// The second result uses cg12's hidden-result pointer in x4.
-.global syscall_rawSyscallNoError
-.type syscall_rawSyscallNoError, %function
-syscall_rawSyscallNoError:
-	mov x8, x0
-	mov x0, x1
-	mov x1, x2
-	mov x2, x3
-	mov x3, 0
-	mov x5, 0
-	mov x6, 0
-	svc 0
-	str x1, [x4]
-	ret
 
 .macro linux_syscall name, number
 .global \name
@@ -587,33 +532,6 @@ runtime_memhash:
 	sub x2, x2, 1
 	b 1b
 2:	mov x0, x1
-	ret
-
-.weak internal_chacha8rand_block_generic
-branch_alias internal_chacha8rand_block, internal_chacha8rand_block_generic
-
-.global internal_runtime_syscall_linux_Syscall6
-.type internal_runtime_syscall_linux_Syscall6, %function
-internal_runtime_syscall_linux_Syscall6:
-	mov x9, x8
-	mov x10, x7
-	mov x8, x0
-	mov x0, x1
-	mov x1, x2
-	mov x2, x3
-	mov x3, x4
-	mov x4, x5
-	mov x5, x6
-	svc 0
-	cmn x0, 4095
-	b.lo 1f
-	neg x11, x0
-	mov x0, -1
-	str xzr, [x10]
-	str x11, [x9]
-	ret
-1:	str x1, [x10]
-	str xzr, [x9]
 	ret
 
 .global runtime_getg
@@ -1064,12 +982,6 @@ _cgo_sigaction:
 .text
 .weak runtime_throw
 branch_alias internal_runtime_cgroup_throw, runtime_throw
-
-.global internal_cpu_getMIDR
-.type internal_cpu_getMIDR, %function
-internal_cpu_getMIDR:
-	mrs x0, midr_el1
-	ret
 
 .global runtime_checkASM
 .type runtime_checkASM, %function

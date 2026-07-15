@@ -35,7 +35,7 @@ done:
 	assert.Contains(t, assembly, "\tcmp x4, #8")
 	assert.Contains(t, assembly, "\tldp x6, x7, [x1, #16]!")
 	assert.Contains(t, assembly, "\tstp x6, x7, [x0], #-16")
-	assert.Contains(t, assembly, "\ttbz x2, #3, .Lcopy_arm64_0_done")
+	assert.Contains(t, assembly, "\ttbz x2, #3, .Lruntime_copy_arm64_0_done")
 }
 
 func TestTranslateARM64ConditionalAndIndexedInstructions(t *testing.T) {
@@ -65,8 +65,8 @@ func TestTranslateARM64MakesStaticTextVisibleToRuntimeMetadata(t *testing.T) {
 	assembly, err := TranslateARM64(file, ARM64Options{PackagePath: "internal/bytealg", Filename: "compare_arm64.s"})
 	require.NoError(t, err)
 
-	assert.Contains(t, assembly, ".global .Lcompare_arm64_helper")
-	assert.Contains(t, assembly, ".hidden .Lcompare_arm64_helper")
+	assert.Contains(t, assembly, ".global .Linternal_bytealg_compare_arm64_helper")
+	assert.Contains(t, assembly, ".hidden .Linternal_bytealg_compare_arm64_helper")
 }
 
 func TestTranslateARM64VectorLoadCompareAndMove(t *testing.T) {
@@ -123,10 +123,88 @@ func TestTranslateARM64MaterializesWideImmediate(t *testing.T) {
 	assert.Contains(t, assembly, "\tmovk x5, #0x4010, lsl #16")
 }
 
+func TestTranslateARM64BuildsABI0RegisterWrapper(t *testing.T) {
+	file, err := Parse(strings.NewReader(`
+TEXT ·readRegister(SB),NOSPLIT,$0-8
+	MRS MIDR_EL1, R0
+	MOVD R0, ret+0(FP)
+	RET
+`))
+	require.NoError(t, err)
+	translation, err := CompileARM64(file, ARM64Options{PackagePath: "internal/cpu", Filename: "cpu_arm64.s"})
+	require.NoError(t, err)
+
+	assert.Contains(t, translation.Assembly, ".global internal_cpu_readRegister\n")
+	assert.Contains(t, translation.Assembly, "\tsub sp, sp, #32")
+	assert.Contains(t, translation.Assembly, "\tstr x30, [sp]")
+	assert.Contains(t, translation.Assembly, "\tbl internal_cpu_readRegister_abi0")
+	assert.Contains(t, translation.Assembly, "\tldr x0, [sp, #8]")
+	assert.Contains(t, translation.Assembly, ".global internal_cpu_readRegister_abi0")
+	assert.Contains(t, translation.Assembly, "\tstr x0, [sp, #8]")
+	require.Len(t, translation.Functions, 2)
+	assert.Equal(t, ARM64Function{Name: "internal_cpu_readRegister", Frame: 32, FrameStart: 4, Flags: []string{"NOSPLIT"}}, translation.Functions[0])
+	assert.Equal(t, "internal_cpu_readRegister_abi0", translation.Functions[1].Name)
+}
+
+func TestTranslateARM64BuildsABI0MultiResultWrapper(t *testing.T) {
+	path := filepath.Join("..", "stdlib", "src", "internal", "runtime", "syscall", "linux", "asm_linux_arm64.s")
+	source, err := os.ReadFile(path)
+	require.NoError(t, err)
+	file, err := Parse(bytes.NewReader(source))
+	require.NoError(t, err)
+	translation, err := CompileARM64(file, ARM64Options{
+		PackagePath: "internal/runtime/syscall/linux",
+		Filename:    "asm_linux_arm64.s",
+	})
+	require.NoError(t, err)
+
+	assert.Contains(t, translation.Assembly, "\tstr x0, [sp, #8]")
+	assert.Contains(t, translation.Assembly, "\tstr x6, [sp, #56]")
+	assert.Contains(t, translation.Assembly, "\tstr x7, [sp, #88]")
+	assert.Contains(t, translation.Assembly, "\tstr x8, [sp, #96]")
+	assert.Contains(t, translation.Assembly, "\tbl internal_runtime_syscall_linux_Syscall6_abi0")
+	assert.Contains(t, translation.Assembly, "\tldr x0, [sp, #64]")
+	assert.Contains(t, translation.Assembly, "\tldr x16, [sp, #72]")
+	assert.Contains(t, translation.Assembly, "\tldr x16, [sp, #80]")
+}
+
+func TestTranslateExactChacha8FrameAndReadOnlyData(t *testing.T) {
+	path := filepath.Join("..", "stdlib", "src", "internal", "chacha8rand", "chacha8_arm64.s")
+	source, err := os.ReadFile(path)
+	require.NoError(t, err)
+	file, err := Parse(bytes.NewReader(source))
+	require.NoError(t, err)
+	translation, err := CompileARM64(file, ARM64Options{
+		PackagePath: "internal/chacha8rand",
+		Filename:    "chacha8_arm64.s",
+	})
+	require.NoError(t, err)
+
+	require.Len(t, translation.Functions, 1)
+	assert.Equal(t, ARM64Function{
+		Name:       "internal_chacha8rand_block",
+		Frame:      32,
+		FrameStart: 4,
+		Flags:      []string{"NOSPLIT"},
+	}, translation.Functions[0])
+	assert.Contains(t, translation.Assembly, "\tsub sp, sp, #32")
+	assert.Contains(t, translation.Assembly, "\tstr w2, [sp]")
+	assert.Contains(t, translation.Assembly, "\tld1r {v12.4s}, [sp]")
+	assert.Contains(t, translation.Assembly, ".section .rodata")
+	assert.Contains(t, translation.Assembly, "internal_chacha8rand_chachaConst:")
+	assert.Contains(t, translation.Assembly, "\t.word 0x61707865")
+	assert.Contains(t, translation.Assembly, "\t.word 0xe0d0c0f")
+}
+
 func TestSupportsARM64FileKeepsTargetPolicyWithTranslator(t *testing.T) {
 	assert.True(t, SupportsARM64File("runtime", "memmove_arm64.s"))
 	assert.True(t, SupportsARM64File("internal/bytealg", "compare_arm64.s"))
 	assert.True(t, SupportsARM64File("internal/bytealg", "index_arm64.s"))
+	assert.True(t, SupportsARM64File("internal/cpu", "cpu_arm64.s"))
+	assert.True(t, SupportsARM64File("internal/chacha8rand", "chacha8_arm64.s"))
+	assert.True(t, SupportsARM64File("internal/runtime/sys", "dit_arm64.s"))
+	assert.True(t, SupportsARM64File("internal/runtime/syscall/linux", "asm_linux_arm64.s"))
+	assert.True(t, SupportsARM64File("syscall", "asm_linux_arm64.s"))
 	assert.False(t, SupportsARM64File("runtime", "asm_arm64.s"))
 	assert.False(t, SupportsARM64File("other", "memmove_arm64.s"))
 }
@@ -153,6 +231,11 @@ func TestTranslateExactRuntimeARM64FilesAssemble(t *testing.T) {
 		{packagePath: "internal/bytealg", name: "equal_arm64.s"},
 		{packagePath: "internal/bytealg", name: "index_arm64.s"},
 		{packagePath: "internal/bytealg", name: "indexbyte_arm64.s"},
+		{packagePath: "internal/cpu", name: "cpu_arm64.s"},
+		{packagePath: "internal/runtime/sys", name: "dit_arm64.s"},
+		{packagePath: "internal/runtime/syscall/linux", name: "asm_linux_arm64.s"},
+		{packagePath: "internal/chacha8rand", name: "chacha8_arm64.s"},
+		{packagePath: "syscall", name: "asm_linux_arm64.s"},
 	}
 	for _, sourceFile := range files {
 		path := filepath.Join("..", "stdlib", "src", filepath.FromSlash(sourceFile.packagePath), sourceFile.name)

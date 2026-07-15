@@ -2,32 +2,73 @@ package plan9asm
 
 import (
 	"fmt"
+	"sort"
 	"strconv"
+	"strings"
 )
 
 func (t *arm64Translator) translateText(text *Text) error {
 	t.functionIndex++
-	if text.Frame != "" && text.Frame != "0" {
-		return fmt.Errorf("TEXT frame $%s is not supported yet", text.Frame)
+	localSize := 0
+	if text.Frame != "" {
+		parsed, err := strconv.ParseUint(text.Frame, 0, 32)
+		if err != nil {
+			return fmt.Errorf("invalid TEXT frame $%s", text.Frame)
+		}
+		localSize = int(parsed)
+	}
+	t.currentABI0 = text.Symbol.ABI == "" && !text.Symbol.Static
+	if t.currentABI0 && localSize != 0 {
+		return fmt.Errorf("ABI0 TEXT frame $%s is not supported yet", text.Frame)
+	}
+	t.currentFrame = 0
+	if localSize != 0 {
+		t.currentFrame = roundUpInteger(localSize+16, 16)
 	}
 	symbol := t.symbol(text.Symbol)
+	if t.currentABI0 {
+		abi0Name, wrapperFrame, err := t.emitABI0Wrapper(text, t.abi0Layouts[t.functionIndex])
+		if err != nil {
+			return err
+		}
+		t.functions = append(t.functions, ARM64Function{
+			Name:       symbol,
+			Frame:      wrapperFrame,
+			FrameStart: 4,
+			Flags:      append([]string(nil), text.Flags...),
+		})
+		symbol = abi0Name
+	}
 	t.functions = append(t.functions, ARM64Function{
-		Name:  symbol,
-		Frame: 0,
-		Flags: append([]string(nil), text.Flags...),
+		Name:       symbol,
+		Frame:      t.currentFrame,
+		FrameStart: frameStart(t.currentFrame),
+		Flags:      append([]string(nil), text.Flags...),
 	})
 	t.output.WriteString("\n.text\n")
 	fmt.Fprintf(&t.output, ".global %s\n", symbol)
-	if text.Symbol.Static {
-		// The cg12 object carries Go runtime metadata for translated assembly
-		// functions, so even a file-local Go symbol must be link-visible from
-		// the separately assembled GNU object. Its file-qualified name remains
-		// unique, and hidden visibility keeps it out of the public ABI.
+	if text.Symbol.Static || t.currentABI0 {
+		// Runtime metadata and ABI wrappers live in the separately emitted cg12
+		// object, so implementation symbols must remain link-visible. Hidden
+		// visibility keeps file-local and ABI0 entry points out of the public ABI.
 		fmt.Fprintf(&t.output, ".hidden %s\n", symbol)
 	}
 	fmt.Fprintf(&t.output, ".type %s, %%function\n", symbol)
 	fmt.Fprintf(&t.output, "%s:\n", symbol)
+	if t.currentFrame != 0 {
+		fmt.Fprintf(&t.output, "\tsub sp, sp, #%d\n", t.currentFrame)
+		t.output.WriteString("\tstr x30, [sp]\n")
+		t.output.WriteString("\tstur x29, [sp, #-8]\n")
+		t.output.WriteString("\tsub x29, sp, #8\n")
+	}
 	return nil
+}
+
+func frameStart(frame int) int {
+	if frame == 0 {
+		return 0
+	}
+	return 4
 }
 
 func (t *arm64Translator) translateDirective(directive *Directive) error {
@@ -40,6 +81,8 @@ func (t *arm64Translator) translateDirective(directive *Directive) error {
 		return nil
 	case "GLOBL":
 		return t.translateGlobal(directive)
+	case "DATA":
+		return t.translateData(directive)
 	default:
 		return fmt.Errorf("unsupported directive %s", directive.Name)
 	}
@@ -62,7 +105,19 @@ func (t *arm64Translator) translateGlobal(directive *Directive) error {
 		return fmt.Errorf("invalid GLOBL size %q", sizeOperand.Immediate)
 	}
 	name := t.symbol(symbol)
-	t.output.WriteString("\n.bss\n")
+	values := append([]arm64DataValue(nil), t.data[name]...)
+	flags := ""
+	if len(directive.Operands) == 3 {
+		flags = directive.Operands[1].Text
+	}
+	section := ".bss"
+	if len(values) != 0 {
+		section = ".data"
+	}
+	if hasPlan9Flag(flags, "RODATA") {
+		section = ".section .rodata"
+	}
+	fmt.Fprintf(&t.output, "\n%s\n", section)
 	t.output.WriteString("\t.balign 8\n")
 	if symbol.Static {
 		fmt.Fprintf(&t.output, "\t.local %s\n", name)
@@ -72,6 +127,101 @@ func (t *arm64Translator) translateGlobal(directive *Directive) error {
 	fmt.Fprintf(&t.output, "\t.type %s, %%object\n", name)
 	fmt.Fprintf(&t.output, "\t.size %s, %d\n", name, size)
 	fmt.Fprintf(&t.output, "%s:\n", name)
-	fmt.Fprintf(&t.output, "\t.zero %d\n", size)
+	if len(values) == 0 {
+		fmt.Fprintf(&t.output, "\t.zero %d\n", size)
+		return nil
+	}
+	sort.Slice(values, func(left, right int) bool {
+		return values[left].offset < values[right].offset
+	})
+	written := uint64(0)
+	for _, value := range values {
+		if value.offset < written || value.offset+value.width > size {
+			return fmt.Errorf("DATA range %d/%d is invalid for %s size %d", value.offset, value.width, name, size)
+		}
+		if value.offset > written {
+			fmt.Fprintf(&t.output, "\t.zero %d\n", value.offset-written)
+		}
+		directive := map[uint64]string{1: ".byte", 2: ".hword", 4: ".word", 8: ".quad"}[value.width]
+		fmt.Fprintf(&t.output, "\t%s 0x%x\n", directive, value.value)
+		written = value.offset + value.width
+	}
+	if written < size {
+		fmt.Fprintf(&t.output, "\t.zero %d\n", size-written)
+	}
 	return nil
+}
+
+type arm64DataValue struct {
+	offset uint64
+	width  uint64
+	value  uint64
+}
+
+func (t *arm64Translator) translateData(directive *Directive) error {
+	return nil
+}
+
+func (t *arm64Translator) recordData(directive *Directive) error {
+	if len(directive.Operands) != 2 || directive.Operands[1].Kind != OperandImmediate {
+		return fmt.Errorf("DATA requires an address/width and immediate value")
+	}
+	symbol, offset, width, err := parsePlan9DataAddress(directive.Operands[0].Text)
+	if err != nil {
+		return err
+	}
+	value, err := strconv.ParseUint(directive.Operands[1].Immediate, 0, 64)
+	if err != nil {
+		return fmt.Errorf("invalid DATA value %q", directive.Operands[1].Text)
+	}
+	if width < 8 && value >= uint64(1)<<(width*8) {
+		return fmt.Errorf("DATA value %#x does not fit in %d bytes", value, width)
+	}
+	name := t.symbol(symbol)
+	t.data[name] = append(t.data[name], arm64DataValue{offset: offset, width: width, value: value})
+	return nil
+}
+
+func parsePlan9DataAddress(source string) (Symbol, uint64, uint64, error) {
+	source = strings.TrimSpace(source)
+	slash := strings.LastIndexByte(source, '/')
+	if slash < 0 {
+		return Symbol{}, 0, 0, fmt.Errorf("DATA address %q has no width", source)
+	}
+	width, err := strconv.ParseUint(strings.TrimSpace(source[slash+1:]), 0, 8)
+	if err != nil || width != 1 && width != 2 && width != 4 && width != 8 {
+		return Symbol{}, 0, 0, fmt.Errorf("invalid DATA width in %q", source)
+	}
+	address := strings.TrimSpace(source[:slash])
+	if !strings.HasSuffix(address, "(SB)") {
+		return Symbol{}, 0, 0, fmt.Errorf("DATA address %q is not relative to SB", source)
+	}
+	nameAndOffset := strings.TrimSpace(strings.TrimSuffix(address, "(SB)"))
+	name := nameAndOffset
+	offset := uint64(0)
+	for index := len(nameAndOffset) - 1; index > 0; index-- {
+		if nameAndOffset[index] != '+' {
+			continue
+		}
+		parsed, err := strconv.ParseUint(strings.TrimSpace(nameAndOffset[index+1:]), 0, 64)
+		if err != nil {
+			continue
+		}
+		name = strings.TrimSpace(nameAndOffset[:index])
+		offset = parsed
+		break
+	}
+	if name == "" {
+		return Symbol{}, 0, 0, fmt.Errorf("DATA address %q has no symbol", source)
+	}
+	return parseSymbol(name), offset, width, nil
+}
+
+func hasPlan9Flag(flags, want string) bool {
+	for _, flag := range strings.Split(flags, "|") {
+		if strings.TrimSpace(flag) == want {
+			return true
+		}
+	}
+	return false
 }
