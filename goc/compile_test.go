@@ -4,6 +4,8 @@ import (
 	"reflect"
 	"strings"
 	"testing"
+
+	"github.com/evanphx/cg12/ir"
 )
 
 func TestCompileCoreGo(t *testing.T) {
@@ -19,6 +21,68 @@ func main() { if sum(5) != 12 { for { break } } }
 		if !strings.Contains(s, want) {
 			t.Errorf("IR missing %q:\n%s", want, s)
 		}
+	}
+}
+
+func TestCompilePreservesNoSplitDirective(t *testing.T) {
+	module, err := Compile("nosplit.go", []byte(`package main
+
+//go:nosplit
+func helper() {}
+`))
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	for _, function := range module.Funcs {
+		if function.Name == "main.helper" {
+			if !function.NoSplit {
+				t.Fatal("main.helper did not preserve //go:nosplit")
+			}
+			return
+		}
+	}
+	t.Fatal("main.helper was not compiled")
+}
+
+func TestCompileExecutableIncludesRuntimeAndMainInitTask(t *testing.T) {
+	module, err := CompileExecutable("main.go", []byte(`package main
+var initialized int
+func init() { initialized = 41 }
+func main() {
+	if initialized != 41 {
+		panic("init did not run")
+	}
+}
+`))
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	functions := make(map[string]bool)
+	for _, function := range module.Funcs {
+		functions[function.Name] = true
+	}
+	for _, name := range []string{"main.init.0", "main.main", "runtime.schedinit"} {
+		if !functions[name] {
+			t.Errorf("executable module is missing %s", name)
+		}
+	}
+
+	var initTask, initTasks *ir.Data
+	for _, data := range module.Data {
+		switch data.Name {
+		case ".goc.module.inittask.0":
+			initTask = data
+		case ".goc.module.inittasks":
+			initTasks = data
+		}
+	}
+	if initTask == nil || len(initTask.Items) != 2 || initTask.Items[1].Sym != "main.init.0" {
+		t.Errorf("main init task = %#v", initTask)
+	}
+	if initTasks == nil || len(initTasks.Items) != 1 || initTasks.Items[0].Sym != ".goc.module.inittask.0" {
+		t.Errorf("module init tasks = %#v", initTasks)
 	}
 }
 

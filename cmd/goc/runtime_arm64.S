@@ -305,6 +305,35 @@ branch_alias internal_runtime_atomic_Pointer_profBuf__Load, internal_runtime_ato
 branch_alias internal_runtime_atomic_Pointer_spanSetBlock__Load, internal_runtime_atomic_Load64
 branch_alias internal_runtime_atomic_Pointer_spanSetBlock__StoreNoWB, internal_runtime_atomic_Store64
 
+// sync/atomic's public ARM64 entry points have the same calling convention and
+// memory-ordering requirements as the internal/runtime/atomic primitives above.
+branch_alias sync_atomic_LoadInt32, internal_runtime_atomic_Load
+branch_alias sync_atomic_LoadInt64, internal_runtime_atomic_Load64
+branch_alias sync_atomic_LoadUint32, internal_runtime_atomic_Load
+branch_alias sync_atomic_LoadUint64, internal_runtime_atomic_Load64
+branch_alias sync_atomic_LoadUintptr, internal_runtime_atomic_Loaduintptr
+branch_alias sync_atomic_LoadPointer, internal_runtime_atomic_Loadp
+branch_alias sync_atomic_StoreInt32, internal_runtime_atomic_Store
+branch_alias sync_atomic_StoreInt64, internal_runtime_atomic_Store64
+branch_alias sync_atomic_StoreUint32, internal_runtime_atomic_Store
+branch_alias sync_atomic_StoreUint64, internal_runtime_atomic_Store64
+branch_alias sync_atomic_StoreUintptr, internal_runtime_atomic_Storeuintptr
+branch_alias sync_atomic_SwapInt32, internal_runtime_atomic_Xchg
+branch_alias sync_atomic_SwapInt64, internal_runtime_atomic_Xchg64
+branch_alias sync_atomic_SwapUint32, internal_runtime_atomic_Xchg
+branch_alias sync_atomic_SwapUint64, internal_runtime_atomic_Xchg64
+branch_alias sync_atomic_SwapUintptr, internal_runtime_atomic_Xchguintptr
+branch_alias sync_atomic_AddInt32, internal_runtime_atomic_Xadd
+branch_alias sync_atomic_AddInt64, internal_runtime_atomic_Xadd64
+branch_alias sync_atomic_AddUint32, internal_runtime_atomic_Xadd
+branch_alias sync_atomic_AddUint64, internal_runtime_atomic_Xadd64
+branch_alias sync_atomic_AddUintptr, internal_runtime_atomic_Xadduintptr
+branch_alias sync_atomic_CompareAndSwapInt32, internal_runtime_atomic_Cas
+branch_alias sync_atomic_CompareAndSwapInt64, internal_runtime_atomic_Cas64
+branch_alias sync_atomic_CompareAndSwapUint32, internal_runtime_atomic_Cas
+branch_alias sync_atomic_CompareAndSwapUint64, internal_runtime_atomic_Cas64
+branch_alias sync_atomic_CompareAndSwapUintptr, internal_runtime_atomic_Casuintptr
+
 .global runtime_memmove
 .type runtime_memmove, %function
 runtime_memmove:
@@ -420,16 +449,13 @@ runtime_exit:
 	svc 0
 	brk 0
 
-.data
-.balign 1
-.global internal_runtime_sys_DITSupported
-internal_runtime_sys_DITSupported:
-	.byte 0
-.global internal_runtime_sys_DITEnabled
-internal_runtime_sys_DITEnabled:
-	.byte 0
-
 .text
+.global internal_runtime_sys_DITEnabled
+.type internal_runtime_sys_DITEnabled, %function
+internal_runtime_sys_DITEnabled:
+	mov w0, 0
+	ret
+
 .global internal_runtime_sys_DisableDIT
 .type internal_runtime_sys_DisableDIT, %function
 internal_runtime_sys_DisableDIT:
@@ -437,6 +463,69 @@ internal_runtime_sys_DisableDIT:
 .global internal_runtime_sys_EnableDIT
 .type internal_runtime_sys_EnableDIT, %function
 internal_runtime_sys_EnableDIT:
+	ret
+
+// reflect.methodValueCall is only entered by reflection-created method
+// closures. Keep a hard failure for that unsupported assembly trampoline while
+// allowing ordinary reflect users to link; silently returning would corrupt
+// the caller's register and stack result areas.
+.global reflect_methodValueCall
+.type reflect_methodValueCall, %function
+reflect_methodValueCall:
+	brk 0
+
+// setg installs the goroutine pointer used by cg12-generated Go code.
+.global runtime_setg
+.type runtime_setg, %function
+runtime_setg:
+	mov x28, x0
+	ret
+
+// reflectcall requires the full runtime dynamic-call frame dispatcher. Trap
+// explicitly until that assembly path is available rather than returning with
+// an uninitialized result frame.
+.global runtime_reflectcall
+.type runtime_reflectcall, %function
+runtime_reflectcall:
+	brk 0
+
+// func rawVforkSyscall(trap, a1, a2, a3 uintptr) (r1, err uintptr)
+// The second result uses cg12's hidden-result pointer in x4.
+.global syscall_rawVforkSyscall
+.type syscall_rawVforkSyscall, %function
+syscall_rawVforkSyscall:
+	mov x8, x0
+	mov x0, x1
+	mov x1, x2
+	mov x2, x3
+	mov x3, 0
+	mov x5, 0
+	mov x6, 0
+	svc 0
+	cmn x0, 4095
+	b.cc 1f
+	mov x1, -1
+	neg x0, x0
+	str x0, [x4]
+	mov x0, x1
+	ret
+1:	str xzr, [x4]
+	ret
+
+// func rawSyscallNoError(trap, a1, a2, a3 uintptr) (r1, r2 uintptr)
+// The second result uses cg12's hidden-result pointer in x4.
+.global syscall_rawSyscallNoError
+.type syscall_rawSyscallNoError, %function
+syscall_rawSyscallNoError:
+	mov x8, x0
+	mov x0, x1
+	mov x1, x2
+	mov x2, x3
+	mov x3, 0
+	mov x5, 0
+	mov x6, 0
+	svc 0
+	str x1, [x4]
 	ret
 
 .macro linux_syscall name, number

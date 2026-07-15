@@ -127,3 +127,93 @@ func TestARM64GoRuntimeGarbageCollectorExecutes(t *testing.T) {
 		t.Fatalf("execute GC program: %v\n%s", err, output)
 	}
 }
+
+func TestARM64StandardLibraryIOAndFmtExecute(t *testing.T) {
+	if runtime.GOARCH != "arm64" {
+		t.Skip("AArch64 Go runtime bootstrap")
+	}
+	if _, err := exec.LookPath("cc"); err != nil {
+		t.Skip("cc unavailable")
+	}
+
+	directory := t.TempDir()
+	compiler := filepath.Join(directory, "goc")
+	build := exec.Command("go", "build", "-o", compiler, ".")
+	build.Env = append(os.Environ(), "GOCACHE="+filepath.Join(directory, "cache"))
+	if output, err := build.CombinedOutput(); err != nil {
+		t.Fatalf("build compiler: %v\n%s", err, output)
+	}
+
+	tests := []struct {
+		name   string
+		source string
+		output string
+	}{
+		{name: "io.WriteString", source: "io_write_string.go"},
+		{name: "fmt.Sprintf", source: "fmt_sprintf.go"},
+		{name: "fmt.Println", source: "fmt_println.go", output: "hello 42\n"},
+	}
+
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			program := filepath.Join("..", "..", "goc", "testdata", test.source)
+			executable := filepath.Join(directory, test.source+".bin")
+			compile := exec.Command(compiler, "-o", executable, program)
+			if output, err := compile.CombinedOutput(); err != nil {
+				t.Fatalf("compile %s: %v\n%s", test.source, err, output)
+			}
+
+			output, err := exec.Command(executable).CombinedOutput()
+			if err != nil {
+				t.Fatalf("execute %s: %v\n%s", test.source, err, output)
+			}
+			if string(output) != test.output {
+				t.Fatalf("output from %s = %q, want %q", test.source, output, test.output)
+			}
+		})
+	}
+}
+
+func TestARM64PlainMainBootsGoRuntimeAndRunsInit(t *testing.T) {
+	if runtime.GOARCH != "arm64" {
+		t.Skip("AArch64 Go runtime bootstrap")
+	}
+	if _, err := exec.LookPath("cc"); err != nil {
+		t.Skip("cc unavailable")
+	}
+
+	directory := t.TempDir()
+	compiler := filepath.Join(directory, "goc")
+	build := exec.Command("go", "build", "-o", compiler, ".")
+	build.Env = append(os.Environ(), "GOCACHE="+filepath.Join(directory, "cache"))
+	if output, err := build.CombinedOutput(); err != nil {
+		t.Fatalf("build compiler: %v\n%s", err, output)
+	}
+
+	source := filepath.Join(directory, "main.go")
+	program := `package main
+
+var initialized int
+
+func init() {
+	initialized = 41
+}
+
+func main() {
+	if initialized != 41 {
+		panic("package init did not run")
+	}
+}
+`
+	if err := os.WriteFile(source, []byte(program), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	executable := filepath.Join(directory, "plain-main")
+	compile := exec.Command(compiler, "-o", executable, source)
+	if output, err := compile.CombinedOutput(); err != nil {
+		t.Fatalf("compile plain Go program: %v\n%s", err, output)
+	}
+	if output, err := exec.Command(executable).CombinedOutput(); err != nil {
+		t.Fatalf("execute plain Go program: %v\n%s", err, output)
+	}
+}

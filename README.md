@@ -14,15 +14,11 @@ short-circuit Boolean expressions, `if`, `for`, and expression or expressionless
 are diagnosed with source positions.
 
 The `goc` test corpus is arranged as a complexity ladder. It compiles, links,
-and executes constants, signed and unsigned arithmetic, overflow at each scalar
-width, parallel assignment and shadowing, branches, loops, calls, recursion,
-short-circuit side effects, switches, constants, and mutable globals. Core cases
-run through both unoptimized and optimized cg12 IR. This is an intentionally
-sound subset rather than a claim of full Go compatibility. The frontend now
-has the initial array, struct, slice, pointer, method, multiple-result, builtin,
-and interface-devirtualization support needed by SHA-256. Maps, closures,
-goroutines, general interface dispatch, runtime startup, and garbage collection
-remain future work.
+and executes constants, arithmetic, assignments, branches, loops, calls,
+recursion, switches, globals, arrays, structs, slices, pointers, methods, maps,
+closures, goroutines, and selected interface operations. Core cases run through
+both unoptimized and optimized cg12 IR. This remains an intentionally sound
+subset rather than a claim of full Go compatibility.
 
 Imports are resolved from build-selected source in the repository-owned
 `stdlib/src` tree with `go/build` and type-checked through `go/types`. The first
@@ -36,10 +32,12 @@ fingerprint covering all 32 expected digest bytes; host hashing and generated
 SHA substitutes are not used.
 
 The repository also contains an unchanged copy of the Go 1.26.1 `runtime`
-package. It is build-selected and type-checked from source, and a first execution
-test lowers the public `runtime.NumCPU` function through cg12. This establishes
-the package boundary without claiming runtime initialization yet: scheduler,
-allocator, and collector bootstrap are the next runtime layers.
+package. On ARM64, the normal executable path compiles that runtime through
+cg12 even when the program does not import `runtime`, boots the scheduler through
+`runtime.main`, and runs package initialization tasks recorded in module data.
+The runtime execution test allocates traced structs, grows stacks, runs the
+standard collector, verifies live heap objects, and exits with background
+runtime threads active.
 
 ```sh
 go run ./cmd/goc -emit-ir program.go

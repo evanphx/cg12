@@ -265,6 +265,21 @@ func TestAdvancedExecutionCorpus(t *testing.T) {
 		{"global elided pointer struct slice", `type item struct { value int }; var items = []*item{{value: 17}, {value: 25}}; func Test() int { return items[0].value + items[1].value }`, 42},
 		{"global concrete error interface", `type textError string; func (value textError) Error() string { return string(value) }; var failure error = textError("bad"); func Test() int { if failure != nil { return 42 }; return 0 }`, 42},
 		{"concrete interface assertion", `type item struct { value int }; func Test() int { var value any = &item{value: 42}; return value.(*item).value }`, 42},
+		{"returned interface survives callee frame", `
+			type counterValue interface { Add(int); Value() int }
+			type returnedCounter struct { value int }
+			func (counter *returnedCounter) Add(amount int) { counter.value += amount }
+			func (counter *returnedCounter) Value() int { return counter.value }
+			func makeCounter() counterValue { return &returnedCounter{} }
+			func Test() int { counter := makeCounter(); counter.Add(42); return counter.Value() }
+		`, 42},
+		{"secondary interface result survives callee frame", `
+			type counterValue interface { Value() int }
+			type returnedCounter struct { value int }
+			func (counter *returnedCounter) Value() int { return counter.value }
+			func makeCounter() (int, counterValue) { return 17, &returnedCounter{value: 25} }
+			func Test() int { first, counter := makeCounter(); return first + counter.Value() }
+		`, 42},
 		{"deferred function call", `var result int; func set(value int) { result = value }; func apply() { defer set(42) }; func Test() int { apply(); return result }`, 42},
 		{"recover outside panic", `func Test() int { if recover() == nil { return 42 }; return 0 }`, 42},
 		{"append scalar growth", `func Test() int { var values []int; values = append(values, 7); values = append(values, 11, 13); return len(values)*100 + cap(values)*10 + values[0] + values[1] + values[2] }`, 361},

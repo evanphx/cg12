@@ -39,7 +39,13 @@ func main() {
 	input := flag.Arg(0)
 	src, err := os.ReadFile(input)
 	check(err)
-	m, err := goc.Compile(filepath.Base(input), src)
+	buildExecutable := !*obj && !*asm && !*emitIR
+	var m *ir.Module
+	if buildExecutable && runtime.GOARCH == "arm64" {
+		m, err = goc.CompileExecutable(filepath.Base(input), src)
+	} else {
+		m, err = goc.Compile(filepath.Base(input), src)
+	}
 	check(err)
 	if *optimize {
 		opt.OptimizeModule(m)

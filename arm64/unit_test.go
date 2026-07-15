@@ -507,6 +507,17 @@ func TestGoABIZerosPointerLocalsBeforeCalls(t *testing.T) {
 	assert.Contains(t, disasmModule(t, module), "str xzr, [x29")
 }
 
+func TestGoABINoSplitOmitsStackGrowthCheck(t *testing.T) {
+	module := ir.NewModule()
+	function := module.NewFuncVoid("nosplit")
+	function.GoABI = true
+	function.NoSplit = true
+	function.Entry().RetVoid()
+
+	assembly := disasmModule(t, module)
+	assert.NotContains(t, assembly, "runtime_morestack_noctxt")
+}
+
 func TestGoABISpillsPointerLiveAcrossCall(t *testing.T) {
 	module := ir.NewModule()
 	f := module.NewFunc("pointer_across_call", ir.ClsP)

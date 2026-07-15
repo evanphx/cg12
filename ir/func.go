@@ -117,6 +117,7 @@ type Func struct {
 	RetAgg   *AggType // non-nil when returning an aggregate by value
 	Variadic bool     // accepts variadic arguments (a trailing "..." in the IL)
 	GoABI    bool     // use the Go runtime's platform frame convention
+	NoSplit  bool     // omit the Go stack-growth check at function entry
 
 	// StackPointerWords records pointer-bearing words within OAlloc results.
 	// The outer key is the allocation result temporary ID; inner keys are byte

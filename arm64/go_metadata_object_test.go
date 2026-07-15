@@ -1,6 +1,7 @@
 package arm64
 
 import (
+	"encoding/binary"
 	"testing"
 
 	"github.com/evanphx/cg12/ir"
@@ -13,6 +14,31 @@ func TestGoGCProgramEncodesExactPointerWords(t *testing.T) {
 	program, err := goGCProgram(8, 32, []uint64{8, 24})
 	require.NoError(t, err)
 	assert.Equal(t, []byte{3, 0b00000101, 0}, program)
+}
+
+func TestGoRuntimeModuledataReferencesModuleInitTasks(t *testing.T) {
+	module := ir.NewModule()
+	schedinit := module.NewFuncVoid("runtime.schedinit")
+	schedinit.GoABI = true
+	schedinit.Entry().RetVoid()
+	module.Data = append(module.Data,
+		&ir.Data{Name: ".goc.runtime.datastart", Align: 8, Items: []ir.DataItem{{Sub: ir.SubUB, Ints: []int64{0}}}},
+		&ir.Data{Name: goModuleInitTasksName, Align: 8, Items: []ir.DataItem{{Sub: ir.SubL, Ints: []int64{0}}}},
+		&ir.Data{Name: ".goc.runtime.dataend", Align: 8, Items: []ir.DataItem{{Sub: ir.SubUB, Ints: []int64{0}}}},
+		&ir.Data{Name: "runtime.firstmoduledata", Align: 8},
+	)
+
+	object, err := CompileToObject(module)
+	require.NoError(t, err)
+	moduledata, ok := dataSymbol(object, sanitize("runtime.firstmoduledata"))
+	require.True(t, ok)
+	relocations := make(map[uint64]obj.Reloc)
+	for _, relocation := range object.DataRelocs {
+		relocations[relocation.Offset] = relocation
+	}
+	assert.Equal(t, sanitize(goModuleInitTasksName), relocations[moduledata.Value+472].Sym)
+	assert.Equal(t, uint64(1), binary.LittleEndian.Uint64(object.Data[moduledata.Value+480:]))
+	assert.Equal(t, uint64(1), binary.LittleEndian.Uint64(object.Data[moduledata.Value+488:]))
 }
 
 func TestGoPCSPTerminatesBeforeFollowingFunction(t *testing.T) {

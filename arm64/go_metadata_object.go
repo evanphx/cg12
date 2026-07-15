@@ -18,6 +18,17 @@ type goFunctionInfo struct {
 	pointerWords []int
 }
 
+const goModuleInitTasksName = ".goc.module.inittasks"
+
+func goModuleInitTaskCount(module *ir.Module) int {
+	for _, data := range module.Data {
+		if data.Name == goModuleInitTasksName {
+			return len(data.Items)
+		}
+	}
+	return 0
+}
+
 func moduleUsesGoRuntime(module *ir.Module) bool {
 	for _, function := range module.Funcs {
 		if function.Name == "runtime.schedinit" {
@@ -35,7 +46,7 @@ type goMetadataBuilder struct {
 	relocs []obj.Reloc
 }
 
-func addGoRuntimeObjectMetadata(object *obj.Object, functions []goFunctionInfo, moduledata *ir.Data, pointerOffsets []uint64) error {
+func addGoRuntimeObjectMetadata(object *obj.Object, functions []goFunctionInfo, moduledata *ir.Data, pointerOffsets []uint64, moduleInitTaskCount int) error {
 	if len(functions) == 0 {
 		return addData(object, moduledata)
 	}
@@ -61,7 +72,7 @@ func addGoRuntimeObjectMetadata(object *obj.Object, functions []goFunctionInfo, 
 		object.Data = append(object.Data, 0)
 	}
 	builder := &goMetadataBuilder{object: object, base: uint64(len(object.Data)), labels: make(map[string]uint64)}
-	builder.build(functions, moduledata, gcProgram, noptrBSSName, noptrBSSSize)
+	builder.build(functions, moduledata, gcProgram, noptrBSSName, noptrBSSSize, moduleInitTaskCount)
 	object.Data = append(object.Data, builder.data...)
 	object.DataRelocs = append(object.DataRelocs, builder.relocs...)
 	return nil
@@ -115,7 +126,7 @@ func goGCProgram(dataStart, dataEnd uint64, pointerOffsets []uint64) ([]byte, er
 	return program, nil
 }
 
-func (builder *goMetadataBuilder) build(functions []goFunctionInfo, moduledata *ir.Data, gcProgram []byte, noptrBSSName string, noptrBSSSize uint64) {
+func (builder *goMetadataBuilder) build(functions []goFunctionInfo, moduledata *ir.Data, gcProgram []byte, noptrBSSName string, noptrBSSSize uint64, moduleInitTaskCount int) {
 	const findFuncBuckets = 4096
 	functions = append(functions, goAssemblyFunctionInfo()...)
 
@@ -251,7 +262,20 @@ func (builder *goMetadataBuilder) build(functions []goFunctionInfo, moduledata *
 	builder.externalPointer(sanitize(".goc.runtime.datastart"))      // rodata
 	builder.pointer(".goc.go.gofunc")
 	builder.pointer(".goc.go.pclntable.end")
-	builder.data = append(builder.data, make([]byte, 256)...)
+	for range 4 {
+		builder.emptySlice()
+	}
+	builder.u64(0) // pluginpath
+	builder.u64(0)
+	builder.emptySlice() // pkghashes
+	if moduleInitTaskCount > 0 {
+		builder.externalPointer(sanitize(goModuleInitTasksName))
+		builder.u64(uint64(moduleInitTaskCount))
+		builder.u64(uint64(moduleInitTaskCount))
+	} else {
+		builder.emptySlice()
+	}
+	builder.data = append(builder.data, make([]byte, 96)...)
 	builder.object.Syms = append(builder.object.Syms, obj.Sym{
 		Name: sanitize(moduledata.Name), Section: obj.SecData,
 		Value: moduleStart, Size: 592, Global: moduledata.Linkage.Export,

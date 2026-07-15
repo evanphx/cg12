@@ -188,7 +188,7 @@ func CompileToObjectWith(m *ir.Module, opts Options) (*obj.Object, error) {
 		}
 	}
 	if moduledata != nil {
-		if err := addGoRuntimeObjectMetadata(o, goFunctions, moduledata, dataPointerOffsets); err != nil {
+		if err := addGoRuntimeObjectMetadata(o, goFunctions, moduledata, dataPointerOffsets, goModuleInitTaskCount(m)); err != nil {
 			return nil, err
 		}
 	}
@@ -930,7 +930,9 @@ func (m *mc) prologue() {
 		return
 	}
 	if m.f.GoABI {
-		m.goStackPrologue()
+		if !m.f.NoSplit {
+			m.goStackPrologue()
+		}
 		m.frameStart = m.prog.Len() * 4
 	}
 	// A strategy may emit a stack-growth guard before the frame is set up; its
