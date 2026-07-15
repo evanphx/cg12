@@ -49,6 +49,18 @@ type Instr struct {
 	// it came from and where it was called. nil for ordinary (non-inlined) code.
 	// Backends turn it into DWARF DW_TAG_inlined_subroutine records.
 	Inl *InlineSite
+
+	// Asm carries an OAsm's inline-assembly template and operand layout.
+	Asm *AsmOp
+}
+
+// AsmOp describes a GNU inline-assembly statement lowered to an OAsm. The
+// operands are numbered in the GNU order used by the template's %N placeholders:
+// the single output (when NumOut == 1) is %0 and lives in the instruction's To,
+// then the input operands are %NumOut, %NumOut+1, ... in the order of Args.
+type AsmOp struct {
+	Template string // the assembler template, verbatim between the quotes
+	NumOut   int    // number of output operands (0 or 1)
 }
 
 // InlineSite describes one level of inlining: a call to Callee at the source

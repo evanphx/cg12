@@ -1208,6 +1208,8 @@ func (m *mc) instr(in *ir.Instr) {
 		// &&label: materialize a block's address (RIP-relative) then place it.
 		m.prog.LeaLabel(true, gpScratch0.mreg(), in.Blk.Name)
 		m.move(m.refLoc(in.To), regLoc(gpScratch0, 8, false))
+	case ir.OAsm:
+		m.fail(fmt.Errorf("amd64: inline assembly is only supported when emitting assembly text, not object code"))
 	case ir.OGetReg:
 		// Read a physical register directly (Args[0] is a RefReg naming it).
 		src := regLoc(Reg(in.Arg(0).ID), in.Cls.Size(), in.Cls.IsFloat())

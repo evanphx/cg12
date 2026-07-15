@@ -1305,6 +1305,8 @@ func (m *mc) instr(in *ir.Instr) {
 		} else {
 			m.emitCall(in)
 		}
+	case ir.OAsm:
+		m.fail("arm64: inline assembly is only supported when emitting assembly text, not object code")
 	case ir.OGetReg:
 		phys := mreg(Reg(in.Args[0].ID))
 		d, done := m.dst(in.To, in.Cls.Size())

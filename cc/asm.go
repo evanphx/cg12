@@ -3,6 +3,7 @@ package cc
 import (
 	"strings"
 
+	"github.com/evanphx/cg12/ir"
 	"modernc.org/cc/v4"
 )
 
@@ -47,7 +48,11 @@ func asmStringLit(e cc.ExpressionNode) (string, bool) {
 	return "", false
 }
 
-// genAsm lowers an inline-assembly statement.
+// genAsm lowers an inline-assembly statement to an OAsm instruction, which a
+// backend emitting assembly text passes through (substituting the %N operand
+// placeholders with the registers the allocator assigns). Operand binding is
+// limited to the plain register constraints "r" (input) and "=r" (output); any
+// other constraint fails loudly rather than miscompiling.
 func (g *gen) genAsm(as *cc.AsmStatement) {
 	if as == nil || as.Asm == nil {
 		return
@@ -55,8 +60,7 @@ func (g *gen) genAsm(as *cc.AsmStatement) {
 	a := as.Asm
 	tmpl := asmTemplate(a)
 
-	switch {
-	case tmpl == "" || tmpl == "nop":
+	if tmpl == "" || tmpl == "nop" {
 		// The empty template is the standard compiler barrier
 		// (`__asm__ volatile("" ::: "memory")`) and `nop` is a hint; both are
 		// no-ops for the values cg12 computes. Input operands are still evaluated
@@ -64,7 +68,63 @@ func (g *gen) genAsm(as *cc.AsmStatement) {
 		g.asmEvalInputs(a)
 		return
 	}
-	g.fail("cc: unsupported inline asm %q: constraint-directed assembly is not supported", tmpl)
+
+	outs, ins, ok := g.asmCollect(a)
+	if !ok {
+		return // asmCollect already recorded the failure
+	}
+	outCls := ir.ClsW
+	if len(outs) == 1 {
+		outCls = clsOf(outs[0].typ)
+	}
+	res := g.cur.Asm(tmpl, outCls, len(outs) == 1, ins...)
+	if len(outs) == 1 {
+		g.storeVal(outs[0].addr, res, outs[0].typ)
+	}
+}
+
+// asmOut is a resolved output operand: the address to store the asm's result to
+// and the C type of that lvalue.
+type asmOut struct {
+	addr ir.Ref
+	typ  cc.Type
+}
+
+// asmCollect gathers an inline-asm statement's output and input operands. Group 0
+// (the first `:`) is outputs, group 1 is inputs, and later groups are clobbers
+// (bare strings, which carry no operand). Only "=r" outputs and "r" inputs are
+// supported, and at most one output; anything else fails loudly.
+func (g *gen) asmCollect(a *cc.Asm) (outs []asmOut, ins []ir.Ref, ok bool) {
+	group := 0
+	for al := a.AsmArgList; al != nil; al = al.AsmArgList {
+		for el := al.AsmExpressionList; el != nil; el = el.AsmExpressionList {
+			cons, operand, isOp := asmOperand(el.AssignmentExpression)
+			if !isOp {
+				continue // a clobber string, not an operand
+			}
+			switch group {
+			case 0: // outputs
+				if cons != "=r" {
+					g.fail("cc: unsupported inline-asm output constraint %q (only \"=r\" is supported)", cons)
+					return nil, nil, false
+				}
+				addr, typ := g.genAddr(operand)
+				outs = append(outs, asmOut{addr, typ})
+			case 1: // inputs
+				if cons != "r" {
+					g.fail("cc: unsupported inline-asm input constraint %q (only \"r\" is supported)", cons)
+					return nil, nil, false
+				}
+				ins = append(ins, g.genExpr(operand))
+			}
+		}
+		group++
+	}
+	if len(outs) > 1 {
+		g.fail("cc: inline asm with multiple outputs is not supported")
+		return nil, nil, false
+	}
+	return outs, ins, true
 }
 
 // asmTemplate returns the assembler template with its surrounding quotes removed.

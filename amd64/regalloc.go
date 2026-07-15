@@ -98,6 +98,8 @@ func numberInstrs(cfg *analysis.CFG) *numbering {
 			case ir.OCall:
 				n.callAt = append(n.callAt, n.next)
 				n.safeAt = append(n.safeAt, n.next)
+			case ir.OAsm:
+				n.callAt = append(n.callAt, n.next) // clobbers like a call, but is not a GC safepoint
 			case ir.OSafepoint:
 				n.safeAt = append(n.safeAt, n.next)
 			}

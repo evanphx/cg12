@@ -70,6 +70,8 @@ func (e *emitter) instr(in *ir.Instr) {
 	case ir.OBlockAddr:
 		e.line("leaq %s(%%rip), %s", e.blabel(in.Blk), gpn(gpScratch0, 8))
 		e.move(e.refLoc(in.To), regLoc(gpScratch0, 8, false))
+	case ir.OAsm:
+		panic("amd64: inline-assembly pass-through is not yet implemented for the amd64 text emitter")
 	case ir.OGetReg:
 		src := regLoc(Reg(in.Arg(0).ID), in.Cls.Size(), in.Cls.IsFloat())
 		e.move(e.refLoc(in.To), src)

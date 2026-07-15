@@ -526,6 +526,8 @@ func (e *emitter) emitInstr(b *ir.Block, in *ir.Instr) {
 		d, done := e.dstReg(in.To, 8)
 		e.line("adr %s, %s", d, e.blockLabel(in.Blk)) // &&label
 		done()
+	case ir.OAsm:
+		e.emitAsm(in)
 	default:
 		if in.Op.IsLoad() {
 			e.emitLoad(in)

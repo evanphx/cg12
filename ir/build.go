@@ -377,6 +377,24 @@ func (b *Block) Call(retCls Cls, callee Ref, args ...Ref) Ref {
 	return res
 }
 
+// Asm emits an inline-assembly statement (OAsm) with the given template. ins are
+// the input operands. When hasOut is true the instruction has a single output
+// operand of class outCls, allocated as a fresh result temporary and returned
+// (else the result is R). Operands are numbered output-first for the template's
+// %N placeholders.
+func (b *Block) Asm(template string, outCls Cls, hasOut bool, ins ...Ref) Ref {
+	in := Instr{Op: OAsm, Cls: outCls, Args: append([]Ref(nil), ins...), Pos: b.curPos,
+		Asm: &AsmOp{Template: template}}
+	var res Ref
+	if hasOut {
+		in.Asm.NumOut = 1
+		res = b.fn.newTemp("", outCls)
+		in.To = res
+	}
+	b.Instrs = append(b.Instrs, in)
+	return res
+}
+
 // Safepoint marks a garbage-collector safepoint that is not a call (an inlined
 // allocation fast path, a loop back-edge poll, ...). The backend emits a stack
 // map of the managed references live here, but no machine code.

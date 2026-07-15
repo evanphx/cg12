@@ -144,6 +144,14 @@ const (
 	// (32 or 64). It backs __builtin_clz / __builtin_clzll.
 	OClz
 
+	// OAsm is a GNU inline-assembly statement carried through as an opaque,
+	// architecture-specific instruction. Instr.Asm holds the template and operand
+	// layout; Args are the input operands and To (when Asm.NumOut == 1) is the
+	// single output. It clobbers like a call, so a backend that emits assembly
+	// text passes the template through (substituting %-operands with the allocated
+	// registers) while an object-emitting backend, having no assembler, rejects it.
+	OAsm
+
 	numOps
 )
 
@@ -239,6 +247,8 @@ var opTable = [numOps]opInfo{
 
 	OGetReg: {name: "getreg", hasResult: true},
 	OSetReg: {name: "setreg"},
+
+	OAsm: {name: "asm", hasResult: true},
 }
 
 // Info returns the static metadata for an opcode.

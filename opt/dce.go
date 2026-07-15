@@ -69,6 +69,8 @@ func hasSideEffect(op ir.Op) bool {
 		return true // reads/writes of a live machine register are volatile
 	case op == ir.OAllocN, op == ir.OStackSave, op == ir.OStackRestore:
 		return true // these move or snapshot the stack pointer; never remove them
+	case op == ir.OAsm:
+		return true // inline asm is volatile: it may read/write memory and registers
 	}
 	return false
 }
