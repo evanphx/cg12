@@ -378,21 +378,26 @@ func (b *Block) Call(retCls Cls, callee Ref, args ...Ref) Ref {
 }
 
 // Asm emits an inline-assembly statement (OAsm) with the given template. ins are
-// the input operands. When hasOut is true the instruction has a single output
-// operand of class outCls, allocated as a fresh result temporary and returned
-// (else the result is R). Operands are numbered output-first for the template's
-// %N placeholders.
-func (b *Block) Asm(template string, outCls Cls, hasOut bool, ins []Ref, imm []bool) Ref {
-	in := Instr{Op: OAsm, Cls: outCls, Args: append([]Ref(nil), ins...), Pos: b.curPos,
-		Asm: &AsmOp{Template: template, Imm: imm}}
-	var res Ref
-	if hasOut {
-		in.Asm.NumOut = 1
-		res = b.fn.newTemp("", outCls)
-		in.To = res
+// the input operands and outCls gives the class of each output operand (zero or
+// more). A fresh result temporary is allocated for each output and they are
+// returned in order: the first is the instruction's To, the rest are Defs.
+// Operands are numbered output-first for the template's %N placeholders.
+func (b *Block) Asm(template string, outCls []Cls, ins []Ref, imm []bool) []Ref {
+	in := Instr{Op: OAsm, Args: append([]Ref(nil), ins...), Pos: b.curPos,
+		Asm: &AsmOp{Template: template, NumOut: len(outCls), Imm: imm}}
+	outs := make([]Ref, len(outCls))
+	for i, cls := range outCls {
+		t := b.fn.newTemp("", cls)
+		outs[i] = t
+		if i == 0 {
+			in.Cls = cls
+			in.To = t
+		} else {
+			in.Defs = append(in.Defs, t)
+		}
 	}
 	b.Instrs = append(b.Instrs, in)
-	return res
+	return outs
 }
 
 // Safepoint marks a garbage-collector safepoint that is not a call (an inlined

@@ -71,6 +71,17 @@ type AsmOp struct {
 // InputImm reports whether input operand k is an immediate.
 func (a *AsmOp) InputImm(k int) bool { return k < len(a.Imm) && a.Imm[k] }
 
+// AsmOutputs returns an OAsm's output operand refs in %-index order: the To
+// (operand %0) followed by the Defs (the additional outputs).
+func (in *Instr) AsmOutputs() []Ref {
+	if in.Asm == nil || in.Asm.NumOut == 0 {
+		return nil
+	}
+	outs := make([]Ref, 0, in.Asm.NumOut)
+	outs = append(outs, in.To)
+	return append(outs, in.Defs...)
+}
+
 // InlineSite describes one level of inlining: a call to Callee at the source
 // position Call was replaced by the callee's body. Parent is the enclosing
 // InlineSite when this inline happened inside already-inlined code, forming a

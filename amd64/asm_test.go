@@ -84,11 +84,18 @@ long keeptest(long k, long a, long b){
 int addimm(int a){ /* an "i" operand becomes a literal immediate */
 	int r; __asm__("movl %k1, %k0\n\taddl %2, %k0" : "=r"(r) : "r"(a), "i"(100)); return r;
 }
+int sumdiff(int a, int b){ /* two "=&r" outputs, kept distinct from the inputs */
+	int s, d;
+	__asm__("movl %k2, %k0\n\taddl %k3, %k0\n\tmovl %k2, %k1\n\tsubl %k3, %k1"
+		: "=&r"(s), "=&r"(d) : "r"(a), "r"(b));
+	return s * 1000 + d;
+}
 int runtest(void){
 	if(add(20, 22) != 42) return 1;
 	if(shl(21) != 42) return 2;
 	if(keeptest(1000, 50, 8) != 1042) return 3; /* 50-8+1000 */
 	if(addimm(23) != 123) return 4;
+	if(sumdiff(20, 8) != 28012) return 5; /* 28*1000 + 12 */
 	return 0;
 }`
 	require.Equal(t, 0, runAsmText(t, src, false))

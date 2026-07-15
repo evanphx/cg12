@@ -40,24 +40,23 @@ func (e *emitter) emitAsm(in *ir.Instr) {
 		return r
 	}
 
-	// The single output operand is %0.
-	idx := 0
+	// The output operands are %0, %1, ... -- the To (first) then the Defs.
 	var finals []func()
-	if asm.NumOut == 1 {
-		t := e.f.Temps[in.To.ID]
-		w := in.Cls.Size()
+	for oi, oref := range in.AsmOutputs() {
+		t := e.f.Temps[oref.ID]
+		w := e.f.ClassOf(oref).Size()
 		if t.Reg != ir.NoReg {
-			vals[0] = asmVal{reg: Reg(t.Reg), width: w}
+			vals[oi] = asmVal{reg: Reg(t.Reg), width: w}
 		} else {
 			r := nextScratch()
-			vals[0] = asmVal{reg: r, width: w}
+			vals[oi] = asmVal{reg: r, width: w}
 			slot := e.spillBase + t.Slot
 			finals = append(finals, func() { e.line("str %s, [x29, #%d]", r.Name(w), slot) })
 		}
-		idx = 1
 	}
 
 	// The remaining operands are the inputs.
+	idx := asm.NumOut
 	for k, a := range in.Args {
 		if asm.InputImm(k) {
 			vals[idx] = asmVal{imm: true, immS: fmt.Sprintf("#%d", e.f.Consts[a.ID].Int)}

@@ -31,8 +31,13 @@ long keeptest(long k, long a, long b){
 int addimm(int a){ /* an "i" operand becomes a literal immediate */
 	int r; __asm__("add %w0, %w1, %2" : "=r"(r) : "r"(a), "i"(100)); return r;
 }
+int sumdiff(int a, int b){ /* two "=&r" outputs, kept distinct from the inputs */
+	int s, d;
+	__asm__("add %w0, %w2, %w3\n\tsub %w1, %w2, %w3" : "=&r"(s), "=&r"(d) : "r"(a), "r"(b));
+	return s * 1000 + d;
+}
 int main(void){
-	printf("%d %ld %ld %d\n", add(20, 22), shl(3, 4), keeptest(1000, 50, 8), addimm(23));
+	printf("%d %ld %ld %d %d\n", add(20, 22), shl(3, 4), keeptest(1000, 50, 8), addimm(23), sumdiff(20, 8));
 	return 0;
 }`
 	for _, optimize := range []bool{false, true} {
@@ -48,7 +53,7 @@ int main(void){
 			}
 			out, code := buildAndRun(t, m, "")
 			require.Equal(t, 0, code)
-			require.Equal(t, "42 48 1042 123\n", out) // 20+22, 3<<4, 50-8+1000, 23+100
+			require.Equal(t, "42 48 1042 123 28012\n", out) // +, <<, sub+k, +imm, 28*1000+12
 		})
 	}
 }

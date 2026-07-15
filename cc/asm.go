@@ -52,8 +52,9 @@ func asmStringLit(e cc.ExpressionNode) (string, bool) {
 // genAsm lowers an inline-assembly statement to an OAsm instruction, which a
 // backend emitting assembly text passes through (substituting the %N operand
 // placeholders with the registers the allocator assigns). Operand binding is
-// limited to the plain register constraints "r" (input) and "=r" (output); any
-// other constraint fails loudly rather than miscompiling.
+// limited to register constraints -- "=r" outputs (one or more) and "r" inputs
+// -- and "i" immediate inputs; any other constraint fails loudly rather than
+// miscompiling.
 func (g *gen) genAsm(as *cc.AsmStatement) {
 	if as == nil || as.Asm == nil {
 		return
@@ -74,13 +75,13 @@ func (g *gen) genAsm(as *cc.AsmStatement) {
 	if !ok {
 		return // asmCollect already recorded the failure
 	}
-	outCls := ir.ClsW
-	if len(outs) == 1 {
-		outCls = clsOf(outs[0].typ)
+	outCls := make([]ir.Cls, len(outs))
+	for i, o := range outs {
+		outCls[i] = clsOf(o.typ)
 	}
-	res := g.cur.Asm(tmpl, outCls, len(outs) == 1, ins, imm)
-	if len(outs) == 1 {
-		g.storeVal(outs[0].addr, res, outs[0].typ)
+	res := g.cur.Asm(tmpl, outCls, ins, imm)
+	for i, o := range outs {
+		g.storeVal(o.addr, res[i], o.typ)
 	}
 }
 
@@ -94,9 +95,9 @@ type asmOut struct {
 // asmCollect gathers an inline-asm statement's output and input operands. Group 0
 // (the first `:`) is outputs, group 1 is inputs, and later groups are clobbers
 // (bare strings, which carry no operand). Outputs must be "=r"; inputs may be "r"
-// (a register) or "i" (a constant, substituted as an immediate). At most one
-// output is supported; anything else fails loudly. The returned imm slice is
-// parallel to ins: imm[k] is true when input k is an immediate.
+// (a register) or "i" (a constant, substituted as an immediate); other
+// constraints fail loudly. The returned imm slice is parallel to ins: imm[k] is
+// true when input k is an immediate.
 func (g *gen) asmCollect(a *cc.Asm) (outs []asmOut, ins []ir.Ref, imm []bool, ok bool) {
 	group := 0
 	for al := a.AsmArgList; al != nil; al = al.AsmArgList {
@@ -107,8 +108,10 @@ func (g *gen) asmCollect(a *cc.Asm) (outs []asmOut, ins []ir.Ref, imm []bool, ok
 			}
 			switch group {
 			case 0: // outputs
-				if cons != "=r" {
-					g.fail("cc: unsupported inline-asm output constraint %q (only \"=r\" is supported)", cons)
+				// "=&r" (early clobber) is accepted and treated the same as "=r":
+				// cg12 keeps every asm output distinct from the inputs already.
+				if cons != "=r" && cons != "=&r" {
+					g.fail("cc: unsupported inline-asm output constraint %q (only \"=r\" and \"=&r\" are supported)", cons)
 					return nil, nil, nil, false
 				}
 				addr, typ := g.genAddr(operand)
@@ -133,10 +136,6 @@ func (g *gen) asmCollect(a *cc.Asm) (outs []asmOut, ins []ir.Ref, imm []bool, ok
 			}
 		}
 		group++
-	}
-	if len(outs) > 1 {
-		g.fail("cc: inline asm with multiple outputs is not supported")
-		return nil, nil, nil, false
 	}
 	return outs, ins, imm, true
 }

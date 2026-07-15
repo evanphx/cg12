@@ -147,9 +147,17 @@ func buildIntervals(f *ir.Func, cfg *analysis.CFG, live *analysis.Liveness, num 
 		p := bp[0]
 		for k := range b.Instrs {
 			in := &b.Instrs[k]
+			// Inline-asm inputs are early-clobber against the outputs: extending
+			// them one position past the instruction keeps them live through the
+			// output definitions, so the allocator never reuses an input register
+			// for an output (which would corrupt an input still read by the asm).
+			argEnd := p
+			if in.Op == ir.OAsm {
+				argEnd = p + 1
+			}
 			for _, a := range in.Args {
 				if a.Kind == ir.RefTemp {
-					extend(int(a.ID), p)
+					extend(int(a.ID), argEnd)
 				}
 			}
 			if in.To.Kind == ir.RefTemp {
