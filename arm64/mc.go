@@ -113,7 +113,7 @@ func CompileToObjectWith(m *ir.Module, opts Options) (*obj.Object, error) {
 		params := dwarfParams(f)
 		paramTemps := paramTempIDs(f)
 		if f.GoABI {
-			inferStackPointerWords(f)
+			prepareGoABI(f)
 		}
 		ir.LowerPointers(f, ptrCls)
 		if err := lower(f, opts.TLSModel); err != nil {
@@ -568,6 +568,107 @@ type blockSym struct {
 	off  int
 }
 
+func prepareGoABI(function *ir.Func) {
+	inferStackPointerWords(function)
+	for _, temporary := range function.Temps {
+		if temporary.Cls == ir.ClsP {
+			temporary.GCRef = true
+		}
+	}
+}
+
+func inferStackPointerWords(function *ir.Func) {
+	definitions := make(map[uint32]*ir.Instr)
+	for _, block := range function.Blocks {
+		for index := range block.Instrs {
+			instruction := &block.Instrs[index]
+			if instruction.To.Kind == ir.RefTemp {
+				definitions[instruction.To.ID] = instruction
+			}
+		}
+	}
+
+	var resolveAddress func(ir.Ref) (uint32, int, bool)
+	resolveAddress = func(reference ir.Ref) (uint32, int, bool) {
+		if reference.Kind != ir.RefTemp {
+			return 0, 0, false
+		}
+		instruction := definitions[reference.ID]
+		if instruction == nil {
+			return 0, 0, false
+		}
+		if instruction.Op.IsAlloc() {
+			return reference.ID, 0, true
+		}
+		if instruction.Op != ir.OAdd || len(instruction.Args) != 2 {
+			return 0, 0, false
+		}
+		base, offset, ok := resolveAddress(instruction.Args[0])
+		if !ok || instruction.Args[1].Kind != ir.RefConst {
+			return 0, 0, false
+		}
+		constant := function.Consts[instruction.Args[1].ID]
+		if constant.Kind != ir.ConstInt {
+			return 0, 0, false
+		}
+		return base, offset + int(constant.Int), true
+	}
+
+	function.StackPointerWords = make(map[uint32]map[int]bool)
+	for _, block := range function.Blocks {
+		for index := range block.Instrs {
+			instruction := &block.Instrs[index]
+			if !instruction.Op.IsStore() || len(instruction.Args) < 2 {
+				continue
+			}
+			value := instruction.Args[0]
+			if function.ClassOf(value) != ir.ClsP {
+				continue
+			}
+			allocation, offset, ok := resolveAddress(instruction.Args[1])
+			if !ok || offset%8 != 0 {
+				continue
+			}
+			if function.StackPointerWords[allocation] == nil {
+				function.StackPointerWords[allocation] = make(map[int]bool)
+			}
+			function.StackPointerWords[allocation][offset] = true
+		}
+	}
+}
+
+// goRegisterPointerMask reports which x0-x7 argument registers contain
+// pointers at function entry. The stack-growth trampoline uses this to expose
+// only actual pointers to the runtime stack copier while preserving every
+// untyped register value in an unscanned save area.
+func goRegisterPointerMask(function *ir.Func) uint8 {
+	var assigner argAssigner
+	var mask uint8
+	for _, parameter := range function.Params {
+		if parameter.Agg != nil {
+			class := classifyAgg(parameter.Agg)
+			switch class.kind {
+			case aggGP:
+				assigner.assignGP(class.nregs, class.size)
+			case aggHFA:
+				assigner.assignHFA(class.nregs, class.size)
+			default:
+				location := assigner.assign(ir.ClsL)
+				if !location.onStack {
+					mask |= 1 << uint(location.reg-X0)
+				}
+			}
+			continue
+		}
+
+		location := assigner.assign(parameter.Cls)
+		if parameter.GCRef && !location.onStack {
+			mask |= 1 << uint(location.reg-X0)
+		}
+	}
+	return mask
+}
+
 func newEmitter(f *ir.Func, alloc *allocation, gc GCStrategy, tlsModel TLSModel) *mc {
 	m := &mc{
 		f: f, alloc: alloc, gc: gc, tlsModel: tlsModel,
@@ -823,7 +924,7 @@ func (m *mc) zeroGoPointerSlots() {
 	if !m.f.GoABI {
 		return
 	}
-	for _, off := range goPointerFrameOffsets(m.f, m.allocOff) {
+	for _, off := range goPointerFrameOffsets(m.f, m.allocOff, m.spillBase) {
 		m.spillStore(a64.Reg(31), false, off, 8)
 	}
 }
@@ -845,6 +946,7 @@ func (m *mc) goStackPrologue() {
 	m.emit(a64.CmpReg(true, mcGP1, mcGP0))
 	m.prog.Bcond(a64.HI, enough)
 	m.emit(a64.AddImm(true, a64.Reg(15), mcX30, 0))
+	m.movImm(a64.Reg(14), int64(goRegisterPointerMask(m.f)), false)
 	m.reloc("runtime_morestack_noctxt", obj.R_AARCH64_CALL26)
 	m.emit(a64.Bl(0))
 	m.prog.B(retry)
@@ -952,12 +1054,12 @@ func (m *mc) frameTop() int {
 }
 
 func (m *mc) goPointerWords() []int {
-	return goPointerWordIndexes(m.f, m.allocOff)
+	return goPointerWordIndexes(m.f, m.allocOff, m.spillBase)
 }
 
-func goPointerWordIndexes(function *ir.Func, allocations map[*ir.Instr]int) []int {
+func goPointerWordIndexes(function *ir.Func, allocations map[*ir.Instr]int, spillBase int) []int {
 	seen := make(map[int]bool)
-	for _, frameOffset := range goPointerFrameOffsets(function, allocations) {
+	for _, frameOffset := range goPointerFrameOffsets(function, allocations, spillBase) {
 		word := (frameOffset - 16) / 8
 		if frameOffset >= 16 {
 			seen[word] = true
@@ -971,13 +1073,20 @@ func goPointerWordIndexes(function *ir.Func, allocations map[*ir.Instr]int) []in
 	return words
 }
 
-func goPointerFrameOffsets(function *ir.Func, allocations map[*ir.Instr]int) []int {
+func goPointerFrameOffsets(function *ir.Func, allocations map[*ir.Instr]int, spillBase int) []int {
 	seen := make(map[int]bool)
 	for instruction, allocationOffset := range allocations {
 		for wordOffset := range function.StackPointerWords[instruction.To.ID] {
 			frameOffset := allocationOffset + wordOffset
 			if frameOffset >= 16 && frameOffset%8 == 0 {
 				seen[frameOffset] = true
+			}
+		}
+	}
+	if function.GoABI {
+		for _, temporary := range function.Temps {
+			if temporary.GCRef && temporary.Reg == ir.NoReg && temporary.Slot >= 0 {
+				seen[spillBase+temporary.Slot] = true
 			}
 		}
 	}

@@ -604,6 +604,8 @@ runtime_getg:
 .type runtime_gogo, %function
 runtime_gogo:
 	ldr x28, [x0, 16]
+	ldr x10, [x28, 48]
+	str x28, [x10, 184]
 	ldr x9, [x0]
 	mov sp, x9
 	ldr x29, [x0, 40]
@@ -643,7 +645,7 @@ runtime_morestack:
 	// stack unwinder sees x15 at the frame's LR slot and therefore skips the
 	// interrupted function, whose stack check ran before it allocated a frame.
 	// Execution uses the retry PC kept separately at offset 72.
-	sub sp, sp, 224
+	sub sp, sp, 320
 	str x15, [sp, 0]
 	stp x0, x1, [sp, 8]
 	stp x2, x3, [sp, 24]
@@ -664,6 +666,44 @@ runtime_morestack:
 2:	mov x9, 0
 3:	str x9, [sp, 208]
 	str x18, [sp, 216]
+	str x14, [sp, 288]
+
+	// The original argument values above are outside the pointer bitmap. Copy
+	// only pointer-bearing registers into the scanned mirror area. x14 is a
+	// per-function bitmap supplied by the generated stack-check slow path.
+	tbz x14, 0, 10f
+	str x0, [sp, 224]
+	b 11f
+10:	str xzr, [sp, 224]
+11:	tbz x14, 1, 12f
+	str x1, [sp, 232]
+	b 13f
+12:	str xzr, [sp, 232]
+13:	tbz x14, 2, 14f
+	str x2, [sp, 240]
+	b 15f
+14:	str xzr, [sp, 240]
+15:	tbz x14, 3, 16f
+	str x3, [sp, 248]
+	b 17f
+16:	str xzr, [sp, 248]
+17:	tbz x14, 4, 18f
+	str x4, [sp, 256]
+	b 19f
+18:	str xzr, [sp, 256]
+19:	tbz x14, 5, 20f
+	str x5, [sp, 264]
+	b 21f
+20:	str xzr, [sp, 264]
+21:	tbz x14, 6, 22f
+	str x6, [sp, 272]
+	b 23f
+22:	str xzr, [sp, 272]
+23:	tbz x14, 7, 24f
+	str x7, [sp, 280]
+	b 25f
+24:	str xzr, [sp, 280]
+25:
 
 	ldr x8, [x28, 48]
 	mov x9, sp
@@ -684,7 +724,7 @@ runtime_morestack:
 
 	// m.morebuf is the gobuf immediately following m.g0.
 	str x15, [x8, 16]
-	add x10, x9, 224
+	add x10, x9, 320
 	str x10, [x8, 8]
 	str x28, [x8, 24]
 
@@ -703,6 +743,7 @@ runtime_morestack:
 runtime_morestack_restore:
 	ldr x16, [sp, 72]
 	ldr x18, [sp, 216]
+	ldr x14, [sp, 288]
 	ldr x9, [sp, 208]
 	cbz x29, 2f
 	str x9, [x29]
@@ -719,7 +760,23 @@ runtime_morestack_restore:
 	ldp x2, x3, [sp, 24]
 	ldp x4, x5, [sp, 40]
 	ldp x6, x7, [sp, 56]
-	add sp, sp, 224
+	tbz x14, 0, 30f
+	ldr x0, [sp, 224]
+30:	tbz x14, 1, 31f
+	ldr x1, [sp, 232]
+31:	tbz x14, 2, 32f
+	ldr x2, [sp, 240]
+32:	tbz x14, 3, 33f
+	ldr x3, [sp, 248]
+33:	tbz x14, 4, 34f
+	ldr x4, [sp, 256]
+34:	tbz x14, 5, 35f
+	ldr x5, [sp, 264]
+35:	tbz x14, 6, 36f
+	ldr x6, [sp, 272]
+36:	tbz x14, 7, 37f
+	ldr x7, [sp, 280]
+37:	add sp, sp, 320
 	br x16
 .global runtime_morestack_restore_end
 runtime_morestack_restore_end:
@@ -750,11 +807,10 @@ runtime_systemstack:
 	str x11, [x28, 56]
 	str x29, [x28, 96]
 	adr x11, runtime_systemstack_switch
-	add x11, x11, 4
 	str x11, [x28, 64]
 	str x28, [x28, 72]
 	str xzr, [x28, 80]
-	str xzr, [x28, 88]
+	str x30, [x28, 88]
 	mov x11, x28
 	ldr x28, [x9]
 	ldr x12, [x28, 56]

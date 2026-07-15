@@ -48,6 +48,34 @@ func Test() int {
 	assert.True(t, callsSymbol(escaping, "runtime.newobject"), "escaping allocation did not remain on the heap")
 }
 
+func TestZeroCaptureFunctionLiteralUsesStaticDescriptor(t *testing.T) {
+	module, err := goc.Compile("closure.go", []byte(`
+package main
+
+var callback func() int
+
+func install() {
+	callback = func() int { return 7 }
+}
+`))
+	require.NoError(t, err)
+
+	install := functionWithSuffix(t, module, "install")
+	assert.False(t, callsSymbol(install, "runtime.newobject"))
+
+	foundDescriptor := false
+	for _, data := range module.Data {
+		if len(data.Items) != 1 || data.Items[0].Sym == "" {
+			continue
+		}
+		if strings.Contains(data.Items[0].Sym, ".func.") {
+			foundDescriptor = true
+			break
+		}
+	}
+	assert.True(t, foundDescriptor, "zero-capture function literal has no static descriptor")
+}
+
 func functionWithSuffix(t *testing.T, module *ir.Module, suffix string) *ir.Func {
 	t.Helper()
 	for _, function := range module.Funcs {

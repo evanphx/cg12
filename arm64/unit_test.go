@@ -507,6 +507,87 @@ func TestGoABIZerosPointerLocalsBeforeCalls(t *testing.T) {
 	assert.Contains(t, disasmModule(t, module), "str xzr, [x29")
 }
 
+func TestGoABISpillsPointerLiveAcrossCall(t *testing.T) {
+	module := ir.NewModule()
+	f := module.NewFunc("pointer_across_call", ir.ClsP)
+	f.GoABI = true
+	pointer := f.ParamRef("pointer")
+	entry := f.Entry()
+	entry.CallVoid(f.Sym("observe", 0))
+	entry.Ret(pointer)
+
+	assembly := disasmModule(t, module)
+	assert.Equal(t, ir.NoReg, f.Temps[pointer.ID].Reg)
+	assert.Contains(t, assembly, "str xzr, [x29")
+}
+
+func TestGoABIReportsPointerResultSlotLiveAcrossCall(t *testing.T) {
+	module := ir.NewModule()
+	function := module.NewFunc("multi_result", ir.ClsP)
+	function.GoABI = true
+	function.Param("size", ir.ClsL)
+	result := function.ParamRef("result1")
+	entry := function.Entry()
+	entry.CallVoid(function.Sym("observe", 0))
+	entry.Store(function.Long(8), result)
+	entry.Ret(function.ConstInt(ir.ClsP, 0))
+
+	prepareGoABI(function)
+	ir.LowerPointers(function, ptrCls)
+	require.NoError(t, lower(function, TLSLocalExec))
+	allocation, err := regAlloc(function)
+	require.NoError(t, err)
+	frame := computeFrame(function, allocation)
+	words := goPointerWordIndexes(function, frame.allocOff, frame.spillBase)
+	assert.Contains(t, words, 0)
+}
+
+func TestGoPointerFrameOffsetsIgnoreUnassignedSpillSlots(t *testing.T) {
+	f := ir.NewModule().NewFunc("pointer_slots", ir.ClsW)
+	f.GoABI = true
+	unassigned := f.NewTemp("unassigned", ir.ClsP)
+	f.Temps[unassigned.ID].GCRef = true
+	spilled := f.NewTemp("spilled", ir.ClsP)
+	f.Temps[spilled.ID].GCRef = true
+	f.Temps[spilled.ID].Slot = 8
+
+	assert.Equal(t, []int{40}, goPointerFrameOffsets(f, nil, 32))
+}
+
+func TestGoAssemblyFunctionInfoOnlyMarksRealTopFrames(t *testing.T) {
+	functions := goAssemblyFunctionInfo()
+	topFrames := make([]string, 0, 2)
+	var morestackRestore *goFunctionInfo
+	for _, function := range functions {
+		if function.funcFlag&1 != 0 {
+			topFrames = append(topFrames, function.name)
+		}
+		if function.name == "runtime_morestack_restore" {
+			function := function
+			morestackRestore = &function
+		}
+	}
+
+	assert.Equal(t, []string{"runtime_mstart", "runtime_goexit", "runtime_asmcgocall"}, topFrames)
+	for _, function := range functions {
+		assert.NotEqual(t, "runtime_morestack_restore_end", function.name)
+	}
+	require.NotNil(t, morestackRestore)
+	assert.Equal(t, 320, morestackRestore.frameSize)
+	assert.Equal(t, []int{25, 26, 27, 28, 29, 30, 31, 32, 33, 34}, morestackRestore.pointerWords)
+}
+
+func TestGoRegisterPointerMaskTracksABIRegisters(t *testing.T) {
+	function := ir.NewModule().NewFunc("pointer_args", ir.ClsW)
+	function.Param("integer", ir.ClsL)
+	function.Param("floating", ir.ClsD)
+	function.ParamRef("firstPointer")
+	function.Param("word", ir.ClsW)
+	function.ParamRef("secondPointer")
+
+	assert.Equal(t, uint8(0b1010), goRegisterPointerMask(function))
+}
+
 func TestCompileLargeFrame(t *testing.T) {
 	// A frame larger than the stp pre-index reach (504 bytes) must adjust sp
 	// separately in the prologue and epilogue. Add/sub immediate only carries 12

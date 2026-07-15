@@ -12,6 +12,7 @@ type goFunctionInfo struct {
 	frameSize    int
 	frameStart   int
 	size         uint64
+	funcID       byte
 	funcFlag     byte
 	pointerWords []int
 }
@@ -49,11 +50,7 @@ func addGoRuntimeObjectMetadata(object *obj.Object, functions []goFunctionInfo, 
 
 func (builder *goMetadataBuilder) build(functions []goFunctionInfo, moduledata *ir.Data) {
 	const findFuncBuckets = 4096
-	functions = append(functions,
-		goFunctionInfo{name: "runtime_gocPrintString", funcFlag: 1 | 4}, // TopFrame | Asm
-		goFunctionInfo{name: "runtime_morestack_restore", frameSize: 224, funcFlag: 4, pointerWords: []int{25}},
-		goFunctionInfo{name: "runtime_morestack_restore_end", funcFlag: 1 | 4},
-	)
+	functions = append(functions, goAssemblyFunctionInfo()...)
 
 	builder.label(".goc.go.pcheader")
 	builder.u32(0xfffffff1)
@@ -133,7 +130,7 @@ func (builder *goMetadataBuilder) build(functions []goFunctionInfo, moduledata *
 		builder.u32(0)
 		builder.u32(0)
 		builder.u32(0)
-		builder.bytes(0, function.funcFlag, 0, 2)
+		builder.bytes(function.funcID, function.funcFlag, 0, 2)
 		builder.u32(uint32(emptyStackMap - builder.labels[".goc.go.gofunc"]))
 		builder.u32(localOffsets[index])
 	}
@@ -201,6 +198,46 @@ func (builder *goMetadataBuilder) build(functions []goFunctionInfo, moduledata *
 		}
 		offset := builder.labels[label] - builder.labels[".goc.go.pcheader"]
 		binary.LittleEndian.PutUint64(builder.data[header+32+uint64(index*8):], offset)
+	}
+}
+
+// goAssemblyFunctionInfo splits the assembly support code at every function
+// that changes how the runtime must unwind the stack. Leaf helpers between
+// these entries can safely share the preceding zero-frame Asm record.
+//
+// Keep this list in text order. In particular, morestack_restore_end aliases
+// morestack_noctxt and cannot have its own functab entry: making that alias a
+// TopFrame used to classify all following scheduler assembly as a terminal
+// frame and made GC stack walks stop early.
+func goAssemblyFunctionInfo() []goFunctionInfo {
+	const (
+		funcFlagTopFrame = 1
+		funcFlagSPWrite  = 2
+		funcFlagAsm      = 4
+
+		funcIDAsmCGOCall        = 2
+		funcIDGoexit            = 8
+		funcIDGogo              = 9
+		funcIDMcall             = 12
+		funcIDMstart            = 14
+		funcIDSystemstack       = 21
+		funcIDSystemstackSwitch = 22
+	)
+
+	return []goFunctionInfo{
+		{name: "runtime_gocPrintString", funcFlag: funcFlagAsm},
+		{name: "runtime_gogo", funcID: funcIDGogo, funcFlag: funcFlagSPWrite | funcFlagAsm},
+		{name: "runtime_mcall", funcID: funcIDMcall, funcFlag: funcFlagSPWrite | funcFlagAsm},
+		// morestack has no x29 frame setup, so its locals bitmap starts at sp+8.
+		// It keeps untyped register values unscanned and mirrors only pointer
+		// arguments into words 27 through 34.
+		{name: "runtime_morestack_restore", frameSize: 320, funcFlag: funcFlagAsm, pointerWords: []int{25, 26, 27, 28, 29, 30, 31, 32, 33, 34}},
+		{name: "runtime_morestack_noctxt", funcFlag: funcFlagAsm},
+		{name: "runtime_systemstack", funcID: funcIDSystemstack, funcFlag: funcFlagSPWrite | funcFlagAsm},
+		{name: "runtime_systemstack_switch", funcID: funcIDSystemstackSwitch, funcFlag: funcFlagAsm},
+		{name: "runtime_mstart", funcID: funcIDMstart, funcFlag: funcFlagTopFrame | funcFlagAsm},
+		{name: "runtime_goexit", funcID: funcIDGoexit, funcFlag: funcFlagTopFrame | funcFlagAsm},
+		{name: "runtime_asmcgocall", funcID: funcIDAsmCGOCall, funcFlag: funcFlagTopFrame | funcFlagAsm},
 	}
 }
 

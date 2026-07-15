@@ -20,6 +20,10 @@ func TestLowerHeapAllocationsPromotesLocalObject(t *testing.T) {
 	assert.Equal(t, ir.OAlloc8, block.Instrs[0].Op)
 	assert.Len(t, block.Instrs[0].Args, 1)
 	assert.Equal(t, int64(8), function.Consts[block.Instrs[0].Arg(0).ID].Int)
+	require.Equal(t, ir.OCall, block.Instrs[1].Op)
+	zeroHelper := function.Consts[block.Instrs[1].Arg(0).ID]
+	assert.Equal(t, "goc_memset", zeroHelper.Sym)
+	assert.Equal(t, object, block.Instrs[1].Arg(1))
 }
 
 func TestLowerHeapAllocationsKeepsEscapingObjectOnHeap(t *testing.T) {
@@ -47,6 +51,21 @@ func TestLowerHeapAllocationsAllowsPointerInLocalSlot(t *testing.T) {
 
 	require.True(t, LowerHeapAllocations(module))
 	assert.Equal(t, ir.OAlloc8, block.Instrs[1].Op)
+}
+
+func TestLowerHeapAllocationsTracksEscapeThroughLocalSlot(t *testing.T) {
+	module := ir.NewModule()
+	function := module.NewFunc("escape", ir.ClsP)
+	block := function.Entry()
+	slot := block.Alloc(8, 8)
+	typeDescriptor := function.Sym("type.int", 0)
+	object := block.HeapAlloc(function.Sym("runtime.newobject", 0), typeDescriptor, 8, 8)
+	block.Store(object, slot)
+	block.Ret(block.Load(ir.ClsP, slot))
+
+	require.True(t, LowerHeapAllocations(module))
+	assert.Equal(t, ir.OCall, block.Instrs[1].Op)
+	assert.Equal(t, []ir.Ref{function.Sym("runtime.newobject", 0), typeDescriptor}, block.Instrs[1].Args)
 }
 
 func TestLowerHeapAllocationsAllowsMemsetInitialization(t *testing.T) {
