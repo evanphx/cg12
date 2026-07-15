@@ -68,15 +68,29 @@ func main() {
 			t.Errorf("executable module is missing %s", name)
 		}
 	}
+	if len(module.Assembly) != 3 {
+		t.Fatalf("executable assembly files = %d, want 3", len(module.Assembly))
+	}
+	for _, assembly := range module.Assembly {
+		if assembly.PackagePath != "runtime" || assembly.Source == "" {
+			t.Errorf("invalid executable assembly source: %#v", assembly)
+		}
+	}
 
 	var initTask, initTasks *ir.Data
+	var arm64UseAlignedLoads *ir.Data
 	for _, data := range module.Data {
 		switch data.Name {
 		case ".goc.module.inittask.0":
 			initTask = data
 		case ".goc.module.inittasks":
 			initTasks = data
+		case "runtime.arm64UseAlignedLoads":
+			arm64UseAlignedLoads = data
 		}
+	}
+	if arm64UseAlignedLoads == nil {
+		t.Error("runtime.arm64UseAlignedLoads global is missing")
 	}
 	if initTask == nil || len(initTask.Items) != 2 || initTask.Items[1].Sym != "main.init.0" {
 		t.Errorf("main init task = %#v", initTask)

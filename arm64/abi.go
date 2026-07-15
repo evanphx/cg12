@@ -69,14 +69,14 @@ func hfaOf(t *ir.AggType) (ir.Cls, int, bool) {
 // assignGP allocates n consecutive integer registers for an aggregate of the
 // given byte size, or places the whole aggregate on the stack.
 func (a *argAssigner) assignGP(n, size int) (regs []Reg, onStack bool, off int) {
-	if a.ngrn+n <= 8 {
+	if a.ngrn+n <= a.intRegs {
 		for i := 0; i < n; i++ {
 			regs = append(regs, Reg(int(X0)+a.ngrn+i))
 		}
 		a.ngrn += n
 		return regs, false, 0
 	}
-	a.ngrn = 8
+	a.ngrn = a.intRegs
 	off = a.nsaa
 	a.nsaa += roundUp(size, 8)
 	return nil, true, off
@@ -85,14 +85,14 @@ func (a *argAssigner) assignGP(n, size int) (regs []Reg, onStack bool, off int) 
 // assignHFA allocates n consecutive SIMD registers for a homogeneous float
 // aggregate of the given byte size, or places it on the stack.
 func (a *argAssigner) assignHFA(n, size int) (regs []Reg, onStack bool, off int) {
-	if a.nsrn+n <= 8 {
+	if a.nsrn+n <= a.floatRegs {
 		for i := 0; i < n; i++ {
 			regs = append(regs, vReg(a.nsrn+i))
 		}
 		a.nsrn += n
 		return regs, false, 0
 	}
-	a.nsrn = 8
+	a.nsrn = a.floatRegs
 	off = a.nsaa
 	a.nsaa += roundUp(size, 8)
 	return nil, true, off
@@ -151,6 +151,9 @@ func aggArgAt(in *ir.Instr, k int) *ir.AggType {
 // pieces into registers or the outgoing stack area are appended to argSetup
 // (returned) so they form one contiguous run before the call.
 func lowerAggArg(f *ir.Func, argRef ir.Ref, agg *ir.AggType, a *argAssigner, out *[]ir.Instr, argSetup []ir.Instr, pins []ir.Ref) ([]ir.Instr, []ir.Ref, error) {
+	if f.GoABI {
+		return lowerGoAggregateArg(f, argRef, agg, a, out, argSetup, pins)
+	}
 	cls := classifyAgg(agg)
 	if cls.kind == aggMemory {
 		// Passed by reference: hand over the pointer like a scalar.

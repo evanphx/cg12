@@ -8,16 +8,31 @@ import (
 	"go/parser"
 	"go/token"
 	"go/types"
+	"os"
 	"path/filepath"
 	"runtime"
 )
 
 // sourceUnit is the unchanged, build-selected source for an imported package.
 type sourceUnit struct {
-	path  string
-	files []*ast.File
-	info  *types.Info
-	pkg   *types.Package
+	path     string
+	files    []*ast.File
+	assembly []sourceAssemblyFile
+	info     *types.Info
+	pkg      *types.Package
+}
+
+type sourceAssemblyFile struct {
+	path   string
+	source string
+}
+
+var translatedAssemblyFiles = map[string]map[string]bool{
+	"runtime": {
+		"atomic_arm64.s":  true,
+		"memclr_arm64.s":  true,
+		"memmove_arm64.s": true,
+	},
 }
 
 // sourceLoader imports selected packages from source while retaining their AST
@@ -156,6 +171,20 @@ func (l *sourceLoader) Import(path string) (*types.Package, error) {
 			return nil, err
 		}
 		u.files = append(u.files, file)
+	}
+	for _, name := range bp.SFiles {
+		if !translatedAssemblyFiles[path][name] {
+			continue
+		}
+		full := filepath.Join(bp.Dir, name)
+		source, err := os.ReadFile(full)
+		if err != nil {
+			return nil, err
+		}
+		u.assembly = append(u.assembly, sourceAssemblyFile{
+			path:   filepath.ToSlash(filepath.Join(path, name)),
+			source: string(source),
+		})
 	}
 	conf := types.Config{Importer: l}
 	u.pkg, err = conf.Check(path, l.fset, u.files, u.info)

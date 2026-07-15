@@ -182,9 +182,10 @@ type AggType struct {
 
 // Field is one member of an aggregate type. Count > 1 denotes an inline array.
 type Field struct {
-	Sub   SubCls
-	Type  *AggType // non-nil for nested aggregate fields (Sub ignored)
-	Count int
+	Sub     SubCls
+	Type    *AggType // non-nil for nested aggregate fields (Sub ignored)
+	Count   int
+	Pointer bool // scalar field is a managed pointer for Go ABI stack maps
 }
 
 // count returns the element count of a field (1 unless it is an inline array).

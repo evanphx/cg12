@@ -72,6 +72,25 @@ func TestLoadExactStandardRuntimeSource(t *testing.T) {
 			t.Errorf("loaded runtime from %q, want repository stdlib", position.Filename)
 		}
 	}
+	assembly := make(map[string]string)
+	for _, file := range unit.assembly {
+		assembly[filepath.Base(file.path)] = file.source
+	}
+	for _, name := range []string{"atomic_arm64.s", "memclr_arm64.s", "memmove_arm64.s"} {
+		got, ok := assembly[name]
+		if !ok {
+			t.Errorf("runtime assembly %s was not retained", name)
+			continue
+		}
+		path := filepath.Join(loader.root, "src", "runtime", name)
+		want, err := os.ReadFile(path)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if got != string(want) {
+			t.Errorf("runtime assembly %s was modified while loading", name)
+		}
+	}
 }
 
 func TestRepositoryStandardLibraryInventory(t *testing.T) {

@@ -46,7 +46,7 @@ func insertCallerSaves(f *ir.Func, cfg *analysis.CFG, live *analysis.Liveness, a
 						continue
 					}
 					r := f.Temps[t].Reg
-					if r == ir.NoReg || !callerClobbered(f.Temps[t].Cls, Reg(r)) {
+					if r == ir.NoReg || !callerClobbered(f.GoABI, f.Temps[t].Cls, Reg(r)) {
 						continue
 					}
 					// A GC ref live across a safepoint is pre-spilled whole-life
@@ -165,7 +165,10 @@ func insertCallerSaves(f *ir.Func, cfg *analysis.CFG, live *analysis.Liveness, a
 // class cls: any caller-saved X register; any V register whose relevant bits a call
 // does not preserve -- the low 64 bits of V8..V15 are callee-saved, but a 128-bit
 // value has no surviving register at all (AAPCS64 preserves only the low half).
-func callerClobbered(cls ir.Cls, r Reg) bool {
+func callerClobbered(goABI bool, cls ir.Cls, r Reg) bool {
+	if goABI {
+		return r >= X0 && r <= vLast
+	}
 	if cls.IsFloat() {
 		if !(r >= V0 && r <= vLast) {
 			return false

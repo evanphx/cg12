@@ -122,6 +122,9 @@ func link(m *ir.Module, exe string) {
 		if usesGoRuntime(m) {
 			assembly += "\n" + bootstrapARM64Assembly
 		}
+		translated, err := arm64.TranslateAssembly(m)
+		check(err)
+		assembly += "\n" + translated
 		support, cleanup := compileRuntimeSupport(cc, assembly)
 		defer cleanup()
 		inputs = append(inputs, support)

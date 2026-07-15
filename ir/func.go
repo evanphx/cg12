@@ -199,19 +199,30 @@ type constKey struct {
 	thread bool // a thread-local symbol is a distinct constant from a plain one
 }
 
-// Module is a translation unit: a set of functions, aggregate types, and data.
+// Module is a translation unit: a set of functions, aggregate types, data, and
+// source assembly selected by the front end.
 type Module struct {
-	Funcs   []*Func
-	Types   []*AggType
-	Data    []*Data
-	Aliases []*Alias
-	Files   []string // source-file table indexed (1-based) by SrcPos.File
+	Funcs    []*Func
+	Types    []*AggType
+	Data     []*Data
+	Aliases  []*Alias
+	Files    []string // source-file table indexed (1-based) by SrcPos.File
+	Assembly []AssemblyFile
 
 	// SymAlign records the guaranteed alignment (bytes) of a data symbol, keyed by
 	// its unmangled name -- from a definition or from the type of a reference. A
 	// backend folding a symbol's low bits into a scaled load/store offset consults
 	// it: that fold is only sound when the symbol is aligned to the access width.
 	SymAlign map[string]int
+}
+
+// AssemblyFile is a package assembly source retained for parsing and target
+// translation after IR compilation. Source uses the Go toolchain's Plan 9
+// assembly syntax.
+type AssemblyFile struct {
+	PackagePath string
+	Path        string
+	Source      string
 }
 
 // Module returns the module this function belongs to (nil if standalone).

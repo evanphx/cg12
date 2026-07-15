@@ -751,22 +751,36 @@ type argLoc struct {
 type argAssigner struct {
 	ngrn, nsrn int
 	nsaa       int // next stacked-argument byte offset
+	intRegs    int
+	floatRegs  int
+	goABI      bool
+}
+
+func newArgAssigner(goABI bool) argAssigner {
+	if goABI {
+		return argAssigner{intRegs: 16, floatRegs: 16, goABI: true}
+	}
+	return argAssigner{intRegs: 8, floatRegs: 8}
 }
 
 func (a *argAssigner) assign(cls ir.Cls) argLoc {
 	if cls.IsFloat() {
-		if a.nsrn < 8 {
+		if a.nsrn < a.floatRegs {
 			r := vReg(a.nsrn)
 			a.nsrn++
 			return argLoc{reg: r}
 		}
-	} else if a.ngrn < 8 {
+	} else if a.ngrn < a.intRegs {
 		r := Reg(int(X0) + a.ngrn)
 		a.ngrn++
 		return argLoc{reg: r}
 	}
+	if a.goABI {
+		off := a.assignStack(cls.Size(), cls.Size())
+		return argLoc{onStack: true, stacky: off}
+	}
 	off := a.nsaa
-	a.nsaa += 8 // scalars occupy one 8-byte stack slot
+	a.nsaa += 8 // AAPCS64 scalars occupy one 8-byte stack slot
 	return argLoc{onStack: true, stacky: off}
 }
 
@@ -800,8 +814,17 @@ func lowerABI(f *ir.Func) error {
 	// A function returning a > 16-byte aggregate is given the result buffer's
 	// address in x8; capture it at entry so the returns can write there.
 	var retBuf ir.Ref
-	if f.RetAgg != nil && classifyAgg(f.RetAgg).kind == aggMemory {
-		retBuf = f.NewTemp("retbuf", ir.ClsL)
+	if f.RetAgg != nil {
+		if f.GoABI {
+			resultAssigner := newArgAssigner(true)
+			_, onStack, _ := assignGoAggregate(&resultAssigner, f.RetAgg)
+			if onStack {
+				retBuf = f.NewTemp("retbuf", ir.ClsL)
+				f.Temp(retBuf).Agg = f.RetAgg
+			}
+		} else if classifyAgg(f.RetAgg).kind == aggMemory {
+			retBuf = f.NewTemp("retbuf", ir.ClsL)
+		}
 	}
 	if err := lowerParams(f, retBuf); err != nil {
 		return err
@@ -835,11 +858,11 @@ func lowerTailCalls(f *ir.Func) error {
 }
 
 func lowerParams(f *ir.Func, retBuf ir.Ref) error {
-	var a argAssigner
+	a := newArgAssigner(f.GoABI)
 	// Register/stack parameter moves (OPar) must precede any aggregate
 	// reconstruction, so the emitter can treat the OPar run as one parallel move.
 	var pars, recon []ir.Instr
-	if !retBuf.IsNone() {
+	if !retBuf.IsNone() && !f.GoABI {
 		// The indirect-result pointer arrives in x8, alongside the arguments.
 		pin := newPinned(f, X8, ir.ClsL)
 		pars = append(pars, ir.Instr{Op: ir.OPar, Cls: ir.ClsL, To: retBuf, Args: []ir.Ref{pin}})
@@ -862,6 +885,15 @@ func lowerParams(f *ir.Func, retBuf ir.Ref) error {
 		pin := newPinned(f, loc.reg, p.Cls)
 		pars = append(pars, ir.Instr{Op: ir.OPar, Cls: p.Cls, To: p.Ref(), Args: []ir.Ref{pin}})
 	}
+	if !retBuf.IsNone() && f.GoABI {
+		resultAssigner := newArgAssigner(true)
+		resultAssigner.nsaa = roundUp(a.nsaa, 8)
+		_, onStack, resultOffset := assignGoAggregate(&resultAssigner, f.RetAgg)
+		if !onStack {
+			return fmt.Errorf("arm64: internal error: Go ABI result buffer assigned to registers")
+		}
+		pars = append(pars, ir.Instr{Op: ir.OPar, Cls: ir.ClsL, To: retBuf, Aux: int64(resultOffset)})
+	}
 	prefix := append(pars, recon...)
 	f.Start.Instrs = append(prefix, f.Start.Instrs...)
 	return nil
@@ -871,6 +903,9 @@ func lowerParams(f *ir.Func, retBuf ir.Ref) error {
 // instructions (for a Memory-class pointer) and the reconstruction instructions
 // (for register-class aggregates, which are rebuilt into a stack slot).
 func lowerAggParam(f *ir.Func, p *ir.Temp, a *argAssigner) (pars, recon []ir.Instr, err error) {
+	if f.GoABI {
+		return lowerGoAggregateParam(f, p, a)
+	}
 	cls := classifyAgg(p.Agg)
 	if cls.kind == aggMemory {
 		// Passed by reference: the incoming value is already a pointer.
@@ -924,7 +959,13 @@ func lowerReturns(f *ir.Func, retBuf ir.Ref) error {
 			continue
 		}
 		if f.RetAgg != nil {
-			lowerAggReturn(f, b, retBuf)
+			if f.GoABI {
+				if err := lowerGoAggregateReturn(f, b, retBuf); err != nil {
+					return err
+				}
+			} else {
+				lowerAggReturn(f, b, retBuf)
+			}
 			continue
 		}
 		v := b.Jmp.Arg
@@ -982,7 +1023,7 @@ func lowerCalls(f *ir.Func) error {
 			callArgs := in.Args[1:]
 			pins := make([]ir.Ref, 0, len(callArgs))
 			var argSetup []ir.Instr // the OArg run, emitted after value computation
-			var a argAssigner
+			a := newArgAssigner(f.GoABI)
 			for k, arg := range callArgs {
 				if agg := aggArgAt(&in, k); agg != nil {
 					var err error
@@ -1008,12 +1049,24 @@ func lowerCalls(f *ir.Func) error {
 			var callCls ir.Cls
 			var callDefs []ir.Ref
 			var post []ir.Instr
+			var stackResult ir.Ref
+			var stackResultOffset int
+			resultEnd := roundUp(a.nsaa, 8)
 			switch {
 			case in.To.IsNone():
 				// no result
 			case in.RetAgg != nil:
-				callTo, callCls, callDefs, argSetup, pins, post =
-					lowerAggResult(f, in.To, in.RetAgg, &a, &out, argSetup, pins)
+				if f.GoABI {
+					var err error
+					callTo, callCls, callDefs, argSetup, pins, post, stackResult, stackResultOffset, resultEnd, err =
+						lowerGoAggregateResult(f, in.To, in.RetAgg, resultEnd, &out, argSetup, pins)
+					if err != nil {
+						return err
+					}
+				} else {
+					callTo, callCls, callDefs, argSetup, pins, post =
+						lowerAggResult(f, in.To, in.RetAgg, &a, &out, argSetup, pins)
+				}
 			default:
 				pres := newPinned(f, retReg(in.Cls), in.Cls)
 				callTo, callCls = pres, in.Cls
@@ -1030,11 +1083,21 @@ func lowerCalls(f *ir.Func) error {
 				}
 			}
 			out = append(out, argSetup...)
-			out = append(out, ir.Instr{
+			stackBytes := a.stackBytes()
+			if f.GoABI {
+				stackBytes = goCallStackBytes(f, &in, resultEnd)
+			}
+			loweredCall := ir.Instr{
 				Op: ir.OCall, Args: append([]ir.Ref{callee}, pins...),
-				Aux: int64(a.stackBytes()), To: callTo, Cls: callCls, Defs: callDefs,
+				Aux: int64(stackBytes), To: callTo, Cls: callCls, Defs: callDefs,
 				Tail: in.Tail, Pos: in.Pos, Inl: in.Inl,
-			})
+			}
+			if !stackResult.IsNone() {
+				loweredCall.RetAgg = in.RetAgg
+				loweredCall.StackResult = stackResult
+				loweredCall.StackResultOffset = int64(stackResultOffset)
+			}
+			out = append(out, loweredCall)
 			out = append(out, post...)
 		}
 		b.Instrs = out

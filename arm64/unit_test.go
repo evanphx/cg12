@@ -584,8 +584,8 @@ func TestGoAssemblyFunctionInfoOnlyMarksRealTopFrames(t *testing.T) {
 		assert.NotEqual(t, "runtime_morestack_restore_end", function.name)
 	}
 	require.NotNil(t, morestackRestore)
-	assert.Equal(t, 320, morestackRestore.frameSize)
-	assert.Equal(t, []int{25, 26, 27, 28, 29, 30, 31, 32, 33, 34}, morestackRestore.pointerWords)
+	assert.Equal(t, 560, morestackRestore.frameSize)
+	assert.Equal(t, []int{49, 50, 51, 52, 53, 54, 55, 56, 57, 58, 59, 60, 61, 62, 63, 64, 65, 66}, morestackRestore.pointerWords)
 }
 
 func TestGoRegisterPointerMaskTracksABIRegisters(t *testing.T) {
@@ -596,7 +596,7 @@ func TestGoRegisterPointerMaskTracksABIRegisters(t *testing.T) {
 	function.Param("word", ir.ClsW)
 	function.ParamRef("secondPointer")
 
-	assert.Equal(t, uint8(0b1010), goRegisterPointerMask(function))
+	assert.Equal(t, uint16(0b1010), goRegisterPointerMask(function))
 }
 
 func TestCompileLargeFrame(t *testing.T) {

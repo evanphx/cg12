@@ -46,6 +46,16 @@ func TestGoPCSPTerminatesBeforeFollowingFunction(t *testing.T) {
 	assert.Equal(t, []byte{2, 9, 64, 0xff, 0xff, 0xff, 0xff, 0x0f, 0}, goPCSP(36, 32))
 }
 
+func TestGoPCSPTracksTemporaryCallStackSpace(t *testing.T) {
+	assert.Equal(t,
+		[]byte{2, 9, 64, 4, 32, 3, 31, 0xff, 0xff, 0xff, 0xff, 0x0f, 0},
+		goPCSP(36, 32,
+			pcspPoint{pc: 52, value: 48},
+			pcspPoint{pc: 64, value: 32},
+		),
+	)
+}
+
 func TestGoRuntimeModuledataDescribesScannedGlobals(t *testing.T) {
 	module := ir.NewModule()
 	schedinit := module.NewFuncVoid("runtime.schedinit")
@@ -70,6 +80,9 @@ func TestGoRuntimeModuledataDescribesScannedGlobals(t *testing.T) {
 	require.True(t, ok)
 	pointer, ok := dataSymbolValue(object, sanitize("runtime.pointer"))
 	require.True(t, ok)
+	pointerSymbol, ok := dataSymbol(object, sanitize("runtime.pointer"))
+	require.True(t, ok)
+	assert.Equal(t, obj.SecData, pointerSymbol.Section)
 
 	expectedProgram, err := goGCProgram(dataStart, dataEnd, []uint64{pointer})
 	require.NoError(t, err)

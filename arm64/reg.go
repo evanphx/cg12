@@ -218,6 +218,16 @@ func calleeFirstOrder(order []Reg) []Reg {
 	return append(callee, caller...)
 }
 
+// calleeSavedFor reports whether a register survives calls made by f. Go's
+// ABIInternal has no callee-saved general-purpose or floating-point registers;
+// the platform ABI retains the AAPCS64 preservation rules.
+func calleeSavedFor(goABI bool, r Reg) bool {
+	if goABI {
+		return false
+	}
+	return calleeSavedReg(r)
+}
+
 // intScratch and fscratch map a slot to a reserved scratch register. Slot 2
 // (x15) is used only by 3-operand indexed stores.
 var intScratchRegs = [3]Reg{scratch0, scratch1, scratch2}

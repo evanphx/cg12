@@ -2,8 +2,6 @@
 .global main
 .type main, %function
 main:
-	mov x19, x0
-	mov x20, x1
 	mov x29, 0
 	adrp x28, runtime_g0
 	add x28, x28, #:lo12:runtime_g0
@@ -20,9 +18,13 @@ main:
 	add x9, x9, #:lo12:runtime_m0
 	str x28, [x9]
 	str x9, [x28, 48]
+	sub sp, sp, 16
+	str w0, [sp]
+	str x1, [sp, 8]
 	bl runtime_check
-	mov w0, w19
-	mov x1, x20
+	ldr w0, [sp]
+	ldr x1, [sp, 8]
+	add sp, sp, 16
 	bl runtime_args
 	bl runtime_osinit
 	bl runtime_schedinit

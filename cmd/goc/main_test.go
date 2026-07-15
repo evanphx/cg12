@@ -18,6 +18,18 @@ func TestARM64RuntimeExitTerminatesTheProcess(t *testing.T) {
 	}
 }
 
+func TestRuntimeSupportDoesNotShadowTranslatedStandardLibraryAssembly(t *testing.T) {
+	for _, symbol := range []string{
+		"runtime_memmove",
+		"runtime_memclrNoHeapPointers",
+		"runtime_publicationBarrier",
+	} {
+		if strings.Contains(runtimeARM64Assembly, ".global "+symbol) {
+			t.Errorf("handwritten runtime support still defines %s", symbol)
+		}
+	}
+}
+
 func TestDriverIRAndRun(t *testing.T) {
 	if _, err := exec.LookPath("cc"); err != nil {
 		t.Skip("cc unavailable")

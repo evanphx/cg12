@@ -36,7 +36,7 @@ func computeFrame(f *ir.Func, alloc *allocation) frameLayout {
 	used := map[Reg]bool{}
 	for _, t := range f.Temps {
 		if t.Reg != ir.NoReg {
-			if r := Reg(t.Reg); calleeSavedReg(r) {
+			if r := Reg(t.Reg); calleeSavedFor(f.GoABI, r) {
 				used[r] = true
 			}
 		}
@@ -49,7 +49,7 @@ func computeFrame(f *ir.Func, alloc *allocation) frameLayout {
 	for _, b := range f.Blocks {
 		for i := range b.Instrs {
 			for _, r := range asmClobberRegs(&b.Instrs[i]) {
-				if calleeSavedReg(r) {
+				if calleeSavedFor(f.GoABI, r) {
 					used[r] = true
 				}
 			}
@@ -68,6 +68,11 @@ func computeFrame(f *ir.Func, alloc *allocation) frameLayout {
 	}
 
 	off := 16 + 8*len(lay.calleeSaved) // x29/x30 occupy [0,16)
+	if f.GoABI {
+		// ABIInternal reserves one fixed outgoing-call area at the bottom of
+		// the frame so SP remains stable across calls for stack copying.
+		off = max(off, goStackLinkSize+maxOutgoingCallSize(f))
+	}
 	lay.spillBase = off
 	off += alloc.spillBytes
 
@@ -147,7 +152,7 @@ func roundUp(n, a int) int {
 // computeNamedCounts replays argument assignment over a variadic function's named
 // parameters, returning how many GP/SIMD registers and stack bytes they used.
 func computeNamedCounts(f *ir.Func) (ngrn, nsrn, stack int) {
-	var a argAssigner
+	a := newArgAssigner(f.GoABI)
 	for _, p := range f.Params {
 		if p.Agg != nil {
 			cls := classifyAgg(p.Agg)

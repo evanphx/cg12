@@ -67,6 +67,12 @@ type Instr struct {
 	// a pointer to it), or nil for a scalar result.
 	RetAgg *AggType
 
+	// StackResult identifies a local aggregate slot that receives an
+	// ABIInternal stack-assigned result. The emitter copies RetAgg from the
+	// outgoing call frame at StackResultOffset before releasing that frame.
+	StackResult       Ref
+	StackResultOffset int64
+
 	// Pos is the source position this instruction was generated from, or the
 	// zero SrcPos when unknown. Backends emit it as debug-line info.
 	Pos SrcPos

@@ -12,10 +12,16 @@ type goFunctionInfo struct {
 	name         string
 	frameSize    int
 	frameStart   int
+	pcsp         []pcspPoint
 	size         uint64
 	funcID       byte
 	funcFlag     byte
 	pointerWords []int
+}
+
+type pcspPoint struct {
+	pc    int
+	value int
 }
 
 const goModuleInitTasksName = ".goc.module.inittasks"
@@ -162,7 +168,7 @@ func (builder *goMetadataBuilder) build(functions []goFunctionInfo, moduledata *
 	pcspOffsets := make([]uint32, len(functions))
 	for index, function := range functions {
 		pcspOffsets[index] = uint32(builder.offset(".goc.go.pctab"))
-		builder.data = append(builder.data, goPCSP(function.frameStart, function.frameSize)...)
+		builder.data = append(builder.data, goPCSP(function.frameStart, function.frameSize, function.pcsp...)...)
 	}
 	builder.label(".goc.go.pctab.end")
 	builder.align(4)
@@ -292,7 +298,7 @@ func (builder *goMetadataBuilder) build(functions []goFunctionInfo, moduledata *
 	}
 }
 
-func goPCSP(frameStart, frameSize int) []byte {
+func goPCSP(frameStart, frameSize int, changes ...pcspPoint) []byte {
 	var data []byte
 	appendUvarint := func(value uint32) {
 		for value >= 0x80 {
@@ -301,14 +307,40 @@ func goPCSP(frameStart, frameSize int) []byte {
 		}
 		data = append(data, byte(value))
 	}
-	if frameStart > 0 {
-		appendUvarint(2) // initial value: -1 -> 0 before frame allocation
-		appendUvarint(uint32(frameStart / 4))
-		appendUvarint(uint32(frameSize) * 2)
-	} else {
-		appendUvarint(uint32(frameSize+1) * 2)
+	appendVarint := func(value int) {
+		encoded := uint32(value << 1)
+		if value < 0 {
+			encoded = ^encoded
+		}
+		appendUvarint(encoded)
 	}
-	appendUvarint(^uint32(0))
+
+	points := make([]pcspPoint, 0, len(changes)+2)
+	if frameStart > 0 {
+		points = append(points, pcspPoint{pc: 0, value: 0})
+	}
+	points = append(points, pcspPoint{pc: frameStart, value: frameSize})
+	for _, change := range changes {
+		if change.pc < frameStart {
+			continue
+		}
+		if len(points) > 0 && points[len(points)-1].pc == change.pc {
+			points[len(points)-1] = change
+			continue
+		}
+		points = append(points, change)
+	}
+
+	value := -1
+	for index, point := range points {
+		appendVarint(point.value - value)
+		value = point.value
+		if index+1 < len(points) {
+			appendUvarint(uint32((points[index+1].pc - point.pc) / 4))
+		} else {
+			appendUvarint(^uint32(0))
+		}
+	}
 	appendUvarint(0) // end of this function's pc-value table
 	return data
 }
@@ -342,8 +374,9 @@ func goAssemblyFunctionInfo() []goFunctionInfo {
 		{name: "runtime_mcall", funcID: funcIDMcall, funcFlag: funcFlagSPWrite | funcFlagAsm},
 		// morestack has no x29 frame setup, so its locals bitmap starts at sp+8.
 		// It keeps untyped register values unscanned and mirrors only pointer
-		// arguments into words 27 through 34.
-		{name: "runtime_morestack_restore", frameSize: 320, funcFlag: funcFlagAsm, pointerWords: []int{25, 26, 27, 28, 29, 30, 31, 32, 33, 34}},
+		// arguments into words 51 through 66. The preceding two words keep the
+		// caller frame pointer and closure context visible to stack copying.
+		{name: "runtime_morestack_restore", frameSize: 560, funcFlag: funcFlagAsm, pointerWords: []int{49, 50, 51, 52, 53, 54, 55, 56, 57, 58, 59, 60, 61, 62, 63, 64, 65, 66}},
 		{name: "runtime_morestack_noctxt", funcFlag: funcFlagAsm},
 		{name: "runtime_systemstack", funcID: funcIDSystemstack, funcFlag: funcFlagSPWrite | funcFlagAsm},
 		{name: "runtime_systemstack_switch", funcID: funcIDSystemstackSwitch, funcFlag: funcFlagAsm},

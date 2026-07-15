@@ -102,6 +102,10 @@ func addAliases(o *obj.Object, aliases []*ir.Alias) error {
 
 func CompileToObjectWith(m *ir.Module, opts Options) (*obj.Object, error) {
 	o := &obj.Object{Machine: obj.EM_AARCH64}
+	assemblyReferences, err := assemblyExternalReferences(m)
+	if err != nil {
+		return nil, err
+	}
 	goRuntime := moduleUsesGoRuntime(m)
 	var rows []obj.LineRow
 	var dfuncs []obj.DwarfFunc
@@ -132,10 +136,17 @@ func CompileToObjectWith(m *ir.Module, opts Options) (*obj.Object, error) {
 			anchor = name
 		}
 		o.Text = append(o.Text, mc.code...)
-		goFunctions = append(goFunctions, goFunctionInfo{name: name, frameSize: mc.m.frame, frameStart: mc.m.frameStart, size: uint64(len(mc.code)), pointerWords: mc.m.goPointerWords()})
+		goFunctions = append(goFunctions, goFunctionInfo{
+			name:         name,
+			frameSize:    mc.m.frame,
+			frameStart:   mc.m.frameStart,
+			pcsp:         mc.m.pcsp,
+			size:         uint64(len(mc.code)),
+			pointerWords: mc.m.goPointerWords(),
+		})
 		o.Syms = append(o.Syms, obj.Sym{
 			Name: name, Section: obj.SecText, Value: base,
-			Size: uint64(len(mc.code)), Global: f.Linkage.Export, Func: true,
+			Size: uint64(len(mc.code)), Global: f.Linkage.Export || assemblyReferences[name], Func: true,
 		})
 		// Local symbols at address-taken blocks (&&label used in static data).
 		for _, bs := range mc.blockSyms {
@@ -175,7 +186,11 @@ func CompileToObjectWith(m *ir.Module, opts Options) (*obj.Object, error) {
 			moduledata = d
 			continue
 		}
-		if err := addData(o, d); err != nil {
+		add := addData
+		if goRuntime {
+			add = addGoData
+		}
+		if err := add(o, d); err != nil {
 			return nil, fmt.Errorf("data %s: %w", d.Name, err)
 		}
 		if goRuntime {
@@ -202,6 +217,11 @@ func CompileToObjectWith(m *ir.Module, opts Options) (*obj.Object, error) {
 	// Emit GC stack maps when any safepoint carries a live root.
 	if len(smFuncs) > 0 {
 		setStackMap(o, smFuncs)
+	}
+	for index := range o.Syms {
+		if assemblyReferences[o.Syms[index].Name] {
+			o.Syms[index].Global = true
+		}
 	}
 	return o, nil
 }
@@ -426,10 +446,21 @@ func convInlineNodes(ns []*inlineNode) []obj.InlineRange {
 
 // addData appends a data definition to the object's .data section.
 func addData(o *obj.Object, d *ir.Data) error {
+	return addDataWithBSS(o, d, true)
+}
+
+// addGoData keeps Go globals in one contiguous data range. The runtime's
+// moduledata and GC program describe that range precisely; splitting zeroed
+// pointer globals into ELF BSS requires a separate gcbss program and bounds.
+func addGoData(o *obj.Object, d *ir.Data) error {
+	return addDataWithBSS(o, d, false)
+}
+
+func addDataWithBSS(o *obj.Object, d *ir.Data, allowBSS bool) error {
 	// Nothing but zero fill: it needs no bytes in the file, only room at run time.
 	// .bss follows .data in memory and .tbss follows .tdata in each thread's block,
 	// so the symbol's value counts from the start of its own zero-filled region.
-	if allZero(d) {
+	if allowBSS && allZero(d) {
 		size, sec, at := zeroSize(d), obj.SecBss, &o.BssSize
 		align := &o.BssAlign
 		if d.Linkage.Thread {
@@ -519,8 +550,9 @@ func addData(o *obj.Object, d *ir.Data) error {
 			}
 		}
 	}
+	name := sanitize(d.Name)
 	o.Syms = append(o.Syms, obj.Sym{
-		Name: sanitize(d.Name), Section: sec, Value: base,
+		Name: name, Section: sec, Value: base,
 		Size: uint64(len(*buf)) - base, Global: d.Linkage.Export,
 		TLS: sec == obj.SecTdata,
 	})
@@ -581,6 +613,7 @@ type mc struct {
 	instrPC    map[*ir.Instr]uint64 // PC at the start of each instruction
 	safepoints []safepoint
 	frameStart int
+	pcsp       []pcspPoint
 
 	blockDone bool
 	useCount  []int                     // per-temp use count, for the fused compare-branch
@@ -689,15 +722,28 @@ func inferStackPointerWords(function *ir.Func) {
 	}
 }
 
-// goRegisterPointerMask reports which x0-x7 argument registers contain
+// goRegisterPointerMask reports which x0-x15 argument registers contain
 // pointers at function entry. The stack-growth trampoline uses this to expose
 // only actual pointers to the runtime stack copier while preserving every
 // untyped register value in an unscanned save area.
-func goRegisterPointerMask(function *ir.Func) uint8 {
-	var assigner argAssigner
-	var mask uint8
+func goRegisterPointerMask(function *ir.Func) uint16 {
+	assigner := newArgAssigner(function.GoABI)
+	var mask uint16
 	for _, parameter := range function.Params {
 		if parameter.Agg != nil {
+			if function.GoABI {
+				parts, onStack, _ := assignGoAggregate(&assigner, parameter.Agg)
+				if onStack {
+					continue
+				}
+				for _, part := range parts {
+					if part.pointer && part.reg >= X0 && part.reg <= X15 {
+						mask |= 1 << uint(part.reg-X0)
+					}
+				}
+				continue
+			}
+
 			class := classifyAgg(parameter.Agg)
 			switch class.kind {
 			case aggGP:
@@ -706,7 +752,7 @@ func goRegisterPointerMask(function *ir.Func) uint8 {
 				assigner.assignHFA(class.nregs, class.size)
 			default:
 				location := assigner.assign(ir.ClsL)
-				if !location.onStack {
+				if !location.onStack && location.reg <= X7 {
 					mask |= 1 << uint(location.reg-X0)
 				}
 			}
@@ -714,7 +760,7 @@ func goRegisterPointerMask(function *ir.Func) uint8 {
 		}
 
 		location := assigner.assign(parameter.Cls)
-		if parameter.GCRef && !location.onStack {
+		if parameter.GCRef && !location.onStack && location.reg >= X0 && location.reg <= X15 {
 			mask |= 1 << uint(location.reg-X0)
 		}
 	}
@@ -999,8 +1045,8 @@ func (m *mc) goStackPrologue() {
 	}
 	m.emit(a64.CmpReg(true, mcGP1, mcGP0))
 	m.prog.Bcond(a64.HI, enough)
-	m.emit(a64.AddImm(true, a64.Reg(15), mcX30, 0))
-	m.movImm(a64.Reg(14), int64(goRegisterPointerMask(m.f)), false)
+	m.emit(a64.AddImm(true, a64.Reg(27), mcX30, 0))
+	m.movImm(a64.Reg(25), int64(goRegisterPointerMask(m.f)), false)
 	m.reloc("runtime_morestack_noctxt", obj.R_AARCH64_CALL26)
 	m.emit(a64.Bl(0))
 	m.prog.B(retry)
@@ -1109,6 +1155,18 @@ func (m *mc) frameTop() int {
 
 func (m *mc) goPointerWords() []int {
 	return goPointerWordIndexes(m.f, m.allocOff, m.spillBase)
+}
+
+func (m *mc) recordPCSP(value int) {
+	if !m.f.GoABI {
+		return
+	}
+	point := pcspPoint{pc: m.prog.Len() * 4, value: value}
+	if len(m.pcsp) > 0 && m.pcsp[len(m.pcsp)-1].pc == point.pc {
+		m.pcsp[len(m.pcsp)-1] = point
+		return
+	}
+	m.pcsp = append(m.pcsp, point)
 }
 
 func goPointerWordIndexes(function *ir.Func, allocations map[*ir.Instr]int, spillBase int) []int {
@@ -2087,6 +2145,9 @@ func (m *mc) regDiffers(r ir.Ref, avoid Reg) bool {
 
 func (m *mc) stackParam(in *ir.Instr) {
 	off := m.frameTop() + int(in.Aux)
+	if m.f.GoABI {
+		off += goStackLinkSize
+	}
 	t := m.f.Temps[in.To.ID]
 	if t.Agg != nil {
 		if t.Reg != ir.NoReg {
@@ -2148,7 +2209,11 @@ func (m *mc) callSequence(b *ir.Block, i int) int {
 	if call.Tail {
 		for _, a := range stackArgs {
 			r := m.src(a.Args[0], 0, a.Cls.Size())
-			m.emit(a64.StrImm(a.Cls.Size() == 8, r, mcX29, uint32(m.frameTop()+int(a.Aux))))
+			offset := m.frameTop() + int(a.Aux)
+			if m.f.GoABI {
+				offset += goStackLinkSize
+			}
+			m.emit(a64.StrImm(a.Cls.Size() == 8, r, mcX29, uint32(offset)))
 		}
 		m.parallelMove(regPairs)
 		for _, a := range symArgs {
@@ -2160,16 +2225,24 @@ func (m *mc) callSequence(b *ir.Block, i int) int {
 	}
 
 	stackBytes := int(call.Aux)
-	if stackBytes > 0 {
+	if stackBytes > 0 && !m.f.GoABI {
 		m.adjustSP(true, stackBytes)
 	}
 	for _, a := range stackArgs {
+		if a.RetAgg != nil {
+			m.emitStackAggregateArgument(a)
+			continue
+		}
 		sz := a.Cls.Size()
 		r := m.src(a.Args[0], 0, sz)
+		offset := int(a.Aux)
+		if m.f.GoABI {
+			offset += goStackLinkSize
+		}
 		if a.Cls.IsFloat() {
-			m.emit(a64.StrFP(sz == 8, r, mcSP, uint32(a.Aux)))
+			m.emit(a64.StrFP(sz == 8, r, mcSP, uint32(offset)))
 		} else {
-			m.emit(a64.StrImm(sz == 8, r, mcSP, uint32(a.Aux)))
+			m.emit(a64.StrImm(sz == 8, r, mcSP, uint32(offset)))
 		}
 	}
 	m.parallelMove(regPairs)
@@ -2177,10 +2250,54 @@ func (m *mc) callSequence(b *ir.Block, i int) int {
 		m.materializeSym(mreg(Reg(m.f.Temps[a.To.ID].Reg)), m.f.Consts[a.Args[0].ID])
 	}
 	m.emitCall(call)
-	if stackBytes > 0 {
+	if call.RetAgg != nil && !call.StackResult.IsNone() {
+		m.emitStackAggregateResult(call)
+	}
+	if stackBytes > 0 && !m.f.GoABI {
 		m.adjustSP(false, stackBytes)
 	}
 	return i + 1
+}
+
+func (m *mc) emitStackAggregateArgument(argument *ir.Instr) {
+	source := m.src(argument.Args[0], 0, 8)
+	if source != mcGP2 {
+		m.emit(a64.AddImm(true, mcGP2, source, 0))
+	}
+	size, _ := argument.RetAgg.Layout()
+	m.emitStackAggregateCopy(mcSP, goStackLinkSize+int(argument.Aux), mcGP2, 0, size)
+}
+
+func (m *mc) emitStackAggregateResult(call *ir.Instr) {
+	destination := m.src(call.StackResult, 0, 8)
+	if destination != mcGP2 {
+		m.emit(a64.AddImm(true, mcGP2, destination, 0))
+	}
+	size, _ := call.RetAgg.Layout()
+	m.emitStackAggregateCopy(mcGP2, 0, mcSP, goStackLinkSize+int(call.StackResultOffset), size)
+}
+
+func (m *mc) emitStackAggregateCopy(destination a64.Reg, destinationOffset int, source a64.Reg, sourceOffset int, size int) {
+	offset := 0
+	for size-offset >= 8 {
+		m.emit(a64.LdrImm(true, mcGP0, source, uint32(sourceOffset+offset)))
+		m.emit(a64.StrImm(true, mcGP0, destination, uint32(destinationOffset+offset)))
+		offset += 8
+	}
+	if size-offset >= 4 {
+		m.emit(a64.LdrImm(false, mcGP0, source, uint32(sourceOffset+offset)))
+		m.emit(a64.StrImm(false, mcGP0, destination, uint32(destinationOffset+offset)))
+		offset += 4
+	}
+	if size-offset >= 2 {
+		m.emit(a64.LdrhImm(mcGP0, source, uint32(sourceOffset+offset)))
+		m.emit(a64.StrhImm(mcGP0, destination, uint32(destinationOffset+offset)))
+		offset += 2
+	}
+	if size-offset == 1 {
+		m.emit(a64.LdrbImm(mcGP0, source, uint32(sourceOffset+offset)))
+		m.emit(a64.StrbImm(mcGP0, destination, uint32(destinationOffset+offset)))
+	}
 }
 
 func (m *mc) emitCall(in *ir.Instr) {

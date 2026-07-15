@@ -18,7 +18,7 @@ import (
 // references. Value references (ir.Ref) already index Temps/Consts by ID.
 const (
 	binMagic   = "cg12"
-	binVersion = 2
+	binVersion = 3
 )
 
 // MarshalBinary encodes the module to cg12's binary unit format.
@@ -42,6 +42,12 @@ func (m *Module) MarshalBinary() ([]byte, error) {
 	e.uv(uint64(len(m.Files)))
 	for _, f := range m.Files {
 		e.str(f)
+	}
+	e.uv(uint64(len(m.Assembly)))
+	for _, assembly := range m.Assembly {
+		e.str(assembly.PackagePath)
+		e.str(assembly.Path)
+		e.str(assembly.Source)
 	}
 	e.uv(uint64(len(m.Data)))
 	for _, d := range m.Data {
@@ -83,6 +89,12 @@ func DecodeModule(data []byte) (*Module, error) {
 	m.Files = make([]string, int(d.uv()))
 	for i := range m.Files {
 		m.Files[i] = d.str()
+	}
+	m.Assembly = make([]AssemblyFile, int(d.uv()))
+	for i := range m.Assembly {
+		m.Assembly[i].PackagePath = d.str()
+		m.Assembly[i].Path = d.str()
+		m.Assembly[i].Source = d.str()
 	}
 	m.Data = make([]*Data, int(d.uv()))
 	for i := range m.Data {
@@ -220,6 +232,7 @@ func (e *enc) encField(f Field) {
 	e.u8(byte(f.Sub))
 	e.typeRef(f.Type)
 	e.iv(int64(f.Count))
+	e.boolean(f.Pointer)
 }
 
 func (e *enc) encData(d *Data) {
@@ -372,6 +385,8 @@ func (e *enc) encInstr(in *Instr, blockRef func(*Block)) {
 		e.ref(r)
 	}
 	e.typeRef(in.RetAgg)
+	e.ref(in.StackResult)
+	e.iv(in.StackResultOffset)
 	e.srcPos(in.Pos)
 	e.boolean(in.Tail)
 	e.boolean(in.Volatile)
@@ -532,7 +547,7 @@ func (d *dec) decType(t *AggType) {
 }
 
 func (d *dec) decField() Field {
-	return Field{Sub: SubCls(d.u8()), Type: d.typeRef(), Count: int(d.iv())}
+	return Field{Sub: SubCls(d.u8()), Type: d.typeRef(), Count: int(d.iv()), Pointer: d.boolean()}
 }
 
 func (d *dec) decData() *Data {
@@ -698,6 +713,8 @@ func (d *dec) decInstr(blockRef func() *Block) Instr {
 		}
 	}
 	in.RetAgg = d.typeRef()
+	in.StackResult = d.ref()
+	in.StackResultOffset = d.iv()
 	in.Pos = d.srcPos()
 	in.Tail = d.boolean()
 	in.Volatile = d.boolean()
