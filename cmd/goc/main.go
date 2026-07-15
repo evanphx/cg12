@@ -106,7 +106,14 @@ func write(name string, b []byte) {
 }
 
 func link(m *ir.Module, exe string) {
-	b, err := compileObject(m)
+	var translatedAssembly string
+	var b []byte
+	var err error
+	if runtime.GOARCH == "arm64" {
+		b, translatedAssembly, err = arm64.CompileObjectAndAssembly(m)
+	} else {
+		b, err = compileObject(m)
+	}
 	check(err)
 	f, err := os.CreateTemp("", "cg12-goc-*.o")
 	check(err)
@@ -118,13 +125,7 @@ func link(m *ir.Module, exe string) {
 	check(err)
 	inputs := []string{f.Name()}
 	if runtime.GOARCH == "arm64" {
-		assembly := runtimeARM64Assembly
-		if usesGoRuntime(m) {
-			assembly += "\n" + bootstrapARM64Assembly
-		}
-		translated, err := arm64.TranslateAssembly(m)
-		check(err)
-		assembly += "\n" + translated
+		assembly := runtimeSupportAssembly(m, translatedAssembly)
 		support, cleanup := compileRuntimeSupport(cc, assembly)
 		defer cleanup()
 		inputs = append(inputs, support)
@@ -133,6 +134,14 @@ func link(m *ir.Module, exe string) {
 	cmd := exec.Command(cc, args...)
 	cmd.Stderr = os.Stderr
 	check(cmd.Run())
+}
+
+func runtimeSupportAssembly(module *ir.Module, translated string) string {
+	assembly := runtimeARM64Assembly + "\n" + translated
+	if usesGoRuntime(module) {
+		assembly += "\n" + bootstrapARM64Assembly
+	}
+	return assembly
 }
 
 func usesGoRuntime(module *ir.Module) bool {

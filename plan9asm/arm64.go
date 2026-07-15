@@ -2,72 +2,16 @@ package plan9asm
 
 import (
 	"fmt"
-	"path/filepath"
-	"strconv"
 	"strings"
-	"unicode"
 )
-
-// ARM64Options supplies the package and file identity needed to resolve Go's
-// package-local and file-local assembly symbols.
-type ARM64Options struct {
-	PackagePath string
-	Filename    string
-}
-
-// TranslateARM64 converts a parsed Plan 9 ARM64 source file to GNU assembler
-// syntax. It intentionally rejects constructs it cannot translate rather than
-// silently emitting assembly with different semantics.
-func TranslateARM64(file *File, options ARM64Options) (string, error) {
-	translator := arm64Translator{
-		options: options,
-		fileTag: sanitizeSymbol(strings.TrimSuffix(filepath.Base(options.Filename), filepath.Ext(options.Filename))),
-		labels:  make(map[int]map[string]string),
-	}
-	translator.collectLabels(file)
-
-	for _, statement := range file.Statements {
-		if err := translator.translate(statement); err != nil {
-			return "", fmt.Errorf("%s:%d: %w", options.Filename, statement.Position().Line, err)
-		}
-	}
-	return translator.output.String(), nil
-}
-
-// ARM64ExternalReferences returns the non-file-local symbols referenced by
-// instructions in a parsed source file. An external object emitter uses this
-// set to give package-private Go definitions linker-visible binding when an
-// assembly file refers to them.
-func ARM64ExternalReferences(file *File, options ARM64Options) []string {
-	translator := arm64Translator{
-		options: options,
-		fileTag: sanitizeSymbol(strings.TrimSuffix(filepath.Base(options.Filename), filepath.Ext(options.Filename))),
-	}
-	references := make(map[string]bool)
-	for _, statement := range file.Statements {
-		instruction, ok := statement.(*Instruction)
-		if !ok {
-			continue
-		}
-		for _, operand := range instruction.Operands {
-			symbol, ok := operandSymbol(operand)
-			if ok && !symbol.Static {
-				references[translator.symbol(symbol)] = true
-			}
-		}
-	}
-	result := make([]string, 0, len(references))
-	for symbol := range references {
-		result = append(result, symbol)
-	}
-	return result
-}
 
 type arm64Translator struct {
 	options       ARM64Options
 	fileTag       string
 	functionIndex int
 	labels        map[int]map[string]string
+	references    map[string]bool
+	functions     []ARM64Function
 	output        strings.Builder
 }
 
@@ -108,68 +52,13 @@ func (t *arm64Translator) translate(statement Statement) error {
 	}
 }
 
-func (t *arm64Translator) translateText(text *Text) error {
-	t.functionIndex++
-	if text.Frame != "" && text.Frame != "0" {
-		return fmt.Errorf("TEXT frame $%s is not supported yet", text.Frame)
-	}
-	symbol := t.symbol(text.Symbol)
-	t.output.WriteString("\n.text\n")
-	if !text.Symbol.Static {
-		fmt.Fprintf(&t.output, ".global %s\n", symbol)
-	}
-	fmt.Fprintf(&t.output, ".type %s, %%function\n", symbol)
-	fmt.Fprintf(&t.output, "%s:\n", symbol)
-	return nil
-}
-
-func (t *arm64Translator) translateDirective(directive *Directive) error {
-	switch directive.Name {
-	case "PCALIGN":
-		if len(directive.Operands) != 1 || directive.Operands[0].Kind != OperandImmediate {
-			return fmt.Errorf("PCALIGN requires one immediate operand")
-		}
-		fmt.Fprintf(&t.output, "\t.balign %s\n", directive.Operands[0].Immediate)
-		return nil
-	case "GLOBL":
-		return t.translateGlobal(directive)
-	default:
-		return fmt.Errorf("unsupported directive %s", directive.Name)
-	}
-}
-
-func (t *arm64Translator) translateGlobal(directive *Directive) error {
-	if len(directive.Operands) < 2 || len(directive.Operands) > 3 {
-		return fmt.Errorf("GLOBL requires a symbol, optional flags, and size")
-	}
-	symbol, ok := operandSymbol(directive.Operands[0])
-	if !ok {
-		return fmt.Errorf("invalid GLOBL symbol %q", directive.Operands[0].Text)
-	}
-	sizeOperand := directive.Operands[len(directive.Operands)-1]
-	if sizeOperand.Kind != OperandImmediate {
-		return fmt.Errorf("invalid GLOBL size %q", sizeOperand.Text)
-	}
-	size, err := strconv.ParseUint(sizeOperand.Immediate, 0, 64)
-	if err != nil {
-		return fmt.Errorf("invalid GLOBL size %q", sizeOperand.Immediate)
-	}
-	name := t.symbol(symbol)
-	t.output.WriteString("\n.bss\n")
-	t.output.WriteString("\t.balign 8\n")
-	if symbol.Static {
-		fmt.Fprintf(&t.output, "\t.local %s\n", name)
-	} else {
-		fmt.Fprintf(&t.output, "\t.global %s\n", name)
-	}
-	fmt.Fprintf(&t.output, "\t.type %s, %%object\n", name)
-	fmt.Fprintf(&t.output, "\t.size %s, %d\n", name, size)
-	fmt.Fprintf(&t.output, "%s:\n", name)
-	fmt.Fprintf(&t.output, "\t.zero %d\n", size)
-	return nil
-}
-
 func (t *arm64Translator) translateInstruction(instruction *Instruction) error {
+	for _, operand := range instruction.Operands {
+		symbol, ok := operandSymbol(operand)
+		if ok && !symbol.Static {
+			t.references[t.symbol(symbol)] = true
+		}
+	}
 	opcode := instruction.Opcode
 	switch opcode {
 	case "MOVD", "MOVW", "MOVWU", "MOVH", "MOVHU", "MOVB", "MOVBU":
@@ -540,152 +429,4 @@ func (t *arm64Translator) branchTarget(operand Operand) string {
 		return t.symbol(symbol)
 	}
 	return t.localLabel(operand.Text)
-}
-
-func memoryAddress(operand Operand, suffix string) (string, error) {
-	if operand.Kind != OperandMemory || operand.Base == "SB" || operand.Base == "FP" {
-		return "", fmt.Errorf("unsupported memory operand %q", operand.Text)
-	}
-	base, err := arm64Register(operand.Base, 64)
-	if err != nil {
-		return "", err
-	}
-	offset := operand.Offset
-	if offset == "" {
-		offset = "0"
-	}
-	switch suffix {
-	case "":
-		if offset == "0" {
-			return fmt.Sprintf("[%s]", base), nil
-		}
-		return fmt.Sprintf("[%s, #%s]", base, offset), nil
-	case "P":
-		return fmt.Sprintf("[%s], #%s", base, offset), nil
-	case "W":
-		return fmt.Sprintf("[%s, #%s]!", base, offset), nil
-	default:
-		return "", fmt.Errorf("unsupported addressing suffix .%s", suffix)
-	}
-}
-
-func formatALUSource(operand Operand, width int) (string, error) {
-	switch operand.Kind {
-	case OperandRegister:
-		return arm64Register(operand.Register, width)
-	case OperandImmediate:
-		return "#" + normalizeImmediate(operand.Immediate), nil
-	case OperandShiftedRegister:
-		register, err := arm64Register(operand.Register, width)
-		if err != nil {
-			return "", err
-		}
-		shift := map[string]string{"<<": "lsl", ">>": "lsr", "->": "asr", "@>": "ror"}[operand.Shift]
-		return fmt.Sprintf("%s, %s #%s", register, shift, operand.ShiftAmount), nil
-	default:
-		return "", fmt.Errorf("unsupported arithmetic operand %q", operand.Text)
-	}
-}
-
-func registerOperand(operand Operand, width int) (string, error) {
-	if operand.Kind != OperandRegister {
-		return "", fmt.Errorf("operand %q must be a register", operand.Text)
-	}
-	return arm64Register(operand.Register, width)
-}
-
-func arm64Register(register string, width int) (string, error) {
-	register = strings.ToUpper(register)
-	prefix := "x"
-	if width == 32 {
-		prefix = "w"
-	}
-	switch register {
-	case "ZR":
-		return prefix + "zr", nil
-	case "SP", "RSP":
-		return "sp", nil
-	case "LR":
-		return prefix + "30", nil
-	case "FP":
-		return prefix + "29", nil
-	}
-	if strings.HasPrefix(register, "R") {
-		number, err := strconv.Atoi(register[1:])
-		if err == nil && number >= 0 && number <= 30 {
-			return prefix + strconv.Itoa(number), nil
-		}
-	}
-	return "", fmt.Errorf("unsupported ARM64 register %s", register)
-}
-
-func moveWidth(opcode string) int {
-	if opcode == "MOVD" || opcode == "MOVW" || opcode == "MOVH" || opcode == "MOVB" {
-		return 64
-	}
-	return 32
-}
-
-func storeWidth(opcode string) int {
-	if opcode == "MOVD" {
-		return 64
-	}
-	return 32
-}
-
-func instructionWidth(opcode string) int {
-	if strings.HasSuffix(opcode, "W") {
-		return 32
-	}
-	return 64
-}
-
-func aluMnemonic(opcode string) string {
-	opcode = strings.TrimSuffix(opcode, "W")
-	return strings.ToLower(opcode)
-}
-
-func branchMnemonic(opcode string) string {
-	switch opcode {
-	case "B":
-		return "b"
-	case "BL":
-		return "bl"
-	case "BCC", "BLO":
-		return "b.lo"
-	case "BCS", "BHS":
-		return "b.hs"
-	default:
-		return "b." + strings.ToLower(strings.TrimPrefix(opcode, "B"))
-	}
-}
-
-func normalizeImmediate(immediate string) string {
-	immediate = strings.TrimSpace(immediate)
-	if strings.HasPrefix(immediate, "~") {
-		value, err := strconv.ParseInt(strings.TrimPrefix(immediate, "~"), 0, 64)
-		if err == nil {
-			return strconv.FormatInt(^value, 10)
-		}
-	}
-	return immediate
-}
-
-func sanitizeSymbol(name string) string {
-	var output strings.Builder
-	for _, r := range name {
-		if r == '_' || unicode.IsLetter(r) || unicode.IsDigit(r) {
-			if r < unicode.MaxASCII {
-				output.WriteRune(r)
-			} else {
-				output.WriteByte('_')
-			}
-		} else {
-			output.WriteByte('_')
-		}
-	}
-	if output.Len() == 0 {
-		return "anon"
-	}
-	return output.String()
 }

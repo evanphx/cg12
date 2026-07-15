@@ -39,6 +39,23 @@ The runtime execution test allocates traced structs, grows stacks, runs the
 standard collector, verifies live heap objects, and exits with background
 runtime threads active.
 
+The ARM64 Go path uses ABIInternal register assignment for scalar and aggregate
+arguments and results. Build-selected Plan 9 assembly is parsed into a syntax
+tree and translated to GNU AArch64 syntax. The currently enabled unchanged
+standard-library files are `runtime/atomic_arm64.s`, `runtime/memclr_arm64.s`,
+and `runtime/memmove_arm64.s`; unsupported files are kept out of the build until
+the translator accepts every construct they contain.
+
+The runtime-assembly demo grows slices, validates their copied contents, clears
+memory, runs the collector, and prints a checksum:
+
+```sh
+go build -o /tmp/goc ./cmd/goc
+/tmp/goc -o /tmp/runtime-assembly-demo goc/testdata/runtime_assembly.go
+/tmp/runtime-assembly-demo
+# ABIInternal + Plan 9 assembly: 256 32896 3072
+```
+
 ```sh
 go run ./cmd/goc -emit-ir program.go
 go run ./cmd/goc -O -c program.go
@@ -72,7 +89,7 @@ go run ./cmd/goc -run program.go
 | `wasm` — WebAssembly backend: locals, structured control flow, linear memory, calls (direct/indirect), aggregates, variadics, WAT emit | ✅ runs on wasmtime, 95% covered (external/WASI calls pending) |
 | `arm64/a64` — direct A64 instruction encoder (integer, float, loads/stores, branches), validated byte-for-byte vs a reference assembler | ✅ implemented, 94% covered |
 | `obj` — ELF64 relocatable-object writer (symbols, .text/.data, relocations) | ✅ links + runs with `ld`/`gcc` |
-| `arm64.CompileObject` — the arm64 backend: IR → A64 bytes → ELF `.o`, **no external assembler** | ✅ integers, floats, calls, tail calls, variadics, aggregates, data |
+| `arm64.CompileObject` — the arm64 backend: IR → A64 bytes → ELF `.o`, **no external assembler** | ✅ integers, floats, calls, tail calls, variadics, aggregates, and data; `CompileObjectAndAssembly` also returns translated GNU assembly sidecars |
 | `link` — partial linker: merges objects from IR modules and `.o` files, resolves cross-object references | ✅ merges .text/.data, symbol resolution, PC-relative branch resolution |
 
 ## Example

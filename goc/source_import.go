@@ -11,6 +11,8 @@ import (
 	"os"
 	"path/filepath"
 	"runtime"
+
+	"github.com/evanphx/cg12/plan9asm"
 )
 
 // sourceUnit is the unchanged, build-selected source for an imported package.
@@ -25,14 +27,6 @@ type sourceUnit struct {
 type sourceAssemblyFile struct {
 	path   string
 	source string
-}
-
-var translatedAssemblyFiles = map[string]map[string]bool{
-	"runtime": {
-		"atomic_arm64.s":  true,
-		"memclr_arm64.s":  true,
-		"memmove_arm64.s": true,
-	},
 }
 
 // sourceLoader imports selected packages from source while retaining their AST
@@ -173,7 +167,7 @@ func (l *sourceLoader) Import(path string) (*types.Package, error) {
 		u.files = append(u.files, file)
 	}
 	for _, name := range bp.SFiles {
-		if !translatedAssemblyFiles[path][name] {
+		if !plan9asm.SupportsARM64File(path, name) {
 			continue
 		}
 		full := filepath.Join(bp.Dir, name)

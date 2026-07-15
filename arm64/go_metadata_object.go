@@ -12,17 +12,17 @@ type goFunctionInfo struct {
 	name         string
 	frameSize    int
 	frameStart   int
-	pcsp         []pcspPoint
 	size         uint64
 	funcID       byte
 	funcFlag     byte
 	pointerWords []int
 }
 
-type pcspPoint struct {
-	pc    int
-	value int
-}
+const (
+	goFuncFlagTopFrame = 1
+	goFuncFlagSPWrite  = 2
+	goFuncFlagAsm      = 4
+)
 
 const goModuleInitTasksName = ".goc.module.inittasks"
 
@@ -52,8 +52,8 @@ type goMetadataBuilder struct {
 	relocs []obj.Reloc
 }
 
-func addGoRuntimeObjectMetadata(object *obj.Object, functions []goFunctionInfo, moduledata *ir.Data, pointerOffsets []uint64, moduleInitTaskCount int) error {
-	if len(functions) == 0 {
+func addGoRuntimeObjectMetadata(object *obj.Object, functions, translatedFunctions []goFunctionInfo, moduledata *ir.Data, pointerOffsets []uint64, moduleInitTaskCount int) error {
+	if len(functions) == 0 && len(translatedFunctions) == 0 {
 		return addData(object, moduledata)
 	}
 	dataStart, ok := dataSymbolValue(object, sanitize(".goc.runtime.datastart"))
@@ -78,7 +78,7 @@ func addGoRuntimeObjectMetadata(object *obj.Object, functions []goFunctionInfo, 
 		object.Data = append(object.Data, 0)
 	}
 	builder := &goMetadataBuilder{object: object, base: uint64(len(object.Data)), labels: make(map[string]uint64)}
-	builder.build(functions, moduledata, gcProgram, noptrBSSName, noptrBSSSize, moduleInitTaskCount)
+	builder.build(functions, translatedFunctions, moduledata, gcProgram, noptrBSSName, noptrBSSSize, moduleInitTaskCount)
 	object.Data = append(object.Data, builder.data...)
 	object.DataRelocs = append(object.DataRelocs, builder.relocs...)
 	return nil
@@ -132,9 +132,10 @@ func goGCProgram(dataStart, dataEnd uint64, pointerOffsets []uint64) ([]byte, er
 	return program, nil
 }
 
-func (builder *goMetadataBuilder) build(functions []goFunctionInfo, moduledata *ir.Data, gcProgram []byte, noptrBSSName string, noptrBSSSize uint64, moduleInitTaskCount int) {
+func (builder *goMetadataBuilder) build(functions, translatedFunctions []goFunctionInfo, moduledata *ir.Data, gcProgram []byte, noptrBSSName string, noptrBSSSize uint64, moduleInitTaskCount int) {
 	const findFuncBuckets = 4096
 	functions = append(functions, goAssemblyFunctionInfo()...)
+	functions = append(functions, translatedFunctions...)
 
 	builder.label(".goc.go.gcbss")
 	builder.bytes(0)
@@ -168,7 +169,7 @@ func (builder *goMetadataBuilder) build(functions []goFunctionInfo, moduledata *
 	pcspOffsets := make([]uint32, len(functions))
 	for index, function := range functions {
 		pcspOffsets[index] = uint32(builder.offset(".goc.go.pctab"))
-		builder.data = append(builder.data, goPCSP(function.frameStart, function.frameSize, function.pcsp...)...)
+		builder.data = append(builder.data, goPCSP(function.frameStart, function.frameSize)...)
 	}
 	builder.label(".goc.go.pctab.end")
 	builder.align(4)
@@ -298,7 +299,7 @@ func (builder *goMetadataBuilder) build(functions []goFunctionInfo, moduledata *
 	}
 }
 
-func goPCSP(frameStart, frameSize int, changes ...pcspPoint) []byte {
+func goPCSP(frameStart, frameSize int) []byte {
 	var data []byte
 	appendUvarint := func(value uint32) {
 		for value >= 0x80 {
@@ -315,21 +316,15 @@ func goPCSP(frameStart, frameSize int, changes ...pcspPoint) []byte {
 		appendUvarint(encoded)
 	}
 
-	points := make([]pcspPoint, 0, len(changes)+2)
+	type point struct {
+		pc    int
+		value int
+	}
+	points := make([]point, 0, 2)
 	if frameStart > 0 {
-		points = append(points, pcspPoint{pc: 0, value: 0})
+		points = append(points, point{pc: 0, value: 0})
 	}
-	points = append(points, pcspPoint{pc: frameStart, value: frameSize})
-	for _, change := range changes {
-		if change.pc < frameStart {
-			continue
-		}
-		if len(points) > 0 && points[len(points)-1].pc == change.pc {
-			points[len(points)-1] = change
-			continue
-		}
-		points = append(points, change)
-	}
+	points = append(points, point{pc: frameStart, value: frameSize})
 
 	value := -1
 	for index, point := range points {
@@ -355,10 +350,6 @@ func goPCSP(frameStart, frameSize int, changes ...pcspPoint) []byte {
 // frame and made GC stack walks stop early.
 func goAssemblyFunctionInfo() []goFunctionInfo {
 	const (
-		funcFlagTopFrame = 1
-		funcFlagSPWrite  = 2
-		funcFlagAsm      = 4
-
 		funcIDAsmCGOCall        = 2
 		funcIDGoexit            = 8
 		funcIDGogo              = 9
@@ -369,20 +360,23 @@ func goAssemblyFunctionInfo() []goFunctionInfo {
 	)
 
 	return []goFunctionInfo{
-		{name: "runtime_gocPrintString", funcFlag: funcFlagAsm},
-		{name: "runtime_gogo", funcID: funcIDGogo, funcFlag: funcFlagSPWrite | funcFlagAsm},
-		{name: "runtime_mcall", funcID: funcIDMcall, funcFlag: funcFlagSPWrite | funcFlagAsm},
+		{name: "runtime_gocPrintString", funcFlag: goFuncFlagAsm},
+		{name: "runtime_gogo", funcID: funcIDGogo, funcFlag: goFuncFlagSPWrite | goFuncFlagAsm},
+		{name: "runtime_mcall", funcID: funcIDMcall, funcFlag: goFuncFlagSPWrite | goFuncFlagAsm},
 		// morestack has no x29 frame setup, so its locals bitmap starts at sp+8.
 		// It keeps untyped register values unscanned and mirrors only pointer
 		// arguments into words 51 through 66. The preceding two words keep the
 		// caller frame pointer and closure context visible to stack copying.
-		{name: "runtime_morestack_restore", frameSize: 560, funcFlag: funcFlagAsm, pointerWords: []int{49, 50, 51, 52, 53, 54, 55, 56, 57, 58, 59, 60, 61, 62, 63, 64, 65, 66}},
-		{name: "runtime_morestack_noctxt", funcFlag: funcFlagAsm},
-		{name: "runtime_systemstack", funcID: funcIDSystemstack, funcFlag: funcFlagSPWrite | funcFlagAsm},
-		{name: "runtime_systemstack_switch", funcID: funcIDSystemstackSwitch, funcFlag: funcFlagAsm},
-		{name: "runtime_mstart", funcID: funcIDMstart, funcFlag: funcFlagTopFrame | funcFlagAsm},
-		{name: "runtime_goexit", funcID: funcIDGoexit, funcFlag: funcFlagTopFrame | funcFlagAsm},
-		{name: "runtime_asmcgocall", funcID: funcIDAsmCGOCall, funcFlag: funcFlagTopFrame | funcFlagAsm},
+		{name: "runtime_morestack_restore", frameSize: 560, funcFlag: goFuncFlagAsm, pointerWords: []int{49, 50, 51, 52, 53, 54, 55, 56, 57, 58, 59, 60, 61, 62, 63, 64, 65, 66}},
+		{name: "runtime_morestack_noctxt", funcFlag: goFuncFlagAsm},
+		{name: "runtime_systemstack", funcID: funcIDSystemstack, funcFlag: goFuncFlagSPWrite | goFuncFlagAsm},
+		{name: "runtime_systemstack_switch", funcID: funcIDSystemstackSwitch, funcFlag: goFuncFlagAsm},
+		{name: "runtime_mstart", funcID: funcIDMstart, funcFlag: goFuncFlagTopFrame | goFuncFlagAsm},
+		{name: "runtime_goexit", funcID: funcIDGoexit, funcFlag: goFuncFlagTopFrame | goFuncFlagAsm},
+		{name: "runtime_asmcgocall", funcID: funcIDAsmCGOCall, funcFlag: goFuncFlagTopFrame | goFuncFlagAsm},
+		// Clear asmcgocall's TopFrame classification for the remaining leaf
+		// helpers and the translated standard-library assembly.
+		{name: "runtime_callCgoMmap", funcFlag: goFuncFlagAsm},
 	}
 }
 

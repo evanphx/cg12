@@ -41,19 +41,37 @@ func TestGoRuntimeModuledataReferencesModuleInitTasks(t *testing.T) {
 	assert.Equal(t, uint64(1), binary.LittleEndian.Uint64(object.Data[moduledata.Value+488:]))
 }
 
+func TestGoRuntimeMetadataIncludesTranslatedAssemblyFunctions(t *testing.T) {
+	module := ir.NewModule()
+	schedinit := module.NewFuncVoid("runtime.schedinit")
+	schedinit.GoABI = true
+	schedinit.Entry().RetVoid()
+	module.Assembly = append(module.Assembly, ir.AssemblyFile{
+		PackagePath: "runtime",
+		Path:        "runtime/example_arm64.s",
+		Source:      "TEXT ·translated<ABIInternal>(SB),NOSPLIT|NOFRAME,$0-0\n\tRET\n",
+	})
+	module.Data = append(module.Data,
+		&ir.Data{Name: ".goc.runtime.datastart", Align: 8, Items: []ir.DataItem{{Sub: ir.SubUB, Ints: []int64{0}}}},
+		&ir.Data{Name: ".goc.runtime.dataend", Align: 8, Items: []ir.DataItem{{Sub: ir.SubUB, Ints: []int64{0}}}},
+		&ir.Data{Name: "runtime.firstmoduledata", Align: 8},
+	)
+
+	object, err := CompileToObject(module)
+	require.NoError(t, err)
+	found := false
+	for _, relocation := range object.DataRelocs {
+		if relocation.Sym == "runtime_translated" {
+			found = true
+			break
+		}
+	}
+	assert.True(t, found, "translated TEXT declaration is absent from runtime functab metadata")
+}
+
 func TestGoPCSPTerminatesBeforeFollowingFunction(t *testing.T) {
 	assert.Equal(t, []byte{66, 0xff, 0xff, 0xff, 0xff, 0x0f, 0}, goPCSP(0, 32))
 	assert.Equal(t, []byte{2, 9, 64, 0xff, 0xff, 0xff, 0xff, 0x0f, 0}, goPCSP(36, 32))
-}
-
-func TestGoPCSPTracksTemporaryCallStackSpace(t *testing.T) {
-	assert.Equal(t,
-		[]byte{2, 9, 64, 4, 32, 3, 31, 0xff, 0xff, 0xff, 0xff, 0x0f, 0},
-		goPCSP(36, 32,
-			pcspPoint{pc: 52, value: 48},
-			pcspPoint{pc: 64, value: 32},
-		),
-	)
 }
 
 func TestGoRuntimeModuledataDescribesScannedGlobals(t *testing.T) {

@@ -7,6 +7,8 @@ import (
 	"runtime"
 	"strings"
 	"testing"
+
+	"github.com/evanphx/cg12/ir"
 )
 
 func TestARM64RuntimeExitTerminatesTheProcess(t *testing.T) {
@@ -27,6 +29,24 @@ func TestRuntimeSupportDoesNotShadowTranslatedStandardLibraryAssembly(t *testing
 		if strings.Contains(runtimeARM64Assembly, ".global "+symbol) {
 			t.Errorf("handwritten runtime support still defines %s", symbol)
 		}
+	}
+}
+
+func TestTranslatedAssemblyPrecedesRuntimeTextEnd(t *testing.T) {
+	module := ir.NewModule()
+	function := module.NewFuncVoid("runtime.schedinit")
+	function.Entry().RetVoid()
+	translated := ".global runtime_memmove\nruntime_memmove:\n\tret\n"
+	assembly := runtimeSupportAssembly(module, translated)
+
+	translatedAt := strings.Index(assembly, ".global runtime_memmove")
+	textEndAt := strings.Index(assembly, ".global runtime_gocTextEnd")
+	mainAt := strings.Index(assembly, ".global main")
+	if translatedAt < 0 || textEndAt < 0 || mainAt < 0 {
+		t.Fatalf("runtime support is missing an expected marker")
+	}
+	if !(translatedAt < textEndAt && textEndAt < mainAt) {
+		t.Fatalf("runtime support order: translated=%d text-end=%d main=%d", translatedAt, textEndAt, mainAt)
 	}
 }
 

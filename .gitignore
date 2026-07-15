@@ -12,6 +12,11 @@ core.*
 *.exe
 *.test
 
+# Default command outputs used by repository demos
+/hello
+/runtime_assembly
+/cmd/cc/prog
+
 # ...but .out files under testdata are expected-output fixtures, not build output
 !**/testdata/**/*.out
 

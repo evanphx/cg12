@@ -1,4 +1,7 @@
 .text
+.global runtime_gocTextEnd
+runtime_gocTextEnd:
+
 .global main
 .type main, %function
 main:
@@ -36,9 +39,6 @@ main:
 	mov x8, 94
 	svc 0
 	brk 0
-
-.global runtime_gocTextEnd
-runtime_gocTextEnd:
 
 .data
 .balign 8

@@ -53,7 +53,9 @@ const (
 	TLSGeneralDynamic
 )
 
-// CompileObject emits an ELF relocatable object for m with default options.
+// CompileObject emits the IR portion of m as an ELF relocatable object with
+// default options. Call CompileObjectAndAssembly when m carries Plan 9 assembly
+// that must be linked alongside the object.
 func CompileObject(m *ir.Module) ([]byte, error) {
 	return CompileObjectWith(m, Options{})
 }
@@ -61,7 +63,29 @@ func CompileObject(m *ir.Module) ([]byte, error) {
 // CompileObjectWith emits an ELF relocatable object for m, applying opts (such as
 // a GC strategy).
 func CompileObjectWith(m *ir.Module, opts Options) ([]byte, error) {
-	o, err := CompileToObjectWith(m, opts)
+	bundle, err := prepareAssembly(m)
+	if err != nil {
+		return nil, err
+	}
+	return compileObjectWithBundle(m, opts, bundle)
+}
+
+// CompileObjectAndAssembly emits the cg12 ELF object and GNU assembly parts of
+// a module after parsing its Plan 9 assembly sources once.
+func CompileObjectAndAssembly(m *ir.Module) ([]byte, string, error) {
+	bundle, err := prepareAssembly(m)
+	if err != nil {
+		return nil, "", err
+	}
+	data, err := compileObjectWithBundle(m, Options{}, bundle)
+	if err != nil {
+		return nil, "", err
+	}
+	return data, bundle.source, nil
+}
+
+func compileObjectWithBundle(m *ir.Module, opts Options, bundle assemblyBundle) ([]byte, error) {
+	o, err := compileToObjectWithBundle(m, opts, bundle)
 	if err != nil {
 		return nil, err
 	}
@@ -101,11 +125,16 @@ func addAliases(o *obj.Object, aliases []*ir.Alias) error {
 }
 
 func CompileToObjectWith(m *ir.Module, opts Options) (*obj.Object, error) {
-	o := &obj.Object{Machine: obj.EM_AARCH64}
-	assemblyReferences, err := assemblyExternalReferences(m)
+	bundle, err := prepareAssembly(m)
 	if err != nil {
 		return nil, err
 	}
+	return compileToObjectWithBundle(m, opts, bundle)
+}
+
+func compileToObjectWithBundle(m *ir.Module, opts Options, bundle assemblyBundle) (*obj.Object, error) {
+	o := &obj.Object{Machine: obj.EM_AARCH64}
+	assemblyReferences := bundle.references
 	goRuntime := moduleUsesGoRuntime(m)
 	var rows []obj.LineRow
 	var dfuncs []obj.DwarfFunc
@@ -140,7 +169,6 @@ func CompileToObjectWith(m *ir.Module, opts Options) (*obj.Object, error) {
 			name:         name,
 			frameSize:    mc.m.frame,
 			frameStart:   mc.m.frameStart,
-			pcsp:         mc.m.pcsp,
 			size:         uint64(len(mc.code)),
 			pointerWords: mc.m.goPointerWords(),
 		})
@@ -203,7 +231,7 @@ func CompileToObjectWith(m *ir.Module, opts Options) (*obj.Object, error) {
 		}
 	}
 	if moduledata != nil {
-		if err := addGoRuntimeObjectMetadata(o, goFunctions, moduledata, dataPointerOffsets, goModuleInitTaskCount(m)); err != nil {
+		if err := addGoRuntimeObjectMetadata(o, goFunctions, bundle.functions, moduledata, dataPointerOffsets, goModuleInitTaskCount(m)); err != nil {
 			return nil, err
 		}
 	}
@@ -613,7 +641,6 @@ type mc struct {
 	instrPC    map[*ir.Instr]uint64 // PC at the start of each instruction
 	safepoints []safepoint
 	frameStart int
-	pcsp       []pcspPoint
 
 	blockDone bool
 	useCount  []int                     // per-temp use count, for the fused compare-branch
@@ -1155,18 +1182,6 @@ func (m *mc) frameTop() int {
 
 func (m *mc) goPointerWords() []int {
 	return goPointerWordIndexes(m.f, m.allocOff, m.spillBase)
-}
-
-func (m *mc) recordPCSP(value int) {
-	if !m.f.GoABI {
-		return
-	}
-	point := pcspPoint{pc: m.prog.Len() * 4, value: value}
-	if len(m.pcsp) > 0 && m.pcsp[len(m.pcsp)-1].pc == point.pc {
-		m.pcsp[len(m.pcsp)-1] = point
-		return
-	}
-	m.pcsp = append(m.pcsp, point)
 }
 
 func goPointerWordIndexes(function *ir.Func, allocations map[*ir.Instr]int, spillBase int) []int {

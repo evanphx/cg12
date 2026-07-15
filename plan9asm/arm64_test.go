@@ -38,6 +38,12 @@ done:
 	assert.Contains(t, assembly, "\ttbz x2, #3, .Lcopy_arm64_0_done")
 }
 
+func TestSupportsARM64FileKeepsTargetPolicyWithTranslator(t *testing.T) {
+	assert.True(t, SupportsARM64File("runtime", "memmove_arm64.s"))
+	assert.False(t, SupportsARM64File("runtime", "asm_arm64.s"))
+	assert.False(t, SupportsARM64File("other", "memmove_arm64.s"))
+}
+
 func TestTranslateExactRuntimeARM64FilesAssemble(t *testing.T) {
 	if runtime.GOARCH != "arm64" {
 		t.Skip("GNU AArch64 assembler is required")
