@@ -7,17 +7,21 @@ import (
 )
 
 type arm64Translator struct {
-	options       ARM64Options
-	fileTag       string
-	functionIndex int
-	labels        map[int]map[string]string
-	references    map[string]bool
-	abi0Layouts   map[int]abi0Layout
-	currentABI0   bool
-	currentFrame  int
-	functions     []ARM64Function
-	data          map[string][]arm64DataValue
-	output        strings.Builder
+	options           ARM64Options
+	fileTag           string
+	functionIndex     int
+	labels            map[int]map[string]string
+	references        map[string]bool
+	abi0Layouts       map[int]abi0Layout
+	directABI0        map[int]bool
+	currentABI0       bool
+	currentDirectABI0 bool
+	currentABI0Layout abi0Layout
+	currentFrame      int
+	functions         []ARM64Function
+	data              map[string][]arm64DataValue
+	lseEnabled        bool
+	output            strings.Builder
 }
 
 func (t *arm64Translator) collectLabels(file *File) {
@@ -59,6 +63,14 @@ func (t *arm64Translator) translate(statement Statement) error {
 
 func (t *arm64Translator) translateInstruction(instruction *Instruction) error {
 	for _, operand := range instruction.Operands {
+		if operand.Kind == OperandMemory && operand.Base == "SB" {
+			name, _, err := t.symbolAddress(operand)
+			if err != nil {
+				return err
+			}
+			t.references[name] = true
+			continue
+		}
 		symbol, ok := operandSymbol(operand)
 		if ok && !symbol.Static {
 			t.references[t.symbol(symbol)] = true
@@ -127,6 +139,16 @@ func (t *arm64Translator) translateInstruction(instruction *Instruction) error {
 		return t.translateDC(instruction)
 	case "SVC":
 		return t.translateSVC(instruction)
+	case "LDAR", "LDARW", "LDARB", "LDAXR", "LDAXRW", "LDAXRB":
+		return t.translateAtomicLoad(instruction)
+	case "STLR", "STLRW", "STLRB":
+		return t.translateAtomicStore(instruction)
+	case "STLXR", "STLXRW", "STLXRB":
+		return t.translateAtomicStoreExclusive(instruction)
+	case "SWPALB", "SWPALW", "SWPALD", "CASALW", "CASALD", "LDADDALW", "LDADDALD", "LDCLRALB", "LDCLRALW", "LDCLRALD", "LDORALB", "LDORALW", "LDORALD":
+		return t.translateLSEAtomic(instruction)
+	case "MVN":
+		return t.translateBitwiseNot(instruction)
 	case "RET":
 		if len(instruction.Operands) != 0 {
 			return fmt.Errorf("RET operands are not supported yet")
@@ -256,14 +278,20 @@ func (t *arm64Translator) emitLoad(instruction *Instruction, source Operand, des
 		if instruction.Suffix != "" {
 			return fmt.Errorf("symbolic load does not accept .%s", instruction.Suffix)
 		}
-		name := t.symbol(source.Symbol)
+		name, offset, err := t.symbolAddress(source)
+		if err != nil {
+			return err
+		}
+		relocation := symbolRelocation(name, offset)
 		fmt.Fprintf(&t.output, "\tadrp x27, %s\n", name)
-		fmt.Fprintf(&t.output, "\t%s %s, [x27, :lo12:%s]\n", mnemonic, destination, name)
+		fmt.Fprintf(&t.output, "\t%s %s, [x27, :lo12:%s]\n", mnemonic, destination, relocation)
 		return nil
 	}
 	var address string
 	var err error
-	if source.Base == "FP" && t.currentABI0 {
+	if source.Base == "FP" && t.currentDirectABI0 {
+		return t.emitDirectABI0Load(instruction, source, destination)
+	} else if source.Base == "FP" && t.currentABI0 {
 		address, err = t.abi0FrameAddress(source, instruction.Suffix)
 	} else {
 		address, err = t.memoryAddress(source, instruction.Suffix)
@@ -289,14 +317,20 @@ func (t *arm64Translator) emitStore(instruction *Instruction, sourceRegister str
 		if instruction.Suffix != "" {
 			return fmt.Errorf("symbolic store does not accept .%s", instruction.Suffix)
 		}
-		name := t.symbol(destination.Symbol)
+		name, offset, err := t.symbolAddress(destination)
+		if err != nil {
+			return err
+		}
+		relocation := symbolRelocation(name, offset)
 		fmt.Fprintf(&t.output, "\tadrp x27, %s\n", name)
-		fmt.Fprintf(&t.output, "\t%s %s, [x27, :lo12:%s]\n", mnemonic, sourceRegister, name)
+		fmt.Fprintf(&t.output, "\t%s %s, [x27, :lo12:%s]\n", mnemonic, sourceRegister, relocation)
 		return nil
 	}
 	var address string
 	var err error
-	if destination.Base == "FP" && t.currentABI0 {
+	if destination.Base == "FP" && t.currentDirectABI0 {
+		return t.emitDirectABI0Store(instruction, sourceRegister, destination)
+	} else if destination.Base == "FP" && t.currentABI0 {
 		address, err = t.abi0FrameAddress(destination, instruction.Suffix)
 	} else {
 		address, err = t.memoryAddress(destination, instruction.Suffix)
@@ -559,6 +593,11 @@ func (t *arm64Translator) translateBranch(instruction *Instruction) error {
 	}
 	mnemonic := branchMnemonic(instruction.Opcode)
 	target := t.branchTarget(instruction.Operands[0])
+	if t.currentABI0 && !t.currentDirectABI0 && instruction.Opcode == "B" {
+		if symbol, ok := operandSymbol(instruction.Operands[0]); ok && !symbol.Static && symbol.ABI == "" {
+			target = abi0Symbol(t.symbol(symbol))
+		}
+	}
 	fmt.Fprintf(&t.output, "\t%s %s\n", mnemonic, target)
 	return nil
 }

@@ -54,6 +54,11 @@ handwritten syscall shims with the copied standard-library implementations.
 The exact `internal/chacha8rand/chacha8_arm64.s` implementation is also active,
 including its multiline `QR` macro, local frame, SIMD structure operations,
 and `DATA`/`GLOBL RODATA` constant tables.
+The unchanged `internal/runtime/atomic/atomic_arm64.s` file replaces the
+handwritten atomic primitives. Its conditional LSE paths, exclusive-access
+fallbacks, and generated `go_asm.h` offset constants are compiled directly;
+eligible leaf ABI0 routines use a direct register adapter so runtime atomics do
+not acquire an extra call frame.
 Unsupported files are kept out of the build until the translator accepts every
 construct they contain.
 

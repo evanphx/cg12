@@ -144,6 +144,7 @@ func TestLoadExactAdditionalStandardAssembly(t *testing.T) {
 		{path: "internal/chacha8rand", file: "chacha8_arm64.s"},
 		{path: "internal/runtime/sys", file: "dit_arm64.s"},
 		{path: "internal/runtime/syscall/linux", file: "asm_linux_arm64.s"},
+		{path: "internal/runtime/atomic", file: "atomic_arm64.s"},
 		{path: "syscall", file: "asm_linux_arm64.s"},
 	}
 

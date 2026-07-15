@@ -9,6 +9,7 @@ import (
 	"testing"
 
 	"github.com/evanphx/cg12/ir"
+	"github.com/evanphx/cg12/plan9asm"
 )
 
 func TestARM64RuntimeExitTerminatesTheProcess(t *testing.T) {
@@ -32,6 +33,13 @@ func TestRuntimeSupportDoesNotShadowTranslatedStandardLibraryAssembly(t *testing
 		"internal_runtime_sys_DisableDIT",
 		"internal_runtime_sys_EnableDIT",
 		"internal_runtime_syscall_linux_Syscall6",
+		"internal_runtime_atomic_Load",
+		"internal_runtime_atomic_Store",
+		"internal_runtime_atomic_Cas",
+		"internal_runtime_atomic_Xadd",
+		"internal_runtime_atomic_Xchg",
+		"internal_runtime_atomic_And8",
+		"internal_runtime_atomic_Or8",
 		"runtime_memequal",
 		"runtime_memmove",
 		"runtime_memclrNoHeapPointers",
@@ -111,11 +119,31 @@ func TestARM64RuntimeAtomicSupportExecutes(t *testing.T) {
 	assembly := filepath.Join(directory, "runtime.S")
 	harness := filepath.Join(directory, "atomic.c")
 	executable := filepath.Join(directory, "atomic")
-	if err := os.WriteFile(assembly, []byte(runtimeARM64Assembly), 0o644); err != nil {
+	atomicPath := filepath.Join("..", "..", "stdlib", "src", "internal", "runtime", "atomic", "atomic_arm64.s")
+	atomicSource, err := os.ReadFile(atomicPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	atomicFile, err := plan9asm.Parse(strings.NewReader(string(atomicSource)))
+	if err != nil {
+		t.Fatal(err)
+	}
+	translated, err := plan9asm.TranslateARM64(atomicFile, plan9asm.ARM64Options{
+		PackagePath:      "internal/runtime/atomic",
+		Filename:         "atomic_arm64.s",
+		Defines:          map[string]int64{"const_offsetARM64HasATOMICS": 135},
+		PreferDirectABI0: true,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(assembly, []byte(translated+runtimeARM64Assembly), 0o644); err != nil {
 		t.Fatal(err)
 	}
 	const source = `
 #include <stdint.h>
+
+unsigned char internal_cpu_ARM64[256];
 
 uint32_t internal_runtime_atomic_Load(uint32_t *);
 void internal_runtime_atomic_Store(uint32_t *, uint32_t);
@@ -196,6 +224,7 @@ func TestARM64StandardLibraryIOAndFmtExecute(t *testing.T) {
 	}{
 		{name: "ABI0 assembly", source: "abi0_assembly.go"},
 		{name: "ChaCha8 assembly", source: "chacha8rand_assembly.go"},
+		{name: "runtime atomic assembly", source: "runtime_atomic_assembly.go"},
 		{name: "internal/bytealg assembly", source: "bytealg_compare.go"},
 		{name: "io.WriteString", source: "io_write_string.go"},
 		{name: "fmt.Sprintf", source: "fmt_sprintf.go"},

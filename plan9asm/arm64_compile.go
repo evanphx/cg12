@@ -10,8 +10,10 @@ import (
 // ARM64Options supplies the package and file identity needed to resolve Go's
 // package-local and file-local assembly symbols.
 type ARM64Options struct {
-	PackagePath string
-	Filename    string
+	PackagePath      string
+	Filename         string
+	Defines          map[string]int64
+	PreferDirectABI0 bool
 }
 
 // ARM64Function describes one translated TEXT declaration in source order.
@@ -50,6 +52,9 @@ var supportedARM64Files = map[string]map[string]bool{
 	"internal/runtime/syscall/linux": {
 		"asm_linux_arm64.s": true,
 	},
+	"internal/runtime/atomic": {
+		"atomic_arm64.s": true,
+	},
 	"runtime": {
 		"atomic_arm64.s":  true,
 		"memclr_arm64.s":  true,
@@ -79,6 +84,7 @@ func CompileARM64(file *File, options ARM64Options) (ARM64Translation, error) {
 		abi0Layouts: collectABI0Layouts(file),
 		data:        make(map[string][]arm64DataValue),
 	}
+	translator.directABI0 = collectDirectABI0(file, translator.abi0Layouts)
 	for _, statement := range file.Statements {
 		directive, ok := statement.(*Directive)
 		if !ok || directive.Name != "DATA" {

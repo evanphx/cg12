@@ -19,6 +19,7 @@ func richModule() *Module {
 		PackagePath: "runtime",
 		Path:        "runtime/atomic_arm64.s",
 		Source:      "TEXT ·publicationBarrier(SB),$0-0\n",
+		Defines:     map[string]int64{"const_offset": 128},
 	})
 	m.Data = append(m.Data, &Data{
 		Name: "tbl", Linkage: Linkage{Export: true}, Align: 8,

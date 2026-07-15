@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"math"
+	"sort"
 )
 
 // The on-disk format lets a compiled unit (an optimized module) be cached to
@@ -18,7 +19,7 @@ import (
 // references. Value references (ir.Ref) already index Temps/Consts by ID.
 const (
 	binMagic   = "cg12"
-	binVersion = 3
+	binVersion = 4
 )
 
 // MarshalBinary encodes the module to cg12's binary unit format.
@@ -48,6 +49,16 @@ func (m *Module) MarshalBinary() ([]byte, error) {
 		e.str(assembly.PackagePath)
 		e.str(assembly.Path)
 		e.str(assembly.Source)
+		names := make([]string, 0, len(assembly.Defines))
+		for name := range assembly.Defines {
+			names = append(names, name)
+		}
+		sort.Strings(names)
+		e.uv(uint64(len(names)))
+		for _, name := range names {
+			e.str(name)
+			e.iv(assembly.Defines[name])
+		}
 	}
 	e.uv(uint64(len(m.Data)))
 	for _, d := range m.Data {
@@ -95,6 +106,13 @@ func DecodeModule(data []byte) (*Module, error) {
 		m.Assembly[i].PackagePath = d.str()
 		m.Assembly[i].Path = d.str()
 		m.Assembly[i].Source = d.str()
+		defineCount := int(d.uv())
+		if defineCount != 0 {
+			m.Assembly[i].Defines = make(map[string]int64, defineCount)
+			for range defineCount {
+				m.Assembly[i].Defines[d.str()] = d.iv()
+			}
+		}
 	}
 	m.Data = make([]*Data, int(d.uv()))
 	for i := range m.Data {

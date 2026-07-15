@@ -14,6 +14,8 @@ func Parse(reader io.Reader) (*File, error) {
 	file := &File{}
 	scanner := bufio.NewScanner(reader)
 	macros := make(map[string]sourceMacro)
+	var conditionals []sourceConditional
+	active := true
 	lineNumber := 0
 	logicalLine := 0
 	var logicalLineSource strings.Builder
@@ -40,6 +42,24 @@ func Parse(reader io.Reader) (*File, error) {
 
 		source := logicalLineSource.String()
 		logicalLineSource.Reset()
+		if handled, nextActive, err := handleSourceConditional(source, macros, conditionals, active); handled {
+			if err != nil {
+				return nil, fmt.Errorf("plan9asm:%d: %w", logicalLine, err)
+			}
+			if strings.HasPrefix(strings.TrimSpace(source), "#if") {
+				conditionals = append(conditionals, sourceConditional{parentActive: active, conditionActive: nextActive})
+			} else if strings.HasPrefix(strings.TrimSpace(source), "#else") {
+				conditionals[len(conditionals)-1].elseSeen = true
+				conditionals[len(conditionals)-1].conditionActive = nextActive
+			} else {
+				conditionals = conditionals[:len(conditionals)-1]
+			}
+			active = nextActive
+			continue
+		}
+		if !active {
+			continue
+		}
 		if macro, ok, err := parseSourceMacro(source); err != nil {
 			return nil, fmt.Errorf("plan9asm:%d: %w", logicalLine, err)
 		} else if ok {
@@ -69,7 +89,51 @@ func Parse(reader io.Reader) (*File, error) {
 	if logicalLineSource.Len() != 0 {
 		return nil, fmt.Errorf("plan9asm:%d: unterminated line continuation", logicalLine)
 	}
+	if len(conditionals) != 0 {
+		return nil, fmt.Errorf("plan9asm: unterminated conditional directive")
+	}
 	return file, nil
+}
+
+type sourceConditional struct {
+	parentActive    bool
+	conditionActive bool
+	elseSeen        bool
+}
+
+func handleSourceConditional(source string, macros map[string]sourceMacro, stack []sourceConditional, active bool) (bool, bool, error) {
+	fields := strings.Fields(strings.TrimSpace(source))
+	if len(fields) == 0 {
+		return false, active, nil
+	}
+	switch fields[0] {
+	case "#ifdef", "#ifndef":
+		if len(fields) != 2 {
+			return true, active, fmt.Errorf("%s requires one name", fields[0])
+		}
+		_, defined := macros[fields[1]]
+		condition := defined
+		if fields[0] == "#ifndef" {
+			condition = !condition
+		}
+		return true, active && condition, nil
+	case "#else":
+		if len(fields) != 1 || len(stack) == 0 {
+			return true, active, fmt.Errorf("unexpected #else")
+		}
+		frame := stack[len(stack)-1]
+		if frame.elseSeen {
+			return true, active, fmt.Errorf("duplicate #else")
+		}
+		return true, frame.parentActive && !frame.conditionActive, nil
+	case "#endif":
+		if len(fields) != 1 || len(stack) == 0 {
+			return true, active, fmt.Errorf("unexpected #endif")
+		}
+		return true, stack[len(stack)-1].parentActive, nil
+	default:
+		return false, active, nil
+	}
 }
 
 type sourceMacro struct {

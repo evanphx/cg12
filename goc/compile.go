@@ -127,11 +127,13 @@ func compile(name string, src []byte, executable bool) (*ir.Module, error) {
 	sort.Strings(assemblyPackages)
 	for _, path := range assemblyPackages {
 		unit := loader.units[path]
+		defines := integerPackageConstants(unit.pkg)
 		for _, assembly := range unit.assembly {
 			mod.Assembly = append(mod.Assembly, ir.AssemblyFile{
 				PackagePath: path,
 				Path:        assembly.path,
 				Source:      assembly.source,
+				Defines:     defines,
 			})
 		}
 	}
@@ -242,6 +244,24 @@ func compile(name string, src []byte, executable bool) (*ir.Module, error) {
 	}
 	opt.LowerHeapAllocations(mod)
 	return g.mod, nil
+}
+
+func integerPackageConstants(pkg *types.Package) map[string]int64 {
+	defines := make(map[string]int64)
+	for _, name := range pkg.Scope().Names() {
+		object, ok := pkg.Scope().Lookup(name).(*types.Const)
+		if !ok {
+			continue
+		}
+		if object.Val().Kind() != constant.Int {
+			continue
+		}
+		value, ok := constant.Int64Val(object.Val())
+		if ok {
+			defines["const_"+name] = value
+		}
+	}
+	return defines
 }
 
 func addModuleInitTasks(mod *ir.Module, packages []packageInit, initSymbols map[*types.Func]string) error {

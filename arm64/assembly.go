@@ -23,8 +23,10 @@ func prepareAssembly(module *ir.Module) (assemblyBundle, error) {
 			return assemblyBundle{}, fmt.Errorf("parse assembly %s: %w", source.Path, err)
 		}
 		translation, err := plan9asm.CompileARM64(file, plan9asm.ARM64Options{
-			PackagePath: source.PackagePath,
-			Filename:    source.Path,
+			PackagePath:      source.PackagePath,
+			Filename:         source.Path,
+			Defines:          source.Defines,
+			PreferDirectABI0: true,
 		})
 		if err != nil {
 			return assemblyBundle{}, fmt.Errorf("translate assembly %s: %w", source.Path, err)

@@ -83,6 +83,22 @@ TEXT ·block<ABIInternal>(SB), NOSPLIT, $0
 	assert.Equal(t, "V0.B16", xor.Operands[1].Text)
 }
 
+func TestParseSelectsConditionalSource(t *testing.T) {
+	file, err := Parse(strings.NewReader(`#ifndef GOARM64_LSE
+MOVD R0, R1
+#else
+MOVD R2, R3
+#endif
+RET
+`))
+	require.NoError(t, err)
+	require.Len(t, file.Statements, 2)
+
+	move := file.Statements[0].(*Instruction)
+	assert.Equal(t, "R0", move.Operands[0].Register)
+	assert.Equal(t, "R1", move.Operands[1].Register)
+}
+
 func TestParseIndexedMemoryOperand(t *testing.T) {
 	file, err := Parse(strings.NewReader("MOVD (R0)(R6), R4\n"))
 	require.NoError(t, err)

@@ -93,6 +93,7 @@ func main() {
 		"internal/chacha8rand/chacha8_arm64.s":             "internal/chacha8rand",
 		"internal/runtime/sys/dit_arm64.s":                 "internal/runtime/sys",
 		"internal/runtime/syscall/linux/asm_linux_arm64.s": "internal/runtime/syscall/linux",
+		"internal/runtime/atomic/atomic_arm64.s":           "internal/runtime/atomic",
 		"runtime/atomic_arm64.s":                           "runtime",
 		"runtime/memclr_arm64.s":                           "runtime",
 		"runtime/memmove_arm64.s":                          "runtime",
@@ -104,6 +105,9 @@ func main() {
 		packagePath, ok := wantAssembly[assembly.Path]
 		if !ok || assembly.PackagePath != packagePath || assembly.Source == "" {
 			t.Errorf("invalid executable assembly source: %#v", assembly)
+		}
+		if assembly.Path == "internal/runtime/atomic/atomic_arm64.s" && assembly.Defines["const_offsetARM64HasATOMICS"] != 135 {
+			t.Errorf("atomic go_asm.h offset = %d, want 135", assembly.Defines["const_offsetARM64HasATOMICS"])
 		}
 		delete(wantAssembly, assembly.Path)
 	}

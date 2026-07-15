@@ -17,8 +17,104 @@ type abi0Layout struct {
 	outputs []abi0Slot
 }
 
+func collectDirectABI0(file *File, layouts map[int]abi0Layout) map[int]bool {
+	direct := make(map[int]bool)
+	functionIndex := -1
+	var text *Text
+	for _, statement := range file.Statements {
+		switch statement := statement.(type) {
+		case *Text:
+			functionIndex++
+			text = statement
+			direct[functionIndex] = !text.Symbol.Static && text.Symbol.ABI == "" && len(layouts[functionIndex].outputs) <= 1
+		case *Instruction:
+			if text == nil || !direct[functionIndex] {
+				continue
+			}
+			if statement.Opcode == "BL" {
+				direct[functionIndex] = false
+				continue
+			}
+			if len(statement.Operands) != 2 {
+				continue
+			}
+			source := statement.Operands[0]
+			destination := statement.Operands[1]
+			if source.Kind == OperandMemory && source.Base == "FP" {
+				offset, err := namedFrameOffset(source.Offset)
+				index := abi0SlotIndex(layouts[functionIndex].inputs, offset)
+				if err != nil || index < 0 || destination.Kind != OperandRegister || destination.Register != "R"+strconv.Itoa(index) {
+					direct[functionIndex] = false
+				}
+			}
+			if destination.Kind == OperandMemory && destination.Base == "FP" {
+				offset, err := namedFrameOffset(destination.Offset)
+				outputs := layouts[functionIndex].outputs
+				if err != nil || len(outputs) != 1 || outputs[0].offset != offset {
+					direct[functionIndex] = false
+				}
+			}
+		}
+	}
+	return direct
+}
+
+func abi0SlotIndex(slots []abi0Slot, offset int) int {
+	for index, slot := range slots {
+		if slot.offset == offset {
+			return index
+		}
+	}
+	return -1
+}
+
+func (t *arm64Translator) emitDirectABI0Load(instruction *Instruction, source Operand, destination string) error {
+	offset, err := namedFrameOffset(source.Offset)
+	if err != nil {
+		return err
+	}
+	index := abi0SlotIndex(t.currentABI0Layout.inputs, offset)
+	if index < 0 {
+		return fmt.Errorf("ABI0 input offset %d has no register", offset)
+	}
+	width := moveWidth(instruction.Opcode)
+	input, err := arm64Register("R"+strconv.Itoa(index), width)
+	if err != nil {
+		return err
+	}
+	if input != destination {
+		fmt.Fprintf(&t.output, "\tmov %s, %s\n", destination, input)
+	}
+	return nil
+}
+
+func (t *arm64Translator) emitDirectABI0Store(instruction *Instruction, sourceRegister string, destination Operand) error {
+	offset, err := namedFrameOffset(destination.Offset)
+	if err != nil {
+		return err
+	}
+	if len(t.currentABI0Layout.outputs) != 1 || t.currentABI0Layout.outputs[0].offset != offset {
+		return fmt.Errorf("ABI0 output offset %d is not the primary result", offset)
+	}
+	width := abi0MoveWidth(instruction.Opcode)
+	resultWidth := 64
+	if width < 8 {
+		resultWidth = 32
+	}
+	result, err := arm64Register("R0", resultWidth)
+	if err != nil {
+		return err
+	}
+	if sourceRegister != result {
+		fmt.Fprintf(&t.output, "\tmov %s, %s\n", result, sourceRegister)
+	}
+	return nil
+}
+
 func collectABI0Layouts(file *File) map[int]abi0Layout {
 	layouts := make(map[int]abi0Layout)
+	functionNames := make(map[string]int)
+	aliases := make(map[int]string)
 	functionIndex := -1
 	var text *Text
 	inputSlots := make(map[int]int)
@@ -39,10 +135,19 @@ func collectABI0Layouts(file *File) map[int]abi0Layout {
 			finish()
 			functionIndex++
 			text = statement
+			functionNames[statement.Symbol.Name] = functionIndex
 			inputSlots = make(map[int]int)
 			outputSlots = make(map[int]int)
 		case *Instruction:
-			if text == nil || text.Symbol.Static || text.Symbol.ABI != "" || len(statement.Operands) != 2 {
+			if text == nil || text.Symbol.Static || text.Symbol.ABI != "" {
+				continue
+			}
+			if statement.Opcode == "B" && len(statement.Operands) == 1 {
+				if symbol, ok := operandSymbol(statement.Operands[0]); ok {
+					aliases[functionIndex] = symbol.Name
+				}
+			}
+			if len(statement.Operands) != 2 {
 				continue
 			}
 			width := abi0MoveWidth(statement.Opcode)
@@ -62,6 +167,28 @@ func collectABI0Layouts(file *File) map[int]abi0Layout {
 		}
 	}
 	finish()
+	for range len(layouts) {
+		changed := false
+		for index, targetName := range aliases {
+			layout := layouts[index]
+			if len(layout.inputs) != 0 || len(layout.outputs) != 0 {
+				continue
+			}
+			targetIndex, ok := functionNames[targetName]
+			if !ok {
+				continue
+			}
+			target := layouts[targetIndex]
+			if len(target.inputs) == 0 && len(target.outputs) == 0 {
+				continue
+			}
+			layouts[index] = target
+			changed = true
+		}
+		if !changed {
+			break
+		}
+	}
 	return layouts
 }
 

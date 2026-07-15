@@ -18,6 +18,8 @@ func (t *arm64Translator) translateText(text *Text) error {
 		localSize = int(parsed)
 	}
 	t.currentABI0 = text.Symbol.ABI == "" && !text.Symbol.Static
+	t.currentDirectABI0 = t.currentABI0 && t.options.PreferDirectABI0 && t.directABI0[t.functionIndex]
+	t.currentABI0Layout = t.abi0Layouts[t.functionIndex]
 	if t.currentABI0 && localSize != 0 {
 		return fmt.Errorf("ABI0 TEXT frame $%s is not supported yet", text.Frame)
 	}
@@ -26,7 +28,7 @@ func (t *arm64Translator) translateText(text *Text) error {
 		t.currentFrame = roundUpInteger(localSize+16, 16)
 	}
 	symbol := t.symbol(text.Symbol)
-	if t.currentABI0 {
+	if t.currentABI0 && !t.currentDirectABI0 {
 		abi0Name, wrapperFrame, err := t.emitABI0Wrapper(text, t.abi0Layouts[t.functionIndex])
 		if err != nil {
 			return err
@@ -47,7 +49,7 @@ func (t *arm64Translator) translateText(text *Text) error {
 	})
 	t.output.WriteString("\n.text\n")
 	fmt.Fprintf(&t.output, ".global %s\n", symbol)
-	if text.Symbol.Static || t.currentABI0 {
+	if text.Symbol.Static || t.currentABI0 && !t.currentDirectABI0 {
 		// Runtime metadata and ABI wrappers live in the separately emitted cg12
 		// object, so implementation symbols must remain link-visible. Hidden
 		// visibility keeps file-local and ABI0 entry points out of the public ABI.

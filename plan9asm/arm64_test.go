@@ -168,6 +168,29 @@ func TestTranslateARM64BuildsABI0MultiResultWrapper(t *testing.T) {
 	assert.Contains(t, translation.Assembly, "\tldr x16, [sp, #80]")
 }
 
+func TestTranslateARM64DirectABI0Leaf(t *testing.T) {
+	file, err := Parse(strings.NewReader(`
+TEXT ·Load(SB), NOSPLIT, $0-12
+	MOVD ptr+0(FP), R0
+	LDARW (R0), R0
+	MOVW R0, ret+8(FP)
+	RET
+`))
+	require.NoError(t, err)
+	translation, err := CompileARM64(file, ARM64Options{
+		PackagePath:      "internal/runtime/atomic",
+		Filename:         "atomic_arm64.s",
+		PreferDirectABI0: true,
+	})
+	require.NoError(t, err)
+
+	assert.NotContains(t, translation.Assembly, "_abi0")
+	assert.NotContains(t, translation.Assembly, "sub sp")
+	assert.Contains(t, translation.Assembly, "\tldar w0, [x0]")
+	require.Len(t, translation.Functions, 1)
+	assert.Equal(t, "internal_runtime_atomic_Load", translation.Functions[0].Name)
+}
+
 func TestTranslateExactChacha8FrameAndReadOnlyData(t *testing.T) {
 	path := filepath.Join("..", "stdlib", "src", "internal", "chacha8rand", "chacha8_arm64.s")
 	source, err := os.ReadFile(path)
@@ -204,6 +227,7 @@ func TestSupportsARM64FileKeepsTargetPolicyWithTranslator(t *testing.T) {
 	assert.True(t, SupportsARM64File("internal/chacha8rand", "chacha8_arm64.s"))
 	assert.True(t, SupportsARM64File("internal/runtime/sys", "dit_arm64.s"))
 	assert.True(t, SupportsARM64File("internal/runtime/syscall/linux", "asm_linux_arm64.s"))
+	assert.True(t, SupportsARM64File("internal/runtime/atomic", "atomic_arm64.s"))
 	assert.True(t, SupportsARM64File("syscall", "asm_linux_arm64.s"))
 	assert.False(t, SupportsARM64File("runtime", "asm_arm64.s"))
 	assert.False(t, SupportsARM64File("other", "memmove_arm64.s"))
@@ -222,6 +246,7 @@ func TestTranslateExactRuntimeARM64FilesAssemble(t *testing.T) {
 	files := []struct {
 		packagePath string
 		name        string
+		defines     map[string]int64
 	}{
 		{packagePath: "runtime", name: "atomic_arm64.s"},
 		{packagePath: "runtime", name: "memclr_arm64.s"},
@@ -235,6 +260,7 @@ func TestTranslateExactRuntimeARM64FilesAssemble(t *testing.T) {
 		{packagePath: "internal/runtime/sys", name: "dit_arm64.s"},
 		{packagePath: "internal/runtime/syscall/linux", name: "asm_linux_arm64.s"},
 		{packagePath: "internal/chacha8rand", name: "chacha8_arm64.s"},
+		{packagePath: "internal/runtime/atomic", name: "atomic_arm64.s", defines: map[string]int64{"const_offsetARM64HasATOMICS": 135}},
 		{packagePath: "syscall", name: "asm_linux_arm64.s"},
 	}
 	for _, sourceFile := range files {
@@ -243,7 +269,7 @@ func TestTranslateExactRuntimeARM64FilesAssemble(t *testing.T) {
 		require.NoError(t, err)
 		file, err := Parse(bytes.NewReader(source))
 		require.NoError(t, err, sourceFile.name)
-		translated, err := TranslateARM64(file, ARM64Options{PackagePath: sourceFile.packagePath, Filename: sourceFile.name})
+		translated, err := TranslateARM64(file, ARM64Options{PackagePath: sourceFile.packagePath, Filename: sourceFile.name, Defines: sourceFile.defines})
 		require.NoError(t, err, sourceFile.name)
 		assembly.WriteString(translated)
 	}

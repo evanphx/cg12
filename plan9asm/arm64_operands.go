@@ -44,6 +44,52 @@ func memoryAddress(operand Operand, suffix string) (string, error) {
 	}
 }
 
+func (t *arm64Translator) symbolAddress(operand Operand) (string, int64, error) {
+	if operand.Kind != OperandMemory || operand.Base != "SB" {
+		return "", 0, fmt.Errorf("operand %q is not relative to SB", operand.Text)
+	}
+	source := strings.TrimSpace(operand.Offset)
+	name := source
+	offset := int64(0)
+	for index := len(source) - 1; index > 0; index-- {
+		if source[index] != '+' && source[index] != '-' {
+			continue
+		}
+		valueSource := strings.TrimSpace(source[index+1:])
+		value, err := strconv.ParseInt(valueSource, 0, 64)
+		if err != nil {
+			defined, ok := t.options.Defines[valueSource]
+			if !ok {
+				continue
+			}
+			value = defined
+		}
+		if source[index] == '-' {
+			value = -value
+		}
+		name = strings.TrimSpace(source[:index])
+		offset = value
+		break
+	}
+	if name == "" {
+		return "", 0, fmt.Errorf("symbol address %q has no symbol", operand.Text)
+	}
+	if strings.Contains(name, "+") || strings.Contains(name, "-") {
+		return "", 0, fmt.Errorf("unresolved symbol offset in %q", operand.Text)
+	}
+	return t.symbol(parseSymbol(name)), offset, nil
+}
+
+func symbolRelocation(name string, offset int64) string {
+	if offset == 0 {
+		return name
+	}
+	if offset > 0 {
+		return fmt.Sprintf("%s+%d", name, offset)
+	}
+	return fmt.Sprintf("%s%d", name, offset)
+}
+
 func (t *arm64Translator) memoryAddress(operand Operand, suffix string) (string, error) {
 	if t.currentFrame == 0 || operand.Base != "RSP" {
 		return memoryAddress(operand, suffix)

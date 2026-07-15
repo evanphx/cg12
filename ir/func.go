@@ -223,6 +223,7 @@ type AssemblyFile struct {
 	PackagePath string
 	Path        string
 	Source      string
+	Defines     map[string]int64
 }
 
 // Module returns the module this function belongs to (nil if standalone).
