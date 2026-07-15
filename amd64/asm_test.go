@@ -1,0 +1,103 @@
+package amd64_test
+
+import (
+	"os"
+	"os/exec"
+	"path/filepath"
+	"testing"
+
+	"github.com/evanphx/cg12/amd64"
+	"github.com/evanphx/cg12/cc"
+	"github.com/evanphx/cg12/opt"
+	"github.com/stretchr/testify/require"
+)
+
+// runAsmText compiles C to amd64 assembly text (the pass-through path for inline
+// asm), assembles it with clang, links it freestanding with the _start stub, and
+// runs it under qemu-x86_64, returning runtest's exit code.
+func runAsmText(t *testing.T, src string, optimize bool) int {
+	t.Helper()
+	clang, err := exec.LookPath("clang")
+	if err != nil {
+		t.Skip("clang not available")
+	}
+	if _, err := exec.LookPath("ld.lld"); err != nil {
+		t.Skip("ld.lld not available")
+	}
+	qemu, err := exec.LookPath("qemu-x86_64")
+	if err != nil {
+		t.Skip("qemu-x86_64 not available")
+	}
+
+	m, err := cc.Compile("asm.c", src)
+	require.NoError(t, err)
+	if optimize {
+		opt.OptimizeModule(m)
+	}
+	asm, err := amd64.CompileModule(m)
+	require.NoError(t, err)
+
+	dir := t.TempDir()
+	asmPath := filepath.Join(dir, "test.s")
+	objPath := filepath.Join(dir, "test.o")
+	stubS := filepath.Join(dir, "start.s")
+	stubO := filepath.Join(dir, "start.o")
+	bin := filepath.Join(dir, "prog")
+	require.NoError(t, os.WriteFile(asmPath, []byte(asm), 0o644))
+	require.NoError(t, os.WriteFile(stubS, []byte(startStub), 0o644))
+
+	out, err := exec.Command(clang, "--target=x86_64-linux-gnu", "-c", asmPath, "-o", objPath).CombinedOutput()
+	require.NoErrorf(t, err, "assemble failed: %s\n--- asm ---\n%s", out, asm)
+	out, err = exec.Command(clang, "--target=x86_64-linux-gnu", "-c", stubS, "-o", stubO).CombinedOutput()
+	require.NoErrorf(t, err, "assemble stub: %s", out)
+	out, err = exec.Command("ld.lld", "-static", "-nostdlib", "-o", bin, stubO, objPath).CombinedOutput()
+	require.NoErrorf(t, err, "link: %s", out)
+
+	cmd := exec.Command(qemu, bin)
+	if err := cmd.Run(); err != nil {
+		if ee, ok := err.(*exec.ExitError); ok {
+			return ee.ExitCode()
+		}
+		t.Fatalf("run: %v", err)
+	}
+	return 0
+}
+
+// TestInlineAsmPassthrough compiles C with GNU inline asm to x86-64 assembly and
+// runs it: the OAsm template is passed through with its %N operands substituted
+// by the registers the allocator assigns. Covers %k (32-bit) and %q (64-bit)
+// operands, a multi-instruction template, and a value that must survive an asm
+// which clobbers the scratch registers. Checked both raw and optimized.
+func TestInlineAsmPassthrough(t *testing.T) {
+	src := `
+int add(int a, int b){
+	int r; __asm__("movl %k1, %k0\n\taddl %k2, %k0" : "=r"(r) : "r"(a), "r"(b)); return r;
+}
+long shl(long x){
+	long r; __asm__("movq %q1, %q0\n\tshlq $1, %q0" : "=r"(r) : "r"(x)); return r;
+}
+long keeptest(long k, long a, long b){
+	long r;
+	__asm__("movq %q1, %q0\n\tsubq %q2, %q0" : "=r"(r) : "r"(a), "r"(b) : "r10", "r11", "cc");
+	return r + k; /* k must survive the clobber */
+}
+int runtest(void){
+	if(add(20, 22) != 42) return 1;
+	if(shl(21) != 42) return 2;
+	if(keeptest(1000, 50, 8) != 1042) return 3; /* 50-8+1000 */
+	return 0;
+}`
+	require.Equal(t, 0, runAsmText(t, src, false))
+	require.Equal(t, 0, runAsmText(t, src, true))
+}
+
+// TestInlineAsmObjectRejected confirms the object emitter rejects inline asm
+// rather than emitting wrong code.
+func TestInlineAsmObjectRejected(t *testing.T) {
+	src := `int f(int a){ int r; __asm__("movl %k1, %k0" : "=r"(r) : "r"(a)); return r; }`
+	m, err := cc.Compile("asm.c", src)
+	require.NoError(t, err)
+	_, err = amd64.CompileObject(m)
+	require.Error(t, err)
+	require.Contains(t, err.Error(), "inline assembly")
+}

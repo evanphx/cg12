@@ -1,6 +1,7 @@
 package cc
 
 import (
+	"strconv"
 	"strings"
 
 	"github.com/evanphx/cg12/ir"
@@ -127,9 +128,14 @@ func (g *gen) asmCollect(a *cc.Asm) (outs []asmOut, ins []ir.Ref, ok bool) {
 	return outs, ins, true
 }
 
-// asmTemplate returns the assembler template with its surrounding quotes removed.
+// asmTemplate returns the assembler template with its surrounding quotes removed
+// and its escape sequences (\n, \t, ...) decoded, so a multi-instruction template
+// becomes real newlines the emitter can split on.
 func asmTemplate(a *cc.Asm) string {
 	s := a.Token3.SrcStr()
+	if unq, err := strconv.Unquote(s); err == nil {
+		return strings.TrimSpace(unq)
+	}
 	if len(s) >= 2 && s[0] == '"' && s[len(s)-1] == '"' {
 		s = s[1 : len(s)-1]
 	}
