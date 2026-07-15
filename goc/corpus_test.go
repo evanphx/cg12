@@ -29,6 +29,46 @@ func TestExecutionCorpus(t *testing.T) {
 		{"signed division and remainder", `func Test() int { return (-17/5)*10 + (-17%5) }`, -32},
 		{"unsigned arithmetic", `func Test() int { var x uint = 1<<63; return int((x>>62) + x/x) }`, 3},
 		{"bitwise", `func Test() int { return (0x55 & 0x0f) | (3 << 4) ^ 2 }`, 55},
+		{"variable shift at word width", `func Test() int { n := uint(64); return int((uint64(1) << n) + (uint64(7) >> n)) }`, 0},
+		{"variable signed shift at word width", `func Test() int { n := uint(64); return int(int64(-7) >> n) }`, -1},
+		{"variable shift beyond word width", `func Test() int { n := uint64(65); return int((uint64(1) << n) + (uint64(7) >> n)) }`, 0},
+		{"variable 32-bit shift at width", `func Test() int { n := uint64(32); return int((uint32(1) << n) + (uint32(7) >> n)) }`, 0},
+		{"stdlib 64-bit population count", `func onesCount64(x uint64) int {
+			const m0 = 0x5555555555555555
+			const m1 = 0x3333333333333333
+			const m2 = 0x0f0f0f0f0f0f0f0f
+			x = x>>1&m0 + x&m0
+			x = x>>2&m1 + x&m1
+			x = (x>>4 + x) & m2
+			x += x >> 8
+			x += x >> 16
+			x += x >> 32
+			return int(x) & 127
+		}; func Test() int { return onesCount64(0x7f) + 10*onesCount64(^uint64(0)) }`, 647},
+		{"runtime bit range search", `func trailingZeros64(x uint64) int {
+			if x == 0 { return 64 }
+			n := 0
+			for x&1 == 0 { n++; x >>= 1 }
+			return n
+		}; func findBitRange64(c uint64, n uint) uint {
+			p := n - 1
+			k := uint(1)
+			for p > 0 {
+				if p <= k { c &= c >> (p & 63); break }
+				c &= c >> (k & 63)
+				if c == 0 { return 64 }
+				p -= k
+				k *= 2
+			}
+			return uint(trailingZeros64(c))
+		}; func Test() int {
+			return int(findBitRange64(0x78, 3))*100 + int(findBitRange64(0x8000000007ffffff, 4))*10 + int(findBitRange64(0x00f0f000, 5))
+		}`, 364},
+		{"clear pointer array subslice", `func clearMiddle(values *[8]uint64) { clear(values[1:7]) }; func Test() int {
+			values := [8]uint64{1, 2, 4, 8, 16, 32, 64, 128}
+			clearMiddle(&values)
+			return int(values[0] + values[1] + values[6] + values[7])
+		}`, 129},
 		{"signed byte overflow", `func Test() int { var x int8=127; x++; return int(x) }`, -128},
 		{"unsigned byte overflow", `func Test() int { var x uint8=255; x+=2; return int(x) }`, 1},
 		{"word overflow", `func Test() int { var x uint32=0xffffffff; x++; return int(x) }`, 0},
@@ -49,6 +89,7 @@ func TestExecutionCorpus(t *testing.T) {
 		{"pointer to slice descriptor", `func measure(values *[]int) int { return len(*values)*10 + cap(*values) }; func Test() int { values := []int{2, 3, 5}; return measure(&values) }`, 33},
 		{"reslice preserves capacity", `func Test() int { values := []int{2, 3, 5}; values = values[:1]; return len(values)*10 + cap(values) }`, 13},
 		{"slice assignment copies header", `func Test() int { values := []int{2, 3, 5}; old := values; values = values[:1]; return len(old)*10 + len(values) }`, 31},
+		{"assign nil slice", `func Test() int { values := []int{2, 3, 5}; values = nil; return len(values)*10 + cap(values) }`, 0},
 		{"pointer array struct field", `type pair struct { left, right int }; func Test() int { var values [2]pair; values[1].left = 7; values[1].right = 11; pointer := &values; return pointer[1].left*10 + pointer[1].right }`, 81},
 		{"range array of structs", `type pair struct { left, right int }; func Test() int { var values [2]pair; values[0].left = 3; values[0].right = 5; values[1].left = 7; values[1].right = 11; total := 0; for _, value := range values { total += value.left + value.right }; return total }`, 26},
 		{"returned array survives callee frame", `func makeValues() [3]int { return [3]int{7, 11, 13} }; func disturb() int { values := [3]int{100, 200, 300}; return values[0] }; func Test() int { values := makeValues(); disturb(); return values[0] + values[1] + values[2] }`, 31},
@@ -89,6 +130,9 @@ func TestAdvancedExecutionCorpus(t *testing.T) {
 		{"implicit pointer method receiver", `type counter int; func (value *counter) add(amount int) { *value += counter(amount) }; func Test() int { var value counter = 17; value.add(25); return int(value) }`, 42},
 		{"global elided pointer struct slice", `type item struct { value int }; var items = []*item{{value: 17}, {value: 25}}; func Test() int { return items[0].value + items[1].value }`, 42},
 		{"global concrete error interface", `type textError string; func (value textError) Error() string { return string(value) }; var failure error = textError("bad"); func Test() int { if failure != nil { return 42 }; return 0 }`, 42},
+		{"concrete interface assertion", `type item struct { value int }; func Test() int { var value any = &item{value: 42}; return value.(*item).value }`, 42},
+		{"deferred function call", `var result int; func set(value int) { result = value }; func apply() { defer set(42) }; func Test() int { apply(); return result }`, 42},
+		{"recover outside panic", `func Test() int { if recover() == nil { return 42 }; return 0 }`, 42},
 		{"append scalar growth", `func Test() int { var values []int; values = append(values, 7); values = append(values, 11, 13); return len(values)*100 + cap(values)*10 + values[0] + values[1] + values[2] }`, 361},
 		{"append slice ellipsis", `func Test() int { values := []int{7}; more := []int{11, 13}; values = append(values, more...); return values[0] + values[1] + values[2] }`, 31},
 	}

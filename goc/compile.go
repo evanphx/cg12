@@ -269,6 +269,21 @@ func (g *gen) globalDecl(gd *ast.GenDecl) {
 					if !ok || address.Op != token.AND {
 						continue
 					}
+					if literal, ok := address.X.(*ast.CompositeLit); ok {
+						pointer, pointerOK := obj.Type().Underlying().(*types.Pointer)
+						structure, structOK := pointer.Elem().Underlying().(*types.Struct)
+						if !pointerOK || !structOK {
+							continue
+						}
+						backingName := name + ".value"
+						g.mod.Data = append(g.mod.Data,
+							&ir.Data{Name: backingName, Align: 8, Items: g.staticStructItems(backingName, structure, literal)},
+							d,
+						)
+						d.Items = []ir.DataItem{{Sub: ir.SubL, Sym: backingName}}
+						g.globals[obj] = name
+						continue
+					}
 					target, ok := address.X.(*ast.Ident)
 					if !ok {
 						continue
@@ -521,7 +536,9 @@ func (g *gen) globalStruct(id *ast.Ident, object types.Object, spec *ast.ValueSp
 		var ok bool
 		literal, ok = spec.Values[valueIndex].(*ast.CompositeLit)
 		if !ok {
-			return
+			// Keep addressable storage for globals whose initializer requires
+			// executable package-initialization code.
+			literal = nil
 		}
 	}
 	size := typeSize(object.Type())
@@ -661,19 +678,21 @@ func (g *gen) globalArray(id *ast.Ident, object types.Object, array *types.Array
 	if valueIndex < len(spec.Values) {
 		literal, ok := spec.Values[valueIndex].(*ast.CompositeLit)
 		if !ok {
-			return
+			literal = nil
 		}
-		for i, expression := range literal.Elts {
-			index := int64(i)
-			if keyed, ok := expression.(*ast.KeyValueExpr); ok {
-				index = constInt(g.info.Types[keyed.Key].Value)
-				expression = keyed.Value
+		if literal != nil {
+			for i, expression := range literal.Elts {
+				index := int64(i)
+				if keyed, ok := expression.(*ast.KeyValueExpr); ok {
+					index = constInt(g.info.Types[keyed.Key].Value)
+					expression = keyed.Value
+				}
+				value := g.info.Types[expression].Value
+				if value == nil {
+					return
+				}
+				values[index] = constInt(value)
 			}
-			value := g.info.Types[expression].Value
-			if value == nil {
-				return
-			}
-			values[index] = constInt(value)
 		}
 	}
 	g.mod.Data = append(g.mod.Data, &ir.Data{
@@ -816,6 +835,9 @@ func (g *gen) convert(v ir.Ref, from, to types.Type) ir.Ref {
 }
 
 func (g *gen) assignmentValue(expression ast.Expr, targetType types.Type) ir.Ref {
+	if identifier, ok := expression.(*ast.Ident); ok && identifier.Name == "nil" && isDescriptorValue(targetType) {
+		return g.zeroValue(targetType)
+	}
 	if _, isInterface := targetType.Underlying().(*types.Interface); !isInterface {
 		return g.expr(expression)
 	}
@@ -877,7 +899,7 @@ func (g *gen) funcDecl(fd *ast.FuncDecl) {
 		g.fail(fd, "unsupported return type %s", sig.Results().At(0).Type())
 		return
 	}
-	exportRuntimeBootstrap := g.pkg.Path() == "runtime" && (fd.Name.Name == "args" || fd.Name.Name == "check" || fd.Name.Name == "osinit" || fd.Name.Name == "schedinit" || fd.Name.Name == "throw")
+	exportRuntimeBootstrap := g.pkg.Path() == "runtime" && (fd.Name.Name == "args" || fd.Name.Name == "check" || fd.Name.Name == "main" || fd.Name.Name == "mstart0" || fd.Name.Name == "newproc" || fd.Name.Name == "osinit" || fd.Name.Name == "schedinit" || fd.Name.Name == "throw")
 	if ast.IsExported(fd.Name.Name) || isMain || exportRuntimeBootstrap || (g.pkg.Path() == "internal/chacha8rand" && fd.Name.Name == "block_generic") {
 		g.fn.Export()
 	}
@@ -950,6 +972,7 @@ func (g *gen) funcDecl(fd *ast.FuncDecl) {
 	}
 	g.stmts(fd.Body.List)
 	if g.err == nil && g.live() {
+		g.runDefers()
 		if platformMain {
 			g.cur.Ret(g.fn.Word(0))
 		} else if sig.Results().Len() == 0 {
@@ -1283,11 +1306,6 @@ func (g *gen) stmt(s ast.Stmt) {
 		g.cur = target
 		g.stmt(n.Stmt)
 	case *ast.DeferStmt:
-		literal, ok := n.Call.Fun.(*ast.FuncLit)
-		if !ok || len(n.Call.Args) != 0 || literal.Type.Params.NumFields() != 0 {
-			g.fail(n, "defer currently requires a parameterless function literal")
-			return
-		}
 		g.store(g.fn.Word(1), g.deferSlots[n], types.Typ[types.Bool])
 		g.deferActions = append(g.deferActions, n)
 	case *ast.SendStmt:
@@ -1413,17 +1431,17 @@ func (g *gen) runDefers() {
 
 	for i := len(g.deferActions) - 1; i >= 0; i-- {
 		deferStatement := g.deferActions[i]
-		literal, ok := deferStatement.Call.Fun.(*ast.FuncLit)
-		if !ok || len(deferStatement.Call.Args) != 0 || literal.Type.Params.NumFields() != 0 {
-			continue
-		}
 		run := g.block("deferrun")
 		done := g.block("deferdone")
 		active := g.load(g.deferSlots[deferStatement], types.Typ[types.Bool])
 		g.cur.Jnz(active, run, done)
 		g.cur = run
 		g.store(g.fn.Word(0), g.deferSlots[deferStatement], types.Typ[types.Bool])
-		g.stmts(literal.Body.List)
+		if literal, ok := deferStatement.Call.Fun.(*ast.FuncLit); ok && len(deferStatement.Call.Args) == 0 && literal.Type.Params.NumFields() == 0 {
+			g.stmts(literal.Body.List)
+		} else {
+			g.expr(deferStatement.Call)
+		}
 		if g.live() {
 			g.cur.Goto(done)
 		}
@@ -2157,6 +2175,34 @@ func (g *gen) expr(e ast.Expr) ir.Ref {
 		data := g.cur.Add(ir.ClsP, base, dataOffset)
 		length := g.cur.Sub(ir.ClsL, high, low)
 		return g.sliceDescriptor(data, length, capacity)
+	case *ast.TypeAssertExpr:
+		if n.Type == nil {
+			g.fail(n, "type switch assertion used as a value")
+			return ir.R
+		}
+		interfaceValue := g.expr(n.X)
+		nonNil := g.block("assertnonnil")
+		failure := g.block("assertfail")
+		success := g.block("assertsuccess")
+		isNil := g.cur.Cmp(ir.CmpEq, ir.ClsP, interfaceValue, g.fn.ConstInt(ir.ClsP, 0))
+		g.cur.Jnz(isNil, failure, nonNil)
+
+		g.cur = nonNil
+		targetType := g.info.Types[n].Type
+		dynamicTag := g.cur.Load(ir.ClsP, interfaceValue)
+		matches := g.cur.Cmp(ir.CmpEq, ir.ClsP, dynamicTag, g.typeTag(targetType))
+		g.cur.Jnz(matches, success, failure)
+
+		g.cur = failure
+		g.cur.CallVoid(g.fn.Sym("abort", 0))
+		g.cur.Hlt()
+
+		g.cur = success
+		data := g.cur.Load(ir.ClsP, g.offset(interfaceValue, 8))
+		if isInlineAggregate(targetType) {
+			return data
+		}
+		return g.load(data, targetType)
 	case *ast.SelectorExpr:
 		selection := g.info.Selections[n]
 		if selection == nil {
@@ -2624,6 +2670,9 @@ func (g *gen) builtinCall(call *ast.CallExpr, builtin *types.Builtin) ir.Ref {
 		}
 		g.fail(call, "unsupported make result %s", g.info.Types[call].Type)
 		return ir.R
+	case "close":
+		g.cur.CallVoid(g.fn.Sym("runtime.closechan", 0), g.expr(call.Args[0]))
+		return g.fn.Word(0)
 	case "String":
 		data := g.expr(call.Args[0])
 		length := g.expr(call.Args[1])
@@ -2697,6 +2746,8 @@ func (g *gen) builtinCall(call *ast.CallExpr, builtin *types.Builtin) ir.Ref {
 		g.cur.CallVoid(abort)
 		g.cur.Hlt()
 		return g.fn.Word(0)
+	case "recover":
+		return g.fn.ConstInt(ir.ClsP, 0)
 	case "print", "println":
 		g.builtinPrint(call, builtin.Name() == "println")
 		return g.fn.Word(0)
@@ -3433,12 +3484,9 @@ func (g *gen) binaryRaw(op token.Token, x, y ir.Ref, t types.Type, n ast.Node) i
 	case token.XOR:
 		return g.cur.Xor(c, x, y)
 	case token.SHL:
-		return g.cur.Shl(c, x, y)
+		return g.shift(op, c, x, y, t, n)
 	case token.SHR:
-		if signed(t) {
-			return g.cur.Sar(c, x, y)
-		}
-		return g.cur.Shr(c, x, y)
+		return g.shift(op, c, x, y, t, n)
 	}
 	pred := ir.CmpEq
 	if c.IsFloat() {
@@ -3493,6 +3541,37 @@ func (g *gen) binaryRaw(op token.Token, x, y ir.Ref, t types.Type, n ast.Node) i
 		g.fail(n, "unsupported operator %s", op)
 	}
 	return g.cur.Cmp(pred, ir.ClsW, x, y)
+}
+
+func (g *gen) shift(op token.Token, class ir.Cls, value, count ir.Ref, valueType types.Type, node ast.Node) ir.Ref {
+	countClass := ir.ClsL
+	if expression, ok := node.(*ast.BinaryExpr); ok {
+		countClass, _ = scalar(g.info.Types[expression.Y].Type)
+	}
+	if countClass == ir.ClsW {
+		count = g.cur.Extuw(ir.ClsL, count)
+	}
+
+	width := int64(64)
+	if class == ir.ClsW {
+		width = 32
+	}
+	tooLarge := g.cur.Cmp(ir.CmpUge, ir.ClsL, count, g.fn.ConstInt(ir.ClsL, width))
+
+	var shifted ir.Ref
+	var overflow ir.Ref
+	switch {
+	case op == token.SHL:
+		shifted = g.cur.Shl(class, value, count)
+		overflow = g.fn.ConstInt(class, 0)
+	case signed(valueType):
+		shifted = g.cur.Sar(class, value, count)
+		overflow = g.cur.Sar(class, value, g.fn.ConstInt(ir.ClsL, width-1))
+	default:
+		shifted = g.cur.Shr(class, value, count)
+		overflow = g.fn.ConstInt(class, 0)
+	}
+	return g.selectValue(tooLarge, overflow, shifted, class)
 }
 
 func (g *gen) stringsEqual(left, right ir.Ref) ir.Ref {

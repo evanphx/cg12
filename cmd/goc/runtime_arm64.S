@@ -589,6 +589,43 @@ runtime_systemstack:
 .type runtime_mstart, %function
 runtime_mstart:
 	mov x29, 0
+	bl runtime_mstart0
+	ret
+
+.weak runtime_mstart0
+.type runtime_mstart0, %function
+runtime_mstart0:
+	brk 0
+
+.global runtime_asminit
+.type runtime_asminit, %function
+runtime_asminit:
+	ret
+
+.global runtime_gettid
+.type runtime_gettid, %function
+runtime_gettid:
+	mov x8, 178
+	svc 0
+	ret
+
+.global runtime_sigaltstack
+.type runtime_sigaltstack, %function
+runtime_sigaltstack:
+	mov x8, 132
+	svc 0
+	cmn x0, 4095
+	b.cc 1f
+	brk 0
+1:	ret
+
+.global runtime_exitThread
+.type runtime_exitThread, %function
+runtime_exitThread:
+	stlr wzr, [x0]
+	mov x0, 0
+	mov x8, 93
+	svc 0
 	brk 0
 
 .global runtime_goexit

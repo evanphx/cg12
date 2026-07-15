@@ -61,7 +61,7 @@ func reachableFunctions(roots []*ast.FuncDecl, rootInfo *types.Info, rootPkg *ty
 	if runtimeAllocation {
 		queue = append(queue, genericRuntimeMethods...)
 		queue = append(queue, runtimeSupportFunctions...)
-		for _, name := range []string{"args", "check", "growslice", "osinit", "schedinit"} {
+		for _, name := range []string{"args", "check", "growslice", "main", "mstart0", "osinit", "schedinit"} {
 			if declaration, exists := runtimeFunctions[name]; exists {
 				queue = append(queue, declaration)
 			}
@@ -124,6 +124,10 @@ func reachableFunctions(roots []*ast.FuncDecl, rootInfo *types.Info, rootPkg *ty
 								if makechan, exists := runtimeFunctions["makechan"]; exists {
 									queue = append(queue, makechan)
 								}
+							}
+						case "close":
+							if closechan, exists := runtimeFunctions["closechan"]; exists {
+								queue = append(queue, closechan)
 							}
 						}
 					}

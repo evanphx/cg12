@@ -26,8 +26,16 @@ main:
 	bl runtime_args
 	bl runtime_osinit
 	bl runtime_schedinit
-	bl main_main
+	adrp x0, runtime_main_funcval
+	add x0, x0, #:lo12:runtime_main_funcval
+	bl runtime_newproc
+	bl runtime_mstart0
 	mov w0, 0
 	mov x8, 94
 	svc 0
 	brk 0
+
+.data
+.balign 8
+runtime_main_funcval:
+	.xword runtime_main
