@@ -312,6 +312,8 @@ func (g *gen) genStmt(s *cc.Statement) {
 		g.genJump(s.JumpStatement)
 	case cc.StatementLabeled:
 		g.genLabeled(s.LabeledStatement)
+	case cc.StatementAsm:
+		g.genAsm(s.AsmStatement)
 	}
 }
 
