@@ -81,10 +81,14 @@ long keeptest(long k, long a, long b){
 	__asm__("movq %q1, %q0\n\tsubq %q2, %q0" : "=r"(r) : "r"(a), "r"(b) : "r10", "r11", "cc");
 	return r + k; /* k must survive the clobber */
 }
+int addimm(int a){ /* an "i" operand becomes a literal immediate */
+	int r; __asm__("movl %k1, %k0\n\taddl %2, %k0" : "=r"(r) : "r"(a), "i"(100)); return r;
+}
 int runtest(void){
 	if(add(20, 22) != 42) return 1;
 	if(shl(21) != 42) return 2;
 	if(keeptest(1000, 50, 8) != 1042) return 3; /* 50-8+1000 */
+	if(addimm(23) != 123) return 4;
 	return 0;
 }`
 	require.Equal(t, 0, runAsmText(t, src, false))

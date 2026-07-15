@@ -70,7 +70,7 @@ func (g *gen) genAsm(as *cc.AsmStatement) {
 		return
 	}
 
-	outs, ins, ok := g.asmCollect(a)
+	outs, ins, imm, ok := g.asmCollect(a)
 	if !ok {
 		return // asmCollect already recorded the failure
 	}
@@ -78,7 +78,7 @@ func (g *gen) genAsm(as *cc.AsmStatement) {
 	if len(outs) == 1 {
 		outCls = clsOf(outs[0].typ)
 	}
-	res := g.cur.Asm(tmpl, outCls, len(outs) == 1, ins...)
+	res := g.cur.Asm(tmpl, outCls, len(outs) == 1, ins, imm)
 	if len(outs) == 1 {
 		g.storeVal(outs[0].addr, res, outs[0].typ)
 	}
@@ -93,9 +93,11 @@ type asmOut struct {
 
 // asmCollect gathers an inline-asm statement's output and input operands. Group 0
 // (the first `:`) is outputs, group 1 is inputs, and later groups are clobbers
-// (bare strings, which carry no operand). Only "=r" outputs and "r" inputs are
-// supported, and at most one output; anything else fails loudly.
-func (g *gen) asmCollect(a *cc.Asm) (outs []asmOut, ins []ir.Ref, ok bool) {
+// (bare strings, which carry no operand). Outputs must be "=r"; inputs may be "r"
+// (a register) or "i" (a constant, substituted as an immediate). At most one
+// output is supported; anything else fails loudly. The returned imm slice is
+// parallel to ins: imm[k] is true when input k is an immediate.
+func (g *gen) asmCollect(a *cc.Asm) (outs []asmOut, ins []ir.Ref, imm []bool, ok bool) {
 	group := 0
 	for al := a.AsmArgList; al != nil; al = al.AsmArgList {
 		for el := al.AsmExpressionList; el != nil; el = el.AsmExpressionList {
@@ -107,25 +109,36 @@ func (g *gen) asmCollect(a *cc.Asm) (outs []asmOut, ins []ir.Ref, ok bool) {
 			case 0: // outputs
 				if cons != "=r" {
 					g.fail("cc: unsupported inline-asm output constraint %q (only \"=r\" is supported)", cons)
-					return nil, nil, false
+					return nil, nil, nil, false
 				}
 				addr, typ := g.genAddr(operand)
 				outs = append(outs, asmOut{addr, typ})
 			case 1: // inputs
-				if cons != "r" {
-					g.fail("cc: unsupported inline-asm input constraint %q (only \"r\" is supported)", cons)
-					return nil, nil, false
+				switch cons {
+				case "r":
+					ins = append(ins, g.genExpr(operand))
+					imm = append(imm, false)
+				case "i":
+					v, isConst := constInt(operand)
+					if !isConst {
+						g.fail("cc: inline-asm \"i\" operand is not a constant expression")
+						return nil, nil, nil, false
+					}
+					ins = append(ins, g.fn.Long(v))
+					imm = append(imm, true)
+				default:
+					g.fail("cc: unsupported inline-asm input constraint %q (only \"r\" and \"i\" are supported)", cons)
+					return nil, nil, nil, false
 				}
-				ins = append(ins, g.genExpr(operand))
 			}
 		}
 		group++
 	}
 	if len(outs) > 1 {
 		g.fail("cc: inline asm with multiple outputs is not supported")
-		return nil, nil, false
+		return nil, nil, nil, false
 	}
-	return outs, ins, true
+	return outs, ins, imm, true
 }
 
 // asmTemplate returns the assembler template with its surrounding quotes removed

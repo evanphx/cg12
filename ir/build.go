@@ -382,9 +382,9 @@ func (b *Block) Call(retCls Cls, callee Ref, args ...Ref) Ref {
 // operand of class outCls, allocated as a fresh result temporary and returned
 // (else the result is R). Operands are numbered output-first for the template's
 // %N placeholders.
-func (b *Block) Asm(template string, outCls Cls, hasOut bool, ins ...Ref) Ref {
+func (b *Block) Asm(template string, outCls Cls, hasOut bool, ins []Ref, imm []bool) Ref {
 	in := Instr{Op: OAsm, Cls: outCls, Args: append([]Ref(nil), ins...), Pos: b.curPos,
-		Asm: &AsmOp{Template: template}}
+		Asm: &AsmOp{Template: template, Imm: imm}}
 	var res Ref
 	if hasOut {
 		in.Asm.NumOut = 1

@@ -61,7 +61,15 @@ type Instr struct {
 type AsmOp struct {
 	Template string // the assembler template, verbatim between the quotes
 	NumOut   int    // number of output operands (0 or 1)
+
+	// Imm, when Imm[k] is true, marks input operand k (Args[k], a constant) as an
+	// immediate: it is substituted into the template as a literal value rather
+	// than placed in a register. A nil or short slice means "not immediate".
+	Imm []bool
 }
+
+// InputImm reports whether input operand k is an immediate.
+func (a *AsmOp) InputImm(k int) bool { return k < len(a.Imm) && a.Imm[k] }
 
 // InlineSite describes one level of inlining: a call to Callee at the source
 // position Call was replaced by the callee's body. Parent is the enclosing

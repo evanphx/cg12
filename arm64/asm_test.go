@@ -28,8 +28,11 @@ long keeptest(long k, long a, long b){
 	__asm__("sub %x0, %x1, %x2" : "=r"(r) : "r"(a), "r"(b) : "x9", "x10", "cc");
 	return r + k; /* k must survive the clobber */
 }
+int addimm(int a){ /* an "i" operand becomes a literal immediate */
+	int r; __asm__("add %w0, %w1, %2" : "=r"(r) : "r"(a), "i"(100)); return r;
+}
 int main(void){
-	printf("%d %ld %ld\n", add(20, 22), shl(3, 4), keeptest(1000, 50, 8));
+	printf("%d %ld %ld %d\n", add(20, 22), shl(3, 4), keeptest(1000, 50, 8), addimm(23));
 	return 0;
 }`
 	for _, optimize := range []bool{false, true} {
@@ -45,7 +48,7 @@ int main(void){
 			}
 			out, code := buildAndRun(t, m, "")
 			require.Equal(t, 0, code)
-			require.Equal(t, "42 48 1042\n", out) // 20+22, 3<<4, 50-8+1000
+			require.Equal(t, "42 48 1042 123\n", out) // 20+22, 3<<4, 50-8+1000, 23+100
 		})
 	}
 }
