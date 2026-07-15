@@ -33,6 +33,7 @@ func TestExecutionCorpus(t *testing.T) {
 		{"unsigned byte overflow", `func Test() int { var x uint8=255; x+=2; return int(x) }`, 1},
 		{"word overflow", `func Test() int { var x uint32=0xffffffff; x++; return int(x) }`, 0},
 		{"comparisons", `func Test() int { n:=0; if -1 < 1 { n+=1 }; if uint(1) < uint(2) { n+=2 }; if 3 != 4 { n+=4 }; return n }`, 7},
+		{"string value equality", `func Test() int { text := "abc"; copy := text[:]; var empty string; score := 0; if text == copy { score += 1 }; if empty == "" { score += 2 }; if text != "abd" { score += 4 }; return score }`, 7},
 		{"float comparisons", `func Test() int { a, b := 1.5, 2.5; if a < b && b >= a && a != b { return 42 }; return 0 }`, 42},
 		{"locals and compound assignment", `func Test() int { x:=3; x+=4; x*=5; x-=2; return x }`, 33},
 		{"parallel assignment", `func Test() int { x,y:=3,8; x,y=y,x; return x*10+y }`, 83},
@@ -45,10 +46,15 @@ func TestExecutionCorpus(t *testing.T) {
 		{"range array", `func Test() int { values := [4]int{2, 3, 5, 7}; sum := 0; for _, value := range values { sum += value }; return sum }`, 17},
 		{"range pointer to array", `func Test() int { values := [4]int{2, 3, 5, 7}; sum := 0; for _, value := range &values { sum += value }; return sum }`, 17},
 		{"slice pointer to array", `func Test() int { values := [4]int{2, 3, 5, 7}; slice := (&values)[:]; return len(slice)*10 + slice[2] }`, 45},
+		{"pointer to slice descriptor", `func measure(values *[]int) int { return len(*values)*10 + cap(*values) }; func Test() int { values := []int{2, 3, 5}; return measure(&values) }`, 33},
+		{"reslice preserves capacity", `func Test() int { values := []int{2, 3, 5}; values = values[:1]; return len(values)*10 + cap(values) }`, 13},
+		{"slice assignment copies header", `func Test() int { values := []int{2, 3, 5}; old := values; values = values[:1]; return len(old)*10 + len(values) }`, 31},
 		{"pointer array struct field", `type pair struct { left, right int }; func Test() int { var values [2]pair; values[1].left = 7; values[1].right = 11; pointer := &values; return pointer[1].left*10 + pointer[1].right }`, 81},
 		{"range array of structs", `type pair struct { left, right int }; func Test() int { var values [2]pair; values[0].left = 3; values[0].right = 5; values[1].left = 7; values[1].right = 11; total := 0; for _, value := range values { total += value.left + value.right }; return total }`, 26},
 		{"returned array survives callee frame", `func makeValues() [3]int { return [3]int{7, 11, 13} }; func disturb() int { values := [3]int{100, 200, 300}; return values[0] }; func Test() int { values := makeValues(); disturb(); return values[0] + values[1] + values[2] }`, 31},
 		{"returned struct survives callee frame", `type pair struct { left, right int }; func makePair() pair { return pair{17, 25} }; func disturb() int { value := pair{100, 200}; return value.left }; func Test() int { value := makePair(); disturb(); return value.left + value.right }`, 42},
+		{"returned string survives callee frame", `func makeText() string { text := "abc"; return text[:] }; func disturb() int { values := [4]int{100, 200, 300, 400}; return values[0] }; func Test() int { text := makeText(); disturb(); return len(text)*10 + int(text[1]) }`, 128},
+		{"zero and copied strings", `func empty() (result string) { return }; func Test() int { var left string; right := left; left = "abc"; return len(empty())*100 + len(right)*10 + len(left) }`, 3},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
@@ -74,9 +80,17 @@ func TestAdvancedExecutionCorpus(t *testing.T) {
 		{"switch fallthrough", `func Test() int { n:=0; switch 2 { case 2: n+=2; fallthrough; case 3: n+=3 }; return n }`, 5},
 		{"package constants", `const base=40; const two int=2; func Test() int { return base+two }`, 42},
 		{"mutable globals", `var total=3; func add(x int){ total+=x }; func Test() int { add(4); add(5); return total }`, 12},
+		{"global zero and constant strings", `var empty string; var text = "abc"; func Test() int { return len(empty)*100 + len(text)*10 + int(text[1]) }`, 128},
+		{"constant struct global", `type bounds struct { low uint16; high uintptr }; var limits = bounds{low: 7, high: 0x123456789}; func Test() int { return int(limits.low) + int(limits.high&0xff) }`, 144},
 		{"global slice assignment", `var values []byte; func set(){ values = []byte{7, 11, 13} }; func Test() int { set(); return len(values)*1000 + cap(values)*100 + int(values[0]+values[1]+values[2]) }`, 3331},
+		{"global zero slice", `var values []int; func Test() int { return len(values)*10 + cap(values) }`, 0},
+		{"global slice backing survives callee", `var values []int; func set(){ values = []int{7, 11, 13} }; func disturb(){ temporary := [4]int{100, 200, 300, 400}; _ = temporary }; func Test() int { set(); disturb(); return values[0] + values[1] + values[2] }`, 31},
 		{"forward multiple results", `func pair() (int, int) { return 17, 25 }; func forward() (int, int) { return pair() }; func Test() int { left, right := forward(); return left + right }`, 42},
 		{"implicit pointer method receiver", `type counter int; func (value *counter) add(amount int) { *value += counter(amount) }; func Test() int { var value counter = 17; value.add(25); return int(value) }`, 42},
+		{"global elided pointer struct slice", `type item struct { value int }; var items = []*item{{value: 17}, {value: 25}}; func Test() int { return items[0].value + items[1].value }`, 42},
+		{"global concrete error interface", `type textError string; func (value textError) Error() string { return string(value) }; var failure error = textError("bad"); func Test() int { if failure != nil { return 42 }; return 0 }`, 42},
+		{"append scalar growth", `func Test() int { var values []int; values = append(values, 7); values = append(values, 11, 13); return len(values)*100 + cap(values)*10 + values[0] + values[1] + values[2] }`, 361},
+		{"append slice ellipsis", `func Test() int { values := []int{7}; more := []int{11, 13}; values = append(values, more...); return values[0] + values[1] + values[2] }`, 31},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) { runCase(t, "package main\n"+tc.body, tc.want, false) })
@@ -108,6 +122,20 @@ func Test() int {
 	return utf8.RuneLen('世')
 }
 `, 3, false)
+}
+
+func TestUnsafeSliceHeaderDereference(t *testing.T) {
+	runCase(t, `package main
+
+import "unsafe"
+
+func Test() int {
+	values := [3]int{7, 11, 13}
+	header := [3]uintptr{uintptr(unsafe.Pointer(&values[0])), 2, 3}
+	slice := *(*[]int)(unsafe.Pointer(&header))
+	return len(slice)*100 + cap(slice)*10 + slice[1]
+}
+`, 241, false)
 }
 
 func TestRepositoryStandardLibraryUTF16(t *testing.T) {

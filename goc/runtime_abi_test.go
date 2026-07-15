@@ -12,7 +12,7 @@ func TestPrintRuntimeABI(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	for _, typeName := range []string{"g", "m", "gobuf", "stack", "moduledata"} {
+	for _, typeName := range []string{"g", "m", "gobuf", "stack", "moduledata", "mheap", "pageAlloc", "gcControllerState"} {
 		object := pkg.Scope().Lookup(typeName).(*types.TypeName)
 		structure := object.Type().Underlying().(*types.Struct)
 		offsets := types.SizesFor("gc", "arm64").Offsetsof(structFields(structure))

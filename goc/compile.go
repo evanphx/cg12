@@ -52,6 +52,9 @@ func Compile(name string, src []byte) (*ir.Module, error) {
 		return true
 	})
 	compileRuntime := emitRuntimeTables
+	if compileRuntime {
+		mod.Data = append(mod.Data, &ir.Data{Name: ".goc.runtime.datastart", Align: 8, Items: []ir.DataItem{{Sub: ir.SubUB, Ints: []int64{0}}}})
+	}
 	typeTags := make(map[string]string)
 	linkNames := make(map[*types.Func]string)
 	collectLinkNames([]*ast.File{file}, info, linkNames)
@@ -131,6 +134,9 @@ func Compile(name string, src []byte) (*ir.Module, error) {
 	}
 	if g.err != nil {
 		return nil, g.err
+	}
+	if compileRuntime {
+		mod.Data = append(mod.Data, &ir.Data{Name: ".goc.runtime.dataend", Align: 8, Items: []ir.DataItem{{Sub: ir.SubUB, Ints: []int64{0}}}})
 	}
 	return g.mod, nil
 }
@@ -222,6 +228,14 @@ func (g *gen) globalDecl(gd *ast.GenDecl) {
 		vs := spec.(*ast.ValueSpec)
 		for i, id := range vs.Names {
 			obj := g.info.Defs[id]
+			if _, ok := obj.Type().Underlying().(*types.Interface); ok {
+				g.globalInterface(id, obj, vs, i)
+				continue
+			}
+			if basic, ok := obj.Type().Underlying().(*types.Basic); ok && basic.Kind() == types.String {
+				g.globalString(id, obj, vs, i)
+				continue
+			}
 			if array, ok := obj.Type().Underlying().(*types.Array); ok {
 				g.globalArray(id, obj, array, vs, i)
 				if g.err != nil {
@@ -282,10 +296,79 @@ func (g *gen) globalDecl(gd *ast.GenDecl) {
 	}
 }
 
-func (g *gen) globalSlice(id *ast.Ident, object types.Object, slice *types.Slice, spec *ast.ValueSpec, valueIndex int) {
+func (g *gen) globalInterface(id *ast.Ident, object types.Object, spec *ast.ValueSpec, valueIndex int) {
 	name := g.pkg.Path() + "." + id.Name
 	if valueIndex >= len(spec.Values) {
 		g.mod.Data = append(g.mod.Data, &ir.Data{Name: name, Align: 8, Items: []ir.DataItem{{Sub: ir.SubL, Ints: []int64{0}}}})
+		g.globals[object] = name
+		return
+	}
+
+	initializer := spec.Values[valueIndex]
+	sourceType := g.info.Types[initializer].Type
+	call, ok := initializer.(*ast.CallExpr)
+	if !ok || len(call.Args) != 1 {
+		return
+	}
+	value := g.info.Types[call.Args[0]].Value
+	basic, ok := sourceType.Underlying().(*types.Basic)
+	if !ok || basic.Kind() != types.String || value == nil || value.Kind() != constant.String {
+		return
+	}
+
+	contents := constant.StringVal(value)
+	textName := name + ".text"
+	stringName := name + ".string"
+	payloadName := name + ".payload"
+	descriptorName := name + ".descriptor"
+	tagName := g.ensureTypeTag(sourceType)
+	g.mod.Data = append(g.mod.Data,
+		&ir.Data{Name: textName, Align: 1, Items: []ir.DataItem{{Sub: ir.SubUB, Str: contents}}},
+		&ir.Data{Name: stringName, Align: 8, Items: []ir.DataItem{
+			{Sub: ir.SubL, Sym: textName},
+			{Sub: ir.SubL, Ints: []int64{int64(len(contents))}},
+		}},
+		&ir.Data{Name: payloadName, Align: 8, Items: []ir.DataItem{{Sub: ir.SubL, Sym: stringName}}},
+		&ir.Data{Name: descriptorName, Align: 8, Items: []ir.DataItem{
+			{Sub: ir.SubL, Sym: tagName},
+			{Sub: ir.SubL, Sym: payloadName},
+		}},
+		&ir.Data{Name: name, Align: 8, Linkage: ir.Linkage{Export: ast.IsExported(id.Name)}, Items: []ir.DataItem{{Sub: ir.SubL, Sym: descriptorName}}},
+	)
+	g.globals[object] = name
+}
+
+func (g *gen) globalString(id *ast.Ident, object types.Object, spec *ast.ValueSpec, valueIndex int) {
+	name := g.pkg.Path() + "." + id.Name
+	contents := ""
+	if valueIndex < len(spec.Values) {
+		value := g.info.Types[spec.Values[valueIndex]].Value
+		if value == nil || value.Kind() != constant.String {
+			return
+		}
+		contents = constant.StringVal(value)
+	}
+	textName := name + ".text"
+	descriptorName := name + ".descriptor"
+	g.mod.Data = append(g.mod.Data,
+		&ir.Data{Name: textName, Align: 1, Items: []ir.DataItem{{Sub: ir.SubUB, Str: contents}}},
+		&ir.Data{Name: descriptorName, Align: 8, Items: []ir.DataItem{
+			{Sub: ir.SubL, Sym: textName},
+			{Sub: ir.SubL, Ints: []int64{int64(len(contents))}},
+		}},
+		&ir.Data{Name: name, Align: 8, Linkage: ir.Linkage{Export: ast.IsExported(id.Name)}, Items: []ir.DataItem{{Sub: ir.SubL, Sym: descriptorName}}},
+	)
+	g.globals[object] = name
+}
+
+func (g *gen) globalSlice(id *ast.Ident, object types.Object, slice *types.Slice, spec *ast.ValueSpec, valueIndex int) {
+	name := g.pkg.Path() + "." + id.Name
+	if valueIndex >= len(spec.Values) {
+		descriptorName := name + ".descriptor"
+		g.mod.Data = append(g.mod.Data,
+			&ir.Data{Name: descriptorName, Align: 8, Items: []ir.DataItem{{Sub: ir.SubL, Ints: []int64{0, 0, 0}}}},
+			&ir.Data{Name: name, Align: 8, Items: []ir.DataItem{{Sub: ir.SubL, Sym: descriptorName}}},
+		)
 		g.globals[object] = name
 		return
 	}
@@ -313,6 +396,39 @@ func (g *gen) globalSlice(id *ast.Ident, object types.Object, slice *types.Slice
 		return
 	}
 	backingName := name + ".backing"
+	if pointer, ok := slice.Elem().Underlying().(*types.Pointer); ok {
+		if structure, ok := pointer.Elem().Underlying().(*types.Struct); ok {
+			items := make([]ir.DataItem, 0, len(literal.Elts))
+			for index, expression := range literal.Elts {
+				var value *ast.CompositeLit
+				switch expression := expression.(type) {
+				case *ast.CompositeLit:
+					value = expression
+				case *ast.UnaryExpr:
+					if expression.Op == token.AND {
+						value, _ = expression.X.(*ast.CompositeLit)
+					}
+				}
+				if value == nil {
+					items = append(items, ir.DataItem{Sub: ir.SubL, Ints: []int64{0}})
+					continue
+				}
+				elementName := fmt.Sprintf("%s.element.%d", backingName, index)
+				g.mod.Data = append(g.mod.Data, &ir.Data{Name: elementName, Align: 8, Items: g.staticStructItems(elementName, structure, value)})
+				items = append(items, ir.DataItem{Sub: ir.SubL, Sym: elementName})
+			}
+			g.mod.Data = append(g.mod.Data,
+				&ir.Data{Name: backingName, Align: 8, Items: items},
+				&ir.Data{Name: name + ".descriptor", Align: 8, Items: []ir.DataItem{
+					{Sub: ir.SubL, Sym: backingName},
+					{Sub: ir.SubL, Ints: []int64{int64(len(literal.Elts)), int64(len(literal.Elts))}},
+				}},
+				&ir.Data{Name: name, Align: 8, Items: []ir.DataItem{{Sub: ir.SubL, Sym: name + ".descriptor"}}},
+			)
+			g.globals[object] = name
+			return
+		}
+	}
 	items := make([]ir.DataItem, 0, len(literal.Elts))
 	for _, expression := range literal.Elts {
 		value := g.info.Types[expression].Value
@@ -346,9 +462,65 @@ func (g *gen) globalSlice(id *ast.Ident, object types.Object, slice *types.Slice
 	g.globals[object] = name
 }
 
+func (g *gen) staticStructItems(name string, structure *types.Struct, literal *ast.CompositeLit) []ir.DataItem {
+	offsets := types.SizesFor("gc", runtime.GOARCH).Offsetsof(structFields(structure))
+	items := make([]ir.DataItem, 0, structure.NumFields()*2)
+	cursor := int64(0)
+	for elementIndex, expression := range literal.Elts {
+		fieldIndex := elementIndex
+		if keyed, ok := expression.(*ast.KeyValueExpr); ok {
+			for index := 0; index < structure.NumFields(); index++ {
+				if structure.Field(index).Name() == keyed.Key.(*ast.Ident).Name {
+					fieldIndex = index
+					break
+				}
+			}
+			expression = keyed.Value
+		}
+		offset := offsets[fieldIndex]
+		if offset > cursor {
+			items = append(items, ir.DataItem{Zero: int(offset - cursor)})
+		}
+		fieldType := structure.Field(fieldIndex).Type()
+		fieldSize := typeSize(fieldType)
+		if value := g.info.Types[expression].Value; value != nil {
+			if value.Kind() == constant.String {
+				text := name + ".string." + structure.Field(fieldIndex).Name()
+				contents := constant.StringVal(value)
+				g.mod.Data = append(g.mod.Data, &ir.Data{Name: text, Align: 1, Items: []ir.DataItem{{Sub: ir.SubUB, Str: contents}}})
+				items = append(items, ir.DataItem{Sub: ir.SubL, Sym: text}, ir.DataItem{Sub: ir.SubL, Ints: []int64{int64(len(contents))}})
+			} else {
+				sub, ok := subOf(fieldType)
+				if !ok {
+					sub = ir.SubL
+				}
+				items = append(items, ir.DataItem{Sub: sub, Ints: []int64{constInt(value)}})
+			}
+		} else if address, ok := expression.(*ast.UnaryExpr); ok && address.Op == token.AND {
+			if selector, ok := address.X.(*ast.SelectorExpr); ok {
+				base, _ := selector.X.(*ast.Ident)
+				object := g.info.Uses[base]
+				items = append(items, ir.DataItem{Sub: ir.SubL, Sym: g.globals[object], Off: fieldOffset(g.info.Selections[selector])})
+			} else {
+				items = append(items, ir.DataItem{Zero: int(fieldSize)})
+			}
+		} else {
+			items = append(items, ir.DataItem{Zero: int(fieldSize)})
+		}
+		cursor = offset + fieldSize
+	}
+	if size := typeSize(structure); cursor < size {
+		items = append(items, ir.DataItem{Zero: int(size - cursor)})
+	}
+	return items
+}
+
 func (g *gen) globalStruct(id *ast.Ident, object types.Object, spec *ast.ValueSpec, valueIndex int) {
+	var literal *ast.CompositeLit
 	if valueIndex < len(spec.Values) {
-		if _, ok := spec.Values[valueIndex].(*ast.CompositeLit); !ok {
+		var ok bool
+		literal, ok = spec.Values[valueIndex].(*ast.CompositeLit)
+		if !ok {
 			return
 		}
 	}
@@ -372,16 +544,46 @@ func (g *gen) globalStruct(id *ast.Ident, object types.Object, spec *ast.ValueSp
 				{Sub: ir.SubL, Sym: "main.main"},
 				{Sub: ir.SubL, Sym: "main.main"},
 				{Sub: ir.SubL, Sym: "main.main"},
-				{Zero: int(size - 192)},
+				{Zero: 48},
+				{Sub: ir.SubL, Sym: ".goc.runtime.datastart"},
+				{Sub: ir.SubL, Sym: ".goc.runtime.dataend"},
+				{Zero: int(size - 256)},
 			}},
 		)
 		g.globals[object] = g.pkg.Path() + "." + id.Name
 		return
 	}
+	bytes := make([]int64, size)
+	structure := object.Type().Underlying().(*types.Struct)
+	offsets := types.SizesFor("gc", runtime.GOARCH).Offsetsof(structFields(structure))
+	if literal != nil {
+		for elementIndex, expression := range literal.Elts {
+			fieldIndex := elementIndex
+			if keyed, ok := expression.(*ast.KeyValueExpr); ok {
+				name := keyed.Key.(*ast.Ident).Name
+				for index := 0; index < structure.NumFields(); index++ {
+					if structure.Field(index).Name() == name {
+						fieldIndex = index
+						break
+					}
+				}
+				expression = keyed.Value
+			}
+			value := g.info.Types[expression].Value
+			if value == nil {
+				continue
+			}
+			fieldSize := typeSize(structure.Field(fieldIndex).Type())
+			bits := uint64(constInt(value))
+			for byteIndex := int64(0); byteIndex < fieldSize; byteIndex++ {
+				bytes[offsets[fieldIndex]+byteIndex] = int64(byte(bits >> (8 * byteIndex)))
+			}
+		}
+	}
 	data := &ir.Data{
 		Name:  g.pkg.Path() + "." + id.Name,
 		Align: int(types.SizesFor("gc", runtime.GOARCH).Alignof(object.Type())),
-		Items: []ir.DataItem{{Sub: ir.SubUB, Ints: make([]int64, size)}},
+		Items: []ir.DataItem{{Sub: ir.SubUB, Ints: bytes}},
 	}
 	if g.runtimeAllocation && g.pkg.Path() == "runtime" && (id.Name == "g0" || id.Name == "m0") {
 		data.Linkage.Export = true
@@ -634,6 +836,10 @@ func (g *gen) assignmentValue(expression ast.Expr, targetType types.Type) ir.Ref
 }
 
 func (g *gen) typeTag(valueType types.Type) ir.Ref {
+	return g.fn.Sym(g.ensureTypeTag(valueType), 0)
+}
+
+func (g *gen) ensureTypeTag(valueType types.Type) string {
 	key := types.TypeString(valueType, func(pkg *types.Package) string {
 		return pkg.Path()
 	})
@@ -647,7 +853,7 @@ func (g *gen) typeTag(valueType types.Type) ir.Ref {
 			Items: []ir.DataItem{{Sub: ir.SubUB, Ints: []int64{1}}},
 		})
 	}
-	return g.fn.Sym(name, 0)
+	return name
 }
 
 func (g *gen) funcDecl(fd *ast.FuncDecl) {
@@ -732,8 +938,7 @@ func (g *gen) funcDecl(fd *ast.FuncDecl) {
 		g.extraResultTypes = append(g.extraResultTypes, result.Type())
 		if result.Name() != "" {
 			g.vars[result] = pointer
-			zero, _ := scalar(result.Type())
-			g.store(g.fn.ConstInt(zero, 0), pointer, result.Type())
+			g.store(g.zeroValue(result.Type()), pointer, result.Type())
 		}
 	}
 	if sig.Results().Len() > 0 && sig.Results().At(0).Name() != "" {
@@ -741,8 +946,7 @@ func (g *gen) funcDecl(fd *ast.FuncDecl) {
 		g.resultSlot = g.alloc(result.Type())
 		g.resultType = result.Type()
 		g.vars[result] = g.resultSlot
-		zero, _ := scalar(result.Type())
-		g.store(g.fn.ConstInt(zero, 0), g.resultSlot, result.Type())
+		g.store(g.zeroValue(result.Type()), g.resultSlot, result.Type())
 	}
 	g.stmts(fd.Body.List)
 	if g.err == nil && g.live() {
@@ -881,7 +1085,7 @@ func (g *gen) stmt(s ast.Stmt) {
 			}
 			for i, id := range vs.Names {
 				obj := g.info.Defs[id]
-				c, ok := scalar(obj.Type())
+				_, ok := scalar(obj.Type())
 				if !ok {
 					g.fail(id, "unsupported variable type %s", obj.Type())
 					return
@@ -891,13 +1095,12 @@ func (g *gen) stmt(s ast.Stmt) {
 				if i >= len(vs.Values) && isMemoryValue(obj.Type()) {
 					continue
 				}
-				v := g.fn.ConstInt(c, 0)
-				if _, ok := obj.Type().Underlying().(*types.Slice); ok {
-					zero := g.fn.Long(0)
-					v = g.sliceDescriptor(g.fn.ConstInt(ir.ClsP, 0), zero, zero)
-				}
+				v := g.zeroValue(obj.Type())
 				if i < len(vs.Values) {
 					v = g.assignmentValue(vs.Values[i], obj.Type())
+				}
+				if isDescriptorValue(obj.Type()) {
+					v = g.copyInlineValue(v, obj.Type())
 				}
 				g.store(v, slot, obj.Type())
 			}
@@ -952,6 +1155,7 @@ func (g *gen) stmt(s ast.Stmt) {
 			var slot ir.Ref
 			var typ types.Type
 			destinationIsInline := false
+			localIdentifier := false
 			if id, ok := lhs.(*ast.Ident); ok {
 				obj := g.info.Uses[id]
 				if n.Tok == token.DEFINE && obj == nil {
@@ -966,6 +1170,7 @@ func (g *gen) stmt(s ast.Stmt) {
 				}
 				_, global := g.globals[obj]
 				destinationIsInline = global && isMemoryValue(typ)
+				localIdentifier = !global
 			} else {
 				typ = g.info.Types[lhs].Type
 				slot = g.lvalue(lhs)
@@ -977,6 +1182,9 @@ func (g *gen) stmt(s ast.Stmt) {
 				v = g.binary(n.Tok-token.ADD_ASSIGN+token.ADD, old, v, typ, n)
 			}
 			v = g.coerce(v, typ)
+			if localIdentifier && isDescriptorValue(typ) {
+				v = g.copyInlineValue(v, typ)
+			}
 			if destinationIsInline && isInlineAggregate(typ) {
 				g.cur.Call(ir.ClsP, g.fn.Sym("memcpy", 0), slot, v, g.fn.Long(typeSize(typ)))
 			} else {
@@ -1337,11 +1545,22 @@ func isInlineAggregate(t types.Type) bool {
 	return false
 }
 
-// Aggregate values are represented by an address in cg12 IR. A returned
-// aggregate therefore needs storage whose lifetime extends beyond the callee's
-// stack frame. Scalar returns continue to use the native result register.
+func isDescriptorValue(t types.Type) bool {
+	switch value := t.Underlying().(type) {
+	case *types.Slice:
+		return true
+	case *types.Basic:
+		return value.Kind() == types.String
+	default:
+		return false
+	}
+}
+
+// Aggregate values and multiword descriptors are represented by an address in
+// cg12 IR. A returned value therefore needs storage whose lifetime extends
+// beyond the callee's stack frame. Scalars continue to use a result register.
 func (g *gen) stableReturnValue(value ir.Ref, resultType types.Type) ir.Ref {
-	if !isMemoryValue(resultType) {
+	if !isInlineAggregate(resultType) {
 		return value
 	}
 
@@ -1349,6 +1568,25 @@ func (g *gen) stableReturnValue(value ir.Ref, resultType types.Type) ir.Ref {
 	result := g.cur.Call(ir.ClsP, g.fn.Sym("calloc", 0), g.fn.Long(1), g.fn.Long(size))
 	g.cur.Call(ir.ClsP, g.fn.Sym("memcpy", 0), result, value, g.fn.Long(size))
 	return result
+}
+
+func (g *gen) copyInlineValue(value ir.Ref, valueType types.Type) ir.Ref {
+	size := typeSize(valueType)
+	copy := g.cur.Call(ir.ClsP, g.fn.Sym("calloc", 0), g.fn.Long(1), g.fn.Long(size))
+	g.cur.Call(ir.ClsP, g.fn.Sym("memcpy", 0), copy, value, g.fn.Long(size))
+	return copy
+}
+
+func (g *gen) zeroValue(valueType types.Type) ir.Ref {
+	if _, ok := valueType.Underlying().(*types.Slice); ok {
+		zero := g.fn.Long(0)
+		return g.sliceDescriptor(g.fn.ConstInt(ir.ClsP, 0), zero, zero)
+	}
+	if basic, ok := valueType.Underlying().(*types.Basic); ok && basic.Kind() == types.String {
+		return g.stringDescriptor(g.fn.ConstInt(ir.ClsP, 0), g.fn.Long(0))
+	}
+	class, _ := scalar(valueType)
+	return g.fn.ConstInt(class, 0)
 }
 
 func (g *gen) allocLocal(t types.Type) ir.Ref {
@@ -1737,7 +1975,7 @@ func (g *gen) expr(e ast.Expr) ir.Ref {
 			if literal, ok := n.X.(*ast.CompositeLit); ok {
 				return g.compositeLiteral(literal, true)
 			}
-			if isMemoryValue(g.info.Types[n.X].Type) {
+			if isInlineAggregate(g.info.Types[n.X].Type) {
 				return g.expr(n.X)
 			}
 			return g.lvalue(n.X)
@@ -1755,7 +1993,7 @@ func (g *gen) expr(e ast.Expr) ir.Ref {
 		}
 	case *ast.StarExpr:
 		pointer := g.expr(n.X)
-		if isMemoryValue(g.info.Types[n].Type) {
+		if isInlineAggregate(g.info.Types[n].Type) {
 			return pointer
 		}
 		return g.load(pointer, g.info.Types[n].Type)
@@ -1772,6 +2010,13 @@ func (g *gen) expr(e ast.Expr) ir.Ref {
 			if _, ok := tv.Type.Underlying().(*types.Slice); ok {
 				if basic, ok := g.info.Types[n.Args[0]].Type.Underlying().(*types.Basic); ok && basic.Kind() == types.String {
 					return g.stringSlice(n.Args[0])
+				}
+			}
+			if basic, ok := tv.Type.Underlying().(*types.Basic); ok && basic.Kind() == types.UnsafePointer {
+				if address, ok := n.Args[0].(*ast.UnaryExpr); ok && address.Op == token.AND {
+					if literal, ok := address.X.(*ast.CompositeLit); ok {
+						return g.compositeLiteral(literal, false)
+					}
 				}
 			}
 			x := g.expr(n.Args[0])
@@ -1871,6 +2116,7 @@ func (g *gen) expr(e ast.Expr) ir.Ref {
 			low = g.expr(n.Low)
 		}
 		high := ir.R
+		capacity := ir.R
 		if n.High != nil {
 			high = g.expr(n.High)
 		} else if array, ok := g.info.Types[n.X].Type.Underlying().(*types.Array); ok {
@@ -1892,6 +2138,17 @@ func (g *gen) expr(e ast.Expr) ir.Ref {
 			return g.stringDescriptor(data, length)
 		}
 		element := g.info.Types[n].Type.Underlying().(*types.Slice).Elem()
+		if n.Max != nil {
+			capacity = g.cur.Sub(ir.ClsL, g.expr(n.Max), low)
+		} else if array, ok := g.info.Types[n.X].Type.Underlying().(*types.Array); ok {
+			capacity = g.cur.Sub(ir.ClsL, g.fn.Long(array.Len()), low)
+		} else if pointer, ok := g.info.Types[n.X].Type.Underlying().(*types.Pointer); ok {
+			array := pointer.Elem().Underlying().(*types.Array)
+			capacity = g.cur.Sub(ir.ClsL, g.fn.Long(array.Len()), low)
+		} else {
+			descriptor := g.expr(n.X)
+			capacity = g.cur.Sub(ir.ClsL, g.cur.Load(ir.ClsL, g.offset(descriptor, 16)), low)
+		}
 		size := typeSize(element)
 		dataOffset := low
 		if size != 1 {
@@ -1899,7 +2156,7 @@ func (g *gen) expr(e ast.Expr) ir.Ref {
 		}
 		data := g.cur.Add(ir.ClsP, base, dataOffset)
 		length := g.cur.Sub(ir.ClsL, high, low)
-		return g.sliceDescriptor(data, length, length)
+		return g.sliceDescriptor(data, length, capacity)
 	case *ast.SelectorExpr:
 		selection := g.info.Selections[n]
 		if selection == nil {
@@ -1936,6 +2193,18 @@ func (g *gen) expr(e ast.Expr) ir.Ref {
 	}
 	g.fail(e, "unsupported expression %T", e)
 	return ir.R
+}
+
+func (g *gen) isUnsafeAggregatePointerConversion(expression ast.Expr, resultType types.Type) bool {
+	if !isInlineAggregate(resultType) {
+		return false
+	}
+	conversion, ok := expression.(*ast.CallExpr)
+	if !ok || len(conversion.Args) != 1 || !g.info.Types[conversion.Fun].IsType() {
+		return false
+	}
+	basic, ok := g.info.Types[conversion.Args[0]].Type.Underlying().(*types.Basic)
+	return ok && basic.Kind() == types.UnsafePointer
 }
 
 func (g *gen) methodReceiver(selector *ast.SelectorExpr, method *types.Func) ir.Ref {
@@ -2025,7 +2294,13 @@ func (g *gen) compositeLiteral(literal *ast.CompositeLit, heap bool) ir.Ref {
 		if alignment < 4 {
 			alignment = 4
 		}
-		backing := g.cur.Alloc(alignment, int(length*elementSize))
+		backingSize := length * elementSize
+		backing := g.cur.Alloc(alignment, int(backingSize))
+		if g.runtimeAllocation {
+			backing = g.cur.Call(ir.ClsP, g.fn.Sym("runtime.newobject", 0), g.runtimeType(types.NewArray(elementType, length)))
+		} else {
+			backing = g.cur.Call(ir.ClsP, g.fn.Sym("calloc", 0), g.fn.Long(1), g.fn.Long(backingSize))
+		}
 		g.zero(backing, types.NewArray(elementType, length))
 		for i, expression := range literal.Elts {
 			index := int64(i)
@@ -2167,8 +2442,7 @@ func (g *gen) functionLiteral(literal *ast.FuncLit) ir.Ref {
 		child.extraResultTypes = append(child.extraResultTypes, result.Type())
 		if result.Name() != "" {
 			child.vars[result] = pointer
-			class, _ := scalar(result.Type())
-			child.store(child.fn.ConstInt(class, 0), pointer, result.Type())
+			child.store(child.zeroValue(result.Type()), pointer, result.Type())
 		}
 	}
 	if signature.Results().Len() > 0 && signature.Results().At(0).Name() != "" {
@@ -2176,8 +2450,7 @@ func (g *gen) functionLiteral(literal *ast.FuncLit) ir.Ref {
 		child.resultSlot = child.alloc(result.Type())
 		child.resultType = result.Type()
 		child.vars[result] = child.resultSlot
-		class, _ := scalar(result.Type())
-		child.store(child.fn.ConstInt(class, 0), child.resultSlot, result.Type())
+		child.store(child.zeroValue(result.Type()), child.resultSlot, result.Type())
 	}
 	child.stmts(literal.Body.List)
 	if child.err != nil {
@@ -2474,30 +2747,92 @@ func (g *gen) builtinCall(call *ast.CallExpr, builtin *types.Builtin) ir.Ref {
 		g.mapDelete(call.Args[0], call.Args[1])
 		return g.fn.Word(0)
 	case "append":
-		destination := g.expr(call.Args[0])
-		source := g.expr(call.Args[1])
-		destinationData := g.cur.Load(ir.ClsP, destination)
-		destinationLength := g.cur.Load(ir.ClsL, g.offset(destination, 8))
-		capacity := g.cur.Load(ir.ClsL, g.offset(destination, 16))
-		sourceData := g.cur.Load(ir.ClsP, source)
-		sourceLength := g.cur.Load(ir.ClsL, g.offset(source, 8))
-		element := g.info.Types[call].Type.Underlying().(*types.Slice).Elem()
-		size := typeSize(element)
-		byteOffset := destinationLength
-		byteLength := sourceLength
-		if size != 1 {
-			byteOffset = g.cur.Mul(ir.ClsL, destinationLength, g.fn.Long(size))
-			byteLength = g.cur.Mul(ir.ClsL, sourceLength, g.fn.Long(size))
-		}
-		writeAt := g.cur.Add(ir.ClsP, destinationData, byteOffset)
-		memcpy := g.fn.Sym("memcpy", 0)
-		g.cur.Call(ir.ClsP, memcpy, writeAt, sourceData, byteLength)
-		length := g.cur.Add(ir.ClsL, destinationLength, sourceLength)
-		return g.sliceDescriptor(destinationData, length, capacity)
+		return g.appendCall(call)
 	default:
 		g.fail(call, "unsupported builtin %s", builtin.Name())
 		return ir.R
 	}
+}
+
+func (g *gen) appendCall(call *ast.CallExpr) ir.Ref {
+	sliceType := g.info.Types[call].Type.Underlying().(*types.Slice)
+	elementType := sliceType.Elem()
+	elementSize := typeSize(elementType)
+	destination := g.expr(call.Args[0])
+	oldData := g.cur.Load(ir.ClsP, destination)
+	oldLength := g.cur.Load(ir.ClsL, g.offset(destination, 8))
+	oldCapacity := g.cur.Load(ir.ClsL, g.offset(destination, 16))
+
+	var source ir.Ref
+	var values []ir.Ref
+	var added ir.Ref
+	if call.Ellipsis.IsValid() {
+		source = g.expr(call.Args[1])
+		added = g.cur.Load(ir.ClsL, g.offset(source, 8))
+	} else {
+		values = make([]ir.Ref, 0, len(call.Args)-1)
+		for _, argument := range call.Args[1:] {
+			values = append(values, g.assignmentValue(argument, elementType))
+		}
+		added = g.fn.Long(int64(len(values)))
+	}
+	newLength := g.cur.Add(ir.ClsL, oldLength, added)
+
+	resultSlot := g.cur.Alloc(8, 8)
+	grow := g.block("appendgrow")
+	reuse := g.block("appendreuse")
+	done := g.block("appenddone")
+	needsGrowth := g.cur.Cmp(ir.CmpUgt, ir.ClsL, newLength, oldCapacity)
+	g.cur.Jnz(needsGrowth, grow, reuse)
+
+	g.cur = grow
+	var grown ir.Ref
+	if g.runtimeAllocation {
+		grown = g.cur.Call(ir.ClsP, g.fn.Sym("runtime.growslice", 0), oldData, newLength, oldCapacity, added, g.runtimeType(elementType))
+	} else {
+		doubled := g.cur.Mul(ir.ClsL, oldCapacity, g.fn.Long(2))
+		useLength := g.cur.Cmp(ir.CmpUgt, ir.ClsL, newLength, doubled)
+		newCapacity := g.selectValue(useLength, newLength, doubled, ir.ClsL)
+		bytes := newCapacity
+		if elementSize != 1 {
+			bytes = g.cur.Mul(ir.ClsL, newCapacity, g.fn.Long(elementSize))
+		}
+		data := g.cur.Call(ir.ClsP, g.fn.Sym("realloc", 0), oldData, bytes)
+		grown = g.sliceDescriptor(data, newLength, newCapacity)
+	}
+	g.cur.Store(grown, resultSlot)
+	g.cur.Goto(done)
+
+	g.cur = reuse
+	g.cur.Store(g.sliceDescriptor(oldData, newLength, oldCapacity), resultSlot)
+	g.cur.Goto(done)
+
+	g.cur = done
+	result := g.cur.Load(ir.ClsP, resultSlot)
+	resultData := g.cur.Load(ir.ClsP, result)
+	byteOffset := oldLength
+	if elementSize != 1 {
+		byteOffset = g.cur.Mul(ir.ClsL, oldLength, g.fn.Long(elementSize))
+	}
+	writeAt := g.cur.Add(ir.ClsP, resultData, byteOffset)
+	if source != ir.R {
+		sourceData := g.cur.Load(ir.ClsP, source)
+		byteLength := added
+		if elementSize != 1 {
+			byteLength = g.cur.Mul(ir.ClsL, added, g.fn.Long(elementSize))
+		}
+		g.cur.Call(ir.ClsP, g.fn.Sym("memmove", 0), writeAt, sourceData, byteLength)
+	} else {
+		for index, value := range values {
+			address := g.offset(writeAt, int64(index)*elementSize)
+			if isInlineAggregate(elementType) {
+				g.cur.Call(ir.ClsP, g.fn.Sym("memcpy", 0), address, value, g.fn.Long(elementSize))
+			} else {
+				g.store(value, address, elementType)
+			}
+		}
+	}
+	return result
 }
 
 func (g *gen) channelType(channel *types.Chan) ir.Ref {
@@ -3064,6 +3399,13 @@ func (g *gen) binary(op token.Token, x, y ir.Ref, t types.Type, n ast.Node) ir.R
 
 func (g *gen) binaryRaw(op token.Token, x, y ir.Ref, t types.Type, n ast.Node) ir.Ref {
 	c, _ := scalar(t)
+	if basic, ok := t.Underlying().(*types.Basic); ok && basic.Kind() == types.String && (op == token.EQL || op == token.NEQ) {
+		equal := g.stringsEqual(x, y)
+		if op == token.NEQ {
+			return g.cur.Cmp(ir.CmpEq, ir.ClsW, equal, g.fn.Word(0))
+		}
+		return equal
+	}
 	switch op {
 	case token.ADD:
 		return g.cur.Add(c, x, y)
@@ -3151,6 +3493,49 @@ func (g *gen) binaryRaw(op token.Token, x, y ir.Ref, t types.Type, n ast.Node) i
 		g.fail(n, "unsupported operator %s", op)
 	}
 	return g.cur.Cmp(pred, ir.ClsW, x, y)
+}
+
+func (g *gen) stringsEqual(left, right ir.Ref) ir.Ref {
+	result := g.cur.Alloc(4, 4)
+	sameDescriptor := g.cur.Cmp(ir.CmpEq, ir.ClsP, left, right)
+	same := g.block("stringeq_same")
+	different := g.block("stringeq_different")
+	compare := g.block("stringeq_compare")
+	compareWithZero := g.block("stringeq_zero")
+	done := g.block("stringeq_done")
+	g.cur.Jnz(sameDescriptor, same, different)
+
+	g.cur = same
+	g.cur.Store(g.fn.Word(1), result)
+	g.cur.Goto(done)
+
+	g.cur = different
+	leftNonNil := g.cur.Cmp(ir.CmpNe, ir.ClsP, left, g.fn.ConstInt(ir.ClsP, 0))
+	rightNonNil := g.cur.Cmp(ir.CmpNe, ir.ClsP, right, g.fn.ConstInt(ir.ClsP, 0))
+	bothNonNil := g.cur.And(ir.ClsW, leftNonNil, rightNonNil)
+	g.cur.Jnz(bothNonNil, compare, compareWithZero)
+
+	g.cur = compare
+	leftLength := g.cur.Load(ir.ClsL, g.offset(left, 8))
+	rightLength := g.cur.Load(ir.ClsL, g.offset(right, 8))
+	lengthsEqual := g.cur.Cmp(ir.CmpEq, ir.ClsL, leftLength, rightLength)
+	leftIsShorter := g.cur.Cmp(ir.CmpUle, ir.ClsL, leftLength, rightLength)
+	compareLength := g.selectValue(leftIsShorter, leftLength, rightLength, ir.ClsL)
+	leftData := g.cur.Load(ir.ClsP, left)
+	rightData := g.cur.Load(ir.ClsP, right)
+	bytes := g.cur.Call(ir.ClsW, g.fn.Sym("memcmp", 0), leftData, rightData, compareLength)
+	bytesEqual := g.cur.Cmp(ir.CmpEq, ir.ClsW, bytes, g.fn.Word(0))
+	g.cur.Store(g.cur.And(ir.ClsW, lengthsEqual, bytesEqual), result)
+	g.cur.Goto(done)
+
+	g.cur = compareWithZero
+	nonNil := g.selectValue(leftNonNil, left, right, ir.ClsP)
+	length := g.cur.Load(ir.ClsL, g.offset(nonNil, 8))
+	g.cur.Store(g.cur.Cmp(ir.CmpEq, ir.ClsL, length, g.fn.Long(0)), result)
+	g.cur.Goto(done)
+
+	g.cur = done
+	return g.cur.Load(ir.ClsW, result)
 }
 
 // OutputName returns the conventional output stem for a source file.
