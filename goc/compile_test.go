@@ -24,6 +24,21 @@ func main() { if sum(5) != 12 { for { break } } }
 	}
 }
 
+func TestCompileAllowsExternalLinknameDeclaration(t *testing.T) {
+	module, err := Compile("linkname.go", []byte(`package main
+import _ "unsafe"
+//go:linkname external runtime.external
+func external(value int) int
+func main() { _ = external(42) }
+`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(module.String(), "$runtime.external") {
+		t.Fatalf("IR does not call the external linkname:\n%s", module)
+	}
+}
+
 func TestCompilePreservesNoSplitDirective(t *testing.T) {
 	module, err := Compile("nosplit.go", []byte(`package main
 
@@ -68,13 +83,28 @@ func main() {
 			t.Errorf("executable module is missing %s", name)
 		}
 	}
-	if len(module.Assembly) != 3 {
-		t.Fatalf("executable assembly files = %d, want 3", len(module.Assembly))
+	wantAssembly := map[string]string{
+		"internal/bytealg/compare_arm64.s":   "internal/bytealg",
+		"internal/bytealg/count_arm64.s":     "internal/bytealg",
+		"internal/bytealg/equal_arm64.s":     "internal/bytealg",
+		"internal/bytealg/index_arm64.s":     "internal/bytealg",
+		"internal/bytealg/indexbyte_arm64.s": "internal/bytealg",
+		"runtime/atomic_arm64.s":             "runtime",
+		"runtime/memclr_arm64.s":             "runtime",
+		"runtime/memmove_arm64.s":            "runtime",
+	}
+	if len(module.Assembly) != len(wantAssembly) {
+		t.Fatalf("executable assembly files = %d, want %d", len(module.Assembly), len(wantAssembly))
 	}
 	for _, assembly := range module.Assembly {
-		if assembly.PackagePath != "runtime" || assembly.Source == "" {
+		packagePath, ok := wantAssembly[assembly.Path]
+		if !ok || assembly.PackagePath != packagePath || assembly.Source == "" {
 			t.Errorf("invalid executable assembly source: %#v", assembly)
 		}
+		delete(wantAssembly, assembly.Path)
+	}
+	for path := range wantAssembly {
+		t.Errorf("executable assembly is missing %s", path)
 	}
 
 	var initTask, initTasks *ir.Data

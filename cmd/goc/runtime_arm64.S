@@ -334,37 +334,6 @@ branch_alias sync_atomic_CompareAndSwapUint32, internal_runtime_atomic_Cas
 branch_alias sync_atomic_CompareAndSwapUint64, internal_runtime_atomic_Cas64
 branch_alias sync_atomic_CompareAndSwapUintptr, internal_runtime_atomic_Casuintptr
 
-.global runtime_memequal
-.type runtime_memequal, %function
-runtime_memequal:
-	cbz x2, 2f
-1:	ldrb w3, [x0], 1
-	ldrb w4, [x1], 1
-	cmp w3, w4
-	b.ne 3f
-	sub x2, x2, 1
-	cbnz x2, 1b
-2:	mov w0, 1
-	ret
-3:	mov w0, 0
-	ret
-
-.global internal_bytealg_IndexByteString
-.type internal_bytealg_IndexByteString, %function
-internal_bytealg_IndexByteString:
-	mov x3, 0
-1:	cmp x3, x1
-	b.hs 3f
-	ldrb w4, [x0, x3]
-	cmp w4, w2
-	b.eq 2f
-	add x3, x3, 1
-	b 1b
-2:	mov x0, x3
-	ret
-3:	mov x0, -1
-	ret
-
 .global internal_runtime_sys_GetCallerSP
 .type internal_runtime_sys_GetCallerSP, %function
 internal_runtime_sys_GetCallerSP:
@@ -1093,62 +1062,6 @@ _cgo_sigaction:
 	.xword 0
 
 .text
-.global internal_bytealg_Count
-.type internal_bytealg_Count, %function
-internal_bytealg_Count:
-	mov x4, 0
-	mov x5, 0
-1:	cmp x4, x1
-	b.hs 2f
-	ldrb w6, [x0, x4]
-	cmp w6, w3
-	cinc x5, x5, eq
-	add x4, x4, 1
-	b 1b
-2:	mov x0, x5
-	ret
-
-.global internal_bytealg_IndexByte
-.type internal_bytealg_IndexByte, %function
-internal_bytealg_IndexByte:
-	mov x4, 0
-1:	cmp x4, x1
-	b.hs 3f
-	ldrb w5, [x0, x4]
-	cmp w5, w3
-	b.eq 2f
-	add x4, x4, 1
-	b 1b
-2:	mov x0, x4
-	ret
-3:	mov x0, -1
-	ret
-
-.global internal_bytealg_Compare
-.type internal_bytealg_Compare, %function
-internal_bytealg_Compare:
-	cmp x1, x4
-	csel x6, x1, x4, lo
-	mov x7, 0
-1:	cmp x7, x6
-	b.hs 4f
-	ldrb w8, [x0, x7]
-	ldrb w9, [x3, x7]
-	cmp w8, w9
-	b.lo 2f
-	b.hi 3f
-	add x7, x7, 1
-	b 1b
-2:	mov x0, -1
-	ret
-3:	mov x0, 1
-	ret
-4:	cmp x1, x4
-	cset x0, hi
-	cset x1, lo
-	sub x0, x0, x1
-	ret
-
 .weak runtime_throw
 branch_alias internal_runtime_cgroup_throw, runtime_throw
 

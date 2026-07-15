@@ -4,6 +4,7 @@ import (
 	"bufio"
 	"fmt"
 	"io"
+	"strconv"
 	"strings"
 	"unicode"
 )
@@ -127,6 +128,37 @@ func parseOperand(source string) Operand {
 		operand.Immediate = strings.TrimSpace(strings.TrimPrefix(source, "$"))
 		return operand
 	}
+	if strings.HasPrefix(source, "[") && strings.HasSuffix(source, "]") {
+		parts, err := splitCommaSeparated(strings.TrimSpace(source[1 : len(source)-1]))
+		if err == nil && len(parts) > 0 {
+			vectors := make([]VectorRegister, 0, len(parts))
+			for _, part := range parts {
+				vector, ok := parseVectorRegister(part)
+				if !ok {
+					vectors = nil
+					break
+				}
+				vectors = append(vectors, vector)
+			}
+			if vectors != nil {
+				operand.Kind = OperandVectorList
+				operand.Vectors = vectors
+				return operand
+			}
+		}
+	}
+	if vector, ok := parseVectorRegister(source); ok {
+		operand.Kind = OperandVectorRegister
+		operand.Vector = vector
+		return operand
+	}
+	if register, extend, shiftAmount, ok := parseExtendedRegister(source); ok {
+		operand.Kind = OperandExtendedRegister
+		operand.Register = register
+		operand.Extend = extend
+		operand.ShiftAmount = shiftAmount
+		return operand
+	}
 	if isRegister(source) {
 		operand.Kind = OperandRegister
 		operand.Register = strings.ToUpper(source)
@@ -145,6 +177,19 @@ func parseOperand(source string) Operand {
 		}
 	}
 	if strings.HasPrefix(source, "(") && strings.HasSuffix(source, ")") {
+		if close := strings.IndexByte(source, ')'); close > 0 && close < len(source)-1 {
+			base := strings.TrimSpace(source[1:close])
+			remainder := strings.TrimSpace(source[close+1:])
+			if strings.HasPrefix(remainder, "(") && strings.HasSuffix(remainder, ")") {
+				index := strings.TrimSpace(remainder[1 : len(remainder)-1])
+				if isRegister(base) && isRegister(index) {
+					operand.Kind = OperandMemory
+					operand.Base = strings.ToUpper(base)
+					operand.Index = strings.ToUpper(index)
+					return operand
+				}
+			}
+		}
 		inside := strings.TrimSpace(source[1 : len(source)-1])
 		parts, err := splitCommaSeparated(inside)
 		if err == nil && len(parts) == 2 && isRegister(parts[0]) && isRegister(parts[1]) {
@@ -174,6 +219,86 @@ func parseOperand(source string) Operand {
 		operand.Symbol = parseSymbol(source)
 	}
 	return operand
+}
+
+func parseExtendedRegister(source string) (register, extend, shiftAmount string, ok bool) {
+	source = strings.ToUpper(strings.TrimSpace(source))
+	dot := strings.IndexByte(source, '.')
+	if dot <= 0 {
+		return "", "", "", false
+	}
+	register = source[:dot]
+	if !isRegister(register) || strings.HasPrefix(register, "V") || strings.HasPrefix(register, "F") {
+		return "", "", "", false
+	}
+	remainder := source[dot+1:]
+	if shift := strings.Index(remainder, "<<"); shift >= 0 {
+		shiftAmount = strings.TrimSpace(remainder[shift+2:])
+		remainder = strings.TrimSpace(remainder[:shift])
+		if _, err := strconv.ParseUint(shiftAmount, 0, 8); err != nil {
+			return "", "", "", false
+		}
+	}
+	switch remainder {
+	case "UXTB", "UXTH", "UXTW", "UXTX", "SXTB", "SXTH", "SXTW", "SXTX":
+		return register, remainder, shiftAmount, true
+	default:
+		return "", "", "", false
+	}
+}
+
+func parseVectorRegister(source string) (VectorRegister, bool) {
+	source = strings.ToUpper(strings.TrimSpace(source))
+	if !strings.HasPrefix(source, "V") {
+		return VectorRegister{}, false
+	}
+
+	registerEnd := 1
+	for registerEnd < len(source) && source[registerEnd] >= '0' && source[registerEnd] <= '9' {
+		registerEnd++
+	}
+	if registerEnd == 1 {
+		return VectorRegister{}, false
+	}
+	registerNumber, err := strconv.Atoi(source[1:registerEnd])
+	if err != nil || registerNumber < 0 || registerNumber > 31 {
+		return VectorRegister{}, false
+	}
+	vector := VectorRegister{Register: source[:registerEnd]}
+	if registerEnd == len(source) {
+		return vector, true
+	}
+	if source[registerEnd] != '.' {
+		return VectorRegister{}, false
+	}
+	arrangement := source[registerEnd+1:]
+	if open := strings.IndexByte(arrangement, '['); open >= 0 {
+		if !strings.HasSuffix(arrangement, "]") || open == 0 {
+			return VectorRegister{}, false
+		}
+		vector.Index = arrangement[open+1 : len(arrangement)-1]
+		if _, err := strconv.ParseUint(vector.Index, 10, 8); err != nil {
+			return VectorRegister{}, false
+		}
+		arrangement = arrangement[:open]
+	}
+	if !validVectorArrangement(arrangement, vector.Index != "") {
+		return VectorRegister{}, false
+	}
+	vector.Arrangement = arrangement
+	return vector, true
+}
+
+func validVectorArrangement(arrangement string, element bool) bool {
+	if element {
+		return arrangement == "B" || arrangement == "H" || arrangement == "S" || arrangement == "D"
+	}
+	switch arrangement {
+	case "B8", "B16", "H4", "H8", "S2", "S4", "D1", "D2":
+		return true
+	default:
+		return false
+	}
 }
 
 func parseSymbol(source string) Symbol {

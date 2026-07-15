@@ -43,8 +43,10 @@ The ARM64 Go path uses ABIInternal register assignment for scalar and aggregate
 arguments and results. Build-selected Plan 9 assembly is parsed into a syntax
 tree and translated to GNU AArch64 syntax. The currently enabled unchanged
 standard-library files are `runtime/atomic_arm64.s`, `runtime/memclr_arm64.s`,
-and `runtime/memmove_arm64.s`; unsupported files are kept out of the build until
-the translator accepts every construct they contain.
+`runtime/memmove_arm64.s`, and all five ARM64 files in `internal/bytealg`:
+`compare_arm64.s`, `count_arm64.s`, `equal_arm64.s`, `index_arm64.s`, and
+`indexbyte_arm64.s`. Unsupported files are kept out of the build until the
+translator accepts every construct they contain.
 
 The runtime-assembly demo grows slices, validates their copied contents, clears
 memory, runs the collector, and prints a checksum:

@@ -2,6 +2,7 @@ package plan9asm
 
 import (
 	"fmt"
+	"strconv"
 	"strings"
 )
 
@@ -63,16 +64,34 @@ func (t *arm64Translator) translateInstruction(instruction *Instruction) error {
 	switch opcode {
 	case "MOVD", "MOVW", "MOVWU", "MOVH", "MOVHU", "MOVB", "MOVBU":
 		return t.translateMove(instruction)
+	case "VMOV":
+		return t.translateVectorMove(instruction)
+	case "VLD1":
+		return t.translateVectorLoad(instruction)
+	case "VCMEQ", "VAND", "VORR", "VEOR", "VADD", "VADDP":
+		return t.translateVectorBinary(instruction)
+	case "VUADDLV":
+		return t.translateVectorAddLongAcross(instruction)
 	case "LDP", "LDPW", "STP", "STPW":
 		return t.translateRegisterPair(instruction)
 	case "ADD", "ADDW", "ADDS", "ADDSW", "SUB", "SUBW", "SUBS", "SUBSW", "AND", "ANDW", "ANDS", "ANDSW", "BIC", "BICW", "BICS", "BICSW", "ORR", "ORRW", "EOR", "EORW", "LSL", "LSLW", "LSR", "LSRW", "ASR", "ASRW":
 		return t.translateALU(instruction)
 	case "NEG", "NEGW", "NEGS", "NEGSW":
 		return t.translateNegate(instruction)
+	case "RBIT", "RBITW", "CLZ", "CLZW":
+		return t.translateUnaryRegister(instruction)
 	case "CMP", "CMPW", "CMN", "CMNW", "TST", "TSTW":
 		return t.translateCompare(instruction)
 	case "CCMP", "CCMPW":
 		return t.translateConditionalCompare(instruction)
+	case "CSEL", "CSELW":
+		return t.translateConditionalSelect(instruction)
+	case "CINC", "CINCW", "CNEG", "CNEGW":
+		return t.translateConditionalUnary(instruction)
+	case "CSET", "CSETW":
+		return t.translateConditionalSet(instruction)
+	case "REV", "REVW", "REV16", "REV16W", "REV32":
+		return t.translateReverse(instruction)
 	case "B", "BL", "BEQ", "BNE", "BCS", "BCC", "BHS", "BLO", "BMI", "BPL", "BVS", "BVC", "BHI", "BLS", "BGE", "BLT", "BGT", "BLE":
 		return t.translateBranch(instruction)
 	case "CBZ", "CBZW", "CBNZ", "CBNZW":
@@ -120,8 +139,7 @@ func (t *arm64Translator) translateMove(instruction *Instruction) error {
 			fmt.Fprintf(&t.output, "\tmov %s, %s\n", destinationRegister, sourceRegister)
 			return nil
 		case OperandImmediate:
-			fmt.Fprintf(&t.output, "\tmov %s, #%s\n", destinationRegister, normalizeImmediate(source.Immediate))
-			return nil
+			return t.emitMoveImmediate(destinationRegister, width, source.Immediate)
 		case OperandMemory:
 			return t.emitLoad(instruction, source, destinationRegister)
 		}
@@ -134,6 +152,60 @@ func (t *arm64Translator) translateMove(instruction *Instruction) error {
 		return t.emitStore(instruction, sourceRegister, destination)
 	}
 	return fmt.Errorf("unsupported %s operands %q, %q", instruction.Opcode, source.Text, destination.Text)
+}
+
+func (t *arm64Translator) emitMoveImmediate(destination string, width int, immediate string) error {
+	normalized := normalizeImmediate(immediate)
+	var value uint64
+	if strings.HasPrefix(normalized, "-") {
+		signed, err := strconv.ParseInt(normalized, 0, 64)
+		if err != nil {
+			return fmt.Errorf("invalid integer immediate $%s", immediate)
+		}
+		value = uint64(signed)
+	} else {
+		unsigned, err := strconv.ParseUint(normalized, 0, 64)
+		if err != nil {
+			return fmt.Errorf("invalid integer immediate $%s", immediate)
+		}
+		value = unsigned
+	}
+	if width == 32 {
+		value &= 0xffffffff
+	}
+	allBits := uint64(0xffffffffffffffff)
+	if width == 32 {
+		allBits = 0xffffffff
+	}
+	if value <= 0xffff {
+		fmt.Fprintf(&t.output, "\tmov %s, #%d\n", destination, value)
+		return nil
+	}
+	if value == allBits {
+		fmt.Fprintf(&t.output, "\tmov %s, #-1\n", destination)
+		return nil
+	}
+
+	chunks := width / 16
+	first := -1
+	for index := 0; index < chunks; index++ {
+		if (value>>uint(index*16))&0xffff != 0 {
+			first = index
+			break
+		}
+	}
+	if first < 0 {
+		fmt.Fprintf(&t.output, "\tmov %s, #0\n", destination)
+		return nil
+	}
+	fmt.Fprintf(&t.output, "\tmovz %s, #0x%x, lsl #%d\n", destination, (value>>uint(first*16))&0xffff, first*16)
+	for index := first + 1; index < chunks; index++ {
+		chunk := (value >> uint(index*16)) & 0xffff
+		if chunk != 0 {
+			fmt.Fprintf(&t.output, "\tmovk %s, #0x%x, lsl #%d\n", destination, chunk, index*16)
+		}
+	}
+	return nil
 }
 
 func (t *arm64Translator) emitLoad(instruction *Instruction, source Operand, destination string) error {
@@ -266,7 +338,7 @@ func (t *arm64Translator) translateNegate(instruction *Instruction) error {
 		return fmt.Errorf("%s requires two operands", instruction.Opcode)
 	}
 	width := instructionWidth(instruction.Opcode)
-	source, err := registerOperand(instruction.Operands[0], width)
+	source, err := formatALUSource(instruction.Operands[0], width)
 	if err != nil {
 		return err
 	}
@@ -278,6 +350,24 @@ func (t *arm64Translator) translateNegate(instruction *Instruction) error {
 	if strings.Contains(instruction.Opcode, "S") {
 		mnemonic = "negs"
 	}
+	fmt.Fprintf(&t.output, "\t%s %s, %s\n", mnemonic, destination, source)
+	return nil
+}
+
+func (t *arm64Translator) translateUnaryRegister(instruction *Instruction) error {
+	if len(instruction.Operands) != 2 {
+		return fmt.Errorf("%s requires a source and destination", instruction.Opcode)
+	}
+	width := instructionWidth(instruction.Opcode)
+	source, err := registerOperand(instruction.Operands[0], width)
+	if err != nil {
+		return err
+	}
+	destination, err := registerOperand(instruction.Operands[1], width)
+	if err != nil {
+		return err
+	}
+	mnemonic := strings.ToLower(strings.TrimSuffix(instruction.Opcode, "W"))
 	fmt.Fprintf(&t.output, "\t%s %s, %s\n", mnemonic, destination, source)
 	return nil
 }
@@ -319,6 +409,78 @@ func (t *arm64Translator) translateConditionalCompare(instruction *Instruction) 
 		return fmt.Errorf("%s flags must be immediate", instruction.Opcode)
 	}
 	fmt.Fprintf(&t.output, "\tccmp %s, %s, #%s, %s\n", left, right, flags.Immediate, condition)
+	return nil
+}
+
+func (t *arm64Translator) translateConditionalSelect(instruction *Instruction) error {
+	if len(instruction.Operands) != 4 {
+		return fmt.Errorf("%s requires a condition, two sources, and destination", instruction.Opcode)
+	}
+	condition := strings.ToLower(instruction.Operands[0].Text)
+	width := instructionWidth(instruction.Opcode)
+	first, err := registerOperand(instruction.Operands[1], width)
+	if err != nil {
+		return err
+	}
+	second, err := registerOperand(instruction.Operands[2], width)
+	if err != nil {
+		return err
+	}
+	destination, err := registerOperand(instruction.Operands[3], width)
+	if err != nil {
+		return err
+	}
+	fmt.Fprintf(&t.output, "\tcsel %s, %s, %s, %s\n", destination, first, second, condition)
+	return nil
+}
+
+func (t *arm64Translator) translateConditionalUnary(instruction *Instruction) error {
+	if len(instruction.Operands) != 3 {
+		return fmt.Errorf("%s requires a condition, source, and destination", instruction.Opcode)
+	}
+	condition := strings.ToLower(instruction.Operands[0].Text)
+	width := instructionWidth(instruction.Opcode)
+	source, err := registerOperand(instruction.Operands[1], width)
+	if err != nil {
+		return err
+	}
+	destination, err := registerOperand(instruction.Operands[2], width)
+	if err != nil {
+		return err
+	}
+	mnemonic := strings.ToLower(strings.TrimSuffix(instruction.Opcode, "W"))
+	fmt.Fprintf(&t.output, "\t%s %s, %s, %s\n", mnemonic, destination, source, condition)
+	return nil
+}
+
+func (t *arm64Translator) translateConditionalSet(instruction *Instruction) error {
+	if len(instruction.Operands) != 2 {
+		return fmt.Errorf("%s requires a condition and destination", instruction.Opcode)
+	}
+	condition := strings.ToLower(instruction.Operands[0].Text)
+	destination, err := registerOperand(instruction.Operands[1], instructionWidth(instruction.Opcode))
+	if err != nil {
+		return err
+	}
+	fmt.Fprintf(&t.output, "\tcset %s, %s\n", destination, condition)
+	return nil
+}
+
+func (t *arm64Translator) translateReverse(instruction *Instruction) error {
+	if len(instruction.Operands) != 2 {
+		return fmt.Errorf("%s requires a source and destination", instruction.Opcode)
+	}
+	width := instructionWidth(instruction.Opcode)
+	source, err := registerOperand(instruction.Operands[0], width)
+	if err != nil {
+		return err
+	}
+	destination, err := registerOperand(instruction.Operands[1], width)
+	if err != nil {
+		return err
+	}
+	mnemonic := strings.ToLower(strings.TrimSuffix(instruction.Opcode, "W"))
+	fmt.Fprintf(&t.output, "\t%s %s, %s\n", mnemonic, destination, source)
 	return nil
 }
 

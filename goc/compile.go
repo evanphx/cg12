@@ -92,7 +92,7 @@ func compile(name string, src []byte, executable bool) (*ir.Module, error) {
 	noWriteBarriers := collectNoWriteBarrierFunctions(functionDecls)
 	var roots []*ast.FuncDecl
 	for _, declaration := range file.Decls {
-		if function, ok := declaration.(*ast.FuncDecl); ok {
+		if function, ok := declaration.(*ast.FuncDecl); ok && function.Body != nil {
 			roots = append(roots, function)
 		}
 	}

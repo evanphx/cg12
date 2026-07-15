@@ -15,6 +15,16 @@ func memoryAddress(operand Operand, suffix string) (string, error) {
 	if err != nil {
 		return "", err
 	}
+	if operand.Index != "" {
+		if suffix != "" {
+			return "", fmt.Errorf("indexed memory operand %q does not accept .%s", operand.Text, suffix)
+		}
+		index, err := arm64Register(operand.Index, 64)
+		if err != nil {
+			return "", err
+		}
+		return fmt.Sprintf("[%s, %s]", base, index), nil
+	}
 	offset := operand.Offset
 	if offset == "" {
 		offset = "0"
@@ -47,6 +57,20 @@ func formatALUSource(operand Operand, width int) (string, error) {
 		}
 		shift := map[string]string{"<<": "lsl", ">>": "lsr", "->": "asr", "@>": "ror"}[operand.Shift]
 		return fmt.Sprintf("%s, %s #%s", register, shift, operand.ShiftAmount), nil
+	case OperandExtendedRegister:
+		registerWidth := 32
+		if strings.HasSuffix(operand.Extend, "X") {
+			registerWidth = 64
+		}
+		register, err := arm64Register(operand.Register, registerWidth)
+		if err != nil {
+			return "", err
+		}
+		extension := strings.ToLower(operand.Extend)
+		if operand.ShiftAmount == "" {
+			return fmt.Sprintf("%s, %s", register, extension), nil
+		}
+		return fmt.Sprintf("%s, %s #%s", register, extension, operand.ShiftAmount), nil
 	default:
 		return "", fmt.Errorf("unsupported arithmetic operand %q", operand.Text)
 	}

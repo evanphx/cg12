@@ -83,7 +83,18 @@ const (
 	OperandRegisterPair
 	OperandShiftedRegister
 	OperandSymbol
+	OperandVectorRegister
+	OperandVectorList
+	OperandExtendedRegister
 )
+
+// VectorRegister is a SIMD register with an optional lane arrangement and
+// element index, such as V3.B16 or V8.D[1].
+type VectorRegister struct {
+	Register    string
+	Arrangement string
+	Index       string
+}
 
 // Operand is a parsed assembly operand. Text always retains the exact trimmed
 // spelling. The remaining fields describe the selected Kind.
@@ -94,10 +105,14 @@ type Operand struct {
 	Immediate   string
 	Base        string
 	Offset      string
+	Index       string
 	Registers   []string
 	Shift       string
 	ShiftAmount string
+	Extend      string
 	Symbol      Symbol
+	Vector      VectorRegister
+	Vectors     []VectorRegister
 }
 
 // Symbol is a Plan 9 symbol reference. ABI is empty unless the source names an

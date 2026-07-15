@@ -22,6 +22,11 @@ func TestARM64RuntimeExitTerminatesTheProcess(t *testing.T) {
 
 func TestRuntimeSupportDoesNotShadowTranslatedStandardLibraryAssembly(t *testing.T) {
 	for _, symbol := range []string{
+		"internal_bytealg_Compare",
+		"internal_bytealg_Count",
+		"internal_bytealg_IndexByte",
+		"internal_bytealg_IndexByteString",
+		"runtime_memequal",
 		"runtime_memmove",
 		"runtime_memclrNoHeapPointers",
 		"runtime_publicationBarrier",
@@ -181,6 +186,7 @@ func TestARM64StandardLibraryIOAndFmtExecute(t *testing.T) {
 		source string
 		output string
 	}{
+		{name: "internal/bytealg assembly", source: "bytealg_compare.go"},
 		{name: "io.WriteString", source: "io_write_string.go"},
 		{name: "fmt.Sprintf", source: "fmt_sprintf.go"},
 		{name: "fmt.Println", source: "fmt_println.go", output: "hello 42\n"},

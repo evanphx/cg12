@@ -17,8 +17,13 @@ func (t *arm64Translator) translateText(text *Text) error {
 		Flags: append([]string(nil), text.Flags...),
 	})
 	t.output.WriteString("\n.text\n")
-	if !text.Symbol.Static {
-		fmt.Fprintf(&t.output, ".global %s\n", symbol)
+	fmt.Fprintf(&t.output, ".global %s\n", symbol)
+	if text.Symbol.Static {
+		// The cg12 object carries Go runtime metadata for translated assembly
+		// functions, so even a file-local Go symbol must be link-visible from
+		// the separately assembled GNU object. Its file-qualified name remains
+		// unique, and hidden visibility keeps it out of the public ABI.
+		fmt.Fprintf(&t.output, ".hidden %s\n", symbol)
 	}
 	fmt.Fprintf(&t.output, ".type %s, %%function\n", symbol)
 	fmt.Fprintf(&t.output, "%s:\n", symbol)

@@ -93,6 +93,47 @@ func TestLoadExactStandardRuntimeSource(t *testing.T) {
 	}
 }
 
+func TestLoadExactStandardBytealgAssembly(t *testing.T) {
+	loader := newSourceLoader(token.NewFileSet())
+	_, err := loader.Import("internal/bytealg")
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	unit := loader.units["internal/bytealg"]
+	if unit == nil {
+		t.Fatal("internal/bytealg source unit was not retained")
+	}
+	wantNames := map[string]bool{
+		"compare_arm64.s":   true,
+		"count_arm64.s":     true,
+		"equal_arm64.s":     true,
+		"index_arm64.s":     true,
+		"indexbyte_arm64.s": true,
+	}
+	if len(unit.assembly) != len(wantNames) {
+		t.Fatalf("internal/bytealg assembly files = %d, want %d", len(unit.assembly), len(wantNames))
+	}
+	for _, assembly := range unit.assembly {
+		name := filepath.Base(assembly.path)
+		if !wantNames[name] {
+			t.Errorf("unexpected internal/bytealg assembly path %q", assembly.path)
+			continue
+		}
+		want, err := os.ReadFile(filepath.Join(loader.root, "src", "internal", "bytealg", name))
+		if err != nil {
+			t.Fatal(err)
+		}
+		if assembly.source != string(want) {
+			t.Errorf("internal/bytealg %s was modified while loading", name)
+		}
+		delete(wantNames, name)
+	}
+	for name := range wantNames {
+		t.Errorf("internal/bytealg assembly is missing %s", name)
+	}
+}
+
 func TestRepositoryStandardLibraryInventory(t *testing.T) {
 	loader := newSourceLoader(token.NewFileSet())
 	packages := []string{

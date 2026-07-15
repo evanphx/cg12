@@ -30,6 +30,13 @@ type ARM64Translation struct {
 }
 
 var supportedARM64Files = map[string]map[string]bool{
+	"internal/bytealg": {
+		"compare_arm64.s":   true,
+		"count_arm64.s":     true,
+		"equal_arm64.s":     true,
+		"index_arm64.s":     true,
+		"indexbyte_arm64.s": true,
+	},
 	"runtime": {
 		"atomic_arm64.s":  true,
 		"memclr_arm64.s":  true,
