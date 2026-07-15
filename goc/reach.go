@@ -61,7 +61,7 @@ func reachableFunctions(roots []*ast.FuncDecl, rootInfo *types.Info, rootPkg *ty
 	if runtimeAllocation {
 		queue = append(queue, genericRuntimeMethods...)
 		queue = append(queue, runtimeSupportFunctions...)
-		for _, name := range []string{"args", "check", "growslice", "main", "mstart0", "osinit", "schedinit"} {
+		for _, name := range []string{"args", "check", "growslice", "main", "makeslice", "mallocgc", "mstart0", "newobject", "newstack", "osinit", "persistentalloc", "schedinit"} {
 			if declaration, exists := runtimeFunctions[name]; exists {
 				queue = append(queue, declaration)
 			}

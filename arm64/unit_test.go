@@ -493,6 +493,20 @@ func TestSelectConstOffsetAddressing(t *testing.T) {
 	assert.Contains(t, store, "#24]", "immediate offset, not a register index")
 }
 
+func TestGoABIZerosPointerLocalsBeforeCalls(t *testing.T) {
+	module := ir.NewModule()
+	f := module.NewFunc("pointer_local", ir.ClsW)
+	f.GoABI = true
+	entry := f.Entry()
+	value := entry.Alloc(8, 8)
+	pointerSlot := entry.Alloc(8, 8)
+	entry.Store(value, pointerSlot)
+	entry.Call(ir.ClsL, f.Sym("observe", 0), value)
+	entry.Ret(f.Word(0))
+
+	assert.Contains(t, disasmModule(t, module), "str xzr, [x29")
+}
+
 func TestCompileLargeFrame(t *testing.T) {
 	// A frame larger than the stp pre-index reach (504 bytes) must adjust sp
 	// separately in the prologue and epilogue. Add/sub immediate only carries 12

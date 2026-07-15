@@ -4,6 +4,7 @@ import (
 	"encoding/binary"
 	"fmt"
 	"math"
+	"sort"
 	"strings"
 
 	"github.com/evanphx/cg12/arm64/a64"
@@ -101,14 +102,19 @@ func addAliases(o *obj.Object, aliases []*ir.Alias) error {
 
 func CompileToObjectWith(m *ir.Module, opts Options) (*obj.Object, error) {
 	o := &obj.Object{Machine: obj.EM_AARCH64}
+	goRuntime := moduleUsesGoRuntime(m)
 	var rows []obj.LineRow
 	var dfuncs []obj.DwarfFunc
 	var smFuncs []stackMapFunc
+	var goFunctions []goFunctionInfo
 	anchor := ""
 	for _, f := range m.Funcs {
 		name := sanitize(f.Name)
 		params := dwarfParams(f)
 		paramTemps := paramTempIDs(f)
+		if f.GoABI {
+			inferStackPointerWords(f)
+		}
 		ir.LowerPointers(f, ptrCls)
 		if err := lower(f, opts.TLSModel); err != nil {
 			return nil, fmt.Errorf("function %s: %w", f.Name, err)
@@ -126,6 +132,7 @@ func CompileToObjectWith(m *ir.Module, opts Options) (*obj.Object, error) {
 			anchor = name
 		}
 		o.Text = append(o.Text, mc.code...)
+		goFunctions = append(goFunctions, goFunctionInfo{name: name, frameSize: mc.m.frame, frameStart: mc.m.frameStart, size: uint64(len(mc.code)), pointerWords: mc.m.goPointerWords()})
 		o.Syms = append(o.Syms, obj.Sym{
 			Name: name, Section: obj.SecText, Value: base,
 			Size: uint64(len(mc.code)), Global: f.Linkage.Export, Func: true,
@@ -162,6 +169,10 @@ func CompileToObjectWith(m *ir.Module, opts Options) (*obj.Object, error) {
 		}
 	}
 	for _, d := range m.Data {
+		if goRuntime && d.Name == "runtime.firstmoduledata" {
+			addGoRuntimeObjectMetadata(o, goFunctions, d)
+			continue
+		}
 		if err := addData(o, d); err != nil {
 			return nil, fmt.Errorf("data %s: %w", d.Name, err)
 		}
@@ -517,6 +528,7 @@ type mc struct {
 
 	instrPC    map[*ir.Instr]uint64 // PC at the start of each instruction
 	safepoints []safepoint
+	frameStart int
 
 	blockDone bool
 	useCount  []int                     // per-temp use count, for the fused compare-branch
@@ -715,6 +727,9 @@ const (
 // this. Because the frame is exactly 16 bytes here there are no spills, allocas,
 // callee-saved registers, or a variadic save area to address off x29.
 func framelessEligible(f *ir.Func, lay frameLayout, gc GCStrategy) bool {
+	if f.GoABI {
+		return false
+	}
 	if lay.frame != 16 || lay.hasDynAlloc || lay.variadic {
 		return false
 	}
@@ -761,6 +776,10 @@ func (m *mc) prologue() {
 	if m.frameless {
 		return
 	}
+	if m.f.GoABI {
+		m.goStackPrologue()
+		m.frameStart = m.prog.Len() * 4
+	}
 	// A strategy may emit a stack-growth guard before the frame is set up; its
 	// slow path branches back to this label to re-check after the stack grows.
 	if pe, ok := m.gc.(PrologueEmitter); ok {
@@ -781,6 +800,7 @@ func (m *mc) prologue() {
 		m.spillStore(mreg(cs[i]), cs[i].IsFloat(), 16+i*8, 8)
 		i++
 	}
+	m.zeroGoPointerSlots()
 	if m.variadic {
 		for i := 0; i < 8; i++ {
 			m.emit(a64.StrImm(true, a64.Reg(i), mcX29, uint32(m.gpSaveOff+i*8)))
@@ -799,19 +819,71 @@ func stpPairable(a, b Reg, off int) bool {
 	return !a.IsFloat() && !b.IsFloat() && off%8 == 0 && off >= -512 && off <= 504
 }
 
-func (m *mc) allocFrame() {
-	if m.frame <= 504 {
-		m.emit(a64.Stp(true, mcX29, mcX30, mcSP, -m.frame, a64.PreIndex))
-	} else {
-		m.adjustSP(true, m.frame)
-		m.emit(a64.Stp(true, mcX29, mcX30, mcSP, 0, a64.SignedOffset))
+func (m *mc) zeroGoPointerSlots() {
+	if !m.f.GoABI {
+		return
 	}
-	m.emit(a64.AddImm(true, mcX29, mcSP, 0)) // mov x29, sp
+	for _, off := range goPointerFrameOffsets(m.f, m.allocOff) {
+		m.spillStore(a64.Reg(31), false, off, 8)
+	}
+}
+
+func (m *mc) goStackPrologue() {
+	const retry = "__cg12_go_prologue"
+	const enough = "__cg12_go_stack_ok"
+
+	m.prog.Label(retry)
+	m.emit(a64.LdrImm(true, mcGP0, a64.Reg(28), 16))
+	m.emit(a64.AddImm(true, mcGP1, mcSP, 0))
+	hi, lo := m.frame>>12, m.frame&0xfff
+	if hi > 0 {
+		m.emit(a64.SubImmLSL12(true, mcGP1, mcGP1, uint32(hi)))
+	}
+	if lo > 0 {
+		m.emit(a64.SubImm(true, mcGP1, mcGP1, uint32(lo)))
+	}
+	m.emit(a64.CmpReg(true, mcGP1, mcGP0))
+	m.prog.Bcond(a64.HI, enough)
+	m.emit(a64.AddImm(true, a64.Reg(15), mcX30, 0))
+	m.reloc("runtime_morestack_noctxt", obj.R_AARCH64_CALL26)
+	m.emit(a64.Bl(0))
+	m.prog.B(retry)
+	m.prog.Label(enough)
+}
+
+func (m *mc) allocFrame() {
+	if !m.f.GoABI {
+		if m.frame <= 504 {
+			m.emit(a64.Stp(true, mcX29, mcX30, mcSP, -m.frame, a64.PreIndex))
+		} else {
+			m.adjustSP(true, m.frame)
+			m.emit(a64.Stp(true, mcX29, mcX30, mcSP, 0, a64.SignedOffset))
+		}
+		m.emit(a64.AddImm(true, mcX29, mcSP, 0))
+		return
+	}
+	m.adjustSP(true, m.frame)
+	m.emit(a64.Stp(true, mcX29, mcX30, mcSP, -8, a64.SignedOffset))
+	m.emit(a64.SubImm(true, mcX29, mcSP, 8))
 }
 
 func (m *mc) frameTeardown() {
-	(m.newSel()).
-		frameTeardown(m.frame, m.hasDynAlloc, m.calleeSaved)
+	if !m.f.GoABI {
+		(m.newSel()).
+			frameTeardown(m.frame, m.hasDynAlloc, m.calleeSaved)
+		return
+	}
+	if m.hasDynAlloc {
+		m.emit(a64.AddImm(true, mcSP, mcX29, 8)) // undo any VLA growth
+	}
+	for i, r := range m.calleeSaved {
+		m.spillLoad(mreg(r), r.IsFloat(), 16+i*8, 8)
+	}
+	if !m.hasDynAlloc {
+		m.emit(a64.AddImm(true, mcSP, mcX29, 8))
+	}
+	m.emit(a64.Ldp(true, mcX29, mcX30, mcSP, -8, a64.SignedOffset))
+	m.adjustSP(false, m.frame)
 }
 
 func (m *mc) epilogue() {
@@ -819,8 +891,8 @@ func (m *mc) epilogue() {
 		m.emit(a64.Ret(mcX30)) // no frame to tear down
 		return
 	}
-	(m.newSel()).
-		epilogue(m.frame, m.hasDynAlloc, m.calleeSaved)
+	m.frameTeardown()
+	m.emit(a64.Ret(mcX30))
 }
 
 // frameAddr computes x29 + off into d. The ADD immediate is only 12 bits (0..4095),
@@ -870,6 +942,51 @@ func (m *mc) adjustSP(sub bool, n int) {
 	if lo > 0 {
 		imm(uint32(lo), false)
 	}
+}
+
+func (m *mc) frameTop() int {
+	if m.f.GoABI {
+		return m.frame + 8
+	}
+	return m.frame
+}
+
+func (m *mc) goPointerWords() []int {
+	return goPointerWordIndexes(m.f, m.allocOff)
+}
+
+func goPointerWordIndexes(function *ir.Func, allocations map[*ir.Instr]int) []int {
+	seen := make(map[int]bool)
+	for _, frameOffset := range goPointerFrameOffsets(function, allocations) {
+		word := (frameOffset - 16) / 8
+		if frameOffset >= 16 {
+			seen[word] = true
+		}
+	}
+	words := make([]int, 0, len(seen))
+	for word := range seen {
+		words = append(words, word)
+	}
+	sort.Ints(words)
+	return words
+}
+
+func goPointerFrameOffsets(function *ir.Func, allocations map[*ir.Instr]int) []int {
+	seen := make(map[int]bool)
+	for instruction, allocationOffset := range allocations {
+		for wordOffset := range function.StackPointerWords[instruction.To.ID] {
+			frameOffset := allocationOffset + wordOffset
+			if frameOffset >= 16 && frameOffset%8 == 0 {
+				seen[frameOffset] = true
+			}
+		}
+	}
+	offsets := make([]int, 0, len(seen))
+	for offset := range seen {
+		offsets = append(offsets, offset)
+	}
+	sort.Ints(offsets)
+	return offsets
 }
 
 // spillImmFits reports whether a byte offset encodes directly in the scaled
@@ -1806,7 +1923,7 @@ func (m *mc) regDiffers(r ir.Ref, avoid Reg) bool {
 }
 
 func (m *mc) stackParam(in *ir.Instr) {
-	off := m.frame + int(in.Aux)
+	off := m.frameTop() + int(in.Aux)
 	t := m.f.Temps[in.To.ID]
 	if t.Agg != nil {
 		if t.Reg != ir.NoReg {
@@ -1868,7 +1985,7 @@ func (m *mc) callSequence(b *ir.Block, i int) int {
 	if call.Tail {
 		for _, a := range stackArgs {
 			r := m.src(a.Args[0], 0, a.Cls.Size())
-			m.emit(a64.StrImm(a.Cls.Size() == 8, r, mcX29, uint32(m.frame+int(a.Aux))))
+			m.emit(a64.StrImm(a.Cls.Size() == 8, r, mcX29, uint32(m.frameTop()+int(a.Aux))))
 		}
 		m.parallelMove(regPairs)
 		for _, a := range symArgs {
@@ -2549,7 +2666,7 @@ func (m *mc) vaPtr(ref ir.Ref) a64.Reg {
 func (m *mc) vaStart(in *ir.Instr) {
 	vp := m.vaPtr(in.Args[0])
 	s := mreg(scratch1)
-	m.frameAddr(s, m.frame+roundUp(m.namedStack, 8))
+	m.frameAddr(s, m.frameTop()+roundUp(m.namedStack, 8))
 	m.emit(a64.StrImm(true, s, vp, 0)) // __stack
 	m.frameAddr(s, m.gpSaveOff+8*8)
 	m.emit(a64.StrImm(true, s, vp, 8)) // __gr_top

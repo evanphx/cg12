@@ -447,6 +447,32 @@ func (b *Block) AtomicRMW(op string, cls Cls, addr, val Ref) Ref {
 // AtomicFence emits a full memory barrier.
 func (b *Block) AtomicFence() { b.IntrinsicVoid("atomic.fence") }
 
+// HeapAlloc emits a typed heap-allocation candidate. The optimizer promotes
+// it to a stack allocation when its result cannot escape and otherwise lowers
+// it to allocator(typeDescriptor).
+func (b *Block) HeapAlloc(allocator, typeDescriptor Ref, size, align int) Ref {
+	if size < 0 {
+		panic("ir: negative heap allocation size")
+	}
+	if align != 4 && align != 8 && align != 16 {
+		if align < 4 {
+			align = 4
+		} else {
+			panic(fmt.Sprintf("ir: invalid heap allocation alignment %d", align))
+		}
+	}
+	in := Instr{
+		Op:   OHeapAlloc,
+		Cls:  ClsP,
+		Args: []Ref{allocator, typeDescriptor, b.fn.Long(int64(size))},
+		Aux:  int64(align),
+		Pos:  b.curPos,
+	}
+	in.To = b.fn.newTemp("", ClsP)
+	b.Instrs = append(b.Instrs, in)
+	return in.To
+}
+
 // Call invokes callee with args and returns the result (class retCls). For a
 // void call use CallVoid.
 func (b *Block) Call(retCls Cls, callee Ref, args ...Ref) Ref {

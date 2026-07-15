@@ -76,6 +76,12 @@ const (
 	_
 	_
 
+	// OHeapAlloc is a typed heap-allocation candidate. Args are the heap
+	// allocator, its type descriptor, and the constant byte size; Aux is the
+	// required alignment. The escape pass promotes local candidates to OAlloc*
+	// and lowers the rest to calls before target lowering.
+	OHeapAlloc
+
 	// Memory-to-memory copy of Aux bytes from Args[1] to Args[0].
 	OBlit
 
@@ -316,10 +322,11 @@ var opTable = [numOps]opInfo{
 	OLoadd:  {name: "loadd", hasResult: true},
 	OLoadq:  {name: "loadq", hasResult: true},
 
-	OAlloc4:  {name: "alloc4", hasResult: true},
-	OAlloc8:  {name: "alloc8", hasResult: true},
-	OAlloc16: {name: "alloc16", hasResult: true},
-	OAllocN:  {name: "allocn", hasResult: true},
+	OAlloc4:    {name: "alloc4", hasResult: true},
+	OAlloc8:    {name: "alloc8", hasResult: true},
+	OAlloc16:   {name: "alloc16", hasResult: true},
+	OAllocN:    {name: "allocn", hasResult: true},
+	OHeapAlloc: {name: "heapalloc", hasResult: true},
 
 	OBlit: {name: "blit"},
 

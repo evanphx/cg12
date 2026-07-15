@@ -35,6 +35,9 @@ main:
 	svc 0
 	brk 0
 
+.global runtime_gocTextEnd
+runtime_gocTextEnd:
+
 .data
 .balign 8
 runtime_main_funcval:

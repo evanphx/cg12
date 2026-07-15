@@ -1,0 +1,284 @@
+package arm64
+
+import (
+	"encoding/binary"
+
+	"github.com/evanphx/cg12/ir"
+	"github.com/evanphx/cg12/obj"
+)
+
+type goFunctionInfo struct {
+	name         string
+	frameSize    int
+	frameStart   int
+	size         uint64
+	funcFlag     byte
+	pointerWords []int
+}
+
+func moduleUsesGoRuntime(module *ir.Module) bool {
+	for _, function := range module.Funcs {
+		if function.Name == "runtime.schedinit" {
+			return true
+		}
+	}
+	return false
+}
+
+type goMetadataBuilder struct {
+	object *obj.Object
+	base   uint64
+	data   []byte
+	labels map[string]uint64
+	relocs []obj.Reloc
+}
+
+func addGoRuntimeObjectMetadata(object *obj.Object, functions []goFunctionInfo, moduledata *ir.Data) {
+	if len(functions) == 0 {
+		_ = addData(object, moduledata)
+		return
+	}
+	for len(object.Data)%8 != 0 {
+		object.Data = append(object.Data, 0)
+	}
+	builder := &goMetadataBuilder{object: object, base: uint64(len(object.Data)), labels: make(map[string]uint64)}
+	builder.build(functions, moduledata)
+	object.Data = append(object.Data, builder.data...)
+	object.DataRelocs = append(object.DataRelocs, builder.relocs...)
+}
+
+func (builder *goMetadataBuilder) build(functions []goFunctionInfo, moduledata *ir.Data) {
+	const findFuncBuckets = 4096
+	functions = append(functions,
+		goFunctionInfo{name: "runtime_gocPrintString", funcFlag: 1 | 4}, // TopFrame | Asm
+		goFunctionInfo{name: "runtime_morestack_restore", frameSize: 224, funcFlag: 4, pointerWords: []int{25}},
+		goFunctionInfo{name: "runtime_morestack_restore_end", funcFlag: 1 | 4},
+	)
+
+	builder.label(".goc.go.pcheader")
+	builder.u32(0xfffffff1)
+	builder.bytes(0, 0, 4, 8)
+	builder.u64(uint64(len(functions)))
+	builder.u64(0)
+	builder.u64(0)
+	for range 5 {
+		builder.u64(0)
+	}
+
+	builder.label(".goc.go.funcnames")
+	nameOffsets := make([]uint32, len(functions))
+	for index, function := range functions {
+		nameOffsets[index] = uint32(builder.offset(".goc.go.funcnames"))
+		builder.data = append(builder.data, function.name...)
+		builder.data = append(builder.data, 0)
+	}
+	builder.label(".goc.go.funcnames.end")
+	builder.align(4)
+
+	builder.label(".goc.go.pctab")
+	builder.bytes(0)
+	pcspOffsets := make([]uint32, len(functions))
+	for index, function := range functions {
+		pcspOffsets[index] = uint32(builder.offset(".goc.go.pctab"))
+		if function.frameStart > 0 {
+			builder.uvarint(2) // initial value: -1 -> 0 before frame allocation
+			builder.uvarint(uint32(function.frameStart / 4))
+			builder.uvarint(uint32(function.frameSize) * 2)
+		} else {
+			builder.uvarint(uint32(function.frameSize+1) * 2)
+		}
+		builder.uvarint(^uint32(0))
+	}
+	builder.label(".goc.go.pctab.end")
+	builder.align(4)
+
+	// Build gofunc before pclntable so its offsets are known when _func records
+	// are written. The section ordering is immaterial; moduledata names each one.
+	builder.label(".goc.go.gofunc")
+	emptyStackMap := builder.position()
+	builder.u32(1)
+	builder.u32(0)
+	localOffsets := make([]uint32, len(functions))
+	for index, function := range functions {
+		builder.align(4)
+		localOffsets[index] = uint32(builder.position() - builder.labels[".goc.go.gofunc"])
+		words := (function.frameSize - 16) / 8
+		if words < 0 {
+			words = 0
+		}
+		builder.u32(1)
+		builder.u32(uint32(words))
+		bitmap := make([]byte, (words+7)/8)
+		for _, word := range function.pointerWords {
+			if word >= 0 && word < words {
+				bitmap[word/8] |= 1 << (word % 8)
+			}
+		}
+		builder.data = append(builder.data, bitmap...)
+	}
+	builder.label(".goc.go.gofunc.end")
+	builder.align(4)
+
+	builder.label(".goc.go.pclntable")
+	functionOffsets := make([]uint32, len(functions))
+	for index, function := range functions {
+		functionOffsets[index] = uint32(builder.offset(".goc.go.pclntable"))
+		builder.reloc32(function.name)
+		builder.u32(nameOffsets[index])
+		builder.u32(0)
+		builder.u32(0)
+		builder.u32(pcspOffsets[index])
+		builder.u32(0)
+		builder.u32(0)
+		builder.u32(0)
+		builder.u32(0)
+		builder.u32(0)
+		builder.bytes(0, function.funcFlag, 0, 2)
+		builder.u32(uint32(emptyStackMap - builder.labels[".goc.go.gofunc"]))
+		builder.u32(localOffsets[index])
+	}
+	builder.label(".goc.go.pclntable.end")
+	builder.align(4)
+
+	builder.label(".goc.go.functab")
+	for index, function := range functions {
+		builder.reloc32(function.name)
+		builder.u32(functionOffsets[index])
+	}
+	endSymbol := "runtime_gocTextEnd"
+	builder.reloc32(endSymbol)
+	builder.u32(0)
+	builder.label(".goc.go.functab.end")
+	builder.align(4)
+
+	builder.label(".goc.go.findfunctab")
+	builder.data = append(builder.data, make([]byte, findFuncBuckets*20)...)
+	builder.align(8)
+
+	moduleStart := builder.position()
+	builder.label(sanitize(moduledata.Name))
+	builder.pointer(".goc.go.pcheader")
+	builder.slice(".goc.go.funcnames", ".goc.go.funcnames.end")
+	builder.emptySlice()
+	builder.emptySlice()
+	builder.slice(".goc.go.pctab", ".goc.go.pctab.end")
+	builder.slice(".goc.go.pclntable", ".goc.go.pclntable.end")
+	builder.sliceCount(".goc.go.functab", len(functions)+1)
+	builder.pointer(".goc.go.findfunctab")
+	builder.externalPointer(functions[0].name)
+	builder.externalPointer(endSymbol)
+	builder.u64(0) // text base: function entry offsets contain absolute addresses
+	builder.externalPointer(endSymbol)
+	builder.externalPointer(sanitize(".goc.runtime.datastart")) // noptrdata
+	builder.externalPointer(sanitize(".goc.runtime.dataend"))   // enoptrdata
+	builder.u64(0)                                              // data
+	builder.u64(0)                                              // edata
+	builder.u64(0)                                              // bss
+	builder.u64(0)                                              // ebss
+	builder.externalPointer(sanitize(".goc.runtime.datastart")) // noptrbss
+	builder.externalPointer(sanitize(".goc.runtime.dataend"))   // enoptrbss
+	builder.u64(0)                                              // covctrs
+	builder.u64(0)                                              // ecovctrs
+	builder.externalPointer(sanitize(".goc.runtime.dataend"))   // end
+	builder.u64(0)                                              // gcdata
+	builder.u64(0)                                              // gcbss
+	builder.externalPointer(sanitize(".goc.runtime.datastart")) // types
+	builder.externalPointer(sanitize(".goc.runtime.dataend"))   // etypes
+	builder.externalPointer(sanitize(".goc.runtime.datastart")) // rodata
+	builder.pointer(".goc.go.gofunc")
+	builder.pointer(".goc.go.pclntable.end")
+	builder.data = append(builder.data, make([]byte, 256)...)
+	builder.object.Syms = append(builder.object.Syms, obj.Sym{
+		Name: sanitize(moduledata.Name), Section: obj.SecData,
+		Value: moduleStart, Size: 592, Global: moduledata.Linkage.Export,
+	})
+
+	// Fill pcHeader offsets now that every table position is known.
+	header := builder.labels[".goc.go.pcheader"] - builder.base
+	for index, label := range []string{".goc.go.funcnames", "", "", ".goc.go.pctab", ".goc.go.pclntable"} {
+		if label == "" {
+			continue
+		}
+		offset := builder.labels[label] - builder.labels[".goc.go.pcheader"]
+		binary.LittleEndian.PutUint64(builder.data[header+32+uint64(index*8):], offset)
+	}
+}
+
+func (builder *goMetadataBuilder) position() uint64 {
+	return builder.base + uint64(len(builder.data))
+}
+
+func (builder *goMetadataBuilder) label(name string) {
+	builder.labels[name] = builder.position()
+	if name != sanitize("runtime.firstmoduledata") {
+		builder.object.Syms = append(builder.object.Syms, obj.Sym{Name: name, Section: obj.SecData, Value: builder.position()})
+	}
+}
+
+func (builder *goMetadataBuilder) offset(label string) uint64 {
+	return builder.position() - builder.labels[label]
+}
+
+func (builder *goMetadataBuilder) align(alignment int) {
+	for len(builder.data)%alignment != 0 {
+		builder.data = append(builder.data, 0)
+	}
+}
+
+func (builder *goMetadataBuilder) bytes(values ...byte) {
+	builder.data = append(builder.data, values...)
+}
+
+func (builder *goMetadataBuilder) u32(value uint32) {
+	var bytes [4]byte
+	binary.LittleEndian.PutUint32(bytes[:], value)
+	builder.data = append(builder.data, bytes[:]...)
+}
+
+func (builder *goMetadataBuilder) u64(value uint64) {
+	var bytes [8]byte
+	binary.LittleEndian.PutUint64(bytes[:], value)
+	builder.data = append(builder.data, bytes[:]...)
+}
+
+func (builder *goMetadataBuilder) uvarint(value uint32) {
+	for value >= 0x80 {
+		builder.bytes(byte(value) | 0x80)
+		value >>= 7
+	}
+	builder.bytes(byte(value))
+}
+
+func (builder *goMetadataBuilder) reloc32(symbol string) {
+	builder.relocs = append(builder.relocs, obj.Reloc{Offset: builder.position(), Sym: symbol, Type: obj.R_AARCH64_ABS32})
+	builder.u32(0)
+}
+
+func (builder *goMetadataBuilder) pointer(label string) {
+	builder.relocs = append(builder.relocs, obj.Reloc{Offset: builder.position(), Sym: label, Type: obj.R_AARCH64_ABS64})
+	builder.u64(0)
+}
+
+func (builder *goMetadataBuilder) externalPointer(symbol string) {
+	builder.relocs = append(builder.relocs, obj.Reloc{Offset: builder.position(), Sym: symbol, Type: obj.R_AARCH64_ABS64})
+	builder.u64(0)
+}
+
+func (builder *goMetadataBuilder) slice(start, end string) {
+	builder.pointer(start)
+	length := builder.labels[end] - builder.labels[start]
+	builder.u64(length)
+	builder.u64(length)
+}
+
+func (builder *goMetadataBuilder) sliceCount(start string, count int) {
+	builder.pointer(start)
+	builder.u64(uint64(count))
+	builder.u64(uint64(count))
+}
+
+func (builder *goMetadataBuilder) emptySlice() {
+	builder.u64(0)
+	builder.u64(0)
+	builder.u64(0)
+}

@@ -1,5 +1,70 @@
 .text
 
+// These helpers deliberately use the write system call instead of libc. The
+// runtime creates threads with clone before it has any cgo/libc thread state,
+// so calling printf from those threads corrupts libc's internal state.
+.global runtime_gocPrintString
+.type runtime_gocPrintString, %function
+runtime_gocPrintString:
+	mov x2, x1
+	mov x1, x0
+	mov x0, 2
+	mov x8, 64
+	svc 0
+	ret
+
+// runtime_gocPrintInteger formats x0 into a stack buffer. x1 selects signed
+// decimal (0), unsigned decimal (1), or hexadecimal with a 0x prefix (2).
+.global runtime_gocPrintInteger
+.type runtime_gocPrintInteger, %function
+runtime_gocPrintInteger:
+	// Preserve the Go frame-pointer link at -8 of the caller's SP.
+	sub sp, sp, 80
+	add x3, sp, 64
+	mov x4, x0
+	mov x5, x1
+	cmp x5, 2
+	b.eq 4f
+	cmp x5, 0
+	b.ne 1f
+	tbz x4, 63, 1f
+	neg x4, x4
+	mov w6, '-'
+	b 2f
+1:	mov w6, 0
+2:	mov x7, 10
+3:	udiv x9, x4, x7
+	msub x10, x9, x7, x4
+	add w10, w10, '0'
+	strb w10, [x3, -1]!
+	mov x4, x9
+	cbnz x4, 3b
+	cbz w6, 7f
+	strb w6, [x3, -1]!
+	b 7f
+4:	mov x7, 16
+5:	and w10, w4, 15
+	cmp w10, 10
+	b.lo 6f
+	add w10, w10, 'a' - 10
+	b 8f
+6:	add w10, w10, '0'
+8:	strb w10, [x3, -1]!
+	lsr x4, x4, 4
+	cbnz x4, 5b
+	mov w10, 'x'
+	strb w10, [x3, -1]!
+	mov w10, '0'
+	strb w10, [x3, -1]!
+7:	add x2, sp, 64
+	sub x2, x2, x3
+	mov x1, x3
+	mov x0, 2
+	mov x8, 64
+	svc 0
+	add sp, sp, 80
+	ret
+
 .macro load32 name
 .global \name
 .type \name, %function
@@ -243,24 +308,45 @@ branch_alias internal_runtime_atomic_Pointer_spanSetBlock__StoreNoWB, internal_r
 .global runtime_memmove
 .type runtime_memmove, %function
 runtime_memmove:
-	b memmove
+	cmp x0, x1
+	b.lo 1f
+	b.eq 3f
+	add x3, x0, x2
+	add x4, x1, x2
+2:	cbz x2, 3f
+	ldrb w5, [x4, -1]!
+	strb w5, [x3, -1]!
+	sub x2, x2, 1
+	b 2b
+1:	cbz x2, 3f
+	ldrb w5, [x1], 1
+	strb w5, [x0], 1
+	sub x2, x2, 1
+	b 1b
+3:	ret
 
 .global runtime_memclrNoHeapPointers
 .type runtime_memclrNoHeapPointers, %function
 runtime_memclrNoHeapPointers:
-	mov x2, x1
-	mov w1, wzr
-	b memset
+	cbz x1, 2f
+1:	strb wzr, [x0], 1
+	sub x1, x1, 1
+	cbnz x1, 1b
+2:	ret
 
 .global runtime_memequal
 .type runtime_memequal, %function
 runtime_memequal:
-	stp x29, x30, [sp, -16]!
-	mov x29, sp
-	bl memcmp
-	cmp w0, 0
-	cset w0, eq
-	ldp x29, x30, [sp], 16
+	cbz x2, 2f
+1:	ldrb w3, [x0], 1
+	ldrb w4, [x1], 1
+	cmp w3, w4
+	b.ne 3f
+	sub x2, x2, 1
+	cbnz x2, 1b
+2:	mov w0, 1
+	ret
+3:	mov w0, 0
 	ret
 
 .global internal_bytealg_IndexByteString
@@ -393,7 +479,7 @@ runtime_raise:
 .global runtime_usleep
 .type runtime_usleep, %function
 runtime_usleep:
-	sub sp, sp, 16
+	sub sp, sp, 32
 	uxtw x3, w0
 	ldr x4, =1000000
 	udiv x1, x3, x4
@@ -405,7 +491,7 @@ runtime_usleep:
 	mov x1, 0
 	mov x8, 101
 	svc 0
-	add sp, sp, 16
+	add sp, sp, 32
 	ret
 
 .global runtime_sysMmap
@@ -427,7 +513,7 @@ linux_syscall runtime_sysMunmap, 215
 .global runtime_nanotime1
 .type runtime_nanotime1, %function
 runtime_nanotime1:
-	sub sp, sp, 16
+	sub sp, sp, 32
 	mov x0, 1
 	mov x1, sp
 	mov x8, 113
@@ -435,21 +521,21 @@ runtime_nanotime1:
 	ldp x0, x1, [sp]
 	ldr x2, =1000000000
 	madd x0, x0, x2, x1
-	add sp, sp, 16
+	add sp, sp, 32
 	ret
 
 .global runtime_walltime
 .type runtime_walltime, %function
 runtime_walltime:
 	mov x9, x0
-	sub sp, sp, 16
+	sub sp, sp, 32
 	mov x0, 0
 	mov x1, sp
 	mov x8, 113
 	svc 0
 	ldp x0, x1, [sp]
 	str w1, [x9]
-	add sp, sp, 16
+	add sp, sp, 32
 	ret
 
 .global runtime_secretEraseRegisters
@@ -522,17 +608,18 @@ runtime_gogo:
 	mov sp, x9
 	ldr x29, [x0, 40]
 	ldr x30, [x0, 32]
-	ldr x26, [x0, 24]
+	ldr x18, [x0, 24]
 	ldr x9, [x0, 8]
-	stp xzr, xzr, [x0]
-	stp xzr, xzr, [x0, 16]
-	stp xzr, xzr, [x0, 32]
+	str xzr, [x0]
+	str xzr, [x0, 24]
+	str xzr, [x0, 32]
+	str xzr, [x0, 40]
 	br x9
 
 .global runtime_mcall
 .type runtime_mcall, %function
 runtime_mcall:
-	mov x26, x0
+	mov x18, x0
 	mov x9, sp
 	str x9, [x28, 56]
 	str x29, [x28, 96]
@@ -544,14 +631,109 @@ runtime_mcall:
 	ldr x9, [x28, 56]
 	mov sp, x9
 	mov x29, 0
-	ldr x9, [x26]
+	ldr x9, [x18]
 	blr x9
 	brk 0
+
+.global runtime_morestack
+.type runtime_morestack, %function
+runtime_morestack:
+	// Preserve register arguments in a frame that newstack will copy. x15 holds
+	// the interrupted function's caller LR; x30 is the retry PC after BL. The
+	// stack unwinder sees x15 at the frame's LR slot and therefore skips the
+	// interrupted function, whose stack check ran before it allocated a frame.
+	// Execution uses the retry PC kept separately at offset 72.
+	sub sp, sp, 224
+	str x15, [sp, 0]
+	stp x0, x1, [sp, 8]
+	stp x2, x3, [sp, 24]
+	stp x4, x5, [sp, 40]
+	stp x6, x7, [sp, 56]
+	str x30, [sp, 72]
+	str q0, [sp, 80]
+	str q1, [sp, 96]
+	str q2, [sp, 112]
+	str q3, [sp, 128]
+	str q4, [sp, 144]
+	str q5, [sp, 160]
+	str q6, [sp, 176]
+	str q7, [sp, 192]
+	cbz x29, 2f
+	ldr x9, [x29]
+	b 3f
+2:	mov x9, 0
+3:	str x9, [sp, 208]
+	str x18, [sp, 216]
+
+	ldr x8, [x28, 48]
+	mov x9, sp
+	str x9, [x28, 56]
+	adr x10, runtime_morestack_restore
+	str x10, [x28, 64]
+	str x28, [x28, 72]
+	str x18, [x28, 80]
+	str x15, [x28, 88]
+	str x29, [x28, 96]
+
+	ldr x4, [x8]
+	cmp x28, x4
+	b.eq 1f
+	ldr x4, [x8, 72]
+	cmp x28, x4
+	b.eq 1f
+
+	// m.morebuf is the gobuf immediately following m.g0.
+	str x15, [x8, 16]
+	add x10, x9, 224
+	str x10, [x8, 8]
+	str x28, [x8, 24]
+
+	ldr x28, [x8]
+	ldr x9, [x28, 56]
+	mov sp, x9
+	mov x29, 0
+	sub sp, sp, 16
+	str xzr, [sp]
+	bl runtime_newstack
+	brk 0
+1:	brk 0
+
+.global runtime_morestack_restore
+.type runtime_morestack_restore, %function
+runtime_morestack_restore:
+	ldr x16, [sp, 72]
+	ldr x18, [sp, 216]
+	ldr x9, [sp, 208]
+	cbz x29, 2f
+	str x9, [x29]
+2:
+	ldr q0, [sp, 80]
+	ldr q1, [sp, 96]
+	ldr q2, [sp, 112]
+	ldr q3, [sp, 128]
+	ldr q4, [sp, 144]
+	ldr q5, [sp, 160]
+	ldr q6, [sp, 176]
+	ldr q7, [sp, 192]
+	ldp x0, x1, [sp, 8]
+	ldp x2, x3, [sp, 24]
+	ldp x4, x5, [sp, 40]
+	ldp x6, x7, [sp, 56]
+	add sp, sp, 224
+	br x16
+.global runtime_morestack_restore_end
+runtime_morestack_restore_end:
+
+.global runtime_morestack_noctxt
+.type runtime_morestack_noctxt, %function
+runtime_morestack_noctxt:
+	mov x18, 0
+	b runtime_morestack
 
 .global runtime_systemstack
 .type runtime_systemstack, %function
 runtime_systemstack:
-	mov x26, x0
+	mov x18, x0
 	ldr x9, [x28, 48]
 	ldr x10, [x9, 72]
 	cmp x28, x10
@@ -562,28 +744,39 @@ runtime_systemstack:
 	ldr x10, [x9, 184]
 	cmp x28, x10
 	b.ne 3f
+	mov x26, x30
 	mov x11, sp
+	mov x27, sp
 	str x11, [x28, 56]
 	str x29, [x28, 96]
-	str x30, [x28, 64]
+	adr x11, runtime_systemstack_switch
+	add x11, x11, 4
+	str x11, [x28, 64]
+	str x28, [x28, 72]
+	str xzr, [x28, 80]
 	str xzr, [x28, 88]
 	mov x11, x28
 	ldr x28, [x9]
 	ldr x12, [x28, 56]
 	mov sp, x12
-	ldr x12, [x26]
+	ldr x12, [x18]
 	blr x12
 	ldr x9, [x28, 48]
 	ldr x28, [x9, 184]
-	ldr x12, [x28, 56]
-	mov sp, x12
 	ldr x29, [x28, 96]
+	mov sp, x27
 	str xzr, [x28, 56]
 	str xzr, [x28, 96]
+	mov x30, x26
 	ret
-2:	ldr x9, [x26]
+2:	ldr x9, [x18]
 	br x9
 3:	brk 0
+
+.global runtime_systemstack_switch
+.type runtime_systemstack_switch, %function
+runtime_systemstack_switch:
+	ret
 
 .global runtime_mstart
 .type runtime_mstart, %function
@@ -672,8 +865,39 @@ indirect_cgo runtime_callCgoSigaction, _cgo_sigaction
 
 unsupported_async runtime_asyncPreempt
 unsupported_async runtime_cgoSigtramp
-unsupported_async runtime_clone
 unsupported_async runtime_sigtramp
+
+.global runtime_clone
+.type runtime_clone, %function
+runtime_clone:
+	// Keep the new M, G, and entry point on the child stack. The clone
+	// syscall returns with SP set to x1 in the child, where argument
+	// registers are otherwise not useful as persistent storage.
+	str x2, [x1, -8]
+	str x3, [x1, -16]
+	str x4, [x1, -24]
+	mov x5, 1234
+	str x5, [x1, -32]
+	mov x8, 220
+	svc 0
+	cbz x0, 1f
+	ret
+1:	ldr x5, [sp, -32]
+	mov x6, 1234
+	cmp x5, x6
+	b.ne 3f
+	ldr x12, [sp, -24]
+	ldr x28, [sp, -16]
+	ldr x10, [sp, -8]
+	cbz x10, 2f
+	cbz x28, 2f
+	str x10, [x28, 48]
+2:	blr x12
+	mov x0, 111
+	mov x8, 93
+	svc 0
+3:	mov x0, 0
+	str xzr, [x0]
 
 .data
 .balign 8

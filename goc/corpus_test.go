@@ -45,6 +45,14 @@ func TestExecutionCorpus(t *testing.T) {
 			x += x >> 32
 			return int(x) & 127
 		}; func Test() int { return onesCount64(0x7f) + 10*onesCount64(^uint64(0)) }`, 647},
+		{"stdlib bit length table", `const lengths = "\x00\x01\x02\x02\x03\x03\x03\x03\x04\x04\x04\x04\x04\x04\x04\x04"
+			func bitLength(x uint64) (n int) {
+				if x >= 1<<32 { x >>= 32; n = 32 }
+				if x >= 1<<16 { x >>= 16; n += 16 }
+				if x >= 1<<8 { x >>= 8; n += 8 }
+				return n + int(lengths[uint8(x)])
+			}
+			func Test() int { return bitLength(0x0fffffffffffffff) + bitLength(0xf) + bitLength(0) }`, 64},
 		{"runtime bit range search", `func trailingZeros64(x uint64) int {
 			if x == 0 { return 64 }
 			n := 0
@@ -64,6 +72,94 @@ func TestExecutionCorpus(t *testing.T) {
 		}; func Test() int {
 			return int(findBitRange64(0x78, 3))*100 + int(findBitRange64(0x8000000007ffffff, 4))*10 + int(findBitRange64(0x00f0f000, 5))
 		}`, 364},
+		{"runtime page bitmap ranges", `type pageBits [8]uint64
+			func (b *pageBits) setRange(i, n uint) {
+				j := i + n - 1
+				if i/64 == j/64 {
+					b[i/64] |= ((uint64(1) << n) - 1) << (i % 64)
+					return
+				}
+				b[i/64] |= ^uint64(0) << (i % 64)
+				for k := i/64 + 1; k < j/64; k++ { b[k] = ^uint64(0) }
+				b[j/64] |= (uint64(1) << (j%64 + 1)) - 1
+			}
+			func (b *pageBits) clearRange(i, n uint) {
+				j := i + n - 1
+				if i/64 == j/64 {
+					b[i/64] &^= ((uint64(1) << n) - 1) << (i % 64)
+					return
+				}
+				b[i/64] &^= ^uint64(0) << (i % 64)
+				clear(b[i/64+1:j/64])
+				b[j/64] &^= (uint64(1) << (j%64 + 1)) - 1
+			}
+			func Test() int {
+				var bits pageBits
+				bits.setRange(0, 512)
+				bits.clearRange(9, 7)
+				score := 0
+				for i, word := range bits {
+					if i == 0 {
+						if word == 0xffffffffffff01ff { score++ }
+					} else if word == ^uint64(0) { score++ }
+				}
+				return score
+			}`, 8},
+		{"runtime nested scavenged bitmap", `type pageBits [8]uint64
+			type pageData struct { allocated pageBits; scavenged pageBits }
+			func (b *pageBits) setRange(i, n uint) {
+				j := i + n - 1
+				b[i/64] |= ^uint64(0) << (i % 64)
+				for k := i/64 + 1; k < j/64; k++ { b[k] = ^uint64(0) }
+				b[j/64] |= (uint64(1) << (j%64 + 1)) - 1
+			}
+			func fill(data *pageData) { data.scavenged.setRange(0, 512) }
+			func Test() int {
+				var data pageData
+				fill(&data)
+				score := 0
+				for _, word := range data.scavenged { if word == ^uint64(0) { score++ } }
+				return score
+			}`, 8},
+		{"runtime page bitmap population range", `type pageBits [8]uint64
+			func ones(x uint64) uint {
+				var count uint
+				for x != 0 { x &= x - 1; count++ }
+				return count
+			}
+			func (b *pageBits) popcntRange(i, n uint) uint {
+				j := i + n - 1
+				if i/64 == j/64 {
+					return ones((b[i/64] >> (i % 64)) & ((1 << n) - 1))
+				}
+				return 0
+			}
+			func Test() int {
+				bits := pageBits{^uint64(0), ^uint64(0), ^uint64(0), ^uint64(0), ^uint64(0), ^uint64(0), ^uint64(0), ^uint64(0)}
+				return int(bits.popcntRange(376, 7))
+			}`, 7},
+		{"returned three-word runtime cache", `type cache struct { base, free, scav uint64 }
+			func acquire() cache { return cache{base: 11, free: 22, scav: 33} }
+			func fill(c *cache) { *c = acquire() }
+			func Test() int { var c cache; fill(&c); return int(c.base + c.free + c.scav) }`, 66},
+		{"runtime page cache scavenged result", `type pageCache struct { base uintptr; cache, scav uint64 }
+			func acquire() pageCache { return pageCache{base: 0x100000, cache: ^uint64(0), scav: ^uint64(0)} }
+			func (c *pageCache) alloc(npages uintptr) (uintptr, uintptr) {
+				mask := (uint64(1) << npages) - 1
+				scav := uint64(0)
+				for bits := c.scav & mask; bits != 0; bits &= bits - 1 { scav++ }
+				c.cache &^= mask
+				c.scav &^= mask
+				return c.base, uintptr(scav) * 8192
+			}
+			func Test() int {
+				var cache pageCache
+				cache = acquire()
+				base, scavenged := cache.alloc(7)
+				if base != 0x100000 || scavenged != 7*8192 { return 0 }
+				if cache.cache != 0xffffffffffffff80 || cache.scav != 0xffffffffffffff80 { return 0 }
+				return 42
+			}`, 42},
 		{"clear pointer array subslice", `func clearMiddle(values *[8]uint64) { clear(values[1:7]) }; func Test() int {
 			values := [8]uint64{1, 2, 4, 8, 16, 32, 64, 128}
 			clearMiddle(&values)
@@ -90,6 +186,8 @@ func TestExecutionCorpus(t *testing.T) {
 		{"reslice preserves capacity", `func Test() int { values := []int{2, 3, 5}; values = values[:1]; return len(values)*10 + cap(values) }`, 13},
 		{"slice assignment copies header", `func Test() int { values := []int{2, 3, 5}; old := values; values = values[:1]; return len(old)*10 + len(values) }`, 31},
 		{"assign nil slice", `func Test() int { values := []int{2, 3, 5}; values = nil; return len(values)*10 + cap(values) }`, 0},
+		{"compare nil slice", `func Test() int { var values []int; if values == nil { return 42 }; return 0 }`, 42},
+		{"compare nil slice struct field", `type holder struct { values []int }; func Test() int { var value holder; if value.values == nil { return 42 }; return 0 }`, 42},
 		{"pointer array struct field", `type pair struct { left, right int }; func Test() int { var values [2]pair; values[1].left = 7; values[1].right = 11; pointer := &values; return pointer[1].left*10 + pointer[1].right }`, 81},
 		{"range array of structs", `type pair struct { left, right int }; func Test() int { var values [2]pair; values[0].left = 3; values[0].right = 5; values[1].left = 7; values[1].right = 11; total := 0; for _, value := range values { total += value.left + value.right }; return total }`, 26},
 		{"returned array survives callee frame", `func makeValues() [3]int { return [3]int{7, 11, 13} }; func disturb() int { values := [3]int{100, 200, 300}; return values[0] }; func Test() int { values := makeValues(); disturb(); return values[0] + values[1] + values[2] }`, 31},
@@ -127,7 +225,13 @@ func TestAdvancedExecutionCorpus(t *testing.T) {
 		{"global zero slice", `var values []int; func Test() int { return len(values)*10 + cap(values) }`, 0},
 		{"global slice backing survives callee", `var values []int; func set(){ values = []int{7, 11, 13} }; func disturb(){ temporary := [4]int{100, 200, 300, 400}; _ = temporary }; func Test() int { set(); disturb(); return values[0] + values[1] + values[2] }`, 31},
 		{"forward multiple results", `func pair() (int, int) { return 17, 25 }; func forward() (int, int) { return pair() }; func Test() int { left, right := forward(); return left + right }`, 42},
+		{"multiple aggregate results", `type pair struct { left, right int }; func values() (pair, pair) { return pair{17, 25}, pair{5, 7} }; func Test() int { first, second := values(); return first.left + first.right + second.left - second.right + 2 }`, 42},
+		{"named aggregate results", `type pair struct { left, right int }; func values() (first pair, second pair) { first = pair{17, 25}; second = pair{5, 7}; return }; func Test() int { first, second := values(); return first.left + first.right + second.left - second.right + 2 }`, 42},
+		{"slice first multi result", `func step(values []byte) ([]byte, bool) { return values[1:], true }; func Test() int { values, ok := step([]byte{7, 11, 13}); values, ok = step(values); if !ok { return 0 }; return len(values)*10 + int(values[0]) }`, 23},
+		{"slice multi result loop", `func step(values []byte) ([]byte, bool) { if len(values) == 1 { return nil, false }; return values[1:], true }; func Test() int { values := []byte{7, 11, 13}; count := 0; for { var ok bool; values, ok = step(values); if !ok { break }; count++ }; return count * 10 }`, 20},
+		{"nil aggregate result", `func value() (int, error) { return 42, nil }; func Test() int { result, err := value(); if err != nil { return 0 }; return result }`, 42},
 		{"implicit pointer method receiver", `type counter int; func (value *counter) add(amount int) { *value += counter(amount) }; func Test() int { var value counter = 17; value.add(25); return int(value) }`, 42},
+		{"promoted field through embedded pointer", `type inner struct { value int }; type outer struct { *inner }; func Test() int { value := outer{inner: &inner{value: 42}}; return value.value }`, 42},
 		{"global elided pointer struct slice", `type item struct { value int }; var items = []*item{{value: 17}, {value: 25}}; func Test() int { return items[0].value + items[1].value }`, 42},
 		{"global concrete error interface", `type textError string; func (value textError) Error() string { return string(value) }; var failure error = textError("bad"); func Test() int { if failure != nil { return 42 }; return 0 }`, 42},
 		{"concrete interface assertion", `type item struct { value int }; func Test() int { var value any = &item{value: 42}; return value.(*item).value }`, 42},

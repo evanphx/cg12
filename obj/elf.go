@@ -16,6 +16,7 @@ const (
 // A few AArch64 relocation types the backend needs.
 const (
 	R_AARCH64_ABS64            = 257 // 64-bit absolute address
+	R_AARCH64_ABS32            = 258 // 32-bit absolute address
 	R_AARCH64_CALL26           = 283 // bl to a 26-bit PC-relative target
 	R_AARCH64_JUMP26           = 282 // b to a 26-bit PC-relative target
 	R_AARCH64_ADR_PREL_LO21    = 274 // adr: 21-bit PC-relative address of a symbol

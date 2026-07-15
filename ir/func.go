@@ -116,6 +116,12 @@ type Func struct {
 	Retty    Cls      // return class when HasRet and RetAgg == nil
 	RetAgg   *AggType // non-nil when returning an aggregate by value
 	Variadic bool     // accepts variadic arguments (a trailing "..." in the IL)
+	GoABI    bool     // use the Go runtime's platform frame convention
+
+	// StackPointerWords records pointer-bearing words within OAlloc results.
+	// The outer key is the allocation result temporary ID; inner keys are byte
+	// offsets from that allocation.
+	StackPointerWords map[uint32]map[int]bool
 
 	// ForceInline is set when the source marked the function
 	// __attribute__((always_inline)) -- the inliner then inlines every call to it
