@@ -7,11 +7,12 @@ import (
 	"github.com/evanphx/cg12/ir"
 )
 
-// asmVal is a resolved inline-asm operand: either an immediate literal or a
-// register (named at its natural width, or forced by a %w/%x modifier).
+// asmVal is a resolved inline-asm operand: an immediate literal, a memory
+// reference, or a register (named at its natural width, or forced by a %w/%x
+// modifier).
 type asmVal struct {
-	imm   bool
-	immS  string // preformatted immediate, e.g. "#5"
+	lit   bool   // imm or mem: substitute litS verbatim, ignoring any width modifier
+	litS  string // preformatted immediate ("#5") or memory reference ("[x9]")
 	reg   Reg
 	width int
 }
@@ -28,7 +29,7 @@ type asmVal struct {
 // a callee-saved register and the template may freely use the caller-saved set.
 func (e *emitter) emitAsm(in *ir.Instr) {
 	asm := in.Asm
-	vals := make([]asmVal, asm.NumOut+len(in.Args))
+	vals := make([]asmVal, len(asm.Ops))
 	scratchN := 0
 	nextScratch := func() Reg {
 		if scratchN >= len(intScratchRegs) {
@@ -40,31 +41,38 @@ func (e *emitter) emitAsm(in *ir.Instr) {
 		return r
 	}
 
-	// The output operands are %0, %1, ... -- the To (first) then the Defs.
+	// Walk the operands in %N order, drawing register outputs from To/Defs and
+	// every other operand's value from Args in order.
+	outs := in.AsmRegOuts()
+	oc, ac := 0, 0 // cursors into outs and in.Args
 	var finals []func()
-	for oi, oref := range in.AsmOutputs() {
-		t := e.f.Temps[oref.ID]
-		w := e.f.ClassOf(oref).Size()
-		if t.Reg != ir.NoReg {
-			vals[oi] = asmVal{reg: Reg(t.Reg), width: w}
-		} else {
-			r := nextScratch()
-			vals[oi] = asmVal{reg: r, width: w}
-			slot := e.spillBase + t.Slot
-			finals = append(finals, func() { e.line("str %s, [x29, #%d]", r.Name(w), slot) })
+	for i, kind := range asm.Ops {
+		switch kind {
+		case ir.AsmRegOut:
+			oref := outs[oc]
+			oc++
+			t := e.f.Temps[oref.ID]
+			w := e.f.ClassOf(oref).Size()
+			if t.Reg != ir.NoReg {
+				vals[i] = asmVal{reg: Reg(t.Reg), width: w}
+			} else {
+				r := nextScratch()
+				vals[i] = asmVal{reg: r, width: w}
+				slot := e.spillBase + t.Slot
+				finals = append(finals, func() { e.line("str %s, [x29, #%d]", r.Name(w), slot) })
+			}
+		case ir.AsmImm:
+			vals[i] = asmVal{lit: true, litS: fmt.Sprintf("#%d", e.f.Consts[in.Args[ac].ID].Int)}
+			ac++
+		case ir.AsmMem:
+			r, _ := e.asmInputReg(in.Args[ac], nextScratch) // the operand's address
+			vals[i] = asmVal{lit: true, litS: fmt.Sprintf("[%s]", r.xName())}
+			ac++
+		default: // AsmRegIn
+			r, w := e.asmInputReg(in.Args[ac], nextScratch)
+			vals[i] = asmVal{reg: r, width: w}
+			ac++
 		}
-	}
-
-	// The remaining operands are the inputs.
-	idx := asm.NumOut
-	for k, a := range in.Args {
-		if asm.InputImm(k) {
-			vals[idx] = asmVal{imm: true, immS: fmt.Sprintf("#%d", e.f.Consts[a.ID].Int)}
-		} else {
-			r, w := e.asmInputReg(a, nextScratch)
-			vals[idx] = asmVal{reg: r, width: w}
-		}
-		idx++
 	}
 
 	text, err := expandAsm(asm.Template, vals)
@@ -154,8 +162,8 @@ func expandAsm(tmpl string, vals []asmVal) (string, error) {
 		}
 		v := vals[num]
 		switch {
-		case v.imm:
-			sb.WriteString(v.immS)
+		case v.lit:
+			sb.WriteString(v.litS)
 		case mod == 'w':
 			sb.WriteString(v.reg.wName())
 		case mod == 'x':

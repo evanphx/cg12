@@ -377,23 +377,35 @@ func (b *Block) Call(retCls Cls, callee Ref, args ...Ref) Ref {
 	return res
 }
 
-// Asm emits an inline-assembly statement (OAsm) with the given template. ins are
-// the input operands and outCls gives the class of each output operand (zero or
-// more). A fresh result temporary is allocated for each output and they are
-// returned in order: the first is the instruction's To, the rest are Defs.
-// Operands are numbered output-first for the template's %N placeholders.
-func (b *Block) Asm(template string, outCls []Cls, ins []Ref, imm []bool) []Ref {
-	in := Instr{Op: OAsm, Args: append([]Ref(nil), ins...), Pos: b.curPos,
-		Asm: &AsmOp{Template: template, NumOut: len(outCls), Imm: imm}}
-	outs := make([]Ref, len(outCls))
-	for i, cls := range outCls {
-		t := b.fn.newTemp("", cls)
-		outs[i] = t
-		if i == 0 {
-			in.Cls = cls
-			in.To = t
+// AsmSpec describes one inline-asm operand for the Asm builder. For an AsmRegOut
+// operand Cls is the result class; for every other kind Ref is the operand's
+// value (a register input's value, an immediate's constant, or a memory
+// operand's address).
+type AsmSpec struct {
+	Kind AsmOperandKind
+	Cls  Cls
+	Ref  Ref
+}
+
+// Asm emits an inline-assembly statement (OAsm) from operand specs in %N order.
+// A fresh result temporary is allocated for each register-output operand; those
+// temporaries are returned in order (the first becomes To, the rest Defs).
+func (b *Block) Asm(template string, specs []AsmSpec) []Ref {
+	in := Instr{Op: OAsm, Pos: b.curPos, Asm: &AsmOp{Template: template}}
+	var outs []Ref
+	for _, s := range specs {
+		in.Asm.Ops = append(in.Asm.Ops, s.Kind)
+		if s.Kind == AsmRegOut {
+			t := b.fn.newTemp("", s.Cls)
+			outs = append(outs, t)
+			if in.To.Kind != RefTemp {
+				in.Cls = s.Cls
+				in.To = t
+			} else {
+				in.Defs = append(in.Defs, t)
+			}
 		} else {
-			in.Defs = append(in.Defs, t)
+			in.Args = append(in.Args, s.Ref)
 		}
 	}
 	b.Instrs = append(b.Instrs, in)

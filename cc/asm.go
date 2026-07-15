@@ -51,10 +51,10 @@ func asmStringLit(e cc.ExpressionNode) (string, bool) {
 
 // genAsm lowers an inline-assembly statement to an OAsm instruction, which a
 // backend emitting assembly text passes through (substituting the %N operand
-// placeholders with the registers the allocator assigns). Operand binding is
-// limited to register constraints -- "=r" outputs (one or more) and "r" inputs
-// -- and "i" immediate inputs; any other constraint fails loudly rather than
-// miscompiling.
+// placeholders with the registers the allocator assigns). Supported operands are
+// register outputs ("=r"/"=&r"), register inputs ("r"), immediate inputs ("i"),
+// and memory operands ("m"/"=m", substituted as a reference through the operand's
+// address); any other constraint fails loudly rather than miscompiling.
 func (g *gen) genAsm(as *cc.AsmStatement) {
 	if as == nil || as.Asm == nil {
 		return
@@ -71,34 +71,33 @@ func (g *gen) genAsm(as *cc.AsmStatement) {
 		return
 	}
 
-	outs, ins, imm, ok := g.asmCollect(a)
+	specs, outLvals, ok := g.asmCollect(a)
 	if !ok {
 		return // asmCollect already recorded the failure
 	}
-	outCls := make([]ir.Cls, len(outs))
-	for i, o := range outs {
-		outCls[i] = clsOf(o.typ)
-	}
-	res := g.cur.Asm(tmpl, outCls, ins, imm)
-	for i, o := range outs {
-		g.storeVal(o.addr, res[i], o.typ)
+	res := g.cur.Asm(tmpl, specs)
+	// res holds the register-output temporaries in order; store each back to its
+	// lvalue. Memory outputs ("=m") are written by the asm directly.
+	for i, lv := range outLvals {
+		g.storeVal(lv.addr, res[i], lv.typ)
 	}
 }
 
-// asmOut is a resolved output operand: the address to store the asm's result to
+// asmOut is a register-output lvalue: the address to store the asm's result to
 // and the C type of that lvalue.
 type asmOut struct {
 	addr ir.Ref
 	typ  cc.Type
 }
 
-// asmCollect gathers an inline-asm statement's output and input operands. Group 0
-// (the first `:`) is outputs, group 1 is inputs, and later groups are clobbers
-// (bare strings, which carry no operand). Outputs must be "=r"; inputs may be "r"
-// (a register) or "i" (a constant, substituted as an immediate); other
-// constraints fail loudly. The returned imm slice is parallel to ins: imm[k] is
-// true when input k is an immediate.
-func (g *gen) asmCollect(a *cc.Asm) (outs []asmOut, ins []ir.Ref, imm []bool, ok bool) {
+// asmCollect gathers an inline-asm statement's operands into specs in %N order.
+// Group 0 (the first `:`) is outputs, group 1 is inputs, and later groups are
+// clobbers (bare strings, which carry no operand). Outputs may be "=r"/"=&r" (a
+// register) or "=m" (memory); inputs may be "r" (a register), "i" (a constant
+// immediate), or "m" (memory). outLvals, parallel to the register-output specs,
+// records where to store each register result back. Unsupported constraints fail
+// loudly.
+func (g *gen) asmCollect(a *cc.Asm) (specs []ir.AsmSpec, outLvals []asmOut, ok bool) {
 	group := 0
 	for al := a.AsmArgList; al != nil; al = al.AsmArgList {
 		for el := al.AsmExpressionList; el != nil; el = el.AsmExpressionList {
@@ -106,38 +105,43 @@ func (g *gen) asmCollect(a *cc.Asm) (outs []asmOut, ins []ir.Ref, imm []bool, ok
 			if !isOp {
 				continue // a clobber string, not an operand
 			}
-			switch group {
-			case 0: // outputs
-				// "=&r" (early clobber) is accepted and treated the same as "=r":
-				// cg12 keeps every asm output distinct from the inputs already.
-				if cons != "=r" && cons != "=&r" {
-					g.fail("cc: unsupported inline-asm output constraint %q (only \"=r\" and \"=&r\" are supported)", cons)
-					return nil, nil, nil, false
-				}
-				addr, typ := g.genAddr(operand)
-				outs = append(outs, asmOut{addr, typ})
-			case 1: // inputs
+			if group == 0 { // outputs
 				switch cons {
-				case "r":
-					ins = append(ins, g.genExpr(operand))
-					imm = append(imm, false)
-				case "i":
-					v, isConst := constInt(operand)
-					if !isConst {
-						g.fail("cc: inline-asm \"i\" operand is not a constant expression")
-						return nil, nil, nil, false
-					}
-					ins = append(ins, g.fn.Long(v))
-					imm = append(imm, true)
+				case "=r", "=&r": // "=&r" (early clobber) is the same here: outputs are always kept distinct
+					addr, typ := g.genAddr(operand)
+					specs = append(specs, ir.AsmSpec{Kind: ir.AsmRegOut, Cls: clsOf(typ)})
+					outLvals = append(outLvals, asmOut{addr, typ})
+				case "=m", "=&m":
+					addr, _ := g.genAddr(operand)
+					specs = append(specs, ir.AsmSpec{Kind: ir.AsmMem, Ref: addr})
 				default:
-					g.fail("cc: unsupported inline-asm input constraint %q (only \"r\" and \"i\" are supported)", cons)
-					return nil, nil, nil, false
+					g.fail("cc: unsupported inline-asm output constraint %q", cons)
+					return nil, nil, false
 				}
+				continue
+			}
+			// inputs
+			switch cons {
+			case "r":
+				specs = append(specs, ir.AsmSpec{Kind: ir.AsmRegIn, Ref: g.genExpr(operand)})
+			case "i":
+				v, isConst := constInt(operand)
+				if !isConst {
+					g.fail("cc: inline-asm \"i\" operand is not a constant expression")
+					return nil, nil, false
+				}
+				specs = append(specs, ir.AsmSpec{Kind: ir.AsmImm, Ref: g.fn.Long(v)})
+			case "m":
+				addr, _ := g.genAddr(operand)
+				specs = append(specs, ir.AsmSpec{Kind: ir.AsmMem, Ref: addr})
+			default:
+				g.fail("cc: unsupported inline-asm input constraint %q", cons)
+				return nil, nil, false
 			}
 		}
 		group++
 	}
-	return outs, ins, imm, true
+	return specs, outLvals, true
 }
 
 // asmTemplate returns the assembler template with its surrounding quotes removed

@@ -36,8 +36,14 @@ int sumdiff(int a, int b){ /* two "=&r" outputs, kept distinct from the inputs *
 	__asm__("add %w0, %w2, %w3\n\tsub %w1, %w2, %w3" : "=&r"(s), "=&r"(d) : "r"(a), "r"(b));
 	return s * 1000 + d;
 }
+int memops(int start){ /* "m" input and "=m" output: read, increment in memory, read */
+	int cell = start, out;
+	__asm__("ldr %w0, %2\n\tadd %w0, %w0, #5\n\tstr %w0, %1" : "=&r"(out), "=m"(cell) : "m"(cell));
+	return cell * 1000 + out; /* cell updated in place, out = start+5 */
+}
 int main(void){
-	printf("%d %ld %ld %d %d\n", add(20, 22), shl(3, 4), keeptest(1000, 50, 8), addimm(23), sumdiff(20, 8));
+	printf("%d %ld %ld %d %d %d\n", add(20, 22), shl(3, 4), keeptest(1000, 50, 8),
+		addimm(23), sumdiff(20, 8), memops(37));
 	return 0;
 }`
 	for _, optimize := range []bool{false, true} {
@@ -53,7 +59,7 @@ int main(void){
 			}
 			out, code := buildAndRun(t, m, "")
 			require.Equal(t, 0, code)
-			require.Equal(t, "42 48 1042 123 28012\n", out) // +, <<, sub+k, +imm, 28*1000+12
+			require.Equal(t, "42 48 1042 123 28012 42042\n", out) // +,<<,sub+k,+imm,28*1000+12,42*1000+42
 		})
 	}
 }

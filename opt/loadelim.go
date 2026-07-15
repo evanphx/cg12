@@ -43,7 +43,7 @@ func LoadElim(f *ir.Func) bool {
 				if lop, ok := canonicalLoadOp(in.Op); ok {
 					avail = avail.record(loc, in.Arg(0), lop)
 				}
-			case in.Op == ir.OCall || in.Op == ir.OBlit || in.Op == ir.OVaStart:
+			case in.Op == ir.OCall || in.Op == ir.OBlit || in.Op == ir.OVaStart || in.Op == ir.OAsm:
 				avail = nil // an unknown memory effect clears everything
 			}
 		}

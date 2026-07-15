@@ -54,32 +54,33 @@ type Instr struct {
 	Asm *AsmOp
 }
 
-// AsmOp describes a GNU inline-assembly statement lowered to an OAsm. The
-// operands are numbered in the GNU order used by the template's %N placeholders:
-// the single output (when NumOut == 1) is %0 and lives in the instruction's To,
-// then the input operands are %NumOut, %NumOut+1, ... in the order of Args.
-type AsmOp struct {
-	Template string // the assembler template, verbatim between the quotes
-	NumOut   int    // number of output operands (0 or 1)
+// AsmOperandKind classifies an inline-asm operand for template substitution.
+type AsmOperandKind uint8
 
-	// Imm, when Imm[k] is true, marks input operand k (Args[k], a constant) as an
-	// immediate: it is substituted into the template as a literal value rather
-	// than placed in a register. A nil or short slice means "not immediate".
-	Imm []bool
+const (
+	AsmRegOut AsmOperandKind = iota // "=r": a register result (in To/Defs)
+	AsmRegIn                        // "r":  a register input (in Args)
+	AsmImm                          // "i":  an immediate constant (in Args)
+	AsmMem                          // "m"/"=m": a memory reference by address (in Args)
+)
+
+// AsmOp describes a GNU inline-assembly statement lowered to an OAsm. Ops lists
+// every operand in the GNU %N order (all outputs, then all inputs). A register
+// output (AsmRegOut) draws its result temporary from To (the first) then Defs;
+// every other operand draws its value from Args in order -- a register input's
+// value, an immediate's constant, or a memory operand's address.
+type AsmOp struct {
+	Template string           // the assembler template, verbatim between the quotes
+	Ops      []AsmOperandKind // operand kinds in %N order
 }
 
-// InputImm reports whether input operand k is an immediate.
-func (a *AsmOp) InputImm(k int) bool { return k < len(a.Imm) && a.Imm[k] }
-
-// AsmOutputs returns an OAsm's output operand refs in %-index order: the To
-// (operand %0) followed by the Defs (the additional outputs).
-func (in *Instr) AsmOutputs() []Ref {
-	if in.Asm == nil || in.Asm.NumOut == 0 {
+// AsmRegOuts returns the register-output result temporaries in %N order (To then
+// Defs).
+func (in *Instr) AsmRegOuts() []Ref {
+	if in.Asm == nil || in.To.Kind != RefTemp {
 		return nil
 	}
-	outs := make([]Ref, 0, in.Asm.NumOut)
-	outs = append(outs, in.To)
-	return append(outs, in.Defs...)
+	return append([]Ref{in.To}, in.Defs...)
 }
 
 // InlineSite describes one level of inlining: a call to Callee at the source
