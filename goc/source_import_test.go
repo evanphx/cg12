@@ -76,7 +76,7 @@ func TestLoadExactStandardRuntimeSource(t *testing.T) {
 	for _, file := range unit.assembly {
 		assembly[filepath.Base(file.path)] = file.source
 	}
-	for _, name := range []string{"atomic_arm64.s", "memclr_arm64.s", "memmove_arm64.s", "preempt_arm64.s", "secret_arm64.s", "tls_arm64.s"} {
+	for _, name := range []string{"atomic_arm64.s", "memclr_arm64.s", "memmove_arm64.s", "preempt_arm64.s", "secret_arm64.s", "sys_linux_arm64.s", "tls_arm64.s"} {
 		got, ok := assembly[name]
 		if !ok {
 			t.Errorf("runtime assembly %s was not retained", name)
@@ -91,6 +91,22 @@ func TestLoadExactStandardRuntimeSource(t *testing.T) {
 			t.Errorf("runtime assembly %s was modified while loading", name)
 		}
 	}
+	for _, file := range unit.assembly {
+		if filepath.Base(file.path) != "tls_arm64.s" {
+			continue
+		}
+		for _, name := range []string{"textflag.h", "go_tls.h", "funcdata.h", "tls_arm64.h"} {
+			want, err := os.ReadFile(filepath.Join(loader.root, "src", "runtime", name))
+			if err != nil {
+				t.Fatal(err)
+			}
+			if file.includes[name] != string(want) {
+				t.Errorf("runtime include %s was not retained unchanged", name)
+			}
+		}
+		return
+	}
+	t.Fatal("runtime tls_arm64.s assembly unit was not retained")
 }
 
 func TestLoadExactStandardBytealgAssembly(t *testing.T) {

@@ -105,7 +105,7 @@ func Test() byte { return sha256.Sum256(nil)[0] }
 		t.Fatal(err)
 	}
 	root := file.Decls[1].(*ast.FuncDecl)
-	reachable := reachableFunctions([]*ast.FuncDecl{root}, info, pkg, loader.units, false, nil, nil)
+	reachable := reachableFunctions([]*ast.FuncDecl{root}, info, pkg, loader.units, false, nil, nil, nil)
 	names := make(map[string]bool)
 	for _, function := range reachable {
 		names[function.pkg.Path()+"."+function.decl.Name.Name] = true

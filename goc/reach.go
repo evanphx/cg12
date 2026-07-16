@@ -86,7 +86,7 @@ func moduleInitDeclarations(rootFiles []*ast.File, rootInfo *types.Info, rootPkg
 // reachableFunctions follows statically named function calls across source
 // units. Calls through interfaces are recorded by their interface method and
 // resolved later by interface lowering.
-func reachableFunctions(roots []*ast.FuncDecl, rootInfo *types.Info, rootPkg *types.Package, units map[string]*sourceUnit, runtimeAllocation bool, initializers []functionDecl, linkNames map[*types.Func]string) []functionDecl {
+func reachableFunctions(roots []*ast.FuncDecl, rootInfo *types.Info, rootPkg *types.Package, units map[string]*sourceUnit, runtimeAllocation bool, initializers []functionDecl, linkNames map[*types.Func]string, assemblyReferences map[string]bool) []functionDecl {
 	declarations := make(map[*types.Func]functionDecl)
 	linkedDeclarations := make(map[string]functionDecl)
 	methods := make(map[string][]functionDecl)
@@ -197,6 +197,11 @@ func reachableFunctions(roots []*ast.FuncDecl, rootInfo *types.Info, rootPkg *ty
 	}
 	for _, root := range roots {
 		queue = append(queue, functionDecl{decl: root, info: rootInfo, pkg: rootPkg})
+	}
+	for symbol, declaration := range linkedDeclarations {
+		if assemblyReferences[assemblySymbolName(symbol)] {
+			queue = append(queue, declaration)
+		}
 	}
 	if runtimeAllocation {
 		runtimeInits, _ := runtimeInitDeclarations(units)
@@ -313,6 +318,18 @@ func reachableFunctions(roots []*ast.FuncDecl, rootInfo *types.Info, rootPkg *ty
 		})
 	}
 	return reachable
+}
+
+func assemblySymbolName(name string) string {
+	var symbol strings.Builder
+	for _, character := range name {
+		if character == '_' || character >= 'A' && character <= 'Z' || character >= 'a' && character <= 'z' || character >= '0' && character <= '9' {
+			symbol.WriteRune(character)
+		} else {
+			symbol.WriteByte('_')
+		}
+	}
+	return symbol.String()
 }
 
 func hasRuntimeMapsLinkName(function *ast.FuncDecl) bool {

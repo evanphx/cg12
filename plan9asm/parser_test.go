@@ -83,6 +83,37 @@ TEXT ·block<ABIInternal>(SB), NOSPLIT, $0
 	assert.Equal(t, "V0.B16", xor.Operands[1].Text)
 }
 
+func TestParseExpandsIncludedObjectAndFunctionMacros(t *testing.T) {
+	file, err := ParseWithOptions(strings.NewReader(`#include "arch.h"
+TEXT ·save(SB), NOSPLIT|NOFRAME, $0
+	SAVE(8*4)
+	READ_TLS
+`), ParseOptions{
+		Defines: map[string]string{"GOOS_linux": "1"},
+		Includes: map[string]string{
+			"arch.h": `#define NOSPLIT 4
+#define NOFRAME 512
+#define OFFSET 8
+#define SAVE(base) MOVD R0, ((base)+OFFSET)(RSP)
+#ifdef GOOS_linux
+#define READ_TLS WORD $0xd53bd040
+#endif
+`,
+		},
+	})
+	require.NoError(t, err)
+	require.Len(t, file.Statements, 3)
+
+	text := file.Statements[0].(*Text)
+	assert.Equal(t, []string{"NOSPLIT", "NOFRAME"}, text.Flags)
+	store := file.Statements[1].(*Instruction)
+	assert.Equal(t, "MOVD", store.Opcode)
+	assert.Equal(t, "((8*4)+8)", store.Operands[1].Offset)
+	word := file.Statements[2].(*Instruction)
+	assert.Equal(t, "WORD", word.Opcode)
+	assert.Equal(t, "0xd53bd040", word.Operands[0].Immediate)
+}
+
 func TestParseSelectsConditionalSource(t *testing.T) {
 	file, err := Parse(strings.NewReader(`#ifndef GOARM64_LSE
 MOVD R0, R1

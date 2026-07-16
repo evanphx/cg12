@@ -250,7 +250,11 @@ func (t *arm64Translator) emitABI0Wrapper(text *Text, layout abi0Layout) (string
 		}
 	}
 	preservedPointers := roundUpInteger(abiAreaEnd, 8)
-	frameSize := roundUpInteger(preservedPointers+extraResults*8+8, 16)
+	framePointerOffset := preservedPointers + extraResults*8
+	// Leave the final stack word unused. Go ARM64 callers keep their saved frame
+	// pointer at SP-8, so placing wrapper state at frameSize-8 would overwrite
+	// the caller's frame chain.
+	frameSize := roundUpInteger(framePointerOffset+16, 16)
 
 	t.output.WriteString("\n.text\n")
 	fmt.Fprintf(&t.output, ".global %s\n", name)
@@ -261,6 +265,10 @@ func (t *arm64Translator) emitABI0Wrapper(text *Text, layout abi0Layout) (string
 	// LR at 0(SP) matches Go's ARM64 frame layout and lets the runtime unwind
 	// through the wrapper while the ABI0 body is active.
 	t.output.WriteString("\tstr x30, [sp]\n")
+	// Plan 9 assembly bodies with local frames establish their own frame pointer.
+	// Preserve the wrapper's caller frame pointer outside the ABI0 argument and
+	// result area so returning through the wrapper restores the Go frame chain.
+	fmt.Fprintf(&t.output, "\tstr x29, [sp, #%d]\n", framePointerOffset)
 	for index, slot := range layout.inputs {
 		if err := emitABI0Store(&t.output, index, 8+slot.offset, slot.width); err != nil {
 			return "", 0, err
@@ -286,6 +294,7 @@ func (t *arm64Translator) emitABI0Wrapper(text *Text, layout abi0Layout) (string
 			return "", 0, err
 		}
 	}
+	fmt.Fprintf(&t.output, "\tldr x29, [sp, #%d]\n", framePointerOffset)
 	t.output.WriteString("\tldr x30, [sp]\n")
 	fmt.Fprintf(&t.output, "\tadd sp, sp, #%d\n", frameSize)
 	t.output.WriteString("\tret\n")

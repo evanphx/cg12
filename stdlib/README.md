@@ -43,8 +43,10 @@ The second ten-package progression is:
 10. `path`
 
 The complete Go 1.26.1 `runtime` source tree is also mirrored here unchanged.
-The cg12 loader build-selects and type-checks it from this repository, and the
-execution corpus lowers `runtime.NumCPU` from that source into a cg12 module.
-Runtime startup, scheduler initialization, heap allocation, and garbage
-collection are separate implementation milestones; until startup exists,
-`NumCPU` observes the zero-initialized `numCPUStartup` global.
+The cg12 loader build-selects and type-checks it from this repository. Normal
+ARM64 executables compile the runtime through cg12, initialize the scheduler,
+allocate traced heap objects, run garbage collection, and execute package init
+tasks. Supported build-selected Plan 9 files, including the unchanged
+`runtime/sys_linux_arm64.s`, are retained with their included headers and
+translated after cg12 IR generation rather than replaced with generated Go or
+handwritten syscall substitutes.

@@ -569,7 +569,7 @@ func TestGoAssemblyFunctionInfoOnlyMarksRealTopFrames(t *testing.T) {
 	functions := goAssemblyFunctionInfo()
 	topFrames := make([]string, 0, 2)
 	var morestackRestore *goFunctionInfo
-	var callCgoMmap *goFunctionInfo
+	var checkASM *goFunctionInfo
 	for _, function := range functions {
 		if function.funcFlag&1 != 0 {
 			topFrames = append(topFrames, function.name)
@@ -578,9 +578,9 @@ func TestGoAssemblyFunctionInfoOnlyMarksRealTopFrames(t *testing.T) {
 			function := function
 			morestackRestore = &function
 		}
-		if function.name == "runtime_callCgoMmap" {
+		if function.name == "runtime_checkASM" {
 			function := function
-			callCgoMmap = &function
+			checkASM = &function
 		}
 	}
 
@@ -591,8 +591,8 @@ func TestGoAssemblyFunctionInfoOnlyMarksRealTopFrames(t *testing.T) {
 	require.NotNil(t, morestackRestore)
 	assert.Equal(t, 560, morestackRestore.frameSize)
 	assert.Equal(t, []int{49, 50, 51, 52, 53, 54, 55, 56, 57, 58, 59, 60, 61, 62, 63, 64, 65, 66}, morestackRestore.pointerWords)
-	require.NotNil(t, callCgoMmap)
-	assert.Equal(t, byte(goFuncFlagAsm), callCgoMmap.funcFlag)
+	require.NotNil(t, checkASM)
+	assert.Equal(t, byte(goFuncFlagAsm), checkASM.funcFlag)
 }
 
 func TestGoRegisterPointerMaskTracksABIRegisters(t *testing.T) {

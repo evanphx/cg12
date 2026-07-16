@@ -376,7 +376,7 @@ func goAssemblyFunctionInfo() []goFunctionInfo {
 		{name: "runtime_asmcgocall", funcID: funcIDAsmCGOCall, funcFlag: goFuncFlagTopFrame | goFuncFlagAsm},
 		// Clear asmcgocall's TopFrame classification for the remaining leaf
 		// helpers and the translated standard-library assembly.
-		{name: "runtime_callCgoMmap", funcFlag: goFuncFlagAsm},
+		{name: "runtime_checkASM", funcFlag: goFuncFlagAsm},
 	}
 }
 

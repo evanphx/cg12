@@ -4,13 +4,106 @@ import (
 	"bufio"
 	"fmt"
 	"io"
+	"sort"
 	"strconv"
 	"strings"
 	"unicode"
 )
 
+// ParseOptions supplies source-level inputs normally provided by the Go
+// assembler's C preprocessor.
+type ParseOptions struct {
+	Defines  map[string]string
+	Includes map[string]string
+}
+
 // Parse reads one Plan 9 assembly source file into a syntax tree.
 func Parse(reader io.Reader) (*File, error) {
+	return ParseWithOptions(reader, ParseOptions{})
+}
+
+// ParseWithOptions reads Plan 9 assembly after resolving the supplied include
+// files and preprocessor definitions.
+func ParseWithOptions(reader io.Reader, options ParseOptions) (*File, error) {
+	source, err := io.ReadAll(reader)
+	if err != nil {
+		return nil, err
+	}
+	expanded, err := expandAssemblyIncludes(string(source), options.Includes, make(map[string]bool))
+	if err != nil {
+		return nil, err
+	}
+
+	var preprocessed strings.Builder
+	names := make([]string, 0, len(options.Defines))
+	for name := range options.Defines {
+		names = append(names, name)
+	}
+	sort.Strings(names)
+	for _, name := range names {
+		if !isIdentifier(name) {
+			return nil, fmt.Errorf("plan9asm: invalid preprocessor definition %q", name)
+		}
+		value := options.Defines[name]
+		if value == "" {
+			value = "1"
+		}
+		fmt.Fprintf(&preprocessed, "#define %s %s\n", name, value)
+	}
+	preprocessed.WriteString(expanded)
+	return parsePreprocessed(strings.NewReader(preprocessed.String()))
+}
+
+func expandAssemblyIncludes(source string, includes map[string]string, loading map[string]bool) (string, error) {
+	var output strings.Builder
+	scanner := bufio.NewScanner(strings.NewReader(source))
+	for scanner.Scan() {
+		line := scanner.Text()
+		name, ok := parseIncludeName(line)
+		content, found := includes[name]
+		if !ok || !found {
+			output.WriteString(line)
+			output.WriteByte('\n')
+			continue
+		}
+		if loading[name] {
+			return "", fmt.Errorf("plan9asm: recursive include %q", name)
+		}
+		loading[name] = true
+		expanded, err := expandAssemblyIncludes(content, includes, loading)
+		delete(loading, name)
+		if err != nil {
+			return "", err
+		}
+		output.WriteString(expanded)
+		if !strings.HasSuffix(expanded, "\n") {
+			output.WriteByte('\n')
+		}
+	}
+	if err := scanner.Err(); err != nil {
+		return "", err
+	}
+	return output.String(), nil
+}
+
+func parseIncludeName(source string) (string, bool) {
+	source = strings.TrimSpace(source)
+	const prefix = "#include"
+	if !strings.HasPrefix(source, prefix) {
+		return "", false
+	}
+	source = strings.TrimSpace(strings.TrimPrefix(source, prefix))
+	if len(source) < 2 || source[0] != '"' {
+		return "", false
+	}
+	end := strings.IndexByte(source[1:], '"')
+	if end < 0 {
+		return "", false
+	}
+	return source[1 : end+1], true
+}
+
+func parsePreprocessed(reader io.Reader) (*File, error) {
 	file := &File{}
 	scanner := bufio.NewScanner(reader)
 	macros := make(map[string]sourceMacro)
@@ -140,30 +233,40 @@ type sourceMacro struct {
 	name       string
 	parameters []string
 	body       string
+	function   bool
 }
 
 func parseSourceMacro(source string) (sourceMacro, bool, error) {
 	source = strings.TrimSpace(source)
-	const prefix = "#define "
-	if !strings.HasPrefix(source, prefix) {
+	const prefix = "#define"
+	if !strings.HasPrefix(source, prefix) || len(source) > len(prefix) && !unicode.IsSpace(rune(source[len(prefix)])) {
 		return sourceMacro{}, false, nil
 	}
-	source = strings.TrimSpace(strings.TrimPrefix(source, prefix))
-	open := strings.IndexByte(source, '(')
-	if open <= 0 {
-		return sourceMacro{}, false, nil
+	source = strings.TrimSpace(source[len(prefix):])
+	nameEnd := 0
+	for nameEnd < len(source) && isIdentifierByte(source[nameEnd], nameEnd == 0) {
+		nameEnd++
 	}
-	close := strings.IndexByte(source[open+1:], ')')
-	if close < 0 {
-		return sourceMacro{}, false, fmt.Errorf("unterminated macro parameter list")
-	}
-	close += open + 1
-	name := strings.TrimSpace(source[:open])
+	name := source[:nameEnd]
 	if !isIdentifier(name) {
 		return sourceMacro{}, false, fmt.Errorf("invalid macro name %q", name)
 	}
+	remainder := source[nameEnd:]
+	if !strings.HasPrefix(remainder, "(") {
+		body := strings.TrimSpace(remainder)
+		if body == "" {
+			body = "1"
+		}
+		return sourceMacro{name: name, body: body}, true, nil
+	}
 
-	parameterSource := strings.TrimSpace(source[open+1 : close])
+	close := strings.IndexByte(remainder[1:], ')')
+	if close < 0 {
+		return sourceMacro{}, false, fmt.Errorf("unterminated macro parameter list")
+	}
+	close++
+
+	parameterSource := strings.TrimSpace(remainder[1:close])
 	var parameters []string
 	if parameterSource != "" {
 		for _, parameter := range strings.Split(parameterSource, ",") {
@@ -174,18 +277,19 @@ func parseSourceMacro(source string) (sourceMacro, bool, error) {
 			parameters = append(parameters, parameter)
 		}
 	}
-	body := strings.ReplaceAll(source[close+1:], "\n", "; ")
-	return sourceMacro{name: name, parameters: parameters, body: strings.TrimSpace(body)}, true, nil
+	body := strings.ReplaceAll(remainder[close+1:], "\n", "; ")
+	return sourceMacro{name: name, parameters: parameters, body: strings.TrimSpace(body), function: true}, true, nil
 }
 
 func expandSourceMacro(source string, macros map[string]sourceMacro) (string, error) {
+	source = expandObjectMacros(source, macros)
 	trimmed := strings.TrimSpace(source)
 	open := strings.IndexByte(trimmed, '(')
 	if open <= 0 || !strings.HasSuffix(trimmed, ")") {
 		return source, nil
 	}
 	macro, ok := macros[strings.TrimSpace(trimmed[:open])]
-	if !ok {
+	if !ok || !macro.function {
 		return source, nil
 	}
 	arguments, err := splitCommaSeparated(trimmed[open+1 : len(trimmed)-1])
@@ -219,7 +323,65 @@ func expandSourceMacro(source string, macros map[string]sourceMacro) (string, er
 		}
 		index = end
 	}
-	return expanded.String(), nil
+	return expandObjectMacros(expanded.String(), macros), nil
+}
+
+func expandObjectMacros(source string, macros map[string]sourceMacro) string {
+	for range 64 {
+		expanded, changed := expandObjectMacrosOnce(source, macros)
+		source = expanded
+		if !changed {
+			break
+		}
+	}
+	return source
+}
+
+func expandObjectMacrosOnce(source string, macros map[string]sourceMacro) (string, bool) {
+	var expanded strings.Builder
+	changed := false
+	quote := byte(0)
+	escaped := false
+	for index := 0; index < len(source); {
+		value := source[index]
+		if quote != 0 {
+			expanded.WriteByte(value)
+			index++
+			if escaped {
+				escaped = false
+			} else if value == '\\' {
+				escaped = true
+			} else if value == quote {
+				quote = 0
+			}
+			continue
+		}
+		if value == '"' || value == '\'' {
+			quote = value
+			expanded.WriteByte(value)
+			index++
+			continue
+		}
+		if !isIdentifierByte(value, true) {
+			expanded.WriteByte(value)
+			index++
+			continue
+		}
+		end := index + 1
+		for end < len(source) && isIdentifierByte(source[end], false) {
+			end++
+		}
+		identifier := source[index:end]
+		macro, ok := macros[identifier]
+		if ok && !macro.function {
+			expanded.WriteString(macro.body)
+			changed = true
+		} else {
+			expanded.WriteString(identifier)
+		}
+		index = end
+	}
+	return expanded.String(), changed
 }
 
 func isIdentifier(source string) bool {
@@ -300,13 +462,34 @@ func parseText(position statementPosition, operands []Operand, line int) (Statem
 	text.Frame, text.Args = splitFrame(frameOperand.Immediate)
 	if len(operands) == 3 {
 		for _, flag := range strings.Split(operands[1].Text, "|") {
-			flag = strings.TrimSpace(flag)
+			flag = canonicalPlan9Flag(strings.TrimSpace(flag))
 			if flag != "" {
 				text.Flags = append(text.Flags, flag)
 			}
 		}
 	}
 	return text, nil
+}
+
+func canonicalPlan9Flag(flag string) string {
+	flags := map[string]string{
+		"1":    "NOPROF",
+		"2":    "DUPOK",
+		"4":    "NOSPLIT",
+		"8":    "RODATA",
+		"16":   "NOPTR",
+		"32":   "WRAPPER",
+		"64":   "NEEDCTXT",
+		"256":  "TLSBSS",
+		"512":  "NOFRAME",
+		"1024": "REFLECTMETHOD",
+		"2048": "TOPFRAME",
+		"4096": "ABIWRAPPER",
+	}
+	if name := flags[flag]; name != "" {
+		return name
+	}
+	return flag
 }
 
 func parseOperands(source string) ([]Operand, error) {
@@ -638,7 +821,7 @@ func isDirective(name string) bool {
 
 func isRegister(source string) bool {
 	source = strings.ToUpper(strings.TrimSpace(source))
-	if source == "ZR" || source == "RSP" || source == "LR" || source == "FP" || source == "SP" || source == "SB" || source == "G" || source == "NZCV" || source == "FPSR" {
+	if source == "ZR" || source == "RSP" || source == "LR" || source == "FP" || source == "SP" || source == "SB" || source == "PC" || source == "G" || source == "NZCV" || source == "FPSR" {
 		return true
 	}
 	if len(source) < 2 {

@@ -12,16 +12,10 @@ import (
 	"github.com/evanphx/cg12/plan9asm"
 )
 
-func TestARM64RuntimeExitTerminatesTheProcess(t *testing.T) {
-	if !strings.Contains(runtimeARM64Assembly, "runtime_exit:\n\tmov x8, 94") {
-		t.Fatal("runtime_exit must use Linux exit_group")
-	}
-	if !strings.Contains(runtimeARM64Assembly, "runtime_exitThread:\n\tstlr wzr, [x0]\n\tmov x0, 0\n\tmov x8, 93") {
-		t.Fatal("runtime_exitThread must use Linux thread exit")
-	}
-}
-
 func TestRuntimeSupportDoesNotShadowTranslatedStandardLibraryAssembly(t *testing.T) {
+	if !plan9asm.SupportsARM64File("runtime", "sys_linux_arm64.s") {
+		t.Fatal("runtime/sys_linux_arm64.s is not enabled for Plan 9 translation")
+	}
 	for _, symbol := range []string{
 		"internal_bytealg_Compare",
 		"internal_bytealg_Count",
@@ -48,10 +42,44 @@ func TestRuntimeSupportDoesNotShadowTranslatedStandardLibraryAssembly(t *testing
 		"runtime_load_g",
 		"runtime_save_g",
 		"runtime_secretEraseRegisters",
+		"runtime_exit",
+		"runtime_exitThread",
+		"runtime_open",
+		"runtime_closefd",
+		"runtime_read",
+		"runtime_write1",
+		"runtime_pipe2",
+		"runtime_usleep",
+		"runtime_gettid",
+		"runtime_raise",
+		"runtime_raiseproc",
+		"runtime_sched_getaffinity",
+		"runtime_osyield",
+		"runtime_futex",
+		"runtime_clone",
+		"runtime_sigaltstack",
+		"runtime_mincore",
+		"runtime_rtsigprocmask",
+		"runtime_rt_sigaction",
+		"runtime_callCgoSigaction",
+		"runtime_sigfwd",
+		"runtime_sigtramp",
+		"runtime_cgoSigtramp",
+		"runtime_sysMmap",
+		"runtime_callCgoMmap",
+		"runtime_sysMunmap",
+		"runtime_callCgoMunmap",
+		"runtime_madvise",
+		"runtime_walltime",
+		"runtime_nanotime1",
+		"runtime_timer_create",
+		"runtime_timer_settime",
+		"runtime_timer_delete",
+		"runtime_vgetrandom1",
 		"syscall_rawSyscallNoError",
 		"syscall_rawVforkSyscall",
 	} {
-		if strings.Contains(runtimeARM64Assembly, ".global "+symbol) {
+		if strings.Contains(runtimeARM64Assembly, ".global "+symbol+"\n") {
 			t.Errorf("handwritten runtime support still defines %s", symbol)
 		}
 	}
@@ -230,6 +258,7 @@ func TestARM64StandardLibraryIOAndFmtExecute(t *testing.T) {
 		{name: "ChaCha8 assembly", source: "chacha8rand_assembly.go"},
 		{name: "runtime atomic assembly", source: "runtime_atomic_assembly.go"},
 		{name: "internal/bytealg assembly", source: "bytealg_compare.go"},
+		{name: "runtime Linux assembly", source: "runtime_assembly.go", output: "ABIInternal + Plan 9 assembly: 256 32896 3072\n"},
 		{name: "io.WriteString", source: "io_write_string.go"},
 		{name: "fmt.Sprintf", source: "fmt_sprintf.go"},
 		{name: "fmt.Println", source: "fmt_println.go", output: "hello 42\n"},

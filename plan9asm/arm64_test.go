@@ -13,6 +13,42 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
+func runtimeARM64ParseOptions(t *testing.T) ParseOptions {
+	t.Helper()
+	runtimeDirectory := filepath.Join("..", "stdlib", "src", "runtime")
+	includes := make(map[string]string)
+	for _, name := range []string{"textflag.h", "go_tls.h", "funcdata.h", "tls_arm64.h", "cgo/abi_arm64.h"} {
+		source, err := os.ReadFile(filepath.Join(runtimeDirectory, filepath.FromSlash(name)))
+		require.NoError(t, err)
+		includes[name] = string(source)
+	}
+	return ParseOptions{
+		Defines:  map[string]string{"GOARCH_arm64": "1", "GOOS_linux": "1"},
+		Includes: includes,
+	}
+}
+
+func runtimeAssemblyDefines() map[string]int64 {
+	return map[string]int64{
+		"g_m":             48,
+		"g_sched":         56,
+		"g_secret":        0,
+		"g_stack":         0,
+		"g_syscallsp":     112,
+		"gobuf_sp":        16,
+		"m_cgoCallers":    0,
+		"m_cgoCallersUse": 0,
+		"m_curg":          0,
+		"m_g0":            0,
+		"m_gsignal":       0,
+		"m_ncgo":          0,
+		"m_procid":        0,
+		"m_vdsoPC":        0,
+		"m_vdsoSP":        0,
+		"stack_lo":        0,
+	}
+}
+
 func TestTranslateARM64OperandOrderAndAddressing(t *testing.T) {
 	file, err := Parse(strings.NewReader(`
 TEXT ·copy<ABIInternal>(SB),NOSPLIT|NOFRAME,$0-24
@@ -137,8 +173,10 @@ TEXT ·readRegister(SB),NOSPLIT,$0-8
 	assert.Contains(t, translation.Assembly, ".global internal_cpu_readRegister\n")
 	assert.Contains(t, translation.Assembly, "\tsub sp, sp, #32")
 	assert.Contains(t, translation.Assembly, "\tstr x30, [sp]")
+	assert.Contains(t, translation.Assembly, "\tstr x29, [sp, #16]")
 	assert.Contains(t, translation.Assembly, "\tbl internal_cpu_readRegister_abi0")
 	assert.Contains(t, translation.Assembly, "\tldr x0, [sp, #8]")
+	assert.Contains(t, translation.Assembly, "\tldr x29, [sp, #16]")
 	assert.Contains(t, translation.Assembly, ".global internal_cpu_readRegister_abi0")
 	assert.Contains(t, translation.Assembly, "\tstr x0, [sp, #8]")
 	require.Len(t, translation.Functions, 2)
@@ -162,10 +200,13 @@ func TestTranslateARM64BuildsABI0MultiResultWrapper(t *testing.T) {
 	assert.Contains(t, translation.Assembly, "\tstr x6, [sp, #56]")
 	assert.Contains(t, translation.Assembly, "\tstr x7, [sp, #88]")
 	assert.Contains(t, translation.Assembly, "\tstr x8, [sp, #96]")
+	assert.Contains(t, translation.Assembly, "\tsub sp, sp, #128")
+	assert.Contains(t, translation.Assembly, "\tstr x29, [sp, #104]")
 	assert.Contains(t, translation.Assembly, "\tbl internal_runtime_syscall_linux_Syscall6_abi0")
 	assert.Contains(t, translation.Assembly, "\tldr x0, [sp, #64]")
 	assert.Contains(t, translation.Assembly, "\tldr x16, [sp, #72]")
 	assert.Contains(t, translation.Assembly, "\tldr x16, [sp, #80]")
+	assert.Contains(t, translation.Assembly, "\tldr x29, [sp, #104]")
 }
 
 func TestTranslateARM64DirectABI0Leaf(t *testing.T) {
@@ -252,7 +293,7 @@ func TestTranslateExactRuntimeTLS(t *testing.T) {
 	path := filepath.Join("..", "stdlib", "src", "runtime", "tls_arm64.s")
 	source, err := os.ReadFile(path)
 	require.NoError(t, err)
-	file, err := Parse(bytes.NewReader(source))
+	file, err := ParseWithOptions(bytes.NewReader(source), runtimeARM64ParseOptions(t))
 	require.NoError(t, err)
 	translation, err := CompileARM64(file, ARM64Options{
 		PackagePath:      "runtime",
@@ -265,11 +306,27 @@ func TestTranslateExactRuntimeTLS(t *testing.T) {
 	assert.Equal(t, "runtime_load_g", translation.Functions[0].Name)
 	assert.Equal(t, "runtime_save_g", translation.Functions[1].Name)
 	assert.NotContains(t, translation.Assembly, "_abi0")
-	assert.Contains(t, translation.Assembly, "\tmrs x0, tpidr_el0")
+	assert.Contains(t, translation.Assembly, "\t.inst 0xd53bd040")
 	assert.Contains(t, translation.Assembly, "\tldr x28, [x0, x27]")
 	assert.Contains(t, translation.Assembly, "\tstr x28, [x0, x27]")
 	assert.Contains(t, translation.Assembly, ".global runtime_tls_g\n")
 	assert.NotContains(t, translation.Assembly, "runtime_tls_g_0")
+}
+
+func TestTranslateExactRuntimeLinuxSystemAssembly(t *testing.T) {
+	path := filepath.Join("..", "stdlib", "src", "runtime", "sys_linux_arm64.s")
+	source, err := os.ReadFile(path)
+	require.NoError(t, err)
+	file, err := ParseWithOptions(bytes.NewReader(source), runtimeARM64ParseOptions(t))
+	require.NoError(t, err)
+	translation, err := CompileARM64(file, ARM64Options{
+		PackagePath:      "runtime",
+		Filename:         "sys_linux_arm64.s",
+		Defines:          runtimeAssemblyDefines(),
+		PreferDirectABI0: true,
+	})
+	require.NoError(t, err)
+	assert.NotEmpty(t, translation.Assembly)
 }
 
 func TestTranslateExactChacha8FrameAndReadOnlyData(t *testing.T) {
@@ -305,6 +362,7 @@ func TestSupportsARM64FileKeepsTargetPolicyWithTranslator(t *testing.T) {
 	assert.True(t, SupportsARM64File("runtime", "secret_arm64.s"))
 	assert.True(t, SupportsARM64File("runtime", "preempt_arm64.s"))
 	assert.True(t, SupportsARM64File("runtime", "tls_arm64.s"))
+	assert.True(t, SupportsARM64File("runtime", "sys_linux_arm64.s"))
 	assert.True(t, SupportsARM64File("internal/bytealg", "compare_arm64.s"))
 	assert.True(t, SupportsARM64File("internal/bytealg", "index_arm64.s"))
 	assert.True(t, SupportsARM64File("internal/cpu", "cpu_arm64.s"))
@@ -339,6 +397,7 @@ func TestTranslateExactRuntimeARM64FilesAssemble(t *testing.T) {
 			"g_m": 48, "m_p": 208, "p_xRegs": 13800, "xRegPerP_scratch": 0, "xRegPerP_cache": 512,
 		}},
 		{packagePath: "runtime", name: "secret_arm64.s"},
+		{packagePath: "runtime", name: "sys_linux_arm64.s", defines: runtimeAssemblyDefines()},
 		{packagePath: "runtime", name: "tls_arm64.s"},
 		{packagePath: "internal/bytealg", name: "compare_arm64.s"},
 		{packagePath: "internal/bytealg", name: "count_arm64.s"},
@@ -356,7 +415,12 @@ func TestTranslateExactRuntimeARM64FilesAssemble(t *testing.T) {
 		path := filepath.Join("..", "stdlib", "src", filepath.FromSlash(sourceFile.packagePath), sourceFile.name)
 		source, err := os.ReadFile(path)
 		require.NoError(t, err)
-		file, err := Parse(bytes.NewReader(source))
+		var file *File
+		if sourceFile.packagePath == "runtime" {
+			file, err = ParseWithOptions(bytes.NewReader(source), runtimeARM64ParseOptions(t))
+		} else {
+			file, err = Parse(bytes.NewReader(source))
+		}
 		require.NoError(t, err, sourceFile.name)
 		translated, err := TranslateARM64(file, ARM64Options{PackagePath: sourceFile.packagePath, Filename: sourceFile.name, Defines: sourceFile.defines})
 		require.NoError(t, err, sourceFile.name)
@@ -384,7 +448,7 @@ func TestExecuteExactRuntimeSecretEraseRegisters(t *testing.T) {
 	path := filepath.Join("..", "stdlib", "src", "runtime", "secret_arm64.s")
 	source, err := os.ReadFile(path)
 	require.NoError(t, err)
-	file, err := Parse(bytes.NewReader(source))
+	file, err := ParseWithOptions(bytes.NewReader(source), runtimeARM64ParseOptions(t))
 	require.NoError(t, err)
 	translation, err := CompileARM64(file, ARM64Options{
 		PackagePath:      "runtime",
@@ -655,7 +719,7 @@ func TestExecuteExactRuntimeTLSWithoutCgo(t *testing.T) {
 	path := filepath.Join("..", "stdlib", "src", "runtime", "tls_arm64.s")
 	source, err := os.ReadFile(path)
 	require.NoError(t, err)
-	file, err := Parse(bytes.NewReader(source))
+	file, err := ParseWithOptions(bytes.NewReader(source), runtimeARM64ParseOptions(t))
 	require.NoError(t, err)
 	translation, err := CompileARM64(file, ARM64Options{
 		PackagePath:      "runtime",

@@ -132,7 +132,13 @@ func main() {
 	for _, function := range module.Funcs {
 		functions[function.Name] = true
 	}
-	for _, name := range []string{"main.init.0", "main.main", "runtime.schedinit"} {
+	for _, name := range []string{
+		"main.init.0",
+		"main.main",
+		"runtime.schedinit",
+		"runtime.sigprofNonGo",
+		"runtime.sigtrampgo",
+	} {
 		if !functions[name] {
 			t.Errorf("executable module is missing %s", name)
 		}
@@ -153,6 +159,7 @@ func main() {
 		"runtime/memmove_arm64.s":                          "runtime",
 		"runtime/preempt_arm64.s":                          "runtime",
 		"runtime/secret_arm64.s":                           "runtime",
+		"runtime/sys_linux_arm64.s":                        "runtime",
 		"runtime/tls_arm64.s":                              "runtime",
 	}
 	if len(module.Assembly) != len(wantAssembly) {
@@ -169,6 +176,9 @@ func main() {
 		}
 		if assembly.PackagePath == "runtime" {
 			runtimeDefines = assembly.Defines
+		}
+		if assembly.Path == "runtime/tls_arm64.s" && assembly.Includes["tls_arm64.h"] == "" {
+			t.Error("runtime tls_arm64.s is missing its retained tls_arm64.h include")
 		}
 		delete(wantAssembly, assembly.Path)
 	}
@@ -190,6 +200,7 @@ func main() {
 
 	var initTask, initTasks *ir.Data
 	var arm64UseAlignedLoads *ir.Data
+	var cgoCallers *ir.Data
 	for _, data := range module.Data {
 		switch data.Name {
 		case ".goc.module.inittask.0":
@@ -198,10 +209,15 @@ func main() {
 			initTasks = data
 		case "runtime.arm64UseAlignedLoads":
 			arm64UseAlignedLoads = data
+		case "_cgo_callers":
+			cgoCallers = data
 		}
 	}
 	if arm64UseAlignedLoads == nil {
 		t.Error("runtime.arm64UseAlignedLoads global is missing")
+	}
+	if cgoCallers == nil || !cgoCallers.Linkage.Export {
+		t.Error("runtime _cgo_callers linkname global is missing or local")
 	}
 	if initTask == nil || len(initTask.Items) != 2 || initTask.Items[1].Sym != "main.init.0" {
 		t.Errorf("main init task = %#v", initTask)

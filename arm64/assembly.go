@@ -2,6 +2,7 @@ package arm64
 
 import (
 	"fmt"
+	"runtime"
 	"strings"
 
 	"github.com/evanphx/cg12/ir"
@@ -18,7 +19,13 @@ func prepareAssembly(module *ir.Module) (assemblyBundle, error) {
 	bundle := assemblyBundle{references: make(map[string]bool)}
 	var output strings.Builder
 	for _, source := range module.Assembly {
-		file, err := plan9asm.Parse(strings.NewReader(source.Source))
+		file, err := plan9asm.ParseWithOptions(strings.NewReader(source.Source), plan9asm.ParseOptions{
+			Defines: map[string]string{
+				"GOARCH_arm64":         "1",
+				"GOOS_" + runtime.GOOS: "1",
+			},
+			Includes: source.Includes,
+		})
 		if err != nil {
 			return assemblyBundle{}, fmt.Errorf("parse assembly %s: %w", source.Path, err)
 		}

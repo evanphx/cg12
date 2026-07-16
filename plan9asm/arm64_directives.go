@@ -21,9 +21,6 @@ func (t *arm64Translator) translateText(text *Text) error {
 	t.currentABI0 = text.Symbol.ABI == "" && !text.Symbol.Static
 	t.currentDirectABI0 = t.currentABI0 && t.options.PreferDirectABI0 && t.directABI0[t.functionIndex]
 	t.currentABI0Layout = t.abi0Layouts[t.functionIndex]
-	if t.currentABI0 && localSize != 0 {
-		return fmt.Errorf("ABI0 TEXT frame $%s is not supported yet", text.Frame)
-	}
 	t.currentFrame = 0
 	if localSize != 0 {
 		t.currentFrame = roundUpInteger(localSize+16, 16)
@@ -256,7 +253,7 @@ func parsePlan9DataAddress(source string) (Symbol, uint64, uint64, error) {
 
 func hasPlan9Flag(flags, want string) bool {
 	for _, flag := range strings.Split(flags, "|") {
-		if strings.TrimSpace(flag) == want {
+		if canonicalPlan9Flag(strings.TrimSpace(flag)) == want {
 			return true
 		}
 	}

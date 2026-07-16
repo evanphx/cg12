@@ -1,6 +1,7 @@
 package goc
 
 import (
+	"bufio"
 	"fmt"
 	"go/ast"
 	"go/build"
@@ -11,6 +12,8 @@ import (
 	"os"
 	"path/filepath"
 	"runtime"
+	"strconv"
+	"strings"
 
 	"github.com/evanphx/cg12/plan9asm"
 )
@@ -25,8 +28,9 @@ type sourceUnit struct {
 }
 
 type sourceAssemblyFile struct {
-	path   string
-	source string
+	path     string
+	source   string
+	includes map[string]string
 }
 
 // sourceLoader imports selected packages from source while retaining their AST
@@ -176,8 +180,9 @@ func (l *sourceLoader) Import(path string) (*types.Package, error) {
 			return nil, err
 		}
 		u.assembly = append(u.assembly, sourceAssemblyFile{
-			path:   filepath.ToSlash(filepath.Join(path, name)),
-			source: string(source),
+			path:     filepath.ToSlash(filepath.Join(path, name)),
+			source:   string(source),
+			includes: l.assemblyIncludes(bp.Dir, string(source)),
 		})
 	}
 	conf := types.Config{Importer: l}
@@ -187,4 +192,59 @@ func (l *sourceLoader) Import(path string) (*types.Package, error) {
 	}
 	l.units[path] = u
 	return u.pkg, nil
+}
+
+func (l *sourceLoader) assemblyIncludes(packageDirectory, source string) map[string]string {
+	includes := make(map[string]string)
+	loading := make(map[string]bool)
+	var load func(directory, source string)
+	load = func(directory, source string) {
+		scanner := bufio.NewScanner(strings.NewReader(source))
+		for scanner.Scan() {
+			name, ok := assemblyIncludeName(scanner.Text())
+			if !ok || includes[name] != "" || loading[name] {
+				continue
+			}
+			candidates := []string{
+				filepath.Join(directory, filepath.FromSlash(name)),
+				filepath.Join(l.root, "src", "runtime", filepath.FromSlash(name)),
+			}
+			var content []byte
+			var path string
+			for _, candidate := range candidates {
+				read, err := os.ReadFile(candidate)
+				if err == nil {
+					content = read
+					path = candidate
+					break
+				}
+			}
+			if content == nil {
+				continue
+			}
+			loading[name] = true
+			includes[name] = string(content)
+			load(filepath.Dir(path), string(content))
+			delete(loading, name)
+		}
+	}
+	load(packageDirectory, source)
+	return includes
+}
+
+func assemblyIncludeName(source string) (string, bool) {
+	source = strings.TrimSpace(source)
+	const prefix = "#include"
+	if !strings.HasPrefix(source, prefix) {
+		return "", false
+	}
+	source = strings.TrimSpace(strings.TrimPrefix(source, prefix))
+	if !strings.HasPrefix(source, "\"") {
+		return "", false
+	}
+	name, err := strconv.Unquote(source)
+	if err != nil || name == "" {
+		return "", false
+	}
+	return name, true
 }

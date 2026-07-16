@@ -18,6 +18,7 @@ import (
 
 	"github.com/evanphx/cg12/ir"
 	"github.com/evanphx/cg12/opt"
+	"github.com/evanphx/cg12/plan9asm"
 )
 
 // Compile parses and type-checks one Go source file and lowers it to cg12 IR.
@@ -77,10 +78,13 @@ func compile(name string, src []byte, executable bool) (*ir.Module, error) {
 	}
 	typeTags := make(map[string]string)
 	linkNames := make(map[*types.Func]string)
+	globalLinkNames := make(map[types.Object]string)
 	interfaceMethods := make(map[*types.Func]bool)
 	collectLinkNames([]*ast.File{file}, info, linkNames)
+	collectGlobalLinkNames([]*ast.File{file}, pkg, globalLinkNames)
 	for _, unit := range loader.units {
 		collectLinkNames(unit.files, unit.info, linkNames)
+		collectGlobalLinkNames(unit.files, unit.pkg, globalLinkNames)
 	}
 	functionDecls := collectFunctionDeclarations(info, pkg, []*ast.File{file}, loader.units)
 	runtimeInits, initSymbols := runtimeInitDeclarations(loader.units)
@@ -96,7 +100,14 @@ func compile(name string, src []byte, executable bool) (*ir.Module, error) {
 			roots = append(roots, function)
 		}
 	}
-	functions := reachableFunctions(roots, info, pkg, loader.units, compileRuntime, moduleInitFunctions, linkNames)
+	assemblyReferences := make(map[string]bool)
+	if compileRuntime {
+		assemblyReferences, err = sourceAssemblyReferences(loader.units)
+		if err != nil {
+			return nil, err
+		}
+	}
+	functions := reachableFunctions(roots, info, pkg, loader.units, compileRuntime, moduleInitFunctions, linkNames, assemblyReferences)
 	globalPackages := map[string]bool{pkg.Path(): true}
 	if compileRuntime {
 		for path := range loader.units {
@@ -134,10 +145,11 @@ func compile(name string, src []byte, executable bool) (*ir.Module, error) {
 				Path:        assembly.path,
 				Source:      assembly.source,
 				Defines:     defines,
+				Includes:    assembly.includes,
 			})
 		}
 	}
-	g := &gen{fset: fset, file: file, info: info, pkg: pkg, mod: mod, globals: map[types.Object]string{}, emitRuntimeTables: emitRuntimeTables, runtimeAllocation: compileRuntime, typeTags: typeTags, linkNames: linkNames, initSymbols: initSymbols, functionDecls: functionDecls, noWriteBarrierFunctions: noWriteBarriers, interfaceMethods: interfaceMethods}
+	g := &gen{fset: fset, file: file, info: info, pkg: pkg, mod: mod, globals: map[types.Object]string{}, globalLinkNames: globalLinkNames, emitRuntimeTables: emitRuntimeTables, runtimeAllocation: compileRuntime, typeTags: typeTags, linkNames: linkNames, initSymbols: initSymbols, functionDecls: functionDecls, noWriteBarrierFunctions: noWriteBarriers, interfaceMethods: interfaceMethods}
 	g.mod.File(name)
 	for _, d := range file.Decls {
 		if gd, ok := d.(*ast.GenDecl); ok && gd.Tok == token.VAR {
@@ -151,7 +163,7 @@ func compile(name string, src []byte, executable bool) (*ir.Module, error) {
 		if !globalPackages[path] {
 			continue
 		}
-		generator := &gen{fset: fset, info: unit.info, pkg: unit.pkg, mod: mod, globals: globals, emitRuntimeTables: emitRuntimeTables, runtimeAllocation: compileRuntime, typeTags: typeTags, linkNames: linkNames, initSymbols: initSymbols, functionDecls: functionDecls, noWriteBarrierFunctions: noWriteBarriers, interfaceMethods: interfaceMethods}
+		generator := &gen{fset: fset, info: unit.info, pkg: unit.pkg, mod: mod, globals: globals, globalLinkNames: globalLinkNames, emitRuntimeTables: emitRuntimeTables, runtimeAllocation: compileRuntime, typeTags: typeTags, linkNames: linkNames, initSymbols: initSymbols, functionDecls: functionDecls, noWriteBarrierFunctions: noWriteBarriers, interfaceMethods: interfaceMethods}
 		for _, sourceFile := range unit.files {
 			for _, declaration := range sourceFile.Decls {
 				global, ok := declaration.(*ast.GenDecl)
@@ -286,6 +298,45 @@ func assemblyPackageDefines(pkg *types.Package) map[string]int64 {
 		}
 	}
 	return defines
+}
+
+func sourceAssemblyReferences(units map[string]*sourceUnit) (map[string]bool, error) {
+	references := make(map[string]bool)
+	paths := make([]string, 0, len(units))
+	for path := range units {
+		paths = append(paths, path)
+	}
+	sort.Strings(paths)
+
+	for _, path := range paths {
+		unit := units[path]
+		defines := assemblyPackageDefines(unit.pkg)
+		for _, assembly := range unit.assembly {
+			file, err := plan9asm.ParseWithOptions(strings.NewReader(assembly.source), plan9asm.ParseOptions{
+				Defines: map[string]string{
+					"GOARCH_" + runtime.GOARCH: "1",
+					"GOOS_" + runtime.GOOS:     "1",
+				},
+				Includes: assembly.includes,
+			})
+			if err != nil {
+				return nil, fmt.Errorf("parse assembly %s: %w", assembly.path, err)
+			}
+			translation, err := plan9asm.CompileARM64(file, plan9asm.ARM64Options{
+				PackagePath:      path,
+				Filename:         assembly.path,
+				Defines:          defines,
+				PreferDirectABI0: true,
+			})
+			if err != nil {
+				return nil, fmt.Errorf("translate assembly %s: %w", assembly.path, err)
+			}
+			for _, reference := range translation.ExternalReferences {
+				references[reference] = true
+			}
+		}
+	}
+	return references, nil
 }
 
 func addModuleInitTasks(mod *ir.Module, packages []packageInit, initSymbols map[*types.Func]string) error {
@@ -600,6 +651,7 @@ type gen struct {
 	cur                      *ir.Block
 	vars                     map[types.Object]ir.Ref
 	globals                  map[types.Object]string
+	globalLinkNames          map[types.Object]string
 	breaks, continues        []*ir.Block
 	seq                      int
 	err                      error
@@ -656,6 +708,23 @@ func collectLinkNames(files []*ast.File, info *types.Info, names map[*types.Func
 			for _, comment := range function.Doc.List {
 				fields := strings.Fields(strings.TrimPrefix(comment.Text, "//"))
 				if len(fields) == 3 && fields[0] == "go:linkname" {
+					names[object] = fields[2]
+				}
+			}
+		}
+	}
+}
+
+func collectGlobalLinkNames(files []*ast.File, pkg *types.Package, names map[types.Object]string) {
+	for _, file := range files {
+		for _, commentGroup := range file.Comments {
+			for _, comment := range commentGroup.List {
+				fields := strings.Fields(strings.TrimPrefix(comment.Text, "//"))
+				if len(fields) != 3 || fields[0] != "go:linkname" {
+					continue
+				}
+				object := pkg.Scope().Lookup(fields[1])
+				if _, ok := object.(*types.Var); ok {
 					names[object] = fields[2]
 				}
 			}
@@ -1031,7 +1100,11 @@ func (g *gen) globalDecl(gd *ast.GenDecl) {
 				continue
 			}
 			name := g.pkg.Path() + "." + id.Name
-			d := &ir.Data{Name: name, Align: 8, Linkage: ir.Linkage{Export: ast.IsExported(id.Name)}}
+			linkedName := g.globalLinkNames[obj]
+			if linkedName != "" {
+				name = linkedName
+			}
+			d := &ir.Data{Name: name, Align: 8, Linkage: ir.Linkage{Export: ast.IsExported(id.Name) || linkedName != ""}}
 			var v int64
 			if i < len(vs.Values) {
 				initializer := vs.Values[i]
@@ -1058,7 +1131,11 @@ func (g *gen) globalDecl(gd *ast.GenDecl) {
 						if identifier {
 							targetObject := g.info.Uses[target]
 							if targetObject != nil && targetObject.Pkg() != nil {
-								d.Items = []ir.DataItem{{Sub: ir.SubL, Sym: targetObject.Pkg().Path() + "." + targetObject.Name()}}
+								targetName := targetObject.Pkg().Path() + "." + targetObject.Name()
+								if linkedName := g.globalLinkNames[targetObject]; linkedName != "" {
+									targetName = linkedName
+								}
+								d.Items = []ir.DataItem{{Sub: ir.SubL, Sym: targetName}}
 								g.mod.Data = append(g.mod.Data, d)
 								g.globals[obj] = name
 								continue

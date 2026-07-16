@@ -43,8 +43,9 @@ The ARM64 Go path uses ABIInternal register assignment for scalar and aggregate
 arguments and results. Build-selected Plan 9 assembly is parsed into a syntax
 tree and translated to GNU AArch64 syntax. The currently enabled unchanged
 standard-library files are `runtime/atomic_arm64.s`, `runtime/memclr_arm64.s`,
-`runtime/memmove_arm64.s`, `runtime/preempt_arm64.s`, `runtime/tls_arm64.s`, and
-all five ARM64 files in `internal/bytealg`:
+`runtime/memmove_arm64.s`, `runtime/preempt_arm64.s`,
+`runtime/secret_arm64.s`, `runtime/sys_linux_arm64.s`,
+`runtime/tls_arm64.s`, and all five ARM64 files in `internal/bytealg`:
 `compare_arm64.s`, `count_arm64.s`, `equal_arm64.s`, `index_arm64.s`, and
 `indexbyte_arm64.s`. The compiler also adapts ABI0 stack operands to its
 ABIInternal call path, allowing the exact `internal/cpu/cpu_arm64.s`,
@@ -52,6 +53,13 @@ ABIInternal call path, allowing the exact `internal/cpu/cpu_arm64.s`,
 `internal/runtime/syscall/linux/asm_linux_arm64.s` files to compile and run.
 The same ABI0 adapter compiles `syscall/asm_linux_arm64.s`, replacing the
 handwritten syscall shims with the copied standard-library implementations.
+The parser resolves the standard `textflag.h`, `go_tls.h`, `funcdata.h`,
+`tls_arm64.h`, and `cgo/abi_arm64.h` include graph and expands both object-like
+and function-like assembler macros. Consequently, the unchanged
+`runtime/sys_linux_arm64.s` now owns runtime process and thread exit, file
+descriptors, clocks, mmap, futexes, thread creation, and signal trampolines;
+the corresponding handwritten support symbols have been removed. Ordinary Go
+program, GC, and `io`/`fmt` execution tests run through those translated paths.
 The exact `internal/chacha8rand/chacha8_arm64.s` implementation is also active,
 including its multiline `QR` macro, local frame, SIMD structure operations,
 and `DATA`/`GLOBL RODATA` constant tables.
@@ -60,7 +68,7 @@ handwritten atomic primitives. Its conditional LSE paths, exclusive-access
 fallbacks, and generated `go_asm.h` offset constants are compiled directly;
 eligible leaf ABI0 routines use a direct register adapter so runtime atomics do
 not acquire an extra call frame.
-`runtime/secret_arm64.s` now supplies the register-erasure path as well,
+`runtime/secret_arm64.s` supplies the register-erasure path as well,
 including all integer and SIMD register clears from the standard source.
 The generated `go_asm.h` environment includes type-checked struct sizes and
 field offsets, so `runtime/preempt_arm64.s` uses the real `g.m`, `m.p`, and

@@ -224,6 +224,7 @@ type AssemblyFile struct {
 	Path        string
 	Source      string
 	Defines     map[string]int64
+	Includes    map[string]string
 }
 
 // Module returns the module this function belongs to (nil if standalone).

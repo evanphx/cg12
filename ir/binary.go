@@ -19,7 +19,7 @@ import (
 // references. Value references (ir.Ref) already index Temps/Consts by ID.
 const (
 	binMagic   = "cg12"
-	binVersion = 4
+	binVersion = 5
 )
 
 // MarshalBinary encodes the module to cg12's binary unit format.
@@ -58,6 +58,16 @@ func (m *Module) MarshalBinary() ([]byte, error) {
 		for _, name := range names {
 			e.str(name)
 			e.iv(assembly.Defines[name])
+		}
+		includeNames := make([]string, 0, len(assembly.Includes))
+		for name := range assembly.Includes {
+			includeNames = append(includeNames, name)
+		}
+		sort.Strings(includeNames)
+		e.uv(uint64(len(includeNames)))
+		for _, name := range includeNames {
+			e.str(name)
+			e.str(assembly.Includes[name])
 		}
 	}
 	e.uv(uint64(len(m.Data)))
@@ -111,6 +121,13 @@ func DecodeModule(data []byte) (*Module, error) {
 			m.Assembly[i].Defines = make(map[string]int64, defineCount)
 			for range defineCount {
 				m.Assembly[i].Defines[d.str()] = d.iv()
+			}
+		}
+		includeCount := int(d.uv())
+		if includeCount != 0 {
+			m.Assembly[i].Includes = make(map[string]string, includeCount)
+			for range includeCount {
+				m.Assembly[i].Includes[d.str()] = d.str()
 			}
 		}
 	}
