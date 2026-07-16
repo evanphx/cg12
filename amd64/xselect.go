@@ -80,13 +80,16 @@ func (s *xsel) selectInt(in *ir.Instr) bool {
 		}
 	case ir.ONeg:
 		if in.Cls.IsFloat() {
-			return false
+			d, commit := s.fpDst(in.To)
+			s.fpInto(d, in.Arg(0))
+			s.b.fnegFP(in.Cls == ir.ClsD, d)
+			commit()
+		} else {
+			d, commit := s.gpDst(in.To)
+			s.gpInto(d, in.Arg(0))
+			s.b.negGP(in.Cls == ir.ClsL, d)
+			commit()
 		}
-		w := in.Cls == ir.ClsL
-		d, commit := s.gpDst(in.To)
-		s.gpInto(d, in.Arg(0))
-		s.b.negGP(w, d)
-		commit()
 	case ir.OShl, ir.OShr, ir.OSar:
 		s.shift(in)
 	case ir.ODiv:
@@ -103,9 +106,15 @@ func (s *xsel) selectInt(in *ir.Instr) bool {
 		s.div(in, false, true)
 	case ir.OCmp:
 		if in.Cmp.IsFloat() {
-			return false
+			dbl := s.f.ClassOf(in.Arg(0)) == ir.ClsD
+			a := s.fpValue(in.Arg(0), fpScratch0)
+			bb := s.fpValue(in.Arg(1), fpScratch1)
+			d, commit := s.gpDst(in.To)
+			s.b.fcmpSet(in.Cmp, dbl, d, a, bb)
+			commit()
+		} else {
+			s.cmp(in)
 		}
-		s.cmp(in)
 	case ir.OExtsb, ir.OExtub, ir.OExtsh, ir.OExtuh, ir.OExtsw, ir.OExtuw:
 		w := in.Cls == ir.ClsL
 		rs := s.gpValue(in.Arg(0), gpScratch1)

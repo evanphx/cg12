@@ -20,10 +20,6 @@ func (e *emitter) instr(in *ir.Instr) {
 		return
 	}
 	switch in.Op {
-	case ir.ONeg:
-		e.neg(in)
-	case ir.OCmp:
-		e.cmp(in)
 	case ir.OAlloc4, ir.OAlloc8, ir.OAlloc16:
 		d, commit := e.gpDst(in.To)
 		e.line("leaq %s, %s", memn(RBP, int32(-e.allocOff[in])), gpn(d, 8))

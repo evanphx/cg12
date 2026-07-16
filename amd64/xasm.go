@@ -50,9 +50,12 @@ type xasm interface {
 	jmpReg(r Reg)
 	hlt()
 
-	// Floating point: two-operand arithmetic (dst = dst OP src) and register move.
+	// Floating point: two-operand arithmetic (dst = dst OP src), register move,
+	// sign-flip negation, and a compare that sets the boolean result.
 	binFP(op ir.Op, dbl bool, dst, src Reg)
 	movFP(dbl bool, dst, src Reg)
+	fnegFP(dbl bool, dst Reg)
+	fcmpSet(cmp ir.Cmp, dbl bool, dst, a, b Reg)
 
 	// Float/int conversions and int<->float bitcasts.
 	cvtSS2SD(dst, src Reg)
@@ -203,6 +206,60 @@ func (b *mcXasm) movFP(dbl bool, dst, src Reg) {
 	} else {
 		b.m.emit(x64.MovssReg(dst.mreg(), src.mreg()))
 	}
+}
+func (b *mcXasm) fnegFP(dbl bool, dst Reg) {
+	if dbl {
+		b.m.movImm(gpScratch0, int64(-9223372036854775808), true) // 0x8000000000000000
+		b.m.emit(x64.MovqToXmm(true, fpScratch1.mreg(), gpScratch0.mreg()))
+		b.m.emit(x64.Xorpd(dst.mreg(), fpScratch1.mreg()))
+	} else {
+		b.m.movImm(gpScratch0, 0x80000000, false)
+		b.m.emit(x64.MovqToXmm(false, fpScratch1.mreg(), gpScratch0.mreg()))
+		b.m.emit(x64.Xorps(dst.mreg(), fpScratch1.mreg()))
+	}
+}
+func (b *mcXasm) fcmpSet(cmp ir.Cmp, dbl bool, dst, a, bb Reg) {
+	dm := dst.mreg()
+	ucomi := func(x, y Reg) {
+		if dbl {
+			b.m.emit(x64.Ucomisd(x.mreg(), y.mreg()))
+		} else {
+			b.m.emit(x64.Ucomiss(x.mreg(), y.mreg()))
+		}
+	}
+	switch cmp {
+	case ir.CmpFgt:
+		ucomi(a, bb)
+		b.m.emit(x64.Setcc(x64.A, dm))
+	case ir.CmpFge:
+		ucomi(a, bb)
+		b.m.emit(x64.Setcc(x64.AE, dm))
+	case ir.CmpFlt:
+		ucomi(bb, a)
+		b.m.emit(x64.Setcc(x64.A, dm))
+	case ir.CmpFle:
+		ucomi(bb, a)
+		b.m.emit(x64.Setcc(x64.AE, dm))
+	case ir.CmpFo:
+		ucomi(a, bb)
+		b.m.emit(x64.Setcc(x64.NP, dm))
+	case ir.CmpFuo:
+		ucomi(a, bb)
+		b.m.emit(x64.Setcc(x64.P, dm))
+	case ir.CmpFeq:
+		ucomi(a, bb)
+		b.m.emit(x64.Setcc(x64.NP, gpScratch0.mreg()))
+		b.m.emit(x64.Setcc(x64.E, dm))
+		b.m.emit(x64.AndReg(false, dm, gpScratch0.mreg()))
+	case ir.CmpFne:
+		ucomi(a, bb)
+		b.m.emit(x64.Setcc(x64.P, gpScratch0.mreg()))
+		b.m.emit(x64.Setcc(x64.NE, dm))
+		b.m.emit(x64.OrReg(false, dm, gpScratch0.mreg()))
+	default:
+		b.fail("amd64: unsupported float compare %v", cmp)
+	}
+	b.m.emit(x64.MovzxByte(false, dm, dm))
 }
 func (b *mcXasm) cvtSS2SD(dst, src Reg) { b.m.emit(x64.Cvtss2sd(dst.mreg(), src.mreg())) }
 func (b *mcXasm) cvtSD2SS(dst, src Reg) { b.m.emit(x64.Cvtsd2ss(dst.mreg(), src.mreg())) }
@@ -393,6 +450,60 @@ func (b *textXasm) movFP(dbl bool, dst, src Reg) {
 		mn = "movsd"
 	}
 	b.e.line("%s %s, %s", mn, xmmn(src), xmmn(dst))
+}
+func (b *textXasm) fnegFP(dbl bool, dst Reg) {
+	if dbl {
+		b.e.line("movabsq $0x8000000000000000, %s", gpn(gpScratch0, 8))
+		b.e.line("movq %s, %s", gpn(gpScratch0, 8), xmmn(fpScratch1))
+		b.e.line("xorpd %s, %s", xmmn(fpScratch1), xmmn(dst))
+	} else {
+		b.e.line("movl $0x80000000, %s", gpn(gpScratch0, 4))
+		b.e.line("movd %s, %s", gpn(gpScratch0, 4), xmmn(fpScratch1))
+		b.e.line("xorps %s, %s", xmmn(fpScratch1), xmmn(dst))
+	}
+}
+func (b *textXasm) fcmpSet(cmp ir.Cmp, dbl bool, dst, a, bb Reg) {
+	d8 := gpn(dst, 1)
+	ucomi := func(x, y Reg) {
+		mn := "ucomiss"
+		if dbl {
+			mn = "ucomisd"
+		}
+		b.e.line("%s %s, %s", mn, xmmn(y), xmmn(x))
+	}
+	switch cmp {
+	case ir.CmpFgt:
+		ucomi(a, bb)
+		b.e.line("seta %s", d8)
+	case ir.CmpFge:
+		ucomi(a, bb)
+		b.e.line("setae %s", d8)
+	case ir.CmpFlt:
+		ucomi(bb, a)
+		b.e.line("seta %s", d8)
+	case ir.CmpFle:
+		ucomi(bb, a)
+		b.e.line("setae %s", d8)
+	case ir.CmpFo:
+		ucomi(a, bb)
+		b.e.line("setnp %s", d8)
+	case ir.CmpFuo:
+		ucomi(a, bb)
+		b.e.line("setp %s", d8)
+	case ir.CmpFeq:
+		ucomi(a, bb)
+		b.e.line("setnp %s", gpn(gpScratch0, 1))
+		b.e.line("sete %s", d8)
+		b.e.line("andb %s, %s", gpn(gpScratch0, 1), d8)
+	case ir.CmpFne:
+		ucomi(a, bb)
+		b.e.line("setp %s", gpn(gpScratch0, 1))
+		b.e.line("setne %s", d8)
+		b.e.line("orb %s, %s", gpn(gpScratch0, 1), d8)
+	default:
+		b.fail("amd64: unsupported float compare %v", cmp)
+	}
+	b.e.line("movzbl %s, %s", d8, gpn(dst, 4))
 }
 func (b *textXasm) cvtSS2SD(dst, src Reg) { b.e.line("cvtss2sd %s, %s", xmmn(src), xmmn(dst)) }
 func (b *textXasm) cvtSD2SS(dst, src Reg) { b.e.line("cvtsd2ss %s, %s", xmmn(src), xmmn(dst)) }
