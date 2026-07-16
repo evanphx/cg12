@@ -81,15 +81,34 @@ func main() {
 	case *emitObj:
 		writeObject(mod, outputPath(*out, input, ".o"))
 	default:
-		exe := *out
-		if exe == "" {
-			exe = strings.TrimSuffix(filepath.Base(input), filepath.Ext(input))
-		}
+		exe, cleanup := outputExe(*out, input, *run)
+		defer cleanup()
 		link(mod, exe)
 		if *run {
-			os.Exit(runProg(exe))
+			code := runProg(exe)
+			cleanup() // os.Exit runs no deferred calls
+			os.Exit(code)
 		}
 	}
+}
+
+// outputExe decides where the linked executable goes. With -o it is the caller's
+// choice. Without one, a plain compile names it after the input, the way cc does.
+// For -run, though, the executable is a means rather than something asked for, so
+// it goes somewhere temporary and is taken away again -- as go run and tcc -run
+// behave. Naming it after the input and leaving it in the working directory
+// litters the caller's tree with something they never asked to keep.
+func outputExe(out, input string, run bool) (path string, cleanup func()) {
+	if out != "" {
+		return out, func() {}
+	}
+	name := strings.TrimSuffix(filepath.Base(input), filepath.Ext(input))
+	if !run {
+		return name, func() {}
+	}
+	dir, err := os.MkdirTemp("", "cg12cc-*")
+	check(err)
+	return filepath.Join(dir, name), func() { os.RemoveAll(dir) }
 }
 
 // writeObject compiles the module to an ELF object and writes it.
