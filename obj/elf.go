@@ -23,8 +23,11 @@ const (
 
 	// Thread-local storage, local-exec model: add the variable's offset from the
 	// thread pointer (read via MRS TPIDR_EL0).
+	// The pair is HI12 then LO12_NC: the offset is split across two adds. The
+	// checking LO12 (550) is for an offset that fits 12 bits all on its own, so
+	// pairing it with a HI12 makes a linker reject any block over 4 KiB.
 	R_AARCH64_TLSLE_ADD_TPREL_HI12    = 549
-	R_AARCH64_TLSLE_ADD_TPREL_LO12_NC = 550
+	R_AARCH64_TLSLE_ADD_TPREL_LO12_NC = 551
 
 	// Thread-local storage, initial-exec model: the offset from the thread pointer
 	// is not known until load time, so it is read from a GOT slot the loader fills.

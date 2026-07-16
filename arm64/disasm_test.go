@@ -1,17 +1,21 @@
 package arm64_test
 
 import (
+	"debug/elf"
 	"encoding/binary"
+	"fmt"
 	"os"
 	"os/exec"
 	"path/filepath"
 	"runtime"
+	"sort"
 	"strings"
 	"testing"
 
 	"github.com/evanphx/cg12/arm64"
 	"github.com/evanphx/cg12/arm64/a64"
 	"github.com/evanphx/cg12/cc"
+	"github.com/evanphx/cg12/obj"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
@@ -178,4 +182,119 @@ func disasmTools(t *testing.T) (as, objcopy string) {
 		}
 	}
 	return as, objcopy
+}
+
+// A call, a branch, and a global's address must come back with the symbol named,
+// not the zero the relocation leaves in the instruction. This is what the tests
+// that read assembly need in order to check what was selected -- "bl sink" says
+// the call went where it should; ".+0" says nothing.
+func TestDisassembleNamesRelocatedSymbols(t *testing.T) {
+	m, err := cc.Compile("named.c", `
+extern int helper(int);
+extern int g_int;
+int caller(int x) { g_int = x; return helper(x); }
+`)
+	require.NoError(t, err)
+	o, err := arm64.CompileToObject(m)
+	require.NoError(t, err)
+
+	asm := arm64.Disassemble(o)
+	assert.Contains(t, asm, "caller:\n", "a symbol in .text starts a label")
+	assert.Contains(t, asm, "\tbl helper\n", "the call names its target")
+	assert.Contains(t, asm, "adrp x", "the global's page")
+	assert.Contains(t, asm, "#:lo12:g_int", "and its offset within that page")
+	assert.NotContains(t, asm, "bl .", "no relocated branch should read as an offset")
+}
+
+// A thread-local's access is a relocation too, and reads as the source would
+// write it: the offset from the thread pointer, named rather than left as zero.
+func TestDisassembleNamesThreadLocalRelocs(t *testing.T) {
+	o, err := arm64.CompileToObject(bumpModule())
+	require.NoError(t, err)
+
+	asm := arm64.Disassemble(o)
+	assert.Contains(t, asm, "mrs x", "the thread pointer is read")
+	assert.Contains(t, asm, "#:tprel_hi12:tls_counter", "the high half of the offset")
+	assert.Contains(t, asm, "#:tprel_lo12_nc:tls_counter", "and the low half")
+}
+
+// The symbolic forms above are claims about assembler syntax -- that
+// "#:tprel_hi12:x" asks for the relocation we think it does. Self-consistency
+// cannot check that, so this hands our disassembly to the reference assembler
+// and requires that the relocations it produces are exactly the ones our object
+// carries: same offset, same type, same symbol, same addend. If a form meant
+// something else, the type would differ.
+func TestDisassembleRelocsMeanWhatTheySay(t *testing.T) {
+	as, _ := disasmTools(t)
+
+	for name, o := range disasmObjects(t) {
+		t.Run(name, func(t *testing.T) {
+			require.NotEmpty(t, o.Relocs, "there is nothing to check without relocations")
+
+			dir := t.TempDir()
+			src := filepath.Join(dir, "sym.s")
+			out := filepath.Join(dir, "sym.o")
+			require.NoError(t, os.WriteFile(src, []byte(".text\n"+arm64.Disassemble(o)), 0o644))
+			msg, err := exec.Command(as, "-o", out, src).CombinedOutput()
+			require.NoErrorf(t, err, "our disassembly does not assemble: %s", msg)
+
+			assert.Equal(t, relocKeys(o.Relocs), asRelocKeys(t, out))
+		})
+	}
+}
+
+// relocKeys renders relocations as comparable text, ordered so two lists of the
+// same relocations compare equal whatever order they were recorded in.
+func relocKeys(relocs []obj.Reloc) []string {
+	keys := make([]string, 0, len(relocs))
+	for _, r := range relocs {
+		keys = append(keys, fmt.Sprintf("%#x type=%d %s%+d", r.Offset, r.Type, r.Sym, r.Addend))
+	}
+	sort.Strings(keys)
+	return keys
+}
+
+// asRelocKeys reads .rela.text out of an object the reference assembler wrote.
+func asRelocKeys(t *testing.T, path string) []string {
+	t.Helper()
+	f, err := elf.Open(path)
+	require.NoError(t, err)
+	defer f.Close()
+
+	syms, err := f.Symbols()
+	require.NoError(t, err)
+	sec := f.Section(".rela.text")
+	require.NotNil(t, sec, "the assembler recorded no relocations at all")
+	data, err := sec.Data()
+	require.NoError(t, err)
+
+	var relocs []obj.Reloc
+	for i := 0; i+24 <= len(data); i += 24 {
+		info := f.ByteOrder.Uint64(data[i+8:])
+		name := ""
+		if idx := info >> 32; idx > 0 && int(idx) <= len(syms) {
+			name = syms[idx-1].Name
+		}
+		relocs = append(relocs, obj.Reloc{
+			Offset: f.ByteOrder.Uint64(data[i:]),
+			Type:   uint32(info),
+			Sym:    name,
+			Addend: int64(f.ByteOrder.Uint64(data[i+16:])),
+		})
+	}
+	return relocKeys(relocs)
+}
+
+// disasmObjects compiles the corpora to objects, relocations and all.
+func disasmObjects(t *testing.T) map[string]*obj.Object {
+	t.Helper()
+	m, err := cc.Compile("corpus.c", disasmCorpus)
+	require.NoError(t, err)
+	broad, err := arm64.CompileToObject(m)
+	require.NoError(t, err)
+
+	tls, err := arm64.CompileToObject(bumpModule())
+	require.NoError(t, err)
+
+	return map[string]*obj.Object{"c-corpus": broad, "thread-local": tls}
 }
