@@ -13,6 +13,7 @@ import (
 	"github.com/evanphx/cg12/arm64"
 	"github.com/evanphx/cg12/ir"
 	"github.com/evanphx/cg12/link"
+	"github.com/evanphx/cg12/obj"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
@@ -256,6 +257,36 @@ func TestSharedLibraryMultipleExports(t *testing.T) {
 	exe, err := l2.LinkDynamicExecutable("main", "libc.so.6")
 	require.NoError(t, err)
 	require.Equal(t, 23, runExe(t, exe))
+}
+
+// An import can be pinned to a specific version of the library that defines it,
+// rather than binding to whatever that library marks as the default.
+func TestVersionedImport(t *testing.T) {
+	if runtime.GOARCH != "arm64" {
+		t.Skip("arm64 executable runs natively only on an arm64 host")
+	}
+	build := func(version string) ([]byte, error) {
+		l := link.NewWith(arm64.Backend{})
+		require.NoError(t, l.AddModule(moduleCallsAbs()))
+		return l.LinkDynamicExecutableWith("main", obj.DynOptions{
+			Needed:  []string{"libc.so.6"},
+			Require: map[string]obj.SymVersion{"abs": {Library: "libc.so.6", Version: version}},
+		})
+	}
+
+	t.Run("binds the requested version", func(t *testing.T) {
+		exe, err := build("GLIBC_2.17")
+		require.NoError(t, err)
+		require.Equal(t, 5, runExe(t, exe)) // abs(-5)
+	})
+
+	// The requirement is a real constraint, not a decoration: demanding a version
+	// the library does not carry must make the loader refuse to start the program.
+	t.Run("a version the library lacks is refused", func(t *testing.T) {
+		exe, err := build("GLIBC_9.99")
+		require.NoError(t, err, "linking still succeeds; the loader is what objects")
+		require.NotEqual(t, 5, runExe(t, exe))
+	})
 }
 
 // The image is a well-formed dynamic executable on both architectures: it names

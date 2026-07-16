@@ -124,15 +124,21 @@ func (l *Linker) LinkSharedLibrary(soname string, export []string, needed ...str
 }
 
 func (l *Linker) linkDynamic(entry string, pie bool, needed []string) ([]byte, error) {
+	return l.LinkDynamicExecutableWith(entry, obj.DynOptions{Needed: needed, PIE: pie})
+}
+
+// LinkDynamicExecutableWith links a dynamic executable with full control over the
+// dynamic options -- exported symbols, pinned symbol versions, and so on. The
+// interpreter defaults to the backend's loader when opts leaves it empty.
+func (l *Linker) LinkDynamicExecutableWith(entry string, opts obj.DynOptions) ([]byte, error) {
 	merged, err := l.mergeWithStart(entry)
 	if err != nil {
 		return nil, err
 	}
-	return merged.WriteDynamicExecutable("_start", obj.DynOptions{
-		Interp: l.be.Interp(),
-		Needed: needed,
-		PIE:    pie,
-	})
+	if opts.Interp == "" {
+		opts.Interp = l.be.Interp()
+	}
+	return merged.WriteDynamicExecutable("_start", opts)
 }
 
 // mergeWithStart prepends the backend's `_start` stub (which calls entry) to the

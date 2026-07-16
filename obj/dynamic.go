@@ -14,29 +14,39 @@ const (
 	ptInterp  = 3
 	ptPhdr    = 6
 
-	shtHash    = 5
-	shtDynamic = 6
-	shtDynsym  = 11
-	shtGnuHash = 0x6ffffff6
+	shtHash       = 5
+	shtDynamic    = 6
+	shtDynsym     = 11
+	shtGnuHash    = 0x6ffffff6
+	shtGnuVerneed = 0x6ffffffe
+	shtGnuVersym  = 0x6fffffff
 
-	dtNull     = 0
-	dtNeeded   = 1
-	dtPltRelSz = 2
-	dtPltGot   = 3
-	dtHash     = 4
-	dtStrTab   = 5
-	dtSymTab   = 6
-	dtRela     = 7
-	dtRelaSz   = 8
-	dtRelaEnt  = 9
-	dtStrSz    = 10
-	dtSymEnt   = 11
-	dtSoname   = 14
-	dtPltRel   = 20
-	dtJmpRel   = 23
-	dtFlags    = 30
-	dtGnuHash  = 0x6ffffef5
-	dtFlags1   = 0x6ffffffb
+	dtNull       = 0
+	dtNeeded     = 1
+	dtPltRelSz   = 2
+	dtPltGot     = 3
+	dtHash       = 4
+	dtStrTab     = 5
+	dtSymTab     = 6
+	dtRela       = 7
+	dtRelaSz     = 8
+	dtRelaEnt    = 9
+	dtStrSz      = 10
+	dtSymEnt     = 11
+	dtSoname     = 14
+	dtPltRel     = 20
+	dtJmpRel     = 23
+	dtFlags      = 30
+	dtGnuHash    = 0x6ffffef5
+	dtVersym     = 0x6ffffff0
+	dtFlags1     = 0x6ffffffb
+	dtVerneed    = 0x6ffffffe
+	dtVerneednum = 0x6fffffff
+
+	// .gnu.version indices: 0 means the symbol is local, 1 means global and
+	// unversioned; 2 and up name an entry in the version requirements.
+	verLocal  = 0
+	verGlobal = 1
 
 	dfBindNow = 0x8 // resolve every relocation at load time (no lazy binding)
 	df1Now    = 0x1
@@ -66,6 +76,17 @@ type DynOptions struct {
 	// Export publishes these defined symbols in the dynamic symbol table, so a
 	// shared library can resolve against the executable (or dlsym can find them).
 	Export []string
+
+	// Require binds an imported symbol to a specific version of the library that
+	// defines it, instead of whichever version that library marks as the default.
+	// It is how a program pins an older interface a library still carries.
+	Require map[string]SymVersion
+}
+
+// SymVersion names a versioned definition of an imported symbol.
+type SymVersion struct {
+	Library string // the needed library that defines it, e.g. libc.so.6
+	Version string // the version to bind to, e.g. GLIBC_2.17
 }
 
 // WriteDynamicExecutable links the object into a dynamically linked executable
@@ -78,11 +99,12 @@ func (o *Object) WriteDynamicExecutable(entrySym string, opts DynOptions) ([]byt
 		return nil, fmt.Errorf("obj: a dynamic executable needs an entry symbol")
 	}
 	return o.writeDynImage(dynImage{
-		entry:  entrySym,
-		interp: opts.Interp,
-		needed: opts.Needed,
-		export: opts.Export,
-		pie:    opts.PIE,
+		entry:   entrySym,
+		interp:  opts.Interp,
+		needed:  opts.Needed,
+		export:  opts.Export,
+		require: opts.Require,
+		pie:     opts.PIE,
 	})
 }
 
@@ -107,12 +129,58 @@ func (o *Object) WriteSharedLibrary(opts SharedOptions) ([]byte, error) {
 
 // dynImage is the plan for one dynamically linked image.
 type dynImage struct {
-	entry  string   // entry symbol; empty for a shared library
-	interp string   // loader path; empty for a shared library
-	needed []string // DT_NEEDED
-	export []string // symbols published in .dynsym
-	soname string   // DT_SONAME; empty for an executable
-	pie    bool     // position-independent (ET_DYN linked at 0)
+	entry   string                // entry symbol; empty for a shared library
+	interp  string                // loader path; empty for a shared library
+	needed  []string              // DT_NEEDED
+	export  []string              // symbols published in .dynsym
+	require map[string]SymVersion // imports pinned to a specific library version
+	soname  string                // DT_SONAME; empty for an executable
+	pie     bool                  // position-independent (ET_DYN linked at 0)
+}
+
+// verneed is one library's version requirements.
+type verneed struct {
+	lib  string
+	vers []string
+}
+
+// planVersions groups the per-symbol version requirements by library and assigns
+// each (library, version) pair the index that .gnu.version will carry for the
+// symbols bound to it. Indices start at 2, since 0 and 1 are reserved for local
+// and global-unversioned.
+func planVersions(require map[string]SymVersion) (needs []verneed, index map[string]uint16) {
+	index = map[string]uint16{}
+	byLib := map[string][]string{}
+	for _, v := range require {
+		byLib[v.Library] = append(byLib[v.Library], v.Version)
+	}
+	libs := make([]string, 0, len(byLib))
+	for l := range byLib {
+		libs = append(libs, l)
+	}
+	sort.Strings(libs)
+	next := uint16(2)
+	for _, lib := range libs {
+		vers := uniqueSorted(byLib[lib])
+		for _, v := range vers {
+			index[lib+"\x00"+v] = next
+			next++
+		}
+		needs = append(needs, verneed{lib: lib, vers: vers})
+	}
+	return needs, index
+}
+
+// uniqueSorted returns the sorted distinct elements of in.
+func uniqueSorted(in []string) []string {
+	sort.Strings(in)
+	var out []string
+	for i, s := range in {
+		if i == 0 || s != in[i-1] {
+			out = append(out, s)
+		}
+	}
+	return out
 }
 
 // writeDynImage builds a dynamically linked ELF. Every symbol referenced by a
@@ -207,6 +275,39 @@ func (o *Object) writeDynImage(im dynImage) ([]byte, error) {
 	if im.soname != "" {
 		sonameOff = dynstr.add(im.soname)
 	}
+
+	// Version requirements: .gnu.version gives every dynamic symbol an index, and
+	// .gnu.version_r spells out, per library, which versions those indices name.
+	needs, verIndex := planVersions(im.require)
+	versioned := len(needs) > 0
+	var versym, verneedTab []byte
+	if versioned {
+		for _, n := range needs {
+			dynstr.add(n.lib)
+			for _, v := range n.vers {
+				dynstr.add(v)
+			}
+		}
+		idx := make([]uint16, nsym)
+		for i := 1; i < nsym; i++ {
+			idx[i] = verGlobal
+		}
+		for i, n := range dynNames {
+			if v, ok := im.require[n]; ok && i > 0 {
+				if vi, ok := verIndex[v.Library+"\x00"+v.Version]; ok {
+					idx[i] = vi
+				}
+			}
+		}
+		idx[0] = verLocal
+		vb := &elfBuf{}
+		for _, v := range idx {
+			vb.u16(v)
+		}
+		versym = vb.b
+		verneedTab = buildVerneed(needs, verIndex, dynstr)
+	}
+
 	hash := sysvHash(dynNames)
 	gnuHashTab := gnuHashTable(dynNames, symoffset)
 
@@ -223,6 +324,12 @@ func (o *Object) writeDynImage(im dynImage) ([]byte, error) {
 	off += nsym * 24
 	dynstrOff := off
 	off += len(dynstr.b)
+	off = alignUp(off, 2)
+	gnuVersymOff := off
+	off += len(versym)
+	off = alignUp(off, 4)
+	gnuVerneedOff := off
+	off += len(verneedTab)
 	off = alignUp(off, 8)
 	relaDynOff := off
 	off += nRel * 24
@@ -256,6 +363,9 @@ func (o *Object) writeDynImage(im dynImage) ([]byte, error) {
 	if nRel > 0 {
 		ndyn += 3 // RELA, RELASZ, RELAENT
 	}
+	if versioned {
+		ndyn += 3 // VERSYM, VERNEED, VERNEEDNUM
+	}
 	off = dynamicOff + ndyn*16
 	dataOff := alignUp(off, 8)
 	off = dataOff + len(o.Data)
@@ -278,6 +388,11 @@ func (o *Object) writeDynImage(im dynImage) ([]byte, error) {
 	secGnuHash := nextSec()
 	secDynsym := nextSec()
 	secDynstr := nextSec()
+	secVersym, secVerneed := -1, -1
+	if versioned {
+		secVersym = nextSec()
+		secVerneed = nextSec()
+	}
 	secRelaDyn := -1
 	if nRel > 0 {
 		secRelaDyn = nextSec()
@@ -429,6 +544,11 @@ func (o *Object) writeDynImage(im dynImage) ([]byte, error) {
 		dt(dtPltRel, dtRela)
 		dt(dtJmpRel, va(relaPltOff))
 	}
+	if versioned {
+		dt(dtVersym, va(gnuVersymOff))
+		dt(dtVerneed, va(gnuVerneedOff))
+		dt(dtVerneednum, uint64(len(needs)))
+	}
 	dt(dtFlags, dfBindNow)
 	dt(dtFlags1, df1Now)
 	dt(dtNull, 0)
@@ -472,6 +592,10 @@ func (o *Object) writeDynImage(im dynImage) ([]byte, error) {
 	put(gnuHashOff, gnuHashTab)
 	put(dynsymOff, dynsym.b)
 	put(dynstrOff, dynstr.b)
+	if versioned {
+		put(gnuVersymOff, versym)
+		put(gnuVerneedOff, verneedTab)
+	}
 	put(relaDynOff, relaDyn.b)
 	put(relaPltOff, relaPlt.b)
 	put(pltOff, plt.b)
@@ -499,6 +623,8 @@ func (o *Object) writeDynImage(im dynImage) ([]byte, error) {
 	set(secGnuHash, ".gnu.hash", shtGnuHash, shfAlloc, gnuHashOff, len(gnuHashTab), secDynsym, 0, 8, 0)
 	set(secDynsym, ".dynsym", shtDynsym, shfAlloc, dynsymOff, len(dynsym.b), secDynstr, 1, 8, 24)
 	set(secDynstr, ".dynstr", shtStrtab, shfAlloc, dynstrOff, len(dynstr.b), 0, 0, 1, 0)
+	set(secVersym, ".gnu.version", shtGnuVersym, shfAlloc, gnuVersymOff, len(versym), secDynsym, 0, 2, 2)
+	set(secVerneed, ".gnu.version_r", shtGnuVerneed, shfAlloc, gnuVerneedOff, len(verneedTab), secDynstr, len(needs), 4, 0)
 	set(secRelaDyn, ".rela.dyn", shtRela, shfAlloc, relaDynOff, len(relaDyn.b), secDynsym, 0, 8, 24)
 	set(secRelaPlt, ".rela.plt", shtRela, shfAlloc, relaPltOff, len(relaPlt.b), secDynsym, secPlt, 8, 24)
 	set(secPlt, ".plt", shtProgbits, shfAlloc|shfExecinstr, pltOff, len(plt.b), 0, 0, 16, 0)
@@ -712,6 +838,37 @@ func gnuHashTable(names []string, symoffset int) []byte {
 		w.u32(v)
 	}
 	return w.b
+}
+
+// buildVerneed encodes .gnu.version_r: one Verneed per library, each followed by
+// a Vernaux per version required from it. The offsets are relative to the record
+// they sit in, and a zero next-offset ends a list.
+func buildVerneed(needs []verneed, index map[string]uint16, dynstr *strtab) []byte {
+	const entSz = 16 // both Verneed and Vernaux are 16 bytes
+	b := &elfBuf{}
+	for i, n := range needs {
+		vnNext := uint32(0)
+		if i != len(needs)-1 {
+			vnNext = uint32(entSz * (1 + len(n.vers))) // past this Verneed and its Vernaux run
+		}
+		b.u16(1)                   // vn_version
+		b.u16(uint16(len(n.vers))) // vn_cnt
+		b.u32(dynstr.add(n.lib))   // vn_file
+		b.u32(entSz)               // vn_aux: the first Vernaux follows immediately
+		b.u32(vnNext)
+		for j, v := range n.vers {
+			vnaNext := uint32(entSz)
+			if j == len(n.vers)-1 {
+				vnaNext = 0
+			}
+			b.u32(elfHash(v))            // vna_hash
+			b.u16(0)                     // vna_flags
+			b.u16(index[n.lib+"\x00"+v]) // vna_other: the .gnu.version index
+			b.u32(dynstr.add(v))         // vna_name
+			b.u32(vnaNext)
+		}
+	}
+	return b.b
 }
 
 // gnuHash is the djb2-derived symbol hash used by DT_GNU_HASH.
