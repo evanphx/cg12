@@ -15,6 +15,7 @@ import (
 	"github.com/evanphx/cg12/arm64"
 	"github.com/evanphx/cg12/arm64/a64"
 	"github.com/evanphx/cg12/cc"
+	"github.com/evanphx/cg12/ir"
 	"github.com/evanphx/cg12/obj"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -297,4 +298,19 @@ func disasmObjects(t *testing.T) map[string]*obj.Object {
 	require.NoError(t, err)
 
 	return map[string]*obj.Object{"c-corpus": broad, "thread-local": tls}
+}
+
+// disasmModule compiles a module and reads its machine code back as assembly.
+// This is how the tests that check what was selected -- that an idiom folded,
+// that a scale did not become a multiply -- get at the code, without a separate
+// text emitter having to exist to tell them.
+//
+// Instructions are written one per line behind a tab, so a mnemonic anchors as
+// "\tror " and cannot be matched by an operand that happens to read the same way
+// (", lsl #2]" inside an addressing mode is not an lsl instruction).
+func disasmModule(t *testing.T, m *ir.Module) string {
+	t.Helper()
+	o, err := arm64.CompileToObject(m)
+	require.NoError(t, err)
+	return arm64.Disassemble(o)
 }

@@ -1,10 +1,8 @@
 package arm64_test
 
 import (
-	"strings"
 	"testing"
 
-	"github.com/evanphx/cg12/arm64"
 	"github.com/evanphx/cg12/ir"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -27,14 +25,12 @@ func TestImmediateAndRotateCodegen(t *testing.T) {
 		return m
 	}
 
-	asm, err := arm64.CompileModule(build())
-	require.NoError(t, err)
-	assert.Contains(t, asm, "ror ", "the shift-or idiom folds to a rotate")
-	assert.NotContains(t, asm, "lsl ", "the rotate's shifts are gone")
+	asm := disasmModule(t, build())
+	assert.Contains(t, asm, "\tror ", "the shift-or idiom folds to a rotate")
+	assert.NotContains(t, asm, "\tlsl ", "the rotate's shifts are gone")
 	assert.Contains(t, asm, ", #100", "add folds a 12-bit immediate")
-	assert.Contains(t, asm, ", #255", "and folds a logical immediate")
-	assert.False(t, strings.Contains(asm, "movz w") && strings.Contains(asm, "#100"),
-		"the add constant is not materialized into a register")
+	assert.Contains(t, asm, ", #0xff", "and folds a logical immediate")
+	assert.NotContains(t, asm, "#0x64", "the add constant is not materialized into a register")
 
 	// It still computes ((rotr(x,7) + 100) & 0xff). For x=0x80: rotr=1, +100=101.
 	_, code := buildAndRun(t, build(), `
@@ -59,8 +55,7 @@ func TestIndexedAddressingCodegen(t *testing.T) {
 		return m
 	}
 
-	asm, err := arm64.CompileModule(build())
-	require.NoError(t, err)
+	asm := disasmModule(t, build())
 	assert.Contains(t, asm, "sxtw #2]", "the scaled int index folds into a register offset")
 	assert.NotContains(t, asm, "\tmul ", "the scale is a fold, not a multiply")
 
@@ -94,14 +89,10 @@ func TestBinaryUnitCompilesAndRuns(t *testing.T) {
 	decoded, err := ir.DecodeModule(data)
 	require.NoError(t, err)
 
-	// Two fresh decodes compile to identical assembly (deterministic + complete).
+	// Two fresh decodes compile to identical code (deterministic + complete).
 	m1, _ := ir.DecodeModule(data)
 	m2, _ := ir.DecodeModule(data)
-	asm1, err := arm64.CompileModule(m1)
-	require.NoError(t, err)
-	asm2, err := arm64.CompileModule(m2)
-	require.NoError(t, err)
-	assert.Equal(t, asm1, asm2)
+	assert.Equal(t, disasmModule(t, m1), disasmModule(t, m2))
 
 	// The decoded unit runs correctly: f(3,4) = (7*3) - (4/2) = 19.
 	_, code := buildAndRun(t, decoded, `

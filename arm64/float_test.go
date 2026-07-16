@@ -4,21 +4,13 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/evanphx/cg12/arm64"
 	"github.com/evanphx/cg12/ir"
 	"github.com/stretchr/testify/assert"
-	"github.com/stretchr/testify/require"
 )
 
-func compile(t *testing.T, f *ir.Func) string {
-	t.Helper()
-	asm, err := arm64.Compile(f)
-	require.NoError(t, err)
-	return asm
-}
-
 func TestFloatArithMnemonics(t *testing.T) {
-	f := ir.NewModule().NewFunc("ops", ir.ClsD)
+	m := ir.NewModule()
+	f := m.NewFunc("ops", ir.ClsD)
 	a := f.Param("a", ir.ClsD)
 	b := f.Param("b", ir.ClsD)
 	e := f.Entry()
@@ -28,14 +20,15 @@ func TestFloatArithMnemonics(t *testing.T) {
 	e.Div(ir.ClsD, a, b)
 	e.Ret(e.Neg(ir.ClsD, a))
 
-	asm := compile(t, f)
+	asm := disasmModule(t, m)
 	for _, mn := range []string{"fadd d", "fsub d", "fmul d", "fdiv d", "fneg d"} {
 		assert.Containsf(t, asm, mn, "missing %q", mn)
 	}
 }
 
 func TestFloatConversionMnemonics(t *testing.T) {
-	f := ir.NewModule().NewFunc("conv", ir.ClsD)
+	m := ir.NewModule()
+	f := m.NewFunc("conv", ir.ClsD)
 	d := f.Param("d", ir.ClsD)
 	s := f.Param("s", ir.ClsS)
 	n := f.Param("n", ir.ClsL)
@@ -56,7 +49,7 @@ func TestFloatConversionMnemonics(t *testing.T) {
 	e.Extuw(ir.ClsL, w) // mov (zero-extend)
 	e.RetVoid()
 
-	asm := compile(t, f)
+	asm := disasmModule(t, m)
 	for _, mn := range []string{
 		"fcvtzs x", "fcvtzu x", "scvtf d", "ucvtf d",
 		"fcvt d", "fcvt s", "fmov x",
@@ -74,7 +67,8 @@ func TestFloatCompareConditions(t *testing.T) {
 		{ir.CmpFeq, "eq"}, {ir.CmpFne, "ne"}, {ir.CmpFlt, "mi"}, {ir.CmpFle, "ls"},
 		{ir.CmpFgt, "gt"}, {ir.CmpFge, "ge"}, {ir.CmpFo, "vc"}, {ir.CmpFuo, "vs"},
 	}
-	f := ir.NewModule().NewFunc("cmps", ir.ClsW)
+	m := ir.NewModule()
+	f := m.NewFunc("cmps", ir.ClsW)
 	a := f.Param("a", ir.ClsD)
 	b := f.Param("b", ir.ClsD)
 	e := f.Entry()
@@ -84,7 +78,7 @@ func TestFloatCompareConditions(t *testing.T) {
 	}
 	e.Ret(acc)
 
-	asm := compile(t, f)
+	asm := disasmModule(t, m)
 	assert.Contains(t, asm, "fcmp d")
 	for _, pc := range preds {
 		assert.Containsf(t, asm, "cset w9, "+pc.cond, "predicate %v", pc.p)
@@ -92,7 +86,8 @@ func TestFloatCompareConditions(t *testing.T) {
 }
 
 func TestFloatLoadStoreAndConst(t *testing.T) {
-	f := ir.NewModule().NewFuncVoid("mem")
+	m := ir.NewModule()
+	f := m.NewFuncVoid("mem")
 	p := f.Param("p", ir.ClsL)
 	e := f.Entry()
 	e.Store(f.Double(1.5), p) // str d, + fmov d,x for the constant
@@ -101,7 +96,7 @@ func TestFloatLoadStoreAndConst(t *testing.T) {
 	e.Load(ir.ClsS, p)        // ldr s
 	e.RetVoid()
 
-	asm := compile(t, f)
+	asm := disasmModule(t, m)
 	for _, mn := range []string{"str d", "str s", "ldr d", "ldr s", "fmov d", "fmov s"} {
 		assert.Containsf(t, asm, mn, "missing %q", mn)
 	}
@@ -110,7 +105,8 @@ func TestFloatLoadStoreAndConst(t *testing.T) {
 func TestFloatSpill(t *testing.T) {
 	// Keep many doubles live to force spilling of SIMD registers.
 	const n = 40
-	f := ir.NewModule().NewFunc("bigf", ir.ClsD).Export()
+	m := ir.NewModule()
+	f := m.NewFunc("bigf", ir.ClsD).Export()
 	x := f.Param("x", ir.ClsD)
 	e := f.Entry()
 	vals := make([]ir.Ref, n)
@@ -123,7 +119,7 @@ func TestFloatSpill(t *testing.T) {
 	}
 	e.Ret(acc)
 
-	asm := compile(t, f)
+	asm := disasmModule(t, m)
 	// Spilled doubles are stored to and reloaded from the stack.
 	assert.True(t, strings.Contains(asm, "str d") && strings.Contains(asm, "ldr d"),
 		"expected float spill/reload")

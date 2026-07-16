@@ -13,6 +13,7 @@ import (
 
 	"github.com/evanphx/cg12/arm64"
 	"github.com/evanphx/cg12/ir"
+	"github.com/evanphx/cg12/obj"
 	"github.com/evanphx/cg12/opt"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -392,4 +393,88 @@ int main(void){ return addmul(3,4)==(3+4)*3 ? 0 : 1; }`), 0o644))
 	assert.Contains(t, table, "addmul.src")
 	assert.Regexp(t, `addmul\.src\s+10\b`, table)
 	assert.Regexp(t, `addmul\.src\s+11\b`, table)
+}
+
+// dwarfModule builds addmul(a,b) = (a+b)*a with source positions on the two
+// arithmetic instructions.
+func dwarfModule() *ir.Module {
+	m := ir.NewModule()
+	f := m.NewFunc("addmul", ir.ClsW).Export()
+	a, b := f.Param("a", ir.ClsW), f.Param("b", ir.ClsW)
+	fi := m.File("addmul.src")
+	e := f.Entry()
+	e.At(ir.SrcPos{File: fi, Line: 10, Col: 3})
+	s := e.Add(ir.ClsW, a, b)
+	e.At(ir.SrcPos{File: fi, Line: 11, Col: 7})
+	e.Ret(e.Mul(ir.ClsW, s, a))
+	return m
+}
+
+// A call's position must survive arm64 call lowering, which replaces the call
+// with a different instruction: the line table has to end up pointing at the
+// branch that the call became. The relocation says exactly where that branch is,
+// so this pins the recorded address to it rather than settling for "the position
+// is mentioned somewhere".
+func TestObjEmitDwarfCallPositionSurvivesLowering(t *testing.T) {
+	m := ir.NewModule()
+	f := m.NewFunc("go", ir.ClsW).Export()
+	x := f.Param("x", ir.ClsW)
+	fi := m.File("call.src")
+	e := f.Entry()
+	e.At(ir.SrcPos{File: fi, Line: 42, Col: 9})
+	e.Ret(e.Call(ir.ClsW, f.Sym("helper", 0), x))
+
+	o, err := arm64.CompileToObject(m)
+	require.NoError(t, err)
+
+	// Where the call ended up: the only relocation naming helper.
+	var callAt uint64
+	found := false
+	for _, r := range o.Relocs {
+		if r.Sym == "helper" && r.Type == obj.R_AARCH64_CALL26 {
+			require.False(t, found, "expected a single call to helper")
+			callAt, found = r.Offset, true
+		}
+	}
+	require.True(t, found, "the call should survive as a bl:\n%s", arm64.Disassemble(o))
+
+	// Lowering a call emits the argument moves ahead of the branch, and they carry
+	// its position too, so line 42's code starts before the bl and runs through it.
+	// What matters is the question a debugger asks: stopped here, what line is this?
+	require.Equal(t, 42, dwarfLineAt(t, o, callAt), "stopped at the call, the line is 42")
+}
+
+// dwarfLineAt reads the object's DWARF line program and reports the source line
+// covering addr -- the entry with the greatest address not past it, which is what
+// a debugger resolves a program counter with.
+func dwarfLineAt(t *testing.T, o *obj.Object, addr uint64) int {
+	t.Helper()
+	data, err := o.MarshalELF()
+	require.NoError(t, err)
+	ef, err := dwarfelf.NewFile(bytes.NewReader(data))
+	require.NoError(t, err)
+	d, err := ef.DWARF()
+	require.NoError(t, err)
+	cu, err := d.Reader().Next()
+	require.NoError(t, err)
+	lr, err := d.LineReader(cu)
+	require.NoError(t, err)
+
+	line, best := 0, uint64(0)
+	var le dwarf.LineEntry
+	for {
+		err := lr.Next(&le)
+		if err == io.EOF {
+			break
+		}
+		require.NoError(t, err)
+		if le.EndSequence || le.Address > addr {
+			continue
+		}
+		if le.Address >= best {
+			line, best = le.Line, le.Address
+		}
+	}
+	require.NotZero(t, line, "no line entry covers %#x", addr)
+	return line
 }

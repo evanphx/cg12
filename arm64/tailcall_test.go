@@ -27,8 +27,7 @@ func TestTailCallDeepRecursion(t *testing.T) {
 	parity("odd", "even", 0)
 
 	// The tail call must be a branch (b), never a call (bl).
-	asm, err := arm64.CompileModule(m)
-	require.NoError(t, err)
+	asm := disasmModule(t, m)
 	assert.Contains(t, asm, "\tb odd\n")
 	assert.Contains(t, asm, "\tb even\n")
 	assert.NotContains(t, asm, "\tbl ") // no call instruction at all
@@ -62,9 +61,7 @@ func TestTailCallStackArgsFit(t *testing.T) {
 	args = append(args, re.Add(ir.ClsW, rp[8], caller.Word(100)), re.Add(ir.ClsW, rp[9], caller.Word(200)))
 	re.TailCall(ir.ClsW, caller.Sym("callee", 0), args...)
 
-	asm, err := arm64.CompileModule(m)
-	require.NoError(t, err)
-	assert.NotContains(t, asm, "\tbl ") // tail-branched, not called
+	assert.NotContains(t, disasmModule(t, m), "\tbl ") // tail-branched, not called
 
 	_, code := buildAndRun(t, m, `
 extern int caller(int,int,int,int,int,int,int,int,int,int);
@@ -87,7 +84,7 @@ func TestTailCallStackArgsOverflowErrors(t *testing.T) {
 	}
 	e.TailCallVoid(f.Sym("h", 0), args...)
 
-	_, err := arm64.CompileModule(m)
+	_, err := arm64.CompileToObject(m)
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "stack argument")
 }
@@ -101,7 +98,7 @@ func TestTailCallNotInTailPositionErrors(t *testing.T) {
 	e.Instrs[len(e.Instrs)-1].Tail = true
 	e.Ret(e.Add(ir.ClsW, r, f.Word(1))) // result used, not returned
 
-	_, err := arm64.CompileModule(m)
+	_, err := arm64.CompileToObject(m)
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "tail call")
 }
