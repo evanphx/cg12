@@ -267,6 +267,27 @@ func (s *sel) cmp(in *ir.Instr) {
 	done()
 }
 
+// frameTeardown restores callee-saved registers and the frame pointer and pops
+// the frame, leaving x30 (lr) at the caller's return address but not returning.
+// It is shared by the return epilogue and the tail-call branch. Callee-saved
+// slots are addressed from x29, which equals sp here (after any VLA growth is
+// undone), so the reload is frame-base-relative in both emitters.
+func (s *sel) frameTeardown(frame int, hasDynAlloc bool, calleeSaved []Reg) {
+	if hasDynAlloc {
+		s.b.movSPFromFP() // undo any VLA growth before the frame-relative reloads
+	}
+	for i, r := range calleeSaved {
+		s.b.ldrSpill(r, r.IsFloat(), 16+i*8, 8)
+	}
+	s.b.frameClose(frame)
+}
+
+// epilogue tears down the frame and returns.
+func (s *sel) epilogue(frame int, hasDynAlloc bool, calleeSaved []Reg) {
+	s.frameTeardown(frame, hasDynAlloc, calleeSaved)
+	s.b.ret()
+}
+
 // call emits a direct or indirect call. Args[0] is the callee: a symbol constant
 // becomes a direct bl, anything else (a temp, or a function-pointer literal the
 // optimizer folded to a constant) is materialized and called indirectly with blr.

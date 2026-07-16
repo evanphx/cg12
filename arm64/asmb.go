@@ -89,6 +89,14 @@ type asmb interface {
 	callSym(sym string)
 	callReg(rn Reg)
 
+	// Frame teardown, shared by the return epilogue and the tail-call branch:
+	// movSPFromFP restores sp from the frame pointer (undoing any VLA growth),
+	// frameClose restores x29/x30 and pops the frame (an ldp with the size-dependent
+	// index/offset form), and ret returns through x30.
+	movSPFromFP()
+	frameClose(frame int)
+	ret()
+
 	// Stack pointer and block addresses. allocN grows the stack by a runtime size
 	// (VLA); movFromSP/movToSP snapshot and restore it; adr materializes a block's
 	// PC-relative address.
@@ -441,6 +449,16 @@ func (b *mcAsm) callSym(sym string) {
 	b.prog.Emit(a64.Bl(0))
 }
 func (b *mcAsm) callReg(rn Reg) { b.prog.Emit(a64.Blr(mreg(rn))) }
+func (b *mcAsm) movSPFromFP()   { b.prog.Emit(a64.AddImm(true, mcSP, mcX29, 0)) } // mov sp, x29
+func (b *mcAsm) frameClose(frame int) {
+	if frame <= 504 {
+		b.prog.Emit(a64.Ldp(true, mcX29, mcX30, mcSP, frame, a64.PostIndex))
+	} else {
+		b.prog.Emit(a64.Ldp(true, mcX29, mcX30, mcSP, 0, a64.SignedOffset))
+		b.m.adjustSP(false, frame)
+	}
+}
+func (b *mcAsm) ret() { b.prog.Emit(a64.Ret(mcX30)) }
 func (b *mcAsm) allocN(rd, size Reg) {
 	b.prog.Emit(a64.AddImm(true, mcGP2, mcSP, 0))              // x15 = sp
 	b.prog.Emit(a64.SubReg(true, mreg(rd), mcGP2, mreg(size))) // rd = sp - size
@@ -547,6 +565,16 @@ func (b *textAsm) jumpTable(idx Reg, blk *ir.Block, targets []*ir.Block) {
 }
 func (b *textAsm) callSym(sym string) { b.line("bl %s", sanitize(sym)) }
 func (b *textAsm) callReg(rn Reg)     { b.line("blr %s", rn.Name(8)) }
+func (b *textAsm) movSPFromFP()       { b.line("mov sp, x29") }
+func (b *textAsm) frameClose(frame int) {
+	if frame <= 504 {
+		b.line("ldp x29, x30, [sp], #%d", frame)
+	} else {
+		b.line("ldp x29, x30, [sp, #0]")
+		b.e.adjustSP("add", frame)
+	}
+}
+func (b *textAsm) ret() { b.line("ret") }
 func (b *textAsm) allocN(rd, size Reg) {
 	b.line("mov x15, sp")
 	b.line("sub %s, x15, %s", rd.xName(), size.xName())

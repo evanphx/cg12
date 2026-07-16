@@ -169,23 +169,13 @@ func (e *emitter) allocFrame() {
 // frameTeardown restores callee-saved registers and the frame pointer and pops
 // the frame, leaving lr set to the caller's return address but not returning.
 func (e *emitter) frameTeardown() {
-	if e.hasDynAlloc {
-		e.line("mov sp, x29") // undo any VLA growth before the sp-relative reloads
-	}
-	for i, r := range e.calleeSaved {
-		e.line("ldr %s, [sp, #%d]", r.xName(), 16+i*8)
-	}
-	if e.frame <= 504 {
-		e.line("ldp x29, x30, [sp], #%d", e.frame)
-	} else {
-		e.line("ldp x29, x30, [sp, #0]")
-		e.adjustSP("add", e.frame)
-	}
+	(&sel{f: e.f, b: &textAsm{e: e}, spillBase: e.spillBase}).
+		frameTeardown(e.frame, e.hasDynAlloc, e.calleeSaved)
 }
 
 func (e *emitter) epilogue() {
-	e.frameTeardown()
-	e.line("ret")
+	(&sel{f: e.f, b: &textAsm{e: e}, spillBase: e.spillBase}).
+		epilogue(e.frame, e.hasDynAlloc, e.calleeSaved)
 }
 
 // emitTailBranch emits a mandatory tail call: after the arguments are in place,

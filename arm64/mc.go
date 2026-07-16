@@ -565,23 +565,13 @@ func (m *mc) allocFrame() {
 }
 
 func (m *mc) frameTeardown() {
-	if m.hasDynAlloc {
-		m.emit(a64.AddImm(true, mcSP, mcX29, 0)) // mov sp, x29: undo any VLA growth
-	}
-	for i, r := range m.calleeSaved {
-		m.spillLoad(mreg(r), r.IsFloat(), 16+i*8, 8)
-	}
-	if m.frame <= 504 {
-		m.emit(a64.Ldp(true, mcX29, mcX30, mcSP, m.frame, a64.PostIndex))
-	} else {
-		m.emit(a64.Ldp(true, mcX29, mcX30, mcSP, 0, a64.SignedOffset))
-		m.adjustSP(false, m.frame)
-	}
+	(&sel{f: m.f, b: &mcAsm{prog: m.prog, m: m}, spillBase: m.spillBase}).
+		frameTeardown(m.frame, m.hasDynAlloc, m.calleeSaved)
 }
 
 func (m *mc) epilogue() {
-	m.frameTeardown()
-	m.emit(a64.Ret(mcX30))
+	(&sel{f: m.f, b: &mcAsm{prog: m.prog, m: m}, spillBase: m.spillBase}).
+		epilogue(m.frame, m.hasDynAlloc, m.calleeSaved)
 }
 
 // adjustSP subtracts (sub=true) or adds n to sp.
