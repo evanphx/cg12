@@ -5,6 +5,7 @@ import (
 
 	"github.com/evanphx/cg12/amd64/x64"
 	"github.com/evanphx/cg12/ir"
+	"github.com/evanphx/cg12/obj"
 )
 
 // xasm is the amd64 instruction builder: an x86-idiomatic assembler surface whose
@@ -57,6 +58,11 @@ type xasm interface {
 	// just past the branch: target = table + (int32)table[idx]. idx is already
 	// bounds-checked. R10/R11 are free scratch at a terminator.
 	jmpTable(idx Reg, blk *ir.Block, targets []*ir.Block)
+
+	// Calls. callSym is a direct call to a named function (recorded as a PLT32
+	// relocation in object code); callReg is an indirect call through a register.
+	callSym(sym string, off int64)
+	callReg(r Reg)
 
 	// Floating point: two-operand arithmetic (dst = dst OP src), register move,
 	// sign-flip negation, and a compare that sets the boolean result.
@@ -221,6 +227,11 @@ func (b *mcXasm) jmpTable(idx Reg, blk *ir.Block, targets []*ir.Block) {
 		b.m.prog.DataWord(t.Name, tbl) // .long t - tbl
 	}
 }
+func (b *mcXasm) callSym(sym string, off int64) {
+	b.m.emit(x64.CallRel(0))
+	b.m.recordReloc(b.m.prog.Len()-4, sym, obj.R_X86_64_PLT32, off-4)
+}
+func (b *mcXasm) callReg(r Reg) { b.m.emit(x64.CallReg(r.mreg())) }
 func (b *mcXasm) divGP(w, signed bool, divisor Reg) {
 	if signed {
 		if w {
@@ -489,6 +500,8 @@ func (b *textXasm) jmpTable(idx Reg, blk *ir.Block, targets []*ir.Block) {
 		b.e.line(".long %s - %s", b.e.blabel(t), tbl)
 	}
 }
+func (b *textXasm) callSym(sym string, off int64) { b.e.line("call %s", sanitize(sym)) }
+func (b *textXasm) callReg(r Reg)                 { b.e.line("call *%s", gpn(r, 8)) }
 func (b *textXasm) divGP(w, signed bool, divisor Reg) {
 	sz := clsSizeW(w)
 	if signed {

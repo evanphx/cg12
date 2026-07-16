@@ -177,6 +177,20 @@ func (s *xsel) term(b *ir.Block) bool {
 	return true
 }
 
+// call emits a direct or indirect call. Args[0] is the callee: a symbol constant
+// becomes a direct call, anything else an indirect call through a register. The
+// caller has already placed the arguments (emitArgs) and set the vararg count.
+func (s *xsel) call(in *ir.Instr) {
+	callee := in.Args[0]
+	if callee.Kind == ir.RefConst {
+		if c := s.f.Consts[callee.ID]; c.Kind == ir.ConstSym {
+			s.b.callSym(c.Sym, c.Int)
+			return
+		}
+	}
+	s.b.callReg(s.gpValue(callee, gpScratch0))
+}
+
 // load emits a load, choosing a GP or XMM destination by the op.
 func (s *xsel) load(in *ir.Instr) {
 	if in.Op == ir.OLoads || in.Op == ir.OLoadd {

@@ -493,13 +493,7 @@ func (e *emitter) emitArgs(args []*ir.Instr) {
 }
 
 func (e *emitter) emitCall(in *ir.Instr) {
-	callee := in.Args[0]
-	if c := e.constOf(callee); c != nil && c.Kind == ir.ConstSym {
-		e.line("call %s", sanitize(c.Sym))
-		return
-	}
-	r := e.gpValue(callee, gpScratch0)
-	e.line("call *%s", gpn(r, 8))
+	(&xsel{f: e.f, b: &textXasm{e: e}}).call(in)
 }
 
 func (e *emitter) emitTailCall(in *ir.Instr) {

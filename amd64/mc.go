@@ -1097,14 +1097,7 @@ func (m *mc) emitTailCall(in *ir.Instr) {
 }
 
 func (m *mc) emitCall(in *ir.Instr) {
-	callee := in.Args[0]
-	if c := m.constOf(callee); c != nil && c.Kind == ir.ConstSym {
-		m.emit(x64.CallRel(0))
-		m.recordReloc(m.prog.Len()-4, c.Sym, obj.R_X86_64_PLT32, c.Int-4)
-		return
-	}
-	r := m.gpValue(callee, gpScratch0)
-	m.emit(x64.CallReg(r.mreg()))
+	(&xsel{f: m.f, b: &mcXasm{m: m}}).call(in)
 }
 
 func (m *mc) term(b *ir.Block) {

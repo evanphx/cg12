@@ -1090,23 +1090,7 @@ func (m *mc) callSequence(b *ir.Block, i int) int {
 }
 
 func (m *mc) emitCall(in *ir.Instr) {
-	callee := in.Args[0]
-	switch callee.Kind {
-	case ir.RefConst:
-		if c := m.f.Consts[callee.ID]; c.Kind == ir.ConstSym {
-			m.reloc(sanitize(c.Sym), obj.R_AARCH64_CALL26)
-			m.emit(a64.Bl(0))
-			break
-		}
-		// A call through a constant address (e.g. a function pointer the
-		// optimizer folded to a literal): materialize it and branch indirectly.
-		m.emit(a64.Blr(m.src(callee, 0, 8)))
-	case ir.RefTemp:
-		r := m.src(callee, 0, 8)
-		m.emit(a64.Blr(r))
-	default:
-		m.fail("arm64: invalid call target")
-	}
+	(&sel{f: m.f, b: &mcAsm{prog: m.prog, m: m}, spillBase: m.spillBase}).call(in)
 	m.recordSafepoint(in) // the branch just emitted; the return address is next
 }
 

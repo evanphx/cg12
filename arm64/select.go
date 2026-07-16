@@ -267,6 +267,21 @@ func (s *sel) cmp(in *ir.Instr) {
 	done()
 }
 
+// call emits a direct or indirect call. Args[0] is the callee: a symbol constant
+// becomes a direct bl, anything else (a temp, or a function-pointer literal the
+// optimizer folded to a constant) is materialized and called indirectly with blr.
+// The machine-code emitter records the GC safepoint after the branch itself.
+func (s *sel) call(in *ir.Instr) {
+	callee := in.Args[0]
+	if callee.Kind == ir.RefConst {
+		if c := s.f.Consts[callee.ID]; c.Kind == ir.ConstSym {
+			s.b.callSym(c.Sym)
+			return
+		}
+	}
+	s.b.callReg(s.src(callee, 0, 8))
+}
+
 // term selects a block terminator through the builder, handling the branch forms
 // and the jump table. It returns false only for the return terminator, which
 // stays on each emitter's own path because it drives the frame epilogue.

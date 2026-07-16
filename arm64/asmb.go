@@ -3,6 +3,7 @@ package arm64
 import (
 	"github.com/evanphx/cg12/arm64/a64"
 	"github.com/evanphx/cg12/ir"
+	"github.com/evanphx/cg12/obj"
 )
 
 // asmb is the arm64 instruction builder: an arm64-idiomatic assembler surface
@@ -82,6 +83,11 @@ type asmb interface {
 	// just past the branch: target = table + (int32)table[idx]. idx is already
 	// bounds-checked. x17/x15 are free scratch at a terminator.
 	jumpTable(idx Reg, blk *ir.Block, targets []*ir.Block)
+
+	// Calls. callSym is a direct bl to a named function (recorded as a CALL26
+	// relocation in object code); callReg is an indirect blr through a register.
+	callSym(sym string)
+	callReg(rn Reg)
 
 	// Stack pointer and block addresses. allocN grows the stack by a runtime size
 	// (VLA); movFromSP/movToSP snapshot and restore it; adr materializes a block's
@@ -430,6 +436,11 @@ func (b *mcAsm) jumpTable(idx Reg, blk *ir.Block, targets []*ir.Block) {
 		b.prog.DataWord(t.Name, tbl) // .word t - tbl
 	}
 }
+func (b *mcAsm) callSym(sym string) {
+	b.m.reloc(sanitize(sym), obj.R_AARCH64_CALL26)
+	b.prog.Emit(a64.Bl(0))
+}
+func (b *mcAsm) callReg(rn Reg) { b.prog.Emit(a64.Blr(mreg(rn))) }
 func (b *mcAsm) allocN(rd, size Reg) {
 	b.prog.Emit(a64.AddImm(true, mcGP2, mcSP, 0))              // x15 = sp
 	b.prog.Emit(a64.SubReg(true, mreg(rd), mcGP2, mreg(size))) // rd = sp - size
@@ -534,6 +545,8 @@ func (b *textAsm) jumpTable(idx Reg, blk *ir.Block, targets []*ir.Block) {
 		b.line(".word %s - %s", b.e.blockLabel(t), tbl)
 	}
 }
+func (b *textAsm) callSym(sym string) { b.line("bl %s", sanitize(sym)) }
+func (b *textAsm) callReg(rn Reg)     { b.line("blr %s", rn.Name(8)) }
 func (b *textAsm) allocN(rd, size Reg) {
 	b.line("mov x15, sp")
 	b.line("sub %s, x15, %s", rd.xName(), size.xName())
