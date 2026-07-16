@@ -101,7 +101,9 @@ func CompileToObjectWith(m *ir.Module, opts Options) (*obj.Object, error) {
 		}
 	}
 	for _, d := range m.Data {
-		addData(o, d)
+		if err := addData(o, d); err != nil {
+			return nil, err
+		}
 	}
 	if len(m.Files) > 0 && anchor != "" {
 		o.SetDWARF(m.Files, rows, dfuncs, uint64(len(o.Text)), anchor, "cg12", ".", m.Files[0], obj.R_X86_64_64, 0x56) // DW_OP_reg6 (rbp)

@@ -180,14 +180,19 @@ func merge(objs []*obj.Object) (*obj.Object, error) {
 		}
 		textBase := uint64(len(out.Text))
 		dataBase := uint64(len(out.Data))
+		tdataBase := uint64(len(out.Tdata))
 		out.Text = append(out.Text, o.Text...)
 		out.Data = append(out.Data, o.Data...)
+		out.Tdata = append(out.Tdata, o.Tdata...)
+		if o.TlsAlign > out.TlsAlign {
+			out.TlsAlign = o.TlsAlign
+		}
 
 		// Place this object's defined symbols; collect local renames (a local name
 		// that clashes with one already placed is uniquified per object).
 		local := map[string]string{}
 		for _, s := range o.Syms {
-			base, ok := sectionBase(s.Section, textBase, dataBase)
+			base, ok := sectionBase(s.Section, textBase, dataBase, tdataBase)
 			if !ok {
 				continue // undefined, or a section this linker does not merge yet
 			}
@@ -237,12 +242,16 @@ func merge(objs []*obj.Object) (*obj.Object, error) {
 	return out, nil
 }
 
-func sectionBase(k obj.SecKind, textBase, dataBase uint64) (uint64, bool) {
+func sectionBase(k obj.SecKind, textBase, dataBase, tdataBase uint64) (uint64, bool) {
 	switch k {
 	case obj.SecText:
 		return textBase, true
 	case obj.SecData:
 		return dataBase, true
+	case obj.SecTdata:
+		// A thread-local symbol's value is its offset within the TLS block, so it
+		// rebases against the merged .tdata rather than an address.
+		return tdataBase, true
 	}
 	return 0, false
 }

@@ -58,6 +58,7 @@ const (
 	SecData                    // defined in .data
 	SecRodata                  // defined in .rodata
 	SecStackMap                // defined in .cg12_stackmaps
+	SecTdata                   // defined in .tdata (thread-local)
 )
 
 // Sym is a symbol-table entry.
@@ -82,10 +83,17 @@ type Reloc struct {
 // Object is the content of a relocatable object: code, data, symbols, and the
 // relocations that reference them.
 type Object struct {
-	Machine    uint16
-	Text       []byte
-	Data       []byte
-	Rodata     []byte
+	Machine uint16
+	Text    []byte
+	Data    []byte
+	Rodata  []byte
+
+	// Tdata is the thread-local initialization image (.tdata): not data used in
+	// place, but the bytes each new thread's TLS block starts life as. TlsAlign is
+	// the alignment the block requires.
+	Tdata    []byte
+	TlsAlign int
+
 	Syms       []Sym
 	Relocs     []Reloc // relocations against .text
 	DataRelocs []Reloc // relocations against .data (e.g. a pointer to a symbol)
@@ -117,6 +125,7 @@ const (
 	shfWrite     = 0x1
 	shfAlloc     = 0x2
 	shfExecinstr = 0x4
+	shfTLS       = 0x400
 
 	stbLocal  = 0
 	stbGlobal = 1

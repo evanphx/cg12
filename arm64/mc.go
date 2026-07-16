@@ -308,39 +308,53 @@ func convInlineNodes(ns []*inlineNode) []obj.InlineRange {
 
 // addData appends a data definition to the object's .data section.
 func addData(o *obj.Object, d *ir.Data) error {
-	if d.Align > 0 {
-		for len(o.Data)%d.Align != 0 {
-			o.Data = append(o.Data, 0)
+	// A thread-local's bytes are not data used in place: they are the image every
+	// new thread's block is initialized from. They go to .tdata, and the symbol
+	// records an offset within that block rather than an address.
+	buf, sec := &o.Data, obj.SecData
+	if d.Linkage.Thread {
+		buf, sec = &o.Tdata, obj.SecTdata
+		if d.Align > o.TlsAlign {
+			o.TlsAlign = d.Align
 		}
 	}
-	base := uint64(len(o.Data))
+	if d.Align > 0 {
+		for len(*buf)%d.Align != 0 {
+			*buf = append(*buf, 0)
+		}
+	}
+	base := uint64(len(*buf))
 	for _, it := range d.Items {
 		switch {
 		case it.Zero > 0:
-			o.Data = append(o.Data, make([]byte, it.Zero)...)
+			*buf = append(*buf, make([]byte, it.Zero)...)
 		case it.Str != "":
-			o.Data = append(o.Data, []byte(it.Str)...)
+			*buf = append(*buf, []byte(it.Str)...)
 		case it.Sym != "":
 			// A pointer stored in data: emit an 8-byte slot and a .rela.data
 			// ABS64 relocation carrying the (symbol + offset) addend.
+			if sec == obj.SecTdata {
+				return fmt.Errorf("arm64: thread-local %q cannot hold the address of %q: every thread's copy would need its own relocation", d.Name, it.Sym)
+			}
 			o.DataRelocs = append(o.DataRelocs, obj.Reloc{
-				Offset: uint64(len(o.Data)), Sym: sanitize(it.Sym),
+				Offset: uint64(len(*buf)), Sym: sanitize(it.Sym),
 				Type: obj.R_AARCH64_ABS64, Addend: it.Off,
 			})
-			o.Data = append(o.Data, make([]byte, 8)...)
+			*buf = append(*buf, make([]byte, 8)...)
 		case len(it.Flts) > 0:
 			for _, v := range it.Flts {
-				o.Data = appendInt(o.Data, floatBitsOf(it.Sub, v), it.Sub.Size())
+				*buf = appendInt(*buf, floatBitsOf(it.Sub, v), it.Sub.Size())
 			}
 		default:
 			for _, v := range it.Ints {
-				o.Data = appendInt(o.Data, v, it.Sub.Size())
+				*buf = appendInt(*buf, v, it.Sub.Size())
 			}
 		}
 	}
 	o.Syms = append(o.Syms, obj.Sym{
-		Name: sanitize(d.Name), Section: obj.SecData, Value: base,
-		Size: uint64(len(o.Data)) - base, Global: d.Linkage.Export,
+		Name: sanitize(d.Name), Section: sec, Value: base,
+		Size: uint64(len(*buf)) - base, Global: d.Linkage.Export,
+		TLS: sec == obj.SecTdata,
 	})
 	return nil
 }

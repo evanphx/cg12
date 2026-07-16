@@ -102,6 +102,10 @@ func (o *Object) WriteExecutable(entrySym string) ([]byte, error) {
 // secVaddr) to the final address of its target symbol.
 func resolveRelocs(machine uint16, sec []byte, secVaddr uint64, relocs []Reloc, symVaddr map[string]uint64) error {
 	for _, r := range relocs {
+		if isTLSReloc(r.Type) || isX86TLSReloc(r.Type) {
+			return fmt.Errorf("obj: %q is thread-local, which a static executable cannot use: "+
+				"nothing would set up the thread pointer. Link it dynamically, where the loader does", r.Sym)
+		}
 		s, ok := symVaddr[r.Sym]
 		if !ok {
 			return fmt.Errorf("obj: undefined symbol %q referenced by relocation", r.Sym)

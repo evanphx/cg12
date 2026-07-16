@@ -13,18 +13,20 @@ const (
 
 	ptDynamic  = 2
 	ptInterp   = 3
+	ptTls      = 7
 	ptPhdr     = 6
 	ptGnuRelro = 0x6474e552
 
-	shtHash       = 5
-	shtDynamic    = 6
-	shtDynsym     = 11
-	shtInitArray  = 14
-	shtFiniArray  = 15
-	shtGnuHash    = 0x6ffffff6
-	shtGnuVerdef  = 0x6ffffffd
-	shtGnuVerneed = 0x6ffffffe
-	shtGnuVersym  = 0x6fffffff
+	shtHash        = 5
+	shtDynamic     = 6
+	shtDynsym      = 11
+	shtProgbitsTls = 1 // .tdata is PROGBITS; SHF_TLS is what marks it thread-local
+	shtInitArray   = 14
+	shtFiniArray   = 15
+	shtGnuHash     = 0x6ffffff6
+	shtGnuVerdef   = 0x6ffffffd
+	shtGnuVerneed  = 0x6ffffffe
+	shtGnuVersym   = 0x6fffffff
 
 	dtNull        = 0
 	dtNeeded      = 1
@@ -380,6 +382,9 @@ func (o *Object) writeDynImage(im dynImage) ([]byte, error) {
 	if relro {
 		nph++ // PT_GNU_RELRO
 	}
+	if len(o.Tdata) > 0 {
+		nph++ // PT_TLS
+	}
 
 	// The dynamic symbol table lists the null symbol, then every import (undefined,
 	// resolved in a needed library), then every export (defined here, published for
@@ -526,6 +531,15 @@ func (o *Object) writeDynImage(im dynImage) ([]byte, error) {
 	// The init/fini arrays are function-pointer tables: written by relocation and
 	// never again, so they belong in the relro region beside the GOT.
 	initArrSize, finiArrSize := len(im.initArr)*8, len(im.finiArr)*8
+
+	// .tdata is only ever read (each thread's block is a copy of it), so it too
+	// sits in the relro region -- at its head, where the alignment below can be
+	// arranged for it.
+	tlsAlign := o.TlsAlign
+	if tlsAlign < 1 {
+		tlsAlign = 1
+	}
+	tdataSize := len(o.Tdata)
 	ndyn := len(im.needed) + 7 // NEEDED..., HASH, GNU_HASH, STRTAB, SYMTAB, STRSZ, SYMENT, NULL
 	if !im.lazy {
 		ndyn += 2 // FLAGS, FLAGS_1 (eager binding)
@@ -557,7 +571,11 @@ func (o *Object) writeDynImage(im dynImage) ([]byte, error) {
 	if finiArrSize > 0 {
 		ndyn += 2 // FINI_ARRAY, FINI_ARRAYSZ
 	}
-	relroSize := initArrSize + finiArrSize + gotSize + ndyn*16
+	relroSize := tdataSize + initArrSize + finiArrSize + gotSize + ndyn*16
+	// PT_TLS must start on its own alignment. The writable region is placed by
+	// working back from its end (below), so rounding the region's size up to the
+	// TLS alignment makes its *start* -- and hence .tdata -- land aligned.
+	relroSize = alignUp(relroSize, tlsAlign)
 
 	// The writable region begins past the read-execute one's last page, so the two
 	// never share a page. When there is a relro region it is nudged forward within
@@ -570,7 +588,8 @@ func (o *Object) writeDynImage(im dynImage) ([]byte, error) {
 	if relro {
 		rwOff += (execAlign - relroSize%execAlign) % execAlign
 	}
-	initArrOff := rwOff
+	tdataOff := rwOff
+	initArrOff := tdataOff + tdataSize
 	finiArrOff := initArrOff + initArrSize
 	gotOff := finiArrOff + finiArrSize
 	dynamicOff := gotOff + gotSize // every size here is a multiple of 8, so this stays aligned
@@ -621,6 +640,10 @@ func (o *Object) writeDynImage(im dynImage) ([]byte, error) {
 		secPlt = nextSec()
 	}
 	secText := nextSec()
+	secTdata := -1
+	if tdataSize > 0 {
+		secTdata = nextSec()
+	}
 	secInitArr, secFiniArr := -1, -1
 	if initArrSize > 0 {
 		secInitArr = nextSec()
@@ -654,6 +677,15 @@ func (o *Object) writeDynImage(im dynImage) ([]byte, error) {
 	for i, n := range pltNames {
 		symVaddr[n] = va(pltOff + i*stubSz)
 	}
+	// A thread-local has no address: every thread has its own copy. Its symbol
+	// value is an offset within the TLS block, which a local-exec relocation turns
+	// into an offset from the thread pointer.
+	tlsOff := map[string]uint64{}
+	for _, sym := range o.Syms {
+		if sym.Section == SecTdata {
+			tlsOff[sym.Name] = tpOffset(o.Machine, sym.Value, uint64(tdataSize), uint64(tlsAlign))
+		}
+	}
 	var entry uint64
 	if im.entry != "" {
 		e, ok := symVaddr[im.entry]
@@ -665,11 +697,11 @@ func (o *Object) writeDynImage(im dynImage) ([]byte, error) {
 
 	text := append([]byte(nil), o.Text...)
 	data := append([]byte(nil), o.Data...)
-	dynRel, err := resolveSection(o.Machine, im.pie, text, va(textOff), o.Relocs, symVaddr)
+	dynRel, err := resolveSection(o.Machine, im.pie, text, va(textOff), o.Relocs, symVaddr, tlsOff)
 	if err != nil {
 		return nil, err
 	}
-	dataRel, err := resolveSection(o.Machine, im.pie, data, va(dataOff), o.DataRelocs, symVaddr)
+	dataRel, err := resolveSection(o.Machine, im.pie, data, va(dataOff), o.DataRelocs, symVaddr, tlsOff)
 	if err != nil {
 		return nil, err
 	}
@@ -868,6 +900,11 @@ func (o *Object) writeDynImage(im dynImage) ([]byte, error) {
 		// loader is allowed to re-protect.
 		phdr(ptGnuRelro, pfR, uint64(rwOff), va(rwOff), uint64(relroEnd-rwOff), 1)
 	}
+	if tdataSize > 0 {
+		// The template every thread's TLS block is built from. It is never written,
+		// only copied, so it is read-only.
+		phdr(ptTls, pfR, uint64(tdataOff), va(tdataOff), uint64(tdataSize), uint64(tlsAlign))
+	}
 
 	put := func(fileOff int, b []byte) {
 		for len(out.b) < fileOff {
@@ -891,6 +928,7 @@ func (o *Object) writeDynImage(im dynImage) ([]byte, error) {
 	put(relaPltOff, relaPlt.b)
 	put(plt0Off, plt.b)
 	put(textOff, text)
+	put(tdataOff, o.Tdata)
 	put(initArrOff, initArr.b)
 	put(finiArrOff, finiArr.b)
 	put(gotOff, got.b)
@@ -923,6 +961,7 @@ func (o *Object) writeDynImage(im dynImage) ([]byte, error) {
 	set(secRelaPlt, ".rela.plt", shtRela, shfAlloc, relaPltOff, len(relaPlt.b), secDynsym, secPlt, 8, 24)
 	set(secPlt, ".plt", shtProgbits, shfAlloc|shfExecinstr, plt0Off, len(plt.b), 0, 0, 16, 0)
 	set(secText, ".text", shtProgbits, shfAlloc|shfExecinstr, textOff, len(text), 0, 0, 16, 0)
+	set(secTdata, ".tdata", shtProgbitsTls, shfAlloc|shfWrite|shfTLS, tdataOff, tdataSize, 0, 0, uint64(tlsAlign), 0)
 	set(secInitArr, ".init_array", shtInitArray, shfAlloc|shfWrite, initArrOff, initArrSize, 0, 0, 8, 8)
 	set(secFiniArr, ".fini_array", shtFiniArray, shfAlloc|shfWrite, finiArrOff, finiArrSize, 0, 0, 8, 8)
 	set(secGot, ".got.plt", shtProgbits, shfAlloc|shfWrite, gotOff, len(got.b), 0, 0, 8, 8)
@@ -999,9 +1038,19 @@ func (o *Object) imports() []string {
 // so it becomes a RELATIVE relocation the loader applies as *slot = base + addend.
 // PC-relative references always resolve here: the distance between two points in
 // the image does not change when the image moves.
-func resolveSection(machine uint16, pie bool, sec []byte, secVaddr uint64, relocs []Reloc, symVaddr map[string]uint64) ([]Reloc, error) {
+func resolveSection(machine uint16, pie bool, sec []byte, secVaddr uint64, relocs []Reloc, symVaddr, tlsOff map[string]uint64) ([]Reloc, error) {
 	var dyn []Reloc
 	for _, r := range relocs {
+		if isTLSReloc(r.Type) || isX86TLSReloc(r.Type) {
+			off, ok := tlsOff[r.Sym]
+			if !ok {
+				return nil, fmt.Errorf("obj: thread-local symbol %q is not defined here; only local-exec TLS is supported, which needs the variable in this image", r.Sym)
+			}
+			if err := resolveTLS(sec, r, int64(off)+r.Addend); err != nil {
+				return nil, err
+			}
+			continue
+		}
 		s, ok := symVaddr[r.Sym]
 		if !ok {
 			return nil, fmt.Errorf("obj: undefined symbol %q referenced by relocation", r.Sym)
@@ -1032,6 +1081,47 @@ func resolveSection(machine uint16, pie bool, sec []byte, secVaddr uint64, reloc
 		}
 	}
 	return dyn, nil
+}
+
+// tpOffset turns a thread-local's offset within the TLS block into its offset
+// from the thread pointer, which is what a local-exec relocation encodes. The two
+// architectures put the block on opposite sides of the pointer:
+//
+//   - AArch64 (variant I): the pointer addresses a TCB and the block follows it,
+//     so offsets are positive, past a two-word TCB rounded up to the block's
+//     alignment.
+//   - x86-64 (variant II): the pointer addresses the *end* of the block, so
+//     offsets are negative.
+func tpOffset(machine uint16, symOff, blockSize, align uint64) uint64 {
+	switch machine {
+	case EM_AARCH64:
+		const tcbSize = 16
+		return uint64(alignUp(tcbSize, int(align))) + symOff
+	case EM_X86_64:
+		return symOff - uint64(alignUp(int(blockSize), int(align)))
+	}
+	return symOff
+}
+
+// resolveTLS writes a local-exec relocation: the offset of a thread-local from
+// the thread pointer, which is a link-time constant because the executable's
+// block sits at a fixed place in every thread.
+func resolveTLS(sec []byte, r Reloc, tp int64) error {
+	switch r.Type {
+	case R_AARCH64_TLSLE_ADD_TPREL_HI12:
+		w := binary.LittleEndian.Uint32(sec[r.Offset:])
+		w = (w &^ (0xfff << 10)) | (uint32((tp>>12)&0xfff) << 10)
+		binary.LittleEndian.PutUint32(sec[r.Offset:], w)
+	case R_AARCH64_TLSLE_ADD_TPREL_LO12_NC:
+		w := binary.LittleEndian.Uint32(sec[r.Offset:])
+		w = (w &^ (0xfff << 10)) | (uint32(tp&0xfff) << 10)
+		binary.LittleEndian.PutUint32(sec[r.Offset:], w)
+	case R_X86_64_TPOFF32:
+		binary.LittleEndian.PutUint32(sec[r.Offset:], uint32(int32(tp)))
+	default:
+		return fmt.Errorf("obj: unsupported thread-local relocation type %d (symbol %q)", r.Type, r.Sym)
+	}
+	return nil
 }
 
 // isAbsoluteReloc reports whether a relocation stores a full 64-bit address, the
