@@ -81,6 +81,12 @@ type DynOptions struct {
 	// defines it, instead of whichever version that library marks as the default.
 	// It is how a program pins an older interface a library still carries.
 	Require map[string]SymVersion
+
+	// Lazy resolves each import on its first call rather than at load time,
+	// trading a resolver trampoline and a writable GOT for not paying to bind
+	// symbols the run never uses. Eager binding is the default and is what
+	// hardened builds want (it lets the GOT be made read-only after relocation).
+	Lazy bool
 }
 
 // SymVersion names a versioned definition of an imported symbol.
@@ -105,6 +111,7 @@ func (o *Object) WriteDynamicExecutable(entrySym string, opts DynOptions) ([]byt
 		export:  opts.Export,
 		require: opts.Require,
 		pie:     opts.PIE,
+		lazy:    opts.Lazy,
 	})
 }
 
@@ -136,6 +143,7 @@ type dynImage struct {
 	require map[string]SymVersion // imports pinned to a specific library version
 	soname  string                // DT_SONAME; empty for an executable
 	pie     bool                  // position-independent (ET_DYN linked at 0)
+	lazy    bool                  // resolve imports on first call, not at load
 }
 
 // verneed is one library's version requirements.
@@ -336,8 +344,10 @@ func (o *Object) writeDynImage(im dynImage) ([]byte, error) {
 	relaPltOff := off
 	off += len(imports) * 24
 	off = alignUp(off, 16)
-	pltOff := off
-	off += len(imports) * stubSz
+	plt0Sz := plt0Size(o.Machine, im.lazy && len(imports) > 0)
+	plt0Off := off
+	pltOff := off + plt0Sz
+	off = pltOff + len(imports)*stubSz
 	off = alignUp(off, 16)
 	textOff := off
 	off += len(o.Text)
@@ -353,7 +363,10 @@ func (o *Object) writeDynImage(im dynImage) ([]byte, error) {
 		off = gotOff
 	}
 	dynamicOff := alignUp(off, 8)
-	ndyn := len(im.needed) + 9 // NEEDED..., HASH, GNU_HASH, STRTAB, SYMTAB, STRSZ, SYMENT, FLAGS, FLAGS_1, NULL
+	ndyn := len(im.needed) + 7 // NEEDED..., HASH, GNU_HASH, STRTAB, SYMTAB, STRSZ, SYMENT, NULL
+	if !im.lazy {
+		ndyn += 2 // FLAGS, FLAGS_1 (eager binding)
+	}
 	if im.soname != "" {
 		ndyn++ // SONAME
 	}
@@ -505,8 +518,11 @@ func (o *Object) writeDynImage(im dynImage) ([]byte, error) {
 	}
 
 	plt := &elfBuf{}
+	if plt0Sz > 0 {
+		plt.bytes(plt0Stub(o.Machine, va(plt0Off), va(gotOff)))
+	}
 	for i := range imports {
-		plt.bytes(pltStub(o.Machine, va(pltOff+i*stubSz), va(gotOff+(gotReserved+i)*8)))
+		plt.bytes(pltStub(o.Machine, va(pltOff+i*stubSz), va(gotOff+(gotReserved+i)*8), va(plt0Off), i, im.lazy))
 	}
 
 	got := &elfBuf{}
@@ -514,8 +530,10 @@ func (o *Object) writeDynImage(im dynImage) ([]byte, error) {
 		got.u64(va(dynamicOff)) // GOT[0] = &_DYNAMIC
 		got.u64(0)              // GOT[1], GOT[2]: the loader's lazy-resolution slots
 		got.u64(0)
-		for range imports {
-			got.u64(0) // filled by the loader from the JUMP_SLOT relocation
+		for i := range imports {
+			// The loader fills this from the JUMP_SLOT relocation; under lazy binding
+			// it adds the load bias to this initial value instead.
+			got.u64(pltGotInit(o.Machine, im.lazy, va(plt0Off), va(pltOff+i*stubSz)))
 		}
 	}
 
@@ -549,8 +567,10 @@ func (o *Object) writeDynImage(im dynImage) ([]byte, error) {
 		dt(dtVerneed, va(gnuVerneedOff))
 		dt(dtVerneednum, uint64(len(needs)))
 	}
-	dt(dtFlags, dfBindNow)
-	dt(dtFlags1, df1Now)
+	if !im.lazy {
+		dt(dtFlags, dfBindNow)
+		dt(dtFlags1, df1Now)
+	}
 	dt(dtNull, 0)
 	if n := len(dyn.b) / 16; n != ndyn {
 		return nil, fmt.Errorf("obj: dynamic section has %d entries, reserved %d", n, ndyn)
@@ -598,7 +618,7 @@ func (o *Object) writeDynImage(im dynImage) ([]byte, error) {
 	}
 	put(relaDynOff, relaDyn.b)
 	put(relaPltOff, relaPlt.b)
-	put(pltOff, plt.b)
+	put(plt0Off, plt.b)
 	put(textOff, text)
 	put(gotOff, got.b)
 	put(dynamicOff, dyn.b)
@@ -627,7 +647,7 @@ func (o *Object) writeDynImage(im dynImage) ([]byte, error) {
 	set(secVerneed, ".gnu.version_r", shtGnuVerneed, shfAlloc, gnuVerneedOff, len(verneedTab), secDynstr, len(needs), 4, 0)
 	set(secRelaDyn, ".rela.dyn", shtRela, shfAlloc, relaDynOff, len(relaDyn.b), secDynsym, 0, 8, 24)
 	set(secRelaPlt, ".rela.plt", shtRela, shfAlloc, relaPltOff, len(relaPlt.b), secDynsym, secPlt, 8, 24)
-	set(secPlt, ".plt", shtProgbits, shfAlloc|shfExecinstr, pltOff, len(plt.b), 0, 0, 16, 0)
+	set(secPlt, ".plt", shtProgbits, shfAlloc|shfExecinstr, plt0Off, len(plt.b), 0, 0, 16, 0)
 	set(secText, ".text", shtProgbits, shfAlloc|shfExecinstr, textOff, len(text), 0, 0, 16, 0)
 	set(secGot, ".got.plt", shtProgbits, shfAlloc|shfWrite, gotOff, len(got.b), 0, 0, 8, 8)
 	set(secDynamic, ".dynamic", shtDynamic, shfAlloc|shfWrite, dynamicOff, ndyn*16, secDynstr, 0, 8, 16)
@@ -925,7 +945,7 @@ func jumpSlot(machine uint16) uint32 {
 	return 0
 }
 
-// pltStubSize is the byte size of one PLT stub (padded to a uniform stride).
+// pltStubSize is the byte size of one PLT entry (a uniform stride).
 func pltStubSize(machine uint16) int {
 	switch machine {
 	case EM_AARCH64, EM_X86_64:
@@ -934,27 +954,98 @@ func pltStubSize(machine uint16) int {
 	return 0
 }
 
-// pltStub encodes a stub that jumps to the address the loader stored in the GOT
-// slot at gotVaddr. Under eager binding the slot always holds the real target, so
-// a single indirect jump suffices. Both forms address the GOT PC-relatively, so
-// the stub works unchanged wherever the image is loaded.
-func pltStub(machine uint16, stubVaddr, gotVaddr uint64) []byte {
+// plt0Size is the size of the resolver trampoline that heads the PLT. It exists
+// only under lazy binding; eager binding needs no resolver.
+func plt0Size(machine uint16, lazy bool) int {
+	if !lazy {
+		return 0
+	}
+	switch machine {
+	case EM_AARCH64:
+		return 32
+	case EM_X86_64:
+		return 16
+	}
+	return 0
+}
+
+// adrpLdrAdd encodes the AArch64 PLT preamble: adrp x16, page(got) ; ldr x17,
+// [x16, #lo12(got)] ; add x16, x16, #lo12(got). It leaves x17 holding the GOT
+// slot's contents and x16 holding the slot's address -- the resolver identifies
+// which import it was called for from that address, which is why the add is here
+// even though eager binding never looks at x16.
+func adrpLdrAdd(b *elfBuf, atVaddr, gotVaddr uint64) {
+	page := ((int64(gotVaddr) &^ 0xfff) - (int64(atVaddr) &^ 0xfff)) >> 12
+	lo12 := uint32(gotVaddr & 0xfff)
+	b.u32(0x90000010 | uint32(page&3)<<29 | uint32((page>>2)&0x7ffff)<<5) // adrp x16
+	b.u32(0xf9400211 | (lo12/8)<<10)                                      // ldr x17, [x16,#lo12]
+	b.u32(0x91000210 | lo12<<10)                                          // add x16, x16, #lo12
+}
+
+// plt0Stub encodes the lazy-binding resolver trampoline. A PLT entry whose GOT
+// slot is still unresolved lands here with x16 (or the stack, on x86-64) naming
+// the slot; the trampoline hands that plus the link map in GOT[1] to the
+// resolver in GOT[2], which binds the symbol and jumps on to it.
+func plt0Stub(machine uint16, plt0Vaddr, gotVaddr uint64) []byte {
 	b := &elfBuf{}
 	switch machine {
 	case EM_AARCH64:
-		// adrp x16, page(got) ; ldr x16, [x16, #lo12(got)] ; br x16
-		page := ((int64(gotVaddr) &^ 0xfff) - (int64(stubVaddr) &^ 0xfff)) >> 12
-		b.u32(0x90000010 | uint32(page&3)<<29 | uint32((page>>2)&0x7ffff)<<5)
-		b.u32(0xf9400210 | uint32((gotVaddr&0xfff)/8)<<10)
-		b.u32(0xd61f0200) // br x16
-		b.u32(0xd503201f) // nop, padding to the 16-byte stride
+		b.u32(0xa9bf7bf0)                       // stp x16, x30, [sp, #-16]!  -- save the slot address and return address
+		adrpLdrAdd(b, plt0Vaddr+4, gotVaddr+16) // point at GOT[2], the resolver
+		b.u32(0xd61f0220)                       // br x17
+		for i := 0; i < 3; i++ {
+			b.u32(0xd503201f) // nop, padding to the 32-byte PLT0
+		}
 	case EM_X86_64:
-		// jmp *disp32(%rip), relative to the end of the 6-byte instruction.
-		b.bytes([]byte{0xff, 0x25})
+		b.bytes([]byte{0xff, 0x35}) // push qword [rip+disp] -- GOT[1], the link map
+		b.u32(uint32(int32(int64(gotVaddr+8) - int64(plt0Vaddr+6))))
+		b.bytes([]byte{0xff, 0x25}) // jmp qword [rip+disp] -- GOT[2], the resolver
+		b.u32(uint32(int32(int64(gotVaddr+16) - int64(plt0Vaddr+12))))
+		b.bytes([]byte{0xcc, 0xcc, 0xcc, 0xcc}) // padding to the 16-byte stride
+	}
+	return b.b
+}
+
+// pltStub encodes the PLT entry for import idx: it jumps to whatever address the
+// GOT slot at gotVaddr holds. Under eager binding that is always the real target.
+// Under lazy binding the slot starts out pointing back into the PLT, so the first
+// call reaches the resolver and every later one goes straight through. The GOT is
+// addressed PC-relatively, so the entry works wherever the image is loaded.
+func pltStub(machine uint16, stubVaddr, gotVaddr, plt0Vaddr uint64, idx int, lazy bool) []byte {
+	b := &elfBuf{}
+	switch machine {
+	case EM_AARCH64:
+		adrpLdrAdd(b, stubVaddr, gotVaddr)
+		b.u32(0xd61f0220) // br x17
+	case EM_X86_64:
+		b.bytes([]byte{0xff, 0x25}) // jmp qword [rip+disp] -- the GOT slot
 		b.u32(uint32(int32(int64(gotVaddr) - int64(stubVaddr+6))))
-		for i := 0; i < 10; i++ {
-			b.u8(0xcc) // int3 padding to the 16-byte stride
+		if lazy {
+			b.u8(0x68) // push $idx -- tells the resolver which relocation this is
+			b.u32(uint32(idx))
+			b.u8(0xe9) // jmp plt0
+			b.u32(uint32(int32(int64(plt0Vaddr) - int64(stubVaddr+16))))
+		} else {
+			for i := 0; i < 10; i++ {
+				b.u8(0xcc) // int3: eager binding never falls through
+			}
 		}
 	}
 	return b.b
+}
+
+// pltGotInit is the value a PLT's GOT slot starts with. Lazy binding points it
+// back into the PLT so the first call reaches the resolver -- on AArch64 at the
+// trampoline itself, on x86-64 at the push that identifies the relocation. The
+// loader adds the load bias to whatever is here, so a link-time address is right
+// in a PIE too. Eager binding needs no initial value: the loader writes the real
+// target before anything runs.
+func pltGotInit(machine uint16, lazy bool, plt0Vaddr, stubVaddr uint64) uint64 {
+	if !lazy {
+		return 0
+	}
+	if machine == EM_X86_64 {
+		return stubVaddr + 6
+	}
+	return plt0Vaddr
 }

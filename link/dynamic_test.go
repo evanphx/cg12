@@ -289,6 +289,69 @@ func TestVersionedImport(t *testing.T) {
 	})
 }
 
+// Lazy binding resolves an import on its first call instead of at load time.
+// Calling two imports (one of them twice) covers both the resolver trampoline and
+// the already-resolved path it leaves behind.
+func TestLazyBinding(t *testing.T) {
+	if runtime.GOARCH != "arm64" {
+		t.Skip("arm64 executable runs natively only on an arm64 host")
+	}
+	for _, pie := range []bool{false, true} {
+		name := "fixed-base"
+		if pie {
+			name = "pie"
+		}
+		t.Run(name, func(t *testing.T) {
+			m := ir.NewModule()
+			f := m.NewFunc("main", ir.ClsW).Export()
+			e := f.Entry()
+			a := e.Call(ir.ClsW, f.Sym("abs", 0), f.Word(-5))
+			b := e.Call(ir.ClsW, f.Sym("labs", 0), f.Long(-30))
+			c := e.Call(ir.ClsW, f.Sym("abs", 0), f.Word(-7)) // second call: already bound
+			e.Ret(e.Add(ir.ClsW, e.Add(ir.ClsW, a, b), c))    // 5 + 30 + 7 = 42
+
+			l := link.NewWith(arm64.Backend{})
+			require.NoError(t, l.AddModule(m))
+			exe, err := l.LinkDynamicExecutableWith("main", obj.DynOptions{
+				Needed: []string{"libc.so.6"}, Lazy: true, PIE: pie,
+			})
+			require.NoError(t, err)
+			require.Equal(t, 42, runExe(t, exe))
+		})
+	}
+}
+
+// Lazy binding is really lazy, and this is what proves it rather than asserting on
+// a flag: a program that references a symbol nothing defines, but never calls it,
+// runs fine when bound lazily and dies at startup when bound eagerly.
+func TestLazyBindingDefersUnusedImport(t *testing.T) {
+	if runtime.GOARCH != "arm64" {
+		t.Skip("arm64 executable runs natively only on an arm64 host")
+	}
+	build := func(lazy bool) []byte {
+		m := ir.NewModule()
+		// g is zero, so the call below is emitted but never reached.
+		m.Data = append(m.Data, &ir.Data{Name: "g", Align: 4,
+			Items: []ir.DataItem{{Sub: ir.SubW, Ints: []int64{0}}}})
+		f := m.NewFunc("main", ir.ClsW).Export()
+		e := f.Entry()
+		call, done := f.NewBlock("call"), f.NewBlock("done")
+		e.Jnz(e.Load(ir.ClsW, f.Sym("g", 0)), call, done)
+		call.Ret(call.Call(ir.ClsW, f.Sym("cg12_no_such_symbol", 0)))
+		done.Ret(f.Word(42))
+
+		l := link.NewWith(arm64.Backend{})
+		require.NoError(t, l.AddModule(m))
+		exe, err := l.LinkDynamicExecutableWith("main", obj.DynOptions{
+			Needed: []string{"libc.so.6"}, Lazy: lazy,
+		})
+		require.NoError(t, err)
+		return exe
+	}
+	require.Equal(t, 42, runExe(t, build(true)), "lazy: never called, so never resolved")
+	require.NotEqual(t, 42, runExe(t, build(false)), "eager: resolving it at load must fail")
+}
+
 // The image is a well-formed dynamic executable on both architectures: it names
 // the loader in PT_INTERP and carries a PT_DYNAMIC segment. This runs everywhere,
 // including where the foreign architecture's libraries are not installed.
