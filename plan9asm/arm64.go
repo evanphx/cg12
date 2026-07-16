@@ -135,6 +135,12 @@ func (t *arm64Translator) translateInstruction(instruction *Instruction) error {
 		return t.translateBarrier(instruction)
 	case "MRS":
 		return t.translateMRS(instruction)
+	case "MRS_TPIDR_R0":
+		if len(instruction.Operands) != 0 {
+			return fmt.Errorf("MRS_TPIDR_R0 does not accept operands")
+		}
+		t.output.WriteString("\tmrs x0, tpidr_el0\n")
+		return nil
 	case "MSR":
 		return t.translateMSR(instruction)
 	case "DC":

@@ -132,6 +132,16 @@ func (t *arm64Translator) translateGlobal(directive *Directive) error {
 		return fmt.Errorf("invalid GLOBL size %q", sizeOperand.Immediate)
 	}
 	name := t.symbol(symbol)
+	if directive.Operands[0].Kind == OperandMemory {
+		resolvedName, offset, err := t.symbolAddress(directive.Operands[0])
+		if err != nil {
+			return err
+		}
+		if offset != 0 {
+			return fmt.Errorf("GLOBL symbol %q has nonzero offset %d", directive.Operands[0].Text, offset)
+		}
+		name = resolvedName
+	}
 	values := append([]arm64DataValue(nil), t.data[name]...)
 	flags := ""
 	if len(directive.Operands) == 3 {

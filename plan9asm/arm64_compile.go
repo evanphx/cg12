@@ -61,6 +61,7 @@ var supportedARM64Files = map[string]map[string]bool{
 		"memmove_arm64.s": true,
 		"preempt_arm64.s": true,
 		"secret_arm64.s":  true,
+		"tls_arm64.s":     true,
 	},
 	"syscall": {
 		"asm_linux_arm64.s": true,

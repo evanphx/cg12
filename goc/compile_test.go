@@ -153,6 +153,7 @@ func main() {
 		"runtime/memmove_arm64.s":                          "runtime",
 		"runtime/preempt_arm64.s":                          "runtime",
 		"runtime/secret_arm64.s":                           "runtime",
+		"runtime/tls_arm64.s":                              "runtime",
 	}
 	if len(module.Assembly) != len(wantAssembly) {
 		t.Fatalf("executable assembly files = %d, want %d", len(module.Assembly), len(wantAssembly))

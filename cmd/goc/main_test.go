@@ -45,6 +45,8 @@ func TestRuntimeSupportDoesNotShadowTranslatedStandardLibraryAssembly(t *testing
 		"runtime_memclrNoHeapPointers",
 		"runtime_publicationBarrier",
 		"runtime_asyncPreempt",
+		"runtime_load_g",
+		"runtime_save_g",
 		"runtime_secretEraseRegisters",
 		"syscall_rawSyscallNoError",
 		"syscall_rawVforkSyscall",

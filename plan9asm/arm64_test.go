@@ -248,6 +248,30 @@ func TestTranslateExactRuntimeAsyncPreempt(t *testing.T) {
 	assert.Contains(t, translation.Assembly, "\tret x27")
 }
 
+func TestTranslateExactRuntimeTLS(t *testing.T) {
+	path := filepath.Join("..", "stdlib", "src", "runtime", "tls_arm64.s")
+	source, err := os.ReadFile(path)
+	require.NoError(t, err)
+	file, err := Parse(bytes.NewReader(source))
+	require.NoError(t, err)
+	translation, err := CompileARM64(file, ARM64Options{
+		PackagePath:      "runtime",
+		Filename:         "tls_arm64.s",
+		PreferDirectABI0: true,
+	})
+	require.NoError(t, err)
+
+	require.Len(t, translation.Functions, 2)
+	assert.Equal(t, "runtime_load_g", translation.Functions[0].Name)
+	assert.Equal(t, "runtime_save_g", translation.Functions[1].Name)
+	assert.NotContains(t, translation.Assembly, "_abi0")
+	assert.Contains(t, translation.Assembly, "\tmrs x0, tpidr_el0")
+	assert.Contains(t, translation.Assembly, "\tldr x28, [x0, x27]")
+	assert.Contains(t, translation.Assembly, "\tstr x28, [x0, x27]")
+	assert.Contains(t, translation.Assembly, ".global runtime_tls_g\n")
+	assert.NotContains(t, translation.Assembly, "runtime_tls_g_0")
+}
+
 func TestTranslateExactChacha8FrameAndReadOnlyData(t *testing.T) {
 	path := filepath.Join("..", "stdlib", "src", "internal", "chacha8rand", "chacha8_arm64.s")
 	source, err := os.ReadFile(path)
@@ -280,6 +304,7 @@ func TestSupportsARM64FileKeepsTargetPolicyWithTranslator(t *testing.T) {
 	assert.True(t, SupportsARM64File("runtime", "memmove_arm64.s"))
 	assert.True(t, SupportsARM64File("runtime", "secret_arm64.s"))
 	assert.True(t, SupportsARM64File("runtime", "preempt_arm64.s"))
+	assert.True(t, SupportsARM64File("runtime", "tls_arm64.s"))
 	assert.True(t, SupportsARM64File("internal/bytealg", "compare_arm64.s"))
 	assert.True(t, SupportsARM64File("internal/bytealg", "index_arm64.s"))
 	assert.True(t, SupportsARM64File("internal/cpu", "cpu_arm64.s"))
@@ -314,6 +339,7 @@ func TestTranslateExactRuntimeARM64FilesAssemble(t *testing.T) {
 			"g_m": 48, "m_p": 208, "p_xRegs": 13800, "xRegPerP_scratch": 0, "xRegPerP_cache": 512,
 		}},
 		{packagePath: "runtime", name: "secret_arm64.s"},
+		{packagePath: "runtime", name: "tls_arm64.s"},
 		{packagePath: "internal/bytealg", name: "compare_arm64.s"},
 		{packagePath: "internal/bytealg", name: "count_arm64.s"},
 		{packagePath: "internal/bytealg", name: "equal_arm64.s"},
@@ -609,6 +635,80 @@ main:
 	directory := t.TempDir()
 	sourcePath := filepath.Join(directory, "preempt.S")
 	executable := filepath.Join(directory, "preempt")
+	require.NoError(t, os.WriteFile(sourcePath, []byte(harness), 0o644))
+	command := exec.Command(cc, "-no-pie", "-o", executable, sourcePath)
+	output, err := command.CombinedOutput()
+	require.NoError(t, err, "%s", output)
+	output, err = exec.Command(executable).CombinedOutput()
+	require.NoError(t, err, "%s", output)
+}
+
+func TestExecuteExactRuntimeTLSWithoutCgo(t *testing.T) {
+	if runtime.GOARCH != "arm64" {
+		t.Skip("AArch64 execution is required")
+	}
+	cc, err := exec.LookPath("cc")
+	if err != nil {
+		t.Skip("cc is unavailable")
+	}
+
+	path := filepath.Join("..", "stdlib", "src", "runtime", "tls_arm64.s")
+	source, err := os.ReadFile(path)
+	require.NoError(t, err)
+	file, err := Parse(bytes.NewReader(source))
+	require.NoError(t, err)
+	translation, err := CompileARM64(file, ARM64Options{
+		PackagePath:      "runtime",
+		Filename:         "tls_arm64.s",
+		PreferDirectABI0: true,
+	})
+	require.NoError(t, err)
+
+	// With cgo disabled, load_g and save_g deliberately leave the dedicated g
+	// register alone. This is the path used by cg12go's current runtime build.
+	harness := translation.Assembly + `
+.text
+.global test_tls
+.type test_tls, %function
+test_tls:
+	stp x28, x30, [sp, #-16]!
+	mov x28, #1234
+	bl runtime_load_g
+	mov x9, #1234
+	cmp x28, x9
+	b.ne .Ltls_fail_load
+	bl runtime_save_g
+	mov x9, #1234
+	cmp x28, x9
+	b.ne .Ltls_fail_save
+	mov w0, #0
+	b .Ltls_done
+.Ltls_fail_load:
+	mov w0, #1
+	b .Ltls_done
+.Ltls_fail_save:
+	mov w0, #2
+.Ltls_done:
+	ldp x28, x30, [sp], #16
+	ret
+.size test_tls, .-test_tls
+
+.global main
+.type main, %function
+main:
+	b test_tls
+.size main, .-main
+
+.data
+.global runtime_iscgo
+.type runtime_iscgo, %object
+.size runtime_iscgo, 1
+runtime_iscgo:
+	.byte 0
+`
+	directory := t.TempDir()
+	sourcePath := filepath.Join(directory, "tls.S")
+	executable := filepath.Join(directory, "tls")
 	require.NoError(t, os.WriteFile(sourcePath, []byte(harness), 0o644))
 	command := exec.Command(cc, "-no-pie", "-o", executable, sourcePath)
 	output, err := command.CombinedOutput()
