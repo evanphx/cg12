@@ -469,6 +469,115 @@ func TestRunpathFindsLibraryBySoname(t *testing.T) {
 	require.Equal(t, 42, code, "cg12_triple(14) resolved from the library next to the program")
 }
 
+// Constructors run before the entry point and destructors after it. For an
+// executable the loader deliberately leaves this to the C runtime, so `_start`
+// makes the calls itself; the test would fail with 0 (never ran) otherwise.
+func TestInitAndFiniArrays(t *testing.T) {
+	if runtime.GOARCH != "arm64" {
+		t.Skip("arm64 executable runs natively only on an arm64 host")
+	}
+	// build makes: ctor sets g=40; main returns g+2; dtor runs afterwards, either
+	// exiting outright (to show it ran) or clobbering things (to show main's
+	// result survives it).
+	build := func(pie, dtorExits bool) []byte {
+		m := ir.NewModule()
+		m.Data = append(m.Data, &ir.Data{Name: "g", Align: 4,
+			Items: []ir.DataItem{{Sub: ir.SubW, Ints: []int64{0}}}})
+
+		c := m.NewFunc("ctor", ir.ClsW).Export()
+		ce := c.Entry()
+		ce.Store(c.Word(40), c.Sym("g", 0))
+		ce.Ret(c.Word(0))
+
+		d := m.NewFunc("dtor", ir.ClsW).Export()
+		de := d.Entry()
+		if dtorExits {
+			de.Ret(de.Call(ir.ClsW, d.Sym("_exit", 0), d.Word(7)))
+		} else {
+			de.Store(d.Word(99), d.Sym("g", 0))
+			de.Ret(d.Word(123)) // a different value, so a clobber would show
+		}
+
+		f := m.NewFunc("main", ir.ClsW).Export()
+		e := f.Entry()
+		e.Ret(e.Add(ir.ClsW, e.Load(ir.ClsW, f.Sym("g", 0)), f.Word(2))) // 40 + 2
+
+		l := link.NewWith(arm64.Backend{})
+		require.NoError(t, l.AddModule(m))
+		exe, err := l.LinkDynamicExecutableWith("main", obj.DynOptions{
+			Needed:    []string{"libc.so.6"},
+			InitArray: []string{"ctor"},
+			FiniArray: []string{"dtor"},
+			PIE:       pie,
+		})
+		require.NoError(t, err)
+		return exe
+	}
+
+	for _, pie := range []bool{false, true} {
+		name := "fixed-base"
+		if pie {
+			name = "pie"
+		}
+		t.Run(name, func(t *testing.T) {
+			// 42 means the constructor ran before main, and that main's result came
+			// back out intact past the destructor.
+			require.Equal(t, 42, runExe(t, build(pie, false)))
+			// The destructor really runs after main: it exits the process itself.
+			require.Equal(t, 7, runExe(t, build(pie, true)))
+		})
+	}
+}
+
+// A shared library initializes itself: here the loader is the one that runs
+// DT_INIT_ARRAY, when the library is brought in.
+func TestSharedLibraryConstructorRunsOnLoad(t *testing.T) {
+	if runtime.GOARCH != "arm64" {
+		t.Skip("arm64 executable runs natively only on an arm64 host")
+	}
+	m := ir.NewModule()
+	m.Data = append(m.Data, &ir.Data{Name: "libg", Align: 4,
+		Items: []ir.DataItem{{Sub: ir.SubW, Ints: []int64{0}}}})
+	c := m.NewFunc("libctor", ir.ClsW).Export()
+	ce := c.Entry()
+	ce.Store(c.Word(42), c.Sym("libg", 0))
+	ce.Ret(c.Word(0))
+	g := m.NewFunc("libget", ir.ClsW).Export()
+	g.Entry().Ret(g.Entry().Load(ir.ClsW, g.Sym("libg", 0)))
+
+	l := link.NewWith(arm64.Backend{})
+	require.NoError(t, l.AddModule(m))
+	so, err := l.LinkSharedLibraryWith(obj.SharedOptions{
+		Soname: "libcg12ctor.so", Export: []string{"libget"}, InitArray: []string{"libctor"},
+	})
+	require.NoError(t, err)
+	dir := t.TempDir()
+	require.NoError(t, os.WriteFile(filepath.Join(dir, "libcg12ctor.so"), so, 0o755))
+
+	// main() = libget(); 42 only if the library's constructor ran at load.
+	p := ir.NewModule()
+	f := p.NewFunc("main", ir.ClsW).Export()
+	f.Entry().Ret(f.Entry().Call(ir.ClsW, f.Sym("libget", 0)))
+	l2 := link.NewWith(arm64.Backend{})
+	require.NoError(t, l2.AddModule(p))
+	exe, err := l2.LinkDynamicExecutableWith("main", obj.DynOptions{
+		Needed:  []string{"libcg12ctor.so", "libc.so.6"},
+		Runpath: []string{"$ORIGIN"},
+	})
+	require.NoError(t, err)
+
+	path := filepath.Join(dir, "prog")
+	require.NoError(t, os.WriteFile(path, exe, 0o755))
+	err = exec.Command(path).Run()
+	code := 0
+	if ee, ok := err.(*exec.ExitError); ok {
+		code = ee.ExitCode()
+	} else {
+		require.NoError(t, err)
+	}
+	require.Equal(t, 42, code, "the library's constructor ran when the loader brought it in")
+}
+
 // The image is a well-formed dynamic executable on both architectures: it names
 // the loader in PT_INTERP and carries a PT_DYNAMIC segment. This runs everywhere,
 // including where the foreign architecture's libraries are not installed.

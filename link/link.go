@@ -24,7 +24,7 @@ import (
 type Backend interface {
 	Machine() uint16
 	CompileModule(m *ir.Module) (*obj.Object, error)
-	StartStub(entry string) (*obj.Object, error)
+	StartStub(entry string, init, fini []string) (*obj.Object, error)
 	Interp() string
 }
 
@@ -83,7 +83,7 @@ func (l *Linker) LinkToELF() ([]byte, error) {
 // addresses, and writes an ET_EXEC image. entry names the function `_start` calls
 // (e.g. "main"), which must be among the linked objects.
 func (l *Linker) LinkExecutable(entry string) ([]byte, error) {
-	merged, err := l.mergeWithStart(entry)
+	merged, err := l.mergeWithStart(entry, nil, nil)
 	if err != nil {
 		return nil, err
 	}
@@ -137,7 +137,7 @@ func (l *Linker) linkDynamic(entry string, pie bool, needed []string) ([]byte, e
 // dynamic options -- exported symbols, pinned symbol versions, and so on. The
 // interpreter defaults to the backend's loader when opts leaves it empty.
 func (l *Linker) LinkDynamicExecutableWith(entry string, opts obj.DynOptions) ([]byte, error) {
-	merged, err := l.mergeWithStart(entry)
+	merged, err := l.mergeWithStart(entry, opts.InitArray, opts.FiniArray)
 	if err != nil {
 		return nil, err
 	}
@@ -147,10 +147,11 @@ func (l *Linker) LinkDynamicExecutableWith(entry string, opts obj.DynOptions) ([
 	return merged.WriteDynamicExecutable("_start", opts)
 }
 
-// mergeWithStart prepends the backend's `_start` stub (which calls entry) to the
-// accumulated objects and merges them into one image.
-func (l *Linker) mergeWithStart(entry string) (*obj.Object, error) {
-	stub, err := l.be.StartStub(entry)
+// mergeWithStart prepends the backend's `_start` stub (which runs the init
+// functions, calls entry, then the fini functions) to the accumulated objects and
+// merges them into one image.
+func (l *Linker) mergeWithStart(entry string, init, fini []string) (*obj.Object, error) {
+	stub, err := l.be.StartStub(entry, init, fini)
 	if err != nil {
 		return nil, err
 	}

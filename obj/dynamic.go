@@ -19,33 +19,41 @@ const (
 	shtHash       = 5
 	shtDynamic    = 6
 	shtDynsym     = 11
+	shtInitArray  = 14
+	shtFiniArray  = 15
 	shtGnuHash    = 0x6ffffff6
 	shtGnuVerneed = 0x6ffffffe
 	shtGnuVersym  = 0x6fffffff
 
-	dtNull       = 0
-	dtNeeded     = 1
-	dtPltRelSz   = 2
-	dtPltGot     = 3
-	dtHash       = 4
-	dtStrTab     = 5
-	dtSymTab     = 6
-	dtRela       = 7
-	dtRelaSz     = 8
-	dtRelaEnt    = 9
-	dtStrSz      = 10
-	dtSymEnt     = 11
-	dtSoname     = 14
-	dtRpath      = 15
-	dtRunpath    = 29
-	dtPltRel     = 20
-	dtJmpRel     = 23
-	dtFlags      = 30
-	dtGnuHash    = 0x6ffffef5
-	dtVersym     = 0x6ffffff0
-	dtFlags1     = 0x6ffffffb
-	dtVerneed    = 0x6ffffffe
-	dtVerneednum = 0x6fffffff
+	dtNull        = 0
+	dtNeeded      = 1
+	dtPltRelSz    = 2
+	dtPltGot      = 3
+	dtHash        = 4
+	dtStrTab      = 5
+	dtSymTab      = 6
+	dtRela        = 7
+	dtRelaSz      = 8
+	dtRelaEnt     = 9
+	dtStrSz       = 10
+	dtSymEnt      = 11
+	dtSoname      = 14
+	dtRpath       = 15
+	dtInit        = 12
+	dtFini        = 13
+	dtInitArray   = 25
+	dtFiniArray   = 26
+	dtInitArraySz = 27
+	dtFiniArraySz = 28
+	dtRunpath     = 29
+	dtPltRel      = 20
+	dtJmpRel      = 23
+	dtFlags       = 30
+	dtGnuHash     = 0x6ffffef5
+	dtVersym      = 0x6ffffff0
+	dtFlags1      = 0x6ffffffb
+	dtVerneed     = 0x6ffffffe
+	dtVerneednum  = 0x6fffffff
 
 	// .gnu.version indices: 0 means the symbol is local, 1 means global and
 	// unversioned; 2 and up name an entry in the version requirements.
@@ -86,6 +94,13 @@ type DynOptions struct {
 	// It is how a program pins an older interface a library still carries.
 	Require map[string]SymVersion
 
+	// InitArray names functions to run before the image's entry point, and
+	// FiniArray functions to run as it is unloaded, each in the order given
+	// (DT_INIT_ARRAY / DT_FINI_ARRAY). They are how a library initializes itself
+	// and how a language runtime runs its static constructors.
+	InitArray []string
+	FiniArray []string
+
 	// Runpath is the list of directories the loader searches for this image's
 	// libraries, ahead of the system paths (DT_RUNPATH). $ORIGIN in an entry stands
 	// for the directory the image itself was loaded from, which is how a program
@@ -121,6 +136,8 @@ func (o *Object) WriteDynamicExecutable(entrySym string, opts DynOptions) ([]byt
 		export:  opts.Export,
 		require: opts.Require,
 		runpath: opts.Runpath,
+		initArr: opts.InitArray,
+		finiArr: opts.FiniArray,
 		pie:     opts.PIE,
 		lazy:    opts.Lazy,
 	})
@@ -128,10 +145,12 @@ func (o *Object) WriteDynamicExecutable(entrySym string, opts DynOptions) ([]byt
 
 // SharedOptions configures a shared library.
 type SharedOptions struct {
-	Soname  string   // the name others link against, e.g. libfoo.so.1 (DT_SONAME)
-	Needed  []string // shared libraries this one needs (DT_NEEDED)
-	Export  []string // symbols to publish for others to resolve against
-	Runpath []string // directories to search for those libraries (DT_RUNPATH)
+	Soname    string   // the name others link against, e.g. libfoo.so.1 (DT_SONAME)
+	Needed    []string // shared libraries this one needs (DT_NEEDED)
+	Export    []string // symbols to publish for others to resolve against
+	Runpath   []string // directories to search for those libraries (DT_RUNPATH)
+	InitArray []string // functions run when the library is loaded
+	FiniArray []string // functions run when it is unloaded
 }
 
 // WriteSharedLibrary links the object into a shared library: a position-
@@ -143,6 +162,8 @@ func (o *Object) WriteSharedLibrary(opts SharedOptions) ([]byte, error) {
 		export:  opts.Export,
 		soname:  opts.Soname,
 		runpath: opts.Runpath,
+		initArr: opts.InitArray,
+		finiArr: opts.FiniArray,
 		pie:     true, // a shared library is position-independent by definition
 	})
 }
@@ -155,6 +176,8 @@ type dynImage struct {
 	export  []string              // symbols published in .dynsym
 	require map[string]SymVersion // imports pinned to a specific library version
 	runpath []string              // DT_RUNPATH search directories
+	initArr []string              // functions run before the entry point
+	finiArr []string              // functions run at unload
 	soname  string                // DT_SONAME; empty for an executable
 	pie     bool                  // position-independent (ET_DYN linked at 0)
 	lazy    bool                  // resolve imports on first call, not at load
@@ -242,6 +265,8 @@ func (o *Object) writeDynImage(im dynImage) ([]byte, error) {
 		if len(imports) > 0 {
 			nRel++ // GOT[0] holds &_DYNAMIC, itself an absolute address
 		}
+		// Each init/fini entry is a function address, so it needs rebasing too.
+		nRel += len(im.initArr) + len(im.finiArr)
 	}
 
 	// --- section layout; vaddr = base + file offset throughout ---------------
@@ -386,6 +411,9 @@ func (o *Object) writeDynImage(im dynImage) ([]byte, error) {
 	if len(imports) > 0 {
 		gotSize = (gotReserved + len(imports)) * 8
 	}
+	// The init/fini arrays are function-pointer tables: written by relocation and
+	// never again, so they belong in the relro region beside the GOT.
+	initArrSize, finiArrSize := len(im.initArr)*8, len(im.finiArr)*8
 	ndyn := len(im.needed) + 7 // NEEDED..., HASH, GNU_HASH, STRTAB, SYMTAB, STRSZ, SYMENT, NULL
 	if !im.lazy {
 		ndyn += 2 // FLAGS, FLAGS_1 (eager binding)
@@ -405,7 +433,13 @@ func (o *Object) writeDynImage(im dynImage) ([]byte, error) {
 	if versioned {
 		ndyn += 3 // VERSYM, VERNEED, VERNEEDNUM
 	}
-	relroSize := gotSize + ndyn*16
+	if initArrSize > 0 {
+		ndyn += 2 // INIT_ARRAY, INIT_ARRAYSZ
+	}
+	if finiArrSize > 0 {
+		ndyn += 2 // FINI_ARRAY, FINI_ARRAYSZ
+	}
+	relroSize := initArrSize + finiArrSize + gotSize + ndyn*16
 
 	// The writable region begins past the read-execute one's last page, so the two
 	// never share a page. When there is a relro region it is nudged forward within
@@ -418,8 +452,10 @@ func (o *Object) writeDynImage(im dynImage) ([]byte, error) {
 	if relro {
 		rwOff += (execAlign - relroSize%execAlign) % execAlign
 	}
-	gotOff := rwOff
-	dynamicOff := gotOff + gotSize // gotSize is a multiple of 8, so this stays aligned
+	initArrOff := rwOff
+	finiArrOff := initArrOff + initArrSize
+	gotOff := finiArrOff + finiArrSize
+	dynamicOff := gotOff + gotSize // every size here is a multiple of 8, so this stays aligned
 	off = dynamicOff + ndyn*16
 
 	dataOff := alignUp(off, 8)
@@ -462,6 +498,13 @@ func (o *Object) writeDynImage(im dynImage) ([]byte, error) {
 		secPlt = nextSec()
 	}
 	secText := nextSec()
+	secInitArr, secFiniArr := -1, -1
+	if initArrSize > 0 {
+		secInitArr = nextSec()
+	}
+	if finiArrSize > 0 {
+		secFiniArr = nextSec()
+	}
 	if len(imports) > 0 {
 		secGot = nextSec()
 	}
@@ -512,6 +555,32 @@ func (o *Object) writeDynImage(im dynImage) ([]byte, error) {
 		dynRel = append(dynRel, Reloc{
 			Offset: va(gotOff), Type: relativeType(o.Machine), Addend: int64(va(dynamicOff)),
 		})
+	}
+
+	// The init/fini tables hold the addresses of functions defined here.
+	funcArray := func(names []string, at int) (*elfBuf, error) {
+		b := &elfBuf{}
+		for i, n := range names {
+			if !o.definesSym(n) {
+				return nil, fmt.Errorf("obj: init/fini function %q is not defined here", n)
+			}
+			addr := symVaddr[n]
+			b.u64(addr)
+			if im.pie {
+				dynRel = append(dynRel, Reloc{
+					Offset: va(at + i*8), Type: relativeType(o.Machine), Addend: int64(addr),
+				})
+			}
+		}
+		return b, nil
+	}
+	initArr, err := funcArray(im.initArr, initArrOff)
+	if err != nil {
+		return nil, err
+	}
+	finiArr, err := funcArray(im.finiArr, finiArrOff)
+	if err != nil {
+		return nil, err
 	}
 	if len(dynRel) != nRel {
 		return nil, fmt.Errorf("obj: counted %d relative relocations, produced %d", nRel, len(dynRel))
@@ -605,6 +674,14 @@ func (o *Object) writeDynImage(im dynImage) ([]byte, error) {
 		dt(dtRelaSz, uint64(len(relaDyn.b)))
 		dt(dtRelaEnt, 24)
 	}
+	if initArrSize > 0 {
+		dt(dtInitArray, va(initArrOff))
+		dt(dtInitArraySz, uint64(initArrSize))
+	}
+	if finiArrSize > 0 {
+		dt(dtFiniArray, va(finiArrOff))
+		dt(dtFiniArraySz, uint64(finiArrSize))
+	}
 	if len(imports) > 0 {
 		dt(dtPltGot, va(gotOff))
 		dt(dtPltRelSz, uint64(len(relaPlt.b)))
@@ -675,6 +752,8 @@ func (o *Object) writeDynImage(im dynImage) ([]byte, error) {
 	put(relaPltOff, relaPlt.b)
 	put(plt0Off, plt.b)
 	put(textOff, text)
+	put(initArrOff, initArr.b)
+	put(finiArrOff, finiArr.b)
 	put(gotOff, got.b)
 	put(dynamicOff, dyn.b)
 	put(dataOff, data)
@@ -704,6 +783,8 @@ func (o *Object) writeDynImage(im dynImage) ([]byte, error) {
 	set(secRelaPlt, ".rela.plt", shtRela, shfAlloc, relaPltOff, len(relaPlt.b), secDynsym, secPlt, 8, 24)
 	set(secPlt, ".plt", shtProgbits, shfAlloc|shfExecinstr, plt0Off, len(plt.b), 0, 0, 16, 0)
 	set(secText, ".text", shtProgbits, shfAlloc|shfExecinstr, textOff, len(text), 0, 0, 16, 0)
+	set(secInitArr, ".init_array", shtInitArray, shfAlloc|shfWrite, initArrOff, initArrSize, 0, 0, 8, 8)
+	set(secFiniArr, ".fini_array", shtFiniArray, shfAlloc|shfWrite, finiArrOff, finiArrSize, 0, 0, 8, 8)
 	set(secGot, ".got.plt", shtProgbits, shfAlloc|shfWrite, gotOff, len(got.b), 0, 0, 8, 8)
 	set(secDynamic, ".dynamic", shtDynamic, shfAlloc|shfWrite, dynamicOff, ndyn*16, secDynstr, 0, 8, 16)
 	set(secData, ".data", shtProgbits, shfAlloc|shfWrite, dataOff, len(data), 0, 0, 8, 0)

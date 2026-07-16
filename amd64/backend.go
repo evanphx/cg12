@@ -38,17 +38,35 @@ func (Backend) Assemble(src string) (*obj.Object, error) {
 	return programObject(p)
 }
 
-// StartStub returns a `_start` object that calls entry and exits with its return
-// value via the exit_group syscall, so a fully linked executable needs no C
-// runtime. The entry function's return value comes back in eax.
-func (Backend) StartStub(entry string) (*obj.Object, error) {
+// StartStub returns a `_start` object: the image's entry point, standing in for a
+// C runtime. It calls each init function, then entry, then each fini function,
+// and exits with entry's return value via the exit_group syscall -- so a linked
+// executable needs no libc startup code.
+//
+// The loader deliberately does not run an executable's DT_INIT_ARRAY (it leaves
+// that to the C runtime, which is us here), so the calls are emitted directly.
+func (Backend) StartStub(entry string, init, fini []string) (*obj.Object, error) {
+	const exitGroup = 231
 	p := x64.NewProgram()
 	p.Globl("_start")
 	p.Label("_start")
-	p.Call(sanitize(entry))                     // call entry (PLT32 to the entry function)
-	p.Emit(x64.MovReg(false, x64.RDI, x64.RAX)) // mov edi, eax (exit code = return value)
-	p.Emit(x64.MovImm32(false, x64.RAX, 231))   // mov eax, 231 (__NR_exit_group)
-	p.Emit(x64.Syscall())                       // syscall
+	for _, n := range init {
+		p.Call(sanitize(n))
+	}
+	p.Call(sanitize(entry))
+	ret := x64.RAX
+	if len(fini) > 0 {
+		// entry's result is in eax, which the fini calls would clobber; rbx is
+		// callee-saved, so it survives them.
+		p.Emit(x64.MovReg(false, x64.RBX, x64.RAX))
+		for _, n := range fini {
+			p.Call(sanitize(n))
+		}
+		ret = x64.RBX
+	}
+	p.Emit(x64.MovReg(false, x64.RDI, ret))         // exit code = entry's result
+	p.Emit(x64.MovImm32(false, x64.RAX, exitGroup)) // mov eax, 231
+	p.Emit(x64.Syscall())
 	return programObject(p)
 }
 

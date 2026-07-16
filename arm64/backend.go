@@ -38,16 +38,36 @@ func (Backend) Assemble(src string) (*obj.Object, error) {
 	return programObject(p)
 }
 
-// StartStub returns a `_start` object that calls entry and exits with its return
-// value via the exit_group syscall, so a fully linked executable needs no C
-// runtime. The entry function's return value is already in w0 when it returns.
-func (Backend) StartStub(entry string) (*obj.Object, error) {
+// StartStub returns a `_start` object: the image's entry point, standing in for a
+// C runtime. It calls each init function, then entry, then each fini function,
+// and exits with entry's return value via the exit_group syscall -- so a linked
+// executable needs no libc startup code.
+//
+// The loader deliberately does not run an executable's DT_INIT_ARRAY (it leaves
+// that to the C runtime, which is us here), so the calls are emitted directly.
+func (Backend) StartStub(entry string, init, fini []string) (*obj.Object, error) {
+	const (
+		x0, x19   = a64.Reg(0), a64.Reg(19)
+		exitGroup = 94
+	)
 	p := a64.NewProgram()
 	p.Globl("_start")
 	p.Label("_start")
-	p.Bl(sanitize(entry))                     // bl entry (CALL26 to the entry function)
-	p.Emit(a64.Movz(true, a64.Reg(8), 94, 0)) // movz x8, #94 (__NR_exit_group)
-	p.Emit(0xd4000001)                        // svc #0
+	for _, n := range init {
+		p.Bl(sanitize(n))
+	}
+	p.Bl(sanitize(entry))
+	if len(fini) > 0 {
+		// entry's result is in w0, which the fini calls would clobber; x19 is
+		// callee-saved, so it survives them.
+		p.Emit(a64.MovReg(true, x19, x0))
+		for _, n := range fini {
+			p.Bl(sanitize(n))
+		}
+		p.Emit(a64.MovReg(true, x0, x19))
+	}
+	p.Emit(a64.Movz(true, a64.Reg(8), exitGroup, 0)) // movz x8, #94
+	p.Emit(0xd4000001)                               // svc #0
 	return programObject(p)
 }
 
