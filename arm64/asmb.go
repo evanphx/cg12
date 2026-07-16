@@ -2,6 +2,7 @@ package arm64
 
 import (
 	"github.com/evanphx/cg12/arm64/a64"
+	"github.com/evanphx/cg12/ir"
 )
 
 // asmb is the arm64 instruction builder: an arm64-idiomatic assembler surface
@@ -51,6 +52,12 @@ type asmb interface {
 
 	// Integer sub-word extends (dstSize/srcSize are the register widths in bytes).
 	ext(op extOp, rd, rn Reg, dstSize, srcSize int)
+
+	// Compare and conditional set.
+	cmpReg(w64 bool, rn, rm Reg)
+	cmpImm(w64 bool, rn Reg, imm uint32)
+	fcmp(dbl bool, rn, rm Reg)
+	cset(rd Reg, cmp ir.Cmp, float bool)
 
 	// Constant materialization (movz/movk/movn sequence).
 	movImm(rd Reg, val int64, w64 bool)
@@ -270,6 +277,23 @@ func (b *mcAsm) ext(op extOp, rd, rn Reg, dstSize, srcSize int) {
 	}
 	b.prog.Emit(w)
 }
+func (b *mcAsm) cmpReg(w64 bool, rn, rm Reg)         { b.prog.Emit(a64.CmpReg(w64, mreg(rn), mreg(rm))) }
+func (b *mcAsm) cmpImm(w64 bool, rn Reg, imm uint32) { b.prog.Emit(a64.CmpImm(w64, mreg(rn), imm)) }
+func (b *mcAsm) fcmp(dbl bool, rn, rm Reg)           { b.prog.Emit(a64.Fcmp(dbl, mreg(rn), mreg(rm))) }
+func (b *mcAsm) cset(rd Reg, cmp ir.Cmp, float bool) {
+	var cond a64.Cond
+	var ok bool
+	if float {
+		cond, ok = fpCondOf(cmp)
+	} else {
+		cond, ok = intCondOf(cmp)
+	}
+	if !ok {
+		b.fail("arm64: unsupported comparison predicate %v", cmp)
+		return
+	}
+	b.prog.Emit(a64.Cset(false, mreg(rd), cond))
+}
 func (b *mcAsm) movImm(rd Reg, val int64, w64 bool) { b.m.movImm(mreg(rd), val, w64) }
 func (b *mcAsm) ldrSpill(rd Reg, float bool, off, size int) {
 	b.m.spillLoad(mreg(rd), float, off, size)
@@ -372,6 +396,31 @@ func (b *textAsm) fmovToGP(dbl bool, rd, rn Reg) {
 }
 func (b *textAsm) ext(op extOp, rd, rn Reg, dstSize, srcSize int) {
 	b.line("%s %s, %s", []string{"sxtb", "uxtb", "sxth", "uxth", "sxtw"}[op], rd.Name(dstSize), rn.Name(srcSize))
+}
+func (b *textAsm) cmpReg(w64 bool, rn, rm Reg) {
+	s := regSize(w64)
+	b.line("cmp %s, %s", rn.Name(s), rm.Name(s))
+}
+func (b *textAsm) cmpImm(w64 bool, rn Reg, imm uint32) {
+	b.line("cmp %s, #%d", rn.Name(regSize(w64)), imm)
+}
+func (b *textAsm) fcmp(dbl bool, rn, rm Reg) {
+	s := regSize(dbl)
+	b.line("fcmp %s, %s", rn.Name(s), rm.Name(s))
+}
+func (b *textAsm) cset(rd Reg, cmp ir.Cmp, float bool) {
+	var cond string
+	var ok bool
+	if float {
+		cond, ok = fpCondCode(cmp)
+	} else {
+		cond, ok = condCode(cmp)
+	}
+	if !ok {
+		b.e.fail("arm64: unsupported comparison predicate %v", cmp)
+		return
+	}
+	b.line("cset %s, %s", rd.Name(4), cond)
 }
 
 func (b *textAsm) r3(mn string, w64 bool, rd, rn, rm Reg) {

@@ -138,6 +138,8 @@ func (s *sel) selectData(in *ir.Instr) bool {
 		d, done := s.dst(in.To, sz)
 		s.b.clz(w64, d, s.src(in.Args[0], 1, sz))
 		done()
+	case ir.OCmp:
+		s.cmp(in)
 
 	// Conversions.
 	case ir.OExts:
@@ -182,6 +184,31 @@ func (s *sel) selectData(in *ir.Instr) bool {
 		return false
 	}
 	return true
+}
+
+// cmp emits a comparison and a conditional-set of the boolean result, folding a
+// small constant into a cmp immediate.
+func (s *sel) cmp(in *ir.Instr) {
+	argCls := s.f.ClassOf(in.Args[0])
+	sz := argCls.Size()
+	w64 := sz == 8
+	float := argCls.IsFloat()
+	s1 := s.src(in.Args[0], 0, sz)
+	switch {
+	case float:
+		s.b.fcmp(w64, s1, s.src(in.Args[1], 1, sz))
+	default:
+		if v, ok := intConst(s.f, in.Args[1]); ok {
+			if imm, lsl12, flip, iok := addSubImm(v); iok && !lsl12 && !flip {
+				s.b.cmpImm(w64, s1, imm)
+				break
+			}
+		}
+		s.b.cmpReg(w64, s1, s.src(in.Args[1], 1, sz))
+	}
+	d, done := s.dst(in.To, in.Cls.Size())
+	s.b.cset(d, in.Cmp, float)
+	done()
 }
 
 // srcSize is the byte width of the first operand's class.
