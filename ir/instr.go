@@ -75,6 +75,10 @@ const (
 type AsmOp struct {
 	Template string           // the assembler template, verbatim between the quotes
 	Ops      []AsmOperandKind // operand kinds in %N order
+	// Regs, parallel to Ops, holds a fixed physical-register constraint letter for
+	// each operand ("a", "d", "S", ...) or "" when the allocator may choose. A
+	// backend precolors the operand's temporary to the named register.
+	Regs []string
 }
 
 // AsmRegOuts returns the register-output result temporaries in %N order (To then

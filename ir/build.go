@@ -385,6 +385,7 @@ type AsmSpec struct {
 	Kind AsmOperandKind
 	Cls  Cls
 	Ref  Ref
+	Reg  string // fixed physical-register constraint letter, or "" for the allocator's choice
 }
 
 // Asm emits an inline-assembly statement (OAsm) from operand specs in %N order.
@@ -395,6 +396,7 @@ func (b *Block) Asm(template string, specs []AsmSpec) []Ref {
 	var outs []Ref
 	for _, s := range specs {
 		in.Asm.Ops = append(in.Asm.Ops, s.Kind)
+		in.Asm.Regs = append(in.Asm.Regs, s.Reg)
 		if s.Kind == AsmRegOut || s.Kind == AsmRegInOut {
 			t := b.fn.newTemp("", s.Cls)
 			outs = append(outs, t)

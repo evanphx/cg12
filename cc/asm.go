@@ -105,47 +105,87 @@ func (g *gen) asmCollect(a *cc.Asm) (specs []ir.AsmSpec, outLvals []asmOut, ok b
 			if !isOp {
 				continue // a clobber string, not an operand
 			}
-			if group == 0 { // outputs
-				switch cons {
-				case "=r", "=&r": // "=&r" (early clobber) is the same here: outputs are always kept distinct
-					addr, typ := g.genAddr(operand)
-					specs = append(specs, ir.AsmSpec{Kind: ir.AsmRegOut, Cls: clsOf(typ)})
-					outLvals = append(outLvals, asmOut{addr, typ})
-				case "+r", "+&r": // read-write register: preload with the current value, store back
-					addr, typ := g.genAddr(operand)
-					specs = append(specs, ir.AsmSpec{Kind: ir.AsmRegInOut, Cls: clsOf(typ), Ref: g.loadVal(addr, typ)})
-					outLvals = append(outLvals, asmOut{addr, typ})
-				case "=m", "=&m", "+m", "+&m": // memory is read/written in place, so "+m" is the same as "=m"
-					addr, _ := g.genAddr(operand)
-					specs = append(specs, ir.AsmSpec{Kind: ir.AsmMem, Ref: addr})
-				default:
-					g.fail("cc: unsupported inline-asm output constraint %q", cons)
-					return nil, nil, false
-				}
-				continue
-			}
-			// inputs
-			switch cons {
-			case "r":
-				specs = append(specs, ir.AsmSpec{Kind: ir.AsmRegIn, Ref: g.genExpr(operand)})
-			case "i":
-				v, isConst := constInt(operand)
-				if !isConst {
-					g.fail("cc: inline-asm \"i\" operand is not a constant expression")
-					return nil, nil, false
-				}
-				specs = append(specs, ir.AsmSpec{Kind: ir.AsmImm, Ref: g.fn.Long(v)})
-			case "m":
-				addr, _ := g.genAddr(operand)
-				specs = append(specs, ir.AsmSpec{Kind: ir.AsmMem, Ref: addr})
-			default:
-				g.fail("cc: unsupported inline-asm input constraint %q", cons)
+			base, output, rw := asmParseConstraint(cons)
+			if (group == 0) != output {
+				g.fail("cc: inline-asm operand %q is in the wrong constraint group", cons)
 				return nil, nil, false
+			}
+			spec, lval, err := g.asmOperandSpec(base, output, rw, operand)
+			if err != "" {
+				g.fail("cc: %s", err)
+				return nil, nil, false
+			}
+			specs = append(specs, spec)
+			if spec.Kind == ir.AsmRegOut || spec.Kind == ir.AsmRegInOut {
+				outLvals = append(outLvals, lval)
 			}
 		}
 		group++
 	}
 	return specs, outLvals, true
+}
+
+// asmParseConstraint strips the '='/'+'/'&' modifiers from a constraint, yielding
+// the base letter and whether the operand is an output and read-write.
+func asmParseConstraint(c string) (base string, output, readwrite bool) {
+	for len(c) > 0 {
+		switch c[0] {
+		case '=':
+			output = true
+		case '+':
+			output, readwrite = true, true
+		case '&':
+			// early clobber: cg12 keeps outputs distinct anyway
+		default:
+			return c, output, readwrite
+		}
+		c = c[1:]
+	}
+	return c, output, readwrite
+}
+
+// asmFixedReg reports whether a base constraint names a single fixed register
+// (the common x86 letters). A backend maps the letter to a physical register.
+func asmFixedReg(base string) bool {
+	switch base {
+	case "a", "b", "c", "d", "S", "D":
+		return true
+	}
+	return false
+}
+
+// asmOperandSpec builds the AsmSpec (and, for a register output, the store-back
+// lvalue) for one operand from its base constraint.
+func (g *gen) asmOperandSpec(base string, output, rw bool, operand cc.ExpressionNode) (ir.AsmSpec, asmOut, string) {
+	switch {
+	case base == "r" || asmFixedReg(base):
+		reg := ""
+		if base != "r" {
+			reg = base
+		}
+		switch {
+		case rw: // "+r" / "+a": read-write register
+			addr, typ := g.genAddr(operand)
+			return ir.AsmSpec{Kind: ir.AsmRegInOut, Cls: clsOf(typ), Ref: g.loadVal(addr, typ), Reg: reg}, asmOut{addr, typ}, ""
+		case output: // "=r" / "=a"
+			addr, typ := g.genAddr(operand)
+			return ir.AsmSpec{Kind: ir.AsmRegOut, Cls: clsOf(typ), Reg: reg}, asmOut{addr, typ}, ""
+		default: // "r" / "a" input
+			// A fixed-register input is materialized into a dedicated pre-colored
+			// temporary by the backend, so no copy is inserted here.
+			return ir.AsmSpec{Kind: ir.AsmRegIn, Ref: g.genExpr(operand), Reg: reg}, asmOut{}, ""
+		}
+	case base == "m":
+		addr, _ := g.genAddr(operand) // memory is read/written in place; "+m" == "=m"
+		return ir.AsmSpec{Kind: ir.AsmMem, Ref: addr}, asmOut{}, ""
+	case base == "i" && !output:
+		v, isConst := constInt(operand)
+		if !isConst {
+			return ir.AsmSpec{}, asmOut{}, "inline-asm \"i\" operand is not a constant expression"
+		}
+		return ir.AsmSpec{Kind: ir.AsmImm, Ref: g.fn.Long(v)}, asmOut{}, ""
+	}
+	return ir.AsmSpec{}, asmOut{}, "unsupported inline-asm constraint " + strconv.Quote(base)
 }
 
 // asmTemplate returns the assembler template with its surrounding quotes removed

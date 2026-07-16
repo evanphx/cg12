@@ -7,6 +7,26 @@ import (
 	"github.com/evanphx/cg12/ir"
 )
 
+// asmPrecolor rejects inline-asm fixed-register constraints, which are the
+// x86-specific operand letters ("a", "d", ...); AArch64 asm does not use them.
+// It runs before allocation, mirroring the amd64 pass that honours them.
+func asmPrecolor(f *ir.Func) error {
+	for _, b := range f.Blocks {
+		for i := range b.Instrs {
+			in := &b.Instrs[i]
+			if in.Op != ir.OAsm {
+				continue
+			}
+			for _, letter := range in.Asm.Regs {
+				if letter != "" {
+					return fmt.Errorf("arm64: inline-asm fixed-register constraint %q is not supported", letter)
+				}
+			}
+		}
+	}
+	return nil
+}
+
 // asmVal is a resolved inline-asm operand: an immediate literal, a memory
 // reference, or a register (named at its natural width, or forced by a %w/%x
 // modifier).

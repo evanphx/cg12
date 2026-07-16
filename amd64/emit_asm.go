@@ -7,6 +7,94 @@ import (
 	"github.com/evanphx/cg12/ir"
 )
 
+// amd64FixedReg maps an inline-asm fixed-register constraint letter to its
+// physical register.
+func amd64FixedReg(letter string) (Reg, bool) {
+	switch letter {
+	case "a":
+		return RAX, true
+	case "b":
+		return RBX, true
+	case "c":
+		return RCX, true
+	case "d":
+		return RDX, true
+	case "S":
+		return RSI, true
+	case "D":
+		return RDI, true
+	}
+	return 0, false
+}
+
+// asmPrecolor pins each inline-asm operand carrying a fixed-register constraint
+// to its physical register, so register allocation places it there. A fixed
+// register output pre-colors its own (freshly created) result temporary; a fixed
+// register input is materialized into a fresh pre-colored temporary by a copy
+// inserted before the asm -- robust even when the optimizer has folded the input
+// to a constant. It runs before allocation.
+func asmPrecolor(f *ir.Func) error {
+	pin := func(ref ir.Ref, reg Reg) {
+		t := f.Temps[ref.ID]
+		t.Fixed = true
+		t.Reg = int(reg)
+	}
+	for _, b := range f.Blocks {
+		var out []ir.Instr
+		for i := range b.Instrs {
+			in := b.Instrs[i]
+			if in.Op != ir.OAsm {
+				out = append(out, in)
+				continue
+			}
+			outs := in.AsmRegOuts()
+			oc, ac := 0, 0
+			var pre []ir.Instr // copies materializing fixed inputs, emitted before the asm
+			for opi, kind := range in.Asm.Ops {
+				letter := ""
+				if opi < len(in.Asm.Regs) {
+					letter = in.Asm.Regs[opi]
+				}
+				switch kind {
+				case ir.AsmRegOut, ir.AsmRegInOut:
+					ref := outs[oc]
+					oc++
+					if kind == ir.AsmRegInOut {
+						ac++ // the preload value is a plain Arg
+					}
+					if letter != "" {
+						reg, ok := amd64FixedReg(letter)
+						if !ok {
+							return fmt.Errorf("amd64: unsupported inline-asm register constraint %q", letter)
+						}
+						pin(ref, reg) // the result temporary is dedicated; pin it directly
+					}
+				default:
+					ai := ac
+					ac++
+					if letter == "" {
+						continue
+					}
+					reg, ok := amd64FixedReg(letter)
+					if !ok {
+						return fmt.Errorf("amd64: unsupported inline-asm register constraint %q", letter)
+					}
+					arg := in.Args[ai]
+					cls := f.ClassOf(arg)
+					nt := f.NewTemp("asmfix", cls)
+					pin(nt, reg)
+					pre = append(pre, ir.Instr{Op: ir.OCopy, Cls: cls, To: nt, Args: []ir.Ref{arg}})
+					in.Args[ai] = nt
+				}
+			}
+			out = append(out, pre...)
+			out = append(out, in)
+		}
+		b.Instrs = out
+	}
+	return nil
+}
+
 // asmVal is a resolved inline-asm operand: an immediate literal, a memory
 // reference, or a register (named at its natural width, or forced by a
 // %q/%k/%w/%b modifier).

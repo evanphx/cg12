@@ -46,6 +46,9 @@ type numbering struct {
 
 // regAlloc runs linear-scan allocation on the already-lowered function.
 func regAlloc(f *ir.Func) (*allocation, error) {
+	if err := asmPrecolor(f); err != nil {
+		return nil, err
+	}
 	cfg := analysis.BuildCFG(f)
 	live := cfg.Liveness()
 
