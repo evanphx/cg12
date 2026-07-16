@@ -69,6 +69,13 @@ type asmb interface {
 	// the primitive the shared parallel-move ordering drives.
 	moveLoc(dst, src loc)
 
+	// Thread-local storage. threadPtr reads the running thread's pointer;
+	// tlsOffset loads a variable's distance from it, the way the chosen model
+	// says. Each needs only the one register it writes -- an address is the sum of
+	// the two, which the selector emits as an ordinary add.
+	threadPtr(rd Reg)
+	tlsOffset(rd Reg, c ir.Const)
+
 	// Memory. load/store use [base]; loadIdx/storeIdx use [base, index] with the
 	// extend/scale encoded in aux. The op fixes the width and signedness.
 	load(op ir.Op, cls ir.Cls, rd, base Reg)
@@ -432,6 +439,8 @@ func (b *mcAsm) storeIdx(op ir.Op, val, base, index Reg, aux int64) {
 func (b *mcAsm) movImm(rd Reg, val int64, w64 bool) { b.m.movImm(mreg(rd), val, w64) }
 func (b *mcAsm) materializeSym(rd Reg, c ir.Const)  { b.m.materializeSym(mreg(rd), c) }
 func (b *mcAsm) moveLoc(dst, src loc)               { b.m.emitMoveLoc(dst, src) }
+func (b *mcAsm) threadPtr(rd Reg)                   { b.prog.Emit(a64.MrsTPIDR(mreg(rd))) }
+func (b *mcAsm) tlsOffset(rd Reg, c ir.Const)       { b.m.emitTLSOffset(mreg(rd), c) }
 func (b *mcAsm) branch(to *ir.Block)                { b.prog.B(to.Name) }
 func (b *mcAsm) cbnz(w64 bool, rn Reg, to *ir.Block) {
 	b.prog.Cbnz(w64, mreg(rn), to.Name)
@@ -552,6 +561,8 @@ func (b *textAsm) storeIdx(op ir.Op, val, base, index Reg, aux int64) {
 func (b *textAsm) movImm(rd Reg, val int64, w64 bool) { b.e.movImm(rd, val, boolToSize(w64)) }
 func (b *textAsm) materializeSym(rd Reg, c ir.Const)  { b.e.materializeSym(rd, c) }
 func (b *textAsm) moveLoc(dst, src loc)               { b.e.emitMoveLoc(dst, src) }
+func (b *textAsm) threadPtr(rd Reg)                   { b.line("mrs %s, tpidr_el0", rd.xName()) }
+func (b *textAsm) tlsOffset(rd Reg, c ir.Const)       { b.e.emitTLSOffset(rd, c) }
 func (b *textAsm) branch(to *ir.Block)                { b.line("b %s", b.e.blockLabel(to)) }
 func (b *textAsm) cbnz(w64 bool, rn Reg, to *ir.Block) {
 	b.line("cbnz %s, %s", rn.Name(regSize(w64)), b.e.blockLabel(to))

@@ -79,6 +79,19 @@ func (s *sel) selectData(in *ir.Instr) bool {
 	w64 := sz == 8
 	flt := in.Cls.IsFloat()
 	switch in.Op {
+	case ir.OThreadPtr:
+		d, done := s.dst(in.To, 8)
+		s.b.threadPtr(d)
+		done()
+	case ir.OTLSOffset:
+		c, ok := threadConst(s.f, in.Args[0])
+		if !ok {
+			s.b.fail("arm64: tlsoffset needs a thread-local symbol, got %v", in.Args[0])
+			return true
+		}
+		d, done := s.dst(in.To, 8)
+		s.b.tlsOffset(d, c)
+		done()
 	case ir.OAdd:
 		if flt {
 			s.binReg(in, sz, func(rd, rn, rm Reg) { s.b.fop(fAdd, w64, rd, rn, rm) })

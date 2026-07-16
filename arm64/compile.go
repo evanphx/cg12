@@ -16,7 +16,7 @@ const ptrCls = ir.ClsL
 
 func Compile(f *ir.Func) (string, error) {
 	ir.LowerPointers(f, ptrCls)
-	if err := lower(f); err != nil {
+	if err := lower(f, TLSLocalExec); err != nil {
 		return "", err
 	}
 	alloc, err := regAlloc(f)

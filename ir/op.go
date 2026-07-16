@@ -123,6 +123,19 @@ const (
 	OGetReg // result = register Args[0] (a RefReg)
 	OSetReg // register Args[1] (a RefReg) = Args[0]
 
+	// Thread-local storage. A thread-local has no address of its own: each thread
+	// holds a copy, and how one is reached depends on the model the backend was
+	// asked for. These ops exist so that reaching it is ordinary instruction
+	// selection -- the register allocator supplies the registers, and for
+	// general-dynamic it sees the call -- rather than something an addressing
+	// helper improvises out of view.
+	//
+	// OThreadPtr is the running thread's pointer; OTLSOffset is a variable's
+	// distance from it, read however the model says. An address is then just their
+	// sum, an ordinary add.
+	OThreadPtr // result = the thread pointer
+	OTLSOffset // result = Args[0] (a thread-local symbol)'s offset from the thread pointer
+
 	// OSafepoint marks a point where the garbage collector may stop the thread:
 	// the backend emits a stack map describing the managed references live here.
 	// Calls are safepoints implicitly; this marks the ones that are not calls —
@@ -244,6 +257,9 @@ var opTable = [numOps]opInfo{
 	OBlockAddr: {name: "blockaddr", hasResult: true},
 
 	OSafepoint: {name: "safept"},
+
+	OThreadPtr: {name: "threadptr", hasResult: true},
+	OTLSOffset: {name: "tlsoffset", hasResult: true},
 
 	OGetReg: {name: "getreg", hasResult: true},
 	OSetReg: {name: "setreg"},

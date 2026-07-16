@@ -799,6 +799,15 @@ func (e *emitter) materializeSym(r Reg, c ir.Const) {
 	}
 }
 
+// emitTLSOffset loads a thread-local's offset from the thread pointer into r,
+// reading it from the GOT slot the loader fills (initial-exec). It needs only the
+// register it writes; the thread pointer is a separate op and the sum an add.
+func (e *emitter) emitTLSOffset(r Reg, c ir.Const) {
+	sym := sanitize(c.Sym)
+	e.line("adrp %s, :gottprel:%s", r.xName(), sym)
+	e.line("ldr %s, [%s, #:gottprel_lo12:%s]", r.xName(), r.xName(), sym)
+}
+
 // floatBits returns the IEEE-754 bit pattern of a floating constant.
 func floatBits(c ir.Const) int64 {
 	if c.Cls == ir.ClsS {

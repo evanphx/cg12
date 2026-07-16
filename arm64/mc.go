@@ -80,7 +80,7 @@ func CompileToObjectWith(m *ir.Module, opts Options) (*obj.Object, error) {
 		params := dwarfParams(f)
 		paramTemps := paramTempIDs(f)
 		ir.LowerPointers(f, ptrCls)
-		if err := lower(f); err != nil {
+		if err := lower(f, opts.TLSModel); err != nil {
 			return nil, fmt.Errorf("function %s: %w", f.Name, err)
 		}
 		alloc, err := regAlloc(f)
@@ -814,28 +814,20 @@ func (m *mc) movImm(r a64.Reg, val int64, w64 bool) {
 	}
 }
 
-// materializeTLSInitialExec computes a thread-local's address as thread_pointer +
-// the offset the loader wrote into a GOT slot: reg = tp + *GOT(sym).
-//
-// The sum needs two registers at once, and this is handed only one, so it borrows
-// a second and gives it back. A caller may have live values in any scratch, and
-// nothing here knows which. The tidier fix is to lower a thread-local access into
-// IR the register allocator can see, so it supplies the temporary -- the same
-// change general-dynamic needs for its call.
-func (m *mc) materializeTLSInitialExec(r a64.Reg, sym string) {
+// emitTLSOffset loads a thread-local's offset from the thread pointer into r.
+// Initial-exec reads it from a GOT slot the loader fills, so this is an ordinary
+// PC-relative load and needs only the register it writes -- the thread pointer is
+// a separate op, and the sum an ordinary add.
+func (m *mc) emitTLSOffset(r a64.Reg, c ir.Const) {
+	if m.tlsModel == TLSLocalExec {
+		m.fail("arm64: local-exec computes a thread-local's offset in the instruction itself, not into a register")
+		return
+	}
+	sym := sanitize(c.Sym)
 	m.reloc(sym, obj.R_AARCH64_TLSIE_ADR_GOTTPREL_PAGE21)
 	m.emit(a64.Adrp(r, 0))
 	m.reloc(sym, obj.R_AARCH64_TLSIE_LD64_GOTTPREL_LO12_NC)
-	m.emit(a64.LdrImm(true, r, r, 0)) // r = the offset from the thread pointer
-
-	borrow := a64.Reg(0)
-	if r == borrow {
-		borrow = a64.Reg(1)
-	}
-	m.emit(a64.Stp(true, borrow, a64.ZR, mcSP, -16, a64.PreIndex)) // save it
-	m.emit(a64.MrsTPIDR(borrow))
-	m.emit(a64.AddReg(true, r, borrow, r)) // r = tp + offset
-	m.emit(a64.Ldp(true, borrow, a64.ZR, mcSP, 16, a64.PostIndex))
+	m.emit(a64.LdrImm(true, r, r, 0))
 }
 
 // materializeSym loads a symbol address (plus offset) into r via adrp/add,
@@ -843,16 +835,14 @@ func (m *mc) materializeTLSInitialExec(r a64.Reg, sym string) {
 func (m *mc) materializeSym(r a64.Reg, c ir.Const) {
 	sym := sanitize(c.Sym)
 	if c.Thread {
-		if m.tlsModel == TLSInitialExec {
-			m.materializeTLSInitialExec(r, sym)
-		} else {
-			// Thread-local, local-exec: reg = thread_pointer + tprel(sym).
-			m.emit(a64.MrsTPIDR(r))
-			m.reloc(sym, obj.R_AARCH64_TLSLE_ADD_TPREL_HI12)
-			m.emit(a64.AddImmLSL12(true, r, r, 0))
-			m.reloc(sym, obj.R_AARCH64_TLSLE_ADD_TPREL_LO12_NC)
-			m.emit(a64.AddImm(true, r, r, 0))
-		}
+		// Only local-exec reaches here: the other models are lowered into ordinary
+		// instructions before selection, so the register allocator can see them.
+		// reg = thread_pointer + tprel(sym), which needs just this one register.
+		m.emit(a64.MrsTPIDR(r))
+		m.reloc(sym, obj.R_AARCH64_TLSLE_ADD_TPREL_HI12)
+		m.emit(a64.AddImmLSL12(true, r, r, 0))
+		m.reloc(sym, obj.R_AARCH64_TLSLE_ADD_TPREL_LO12_NC)
+		m.emit(a64.AddImm(true, r, r, 0))
 	} else {
 		m.reloc(sym, obj.R_AARCH64_ADR_PREL_PG_HI21)
 		m.emit(a64.Adrp(r, 0))

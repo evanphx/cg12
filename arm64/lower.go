@@ -16,9 +16,12 @@ import (
 //
 // Only the integer subset (classes w and l) is handled; anything outside it
 // returns an explicit error rather than emitting silently wrong code.
-func lower(f *ir.Func) error {
+func lower(f *ir.Func, tlsModel TLSModel) error {
 	lowerpass.JumpTables(f) // dense switches -> indexed branch (JmpTable)
 	lowerpass.Switches(f)   // remaining multiway branches -> conditional branches
+	// Before the folds: they rewrite addressing, and a thread-local is not an
+	// address they can reason about.
+	lowerTLS(f, tlsModel)
 	hoistAllocas(f)
 	foldIdioms(f)
 	foldAddressing(f)
@@ -717,4 +720,62 @@ func lowerCalls(f *ir.Func) error {
 		b.Instrs = out
 	}
 	return nil
+}
+
+// lowerTLS rewrites references to thread-local variables into instructions the
+// register allocator can see.
+//
+// A thread-local has no address of its own, and how one is reached depends on the
+// model. Local-exec is a link-time constant that fits in a single register, so the
+// emitter can improvise it. The others cannot be improvised: initial-exec adds the
+// thread pointer to an offset -- two registers at once -- and general-dynamic ends
+// in a call, which would clobber whatever the allocator happened to be keeping in
+// caller-saved registers. Turning the access into ordinary instructions here lets
+// the allocator supply the registers and (for the call) spill across it, instead
+// of an addressing helper doing either behind its back.
+func lowerTLS(f *ir.Func, model TLSModel) {
+	if model == TLSLocalExec {
+		return // a link-time constant, and one register is enough to build it
+	}
+	for _, b := range f.Blocks {
+		out := make([]ir.Instr, 0, len(b.Instrs))
+		for _, in := range b.Instrs {
+			for i, a := range in.Args {
+				c, ok := threadConst(f, a)
+				if !ok {
+					continue
+				}
+				// addr = thread_pointer + offset(sym), an ordinary add of two temps.
+				off := f.NewTemp("", ir.ClsL)
+				tp := f.NewTemp("", ir.ClsL)
+				addr := f.NewTemp("", ir.ClsL)
+				out = append(out,
+					ir.Instr{Op: ir.OTLSOffset, Cls: ir.ClsL, To: off, Args: []ir.Ref{a}, Pos: in.Pos},
+					ir.Instr{Op: ir.OThreadPtr, Cls: ir.ClsL, To: tp, Pos: in.Pos},
+					ir.Instr{Op: ir.OAdd, Cls: ir.ClsL, To: addr, Args: []ir.Ref{tp, off}, Pos: in.Pos},
+				)
+				if c.Int != 0 {
+					sum := f.NewTemp("", ir.ClsL)
+					out = append(out, ir.Instr{Op: ir.OAdd, Cls: ir.ClsL, To: sum,
+						Args: []ir.Ref{addr, f.Long(c.Int)}, Pos: in.Pos})
+					addr = sum
+				}
+				in.Args[i] = addr
+			}
+			out = append(out, in)
+		}
+		b.Instrs = out
+	}
+}
+
+// threadConst reports whether ref names a thread-local symbol, and returns it.
+func threadConst(f *ir.Func, ref ir.Ref) (ir.Const, bool) {
+	if ref.Kind != ir.RefConst {
+		return ir.Const{}, false
+	}
+	c := f.Consts[ref.ID]
+	if c.Kind != ir.ConstSym || !c.Thread {
+		return ir.Const{}, false
+	}
+	return c, true
 }

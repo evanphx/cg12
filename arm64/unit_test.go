@@ -195,7 +195,7 @@ func TestLowerAcceptsFloat(t *testing.T) {
 	f := ir.NewModule().NewFunc("f", ir.ClsD)
 	x := f.Param("x", ir.ClsD)
 	f.Entry().Ret(x)
-	require.NoError(t, lower(f))
+	require.NoError(t, lower(f, TLSLocalExec))
 }
 
 func TestLowerManyParamsUseStack(t *testing.T) {
@@ -204,7 +204,7 @@ func TestLowerManyParamsUseStack(t *testing.T) {
 		f.Param("p", ir.ClsW)
 	}
 	f.Entry().RetVoid()
-	require.NoError(t, lower(f))
+	require.NoError(t, lower(f, TLSLocalExec))
 	stacked := 0
 	for _, in := range f.Start.Instrs {
 		if in.Op == ir.OPar && len(in.Args) == 0 {
@@ -220,7 +220,7 @@ func TestLowerManyFloatParamsUseStack(t *testing.T) {
 		f.Param("d", ir.ClsD)
 	}
 	f.Entry().RetVoid()
-	require.NoError(t, lower(f))
+	require.NoError(t, lower(f, TLSLocalExec))
 	stacked := 0
 	for _, in := range f.Start.Instrs {
 		if in.Op == ir.OPar && len(in.Args) == 0 {
@@ -240,7 +240,7 @@ func TestLowerFloatParamsUseSeparateBank(t *testing.T) {
 		f.Param("d", ir.ClsD)
 	}
 	f.Entry().RetVoid()
-	require.NoError(t, lower(f), "6 int + 6 float args fit in x0..x5 and v0..v5")
+	require.NoError(t, lower(f, TLSLocalExec), "6 int + 6 float args fit in x0..x5 and v0..v5")
 }
 
 func TestLowerManyCallArgsUseStack(t *testing.T) {
@@ -252,7 +252,7 @@ func TestLowerManyCallArgsUseStack(t *testing.T) {
 	}
 	e.CallVoid(f.Sym("g", 0), args...)
 	e.RetVoid()
-	require.NoError(t, lower(f))
+	require.NoError(t, lower(f, TLSLocalExec))
 	// The call records a 16-aligned outgoing stack area for the two extra args.
 	var call *ir.Instr
 	for k := range f.Start.Instrs {
