@@ -64,6 +64,13 @@ type xasm interface {
 	callSym(sym string, off int64)
 	callReg(r Reg)
 
+	// Frame teardown, shared by the return epilogue and the tail-call branch:
+	// restoreGP reloads a callee-saved register from its RBP-relative slot,
+	// framePop unwinds the frame (mov rsp,rbp; pop rbp), and ret returns.
+	restoreGP(r Reg, off int32)
+	framePop()
+	ret()
+
 	// Floating point: two-operand arithmetic (dst = dst OP src), register move,
 	// sign-flip negation, and a compare that sets the boolean result.
 	binFP(op ir.Op, dbl bool, dst, src Reg)
@@ -232,6 +239,14 @@ func (b *mcXasm) callSym(sym string, off int64) {
 	b.m.recordReloc(b.m.prog.Len()-4, sym, obj.R_X86_64_PLT32, off-4)
 }
 func (b *mcXasm) callReg(r Reg) { b.m.emit(x64.CallReg(r.mreg())) }
+func (b *mcXasm) restoreGP(r Reg, off int32) {
+	b.m.emit(x64.Load(true, r.mreg(), x64.At(RBP.mreg(), off)))
+}
+func (b *mcXasm) framePop() {
+	b.m.emit(x64.MovReg(true, RSP.mreg(), RBP.mreg()))
+	b.m.emit(x64.Pop(RBP.mreg()))
+}
+func (b *mcXasm) ret() { b.m.emit(x64.Ret()) }
 func (b *mcXasm) divGP(w, signed bool, divisor Reg) {
 	if signed {
 		if w {
@@ -502,6 +517,12 @@ func (b *textXasm) jmpTable(idx Reg, blk *ir.Block, targets []*ir.Block) {
 }
 func (b *textXasm) callSym(sym string, off int64) { b.e.line("call %s", sanitize(sym)) }
 func (b *textXasm) callReg(r Reg)                 { b.e.line("call *%s", gpn(r, 8)) }
+func (b *textXasm) restoreGP(r Reg, off int32)    { b.e.line("movq %s, %s", memn(RBP, off), gpn(r, 8)) }
+func (b *textXasm) framePop() {
+	b.e.line("movq %%rbp, %%rsp")
+	b.e.line("popq %%rbp")
+}
+func (b *textXasm) ret() { b.e.line("ret") }
 func (b *textXasm) divGP(w, signed bool, divisor Reg) {
 	sz := clsSizeW(w)
 	if signed {

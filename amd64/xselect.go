@@ -177,6 +177,22 @@ func (s *xsel) term(b *ir.Block) bool {
 	return true
 }
 
+// teardown restores callee-saved registers and unwinds the frame (mov rsp,rbp;
+// pop rbp), leaving rsp at the return address without returning. It is shared by
+// the return epilogue and the tail-call branch.
+func (s *xsel) teardown(lay *frameLayout) {
+	for k, r := range lay.calleeSaved {
+		s.b.restoreGP(r, lay.savedAddr(k))
+	}
+	s.b.framePop()
+}
+
+// epilogue tears down the frame and returns.
+func (s *xsel) epilogue(lay *frameLayout) {
+	s.teardown(lay)
+	s.b.ret()
+}
+
 // call emits a direct or indirect call. Args[0] is the callee: a symbol constant
 // becomes a direct call, anything else an indirect call through a register. The
 // caller has already placed the arguments (emitArgs) and set the vararg count.

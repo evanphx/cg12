@@ -630,18 +630,13 @@ func (m *mc) saveVarargRegs() {
 
 // teardown restores callee-saved registers and unwinds the frame (mov rsp,rbp;
 // pop rbp), leaving rsp at the return address without returning. It is shared by
-// the return epilogue and the tail-call branch.
+// the return epilogue and the tail-call branch, and selected once through xsel.
 func (m *mc) teardown() {
-	for k, r := range m.calleeSaved {
-		m.emit(x64.Load(true, r.mreg(), x64.At(RBP.mreg(), m.savedAddr(k))))
-	}
-	m.emit(x64.MovReg(true, RSP.mreg(), RBP.mreg()))
-	m.emit(x64.Pop(RBP.mreg()))
+	(&xsel{f: m.f, b: &mcXasm{m: m}}).teardown(&m.frameLayout)
 }
 
 func (m *mc) epilogue() {
-	m.teardown()
-	m.emit(x64.Ret())
+	(&xsel{f: m.f, b: &mcXasm{m: m}}).epilogue(&m.frameLayout)
 }
 
 // --- location abstraction --------------------------------------------------

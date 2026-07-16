@@ -131,16 +131,11 @@ func (e *emitter) prologue() {
 }
 
 func (e *emitter) teardown() {
-	for k, r := range e.calleeSaved {
-		e.line("movq %s, %s", memn(RBP, e.savedAddr(k)), gpn(r, 8))
-	}
-	e.line("movq %%rbp, %%rsp")
-	e.line("popq %%rbp")
+	(&xsel{f: e.f, b: &textXasm{e: e}}).teardown(&e.frameLayout)
 }
 
 func (e *emitter) epilogue() {
-	e.teardown()
-	e.line("ret")
+	(&xsel{f: e.f, b: &textXasm{e: e}}).epilogue(&e.frameLayout)
 }
 
 // --- operands (shared loc abstraction) -------------------------------------
