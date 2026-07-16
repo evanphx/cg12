@@ -83,6 +83,15 @@ func (s *sel) selectData(in *ir.Instr) bool {
 		d, done := s.dst(in.To, 8)
 		s.b.threadPtr(d)
 		done()
+	case ir.OTLSIndexAddr:
+		c, ok := threadConst(s.f, in.Args[0])
+		if !ok {
+			s.b.fail("arm64: tlsindexaddr needs a thread-local symbol, got %v", in.Args[0])
+			return true
+		}
+		d, done := s.dst(in.To, 8)
+		s.b.tlsIndexAddr(d, c)
+		done()
 	case ir.OTLSOffset:
 		c, ok := threadConst(s.f, in.Args[0])
 		if !ok {

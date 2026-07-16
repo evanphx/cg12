@@ -745,15 +745,29 @@ func lowerTLS(f *ir.Func, model TLSModel) {
 				if !ok {
 					continue
 				}
-				// addr = thread_pointer + offset(sym), an ordinary add of two temps.
-				off := f.NewTemp("", ir.ClsL)
-				tp := f.NewTemp("", ir.ClsL)
-				addr := f.NewTemp("", ir.ClsL)
-				out = append(out,
-					ir.Instr{Op: ir.OTLSOffset, Cls: ir.ClsL, To: off, Args: []ir.Ref{a}, Pos: in.Pos},
-					ir.Instr{Op: ir.OThreadPtr, Cls: ir.ClsL, To: tp, Pos: in.Pos},
-					ir.Instr{Op: ir.OAdd, Cls: ir.ClsL, To: addr, Args: []ir.Ref{tp, off}, Pos: in.Pos},
-				)
+				var addr ir.Ref
+				if model == TLSGeneralDynamic {
+					// The variable's storage may not exist in this thread yet, so ask
+					// __tls_get_addr for the address, handing it the descriptor. The call
+					// is an ordinary one: the allocator sees it and spills across it.
+					idx := f.NewTemp("", ir.ClsL)
+					addr = f.NewTemp("", ir.ClsL)
+					out = append(out,
+						ir.Instr{Op: ir.OTLSIndexAddr, Cls: ir.ClsL, To: idx, Args: []ir.Ref{a}, Pos: in.Pos},
+						ir.Instr{Op: ir.OCall, Cls: ir.ClsL, To: addr, Pos: in.Pos,
+							Args: []ir.Ref{f.Sym("__tls_get_addr", 0), idx}},
+					)
+				} else {
+					// addr = thread_pointer + offset(sym), an ordinary add of two temps.
+					off := f.NewTemp("", ir.ClsL)
+					tp := f.NewTemp("", ir.ClsL)
+					addr = f.NewTemp("", ir.ClsL)
+					out = append(out,
+						ir.Instr{Op: ir.OTLSOffset, Cls: ir.ClsL, To: off, Args: []ir.Ref{a}, Pos: in.Pos},
+						ir.Instr{Op: ir.OThreadPtr, Cls: ir.ClsL, To: tp, Pos: in.Pos},
+						ir.Instr{Op: ir.OAdd, Cls: ir.ClsL, To: addr, Args: []ir.Ref{tp, off}, Pos: in.Pos},
+					)
+				}
 				if c.Int != 0 {
 					sum := f.NewTemp("", ir.ClsL)
 					out = append(out, ir.Instr{Op: ir.OAdd, Cls: ir.ClsL, To: sum,

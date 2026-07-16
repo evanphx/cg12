@@ -44,6 +44,12 @@ const (
 	// from the start -- a library brought in later by dlopen may find no room left
 	// in the static block, which is what general-dynamic exists for.
 	TLSInitialExec
+
+	// TLSGeneralDynamic asks __tls_get_addr for the address, which finds or
+	// allocates this thread's block for the owning module. It works for any
+	// thread-local, including one in a library brought in by dlopen, at the cost of
+	// a call.
+	TLSGeneralDynamic
 )
 
 // CompileObject emits an ELF relocatable object for m with default options.
@@ -812,6 +818,19 @@ func (m *mc) movImm(r a64.Reg, val int64, w64 bool) {
 	if first { // the value is zero
 		m.emit(a64.Movz(w64, r, 0, 0))
 	}
+}
+
+// emitTLSIndexAddr loads the address of a thread-local's descriptor into r: the
+// two words naming which module owns the variable and its offset within that
+// module. Handing it to __tls_get_addr yields the address. This is plain adrp/add
+// and needs only the register it writes -- the call is a separate instruction, so
+// the allocator knows to spill across it.
+func (m *mc) emitTLSIndexAddr(r a64.Reg, c ir.Const) {
+	sym := sanitize(c.Sym)
+	m.reloc(sym, obj.R_AARCH64_TLSGD_ADR_PAGE21)
+	m.emit(a64.Adrp(r, 0))
+	m.reloc(sym, obj.R_AARCH64_TLSGD_ADD_LO12_NC)
+	m.emit(a64.AddImm(true, r, r, 0))
 }
 
 // emitTLSOffset loads a thread-local's offset from the thread pointer into r.

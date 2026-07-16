@@ -333,7 +333,7 @@ func (o *Object) writeDynImage(im dynImage) ([]byte, error) {
 	// a GOT slot but never a PLT stub, so keep it out of the imports.
 	tlsGotSym := map[string]bool{}
 	for _, r := range o.allRelocs() {
-		if isTLSGotReloc(r.Type) {
+		if isTLSGotReloc(r.Type) || isTLSGdReloc(r.Type) {
 			tlsGotSym[r.Sym] = true
 		}
 	}
@@ -359,17 +359,22 @@ func (o *Object) writeDynImage(im dynImage) ([]byte, error) {
 	// Initial-exec reads a thread-local's offset from a GOT slot the loader fills.
 	// Collect the variables reached that way; each needs a slot and a relocation
 	// telling the loader which variable it describes.
-	var tlsGot []string
-	seenTls := map[string]bool{}
+	var tlsGot, tlsGd []string
+	seenTls, seenGd := map[string]bool{}, map[string]bool{}
 	for _, r := range o.allRelocs() {
-		if isTLSGotReloc(r.Type) && !seenTls[r.Sym] {
+		switch {
+		case isTLSGotReloc(r.Type) && !seenTls[r.Sym]:
 			seenTls[r.Sym] = true
 			tlsGot = append(tlsGot, r.Sym)
+		case isTLSGdReloc(r.Type) && !seenGd[r.Sym]:
+			seenGd[r.Sym] = true
+			tlsGd = append(tlsGd, r.Sym)
 		}
 	}
 	sort.Strings(tlsGot)
+	sort.Strings(tlsGd)
 	var tlsHere, tlsElsewhere []string
-	for _, n := range tlsGot {
+	for _, n := range append(append([]string(nil), tlsGot...), tlsGd...) {
 		if o.definesSym(n) {
 			tlsHere = append(tlsHere, n)
 		} else {
@@ -392,7 +397,7 @@ func (o *Object) writeDynImage(im dynImage) ([]byte, error) {
 				nRel++
 			}
 		}
-		if nplt > 0 || len(tlsGot) > 0 {
+		if nplt > 0 || len(tlsGot) > 0 || len(tlsGd) > 0 {
 			nRel++ // GOT[0] holds &_DYNAMIC, itself an absolute address
 		}
 		// Each init/fini entry is a function address, so it needs rebasing too.
@@ -401,7 +406,7 @@ func (o *Object) writeDynImage(im dynImage) ([]byte, error) {
 	// The thread-local GOT slots need a relocation each, in every image: their
 	// values are the loader's to decide, position-independent or not.
 	var tlsSlotRel []Reloc
-	nRelaDyn := nRel + len(tlsGot)
+	nRelaDyn := nRel + len(tlsGot) + 2*len(tlsGd)
 
 	// --- section layout; vaddr = base + file offset throughout ---------------
 	// PT_PHDR is not decoration: the loader derives the image's load bias from it
@@ -574,11 +579,15 @@ func (o *Object) writeDynImage(im dynImage) ([]byte, error) {
 	// one per thread-local reached through it. The header is there whenever the GOT
 	// is, so its size and its contents below must agree on that -- they are written
 	// in different places, and a disagreement silently shifts everything after it.
-	gotSize, tlsGotAt := 0, 0
-	if nplt > 0 || len(tlsGot) > 0 {
+	gotSize, tlsGotAt, tlsGdAt := 0, 0, 0
+	if nplt > 0 || len(tlsGot) > 0 || len(tlsGd) > 0 {
 		gotSize = (gotReserved + nplt) * 8
 		tlsGotAt = gotSize
 		gotSize += len(tlsGot) * 8
+		// A general-dynamic descriptor is two words: the owning module, then the
+		// offset within it.
+		tlsGdAt = gotSize
+		gotSize += len(tlsGd) * 16
 	}
 	// The init/fini arrays are function-pointer tables: written by relocation and
 	// never again, so they belong in the relro region beside the GOT.
@@ -707,7 +716,7 @@ func (o *Object) writeDynImage(im dynImage) ([]byte, error) {
 	if finiArrSize > 0 {
 		secFiniArr = nextSec()
 	}
-	if nplt > 0 || len(tlsGot) > 0 {
+	if nplt > 0 || len(tlsGot) > 0 || len(tlsGd) > 0 {
 		secGot = nextSec()
 	}
 	secDynamic := nextSec()
@@ -770,19 +779,23 @@ func (o *Object) writeDynImage(im dynImage) ([]byte, error) {
 	for i, n := range tlsGot {
 		tlsGotVaddr[n] = va(gotOff + tlsGotAt + i*8)
 	}
+	tlsGdVaddr := map[string]uint64{}
+	for i, n := range tlsGd {
+		tlsGdVaddr[n] = va(gotOff + tlsGdAt + i*16)
+	}
 
 	text := append([]byte(nil), o.Text...)
 	data := append([]byte(nil), o.Data...)
-	dynRel, err := resolveSection(o.Machine, im.pie, text, va(textOff), o.Relocs, symVaddr, tlsOff, tlsGotVaddr)
+	dynRel, err := resolveSection(o.Machine, im.pie, text, va(textOff), o.Relocs, symVaddr, tlsOff, tlsGotVaddr, tlsGdVaddr)
 	if err != nil {
 		return nil, err
 	}
-	dataRel, err := resolveSection(o.Machine, im.pie, data, va(dataOff), o.DataRelocs, symVaddr, tlsOff, tlsGotVaddr)
+	dataRel, err := resolveSection(o.Machine, im.pie, data, va(dataOff), o.DataRelocs, symVaddr, tlsOff, tlsGotVaddr, tlsGdVaddr)
 	if err != nil {
 		return nil, err
 	}
 	dynRel = append(dynRel, dataRel...)
-	if im.pie && (nplt > 0 || len(tlsGot) > 0) {
+	if im.pie && (nplt > 0 || len(tlsGot) > 0 || len(tlsGd) > 0) {
 		dynRel = append(dynRel, Reloc{
 			Offset: va(gotOff), Type: relativeType(o.Machine), Addend: int64(va(dynamicOff)),
 		})
@@ -822,6 +835,14 @@ func (o *Object) writeDynImage(im dynImage) ([]byte, error) {
 		tlsSlotRel = append(tlsSlotRel, Reloc{
 			Offset: tlsGotVaddr[n], Sym: n, Type: tlsGotSlotType(o.Machine),
 		})
+	}
+	// A descriptor's two words are filled separately: which module owns the
+	// variable, and its offset within that module.
+	for _, n := range tlsGd {
+		tlsSlotRel = append(tlsSlotRel,
+			Reloc{Offset: tlsGdVaddr[n], Sym: n, Type: R_AARCH64_TLS_DTPMOD64},
+			Reloc{Offset: tlsGdVaddr[n] + 8, Sym: n, Type: R_AARCH64_TLS_DTPREL64},
+		)
 	}
 
 	// --- section contents ----------------------------------------------------
@@ -909,7 +930,7 @@ func (o *Object) writeDynImage(im dynImage) ([]byte, error) {
 	}
 
 	got := &elfBuf{}
-	if nplt > 0 || len(tlsGot) > 0 {
+	if nplt > 0 || len(tlsGot) > 0 || len(tlsGd) > 0 {
 		got.u64(va(dynamicOff)) // GOT[0] = &_DYNAMIC
 		got.u64(0)              // GOT[1], GOT[2]: the loader's lazy-resolution slots
 		got.u64(0)
@@ -922,6 +943,10 @@ func (o *Object) writeDynImage(im dynImage) ([]byte, error) {
 		}
 		for range tlsGot {
 			got.u64(0) // the loader writes the thread-pointer offset here
+		}
+		for range tlsGd {
+			got.u64(0) // the loader writes the owning module here...
+			got.u64(0) // ...and the offset within it here
 		}
 	}
 
@@ -1165,9 +1190,31 @@ func (o *Object) imports() []string {
 // so it becomes a RELATIVE relocation the loader applies as *slot = base + addend.
 // PC-relative references always resolve here: the distance between two points in
 // the image does not change when the image moves.
-func resolveSection(machine uint16, pie bool, sec []byte, secVaddr uint64, relocs []Reloc, symVaddr, tlsOff, gotVaddr map[string]uint64) ([]Reloc, error) {
+func resolveSection(machine uint16, pie bool, sec []byte, secVaddr uint64, relocs []Reloc, symVaddr, tlsOff, gotVaddr, gdVaddr map[string]uint64) ([]Reloc, error) {
 	var dyn []Reloc
 	for _, r := range relocs {
+		if isTLSGdReloc(r.Type) {
+			// The code addresses the descriptor; the loader fills it in. So this
+			// resolves like any other reference to an address -- the descriptor's.
+			d, ok := gdVaddr[r.Sym]
+			if !ok {
+				return nil, fmt.Errorf("obj: no descriptor for thread-local %q", r.Sym)
+			}
+			place := int64(secVaddr) + int64(r.Offset)
+			var err error
+			switch r.Type {
+			case R_AARCH64_TLSGD_ADR_PAGE21:
+				err = resolveAArch64(sec, Reloc{Offset: r.Offset, Sym: r.Sym,
+					Type: R_AARCH64_ADR_PREL_PG_HI21}, int64(d), place)
+			case R_AARCH64_TLSGD_ADD_LO12_NC:
+				err = resolveAArch64(sec, Reloc{Offset: r.Offset, Sym: r.Sym,
+					Type: R_AARCH64_ADD_ABS_LO12_NC}, int64(d), place)
+			}
+			if err != nil {
+				return nil, err
+			}
+			continue
+		}
 		if isTLSGotReloc(r.Type) {
 			// Initial-exec: the code addresses the GOT slot, and the loader puts the
 			// thread-pointer offset in it. So this resolves like any other reference

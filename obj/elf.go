@@ -31,6 +31,15 @@ const (
 	R_AARCH64_TLSIE_ADR_GOTTPREL_PAGE21   = 541  // adrp: page of the slot
 	R_AARCH64_TLSIE_LD64_GOTTPREL_LO12_NC = 542  // ldr: low 12 bits of the slot
 	R_AARCH64_TLS_TPREL64                 = 1030 // the slot itself: the loader stores the offset
+
+	// Thread-local storage, general-dynamic model: for a variable whose storage may
+	// not exist yet (one in a library brought in by dlopen). The code passes the
+	// address of a two-word descriptor to __tls_get_addr, which finds or allocates
+	// this thread's block for that module and returns the variable's address.
+	R_AARCH64_TLSGD_ADR_PAGE21  = 513  // adrp: page of the descriptor
+	R_AARCH64_TLSGD_ADD_LO12_NC = 514  // add: low 12 bits of the descriptor
+	R_AARCH64_TLS_DTPMOD64      = 1028 // descriptor word 0: which module owns it
+	R_AARCH64_TLS_DTPREL64      = 1029 // descriptor word 1: its offset within that module
 )
 
 // A few x86-64 relocation types the backend needs.
@@ -64,6 +73,11 @@ func isTLSGotReloc(typ uint32) bool {
 	return false
 }
 
+// isTLSGdReloc reports whether typ addresses a general-dynamic descriptor.
+func isTLSGdReloc(typ uint32) bool {
+	return typ == R_AARCH64_TLSGD_ADR_PAGE21 || typ == R_AARCH64_TLSGD_ADD_LO12_NC
+}
+
 // tlsGotSlotType is the machine's relocation for a thread-local GOT slot: the
 // loader works out the variable's offset from the thread pointer and stores it.
 func tlsGotSlotType(machine uint16) uint32 {
@@ -85,7 +99,7 @@ func isTLSReloc(typ uint32) bool {
 // isAnyTLSReloc reports whether typ references a thread-local symbol in any model,
 // which is what makes the symbol STT_TLS.
 func isAnyTLSReloc(typ uint32) bool {
-	return isTLSReloc(typ) || isX86TLSReloc(typ) || isTLSGotReloc(typ)
+	return isTLSReloc(typ) || isX86TLSReloc(typ) || isTLSGotReloc(typ) || isTLSGdReloc(typ)
 }
 
 // SecKind names the section a symbol is defined in (or that it is undefined).

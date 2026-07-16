@@ -799,6 +799,14 @@ func (e *emitter) materializeSym(r Reg, c ir.Const) {
 	}
 }
 
+// emitTLSIndexAddr loads the address of a thread-local's descriptor into r; see
+// the machine-code emitter for what the descriptor is.
+func (e *emitter) emitTLSIndexAddr(r Reg, c ir.Const) {
+	sym := sanitize(c.Sym)
+	e.line("adrp %s, :tlsgd:%s", r.xName(), sym)
+	e.line("add %s, %s, :tlsgd_lo12:%s", r.xName(), r.xName(), sym)
+}
+
 // emitTLSOffset loads a thread-local's offset from the thread pointer into r,
 // reading it from the GOT slot the loader fills (initial-exec). It needs only the
 // register it writes; the thread pointer is a separate op and the sum an add.

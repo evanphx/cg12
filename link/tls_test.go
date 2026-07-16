@@ -172,3 +172,67 @@ func TestInitialExecTLSInSharedLibrary(t *testing.T) {
 	}
 	require.Equal(t, 42, code, "++libtls, reached from inside the library")
 }
+
+// General-dynamic asks __tls_get_addr for the address rather than working it out
+// from the thread pointer, so it serves a thread-local whose storage may not
+// exist in this thread yet -- one in a library brought in by dlopen, which is
+// past the point where initial-exec's static block was sized.
+//
+// The test asserts general-dynamic works, and deliberately does not try to show
+// initial-exec failing here: glibc keeps a surplus of static TLS, so initial-exec
+// often gets away with it, and a test resting on that would be flaky.
+func TestGeneralDynamicTLSInDlopenedLibrary(t *testing.T) {
+	if runtime.GOARCH != "arm64" {
+		t.Skip("arm64 executable runs natively only on an arm64 host")
+	}
+	cc, ok := toolchain()
+	if !ok {
+		t.Skip("no AArch64 toolchain available")
+	}
+	dir := t.TempDir()
+
+	m := ir.NewModule()
+	m.Data = append(m.Data, &ir.Data{Name: "gdtls", Align: 4, Linkage: ir.Linkage{Thread: true},
+		Items: []ir.DataItem{{Sub: ir.SubW, Ints: []int64{41}}}})
+	f := m.NewFunc("gd_bump", ir.ClsW).Export()
+	e := f.Entry()
+	a := f.ThreadSym("gdtls")
+	v := e.Add(ir.ClsW, e.Load(ir.ClsW, a), f.Word(1))
+	e.Store(v, a)
+	e.Ret(v)
+
+	l := link.NewWith(arm64.Backend{Opts: arm64.Options{TLSModel: arm64.TLSGeneralDynamic}})
+	require.NoError(t, l.AddModule(m))
+	so, err := l.LinkSharedLibraryWith(obj.SharedOptions{
+		Soname: "libgdtls.so", Export: []string{"gd_bump"},
+		Needed: []string{"libc.so.6"}, // where __tls_get_addr is found
+	})
+	require.NoError(t, err)
+	require.NoError(t, os.WriteFile(filepath.Join(dir, "libgdtls.so"), so, 0o755))
+
+	// A C host so the library really is brought in late, by dlopen.
+	src := filepath.Join(dir, "host.c")
+	require.NoError(t, os.WriteFile(src, []byte(`
+#include <dlfcn.h>
+int main(void){
+  void *h = dlopen("./libgdtls.so", RTLD_NOW);
+  if(!h) return 1;
+  int (*bump)(void) = dlsym(h, "gd_bump");
+  if(!bump) return 2;
+  return bump();
+}`), 0o644))
+	bin := filepath.Join(dir, "host")
+	out, err := exec.Command(cc, "-o", bin, src).CombinedOutput()
+	require.NoErrorf(t, err, "building the host: %s", out)
+
+	cmd := exec.Command(bin)
+	cmd.Dir = dir
+	err = cmd.Run()
+	code := 0
+	if ee, ok := err.(*exec.ExitError); ok {
+		code = ee.ExitCode()
+	} else {
+		require.NoError(t, err)
+	}
+	require.Equal(t, 42, code, "++gdtls in a library dlopened after startup")
+}

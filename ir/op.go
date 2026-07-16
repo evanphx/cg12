@@ -136,6 +136,14 @@ const (
 	OThreadPtr // result = the thread pointer
 	OTLSOffset // result = Args[0] (a thread-local symbol)'s offset from the thread pointer
 
+	// OTLSIndexAddr yields the address of the descriptor naming Args[0] (a
+	// thread-local symbol): which module owns it, and its offset within that
+	// module. Handing that to __tls_get_addr yields the variable's address, which
+	// is how one is reached whose storage may not exist yet -- a variable in a
+	// library brought in by dlopen. That call is an ordinary one, so the register
+	// allocator sees what it clobbers.
+	OTLSIndexAddr
+
 	// OSafepoint marks a point where the garbage collector may stop the thread:
 	// the backend emits a stack map describing the managed references live here.
 	// Calls are safepoints implicitly; this marks the ones that are not calls —
@@ -258,8 +266,9 @@ var opTable = [numOps]opInfo{
 
 	OSafepoint: {name: "safept"},
 
-	OThreadPtr: {name: "threadptr", hasResult: true},
-	OTLSOffset: {name: "tlsoffset", hasResult: true},
+	OThreadPtr:    {name: "threadptr", hasResult: true},
+	OTLSOffset:    {name: "tlsoffset", hasResult: true},
+	OTLSIndexAddr: {name: "tlsindexaddr", hasResult: true},
 
 	OGetReg: {name: "getreg", hasResult: true},
 	OSetReg: {name: "setreg"},
