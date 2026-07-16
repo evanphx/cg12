@@ -37,6 +37,21 @@ type asmb interface {
 	shiftImm(op shiftOp, w64 bool, rd, rn Reg, sh uint32)
 	rotrImm(w64 bool, rd, rn Reg, sh uint32)
 
+	// Floating point.
+	fop(op floatOp, dbl bool, rd, rn, rm Reg)
+	fneg(dbl bool, rd, rn Reg)
+	fcvtStoD(rd, rn Reg)
+	fcvtDtoS(rd, rn Reg)
+	fcvtzs(dstW64, srcDbl bool, rd, rn Reg)
+	fcvtzu(dstW64, srcDbl bool, rd, rn Reg)
+	scvtf(dstDbl, srcW64 bool, rd, rn Reg)
+	ucvtf(dstDbl, srcW64 bool, rd, rn Reg)
+	fmovFromGP(dbl bool, rd, rn Reg)
+	fmovToGP(dbl bool, rd, rn Reg)
+
+	// Integer sub-word extends (dstSize/srcSize are the register widths in bytes).
+	ext(op extOp, rd, rn Reg, dstSize, srcSize int)
+
 	// Constant materialization (movz/movk/movn sequence).
 	movImm(rd Reg, val int64, w64 bool)
 
@@ -67,6 +82,26 @@ const (
 	shLsl shiftOp = iota
 	shLsr
 	shAsr
+)
+
+type floatOp uint8
+
+const (
+	fAdd floatOp = iota
+	fSub
+	fMul
+	fDiv
+)
+
+// extOp names a sub-word sign/zero extend: sxtb/uxtb/sxth/uxth/sxtw.
+type extOp uint8
+
+const (
+	extSb extOp = iota
+	extUb
+	extSh
+	extUh
+	extSw
 )
 
 // --- machine-code backend --------------------------------------------------
@@ -185,6 +220,56 @@ func (b *mcAsm) shiftImm(op shiftOp, w64 bool, rd, rn Reg, sh uint32) {
 func (b *mcAsm) rotrImm(w64 bool, rd, rn Reg, sh uint32) {
 	b.prog.Emit(a64.RorImm(w64, mreg(rd), mreg(rn), sh))
 }
+func (b *mcAsm) fop(op floatOp, dbl bool, rd, rn, rm Reg) {
+	var enc func(bool, a64.Reg, a64.Reg, a64.Reg) uint32
+	switch op {
+	case fAdd:
+		enc = a64.Fadd
+	case fSub:
+		enc = a64.Fsub
+	case fMul:
+		enc = a64.Fmul
+	case fDiv:
+		enc = a64.Fdiv
+	}
+	b.prog.Emit(enc(dbl, mreg(rd), mreg(rn), mreg(rm)))
+}
+func (b *mcAsm) fneg(dbl bool, rd, rn Reg) { b.prog.Emit(a64.Fneg(dbl, mreg(rd), mreg(rn))) }
+func (b *mcAsm) fcvtStoD(rd, rn Reg)       { b.prog.Emit(a64.FcvtStoD(mreg(rd), mreg(rn))) }
+func (b *mcAsm) fcvtDtoS(rd, rn Reg)       { b.prog.Emit(a64.FcvtDtoS(mreg(rd), mreg(rn))) }
+func (b *mcAsm) fcvtzs(dstW64, srcDbl bool, rd, rn Reg) {
+	b.prog.Emit(a64.Fcvtzs(dstW64, srcDbl, mreg(rd), mreg(rn)))
+}
+func (b *mcAsm) fcvtzu(dstW64, srcDbl bool, rd, rn Reg) {
+	b.prog.Emit(a64.Fcvtzu(dstW64, srcDbl, mreg(rd), mreg(rn)))
+}
+func (b *mcAsm) scvtf(dstDbl, srcW64 bool, rd, rn Reg) {
+	b.prog.Emit(a64.Scvtf(dstDbl, srcW64, mreg(rd), mreg(rn)))
+}
+func (b *mcAsm) ucvtf(dstDbl, srcW64 bool, rd, rn Reg) {
+	b.prog.Emit(a64.Ucvtf(dstDbl, srcW64, mreg(rd), mreg(rn)))
+}
+func (b *mcAsm) fmovFromGP(dbl bool, rd, rn Reg) {
+	b.prog.Emit(a64.FmovFromGP(dbl, mreg(rd), mreg(rn)))
+}
+func (b *mcAsm) fmovToGP(dbl bool, rd, rn Reg) { b.prog.Emit(a64.FmovToGP(dbl, mreg(rd), mreg(rn))) }
+func (b *mcAsm) ext(op extOp, rd, rn Reg, dstSize, srcSize int) {
+	w64 := dstSize == 8
+	var w uint32
+	switch op {
+	case extSb:
+		w = a64.Sxtb(w64, mreg(rd), mreg(rn))
+	case extUb:
+		w = a64.Uxtb(mreg(rd), mreg(rn))
+	case extSh:
+		w = a64.Sxth(w64, mreg(rd), mreg(rn))
+	case extUh:
+		w = a64.Uxth(mreg(rd), mreg(rn))
+	case extSw:
+		w = a64.Sxtw(mreg(rd), mreg(rn))
+	}
+	b.prog.Emit(w)
+}
 func (b *mcAsm) movImm(rd Reg, val int64, w64 bool) { b.m.movImm(mreg(rd), val, w64) }
 func (b *mcAsm) ldrSpill(rd Reg, float bool, off, size int) {
 	b.m.spillLoad(mreg(rd), float, off, size)
@@ -254,6 +339,40 @@ func (b *textAsm) strSpill(rs Reg, float bool, off, size int) {
 }
 func (b *textAsm) raw(word uint32)              { b.line(".inst 0x%08x", word) }
 func (b *textAsm) fail(format string, a ...any) { b.e.fail(format, a...) }
+
+func (b *textAsm) fop(op floatOp, dbl bool, rd, rn, rm Reg) {
+	s := regSize(dbl)
+	b.line("%s %s, %s, %s", []string{"fadd", "fsub", "fmul", "fdiv"}[op], rd.Name(s), rn.Name(s), rm.Name(s))
+}
+func (b *textAsm) fneg(dbl bool, rd, rn Reg) {
+	s := regSize(dbl)
+	b.line("fneg %s, %s", rd.Name(s), rn.Name(s))
+}
+func (b *textAsm) fcvtStoD(rd, rn Reg) { b.line("fcvt %s, %s", rd.Name(8), rn.Name(4)) }
+func (b *textAsm) fcvtDtoS(rd, rn Reg) { b.line("fcvt %s, %s", rd.Name(4), rn.Name(8)) }
+func (b *textAsm) fcvtzs(dstW64, srcDbl bool, rd, rn Reg) {
+	b.line("fcvtzs %s, %s", rd.Name(regSize(dstW64)), rn.Name(regSize(srcDbl)))
+}
+func (b *textAsm) fcvtzu(dstW64, srcDbl bool, rd, rn Reg) {
+	b.line("fcvtzu %s, %s", rd.Name(regSize(dstW64)), rn.Name(regSize(srcDbl)))
+}
+func (b *textAsm) scvtf(dstDbl, srcW64 bool, rd, rn Reg) {
+	b.line("scvtf %s, %s", rd.Name(regSize(dstDbl)), rn.Name(regSize(srcW64)))
+}
+func (b *textAsm) ucvtf(dstDbl, srcW64 bool, rd, rn Reg) {
+	b.line("ucvtf %s, %s", rd.Name(regSize(dstDbl)), rn.Name(regSize(srcW64)))
+}
+func (b *textAsm) fmovFromGP(dbl bool, rd, rn Reg) {
+	s := regSize(dbl)
+	b.line("fmov %s, %s", rd.Name(s), rn.Name(s))
+}
+func (b *textAsm) fmovToGP(dbl bool, rd, rn Reg) {
+	s := regSize(dbl)
+	b.line("fmov %s, %s", rd.Name(s), rn.Name(s))
+}
+func (b *textAsm) ext(op extOp, rd, rn Reg, dstSize, srcSize int) {
+	b.line("%s %s, %s", []string{"sxtb", "uxtb", "sxth", "uxth", "sxtw"}[op], rd.Name(dstSize), rn.Name(srcSize))
+}
 
 func (b *textAsm) r3(mn string, w64 bool, rd, rn, rm Reg) {
 	s := regSize(w64)

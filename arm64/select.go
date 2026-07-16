@@ -16,25 +16,38 @@ type sel struct {
 	spillBase int
 }
 
-// src resolves an integer source operand to a register, loading a spilled
-// temporary into scratch register slot `slot` or materializing a constant there.
+// src resolves a source operand to a register, loading a spilled temporary into
+// scratch register slot `slot` or materializing a constant there. It is
+// class-aware: a floating operand uses the FP scratch registers and FP loads.
 func (s *sel) src(ref ir.Ref, slot, size int) Reg {
+	float := s.f.ClassOf(ref).IsFloat()
 	scr := intScratchRegs[slot]
+	if float {
+		scr = floatScratchRegs[slot]
+	}
 	switch ref.Kind {
 	case ir.RefTemp:
 		t := s.f.Temps[ref.ID]
 		if t.Reg != ir.NoReg {
 			return Reg(t.Reg)
 		}
-		s.b.ldrSpill(scr, false, s.spillBase+t.Slot, size)
+		s.b.ldrSpill(scr, float, s.spillBase+t.Slot, size)
 		return scr
 	case ir.RefConst:
-		if c := s.f.Consts[ref.ID]; c.Kind == ir.ConstInt {
+		c := s.f.Consts[ref.ID]
+		if float {
+			if bits, ok := floatConstBits(c); ok {
+				gp := intScratchRegs[0]
+				s.b.movImm(gp, bits, size == 8)
+				s.b.fmovFromGP(size == 8, scr, gp)
+				return scr
+			}
+		} else if c.Kind == ir.ConstInt {
 			s.b.movImm(scr, c.Int, size == 8)
 			return scr
 		}
 	}
-	s.b.fail("arm64: cannot materialize integer operand %v", ref)
+	s.b.fail("arm64: cannot materialize operand %v", ref)
 	return scr
 }
 
@@ -46,29 +59,50 @@ func (s *sel) dst(ref ir.Ref, size int) (Reg, func()) {
 	if t.Reg != ir.NoReg {
 		return Reg(t.Reg), func() {}
 	}
+	float := t.Cls.IsFloat()
 	scr := intScratchRegs[0]
+	if float {
+		scr = floatScratchRegs[0]
+	}
 	off := s.spillBase + t.Slot
-	return scr, func() { s.b.strSpill(scr, false, off, size) }
+	return scr, func() { s.b.strSpill(scr, float, off, size) }
 }
 
 // selectInt handles the integer data-processing instructions through the builder.
 // It reports whether it handled the instruction; float and other ops fall back to
 // the emitter's own logic during the migration.
-func (s *sel) selectInt(in *ir.Instr) bool {
-	if in.Cls.IsFloat() || s.hasSymOperand(in) {
+func (s *sel) selectData(in *ir.Instr) bool {
+	if s.hasSymOperand(in) {
 		return false
 	}
 	sz := in.Cls.Size()
 	w64 := sz == 8
+	flt := in.Cls.IsFloat()
 	switch in.Op {
 	case ir.OAdd:
-		s.addSub(in, false)
+		if flt {
+			s.binReg(in, sz, func(rd, rn, rm Reg) { s.b.fop(fAdd, w64, rd, rn, rm) })
+		} else {
+			s.addSub(in, false)
+		}
 	case ir.OSub:
-		s.addSub(in, true)
+		if flt {
+			s.binReg(in, sz, func(rd, rn, rm Reg) { s.b.fop(fSub, w64, rd, rn, rm) })
+		} else {
+			s.addSub(in, true)
+		}
 	case ir.OMul:
-		s.binReg(in, sz, func(rd, rn, rm Reg) { s.b.mul(w64, rd, rn, rm) })
+		if flt {
+			s.binReg(in, sz, func(rd, rn, rm Reg) { s.b.fop(fMul, w64, rd, rn, rm) })
+		} else {
+			s.binReg(in, sz, func(rd, rn, rm Reg) { s.b.mul(w64, rd, rn, rm) })
+		}
 	case ir.ODiv:
-		s.binReg(in, sz, func(rd, rn, rm Reg) { s.b.sdiv(w64, rd, rn, rm) })
+		if flt {
+			s.binReg(in, sz, func(rd, rn, rm Reg) { s.b.fop(fDiv, w64, rd, rn, rm) })
+		} else {
+			s.binReg(in, sz, func(rd, rn, rm Reg) { s.b.sdiv(w64, rd, rn, rm) })
+		}
 	case ir.OUDiv:
 		s.binReg(in, sz, func(rd, rn, rm Reg) { s.b.udiv(w64, rd, rn, rm) })
 	case ir.ORem:
@@ -93,16 +127,82 @@ func (s *sel) selectInt(in *ir.Instr) bool {
 		s.rotr(in)
 	case ir.ONeg:
 		d, done := s.dst(in.To, sz)
-		s.b.neg(w64, d, s.src(in.Args[0], 1, sz))
+		rn := s.src(in.Args[0], 1, sz)
+		if flt {
+			s.b.fneg(w64, d, rn)
+		} else {
+			s.b.neg(w64, d, rn)
+		}
 		done()
 	case ir.OClz:
 		d, done := s.dst(in.To, sz)
 		s.b.clz(w64, d, s.src(in.Args[0], 1, sz))
 		done()
+
+	// Conversions.
+	case ir.OExts:
+		s.conv1(in, func(rd, rn Reg) { s.b.fcvtStoD(rd, rn) })
+	case ir.OTruncd:
+		s.conv1(in, func(rd, rn Reg) { s.b.fcvtDtoS(rd, rn) })
+	case ir.OStosi:
+		s.conv1(in, func(rd, rn Reg) { s.b.fcvtzs(w64, s.srcSize(in) == 8, rd, rn) })
+	case ir.OStoui:
+		s.conv1(in, func(rd, rn Reg) { s.b.fcvtzu(w64, s.srcSize(in) == 8, rd, rn) })
+	case ir.OSltof:
+		s.conv1(in, func(rd, rn Reg) { s.b.scvtf(w64, s.srcSize(in) == 8, rd, rn) })
+	case ir.OUltof:
+		s.conv1(in, func(rd, rn Reg) { s.b.ucvtf(w64, s.srcSize(in) == 8, rd, rn) })
+	case ir.OCast:
+		s.conv1(in, func(rd, rn Reg) {
+			if flt {
+				s.b.fmovFromGP(w64, rd, rn)
+			} else {
+				s.b.fmovToGP(s.srcSize(in) == 8, rd, rn)
+			}
+		})
+
+	// Integer sub-word extends.
+	case ir.OExtsb:
+		s.extend(in, extSb)
+	case ir.OExtub:
+		s.extend(in, extUb)
+	case ir.OExtsh:
+		s.extend(in, extSh)
+	case ir.OExtuh:
+		s.extend(in, extUh)
+	case ir.OExtsw:
+		s.extend(in, extSw)
+	case ir.OExtuw:
+		// A 32-bit mov zero-extends into the X register.
+		d, done := s.dst(in.To, 4)
+		s.b.movReg(false, d, s.src(in.Args[0], 1, 4))
+		done()
+
 	default:
 		return false
 	}
 	return true
+}
+
+// srcSize is the byte width of the first operand's class.
+func (s *sel) srcSize(in *ir.Instr) int { return s.f.ClassOf(in.Args[0]).Size() }
+
+// conv1 emits a one-source, one-destination conversion, resolving the source at
+// its own width and the destination at the result width.
+func (s *sel) conv1(in *ir.Instr, emit func(rd, rn Reg)) {
+	rn := s.src(in.Args[0], 1, s.srcSize(in))
+	rd, done := s.dst(in.To, in.Cls.Size())
+	emit(rd, rn)
+	done()
+}
+
+// extend emits an integer sub-word sign/zero extend.
+func (s *sel) extend(in *ir.Instr, op extOp) {
+	srcSz := s.srcSize(in)
+	rn := s.src(in.Args[0], 1, srcSz)
+	rd, done := s.dst(in.To, in.Cls.Size())
+	s.b.ext(op, rd, rn, in.Cls.Size(), srcSz)
+	done()
 }
 
 // hasSymOperand reports whether any operand is a symbol constant, which the
