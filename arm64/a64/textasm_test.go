@@ -79,9 +79,34 @@ func TestAssembleErrors(t *testing.T) {
 		"frobnicate x0, x1",  // unknown mnemonic
 		"add x0, x1",         // too few operands
 		"add x0, x1, potato", // bad operand
-		"b missing",          // undefined label
+		"b missing",          // undefined label (Bytes resolves locally only)
 	} {
 		_, err := Assemble(src)
 		require.Error(t, err, "expected error for %q", src)
 	}
+}
+
+// TestLinkExternalBranch confirms Program.Link keeps an undefined bl as a CALL26
+// relocation (rather than erroring like Bytes) and exports .globl labels, so a
+// hand-written function can be assembled into a linkable object.
+func TestLinkExternalBranch(t *testing.T) {
+	p, err := AssembleProgram(`
+		.globl f
+	f:
+		bl external
+		ret
+	`)
+	require.NoError(t, err)
+	code, relocs, err := p.Link()
+	require.NoError(t, err)
+	require.Len(t, code, 2*4)
+	require.Len(t, relocs, 1)
+	require.Equal(t, "external", relocs[0].Sym)
+	require.Equal(t, RelCall26, relocs[0].Kind)
+	require.Equal(t, 0, relocs[0].Offset) // the bl is the first word
+	require.True(t, p.IsGlobal("f"))
+
+	// A conditional or missing local branch still cannot be a relocation.
+	_, err = AssembleProgram("b.eq gone\nret")
+	require.NoError(t, err)
 }

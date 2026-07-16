@@ -121,6 +121,55 @@ func TestLinkResolvesCrossModuleCallAMD64(t *testing.T) {
 	assert.True(t, names["helper"] && names["caller"])
 }
 
+// Hand-written assembly, assembled into an object without an external assembler,
+// links against an IR-compiled function: the `call helper` becomes a PLT32
+// relocation that the linker resolves against the IR module's helper symbol. This
+// is the "own linking" path -- no `cc` in the loop.
+func TestLinkHandWrittenAsmCallsIR(t *testing.T) {
+	be := amd64.Backend{}
+
+	helperObj, err := be.CompileModule(moduleHelper()) // helper() = 41, from IR
+	require.NoError(t, err)
+
+	// caller() = helper() + 1, written by hand in AT&T assembly.
+	callerObj, err := be.Assemble(`
+		.globl caller
+	caller:
+		call helper
+		addl $1, %eax
+		ret
+	`)
+	require.NoError(t, err)
+
+	// The hand-written object exports caller and references helper via a relocation.
+	names := map[string]bool{}
+	for _, s := range callerObj.Syms {
+		if s.Global {
+			names[s.Name] = true
+		}
+	}
+	assert.True(t, names["caller"], "caller is an exported symbol")
+	require.Len(t, callerObj.Relocs, 1)
+	assert.Equal(t, "helper", callerObj.Relocs[0].Sym)
+	assert.Equal(t, uint32(obj.R_X86_64_PLT32), callerObj.Relocs[0].Type)
+
+	l := link.NewWith(be)
+	l.AddObject(helperObj)
+	l.AddObject(callerObj)
+	linked, err := l.Link()
+	require.NoError(t, err)
+
+	// The call to helper is resolved and dropped; both symbols survive.
+	for _, r := range linked.Relocs {
+		assert.NotEqual(t, "helper", r.Sym, "the call into the IR function was resolved")
+	}
+	defined := map[string]bool{}
+	for _, s := range linked.Syms {
+		defined[s.Name] = true
+	}
+	assert.True(t, defined["helper"] && defined["caller"])
+}
+
 // The same link works when the inputs are architecture .o files rather than IR.
 func TestLinkFromObjectFiles(t *testing.T) {
 	ha, err := arm64.CompileObject(moduleHelper())

@@ -70,3 +70,24 @@ func TestAssembleErrors(t *testing.T) {
 		require.Error(t, err, "expected error for %q", src)
 	}
 }
+
+// TestLinkExternalCall confirms Program.Link keeps a call to an undefined label
+// as a PLT32 relocation (rather than erroring like Bytes) and exports .globl
+// labels, so a hand-written function can be assembled into a linkable object.
+func TestLinkExternalCall(t *testing.T) {
+	p, err := AssembleProgram(`
+		.globl f
+	f:
+		call external
+		ret
+	`)
+	require.NoError(t, err)
+	code, relocs, err := p.Link()
+	require.NoError(t, err)
+	require.Len(t, relocs, 1)
+	require.Equal(t, "external", relocs[0].Sym)
+	require.Equal(t, RelPLT32, relocs[0].Kind)
+	require.Equal(t, int64(-4), relocs[0].Addend)          // instruction-end bias
+	require.Equal(t, byte(0xe8), code[relocs[0].Offset-1]) // the call opcode precedes the disp32
+	require.True(t, p.IsGlobal("f"))
+}

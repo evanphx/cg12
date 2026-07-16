@@ -18,10 +18,28 @@ import (
 // and the branches (jmp, jCC, call, ret, nop). Unsupported mnemonics or operand
 // shapes are a reported error, never silently skipped.
 func Assemble(src string) ([]byte, error) {
+	p, err := AssembleProgram(src)
+	if err != nil {
+		return nil, err
+	}
+	return p.Bytes()
+}
+
+// AssembleProgram parses the assembly text into a Program without resolving it,
+// so a caller can turn it into a relocatable object (via Program.Link) that
+// keeps external calls as relocations and exported labels as symbols. It honors
+// the `.globl`/`.global name` directive; other `.`-directives are ignored.
+func AssembleProgram(src string) (*Program, error) {
 	p := NewProgram()
 	for lineno, raw := range strings.Split(src, "\n") {
 		line := strings.TrimSpace(stripComment(raw))
 		if line == "" {
+			continue
+		}
+		if strings.HasPrefix(line, ".") {
+			if err := directive(p, line); err != nil {
+				return nil, fmt.Errorf("line %d: %q: %w", lineno+1, line, err)
+			}
 			continue
 		}
 		if strings.HasSuffix(line, ":") {
@@ -32,7 +50,22 @@ func Assemble(src string) ([]byte, error) {
 			return nil, fmt.Errorf("line %d: %q: %w", lineno+1, line, err)
 		}
 	}
-	return p.Bytes()
+	return p, nil
+}
+
+// directive handles the assembler directives the object path needs; `.globl`
+// (or `.global`) marks a symbol exported. Unknown directives are ignored so
+// common section/type noise in hand-written asm does not fail the parse.
+func directive(p *Program, line string) error {
+	name, rest := splitFields(line)
+	switch name {
+	case ".globl", ".global":
+		if rest == "" {
+			return fmt.Errorf("%s needs a symbol name", name)
+		}
+		p.Globl(strings.TrimSpace(rest))
+	}
+	return nil
 }
 
 func stripComment(s string) string {
@@ -57,7 +90,7 @@ func asmLine(p *Program, line string) error {
 	case "jmp":
 		return branch(p, ops, func(l string) { p.Jmp(l) })
 	case "call":
-		return branch(p, ops, func(l string) { p.branch([]byte{0xe8}, l) })
+		return branch(p, ops, func(l string) { p.Call(l) })
 	}
 	if strings.HasPrefix(mn, "j") {
 		if c, ok := condByName(mn[1:]); ok {
