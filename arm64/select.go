@@ -45,6 +45,9 @@ func (s *sel) src(ref ir.Ref, slot, size int) Reg {
 		} else if c.Kind == ir.ConstInt {
 			s.b.movImm(scr, c.Int, size == 8)
 			return scr
+		} else if c.Kind == ir.ConstSym {
+			s.b.materializeSym(scr, c)
+			return scr
 		}
 	}
 	s.b.fail("arm64: cannot materialize operand %v", ref)
@@ -72,9 +75,6 @@ func (s *sel) dst(ref ir.Ref, size int) (Reg, func()) {
 // It reports whether it handled the instruction; float and other ops fall back to
 // the emitter's own logic during the migration.
 func (s *sel) selectData(in *ir.Instr) bool {
-	if s.hasSymOperand(in) {
-		return false
-	}
 	sz := in.Cls.Size()
 	w64 := sz == 8
 	flt := in.Cls.IsFloat()
@@ -270,18 +270,8 @@ func (s *sel) extend(in *ir.Instr, op extOp) {
 	done()
 }
 
-// hasSymOperand reports whether any operand is a symbol constant, which the
 // shared integer path does not yet materialize (those instructions stay on the
 // emitter's own path during the migration).
-func (s *sel) hasSymOperand(in *ir.Instr) bool {
-	for _, a := range in.Args {
-		if a.Kind == ir.RefConst && s.f.Consts[a.ID].Kind != ir.ConstInt {
-			return true
-		}
-	}
-	return false
-}
-
 // binReg emits a three-operand register instruction via the given builder call.
 func (s *sel) binReg(in *ir.Instr, sz int, emit func(rd, rn, rm Reg)) {
 	s1 := s.src(in.Args[0], 0, sz)

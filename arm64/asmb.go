@@ -59,8 +59,10 @@ type asmb interface {
 	fcmp(dbl bool, rn, rm Reg)
 	cset(rd Reg, cmp ir.Cmp, float bool)
 
-	// Constant materialization (movz/movk/movn sequence).
+	// Constant materialization: an integer (movz/movk/movn) or a symbol address
+	// (adrp+add, recording relocations or emitting :lo12: syntax per backend).
 	movImm(rd Reg, val int64, w64 bool)
+	materializeSym(rd Reg, c ir.Const)
 
 	// Memory. load/store use [base]; loadIdx/storeIdx use [base, index] with the
 	// extend/scale encoded in aux. The op fixes the width and signedness.
@@ -390,6 +392,7 @@ func (b *mcAsm) storeIdx(op ir.Op, val, base, index Reg, aux int64) {
 	}
 }
 func (b *mcAsm) movImm(rd Reg, val int64, w64 bool) { b.m.movImm(mreg(rd), val, w64) }
+func (b *mcAsm) materializeSym(rd Reg, c ir.Const)  { b.m.materializeSym(mreg(rd), c) }
 func (b *mcAsm) ldrSpill(rd Reg, float bool, off, size int) {
 	b.m.spillLoad(mreg(rd), float, off, size)
 }
@@ -468,6 +471,7 @@ func (b *textAsm) storeIdx(op ir.Op, val, base, index Reg, aux int64) {
 	b.line("%s %s, [%s, %s%s]", mn, val.Name(valSz), base.Name(8), index.Name(indexSize(option)), amodeSuffix(option, s, op))
 }
 func (b *textAsm) movImm(rd Reg, val int64, w64 bool) { b.e.movImm(rd, val, boolToSize(w64)) }
+func (b *textAsm) materializeSym(rd Reg, c ir.Const)  { b.e.materializeSym(rd, c) }
 func (b *textAsm) ldrSpill(rd Reg, float bool, off, size int) {
 	b.line("ldr %s, [x29, #%d]", rd.Name(size), off)
 }
