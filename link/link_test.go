@@ -7,9 +7,11 @@ import (
 	"runtime"
 	"testing"
 
+	"github.com/evanphx/cg12/amd64"
 	"github.com/evanphx/cg12/arm64"
 	"github.com/evanphx/cg12/ir"
 	"github.com/evanphx/cg12/link"
+	"github.com/evanphx/cg12/obj"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
@@ -95,6 +97,28 @@ func TestLinkResolvesCrossModuleCallFromIR(t *testing.T) {
 	require.NoError(t, err)
 	code := linkRun(t, data, `extern int caller(void); int main(void){ return caller()==42 ? 0 : 1; }`)
 	require.Equal(t, 0, code)
+}
+
+// The linker resolves the same cross-module call for amd64 output when driven by
+// the amd64 backend: the x86-64 PLT32 relocation is patched and dropped, proving
+// the common Backend interface and the machine-generic branch patcher.
+func TestLinkResolvesCrossModuleCallAMD64(t *testing.T) {
+	l := link.NewWith(amd64.Backend{})
+	require.NoError(t, l.AddModule(moduleHelper()))
+	require.NoError(t, l.AddModule(moduleCaller()))
+
+	linked, err := l.Link()
+	require.NoError(t, err)
+
+	assert.Equal(t, uint16(obj.EM_X86_64), linked.Machine)
+	for _, r := range linked.Relocs {
+		assert.NotEqual(t, "helper", r.Sym, "the cross-module call was resolved by the linker")
+	}
+	names := map[string]bool{}
+	for _, s := range linked.Syms {
+		names[s.Name] = true
+	}
+	assert.True(t, names["helper"] && names["caller"])
 }
 
 // The same link works when the inputs are architecture .o files rather than IR.

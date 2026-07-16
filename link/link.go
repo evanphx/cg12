@@ -9,23 +9,38 @@ package link
 import (
 	"encoding/binary"
 	"fmt"
+	"math"
 
 	"github.com/evanphx/cg12/arm64"
 	"github.com/evanphx/cg12/ir"
 	"github.com/evanphx/cg12/obj"
 )
 
+// Backend is the common code-generator output the linker consumes: it compiles
+// an IR module to a relocatable object and names the ELF machine it targets.
+// arm64.Backend and amd64.Backend implement it, so the linker handles either
+// architecture through one interface without importing its entry points.
+type Backend interface {
+	Machine() uint16
+	CompileModule(m *ir.Module) (*obj.Object, error)
+}
+
 // Linker accumulates input objects from either front-end and links them.
 type Linker struct {
+	be   Backend
 	objs []*obj.Object
 }
 
-// New returns an empty linker.
-func New() *Linker { return &Linker{} }
+// New returns a linker that compiles IR modules with the arm64 backend.
+func New() *Linker { return NewWith(arm64.Backend{}) }
+
+// NewWith returns a linker that compiles IR modules with the given backend, so a
+// caller can link amd64 (or any future architecture) output through the same API.
+func NewWith(be Backend) *Linker { return &Linker{be: be} }
 
 // AddModule compiles an IR module to a relocatable object and adds it.
 func (l *Linker) AddModule(m *ir.Module) error {
-	o, err := arm64.CompileToObject(m)
+	o, err := l.be.CompileModule(m)
 	if err != nil {
 		return err
 	}
@@ -122,8 +137,8 @@ func merge(objs []*obj.Object) (*obj.Object, error) {
 	// Apply every intra-.text PC-relative relocation whose target is now defined;
 	// keep the rest for the final link.
 	for _, p := range relocs {
-		if sym, ok := defined[p.r.Sym]; ok && !p.toData && sym.Section == obj.SecText && isPCRel(p.r.Type) {
-			if err := patchBranch(out.Text, p.r, sym); err != nil {
+		if sym, ok := defined[p.r.Sym]; ok && !p.toData && sym.Section == obj.SecText && isPCRel(out.Machine, p.r.Type) {
+			if err := patchBranch(out.Machine, out.Text, p.r, sym); err != nil {
 				return nil, err
 			}
 			continue
@@ -147,15 +162,35 @@ func sectionBase(k obj.SecKind, textBase, dataBase uint64) (uint64, bool) {
 	return 0, false
 }
 
-func isPCRel(typ uint32) bool {
-	return typ == obj.R_AARCH64_CALL26 || typ == obj.R_AARCH64_JUMP26
+// isPCRel reports whether a relocation type is an intra-.text PC-relative call
+// or jump the linker can resolve now, for the given machine.
+func isPCRel(machine uint16, typ uint32) bool {
+	switch machine {
+	case obj.EM_AARCH64:
+		return typ == obj.R_AARCH64_CALL26 || typ == obj.R_AARCH64_JUMP26
+	case obj.EM_X86_64:
+		return typ == obj.R_X86_64_PC32 || typ == obj.R_X86_64_PLT32
+	}
+	return false
 }
 
-// patchBranch resolves a CALL26/JUMP26 relocation by writing the (now known)
-// PC-relative displacement into the branch instruction's 26-bit immediate. This
-// is link-time-final because both the branch and its target are in .text, so
-// their relative distance does not depend on where .text is finally loaded.
-func patchBranch(text []byte, r obj.Reloc, sym obj.Sym) error {
+// patchBranch resolves a PC-relative relocation by writing the (now known)
+// displacement into the branch instruction. This is link-time-final because both
+// the branch and its target are in .text, so their relative distance does not
+// depend on where .text is finally loaded.
+func patchBranch(machine uint16, text []byte, r obj.Reloc, sym obj.Sym) error {
+	switch machine {
+	case obj.EM_AARCH64:
+		return patchAArch64Branch(text, r, sym)
+	case obj.EM_X86_64:
+		return patchX86Rel32(text, r, sym)
+	}
+	return fmt.Errorf("link: cannot resolve relocation for machine %d", machine)
+}
+
+// patchAArch64Branch writes a CALL26/JUMP26 relocation into a branch's 26-bit
+// immediate (the displacement in units of 4-byte instructions).
+func patchAArch64Branch(text []byte, r obj.Reloc, sym obj.Sym) error {
 	target := int64(sym.Value) + r.Addend
 	disp := target - int64(r.Offset)
 	if disp%4 != 0 {
@@ -168,5 +203,17 @@ func patchBranch(text []byte, r obj.Reloc, sym obj.Sym) error {
 	word := binary.LittleEndian.Uint32(text[r.Offset:])
 	word = (word & 0xfc000000) | uint32(imm)&0x03ffffff
 	binary.LittleEndian.PutUint32(text[r.Offset:], word)
+	return nil
+}
+
+// patchX86Rel32 writes a PC32/PLT32 relocation as a 32-bit displacement. The
+// addend already accounts for the instruction-end bias (-4), so the value is
+// simply sym + addend - place.
+func patchX86Rel32(text []byte, r obj.Reloc, sym obj.Sym) error {
+	disp := int64(sym.Value) + r.Addend - int64(r.Offset)
+	if disp < math.MinInt32 || disp > math.MaxInt32 {
+		return fmt.Errorf("link: call to %q out of range (%d bytes)", r.Sym, disp)
+	}
+	binary.LittleEndian.PutUint32(text[r.Offset:], uint32(int32(disp)))
 	return nil
 }
