@@ -50,9 +50,63 @@ func (s *xsel) selectInt(in *ir.Instr) bool {
 			return false
 		}
 		s.binInt(in)
-		return true
+	case ir.ONeg:
+		if in.Cls.IsFloat() {
+			return false
+		}
+		w := in.Cls == ir.ClsL
+		d, commit := s.gpDst(in.To)
+		s.gpInto(d, in.Arg(0))
+		s.b.negGP(w, d)
+		commit()
+	case ir.OShl, ir.OShr, ir.OSar:
+		s.shift(in)
+	case ir.OCmp:
+		if in.Cmp.IsFloat() {
+			return false
+		}
+		s.cmp(in)
+	default:
+		return false
 	}
-	return false
+	return true
+}
+
+// shift emits a shift by an immediate count or by %cl.
+func (s *xsel) shift(in *ir.Instr) {
+	w := in.Cls == ir.ClsL
+	d, commit := s.gpDst(in.To)
+	if c := intConstAMD(s.f, in.Arg(1)); c != nil {
+		s.gpInto(d, in.Arg(0))
+		s.b.shiftImmGP(in.Op, w, d, byte(c.Int&63))
+		commit()
+		return
+	}
+	s.gpInto(RCX, in.Arg(1))
+	s.gpInto(d, in.Arg(0))
+	s.b.shiftCLGP(in.Op, w, d)
+	commit()
+}
+
+// cmp emits a compare and a movzx'd conditional-set of the boolean result.
+func (s *xsel) cmp(in *ir.Instr) {
+	argW := s.f.ClassOf(in.Arg(0)) == ir.ClsL
+	ra := s.gpValue(in.Arg(0), gpScratch0)
+	rb := s.gpValue(in.Arg(1), gpScratch1)
+	s.b.cmpGP(argW, ra, rb)
+	d, commit := s.gpDst(in.To)
+	s.b.setccMovzx(in.Cmp, d)
+	commit()
+}
+
+// intConstAMD returns ref's integer constant, or nil.
+func intConstAMD(f *ir.Func, ref ir.Ref) *ir.Const {
+	if ref.Kind == ir.RefConst {
+		if c := f.Consts[ref.ID]; c.Kind == ir.ConstInt {
+			return &c
+		}
+	}
+	return nil
 }
 
 // binInt computes dst = arg0 OP arg1 in x86's two-operand form: place arg0 in the

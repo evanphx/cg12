@@ -26,6 +26,11 @@ type xasm interface {
 
 	// Two-operand integer arithmetic: dst = dst OP src.
 	binGP(op ir.Op, w bool, dst, src Reg)
+	negGP(w bool, dst Reg)
+	shiftImmGP(op ir.Op, w bool, dst Reg, imm byte)
+	shiftCLGP(op ir.Op, w bool, dst Reg)
+	cmpGP(w bool, a, b Reg)
+	setccMovzx(cmp ir.Cmp, dst Reg)
 
 	// spillStore writes a scratch register back to a result's frame slot.
 	spillStore(r Reg, slot, size int)
@@ -59,6 +64,34 @@ func (b *mcXasm) binGP(op ir.Op, w bool, dst, src Reg) {
 		b.fail("amd64: %s is not a two-operand arithmetic op", op)
 	}
 }
+func (b *mcXasm) negGP(w bool, dst Reg) { b.m.emit(x64.Neg(w, dst.mreg())) }
+func (b *mcXasm) shiftImmGP(op ir.Op, w bool, dst Reg, imm byte) {
+	d := dst.mreg()
+	switch op {
+	case ir.OShl:
+		b.m.emit(x64.ShlImm(w, d, imm))
+	case ir.OShr:
+		b.m.emit(x64.ShrImm(w, d, imm))
+	case ir.OSar:
+		b.m.emit(x64.SarImm(w, d, imm))
+	}
+}
+func (b *mcXasm) shiftCLGP(op ir.Op, w bool, dst Reg) {
+	d := dst.mreg()
+	switch op {
+	case ir.OShl:
+		b.m.emit(x64.ShlCL(w, d))
+	case ir.OShr:
+		b.m.emit(x64.ShrCL(w, d))
+	case ir.OSar:
+		b.m.emit(x64.SarCL(w, d))
+	}
+}
+func (b *mcXasm) cmpGP(w bool, a, bb Reg) { b.m.emit(x64.CmpReg(w, a.mreg(), bb.mreg())) }
+func (b *mcXasm) setccMovzx(cmp ir.Cmp, dst Reg) {
+	b.m.emit(x64.Setcc(intCond(cmp), dst.mreg()))
+	b.m.emit(x64.MovzxByte(false, dst.mreg(), dst.mreg()))
+}
 func (b *mcXasm) spillStore(r Reg, slot, size int) {
 	b.m.emit(x64.Store(size*8, r.mreg(), x64.At(RBP.mreg(), b.m.slotAddr(slot))))
 }
@@ -86,9 +119,32 @@ func (b *textXasm) binGP(op ir.Op, w bool, dst, src Reg) {
 	}
 	b.e.line("%s%s %s, %s", mn, suf(sz), gpn(src, sz), gpn(dst, sz))
 }
+func (b *textXasm) negGP(w bool, dst Reg) {
+	sz := clsSizeW(w)
+	b.e.line("neg%s %s", suf(sz), gpn(dst, sz))
+}
+func (b *textXasm) shiftImmGP(op ir.Op, w bool, dst Reg, imm byte) {
+	sz := clsSizeW(w)
+	b.e.line("%s%s $%d, %s", shiftMn[op], suf(sz), imm, gpn(dst, sz))
+}
+func (b *textXasm) shiftCLGP(op ir.Op, w bool, dst Reg) {
+	sz := clsSizeW(w)
+	b.e.line("%s%s %%cl, %s", shiftMn[op], suf(sz), gpn(dst, sz))
+}
+func (b *textXasm) cmpGP(w bool, a, bb Reg) {
+	sz := clsSizeW(w)
+	b.e.line("cmp%s %s, %s", suf(sz), gpn(bb, sz), gpn(a, sz))
+}
+func (b *textXasm) setccMovzx(cmp ir.Cmp, dst Reg) {
+	b.e.line("set%s %s", intCC[cmp], gpn(dst, 1))
+	b.e.line("movzbl %s, %s", gpn(dst, 1), gpn(dst, 4))
+}
 func (b *textXasm) spillStore(r Reg, slot, size int) {
 	b.e.line("mov%s %s, %s", suf(size), gpn(r, size), memn(RBP, b.e.slotAddr(slot)))
 }
+
+var shiftMn = map[ir.Op]string{ir.OShl: "shl", ir.OShr: "shr", ir.OSar: "sar"}
+
 func (b *textXasm) fail(format string, a ...any) { panic(fmt.Sprintf(format, a...)) }
 
 // clsSizeW returns the operand byte size for the w (64-bit) flag.

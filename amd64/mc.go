@@ -1169,8 +1169,6 @@ func (m *mc) instr(in *ir.Instr) {
 		m.divInt(in, true, true)
 	case ir.OURem:
 		m.divInt(in, false, true)
-	case ir.OShl, ir.OShr, ir.OSar:
-		m.shift(in)
 	case ir.ONeg:
 		m.neg(in)
 	case ir.OCmp:

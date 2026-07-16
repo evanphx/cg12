@@ -34,8 +34,6 @@ func (e *emitter) instr(in *ir.Instr) {
 		e.divInt(in, true, true)
 	case ir.OURem:
 		e.divInt(in, false, true)
-	case ir.OShl, ir.OShr, ir.OSar:
-		e.shift(in)
 	case ir.ONeg:
 		e.neg(in)
 	case ir.OCmp:
