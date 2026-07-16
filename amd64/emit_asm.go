@@ -46,21 +46,30 @@ func (e *emitter) emitAsm(in *ir.Instr) {
 	outs := in.AsmRegOuts()
 	oc, ac := 0, 0 // cursors into outs and in.Args
 	var finals []func()
+	resolveOut := func() (Reg, int) {
+		oref := outs[oc]
+		oc++
+		t := e.f.Temps[oref.ID]
+		w := e.f.ClassOf(oref).Size()
+		if t.Reg != ir.NoReg {
+			return Reg(t.Reg), w
+		}
+		r := next()
+		slot := e.slotAddr(t.Slot)
+		finals = append(finals, func() { e.line("mov%s %s, %s", suf(w), gpn(r, w), memn(RBP, slot)) })
+		return r, w
+	}
 	for i, kind := range asm.Ops {
 		switch kind {
 		case ir.AsmRegOut:
-			oref := outs[oc]
-			oc++
-			t := e.f.Temps[oref.ID]
-			w := e.f.ClassOf(oref).Size()
-			if t.Reg != ir.NoReg {
-				vals[i] = asmVal{reg: Reg(t.Reg), width: w}
-			} else {
-				r := next()
-				vals[i] = asmVal{reg: r, width: w}
-				slot := e.slotAddr(t.Slot)
-				finals = append(finals, func() { e.line("mov%s %s, %s", suf(w), gpn(r, w), memn(RBP, slot)) })
-			}
+			r, w := resolveOut()
+			vals[i] = asmVal{reg: r, width: w}
+		case ir.AsmRegInOut:
+			r, w := resolveOut()
+			pre, _ := e.asmInputReg(in.Args[ac], next) // preload value
+			ac++
+			e.line("mov%s %s, %s", suf(w), gpn(pre, w), gpn(r, w)) // preload the read-write register
+			vals[i] = asmVal{reg: r, width: w}
 		case ir.AsmImm:
 			vals[i] = asmVal{lit: true, litS: fmt.Sprintf("$%d", e.f.Consts[in.Args[ac].ID].Int)}
 			ac++

@@ -41,9 +41,13 @@ int memops(int start){ /* "m" input and "=m" output: read, increment in memory, 
 	__asm__("ldr %w0, %2\n\tadd %w0, %w0, #5\n\tstr %w0, %1" : "=&r"(out), "=m"(cell) : "m"(cell));
 	return cell * 1000 + out; /* cell updated in place, out = start+5 */
 }
+int accum(int x, int y){ /* "+r": read-write register, preloaded and stored back */
+	__asm__("add %w0, %w0, %w1" : "+r"(x) : "r"(y));
+	return x;
+}
 int main(void){
-	printf("%d %ld %ld %d %d %d\n", add(20, 22), shl(3, 4), keeptest(1000, 50, 8),
-		addimm(23), sumdiff(20, 8), memops(37));
+	printf("%d %ld %ld %d %d %d %d\n", add(20, 22), shl(3, 4), keeptest(1000, 50, 8),
+		addimm(23), sumdiff(20, 8), memops(37), accum(40, 2));
 	return 0;
 }`
 	for _, optimize := range []bool{false, true} {
@@ -59,7 +63,7 @@ int main(void){
 			}
 			out, code := buildAndRun(t, m, "")
 			require.Equal(t, 0, code)
-			require.Equal(t, "42 48 1042 123 28012 42042\n", out) // +,<<,sub+k,+imm,28*1000+12,42*1000+42
+			require.Equal(t, "42 48 1042 123 28012 42042 42\n", out) // +,<<,sub+k,+imm,sumdiff,memops,+r
 		})
 	}
 }

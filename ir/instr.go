@@ -58,17 +58,20 @@ type Instr struct {
 type AsmOperandKind uint8
 
 const (
-	AsmRegOut AsmOperandKind = iota // "=r": a register result (in To/Defs)
-	AsmRegIn                        // "r":  a register input (in Args)
-	AsmImm                          // "i":  an immediate constant (in Args)
-	AsmMem                          // "m"/"=m": a memory reference by address (in Args)
+	AsmRegOut   AsmOperandKind = iota // "=r": a register result (in To/Defs)
+	AsmRegIn                          // "r":  a register input (in Args)
+	AsmImm                            // "i":  an immediate constant (in Args)
+	AsmMem                            // "m"/"=m": a memory reference by address (in Args)
+	AsmRegInOut                       // "+r": a register result preloaded with an input (in Args)
 )
 
 // AsmOp describes a GNU inline-assembly statement lowered to an OAsm. Ops lists
 // every operand in the GNU %N order (all outputs, then all inputs). A register
-// output (AsmRegOut) draws its result temporary from To (the first) then Defs;
-// every other operand draws its value from Args in order -- a register input's
-// value, an immediate's constant, or a memory operand's address.
+// output (AsmRegOut) or read-write register (AsmRegInOut) draws its result
+// temporary from To (the first) then Defs; every operand other than a plain
+// register output draws a value from Args in order -- a register input's value,
+// an immediate's constant, a memory operand's address, or a read-write
+// register's preload value.
 type AsmOp struct {
 	Template string           // the assembler template, verbatim between the quotes
 	Ops      []AsmOperandKind // operand kinds in %N order

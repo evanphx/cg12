@@ -395,7 +395,7 @@ func (b *Block) Asm(template string, specs []AsmSpec) []Ref {
 	var outs []Ref
 	for _, s := range specs {
 		in.Asm.Ops = append(in.Asm.Ops, s.Kind)
-		if s.Kind == AsmRegOut {
+		if s.Kind == AsmRegOut || s.Kind == AsmRegInOut {
 			t := b.fn.newTemp("", s.Cls)
 			outs = append(outs, t)
 			if in.To.Kind != RefTemp {
@@ -404,8 +404,9 @@ func (b *Block) Asm(template string, specs []AsmSpec) []Ref {
 			} else {
 				in.Defs = append(in.Defs, t)
 			}
-		} else {
-			in.Args = append(in.Args, s.Ref)
+		}
+		if s.Kind != AsmRegOut {
+			in.Args = append(in.Args, s.Ref) // a read-write register also carries a preload value
 		}
 	}
 	b.Instrs = append(b.Instrs, in)

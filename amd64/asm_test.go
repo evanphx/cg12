@@ -95,6 +95,10 @@ int memops(int start){ /* "m" input and "=m" output: read, add 5 in memory, read
 	__asm__("movl %2, %k0\n\taddl $5, %k0\n\tmovl %k0, %1" : "=&r"(out), "=m"(cell) : "m"(cell));
 	return cell * 1000 + out; /* cell updated in place, out = start+5 */
 }
+int accum(int x, int y){ /* "+r": read-write register, preloaded and stored back */
+	__asm__("addl %k1, %k0" : "+r"(x) : "r"(y));
+	return x;
+}
 int runtest(void){
 	if(add(20, 22) != 42) return 1;
 	if(shl(21) != 42) return 2;
@@ -102,6 +106,7 @@ int runtest(void){
 	if(addimm(23) != 123) return 4;
 	if(sumdiff(20, 8) != 28012) return 5; /* 28*1000 + 12 */
 	if(memops(37) != 42042) return 6;    /* 42*1000 + 42 */
+	if(accum(40, 2) != 42) return 7;
 	return 0;
 }`
 	require.Equal(t, 0, runAsmText(t, src, false))

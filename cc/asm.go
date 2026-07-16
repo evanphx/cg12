@@ -111,7 +111,11 @@ func (g *gen) asmCollect(a *cc.Asm) (specs []ir.AsmSpec, outLvals []asmOut, ok b
 					addr, typ := g.genAddr(operand)
 					specs = append(specs, ir.AsmSpec{Kind: ir.AsmRegOut, Cls: clsOf(typ)})
 					outLvals = append(outLvals, asmOut{addr, typ})
-				case "=m", "=&m":
+				case "+r", "+&r": // read-write register: preload with the current value, store back
+					addr, typ := g.genAddr(operand)
+					specs = append(specs, ir.AsmSpec{Kind: ir.AsmRegInOut, Cls: clsOf(typ), Ref: g.loadVal(addr, typ)})
+					outLvals = append(outLvals, asmOut{addr, typ})
+				case "=m", "=&m", "+m", "+&m": // memory is read/written in place, so "+m" is the same as "=m"
 					addr, _ := g.genAddr(operand)
 					specs = append(specs, ir.AsmSpec{Kind: ir.AsmMem, Ref: addr})
 				default:
