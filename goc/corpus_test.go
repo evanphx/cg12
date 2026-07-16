@@ -170,6 +170,30 @@ func TestExecutionCorpus(t *testing.T) {
 		{"word overflow", `func Test() int { var x uint32=0xffffffff; x++; return int(x) }`, 0},
 		{"comparisons", `func Test() int { n:=0; if -1 < 1 { n+=1 }; if uint(1) < uint(2) { n+=2 }; if 3 != 4 { n+=4 }; return n }`, 7},
 		{"string value equality", `func Test() int { text := "abc"; copy := text[:]; var empty string; score := 0; if text == copy { score += 1 }; if empty == "" { score += 2 }; if text != "abd" { score += 4 }; return score }`, 7},
+		{"string lexical ordering", `func Test() int {
+			higher := "z"
+			lower := "a"
+			score := 0
+			if higher > lower {
+				score += 1
+			}
+			if higher >= "z" {
+				score += 2
+			}
+			if lower < higher {
+				score += 4
+			}
+			if lower <= "a" {
+				score += 8
+			}
+			if "ab" < "aba" {
+				score += 16
+			}
+			if "aba" > "ab" {
+				score += 32
+			}
+			return score
+		}`, 63},
 		{"float comparisons", `func Test() int { a, b := 1.5, 2.5; if a < b && b >= a && a != b { return 42 }; return 0 }`, 42},
 		{"locals and compound assignment", `func Test() int { x:=3; x+=4; x*=5; x-=2; return x }`, 33},
 		{"parallel assignment", `func Test() int { x,y:=3,8; x,y=y,x; return x*10+y }`, 83},
@@ -249,6 +273,7 @@ func TestAdvancedExecutionCorpus(t *testing.T) {
 		{"switch fallthrough", `func Test() int { n:=0; switch 2 { case 2: n+=2; fallthrough; case 3: n+=3 }; return n }`, 5},
 		{"string switch compares contents", `func Test() int { value := ""; switch value { case "on": return 1; case "": return 42; default: return 2 } }`, 42},
 		{"package constants", `const base=40; const two int=2; func Test() int { return base+two }`, 42},
+		{"dynamic numeric conversions", `func Test() int { value := int64(84); half := float64(value) / 2; narrowed := float32(half); return int(narrowed) }`, 42},
 		{"mutable globals", `var total=3; func add(x int){ total+=x }; func Test() int { add(4); add(5); return total }`, 12},
 		{"global zero and constant strings", `var empty string; var text = "abc"; func Test() int { return len(empty)*100 + len(text)*10 + int(text[1]) }`, 128},
 		{"constant struct global", `type bounds struct { low uint16; high uintptr }; var limits = bounds{low: 7, high: 0x123456789}; func Test() int { return int(limits.low) + int(limits.high&0xff) }`, 144},
@@ -261,6 +286,22 @@ func TestAdvancedExecutionCorpus(t *testing.T) {
 		{"global slice backing survives callee", `var values []int; func set(){ values = []int{7, 11, 13} }; func disturb(){ temporary := [4]int{100, 200, 300, 400}; _ = temporary }; func Test() int { set(); disturb(); return values[0] + values[1] + values[2] }`, 31},
 		{"slice literal copies struct elements", `type pair struct { left int; right int }; func Test() int { values := []pair{{left: 17, right: 25}}; return values[0].left + values[0].right }`, 42},
 		{"map literal copies string keys and struct values", `type record struct { value int }; func Test() int { values := map[string]record{"left": {value: 17}, "right": {value: 25}}; return values["left"].value + values["right"].value }`, 42},
+		{"map growth marks inserted slot occupied", `func Test() int {
+			values := make(map[int]bool)
+			keys := []int{1, 2, 3, 4, 5, 6, 7, 9, 0, 8}
+			for _, key := range keys {
+				values[key] = true
+			}
+			if len(values) != len(keys) {
+				return 0
+			}
+			for key := 0; key < len(keys); key++ {
+				if !values[key] {
+					return 0
+				}
+			}
+			return 42
+		}`, 42},
 		{"forward multiple results", `func pair() (int, int) { return 17, 25 }; func forward() (int, int) { return pair() }; func Test() int { left, right := forward(); return left + right }`, 42},
 		{"multiple aggregate results", `type pair struct { left, right int }; func values() (pair, pair) { return pair{17, 25}, pair{5, 7} }; func Test() int { first, second := values(); return first.left + first.right + second.left - second.right + 2 }`, 42},
 		{"nil interface after aggregate result", `type pair struct { left, right int }; func values() (pair, error) { return pair{17, 25}, nil }; func overwrite() [4]int { return [4]int{1, 2, 3, 4} }; func Test() int { value, err := values(); scratch := overwrite(); if err != nil { return -1 }; return value.left + value.right + scratch[3] - 4 }`, 42},
@@ -269,15 +310,86 @@ func TestAdvancedExecutionCorpus(t *testing.T) {
 		{"slice first multi result", `func step(values []byte) ([]byte, bool) { return values[1:], true }; func Test() int { values, ok := step([]byte{7, 11, 13}); values, ok = step(values); if !ok { return 0 }; return len(values)*10 + int(values[0]) }`, 23},
 		{"slice multi result loop", `func step(values []byte) ([]byte, bool) { if len(values) == 1 { return nil, false }; return values[1:], true }; func Test() int { values := []byte{7, 11, 13}; count := 0; for { var ok bool; values, ok = step(values); if !ok { break }; count++ }; return count * 10 }`, 20},
 		{"nil aggregate result", `func value() (int, error) { return 42, nil }; func Test() int { result, err := value(); if err != nil { return 0 }; return result }`, 42},
+		{"named interface result assignment", `func value() (result any) { result = 42; return }; func Test() int { return value().(int) }`, 42},
 		{"implicit pointer method receiver", `type counter int; func (value *counter) add(amount int) { *value += counter(amount) }; func Test() int { var value counter = 17; value.add(25); return int(value) }`, 42},
 		{"promoted embedded method receiver", `type flags uint8; func (f *flags) set() { *f |= 1 }; type state struct { count uint16; flags }; func Test() int { s := state{count: 510}; s.set(); return int(s.count) + int(s.flags)*1000 }`, 1510},
 		{"promoted embedded scalar value receiver", `type flags uintptr; func (f flags) kind() int { return int(f & 31) }; type value struct { flags }; func Test() int { v := value{flags: 42}; return v.kind() }`, 10},
 		{"promoted field through embedded pointer", `type inner struct { value int }; type outer struct { *inner }; func Test() int { value := outer{inner: &inner{value: 42}}; return value.value }`, 42},
 		{"global elided pointer struct slice", `type item struct { value int }; var items = []*item{{value: 17}, {value: 25}}; func Test() int { return items[0].value + items[1].value }`, 42},
 		{"global concrete error interface", `type textError string; func (value textError) Error() string { return string(value) }; var failure error = textError("bad"); func Test() int { if failure != nil { return 42 }; return 0 }`, 42},
+		{"type switch interface case", `type textError string
+
+		func (value textError) Error() string {
+			return string(value)
+		}
+
+		func Test() int {
+			var value any = textError("forty-two")
+			switch converted := value.(type) {
+			case error:
+				if converted.Error() == "forty-two" {
+					return 42
+				}
+			}
+			return 0
+		}`, 42},
 		{"concrete interface assertion", `type item struct { value int }; func Test() int { var value any = &item{value: 42}; return value.(*item).value }`, 42},
 		{"interface struct field assignment", `type item struct { value int }; type holder struct { value any }; func set(target *holder, value any) { target.value = value }; func Test() int { var target holder; set(&target, &item{value: 42}); return target.value.(*item).value }`, 42},
 		{"interface struct field composite", `type item struct { value int }; type holder struct { value any }; func Test() int { target := holder{value: &item{value: 42}}; return target.value.(*item).value }`, 42},
+		{"interface method in composite field", `type source interface {
+			Value() int
+		}
+
+		type implementation struct {
+			value int
+		}
+
+		func (value *implementation) Value() int {
+			return value.value
+		}
+
+		type holder struct {
+			source source
+		}
+
+		func Test() int {
+			value := holder{
+				source: &implementation{value: 42},
+			}
+			return value.source.Value()
+		}`, 42},
+		{"named function interface receiver", `type operation func(int) int
+
+		func (function operation) Apply(value int) int {
+			return function(value)
+		}
+
+		type applier interface {
+			Apply(int) int
+		}
+
+		func addTwo(value int) int {
+			return value + 2
+		}
+
+		func Test() int {
+			var function applier = operation(addTwo)
+			return function.Apply(40)
+		}`, 42},
+		{"method value forwards multiple results", `type pair struct {
+			left  int
+			right int
+		}
+
+		func (value pair) Values() (int, int) {
+			return value.left, value.right
+		}
+
+		func Test() int {
+			values := pair{left: 17, right: 25}.Values
+			left, right := values()
+			return left + right
+		}`, 42},
 		{"nil interface struct field", `type item struct { value int }; type holder struct { value any }; func Test() int { target := holder{value: &item{value: 42}}; target.value = nil; if target.value == nil { return 42 }; return 0 }`, 42},
 		{"aggregate interface payload survives callee", `
 			type boxedValue struct { left int; padding [24]int; right int }
@@ -302,6 +414,21 @@ func TestAdvancedExecutionCorpus(t *testing.T) {
 			func Test() int { first, counter := makeCounter(); return first + counter.Value() }
 		`, 42},
 		{"deferred function call", `var result int; func set(value int) { result = value }; func apply() { defer set(42) }; func Test() int { apply(); return result }`, 42},
+		{"defer updates named result from captured pointer", `type resultState struct {
+			code int
+		}
+
+		func run() (code int) {
+			state := &resultState{code: 42}
+			defer func() {
+				code = state.code
+			}()
+			return
+		}
+
+		func Test() int {
+			return run()
+		}`, 42},
 		{"recover outside panic", `func Test() int { if recover() == nil { return 42 }; return 0 }`, 42},
 		{"append scalar growth", `func Test() int { var values []int; values = append(values, 7); values = append(values, 11, 13); return len(values)*100 + cap(values)*10 + values[0] + values[1] + values[2] }`, 361},
 		{"append slice ellipsis", `func Test() int { values := []int{7}; more := []int{11, 13}; values = append(values, more...); return values[0] + values[1] + values[2] }`, 31},
@@ -561,6 +688,485 @@ func Test() int {
 	}
 	if len(values) != 3 || cap(values) != 3 {
 		return 2
+	}
+	return 42
+}
+`, 42)
+}
+
+func TestRuntimeClosurePassedToGoroutine(t *testing.T) {
+	runExecutableCase(t, `package main
+
+func Test() int {
+	done := make(chan int, 1)
+	value := 40
+	go func() {
+		done <- value + 2
+	}()
+	return <-done
+}
+`, 42)
+}
+
+func TestRuntimeNestedDeferInDeferredClosure(t *testing.T) {
+	runExecutableCase(t, `package main
+
+func worker(done chan int) {
+	defer func() {
+		defer func() {
+			done <- 42
+		}()
+	}()
+}
+
+func Test() int {
+	done := make(chan int, 1)
+	go worker(done)
+	return <-done
+}
+`, 42)
+}
+
+func TestRepositoryStandardLibraryOnceFuncSharesCapture(t *testing.T) {
+	runExecutableCase(t, `package main
+
+import "sync"
+
+func Test() int {
+	value := 0
+	run := sync.OnceFunc(func() {
+		value = 42
+	})
+	run()
+	run()
+	return value
+}
+`, 42)
+}
+
+func TestRuntimeSelectSendDefault(t *testing.T) {
+	runExecutableCase(t, `package main
+
+func Test() int {
+	values := make(chan int, 1)
+	select {
+	case values <- 42:
+		return <-values
+	default:
+		return 1
+	}
+}
+`, 42)
+}
+
+func TestRuntimeSelectChoosesDefault(t *testing.T) {
+	runExecutableCase(t, `package main
+
+func Test() int {
+	values := make(chan int)
+	select {
+	case values <- 1:
+		return 1
+	default:
+		return 42
+	}
+}
+`, 42)
+}
+
+func TestRuntimeSelectReceiveDefault(t *testing.T) {
+	runExecutableCase(t, `package main
+
+func Test() int {
+	values := make(chan int, 1)
+	values <- 42
+	select {
+	case value, ok := <-values:
+		if !ok {
+			return 1
+		}
+		return value
+	default:
+		return 2
+	}
+}
+`, 42)
+}
+
+func TestRuntimeSelectReceiveChoosesDefault(t *testing.T) {
+	runExecutableCase(t, `package main
+
+func Test() int {
+	values := make(chan int)
+	select {
+	case <-values:
+		return 1
+	default:
+		return 42
+	}
+}
+`, 42)
+}
+
+func TestRuntimeSelectMultipleChannels(t *testing.T) {
+	runExecutableCase(t, `package main
+
+func Test() int {
+	first := make(chan int, 1)
+	second := make(chan int, 1)
+	second <- 42
+	select {
+	case <-first:
+		return 1
+	case value := <-second:
+		return value
+	}
+}
+`, 42)
+}
+
+func TestRuntimeSliceToArrayConversionCopiesValue(t *testing.T) {
+	runExecutableCase(t, `package main
+
+func Test() int {
+	values := []int{4, 8, 15, 2}
+	converted := [4]int(values)
+	values[0] = 99
+	return converted[0]*10 + converted[3]
+}
+`, 42)
+}
+
+func TestRuntimeIntegerToStringConversion(t *testing.T) {
+	runExecutableCase(t, `package main
+
+func Test() int {
+	ascii := string(rune('A'))
+	multibyte := string(rune('世'))
+	invalid := string(int64(0x110000))
+	if ascii != "A" {
+		return 1
+	}
+	if multibyte != "世" {
+		return 2
+	}
+	if invalid != "�" {
+		return 3
+	}
+	return 42
+}
+`, 42)
+}
+
+func TestRuntimeAppendStringEllipsis(t *testing.T) {
+	runExecutableCase(t, `package main
+
+func Test() int {
+	bytes := []byte{}
+	for _, value := range "[世" {
+		bytes = append(bytes, string(value)...)
+	}
+	if string(bytes) != "[世" {
+		return 1
+	}
+	return 42
+}
+`, 42)
+}
+
+func TestRuntimeReturnedStringStoredInSlice(t *testing.T) {
+	runExecutableCase(t, `package main
+
+import "regexp"
+
+func rewrite(text string) string {
+	bytes := []byte{}
+	for _, value := range text {
+		bytes = append(bytes, string(value)...)
+	}
+	return string(bytes)
+}
+
+func Test() int {
+	rewritten := rewrite("[")
+	if len(rewritten) != 1 {
+		return 10 + len(rewritten)
+	}
+	if rewritten[0] != '[' {
+		return 100 + int(rewritten[0])
+	}
+	patterns := []string{rewritten}
+	for index, pattern := range patterns {
+		patterns[index] = rewrite(pattern)
+	}
+	if patterns[0] != "[" {
+		return 3
+	}
+	matched, err := regexp.MatchString(patterns[0], "value")
+	if matched || err == nil {
+		return 1
+	}
+	return 42
+}
+`, 42)
+}
+
+func TestRepositoryStandardLibraryRegexpMatchString(t *testing.T) {
+	runExecutableCase(t, `package main
+
+import "regexp"
+
+func Test() int {
+	matched, err := regexp.MatchString("[", "value")
+	if matched || err == nil {
+		return 1
+	}
+	matched, err = regexp.MatchString("^val", "value")
+	if !matched || err != nil {
+		return 2
+	}
+	return 42
+}
+`, 42)
+}
+
+func TestRepositoryStandardLibraryRegexpErrorMethod(t *testing.T) {
+	runExecutableCase(t, `package main
+
+import (
+	"fmt"
+	"regexp"
+)
+
+func checkError(values ...any) bool {
+	value := values[0]
+	converted, ok := value.(error)
+	return ok && len(converted.Error()) != 0
+}
+
+func Test() int {
+	_, err := regexp.MatchString("[", "value")
+	if err == nil {
+		return 1
+	}
+	message := err.Error()
+	if len(message) == 0 {
+		return 2
+	}
+	var value any = err
+	converted, ok := value.(error)
+	if !ok || len(converted.Error()) == 0 {
+		return 3
+	}
+	if !checkError(err) {
+		return 4
+	}
+	formatted := fmt.Sprintf("%s", err)
+	if len(formatted) == 0 {
+		return 5
+	}
+	return 42
+}
+`, 42)
+}
+
+func TestRuntimeMultiValueCallExpandsAsArguments(t *testing.T) {
+	runExecutableCase(t, `package main
+
+func values() (string, int) {
+	return "", 42
+}
+
+func consume(text string, value int) int {
+	if text != "" {
+		return 1
+	}
+	return value
+}
+
+func Test() int {
+	return consume(values())
+}
+`, 42)
+}
+
+func TestRuntimeInterfaceToInterfaceAssertionPreservesDescriptor(t *testing.T) {
+	runExecutableCase(t, `package main
+
+type value interface {
+	Value() int
+}
+
+type extendedValue interface {
+	value
+	Valid() bool
+}
+
+type item struct {
+	n int
+}
+
+func (i *item) Value() int {
+	return i.n
+}
+
+func (i *item) Valid() bool {
+	return true
+}
+
+func Test() int {
+	var original value = &item{n: 42}
+	extended, ok := original.(extendedValue)
+	if !ok || !extended.Valid() {
+		return 1
+	}
+	return extended.Value()
+}
+`, 42)
+}
+
+func TestRuntimeRangeOverFunction(t *testing.T) {
+	runExecutableCase(t, `package main
+
+func values(yield func(int) bool) {
+	for value := 1; value <= 6; value++ {
+		if !yield(value) {
+			return
+		}
+	}
+}
+
+func Test() int {
+	total := 0
+	for value := range values {
+		if value%2 == 0 {
+			continue
+		}
+		if value == 5 {
+			break
+		}
+		total += value
+	}
+	return total*10 + 2
+}
+`, 42)
+}
+
+func TestRuntimeNamedInterfaceResultAddress(t *testing.T) {
+	runExecutableCase(t, `package main
+
+import "unsafe"
+
+type interfaceHeader struct {
+	typ  unsafe.Pointer
+	data unsafe.Pointer
+}
+
+type item struct {
+	value int
+}
+
+func copyInterface(input any) (result any) {
+	source := (*interfaceHeader)(unsafe.Pointer(&input))
+	destination := (*interfaceHeader)(unsafe.Pointer(&result))
+	destination.typ = source.typ
+	destination.data = source.data
+	return
+}
+
+func Test() int {
+	result := copyInterface(&item{value: 42})
+	return result.(*item).value
+}
+`, 42)
+}
+
+func TestRuntimeAtomicValueChannelRoundTrip(t *testing.T) {
+	runExecutableCase(t, `package main
+
+import "sync/atomic"
+
+func Test() int {
+	var value atomic.Value
+	channel := make(chan struct{}, 1)
+	value.Store(channel)
+	loaded := value.Load().(chan struct{})
+	loaded <- struct{}{}
+	<-loaded
+	return 42
+}
+`, 42)
+}
+
+func TestRuntimeContextCancelDone(t *testing.T) {
+	runExecutableCase(t, `package main
+
+import "context"
+
+func Test() int {
+	ctx, cancel := context.WithCancel(context.Background())
+	done := ctx.Done()
+	if done == nil {
+		return 1
+	}
+	cancel()
+	<-done
+	return 42
+}
+`, 42)
+}
+
+func TestRuntimeStringSliceConversionsCopy(t *testing.T) {
+	runExecutableCase(t, `package main
+
+func Test() int {
+	bytes := []byte("alpha")
+	text := string(bytes)
+	bytes[0] = 'z'
+	if text != "alpha" {
+		return 1
+	}
+
+	copy := []byte(text)
+	copy[1] = 'z'
+	if text != "alpha" || string(copy) != "azpha" {
+		return 2
+	}
+
+	runes := []rune("世界")
+	if string(runes) != "世界" {
+		return 3
+	}
+	return 42
+}
+`, 42)
+}
+
+func TestRuntimeRangeOverUntypedStringConstant(t *testing.T) {
+	runExecutableCase(t, `package main
+
+func Test() int {
+	const text = "a世"
+	total := 0
+	for index, value := range text {
+		total += index + int(value)
+	}
+	if total != int('a')+1+int('世') {
+		return 1
+	}
+	return 42
+}
+`, 42)
+}
+
+func TestRepositoryStandardLibraryFileModeString(t *testing.T) {
+	runExecutableCase(t, `package main
+
+import "io/fs"
+
+func Test() int {
+	if fs.FileMode(0o644).String() != "-rw-r--r--" {
+		return 1
 	}
 	return 42
 }
@@ -860,6 +1466,28 @@ func Test() int {
 `, 352)
 }
 
+func TestRuntimeGlobalStructSliceInitializer(t *testing.T) {
+	runExecutableCase(t, `package main
+
+type entry struct {
+	name  string
+	value int
+}
+
+var entries = []entry{
+	{name: "alpha", value: 17},
+	{name: "beta", value: 25},
+}
+
+func Test() int {
+	if entries[0].name != "alpha" || entries[1].name != "beta" {
+		return -1
+	}
+	return entries[0].value + entries[1].value
+}
+`, 42)
+}
+
 func TestMixedInterfaceConcreteEqualityExecution(t *testing.T) {
 	runExecutableCase(t, `package main
 
@@ -880,6 +1508,28 @@ func Test() int {
 	}
 	if err == errorCode(5) {
 		return -2
+	}
+	return 42
+}
+`, 42)
+}
+
+func TestInterfaceSliceElementConcreteEqualityExecution(t *testing.T) {
+	runExecutableCase(t, `package main
+
+func Test() int {
+	values := []any{1}
+	value := 1
+	if value != values[0] {
+		return -1
+	}
+	if value == any(2) {
+		return -2
+	}
+	for _, element := range values {
+		if element != value {
+			return -3
+		}
 	}
 	return 42
 }
@@ -969,6 +1619,22 @@ func Test() int {
 	}
 	base = 10
 	return add(32)
+}
+`, 42, false)
+}
+
+func TestGenericFunctionLiteralParameterExecution(t *testing.T) {
+	runCase(t, `package main
+
+func apply[T ~int](value T) int {
+	add := func(increment T) int {
+		return int(value + increment)
+	}
+	return add(2)
+}
+
+func Test() int {
+	return apply(40)
 }
 `, 42, false)
 }

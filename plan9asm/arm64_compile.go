@@ -31,6 +31,7 @@ type ARM64Translation struct {
 	Assembly           string
 	ExternalReferences []string
 	ABI0References     []string
+	GlobalDefinitions  []string
 	Functions          []ARM64Function
 }
 
@@ -136,6 +137,7 @@ func CompileARM64(file *File, options ARM64Options) (ARM64Translation, error) {
 		data:              make(map[string][]arm64DataValue),
 	}
 	translator.directABI0 = collectDirectABI0(file, translator.abi0Layouts)
+	globalDefinitions := make(map[string]bool)
 	functionIndex := -1
 	for _, statement := range file.Statements {
 		switch statement := statement.(type) {
@@ -156,6 +158,14 @@ func CompileARM64(file *File, options ARM64Options) (ARM64Translation, error) {
 		case *Instruction:
 			if statement.Opcode == "BL" || statement.Opcode == "CALL" {
 				translator.functionCalls[functionIndex] = true
+			}
+		case *Directive:
+			if statement.Name != "GLOBL" || len(statement.Operands) == 0 {
+				continue
+			}
+			symbol, ok := operandSymbol(statement.Operands[0])
+			if ok && !symbol.Static {
+				globalDefinitions[translator.symbol(symbol)] = true
 			}
 		}
 	}
@@ -186,10 +196,16 @@ func CompileARM64(file *File, options ARM64Options) (ARM64Translation, error) {
 		abi0References = append(abi0References, symbol)
 	}
 	sort.Strings(abi0References)
+	definitions := make([]string, 0, len(globalDefinitions))
+	for symbol := range globalDefinitions {
+		definitions = append(definitions, symbol)
+	}
+	sort.Strings(definitions)
 	return ARM64Translation{
 		Assembly:           translator.output.String(),
 		ExternalReferences: references,
 		ABI0References:     abi0References,
+		GlobalDefinitions:  definitions,
 		Functions:          translator.functions,
 	}, nil
 }

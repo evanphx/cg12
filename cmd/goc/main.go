@@ -18,6 +18,10 @@ import (
 )
 
 func main() {
+	if len(os.Args) > 1 && os.Args[1] == "test" {
+		os.Exit(testCommand(os.Args[2:]))
+	}
+
 	out := flag.String("o", "", "output file")
 	obj := flag.Bool("c", false, "emit a relocatable object")
 	asm := flag.Bool("S", false, "emit assembly")
@@ -64,6 +68,58 @@ func main() {
 			os.Exit(runProgram(exe))
 		}
 	}
+}
+
+func testCommand(arguments []string) int {
+	flags := flag.NewFlagSet("goc test", flag.ContinueOnError)
+	flags.SetOutput(os.Stderr)
+	runPattern := flags.String("run", "", "run only tests matching the regular expression")
+	verbose := flags.Bool("v", false, "print each test as it runs")
+	optimize := flags.Bool("O", false, "optimize cg12 IR")
+	output := flags.String("o", "", "write the test executable to this file")
+	if err := flags.Parse(arguments); err != nil {
+		return 2
+	}
+	if flags.NArg() != 1 {
+		fmt.Fprintln(os.Stderr, "usage: goc test [-O] [-v] [-run regexp] [-o testbinary] package")
+		return 2
+	}
+	if runtime.GOARCH != "arm64" {
+		fmt.Fprintf(os.Stderr, "goc: test executables are not supported on %s\n", runtime.GOARCH)
+		return 1
+	}
+
+	packagePath := flags.Arg(0)
+	module, _, err := goc.CompileTestExecutable(packagePath)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "goc: %v\n", err)
+		return 1
+	}
+	if *optimize {
+		opt.OptimizeModule(module)
+	}
+
+	executable := *output
+	var temporaryDirectory string
+	if executable == "" {
+		temporaryDirectory, err = os.MkdirTemp("", "goc-test-*")
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "goc: %v\n", err)
+			return 1
+		}
+		defer os.RemoveAll(temporaryDirectory)
+		executable = filepath.Join(temporaryDirectory, "testbinary")
+	}
+	link(module, executable)
+
+	programArguments := make([]string, 0, 2)
+	if *verbose {
+		programArguments = append(programArguments, "-test.v=true")
+	}
+	if *runPattern != "" {
+		programArguments = append(programArguments, "-test.run="+*runPattern)
+	}
+	return runProgram(executable, programArguments...)
 }
 
 func compileAsm(m *ir.Module) (string, error) {
@@ -153,10 +209,10 @@ func compileRuntimeSupport(cc, assembly string) (string, func()) {
 	return object, cleanup
 }
 
-func runProgram(name string) int {
+func runProgram(name string, arguments ...string) int {
 	abs, err := filepath.Abs(name)
 	check(err)
-	cmd := exec.Command(abs)
+	cmd := exec.Command(abs, arguments...)
 	cmd.Stdin, cmd.Stdout, cmd.Stderr = os.Stdin, os.Stdout, os.Stderr
 	err = cmd.Run()
 	if e, ok := err.(*exec.ExitError); ok {

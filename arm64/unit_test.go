@@ -630,6 +630,26 @@ func TestGoABIGroupedSliceResultUsesThreeValueRegisters(t *testing.T) {
 	assert.Contains(t, assembly, "x2")
 }
 
+func TestGoABIStackGrowthPreservesClosureContext(t *testing.T) {
+	function := ir.NewModule().NewFunc("closure_value", ir.ClsL)
+	function.GoABI = true
+	context := function.NewTemp("closure", ir.ClsP)
+	temporary := function.Temp(context)
+	temporary.Fixed = true
+	temporary.Reg = 26
+	function.Entry().Ret(function.Entry().Load(ir.ClsL, context))
+
+	argumentFrame := goArgumentFrameFor(function)
+	foundClosureSpill := false
+	for _, spill := range argumentFrame.spills {
+		if spill.reg == X26 {
+			foundClosureSpill = true
+			assert.True(t, spill.pointer)
+		}
+	}
+	assert.True(t, foundClosureSpill, "closure context must survive morestack")
+}
+
 func TestGoABIReportsPointerResultSlotLiveAcrossCall(t *testing.T) {
 	module := ir.NewModule()
 	function := module.NewFunc("multi_result", ir.ClsP)

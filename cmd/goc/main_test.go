@@ -181,6 +181,47 @@ func main() {
 	}
 }
 
+func TestDriverRunsStandardLibraryTest(t *testing.T) {
+	if runtime.GOOS != "linux" || runtime.GOARCH != "arm64" {
+		t.Skip("cg12 Go test executables require Linux ARM64")
+	}
+	if _, err := exec.LookPath("cc"); err != nil {
+		t.Skip("cc unavailable")
+	}
+
+	directory := t.TempDir()
+	compiler := filepath.Join(directory, "goc")
+	build := exec.Command("go", "build", "-o", compiler, ".")
+	build.Env = append(os.Environ(), "GOCACHE="+filepath.Join(directory, "cache"))
+	if output, err := build.CombinedOutput(); err != nil {
+		t.Fatalf("build compiler: %v\n%s", err, output)
+	}
+
+	testBinary := filepath.Join(directory, "container-list.test")
+	command := exec.Command(compiler, "test", "-o", testBinary, "-v", "-run", "^TestRemove$", "container/list")
+	output, err := command.CombinedOutput()
+	if err != nil {
+		t.Fatalf("run standard library test: %v\n%s", err, output)
+	}
+	text := string(output)
+	if !strings.Contains(text, "=== RUN   TestRemove\n") {
+		t.Fatalf("test output does not contain the selected test:\n%s", output)
+	}
+	if !strings.Contains(text, "--- PASS: TestRemove") || !strings.Contains(text, "PASS\n") {
+		t.Fatalf("test output does not report success:\n%s", output)
+	}
+
+	invalidPattern := exec.Command(testBinary, "-test.run=[")
+	invalidOutput, err := invalidPattern.CombinedOutput()
+	exitError, ok := err.(*exec.ExitError)
+	if !ok || exitError.ExitCode() != 1 {
+		t.Fatalf("invalid test pattern exit = %v; want status 1\n%s", err, invalidOutput)
+	}
+	if !strings.Contains(string(invalidOutput), "testing: invalid regexp") {
+		t.Fatalf("invalid test pattern output is missing the error:\n%s", invalidOutput)
+	}
+}
+
 func TestARM64RuntimeAtomicSupportExecutes(t *testing.T) {
 	if runtime.GOARCH != "arm64" {
 		t.Skip("AArch64 runtime support")

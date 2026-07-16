@@ -13,6 +13,7 @@ type assemblyBundle struct {
 	source         string
 	references     map[string]bool
 	abi0References map[string]bool
+	definitions    map[string]bool
 	functions      []goFunctionInfo
 }
 
@@ -20,6 +21,7 @@ func prepareAssembly(module *ir.Module) (assemblyBundle, error) {
 	bundle := assemblyBundle{
 		references:     make(map[string]bool),
 		abi0References: make(map[string]bool),
+		definitions:    make(map[string]bool),
 	}
 	assemblyFunctions := make(map[string]bool)
 	var output strings.Builder
@@ -50,6 +52,9 @@ func prepareAssembly(module *ir.Module) (assemblyBundle, error) {
 		}
 		for _, symbol := range translation.ABI0References {
 			bundle.abi0References[symbol] = true
+		}
+		for _, symbol := range translation.GlobalDefinitions {
+			bundle.definitions[symbol] = true
 		}
 		for _, function := range translation.Functions {
 			assemblyFunctions[function.Name] = true

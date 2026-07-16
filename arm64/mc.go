@@ -220,6 +220,9 @@ func compileToObjectWithBundle(m *ir.Module, opts Options, bundle assemblyBundle
 			moduledata = d
 			continue
 		}
+		if bundle.definitions[sanitize(d.Name)] {
+			continue
+		}
 		add := addData
 		if goRuntime {
 			add = addGoData

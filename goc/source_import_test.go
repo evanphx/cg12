@@ -121,6 +121,44 @@ func TestLoadExactStandardRuntimeSource(t *testing.T) {
 	t.Fatal("runtime tls_arm64.s assembly unit was not retained")
 }
 
+func TestLoadExactStandardTestingSource(t *testing.T) {
+	loader := newSourceLoader(token.NewFileSet())
+	pkg, err := loader.Import("testing")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if pkg.Path() != "testing" {
+		t.Fatalf("path = %q", pkg.Path())
+	}
+
+	unit := loader.units[pkg.Path()]
+	if unit == nil || len(unit.files) == 0 {
+		t.Fatal("testing source AST was not retained")
+	}
+	for _, file := range unit.files {
+		position := loader.fset.Position(file.Package)
+		stdlibSource := filepath.Join("stdlib", "src", "testing")
+		if !strings.Contains(position.Filename, stdlibSource) {
+			t.Errorf("loaded testing from %q, want repository stdlib", position.Filename)
+		}
+	}
+	for _, path := range []string{
+		"context",
+		"flag",
+		"internal/synctest",
+		"internal/sysinfo",
+		"internal/unsafeheader",
+		"math/rand",
+		"path/filepath",
+		"runtime/debug",
+		"runtime/trace",
+	} {
+		if loader.units[path] == nil {
+			t.Errorf("testing source dependency %q was not retained", path)
+		}
+	}
+}
+
 func TestLoadExactStandardBytealgAssembly(t *testing.T) {
 	loader := newSourceLoader(token.NewFileSet())
 	_, err := loader.Import("internal/bytealg")

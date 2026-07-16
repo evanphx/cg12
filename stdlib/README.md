@@ -62,6 +62,13 @@ sorting, heap, map, buffered I/O, encoding, and CSV operations. The buffered
 I/O and CSV cases also read through `io.EOF`, exercising non-nil interface
 equality and multi-result interface returns across ABIInternal calls.
 
+The unchanged Go 1.26.1 `testing`, `regexp`, and `regexp/syntax` packages are
+now active as well. `goc test` discovers same-package `TestXxx(*testing.T)`
+functions and generates the ordinary `testing.Main` registration wrapper while
+leaving all matching and execution to those copied packages. The complete
+copied suites for `container/list`, `container/ring`, and `container/heap`
+currently pass through this path.
+
 The complete Go 1.26.1 `runtime` source tree is also mirrored here unchanged.
 The cg12 loader build-selects and type-checks it from this repository. Normal
 ARM64 executables compile the runtime through cg12, initialize the scheduler,

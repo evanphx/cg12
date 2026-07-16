@@ -100,6 +100,18 @@ func goArgumentFrameFor(function *ir.Func) goArgumentFrame {
 		})
 		parameterIndex++
 	}
+	for _, temporary := range function.Temps {
+		if !temporary.Fixed || temporary.Reg != 26 {
+			continue
+		}
+		groups = append(groups, goRegisterSpillGroup{
+			reg:       Reg(temporary.Reg),
+			size:      8,
+			alignment: 8,
+			pointer:   true,
+		})
+		break
+	}
 
 	resultEnd := roundUp(assigner.nsaa, 8)
 	if function.RetAgg != nil {

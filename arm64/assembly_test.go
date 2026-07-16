@@ -1,6 +1,7 @@
 package arm64
 
 import (
+	"strings"
 	"testing"
 
 	"github.com/evanphx/cg12/ir"
@@ -27,6 +28,33 @@ func TestPrepareAssemblyCollectsCodeReferencesAndFunctions(t *testing.T) {
 	assert.Equal(t, "runtime_example", bundle.functions[0].name)
 	assert.Equal(t, 8, bundle.functions[0].argumentSize)
 	assert.Equal(t, byte(goFuncFlagAsm), bundle.functions[0].funcFlag)
+}
+
+func TestAssemblyGlobalReplacesIRDataDefinition(t *testing.T) {
+	module := ir.NewModule()
+	module.Data = append(module.Data, &ir.Data{
+		Name:  "runtime.table",
+		Align: 8,
+		Items: []ir.DataItem{{Sub: ir.SubL, Ints: []int64{0}}},
+	})
+	module.Assembly = append(module.Assembly, ir.AssemblyFile{
+		PackagePath: "runtime",
+		Path:        "runtime/table.s",
+		Source: `DATA ·table+0(SB)/8, $42
+GLOBL ·table(SB), RODATA, $8
+`,
+	})
+
+	assembly, err := TranslateAssembly(module)
+	require.NoError(t, err)
+	assert.Equal(t, 1, strings.Count(assembly, "runtime_table:\n"))
+	assert.Contains(t, assembly, "\t.quad 0x2a\n")
+
+	object, err := CompileToObject(module)
+	require.NoError(t, err)
+	for _, symbol := range object.Syms {
+		assert.NotEqual(t, "runtime_table", symbol.Name)
+	}
 }
 
 func TestPrepareAssemblyMarksAsyncPreemptForRuntimeStackScanning(t *testing.T) {

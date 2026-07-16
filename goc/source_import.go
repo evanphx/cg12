@@ -37,20 +37,22 @@ type sourceAssemblyFile struct {
 // for cg12 lowering. Dependencies use export data until they too are selected
 // for source compilation.
 type sourceLoader struct {
-	fset        *token.FileSet
-	units       map[string]*sourceUnit
-	loading     map[string]bool
-	sources     map[string]bool
-	base        types.Importer
-	root        string
-	forcePureGo bool
+	fset         *token.FileSet
+	units        map[string]*sourceUnit
+	loading      map[string]bool
+	sources      map[string]bool
+	testPackages map[string]bool
+	base         types.Importer
+	root         string
+	forcePureGo  bool
 }
 
 func newSourceLoader(fset *token.FileSet) *sourceLoader {
 	return &sourceLoader{
-		fset:    fset,
-		units:   make(map[string]*sourceUnit),
-		loading: make(map[string]bool),
+		fset:         fset,
+		units:        make(map[string]*sourceUnit),
+		loading:      make(map[string]bool),
+		testPackages: make(map[string]bool),
 		sources: map[string]bool{
 			"bufio":                                 true,
 			"bytes":                                 true,
@@ -58,8 +60,11 @@ func newSourceLoader(fset *token.FileSet) *sourceLoader {
 			"container/heap":                        true,
 			"container/list":                        true,
 			"container/ring":                        true,
+			"context":                               true,
 			"crypto":                                true,
+			"encoding":                              true,
 			"errors":                                true,
+			"flag":                                  true,
 			"fmt":                                   true,
 			"io":                                    true,
 			"io/fs":                                 true,
@@ -118,17 +123,27 @@ func newSourceLoader(fset *token.FileSet) *sourceLoader {
 			"internal/strconv":                      true,
 			"internal/stringslite":                  true,
 			"internal/sync":                         true,
+			"internal/synctest":                     true,
+			"internal/sysinfo":                      true,
 			"internal/syscall/execenv":              true,
 			"internal/syscall/unix":                 true,
 			"internal/testlog":                      true,
 			"internal/trace/tracev2":                true,
+			"internal/unsafeheader":                 true,
 			"iter":                                  true,
 			"maps":                                  true,
+			"math":                                  true,
 			"math/bits":                             true,
+			"math/rand":                             true,
 			"os":                                    true,
 			"path":                                  true,
+			"path/filepath":                         true,
 			"reflect":                               true,
+			"regexp":                                true,
+			"regexp/syntax":                         true,
 			"runtime":                               true,
+			"runtime/debug":                         true,
+			"runtime/trace":                         true,
 			"slices":                                true,
 			"sort":                                  true,
 			"strconv":                               true,
@@ -136,6 +151,7 @@ func newSourceLoader(fset *token.FileSet) *sourceLoader {
 			"sync":                                  true,
 			"sync/atomic":                           true,
 			"syscall":                               true,
+			"testing":                               true,
 			"time":                                  true,
 			"unicode":                               true,
 			"unicode/utf8":                          true,
@@ -188,7 +204,11 @@ func (l *sourceLoader) Import(path string) (*types.Package, error) {
 			Instances:  make(map[*ast.Ident]types.Instance),
 		},
 	}
-	for _, name := range bp.GoFiles {
+	goFiles := append([]string(nil), bp.GoFiles...)
+	if l.testPackages[path] {
+		goFiles = append(goFiles, bp.TestGoFiles...)
+	}
+	for _, name := range goFiles {
 		full := filepath.Join(bp.Dir, name)
 		file, err := parser.ParseFile(l.fset, full, nil, parser.ParseComments|parser.AllErrors)
 		if err != nil {

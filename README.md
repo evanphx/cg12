@@ -94,6 +94,23 @@ go run ./cmd/goc -O -c program.go
 go run ./cmd/goc -run program.go
 ```
 
+The Go frontend can also build and execute the copied standard library's exact
+same-package tests through cg12:
+
+```sh
+go build -o /tmp/goc ./cmd/goc
+/tmp/goc test -v container/list
+/tmp/goc test -v -run '^TestRemove$' container/list
+/tmp/goc test -o /tmp/list.test container/list
+/tmp/list.test -test.run='^TestRemove$'
+```
+
+`goc test` compiles every discovered `TestXxx(*testing.T)` function, the copied
+`testing` package, and the copied `regexp` implementation into the test binary.
+The binary performs `-run` filtering and reports invalid expressions itself.
+External test packages, benchmarks, examples, fuzz targets, and `TestMain` are
+the next test-driver stages and are not discovered yet.
+
 ## Goals
 
 - **Library-first.** cg12 is designed to be embedded. You construct IR through a

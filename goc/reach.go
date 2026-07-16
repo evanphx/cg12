@@ -5,6 +5,7 @@ import (
 	"go/ast"
 	"go/token"
 	"go/types"
+	"sort"
 	"strings"
 )
 
@@ -88,7 +89,7 @@ func moduleInitDeclarations(rootFiles []*ast.File, rootInfo *types.Info, rootPkg
 // reachableFunctions follows statically named function calls across source
 // units. Calls through interfaces are recorded by their interface method and
 // resolved later by interface lowering.
-func reachableFunctions(roots []*ast.FuncDecl, rootFiles []*ast.File, rootInfo *types.Info, rootPkg *types.Package, units map[string]*sourceUnit, runtimeAllocation bool, initializers []functionDecl, linkNames map[*types.Func]string, assemblyReferences map[string]bool) []functionDecl {
+func reachableFunctions(roots []*ast.FuncDecl, rootFiles []*ast.File, rootInfo *types.Info, rootPkg *types.Package, units map[string]*sourceUnit, dynamicTypes []types.Type, runtimeAllocation bool, initializers []functionDecl, linkNames map[*types.Func]string, assemblyReferences map[string]bool) []functionDecl {
 	declarations := make(map[*types.Func]functionDecl)
 	linkedDeclarations := make(map[string]functionDecl)
 	methods := make(map[string][]functionDecl)
@@ -127,6 +128,26 @@ func reachableFunctions(roots []*ast.FuncDecl, rootFiles []*ast.File, rootInfo *
 				}
 			}
 		}
+	}
+	var assertedInterfaces []*types.Interface
+	collectAssertedInterfaces := func(files []*ast.File, info *types.Info) {
+		for _, file := range files {
+			ast.Inspect(file, func(node ast.Node) bool {
+				assertion, ok := node.(*ast.TypeAssertExpr)
+				if !ok || assertion.Type == nil {
+					return true
+				}
+				assertedType := info.Types[assertion.Type].Type
+				if interfaceType, ok := assertedType.Underlying().(*types.Interface); ok {
+					assertedInterfaces = append(assertedInterfaces, interfaceType)
+				}
+				return true
+			})
+		}
+	}
+	collectAssertedInterfaces(rootFiles, rootInfo)
+	for _, unit := range units {
+		collectAssertedInterfaces(unit.files, unit.info)
 	}
 	for function, declaration := range declarations {
 		symbol := functionSymbol(function)
@@ -167,12 +188,92 @@ func reachableFunctions(roots []*ast.FuncDecl, rootFiles []*ast.File, rootInfo *
 			return
 		}
 		for methodIndex := 0; methodIndex < interfaceType.NumMethods(); methodIndex++ {
-			for _, candidate := range methods[interfaceType.Method(methodIndex).Name()] {
-				candidateObject := candidate.info.Defs[candidate.decl.Name].(*types.Func)
-				candidateReceiver := candidateObject.Type().(*types.Signature).Recv().Type()
-				if types.Identical(candidateReceiver, sourceType) {
-					queue = append(queue, candidate)
+			method := interfaceType.Method(methodIndex)
+			object, _, _ := types.LookupFieldOrMethod(sourceType, true, method.Pkg(), method.Name())
+			if function, ok := object.(*types.Func); ok {
+				enqueueObject(function)
+			}
+		}
+		for _, assertedInterface := range assertedInterfaces {
+			if !types.Implements(sourceType, assertedInterface) {
+				continue
+			}
+			for methodIndex := 0; methodIndex < assertedInterface.NumMethods(); methodIndex++ {
+				method := assertedInterface.Method(methodIndex)
+				object, _, _ := types.LookupFieldOrMethod(sourceType, true, method.Pkg(), method.Name())
+				if function, ok := object.(*types.Func); ok {
+					enqueueObject(function)
 				}
+			}
+		}
+	}
+	enqueueValueImplementation := func(expression ast.Expr, targetType types.Type, info *types.Info) {
+		if expression == nil || targetType == nil {
+			return
+		}
+		interfaceType, ok := targetType.Underlying().(*types.Interface)
+		if !ok {
+			return
+		}
+		sourceType := info.Types[expression].Type
+		if basic, ok := sourceType.Underlying().(*types.Basic); ok && basic.Info()&types.IsUntyped != 0 {
+			sourceType = types.Default(sourceType)
+		}
+		if sourceType != nil {
+			enqueueImplementation(sourceType, interfaceType)
+		}
+	}
+	enqueueCompositeImplementations := func(literal *ast.CompositeLit, info *types.Info) {
+		literalType := info.Types[literal].Type
+		if literalType == nil {
+			return
+		}
+		switch compositeType := literalType.Underlying().(type) {
+		case *types.Struct:
+			for elementIndex, element := range literal.Elts {
+				fieldIndex := elementIndex
+				value := element
+				if keyed, ok := element.(*ast.KeyValueExpr); ok {
+					identifier, ok := keyed.Key.(*ast.Ident)
+					if !ok {
+						continue
+					}
+					fieldIndex = -1
+					for index := 0; index < compositeType.NumFields(); index++ {
+						if compositeType.Field(index).Name() == identifier.Name {
+							fieldIndex = index
+							break
+						}
+					}
+					value = keyed.Value
+				}
+				if fieldIndex < 0 || fieldIndex >= compositeType.NumFields() {
+					continue
+				}
+				enqueueValueImplementation(value, compositeType.Field(fieldIndex).Type(), info)
+			}
+		case *types.Array:
+			for _, element := range literal.Elts {
+				if keyed, ok := element.(*ast.KeyValueExpr); ok {
+					element = keyed.Value
+				}
+				enqueueValueImplementation(element, compositeType.Elem(), info)
+			}
+		case *types.Slice:
+			for _, element := range literal.Elts {
+				if keyed, ok := element.(*ast.KeyValueExpr); ok {
+					element = keyed.Value
+				}
+				enqueueValueImplementation(element, compositeType.Elem(), info)
+			}
+		case *types.Map:
+			for _, element := range literal.Elts {
+				keyed, ok := element.(*ast.KeyValueExpr)
+				if !ok {
+					continue
+				}
+				enqueueValueImplementation(keyed.Key, compositeType.Key(), info)
+				enqueueValueImplementation(keyed.Value, compositeType.Elem(), info)
 			}
 		}
 	}
@@ -184,9 +285,18 @@ func reachableFunctions(roots []*ast.FuncDecl, rootFiles []*ast.File, rootInfo *
 					continue
 				}
 				for _, specification := range global.Specs {
-					values := specification.(*ast.ValueSpec).Values
-					for _, value := range values {
+					valueSpecification := specification.(*ast.ValueSpec)
+					for index, value := range valueSpecification.Values {
+						if index < len(valueSpecification.Names) {
+							object := info.Defs[valueSpecification.Names[index]]
+							if object != nil {
+								enqueueValueImplementation(value, object.Type(), info)
+							}
+						}
 						ast.Inspect(value, func(node ast.Node) bool {
+							if literal, ok := node.(*ast.CompositeLit); ok {
+								enqueueCompositeImplementations(literal, info)
+							}
 							identifier, ok := node.(*ast.Ident)
 							if !ok {
 								return true
@@ -235,7 +345,7 @@ func reachableFunctions(roots []*ast.FuncDecl, rootFiles []*ast.File, rootInfo *
 		queue = append(queue, genericRuntimeMethods...)
 		for _, name := range []string{
 			"args", "c128equal", "c64equal", "check", "concatstring2", "f32equal", "f64equal", "growslice",
-			"interequal", "interhash", "main", "makeslice", "mallocgc", "memequal8",
+			"goPanicSliceConvert", "interequal", "interhash", "main", "makeslice", "mallocgc", "memequal8",
 			"memequal16", "memequal32", "memequal64", "memequal128", "mstart0",
 			"newobject", "newstack", "nilinterequal", "nilinterhash", "osinit", "persistentalloc",
 			"printbool", "printfloat32", "printfloat64", "printhex", "printint", "printnl",
@@ -266,9 +376,53 @@ func reachableFunctions(roots []*ast.FuncDecl, rootFiles []*ast.File, rootInfo *
 		seen[key] = true
 		reachable = append(reachable, current)
 
+		currentFunction, _ := current.info.Defs[current.decl.Name].(*types.Func)
+		currentSignature, _ := currentFunction.Type().(*types.Signature)
+		parents := astParents(current.decl.Body)
 		ast.Inspect(current.decl.Body, func(node ast.Node) bool {
+			switch statement := node.(type) {
+			case *ast.CompositeLit:
+				enqueueCompositeImplementations(statement, current.info)
+			case *ast.AssignStmt:
+				if len(statement.Lhs) == len(statement.Rhs) {
+					for index, value := range statement.Rhs {
+						targetType := current.info.Types[statement.Lhs[index]].Type
+						enqueueValueImplementation(value, targetType, current.info)
+					}
+				}
+			case *ast.ValueSpec:
+				for index, value := range statement.Values {
+					if index >= len(statement.Names) {
+						continue
+					}
+					object := current.info.Defs[statement.Names[index]]
+					if object == nil {
+						object = current.info.Uses[statement.Names[index]]
+					}
+					if object != nil {
+						enqueueValueImplementation(value, object.Type(), current.info)
+					}
+				}
+			case *ast.ReturnStmt:
+				signature := currentSignature
+				for parent := ast.Node(statement); parent != nil; parent = parents[parent] {
+					if function, ok := parent.(*ast.FuncLit); ok {
+						signature, _ = current.info.Types[function.Type].Type.(*types.Signature)
+						break
+					}
+				}
+				if signature != nil && len(statement.Results) == signature.Results().Len() {
+					for index, value := range statement.Results {
+						enqueueValueImplementation(value, signature.Results().At(index).Type(), current.info)
+					}
+				}
+			case *ast.SendStmt:
+				if channelType, ok := current.info.Types[statement.Chan].Type.Underlying().(*types.Chan); ok {
+					enqueueValueImplementation(statement.Value, channelType.Elem(), current.info)
+				}
+			}
 			if statement, ok := node.(*ast.RangeStmt); ok {
-				if basic, ok := current.info.Types[statement.X].Type.Underlying().(*types.Basic); ok && basic.Kind() == types.String {
+				if basic, ok := current.info.Types[statement.X].Type.Underlying().(*types.Basic); ok && (basic.Kind() == types.String || basic.Kind() == types.UntypedString) {
 					if decoderune, exists := runtimeFunctions["decoderune"]; exists {
 						queue = append(queue, decoderune)
 					}
@@ -298,7 +452,66 @@ func reachableFunctions(roots []*ast.FuncDecl, rootFiles []*ast.File, rootInfo *
 					queue = append(queue, chansend)
 				}
 			}
+			if _, ok := node.(*ast.SelectStmt); ok {
+				if selectGo, exists := runtimeFunctions["selectgo"]; exists {
+					queue = append(queue, selectGo)
+				}
+			}
 			if call, ok := node.(*ast.CallExpr); ok {
+				if current.info.Types[call.Fun].IsType() && len(call.Args) == 1 {
+					enqueueValueImplementation(call.Args[0], current.info.Types[call].Type, current.info)
+					if runtimeAllocation {
+						source, sourceIsBasic := current.info.Types[call.Args[0]].Type.Underlying().(*types.Basic)
+						target, targetIsBasic := current.info.Types[call].Type.Underlying().(*types.Basic)
+						if sourceIsBasic && targetIsBasic && source.Info()&types.IsInteger != 0 && target.Kind() == types.String {
+							if intstring, exists := runtimeFunctions["intstring"]; exists {
+								queue = append(queue, intstring)
+							}
+						}
+					}
+				}
+				if runtimeAllocation && current.pkg.Path() != "runtime" && current.info.Types[call.Fun].IsType() && len(call.Args) == 1 {
+					sourceType := current.info.Types[call.Args[0]].Type
+					targetType := current.info.Types[call].Type
+					if sourceSlice, ok := sourceType.Underlying().(*types.Slice); ok {
+						if target, ok := targetType.Underlying().(*types.Basic); ok && target.Kind() == types.String {
+							if element, ok := sourceSlice.Elem().Underlying().(*types.Basic); ok {
+								functionName := ""
+								switch element.Kind() {
+								case types.Uint8:
+									functionName = "slicebytetostring"
+									if comparison, ok := parents[call].(*ast.BinaryExpr); ok {
+										switch comparison.Op {
+										case token.EQL, token.NEQ, token.LSS, token.LEQ, token.GTR, token.GEQ:
+											functionName = "slicebytetostringtmp"
+										}
+									}
+								case types.Int32:
+									functionName = "slicerunetostring"
+								}
+								if function, exists := runtimeFunctions[functionName]; exists {
+									queue = append(queue, function)
+								}
+							}
+						}
+					}
+					if source, ok := sourceType.Underlying().(*types.Basic); ok && source.Kind() == types.String {
+						if targetSlice, ok := targetType.Underlying().(*types.Slice); ok {
+							if element, ok := targetSlice.Elem().Underlying().(*types.Basic); ok {
+								functionName := ""
+								switch element.Kind() {
+								case types.Uint8:
+									functionName = "stringtoslicebyte"
+								case types.Int32:
+									functionName = "stringtoslicerune"
+								}
+								if function, exists := runtimeFunctions[functionName]; exists {
+									queue = append(queue, function)
+								}
+							}
+						}
+					}
+				}
 				if signature, ok := current.info.Types[call.Fun].Type.Underlying().(*types.Signature); ok {
 					for argumentIndex, argument := range call.Args {
 						parameterIndex := argumentIndex
@@ -372,6 +585,51 @@ func reachableFunctions(roots []*ast.FuncDecl, rootFiles []*ast.File, rootInfo *
 		})
 	}
 	return reachable
+}
+
+func collectDynamicTypes(rootInfo *types.Info, units map[string]*sourceUnit) []types.Type {
+	byKey := make(map[string]types.Type)
+	add := func(valueType types.Type) {
+		if valueType == nil {
+			return
+		}
+		key := goTypeKey(valueType)
+		if _, exists := byKey[key]; !exists {
+			byKey[key] = valueType
+		}
+		if named, ok := types.Unalias(valueType).(*types.Named); ok {
+			pointer := types.NewPointer(named)
+			pointerKey := goTypeKey(pointer)
+			if _, exists := byKey[pointerKey]; !exists {
+				byKey[pointerKey] = pointer
+			}
+		}
+	}
+	collect := func(info *types.Info) {
+		for _, typeAndValue := range info.Types {
+			add(typeAndValue.Type)
+		}
+		for _, object := range info.Defs {
+			if typeName, ok := object.(*types.TypeName); ok {
+				add(typeName.Type())
+			}
+		}
+	}
+	collect(rootInfo)
+	for _, unit := range units {
+		collect(unit.info)
+	}
+
+	keys := make([]string, 0, len(byKey))
+	for key := range byKey {
+		keys = append(keys, key)
+	}
+	sort.Strings(keys)
+	dynamicTypes := make([]types.Type, 0, len(keys))
+	for _, key := range keys {
+		dynamicTypes = append(dynamicTypes, byKey[key])
+	}
+	return dynamicTypes
 }
 
 func assemblySymbolName(name string) string {

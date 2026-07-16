@@ -512,7 +512,7 @@ var values []int
 
 func TestRejectUnsupportedSelect(t *testing.T) {
 	_, err := Compile("bad.go", []byte("package p\nfunc f() { select {} }"))
-	if err == nil || !strings.Contains(err.Error(), "unsupported statement *ast.SelectStmt") {
+	if err == nil || !strings.Contains(err.Error(), "select with no communication cases") {
 		t.Fatalf("error = %v", err)
 	}
 }
