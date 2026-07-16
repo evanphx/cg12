@@ -578,6 +578,67 @@ func TestSharedLibraryConstructorRunsOnLoad(t *testing.T) {
 	require.Equal(t, 42, code, "the library's constructor ran when the loader brought it in")
 }
 
+// A library can publish a symbol at a named version, and a program can demand
+// that exact version of it -- the other half of versioning from TestVersionedImport,
+// which pinned a version libc happened to define. Here both sides are ours, so the
+// definition is what makes the requirement satisfiable.
+func TestVersionedExport(t *testing.T) {
+	if runtime.GOARCH != "arm64" {
+		t.Skip("arm64 executable runs natively only on an arm64 host")
+	}
+	// build writes a library publishing cg12_triple@CG12_1.0 into dir, plus a
+	// program next to it demanding cg12_triple at the given version.
+	build := func(t *testing.T, dir, want string) string {
+		m := ir.NewModule()
+		f := m.NewFunc("cg12_triple", ir.ClsW).Export()
+		x := f.Param("x", ir.ClsW)
+		e := f.Entry()
+		e.Ret(e.Mul(ir.ClsW, x, f.Word(3)))
+		l := link.NewWith(arm64.Backend{})
+		require.NoError(t, l.AddModule(m))
+		so, err := l.LinkSharedLibraryWith(obj.SharedOptions{
+			Soname:  "libcg12ver.so",
+			Export:  []string{"cg12_triple"},
+			Provide: map[string]string{"cg12_triple": "CG12_1.0"},
+		})
+		require.NoError(t, err)
+		require.NoError(t, os.WriteFile(filepath.Join(dir, "libcg12ver.so"), so, 0o755))
+
+		p := ir.NewModule()
+		g := p.NewFunc("main", ir.ClsW).Export()
+		ge := g.Entry()
+		ge.Ret(ge.Call(ir.ClsW, g.Sym("cg12_triple", 0), g.Word(14)))
+		l2 := link.NewWith(arm64.Backend{})
+		require.NoError(t, l2.AddModule(p))
+		exe, err := l2.LinkDynamicExecutableWith("main", obj.DynOptions{
+			Needed:  []string{"libcg12ver.so", "libc.so.6"},
+			Runpath: []string{"$ORIGIN"},
+			Require: map[string]obj.SymVersion{
+				"cg12_triple": {Library: "libcg12ver.so", Version: want},
+			},
+		})
+		require.NoError(t, err)
+		path := filepath.Join(dir, "prog")
+		require.NoError(t, os.WriteFile(path, exe, 0o755))
+		return path
+	}
+	run := func(path string) int {
+		err := exec.Command(path).Run()
+		if ee, ok := err.(*exec.ExitError); ok {
+			return ee.ExitCode()
+		}
+		require.NoError(t, err)
+		return 0
+	}
+
+	t.Run("binds the published version", func(t *testing.T) {
+		require.Equal(t, 42, run(build(t, t.TempDir(), "CG12_1.0")))
+	})
+	t.Run("a version the library never published is refused", func(t *testing.T) {
+		require.NotEqual(t, 42, run(build(t, t.TempDir(), "CG12_9.9")))
+	})
+}
+
 // The image is a well-formed dynamic executable on both architectures: it names
 // the loader in PT_INTERP and carries a PT_DYNAMIC segment. This runs everywhere,
 // including where the foreign architecture's libraries are not installed.

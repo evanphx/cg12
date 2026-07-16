@@ -22,6 +22,7 @@ const (
 	shtInitArray  = 14
 	shtFiniArray  = 15
 	shtGnuHash    = 0x6ffffff6
+	shtGnuVerdef  = 0x6ffffffd
 	shtGnuVerneed = 0x6ffffffe
 	shtGnuVersym  = 0x6fffffff
 
@@ -52,13 +53,18 @@ const (
 	dtGnuHash     = 0x6ffffef5
 	dtVersym      = 0x6ffffff0
 	dtFlags1      = 0x6ffffffb
+	dtVerdef      = 0x6ffffffc
+	dtVerdefnum   = 0x6ffffffd
 	dtVerneed     = 0x6ffffffe
 	dtVerneednum  = 0x6fffffff
 
-	// .gnu.version indices: 0 means the symbol is local, 1 means global and
-	// unversioned; 2 and up name an entry in the version requirements.
-	verLocal  = 0
-	verGlobal = 1
+	// .gnu.version indices: 0 means the symbol is local, 1 the base version (an
+	// image's own unversioned global scope); 2 and up name a version definition or
+	// requirement. Definitions and requirements share this one numbering, so their
+	// indices have to be handed out together.
+	verLocal   = 0
+	verGlobal  = 1
+	verFlgBase = 0x1 // VER_FLG_BASE: the definition standing for the image itself
 
 	dfBindNow = 0x8 // resolve every relocation at load time (no lazy binding)
 	df1Now    = 0x1
@@ -151,6 +157,11 @@ type SharedOptions struct {
 	Runpath   []string // directories to search for those libraries (DT_RUNPATH)
 	InitArray []string // functions run when the library is loaded
 	FiniArray []string // functions run when it is unloaded
+
+	// Provide publishes an exported symbol at a named version, so a consumer can
+	// bind to that exact interface and the library can carry another alongside it
+	// later (DT_VERDEF).
+	Provide map[string]string // symbol -> version name
 }
 
 // WriteSharedLibrary links the object into a shared library: a position-
@@ -164,6 +175,7 @@ func (o *Object) WriteSharedLibrary(opts SharedOptions) ([]byte, error) {
 		runpath: opts.Runpath,
 		initArr: opts.InitArray,
 		finiArr: opts.FiniArray,
+		provide: opts.Provide,
 		pie:     true, // a shared library is position-independent by definition
 	})
 }
@@ -175,6 +187,7 @@ type dynImage struct {
 	needed  []string              // DT_NEEDED
 	export  []string              // symbols published in .dynsym
 	require map[string]SymVersion // imports pinned to a specific library version
+	provide map[string]string     // exports published at a named version
 	runpath []string              // DT_RUNPATH search directories
 	initArr []string              // functions run before the entry point
 	finiArr []string              // functions run at unload
@@ -189,12 +202,27 @@ type verneed struct {
 	vers []string
 }
 
-// planVersions groups the per-symbol version requirements by library and assigns
-// each (library, version) pair the index that .gnu.version will carry for the
-// symbols bound to it. Indices start at 2, since 0 and 1 are reserved for local
-// and global-unversioned.
-func planVersions(require map[string]SymVersion) (needs []verneed, index map[string]uint16) {
+// planVersions hands out the .gnu.version index for every version this image
+// defines and every version it requires. Definitions and requirements share one
+// numbering, so they must be allocated together: 0 and 1 are reserved (local and
+// base), definitions take the next indices, and requirements follow.
+//
+// A definition is keyed by its bare version name; a requirement by library and
+// version, since two libraries may use the same version name for different things.
+func planVersions(provide map[string]string, require map[string]SymVersion) (defs []string, needs []verneed, index map[string]uint16) {
 	index = map[string]uint16{}
+	next := uint16(2)
+
+	names := make([]string, 0, len(provide))
+	for _, v := range provide {
+		names = append(names, v)
+	}
+	for _, v := range uniqueSorted(names) {
+		defs = append(defs, v)
+		index[v] = next
+		next++
+	}
+
 	byLib := map[string][]string{}
 	for _, v := range require {
 		byLib[v.Library] = append(byLib[v.Library], v.Version)
@@ -204,7 +232,6 @@ func planVersions(require map[string]SymVersion) (needs []verneed, index map[str
 		libs = append(libs, l)
 	}
 	sort.Strings(libs)
-	next := uint16(2)
 	for _, lib := range libs {
 		vers := uniqueSorted(byLib[lib])
 		for _, v := range vers {
@@ -213,7 +240,36 @@ func planVersions(require map[string]SymVersion) (needs []verneed, index map[str
 		}
 		needs = append(needs, verneed{lib: lib, vers: vers})
 	}
-	return needs, index
+	return defs, needs, index
+}
+
+// buildVerdef encodes .gnu.version_d: the base definition standing for the image
+// itself, then one definition per version it publishes. As with .gnu.version_r the
+// offsets are relative to the record they sit in, and a zero next-offset ends the
+// list.
+func buildVerdef(base string, defs []string, index map[string]uint16, dynstr *strtab) []byte {
+	const vdSz, vdaSz = 20, 8
+	b := &elfBuf{}
+	entry := func(flags, ndx uint16, name string, last bool) {
+		next := uint32(vdSz + vdaSz)
+		if last {
+			next = 0
+		}
+		b.u16(1)     // vd_version
+		b.u16(flags) // vd_flags
+		b.u16(ndx)   // vd_ndx
+		b.u16(1)     // vd_cnt: one name per definition
+		b.u32(elfHash(name))
+		b.u32(vdSz) // vd_aux: the Verdaux follows immediately
+		b.u32(next)
+		b.u32(dynstr.add(name)) // vda_name
+		b.u32(0)                // vda_next: the only one
+	}
+	entry(verFlgBase, verGlobal, base, len(defs) == 0)
+	for i, v := range defs {
+		entry(0, index[v], v, i == len(defs)-1)
+	}
+	return b.b
 }
 
 // uniqueSorted returns the sorted distinct elements of in.
@@ -335,11 +391,12 @@ func (o *Object) writeDynImage(im dynImage) ([]byte, error) {
 		runpathOff = dynstr.add(strings.Join(im.runpath, ":"))
 	}
 
-	// Version requirements: .gnu.version gives every dynamic symbol an index, and
-	// .gnu.version_r spells out, per library, which versions those indices name.
-	needs, verIndex := planVersions(im.require)
-	versioned := len(needs) > 0
-	var versym, verneedTab []byte
+	// Versions: .gnu.version gives every dynamic symbol an index, .gnu.version_d
+	// spells out the versions this image defines, and .gnu.version_r the ones it
+	// needs from its libraries.
+	defs, needs, verIndex := planVersions(im.provide, im.require)
+	versioned := len(defs) > 0 || len(needs) > 0
+	var versym, verdefTab, verneedTab []byte
 	if versioned {
 		for _, n := range needs {
 			dynstr.add(n.lib)
@@ -352,8 +409,16 @@ func (o *Object) writeDynImage(im dynImage) ([]byte, error) {
 			idx[i] = verGlobal
 		}
 		for i, n := range dynNames {
-			if v, ok := im.require[n]; ok && i > 0 {
+			if i == 0 {
+				continue
+			}
+			if v, ok := im.require[n]; ok {
 				if vi, ok := verIndex[v.Library+"\x00"+v.Version]; ok {
+					idx[i] = vi
+				}
+			}
+			if v, ok := im.provide[n]; ok {
+				if vi, ok := verIndex[v]; ok {
 					idx[i] = vi
 				}
 			}
@@ -364,7 +429,16 @@ func (o *Object) writeDynImage(im dynImage) ([]byte, error) {
 			vb.u16(v)
 		}
 		versym = vb.b
-		verneedTab = buildVerneed(needs, verIndex, dynstr)
+		if len(defs) > 0 {
+			base := im.soname
+			if base == "" {
+				base = "cg12" // an executable has no soname to name its base version after
+			}
+			verdefTab = buildVerdef(base, defs, verIndex, dynstr)
+		}
+		if len(needs) > 0 {
+			verneedTab = buildVerneed(needs, verIndex, dynstr)
+		}
 	}
 
 	hash := sysvHash(dynNames)
@@ -387,6 +461,8 @@ func (o *Object) writeDynImage(im dynImage) ([]byte, error) {
 	gnuVersymOff := off
 	off += len(versym)
 	off = alignUp(off, 4)
+	gnuVerdefOff := off
+	off += len(verdefTab)
 	gnuVerneedOff := off
 	off += len(verneedTab)
 	off = alignUp(off, 8)
@@ -431,7 +507,13 @@ func (o *Object) writeDynImage(im dynImage) ([]byte, error) {
 		ndyn += 3 // RELA, RELASZ, RELAENT
 	}
 	if versioned {
-		ndyn += 3 // VERSYM, VERNEED, VERNEEDNUM
+		ndyn++ // VERSYM
+	}
+	if len(im.provide) > 0 {
+		ndyn += 2 // VERDEF, VERDEFNUM
+	}
+	if len(im.require) > 0 {
+		ndyn += 2 // VERNEED, VERNEEDNUM
 	}
 	if initArrSize > 0 {
 		ndyn += 2 // INIT_ARRAY, INIT_ARRAYSZ
@@ -483,9 +565,14 @@ func (o *Object) writeDynImage(im dynImage) ([]byte, error) {
 	secGnuHash := nextSec()
 	secDynsym := nextSec()
 	secDynstr := nextSec()
-	secVersym, secVerneed := -1, -1
+	secVersym, secVerdef, secVerneed := -1, -1, -1
 	if versioned {
 		secVersym = nextSec()
+	}
+	if len(verdefTab) > 0 {
+		secVerdef = nextSec()
+	}
+	if len(verneedTab) > 0 {
 		secVerneed = nextSec()
 	}
 	secRelaDyn := -1
@@ -690,6 +777,12 @@ func (o *Object) writeDynImage(im dynImage) ([]byte, error) {
 	}
 	if versioned {
 		dt(dtVersym, va(gnuVersymOff))
+	}
+	if len(verdefTab) > 0 {
+		dt(dtVerdef, va(gnuVerdefOff))
+		dt(dtVerdefnum, uint64(len(defs)+1)) // the definitions plus the base
+	}
+	if len(verneedTab) > 0 {
 		dt(dtVerneed, va(gnuVerneedOff))
 		dt(dtVerneednum, uint64(len(needs)))
 	}
@@ -746,6 +839,7 @@ func (o *Object) writeDynImage(im dynImage) ([]byte, error) {
 	put(dynstrOff, dynstr.b)
 	if versioned {
 		put(gnuVersymOff, versym)
+		put(gnuVerdefOff, verdefTab)
 		put(gnuVerneedOff, verneedTab)
 	}
 	put(relaDynOff, relaDyn.b)
@@ -778,6 +872,7 @@ func (o *Object) writeDynImage(im dynImage) ([]byte, error) {
 	set(secDynsym, ".dynsym", shtDynsym, shfAlloc, dynsymOff, len(dynsym.b), secDynstr, 1, 8, 24)
 	set(secDynstr, ".dynstr", shtStrtab, shfAlloc, dynstrOff, len(dynstr.b), 0, 0, 1, 0)
 	set(secVersym, ".gnu.version", shtGnuVersym, shfAlloc, gnuVersymOff, len(versym), secDynsym, 0, 2, 2)
+	set(secVerdef, ".gnu.version_d", shtGnuVerdef, shfAlloc, gnuVerdefOff, len(verdefTab), secDynstr, len(defs)+1, 4, 0)
 	set(secVerneed, ".gnu.version_r", shtGnuVerneed, shfAlloc, gnuVerneedOff, len(verneedTab), secDynstr, len(needs), 4, 0)
 	set(secRelaDyn, ".rela.dyn", shtRela, shfAlloc, relaDynOff, len(relaDyn.b), secDynsym, 0, 8, 24)
 	set(secRelaPlt, ".rela.plt", shtRela, shfAlloc, relaPltOff, len(relaPlt.b), secDynsym, secPlt, 8, 24)
