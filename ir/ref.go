@@ -20,6 +20,10 @@ const (
 	_ // was RefMem
 
 	RefReg // a physical machine register; ID is the target register number
+
+	// RefAggregate is a frontend-only immutable bundle of scalar SSA refs. It
+	// must be consumed by aggregate-aware builders before target lowering.
+	RefAggregate
 )
 
 // Ref is a compact, comparable operand reference. It is deliberately a small

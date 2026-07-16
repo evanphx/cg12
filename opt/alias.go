@@ -142,6 +142,9 @@ func (ai *aliasInfo) computeEscape() {
 			}
 		}
 		mark(b.Jmp.Arg) // returning a pointer escapes it
+		for _, argument := range b.Jmp.Args {
+			mark(argument)
+		}
 	}
 }
 

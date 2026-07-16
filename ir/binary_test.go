@@ -11,10 +11,11 @@ import (
 // union, data, source positions, phis, calls, a tail call, and a variadic.
 func richModule() *Module {
 	pair := &AggType{Name: "pair", Fields: []Field{{Sub: SubW}, {Sub: SubW}}}
+	slice := &AggType{Name: "slice", Fields: []Field{{Sub: SubL, Pointer: true}, {Sub: SubL}, {Sub: SubL}}}
 	// A union and a nested-aggregate field, to exercise Cases and Field.Type.
 	un := &AggType{Name: "u", Union: true, Cases: [][]Field{{{Sub: SubD}}, {{Type: pair}}}}
 	m := NewModule()
-	m.Types = append(m.Types, pair, un)
+	m.Types = append(m.Types, pair, slice, un)
 	m.Assembly = append(m.Assembly, AssemblyFile{
 		PackagePath: "runtime",
 		Path:        "runtime/atomic_arm64.s",
@@ -54,6 +55,22 @@ func richModule() *Module {
 	v.Param("k", ClsW)
 	v.Entry().Ret(v.Double(1.5))
 
+	// tail([]byte) []byte exercises grouped by-value parameters and results.
+	tail := m.NewFunc("tail", ClsP)
+	tail.RetAgg = slice
+	tail.RetValues = true
+	sliceParts := tail.ParamGroup("value", slice, ClsP, ClsL, ClsL)
+	tail.Aggregate(slice, sliceParts...)
+	tail.Entry().RetAggregate(sliceParts...)
+
+	caller := m.NewFunc("calltail", ClsP)
+	callParts := caller.Entry().CallAggregate(slice, []Cls{ClsP, ClsL, ClsL}, caller.Sym("tail", 0), caller.ConstInt(ClsP, 0), caller.Long(2), caller.Long(2))
+	call := &caller.Entry().Instrs[0]
+	call.ArgGroups = []ValueGroup{{Index: 0, Count: 3, Type: slice}}
+	caller.RetAgg = slice
+	caller.RetValues = true
+	caller.Entry().RetAggregate(callParts...)
+
 	// sw(k): a multiway switch, to exercise the JmpSwitch terminator round-trip.
 	sw := m.NewFunc("sw", ClsW).Export()
 	k := sw.Param("k", ClsW)
@@ -91,6 +108,30 @@ func TestBinaryRoundTrip(t *testing.T) {
 	// The decoded aggregate reference is resolved, not nil.
 	require.NotNil(t, m2.Funcs[0].Params[0].Agg)
 	assert.Equal(t, "pair", m2.Funcs[0].Params[0].Agg.Name)
+
+	var tail *Func
+	var caller *Func
+	for _, function := range m2.Funcs {
+		switch function.Name {
+		case "tail":
+			tail = function
+		case "calltail":
+			caller = function
+		}
+	}
+	require.NotNil(t, tail)
+	assert.True(t, tail.RetValues)
+	require.Len(t, tail.ParamGroups, 1)
+	assert.Equal(t, ValueGroup{Index: 0, Count: 3, Type: m2.Types[1]}, tail.ParamGroups[0])
+	require.Len(t, tail.AggregateValues, 1)
+	assert.Len(t, tail.AggregateValues[0].Parts, 3)
+
+	require.NotNil(t, caller)
+	require.Len(t, caller.Entry().Instrs, 1)
+	call := &caller.Entry().Instrs[0]
+	assert.True(t, call.RetValues)
+	require.Len(t, call.ArgGroups, 1)
+	assert.Equal(t, ValueGroup{Index: 0, Count: 3, Type: m2.Types[1]}, call.ArgGroups[0])
 }
 
 func TestBinaryDeterministic(t *testing.T) {
@@ -142,7 +183,7 @@ func TestBinaryRejectsTruncated(t *testing.T) {
 // either restore the burned slots or bump binVersion and mean it.
 func TestWireNumbersSurviveTheBurnedSlots(t *testing.T) {
 	assert.Equal(t, RefKind(7), RefReg, "RefReg sits after the two burned RefKinds")
-	assert.Equal(t, Op(57), OPar, "OPar sits after the burned OArgEnv")
+	assert.Equal(t, Op(58), OPar, "OPar sits after OHeapAlloc and the burned OArgEnv")
 
 	// The burned op's slot must not have acquired a live op: the array is indexed
 	// by Op, so a new op landing there would answer to the dead one's number.

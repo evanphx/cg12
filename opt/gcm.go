@@ -171,6 +171,11 @@ func (s *gcmScheduler) collectUses() {
 		if b.Jmp.Arg.Kind == ir.RefTemp {
 			addFixed(b.Jmp.Arg.ID, b)
 		}
+		for _, argument := range b.Jmp.Args {
+			if argument.Kind == ir.RefTemp {
+				addFixed(argument.ID, b)
+			}
+		}
 	}
 	for _, uid := range s.movIDs {
 		for _, a := range s.movInstr[uid].Args {

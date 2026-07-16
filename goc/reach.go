@@ -9,9 +9,11 @@ import (
 )
 
 type functionDecl struct {
-	decl *ast.FuncDecl
-	info *types.Info
-	pkg  *types.Package
+	decl          *ast.FuncDecl
+	info          *types.Info
+	pkg           *types.Package
+	typeArguments []types.Type
+	symbol        string
 }
 
 type packageInit struct {
@@ -86,12 +88,18 @@ func moduleInitDeclarations(rootFiles []*ast.File, rootInfo *types.Info, rootPkg
 // reachableFunctions follows statically named function calls across source
 // units. Calls through interfaces are recorded by their interface method and
 // resolved later by interface lowering.
-func reachableFunctions(roots []*ast.FuncDecl, rootInfo *types.Info, rootPkg *types.Package, units map[string]*sourceUnit, runtimeAllocation bool, initializers []functionDecl, linkNames map[*types.Func]string, assemblyReferences map[string]bool) []functionDecl {
+func reachableFunctions(roots []*ast.FuncDecl, rootFiles []*ast.File, rootInfo *types.Info, rootPkg *types.Package, units map[string]*sourceUnit, runtimeAllocation bool, initializers []functionDecl, linkNames map[*types.Func]string, assemblyReferences map[string]bool) []functionDecl {
 	declarations := make(map[*types.Func]functionDecl)
 	linkedDeclarations := make(map[string]functionDecl)
 	methods := make(map[string][]functionDecl)
 	runtimeFunctions := make(map[string]functionDecl)
 	var genericRuntimeMethods []functionDecl
+	for _, declaration := range roots {
+		object, ok := rootInfo.Defs[declaration.Name].(*types.Func)
+		if ok {
+			declarations[object] = functionDecl{decl: declaration, info: rootInfo, pkg: rootPkg}
+		}
+	}
 	for _, unit := range units {
 		for _, file := range unit.files {
 			for _, declaration := range file.Decls {
@@ -168,31 +176,48 @@ func reachableFunctions(roots []*ast.FuncDecl, rootInfo *types.Info, rootPkg *ty
 			}
 		}
 	}
-	if runtimeAllocation {
-		for _, unit := range units {
-			for _, file := range unit.files {
-				for _, declaration := range file.Decls {
-					global, ok := declaration.(*ast.GenDecl)
-					if !ok || global.Tok != token.VAR {
-						continue
-					}
-					for _, specification := range global.Specs {
-						values := specification.(*ast.ValueSpec).Values
-						for _, value := range values {
-							ast.Inspect(value, func(node ast.Node) bool {
-								identifier, ok := node.(*ast.Ident)
-								if !ok {
-									return true
-								}
-								if function, ok := unit.info.Uses[identifier].(*types.Func); ok {
-									enqueueObject(function)
-								}
+	scanGlobalFunctionUses := func(files []*ast.File, info *types.Info) {
+		for _, file := range files {
+			for _, declaration := range file.Decls {
+				global, ok := declaration.(*ast.GenDecl)
+				if !ok || global.Tok != token.VAR {
+					continue
+				}
+				for _, specification := range global.Specs {
+					values := specification.(*ast.ValueSpec).Values
+					for _, value := range values {
+						ast.Inspect(value, func(node ast.Node) bool {
+							identifier, ok := node.(*ast.Ident)
+							if !ok {
 								return true
-							})
-						}
+							}
+							if function, ok := info.Uses[identifier].(*types.Func); ok {
+								if instance, instantiated := info.Instances[identifier]; instantiated {
+									origin := function.Origin()
+									if declaration, exists := declarations[origin]; exists {
+										arguments := make([]types.Type, instance.TypeArgs.Len())
+										for index := range arguments {
+											arguments[index] = instance.TypeArgs.At(index)
+										}
+										declaration.typeArguments = arguments
+										declaration.symbol = genericInstanceSymbol(origin, arguments)
+										queue = append(queue, declaration)
+										return true
+									}
+								}
+								enqueueObject(function)
+							}
+							return true
+						})
 					}
 				}
 			}
+		}
+	}
+	scanGlobalFunctionUses(rootFiles, rootInfo)
+	if runtimeAllocation {
+		for _, unit := range units {
+			scanGlobalFunctionUses(unit.files, unit.info)
 		}
 	}
 	for _, root := range roots {
@@ -212,8 +237,9 @@ func reachableFunctions(roots []*ast.FuncDecl, rootInfo *types.Info, rootPkg *ty
 			"args", "c128equal", "c64equal", "check", "concatstring2", "f32equal", "f64equal", "growslice",
 			"interequal", "interhash", "main", "makeslice", "mallocgc", "memequal8",
 			"memequal16", "memequal32", "memequal64", "memequal128", "mstart0",
-			"newobject", "newstack", "nilinterequal", "nilinterhash", "osinit",
-			"persistentalloc", "schedinit", "strequal",
+			"newobject", "newstack", "nilinterequal", "nilinterhash", "osinit", "persistentalloc",
+			"printbool", "printfloat32", "printfloat64", "printhex", "printint", "printnl",
+			"printstring", "printuint", "schedinit", "strequal",
 		} {
 			if declaration, exists := runtimeFunctions[name]; exists {
 				queue = append(queue, declaration)
@@ -225,15 +251,19 @@ func reachableFunctions(roots []*ast.FuncDecl, rootInfo *types.Info, rootPkg *ty
 			}
 		}
 	}
-	seen := make(map[*ast.FuncDecl]bool)
+	seen := make(map[string]bool)
 	var reachable []functionDecl
 	for len(queue) > 0 {
 		current := queue[0]
 		queue = queue[1:]
-		if seen[current.decl] {
+		key := fmt.Sprintf("%p", current.decl)
+		if current.symbol != "" {
+			key = current.symbol
+		}
+		if seen[key] {
 			continue
 		}
-		seen[current.decl] = true
+		seen[key] = true
 		reachable = append(reachable, current)
 
 		ast.Inspect(current.decl.Body, func(node ast.Node) bool {
@@ -318,6 +348,24 @@ func reachableFunctions(roots []*ast.FuncDecl, rootInfo *types.Info, rootPkg *ty
 			object, ok := current.info.Uses[identifier].(*types.Func)
 			if !ok {
 				return true
+			}
+			if instance, ok := current.info.Instances[identifier]; ok {
+				origin := object.Origin()
+				signature := origin.Type().(*types.Signature)
+				if signature.TypeParams().Len() > 0 {
+					declaration, exists := declarations[origin]
+					if exists {
+						arguments := make([]types.Type, instance.TypeArgs.Len())
+						substitutions := functionTypeSubstitutions(current)
+						for index := range arguments {
+							arguments[index] = substituteType(instance.TypeArgs.At(index), substitutions)
+						}
+						declaration.typeArguments = arguments
+						declaration.symbol = genericInstanceSymbol(origin, arguments)
+						queue = append(queue, declaration)
+						return true
+					}
+				}
 			}
 			enqueueObject(object)
 			return true

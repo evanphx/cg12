@@ -42,6 +42,26 @@ The second ten-package progression is:
 9. `unicode/utf16`
 10. `path`
 
+The third ten-package progression is:
+
+1. `container/list`
+2. `container/ring`
+3. `sort`
+4. `container/heap`
+5. `maps`
+6. `bufio`
+7. `encoding/ascii85`
+8. `encoding/base32`
+9. `encoding/base64`
+10. `encoding/csv`
+
+All ten third-progression packages have linked ARM64 execution tests. These
+tests compile the copied Go sources and their dependencies through cg12, link
+them with the cg12-compiled runtime, and execute representative container,
+sorting, heap, map, buffered I/O, encoding, and CSV operations. The buffered
+I/O and CSV cases also read through `io.EOF`, exercising non-nil interface
+equality and multi-result interface returns across ABIInternal calls.
+
 The complete Go 1.26.1 `runtime` source tree is also mirrored here unchanged.
 The cg12 loader build-selects and type-checks it from this repository. Normal
 ARM64 executables compile the runtime through cg12, initialize the scheduler,

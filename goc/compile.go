@@ -44,6 +44,7 @@ func compile(name string, src []byte, executable bool) (*ir.Module, error) {
 		Uses:       make(map[*ast.Ident]types.Object),
 		Selections: make(map[*ast.SelectorExpr]*types.Selection),
 		Implicits:  make(map[ast.Node]types.Object),
+		Instances:  make(map[*ast.Ident]types.Instance),
 	}
 	loader := newSourceLoader(fset)
 	loader.forcePureGo = !executable
@@ -78,6 +79,7 @@ func compile(name string, src []byte, executable bool) (*ir.Module, error) {
 		mod.Data = append(mod.Data, &ir.Data{Name: ".goc.runtime.datastart", Align: 8, Items: []ir.DataItem{{Sub: ir.SubUB, Ints: []int64{0}}}})
 	}
 	typeTags := make(map[string]string)
+	goABITypes := make(map[string]*ir.AggType)
 	linkNames := make(map[*types.Func]string)
 	globalLinkNames := make(map[types.Object]string)
 	interfaceMethods := make(map[*types.Func]bool)
@@ -108,7 +110,7 @@ func compile(name string, src []byte, executable bool) (*ir.Module, error) {
 			return nil, err
 		}
 	}
-	functions := reachableFunctions(roots, info, pkg, loader.units, compileRuntime, moduleInitFunctions, linkNames, assemblyReferences)
+	functions := reachableFunctions(roots, []*ast.File{file}, info, pkg, loader.units, compileRuntime, moduleInitFunctions, linkNames, assemblyReferences)
 	globalPackages := map[string]bool{pkg.Path(): true}
 	if compileRuntime {
 		for path := range loader.units {
@@ -150,7 +152,24 @@ func compile(name string, src []byte, executable bool) (*ir.Module, error) {
 			})
 		}
 	}
-	g := &gen{fset: fset, file: file, info: info, pkg: pkg, mod: mod, globals: map[types.Object]string{}, globalLinkNames: globalLinkNames, emitRuntimeTables: emitRuntimeTables, runtimeAllocation: compileRuntime, typeTags: typeTags, linkNames: linkNames, initSymbols: initSymbols, functionDecls: functionDecls, noWriteBarrierFunctions: noWriteBarriers, interfaceMethods: interfaceMethods}
+	g := &gen{
+		fset:                    fset,
+		file:                    file,
+		info:                    info,
+		pkg:                     pkg,
+		mod:                     mod,
+		globals:                 map[types.Object]string{},
+		globalLinkNames:         globalLinkNames,
+		emitRuntimeTables:       emitRuntimeTables,
+		runtimeAllocation:       compileRuntime,
+		typeTags:                typeTags,
+		goABITypes:              goABITypes,
+		linkNames:               linkNames,
+		initSymbols:             initSymbols,
+		functionDecls:           functionDecls,
+		noWriteBarrierFunctions: noWriteBarriers,
+		interfaceMethods:        interfaceMethods,
+	}
 	g.mod.File(name)
 	for _, d := range file.Decls {
 		if gd, ok := d.(*ast.GenDecl); ok && gd.Tok == token.VAR {
@@ -164,7 +183,23 @@ func compile(name string, src []byte, executable bool) (*ir.Module, error) {
 		if !globalPackages[path] {
 			continue
 		}
-		generator := &gen{fset: fset, info: unit.info, pkg: unit.pkg, mod: mod, globals: globals, globalLinkNames: globalLinkNames, emitRuntimeTables: emitRuntimeTables, runtimeAllocation: compileRuntime, typeTags: typeTags, linkNames: linkNames, initSymbols: initSymbols, functionDecls: functionDecls, noWriteBarrierFunctions: noWriteBarriers, interfaceMethods: interfaceMethods}
+		generator := &gen{
+			fset:                    fset,
+			info:                    unit.info,
+			pkg:                     unit.pkg,
+			mod:                     mod,
+			globals:                 globals,
+			globalLinkNames:         globalLinkNames,
+			emitRuntimeTables:       emitRuntimeTables,
+			runtimeAllocation:       compileRuntime,
+			typeTags:                typeTags,
+			goABITypes:              goABITypes,
+			linkNames:               linkNames,
+			initSymbols:             initSymbols,
+			functionDecls:           functionDecls,
+			noWriteBarrierFunctions: noWriteBarriers,
+			interfaceMethods:        interfaceMethods,
+		}
 		for _, sourceFile := range unit.files {
 			for _, declaration := range sourceFile.Decls {
 				global, ok := declaration.(*ast.GenDecl)
@@ -215,6 +250,7 @@ func compile(name string, src []byte, executable bool) (*ir.Module, error) {
 				emitRuntimeTables:        emitRuntimeTables,
 				runtimeAllocation:        compileRuntime,
 				typeTags:                 typeTags,
+				goABITypes:               goABITypes,
 				linkNames:                linkNames,
 				initSymbols:              initSymbols,
 				functionDecls:            functionDecls,
@@ -225,13 +261,15 @@ func compile(name string, src []byte, executable bool) (*ir.Module, error) {
 				initializingGlobals:      make(map[types.Object]bool),
 			}
 		}
+		generator.typeArguments = function.typeArguments
+		generator.functionName = function.symbol
 		generator.funcDecl(function.decl)
 		if generator.err != nil {
 			return nil, generator.err
 		}
 	}
 	addInterfaceMethodWrappers(g, functions)
-	if loader.units["crypto/internal/fips140"] != nil {
+	if loader.units["crypto/internal/fips140"] != nil && !compileRuntime {
 		addFIPSRuntimeStubs(mod)
 	}
 	if loader.units["crypto/sha1"] != nil || loader.units["crypto/md5"] != nil {
@@ -396,8 +434,22 @@ func addInterfaceMethodWrappers(g *gen, reachable []functionDecl) {
 			}
 			function = g.mod.NewFunc(name, resultClass)
 		}
-		receiver := function.Param("receiver", ir.ClsP)
-		function.Temp(receiver).Agg = g.goABIAggregate(signature.Recv().Type())
+		wrapper := &gen{
+			fn:                function,
+			cur:               function.Entry(),
+			mod:               g.mod,
+			typeTags:          g.typeTags,
+			goABITypes:        g.goABITypes,
+			linkNames:         g.linkNames,
+			initSymbols:       g.initSymbols,
+			runtimeAllocation: g.runtimeAllocation,
+		}
+		if signature.Results().Len() > 0 {
+			resultType := signature.Results().At(0).Type()
+			function.RetAgg = wrapper.goABIAggregate(resultType)
+			function.RetValues = wrapper.runtimeAllocation && isSliceType(resultType)
+		}
+		receiver := wrapper.functionParameter("receiver", signature.Recv().Type(), ir.ClsP)
 		parameters := make([]ir.Ref, signature.Params().Len())
 		for index := range parameters {
 			parameterType := signature.Params().At(index).Type()
@@ -406,11 +458,10 @@ func addInterfaceMethodWrappers(g *gen, reachable []functionDecl) {
 				g.err = fmt.Errorf("goc: interface method %s has unsupported parameter %s", name, parameterType)
 				return
 			}
-			parameters[index] = function.Param(signature.Params().At(index).Name(), parameterClass)
-			function.Temp(parameters[index]).Agg = g.goABIAggregate(parameterType)
+			parameters[index] = wrapper.functionParameter(signature.Params().At(index).Name(), parameterType, parameterClass)
 		}
 		var resultPointers []ir.Ref
-		if signature.Results().Len() > 0 && isInlineAggregate(signature.Results().At(0).Type()) {
+		if signature.Results().Len() > 0 && isInlineAggregate(signature.Results().At(0).Type()) && !(wrapper.runtimeAllocation && isSliceType(signature.Results().At(0).Type())) {
 			resultPointers = append(resultPointers, function.Param("result0", ir.ClsP))
 		}
 		for index := 1; index < signature.Results().Len(); index++ {
@@ -418,20 +469,11 @@ func addInterfaceMethodWrappers(g *gen, reachable []functionDecl) {
 		}
 
 		candidates := interfaceMethodCandidates(g, reachable, method, interfaceType)
-		wrapper := &gen{
-			fn:                function,
-			cur:               function.Entry(),
-			mod:               g.mod,
-			typeTags:          g.typeTags,
-			linkNames:         g.linkNames,
-			initSymbols:       g.initSymbols,
-			runtimeAllocation: g.runtimeAllocation,
-		}
 		dynamicTag := wrapper.cur.Load(ir.ClsP, receiver)
 		for index, candidate := range candidates {
-			candidateSignature := candidate.Type().(*types.Signature)
+			candidateSignature := candidate.function.Type().(*types.Signature)
 			receiverType := candidateSignature.Recv().Type()
-			tagName := g.typeTags[goTypeKey(receiverType)]
+			tagName := g.typeTags[goTypeKey(candidate.dynamicType)]
 			if tagName == "" {
 				continue
 			}
@@ -442,17 +484,17 @@ func addInterfaceMethodWrappers(g *gen, reachable []functionDecl) {
 
 			wrapper.cur = invoke
 			arguments := make([]ir.Ref, 0, 1+len(parameters)+len(resultPointers))
-			arguments = append(arguments, wrapper.interfaceMethodReceiver(receiver, candidate))
+			arguments = append(arguments, wrapper.interfaceMethodReceiver(receiver, candidate.function))
 			arguments = append(arguments, parameters...)
 			arguments = append(arguments, resultPointers...)
-			callee := function.Sym(g.functionSymbol(candidate), 0)
+			callee := function.Sym(g.functionSymbol(candidate.function), 0)
 			if signature.Results().Len() == 0 {
 				wrapper.callVoidWithSignature(callee, arguments, candidateSignature, receiverType)
 				wrapper.cur.RetVoid()
 			} else {
 				resultClass, _ := scalar(signature.Results().At(0).Type())
 				result := wrapper.callWithSignature(resultClass, callee, arguments, candidateSignature, receiverType)
-				wrapper.cur.Ret(result)
+				wrapper.returnValue(result, signature.Results().At(0).Type())
 			}
 			wrapper.cur = next
 		}
@@ -461,23 +503,49 @@ func addInterfaceMethodWrappers(g *gen, reachable []functionDecl) {
 	}
 }
 
-func interfaceMethodCandidates(g *gen, reachable []functionDecl, method *types.Func, interfaceType *types.Interface) []*types.Func {
-	seen := make(map[*types.Func]bool)
-	var candidates []*types.Func
+type interfaceMethodCandidate struct {
+	function    *types.Func
+	dynamicType types.Type
+}
+
+func interfaceMethodCandidates(g *gen, reachable []functionDecl, method *types.Func, interfaceType *types.Interface) []interfaceMethodCandidate {
+	seen := make(map[string]bool)
+	var candidates []interfaceMethodCandidate
+	add := func(function *types.Func, dynamicType types.Type) {
+		key := g.functionSymbol(function) + "|" + goTypeKey(dynamicType)
+		if seen[key] {
+			return
+		}
+		seen[key] = true
+		candidates = append(candidates, interfaceMethodCandidate{
+			function:    function,
+			dynamicType: dynamicType,
+		})
+	}
 	for _, declaration := range reachable {
 		candidate, ok := declaration.info.Defs[declaration.decl.Name].(*types.Func)
-		if !ok || seen[candidate] || candidate.Name() != method.Name() {
+		if !ok || candidate.Name() != method.Name() {
 			continue
 		}
 		signature, ok := candidate.Type().(*types.Signature)
-		if !ok || signature.Recv() == nil || !types.Implements(signature.Recv().Type(), interfaceType) {
+		if !ok || signature.Recv() == nil {
 			continue
 		}
-		seen[candidate] = true
-		candidates = append(candidates, candidate)
+		receiverType := signature.Recv().Type()
+		if types.Implements(receiverType, interfaceType) {
+			add(candidate, receiverType)
+		}
+		if _, pointerReceiver := receiverType.(*types.Pointer); !pointerReceiver {
+			pointerType := types.NewPointer(receiverType)
+			if types.Implements(pointerType, interfaceType) {
+				add(candidate, pointerType)
+			}
+		}
 	}
 	sort.Slice(candidates, func(i, j int) bool {
-		return g.functionSymbol(candidates[i]) < g.functionSymbol(candidates[j])
+		left := g.functionSymbol(candidates[i].function) + "|" + goTypeKey(candidates[i].dynamicType)
+		right := g.functionSymbol(candidates[j].function) + "|" + goTypeKey(candidates[j].dynamicType)
+		return left < right
 	})
 	return candidates
 }
@@ -515,7 +583,7 @@ func addRuntimeInitTask(mod *ir.Module, declarations []functionDecl, initSymbols
 	)
 
 	for _, data := range mod.Data {
-		if data.Name != "runtime.runtime_inittasks.descriptor" {
+		if data.Name != "runtime.runtime_inittasks" && data.Name != "runtime.runtime_inittasks.descriptor" {
 			continue
 		}
 		data.Items = []ir.DataItem{
@@ -678,6 +746,7 @@ type gen struct {
 	emitRuntimeTables        bool
 	runtimeAllocation        bool
 	typeTags                 map[string]string
+	goABITypes               map[string]*ir.AggType
 	linkNames                map[*types.Func]string
 	initSymbols              map[*types.Func]string
 	stackAddresses           map[uint32]bool
@@ -686,6 +755,9 @@ type gen struct {
 	dynamicInitializers      map[types.Object]globalInitializer
 	dynamicInitializerGuards map[types.Object]string
 	initializingGlobals      map[types.Object]bool
+	typeArguments            []types.Type
+	functionName             string
+	currentFunction          *types.Func
 }
 
 type globalInitializer struct {
@@ -1092,8 +1164,12 @@ func (g *gen) globalDecl(gd *ast.GenDecl) {
 			if slice, ok := obj.Type().Underlying().(*types.Slice); ok {
 				g.globalSlice(id, obj, slice, vs, i)
 				name := g.pkg.Path() + "." + id.Name
-				g.markDataPointerCell(name)
-				g.markDataPointerWords(name+".descriptor", obj.Type())
+				if g.runtimeAllocation {
+					g.markDataPointerWords(name, obj.Type())
+				} else {
+					g.markDataPointerCell(name)
+					g.markDataPointerWords(name+".descriptor", obj.Type())
+				}
 				continue
 			}
 			cls, ok := scalar(obj.Type())
@@ -1227,13 +1303,27 @@ func (g *gen) globalString(id *ast.Ident, object types.Object, spec *ast.ValueSp
 
 func (g *gen) globalSlice(id *ast.Ident, object types.Object, slice *types.Slice, spec *ast.ValueSpec, valueIndex int) {
 	name := g.pkg.Path() + "." + id.Name
-	emitZero := func() {
-		descriptorName := name + ".descriptor"
-		g.mod.Data = append(g.mod.Data,
-			&ir.Data{Name: descriptorName, Align: 8, Items: []ir.DataItem{{Sub: ir.SubL, Ints: []int64{0, 0, 0}}}},
-			&ir.Data{Name: name, Align: 8, Items: []ir.DataItem{{Sub: ir.SubL, Sym: descriptorName}}},
-		)
+	emitHeader := func(items []ir.DataItem) {
+		headerName := name + ".descriptor"
+		if g.runtimeAllocation {
+			headerName = name
+		}
+		g.mod.Data = append(g.mod.Data, &ir.Data{
+			Name:  headerName,
+			Align: 8,
+			Items: items,
+		})
+		if !g.runtimeAllocation {
+			g.mod.Data = append(g.mod.Data, &ir.Data{
+				Name:  name,
+				Align: 8,
+				Items: []ir.DataItem{{Sub: ir.SubL, Sym: headerName}},
+			})
+		}
 		g.globals[object] = name
+	}
+	emitZero := func() {
+		emitHeader([]ir.DataItem{{Sub: ir.SubL, Ints: []int64{0, 0, 0}}})
 	}
 	if valueIndex >= len(spec.Values) {
 		emitZero()
@@ -1246,15 +1336,11 @@ func (g *gen) globalSlice(id *ast.Ident, object types.Object, slice *types.Slice
 		if byteElements && basic.Kind() == types.Uint8 && value != nil && value.Kind() == constant.String {
 			contents := constant.StringVal(value)
 			backingName := name + ".backing"
-			g.mod.Data = append(g.mod.Data,
-				&ir.Data{Name: backingName, Align: 1, Items: []ir.DataItem{{Sub: ir.SubUB, Str: contents}}},
-				&ir.Data{Name: name + ".descriptor", Align: 8, Items: []ir.DataItem{
-					{Sub: ir.SubL, Sym: backingName},
-					{Sub: ir.SubL, Ints: []int64{int64(len(contents)), int64(len(contents))}},
-				}},
-				&ir.Data{Name: name, Align: 8, Items: []ir.DataItem{{Sub: ir.SubL, Sym: name + ".descriptor"}}},
-			)
-			g.globals[object] = name
+			g.mod.Data = append(g.mod.Data, &ir.Data{Name: backingName, Align: 1, Items: []ir.DataItem{{Sub: ir.SubUB, Str: contents}}})
+			emitHeader([]ir.DataItem{
+				{Sub: ir.SubL, Sym: backingName},
+				{Sub: ir.SubL, Ints: []int64{int64(len(contents)), int64(len(contents))}},
+			})
 			return
 		}
 	}
@@ -1290,15 +1376,11 @@ func (g *gen) globalSlice(id *ast.Ident, object types.Object, slice *types.Slice
 				})
 				items = append(items, ir.DataItem{Sub: ir.SubL, Sym: elementName})
 			}
-			g.mod.Data = append(g.mod.Data,
-				&ir.Data{Name: backingName, Align: 8, Items: items, PointerWords: pointerWordIndices(types.NewArray(slice.Elem(), int64(len(literal.Elts))))},
-				&ir.Data{Name: name + ".descriptor", Align: 8, Items: []ir.DataItem{
-					{Sub: ir.SubL, Sym: backingName},
-					{Sub: ir.SubL, Ints: []int64{int64(len(literal.Elts)), int64(len(literal.Elts))}},
-				}},
-				&ir.Data{Name: name, Align: 8, Items: []ir.DataItem{{Sub: ir.SubL, Sym: name + ".descriptor"}}},
-			)
-			g.globals[object] = name
+			g.mod.Data = append(g.mod.Data, &ir.Data{Name: backingName, Align: 8, Items: items, PointerWords: pointerWordIndices(types.NewArray(slice.Elem(), int64(len(literal.Elts))))})
+			emitHeader([]ir.DataItem{
+				{Sub: ir.SubL, Sym: backingName},
+				{Sub: ir.SubL, Ints: []int64{int64(len(literal.Elts)), int64(len(literal.Elts))}},
+			})
 			return
 		}
 	}
@@ -1350,15 +1432,11 @@ func (g *gen) globalSlice(id *ast.Ident, object types.Object, slice *types.Slice
 		items = []ir.DataItem{{Zero: int(typeSize(slice.Elem())) * len(literal.Elts)}}
 		backingPointerWords = pointerWordIndices(types.NewArray(slice.Elem(), int64(len(literal.Elts))))
 	}
-	g.mod.Data = append(g.mod.Data,
-		&ir.Data{Name: backingName, Align: 8, Items: items, PointerWords: backingPointerWords},
-		&ir.Data{Name: name + ".descriptor", Align: 8, Items: []ir.DataItem{
-			{Sub: ir.SubL, Sym: backingName},
-			{Sub: ir.SubL, Ints: []int64{int64(len(literal.Elts)), int64(len(literal.Elts))}},
-		}},
-		&ir.Data{Name: name, Align: 8, Items: []ir.DataItem{{Sub: ir.SubL, Sym: name + ".descriptor"}}},
-	)
-	g.globals[object] = name
+	g.mod.Data = append(g.mod.Data, &ir.Data{Name: backingName, Align: 8, Items: items, PointerWords: backingPointerWords})
+	emitHeader([]ir.DataItem{
+		{Sub: ir.SubL, Sym: backingName},
+		{Sub: ir.SubL, Ints: []int64{int64(len(literal.Elts)), int64(len(literal.Elts))}},
+	})
 }
 
 func (g *gen) staticStructItems(name string, structure *types.Struct, literal *ast.CompositeLit) []ir.DataItem {
@@ -1714,6 +1792,10 @@ func (g *gen) goABIAggregate(valueType types.Type) *ir.AggType {
 		// instantiated caller, not to the generic function's ABI.
 		return nil
 	}
+	cacheKey := goABIAggregateKey(valueType)
+	if aggregate := g.goABITypes[cacheKey]; aggregate != nil {
+		return aggregate
+	}
 	var fields []ir.Field
 	switch value := valueType.Underlying().(type) {
 	case *types.Array:
@@ -1761,7 +1843,25 @@ func (g *gen) goABIAggregate(valueType types.Type) *ir.AggType {
 		Fields: fields,
 	}
 	g.mod.AddType(aggregate)
+	if g.goABITypes == nil {
+		g.goABITypes = make(map[string]*ir.AggType)
+	}
+	g.goABITypes[cacheKey] = aggregate
 	return aggregate
+}
+
+func goABIAggregateKey(valueType types.Type) string {
+	switch value := valueType.Underlying().(type) {
+	case *types.Slice:
+		return "descriptor:slice"
+	case *types.Interface:
+		return "descriptor:interface"
+	case *types.Basic:
+		if value.Kind() == types.String || value.Kind() == types.UntypedString {
+			return "descriptor:string"
+		}
+	}
+	return "aggregate:" + goTypeKey(valueType)
 }
 
 func (g *gen) goABIField(valueType types.Type) (ir.Field, bool) {
@@ -1906,17 +2006,71 @@ func (g *gen) adaptSharedGenericArguments(arguments []ir.Ref, concrete, compiled
 
 func (g *gen) callWithSignature(resultClass ir.Cls, callee ir.Ref, arguments []ir.Ref, signature *types.Signature, receiverType types.Type) ir.Ref {
 	arguments = g.normalizeCallInterfaces(arguments, signature, receiverType)
-	result := g.cur.Call(resultClass, callee, arguments...)
+	arguments, argumentGroups, aggregateArguments := g.flattenCallArguments(arguments, signature, receiverType)
+
+	var result ir.Ref
+	if signature.Results().Len() > 0 && g.runtimeAllocation && isSliceType(signature.Results().At(0).Type()) {
+		aggregate := g.goABIAggregate(signature.Results().At(0).Type())
+		parts := g.cur.CallAggregate(aggregate, []ir.Cls{ir.ClsP, ir.ClsL, ir.ClsL}, callee, arguments...)
+		result = g.fn.Aggregate(aggregate, parts...)
+	} else {
+		result = g.cur.Call(resultClass, callee, arguments...)
+	}
 	instruction := &g.cur.Instrs[len(g.cur.Instrs)-1]
-	g.annotateABICall(instruction, signature, receiverType)
+	instruction.ArgGroups = argumentGroups
+	instruction.AggArgs = aggregateArguments
+	if signature.Results().Len() > 0 && instruction.RetAgg == nil {
+		instruction.RetAgg = g.goABIAggregate(signature.Results().At(0).Type())
+	}
 	return result
 }
 
 func (g *gen) callVoidWithSignature(callee ir.Ref, arguments []ir.Ref, signature *types.Signature, receiverType types.Type) {
 	arguments = g.normalizeCallInterfaces(arguments, signature, receiverType)
+	arguments, argumentGroups, aggregateArguments := g.flattenCallArguments(arguments, signature, receiverType)
 	g.cur.CallVoid(callee, arguments...)
 	instruction := &g.cur.Instrs[len(g.cur.Instrs)-1]
-	g.annotateABICall(instruction, signature, receiverType)
+	instruction.ArgGroups = argumentGroups
+	instruction.AggArgs = aggregateArguments
+}
+
+func (g *gen) flattenCallArguments(arguments []ir.Ref, signature *types.Signature, receiverType types.Type) ([]ir.Ref, []ir.ValueGroup, []*ir.AggType) {
+	flat := make([]ir.Ref, 0, len(arguments)+4)
+	groups := make([]ir.ValueGroup, 0, 2)
+	aggregates := make([]*ir.AggType, 0, len(arguments)+4)
+	argumentIndex := 0
+
+	appendArgument := func(value ir.Ref, valueType types.Type) {
+		if g.runtimeAllocation && isSliceType(valueType) {
+			data, length, capacity := g.sliceParts(value)
+			start := len(flat)
+			flat = append(flat, data, length, capacity)
+			aggregates = append(aggregates, nil, nil, nil)
+			groups = append(groups, ir.ValueGroup{
+				Index: start,
+				Count: 3,
+				Type:  g.goABIAggregate(valueType),
+			})
+			return
+		}
+		flat = append(flat, value)
+		aggregates = append(aggregates, g.goABIAggregate(valueType))
+	}
+
+	if receiverType != nil && argumentIndex < len(arguments) {
+		appendArgument(arguments[argumentIndex], receiverType)
+		argumentIndex++
+	}
+	for parameterIndex := 0; parameterIndex < signature.Params().Len() && argumentIndex < len(arguments); parameterIndex++ {
+		appendArgument(arguments[argumentIndex], signature.Params().At(parameterIndex).Type())
+		argumentIndex++
+	}
+	for argumentIndex < len(arguments) {
+		flat = append(flat, arguments[argumentIndex])
+		aggregates = append(aggregates, nil)
+		argumentIndex++
+	}
+	return flat, groups, aggregates
 }
 func signed(t types.Type) bool {
 	if parameter, ok := t.(*types.TypeParam); ok {
@@ -1964,6 +2118,14 @@ func (g *gen) alloc(t types.Type) ir.Ref {
 	return g.localAlloc(4, 4)
 }
 func (g *gen) load(addr ir.Ref, t types.Type) ir.Ref {
+	if g.runtimeAllocation {
+		if _, ok := t.Underlying().(*types.Slice); ok {
+			data := g.cur.Load(ir.ClsP, addr)
+			length := g.cur.Load(ir.ClsL, g.offset(addr, 8))
+			capacity := g.cur.Load(ir.ClsL, g.offset(addr, 16))
+			return g.sliceValue(data, length, capacity)
+		}
+	}
 	c, _ := scalar(t)
 	if sub, ok := subOf(t); ok {
 		return g.cur.LoadSub(c, sub, addr)
@@ -1971,6 +2133,15 @@ func (g *gen) load(addr ir.Ref, t types.Type) ir.Ref {
 	return g.cur.Load(c, addr)
 }
 func (g *gen) store(v, addr ir.Ref, t types.Type) {
+	if g.runtimeAllocation {
+		if slice, ok := t.Underlying().(*types.Slice); ok {
+			data, length, capacity := g.sliceParts(v)
+			g.store(data, addr, types.NewPointer(slice.Elem()))
+			g.store(length, g.offset(addr, 8), types.Typ[types.Int])
+			g.store(capacity, g.offset(addr, 16), types.Typ[types.Int])
+			return
+		}
+	}
 	if sub, ok := subOf(t); ok {
 		g.cur.StoreSub(sub, v, addr)
 		return
@@ -2007,6 +2178,12 @@ func (g *gen) assignLocal(value, slot ir.Ref, valueType types.Type) {
 // interface is represented internally by a nil descriptor pointer, so give it
 // a concrete zero header before copying its two words.
 func (g *gen) storeInlineValue(value, address ir.Ref, valueType types.Type) {
+	if g.runtimeAllocation {
+		if _, ok := valueType.Underlying().(*types.Slice); ok {
+			g.store(value, address, valueType)
+			return
+		}
+	}
 	if isInterfaceValue(valueType) {
 		value = g.materializeNilInterface(value)
 	}
@@ -2079,9 +2256,12 @@ func (g *gen) assignmentValue(expression ast.Expr, targetType types.Type) ir.Ref
 	if identifier, ok := expression.(*ast.Ident); ok && identifier.Name == "nil" {
 		return g.fn.ConstInt(ir.ClsP, 0)
 	}
-	sourceType := g.info.Types[expression].Type
+	sourceType := g.typeAndValue(expression).Type
 	if _, alreadyInterface := sourceType.Underlying().(*types.Interface); alreadyInterface {
-		return g.expr(expression)
+		value := g.materializeNilInterface(g.expr(expression))
+		copy := g.localAlloc(8, int(typeSize(targetType)))
+		g.cur.Call(ir.ClsP, g.fn.Sym("goc_memcpy", 0), copy, value, g.fn.Long(typeSize(targetType)))
+		return copy
 	}
 	value := g.expr(expression)
 	if isDirectInterfaceType(sourceType) {
@@ -2206,11 +2386,13 @@ func (g *gen) initializeGlobal(object types.Object) {
 	switch {
 	case isMemoryValue(valueType), isInterfaceValue(valueType):
 		g.storeInlineValue(value, destination, valueType)
+	case g.runtimeAllocation && isSliceType(valueType):
+		g.store(value, destination, valueType)
 	case isDescriptorValue(valueType):
-		// String and slice globals contain a pointer to permanent descriptor
+		// Legacy string and slice globals contain a pointer to permanent descriptor
 		// storage. Copy a dynamic initializer into that storage instead of
 		// retaining the address of a temporary descriptor in the init frame.
-		descriptor := g.load(destination, valueType)
+		descriptor := g.cur.Load(ir.ClsP, destination)
 		g.storeInlineValue(value, descriptor, valueType)
 	default:
 		g.store(value, destination, valueType)
@@ -2311,11 +2493,11 @@ func (g *gen) ensureTypeTag(valueType types.Type) string {
 }
 
 func runtimeEqualSymbol(valueType types.Type) string {
-	if interfaceType, ok := valueType.Underlying().(*types.Interface); ok {
-		if interfaceType.NumMethods() == 0 {
-			return "runtime.nilinterequal"
-		}
-		return "runtime.interequal"
+	if _, ok := valueType.Underlying().(*types.Interface); ok {
+		// cg12go represents every interface as an empty-interface-style
+		// (concrete type, data) pair. It does not use the runtime's itab layout
+		// for interfaces with methods.
+		return "runtime.nilinterequal"
 	}
 	switch valueType.Underlying().(type) {
 	case *types.Pointer, *types.Chan:
@@ -2447,10 +2629,15 @@ func runtimePointerBytes(valueType types.Type) int64 {
 
 func (g *gen) funcDecl(fd *ast.FuncDecl) {
 	obj := g.info.Defs[fd.Name].(*types.Func)
-	sig := obj.Type().(*types.Signature)
+	g.currentFunction = obj
+	originalSignature := obj.Type().(*types.Signature)
+	sig := g.concreteType(obj.Type()).(*types.Signature)
 	isMain := g.pkg.Name() == "main" && obj.Name() == "main"
 	platformMain := isMain && !g.runtimeAllocation
 	name := g.functionSymbol(obj)
+	if g.functionName != "" {
+		name = g.functionName
+	}
 	if platformMain {
 		name = "main"
 	}
@@ -2470,10 +2657,11 @@ func (g *gen) funcDecl(fd *ast.FuncDecl) {
 	if sig.Results().Len() > 0 {
 		resultAggregate = g.goABIAggregate(sig.Results().At(0).Type())
 		g.fn.RetAgg = resultAggregate
+		g.fn.RetValues = g.runtimeAllocation && isSliceType(sig.Results().At(0).Type())
 	}
 	g.fn.NoSplit = hasCompilerDirective(fd, "go:nosplit")
 	exportRuntimeBootstrap := g.pkg.Path() == "runtime" && (fd.Name.Name == "args" || fd.Name.Name == "check" || fd.Name.Name == "main" || fd.Name.Name == "mstart0" || fd.Name.Name == "newproc" || fd.Name.Name == "newstack" || fd.Name.Name == "osinit" || fd.Name.Name == "schedinit" || fd.Name.Name == "throw")
-	if ast.IsExported(fd.Name.Name) || isMain || exportRuntimeBootstrap {
+	if ast.IsExported(fd.Name.Name) || isMain || exportRuntimeBootstrap || g.linkNames[obj] != "" {
 		g.fn.Export()
 	}
 	g.vars = map[types.Object]ir.Ref{}
@@ -2513,29 +2701,35 @@ func (g *gen) funcDecl(fd *ast.FuncDecl) {
 		return true
 	})
 	if receiver := sig.Recv(); receiver != nil {
+		originalReceiver := originalSignature.Recv()
 		cls, ok := scalar(receiver.Type())
 		if !ok {
 			g.fail(fd, "unsupported receiver type %s", receiver.Type())
 			return
 		}
-		parameter := g.fn.Param(receiver.Name(), cls)
-		g.fn.Temp(parameter).Agg = g.goABIAggregate(receiver.Type())
+		parameter := g.functionParameter(receiver.Name(), receiver.Type(), cls)
 		slot := g.alloc(receiver.Type())
+		if g.runtimeAllocation && isSliceType(receiver.Type()) {
+			slot = g.allocLocal(receiver.Type())
+		}
 		g.store(parameter, slot, receiver.Type())
-		g.vars[receiver] = slot
+		g.vars[originalReceiver] = slot
 	}
 	for i := 0; i < sig.Params().Len(); i++ {
 		v := sig.Params().At(i)
+		originalParameter := originalSignature.Params().At(i)
 		c, ok := scalar(v.Type())
 		if !ok {
 			g.fail(fd, "unsupported parameter type %s", v.Type())
 			return
 		}
-		p := g.fn.Param(v.Name(), c)
-		g.fn.Temp(p).Agg = g.goABIAggregate(v.Type())
+		p := g.functionParameter(v.Name(), v.Type(), c)
 		slot := g.alloc(v.Type())
+		if g.runtimeAllocation && isSliceType(v.Type()) {
+			slot = g.allocLocal(v.Type())
+		}
 		g.store(p, slot, v.Type())
-		g.vars[v] = slot
+		g.vars[originalParameter] = slot
 	}
 	if sig.Results().Len() > 0 && isInlineAggregate(sig.Results().At(0).Type()) && resultAggregate == nil {
 		g.aggregateResult = g.fn.Param("result0", ir.ClsP)
@@ -2545,34 +2739,42 @@ func (g *gen) funcDecl(fd *ast.FuncDecl) {
 	}
 	for i := 1; i < sig.Results().Len(); i++ {
 		result := sig.Results().At(i)
+		originalResult := originalSignature.Results().At(i)
 		pointer := g.fn.Param(fmt.Sprintf("result%d", i), ir.ClsP)
 		g.extraResultSlots = append(g.extraResultSlots, pointer)
 		g.extraResultTypes = append(g.extraResultTypes, result.Type())
 		if result.Name() != "" {
-			g.vars[result] = pointer
-			if isInlineAggregate(result.Type()) {
+			g.vars[originalResult] = pointer
+			if isInlineAggregate(result.Type()) && !(g.runtimeAllocation && isSliceType(result.Type())) {
 				g.zero(pointer, result.Type())
-				g.directValues[result] = true
+				g.directValues[originalResult] = true
 			} else {
-				g.store(g.zeroValue(result.Type()), pointer, result.Type())
+				if g.runtimeAllocation && isSliceType(result.Type()) {
+					g.zero(pointer, result.Type())
+				} else {
+					g.store(g.zeroValue(result.Type()), pointer, result.Type())
+				}
 			}
 		}
 	}
 	if sig.Results().Len() > 0 && sig.Results().At(0).Name() != "" {
 		result := sig.Results().At(0)
+		originalResult := originalSignature.Results().At(0)
 		g.resultType = result.Type()
-		if isInlineAggregate(result.Type()) {
+		if isInlineAggregate(result.Type()) && !(g.runtimeAllocation && isSliceType(result.Type())) {
 			g.resultSlot = g.aggregateResult
 			if g.resultSlot == ir.R {
 				g.resultSlot = g.aggregateResultStorage(result.Type())
 			}
 			g.zero(g.resultSlot, result.Type())
-			g.directValues[result] = true
+			g.directValues[originalResult] = true
+		} else if g.runtimeAllocation && isSliceType(result.Type()) {
+			g.resultSlot = g.allocLocal(result.Type())
 		} else {
 			g.resultSlot = g.alloc(result.Type())
 			g.store(g.zeroValue(result.Type()), g.resultSlot, result.Type())
 		}
-		g.vars[result] = g.resultSlot
+		g.vars[originalResult] = g.resultSlot
 	}
 	g.stmts(fd.Body.List)
 	if g.err == nil && g.live() {
@@ -2588,6 +2790,17 @@ func (g *gen) funcDecl(fd *ast.FuncDecl) {
 	if g.err == nil {
 		g.terminateUnusedLabels()
 	}
+}
+
+func (g *gen) functionParameter(name string, valueType types.Type, class ir.Cls) ir.Ref {
+	if g.runtimeAllocation && isSliceType(valueType) {
+		aggregate := g.goABIAggregate(valueType)
+		parts := g.fn.ParamGroup(name, aggregate, ir.ClsP, ir.ClsL, ir.ClsL)
+		return g.fn.Aggregate(aggregate, parts...)
+	}
+	parameter := g.fn.Param(name, class)
+	g.fn.Temp(parameter).Agg = g.goABIAggregate(valueType)
+	return parameter
 }
 
 func hasCompilerDirective(declaration *ast.FuncDecl, directive string) bool {
@@ -2645,7 +2858,7 @@ func (g *gen) multiValueAssignment(statement *ast.AssignStmt, call *ast.CallExpr
 			}
 		}
 	}
-	signature, ok := g.info.Types[call.Fun].Type.Underlying().(*types.Signature)
+	signature, ok := g.typeAndValue(call.Fun).Type.Underlying().(*types.Signature)
 	if !ok {
 		g.fail(call, "multiple-result call target is not a function")
 		return
@@ -2654,8 +2867,13 @@ func (g *gen) multiValueAssignment(statement *ast.AssignStmt, call *ast.CallExpr
 	var callee ir.Ref
 	var closure ir.Ref
 	if object != nil {
+		calleeName := g.functionSymbol(object)
 		callSignature = compiledFunctionSignature(object)
-		callee = g.fn.Sym(g.functionSymbol(object), 0)
+		if instanceName, instantiated := g.instantiatedFunctionSymbol(object, call.Fun); instantiated {
+			calleeName = instanceName
+			callSignature = signature
+		}
+		callee = g.fn.Sym(calleeName, 0)
 	} else {
 		closure = g.expr(call.Fun)
 		callee = g.cur.Load(ir.ClsP, closure)
@@ -2705,7 +2923,7 @@ func (g *gen) multiValueAssignment(statement *ast.AssignStmt, call *ast.CallExpr
 		}
 		resultType := signature.Results().At(i).Type()
 		value := values[i]
-		if i > 0 && !isInlineAggregate(resultType) {
+		if i > 0 && (!isInlineAggregate(resultType) || (g.runtimeAllocation && isSliceType(resultType))) {
 			value = g.load(value, resultType)
 		}
 
@@ -2732,6 +2950,8 @@ func (g *gen) multiValueAssignment(statement *ast.AssignStmt, call *ast.CallExpr
 			g.assignLocal(value, slot, resultType)
 		} else if localIdentifier && isDescriptorValue(resultType) {
 			g.store(value, slot, resultType)
+		} else if g.runtimeAllocation && isSliceType(resultType) {
+			g.store(value, slot, resultType)
 		} else if isInlineAggregate(resultType) {
 			g.cur.Call(ir.ClsP, g.fn.Sym("goc_memcpy", 0), slot, value, g.fn.Long(typeSize(resultType)))
 		} else {
@@ -2746,14 +2966,14 @@ func (g *gen) typeAssertionAssignment(statement *ast.AssignStmt, assertion *ast.
 		return
 	}
 	value, ok := g.typeAssertion(assertion)
-	targetType := g.info.Types[assertion.Type].Type
+	targetType := g.typeAndValue(assertion.Type).Type
 	g.assignResult(statement.Lhs[0], statement.Tok, value, targetType)
 	g.assignResult(statement.Lhs[1], statement.Tok, ok, types.Typ[types.Bool])
 }
 
 func (g *gen) typeAssertion(assertion *ast.TypeAssertExpr) (ir.Ref, ir.Ref) {
 	descriptor := g.expr(assertion.X)
-	targetType := g.info.Types[assertion.Type].Type
+	targetType := g.typeAndValue(assertion.Type).Type
 	targetClass, _ := scalar(targetType)
 	failureValue := g.zeroValue(targetType)
 
@@ -2892,30 +3112,31 @@ func (g *gen) stmt(s ast.Stmt) {
 			}
 			for i, id := range vs.Names {
 				obj := g.info.Defs[id]
-				_, ok := scalar(obj.Type())
+				objectType := g.objectType(obj)
+				_, ok := scalar(objectType)
 				if !ok {
-					g.fail(id, "unsupported variable type %s", obj.Type())
+					g.fail(id, "unsupported variable type %s", objectType)
 					return
 				}
-				slot := g.allocLocal(obj.Type())
+				slot := g.allocLocal(objectType)
 				g.vars[obj] = slot
-				if i >= len(vs.Values) && isMemoryValue(obj.Type()) {
+				if i >= len(vs.Values) && isMemoryValue(objectType) {
 					continue
 				}
-				v := g.zeroValue(obj.Type())
+				v := g.zeroValue(objectType)
 				if i < len(vs.Values) {
-					v = g.assignmentValue(vs.Values[i], obj.Type())
+					v = g.assignmentValue(vs.Values[i], objectType)
 				}
-				if isDescriptorValue(obj.Type()) {
-					v = g.copyInlineValue(v, obj.Type())
+				if isDescriptorValue(objectType) {
+					v = g.copyInlineValue(v, objectType)
 				}
-				g.assignLocal(v, slot, obj.Type())
+				g.assignLocal(v, slot, objectType)
 			}
 		}
 	case *ast.AssignStmt:
 		if len(n.Lhs) == 1 && len(n.Rhs) == 1 {
 			if index, ok := n.Lhs[0].(*ast.IndexExpr); ok {
-				if _, isMap := g.info.Types[index.X].Type.Underlying().(*types.Map); isMap {
+				if _, isMap := g.typeAndValue(index.X).Type.Underlying().(*types.Map); isMap {
 					g.mapAssign(index, n.Rhs[0])
 					return
 				}
@@ -2923,7 +3144,7 @@ func (g *gen) stmt(s ast.Stmt) {
 		}
 		if len(n.Rhs) == 1 && len(n.Lhs) > 1 {
 			if index, ok := n.Rhs[0].(*ast.IndexExpr); ok {
-				if _, isMap := g.info.Types[index.X].Type.Underlying().(*types.Map); isMap {
+				if _, isMap := g.typeAndValue(index.X).Type.Underlying().(*types.Map); isMap {
 					g.mapLookupAssignment(n, index)
 					return
 				}
@@ -2942,7 +3163,7 @@ func (g *gen) stmt(s ast.Stmt) {
 		}
 		vals := make([]ir.Ref, len(n.Rhs))
 		for i, e := range n.Rhs {
-			targetType := g.info.Types[n.Lhs[i]].Type
+			targetType := g.typeAndValue(n.Lhs[i]).Type
 			if targetType == nil {
 				if identifier, ok := n.Lhs[i].(*ast.Ident); ok {
 					object := g.info.Uses[identifier]
@@ -2950,12 +3171,12 @@ func (g *gen) stmt(s ast.Stmt) {
 						object = g.info.Defs[identifier]
 					}
 					if object != nil {
-						targetType = object.Type()
+						targetType = g.objectType(object)
 					}
 				}
 			}
 			if targetType == nil {
-				targetType = g.info.Types[e].Type
+				targetType = g.typeAndValue(e).Type
 			}
 			vals[i] = g.assignmentValue(e, targetType)
 		}
@@ -2972,7 +3193,7 @@ func (g *gen) stmt(s ast.Stmt) {
 				if n.Tok == token.DEFINE && obj == nil {
 					obj = g.info.Defs[id]
 				}
-				typ = obj.Type()
+				typ = g.objectType(obj)
 				var exists bool
 				slot, exists = g.addr(obj)
 				if !exists {
@@ -2984,12 +3205,12 @@ func (g *gen) stmt(s ast.Stmt) {
 				if g.directValues[obj] && isInlineAggregate(typ) {
 					destinationIsInline = true
 				}
-				if global && isDescriptorValue(typ) {
+				if global && isDescriptorValue(typ) && !(g.runtimeAllocation && isSliceType(typ)) {
 					slot = g.cur.Load(ir.ClsP, slot)
 				}
 				localIdentifier = !global && !g.directValues[obj]
 			} else {
-				typ = g.info.Types[lhs].Type
+				typ = g.typeAndValue(lhs).Type
 				slot = g.lvalue(lhs)
 				destinationIsInline = true
 			}
@@ -3013,7 +3234,7 @@ func (g *gen) stmt(s ast.Stmt) {
 			}
 		}
 	case *ast.IncDecStmt:
-		targetType := g.info.Types[n.X].Type
+		targetType := g.typeAndValue(n.X).Type
 		var slot ir.Ref
 		if identifier, ok := n.X.(*ast.Ident); ok {
 			object := g.info.Uses[identifier]
@@ -3042,10 +3263,18 @@ func (g *gen) stmt(s ast.Stmt) {
 		if len(n.Results) == 0 {
 			if g.fn.HasRet && g.resultSlot != ir.R {
 				value := g.resultSlot
-				if !isInlineAggregate(g.resultType) {
+				if !isInlineAggregate(g.resultType) || (g.runtimeAllocation && isSliceType(g.resultType)) {
 					value = g.load(g.resultSlot, g.resultType)
 				}
-				g.cur.Ret(g.stableReturnValue(value, g.resultType))
+				for index, resultType := range g.extraResultTypes {
+					if !isInterfaceValue(resultType) {
+						continue
+					}
+					resultSlot := g.extraResultSlots[index]
+					result := g.load(resultSlot, resultType)
+					g.store(g.stableReturnValue(result, resultType, false), resultSlot, resultType)
+				}
+				g.returnValue(value, g.resultType)
 			} else {
 				g.cur.RetVoid()
 			}
@@ -3064,9 +3293,9 @@ func (g *gen) stmt(s ast.Stmt) {
 				if i > 0 {
 					resultType = g.extraResultTypes[i-1]
 				} else if resultType == nil {
-					resultType = g.info.Types[result].Type
+					resultType = g.typeAndValue(result).Type
 				}
-				if identifier, ok := result.(*ast.Ident); ok && identifier.Name == "nil" && isInlineAggregate(resultType) {
+				if identifier, ok := result.(*ast.Ident); ok && identifier.Name == "nil" && isInlineAggregate(resultType) && !(g.runtimeAllocation && isSliceType(resultType)) {
 					values[i] = g.localAlloc(8, int(typeSize(resultType)))
 					g.zero(values[i], resultType)
 				} else {
@@ -3075,13 +3304,15 @@ func (g *gen) stmt(s ast.Stmt) {
 			}
 			for i := 1; i < len(values); i++ {
 				resultType := g.extraResultTypes[i-1]
-				if isInlineAggregate(resultType) {
+				if g.runtimeAllocation && isSliceType(resultType) {
+					g.store(values[i], g.extraResultSlots[i-1], resultType)
+				} else if isInlineAggregate(resultType) {
 					g.cur.Call(ir.ClsP, g.fn.Sym("goc_memcpy", 0), g.extraResultSlots[i-1], values[i], g.fn.Long(typeSize(resultType)))
 				} else {
-					g.store(g.stableReturnValue(values[i], resultType), g.extraResultSlots[i-1], resultType)
+					g.store(g.stableReturnValue(values[i], resultType, false), g.extraResultSlots[i-1], resultType)
 				}
 			}
-			g.cur.Ret(g.stableReturnValue(values[0], g.resultType))
+			g.returnValue(values[0], g.resultType)
 		}
 	case *ast.IfStmt:
 		g.ifStmt(n)
@@ -3151,7 +3382,7 @@ func (g *gen) stmt(s ast.Stmt) {
 		g.deferActions = append(g.deferActions, n)
 	case *ast.SendStmt:
 		channel := g.expr(n.Chan)
-		elementType := g.info.Types[n.Value].Type
+		elementType := g.typeAndValue(n.Value).Type
 		value := g.assignmentValue(n.Value, elementType)
 		address := value
 		if !isMemoryValue(elementType) {
@@ -3170,7 +3401,14 @@ func (g *gen) stmt(s ast.Stmt) {
 func (g *gen) returnMultiValueCall(call *ast.CallExpr) {
 	var function *types.Func
 	var receiver ir.Ref
-	switch target := call.Fun.(type) {
+	functionExpression := call.Fun
+	switch instantiation := call.Fun.(type) {
+	case *ast.IndexExpr:
+		functionExpression = instantiation.X
+	case *ast.IndexListExpr:
+		functionExpression = instantiation.X
+	}
+	switch target := functionExpression.(type) {
 	case *ast.Ident:
 		function, _ = g.info.Uses[target].(*types.Func)
 	case *ast.SelectorExpr:
@@ -3189,7 +3427,7 @@ func (g *gen) returnMultiValueCall(call *ast.CallExpr) {
 		}
 	}
 
-	signature, ok := g.info.Types[call.Fun].Type.Underlying().(*types.Signature)
+	signature, ok := g.typeAndValue(call.Fun).Type.Underlying().(*types.Signature)
 	if !ok || signature.Results().Len() < 2 {
 		g.fail(call, "return call is not multi-valued")
 		return
@@ -3200,7 +3438,12 @@ func (g *gen) returnMultiValueCall(call *ast.CallExpr) {
 	callSignature := signature
 	if function != nil {
 		callSignature = compiledFunctionSignature(function)
-		callee = g.fn.Sym(g.functionSymbol(function), 0)
+		calleeName := g.functionSymbol(function)
+		if instanceName, instantiated := g.instantiatedFunctionSymbol(function, functionExpression); instantiated {
+			calleeName = instanceName
+			callSignature = signature
+		}
+		callee = g.fn.Sym(calleeName, 0)
 	} else {
 		closure = g.expr(call.Fun)
 		callee = g.cur.Load(ir.ClsP, closure)
@@ -3229,7 +3472,16 @@ func (g *gen) returnMultiValueCall(call *ast.CallExpr) {
 		}
 	}
 	value := g.callWithSignature(resultClass, callee, arguments, callSignature, receiverType)
-	g.cur.Ret(g.stableReturnValue(value, resultType))
+	g.returnValue(value, resultType)
+}
+
+func (g *gen) returnValue(value ir.Ref, resultType types.Type) {
+	if g.runtimeAllocation && isSliceType(resultType) {
+		data, length, capacity := g.sliceParts(value)
+		g.cur.RetAggregate(data, length, capacity)
+		return
+	}
+	g.cur.Ret(g.stableReturnValue(value, resultType, g.fn.RetAgg != nil))
 }
 
 func (g *gen) goStatement(statement *ast.GoStmt) {
@@ -3252,18 +3504,6 @@ func (g *gen) goStatement(statement *ast.GoStmt) {
 
 	position := g.fset.Position(statement.Pos())
 	wrapperName := fmt.Sprintf("%s.gowrap.%d.%d", g.pkg.Path(), position.Line, position.Column)
-	wrapper := &gen{fn: g.mod.NewFuncVoid(wrapperName)}
-	wrapper.cur = wrapper.fn.Entry()
-	context := wrapper.closureContext()
-	arguments := make([]ir.Ref, len(call.Args))
-	for i, argument := range call.Args {
-		parameterType := signature.Params().At(i).Type()
-		arguments[i] = wrapper.load(wrapper.offset(context, int64(8*(i+1))), parameterType)
-		_ = argument
-	}
-	wrapper.cur.CallVoid(wrapper.fn.Sym(g.functionSymbol(function), 0), arguments...)
-	wrapper.cur.RetVoid()
-
 	closureFields := make([]*types.Var, 0, len(call.Args)+1)
 	closureFields = append(closureFields, types.NewVar(token.NoPos, nil, "code", types.Typ[types.Uintptr]))
 	for index := 0; index < signature.Params().Len(); index++ {
@@ -3271,12 +3511,34 @@ func (g *gen) goStatement(statement *ast.GoStmt) {
 		closureFields = append(closureFields, types.NewVar(token.NoPos, nil, parameter.Name(), parameter.Type()))
 	}
 	closureType := types.NewStruct(closureFields, nil)
+	closureOffsets := structOffsets(closureFields)
+
+	wrapper := &gen{
+		fn:                g.mod.NewFuncVoid(wrapperName),
+		mod:               g.mod,
+		runtimeAllocation: g.runtimeAllocation,
+		typeTags:          g.typeTags,
+		goABITypes:        g.goABITypes,
+		linkNames:         g.linkNames,
+		initSymbols:       g.initSymbols,
+	}
+	wrapper.cur = wrapper.fn.Entry()
+	context := wrapper.closureContext()
+	arguments := make([]ir.Ref, len(call.Args))
+	for index := range call.Args {
+		parameterType := signature.Params().At(index).Type()
+		parameterAddress := wrapper.offset(context, closureOffsets[index+1])
+		arguments[index] = wrapper.load(parameterAddress, parameterType)
+	}
+	wrapper.callVoidWithSignature(wrapper.fn.Sym(g.functionSymbol(function), 0), arguments, signature, nil)
+	wrapper.cur.RetVoid()
+
 	closure := g.allocateTyped(closureType)
 	g.cur.Store(g.fn.Sym(wrapperName, 0), closure)
 	for i, argument := range call.Args {
 		parameterType := signature.Params().At(i).Type()
 		value := g.assignmentValue(argument, parameterType)
-		g.store(value, g.offset(closure, int64(8*(i+1))), parameterType)
+		g.store(value, g.offset(closure, closureOffsets[i+1]), parameterType)
 	}
 	g.cur.CallVoid(g.fn.Sym("runtime.newproc", 0), closure)
 }
@@ -3311,6 +3573,12 @@ func (g *gen) runDefers() {
 }
 
 func (g *gen) rangeStmt(statement *ast.RangeStmt, label string) {
+	rangeType := g.typeAndValue(statement.X).Type
+	if mapType, ok := rangeType.Underlying().(*types.Map); ok {
+		g.mapRangeStmt(statement, label, mapType)
+		return
+	}
+
 	indexType := types.Typ[types.Int]
 	indexSlot := g.alloc(indexType)
 	g.store(g.fn.Long(0), indexSlot, indexType)
@@ -3323,15 +3591,13 @@ func (g *gen) rangeStmt(statement *ast.RangeStmt, label string) {
 		g.vars[object] = indexSlot
 	}
 
-	rangeType := g.info.Types[statement.X].Type
 	var upper ir.Ref
 	var rangeData ir.Ref
 	var stringDescriptor ir.Ref
 	stringRange := false
 	if _, ok := rangeType.Underlying().(*types.Slice); ok {
-		slice := g.expr(statement.X)
-		rangeData = g.cur.Load(ir.ClsP, slice)
-		upper = g.cur.Load(ir.ClsL, g.offset(slice, 8))
+		sliceValue := g.expr(statement.X)
+		rangeData, upper, _ = g.sliceParts(sliceValue)
 	} else if array, ok := rangeType.Underlying().(*types.Array); ok {
 		rangeData = g.expr(statement.X)
 		upper = g.fn.Long(array.Len())
@@ -3360,7 +3626,7 @@ func (g *gen) rangeStmt(statement *ast.RangeStmt, label string) {
 		if object == nil {
 			object = g.info.Uses[value]
 		}
-		valueType = object.Type()
+		valueType = g.objectType(object)
 		valueSlot = g.allocLocal(valueType)
 		g.vars[object] = valueSlot
 	}
@@ -3434,7 +3700,7 @@ func (g *gen) rangeStmt(statement *ast.RangeStmt, label string) {
 		}
 		address := g.cur.Add(ir.ClsP, rangeData, elementOffset)
 		value := address
-		if !isInlineAggregate(valueType) {
+		if !isInlineAggregate(valueType) || (g.runtimeAllocation && isSliceType(valueType)) {
 			value = g.load(address, valueType)
 		}
 		g.assignLocal(value, valueSlot, valueType)
@@ -3451,6 +3717,90 @@ func (g *gen) rangeStmt(statement *ast.RangeStmt, label string) {
 		index = g.load(indexSlot, indexType)
 		index = g.cur.Add(ir.ClsL, index, g.fn.Long(1))
 	}
+	g.store(index, indexSlot, indexType)
+	g.cur.Goto(test)
+	g.breaks = g.breaks[:len(g.breaks)-1]
+	g.continues = g.continues[:len(g.continues)-1]
+	g.clearLabeledControl(label)
+	g.cur = done
+}
+
+func (g *gen) mapRangeStmt(statement *ast.RangeStmt, label string, mapType *types.Map) {
+	indexType := types.Typ[types.Int]
+	mapping := g.expr(statement.X)
+	indexSlot := g.alloc(indexType)
+	g.store(g.fn.Long(0), indexSlot, indexType)
+
+	rangeVariable := func(expression ast.Expr, valueType types.Type) ir.Ref {
+		identifier, ok := expression.(*ast.Ident)
+		if !ok || identifier.Name == "_" {
+			return ir.R
+		}
+
+		object := g.info.Defs[identifier]
+		if object == nil {
+			object = g.info.Uses[identifier]
+		}
+		if statement.Tok != token.DEFINE {
+			if slot, exists := g.addr(object); exists {
+				return slot
+			}
+		}
+
+		slot := g.allocLocal(valueType)
+		g.vars[object] = slot
+		return slot
+	}
+
+	keySlot := rangeVariable(statement.Key, mapType.Key())
+	valueSlot := rangeVariable(statement.Value, mapType.Elem())
+
+	start := g.block("maprangestart")
+	test := g.block("maprangetest")
+	occupied := g.block("maprangeoccupied")
+	body := g.block("maprangebody")
+	post := g.block("maprangepost")
+	done := g.block("maprangeend")
+	isNil := g.cur.Cmp(ir.CmpEq, ir.ClsP, mapping, g.fn.ConstInt(ir.ClsP, 0))
+	g.cur.Jnz(isNil, done, start)
+
+	g.cur = start
+	capacity := g.cur.Load(ir.ClsL, g.offset(mapping, mapCapacityOffset))
+	g.cur.Goto(test)
+
+	g.cur = test
+	index := g.load(indexSlot, indexType)
+	inRange := g.cur.Cmp(ir.CmpSlt, ir.ClsL, index, capacity)
+	g.cur.Jnz(inRange, occupied, done)
+
+	g.cur = occupied
+	used := g.cur.Load(ir.ClsP, g.offset(mapping, mapUsedOffset))
+	usedAddress := g.cur.Add(ir.ClsP, used, index)
+	isUsed := g.cur.LoadSub(ir.ClsW, ir.SubUB, usedAddress)
+	g.cur.Jnz(isUsed, body, post)
+
+	g.breaks = append(g.breaks, done)
+	g.continues = append(g.continues, post)
+	g.setLabeledControl(label, done, post)
+	g.cur = body
+	if keySlot != ir.R {
+		keyAddress := g.mapElementAddress(mapping, mapKeysOffset, index, mapType.Key())
+		key := g.mapElementValue(keyAddress, mapType.Key())
+		g.assignLocal(key, keySlot, mapType.Key())
+	}
+	if valueSlot != ir.R {
+		valueAddress := g.mapElementAddress(mapping, mapValuesOffset, index, mapType.Elem())
+		value := g.mapElementValue(valueAddress, mapType.Elem())
+		g.assignLocal(value, valueSlot, mapType.Elem())
+	}
+	g.stmts(statement.Body.List)
+	if g.live() {
+		g.cur.Goto(post)
+	}
+
+	g.cur = post
+	index = g.load(indexSlot, indexType)
+	index = g.cur.Add(ir.ClsL, index, g.fn.Long(1))
 	g.store(index, indexSlot, indexType)
 	g.cur.Goto(test)
 	g.breaks = g.breaks[:len(g.breaks)-1]
@@ -3507,16 +3857,27 @@ func isDescriptorValue(t types.Type) bool {
 	}
 }
 
-// Aggregate values and multiword descriptors are represented by an address in
-// cg12 IR. A returned value therefore needs storage whose lifetime extends
-// beyond the callee's stack frame. Scalars continue to use a result register.
-func (g *gen) stableReturnValue(value ir.Ref, resultType types.Type) ir.Ref {
+func isSliceType(valueType types.Type) bool {
+	if valueType == nil {
+		return false
+	}
+	_, ok := representativeType(valueType).Underlying().(*types.Slice)
+	return ok
+}
+
+// The aggregate forms that have not been scalarized are represented by an
+// address in cg12 IR. A returned value therefore needs storage whose lifetime
+// extends beyond the callee's stack frame. Slices take the scalar return path
+// before this helper. registerAggregate is true when ABIInternal consumes the
+// pointed-to fields into result registers before tearing down the frame.
+// Indirect extra results always escape through caller-provided storage.
+func (g *gen) stableReturnValue(value ir.Ref, resultType types.Type, registerAggregate bool) ir.Ref {
 	if isSharedTypeParameter(resultType) {
 		return value
 	}
 	if _, isInterface := resultType.Underlying().(*types.Interface); isInterface {
 		nilValue := g.fn.ConstInt(ir.ClsP, 0)
-		if g.fn.RetAgg != nil {
+		if registerAggregate {
 			nilValue = g.localAlloc(8, int(typeSize(resultType)))
 			g.zero(nilValue, resultType)
 		}
@@ -3543,7 +3904,7 @@ func (g *gen) stableReturnValue(value ir.Ref, resultType types.Type) ir.Ref {
 	if !isInlineAggregate(resultType) {
 		return value
 	}
-	if g.fn.RetAgg != nil {
+	if registerAggregate {
 		// ABIInternal return lowering reads the aggregate fields into result
 		// registers before tearing down this frame, so local result storage is
 		// sufficient and does not escape.
@@ -3561,6 +3922,11 @@ func (g *gen) stableReturnValue(value ir.Ref, resultType types.Type) ir.Ref {
 }
 
 func (g *gen) copyInlineValue(value ir.Ref, valueType types.Type) ir.Ref {
+	if g.runtimeAllocation {
+		if _, ok := valueType.Underlying().(*types.Slice); ok {
+			return value
+		}
+	}
 	size := typeSize(valueType)
 	copy := g.localAlloc(8, int(size))
 	g.cur.Call(ir.ClsP, g.fn.Sym("goc_memcpy", 0), copy, value, g.fn.Long(size))
@@ -3588,6 +3954,13 @@ func (g *gen) zeroValue(valueType types.Type) ir.Ref {
 }
 
 func (g *gen) allocLocal(t types.Type) ir.Ref {
+	if g.runtimeAllocation {
+		if _, ok := t.Underlying().(*types.Slice); ok {
+			slot := g.localAlloc(8, int(typeSize(t)))
+			g.zero(slot, t)
+			return slot
+		}
+	}
 	switch t.Underlying().(type) {
 	case *types.Array, *types.Struct:
 		slot := g.localAlloc(8, 8)
@@ -3634,7 +4007,7 @@ func (g *gen) lvalue(expression ast.Expr) ir.Ref {
 	case *ast.IndexExpr:
 		base := g.indexBase(expression.X)
 		index := g.expr(expression.Index)
-		size := typeSize(g.info.Types[expression].Type)
+		size := typeSize(g.typeAndValue(expression).Type)
 		if size != 1 {
 			index = g.cur.Mul(ir.ClsL, index, g.fn.Long(size))
 		}
@@ -3645,6 +4018,27 @@ func (g *gen) lvalue(expression ast.Expr) ir.Ref {
 		g.fail(expression, "unsupported assignment target %T", expression)
 		return ir.R
 	}
+}
+
+func (g *gen) sliceLvalue(expression ast.Expr) ir.Ref {
+	identifier, ok := expression.(*ast.Ident)
+	if !ok {
+		return g.lvalue(expression)
+	}
+	object := g.info.Uses[identifier]
+	if object == nil {
+		object = g.info.Defs[identifier]
+	}
+	g.initializeGlobal(object)
+	address, exists := g.addr(object)
+	if !exists {
+		g.fail(identifier, "unknown variable %s", identifier.Name)
+		return ir.R
+	}
+	if _, global := g.globals[object]; global && !g.runtimeAllocation {
+		return g.cur.Load(ir.ClsP, address)
+	}
+	return address
 }
 
 func (g *gen) addr(obj types.Object) (ir.Ref, bool) {
@@ -3786,7 +4180,7 @@ func (g *gen) switchStmt(n *ast.SwitchStmt, label string) {
 			if n.Tag == nil {
 				cond = g.expr(e)
 			} else {
-				cond = g.binaryRaw(token.EQL, tag, g.expr(e), g.info.Types[n.Tag].Type, e)
+				cond = g.binaryRaw(token.EQL, tag, g.expr(e), g.typeAndValue(n.Tag).Type, e)
 			}
 			g.cur.Jnz(cond, blocks[i], next)
 			g.cur = next
@@ -3877,7 +4271,7 @@ func (g *gen) typeSwitchStmt(statement *ast.TypeSwitchStmt, label string) {
 				g.cur.Jnz(isNil, next, nonNil)
 				g.cur = nonNil
 				dynamicTag := g.cur.Load(ir.ClsP, interfaceValue)
-				caseType := g.info.Types[caseExpression].Type
+				caseType := g.typeAndValue(caseExpression).Type
 				matches := g.cur.Cmp(ir.CmpEq, ir.ClsP, dynamicTag, g.typeTag(caseType))
 				g.cur.Jnz(matches, blocks[i], next)
 			}
@@ -3935,7 +4329,7 @@ func (g *gen) typeSwitchStmt(statement *ast.TypeSwitchStmt, label string) {
 
 func (g *gen) expr(e ast.Expr) ir.Ref {
 	g.at(e)
-	tv := g.info.Types[e]
+	tv := g.typeAndValue(e)
 	c, _ := scalar(tv.Type)
 	if tv.Value != nil {
 		if tv.Value.Kind() == constant.String {
@@ -3971,19 +4365,37 @@ func (g *gen) expr(e ast.Expr) ir.Ref {
 			return ir.R
 		}
 		_, global := g.globals[obj]
-		if g.directValues[obj] || (global && (isMemoryValue(obj.Type()) || isInterfaceValue(obj.Type()))) {
+		objectType := g.objectType(obj)
+		if g.runtimeAllocation && global && isSliceType(objectType) {
+			return g.load(slot, objectType)
+		}
+		if g.directValues[obj] || (global && (isMemoryValue(objectType) || isInterfaceValue(objectType))) {
 			return slot
 		}
-		return g.load(slot, obj.Type())
+		return g.load(slot, objectType)
 	case *ast.BinaryExpr:
 		if n.Op == token.LAND || n.Op == token.LOR {
 			return g.logical(n)
 		}
-		return g.binary(n.Op, g.expr(n.X), g.expr(n.Y), g.info.Types[n.X].Type, n)
+		if n.Op == token.EQL || n.Op == token.NEQ {
+			leftType := g.typeAndValue(n.X).Type
+			rightType := g.typeAndValue(n.Y).Type
+			if isInterfaceValue(leftType) {
+				left := g.assignmentValue(n.X, leftType)
+				right := g.assignmentValue(n.Y, leftType)
+				return g.binary(n.Op, left, right, leftType, n)
+			}
+			if isInterfaceValue(rightType) {
+				left := g.assignmentValue(n.X, rightType)
+				right := g.assignmentValue(n.Y, rightType)
+				return g.binary(n.Op, left, right, rightType, n)
+			}
+		}
+		return g.binary(n.Op, g.expr(n.X), g.expr(n.Y), g.typeAndValue(n.X).Type, n)
 	case *ast.UnaryExpr:
 		if n.Op == token.ARROW {
 			channel := g.expr(n.X)
-			channelType := g.info.Types[n.X].Type.Underlying().(*types.Chan)
+			channelType := g.typeAndValue(n.X).Type.Underlying().(*types.Chan)
 			elementType := channelType.Elem()
 			size := typeSize(elementType)
 			if size < 4 {
@@ -4004,13 +4416,16 @@ func (g *gen) expr(e ast.Expr) ir.Ref {
 			// runtime header. Taking the address of one must expose that header,
 			// as runtime helpers such as efaceOf expect, rather than the frontend
 			// slot that contains the header address.
-			if _, ok := g.info.Types[n.X].Type.Underlying().(*types.Interface); ok {
+			if _, ok := g.typeAndValue(n.X).Type.Underlying().(*types.Interface); ok {
 				return g.expr(n.X)
 			}
-			if isSharedTypeParameter(g.info.Types[n.X].Type) {
+			if isSharedTypeParameter(g.typeAndValue(n.X).Type) {
 				return g.expr(n.X)
 			}
-			if isInlineAggregate(g.info.Types[n.X].Type) {
+			if g.runtimeAllocation && isSliceType(g.typeAndValue(n.X).Type) {
+				return g.sliceLvalue(n.X)
+			}
+			if isInlineAggregate(g.typeAndValue(n.X).Type) {
 				return g.expr(n.X)
 			}
 			return g.lvalue(n.X)
@@ -4028,24 +4443,33 @@ func (g *gen) expr(e ast.Expr) ir.Ref {
 		}
 	case *ast.StarExpr:
 		pointer := g.expr(n.X)
-		if isInlineAggregate(g.info.Types[n].Type) || isInterfaceValue(g.info.Types[n].Type) {
+		starType := g.typeAndValue(n).Type
+		if g.runtimeAllocation && isSliceType(starType) {
+			return g.load(pointer, starType)
+		}
+		if isInlineAggregate(starType) || isInterfaceValue(starType) {
 			return pointer
 		}
-		return g.load(pointer, g.info.Types[n].Type)
+		return g.load(pointer, starType)
 	case *ast.CompositeLit:
 		return g.compositeLiteral(n, false)
 	case *ast.FuncLit:
 		return g.functionLiteral(n)
 	case *ast.CallExpr:
-		if g.info.Types[n.Fun].IsType() {
+		if g.typeAndValue(n.Fun).IsType() {
 			if len(n.Args) != 1 {
 				g.fail(n, "conversion requires one argument")
 				return ir.R
 			}
 			if _, ok := tv.Type.Underlying().(*types.Slice); ok {
-				if basic, ok := g.info.Types[n.Args[0]].Type.Underlying().(*types.Basic); ok && basic.Kind() == types.String {
+				if basic, ok := g.typeAndValue(n.Args[0]).Type.Underlying().(*types.Basic); ok && basic.Kind() == types.String {
 					return g.stringSlice(n.Args[0])
 				}
+			}
+			if target, ok := tv.Type.Underlying().(*types.Basic); ok && target.Kind() == types.String && isSliceType(g.typeAndValue(n.Args[0]).Type) {
+				sliceValue := g.expr(n.Args[0])
+				data, length, _ := g.sliceParts(sliceValue)
+				return g.stringDescriptor(data, length)
 			}
 			if basic, ok := tv.Type.Underlying().(*types.Basic); ok && basic.Kind() == types.UnsafePointer {
 				if address, ok := n.Args[0].(*ast.UnaryExpr); ok && address.Op == token.AND {
@@ -4055,7 +4479,7 @@ func (g *gen) expr(e ast.Expr) ir.Ref {
 				}
 			}
 			x := g.expr(n.Args[0])
-			return g.convert(x, g.info.Types[n.Args[0]].Type, tv.Type)
+			return g.convert(x, g.typeAndValue(n.Args[0]).Type, tv.Type)
 		}
 		if identifier, ok := n.Fun.(*ast.Ident); ok {
 			if builtin, ok := g.info.Uses[identifier].(*types.Builtin); ok {
@@ -4098,6 +4522,34 @@ func (g *gen) expr(e ast.Expr) ir.Ref {
 		var callSignature *types.Signature
 		var closure ir.Ref
 		if obj != nil {
+			if obj.Pkg() != nil && obj.Pkg().Path() == "maps" && obj.Name() == "clone" && len(n.Args) == 1 {
+				mapType, ok := g.typeAndValue(n.Args[0]).Type.Underlying().(*types.Map)
+				if !ok {
+					g.fail(n, "maps.clone argument is not a map")
+					return ir.R
+				}
+				cloned := g.cloneMap(g.expr(n.Args[0]), mapType)
+				descriptor := g.localAlloc(8, 16)
+				g.cur.Store(g.typeTag(g.typeAndValue(n.Args[0]).Type), descriptor)
+				g.cur.Store(cloned, g.offset(descriptor, 8))
+				return descriptor
+			}
+			if obj.Pkg() != nil && obj.Pkg().Path() == "runtime" && obj.Name() == "getg" && len(n.Args) == 0 {
+				if runtime.GOARCH != "arm64" {
+					g.fail(n, "runtime.getg intrinsic is unsupported on %s", runtime.GOARCH)
+					return ir.R
+				}
+				const arm64GRegister = 28
+				return g.cur.Load(ir.ClsP, g.fn.RegVar("g", arm64GRegister))
+			}
+			if obj.Pkg() != nil && obj.Pkg().Path() == "internal/runtime/sys" && len(n.Args) == 0 {
+				switch obj.Name() {
+				case "GetCallerPC":
+					return g.cur.CallerPC()
+				case "GetCallerSP":
+					return g.cur.CallerSP()
+				}
+			}
 			if obj.Pkg() != nil && obj.Pkg().Path() == "internal/abi" &&
 				(obj.Name() == "FuncPCABI0" || obj.Name() == "FuncPCABIInternal") && len(n.Args) == 1 {
 				if identifier, ok := n.Args[0].(*ast.Ident); ok {
@@ -4108,15 +4560,20 @@ func (g *gen) expr(e ast.Expr) ir.Ref {
 				functionValue := g.expr(n.Args[0])
 				return g.cur.Load(ir.ClsP, functionValue)
 			}
-			callee = g.fn.Sym(g.functionSymbol(obj), 0)
-			sig, _ = g.info.Types[n.Fun].Type.Underlying().(*types.Signature)
+			calleeName := g.functionSymbol(obj)
+			sig, _ = g.typeAndValue(n.Fun).Type.Underlying().(*types.Signature)
 			if sig == nil {
-				sig = obj.Type().(*types.Signature)
+				sig = g.objectType(obj).(*types.Signature)
 			}
 			callSignature = compiledFunctionSignature(obj)
+			if instanceName, instantiated := g.instantiatedFunctionSymbol(obj, functionExpression); instantiated {
+				calleeName = instanceName
+				callSignature = sig
+			}
+			callee = g.fn.Sym(calleeName, 0)
 		} else {
 			var ok bool
-			sig, ok = g.info.Types[n.Fun].Type.Underlying().(*types.Signature)
+			sig, ok = g.typeAndValue(n.Fun).Type.Underlying().(*types.Signature)
 			if !ok {
 				g.fail(n, "call target is not a function")
 				return ir.R
@@ -4158,21 +4615,24 @@ func (g *gen) expr(e ast.Expr) ir.Ref {
 		}
 		return g.callWithSignature(c, callee, args, callSignature, receiverType)
 	case *ast.IndexExpr:
-		if _, function := g.info.Types[n].Type.Underlying().(*types.Signature); function && g.info.Types[n.Index].IsType() {
+		if _, function := g.typeAndValue(n).Type.Underlying().(*types.Signature); function && g.typeAndValue(n.Index).IsType() {
 			return g.instantiatedFunctionValue(n.X, n)
 		}
-		if _, isMap := g.info.Types[n.X].Type.Underlying().(*types.Map); isMap {
+		if _, isMap := g.typeAndValue(n.X).Type.Underlying().(*types.Map); isMap {
 			value, _ := g.mapLookup(n)
 			return value
 		}
 		base := g.indexBase(n.X)
 		idx := g.expr(n.Index)
-		element := g.info.Types[n].Type
+		element := g.typeAndValue(n).Type
 		size := typeSize(element)
 		if size != 1 {
 			idx = g.cur.Mul(ir.ClsL, idx, g.fn.Long(size))
 		}
 		addr := g.cur.Add(ir.ClsP, base, idx)
+		if g.runtimeAllocation && isSliceType(element) {
+			return g.load(addr, element)
+		}
 		if isInlineAggregate(element) {
 			return addr
 		}
@@ -4181,8 +4641,8 @@ func (g *gen) expr(e ast.Expr) ir.Ref {
 		return g.instantiatedFunctionValue(n.X, n)
 	case *ast.SliceExpr:
 		base := g.indexBase(n.X)
-		sourceType := representativeType(g.info.Types[n.X].Type)
-		resultType := representativeType(g.info.Types[n].Type)
+		sourceType := representativeType(g.typeAndValue(n.X).Type)
+		resultType := representativeType(g.typeAndValue(n).Type)
 		low := g.fn.Long(0)
 		if n.Low != nil {
 			low = g.expr(n.Low)
@@ -4202,7 +4662,7 @@ func (g *gen) expr(e ast.Expr) ir.Ref {
 			high = g.fn.Long(array.Len())
 		} else {
 			descriptor := g.expr(n.X)
-			high = g.cur.Load(ir.ClsL, g.offset(descriptor, 8))
+			_, high, _ = g.sliceParts(descriptor)
 		}
 		if basic, ok := resultType.Underlying().(*types.Basic); ok && basic.Kind() == types.String {
 			data := g.cur.Add(ir.ClsP, base, low)
@@ -4211,7 +4671,7 @@ func (g *gen) expr(e ast.Expr) ir.Ref {
 		}
 		slice, ok := resultType.Underlying().(*types.Slice)
 		if !ok {
-			g.fail(n, "unsupported slice result type %s", g.info.Types[n].Type)
+			g.fail(n, "unsupported slice result type %s", g.typeAndValue(n).Type)
 			return ir.R
 		}
 		element := slice.Elem()
@@ -4224,7 +4684,8 @@ func (g *gen) expr(e ast.Expr) ir.Ref {
 			capacity = g.cur.Sub(ir.ClsL, g.fn.Long(array.Len()), low)
 		} else {
 			descriptor := g.expr(n.X)
-			capacity = g.cur.Sub(ir.ClsL, g.cur.Load(ir.ClsL, g.offset(descriptor, 16)), low)
+			_, _, sourceCapacity := g.sliceParts(descriptor)
+			capacity = g.cur.Sub(ir.ClsL, sourceCapacity, low)
 		}
 		size := typeSize(element)
 		dataOffset := low
@@ -4247,7 +4708,7 @@ func (g *gen) expr(e ast.Expr) ir.Ref {
 		g.cur.Jnz(isNil, failure, nonNil)
 
 		g.cur = nonNil
-		targetType := g.info.Types[n].Type
+		targetType := g.typeAndValue(n).Type
 		dynamicTag := g.cur.Load(ir.ClsP, interfaceValue)
 		matches := g.cur.Cmp(ir.CmpEq, ir.ClsP, dynamicTag, g.typeTag(targetType))
 		g.cur.Jnz(matches, success, failure)
@@ -4258,6 +4719,9 @@ func (g *gen) expr(e ast.Expr) ir.Ref {
 
 		g.cur = success
 		data := g.cur.Load(ir.ClsP, g.offset(interfaceValue, 8))
+		if g.runtimeAllocation && isSliceType(targetType) {
+			return g.load(data, targetType)
+		}
 		if isInlineAggregate(targetType) || isDirectInterfaceType(targetType) {
 			return data
 		}
@@ -4275,10 +4739,11 @@ func (g *gen) expr(e ast.Expr) ir.Ref {
 			}
 			g.initializeGlobal(object)
 			address := g.fn.Sym(object.Pkg().Path()+"."+object.Name(), 0)
-			if isMemoryValue(object.Type()) {
+			objectType := g.objectType(object)
+			if isMemoryValue(objectType) || isInterfaceValue(objectType) {
 				return address
 			}
-			return g.load(address, object.Type())
+			return g.load(address, objectType)
 		}
 		if selection.Kind() != types.FieldVal {
 			if selection.Kind() == types.MethodVal {
@@ -4293,6 +4758,9 @@ func (g *gen) expr(e ast.Expr) ir.Ref {
 			return ir.R
 		}
 		addr := g.selectorAddress(g.expr(n.X), selection)
+		if g.runtimeAllocation && isSliceType(selection.Type()) {
+			return g.load(addr, selection.Type())
+		}
 		if isInlineAggregate(selection.Type()) || isInterfaceValue(selection.Type()) {
 			return addr
 		}
@@ -4306,10 +4774,16 @@ func (g *gen) instantiatedFunctionValue(expression ast.Expr, instantiation ast.E
 	switch expression := expression.(type) {
 	case *ast.Ident:
 		if function, ok := g.info.Uses[expression].(*types.Func); ok {
+			if symbol, instantiated := g.instantiatedFunctionSymbol(function, expression); instantiated {
+				return g.staticFunctionValue(symbol)
+			}
 			return g.functionValue(function)
 		}
 	case *ast.SelectorExpr:
 		if function, ok := g.info.Uses[expression.Sel].(*types.Func); ok {
+			if symbol, instantiated := g.instantiatedFunctionSymbol(function, expression); instantiated {
+				return g.staticFunctionValue(symbol)
+			}
 			return g.functionValue(function)
 		}
 	}
@@ -4401,7 +4875,7 @@ func (g *gen) interfaceMethodReceiver(descriptor ir.Ref, method *types.Func) ir.
 	if _, pointer := receiverType.Underlying().(*types.Pointer); pointer {
 		return payload
 	}
-	if isMemoryValue(receiverType) {
+	if isInlineAggregate(receiverType) || isMemoryValue(receiverType) {
 		return payload
 	}
 	return g.load(payload, receiverType)
@@ -4447,33 +4921,48 @@ func (g *gen) methodValue(expression *ast.SelectorExpr, selection *types.Selecti
 	} else {
 		function = g.mod.NewFunc(wrapperName, resultClass)
 	}
-	wrapper := &gen{fn: function}
-	wrapper.cur = function.Entry()
+	wrapper := &gen{
+		fn:                function,
+		cur:               function.Entry(),
+		mod:               g.mod,
+		runtimeAllocation: g.runtimeAllocation,
+		typeTags:          g.typeTags,
+		goABITypes:        g.goABITypes,
+		linkNames:         g.linkNames,
+		initSymbols:       g.initSymbols,
+	}
+	if signature.Results().Len() > 0 {
+		resultType := signature.Results().At(0).Type()
+		function.RetAgg = wrapper.goABIAggregate(resultType)
+		function.RetValues = wrapper.runtimeAllocation && isSliceType(resultType)
+	}
 	context := wrapper.closureContext()
-	receiverType := method.Type().(*types.Signature).Recv().Type()
+	methodSignature := method.Type().(*types.Signature)
+	receiverType := methodSignature.Recv().Type()
 	receiver := wrapper.load(wrapper.offset(context, 8), receiverType)
 	arguments := []ir.Ref{receiver}
 	for index := 0; index < signature.Params().Len(); index++ {
 		parameter := signature.Params().At(index)
 		class, _ := scalar(parameter.Type())
-		arguments = append(arguments, function.Param(parameter.Name(), class))
+		arguments = append(arguments, wrapper.functionParameter(parameter.Name(), parameter.Type(), class))
 	}
 	callee := function.Sym(g.functionSymbol(method), 0)
 	if signature.Results().Len() == 0 {
-		wrapper.cur.CallVoid(callee, arguments...)
+		wrapper.callVoidWithSignature(callee, arguments, methodSignature, receiverType)
 		wrapper.cur.RetVoid()
 	} else {
-		result := wrapper.cur.Call(resultClass, callee, arguments...)
-		wrapper.cur.Ret(result)
+		result := wrapper.callWithSignature(resultClass, callee, arguments, methodSignature, receiverType)
+		wrapper.returnValue(result, signature.Results().At(0).Type())
 	}
-	descriptor := g.localAlloc(8, 16)
+	descriptorSize := int(8 + typeSize(receiverType))
+	descriptor := g.localAlloc(8, descriptorSize)
 	g.cur.Store(g.fn.Sym(wrapperName, 0), descriptor)
 	g.store(g.methodReceiver(expression, method), g.offset(descriptor, 8), receiverType)
 	return descriptor
 }
 
 func (g *gen) compositeLiteral(literal *ast.CompositeLit, heap bool) ir.Ref {
-	t := g.info.Types[literal].Type
+	t := g.typeAndValue(literal).Type
 	if mapType, isMap := t.Underlying().(*types.Map); isMap {
 		capacity := int64(len(literal.Elts))
 		if capacity < 8 {
@@ -4596,9 +5085,12 @@ func (g *gen) compositeLiteral(literal *ast.CompositeLit, heap bool) ir.Ref {
 }
 
 func (g *gen) functionLiteral(literal *ast.FuncLit) ir.Ref {
-	signature := g.info.Types[literal.Type].Type.(*types.Signature)
+	signature := g.typeAndValue(literal.Type).Type.(*types.Signature)
 	position := g.fset.Position(literal.Pos())
 	symbol := fmt.Sprintf("%s.func.%d.%d", g.pkg.Path(), position.Line, position.Column)
+	if g.functionName != "" {
+		symbol = fmt.Sprintf("%s.func.%d.%d", g.functionName, position.Line, position.Column)
+	}
 	var captures []types.Object
 	seenCapture := make(map[types.Object]bool)
 	ast.Inspect(literal.Body, func(node ast.Node) bool {
@@ -4627,6 +5119,7 @@ func (g *gen) functionLiteral(literal *ast.FuncLit) ir.Ref {
 		emitRuntimeTables:        g.emitRuntimeTables,
 		runtimeAllocation:        g.runtimeAllocation,
 		typeTags:                 g.typeTags,
+		goABITypes:               g.goABITypes,
 		vars:                     make(map[types.Object]ir.Ref),
 		labels:                   make(map[string]*ir.Block),
 		deferSlots:               make(map[*ast.DeferStmt]ir.Ref),
@@ -4641,6 +5134,9 @@ func (g *gen) functionLiteral(literal *ast.FuncLit) ir.Ref {
 		stackAddresses:           make(map[uint32]bool),
 		heapCaptures:             make(map[types.Object]ir.Ref),
 		directValues:             make(map[types.Object]bool),
+		typeArguments:            g.typeArguments,
+		functionName:             g.functionName,
+		currentFunction:          g.currentFunction,
 	}
 	if signature.Results().Len() == 0 {
 		child.fn = g.mod.NewFuncVoid(symbol)
@@ -4656,6 +5152,7 @@ func (g *gen) functionLiteral(literal *ast.FuncLit) ir.Ref {
 	if signature.Results().Len() > 0 {
 		resultAggregate = child.goABIAggregate(signature.Results().At(0).Type())
 		child.fn.RetAgg = resultAggregate
+		child.fn.RetValues = child.runtimeAllocation && isSliceType(signature.Results().At(0).Type())
 	}
 	child.cur = child.fn.Entry()
 	child.parents = astParents(literal.Body)
@@ -4679,9 +5176,11 @@ func (g *gen) functionLiteral(literal *ast.FuncLit) ir.Ref {
 			g.fail(literal, "unsupported function literal parameter %s", parameter.Type())
 			return ir.R
 		}
-		value := child.fn.Param(parameter.Name(), class)
-		child.fn.Temp(value).Agg = child.goABIAggregate(parameter.Type())
+		value := child.functionParameter(parameter.Name(), parameter.Type(), class)
 		slot := child.alloc(parameter.Type())
+		if child.runtimeAllocation && isSliceType(parameter.Type()) {
+			slot = child.allocLocal(parameter.Type())
+		}
 		child.store(value, slot, parameter.Type())
 		child.vars[parameter] = slot
 	}
@@ -4702,9 +5201,11 @@ func (g *gen) functionLiteral(literal *ast.FuncLit) ir.Ref {
 		child.extraResultTypes = append(child.extraResultTypes, result.Type())
 		if result.Name() != "" {
 			child.vars[result] = pointer
-			if isInlineAggregate(result.Type()) {
+			if isInlineAggregate(result.Type()) && !(child.runtimeAllocation && isSliceType(result.Type())) {
 				child.zero(pointer, result.Type())
 				child.directValues[result] = true
+			} else if child.runtimeAllocation && isSliceType(result.Type()) {
+				child.zero(pointer, result.Type())
 			} else {
 				child.store(child.zeroValue(result.Type()), pointer, result.Type())
 			}
@@ -4713,13 +5214,15 @@ func (g *gen) functionLiteral(literal *ast.FuncLit) ir.Ref {
 	if signature.Results().Len() > 0 && signature.Results().At(0).Name() != "" {
 		result := signature.Results().At(0)
 		child.resultType = result.Type()
-		if isInlineAggregate(result.Type()) {
+		if isInlineAggregate(result.Type()) && !(child.runtimeAllocation && isSliceType(result.Type())) {
 			child.resultSlot = child.aggregateResult
 			if child.resultSlot == ir.R {
 				child.resultSlot = child.aggregateResultStorage(result.Type())
 			}
 			child.zero(child.resultSlot, result.Type())
 			child.directValues[result] = true
+		} else if child.runtimeAllocation && isSliceType(result.Type()) {
+			child.resultSlot = child.allocLocal(result.Type())
 		} else {
 			child.resultSlot = child.alloc(result.Type())
 			child.store(child.zeroValue(result.Type()), child.resultSlot, result.Type())
@@ -4770,10 +5273,14 @@ func (g *gen) functionLiteral(literal *ast.FuncLit) ir.Ref {
 					captureType = types.Typ[types.UnsafePointer]
 				}
 			}
-			if isInlineAggregate(captureType) {
+			if g.runtimeAllocation && isSliceType(captureType) {
+				cell = g.allocateTyped(captureType)
+				source := g.load(g.vars[capture], captureType)
+				g.storeInlineValue(source, cell, captureType)
+			} else if isInlineAggregate(captureType) {
 				backing := g.allocateTyped(captureType)
 				source := g.load(g.vars[capture], captureType)
-				g.cur.Call(ir.ClsP, g.fn.Sym("goc_memcpy", 0), backing, source, g.fn.Long(typeSize(captureType)))
+				g.storeInlineValue(source, backing, captureType)
 
 				// Aggregate frontend variables are one level indirect: their
 				// variable slot contains the address of stable backing storage.
@@ -4926,9 +5433,10 @@ func (g *gen) stringConstant(contents string) ir.Ref {
 
 func (g *gen) indexBase(expression ast.Expr) ir.Ref {
 	base := g.expr(expression)
-	expressionType := representativeType(g.info.Types[expression].Type)
+	expressionType := representativeType(g.typeAndValue(expression).Type)
 	if _, ok := expressionType.Underlying().(*types.Slice); ok {
-		return g.cur.Load(ir.ClsP, base)
+		data, _, _ := g.sliceParts(base)
+		return data
 	}
 	if basic, ok := expressionType.Underlying().(*types.Basic); ok && basic.Info()&types.IsString != 0 {
 		return g.cur.Load(ir.ClsP, base)
@@ -4937,11 +5445,46 @@ func (g *gen) indexBase(expression ast.Expr) ir.Ref {
 }
 
 func (g *gen) sliceDescriptor(data, length, capacity ir.Ref) ir.Ref {
+	if g.runtimeAllocation {
+		return g.sliceValue(data, length, capacity)
+	}
 	descriptor := g.localAlloc(8, 24)
 	g.cur.Store(data, descriptor)
 	g.cur.Store(g.descriptorLength(length), g.offset(descriptor, 8))
 	g.cur.Store(g.descriptorLength(capacity), g.offset(descriptor, 16))
 	return descriptor
+}
+
+func (g *gen) sliceValue(data, length, capacity ir.Ref) ir.Ref {
+	aggregate := g.goABIAggregate(types.NewSlice(types.Typ[types.Uint8]))
+	return g.fn.Aggregate(
+		aggregate,
+		data,
+		g.descriptorLength(length),
+		g.descriptorLength(capacity),
+	)
+}
+
+func (g *gen) sliceParts(value ir.Ref) (data, length, capacity ir.Ref) {
+	if value.Kind == ir.RefAggregate {
+		aggregate := g.fn.AggregateValue(value)
+		if len(aggregate.Parts) != 3 {
+			panic("goc: slice aggregate does not have three parts")
+		}
+		return aggregate.Parts[0], aggregate.Parts[1], aggregate.Parts[2]
+	}
+	return g.cur.Load(ir.ClsP, value),
+		g.cur.Load(ir.ClsL, g.offset(value, 8)),
+		g.cur.Load(ir.ClsL, g.offset(value, 16))
+}
+
+func (g *gen) materializeSlice(value ir.Ref) ir.Ref {
+	if value.Kind != ir.RefAggregate {
+		return value
+	}
+	storage := g.localAlloc(8, 24)
+	g.store(value, storage, types.NewSlice(types.Typ[types.Uint8]))
+	return storage
 }
 
 func (g *gen) descriptorLength(value ir.Ref) ir.Ref {
@@ -4999,17 +5542,17 @@ func (g *gen) builtinCall(call *ast.CallExpr, builtin *types.Builtin) ir.Ref {
 		offset := g.expr(call.Args[1])
 		return g.cur.Add(ir.ClsP, pointer, offset)
 	case "Sizeof":
-		argumentType := g.info.Types[call.Args[0]].Type
+		argumentType := g.typeAndValue(call.Args[0]).Type
 		pointerSize := int64(types.SizesFor("gc", runtime.GOARCH).Sizeof(types.Typ[types.Uintptr]))
 		if _, isTypeParameter := argumentType.(*types.TypeParam); isTypeParameter {
 			return g.fn.Long(pointerSize)
 		}
 		return g.fn.Long(typeSize(argumentType))
 	case "make":
-		if mapType, ok := g.info.Types[call].Type.Underlying().(*types.Map); ok {
+		if mapType, ok := g.typeAndValue(call).Type.Underlying().(*types.Map); ok {
 			return g.makeMap(call, mapType)
 		}
-		if sliceType, ok := g.info.Types[call].Type.Underlying().(*types.Slice); ok {
+		if sliceType, ok := g.typeAndValue(call).Type.Underlying().(*types.Slice); ok {
 			length := g.expr(call.Args[1])
 			capacity := length
 			if len(call.Args) == 3 {
@@ -5035,14 +5578,14 @@ func (g *gen) builtinCall(call *ast.CallExpr, builtin *types.Builtin) ir.Ref {
 			}
 			return g.sliceDescriptor(data, length, capacity)
 		}
-		if channelType, ok := g.info.Types[call].Type.Underlying().(*types.Chan); ok {
+		if channelType, ok := g.typeAndValue(call).Type.Underlying().(*types.Chan); ok {
 			capacity := g.fn.Long(0)
 			if len(call.Args) == 2 {
 				capacity = g.expr(call.Args[1])
 			}
 			return g.cur.Call(ir.ClsP, g.fn.Sym("runtime.makechan", 0), g.channelType(channelType), capacity)
 		}
-		g.fail(call, "unsupported make result %s", g.info.Types[call].Type)
+		g.fail(call, "unsupported make result %s", g.typeAndValue(call).Type)
 		return ir.R
 	case "close":
 		g.cur.CallVoid(g.fn.Sym("runtime.closechan", 0), g.expr(call.Args[0]))
@@ -5057,12 +5600,16 @@ func (g *gen) builtinCall(call *ast.CallExpr, builtin *types.Builtin) ir.Ref {
 		return g.sliceDescriptor(data, length, length)
 	case "StringData", "SliceData":
 		descriptor := g.expr(call.Args[0])
+		if isSliceType(g.typeAndValue(call.Args[0]).Type) {
+			data, _, _ := g.sliceParts(descriptor)
+			return data
+		}
 		return g.cur.Load(ir.ClsP, descriptor)
 	case "real", "imag":
 		return g.complexComponent(call, builtin.Name() == "imag")
 	case "min", "max":
 		result := g.expr(call.Args[0])
-		resultType := g.info.Types[call.Args[0]].Type
+		resultType := g.typeAndValue(call.Args[0]).Type
 		class, _ := scalar(resultType)
 		for _, argument := range call.Args[1:] {
 			candidate := g.expr(argument)
@@ -5086,20 +5633,21 @@ func (g *gen) builtinCall(call *ast.CallExpr, builtin *types.Builtin) ir.Ref {
 		}
 		return result
 	case "new":
-		pointer := g.info.Types[call].Type.(*types.Pointer)
+		pointer := g.typeAndValue(call).Type.(*types.Pointer)
 		return g.allocateTyped(pointer.Elem())
 	case "len", "cap":
-		argumentType := g.info.Types[call.Args[0]].Type
+		argumentType := g.typeAndValue(call.Args[0]).Type
 		switch t := representativeType(argumentType).Underlying().(type) {
 		case *types.Array:
 			return g.fn.Long(t.Len())
 		case *types.Slice:
 			descriptor := g.expr(call.Args[0])
-			offset := int64(8)
 			if builtin.Name() == "cap" {
-				offset = 16
+				_, _, capacity := g.sliceParts(descriptor)
+				return capacity
 			}
-			return g.cur.Load(ir.ClsL, g.offset(descriptor, offset))
+			_, length, _ := g.sliceParts(descriptor)
+			return length
 		case *types.Map:
 			if builtin.Name() == "cap" {
 				g.fail(call, "cap is not defined for maps")
@@ -5130,22 +5678,27 @@ func (g *gen) builtinCall(call *ast.CallExpr, builtin *types.Builtin) ir.Ref {
 	case "copy":
 		destination := g.expr(call.Args[0])
 		source := g.expr(call.Args[1])
-		length := g.cur.Load(ir.ClsL, g.offset(source, 8))
-		destinationLength := g.cur.Load(ir.ClsL, g.offset(destination, 8))
+		destinationData, destinationLength, _ := g.sliceParts(destination)
+		var sourceData ir.Ref
+		var length ir.Ref
+		if isSliceType(g.typeAndValue(call.Args[1]).Type) {
+			sourceData, length, _ = g.sliceParts(source)
+		} else {
+			sourceData = g.cur.Load(ir.ClsP, source)
+			length = g.cur.Load(ir.ClsL, g.offset(source, 8))
+		}
 		useSource := g.cur.Cmp(ir.CmpSle, ir.ClsW, length, destinationLength)
 		shorter := g.selectValue(useSource, length, destinationLength, ir.ClsL)
-		element := g.info.Types[call.Args[0]].Type.Underlying().(*types.Slice).Elem()
+		element := g.typeAndValue(call.Args[0]).Type.Underlying().(*types.Slice).Elem()
 		bytes := shorter
 		if size := typeSize(element); size != 1 {
 			bytes = g.cur.Mul(ir.ClsL, shorter, g.fn.Long(size))
 		}
 		memcpy := g.fn.Sym("goc_memcpy", 0)
-		destinationData := g.cur.Load(ir.ClsP, destination)
-		sourceData := g.cur.Load(ir.ClsP, source)
 		g.cur.Call(ir.ClsP, memcpy, destinationData, sourceData, bytes)
 		return shorter
 	case "clear":
-		argumentType := g.info.Types[call.Args[0]].Type
+		argumentType := g.typeAndValue(call.Args[0]).Type
 		var data ir.Ref
 		var size ir.Ref
 		switch target := argumentType.Underlying().(type) {
@@ -5154,8 +5707,8 @@ func (g *gen) builtinCall(call *ast.CallExpr, builtin *types.Builtin) ir.Ref {
 			size = g.fn.Long(typeSize(target))
 		case *types.Slice:
 			descriptor := g.expr(call.Args[0])
-			data = g.cur.Load(ir.ClsP, descriptor)
-			length := g.cur.Load(ir.ClsL, g.offset(descriptor, 8))
+			var length ir.Ref
+			data, length, _ = g.sliceParts(descriptor)
 			size = length
 			if elementSize := typeSize(target.Elem()); elementSize != 1 {
 				size = g.cur.Mul(ir.ClsL, length, g.fn.Long(elementSize))
@@ -5182,7 +5735,7 @@ func (g *gen) builtinCall(call *ast.CallExpr, builtin *types.Builtin) ir.Ref {
 }
 
 func (g *gen) complexComponent(call *ast.CallExpr, imaginary bool) ir.Ref {
-	argumentType, ok := g.info.Types[call.Args[0]].Type.Underlying().(*types.Basic)
+	argumentType, ok := g.typeAndValue(call.Args[0]).Type.Underlying().(*types.Basic)
 	if !ok {
 		g.fail(call, "%s operand is not a complex number", call.Fun)
 		return ir.R
@@ -5207,20 +5760,18 @@ func (g *gen) complexComponent(call *ast.CallExpr, imaginary bool) ir.Ref {
 }
 
 func (g *gen) appendCall(call *ast.CallExpr) ir.Ref {
-	sliceType := g.info.Types[call].Type.Underlying().(*types.Slice)
+	sliceType := g.typeAndValue(call).Type.Underlying().(*types.Slice)
 	elementType := sliceType.Elem()
 	elementSize := typeSize(elementType)
 	destination := g.expr(call.Args[0])
-	oldData := g.cur.Load(ir.ClsP, destination)
-	oldLength := g.cur.Load(ir.ClsL, g.offset(destination, 8))
-	oldCapacity := g.cur.Load(ir.ClsL, g.offset(destination, 16))
+	oldData, oldLength, oldCapacity := g.sliceParts(destination)
 
 	var source ir.Ref
 	var values []ir.Ref
 	var added ir.Ref
 	if call.Ellipsis.IsValid() {
 		source = g.expr(call.Args[1])
-		added = g.cur.Load(ir.ClsL, g.offset(source, 8))
+		_, added, _ = g.sliceParts(source)
 	} else {
 		values = make([]ir.Ref, 0, len(call.Args)-1)
 		for _, argument := range call.Args[1:] {
@@ -5230,7 +5781,9 @@ func (g *gen) appendCall(call *ast.CallExpr) ir.Ref {
 	}
 	newLength := g.cur.Add(ir.ClsL, oldLength, added)
 
-	resultSlot := g.localAlloc(8, 8)
+	resultDataSlot := g.localAlloc(8, 8)
+	resultLengthSlot := g.localAlloc(8, 8)
+	resultCapacitySlot := g.localAlloc(8, 8)
 	grow := g.block("appendgrow")
 	reuse := g.block("appendreuse")
 	done := g.block("appenddone")
@@ -5240,9 +5793,18 @@ func (g *gen) appendCall(call *ast.CallExpr) ir.Ref {
 	g.cur = grow
 	var grown ir.Ref
 	if g.runtimeAllocation {
-		grown = g.cur.Call(ir.ClsP, g.fn.Sym("runtime.growslice", 0), oldData, newLength, oldCapacity, added, g.runtimeType(elementType))
-		instruction := &g.cur.Instrs[len(g.cur.Instrs)-1]
-		instruction.RetAgg = g.goABIAggregate(sliceType)
+		aggregate := g.goABIAggregate(sliceType)
+		parts := g.cur.CallAggregate(
+			aggregate,
+			[]ir.Cls{ir.ClsP, ir.ClsL, ir.ClsL},
+			g.fn.Sym("runtime.growslice", 0),
+			oldData,
+			newLength,
+			oldCapacity,
+			added,
+			g.runtimeType(elementType),
+		)
+		grown = g.fn.Aggregate(aggregate, parts...)
 	} else {
 		doubled := g.cur.Mul(ir.ClsL, oldCapacity, g.fn.Long(2))
 		useLength := g.cur.Cmp(ir.CmpUgt, ir.ClsL, newLength, doubled)
@@ -5254,23 +5816,29 @@ func (g *gen) appendCall(call *ast.CallExpr) ir.Ref {
 		data := g.cur.Call(ir.ClsP, g.fn.Sym("realloc", 0), oldData, bytes)
 		grown = g.sliceDescriptor(data, newLength, newCapacity)
 	}
-	g.cur.Store(grown, resultSlot)
+	grownData, grownLength, grownCapacity := g.sliceParts(grown)
+	g.cur.Store(grownData, resultDataSlot)
+	g.cur.Store(grownLength, resultLengthSlot)
+	g.cur.Store(grownCapacity, resultCapacitySlot)
 	g.cur.Goto(done)
 
 	g.cur = reuse
-	g.cur.Store(g.sliceDescriptor(oldData, newLength, oldCapacity), resultSlot)
+	g.cur.Store(oldData, resultDataSlot)
+	g.cur.Store(newLength, resultLengthSlot)
+	g.cur.Store(oldCapacity, resultCapacitySlot)
 	g.cur.Goto(done)
 
 	g.cur = done
-	result := g.cur.Load(ir.ClsP, resultSlot)
-	resultData := g.cur.Load(ir.ClsP, result)
+	resultData := g.cur.Load(ir.ClsP, resultDataSlot)
+	resultLength := g.cur.Load(ir.ClsL, resultLengthSlot)
+	resultCapacity := g.cur.Load(ir.ClsL, resultCapacitySlot)
 	byteOffset := oldLength
 	if elementSize != 1 {
 		byteOffset = g.cur.Mul(ir.ClsL, oldLength, g.fn.Long(elementSize))
 	}
 	writeAt := g.cur.Add(ir.ClsP, resultData, byteOffset)
 	if source != ir.R {
-		sourceData := g.cur.Load(ir.ClsP, source)
+		sourceData, _, _ := g.sliceParts(source)
 		byteLength := added
 		if elementSize != 1 {
 			byteLength = g.cur.Mul(ir.ClsL, added, g.fn.Long(elementSize))
@@ -5279,14 +5847,16 @@ func (g *gen) appendCall(call *ast.CallExpr) ir.Ref {
 	} else {
 		for index, value := range values {
 			address := g.offset(writeAt, int64(index)*elementSize)
-			if isInlineAggregate(elementType) {
+			if g.runtimeAllocation && isSliceType(elementType) {
+				g.storeInlineValue(value, address, elementType)
+			} else if isInlineAggregate(elementType) {
 				g.cur.Call(ir.ClsP, g.fn.Sym("goc_memcpy", 0), address, value, g.fn.Long(elementSize))
 			} else {
 				g.store(value, address, elementType)
 			}
 		}
 	}
-	return result
+	return g.sliceDescriptor(resultData, resultLength, resultCapacity)
 }
 
 func (g *gen) channelType(channel *types.Chan) ir.Ref {
@@ -5512,8 +6082,42 @@ func (g *gen) allocateMap(mapType *types.Map, capacity ir.Ref) ir.Ref {
 	return header
 }
 
+func (g *gen) cloneMap(mapping ir.Ref, mapType *types.Map) ir.Ref {
+	clonedSlot := g.alloc(types.NewMap(mapType.Key(), mapType.Elem()))
+	g.store(g.fn.ConstInt(ir.ClsP, 0), clonedSlot, types.NewMap(mapType.Key(), mapType.Elem()))
+	done := g.block("mapcloneend")
+	clone := g.block("mapclone")
+	isNil := g.cur.Cmp(ir.CmpEq, ir.ClsP, mapping, g.fn.ConstInt(ir.ClsP, 0))
+	g.cur.Jnz(isNil, done, clone)
+
+	g.cur = clone
+	capacity := g.cur.Load(ir.ClsL, g.offset(mapping, mapCapacityOffset))
+	cloned := g.allocateMap(mapType, capacity)
+	length := g.cur.Load(ir.ClsL, g.offset(mapping, mapLengthOffset))
+	g.cur.Store(length, g.offset(cloned, mapLengthOffset))
+	memcpy := g.fn.Sym("goc_memcpy", 0)
+	for _, array := range []struct {
+		offset      int64
+		elementSize int64
+	}{
+		{offset: mapKeysOffset, elementSize: typeSize(mapType.Key())},
+		{offset: mapValuesOffset, elementSize: typeSize(mapType.Elem())},
+		{offset: mapUsedOffset, elementSize: 1},
+	} {
+		source := g.cur.Load(ir.ClsP, g.offset(mapping, array.offset))
+		destination := g.cur.Load(ir.ClsP, g.offset(cloned, array.offset))
+		byteCount := g.cur.Mul(ir.ClsL, capacity, g.fn.Long(array.elementSize))
+		g.cur.Call(ir.ClsP, memcpy, destination, source, byteCount)
+	}
+	g.store(cloned, clonedSlot, types.NewMap(mapType.Key(), mapType.Elem()))
+	g.cur.Goto(done)
+
+	g.cur = done
+	return g.load(clonedSlot, types.NewMap(mapType.Key(), mapType.Elem()))
+}
+
 func (g *gen) mapLookup(index *ast.IndexExpr) (ir.Ref, ir.Ref) {
-	mapType := g.info.Types[index.X].Type.Underlying().(*types.Map)
+	mapType := g.typeAndValue(index.X).Type.Underlying().(*types.Map)
 	mapping := g.expr(index.X)
 	key := g.assignmentValue(index.Index, mapType.Key())
 	valueSlot := g.allocLocal(mapType.Elem())
@@ -5579,7 +6183,7 @@ func (g *gen) mapLookup(index *ast.IndexExpr) (ir.Ref, ir.Ref) {
 }
 
 func (g *gen) mapAssign(index *ast.IndexExpr, valueExpression ast.Expr) {
-	mapType := g.info.Types[index.X].Type.Underlying().(*types.Map)
+	mapType := g.typeAndValue(index.X).Type.Underlying().(*types.Map)
 	mapping := g.expr(index.X)
 	key := g.assignmentValue(index.Index, mapType.Key())
 	value := g.assignmentValue(valueExpression, mapType.Elem())
@@ -5674,6 +6278,9 @@ func (g *gen) mapAssign(index *ast.IndexExpr, valueExpression ast.Expr) {
 }
 
 func (g *gen) mapElementValue(address ir.Ref, valueType types.Type) ir.Ref {
+	if g.runtimeAllocation && isSliceType(valueType) {
+		return g.load(address, valueType)
+	}
 	if isInlineAggregate(valueType) || isInterfaceValue(valueType) {
 		return address
 	}
@@ -5739,16 +6346,18 @@ func (g *gen) assignMapResult(statement *ast.AssignStmt, resultIndex int, value 
 	}
 	slot, exists := g.addr(object)
 	if !exists {
-		slot = g.alloc(object.Type())
+		objectType := g.objectType(object)
+		slot = g.alloc(objectType)
 		g.vars[object] = slot
 	}
-	g.store(g.coerce(value, object.Type()), slot, object.Type())
+	objectType := g.objectType(object)
+	g.store(g.coerce(value, objectType), slot, objectType)
 }
 
 func (g *gen) mapDelete(mapExpression, keyExpression ast.Expr) {
-	mapType := g.info.Types[mapExpression].Type.Underlying().(*types.Map)
+	mapType := g.typeAndValue(mapExpression).Type.Underlying().(*types.Map)
 	mapping := g.expr(mapExpression)
-	key := g.expr(keyExpression)
+	key := g.assignmentValue(keyExpression, mapType.Key())
 	done := g.block("mapdeleteend")
 	start := g.block("mapdeletestart")
 	isNil := g.cur.Cmp(ir.CmpEq, ir.ClsP, mapping, g.fn.ConstInt(ir.ClsP, 0))
@@ -5778,9 +6387,8 @@ func (g *gen) mapDelete(mapExpression, keyExpression ast.Expr) {
 
 	g.cur = compare
 	keyAddress := g.mapElementAddress(mapping, mapKeysOffset, i, mapType.Key())
-	storedKey := g.load(keyAddress, mapType.Key())
-	keyClass, _ := scalar(mapType.Key())
-	equal := g.cur.Cmp(ir.CmpEq, keyClass, storedKey, key)
+	storedKey := g.mapElementValue(keyAddress, mapType.Key())
+	equal := g.binaryRaw(token.EQL, storedKey, key, mapType.Key(), keyExpression)
 	g.cur.Jnz(equal, remove, next)
 
 	g.cur = remove
@@ -5866,22 +6474,25 @@ func (g *gen) builtinPrint(call *ast.CallExpr, newline bool) {
 }
 
 func (g *gen) builtinRuntimePrint(call *ast.CallExpr, newline bool) {
-	printString := g.fn.Sym("runtime_gocPrintString", 0)
-	printInteger := g.fn.Sym("runtime_gocPrintInteger", 0)
 	for _, argument := range call.Args {
 		value := g.info.Types[argument]
 		if value.Value != nil && value.Value.Kind() == constant.String {
 			contents := constant.StringVal(value.Value)
-			g.cur.Call(ir.ClsW, printString, g.cString(contents), g.fn.Long(int64(len(contents))))
+			g.callRuntimePrint(call, "printstring", g.stringConstant(contents))
 			continue
 		}
 
 		argumentType := value.Type
 		if basic, ok := argumentType.Underlying().(*types.Basic); ok && basic.Kind() == types.String {
-			descriptor := g.expr(argument)
-			data := g.cur.Load(ir.ClsP, descriptor)
-			length := g.cur.Load(ir.ClsL, g.offset(descriptor, 8))
-			g.cur.Call(ir.ClsW, printString, data, length)
+			g.callRuntimePrint(call, "printstring", g.expr(argument))
+			continue
+		}
+		if isSliceType(argumentType) {
+			// The runtime's diagnostic print builtin accepts otherwise unsupported
+			// values as an address-shaped operand. Materialize a real header here;
+			// ordinary slice calls continue to pass the three value components.
+			header := g.materializeSlice(g.expr(argument))
+			g.callRuntimePrint(call, "printint", header)
 			continue
 		}
 
@@ -5890,28 +6501,56 @@ func (g *gen) builtinRuntimePrint(call *ast.CallExpr, newline bool) {
 			g.fail(argument, "unsupported print operand %s", argumentType)
 			return
 		}
-		mode := int64(0)
-		isUnsigned := false
-		if _, pointer := argumentType.Underlying().(*types.Pointer); pointer {
-			mode = 2
-			isUnsigned = true
-		} else if basic, basicOK := argumentType.Underlying().(*types.Basic); basicOK && basic.Info()&types.IsUnsigned != 0 {
-			mode = 1
-			isUnsigned = true
-		}
 		argumentValue := g.expr(argument)
-		if class == ir.ClsW {
-			if isUnsigned {
+		basic, isBasic := argumentType.Underlying().(*types.Basic)
+		switch {
+		case isBasic && basic.Kind() == types.Bool:
+			g.callRuntimePrint(call, "printbool", argumentValue)
+		case class == ir.ClsS:
+			g.callRuntimePrint(call, "printfloat32", argumentValue)
+		case class == ir.ClsD:
+			g.callRuntimePrint(call, "printfloat64", argumentValue)
+		case isRuntimePrintPointer(argumentType):
+			g.callRuntimePrint(call, "printhex", g.cur.Copy(ir.ClsL, argumentValue))
+		case isBasic && basic.Info()&types.IsUnsigned != 0:
+			if class == ir.ClsW {
 				argumentValue = g.cur.Extuw(ir.ClsL, argumentValue)
-			} else {
+			}
+			g.callRuntimePrint(call, "printuint", argumentValue)
+		default:
+			if class == ir.ClsW {
 				argumentValue = g.cur.Extsw(ir.ClsL, argumentValue)
 			}
+			g.callRuntimePrint(call, "printint", argumentValue)
 		}
-		g.cur.Call(ir.ClsW, printInteger, argumentValue, g.fn.Long(mode))
 	}
 	if newline {
-		g.cur.Call(ir.ClsW, printString, g.cString("\n"), g.fn.Long(1))
+		g.callRuntimePrint(call, "printnl")
 	}
+}
+
+func (g *gen) callRuntimePrint(node ast.Node, name string, arguments ...ir.Ref) {
+	for function := range g.functionDecls {
+		if function.Pkg() == nil || function.Pkg().Path() != "runtime" || function.Name() != name {
+			continue
+		}
+		signature := compiledFunctionSignature(function)
+		if signature.Recv() != nil {
+			continue
+		}
+		g.callVoidWithSignature(g.fn.Sym(g.functionSymbol(function), 0), arguments, signature, nil)
+		return
+	}
+	g.fail(node, "runtime print function %s is unavailable", name)
+}
+
+func isRuntimePrintPointer(valueType types.Type) bool {
+	switch valueType.Underlying().(type) {
+	case *types.Pointer, *types.Map, *types.Chan, *types.Signature:
+		return true
+	}
+	basic, ok := valueType.Underlying().(*types.Basic)
+	return ok && basic.Kind() == types.UnsafePointer
 }
 
 func (g *gen) cString(contents string) ir.Ref {
@@ -6131,6 +6770,161 @@ func compiledFunctionSignature(function *types.Func) *types.Signature {
 	return function.Origin().Type().(*types.Signature)
 }
 
+func genericInstanceSymbol(function *types.Func, arguments []types.Type) string {
+	var symbol strings.Builder
+	symbol.WriteString(functionSymbol(function.Origin()))
+	symbol.WriteByte('[')
+	for index, argument := range arguments {
+		if index > 0 {
+			symbol.WriteByte(',')
+		}
+		symbol.WriteString(types.TypeString(argument, func(pkg *types.Package) string {
+			return pkg.Path()
+		}))
+	}
+	symbol.WriteByte(']')
+	return symbol.String()
+}
+
+func functionTypeSubstitutions(function functionDecl) map[*types.TypeParam]types.Type {
+	if len(function.typeArguments) == 0 {
+		return nil
+	}
+	object, ok := function.info.Defs[function.decl.Name].(*types.Func)
+	if !ok {
+		return nil
+	}
+	parameters := object.Origin().Type().(*types.Signature).TypeParams()
+	substitutions := make(map[*types.TypeParam]types.Type, parameters.Len())
+	for index := 0; index < parameters.Len() && index < len(function.typeArguments); index++ {
+		substitutions[parameters.At(index)] = function.typeArguments[index]
+	}
+	return substitutions
+}
+
+func substituteType(valueType types.Type, substitutions map[*types.TypeParam]types.Type) types.Type {
+	if valueType == nil || len(substitutions) == 0 {
+		return valueType
+	}
+	switch value := valueType.(type) {
+	case *types.TypeParam:
+		if replacement := substitutions[value]; replacement != nil {
+			return replacement
+		}
+		return value
+	case *types.Alias:
+		return substituteType(types.Unalias(value), substitutions)
+	case *types.Array:
+		return types.NewArray(substituteType(value.Elem(), substitutions), value.Len())
+	case *types.Slice:
+		return types.NewSlice(substituteType(value.Elem(), substitutions))
+	case *types.Pointer:
+		return types.NewPointer(substituteType(value.Elem(), substitutions))
+	case *types.Map:
+		return types.NewMap(
+			substituteType(value.Key(), substitutions),
+			substituteType(value.Elem(), substitutions),
+		)
+	case *types.Chan:
+		return types.NewChan(value.Dir(), substituteType(value.Elem(), substitutions))
+	case *types.Tuple:
+		variables := make([]*types.Var, value.Len())
+		for index := range variables {
+			variable := value.At(index)
+			variables[index] = types.NewVar(
+				variable.Pos(),
+				variable.Pkg(),
+				variable.Name(),
+				substituteType(variable.Type(), substitutions),
+			)
+		}
+		return types.NewTuple(variables...)
+	case *types.Signature:
+		var receiver *types.Var
+		if value.Recv() != nil {
+			receiver = types.NewVar(
+				value.Recv().Pos(),
+				value.Recv().Pkg(),
+				value.Recv().Name(),
+				substituteType(value.Recv().Type(), substitutions),
+			)
+		}
+		parameters := substituteType(value.Params(), substitutions).(*types.Tuple)
+		results := substituteType(value.Results(), substitutions).(*types.Tuple)
+		return types.NewSignatureType(receiver, nil, nil, parameters, results, value.Variadic())
+	case *types.Named:
+		if value.TypeArgs().Len() == 0 {
+			return value
+		}
+		arguments := make([]types.Type, value.TypeArgs().Len())
+		changed := false
+		for index := range arguments {
+			arguments[index] = substituteType(value.TypeArgs().At(index), substitutions)
+			changed = changed || !types.Identical(arguments[index], value.TypeArgs().At(index))
+		}
+		if !changed {
+			return value
+		}
+		instantiated, err := types.Instantiate(nil, value.Origin(), arguments, false)
+		if err == nil {
+			return instantiated
+		}
+	}
+	return valueType
+}
+
+func (g *gen) typeSubstitutions() map[*types.TypeParam]types.Type {
+	if len(g.typeArguments) == 0 || g.currentFunction == nil {
+		return nil
+	}
+	parameters := g.currentFunction.Origin().Type().(*types.Signature).TypeParams()
+	substitutions := make(map[*types.TypeParam]types.Type, parameters.Len())
+	for index := 0; index < parameters.Len() && index < len(g.typeArguments); index++ {
+		substitutions[parameters.At(index)] = g.typeArguments[index]
+	}
+	return substitutions
+}
+
+func (g *gen) concreteType(valueType types.Type) types.Type {
+	return substituteType(valueType, g.typeSubstitutions())
+}
+
+func (g *gen) typeAndValue(expression ast.Expr) types.TypeAndValue {
+	value := g.info.Types[expression]
+	value.Type = g.concreteType(value.Type)
+	return value
+}
+
+func (g *gen) objectType(object types.Object) types.Type {
+	return g.concreteType(object.Type())
+}
+
+func functionIdentifier(expression ast.Expr) *ast.Ident {
+	switch expression := expression.(type) {
+	case *ast.Ident:
+		return expression
+	case *ast.SelectorExpr:
+		return expression.Sel
+	}
+	return nil
+}
+
+func (g *gen) instantiatedFunctionSymbol(function *types.Func, expression ast.Expr) (string, bool) {
+	identifier := functionIdentifier(expression)
+	if identifier == nil {
+		return "", false
+	}
+	instance, ok := g.info.Instances[identifier]
+	if !ok || function.Origin().Type().(*types.Signature).TypeParams().Len() == 0 {
+		return "", false
+	}
+	arguments := make([]types.Type, instance.TypeArgs.Len())
+	for index := range arguments {
+		arguments[index] = g.concreteType(instance.TypeArgs.At(index))
+	}
+	return genericInstanceSymbol(function, arguments), true
+}
+
 func (g *gen) functionSymbol(function *types.Func) string {
 	if name := g.linkNames[function]; name != "" {
 		return name
@@ -6203,6 +6997,15 @@ func (g *gen) binaryRaw(op token.Token, x, y ir.Ref, t types.Type, n ast.Node) i
 				}
 				return isNil
 			}
+			if g.runtimeAllocation {
+				left := g.materializeNilInterface(x)
+				right := g.materializeNilInterface(y)
+				equal := g.cur.Call(ir.ClsW, g.fn.Sym("runtime.nilinterequal", 0), left, right)
+				if op == token.NEQ {
+					return g.cur.Cmp(ir.CmpEq, ir.ClsW, equal, g.fn.Word(0))
+				}
+				return equal
+			}
 		}
 	}
 	if isMemoryValue(t) && (op == token.EQL || op == token.NEQ) {
@@ -6214,7 +7017,7 @@ func (g *gen) binaryRaw(op token.Token, x, y ir.Ref, t types.Type, n ast.Node) i
 	}
 	if op == token.EQL || op == token.NEQ {
 		if _, ok := t.Underlying().(*types.Slice); ok {
-			x = g.cur.Load(ir.ClsP, x)
+			x, _, _ = g.sliceParts(x)
 			predicate := ir.CmpEq
 			if op == token.NEQ {
 				predicate = ir.CmpNe

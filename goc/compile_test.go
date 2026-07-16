@@ -149,16 +149,23 @@ func main() {
 		"internal/bytealg/equal_arm64.s":                   "internal/bytealg",
 		"internal/bytealg/index_arm64.s":                   "internal/bytealg",
 		"internal/bytealg/indexbyte_arm64.s":               "internal/bytealg",
+		"internal/abi/abi_test.s":                          "internal/abi",
+		"internal/abi/stub.s":                              "internal/abi",
+		"internal/cpu/cpu.s":                               "internal/cpu",
 		"internal/cpu/cpu_arm64.s":                         "internal/cpu",
 		"internal/chacha8rand/chacha8_arm64.s":             "internal/chacha8rand",
 		"internal/runtime/sys/dit_arm64.s":                 "internal/runtime/sys",
+		"internal/runtime/sys/empty.s":                     "internal/runtime/sys",
 		"internal/runtime/syscall/linux/asm_linux_arm64.s": "internal/runtime/syscall/linux",
 		"internal/runtime/atomic/atomic_arm64.s":           "internal/runtime/atomic",
+		"runtime/asm.s":                                    "runtime",
 		"runtime/asm_arm64.s":                              "runtime",
 		"runtime/atomic_arm64.s":                           "runtime",
+		"runtime/ints.s":                                   "runtime",
 		"runtime/memclr_arm64.s":                           "runtime",
 		"runtime/memmove_arm64.s":                          "runtime",
 		"runtime/preempt_arm64.s":                          "runtime",
+		"runtime/rt0_linux_arm64.s":                        "runtime",
 		"runtime/secret_arm64.s":                           "runtime",
 		"runtime/sys_linux_arm64.s":                        "runtime",
 		"runtime/tls_arm64.s":                              "runtime",
@@ -228,6 +235,48 @@ func main() {
 	}
 }
 
+func TestCompileExecutableUsesExactRuntimeFIPSIndicator(t *testing.T) {
+	source := `package main
+
+import "crypto/sha256"
+
+func main() {
+	_ = sha256.Sum256(nil)
+}
+`
+	module, err := CompileExecutable("main.go", []byte(source))
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	for _, symbol := range []string{
+		"crypto/internal/fips140.getIndicator",
+		"crypto/internal/fips140.setIndicator",
+	} {
+		count := 0
+		usesRuntimeG := false
+		for _, function := range module.Funcs {
+			if function.Name == symbol {
+				count++
+				if !function.Linkage.Export {
+					t.Errorf("%s is not exported", symbol)
+				}
+				for _, block := range function.Blocks {
+					for _, instruction := range block.Instrs {
+						usesRuntimeG = usesRuntimeG || instruction.Op == ir.OGetReg
+					}
+				}
+			}
+		}
+		if count != 1 {
+			t.Errorf("%s definitions = %d, want 1", symbol, count)
+		}
+		if !usesRuntimeG {
+			t.Errorf("%s does not use the exact runtime per-g implementation", symbol)
+		}
+	}
+}
+
 func TestCompileExecutableIncludesReachableSyscallAssembly(t *testing.T) {
 	module, err := CompileExecutable("main.go", []byte(`package main
 import "syscall"
@@ -282,6 +331,106 @@ func main() {
 	}
 	if !foundGeneric {
 		t.Error("internal/sync.HashTrieMap.LoadOrStore was not compiled")
+	}
+}
+
+func TestCompileExecutableRepresentsSlicesAsGroupedScalarValues(t *testing.T) {
+	module, err := CompileExecutable("main.go", []byte(`package main
+func shorten(values []int) { values = values[:1] }
+func tail(values []int) []int { return values[1:] }
+func main() {
+	values := []int{1, 2, 3}
+	shorten(values)
+	_ = tail(values)
+}
+`))
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	var shorten *ir.Func
+	var tail *ir.Func
+	foundGroupedCall := false
+	for _, function := range module.Funcs {
+		switch function.Name {
+		case "main.shorten":
+			shorten = function
+		case "main.tail":
+			tail = function
+		}
+		for _, block := range function.Blocks {
+			for _, instruction := range block.Instrs {
+				for _, argument := range instruction.Args {
+					if argument.Kind == ir.RefAggregate {
+						t.Fatalf("aggregate bundle escaped into %s instruction %s", function.Name, instruction.Op)
+					}
+				}
+				if instruction.Op != ir.OCall || len(instruction.Args) == 0 || instruction.Args[0].Kind != ir.RefConst {
+					continue
+				}
+				callee := function.Consts[instruction.Args[0].ID]
+				if callee.Kind == ir.ConstSym && callee.Sym == "main.shorten" {
+					foundGroupedCall = len(instruction.ArgGroups) == 1 && instruction.ArgGroups[0].Count == 3
+				}
+			}
+		}
+	}
+
+	if shorten == nil {
+		t.Fatal("main.shorten was not compiled")
+	}
+	if len(shorten.Params) != 3 || len(shorten.ParamGroups) != 1 || shorten.ParamGroups[0].Count != 3 {
+		t.Fatalf("shorten parameters = %d, groups = %#v", len(shorten.Params), shorten.ParamGroups)
+	}
+	if shorten.Params[0].Cls != ir.ClsP || shorten.Params[1].Cls != ir.ClsL || shorten.Params[2].Cls != ir.ClsL {
+		t.Fatalf("shorten parameter classes = %s, %s, %s", shorten.Params[0].Cls, shorten.Params[1].Cls, shorten.Params[2].Cls)
+	}
+	if tail == nil || !tail.RetValues || tail.RetAgg == nil {
+		t.Fatalf("tail aggregate result = %#v, value form = %v", tail, tail != nil && tail.RetValues)
+	}
+	if tail.RetAgg != shorten.ParamGroups[0].Type {
+		t.Error("slice ABI metadata was not canonicalized to one aggregate type")
+	}
+	foundValueReturn := false
+	for _, block := range tail.Blocks {
+		if block.Jmp.Kind == ir.JmpRet && !block.Jmp.Arg.IsNone() && len(block.Jmp.Args) == 2 {
+			foundValueReturn = true
+		}
+	}
+	if !foundValueReturn {
+		t.Error("tail has no three-part slice return")
+	}
+	if !foundGroupedCall {
+		t.Error("call to main.shorten does not carry a three-part aggregate group")
+	}
+}
+
+func TestCompileExecutableStoresGlobalSliceHeaderInline(t *testing.T) {
+	module, err := CompileExecutable("main.go", []byte(`package main
+var values = []int{7, 11, 13}
+func main() { _ = values }
+`))
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	var global *ir.Data
+	for _, data := range module.Data {
+		if data.Name == "main.values" {
+			global = data
+		}
+		if data.Name == "main.values.descriptor" {
+			t.Fatal("global slice still has a separate descriptor object")
+		}
+	}
+	if global == nil {
+		t.Fatal("main.values was not emitted")
+	}
+	if !reflect.DeepEqual(global.PointerWords, []int{0}) {
+		t.Fatalf("main.values pointer words = %v, want [0]", global.PointerWords)
+	}
+	if len(global.Items) != 2 || global.Items[0].Sym != "main.values.backing" || len(global.Items[1].Ints) != 2 {
+		t.Fatalf("main.values data = %#v, want inline data/length/capacity header", global.Items)
 	}
 }
 

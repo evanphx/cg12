@@ -1,6 +1,7 @@
 package arm64
 
 import (
+	"fmt"
 	"strings"
 	"testing"
 
@@ -518,6 +519,26 @@ func TestGoABINoSplitOmitsStackGrowthCheck(t *testing.T) {
 	assert.NotContains(t, assembly, "runtime_morestack_noctxt")
 }
 
+func TestGoABICallerFrameIntrinsicsUseSavedFrame(t *testing.T) {
+	pcModule := ir.NewModule()
+	callerPC := pcModule.NewFunc("caller_pc", ir.ClsL)
+	callerPC.GoABI = true
+	callerPC.NoSplit = true
+	callerPC.Entry().Ret(callerPC.Entry().CallerPC())
+
+	pcAssembly := disasmModule(t, pcModule)
+	assert.Contains(t, pcAssembly, "ldr x9, [x29, #8]")
+
+	spModule := ir.NewModule()
+	callerSP := spModule.NewFunc("caller_sp", ir.ClsL)
+	callerSP.GoABI = true
+	callerSP.NoSplit = true
+	callerSP.Entry().Ret(callerSP.Entry().CallerSP())
+
+	spAssembly := disasmModule(t, spModule)
+	assert.Contains(t, spAssembly, "add x9, x29, #24")
+}
+
 func TestGoABISpillsPointerLiveAcrossCall(t *testing.T) {
 	module := ir.NewModule()
 	f := module.NewFunc("pointer_across_call", ir.ClsP)
@@ -530,6 +551,83 @@ func TestGoABISpillsPointerLiveAcrossCall(t *testing.T) {
 	assembly := disasmModule(t, module)
 	assert.Equal(t, ir.NoReg, f.Temps[pointer.ID].Reg)
 	assert.Contains(t, assembly, "str xzr, [x29")
+}
+
+func TestGoABIGroupedSliceValuesUseRegistersOrWholeStack(t *testing.T) {
+	sliceType := &ir.AggType{
+		Name:  "slice",
+		Align: 8,
+		Fields: []ir.Field{
+			{Sub: ir.SubL, Pointer: true},
+			{Sub: ir.SubL},
+			{Sub: ir.SubL},
+		},
+	}
+
+	calleeModule := ir.NewModule()
+	callee := calleeModule.NewFunc("consume_slice", ir.ClsL)
+	callee.GoABI = true
+	callee.NoSplit = true
+	for index := 0; index < 14; index++ {
+		callee.Param(fmt.Sprintf("value%d", index), ir.ClsL)
+	}
+	parts := callee.ParamGroup("values", sliceType, ir.ClsP, ir.ClsL, ir.ClsL)
+	callee.Entry().Ret(parts[1])
+	calleeAssembly := disasmModule(t, calleeModule)
+	assert.Contains(t, calleeAssembly, "mov x")
+
+	callerModule := ir.NewModule()
+	caller := callerModule.NewFunc("call_slice_len", ir.ClsL)
+	caller.GoABI = true
+	caller.NoSplit = true
+	entry := caller.Entry()
+	arguments := make([]ir.Ref, 0, 17)
+	for index := 0; index < 14; index++ {
+		arguments = append(arguments, caller.Long(int64(index)))
+	}
+	arguments = append(arguments,
+		caller.ConstInt(ir.ClsP, 0),
+		caller.Long(7),
+		caller.Long(9),
+	)
+	result := entry.Call(ir.ClsL, caller.Sym("consume_slice", 0), arguments...)
+	call := &entry.Instrs[len(entry.Instrs)-1]
+	call.ArgGroups = []ir.ValueGroup{{Index: 14, Count: 3, Type: sliceType}}
+	entry.Ret(result)
+
+	callerAssembly := disasmModule(t, callerModule)
+	assert.Contains(t, callerAssembly, "[sp, #8]")
+	assert.Contains(t, callerAssembly, "[sp, #16]")
+	assert.Contains(t, callerAssembly, "[sp, #24]")
+
+	argumentFrame := goArgumentFrameFor(callee)
+	assert.Contains(t, argumentFrame.pointerWords, 0, "stack-passed slice data must remain visible to the garbage collector")
+}
+
+func TestGoABIGroupedSliceResultUsesThreeValueRegisters(t *testing.T) {
+	sliceType := &ir.AggType{
+		Name:  "slice_result",
+		Align: 8,
+		Fields: []ir.Field{
+			{Sub: ir.SubL, Pointer: true},
+			{Sub: ir.SubL},
+			{Sub: ir.SubL},
+		},
+	}
+
+	module := ir.NewModule()
+	function := module.NewFunc("return_slice", ir.ClsP)
+	function.GoABI = true
+	function.NoSplit = true
+	function.RetAgg = sliceType
+	function.RetValues = true
+	entry := function.Entry()
+	entry.RetAggregate(function.ConstInt(ir.ClsP, 0), function.Long(3), function.Long(5))
+
+	assembly := disasmModule(t, module)
+	assert.Contains(t, assembly, "x0")
+	assert.Contains(t, assembly, "x1")
+	assert.Contains(t, assembly, "x2")
 }
 
 func TestGoABIReportsPointerResultSlotLiveAcrossCall(t *testing.T) {
@@ -563,25 +661,6 @@ func TestGoPointerFrameOffsetsIgnoreUnassignedSpillSlots(t *testing.T) {
 	f.Temps[spilled.ID].Slot = 8
 
 	assert.Equal(t, []int{40}, goPointerFrameOffsets(f, nil, 32))
-}
-
-func TestGoAssemblyFunctionInfoOnlyMarksRealTopFrames(t *testing.T) {
-	functions := goAssemblyFunctionInfo()
-	topFrames := make([]string, 0, 2)
-	var supportEnd *goFunctionInfo
-	for _, function := range functions {
-		if function.funcFlag&1 != 0 {
-			topFrames = append(topFrames, function.name)
-		}
-		if function.name == "runtime_gocAssemblySupportEnd" {
-			function := function
-			supportEnd = &function
-		}
-	}
-
-	assert.Empty(t, topFrames)
-	require.NotNil(t, supportEnd)
-	assert.Equal(t, byte(goFuncFlagAsm), supportEnd.funcFlag)
 }
 
 func TestCompileLargeFrame(t *testing.T) {

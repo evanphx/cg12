@@ -618,18 +618,26 @@ func TestTranslateExactCRC32Assembly(t *testing.T) {
 
 func TestSupportsARM64FileKeepsTargetPolicyWithTranslator(t *testing.T) {
 	assert.True(t, SupportsARM64File("runtime", "asm_arm64.s"))
+	assert.True(t, SupportsARM64File("runtime", "asm.s"))
+	assert.True(t, SupportsARM64File("runtime", "ints.s"))
 	assert.True(t, SupportsARM64File("runtime", "memmove_arm64.s"))
 	assert.True(t, SupportsARM64File("runtime", "secret_arm64.s"))
 	assert.True(t, SupportsARM64File("runtime", "preempt_arm64.s"))
+	assert.True(t, SupportsARM64File("runtime", "rt0_linux_arm64.s"))
 	assert.True(t, SupportsARM64File("runtime", "tls_arm64.s"))
 	assert.True(t, SupportsARM64File("runtime", "sys_linux_arm64.s"))
+	assert.True(t, SupportsARM64File("internal/abi", "abi_test.s"))
+	assert.True(t, SupportsARM64File("internal/abi", "stub.s"))
 	assert.True(t, SupportsARM64File("internal/bytealg", "compare_arm64.s"))
 	assert.True(t, SupportsARM64File("internal/bytealg", "index_arm64.s"))
+	assert.True(t, SupportsARM64File("internal/cpu", "cpu.s"))
 	assert.True(t, SupportsARM64File("internal/cpu", "cpu_arm64.s"))
 	assert.True(t, SupportsARM64File("internal/chacha8rand", "chacha8_arm64.s"))
 	assert.True(t, SupportsARM64File("internal/runtime/sys", "dit_arm64.s"))
+	assert.True(t, SupportsARM64File("internal/runtime/sys", "empty.s"))
 	assert.True(t, SupportsARM64File("internal/runtime/syscall/linux", "asm_linux_arm64.s"))
 	assert.True(t, SupportsARM64File("internal/runtime/atomic", "atomic_arm64.s"))
+	assert.True(t, SupportsARM64File("internal/reflectlite", "asm.s"))
 	assert.True(t, SupportsARM64File("reflect", "asm_arm64.s"))
 	assert.True(t, SupportsARM64File("crypto/internal/fips140/sha256", "sha256block_arm64.s"))
 	assert.True(t, SupportsARM64File("crypto/internal/fips140/sha512", "sha512block_arm64.s"))
@@ -637,6 +645,7 @@ func TestSupportsARM64FileKeepsTargetPolicyWithTranslator(t *testing.T) {
 	assert.True(t, SupportsARM64File("crypto/sha1", "sha1block_arm64.s"))
 	assert.True(t, SupportsARM64File("hash/crc32", "crc32_arm64.s"))
 	assert.True(t, SupportsARM64File("syscall", "asm_linux_arm64.s"))
+	assert.True(t, SupportsARM64File("sync/atomic", "asm.s"))
 	assert.False(t, SupportsARM64File("other", "memmove_arm64.s"))
 }
 
@@ -655,25 +664,34 @@ func TestTranslateExactRuntimeARM64FilesAssemble(t *testing.T) {
 		name        string
 		defines     map[string]int64
 	}{
+		{packagePath: "runtime", name: "asm.s"},
 		{packagePath: "runtime", name: "atomic_arm64.s"},
+		{packagePath: "runtime", name: "ints.s"},
 		{packagePath: "runtime", name: "memclr_arm64.s"},
 		{packagePath: "runtime", name: "memmove_arm64.s"},
 		{packagePath: "runtime", name: "preempt_arm64.s", defines: map[string]int64{
 			"g_m": 48, "m_p": 208, "p_xRegs": 13800, "xRegPerP_scratch": 0, "xRegPerP_cache": 512,
 		}},
+		{packagePath: "runtime", name: "rt0_linux_arm64.s"},
 		{packagePath: "runtime", name: "secret_arm64.s"},
 		{packagePath: "runtime", name: "sys_linux_arm64.s", defines: runtimeAssemblyDefines()},
 		{packagePath: "runtime", name: "tls_arm64.s"},
+		{packagePath: "internal/abi", name: "abi_test.s"},
+		{packagePath: "internal/abi", name: "stub.s"},
 		{packagePath: "internal/bytealg", name: "compare_arm64.s"},
 		{packagePath: "internal/bytealg", name: "count_arm64.s"},
 		{packagePath: "internal/bytealg", name: "equal_arm64.s"},
 		{packagePath: "internal/bytealg", name: "index_arm64.s"},
 		{packagePath: "internal/bytealg", name: "indexbyte_arm64.s"},
+		{packagePath: "internal/cpu", name: "cpu.s"},
 		{packagePath: "internal/cpu", name: "cpu_arm64.s"},
 		{packagePath: "internal/runtime/sys", name: "dit_arm64.s"},
+		{packagePath: "internal/runtime/sys", name: "empty.s"},
 		{packagePath: "internal/runtime/syscall/linux", name: "asm_linux_arm64.s"},
 		{packagePath: "internal/chacha8rand", name: "chacha8_arm64.s"},
+		{packagePath: "internal/reflectlite", name: "asm.s"},
 		{packagePath: "internal/runtime/atomic", name: "atomic_arm64.s", defines: map[string]int64{"const_offsetARM64HasATOMICS": 135}},
+		{packagePath: "sync/atomic", name: "asm.s"},
 		{packagePath: "syscall", name: "asm_linux_arm64.s"},
 	}
 	for _, sourceFile := range files {

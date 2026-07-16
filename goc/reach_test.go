@@ -55,7 +55,7 @@ func TestRuntimeInitTaskContainsEveryPackageInitializer(t *testing.T) {
 
 	declarations, symbols := runtimeInitDeclarations(loader.units)
 	module := ir.NewModule()
-	descriptor := &ir.Data{Name: "runtime.runtime_inittasks.descriptor"}
+	descriptor := &ir.Data{Name: "runtime.runtime_inittasks"}
 	module.Data = append(module.Data, descriptor)
 	if err := addRuntimeInitTask(module, declarations, symbols); err != nil {
 		t.Fatal(err)
@@ -105,7 +105,7 @@ func Test() byte { return sha256.Sum256(nil)[0] }
 		t.Fatal(err)
 	}
 	root := file.Decls[1].(*ast.FuncDecl)
-	reachable := reachableFunctions([]*ast.FuncDecl{root}, info, pkg, loader.units, false, nil, nil, nil)
+	reachable := reachableFunctions([]*ast.FuncDecl{root}, []*ast.File{file}, info, pkg, loader.units, false, nil, nil, nil)
 	names := make(map[string]bool)
 	for _, function := range reachable {
 		names[function.pkg.Path()+"."+function.decl.Name.Name] = true

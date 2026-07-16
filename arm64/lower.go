@@ -58,6 +58,9 @@ func validateComparisonPredicates(function *ir.Func) error {
 			if instruction.Op != ir.OCmp || len(instruction.Args) == 0 {
 				continue
 			}
+			if instruction.Args[0].Kind == ir.RefAggregate {
+				return fmt.Errorf("aggregate value reached comparison in %s.%s at %+v", function.Name, block.Name, instruction.Pos)
+			}
 			operandClass := function.ClassOf(instruction.Args[0])
 			if operandClass.IsFloat() != instruction.Cmp.IsFloat() {
 				return fmt.Errorf("comparison predicate %v does not match %s operands at %+v", instruction.Cmp, operandClass, instruction.Pos)
@@ -894,7 +897,22 @@ func lowerParams(f *ir.Func, retBuf ir.Ref) error {
 		pin := newPinned(f, X8, ir.ClsL)
 		pars = append(pars, ir.Instr{Op: ir.OPar, Cls: ir.ClsL, To: retBuf, Args: []ir.Ref{pin}})
 	}
-	for _, p := range f.Params {
+	for parameterIndex := 0; parameterIndex < len(f.Params); {
+		if group, ok := valueGroupAt(f.ParamGroups, parameterIndex); ok {
+			end := parameterIndex + group.Count
+			if end > len(f.Params) {
+				return fmt.Errorf("arm64: aggregate parameter group extends beyond parameter list")
+			}
+			groupParameters, err := lowerGoValueParams(f, f.Params[parameterIndex:end], group.Type, &a)
+			if err != nil {
+				return err
+			}
+			pars = append(pars, groupParameters...)
+			parameterIndex = end
+			continue
+		}
+
+		p := f.Params[parameterIndex]
 		if p.Agg != nil {
 			ps, rs, err := lowerAggParam(f, p, &a)
 			if err != nil {
@@ -902,15 +920,18 @@ func lowerParams(f *ir.Func, retBuf ir.Ref) error {
 			}
 			pars = append(pars, ps...)
 			recon = append(recon, rs...)
+			parameterIndex++
 			continue
 		}
 		loc := a.assign(p.Cls)
 		if loc.onStack {
 			pars = append(pars, ir.Instr{Op: ir.OPar, Cls: p.Cls, To: p.Ref(), Aux: int64(loc.stacky)})
+			parameterIndex++
 			continue
 		}
 		pin := newPinned(f, loc.reg, p.Cls)
 		pars = append(pars, ir.Instr{Op: ir.OPar, Cls: p.Cls, To: p.Ref(), Args: []ir.Ref{pin}})
+		parameterIndex++
 	}
 	if !retBuf.IsNone() && f.GoABI {
 		resultAssigner := newArgAssigner(true)
@@ -987,7 +1008,13 @@ func lowerReturns(f *ir.Func, retBuf ir.Ref) error {
 		}
 		if f.RetAgg != nil {
 			if f.GoABI {
-				if err := lowerGoAggregateReturn(f, b, retBuf); err != nil {
+				var err error
+				if f.RetValues {
+					err = lowerGoValueReturn(f, b, retBuf)
+				} else {
+					err = lowerGoAggregateReturn(f, b, retBuf)
+				}
+				if err != nil {
 					return err
 				}
 			} else {
@@ -1051,24 +1078,52 @@ func lowerCalls(f *ir.Func) error {
 			pins := make([]ir.Ref, 0, len(callArgs))
 			var argSetup []ir.Instr // the OArg run, emitted after value computation
 			a := newArgAssigner(f.GoABI)
-			for k, arg := range callArgs {
-				if agg := aggArgAt(&in, k); agg != nil {
+			for argumentIndex := 0; argumentIndex < len(callArgs); {
+				if group, ok := valueGroupAt(in.ArgGroups, argumentIndex); ok {
+					end := argumentIndex + group.Count
+					if end > len(callArgs) {
+						return fmt.Errorf("arm64: aggregate argument group extends beyond call argument list")
+					}
+					var err error
+					argSetup, pins, err = lowerGoValueArg(f, callArgs[argumentIndex:end], group.Type, &a, argSetup, pins)
+					if err != nil {
+						return err
+					}
+					argumentIndex = end
+					continue
+				}
+
+				arg := callArgs[argumentIndex]
+				if agg := aggArgAt(&in, argumentIndex); agg != nil {
 					var err error
 					argSetup, pins, err = lowerAggArg(f, arg, agg, &a, &out, argSetup, pins)
 					if err != nil {
 						return err
 					}
+					argumentIndex++
 					continue
+				}
+				if arg.Kind == ir.RefAggregate {
+					calleeName := "indirect call"
+					if callee.Kind == ir.RefConst {
+						constant := f.Consts[callee.ID]
+						if constant.Kind == ir.ConstSym {
+							calleeName = constant.Sym
+						}
+					}
+					return fmt.Errorf("arm64: ungrouped aggregate call argument %d to %s in %s", argumentIndex, calleeName, f.Name)
 				}
 				cls := f.ClassOf(arg)
 				loc := a.assign(cls)
 				if loc.onStack {
 					argSetup = append(argSetup, ir.Instr{Op: ir.OArg, Cls: cls, To: ir.R, Aux: int64(loc.stacky), Args: []ir.Ref{arg}})
+					argumentIndex++
 					continue
 				}
 				pin := newPinned(f, loc.reg, cls)
 				argSetup = append(argSetup, ir.Instr{Op: ir.OArg, Cls: cls, To: pin, Args: []ir.Ref{arg}})
 				pins = append(pins, pin)
+				argumentIndex++
 			}
 			// Result handling: build the call's To/Defs and the post-call
 			// instructions, possibly adding an x8 setup to the argument run.
@@ -1085,8 +1140,14 @@ func lowerCalls(f *ir.Func) error {
 			case in.RetAgg != nil:
 				if f.GoABI {
 					var err error
-					callTo, callCls, callDefs, argSetup, pins, post, stackResult, stackResultOffset, resultEnd, err =
-						lowerGoAggregateResult(f, in.To, in.RetAgg, resultEnd, &out, argSetup, pins)
+					if in.RetValues {
+						destinations := append([]ir.Ref{in.To}, in.Defs...)
+						callTo, callCls, callDefs, argSetup, pins, post, stackResult, stackResultOffset, resultEnd, err =
+							lowerGoValueResult(f, destinations, in.RetAgg, resultEnd, &out, argSetup, pins)
+					} else {
+						callTo, callCls, callDefs, argSetup, pins, post, stackResult, stackResultOffset, resultEnd, err =
+							lowerGoAggregateResult(f, in.To, in.RetAgg, resultEnd, &out, argSetup, pins)
+					}
 					if err != nil {
 						return err
 					}

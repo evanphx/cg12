@@ -134,6 +134,13 @@ const (
 	OGetReg // result = register Args[0] (a RefReg)
 	OSetReg // register Args[1] (a RefReg) = Args[0]
 
+	// Runtime frame intrinsics. OGetCallerPC returns the address to which the
+	// current function will return. OGetCallerSP returns the caller's stack
+	// pointer as it was immediately before entering the current function. The
+	// backend resolves both after it has planned the current frame.
+	OGetCallerPC
+	OGetCallerSP
+
 	// Thread-local storage. A thread-local has no address of its own: each thread
 	// holds a copy, and how one is reached depends on the model the backend was
 	// asked for. These ops exist so that reaching it is ordinary instruction
@@ -154,7 +161,6 @@ const (
 	// library brought in by dlopen. That call is an ordinary one, so the register
 	// allocator sees what it clobbers.
 	OTLSIndexAddr
-
 	// OSafepoint marks a point where the garbage collector may stop the thread:
 	// the backend emits a stack map describing the managed references live here.
 	// Calls are safepoints implicitly; this marks the ones that are not calls —
@@ -365,6 +371,9 @@ var opTable = [numOps]opInfo{
 
 	OGetReg: {name: "getreg", hasResult: true},
 	OSetReg: {name: "setreg"},
+
+	OGetCallerPC: {name: "getcallerpc", hasResult: true},
+	OGetCallerSP: {name: "getcallersp", hasResult: true},
 
 	OAsm: {name: "asm", hasResult: true},
 

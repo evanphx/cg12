@@ -2,7 +2,6 @@
 package main
 
 import (
-	_ "embed"
 	"flag"
 	"fmt"
 	"os"
@@ -17,12 +16,6 @@ import (
 	"github.com/evanphx/cg12/ir"
 	"github.com/evanphx/cg12/opt"
 )
-
-//go:embed runtime_arm64.S
-var runtimeARM64Assembly string
-
-//go:embed bootstrap_arm64.S
-var bootstrapARM64Assembly string
 
 func main() {
 	out := flag.String("o", "", "output file")
@@ -125,8 +118,7 @@ func link(m *ir.Module, exe string) {
 	check(err)
 	inputs := []string{f.Name()}
 	if runtime.GOARCH == "arm64" {
-		assembly := runtimeSupportAssembly(m, translatedAssembly)
-		support, cleanup := compileRuntimeSupport(cc, assembly)
+		support, cleanup := compileRuntimeSupport(cc, translatedAssembly)
 		defer cleanup()
 		inputs = append(inputs, support)
 	}
@@ -134,23 +126,6 @@ func link(m *ir.Module, exe string) {
 	cmd := exec.Command(cc, args...)
 	cmd.Stderr = os.Stderr
 	check(cmd.Run())
-}
-
-func runtimeSupportAssembly(module *ir.Module, translated string) string {
-	assembly := runtimeARM64Assembly + "\n" + translated
-	if usesGoRuntime(module) {
-		assembly += "\n" + bootstrapARM64Assembly
-	}
-	return assembly
-}
-
-func usesGoRuntime(module *ir.Module) bool {
-	for _, function := range module.Funcs {
-		if function.Name == "runtime.schedinit" {
-			return true
-		}
-	}
-	return false
 }
 
 func compileRuntimeSupport(cc, assembly string) (string, func()) {

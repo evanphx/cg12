@@ -8,16 +8,29 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/evanphx/cg12/arm64"
+	"github.com/evanphx/cg12/goc"
 	"github.com/evanphx/cg12/ir"
 	"github.com/evanphx/cg12/plan9asm"
 )
 
-func TestRuntimeSupportDoesNotShadowTranslatedStandardLibraryAssembly(t *testing.T) {
+func TestStandardLibraryRuntimeAssemblyIsTranslated(t *testing.T) {
+	if runtime.GOARCH != "arm64" {
+		t.Skip("AArch64 Plan 9 assembly translation")
+	}
 	if !plan9asm.SupportsARM64File("runtime", "sys_linux_arm64.s") {
 		t.Fatal("runtime/sys_linux_arm64.s is not enabled for Plan 9 translation")
 	}
 	if !plan9asm.SupportsARM64File("runtime", "asm_arm64.s") {
 		t.Fatal("runtime/asm_arm64.s is not enabled for Plan 9 translation")
+	}
+	module, err := goc.CompileExecutable("main.go", []byte("package main\nfunc main() {}\n"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	translated, err := arm64.TranslateAssembly(module)
+	if err != nil {
+		t.Fatal(err)
 	}
 	for _, symbol := range []string{
 		"internal_bytealg_Compare",
@@ -37,8 +50,6 @@ func TestRuntimeSupportDoesNotShadowTranslatedStandardLibraryAssembly(t *testing
 		"internal_runtime_atomic_Xchg",
 		"internal_runtime_atomic_And8",
 		"internal_runtime_atomic_Or8",
-		"reflect_makeFuncStub",
-		"reflect_methodValueCall",
 		"runtime_memequal",
 		"runtime_memmove",
 		"runtime_memclrNoHeapPointers",
@@ -97,11 +108,9 @@ func TestRuntimeSupportDoesNotShadowTranslatedStandardLibraryAssembly(t *testing
 		"runtime_timer_settime",
 		"runtime_timer_delete",
 		"runtime_vgetrandom1",
-		"syscall_rawSyscallNoError",
-		"syscall_rawVforkSyscall",
 	} {
-		if strings.Contains(runtimeARM64Assembly, ".global "+symbol+"\n") {
-			t.Errorf("handwritten runtime support still defines %s", symbol)
+		if !strings.Contains(translated, ".global "+symbol+"\n") {
+			t.Errorf("translated standard library assembly does not define %s", symbol)
 		}
 	}
 }
@@ -110,8 +119,17 @@ func TestTranslatedAssemblyPrecedesRuntimeTextEnd(t *testing.T) {
 	module := ir.NewModule()
 	function := module.NewFuncVoid("runtime.schedinit")
 	function.Entry().RetVoid()
-	translated := ".global runtime_memmove\nruntime_memmove:\n\tret\n"
-	assembly := runtimeSupportAssembly(module, translated)
+	module.Assembly = append(module.Assembly, ir.AssemblyFile{
+		PackagePath: "runtime",
+		Path:        "runtime/memmove_arm64.s",
+		Source: `TEXT ·memmove<ABIInternal>(SB),NOSPLIT|NOFRAME,$0-0
+	RET
+`,
+	})
+	assembly, err := arm64.TranslateAssembly(module)
+	if err != nil {
+		t.Fatal(err)
+	}
 
 	translatedAt := strings.Index(assembly, ".global runtime_memmove")
 	textEndAt := strings.Index(assembly, ".global runtime_gocTextEnd")
@@ -193,7 +211,7 @@ func TestARM64RuntimeAtomicSupportExecutes(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err := os.WriteFile(assembly, []byte(translated+runtimeARM64Assembly), 0o644); err != nil {
+	if err := os.WriteFile(assembly, []byte(translated), 0o644); err != nil {
 		t.Fatal(err)
 	}
 	const source = `
@@ -281,6 +299,7 @@ func TestARM64StandardLibraryIOAndFmtExecute(t *testing.T) {
 		{name: "ABI0 assembly", source: "abi0_assembly.go"},
 		{name: "ChaCha8 assembly", source: "chacha8rand_assembly.go"},
 		{name: "runtime atomic assembly", source: "runtime_atomic_assembly.go"},
+		{name: "sync/atomic assembly", source: "sync_atomic_assembly.go"},
 		{name: "internal/bytealg assembly", source: "bytealg_compare.go"},
 		{name: "runtime Linux assembly", source: "runtime_assembly.go", output: "ABIInternal + Plan 9 assembly: 256 32896 3072\n"},
 		{name: "reflect MakeFunc assembly", source: "reflect_makefunc.go"},
@@ -343,6 +362,7 @@ func main() {
 	if initialized != 41 {
 		panic("package init did not run")
 	}
+	println("hello from cg12 Go")
 }
 `
 	if err := os.WriteFile(source, []byte(program), 0o644); err != nil {
@@ -353,7 +373,11 @@ func main() {
 	if output, err := compile.CombinedOutput(); err != nil {
 		t.Fatalf("compile plain Go program: %v\n%s", err, output)
 	}
-	if output, err := exec.Command(executable).CombinedOutput(); err != nil {
+	output, err := exec.Command(executable).CombinedOutput()
+	if err != nil {
 		t.Fatalf("execute plain Go program: %v\n%s", err, output)
+	}
+	if string(output) != "hello from cg12 Go\n" {
+		t.Fatalf("plain Go output = %q, want %q", output, "hello from cg12 Go\n")
 	}
 }

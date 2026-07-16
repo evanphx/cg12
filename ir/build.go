@@ -46,6 +46,23 @@ func (f *Func) Param(name string, cls Cls) Ref {
 	return r
 }
 
+// ParamGroup appends the scalar parts of one by-value aggregate parameter and
+// records that they must be assigned atomically by the target ABI.
+func (f *Func) ParamGroup(name string, aggregate *AggType, classes ...Cls) []Ref {
+	start := len(f.Params)
+	parts := make([]Ref, len(classes))
+	for index, class := range classes {
+		partName := fmt.Sprintf("%s.%d", name, index)
+		parts[index] = f.Param(partName, class)
+	}
+	f.ParamGroups = append(f.ParamGroups, ValueGroup{
+		Index: start,
+		Count: len(parts),
+		Type:  aggregate,
+	})
+	return parts
+}
+
 // ParamRef appends a managed-reference (GC root) parameter: a pointer-class
 // value flagged as a garbage-collector root.
 func (f *Func) ParamRef(name string) Ref {
@@ -111,6 +128,26 @@ func (f *Func) newTemp(name string, cls Cls) Ref {
 // is the exported entry point backends use to introduce temporaries (copies,
 // spill reloads, pre-coloured ABI registers) during lowering.
 func (f *Func) NewTemp(name string, cls Cls) Ref { return f.newTemp(name, cls) }
+
+// Aggregate creates an immutable frontend aggregate from scalar SSA parts.
+func (f *Func) Aggregate(valueType *AggType, parts ...Ref) Ref {
+	id := len(f.AggregateValues)
+	f.AggregateValues = append(f.AggregateValues, AggregateValue{
+		Type:  valueType,
+		Parts: append([]Ref(nil), parts...),
+	})
+	return Ref{Kind: RefAggregate, ID: uint32(id)}
+}
+
+// Aggregate returns the aggregate value named by reference. It panics for a
+// non-aggregate reference so accidental scalar use is caught close to the
+// frontend that produced it.
+func (f *Func) AggregateValue(reference Ref) AggregateValue {
+	if reference.Kind != RefAggregate || int(reference.ID) >= len(f.AggregateValues) {
+		panic("ir: reference is not an aggregate value")
+	}
+	return f.AggregateValues[reference.ID]
+}
 
 func (f *Func) internConst(c Const) Ref {
 	k := constKey{c.Kind, c.Cls, c.Int, c.Flt, c.Sym, c.Thread}
@@ -260,6 +297,16 @@ func (b *Block) Ultof(cls Cls, x Ref) Ref { return b.emit(OUltof, cls, x) } // u
 // registers (sp, fp, lr, the platform register) are always safe.
 func (f *Func) RegVar(name string, reg int) Ref {
 	return Ref{Kind: RefReg, ID: uint32(reg)}
+}
+
+// CallerPC returns the address to which the current function will return.
+func (b *Block) CallerPC() Ref {
+	return b.emit(OGetCallerPC, ClsL)
+}
+
+// CallerSP returns the caller's stack pointer at function entry.
+func (b *Block) CallerSP() Ref {
+	return b.emit(OGetCallerSP, ClsL)
 }
 
 func (b *Block) Load(cls Cls, addr Ref) Ref {
@@ -521,6 +568,34 @@ func (b *Block) Asm(template string, specs []AsmSpec) []Ref {
 	return outs
 }
 
+// CallAggregate invokes a function returning an aggregate already represented
+// as scalar SSA parts. The result refs are defined together by the call.
+func (b *Block) CallAggregate(aggregate *AggType, classes []Cls, callee Ref, args ...Ref) []Ref {
+	if len(classes) == 0 {
+		panic("ir: aggregate call has no result parts")
+	}
+	instruction := Instr{
+		Op:        OCall,
+		Cls:       classes[0],
+		Args:      append([]Ref{callee}, args...),
+		RetAgg:    aggregate,
+		RetValues: true,
+		Pos:       b.curPos,
+	}
+	results := make([]Ref, len(classes))
+	for index, class := range classes {
+		result := b.fn.newTemp("", class)
+		results[index] = result
+		if index == 0 {
+			instruction.To = result
+		} else {
+			instruction.Defs = append(instruction.Defs, result)
+		}
+	}
+	b.Instrs = append(b.Instrs, instruction)
+	return results
+}
+
 // Safepoint marks a garbage-collector safepoint that is not a call (an inlined
 // allocation fast path, a loop back-edge poll, ...). The backend emits a stack
 // map of the managed references live here, but no machine code.
@@ -558,6 +633,15 @@ func (b *Block) TailCallVoid(callee Ref, args ...Ref) {
 
 // Ret returns v from the function.
 func (b *Block) Ret(v Ref) { b.Jmp = Jmp{Kind: JmpRet, Arg: v} }
+
+// RetAggregate returns scalar SSA parts that together form the function's
+// aggregate result.
+func (b *Block) RetAggregate(parts ...Ref) {
+	if len(parts) == 0 {
+		panic("ir: aggregate return has no parts")
+	}
+	b.Jmp = Jmp{Kind: JmpRet, Arg: parts[0], Args: append([]Ref(nil), parts[1:]...)}
+}
 
 // RetVoid returns with no value.
 func (b *Block) RetVoid() { b.Jmp = Jmp{Kind: JmpRet} }

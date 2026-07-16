@@ -331,6 +331,16 @@ func (f *Func) refString(r Ref) string {
 		return fmt.Sprintf("%%.slot%d", r.ID)
 	case RefReg:
 		return fmt.Sprintf("reg%d", r.ID)
+	case RefAggregate:
+		if int(r.ID) < len(f.AggregateValues) {
+			value := f.AggregateValues[r.ID]
+			parts := make([]string, len(value.Parts))
+			for index, part := range value.Parts {
+				parts[index] = f.refString(part)
+			}
+			return fmt.Sprintf(":%s{%s}", value.Type.Name, strings.Join(parts, ", "))
+		}
+		return fmt.Sprintf("<aggregate %d>", r.ID)
 	}
 	return fmt.Sprintf("<ref %d:%d>", r.Kind, r.ID)
 }

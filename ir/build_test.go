@@ -83,6 +83,20 @@ func TestArithmeticOps(t *testing.T) {
 	assert.Equal(t, ClsD, f.ClassOf(cases[len(cases)-1].got))
 }
 
+func TestCallerFrameIntrinsics(t *testing.T) {
+	function := NewModule().NewFunc("caller", ClsL)
+	entry := function.Entry()
+	callerPC := entry.CallerPC()
+	callerSP := entry.CallerSP()
+	entry.Ret(callerPC)
+
+	require.Len(t, entry.Instrs, 2)
+	assert.Equal(t, OGetCallerPC, entry.Instrs[0].Op)
+	assert.Equal(t, ClsL, function.ClassOf(callerPC))
+	assert.Equal(t, OGetCallerSP, entry.Instrs[1].Op)
+	assert.Equal(t, ClsL, function.ClassOf(callerSP))
+}
+
 func TestCompareMnemonic(t *testing.T) {
 	f := NewModule().NewFunc("lt", ClsW)
 	a := f.Param("a", ClsW)

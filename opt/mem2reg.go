@@ -240,6 +240,9 @@ func findPromotable(f *ir.Func) ([]promotable, map[uint32]int) {
 			}
 		}
 		escape(b.Jmp.Arg)
+		for _, argument := range b.Jmp.Args {
+			escape(argument)
+		}
 	}
 
 	var vars []promotable

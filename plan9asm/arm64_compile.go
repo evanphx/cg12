@@ -57,7 +57,12 @@ var supportedARM64Files = map[string]map[string]bool{
 		"index_arm64.s":     true,
 		"indexbyte_arm64.s": true,
 	},
+	"internal/abi": {
+		"abi_test.s": true,
+		"stub.s":     true,
+	},
 	"internal/cpu": {
+		"cpu.s":       true,
 		"cpu_arm64.s": true,
 	},
 	"internal/chacha8rand": {
@@ -65,6 +70,7 @@ var supportedARM64Files = map[string]map[string]bool{
 	},
 	"internal/runtime/sys": {
 		"dit_arm64.s": true,
+		"empty.s":     true,
 	},
 	"internal/runtime/syscall/linux": {
 		"asm_linux_arm64.s": true,
@@ -72,21 +78,30 @@ var supportedARM64Files = map[string]map[string]bool{
 	"internal/runtime/atomic": {
 		"atomic_arm64.s": true,
 	},
+	"internal/reflectlite": {
+		"asm.s": true,
+	},
 	"reflect": {
 		"asm_arm64.s": true,
 	},
 	"runtime": {
+		"asm.s":             true,
 		"asm_arm64.s":       true,
 		"atomic_arm64.s":    true,
+		"ints.s":            true,
 		"memclr_arm64.s":    true,
 		"memmove_arm64.s":   true,
 		"preempt_arm64.s":   true,
+		"rt0_linux_arm64.s": true,
 		"secret_arm64.s":    true,
 		"sys_linux_arm64.s": true,
 		"tls_arm64.s":       true,
 	},
 	"syscall": {
 		"asm_linux_arm64.s": true,
+	},
+	"sync/atomic": {
+		"asm.s": true,
 	},
 }
 

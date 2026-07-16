@@ -58,6 +58,11 @@ type Instr struct {
 	// which is a pointer to that aggregate. nil entries are scalar arguments.
 	AggArgs []*AggType
 
+	// ArgGroups describes aggregate call arguments that have already been
+	// scalarized into consecutive entries of Args[1:]. Unlike AggArgs, whose
+	// argument is an address, an ArgGroup carries the value's scalar SSA parts.
+	ArgGroups []ValueGroup
+
 	// Defs lists physical-register results an OCall produces beyond To — the
 	// extra registers of a multi-register aggregate return. They are defined at
 	// the call for liveness/allocation.
@@ -66,6 +71,10 @@ type Instr struct {
 	// RetAgg is the aggregate type of an OCall's result (the result temporary is
 	// a pointer to it), or nil for a scalar result.
 	RetAgg *AggType
+
+	// RetValues means To and Defs are the scalar parts of RetAgg rather than To
+	// being an address at which the aggregate result is reconstructed.
+	RetValues bool
 
 	// StackResult identifies a local aggregate slot that receives an
 	// ABIInternal stack-assigned result. The emitter copies RetAgg from the

@@ -19,7 +19,7 @@ import (
 // references. Value references (ir.Ref) already index Temps/Consts by ID.
 const (
 	binMagic   = "cg12"
-	binVersion = 5
+	binVersion = 6
 )
 
 // MarshalBinary encodes the module to cg12's binary unit format.
@@ -182,6 +182,12 @@ func collectTypes(m *Module) ([]*AggType, map[*AggType]int) {
 	}
 	for _, f := range m.Funcs {
 		add(f.RetAgg)
+		for _, value := range f.AggregateValues {
+			add(value.Type)
+		}
+		for _, group := range f.ParamGroups {
+			add(group.Type)
+		}
 		for _, t := range f.Temps {
 			if t != nil {
 				add(t.Agg)
@@ -193,6 +199,9 @@ func collectTypes(m *Module) ([]*AggType, map[*AggType]int) {
 				add(in.RetAgg)
 				for _, a := range in.AggArgs {
 					add(a)
+				}
+				for _, group := range in.ArgGroups {
+					add(group.Type)
 				}
 			}
 		}
@@ -242,6 +251,15 @@ func (e *enc) linkage(l Linkage) {
 	e.boolean(l.Thread)
 	e.str(l.Section)
 	e.str(l.SecArgs)
+}
+
+func (e *enc) valueGroups(groups []ValueGroup) {
+	e.uv(uint64(len(groups)))
+	for _, group := range groups {
+		e.iv(int64(group.Index))
+		e.iv(int64(group.Count))
+		e.typeRef(group.Type)
+	}
 }
 
 func (e *enc) encType(t *AggType) {
@@ -302,6 +320,7 @@ func (e *enc) encFunc(f *Func) {
 	e.boolean(f.HasRet)
 	e.u8(byte(f.Retty))
 	e.typeRef(f.RetAgg)
+	e.boolean(f.RetValues)
 	e.boolean(f.Variadic)
 
 	e.uv(uint64(len(f.Temps)))
@@ -312,10 +331,19 @@ func (e *enc) encFunc(f *Func) {
 	for _, c := range f.Consts {
 		e.encConst(c)
 	}
+	e.uv(uint64(len(f.AggregateValues)))
+	for _, value := range f.AggregateValues {
+		e.typeRef(value.Type)
+		e.uv(uint64(len(value.Parts)))
+		for _, part := range value.Parts {
+			e.ref(part)
+		}
+	}
 	e.uv(uint64(len(f.Params)))
 	for _, p := range f.Params {
 		e.uv(uint64(p.ID)) // Params are Temps; ID is the index into Temps
 	}
+	e.valueGroups(f.ParamGroups)
 
 	blockIdx := make(map[*Block]int, len(f.Blocks))
 	for i, b := range f.Blocks {
@@ -415,11 +443,13 @@ func (e *enc) encInstr(in *Instr, blockRef func(*Block)) {
 	for _, t := range in.AggArgs {
 		e.typeRef(t)
 	}
+	e.valueGroups(in.ArgGroups)
 	e.uv(uint64(len(in.Defs)))
 	for _, r := range in.Defs {
 		e.ref(r)
 	}
 	e.typeRef(in.RetAgg)
+	e.boolean(in.RetValues)
 	e.ref(in.StackResult)
 	e.iv(in.StackResultOffset)
 	e.srcPos(in.Pos)
@@ -483,6 +513,18 @@ type dec struct {
 	pos   int
 	err   error
 	types []*AggType
+}
+
+func (d *dec) valueGroups() []ValueGroup {
+	groups := make([]ValueGroup, int(d.uv()))
+	for index := range groups {
+		groups[index] = ValueGroup{
+			Index: int(d.iv()),
+			Count: int(d.iv()),
+			Type:  d.typeRef(),
+		}
+	}
+	return groups
 }
 
 func (d *dec) fail(what string) {
@@ -617,6 +659,7 @@ func (d *dec) decFunc(m *Module) *Func {
 	f.HasRet = d.boolean()
 	f.Retty = Cls(d.u8())
 	f.RetAgg = d.typeRef()
+	f.RetValues = d.boolean()
 	f.Variadic = d.boolean()
 
 	f.Temps = make([]*Temp, int(d.uv()))
@@ -627,6 +670,15 @@ func (d *dec) decFunc(m *Module) *Func {
 	for i := range f.Consts {
 		f.Consts[i] = d.decConst()
 	}
+	f.AggregateValues = make([]AggregateValue, int(d.uv()))
+	for index := range f.AggregateValues {
+		value := AggregateValue{Type: d.typeRef()}
+		value.Parts = make([]Ref, int(d.uv()))
+		for partIndex := range value.Parts {
+			value.Parts[partIndex] = d.ref()
+		}
+		f.AggregateValues[index] = value
+	}
 	f.Params = make([]*Temp, int(d.uv()))
 	for i := range f.Params {
 		if id := int(d.uv()); id < len(f.Temps) {
@@ -635,6 +687,7 @@ func (d *dec) decFunc(m *Module) *Func {
 			d.fail("param temp index")
 		}
 	}
+	f.ParamGroups = d.valueGroups()
 
 	f.Blocks = make([]*Block, int(d.uv()))
 	for i := range f.Blocks {
@@ -741,6 +794,7 @@ func (d *dec) decInstr(blockRef func() *Block) Instr {
 			in.AggArgs[i] = d.typeRef()
 		}
 	}
+	in.ArgGroups = d.valueGroups()
 	if n := int(d.uv()); n > 0 {
 		in.Defs = make([]Ref, n)
 		for i := range in.Defs {
@@ -748,6 +802,7 @@ func (d *dec) decInstr(blockRef func() *Block) Instr {
 		}
 	}
 	in.RetAgg = d.typeRef()
+	in.RetValues = d.boolean()
 	in.StackResult = d.ref()
 	in.StackResultOffset = d.iv()
 	in.Pos = d.srcPos()

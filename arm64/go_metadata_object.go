@@ -160,7 +160,6 @@ func goGCProgram(dataStart, dataEnd uint64, pointerOffsets []uint64) ([]byte, er
 
 func (builder *goMetadataBuilder) build(functions, translatedFunctions []goFunctionInfo, moduledata *ir.Data, gcProgram []byte, noptrBSSName string, noptrBSSSize uint64, moduleInitTaskCount int) {
 	const findFuncBuckets = 4096
-	functions = append(functions, goAssemblyFunctionInfo()...)
 	functions = append(functions, translatedFunctions...)
 
 	builder.label(".goc.go.gcbss")
@@ -360,15 +359,6 @@ func goPCSP(frameStart, frameSize int) []byte {
 	}
 	appendUvarint(0) // end of this function's pc-value table
 	return data
-}
-
-// goAssemblyFunctionInfo splits the native assembly support code from the
-// translated standard-library assembly that follows it in the text section.
-func goAssemblyFunctionInfo() []goFunctionInfo {
-	return []goFunctionInfo{
-		{name: "runtime_gocPrintString", funcFlag: goFuncFlagAsm},
-		{name: "runtime_gocAssemblySupportEnd", funcFlag: goFuncFlagAsm},
-	}
 }
 
 func (builder *goMetadataBuilder) position() uint64 {

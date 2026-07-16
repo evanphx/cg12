@@ -52,8 +52,12 @@ func newSourceLoader(fset *token.FileSet) *sourceLoader {
 		units:   make(map[string]*sourceUnit),
 		loading: make(map[string]bool),
 		sources: map[string]bool{
+			"bufio":                                 true,
 			"bytes":                                 true,
 			"cmp":                                   true,
+			"container/heap":                        true,
+			"container/list":                        true,
+			"container/ring":                        true,
 			"crypto":                                true,
 			"errors":                                true,
 			"fmt":                                   true,
@@ -71,7 +75,11 @@ func newSourceLoader(fset *token.FileSet) *sourceLoader {
 			"crypto/md5":                            true,
 			"crypto/sha1":                           true,
 			"crypto/sha512":                         true,
+			"encoding/ascii85":                      true,
+			"encoding/base32":                       true,
+			"encoding/base64":                       true,
 			"encoding/binary":                       true,
+			"encoding/csv":                          true,
 			"encoding/hex":                          true,
 			"hash/adler32":                          true,
 			"hash/crc32":                            true,
@@ -115,12 +123,14 @@ func newSourceLoader(fset *token.FileSet) *sourceLoader {
 			"internal/testlog":                      true,
 			"internal/trace/tracev2":                true,
 			"iter":                                  true,
+			"maps":                                  true,
 			"math/bits":                             true,
 			"os":                                    true,
 			"path":                                  true,
 			"reflect":                               true,
 			"runtime":                               true,
 			"slices":                                true,
+			"sort":                                  true,
 			"strconv":                               true,
 			"strings":                               true,
 			"sync":                                  true,
@@ -158,7 +168,8 @@ func (l *sourceLoader) Import(path string) (*types.Package, error) {
 	defer delete(l.loading, path)
 	ctx := build.Default
 	ctx.BuildTags = append([]string{}, ctx.BuildTags...)
-	if l.forcePureGo || runtime.GOARCH != "arm64" || !plan9asm.SupportsARM64Package(path) {
+	useAssembly := !l.forcePureGo && runtime.GOARCH == "arm64" && plan9asm.SupportsARM64Package(path)
+	if !useAssembly {
 		ctx.BuildTags = append(ctx.BuildTags, "purego")
 	}
 	ctx.GOROOT = l.root
@@ -174,6 +185,7 @@ func (l *sourceLoader) Import(path string) (*types.Package, error) {
 			Uses:       make(map[*ast.Ident]types.Object),
 			Selections: make(map[*ast.SelectorExpr]*types.Selection),
 			Implicits:  make(map[ast.Node]types.Object),
+			Instances:  make(map[*ast.Ident]types.Instance),
 		},
 	}
 	for _, name := range bp.GoFiles {
@@ -185,8 +197,11 @@ func (l *sourceLoader) Import(path string) (*types.Package, error) {
 		u.files = append(u.files, file)
 	}
 	for _, name := range bp.SFiles {
-		if !plan9asm.SupportsARM64File(path, name) {
+		if !useAssembly {
 			continue
+		}
+		if !plan9asm.SupportsARM64File(path, name) {
+			return nil, fmt.Errorf("translate %s: unsupported build-selected assembly file %s", path, name)
 		}
 		full := filepath.Join(bp.Dir, name)
 		source, err := os.ReadFile(full)

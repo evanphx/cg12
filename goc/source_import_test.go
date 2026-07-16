@@ -76,7 +76,19 @@ func TestLoadExactStandardRuntimeSource(t *testing.T) {
 	for _, file := range unit.assembly {
 		assembly[filepath.Base(file.path)] = file.source
 	}
-	for _, name := range []string{"atomic_arm64.s", "memclr_arm64.s", "memmove_arm64.s", "preempt_arm64.s", "secret_arm64.s", "sys_linux_arm64.s", "tls_arm64.s"} {
+	for _, name := range []string{
+		"asm.s",
+		"asm_arm64.s",
+		"atomic_arm64.s",
+		"ints.s",
+		"memclr_arm64.s",
+		"memmove_arm64.s",
+		"preempt_arm64.s",
+		"rt0_linux_arm64.s",
+		"secret_arm64.s",
+		"sys_linux_arm64.s",
+		"tls_arm64.s",
+	} {
 		got, ok := assembly[name]
 		if !ok {
 			t.Errorf("runtime assembly %s was not retained", name)
@@ -157,12 +169,18 @@ func TestLoadExactAdditionalStandardAssembly(t *testing.T) {
 		file string
 	}{
 		{path: "internal/cpu", file: "cpu_arm64.s"},
+		{path: "internal/cpu", file: "cpu.s"},
+		{path: "internal/abi", file: "abi_test.s"},
+		{path: "internal/abi", file: "stub.s"},
 		{path: "internal/chacha8rand", file: "chacha8_arm64.s"},
+		{path: "internal/reflectlite", file: "asm.s"},
 		{path: "internal/runtime/sys", file: "dit_arm64.s"},
+		{path: "internal/runtime/sys", file: "empty.s"},
 		{path: "internal/runtime/syscall/linux", file: "asm_linux_arm64.s"},
 		{path: "internal/runtime/atomic", file: "atomic_arm64.s"},
 		{path: "crypto/internal/fips140/sha256", file: "sha256block_arm64.s"},
 		{path: "syscall", file: "asm_linux_arm64.s"},
+		{path: "sync/atomic", file: "asm.s"},
 	}
 
 	for _, test := range tests {
@@ -222,6 +240,16 @@ func TestRepositoryStandardLibraryInventory(t *testing.T) {
 		"crypto/sha512",
 		"unicode/utf16",
 		"path",
+		"container/list",
+		"container/ring",
+		"sort",
+		"container/heap",
+		"maps",
+		"bufio",
+		"encoding/ascii85",
+		"encoding/base32",
+		"encoding/base64",
+		"encoding/csv",
 		"runtime",
 	}
 	for _, path := range packages {

@@ -263,6 +263,8 @@ func TestAdvancedExecutionCorpus(t *testing.T) {
 		{"map literal copies string keys and struct values", `type record struct { value int }; func Test() int { values := map[string]record{"left": {value: 17}, "right": {value: 25}}; return values["left"].value + values["right"].value }`, 42},
 		{"forward multiple results", `func pair() (int, int) { return 17, 25 }; func forward() (int, int) { return pair() }; func Test() int { left, right := forward(); return left + right }`, 42},
 		{"multiple aggregate results", `type pair struct { left, right int }; func values() (pair, pair) { return pair{17, 25}, pair{5, 7} }; func Test() int { first, second := values(); return first.left + first.right + second.left - second.right + 2 }`, 42},
+		{"nil interface after aggregate result", `type pair struct { left, right int }; func values() (pair, error) { return pair{17, 25}, nil }; func overwrite() [4]int { return [4]int{1, 2, 3, 4} }; func Test() int { value, err := values(); scratch := overwrite(); if err != nil { return -1 }; return value.left + value.right + scratch[3] - 4 }`, 42},
+		{"generic globals function values and forwarded results", `func identity[T any](value T) T { return value }; var global = identity(func() int { return 17 }); func retry[T any](fn func() (T, error)) (T, error) { return fn() }; func forward() (int, error) { return retry(func() (int, error) { return 25, nil }) }; func Test() int { selected := identity[int]; first := selected(global()); second, err := forward(); if err != nil { return -1 }; return first + second }`, 42},
 		{"named aggregate results", `type pair struct { left, right int }; func values() (first pair, second pair) { first = pair{17, 25}; second = pair{5, 7}; return }; func Test() int { first, second := values(); return first.left + first.right + second.left - second.right + 2 }`, 42},
 		{"slice first multi result", `func step(values []byte) ([]byte, bool) { return values[1:], true }; func Test() int { values, ok := step([]byte{7, 11, 13}); values, ok = step(values); if !ok { return 0 }; return len(values)*10 + int(values[0]) }`, 23},
 		{"slice multi result loop", `func step(values []byte) ([]byte, bool) { if len(values) == 1 { return nil, false }; return values[1:], true }; func Test() int { values := []byte{7, 11, 13}; count := 0; for { var ok bool; values, ok = step(values); if !ok { break }; count++ }; return count * 10 }`, 20},
@@ -432,6 +434,458 @@ func Test() int {
 `, 1, false)
 }
 
+func TestRuntimeSliceValueSemanticsAcrossABI(t *testing.T) {
+	runExecutableCase(t, `package main
+
+func shorten(values []int) {
+	values = values[:1]
+}
+
+func shortenPointer(values *[]int) {
+	*values = (*values)[:1]
+}
+
+func stackPassed(
+	a0, a1, a2, a3, a4, a5, a6 int,
+	a7, a8, a9, a10, a11, a12, a13 int,
+	values []int,
+) int {
+	values = values[:1]
+	return len(values)*10 + cap(values)
+}
+
+func tail(values []int) []int {
+	return values[1:]
+}
+
+func Test() int {
+	values := []int{7, 11, 13}
+	shorten(values)
+	if len(values) != 3 || cap(values) != 3 {
+		return 1
+	}
+	if stackPassed(0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, values) != 13 {
+		return 2
+	}
+	if len(values) != 3 {
+		return 3
+	}
+	copy := values
+	shortenPointer(&copy)
+	if len(copy) != 1 || len(values) != 3 {
+		return 4
+	}
+	result := tail(values)
+	if len(result) != 2 || cap(result) != 2 || result[0] != 11 {
+		return 5
+	}
+	return 42
+}
+`, 42)
+}
+
+func TestRuntimeSliceValuesThroughInterfaceMethod(t *testing.T) {
+	runExecutableCase(t, `package main
+
+type transformer interface {
+	tail([]int) []int
+}
+
+type implementation struct{}
+
+func (implementation) tail(values []int) []int {
+	values = values[1:]
+	return values
+}
+
+func throughInterface(value transformer, values []int) []int {
+	return value.tail(values)
+}
+
+func Test() int {
+	values := []int{7, 11, 13}
+	result := throughInterface(implementation{}, values)
+	if len(values) != 3 || cap(values) != 3 {
+		return 1
+	}
+	if len(result) != 2 || cap(result) != 2 || result[0] != 11 {
+		return 2
+	}
+	return 42
+}
+`, 42)
+}
+
+func TestRuntimeSliceValuesThroughMethodValue(t *testing.T) {
+	runExecutableCase(t, `package main
+
+type cutter struct {
+	count int
+}
+
+func (value cutter) cut(values []int) []int {
+	values = values[value.count:]
+	return values
+}
+
+func Test() int {
+	values := []int{7, 11, 13}
+	cut := cutter{count: 1}.cut
+	result := cut(values)
+	if len(values) != 3 || cap(values) != 3 {
+		return 1
+	}
+	if len(result) != 2 || cap(result) != 2 || result[0] != 11 {
+		return 2
+	}
+	return 42
+}
+`, 42)
+}
+
+func TestRuntimeSliceValuePassedToGoroutine(t *testing.T) {
+	runExecutableCase(t, `package main
+
+func shorten(values []int, done chan int) {
+	values = values[:1]
+	done <- len(values)*10 + cap(values)
+}
+
+func Test() int {
+	values := []int{7, 11, 13}
+	done := make(chan int, 1)
+	go shorten(values, done)
+	result := <-done
+	if result != 13 {
+		return 1
+	}
+	if len(values) != 3 || cap(values) != 3 {
+		return 2
+	}
+	return 42
+}
+`, 42)
+}
+
+func TestRuntimeStackPassedSliceSurvivesGarbageCollection(t *testing.T) {
+	runExecutableCase(t, `package main
+
+import "runtime"
+
+type item struct {
+	value int
+}
+
+func retain(
+	a0, a1, a2, a3, a4, a5, a6 int,
+	a7, a8, a9, a10, a11, a12, a13 int,
+	values []*item,
+) int {
+	runtime.GC()
+	return values[0].value
+}
+
+func Test() int {
+	values := []*item{&item{value: 42}}
+	return retain(0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, values)
+}
+`, 42)
+}
+
+func TestRuntimePointerSliceBackingScansElements(t *testing.T) {
+	runExecutableCase(t, `package main
+
+import "runtime"
+
+type item struct {
+	value int
+}
+
+func inspect(values []*item) int {
+	runtime.GC()
+	return values[0].value
+}
+
+func Test() int {
+	value := &item{value: 42}
+	values := []*item{value}
+	return inspect(values)
+}
+`, 42)
+}
+
+func TestRepositoryStandardLibraryContainerList(t *testing.T) {
+	runExecutableCase(t, `package main
+
+import "container/list"
+
+func Test() int {
+	values := list.New()
+	values.PushBack(11)
+	values.PushFront(7)
+	values.PushBack(13)
+	sum := 0
+	for element := values.Front(); element != nil; element = element.Next() {
+		sum += element.Value.(int)
+	}
+	return values.Len()*100 + sum
+}
+`, 331)
+}
+
+func TestRepositoryStandardLibraryContainerRing(t *testing.T) {
+	runExecutableCase(t, `package main
+
+import "container/ring"
+
+func Test() int {
+	values := ring.New(3)
+	values.Value = 7
+	values = values.Next()
+	values.Value = 11
+	values = values.Next()
+	values.Value = 13
+	sum := 0
+	values.Do(func(value any) {
+		sum += value.(int)
+	})
+	return values.Len()*100 + sum
+}
+`, 331)
+}
+
+func TestRepositoryStandardLibrarySort(t *testing.T) {
+	runExecutableCase(t, `package main
+
+import "sort"
+
+func Test() int {
+	values := []int{9, -4, 5, 3}
+	sort.Ints(values)
+	if values[0] != -4 {
+		return 1000 + values[0]
+	}
+	if values[1] != 3 {
+		return 2000 + values[1]
+	}
+	if values[2] != 5 {
+		return 3000 + values[2]
+	}
+	if values[3] != 9 {
+		return 4000 + values[3]
+	}
+	index := sort.SearchInts(values, 5)
+	if index != 2 {
+		return 5000 + index
+	}
+	return 42
+}
+`, 42)
+}
+
+func TestRepositoryStandardLibraryContainerHeap(t *testing.T) {
+	runExecutableCase(t, `package main
+
+import "container/heap"
+
+type intHeap []int
+
+func (values intHeap) Len() int {
+	return len(values)
+}
+
+func (values intHeap) Less(left, right int) bool {
+	return values[left] < values[right]
+}
+
+func (values intHeap) Swap(left, right int) {
+	values[left], values[right] = values[right], values[left]
+}
+
+func (values *intHeap) Push(value any) {
+	*values = append(*values, value.(int))
+}
+
+func (values *intHeap) Pop() any {
+	old := *values
+	last := len(old) - 1
+	value := old[last]
+	*values = old[:last]
+	return value
+}
+
+func Test() int {
+	values := intHeap{9, 1, 5}
+	heap.Init(&values)
+	heap.Push(&values, 3)
+	first := heap.Pop(&values).(int)
+	second := heap.Pop(&values).(int)
+	return first*100 + second*10 + len(values)
+}
+`, 132)
+}
+
+func TestRepositoryStandardLibraryMaps(t *testing.T) {
+	runExecutableCase(t, `package main
+
+import "maps"
+
+func Test() int {
+	original := map[string]int{"alpha": 1, "beta": 2, "gamma": 3}
+	clone := maps.Clone(original)
+	if !maps.Equal(original, clone) {
+		return -1
+	}
+	maps.DeleteFunc(clone, func(_ string, value int) bool {
+		return value%2 == 0
+	})
+	return len(clone)*100 + clone["gamma"]
+}
+`, 203)
+}
+
+func TestRepositoryStandardLibraryBufio(t *testing.T) {
+	runExecutableCase(t, `package main
+
+import (
+	"bufio"
+	"io"
+	"strings"
+)
+
+func Test() int {
+	reader := bufio.NewReader(strings.NewReader("alpha,beta"))
+	first, err := reader.ReadString(',')
+	if err != nil {
+		return -1
+	}
+	second, err := reader.ReadString('a')
+	if err != nil {
+		return -2
+	}
+	third, err := reader.ReadString('!')
+	if err != io.EOF {
+		return -3
+	}
+	return len(first)*10 + len(second) + len(third)
+}
+`, 64)
+}
+
+func TestRepositoryStandardLibraryASCII85(t *testing.T) {
+	runExecutableCase(t, `package main
+
+import "encoding/ascii85"
+
+func Test() int {
+	source := []byte("easy")
+	encoded := make([]byte, ascii85.MaxEncodedLen(len(source)))
+	encodedLength := ascii85.Encode(encoded, source)
+	decoded := make([]byte, len(source))
+	decodedLength, _, err := ascii85.Decode(decoded, encoded[:encodedLength], true)
+	if err != nil {
+		return -1
+	}
+	sum := 0
+	for _, value := range decoded[:decodedLength] {
+		sum += int(value)
+	}
+	return encodedLength*100 + decodedLength*10 + sum
+}
+`, 974)
+}
+
+func TestRepositoryStandardLibraryBase32(t *testing.T) {
+	runExecutableCase(t, `package main
+
+import "encoding/base32"
+
+func Test() int {
+	source := []byte("foo")
+	encoded := make([]byte, base32.StdEncoding.EncodedLen(len(source)))
+	base32.StdEncoding.Encode(encoded, source)
+	decoded := make([]byte, base32.StdEncoding.DecodedLen(len(encoded)))
+	decodedLength, err := base32.StdEncoding.Decode(decoded, encoded)
+	if err != nil {
+		return -1
+	}
+	sum := 0
+	for _, value := range decoded[:decodedLength] {
+		sum += int(value)
+	}
+	return len(encoded)*100 + decodedLength*10 + sum
+}
+`, 1154)
+}
+
+func TestRepositoryStandardLibraryBase64(t *testing.T) {
+	runExecutableCase(t, `package main
+
+import "encoding/base64"
+
+func Test() int {
+	source := []byte("hello")
+	encoded := make([]byte, base64.StdEncoding.EncodedLen(len(source)))
+	base64.StdEncoding.Encode(encoded, source)
+	decoded := make([]byte, base64.StdEncoding.DecodedLen(len(encoded)))
+	decodedLength, err := base64.StdEncoding.Decode(decoded, encoded)
+	if err != nil {
+		return -1
+	}
+	sum := 0
+	for _, value := range decoded[:decodedLength] {
+		sum += int(value)
+	}
+	return len(encoded)*100 + decodedLength*10 + sum
+}
+`, 1382)
+}
+
+func TestRepositoryStandardLibraryCSV(t *testing.T) {
+	runExecutableCase(t, `package main
+
+import (
+	"encoding/csv"
+	"strings"
+)
+
+func Test() int {
+	reader := csv.NewReader(strings.NewReader("name,value\nalpha,7\nbeta,11\n"))
+	records, err := reader.ReadAll()
+	if err != nil {
+		return -1
+	}
+	return len(records)*100 + len(records[1][0])*10 + len(records[2][1])
+}
+`, 352)
+}
+
+func TestMixedInterfaceConcreteEqualityExecution(t *testing.T) {
+	runExecutableCase(t, `package main
+
+type errorCode uintptr
+
+func (code errorCode) Error() string {
+	return "error"
+}
+
+func failure() error {
+	return errorCode(4)
+}
+
+func Test() int {
+	err := failure()
+	if err != errorCode(4) {
+		return -1
+	}
+	if err == errorCode(5) {
+		return -2
+	}
+	return 42
+}
+`, 42)
+}
+
 func TestRepositoryStandardLibraryRuntimeNumCPU(t *testing.T) {
 	runCase(t, `package main
 
@@ -556,6 +1010,58 @@ func runCase(t *testing.T, src string, want int, optimized bool) {
 	}
 	if out, err := exec.Command(exe).CombinedOutput(); err != nil {
 		t.Fatalf("result != %d: %v\n%s", want, err, out)
+	}
+}
+
+func runExecutableCase(t *testing.T, source string, want int) {
+	t.Helper()
+	if runtime.GOOS != "linux" || runtime.GOARCH != "arm64" {
+		t.Skip("Go runtime execution test requires Linux ARM64")
+	}
+	cc, err := exec.LookPath("cc")
+	if err != nil {
+		t.Skip("system C linker unavailable")
+	}
+
+	program := source + fmt.Sprintf(`
+func main() {
+	got := Test()
+	if got != %d {
+		println("got", got, "want", %d)
+		panic("standard library result mismatch")
+	}
+}
+`, want, want)
+	module, err := goc.CompileExecutable("case.go", []byte(program))
+	if err != nil {
+		t.Fatalf("compile executable: %v", err)
+	}
+	objectData, assemblySource, err := arm64.CompileObjectAndAssembly(module)
+	if err != nil {
+		t.Fatalf("machine code: %v", err)
+	}
+
+	directory := t.TempDir()
+	objectPath := filepath.Join(directory, "case.o")
+	if err := os.WriteFile(objectPath, objectData, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	assemblyPath := filepath.Join(directory, "runtime.S")
+	if err := os.WriteFile(assemblyPath, []byte(assemblySource), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	assemblyObjectPath := filepath.Join(directory, "runtime.o")
+	assemble := exec.Command(cc, "-c", "-o", assemblyObjectPath, assemblyPath)
+	if output, err := assemble.CombinedOutput(); err != nil {
+		t.Fatalf("assemble runtime: %v\n%s", err, output)
+	}
+	executable := filepath.Join(directory, "case")
+	link := exec.Command(cc, "-no-pie", "-o", executable, objectPath, assemblyObjectPath)
+	if output, err := link.CombinedOutput(); err != nil {
+		t.Fatalf("link executable: %v\n%s", err, output)
+	}
+	if output, err := exec.Command(executable).CombinedOutput(); err != nil {
+		t.Fatalf("result != %d: %v\n%s", want, err, output)
 	}
 }
 

@@ -35,6 +35,27 @@ type Temp struct {
 	GCType uint32
 }
 
+// ValueGroup records a run of scalar SSA values that together form one
+// aggregate value. Index is relative to the surrounding parameter or argument
+// list; Count is the number of recursively flattened scalar parts.
+//
+// Keeping the parts as ordinary temporaries lets the existing scalar optimizer
+// and register allocator operate unchanged, while Type preserves the atomic
+// ABI grouping required for values such as Go slices.
+type ValueGroup struct {
+	Index int
+	Count int
+	Type  *AggType
+}
+
+// AggregateValue is a frontend-level immutable aggregate composed of scalar
+// SSA refs. Aggregate refs never receive registers or spill slots themselves;
+// calls, returns, loads, and stores consume their Parts explicitly.
+type AggregateValue struct {
+	Type  *AggType
+	Parts []Ref
+}
+
 // ConstKind distinguishes the flavours of constant.
 type ConstKind uint8
 
@@ -112,12 +133,16 @@ type Func struct {
 	Name    string
 	Linkage Linkage
 
-	HasRet   bool     // whether the function returns a value
-	Retty    Cls      // return class when HasRet and RetAgg == nil
-	RetAgg   *AggType // non-nil when returning an aggregate by value
-	Variadic bool     // accepts variadic arguments (a trailing "..." in the IL)
-	GoABI    bool     // use the Go runtime's platform frame convention
-	NoSplit  bool     // omit the Go stack-growth check at function entry
+	HasRet bool     // whether the function returns a value
+	Retty  Cls      // return class when HasRet and RetAgg == nil
+	RetAgg *AggType // non-nil when returning an aggregate by value
+	// RetValues means an aggregate return is already represented by scalar SSA
+	// parts: Jmp.Arg is the first part and Jmp.Args contains the remaining parts.
+	// Without it, the historical representation uses Jmp.Arg as an address.
+	RetValues bool
+	Variadic  bool // accepts variadic arguments (a trailing "..." in the IL)
+	GoABI     bool // use the Go runtime's platform frame convention
+	NoSplit   bool // omit the Go stack-growth check at function entry
 
 	// StackPointerWords records pointer-bearing words within OAlloc results.
 	// The outer key is the allocation result temporary ID; inner keys are byte
@@ -144,11 +169,15 @@ type Func struct {
 	NoInline bool
 
 	Params []*Temp
-	Blocks []*Block
-	Start  *Block
+	// ParamGroups groups runs in Params into by-value aggregate parameters.
+	// Parameters outside a group are ordinary scalar values.
+	ParamGroups []ValueGroup
+	Blocks      []*Block
+	Start       *Block
 
-	Temps  []*Temp
-	Consts []Const
+	Temps           []*Temp
+	Consts          []Const
+	AggregateValues []AggregateValue
 
 	// lowered names the target this function has been lowered for, or "" if it
 	// has not been. See MarkLowered.
@@ -299,6 +328,8 @@ func (f *Func) ClassOf(r Ref) Cls {
 		return f.Temps[r.ID].Cls
 	case RefConst:
 		return f.Consts[r.ID].Cls
+	case RefAggregate:
+		panic("ir: aggregate value has no scalar class")
 	}
 	return ClsW
 }

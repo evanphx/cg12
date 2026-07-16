@@ -47,20 +47,24 @@ func allFieldsSet(t *testing.T, v any, skip ...string) {
 func TestInstrRoundTripsEveryField(t *testing.T) {
 	agg := &AggType{Name: "pair", Fields: []Field{{Sub: SubW}, {Sub: SubW}}}
 	in := Instr{
-		Op:       OCall,
-		Cls:      ClsL,
-		To:       Ref{Kind: RefTemp, ID: 1},
-		Args:     []Ref{{Kind: RefTemp, ID: 2}, {Kind: RefTemp, ID: 3}},
-		Cmp:      CmpSlt,
-		Aux:      42,
-		Unroll:   3,
-		Amode:    9,
-		AggArgs:  []*AggType{agg},
-		Defs:     []Ref{{Kind: RefTemp, ID: 4}},
-		RetAgg:   agg,
-		Pos:      SrcPos{File: 1, Line: 2, Col: 3},
-		Tail:     true,
-		Volatile: true,
+		Op:                OCall,
+		Cls:               ClsL,
+		To:                Ref{Kind: RefTemp, ID: 1},
+		Args:              []Ref{{Kind: RefTemp, ID: 2}, {Kind: RefTemp, ID: 3}},
+		Cmp:               CmpSlt,
+		Aux:               42,
+		Unroll:            3,
+		Amode:             9,
+		AggArgs:           []*AggType{agg},
+		ArgGroups:         []ValueGroup{{Index: 0, Count: 1, Type: agg}},
+		Defs:              []Ref{{Kind: RefTemp, ID: 4}},
+		RetAgg:            agg,
+		RetValues:         true,
+		StackResult:       Ref{Kind: RefTemp, ID: 4},
+		StackResultOffset: 8,
+		Pos:               SrcPos{File: 1, Line: 2, Col: 3},
+		Tail:              true,
+		Volatile:          true,
 		Asm: &AsmOp{
 			Template: "movl %k1, %k0",
 			Ops:      []AsmOperandKind{AsmRegOut, AsmRegIn},
@@ -92,6 +96,9 @@ func TestInstrRoundTripsEveryField(t *testing.T) {
 	// AggType likewise round-trips through the module's type table by identity.
 	require.Equal(t, in.RetAgg.Name, got.RetAgg.Name)
 	require.Len(t, got.AggArgs, 1)
+	require.Len(t, got.ArgGroups, 1)
+	require.Equal(t, in.ArgGroups[0].Type.Name, got.ArgGroups[0].Type.Name)
+	in.ArgGroups[0].Type, got.ArgGroups[0].Type = nil, nil
 	in.AggArgs, got.AggArgs, in.RetAgg, got.RetAgg = nil, nil, nil, nil
 
 	require.Equal(t, in, got)

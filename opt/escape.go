@@ -141,6 +141,9 @@ func lowerFunctionHeapAllocations(function *ir.Func) bool {
 			}
 		}
 		mark(block.Jmp.Arg)
+		for _, argument := range block.Jmp.Args {
+			mark(argument)
+		}
 	}
 
 	for _, block := range function.Blocks {

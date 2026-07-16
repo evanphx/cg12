@@ -76,6 +76,12 @@ func prepareAssembly(module *ir.Module) (assemblyBundle, error) {
 	}
 	output.WriteString(wrappers)
 	bundle.functions = append(bundle.functions, wrapperFunctions...)
+	if moduleUsesGoRuntime(module) {
+		output.WriteString("\n\t.text\n")
+		output.WriteString("\t.global runtime_gocTextEnd\n")
+		output.WriteString("\t.type runtime_gocTextEnd, %function\n")
+		output.WriteString("runtime_gocTextEnd:\n")
+	}
 	bundle.source = output.String()
 	return bundle, nil
 }

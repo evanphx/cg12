@@ -663,17 +663,19 @@ func cloneInstr(caller *ir.Func, in *ir.Instr, mapRef func(ir.Ref) ir.Ref, mapBl
 	// Volatile is a semantic flag that must ride along: a cloned volatile store is
 	// still observable. Tail is copied here too, but spliceCall clears it on the
 	// clone, because a call inlined into a caller returns to the continuation and is
-	// no longer in tail position. Amode is deliberately not copied -- it is set only
-	// during lowering, after every pass that clones instructions has run, so it is
-	// always zero here.
+	// no longer in tail position. Amode is normally unset before lowering, but copy
+	// it so this remains a total instruction clone if a later pipeline reorders the
+	// pass.
 	out := ir.Instr{
 		Op:                in.Op,
 		Cls:               in.Cls,
 		To:                mapRef(in.To),
 		Cmp:               in.Cmp,
 		Aux:               in.Aux,
+		Amode:             in.Amode,
 		Unroll:            in.Unroll,
 		RetAgg:            in.RetAgg,
+		RetValues:         in.RetValues,
 		StackResult:       mapRef(in.StackResult),
 		StackResultOffset: in.StackResultOffset,
 		Asm:               in.Asm,
@@ -693,6 +695,9 @@ func cloneInstr(caller *ir.Func, in *ir.Instr, mapRef func(ir.Ref) ir.Ref, mapBl
 	}
 	if in.AggArgs != nil {
 		out.AggArgs = append([]*ir.AggType(nil), in.AggArgs...)
+	}
+	if in.ArgGroups != nil {
+		out.ArgGroups = append([]ir.ValueGroup(nil), in.ArgGroups...)
 	}
 	for _, d := range in.Defs {
 		out.Defs = append(out.Defs, mapRef(d))

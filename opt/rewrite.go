@@ -39,6 +39,9 @@ func applySubst(f *ir.Func, s subst) {
 			}
 		}
 		b.Jmp.Arg = s.resolve(b.Jmp.Arg)
+		for index := range b.Jmp.Args {
+			b.Jmp.Args[index] = s.resolve(b.Jmp.Args[index])
+		}
 	}
 }
 
@@ -62,6 +65,9 @@ func useCounts(f *ir.Func) map[uint32]int {
 			}
 		}
 		add(b.Jmp.Arg)
+		for _, argument := range b.Jmp.Args {
+			add(argument)
+		}
 	}
 	return u
 }

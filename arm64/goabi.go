@@ -44,13 +44,33 @@ func goArgumentFrameFor(function *ir.Func) goArgumentFrame {
 	assigner := newArgAssigner(true)
 	groups := make([]goRegisterSpillGroup, 0, len(function.Params))
 	pointerOffsets := make(map[int]bool)
-	for _, parameter := range function.Params {
+	for parameterIndex := 0; parameterIndex < len(function.Params); {
+		if group, ok := valueGroupAt(function.ParamGroups, parameterIndex); ok {
+			parts, onStack, stackOffset := assignGoAggregate(&assigner, group.Type)
+			if onStack {
+				for _, offset := range goAggregatePointerOffsets(group.Type) {
+					pointerOffsets[stackOffset+offset] = true
+				}
+			} else {
+				size, alignment := group.Type.Layout()
+				groups = append(groups, goRegisterSpillGroup{
+					parts:     parts,
+					size:      size,
+					alignment: alignment,
+				})
+			}
+			parameterIndex += group.Count
+			continue
+		}
+
+		parameter := function.Params[parameterIndex]
 		if parameter.Agg != nil {
 			parts, onStack, stackOffset := assignGoAggregate(&assigner, parameter.Agg)
 			if onStack {
 				for _, offset := range goAggregatePointerOffsets(parameter.Agg) {
 					pointerOffsets[stackOffset+offset] = true
 				}
+				parameterIndex++
 				continue
 			}
 			size, alignment := parameter.Agg.Layout()
@@ -59,6 +79,7 @@ func goArgumentFrameFor(function *ir.Func) goArgumentFrame {
 				size:      size,
 				alignment: alignment,
 			})
+			parameterIndex++
 			continue
 		}
 
@@ -67,6 +88,7 @@ func goArgumentFrameFor(function *ir.Func) goArgumentFrame {
 			if parameter.GCRef {
 				pointerOffsets[location.stacky] = true
 			}
+			parameterIndex++
 			continue
 		}
 		groups = append(groups, goRegisterSpillGroup{
@@ -76,6 +98,7 @@ func goArgumentFrameFor(function *ir.Func) goArgumentFrame {
 			float:     parameter.Cls.IsFloat(),
 			pointer:   parameter.GCRef,
 		})
+		parameterIndex++
 	}
 
 	resultEnd := roundUp(assigner.nsaa, 8)
@@ -133,6 +156,15 @@ func goArgumentFrameFor(function *ir.Func) goArgumentFrame {
 	}
 	sort.Ints(pointerWords)
 	return goArgumentFrame{spills: spills, size: cursor, pointerWords: pointerWords}
+}
+
+func valueGroupAt(groups []ir.ValueGroup, index int) (ir.ValueGroup, bool) {
+	for _, group := range groups {
+		if group.Index == index {
+			return group, true
+		}
+	}
+	return ir.ValueGroup{}, false
 }
 
 func goAggregatePointerOffsets(aggregate *ir.AggType) []int {
@@ -393,6 +425,45 @@ func lowerGoAggregateParam(f *ir.Func, parameter *ir.Temp, assigner *argAssigner
 	return nil, reconstruction, nil
 }
 
+func lowerGoValueParams(f *ir.Func, parameters []*ir.Temp, aggregate *ir.AggType, assigner *argAssigner) ([]ir.Instr, error) {
+	parts, onStack, stackOffset := assignGoAggregate(assigner, aggregate)
+	if onStack {
+		parts, _ = flattenGoAggregate(aggregate)
+	}
+	if len(parts) != len(parameters) {
+		return nil, fmt.Errorf("arm64: aggregate parameter has %d SSA parts, want %d", len(parameters), len(parts))
+	}
+
+	lowered := make([]ir.Instr, 0, len(parts))
+	for index, part := range parts {
+		parameter := parameters[index]
+		if parameter.Cls != part.sub.Cls() {
+			return nil, fmt.Errorf("arm64: aggregate parameter part %d has class %s, want %s", index, parameter.Cls, part.sub.Cls())
+		}
+		if onStack {
+			lowered = append(lowered, ir.Instr{
+				Op:  ir.OPar,
+				Cls: parameter.Cls,
+				To:  parameter.Ref(),
+				Aux: int64(stackOffset + part.offset),
+			})
+			continue
+		}
+
+		pin := newPinned(f, part.reg, parameter.Cls)
+		if part.pointer {
+			f.Temp(pin).GCRef = true
+		}
+		lowered = append(lowered, ir.Instr{
+			Op:   ir.OPar,
+			Cls:  parameter.Cls,
+			To:   parameter.Ref(),
+			Args: []ir.Ref{pin},
+		})
+	}
+	return lowered, nil
+}
+
 func lowerGoAggregateArg(f *ir.Func, argument ir.Ref, aggregate *ir.AggType, assigner *argAssigner, out *[]ir.Instr, setup []ir.Instr, pins []ir.Ref) ([]ir.Instr, []ir.Ref, error) {
 	parts, onStack, stackOffset := assignGoAggregate(assigner, aggregate)
 	if onStack {
@@ -430,6 +501,47 @@ func lowerGoAggregateArg(f *ir.Func, argument ir.Ref, aggregate *ir.AggType, ass
 	return setup, pins, nil
 }
 
+func lowerGoValueArg(f *ir.Func, arguments []ir.Ref, aggregate *ir.AggType, assigner *argAssigner, setup []ir.Instr, pins []ir.Ref) ([]ir.Instr, []ir.Ref, error) {
+	parts, onStack, stackOffset := assignGoAggregate(assigner, aggregate)
+	if onStack {
+		parts, _ = flattenGoAggregate(aggregate)
+	}
+	if len(parts) != len(arguments) {
+		return nil, nil, fmt.Errorf("arm64: aggregate argument has %d SSA parts, want %d", len(arguments), len(parts))
+	}
+
+	for index, part := range parts {
+		argument := arguments[index]
+		class := f.ClassOf(argument)
+		if class != part.sub.Cls() {
+			return nil, nil, fmt.Errorf("arm64: aggregate argument part %d has class %s, want %s", index, class, part.sub.Cls())
+		}
+		if onStack {
+			setup = append(setup, ir.Instr{
+				Op:   ir.OArg,
+				Cls:  class,
+				To:   ir.R,
+				Args: []ir.Ref{argument},
+				Aux:  int64(stackOffset + part.offset),
+			})
+			continue
+		}
+
+		pin := newPinned(f, part.reg, class)
+		if part.pointer {
+			f.Temp(pin).GCRef = true
+		}
+		setup = append(setup, ir.Instr{
+			Op:   ir.OArg,
+			Cls:  class,
+			To:   pin,
+			Args: []ir.Ref{argument},
+		})
+		pins = append(pins, pin)
+	}
+	return setup, pins, nil
+}
+
 func lowerGoAggregateResult(f *ir.Func, destination ir.Ref, aggregate *ir.AggType, stackBase int, out *[]ir.Instr, setup []ir.Instr, pins []ir.Ref) (callTo ir.Ref, callClass ir.Cls, definitions []ir.Ref, newSetup []ir.Instr, newPins []ir.Ref, post []ir.Instr, stackResult ir.Ref, stackOffset int, stackEnd int, err error) {
 	resultAssigner := newArgAssigner(true)
 	resultAssigner.nsaa = stackBase
@@ -460,6 +572,63 @@ func lowerGoAggregateResult(f *ir.Func, destination ir.Ref, aggregate *ir.AggTyp
 		})
 	}
 	post = append(post, ir.Instr{Op: ir.OCopy, Cls: ir.ClsL, To: destination, Args: []ir.Ref{slot}})
+	return callTo, callClass, definitions, setup, pins, post, ir.R, 0, resultAssigner.nsaa, nil
+}
+
+func lowerGoValueResult(f *ir.Func, destinations []ir.Ref, aggregate *ir.AggType, stackBase int, out *[]ir.Instr, setup []ir.Instr, pins []ir.Ref) (callTo ir.Ref, callClass ir.Cls, definitions []ir.Ref, newSetup []ir.Instr, newPins []ir.Ref, post []ir.Instr, stackResult ir.Ref, stackOffset int, stackEnd int, err error) {
+	resultAssigner := newArgAssigner(true)
+	resultAssigner.nsaa = stackBase
+	parts, onStack, resultOffset := assignGoAggregate(&resultAssigner, aggregate)
+	if onStack {
+		parts, _ = flattenGoAggregate(aggregate)
+	}
+	if len(parts) != len(destinations) {
+		err = fmt.Errorf("arm64: aggregate result has %d SSA parts, want %d", len(destinations), len(parts))
+		return
+	}
+
+	if onStack {
+		slot := aggregateAlloc(f, aggregate, out)
+		for index, part := range parts {
+			destination := destinations[index]
+			if f.ClassOf(destination) != part.sub.Cls() {
+				err = fmt.Errorf("arm64: aggregate result part %d has class %s, want %s", index, f.ClassOf(destination), part.sub.Cls())
+				return
+			}
+			address := offsetAddr(f, slot, part.offset, &post)
+			post = append(post, ir.Instr{
+				Op:   loadOpForSub(part.sub),
+				Cls:  part.sub.Cls(),
+				To:   destination,
+				Args: []ir.Ref{address},
+			})
+		}
+		return ir.R, 0, nil, setup, pins, post, slot, resultOffset, resultAssigner.nsaa, nil
+	}
+
+	for index, part := range parts {
+		destination := destinations[index]
+		if f.ClassOf(destination) != part.sub.Cls() {
+			err = fmt.Errorf("arm64: aggregate result part %d has class %s, want %s", index, f.ClassOf(destination), part.sub.Cls())
+			return
+		}
+		pin := newPinned(f, part.reg, part.sub.Cls())
+		if part.pointer {
+			f.Temp(pin).GCRef = true
+		}
+		if index == 0 {
+			callTo = pin
+			callClass = part.sub.Cls()
+		} else {
+			definitions = append(definitions, pin)
+		}
+		post = append(post, ir.Instr{
+			Op:   ir.OCopy,
+			Cls:  part.sub.Cls(),
+			To:   destination,
+			Args: []ir.Ref{pin},
+		})
+	}
 	return callTo, callClass, definitions, setup, pins, post, ir.R, 0, resultAssigner.nsaa, nil
 }
 
@@ -507,6 +676,60 @@ func lowerGoAggregateReturn(f *ir.Func, block *ir.Block, resultBuffer ir.Ref) er
 	return nil
 }
 
+func lowerGoValueReturn(f *ir.Func, block *ir.Block, resultBuffer ir.Ref) error {
+	values := append([]ir.Ref{block.Jmp.Arg}, block.Jmp.Args...)
+	resultAssigner := newArgAssigner(true)
+	parts, onStack, _ := assignGoAggregate(&resultAssigner, f.RetAgg)
+	if onStack {
+		parts, _ = flattenGoAggregate(f.RetAgg)
+	}
+	if len(parts) != len(values) {
+		return fmt.Errorf("arm64: aggregate return has %d SSA parts, want %d", len(values), len(parts))
+	}
+
+	if onStack {
+		if resultBuffer.IsNone() {
+			return fmt.Errorf("arm64: missing stack result buffer for Go ABI aggregate")
+		}
+		for index, part := range parts {
+			value := values[index]
+			if f.ClassOf(value) != part.sub.Cls() {
+				return fmt.Errorf("arm64: aggregate return part %d has class %s, want %s", index, f.ClassOf(value), part.sub.Cls())
+			}
+			address := offsetAddr(f, resultBuffer, part.offset, &block.Instrs)
+			block.Instrs = append(block.Instrs, ir.Instr{
+				Op:   storeOpForSub(part.sub),
+				Cls:  part.sub.Cls(),
+				Args: []ir.Ref{value, address},
+			})
+		}
+		block.Jmp = ir.Jmp{Kind: ir.JmpRet}
+		return nil
+	}
+
+	resultRegisters := make([]ir.Ref, 0, len(parts))
+	for index, part := range parts {
+		value := values[index]
+		if f.ClassOf(value) != part.sub.Cls() {
+			return fmt.Errorf("arm64: aggregate return part %d has class %s, want %s", index, f.ClassOf(value), part.sub.Cls())
+		}
+		pin := newPinned(f, part.reg, part.sub.Cls())
+		if part.pointer {
+			f.Temp(pin).GCRef = true
+		}
+		block.Instrs = append(block.Instrs, ir.Instr{
+			Op:   ir.OCopy,
+			Cls:  part.sub.Cls(),
+			To:   pin,
+			Args: []ir.Ref{value},
+		})
+		resultRegisters = append(resultRegisters, pin)
+	}
+	block.Jmp.Arg = resultRegisters[0]
+	block.Jmp.Args = resultRegisters[1:]
+	return nil
+}
+
 type goABISpill struct {
 	size      int
 	alignment int
@@ -515,7 +738,19 @@ type goABISpill struct {
 func goCallStackBytes(f *ir.Func, call *ir.Instr, resultEnd int) int {
 	assigner := newArgAssigner(true)
 	var spills []goABISpill
-	for argumentIndex, argument := range call.Args[1:] {
+	arguments := call.Args[1:]
+	for argumentIndex := 0; argumentIndex < len(arguments); {
+		if group, ok := valueGroupAt(call.ArgGroups, argumentIndex); ok {
+			_, onStack, _ := assignGoAggregate(&assigner, group.Type)
+			if !onStack {
+				size, alignment := group.Type.Layout()
+				spills = append(spills, goABISpill{size: size, alignment: alignment})
+			}
+			argumentIndex += group.Count
+			continue
+		}
+
+		argument := arguments[argumentIndex]
 		aggregate := aggArgAt(call, argumentIndex)
 		if aggregate != nil {
 			_, onStack, _ := assignGoAggregate(&assigner, aggregate)
@@ -523,6 +758,7 @@ func goCallStackBytes(f *ir.Func, call *ir.Instr, resultEnd int) int {
 				size, alignment := aggregate.Layout()
 				spills = append(spills, goABISpill{size: size, alignment: alignment})
 			}
+			argumentIndex++
 			continue
 		}
 
@@ -531,6 +767,7 @@ func goCallStackBytes(f *ir.Func, call *ir.Instr, resultEnd int) int {
 		if !location.onStack {
 			spills = append(spills, goABISpill{size: class.Size(), alignment: class.Size()})
 		}
+		argumentIndex++
 	}
 
 	cursor := roundUp(resultEnd, 8)
