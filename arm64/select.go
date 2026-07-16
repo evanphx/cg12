@@ -267,10 +267,9 @@ func (s *sel) cmp(in *ir.Instr) {
 	done()
 }
 
-// term selects a block terminator through the builder, handling the simple
-// branch forms. It returns false for the return and jump-table terminators,
-// which stay on each emitter's own path (they touch the frame epilogue and a
-// PC-relative offset table).
+// term selects a block terminator through the builder, handling the branch forms
+// and the jump table. It returns false only for the return terminator, which
+// stays on each emitter's own path because it drives the frame epilogue.
 func (s *sel) term(b *ir.Block) bool {
 	switch b.Jmp.Kind {
 	case ir.JmpJmp:
@@ -284,6 +283,8 @@ func (s *sel) term(b *ir.Block) bool {
 		s.b.brk()
 	case ir.JmpBr:
 		s.b.brind(s.src(b.Jmp.Arg, 0, 8))
+	case ir.JmpTable:
+		s.b.jumpTable(s.src(b.Jmp.Arg, 0, 4), b, b.Jmp.Targets)
 	default:
 		return false
 	}

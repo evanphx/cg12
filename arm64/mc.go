@@ -1643,21 +1643,6 @@ func (m *mc) term(b *ir.Block) {
 	switch b.Jmp.Kind {
 	case ir.JmpRet:
 		m.epilogue()
-	case ir.JmpTable:
-		// Indexed branch through a PC-relative offset table placed just past the
-		// branch: target = table + (int32)table[idx]. The index is already bounds
-		// checked, so it addresses within the table. x17/x15 are free scratch at a
-		// terminator (the index comes from slot 0 = x16 or an allocated register).
-		idx := m.src(b.Jmp.Arg, 0, 4)
-		tbl := b.Name + ".tbl"
-		m.prog.Adr(mcGP1, tbl)                                  // adr  x17, tbl
-		m.emit(a64.LdrswReg(mcGP2, mcGP1, idx, a64.ExtUXTW, 1)) // ldrsw x15, [x17, idx, uxtw #2]
-		m.emit(a64.AddReg(true, mcGP2, mcGP1, mcGP2))           // add  x15, x17, x15
-		m.emit(a64.Br(mcGP2))                                   // br   x15
-		m.prog.Label(tbl)
-		for _, t := range b.Jmp.Targets {
-			m.prog.DataWord(t.Name, tbl) // .word t - tbl
-		}
 	default:
 		m.fail("arm64: block %q has no terminator", b.Name)
 	}

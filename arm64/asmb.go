@@ -78,6 +78,11 @@ type asmb interface {
 	brind(rn Reg)
 	brk()
 
+	// jumpTable emits an indexed branch through a PC-relative offset table placed
+	// just past the branch: target = table + (int32)table[idx]. idx is already
+	// bounds-checked. x17/x15 are free scratch at a terminator.
+	jumpTable(idx Reg, blk *ir.Block, targets []*ir.Block)
+
 	// Stack pointer and block addresses. allocN grows the stack by a runtime size
 	// (VLA); movFromSP/movToSP snapshot and restore it; adr materializes a block's
 	// PC-relative address.
@@ -414,6 +419,17 @@ func (b *mcAsm) cbnz(w64 bool, rn Reg, to *ir.Block) {
 }
 func (b *mcAsm) brind(rn Reg) { b.prog.Emit(a64.Br(mreg(rn))) }
 func (b *mcAsm) brk()         { b.prog.Emit(a64.Brk(0)) }
+func (b *mcAsm) jumpTable(idx Reg, blk *ir.Block, targets []*ir.Block) {
+	tbl := blk.Name + ".tbl"
+	b.prog.Adr(mcGP1, tbl)                                             // adr  x17, tbl
+	b.prog.Emit(a64.LdrswReg(mcGP2, mcGP1, mreg(idx), a64.ExtUXTW, 1)) // ldrsw x15, [x17, idx, uxtw #2]
+	b.prog.Emit(a64.AddReg(true, mcGP2, mcGP1, mcGP2))                 // add  x15, x17, x15
+	b.prog.Emit(a64.Br(mcGP2))                                         // br   x15
+	b.prog.Label(tbl)
+	for _, t := range targets {
+		b.prog.DataWord(t.Name, tbl) // .word t - tbl
+	}
+}
 func (b *mcAsm) allocN(rd, size Reg) {
 	b.prog.Emit(a64.AddImm(true, mcGP2, mcSP, 0))              // x15 = sp
 	b.prog.Emit(a64.SubReg(true, mreg(rd), mcGP2, mreg(size))) // rd = sp - size
@@ -507,6 +523,17 @@ func (b *textAsm) cbnz(w64 bool, rn Reg, to *ir.Block) {
 }
 func (b *textAsm) brind(rn Reg) { b.line("br %s", rn.Name(8)) }
 func (b *textAsm) brk()         { b.line("brk #0") }
+func (b *textAsm) jumpTable(idx Reg, blk *ir.Block, targets []*ir.Block) {
+	tbl := b.e.blockLabel(blk) + "_tbl"
+	b.line("adr x17, %s", tbl)
+	b.line("ldrsw x15, [x17, %s, uxtw #2]", idx.Name(4))
+	b.line("add x15, x17, x15")
+	b.line("br x15")
+	b.line("%s:", tbl)
+	for _, t := range targets {
+		b.line(".word %s - %s", b.e.blockLabel(t), tbl)
+	}
+}
 func (b *textAsm) allocN(rd, size Reg) {
 	b.line("mov x15, sp")
 	b.line("sub %s, x15, %s", rd.xName(), size.xName())
