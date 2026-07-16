@@ -1273,27 +1273,6 @@ func (m *mc) instr(in *ir.Instr) {
 		d, done := m.dst(in.To, 8)
 		m.frameAddr(d, m.allocOff[in])
 		done()
-	case ir.OAllocN:
-		// Variable-length array: grow the stack by the (16-aligned) size and
-		// return the new stack top. x29 stays put, so fixed locals/spills remain
-		// addressable; the epilogue restores sp from x29.
-		size := m.src(in.Args[0], 1, 8)
-		d, done := m.dst(in.To, 8)
-		m.emit(a64.AddImm(true, mcGP2, mcSP, 0)) // x15 = sp
-		m.emit(a64.SubReg(true, d, mcGP2, size)) // d = sp - size (safe if d == size)
-		m.emit(a64.AddImm(true, mcSP, d, 0))     // sp = d
-		done()
-	case ir.OStackSave:
-		d, done := m.dst(in.To, 8)
-		m.emit(a64.AddImm(true, d, mcSP, 0)) // mov d, sp
-		done()
-	case ir.OStackRestore:
-		r := m.src(in.Args[0], 0, 8)
-		m.emit(a64.AddImm(true, mcSP, r, 0)) // mov sp, r
-	case ir.OBlockAddr:
-		d, done := m.dst(in.To, 8)
-		m.prog.Adr(d, in.Blk.Name) // PC-relative label address (&&label)
-		done()
 	default:
 		if in.Op.IsLoad() {
 			m.load(in)

@@ -78,6 +78,14 @@ type asmb interface {
 	brind(rn Reg)
 	brk()
 
+	// Stack pointer and block addresses. allocN grows the stack by a runtime size
+	// (VLA); movFromSP/movToSP snapshot and restore it; adr materializes a block's
+	// PC-relative address.
+	allocN(rd, size Reg)
+	movFromSP(rd Reg)
+	movToSP(rn Reg)
+	adr(rd Reg, to *ir.Block)
+
 	// Spill traffic: a load into / store from a frame slot at x29+off.
 	ldrSpill(rd Reg, float bool, off, size int)
 	strSpill(rs Reg, float bool, off, size int)
@@ -406,6 +414,14 @@ func (b *mcAsm) cbnz(w64 bool, rn Reg, to *ir.Block) {
 }
 func (b *mcAsm) brind(rn Reg) { b.prog.Emit(a64.Br(mreg(rn))) }
 func (b *mcAsm) brk()         { b.prog.Emit(a64.Brk(0)) }
+func (b *mcAsm) allocN(rd, size Reg) {
+	b.prog.Emit(a64.AddImm(true, mcGP2, mcSP, 0))              // x15 = sp
+	b.prog.Emit(a64.SubReg(true, mreg(rd), mcGP2, mreg(size))) // rd = sp - size
+	b.prog.Emit(a64.AddImm(true, mcSP, mreg(rd), 0))           // sp = rd
+}
+func (b *mcAsm) movFromSP(rd Reg)         { b.prog.Emit(a64.AddImm(true, mreg(rd), mcSP, 0)) }
+func (b *mcAsm) movToSP(rn Reg)           { b.prog.Emit(a64.AddImm(true, mcSP, mreg(rn), 0)) }
+func (b *mcAsm) adr(rd Reg, to *ir.Block) { b.prog.Adr(mreg(rd), to.Name) }
 func (b *mcAsm) ldrSpill(rd Reg, float bool, off, size int) {
 	b.m.spillLoad(mreg(rd), float, off, size)
 }
@@ -491,6 +507,14 @@ func (b *textAsm) cbnz(w64 bool, rn Reg, to *ir.Block) {
 }
 func (b *textAsm) brind(rn Reg) { b.line("br %s", rn.Name(8)) }
 func (b *textAsm) brk()         { b.line("brk #0") }
+func (b *textAsm) allocN(rd, size Reg) {
+	b.line("mov x15, sp")
+	b.line("sub %s, x15, %s", rd.xName(), size.xName())
+	b.line("mov sp, %s", rd.xName())
+}
+func (b *textAsm) movFromSP(rd Reg)         { b.line("mov %s, sp", rd.xName()) }
+func (b *textAsm) movToSP(rn Reg)           { b.line("mov sp, %s", rn.xName()) }
+func (b *textAsm) adr(rd Reg, to *ir.Block) { b.line("adr %s, %s", rd.xName(), b.e.blockLabel(to)) }
 func (b *textAsm) ldrSpill(rd Reg, float bool, off, size int) {
 	b.line("ldr %s, [x29, #%d]", rd.Name(size), off)
 }

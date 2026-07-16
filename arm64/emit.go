@@ -430,23 +430,6 @@ func (e *emitter) emitInstr(b *ir.Block, in *ir.Instr) {
 		d, done := e.dstReg(in.To, 8)
 		e.frameAddr(d, e.allocOff[in])
 		done()
-	case ir.OAllocN:
-		size := e.srcReg(in.Args[0], 1, 8)
-		d, done := e.dstReg(in.To, 8)
-		e.line("mov x15, sp")
-		e.line("sub %s, x15, %s", d, size)
-		e.line("mov sp, %s", d)
-		done()
-	case ir.OStackSave:
-		d, done := e.dstReg(in.To, 8)
-		e.line("mov %s, sp", d)
-		done()
-	case ir.OStackRestore:
-		e.line("mov sp, %s", e.srcReg(in.Args[0], 0, 8))
-	case ir.OBlockAddr:
-		d, done := e.dstReg(in.To, 8)
-		e.line("adr %s, %s", d, e.blockLabel(in.Blk)) // &&label
-		done()
 	case ir.OAsm:
 		e.emitAsm(in)
 	default:

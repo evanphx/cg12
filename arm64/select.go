@@ -180,6 +180,24 @@ func (s *sel) selectData(in *ir.Instr) bool {
 		s.b.movReg(false, d, s.src(in.Args[0], 1, 4))
 		done()
 
+	// Stack pointer and block addresses (OAlloc4/8/16 stay per-emitter: they need
+	// the frame-layout offset).
+	case ir.OAllocN:
+		size := s.src(in.Args[0], 1, 8)
+		d, done := s.dst(in.To, 8)
+		s.b.allocN(d, size)
+		done()
+	case ir.OStackSave:
+		d, done := s.dst(in.To, 8)
+		s.b.movFromSP(d)
+		done()
+	case ir.OStackRestore:
+		s.b.movToSP(s.src(in.Args[0], 0, 8))
+	case ir.OBlockAddr:
+		d, done := s.dst(in.To, 8)
+		s.b.adr(d, in.Blk)
+		done()
+
 	default:
 		switch {
 		case in.Op.IsLoad():
