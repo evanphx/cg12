@@ -31,6 +31,7 @@ type xasm interface {
 	shiftCLGP(op ir.Op, w bool, dst Reg)
 	cmpGP(w bool, a, b Reg)
 	setccMovzx(cmp ir.Cmp, dst Reg)
+	extGP(op ir.Op, w bool, dst, src Reg)
 
 	// spillStore writes a scratch register back to a result's frame slot.
 	spillStore(r Reg, slot, size int)
@@ -92,6 +93,23 @@ func (b *mcXasm) setccMovzx(cmp ir.Cmp, dst Reg) {
 	b.m.emit(x64.Setcc(intCond(cmp), dst.mreg()))
 	b.m.emit(x64.MovzxByte(false, dst.mreg(), dst.mreg()))
 }
+func (b *mcXasm) extGP(op ir.Op, w bool, dst, src Reg) {
+	dm, sm := dst.mreg(), src.mreg()
+	switch op {
+	case ir.OExtsb:
+		b.m.emit(x64.MovsxByte(w, dm, sm))
+	case ir.OExtub:
+		b.m.emit(x64.MovzxByte(w, dm, sm))
+	case ir.OExtsh:
+		b.m.emit(x64.MovsxWord(w, dm, sm))
+	case ir.OExtuh:
+		b.m.emit(x64.MovzxWord(w, dm, sm))
+	case ir.OExtsw:
+		b.m.emit(x64.Movsxd(dm, sm))
+	case ir.OExtuw:
+		b.m.emit(x64.MovReg(false, dm, sm)) // a 32-bit mov zero-extends
+	}
+}
 func (b *mcXasm) spillStore(r Reg, slot, size int) {
 	b.m.emit(x64.Store(size*8, r.mreg(), x64.At(RBP.mreg(), b.m.slotAddr(slot))))
 }
@@ -138,6 +156,26 @@ func (b *textXasm) cmpGP(w bool, a, bb Reg) {
 func (b *textXasm) setccMovzx(cmp ir.Cmp, dst Reg) {
 	b.e.line("set%s %s", intCC[cmp], gpn(dst, 1))
 	b.e.line("movzbl %s, %s", gpn(dst, 1), gpn(dst, 4))
+}
+func (b *textXasm) extGP(op ir.Op, w bool, dst, src Reg) {
+	dw, tail := 4, "l"
+	if w {
+		dw, tail = 8, "q"
+	}
+	switch op {
+	case ir.OExtsb:
+		b.e.line("movsb%s %s, %s", tail, gpn(src, 1), gpn(dst, dw))
+	case ir.OExtub:
+		b.e.line("movzb%s %s, %s", tail, gpn(src, 1), gpn(dst, dw))
+	case ir.OExtsh:
+		b.e.line("movsw%s %s, %s", tail, gpn(src, 2), gpn(dst, dw))
+	case ir.OExtuh:
+		b.e.line("movzw%s %s, %s", tail, gpn(src, 2), gpn(dst, dw))
+	case ir.OExtsw:
+		b.e.line("movslq %s, %s", gpn(src, 4), gpn(dst, 8))
+	case ir.OExtuw:
+		b.e.line("movl %s, %s", gpn(src, 4), gpn(dst, 4))
+	}
 }
 func (b *textXasm) spillStore(r Reg, slot, size int) {
 	b.e.line("mov%s %s, %s", suf(size), gpn(r, size), memn(RBP, b.e.slotAddr(slot)))

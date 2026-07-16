@@ -66,6 +66,12 @@ func (s *xsel) selectInt(in *ir.Instr) bool {
 			return false
 		}
 		s.cmp(in)
+	case ir.OExtsb, ir.OExtub, ir.OExtsh, ir.OExtuh, ir.OExtsw, ir.OExtuw:
+		w := in.Cls == ir.ClsL
+		rs := s.gpValue(in.Arg(0), gpScratch1)
+		d, commit := s.gpDst(in.To)
+		s.b.extGP(in.Op, w, d, rs)
+		commit()
 	default:
 		return false
 	}

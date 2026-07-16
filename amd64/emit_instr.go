@@ -61,8 +61,6 @@ func (e *emitter) instr(in *ir.Instr) {
 	case ir.OStackRestore:
 		r := e.gpValue(in.Args[0], gpScratch0)
 		e.line("movq %s, %%rsp", gpn(r, 8)) // mov rsp, r
-	case ir.OExtsb, ir.OExtub, ir.OExtsh, ir.OExtuh, ir.OExtsw, ir.OExtuw:
-		e.extend(in)
 	case ir.OExts, ir.OTruncd, ir.OStosi, ir.OStoui, ir.OSltof, ir.OUltof, ir.OCast:
 		e.convert(in)
 	case ir.OBlockAddr:
