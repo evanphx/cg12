@@ -61,6 +61,46 @@ func moduleMainCallsHelper() *ir.Module {
 	return m
 }
 
+// moduleReadsGlobal builds main() = *g, where g is an initialized module-level
+// word. Addressing the global exercises the symbol-address relocations the
+// executable writer must resolve (arm64 ADRP+ADD, amd64 RIP-relative PC32).
+func moduleReadsGlobal(v int64) *ir.Module {
+	m := ir.NewModule()
+	m.Data = append(m.Data, &ir.Data{
+		Name:  "g",
+		Align: 4,
+		Items: []ir.DataItem{{Sub: ir.SubW, Ints: []int64{v}}},
+	})
+	f := m.NewFunc("main", ir.ClsW).Export()
+	e := f.Entry()
+	e.Ret(e.Load(ir.ClsW, f.Sym("g", 0)))
+	return m
+}
+
+// A program that reads an initialized global links into a runnable executable:
+// the symbol-address relocations are resolved against the .data segment's final
+// virtual address, and the program returns the global's value.
+func TestExecutableReadsGlobal(t *testing.T) {
+	t.Run("arm64", func(t *testing.T) {
+		if runtime.GOARCH != "arm64" {
+			t.Skip("arm64 executable runs natively only on an arm64 host")
+		}
+		l := link.NewWith(arm64.Backend{})
+		require.NoError(t, l.AddModule(moduleReadsGlobal(99)))
+		exe, err := l.LinkExecutable("main")
+		require.NoError(t, err)
+		require.Equal(t, 99, runExe(t, exe))
+	})
+	t.Run("amd64", func(t *testing.T) {
+		qemu := qemuX86(t)
+		l := link.NewWith(amd64.Backend{})
+		require.NoError(t, l.AddModule(moduleReadsGlobal(99)))
+		exe, err := l.LinkExecutable("main")
+		require.NoError(t, err)
+		require.Equal(t, 99, runExe(t, exe, qemu))
+	})
+}
+
 // The linker turns an IR module straight into a runnable static executable -- no
 // external assembler, linker, or C runtime -- and the process exit code is the
 // entry function's return value.
