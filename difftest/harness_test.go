@@ -70,43 +70,49 @@ func (c Case) run(t *testing.T) {
 	}
 }
 
-// cg12 parses, optionally optimizes, compiles, links, and runs.
+// cg12 parses, optionally optimizes, compiles to an object, links, and runs.
 func (c Case) cg12(t *testing.T, cc string, optimize bool) string {
 	m, err := parse.Parse(c.IL)
 	require.NoErrorf(t, err, "%s: parse", c.Name)
 	if optimize {
 		opt.OptimizeModule(m)
 	}
-	asm, err := arm64.CompileModule(m)
+	o, err := arm64.CompileToObject(m)
 	require.NoErrorf(t, err, "%s: compile", c.Name)
-	return linkRun(t, cc, asm, c.Main)
+	data, err := o.MarshalELF()
+	require.NoErrorf(t, err, "%s: marshal", c.Name)
+
+	unit := filepath.Join(t.TempDir(), "cg12.o")
+	require.NoError(t, os.WriteFile(unit, data, 0o644))
+	return linkRun(t, cc, unit, c.Main, arm64.Disassemble(o))
 }
 
-// qbe compiles the IL with the reference QBE, links, and runs.
+// qbe compiles the IL with the reference QBE, links, and runs. QBE emits
+// assembly text, so this is the one path that still hands a .s to the toolchain.
 func (c Case) qbe(t *testing.T, cc, qbe string) string {
 	dir := t.TempDir()
 	src := filepath.Join(dir, "in.ssa")
-	out := filepath.Join(dir, "qbe.s")
+	unit := filepath.Join(dir, "qbe.s")
 	require.NoError(t, os.WriteFile(src, []byte(c.IL), 0o644))
-	if o, err := exec.Command(qbe, "-o", out, src).CombinedOutput(); err != nil {
+	if o, err := exec.Command(qbe, "-o", unit, src).CombinedOutput(); err != nil {
 		t.Fatalf("%s: qbe failed: %s", c.Name, o)
 	}
-	asm, err := os.ReadFile(out)
+	asm, err := os.ReadFile(unit)
 	require.NoError(t, err)
-	return linkRun(t, cc, string(asm), c.Main)
+	return linkRun(t, cc, unit, c.Main, string(asm))
 }
 
-// linkRun assembles asm with the C driver, runs the program, and returns stdout.
-func linkRun(t *testing.T, cc, asm, cmain string) string {
+// linkRun links an already-compiled unit -- an object of ours, or QBE's assembly
+// -- with the C driver, runs the program, and returns stdout. listing is the code
+// to show if the link fails.
+func linkRun(t *testing.T, cc, unit, cmain, listing string) string {
 	dir := t.TempDir()
-	asmPath := filepath.Join(dir, "o.s")
 	cPath := filepath.Join(dir, "main.c")
 	bin := filepath.Join(dir, "prog")
-	require.NoError(t, os.WriteFile(asmPath, []byte(asm), 0o644))
 	require.NoError(t, os.WriteFile(cPath, []byte(cmain), 0o644))
 
-	if o, err := exec.Command(cc, "-o", bin, asmPath, cPath).CombinedOutput(); err != nil {
-		t.Fatalf("assemble/link failed: %s\n--- asm ---\n%s", o, asm)
+	if o, err := exec.Command(cc, "-o", bin, unit, cPath).CombinedOutput(); err != nil {
+		t.Fatalf("assemble/link failed: %s\n--- asm ---\n%s", o, listing)
 	}
 	cmd := exec.Command(bin)
 	var stdout bytes.Buffer

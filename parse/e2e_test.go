@@ -40,15 +40,17 @@ func parseCompileRun(t *testing.T, il, cmain string) int {
 	m, err := parse.Parse(il)
 	require.NoErrorf(t, err, "parse:\n%s", il)
 	opt.OptimizeModule(m)
-	asm, err := arm64.CompileModule(m)
+	o, err := arm64.CompileToObject(m)
+	require.NoError(t, err)
+	data, err := o.MarshalELF()
 	require.NoError(t, err)
 
 	dir := t.TempDir()
-	require.NoError(t, os.WriteFile(filepath.Join(dir, "o.s"), []byte(asm), 0o644))
+	require.NoError(t, os.WriteFile(filepath.Join(dir, "o.o"), data, 0o644))
 	require.NoError(t, os.WriteFile(filepath.Join(dir, "m.c"), []byte(cmain), 0o644))
 	bin := filepath.Join(dir, "p")
-	out, err := exec.Command(cc, "-o", bin, filepath.Join(dir, "o.s"), filepath.Join(dir, "m.c")).CombinedOutput()
-	require.NoErrorf(t, err, "link failed: %s\n%s", out, asm)
+	out, err := exec.Command(cc, "-o", bin, filepath.Join(dir, "o.o"), filepath.Join(dir, "m.c")).CombinedOutput()
+	require.NoErrorf(t, err, "link failed: %s\n%s", out, arm64.Disassemble(o))
 
 	cmd := exec.Command(bin)
 	var sb bytes.Buffer

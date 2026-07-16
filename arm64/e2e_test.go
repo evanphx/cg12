@@ -28,7 +28,7 @@ func assembler() (string, bool) {
 	return "", false
 }
 
-// buildAndRun compiles m to assembly, links it with a C driver, runs the
+// buildAndRun compiles m to an object, links it with a C driver, runs the
 // program, and returns its stdout and exit code. It skips when no AArch64
 // toolchain is available so the suite stays portable.
 func buildAndRun(t *testing.T, m *ir.Module, cmain string) (string, int) {
@@ -37,18 +37,20 @@ func buildAndRun(t *testing.T, m *ir.Module, cmain string) (string, int) {
 	if !ok {
 		t.Skip("no AArch64 assembler available")
 	}
-	asm, err := arm64.CompileModule(m)
+	o, err := arm64.CompileToObject(m)
+	require.NoError(t, err)
+	data, err := o.MarshalELF()
 	require.NoError(t, err)
 
 	dir := t.TempDir()
-	asmPath := filepath.Join(dir, "out.s")
+	objPath := filepath.Join(dir, "out.o")
 	cPath := filepath.Join(dir, "main.c")
 	bin := filepath.Join(dir, "prog")
-	require.NoError(t, os.WriteFile(asmPath, []byte(asm), 0o644))
+	require.NoError(t, os.WriteFile(objPath, data, 0o644))
 	require.NoError(t, os.WriteFile(cPath, []byte(cmain), 0o644))
 
-	out, err := exec.Command(cc, "-o", bin, asmPath, cPath).CombinedOutput()
-	require.NoErrorf(t, err, "assemble/link failed: %s\n--- asm ---\n%s", out, asm)
+	out, err := exec.Command(cc, "-o", bin, objPath, cPath).CombinedOutput()
+	require.NoErrorf(t, err, "link failed: %s\n--- asm ---\n%s", out, arm64.Disassemble(o))
 
 	cmd := exec.Command(bin)
 	var stdout bytes.Buffer

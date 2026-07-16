@@ -12,6 +12,7 @@ import (
 	"time"
 
 	"github.com/evanphx/cg12/arm64"
+	"github.com/evanphx/cg12/obj"
 	"github.com/evanphx/cg12/opt"
 	"github.com/evanphx/cg12/parse"
 	"github.com/stretchr/testify/require"
@@ -45,21 +46,23 @@ func TestQBECorpus(t *testing.T) {
 			}
 
 			// cg12 must be able to compile it; unsupported features skip.
-			asmOpt, err := compileIL(tc.il, true)
+			objOpt, err := compileIL(tc.il, true)
 			if err != nil {
 				t.Skipf("unsupported by cg12: %v", err)
 			}
-			asmUnopt, err := compileIL(tc.il, false)
+			objUnopt, err := compileIL(tc.il, false)
 			require.NoError(t, err)
 
 			wantOut, wantExit := tc.expect()
-			checkRun(t, cc, asmUnopt, tc.driver, "unoptimized", wantOut, wantExit)
-			checkRun(t, cc, asmOpt, tc.driver, "optimized", wantOut, wantExit)
+			checkRun(t, cc, unit{writeObject(t, objUnopt), arm64.Disassemble(objUnopt)},
+				tc.driver, "unoptimized", wantOut, wantExit)
+			checkRun(t, cc, unit{writeObject(t, objOpt), arm64.Disassemble(objOpt)},
+				tc.driver, "optimized", wantOut, wantExit)
 
 			if qbe, ok := qbePath(); ok {
 				if asm, err := qbeAsm(qbe, file); err != nil {
 					t.Logf("QBE could not compile this file, skipping oracle: %v", err)
-				} else if out, exit := runAsm(t, cc, asm, tc.driver); !matches(out, exit, wantOut, wantExit) {
+				} else if out, exit := runUnit(t, cc, writeAsm(t, asm), tc.driver); !matches(out, exit, wantOut, wantExit) {
 					// cg12 already matched the recorded expected output; if this
 					// (possibly stale) QBE binary disagrees, trust the expectation.
 					t.Logf("QBE reference disagrees with the recorded expectation (its support may differ), skipping oracle")
@@ -129,15 +132,28 @@ func extractBlock(src, what string) string {
 	return strings.Join(out, "\n") + "\n"
 }
 
-func compileIL(il string, optimize bool) (string, error) {
+// compileIL parses and compiles to an object. It returns the object rather than
+// bytes so a failure can still be shown as readable code.
+func compileIL(il string, optimize bool) (*obj.Object, error) {
 	m, err := parse.Parse(il)
 	if err != nil {
-		return "", err
+		return nil, err
 	}
 	if optimize {
 		opt.OptimizeModule(m)
 	}
-	return arm64.CompileModule(m)
+	return arm64.CompileToObject(m)
+}
+
+// writeObject serializes an object into a fresh directory and returns its path,
+// ready to hand to the linker.
+func writeObject(t *testing.T, o *obj.Object) string {
+	t.Helper()
+	data, err := o.MarshalELF()
+	require.NoError(t, err)
+	path := filepath.Join(t.TempDir(), "cg12.o")
+	require.NoError(t, os.WriteFile(path, data, 0o644))
+	return path
 }
 
 func qbeAsm(qbe, file string) (string, error) {
@@ -155,8 +171,8 @@ func qbeAsm(qbe, file string) (string, error) {
 }
 
 // checkRun links, runs, and asserts the program matches the expectation.
-func checkRun(t *testing.T, cc, asm, driver, label, wantOut string, wantExit int) {
-	out, exit := runAsm(t, cc, asm, driver)
+func checkRun(t *testing.T, cc string, u unit, driver, label, wantOut string, wantExit int) {
+	out, exit := runUnit(t, cc, u, driver)
 	if wantOut != "" {
 		require.Equalf(t, wantOut, out, "%s: output mismatch", label)
 	} else {
@@ -174,13 +190,27 @@ func matches(out string, exit int, wantOut string, wantExit int) bool {
 
 // runAsm links asm with an optional driver, runs the program with the args QBE's
 // harness uses ("a b c"), and returns its stdout and exit code.
-func runAsm(t *testing.T, cc, asm, driver string) (string, int) {
-	dir := t.TempDir()
-	asmPath := filepath.Join(dir, "o.s")
-	bin := filepath.Join(dir, "prog")
-	require.NoError(t, os.WriteFile(asmPath, []byte(asm), 0o644))
+// unit is a compiled translation unit ready for the linker: our object, or the
+// reference QBE's assembly. listing is the code to show if the link fails.
+type unit struct {
+	path    string
+	listing string
+}
 
-	srcs := []string{asmPath}
+// writeAsm makes a unit out of assembly text -- the QBE reference path, the one
+// place a .s still reaches the toolchain.
+func writeAsm(t *testing.T, asm string) unit {
+	t.Helper()
+	path := filepath.Join(t.TempDir(), "qbe.s")
+	require.NoError(t, os.WriteFile(path, []byte(asm), 0o644))
+	return unit{path, asm}
+}
+
+func runUnit(t *testing.T, cc string, u unit, driver string) (string, int) {
+	dir := t.TempDir()
+	bin := filepath.Join(dir, "prog")
+
+	srcs := []string{u.path}
 	if strings.TrimSpace(driver) != "" {
 		cPath := filepath.Join(dir, "driver.c")
 		require.NoError(t, os.WriteFile(cPath, []byte(driver), 0o644))
@@ -189,7 +219,7 @@ func runAsm(t *testing.T, cc, asm, driver string) (string, int) {
 	// -no-pie so non-PIC assembly (QBE emits adrp for extern symbols) links.
 	args := append([]string{"-no-pie", "-g", "-o", bin}, srcs...)
 	if o, err := exec.Command(cc, args...).CombinedOutput(); err != nil {
-		t.Fatalf("link failed: %s\n%s", o, asm)
+		t.Fatalf("link failed: %s\n%s", o, u.listing)
 	}
 
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
