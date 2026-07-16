@@ -39,6 +39,16 @@ func asmOperand(e cc.ExpressionNode) (constraint string, operand cc.ExpressionNo
 	return constraint, operand, operand != nil
 }
 
+// asmIsGoto reports whether an asm statement carries the `goto` qualifier.
+func asmIsGoto(a *cc.Asm) bool {
+	for q := a.AsmQualifierList; q != nil; q = q.AsmQualifierList {
+		if q.AsmQualifier != nil && q.AsmQualifier.Case == cc.AsmQualifierGoto {
+			return true
+		}
+	}
+	return false
+}
+
 // asmStringLit returns the value of a string-literal expression.
 func asmStringLit(e cc.ExpressionNode) (string, bool) {
 	if pe, ok := e.(*cc.PrimaryExpression); ok && pe.Case == cc.PrimaryExpressionString {
@@ -60,6 +70,13 @@ func (g *gen) genAsm(as *cc.AsmStatement) {
 		return
 	}
 	a := as.Asm
+	if asmIsGoto(a) {
+		// `asm goto` branches to C labels, so it would need to lower to a
+		// multi-successor terminator wired into the CFG. Fail loudly rather than
+		// dropping the branch (which would fall through and miscompile).
+		g.fail("cc: `asm goto` is not supported")
+		return
+	}
 	tmpl := asmTemplate(a)
 
 	if tmpl == "" || tmpl == "nop" {
