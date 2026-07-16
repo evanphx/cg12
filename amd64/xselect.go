@@ -72,6 +72,8 @@ func (s *xsel) selectInt(in *ir.Instr) bool {
 		d, commit := s.gpDst(in.To)
 		s.b.extGP(in.Op, w, d, rs)
 		commit()
+	case ir.OCopy:
+		s.b.move(s.b.refLoc(in.To), s.b.refLoc(in.Arg(0)))
 	default:
 		return false
 	}

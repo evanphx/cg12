@@ -38,8 +38,6 @@ func (e *emitter) instr(in *ir.Instr) {
 		e.neg(in)
 	case ir.OCmp:
 		e.cmp(in)
-	case ir.OCopy:
-		e.move(e.refLoc(in.To), e.refLoc(in.Arg(0)))
 	case ir.OStoreb, ir.OStoreh, ir.OStorew, ir.OStorel, ir.OStores, ir.OStored:
 		e.store(in)
 	case ir.OLoadsb, ir.OLoadub, ir.OLoadsh, ir.OLoaduh, ir.OLoadsw, ir.OLoaduw, ir.OLoadl, ir.OLoads, ir.OLoadd:

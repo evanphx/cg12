@@ -1173,8 +1173,6 @@ func (m *mc) instr(in *ir.Instr) {
 		m.neg(in)
 	case ir.OCmp:
 		m.cmp(in)
-	case ir.OCopy:
-		m.move(m.refLoc(in.To), m.refLoc(in.Arg(0)))
 	case ir.OStoreb, ir.OStoreh, ir.OStorew, ir.OStorel, ir.OStores, ir.OStored:
 		m.store(in)
 	case ir.OLoadsb, ir.OLoadub, ir.OLoadsh, ir.OLoaduh, ir.OLoadsw, ir.OLoaduw, ir.OLoadl, ir.OLoads, ir.OLoadd:
