@@ -13,14 +13,17 @@ const (
 
 	ptDynamic  = 2
 	ptInterp   = 3
+	ptNote     = 4
 	ptTls      = 7
 	ptPhdr     = 6
+	ptGnuStack = 0x6474e551
 	ptGnuRelro = 0x6474e552
 
 	shtHash        = 5
 	shtDynamic     = 6
 	shtDynsym      = 11
 	shtProgbitsTls = 1 // .tdata is PROGBITS; SHF_TLS is what marks it thread-local
+	shtNote        = 7
 	shtInitArray   = 14
 	shtFiniArray   = 15
 	shtGnuHash     = 0x6ffffff6
@@ -368,7 +371,7 @@ func (o *Object) writeDynImage(im dynImage) ([]byte, error) {
 	// (l_addr = where it actually mapped the headers - this p_vaddr). Without it
 	// the bias reads as zero, which is right for a fixed-base image but sends the
 	// loader dereferencing garbage in a PIE.
-	nph := 4 // PT_PHDR, PT_LOAD (r-x), PT_LOAD (rw-), PT_DYNAMIC
+	nph := 6 // PT_PHDR, PT_NOTE, PT_LOAD (r-x), PT_LOAD (rw-), PT_DYNAMIC, PT_GNU_STACK
 	var interp []byte
 	if im.interp != "" {
 		interp = append([]byte(im.interp), 0)
@@ -488,6 +491,10 @@ func (o *Object) writeDynImage(im dynImage) ([]byte, error) {
 	off := alignUp(64+nph*56, 8)
 	interpOff := off
 	off += len(interp)
+	off = alignUp(off, 4)
+	note, noteDescOff := buildIDNote()
+	noteOff := off
+	off += len(note)
 	off = alignUp(off, 8)
 	hashOff := off
 	off += len(hash)
@@ -616,6 +623,7 @@ func (o *Object) writeDynImage(im dynImage) ([]byte, error) {
 	if interp != nil {
 		secInterp = nextSec()
 	}
+	secNote := nextSec()
 	secHash := nextSec()
 	secGnuHash := nextSec()
 	secDynsym := nextSec()
@@ -891,6 +899,7 @@ func (o *Object) writeDynImage(im dynImage) ([]byte, error) {
 	if interp != nil {
 		phdr(ptInterp, pfR, uint64(interpOff), va(interpOff), uint64(len(interp)), 1)
 	}
+	phdr(ptNote, pfR, uint64(noteOff), va(noteOff), uint64(len(note)), 4)
 	phdr(ptLoad, pfR|pfX, 0, base, uint64(roEnd), execAlign)
 	phdr(ptLoad, pfR|pfW, uint64(rwOff), va(rwOff), uint64(rwEnd-rwOff), execAlign)
 	phdr(ptDynamic, pfR|pfW, uint64(dynamicOff), va(dynamicOff), uint64(ndyn*16), 8)
@@ -905,6 +914,9 @@ func (o *Object) writeDynImage(im dynImage) ([]byte, error) {
 		// only copied, so it is read-only.
 		phdr(ptTls, pfR, uint64(tdataOff), va(tdataOff), uint64(tdataSize), uint64(tlsAlign))
 	}
+	// An empty segment whose flags say the stack wants no execute permission. Its
+	// absence is not neutral: the kernel then falls back to an executable stack.
+	phdr(ptGnuStack, pfR|pfW, 0, 0, 0, 0x10)
 
 	put := func(fileOff int, b []byte) {
 		for len(out.b) < fileOff {
@@ -915,6 +927,7 @@ func (o *Object) writeDynImage(im dynImage) ([]byte, error) {
 	if interp != nil {
 		put(interpOff, interp)
 	}
+	put(noteOff, note)
 	put(hashOff, hash)
 	put(gnuHashOff, gnuHashTab)
 	put(dynsymOff, dynsym.b)
@@ -950,6 +963,7 @@ func (o *Object) writeDynImage(im dynImage) ([]byte, error) {
 	}
 	secs[secNull] = dsection{name: shstr.add("")}
 	set(secInterp, ".interp", shtProgbits, shfAlloc, interpOff, len(interp), 0, 0, 1, 0)
+	set(secNote, ".note.gnu.build-id", shtNote, shfAlloc, noteOff, len(note), 0, 0, 4, 0)
 	set(secHash, ".hash", shtHash, shfAlloc, hashOff, len(hash), secDynsym, 0, 8, 4)
 	set(secGnuHash, ".gnu.hash", shtGnuHash, shfAlloc, gnuHashOff, len(gnuHashTab), secDynsym, 0, 8, 0)
 	set(secDynsym, ".dynsym", shtDynsym, shfAlloc, dynsymOff, len(dynsym.b), secDynstr, 1, 8, 24)
@@ -993,6 +1007,7 @@ func (o *Object) writeDynImage(im dynImage) ([]byte, error) {
 
 	writeElfHeader(out.b, etype, o.Machine, entry, nph)
 	writeSectionInfo(out.b, uint64(shoff), numSec, secShstrtab)
+	setBuildID(out.b, noteOff+noteDescOff)
 	return out.b, nil
 }
 

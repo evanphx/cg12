@@ -1,6 +1,7 @@
 package obj
 
 import (
+	"crypto/sha256"
 	"encoding/binary"
 	"fmt"
 	"math"
@@ -27,11 +28,13 @@ const (
 // kernel can load and run it directly -- no external linker or C runtime. entrySym
 // names the symbol the ELF entry point (e_entry) points at (e.g. "_start").
 func (o *Object) WriteExecutable(entrySym string) ([]byte, error) {
-	nph := 1
+	nph := 3 // PT_LOAD (r-x), PT_NOTE, PT_GNU_STACK
 	if len(o.Data) > 0 {
-		nph = 2
+		nph++ // PT_LOAD (rw-)
 	}
-	textOff := alignUp(64+nph*56, 16)
+	note, noteDescOff := buildIDNote()
+	noteOff := alignUp(64+nph*56, 4)
+	textOff := alignUp(noteOff+len(note), 16)
 	textVaddr := uint64(execBase + textOff)
 
 	dataOff := 0
@@ -68,33 +71,40 @@ func (o *Object) WriteExecutable(entrySym string) ([]byte, error) {
 
 	out := &elfBuf{}
 	out.pad(64) // ELF header, filled in at the end
-	phdr := func(flags uint32, off, vaddr, size uint64) {
-		out.u32(ptLoad)
+	phdr := func(typ, flags uint32, off, vaddr, size, align uint64) {
+		out.u32(typ)
 		out.u32(flags)
 		out.u64(off)
 		out.u64(vaddr)
 		out.u64(vaddr) // p_paddr
 		out.u64(size)  // p_filesz
 		out.u64(size)  // p_memsz
-		out.u64(execAlign)
+		out.u64(align)
 	}
 	textFilesz := uint64(textOff + len(text))
-	phdr(pfR|pfX, 0, execBase, textFilesz)
-	if nph == 2 {
-		phdr(pfR|pfW, uint64(dataOff), dataVaddr, uint64(len(data)))
+	phdr(ptLoad, pfR|pfX, 0, execBase, textFilesz, execAlign)
+	if len(o.Data) > 0 {
+		phdr(ptLoad, pfR|pfW, uint64(dataOff), dataVaddr, uint64(len(data)), execAlign)
 	}
-	for len(out.b) < textOff {
-		out.u8(0)
-	}
-	out.bytes(text)
-	if nph == 2 {
-		for len(out.b) < dataOff {
+	phdr(ptNote, pfR, uint64(noteOff), uint64(execBase+noteOff), uint64(len(note)), 4)
+	// An empty segment whose flags say the stack wants no execute permission. Its
+	// absence is not neutral: the kernel then falls back to an executable stack.
+	phdr(ptGnuStack, pfR|pfW, 0, 0, 0, 0x10)
+
+	put := func(fileOff int, b []byte) {
+		for len(out.b) < fileOff {
 			out.u8(0)
 		}
-		out.bytes(data)
+		out.bytes(b)
+	}
+	put(noteOff, note)
+	put(textOff, text)
+	if len(o.Data) > 0 {
+		put(dataOff, data)
 	}
 
 	writeExecHeader(out.b, o.Machine, entry, nph)
+	setBuildID(out.b, noteOff+noteDescOff)
 	return out.b, nil
 }
 
@@ -217,6 +227,37 @@ func writeSectionInfo(b []byte, shoff uint64, shnum, shstrndx int) {
 	binary.LittleEndian.PutUint16(b[58:], 64)            // e_shentsize
 	binary.LittleEndian.PutUint16(b[60:], uint16(shnum)) // e_shnum
 	binary.LittleEndian.PutUint16(b[62:], uint16(shstrndx))
+}
+
+// buildIDSize is the length of the identifier, matching the 20 bytes a linker's
+// default (sha1-shaped) build ID occupies.
+const buildIDSize = 20
+
+// ntGnuBuildID is the note type naming an image's unique build identifier.
+const ntGnuBuildID = 3
+
+// buildIDNote returns a .note.gnu.build-id note with the identifier still zeroed,
+// and the offset of that identifier within the note. The value cannot be known
+// until the image is finished -- it is a hash *of* the image -- so it is patched
+// in afterwards by setBuildID.
+func buildIDNote() (note []byte, descOff int) {
+	b := &elfBuf{}
+	b.u32(4)            // n_namesz: "GNU\0"
+	b.u32(buildIDSize)  // n_descsz
+	b.u32(ntGnuBuildID) // n_type
+	b.bytes([]byte("GNU\x00"))
+	descOff = len(b.b)
+	b.pad(buildIDSize)
+	return b.b, descOff
+}
+
+// setBuildID hashes the finished image and writes the digest into its build-id
+// note. The identifier reads as zero while hashing, so the same image always
+// yields the same identifier -- which is the point: it names this exact build, and
+// lets a debugger match it to its symbols.
+func setBuildID(image []byte, descAt int) {
+	sum := sha256.Sum256(image)
+	copy(image[descAt:descAt+buildIDSize], sum[:buildIDSize])
 }
 
 // alignUp rounds n up to the next multiple of a.
