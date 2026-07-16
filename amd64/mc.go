@@ -1150,13 +1150,13 @@ func (m *mc) term(b *ir.Block) {
 // --- instruction selection -------------------------------------------------
 
 func (m *mc) instr(in *ir.Instr) {
+	// Two-operand integer arithmetic is selected once, through the shared builder.
+	if (&xsel{f: m.f, b: &mcXasm{m: m}}).selectInt(in) {
+		return
+	}
 	switch in.Op {
 	case ir.OAdd, ir.OSub, ir.OMul, ir.OAnd, ir.OOr, ir.OXor:
-		if in.Cls.IsFloat() {
-			m.binFP(in)
-		} else {
-			m.binInt(in)
-		}
+		m.binFP(in) // the integer forms are handled by the shared selector above
 	case ir.ODiv:
 		if in.Cls.IsFloat() {
 			m.binFP(in)

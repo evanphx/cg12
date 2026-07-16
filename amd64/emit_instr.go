@@ -15,13 +15,13 @@ func clsSize(cls ir.Cls) int {
 }
 
 func (e *emitter) instr(in *ir.Instr) {
+	// Two-operand integer arithmetic is selected once, through the shared builder.
+	if (&xsel{f: e.f, b: &textXasm{e: e}}).selectInt(in) {
+		return
+	}
 	switch in.Op {
 	case ir.OAdd, ir.OSub, ir.OMul, ir.OAnd, ir.OOr, ir.OXor:
-		if in.Cls.IsFloat() {
-			e.binFP(in)
-		} else {
-			e.binInt(in)
-		}
+		e.binFP(in) // the integer forms are handled by the shared selector above
 	case ir.ODiv:
 		if in.Cls.IsFloat() {
 			e.binFP(in)

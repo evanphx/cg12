@@ -1,0 +1,72 @@
+package amd64
+
+import "github.com/evanphx/cg12/ir"
+
+// xsel drives amd64 instruction selection against an xasm builder, resolving
+// operands to registers through the builder's move primitive so the selection is
+// written once for both the machine-code and text emitters (mirroring arm64's
+// sel).
+type xsel struct {
+	f *ir.Func
+	b xasm
+}
+
+// gpValue returns a GPR holding ref's value, loading it into scratch if it is not
+// already in a register.
+func (s *xsel) gpValue(ref ir.Ref, scratch Reg) Reg {
+	l := s.b.refLoc(ref)
+	if l.kind == locReg {
+		return l.reg
+	}
+	s.b.move(regLoc(scratch, l.size, false), l)
+	return scratch
+}
+
+// gpInto places ref's value into GPR d.
+func (s *xsel) gpInto(d Reg, ref ir.Ref) {
+	l := s.b.refLoc(ref)
+	s.b.move(regLoc(d, l.size, false), l)
+}
+
+// gpDst returns the destination GPR for an integer result and a commit closure
+// that stores it back when the result is spilled.
+func (s *xsel) gpDst(ref ir.Ref) (Reg, func()) {
+	t := s.f.Temps[ref.ID]
+	if t.Reg != ir.NoReg {
+		return Reg(t.Reg), func() {}
+	}
+	size := t.Cls.Size()
+	slot := t.Slot
+	return gpScratch0, func() { s.b.spillStore(gpScratch0, slot, size) }
+}
+
+// selectInt handles the two-operand integer arithmetic instructions
+// (add/sub/mul/and/or/xor) through the builder. It reports whether it handled the
+// instruction; everything else falls back to the emitter's own logic.
+func (s *xsel) selectInt(in *ir.Instr) bool {
+	switch in.Op {
+	case ir.OAdd, ir.OSub, ir.OMul, ir.OAnd, ir.OOr, ir.OXor:
+		if in.Cls.IsFloat() {
+			return false
+		}
+		s.binInt(in)
+		return true
+	}
+	return false
+}
+
+// binInt computes dst = arg0 OP arg1 in x86's two-operand form: place arg0 in the
+// destination, then apply the op with arg1. If arg1 already occupies the
+// destination register it is moved aside first.
+func (s *xsel) binInt(in *ir.Instr) {
+	w := in.Cls == ir.ClsL
+	d, commit := s.gpDst(in.To)
+	rb := s.gpValue(in.Arg(1), gpScratch1)
+	if rb == d {
+		s.b.movReg(w, gpScratch1, rb)
+		rb = gpScratch1
+	}
+	s.gpInto(d, in.Arg(0))
+	s.b.binGP(in.Op, w, d, rb)
+	commit()
+}
