@@ -352,6 +352,85 @@ func TestLazyBindingDefersUnusedImport(t *testing.T) {
 	require.NotEqual(t, 42, runExe(t, build(false)), "eager: resolving it at load must fail")
 }
 
+// dynamicSegmentAddr returns the virtual address of an image's PT_DYNAMIC.
+func dynamicSegmentAddr(t *testing.T, exe []byte) uint64 {
+	t.Helper()
+	f, err := elf.NewFile(bytes.NewReader(exe))
+	require.NoError(t, err)
+	for _, p := range f.Progs {
+		if p.Type == elf.PT_DYNAMIC {
+			return p.Vaddr
+		}
+	}
+	t.Fatal("no PT_DYNAMIC segment")
+	return 0
+}
+
+// Binding eagerly means every GOT slot is written before the image's own code
+// runs, so the loader can freeze the GOT and .dynamic afterwards. That is the
+// whole point of eager binding, and what proves it happened is behaviour rather
+// than the presence of a segment: writing into the region faults when bound
+// eagerly and succeeds when bound lazily, which needs the GOT writable.
+func TestRelroFreezesTheGOT(t *testing.T) {
+	if runtime.GOARCH != "arm64" {
+		t.Skip("arm64 executable runs natively only on an arm64 host")
+	}
+	// poke builds a program that stores to addr. Its shape does not depend on the
+	// address, so a first build reveals where .dynamic lands and a second aims at it.
+	poke := func(lazy bool, addr int64) []byte {
+		m := ir.NewModule()
+		f := m.NewFunc("main", ir.ClsW).Export()
+		e := f.Entry()
+		e.Store(f.Word(1), f.Long(addr))
+		e.Ret(f.Word(0))
+		l := link.NewWith(arm64.Backend{})
+		require.NoError(t, l.AddModule(m))
+		exe, err := l.LinkDynamicExecutableWith("main", obj.DynOptions{
+			Needed: []string{"libc.so.6"}, Lazy: lazy,
+		})
+		require.NoError(t, err)
+		return exe
+	}
+	aimed := func(lazy bool) []byte {
+		return poke(lazy, int64(dynamicSegmentAddr(t, poke(lazy, 0))))
+	}
+
+	const sigsegv = 139
+	require.Equal(t, sigsegv, runExe(t, aimed(false)), "eager: .dynamic must be read-only after relocation")
+	require.Equal(t, 0, runExe(t, aimed(true)), "lazy: the resolver needs it writable, so no relro")
+}
+
+// Relro must not overreach: the loader freezes whole pages, so .data has to start
+// on one of its own. If it were caught in the region, this store would fault.
+func TestRelroLeavesDataWritable(t *testing.T) {
+	if runtime.GOARCH != "arm64" {
+		t.Skip("arm64 executable runs natively only on an arm64 host")
+	}
+	for _, pie := range []bool{false, true} {
+		name := "fixed-base"
+		if pie {
+			name = "pie"
+		}
+		t.Run(name, func(t *testing.T) {
+			m := ir.NewModule()
+			m.Data = append(m.Data, &ir.Data{Name: "g", Align: 4,
+				Items: []ir.DataItem{{Sub: ir.SubW, Ints: []int64{0}}}})
+			f := m.NewFunc("main", ir.ClsW).Export()
+			e := f.Entry()
+			e.Store(f.Word(41), f.Sym("g", 0))
+			e.Ret(e.Add(ir.ClsW, e.Load(ir.ClsW, f.Sym("g", 0)), f.Word(1)))
+
+			l := link.NewWith(arm64.Backend{})
+			require.NoError(t, l.AddModule(m))
+			exe, err := l.LinkDynamicExecutableWith("main", obj.DynOptions{
+				Needed: []string{"libc.so.6"}, PIE: pie,
+			})
+			require.NoError(t, err)
+			require.Equal(t, 42, runExe(t, exe))
+		})
+	}
+}
+
 // The image is a well-formed dynamic executable on both architectures: it names
 // the loader in PT_INTERP and carries a PT_DYNAMIC segment. This runs everywhere,
 // including where the foreign architecture's libraries are not installed.

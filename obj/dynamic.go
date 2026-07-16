@@ -10,9 +10,10 @@ import (
 const (
 	etDyn = 3
 
-	ptDynamic = 2
-	ptInterp  = 3
-	ptPhdr    = 6
+	ptDynamic  = 2
+	ptInterp   = 3
+	ptPhdr     = 6
+	ptGnuRelro = 0x6474e552
 
 	shtHash       = 5
 	shtDynamic    = 6
@@ -241,6 +242,14 @@ func (o *Object) writeDynImage(im dynImage) ([]byte, error) {
 		interp = append([]byte(im.interp), 0)
 		nph++ // PT_INTERP
 	}
+	// Eager binding writes every GOT slot before any of the image's code runs, so
+	// the GOT and .dynamic can be frozen once relocation is done -- the point of
+	// binding eagerly. Lazy binding needs the GOT writable for its resolver, so it
+	// gets no RELRO.
+	relro := !im.lazy
+	if relro {
+		nph++ // PT_GNU_RELRO
+	}
 
 	// The dynamic symbol table lists the null symbol, then every import (undefined,
 	// resolved in a needed library), then every export (defined here, published for
@@ -353,16 +362,13 @@ func (o *Object) writeDynImage(im dynImage) ([]byte, error) {
 	off += len(o.Text)
 	roEnd := off
 
-	// The writable segment starts on a fresh page so it never shares one with the
-	// read-execute segment.
-	rwOff := alignUp(roEnd, execAlign)
-	gotOff := rwOff
+	// How much of the writable region is read-only after relocation: the GOT and
+	// .dynamic. Both sizes are known before placement, which is what lets the
+	// region be positioned to end exactly on a page (see below).
+	gotSize := 0
 	if len(imports) > 0 {
-		off = gotOff + (gotReserved+len(imports))*8
-	} else {
-		off = gotOff
+		gotSize = (gotReserved + len(imports)) * 8
 	}
-	dynamicOff := alignUp(off, 8)
 	ndyn := len(im.needed) + 7 // NEEDED..., HASH, GNU_HASH, STRTAB, SYMTAB, STRSZ, SYMENT, NULL
 	if !im.lazy {
 		ndyn += 2 // FLAGS, FLAGS_1 (eager binding)
@@ -379,8 +385,28 @@ func (o *Object) writeDynImage(im dynImage) ([]byte, error) {
 	if versioned {
 		ndyn += 3 // VERSYM, VERNEED, VERNEEDNUM
 	}
+	relroSize := gotSize + ndyn*16
+
+	// The writable region begins past the read-execute one's last page, so the two
+	// never share a page. When there is a relro region it is nudged forward within
+	// that page so that it *ends* on a page boundary: .data then starts on a fresh
+	// page (the loader freezes whole pages, and .data must stay writable) without
+	// costing a page of padding to get there. The segment start need not be page
+	// aligned -- p_vaddr and p_offset stay congruent because they differ by the
+	// image base throughout.
+	rwOff := alignUp(roEnd, execAlign)
+	if relro {
+		rwOff += (execAlign - relroSize%execAlign) % execAlign
+	}
+	gotOff := rwOff
+	dynamicOff := gotOff + gotSize // gotSize is a multiple of 8, so this stays aligned
 	off = dynamicOff + ndyn*16
+
 	dataOff := alignUp(off, 8)
+	relroEnd := off // == rwOff + relroSize, a page boundary when relro is on
+	if relro {
+		dataOff = relroEnd
+	}
 	off = dataOff + len(o.Data)
 	rwEnd := off
 
@@ -598,6 +624,12 @@ func (o *Object) writeDynImage(im dynImage) ([]byte, error) {
 	phdr(ptLoad, pfR|pfX, 0, base, uint64(roEnd), execAlign)
 	phdr(ptLoad, pfR|pfW, uint64(rwOff), va(rwOff), uint64(rwEnd-rwOff), execAlign)
 	phdr(ptDynamic, pfR|pfW, uint64(dynamicOff), va(dynamicOff), uint64(ndyn*16), 8)
+	if relro {
+		// Read-only after relocation: the GOT and .dynamic, up to the page boundary
+		// that .data starts on. Stays inside the writable segment, which is what the
+		// loader is allowed to re-protect.
+		phdr(ptGnuRelro, pfR, uint64(rwOff), va(rwOff), uint64(relroEnd-rwOff), 1)
+	}
 
 	put := func(fileOff int, b []byte) {
 		for len(out.b) < fileOff {

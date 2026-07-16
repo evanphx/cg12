@@ -5,6 +5,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"runtime"
+	"syscall"
 	"testing"
 
 	"github.com/evanphx/cg12/amd64"
@@ -16,6 +17,8 @@ import (
 
 // runExe writes the linked bytes to a temp file, marks it executable, runs it
 // (directly, or through runner such as qemu), and returns the process exit code.
+// A process killed by a signal reports 128+signal, as a shell does, so a crash is
+// a legible number rather than the -1 that ExitCode gives for every signal alike.
 func runExe(t *testing.T, data []byte, runner ...string) int {
 	t.Helper()
 	dir := t.TempDir()
@@ -26,11 +29,14 @@ func runExe(t *testing.T, data []byte, runner ...string) int {
 	if err == nil {
 		return 0
 	}
-	if ee, ok := err.(*exec.ExitError); ok {
-		return ee.ExitCode()
+	ee, ok := err.(*exec.ExitError)
+	if !ok {
+		t.Fatalf("run %v: %v", argv, err)
 	}
-	t.Fatalf("run %v: %v", argv, err)
-	return -1
+	if ws, ok := ee.Sys().(syscall.WaitStatus); ok && ws.Signaled() {
+		return 128 + int(ws.Signal())
+	}
+	return ee.ExitCode()
 }
 
 // qemuX86 returns the qemu-x86_64 user-mode emulator, or skips.
