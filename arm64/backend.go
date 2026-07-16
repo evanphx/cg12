@@ -32,6 +32,26 @@ func (Backend) Assemble(src string) (*obj.Object, error) {
 	if err != nil {
 		return nil, err
 	}
+	return programObject(p)
+}
+
+// StartStub returns a `_start` object that calls entry and exits with its return
+// value via the exit_group syscall, so a fully linked executable needs no C
+// runtime. The entry function's return value is already in w0 when it returns.
+func (Backend) StartStub(entry string) (*obj.Object, error) {
+	p := a64.NewProgram()
+	p.Globl("_start")
+	p.Label("_start")
+	p.Bl(sanitize(entry))                     // bl entry (CALL26 to the entry function)
+	p.Emit(a64.Movz(true, a64.Reg(8), 94, 0)) // movz x8, #94 (__NR_exit_group)
+	p.Emit(0xd4000001)                        // svc #0
+	return programObject(p)
+}
+
+// programObject turns an assembled a64 program into a relocatable object: its
+// defined labels become .text symbols (globals exported), and references to
+// undefined labels become relocations the linker resolves.
+func programObject(p *a64.Program) (*obj.Object, error) {
 	code, relocs, err := p.Link()
 	if err != nil {
 		return nil, err

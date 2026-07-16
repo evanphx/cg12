@@ -17,12 +17,14 @@ import (
 )
 
 // Backend is the common code-generator output the linker consumes: it compiles
-// an IR module to a relocatable object and names the ELF machine it targets.
-// arm64.Backend and amd64.Backend implement it, so the linker handles either
-// architecture through one interface without importing its entry points.
+// an IR module to a relocatable object, synthesizes a process-entry stub, and
+// names the ELF machine it targets. arm64.Backend and amd64.Backend implement it,
+// so the linker handles either architecture through one interface without
+// importing its entry points.
 type Backend interface {
 	Machine() uint16
 	CompileModule(m *ir.Module) (*obj.Object, error)
+	StartStub(entry string) (*obj.Object, error)
 }
 
 // Linker accumulates input objects from either front-end and links them.
@@ -64,13 +66,31 @@ func (l *Linker) AddObject(o *obj.Object) { l.objs = append(l.objs, o) }
 // Link merges the inputs into one relocatable object.
 func (l *Linker) Link() (*obj.Object, error) { return merge(l.objs) }
 
-// LinkToELF links and serializes the result to ELF bytes.
+// LinkToELF links and serializes the result to a relocatable-object ELF.
 func (l *Linker) LinkToELF() ([]byte, error) {
 	o, err := l.Link()
 	if err != nil {
 		return nil, err
 	}
 	return o.MarshalELF()
+}
+
+// LinkExecutable fully links the accumulated objects into a static ELF executable
+// that runs directly on Linux with no C runtime or external linker: it synthesizes
+// a `_start` stub (via the backend) that calls entry and exits with its return
+// value, merges everything, resolves all relocations at their final virtual
+// addresses, and writes an ET_EXEC image. entry names the function `_start` calls
+// (e.g. "main"), which must be among the linked objects.
+func (l *Linker) LinkExecutable(entry string) ([]byte, error) {
+	stub, err := l.be.StartStub(entry)
+	if err != nil {
+		return nil, err
+	}
+	merged, err := merge(append([]*obj.Object{stub}, l.objs...))
+	if err != nil {
+		return nil, err
+	}
+	return merged.WriteExecutable("_start")
 }
 
 // merge concatenates the objects' .text/.data, resolves their symbols, re-bases

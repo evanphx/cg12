@@ -1,0 +1,207 @@
+package obj
+
+import (
+	"encoding/binary"
+	"fmt"
+	"math"
+)
+
+// Executable layout constants. The image is a static, non-PIE ET_EXEC loaded at a
+// fixed base; every byte's virtual address is execBase + its file offset, so with
+// execBase a multiple of execAlign the segment-alignment rule (p_vaddr ≡ p_offset
+// mod p_align) holds for free.
+const (
+	execBase  = 0x400000 // load address of the ELF header
+	execAlign = 0x10000  // segment alignment (>= the page size on arm64 and amd64)
+
+	ptLoad = 1
+	etExec = 2
+	pfX    = 1
+	pfW    = 2
+	pfR    = 4
+)
+
+// WriteExecutable fully links the object into a static ET_EXEC ELF: it assigns
+// virtual addresses to .text and .data, resolves every relocation against those
+// addresses (erroring on any undefined symbol), and emits program headers so the
+// kernel can load and run it directly -- no external linker or C runtime. entrySym
+// names the symbol the ELF entry point (e_entry) points at (e.g. "_start").
+func (o *Object) WriteExecutable(entrySym string) ([]byte, error) {
+	nph := 1
+	if len(o.Data) > 0 {
+		nph = 2
+	}
+	textOff := alignUp(64+nph*56, 16)
+	textVaddr := uint64(execBase + textOff)
+
+	dataOff := 0
+	var dataVaddr uint64
+	if len(o.Data) > 0 {
+		dataOff = alignUp(textOff+len(o.Text), execAlign)
+		dataVaddr = uint64(execBase + dataOff)
+	}
+
+	// Final virtual address of every defined symbol.
+	symVaddr := map[string]uint64{}
+	for _, s := range o.Syms {
+		switch s.Section {
+		case SecText:
+			symVaddr[s.Name] = textVaddr + s.Value
+		case SecData:
+			symVaddr[s.Name] = dataVaddr + s.Value
+		}
+	}
+	entry, ok := symVaddr[entrySym]
+	if !ok {
+		return nil, fmt.Errorf("obj: entry symbol %q is not defined", entrySym)
+	}
+
+	// Resolve relocations into fresh copies of the sections.
+	text := append([]byte(nil), o.Text...)
+	data := append([]byte(nil), o.Data...)
+	if err := resolveRelocs(o.Machine, text, textVaddr, o.Relocs, symVaddr); err != nil {
+		return nil, err
+	}
+	if err := resolveRelocs(o.Machine, data, dataVaddr, o.DataRelocs, symVaddr); err != nil {
+		return nil, err
+	}
+
+	out := &elfBuf{}
+	out.pad(64) // ELF header, filled in at the end
+	phdr := func(flags uint32, off, vaddr, size uint64) {
+		out.u32(ptLoad)
+		out.u32(flags)
+		out.u64(off)
+		out.u64(vaddr)
+		out.u64(vaddr) // p_paddr
+		out.u64(size)  // p_filesz
+		out.u64(size)  // p_memsz
+		out.u64(execAlign)
+	}
+	textFilesz := uint64(textOff + len(text))
+	phdr(pfR|pfX, 0, execBase, textFilesz)
+	if nph == 2 {
+		phdr(pfR|pfW, uint64(dataOff), dataVaddr, uint64(len(data)))
+	}
+	for len(out.b) < textOff {
+		out.u8(0)
+	}
+	out.bytes(text)
+	if nph == 2 {
+		for len(out.b) < dataOff {
+			out.u8(0)
+		}
+		out.bytes(data)
+	}
+
+	writeExecHeader(out.b, o.Machine, entry, nph)
+	return out.b, nil
+}
+
+// resolveRelocs patches every relocation in one section (at virtual address
+// secVaddr) to the final address of its target symbol.
+func resolveRelocs(machine uint16, sec []byte, secVaddr uint64, relocs []Reloc, symVaddr map[string]uint64) error {
+	for _, r := range relocs {
+		s, ok := symVaddr[r.Sym]
+		if !ok {
+			return fmt.Errorf("obj: undefined symbol %q referenced by relocation", r.Sym)
+		}
+		target := int64(s) + r.Addend
+		place := int64(secVaddr) + int64(r.Offset)
+		var err error
+		switch machine {
+		case EM_AARCH64:
+			err = resolveAArch64(sec, r, target, place)
+		case EM_X86_64:
+			err = resolveX86(sec, r, target, place)
+		default:
+			return fmt.Errorf("obj: cannot link machine %d", machine)
+		}
+		if err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+// resolveAArch64 applies one AArch64 relocation: absolute (ABS64), PC-relative
+// branch (CALL26/JUMP26), or symbol-address (ADRP page + ADD low-12).
+func resolveAArch64(sec []byte, r Reloc, target, place int64) error {
+	switch r.Type {
+	case R_AARCH64_ABS64:
+		binary.LittleEndian.PutUint64(sec[r.Offset:], uint64(target))
+	case R_AARCH64_CALL26, R_AARCH64_JUMP26:
+		disp := target - place
+		if disp%4 != 0 || disp < -(1<<27) || disp >= (1<<27) {
+			return fmt.Errorf("obj: branch to %q out of range (%d bytes)", r.Sym, disp)
+		}
+		w := binary.LittleEndian.Uint32(sec[r.Offset:])
+		w = (w & 0xfc000000) | uint32((disp>>2)&0x03ffffff)
+		binary.LittleEndian.PutUint32(sec[r.Offset:], w)
+	case R_AARCH64_ADR_PREL_PG_HI21:
+		page := ((target &^ 0xfff) - (place &^ 0xfff)) >> 12
+		if page < -(1<<20) || page >= (1<<20) {
+			return fmt.Errorf("obj: adrp to %q out of range", r.Sym)
+		}
+		w := binary.LittleEndian.Uint32(sec[r.Offset:])
+		immlo := uint32(page & 3)
+		immhi := uint32((page >> 2) & 0x7ffff)
+		w = (w &^ ((3 << 29) | (0x7ffff << 5))) | (immlo << 29) | (immhi << 5)
+		binary.LittleEndian.PutUint32(sec[r.Offset:], w)
+	case R_AARCH64_ADD_ABS_LO12_NC:
+		w := binary.LittleEndian.Uint32(sec[r.Offset:])
+		w = (w &^ (0xfff << 10)) | (uint32(target&0xfff) << 10)
+		binary.LittleEndian.PutUint32(sec[r.Offset:], w)
+	default:
+		return fmt.Errorf("obj: cannot statically resolve aarch64 relocation type %d (symbol %q)", r.Type, r.Sym)
+	}
+	return nil
+}
+
+// resolveX86 applies one x86-64 relocation: absolute (64/32/32S) or PC-relative
+// (PC32/PLT32, whose addend already folds in the instruction-end bias).
+func resolveX86(sec []byte, r Reloc, target, place int64) error {
+	switch r.Type {
+	case R_X86_64_64:
+		binary.LittleEndian.PutUint64(sec[r.Offset:], uint64(target))
+	case R_X86_64_PC32, R_X86_64_PLT32:
+		disp := target - place
+		if disp < math.MinInt32 || disp > math.MaxInt32 {
+			return fmt.Errorf("obj: reference to %q out of range (%d bytes)", r.Sym, disp)
+		}
+		binary.LittleEndian.PutUint32(sec[r.Offset:], uint32(int32(disp)))
+	case R_X86_64_32, R_X86_64_32S:
+		binary.LittleEndian.PutUint32(sec[r.Offset:], uint32(int32(target)))
+	default:
+		return fmt.Errorf("obj: cannot statically resolve x86-64 relocation type %d (symbol %q)", r.Type, r.Sym)
+	}
+	return nil
+}
+
+// writeExecHeader fills the 64-byte ELF header of a static executable in place.
+func writeExecHeader(b []byte, machine uint16, entry uint64, phnum int) {
+	h := &elfBuf{b: b[:0:64]}
+	h.bytes([]byte{0x7f, 'E', 'L', 'F', elfclass64, elfdata2lsb, evCurrent, 0})
+	h.pad(8) // rest of e_ident
+	h.u16(etExec)
+	h.u16(machine)
+	h.u32(evCurrent)
+	h.u64(entry) // e_entry
+	h.u64(64)    // e_phoff (program headers follow the ELF header)
+	h.u64(0)     // e_shoff (no section headers -- not needed to load and run)
+	h.u32(0)     // e_flags
+	h.u16(64)    // e_ehsize
+	h.u16(56)    // e_phentsize
+	h.u16(uint16(phnum))
+	h.u16(0) // e_shentsize
+	h.u16(0) // e_shnum
+	h.u16(0) // e_shstrndx
+}
+
+// alignUp rounds n up to the next multiple of a.
+func alignUp(n, a int) int {
+	if a < 1 {
+		return n
+	}
+	return (n + a - 1) &^ (a - 1)
+}
