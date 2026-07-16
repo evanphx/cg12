@@ -43,7 +43,8 @@ The ARM64 Go path uses ABIInternal register assignment for scalar and aggregate
 arguments and results. Build-selected Plan 9 assembly is parsed into a syntax
 tree and translated to GNU AArch64 syntax. The currently enabled unchanged
 standard-library files are `runtime/atomic_arm64.s`, `runtime/memclr_arm64.s`,
-`runtime/memmove_arm64.s`, and all five ARM64 files in `internal/bytealg`:
+`runtime/memmove_arm64.s`, `runtime/preempt_arm64.s`, and all five ARM64 files
+in `internal/bytealg`:
 `compare_arm64.s`, `count_arm64.s`, `equal_arm64.s`, `index_arm64.s`, and
 `indexbyte_arm64.s`. The compiler also adapts ABI0 stack operands to its
 ABIInternal call path, allowing the exact `internal/cpu/cpu_arm64.s`,
@@ -61,6 +62,11 @@ eligible leaf ABI0 routines use a direct register adapter so runtime atomics do
 not acquire an extra call frame.
 `runtime/secret_arm64.s` now supplies the register-erasure path as well,
 including all integer and SIMD register clears from the standard source.
+The generated `go_asm.h` environment includes type-checked struct sizes and
+field offsets, so `runtime/preempt_arm64.s` uses the real `g.m`, `m.p`, and
+`p.xRegs` layouts. Its signal-injected 240-byte frame carries the standard
+`FuncID_asyncPreempt` metadata, and execution tests exercise its GP, SIMD,
+status-register, and signal-call-record save/restore path.
 Unsupported files are kept out of the build until the translator accepts every
 construct they contain.
 

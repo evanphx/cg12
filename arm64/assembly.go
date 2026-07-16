@@ -47,12 +47,21 @@ func prepareAssembly(module *ir.Module) (assemblyBundle, error) {
 				name:       function.Name,
 				frameSize:  function.Frame,
 				frameStart: function.FrameStart,
+				funcID:     assemblyFunctionID(function.Name),
 				funcFlag:   flags,
 			})
 		}
 	}
 	bundle.source = output.String()
 	return bundle, nil
+}
+
+func assemblyFunctionID(name string) byte {
+	const funcIDAsyncPreempt = 3
+	if name == "runtime_asyncPreempt" {
+		return funcIDAsyncPreempt
+	}
+	return 0
 }
 
 // TranslateAssembly parses and converts the module's Go-style Plan 9 assembly

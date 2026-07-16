@@ -703,7 +703,6 @@ indirect_cgo runtime_callCgoSigaction, _cgo_sigaction
 	brk 0
 .endm
 
-unsupported_async runtime_asyncPreempt
 unsupported_async runtime_cgoSigtramp
 unsupported_async runtime_sigtramp
 

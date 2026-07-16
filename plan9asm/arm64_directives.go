@@ -2,6 +2,7 @@ package plan9asm
 
 import (
 	"fmt"
+	"path/filepath"
 	"sort"
 	"strconv"
 	"strings"
@@ -43,8 +44,8 @@ func (t *arm64Translator) translateText(text *Text) error {
 	}
 	t.functions = append(t.functions, ARM64Function{
 		Name:       symbol,
-		Frame:      t.currentFrame,
-		FrameStart: frameStart(t.currentFrame),
+		Frame:      t.assemblyFrameSize(symbol),
+		FrameStart: t.assemblyFrameStart(symbol),
 		Flags:      append([]string(nil), text.Flags...),
 	})
 	t.output.WriteString("\n.text\n")
@@ -64,6 +65,30 @@ func (t *arm64Translator) translateText(text *Text) error {
 		t.output.WriteString("\tsub x29, sp, #8\n")
 	}
 	return nil
+}
+
+func (t *arm64Translator) isRuntimeAsyncPreempt(symbol string) bool {
+	return symbol == "runtime_asyncPreempt" &&
+		t.options.PackagePath == "runtime" &&
+		filepath.Base(t.options.Filename) == "preempt_arm64.s"
+}
+
+func (t *arm64Translator) assemblyFrameSize(symbol string) int {
+	if t.isRuntimeAsyncPreempt(symbol) {
+		// asyncPreempt manually subtracts 240 bytes from SP. Its final 256-byte
+		// adjustment also removes the 16-byte signal-injected call record and is
+		// therefore not part of this function's frame.
+		return 240
+	}
+	return t.currentFrame
+}
+
+func (t *arm64Translator) assemblyFrameStart(symbol string) int {
+	if t.isRuntimeAsyncPreempt(symbol) {
+		// The manual SP subtraction is the function's second instruction.
+		return 8
+	}
+	return frameStart(t.currentFrame)
 }
 
 func frameStart(frame int) int {

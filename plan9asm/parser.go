@@ -638,7 +638,7 @@ func isDirective(name string) bool {
 
 func isRegister(source string) bool {
 	source = strings.ToUpper(strings.TrimSpace(source))
-	if source == "ZR" || source == "RSP" || source == "LR" || source == "FP" || source == "SP" || source == "SB" {
+	if source == "ZR" || source == "RSP" || source == "LR" || source == "FP" || source == "SP" || source == "SB" || source == "G" || source == "NZCV" || source == "FPSR" {
 		return true
 	}
 	if len(source) < 2 {

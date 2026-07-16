@@ -211,6 +211,43 @@ func TestTranslateExactRuntimeSecretEraseRegisters(t *testing.T) {
 	assert.Contains(t, translation.Assembly, "\tfmov d31, xzr")
 }
 
+func TestTranslateExactRuntimeAsyncPreempt(t *testing.T) {
+	path := filepath.Join("..", "stdlib", "src", "runtime", "preempt_arm64.s")
+	source, err := os.ReadFile(path)
+	require.NoError(t, err)
+	file, err := Parse(bytes.NewReader(source))
+	require.NoError(t, err)
+	translation, err := CompileARM64(file, ARM64Options{
+		PackagePath: "runtime",
+		Filename:    "preempt_arm64.s",
+		Defines: map[string]int64{
+			"g_m":              48,
+			"m_p":              208,
+			"p_xRegs":          13800,
+			"xRegPerP_scratch": 0,
+			"xRegPerP_cache":   512,
+		},
+		PreferDirectABI0: true,
+	})
+	require.NoError(t, err)
+
+	require.Len(t, translation.Functions, 1)
+	assert.Equal(t, ARM64Function{
+		Name:       "runtime_asyncPreempt",
+		Frame:      240,
+		FrameStart: 8,
+		Flags:      []string{"NOSPLIT", "NOFRAME"},
+	}, translation.Functions[0])
+	assert.NotContains(t, translation.Assembly, "_abi0")
+	assert.Contains(t, translation.Assembly, "\tmrs x0, nzcv")
+	assert.Contains(t, translation.Assembly, "\tmsr fpsr, x0")
+	assert.Contains(t, translation.Assembly, "\tldr x0, [x28, #48]")
+	assert.Contains(t, translation.Assembly, "\tmov x27, #13800")
+	assert.Contains(t, translation.Assembly, "\tadd x0, x0, x27")
+	assert.Contains(t, translation.Assembly, "\tbl runtime_asyncPreempt2")
+	assert.Contains(t, translation.Assembly, "\tret x27")
+}
+
 func TestTranslateExactChacha8FrameAndReadOnlyData(t *testing.T) {
 	path := filepath.Join("..", "stdlib", "src", "internal", "chacha8rand", "chacha8_arm64.s")
 	source, err := os.ReadFile(path)
@@ -242,6 +279,7 @@ func TestTranslateExactChacha8FrameAndReadOnlyData(t *testing.T) {
 func TestSupportsARM64FileKeepsTargetPolicyWithTranslator(t *testing.T) {
 	assert.True(t, SupportsARM64File("runtime", "memmove_arm64.s"))
 	assert.True(t, SupportsARM64File("runtime", "secret_arm64.s"))
+	assert.True(t, SupportsARM64File("runtime", "preempt_arm64.s"))
 	assert.True(t, SupportsARM64File("internal/bytealg", "compare_arm64.s"))
 	assert.True(t, SupportsARM64File("internal/bytealg", "index_arm64.s"))
 	assert.True(t, SupportsARM64File("internal/cpu", "cpu_arm64.s"))
@@ -272,6 +310,9 @@ func TestTranslateExactRuntimeARM64FilesAssemble(t *testing.T) {
 		{packagePath: "runtime", name: "atomic_arm64.s"},
 		{packagePath: "runtime", name: "memclr_arm64.s"},
 		{packagePath: "runtime", name: "memmove_arm64.s"},
+		{packagePath: "runtime", name: "preempt_arm64.s", defines: map[string]int64{
+			"g_m": 48, "m_p": 208, "p_xRegs": 13800, "xRegPerP_scratch": 0, "xRegPerP_cache": 512,
+		}},
 		{packagePath: "runtime", name: "secret_arm64.s"},
 		{packagePath: "internal/bytealg", name: "compare_arm64.s"},
 		{packagePath: "internal/bytealg", name: "count_arm64.s"},
@@ -386,6 +427,188 @@ main:
 	directory := t.TempDir()
 	sourcePath := filepath.Join(directory, "secret.S")
 	executable := filepath.Join(directory, "secret")
+	require.NoError(t, os.WriteFile(sourcePath, []byte(harness), 0o644))
+	command := exec.Command(cc, "-no-pie", "-o", executable, sourcePath)
+	output, err := command.CombinedOutput()
+	require.NoError(t, err, "%s", output)
+	output, err = exec.Command(executable).CombinedOutput()
+	require.NoError(t, err, "%s", output)
+}
+
+func TestExecuteExactRuntimeAsyncPreemptRegisterSave(t *testing.T) {
+	if runtime.GOARCH != "arm64" {
+		t.Skip("AArch64 execution is required")
+	}
+	cc, err := exec.LookPath("cc")
+	if err != nil {
+		t.Skip("cc is unavailable")
+	}
+
+	path := filepath.Join("..", "stdlib", "src", "runtime", "preempt_arm64.s")
+	source, err := os.ReadFile(path)
+	require.NoError(t, err)
+	file, err := Parse(bytes.NewReader(source))
+	require.NoError(t, err)
+	translation, err := CompileARM64(file, ARM64Options{
+		PackagePath: "runtime",
+		Filename:    "preempt_arm64.s",
+		Defines: map[string]int64{
+			"g_m":              48,
+			"m_p":              208,
+			"p_xRegs":          13800,
+			"xRegPerP_scratch": 0,
+			"xRegPerP_cache":   512,
+		},
+		PreferDirectABI0: true,
+	})
+	require.NoError(t, err)
+
+	// The adapter builds the 16-byte call record normally injected by the
+	// runtime's signal handler. asyncPreempt2 points the cache at the exact
+	// vector state that asyncPreempt saved, allowing the unchanged routine to
+	// restore it before the adapter verifies representative registers.
+	harness := translation.Assembly + `
+.text
+.global runtime_asyncPreempt2
+.type runtime_asyncPreempt2, %function
+runtime_asyncPreempt2:
+	sub x9, x0, #512
+	str x9, [x0]
+	ret
+.size runtime_asyncPreempt2, .-runtime_asyncPreempt2
+
+.global test_preempt
+.type test_preempt, %function
+test_preempt:
+	sub sp, sp, #176
+	stp x29, x30, [sp]
+	stp x19, x20, [sp, #16]
+	stp x21, x22, [sp, #32]
+	stp x23, x24, [sp, #48]
+	stp x25, x26, [sp, #64]
+	stp x27, x28, [sp, #80]
+	stp d8, d9, [sp, #96]
+	stp d10, d11, [sp, #112]
+	stp d12, d13, [sp, #128]
+	stp d14, d15, [sp, #144]
+	mrs x9, fpsr
+	str x9, [sp, #160]
+
+	adrp x28, .Lpreempt_g
+	add x28, x28, :lo12:.Lpreempt_g
+	adrp x9, .Lpreempt_m
+	add x9, x9, :lo12:.Lpreempt_m
+	str x9, [x28, #48]
+	adrp x10, .Lpreempt_p
+	add x10, x10, :lo12:.Lpreempt_p
+	str x10, [x9, #208]
+
+	mov x0, #101
+	mov x1, #102
+	mov x17, #118
+	mov x19, #120
+	mov x26, #127
+	mov x9, #201
+	dup v0.2d, x9
+	mov x9, #232
+	dup v31.2d, x9
+	mov x9, #1
+	msr fpsr, x9
+	cmp x0, x0
+
+	str x30, [sp, #-16]!
+	adr x30, .Lpreempt_resume
+	b runtime_asyncPreempt
+
+.Lpreempt_resume:
+	mrs x9, nzcv
+	mov x10, #0x60000000
+	cmp x9, x10
+	b.ne .Lpreempt_fail_1
+	mrs x9, fpsr
+	cmp x9, #1
+	b.ne .Lpreempt_fail_2
+	cmp x0, #101
+	b.ne .Lpreempt_fail_3
+	cmp x1, #102
+	b.ne .Lpreempt_fail_4
+	cmp x17, #118
+	b.ne .Lpreempt_fail_5
+	cmp x19, #120
+	b.ne .Lpreempt_fail_6
+	cmp x26, #127
+	b.ne .Lpreempt_fail_7
+	umov x9, v0.d[0]
+	cmp x9, #201
+	b.ne .Lpreempt_fail_8
+	umov x9, v31.d[0]
+	cmp x9, #232
+	b.ne .Lpreempt_fail_9
+	mov x0, #0
+	b .Lpreempt_done
+.Lpreempt_fail_1:
+	mov x0, #1
+	b .Lpreempt_done
+.Lpreempt_fail_2:
+	mov x0, #2
+	b .Lpreempt_done
+.Lpreempt_fail_3:
+	mov x0, #3
+	b .Lpreempt_done
+.Lpreempt_fail_4:
+	mov x0, #4
+	b .Lpreempt_done
+.Lpreempt_fail_5:
+	mov x0, #5
+	b .Lpreempt_done
+.Lpreempt_fail_6:
+	mov x0, #6
+	b .Lpreempt_done
+.Lpreempt_fail_7:
+	mov x0, #7
+	b .Lpreempt_done
+.Lpreempt_fail_8:
+	mov x0, #8
+	b .Lpreempt_done
+.Lpreempt_fail_9:
+	mov x0, #9
+.Lpreempt_done:
+	ldr x9, [sp, #160]
+	msr fpsr, x9
+	ldp d14, d15, [sp, #144]
+	ldp d12, d13, [sp, #128]
+	ldp d10, d11, [sp, #112]
+	ldp d8, d9, [sp, #96]
+	ldp x27, x28, [sp, #80]
+	ldp x25, x26, [sp, #64]
+	ldp x23, x24, [sp, #48]
+	ldp x21, x22, [sp, #32]
+	ldp x19, x20, [sp, #16]
+	ldp x29, x30, [sp]
+	add sp, sp, #176
+	ret
+.size test_preempt, .-test_preempt
+
+.global main
+.type main, %function
+main:
+	b test_preempt
+.size main, .-main
+
+.bss
+.balign 16
+.Lpreempt_g:
+	.zero 64
+.balign 16
+.Lpreempt_m:
+	.zero 216
+.balign 16
+.Lpreempt_p:
+	.zero 14320
+`
+	directory := t.TempDir()
+	sourcePath := filepath.Join(directory, "preempt.S")
+	executable := filepath.Join(directory, "preempt")
 	require.NoError(t, os.WriteFile(sourcePath, []byte(harness), 0o644))
 	command := exec.Command(cc, "-no-pie", "-o", executable, sourcePath)
 	output, err := command.CombinedOutput()

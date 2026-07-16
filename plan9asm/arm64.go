@@ -123,7 +123,7 @@ func (t *arm64Translator) translateInstruction(instruction *Instruction) error {
 		return t.translateReverse(instruction)
 	case "UBFX", "UBFXW", "SBFX", "SBFXW":
 		return t.translateBitfieldExtract(instruction)
-	case "B", "JMP", "BL", "BEQ", "BNE", "BCS", "BCC", "BHS", "BLO", "BMI", "BPL", "BVS", "BVC", "BHI", "BLS", "BGE", "BLT", "BGT", "BLE":
+	case "B", "JMP", "BL", "CALL", "BEQ", "BNE", "BCS", "BCC", "BHS", "BLO", "BMI", "BPL", "BVS", "BVC", "BHI", "BLS", "BGE", "BLT", "BGT", "BLE":
 		return t.translateBranch(instruction)
 	case "CBZ", "CBZW", "CBNZ", "CBNZW":
 		return t.translateCompareBranch(instruction)
@@ -152,8 +152,20 @@ func (t *arm64Translator) translateInstruction(instruction *Instruction) error {
 	case "MVN":
 		return t.translateBitwiseNot(instruction)
 	case "RET":
-		if len(instruction.Operands) != 0 {
-			return fmt.Errorf("RET operands are not supported yet")
+		if len(instruction.Operands) > 1 {
+			return fmt.Errorf("RET accepts at most one target")
+		}
+		if len(instruction.Operands) == 1 {
+			target := instruction.Operands[0]
+			if target.Kind != OperandMemory || target.Offset != "" || target.Index != "" {
+				return fmt.Errorf("unsupported RET target %q", target.Text)
+			}
+			register, err := arm64Register(target.Base, 64)
+			if err != nil {
+				return err
+			}
+			fmt.Fprintf(&t.output, "\tret %s\n", register)
+			return nil
 		}
 		if t.currentFrame != 0 {
 			fmt.Fprintf(&t.output, "\tadd x29, sp, #%d\n", t.currentFrame-8)
@@ -192,6 +204,24 @@ func (t *arm64Translator) translateMove(instruction *Instruction) error {
 	}
 	source := instruction.Operands[0]
 	destination := instruction.Operands[1]
+	if instruction.Opcode == "MOVD" {
+		if systemRegister(source) && destination.Kind == OperandRegister {
+			destinationRegister, err := arm64Register(destination.Register, 64)
+			if err != nil {
+				return err
+			}
+			fmt.Fprintf(&t.output, "\tmrs %s, %s\n", destinationRegister, strings.ToLower(source.Register))
+			return nil
+		}
+		if source.Kind == OperandRegister && systemRegister(destination) {
+			sourceRegister, err := arm64Register(source.Register, 64)
+			if err != nil {
+				return err
+			}
+			fmt.Fprintf(&t.output, "\tmsr %s, %s\n", strings.ToLower(destination.Register), sourceRegister)
+			return nil
+		}
+	}
 	width := moveWidth(instruction.Opcode)
 	if destination.Kind == OperandRegister {
 		destinationRegister, err := arm64Register(destination.Register, width)
@@ -229,8 +259,16 @@ func (t *arm64Translator) translateMove(instruction *Instruction) error {
 	return fmt.Errorf("unsupported %s operands %q, %q", instruction.Opcode, source.Text, destination.Text)
 }
 
+func systemRegister(operand Operand) bool {
+	return operand.Kind == OperandRegister && (operand.Register == "NZCV" || operand.Register == "FPSR")
+}
+
 func (t *arm64Translator) emitMoveImmediate(destination string, width int, immediate string) error {
-	normalized := normalizeImmediate(immediate)
+	resolved, err := t.resolveIntegerExpression(immediate)
+	if err != nil {
+		return fmt.Errorf("invalid integer immediate $%s: %w", immediate, err)
+	}
+	normalized := strconv.FormatInt(resolved, 10)
 	var value uint64
 	if strings.HasPrefix(normalized, "-") {
 		signed, err := strconv.ParseInt(normalized, 0, 64)
@@ -424,7 +462,23 @@ func (t *arm64Translator) translateALU(instruction *Instruction) error {
 	if err != nil {
 		return err
 	}
-	right, err := formatALUSource(source, width)
+	if source.Kind == OperandImmediate && (mnemonic == "add" || mnemonic == "adds" || mnemonic == "sub" || mnemonic == "subs") {
+		value, err := t.resolveIntegerExpression(source.Immediate)
+		if err != nil {
+			return err
+		}
+		if !arm64AddSubImmediate(value) {
+			if leftRegister == "x27" || destinationRegister == "x27" {
+				return fmt.Errorf("%s with a large immediate cannot use reserved register R27", instruction.Opcode)
+			}
+			if err := t.emitMoveImmediate("x27", width, source.Immediate); err != nil {
+				return err
+			}
+			fmt.Fprintf(&t.output, "\t%s %s, %s, x27\n", mnemonic, destinationRegister, leftRegister)
+			return nil
+		}
+	}
+	right, err := t.formatALUSource(source, width)
 	if err != nil {
 		return err
 	}
@@ -432,12 +486,22 @@ func (t *arm64Translator) translateALU(instruction *Instruction) error {
 	return nil
 }
 
+func arm64AddSubImmediate(value int64) bool {
+	if value < 0 {
+		return false
+	}
+	if value <= 4095 {
+		return true
+	}
+	return value%4096 == 0 && value/4096 <= 4095
+}
+
 func (t *arm64Translator) translateNegate(instruction *Instruction) error {
 	if len(instruction.Operands) != 2 {
 		return fmt.Errorf("%s requires two operands", instruction.Opcode)
 	}
 	width := instructionWidth(instruction.Opcode)
-	source, err := formatALUSource(instruction.Operands[0], width)
+	source, err := t.formatALUSource(instruction.Operands[0], width)
 	if err != nil {
 		return err
 	}
@@ -480,7 +544,7 @@ func (t *arm64Translator) translateCompare(instruction *Instruction) error {
 	if err != nil {
 		return err
 	}
-	right, err := formatALUSource(instruction.Operands[0], width)
+	right, err := t.formatALUSource(instruction.Operands[0], width)
 	if err != nil {
 		return err
 	}

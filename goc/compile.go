@@ -127,7 +127,7 @@ func compile(name string, src []byte, executable bool) (*ir.Module, error) {
 	sort.Strings(assemblyPackages)
 	for _, path := range assemblyPackages {
 		unit := loader.units[path]
-		defines := integerPackageConstants(unit.pkg)
+		defines := assemblyPackageDefines(unit.pkg)
 		for _, assembly := range unit.assembly {
 			mod.Assembly = append(mod.Assembly, ir.AssemblyFile{
 				PackagePath: path,
@@ -246,19 +246,43 @@ func compile(name string, src []byte, executable bool) (*ir.Module, error) {
 	return g.mod, nil
 }
 
-func integerPackageConstants(pkg *types.Package) map[string]int64 {
+func assemblyPackageDefines(pkg *types.Package) map[string]int64 {
 	defines := make(map[string]int64)
+	sizes := types.SizesFor("gc", runtime.GOARCH)
 	for _, name := range pkg.Scope().Names() {
-		object, ok := pkg.Scope().Lookup(name).(*types.Const)
-		if !ok {
-			continue
-		}
-		if object.Val().Kind() != constant.Int {
-			continue
-		}
-		value, ok := constant.Int64Val(object.Val())
-		if ok {
-			defines["const_"+name] = value
+		object := pkg.Scope().Lookup(name)
+		switch object := object.(type) {
+		case *types.Const:
+			if object.Val().Kind() != constant.Int {
+				continue
+			}
+			value, ok := constant.Int64Val(object.Val())
+			if ok {
+				defines["const_"+name] = value
+			}
+		case *types.TypeName:
+			if sizes == nil {
+				continue
+			}
+			named, ok := types.Unalias(object.Type()).(*types.Named)
+			if !ok || named.TypeParams().Len() != 0 {
+				continue
+			}
+			structure, ok := named.Underlying().(*types.Struct)
+			if !ok {
+				continue
+			}
+			fields := make([]*types.Var, structure.NumFields())
+			for index := range fields {
+				fields[index] = structure.Field(index)
+			}
+			offsets := sizes.Offsetsof(fields)
+			defines[name+"__size"] = sizes.Sizeof(named)
+			for index, field := range fields {
+				if field.Name() != "_" {
+					defines[name+"_"+field.Name()] = offsets[index]
+				}
+			}
 		}
 	}
 	return defines

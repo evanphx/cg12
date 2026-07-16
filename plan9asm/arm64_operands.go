@@ -2,6 +2,9 @@ package plan9asm
 
 import (
 	"fmt"
+	"go/ast"
+	goparser "go/parser"
+	"go/token"
 	"strconv"
 	"strings"
 	"unicode"
@@ -91,6 +94,13 @@ func symbolRelocation(name string, offset int64) string {
 }
 
 func (t *arm64Translator) memoryAddress(operand Operand, suffix string) (string, error) {
+	if operand.Offset != "" {
+		offset, err := t.resolveIntegerExpression(operand.Offset)
+		if err != nil {
+			return "", fmt.Errorf("invalid memory offset %q: %w", operand.Offset, err)
+		}
+		operand.Offset = strconv.FormatInt(offset, 10)
+	}
 	if t.currentFrame == 0 || operand.Base != "RSP" {
 		return memoryAddress(operand, suffix)
 	}
@@ -101,12 +111,16 @@ func (t *arm64Translator) memoryAddress(operand Operand, suffix string) (string,
 	return memoryAddress(operand, suffix)
 }
 
-func formatALUSource(operand Operand, width int) (string, error) {
+func (t *arm64Translator) formatALUSource(operand Operand, width int) (string, error) {
 	switch operand.Kind {
 	case OperandRegister:
 		return arm64Register(operand.Register, width)
 	case OperandImmediate:
-		return "#" + normalizeImmediate(operand.Immediate), nil
+		value, err := t.resolveIntegerExpression(operand.Immediate)
+		if err != nil {
+			return "", err
+		}
+		return "#" + strconv.FormatInt(value, 10), nil
 	case OperandShiftedRegister:
 		register, err := arm64Register(operand.Register, width)
 		if err != nil {
@@ -155,6 +169,8 @@ func arm64Register(register string, width int) (string, error) {
 		return prefix + "30", nil
 	case "FP":
 		return prefix + "29", nil
+	case "G":
+		return prefix + "28", nil
 	}
 	if strings.HasPrefix(register, "R") {
 		number, err := strconv.Atoi(register[1:])
@@ -195,7 +211,7 @@ func branchMnemonic(opcode string) string {
 	switch opcode {
 	case "B", "JMP":
 		return "b"
-	case "BL":
+	case "BL", "CALL":
 		return "bl"
 	case "BCC", "BLO":
 		return "b.lo"
@@ -215,6 +231,106 @@ func normalizeImmediate(immediate string) string {
 		}
 	}
 	return immediate
+}
+
+func (t *arm64Translator) resolveIntegerExpression(source string) (int64, error) {
+	source = strings.TrimSpace(source)
+	if strings.HasPrefix(source, "~") {
+		source = "^" + strings.TrimSpace(strings.TrimPrefix(source, "~"))
+	}
+	expression, err := goparser.ParseExpr(source)
+	if err != nil {
+		return 0, err
+	}
+	return t.evaluateIntegerExpression(expression)
+}
+
+func (t *arm64Translator) evaluateIntegerExpression(expression ast.Expr) (int64, error) {
+	switch expression := expression.(type) {
+	case *ast.BasicLit:
+		if expression.Kind != token.INT {
+			return 0, fmt.Errorf("%s is not an integer", expression.Value)
+		}
+		value, err := strconv.ParseInt(expression.Value, 0, 64)
+		if err == nil {
+			return value, nil
+		}
+		unsigned, unsignedErr := strconv.ParseUint(expression.Value, 0, 64)
+		if unsignedErr != nil {
+			return 0, err
+		}
+		return int64(unsigned), nil
+	case *ast.Ident:
+		value, ok := t.options.Defines[expression.Name]
+		if !ok {
+			return 0, fmt.Errorf("undefined assembly constant %s", expression.Name)
+		}
+		return value, nil
+	case *ast.ParenExpr:
+		return t.evaluateIntegerExpression(expression.X)
+	case *ast.UnaryExpr:
+		value, err := t.evaluateIntegerExpression(expression.X)
+		if err != nil {
+			return 0, err
+		}
+		switch expression.Op {
+		case token.ADD:
+			return value, nil
+		case token.SUB:
+			return -value, nil
+		case token.XOR:
+			return ^value, nil
+		default:
+			return 0, fmt.Errorf("unsupported unary operator %s", expression.Op)
+		}
+	case *ast.BinaryExpr:
+		left, err := t.evaluateIntegerExpression(expression.X)
+		if err != nil {
+			return 0, err
+		}
+		right, err := t.evaluateIntegerExpression(expression.Y)
+		if err != nil {
+			return 0, err
+		}
+		switch expression.Op {
+		case token.ADD:
+			return left + right, nil
+		case token.SUB:
+			return left - right, nil
+		case token.MUL:
+			return left * right, nil
+		case token.QUO:
+			if right == 0 {
+				return 0, fmt.Errorf("division by zero")
+			}
+			return left / right, nil
+		case token.REM:
+			if right == 0 {
+				return 0, fmt.Errorf("division by zero")
+			}
+			return left % right, nil
+		case token.SHL:
+			if right < 0 || right >= 64 {
+				return 0, fmt.Errorf("invalid shift count %d", right)
+			}
+			return left << uint(right), nil
+		case token.SHR:
+			if right < 0 || right >= 64 {
+				return 0, fmt.Errorf("invalid shift count %d", right)
+			}
+			return left >> uint(right), nil
+		case token.AND:
+			return left & right, nil
+		case token.OR:
+			return left | right, nil
+		case token.XOR:
+			return left ^ right, nil
+		default:
+			return 0, fmt.Errorf("unsupported binary operator %s", expression.Op)
+		}
+	default:
+		return 0, fmt.Errorf("unsupported integer expression %T", expression)
+	}
 }
 
 func sanitizeSymbol(name string) string {

@@ -1,12 +1,66 @@
 package goc
 
 import (
+	"go/ast"
+	"go/parser"
+	"go/token"
+	"go/types"
 	"reflect"
+	"runtime"
 	"strings"
 	"testing"
 
 	"github.com/evanphx/cg12/ir"
 )
+
+func TestAssemblyPackageDefinesIncludeConstantsAndStructLayouts(t *testing.T) {
+	fset := token.NewFileSet()
+	file, err := parser.ParseFile(fset, "layout.go", `package layout
+const answer = 42
+type inner struct {
+	byte byte
+	word uintptr
+}
+type outer struct {
+	flag bool
+	item inner
+	ptr *outer
+}
+`, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	sizes := types.SizesFor("gc", runtime.GOARCH)
+	configuration := types.Config{Sizes: sizes}
+	pkg, err := configuration.Check("layout", fset, []*ast.File{file}, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	defines := assemblyPackageDefines(pkg)
+	outer := pkg.Scope().Lookup("outer").Type().Underlying().(*types.Struct)
+	fields := make([]*types.Var, outer.NumFields())
+	for index := range fields {
+		fields[index] = outer.Field(index)
+	}
+	offsets := sizes.Offsetsof(fields)
+
+	if defines["const_answer"] != 42 {
+		t.Errorf("const_answer = %d, want 42", defines["const_answer"])
+	}
+	if defines["outer_flag"] != offsets[0] {
+		t.Errorf("outer_flag = %d, want %d", defines["outer_flag"], offsets[0])
+	}
+	if defines["outer_item"] != offsets[1] {
+		t.Errorf("outer_item = %d, want %d", defines["outer_item"], offsets[1])
+	}
+	if defines["outer_ptr"] != offsets[2] {
+		t.Errorf("outer_ptr = %d, want %d", defines["outer_ptr"], offsets[2])
+	}
+	if defines["outer__size"] != sizes.Sizeof(pkg.Scope().Lookup("outer").Type()) {
+		t.Errorf("outer__size = %d, want %d", defines["outer__size"], sizes.Sizeof(pkg.Scope().Lookup("outer").Type()))
+	}
+}
 
 func TestCompileCoreGo(t *testing.T) {
 	m, err := Compile("sum.go", []byte(`package main
@@ -97,11 +151,13 @@ func main() {
 		"runtime/atomic_arm64.s":                           "runtime",
 		"runtime/memclr_arm64.s":                           "runtime",
 		"runtime/memmove_arm64.s":                          "runtime",
+		"runtime/preempt_arm64.s":                          "runtime",
 		"runtime/secret_arm64.s":                           "runtime",
 	}
 	if len(module.Assembly) != len(wantAssembly) {
 		t.Fatalf("executable assembly files = %d, want %d", len(module.Assembly), len(wantAssembly))
 	}
+	var runtimeDefines map[string]int64
 	for _, assembly := range module.Assembly {
 		packagePath, ok := wantAssembly[assembly.Path]
 		if !ok || assembly.PackagePath != packagePath || assembly.Source == "" {
@@ -110,10 +166,25 @@ func main() {
 		if assembly.Path == "internal/runtime/atomic/atomic_arm64.s" && assembly.Defines["const_offsetARM64HasATOMICS"] != 135 {
 			t.Errorf("atomic go_asm.h offset = %d, want 135", assembly.Defines["const_offsetARM64HasATOMICS"])
 		}
+		if assembly.PackagePath == "runtime" {
+			runtimeDefines = assembly.Defines
+		}
 		delete(wantAssembly, assembly.Path)
 	}
 	for path := range wantAssembly {
 		t.Errorf("executable assembly is missing %s", path)
+	}
+	wantRuntimeDefines := map[string]int64{
+		"g_m":              48,
+		"m_p":              208,
+		"p_xRegs":          13800,
+		"xRegPerP_scratch": 0,
+		"xRegPerP_cache":   512,
+	}
+	for name, want := range wantRuntimeDefines {
+		if got := runtimeDefines[name]; got != want {
+			t.Errorf("runtime assembly define %s = %d, want %d", name, got, want)
+		}
 	}
 
 	var initTask, initTasks *ir.Data
