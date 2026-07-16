@@ -136,6 +136,41 @@ func (b *mcXasm) setccMovzx(cmp ir.Cmp, dst Reg) {
 	b.m.emit(x64.Setcc(intCond(cmp), dst.mreg()))
 	b.m.emit(x64.MovzxByte(false, dst.mreg(), dst.mreg()))
 }
+
+// intCond maps an integer predicate to its x64 condition code (flags from a - b).
+func intCond(c ir.Cmp) x64.Cond {
+	switch c {
+	case ir.CmpEq:
+		return x64.E
+	case ir.CmpNe:
+		return x64.NE
+	case ir.CmpSlt:
+		return x64.L
+	case ir.CmpSle:
+		return x64.LE
+	case ir.CmpSgt:
+		return x64.G
+	case ir.CmpSge:
+		return x64.GE
+	case ir.CmpUlt:
+		return x64.B
+	case ir.CmpUle:
+		return x64.BE
+	case ir.CmpUgt:
+		return x64.A
+	case ir.CmpUge:
+		return x64.AE
+	}
+	return x64.E
+}
+
+// intCC maps an integer predicate to its AT&T condition suffix (flags from a - b).
+var intCC = map[ir.Cmp]string{
+	ir.CmpEq: "e", ir.CmpNe: "ne", ir.CmpSlt: "l", ir.CmpSle: "le",
+	ir.CmpSgt: "g", ir.CmpSge: "ge", ir.CmpUlt: "b", ir.CmpUle: "be",
+	ir.CmpUgt: "a", ir.CmpUge: "ae",
+}
+
 func (b *mcXasm) extGP(op ir.Op, w bool, dst, src Reg) {
 	dm, sm := dst.mreg(), src.mreg()
 	switch op {
