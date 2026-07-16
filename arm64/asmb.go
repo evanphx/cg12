@@ -71,6 +71,13 @@ type asmb interface {
 	store(op ir.Op, val, base Reg)
 	storeIdx(op ir.Op, val, base, index Reg, aux int64)
 
+	// Control flow. Branch targets are blocks so each backend formats its own
+	// label; brind is a computed goto through a register, brk halts.
+	branch(to *ir.Block)
+	cbnz(w64 bool, rn Reg, to *ir.Block)
+	brind(rn Reg)
+	brk()
+
 	// Spill traffic: a load into / store from a frame slot at x29+off.
 	ldrSpill(rd Reg, float bool, off, size int)
 	strSpill(rs Reg, float bool, off, size int)
@@ -393,6 +400,12 @@ func (b *mcAsm) storeIdx(op ir.Op, val, base, index Reg, aux int64) {
 }
 func (b *mcAsm) movImm(rd Reg, val int64, w64 bool) { b.m.movImm(mreg(rd), val, w64) }
 func (b *mcAsm) materializeSym(rd Reg, c ir.Const)  { b.m.materializeSym(mreg(rd), c) }
+func (b *mcAsm) branch(to *ir.Block)                { b.prog.B(to.Name) }
+func (b *mcAsm) cbnz(w64 bool, rn Reg, to *ir.Block) {
+	b.prog.Cbnz(w64, mreg(rn), to.Name)
+}
+func (b *mcAsm) brind(rn Reg) { b.prog.Emit(a64.Br(mreg(rn))) }
+func (b *mcAsm) brk()         { b.prog.Emit(a64.Brk(0)) }
 func (b *mcAsm) ldrSpill(rd Reg, float bool, off, size int) {
 	b.m.spillLoad(mreg(rd), float, off, size)
 }
@@ -472,6 +485,12 @@ func (b *textAsm) storeIdx(op ir.Op, val, base, index Reg, aux int64) {
 }
 func (b *textAsm) movImm(rd Reg, val int64, w64 bool) { b.e.movImm(rd, val, boolToSize(w64)) }
 func (b *textAsm) materializeSym(rd Reg, c ir.Const)  { b.e.materializeSym(rd, c) }
+func (b *textAsm) branch(to *ir.Block)                { b.line("b %s", b.e.blockLabel(to)) }
+func (b *textAsm) cbnz(w64 bool, rn Reg, to *ir.Block) {
+	b.line("cbnz %s, %s", rn.Name(regSize(w64)), b.e.blockLabel(to))
+}
+func (b *textAsm) brind(rn Reg) { b.line("br %s", rn.Name(8)) }
+func (b *textAsm) brk()         { b.line("brk #0") }
 func (b *textAsm) ldrSpill(rd Reg, float bool, off, size int) {
 	b.line("ldr %s, [x29, #%d]", rd.Name(size), off)
 }

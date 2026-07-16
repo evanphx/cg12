@@ -1658,20 +1658,12 @@ func loadSize(op ir.Op, cls ir.Cls) int { _, sz := loadInfo(op, cls); return sz 
 func storeSize(op ir.Op) int            { _, sz := storeInfo(op); return sz }
 
 func (m *mc) term(b *ir.Block) {
+	if (&sel{f: m.f, b: &mcAsm{prog: m.prog, m: m}, spillBase: m.spillBase}).term(b) {
+		return
+	}
 	switch b.Jmp.Kind {
 	case ir.JmpRet:
 		m.epilogue()
-	case ir.JmpJmp:
-		m.prog.B(b.Jmp.To.Name)
-	case ir.JmpJnz:
-		r := m.src(b.Jmp.Arg, 0, m.f.ClassOf(b.Jmp.Arg).Size())
-		m.prog.Cbnz(m.f.ClassOf(b.Jmp.Arg).Size() == 8, r, b.Jmp.To.Name)
-		m.prog.B(b.Jmp.To2.Name)
-	case ir.JmpHlt:
-		m.emit(a64.Brk(0))
-	case ir.JmpBr:
-		r := m.src(b.Jmp.Arg, 0, 8)
-		m.emit(a64.Br(r)) // computed goto: branch to the address register
 	case ir.JmpTable:
 		// Indexed branch through a PC-relative offset table placed just past the
 		// branch: target = table + (int32)table[idx]. The index is already bounds

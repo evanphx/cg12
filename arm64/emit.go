@@ -376,20 +376,12 @@ func (e *emitter) emitLoc(pos ir.SrcPos) {
 }
 
 func (e *emitter) emitTerm(b *ir.Block) {
+	if (&sel{f: e.f, b: &textAsm{e: e}, spillBase: e.spillBase}).term(b) {
+		return
+	}
 	switch b.Jmp.Kind {
 	case ir.JmpRet:
 		e.epilogue()
-	case ir.JmpJmp:
-		e.line("b %s", e.blockLabel(b.Jmp.To))
-	case ir.JmpJnz:
-		r := e.srcReg(b.Jmp.Arg, 0, e.f.ClassOf(b.Jmp.Arg).Size())
-		e.line("cbnz %s, %s", r, e.blockLabel(b.Jmp.To))
-		e.line("b %s", e.blockLabel(b.Jmp.To2))
-	case ir.JmpHlt:
-		e.line("brk #0")
-	case ir.JmpBr:
-		r := e.srcReg(b.Jmp.Arg, 0, 8)
-		e.line("br %s", r) // computed goto
 	case ir.JmpTable:
 		// Indexed branch through a PC-relative offset table (see the machine-code
 		// emitter). The assembler computes each entry as (case - table).
