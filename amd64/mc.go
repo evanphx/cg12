@@ -1164,20 +1164,8 @@ func (m *mc) instr(in *ir.Instr) {
 	case ir.OStackRestore:
 		r := m.gpValue(in.Args[0], gpScratch0)
 		m.emit(x64.MovReg(true, RSP.mreg(), r.mreg())) // mov rsp, r
-	case ir.OBlockAddr:
-		// &&label: materialize a block's address (RIP-relative) then place it.
-		m.prog.LeaLabel(true, gpScratch0.mreg(), in.Blk.Name)
-		m.move(m.refLoc(in.To), regLoc(gpScratch0, 8, false))
 	case ir.OAsm:
 		m.fail(fmt.Errorf("amd64: inline assembly is only supported when emitting assembly text, not object code"))
-	case ir.OGetReg:
-		// Read a physical register directly (Args[0] is a RefReg naming it).
-		src := regLoc(Reg(in.Arg(0).ID), in.Cls.Size(), in.Cls.IsFloat())
-		m.move(m.refLoc(in.To), src)
-	case ir.OSetReg:
-		// Write a value (Args[0]) to a physical register (Args[1] is a RefReg).
-		dst := regLoc(Reg(in.Arg(1).ID), in.Cls.Size(), in.Cls.IsFloat())
-		m.move(dst, m.refLoc(in.Arg(0)))
 	case ir.OVaStart:
 		m.vaStart(in)
 	case ir.OVaArg:

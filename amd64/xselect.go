@@ -140,6 +140,15 @@ func (s *xsel) selectInt(in *ir.Instr) bool {
 		commit()
 	case ir.OStackRestore:
 		s.b.movToSP(s.gpValue(in.Args[0], gpScratch0))
+	case ir.OGetReg:
+		src := regLoc(Reg(in.Arg(0).ID), in.Cls.Size(), in.Cls.IsFloat())
+		s.b.move(s.b.refLoc(in.To), src)
+	case ir.OSetReg:
+		dst := regLoc(Reg(in.Arg(1).ID), in.Cls.Size(), in.Cls.IsFloat())
+		s.b.move(dst, s.b.refLoc(in.Arg(0)))
+	case ir.OBlockAddr:
+		s.b.blockAddrLea(gpScratch0, in.Blk)
+		s.b.move(s.b.refLoc(in.To), regLoc(gpScratch0, 8, false))
 	default:
 		return false
 	}

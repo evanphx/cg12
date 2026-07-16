@@ -50,6 +50,9 @@ type xasm interface {
 	jmpReg(r Reg)
 	hlt()
 
+	// blockAddrLea materializes a block's RIP-relative address into dst (&&label).
+	blockAddrLea(dst Reg, blk *ir.Block)
+
 	// Floating point: two-operand arithmetic (dst = dst OP src), register move,
 	// sign-flip negation, and a compare that sets the boolean result.
 	binFP(op ir.Op, dbl bool, dst, src Reg)
@@ -164,6 +167,9 @@ func (b *mcXasm) jnz(r Reg, w bool, to, to2 *ir.Block) {
 }
 func (b *mcXasm) jmpReg(r Reg) { b.m.emit(x64.JmpReg(r.mreg())) }
 func (b *mcXasm) hlt()         { b.m.emit(x64.Ud2()) }
+func (b *mcXasm) blockAddrLea(dst Reg, blk *ir.Block) {
+	b.m.prog.LeaLabel(true, dst.mreg(), blk.Name)
+}
 func (b *mcXasm) divGP(w, signed bool, divisor Reg) {
 	if signed {
 		if w {
@@ -418,6 +424,9 @@ func (b *textXasm) jnz(r Reg, w bool, to, to2 *ir.Block) {
 }
 func (b *textXasm) jmpReg(r Reg) { b.e.line("jmp *%s", gpn(r, 8)) }
 func (b *textXasm) hlt()         { b.e.line("ud2") }
+func (b *textXasm) blockAddrLea(dst Reg, blk *ir.Block) {
+	b.e.line("leaq %s(%%rip), %s", b.e.blabel(blk), gpn(dst, 8))
+}
 func (b *textXasm) divGP(w, signed bool, divisor Reg) {
 	sz := clsSizeW(w)
 	if signed {

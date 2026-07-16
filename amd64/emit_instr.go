@@ -24,17 +24,8 @@ func (e *emitter) instr(in *ir.Instr) {
 		d, commit := e.gpDst(in.To)
 		e.line("leaq %s, %s", memn(RBP, int32(-e.allocOff[in])), gpn(d, 8))
 		commit()
-	case ir.OBlockAddr:
-		e.line("leaq %s(%%rip), %s", e.blabel(in.Blk), gpn(gpScratch0, 8))
-		e.move(e.refLoc(in.To), regLoc(gpScratch0, 8, false))
 	case ir.OAsm:
 		e.emitAsm(in)
-	case ir.OGetReg:
-		src := regLoc(Reg(in.Arg(0).ID), in.Cls.Size(), in.Cls.IsFloat())
-		e.move(e.refLoc(in.To), src)
-	case ir.OSetReg:
-		dst := regLoc(Reg(in.Arg(1).ID), in.Cls.Size(), in.Cls.IsFloat())
-		e.move(dst, e.refLoc(in.Arg(0)))
 	case ir.OVaStart:
 		e.vaStart(in)
 	case ir.OVaArg:
