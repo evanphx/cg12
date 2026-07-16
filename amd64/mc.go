@@ -1176,8 +1176,6 @@ func (m *mc) instr(in *ir.Instr) {
 	case ir.OStackRestore:
 		r := m.gpValue(in.Args[0], gpScratch0)
 		m.emit(x64.MovReg(true, RSP.mreg(), r.mreg())) // mov rsp, r
-	case ir.OExts, ir.OTruncd, ir.OStosi, ir.OStoui, ir.OSltof, ir.OUltof, ir.OCast:
-		m.convert(in)
 	case ir.OBlockAddr:
 		// &&label: materialize a block's address (RIP-relative) then place it.
 		m.prog.LeaLabel(true, gpScratch0.mreg(), in.Blk.Name)

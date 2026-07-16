@@ -22,6 +22,27 @@ func (s *xsel) gpValue(ref ir.Ref, scratch Reg) Reg {
 	return scratch
 }
 
+// fpValue returns an XMM holding ref's value, loading it into scratch if needed.
+func (s *xsel) fpValue(ref ir.Ref, scratch Reg) Reg {
+	l := s.b.refLoc(ref)
+	if l.kind == locReg {
+		return l.reg
+	}
+	s.b.move(regLoc(scratch, l.size, true), l)
+	return scratch
+}
+
+// fpDst returns the destination XMM for a float result and a commit closure.
+func (s *xsel) fpDst(ref ir.Ref) (Reg, func()) {
+	t := s.f.Temps[ref.ID]
+	if t.Reg != ir.NoReg {
+		return Reg(t.Reg), func() {}
+	}
+	size := t.Cls.Size()
+	slot := t.Slot
+	return fpScratch0, func() { s.b.spillStoreFP(fpScratch0, slot, size) }
+}
+
 // gpInto places ref's value into GPR d.
 func (s *xsel) gpInto(d Reg, ref ir.Ref) {
 	l := s.b.refLoc(ref)
@@ -83,6 +104,8 @@ func (s *xsel) selectInt(in *ir.Instr) bool {
 		d, commit := s.gpDst(in.To)
 		s.b.extGP(in.Op, w, d, rs)
 		commit()
+	case ir.OExts, ir.OTruncd, ir.OStosi, ir.OStoui, ir.OSltof, ir.OUltof, ir.OCast:
+		s.convert(in)
 	case ir.OCopy:
 		s.b.move(s.b.refLoc(in.To), s.b.refLoc(in.Arg(0)))
 	case ir.OAllocN:
@@ -120,6 +143,48 @@ func (s *xsel) term(b *ir.Block) bool {
 		return false
 	}
 	return true
+}
+
+// convert emits a float/int conversion or int<->float bitcast.
+func (s *xsel) convert(in *ir.Instr) {
+	switch in.Op {
+	case ir.OExts:
+		rs := s.fpValue(in.Arg(0), fpScratch1)
+		d, commit := s.fpDst(in.To)
+		s.b.cvtSS2SD(d, rs)
+		commit()
+	case ir.OTruncd:
+		rs := s.fpValue(in.Arg(0), fpScratch1)
+		d, commit := s.fpDst(in.To)
+		s.b.cvtSD2SS(d, rs)
+		commit()
+	case ir.OStosi, ir.OStoui:
+		srcD := s.f.ClassOf(in.Arg(0)) == ir.ClsD
+		w := in.Cls == ir.ClsL
+		rs := s.fpValue(in.Arg(0), fpScratch1)
+		d, commit := s.gpDst(in.To)
+		s.b.cvtF2SI(w, srcD, d, rs)
+		commit()
+	case ir.OSltof, ir.OUltof:
+		dstD := in.Cls == ir.ClsD
+		w := s.f.ClassOf(in.Arg(0)) == ir.ClsL
+		rs := s.gpValue(in.Arg(0), gpScratch1)
+		d, commit := s.fpDst(in.To)
+		s.b.cvtSI2F(w, dstD, d, rs)
+		commit()
+	case ir.OCast:
+		if in.Cls.IsFloat() {
+			rs := s.gpValue(in.Arg(0), gpScratch1)
+			d, commit := s.fpDst(in.To)
+			s.b.castG2F(in.Cls == ir.ClsD, d, rs)
+			commit()
+		} else {
+			rs := s.fpValue(in.Arg(0), fpScratch1)
+			d, commit := s.gpDst(in.To)
+			s.b.castF2G(in.Cls == ir.ClsL, d, rs)
+			commit()
+		}
+	}
 }
 
 // div emits an integer divide/remainder: place the dividend in RAX, divide, then

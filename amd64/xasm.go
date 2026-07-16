@@ -50,8 +50,17 @@ type xasm interface {
 	jmpReg(r Reg)
 	hlt()
 
-	// spillStore writes a scratch register back to a result's frame slot.
+	// Float/int conversions and int<->float bitcasts.
+	cvtSS2SD(dst, src Reg)
+	cvtSD2SS(dst, src Reg)
+	cvtF2SI(w, srcD bool, dst, src Reg)
+	cvtSI2F(w, dstD bool, dst, src Reg)
+	castG2F(dbl bool, dst, src Reg)
+	castF2G(long bool, dst, src Reg)
+
+	// spillStore/spillStoreFP write a scratch register back to a result's slot.
 	spillStore(r Reg, slot, size int)
+	spillStoreFP(r Reg, slot, size int)
 
 	fail(format string, a ...any)
 }
@@ -154,8 +163,38 @@ func (b *mcXasm) divGP(w, signed bool, divisor Reg) {
 		b.m.emit(x64.Div(w, divisor.mreg()))
 	}
 }
+func (b *mcXasm) cvtSS2SD(dst, src Reg) { b.m.emit(x64.Cvtss2sd(dst.mreg(), src.mreg())) }
+func (b *mcXasm) cvtSD2SS(dst, src Reg) { b.m.emit(x64.Cvtsd2ss(dst.mreg(), src.mreg())) }
+func (b *mcXasm) cvtF2SI(w, srcD bool, dst, src Reg) {
+	if srcD {
+		b.m.emit(x64.Cvttsd2si(w, dst.mreg(), src.mreg()))
+	} else {
+		b.m.emit(x64.Cvttss2si(w, dst.mreg(), src.mreg()))
+	}
+}
+func (b *mcXasm) cvtSI2F(w, dstD bool, dst, src Reg) {
+	if dstD {
+		b.m.emit(x64.Cvtsi2sd(w, dst.mreg(), src.mreg()))
+	} else {
+		b.m.emit(x64.Cvtsi2ss(w, dst.mreg(), src.mreg()))
+	}
+}
+func (b *mcXasm) castG2F(dbl bool, dst, src Reg) {
+	b.m.emit(x64.MovqToXmm(dbl, dst.mreg(), src.mreg()))
+}
+func (b *mcXasm) castF2G(long bool, dst, src Reg) {
+	b.m.emit(x64.MovqFromXmm(long, dst.mreg(), src.mreg()))
+}
 func (b *mcXasm) spillStore(r Reg, slot, size int) {
 	b.m.emit(x64.Store(size*8, r.mreg(), x64.At(RBP.mreg(), b.m.slotAddr(slot))))
+}
+func (b *mcXasm) spillStoreFP(r Reg, slot, size int) {
+	mem := x64.At(RBP.mreg(), b.m.slotAddr(slot))
+	if size == 8 {
+		b.m.emit(x64.MovsdStore(r.mreg(), mem))
+	} else {
+		b.m.emit(x64.MovssStore(r.mreg(), mem))
+	}
 }
 func (b *mcXasm) fail(format string, a ...any) { b.m.fail(fmt.Errorf(format, a...)) }
 
@@ -250,8 +289,50 @@ func (b *textXasm) divGP(w, signed bool, divisor Reg) {
 		b.e.line("div%s %s", suf(sz), gpn(divisor, sz))
 	}
 }
+func (b *textXasm) cvtSS2SD(dst, src Reg) { b.e.line("cvtss2sd %s, %s", xmmn(src), xmmn(dst)) }
+func (b *textXasm) cvtSD2SS(dst, src Reg) { b.e.line("cvtsd2ss %s, %s", xmmn(src), xmmn(dst)) }
+func (b *textXasm) cvtF2SI(w, srcD bool, dst, src Reg) {
+	mn := "cvttss2si"
+	if srcD {
+		mn = "cvttsd2si"
+	}
+	b.e.line("%s %s, %s", mn, xmmn(src), gpn(dst, clsSizeW(w)))
+}
+func (b *textXasm) cvtSI2F(w, dstD bool, dst, src Reg) {
+	mn := "cvtsi2ss"
+	if dstD {
+		mn = "cvtsi2sd"
+	}
+	if w {
+		mn += "q"
+	} else {
+		mn += "l"
+	}
+	b.e.line("%s %s, %s", mn, gpn(src, clsSizeW(w)), xmmn(dst))
+}
+func (b *textXasm) castG2F(dbl bool, dst, src Reg) {
+	mn, sz := "movd", 4
+	if dbl {
+		mn, sz = "movq", 8
+	}
+	b.e.line("%s %s, %s", mn, gpn(src, sz), xmmn(dst))
+}
+func (b *textXasm) castF2G(long bool, dst, src Reg) {
+	mn, sz := "movd", 4
+	if long {
+		mn, sz = "movq", 8
+	}
+	b.e.line("%s %s, %s", mn, xmmn(src), gpn(dst, sz))
+}
 func (b *textXasm) spillStore(r Reg, slot, size int) {
 	b.e.line("mov%s %s, %s", suf(size), gpn(r, size), memn(RBP, b.e.slotAddr(slot)))
+}
+func (b *textXasm) spillStoreFP(r Reg, slot, size int) {
+	mn := "movss"
+	if size == 8 {
+		mn = "movsd"
+	}
+	b.e.line("%s %s, %s", mn, xmmn(r), memn(RBP, b.e.slotAddr(slot)))
 }
 
 var shiftMn = map[ir.Op]string{ir.OShl: "shl", ir.OShr: "shr", ir.OSar: "sar"}
