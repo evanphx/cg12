@@ -3,6 +3,9 @@ package link_test
 import (
 	"bytes"
 	"debug/elf"
+	"os"
+	"os/exec"
+	"path/filepath"
 	"runtime"
 	"testing"
 
@@ -107,4 +110,65 @@ func TestThreadLocalFromLibraryErrors(t *testing.T) {
 	_, err := l.LinkDynamicExecutableWith("main", obj.DynOptions{Needed: []string{"libc.so.6"}})
 	require.Error(t, err)
 	require.Contains(t, err.Error(), "local-exec")
+}
+
+// tlsLibModule builds a shared library with a thread-local of its own:
+// lib_bump() returns ++libtls, starting from 41.
+func tlsLibModule() *ir.Module {
+	m := ir.NewModule()
+	m.Data = append(m.Data, &ir.Data{Name: "libtls", Align: 4, Linkage: ir.Linkage{Thread: true},
+		Items: []ir.DataItem{{Sub: ir.SubW, Ints: []int64{41}}}})
+	f := m.NewFunc("lib_bump", ir.ClsW).Export()
+	e := f.Entry()
+	a := f.ThreadSym("libtls")
+	v := e.Add(ir.ClsW, e.Load(ir.ClsW, a), f.Word(1))
+	e.Store(v, a)
+	e.Ret(v)
+	return m
+}
+
+// A shared library can have thread-local storage, which local-exec cannot express:
+// the library's block is placed by the loader, so the offset from the thread
+// pointer is not a link-time constant. Initial-exec reads that offset from a GOT
+// slot the loader fills instead.
+func TestInitialExecTLSInSharedLibrary(t *testing.T) {
+	if runtime.GOARCH != "arm64" {
+		t.Skip("arm64 executable runs natively only on an arm64 host")
+	}
+	dir := t.TempDir()
+
+	l := link.NewWith(arm64.Backend{Opts: arm64.Options{TLSModel: arm64.TLSInitialExec}})
+	require.NoError(t, l.AddModule(tlsLibModule()))
+	so, err := l.LinkSharedLibraryWith(obj.SharedOptions{
+		Soname: "libietls.so", Export: []string{"lib_bump"},
+	})
+	require.NoError(t, err)
+	require.NoError(t, os.WriteFile(filepath.Join(dir, "libietls.so"), so, 0o755))
+
+	// The GOT slot is filled by the loader, which alone knows where the library's
+	// block landed; the relocation only names the variable.
+	f, err := elf.NewFile(bytes.NewReader(so))
+	require.NoError(t, err)
+	require.NotNil(t, f.Section(".dynsym"), "the thread-local must be a dynamic symbol to be named")
+
+	p := ir.NewModule()
+	g := p.NewFunc("main", ir.ClsW).Export()
+	g.Entry().Ret(g.Entry().Call(ir.ClsW, g.Sym("lib_bump", 0)))
+	l2 := link.NewWith(arm64.Backend{})
+	require.NoError(t, l2.AddModule(p))
+	exe, err := l2.LinkDynamicExecutableWith("main", obj.DynOptions{
+		Needed: []string{"libietls.so", "libc.so.6"}, Runpath: []string{"$ORIGIN"},
+	})
+	require.NoError(t, err)
+	path := filepath.Join(dir, "prog")
+	require.NoError(t, os.WriteFile(path, exe, 0o755))
+
+	err = exec.Command(path).Run()
+	code := 0
+	if ee, ok := err.(*exec.ExitError); ok {
+		code = ee.ExitCode()
+	} else {
+		require.NoError(t, err)
+	}
+	require.Equal(t, 42, code, "++libtls, reached from inside the library")
 }

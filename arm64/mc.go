@@ -22,7 +22,29 @@ type Options struct {
 	// GC, when set, emits garbage-collector support code (e.g. safepoint polls)
 	// late during emission, keeping it out of the normal generated code.
 	GC GCStrategy
+
+	// TLSModel selects how a thread-local's address is computed. The default,
+	// local-exec, only works in the main executable, where the offset from the
+	// thread pointer is fixed at link time. Initial-exec reads that offset from a
+	// GOT slot the loader fills, so it also works in a shared library.
+	TLSModel TLSModel
 }
+
+// TLSModel names a way of reaching a thread-local variable.
+type TLSModel uint8
+
+const (
+	// TLSLocalExec bakes the offset from the thread pointer into the code. Only
+	// the main executable can do this: its block sits at a fixed place in every
+	// thread.
+	TLSLocalExec TLSModel = iota
+
+	// TLSInitialExec reads the offset from a GOT slot the loader fills, so the
+	// variable may live in a shared library. It still assumes the library is there
+	// from the start -- a library brought in later by dlopen may find no room left
+	// in the static block, which is what general-dynamic exists for.
+	TLSInitialExec
+)
 
 // CompileObject emits an ELF relocatable object for m with default options.
 func CompileObject(m *ir.Module) ([]byte, error) {
@@ -65,7 +87,7 @@ func CompileToObjectWith(m *ir.Module, opts Options) (*obj.Object, error) {
 		if err != nil {
 			return nil, fmt.Errorf("function %s: %w", f.Name, err)
 		}
-		mc, err := emitMachine(f, alloc, opts.GC)
+		mc, err := emitMachine(f, alloc, opts.GC, opts.TLSModel)
 		if err != nil {
 			return nil, fmt.Errorf("function %s: %w", f.Name, err)
 		}
@@ -413,12 +435,13 @@ type safepoint struct {
 
 // mc emits AArch64 machine code for one function.
 type mc struct {
-	f      *ir.Func
-	alloc  *allocation
-	gc     GCStrategy
-	lay    *emitter // reused only for pure layout/lookup helpers
-	prog   *a64.Program
-	relocs []obj.Reloc
+	f        *ir.Func
+	alloc    *allocation
+	gc       GCStrategy
+	tlsModel TLSModel
+	lay      *emitter // reused only for pure layout/lookup helpers
+	prog     *a64.Program
+	relocs   []obj.Reloc
 
 	instrPC    map[*ir.Instr]uint64 // PC at the start of each instruction
 	safepoints []safepoint
@@ -467,13 +490,13 @@ type blockSym struct {
 	off  int
 }
 
-func emitMachine(f *ir.Func, alloc *allocation, gc GCStrategy) (*machineCode, error) {
+func emitMachine(f *ir.Func, alloc *allocation, gc GCStrategy, tlsModel TLSModel) (*machineCode, error) {
 	// Reuse the text emitter's frame layout — it is pure computation.
 	lay := &emitter{f: f, alloc: alloc, allocOff: map[*ir.Instr]int{}}
 	lay.planFrame()
 
 	m := &mc{
-		f: f, alloc: alloc, gc: gc, lay: lay, prog: a64.NewProgram(), instrPC: map[*ir.Instr]uint64{},
+		f: f, alloc: alloc, gc: gc, tlsModel: tlsModel, lay: lay, prog: a64.NewProgram(), instrPC: map[*ir.Instr]uint64{},
 		frame: lay.frame, spillBase: lay.spillBase, calleeSaved: lay.calleeSaved, allocOff: lay.allocOff,
 		variadic: lay.variadic, gpSaveOff: lay.gpSaveOff, fpSaveOff: lay.fpSaveOff,
 		namedGr: lay.namedGr, namedSr: lay.namedSr, namedStack: lay.namedStack,
@@ -791,17 +814,45 @@ func (m *mc) movImm(r a64.Reg, val int64, w64 bool) {
 	}
 }
 
+// materializeTLSInitialExec computes a thread-local's address as thread_pointer +
+// the offset the loader wrote into a GOT slot: reg = tp + *GOT(sym).
+//
+// The sum needs two registers at once, and this is handed only one, so it borrows
+// a second and gives it back. A caller may have live values in any scratch, and
+// nothing here knows which. The tidier fix is to lower a thread-local access into
+// IR the register allocator can see, so it supplies the temporary -- the same
+// change general-dynamic needs for its call.
+func (m *mc) materializeTLSInitialExec(r a64.Reg, sym string) {
+	m.reloc(sym, obj.R_AARCH64_TLSIE_ADR_GOTTPREL_PAGE21)
+	m.emit(a64.Adrp(r, 0))
+	m.reloc(sym, obj.R_AARCH64_TLSIE_LD64_GOTTPREL_LO12_NC)
+	m.emit(a64.LdrImm(true, r, r, 0)) // r = the offset from the thread pointer
+
+	borrow := a64.Reg(0)
+	if r == borrow {
+		borrow = a64.Reg(1)
+	}
+	m.emit(a64.Stp(true, borrow, a64.ZR, mcSP, -16, a64.PreIndex)) // save it
+	m.emit(a64.MrsTPIDR(borrow))
+	m.emit(a64.AddReg(true, r, borrow, r)) // r = tp + offset
+	m.emit(a64.Ldp(true, borrow, a64.ZR, mcSP, 16, a64.PostIndex))
+}
+
 // materializeSym loads a symbol address (plus offset) into r via adrp/add,
 // recording the page and low-12 relocations.
 func (m *mc) materializeSym(r a64.Reg, c ir.Const) {
 	sym := sanitize(c.Sym)
 	if c.Thread {
-		// Thread-local, local-exec: reg = thread_pointer + tprel(sym).
-		m.emit(a64.MrsTPIDR(r))
-		m.reloc(sym, obj.R_AARCH64_TLSLE_ADD_TPREL_HI12)
-		m.emit(a64.AddImmLSL12(true, r, r, 0))
-		m.reloc(sym, obj.R_AARCH64_TLSLE_ADD_TPREL_LO12_NC)
-		m.emit(a64.AddImm(true, r, r, 0))
+		if m.tlsModel == TLSInitialExec {
+			m.materializeTLSInitialExec(r, sym)
+		} else {
+			// Thread-local, local-exec: reg = thread_pointer + tprel(sym).
+			m.emit(a64.MrsTPIDR(r))
+			m.reloc(sym, obj.R_AARCH64_TLSLE_ADD_TPREL_HI12)
+			m.emit(a64.AddImmLSL12(true, r, r, 0))
+			m.reloc(sym, obj.R_AARCH64_TLSLE_ADD_TPREL_LO12_NC)
+			m.emit(a64.AddImm(true, r, r, 0))
+		}
 	} else {
 		m.reloc(sym, obj.R_AARCH64_ADR_PREL_PG_HI21)
 		m.emit(a64.Adrp(r, 0))

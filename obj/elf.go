@@ -25,6 +25,12 @@ const (
 	// thread pointer (read via MRS TPIDR_EL0).
 	R_AARCH64_TLSLE_ADD_TPREL_HI12    = 549
 	R_AARCH64_TLSLE_ADD_TPREL_LO12_NC = 550
+
+	// Thread-local storage, initial-exec model: the offset from the thread pointer
+	// is not known until load time, so it is read from a GOT slot the loader fills.
+	R_AARCH64_TLSIE_ADR_GOTTPREL_PAGE21   = 541  // adrp: page of the slot
+	R_AARCH64_TLSIE_LD64_GOTTPREL_LO12_NC = 542  // ldr: low 12 bits of the slot
+	R_AARCH64_TLS_TPREL64                 = 1030 // the slot itself: the loader stores the offset
 )
 
 // A few x86-64 relocation types the backend needs.
@@ -38,15 +44,48 @@ const (
 	// Thread-local storage, local-exec model: a 32-bit offset from the thread
 	// pointer (read via %fs).
 	R_X86_64_TPOFF32 = 23
+
+	// Thread-local storage, initial-exec model: the offset is read from a GOT slot
+	// the loader fills.
+	R_X86_64_GOTTPOFF = 22 // RIP-relative reference to the slot
+	R_X86_64_TPOFF64  = 18 // the slot itself: the loader stores the offset
 )
 
 // isX86TLSReloc reports whether typ references a thread-local x86-64 symbol.
 func isX86TLSReloc(typ uint32) bool { return typ == R_X86_64_TPOFF32 }
 
+// isTLSGotReloc reports whether typ reads a thread-local's offset out of a GOT
+// slot (the initial-exec model) rather than encoding it directly.
+func isTLSGotReloc(typ uint32) bool {
+	switch typ {
+	case R_AARCH64_TLSIE_ADR_GOTTPREL_PAGE21, R_AARCH64_TLSIE_LD64_GOTTPREL_LO12_NC, R_X86_64_GOTTPOFF:
+		return true
+	}
+	return false
+}
+
+// tlsGotSlotType is the machine's relocation for a thread-local GOT slot: the
+// loader works out the variable's offset from the thread pointer and stores it.
+func tlsGotSlotType(machine uint16) uint32 {
+	switch machine {
+	case EM_AARCH64:
+		return R_AARCH64_TLS_TPREL64
+	case EM_X86_64:
+		return R_X86_64_TPOFF64
+	}
+	return 0
+}
+
 // isTLSReloc reports whether typ references a thread-local symbol (so the symbol
 // must be typed STT_TLS).
 func isTLSReloc(typ uint32) bool {
 	return typ == R_AARCH64_TLSLE_ADD_TPREL_HI12 || typ == R_AARCH64_TLSLE_ADD_TPREL_LO12_NC
+}
+
+// isAnyTLSReloc reports whether typ references a thread-local symbol in any model,
+// which is what makes the symbol STT_TLS.
+func isAnyTLSReloc(typ uint32) bool {
+	return isTLSReloc(typ) || isX86TLSReloc(typ) || isTLSGotReloc(typ)
 }
 
 // SecKind names the section a symbol is defined in (or that it is undefined).
@@ -177,7 +216,7 @@ func (o *Object) MarshalELF() ([]byte, error) {
 	tlsSym := map[string]bool{}
 	allRelocs := append(append(append([]Reloc{}, o.Relocs...), o.DataRelocs...), o.DebugInfoRelocs...)
 	for _, rl := range allRelocs {
-		if isTLSReloc(rl.Type) || isX86TLSReloc(rl.Type) {
+		if isAnyTLSReloc(rl.Type) {
 			tlsSym[rl.Sym] = true
 		}
 	}

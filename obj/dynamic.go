@@ -3,6 +3,7 @@ package obj
 import (
 	"encoding/binary"
 	"fmt"
+	"math"
 	"sort"
 	"strings"
 )
@@ -328,11 +329,22 @@ func (o *Object) writeDynImage(im dynImage) ([]byte, error) {
 	// of the imports: they are not resolved in a library but by calling our own
 	// resolver at load time. Both kinds still need a PLT slot, since neither
 	// address is known at link time.
+	// A thread-local reached through the GOT is a variable, not a function: it gets
+	// a GOT slot but never a PLT stub, so keep it out of the imports.
+	tlsGotSym := map[string]bool{}
+	for _, r := range o.allRelocs() {
+		if isTLSGotReloc(r.Type) {
+			tlsGotSym[r.Sym] = true
+		}
+	}
 	var imports, ifuncs []string
 	for _, n := range o.imports() {
-		if _, ok := im.ifunc[n]; ok {
+		switch {
+		case tlsGotSym[n]:
+			// resolved through its GOT slot below, not through a PLT
+		case im.ifunc[n] != "":
 			ifuncs = append(ifuncs, n)
-		} else {
+		default:
 			imports = append(imports, n)
 		}
 	}
@@ -343,6 +355,27 @@ func (o *Object) writeDynImage(im dynImage) ([]byte, error) {
 	}
 	pltNames := append(append([]string(nil), imports...), ifuncs...)
 	nplt := len(pltNames)
+
+	// Initial-exec reads a thread-local's offset from a GOT slot the loader fills.
+	// Collect the variables reached that way; each needs a slot and a relocation
+	// telling the loader which variable it describes.
+	var tlsGot []string
+	seenTls := map[string]bool{}
+	for _, r := range o.allRelocs() {
+		if isTLSGotReloc(r.Type) && !seenTls[r.Sym] {
+			seenTls[r.Sym] = true
+			tlsGot = append(tlsGot, r.Sym)
+		}
+	}
+	sort.Strings(tlsGot)
+	var tlsHere, tlsElsewhere []string
+	for _, n := range tlsGot {
+		if o.definesSym(n) {
+			tlsHere = append(tlsHere, n)
+		} else {
+			tlsElsewhere = append(tlsElsewhere, n)
+		}
+	}
 
 	base := uint64(execBase)
 	etype := uint16(etExec)
@@ -359,12 +392,16 @@ func (o *Object) writeDynImage(im dynImage) ([]byte, error) {
 				nRel++
 			}
 		}
-		if nplt > 0 {
+		if nplt > 0 || len(tlsGot) > 0 {
 			nRel++ // GOT[0] holds &_DYNAMIC, itself an absolute address
 		}
 		// Each init/fini entry is a function address, so it needs rebasing too.
 		nRel += len(im.initArr) + len(im.finiArr)
 	}
+	// The thread-local GOT slots need a relocation each, in every image: their
+	// values are the loader's to decide, position-independent or not.
+	var tlsSlotRel []Reloc
+	nRelaDyn := nRel + len(tlsGot)
 
 	// --- section layout; vaddr = base + file offset throughout ---------------
 	// PT_PHDR is not decoration: the loader derives the image's load bias from it
@@ -403,17 +440,19 @@ func (o *Object) writeDynImage(im dynImage) ([]byte, error) {
 	// DT_GNU_HASH walks a bucket as a run of adjacent symbols, so the exports must
 	// be ordered by bucket. That count depends only on how many there are, so the
 	// order can be settled before anything is laid out.
-	symoffset := 1 + len(imports)
+	undef := append(append([]string(nil), imports...), tlsElsewhere...)
+	defined := append(append([]string(nil), exports...), tlsHere...)
+	symoffset := 1 + len(undef)
 	nbuckets := uint32(1)
-	if len(exports) > 0 {
-		nbuckets = uint32(len(exports))
+	if len(defined) > 0 {
+		nbuckets = uint32(len(defined))
 	}
-	sort.SliceStable(exports, func(i, j int) bool {
-		return gnuHash(exports[i])%nbuckets < gnuHash(exports[j])%nbuckets
+	sort.SliceStable(defined, func(i, j int) bool {
+		return gnuHash(defined[i])%nbuckets < gnuHash(defined[j])%nbuckets
 	})
 
-	dynNames := append([]string{""}, imports...)
-	dynNames = append(dynNames, exports...)
+	dynNames := append([]string{""}, undef...)
+	dynNames = append(dynNames, defined...)
 	nsym := len(dynNames)
 
 	dynstr := &strtab{}
@@ -515,7 +554,7 @@ func (o *Object) writeDynImage(im dynImage) ([]byte, error) {
 	off += len(verneedTab)
 	off = alignUp(off, 8)
 	relaDynOff := off
-	off += nRel * 24
+	off += nRelaDyn * 24
 	relaPltOff := off
 	off += nplt * 24
 	off = alignUp(off, 16)
@@ -531,9 +570,15 @@ func (o *Object) writeDynImage(im dynImage) ([]byte, error) {
 	// How much of the writable region is read-only after relocation: the GOT and
 	// .dynamic. Both sizes are known before placement, which is what lets the
 	// region be positioned to end exactly on a page (see below).
-	gotSize := 0
-	if nplt > 0 {
+	// The GOT holds the psABI's reserved header, then one slot per PLT entry, then
+	// one per thread-local reached through it. The header is there whenever the GOT
+	// is, so its size and its contents below must agree on that -- they are written
+	// in different places, and a disagreement silently shifts everything after it.
+	gotSize, tlsGotAt := 0, 0
+	if nplt > 0 || len(tlsGot) > 0 {
 		gotSize = (gotReserved + nplt) * 8
+		tlsGotAt = gotSize
+		gotSize += len(tlsGot) * 8
 	}
 	// The init/fini arrays are function-pointer tables: written by relocation and
 	// never again, so they belong in the relro region beside the GOT.
@@ -560,7 +605,7 @@ func (o *Object) writeDynImage(im dynImage) ([]byte, error) {
 	if nplt > 0 {
 		ndyn += 4 // PLTGOT, PLTRELSZ, PLTREL, JMPREL
 	}
-	if nRel > 0 {
+	if nRelaDyn > 0 {
 		ndyn += 3 // RELA, RELASZ, RELAENT
 	}
 	if versioned {
@@ -639,7 +684,7 @@ func (o *Object) writeDynImage(im dynImage) ([]byte, error) {
 		secVerneed = nextSec()
 	}
 	secRelaDyn := -1
-	if nRel > 0 {
+	if nRelaDyn > 0 {
 		secRelaDyn = nextSec()
 	}
 	secRelaPlt, secPlt, secGot := -1, -1, -1
@@ -662,7 +707,7 @@ func (o *Object) writeDynImage(im dynImage) ([]byte, error) {
 	if finiArrSize > 0 {
 		secFiniArr = nextSec()
 	}
-	if nplt > 0 {
+	if nplt > 0 || len(tlsGot) > 0 {
 		secGot = nextSec()
 	}
 	secDynamic := nextSec()
@@ -718,18 +763,26 @@ func (o *Object) writeDynImage(im dynImage) ([]byte, error) {
 		entry = e
 	}
 
+	// Each thread-local GOT slot is filled by the loader with that variable's
+	// offset from the thread pointer -- which only the loader can know, since it
+	// decides where each module's block goes.
+	tlsGotVaddr := map[string]uint64{}
+	for i, n := range tlsGot {
+		tlsGotVaddr[n] = va(gotOff + tlsGotAt + i*8)
+	}
+
 	text := append([]byte(nil), o.Text...)
 	data := append([]byte(nil), o.Data...)
-	dynRel, err := resolveSection(o.Machine, im.pie, text, va(textOff), o.Relocs, symVaddr, tlsOff)
+	dynRel, err := resolveSection(o.Machine, im.pie, text, va(textOff), o.Relocs, symVaddr, tlsOff, tlsGotVaddr)
 	if err != nil {
 		return nil, err
 	}
-	dataRel, err := resolveSection(o.Machine, im.pie, data, va(dataOff), o.DataRelocs, symVaddr, tlsOff)
+	dataRel, err := resolveSection(o.Machine, im.pie, data, va(dataOff), o.DataRelocs, symVaddr, tlsOff, tlsGotVaddr)
 	if err != nil {
 		return nil, err
 	}
 	dynRel = append(dynRel, dataRel...)
-	if im.pie && nplt > 0 {
+	if im.pie && (nplt > 0 || len(tlsGot) > 0) {
 		dynRel = append(dynRel, Reloc{
 			Offset: va(gotOff), Type: relativeType(o.Machine), Addend: int64(va(dynamicOff)),
 		})
@@ -763,43 +816,73 @@ func (o *Object) writeDynImage(im dynImage) ([]byte, error) {
 	if len(dynRel) != nRel {
 		return nil, fmt.Errorf("obj: counted %d relative relocations, produced %d", nRel, len(dynRel))
 	}
+	// Tell the loader which variable each thread-local GOT slot describes; it fills
+	// in the offset once it has placed that module's block.
+	for _, n := range tlsGot {
+		tlsSlotRel = append(tlsSlotRel, Reloc{
+			Offset: tlsGotVaddr[n], Sym: n, Type: tlsGotSlotType(o.Machine),
+		})
+	}
 
 	// --- section contents ----------------------------------------------------
 	dynsym := &elfBuf{}
 	dynsym.pad(24) // index 0: the null symbol
+	dynIndex := map[string]int{}
 	for i, n := range dynNames[1:] {
 		idx := i + 1
-		if idx <= len(imports) {
-			// An import: undefined here, so the loader binds it in a needed library.
+		dynIndex[n] = idx
+		if idx < symoffset {
+			// Undefined here: the loader finds it in a needed library. A thread-local
+			// is still STT_TLS, which is how the loader knows to resolve it against a
+			// module's block rather than as an address.
+			typ := byte(sttFunc)
+			if tlsGotSym[n] {
+				typ = sttTLS
+			}
 			dynsym.u32(symNameOff[idx])
-			dynsym.u8((stbGlobal << 4) | sttFunc)
+			dynsym.u8((stbGlobal << 4) | typ)
 			dynsym.u8(0)
 			dynsym.u16(shnUndef)
 			dynsym.u64(0) // st_value
 			dynsym.u64(0) // st_size
 			continue
 		}
-		// An export: defined here, so publish its address, size, and section.
-		s := o.findSym(n)
-		typ, shndx := byte(sttObject), secData
-		if s.Func {
-			typ = sttFunc
-		}
-		if s.Section == SecText {
+		// Defined here: publish its value, size, and section. A thread-local's value
+		// is its offset within this module's block, not an address.
+		sym := o.findSym(n)
+		typ, shndx, value := byte(sttObject), secData, symVaddr[n]
+		switch {
+		case sym.Section == SecTdata:
+			typ, shndx, value = sttTLS, secTdata, sym.Value
+		case sym.Section == SecTbss:
+			typ, shndx, value = sttTLS, secTbss, uint64(tdataSize)+sym.Value
+		case sym.Section == SecText:
 			shndx = secText
+			if sym.Func {
+				typ = sttFunc
+			}
+		case sym.Section == SecBss:
+			shndx = secBss
+		case sym.Func:
+			typ = sttFunc
 		}
 		dynsym.u32(symNameOff[idx])
 		dynsym.u8((stbGlobal << 4) | typ)
 		dynsym.u8(0)
 		dynsym.u16(uint16(shndx))
-		dynsym.u64(symVaddr[n])
-		dynsym.u64(s.Size)
+		dynsym.u64(value)
+		dynsym.u64(sym.Size)
 	}
 
 	relaDyn := &elfBuf{}
 	for _, r := range dynRel {
 		relaDyn.u64(r.Offset)
 		relaDyn.u64(uint64(r.Type)) // symbol index 0: RELATIVE needs no symbol
+		relaDyn.i64(r.Addend)
+	}
+	for _, r := range tlsSlotRel {
+		relaDyn.u64(r.Offset)
+		relaDyn.u64(uint64(dynIndex[r.Sym])<<32 | uint64(r.Type)) // names the variable
 		relaDyn.i64(r.Addend)
 	}
 
@@ -826,7 +909,7 @@ func (o *Object) writeDynImage(im dynImage) ([]byte, error) {
 	}
 
 	got := &elfBuf{}
-	if nplt > 0 {
+	if nplt > 0 || len(tlsGot) > 0 {
 		got.u64(va(dynamicOff)) // GOT[0] = &_DYNAMIC
 		got.u64(0)              // GOT[1], GOT[2]: the loader's lazy-resolution slots
 		got.u64(0)
@@ -836,6 +919,9 @@ func (o *Object) writeDynImage(im dynImage) ([]byte, error) {
 			// resolved eagerly, so its slot needs no lazy trampoline value.
 			_, isIfunc := im.ifunc[n]
 			got.u64(pltGotInit(o.Machine, im.lazy && !isIfunc, va(plt0Off), va(pltOff+i*stubSz)))
+		}
+		for range tlsGot {
+			got.u64(0) // the loader writes the thread-pointer offset here
 		}
 	}
 
@@ -856,7 +942,7 @@ func (o *Object) writeDynImage(im dynImage) ([]byte, error) {
 	dt(dtSymTab, va(dynsymOff))
 	dt(dtStrSz, uint64(len(dynstr.b)))
 	dt(dtSymEnt, 24)
-	if nRel > 0 {
+	if nRelaDyn > 0 {
 		dt(dtRela, va(relaDynOff))
 		dt(dtRelaSz, uint64(len(relaDyn.b)))
 		dt(dtRelaEnt, 24)
@@ -1079,9 +1165,22 @@ func (o *Object) imports() []string {
 // so it becomes a RELATIVE relocation the loader applies as *slot = base + addend.
 // PC-relative references always resolve here: the distance between two points in
 // the image does not change when the image moves.
-func resolveSection(machine uint16, pie bool, sec []byte, secVaddr uint64, relocs []Reloc, symVaddr, tlsOff map[string]uint64) ([]Reloc, error) {
+func resolveSection(machine uint16, pie bool, sec []byte, secVaddr uint64, relocs []Reloc, symVaddr, tlsOff, gotVaddr map[string]uint64) ([]Reloc, error) {
 	var dyn []Reloc
 	for _, r := range relocs {
+		if isTLSGotReloc(r.Type) {
+			// Initial-exec: the code addresses the GOT slot, and the loader puts the
+			// thread-pointer offset in it. So this resolves like any other reference
+			// to an address -- the slot's.
+			slot, ok := gotVaddr[r.Sym]
+			if !ok {
+				return nil, fmt.Errorf("obj: no GOT slot for thread-local %q", r.Sym)
+			}
+			if err := resolveTLSGot(machine, sec, r, int64(slot), int64(secVaddr)+int64(r.Offset)); err != nil {
+				return nil, err
+			}
+			continue
+		}
 		if isTLSReloc(r.Type) || isX86TLSReloc(r.Type) {
 			off, ok := tlsOff[r.Sym]
 			if !ok {
@@ -1122,6 +1221,35 @@ func resolveSection(machine uint16, pie bool, sec []byte, secVaddr uint64, reloc
 		}
 	}
 	return dyn, nil
+}
+
+// resolveTLSGot points an initial-exec reference at the GOT slot holding the
+// variable's thread-pointer offset. The addressing is the ordinary PC-relative
+// kind: what makes it thread-local is only what the loader stores in the slot.
+func resolveTLSGot(machine uint16, sec []byte, r Reloc, slot, place int64) error {
+	switch r.Type {
+	case R_AARCH64_TLSIE_ADR_GOTTPREL_PAGE21:
+		page := ((slot &^ 0xfff) - (place &^ 0xfff)) >> 12
+		if page < -(1<<20) || page >= (1<<20) {
+			return fmt.Errorf("obj: thread-local GOT slot for %q out of adrp range", r.Sym)
+		}
+		w := binary.LittleEndian.Uint32(sec[r.Offset:])
+		w = (w &^ ((3 << 29) | (0x7ffff << 5))) | (uint32(page&3) << 29) | (uint32((page>>2)&0x7ffff) << 5)
+		binary.LittleEndian.PutUint32(sec[r.Offset:], w)
+	case R_AARCH64_TLSIE_LD64_GOTTPREL_LO12_NC:
+		w := binary.LittleEndian.Uint32(sec[r.Offset:])
+		w = (w &^ (0xfff << 10)) | (uint32((slot&0xfff)/8) << 10) // ldr scales by 8
+		binary.LittleEndian.PutUint32(sec[r.Offset:], w)
+	case R_X86_64_GOTTPOFF:
+		disp := slot + r.Addend - place
+		if disp < math.MinInt32 || disp > math.MaxInt32 {
+			return fmt.Errorf("obj: thread-local GOT slot for %q out of range", r.Sym)
+		}
+		binary.LittleEndian.PutUint32(sec[r.Offset:], uint32(int32(disp)))
+	default:
+		return fmt.Errorf("obj: unsupported thread-local GOT relocation type %d (symbol %q)", r.Type, r.Sym)
+	}
+	return nil
 }
 
 // tpOffset turns a thread-local's offset within the TLS block into its offset
