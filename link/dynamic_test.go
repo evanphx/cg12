@@ -639,6 +639,75 @@ func TestVersionedExport(t *testing.T) {
 	})
 }
 
+// An ifunc's address is chosen at load time by running a resolver, which is how
+// one name selects among implementations for the machine it turns out to be on.
+// The symbol has no body, so calls to it must route through the PLT even though
+// nothing outside the image defines it. What proves it works is that the same
+// program yields a different answer purely by what the resolver returns.
+func TestIFuncResolverPicksImplementation(t *testing.T) {
+	if runtime.GOARCH != "arm64" {
+		t.Skip("arm64 executable runs natively only on an arm64 host")
+	}
+	build := func(pick string, pie bool) []byte {
+		m := ir.NewModule()
+		for _, impl := range []struct {
+			name  string
+			scale int64
+		}{{"impl_triple", 3}, {"impl_double", 2}} {
+			fn := m.NewFunc(impl.name, ir.ClsW).Export()
+			x := fn.Param("x", ir.ClsW)
+			e := fn.Entry()
+			e.Ret(e.Mul(ir.ClsW, x, fn.Word(impl.scale)))
+		}
+		// The loader calls this and uses whatever address it hands back.
+		r := m.NewFunc("resolver", ir.ClsL).Export()
+		r.Entry().Ret(r.Sym("impl_"+pick, 0))
+
+		// main calls `scaled`, a symbol with no body of its own.
+		f := m.NewFunc("main", ir.ClsW).Export()
+		e := f.Entry()
+		e.Ret(e.Call(ir.ClsW, f.Sym("scaled", 0), f.Word(14)))
+
+		l := link.NewWith(arm64.Backend{})
+		require.NoError(t, l.AddModule(m))
+		exe, err := l.LinkDynamicExecutableWith("main", obj.DynOptions{
+			Needed: []string{"libc.so.6"},
+			IFunc:  map[string]string{"scaled": "resolver"},
+			PIE:    pie,
+		})
+		require.NoError(t, err)
+		return exe
+	}
+	for _, pie := range []bool{false, true} {
+		name := "fixed-base"
+		if pie {
+			name = "pie"
+		}
+		t.Run(name, func(t *testing.T) {
+			require.Equal(t, 42, runExe(t, build("triple", pie))) // 14*3
+			require.Equal(t, 28, runExe(t, build("double", pie))) // 14*2
+		})
+	}
+}
+
+// An ifunc whose resolver is not defined here cannot be resolved by anyone, so it
+// is a link error rather than an image that fails at load.
+func TestIFuncMissingResolverErrors(t *testing.T) {
+	m := ir.NewModule()
+	f := m.NewFunc("main", ir.ClsW).Export()
+	e := f.Entry()
+	e.Ret(e.Call(ir.ClsW, f.Sym("scaled", 0), f.Word(14)))
+
+	l := link.NewWith(arm64.Backend{})
+	require.NoError(t, l.AddModule(m))
+	_, err := l.LinkDynamicExecutableWith("main", obj.DynOptions{
+		Needed: []string{"libc.so.6"},
+		IFunc:  map[string]string{"scaled": "nonexistent_resolver"},
+	})
+	require.Error(t, err)
+	require.Contains(t, err.Error(), "nonexistent_resolver")
+}
+
 // The image is a well-formed dynamic executable on both architectures: it names
 // the loader in PT_INTERP and carries a PT_DYNAMIC segment. This runs everywhere,
 // including where the foreign architecture's libraries are not installed.

@@ -73,8 +73,12 @@ const (
 	// an imported symbol; RELATIVE rebases an absolute address by the load bias.
 	R_AARCH64_JUMP_SLOT = 1026
 	R_AARCH64_RELATIVE  = 1027
+	R_AARCH64_IRELATIVE = 1032
 	R_X86_64_JUMP_SLOT  = 7
 	R_X86_64_RELATIVE   = 8
+	R_X86_64_IRELATIVE  = 37
+
+	sttGnuIfunc = 10 // a symbol whose address a resolver picks at load time
 
 	// The PLT's GOT reserves three leading slots per the psABI: the address of
 	// _DYNAMIC, and two the loader uses for lazy resolution (unused under BIND_NOW).
@@ -113,6 +117,13 @@ type DynOptions struct {
 	// ships libraries beside it without hard-coding an absolute path.
 	Runpath []string
 
+	// IFunc maps a symbol to the resolver that decides its address at load time:
+	// the loader calls the resolver and uses whatever it returns. It is how one
+	// name selects among implementations for the machine it turns out to be
+	// running on. Calls to such a symbol must go through the PLT even though it is
+	// defined here, since its address is not known until the resolver has run.
+	IFunc map[string]string // symbol -> resolver function
+
 	// Lazy resolves each import on its first call rather than at load time,
 	// trading a resolver trampoline and a writable GOT for not paying to bind
 	// symbols the run never uses. Eager binding is the default and is what
@@ -144,6 +155,7 @@ func (o *Object) WriteDynamicExecutable(entrySym string, opts DynOptions) ([]byt
 		runpath: opts.Runpath,
 		initArr: opts.InitArray,
 		finiArr: opts.FiniArray,
+		ifunc:   opts.IFunc,
 		pie:     opts.PIE,
 		lazy:    opts.Lazy,
 	})
@@ -162,6 +174,9 @@ type SharedOptions struct {
 	// bind to that exact interface and the library can carry another alongside it
 	// later (DT_VERDEF).
 	Provide map[string]string // symbol -> version name
+
+	// IFunc maps a symbol to the resolver that picks its address at load time.
+	IFunc map[string]string
 }
 
 // WriteSharedLibrary links the object into a shared library: a position-
@@ -176,6 +191,7 @@ func (o *Object) WriteSharedLibrary(opts SharedOptions) ([]byte, error) {
 		initArr: opts.InitArray,
 		finiArr: opts.FiniArray,
 		provide: opts.Provide,
+		ifunc:   opts.IFunc,
 		pie:     true, // a shared library is position-independent by definition
 	})
 }
@@ -191,6 +207,7 @@ type dynImage struct {
 	runpath []string              // DT_RUNPATH search directories
 	initArr []string              // functions run before the entry point
 	finiArr []string              // functions run at unload
+	ifunc   map[string]string     // symbol -> resolver that picks its address at load
 	soname  string                // DT_SONAME; empty for an executable
 	pie     bool                  // position-independent (ET_DYN linked at 0)
 	lazy    bool                  // resolve imports on first call, not at load
@@ -301,7 +318,26 @@ func (o *Object) writeDynImage(im dynImage) ([]byte, error) {
 	if stubSz == 0 {
 		return nil, fmt.Errorf("obj: cannot build a PLT for machine %d", o.Machine)
 	}
-	imports := o.imports()
+	// A symbol named as an ifunc has no body of its own -- its address is whatever
+	// its resolver returns -- so it arrives here looking undefined. Pull those out
+	// of the imports: they are not resolved in a library but by calling our own
+	// resolver at load time. Both kinds still need a PLT slot, since neither
+	// address is known at link time.
+	var imports, ifuncs []string
+	for _, n := range o.imports() {
+		if _, ok := im.ifunc[n]; ok {
+			ifuncs = append(ifuncs, n)
+		} else {
+			imports = append(imports, n)
+		}
+	}
+	for _, n := range ifuncs {
+		if r := im.ifunc[n]; !o.definesSym(r) {
+			return nil, fmt.Errorf("obj: ifunc resolver %q for %q is not defined here", r, n)
+		}
+	}
+	pltNames := append(append([]string(nil), imports...), ifuncs...)
+	nplt := len(pltNames)
 
 	base := uint64(execBase)
 	etype := uint16(etExec)
@@ -318,7 +354,7 @@ func (o *Object) writeDynImage(im dynImage) ([]byte, error) {
 				nRel++
 			}
 		}
-		if len(imports) > 0 {
+		if nplt > 0 {
 			nRel++ // GOT[0] holds &_DYNAMIC, itself an absolute address
 		}
 		// Each init/fini entry is a function address, so it needs rebasing too.
@@ -469,12 +505,12 @@ func (o *Object) writeDynImage(im dynImage) ([]byte, error) {
 	relaDynOff := off
 	off += nRel * 24
 	relaPltOff := off
-	off += len(imports) * 24
+	off += nplt * 24
 	off = alignUp(off, 16)
-	plt0Sz := plt0Size(o.Machine, im.lazy && len(imports) > 0)
+	plt0Sz := plt0Size(o.Machine, im.lazy && nplt > 0)
 	plt0Off := off
 	pltOff := off + plt0Sz
-	off = pltOff + len(imports)*stubSz
+	off = pltOff + nplt*stubSz
 	off = alignUp(off, 16)
 	textOff := off
 	off += len(o.Text)
@@ -484,8 +520,8 @@ func (o *Object) writeDynImage(im dynImage) ([]byte, error) {
 	// .dynamic. Both sizes are known before placement, which is what lets the
 	// region be positioned to end exactly on a page (see below).
 	gotSize := 0
-	if len(imports) > 0 {
-		gotSize = (gotReserved + len(imports)) * 8
+	if nplt > 0 {
+		gotSize = (gotReserved + nplt) * 8
 	}
 	// The init/fini arrays are function-pointer tables: written by relocation and
 	// never again, so they belong in the relro region beside the GOT.
@@ -500,7 +536,7 @@ func (o *Object) writeDynImage(im dynImage) ([]byte, error) {
 	if len(im.runpath) > 0 {
 		ndyn++ // RUNPATH
 	}
-	if len(imports) > 0 {
+	if nplt > 0 {
 		ndyn += 4 // PLTGOT, PLTRELSZ, PLTREL, JMPREL
 	}
 	if nRel > 0 {
@@ -580,7 +616,7 @@ func (o *Object) writeDynImage(im dynImage) ([]byte, error) {
 		secRelaDyn = nextSec()
 	}
 	secRelaPlt, secPlt, secGot := -1, -1, -1
-	if len(imports) > 0 {
+	if nplt > 0 {
 		secRelaPlt = nextSec()
 		secPlt = nextSec()
 	}
@@ -592,7 +628,7 @@ func (o *Object) writeDynImage(im dynImage) ([]byte, error) {
 	if finiArrSize > 0 {
 		secFiniArr = nextSec()
 	}
-	if len(imports) > 0 {
+	if nplt > 0 {
 		secGot = nextSec()
 	}
 	secDynamic := nextSec()
@@ -615,7 +651,7 @@ func (o *Object) writeDynImage(im dynImage) ([]byte, error) {
 			symVaddr[s.Name] = va(dataOff) + s.Value
 		}
 	}
-	for i, n := range imports {
+	for i, n := range pltNames {
 		symVaddr[n] = va(pltOff + i*stubSz)
 	}
 	var entry uint64
@@ -638,7 +674,7 @@ func (o *Object) writeDynImage(im dynImage) ([]byte, error) {
 		return nil, err
 	}
 	dynRel = append(dynRel, dataRel...)
-	if im.pie && len(imports) > 0 {
+	if im.pie && nplt > 0 {
 		dynRel = append(dynRel, Reloc{
 			Offset: va(gotOff), Type: relativeType(o.Machine), Addend: int64(va(dynamicOff)),
 		})
@@ -713,29 +749,38 @@ func (o *Object) writeDynImage(im dynImage) ([]byte, error) {
 	}
 
 	relaPlt := &elfBuf{}
-	for i := range imports {
-		relaPlt.u64(va(gotOff + (gotReserved+i)*8))                // r_offset: the GOT slot
-		relaPlt.u64(uint64(i+1)<<32 | uint64(jumpSlot(o.Machine))) // r_info
-		relaPlt.i64(0)                                             // r_addend
+	for i, n := range pltNames {
+		relaPlt.u64(va(gotOff + (gotReserved+i)*8)) // r_offset: the GOT slot
+		if r, ok := im.ifunc[n]; ok {
+			// The loader calls the resolver and stores what it returns. No symbol is
+			// named: the addend *is* the resolver, which the loader rebases first.
+			relaPlt.u64(uint64(irelativeType(o.Machine)))
+			relaPlt.i64(int64(symVaddr[r]))
+			continue
+		}
+		relaPlt.u64(uint64(i+1)<<32 | uint64(jumpSlot(o.Machine))) // dynsym index i+1
+		relaPlt.i64(0)
 	}
 
 	plt := &elfBuf{}
 	if plt0Sz > 0 {
 		plt.bytes(plt0Stub(o.Machine, va(plt0Off), va(gotOff)))
 	}
-	for i := range imports {
+	for i := range pltNames {
 		plt.bytes(pltStub(o.Machine, va(pltOff+i*stubSz), va(gotOff+(gotReserved+i)*8), va(plt0Off), i, im.lazy))
 	}
 
 	got := &elfBuf{}
-	if len(imports) > 0 {
+	if nplt > 0 {
 		got.u64(va(dynamicOff)) // GOT[0] = &_DYNAMIC
 		got.u64(0)              // GOT[1], GOT[2]: the loader's lazy-resolution slots
 		got.u64(0)
-		for i := range imports {
-			// The loader fills this from the JUMP_SLOT relocation; under lazy binding
-			// it adds the load bias to this initial value instead.
-			got.u64(pltGotInit(o.Machine, im.lazy, va(plt0Off), va(pltOff+i*stubSz)))
+		for i, n := range pltNames {
+			// The loader fills this from the slot's relocation; under lazy binding it
+			// adds the load bias to this initial value instead. An ifunc is always
+			// resolved eagerly, so its slot needs no lazy trampoline value.
+			_, isIfunc := im.ifunc[n]
+			got.u64(pltGotInit(o.Machine, im.lazy && !isIfunc, va(plt0Off), va(pltOff+i*stubSz)))
 		}
 	}
 
@@ -769,7 +814,7 @@ func (o *Object) writeDynImage(im dynImage) ([]byte, error) {
 		dt(dtFiniArray, va(finiArrOff))
 		dt(dtFiniArraySz, uint64(finiArrSize))
 	}
-	if len(imports) > 0 {
+	if nplt > 0 {
 		dt(dtPltGot, va(gotOff))
 		dt(dtPltRelSz, uint64(len(relaPlt.b)))
 		dt(dtPltRel, dtRela)
@@ -999,6 +1044,18 @@ func isAbsoluteReloc(machine uint16, typ uint32) bool {
 		return typ == R_X86_64_64
 	}
 	return false
+}
+
+// irelativeType is the machine's resolver-call relocation: the loader calls the
+// function at the addend and stores what it returns.
+func irelativeType(machine uint16) uint32 {
+	switch machine {
+	case EM_AARCH64:
+		return R_AARCH64_IRELATIVE
+	case EM_X86_64:
+		return R_X86_64_IRELATIVE
+	}
+	return 0
 }
 
 // relativeType is the machine's load-base rebase relocation.
