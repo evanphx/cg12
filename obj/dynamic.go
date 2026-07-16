@@ -17,6 +17,7 @@ const (
 	shtHash    = 5
 	shtDynamic = 6
 	shtDynsym  = 11
+	shtGnuHash = 0x6ffffff6
 
 	dtNull     = 0
 	dtNeeded   = 1
@@ -34,6 +35,7 @@ const (
 	dtPltRel   = 20
 	dtJmpRel   = 23
 	dtFlags    = 30
+	dtGnuHash  = 0x6ffffef5
 	dtFlags1   = 0x6ffffffb
 
 	dfBindNow = 0x8 // resolve every relocation at load time (no lazy binding)
@@ -175,6 +177,18 @@ func (o *Object) writeDynImage(im dynImage) ([]byte, error) {
 			return nil, fmt.Errorf("obj: cannot export %q: it is not defined here", n)
 		}
 	}
+	// DT_GNU_HASH walks a bucket as a run of adjacent symbols, so the exports must
+	// be ordered by bucket. That count depends only on how many there are, so the
+	// order can be settled before anything is laid out.
+	symoffset := 1 + len(imports)
+	nbuckets := uint32(1)
+	if len(exports) > 0 {
+		nbuckets = uint32(len(exports))
+	}
+	sort.SliceStable(exports, func(i, j int) bool {
+		return gnuHash(exports[i])%nbuckets < gnuHash(exports[j])%nbuckets
+	})
+
 	dynNames := append([]string{""}, imports...)
 	dynNames = append(dynNames, exports...)
 	nsym := len(dynNames)
@@ -194,6 +208,7 @@ func (o *Object) writeDynImage(im dynImage) ([]byte, error) {
 		sonameOff = dynstr.add(im.soname)
 	}
 	hash := sysvHash(dynNames)
+	gnuHashTab := gnuHashTable(dynNames, symoffset)
 
 	off := alignUp(64+nph*56, 8)
 	interpOff := off
@@ -201,6 +216,9 @@ func (o *Object) writeDynImage(im dynImage) ([]byte, error) {
 	off = alignUp(off, 8)
 	hashOff := off
 	off += len(hash)
+	off = alignUp(off, 8)
+	gnuHashOff := off
+	off += len(gnuHashTab)
 	dynsymOff := off
 	off += nsym * 24
 	dynstrOff := off
@@ -228,7 +246,7 @@ func (o *Object) writeDynImage(im dynImage) ([]byte, error) {
 		off = gotOff
 	}
 	dynamicOff := alignUp(off, 8)
-	ndyn := len(im.needed) + 8 // NEEDED..., HASH, STRTAB, SYMTAB, STRSZ, SYMENT, FLAGS, FLAGS_1, NULL
+	ndyn := len(im.needed) + 9 // NEEDED..., HASH, GNU_HASH, STRTAB, SYMTAB, STRSZ, SYMENT, FLAGS, FLAGS_1, NULL
 	if im.soname != "" {
 		ndyn++ // SONAME
 	}
@@ -257,6 +275,7 @@ func (o *Object) writeDynImage(im dynImage) ([]byte, error) {
 		secInterp = nextSec()
 	}
 	secHash := nextSec()
+	secGnuHash := nextSec()
 	secDynsym := nextSec()
 	secDynstr := nextSec()
 	secRelaDyn := -1
@@ -394,6 +413,7 @@ func (o *Object) writeDynImage(im dynImage) ([]byte, error) {
 		dt(dtSoname, uint64(sonameOff))
 	}
 	dt(dtHash, va(hashOff))
+	dt(dtGnuHash, va(gnuHashOff))
 	dt(dtStrTab, va(dynstrOff))
 	dt(dtSymTab, va(dynsymOff))
 	dt(dtStrSz, uint64(len(dynstr.b)))
@@ -449,6 +469,7 @@ func (o *Object) writeDynImage(im dynImage) ([]byte, error) {
 		put(interpOff, interp)
 	}
 	put(hashOff, hash)
+	put(gnuHashOff, gnuHashTab)
 	put(dynsymOff, dynsym.b)
 	put(dynstrOff, dynstr.b)
 	put(relaDynOff, relaDyn.b)
@@ -475,6 +496,7 @@ func (o *Object) writeDynImage(im dynImage) ([]byte, error) {
 	secs[secNull] = dsection{name: shstr.add("")}
 	set(secInterp, ".interp", shtProgbits, shfAlloc, interpOff, len(interp), 0, 0, 1, 0)
 	set(secHash, ".hash", shtHash, shfAlloc, hashOff, len(hash), secDynsym, 0, 8, 4)
+	set(secGnuHash, ".gnu.hash", shtGnuHash, shfAlloc, gnuHashOff, len(gnuHashTab), secDynsym, 0, 8, 0)
 	set(secDynsym, ".dynsym", shtDynsym, shfAlloc, dynsymOff, len(dynsym.b), secDynstr, 1, 8, 24)
 	set(secDynstr, ".dynstr", shtStrtab, shfAlloc, dynstrOff, len(dynstr.b), 0, 0, 1, 0)
 	set(secRelaDyn, ".rela.dyn", shtRela, shfAlloc, relaDynOff, len(relaDyn.b), secDynsym, 0, 8, 24)
@@ -637,6 +659,68 @@ func sysvHash(names []string) []byte {
 		w.u32(v)
 	}
 	return w.b
+}
+
+// gnuHashTable builds a DT_GNU_HASH table over the defined symbols, which occupy
+// dynsym[symoffset:] and must already be ordered by bucket (the format walks a
+// bucket as a run of adjacent symbols, so ordering is a hard requirement, not an
+// optimization). Undefined symbols are not hashed at all, which is why they must
+// come first. Each chain word carries the symbol's hash with bit 0 reused as an
+// end-of-bucket marker, and a Bloom filter lets the loader reject a name that is
+// certainly absent without touching the buckets.
+func gnuHashTable(names []string, symoffset int) []byte {
+	n := len(names) - symoffset
+	nbuckets := uint32(1)
+	if n > 0 {
+		nbuckets = uint32(n)
+	}
+	bloomSize := uint32(1) // must be a power of two
+	for int(bloomSize)*8 < n {
+		bloomSize *= 2
+	}
+	const bloomShift = 6
+
+	bloom := make([]uint64, bloomSize)
+	buckets := make([]uint32, nbuckets)
+	chain := make([]uint32, n)
+	for i := 0; i < n; i++ {
+		h := gnuHash(names[symoffset+i])
+		bloom[(h/64)%bloomSize] |= 1<<(h%64) | 1<<((h>>bloomShift)%64)
+		b := h % nbuckets
+		if buckets[b] == 0 {
+			buckets[b] = uint32(symoffset + i) // first symbol of this bucket
+		}
+		// Bit 0 marks the last symbol in a bucket; the hash itself is even-masked.
+		chain[i] = h &^ 1
+		if i+1 == n || gnuHash(names[symoffset+i+1])%nbuckets != b {
+			chain[i] |= 1
+		}
+	}
+
+	w := &elfBuf{}
+	w.u32(nbuckets)
+	w.u32(uint32(symoffset))
+	w.u32(bloomSize)
+	w.u32(bloomShift)
+	for _, v := range bloom {
+		w.u64(v)
+	}
+	for _, v := range buckets {
+		w.u32(v)
+	}
+	for _, v := range chain {
+		w.u32(v)
+	}
+	return w.b
+}
+
+// gnuHash is the djb2-derived symbol hash used by DT_GNU_HASH.
+func gnuHash(name string) uint32 {
+	h := uint32(5381)
+	for i := 0; i < len(name); i++ {
+		h = h*33 + uint32(name[i])
+	}
+	return h
 }
 
 // elfHash is the SysV symbol hash from the ELF specification.

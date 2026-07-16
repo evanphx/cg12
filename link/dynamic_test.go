@@ -202,6 +202,62 @@ func TestDlopenOwnSharedLibrary(t *testing.T) {
 	require.Equal(t, 42, runExe(t, exe)) // cg12_triple(14)
 }
 
+// Several exports in one library exercise the hash tables for real: the loader
+// looks each name up through DT_GNU_HASH (which it prefers over DT_HASH when both
+// are present), walking a bucket's chain to the right symbol. A wrong bucket
+// order or end-of-chain marker would fail to resolve.
+func TestSharedLibraryMultipleExports(t *testing.T) {
+	if runtime.GOARCH != "arm64" {
+		t.Skip("arm64 executable runs natively only on an arm64 host")
+	}
+	m := ir.NewModule()
+	for _, fn := range []struct {
+		name string
+		body func(f *ir.Func, e *ir.Block, x ir.Ref)
+	}{
+		{"cg12_add3", func(f *ir.Func, e *ir.Block, x ir.Ref) { e.Ret(e.Add(ir.ClsW, x, f.Word(3))) }},
+		{"cg12_mul2", func(f *ir.Func, e *ir.Block, x ir.Ref) { e.Ret(e.Mul(ir.ClsW, x, f.Word(2))) }},
+		{"cg12_neg", func(f *ir.Func, e *ir.Block, x ir.Ref) { e.Ret(e.Sub(ir.ClsW, f.Word(0), x)) }},
+	} {
+		f := m.NewFunc(fn.name, ir.ClsW).Export()
+		x := f.Param("x", ir.ClsW)
+		fn.body(f, f.Entry(), x)
+	}
+	exports := []string{"cg12_add3", "cg12_mul2", "cg12_neg"}
+
+	l := link.NewWith(arm64.Backend{})
+	require.NoError(t, l.AddModule(m))
+	so, err := l.LinkSharedLibrary("libcg12multi.so", exports)
+	require.NoError(t, err)
+	dir := t.TempDir()
+	soPath := filepath.Join(dir, "libcg12multi.so")
+	require.NoError(t, os.WriteFile(soPath, so, 0o755))
+
+	// main() = add3(mul2(neg(-10))) = add3(mul2(10)) = add3(20) = 23
+	const rtldNow = 2
+	p := ir.NewModule()
+	p.Data = append(p.Data, &ir.Data{Name: "sopath", Align: 1,
+		Items: []ir.DataItem{{Str: soPath}, {Sub: ir.SubB, Ints: []int64{0}}}})
+	for _, n := range exports {
+		p.Data = append(p.Data, &ir.Data{Name: "n_" + n, Align: 1,
+			Items: []ir.DataItem{{Str: n}, {Sub: ir.SubB, Ints: []int64{0}}}})
+	}
+	f := p.NewFunc("main", ir.ClsW).Export()
+	e := f.Entry()
+	h := e.Call(ir.ClsL, f.Sym("dlopen", 0), f.Sym("sopath", 0), f.Word(rtldNow))
+	sym := func(n string) ir.Ref { return e.Call(ir.ClsL, f.Sym("dlsym", 0), h, f.Sym("n_"+n, 0)) }
+	v := e.Call(ir.ClsW, sym("cg12_neg"), f.Word(-10))
+	v = e.Call(ir.ClsW, sym("cg12_mul2"), v)
+	v = e.Call(ir.ClsW, sym("cg12_add3"), v)
+	e.Ret(v)
+
+	l2 := link.NewWith(arm64.Backend{})
+	require.NoError(t, l2.AddModule(p))
+	exe, err := l2.LinkDynamicExecutable("main", "libc.so.6")
+	require.NoError(t, err)
+	require.Equal(t, 23, runExe(t, exe))
+}
+
 // The image is a well-formed dynamic executable on both architectures: it names
 // the loader in PT_INTERP and carries a PT_DYNAMIC segment. This runs everywhere,
 // including where the foreign architecture's libraries are not installed.
