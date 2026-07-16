@@ -267,6 +267,63 @@ func (s *sel) cmp(in *ir.Instr) {
 	done()
 }
 
+// parallelMove performs a set of simultaneous moves, ordering them so no source
+// is clobbered before it is read and breaking register cycles with a scratch. It
+// is written once here and drives both emitters through the moveLoc primitive.
+func (s *sel) parallelMove(pairs []movePairLoc) {
+	var work []movePairLoc
+	for _, p := range pairs {
+		if !sameLoc(p.dst, p.src) {
+			work = append(work, p)
+		}
+	}
+	for len(work) > 0 {
+		idx := -1
+		for i, p := range work {
+			blocked := false
+			for j, q := range work {
+				if i != j && srcReadsDst(q.src, p.dst) {
+					blocked = true
+					break
+				}
+			}
+			if !blocked {
+				idx = i
+				break
+			}
+		}
+		if idx >= 0 {
+			s.b.moveLoc(work[idx].dst, work[idx].src)
+			work = append(work[:idx], work[idx+1:]...)
+			continue
+		}
+		// Cyclic: rescue a register destination into scratch and reroute readers.
+		ci := -1
+		for i, p := range work {
+			if !p.dst.mem {
+				ci = i
+				break
+			}
+		}
+		if ci < 0 {
+			s.b.fail("arm64: unexpected memory cycle in parallel move")
+			return
+		}
+		saved := work[ci].dst
+		rescue := scratch2
+		if saved.reg.IsFloat() {
+			rescue = fscratch0
+		}
+		tmp := loc{reg: rescue, size: saved.size}
+		s.b.moveLoc(tmp, saved)
+		for i := range work {
+			if srcReadsDst(work[i].src, saved) && !work[i].src.mem {
+				work[i].src = tmp
+			}
+		}
+	}
+}
+
 // frameTeardown restores callee-saved registers and the frame pointer and pops
 // the frame, leaving x30 (lr) at the caller's return address but not returning.
 // It is shared by the return epilogue and the tail-call branch. Callee-saved

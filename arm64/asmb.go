@@ -65,6 +65,10 @@ type asmb interface {
 	movImm(rd Reg, val int64, w64 bool)
 	materializeSym(rd Reg, c ir.Const)
 
+	// moveLoc emits a single move between two locations (register or frame slot),
+	// the primitive the shared parallel-move ordering drives.
+	moveLoc(dst, src loc)
+
 	// Memory. load/store use [base]; loadIdx/storeIdx use [base, index] with the
 	// extend/scale encoded in aux. The op fixes the width and signedness.
 	load(op ir.Op, cls ir.Cls, rd, base Reg)
@@ -427,6 +431,7 @@ func (b *mcAsm) storeIdx(op ir.Op, val, base, index Reg, aux int64) {
 }
 func (b *mcAsm) movImm(rd Reg, val int64, w64 bool) { b.m.movImm(mreg(rd), val, w64) }
 func (b *mcAsm) materializeSym(rd Reg, c ir.Const)  { b.m.materializeSym(mreg(rd), c) }
+func (b *mcAsm) moveLoc(dst, src loc)               { b.m.emitMoveLoc(dst, src) }
 func (b *mcAsm) branch(to *ir.Block)                { b.prog.B(to.Name) }
 func (b *mcAsm) cbnz(w64 bool, rn Reg, to *ir.Block) {
 	b.prog.Cbnz(w64, mreg(rn), to.Name)
@@ -546,6 +551,7 @@ func (b *textAsm) storeIdx(op ir.Op, val, base, index Reg, aux int64) {
 }
 func (b *textAsm) movImm(rd Reg, val int64, w64 bool) { b.e.movImm(rd, val, boolToSize(w64)) }
 func (b *textAsm) materializeSym(rd Reg, c ir.Const)  { b.e.materializeSym(rd, c) }
+func (b *textAsm) moveLoc(dst, src loc)               { b.e.emitMoveLoc(dst, src) }
 func (b *textAsm) branch(to *ir.Block)                { b.line("b %s", b.e.blockLabel(to)) }
 func (b *textAsm) cbnz(w64 bool, rn Reg, to *ir.Block) {
 	b.line("cbnz %s, %s", rn.Name(regSize(w64)), b.e.blockLabel(to))

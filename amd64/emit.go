@@ -341,55 +341,7 @@ func (e *emitter) constOf(r ir.Ref) *ir.Const {
 // --- parallel moves --------------------------------------------------------
 
 func (e *emitter) parallelMove(pairs []locPair) {
-	var work []locPair
-	for _, p := range pairs {
-		if !sameLoc(p.dst, p.src) {
-			work = append(work, p)
-		}
-	}
-	for len(work) > 0 {
-		idx := -1
-		for i, p := range work {
-			blocked := false
-			for j, q := range work {
-				if i != j && srcReadsDst(q.src, p.dst) {
-					blocked = true
-					break
-				}
-			}
-			if !blocked {
-				idx = i
-				break
-			}
-		}
-		if idx >= 0 {
-			e.move(work[idx].dst, work[idx].src)
-			work = append(work[:idx], work[idx+1:]...)
-			continue
-		}
-		ci := -1
-		for i, p := range work {
-			if p.dst.kind == locReg {
-				ci = i
-				break
-			}
-		}
-		if ci < 0 {
-			return
-		}
-		saved := work[ci].dst
-		rescue := gpScratch0
-		if saved.float {
-			rescue = fpScratch0
-		}
-		tmp := regLoc(rescue, saved.size, saved.float)
-		e.move(tmp, saved)
-		for i := range work {
-			if srcReadsDst(work[i].src, saved) {
-				work[i].src = tmp
-			}
-		}
-	}
+	(&xsel{f: e.f, b: &textXasm{e: e}}).parallelMove(pairs)
 }
 
 // --- block emission --------------------------------------------------------

@@ -918,60 +918,10 @@ func srcReadsDst(src, dst loc) bool {
 	return false
 }
 
-// parallelMove performs a set of simultaneous moves, ordering them so no source
-// is clobbered before it is read and breaking register cycles with a scratch.
+// parallelMove performs a set of simultaneous moves, selected once through the
+// shared xsel so the machine-code and text emitters share the ordering logic.
 func (m *mc) parallelMove(pairs []locPair) {
-	var work []locPair
-	for _, p := range pairs {
-		if !sameLoc(p.dst, p.src) {
-			work = append(work, p)
-		}
-	}
-	for len(work) > 0 {
-		idx := -1
-		for i, p := range work {
-			blocked := false
-			for j, q := range work {
-				if i != j && srcReadsDst(q.src, p.dst) {
-					blocked = true
-					break
-				}
-			}
-			if !blocked {
-				idx = i
-				break
-			}
-		}
-		if idx >= 0 {
-			m.move(work[idx].dst, work[idx].src)
-			work = append(work[:idx], work[idx+1:]...)
-			continue
-		}
-		// Cyclic: rescue a register destination into scratch and reroute readers.
-		ci := -1
-		for i, p := range work {
-			if p.dst.kind == locReg {
-				ci = i
-				break
-			}
-		}
-		if ci < 0 {
-			m.fail(fmt.Errorf("amd64: unexpected memory cycle in parallel move"))
-			return
-		}
-		saved := work[ci].dst
-		rescue := gpScratch0
-		if saved.float {
-			rescue = fpScratch0
-		}
-		tmp := regLoc(rescue, saved.size, saved.float)
-		m.move(tmp, saved)
-		for i := range work {
-			if srcReadsDst(work[i].src, saved) {
-				work[i].src = tmp
-			}
-		}
-	}
+	(&xsel{f: m.f, b: &mcXasm{m: m}}).parallelMove(pairs)
 }
 
 // --- block emission --------------------------------------------------------

@@ -32,60 +32,9 @@ func srcReadsDst(src, dst loc) bool {
 	return false
 }
 
-// parallelMove emits a set of simultaneous moves, ordering them so no source is
-// clobbered before it is read and breaking register cycles with scratch2.
+// parallelMove selects the simultaneous-move ordering once, through the shared sel.
 func (e *emitter) parallelMove(pairs []movePairLoc) {
-	var work []movePairLoc
-	for _, p := range pairs {
-		if !sameLoc(p.dst, p.src) {
-			work = append(work, p)
-		}
-	}
-	for len(work) > 0 {
-		idx := -1
-		for i, p := range work {
-			blocked := false
-			for j, q := range work {
-				if i != j && srcReadsDst(q.src, p.dst) {
-					blocked = true
-					break
-				}
-			}
-			if !blocked {
-				idx = i
-				break
-			}
-		}
-		if idx >= 0 {
-			e.emitMoveLoc(work[idx].dst, work[idx].src)
-			work = append(work[:idx], work[idx+1:]...)
-			continue
-		}
-		// Cyclic: rescue a register destination into scratch2 and reroute.
-		ci := -1
-		for i, p := range work {
-			if !p.dst.mem {
-				ci = i
-				break
-			}
-		}
-		if ci < 0 {
-			e.fail("arm64: unexpected memory cycle in parallel move")
-			return
-		}
-		saved := work[ci].dst
-		rescue := scratch2
-		if saved.reg.IsFloat() {
-			rescue = fscratch0
-		}
-		tmp := loc{reg: rescue, size: saved.size}
-		e.emitMoveLoc(tmp, saved)
-		for i := range work {
-			if srcReadsDst(work[i].src, saved) && !work[i].src.mem {
-				work[i].src = tmp
-			}
-		}
-	}
+	(&sel{f: e.f, b: &textAsm{e: e}, spillBase: e.spillBase}).parallelMove(pairs)
 }
 
 // emitMoveLoc emits a single move between two locations.

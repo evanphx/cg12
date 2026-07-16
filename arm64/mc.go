@@ -853,56 +853,7 @@ func (m *mc) dst(ref ir.Ref, size int) (a64.Reg, func()) {
 // --- parallel moves --------------------------------------------------------
 
 func (m *mc) parallelMove(pairs []movePairLoc) {
-	var work []movePairLoc
-	for _, p := range pairs {
-		if !sameLoc(p.dst, p.src) {
-			work = append(work, p)
-		}
-	}
-	for len(work) > 0 {
-		idx := -1
-		for i, p := range work {
-			blocked := false
-			for j, q := range work {
-				if i != j && srcReadsDst(q.src, p.dst) {
-					blocked = true
-					break
-				}
-			}
-			if !blocked {
-				idx = i
-				break
-			}
-		}
-		if idx >= 0 {
-			m.emitMoveLoc(work[idx].dst, work[idx].src)
-			work = append(work[:idx], work[idx+1:]...)
-			continue
-		}
-		ci := -1
-		for i, p := range work {
-			if !p.dst.mem {
-				ci = i
-				break
-			}
-		}
-		if ci < 0 {
-			m.fail("arm64: unexpected memory cycle in parallel move")
-			return
-		}
-		saved := work[ci].dst
-		rescue := scratch2
-		if saved.reg.IsFloat() {
-			rescue = fscratch0
-		}
-		tmp := loc{reg: rescue, size: saved.size}
-		m.emitMoveLoc(tmp, saved)
-		for i := range work {
-			if srcReadsDst(work[i].src, saved) && !work[i].src.mem {
-				work[i].src = tmp
-			}
-		}
-	}
+	(&sel{f: m.f, b: &mcAsm{prog: m.prog, m: m}, spillBase: m.spillBase}).parallelMove(pairs)
 }
 
 func (m *mc) emitMoveLoc(dst, src loc) {

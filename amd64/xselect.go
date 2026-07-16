@@ -177,6 +177,63 @@ func (s *xsel) term(b *ir.Block) bool {
 	return true
 }
 
+// parallelMove performs a set of simultaneous moves, ordering them so no source
+// is clobbered before it is read and breaking register cycles with a scratch. It
+// is written once here and drives both emitters through the move primitive.
+func (s *xsel) parallelMove(pairs []locPair) {
+	var work []locPair
+	for _, p := range pairs {
+		if !sameLoc(p.dst, p.src) {
+			work = append(work, p)
+		}
+	}
+	for len(work) > 0 {
+		idx := -1
+		for i, p := range work {
+			blocked := false
+			for j, q := range work {
+				if i != j && srcReadsDst(q.src, p.dst) {
+					blocked = true
+					break
+				}
+			}
+			if !blocked {
+				idx = i
+				break
+			}
+		}
+		if idx >= 0 {
+			s.b.move(work[idx].dst, work[idx].src)
+			work = append(work[:idx], work[idx+1:]...)
+			continue
+		}
+		// Cyclic: rescue a register destination into scratch and reroute readers.
+		ci := -1
+		for i, p := range work {
+			if p.dst.kind == locReg {
+				ci = i
+				break
+			}
+		}
+		if ci < 0 {
+			s.b.fail("amd64: unexpected memory cycle in parallel move")
+			return
+		}
+		saved := work[ci].dst
+		rescue := gpScratch0
+		if saved.float {
+			rescue = fpScratch0
+		}
+		tmp := regLoc(rescue, saved.size, saved.float)
+		s.b.move(tmp, saved)
+		for i := range work {
+			if srcReadsDst(work[i].src, saved) {
+				work[i].src = tmp
+			}
+		}
+	}
+}
+
 // teardown restores callee-saved registers and unwinds the frame (mov rsp,rbp;
 // pop rbp), leaving rsp at the return address without returning. It is shared by
 // the return epilogue and the tail-call branch.
