@@ -107,6 +107,22 @@ func (l *Linker) LinkPIE(entry string, needed ...string) ([]byte, error) {
 	return l.linkDynamic(entry, true, needed)
 }
 
+// LinkSharedLibrary links the accumulated objects into a shared library (.so)
+// exporting the named symbols, which other programs can link against or dlopen.
+// It has no entry point and no interpreter, and is position-independent, so the
+// loader may place it anywhere. needed names libraries this one itself calls into.
+func (l *Linker) LinkSharedLibrary(soname string, export []string, needed ...string) ([]byte, error) {
+	merged, err := merge(l.objs)
+	if err != nil {
+		return nil, err
+	}
+	return merged.WriteSharedLibrary(obj.SharedOptions{
+		Soname: soname,
+		Needed: needed,
+		Export: export,
+	})
+}
+
 func (l *Linker) linkDynamic(entry string, pie bool, needed []string) ([]byte, error) {
 	merged, err := l.mergeWithStart(entry)
 	if err != nil {

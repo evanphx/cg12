@@ -3,6 +3,9 @@ package link_test
 import (
 	"bytes"
 	"debug/elf"
+	"os"
+	"os/exec"
+	"path/filepath"
 	"runtime"
 	"testing"
 
@@ -119,6 +122,84 @@ func TestPIEExecutable(t *testing.T) {
 	require.Equal(t, elf.ET_DYN, f.Type, "a PIE is an ET_DYN image")
 
 	require.Equal(t, 77, runExe(t, exe))
+}
+
+// moduleTripleLib builds a library exporting cg12_triple(x) = x*3.
+func moduleTripleLib() *ir.Module {
+	m := ir.NewModule()
+	f := m.NewFunc("cg12_triple", ir.ClsW).Export()
+	x := f.Param("x", ir.ClsW)
+	e := f.Entry()
+	e.Ret(e.Mul(ir.ClsW, x, f.Word(3)))
+	return m
+}
+
+// buildTripleSo links the demo shared library and writes it into dir.
+func buildTripleSo(t *testing.T, dir string) string {
+	t.Helper()
+	l := link.NewWith(arm64.Backend{})
+	require.NoError(t, l.AddModule(moduleTripleLib()))
+	so, err := l.LinkSharedLibrary("libcg12demo.so", []string{"cg12_triple"})
+	require.NoError(t, err)
+	path := filepath.Join(dir, "libcg12demo.so")
+	require.NoError(t, os.WriteFile(path, so, 0o755))
+	return path
+}
+
+// Our shared library is a real one: a C program compiled by the system toolchain
+// links against it and calls into it. This exercises the parts a loadable image
+// alone does not need -- the section headers and dynamic symbol table the static
+// linker reads to resolve cg12_triple at link time.
+func TestSharedLibraryLinkedFromC(t *testing.T) {
+	if runtime.GOARCH != "arm64" {
+		t.Skip("arm64 shared library links natively only on an arm64 host")
+	}
+	cc, ok := toolchain()
+	if !ok {
+		t.Skip("no AArch64 toolchain available")
+	}
+	dir := t.TempDir()
+	buildTripleSo(t, dir)
+
+	src := filepath.Join(dir, "main.c")
+	require.NoError(t, os.WriteFile(src, []byte(`
+extern int cg12_triple(int);
+int main(void){ return cg12_triple(14) == 42 ? 0 : 1; }`), 0o644))
+
+	bin := filepath.Join(dir, "useso")
+	out, err := exec.Command(cc, "-o", bin, src, "-L"+dir, "-l:libcg12demo.so", "-Wl,-rpath,"+dir).CombinedOutput()
+	require.NoErrorf(t, err, "linking against our .so failed: %s", out)
+	require.NoError(t, exec.Command(bin).Run(), "the C program calling our library should succeed")
+}
+
+// The whole round trip with no external toolchain at all: a cg12-built program
+// dlopens a cg12-built shared library, resolves a symbol from it with dlsym, and
+// calls it through the returned pointer.
+func TestDlopenOwnSharedLibrary(t *testing.T) {
+	if runtime.GOARCH != "arm64" {
+		t.Skip("arm64 executable runs natively only on an arm64 host")
+	}
+	dir := t.TempDir()
+	soPath := buildTripleSo(t, dir)
+
+	// main() { return ((int(*)(int))dlsym(dlopen(path, RTLD_NOW), "cg12_triple"))(14); }
+	const rtldNow = 2
+	m := ir.NewModule()
+	m.Data = append(m.Data,
+		&ir.Data{Name: "sopath", Align: 1, Items: []ir.DataItem{{Str: soPath}, {Sub: ir.SubB, Ints: []int64{0}}}},
+		&ir.Data{Name: "symname", Align: 1, Items: []ir.DataItem{{Str: "cg12_triple"}, {Sub: ir.SubB, Ints: []int64{0}}}},
+	)
+	f := m.NewFunc("main", ir.ClsW).Export()
+	e := f.Entry()
+	h := e.Call(ir.ClsL, f.Sym("dlopen", 0), f.Sym("sopath", 0), f.Word(rtldNow))
+	fp := e.Call(ir.ClsL, f.Sym("dlsym", 0), h, f.Sym("symname", 0))
+	e.Ret(e.Call(ir.ClsW, fp, f.Word(14))) // indirect call through the dlsym result
+
+	l := link.NewWith(arm64.Backend{})
+	require.NoError(t, l.AddModule(m))
+	exe, err := l.LinkDynamicExecutable("main", "libc.so.6")
+	require.NoError(t, err)
+	require.Equal(t, 42, runExe(t, exe)) // cg12_triple(14)
 }
 
 // The image is a well-formed dynamic executable on both architectures: it names

@@ -205,6 +205,16 @@ func writeElfHeader(b []byte, etype, machine uint16, entry uint64, phnum int) {
 	h.u16(0) // e_shstrndx
 }
 
+// writeSectionInfo patches an already-written ELF header to point at a section
+// header table. writeElfHeader leaves these zero, which is all a loadable image
+// needs; a shared library also wants them so the static linker can read it.
+func writeSectionInfo(b []byte, shoff uint64, shnum, shstrndx int) {
+	binary.LittleEndian.PutUint64(b[40:], shoff)         // e_shoff
+	binary.LittleEndian.PutUint16(b[58:], 64)            // e_shentsize
+	binary.LittleEndian.PutUint16(b[60:], uint16(shnum)) // e_shnum
+	binary.LittleEndian.PutUint16(b[62:], uint16(shstrndx))
+}
+
 // alignUp rounds n up to the next multiple of a.
 func alignUp(n, a int) int {
 	if a < 1 {

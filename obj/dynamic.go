@@ -14,6 +14,10 @@ const (
 	ptInterp  = 3
 	ptPhdr    = 6
 
+	shtHash    = 5
+	shtDynamic = 6
+	shtDynsym  = 11
+
 	dtNull     = 0
 	dtNeeded   = 1
 	dtPltRelSz = 2
@@ -56,6 +60,10 @@ type DynOptions struct {
 	// loader may place at any base. Absolute references then cannot be bound here
 	// and become RELATIVE relocations the loader rebases.
 	PIE bool
+
+	// Export publishes these defined symbols in the dynamic symbol table, so a
+	// shared library can resolve against the executable (or dlsym can find them).
+	Export []string
 }
 
 // WriteDynamicExecutable links the object into a dynamically linked executable
@@ -71,7 +79,27 @@ func (o *Object) WriteDynamicExecutable(entrySym string, opts DynOptions) ([]byt
 		entry:  entrySym,
 		interp: opts.Interp,
 		needed: opts.Needed,
+		export: opts.Export,
 		pie:    opts.PIE,
+	})
+}
+
+// SharedOptions configures a shared library.
+type SharedOptions struct {
+	Soname string   // the name others link against, e.g. libfoo.so.1 (DT_SONAME)
+	Needed []string // shared libraries this one needs (DT_NEEDED)
+	Export []string // symbols to publish for others to resolve against
+}
+
+// WriteSharedLibrary links the object into a shared library: a position-
+// independent ET_DYN image with no entry point and no interpreter, publishing
+// Export in its dynamic symbol table so the loader (or dlsym) can find them.
+func (o *Object) WriteSharedLibrary(opts SharedOptions) ([]byte, error) {
+	return o.writeDynImage(dynImage{
+		needed: opts.Needed,
+		export: opts.Export,
+		soname: opts.Soname,
+		pie:    true, // a shared library is position-independent by definition
 	})
 }
 
@@ -80,6 +108,8 @@ type dynImage struct {
 	entry  string   // entry symbol; empty for a shared library
 	interp string   // loader path; empty for a shared library
 	needed []string // DT_NEEDED
+	export []string // symbols published in .dynsym
+	soname string   // DT_SONAME; empty for an executable
 	pie    bool     // position-independent (ET_DYN linked at 0)
 }
 
@@ -134,19 +164,36 @@ func (o *Object) writeDynImage(im dynImage) ([]byte, error) {
 		nph++ // PT_INTERP
 	}
 
-	// .dynstr holds the import names and the needed-library names.
+	// The dynamic symbol table lists the null symbol, then every import (undefined,
+	// resolved in a needed library), then every export (defined here, published for
+	// others to resolve against). Names and the table's shape are fixed now; the
+	// exports' addresses are filled in once the layout below assigns them.
+	exports := append([]string(nil), im.export...)
+	sort.Strings(exports)
+	for _, n := range exports {
+		if !o.definesSym(n) {
+			return nil, fmt.Errorf("obj: cannot export %q: it is not defined here", n)
+		}
+	}
+	dynNames := append([]string{""}, imports...)
+	dynNames = append(dynNames, exports...)
+	nsym := len(dynNames)
+
 	dynstr := &strtab{}
 	dynstr.add("")
-	symNameOff := make([]uint32, len(imports))
-	for i, n := range imports {
-		symNameOff[i] = dynstr.add(n)
+	symNameOff := make([]uint32, nsym)
+	for i, n := range dynNames[1:] {
+		symNameOff[i+1] = dynstr.add(n)
 	}
 	neededOff := make([]uint32, len(im.needed))
 	for i, n := range im.needed {
 		neededOff[i] = dynstr.add(n)
 	}
-	nsym := len(imports) + 1 // index 0 is the null symbol
-	hash := sysvHash(nsym)
+	var sonameOff uint32
+	if im.soname != "" {
+		sonameOff = dynstr.add(im.soname)
+	}
+	hash := sysvHash(dynNames)
 
 	off := alignUp(64+nph*56, 8)
 	interpOff := off
@@ -182,6 +229,9 @@ func (o *Object) writeDynImage(im dynImage) ([]byte, error) {
 	}
 	dynamicOff := alignUp(off, 8)
 	ndyn := len(im.needed) + 8 // NEEDED..., HASH, STRTAB, SYMTAB, STRSZ, SYMENT, FLAGS, FLAGS_1, NULL
+	if im.soname != "" {
+		ndyn++ // SONAME
+	}
 	if len(imports) > 0 {
 		ndyn += 4 // PLTGOT, PLTRELSZ, PLTREL, JMPREL
 	}
@@ -194,6 +244,41 @@ func (o *Object) writeDynImage(im dynImage) ([]byte, error) {
 	rwEnd := off
 
 	va := func(fileOff int) uint64 { return base + uint64(fileOff) }
+
+	// Section-header indices, assigned in the order the sections are emitted. A
+	// loadable image is run from its program headers, but a shared library is also
+	// *linked against*, and the static linker reads it through its sections -- so
+	// the table has to be here and an exported symbol has to name a real section.
+	secIdx := 0
+	nextSec := func() int { i := secIdx; secIdx++; return i }
+	secNull := nextSec()
+	secInterp := -1
+	if interp != nil {
+		secInterp = nextSec()
+	}
+	secHash := nextSec()
+	secDynsym := nextSec()
+	secDynstr := nextSec()
+	secRelaDyn := -1
+	if nRel > 0 {
+		secRelaDyn = nextSec()
+	}
+	secRelaPlt, secPlt, secGot := -1, -1, -1
+	if len(imports) > 0 {
+		secRelaPlt = nextSec()
+		secPlt = nextSec()
+	}
+	secText := nextSec()
+	if len(imports) > 0 {
+		secGot = nextSec()
+	}
+	secDynamic := nextSec()
+	secData := -1
+	if len(o.Data) > 0 {
+		secData = nextSec()
+	}
+	secShstrtab := nextSec()
+	numSec := secIdx
 
 	// --- symbol addresses ----------------------------------------------------
 	// A defined symbol resolves to its link-time address; an import resolves to
@@ -242,13 +327,33 @@ func (o *Object) writeDynImage(im dynImage) ([]byte, error) {
 	// --- section contents ----------------------------------------------------
 	dynsym := &elfBuf{}
 	dynsym.pad(24) // index 0: the null symbol
-	for i := range imports {
-		dynsym.u32(symNameOff[i])
-		dynsym.u8((stbGlobal << 4) | sttFunc)
-		dynsym.u8(0)         // st_other
-		dynsym.u16(shnUndef) // undefined: the loader finds it in a needed library
-		dynsym.u64(0)        // st_value
-		dynsym.u64(0)        // st_size
+	for i, n := range dynNames[1:] {
+		idx := i + 1
+		if idx <= len(imports) {
+			// An import: undefined here, so the loader binds it in a needed library.
+			dynsym.u32(symNameOff[idx])
+			dynsym.u8((stbGlobal << 4) | sttFunc)
+			dynsym.u8(0)
+			dynsym.u16(shnUndef)
+			dynsym.u64(0) // st_value
+			dynsym.u64(0) // st_size
+			continue
+		}
+		// An export: defined here, so publish its address, size, and section.
+		s := o.findSym(n)
+		typ, shndx := byte(sttObject), secData
+		if s.Func {
+			typ = sttFunc
+		}
+		if s.Section == SecText {
+			shndx = secText
+		}
+		dynsym.u32(symNameOff[idx])
+		dynsym.u8((stbGlobal << 4) | typ)
+		dynsym.u8(0)
+		dynsym.u16(uint16(shndx))
+		dynsym.u64(symVaddr[n])
+		dynsym.u64(s.Size)
 	}
 
 	relaDyn := &elfBuf{}
@@ -284,6 +389,9 @@ func (o *Object) writeDynImage(im dynImage) ([]byte, error) {
 	dt := func(tag, val uint64) { dyn.u64(tag); dyn.u64(val) }
 	for _, n := range neededOff {
 		dt(dtNeeded, uint64(n))
+	}
+	if im.soname != "" {
+		dt(dtSoname, uint64(sonameOff))
 	}
 	dt(dtHash, va(hashOff))
 	dt(dtStrTab, va(dynstrOff))
@@ -351,8 +459,69 @@ func (o *Object) writeDynImage(im dynImage) ([]byte, error) {
 	put(dynamicOff, dyn.b)
 	put(dataOff, data)
 
+	// Section headers, so the static linker can link against this image.
+	shstr := &strtab{}
+	secs := make([]dsection, numSec)
+	set := func(i int, name string, typ uint32, flags uint64, off int, size int, link, info int, align, entsize uint64) {
+		if i < 0 {
+			return
+		}
+		secs[i] = dsection{
+			name: shstr.add(name), typ: typ, flags: flags, addr: va(off),
+			off: uint64(off), size: uint64(size), link: uint32(link), info: uint32(info),
+			align: align, entsize: entsize,
+		}
+	}
+	secs[secNull] = dsection{name: shstr.add("")}
+	set(secInterp, ".interp", shtProgbits, shfAlloc, interpOff, len(interp), 0, 0, 1, 0)
+	set(secHash, ".hash", shtHash, shfAlloc, hashOff, len(hash), secDynsym, 0, 8, 4)
+	set(secDynsym, ".dynsym", shtDynsym, shfAlloc, dynsymOff, len(dynsym.b), secDynstr, 1, 8, 24)
+	set(secDynstr, ".dynstr", shtStrtab, shfAlloc, dynstrOff, len(dynstr.b), 0, 0, 1, 0)
+	set(secRelaDyn, ".rela.dyn", shtRela, shfAlloc, relaDynOff, len(relaDyn.b), secDynsym, 0, 8, 24)
+	set(secRelaPlt, ".rela.plt", shtRela, shfAlloc, relaPltOff, len(relaPlt.b), secDynsym, secPlt, 8, 24)
+	set(secPlt, ".plt", shtProgbits, shfAlloc|shfExecinstr, pltOff, len(plt.b), 0, 0, 16, 0)
+	set(secText, ".text", shtProgbits, shfAlloc|shfExecinstr, textOff, len(text), 0, 0, 16, 0)
+	set(secGot, ".got.plt", shtProgbits, shfAlloc|shfWrite, gotOff, len(got.b), 0, 0, 8, 8)
+	set(secDynamic, ".dynamic", shtDynamic, shfAlloc|shfWrite, dynamicOff, ndyn*16, secDynstr, 0, 8, 16)
+	set(secData, ".data", shtProgbits, shfAlloc|shfWrite, dataOff, len(data), 0, 0, 8, 0)
+
+	// .shstrtab is not loaded, so it goes after the image's mapped content.
+	shstrOff := len(out.b)
+	secs[secShstrtab] = dsection{
+		name: shstr.add(".shstrtab"), typ: shtStrtab, off: uint64(shstrOff), align: 1,
+	}
+	secs[secShstrtab].size = uint64(len(shstr.b))
+	out.bytes(shstr.b)
+
+	out.align(8)
+	shoff := len(out.b)
+	for _, s := range secs {
+		out.u32(s.name)
+		out.u32(s.typ)
+		out.u64(s.flags)
+		out.u64(s.addr)
+		out.u64(s.off)
+		out.u64(s.size)
+		out.u32(s.link)
+		out.u32(s.info)
+		out.u64(s.align)
+		out.u64(s.entsize)
+	}
+
 	writeElfHeader(out.b, etype, o.Machine, entry, nph)
+	writeSectionInfo(out.b, uint64(shoff), numSec, secShstrtab)
 	return out.b, nil
+}
+
+// dsection is one section header of a loadable image.
+type dsection struct {
+	name           uint32
+	typ            uint32
+	flags          uint64
+	addr, off      uint64
+	size           uint64
+	link, info     uint32
+	align, entsize uint64
 }
 
 // allRelocs returns every relocation the object carries against .text and .data.
@@ -444,19 +613,64 @@ func relativeType(machine uint16) uint32 {
 	return 0
 }
 
-// sysvHash builds a structurally valid SysV hash table (DT_HASH) covering nsym
-// symbols. The loader reads nchain to size the symbol table; the single bucket is
-// empty because this image exports nothing for others to look up -- its own
-// imports are resolved in the libraries' hash tables, not this one.
-func sysvHash(nsym int) []byte {
-	b := &elfBuf{}
-	b.u32(1)            // nbucket
-	b.u32(uint32(nsym)) // nchain
-	b.u32(0)            // bucket[0] = STN_UNDEF: no exported symbol
-	for i := 0; i < nsym; i++ {
-		b.u32(0) // chain[i]
+// sysvHash builds the SysV hash table (DT_HASH) over a dynamic symbol table,
+// names[i] naming symbol i (names[0] is the null symbol). A lookup hashes the
+// name to a bucket and walks the chain from there, so the table must really work
+// whenever this image exports anything.
+func sysvHash(names []string) []byte {
+	nsym := len(names)
+	nbucket := nsym/2 + 1
+	buckets := make([]uint32, nbucket)
+	chain := make([]uint32, nsym)
+	for i := 1; i < nsym; i++ {
+		b := elfHash(names[i]) % uint32(nbucket)
+		chain[i] = buckets[b] // link to whatever was at the head
+		buckets[b] = uint32(i)
 	}
-	return b.b
+	w := &elfBuf{}
+	w.u32(uint32(nbucket))
+	w.u32(uint32(nsym)) // nchain: also how the loader sizes .dynsym
+	for _, v := range buckets {
+		w.u32(v)
+	}
+	for _, v := range chain {
+		w.u32(v)
+	}
+	return w.b
+}
+
+// elfHash is the SysV symbol hash from the ELF specification.
+func elfHash(name string) uint32 {
+	var h, g uint32
+	for i := 0; i < len(name); i++ {
+		h = (h << 4) + uint32(name[i])
+		g = h & 0xf0000000
+		if g != 0 {
+			h ^= g >> 24
+		}
+		h &^= g
+	}
+	return h
+}
+
+// definesSym reports whether the object defines name.
+func (o *Object) definesSym(name string) bool {
+	for _, s := range o.Syms {
+		if s.Name == name && s.Section != SecUndef {
+			return true
+		}
+	}
+	return false
+}
+
+// findSym returns the object's definition of name (empty if absent).
+func (o *Object) findSym(name string) Sym {
+	for _, s := range o.Syms {
+		if s.Name == name && s.Section != SecUndef {
+			return s
+		}
+	}
+	return Sym{}
 }
 
 // jumpSlot is the machine's PLT-slot relocation type.
