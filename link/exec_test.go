@@ -125,6 +125,16 @@ func TestExecutableReturnsConstant(t *testing.T) {
 	})
 }
 
+// Linking an executable whose entry references an undefined symbol is an error,
+// not a broken binary: a static executable cannot leave a symbol unresolved.
+func TestExecutableUndefinedSymbolErrors(t *testing.T) {
+	l := link.NewWith(arm64.Backend{})
+	require.NoError(t, l.AddModule(moduleMainCallsHelper())) // main calls helper, never provided
+	_, err := l.LinkExecutable("main")
+	require.Error(t, err)
+	require.Contains(t, err.Error(), "helper")
+}
+
 // A cross-module call is resolved into the final executable: main() calls helper()
 // in another module, and the running program returns 42.
 func TestExecutableCrossModuleCall(t *testing.T) {
