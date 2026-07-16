@@ -83,103 +83,7 @@ func sizeOf(w64 bool) int {
 func TestEncodingsMatchAssembler(t *testing.T) {
 	as, objcopy := tools(t)
 
-	cases := []struct {
-		asm  string
-		word uint32
-	}{
-		// add/sub, register and immediate
-		{"add w1, w2, w3", AddReg(false, 1, 2, 3)},
-		{"add x1, x2, x3", AddReg(true, 1, 2, 3)},
-		{"sub x5, x6, x7", SubReg(true, 5, 6, 7)},
-		{"subs x1, x2, x3", SubsReg(true, 1, 2, 3)},
-		{"cmp x9, x10", CmpReg(true, 9, 10)},
-		{"add x1, x2, #5", AddImm(true, 1, 2, 5)},
-		{"add x11, x12, #4095", AddImm(true, 11, 12, 4095)},
-		{"sub w3, w4, #10", SubImm(false, 3, 4, 10)},
-		// logical + mov
-		{"and x1, x2, x3", AndReg(true, 1, 2, 3)},
-		{"orr w4, w5, w6", OrrReg(false, 4, 5, 6)},
-		{"eor x7, x8, x9", EorReg(true, 7, 8, 9)},
-		{"mov x1, x2", MovReg(true, 1, 2)},
-		// move wide
-		{"movz x1, #0x1234", Movz(true, 1, 0x1234, 0)},
-		{"movz x1, #0x1234, lsl #16", Movz(true, 1, 0x1234, 16)},
-		{"movk w2, #0xabcd", Movk(false, 2, 0xabcd, 0)},
-		{"movn x3, #0xff, lsl #32", Movn(true, 3, 0xff, 32)},
-		// div, variable shifts
-		{"udiv x1, x2, x3", Udiv(true, 1, 2, 3)},
-		{"sdiv w4, w5, w6", Sdiv(false, 4, 5, 6)},
-		{"lsl x1, x2, x3", Lslv(true, 1, 2, 3)},
-		{"lsr w4, w5, w6", Lsrv(false, 4, 5, 6)},
-		{"asr x7, x8, x9", Asrv(true, 7, 8, 9)},
-		// multiply
-		{"madd x1, x2, x3, x4", Madd(true, 1, 2, 3, 4)},
-		{"msub w5, w6, w7, w8", Msub(false, 5, 6, 7, 8)},
-		{"mul x1, x2, x3", Mul(true, 1, 2, 3)},
-		// conditional select
-		{"csel x1, x2, x3, eq", Csel(true, 1, 2, 3, EQ)},
-		{"cset w1, ne", Cset(false, 1, NE)},
-		{"cset x2, ge", Cset(true, 2, GE)},
-		// branches to self (offset 0) — validates the opcode
-		{"b .", B(0)},
-		{"bl .", Bl(0)},
-		{"b.eq .", Bcond(EQ, 0)},
-		{"cbz x1, .", Cbz(true, 1, 0)},
-		{"cbnz w2, .", Cbnz(false, 2, 0)},
-		{"ret", Ret(30)},
-		{"br x1", Br(1)},
-		{"blr x2", Blr(2)},
-		{"brk #0", Brk(0)},
-		{"brk #7", Brk(7)},
-		// loads and stores
-		{"str x0, [x1, #8]", StrImm(true, 0, 1, 8)},
-		{"str w2, [x3, #12]", StrImm(false, 2, 3, 12)},
-		{"ldr x4, [x5, #16]", LdrImm(true, 4, 5, 16)},
-		{"ldr w6, [x7, #4]", LdrImm(false, 6, 7, 4)},
-		{"strb w0, [x1]", StrbImm(0, 1, 0)},
-		{"ldrb w2, [x3, #1]", LdrbImm(2, 3, 1)},
-		{"strh w4, [x5, #2]", StrhImm(4, 5, 2)},
-		{"ldrh w6, [x7, #4]", LdrhImm(6, 7, 4)},
-		{"ldrsw x1, [x2, #8]", LdrswImm(1, 2, 8)},
-		// immediate cmp, shifts, rotate
-		{"cmp w1, #16", CmpImm(false, 1, 16)},
-		{"cmp x2, #4095", CmpImm(true, 2, 4095)},
-		{"lsl w1, w2, #7", LslImm(false, 1, 2, 7)},
-		{"lsl x3, x4, #40", LslImm(true, 3, 4, 40)},
-		{"lsr w5, w6, #25", LsrImm(false, 5, 6, 25)},
-		{"lsr x7, x8, #1", LsrImm(true, 7, 8, 1)},
-		{"asr w1, w2, #3", AsrImm(false, 1, 2, 3)},
-		{"asr x3, x4, #10", AsrImm(true, 3, 4, 10)},
-		{"ror w9, w10, #7", RorImm(false, 9, 10, 7)},
-		{"ror x11, x12, #40", RorImm(true, 11, 12, 40)},
-		{"extr w1, w2, w3, #5", Extr(false, 1, 2, 3, 5)},
-		// logical immediates (bitmask encoded)
-		{"and w1, w2, #0xff", andBits(false, 1, 2, 0xff)},
-		{"and x3, x4, #0xffff", andBits(true, 3, 4, 0xffff)},
-		{"orr w5, w6, #0xf0f0f0f0", orrBits(false, 5, 6, 0xf0f0f0f0)},
-		{"eor x7, x8, #0x1", eorBits(true, 7, 8, 0x1)},
-		{"and w9, w10, #0xfffffff8", andBits(false, 9, 10, 0xfffffff8)},
-		// bic / orn / mvn
-		{"bic w1, w2, w3", BicReg(false, 1, 2, 3)},
-		{"bic x4, x5, x6", BicReg(true, 4, 5, 6)},
-		{"orn w7, w8, w9", OrnReg(false, 7, 8, 9)},
-		{"mvn w10, w11", MvnReg(false, 10, 11)},
-		{"mvn x12, x13", MvnReg(true, 12, 13)},
-		// register-offset (indexed) loads and stores
-		{"ldr w1, [x2, w3, sxtw #2]", LdrReg(false, 1, 2, 3, ExtSXTW, 1)},
-		{"ldr w4, [x5, x6, lsl #2]", LdrReg(false, 4, 5, 6, ExtLSL, 1)},
-		{"ldr x7, [x8, x9, lsl #3]", LdrReg(true, 7, 8, 9, ExtLSL, 1)},
-		{"str w1, [x2, w3, sxtw #2]", StrReg(false, 1, 2, 3, ExtSXTW, 1)},
-		{"str w4, [x5, x6, lsl #2]", StrReg(false, 4, 5, 6, ExtLSL, 1)},
-		{"ldrb w1, [x2, w3, sxtw]", LdrbReg(1, 2, 3, ExtSXTW, 0)},
-		{"ldrb w4, [x5, x6]", LdrbReg(4, 5, 6, ExtLSL, 0)},
-		{"strb w1, [x2, w3, sxtw]", StrbReg(1, 2, 3, ExtSXTW, 0)},
-		{"ldrsw x1, [x2, w3, sxtw #2]", LdrswReg(1, 2, 3, ExtSXTW, 1)},
-		{"ldrh w4, [x5, w6, uxtw #1]", LdrhReg(4, 5, 6, ExtUXTW, 1)},
-		// count leading zeros
-		{"clz w1, w2", Clz(false, 1, 2)},
-		{"clz x3, x4", Clz(true, 3, 4)},
-	}
+	cases := encodingCases
 
 	lines := make([]string, len(cases))
 	for i, c := range cases {
@@ -259,67 +163,7 @@ func TestProgramErrors(t *testing.T) {
 func TestMoreEncodingsMatchAssembler(t *testing.T) {
 	as, objcopy := tools(t)
 
-	cases := []struct {
-		asm  string
-		word uint32
-	}{
-		// float arithmetic (single and double)
-		{"fadd s0, s1, s2", Fadd(false, 0, 1, 2)},
-		{"fsub d3, d4, d5", Fsub(true, 3, 4, 5)},
-		{"fmul s6, s7, s8", Fmul(false, 6, 7, 8)},
-		{"fdiv d0, d1, d2", Fdiv(true, 0, 1, 2)},
-		{"fneg s0, s1", Fneg(false, 0, 1)},
-		{"fneg d2, d3", Fneg(true, 2, 3)},
-		{"fmov s0, s1", FmovReg(false, 0, 1)},
-		{"fmov d4, d5", FmovReg(true, 4, 5)},
-		{"fcvt d0, s1", FcvtStoD(0, 1)},
-		{"fcvt s2, d3", FcvtDtoS(2, 3)},
-		{"fcmp s0, s1", Fcmp(false, 0, 1)},
-		{"fcmp d2, d3", Fcmp(true, 2, 3)},
-		// FP <-> integer
-		{"fcvtzs w0, s1", Fcvtzs(false, false, 0, 1)},
-		{"fcvtzs x2, d3", Fcvtzs(true, true, 2, 3)},
-		{"fcvtzu w4, s5", Fcvtzu(false, false, 4, 5)},
-		{"scvtf s0, w1", Scvtf(false, false, 0, 1)},
-		{"scvtf d2, x3", Scvtf(true, true, 2, 3)},
-		{"ucvtf s4, w5", Ucvtf(false, false, 4, 5)},
-		{"fmov s0, w1", FmovFromGP(false, 0, 1)},
-		{"fmov d2, x3", FmovFromGP(true, 2, 3)},
-		{"fmov w0, s1", FmovToGP(false, 0, 1)},
-		{"fmov x2, d3", FmovToGP(true, 2, 3)},
-		// FP loads/stores
-		{"str s0, [x1, #4]", StrFP(false, 0, 1, 4)},
-		{"ldr d2, [x3, #8]", LdrFP(true, 2, 3, 8)},
-		{"str q0, [x1]", StrQ(0, 1, 0)},
-		{"ldr q2, [x3, #16]", LdrQ(2, 3, 16)},
-		{"mov v0.16b, v1.16b", MovVec16b(0, 1)},
-		// load/store pairs
-		{"stp x29, x30, [sp, #-16]!", Stp(true, 29, 30, SP, -16, PreIndex)},
-		{"ldp x29, x30, [sp], #16", Ldp(true, 29, 30, SP, 16, PostIndex)},
-		{"stp x0, x1, [x2, #16]", Stp(true, 0, 1, 2, 16, SignedOffset)},
-		{"stp w3, w4, [x5, #8]", Stp(false, 3, 4, 5, 8, SignedOffset)},
-		// signed sub-word loads
-		{"ldrsb w0, [x1]", LdrsbImm(false, 0, 1, 0)},
-		{"ldrsb x2, [x3, #1]", LdrsbImm(true, 2, 3, 1)},
-		{"ldrsh w4, [x5, #2]", LdrshImm(false, 4, 5, 2)},
-		// address, shifted immediate
-		{"adrp x0, .", Adrp(0, 0)},
-		{"adr x0, .", Adr(0, 0)},
-		{"add sp, sp, #1, lsl #12", AddImmLSL12(true, SP, SP, 1)},
-		{"sub x0, x1, #2, lsl #12", SubImmLSL12(true, 0, 1, 2)},
-		// extends
-		{"sxtb w0, w1", Sxtb(false, 0, 1)},
-		{"sxtb x2, w3", Sxtb(true, 2, 3)},
-		{"sxth w4, w5", Sxth(false, 4, 5)},
-		{"sxtw x6, w7", Sxtw(6, 7)},
-		{"uxtb w0, w1", Uxtb(0, 1)},
-		{"uxth w2, w3", Uxth(2, 3)},
-		{"neg x0, x1", NegReg(true, 0, 1)},
-		{"add x0, x1, w2, sxtw", AddExtSxtw(0, 1, 2)},
-		{"add x5, x9, w10, sxtw", AddExtSxtw(5, 9, 10)},
-		{"mrs x0, tpidr_el0", MrsTPIDR(0)},
-		{"mrs x5, tpidr_el0", MrsTPIDR(5)},
-	}
+	cases := moreEncodingCases
 
 	lines := make([]string, len(cases))
 	for i, c := range cases {
@@ -380,4 +224,147 @@ func TestProgramDataWord(t *testing.T) {
 	require.NoError(t, err)
 	assert.Equal(t, int32(-8), int32(binary.LittleEndian.Uint32(got[8:12])))
 	assert.Equal(t, int32(12), int32(binary.LittleEndian.Uint32(got[12:16])))
+}
+
+// encodingCase pairs a line of assembly with the word our encoder produces for
+// it. The assembler validates the encoder against these; the disassembler is
+// checked against the same pairs read the other way, so one set of facts holds
+// both directions honest.
+type encodingCase struct {
+	asm  string
+	word uint32
+}
+
+var encodingCases = []encodingCase{
+	{"add w1, w2, w3", AddReg(false, 1, 2, 3)},
+	{"add x1, x2, x3", AddReg(true, 1, 2, 3)},
+	{"sub x5, x6, x7", SubReg(true, 5, 6, 7)},
+	{"subs x1, x2, x3", SubsReg(true, 1, 2, 3)},
+	{"cmp x9, x10", CmpReg(true, 9, 10)},
+	{"add x1, x2, #5", AddImm(true, 1, 2, 5)},
+	{"add x11, x12, #4095", AddImm(true, 11, 12, 4095)},
+	{"sub w3, w4, #10", SubImm(false, 3, 4, 10)},
+	{"and x1, x2, x3", AndReg(true, 1, 2, 3)},
+	{"orr w4, w5, w6", OrrReg(false, 4, 5, 6)},
+	{"eor x7, x8, x9", EorReg(true, 7, 8, 9)},
+	{"mov x1, x2", MovReg(true, 1, 2)},
+	{"movz x1, #0x1234", Movz(true, 1, 0x1234, 0)},
+	{"movz x1, #0x1234, lsl #16", Movz(true, 1, 0x1234, 16)},
+	{"movk w2, #0xabcd", Movk(false, 2, 0xabcd, 0)},
+	{"movn x3, #0xff, lsl #32", Movn(true, 3, 0xff, 32)},
+	{"udiv x1, x2, x3", Udiv(true, 1, 2, 3)},
+	{"sdiv w4, w5, w6", Sdiv(false, 4, 5, 6)},
+	{"lsl x1, x2, x3", Lslv(true, 1, 2, 3)},
+	{"lsr w4, w5, w6", Lsrv(false, 4, 5, 6)},
+	{"asr x7, x8, x9", Asrv(true, 7, 8, 9)},
+	{"madd x1, x2, x3, x4", Madd(true, 1, 2, 3, 4)},
+	{"msub w5, w6, w7, w8", Msub(false, 5, 6, 7, 8)},
+	{"mul x1, x2, x3", Mul(true, 1, 2, 3)},
+	{"csel x1, x2, x3, eq", Csel(true, 1, 2, 3, EQ)},
+	{"cset w1, ne", Cset(false, 1, NE)},
+	{"cset x2, ge", Cset(true, 2, GE)},
+	{"b .", B(0)},
+	{"bl .", Bl(0)},
+	{"b.eq .", Bcond(EQ, 0)},
+	{"cbz x1, .", Cbz(true, 1, 0)},
+	{"cbnz w2, .", Cbnz(false, 2, 0)},
+	{"ret", Ret(30)},
+	{"br x1", Br(1)},
+	{"blr x2", Blr(2)},
+	{"brk #0", Brk(0)},
+	{"brk #7", Brk(7)},
+	{"str x0, [x1, #8]", StrImm(true, 0, 1, 8)},
+	{"str w2, [x3, #12]", StrImm(false, 2, 3, 12)},
+	{"ldr x4, [x5, #16]", LdrImm(true, 4, 5, 16)},
+	{"ldr w6, [x7, #4]", LdrImm(false, 6, 7, 4)},
+	{"strb w0, [x1]", StrbImm(0, 1, 0)},
+	{"ldrb w2, [x3, #1]", LdrbImm(2, 3, 1)},
+	{"strh w4, [x5, #2]", StrhImm(4, 5, 2)},
+	{"ldrh w6, [x7, #4]", LdrhImm(6, 7, 4)},
+	{"ldrsw x1, [x2, #8]", LdrswImm(1, 2, 8)},
+	{"cmp w1, #16", CmpImm(false, 1, 16)},
+	{"cmp x2, #4095", CmpImm(true, 2, 4095)},
+	{"lsl w1, w2, #7", LslImm(false, 1, 2, 7)},
+	{"lsl x3, x4, #40", LslImm(true, 3, 4, 40)},
+	{"lsr w5, w6, #25", LsrImm(false, 5, 6, 25)},
+	{"lsr x7, x8, #1", LsrImm(true, 7, 8, 1)},
+	{"asr w1, w2, #3", AsrImm(false, 1, 2, 3)},
+	{"asr x3, x4, #10", AsrImm(true, 3, 4, 10)},
+	{"ror w9, w10, #7", RorImm(false, 9, 10, 7)},
+	{"ror x11, x12, #40", RorImm(true, 11, 12, 40)},
+	{"extr w1, w2, w3, #5", Extr(false, 1, 2, 3, 5)},
+	{"and w1, w2, #0xff", andBits(false, 1, 2, 0xff)},
+	{"and x3, x4, #0xffff", andBits(true, 3, 4, 0xffff)},
+	{"orr w5, w6, #0xf0f0f0f0", orrBits(false, 5, 6, 0xf0f0f0f0)},
+	{"eor x7, x8, #0x1", eorBits(true, 7, 8, 0x1)},
+	{"and w9, w10, #0xfffffff8", andBits(false, 9, 10, 0xfffffff8)},
+	{"bic w1, w2, w3", BicReg(false, 1, 2, 3)},
+	{"bic x4, x5, x6", BicReg(true, 4, 5, 6)},
+	{"orn w7, w8, w9", OrnReg(false, 7, 8, 9)},
+	{"mvn w10, w11", MvnReg(false, 10, 11)},
+	{"mvn x12, x13", MvnReg(true, 12, 13)},
+	{"ldr w1, [x2, w3, sxtw #2]", LdrReg(false, 1, 2, 3, ExtSXTW, 1)},
+	{"ldr w4, [x5, x6, lsl #2]", LdrReg(false, 4, 5, 6, ExtLSL, 1)},
+	{"ldr x7, [x8, x9, lsl #3]", LdrReg(true, 7, 8, 9, ExtLSL, 1)},
+	{"str w1, [x2, w3, sxtw #2]", StrReg(false, 1, 2, 3, ExtSXTW, 1)},
+	{"str w4, [x5, x6, lsl #2]", StrReg(false, 4, 5, 6, ExtLSL, 1)},
+	{"ldrb w1, [x2, w3, sxtw]", LdrbReg(1, 2, 3, ExtSXTW, 0)},
+	{"ldrb w4, [x5, x6]", LdrbReg(4, 5, 6, ExtLSL, 0)},
+	{"strb w1, [x2, w3, sxtw]", StrbReg(1, 2, 3, ExtSXTW, 0)},
+	{"ldrsw x1, [x2, w3, sxtw #2]", LdrswReg(1, 2, 3, ExtSXTW, 1)},
+	{"ldrh w4, [x5, w6, uxtw #1]", LdrhReg(4, 5, 6, ExtUXTW, 1)},
+	{"clz w1, w2", Clz(false, 1, 2)},
+	{"clz x3, x4", Clz(true, 3, 4)},
+}
+
+var moreEncodingCases = []encodingCase{
+	{"fadd s0, s1, s2", Fadd(false, 0, 1, 2)},
+	{"fsub d3, d4, d5", Fsub(true, 3, 4, 5)},
+	{"fmul s6, s7, s8", Fmul(false, 6, 7, 8)},
+	{"fdiv d0, d1, d2", Fdiv(true, 0, 1, 2)},
+	{"fneg s0, s1", Fneg(false, 0, 1)},
+	{"fneg d2, d3", Fneg(true, 2, 3)},
+	{"fmov s0, s1", FmovReg(false, 0, 1)},
+	{"fmov d4, d5", FmovReg(true, 4, 5)},
+	{"fcvt d0, s1", FcvtStoD(0, 1)},
+	{"fcvt s2, d3", FcvtDtoS(2, 3)},
+	{"fcmp s0, s1", Fcmp(false, 0, 1)},
+	{"fcmp d2, d3", Fcmp(true, 2, 3)},
+	{"fcvtzs w0, s1", Fcvtzs(false, false, 0, 1)},
+	{"fcvtzs x2, d3", Fcvtzs(true, true, 2, 3)},
+	{"fcvtzu w4, s5", Fcvtzu(false, false, 4, 5)},
+	{"scvtf s0, w1", Scvtf(false, false, 0, 1)},
+	{"scvtf d2, x3", Scvtf(true, true, 2, 3)},
+	{"ucvtf s4, w5", Ucvtf(false, false, 4, 5)},
+	{"fmov s0, w1", FmovFromGP(false, 0, 1)},
+	{"fmov d2, x3", FmovFromGP(true, 2, 3)},
+	{"fmov w0, s1", FmovToGP(false, 0, 1)},
+	{"fmov x2, d3", FmovToGP(true, 2, 3)},
+	{"str s0, [x1, #4]", StrFP(false, 0, 1, 4)},
+	{"ldr d2, [x3, #8]", LdrFP(true, 2, 3, 8)},
+	{"str q0, [x1]", StrQ(0, 1, 0)},
+	{"ldr q2, [x3, #16]", LdrQ(2, 3, 16)},
+	{"mov v0.16b, v1.16b", MovVec16b(0, 1)},
+	{"stp x29, x30, [sp, #-16]!", Stp(true, 29, 30, SP, -16, PreIndex)},
+	{"ldp x29, x30, [sp], #16", Ldp(true, 29, 30, SP, 16, PostIndex)},
+	{"stp x0, x1, [x2, #16]", Stp(true, 0, 1, 2, 16, SignedOffset)},
+	{"stp w3, w4, [x5, #8]", Stp(false, 3, 4, 5, 8, SignedOffset)},
+	{"ldrsb w0, [x1]", LdrsbImm(false, 0, 1, 0)},
+	{"ldrsb x2, [x3, #1]", LdrsbImm(true, 2, 3, 1)},
+	{"ldrsh w4, [x5, #2]", LdrshImm(false, 4, 5, 2)},
+	{"adrp x0, .", Adrp(0, 0)},
+	{"adr x0, .", Adr(0, 0)},
+	{"add sp, sp, #1, lsl #12", AddImmLSL12(true, SP, SP, 1)},
+	{"sub x0, x1, #2, lsl #12", SubImmLSL12(true, 0, 1, 2)},
+	{"sxtb w0, w1", Sxtb(false, 0, 1)},
+	{"sxtb x2, w3", Sxtb(true, 2, 3)},
+	{"sxth w4, w5", Sxth(false, 4, 5)},
+	{"sxtw x6, w7", Sxtw(6, 7)},
+	{"uxtb w0, w1", Uxtb(0, 1)},
+	{"uxth w2, w3", Uxth(2, 3)},
+	{"neg x0, x1", NegReg(true, 0, 1)},
+	{"add x0, x1, w2, sxtw", AddExtSxtw(0, 1, 2)},
+	{"add x5, x9, w10, sxtw", AddExtSxtw(5, 9, 10)},
+	{"mrs x0, tpidr_el0", MrsTPIDR(0)},
+	{"mrs x5, tpidr_el0", MrsTPIDR(5)},
 }
