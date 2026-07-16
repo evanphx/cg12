@@ -1237,72 +1237,9 @@ func (m *mc) instr(in *ir.Instr) {
 		return
 	case ir.OCopy, ir.OPar, ir.OArg:
 		m.copy(in)
-	case ir.OAdd:
-		if in.Cls.IsFloat() {
-			m.binFP(in, a64.AddReg, a64.Fadd)
-		} else {
-			m.addSub(in, false)
-		}
-	case ir.OSub:
-		if in.Cls.IsFloat() {
-			m.binFP(in, a64.SubReg, a64.Fsub)
-		} else {
-			m.addSub(in, true)
-		}
-	case ir.OMul:
-		m.binFP(in, func(w bool, d, n, mm a64.Reg) uint32 { return a64.Mul(w, d, n, mm) }, a64.Fmul)
-	case ir.ODiv:
-		m.binFP(in, a64.Sdiv, a64.Fdiv)
-	case ir.OUDiv:
-		m.binInt(in, a64.Udiv)
-	case ir.OAnd:
-		m.logical(in, a64.AndReg, a64.AndImm)
-	case ir.OOr:
-		m.logical(in, a64.OrrReg, a64.OrrImm)
-	case ir.OXor:
-		if !m.tryMvn(in) {
-			m.logical(in, a64.EorReg, a64.EorImm)
-		}
-	case ir.OBic:
-		m.binInt(in, a64.BicReg)
-	case ir.OClz:
-		sz := in.Cls.Size()
-		s := m.src(in.Args[0], 1, sz)
-		d, done := m.dst(in.To, sz)
-		m.emit(a64.Clz(sz == 8, d, s))
-		done()
-	case ir.OShl:
-		m.shift(in, a64.Lslv, a64.LslImm)
-	case ir.OShr:
-		m.shift(in, a64.Lsrv, a64.LsrImm)
-	case ir.OSar:
-		m.shift(in, a64.Asrv, a64.AsrImm)
-	case ir.ORotr:
-		sz := in.Cls.Size()
-		v, _ := intConst(m.f, in.Args[1])
-		s := m.src(in.Args[0], 0, sz)
-		d, done := m.dst(in.To, sz)
-		m.emit(a64.RorImm(sz == 8, d, s, uint32(v)))
-		done()
-	case ir.ORem:
-		m.rem(in, a64.Sdiv)
-	case ir.OURem:
-		m.rem(in, a64.Udiv)
-	case ir.ONeg:
-		s := m.src(in.Args[0], 1, in.Cls.Size())
-		d, done := m.dst(in.To, in.Cls.Size())
-		if in.Cls.IsFloat() {
-			m.emit(a64.Fneg(in.Cls.Size() == 8, d, s))
-		} else {
-			m.emit(a64.NegReg(in.Cls.Size() == 8, d, s))
-		}
-		done()
-	case ir.OCmp:
-		m.cmp(in)
-	case ir.OExtsb, ir.OExtub, ir.OExtsh, ir.OExtuh, ir.OExtsw, ir.OExtuw:
-		m.extend(in)
-	case ir.OExts, ir.OTruncd, ir.OStosi, ir.OStoui, ir.OSltof, ir.OUltof, ir.OCast:
-		m.conv(in)
+	// The data-processing, compare, conversion, extend, and load/store
+	// instructions are selected by the shared builder (selectData) before this
+	// switch is reached.
 	case ir.OCall:
 		if in.Tail {
 			m.tailBranch(in)

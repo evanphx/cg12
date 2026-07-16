@@ -418,87 +418,11 @@ func (e *emitter) emitInstr(b *ir.Block, in *ir.Instr) {
 	switch in.Op {
 	case ir.ONop:
 		return
-	case ir.OAdd:
-		if in.Cls.IsFloat() {
-			e.binop("fadd", in, sz)
-		} else {
-			e.addSubImm(in, false, sz)
-		}
-	case ir.OSub:
-		if in.Cls.IsFloat() {
-			e.binop("fsub", in, sz)
-		} else {
-			e.addSubImm(in, true, sz)
-		}
-	case ir.OMul:
-		e.binop(fltMn(in.Cls, "mul", "fmul"), in, sz)
-	case ir.ODiv:
-		e.binop(fltMn(in.Cls, "sdiv", "fdiv"), in, sz)
-	case ir.OUDiv:
-		e.binop("udiv", in, sz)
-	case ir.OAnd:
-		e.logicalImm(in, "and", sz)
-	case ir.OOr:
-		e.logicalImm(in, "orr", sz)
-	case ir.OXor:
-		if !e.tryMvn(in, sz) {
-			e.logicalImm(in, "eor", sz)
-		}
-	case ir.OBic:
-		e.binop("bic", in, sz)
-	case ir.OClz:
-		s := e.srcReg(in.Args[0], 1, sz)
-		d, done := e.dstReg(in.To, sz)
-		e.line("clz %s, %s", d, s)
-		done()
-	case ir.OShl:
-		e.shiftImm(in, "lsl", sz)
-	case ir.OShr:
-		e.shiftImm(in, "lsr", sz)
-	case ir.OSar:
-		e.shiftImm(in, "asr", sz)
-	case ir.ORotr:
-		e.rotrImm(in, sz)
-	case ir.ORem:
-		e.remop("sdiv", in, sz)
-	case ir.OURem:
-		e.remop("udiv", in, sz)
-	case ir.ONeg:
-		s := e.srcReg(in.Args[0], 1, sz)
-		d, done := e.dstReg(in.To, sz)
-		e.line("%s %s, %s", fltMn(in.Cls, "neg", "fneg"), d, s)
-		done()
+	// The data-processing, compare, conversion, extend, and load/store
+	// instructions are selected by the shared builder (selectData) before this
+	// switch is reached.
 	case ir.OCopy, ir.OPar, ir.OArg:
 		e.emitCopy(in, sz)
-	case ir.OCmp:
-		e.emitCmp(in)
-	case ir.OExtsb:
-		e.emitConv("sxtb", in)
-	case ir.OExtub:
-		e.emitConv("uxtb", in)
-	case ir.OExtsh:
-		e.emitConv("sxth", in)
-	case ir.OExtuh:
-		e.emitConv("uxth", in)
-	case ir.OExtsw:
-		e.emitConv("sxtw", in)
-	case ir.OExtuw:
-		// Writing a W register zero-extends into its X register.
-		e.emitConvSz("mov", in, 4, 4)
-	case ir.OExts:
-		e.emitConv("fcvt", in)
-	case ir.OTruncd:
-		e.emitConv("fcvt", in)
-	case ir.OStosi:
-		e.emitConv("fcvtzs", in)
-	case ir.OStoui:
-		e.emitConv("fcvtzu", in)
-	case ir.OSltof:
-		e.emitConv("scvtf", in)
-	case ir.OUltof:
-		e.emitConv("ucvtf", in)
-	case ir.OCast:
-		e.emitConv("fmov", in)
 	case ir.OCall:
 		if in.Tail { // an argument-less tail call reaches here directly
 			e.emitTailBranch(in)
