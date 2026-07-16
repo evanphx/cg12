@@ -527,19 +527,6 @@ func (e *emitter) term(b *ir.Block) {
 	switch b.Jmp.Kind {
 	case ir.JmpRet:
 		e.epilogue()
-	case ir.JmpTable:
-		// Indexed branch through a PC-relative offset table (see the machine-code
-		// emitter). The assembler computes each entry as (case - table).
-		idx := e.gpValue(b.Jmp.Arg, gpScratch1)
-		tbl := e.blabel(b) + "_tbl"
-		e.line("leaq %s(%%rip), %s", tbl, gpn(gpScratch0, 8))
-		e.line("movslq (%s,%s,4), %s", gpn(gpScratch0, 8), gpn(idx, 8), gpn(gpScratch1, 8))
-		e.line("addq %s, %s", gpn(gpScratch1, 8), gpn(gpScratch0, 8))
-		e.line("jmp *%s", gpn(gpScratch0, 8))
-		e.line("%s:", tbl)
-		for _, t := range b.Jmp.Targets {
-			e.line(".long %s - %s", e.blabel(t), tbl)
-		}
 	default:
 		panic(fmt.Sprintf("amd64: block %q has an unsupported terminator %d", b.Name, b.Jmp.Kind))
 	}

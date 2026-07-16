@@ -155,9 +155,9 @@ func (s *xsel) selectInt(in *ir.Instr) bool {
 	return true
 }
 
-// term selects a block terminator through the builder, handling the simple
-// branch forms. It returns false for the return and jump-table terminators,
-// which stay on each emitter's own path (frame epilogue and PC-relative table).
+// term selects a block terminator through the builder, handling the branch forms
+// and the jump table. It returns false only for the return terminator, which
+// stays on each emitter's own path because it drives the frame epilogue.
 func (s *xsel) term(b *ir.Block) bool {
 	switch b.Jmp.Kind {
 	case ir.JmpJmp:
@@ -169,6 +169,8 @@ func (s *xsel) term(b *ir.Block) bool {
 		s.b.hlt()
 	case ir.JmpBr:
 		s.b.jmpReg(s.gpValue(b.Jmp.Arg, gpScratch0))
+	case ir.JmpTable:
+		s.b.jmpTable(s.gpValue(b.Jmp.Arg, gpScratch1), b, b.Jmp.Targets)
 	default:
 		return false
 	}

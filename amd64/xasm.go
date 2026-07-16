@@ -53,6 +53,11 @@ type xasm interface {
 	// blockAddrLea materializes a block's RIP-relative address into dst (&&label).
 	blockAddrLea(dst Reg, blk *ir.Block)
 
+	// jmpTable emits an indexed branch through a PC-relative offset table placed
+	// just past the branch: target = table + (int32)table[idx]. idx is already
+	// bounds-checked. R10/R11 are free scratch at a terminator.
+	jmpTable(idx Reg, blk *ir.Block, targets []*ir.Block)
+
 	// Floating point: two-operand arithmetic (dst = dst OP src), register move,
 	// sign-flip negation, and a compare that sets the boolean result.
 	binFP(op ir.Op, dbl bool, dst, src Reg)
@@ -204,6 +209,17 @@ func (b *mcXasm) jmpReg(r Reg) { b.m.emit(x64.JmpReg(r.mreg())) }
 func (b *mcXasm) hlt()         { b.m.emit(x64.Ud2()) }
 func (b *mcXasm) blockAddrLea(dst Reg, blk *ir.Block) {
 	b.m.prog.LeaLabel(true, dst.mreg(), blk.Name)
+}
+func (b *mcXasm) jmpTable(idx Reg, blk *ir.Block, targets []*ir.Block) {
+	tbl := blk.Name + ".tbl"
+	b.m.prog.LeaLabel(true, gpScratch0.mreg(), tbl) // lea R10, [rip+tbl]
+	b.m.emit(x64.MovsxdLoad(gpScratch1.mreg(), x64.Mem{Base: gpScratch0.mreg(), Index: idx.mreg(), Scale: 4, HasIndex: true}))
+	b.m.emit(x64.AddReg(true, gpScratch0.mreg(), gpScratch1.mreg())) // add R10, R11
+	b.m.emit(x64.JmpReg(gpScratch0.mreg()))                          // jmp *R10
+	b.m.prog.Label(tbl)
+	for _, t := range targets {
+		b.m.prog.DataWord(t.Name, tbl) // .long t - tbl
+	}
 }
 func (b *mcXasm) divGP(w, signed bool, divisor Reg) {
 	if signed {
@@ -461,6 +477,17 @@ func (b *textXasm) jmpReg(r Reg) { b.e.line("jmp *%s", gpn(r, 8)) }
 func (b *textXasm) hlt()         { b.e.line("ud2") }
 func (b *textXasm) blockAddrLea(dst Reg, blk *ir.Block) {
 	b.e.line("leaq %s(%%rip), %s", b.e.blabel(blk), gpn(dst, 8))
+}
+func (b *textXasm) jmpTable(idx Reg, blk *ir.Block, targets []*ir.Block) {
+	tbl := b.e.blabel(blk) + "_tbl"
+	b.e.line("leaq %s(%%rip), %s", tbl, gpn(gpScratch0, 8))
+	b.e.line("movslq (%s,%s,4), %s", gpn(gpScratch0, 8), gpn(idx, 8), gpn(gpScratch1, 8))
+	b.e.line("addq %s, %s", gpn(gpScratch1, 8), gpn(gpScratch0, 8))
+	b.e.line("jmp *%s", gpn(gpScratch0, 8))
+	b.e.line("%s:", tbl)
+	for _, t := range targets {
+		b.e.line(".long %s - %s", b.e.blabel(t), tbl)
+	}
 }
 func (b *textXasm) divGP(w, signed bool, divisor Reg) {
 	sz := clsSizeW(w)
