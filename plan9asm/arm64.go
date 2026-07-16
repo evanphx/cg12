@@ -83,6 +83,8 @@ func (t *arm64Translator) translateInstruction(instruction *Instruction) error {
 	switch opcode {
 	case "MOVD", "MOVW", "MOVWU", "MOVH", "MOVHU", "MOVB", "MOVBU":
 		return t.translateMove(instruction)
+	case "FMOVD":
+		return t.translateFloatMove(instruction)
 	case "VMOV":
 		return t.translateVectorMove(instruction)
 	case "VLD1", "VLD1R", "VLD4R":
@@ -121,7 +123,7 @@ func (t *arm64Translator) translateInstruction(instruction *Instruction) error {
 		return t.translateReverse(instruction)
 	case "UBFX", "UBFXW", "SBFX", "SBFXW":
 		return t.translateBitfieldExtract(instruction)
-	case "B", "BL", "BEQ", "BNE", "BCS", "BCC", "BHS", "BLO", "BMI", "BPL", "BVS", "BVC", "BHI", "BLS", "BGE", "BLT", "BGT", "BLE":
+	case "B", "JMP", "BL", "BEQ", "BNE", "BCS", "BCC", "BHS", "BLO", "BMI", "BPL", "BVS", "BVC", "BHI", "BLS", "BGE", "BLT", "BGT", "BLE":
 		return t.translateBranch(instruction)
 	case "CBZ", "CBZW", "CBNZ", "CBNZW":
 		return t.translateCompareBranch(instruction)
@@ -165,6 +167,23 @@ func (t *arm64Translator) translateInstruction(instruction *Instruction) error {
 	default:
 		return fmt.Errorf("unsupported ARM64 instruction %s", opcode)
 	}
+}
+
+func (t *arm64Translator) translateFloatMove(instruction *Instruction) error {
+	if len(instruction.Operands) != 2 {
+		return fmt.Errorf("FMOVD requires a source and destination")
+	}
+	source := instruction.Operands[0]
+	destination := instruction.Operands[1]
+	if source.Kind != OperandRegister || source.Register != "ZR" || destination.Kind != OperandRegister || !strings.HasPrefix(destination.Register, "F") {
+		return fmt.Errorf("unsupported FMOVD operands %q, %q", source.Text, destination.Text)
+	}
+	number, err := strconv.Atoi(strings.TrimPrefix(destination.Register, "F"))
+	if err != nil || number < 0 || number > 31 {
+		return fmt.Errorf("unsupported floating-point register %s", destination.Register)
+	}
+	fmt.Fprintf(&t.output, "\tfmov d%d, xzr\n", number)
+	return nil
 }
 
 func (t *arm64Translator) translateMove(instruction *Instruction) error {
@@ -593,7 +612,7 @@ func (t *arm64Translator) translateBranch(instruction *Instruction) error {
 	}
 	mnemonic := branchMnemonic(instruction.Opcode)
 	target := t.branchTarget(instruction.Operands[0])
-	if t.currentABI0 && !t.currentDirectABI0 && instruction.Opcode == "B" {
+	if t.currentABI0 && !t.currentDirectABI0 && (instruction.Opcode == "B" || instruction.Opcode == "JMP") {
 		if symbol, ok := operandSymbol(instruction.Operands[0]); ok && !symbol.Static && symbol.ABI == "" {
 			target = abi0Symbol(t.symbol(symbol))
 		}

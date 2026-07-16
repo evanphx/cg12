@@ -59,6 +59,8 @@ handwritten atomic primitives. Its conditional LSE paths, exclusive-access
 fallbacks, and generated `go_asm.h` offset constants are compiled directly;
 eligible leaf ABI0 routines use a direct register adapter so runtime atomics do
 not acquire an extra call frame.
+`runtime/secret_arm64.s` now supplies the register-erasure path as well,
+including all integer and SIMD register clears from the standard source.
 Unsupported files are kept out of the build until the translator accepts every
 construct they contain.
 

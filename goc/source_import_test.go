@@ -76,7 +76,7 @@ func TestLoadExactStandardRuntimeSource(t *testing.T) {
 	for _, file := range unit.assembly {
 		assembly[filepath.Base(file.path)] = file.source
 	}
-	for _, name := range []string{"atomic_arm64.s", "memclr_arm64.s", "memmove_arm64.s"} {
+	for _, name := range []string{"atomic_arm64.s", "memclr_arm64.s", "memmove_arm64.s", "secret_arm64.s"} {
 		got, ok := assembly[name]
 		if !ok {
 			t.Errorf("runtime assembly %s was not retained", name)

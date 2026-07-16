@@ -282,11 +282,6 @@ runtime_walltime:
 	add sp, sp, 32
 	ret
 
-.global runtime_secretEraseRegisters
-.type runtime_secretEraseRegisters, %function
-runtime_secretEraseRegisters:
-	ret
-
 .global internal_abi_FuncPCABI0
 .type internal_abi_FuncPCABI0, %function
 internal_abi_FuncPCABI0:

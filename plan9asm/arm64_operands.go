@@ -193,7 +193,7 @@ func aluMnemonic(opcode string) string {
 
 func branchMnemonic(opcode string) string {
 	switch opcode {
-	case "B":
+	case "B", "JMP":
 		return "b"
 	case "BL":
 		return "bl"

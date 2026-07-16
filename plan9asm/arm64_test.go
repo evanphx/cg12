@@ -191,6 +191,26 @@ TEXT ·Load(SB), NOSPLIT, $0-12
 	assert.Equal(t, "internal_runtime_atomic_Load", translation.Functions[0].Name)
 }
 
+func TestTranslateExactRuntimeSecretEraseRegisters(t *testing.T) {
+	path := filepath.Join("..", "stdlib", "src", "runtime", "secret_arm64.s")
+	source, err := os.ReadFile(path)
+	require.NoError(t, err)
+	file, err := Parse(bytes.NewReader(source))
+	require.NoError(t, err)
+	translation, err := CompileARM64(file, ARM64Options{
+		PackagePath:      "runtime",
+		Filename:         "secret_arm64.s",
+		PreferDirectABI0: true,
+	})
+	require.NoError(t, err)
+
+	require.Len(t, translation.Functions, 2)
+	assert.NotContains(t, translation.Assembly, "_abi0")
+	assert.Contains(t, translation.Assembly, "\tb runtime_secretEraseRegistersMcall")
+	assert.Contains(t, translation.Assembly, "\tfmov d0, xzr")
+	assert.Contains(t, translation.Assembly, "\tfmov d31, xzr")
+}
+
 func TestTranslateExactChacha8FrameAndReadOnlyData(t *testing.T) {
 	path := filepath.Join("..", "stdlib", "src", "internal", "chacha8rand", "chacha8_arm64.s")
 	source, err := os.ReadFile(path)
@@ -221,6 +241,7 @@ func TestTranslateExactChacha8FrameAndReadOnlyData(t *testing.T) {
 
 func TestSupportsARM64FileKeepsTargetPolicyWithTranslator(t *testing.T) {
 	assert.True(t, SupportsARM64File("runtime", "memmove_arm64.s"))
+	assert.True(t, SupportsARM64File("runtime", "secret_arm64.s"))
 	assert.True(t, SupportsARM64File("internal/bytealg", "compare_arm64.s"))
 	assert.True(t, SupportsARM64File("internal/bytealg", "index_arm64.s"))
 	assert.True(t, SupportsARM64File("internal/cpu", "cpu_arm64.s"))
@@ -251,6 +272,7 @@ func TestTranslateExactRuntimeARM64FilesAssemble(t *testing.T) {
 		{packagePath: "runtime", name: "atomic_arm64.s"},
 		{packagePath: "runtime", name: "memclr_arm64.s"},
 		{packagePath: "runtime", name: "memmove_arm64.s"},
+		{packagePath: "runtime", name: "secret_arm64.s"},
 		{packagePath: "internal/bytealg", name: "compare_arm64.s"},
 		{packagePath: "internal/bytealg", name: "count_arm64.s"},
 		{packagePath: "internal/bytealg", name: "equal_arm64.s"},
@@ -280,5 +302,94 @@ func TestTranslateExactRuntimeARM64FilesAssemble(t *testing.T) {
 	require.NoError(t, os.WriteFile(sourcePath, assembly.Bytes(), 0o644))
 	command := exec.Command(cc, "-c", "-o", objectPath, sourcePath)
 	output, err := command.CombinedOutput()
+	require.NoError(t, err, "%s", output)
+}
+
+func TestExecuteExactRuntimeSecretEraseRegisters(t *testing.T) {
+	if runtime.GOARCH != "arm64" {
+		t.Skip("AArch64 execution is required")
+	}
+	cc, err := exec.LookPath("cc")
+	if err != nil {
+		t.Skip("cc is unavailable")
+	}
+
+	path := filepath.Join("..", "stdlib", "src", "runtime", "secret_arm64.s")
+	source, err := os.ReadFile(path)
+	require.NoError(t, err)
+	file, err := Parse(bytes.NewReader(source))
+	require.NoError(t, err)
+	translation, err := CompileARM64(file, ARM64Options{
+		PackagePath:      "runtime",
+		Filename:         "secret_arm64.s",
+		PreferDirectABI0: true,
+	})
+	require.NoError(t, err)
+
+	// secretEraseRegisters intentionally clears AAPCS callee-saved registers.
+	// Preserve them around the call so this test adapter can safely return to C,
+	// while checking the generated function before restoring their old values.
+	harness := translation.Assembly + `
+.text
+.global test_secret
+.type test_secret, %function
+test_secret:
+	stp x29, x30, [sp, #-160]!
+	stp x19, x20, [sp, #16]
+	stp x21, x22, [sp, #32]
+	stp x23, x24, [sp, #48]
+	stp x25, x26, [sp, #64]
+	stp x27, x28, [sp, #80]
+	stp d8, d9, [sp, #96]
+	stp d10, d11, [sp, #112]
+	stp d12, d13, [sp, #128]
+	stp d14, d15, [sp, #144]
+	mov x0, #1
+	mov x1, #1
+	mov x19, #1
+	mov x25, #1
+	mov x26, #1
+	mov x27, #1
+	fmov d0, x19
+	fmov d31, x19
+	bl runtime_secretEraseRegisters
+	orr x9, x0, x1
+	orr x9, x9, x19
+	orr x9, x9, x25
+	orr x9, x9, x26
+	orr x9, x9, x27
+	fmov x10, d0
+	orr x9, x9, x10
+	fmov x10, d31
+	orr x9, x9, x10
+	cmp x9, #0
+	cset w0, ne
+	ldp d14, d15, [sp, #144]
+	ldp d12, d13, [sp, #128]
+	ldp d10, d11, [sp, #112]
+	ldp d8, d9, [sp, #96]
+	ldp x27, x28, [sp, #80]
+	ldp x25, x26, [sp, #64]
+	ldp x23, x24, [sp, #48]
+	ldp x21, x22, [sp, #32]
+	ldp x19, x20, [sp, #16]
+	ldp x29, x30, [sp], #160
+	ret
+.size test_secret, .-test_secret
+
+.global main
+.type main, %function
+main:
+	b test_secret
+.size main, .-main
+`
+	directory := t.TempDir()
+	sourcePath := filepath.Join(directory, "secret.S")
+	executable := filepath.Join(directory, "secret")
+	require.NoError(t, os.WriteFile(sourcePath, []byte(harness), 0o644))
+	command := exec.Command(cc, "-no-pie", "-o", executable, sourcePath)
+	output, err := command.CombinedOutput()
+	require.NoError(t, err, "%s", output)
+	output, err = exec.Command(executable).CombinedOutput()
 	require.NoError(t, err, "%s", output)
 }
