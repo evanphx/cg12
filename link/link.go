@@ -25,6 +25,7 @@ type Backend interface {
 	Machine() uint16
 	CompileModule(m *ir.Module) (*obj.Object, error)
 	StartStub(entry string) (*obj.Object, error)
+	Interp() string
 }
 
 // Linker accumulates input objects from either front-end and links them.
@@ -82,15 +83,37 @@ func (l *Linker) LinkToELF() ([]byte, error) {
 // addresses, and writes an ET_EXEC image. entry names the function `_start` calls
 // (e.g. "main"), which must be among the linked objects.
 func (l *Linker) LinkExecutable(entry string) ([]byte, error) {
-	stub, err := l.be.StartStub(entry)
-	if err != nil {
-		return nil, err
-	}
-	merged, err := merge(append([]*obj.Object{stub}, l.objs...))
+	merged, err := l.mergeWithStart(entry)
 	if err != nil {
 		return nil, err
 	}
 	return merged.WriteExecutable("_start")
+}
+
+// LinkDynamicExecutable links the accumulated objects into a dynamically linked
+// ELF executable that calls into the named shared libraries (e.g. "libc.so.6").
+// Any symbol the objects reference but do not define is imported: it is bound at
+// load time to the library that exports it, through a PLT stub the linker
+// synthesizes. entry names the function `_start` calls (e.g. "main").
+func (l *Linker) LinkDynamicExecutable(entry string, needed ...string) ([]byte, error) {
+	merged, err := l.mergeWithStart(entry)
+	if err != nil {
+		return nil, err
+	}
+	return merged.WriteDynamicExecutable("_start", obj.DynOptions{
+		Interp: l.be.Interp(),
+		Needed: needed,
+	})
+}
+
+// mergeWithStart prepends the backend's `_start` stub (which calls entry) to the
+// accumulated objects and merges them into one image.
+func (l *Linker) mergeWithStart(entry string) (*obj.Object, error) {
+	stub, err := l.be.StartStub(entry)
+	if err != nil {
+		return nil, err
+	}
+	return merge(append([]*obj.Object{stub}, l.objs...))
 }
 
 // merge concatenates the objects' .text/.data, resolves their symbols, re-bases

@@ -17,6 +17,9 @@ type Backend struct{ Opts Options }
 // Machine reports the ELF machine type of the objects this backend emits.
 func (Backend) Machine() uint16 { return obj.EM_X86_64 }
 
+// Interp is the dynamic loader a dynamically linked amd64 executable runs under.
+func (Backend) Interp() string { return "/lib64/ld-linux-x86-64.so.2" }
+
 // CompileModule compiles an IR module to a relocatable object.
 func (b Backend) CompileModule(m *ir.Module) (*obj.Object, error) {
 	return CompileToObjectWith(m, b.Opts)
