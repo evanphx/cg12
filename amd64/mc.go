@@ -1153,10 +1153,6 @@ func (m *mc) instr(in *ir.Instr) {
 		m.neg(in)
 	case ir.OCmp:
 		m.cmp(in)
-	case ir.OStoreb, ir.OStoreh, ir.OStorew, ir.OStorel, ir.OStores, ir.OStored:
-		m.store(in)
-	case ir.OLoadsb, ir.OLoadub, ir.OLoadsh, ir.OLoaduh, ir.OLoadsw, ir.OLoaduw, ir.OLoadl, ir.OLoads, ir.OLoadd:
-		m.load(in)
 	case ir.OAlloc4, ir.OAlloc8, ir.OAlloc16:
 		d, commit := m.gpDst(in.To)
 		m.emit(x64.Lea(true, d.mreg(), x64.At(RBP.mreg(), int32(-m.allocOff[in]))))

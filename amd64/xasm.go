@@ -58,6 +58,13 @@ type xasm interface {
 	castG2F(dbl bool, dst, src Reg)
 	castF2G(long bool, dst, src Reg)
 
+	// Memory. Each method resolves the address (base+disp, RIP-relative symbol, or
+	// a computed pointer) internally, so the addressing model stays per-backend.
+	loadGP(op ir.Op, w bool, dst Reg, addr ir.Ref)
+	loadFP(op ir.Op, dst Reg, addr ir.Ref)
+	storeGP(op ir.Op, val Reg, addr ir.Ref)
+	storeFP(op ir.Op, val Reg, addr ir.Ref)
+
 	// spillStore/spillStoreFP write a scratch register back to a result's slot.
 	spillStore(r Reg, slot, size int)
 	spillStoreFP(r Reg, slot, size int)
@@ -184,6 +191,51 @@ func (b *mcXasm) castG2F(dbl bool, dst, src Reg) {
 }
 func (b *mcXasm) castF2G(long bool, dst, src Reg) {
 	b.m.emit(x64.MovqFromXmm(long, dst.mreg(), src.mreg()))
+}
+func (b *mcXasm) loadGP(op ir.Op, w bool, dst Reg, addr ir.Ref) {
+	mem, fixup := b.m.memAddr(addr, gpScratch1)
+	dm := dst.mreg()
+	switch op {
+	case ir.OLoadub:
+		b.m.emit(x64.MovzxLoadByte(w, dm, mem))
+	case ir.OLoadsb:
+		b.m.emit(x64.MovsxLoadByte(w, dm, mem))
+	case ir.OLoaduh:
+		b.m.emit(x64.MovzxLoadWord(w, dm, mem))
+	case ir.OLoadsh:
+		b.m.emit(x64.MovsxLoadWord(w, dm, mem))
+	case ir.OLoaduw:
+		b.m.emit(x64.Load(false, dm, mem)) // a 32-bit load zero-extends
+	case ir.OLoadsw:
+		b.m.emit(x64.MovsxdLoad(dm, mem))
+	case ir.OLoadl:
+		b.m.emit(x64.Load(true, dm, mem))
+	}
+	fixup()
+}
+func (b *mcXasm) loadFP(op ir.Op, dst Reg, addr ir.Ref) {
+	mem, fixup := b.m.memAddr(addr, gpScratch1)
+	if op == ir.OLoadd {
+		b.m.emit(x64.MovsdLoad(dst.mreg(), mem))
+	} else {
+		b.m.emit(x64.MovssLoad(dst.mreg(), mem))
+	}
+	fixup()
+}
+func (b *mcXasm) storeGP(op ir.Op, val Reg, addr ir.Ref) {
+	mem, fixup := b.m.memAddr(addr, gpScratch1)
+	sz := map[ir.Op]int{ir.OStoreb: 8, ir.OStoreh: 16, ir.OStorew: 32, ir.OStorel: 64}[op]
+	b.m.emit(x64.Store(sz, val.mreg(), mem))
+	fixup()
+}
+func (b *mcXasm) storeFP(op ir.Op, val Reg, addr ir.Ref) {
+	mem, fixup := b.m.memAddr(addr, gpScratch1)
+	if op == ir.OStored {
+		b.m.emit(x64.MovsdStore(val.mreg(), mem))
+	} else {
+		b.m.emit(x64.MovssStore(val.mreg(), mem))
+	}
+	fixup()
 }
 func (b *mcXasm) spillStore(r Reg, slot, size int) {
 	b.m.emit(x64.Store(size*8, r.mreg(), x64.At(RBP.mreg(), b.m.slotAddr(slot))))
@@ -323,6 +375,50 @@ func (b *textXasm) castF2G(long bool, dst, src Reg) {
 		mn, sz = "movq", 8
 	}
 	b.e.line("%s %s, %s", mn, xmmn(src), gpn(dst, sz))
+}
+func (b *textXasm) loadGP(op ir.Op, w bool, dst Reg, addr ir.Ref) {
+	mem := b.e.memAddr(addr, gpScratch1)
+	dw, tail := 4, "l"
+	if w {
+		dw, tail = 8, "q"
+	}
+	switch op {
+	case ir.OLoadub:
+		b.e.line("movzb%s %s, %s", tail, mem, gpn(dst, dw))
+	case ir.OLoadsb:
+		b.e.line("movsb%s %s, %s", tail, mem, gpn(dst, dw))
+	case ir.OLoaduh:
+		b.e.line("movzw%s %s, %s", tail, mem, gpn(dst, dw))
+	case ir.OLoadsh:
+		b.e.line("movsw%s %s, %s", tail, mem, gpn(dst, dw))
+	case ir.OLoaduw:
+		b.e.line("movl %s, %s", mem, gpn(dst, 4)) // a 32-bit load zero-extends
+	case ir.OLoadsw:
+		b.e.line("movslq %s, %s", mem, gpn(dst, 8))
+	case ir.OLoadl:
+		b.e.line("movq %s, %s", mem, gpn(dst, 8))
+	}
+}
+func (b *textXasm) loadFP(op ir.Op, dst Reg, addr ir.Ref) {
+	mem := b.e.memAddr(addr, gpScratch1)
+	mn := "movss"
+	if op == ir.OLoadd {
+		mn = "movsd"
+	}
+	b.e.line("%s %s, %s", mn, mem, xmmn(dst))
+}
+func (b *textXasm) storeGP(op ir.Op, val Reg, addr ir.Ref) {
+	mem := b.e.memAddr(addr, gpScratch1)
+	size := map[ir.Op]int{ir.OStoreb: 1, ir.OStoreh: 2, ir.OStorew: 4, ir.OStorel: 8}[op]
+	b.e.line("mov%s %s, %s", suf(size), gpn(val, size), mem)
+}
+func (b *textXasm) storeFP(op ir.Op, val Reg, addr ir.Ref) {
+	mem := b.e.memAddr(addr, gpScratch1)
+	mn := "movss"
+	if op == ir.OStored {
+		mn = "movsd"
+	}
+	b.e.line("%s %s, %s", mn, xmmn(val), mem)
 }
 func (b *textXasm) spillStore(r Reg, slot, size int) {
 	b.e.line("mov%s %s, %s", suf(size), gpn(r, size), memn(RBP, b.e.slotAddr(slot)))

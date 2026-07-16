@@ -28,10 +28,6 @@ func (e *emitter) instr(in *ir.Instr) {
 		e.neg(in)
 	case ir.OCmp:
 		e.cmp(in)
-	case ir.OStoreb, ir.OStoreh, ir.OStorew, ir.OStorel, ir.OStores, ir.OStored:
-		e.store(in)
-	case ir.OLoadsb, ir.OLoadub, ir.OLoadsh, ir.OLoaduh, ir.OLoadsw, ir.OLoaduw, ir.OLoadl, ir.OLoads, ir.OLoadd:
-		e.load(in)
 	case ir.OAlloc4, ir.OAlloc8, ir.OAlloc16:
 		d, commit := e.gpDst(in.To)
 		e.line("leaq %s, %s", memn(RBP, int32(-e.allocOff[in])), gpn(d, 8))

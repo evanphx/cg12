@@ -108,6 +108,10 @@ func (s *xsel) selectInt(in *ir.Instr) bool {
 		s.convert(in)
 	case ir.OCopy:
 		s.b.move(s.b.refLoc(in.To), s.b.refLoc(in.Arg(0)))
+	case ir.OLoadsb, ir.OLoadub, ir.OLoadsh, ir.OLoaduh, ir.OLoadsw, ir.OLoaduw, ir.OLoadl, ir.OLoads, ir.OLoadd:
+		s.load(in)
+	case ir.OStoreb, ir.OStoreh, ir.OStorew, ir.OStorel, ir.OStores, ir.OStored:
+		s.store(in)
 	case ir.OAllocN:
 		size := s.gpValue(in.Args[0], gpScratch0)
 		d, commit := s.gpDst(in.To)
@@ -143,6 +147,28 @@ func (s *xsel) term(b *ir.Block) bool {
 		return false
 	}
 	return true
+}
+
+// load emits a load, choosing a GP or XMM destination by the op.
+func (s *xsel) load(in *ir.Instr) {
+	if in.Op == ir.OLoads || in.Op == ir.OLoadd {
+		d, commit := s.fpDst(in.To)
+		s.b.loadFP(in.Op, d, in.Arg(0))
+		commit()
+		return
+	}
+	d, commit := s.gpDst(in.To)
+	s.b.loadGP(in.Op, in.Cls == ir.ClsL, d, in.Arg(0))
+	commit()
+}
+
+// store emits a store; Args[0] is the value, Args[1] the address.
+func (s *xsel) store(in *ir.Instr) {
+	if in.Op == ir.OStores || in.Op == ir.OStored {
+		s.b.storeFP(in.Op, s.fpValue(in.Arg(0), fpScratch0), in.Arg(1))
+		return
+	}
+	s.b.storeGP(in.Op, s.gpValue(in.Arg(0), gpScratch0), in.Arg(1))
 }
 
 // convert emits a float/int conversion or int<->float bitcast.
