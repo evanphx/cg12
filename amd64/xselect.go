@@ -91,6 +91,26 @@ func (s *xsel) selectInt(in *ir.Instr) bool {
 	return true
 }
 
+// term selects a block terminator through the builder, handling the simple
+// branch forms. It returns false for the return and jump-table terminators,
+// which stay on each emitter's own path (frame epilogue and PC-relative table).
+func (s *xsel) term(b *ir.Block) bool {
+	switch b.Jmp.Kind {
+	case ir.JmpJmp:
+		s.b.jmp(b.Jmp.To)
+	case ir.JmpJnz:
+		w := s.f.ClassOf(b.Jmp.Arg) == ir.ClsL
+		s.b.jnz(s.gpValue(b.Jmp.Arg, gpScratch0), w, b.Jmp.To, b.Jmp.To2)
+	case ir.JmpHlt:
+		s.b.hlt()
+	case ir.JmpBr:
+		s.b.jmpReg(s.gpValue(b.Jmp.Arg, gpScratch0))
+	default:
+		return false
+	}
+	return true
+}
+
 // shift emits a shift by an immediate count or by %cl.
 func (s *xsel) shift(in *ir.Instr) {
 	w := in.Cls == ir.ClsL

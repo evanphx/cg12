@@ -1111,22 +1111,12 @@ func (m *mc) term(b *ir.Block) {
 	if m.blockDone {
 		return // a tail call already emitted this block's exit
 	}
+	if (&xsel{f: m.f, b: &mcXasm{m: m}}).term(b) {
+		return
+	}
 	switch b.Jmp.Kind {
-	case ir.JmpJmp:
-		m.prog.Jmp(b.Jmp.To.Name)
-	case ir.JmpJnz:
-		r := m.gpValue(b.Jmp.Arg, gpScratch0)
-		w := m.f.ClassOf(b.Jmp.Arg) == ir.ClsL
-		m.emit(x64.TestReg(w, r.mreg(), r.mreg()))
-		m.prog.Jcc(x64.NE, b.Jmp.To.Name)
-		m.prog.Jmp(b.Jmp.To2.Name)
 	case ir.JmpRet:
 		m.epilogue()
-	case ir.JmpHlt:
-		m.emit(x64.Ud2())
-	case ir.JmpBr:
-		r := m.gpValue(b.Jmp.Arg, gpScratch0)
-		m.emit(x64.JmpReg(r.mreg())) // computed goto
 	case ir.JmpTable:
 		// Indexed branch through a PC-relative offset table placed just past the
 		// jump: target = table + (int32)table[idx]. R10 holds the table base and

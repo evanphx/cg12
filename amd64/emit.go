@@ -521,25 +521,12 @@ func (e *emitter) term(b *ir.Block) {
 	if e.blockDone {
 		return
 	}
+	if (&xsel{f: e.f, b: &textXasm{e: e}}).term(b) {
+		return
+	}
 	switch b.Jmp.Kind {
-	case ir.JmpJmp:
-		e.line("jmp %s", e.blabel(b.Jmp.To))
-	case ir.JmpJnz:
-		r := e.gpValue(b.Jmp.Arg, gpScratch0)
-		sz := 4
-		if e.f.ClassOf(b.Jmp.Arg) == ir.ClsL {
-			sz = 8
-		}
-		e.line("test%s %s, %s", suf(sz), gpn(r, sz), gpn(r, sz))
-		e.line("jne %s", e.blabel(b.Jmp.To))
-		e.line("jmp %s", e.blabel(b.Jmp.To2))
 	case ir.JmpRet:
 		e.epilogue()
-	case ir.JmpHlt:
-		e.line("ud2")
-	case ir.JmpBr:
-		r := e.gpValue(b.Jmp.Arg, gpScratch0)
-		e.line("jmp *%s", gpn(r, 8)) // computed goto
 	case ir.JmpTable:
 		// Indexed branch through a PC-relative offset table (see the machine-code
 		// emitter). The assembler computes each entry as (case - table).

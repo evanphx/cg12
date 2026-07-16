@@ -39,6 +39,13 @@ type xasm interface {
 	movFromSP(dst Reg)
 	movToSP(src Reg)
 
+	// Control flow. Branch targets are blocks so each backend formats its label;
+	// jnz tests a register and branches to `to`, else falls through to `to2`.
+	jmp(to *ir.Block)
+	jnz(r Reg, w bool, to, to2 *ir.Block)
+	jmpReg(r Reg)
+	hlt()
+
 	// spillStore writes a scratch register back to a result's frame slot.
 	spillStore(r Reg, slot, size int)
 
@@ -122,6 +129,14 @@ func (b *mcXasm) allocNSP(dst, size Reg) {
 }
 func (b *mcXasm) movFromSP(dst Reg) { b.m.emit(x64.MovReg(true, dst.mreg(), RSP.mreg())) }
 func (b *mcXasm) movToSP(src Reg)   { b.m.emit(x64.MovReg(true, RSP.mreg(), src.mreg())) }
+func (b *mcXasm) jmp(to *ir.Block)  { b.m.prog.Jmp(to.Name) }
+func (b *mcXasm) jnz(r Reg, w bool, to, to2 *ir.Block) {
+	b.m.emit(x64.TestReg(w, r.mreg(), r.mreg()))
+	b.m.prog.Jcc(x64.NE, to.Name)
+	b.m.prog.Jmp(to2.Name)
+}
+func (b *mcXasm) jmpReg(r Reg) { b.m.emit(x64.JmpReg(r.mreg())) }
+func (b *mcXasm) hlt()         { b.m.emit(x64.Ud2()) }
 func (b *mcXasm) spillStore(r Reg, slot, size int) {
 	b.m.emit(x64.Store(size*8, r.mreg(), x64.At(RBP.mreg(), b.m.slotAddr(slot))))
 }
@@ -195,6 +210,15 @@ func (b *textXasm) allocNSP(dst, size Reg) {
 }
 func (b *textXasm) movFromSP(dst Reg) { b.e.line("movq %%rsp, %s", gpn(dst, 8)) }
 func (b *textXasm) movToSP(src Reg)   { b.e.line("movq %s, %%rsp", gpn(src, 8)) }
+func (b *textXasm) jmp(to *ir.Block)  { b.e.line("jmp %s", b.e.blabel(to)) }
+func (b *textXasm) jnz(r Reg, w bool, to, to2 *ir.Block) {
+	sz := clsSizeW(w)
+	b.e.line("test%s %s, %s", suf(sz), gpn(r, sz), gpn(r, sz))
+	b.e.line("jne %s", b.e.blabel(to))
+	b.e.line("jmp %s", b.e.blabel(to2))
+}
+func (b *textXasm) jmpReg(r Reg) { b.e.line("jmp *%s", gpn(r, 8)) }
+func (b *textXasm) hlt()         { b.e.line("ud2") }
 func (b *textXasm) spillStore(r Reg, slot, size int) {
 	b.e.line("mov%s %s, %s", suf(size), gpn(r, size), memn(RBP, b.e.slotAddr(slot)))
 }
