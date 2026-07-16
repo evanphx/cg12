@@ -181,9 +181,13 @@ func merge(objs []*obj.Object) (*obj.Object, error) {
 		textBase := uint64(len(out.Text))
 		dataBase := uint64(len(out.Data))
 		tdataBase := uint64(len(out.Tdata))
+		bssBase := uint64(out.BssSize)
+		tbssBase := uint64(out.TbssSize)
 		out.Text = append(out.Text, o.Text...)
 		out.Data = append(out.Data, o.Data...)
 		out.Tdata = append(out.Tdata, o.Tdata...)
+		out.BssSize += o.BssSize
+		out.TbssSize += o.TbssSize
 		if o.TlsAlign > out.TlsAlign {
 			out.TlsAlign = o.TlsAlign
 		}
@@ -192,7 +196,7 @@ func merge(objs []*obj.Object) (*obj.Object, error) {
 		// that clashes with one already placed is uniquified per object).
 		local := map[string]string{}
 		for _, s := range o.Syms {
-			base, ok := sectionBase(s.Section, textBase, dataBase, tdataBase)
+			base, ok := sectionBase(s.Section, textBase, dataBase, tdataBase, bssBase, tbssBase)
 			if !ok {
 				continue // undefined, or a section this linker does not merge yet
 			}
@@ -242,7 +246,7 @@ func merge(objs []*obj.Object) (*obj.Object, error) {
 	return out, nil
 }
 
-func sectionBase(k obj.SecKind, textBase, dataBase, tdataBase uint64) (uint64, bool) {
+func sectionBase(k obj.SecKind, textBase, dataBase, tdataBase, bssBase, tbssBase uint64) (uint64, bool) {
 	switch k {
 	case obj.SecText:
 		return textBase, true
@@ -252,6 +256,10 @@ func sectionBase(k obj.SecKind, textBase, dataBase, tdataBase uint64) (uint64, b
 		// A thread-local symbol's value is its offset within the TLS block, so it
 		// rebases against the merged .tdata rather than an address.
 		return tdataBase, true
+	case obj.SecBss:
+		return bssBase, true
+	case obj.SecTbss:
+		return tbssBase, true
 	}
 	return 0, false
 }

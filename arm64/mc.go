@@ -308,6 +308,29 @@ func convInlineNodes(ns []*inlineNode) []obj.InlineRange {
 
 // addData appends a data definition to the object's .data section.
 func addData(o *obj.Object, d *ir.Data) error {
+	// Nothing but zero fill: it needs no bytes in the file, only room at run time.
+	// .bss follows .data in memory and .tbss follows .tdata in each thread's block,
+	// so the symbol's value counts from the start of its own zero-filled region.
+	if allZero(d) {
+		size, sec, at := zeroSize(d), obj.SecBss, &o.BssSize
+		if d.Linkage.Thread {
+			sec, at = obj.SecTbss, &o.TbssSize
+			if d.Align > o.TlsAlign {
+				o.TlsAlign = d.Align
+			}
+		}
+		if d.Align > 0 {
+			*at = obj.AlignInt(*at, d.Align)
+		}
+		base := uint64(*at)
+		*at += size
+		o.Syms = append(o.Syms, obj.Sym{
+			Name: sanitize(d.Name), Section: sec, Value: base, Size: uint64(size),
+			Global: d.Linkage.Export, TLS: sec == obj.SecTbss,
+		})
+		return nil
+	}
+
 	// A thread-local's bytes are not data used in place: they are the image every
 	// new thread's block is initialized from. They go to .tdata, and the symbol
 	// records an offset within that block rather than an address.
@@ -1698,4 +1721,27 @@ func (m *mc) vaArg(in *ir.Instr) {
 		m.emit(a64.LdrImm(in.Cls.Size() == 8, d, addr, 0))
 	}
 	done()
+}
+
+// allZero reports whether a data definition is nothing but zero fill, in which
+// case it needs no bytes in the file at all -- the loader supplies the zeroes.
+func allZero(d *ir.Data) bool {
+	if len(d.Items) == 0 {
+		return false
+	}
+	for _, it := range d.Items {
+		if it.Zero == 0 {
+			return false
+		}
+	}
+	return true
+}
+
+// zeroSize is the total length of an all-zero definition.
+func zeroSize(d *ir.Data) int {
+	n := 0
+	for _, it := range d.Items {
+		n += it.Zero
+	}
+	return n
 }

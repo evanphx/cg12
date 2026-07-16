@@ -59,6 +59,8 @@ const (
 	SecRodata                  // defined in .rodata
 	SecStackMap                // defined in .cg12_stackmaps
 	SecTdata                   // defined in .tdata (thread-local)
+	SecBss                     // defined in .bss (zero-filled, occupies no file space)
+	SecTbss                    // defined in .tbss (thread-local, zero-filled)
 )
 
 // Sym is a symbol-table entry.
@@ -94,6 +96,12 @@ type Object struct {
 	Tdata    []byte
 	TlsAlign int
 
+	// BssSize and TbssSize are zero-filled regions that take up no room in the
+	// file: the loader supplies the zeroes. .bss follows .data in memory, .tbss
+	// follows .tdata in each thread's block.
+	BssSize  int
+	TbssSize int
+
 	Syms       []Sym
 	Relocs     []Reloc // relocations against .text
 	DataRelocs []Reloc // relocations against .data (e.g. a pointer to a symbol)
@@ -120,6 +128,7 @@ const (
 	shtProgbits = 1
 	shtSymtab   = 2
 	shtStrtab   = 3
+	shtNobits   = 8
 	shtRela     = 4
 
 	shfWrite     = 0x1
@@ -190,6 +199,17 @@ func (o *Object) MarshalELF() ([]byte, error) {
 	secRela := next()
 	secData := next()
 	secRelaData := next()
+	secBss := -1
+	if o.BssSize > 0 {
+		secBss = next()
+	}
+	secTdata, secTbss := -1, -1
+	if len(o.Tdata) > 0 {
+		secTdata = next()
+	}
+	if o.TbssSize > 0 {
+		secTbss = next()
+	}
 	var secDebugAbbrev, secDebugInfo, secRelaInfo, secDebugLine, secRelaLine, secDebugLoc int
 	if hasDwarf {
 		secDebugAbbrev = next()
@@ -223,6 +243,12 @@ func (o *Object) MarshalELF() ([]byte, error) {
 			shndx = uint16(secText)
 		case SecData:
 			shndx = uint16(secData)
+		case SecBss:
+			shndx = uint16(secBss)
+		case SecTdata:
+			shndx = uint16(secTdata)
+		case SecTbss:
+			shndx = uint16(secTbss)
 		case SecStackMap:
 			shndx = uint16(secStackMap)
 		}
@@ -232,7 +258,7 @@ func (o *Object) MarshalELF() ([]byte, error) {
 			typ = sttTLS
 		case s.Func:
 			typ = sttFunc
-		case s.Section == SecData:
+		case s.Section == SecData || s.Section == SecBss:
 			typ = sttObject
 		}
 		bind := byte(stbLocal)
@@ -296,6 +322,15 @@ func (o *Object) MarshalELF() ([]byte, error) {
 	secs[secRela] = section{name: ".rela.text", typ: shtRela, link: uint32(secSymtab), info: uint32(secText), addralign: 8, entsize: 24, data: rela.b}
 	secs[secData] = section{name: ".data", typ: shtProgbits, flags: shfAlloc | shfWrite, addralign: 8, data: o.Data}
 	secs[secRelaData] = section{name: ".rela.data", typ: shtRela, link: uint32(secSymtab), info: uint32(secData), addralign: 8, entsize: 24, data: relaData.b}
+	if secBss >= 0 {
+		secs[secBss] = section{name: ".bss", typ: shtNobits, flags: shfAlloc | shfWrite, addralign: 8, nobits: uint64(o.BssSize)}
+	}
+	if secTdata >= 0 {
+		secs[secTdata] = section{name: ".tdata", typ: shtProgbits, flags: shfAlloc | shfWrite | shfTLS, addralign: uint64(tlsAlignOf(o)), data: o.Tdata}
+	}
+	if secTbss >= 0 {
+		secs[secTbss] = section{name: ".tbss", typ: shtNobits, flags: shfAlloc | shfWrite | shfTLS, addralign: uint64(tlsAlignOf(o)), nobits: uint64(o.TbssSize)}
+	}
 	if hasDwarf {
 		secs[secDebugAbbrev] = section{name: ".debug_abbrev", typ: shtProgbits, addralign: 1, data: o.DebugAbbrev}
 		secs[secDebugInfo] = section{name: ".debug_info", typ: shtProgbits, addralign: 1, data: o.DebugInfo}
@@ -326,7 +361,7 @@ func (o *Object) MarshalELF() ([]byte, error) {
 		}
 		out.align(secs[i].addralign)
 		secs[i].offset = uint64(len(out.b))
-		out.bytes(secs[i].data)
+		out.bytes(secs[i].data) // a NOBITS section has none, which is the point
 	}
 	out.align(8)
 	shoff := uint64(len(out.b))
@@ -337,7 +372,11 @@ func (o *Object) MarshalELF() ([]byte, error) {
 		out.u64(s.flags)
 		out.u64(0) // sh_addr
 		out.u64(s.offset)
-		out.u64(uint64(len(s.data)))
+		if s.typ == shtNobits {
+			out.u64(s.nobits)
+		} else {
+			out.u64(uint64(len(s.data)))
+		}
 		out.u32(s.link)
 		out.u32(s.info)
 		out.u64(s.addralign)
@@ -357,8 +396,11 @@ type section struct {
 	addralign uint64
 	entsize   uint64
 	data      []byte
-	nameOff   uint32
-	offset    uint64
+	// nobits is the size of a section that occupies run-time space but no file
+	// bytes (.bss and .tbss), which therefore has no data to carry.
+	nobits  uint64
+	nameOff uint32
+	offset  uint64
 }
 
 // writeHeader fills the 64-byte ELF header in place.
@@ -427,4 +469,20 @@ func (s *strtab) add(name string) uint32 {
 	s.b = append(s.b, name...)
 	s.b = append(s.b, 0)
 	return o
+}
+
+// AlignInt rounds n up to the next multiple of a (a <= 0 means no alignment).
+func AlignInt(n, a int) int {
+	if a < 1 {
+		return n
+	}
+	return (n + a - 1) &^ (a - 1)
+}
+
+// tlsAlignOf is an object's TLS block alignment, defaulting to a single byte.
+func tlsAlignOf(o *Object) int {
+	if o.TlsAlign < 1 {
+		return 1
+	}
+	return o.TlsAlign
 }

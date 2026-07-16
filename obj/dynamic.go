@@ -648,9 +648,12 @@ func (o *Object) writeDynImage(im dynImage) ([]byte, error) {
 		secPlt = nextSec()
 	}
 	secText := nextSec()
-	secTdata := -1
+	secTdata, secTbss := -1, -1
 	if tdataSize > 0 {
 		secTdata = nextSec()
+	}
+	if o.TbssSize > 0 {
+		secTbss = nextSec()
 	}
 	secInitArr, secFiniArr := -1, -1
 	if initArrSize > 0 {
@@ -667,6 +670,10 @@ func (o *Object) writeDynImage(im dynImage) ([]byte, error) {
 	if len(o.Data) > 0 {
 		secData = nextSec()
 	}
+	secBss := -1
+	if o.BssSize > 0 {
+		secBss = nextSec()
+	}
 	secShstrtab := nextSec()
 	numSec := secIdx
 
@@ -680,6 +687,9 @@ func (o *Object) writeDynImage(im dynImage) ([]byte, error) {
 			symVaddr[s.Name] = va(textOff) + s.Value
 		case SecData:
 			symVaddr[s.Name] = va(dataOff) + s.Value
+		case SecBss:
+			// .bss has no bytes in the file; it picks up where .data ends in memory.
+			symVaddr[s.Name] = va(dataOff) + uint64(len(o.Data)) + s.Value
 		}
 	}
 	for i, n := range pltNames {
@@ -689,9 +699,14 @@ func (o *Object) writeDynImage(im dynImage) ([]byte, error) {
 	// value is an offset within the TLS block, which a local-exec relocation turns
 	// into an offset from the thread pointer.
 	tlsOff := map[string]uint64{}
+	blockSize := uint64(tdataSize + o.TbssSize)
 	for _, sym := range o.Syms {
-		if sym.Section == SecTdata {
-			tlsOff[sym.Name] = tpOffset(o.Machine, sym.Value, uint64(tdataSize), uint64(tlsAlign))
+		switch sym.Section {
+		case SecTdata:
+			tlsOff[sym.Name] = tpOffset(o.Machine, sym.Value, blockSize, uint64(tlsAlign))
+		case SecTbss:
+			// .tbss carries no image, so it follows .tdata within each thread's block.
+			tlsOff[sym.Name] = tpOffset(o.Machine, uint64(tdataSize)+sym.Value, blockSize, uint64(tlsAlign))
 		}
 	}
 	var entry uint64
@@ -883,15 +898,18 @@ func (o *Object) writeDynImage(im dynImage) ([]byte, error) {
 	// --- emit ----------------------------------------------------------------
 	out := &elfBuf{}
 	out.pad(64) // ELF header, filled in at the end
-	phdr := func(typ, flags uint32, off, vaddr, size, align uint64) {
+	phdrMem := func(typ, flags uint32, off, vaddr, filesz, memsz, align uint64) {
 		out.u32(typ)
 		out.u32(flags)
 		out.u64(off)
 		out.u64(vaddr)
 		out.u64(vaddr) // p_paddr
-		out.u64(size)  // p_filesz
-		out.u64(size)  // p_memsz
+		out.u64(filesz)
+		out.u64(memsz)
 		out.u64(align)
+	}
+	phdr := func(typ, flags uint32, off, vaddr, size, align uint64) {
+		phdrMem(typ, flags, off, vaddr, size, size, align)
 	}
 	// PT_PHDR must precede every loadable segment, and PT_INTERP conventionally
 	// follows it. Both live inside the read-execute PT_LOAD that starts the image.
@@ -901,7 +919,10 @@ func (o *Object) writeDynImage(im dynImage) ([]byte, error) {
 	}
 	phdr(ptNote, pfR, uint64(noteOff), va(noteOff), uint64(len(note)), 4)
 	phdr(ptLoad, pfR|pfX, 0, base, uint64(roEnd), execAlign)
-	phdr(ptLoad, pfR|pfW, uint64(rwOff), va(rwOff), uint64(rwEnd-rwOff), execAlign)
+	// .bss lives past the file's end: memsz exceeds filesz and the loader zeroes
+	// the difference.
+	phdrMem(ptLoad, pfR|pfW, uint64(rwOff), va(rwOff), uint64(rwEnd-rwOff),
+		uint64(rwEnd-rwOff+o.BssSize), execAlign)
 	phdr(ptDynamic, pfR|pfW, uint64(dynamicOff), va(dynamicOff), uint64(ndyn*16), 8)
 	if relro {
 		// Read-only after relocation: the GOT and .dynamic, up to the page boundary
@@ -912,7 +933,8 @@ func (o *Object) writeDynImage(im dynImage) ([]byte, error) {
 	if tdataSize > 0 {
 		// The template every thread's TLS block is built from. It is never written,
 		// only copied, so it is read-only.
-		phdr(ptTls, pfR, uint64(tdataOff), va(tdataOff), uint64(tdataSize), uint64(tlsAlign))
+		phdrMem(ptTls, pfR, uint64(tdataOff), va(tdataOff), uint64(tdataSize),
+			uint64(tdataSize+o.TbssSize), uint64(tlsAlign))
 	}
 	// An empty segment whose flags say the stack wants no execute permission. Its
 	// absence is not neutral: the kernel then falls back to an executable stack.
@@ -981,6 +1003,10 @@ func (o *Object) writeDynImage(im dynImage) ([]byte, error) {
 	set(secGot, ".got.plt", shtProgbits, shfAlloc|shfWrite, gotOff, len(got.b), 0, 0, 8, 8)
 	set(secDynamic, ".dynamic", shtDynamic, shfAlloc|shfWrite, dynamicOff, ndyn*16, secDynstr, 0, 8, 16)
 	set(secData, ".data", shtProgbits, shfAlloc|shfWrite, dataOff, len(data), 0, 0, 8, 0)
+	// NOBITS: these take up addresses and run-time space but no file bytes, so
+	// their offsets are only where they would have begun.
+	set(secBss, ".bss", shtNobits, shfAlloc|shfWrite, dataOff+len(data), o.BssSize, 0, 0, 8, 0)
+	set(secTbss, ".tbss", shtNobits, shfAlloc|shfWrite|shfTLS, tdataOff+tdataSize, o.TbssSize, 0, 0, uint64(tlsAlign), 0)
 
 	// .shstrtab is not loaded, so it goes after the image's mapped content.
 	shstrOff := len(out.b)
