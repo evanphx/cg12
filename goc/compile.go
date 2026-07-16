@@ -1832,6 +1832,17 @@ func (g *gen) assignLocal(value, slot ir.Ref, valueType types.Type) {
 	g.store(value, slot, valueType)
 }
 
+// storeInlineValue copies a value represented by an address into storage that
+// contains the value itself, such as a struct field or array element. A nil
+// interface is represented internally by a nil descriptor pointer, so give it
+// a concrete zero header before copying its two words.
+func (g *gen) storeInlineValue(value, address ir.Ref, valueType types.Type) {
+	if isInterfaceValue(valueType) {
+		value = g.materializeNilInterface(value)
+	}
+	g.cur.Call(ir.ClsP, g.fn.Sym("goc_memcpy", 0), address, value, g.fn.Long(typeSize(valueType)))
+}
+
 func (g *gen) localAlloc(align, size int) ir.Ref {
 	address := g.cur.Alloc(align, size)
 	if g.stackAddresses == nil {
@@ -2517,8 +2528,8 @@ func (g *gen) assignResult(lhs ast.Expr, assignmentToken token.Token, value ir.R
 		g.assignLocal(value, slot, valueType)
 	} else if localIdentifier && isDescriptorValue(valueType) {
 		g.store(value, slot, valueType)
-	} else if isInlineAggregate(valueType) {
-		g.cur.Call(ir.ClsP, g.fn.Sym("goc_memcpy", 0), slot, value, g.fn.Long(typeSize(valueType)))
+	} else if isInlineAggregate(valueType) || isInterfaceValue(valueType) {
+		g.storeInlineValue(value, slot, valueType)
 	} else {
 		g.store(value, slot, valueType)
 	}
@@ -2660,8 +2671,8 @@ func (g *gen) stmt(s ast.Stmt) {
 				g.assignLocal(v, slot, typ)
 				continue
 			}
-			if destinationIsInline && isInlineAggregate(typ) {
-				g.cur.Call(ir.ClsP, g.fn.Sym("goc_memcpy", 0), slot, v, g.fn.Long(typeSize(typ)))
+			if destinationIsInline && (isInlineAggregate(typ) || isInterfaceValue(typ)) {
+				g.storeInlineValue(v, slot, typ)
 			} else {
 				g.store(v, slot, typ)
 			}
@@ -3131,6 +3142,11 @@ func isInlineAggregate(t types.Type) bool {
 		return value.Kind() == types.String
 	}
 	return false
+}
+
+func isInterfaceValue(t types.Type) bool {
+	_, ok := representativeType(t).Underlying().(*types.Interface)
+	return ok
 }
 
 func isDescriptorValue(t types.Type) bool {
@@ -3911,7 +3927,7 @@ func (g *gen) expr(e ast.Expr) ir.Ref {
 			return ir.R
 		}
 		addr := g.selectorAddress(g.expr(n.X), selection)
-		if isInlineAggregate(selection.Type()) {
+		if isInlineAggregate(selection.Type()) || isInterfaceValue(selection.Type()) {
 			return addr
 		}
 		return g.load(addr, selection.Type())
@@ -4153,10 +4169,10 @@ func (g *gen) compositeLiteral(literal *ast.CompositeLit, heap bool) ir.Ref {
 				expression = keyed.Value
 			}
 			fieldType := structure.Field(fieldIndex).Type()
-			value := g.expr(expression)
+			value := g.assignmentValue(expression, fieldType)
 			fieldAddress := g.offset(backing, offsets[fieldIndex])
-			if isInlineAggregate(fieldType) {
-				g.cur.Call(ir.ClsP, g.fn.Sym("goc_memcpy", 0), fieldAddress, value, g.fn.Long(typeSize(fieldType)))
+			if isInlineAggregate(fieldType) || isInterfaceValue(fieldType) {
+				g.storeInlineValue(value, fieldAddress, fieldType)
 			} else {
 				g.store(value, fieldAddress, fieldType)
 			}

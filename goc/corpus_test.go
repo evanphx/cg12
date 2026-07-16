@@ -265,6 +265,9 @@ func TestAdvancedExecutionCorpus(t *testing.T) {
 		{"global elided pointer struct slice", `type item struct { value int }; var items = []*item{{value: 17}, {value: 25}}; func Test() int { return items[0].value + items[1].value }`, 42},
 		{"global concrete error interface", `type textError string; func (value textError) Error() string { return string(value) }; var failure error = textError("bad"); func Test() int { if failure != nil { return 42 }; return 0 }`, 42},
 		{"concrete interface assertion", `type item struct { value int }; func Test() int { var value any = &item{value: 42}; return value.(*item).value }`, 42},
+		{"interface struct field assignment", `type item struct { value int }; type holder struct { value any }; func set(target *holder, value any) { target.value = value }; func Test() int { var target holder; set(&target, &item{value: 42}); return target.value.(*item).value }`, 42},
+		{"interface struct field composite", `type item struct { value int }; type holder struct { value any }; func Test() int { target := holder{value: &item{value: 42}}; return target.value.(*item).value }`, 42},
+		{"nil interface struct field", `type item struct { value int }; type holder struct { value any }; func Test() int { target := holder{value: &item{value: 42}}; target.value = nil; if target.value == nil { return 42 }; return 0 }`, 42},
 		{"returned interface survives callee frame", `
 			type counterValue interface { Add(int); Value() int }
 			type returnedCounter struct { value int }
