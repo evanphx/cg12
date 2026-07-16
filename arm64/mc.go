@@ -1270,7 +1270,7 @@ func (m *mc) instr(in *ir.Instr) {
 			m.emitCall(in)
 		}
 	case ir.OAsm:
-		m.fail("arm64: inline assembly is only supported when emitting assembly text, not object code")
+		m.emitAsm(in)
 	case ir.OGetReg:
 		phys := mreg(Reg(in.Args[0].ID))
 		d, done := m.dst(in.To, in.Cls.Size())
@@ -1743,4 +1743,115 @@ func zeroSize(d *ir.Data) int {
 		n += it.Zero
 	}
 	return n
+}
+
+// emitAsm emits an inline-asm template as machine code. The operands are resolved
+// to registers exactly as the ABI-independent template expects, the template is
+// expanded, and the resulting assembly is run through the same assembler the
+// text-input path uses -- so an inline-asm sequence becomes bytes without an
+// external assembler. Only the mnemonics that assembler knows are available, and
+// anything else is reported rather than silently dropped.
+func (m *mc) emitAsm(in *ir.Instr) {
+	asm := in.Asm
+	vals := make([]asmVal, len(asm.Ops))
+	scratchN := 0
+	nextScratch := func() Reg {
+		if scratchN >= len(intScratchRegs) {
+			m.fail("arm64: inline asm needs more scratch registers than are available")
+			return scratch0
+		}
+		r := intScratchRegs[scratchN]
+		scratchN++
+		return r
+	}
+
+	// Walk the operands in %N order, drawing register outputs from To/Defs and
+	// every other operand's value from Args in order.
+	outs := in.AsmRegOuts()
+	oc, ac := 0, 0 // cursors into outs and in.Args
+	var finals []func()
+	resolveOut := func() (Reg, int) {
+		oref := outs[oc]
+		oc++
+		t := m.f.Temps[oref.ID]
+		w := m.f.ClassOf(oref).Size()
+		if t.Reg != ir.NoReg {
+			return Reg(t.Reg), w
+		}
+		r := nextScratch()
+		slot := m.spillBase + t.Slot
+		finals = append(finals, func() { m.spillStore(mreg(r), r.IsFloat(), slot, w) })
+		return r, w
+	}
+	for i, kind := range asm.Ops {
+		switch kind {
+		case ir.AsmRegOut:
+			r, w := resolveOut()
+			vals[i] = asmVal{reg: r, width: w}
+		case ir.AsmRegInOut:
+			r, w := resolveOut()
+			pre, _ := m.asmInputReg(in.Args[ac], nextScratch) // preload value
+			ac++
+			m.emit(a64.MovReg(w == 8, mreg(r), mreg(pre))) // preload the read-write register
+			vals[i] = asmVal{reg: r, width: w}
+		case ir.AsmImm:
+			vals[i] = asmVal{lit: true, litS: fmt.Sprintf("#%d", m.f.Consts[in.Args[ac].ID].Int)}
+			ac++
+		case ir.AsmMem:
+			r, _ := m.asmInputReg(in.Args[ac], nextScratch) // the operand's address
+			vals[i] = asmVal{lit: true, litS: fmt.Sprintf("[%s]", r.xName())}
+			ac++
+		default: // AsmRegIn
+			r, w := m.asmInputReg(in.Args[ac], nextScratch)
+			vals[i] = asmVal{reg: r, width: w}
+			ac++
+		}
+	}
+
+	text, err := expandAsm(asm.Template, vals)
+	if err != nil {
+		m.fail("arm64: %v", err)
+		return
+	}
+	code, err := a64.Assemble(text)
+	if err != nil {
+		m.fail("arm64: inline assembly: %v", err)
+		return
+	}
+	for i := 0; i+4 <= len(code); i += 4 {
+		m.emit(binary.LittleEndian.Uint32(code[i:]))
+	}
+	for _, f := range finals {
+		f()
+	}
+}
+
+// asmInputReg yields a register holding an inline-asm operand's value, loading a
+// spilled temporary or materializing a constant into a scratch register first.
+func (m *mc) asmInputReg(ref ir.Ref, nextScratch func() Reg) (Reg, int) {
+	switch ref.Kind {
+	case ir.RefTemp:
+		t := m.f.Temps[ref.ID]
+		w := m.f.ClassOf(ref).Size()
+		if t.Reg != ir.NoReg {
+			return Reg(t.Reg), w
+		}
+		r := nextScratch()
+		m.spillLoad(mreg(r), r.IsFloat(), m.spillBase+t.Slot, w)
+		return r, w
+	case ir.RefConst:
+		c := m.f.Consts[ref.ID]
+		r := nextScratch()
+		switch c.Kind {
+		case ir.ConstInt:
+			m.movImm(mreg(r), c.Int, true)
+		case ir.ConstSym:
+			m.materializeSym(mreg(r), c)
+		default:
+			m.fail("arm64: unsupported inline-asm constant operand")
+		}
+		return r, 8
+	}
+	m.fail("arm64: unsupported inline-asm operand %v", ref)
+	return scratch0, 8
 }

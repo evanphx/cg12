@@ -61,20 +61,22 @@ int main(void){
 			if optimize {
 				opt.OptimizeModule(m)
 			}
-			out, code := buildAndRun(t, m, "")
+			out, code := buildObjAndRun(t, m, "")
 			require.Equal(t, 0, code)
 			require.Equal(t, "42 48 1042 123 28012 42042 42\n", out) // +,<<,sub+k,+imm,sumdiff,memops,+r
 		})
 	}
 }
 
-// TestInlineAsmObjectRejected confirms the object emitter, having no assembler
-// for arbitrary mnemonics, rejects inline asm rather than emitting wrong code.
-func TestInlineAsmObjectRejected(t *testing.T) {
-	src := `int f(int a){ int r; __asm__("mov %w0, %w1" : "=r"(r) : "r"(a)); return r; }`
+// TestInlineAsmUnsupportedMnemonic confirms an instruction the assembler does not
+// know is reported rather than silently dropped or mis-encoded. Inline asm in the
+// object path goes through the same assembler the text-input path uses, so its
+// coverage bounds what an inline-asm template may say.
+func TestInlineAsmUnsupportedMnemonic(t *testing.T) {
+	src := `int f(int a){ int r; __asm__("frobnicate %w0, %w1" : "=r"(r) : "r"(a)); return r; }`
 	m, err := cc.Compile("asm.c", src)
 	require.NoError(t, err)
 	_, err = arm64.CompileObject(m)
 	require.Error(t, err)
-	require.Contains(t, err.Error(), "inline assembly")
+	require.Contains(t, err.Error(), "frobnicate")
 }
