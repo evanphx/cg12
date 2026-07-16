@@ -74,6 +74,17 @@ func (s *xsel) selectInt(in *ir.Instr) bool {
 		commit()
 	case ir.OCopy:
 		s.b.move(s.b.refLoc(in.To), s.b.refLoc(in.Arg(0)))
+	case ir.OAllocN:
+		size := s.gpValue(in.Args[0], gpScratch0)
+		d, commit := s.gpDst(in.To)
+		s.b.allocNSP(d, size)
+		commit()
+	case ir.OStackSave:
+		d, commit := s.gpDst(in.To)
+		s.b.movFromSP(d)
+		commit()
+	case ir.OStackRestore:
+		s.b.movToSP(s.gpValue(in.Args[0], gpScratch0))
 	default:
 		return false
 	}

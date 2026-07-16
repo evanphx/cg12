@@ -46,19 +46,6 @@ func (e *emitter) instr(in *ir.Instr) {
 		d, commit := e.gpDst(in.To)
 		e.line("leaq %s, %s", memn(RBP, int32(-e.allocOff[in])), gpn(d, 8))
 		commit()
-	case ir.OAllocN:
-		size := e.gpValue(in.Args[0], gpScratch0)
-		d, commit := e.gpDst(in.To)
-		e.line("subq %s, %%rsp", gpn(size, 8)) // sub rsp, size (16-aligned)
-		e.line("movq %%rsp, %s", gpn(d, 8))    // d = rsp
-		commit()
-	case ir.OStackSave:
-		d, commit := e.gpDst(in.To)
-		e.line("movq %%rsp, %s", gpn(d, 8)) // mov d, rsp
-		commit()
-	case ir.OStackRestore:
-		r := e.gpValue(in.Args[0], gpScratch0)
-		e.line("movq %s, %%rsp", gpn(r, 8)) // mov rsp, r
 	case ir.OExts, ir.OTruncd, ir.OStosi, ir.OStoui, ir.OSltof, ir.OUltof, ir.OCast:
 		e.convert(in)
 	case ir.OBlockAddr:

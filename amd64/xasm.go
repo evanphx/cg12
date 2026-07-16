@@ -33,6 +33,12 @@ type xasm interface {
 	setccMovzx(cmp ir.Cmp, dst Reg)
 	extGP(op ir.Op, w bool, dst, src Reg)
 
+	// Stack pointer: allocNSP grows the stack by a runtime size (VLA) and yields
+	// the new top; movFromSP/movToSP snapshot and restore rsp.
+	allocNSP(dst, size Reg)
+	movFromSP(dst Reg)
+	movToSP(src Reg)
+
 	// spillStore writes a scratch register back to a result's frame slot.
 	spillStore(r Reg, slot, size int)
 
@@ -110,6 +116,12 @@ func (b *mcXasm) extGP(op ir.Op, w bool, dst, src Reg) {
 		b.m.emit(x64.MovReg(false, dm, sm)) // a 32-bit mov zero-extends
 	}
 }
+func (b *mcXasm) allocNSP(dst, size Reg) {
+	b.m.emit(x64.SubReg(true, RSP.mreg(), size.mreg()))
+	b.m.emit(x64.MovReg(true, dst.mreg(), RSP.mreg()))
+}
+func (b *mcXasm) movFromSP(dst Reg) { b.m.emit(x64.MovReg(true, dst.mreg(), RSP.mreg())) }
+func (b *mcXasm) movToSP(src Reg)   { b.m.emit(x64.MovReg(true, RSP.mreg(), src.mreg())) }
 func (b *mcXasm) spillStore(r Reg, slot, size int) {
 	b.m.emit(x64.Store(size*8, r.mreg(), x64.At(RBP.mreg(), b.m.slotAddr(slot))))
 }
@@ -177,6 +189,12 @@ func (b *textXasm) extGP(op ir.Op, w bool, dst, src Reg) {
 		b.e.line("movl %s, %s", gpn(src, 4), gpn(dst, 4))
 	}
 }
+func (b *textXasm) allocNSP(dst, size Reg) {
+	b.e.line("subq %s, %%rsp", gpn(size, 8))
+	b.e.line("movq %%rsp, %s", gpn(dst, 8))
+}
+func (b *textXasm) movFromSP(dst Reg) { b.e.line("movq %%rsp, %s", gpn(dst, 8)) }
+func (b *textXasm) movToSP(src Reg)   { b.e.line("movq %s, %%rsp", gpn(src, 8)) }
 func (b *textXasm) spillStore(r Reg, slot, size int) {
 	b.e.line("mov%s %s, %s", suf(size), gpn(r, size), memn(RBP, b.e.slotAddr(slot)))
 }
