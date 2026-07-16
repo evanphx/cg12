@@ -431,6 +431,44 @@ func TestRelroLeavesDataWritable(t *testing.T) {
 	}
 }
 
+// A program can find its libraries by soname instead of by absolute path: the
+// library is listed as NEEDED and DT_RUNPATH says where to look, with $ORIGIN
+// standing for the directory the program itself was loaded from. That is how a
+// program ships libraries beside it and stays relocatable on disk.
+func TestRunpathFindsLibraryBySoname(t *testing.T) {
+	if runtime.GOARCH != "arm64" {
+		t.Skip("arm64 executable runs natively only on an arm64 host")
+	}
+	dir := t.TempDir()
+	buildTripleSo(t, dir) // libcg12demo.so, exporting cg12_triple
+
+	// main() = cg12_triple(14); the symbol comes from the library, found via RUNPATH.
+	m := ir.NewModule()
+	f := m.NewFunc("main", ir.ClsW).Export()
+	e := f.Entry()
+	e.Ret(e.Call(ir.ClsW, f.Sym("cg12_triple", 0), f.Word(14)))
+
+	l := link.NewWith(arm64.Backend{})
+	require.NoError(t, l.AddModule(m))
+	exe, err := l.LinkDynamicExecutableWith("main", obj.DynOptions{
+		Needed:  []string{"libcg12demo.so", "libc.so.6"},
+		Runpath: []string{"$ORIGIN"},
+	})
+	require.NoError(t, err)
+
+	// Place the program beside the library so $ORIGIN resolves to their directory.
+	path := filepath.Join(dir, "prog")
+	require.NoError(t, os.WriteFile(path, exe, 0o755))
+	err = exec.Command(path).Run()
+	var code int
+	if ee, ok := err.(*exec.ExitError); ok {
+		code = ee.ExitCode()
+	} else {
+		require.NoError(t, err)
+	}
+	require.Equal(t, 42, code, "cg12_triple(14) resolved from the library next to the program")
+}
+
 // The image is a well-formed dynamic executable on both architectures: it names
 // the loader in PT_INTERP and carries a PT_DYNAMIC segment. This runs everywhere,
 // including where the foreign architecture's libraries are not installed.

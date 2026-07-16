@@ -4,6 +4,7 @@ import (
 	"encoding/binary"
 	"fmt"
 	"sort"
+	"strings"
 )
 
 // Dynamic-linking ELF constants.
@@ -35,6 +36,8 @@ const (
 	dtStrSz      = 10
 	dtSymEnt     = 11
 	dtSoname     = 14
+	dtRpath      = 15
+	dtRunpath    = 29
 	dtPltRel     = 20
 	dtJmpRel     = 23
 	dtFlags      = 30
@@ -83,6 +86,12 @@ type DynOptions struct {
 	// It is how a program pins an older interface a library still carries.
 	Require map[string]SymVersion
 
+	// Runpath is the list of directories the loader searches for this image's
+	// libraries, ahead of the system paths (DT_RUNPATH). $ORIGIN in an entry stands
+	// for the directory the image itself was loaded from, which is how a program
+	// ships libraries beside it without hard-coding an absolute path.
+	Runpath []string
+
 	// Lazy resolves each import on its first call rather than at load time,
 	// trading a resolver trampoline and a writable GOT for not paying to bind
 	// symbols the run never uses. Eager binding is the default and is what
@@ -111,6 +120,7 @@ func (o *Object) WriteDynamicExecutable(entrySym string, opts DynOptions) ([]byt
 		needed:  opts.Needed,
 		export:  opts.Export,
 		require: opts.Require,
+		runpath: opts.Runpath,
 		pie:     opts.PIE,
 		lazy:    opts.Lazy,
 	})
@@ -118,9 +128,10 @@ func (o *Object) WriteDynamicExecutable(entrySym string, opts DynOptions) ([]byt
 
 // SharedOptions configures a shared library.
 type SharedOptions struct {
-	Soname string   // the name others link against, e.g. libfoo.so.1 (DT_SONAME)
-	Needed []string // shared libraries this one needs (DT_NEEDED)
-	Export []string // symbols to publish for others to resolve against
+	Soname  string   // the name others link against, e.g. libfoo.so.1 (DT_SONAME)
+	Needed  []string // shared libraries this one needs (DT_NEEDED)
+	Export  []string // symbols to publish for others to resolve against
+	Runpath []string // directories to search for those libraries (DT_RUNPATH)
 }
 
 // WriteSharedLibrary links the object into a shared library: a position-
@@ -128,10 +139,11 @@ type SharedOptions struct {
 // Export in its dynamic symbol table so the loader (or dlsym) can find them.
 func (o *Object) WriteSharedLibrary(opts SharedOptions) ([]byte, error) {
 	return o.writeDynImage(dynImage{
-		needed: opts.Needed,
-		export: opts.Export,
-		soname: opts.Soname,
-		pie:    true, // a shared library is position-independent by definition
+		needed:  opts.Needed,
+		export:  opts.Export,
+		soname:  opts.Soname,
+		runpath: opts.Runpath,
+		pie:     true, // a shared library is position-independent by definition
 	})
 }
 
@@ -142,6 +154,7 @@ type dynImage struct {
 	needed  []string              // DT_NEEDED
 	export  []string              // symbols published in .dynsym
 	require map[string]SymVersion // imports pinned to a specific library version
+	runpath []string              // DT_RUNPATH search directories
 	soname  string                // DT_SONAME; empty for an executable
 	pie     bool                  // position-independent (ET_DYN linked at 0)
 	lazy    bool                  // resolve imports on first call, not at load
@@ -292,6 +305,10 @@ func (o *Object) writeDynImage(im dynImage) ([]byte, error) {
 	if im.soname != "" {
 		sonameOff = dynstr.add(im.soname)
 	}
+	var runpathOff uint32
+	if len(im.runpath) > 0 {
+		runpathOff = dynstr.add(strings.Join(im.runpath, ":"))
+	}
 
 	// Version requirements: .gnu.version gives every dynamic symbol an index, and
 	// .gnu.version_r spells out, per library, which versions those indices name.
@@ -375,6 +392,9 @@ func (o *Object) writeDynImage(im dynImage) ([]byte, error) {
 	}
 	if im.soname != "" {
 		ndyn++ // SONAME
+	}
+	if len(im.runpath) > 0 {
+		ndyn++ // RUNPATH
 	}
 	if len(imports) > 0 {
 		ndyn += 4 // PLTGOT, PLTRELSZ, PLTREL, JMPREL
@@ -570,6 +590,9 @@ func (o *Object) writeDynImage(im dynImage) ([]byte, error) {
 	}
 	if im.soname != "" {
 		dt(dtSoname, uint64(sonameOff))
+	}
+	if len(im.runpath) > 0 {
+		dt(dtRunpath, uint64(runpathOff))
 	}
 	dt(dtHash, va(hashOff))
 	dt(dtGnuHash, va(gnuHashOff))
