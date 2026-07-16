@@ -49,6 +49,12 @@ func (s *xsel) gpInto(d Reg, ref ir.Ref) {
 	s.b.move(regLoc(d, l.size, false), l)
 }
 
+// fpInto places ref's value into XMM d.
+func (s *xsel) fpInto(d Reg, ref ir.Ref) {
+	l := s.b.refLoc(ref)
+	s.b.move(regLoc(d, l.size, true), l)
+}
+
 // gpDst returns the destination GPR for an integer result and a commit closure
 // that stores it back when the result is spilled.
 func (s *xsel) gpDst(ref ir.Ref) (Reg, func()) {
@@ -68,9 +74,10 @@ func (s *xsel) selectInt(in *ir.Instr) bool {
 	switch in.Op {
 	case ir.OAdd, ir.OSub, ir.OMul, ir.OAnd, ir.OOr, ir.OXor:
 		if in.Cls.IsFloat() {
-			return false
+			s.binFP(in)
+		} else {
+			s.binInt(in)
 		}
-		s.binInt(in)
 	case ir.ONeg:
 		if in.Cls.IsFloat() {
 			return false
@@ -84,9 +91,10 @@ func (s *xsel) selectInt(in *ir.Instr) bool {
 		s.shift(in)
 	case ir.ODiv:
 		if in.Cls.IsFloat() {
-			return false
+			s.binFP(in)
+		} else {
+			s.div(in, true, false)
 		}
-		s.div(in, true, false)
 	case ir.OUDiv:
 		s.div(in, false, false)
 	case ir.ORem:
@@ -169,6 +177,20 @@ func (s *xsel) store(in *ir.Instr) {
 		return
 	}
 	s.b.storeGP(in.Op, s.gpValue(in.Arg(0), gpScratch0), in.Arg(1))
+}
+
+// binFP computes dst = arg0 OP arg1 in x86's two-operand form for floats.
+func (s *xsel) binFP(in *ir.Instr) {
+	dbl := in.Cls == ir.ClsD
+	d, commit := s.fpDst(in.To)
+	rb := s.fpValue(in.Arg(1), fpScratch1)
+	if rb == d {
+		s.b.movFP(dbl, fpScratch1, rb)
+		rb = fpScratch1
+	}
+	s.fpInto(d, in.Arg(0))
+	s.b.binFP(in.Op, dbl, d, rb)
+	commit()
 }
 
 // convert emits a float/int conversion or int<->float bitcast.

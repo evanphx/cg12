@@ -50,6 +50,10 @@ type xasm interface {
 	jmpReg(r Reg)
 	hlt()
 
+	// Floating point: two-operand arithmetic (dst = dst OP src) and register move.
+	binFP(op ir.Op, dbl bool, dst, src Reg)
+	movFP(dbl bool, dst, src Reg)
+
 	// Float/int conversions and int<->float bitcasts.
 	cvtSS2SD(dst, src Reg)
 	cvtSD2SS(dst, src Reg)
@@ -168,6 +172,36 @@ func (b *mcXasm) divGP(w, signed bool, divisor Reg) {
 	} else {
 		b.m.emit(x64.XorReg(w, RDX.mreg(), RDX.mreg()))
 		b.m.emit(x64.Div(w, divisor.mreg()))
+	}
+}
+func (b *mcXasm) binFP(op ir.Op, dbl bool, dst, src Reg) {
+	dm, rm := dst.mreg(), src.mreg()
+	switch {
+	case op == ir.OAdd && dbl:
+		b.m.emit(x64.Addsd(dm, rm))
+	case op == ir.OAdd:
+		b.m.emit(x64.Addss(dm, rm))
+	case op == ir.OSub && dbl:
+		b.m.emit(x64.Subsd(dm, rm))
+	case op == ir.OSub:
+		b.m.emit(x64.Subss(dm, rm))
+	case op == ir.OMul && dbl:
+		b.m.emit(x64.Mulsd(dm, rm))
+	case op == ir.OMul:
+		b.m.emit(x64.Mulss(dm, rm))
+	case op == ir.ODiv && dbl:
+		b.m.emit(x64.Divsd(dm, rm))
+	case op == ir.ODiv:
+		b.m.emit(x64.Divss(dm, rm))
+	default:
+		b.fail("amd64: unsupported float op %s", op)
+	}
+}
+func (b *mcXasm) movFP(dbl bool, dst, src Reg) {
+	if dbl {
+		b.m.emit(x64.MovsdReg(dst.mreg(), src.mreg()))
+	} else {
+		b.m.emit(x64.MovssReg(dst.mreg(), src.mreg()))
 	}
 }
 func (b *mcXasm) cvtSS2SD(dst, src Reg) { b.m.emit(x64.Cvtss2sd(dst.mreg(), src.mreg())) }
@@ -340,6 +374,25 @@ func (b *textXasm) divGP(w, signed bool, divisor Reg) {
 		b.e.line("xorl %%edx, %%edx")
 		b.e.line("div%s %s", suf(sz), gpn(divisor, sz))
 	}
+}
+func (b *textXasm) binFP(op ir.Op, dbl bool, dst, src Reg) {
+	base := map[ir.Op]string{ir.OAdd: "add", ir.OSub: "sub", ir.OMul: "mul", ir.ODiv: "div"}[op]
+	if base == "" {
+		b.fail("amd64: unsupported float op %s", op)
+		return
+	}
+	sfx := "ss"
+	if dbl {
+		sfx = "sd"
+	}
+	b.e.line("%s%s %s, %s", base, sfx, xmmn(src), xmmn(dst))
+}
+func (b *textXasm) movFP(dbl bool, dst, src Reg) {
+	mn := "movss"
+	if dbl {
+		mn = "movsd"
+	}
+	b.e.line("%s %s, %s", mn, xmmn(src), xmmn(dst))
 }
 func (b *textXasm) cvtSS2SD(dst, src Reg) { b.e.line("cvtss2sd %s, %s", xmmn(src), xmmn(dst)) }
 func (b *textXasm) cvtSD2SS(dst, src Reg) { b.e.line("cvtsd2ss %s, %s", xmmn(src), xmmn(dst)) }

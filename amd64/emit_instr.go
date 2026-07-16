@@ -20,10 +20,6 @@ func (e *emitter) instr(in *ir.Instr) {
 		return
 	}
 	switch in.Op {
-	case ir.OAdd, ir.OSub, ir.OMul, ir.OAnd, ir.OOr, ir.OXor:
-		e.binFP(in) // the integer forms are handled by the shared selector above
-	case ir.ODiv:
-		e.binFP(in) // integer div/rem handled by the shared selector above
 	case ir.ONeg:
 		e.neg(in)
 	case ir.OCmp:
