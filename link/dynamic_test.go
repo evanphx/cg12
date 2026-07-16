@@ -86,6 +86,41 @@ func TestDynamicExecutableMultipleImports(t *testing.T) {
 	require.Equal(t, 42, runExe(t, exe))
 }
 
+// moduleDerefsPointerInData builds main() = **p, where the module-level pointer p
+// holds the address of the global g. The stored address is absolute, so a
+// position-independent image cannot bind it at link time -- it becomes a RELATIVE
+// relocation the loader rebases to wherever the image lands.
+func moduleDerefsPointerInData(v int64) *ir.Module {
+	m := ir.NewModule()
+	m.Data = append(m.Data,
+		&ir.Data{Name: "g", Align: 4, Items: []ir.DataItem{{Sub: ir.SubW, Ints: []int64{v}}}},
+		&ir.Data{Name: "p", Align: 8, Items: []ir.DataItem{{Sym: "g"}}}, // p = &g
+	)
+	f := m.NewFunc("main", ir.ClsW).Export()
+	e := f.Entry()
+	e.Ret(e.Load(ir.ClsW, e.Load(ir.ClsL, f.Sym("p", 0))))
+	return m
+}
+
+// A position-independent executable runs: the loader places it at an arbitrary
+// base and rebases the pointer stored in .data via its RELATIVE relocation, so
+// dereferencing that pointer still finds the global.
+func TestPIEExecutable(t *testing.T) {
+	if runtime.GOARCH != "arm64" {
+		t.Skip("arm64 executable runs natively only on an arm64 host")
+	}
+	l := link.NewWith(arm64.Backend{})
+	require.NoError(t, l.AddModule(moduleDerefsPointerInData(77)))
+	exe, err := l.LinkPIE("main", "libc.so.6")
+	require.NoError(t, err)
+
+	f, err := elf.NewFile(bytes.NewReader(exe))
+	require.NoError(t, err)
+	require.Equal(t, elf.ET_DYN, f.Type, "a PIE is an ET_DYN image")
+
+	require.Equal(t, 77, runExe(t, exe))
+}
+
 // The image is a well-formed dynamic executable on both architectures: it names
 // the loader in PT_INTERP and carries a PT_DYNAMIC segment. This runs everywhere,
 // including where the foreign architecture's libraries are not installed.

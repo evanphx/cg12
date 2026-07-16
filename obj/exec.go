@@ -180,10 +180,17 @@ func resolveX86(sec []byte, r Reloc, target, place int64) error {
 
 // writeExecHeader fills the 64-byte ELF header of a static executable in place.
 func writeExecHeader(b []byte, machine uint16, entry uint64, phnum int) {
+	writeElfHeader(b, etExec, machine, entry, phnum)
+}
+
+// writeElfHeader fills the 64-byte ELF header of a loadable image (ET_EXEC or
+// ET_DYN) in place. Such an image is loaded from its program headers, so it needs
+// no section headers.
+func writeElfHeader(b []byte, etype, machine uint16, entry uint64, phnum int) {
 	h := &elfBuf{b: b[:0:64]}
 	h.bytes([]byte{0x7f, 'E', 'L', 'F', elfclass64, elfdata2lsb, evCurrent, 0})
 	h.pad(8) // rest of e_ident
-	h.u16(etExec)
+	h.u16(etype)
 	h.u16(machine)
 	h.u32(evCurrent)
 	h.u64(entry) // e_entry

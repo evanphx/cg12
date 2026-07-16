@@ -96,6 +96,18 @@ func (l *Linker) LinkExecutable(entry string) ([]byte, error) {
 // load time to the library that exports it, through a PLT stub the linker
 // synthesizes. entry names the function `_start` calls (e.g. "main").
 func (l *Linker) LinkDynamicExecutable(entry string, needed ...string) ([]byte, error) {
+	return l.linkDynamic(entry, false, needed)
+}
+
+// LinkPIE is LinkDynamicExecutable but emits a position-independent executable:
+// an ET_DYN image the loader may place at any address (so it works with ASLR).
+// References within the image still resolve here, but its absolute addresses
+// become RELATIVE relocations the loader rebases.
+func (l *Linker) LinkPIE(entry string, needed ...string) ([]byte, error) {
+	return l.linkDynamic(entry, true, needed)
+}
+
+func (l *Linker) linkDynamic(entry string, pie bool, needed []string) ([]byte, error) {
 	merged, err := l.mergeWithStart(entry)
 	if err != nil {
 		return nil, err
@@ -103,6 +115,7 @@ func (l *Linker) LinkDynamicExecutable(entry string, needed ...string) ([]byte, 
 	return merged.WriteDynamicExecutable("_start", obj.DynOptions{
 		Interp: l.be.Interp(),
 		Needed: needed,
+		PIE:    pie,
 	})
 }
 
