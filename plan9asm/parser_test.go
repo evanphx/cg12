@@ -83,6 +83,28 @@ TEXT ·block<ABIInternal>(SB), NOSPLIT, $0
 	assert.Equal(t, "V0.B16", xor.Operands[1].Text)
 }
 
+func TestParseExpandsNestedFunctionMacros(t *testing.T) {
+	file, err := Parse(strings.NewReader(`#define INNER(A, B) VADD A.D2, B.D2, B.D2
+#define OUTER(A, B, C) INNER(A, B); VEOR C.B16, B.B16, C.B16
+TEXT ·block<ABIInternal>(SB), NOSPLIT, $0
+	OUTER(V0, V4, V8)
+`))
+	require.NoError(t, err)
+	require.Len(t, file.Statements, 3)
+
+	add, ok := file.Statements[1].(*Instruction)
+	require.True(t, ok)
+	assert.Equal(t, "VADD", add.Opcode)
+	assert.Equal(t, "V0.D2", add.Operands[0].Text)
+	assert.Equal(t, "V4.D2", add.Operands[1].Text)
+
+	xor, ok := file.Statements[2].(*Instruction)
+	require.True(t, ok)
+	assert.Equal(t, "VEOR", xor.Opcode)
+	assert.Equal(t, "V8.B16", xor.Operands[0].Text)
+	assert.Equal(t, "V4.B16", xor.Operands[1].Text)
+}
+
 func TestParseExpandsIncludedObjectAndFunctionMacros(t *testing.T) {
 	file, err := ParseWithOptions(strings.NewReader(`#include "arch.h"
 TEXT ·save(SB), NOSPLIT|NOFRAME, $0
@@ -128,6 +150,24 @@ RET
 	move := file.Statements[0].(*Instruction)
 	assert.Equal(t, "R0", move.Operands[0].Register)
 	assert.Equal(t, "R1", move.Operands[1].Register)
+}
+
+func TestParseSelectsConditionalIntroducedByMacroExpansion(t *testing.T) {
+	file, err := ParseWithOptions(strings.NewReader(`#define BREAK \
+#ifdef GOOS_windows \
+	BRK $0xf000 \
+#else \
+	BRK \
+#endif
+BREAK
+`), ParseOptions{Defines: map[string]string{"GOOS_linux": "1"}})
+	require.NoError(t, err)
+	require.Len(t, file.Statements, 1)
+
+	breakInstruction, ok := file.Statements[0].(*Instruction)
+	require.True(t, ok)
+	assert.Equal(t, "BRK", breakInstruction.Opcode)
+	assert.Empty(t, breakInstruction.Operands)
 }
 
 func TestParseIndexedMemoryOperand(t *testing.T) {

@@ -37,12 +37,13 @@ type sourceAssemblyFile struct {
 // for cg12 lowering. Dependencies use export data until they too are selected
 // for source compilation.
 type sourceLoader struct {
-	fset    *token.FileSet
-	units   map[string]*sourceUnit
-	loading map[string]bool
-	sources map[string]bool
-	base    types.Importer
-	root    string
+	fset        *token.FileSet
+	units       map[string]*sourceUnit
+	loading     map[string]bool
+	sources     map[string]bool
+	base        types.Importer
+	root        string
+	forcePureGo bool
 }
 
 func newSourceLoader(fset *token.FileSet) *sourceLoader {
@@ -51,7 +52,9 @@ func newSourceLoader(fset *token.FileSet) *sourceLoader {
 		units:   make(map[string]*sourceUnit),
 		loading: make(map[string]bool),
 		sources: map[string]bool{
+			"bytes":                                 true,
 			"cmp":                                   true,
+			"crypto":                                true,
 			"errors":                                true,
 			"fmt":                                   true,
 			"io":                                    true,
@@ -61,6 +64,10 @@ func newSourceLoader(fset *token.FileSet) *sourceLoader {
 			"crypto/internal/fips140/sha256":        true,
 			"crypto/internal/fips140/sha512":        true,
 			"crypto/internal/fips140deps/byteorder": true,
+			"crypto/internal/fips140deps/cpu":       true,
+			"crypto/internal/fips140deps/godebug":   true,
+			"crypto/internal/fips140deps/time":      true,
+			"crypto/internal/impl":                  true,
 			"crypto/md5":                            true,
 			"crypto/sha1":                           true,
 			"crypto/sha512":                         true,
@@ -72,6 +79,7 @@ func newSourceLoader(fset *token.FileSet) *sourceLoader {
 			"internal/abi":                          true,
 			"internal/asan":                         true,
 			"internal/bytealg":                      true,
+			"internal/bisect":                       true,
 			"internal/byteorder":                    true,
 			"internal/chacha8rand":                  true,
 			"internal/coverage/rtcov":               true,
@@ -79,6 +87,7 @@ func newSourceLoader(fset *token.FileSet) *sourceLoader {
 			"internal/filepathlite":                 true,
 			"internal/fmtsort":                      true,
 			"internal/goarch":                       true,
+			"internal/godebug":                      true,
 			"internal/godebugs":                     true,
 			"internal/goexperiment":                 true,
 			"internal/goos":                         true,
@@ -113,10 +122,12 @@ func newSourceLoader(fset *token.FileSet) *sourceLoader {
 			"runtime":                               true,
 			"slices":                                true,
 			"strconv":                               true,
+			"strings":                               true,
 			"sync":                                  true,
 			"sync/atomic":                           true,
 			"syscall":                               true,
 			"time":                                  true,
+			"unicode":                               true,
 			"unicode/utf8":                          true,
 			"unicode/utf16":                         true,
 		},
@@ -146,7 +157,10 @@ func (l *sourceLoader) Import(path string) (*types.Package, error) {
 	l.loading[path] = true
 	defer delete(l.loading, path)
 	ctx := build.Default
-	ctx.BuildTags = append(append([]string{}, ctx.BuildTags...), "purego")
+	ctx.BuildTags = append([]string{}, ctx.BuildTags...)
+	if l.forcePureGo || runtime.GOARCH != "arm64" || !plan9asm.SupportsARM64Package(path) {
+		ctx.BuildTags = append(ctx.BuildTags, "purego")
+	}
 	ctx.GOROOT = l.root
 	bp, err := ctx.Import(path, "", 0)
 	if err != nil {

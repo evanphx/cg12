@@ -2,11 +2,168 @@ package arm64
 
 import (
 	"fmt"
+	"sort"
 
 	"github.com/evanphx/cg12/ir"
 )
 
 const goStackLinkSize = 8
+
+type goRegisterSpill struct {
+	reg     Reg
+	offset  int
+	size    int
+	float   bool
+	pointer bool
+}
+
+type goRegisterSpillGroup struct {
+	parts     []goABIPart
+	reg       Reg
+	size      int
+	alignment int
+	float     bool
+	pointer   bool
+}
+
+type goArgumentFrame struct {
+	spills       []goRegisterSpill
+	size         int
+	pointerWords []int
+}
+
+// goRegisterSpills returns the ABIInternal entry spills used by the standard
+// stack-growth prologue. Register arguments have home slots after all stack
+// arguments and stack results. morestack copies those slots with the caller's
+// frame, and the retry path reloads the argument registers from them.
+func goRegisterSpills(function *ir.Func) []goRegisterSpill {
+	return goArgumentFrameFor(function).spills
+}
+
+func goArgumentFrameFor(function *ir.Func) goArgumentFrame {
+	assigner := newArgAssigner(true)
+	groups := make([]goRegisterSpillGroup, 0, len(function.Params))
+	pointerOffsets := make(map[int]bool)
+	for _, parameter := range function.Params {
+		if parameter.Agg != nil {
+			parts, onStack, stackOffset := assignGoAggregate(&assigner, parameter.Agg)
+			if onStack {
+				for _, offset := range goAggregatePointerOffsets(parameter.Agg) {
+					pointerOffsets[stackOffset+offset] = true
+				}
+				continue
+			}
+			size, alignment := parameter.Agg.Layout()
+			groups = append(groups, goRegisterSpillGroup{
+				parts:     parts,
+				size:      size,
+				alignment: alignment,
+			})
+			continue
+		}
+
+		location := assigner.assign(parameter.Cls)
+		if location.onStack {
+			if parameter.GCRef {
+				pointerOffsets[location.stacky] = true
+			}
+			continue
+		}
+		groups = append(groups, goRegisterSpillGroup{
+			reg:       location.reg,
+			size:      parameter.Cls.Size(),
+			alignment: parameter.Cls.Size(),
+			float:     parameter.Cls.IsFloat(),
+			pointer:   parameter.GCRef,
+		})
+	}
+
+	resultEnd := roundUp(assigner.nsaa, 8)
+	if function.RetAgg != nil {
+		results := newArgAssigner(true)
+		results.nsaa = resultEnd
+		_, onStack, stackOffset := assignGoAggregate(&results, function.RetAgg)
+		if onStack {
+			for _, offset := range goAggregatePointerOffsets(function.RetAgg) {
+				pointerOffsets[stackOffset+offset] = true
+			}
+		}
+		resultEnd = results.nsaa
+	}
+
+	cursor := roundUp(resultEnd, 8)
+	var spills []goRegisterSpill
+	for _, group := range groups {
+		cursor = roundUp(cursor, group.alignment)
+		if len(group.parts) == 0 {
+			spill := goRegisterSpill{
+				reg:     group.reg,
+				offset:  goStackLinkSize + cursor,
+				size:    group.size,
+				float:   group.float,
+				pointer: group.pointer,
+			}
+			spills = append(spills, spill)
+			if spill.pointer {
+				pointerOffsets[cursor] = true
+			}
+		} else {
+			for _, part := range group.parts {
+				spill := goRegisterSpill{
+					reg:     part.reg,
+					offset:  goStackLinkSize + cursor + part.offset,
+					size:    part.sub.Size(),
+					float:   part.sub.Cls().IsFloat(),
+					pointer: part.pointer,
+				}
+				spills = append(spills, spill)
+				if spill.pointer {
+					pointerOffsets[cursor+part.offset] = true
+				}
+			}
+		}
+		cursor += group.size
+	}
+	cursor = roundUp(cursor, 8)
+	pointerWords := make([]int, 0, len(pointerOffsets))
+	for offset := range pointerOffsets {
+		if offset%8 == 0 {
+			pointerWords = append(pointerWords, offset/8)
+		}
+	}
+	sort.Ints(pointerWords)
+	return goArgumentFrame{spills: spills, size: cursor, pointerWords: pointerWords}
+}
+
+func goAggregatePointerOffsets(aggregate *ir.AggType) []int {
+	var offsets []int
+	var walk func(*ir.AggType, int)
+	walk = func(current *ir.AggType, base int) {
+		if current == nil || current.Opaque || current.Union {
+			return
+		}
+		offset := 0
+		for _, field := range current.Fields {
+			size, alignment := goFieldSizeAlign(field)
+			offset = roundUp(offset, alignment)
+			count := field.Count
+			if count <= 0 {
+				count = 1
+			}
+			for index := 0; index < count; index++ {
+				fieldOffset := base + offset + index*size
+				if field.Type != nil {
+					walk(field.Type, fieldOffset)
+				} else if field.Pointer {
+					offsets = append(offsets, fieldOffset)
+				}
+			}
+			offset += size * count
+		}
+	}
+	walk(aggregate, 0)
+	return offsets
+}
 
 func maxOutgoingCallSize(function *ir.Func) int {
 	maximum := 0

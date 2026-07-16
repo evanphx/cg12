@@ -108,6 +108,74 @@ func TestInlineRecordsProvenance(t *testing.T) {
 	assert.Nil(t, site.Parent, "a top-level inline has no parent")
 }
 
+func TestInlineAdaptsGenericComparisonToFloatArguments(t *testing.T) {
+	module := ir.NewModule()
+	generic := module.NewFunc("genericLess", ir.ClsW)
+	left := generic.Param("left", ir.ClsL)
+	right := generic.Param("right", ir.ClsL)
+	generic.Entry().Ret(generic.Entry().Cmp(ir.CmpUlt, ir.ClsW, left, right))
+
+	instantiated := module.NewFunc("floatLess", ir.ClsW).Export()
+	floatLeft := instantiated.Param("left", ir.ClsD)
+	floatRight := instantiated.Param("right", ir.ClsD)
+	instantiated.Entry().Ret(instantiated.Entry().Call(
+		ir.ClsW,
+		instantiated.Sym("genericLess", 0),
+		floatLeft,
+		floatRight,
+	))
+
+	require.True(t, opt.Inline(module))
+	for _, block := range instantiated.Blocks {
+		for _, instruction := range block.Instrs {
+			if instruction.Op == ir.OCmp {
+				assert.Equal(t, ir.CmpFlt, instruction.Cmp)
+				return
+			}
+		}
+	}
+	t.Fatal("inlined floating-point comparison was not found")
+}
+
+func TestNestedInlineAdaptsGenericComparisonToFloatArguments(t *testing.T) {
+	module := ir.NewModule()
+	less := module.NewFunc("genericLess", ir.ClsW)
+	lessLeft := less.Param("left", ir.ClsL)
+	lessRight := less.Param("right", ir.ClsL)
+	less.Entry().Ret(less.Entry().Cmp(ir.CmpUlt, ir.ClsW, lessLeft, lessRight))
+
+	compare := module.NewFunc("genericCompare", ir.ClsW)
+	left := compare.Param("left", ir.ClsL)
+	right := compare.Param("right", ir.ClsL)
+	entry := compare.Entry()
+	leftLess := entry.Call(ir.ClsW, compare.Sym("genericLess", 0), left, right)
+	rightLess := entry.Call(ir.ClsW, compare.Sym("genericLess", 0), right, left)
+	entry.Ret(entry.Or(ir.ClsW, leftLess, rightLess))
+
+	instantiated := module.NewFunc("floatCompare", ir.ClsW).Export()
+	floatLeft := instantiated.Param("left", ir.ClsD)
+	floatRight := instantiated.Param("right", ir.ClsD)
+	instantiated.Entry().Ret(instantiated.Entry().Call(
+		ir.ClsW,
+		instantiated.Sym("genericCompare", 0),
+		floatLeft,
+		floatRight,
+	))
+
+	opt.OptimizeModule(module)
+	comparisonCount := 0
+	for _, block := range instantiated.Blocks {
+		for _, instruction := range block.Instrs {
+			if instruction.Op != ir.OCmp {
+				continue
+			}
+			comparisonCount++
+			assert.True(t, instruction.Cmp.IsFloat(), "comparison predicate %v", instruction.Cmp)
+		}
+	}
+	assert.Equal(t, 2, comparisonCount)
+}
+
 func TestInlineRecursiveNotInlined(t *testing.T) {
 	// A self-recursive callee is never inlined (it would not terminate).
 	m := ir.NewModule()

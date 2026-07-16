@@ -19,6 +19,9 @@ func lower(f *ir.Func, tlsModel TLSModel) error {
 	if err := f.MarkLowered("arm64"); err != nil {
 		return err
 	}
+	if err := validateComparisonPredicates(f); err != nil {
+		return fmt.Errorf("before ARM64 lowering: %w", err)
+	}
 	lowerpass.JumpTables(f) // dense switches -> indexed branch (JmpTable)
 	lowerpass.Switches(f)   // remaining multiway branches -> conditional branches
 	// Before the folds: they rewrite addressing, and a thread-local is not an
@@ -37,7 +40,31 @@ func lower(f *ir.Func, tlsModel TLSModel) error {
 	lowerpass.CoalescePhis(f)
 	lowerpass.DestructSSA(f)
 	lowerpass.ThreadJumps(f) // collapse the empty forwarding blocks edge splitting left
-	return lowerABI(f)
+	if err := validateComparisonPredicates(f); err != nil {
+		return fmt.Errorf("after SSA destruction: %w", err)
+	}
+	if err := lowerABI(f); err != nil {
+		return err
+	}
+	if err := validateComparisonPredicates(f); err != nil {
+		return fmt.Errorf("after ABI lowering: %w", err)
+	}
+	return nil
+}
+
+func validateComparisonPredicates(function *ir.Func) error {
+	for _, block := range function.Blocks {
+		for _, instruction := range block.Instrs {
+			if instruction.Op != ir.OCmp || len(instruction.Args) == 0 {
+				continue
+			}
+			operandClass := function.ClassOf(instruction.Args[0])
+			if operandClass.IsFloat() != instruction.Cmp.IsFloat() {
+				return fmt.Errorf("comparison predicate %v does not match %s operands at %+v", instruction.Cmp, operandClass, instruction.Pos)
+			}
+		}
+	}
+	return nil
 }
 
 // foldSharedOffset folds a constant-offset address computation `a = add(base, #c)`

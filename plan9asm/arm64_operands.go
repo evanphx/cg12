@@ -19,12 +19,15 @@ func memoryAddress(operand Operand, suffix string) (string, error) {
 		return "", err
 	}
 	if operand.Index != "" {
-		if suffix != "" {
-			return "", fmt.Errorf("indexed memory operand %q does not accept .%s", operand.Text, suffix)
-		}
 		index, err := arm64Register(operand.Index, 64)
 		if err != nil {
 			return "", err
+		}
+		if suffix == "P" {
+			return fmt.Sprintf("[%s], %s", base, index), nil
+		}
+		if suffix != "" {
+			return "", fmt.Errorf("indexed memory operand %q does not accept .%s", operand.Text, suffix)
 		}
 		return fmt.Sprintf("[%s, %s]", base, index), nil
 	}
@@ -94,20 +97,50 @@ func symbolRelocation(name string, offset int64) string {
 }
 
 func (t *arm64Translator) memoryAddress(operand Operand, suffix string) (string, error) {
+	return t.memoryAddressAvoiding(operand, suffix)
+}
+
+func (t *arm64Translator) memoryAddressAvoiding(operand Operand, suffix string, avoid ...string) (string, error) {
 	if operand.Offset != "" {
-		offset, err := t.resolveIntegerExpression(operand.Offset)
+		offsetSource := operand.Offset
+		if operand.Base == "SP" {
+			offset, err := namedFrameOffset(offsetSource)
+			if err != nil {
+				return "", err
+			}
+			offsetSource = strconv.Itoa(t.currentPlan9Frame + offset)
+		}
+		offset, err := t.resolveIntegerExpression(offsetSource)
 		if err != nil {
 			return "", fmt.Errorf("invalid memory offset %q: %w", operand.Offset, err)
 		}
+		if suffix == "" && (offset < -256 || offset > 255) {
+			base, err := arm64Register(operand.Base, 64)
+			if err != nil {
+				return "", err
+			}
+			addressRegister := "x16"
+			unavailable := make(map[string]bool, len(avoid)+1)
+			unavailable[base] = true
+			for _, register := range avoid {
+				unavailable[register] = true
+			}
+			for _, candidate := range []string{"x16", "x17", "x27"} {
+				if !unavailable[candidate] {
+					addressRegister = candidate
+					break
+				}
+			}
+			if unavailable[addressRegister] {
+				return "", fmt.Errorf("no scratch register available for memory operand %q", operand.Text)
+			}
+			if err := t.emitRegisterOffset(addressRegister, base, offset); err != nil {
+				return "", err
+			}
+			return "[" + addressRegister + "]", nil
+		}
 		operand.Offset = strconv.FormatInt(offset, 10)
 	}
-	if t.currentFrame == 0 || operand.Base != "RSP" {
-		return memoryAddress(operand, suffix)
-	}
-	if suffix != "" || operand.Index != "" {
-		return "", fmt.Errorf("framed RSP operand %q does not accept indexed or update addressing", operand.Text)
-	}
-	operand.Base = "SP"
 	return memoryAddress(operand, suffix)
 }
 

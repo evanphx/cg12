@@ -568,42 +568,20 @@ func TestGoPointerFrameOffsetsIgnoreUnassignedSpillSlots(t *testing.T) {
 func TestGoAssemblyFunctionInfoOnlyMarksRealTopFrames(t *testing.T) {
 	functions := goAssemblyFunctionInfo()
 	topFrames := make([]string, 0, 2)
-	var morestackRestore *goFunctionInfo
-	var checkASM *goFunctionInfo
+	var supportEnd *goFunctionInfo
 	for _, function := range functions {
 		if function.funcFlag&1 != 0 {
 			topFrames = append(topFrames, function.name)
 		}
-		if function.name == "runtime_morestack_restore" {
+		if function.name == "runtime_gocAssemblySupportEnd" {
 			function := function
-			morestackRestore = &function
-		}
-		if function.name == "runtime_checkASM" {
-			function := function
-			checkASM = &function
+			supportEnd = &function
 		}
 	}
 
-	assert.Equal(t, []string{"runtime_mstart", "runtime_goexit", "runtime_asmcgocall"}, topFrames)
-	for _, function := range functions {
-		assert.NotEqual(t, "runtime_morestack_restore_end", function.name)
-	}
-	require.NotNil(t, morestackRestore)
-	assert.Equal(t, 560, morestackRestore.frameSize)
-	assert.Equal(t, []int{49, 50, 51, 52, 53, 54, 55, 56, 57, 58, 59, 60, 61, 62, 63, 64, 65, 66}, morestackRestore.pointerWords)
-	require.NotNil(t, checkASM)
-	assert.Equal(t, byte(goFuncFlagAsm), checkASM.funcFlag)
-}
-
-func TestGoRegisterPointerMaskTracksABIRegisters(t *testing.T) {
-	function := ir.NewModule().NewFunc("pointer_args", ir.ClsW)
-	function.Param("integer", ir.ClsL)
-	function.Param("floating", ir.ClsD)
-	function.ParamRef("firstPointer")
-	function.Param("word", ir.ClsW)
-	function.ParamRef("secondPointer")
-
-	assert.Equal(t, uint16(0b1010), goRegisterPointerMask(function))
+	assert.Empty(t, topFrames)
+	require.NotNil(t, supportEnd)
+	assert.Equal(t, byte(goFuncFlagAsm), supportEnd.funcFlag)
 }
 
 func TestCompileLargeFrame(t *testing.T) {

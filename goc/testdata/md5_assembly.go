@@ -1,0 +1,15 @@
+package main
+
+import "crypto/md5"
+
+func main() {
+	digest := md5.Sum([]byte("abc"))
+	want := [md5.Size]byte{
+		0x90, 0x01, 0x50, 0x98, 0x3c, 0xd2, 0x4f, 0xb0,
+		0xd6, 0x96, 0x3f, 0x7d, 0x28, 0xe1, 0x7f, 0x72,
+	}
+
+	if digest != want {
+		panic("md5 assembly returned the wrong digest")
+	}
+}

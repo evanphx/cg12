@@ -25,6 +25,7 @@ func TestPrepareAssemblyCollectsCodeReferencesAndFunctions(t *testing.T) {
 	assert.True(t, bundle.references["runtime_flag"])
 	require.Len(t, bundle.functions, 1)
 	assert.Equal(t, "runtime_example", bundle.functions[0].name)
+	assert.Equal(t, 8, bundle.functions[0].argumentSize)
 	assert.Equal(t, byte(goFuncFlagAsm), bundle.functions[0].funcFlag)
 }
 
@@ -48,4 +49,31 @@ func TestPrepareAssemblyMarksAsyncPreemptForRuntimeStackScanning(t *testing.T) {
 	assert.Equal(t, 8, bundle.functions[0].frameStart)
 	assert.Equal(t, byte(3), bundle.functions[0].funcID)
 	assert.Equal(t, byte(goFuncFlagAsm), bundle.functions[0].funcFlag)
+}
+
+func TestPrepareAssemblyBuildsGoABI0EntryWrapper(t *testing.T) {
+	module := ir.NewModule()
+	args := module.NewFunc("runtime.args", ir.ClsW)
+	args.GoABI = true
+	args.Param("argc", ir.ClsW)
+	args.Param("argv", ir.ClsL)
+	args.Entry().Ret(args.Word(0))
+	module.Assembly = append(module.Assembly, ir.AssemblyFile{
+		PackagePath: "runtime",
+		Path:        "runtime/caller_arm64.s",
+		Source: `TEXT ·caller<ABIInternal>(SB),NOSPLIT|NOFRAME,$0-0
+	CALL runtime·args(SB)
+	RET
+`,
+	})
+
+	bundle, err := prepareAssembly(module)
+	require.NoError(t, err)
+	assert.Contains(t, bundle.source, "\tbl runtime_args_abi0\n")
+	assert.Contains(t, bundle.source, "runtime_args_abi0:\n")
+	assert.Contains(t, bundle.source, "\tldr w0, [sp, #24]\n")
+	assert.Contains(t, bundle.source, "\tldr x1, [sp, #32]\n")
+	assert.Contains(t, bundle.source, "\tbl runtime_args\n")
+	assert.Contains(t, bundle.source, "\tstr w0, [sp, #40]\n")
+	assert.True(t, bundle.abi0References["runtime_args"])
 }

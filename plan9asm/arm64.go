@@ -12,15 +12,24 @@ type arm64Translator struct {
 	functionIndex     int
 	labels            map[int]map[string]string
 	references        map[string]bool
+	abi0References    map[string]bool
 	abi0Layouts       map[int]abi0Layout
 	directABI0        map[int]bool
+	abi0Symbols       map[string]bool
+	directABI0Symbols map[string]bool
+	functionCalls     map[int]bool
 	currentABI0       bool
 	currentDirectABI0 bool
 	currentABI0Layout abi0Layout
 	currentFrame      int
+	currentPlan9Frame int
+	currentLeaf       bool
 	functions         []ARM64Function
 	data              map[string][]arm64DataValue
 	lseEnabled        bool
+	cryptoEnabled     bool
+	sha512Enabled     bool
+	crcEnabled        bool
 	output            strings.Builder
 }
 
@@ -80,20 +89,34 @@ func (t *arm64Translator) translateInstruction(instruction *Instruction) error {
 	switch opcode {
 	case "MOVD", "MOVW", "MOVWU", "MOVH", "MOVHU", "MOVB", "MOVBU":
 		return t.translateMove(instruction)
-	case "FMOVD":
+	case "FMOVD", "FMOVS":
 		return t.translateFloatMove(instruction)
 	case "VMOV":
 		return t.translateVectorMove(instruction)
+	case "VDUP":
+		return t.translateVectorDuplicate(instruction)
 	case "VLD1", "VLD1R", "VLD4R":
 		return t.translateVectorLoad(instruction)
 	case "VST1":
 		return t.translateVectorStore(instruction)
 	case "VCMEQ", "VAND", "VORR", "VEOR", "VADD", "VADDP":
 		return t.translateVectorBinary(instruction)
-	case "VREV32":
+	case "VREV32", "VREV64":
 		return t.translateVectorUnary(instruction)
+	case "AESE", "AESMC":
+		return t.translateVectorCrypto(instruction)
+	case "SHA256H", "SHA256H2", "SHA256SU0", "SHA256SU1":
+		return t.translateSHA256(instruction)
+	case "SHA1C", "SHA1P", "SHA1M", "SHA1H", "SHA1SU0", "SHA1SU1":
+		return t.translateSHA1(instruction)
+	case "SHA512H", "SHA512H2", "SHA512SU0", "SHA512SU1":
+		return t.translateSHA512(instruction)
+	case "CRC32B", "CRC32H", "CRC32W", "CRC32X", "CRC32CB", "CRC32CH", "CRC32CW", "CRC32CX":
+		return t.translateCRC32(instruction)
 	case "VSHL", "VSRI":
 		return t.translateVectorImmediate(instruction)
+	case "VEXT":
+		return t.translateVectorExtract(instruction)
 	case "VTBL":
 		return t.translateVectorTable(instruction)
 	case "VUADDLV":
@@ -110,6 +133,8 @@ func (t *arm64Translator) translateInstruction(instruction *Instruction) error {
 		return t.translateNegate(instruction)
 	case "RBIT", "RBITW", "CLZ", "CLZW":
 		return t.translateUnaryRegister(instruction)
+	case "ROR", "RORW":
+		return t.translateRotateRight(instruction)
 	case "CMP", "CMPW", "CMN", "CMNW", "TST", "TSTW":
 		return t.translateCompare(instruction)
 	case "CCMP", "CCMPW":
@@ -140,8 +165,35 @@ func (t *arm64Translator) translateInstruction(instruction *Instruction) error {
 		return t.translateMSR(instruction)
 	case "DC":
 		return t.translateDC(instruction)
+	case "PRFM":
+		if len(instruction.Operands) != 2 || instruction.Operands[0].Kind != OperandMemory {
+			return fmt.Errorf("PRFM requires an address and prefetch operation")
+		}
+		address, err := t.memoryAddress(instruction.Operands[0], instruction.Suffix)
+		if err != nil {
+			return err
+		}
+		operation := strings.ToLower(instruction.Operands[1].Text)
+		fmt.Fprintf(&t.output, "\tprfm %s, %s\n", operation, address)
+		return nil
 	case "SVC":
 		return t.translateSVC(instruction)
+	case "BRK":
+		if len(instruction.Operands) == 0 {
+			t.output.WriteString("\tbrk #0\n")
+			return nil
+		}
+		if len(instruction.Operands) != 1 || instruction.Operands[0].Kind != OperandImmediate {
+			return fmt.Errorf("BRK accepts at most one immediate")
+		}
+		fmt.Fprintf(&t.output, "\tbrk #%s\n", instruction.Operands[0].Immediate)
+		return nil
+	case "UNDEF":
+		if len(instruction.Operands) != 0 {
+			return fmt.Errorf("UNDEF does not accept operands")
+		}
+		t.output.WriteString("\t.inst 0\n")
+		return nil
 	case "LDAR", "LDARW", "LDARB", "LDAXR", "LDAXRW", "LDAXRB":
 		return t.translateAtomicLoad(instruction)
 	case "STLR", "STLRW", "STLRB":
@@ -150,7 +202,7 @@ func (t *arm64Translator) translateInstruction(instruction *Instruction) error {
 		return t.translateAtomicStoreExclusive(instruction)
 	case "SWPALB", "SWPALW", "SWPALD", "CASALW", "CASALD", "LDADDALW", "LDADDALD", "LDCLRALB", "LDCLRALW", "LDCLRALD", "LDORALB", "LDORALW", "LDORALD":
 		return t.translateLSEAtomic(instruction)
-	case "MVN":
+	case "MVN", "MVNW":
 		return t.translateBitwiseNot(instruction)
 	case "RET":
 		if len(instruction.Operands) > 1 {
@@ -169,8 +221,13 @@ func (t *arm64Translator) translateInstruction(instruction *Instruction) error {
 			return nil
 		}
 		if t.currentFrame != 0 {
-			fmt.Fprintf(&t.output, "\tadd x29, sp, #%d\n", t.currentFrame-8)
-			fmt.Fprintf(&t.output, "\tadd sp, sp, #%d\n", t.currentFrame)
+			t.output.WriteString("\tldur x29, [sp, #-8]\n")
+			if !t.currentLeaf {
+				t.output.WriteString("\tldr x30, [sp]\n")
+			}
+			if err := t.emitRegisterOffset("sp", "sp", int64(t.currentFrame)); err != nil {
+				return err
+			}
 		}
 		t.output.WriteString("\tret\n")
 		return nil
@@ -200,19 +257,70 @@ func (t *arm64Translator) translateInstruction(instruction *Instruction) error {
 
 func (t *arm64Translator) translateFloatMove(instruction *Instruction) error {
 	if len(instruction.Operands) != 2 {
-		return fmt.Errorf("FMOVD requires a source and destination")
+		return fmt.Errorf("%s requires a source and destination", instruction.Opcode)
 	}
 	source := instruction.Operands[0]
 	destination := instruction.Operands[1]
-	if source.Kind != OperandRegister || source.Register != "ZR" || destination.Kind != OperandRegister || !strings.HasPrefix(destination.Register, "F") {
-		return fmt.Errorf("unsupported FMOVD operands %q, %q", source.Text, destination.Text)
+	width := 64
+	if instruction.Opcode == "FMOVS" {
+		width = 32
 	}
-	number, err := strconv.Atoi(strings.TrimPrefix(destination.Register, "F"))
+	if source.Kind == OperandRegister && source.Register == "ZR" && destination.Kind == OperandRegister {
+		destinationRegister, err := arm64FloatRegister(destination.Register, width)
+		if err != nil {
+			return err
+		}
+		fmt.Fprintf(&t.output, "\tfmov %s, %s\n", destinationRegister, arm64ZeroRegister(width))
+		return nil
+	}
+	if source.Kind == OperandMemory && destination.Kind == OperandRegister {
+		destinationRegister, err := arm64FloatRegister(destination.Register, width)
+		if err != nil {
+			return err
+		}
+		address, err := t.memoryAddress(source, instruction.Suffix)
+		if err != nil {
+			return err
+		}
+		fmt.Fprintf(&t.output, "\tldr %s, %s\n", destinationRegister, address)
+		return nil
+	}
+	if source.Kind == OperandRegister && destination.Kind == OperandMemory {
+		sourceRegister, err := arm64FloatRegister(source.Register, width)
+		if err != nil {
+			return err
+		}
+		address, err := t.memoryAddress(destination, instruction.Suffix)
+		if err != nil {
+			return err
+		}
+		fmt.Fprintf(&t.output, "\tstr %s, %s\n", sourceRegister, address)
+		return nil
+	}
+	return fmt.Errorf("unsupported %s operands %q, %q", instruction.Opcode, source.Text, destination.Text)
+}
+
+func arm64FloatRegister(register string, width int) (string, error) {
+	register = strings.ToUpper(register)
+	if !strings.HasPrefix(register, "F") {
+		return "", fmt.Errorf("unsupported ARM64 floating-point register %s", register)
+	}
+	number, err := strconv.Atoi(strings.TrimPrefix(register, "F"))
 	if err != nil || number < 0 || number > 31 {
-		return fmt.Errorf("unsupported floating-point register %s", destination.Register)
+		return "", fmt.Errorf("unsupported ARM64 floating-point register %s", register)
 	}
-	fmt.Fprintf(&t.output, "\tfmov d%d, xzr\n", number)
-	return nil
+	prefix := "d"
+	if width == 32 {
+		prefix = "s"
+	}
+	return prefix + strconv.Itoa(number), nil
+}
+
+func arm64ZeroRegister(width int) string {
+	if width == 32 {
+		return "wzr"
+	}
+	return "xzr"
 }
 
 func (t *arm64Translator) translateMove(instruction *Instruction) error {
@@ -255,10 +363,15 @@ func (t *arm64Translator) translateMove(instruction *Instruction) error {
 			return nil
 		case OperandImmediate:
 			if symbolOperand := parseOperand(source.Immediate); symbolOperand.Kind == OperandMemory && symbolOperand.Base == "SB" {
-				name := t.symbol(symbolOperand.Symbol)
+				name, offset, err := t.symbolAddress(symbolOperand)
+				if err != nil {
+					return err
+				}
 				t.references[name] = true
-				fmt.Fprintf(&t.output, "\tadrp %s, %s\n", destinationRegister, name)
-				fmt.Fprintf(&t.output, "\tadd %s, %s, :lo12:%s\n", destinationRegister, destinationRegister, name)
+				target := t.assemblyAddressSymbol(name)
+				relocation := symbolRelocation(target, offset)
+				fmt.Fprintf(&t.output, "\tadrp %s, %s\n", destinationRegister, target)
+				fmt.Fprintf(&t.output, "\tadd %s, %s, :lo12:%s\n", destinationRegister, destinationRegister, relocation)
 				return nil
 			}
 			if frameOperand := parseOperand(source.Immediate); frameOperand.Kind == OperandMemory && frameOperand.Base == "FP" {
@@ -272,6 +385,9 @@ func (t *arm64Translator) translateMove(instruction *Instruction) error {
 				addressOffset := t.currentFrame + 8 + offset
 				fmt.Fprintf(&t.output, "\tadd %s, sp, #%d\n", destinationRegister, addressOffset)
 				return nil
+			}
+			if addressOperand := parseOperand(source.Immediate); addressOperand.Kind == OperandMemory && addressOperand.Index == "" {
+				return t.emitAddressImmediate(destinationRegister, addressOperand)
 			}
 			return t.emitMoveImmediate(destinationRegister, width, source.Immediate)
 		case OperandMemory:
@@ -307,6 +423,59 @@ func (t *arm64Translator) translateMove(instruction *Instruction) error {
 		return t.emitStore(instruction, sourceRegister, destination)
 	}
 	return fmt.Errorf("unsupported %s operands %q, %q", instruction.Opcode, source.Text, destination.Text)
+}
+
+func (t *arm64Translator) assemblyAddressSymbol(name string) string {
+	if !t.abi0Symbols[name] {
+		return name
+	}
+	t.abi0References[name] = true
+	if t.directABI0Symbols[name] {
+		return name
+	}
+	return abi0Symbol(name)
+}
+
+func (t *arm64Translator) emitAddressImmediate(destination string, address Operand) error {
+	base, err := arm64Register(address.Base, 64)
+	if err != nil {
+		return err
+	}
+	offset, err := t.resolveIntegerExpression(address.Offset)
+	if err != nil {
+		return fmt.Errorf("invalid address offset %q: %w", address.Offset, err)
+	}
+	return t.emitRegisterOffset(destination, base, offset)
+}
+
+func (t *arm64Translator) emitRegisterOffset(destination, base string, offset int64) error {
+	if offset == 0 {
+		fmt.Fprintf(&t.output, "\tmov %s, %s\n", destination, base)
+		return nil
+	}
+	mnemonic := "add"
+	magnitude := offset
+	if magnitude < 0 {
+		mnemonic = "sub"
+		magnitude = -magnitude
+	}
+	if magnitude <= 4095 {
+		fmt.Fprintf(&t.output, "\t%s %s, %s, #%d\n", mnemonic, destination, base, magnitude)
+		return nil
+	}
+	if magnitude%4096 == 0 && magnitude/4096 <= 4095 {
+		fmt.Fprintf(&t.output, "\t%s %s, %s, #%d, lsl #12\n", mnemonic, destination, base, magnitude/4096)
+		return nil
+	}
+	scratch := "x27"
+	if destination == scratch || base == scratch {
+		scratch = "x16"
+	}
+	if err := t.emitMoveImmediate(scratch, 64, strconv.FormatInt(magnitude, 10)); err != nil {
+		return err
+	}
+	fmt.Fprintf(&t.output, "\t%s %s, %s, %s\n", mnemonic, destination, base, scratch)
+	return nil
 }
 
 func systemRegister(operand Operand) bool {
@@ -438,9 +607,9 @@ func (t *arm64Translator) emitStore(instruction *Instruction, sourceRegister str
 	if destination.Base == "FP" && t.currentDirectABI0 {
 		return t.emitDirectABI0Store(instruction, sourceRegister, destination)
 	} else if destination.Base == "FP" && t.currentABI0 {
-		address, err = t.abi0FrameAddress(destination, instruction.Suffix)
+		address, err = t.abi0FrameAddressAvoiding(destination, instruction.Suffix, sourceRegister)
 	} else {
-		address, err = t.memoryAddress(destination, instruction.Suffix)
+		address, err = t.memoryAddressAvoiding(destination, instruction.Suffix, sourceRegister)
 	}
 	if err != nil {
 		return err
@@ -478,7 +647,12 @@ func (t *arm64Translator) translateRegisterPair(instruction *Instruction) error 
 	if err != nil {
 		return err
 	}
-	address, err := t.memoryAddress(memory, instruction.Suffix)
+	var address string
+	if strings.HasPrefix(instruction.Opcode, "ST") {
+		address, err = t.memoryAddressAvoiding(memory, instruction.Suffix, first, second)
+	} else {
+		address, err = t.memoryAddress(memory, instruction.Suffix)
+	}
 	if err != nil {
 		return err
 	}
@@ -502,11 +676,11 @@ func (t *arm64Translator) translateFloatRegisterPair(instruction *Instruction) e
 	if pair.Kind != OperandRegisterPair || memory.Kind != OperandMemory || memory.Base == "SB" {
 		return fmt.Errorf("unsupported %s operands %q, %q", instruction.Opcode, instruction.Operands[0].Text, instruction.Operands[1].Text)
 	}
-	first, err := arm64FloatRegister(pair.Registers[0])
+	first, err := arm64FloatRegister(pair.Registers[0], 64)
 	if err != nil {
 		return err
 	}
-	second, err := arm64FloatRegister(pair.Registers[1])
+	second, err := arm64FloatRegister(pair.Registers[1], 64)
 	if err != nil {
 		return err
 	}
@@ -520,18 +694,6 @@ func (t *arm64Translator) translateFloatRegisterPair(instruction *Instruction) e
 	}
 	fmt.Fprintf(&t.output, "\t%s %s, %s, %s\n", mnemonic, first, second, address)
 	return nil
-}
-
-func arm64FloatRegister(register string) (string, error) {
-	register = strings.ToUpper(register)
-	if !strings.HasPrefix(register, "F") {
-		return "", fmt.Errorf("unsupported ARM64 floating-point register %s", register)
-	}
-	number, err := strconv.Atoi(register[1:])
-	if err != nil || number < 0 || number > 31 {
-		return "", fmt.Errorf("unsupported ARM64 floating-point register %s", register)
-	}
-	return "d" + strconv.Itoa(number), nil
 }
 
 func (t *arm64Translator) translateALU(instruction *Instruction) error {
@@ -566,13 +728,17 @@ func (t *arm64Translator) translateALU(instruction *Instruction) error {
 			return err
 		}
 		if !arm64AddSubImmediate(value) {
-			if leftRegister == "x27" || destinationRegister == "x27" {
+			scratch := "x27"
+			if width == 32 {
+				scratch = "w27"
+			}
+			if leftRegister == scratch || destinationRegister == scratch {
 				return fmt.Errorf("%s with a large immediate cannot use reserved register R27", instruction.Opcode)
 			}
-			if err := t.emitMoveImmediate("x27", width, source.Immediate); err != nil {
+			if err := t.emitMoveImmediate(scratch, width, source.Immediate); err != nil {
 				return err
 			}
-			fmt.Fprintf(&t.output, "\t%s %s, %s, x27\n", mnemonic, destinationRegister, leftRegister)
+			fmt.Fprintf(&t.output, "\t%s %s, %s, %s\n", mnemonic, destinationRegister, leftRegister, scratch)
 			return nil
 		}
 	}
@@ -656,6 +822,37 @@ func (t *arm64Translator) translateUnaryRegister(instruction *Instruction) error
 	}
 	mnemonic := strings.ToLower(strings.TrimSuffix(instruction.Opcode, "W"))
 	fmt.Fprintf(&t.output, "\t%s %s, %s\n", mnemonic, destination, source)
+	return nil
+}
+
+func (t *arm64Translator) translateRotateRight(instruction *Instruction) error {
+	if len(instruction.Operands) != 2 && len(instruction.Operands) != 3 {
+		return fmt.Errorf("%s requires an immediate, optional source, and destination", instruction.Opcode)
+	}
+	immediate := instruction.Operands[0]
+	if immediate.Kind != OperandImmediate {
+		return fmt.Errorf("%s rotation must be immediate", instruction.Opcode)
+	}
+	width := instructionWidth(instruction.Opcode)
+	destination, err := registerOperand(instruction.Operands[len(instruction.Operands)-1], width)
+	if err != nil {
+		return err
+	}
+	source := destination
+	if len(instruction.Operands) == 3 {
+		source, err = registerOperand(instruction.Operands[1], width)
+		if err != nil {
+			return err
+		}
+	}
+	amount, err := t.resolveIntegerExpression(immediate.Immediate)
+	if err != nil {
+		return err
+	}
+	if amount < 0 || amount >= int64(width) {
+		return fmt.Errorf("%s rotation %d is outside the %d-bit register", instruction.Opcode, amount, width)
+	}
+	fmt.Fprintf(&t.output, "\tror %s, %s, #%d\n", destination, source, amount)
 	return nil
 }
 
@@ -812,9 +1009,11 @@ func (t *arm64Translator) translateBranch(instruction *Instruction) error {
 			return fmt.Errorf("%s does not accept an indirect target", instruction.Opcode)
 		}
 	}
-	if t.currentABI0 && !t.currentDirectABI0 && (instruction.Opcode == "B" || instruction.Opcode == "JMP") {
-		if symbol, ok := operandSymbol(instruction.Operands[0]); ok && !symbol.Static && symbol.ABI == "" {
-			target = abi0Symbol(t.symbol(symbol))
+	if symbol, ok := operandSymbol(instruction.Operands[0]); ok && !symbol.Static && symbol.ABI == "" {
+		name := t.symbol(symbol)
+		t.abi0References[name] = true
+		if !t.directABI0Symbols[name] {
+			target = abi0Symbol(name)
 		}
 	}
 	fmt.Fprintf(&t.output, "\t%s %s\n", mnemonic, target)

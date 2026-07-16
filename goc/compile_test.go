@@ -154,6 +154,7 @@ func main() {
 		"internal/runtime/sys/dit_arm64.s":                 "internal/runtime/sys",
 		"internal/runtime/syscall/linux/asm_linux_arm64.s": "internal/runtime/syscall/linux",
 		"internal/runtime/atomic/atomic_arm64.s":           "internal/runtime/atomic",
+		"runtime/asm_arm64.s":                              "runtime",
 		"runtime/atomic_arm64.s":                           "runtime",
 		"runtime/memclr_arm64.s":                           "runtime",
 		"runtime/memmove_arm64.s":                          "runtime",
@@ -248,6 +249,75 @@ func main() {
 	t.Fatal("reachable syscall/asm_linux_arm64.s was not retained")
 }
 
+func TestCompileExecutableUsesAggregateABIForInterfaceResults(t *testing.T) {
+	module, err := CompileExecutable("main.go", []byte(`package main
+import "sync"
+var values sync.Map
+func main() {
+	values.LoadOrStore("key", 42)
+}
+`))
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	foundConcrete := false
+	foundGeneric := false
+	for _, function := range module.Funcs {
+		switch function.Name {
+		case "sync.Map.LoadOrStore":
+			foundConcrete = true
+			if function.RetAgg == nil || len(function.RetAgg.Fields) != 2 {
+				t.Fatalf("sync.Map.LoadOrStore aggregate result = %#v", function.RetAgg)
+			}
+		case "internal/sync.HashTrieMap.LoadOrStore":
+			foundGeneric = true
+			if function.RetAgg != nil {
+				t.Fatalf("generic HashTrieMap.LoadOrStore aggregate result = %#v, want scalar descriptor", function.RetAgg)
+			}
+		}
+	}
+	if !foundConcrete {
+		t.Error("sync.Map.LoadOrStore was not compiled")
+	}
+	if !foundGeneric {
+		t.Error("internal/sync.HashTrieMap.LoadOrStore was not compiled")
+	}
+}
+
+func TestCompileExecutableKeepsInlinedFloatComparisonsTyped(t *testing.T) {
+	module, err := CompileExecutable("main.go", []byte(`package main
+import "fmt"
+func main() {
+	_ = fmt.Sprintf("%v", 42)
+}
+`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	found := false
+	for _, function := range module.Funcs {
+		if function.Name != "internal/fmtsort.compare" {
+			continue
+		}
+		found = true
+		for _, block := range function.Blocks {
+			for _, instruction := range block.Instrs {
+				if instruction.Op != ir.OCmp || len(instruction.Args) == 0 {
+					continue
+				}
+				operandClass := function.ClassOf(instruction.Args[0])
+				if operandClass.IsFloat() && !instruction.Cmp.IsFloat() {
+					t.Fatalf("float operands use comparison predicate %v in block %s", instruction.Cmp, block.Name)
+				}
+			}
+		}
+	}
+	if !found {
+		t.Fatal("internal/fmtsort.compare was not compiled")
+	}
+}
+
 func TestCompileRecordsExactGlobalPointerWords(t *testing.T) {
 	m, err := Compile("globals.go", []byte(`package main
 type node struct {
@@ -272,7 +342,7 @@ var values []int
 		"main.pointer":           {0},
 		"main.text":              {0},
 		"main.text.descriptor":   {0},
-		"main.dynamic":           {0},
+		"main.dynamic":           {0, 1},
 		"main.values":            {0},
 		"main.values.descriptor": {0},
 	}

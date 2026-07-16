@@ -244,15 +244,23 @@ func TestAdvancedExecutionCorpus(t *testing.T) {
 	}{
 		{"short circuit and", `var calls int; func yes() bool { calls++; return true }; func Test() int { if false && yes() {}; return calls }`, 0},
 		{"short circuit or", `var calls int; func yes() bool { calls++; return true }; func Test() int { if true || yes() {}; return calls }`, 0},
+		{"label in eliminated constant branch", `const enabled = true; func Test() int { if enabled { return 42 } else { unused: for { break unused } }; return 0 }`, 42},
 		{"switch", `func Test() int { x:=3; switch x { case 1: return 10; case 2,3: return 20; default: return 30 } }`, 20},
 		{"switch fallthrough", `func Test() int { n:=0; switch 2 { case 2: n+=2; fallthrough; case 3: n+=3 }; return n }`, 5},
+		{"string switch compares contents", `func Test() int { value := ""; switch value { case "on": return 1; case "": return 42; default: return 2 } }`, 42},
 		{"package constants", `const base=40; const two int=2; func Test() int { return base+two }`, 42},
 		{"mutable globals", `var total=3; func add(x int){ total+=x }; func Test() int { add(4); add(5); return total }`, 12},
 		{"global zero and constant strings", `var empty string; var text = "abc"; func Test() int { return len(empty)*100 + len(text)*10 + int(text[1]) }`, 128},
 		{"constant struct global", `type bounds struct { low uint16; high uintptr }; var limits = bounds{low: 7, high: 0x123456789}; func Test() int { return int(limits.low) + int(limits.high&0xff) }`, 144},
 		{"global slice assignment", `var values []byte; func set(){ values = []byte{7, 11, 13} }; func Test() int { set(); return len(values)*1000 + cap(values)*100 + int(values[0]+values[1]+values[2]) }`, 3331},
+		{"static numeric global slice", `var values = []uint32{7, 11, 24}; func Test() int { return int(values[0] + values[1] + values[2]) }`, 42},
+		{"escaping aggregate closure capture", `type state struct { value int }; func counter() func() int { current := state{value: 40}; return func() int { current.value++; return current.value } }; func Test() int { next := counter(); _ = next(); return next() }`, 42},
+		{"interface string extraction preserves descriptor", `func Test() int { var boxed any = "hello"; asserted, ok := boxed.(string); if !ok { return 0 }; switch value := boxed.(type) { case string: return len(asserted) + len(value) + 32 }; return 0 }`, 42},
+		{"dynamic global slice descriptor survives initializer frame", `var values = make([]int, 3); func setup(){ values[0] = 7; values[1] = 11; values[2] = 24 }; func disturb(){ temporary := [8]int{1,2,3,4,5,6,7,8}; _ = temporary }; func Test() int { setup(); disturb(); return values[0] + values[1] + values[2] }`, 42},
 		{"global zero slice", `var values []int; func Test() int { return len(values)*10 + cap(values) }`, 0},
 		{"global slice backing survives callee", `var values []int; func set(){ values = []int{7, 11, 13} }; func disturb(){ temporary := [4]int{100, 200, 300, 400}; _ = temporary }; func Test() int { set(); disturb(); return values[0] + values[1] + values[2] }`, 31},
+		{"slice literal copies struct elements", `type pair struct { left int; right int }; func Test() int { values := []pair{{left: 17, right: 25}}; return values[0].left + values[0].right }`, 42},
+		{"map literal copies string keys and struct values", `type record struct { value int }; func Test() int { values := map[string]record{"left": {value: 17}, "right": {value: 25}}; return values["left"].value + values["right"].value }`, 42},
 		{"forward multiple results", `func pair() (int, int) { return 17, 25 }; func forward() (int, int) { return pair() }; func Test() int { left, right := forward(); return left + right }`, 42},
 		{"multiple aggregate results", `type pair struct { left, right int }; func values() (pair, pair) { return pair{17, 25}, pair{5, 7} }; func Test() int { first, second := values(); return first.left + first.right + second.left - second.right + 2 }`, 42},
 		{"named aggregate results", `type pair struct { left, right int }; func values() (first pair, second pair) { first = pair{17, 25}; second = pair{5, 7}; return }; func Test() int { first, second := values(); return first.left + first.right + second.left - second.right + 2 }`, 42},
@@ -261,6 +269,7 @@ func TestAdvancedExecutionCorpus(t *testing.T) {
 		{"nil aggregate result", `func value() (int, error) { return 42, nil }; func Test() int { result, err := value(); if err != nil { return 0 }; return result }`, 42},
 		{"implicit pointer method receiver", `type counter int; func (value *counter) add(amount int) { *value += counter(amount) }; func Test() int { var value counter = 17; value.add(25); return int(value) }`, 42},
 		{"promoted embedded method receiver", `type flags uint8; func (f *flags) set() { *f |= 1 }; type state struct { count uint16; flags }; func Test() int { s := state{count: 510}; s.set(); return int(s.count) + int(s.flags)*1000 }`, 1510},
+		{"promoted embedded scalar value receiver", `type flags uintptr; func (f flags) kind() int { return int(f & 31) }; type value struct { flags }; func Test() int { v := value{flags: 42}; return v.kind() }`, 10},
 		{"promoted field through embedded pointer", `type inner struct { value int }; type outer struct { *inner }; func Test() int { value := outer{inner: &inner{value: 42}}; return value.value }`, 42},
 		{"global elided pointer struct slice", `type item struct { value int }; var items = []*item{{value: 17}, {value: 25}}; func Test() int { return items[0].value + items[1].value }`, 42},
 		{"global concrete error interface", `type textError string; func (value textError) Error() string { return string(value) }; var failure error = textError("bad"); func Test() int { if failure != nil { return 42 }; return 0 }`, 42},
@@ -268,6 +277,13 @@ func TestAdvancedExecutionCorpus(t *testing.T) {
 		{"interface struct field assignment", `type item struct { value int }; type holder struct { value any }; func set(target *holder, value any) { target.value = value }; func Test() int { var target holder; set(&target, &item{value: 42}); return target.value.(*item).value }`, 42},
 		{"interface struct field composite", `type item struct { value int }; type holder struct { value any }; func Test() int { target := holder{value: &item{value: 42}}; return target.value.(*item).value }`, 42},
 		{"nil interface struct field", `type item struct { value int }; type holder struct { value any }; func Test() int { target := holder{value: &item{value: 42}}; target.value = nil; if target.value == nil { return 42 }; return 0 }`, 42},
+		{"aggregate interface payload survives callee", `
+			type boxedValue struct { left int; padding [24]int; right int }
+			var boxed any
+			func saveBoxed() { boxed = boxedValue{left: 17, right: 25} }
+			func disturbBoxedStack() { temporary := [64]int{}; for index := range temporary { temporary[index] = index + 100 }; _ = temporary }
+			func Test() int { saveBoxed(); disturbBoxedStack(); value := boxed.(boxedValue); return value.left + value.right }
+		`, 42},
 		{"returned interface survives callee frame", `
 			type counterValue interface { Add(int); Value() int }
 			type returnedCounter struct { value int }

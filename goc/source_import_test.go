@@ -161,6 +161,7 @@ func TestLoadExactAdditionalStandardAssembly(t *testing.T) {
 		{path: "internal/runtime/sys", file: "dit_arm64.s"},
 		{path: "internal/runtime/syscall/linux", file: "asm_linux_arm64.s"},
 		{path: "internal/runtime/atomic", file: "atomic_arm64.s"},
+		{path: "crypto/internal/fips140/sha256", file: "sha256block_arm64.s"},
 		{path: "syscall", file: "asm_linux_arm64.s"},
 	}
 

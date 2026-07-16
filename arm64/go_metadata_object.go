@@ -3,19 +3,22 @@ package arm64
 import (
 	"encoding/binary"
 	"fmt"
+	"sort"
 
 	"github.com/evanphx/cg12/ir"
 	"github.com/evanphx/cg12/obj"
 )
 
 type goFunctionInfo struct {
-	name         string
-	frameSize    int
-	frameStart   int
-	size         uint64
-	funcID       byte
-	funcFlag     byte
-	pointerWords []int
+	name                 string
+	frameSize            int
+	frameStart           int
+	size                 uint64
+	funcID               byte
+	funcFlag             byte
+	pointerWords         []int
+	argumentSize         int
+	argumentPointerWords []int
 }
 
 const (
@@ -56,6 +59,7 @@ func addGoRuntimeObjectMetadata(object *obj.Object, functions, translatedFunctio
 	if len(functions) == 0 && len(translatedFunctions) == 0 {
 		return addData(object, moduledata)
 	}
+	functions = sortGoFunctionsByTextOffset(object, functions)
 	dataStart, ok := dataSymbolValue(object, sanitize(".goc.runtime.datastart"))
 	if !ok {
 		return fmt.Errorf("Go runtime metadata: missing data-start symbol")
@@ -82,6 +86,28 @@ func addGoRuntimeObjectMetadata(object *obj.Object, functions, translatedFunctio
 	object.Data = append(object.Data, builder.data...)
 	object.DataRelocs = append(object.DataRelocs, builder.relocs...)
 	return nil
+}
+
+func sortGoFunctionsByTextOffset(object *obj.Object, functions []goFunctionInfo) []goFunctionInfo {
+	offsets := make(map[string]uint64, len(functions))
+	for _, symbol := range object.Syms {
+		if symbol.Section == obj.SecText && symbol.Func {
+			offsets[symbol.Name] = symbol.Value
+		}
+	}
+	sorted := append([]goFunctionInfo(nil), functions...)
+	sort.SliceStable(sorted, func(left, right int) bool {
+		leftOffset, leftFound := offsets[sorted[left].name]
+		rightOffset, rightFound := offsets[sorted[right].name]
+		if leftFound != rightFound {
+			return leftFound
+		}
+		if !leftFound {
+			return false
+		}
+		return leftOffset < rightOffset
+	})
+	return sorted
 }
 
 func dataSymbolValue(object *obj.Object, name string) (uint64, bool) {
@@ -177,9 +203,13 @@ func (builder *goMetadataBuilder) build(functions, translatedFunctions []goFunct
 	// Build gofunc before pclntable so its offsets are known when _func records
 	// are written. The section ordering is immaterial; moduledata names each one.
 	builder.label(".goc.go.gofunc")
-	emptyStackMap := builder.position()
-	builder.u32(1)
-	builder.u32(0)
+	argumentOffsets := make([]uint32, len(functions))
+	for index, function := range functions {
+		builder.align(4)
+		argumentOffsets[index] = uint32(builder.position() - builder.labels[".goc.go.gofunc"])
+		words := (function.argumentSize + 7) / 8
+		builder.stackMap(words, function.argumentPointerWords)
+	}
 	localOffsets := make([]uint32, len(functions))
 	for index, function := range functions {
 		builder.align(4)
@@ -188,15 +218,7 @@ func (builder *goMetadataBuilder) build(functions, translatedFunctions []goFunct
 		if words < 0 {
 			words = 0
 		}
-		builder.u32(1)
-		builder.u32(uint32(words))
-		bitmap := make([]byte, (words+7)/8)
-		for _, word := range function.pointerWords {
-			if word >= 0 && word < words {
-				bitmap[word/8] |= 1 << (word % 8)
-			}
-		}
-		builder.data = append(builder.data, bitmap...)
+		builder.stackMap(words, function.pointerWords)
 	}
 	builder.label(".goc.go.gofunc.end")
 	builder.align(4)
@@ -207,7 +229,7 @@ func (builder *goMetadataBuilder) build(functions, translatedFunctions []goFunct
 		functionOffsets[index] = uint32(builder.offset(".goc.go.pclntable"))
 		builder.reloc32(function.name)
 		builder.u32(nameOffsets[index])
-		builder.u32(0)
+		builder.u32(uint32(function.argumentSize))
 		builder.u32(0)
 		builder.u32(pcspOffsets[index])
 		builder.u32(0)
@@ -216,7 +238,7 @@ func (builder *goMetadataBuilder) build(functions, translatedFunctions []goFunct
 		builder.u32(0)
 		builder.u32(0)
 		builder.bytes(function.funcID, function.funcFlag, 0, 2)
-		builder.u32(uint32(emptyStackMap - builder.labels[".goc.go.gofunc"]))
+		builder.u32(argumentOffsets[index])
 		builder.u32(localOffsets[index])
 	}
 	builder.label(".goc.go.pclntable.end")
@@ -340,43 +362,12 @@ func goPCSP(frameStart, frameSize int) []byte {
 	return data
 }
 
-// goAssemblyFunctionInfo splits the assembly support code at every function
-// that changes how the runtime must unwind the stack. Leaf helpers between
-// these entries can safely share the preceding zero-frame Asm record.
-//
-// Keep this list in text order. In particular, morestack_restore_end aliases
-// morestack_noctxt and cannot have its own functab entry: making that alias a
-// TopFrame used to classify all following scheduler assembly as a terminal
-// frame and made GC stack walks stop early.
+// goAssemblyFunctionInfo splits the native assembly support code from the
+// translated standard-library assembly that follows it in the text section.
 func goAssemblyFunctionInfo() []goFunctionInfo {
-	const (
-		funcIDAsmCGOCall        = 2
-		funcIDGoexit            = 8
-		funcIDGogo              = 9
-		funcIDMcall             = 12
-		funcIDMstart            = 14
-		funcIDSystemstack       = 21
-		funcIDSystemstackSwitch = 22
-	)
-
 	return []goFunctionInfo{
 		{name: "runtime_gocPrintString", funcFlag: goFuncFlagAsm},
-		{name: "runtime_gogo", funcID: funcIDGogo, funcFlag: goFuncFlagSPWrite | goFuncFlagAsm},
-		{name: "runtime_mcall", funcID: funcIDMcall, funcFlag: goFuncFlagSPWrite | goFuncFlagAsm},
-		// morestack has no x29 frame setup, so its locals bitmap starts at sp+8.
-		// It keeps untyped register values unscanned and mirrors only pointer
-		// arguments into words 51 through 66. The preceding two words keep the
-		// caller frame pointer and closure context visible to stack copying.
-		{name: "runtime_morestack_restore", frameSize: 560, funcFlag: goFuncFlagAsm, pointerWords: []int{49, 50, 51, 52, 53, 54, 55, 56, 57, 58, 59, 60, 61, 62, 63, 64, 65, 66}},
-		{name: "runtime_morestack_noctxt", funcFlag: goFuncFlagAsm},
-		{name: "runtime_systemstack", funcID: funcIDSystemstack, funcFlag: goFuncFlagSPWrite | goFuncFlagAsm},
-		{name: "runtime_systemstack_switch", funcID: funcIDSystemstackSwitch, funcFlag: goFuncFlagAsm},
-		{name: "runtime_mstart", funcID: funcIDMstart, funcFlag: goFuncFlagTopFrame | goFuncFlagAsm},
-		{name: "runtime_goexit", funcID: funcIDGoexit, funcFlag: goFuncFlagTopFrame | goFuncFlagAsm},
-		{name: "runtime_asmcgocall", funcID: funcIDAsmCGOCall, funcFlag: goFuncFlagTopFrame | goFuncFlagAsm},
-		// Clear asmcgocall's TopFrame classification for the remaining leaf
-		// helpers and the translated standard-library assembly.
-		{name: "runtime_checkASM", funcFlag: goFuncFlagAsm},
+		{name: "runtime_gocAssemblySupportEnd", funcFlag: goFuncFlagAsm},
 	}
 }
 
@@ -403,6 +394,18 @@ func (builder *goMetadataBuilder) align(alignment int) {
 
 func (builder *goMetadataBuilder) bytes(values ...byte) {
 	builder.data = append(builder.data, values...)
+}
+
+func (builder *goMetadataBuilder) stackMap(words int, pointerWords []int) {
+	builder.u32(1)
+	builder.u32(uint32(words))
+	bitmap := make([]byte, (words+7)/8)
+	for _, word := range pointerWords {
+		if word >= 0 && word < words {
+			bitmap[word/8] |= 1 << (word % 8)
+		}
+	}
+	builder.data = append(builder.data, bitmap...)
 }
 
 func (builder *goMetadataBuilder) u32(value uint32) {

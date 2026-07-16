@@ -208,7 +208,13 @@ func reachableFunctions(roots []*ast.FuncDecl, rootInfo *types.Info, rootPkg *ty
 		queue = append(queue, runtimeInits...)
 		queue = append(queue, initializers...)
 		queue = append(queue, genericRuntimeMethods...)
-		for _, name := range []string{"args", "check", "growslice", "main", "makeslice", "mallocgc", "mstart0", "newobject", "newstack", "osinit", "persistentalloc", "schedinit"} {
+		for _, name := range []string{
+			"args", "c128equal", "c64equal", "check", "concatstring2", "f32equal", "f64equal", "growslice",
+			"interequal", "interhash", "main", "makeslice", "mallocgc", "memequal8",
+			"memequal16", "memequal32", "memequal64", "memequal128", "mstart0",
+			"newobject", "newstack", "nilinterequal", "nilinterhash", "osinit",
+			"persistentalloc", "schedinit", "strequal",
+		} {
 			if declaration, exists := runtimeFunctions[name]; exists {
 				queue = append(queue, declaration)
 			}

@@ -137,7 +137,7 @@ func parsePreprocessed(reader io.Reader) (*File, error) {
 		logicalLineSource.Reset()
 		if handled, nextActive, err := handleSourceConditional(source, macros, conditionals, active); handled {
 			if err != nil {
-				return nil, fmt.Errorf("plan9asm:%d: %w", logicalLine, err)
+				return nil, fmt.Errorf("plan9asm:%d: %w in %q", logicalLine, err, strings.TrimSpace(source))
 			}
 			if strings.HasPrefix(strings.TrimSpace(source), "#if") {
 				conditionals = append(conditionals, sourceConditional{parentActive: active, conditionActive: nextActive})
@@ -163,6 +163,10 @@ func parsePreprocessed(reader io.Reader) (*File, error) {
 		if err != nil {
 			return nil, fmt.Errorf("plan9asm:%d: %w", logicalLine, err)
 		}
+		expanded, err = selectExpandedConditionals(expanded, macros)
+		if err != nil {
+			return nil, fmt.Errorf("plan9asm:%d: %w while expanding %q", logicalLine, err, strings.TrimSpace(source))
+		}
 		for _, sourceStatement := range splitStatements(expanded) {
 			statement, err := parseStatement(sourceStatement, logicalLine)
 			if err != nil {
@@ -186,6 +190,41 @@ func parsePreprocessed(reader io.Reader) (*File, error) {
 		return nil, fmt.Errorf("plan9asm: unterminated conditional directive")
 	}
 	return file, nil
+}
+
+func selectExpandedConditionals(source string, macros map[string]sourceMacro) (string, error) {
+	if !strings.ContainsAny(source, "\n;") {
+		return source, nil
+	}
+	var output strings.Builder
+	var conditionals []sourceConditional
+	active := true
+	for _, statement := range splitStatements(source) {
+		if handled, nextActive, err := handleSourceConditional(statement, macros, conditionals, active); handled {
+			if err != nil {
+				return "", err
+			}
+			trimmed := strings.TrimSpace(statement)
+			if strings.HasPrefix(trimmed, "#if") {
+				conditionals = append(conditionals, sourceConditional{parentActive: active, conditionActive: nextActive})
+			} else if strings.HasPrefix(trimmed, "#else") {
+				conditionals[len(conditionals)-1].elseSeen = true
+				conditionals[len(conditionals)-1].conditionActive = nextActive
+			} else {
+				conditionals = conditionals[:len(conditionals)-1]
+			}
+			active = nextActive
+			continue
+		}
+		if active {
+			output.WriteString(statement)
+			output.WriteString(";\n")
+		}
+	}
+	if len(conditionals) != 0 {
+		return "", fmt.Errorf("unterminated conditional directive in macro expansion")
+	}
+	return output.String(), nil
 }
 
 type sourceConditional struct {
@@ -283,22 +322,127 @@ func parseSourceMacro(source string) (sourceMacro, bool, error) {
 
 func expandSourceMacro(source string, macros map[string]sourceMacro) (string, error) {
 	source = expandObjectMacros(source, macros)
-	trimmed := strings.TrimSpace(source)
-	open := strings.IndexByte(trimmed, '(')
-	if open <= 0 || !strings.HasSuffix(trimmed, ")") {
-		return source, nil
+	for range 64 {
+		expanded, changed, err := expandFunctionMacrosOnce(source, macros)
+		if err != nil {
+			return "", err
+		}
+		source = expandObjectMacros(expanded, macros)
+		if !changed {
+			return source, nil
+		}
 	}
-	macro, ok := macros[strings.TrimSpace(trimmed[:open])]
-	if !ok || !macro.function {
-		return source, nil
+	return "", fmt.Errorf("function-like macro expansion exceeded 64 passes")
+}
+
+func expandFunctionMacrosOnce(source string, macros map[string]sourceMacro) (string, bool, error) {
+	var expanded strings.Builder
+	changed := false
+	quote := byte(0)
+	escaped := false
+	for index := 0; index < len(source); {
+		value := source[index]
+		if quote != 0 {
+			expanded.WriteByte(value)
+			index++
+			if escaped {
+				escaped = false
+			} else if value == '\\' {
+				escaped = true
+			} else if value == quote {
+				quote = 0
+			}
+			continue
+		}
+		if value == '"' || value == '\'' {
+			quote = value
+			expanded.WriteByte(value)
+			index++
+			continue
+		}
+		if !isIdentifierByte(value, true) {
+			expanded.WriteByte(value)
+			index++
+			continue
+		}
+
+		end := index + 1
+		for end < len(source) && isIdentifierByte(source[end], false) {
+			end++
+		}
+		identifier := source[index:end]
+		macro, ok := macros[identifier]
+		if !ok || !macro.function {
+			expanded.WriteString(identifier)
+			index = end
+			continue
+		}
+
+		open := end
+		for open < len(source) && unicode.IsSpace(rune(source[open])) {
+			open++
+		}
+		if open == len(source) || source[open] != '(' {
+			expanded.WriteString(identifier)
+			index = end
+			continue
+		}
+		close, err := matchingMacroParen(source, open)
+		if err != nil {
+			return "", false, fmt.Errorf("macro %s: %w", macro.name, err)
+		}
+		argumentSource := strings.TrimSpace(source[open+1 : close])
+		var arguments []string
+		if argumentSource != "" {
+			arguments, err = splitCommaSeparated(argumentSource)
+			if err != nil {
+				return "", false, err
+			}
+		}
+		if len(arguments) != len(macro.parameters) {
+			return "", false, fmt.Errorf("macro %s requires %d arguments, got %d", macro.name, len(macro.parameters), len(arguments))
+		}
+		expanded.WriteString(substituteFunctionMacro(macro, arguments))
+		changed = true
+		index = close + 1
 	}
-	arguments, err := splitCommaSeparated(trimmed[open+1 : len(trimmed)-1])
-	if err != nil {
-		return "", err
+	return expanded.String(), changed, nil
+}
+
+func matchingMacroParen(source string, open int) (int, error) {
+	depth := 0
+	quote := byte(0)
+	escaped := false
+	for index := open; index < len(source); index++ {
+		value := source[index]
+		if quote != 0 {
+			if escaped {
+				escaped = false
+			} else if value == '\\' {
+				escaped = true
+			} else if value == quote {
+				quote = 0
+			}
+			continue
+		}
+		if value == '"' || value == '\'' {
+			quote = value
+			continue
+		}
+		switch value {
+		case '(':
+			depth++
+		case ')':
+			depth--
+			if depth == 0 {
+				return index, nil
+			}
+		}
 	}
-	if len(arguments) != len(macro.parameters) {
-		return "", fmt.Errorf("macro %s requires %d arguments, got %d", macro.name, len(macro.parameters), len(arguments))
-	}
+	return 0, fmt.Errorf("unterminated invocation")
+}
+
+func substituteFunctionMacro(macro sourceMacro, arguments []string) string {
 	values := make(map[string]string, len(arguments))
 	for index, parameter := range macro.parameters {
 		values[parameter] = strings.TrimSpace(arguments[index])
@@ -323,7 +467,7 @@ func expandSourceMacro(source string, macros map[string]sourceMacro) (string, er
 		}
 		index = end
 	}
-	return expandObjectMacros(expanded.String(), macros), nil
+	return expanded.String()
 }
 
 func expandObjectMacros(source string, macros map[string]sourceMacro) string {
@@ -461,8 +605,10 @@ func parseText(position statementPosition, operands []Operand, line int) (Statem
 	}
 	text.Frame, text.Args = splitFrame(frameOperand.Immediate)
 	if len(operands) == 3 {
-		for _, flag := range strings.Split(operands[1].Text, "|") {
-			flag = canonicalPlan9Flag(strings.TrimSpace(flag))
+		for _, flag := range strings.FieldsFunc(operands[1].Text, func(r rune) bool {
+			return r == '|' || r == '(' || r == ')' || unicode.IsSpace(r)
+		}) {
+			flag = canonicalPlan9Flag(flag)
 			if flag != "" {
 				text.Flags = append(text.Flags, flag)
 			}
@@ -765,7 +911,7 @@ func splitStatements(line string) []string {
 			if depth > 0 {
 				depth--
 			}
-		case ';':
+		case ';', '\n':
 			if depth == 0 {
 				statements = append(statements, line[start:index])
 				start = index + 1

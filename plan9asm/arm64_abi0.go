@@ -31,7 +31,7 @@ func collectDirectABI0(file *File, layouts map[int]abi0Layout) map[int]bool {
 			if text == nil || !direct[functionIndex] {
 				continue
 			}
-			if statement.Opcode == "BL" {
+			if statement.Opcode == "BL" || statement.Opcode == "CALL" {
 				direct[functionIndex] = false
 				continue
 			}
@@ -157,6 +157,14 @@ func collectABI0Layouts(file *File) map[int]abi0Layout {
 			if source := statement.Operands[0]; source.Kind == OperandMemory && source.Base == "FP" {
 				if offset, err := namedFrameOffset(source.Offset); err == nil {
 					inputSlots[offset] = max(inputSlots[offset], width)
+					if strings.HasSuffix(namedFrameField(source.Offset), "_base") {
+						// Go names a slice's three ABI0 words name_base,
+						// name_len, and name_cap. Assembly commonly reads only the
+						// base, but ABIInternal still consumes registers for all
+						// three words before assigning the following argument.
+						inputSlots[offset+8] = max(inputSlots[offset+8], 8)
+						inputSlots[offset+16] = max(inputSlots[offset+16], 8)
+					}
 				}
 			}
 			if destination := statement.Operands[1]; destination.Kind == OperandMemory && destination.Base == "FP" {
@@ -190,6 +198,16 @@ func collectABI0Layouts(file *File) map[int]abi0Layout {
 		}
 	}
 	return layouts
+}
+
+func namedFrameField(source string) string {
+	source = strings.TrimSpace(source)
+	for index := len(source) - 1; index > 0; index-- {
+		if source[index] == '+' || source[index] == '-' {
+			return strings.TrimSpace(source[:index])
+		}
+	}
+	return ""
 }
 
 func sortedABI0Slots(widths map[int]int) []abi0Slot {
@@ -350,6 +368,10 @@ func emitRegisterStore(output *strings.Builder, source, address, width int) erro
 }
 
 func (t *arm64Translator) abi0FrameAddress(operand Operand, suffix string) (string, error) {
+	return t.abi0FrameAddressAvoiding(operand, suffix)
+}
+
+func (t *arm64Translator) abi0FrameAddressAvoiding(operand Operand, suffix string, avoid ...string) (string, error) {
 	if suffix != "" {
 		return "", fmt.Errorf("ABI0 frame operand %q does not accept .%s", operand.Text, suffix)
 	}
@@ -357,7 +379,12 @@ func (t *arm64Translator) abi0FrameAddress(operand Operand, suffix string) (stri
 	if err != nil {
 		return "", err
 	}
-	return fmt.Sprintf("[sp, #%d]", t.currentFrame+8+offset), nil
+	return t.memoryAddressAvoiding(Operand{
+		Kind:   OperandMemory,
+		Text:   operand.Text,
+		Base:   "RSP",
+		Offset: strconv.Itoa(t.currentFrame + 8 + offset),
+	}, "", avoid...)
 }
 
 func abi0Symbol(name string) string {

@@ -107,13 +107,14 @@ func (t *arm64Translator) translateLSEAtomic(instruction *Instruction) error {
 
 func (t *arm64Translator) translateBitwiseNot(instruction *Instruction) error {
 	if len(instruction.Operands) != 2 {
-		return fmt.Errorf("MVN requires a source and destination")
+		return fmt.Errorf("%s requires a source and destination", instruction.Opcode)
 	}
-	source, err := registerOperand(instruction.Operands[0], 64)
+	width := instructionWidth(instruction.Opcode)
+	source, err := registerOperand(instruction.Operands[0], width)
 	if err != nil {
 		return err
 	}
-	destination, err := registerOperand(instruction.Operands[1], 64)
+	destination, err := registerOperand(instruction.Operands[1], width)
 	if err != nil {
 		return err
 	}

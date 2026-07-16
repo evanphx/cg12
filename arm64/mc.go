@@ -160,17 +160,23 @@ func compileToObjectWithBundle(m *ir.Module, opts Options, bundle assemblyBundle
 		if err != nil {
 			return nil, fmt.Errorf("function %s: %w", f.Name, err)
 		}
+		argumentFrame := goArgumentFrame{}
+		if f.GoABI {
+			argumentFrame = goArgumentFrameFor(f)
+		}
 		base := uint64(len(o.Text))
 		if anchor == "" {
 			anchor = name
 		}
 		o.Text = append(o.Text, mc.code...)
 		goFunctions = append(goFunctions, goFunctionInfo{
-			name:         name,
-			frameSize:    mc.m.frame,
-			frameStart:   mc.m.frameStart,
-			size:         uint64(len(mc.code)),
-			pointerWords: mc.m.goPointerWords(),
+			name:                 name,
+			frameSize:            mc.m.frame,
+			frameStart:           mc.m.frameStart,
+			size:                 uint64(len(mc.code)),
+			pointerWords:         mc.m.goPointerWords(),
+			argumentSize:         argumentFrame.size,
+			argumentPointerWords: argumentFrame.pointerWords,
 		})
 		o.Syms = append(o.Syms, obj.Sym{
 			Name: name, Section: obj.SecText, Value: base,
@@ -794,7 +800,7 @@ func goRegisterPointerMask(function *ir.Func) uint16 {
 	return mask
 }
 
-func newEmitter(f *ir.Func, alloc *allocation, gc GCStrategy, tlsModel TLSModel) *mc {
+func emitMachine(f *ir.Func, alloc *allocation, gc GCStrategy, tlsModel TLSModel) (*machineCode, error) {
 	m := &mc{
 		f: f, alloc: alloc, gc: gc, tlsModel: tlsModel,
 		prog: a64.NewProgram(), instrPC: map[*ir.Instr]uint64{},
@@ -1072,12 +1078,34 @@ func (m *mc) goStackPrologue() {
 	}
 	m.emit(a64.CmpReg(true, mcGP1, mcGP0))
 	m.prog.Bcond(a64.HI, enough)
-	m.emit(a64.AddImm(true, a64.Reg(27), mcX30, 0))
-	m.movImm(a64.Reg(25), int64(goRegisterPointerMask(m.f)), false)
+	spills := goRegisterSpills(m.f)
+	for _, spill := range spills {
+		m.emitGoRegisterSpill(spill, false)
+	}
+	m.emit(a64.AddImm(true, a64.Reg(3), mcX30, 0))
 	m.reloc("runtime_morestack_noctxt", obj.R_AARCH64_CALL26)
 	m.emit(a64.Bl(0))
+	for _, spill := range spills {
+		m.emitGoRegisterSpill(spill, true)
+	}
 	m.prog.B(retry)
 	m.prog.Label(enough)
+}
+
+func (m *mc) emitGoRegisterSpill(spill goRegisterSpill, load bool) {
+	base := mcSP
+	offset := spill.offset
+	if !spillImmFits(offset, spill.size) {
+		m.movImm(mcGP1, int64(offset), true)
+		m.emit(a64.AddReg(true, mcGP1, mcSP, mcGP1))
+		base = mcGP1
+		offset = 0
+	}
+	if load {
+		m.ldFrom(mreg(spill.reg), spill.float, base, offset, spill.size)
+		return
+	}
+	m.stTo(mreg(spill.reg), spill.float, base, offset, spill.size)
 }
 
 func (m *mc) allocFrame() {
@@ -1239,6 +1267,10 @@ func (m *mc) ldFrom(r a64.Reg, float bool, base a64.Reg, off, size int) {
 		m.emit(a64.LdrQ(r, base, uint32(off))) // 128-bit quad
 	case float:
 		m.emit(a64.LdrFP(size == 8, r, base, uint32(off)))
+	case size == 1:
+		m.emit(a64.LdrbImm(r, base, uint32(off)))
+	case size == 2:
+		m.emit(a64.LdrhImm(r, base, uint32(off)))
 	default:
 		m.emit(a64.LdrImm(size == 8, r, base, uint32(off)))
 	}
@@ -1250,6 +1282,10 @@ func (m *mc) stTo(r a64.Reg, float bool, base a64.Reg, off, size int) {
 		m.emit(a64.StrQ(r, base, uint32(off)))
 	case float:
 		m.emit(a64.StrFP(size == 8, r, base, uint32(off)))
+	case size == 1:
+		m.emit(a64.StrbImm(r, base, uint32(off)))
+	case size == 2:
+		m.emit(a64.StrhImm(r, base, uint32(off)))
 	default:
 		m.emit(a64.StrImm(size == 8, r, base, uint32(off)))
 	}
@@ -2677,7 +2713,7 @@ func (m *mc) cmp(in *ir.Instr) {
 		cond, ok = intCondOf(in.Cmp)
 	}
 	if !ok {
-		m.fail("arm64: unsupported comparison predicate %v", in.Cmp)
+		m.fail("arm64: unsupported comparison predicate %v for %s operands", in.Cmp, argCls)
 		return
 	}
 	d, done := m.dst(in.To, in.Cls.Size())

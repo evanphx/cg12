@@ -16,6 +16,9 @@ func TestRuntimeSupportDoesNotShadowTranslatedStandardLibraryAssembly(t *testing
 	if !plan9asm.SupportsARM64File("runtime", "sys_linux_arm64.s") {
 		t.Fatal("runtime/sys_linux_arm64.s is not enabled for Plan 9 translation")
 	}
+	if !plan9asm.SupportsARM64File("runtime", "asm_arm64.s") {
+		t.Fatal("runtime/asm_arm64.s is not enabled for Plan 9 translation")
+	}
 	for _, symbol := range []string{
 		"internal_bytealg_Compare",
 		"internal_bytealg_Count",
@@ -34,6 +37,8 @@ func TestRuntimeSupportDoesNotShadowTranslatedStandardLibraryAssembly(t *testing
 		"internal_runtime_atomic_Xchg",
 		"internal_runtime_atomic_And8",
 		"internal_runtime_atomic_Or8",
+		"reflect_makeFuncStub",
+		"reflect_methodValueCall",
 		"runtime_memequal",
 		"runtime_memmove",
 		"runtime_memclrNoHeapPointers",
@@ -42,6 +47,22 @@ func TestRuntimeSupportDoesNotShadowTranslatedStandardLibraryAssembly(t *testing
 		"runtime_load_g",
 		"runtime_save_g",
 		"runtime_secretEraseRegisters",
+		"runtime_getfp",
+		"runtime_procyieldAsm",
+		"runtime_setg",
+		"runtime_reflectcall",
+		"runtime_memhash",
+		"runtime_gogo",
+		"runtime_mcall",
+		"runtime_morestack",
+		"runtime_morestack_noctxt",
+		"runtime_systemstack",
+		"runtime_systemstack_switch",
+		"runtime_mstart",
+		"runtime_asminit",
+		"runtime_goexit",
+		"runtime_asmcgocall",
+		"runtime_checkASM",
 		"runtime_exit",
 		"runtime_exitThread",
 		"runtime_open",
@@ -95,11 +116,14 @@ func TestTranslatedAssemblyPrecedesRuntimeTextEnd(t *testing.T) {
 	translatedAt := strings.Index(assembly, ".global runtime_memmove")
 	textEndAt := strings.Index(assembly, ".global runtime_gocTextEnd")
 	mainAt := strings.Index(assembly, ".global main")
-	if translatedAt < 0 || textEndAt < 0 || mainAt < 0 {
+	if translatedAt < 0 || textEndAt < 0 {
 		t.Fatalf("runtime support is missing an expected marker")
 	}
-	if !(translatedAt < textEndAt && textEndAt < mainAt) {
-		t.Fatalf("runtime support order: translated=%d text-end=%d main=%d", translatedAt, textEndAt, mainAt)
+	if mainAt >= 0 {
+		t.Fatal("bootstrap support still defines main instead of using runtime/asm_arm64.s")
+	}
+	if translatedAt >= textEndAt {
+		t.Fatalf("runtime support order: translated=%d text-end=%d", translatedAt, textEndAt)
 	}
 }
 
@@ -259,6 +283,12 @@ func TestARM64StandardLibraryIOAndFmtExecute(t *testing.T) {
 		{name: "runtime atomic assembly", source: "runtime_atomic_assembly.go"},
 		{name: "internal/bytealg assembly", source: "bytealg_compare.go"},
 		{name: "runtime Linux assembly", source: "runtime_assembly.go", output: "ABIInternal + Plan 9 assembly: 256 32896 3072\n"},
+		{name: "reflect MakeFunc assembly", source: "reflect_makefunc.go"},
+		{name: "SHA-256 assembly", source: "sha256_assembly.go"},
+		{name: "SHA-512 assembly", source: "sha512_assembly.go"},
+		{name: "MD5 assembly", source: "md5_assembly.go"},
+		{name: "SHA-1 assembly", source: "sha1_assembly.go"},
+		{name: "CRC-32 assembly", source: "crc32_assembly.go"},
 		{name: "io.WriteString", source: "io_write_string.go"},
 		{name: "fmt.Sprintf", source: "fmt_sprintf.go"},
 		{name: "fmt.Println", source: "fmt_println.go", output: "hello 42\n"},

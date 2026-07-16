@@ -535,7 +535,7 @@ func spliceCall(caller *ir.Func, b *ir.Block, idx int, callee *ir.Func, cg *call
 			tb.Phis = append(tb.Phis, np)
 		}
 		for i := range s.instrs {
-			cl := cloneInstr(&s.instrs[i], mapRef, mapBlock)
+			cl := cloneInstr(caller, &s.instrs[i], mapRef, mapBlock)
 			cl.Inl = rebaseInline(s.instrs[i].Inl, site, rebaseCache)
 			if cl.Op == ir.OCall {
 				// After inlining, control returns to cont, so a call that was in tail
@@ -659,19 +659,37 @@ func aggOffset(f *ir.Func, base ir.Ref, off int, out *[]ir.Instr) ir.Ref {
 
 // cloneInstr copies an instruction, remapping every value reference and any block
 // reference (an OBlockAddr's &&label target) into the caller's cloned body.
-func cloneInstr(in *ir.Instr, mapRef func(ir.Ref) ir.Ref, mapBlock func(*ir.Block) *ir.Block) ir.Instr {
+func cloneInstr(caller *ir.Func, in *ir.Instr, mapRef func(ir.Ref) ir.Ref, mapBlock func(*ir.Block) *ir.Block) ir.Instr {
 	// Volatile is a semantic flag that must ride along: a cloned volatile store is
 	// still observable. Tail is copied here too, but spliceCall clears it on the
 	// clone, because a call inlined into a caller returns to the continuation and is
 	// no longer in tail position. Amode is deliberately not copied -- it is set only
 	// during lowering, after every pass that clones instructions has run, so it is
 	// always zero here.
-	out := ir.Instr{Op: in.Op, Cls: in.Cls, To: mapRef(in.To), Cmp: in.Cmp, Aux: in.Aux, Unroll: in.Unroll, RetAgg: in.RetAgg, Asm: in.Asm, Intrin: in.Intrin, Pos: in.Pos, Volatile: in.Volatile, Tail: in.Tail}
+	out := ir.Instr{
+		Op:                in.Op,
+		Cls:               in.Cls,
+		To:                mapRef(in.To),
+		Cmp:               in.Cmp,
+		Aux:               in.Aux,
+		Unroll:            in.Unroll,
+		RetAgg:            in.RetAgg,
+		StackResult:       mapRef(in.StackResult),
+		StackResultOffset: in.StackResultOffset,
+		Asm:               in.Asm,
+		Intrin:            in.Intrin,
+		Pos:               in.Pos,
+		Volatile:          in.Volatile,
+		Tail:              in.Tail,
+	}
 	if in.Blk != nil {
 		out.Blk = mapBlock(in.Blk)
 	}
 	for _, a := range in.Args {
 		out.Args = append(out.Args, mapRef(a))
+	}
+	if out.Op == ir.OCmp && len(out.Args) > 0 && caller.ClassOf(out.Args[0]).IsFloat() {
+		out.Cmp = floatingComparison(out.Cmp)
 	}
 	if in.AggArgs != nil {
 		out.AggArgs = append([]*ir.AggType(nil), in.AggArgs...)
@@ -680,6 +698,30 @@ func cloneInstr(in *ir.Instr, mapRef func(ir.Ref) ir.Ref, mapBlock func(*ir.Bloc
 		out.Defs = append(out.Defs, mapRef(d))
 	}
 	return out
+}
+
+// floatingComparison preserves the source comparison when inlining shared
+// generic code into a floating-point instantiation. The generic body may use
+// an integer representative for a mixed ordered constraint; substituting a
+// float argument changes the operand class and therefore also requires the
+// floating-point form of its comparison predicate.
+func floatingComparison(comparison ir.Cmp) ir.Cmp {
+	switch comparison {
+	case ir.CmpEq:
+		return ir.CmpFeq
+	case ir.CmpNe:
+		return ir.CmpFne
+	case ir.CmpSlt, ir.CmpUlt:
+		return ir.CmpFlt
+	case ir.CmpSle, ir.CmpUle:
+		return ir.CmpFle
+	case ir.CmpSgt, ir.CmpUgt:
+		return ir.CmpFgt
+	case ir.CmpSge, ir.CmpUge:
+		return ir.CmpFge
+	default:
+		return comparison
+	}
 }
 
 // rebaseInline re-roots a callee instruction's inline chain (relative to the

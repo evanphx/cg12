@@ -17,6 +17,10 @@ func Fold(f *ir.Func) bool {
 	for _, b := range f.Blocks {
 		for i := range b.Instrs {
 			in := &b.Instrs[i]
+			if in.Op == ir.OCmp && len(in.Args) > 0 && f.ClassOf(in.Args[0]).IsFloat() && !in.Cmp.IsFloat() {
+				in.Cmp = floatingComparison(in.Cmp)
+				changed = true
+			}
 			if in.To.IsNone() {
 				continue
 			}

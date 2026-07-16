@@ -21,6 +21,7 @@ type ARM64Function struct {
 	Name       string
 	Frame      int
 	FrameStart int
+	Args       int
 	Flags      []string
 }
 
@@ -29,10 +30,26 @@ type ARM64Function struct {
 type ARM64Translation struct {
 	Assembly           string
 	ExternalReferences []string
+	ABI0References     []string
 	Functions          []ARM64Function
 }
 
 var supportedARM64Files = map[string]map[string]bool{
+	"crypto/md5": {
+		"md5block_arm64.s": true,
+	},
+	"crypto/sha1": {
+		"sha1block_arm64.s": true,
+	},
+	"hash/crc32": {
+		"crc32_arm64.s": true,
+	},
+	"crypto/internal/fips140/sha256": {
+		"sha256block_arm64.s": true,
+	},
+	"crypto/internal/fips140/sha512": {
+		"sha512block_arm64.s": true,
+	},
 	"internal/bytealg": {
 		"compare_arm64.s":   true,
 		"count_arm64.s":     true,
@@ -55,7 +72,11 @@ var supportedARM64Files = map[string]map[string]bool{
 	"internal/runtime/atomic": {
 		"atomic_arm64.s": true,
 	},
+	"reflect": {
+		"asm_arm64.s": true,
+	},
 	"runtime": {
+		"asm_arm64.s":       true,
 		"atomic_arm64.s":    true,
 		"memclr_arm64.s":    true,
 		"memmove_arm64.s":   true,
@@ -75,20 +96,54 @@ func SupportsARM64File(packagePath, filename string) bool {
 	return supportedARM64Files[packagePath][filepath.Base(filename)]
 }
 
+// SupportsARM64Package reports whether all assembly selected for a source
+// package is expected to flow through the ARM64 translator. Source loading can
+// then select the package's real non-purego implementation.
+func SupportsARM64Package(packagePath string) bool {
+	return len(supportedARM64Files[packagePath]) != 0
+}
+
 // CompileARM64 converts a parsed Plan 9 ARM64 source file to GNU syntax and
 // returns the symbol metadata needed when the generated code is assembled into
 // a separate object.
 func CompileARM64(file *File, options ARM64Options) (ARM64Translation, error) {
 	filename := strings.TrimSuffix(filepath.Base(options.Filename), filepath.Ext(options.Filename))
 	translator := arm64Translator{
-		options:     options,
-		fileTag:     sanitizeSymbol(options.PackagePath + "_" + filename),
-		labels:      make(map[int]map[string]string),
-		references:  make(map[string]bool),
-		abi0Layouts: collectABI0Layouts(file),
-		data:        make(map[string][]arm64DataValue),
+		options:           options,
+		fileTag:           sanitizeSymbol(options.PackagePath + "_" + filename),
+		labels:            make(map[int]map[string]string),
+		references:        make(map[string]bool),
+		abi0References:    make(map[string]bool),
+		abi0Layouts:       collectABI0Layouts(file),
+		abi0Symbols:       make(map[string]bool),
+		directABI0Symbols: make(map[string]bool),
+		functionCalls:     make(map[int]bool),
+		data:              make(map[string][]arm64DataValue),
 	}
 	translator.directABI0 = collectDirectABI0(file, translator.abi0Layouts)
+	functionIndex := -1
+	for _, statement := range file.Statements {
+		switch statement := statement.(type) {
+		case *Text:
+			functionIndex++
+			if options.PackagePath == "runtime" && filepath.Base(options.Filename) == "preempt_arm64.s" && translator.symbol(statement.Symbol) == "runtime_asyncPreempt" {
+				// asyncPreempt is entered by compiler-injected asynchronous
+				// preemption calls using ABIInternal even though its assembly
+				// declaration has no explicit ABI selector.
+				translator.directABI0[functionIndex] = true
+			}
+			if !statement.Symbol.Static && statement.Symbol.ABI == "" {
+				translator.abi0Symbols[translator.symbol(statement.Symbol)] = true
+			}
+			if translator.directABI0[functionIndex] && !statement.Symbol.Static && statement.Symbol.ABI == "" {
+				translator.directABI0Symbols[translator.symbol(statement.Symbol)] = true
+			}
+		case *Instruction:
+			if statement.Opcode == "BL" || statement.Opcode == "CALL" {
+				translator.functionCalls[functionIndex] = true
+			}
+		}
+	}
 	for _, statement := range file.Statements {
 		directive, ok := statement.(*Directive)
 		if !ok || directive.Name != "DATA" {
@@ -111,9 +166,15 @@ func CompileARM64(file *File, options ARM64Options) (ARM64Translation, error) {
 		references = append(references, symbol)
 	}
 	sort.Strings(references)
+	abi0References := make([]string, 0, len(translator.abi0References))
+	for symbol := range translator.abi0References {
+		abi0References = append(abi0References, symbol)
+	}
+	sort.Strings(abi0References)
 	return ARM64Translation{
 		Assembly:           translator.output.String(),
 		ExternalReferences: references,
+		ABI0References:     abi0References,
 		Functions:          translator.functions,
 	}, nil
 }

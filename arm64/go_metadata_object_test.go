@@ -16,6 +16,19 @@ func TestGoGCProgramEncodesExactPointerWords(t *testing.T) {
 	assert.Equal(t, []byte{3, 0b00000101, 0}, program)
 }
 
+func TestGoFunctionMetadataFollowsEmittedTextOffsets(t *testing.T) {
+	object := &obj.Object{Syms: []obj.Sym{
+		{Name: "later", Section: obj.SecText, Value: 64, Func: true},
+		{Name: "earlier", Section: obj.SecText, Value: 16, Func: true},
+	}}
+	functions := []goFunctionInfo{{name: "later"}, {name: "earlier"}}
+
+	sorted := sortGoFunctionsByTextOffset(object, functions)
+	require.Len(t, sorted, 2)
+	assert.Equal(t, "earlier", sorted[0].name)
+	assert.Equal(t, "later", sorted[1].name)
+}
+
 func TestGoRuntimeModuledataReferencesModuleInitTasks(t *testing.T) {
 	module := ir.NewModule()
 	schedinit := module.NewFuncVoid("runtime.schedinit")
