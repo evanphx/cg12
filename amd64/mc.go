@@ -1148,17 +1148,7 @@ func (m *mc) instr(in *ir.Instr) {
 	case ir.OAdd, ir.OSub, ir.OMul, ir.OAnd, ir.OOr, ir.OXor:
 		m.binFP(in) // the integer forms are handled by the shared selector above
 	case ir.ODiv:
-		if in.Cls.IsFloat() {
-			m.binFP(in)
-		} else {
-			m.divInt(in, true, false)
-		}
-	case ir.OUDiv:
-		m.divInt(in, false, false)
-	case ir.ORem:
-		m.divInt(in, true, true)
-	case ir.OURem:
-		m.divInt(in, false, true)
+		m.binFP(in) // integer div/rem handled by the shared selector above
 	case ir.ONeg:
 		m.neg(in)
 	case ir.OCmp:

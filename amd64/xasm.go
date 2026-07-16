@@ -33,6 +33,10 @@ type xasm interface {
 	setccMovzx(cmp ir.Cmp, dst Reg)
 	extGP(op ir.Op, w bool, dst, src Reg)
 
+	// divGP divides RAX (already set up) by divisor, sign-extending into RDX (or
+	// zeroing it, unsigned); the quotient lands in RAX, the remainder in RDX.
+	divGP(w, signed bool, divisor Reg)
+
 	// Stack pointer: allocNSP grows the stack by a runtime size (VLA) and yields
 	// the new top; movFromSP/movToSP snapshot and restore rsp.
 	allocNSP(dst, size Reg)
@@ -137,6 +141,19 @@ func (b *mcXasm) jnz(r Reg, w bool, to, to2 *ir.Block) {
 }
 func (b *mcXasm) jmpReg(r Reg) { b.m.emit(x64.JmpReg(r.mreg())) }
 func (b *mcXasm) hlt()         { b.m.emit(x64.Ud2()) }
+func (b *mcXasm) divGP(w, signed bool, divisor Reg) {
+	if signed {
+		if w {
+			b.m.emit(x64.Cqo())
+		} else {
+			b.m.emit(x64.Cdq())
+		}
+		b.m.emit(x64.Idiv(w, divisor.mreg()))
+	} else {
+		b.m.emit(x64.XorReg(w, RDX.mreg(), RDX.mreg()))
+		b.m.emit(x64.Div(w, divisor.mreg()))
+	}
+}
 func (b *mcXasm) spillStore(r Reg, slot, size int) {
 	b.m.emit(x64.Store(size*8, r.mreg(), x64.At(RBP.mreg(), b.m.slotAddr(slot))))
 }
@@ -219,6 +236,20 @@ func (b *textXasm) jnz(r Reg, w bool, to, to2 *ir.Block) {
 }
 func (b *textXasm) jmpReg(r Reg) { b.e.line("jmp *%s", gpn(r, 8)) }
 func (b *textXasm) hlt()         { b.e.line("ud2") }
+func (b *textXasm) divGP(w, signed bool, divisor Reg) {
+	sz := clsSizeW(w)
+	if signed {
+		if w {
+			b.e.line("cqto")
+		} else {
+			b.e.line("cltd")
+		}
+		b.e.line("idiv%s %s", suf(sz), gpn(divisor, sz))
+	} else {
+		b.e.line("xorl %%edx, %%edx")
+		b.e.line("div%s %s", suf(sz), gpn(divisor, sz))
+	}
+}
 func (b *textXasm) spillStore(r Reg, slot, size int) {
 	b.e.line("mov%s %s, %s", suf(size), gpn(r, size), memn(RBP, b.e.slotAddr(slot)))
 }

@@ -61,6 +61,17 @@ func (s *xsel) selectInt(in *ir.Instr) bool {
 		commit()
 	case ir.OShl, ir.OShr, ir.OSar:
 		s.shift(in)
+	case ir.ODiv:
+		if in.Cls.IsFloat() {
+			return false
+		}
+		s.div(in, true, false)
+	case ir.OUDiv:
+		s.div(in, false, false)
+	case ir.ORem:
+		s.div(in, true, true)
+	case ir.OURem:
+		s.div(in, false, true)
 	case ir.OCmp:
 		if in.Cmp.IsFloat() {
 			return false
@@ -109,6 +120,22 @@ func (s *xsel) term(b *ir.Block) bool {
 		return false
 	}
 	return true
+}
+
+// div emits an integer divide/remainder: place the dividend in RAX, divide, then
+// move the quotient (RAX) or remainder (RDX) to the destination.
+func (s *xsel) div(in *ir.Instr, signed, rem bool) {
+	w := in.Cls == ir.ClsL
+	rb := s.gpValue(in.Arg(1), gpScratch1)
+	s.gpInto(RAX, in.Arg(0))
+	s.b.divGP(w, signed, rb)
+	d, commit := s.gpDst(in.To)
+	res := RAX
+	if rem {
+		res = RDX
+	}
+	s.b.movReg(w, d, res)
+	commit()
 }
 
 // shift emits a shift by an immediate count or by %cl.
