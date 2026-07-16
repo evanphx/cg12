@@ -62,6 +62,13 @@ type asmb interface {
 	// Constant materialization (movz/movk/movn sequence).
 	movImm(rd Reg, val int64, w64 bool)
 
+	// Memory. load/store use [base]; loadIdx/storeIdx use [base, index] with the
+	// extend/scale encoded in aux. The op fixes the width and signedness.
+	load(op ir.Op, cls ir.Cls, rd, base Reg)
+	loadIdx(op ir.Op, cls ir.Cls, rd, base, index Reg, aux int64)
+	store(op ir.Op, val, base Reg)
+	storeIdx(op ir.Op, val, base, index Reg, aux int64)
+
 	// Spill traffic: a load into / store from a frame slot at x29+off.
 	ldrSpill(rd Reg, float bool, off, size int)
 	strSpill(rs Reg, float bool, off, size int)
@@ -294,6 +301,94 @@ func (b *mcAsm) cset(rd Reg, cmp ir.Cmp, float bool) {
 	}
 	b.prog.Emit(a64.Cset(false, mreg(rd), cond))
 }
+func (b *mcAsm) load(op ir.Op, cls ir.Cls, rd, base Reg) {
+	d, a := mreg(rd), mreg(base)
+	sz := loadSize(op, cls)
+	switch op {
+	case ir.OLoadl:
+		b.prog.Emit(a64.LdrImm(true, d, a, 0))
+	case ir.OLoaduw:
+		b.prog.Emit(a64.LdrImm(false, d, a, 0))
+	case ir.OLoadsw:
+		b.prog.Emit(a64.LdrswImm(d, a, 0))
+	case ir.OLoadub:
+		b.prog.Emit(a64.LdrbImm(d, a, 0))
+	case ir.OLoadsb:
+		b.prog.Emit(a64.LdrsbImm(sz == 8, d, a, 0))
+	case ir.OLoaduh:
+		b.prog.Emit(a64.LdrhImm(d, a, 0))
+	case ir.OLoadsh:
+		b.prog.Emit(a64.LdrshImm(sz == 8, d, a, 0))
+	case ir.OLoads:
+		b.prog.Emit(a64.LdrFP(false, d, a, 0))
+	case ir.OLoadd:
+		b.prog.Emit(a64.LdrFP(true, d, a, 0))
+	case ir.OLoadq:
+		b.prog.Emit(a64.LdrQ(d, a, 0))
+	default:
+		b.fail("arm64: unsupported load %s", op)
+	}
+}
+func (b *mcAsm) loadIdx(op ir.Op, cls ir.Cls, rd, base, index Reg, aux int64) {
+	d, ba, ix := mreg(rd), mreg(base), mreg(index)
+	option, s := decodeAmode(aux)
+	sz := loadSize(op, cls)
+	switch op {
+	case ir.OLoadl:
+		b.prog.Emit(a64.LdrReg(true, d, ba, ix, option, s))
+	case ir.OLoaduw:
+		b.prog.Emit(a64.LdrReg(false, d, ba, ix, option, s))
+	case ir.OLoadsw:
+		b.prog.Emit(a64.LdrswReg(d, ba, ix, option, s))
+	case ir.OLoadub:
+		b.prog.Emit(a64.LdrbReg(d, ba, ix, option, s))
+	case ir.OLoadsb:
+		b.prog.Emit(a64.LdrsbReg(sz == 8, d, ba, ix, option, s))
+	case ir.OLoaduh:
+		b.prog.Emit(a64.LdrhReg(d, ba, ix, option, s))
+	case ir.OLoadsh:
+		b.prog.Emit(a64.LdrshReg(sz == 8, d, ba, ix, option, s))
+	default:
+		b.fail("arm64: unsupported indexed load %s", op)
+	}
+}
+func (b *mcAsm) store(op ir.Op, val, base Reg) {
+	v, a := mreg(val), mreg(base)
+	switch op {
+	case ir.OStorel:
+		b.prog.Emit(a64.StrImm(true, v, a, 0))
+	case ir.OStorew:
+		b.prog.Emit(a64.StrImm(false, v, a, 0))
+	case ir.OStoreb:
+		b.prog.Emit(a64.StrbImm(v, a, 0))
+	case ir.OStoreh:
+		b.prog.Emit(a64.StrhImm(v, a, 0))
+	case ir.OStores:
+		b.prog.Emit(a64.StrFP(false, v, a, 0))
+	case ir.OStored:
+		b.prog.Emit(a64.StrFP(true, v, a, 0))
+	case ir.OStoreq:
+		b.prog.Emit(a64.StrQ(v, a, 0))
+	default:
+		b.fail("arm64: unsupported store %s", op)
+	}
+}
+func (b *mcAsm) storeIdx(op ir.Op, val, base, index Reg, aux int64) {
+	v, ba, ix := mreg(val), mreg(base), mreg(index)
+	option, s := decodeAmode(aux)
+	switch op {
+	case ir.OStorel:
+		b.prog.Emit(a64.StrReg(true, v, ba, ix, option, s))
+	case ir.OStorew:
+		b.prog.Emit(a64.StrReg(false, v, ba, ix, option, s))
+	case ir.OStoreb:
+		b.prog.Emit(a64.StrbReg(v, ba, ix, option, s))
+	case ir.OStoreh:
+		b.prog.Emit(a64.StrhReg(v, ba, ix, option, s))
+	default:
+		b.fail("arm64: unsupported indexed store %s", op)
+	}
+}
 func (b *mcAsm) movImm(rd Reg, val int64, w64 bool) { b.m.movImm(mreg(rd), val, w64) }
 func (b *mcAsm) ldrSpill(rd Reg, float bool, off, size int) {
 	b.m.spillLoad(mreg(rd), float, off, size)
@@ -353,6 +448,24 @@ func (b *textAsm) shiftImm(op shiftOp, w64 bool, rd, rn Reg, sh uint32) {
 func (b *textAsm) rotrImm(w64 bool, rd, rn Reg, sh uint32) {
 	s := regSize(w64)
 	b.line("ror %s, %s, #%d", rd.Name(s), rn.Name(s), sh)
+}
+func (b *textAsm) load(op ir.Op, cls ir.Cls, rd, base Reg) {
+	mn, sz := loadInfo(op, cls)
+	b.line("%s %s, [%s]", mn, rd.Name(sz), base.Name(8))
+}
+func (b *textAsm) loadIdx(op ir.Op, cls ir.Cls, rd, base, index Reg, aux int64) {
+	mn, sz := loadInfo(op, cls)
+	option, s := decodeAmode(aux)
+	b.line("%s %s, [%s, %s%s]", mn, rd.Name(sz), base.Name(8), index.Name(indexSize(option)), amodeSuffix(option, s, op))
+}
+func (b *textAsm) store(op ir.Op, val, base Reg) {
+	mn, valSz := storeInfo(op)
+	b.line("%s %s, [%s]", mn, val.Name(valSz), base.Name(8))
+}
+func (b *textAsm) storeIdx(op ir.Op, val, base, index Reg, aux int64) {
+	mn, valSz := storeInfo(op)
+	option, s := decodeAmode(aux)
+	b.line("%s %s, [%s, %s%s]", mn, val.Name(valSz), base.Name(8), index.Name(indexSize(option)), amodeSuffix(option, s, op))
 }
 func (b *textAsm) movImm(rd Reg, val int64, w64 bool) { b.e.movImm(rd, val, boolToSize(w64)) }
 func (b *textAsm) ldrSpill(rd Reg, float bool, off, size int) {

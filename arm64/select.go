@@ -181,9 +181,47 @@ func (s *sel) selectData(in *ir.Instr) bool {
 		done()
 
 	default:
-		return false
+		switch {
+		case in.Op.IsLoad():
+			s.load(in)
+		case in.Op.IsStore():
+			s.store(in)
+		default:
+			return false
+		}
 	}
 	return true
+}
+
+// load emits a load, [base] or indexed [base, index] with the extend/scale in Aux.
+func (s *sel) load(in *ir.Instr) {
+	sz := loadSize(in.Op, in.Cls)
+	if len(in.Args) == 2 { // indexed
+		base := s.src(in.Args[0], 1, 8)
+		option, _ := decodeAmode(in.Aux)
+		index := s.src(in.Args[1], 0, indexSize(option))
+		d, done := s.dst(in.To, sz)
+		s.b.loadIdx(in.Op, in.Cls, d, base, index, in.Aux)
+		done()
+		return
+	}
+	addr := s.src(in.Args[0], 1, 8)
+	d, done := s.dst(in.To, sz)
+	s.b.load(in.Op, in.Cls, d, addr)
+	done()
+}
+
+// store emits a store, [base] or indexed [base, index].
+func (s *sel) store(in *ir.Instr) {
+	val := s.src(in.Args[0], 0, storeSize(in.Op))
+	if len(in.Args) == 3 { // indexed
+		base := s.src(in.Args[1], 1, 8)
+		option, _ := decodeAmode(in.Aux)
+		index := s.src(in.Args[2], 2, indexSize(option))
+		s.b.storeIdx(in.Op, val, base, index, in.Aux)
+		return
+	}
+	s.b.store(in.Op, val, s.src(in.Args[1], 1, 8))
 }
 
 // cmp emits a comparison and a conditional-set of the boolean result, folding a
