@@ -409,6 +409,11 @@ func (e *emitter) emitTerm(b *ir.Block) {
 }
 
 func (e *emitter) emitInstr(b *ir.Block, in *ir.Instr) {
+	// Integer data-processing instructions are selected once, through the shared
+	// builder (here backed by the assembly-text renderer).
+	if (&sel{f: e.f, b: &textAsm{e: e}, spillBase: e.spillBase}).selectInt(in) {
+		return
+	}
 	sz := in.Cls.Size()
 	switch in.Op {
 	case ir.ONop:

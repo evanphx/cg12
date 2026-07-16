@@ -1227,6 +1227,11 @@ func (m *mc) tailBranch(in *ir.Instr) {
 // --- instructions ----------------------------------------------------------
 
 func (m *mc) instr(in *ir.Instr) {
+	// Integer data-processing instructions are selected once, through the shared
+	// builder (here backed by the machine-code encoder).
+	if (&sel{f: m.f, b: &mcAsm{prog: m.prog, m: m}, spillBase: m.spillBase}).selectInt(in) {
+		return
+	}
 	switch in.Op {
 	case ir.ONop:
 		return
