@@ -459,37 +459,6 @@ func (e *emitter) shiftImm(in *ir.Instr, mn string, sz int) {
 	e.binop(mn, in, sz)
 }
 
-// addSubImm emits an add/sub, folding a constant operand into a 12-bit
-// immediate and flipping add<->sub for a negative constant.
-func (e *emitter) addSubImm(in *ir.Instr, sub bool, sz int) {
-	aRef, bRef := in.Args[0], in.Args[1]
-	if !sub {
-		if _, ok := intConst(e.f, bRef); !ok {
-			if _, ok := intConst(e.f, aRef); ok {
-				aRef, bRef = bRef, aRef
-			}
-		}
-	}
-	if v, ok := intConst(e.f, bRef); ok {
-		if imm, lsl12, flip, ok := addSubImm(v); ok {
-			s1 := e.srcReg(aRef, 0, sz)
-			d, done := e.dstReg(in.To, sz)
-			mn := "add"
-			if sub != flip {
-				mn = "sub"
-			}
-			if lsl12 {
-				e.line("%s %s, %s, #%d, lsl #12", mn, d, s1, imm)
-			} else {
-				e.line("%s %s, %s, #%d", mn, d, s1, imm)
-			}
-			done()
-			return
-		}
-	}
-	e.binop(map[bool]string{false: "add", true: "sub"}[sub], in, sz)
-}
-
 // logicalImm emits a bitwise op, folding a constant operand into a logical
 // (bitmask) immediate when it encodes as one.
 func (e *emitter) logicalImm(in *ir.Instr, mn string, sz int) {
@@ -515,56 +484,12 @@ func (e *emitter) logicalImm(in *ir.Instr, mn string, sz int) {
 	e.binop(mn, in, sz)
 }
 
-// tryMvn emits a bitwise NOT (MVN) when in is xor(x, all-ones).
-func (e *emitter) tryMvn(in *ir.Instr, sz int) bool {
-	var x ir.Ref
-	switch {
-	case allOnes(e.f, in.Cls, in.Args[1]):
-		x = in.Args[0]
-	case allOnes(e.f, in.Cls, in.Args[0]):
-		x = in.Args[1]
-	default:
-		return false
-	}
-	s := e.srcReg(x, 0, sz)
-	d, done := e.dstReg(in.To, sz)
-	e.line("mvn %s, %s", d, s)
-	done()
-	return true
-}
-
 // rotrImm emits a rotate-right by a constant amount (ORotr).
 func (e *emitter) rotrImm(in *ir.Instr, sz int) {
 	v, _ := intConst(e.f, in.Args[1])
 	s := e.srcReg(in.Args[0], 0, sz)
 	d, done := e.dstReg(in.To, sz)
 	e.line("ror %s, %s, #%d", d, s, v)
-	done()
-}
-
-// remop computes a remainder as a - (a/b)*b using div + msub (integer only).
-func (e *emitter) remop(divmn string, in *ir.Instr, sz int) {
-	a := e.srcReg(in.Args[0], 0, sz)
-	b := e.srcReg(in.Args[1], 1, sz)
-	q := scratch2.Name(sz)
-	e.line("%s %s, %s, %s", divmn, q, a, b)
-	d, done := e.dstReg(in.To, sz)
-	e.line("msub %s, %s, %s, %s", d, q, b, a)
-	done()
-}
-
-// emitConv emits a one-operand conversion where the operand and result may be in
-// different register classes and widths.
-func (e *emitter) emitConv(mn string, in *ir.Instr) {
-	e.emitConvSz(mn, in, e.f.ClassOf(in.Args[0]).Size(), in.Cls.Size())
-}
-
-// emitConvSz is emitConv with explicit operand and result register widths, for
-// the cases where they differ from the values' natural class sizes.
-func (e *emitter) emitConvSz(mn string, in *ir.Instr, srcSz, dstSz int) {
-	s := e.srcReg(in.Args[0], 1, srcSz)
-	d, done := e.dstReg(in.To, dstSz)
-	e.line("%s %s, %s", mn, d, s)
 	done()
 }
 
@@ -588,41 +513,6 @@ func vec16(qName string) string {
 		return "v" + qName[1:] + ".16b"
 	}
 	return qName
-}
-
-func (e *emitter) emitCmp(in *ir.Instr) {
-	argCls := e.f.ClassOf(in.Args[0])
-	sz := argCls.Size()
-
-	var cond string
-	var ok bool
-	if argCls.IsFloat() {
-		s1 := e.srcReg(in.Args[0], 0, sz)
-		s2 := e.srcReg(in.Args[1], 1, sz)
-		e.line("fcmp %s, %s", s1, s2)
-		cond, ok = fpCondCode(in.Cmp)
-	} else {
-		s1 := e.srcReg(in.Args[0], 0, sz)
-		folded := false
-		if v, vok := intConst(e.f, in.Args[1]); vok {
-			if imm, lsl12, flip, iok := addSubImm(v); iok && !lsl12 && !flip {
-				e.line("cmp %s, #%d", s1, imm)
-				folded = true
-			}
-		}
-		if !folded {
-			s2 := e.srcReg(in.Args[1], 1, sz)
-			e.line("cmp %s, %s", s1, s2)
-		}
-		cond, ok = condCode(in.Cmp)
-	}
-	if !ok {
-		e.fail("arm64: unsupported comparison predicate %v", in.Cmp)
-		return
-	}
-	d, done := e.dstReg(in.To, in.Cls.Size())
-	e.line("cset %s, %s", d, cond)
-	done()
 }
 
 // fltMn selects the integer or floating-point mnemonic for a class.

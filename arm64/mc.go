@@ -1395,39 +1395,6 @@ func (m *mc) logical(in *ir.Instr, rEnc func(w64 bool, rd, rn, rm a64.Reg) uint3
 	m.binInt(in, rEnc)
 }
 
-// tryMvn emits a bitwise NOT (MVN) when `in` is xor(x, all-ones); it reports
-// whether it did.
-func (m *mc) tryMvn(in *ir.Instr) bool {
-	var x ir.Ref
-	switch {
-	case allOnes(m.f, in.Cls, in.Args[1]):
-		x = in.Args[0]
-	case allOnes(m.f, in.Cls, in.Args[0]):
-		x = in.Args[1]
-	default:
-		return false
-	}
-	sz := in.Cls.Size()
-	s := m.src(x, 0, sz)
-	d, done := m.dst(in.To, sz)
-	m.emit(a64.MvnReg(sz == 8, d, s))
-	done()
-	return true
-}
-
-func (m *mc) binFP(in *ir.Instr, iEnc func(w64 bool, rd, rn, rm a64.Reg) uint32, fEnc func(dbl bool, rd, rn, rm a64.Reg) uint32) {
-	if !in.Cls.IsFloat() {
-		m.binInt(in, iEnc)
-		return
-	}
-	sz := in.Cls.Size()
-	s1 := m.src(in.Args[0], 0, sz)
-	s2 := m.src(in.Args[1], 1, sz)
-	d, done := m.dst(in.To, sz)
-	m.emit(fEnc(sz == 8, d, s1, s2))
-	done()
-}
-
 func (m *mc) rem(in *ir.Instr, div func(w64 bool, rd, rn, rm a64.Reg) uint32) {
 	sz := in.Cls.Size()
 	w64 := sz == 8
@@ -1507,34 +1474,6 @@ func (m *mc) extend(in *ir.Instr) {
 		m.emit(a64.Uxth(d, s))
 	case ir.OExtuw:
 		m.emit(a64.MovReg(false, d, s)) // mov Wd, Wn zero-extends into Xd
-	}
-	done()
-}
-
-func (m *mc) conv(in *ir.Instr) {
-	ssz := m.f.ClassOf(in.Args[0]).Size()
-	dsz := in.Cls.Size()
-	s := m.src(in.Args[0], 1, ssz)
-	d, done := m.dst(in.To, dsz)
-	switch in.Op {
-	case ir.OExts:
-		m.emit(a64.FcvtStoD(d, s))
-	case ir.OTruncd:
-		m.emit(a64.FcvtDtoS(d, s))
-	case ir.OStosi:
-		m.emit(a64.Fcvtzs(dsz == 8, ssz == 8, d, s))
-	case ir.OStoui:
-		m.emit(a64.Fcvtzu(dsz == 8, ssz == 8, d, s))
-	case ir.OSltof:
-		m.emit(a64.Scvtf(dsz == 8, ssz == 8, d, s))
-	case ir.OUltof:
-		m.emit(a64.Ucvtf(dsz == 8, ssz == 8, d, s))
-	case ir.OCast:
-		if in.Cls.IsFloat() {
-			m.emit(a64.FmovFromGP(dsz == 8, d, s))
-		} else {
-			m.emit(a64.FmovToGP(ssz == 8, d, s))
-		}
 	}
 	done()
 }
