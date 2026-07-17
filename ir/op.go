@@ -102,9 +102,12 @@ const (
 	OCopy
 
 	// Calls and arguments.
-	OCall   // Args[0] is the callee; Instr.Cls is the return class
-	OArg    // an outgoing call argument (materialised before the OCall)
-	OArgEnv // the outgoing environment argument
+	OCall // Args[0] is the callee; Instr.Cls is the return class
+	OArg  // an outgoing call argument (materialised before the OCall)
+	_     // was OArgEnv, the outgoing environment argument: never referenced by
+	//       anything, and its number is burned rather than reclaimed because an
+	//       Op is written to the binary encoding as its number -- renumbering
+	//       every op after it would decode old modules as different instructions.
 	OPar    // an incoming parameter placeholder
 	OParEnv // the incoming environment parameter
 
@@ -256,7 +259,6 @@ var opTable = [numOps]opInfo{
 
 	OCall:   {name: "call", hasResult: true},
 	OArg:    {name: "arg"},
-	OArgEnv: {name: "argenv"},
 	OPar:    {name: "par", hasResult: true},
 	OParEnv: {name: "parenv", hasResult: true},
 

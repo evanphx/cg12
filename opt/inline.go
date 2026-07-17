@@ -263,7 +263,7 @@ func spliceCall(caller *ir.Func, b *ir.Block, idx int, callee *ir.Func, cg *call
 					continue
 				}
 				if g := directCallee(caller, in, cg.byName); g != nil && scc.comp[g] == cycle {
-					in.Aux = int64(depth + 1)
+					in.Unroll = int32(depth + 1)
 				}
 			}
 		}
@@ -272,7 +272,7 @@ func spliceCall(caller *ir.Func, b *ir.Block, idx int, callee *ir.Func, cg *call
 
 // cloneInstr copies an instruction, remapping every value reference.
 func cloneInstr(in *ir.Instr, mapRef func(ir.Ref) ir.Ref) ir.Instr {
-	out := ir.Instr{Op: in.Op, Cls: in.Cls, To: mapRef(in.To), Cmp: in.Cmp, Aux: in.Aux, RetAgg: in.RetAgg, Asm: in.Asm, Pos: in.Pos}
+	out := ir.Instr{Op: in.Op, Cls: in.Cls, To: mapRef(in.To), Cmp: in.Cmp, Aux: in.Aux, Unroll: in.Unroll, RetAgg: in.RetAgg, Asm: in.Asm, Pos: in.Pos}
 	for _, a := range in.Args {
 		out.Args = append(out.Args, mapRef(a))
 	}

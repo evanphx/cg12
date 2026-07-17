@@ -4,14 +4,22 @@ package ir
 type RefKind uint8
 
 const (
-	RefNone    RefKind = iota // absent operand (the zero Ref)
-	RefTemp                   // an SSA temporary; ID indexes Func.Temps
-	RefConst                  // a constant; ID indexes Func.Consts
-	RefType                   // an aggregate type; ID indexes Module.Types
-	RefSlot                   // a stack slot; ID is a per-function slot number
-	RefCallArg                // ABI descriptor emitted between isel and regalloc
-	RefMem                    // an addressing mode; ID indexes Func.Mems (target lowering)
-	RefReg                    // a physical machine register; ID is the target register number
+	RefNone  RefKind = iota // absent operand (the zero Ref)
+	RefTemp                 // an SSA temporary; ID indexes Func.Temps
+	RefConst                // a constant; ID indexes Func.Consts
+	RefType                 // an aggregate type; ID indexes Module.Types
+	RefSlot                 // a stack slot; ID is a per-function slot number
+
+	// Two kinds were declared here and never used by anything: an ABI descriptor
+	// for the gap between isel and regalloc, and an addressing mode indexing a
+	// Func.Mems that was never added. They are burned rather than reclaimed
+	// because a Ref's kind is written to the binary encoding as its number, so
+	// renumbering RefReg would make every previously encoded module decode as
+	// something else -- silently, since the decoder would find a kind it knows.
+	_ // was RefCallArg
+	_ // was RefMem
+
+	RefReg // a physical machine register; ID is the target register number
 )
 
 // Ref is a compact, comparable operand reference. It is deliberately a small

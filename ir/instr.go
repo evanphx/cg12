@@ -14,6 +14,19 @@ type Instr struct {
 	Cmp  Cmp   // predicate, valid only when Op == OCmp
 	Aux  int64 // op-specific immediate: blit size, vaarg type id, call stack bytes
 
+	// Unroll is the recursion depth the inliner marks an OCall with while it
+	// decides how far to unroll a cycle. It is transient: opt clears it when the
+	// unroller is done, and nothing outside opt reads it.
+	//
+	// It has a field of its own because it used to live in Aux, which an OCall
+	// also uses for its outgoing stack bytes. The two never met -- the backend's
+	// ABI lowering rebuilds the call instruction, so a stale depth was overwritten
+	// rather than misread -- but nothing said so, and what kept them apart was the
+	// order the passes happen to run in plus one clearCallDepth call. Aux is an
+	// untyped int64 with several meanings; that is exactly how a pass reordering
+	// turns into a wrong stack frame.
+	Unroll int32
+
 	// AggArgs types by-value aggregate call arguments: for an OCall, AggArgs[k]
 	// (when non-nil) is the aggregate type of the value argument Args[1+k],
 	// which is a pointer to that aggregate. nil entries are scalar arguments.

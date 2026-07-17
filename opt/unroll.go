@@ -45,7 +45,7 @@ func unrollInto(caller *ir.Func, cg *callGraph, scc *sccInfo) bool {
 		if callee == nil {
 			break
 		}
-		depth := int(b.Instrs[idx].Aux)
+		depth := int(b.Instrs[idx].Unroll)
 		spliceCall(caller, b, idx, callee, cg, scc, depth)
 		changed = true
 	}
@@ -66,7 +66,7 @@ func findUnrollable(caller *ir.Func, cg *callGraph, scc *sccInfo) (*ir.Block, in
 			if callee == nil || scc.comp[callee] != scc.comp[caller] {
 				continue // not a back-edge inside this recursion cycle
 			}
-			if int(in.Aux) >= maxRecursionDepth {
+			if int(in.Unroll) >= maxRecursionDepth {
 				continue // this chain is already unrolled to the limit
 			}
 			if inlinable(callee) {
@@ -77,12 +77,17 @@ func findUnrollable(caller *ir.Func, cg *callGraph, scc *sccInfo) (*ir.Block, in
 	return nil, 0, nil
 }
 
-// clearCallDepth removes the transient depth marks left in call Aux slots.
+// clearCallDepth removes the transient depth marks the unroller left on calls.
+//
+// It used to zero Aux, which on a lowered call means the outgoing stack bytes --
+// so this ran only before lowering, and only because that is the order the
+// passes happen to be in. The mark has its own field now, and clearing it can no
+// longer erase anything else.
 func clearCallDepth(f *ir.Func) {
 	for _, b := range f.Blocks {
 		for i := range b.Instrs {
 			if b.Instrs[i].Op == ir.OCall {
-				b.Instrs[i].Aux = 0
+				b.Instrs[i].Unroll = 0
 			}
 		}
 	}

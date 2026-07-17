@@ -23,8 +23,10 @@ func TestRefStringVariants(t *testing.T) {
 	assert.Equal(t, "%.slot3", f.refString(slotRef(3)))
 	// Type ref past the registered set falls back to a synthetic name.
 	assert.Equal(t, ":t9", f.refString(typeRef(9)))
-	// Kinds without a textual form render a debug placeholder.
-	assert.Equal(t, "<ref 5:1>", f.refString(Ref{Kind: RefCallArg, ID: 1}))
+	// A kind with no textual form renders a debug placeholder rather than
+	// something that reads like a real operand. 5 is one of the two numbers burned
+	// when RefCallArg and RefMem were removed, so nothing will ever name it again.
+	assert.Equal(t, "<ref 5:1>", f.refString(Ref{Kind: 5, ID: 1}))
 }
 
 func TestConstStringUnknownKind(t *testing.T) {

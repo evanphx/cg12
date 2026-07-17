@@ -120,3 +120,22 @@ func TestBinaryRejectsTruncated(t *testing.T) {
 	_, err := DecodeModule(data[:len(data)-5]) // cut off the tail
 	require.Error(t, err)
 }
+
+// The binary encoding writes a Ref's kind and an Op as their numbers, so those
+// numbers are the format. Two RefKinds and one Op were removed for being unused;
+// their slots are burned (`_`) rather than reclaimed, because closing the gap
+// would renumber everything after and make an already-encoded module decode as
+// different instructions -- silently, since the decoder would find kinds and ops
+// it knows perfectly well.
+//
+// This pins the numbers a future cleanup would quietly change. If it fails,
+// either restore the burned slots or bump binVersion and mean it.
+func TestWireNumbersSurviveTheBurnedSlots(t *testing.T) {
+	assert.Equal(t, RefKind(7), RefReg, "RefReg sits after the two burned RefKinds")
+	assert.Equal(t, Op(57), OPar, "OPar sits after the burned OArgEnv")
+
+	// The burned op's slot must not have acquired a live op: the array is indexed
+	// by Op, so a new op landing there would answer to the dead one's number.
+	assert.Empty(t, opTable[OArg+1].name, "the slot after OArg is the burned OArgEnv")
+
+}
