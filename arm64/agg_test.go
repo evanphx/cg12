@@ -27,8 +27,7 @@ func TestCompileAggregateParamGP(t *testing.T) {
 	e := f.Entry()
 	e.Ret(e.Load(ir.ClsW, p))
 
-	asm, err := Compile(f)
-	require.NoError(t, err)
+	asm := disasmModule(t, m)
 	// The struct arrives in x0 and is stored into a reconstructed stack slot.
 	assert.Contains(t, asm, "add x", "slot address computed from x29")
 	assert.Contains(t, asm, "str x0")
@@ -43,8 +42,7 @@ func TestCompileAggregateParamHFA(t *testing.T) {
 	e := f.Entry()
 	e.Ret(e.Load(ir.ClsS, p))
 
-	asm, err := Compile(f)
-	require.NoError(t, err)
+	asm := disasmModule(t, m)
 	// HFA elements arrive in s0/s1 and are stored into the slot.
 	assert.Contains(t, asm, "str s0")
 	assert.Contains(t, asm, "str s1")
@@ -62,8 +60,7 @@ func TestCompileAggregateArg(t *testing.T) {
 	call.AggArgs = []*ir.AggType{pair} // the single arg is a by-value aggregate
 	e.Ret(r)
 
-	asm, err := Compile(f)
-	require.NoError(t, err)
+	asm := disasmModule(t, m)
 	// The aggregate is loaded into x0 and passed by register.
 	assert.Contains(t, asm, "ldr")
 	assert.Contains(t, asm, "bl sink")
@@ -81,8 +78,7 @@ func TestCompileAggregateArgHFA(t *testing.T) {
 	call.AggArgs = []*ir.AggType{vec}
 	e.RetVoid()
 
-	asm, err := Compile(f)
-	require.NoError(t, err)
+	asm := disasmModule(t, m)
 	assert.Contains(t, asm, "ldr s") // HFA elements loaded into SIMD registers
 	assert.Contains(t, asm, "bl sink")
 }
@@ -103,8 +99,7 @@ func TestCompileAggregateArgMemoryOnStack(t *testing.T) {
 	call.AggArgs[8] = big
 	e.RetVoid()
 
-	asm, err := Compile(f)
-	require.NoError(t, err)
+	asm := disasmModule(t, m)
 	assert.Contains(t, asm, "sub sp", "outgoing stack area reserved")
 }
 
@@ -124,7 +119,7 @@ func TestCompileAggregateArgStackErrors(t *testing.T) {
 	call.AggArgs[8] = pair // all x0..x7 used -> the aggregate is stacked
 	e.RetVoid()
 
-	_, err := Compile(f)
+	_, err := CompileToObject(m)
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "stack-passed aggregate")
 }
@@ -138,8 +133,7 @@ func TestCompileAggregateByReference(t *testing.T) {
 	e := f.Entry()
 	e.Ret(e.Load(ir.ClsW, p))
 
-	asm, err := Compile(f)
-	require.NoError(t, err)
+	asm := disasmModule(t, m)
 	// No reconstruction stores for a by-reference aggregate; the pointer is used.
 	assert.NotContains(t, asm, "str x0")
 }
@@ -158,8 +152,7 @@ func TestCompileStackedAggregateParam(t *testing.T) {
 	e := f.Entry()
 	e.Ret(e.Load(ir.ClsW, p))
 
-	asm, err := Compile(f)
-	require.NoError(t, err)
+	asm := disasmModule(t, m)
 	assert.Contains(t, asm, "add x", "stacked aggregate parameter address computed from x29")
 }
 
@@ -219,8 +212,7 @@ func TestCompileAggregateResultMemory(t *testing.T) {
 	call.RetAgg = big
 	e.Ret(e.Load(ir.ClsL, r))
 
-	asm, err := Compile(f)
-	require.NoError(t, err)
+	asm := disasmModule(t, m)
 	assert.Contains(t, asm, "x8", "buffer address passed in x8")
 }
 

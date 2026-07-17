@@ -6,7 +6,6 @@ import (
 
 	"github.com/evanphx/cg12/ir"
 	"github.com/stretchr/testify/assert"
-	"github.com/stretchr/testify/require"
 )
 
 func TestCompileVariadic(t *testing.T) {
@@ -22,8 +21,7 @@ func TestCompileVariadic(t *testing.T) {
 	_ = d
 	e.Ret(i)
 
-	asm, err := Compile(f)
-	require.NoError(t, err)
+	asm := disasmModule(t, m)
 	// Register save area written at entry.
 	assert.Contains(t, asm, "str x1", "argument registers spilled to the save area")
 	assert.Contains(t, asm, "str d0")

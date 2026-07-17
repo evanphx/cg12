@@ -640,12 +640,6 @@ func (m *mc) epilogue() {
 		epilogue(m.frame, m.hasDynAlloc, m.calleeSaved)
 }
 
-// adjustSP subtracts (sub=true) or adds n to sp.
-// adjustSP adds or subtracts n from sp. It uses only the immediate forms (a
-// shifted #hi12<<12 plus a #lo12), because the register form of add/sub cannot
-// target sp — register 31 there denotes the zero register, so `sub sp, sp, xN`
-// would silently write to xzr. Splitting the immediate reaches any frame up to
-// ~16 MiB.
 // frameAddr computes x29 + off into d. The ADD immediate is only 12 bits (0..4095),
 // so a larger frame offset is split into a shifted-high and a low add — otherwise
 // the immediate silently wraps and the address collides with another frame slot.
@@ -661,6 +655,11 @@ func (m *mc) frameAddr(d a64.Reg, off int) {
 	m.emit(a64.AddImm(true, d, mcX29, uint32(lo)))
 }
 
+// adjustSP subtracts (sub=true) or adds n to sp. It uses only the immediate
+// forms (a shifted #hi12<<12 plus a #lo12), because the register form of add/sub
+// cannot target sp — register 31 there denotes the zero register, so
+// `sub sp, sp, xN` would silently write to xzr. Splitting the immediate reaches
+// any frame up to ~16 MiB.
 func (m *mc) adjustSP(sub bool, n int) {
 	if n == 0 {
 		return

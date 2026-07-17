@@ -4,7 +4,9 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/evanphx/cg12/arm64/a64"
 	"github.com/evanphx/cg12/ir"
+	"github.com/evanphx/cg12/obj"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
@@ -314,68 +316,104 @@ func TestDestructSSARemovesPhis(t *testing.T) {
 
 func TestCompileFloatFunction(t *testing.T) {
 	// A float add now compiles; the parameter comes in s0 and the result too.
-	f := ir.NewModule().NewFunc("fadd", ir.ClsS).Export()
+	m := ir.NewModule()
+	f := m.NewFunc("fadd", ir.ClsS).Export()
 	a := f.Param("a", ir.ClsS)
 	b := f.Param("b", ir.ClsS)
 	e := f.Entry()
 	e.Ret(e.Add(ir.ClsS, a, b))
 
-	asm, err := Compile(f)
-	require.NoError(t, err)
-	assert.Contains(t, asm, "fadd s")
+	assert.Contains(t, disasmModule(t, m), "fadd s")
 }
 
 func TestCompileLargeFrame(t *testing.T) {
 	// A frame larger than the stp pre-index reach (504 bytes) must adjust sp
-	// separately in the prologue and epilogue. A 2KB alloc lands in adjustSP's
-	// immediate branch; a >4KB alloc that is not a clean multiple of 4096 lands
-	// in the scratch-register (movImm) branch.
+	// separately in the prologue and epilogue. Add/sub immediate only carries 12
+	// bits, and the register form cannot target sp -- register 31 is the zero
+	// register there -- so a frame past 4095 is subtracted in two goes: a shifted
+	// high half and a low half.
 	compileAlloc := func(size int) string {
-		f := ir.NewModule().NewFunc("bf", ir.ClsW).Export()
+		m := ir.NewModule()
+		f := m.NewFunc("bf", ir.ClsW).Export()
 		x := f.Param("x", ir.ClsW)
 		e := f.Entry()
 		p := e.Alloc(4, size)
 		e.Store(x, p)
 		e.Ret(e.Load(ir.ClsW, p))
-		asm, err := Compile(f)
-		require.NoError(t, err)
-		return asm
+		return disasmModule(t, m)
 	}
 
-	small := compileAlloc(2048) // frame ~2064, fits an immediate
-	assert.Contains(t, small, "sub sp, sp, #")
-	assert.Contains(t, small, "add sp, sp, #")
+	small := compileAlloc(2048) // frame 2064: one immediate reaches it
+	assert.Contains(t, small, "sub sp, sp, #2064")
+	assert.Contains(t, small, "add sp, sp, #2064")
 	assert.NotContains(t, small, "stp x29, x30, [sp, #-") // not the pre-index form
 
-	huge := compileAlloc(9000) // frame > 4095 and not a multiple of 4096
-	assert.Contains(t, huge, "sub sp, sp, "+scratch0.xName())
-	assert.Contains(t, huge, "add sp, sp, "+scratch0.xName())
+	// frame 9024 = 2<<12 + 832, which no single immediate reaches.
+	huge := compileAlloc(9000)
+	assert.Contains(t, huge, "sub sp, sp, #2, lsl #12")
+	assert.Contains(t, huge, "sub sp, sp, #832")
+	assert.Contains(t, huge, "add sp, sp, #2, lsl #12")
+	assert.Contains(t, huge, "add sp, sp, #832")
 }
 
+// Static data reaches the object as bytes, a symbol, and -- where it names
+// another symbol -- a relocation. Checking those directly says what the data
+// actually is; the directives it used to be spelled with were only a rendering
+// of it.
 func TestCompileModuleWithData(t *testing.T) {
 	m := ir.NewModule()
-	m.Data = append(m.Data, &ir.Data{
-		Name:    "g",
-		Linkage: ir.Linkage{Export: true},
-		Align:   8,
-		Items: []ir.DataItem{
-			{Sub: ir.SubW, Ints: []int64{1, 2}},
-			{Zero: 4},
-			{Str: "hi"},
-			{Sub: ir.SubL, Sym: "other", Off: 8},
-		},
-	})
+	m.Data = append(m.Data,
+		// One byte first, so g's alignment has to pad rather than happening to hold.
+		&ir.Data{Name: "pad", Items: []ir.DataItem{{Sub: ir.SubB, Ints: []int64{7}}}},
+		&ir.Data{
+			Name:    "g",
+			Linkage: ir.Linkage{Export: true},
+			Align:   8,
+			Items: []ir.DataItem{
+				{Sub: ir.SubW, Ints: []int64{1, 2}},
+				{Zero: 4},
+				{Str: "hi"},
+				{Sub: ir.SubL, Sym: "other", Off: 8},
+			},
+		})
 	f := m.NewFuncVoid("noop")
 	f.Entry().RetVoid()
 
-	asm, err := CompileModule(m)
+	o, err := CompileToObject(m)
 	require.NoError(t, err)
-	assert.Contains(t, asm, ".globl g")
-	assert.Contains(t, asm, ".balign 8")
-	assert.Contains(t, asm, ".word 1")
-	assert.Contains(t, asm, ".zero 4")
-	assert.Contains(t, asm, `.ascii "hi"`)
-	assert.Contains(t, asm, ".quad other+8")
+
+	g := findSym(t, o, "g")
+	assert.Equal(t, obj.SecData, g.Section)
+	assert.True(t, g.Global, "an exported datum is visible to the linker")
+	assert.Zero(t, g.Value%8, "Align: 8 is honoured, so the leading byte is padded over")
+
+	// The items in order: two words, four zero bytes, the string, and then eight
+	// bytes left for the linker to fill in.
+	assert.Equal(t, []byte{
+		1, 0, 0, 0,
+		2, 0, 0, 0,
+		0, 0, 0, 0,
+		'h', 'i',
+		0, 0, 0, 0, 0, 0, 0, 0,
+	}, o.Data[g.Value:g.Value+g.Size])
+
+	// The address of another symbol is not something we can write down, so it is
+	// a relocation over those last eight bytes.
+	assert.Contains(t, o.DataRelocs, obj.Reloc{
+		Offset: g.Value + 14, Sym: "other", Type: obj.R_AARCH64_ABS64, Addend: 8,
+	})
+}
+
+// findSym returns the named symbol, failing if the object has no such thing.
+func findSym(t *testing.T, o *obj.Object, name string) obj.Sym {
+	t.Helper()
+	for _, s := range o.Syms {
+		if s.Name == name {
+			return s
+		}
+	}
+	t.Fatalf("no symbol %q in %v", name, o.Syms)
+	return obj.Sym{}
 }
 
 func TestCompileModulePropagatesError(t *testing.T) {
@@ -393,37 +431,54 @@ func TestCompileModulePropagatesError(t *testing.T) {
 	call.AggArgs = make([]*ir.AggType, 9)
 	call.AggArgs[8] = pair
 	e.RetVoid()
-	_, err := CompileModule(m)
+	_, err := CompileToObject(m)
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "bad")
 }
 
-func newEmitter(f *ir.Func, sb *strings.Builder) *emitter {
-	return &emitter{f: f, sb: sb, allocOff: map[*ir.Instr]int{}, label: "t"}
+// disasmModule compiles a module and reads its machine code back as assembly,
+// which is how these tests check what was selected.
+func disasmModule(t *testing.T, m *ir.Module) string {
+	t.Helper()
+	o, err := CompileToObject(m)
+	require.NoError(t, err)
+	return Disassemble(o)
+}
+
+// newMC builds a bare machine-code emitter for exercising one piece of it in
+// isolation, without going through a whole compile.
+func newMC(f *ir.Func) *mc {
+	return &mc{f: f, prog: a64.NewProgram(), instrPC: map[*ir.Instr]uint64{}, allocOff: map[*ir.Instr]int{}}
+}
+
+// mcText reads back what the emitter produced, as assembly.
+func mcText(t *testing.T, m *mc) string {
+	t.Helper()
+	code, err := m.prog.Bytes()
+	require.NoError(t, err)
+	return a64.DisasmBytes(code)
 }
 
 func TestParallelMoveRegisterSwap(t *testing.T) {
-	var sb strings.Builder
-	e := newEmitter(ir.NewModule().NewFuncVoid("x"), &sb)
-	e.parallelMove([]movePairLoc{
+	m := newMC(ir.NewModule().NewFuncVoid("x"))
+	m.parallelMove([]movePairLoc{
 		{dst: loc{reg: X0, size: 8}, src: loc{reg: X1, size: 8}},
 		{dst: loc{reg: X1, size: 8}, src: loc{reg: X0, size: 8}},
 	})
-	out := sb.String()
-	// The cycle is broken through scratch2 (x15) and takes three moves.
+	out := mcText(t, m)
+	// Neither move can go first without destroying the other's source, so the
+	// cycle is broken through the scratch register and costs a third move.
 	assert.Contains(t, out, "x15")
-	assert.Equal(t, 3, strings.Count(out, "mov "))
+	assert.Equal(t, 3, strings.Count(out, "mov "), out)
 }
 
 func TestParallelMoveNoOpsAndChain(t *testing.T) {
-	var sb strings.Builder
-	e := newEmitter(ir.NewModule().NewFuncVoid("x"), &sb)
-	e.parallelMove([]movePairLoc{
+	m := newMC(ir.NewModule().NewFuncVoid("x"))
+	m.parallelMove([]movePairLoc{
 		{dst: loc{reg: X0, size: 8}, src: loc{reg: X0, size: 8}}, // no-op, dropped
 		{dst: loc{reg: X2, size: 8}, src: loc{reg: X3, size: 8}},
 	})
-	out := sb.String()
-	assert.Equal(t, "\tmov x2, x3\n", out)
+	assert.Equal(t, "mov x2, x3\n", mcText(t, m))
 }
 
 func TestEmitMoveLocCombos(t *testing.T) {
@@ -435,23 +490,23 @@ func TestEmitMoveLocCombos(t *testing.T) {
 	}{
 		{"reg<-reg", loc{reg: X0, size: 8}, loc{reg: X1, size: 8}, "mov x0, x1"},
 		{"reg<-mem", loc{reg: X0, size: 8}, loc{mem: true, slot: 8, size: 8}, "ldr x0, [x29, #8]"},
-		{"reg<-imm", loc{reg: X0, size: 4}, loc{imm: true, val: 7, size: 4}, "movz w0, #7"},
+		{"reg<-imm", loc{reg: X0, size: 4}, loc{imm: true, val: 7, size: 4}, "movz w0, #0x7"},
 		{"mem<-reg", loc{mem: true, slot: 16, size: 8}, loc{reg: X2, size: 8}, "str x2, [x29, #16]"},
-		{"mem<-imm", loc{mem: true, slot: 0, size: 4}, loc{imm: true, val: 3, size: 4}, "str w16, [x29, #0]"},
+		{"mem<-imm", loc{mem: true, slot: 0, size: 4}, loc{imm: true, val: 3, size: 4}, "str w16, [x29]"},
 		{"mem<-mem", loc{mem: true, slot: 24, size: 8}, loc{mem: true, slot: 8, size: 8}, "ldr x16, [x29, #8]"},
 	}
 	for _, c := range cases {
-		var sb strings.Builder
-		e := newEmitter(ir.NewModule().NewFuncVoid("x"), &sb)
-		e.emitMoveLoc(c.dst, c.src)
-		assert.Containsf(t, sb.String(), c.want, c.name)
+		t.Run(c.name, func(t *testing.T) {
+			m := newMC(ir.NewModule().NewFuncVoid("x"))
+			m.emitMoveLoc(c.dst, c.src)
+			assert.Contains(t, mcText(t, m), c.want)
+		})
 	}
 }
 
 func TestLocOf(t *testing.T) {
 	f := ir.NewModule().NewFuncVoid("x")
-	var sb strings.Builder
-	e := newEmitter(f, &sb)
+	e := &emitter{f: f, allocOff: map[*ir.Instr]int{}}
 
 	reg := f.NewTemp("r", ir.ClsL)
 	f.Temp(reg).Reg = int(X5)
@@ -472,63 +527,61 @@ func TestLocOf(t *testing.T) {
 
 func TestEmitCallErrors(t *testing.T) {
 	f := ir.NewModule().NewFunc("x", ir.ClsW)
-	var sb strings.Builder
 
 	// A constant integer address is a legal indirect call target: it is
 	// materialized and branched to (blr), so no error.
-	e := newEmitter(f, &sb)
-	e.emitCall(&ir.Instr{Op: ir.OCall, Args: []ir.Ref{f.Word(5)}})
-	require.NoError(t, e.err)
+	m := newMC(f)
+	(&sel{f: m.f, b: &mcAsm{prog: m.prog, m: m}}).call(&ir.Instr{Op: ir.OCall, Args: []ir.Ref{f.Word(5)}})
+	require.NoError(t, m.err)
+	assert.Contains(t, mcText(t, m), "blr ")
 
 	// A slot reference cannot be a call target.
-	e2 := newEmitter(f, &sb)
-	e2.emitCall(&ir.Instr{Op: ir.OCall, Args: []ir.Ref{{Kind: ir.RefSlot}}})
-	require.Error(t, e2.err)
+	m2 := newMC(f)
+	(&sel{f: m2.f, b: &mcAsm{prog: m2.prog, m: m2}}).call(&ir.Instr{Op: ir.OCall, Args: []ir.Ref{{Kind: ir.RefSlot}}})
+	require.Error(t, m2.err)
 }
 
 func TestEmitTermHltAndMissing(t *testing.T) {
 	f := ir.NewModule().NewFuncVoid("x")
 	b := f.Entry()
 
-	var sb strings.Builder
-	e := newEmitter(f, &sb)
+	m := newMC(f)
 	b.Hlt()
-	e.emitTerm(b)
-	assert.Contains(t, sb.String(), "brk #0")
+	m.term(b)
+	assert.Contains(t, mcText(t, m), "brk #0")
 
-	var sb2 strings.Builder
-	e2 := newEmitter(f, &sb2)
+	m2 := newMC(f)
 	b.Jmp = ir.Jmp{Kind: ir.JmpNone}
-	e2.emitTerm(b)
-	require.Error(t, e2.err)
+	m2.term(b)
+	require.Error(t, m2.err)
 }
 
 func TestSrcRegFailsOnUnsupportedRef(t *testing.T) {
-	f := ir.NewModule().NewFuncVoid("x")
-	var sb strings.Builder
-	e := newEmitter(f, &sb)
-	e.srcReg(ir.Ref{Kind: ir.RefSlot}, 0, 8)
-	require.Error(t, e.err)
+	m := newMC(ir.NewModule().NewFuncVoid("x"))
+	(&sel{f: m.f, b: &mcAsm{prog: m.prog, m: m}}).src(ir.Ref{Kind: ir.RefSlot}, 0, 8)
+	require.Error(t, m.err)
 }
 
 func TestFailKeepsFirstError(t *testing.T) {
-	e := &emitter{}
-	e.fail("first %d", 1)
-	e.fail("second")
-	require.EqualError(t, e.err, "first 1")
+	m := &mc{}
+	m.fail("first %d", 1)
+	m.fail("second")
+	require.EqualError(t, m.err, "first 1")
 }
 
+// movImm builds a value out of 16-bit chunks, and the point is that it skips the
+// chunks it does not need: whichever of MOVZ (start from zero) or MOVN (start
+// from all-ones) leaves less to fill.
 func TestMovImmPatterns(t *testing.T) {
-	var sb strings.Builder
-	e := &emitter{f: ir.NewModule().NewFuncVoid("x"), sb: &sb}
-	e.movImm(X0, 0x1234, 8)
-	e.movImm(X1, -1, 4)
-	e.movImm(X2, 0xABCD0000, 8)
-	e.movImm(X3, 0x1234ABCD, 8)
-	out := sb.String()
-	assert.Contains(t, out, "movz x0, #4660")           // 0x1234, single chunk
-	assert.Contains(t, out, "movn w1, #0")              // -1 in one instruction
-	assert.Contains(t, out, "movz x2, #43981, lsl #16") // 0xABCD << 16, low chunk skipped
-	assert.Contains(t, out, "movz x3, #43981")          // 0x1234ABCD: low chunk
-	assert.Contains(t, out, "movk x3, #4660, lsl #16")  // ... then high chunk
+	m := newMC(ir.NewModule().NewFuncVoid("x"))
+	m.movImm(a64.Reg(0), 0x1234, true)
+	m.movImm(a64.Reg(1), -1, false)
+	m.movImm(a64.Reg(2), 0xABCD0000, true)
+	m.movImm(a64.Reg(3), 0x1234ABCD, true)
+	out := mcText(t, m)
+	assert.Contains(t, out, "movz x0, #0x1234")          // a single chunk
+	assert.Contains(t, out, "movn w1, #0x0")             // -1 in one instruction
+	assert.Contains(t, out, "movz x2, #0xabcd, lsl #16") // the zero low chunk is skipped
+	assert.Contains(t, out, "movz x3, #0xabcd")          // 0x1234ABCD: low chunk
+	assert.Contains(t, out, "movk x3, #0x1234, lsl #16") // ... then high chunk
 }
