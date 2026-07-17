@@ -11,7 +11,7 @@ import (
 // qemu-x86_64, returning the exit code (0 = success).
 func runC(t *testing.T, src string) int {
 	t.Helper()
-	m, err := cc.Compile("x.c", src)
+	m, err := cc.CompileFor(cc.TargetAMD64, "x.c", src)
 	require.NoError(t, err)
 	return runObj(t, m)
 }

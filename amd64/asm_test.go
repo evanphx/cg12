@@ -23,7 +23,7 @@ func runAsmSrc(t *testing.T, src string, optimize bool) int {
 	testenv.Tool(t, "ld.lld")
 	qemu := testenv.Tool(t, "qemu-x86_64")
 
-	m, err := cc.Compile("asm.c", src)
+	m, err := cc.CompileFor(cc.TargetAMD64, "asm.c", src)
 	require.NoError(t, err)
 	if optimize {
 		opt.OptimizeModule(m)
@@ -110,7 +110,7 @@ int runtest(void){
 // surrounding code reading a register nothing ever wrote.
 func TestInlineAsmUnsupportedMnemonicErrors(t *testing.T) {
 	src := `int f(int a){ int r; __asm__("cpuid\n\tmovl %k1, %k0" : "=r"(r) : "r"(a)); return r; }`
-	m, err := cc.Compile("asm.c", src)
+	m, err := cc.CompileFor(cc.TargetAMD64, "asm.c", src)
 	require.NoError(t, err)
 	_, err = amd64.CompileObject(m)
 	require.Error(t, err)

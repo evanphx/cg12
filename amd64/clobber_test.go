@@ -14,7 +14,7 @@ import (
 // which says so, was parsed and thrown away. On x86-64 this is the cpuid idiom:
 // cpuid writes rbx, which is callee-saved, so every use of it declares : "rbx".
 func TestCalleeSavedClobbersAreHonoured(t *testing.T) {
-	m, err := cc.Compile("c.c", `
+	m, err := cc.CompileFor(cc.TargetAMD64, "c.c", `
 long f(long a, long b, long c, long d){
 	long r;
 	__asm__("movq $99, %%rbx\n\tmovq $99, %%r12\n\tmovq $99, %%r13\n\tmovq $99, %%r14\n\tmovq $9, %q0"
@@ -29,7 +29,7 @@ int runtest(void){ return f(1,2,3,4) == 19 ? 0 : 1; }`)
 
 // The caller-saved case, which worked before and must keep working.
 func TestCallerSavedClobbersStillWork(t *testing.T) {
-	m, err := cc.Compile("c.c", `
+	m, err := cc.CompileFor(cc.TargetAMD64, "c.c", `
 long f(long a, long b){
 	long r;
 	__asm__("movq $99, %%r10\n\tmovq %q1, %q0\n\tsubq %q2, %q0"
@@ -44,7 +44,7 @@ int runtest(void){ return f(50, 8) == 42 ? 0 : 1; }`)
 // A clobber the backend cannot resolve to a register is an error.
 func TestUnknownClobberIsRefused(t *testing.T) {
 	for _, name := range []string{"not_a_register", "x19", "r99"} {
-		m, err := cc.Compile("c.c", `
+		m, err := cc.CompileFor(cc.TargetAMD64, "c.c", `
 int f(int a){ int r; __asm__("movl %k1, %k0" : "=r"(r) : "r"(a) : "`+name+`"); return r; }`)
 		require.NoError(t, err)
 		_, err = amd64.CompileObject(m)
@@ -57,7 +57,7 @@ int f(int a){ int r; __asm__("movl %k1, %k0" : "=r"(r) : "r"(a) : "`+name+`"); r
 // windows onto the same thing.
 func TestClobberNamesAtAnyWidth(t *testing.T) {
 	for _, name := range []string{"rbx", "ebx", "bl", "memory", "cc"} {
-		m, err := cc.Compile("c.c", `
+		m, err := cc.CompileFor(cc.TargetAMD64, "c.c", `
 int f(int a){ int r; __asm__("movl %k1, %k0" : "=r"(r) : "r"(a) : "`+name+`"); return r; }`)
 		require.NoError(t, err)
 		_, err = amd64.CompileObject(m)

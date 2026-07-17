@@ -98,11 +98,33 @@ const headerCompat = `
 #define __HAVE_FLOAT16 0
 `
 
-// Compile parses C source and returns the equivalent cg12 module.
+// Target names the machine C is being compiled for. It decides the semantics
+// the standard leaves to the implementation -- the width of a long, and whether
+// a plain char is signed, which AArch64 and x86-64 answer differently.
+type Target string
+
+const (
+	TargetARM64 Target = "arm64"
+	TargetAMD64 Target = "amd64"
+)
+
+// Compile parses C source for the default target and returns the equivalent
+// cg12 module.
 func Compile(name, src string) (*ir.Module, error) {
-	cfg, err := cc.NewConfig("linux", "arm64")
+	return CompileFor(TargetARM64, name, src)
+}
+
+// CompileFor parses C source for a named target.
+//
+// The target is not decoration. `char c = 200; c < 0` is false on AArch64, where
+// a plain char is unsigned, and true on x86-64, where it is signed -- so the
+// same source compiled for the wrong one is a program that computes something
+// else. cg12's amd64 backend has its own tests that feed this C, and every one
+// of them was getting AArch64's answers.
+func CompileFor(target Target, name, src string) (*ir.Module, error) {
+	cfg, err := cc.NewConfig("linux", string(target))
 	if err != nil {
-		return nil, fmt.Errorf("cc config: %w", err)
+		return nil, fmt.Errorf("cc config for %s: %w", target, err)
 	}
 	ast, err := cc.Translate(cfg, []cc.Source{
 		{Name: "<predefined>", Value: cfg.Predefined + headerCompat},
@@ -172,15 +194,21 @@ func clsOf(t cc.Type) ir.Cls {
 // or a pointer), for which pointer-width constants and no-op width changes apply.
 func wide(c ir.Cls) bool { return c == ir.ClsL || c == ir.ClsP }
 
-// signed reports whether arithmetic/comparison on t is signed. char is unsigned
-// on this target (aarch64).
+// signed reports whether arithmetic/comparison on t is signed.
+//
+// For an integer this asks the type checker, which knows the target's answer.
+// A plain char is the case that matters: unsigned on AArch64, signed on x86-64,
+// and a list here would have to name one of them. An address compares unsigned;
+// everything else -- the floating types -- compares signed, where the question
+// arises at all.
 func signed(t cc.Type) bool {
-	switch t.Kind() {
-	case cc.Bool, cc.Char, cc.UChar, cc.UShort, cc.UInt, cc.ULong, cc.ULongLong, cc.UInt128, cc.Ptr:
+	if t.Kind() == cc.Ptr {
 		return false
-	default:
-		return true
 	}
+	if cc.IsIntegerType(t) {
+		return cc.IsSignedInteger(t)
+	}
+	return true
 }
 
 func isFloat(t cc.Type) bool {
