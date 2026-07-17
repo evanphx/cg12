@@ -119,6 +119,27 @@ func ReadELF(data []byte) (*Object, error) {
 	names := make([]string, len(syms)+1)
 	for i, s := range syms {
 		names[i+1] = s.Name
+
+		// A section symbol is how a relocation says "somewhere in that section"
+		// rather than "that named thing": gcc compiles a string literal into a
+		// reference to .rodata.str1.8 + offset, because the literal has no name to
+		// refer to. The symbol table entry carries no name of its own.
+		//
+		// The model can only name things, so this gives the section a name and
+		// places it where the section landed. The relocation's addend already counts
+		// from the section's start, which is exactly what this symbol's value is, so
+		// the two compose without touching the addend.
+		if elf.ST_TYPE(s.Info) == elf.STT_SECTION {
+			p, ok := place[s.Section]
+			if !ok {
+				continue // a section we do not carry; relocations into it are refused below
+			}
+			n := sectionSymName(f, s.Section)
+			names[i+1] = n
+			o.Syms = append(o.Syms, Sym{Name: n, Section: p.kind, Value: p.base})
+			continue
+		}
+
 		sym, ok, err := elfSymbol(f, s, func(i elf.SectionIndex) (SecKind, uint64, bool) {
 			p, ok := place[i]
 			return p.kind, p.base, ok
@@ -162,6 +183,18 @@ func ReadELF(data []byte) (*Object, error) {
 			o.RelroRelocs = append(o.RelroRelocs, rs...)
 		default:
 			return nil, fmt.Errorf("obj: %s relocates %q, which cannot carry relocations", s.Name, f.Sections[target].Name)
+		}
+	}
+
+	// A relocation with no target names nothing, so nothing can ever resolve it.
+	// It reaches the linker as `undefined symbol ""`, pointing at neither the
+	// object nor the reason -- which is what a section symbol used to become.
+	// Refusing here names the object instead, and keeps the promise that whatever
+	// ReadELF returns can be linked.
+	for _, r := range o.allRelocs() {
+		if r.Sym == "" {
+			return nil, fmt.Errorf("obj: a relocation at offset %#x (type %d) names no symbol, "+
+				"so nothing could resolve it", r.Offset, r.Type)
 		}
 	}
 	return o, nil
@@ -323,4 +356,16 @@ func readRela(s *elf.Section, names []string, base uint64) ([]Reloc, error) {
 		})
 	}
 	return out, nil
+}
+
+// sectionSymName is the local name given to a section so that relocations
+// against it -- which is how a reference to something unnamed, like a string
+// literal, is expressed -- have something to name.
+//
+// It carries the section index because several ELF sections merge onto one of
+// ours at different bases: an object with .rodata and .rodata.str1.8 needs a
+// distinct symbol for each, at each one's own base. The '#' cannot occur in a C
+// identifier or in a section name, so nothing real collides with this.
+func sectionSymName(f *elf.File, i elf.SectionIndex) string {
+	return fmt.Sprintf("%s#%d", sectionName(f, i), i)
 }
