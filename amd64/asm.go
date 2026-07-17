@@ -7,6 +7,11 @@ import (
 	"github.com/evanphx/cg12/ir"
 )
 
+// Inline assembly: binding a template's operands to registers and writing the
+// template out with them substituted in. The result goes to x64.Assemble, so the
+// operands are spelled in the AT&T syntax it reads -- which is why the register
+// and memory naming lives here rather than with the encoders.
+
 // amd64FixedReg maps an inline-asm fixed-register constraint letter to its
 // physical register.
 func amd64FixedReg(letter string) (Reg, bool) {
@@ -105,121 +110,6 @@ type asmVal struct {
 	width int
 }
 
-// emitAsm passes a GNU inline-assembly template (an OAsm) through to the output
-// in AT&T syntax, substituting each %N placeholder with the register the
-// allocator bound to operand N (or, for an "i" operand, a literal immediate).
-// Operands are numbered output-first: %0 is the single output (when present),
-// then the inputs. A register operand already in a register uses it directly; a
-// spilled or constant register operand is materialized into a scratch register
-// (loaded before, and, for the output, stored back after).
-//
-// The OAsm clobbers like a call, so any value live across it is already held in
-// a callee-saved register and the template may freely use the caller-saved set.
-func (e *emitter) emitAsm(in *ir.Instr) {
-	asm := in.Asm
-	vals := make([]asmVal, len(asm.Ops))
-	scratch := [...]Reg{gpScratch0, gpScratch1}
-	scratchN := 0
-	next := func() Reg {
-		if scratchN >= len(scratch) {
-			panic("amd64: inline asm needs more scratch registers than are available")
-		}
-		r := scratch[scratchN]
-		scratchN++
-		return r
-	}
-
-	// Walk the operands in %N order, drawing register outputs from To/Defs and
-	// every other operand's value from Args in order.
-	outs := in.AsmRegOuts()
-	oc, ac := 0, 0 // cursors into outs and in.Args
-	var finals []func()
-	resolveOut := func() (Reg, int) {
-		oref := outs[oc]
-		oc++
-		t := e.f.Temps[oref.ID]
-		w := e.f.ClassOf(oref).Size()
-		if t.Reg != ir.NoReg {
-			return Reg(t.Reg), w
-		}
-		r := next()
-		slot := e.slotAddr(t.Slot)
-		finals = append(finals, func() { e.line("mov%s %s, %s", suf(w), gpn(r, w), memn(RBP, slot)) })
-		return r, w
-	}
-	for i, kind := range asm.Ops {
-		switch kind {
-		case ir.AsmRegOut:
-			r, w := resolveOut()
-			vals[i] = asmVal{reg: r, width: w}
-		case ir.AsmRegInOut:
-			r, w := resolveOut()
-			pre, _ := e.asmInputReg(in.Args[ac], next) // preload value
-			ac++
-			e.line("mov%s %s, %s", suf(w), gpn(pre, w), gpn(r, w)) // preload the read-write register
-			vals[i] = asmVal{reg: r, width: w}
-		case ir.AsmImm:
-			vals[i] = asmVal{lit: true, litS: fmt.Sprintf("$%d", e.f.Consts[in.Args[ac].ID].Int)}
-			ac++
-		case ir.AsmMem:
-			r, _ := e.asmInputReg(in.Args[ac], next) // the operand's address
-			vals[i] = asmVal{lit: true, litS: memn(r, 0)}
-			ac++
-		default: // AsmRegIn
-			r, w := e.asmInputReg(in.Args[ac], next)
-			vals[i] = asmVal{reg: r, width: w}
-			ac++
-		}
-	}
-
-	text, err := expandAsm(asm.Template, vals)
-	if err != nil {
-		panic(fmt.Sprintf("amd64: %v", err))
-	}
-	for _, ln := range strings.Split(text, "\n") {
-		if ln = strings.TrimSpace(ln); ln != "" {
-			e.line("%s", ln)
-		}
-	}
-	for _, f := range finals {
-		f()
-	}
-}
-
-// asmInputReg resolves a register input operand to a register (loading a spilled
-// temp or materializing a constant into a scratch register) and returns it with
-// its natural byte width.
-func (e *emitter) asmInputReg(ref ir.Ref, next func() Reg) (Reg, int) {
-	switch ref.Kind {
-	case ir.RefTemp:
-		t := e.f.Temps[ref.ID]
-		w := e.f.ClassOf(ref).Size()
-		if t.Reg != ir.NoReg {
-			return Reg(t.Reg), w
-		}
-		r := next()
-		e.line("mov%s %s, %s", suf(w), memn(RBP, e.slotAddr(t.Slot)), gpn(r, w))
-		return r, w
-	case ir.RefConst:
-		c := e.f.Consts[ref.ID]
-		r := next()
-		switch c.Kind {
-		case ir.ConstInt:
-			e.movImm(r, c.Int, true)
-		case ir.ConstSym:
-			e.materializeSym(r, c.Sym, c.Int, c.Thread)
-		default:
-			panic("amd64: unsupported inline-asm constant operand")
-		}
-		return r, 8
-	}
-	panic(fmt.Sprintf("amd64: unsupported inline-asm operand %v", ref))
-}
-
-// expandAsm substitutes the operand placeholders in a template. A %N names
-// operand N at its natural width; the %q, %k, %w, and %b forms force the 64-,
-// 32-, 16-, and 8-bit register names; %% is a literal percent. An immediate
-// operand ignores any width form.
 func expandAsm(tmpl string, vals []asmVal) (string, error) {
 	var sb strings.Builder
 	for i := 0; i < len(tmpl); {
@@ -273,4 +163,48 @@ func expandAsm(tmpl string, vals []asmVal) (string, error) {
 		sb.WriteString(gpn(v.reg, size))
 	}
 	return sb.String(), nil
+}
+
+// gpNames gives each GP register's name at width [8, 16, 32, 64] bits.
+var gpNames = [16][4]string{
+	RAX: {"al", "ax", "eax", "rax"},
+	RCX: {"cl", "cx", "ecx", "rcx"},
+	RDX: {"dl", "dx", "edx", "rdx"},
+	RBX: {"bl", "bx", "ebx", "rbx"},
+	RSP: {"spl", "sp", "esp", "rsp"},
+	RBP: {"bpl", "bp", "ebp", "rbp"},
+	RSI: {"sil", "si", "esi", "rsi"},
+	RDI: {"dil", "di", "edi", "rdi"},
+	R8:  {"r8b", "r8w", "r8d", "r8"},
+	R9:  {"r9b", "r9w", "r9d", "r9"},
+	R10: {"r10b", "r10w", "r10d", "r10"},
+	R11: {"r11b", "r11w", "r11d", "r11"},
+	R12: {"r12b", "r12w", "r12d", "r12"},
+	R13: {"r13b", "r13w", "r13d", "r13"},
+	R14: {"r14b", "r14w", "r14d", "r14"},
+	R15: {"r15b", "r15w", "r15d", "r15"},
+}
+
+func sizeIdx(size int) int {
+	switch size {
+	case 1:
+		return 0
+	case 2:
+		return 1
+	case 4:
+		return 2
+	default:
+		return 3
+	}
+}
+
+// suf returns the AT&T operand-size suffix for a byte width.
+
+func gpn(r Reg, size int) string { return "%" + gpNames[r][sizeIdx(size)] }
+
+func memn(base Reg, disp int32) string {
+	if disp == 0 {
+		return "(" + gpn(base, 8) + ")"
+	}
+	return fmt.Sprintf("%d(%s)", disp, gpn(base, 8))
 }

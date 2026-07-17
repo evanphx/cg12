@@ -3,8 +3,8 @@ package amd64
 import "github.com/evanphx/cg12/ir"
 
 // xsel drives amd64 instruction selection against an xasm builder, resolving
-// operands to registers through the builder's move primitive so the selection is
-// written once for both the machine-code and text emitters (mirroring arm64's
+// operands to registers through the builder's move primitive, so that choosing
+// which instruction to emit stays separate from encoding it (mirroring arm64's
 // sel).
 type xsel struct {
 	f *ir.Func
@@ -179,7 +179,7 @@ func (s *xsel) term(b *ir.Block) bool {
 
 // parallelMove performs a set of simultaneous moves, ordering them so no source
 // is clobbered before it is read and breaking register cycles with a scratch. It
-// is written once here and drives both emitters through the move primitive.
+// is written once here, above the move primitive that emits each one.
 func (s *xsel) parallelMove(pairs []locPair) {
 	var work []locPair
 	for _, p := range pairs {

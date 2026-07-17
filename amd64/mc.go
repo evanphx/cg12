@@ -352,8 +352,10 @@ func setStackMap(o *obj.Object, funcs []stackMapFunc) {
 	})
 }
 
-// frameLayout is the stack-frame plan for one function, shared by the machine and
-// text emitters. All offsets are relative to RBP (which points at the saved RBP).
+// frameLayout is the stack-frame plan for one function: the prologue, the
+// epilogue, and every frame access read their offsets from here, so they cannot
+// disagree about where a spill slot went. All offsets are relative to RBP (which
+// points at the saved RBP).
 type frameLayout struct {
 	calleeSaved []Reg             // callee-saved registers to preserve, in save order
 	spillBase   int               // bytes below RBP where spill slots begin
@@ -921,7 +923,7 @@ func srcReadsDst(src, dst loc) bool {
 }
 
 // parallelMove performs a set of simultaneous moves, selected once through the
-// shared xsel so the machine-code and text emitters share the ordering logic.
+// shared xsel, which owns the ordering logic.
 func (m *mc) parallelMove(pairs []locPair) {
 	(&xsel{f: m.f, b: &mcXasm{m: m}}).parallelMove(pairs)
 }
