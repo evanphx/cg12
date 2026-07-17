@@ -597,6 +597,11 @@ func (o *Object) writeDynImage(im dynImage) ([]byte, error) {
 	// never again, so they belong in the relro region beside the GOT.
 	initArrSize, finiArrSize := len(im.initArr)*8, len(im.finiArr)*8
 
+	// .data.rel.ro is const data holding an address: the same story as the GOT,
+	// arrived at from the other side. It is written by relocation and never again,
+	// so it belongs in the relro region too.
+	relroDataAlign := alignOr(o.RelroAlign, 8)
+
 	// .tdata is only ever read (each thread's block is a copy of it), so it too
 	// sits in the relro region -- at its head, where the alignment below can be
 	// arranged for it.
@@ -636,11 +641,19 @@ func (o *Object) writeDynImage(im dynImage) ([]byte, error) {
 	if finiArrSize > 0 {
 		ndyn += 2 // FINI_ARRAY, FINI_ARRAYSZ
 	}
-	relroSize := tdataSize + initArrSize + finiArrSize + gotSize + ndyn*16
-	// PT_TLS must start on its own alignment. The writable region is placed by
-	// working back from its end (below), so rounding the region's size up to the
-	// TLS alignment makes its *start* -- and hence .tdata -- land aligned.
-	relroSize = alignUp(relroSize, tlsAlign)
+	// .data.rel.ro sits after .tdata and before the GOT: its offset within the
+	// region reserves whatever padding its own alignment needs, and its size is
+	// rounded to 8 because everything after it here is a table of words and is
+	// placed by addition alone.
+	relroDataOffInRegion := alignUp(tdataSize, relroDataAlign)
+	relroDataSize := alignUp(len(o.Relro), 8)
+	relroSize := relroDataOffInRegion + relroDataSize + initArrSize + finiArrSize + gotSize + ndyn*16
+	// PT_TLS must start on its own alignment, and so must .data.rel.ro. The
+	// writable region is placed by working back from its end (below), so rounding
+	// the region's size up makes its *start* land aligned -- and with it .tdata, at
+	// the head, and .data.rel.ro, at a rounded offset from the head. Both must be
+	// satisfied, and alignments are powers of two, so the larger implies the other.
+	relroSize = alignUp(relroSize, max(tlsAlign, relroDataAlign))
 
 	// The writable region begins past the read-execute one's last page, so the two
 	// never share a page. When there is a relro region it is nudged forward within
@@ -654,7 +667,8 @@ func (o *Object) writeDynImage(im dynImage) ([]byte, error) {
 		rwOff += (execAlign - relroSize%execAlign) % execAlign
 	}
 	tdataOff := rwOff
-	initArrOff := tdataOff + tdataSize
+	relroDataOff := rwOff + relroDataOffInRegion
+	initArrOff := relroDataOff + relroDataSize
 	finiArrOff := initArrOff + initArrSize
 	gotOff := finiArrOff + finiArrSize
 	dynamicOff := gotOff + gotSize // every size here is a multiple of 8, so this stays aligned
@@ -749,6 +763,8 @@ func (o *Object) writeDynImage(im dynImage) ([]byte, error) {
 			symVaddr[s.Name] = va(dataOff) + s.Value
 		case SecRodata:
 			symVaddr[s.Name] = va(rodataOff) + s.Value
+		case SecRelro:
+			symVaddr[s.Name] = va(relroDataOff) + s.Value
 		case SecBss:
 			// .bss has no bytes in the file; it picks up where .data ends in memory,
 			// rounded up to what its own contents need. Without the rounding it
@@ -820,6 +836,14 @@ func (o *Object) writeDynImage(im dynImage) ([]byte, error) {
 	if err != nil {
 		return nil, err
 	}
+	relroData := append([]byte(nil), o.Relro...)
+	relroRel, err := resolveSection(o.Machine, im.pie, relroData, va(relroDataOff), o.RelroRelocs, symVaddr, tlsOff, tlsGotVaddr, tlsGdVaddr)
+	if err != nil {
+		return nil, err
+	}
+	// Whatever is left for the loader here is exactly what the section is for, so
+	// unlike .rodata's there is nothing to refuse.
+	dynRel = append(dynRel, relroRel...)
 	if len(rodataRel) > 0 {
 		return nil, fmt.Errorf("obj: %d relocation(s) in .rodata would have to be applied by the loader, "+
 			"which cannot write it: read-only data holding an address needs .data.rel.ro, which this linker does not emit yet",
@@ -1106,6 +1130,7 @@ func (o *Object) writeDynImage(im dynImage) ([]byte, error) {
 	put(textOff, text)
 	put(rodataOff, rodata)
 	put(tdataOff, o.Tdata)
+	put(relroDataOff, relroData)
 	put(initArrOff, initArr.b)
 	put(finiArrOff, finiArr.b)
 	put(gotOff, got.b)
@@ -1194,7 +1219,8 @@ type dsection struct {
 func (o *Object) allRelocs() []Reloc {
 	all := append([]Reloc{}, o.Relocs...)
 	all = append(all, o.DataRelocs...)
-	return append(all, o.RodataRelocs...)
+	all = append(all, o.RodataRelocs...)
+	return append(all, o.RelroRelocs...)
 }
 
 // imports returns the sorted names of every symbol a relocation references but

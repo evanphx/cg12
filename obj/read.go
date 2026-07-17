@@ -75,6 +75,16 @@ func ReadELF(data []byte) (*Object, error) {
 			if a := int(s.Addralign); a > o.RodataAlign {
 				o.RodataAlign = a
 			}
+		case SecRelro:
+			place[idx] = placed{kind, uint64(len(o.Relro))}
+			b, err := s.Data()
+			if err != nil {
+				return nil, err
+			}
+			o.Relro = append(o.Relro, b...)
+			if a := int(s.Addralign); a > o.RelroAlign {
+				o.RelroAlign = a
+			}
 		case SecBss:
 			// .bss occupies no file bytes: only a size, and an offset within it.
 			place[idx] = placed{kind, uint64(o.BssSize)}
@@ -148,6 +158,8 @@ func ReadELF(data []byte) (*Object, error) {
 			o.DataRelocs = append(o.DataRelocs, rs...)
 		case SecRodata:
 			o.RodataRelocs = append(o.RodataRelocs, rs...)
+		case SecRelro:
+			o.RelroRelocs = append(o.RelroRelocs, rs...)
 		default:
 			return nil, fmt.Errorf("obj: %s relocates %q, which cannot carry relocations", s.Name, f.Sections[target].Name)
 		}
@@ -178,6 +190,13 @@ func sectionKind(s *elf.Section) (SecKind, bool) {
 		return SecBss, true
 	case hasPrefix(name, ".rodata"):
 		return SecRodata, true
+	case hasPrefix(name, ".data.rel.ro"):
+		// Const data holding an address, which gcc emits for `static const char
+		// *const []` (as .data.rel.ro.local when nothing outside can name it).
+		// Ahead of the .data case below, which its name also starts with -- and
+		// distinct from .data.rel, which is writable data that merely needs
+		// relocating and stays writable.
+		return SecRelro, true
 	case hasPrefix(name, ".data", ".init_array", ".fini_array", ".data.rel"):
 		return SecData, true
 	}

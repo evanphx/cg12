@@ -150,6 +150,24 @@ type Data struct {
 	Items   []DataItem
 }
 
+// HoldsAddress reports whether any of the definition's items is the address of a
+// symbol, and so needs a relocation.
+//
+// It decides where read-only data goes. A const object that holds only numbers
+// is finished the moment it is written, and belongs in .rodata. One that holds
+// an address is not: in a position-independent image the address depends on
+// where the loader put things, so something has to write it after .rodata has
+// already been mapped unwritable. Such a datum goes to .data.rel.ro instead --
+// writable for the loader, read-only before the program runs.
+func (d *Data) HoldsAddress() bool {
+	for _, it := range d.Items {
+		if it.Sym != "" {
+			return true
+		}
+	}
+	return false
+}
+
 // DataItem is one initialiser field of a Data definition.
 type DataItem struct {
 	Sub  SubCls // element type

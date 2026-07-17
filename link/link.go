@@ -215,21 +215,29 @@ func merge(objs []*obj.Object) (*obj.Object, error) {
 		// backend put in.
 		out.DataAlign = maxInt(out.DataAlign, o.DataAlign)
 		out.RodataAlign = maxInt(out.RodataAlign, o.RodataAlign)
+		out.RelroAlign = maxInt(out.RelroAlign, o.RelroAlign)
 		out.BssAlign = maxInt(out.BssAlign, o.BssAlign)
 		out.TlsAlign = maxInt(out.TlsAlign, o.TlsAlign)
 
-		textBase := uint64(len(out.Text))
-		dataBase := uint64(alignUp(len(out.Data), o.DataAlign))
-		rodataBase := uint64(alignUp(len(out.Rodata), o.RodataAlign))
-		tdataBase := uint64(alignUp(len(out.Tdata), o.TlsAlign))
-		bssBase := uint64(alignUp(out.BssSize, o.BssAlign))
-		tbssBase := uint64(alignUp(out.TbssSize, o.TlsAlign))
+		// Where each of this object's sections lands in the merged one. A section
+		// this linker does not merge has no entry, which is what makes a symbol
+		// defined in one refuse to place rather than land at offset zero.
+		base := map[obj.SecKind]uint64{
+			obj.SecText:   uint64(len(out.Text)),
+			obj.SecData:   uint64(alignUp(len(out.Data), o.DataAlign)),
+			obj.SecRodata: uint64(alignUp(len(out.Rodata), o.RodataAlign)),
+			obj.SecRelro:  uint64(alignUp(len(out.Relro), o.RelroAlign)),
+			obj.SecTdata:  uint64(alignUp(len(out.Tdata), o.TlsAlign)),
+			obj.SecBss:    uint64(alignUp(out.BssSize, o.BssAlign)),
+			obj.SecTbss:   uint64(alignUp(out.TbssSize, o.TlsAlign)),
+		}
 		out.Text = append(out.Text, o.Text...)
-		out.Data = append(padTo(out.Data, int(dataBase)), o.Data...)
-		out.Rodata = append(padTo(out.Rodata, int(rodataBase)), o.Rodata...)
-		out.Tdata = append(padTo(out.Tdata, int(tdataBase)), o.Tdata...)
-		out.BssSize = int(bssBase) + o.BssSize
-		out.TbssSize = int(tbssBase) + o.TbssSize
+		out.Data = append(padTo(out.Data, int(base[obj.SecData])), o.Data...)
+		out.Rodata = append(padTo(out.Rodata, int(base[obj.SecRodata])), o.Rodata...)
+		out.Relro = append(padTo(out.Relro, int(base[obj.SecRelro])), o.Relro...)
+		out.Tdata = append(padTo(out.Tdata, int(base[obj.SecTdata])), o.Tdata...)
+		out.BssSize = int(base[obj.SecBss]) + o.BssSize
+		out.TbssSize = int(base[obj.SecTbss]) + o.TbssSize
 
 		// Place this object's defined symbols, renaming every local so no other
 		// object can reach it.
@@ -242,12 +250,12 @@ func merge(objs []*obj.Object) (*obj.Object, error) {
 		// that gets captured.
 		local := map[string]string{}
 		for _, s := range o.Syms {
-			base, ok := sectionBase(s.Section, textBase, dataBase, rodataBase, tdataBase, bssBase, tbssBase)
+			at, ok := base[s.Section]
 			if !ok {
 				continue // undefined, or a section this linker does not merge yet
 			}
 			rebased := s
-			rebased.Value += base
+			rebased.Value += at
 			if s.Global {
 				if _, dup := defined[s.Name]; dup {
 					return nil, fmt.Errorf("link: duplicate symbol %q", s.Name)
@@ -261,18 +269,19 @@ func merge(objs []*obj.Object) (*obj.Object, error) {
 			out.Syms = append(out.Syms, rebased)
 		}
 
-		rebase := func(rs []obj.Reloc, base uint64, in obj.SecKind) {
+		rebase := func(rs []obj.Reloc, in obj.SecKind) {
 			for _, r := range rs {
-				r.Offset += base
+				r.Offset += base[in]
 				if n, ok := local[r.Sym]; ok {
 					r.Sym = n
 				}
 				relocs = append(relocs, pending{r, in})
 			}
 		}
-		rebase(o.Relocs, textBase, obj.SecText)
-		rebase(o.DataRelocs, dataBase, obj.SecData)
-		rebase(o.RodataRelocs, rodataBase, obj.SecRodata)
+		rebase(o.Relocs, obj.SecText)
+		rebase(o.DataRelocs, obj.SecData)
+		rebase(o.RodataRelocs, obj.SecRodata)
+		rebase(o.RelroRelocs, obj.SecRelro)
 	}
 
 	// Apply every intra-.text PC-relative relocation whose target is now defined;
@@ -289,6 +298,8 @@ func merge(objs []*obj.Object) (*obj.Object, error) {
 			out.DataRelocs = append(out.DataRelocs, p.r)
 		case obj.SecRodata:
 			out.RodataRelocs = append(out.RodataRelocs, p.r)
+		case obj.SecRelro:
+			out.RelroRelocs = append(out.RelroRelocs, p.r)
 		default:
 			out.Relocs = append(out.Relocs, p.r)
 		}
@@ -296,28 +307,6 @@ func merge(objs []*obj.Object) (*obj.Object, error) {
 	return out, nil
 }
 
-func sectionBase(k obj.SecKind, textBase, dataBase, rodataBase, tdataBase, bssBase, tbssBase uint64) (uint64, bool) {
-	switch k {
-	case obj.SecText:
-		return textBase, true
-	case obj.SecData:
-		return dataBase, true
-	case obj.SecRodata:
-		return rodataBase, true
-	case obj.SecTdata:
-		// A thread-local symbol's value is its offset within the TLS block, so it
-		// rebases against the merged .tdata rather than an address.
-		return tdataBase, true
-	case obj.SecBss:
-		return bssBase, true
-	case obj.SecTbss:
-		return tbssBase, true
-	}
-	return 0, false
-}
-
-// isPCRel reports whether a relocation type is an intra-.text PC-relative call
-// or jump the linker can resolve now, for the given machine.
 func isPCRel(machine uint16, typ uint32) bool {
 	switch machine {
 	case obj.EM_AARCH64:

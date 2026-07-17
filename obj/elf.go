@@ -113,6 +113,7 @@ const (
 	SecText                    // defined in .text
 	SecData                    // defined in .data
 	SecRodata                  // defined in .rodata
+	SecRelro                   // defined in .data.rel.ro (read-only, but holds an address)
 	SecStackMap                // defined in .cg12_stackmaps
 	SecTdata                   // defined in .tdata (thread-local)
 	SecBss                     // defined in .bss (zero-filled, occupies no file space)
@@ -152,6 +153,18 @@ type Object struct {
 	// an implementation may put it where the hardware refuses.
 	Rodata []byte
 
+	// Relro is read-only data that holds an address: `static const char *const
+	// p[] = {...}`. It is const to the program and yet cannot be finished at link
+	// time, because in a position-independent image the address it holds is not
+	// known until the loader picks a base -- and .rodata is mapped without write
+	// permission, so there is nowhere to write it.
+	//
+	// So it gets a section that is writable while the loader relocates it and
+	// read-only afterwards, which PT_GNU_RELRO arranges (see MarshalDynamic). The
+	// program never sees it writable. In a fixed-base image no such datum arises:
+	// every address is a link-time constant, so it stays in .rodata.
+	Relro []byte
+
 	// Tdata is the thread-local initialization image (.tdata): not data used in
 	// place, but the bytes each new thread's TLS block starts life as.
 	Tdata []byte
@@ -171,6 +184,7 @@ type Object struct {
 	// TlsAlign covers both .tdata and .tbss, which are one block per thread.
 	DataAlign   int
 	RodataAlign int
+	RelroAlign  int
 	BssAlign    int
 	TlsAlign    int
 
@@ -182,6 +196,10 @@ type Object struct {
 	// offset filed under .rela.data patches whatever happens to be at that offset
 	// in .data instead.
 	RodataRelocs []Reloc
+	// RelroRelocs are relocations against .data.rel.ro, separate for the same
+	// reason. Unlike .rodata's, these are expected: a datum is in this section
+	// precisely because it has one.
+	RelroRelocs []Reloc
 
 	// Optional DWARF debug sections. When DebugLine is non-empty the writer emits
 	// .debug_abbrev/.debug_info/.debug_line/.debug_loc (and their .rela sections).
@@ -281,6 +299,11 @@ func (o *Object) MarshalELF() ([]byte, error) {
 		secRodata = next()
 		secRelaRodata = next()
 	}
+	secRelro, secRelaRelro := -1, -1
+	if len(o.Relro) > 0 {
+		secRelro = next()
+		secRelaRelro = next()
+	}
 	secBss := -1
 	if o.BssSize > 0 {
 		secBss = next()
@@ -327,6 +350,8 @@ func (o *Object) MarshalELF() ([]byte, error) {
 			shndx = uint16(secData)
 		case SecRodata:
 			shndx = uint16(secRodata)
+		case SecRelro:
+			shndx = uint16(secRelro)
 		case SecBss:
 			shndx = uint16(secBss)
 		case SecTdata:
@@ -342,7 +367,7 @@ func (o *Object) MarshalELF() ([]byte, error) {
 			typ = sttTLS
 		case s.Func:
 			typ = sttFunc
-		case s.Section == SecData || s.Section == SecBss:
+		case s.Section == SecData || s.Section == SecBss || s.Section == SecRelro:
 			typ = sttObject
 		}
 		bind := byte(stbLocal)
@@ -390,6 +415,10 @@ func (o *Object) MarshalELF() ([]byte, error) {
 	if err != nil {
 		return nil, err
 	}
+	relaRelro, err := encodeRela(o.RelroRelocs)
+	if err != nil {
+		return nil, err
+	}
 	relaInfo, err := encodeRela(o.DebugInfoRelocs)
 	if err != nil {
 		return nil, err
@@ -413,6 +442,14 @@ func (o *Object) MarshalELF() ([]byte, error) {
 		// No shfWrite: that flag is the whole point of the section.
 		secs[secRodata] = section{name: ".rodata", typ: shtProgbits, flags: shfAlloc, addralign: uint64(alignOr(o.RodataAlign, 8)), data: o.Rodata}
 		secs[secRelaRodata] = section{name: ".rela.rodata", typ: shtRela, link: uint32(secSymtab), info: uint32(secRodata), addralign: 8, entsize: 24, data: relaRodata.b}
+	}
+	if secRelro >= 0 {
+		// shfWrite, and yet the section's name is a promise it is not: it is
+		// writable so the loader can relocate it, and PT_GNU_RELRO takes the write
+		// permission away before the program runs. A static linker reading this
+		// object recognises the name and keeps it apart from ordinary .data.
+		secs[secRelro] = section{name: ".data.rel.ro", typ: shtProgbits, flags: shfAlloc | shfWrite, addralign: uint64(alignOr(o.RelroAlign, 8)), data: o.Relro}
+		secs[secRelaRelro] = section{name: ".rela.data.rel.ro", typ: shtRela, link: uint32(secSymtab), info: uint32(secRelro), addralign: 8, entsize: 24, data: relaRelro.b}
 	}
 	secs[secRelaData] = section{name: ".rela.data", typ: shtRela, link: uint32(secSymtab), info: uint32(secData), addralign: 8, entsize: 24, data: relaData.b}
 	if secBss >= 0 {

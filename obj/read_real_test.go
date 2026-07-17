@@ -13,14 +13,15 @@ import (
 )
 
 // gccObject compiles C with the host gcc and returns the .o bytes.
-func gccObject(t *testing.T, src string) []byte {
+func gccObject(t *testing.T, src string, flags ...string) []byte {
 	t.Helper()
 	gcc := testenv.Tool(t, "gcc")
 	dir := t.TempDir()
 	c := filepath.Join(dir, "x.c")
 	o := filepath.Join(dir, "x.o")
 	require.NoError(t, os.WriteFile(c, []byte(src), 0o644))
-	out, err := exec.Command(gcc, "-w", "-c", "-o", o, c).CombinedOutput()
+	argv := append([]string{"-w", "-c", "-o", o}, flags...)
+	out, err := exec.Command(gcc, append(argv, c)...).CombinedOutput()
 	require.NoErrorf(t, err, "gcc: %s", out)
 	data, err := os.ReadFile(o)
 	require.NoError(t, err)
@@ -136,4 +137,36 @@ int b(void){ return a() + 1; }
 	}
 	require.True(t, names["peer"], "a's call to peer survives: %v", o.Relocs)
 	require.True(t, names["a"], "b's call to a survives: %v", o.Relocs)
+}
+
+// gcc puts `static const char *const []` in .data.rel.ro.local: const data that
+// still needs relocating. Our model has a section for exactly that, and reading
+// the object must find it there.
+//
+// The name starts with ".data", so the obvious prefix match files it as ordinary
+// writable data. Nothing then reads the wrong bytes -- which is why this went
+// unnoticed -- but the data stays writable for the life of the process, losing
+// the guarantee the section exists to make.
+func TestReadRealObjectFindsDataRelRo(t *testing.T) {
+	data := gccObject(t, `
+		static const char *const words[] = {"alpha", "beta"};
+		const char *pick(int i) { return words[i]; }
+	`, "-fPIC", "-O2")
+	o, err := obj.ReadELF(data)
+	require.NoError(t, err)
+
+	require.NotEmpty(t, o.Relro, "the pointer table is .data.rel.ro, not .data")
+	require.Len(t, o.Relro, 16, "two pointers")
+	require.Len(t, o.RelroRelocs, 2,
+		"one relocation per pointer, filed against .data.rel.ro rather than .data")
+
+	// The strings themselves hold no address, so they stay in real read-only data.
+	require.NotEmpty(t, o.Rodata, "the string bodies are .rodata")
+	require.Empty(t, o.RodataRelocs, "and nothing there needs relocating")
+
+	// Not checked here: what those two relocations point AT. gcc files them
+	// against the section symbol .rodata.str1.8, and ReadELF drops section symbols,
+	// so both come back with an empty target name. That is #134 -- it predates this
+	// section and hits any object with a string literal in it -- and asserting the
+	// wrong thing here would make this test fail for that reason instead of its own.
 }

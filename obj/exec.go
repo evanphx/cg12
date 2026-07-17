@@ -46,7 +46,18 @@ func (o *Object) WriteExecutable(entrySym string) ([]byte, error) {
 	// not write it, which is a property of the mapping, not of the source's types.
 	rodataOff := alignUp(textOff+len(o.Text), alignOr(o.RodataAlign, 8))
 	rodataVaddr := uint64(execBase + rodataOff)
-	roEnd := rodataOff + len(o.Rodata)
+
+	// .data.rel.ro joins it there, rather than needing a region of its own.
+	//
+	// That section exists because a position-independent image cannot finish const
+	// data holding an address until the loader picks a base, so the bytes must be
+	// writable while it works. A static image has no loader and no base to pick:
+	// every address is a constant known now, resolveRelocs writes them all below,
+	// and nothing is left to do at run time. So the data can be read-only for the
+	// whole life of the process -- which is what it asked to be.
+	relroOff := alignUp(rodataOff+len(o.Rodata), alignOr(o.RelroAlign, 8))
+	relroVaddr := uint64(execBase + relroOff)
+	roEnd := relroOff + len(o.Relro)
 
 	dataOff := 0
 	var dataVaddr uint64
@@ -67,6 +78,8 @@ func (o *Object) WriteExecutable(entrySym string) ([]byte, error) {
 			symVaddr[s.Name] = dataVaddr + s.Value
 		case SecRodata:
 			symVaddr[s.Name] = rodataVaddr + s.Value
+		case SecRelro:
+			symVaddr[s.Name] = relroVaddr + s.Value
 		case SecBss:
 			// .bss has no bytes in the file; it picks up where .data ends in memory,
 			// rounded up to what its own contents need.
@@ -82,6 +95,7 @@ func (o *Object) WriteExecutable(entrySym string) ([]byte, error) {
 	text := append([]byte(nil), o.Text...)
 	data := append([]byte(nil), o.Data...)
 	rodata := append([]byte(nil), o.Rodata...)
+	relro := append([]byte(nil), o.Relro...)
 	if err := resolveRelocs(o.Machine, text, textVaddr, o.Relocs, symVaddr); err != nil {
 		return nil, err
 	}
@@ -89,6 +103,9 @@ func (o *Object) WriteExecutable(entrySym string) ([]byte, error) {
 		return nil, err
 	}
 	if err := resolveRelocs(o.Machine, rodata, rodataVaddr, o.RodataRelocs, symVaddr); err != nil {
+		return nil, err
+	}
+	if err := resolveRelocs(o.Machine, relro, relroVaddr, o.RelroRelocs, symVaddr); err != nil {
 		return nil, err
 	}
 
@@ -130,6 +147,7 @@ func (o *Object) WriteExecutable(entrySym string) ([]byte, error) {
 	put(noteOff, note)
 	put(textOff, text)
 	put(rodataOff, rodata)
+	put(relroOff, relro)
 	if len(data) > 0 {
 		put(dataOff, data)
 	}

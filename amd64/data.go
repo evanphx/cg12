@@ -48,6 +48,12 @@ func addData(o *obj.Object, d *ir.Data) error {
 	switch {
 	case d.Linkage.Thread:
 		buf, sec, align = &o.Tdata, obj.SecTdata, &o.TlsAlign
+	case d.Linkage.Section == rodataSection && d.HoldsAddress():
+		// Read-only, and yet it cannot be finished here: the address it holds is
+		// only known once the image is loaded, and .rodata is mapped unwritable.
+		// .data.rel.ro is the compromise -- writable while the loader relocates it,
+		// read-only by PT_GNU_RELRO before the program runs.
+		buf, sec, align = &o.Relro, obj.SecRelro, &o.RelroAlign
 	case d.Linkage.Section == rodataSection:
 		// Read-only data is a section of its own, because a section is where the
 		// promise is kept: the loader maps it without write permission.
@@ -73,11 +79,15 @@ func addData(o *obj.Object, d *ir.Data) error {
 				return fmt.Errorf("amd64: thread-local %q cannot hold the address of %q: every thread's copy would need its own relocation", d.Name, it.Sym)
 			}
 			// The relocation's offset is relative to its own section, so it has to
-			// be filed against the one the datum went to: a .rodata offset in
+			// be filed against the one the datum went to: a .data.rel.ro offset in
 			// .rela.data patches whatever is at that offset in .data.
+			//
+			// .rodata is not a case here: a const datum holding an address is
+			// exactly what went to .data.rel.ro above, so nothing reaching this
+			// point is in .rodata.
 			list := &o.DataRelocs
-			if sec == obj.SecRodata {
-				list = &o.RodataRelocs
+			if sec == obj.SecRelro {
+				list = &o.RelroRelocs
 			}
 			*list = append(*list, obj.Reloc{
 				Offset: uint64(len(*buf)), Sym: sanitize(it.Sym),
