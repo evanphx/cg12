@@ -40,6 +40,19 @@ type Instr struct {
 	// time when a target cannot honour it.
 	Tail bool
 
+	// Volatile marks a load or store whose execution is itself observable: the
+	// access must happen, exactly once, in the order written. It is what C's
+	// `volatile` means, and it is a property of the access rather than of the op,
+	// because the same OLoadw is ordinary in one place and a device register read
+	// in another.
+	//
+	// A pass may not remove a volatile access (even for an unused result), fold
+	// two into one, satisfy one from a previous value, or move one past another
+	// access. Without this the optimizer is free to reason that reading the same
+	// address twice must yield the same value -- which is exactly what an MMIO
+	// register, a signal-handler flag, and another thread's variable all violate.
+	Volatile bool
+
 	// Blk names the target block of an OBlockAddr (the address of a label taken
 	// with the &&label extension), whose result is that block's code address.
 	Blk *Block

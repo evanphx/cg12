@@ -264,19 +264,36 @@ func isMemValue(t cc.Type) bool {
 // loadVal loads a value of type t from addr, sign/zero-extending narrow types.
 func (g *gen) loadVal(addr ir.Ref, t cc.Type) ir.Ref {
 	cls := clsOf(t)
+	var r ir.Ref
 	switch t.Size() {
 	case 1:
 		if signed(t) {
-			return g.cur.LoadSub(cls, ir.SubB, addr)
+			r = g.cur.LoadSub(cls, ir.SubB, addr)
+		} else {
+			r = g.cur.LoadSub(cls, ir.SubUB, addr)
 		}
-		return g.cur.LoadSub(cls, ir.SubUB, addr)
 	case 2:
 		if signed(t) {
-			return g.cur.LoadSub(cls, ir.SubH, addr)
+			r = g.cur.LoadSub(cls, ir.SubH, addr)
+		} else {
+			r = g.cur.LoadSub(cls, ir.SubUH, addr)
 		}
-		return g.cur.LoadSub(cls, ir.SubUH, addr)
 	default:
-		return g.cur.Load(cls, addr)
+		r = g.cur.Load(cls, addr)
+	}
+	g.markVolatile(t)
+	return r
+}
+
+// markVolatile flags the instruction just emitted as an observable access when
+// the type it accesses is volatile. Reading a volatile object is an event, not
+// just a way to obtain its value, so the optimizer must not fold two reads
+// together or drop one whose value goes unused.
+func (g *gen) markVolatile(t cc.Type) {
+	if a := t.Attributes(); a != nil && a.IsVolatile() {
+		if n := len(g.cur.Instrs); n > 0 {
+			g.cur.Instrs[n-1].Volatile = true
+		}
 	}
 }
 
@@ -290,6 +307,7 @@ func (g *gen) storeVal(addr, val ir.Ref, t cc.Type) {
 	default:
 		g.cur.Store(val, addr)
 	}
+	g.markVolatile(t)
 }
 
 // --- functions -------------------------------------------------------------

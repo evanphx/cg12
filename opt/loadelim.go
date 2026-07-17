@@ -28,6 +28,16 @@ func LoadElim(f *ir.Func) bool {
 		for i := range b.Instrs {
 			in := &b.Instrs[i]
 			switch {
+			// A volatile access must happen, so it can neither be answered from a
+			// value already in hand nor answer a later one. Invalidating rather
+			// than recording keeps a later ordinary load of the same address from
+			// reusing what the volatile one read.
+			case in.Volatile && (in.Op.IsLoad() || in.Op.IsStore()):
+				arg := 0
+				if in.Op.IsStore() {
+					arg = 1
+				}
+				avail = avail.invalidate(ai.locOf(in.Arg(arg), accessWidth(in.Op)))
 			case in.Op.IsLoad():
 				loc := ai.locOf(in.Arg(0), accessWidth(in.Op))
 				if v, ok := avail.lookup(in.Op, loc); ok {

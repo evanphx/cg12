@@ -47,7 +47,7 @@ func filterPhis(phis []*ir.Phi, uses map[uint32]int) []*ir.Phi {
 
 // isDead reports whether an instruction can be removed.
 func isDead(in *ir.Instr, uses map[uint32]int) bool {
-	if hasSideEffect(in.Op) {
+	if hasSideEffect(in) {
 		return false
 	}
 	if in.To.Kind != ir.RefTemp {
@@ -56,9 +56,14 @@ func isDead(in *ir.Instr, uses map[uint32]int) bool {
 	return uses[in.To.ID] == 0
 }
 
-// hasSideEffect reports whether an op affects state beyond its result.
-func hasSideEffect(op ir.Op) bool {
-	switch {
+// hasSideEffect reports whether an instruction affects state beyond its result.
+func hasSideEffect(in *ir.Instr) bool {
+	// A volatile access is observable by being performed at all, so it is an
+	// effect even when it is a load and even when nothing uses the value.
+	if in.Volatile {
+		return true
+	}
+	switch op := in.Op; {
 	case op.IsStore():
 		return true
 	case op == ir.OCall, op == ir.OBlit, op == ir.OVaStart:

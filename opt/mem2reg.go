@@ -167,14 +167,19 @@ func findPromotable(f *ir.Func) ([]promotable, map[uint32]int) {
 			case in.Op.IsAlloc():
 				// its result is a candidate; its size operand is not a temp
 			case in.Op.IsLoad():
-				if cls, full := fullLoadClass(in); full && in.Args[0].Kind == ir.RefTemp && isAlloc[in.Args[0].ID] {
+				cls, full := fullLoadClass(in)
+				if full && !in.Volatile && in.Args[0].Kind == ir.RefTemp && isAlloc[in.Args[0].ID] {
 					note(in.Args[0].ID, cls)
 				} else {
-					escape(in.Args[0]) // sub-word or otherwise unpromotable use
+					// Sub-word, volatile, or otherwise unpromotable: a volatile local
+					// has to keep its storage, since an access to a register is no
+					// access at all.
+					escape(in.Args[0])
 				}
 			case in.Op.IsStore():
 				escape(in.Args[0]) // storing the pointer value escapes it
-				if cls, full := fullStoreClass(in); full && in.Args[1].Kind == ir.RefTemp && isAlloc[in.Args[1].ID] {
+				cls, full := fullStoreClass(in)
+				if full && !in.Volatile && in.Args[1].Kind == ir.RefTemp && isAlloc[in.Args[1].ID] {
 					note(in.Args[1].ID, cls)
 				} else {
 					escape(in.Args[1])

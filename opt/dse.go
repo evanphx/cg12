@@ -25,6 +25,13 @@ func DeadAlloc(f *ir.Func) bool {
 					loaded[base] = true
 				}
 			}
+			// A volatile store is observable even when nothing reads the value
+			// back, so the storage it writes to is not dead.
+			if in.Volatile && in.Op.IsStore() {
+				if base, ok := ai.allocBase[in.Arg(1).ID]; ok {
+					loaded[base] = true
+				}
+			}
 		}
 	}
 
