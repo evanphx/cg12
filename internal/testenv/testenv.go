@@ -60,3 +60,34 @@ func Have(names ...string) (string, bool) {
 	}
 	return "", false
 }
+
+// X86Sysroot returns a directory holding an x86-64 loader and libc, for running
+// a dynamically linked x86-64 image under qemu-x86_64 -L. It skips when there is
+// none.
+//
+// A dynamic image is loaded by an interpreter, so running one needs that
+// target's ld.so and its libraries -- which a machine of another architecture
+// has no reason to have. Without it the amd64 dynamic path can only be inspected,
+// never run, and the PLT stubs and GOT initialisation are hand-encoded bytes that
+// a structural check cannot tell apart from wrong ones.
+//
+// Set CG12_X86_SYSROOT, or install a cross libc (Debian/Ubuntu:
+// libc6-amd64-cross, which lands in /usr/x86_64-linux-gnu).
+func X86Sysroot(t testing.TB) string {
+	t.Helper()
+	if p := os.Getenv("CG12_X86_SYSROOT"); p != "" {
+		return p
+	}
+	for _, p := range []string{"/usr/x86_64-linux-gnu"} {
+		if fi, err := os.Stat(p + "/lib/ld-linux-x86-64.so.2"); err == nil && !fi.IsDir() {
+			return p
+		}
+	}
+	if required() {
+		t.Fatal("CG12_REQUIRE_TOOLS is set and there is no x86-64 sysroot: " +
+			"the dynamic image cannot be run, only inspected. Set CG12_X86_SYSROOT, " +
+			"or install libc6-amd64-cross.")
+	}
+	t.Skip("no x86-64 sysroot (set CG12_X86_SYSROOT, or install libc6-amd64-cross)")
+	return ""
+}
