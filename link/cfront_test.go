@@ -162,3 +162,80 @@ func TestModuleCanBeLoweredTwiceForOneTarget(t *testing.T) {
 		require.Equalf(t, 0, runExe(t, exe), "%s image computes the same answer", pass)
 	}
 }
+
+// Floating-point inline asm on amd64, which did not compile at all.
+//
+// Three things were missing and each hid the next: cc rejected "x" (x86's
+// spelling of "an SSE register"), the x64 assembler could not name a single SSE
+// instruction, and the register allocator spilled every FP operand of every asm.
+// The last is the interesting one: an asm clobbers like a call, its inputs are
+// deliberately extended one position past it so an output cannot reuse their
+// register, and the two together made an operand look like a value living ACROSS
+// the asm -- which must be callee-saved, and System V has no callee-saved XMM.
+//
+// This runs the result, because the assembler agreeing with llvm-mc (which
+// amd64/x64 checks) says the bytes are the instruction, not that the operands
+// reached it in the right registers.
+func TestAmd64FloatInlineAsmRuns(t *testing.T) {
+	m, err := cc.CompileFor(cc.TargetAMD64, "f.c", `
+double dadd(double a, double b){ double r=a; __asm__("addsd %1, %0" : "+x"(r) : "x"(b)); return r; }
+float  fmul(float a, float b){ float r=a; __asm__("mulss %1, %0" : "+x"(r) : "x"(b)); return r; }
+double dmov(double a){ double r; __asm__("movsd %1, %0" : "=x"(r) : "x"(a)); return r; }
+double dzero(void){ double r; __asm__("xorpd %0, %0" : "=x"(r)); return r; }
+// Enough live doubles that the operands cannot all be handed a register by luck.
+double busy(double a, double b, double c, double d){
+	double r = a; __asm__("addsd %1, %0" : "+x"(r) : "x"(b));
+	double s = c; __asm__("mulsd %1, %0" : "+x"(s) : "x"(d));
+	return r + s;
+}
+int main(void){
+	if (dadd(1.5, 2.25) != 3.75) return 1;
+	if (fmul(2.0f, 4.0f) != 8.0f) return 2;
+	if (dmov(7.5) != 7.5) return 3;
+	if (dzero() != 0.0) return 4;
+	if (busy(1.0, 2.0, 3.0, 4.0) != 15.0) return 5; /* (1+2) + (3*4) */
+	return 0;
+}`)
+	require.NoError(t, err)
+	l := link.NewWith(amd64.Backend{})
+	require.NoError(t, l.AddModule(m))
+	exe, err := l.LinkExecutable("main")
+	require.NoError(t, err)
+	require.Equal(t, 0, runX86Static(t, exe), "each template computed what it says")
+}
+
+// The operand relief must not reach the clobber list. An asm's operand does not
+// CROSS the asm, so it need not be callee-saved -- but a template that says it
+// writes a register may write it before the instruction that reads the operand,
+// so the operand must still not be sitting there.
+//
+// Three details make this test test that, each learned by watching an earlier
+// draft pass when the rule was deliberately broken:
+//
+//   - xmm8 is the FIRST entry in floatAllocOrder, so it is what the allocator
+//     hands out unless the clobber list stops it. Clobbering one further down
+//     passes either way: nothing was going to be put there.
+//   - the operand must be one the TEMPLATE reads. A "+x" preload is copied into
+//     the output register before the template runs, so a clobber cannot reach it
+//     -- the draft that used one proved nothing.
+//   - the template ZEROES the register rather than moving an operand into it.
+//     "movsd %1, %%xmm8" is a no-op exactly when %1 is already in xmm8, which is
+//     the case being tested.
+//
+// So: if the clobber is ignored, b lands in xmm8, xorpd zeroes it, and r comes
+// back 0 rather than 2.25.
+func TestAmd64FloatInlineAsmHonoursClobbers(t *testing.T) {
+	m, err := cc.CompileFor(cc.TargetAMD64, "f.c", `
+double f(double b){
+	double r;
+	__asm__("xorpd %%xmm8, %%xmm8\n\tmovsd %1, %0" : "=x"(r) : "x"(b) : "xmm8");
+	return r;
+}
+int main(void){ return f(2.25) == 2.25 ? 0 : 1; }`)
+	require.NoError(t, err)
+	l := link.NewWith(amd64.Backend{})
+	require.NoError(t, l.AddModule(m))
+	exe, err := l.LinkExecutable("main")
+	require.NoError(t, err)
+	require.Equal(t, 0, runX86Static(t, exe), "b was not placed in the clobbered register")
+}

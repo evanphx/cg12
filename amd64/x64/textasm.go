@@ -115,6 +115,13 @@ func asmLine(p *Program, line string) error {
 			return branch(p, ops, func(l string) { p.Jcc(c, l) })
 		}
 	}
+	// The SSE set, before the suffix split below: these mnemonics carry their
+	// width in their own name (ss is four bytes, sd is eight), so the trailing
+	// letter is part of the instruction rather than a size suffix. Splitting
+	// "addsd" into "adds" + d would invent an instruction that does not exist.
+	if err, ok := sse(p, mn, ops); ok {
+		return err
+	}
 
 	// Size-suffixed instructions: the last character is q/l/w/b.
 	base, w, sz, ok := splitSuffix(mn)
@@ -483,6 +490,13 @@ var attRegs = func() map[string]attReg {
 			m["r"+d+suf] = attReg{Reg(i), sz}
 		}
 	}
+	// The SSE registers. Their size is recorded as 0: an XMM name selects no width
+	// -- movss and movsd differ in the mnemonic, not the register -- so there is
+	// nothing for asmCtx.reg's suffix check to compare against, and an XMM operand
+	// goes through xmm() instead.
+	for i := 0; i <= 15; i++ {
+		m["xmm"+strconv.Itoa(i)] = attReg{XMM0 + Reg(i), 0}
+	}
 	return m
 }()
 
@@ -571,4 +585,125 @@ func (a *asmCtx) divide(signed bool) error {
 		a.p.Emit(Div(a.w, r))
 	}
 	return nil
+}
+
+// --- the SSE set -----------------------------------------------------------
+//
+// Every encoder here already existed and was already checked against llvm-mc;
+// none of them could be reached by name. That is the same gap the a64 side had,
+// and it has the same consequence: floating-point inline asm did not compile,
+// because the assembler this backend hands templates to had no word for any of
+// these instructions.
+
+// xmmOperand resolves an operand that must be an SSE register.
+//
+// The check is on the width the name selects, not on the register number: in
+// this package an XMM register and a general one share the numbers 0..15 (they
+// are separate encoding spaces), so %xmm3 and %rbx are the same Reg. What tells
+// them apart is that an XMM name selects no width -- see attRegs.
+func xmmOperand(mn, s string) (Reg, error) {
+	r, sz, ok := parseReg(s)
+	if !ok || sz != 0 {
+		return 0, fmt.Errorf("%s: %q is not an SSE register", mn, s)
+	}
+	return r, nil
+}
+
+// gpOperand resolves an operand that must be a general register of width sz.
+func gpOperand(mn, s string, sz int) (Reg, error) {
+	r, got, ok := parseReg(s)
+	if !ok || got == 0 {
+		return 0, fmt.Errorf("%s: %q is not a general register", mn, s)
+	}
+	if got != sz {
+		return 0, fmt.Errorf("%s: %q is a %d-byte register where %d is required", mn, s, got, sz)
+	}
+	return r, nil
+}
+
+// sse assembles the SSE instructions, reporting whether the mnemonic was one of
+// them. AT&T order names the source first, so the destination is the last
+// operand -- the same convention the integer forms above follow.
+func sse(p *Program, mn string, ops []string) (error, bool) {
+	rr := map[string]func(dst, src Reg) []byte{
+		"addsd": Addsd, "subsd": Subsd, "mulsd": Mulsd, "divsd": Divsd,
+		"addss": Addss, "subss": Subss, "mulss": Mulss, "divss": Divss,
+		"ucomisd": Ucomisd, "ucomiss": Ucomiss,
+		"xorps": Xorps, "xorpd": Xorpd,
+		"cvtsd2ss": Cvtsd2ss, "cvtss2sd": Cvtss2sd,
+	}
+	if enc, ok := rr[mn]; ok {
+		if len(ops) != 2 {
+			return fmt.Errorf("%s takes two operands", mn), true
+		}
+		src, err := xmmOperand(mn, ops[0])
+		if err != nil {
+			return err, true
+		}
+		dst, err := xmmOperand(mn, ops[1])
+		if err != nil {
+			return err, true
+		}
+		p.Emit(enc(dst, src))
+		return nil, true
+	}
+
+	// movss/movsd move between registers or between a register and memory, and
+	// which one it is depends on where the memory operand is.
+	switch mn {
+	case "movsd", "movss":
+		if len(ops) != 2 {
+			return fmt.Errorf("%s takes two operands", mn), true
+		}
+		wide := mn == "movsd"
+		src, dst := ops[0], ops[1]
+		switch {
+		case isReg(src) && isReg(dst):
+			sr, err := xmmOperand(mn, src)
+			if err != nil {
+				return err, true
+			}
+			dr, err := xmmOperand(mn, dst)
+			if err != nil {
+				return err, true
+			}
+			if wide {
+				p.Emit(MovsdReg(dr, sr))
+			} else {
+				p.Emit(MovssReg(dr, sr))
+			}
+		case isReg(src): // register -> memory
+			sr, err := xmmOperand(mn, src)
+			if err != nil {
+				return err, true
+			}
+			m, ok := parseMem(dst)
+			if !ok {
+				return fmt.Errorf("%s: %q is not a memory operand", mn, dst), true
+			}
+			if wide {
+				p.Emit(MovsdStore(sr, m))
+			} else {
+				p.Emit(MovssStore(sr, m))
+			}
+		case isReg(dst): // memory -> register
+			dr, err := xmmOperand(mn, dst)
+			if err != nil {
+				return err, true
+			}
+			m, ok := parseMem(src)
+			if !ok {
+				return fmt.Errorf("%s: %q is not a memory operand", mn, src), true
+			}
+			if wide {
+				p.Emit(MovsdLoad(dr, m))
+			} else {
+				p.Emit(MovssLoad(dr, m))
+			}
+		default:
+			return fmt.Errorf("%s: one operand must be a register", mn), true
+		}
+		return nil, true
+	}
+	return nil, false
 }

@@ -47,10 +47,17 @@ type numbering struct {
 	// beyond its outputs. Being live across one of these rules those registers out,
 	// which "crosses a call" does not say: that only rules out the caller-saved set.
 	asmClobbers map[int][]Reg
-	safeAt      []int       // positions that are safepoints (calls + OSafepoint)
-	posInstr    []*ir.Instr // position -> instruction (nil at terminator slots)
-	order       []*ir.Block
-	next        int
+	// asmOperand maps an OAsm's position to the temps that are its own operands.
+	// Such a temp is live AT the asm, not across it: the asm reads it. It is here
+	// because the two are indistinguishable from the live range alone -- an asm's
+	// input is deliberately extended one position past the instruction (so the
+	// allocator cannot reuse its register for an output), which is exactly the
+	// shape of a value that survives the asm and really does cross it.
+	asmOperand map[int]map[int]bool
+	safeAt     []int       // positions that are safepoints (calls + OSafepoint)
+	posInstr   []*ir.Instr // position -> instruction (nil at terminator slots)
+	order      []*ir.Block
+	next       int
 }
 
 // regAlloc runs linear-scan allocation on the already-lowered function.
@@ -117,6 +124,18 @@ func numberInstrs(cfg *analysis.CFG) *numbering {
 						n.asmClobbers = map[int][]Reg{}
 					}
 					n.asmClobbers[n.next] = regs
+				}
+				own := map[int]bool{}
+				for _, a := range b.Instrs[k].Args {
+					if a.Kind == ir.RefTemp {
+						own[int(a.ID)] = true
+					}
+				}
+				if len(own) > 0 {
+					if n.asmOperand == nil {
+						n.asmOperand = map[int]map[int]bool{}
+					}
+					n.asmOperand[n.next] = own
 				}
 			case ir.OSafepoint:
 				n.safeAt = append(n.safeAt, n.next)
@@ -220,14 +239,31 @@ func buildIntervals(f *ir.Func, cfg *analysis.CFG, live *analysis.Liveness, num 
 			continue // temp never used
 		}
 		for _, c := range num.callAt {
-			if iv.start <= c && c < iv.end {
+			if iv.start > c || c >= iv.end {
+				continue
+			}
+			// An operand of the asm AT c does not CROSS it: the asm is reading the
+			// value, and a value being read is not a value that has to survive. Its
+			// range reaches past c only because an asm's inputs are deliberately
+			// extended one position, so the allocator cannot reuse an input's
+			// register for an output -- which is the same shape as a value that
+			// really does live over the asm, and was being read as one.
+			//
+			// Counting it as crossing forced it into a callee-saved register, and
+			// System V has no callee-saved XMM: every floating-point operand of every
+			// inline asm was spilled, and the emitter then ran out of scratch
+			// registers reloading them. That is why FP inline asm did not compile.
+			if !num.asmOperand[c][iv.temp] {
 				iv.crosses = true
-				for _, r := range num.asmClobbers[c] {
-					if iv.avoid == nil {
-						iv.avoid = map[Reg]bool{}
-					}
-					iv.avoid[r] = true
+			}
+			// The clobber list applies either way. A template that says it writes a
+			// register may write it before the instruction that reads this operand,
+			// so an operand must not sit there even though it is only being read.
+			for _, r := range num.asmClobbers[c] {
+				if iv.avoid == nil {
+					iv.avoid = map[Reg]bool{}
 				}
+				iv.avoid[r] = true
 			}
 		}
 		for _, p := range num.safeAt {

@@ -1133,15 +1133,29 @@ func (m *mc) memAddr(addr ir.Ref, scratch Reg) (x64.Mem, func()) {
 func (m *mc) emitAsm(in *ir.Instr) {
 	asm := in.Asm
 	vals := make([]asmVal, len(asm.Ops))
-	scratch := [...]Reg{gpScratch0, gpScratch1}
-	scratchN := 0
-	next := func() Reg {
-		if scratchN >= len(scratch) {
+	// Two pools, because an operand's register has to come from the file its class
+	// lives in: a double in a GP register is not a double. They are counted
+	// separately so a template using both does not exhaust one by spending the
+	// other's budget.
+	gp := [...]Reg{gpScratch0, gpScratch1}
+	fp := [...]Reg{fpScratch0, fpScratch1}
+	gpN, fpN := 0, 0
+	next := func(float bool) Reg {
+		if float {
+			if fpN >= len(fp) {
+				m.fail(fmt.Errorf("amd64: inline asm needs more XMM scratch registers than are available"))
+				return fpScratch0
+			}
+			r := fp[fpN]
+			fpN++
+			return r
+		}
+		if gpN >= len(gp) {
 			m.fail(fmt.Errorf("amd64: inline asm needs more scratch registers than are available"))
 			return gpScratch0
 		}
-		r := scratch[scratchN]
-		scratchN++
+		r := gp[gpN]
+		gpN++
 		return r
 	}
 
@@ -1160,10 +1174,18 @@ func (m *mc) emitAsm(in *ir.Instr) {
 		}
 		// The output is spilled: give the template a scratch register and store it
 		// back once the template has run.
-		r := next()
+		float := m.f.ClassOf(oref).IsFloat()
+		r := next(float)
 		slot := m.slotAddr(t.Slot)
 		finals = append(finals, func() {
-			m.emit(x64.Store(w*8, r.mreg(), x64.At(RBP.mreg(), slot)))
+			switch {
+			case float && w == 8:
+				m.emit(x64.MovsdStore(r.mreg(), x64.At(RBP.mreg(), slot)))
+			case float:
+				m.emit(x64.MovssStore(r.mreg(), x64.At(RBP.mreg(), slot)))
+			default:
+				m.emit(x64.Store(w*8, r.mreg(), x64.At(RBP.mreg(), slot)))
+			}
 		})
 		return r, w
 	}
@@ -1176,7 +1198,14 @@ func (m *mc) emitAsm(in *ir.Instr) {
 			r, w := resolveOut()
 			pre, _ := m.asmInputReg(in.Args[ac], next) // preload value
 			ac++
-			m.emit(x64.MovReg(w == 8, r.mreg(), pre.mreg())) // preload the read-write register
+			switch {
+			case r.IsFloat() && w == 8:
+				m.emit(x64.MovsdReg(r.mreg(), pre.mreg()))
+			case r.IsFloat():
+				m.emit(x64.MovssReg(r.mreg(), pre.mreg()))
+			default:
+				m.emit(x64.MovReg(w == 8, r.mreg(), pre.mreg()))
+			}
 			vals[i] = asmVal{reg: r, width: w}
 		case ir.AsmImm:
 			vals[i] = asmVal{lit: true, litS: fmt.Sprintf("$%d", m.f.Consts[in.Args[ac].ID].Int)}
@@ -1210,20 +1239,28 @@ func (m *mc) emitAsm(in *ir.Instr) {
 
 // asmInputReg yields a register holding an inline-asm operand's value, loading a
 // spilled temporary or materializing a constant into a scratch register first.
-func (m *mc) asmInputReg(ref ir.Ref, next func() Reg) (Reg, int) {
+func (m *mc) asmInputReg(ref ir.Ref, next func(float bool) Reg) (Reg, int) {
 	switch ref.Kind {
 	case ir.RefTemp:
 		t := m.f.Temps[ref.ID]
-		w := m.f.ClassOf(ref).Size()
+		cls := m.f.ClassOf(ref)
+		w := cls.Size()
 		if t.Reg != ir.NoReg {
 			return Reg(t.Reg), w
 		}
-		r := next()
-		m.emit(x64.Load(w == 8, r.mreg(), x64.At(RBP.mreg(), m.slotAddr(t.Slot))))
+		r := next(cls.IsFloat())
+		switch {
+		case cls.IsFloat() && w == 8:
+			m.emit(x64.MovsdLoad(r.mreg(), x64.At(RBP.mreg(), m.slotAddr(t.Slot))))
+		case cls.IsFloat():
+			m.emit(x64.MovssLoad(r.mreg(), x64.At(RBP.mreg(), m.slotAddr(t.Slot))))
+		default:
+			m.emit(x64.Load(w == 8, r.mreg(), x64.At(RBP.mreg(), m.slotAddr(t.Slot))))
+		}
 		return r, w
 	case ir.RefConst:
 		c := m.f.Consts[ref.ID]
-		r := next()
+		r := next(false) // an int or a symbol address: a GP register either way
 		switch c.Kind {
 		case ir.ConstInt:
 			m.movImm(r, c.Int, true)

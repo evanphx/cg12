@@ -49,3 +49,64 @@ func TestWidenedFormsRejectBadOperands(t *testing.T) {
 		require.Errorf(t, err, "%q (%s) must not assemble", c.src, c.why)
 	}
 }
+
+// The SSE set, which the parser could not name either. Same gap, same
+// consequence, one target over: floating-point inline asm did not compile on
+// amd64 at all, because the assembler this backend hands templates to had no
+// word for a single one of these instructions -- while arm64's had learned its
+// whole FP set.
+//
+// llvm-mc is the judge, as above: reaching the right encoder with the operands
+// the wrong way round assembles just as cleanly and computes something else.
+func TestSSEParsingMatchesReference(t *testing.T) {
+	for _, c := range []struct{ src, want string }{
+		// Arithmetic. AT&T names the source first, so these must come back with
+		// xmm1 as the source and xmm0 as the destination, not reversed.
+		{"addsd %xmm1, %xmm0", "addsd %xmm1, %xmm0"},
+		{"subsd %xmm1, %xmm0", "subsd %xmm1, %xmm0"},
+		{"mulsd %xmm1, %xmm0", "mulsd %xmm1, %xmm0"},
+		{"divsd %xmm1, %xmm0", "divsd %xmm1, %xmm0"},
+		{"addss %xmm3, %xmm2", "addss %xmm3, %xmm2"},
+		{"subss %xmm3, %xmm2", "subss %xmm3, %xmm2"},
+		{"mulss %xmm3, %xmm2", "mulss %xmm3, %xmm2"},
+		{"divss %xmm3, %xmm2", "divss %xmm3, %xmm2"},
+		// A high register, so the REX bit is exercised rather than assumed.
+		{"addsd %xmm14, %xmm15", "addsd %xmm14, %xmm15"},
+		// Moves, register and memory in both directions.
+		{"movsd %xmm1, %xmm0", "movsd %xmm1, %xmm0"},
+		{"movss %xmm1, %xmm0", "movss %xmm1, %xmm0"},
+		{"movsd (%rax), %xmm0", "movsd (%rax), %xmm0"},
+		{"movsd %xmm0, (%rax)", "movsd %xmm0, (%rax)"},
+		{"movss (%rbx), %xmm2", "movss (%rbx), %xmm2"},
+		{"movss %xmm2, (%rbx)", "movss %xmm2, (%rbx)"},
+		// Compares and the sign-bit tricks.
+		{"ucomisd %xmm1, %xmm0", "ucomisd %xmm1, %xmm0"},
+		{"ucomiss %xmm1, %xmm0", "ucomiss %xmm1, %xmm0"},
+		{"xorps %xmm1, %xmm0", "xorps %xmm1, %xmm0"},
+		{"xorpd %xmm1, %xmm0", "xorpd %xmm1, %xmm0"},
+		// Precision conversion between the two float widths.
+		{"cvtsd2ss %xmm1, %xmm0", "cvtsd2ss %xmm1, %xmm0"},
+		{"cvtss2sd %xmm1, %xmm0", "cvtss2sd %xmm1, %xmm0"},
+	} {
+		got, err := Assemble(c.src)
+		require.NoErrorf(t, err, "we cannot assemble %q", c.src)
+		check(t, c.want, got)
+	}
+}
+
+// An SSE mnemonic with a general register, or an integer one with an SSE
+// register, is a mistake rather than something to encode by guessing which the
+// author meant. #105 contained the silent mis-encoding on both sides; this keeps
+// the new mnemonics inside that.
+func TestSSEWrongRegisterFileIsRejected(t *testing.T) {
+	for _, src := range []string{
+		"addsd %rax, %xmm0",   // a general register where an SSE one belongs
+		"addsd %xmm0, %rax",   // and the other way round
+		"movsd %eax, %xmm0",   // narrow general register
+		"ucomisd %xmm0, %rbx", // compare into a general register
+		"addq %xmm0, %rax",    // an integer mnemonic on an SSE register
+	} {
+		_, err := Assemble(src)
+		require.Errorf(t, err, "%q must not assemble to something", src)
+	}
+}

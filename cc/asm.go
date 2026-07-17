@@ -186,14 +186,20 @@ func asmFixedReg(base string) bool {
 // lvalue) for one operand from its base constraint.
 func (g *gen) asmOperandSpec(base string, output, rw bool, operand cc.ExpressionNode) (ir.AsmSpec, asmOut, string) {
 	switch {
-	case base == "r" || base == "w" || asmFixedReg(base):
-		// "w" is how AArch64 spells a floating-point register operand. cg12's "r"
-		// already picks the register file from the operand's own class -- a double
-		// gets a V register either way -- so the letters agree here. Accepting
-		// both means source written for gcc, which requires "w" for a double and
-		// refuses "r", compiles as written.
+	case base == "r" || base == "w" || (base == "x" && g.target == TargetAMD64) || asmFixedReg(base):
+		// "w" is how AArch64 spells a floating-point register operand, "x" is how
+		// x86-64 does. cg12's "r" already picks the register file from the operand's
+		// own class -- a double gets a V or an XMM either way -- so the letters
+		// agree here. Accepting them means source written for gcc, which requires
+		// the target's own letter for a double and refuses "r", compiles as written.
+		//
+		// "x" is taken only for amd64, because it does not mean the same thing on
+		// both: on x86-64 it is any XMM, which is exactly what the class picks, but
+		// on AArch64 it is V0-V15 specifically -- a restriction cg12 cannot honour,
+		// so accepting it there would quietly allocate V16+ for a template that
+		// needs a low register.
 		reg := ""
-		if base != "r" && base != "w" {
+		if base != "r" && base != "w" && base != "x" {
 			reg = base
 		}
 		switch {

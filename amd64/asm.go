@@ -173,6 +173,14 @@ func expandAsm(tmpl string, vals []asmVal) (string, error) {
 			sb.WriteString(v.litS)
 			continue
 		}
+		// An XMM operand names itself the same at every width: the instruction's
+		// suffix says whether it is reading four bytes or eight (movss vs movsd),
+		// not the register. So a width modifier has nothing to select and is
+		// ignored rather than made to pick a name that does not exist.
+		if v.reg.IsFloat() {
+			sb.WriteString(xmmn(v.reg))
+			continue
+		}
 		if size == 0 {
 			size = v.width
 		}
@@ -217,6 +225,9 @@ func sizeIdx(size int) int {
 // suf returns the AT&T operand-size suffix for a byte width.
 
 func gpn(r Reg, size int) string { return "%" + gpNames[r][sizeIdx(size)] }
+
+// xmmn names an SSE register for the assembler.
+func xmmn(r Reg) string { return fmt.Sprintf("%%xmm%d", int(r-XMM0)) }
 
 func memn(base Reg, disp int32) string {
 	if disp == 0 {
