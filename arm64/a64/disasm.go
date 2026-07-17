@@ -487,6 +487,9 @@ func intLdSt(size, opc uint32) (op string, w64, ok bool) {
 }
 
 func disasmLdSt(w uint32) string {
+	if s := disasmExclusive(w); s != "" {
+		return s
+	}
 	switch {
 	case bits(w, 29, 24) == 0x39: // unsigned offset, integer
 		size, opc := bits(w, 31, 30), bits(w, 23, 22)
@@ -672,6 +675,72 @@ func disasmMovVec(w uint32) string {
 func disasmSystem(w uint32) string {
 	if w&^uint32(0x1f) == 0xd53bd040 {
 		return fmt.Sprintf("mrs x%d, tpidr_el0", w&0x1f)
+	}
+	// SVC #imm16: the exception-generating group, with the syscall selector.
+	if w&0xffe0001f == 0xd4000001 {
+		return fmt.Sprintf("svc #%d", bits(w, 20, 5))
+	}
+	// The barrier group: DMB/DSB/ISB share the reserved bits and differ in the
+	// low opcode field (bits 7:5), with the domain in CRm (bits 11:8).
+	if w&0xfffff0df == 0xd50330df && bits(w, 7, 5) == 6 {
+		return "isb" // only the sy form is emitted, printed bare as the reference does
+	}
+	if w&0xfffff09f == 0xd503309f { // DMB (opc 5) / DSB (opc 4)
+		op := map[uint32]string{5: "dmb", 4: "dsb"}[bits(w, 7, 5)]
+		if op != "" {
+			if dom := barrierName(bits(w, 11, 8)); dom != "" {
+				return op + " " + dom
+			}
+		}
+	}
+	return ""
+}
+
+// barrierName is the inverse of barrierByName, for the domains this assembler
+// encodes.
+func barrierName(crm uint32) string {
+	switch BarrierOption(crm) {
+	case BarrierSY:
+		return "sy"
+	case BarrierISH:
+		return "ish"
+	case BarrierISHST:
+		return "ishst"
+	case BarrierLD:
+		return "ld"
+	case BarrierST:
+		return "st"
+	}
+	return ""
+}
+
+// disasmExclusive decodes the LDXR/STXR/LDAXR/STLXR forms. They live in the
+// load/store encoding space, so Disasm reaches this from disasmLdSt.
+func disasmExclusive(w uint32) string {
+	if bits(w, 29, 24) != 0x8 || bits(w, 21, 21) != 0 || bits(w, 14, 10) != 31 {
+		return "" // not the exclusive-access group
+	}
+	size := bits(w, 31, 30)
+	if size != 2 && size != 3 { // only word/doubleword are encoded here
+		return ""
+	}
+	w64 := size == 3
+	load := bits(w, 22, 22) == 1
+	acqrel := bits(w, 15, 15) == 1
+	rt, rn, rs := w&0x1f, bits(w, 9, 5), bits(w, 20, 16)
+	switch {
+	case load && bits(w, 20, 16) == 31:
+		mn := "ldxr"
+		if acqrel {
+			mn = "ldaxr"
+		}
+		return fmt.Sprintf("%s %s, [%s]", mn, gpr(w64, rt), gprSP(true, rn))
+	case !load:
+		mn := "stxr"
+		if acqrel {
+			mn = "stlxr"
+		}
+		return fmt.Sprintf("%s %s, %s, [%s]", mn, gpr(false, rs), gpr(w64, rt), gprSP(true, rn))
 	}
 	return ""
 }

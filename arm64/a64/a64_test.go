@@ -307,6 +307,28 @@ var encodingCases = []encodingCase{
 	{"ldrh w4, [x5, w6, uxtw #1]", LdrhReg(4, 5, 6, ExtUXTW, 1)},
 	{"clz w1, w2", Clz(false, 1, 2)},
 	{"clz x3, x4", Clz(true, 3, 4)},
+
+	// System and synchronization.
+	{"svc #0", Svc(0)},
+	{"svc #128", Svc(128)},
+	{"dmb sy", Dmb(BarrierSY)},
+	{"dmb ish", Dmb(BarrierISH)},
+	{"dmb ishst", Dmb(BarrierISHST)},
+	{"dmb ld", Dmb(BarrierLD)},
+	{"dmb st", Dmb(BarrierST)},
+	{"dsb sy", Dsb(BarrierSY)},
+	{"dsb ish", Dsb(BarrierISH)},
+	{"isb", Isb()},
+
+	// Exclusive access: the atomic primitives.
+	{"ldxr w0, [x1]", Ldxr(false, 0, 1)},
+	{"ldxr x2, [x3]", Ldxr(true, 2, 3)},
+	{"ldaxr w4, [x5]", Ldaxr(false, 4, 5)},
+	{"ldaxr x6, [x7]", Ldaxr(true, 6, 7)},
+	{"stxr w0, w1, [x2]", Stxr(false, 0, 1, 2)},
+	{"stxr w3, x4, [x5]", Stxr(true, 3, 4, 5)},
+	{"stlxr w6, w7, [x8]", Stlxr(false, 6, 7, 8)},
+	{"stlxr w9, x10, [x11]", Stlxr(true, 9, 10, 11)},
 }
 
 var moreEncodingCases = []encodingCase{

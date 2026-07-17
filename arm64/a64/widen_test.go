@@ -44,6 +44,17 @@ var widenedCases = []string{
 	"cset w1, ne", "cset x2, ge",
 	"mrs x0, tpidr_el0",
 	"ldp x29, x30, [sp, #16]", "stp x0, x1, [x2, #16]", "stp w3, w4, [x5, #8]",
+
+	// System and synchronization, none of which the parser could name. Without
+	// the exclusives there is no way to write a compare-and-swap, which is what a
+	// lock-free atomic is built from.
+	"svc #0", "svc #128",
+	"dmb sy", "dmb ish", "dmb ishst", "dmb ld", "dmb st",
+	"dsb sy", "dsb ish", "isb",
+	"ldxr w0, [x1]", "ldxr x2, [x3]",
+	"ldaxr w4, [x5]", "ldaxr x6, [x7]",
+	"stxr w0, w1, [x2]", "stxr w3, x4, [x5]",
+	"stlxr w6, w7, [x8]", "stlxr w9, x10, [x11]",
 }
 
 func TestWidenedParsingMatchesAssembler(t *testing.T) {
@@ -78,6 +89,11 @@ func TestWidenedFormsRejectBadOperands(t *testing.T) {
 		{"mrs x0, ttbr0_el1", "a system register we do not encode"},
 		{"mrs w0, tpidr_el0", "a system register read gives an x"},
 		{"stp x0, w1, [x2, #16]", "mismatched widths"},
+		{"dmb foo", "not a barrier option"},
+		{"stxr x0, x1, [x2]", "the status register must be 32-bit"},
+		{"ldxr w0, [x1, #8]", "an exclusive access takes no offset"},
+		{"svc x0", "svc takes an immediate, not a register"},
+		{"isb ish", "only the sy domain is encoded for isb"},
 	} {
 		_, err := Assemble(c.src)
 		require.Errorf(t, err, "%q (%s) must not assemble", c.src, c.why)

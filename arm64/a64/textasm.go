@@ -183,6 +183,33 @@ func asmLine(p *Program, line string) error {
 		return a.fmov()
 	case "scvtf", "ucvtf", "fcvtzs", "fcvtzu":
 		return a.fpIntConv(mn)
+	case "svc":
+		v, ok := a.imm(0)
+		if !ok || len(ops) != 1 {
+			return fmt.Errorf("svc takes one immediate")
+		}
+		if v < 0 || v > 0xffff {
+			return fmt.Errorf("svc: #%d out of range", v)
+		}
+		p.Emit(Svc(uint16(v)))
+		return nil
+	case "dmb", "dsb":
+		return a.barrier(mn)
+	case "isb":
+		// ISB takes an optional domain; only the full-system form is encoded, and
+		// it is the only one anything writes, so the operand (if any) must be sy.
+		if len(ops) == 1 && ops[0] != "sy" {
+			return fmt.Errorf("isb: only the sy domain is encoded, not %q", ops[0])
+		}
+		if len(ops) > 1 {
+			return fmt.Errorf("isb takes at most one operand")
+		}
+		p.Emit(Isb())
+		return nil
+	case "ldxr", "ldaxr":
+		return a.loadExclusive(mn == "ldaxr")
+	case "stxr", "stlxr":
+		return a.storeExclusive(mn == "stlxr")
 	}
 	if c, ok := condSuffix(mn, "b."); ok {
 		if len(ops) != 1 {
@@ -945,4 +972,91 @@ func condNamed(s string) (Cond, bool) {
 		return condByName(strings.ToLower(s)), true
 	}
 	return 0, false
+}
+
+// barrier assembles DMB/DSB <option>, whose sole operand is a domain name rather
+// than a register or immediate.
+func (a *asmCtx) barrier(mn string) error {
+	if len(a.ops) != 1 {
+		return fmt.Errorf("%s takes one barrier option", mn)
+	}
+	o, ok := barrierByName(a.ops[0])
+	if !ok {
+		return fmt.Errorf("%s: %q is not a barrier option this assembler encodes", mn, a.ops[0])
+	}
+	if mn == "dmb" {
+		a.p.Emit(Dmb(o))
+	} else {
+		a.p.Emit(Dsb(o))
+	}
+	return nil
+}
+
+// barrierByName maps a barrier domain name to its option. Only the domains an
+// atomic sequence actually uses are encoded; a name outside the set is refused
+// rather than encoded as the wrong domain.
+func barrierByName(s string) (BarrierOption, bool) {
+	switch s {
+	case "sy":
+		return BarrierSY, true
+	case "ish":
+		return BarrierISH, true
+	case "ishst":
+		return BarrierISHST, true
+	case "ld":
+		return BarrierLD, true
+	case "st":
+		return BarrierST, true
+	}
+	return 0, false
+}
+
+// loadExclusive assembles LDXR/LDAXR <Wt|Xt>, [<Xn>].
+func (a *asmCtx) loadExclusive(acquire bool) error {
+	rt, w64, _, err := a.reg(0)
+	if err != nil {
+		return err
+	}
+	rn, off, err := a.mem(1)
+	if err != nil {
+		return err
+	}
+	if off != 0 {
+		return fmt.Errorf("%s: an exclusive access takes no offset", a.mn)
+	}
+	if acquire {
+		a.p.Emit(Ldaxr(w64, rt, rn))
+	} else {
+		a.p.Emit(Ldxr(w64, rt, rn))
+	}
+	return nil
+}
+
+// storeExclusive assembles STXR/STLXR <Ws>, <Wt|Xt>, [<Xn>]. The status register
+// Ws is always a 32-bit register; the width of the stored value comes from Wt/Xt.
+func (a *asmCtx) storeExclusive(release bool) error {
+	rs, sw, _, err := a.reg(0)
+	if err != nil {
+		return err
+	}
+	if sw {
+		return fmt.Errorf("%s: the status register must be 32-bit (w%d, not x%d)", a.mn, rs, rs)
+	}
+	rt, w64, _, err := a.reg(1)
+	if err != nil {
+		return err
+	}
+	rn, off, err := a.mem(2)
+	if err != nil {
+		return err
+	}
+	if off != 0 {
+		return fmt.Errorf("%s: an exclusive access takes no offset", a.mn)
+	}
+	if release {
+		a.p.Emit(Stlxr(w64, rs, rt, rn))
+	} else {
+		a.p.Emit(Stxr(w64, rs, rt, rn))
+	}
+	return nil
 }
