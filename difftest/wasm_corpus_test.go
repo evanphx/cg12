@@ -7,6 +7,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/evanphx/cg12/internal/testenv"
 	"github.com/evanphx/cg12/ir"
 	"github.com/evanphx/cg12/parse"
 	"github.com/evanphx/cg12/wasm"
@@ -16,11 +17,7 @@ import (
 // wasmtimeBin locates a wasmtime binary or skips.
 func wasmtimeBin(t *testing.T) string {
 	t.Helper()
-	if p, err := exec.LookPath("wasmtime"); err == nil {
-		return p
-	}
-	t.Skip("wasmtime not available")
-	return ""
+	return testenv.Tool(t, "wasmtime")
 }
 
 // TestWASMCorpus runs a subset of QBE's own test programs on WebAssembly. Each

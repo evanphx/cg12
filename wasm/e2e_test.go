@@ -7,6 +7,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/evanphx/cg12/internal/testenv"
 	"github.com/evanphx/cg12/ir"
 	"github.com/evanphx/cg12/wasm"
 	"github.com/stretchr/testify/assert"
@@ -16,11 +17,7 @@ import (
 // wasmtime locates a wasmtime binary, or skips the test when none is present.
 func wasmtime(t *testing.T) string {
 	t.Helper()
-	if p, err := exec.LookPath("wasmtime"); err == nil {
-		return p
-	}
-	t.Skip("wasmtime not available")
-	return ""
+	return testenv.Tool(t, "wasmtime")
 }
 
 // runFunc compiles m to WAT, then invokes exported function fn with args via

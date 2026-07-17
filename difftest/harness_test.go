@@ -43,6 +43,11 @@ func assembler(t *testing.T) string {
 }
 
 // qbePath returns a QBE binary if one is configured.
+//
+// This one is deliberately not a testenv.Tool gate: QBE is an oracle that
+// confirms a result the corpus has already checked against its recorded
+// expectation, so its absence costs a second opinion rather than the check
+// itself. Everything else a test here needs, it needs.
 func qbePath() (string, bool) {
 	if p := os.Getenv("CG12_QBE"); p != "" {
 		return p, true

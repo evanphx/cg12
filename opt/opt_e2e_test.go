@@ -9,32 +9,27 @@ import (
 	"testing"
 
 	"github.com/evanphx/cg12/arm64"
+	"github.com/evanphx/cg12/internal/testenv"
 	"github.com/evanphx/cg12/ir"
 	"github.com/evanphx/cg12/opt"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
 
-func assembler() (string, bool) {
-	if p, err := exec.LookPath("aarch64-linux-gnu-gcc"); err == nil {
-		return p, true
+func assembler(t testing.TB) string {
+	t.Helper()
+	if p, ok := testenv.Have("aarch64-linux-gnu-gcc"); ok {
+		return p
 	}
-	if runtime.GOARCH == "arm64" {
-		for _, c := range []string{"cc", "gcc", "clang"} {
-			if p, err := exec.LookPath(c); err == nil {
-				return p, true
-			}
-		}
+	if runtime.GOARCH != "arm64" {
+		t.Skip("no AArch64 toolchain: this host is not arm64 and there is no cross compiler")
 	}
-	return "", false
+	return testenv.Tool(t, "cc", "gcc", "clang")
 }
 
 func runModule(t *testing.T, m *ir.Module, cmain string) int {
 	t.Helper()
-	cc, ok := assembler()
-	if !ok {
-		t.Skip("no AArch64 assembler available")
-	}
+	cc := assembler(t)
 	o, err := arm64.CompileToObject(m)
 	require.NoError(t, err)
 	data, err := o.MarshalELF()

@@ -9,6 +9,7 @@ import (
 
 	"github.com/evanphx/cg12/amd64"
 	"github.com/evanphx/cg12/arm64"
+	"github.com/evanphx/cg12/internal/testenv"
 	"github.com/evanphx/cg12/ir"
 	"github.com/evanphx/cg12/link"
 	"github.com/evanphx/cg12/obj"
@@ -17,27 +18,21 @@ import (
 )
 
 // toolchain finds a C compiler producing native AArch64 objects.
-func toolchain() (string, bool) {
-	if p, err := exec.LookPath("aarch64-linux-gnu-gcc"); err == nil {
-		return p, true
+func toolchain(t testing.TB) string {
+	t.Helper()
+	if p, ok := testenv.Have("aarch64-linux-gnu-gcc"); ok {
+		return p
 	}
-	if runtime.GOARCH == "arm64" {
-		for _, c := range []string{"cc", "gcc", "clang"} {
-			if p, err := exec.LookPath(c); err == nil {
-				return p, true
-			}
-		}
+	if runtime.GOARCH != "arm64" {
+		t.Skip("no AArch64 toolchain: this host is not arm64 and there is no cross compiler")
 	}
-	return "", false
+	return testenv.Tool(t, "cc", "gcc", "clang")
 }
 
 // linkRun links a merged object with a C driver, runs it, and returns the code.
 func linkRun(t *testing.T, data []byte, cmain string) int {
 	t.Helper()
-	cc, ok := toolchain()
-	if !ok {
-		t.Skip("no AArch64 toolchain available")
-	}
+	cc := toolchain(t)
 	dir := t.TempDir()
 	objPath := filepath.Join(dir, "linked.o")
 	cPath := filepath.Join(dir, "main.c")

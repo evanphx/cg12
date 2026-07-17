@@ -155,10 +155,7 @@ func TestSharedLibraryLinkedFromC(t *testing.T) {
 	if runtime.GOARCH != "arm64" {
 		t.Skip("arm64 shared library links natively only on an arm64 host")
 	}
-	cc, ok := toolchain()
-	if !ok {
-		t.Skip("no AArch64 toolchain available")
-	}
+	cc := toolchain(t)
 	dir := t.TempDir()
 	buildTripleSo(t, dir)
 

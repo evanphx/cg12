@@ -105,10 +105,7 @@ int use(void){ return weakvar; }
 // -ffunction-sections gives every function its own .text.NAME. Those are still
 // text, and their relocations still matter.
 func TestReadFunctionSections(t *testing.T) {
-	gcc, err := exec.LookPath("gcc")
-	if err != nil {
-		t.Skip("gcc not available")
-	}
+	gcc := testenv.Tool(t, "gcc")
 	dir := t.TempDir()
 	c := filepath.Join(dir, "f.c")
 	obn := filepath.Join(dir, "f.o")

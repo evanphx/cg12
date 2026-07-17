@@ -10,6 +10,7 @@ import (
 	"testing"
 
 	"github.com/evanphx/cg12/arm64/a64"
+	"github.com/evanphx/cg12/internal/testenv"
 	"github.com/evanphx/cg12/obj"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -27,10 +28,8 @@ func words(ws ...uint32) []byte {
 // returning the exit code. It skips when no AArch64 toolchain is present.
 func linkRun(t *testing.T, objBytes []byte, cmain string) int {
 	t.Helper()
-	cc, err := exec.LookPath("aarch64-linux-gnu-gcc")
-	if err != nil {
-		t.Skip("no AArch64 toolchain available")
-	}
+	cc := testenv.Tool(t, "aarch64-linux-gnu-gcc")
+
 	dir := t.TempDir()
 	objPath := filepath.Join(dir, "unit.o")
 	cPath := filepath.Join(dir, "main.c")
