@@ -23,13 +23,18 @@ const (
 )
 
 // WriteExecutable fully links the object into a static ET_EXEC ELF: it assigns
-// virtual addresses to .text and .data, resolves every relocation against those
-// addresses (erroring on any undefined symbol), and emits program headers so the
-// kernel can load and run it directly -- no external linker or C runtime. entrySym
-// names the symbol the ELF entry point (e_entry) points at (e.g. "_start").
+// virtual addresses to .text, .data and .bss, resolves every relocation against
+// those addresses (erroring on any undefined symbol), and emits program headers
+// so the kernel can load and run it directly -- no external linker or C runtime.
+// entrySym names the symbol the ELF entry point (e_entry) points at (e.g.
+// "_start").
 func (o *Object) WriteExecutable(entrySym string) ([]byte, error) {
+	// .bss needs the writable segment as much as .data does: it has no bytes in
+	// the file, but it still has to be mapped, and a program with only
+	// zero-initialized globals is ordinary.
+	hasRW := len(o.Data) > 0 || o.BssSize > 0
 	nph := 3 // PT_LOAD (r-x), PT_NOTE, PT_GNU_STACK
-	if len(o.Data) > 0 {
+	if hasRW {
 		nph++ // PT_LOAD (rw-)
 	}
 	note, noteDescOff := buildIDNote()
@@ -39,7 +44,7 @@ func (o *Object) WriteExecutable(entrySym string) ([]byte, error) {
 
 	dataOff := 0
 	var dataVaddr uint64
-	if len(o.Data) > 0 {
+	if hasRW {
 		dataOff = alignUp(textOff+len(o.Text), execAlign)
 		dataVaddr = uint64(execBase + dataOff)
 	}
@@ -52,6 +57,10 @@ func (o *Object) WriteExecutable(entrySym string) ([]byte, error) {
 			symVaddr[s.Name] = textVaddr + s.Value
 		case SecData:
 			symVaddr[s.Name] = dataVaddr + s.Value
+		case SecBss:
+			// .bss has no bytes in the file; it picks up where .data ends in memory,
+			// rounded up to what its own contents need.
+			symVaddr[s.Name] = dataVaddr + uint64(bssStart(o)) + s.Value
 		}
 	}
 	entry, ok := symVaddr[entrySym]
@@ -71,20 +80,28 @@ func (o *Object) WriteExecutable(entrySym string) ([]byte, error) {
 
 	out := &elfBuf{}
 	out.pad(64) // ELF header, filled in at the end
-	phdr := func(typ, flags uint32, off, vaddr, size, align uint64) {
+	phdrMem := func(typ, flags uint32, off, vaddr, filesz, memsz, align uint64) {
 		out.u32(typ)
 		out.u32(flags)
 		out.u64(off)
 		out.u64(vaddr)
 		out.u64(vaddr) // p_paddr
-		out.u64(size)  // p_filesz
-		out.u64(size)  // p_memsz
+		out.u64(filesz)
+		out.u64(memsz)
 		out.u64(align)
+	}
+	// Most segments are entirely present in the file, so their memory extent is
+	// their file extent. .bss is the exception.
+	phdr := func(typ, flags uint32, off, vaddr, size, align uint64) {
+		phdrMem(typ, flags, off, vaddr, size, size, align)
 	}
 	textFilesz := uint64(textOff + len(text))
 	phdr(ptLoad, pfR|pfX, 0, execBase, textFilesz, execAlign)
-	if len(o.Data) > 0 {
-		phdr(ptLoad, pfR|pfW, uint64(dataOff), dataVaddr, uint64(len(data)), execAlign)
+	if hasRW {
+		// .bss lives past the file's end: memsz exceeds filesz and the loader zeroes
+		// the difference, including whatever padding its alignment needed.
+		phdrMem(ptLoad, pfR|pfW, uint64(dataOff), dataVaddr, uint64(len(data)),
+			uint64(bssStart(o)+o.BssSize), execAlign)
 	}
 	phdr(ptNote, pfR, uint64(noteOff), uint64(execBase+noteOff), uint64(len(note)), 4)
 	// An empty segment whose flags say the stack wants no execute permission. Its
@@ -99,7 +116,7 @@ func (o *Object) WriteExecutable(entrySym string) ([]byte, error) {
 	}
 	put(noteOff, note)
 	put(textOff, text)
-	if len(o.Data) > 0 {
+	if len(data) > 0 {
 		put(dataOff, data)
 	}
 
