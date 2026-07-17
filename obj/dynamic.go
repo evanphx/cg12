@@ -570,6 +570,10 @@ func (o *Object) writeDynImage(im dynImage) ([]byte, error) {
 	off = alignUp(off, 16)
 	textOff := off
 	off += len(o.Text)
+	// .rodata belongs in the read-only region, which is what makes it read-only:
+	// the promise is kept by the mapping, not by the source's types.
+	rodataOff := alignUp(off, alignOr(o.RodataAlign, 8))
+	off = rodataOff + len(o.Rodata)
 	roEnd := off
 
 	// How much of the writable region is read-only after relocation: the GOT and
@@ -743,6 +747,8 @@ func (o *Object) writeDynImage(im dynImage) ([]byte, error) {
 			symVaddr[s.Name] = va(textOff) + s.Value
 		case SecData:
 			symVaddr[s.Name] = va(dataOff) + s.Value
+		case SecRodata:
+			symVaddr[s.Name] = va(rodataOff) + s.Value
 		case SecBss:
 			// .bss has no bytes in the file; it picks up where .data ends in memory,
 			// rounded up to what its own contents need. Without the rounding it
@@ -792,6 +798,7 @@ func (o *Object) writeDynImage(im dynImage) ([]byte, error) {
 
 	text := append([]byte(nil), o.Text...)
 	data := append([]byte(nil), o.Data...)
+	rodata := append([]byte(nil), o.Rodata...)
 	dynRel, err := resolveSection(o.Machine, im.pie, text, va(textOff), o.Relocs, symVaddr, tlsOff, tlsGotVaddr, tlsGdVaddr)
 	if err != nil {
 		return nil, err
@@ -801,6 +808,23 @@ func (o *Object) writeDynImage(im dynImage) ([]byte, error) {
 		return nil, err
 	}
 	dynRel = append(dynRel, dataRel...)
+
+	// .rodata is mapped without write permission, so anything the loader would
+	// have to patch there cannot be. In a fixed-base image every address is a
+	// link-time constant and resolveSection writes them all now, leaving nothing
+	// for the loader; in a PIE they become RELATIVE relocations, and there is
+	// nowhere to apply them. A real toolchain answers this with .data.rel.ro --
+	// mapped writable, relocated, then made read-only by PT_GNU_RELRO -- which
+	// cg12 has for the GOT and .dynamic but not yet for data.
+	rodataRel, err := resolveSection(o.Machine, im.pie, rodata, va(rodataOff), o.RodataRelocs, symVaddr, tlsOff, tlsGotVaddr, tlsGdVaddr)
+	if err != nil {
+		return nil, err
+	}
+	if len(rodataRel) > 0 {
+		return nil, fmt.Errorf("obj: %d relocation(s) in .rodata would have to be applied by the loader, "+
+			"which cannot write it: read-only data holding an address needs .data.rel.ro, which this linker does not emit yet",
+			len(rodataRel))
+	}
 	if im.pie && (nplt > 0 || len(tlsGot) > 0 || len(tlsGd) > 0) {
 		dynRel = append(dynRel, Reloc{
 			Offset: va(gotOff), Type: relativeType(o.Machine), Addend: int64(va(dynamicOff)),
@@ -1080,6 +1104,7 @@ func (o *Object) writeDynImage(im dynImage) ([]byte, error) {
 	put(relaPltOff, relaPlt.b)
 	put(plt0Off, plt.b)
 	put(textOff, text)
+	put(rodataOff, rodata)
 	put(tdataOff, o.Tdata)
 	put(initArrOff, initArr.b)
 	put(finiArrOff, finiArr.b)
@@ -1165,9 +1190,11 @@ type dsection struct {
 	align, entsize uint64
 }
 
-// allRelocs returns every relocation the object carries against .text and .data.
+// allRelocs returns every relocation the object carries against its sections.
 func (o *Object) allRelocs() []Reloc {
-	return append(append([]Reloc{}, o.Relocs...), o.DataRelocs...)
+	all := append([]Reloc{}, o.Relocs...)
+	all = append(all, o.DataRelocs...)
+	return append(all, o.RodataRelocs...)
 }
 
 // imports returns the sorted names of every symbol a relocation references but

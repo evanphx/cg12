@@ -56,16 +56,25 @@ func ReadELF(data []byte) (*Object, error) {
 			}
 			o.Text = append(o.Text, b...)
 		case SecData:
-			// .rodata merges into .data. cg12's own backends already place their
-			// const data there (addData reads Linkage.Thread, not Linkage.Section),
-			// so this keeps an ingested object's bytes and symbols correct and is no
-			// less read-only than what we emit ourselves.
 			place[idx] = placed{kind, uint64(len(o.Data))}
 			b, err := s.Data()
 			if err != nil {
 				return nil, err
 			}
 			o.Data = append(o.Data, b...)
+			if a := int(s.Addralign); a > o.DataAlign {
+				o.DataAlign = a
+			}
+		case SecRodata:
+			place[idx] = placed{kind, uint64(len(o.Rodata))}
+			b, err := s.Data()
+			if err != nil {
+				return nil, err
+			}
+			o.Rodata = append(o.Rodata, b...)
+			if a := int(s.Addralign); a > o.RodataAlign {
+				o.RodataAlign = a
+			}
 		case SecBss:
 			// .bss occupies no file bytes: only a size, and an offset within it.
 			place[idx] = placed{kind, uint64(o.BssSize)}
@@ -137,6 +146,8 @@ func ReadELF(data []byte) (*Object, error) {
 			o.Relocs = append(o.Relocs, rs...)
 		case SecData, SecTdata:
 			o.DataRelocs = append(o.DataRelocs, rs...)
+		case SecRodata:
+			o.RodataRelocs = append(o.RodataRelocs, rs...)
 		default:
 			return nil, fmt.Errorf("obj: %s relocates %q, which cannot carry relocations", s.Name, f.Sections[target].Name)
 		}
@@ -165,7 +176,9 @@ func sectionKind(s *elf.Section) (SecKind, bool) {
 		return SecText, true
 	case s.Type == elf.SHT_NOBITS:
 		return SecBss, true
-	case hasPrefix(name, ".data", ".rodata", ".init_array", ".fini_array", ".data.rel"):
+	case hasPrefix(name, ".rodata"):
+		return SecRodata, true
+	case hasPrefix(name, ".data", ".init_array", ".fini_array", ".data.rel"):
 		return SecData, true
 	}
 	return 0, false

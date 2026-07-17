@@ -197,9 +197,11 @@ func merge(objs []*obj.Object) (*obj.Object, error) {
 
 	defined := map[string]obj.Sym{} // merged name -> defined symbol
 	used := map[string]bool{}
+	// A relocation's offset is relative to its own section, so which one it
+	// patches travels with it.
 	type pending struct {
-		r      obj.Reloc
-		toData bool
+		r  obj.Reloc
+		in obj.SecKind
 	}
 	var relocs []pending
 
@@ -212,16 +214,19 @@ func merge(objs []*obj.Object) (*obj.Object, error) {
 		// at would shift every datum within by that much, undoing the padding the
 		// backend put in.
 		out.DataAlign = maxInt(out.DataAlign, o.DataAlign)
+		out.RodataAlign = maxInt(out.RodataAlign, o.RodataAlign)
 		out.BssAlign = maxInt(out.BssAlign, o.BssAlign)
 		out.TlsAlign = maxInt(out.TlsAlign, o.TlsAlign)
 
 		textBase := uint64(len(out.Text))
 		dataBase := uint64(alignUp(len(out.Data), o.DataAlign))
+		rodataBase := uint64(alignUp(len(out.Rodata), o.RodataAlign))
 		tdataBase := uint64(alignUp(len(out.Tdata), o.TlsAlign))
 		bssBase := uint64(alignUp(out.BssSize, o.BssAlign))
 		tbssBase := uint64(alignUp(out.TbssSize, o.TlsAlign))
 		out.Text = append(out.Text, o.Text...)
 		out.Data = append(padTo(out.Data, int(dataBase)), o.Data...)
+		out.Rodata = append(padTo(out.Rodata, int(rodataBase)), o.Rodata...)
 		out.Tdata = append(padTo(out.Tdata, int(tdataBase)), o.Tdata...)
 		out.BssSize = int(bssBase) + o.BssSize
 		out.TbssSize = int(tbssBase) + o.TbssSize
@@ -237,7 +242,7 @@ func merge(objs []*obj.Object) (*obj.Object, error) {
 		// that gets captured.
 		local := map[string]string{}
 		for _, s := range o.Syms {
-			base, ok := sectionBase(s.Section, textBase, dataBase, tdataBase, bssBase, tbssBase)
+			base, ok := sectionBase(s.Section, textBase, dataBase, rodataBase, tdataBase, bssBase, tbssBase)
 			if !ok {
 				continue // undefined, or a section this linker does not merge yet
 			}
@@ -256,43 +261,49 @@ func merge(objs []*obj.Object) (*obj.Object, error) {
 			out.Syms = append(out.Syms, rebased)
 		}
 
-		rebase := func(rs []obj.Reloc, base uint64, toData bool) {
+		rebase := func(rs []obj.Reloc, base uint64, in obj.SecKind) {
 			for _, r := range rs {
 				r.Offset += base
 				if n, ok := local[r.Sym]; ok {
 					r.Sym = n
 				}
-				relocs = append(relocs, pending{r, toData})
+				relocs = append(relocs, pending{r, in})
 			}
 		}
-		rebase(o.Relocs, textBase, false)
-		rebase(o.DataRelocs, dataBase, true)
+		rebase(o.Relocs, textBase, obj.SecText)
+		rebase(o.DataRelocs, dataBase, obj.SecData)
+		rebase(o.RodataRelocs, rodataBase, obj.SecRodata)
 	}
 
 	// Apply every intra-.text PC-relative relocation whose target is now defined;
 	// keep the rest for the final link.
 	for _, p := range relocs {
-		if sym, ok := defined[p.r.Sym]; ok && !p.toData && sym.Section == obj.SecText && isPCRel(out.Machine, p.r.Type) {
+		if sym, ok := defined[p.r.Sym]; ok && p.in == obj.SecText && sym.Section == obj.SecText && isPCRel(out.Machine, p.r.Type) {
 			if err := patchBranch(out.Machine, out.Text, p.r, sym); err != nil {
 				return nil, err
 			}
 			continue
 		}
-		if p.toData {
+		switch p.in {
+		case obj.SecData:
 			out.DataRelocs = append(out.DataRelocs, p.r)
-		} else {
+		case obj.SecRodata:
+			out.RodataRelocs = append(out.RodataRelocs, p.r)
+		default:
 			out.Relocs = append(out.Relocs, p.r)
 		}
 	}
 	return out, nil
 }
 
-func sectionBase(k obj.SecKind, textBase, dataBase, tdataBase, bssBase, tbssBase uint64) (uint64, bool) {
+func sectionBase(k obj.SecKind, textBase, dataBase, rodataBase, tdataBase, bssBase, tbssBase uint64) (uint64, bool) {
 	switch k {
 	case obj.SecText:
 		return textBase, true
 	case obj.SecData:
 		return dataBase, true
+	case obj.SecRodata:
+		return rodataBase, true
 	case obj.SecTdata:
 		// A thread-local symbol's value is its offset within the TLS block, so it
 		// rebases against the merged .tdata rather than an address.

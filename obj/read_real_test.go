@@ -59,18 +59,19 @@ int text(void){ return rovar; }
 	require.Equal(t, obj.SecBss, bv.Section)
 	require.GreaterOrEqual(t, o.BssSize, 4, "the .bss symbol needs room reserved for it")
 
-	// The initialized ones share .data and must not overlap.
-	for _, s := range []obj.Sym{dv, rv, pv} {
+	// The const one is read-only data: its own region, because that is where the
+	// promise is kept.
+	require.Equal(t, obj.SecRodata, rv.Section)
+	require.GreaterOrEqual(t, len(o.Rodata), int(rv.Value)+4)
+	require.Equal(t, uint32(0x55667788), binary.LittleEndian.Uint32(o.Rodata[rv.Value:]))
+
+	// The writable ones share .data and must not overlap.
+	for _, s := range []obj.Sym{dv, pv} {
 		require.Equal(t, obj.SecData, s.Section, s.Name)
 	}
-	require.NotEqual(t, dv.Value, rv.Value, "datavar and rovar are different variables")
 	require.NotEqual(t, dv.Value, pv.Value, "datavar and ptr are different variables")
-	require.NotEqual(t, rv.Value, pv.Value, "rovar and ptr are different variables")
-
-	// And each one's bytes are really there, at its own offset.
 	require.GreaterOrEqual(t, len(o.Data), int(pv.Value)+8)
 	require.Equal(t, uint32(0x11223344), binary.LittleEndian.Uint32(o.Data[dv.Value:]))
-	require.Equal(t, uint32(0x55667788), binary.LittleEndian.Uint32(o.Data[rv.Value:]))
 
 	// ptr's relocation lives in .rela.data.rel -- neither .rela.text nor
 	// .rela.data, so reading only those two names dropped it silently.

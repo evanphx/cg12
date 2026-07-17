@@ -367,8 +367,13 @@ func addData(o *obj.Object, d *ir.Data) error {
 	// records an offset within that block rather than an address.
 	buf, sec := &o.Data, obj.SecData
 	align := &o.DataAlign
-	if d.Linkage.Thread {
+	switch {
+	case d.Linkage.Thread:
 		buf, sec, align = &o.Tdata, obj.SecTdata, &o.TlsAlign
+	case d.Linkage.Section == rodataSection:
+		// Read-only data is a section of its own, because a section is where the
+		// promise is kept: the loader maps it without write permission.
+		buf, sec, align = &o.Rodata, obj.SecRodata, &o.RodataAlign
 	}
 	if d.Align > *align {
 		*align = d.Align
@@ -391,7 +396,14 @@ func addData(o *obj.Object, d *ir.Data) error {
 			if sec == obj.SecTdata {
 				return fmt.Errorf("arm64: thread-local %q cannot hold the address of %q: every thread's copy would need its own relocation", d.Name, it.Sym)
 			}
-			o.DataRelocs = append(o.DataRelocs, obj.Reloc{
+			// The relocation's offset is relative to its own section, so it has to
+			// be filed against the one the datum went to: a .rodata offset in
+			// .rela.data patches whatever is at that offset in .data.
+			list := &o.DataRelocs
+			if sec == obj.SecRodata {
+				list = &o.RodataRelocs
+			}
+			*list = append(*list, obj.Reloc{
 				Offset: uint64(len(*buf)), Sym: sanitize(it.Sym),
 				Type: obj.R_AARCH64_ABS64, Addend: it.Off,
 			})
@@ -1872,3 +1884,6 @@ func (m *mc) asmInputReg(ref ir.Ref, nextScratch func() Reg) (Reg, int) {
 	m.fail("arm64: unsupported inline-asm operand %v", ref)
 	return scratch0, 8
 }
+
+// rodataSection is the ir.Linkage.Section a front end marks read-only data with.
+const rodataSection = ".rodata"

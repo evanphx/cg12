@@ -42,10 +42,18 @@ func (o *Object) WriteExecutable(entrySym string) ([]byte, error) {
 	textOff := alignUp(noteOff+len(note), 16)
 	textVaddr := uint64(execBase + textOff)
 
+	// .rodata follows .text in the read-only segment: the program may read it and
+	// not write it, which is a property of the mapping, not of the source's types.
+	rodataOff := alignUp(textOff+len(o.Text), alignOr(o.RodataAlign, 8))
+	rodataVaddr := uint64(execBase + rodataOff)
+	roEnd := rodataOff + len(o.Rodata)
+
 	dataOff := 0
 	var dataVaddr uint64
 	if hasRW {
-		dataOff = alignUp(textOff+len(o.Text), execAlign)
+		// The writable segment starts on its own page: the read-only one must end
+		// before it, or the loader maps rodata writable along with it.
+		dataOff = alignUp(roEnd, execAlign)
 		dataVaddr = uint64(execBase + dataOff)
 	}
 
@@ -57,6 +65,8 @@ func (o *Object) WriteExecutable(entrySym string) ([]byte, error) {
 			symVaddr[s.Name] = textVaddr + s.Value
 		case SecData:
 			symVaddr[s.Name] = dataVaddr + s.Value
+		case SecRodata:
+			symVaddr[s.Name] = rodataVaddr + s.Value
 		case SecBss:
 			// .bss has no bytes in the file; it picks up where .data ends in memory,
 			// rounded up to what its own contents need.
@@ -71,10 +81,14 @@ func (o *Object) WriteExecutable(entrySym string) ([]byte, error) {
 	// Resolve relocations into fresh copies of the sections.
 	text := append([]byte(nil), o.Text...)
 	data := append([]byte(nil), o.Data...)
+	rodata := append([]byte(nil), o.Rodata...)
 	if err := resolveRelocs(o.Machine, text, textVaddr, o.Relocs, symVaddr); err != nil {
 		return nil, err
 	}
 	if err := resolveRelocs(o.Machine, data, dataVaddr, o.DataRelocs, symVaddr); err != nil {
+		return nil, err
+	}
+	if err := resolveRelocs(o.Machine, rodata, rodataVaddr, o.RodataRelocs, symVaddr); err != nil {
 		return nil, err
 	}
 
@@ -95,8 +109,7 @@ func (o *Object) WriteExecutable(entrySym string) ([]byte, error) {
 	phdr := func(typ, flags uint32, off, vaddr, size, align uint64) {
 		phdrMem(typ, flags, off, vaddr, size, size, align)
 	}
-	textFilesz := uint64(textOff + len(text))
-	phdr(ptLoad, pfR|pfX, 0, execBase, textFilesz, execAlign)
+	phdr(ptLoad, pfR|pfX, 0, execBase, uint64(roEnd), execAlign)
 	if hasRW {
 		// .bss lives past the file's end: memsz exceeds filesz and the loader zeroes
 		// the difference, including whatever padding its alignment needed.
@@ -116,6 +129,7 @@ func (o *Object) WriteExecutable(entrySym string) ([]byte, error) {
 	}
 	put(noteOff, note)
 	put(textOff, text)
+	put(rodataOff, rodata)
 	if len(data) > 0 {
 		put(dataOff, data)
 	}

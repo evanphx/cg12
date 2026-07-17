@@ -145,6 +145,13 @@ type Object struct {
 	Text    []byte
 	Data    []byte
 
+	// Rodata is data the program may read and not write: a const object, a string
+	// literal. It is a section of its own because that is the only way to say so
+	// -- the promise is kept by the page it lands on, not by the type it had in
+	// the source, and C leaves writing through a cast to it undefined precisely so
+	// an implementation may put it where the hardware refuses.
+	Rodata []byte
+
 	// Tdata is the thread-local initialization image (.tdata): not data used in
 	// place, but the bytes each new thread's TLS block starts life as.
 	Tdata []byte
@@ -162,13 +169,19 @@ type Object struct {
 	// nothing. Zero means no requirement.
 	//
 	// TlsAlign covers both .tdata and .tbss, which are one block per thread.
-	DataAlign int
-	BssAlign  int
-	TlsAlign  int
+	DataAlign   int
+	RodataAlign int
+	BssAlign    int
+	TlsAlign    int
 
 	Syms       []Sym
 	Relocs     []Reloc // relocations against .text
 	DataRelocs []Reloc // relocations against .data (e.g. a pointer to a symbol)
+	// RodataRelocs are relocations against .rodata. They are a separate list
+	// because a relocation's offset is relative to its own section, so a .rodata
+	// offset filed under .rela.data patches whatever happens to be at that offset
+	// in .data instead.
+	RodataRelocs []Reloc
 
 	// Optional DWARF debug sections. When DebugLine is non-empty the writer emits
 	// .debug_abbrev/.debug_info/.debug_line/.debug_loc (and their .rela sections).
@@ -263,6 +276,11 @@ func (o *Object) MarshalELF() ([]byte, error) {
 	secRela := next()
 	secData := next()
 	secRelaData := next()
+	secRodata, secRelaRodata := -1, -1
+	if len(o.Rodata) > 0 {
+		secRodata = next()
+		secRelaRodata = next()
+	}
 	secBss := -1
 	if o.BssSize > 0 {
 		secBss = next()
@@ -307,6 +325,8 @@ func (o *Object) MarshalELF() ([]byte, error) {
 			shndx = uint16(secText)
 		case SecData:
 			shndx = uint16(secData)
+		case SecRodata:
+			shndx = uint16(secRodata)
 		case SecBss:
 			shndx = uint16(secBss)
 		case SecTdata:
@@ -366,6 +386,10 @@ func (o *Object) MarshalELF() ([]byte, error) {
 	if err != nil {
 		return nil, err
 	}
+	relaRodata, err := encodeRela(o.RodataRelocs)
+	if err != nil {
+		return nil, err
+	}
 	relaInfo, err := encodeRela(o.DebugInfoRelocs)
 	if err != nil {
 		return nil, err
@@ -385,6 +409,11 @@ func (o *Object) MarshalELF() ([]byte, error) {
 	secs[secText] = section{name: ".text", typ: shtProgbits, flags: shfAlloc | shfExecinstr, addralign: 4, data: o.Text}
 	secs[secRela] = section{name: ".rela.text", typ: shtRela, link: uint32(secSymtab), info: uint32(secText), addralign: 8, entsize: 24, data: rela.b}
 	secs[secData] = section{name: ".data", typ: shtProgbits, flags: shfAlloc | shfWrite, addralign: uint64(alignOr(o.DataAlign, 8)), data: o.Data}
+	if secRodata >= 0 {
+		// No shfWrite: that flag is the whole point of the section.
+		secs[secRodata] = section{name: ".rodata", typ: shtProgbits, flags: shfAlloc, addralign: uint64(alignOr(o.RodataAlign, 8)), data: o.Rodata}
+		secs[secRelaRodata] = section{name: ".rela.rodata", typ: shtRela, link: uint32(secSymtab), info: uint32(secRodata), addralign: 8, entsize: 24, data: relaRodata.b}
+	}
 	secs[secRelaData] = section{name: ".rela.data", typ: shtRela, link: uint32(secSymtab), info: uint32(secData), addralign: 8, entsize: 24, data: relaData.b}
 	if secBss >= 0 {
 		secs[secBss] = section{name: ".bss", typ: shtNobits, flags: shfAlloc | shfWrite, addralign: uint64(alignOr(o.BssAlign, 8)), nobits: uint64(o.BssSize)}
