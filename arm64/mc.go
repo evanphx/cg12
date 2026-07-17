@@ -1852,10 +1852,25 @@ func (m *mc) emitAsm(in *ir.Instr) {
 		m.fail("arm64: %v", err)
 		return
 	}
-	code, err := a64.Assemble(text)
+	prog, err := a64.AssembleProgram(text)
 	if err != nil {
 		m.fail("arm64: inline assembly: %v", err)
 		return
+	}
+	code, asmRelocs, err := prog.Link()
+	if err != nil {
+		m.fail("arm64: inline assembly: %v", err)
+		return
+	}
+	// A template that references a symbol (adrp/adr/add :lo12:, or a bl to another
+	// function) produces relocations against its own bytes. Re-anchor each to where
+	// the template lands in this function's text, so the linker patches the real
+	// instruction rather than a zero immediate that dereferences nothing.
+	base := m.prog.Len() * 4
+	for _, r := range asmRelocs {
+		m.relocs = append(m.relocs, obj.Reloc{
+			Offset: uint64(base + r.Offset), Sym: sanitize(r.Sym), Type: aarch64RelType(r.Kind),
+		})
 	}
 	for i := 0; i+4 <= len(code); i += 4 {
 		m.emit(binary.LittleEndian.Uint32(code[i:]))

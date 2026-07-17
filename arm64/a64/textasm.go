@@ -212,6 +212,8 @@ func asmLine(p *Program, line string) error {
 		return a.loadExclusive(mn == "ldaxr")
 	case "stxr", "stlxr":
 		return a.storeExclusive(mn == "stlxr")
+	case "adrp", "adr":
+		return a.adr(mn == "adrp")
 	}
 	if c, ok := condSuffix(mn, "b."); ok {
 		if len(ops) != 1 {
@@ -318,6 +320,17 @@ func (a *asmCtx) addSub(sub bool) error {
 	rn, _, _, err := a.reg(1)
 	if err != nil {
 		return err
+	}
+	// add xd, xn, :lo12:symbol -- the low-12-bits completion of an adrp page,
+	// taken as a relocation against the symbol.
+	if !sub && len(a.ops) == 3 {
+		if sym, ok := strings.CutPrefix(a.ops[2], ":lo12:"); ok {
+			if !w {
+				return fmt.Errorf("add :lo12: needs an x register")
+			}
+			a.p.SymRef(AddImm(true, rd, rn, 0), sym, RelAddAbsLo12)
+			return nil
+		}
 	}
 	if v, ok := a.imm(2); ok {
 		if v < 0 || v > 0xfff {
@@ -1210,6 +1223,32 @@ func (a *asmCtx) storeExclusive(release bool) error {
 		a.p.Emit(Stlxr(w64, rs, rt, rn))
 	} else {
 		a.p.Emit(Stxr(w64, rs, rt, rn))
+	}
+	return nil
+}
+
+// adr assembles ADRP/ADR xd, symbol -- the PC-relative address of a symbol. A
+// hand-written one names an external symbol (the common case: the high half of a
+// global's address, completed by a following `add xd, xd, :lo12:symbol`), so it
+// emits a relocation. A bare local label is not supported here: the compiler's
+// own adrp goes through the machine-code path, and a PC-relative adr to a local
+// label would need the range-checked fixup machinery the branches use.
+func (a *asmCtx) adr(page bool) error {
+	rd, w, _, err := a.reg(0)
+	if err != nil {
+		return err
+	}
+	if !w {
+		return fmt.Errorf("%s: the destination must be an x register", a.mn)
+	}
+	if len(a.ops) != 2 {
+		return fmt.Errorf("%s takes a register and a symbol", a.mn)
+	}
+	sym := a.ops[1]
+	if page {
+		a.p.SymRef(Adrp(rd, 0), sym, RelAdrPrelPgHi21)
+	} else {
+		a.p.SymRef(Adr(rd, 0), sym, RelAdrPrelLo21)
 	}
 	return nil
 }

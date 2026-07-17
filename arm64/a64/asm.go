@@ -11,6 +11,7 @@ type Program struct {
 	labels  map[string]int // label -> word index
 	globals map[string]bool
 	fixups  []fixup
+	symRefs []Reloc // symbol relocations (adrp/adr/add :lo12:), applied by the linker
 	err     error
 }
 
@@ -24,6 +25,14 @@ const (
 	RelNone RelKind = iota
 	RelCall26
 	RelJump26
+
+	// The symbol-address forms, for adrp/adr/add reaching an external symbol.
+	// adrp takes the symbol's PAGE (ADR_PREL_PG_HI21); the add that completes the
+	// address takes its low 12 bits (ADD_ABS_LO12_NC); a bare adr takes the whole
+	// 21-bit PC-relative displacement (ADR_PREL_LO21).
+	RelAdrPrelPgHi21
+	RelAddAbsLo12
+	RelAdrPrelLo21
 )
 
 // Reloc is a branch the assembler could not bind to a local label; the linker
@@ -43,6 +52,15 @@ type fixup struct {
 	bits  uint                   // signed offset width (imm bits + 2 for the /4 scale)
 	data  bool                   // emit the raw byte offset as a data word (no encoding)
 	rel   RelKind                // relocation class when label is external
+}
+
+// SymRef emits an instruction word that references a symbol the linker resolves:
+// the word carries a zero immediate, and a relocation of the given kind records
+// where the symbol's address (or page, or low bits) belongs. Used for the
+// adrp/adr/add-lo12 symbol-address forms, whose value is not a local offset.
+func (p *Program) SymRef(word uint32, sym string, kind RelKind) {
+	p.symRefs = append(p.symRefs, Reloc{Offset: len(p.words) * 4, Sym: sym, Kind: kind})
+	p.words = append(p.words, word)
 }
 
 // NewProgram returns an empty program.
@@ -183,6 +201,7 @@ func (p *Program) Link() ([]byte, []Reloc, error) {
 		}
 		p.words[fx.at] = fx.enc(off)
 	}
+	relocs = append(relocs, p.symRefs...)
 	return p.words2bytes(), relocs, nil
 }
 

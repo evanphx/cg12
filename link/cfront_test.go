@@ -239,3 +239,32 @@ int main(void){ return f(2.25) == 2.25 ? 0 : 1; }`)
 	require.NoError(t, err)
 	require.Equal(t, 0, runX86Static(t, exe), "b was not placed in the clobbered register")
 }
+
+// Inline asm that references a symbol -- adrp/add for a global's address, or a
+// bl to another function -- carries relocations against its own bytes, and the
+// backend must re-anchor them into the function's text. It used to assemble the
+// template and throw the relocations away, so `adrp x0, g` reached a zero page
+// and the following load dereferenced nothing.
+func TestArm64AsmSymbolReference(t *testing.T) {
+	if runtime.GOARCH != "arm64" {
+		t.Skip("arm64 executable runs natively only on an arm64 host")
+	}
+	// helper() is reached by a bl in inline asm; g by adrp+add. Both are symbol
+	// references that only work if the relocation survived.
+	m, err := cc.CompileFor(cc.TargetARM64, "a.c", `
+char g = 35;
+int helper(void){ return 7; }
+int main(void){
+	char *p;
+	__asm__("adrp %0, g\n\tadd %0, %0, :lo12:g" : "=r"(p));
+	int h;
+	__asm__("bl helper\n\tmov %w0, w0" : "=r"(h) :: "x30");
+	return *p + h;   /* 35 + 7 = 42 */
+}`)
+	require.NoError(t, err)
+	l := link.NewWith(arm64.Backend{})
+	require.NoError(t, l.AddModule(m))
+	exe, err := l.LinkExecutable("main")
+	require.NoError(t, err)
+	require.Equal(t, 42, runExe(t, exe), "the symbol references in the templates resolved")
+}

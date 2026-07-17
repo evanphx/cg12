@@ -114,8 +114,15 @@ func programObject(p *a64.Program) (*obj.Object, error) {
 
 // aarch64RelType maps an assembler relocation class to its ELF AArch64 type.
 func aarch64RelType(k a64.RelKind) uint32 {
-	if k == a64.RelCall26 {
+	switch k {
+	case a64.RelCall26:
 		return obj.R_AARCH64_CALL26
+	case a64.RelAdrPrelPgHi21:
+		return obj.R_AARCH64_ADR_PREL_PG_HI21
+	case a64.RelAddAbsLo12:
+		return obj.R_AARCH64_ADD_ABS_LO12_NC
+	case a64.RelAdrPrelLo21:
+		return obj.R_AARCH64_ADR_PREL_LO21
 	}
 	return obj.R_AARCH64_JUMP26
 }

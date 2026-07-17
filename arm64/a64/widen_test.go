@@ -68,6 +68,12 @@ var widenedCases = []string{
 	"mrs x0, fpcr", "mrs x1, fpsr", "mrs x2, nzcv",
 	"mrs x3, cntvct_el0", "mrs x4, ctr_el0",
 	"msr fpcr, x5", "msr nzcv, x6", "msr tpidr_el0, x7",
+
+	// PC-relative symbol addressing. adrp takes a symbol's page and the following
+	// add its low 12 bits; a bare adr takes the whole displacement. The symbol is
+	// external, so each is a relocation with a zero immediate -- which is exactly
+	// what the reference assembler emits, so the bytes still compare.
+	"adrp x0, extsym", "adr x1, extsym", "add x0, x0, :lo12:extsym",
 }
 
 func TestWidenedParsingMatchesAssembler(t *testing.T) {

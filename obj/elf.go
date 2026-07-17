@@ -18,6 +18,7 @@ const (
 	R_AARCH64_ABS64            = 257 // 64-bit absolute address
 	R_AARCH64_CALL26           = 283 // bl to a 26-bit PC-relative target
 	R_AARCH64_JUMP26           = 282 // b to a 26-bit PC-relative target
+	R_AARCH64_ADR_PREL_LO21    = 274 // adr: 21-bit PC-relative address of a symbol
 	R_AARCH64_ADR_PREL_PG_HI21 = 275 // adrp: page of a symbol
 	R_AARCH64_ADD_ABS_LO12_NC  = 277 // add: low 12 bits of a symbol
 
