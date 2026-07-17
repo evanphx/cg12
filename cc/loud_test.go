@@ -94,3 +94,43 @@ func TestLongDoubleIsRefusedForAmd64(t *testing.T) {
 		require.NoError(t, err, "arm64's long double IS the quad cg12 implements")
 	}
 }
+
+// cg12 does not implement atomics, and used to compile them anyway.
+//
+// `_Atomic int g; g++;` became loaduw/add/storew -- a read-modify-write with no
+// atomicity at all -- and __atomic_load_n(&g, __ATOMIC_SEQ_CST) became a plain
+// load with its memory-order argument dropped. Both produced a program that runs,
+// passes any single-threaded test, and races under contention: the failure
+// arrives on someone else's machine, months later, as corruption with nothing to
+// trace it to. That is the worst way for a compiler to be wrong, and an error is
+// the only honest answer until the IR has an ordering and the ops to carry it.
+func TestAtomicsAreRefused(t *testing.T) {
+	for _, src := range []string{
+		`_Atomic int g; void f(void){ g++; }`,                             // an atomic object
+		`void f(void){ _Atomic int x = 0; x++; }`,                         // a local one
+		`struct S { _Atomic int a; }; int f(struct S *s){ return s->a; }`, // read via a member
+		`struct S { _Atomic int a; }; void f(struct S *s){ s->a = 1; }`,   // written via a member
+		`int g; int f(void){ return __atomic_load_n(&g, 5); }`,            // SEQ_CST load
+		`int g; void f(int v){ __atomic_store_n(&g, v, 5); }`,             // SEQ_CST store
+	} {
+		_, err := cc.Compile("a.c", src)
+		require.Error(t, err, "an atomic that compiles to ordinary memory access is worse than one that fails")
+		require.Contains(t, err.Error(), "not supported")
+	}
+}
+
+// The refusal must not spread past what it is for. volatile is a different
+// promise and cg12 keeps it (see #104 and cc/volatile_test.go); an ordinary
+// member of a struct that merely contains an atomic is an ordinary load; and a
+// plain int is a plain int. Refusing any of these would reject programs cg12
+// compiles correctly.
+func TestNonAtomicsStillCompile(t *testing.T) {
+	for _, src := range []string{
+		`int g; void f(void){ g++; }`,
+		`volatile int g; void f(void){ g++; }`,
+		`struct S { _Atomic int a; int b; }; int f(struct S *s){ return s->b; }`,
+	} {
+		_, err := cc.Compile("a.c", src)
+		require.NoError(t, err)
+	}
+}

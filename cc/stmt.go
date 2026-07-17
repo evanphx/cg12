@@ -166,6 +166,7 @@ func (g *gen) genLocalDecl(d *cc.Declaration) {
 		if dcl == nil || dcl.IsSynthetic() {
 			continue // synthetic (__func__) needs no storage
 		}
+		g.checkAtomicDecl(dcl)
 		t := dcl.Type()
 		if t.Kind() == cc.Function {
 			continue // a local prototype

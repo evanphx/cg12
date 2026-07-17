@@ -209,11 +209,13 @@ func (g *gen) genAddr(e cc.ExpressionNode) (ir.Ref, cc.Type) {
 			base, bt := g.genAddr(n.PostfixExpression)
 			g.checkPacked(bt)
 			fld := n.Field()
+			g.checkAtomicMember(fld)
 			return g.offset(base, int(fld.Offset())), fld.Type()
 		case cc.PostfixExpressionPSelect: // p->field
 			ptr := g.genExpr(n.PostfixExpression)
 			g.checkPacked(pointee(n.PostfixExpression.Type()))
 			fld := n.Field()
+			g.checkAtomicMember(fld)
 			return g.offset(ptr, int(fld.Offset())), fld.Type()
 		case cc.PostfixExpressionComplit: // (T){ ... }
 			return g.complit(n)

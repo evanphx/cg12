@@ -514,6 +514,7 @@ func (g *gen) genGlobalDecl(d *cc.Declaration) {
 	for l := d.InitDeclaratorList; l != nil; l = l.InitDeclaratorList {
 		id := l.InitDeclarator
 		dcl := id.Declarator
+		g.checkAtomicDecl(dcl)
 		if dcl == nil || dcl.IsSynthetic() {
 			continue
 		}

@@ -40,14 +40,13 @@ func (g *gen) builtinCall(n *cc.PostfixExpression) (ir.Ref, bool) {
 		cls := clsOf(args[0].Type())
 		return g.cur.Clz(cls, g.genExpr(args[0])), true
 
-	case "__atomic_load_n":
-		elem := pointee(args[0].Type())
-		return g.loadVal(g.genExpr(args[0]), elem), true
-	case "__atomic_store_n":
-		elem := pointee(args[0].Type())
-		addr := g.genExpr(args[0])
-		val := g.convert(g.genExpr(args[1]), args[1].Type(), elem)
-		g.storeVal(addr, val, elem)
+	case "__atomic_load_n", "__atomic_store_n":
+		// These took the address and the value and threw the memory order away, so
+		// __ATOMIC_SEQ_CST compiled to a plain load or store with no fence on either
+		// side of it. The access is atomic by accident on both targets -- an aligned
+		// word-sized load does not tear -- but the ORDER it was asked for is the
+		// entire reason the builtin was written rather than a plain assignment.
+		g.atomicUnsupported(name)
 		return ir.R, true
 
 	case "__builtin_add_overflow", "__builtin_sub_overflow", "__builtin_mul_overflow":
