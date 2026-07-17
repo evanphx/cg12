@@ -68,6 +68,101 @@ func TestLowerHeapAllocationsTracksEscapeThroughLocalSlot(t *testing.T) {
 	assert.Equal(t, []ir.Ref{function.Sym("runtime.newobject", 0), typeDescriptor}, block.Instrs[1].Args)
 }
 
+func TestLowerHeapAllocationsAllowsLocalPhi(t *testing.T) {
+	module := ir.NewModule()
+	function := module.NewFunc("localPhi", ir.ClsL)
+	condition := function.Param("condition", ir.ClsW)
+	entry := function.Entry()
+	left := function.NewBlock("left")
+	right := function.NewBlock("right")
+	join := function.NewBlock("join")
+	object := entry.HeapAlloc(
+		function.Sym("runtime.newobject", 0),
+		function.Sym("type.int", 0),
+		8,
+		8,
+	)
+	entry.Jnz(condition, left, right)
+	left.Goto(join)
+	right.Goto(join)
+	pointer := join.Phi(
+		ir.ClsP,
+		ir.PhiEdge{From: left, Val: object},
+		ir.PhiEdge{From: right, Val: function.Sym("global.int", 0)},
+	)
+	join.Ret(join.Load(ir.ClsL, pointer))
+
+	require.True(t, LowerHeapAllocations(module))
+	assert.Equal(t, ir.OAlloc8, entry.Instrs[0].Op)
+}
+
+func TestLowerHeapAllocationsTracksEscapeThroughPhi(t *testing.T) {
+	module := ir.NewModule()
+	function := module.NewFunc("escapingPhi", ir.ClsP)
+	condition := function.Param("condition", ir.ClsW)
+	entry := function.Entry()
+	left := function.NewBlock("left")
+	right := function.NewBlock("right")
+	join := function.NewBlock("join")
+	typeDescriptor := function.Sym("type.int", 0)
+	object := entry.HeapAlloc(
+		function.Sym("runtime.newobject", 0),
+		typeDescriptor,
+		8,
+		8,
+	)
+	entry.Jnz(condition, left, right)
+	left.Goto(join)
+	right.Goto(join)
+	pointer := join.Phi(
+		ir.ClsP,
+		ir.PhiEdge{From: left, Val: object},
+		ir.PhiEdge{From: right, Val: function.Sym("global.int", 0)},
+	)
+	join.Ret(pointer)
+
+	require.True(t, LowerHeapAllocations(module))
+	assert.Equal(t, ir.OCall, entry.Instrs[0].Op)
+	assert.Equal(t, []ir.Ref{function.Sym("runtime.newobject", 0), typeDescriptor}, entry.Instrs[0].Args)
+}
+
+func TestLowerHeapAllocationsAllowsPointerComparison(t *testing.T) {
+	module := ir.NewModule()
+	function := module.NewFunc("compareLocalPointer", ir.ClsW)
+	block := function.Entry()
+	object := block.HeapAlloc(
+		function.Sym("runtime.newobject", 0),
+		function.Sym("type.int", 0),
+		8,
+		8,
+	)
+	nilPointer := function.ConstInt(ir.ClsP, 0)
+	comparison := block.Cmp(ir.CmpEq, ir.ClsW, object, nilPointer)
+	block.Ret(comparison)
+
+	require.True(t, LowerHeapAllocations(module))
+	assert.Equal(t, ir.OAlloc8, block.Instrs[0].Op)
+}
+
+func TestLowerHeapAllocationsAllowsDynamicPointerOffset(t *testing.T) {
+	module := ir.NewModule()
+	function := module.NewFunc("indexLocalObject", ir.ClsL)
+	offset := function.Param("offset", ir.ClsL)
+	block := function.Entry()
+	object := block.HeapAlloc(
+		function.Sym("runtime.newobject", 0),
+		function.Sym("type.array", 0),
+		16,
+		8,
+	)
+	element := block.Add(ir.ClsP, object, offset)
+	block.Store(function.Long(42), element)
+	block.Ret(block.Load(ir.ClsL, element))
+
+	require.True(t, LowerHeapAllocations(module))
+	assert.Equal(t, ir.OAlloc8, block.Instrs[0].Op)
+}
+
 func TestLowerHeapAllocationsAllowsMemsetInitialization(t *testing.T) {
 	module := ir.NewModule()
 	function := module.NewFunc("local", ir.ClsL)
@@ -95,4 +190,37 @@ func TestLowerHeapAllocationsAllowsCompilerMemoryHelpers(t *testing.T) {
 			assert.Equal(t, ir.OAlloc8, block.Instrs[0].Op)
 		})
 	}
+}
+
+func TestLowerHeapAllocationsAllowsPointerStoreIntoCandidate(t *testing.T) {
+	module := ir.NewModule()
+	function := module.NewFunc("localPointerField", ir.ClsL)
+	block := function.Entry()
+	object := block.HeapAlloc(function.Sym("runtime.newobject", 0), function.Sym("type.pointerHolder", 0), 8, 8)
+	block.CallVoid(function.Sym("runtime.atomicstorep", 0), object, function.Sym("global.pointer", 0))
+	block.Ret(block.Load(ir.ClsL, object))
+
+	require.True(t, LowerHeapAllocations(module))
+	assert.Equal(t, ir.OAlloc8, block.Instrs[0].Op)
+}
+
+func TestLowerHeapAllocationsAllowsGrowSliceToObserveCandidate(t *testing.T) {
+	module := ir.NewModule()
+	function := module.NewFunc("growLocalSlice", ir.ClsL)
+	block := function.Entry()
+	object := block.HeapAlloc(function.Sym("runtime.newobject", 0), function.Sym("type.array", 0), 16, 8)
+	block.Call(
+		ir.ClsP,
+		function.Sym("runtime.growslice", 0),
+		object,
+		function.Long(2),
+		function.Long(1),
+		function.Long(1),
+		function.Sym("type.int", 0),
+	)
+	block.Store(function.Long(42), object)
+	block.Ret(block.Load(ir.ClsL, object))
+
+	require.True(t, LowerHeapAllocations(module))
+	assert.Equal(t, ir.OAlloc8, block.Instrs[0].Op)
 }

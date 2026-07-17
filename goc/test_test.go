@@ -2,10 +2,12 @@ package goc
 
 import (
 	"testing"
+
+	"github.com/evanphx/cg12/ir"
 )
 
 func TestDiscoverPackageTests(t *testing.T) {
-	tests, err := discoverPackageTests("container/list")
+	tests, _, err := discoverPackageTests("container/list")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -19,6 +21,30 @@ func TestDiscoverPackageTests(t *testing.T) {
 	}
 	for name := range want {
 		t.Errorf("container/list test %s was not discovered", name)
+	}
+}
+
+func TestDiscoverExternalPackageTests(t *testing.T) {
+	tests, hasExternalTests, err := discoverPackageTests("sort")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !hasExternalTests {
+		t.Fatal("sort external tests were not loaded")
+	}
+	want := map[string]bool{
+		"TestSortIntSlice": true,
+		"TestSearch":       true,
+		"TestFind":         true,
+	}
+	for _, test := range tests {
+		if test.PackagePath != "sort_test" {
+			continue
+		}
+		delete(want, test.Name)
+	}
+	for name := range want {
+		t.Errorf("sort external test %s was not discovered", name)
 	}
 }
 
@@ -55,5 +81,74 @@ func TestCompilePackageTests(t *testing.T) {
 	}
 	if !foundRemove || len(tests) <= 1 {
 		t.Fatalf("compiled tests = %#v; want all container/list tests", tests)
+	}
+}
+
+func TestCompileUTF8TestsKeepsFunctionSizeBounded(t *testing.T) {
+	module, _, err := CompileTestExecutable("unicode/utf8")
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	var largestName string
+	largestTemporaries := 0
+	largestBlocks := 0
+	largestInstructions := 0
+	signalHandlerAllocates := false
+	stackScannerAllocates := false
+	runeCountCopiesString := false
+	runeCountBorrowsString := false
+	for _, function := range module.Funcs {
+		instructions := 0
+		for _, block := range function.Blocks {
+			instructions += len(block.Instrs)
+			for index := range block.Instrs {
+				instruction := &block.Instrs[index]
+				if instruction.Op != ir.OCall {
+					continue
+				}
+				callee := instruction.Arg(0)
+				if callee.Kind != ir.RefConst {
+					continue
+				}
+				constant := function.Consts[callee.ID]
+				if constant.Kind != ir.ConstSym || constant.Sym != "runtime.newobject" {
+					if function.Name == "unicode/utf8.RuneCount" {
+						switch constant.Sym {
+						case "runtime.slicebytetostring":
+							runeCountCopiesString = true
+						case "runtime.slicebytetostringtmp":
+							runeCountBorrowsString = true
+						}
+					}
+					continue
+				}
+				switch function.Name {
+				case "runtime.sighandler":
+					signalHandlerAllocates = true
+				case "runtime.stackScanState.getPtr":
+					stackScannerAllocates = true
+				}
+			}
+		}
+		if len(function.Temps) > largestTemporaries {
+			largestName = function.Name
+			largestTemporaries = len(function.Temps)
+			largestBlocks = len(function.Blocks)
+			largestInstructions = instructions
+		}
+	}
+
+	if largestTemporaries > 100000 {
+		t.Fatalf("function %s expanded to %d temporaries, %d blocks, and %d instructions", largestName, largestTemporaries, largestBlocks, largestInstructions)
+	}
+	if signalHandlerAllocates {
+		t.Fatal("runtime.sighandler allocates on the signal stack")
+	}
+	if stackScannerAllocates {
+		t.Fatal("runtime.stackScanState.getPtr allocates its range literal on the heap")
+	}
+	if runeCountCopiesString || !runeCountBorrowsString {
+		t.Fatal("unicode/utf8.RuneCount does not use a non-allocating temporary string conversion")
 	}
 }

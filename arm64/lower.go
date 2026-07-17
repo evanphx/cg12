@@ -1178,7 +1178,7 @@ func lowerCalls(f *ir.Func) error {
 			loweredCall := ir.Instr{
 				Op: ir.OCall, Args: append([]ir.Ref{callee}, pins...),
 				Aux: int64(stackBytes), To: callTo, Cls: callCls, Defs: callDefs,
-				Tail: in.Tail, Pos: in.Pos, Inl: in.Inl,
+				Tail: in.Tail, ClosureCall: in.ClosureCall, Pos: in.Pos, Inl: in.Inl,
 			}
 			if !stackResult.IsNone() {
 				loweredCall.RetAgg = in.RetAgg

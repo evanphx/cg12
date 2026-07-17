@@ -143,6 +143,9 @@ type Func struct {
 	Variadic  bool // accepts variadic arguments (a trailing "..." in the IL)
 	GoABI     bool // use the Go runtime's platform frame convention
 	NoSplit   bool // omit the Go stack-growth check at function entry
+	// HasClosureContext reports that ABIInternal supplies this function's
+	// closure environment in the architecture's dedicated closure register.
+	HasClosureContext bool
 
 	// StackPointerWords records pointer-bearing words within OAlloc results.
 	// The outer key is the allocation result temporary ID; inner keys are byte

@@ -4,6 +4,7 @@ import (
 	"encoding/binary"
 	"fmt"
 	"sort"
+	"strings"
 
 	"github.com/evanphx/cg12/ir"
 	"github.com/evanphx/cg12/obj"
@@ -16,9 +17,26 @@ type goFunctionInfo struct {
 	size                 uint64
 	funcID               byte
 	funcFlag             byte
+	deferReturn          uint32
 	pointerWords         []int
 	argumentSize         int
 	argumentPointerWords []int
+}
+
+func goRuntimeFunctionID(name string) byte {
+	if strings.Contains(name, "_deferwrap_") || strings.Contains(name, "_gowrap_") || strings.Contains(name, "_methodvalue_") {
+		return 23
+	}
+	switch name {
+	case "runtime_gopanic":
+		return 10
+	case "runtime_main":
+		return 17
+	case "runtime_sigpanic":
+		return 20
+	default:
+		return 0
+	}
 }
 
 const (
@@ -196,6 +214,16 @@ func (builder *goMetadataBuilder) build(functions, translatedFunctions []goFunct
 		pcspOffsets[index] = uint32(builder.offset(".goc.go.pctab"))
 		builder.data = append(builder.data, goPCSP(function.frameStart, function.frameSize)...)
 	}
+	unsafePointOffsets := make([]uint32, len(functions))
+	for index := range functions {
+		unsafePointOffsets[index] = uint32(builder.offset(".goc.go.pctab"))
+		builder.data = append(builder.data, goUnsafePointPCData()...)
+	}
+	stackMapOffsets := make([]uint32, len(functions))
+	for index, function := range functions {
+		stackMapOffsets[index] = uint32(builder.offset(".goc.go.pctab"))
+		builder.data = append(builder.data, goStackMapPCData(function.frameStart)...)
+	}
 	builder.label(".goc.go.pctab.end")
 	builder.align(4)
 
@@ -207,7 +235,7 @@ func (builder *goMetadataBuilder) build(functions, translatedFunctions []goFunct
 		builder.align(4)
 		argumentOffsets[index] = uint32(builder.position() - builder.labels[".goc.go.gofunc"])
 		words := (function.argumentSize + 7) / 8
-		builder.stackMap(words, function.argumentPointerWords)
+		builder.stackMaps(words, function.argumentPointerWords, nil)
 	}
 	localOffsets := make([]uint32, len(functions))
 	for index, function := range functions {
@@ -217,7 +245,7 @@ func (builder *goMetadataBuilder) build(functions, translatedFunctions []goFunct
 		if words < 0 {
 			words = 0
 		}
-		builder.stackMap(words, function.pointerWords)
+		builder.stackMaps(words, nil, function.pointerWords)
 	}
 	builder.label(".goc.go.gofunc.end")
 	builder.align(4)
@@ -229,14 +257,16 @@ func (builder *goMetadataBuilder) build(functions, translatedFunctions []goFunct
 		builder.reloc32(function.name)
 		builder.u32(nameOffsets[index])
 		builder.u32(uint32(function.argumentSize))
-		builder.u32(0)
+		builder.u32(function.deferReturn)
 		builder.u32(pcspOffsets[index])
 		builder.u32(0)
 		builder.u32(0)
-		builder.u32(0)
+		builder.u32(2)
 		builder.u32(0)
 		builder.u32(0)
 		builder.bytes(function.funcID, function.funcFlag, 0, 2)
+		builder.u32(unsafePointOffsets[index])
+		builder.u32(stackMapOffsets[index])
 		builder.u32(argumentOffsets[index])
 		builder.u32(localOffsets[index])
 	}
@@ -361,6 +391,47 @@ func goPCSP(frameStart, frameSize int) []byte {
 	return data
 }
 
+// goUnsafePointPCData marks the complete generated function as unsafe for
+// asynchronous preemption. cg12 keeps managed references in registers between
+// calls, while its Go stack maps describe the spill state at call safepoints.
+// Cooperative preemption at calls remains available.
+func goUnsafePointPCData() []byte {
+	return []byte{1, 0xff, 0xff, 0xff, 0xff, 0x0f, 0}
+}
+
+// goStackMapPCData selects the entry maps while the function is in its stack
+// growth prologue, then switches to the body maps once the frame exists. The
+// entry argument map describes the temporary register spills used by
+// morestack. Those spill slots are not valid roots during ordinary execution.
+func goStackMapPCData(frameStart int) []byte {
+	var data []byte
+	appendUvarint := func(value uint32) {
+		for value >= 0x80 {
+			data = append(data, byte(value)|0x80)
+			value >>= 7
+		}
+		data = append(data, byte(value))
+	}
+	appendVarint := func(value int) {
+		encoded := uint32(value << 1)
+		if value < 0 {
+			encoded = ^encoded
+		}
+		appendUvarint(encoded)
+	}
+
+	value := -1
+	if frameStart > 0 {
+		appendVarint(-value)
+		value = 0
+		appendUvarint(uint32(frameStart / 4))
+	}
+	appendVarint(1 - value)
+	appendUvarint(^uint32(0))
+	appendUvarint(0)
+	return data
+}
+
 func (builder *goMetadataBuilder) position() uint64 {
 	return builder.base + uint64(len(builder.data))
 }
@@ -386,16 +457,18 @@ func (builder *goMetadataBuilder) bytes(values ...byte) {
 	builder.data = append(builder.data, values...)
 }
 
-func (builder *goMetadataBuilder) stackMap(words int, pointerWords []int) {
-	builder.u32(1)
+func (builder *goMetadataBuilder) stackMaps(words int, pointerWordMaps ...[]int) {
+	builder.u32(uint32(len(pointerWordMaps)))
 	builder.u32(uint32(words))
-	bitmap := make([]byte, (words+7)/8)
-	for _, word := range pointerWords {
-		if word >= 0 && word < words {
-			bitmap[word/8] |= 1 << (word % 8)
+	for _, pointerWords := range pointerWordMaps {
+		bitmap := make([]byte, (words+7)/8)
+		for _, word := range pointerWords {
+			if word >= 0 && word < words {
+				bitmap[word/8] |= 1 << (word % 8)
+			}
 		}
+		builder.data = append(builder.data, bitmap...)
 	}
-	builder.data = append(builder.data, bitmap...)
 }
 
 func (builder *goMetadataBuilder) u32(value uint32) {

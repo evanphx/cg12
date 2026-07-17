@@ -100,17 +100,19 @@ func goArgumentFrameFor(function *ir.Func) goArgumentFrame {
 		})
 		parameterIndex++
 	}
-	for _, temporary := range function.Temps {
-		if !temporary.Fixed || temporary.Reg != 26 {
-			continue
+	if function.HasClosureContext {
+		for _, temporary := range function.Temps {
+			if !temporary.Fixed || temporary.Reg != 26 {
+				continue
+			}
+			groups = append(groups, goRegisterSpillGroup{
+				reg:       Reg(temporary.Reg),
+				size:      8,
+				alignment: 8,
+				pointer:   true,
+			})
+			break
 		}
-		groups = append(groups, goRegisterSpillGroup{
-			reg:       Reg(temporary.Reg),
-			size:      8,
-			alignment: 8,
-			pointer:   true,
-		})
-		break
 	}
 
 	resultEnd := roundUp(assigner.nsaa, 8)
@@ -786,6 +788,10 @@ func goCallStackBytes(f *ir.Func, call *ir.Instr, resultEnd int) int {
 	for _, spill := range spills {
 		cursor = roundUp(cursor, spill.alignment)
 		cursor += spill.size
+	}
+	if call.ClosureCall {
+		cursor = roundUp(cursor, 8)
+		cursor += 8
 	}
 	cursor = roundUp(cursor, 8)
 	if cursor == 0 {

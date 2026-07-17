@@ -17,63 +17,92 @@ import (
 // PackageTest describes one top-level Test function discovered in a package's
 // build-selected _test.go files.
 type PackageTest struct {
-	Name string
+	Name        string
+	PackagePath string
 }
 
-// CompileTestExecutable compiles a package's internal tests into a normal Go
-// executable linked against the cg12-compiled runtime. Test selection remains
-// a runtime concern handled by the copied testing and regexp packages.
+// CompileTestExecutable compiles a package's internal and external tests into a
+// normal Go executable linked against the cg12-compiled runtime. Test selection
+// remains a runtime concern handled by the copied testing and regexp packages.
 func CompileTestExecutable(packagePath string) (*ir.Module, []PackageTest, error) {
-	tests, err := discoverPackageTests(packagePath)
+	tests, hasExternalTests, err := discoverPackageTests(packagePath)
 	if err != nil {
 		return nil, nil, err
 	}
 
-	source := testMainSource(packagePath, tests)
-	module, err := compile("_testmain.go", []byte(source), compileOptions{
+	externalPackagePath := packagePath + "_test"
+	source := testMainSource(packagePath, externalPackagePath, tests)
+	options := compileOptions{
 		executable:   true,
 		testPackages: map[string]bool{packagePath: true},
-	})
+	}
+	if hasExternalTests {
+		options.externalTestPackages = map[string]string{externalPackagePath: packagePath}
+	}
+	module, err := compile("_testmain.go", []byte(source), options)
 	if err != nil {
 		return nil, nil, err
 	}
 	return module, tests, nil
 }
 
-func discoverPackageTests(packagePath string) ([]PackageTest, error) {
+func discoverPackageTests(packagePath string) ([]PackageTest, bool, error) {
 	fset := token.NewFileSet()
 	loader := newSourceLoader(fset)
 	loader.testPackages[packagePath] = true
 	if _, err := loader.Import(packagePath); err != nil {
-		return nil, fmt.Errorf("goc test: load %s: %w", packagePath, err)
+		return nil, false, fmt.Errorf("goc test: load %s: %w", packagePath, err)
 	}
 	unit := loader.units[packagePath]
 	if unit == nil {
-		return nil, fmt.Errorf("goc test: package %s is not available from source", packagePath)
+		return nil, false, fmt.Errorf("goc test: package %s is not available from source", packagePath)
 	}
 
 	var tests []PackageTest
-	for _, file := range unit.files {
-		filename := fset.Position(file.Package).Filename
-		if !strings.HasSuffix(filename, "_test.go") {
-			continue
+	discoverUnitTests := func(unit *sourceUnit) {
+		if unit == nil {
+			return
 		}
-		for _, declaration := range file.Decls {
-			function, ok := declaration.(*ast.FuncDecl)
-			if !ok || function.Recv != nil || !isTestName(function.Name.Name, "Test") {
+		for _, file := range unit.files {
+			filename := fset.Position(file.Package).Filename
+			if !strings.HasSuffix(filename, "_test.go") {
 				continue
 			}
-			object, ok := unit.info.Defs[function.Name].(*types.Func)
-			if !ok || !isTestingTSignature(object.Type()) {
-				continue
+			for _, declaration := range file.Decls {
+				function, ok := declaration.(*ast.FuncDecl)
+				if !ok || function.Recv != nil || !isTestName(function.Name.Name, "Test") {
+					continue
+				}
+				object, ok := unit.info.Defs[function.Name].(*types.Func)
+				if !ok || !isTestingTSignature(object.Type()) {
+					continue
+				}
+				tests = append(tests, PackageTest{
+					Name:        function.Name.Name,
+					PackagePath: unit.path,
+				})
 			}
-			tests = append(tests, PackageTest{Name: function.Name.Name})
 		}
 	}
+	discoverUnitTests(unit)
+
+	externalPackagePath := packagePath + "_test"
+	loader.externalTestPackages[externalPackagePath] = packagePath
+	_, externalError := loader.Import(externalPackagePath)
+	hasExternalTests := externalError == nil && len(loader.units[externalPackagePath].files) != 0
+	if externalError != nil {
+		return nil, false, fmt.Errorf("goc test: load external tests for %s: %w", packagePath, externalError)
+	}
+	if hasExternalTests {
+		discoverUnitTests(loader.units[externalPackagePath])
+	}
 	sort.Slice(tests, func(i, j int) bool {
-		return tests[i].Name < tests[j].Name
+		if tests[i].Name != tests[j].Name {
+			return tests[i].Name < tests[j].Name
+		}
+		return tests[i].PackagePath < tests[j].PackagePath
 	})
-	return tests, nil
+	return tests, hasExternalTests, nil
 }
 
 func isTestName(name, prefix string) bool {
@@ -104,15 +133,27 @@ func isTestingTSignature(valueType types.Type) bool {
 	return named.Obj().Pkg().Path() == "testing" && named.Obj().Name() == "T"
 }
 
-func testMainSource(packagePath string, tests []PackageTest) string {
+func testMainSource(packagePath, externalPackagePath string, tests []PackageTest) string {
+	importsPackage := make(map[string]bool)
+	for _, test := range tests {
+		importsPackage[test.PackagePath] = true
+	}
 	var source strings.Builder
 	source.WriteString("package main\n\n")
 	source.WriteString("import (\n")
 	source.WriteString("\t\"regexp\"\n")
 	source.WriteString("\t\"testing\"\n")
-	source.WriteString("\ttestpkg ")
-	source.WriteString(strconv.Quote(packagePath))
-	source.WriteString("\n)\n\n")
+	if importsPackage[packagePath] {
+		source.WriteString("\ttestpkg ")
+		source.WriteString(strconv.Quote(packagePath))
+		source.WriteString("\n")
+	}
+	if importsPackage[externalPackagePath] {
+		source.WriteString("\texttestpkg ")
+		source.WriteString(strconv.Quote(externalPackagePath))
+		source.WriteString("\n")
+	}
+	source.WriteString(")\n\n")
 	source.WriteString("func matchString(pattern, name string) (bool, error) {\n")
 	source.WriteString("\treturn regexp.MatchString(pattern, name)\n")
 	source.WriteString("}\n\n")
@@ -121,7 +162,12 @@ func testMainSource(packagePath string, tests []PackageTest) string {
 	for _, test := range tests {
 		source.WriteString("\t\t{Name: ")
 		source.WriteString(strconv.Quote(test.Name))
-		source.WriteString(", F: testpkg.")
+		source.WriteString(", F: ")
+		if test.PackagePath == externalPackagePath {
+			source.WriteString("exttestpkg.")
+		} else {
+			source.WriteString("testpkg.")
+		}
 		source.WriteString(test.Name)
 		source.WriteString("},\n")
 	}

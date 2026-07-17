@@ -67,7 +67,9 @@ now active as well. `goc test` discovers same-package `TestXxx(*testing.T)`
 functions and generates the ordinary `testing.Main` registration wrapper while
 leaving all matching and execution to those copied packages. The complete
 copied suites for `container/list`, `container/ring`, and `container/heap`
-currently pass through this path.
+currently pass through this path. The complete copied suites for `unicode/utf8`,
+`unicode/utf16`, `path`, and `hash/adler32` also pass, including their
+allocation-count, interface, clone, and binary-marshaling tests.
 
 The complete Go 1.26.1 `runtime` source tree is also mirrored here unchanged.
 The cg12 loader build-selects and type-checks it from this repository. Normal

@@ -294,6 +294,49 @@ TEXT ·Load(SB), NOSPLIT, $0-12
 	assert.Equal(t, "internal_runtime_atomic_Load", translation.Functions[0].Name)
 }
 
+func TestTranslateARM64DirectABI0CallAfterReadingArguments(t *testing.T) {
+	file, err := Parse(strings.NewReader(`
+TEXT runtime·systemstack(SB), NOSPLIT, $0-8
+	MOVD fn+0(FP), R3
+	MOVD R3, R26
+	BL runtime·save_g(SB)
+	RET
+`))
+	require.NoError(t, err)
+	translation, err := CompileARM64(file, ARM64Options{
+		PackagePath:      "runtime",
+		Filename:         "asm_arm64.s",
+		PreferDirectABI0: true,
+	})
+	require.NoError(t, err)
+
+	assert.Contains(t, translation.Assembly, "runtime_systemstack:\n")
+	assert.Contains(t, translation.Assembly, "runtime_systemstack_abi0:\n")
+	assert.NotContains(t, translation.Assembly, "bl runtime_systemstack_abi0")
+	assert.Contains(t, translation.Assembly, "\tmov x3, x0")
+	require.Len(t, translation.Functions, 1)
+}
+
+func TestTranslateARM64KeepsABI0WrapperWhenReadingArgumentsAfterCall(t *testing.T) {
+	file, err := Parse(strings.NewReader(`
+TEXT ·callThenRead(SB), NOSPLIT, $0-8
+	BL ·helper(SB)
+	MOVD value+0(FP), R0
+	RET
+TEXT ·helper(SB), NOSPLIT, $0-0
+	RET
+`))
+	require.NoError(t, err)
+	translation, err := CompileARM64(file, ARM64Options{
+		PackagePath:      "runtime",
+		Filename:         "asm_arm64.s",
+		PreferDirectABI0: true,
+	})
+	require.NoError(t, err)
+
+	assert.Contains(t, translation.Assembly, "\tbl runtime_callThenRead_abi0")
+}
+
 func TestTranslateARM64ABI0TailBranchUsesDirectTarget(t *testing.T) {
 	file, err := Parse(strings.NewReader(`
 TEXT ·caller(SB),NOSPLIT,$0-8
@@ -314,7 +357,7 @@ TEXT ·abort(SB),NOSPLIT,$0-0
 	assert.Contains(t, translation.Assembly, ".hidden runtime_abort_abi0")
 }
 
-func TestTranslateARM64AssemblyFunctionAddressUsesABI0Body(t *testing.T) {
+func TestTranslateARM64AssemblyFunctionAddressUsesDirectBodyWhenAvailable(t *testing.T) {
 	file, err := Parse(strings.NewReader(`
 TEXT ·target(SB),NOSPLIT,$0-0
 	BL ·helper(SB)
@@ -333,8 +376,8 @@ TEXT ·address<ABIInternal>(SB),NOSPLIT|NOFRAME,$0-0
 	})
 	require.NoError(t, err)
 
-	assert.Contains(t, translation.Assembly, "\tadrp x0, runtime_target_abi0")
-	assert.Contains(t, translation.Assembly, "\tadd x0, x0, :lo12:runtime_target_abi0+8")
+	assert.Contains(t, translation.Assembly, "\tadrp x0, runtime_target")
+	assert.Contains(t, translation.Assembly, "\tadd x0, x0, :lo12:runtime_target+8")
 }
 
 func TestTranslateExactRuntimeSecretEraseRegisters(t *testing.T) {

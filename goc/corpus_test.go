@@ -279,6 +279,8 @@ func TestAdvancedExecutionCorpus(t *testing.T) {
 		{"constant struct global", `type bounds struct { low uint16; high uintptr }; var limits = bounds{low: 7, high: 0x123456789}; func Test() int { return int(limits.low) + int(limits.high&0xff) }`, 144},
 		{"global slice assignment", `var values []byte; func set(){ values = []byte{7, 11, 13} }; func Test() int { set(); return len(values)*1000 + cap(values)*100 + int(values[0]+values[1]+values[2]) }`, 3331},
 		{"static numeric global slice", `var values = []uint32{7, 11, 24}; func Test() int { return int(values[0] + values[1] + values[2]) }`, 42},
+		{"dynamic fields in global composite", `type entry struct { predicate func(int) bool }; func atLeast(limit int) func(int) bool { return func(value int) bool { return value >= limit } }; var entries = []entry{{predicate: atLeast(17)}, {predicate: atLeast(25)}}; func Test() int { if entries[0].predicate(16) || !entries[0].predicate(17) || entries[1].predicate(24) || !entries[1].predicate(25) { return 0 }; return 42 }`, 42},
+		{"global composite references variables and function", `type entry struct { apply func(int) int; name string }; var base = 37; var label = "go"; func addBase(value int) int { return base + value }; var current = entry{apply: addBase, name: label}; func Test() int { return current.apply(3) + len(current.name) }`, 42},
 		{"escaping aggregate closure capture", `type state struct { value int }; func counter() func() int { current := state{value: 40}; return func() int { current.value++; return current.value } }; func Test() int { next := counter(); _ = next(); return next() }`, 42},
 		{"interface string extraction preserves descriptor", `func Test() int { var boxed any = "hello"; asserted, ok := boxed.(string); if !ok { return 0 }; switch value := boxed.(type) { case string: return len(asserted) + len(value) + 32 }; return 0 }`, 42},
 		{"dynamic global slice descriptor survives initializer frame", `var values = make([]int, 3); func setup(){ values[0] = 7; values[1] = 11; values[2] = 24 }; func disturb(){ temporary := [8]int{1,2,3,4,5,6,7,8}; _ = temporary }; func Test() int { setup(); disturb(); return values[0] + values[1] + values[2] }`, 42},
@@ -314,9 +316,33 @@ func TestAdvancedExecutionCorpus(t *testing.T) {
 		{"implicit pointer method receiver", `type counter int; func (value *counter) add(amount int) { *value += counter(amount) }; func Test() int { var value counter = 17; value.add(25); return int(value) }`, 42},
 		{"promoted embedded method receiver", `type flags uint8; func (f *flags) set() { *f |= 1 }; type state struct { count uint16; flags }; func Test() int { s := state{count: 510}; s.set(); return int(s.count) + int(s.flags)*1000 }`, 1510},
 		{"promoted embedded scalar value receiver", `type flags uintptr; func (f flags) kind() int { return int(f & 31) }; type value struct { flags }; func Test() int { v := value{flags: 42}; return v.kind() }`, 10},
+		{"promoted embedded interface method", `type source interface { Value() int }; type implementation struct { value int }; func (value *implementation) Value() int { return value.value }; type wrapper struct { source }; func Test() int { var value source = &wrapper{source: &implementation{value: 42}}; return value.Value() }`, 42},
 		{"promoted field through embedded pointer", `type inner struct { value int }; type outer struct { *inner }; func Test() int { value := outer{inner: &inner{value: 42}}; return value.value }`, 42},
 		{"global elided pointer struct slice", `type item struct { value int }; var items = []*item{{value: 17}, {value: 25}}; func Test() int { return items[0].value + items[1].value }`, 42},
 		{"global concrete error interface", `type textError string; func (value textError) Error() string { return string(value) }; var failure error = textError("bad"); func Test() int { if failure != nil { return 42 }; return 0 }`, 42},
+		{"global composite interface initializer", `type source interface { Value() int }; type implementation struct { value int }; func (value implementation) Value() int { return value.value }; var global source = implementation{value: 42}; func Test() int { return global.Value() }`, 42},
+		{"global string slice inline headers", `var values = []string{0: "a", 1: "forty-two", 2: "z"}; func Test() int { if values[1] != "forty-two" { return 0 }; return len(values[0])*40 + len(values[2])*2 }`, 42},
+		{"global float slice data", `var values = []float64{0: -3.25, 1: 42.5, 2: 1000.75}; func Test() int { if values[0] != -3.25 || values[2] != 1000.75 { return 0 }; return int(values[1]) }`, 42},
+		{"global struct nil interface field", `var values = []struct { failure error; value int }{{failure: nil, value: 42}}; func Test() int { if values[0].failure != nil { return 0 }; return values[0].value }`, 42},
+		{"global static struct interface field", `type source interface {
+			Value() int
+		}
+
+		type emptySource struct{}
+
+		func (emptySource) Value() int {
+			return 42
+		}
+
+		type holder struct {
+			source source
+		}
+
+		var global = &holder{source: emptySource{}}
+
+		func Test() int {
+			return global.source.Value()
+		}`, 42},
 		{"type switch interface case", `type textError string
 
 		func (value textError) Error() string {
@@ -334,6 +360,8 @@ func TestAdvancedExecutionCorpus(t *testing.T) {
 			return 0
 		}`, 42},
 		{"concrete interface assertion", `type item struct { value int }; func Test() int { var value any = &item{value: 42}; return value.(*item).value }`, 42},
+		{"direct interface assertion", `type source interface { Value() int }; type extended interface { source; Extra() int }; type implementation struct{}; func (*implementation) Value() int { return 17 }; func (*implementation) Extra() int { return 25 }; func Test() int { var value source = &implementation{}; converted := value.(extended); return converted.Value() + converted.Extra() }`, 42},
+		{"pointer to slice local through interface", `func value() any { values := make([]int, 35); values[34] = 7; return &values }; func Test() int { values := value().(*[]int); return len(*values) + (*values)[34] }`, 42},
 		{"interface struct field assignment", `type item struct { value int }; type holder struct { value any }; func set(target *holder, value any) { target.value = value }; func Test() int { var target holder; set(&target, &item{value: 42}); return target.value.(*item).value }`, 42},
 		{"interface struct field composite", `type item struct { value int }; type holder struct { value any }; func Test() int { target := holder{value: &item{value: 42}}; return target.value.(*item).value }`, 42},
 		{"interface method in composite field", `type source interface {
@@ -413,7 +441,21 @@ func TestAdvancedExecutionCorpus(t *testing.T) {
 			func makeCounter() (int, counterValue) { return 17, &returnedCounter{value: 25} }
 			func Test() int { first, counter := makeCounter(); return first + counter.Value() }
 		`, 42},
+		{"global struct slice contains string slice", `type entry struct { name string; values []string }; var entries = []entry{{name: "first", values: []string{"a", "bc"}}, {name: "second", values: []string{"def"}}}; func Test() int { return len(entries[0].name) + len(entries[0].values)*10 + len(entries[0].values[1]) + len(entries[1].values[0]) + len(entries[1].name) }`, 36},
+		{"global array of structs", `type pair struct { low byte; high byte }; var pairs = [4]pair{{1, 2}, {3, 4}, 3: {19, 23}}; func Test() int { return int(pairs[0].low + pairs[0].high + pairs[1].low + pairs[1].high + pairs[2].low + pairs[3].low + pairs[3].high) }`, 52},
+		{"global struct slice with array field", `type caseRange struct { low uint32; delta [3]int32 }; var ranges = []caseRange{{low: 0x391, delta: [3]int32{0, 32, 0}}}; func Test() int { return int(ranges[0].delta[1]) + 10 }`, 42},
+		{"range over temporary slice literal", `func Test() int { total := 0; for _, value := range []int{5, 8, 13, 16} { total += value }; return total }`, 42},
+		{"implicit pointer composite literal", `type pair struct { left, right int }; func Test() int { values := []*pair{{left: 17, right: 25}}; return values[0].left + values[0].right }`, 42},
 		{"deferred function call", `var result int; func set(value int) { result = value }; func apply() { defer set(42) }; func Test() int { apply(); return result }`, 42},
+		{"return expression is evaluated before defer", `var value = 1
+			func updateValue() { value = 2 }
+			func deferredValue() int { defer updateValue(); return value }
+			func Test() int { return deferredValue()*10 + value }`, 12},
+		{"defer updates explicit named result", `func deferredResult() (result int) {
+			defer func() { result += 2 }()
+			return 40
+		}
+		func Test() int { return deferredResult() }`, 42},
 		{"defer updates named result from captured pointer", `type resultState struct {
 			code int
 		}
@@ -436,6 +478,98 @@ func TestAdvancedExecutionCorpus(t *testing.T) {
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) { runCase(t, "package main\n"+tc.body, tc.want, false) })
 	}
+}
+
+func TestRuntimePanicRecover(t *testing.T) {
+	runExecutableCase(t, `package main
+
+func trigger() {
+	defer func() {
+		if recover() == nil {
+			panic("missing panic")
+		}
+	}()
+	panic("boom")
+}
+
+var normalRecoverResult int
+
+func recoverWithoutPanic() {
+	defer func() {
+		if recover() == nil {
+			normalRecoverResult = 42
+		} else {
+			normalRecoverResult = 1
+		}
+	}()
+}
+
+func returnedRecoverValue() (value any) {
+	defer func() {
+		value = recover()
+	}()
+	return
+}
+
+func Test() int {
+	trigger()
+	if recover() != nil {
+		return 1
+	}
+	recoverWithoutPanic()
+	if returnedRecoverValue() != nil {
+		return 2
+	}
+	return normalRecoverResult
+}
+`, 42)
+}
+
+func TestRuntimeDeferReturnValues(t *testing.T) {
+	runExecutableCase(t, `package main
+
+var returnOrderValue = 1
+
+func updateReturnOrderValue() {
+	returnOrderValue = 2
+}
+
+func returnBeforeDefer() int {
+	defer updateReturnOrderValue()
+	return returnOrderValue
+}
+
+func updateFloatResult() (result float64) {
+	defer func() {
+		result += 2
+	}()
+	return 40
+}
+
+func sourcePair() (int, int) {
+	return 16, 24
+}
+
+func updateForwardedResults() (left int, right int) {
+	defer func() {
+		left++
+		right++
+	}()
+	return sourcePair()
+}
+
+func Test() int {
+	ordered := returnBeforeDefer()*10 + returnOrderValue
+	if ordered != 12 {
+		return ordered
+	}
+	if updateFloatResult() != 42 {
+		return 1
+	}
+	left, right := updateForwardedResults()
+	return left + right
+}
+`, 42)
 }
 
 func TestStandardLibrarySHA256(t *testing.T) {
@@ -490,6 +624,47 @@ func Test() int {
 `, 2, false)
 }
 
+func TestRepositoryStandardLibraryUTF16DecodeAllocations(t *testing.T) {
+	runExecutableCase(t, `package main
+
+import (
+	"testing"
+	"unicode/utf16"
+)
+
+func Test() int {
+	input := []uint16{1, 2, 3, 4}
+	allocations := testing.AllocsPerRun(10, func() {
+		decoded := utf16.Decode(input)
+		if len(decoded) != 4 || decoded[3] != 4 {
+			panic("unexpected UTF-16 decode result")
+		}
+	})
+	if allocations != 0 {
+		return -1
+	}
+	return 42
+}
+`, 42)
+}
+
+func TestRuntimeDynamicGlobalInitializerUsesImportedGlobal(t *testing.T) {
+	runExecutableCase(t, `package main
+
+import . "path"
+
+var badPattern = ErrBadPattern
+
+func Test() int {
+	_, err := Match("[", "value")
+	if err != badPattern {
+		return -1
+	}
+	return 42
+}
+`, 42)
+}
+
 func TestRepositoryStandardLibraryHex(t *testing.T) {
 	runCase(t, `package main
 
@@ -510,6 +685,49 @@ func Test() int {
 	return int(adler32.Checksum([]byte("abc")))
 }
 `, 38600999, false)
+}
+
+func TestRepositoryStandardLibraryAdler32WriteString(t *testing.T) {
+	runExecutableCase(t, `package main
+
+import (
+	"encoding"
+	"hash/adler32"
+	"io"
+)
+
+func Test() int {
+	input := "abcde"
+	for iteration := 0; iteration < 32; iteration++ {
+		hash := adler32.New()
+		secondHash := adler32.New()
+		if _, err := io.WriteString(hash, input[:len(input)/2]); err != nil {
+			return -1
+		}
+		state, err := hash.(encoding.BinaryMarshaler).MarshalBinary()
+		if err != nil {
+			return -1
+		}
+		appendedState, err := hash.(encoding.BinaryAppender).AppendBinary(make([]byte, 4, 32))
+		if err != nil || string(state) != string(appendedState[4:]) {
+			return -1
+		}
+		if err := secondHash.(encoding.BinaryUnmarshaler).UnmarshalBinary(state); err != nil {
+			return -1
+		}
+		if _, err := io.WriteString(hash, input[len(input)/2:]); err != nil {
+			return -1
+		}
+		if _, err := io.WriteString(secondHash, input[len(input)/2:]); err != nil {
+			return -1
+		}
+		if hash.Sum32() != secondHash.Sum32() {
+			return -1
+		}
+	}
+	return int(adler32.Checksum([]byte("abc")))
+}
+`, 38600999)
 }
 
 func TestRepositoryStandardLibraryBinary(t *testing.T) {
@@ -708,6 +926,19 @@ func Test() int {
 `, 42)
 }
 
+func TestRuntimeClosureWithArgumentsPassedToGoroutine(t *testing.T) {
+	runExecutableCase(t, `package main
+
+func Test() int {
+	done := make(chan int, 1)
+	go func(value int) {
+		done <- value + 2
+	}(40)
+	return <-done
+}
+`, 42)
+}
+
 func TestRuntimeNestedDeferInDeferredClosure(t *testing.T) {
 	runExecutableCase(t, `package main
 
@@ -874,6 +1105,21 @@ func Test() int {
 `, 42)
 }
 
+func TestRuntimeAppendMakeToNilSlice(t *testing.T) {
+	runExecutableCase(t, `package main
+
+func Test() int {
+	source := make([]byte, 42)
+	values := append([]byte(nil), make([]byte, 1024)...)
+	length := copy(values, source)
+	if length != 42 || len(values) != 1024 || cap(values) < 1024 {
+		return 1
+	}
+	return 42
+}
+`, 42)
+}
+
 func TestRuntimeReturnedStringStoredInSlice(t *testing.T) {
 	runExecutableCase(t, `package main
 
@@ -904,6 +1150,22 @@ func Test() int {
 	}
 	matched, err := regexp.MatchString(patterns[0], "value")
 	if matched || err == nil {
+		return 1
+	}
+	return 42
+}
+`, 42)
+}
+
+func TestRuntimeStaticGlobalSpecialFloatArray(t *testing.T) {
+	runExecutableCase(t, `package main
+
+import "math"
+
+var values = [...]float64{17, math.Inf(1), math.NaN()}
+
+func Test() int {
+	if values[0] != 17 || !math.IsInf(values[1], 1) || !math.IsNaN(values[2]) {
 		return 1
 	}
 	return 42
@@ -1220,6 +1482,49 @@ func Test() int {
 `, 42)
 }
 
+func TestRuntimePointerToSliceLocalEscapes(t *testing.T) {
+	runExecutableCase(t, `package main
+
+import "runtime"
+
+func makeValues() any {
+	values := make([]int, 35)
+	values[34] = 7
+	return &values
+}
+
+func Test() int {
+	values := makeValues().(*[]int)
+	runtime.GC()
+	return len(*values) + (*values)[34]
+}
+`, 42)
+}
+
+func TestRuntimeClosureSurvivesGarbageCollectionInCallee(t *testing.T) {
+	runExecutableCase(t, `package main
+
+import "runtime"
+
+func apply(callback func(int) int) int {
+	runtime.GC()
+	return callback(2)
+}
+
+func Test() int {
+	total := 0
+	for index := 0; index < 100; index++ {
+		base := 40 + index
+		callback := func(value int) int {
+			return base + value
+		}
+		total += apply(callback) - index
+	}
+	return total
+}
+`, 4200)
+}
+
 func TestRepositoryStandardLibraryContainerList(t *testing.T) {
 	runExecutableCase(t, `package main
 
@@ -1283,6 +1588,34 @@ func Test() int {
 	index := sort.SearchInts(values, 5)
 	if index != 2 {
 		return 5000 + index
+	}
+	return 42
+}
+`, 42)
+}
+
+func TestRepositoryStandardLibrarySortFindExhaustive(t *testing.T) {
+	runExecutableCase(t, `package main
+
+import "sort"
+
+func Test() int {
+	for size := 0; size <= 100; size++ {
+		for target := 1; target <= size*2+1; target++ {
+			compare := func(index int) int {
+				return target - (index+1)*2
+			}
+			position, found := sort.Find(size, compare)
+			wantPosition := target / 2
+			wantFound := false
+			if target%2 == 0 {
+				wantPosition--
+				wantFound = true
+			}
+			if position != wantPosition || found != wantFound {
+				return 1
+			}
+		}
 	}
 	return 42
 }
@@ -1464,6 +1797,25 @@ func Test() int {
 	return len(records)*100 + len(records[1][0])*10 + len(records[2][1])
 }
 `, 352)
+}
+
+func TestRepositoryStandardLibraryIOCopyN(t *testing.T) {
+	runExecutableCase(t, `package main
+
+import (
+	"bytes"
+	"io"
+)
+
+func Test() int {
+	reader := bytes.NewReader([]byte("abc"))
+	written, err := io.CopyN(io.Discard, reader, 1)
+	if err != nil || written != 1 {
+		return -1
+	}
+	return reader.Len() * 20 + int(written) * 2
+}
+`, 42)
 }
 
 func TestRuntimeGlobalStructSliceInitializer(t *testing.T) {

@@ -174,6 +174,8 @@ func compileToObjectWithBundle(m *ir.Module, opts Options, bundle assemblyBundle
 			frameSize:            mc.m.frame,
 			frameStart:           mc.m.frameStart,
 			size:                 uint64(len(mc.code)),
+			funcID:               goRuntimeFunctionID(name),
+			deferReturn:          mc.m.deferReturnOffset(),
 			pointerWords:         mc.m.goPointerWords(),
 			argumentSize:         argumentFrame.size,
 			argumentPointerWords: argumentFrame.pointerWords,
@@ -735,7 +737,9 @@ func inferStackPointerWords(function *ir.Func) {
 		return base, offset + int(constant.Int), true
 	}
 
-	function.StackPointerWords = make(map[uint32]map[int]bool)
+	if function.StackPointerWords == nil {
+		function.StackPointerWords = make(map[uint32]map[int]bool)
+	}
 	for _, block := range function.Blocks {
 		for index := range block.Instrs {
 			instruction := &block.Instrs[index]
@@ -803,7 +807,7 @@ func goRegisterPointerMask(function *ir.Func) uint16 {
 	return mask
 }
 
-func emitMachine(f *ir.Func, alloc *allocation, gc GCStrategy, tlsModel TLSModel) (*machineCode, error) {
+func newEmitter(f *ir.Func, alloc *allocation, gc GCStrategy, tlsModel TLSModel) *mc {
 	m := &mc{
 		f: f, alloc: alloc, gc: gc, tlsModel: tlsModel,
 		prog: a64.NewProgram(), instrPC: map[*ir.Instr]uint64{},
@@ -1213,6 +1217,27 @@ func (m *mc) frameTop() int {
 
 func (m *mc) goPointerWords() []int {
 	return goPointerWordIndexes(m.f, m.allocOff, m.spillBase)
+}
+
+func (m *mc) deferReturnOffset() uint32 {
+	for _, block := range m.f.Blocks {
+		for index := range block.Instrs {
+			instruction := &block.Instrs[index]
+			if instruction.Op != ir.OCall || len(instruction.Args) == 0 {
+				continue
+			}
+			callee := instruction.Args[0]
+			if callee.Kind != ir.RefConst {
+				continue
+			}
+			constant := m.f.Consts[callee.ID]
+			if constant.Kind != ir.ConstSym || sanitize(constant.Sym) != "runtime_deferreturn" {
+				continue
+			}
+			return uint32(m.instrPC[instruction])
+		}
+	}
+	return 0
 }
 
 func goPointerWordIndexes(function *ir.Func, allocations map[*ir.Instr]int, spillBase int) []int {

@@ -65,6 +65,7 @@ func TestInstrRoundTripsEveryField(t *testing.T) {
 		Pos:               SrcPos{File: 1, Line: 2, Col: 3},
 		Tail:              true,
 		Volatile:          true,
+		ClosureCall:       true,
 		Asm: &AsmOp{
 			Template: "movl %k1, %k0",
 			Ops:      []AsmOperandKind{AsmRegOut, AsmRegIn},

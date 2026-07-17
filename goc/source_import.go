@@ -37,22 +37,24 @@ type sourceAssemblyFile struct {
 // for cg12 lowering. Dependencies use export data until they too are selected
 // for source compilation.
 type sourceLoader struct {
-	fset         *token.FileSet
-	units        map[string]*sourceUnit
-	loading      map[string]bool
-	sources      map[string]bool
-	testPackages map[string]bool
-	base         types.Importer
-	root         string
-	forcePureGo  bool
+	fset                 *token.FileSet
+	units                map[string]*sourceUnit
+	loading              map[string]bool
+	sources              map[string]bool
+	testPackages         map[string]bool
+	externalTestPackages map[string]string
+	base                 types.Importer
+	root                 string
+	forcePureGo          bool
 }
 
 func newSourceLoader(fset *token.FileSet) *sourceLoader {
 	return &sourceLoader{
-		fset:         fset,
-		units:        make(map[string]*sourceUnit),
-		loading:      make(map[string]bool),
-		testPackages: make(map[string]bool),
+		fset:                 fset,
+		units:                make(map[string]*sourceUnit),
+		loading:              make(map[string]bool),
+		testPackages:         make(map[string]bool),
+		externalTestPackages: make(map[string]string),
 		sources: map[string]bool{
 			"bufio":                                 true,
 			"bytes":                                 true,
@@ -95,6 +97,7 @@ func newSourceLoader(fset *token.FileSet) *sourceLoader {
 			"internal/bisect":                       true,
 			"internal/byteorder":                    true,
 			"internal/chacha8rand":                  true,
+			"internal/cfg":                          true,
 			"internal/coverage/rtcov":               true,
 			"internal/cpu":                          true,
 			"internal/filepathlite":                 true,
@@ -106,6 +109,7 @@ func newSourceLoader(fset *token.FileSet) *sourceLoader {
 			"internal/goos":                         true,
 			"internal/msan":                         true,
 			"internal/oserror":                      true,
+			"internal/platform":                     true,
 			"internal/poll":                         true,
 			"internal/profilerecord":                true,
 			"internal/race":                         true,
@@ -127,6 +131,8 @@ func newSourceLoader(fset *token.FileSet) *sourceLoader {
 			"internal/sysinfo":                      true,
 			"internal/syscall/execenv":              true,
 			"internal/syscall/unix":                 true,
+			"internal/testenv":                      true,
+			"internal/testhash":                     true,
 			"internal/testlog":                      true,
 			"internal/trace/tracev2":                true,
 			"internal/unsafeheader":                 true,
@@ -135,7 +141,9 @@ func newSourceLoader(fset *token.FileSet) *sourceLoader {
 			"math":                                  true,
 			"math/bits":                             true,
 			"math/rand":                             true,
+			"math/rand/v2":                          true,
 			"os":                                    true,
+			"os/exec":                               true,
 			"path":                                  true,
 			"path/filepath":                         true,
 			"reflect":                               true,
@@ -174,7 +182,13 @@ func (l *sourceLoader) Import(path string) (*types.Package, error) {
 	if u := l.units[path]; u != nil {
 		return u.pkg, nil
 	}
-	if !l.sources[path] {
+	packagePath := path
+	externalTestPackage := false
+	if testedPackage := l.externalTestPackages[path]; testedPackage != "" {
+		packagePath = testedPackage
+		externalTestPackage = true
+	}
+	if !externalTestPackage && !l.sources[path] {
 		return l.base.Import(path)
 	}
 	if l.loading[path] {
@@ -184,12 +198,12 @@ func (l *sourceLoader) Import(path string) (*types.Package, error) {
 	defer delete(l.loading, path)
 	ctx := build.Default
 	ctx.BuildTags = append([]string{}, ctx.BuildTags...)
-	useAssembly := !l.forcePureGo && runtime.GOARCH == "arm64" && plan9asm.SupportsARM64Package(path)
+	useAssembly := !externalTestPackage && !l.forcePureGo && runtime.GOARCH == "arm64" && plan9asm.SupportsARM64Package(path)
 	if !useAssembly {
 		ctx.BuildTags = append(ctx.BuildTags, "purego")
 	}
 	ctx.GOROOT = l.root
-	bp, err := ctx.Import(path, "", 0)
+	bp, err := ctx.Import(packagePath, "", 0)
 	if err != nil {
 		return nil, err
 	}
@@ -204,8 +218,13 @@ func (l *sourceLoader) Import(path string) (*types.Package, error) {
 			Instances:  make(map[*ast.Ident]types.Instance),
 		},
 	}
-	goFiles := append([]string(nil), bp.GoFiles...)
-	if l.testPackages[path] {
+	var goFiles []string
+	if externalTestPackage {
+		goFiles = append(goFiles, bp.XTestGoFiles...)
+	} else {
+		goFiles = append(goFiles, bp.GoFiles...)
+	}
+	if !externalTestPackage && l.testPackages[path] {
 		goFiles = append(goFiles, bp.TestGoFiles...)
 	}
 	for _, name := range goFiles {

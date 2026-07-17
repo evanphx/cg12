@@ -25,6 +25,20 @@ func DeadAlloc(f *ir.Func) bool {
 					loaded[base] = true
 				}
 			}
+			// Calls to the recognized memory helpers do not retain local pointers,
+			// but they do observe the bytes stored behind those pointers. Keep the
+			// allocation's stores even when later scalar load elimination has removed
+			// every explicit load from this function.
+			if benignMemoryCall(f, *in) {
+				for _, argument := range in.Args[1:] {
+					if argument.Kind != ir.RefTemp {
+						continue
+					}
+					if base, ok := ai.allocBase[argument.ID]; ok {
+						loaded[base] = true
+					}
+				}
+			}
 			// A volatile store is observable even when nothing reads the value
 			// back, so the storage it writes to is not dead.
 			if in.Volatile && in.Op.IsStore() {

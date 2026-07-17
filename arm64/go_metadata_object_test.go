@@ -29,6 +29,25 @@ func TestGoFunctionMetadataFollowsEmittedTextOffsets(t *testing.T) {
 	assert.Equal(t, "later", sorted[1].name)
 }
 
+func TestGoFunctionMetadataPreservesRuntimeFunctionID(t *testing.T) {
+	builder := &goMetadataBuilder{
+		object: &obj.Object{},
+		labels: make(map[string]uint64),
+	}
+	functions := []goFunctionInfo{
+		{
+			name:   "runtime_gopanic",
+			funcID: 10,
+		},
+	}
+
+	builder.build(functions, nil, &ir.Data{Name: "runtime.firstmoduledata"}, []byte{0}, ".goc.runtime.dataend", 0, 0)
+	pclntableOffset := builder.labels[".goc.go.pclntable"] - builder.base
+	const funcIDOffset = 40
+
+	assert.Equal(t, byte(10), builder.data[pclntableOffset+funcIDOffset])
+}
+
 func TestGoRuntimeModuledataReferencesModuleInitTasks(t *testing.T) {
 	module := ir.NewModule()
 	schedinit := module.NewFuncVoid("runtime.schedinit")
@@ -85,6 +104,26 @@ func TestGoRuntimeMetadataIncludesTranslatedAssemblyFunctions(t *testing.T) {
 func TestGoPCSPTerminatesBeforeFollowingFunction(t *testing.T) {
 	assert.Equal(t, []byte{66, 0xff, 0xff, 0xff, 0xff, 0x0f, 0}, goPCSP(0, 32))
 	assert.Equal(t, []byte{2, 9, 64, 0xff, 0xff, 0xff, 0xff, 0x0f, 0}, goPCSP(36, 32))
+}
+
+func TestGoUnsafePointPCDataDisablesAsyncPreemption(t *testing.T) {
+	assert.Equal(t, []byte{1, 0xff, 0xff, 0xff, 0xff, 0x0f, 0}, goUnsafePointPCData())
+}
+
+func TestGoStackMapPCDataSwitchesAfterPrologue(t *testing.T) {
+	assert.Equal(t, []byte{4, 0xff, 0xff, 0xff, 0xff, 0x0f, 0}, goStackMapPCData(0))
+	assert.Equal(t, []byte{2, 9, 2, 0xff, 0xff, 0xff, 0xff, 0x0f, 0}, goStackMapPCData(36))
+}
+
+func TestGoStackMapsSeparateEntryAndBodyRoots(t *testing.T) {
+	builder := &goMetadataBuilder{}
+	builder.stackMaps(8, []int{1}, []int{6})
+	assert.Equal(t, []byte{
+		2, 0, 0, 0,
+		8, 0, 0, 0,
+		0b00000010,
+		0b01000000,
+	}, builder.data)
 }
 
 func TestGoRuntimeModuledataDescribesScannedGlobals(t *testing.T) {

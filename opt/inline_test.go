@@ -74,6 +74,215 @@ int main(void){ return (go(5) == 10 && go(20) == 23) ? 0 : 1; }`)
 	assert.Equal(t, 0, code)
 }
 
+func TestInlineNoSplitCallsOnlyChangesNoSplitCallers(t *testing.T) {
+	module := ir.NewModule()
+	addHelper(module)
+
+	nosplitCaller := module.NewFunc("nosplitCaller", ir.ClsW)
+	nosplitCaller.NoSplit = true
+	nosplitArgument := nosplitCaller.Param("value", ir.ClsW)
+	nosplitCaller.Entry().Ret(nosplitCaller.Entry().Call(ir.ClsW, nosplitCaller.Sym("add3", 0), nosplitArgument))
+
+	splitCaller := module.NewFunc("splitCaller", ir.ClsW)
+	splitArgument := splitCaller.Param("value", ir.ClsW)
+	splitCaller.Entry().Ret(splitCaller.Entry().Call(ir.ClsW, splitCaller.Sym("add3", 0), splitArgument))
+
+	require.True(t, opt.InlineNoSplitCalls(module))
+	assert.Equal(t, 1, countCalls(module), "the ordinary caller should retain its call")
+
+	nosplitCalls := 0
+	for _, block := range nosplitCaller.Blocks {
+		for _, instruction := range block.Instrs {
+			if instruction.Op == ir.OCall {
+				nosplitCalls++
+			}
+		}
+	}
+	assert.Zero(t, nosplitCalls)
+}
+
+func TestInlineHeapAllocationExposesCallerLocalObject(t *testing.T) {
+	module := ir.NewModule()
+	constructor := module.NewFunc("newValue", ir.ClsP)
+	constructorBlock := constructor.Entry()
+	object := constructorBlock.HeapAlloc(
+		constructor.Sym("runtime.newobject", 0),
+		constructor.Sym("type.int", 0),
+		8,
+		8,
+	)
+	constructorBlock.Store(constructor.Long(42), object)
+	constructorBlock.Ret(object)
+
+	caller := module.NewFunc("readValue", ir.ClsL)
+	callerBlock := caller.Entry()
+	valuePointer := callerBlock.Call(ir.ClsP, caller.Sym("newValue", 0))
+	callerBlock.Ret(callerBlock.Load(ir.ClsL, valuePointer))
+
+	require.True(t, opt.InlineHeapAllocations(module))
+	require.True(t, opt.LowerHeapAllocations(module))
+	stackAllocationFound := false
+	for _, block := range caller.Blocks {
+		for _, instruction := range block.Instrs {
+			if instruction.Op == ir.OAlloc8 {
+				stackAllocationFound = true
+			}
+			if instruction.Op != ir.OCall || len(instruction.Args) == 0 {
+				continue
+			}
+			callee := instruction.Arg(0)
+			if callee.Kind != ir.RefConst {
+				continue
+			}
+			constant := caller.Consts[callee.ID]
+			assert.NotEqual(t, "runtime.newobject", constant.Sym)
+		}
+	}
+	assert.True(t, stackAllocationFound)
+}
+
+func TestInlineHeapAllocationThroughAggregateReturn(t *testing.T) {
+	module := ir.NewModule()
+	sliceType := &ir.AggType{
+		Name: "slice",
+		Fields: []ir.Field{
+			{Sub: ir.SubL, Pointer: true},
+			{Sub: ir.SubL},
+			{Sub: ir.SubL},
+		},
+	}
+	module.AddType(sliceType)
+
+	helper := module.NewFunc("identitySlice", ir.ClsP)
+	helper.RetAgg = sliceType
+	helper.RetValues = true
+	helperParts := helper.ParamGroup("value", sliceType, ir.ClsP, ir.ClsL, ir.ClsL)
+	helper.Entry().RetAggregate(helperParts...)
+
+	constructor := module.NewFunc("newSlice", ir.ClsP)
+	constructor.RetAgg = sliceType
+	constructor.RetValues = true
+	constructorBlock := constructor.Entry()
+	object := constructorBlock.HeapAlloc(
+		constructor.Sym("runtime.newobject", 0),
+		constructor.Sym("type.array", 0),
+		16,
+		8,
+	)
+	constructorParts := constructorBlock.CallAggregate(
+		sliceType,
+		[]ir.Cls{ir.ClsP, ir.ClsL, ir.ClsL},
+		constructor.Sym("identitySlice", 0),
+		object,
+		constructor.Long(1),
+		constructor.Long(1),
+	)
+	constructorBlock.RetAggregate(constructorParts...)
+
+	caller := module.NewFunc("readSlice", ir.ClsL)
+	callerBlock := caller.Entry()
+	parts := callerBlock.CallAggregate(
+		sliceType,
+		[]ir.Cls{ir.ClsP, ir.ClsL, ir.ClsL},
+		caller.Sym("newSlice", 0),
+	)
+	callerBlock.Store(caller.Long(42), parts[0])
+	callerBlock.Ret(callerBlock.Load(ir.ClsL, parts[0]))
+
+	require.True(t, opt.InlineHeapAllocations(module))
+	require.True(t, opt.LowerHeapAllocations(module))
+	stackAllocationFound := false
+	for _, block := range caller.Blocks {
+		for _, instruction := range block.Instrs {
+			if instruction.Op == ir.OAlloc8 {
+				stackAllocationFound = true
+			}
+		}
+	}
+	assert.True(t, stackAllocationFound)
+}
+
+func TestInlineHeapAllocationThroughLocalAggregateSlot(t *testing.T) {
+	module := ir.NewModule()
+	sliceType := &ir.AggType{
+		Name: "slice",
+		Fields: []ir.Field{
+			{Sub: ir.SubL, Pointer: true},
+			{Sub: ir.SubL},
+			{Sub: ir.SubL},
+		},
+	}
+	module.AddType(sliceType)
+
+	helper := module.NewFunc("useSlice", ir.ClsP)
+	helper.RetAgg = sliceType
+	helper.RetValues = true
+	helperParts := helper.ParamGroup("value", sliceType, ir.ClsP, ir.ClsL, ir.ClsL)
+	helperBlock := helper.Entry()
+	pointer := helperParts[0]
+	for index := 0; index < 30; index++ {
+		pointer = helperBlock.Copy(ir.ClsP, pointer)
+	}
+	helperBlock.RetAggregate(pointer, helperParts[1], helperParts[2])
+
+	caller := module.NewFunc("readSlice", ir.ClsL)
+	callerBlock := caller.Entry()
+	object := callerBlock.HeapAlloc(
+		caller.Sym("runtime.newobject", 0),
+		caller.Sym("type.array", 0),
+		16,
+		8,
+	)
+	slot := callerBlock.Alloc(8, 8)
+	callerBlock.Call(
+		ir.ClsP,
+		caller.Sym("goc_memset", 0),
+		slot,
+		caller.Word(0),
+		caller.Long(8),
+	)
+	callerBlock.Store(object, slot)
+	loadedObject := callerBlock.Load(ir.ClsP, slot)
+	parts := callerBlock.CallAggregate(
+		sliceType,
+		[]ir.Cls{ir.ClsP, ir.ClsL, ir.ClsL},
+		caller.Sym("useSlice", 0),
+		loadedObject,
+		caller.Long(1),
+		caller.Long(1),
+	)
+	callerBlock.Store(caller.Long(42), parts[0])
+	callerBlock.Ret(callerBlock.Load(ir.ClsL, parts[0]))
+
+	require.True(t, opt.InlineHeapAllocations(module))
+	require.True(t, opt.LowerHeapAllocations(module))
+	stackAllocationFound := false
+	for _, block := range caller.Blocks {
+		for _, instruction := range block.Instrs {
+			if instruction.Op == ir.OAlloc8 && instruction.To == object {
+				stackAllocationFound = true
+			}
+		}
+	}
+	assert.True(t, stackAllocationFound)
+}
+
+func TestInlineSkipsFrameScopedDefers(t *testing.T) {
+	module := ir.NewModule()
+	deferred := module.NewFuncVoid("deferred")
+	deferredBlock := deferred.Entry()
+	deferredBlock.CallVoid(deferred.Sym("runtime.deferproc", 0), deferred.Sym("deferred.fn", 0))
+	deferredBlock.CallVoid(deferred.Sym("runtime.deferreturn", 0))
+	deferredBlock.RetVoid()
+
+	caller := module.NewFuncVoid("caller")
+	caller.Entry().CallVoid(caller.Sym("deferred", 0))
+	caller.Entry().RetVoid()
+
+	assert.False(t, opt.Inline(module))
+	assert.Equal(t, 3, countCalls(module))
+}
+
 func TestInlineRecordsProvenance(t *testing.T) {
 	m := ir.NewModule()
 	addHelper(m) // add3(x) = x + 3
@@ -200,6 +409,28 @@ func TestInlineRecursiveNotInlined(t *testing.T) {
 extern int go(int);
 int main(void){ return go(5) == 120 ? 0 : 1; }`)
 	assert.Equal(t, 0, code)
+}
+
+func TestUnrollRecursiveFunctionWithStackPointerMetadata(t *testing.T) {
+	module := ir.NewModule()
+	function := module.NewFunc("recursive", ir.ClsW)
+	value := function.Param("value", ir.ClsW)
+	entry := function.Entry()
+	local := entry.Alloc(8, 8)
+	function.StackPointerWords = map[uint32]map[int]bool{
+		local.ID: {0: true},
+	}
+	recurse := function.NewBlock("recurse")
+	done := function.NewBlock("done")
+	entry.Jnz(entry.Cmp(ir.CmpEq, ir.ClsW, value, function.Word(0)), done, recurse)
+	done.Ret(function.Word(0))
+	next := recurse.Sub(ir.ClsW, value, function.Word(1))
+	recurse.Ret(recurse.Call(ir.ClsW, function.Sym("recursive", 0), next))
+
+	require.True(t, opt.UnrollRecursion(module))
+	for id := range function.StackPointerWords {
+		assert.Less(t, int(id), len(function.Temps))
+	}
 }
 
 func TestInlineSkipsIndirectAndOversized(t *testing.T) {

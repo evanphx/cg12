@@ -278,6 +278,7 @@ func TestRepositoryStandardLibraryInventory(t *testing.T) {
 		"crypto/sha512",
 		"unicode/utf16",
 		"path",
+		"internal/testhash",
 		"container/list",
 		"container/ring",
 		"sort",

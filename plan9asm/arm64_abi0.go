@@ -21,21 +21,38 @@ func collectDirectABI0(file *File, layouts map[int]abi0Layout) map[int]bool {
 	direct := make(map[int]bool)
 	functionIndex := -1
 	var text *Text
+	called := false
 	for _, statement := range file.Statements {
 		switch statement := statement.(type) {
 		case *Text:
 			functionIndex++
 			text = statement
+			called = false
 			direct[functionIndex] = !text.Symbol.Static && text.Symbol.ABI == "" && len(layouts[functionIndex].outputs) <= 1
 		case *Instruction:
 			if text == nil || !direct[functionIndex] {
 				continue
 			}
+			for _, operand := range statement.Operands {
+				if strings.Contains(operand.Text, "(FP)") && operand.Kind != OperandMemory {
+					direct[functionIndex] = false
+					break
+				}
+			}
+			if !direct[functionIndex] {
+				continue
+			}
 			if statement.Opcode == "BL" || statement.Opcode == "CALL" {
-				direct[functionIndex] = false
+				called = true
 				continue
 			}
 			if len(statement.Operands) != 2 {
+				for _, operand := range statement.Operands {
+					if operand.Base == "FP" {
+						direct[functionIndex] = false
+						break
+					}
+				}
 				continue
 			}
 			source := statement.Operands[0]
@@ -43,7 +60,7 @@ func collectDirectABI0(file *File, layouts map[int]abi0Layout) map[int]bool {
 			if source.Kind == OperandMemory && source.Base == "FP" {
 				offset, err := namedFrameOffset(source.Offset)
 				index := abi0SlotIndex(layouts[functionIndex].inputs, offset)
-				if err != nil || index < 0 || destination.Kind != OperandRegister || destination.Register != "R"+strconv.Itoa(index) {
+				if called || err != nil || index < 0 || destination.Kind != OperandRegister {
 					direct[functionIndex] = false
 				}
 			}

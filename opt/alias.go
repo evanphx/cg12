@@ -125,6 +125,12 @@ func (ai *aliasInfo) computeEscape() {
 			case in.Op.IsLifetime():
 				// a lifetime marker names the allocation to bound its live region, not
 				// to leak its address, so it does not escape its operand
+			case benignMemoryCall(ai.f, in):
+				// Memory helpers observe local storage but do not retain it.
+			case isAtomicPointerStore(ai.f, in):
+				// The destination is observed only during the store. The value being
+				// stored can still make a local allocation reachable externally.
+				mark(in.Arg(2))
 			case (in.Op == ir.OAdd || in.Op == ir.OSub) && ai.tracked(in.To):
 				// constant-offset derivation: operands stay local
 			case in.Op == ir.OIntrinsic:

@@ -107,6 +107,11 @@ type Instr struct {
 	// register, a signal-handler flag, and another thread's variable all violate.
 	Volatile bool
 
+	// ClosureCall marks an indirect call whose callee receives a closure
+	// environment in the architecture's dedicated closure register. ABIInternal
+	// reserves an additional spill word for that register in the outgoing frame.
+	ClosureCall bool
+
 	// Blk names the target block of an OBlockAddr (the address of a label taken
 	// with the &&label extension), whose result is that block's code address.
 	Blk *Block

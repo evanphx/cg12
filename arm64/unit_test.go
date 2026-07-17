@@ -633,6 +633,7 @@ func TestGoABIGroupedSliceResultUsesThreeValueRegisters(t *testing.T) {
 func TestGoABIStackGrowthPreservesClosureContext(t *testing.T) {
 	function := ir.NewModule().NewFunc("closure_value", ir.ClsL)
 	function.GoABI = true
+	function.HasClosureContext = true
 	context := function.NewTemp("closure", ir.ClsP)
 	temporary := function.Temp(context)
 	temporary.Fixed = true
@@ -648,6 +649,43 @@ func TestGoABIStackGrowthPreservesClosureContext(t *testing.T) {
 		}
 	}
 	assert.True(t, foundClosureSpill, "closure context must survive morestack")
+}
+
+func TestGoABICallSiteClosureRegisterIsNotAnIncomingContext(t *testing.T) {
+	function := ir.NewModule().NewFunc("call_function_value", ir.ClsL)
+	function.GoABI = true
+	context := function.NewTemp("call_context", ir.ClsP)
+	temporary := function.Temp(context)
+	temporary.Fixed = true
+	temporary.Reg = 26
+	function.Entry().Ret(function.Long(1))
+
+	argumentFrame := goArgumentFrameFor(function)
+	for _, spill := range argumentFrame.spills {
+		assert.NotEqual(t, X26, spill.reg)
+	}
+}
+
+func TestGoABIClosureCallReservesContextSpillWord(t *testing.T) {
+	function := ir.NewModule().NewFuncVoid("closure_caller")
+	function.GoABI = true
+	callee := function.ParamRef("callee")
+	function.Entry().CallVoid(callee)
+	call := &function.Entry().Instrs[len(function.Entry().Instrs)-1]
+	call.ClosureCall = true
+	function.Entry().RetVoid()
+
+	prepareGoABI(function)
+	require.NoError(t, lower(function, TLSLocalExec))
+	var loweredCall *ir.Instr
+	for index := range function.Entry().Instrs {
+		instruction := &function.Entry().Instrs[index]
+		if instruction.Op == ir.OCall {
+			loweredCall = instruction
+		}
+	}
+	require.NotNil(t, loweredCall)
+	assert.Equal(t, int64(16), loweredCall.Aux)
 }
 
 func TestGoABIReportsPointerResultSlotLiveAcrossCall(t *testing.T) {

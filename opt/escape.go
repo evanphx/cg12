@@ -47,9 +47,34 @@ func lowerFunctionHeapAllocations(function *ir.Func) bool {
 			if _, known := bases[id]; known {
 				continue
 			}
-			base, ok := derivedHeapBase(function, instruction, bases)
+			base, ok := derivedHeapBase(instruction, bases)
 			if ok {
 				bases[id] = base
+				updated = true
+			}
+		}
+		for _, block := range function.Blocks {
+			for _, phi := range block.Phis {
+				base, found, conflict := phiHeapBase(phi, bases)
+				if conflict {
+					for _, argument := range phi.Args {
+						if argumentBase, tracked := heapBase(argument, bases); tracked {
+							escaped[argumentBase] = true
+						}
+					}
+					continue
+				}
+				if !found || phi.To.Kind != ir.RefTemp {
+					continue
+				}
+				if previous, exists := bases[phi.To.ID]; exists {
+					if previous != base {
+						escaped[previous] = true
+						escaped[base] = true
+					}
+					continue
+				}
+				bases[phi.To.ID] = base
 				updated = true
 			}
 		}
@@ -113,6 +138,9 @@ func lowerFunctionHeapAllocations(function *ir.Func) bool {
 	}
 	for _, block := range function.Blocks {
 		for _, phi := range block.Phis {
+			if _, tracked := heapBase(phi.To, bases); tracked {
+				continue
+			}
 			for _, argument := range phi.Args {
 				mark(argument)
 			}
@@ -123,6 +151,8 @@ func lowerFunctionHeapAllocations(function *ir.Func) bool {
 				// The allocator, type descriptor, and size are not uses of the result.
 			case instruction.Op.IsLoad():
 				// Reading through the candidate keeps it local.
+			case instruction.Op == ir.OCmp:
+				// Comparing a pointer observes its value but cannot retain it.
 			case instruction.Op.IsStore():
 				// Frontend variables live in ordinary stack allocations. Saving a
 				// candidate in a non-escaping local slot does not make the pointed-to
@@ -132,6 +162,16 @@ func lowerFunctionHeapAllocations(function *ir.Func) bool {
 				}
 			case isTrackedHeapDerivation(instruction, bases):
 				// Copies, casts, and constant pointer offsets preserve locality.
+			case isAtomicPointerStore(function, instruction):
+				// The destination is observed only for the duration of the store.
+				// This is the write-barrier form emitted for pointer fields before
+				// escape lowering knows whether the enclosing object is stack-local.
+				destination := instruction.Arg(1)
+				if _, localCandidate := heapBase(destination, bases); localCandidate {
+					mark(instruction.Arg(2))
+				} else if aliases.locOf(destination, 1).class != cLocal {
+					mark(instruction.Arg(2))
+				}
 			case benignMemoryCall(function, instruction):
 				// memcpy/memset observe the storage but do not retain its address.
 			default:
@@ -188,23 +228,48 @@ func lowerFunctionHeapAllocations(function *ir.Func) bool {
 	return true
 }
 
-func derivedHeapBase(function *ir.Func, instruction ir.Instr, bases map[uint32]uint32) (uint32, bool) {
+func phiHeapBase(phi *ir.Phi, bases map[uint32]uint32) (uint32, bool, bool) {
+	var base uint32
+	found := false
+	for _, argument := range phi.Args {
+		argumentBase, tracked := heapBase(argument, bases)
+		if !tracked {
+			continue
+		}
+		if found && argumentBase != base {
+			return 0, false, true
+		}
+		base = argumentBase
+		found = true
+	}
+	return base, found, false
+}
+
+func isAtomicPointerStore(function *ir.Func, instruction ir.Instr) bool {
+	if instruction.Op != ir.OCall || len(instruction.Args) != 3 {
+		return false
+	}
+	callee := instruction.Arg(0)
+	if callee.Kind != ir.RefConst {
+		return false
+	}
+	constant := function.Consts[callee.ID]
+	return constant.Kind == ir.ConstSym && constant.Sym == "runtime.atomicstorep"
+}
+
+func derivedHeapBase(instruction ir.Instr, bases map[uint32]uint32) (uint32, bool) {
 	if instruction.Op == ir.OCopy || instruction.Op == ir.OCast {
 		return heapBase(instruction.Arg(0), bases)
 	}
-	if instruction.Op != ir.OAdd && instruction.Op != ir.OSub {
+	if (instruction.Op != ir.OAdd && instruction.Op != ir.OSub) || instruction.Cls != ir.ClsP {
 		return 0, false
 	}
 	if base, ok := heapBase(instruction.Arg(0), bases); ok {
-		if _, constant := constInt(function, instruction.Arg(1)); constant {
-			return base, true
-		}
+		return base, true
 	}
 	if instruction.Op == ir.OAdd {
 		if base, ok := heapBase(instruction.Arg(1), bases); ok {
-			if _, constant := constInt(function, instruction.Arg(0)); constant {
-				return base, true
-			}
+			return base, true
 		}
 	}
 	return 0, false
@@ -240,7 +305,8 @@ func benignMemoryCall(function *ir.Func, instruction ir.Instr) bool {
 	}
 	switch constant.Sym {
 	case "memset", "memcpy", "memmove", "memcmp",
-		"goc_memset", "goc_memcpy", "goc_memmove", "goc_memcmp":
+		"goc_memset", "goc_memcpy", "goc_memmove", "goc_memcmp",
+		"runtime.growslice":
 		return true
 	default:
 		return false

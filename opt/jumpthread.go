@@ -358,7 +358,7 @@ func threadOne(f *ir.Func, c threadCand) {
 				continue // its value is known on this edge; no need to recompute it
 			}
 		}
-		bp.Instrs = append(bp.Instrs, cloneInstr(in, resolve, identityBlock))
+		bp.Instrs = append(bp.Instrs, cloneInstr(f, in, resolve, identityBlock))
 	}
 	bp.Jmp = ir.Jmp{Kind: ir.JmpJmp, To: target}
 

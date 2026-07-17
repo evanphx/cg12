@@ -78,6 +78,43 @@ func main() { if sum(5) != 12 { for { break } } }
 	}
 }
 
+func TestStaticInitializerIgnoresKeyedStructFieldNames(t *testing.T) {
+	fset := token.NewFileSet()
+	file, err := parser.ParseFile(fset, "initializer.go", `package initializer
+type debugVars struct {
+	enabled int32
+}
+type debugVar struct {
+	name  string
+	value *int32
+}
+var debug debugVars
+var dbgvars = []*debugVar{
+	{name: "enabled", value: &debug.enabled},
+}
+`, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	info := &types.Info{
+		Types:      make(map[ast.Expr]types.TypeAndValue),
+		Defs:       make(map[*ast.Ident]types.Object),
+		Uses:       make(map[*ast.Ident]types.Object),
+		Selections: make(map[*ast.SelectorExpr]*types.Selection),
+	}
+	configuration := types.Config{Sizes: types.SizesFor("gc", runtime.GOARCH)}
+	if _, err := configuration.Check("initializer", fset, []*ast.File{file}, info); err != nil {
+		t.Fatal(err)
+	}
+
+	declaration := file.Decls[3].(*ast.GenDecl)
+	specification := declaration.Specs[0].(*ast.ValueSpec)
+	if !staticallyInitialized(specification.Values[0], info) {
+		t.Fatal("global pointer table should be representable as static data")
+	}
+}
+
 func TestCompileAllowsExternalLinknameDeclaration(t *testing.T) {
 	module, err := Compile("linkname.go", []byte(`package main
 import _ "unsafe"
@@ -112,6 +149,23 @@ func helper() {}
 		}
 	}
 	t.Fatal("main.helper was not compiled")
+}
+
+func TestCompileKeepsAssignedNonEscapingAddressOnStack(t *testing.T) {
+	module, err := Compile("address.go", []byte(`package main
+type pair struct { left, right int }
+func sum(value *pair) int { return value.left + value.right }
+func Test() int {
+	value := &pair{left: 17, right: 25}
+	return sum(value)
+}
+`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(module.String(), "$calloc") {
+		t.Fatalf("non-escaping address was heap allocated:\n%s", module)
+	}
 }
 
 func TestCompileExecutableIncludesRuntimeAndMainInitTask(t *testing.T) {
@@ -507,6 +561,22 @@ var values []int
 	}
 	for name := range want {
 		t.Errorf("missing data definition %s", name)
+	}
+}
+
+func TestSharedTypeParameterUsesOnePointerWord(t *testing.T) {
+	constraint := types.NewInterfaceType(nil, nil)
+	constraint.Complete()
+	name := types.NewTypeName(token.NoPos, nil, "T", nil)
+	typeParameter := types.NewTypeParam(name, constraint)
+
+	var offsets []int64
+	visitPointerWords(typeParameter, 24, func(offset int64) {
+		offsets = append(offsets, offset)
+	})
+
+	if !reflect.DeepEqual(offsets, []int64{24}) {
+		t.Fatalf("shared type parameter pointer offsets = %v, want [24]", offsets)
 	}
 }
 

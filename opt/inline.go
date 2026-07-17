@@ -36,6 +36,17 @@ const (
 	inlineOnceBudget  = 24 // a single-site callee inlines up to this size
 )
 
+// preEscapeAggregateInstrBudget admits slightly larger aggregate-returning
+// constructors. Scalar pointer constructors stay on the ordinary budget until
+// escape analysis can model every pointer-return path they use.
+const preEscapeAggregateInstrBudget = 32
+
+// preEscapeInstrBudget permits a larger aggregate helper to be exposed only
+// when it directly consumes a heap-allocation candidate. This is intentionally
+// separate from ordinary inlining: its purpose is to preserve caller-visible
+// escape information, not to inline every helper of this size.
+const preEscapeInstrBudget = 256
+
 // inlineFuncBudget bounds how many calls are inlined into one function per pass,
 // a backstop against code-size blow-up; the pipeline's fixpoint applies more on
 // later rounds if they remain worthwhile.
@@ -234,6 +245,231 @@ func funcSize(f *ir.Func) int {
 	return n
 }
 
+// InlineNoSplitCalls inlines small split-stack callees into nosplit callers.
+// Runtime signal entry functions can execute briefly on a signal stack while
+// the G register still describes the interrupted goroutine. A stack check in
+// that window would compare unrelated stack bounds, so the standard Go
+// compiler relies on inlining tiny accessors used by those paths.
+func InlineNoSplitCalls(m *ir.Module) bool {
+	cg := buildCallGraph(m)
+	scc := computeSCC(cg)
+	changed := false
+	for _, caller := range scc.order {
+		if caller.Start == nil || !caller.NoSplit {
+			continue
+		}
+		for count := 0; count < inlineFuncBudget; count++ {
+			block, index, callee := findSplitCalleeToInline(caller, cg, scc)
+			if callee == nil {
+				break
+			}
+			spliceCall(caller, block, index, callee, cg, scc, 0)
+			changed = true
+		}
+	}
+	return changed
+}
+
+// InlineHeapAllocations exposes small constructor allocations to their callers
+// before escape lowering. A constructor may need to return a heap candidate in
+// isolation, while a caller that immediately copies or reads the value can keep
+// the same object on its stack. Keeping this as a focused pre-escape pass avoids
+// requiring the full optimization pipeline for ordinary Go compilation.
+func InlineHeapAllocations(module *ir.Module) bool {
+	graph := buildCallGraph(module)
+	components := computeSCC(graph)
+	changed := false
+	for _, caller := range components.order {
+		if caller.Start == nil {
+			continue
+		}
+		for count := 0; count < inlineFuncBudget; count++ {
+			block, index, callee := findHeapAllocatingConstructor(caller, graph, components)
+			if callee == nil {
+				break
+			}
+			spliceCall(caller, block, index, callee, graph, components, 0)
+			changed = true
+		}
+	}
+
+	graph = buildCallGraph(module)
+	components = computeSCC(graph)
+	for _, caller := range components.order {
+		if caller.Start == nil {
+			continue
+		}
+		for count := 0; count < inlineFuncBudget; count++ {
+			block, index, callee := findHeapAllocationConsumer(caller, graph, components)
+			if callee == nil {
+				break
+			}
+			spliceCall(caller, block, index, callee, graph, components, 0)
+			changed = true
+		}
+	}
+	return changed
+}
+
+func findHeapAllocatingConstructor(caller *ir.Func, graph *callGraph, components *sccInfo) (*ir.Block, int, *ir.Func) {
+	for _, block := range caller.Blocks {
+		for index := range block.Instrs {
+			instruction := &block.Instrs[index]
+			if instruction.Op != ir.OCall {
+				continue
+			}
+			callee := directCallee(caller, instruction, graph.byName)
+			if callee == nil || components.recursive[callee] {
+				continue
+			}
+			if len(instruction.Args)-1 != len(callee.Params) {
+				continue
+			}
+			if !containsHeapAllocation(callee) {
+				continue
+			}
+			if inlinable(callee) {
+				return block, index, callee
+			}
+			if callee.RetAgg != nil && callee.RetValues &&
+				inlinableWithBudget(callee, preEscapeAggregateInstrBudget) {
+				return block, index, callee
+			}
+		}
+	}
+	return nil, 0, nil
+}
+
+func findHeapAllocationConsumer(caller *ir.Func, graph *callGraph, components *sccInfo) (*ir.Block, int, *ir.Func) {
+	for _, block := range caller.Blocks {
+		for index := range block.Instrs {
+			instruction := &block.Instrs[index]
+			if instruction.Op != ir.OCall {
+				continue
+			}
+			callee := directCallee(caller, instruction, graph.byName)
+			if callee == nil || components.recursive[callee] {
+				continue
+			}
+			if len(instruction.Args)-1 != len(callee.Params) {
+				continue
+			}
+			if callee.RetAgg == nil || !callee.RetValues {
+				continue
+			}
+			if callUsesHeapAllocation(caller, instruction) &&
+				inlinableWithBudget(callee, preEscapeInstrBudget) {
+				return block, index, callee
+			}
+		}
+	}
+	return nil, 0, nil
+}
+
+func callUsesHeapAllocation(function *ir.Func, call *ir.Instr) bool {
+	heapValues := make(map[uint32]bool)
+	heapSlots := make(map[localSlot]bool)
+	aliases := newAliasInfo(function)
+	for changed := true; changed; {
+		changed = false
+		for _, block := range function.Blocks {
+			for _, instruction := range block.Instrs {
+				if instruction.To.Kind == ir.RefTemp && !heapValues[instruction.To.ID] {
+					derived := instruction.Op == ir.OHeapAlloc
+					if heapValueDerivation(instruction, heapValues) {
+						derived = true
+					}
+					if instruction.Op.IsLoad() {
+						location := aliases.locOf(instruction.Arg(0), 1)
+						if location.class == cLocal {
+							slot := localSlot{base: location.key, offset: location.offset}
+							if heapSlots[slot] {
+								derived = true
+							}
+						}
+					}
+					if derived {
+						heapValues[instruction.To.ID] = true
+						changed = true
+					}
+				}
+
+				if !instruction.Op.IsStore() || !isHeapValue(instruction.Arg(0), heapValues) {
+					continue
+				}
+				location := aliases.locOf(instruction.Arg(1), 1)
+				if location.class != cLocal {
+					continue
+				}
+				slot := localSlot{base: location.key, offset: location.offset}
+				if !heapSlots[slot] {
+					heapSlots[slot] = true
+					changed = true
+				}
+			}
+		}
+	}
+	for _, argument := range call.Args[1:] {
+		if argument.Kind == ir.RefTemp && heapValues[argument.ID] {
+			return true
+		}
+	}
+	return false
+}
+
+func heapValueDerivation(instruction ir.Instr, heapValues map[uint32]bool) bool {
+	if instruction.Op == ir.OCopy || instruction.Op == ir.OCast {
+		return isHeapValue(instruction.Arg(0), heapValues)
+	}
+	if (instruction.Op != ir.OAdd && instruction.Op != ir.OSub) || instruction.Cls != ir.ClsP {
+		return false
+	}
+	if isHeapValue(instruction.Arg(0), heapValues) {
+		return true
+	}
+	if instruction.Op == ir.OAdd && isHeapValue(instruction.Arg(1), heapValues) {
+		return true
+	}
+	return false
+}
+
+func isHeapValue(reference ir.Ref, heapValues map[uint32]bool) bool {
+	return reference.Kind == ir.RefTemp && heapValues[reference.ID]
+}
+
+func containsHeapAllocation(function *ir.Func) bool {
+	for _, block := range function.Blocks {
+		for _, instruction := range block.Instrs {
+			if instruction.Op == ir.OHeapAlloc {
+				return true
+			}
+		}
+	}
+	return false
+}
+
+func findSplitCalleeToInline(caller *ir.Func, cg *callGraph, scc *sccInfo) (*ir.Block, int, *ir.Func) {
+	for _, block := range caller.Blocks {
+		for index := range block.Instrs {
+			instruction := &block.Instrs[index]
+			if instruction.Op != ir.OCall {
+				continue
+			}
+			callee := directCallee(caller, instruction, cg.byName)
+			if callee == nil || callee.NoSplit || scc.recursive[callee] {
+				continue
+			}
+			if len(instruction.Args)-1 != len(callee.Params) {
+				continue
+			}
+			if inlinable(callee) {
+				return block, index, callee
+			}
+		}
+	}
+	return nil, 0, nil
+}
+
 // inlineInto repeatedly inlines eligible calls in caller until none remain or
 // the per-function budget is spent. Re-scanning after each splice lets calls
 // exposed by a previous inline (the callee's own calls) be inlined in turn; the
@@ -362,12 +598,46 @@ func inlinableStructure(callee *ir.Func) bool {
 			if b.Instrs[k].Op == ir.OBlockAddr {
 				return false
 			}
+			if isFrameScopedRuntimeCall(callee, &b.Instrs[k]) {
+				return false
+			}
 		}
 		if b.Jmp.Kind == ir.JmpRet {
 			hasRet = true
 		}
 	}
 	return hasRet // needs a return to splice the continuation onto
+}
+
+func inlinable(callee *ir.Func) bool {
+	return inlinableWithBudget(callee, inlineSmallBudget)
+}
+
+func inlinableWithBudget(callee *ir.Func, instructionBudget int) bool {
+	if !inlinableStructure(callee) {
+		return false
+	}
+	return funcSize(callee) <= instructionBudget
+}
+
+func isFrameScopedRuntimeCall(function *ir.Func, instruction *ir.Instr) bool {
+	if instruction.Op != ir.OCall || len(instruction.Args) == 0 {
+		return false
+	}
+	callee := instruction.Arg(0)
+	if callee.Kind != ir.RefConst {
+		return false
+	}
+	constant := function.Consts[callee.ID]
+	if constant.Kind != ir.ConstSym {
+		return false
+	}
+	switch constant.Sym {
+	case "runtime.deferproc", "runtime.deferprocStack", "runtime.deferprocat", "runtime.deferreturn":
+		return true
+	default:
+		return false
+	}
 }
 
 // worthInlining applies the cost model to a structurally-inlinable callee named at
@@ -412,14 +682,16 @@ func worthInlining(callee *ir.Func, sites int) bool {
 func spliceCall(caller *ir.Func, b *ir.Block, idx int, callee *ir.Func, cg *callGraph, scc *sccInfo, depth int) {
 	call := b.Instrs[idx]
 	args := call.Args[1:]
-	result := call.To
+	results := []ir.Ref{call.To}
+	results = append(results, call.Defs...)
 
 	// An aggregate-returning callee returns a pointer to its value; the call's
 	// result is a pointer to a buffer holding a copy of it. Materialize that buffer
 	// and copy at each return (below), reproducing what the return ABI would emit.
 	aggRet := callee.RetAgg
+	copyAggregateReturn := aggRet != nil && !callee.RetValues
 	aggSize := 0
-	if aggRet != nil {
+	if copyAggregateReturn {
 		aggSize, _ = aggRet.Layout()
 	}
 
@@ -457,6 +729,9 @@ func spliceCall(caller *ir.Func, b *ir.Block, idx int, callee *ir.Func, cg *call
 		}
 	}
 	for id, words := range callee.StackPointerWords {
+		if int(id) >= nTemps {
+			continue
+		}
 		mapped := tempMap[id]
 		if mapped.Kind != ir.RefTemp {
 			continue
@@ -495,9 +770,9 @@ func spliceCall(caller *ir.Func, b *ir.Block, idx int, callee *ir.Func, cg *call
 
 	// The aggregate result buffer is allocated in the pre-call block, which
 	// dominates every cloned block and cont, so it is a legal definition of result.
-	if aggRet != nil && !result.IsNone() {
+	if copyAggregateReturn && !call.To.IsNone() {
 		b.Instrs = append(b.Instrs, ir.Instr{
-			Op: ir.OAlloc16, Cls: ir.ClsL, To: result,
+			Op: ir.OAlloc16, Cls: ir.ClsL, To: call.To,
 			Args: []ir.Ref{caller.Long(int64(aggSize))},
 		})
 	}
@@ -523,7 +798,8 @@ func spliceCall(caller *ir.Func, b *ir.Block, idx int, callee *ir.Func, cg *call
 	site := &ir.InlineSite{Callee: callee.Name, Call: call.Pos, Parent: call.Inl}
 	rebaseCache := map[*ir.InlineSite]*ir.InlineSite{}
 
-	var retVals, retBlocks = []ir.Ref{}, []*ir.Block{}
+	retVals := make([][]ir.Ref, len(results))
+	var retBlocks []*ir.Block
 	for _, s := range body {
 		tb := blockMap[s.orig]
 		for _, ph := range s.phis {
@@ -548,13 +824,20 @@ func spliceCall(caller *ir.Func, b *ir.Block, idx int, callee *ir.Func, cg *call
 		switch s.jmp.Kind {
 		case ir.JmpRet:
 			switch {
-			case aggRet != nil:
+			case copyAggregateReturn:
 				// Snapshot the returned aggregate into the result buffer.
-				if !result.IsNone() && !s.jmp.Arg.IsNone() {
-					aggCopy(caller, result, mapRef(s.jmp.Arg), aggSize, &tb.Instrs)
+				if !call.To.IsNone() && !s.jmp.Arg.IsNone() {
+					aggCopy(caller, call.To, mapRef(s.jmp.Arg), aggSize, &tb.Instrs)
 				}
-			case !result.IsNone() && !s.jmp.Arg.IsNone():
-				retVals = append(retVals, mapRef(s.jmp.Arg))
+			case len(results) > 0 && !results[0].IsNone() && !s.jmp.Arg.IsNone():
+				returned := []ir.Ref{s.jmp.Arg}
+				returned = append(returned, s.jmp.Args...)
+				if len(returned) != len(results) {
+					panic("opt: inlined return does not match call results")
+				}
+				for resultIndex, value := range returned {
+					retVals[resultIndex] = append(retVals[resultIndex], mapRef(value))
+				}
 				retBlocks = append(retBlocks, tb)
 			}
 			tb.Jmp = ir.Jmp{Kind: ir.JmpJmp, To: cont}
@@ -582,12 +865,28 @@ func spliceCall(caller *ir.Func, b *ir.Block, idx int, callee *ir.Func, cg *call
 	// Enter the inlined body.
 	b.Jmp = ir.Jmp{Kind: ir.JmpJmp, To: blockMap[entry]}
 
-	// A scalar call's result is the phi of the values the returns carried. An
-	// aggregate result was placed in its buffer at each return above, so it needs no
-	// phi (result is defined once, by the OAlloc16 in the pre-call block).
-	if !result.IsNone() && aggRet == nil {
-		ph := &ir.Phi{Cls: caller.ClassOf(result), To: result, Args: retVals, Blocks: retBlocks}
-		cont.Phis = append(cont.Phis, ph)
+	// Preserve a single return as a copy so alias and escape passes can see
+	// through it. Multiple return paths still require a phi. A non-scalar
+	// aggregate result was placed in its buffer at each return above, so it needs
+	// no phi.
+	if len(results) > 0 && !results[0].IsNone() && !copyAggregateReturn {
+		for resultIndex, result := range results {
+			values := retVals[resultIndex]
+			if len(values) == 1 {
+				copyResult := ir.Instr{
+					Op:   ir.OCopy,
+					Cls:  caller.ClassOf(result),
+					To:   result,
+					Args: []ir.Ref{values[0]},
+					Pos:  call.Pos,
+					Inl:  call.Inl,
+				}
+				cont.Instrs = append([]ir.Instr{copyResult}, cont.Instrs...)
+			} else {
+				phi := &ir.Phi{Cls: caller.ClassOf(result), To: result, Args: values, Blocks: retBlocks}
+				cont.Phis = append(cont.Phis, phi)
+			}
+		}
 	}
 
 	// The original terminator now lives in cont, so successors that named b as a
@@ -683,6 +982,7 @@ func cloneInstr(caller *ir.Func, in *ir.Instr, mapRef func(ir.Ref) ir.Ref, mapBl
 		Pos:               in.Pos,
 		Volatile:          in.Volatile,
 		Tail:              in.Tail,
+		ClosureCall:       in.ClosureCall,
 	}
 	if in.Blk != nil {
 		out.Blk = mapBlock(in.Blk)
