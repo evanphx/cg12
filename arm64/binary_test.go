@@ -3,6 +3,7 @@ package arm64_test
 import (
 	"testing"
 
+	"github.com/evanphx/cg12/cc"
 	"github.com/evanphx/cg12/ir"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -99,4 +100,33 @@ func TestBinaryUnitCompilesAndRuns(t *testing.T) {
 extern int f(int, int);
 int main(void){ return f(3, 4) == 19 ? 0 : 1; }`)
 	assert.Equal(t, 0, code)
+}
+
+// The binary format's promise is that a cached unit is a complete, usable module
+// -- the whole point being to skip the front end on a cache hit. It carried the
+// OAsm instruction but dropped its template, so a cached module with inline asm
+// decoded to an OAsm with nothing in it and panicked the backend on a nil
+// dereference. It preserved the register allocation faithfully while doing so.
+func TestBinaryUnitKeepsInlineAsm(t *testing.T) {
+	build := func() *ir.Module {
+		m, err := cc.Compile("asm.c", `
+int add(int a, int b){
+	int r; __asm__("add %w0, %w1, %w2" : "=r"(r) : "r"(a), "r"(b)); return r;
+}`)
+		require.NoError(t, err)
+		return m
+	}
+
+	data, err := build().MarshalBinary()
+	require.NoError(t, err)
+	decoded, err := ir.DecodeModule(data)
+	require.NoError(t, err)
+
+	// The template survived, and so did the operands it names.
+	asm := disasmModule(t, decoded)
+	require.Contains(t, asm, "\tadd w", "the template's instruction is in the code:\n%s", asm)
+
+	// A fresh decode compiles to the same code as the module it was cached from.
+	m1, _ := ir.DecodeModule(data)
+	require.Equal(t, disasmModule(t, m1), asm)
 }

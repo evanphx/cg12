@@ -284,6 +284,8 @@ func (e *enc) encTemp(t *Temp) {
 	e.iv(int64(t.Reg))
 	e.boolean(t.Fixed)
 	e.typeRef(t.Agg)
+	e.boolean(t.GCRef)
+	e.uv(uint64(t.GCType))
 }
 
 func (e *enc) encConst(c Const) {
@@ -359,7 +361,41 @@ func (e *enc) encInstr(in *Instr, blockRef func(*Block)) {
 	e.typeRef(in.RetAgg)
 	e.srcPos(in.Pos)
 	e.boolean(in.Tail)
+	e.boolean(in.Volatile)
+	e.asmOp(in.Asm)
+	e.inlineSite(in.Inl)
 	blockRef(in.Blk) // OBlockAddr target (nil for every other op)
+}
+
+// asmOp encodes an inline-asm template and its operand kinds, or its absence.
+func (e *enc) asmOp(a *AsmOp) {
+	if a == nil {
+		e.boolean(false)
+		return
+	}
+	e.boolean(true)
+	e.str(a.Template)
+	e.uv(uint64(len(a.Ops)))
+	for _, k := range a.Ops {
+		e.u8(byte(k))
+	}
+	e.uv(uint64(len(a.Regs)))
+	for _, r := range a.Regs {
+		e.str(r)
+	}
+}
+
+// inlineSite encodes an inline context: a chain of call sites, innermost first.
+func (e *enc) inlineSite(s *InlineSite) {
+	n := 0
+	for p := s; p != nil; p = p.Parent {
+		n++
+	}
+	e.uv(uint64(n))
+	for p := s; p != nil; p = p.Parent {
+		e.str(p.Callee)
+		e.srcPos(p.Call)
+	}
 }
 
 // --- decoder --------------------------------------------------------------
@@ -537,7 +573,7 @@ func (d *dec) decFunc(m *Module) *Func {
 }
 
 func (d *dec) decTemp(id int) *Temp {
-	return &Temp{
+	t := &Temp{
 		ID:    id,
 		Name:  d.str(),
 		Cls:   Cls(d.u8()),
@@ -545,7 +581,10 @@ func (d *dec) decTemp(id int) *Temp {
 		Reg:   int(d.iv()),
 		Fixed: d.boolean(),
 		Agg:   d.typeRef(),
+		GCRef: d.boolean(),
 	}
+	t.GCType = uint32(d.uv())
+	return t
 }
 
 func (d *dec) decConst() Const {
@@ -627,6 +666,45 @@ func (d *dec) decInstr(blockRef func() *Block) Instr {
 	in.RetAgg = d.typeRef()
 	in.Pos = d.srcPos()
 	in.Tail = d.boolean()
+	in.Volatile = d.boolean()
+	in.Asm = d.asmOp()
+	in.Inl = d.inlineSite()
 	in.Blk = blockRef()
 	return in
+}
+
+func (d *dec) asmOp() *AsmOp {
+	if !d.boolean() {
+		return nil
+	}
+	a := &AsmOp{Template: d.str()}
+	if n := int(d.uv()); n > 0 {
+		a.Ops = make([]AsmOperandKind, n)
+		for i := range a.Ops {
+			a.Ops[i] = AsmOperandKind(d.u8())
+		}
+	}
+	if n := int(d.uv()); n > 0 {
+		a.Regs = make([]string, n)
+		for i := range a.Regs {
+			a.Regs[i] = d.str()
+		}
+	}
+	return a
+}
+
+// inlineSite rebuilds the call-site chain, which was written innermost first.
+func (d *dec) inlineSite() *InlineSite {
+	n := int(d.uv())
+	if n == 0 {
+		return nil
+	}
+	sites := make([]*InlineSite, n)
+	for i := range sites {
+		sites[i] = &InlineSite{Callee: d.str(), Call: d.srcPos()}
+	}
+	for i := 0; i < n-1; i++ {
+		sites[i].Parent = sites[i+1]
+	}
+	return sites[0]
 }
