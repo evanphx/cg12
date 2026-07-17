@@ -54,6 +54,7 @@ func TestInstrRoundTripsEveryField(t *testing.T) {
 		Cmp:      CmpSlt,
 		Aux:      42,
 		Unroll:   3,
+		Amode:    9,
 		AggArgs:  []*AggType{agg},
 		Defs:     []Ref{{Kind: RefTemp, ID: 4}},
 		RetAgg:   agg,

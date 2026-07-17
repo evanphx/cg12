@@ -1494,9 +1494,9 @@ func (m *mc) extend(in *ir.Instr) {
 
 func (m *mc) load(in *ir.Instr) {
 	sz := loadSize(in.Op, in.Cls)
-	if len(in.Args) == 2 { // indexed: [base, index] with extend/scale in Aux
+	if len(in.Args) == 2 { // indexed: [base, index] with extend/scale in Amode
 		base := m.src(in.Args[0], 1, 8)
-		option, s := decodeAmode(in.Aux)
+		option, s := decodeAmode(in.Amode)
 		index := m.src(in.Args[1], 0, indexSize(option))
 		d, done := m.dst(in.To, sz)
 		switch in.Op {
@@ -1554,7 +1554,7 @@ func (m *mc) store(in *ir.Instr) {
 	val := m.src(in.Args[0], 0, valSz)
 	if len(in.Args) == 3 { // indexed: [value, base, index]
 		base := m.src(in.Args[1], 1, 8)
-		option, s := decodeAmode(in.Aux)
+		option, s := decodeAmode(in.Amode)
 		index := m.src(in.Args[2], 2, indexSize(option))
 		switch in.Op {
 		case ir.OStorel:
@@ -1592,9 +1592,9 @@ func (m *mc) store(in *ir.Instr) {
 }
 
 // decodeAmode unpacks the extend option and scale bit an addressing fold stored
-// in a memory op's Aux.
-func decodeAmode(aux int64) (option, s uint32) {
-	return uint32(aux>>1) & 7, uint32(aux & 1)
+// in a memory op's Amode.
+func decodeAmode(amode int32) (option, s uint32) {
+	return uint32(amode>>1) & 7, uint32(amode & 1)
 }
 
 // indexSize is the spill-reload width of an index register: 32-bit for an SXTW

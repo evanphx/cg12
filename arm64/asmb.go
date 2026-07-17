@@ -80,9 +80,9 @@ type asmb interface {
 	// Memory. load/store use [base]; loadIdx/storeIdx use [base, index] with the
 	// extend/scale encoded in aux. The op fixes the width and signedness.
 	load(op ir.Op, cls ir.Cls, rd, base Reg)
-	loadIdx(op ir.Op, cls ir.Cls, rd, base, index Reg, aux int64)
+	loadIdx(op ir.Op, cls ir.Cls, rd, base, index Reg, amode int32)
 	store(op ir.Op, val, base Reg)
-	storeIdx(op ir.Op, val, base, index Reg, aux int64)
+	storeIdx(op ir.Op, val, base, index Reg, amode int32)
 
 	// Control flow. Branch targets are blocks so each backend formats its own
 	// label; brind is a computed goto through a register, brk halts.
@@ -377,9 +377,9 @@ func (b *mcAsm) load(op ir.Op, cls ir.Cls, rd, base Reg) {
 		b.fail("arm64: unsupported load %s", op)
 	}
 }
-func (b *mcAsm) loadIdx(op ir.Op, cls ir.Cls, rd, base, index Reg, aux int64) {
+func (b *mcAsm) loadIdx(op ir.Op, cls ir.Cls, rd, base, index Reg, amode int32) {
 	d, ba, ix := mreg(rd), mreg(base), mreg(index)
-	option, s := decodeAmode(aux)
+	option, s := decodeAmode(amode)
 	sz := loadSize(op, cls)
 	switch op {
 	case ir.OLoadl:
@@ -421,9 +421,9 @@ func (b *mcAsm) store(op ir.Op, val, base Reg) {
 		b.fail("arm64: unsupported store %s", op)
 	}
 }
-func (b *mcAsm) storeIdx(op ir.Op, val, base, index Reg, aux int64) {
+func (b *mcAsm) storeIdx(op ir.Op, val, base, index Reg, amode int32) {
 	v, ba, ix := mreg(val), mreg(base), mreg(index)
-	option, s := decodeAmode(aux)
+	option, s := decodeAmode(amode)
 	switch op {
 	case ir.OStorel:
 		b.prog.Emit(a64.StrReg(true, v, ba, ix, option, s))

@@ -12,7 +12,33 @@ type Instr struct {
 	To   Ref   // result temporary, or R when the op has no result
 	Args []Ref // operands
 	Cmp  Cmp   // predicate, valid only when Op == OCmp
-	Aux  int64 // op-specific immediate: blit size, vaarg type id, call stack bytes
+
+	// Aux is an op-specific immediate. Each op that uses it reads exactly one
+	// meaning, and they are mutually exclusive, but the field is untyped, so the
+	// meanings are only kept apart by which op carries them -- which is why the two
+	// that once shared OCall (recursion depth and stack bytes) were split out (see
+	// Unroll). The meanings still here:
+	//   - OBlit / aggregate copy: the number of bytes to copy.
+	//   - OVaArg: the type id of the argument being fetched.
+	//   - OCall (after ABI lowering): the outgoing stack-argument area size.
+	//   - OPar / OArg (after ABI lowering): a stacked argument's byte offset.
+	// The first two are set by the front end and survive serialization; the last
+	// two are established during lowering and never reach the binary format.
+	Aux int64
+
+	// Amode carries a target's folded memory addressing mode on a load or store,
+	// or 0 for a plain [base] or [base, #imm] access. It is set during lowering
+	// (arm64's foldAddressing packs its extend option and scale here) and read by
+	// the emitter; it never reaches the binary format, which only transports
+	// pre-lowering IR.
+	//
+	// It has a field of its own rather than riding in Aux because a folded load is
+	// still an OLoadl: the op does not change, so Aux on that op would mean "the
+	// addressing mode" after the fold and "nothing" before it, on instructions a
+	// pass cannot tell apart. That is the overload ir/instr.go's own contract warns
+	// against, and the reason the fold was the one Aux meaning most able to be
+	// misread by a pass that ran after it.
+	Amode int32
 
 	// Unroll is the recursion depth the inliner marks an OCall with while it
 	// decides how far to unroll a cycle. It is transient: opt clears it when the

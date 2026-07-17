@@ -358,6 +358,7 @@ func (e *enc) encInstr(in *Instr, blockRef func(*Block)) {
 	e.u8(byte(in.Cmp))
 	e.iv(in.Aux)
 	e.iv(int64(in.Unroll))
+	e.iv(int64(in.Amode))
 	e.uv(uint64(len(in.AggArgs)))
 	for _, t := range in.AggArgs {
 		e.typeRef(t)
@@ -664,6 +665,7 @@ func (d *dec) decInstr(blockRef func() *Block) Instr {
 	in.Cmp = Cmp(d.u8())
 	in.Aux = d.iv()
 	in.Unroll = int32(d.iv())
+	in.Amode = int32(d.iv())
 	if n := int(d.uv()); n > 0 {
 		in.AggArgs = make([]*AggType, n)
 		for i := range in.AggArgs {

@@ -237,10 +237,10 @@ func (s *sel) load(in *ir.Instr) {
 	sz := loadSize(in.Op, in.Cls)
 	if len(in.Args) == 2 { // indexed
 		base := s.src(in.Args[0], 1, 8)
-		option, _ := decodeAmode(in.Aux)
+		option, _ := decodeAmode(in.Amode)
 		index := s.src(in.Args[1], 0, indexSize(option))
 		d, done := s.dst(in.To, sz)
-		s.b.loadIdx(in.Op, in.Cls, d, base, index, in.Aux)
+		s.b.loadIdx(in.Op, in.Cls, d, base, index, in.Amode)
 		done()
 		return
 	}
@@ -255,9 +255,9 @@ func (s *sel) store(in *ir.Instr) {
 	val := s.src(in.Args[0], 0, storeSize(in.Op))
 	if len(in.Args) == 3 { // indexed
 		base := s.src(in.Args[1], 1, 8)
-		option, _ := decodeAmode(in.Aux)
+		option, _ := decodeAmode(in.Amode)
 		index := s.src(in.Args[2], 2, indexSize(option))
-		s.b.storeIdx(in.Op, val, base, index, in.Aux)
+		s.b.storeIdx(in.Op, val, base, index, in.Amode)
 		return
 	}
 	s.b.store(in.Op, val, s.src(in.Args[1], 1, 8))

@@ -39,7 +39,7 @@ func lower(f *ir.Func, tlsModel TLSModel) error {
 //
 // (with the sext and shift optional, and k matching the access width for a
 // scaled index) and rewrites the memory op to carry (base, index) plus the
-// extend/scale in Aux, dropping the now-dead address arithmetic. A load then
+// extend/scale in Amode, dropping the now-dead address arithmetic. A load then
 // carries [base, index]; a store carries [value, base, index].
 func foldAddressing(f *ir.Func) {
 	uses, defOf := defUse(f)
@@ -94,7 +94,7 @@ func foldAddressing(f *ir.Func) {
 			}
 
 			nop(add)
-			in.Aux = int64(option)<<1 | int64(s)
+			in.Amode = int32(option)<<1 | int32(s)
 			if in.Op.IsLoad() {
 				in.Args = []ir.Ref{base, index}
 			} else {
