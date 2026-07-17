@@ -39,9 +39,16 @@ func subOfType(t cc.Type) ir.SubCls {
 }
 
 // aggOf builds (and memoizes) the cg12 aggregate type mirroring a C struct or
-// union, registering it with the module. The layout follows the natural C rules,
-// which cg12's own layout reproduces, so field offsets agree with the type
-// checker's.
+// union, registering it with the module. It is reached only where an aggregate
+// crosses the ABI by value -- a parameter, an argument, a return -- which is
+// exactly where its layout has to be right.
+//
+// The type is built from the members' types, and cg12's layout rules then
+// reproduce the natural C ones. That is an assumption, not a derivation: this
+// never consults the type checker's own offsets. Where the two disagree the
+// backends classify from this type and place the fields somewhere C did not, so
+// the check below is what stands between a disagreement and a struct that
+// arrives at a gcc-compiled callee with its fields moved.
 func (g *gen) aggOf(t cc.Type) *ir.AggType {
 	if a, ok := g.aggs[t]; ok {
 		return a
@@ -60,7 +67,26 @@ func (g *gen) aggOf(t cc.Type) *ir.AggType {
 		}
 	}
 	g.mod.AddType(agg)
+	g.checkAggLayout(t, agg)
 	return agg
+}
+
+// checkAggLayout requires cg12's layout of an aggregate to be the one C gave it.
+//
+// A bitfield is the case that breaks it: its Type() is the whole storage type,
+// so `unsigned a:1, b:1` builds two four-byte fields where C packs both into
+// one, and the type comes out five times too big. Same-unit calls still work,
+// because both sides share the same wrong layout -- it only shows when the
+// struct meets code someone else compiled, which no test did.
+func (g *gen) checkAggLayout(t cc.Type, agg *ir.AggType) {
+	size, align := agg.Layout()
+	if size == int(t.Size()) && align == t.Align() {
+		return
+	}
+	g.fail("cc: cannot pass %s by value: cg12 lays it out as %d bytes (align %d) "+
+		"but C says %d (align %d) -- a bitfield, or a packed or aligned attribute, "+
+		"which cg12's aggregate types cannot yet express",
+		aggName(t), size, align, t.Size(), t.Align())
 }
 
 // fieldOf maps one C member type to an aggregate field: a nested aggregate keeps
