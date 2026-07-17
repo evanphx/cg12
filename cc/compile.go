@@ -51,6 +51,9 @@ type lval struct {
 	// the actual __va_list state (which lives in the caller), rather than being
 	// the state itself as a local va_list is.
 	vaRef bool
+	// thread marks a symbol as thread-local: its address is per-thread, reached
+	// through the TLS ABI rather than being a link-time constant.
+	thread bool
 }
 
 // vaStorage returns the address of a va_list's __va_list state. A local va_list
@@ -69,6 +72,9 @@ func (g *gen) vaStorage(v lval) ir.Ref {
 // carry a prebuilt ref across function boundaries).
 func (g *gen) addrOf(v lval) ir.Ref {
 	if v.sym != "" {
+		if v.thread {
+			return g.fn.ThreadSym(v.sym)
+		}
 		return g.fn.Sym(v.sym, 0)
 	}
 	return v.addr
@@ -425,6 +431,17 @@ func (g *gen) genGlobalDecl(d *cc.Declaration) {
 		if t.Kind() == cc.Function {
 			continue // a prototype needs no storage
 		}
+		thread := dcl.IsThreadLocal()
+
+		// `extern int x;` says x is defined in another translation unit: it needs a
+		// name to reference, not storage. Defining it here would give this unit a
+		// private zero-filled x that quietly shadows the real one. `extern int x =
+		// 1;` is a definition despite the keyword, hence the initializer test.
+		if dcl.IsExtern() && !dcl.HasInitializer() {
+			g.define(dcl.Name(), lval{sym: dcl.Name(), typ: t, thread: thread})
+			continue
+		}
+
 		sec := sectionOf(t)
 		if sec == "" {
 			// Classify by const-ness so a backend can place it in read-only (.rodata)
@@ -434,7 +451,15 @@ func (g *gen) genGlobalDecl(d *cc.Declaration) {
 				sec = ".rodata"
 			}
 		}
-		data := &ir.Data{Name: dcl.Name(), Align: align(t), Linkage: ir.Linkage{Section: sec}}
+		data := &ir.Data{Name: dcl.Name(), Align: align(t), Linkage: ir.Linkage{
+			Section: sec,
+			// External linkage is what makes a definition visible to the linker;
+			// `static` is internal and stays private to this unit.
+			Export: dcl.Linkage() == cc.External,
+			// A thread-local's bytes are the image each thread's block starts from,
+			// not data used in place.
+			Thread: thread,
+		}}
 		if id.Case == cc.InitDeclaratorInit {
 			data.Items = g.globalItems(t, id.Initializer)
 		}
@@ -442,7 +467,7 @@ func (g *gen) genGlobalDecl(d *cc.Declaration) {
 			data.Items = []ir.DataItem{{Zero: int(t.Size())}}
 		}
 		g.mod.Data = append(g.mod.Data, data)
-		g.define(dcl.Name(), lval{sym: dcl.Name(), typ: t}) // reachable via symbol
+		g.define(dcl.Name(), lval{sym: dcl.Name(), typ: t, thread: thread}) // reachable via symbol
 	}
 }
 
