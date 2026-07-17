@@ -161,6 +161,8 @@ func asmLine(p *Program, line string) error {
 		return a.cset()
 	case "mrs":
 		return a.mrs()
+	case "msr":
+		return a.msr()
 	case "ldp", "stp":
 		return a.pair(mn == "ldp")
 	// Floating point. The encoders have been here all along; the parser could not
@@ -423,11 +425,51 @@ func (a *asmCtx) cmp() error {
 	return nil
 }
 
+// accessLog2 is the base-2 log of a load/store's access width, which is the
+// scale a register offset is shifted by when it is scaled ([base, idx, lsl #k]).
+var accessLog2 = map[string]uint32{
+	"ldrb": 0, "strb": 0,
+	"ldrh": 1, "strh": 1,
+	"ldrsw": 2,
+}
+
 func (a *asmCtx) loadStore(mn string) error {
 	rt, w, _, err := a.reg(0)
 	if err != nil {
 		return err
 	}
+	scale := accessLog2[mn]
+	if mn == "ldr" || mn == "str" {
+		scale = 2
+		if w {
+			scale = 3
+		}
+	}
+
+	// [base, index, extend #shift] -- the register-offset form -- when the operand
+	// after the base is a register rather than an immediate.
+	if idx, opt, s, ok, err := a.memReg(1, scale); err != nil {
+		return err
+	} else if ok {
+		switch mn {
+		case "ldr":
+			a.p.Emit(LdrReg(w, rt, idx.base, idx.index, opt, s))
+		case "ldrb":
+			a.p.Emit(LdrbReg(rt, idx.base, idx.index, opt, s))
+		case "ldrh":
+			a.p.Emit(LdrhReg(rt, idx.base, idx.index, opt, s))
+		case "ldrsw":
+			a.p.Emit(LdrswReg(rt, idx.base, idx.index, opt, s))
+		case "str":
+			a.p.Emit(StrReg(w, rt, idx.base, idx.index, opt, s))
+		case "strb":
+			a.p.Emit(StrbReg(rt, idx.base, idx.index, opt, s))
+		case "strh":
+			a.p.Emit(StrhReg(rt, idx.base, idx.index, opt, s))
+		}
+		return nil
+	}
+
 	base, off, err := a.mem(1)
 	if err != nil {
 		return err
@@ -452,6 +494,96 @@ func (a *asmCtx) loadStore(mn string) error {
 		a.p.Emit(StrhImm(rt, base, uint32(off)))
 	}
 	return nil
+}
+
+type memIndex struct{ base, index Reg }
+
+// memReg parses the register-offset memory form [base, index{, extend {#shift}}],
+// reporting ok=false (with no error) when the operand is not that form so the
+// caller can fall back to the base+immediate parser.
+//
+// scale is the access width's log2: a scaled index (a trailing #shift) is only
+// legal when the shift equals it -- `[x, w, sxtw #2]` on a word load, because the
+// index counts elements, not bytes. The reference assembler rejects any other
+// shift, and so does this.
+func (a *asmCtx) memReg(i int, scale uint32) (memIndex, uint32, uint32, bool, error) {
+	if i >= len(a.ops) {
+		return memIndex{}, 0, 0, false, nil
+	}
+	inner := strings.TrimSpace(strings.Join(a.ops[i:], ", "))
+	if !strings.HasPrefix(inner, "[") || !strings.HasSuffix(inner, "]") {
+		return memIndex{}, 0, 0, false, nil
+	}
+	fields := splitOperands(strings.TrimSpace(inner[1 : len(inner)-1]))
+	if len(fields) < 2 {
+		return memIndex{}, 0, 0, false, nil
+	}
+	// The offset must be a register for this form; otherwise defer to mem().
+	idx, idxW, idxFlt, ok := parseReg(fields[1])
+	if !ok || idxFlt {
+		return memIndex{}, 0, 0, false, nil
+	}
+	base, _, baseFlt, ok := parseReg(fields[0])
+	if !ok || baseFlt {
+		return memIndex{}, 0, 0, false, fmt.Errorf("%s: %q is not a base register", a.mn, fields[0])
+	}
+
+	// The extend: LSL for an x index (or absent), an sxtw/uxtw for a w index. A
+	// bare register with no extend is LSL #0.
+	option := ExtLSL
+	if idxW {
+		// An x index defaults to LSL; a w index has to say sxtw or uxtw, since the
+		// high half's meaning is not otherwise defined.
+	} else {
+		option = ExtUXTW // a plain w index with no extend is unusual; require one below
+	}
+	s := uint32(0)
+	if len(fields) >= 3 {
+		opt, shift, hasShift, err := parseExtend(fields[2], scale)
+		if err != nil {
+			return memIndex{}, 0, 0, false, fmt.Errorf("%s: %w", a.mn, err)
+		}
+		option = opt
+		if hasShift {
+			if shift != scale {
+				return memIndex{}, 0, 0, false, fmt.Errorf("%s: index shift #%d does not match the %d-byte access", a.mn, shift, 1<<scale)
+			}
+			s = 1
+		}
+	} else if !idxW {
+		return memIndex{}, 0, 0, false, fmt.Errorf("%s: a w index needs an extend (sxtw/uxtw)", a.mn)
+	}
+	return memIndex{base, idx}, option, s, true, nil
+}
+
+// parseExtend decodes an index extend `sxtw`, `uxtw`, or `lsl` with an optional
+// `#shift`. It reports whether a shift was written and returns its value.
+func parseExtend(s string, scale uint32) (option, shift uint32, hasShift bool, err error) {
+	toks := strings.Fields(s)
+	if len(toks) == 0 {
+		return 0, 0, false, fmt.Errorf("empty index extend")
+	}
+	switch toks[0] {
+	case "lsl":
+		option = ExtLSL
+	case "uxtw":
+		option = ExtUXTW
+	case "sxtw":
+		option = ExtSXTW
+	default:
+		return 0, 0, false, fmt.Errorf("%q is not an index extend this assembler encodes", toks[0])
+	}
+	if len(toks) == 2 {
+		v, ok := parseImm(toks[1])
+		if !ok || v < 0 {
+			return 0, 0, false, fmt.Errorf("%q is not a shift amount", toks[1])
+		}
+		return option, uint32(v), true, nil
+	}
+	if len(toks) > 2 {
+		return 0, 0, false, fmt.Errorf("%q has too many parts for an index extend", s)
+	}
+	return option, 0, false, nil
 }
 
 // mem parses a memory operand [base] or [base, #off] spanning operands i.. (the
@@ -929,10 +1061,31 @@ func (a *asmCtx) mrs() error {
 	if !w64 {
 		return fmt.Errorf("mrs: %q is a w register; a system register read gives an x", a.ops[0])
 	}
-	if strings.ToLower(a.ops[1]) != "tpidr_el0" {
-		return fmt.Errorf("mrs: %q is not a system register this assembler encodes (only tpidr_el0)", a.ops[1])
+	s, ok := SysRegs[strings.ToLower(a.ops[1])]
+	if !ok {
+		return fmt.Errorf("mrs: %q is not a system register this assembler names", a.ops[1])
 	}
-	a.p.Emit(MrsTPIDR(rt))
+	a.p.Emit(Mrs(rt, s))
+	return nil
+}
+
+// msr assembles MSR <sysreg>, <Xt> -- write a system register from a general one.
+func (a *asmCtx) msr() error {
+	if len(a.ops) != 2 {
+		return fmt.Errorf("msr takes a system register and a register")
+	}
+	s, ok := SysRegs[strings.ToLower(a.ops[0])]
+	if !ok {
+		return fmt.Errorf("msr: %q is not a system register this assembler names", a.ops[0])
+	}
+	rt, w64, _, err := a.reg(1)
+	if err != nil {
+		return err
+	}
+	if !w64 {
+		return fmt.Errorf("msr: %q is a w register; a system register write takes an x", a.ops[1])
+	}
+	a.p.Emit(Msr(s, rt))
 	return nil
 }
 

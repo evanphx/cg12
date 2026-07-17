@@ -329,6 +329,16 @@ var encodingCases = []encodingCase{
 	{"stxr w3, x4, [x5]", Stxr(true, 3, 4, 5)},
 	{"stlxr w6, w7, [x8]", Stlxr(false, 6, 7, 8)},
 	{"stlxr w9, x10, [x11]", Stlxr(true, 9, 10, 11)},
+
+	// System-register transfer (mrs already had tpidr_el0; the rest are new).
+	{"mrs x0, fpcr", Mrs(0, SysRegs["fpcr"])},
+	{"mrs x1, fpsr", Mrs(1, SysRegs["fpsr"])},
+	{"mrs x2, nzcv", Mrs(2, SysRegs["nzcv"])},
+	{"mrs x3, cntvct_el0", Mrs(3, SysRegs["cntvct_el0"])},
+	{"mrs x4, midr_el1", Mrs(4, SysRegs["midr_el1"])},
+	{"msr fpcr, x5", Msr(SysRegs["fpcr"], 5)},
+	{"msr nzcv, x6", Msr(SysRegs["nzcv"], 6)},
+	{"msr tpidr_el0, x7", Msr(SysRegs["tpidr_el0"], 7)},
 }
 
 var moreEncodingCases = []encodingCase{

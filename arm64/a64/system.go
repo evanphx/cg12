@@ -74,3 +74,53 @@ func exSize(w64 bool) uint32 {
 	}
 	return 2
 }
+
+// System-register access. A system register is named by five small fields
+// (op0/op1, CRn, CRm, op2); MRS reads one into a general register, MSR writes
+// one from it. The named-register set below is the user-accessible common ones
+// -- the floating-point control and status words, the condition flags, the
+// counters and cache-geometry registers a runtime reads -- rather than the whole
+// architectural space, which runs to hundreds.
+
+// SysReg identifies a system register by its encoding fields. o0 is op0-2, the
+// two-bit value that actually lands in the instruction.
+type SysReg struct {
+	o0, op1, crn, crm, op2 uint32
+	name                   string
+}
+
+// Mrs encodes MRS <Xt>, <sysreg> -- read a system register.
+func Mrs(rt Reg, s SysReg) uint32 {
+	return 0xd5300000 | s.o0<<19 | s.op1<<16 | s.crn<<12 | s.crm<<8 | s.op2<<5 | r(rt)
+}
+
+// Msr encodes MSR <sysreg>, <Xt> -- write a system register.
+func Msr(s SysReg, rt Reg) uint32 {
+	return 0xd5100000 | s.o0<<19 | s.op1<<16 | s.crn<<12 | s.crm<<8 | s.op2<<5 | r(rt)
+}
+
+// SysRegs are the system registers this assembler names, keyed by their lower-case
+// mnemonic. Fields are (o0, op1, CRn, CRm, op2); o0 is op0-2 and is 1 for every
+// register here (op0 == 3, the user/system range).
+var SysRegs = map[string]SysReg{
+	"tpidr_el0":   {1, 3, 13, 0, 2, "tpidr_el0"},   // thread pointer (EL0)
+	"tpidrro_el0": {1, 3, 13, 0, 3, "tpidrro_el0"}, // read-only thread pointer
+	"fpcr":        {1, 3, 4, 4, 0, "fpcr"},         // FP control
+	"fpsr":        {1, 3, 4, 4, 1, "fpsr"},         // FP status
+	"nzcv":        {1, 3, 4, 2, 0, "nzcv"},         // condition flags
+	"ctr_el0":     {1, 3, 0, 0, 1, "ctr_el0"},      // cache type
+	"dczid_el0":   {1, 3, 0, 0, 7, "dczid_el0"},    // DC ZVA block size
+	"cntvct_el0":  {1, 3, 14, 0, 2, "cntvct_el0"},  // virtual counter
+	"cntfrq_el0":  {1, 3, 14, 0, 0, "cntfrq_el0"},  // counter frequency
+	"midr_el1":    {1, 0, 0, 0, 0, "midr_el1"},     // main ID (EL1)
+	"mpidr_el1":   {1, 0, 0, 0, 5, "mpidr_el1"},    // multiprocessor affinity
+}
+
+// sysRegByEncoding is the inverse of SysRegs, for the disassembler.
+var sysRegByEncoding = func() map[uint32]string {
+	m := map[uint32]string{}
+	for _, s := range SysRegs {
+		m[s.o0<<19|s.op1<<16|s.crn<<12|s.crm<<8|s.op2<<5] = s.name
+	}
+	return m
+}()

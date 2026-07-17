@@ -673,8 +673,18 @@ func disasmMovVec(w uint32) string {
 // --- system ----------------------------------------------------------------
 
 func disasmSystem(w uint32) string {
-	if w&^uint32(0x1f) == 0xd53bd040 {
-		return fmt.Sprintf("mrs x%d, tpidr_el0", w&0x1f)
+	// MRS <Xt>, <sysreg> and MSR <sysreg>, <Xt>: the register-transfer forms. The
+	// high bits fix everything but the L bit (bit 20, read vs write) and the five
+	// fields naming the system register, which live in bits 19..5 and which
+	// sysRegByEncoding maps back for the set we name.
+	read := w&0xfff00000 == 0xd5300000
+	if read || w&0xfff00000 == 0xd5100000 {
+		if name, ok := sysRegByEncoding[w&0xfffe0]; ok {
+			if read {
+				return fmt.Sprintf("mrs x%d, %s", w&0x1f, name)
+			}
+			return fmt.Sprintf("msr %s, x%d", name, w&0x1f)
+		}
 	}
 	// SVC #imm16: the exception-generating group, with the syscall selector.
 	if w&0xffe0001f == 0xd4000001 {

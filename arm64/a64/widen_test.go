@@ -55,6 +55,19 @@ var widenedCases = []string{
 	"ldaxr w4, [x5]", "ldaxr x6, [x7]",
 	"stxr w0, w1, [x2]", "stxr w3, x4, [x5]",
 	"stlxr w6, w7, [x8]", "stlxr w9, x10, [x11]",
+
+	// Register-offset addressing, which only the base+immediate forms could parse.
+	"ldr w1, [x2, w3, sxtw #2]", "ldr w4, [x5, x6, lsl #2]",
+	"ldr x7, [x8, x9, lsl #3]", "ldr x0, [x1, x2]",
+	"str w1, [x2, w3, sxtw #2]", "str x3, [x4, x5, lsl #3]",
+	"ldrb w1, [x2, w3, sxtw]", "ldrb w4, [x5, x6]",
+	"strb w1, [x2, w3, uxtw]",
+	"ldrh w4, [x5, w6, uxtw #1]", "ldrsw x1, [x2, w3, sxtw #2]",
+
+	// System-register transfer, beyond the single tpidr_el0 the parser knew.
+	"mrs x0, fpcr", "mrs x1, fpsr", "mrs x2, nzcv",
+	"mrs x3, cntvct_el0", "mrs x4, ctr_el0",
+	"msr fpcr, x5", "msr nzcv, x6", "msr tpidr_el0, x7",
 }
 
 func TestWidenedParsingMatchesAssembler(t *testing.T) {
@@ -94,6 +107,9 @@ func TestWidenedFormsRejectBadOperands(t *testing.T) {
 		{"ldxr w0, [x1, #8]", "an exclusive access takes no offset"},
 		{"svc x0", "svc takes an immediate, not a register"},
 		{"isb ish", "only the sy domain is encoded for isb"},
+		{"ldr w0, [x1, w2, sxtw #1]", "shift #1 does not match a 4-byte word access"},
+		{"ldr x0, [x1, w2]", "a w index needs an extend"},
+		{"ldr w0, [x1, x2, ror #2]", "ror is not an index extend"},
 	} {
 		_, err := Assemble(c.src)
 		require.Errorf(t, err, "%q (%s) must not assemble", c.src, c.why)
