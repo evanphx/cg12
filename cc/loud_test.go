@@ -14,13 +14,19 @@ import (
 func TestUnfoldableConstructsAreDiagnosed(t *testing.T) {
 	for _, c := range []struct{ name, src, want string }{
 		{
-			// collectLabels walks compound, labelled, selection and iteration
-			// statements -- not expression statements, so a label inside a GNU
-			// statement expression never gets a block. The parser accepts the goto,
-			// so nothing upstream catches it, and emitting nothing for a jump means
-			// falling through to whatever follows instead.
-			name: "goto a label inside a statement expression",
-			src:  `int f(int a){ int x = ({ if (a) goto deep; a; deep: a + 1; }); return x; }`,
+			// collectLabels pre-allocates a block for every label reachable from a
+			// goto, so a name still missing here is one that does not exist -- and
+			// emitting nothing for a jump is not a failed jump, it is a fall-through
+			// to whatever follows. The parser catches an undefined label in ordinary
+			// code, so this is the case it does not see: a jump INTO a statement
+			// expression, which gcc rejects as "jump into statement expression" and
+			// modernc accepts.
+			name: "goto into a statement expression",
+			src: `int f(int a){
+				int x = ({ int t = a; inner: t; });
+				if (x < 5) goto inner;
+				return x;
+			}`,
 			want: "no such label",
 		},
 	} {

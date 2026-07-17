@@ -74,6 +74,29 @@ func labeledItem(bi *cc.BlockItem) bool {
 		bi.Statement.Case == cc.StatementLabeled
 }
 
+// trailingExpr peels any labels off a statement and reports the expression
+// underneath, which is a statement expression's value. The labels come back so
+// the caller can start their blocks first: they are jump targets, and the
+// expression is what the last of them runs.
+func trailingExpr(s *cc.Statement) (labels []*cc.LabeledStatement, expr cc.ExpressionNode, ok bool) {
+	for s != nil && s.Case == cc.StatementLabeled {
+		ls := s.LabeledStatement
+		if ls == nil {
+			return nil, nil, false
+		}
+		labels = append(labels, ls)
+		s = ls.Statement
+	}
+	if s == nil || s.Case != cc.StatementExpr {
+		return nil, nil, false
+	}
+	es := s.ExpressionStatement
+	if es == nil || es.ExpressionList == nil {
+		return nil, nil, false
+	}
+	return labels, es.ExpressionList, true
+}
+
 // genStmtExpr evaluates a GNU statement expression ({ ... }): its statements run
 // in a fresh scope, and the value of the whole expression is the value of the
 // final expression statement.
@@ -81,15 +104,37 @@ func (g *gen) genStmtExpr(cs *cc.CompoundStatement) ir.Ref {
 	if cs == nil {
 		return ir.R
 	}
+	// A label inside a statement expression needs a block before the goto that
+	// targets it is generated, exactly as one in a function body does. The
+	// function-level collectLabels cannot see it: it walks statements, and a
+	// statement expression hangs off an expression -- reaching it from there would
+	// mean walking every expression node kind. Here the compound statement is
+	// already in hand, and this runs before its body, which is what the
+	// pre-allocation is for.
+	//
+	// They are dropped again on the way out, so only a jump within the statement
+	// expression can reach them. Jumping in from outside is not legal C -- gcc
+	// calls it "jump into statement expression" -- and leaving them behind would
+	// let one resolve, and only when the goto came after the expression in the
+	// source. A jump OUT of one targets a label the function level collected.
+	for _, name := range g.collectInnerLabels(cs) {
+		defer delete(g.labels, name)
+	}
 	g.push()
 	defer g.pop()
 	result := ir.R
 	for l := cs.BlockItemList; l != nil; l = l.BlockItemList {
 		bi := l.BlockItem
-		if l.BlockItemList == nil && bi.Case == cc.BlockItemStmt &&
-			bi.Statement != nil && bi.Statement.Case == cc.StatementExpr {
-			if es := bi.Statement.ExpressionStatement; es != nil && es.ExpressionList != nil {
-				result = g.genExpr(es.ExpressionList) // the trailing expression is the value
+		if l.BlockItemList == nil && bi.Case == cc.BlockItemStmt && bi.Statement != nil {
+			if labels, es, ok := trailingExpr(bi.Statement); ok {
+				// The value is the final expression, which may sit behind labels:
+				// `({ ...; done: x; })` is legal and its value is x. Testing for a
+				// bare expression statement misses that and leaves the whole
+				// statement expression with no value at all.
+				for _, ls := range labels {
+					g.genLabeled(ls)
+				}
+				result = g.genExpr(es)
 				break
 			}
 		}
@@ -469,6 +514,24 @@ func (g *gen) collectCases(s *cc.Statement, cases *[]switchCase, defBlk **ir.Blo
 	case cc.StatementIteration:
 		g.collectCases(s.IterationStatement.Statement, cases, defBlk)
 	}
+}
+
+// collectInnerLabels pre-allocates a block for every label in a statement
+// expression, returning their names so the caller can drop them again: they are
+// reachable only from within it.
+func (g *gen) collectInnerLabels(cs *cc.CompoundStatement) []string {
+	before := make(map[string]bool, len(g.labels))
+	for n := range g.labels {
+		before[n] = true
+	}
+	g.collectLabels(cs)
+	var added []string
+	for n := range g.labels {
+		if !before[n] {
+			added = append(added, n)
+		}
+	}
+	return added
 }
 
 // collectLabels pre-allocates a block for every goto label in the function, so a

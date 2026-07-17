@@ -121,6 +121,26 @@ int main(void){
   return 0;
 }`},
 
+	{"statement-expressions", `
+#include <stdio.h>
+/* A goto wholly within a statement expression: gcc compiles this, and the
+   label needs a block before the goto that targets it is generated. */
+static int pick(int a){
+  return ({ int t = a; if (t > 0) goto pos; t = -t; pos: t + 1; });
+}
+static int nested(int a){
+  return ({ int u = ({ int v = a; if (v > 10) goto big; v; big: v * 2; }); u + 1; });
+}
+static int loops(int n){
+  int s = 0;
+  for (int i = 0; i < n; i++) s += ({ int t = i; if (t % 2) goto odd; t; odd: t * 10; });
+  return s;
+}
+int main(void){
+  printf("%d %d %d %d %d\n", pick(5), pick(-5), nested(20), nested(3), loops(4));
+  return 0;
+}`},
+
 	{"struct-layout", `
 #include <stdio.h>
 struct A { char c; int i; };
