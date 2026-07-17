@@ -186,9 +186,14 @@ func asmFixedReg(base string) bool {
 // lvalue) for one operand from its base constraint.
 func (g *gen) asmOperandSpec(base string, output, rw bool, operand cc.ExpressionNode) (ir.AsmSpec, asmOut, string) {
 	switch {
-	case base == "r" || asmFixedReg(base):
+	case base == "r" || base == "w" || asmFixedReg(base):
+		// "w" is how AArch64 spells a floating-point register operand. cg12's "r"
+		// already picks the register file from the operand's own class -- a double
+		// gets a V register either way -- so the letters agree here. Accepting
+		// both means source written for gcc, which requires "w" for a double and
+		// refuses "r", compiles as written.
 		reg := ""
-		if base != "r" {
+		if base != "r" && base != "w" {
 			reg = base
 		}
 		switch {

@@ -82,8 +82,13 @@ func expandAsm(tmpl string, vals []asmVal) (string, error) {
 			i++
 			continue
 		}
+		// A width modifier names the operand's register through a particular
+		// window: %w0/%x0 the 32- and 64-bit general ones, %s0/%d0 the single and
+		// double floating ones. Without it the operand is named at the width its C
+		// type gives it.
 		var mod byte
-		if tmpl[i] == 'w' || tmpl[i] == 'x' {
+		switch tmpl[i] {
+		case 'w', 'x', 's', 'd':
 			mod = tmpl[i]
 			i++
 		}
@@ -109,6 +114,12 @@ func expandAsm(tmpl string, vals []asmVal) (string, error) {
 			sb.WriteString(v.reg.wName())
 		case mod == 'x':
 			sb.WriteString(v.reg.xName())
+		case mod == 's' || mod == 'd':
+			if !v.reg.IsFloat() {
+				return "", fmt.Errorf("inline asm: %%%c%d names a floating-point register, but operand %%%d is in %s",
+					mod, num, num, v.reg.xName())
+			}
+			sb.WriteString(v.reg.Name(fpWidth(mod)))
 		default:
 			sb.WriteString(v.reg.Name(v.width))
 		}
@@ -172,4 +183,12 @@ func regByName(name string) (Reg, bool) {
 		}
 	}
 	return 0, false
+}
+
+// fpWidth is the byte width a floating-point operand modifier names.
+func fpWidth(mod byte) int {
+	if mod == 'd' {
+		return 8
+	}
+	return 4
 }

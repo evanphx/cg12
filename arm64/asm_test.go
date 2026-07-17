@@ -80,3 +80,55 @@ func TestInlineAsmUnsupportedMnemonic(t *testing.T) {
 	require.Error(t, err)
 	require.Contains(t, err.Error(), "frobnicate")
 }
+
+// Floating-point inline assembly. The FP encoders were always here; the parser
+// could not reach them, so `fadd d0, d1, d2` would not assemble and a double
+// could not be an inline-asm operand at all. gcc spells the constraint "w" on
+// AArch64 and refuses "r" for a double, so this is source written the way gcc
+// wants it.
+func TestInlineAsmFloat(t *testing.T) {
+	src := `#include <stdio.h>
+double dadd(double a, double b){
+	double r; __asm__("fadd %d0, %d1, %d2" : "=w"(r) : "w"(a), "w"(b)); return r;
+}
+float fmul(float a, float b){
+	float r; __asm__("fmul %s0, %s1, %s2" : "=w"(r) : "w"(a), "w"(b)); return r;
+}
+double dneg(double a){
+	double r; __asm__("fneg %d0, %d1" : "=w"(r) : "w"(a)); return r;
+}
+double bits(double a){ /* across the register files, both ways */
+	long b; double r;
+	__asm__("fmov %x0, %d1" : "=r"(b) : "w"(a));
+	__asm__("fmov %d0, %x1" : "=w"(r) : "r"(b));
+	return r;
+}
+int cvt(double a){ int r; __asm__("fcvtzs %w0, %d1" : "=r"(r) : "w"(a)); return r; }
+double icvt(int a){ double r; __asm__("scvtf %d0, %w1" : "=w"(r) : "r"(a)); return r; }
+int main(void){
+	if (dadd(1.5, 2.5) != 4.0) return 1;
+	if (fmul(3.0f, 4.0f) != 12.0f) return 2;
+	if (dneg(2.5) != -2.5) return 3;
+	if (bits(6.25) != 6.25) return 4;
+	if (cvt(42.9) != 42) return 5;
+	if (icvt(7) != 7.0) return 6;
+	printf("ok\n");
+	return 0;
+}`
+	m, err := cc.Compile("f.c", src)
+	require.NoError(t, err)
+	out, code := buildAndRun(t, m, "")
+	require.Equal(t, 0, code)
+	require.Equal(t, "ok\n", out)
+}
+
+// A modifier that names a floating-point register, given an operand that is in a
+// general one, is an error rather than a name for the wrong register.
+func TestInlineAsmFloatModifierMismatch(t *testing.T) {
+	m, err := cc.Compile("f.c", `
+int f(int a){ int r; __asm__("fmov %d0, %d1" : "=r"(r) : "r"(a)); return r; }`)
+	require.NoError(t, err)
+	_, err = arm64.CompileObject(m)
+	require.Error(t, err)
+	require.Contains(t, err.Error(), "floating-point register")
+}

@@ -139,6 +139,50 @@ func asmLine(p *Program, line string) error {
 		return a.cbr(func(w bool, r Reg, l string) { p.Cbz(w, r, l) })
 	case "cbnz":
 		return a.cbr(func(w bool, r Reg, l string) { p.Cbnz(w, r, l) })
+	case "br":
+		return a.reg1(Br)
+	case "blr":
+		return a.reg1(Blr)
+	case "clz":
+		return a.arith2(Clz)
+	case "sxtb", "sxth", "sxtw", "uxtb", "uxth":
+		return a.extend(mn)
+	case "madd":
+		return a.arith4(Madd)
+	case "msub":
+		return a.arith4(Msub)
+	case "extr":
+		return a.extr()
+	case "ror":
+		return a.ror()
+	case "csel":
+		return a.csel()
+	case "cset":
+		return a.cset()
+	case "mrs":
+		return a.mrs()
+	case "ldp", "stp":
+		return a.pair(mn == "ldp")
+	// Floating point. The encoders have been here all along; the parser could not
+	// reach them, so `mov d0, d1` was refused rather than encoded.
+	case "fadd":
+		return a.fp3(Fadd)
+	case "fsub":
+		return a.fp3(Fsub)
+	case "fmul":
+		return a.fp3(Fmul)
+	case "fdiv":
+		return a.fp3(Fdiv)
+	case "fneg":
+		return a.fp2(Fneg)
+	case "fcmp":
+		return a.fcmp()
+	case "fcvt":
+		return a.fcvt()
+	case "fmov":
+		return a.fmov()
+	case "scvtf", "ucvtf", "fcvtzs", "fcvtzu":
+		return a.fpIntConv(mn)
 	}
 	if c, ok := condSuffix(mn, "b."); ok {
 		if len(ops) != 1 {
@@ -533,4 +577,372 @@ func condByName(c string) Cond {
 		return CS
 	}
 	return EQ
+}
+
+// --- floating point --------------------------------------------------------
+//
+// The FP encoders (Fadd, FmovReg, Fcvt and the rest) have been in this package
+// all along; nothing here could reach them, so `mov d0, d1` was refused. These
+// are the parser's side of them.
+
+// fpr parses operand i as a floating-point register, returning it and whether it
+// is a double. An x/w name here is an error for the same reason a d name is an
+// error in an integer instruction: the register files share an encoding, so
+// taking one for the other assembles cleanly onto the wrong register.
+func (a *asmCtx) fpr(i int) (Reg, bool, error) {
+	if i >= len(a.ops) {
+		return 0, false, fmt.Errorf("%s: missing operand %d", a.mn, i+1)
+	}
+	r, dbl, flt, ok := parseReg(a.ops[i])
+	if !ok {
+		return 0, false, fmt.Errorf("%s: %q is not a register", a.mn, a.ops[i])
+	}
+	if !flt {
+		return 0, false, fmt.Errorf("%s: %q is a general register, and this instruction takes a floating-point one", a.mn, a.ops[i])
+	}
+	return r, dbl, nil
+}
+
+// fpSame parses n FP operands and requires them all to be the same width: `fadd
+// s0, d1, s2` names no instruction.
+func (a *asmCtx) fpSame(n int) ([]Reg, bool, error) {
+	regs := make([]Reg, n)
+	var dbl bool
+	for i := 0; i < n; i++ {
+		r, d, err := a.fpr(i)
+		if err != nil {
+			return nil, false, err
+		}
+		if i == 0 {
+			dbl = d
+		} else if d != dbl {
+			return nil, false, fmt.Errorf("%s: operands are not all the same width", a.mn)
+		}
+		regs[i] = r
+	}
+	return regs, dbl, nil
+}
+
+func (a *asmCtx) fp3(enc func(dbl bool, rd, rn, rm Reg) uint32) error {
+	r, dbl, err := a.fpSame(3)
+	if err != nil {
+		return err
+	}
+	a.p.Emit(enc(dbl, r[0], r[1], r[2]))
+	return nil
+}
+
+func (a *asmCtx) fp2(enc func(dbl bool, rd, rn Reg) uint32) error {
+	r, dbl, err := a.fpSame(2)
+	if err != nil {
+		return err
+	}
+	a.p.Emit(enc(dbl, r[0], r[1]))
+	return nil
+}
+
+func (a *asmCtx) fcmp() error {
+	r, dbl, err := a.fpSame(2)
+	if err != nil {
+		return err
+	}
+	a.p.Emit(Fcmp(dbl, r[0], r[1]))
+	return nil
+}
+
+// fcvt converts between the FP widths, so its operands deliberately differ.
+func (a *asmCtx) fcvt() error {
+	rd, dstDbl, err := a.fpr(0)
+	if err != nil {
+		return err
+	}
+	rn, srcDbl, err := a.fpr(1)
+	if err != nil {
+		return err
+	}
+	if dstDbl == srcDbl {
+		return fmt.Errorf("fcvt: %q and %q are the same width, so there is nothing to convert", a.ops[0], a.ops[1])
+	}
+	if dstDbl {
+		a.p.Emit(FcvtStoD(rd, rn))
+	} else {
+		a.p.Emit(FcvtDtoS(rd, rn))
+	}
+	return nil
+}
+
+// fmov is three instructions wearing one mnemonic: an FP copy, and a bit-for-bit
+// move each way between the register files. The operands say which.
+func (a *asmCtx) fmov() error {
+	if len(a.ops) != 2 {
+		return fmt.Errorf("fmov takes two operands")
+	}
+	_, dstDbl, dstFlt, dstOK := parseReg(a.ops[0])
+	_, srcDbl, srcFlt, srcOK := parseReg(a.ops[1])
+	if !dstOK || !srcOK {
+		return fmt.Errorf("fmov: %q, %q: not registers", a.ops[0], a.ops[1])
+	}
+	rd, rn := mustReg(a.ops[0]), mustReg(a.ops[1])
+	switch {
+	case dstFlt && srcFlt:
+		if dstDbl != srcDbl {
+			return fmt.Errorf("fmov: %q and %q are different widths", a.ops[0], a.ops[1])
+		}
+		a.p.Emit(FmovReg(dstDbl, rd, rn))
+	case dstFlt: // fmov d0, x1: an integer register's bits into an FP one
+		if dstDbl != srcDbl {
+			return fmt.Errorf("fmov: %q and %q are different widths", a.ops[0], a.ops[1])
+		}
+		a.p.Emit(FmovFromGP(dstDbl, rd, rn))
+	case srcFlt: // fmov x0, d1: the other way
+		if dstDbl != srcDbl {
+			return fmt.Errorf("fmov: %q and %q are different widths", a.ops[0], a.ops[1])
+		}
+		a.p.Emit(FmovToGP(srcDbl, rd, rn))
+	default:
+		return fmt.Errorf("fmov: %q, %q: at least one operand must be a floating-point register", a.ops[0], a.ops[1])
+	}
+	return nil
+}
+
+// fpIntConv is the four conversions between an integer register and an FP one.
+// Each names two widths independently -- `scvtf d0, w1` is an int to a double --
+// so neither operand's width implies the other's.
+func (a *asmCtx) fpIntConv(mn string) error {
+	if len(a.ops) != 2 {
+		return fmt.Errorf("%s takes two operands", mn)
+	}
+	toFloat := mn == "scvtf" || mn == "ucvtf"
+	fpIdx, gpIdx := 0, 1
+	if !toFloat {
+		fpIdx, gpIdx = 1, 0
+	}
+	fp, dbl, err := a.fpr(fpIdx)
+	if err != nil {
+		return err
+	}
+	gp, w64, _, err := a.reg(gpIdx)
+	if err != nil {
+		return err
+	}
+	switch mn {
+	case "scvtf":
+		a.p.Emit(Scvtf(dbl, w64, fp, gp))
+	case "ucvtf":
+		a.p.Emit(Ucvtf(dbl, w64, fp, gp))
+	case "fcvtzs":
+		a.p.Emit(Fcvtzs(w64, dbl, gp, fp))
+	case "fcvtzu":
+		a.p.Emit(Fcvtzu(w64, dbl, gp, fp))
+	}
+	return nil
+}
+
+// mustReg is parseReg for a name already known to parse.
+func mustReg(s string) Reg { r, _, _, _ := parseReg(s); return r }
+
+// --- the rest of the integer set -------------------------------------------
+//
+// Encoders that were also unreachable: the register-indirect branches, the
+// extends, the multiply-accumulates, the bitfield extract and its rotate alias,
+// the conditional select, the system register read, and the load/store pair.
+
+func (a *asmCtx) reg1(enc func(Reg) uint32) error {
+	rn, _, _, err := a.reg(0)
+	if err != nil {
+		return err
+	}
+	a.p.Emit(enc(rn))
+	return nil
+}
+
+func (a *asmCtx) arith4(enc func(w64 bool, rd, rn, rm, ra Reg) uint32) error {
+	rd, w, _, err := a.reg(0)
+	if err != nil {
+		return err
+	}
+	rn, _, _, err := a.reg(1)
+	if err != nil {
+		return err
+	}
+	rm, _, _, err := a.reg(2)
+	if err != nil {
+		return err
+	}
+	ra, _, _, err := a.reg(3)
+	if err != nil {
+		return err
+	}
+	a.p.Emit(enc(w, rd, rn, rm, ra))
+	return nil
+}
+
+// extend sign- or zero-extends a narrow value. The source is always a w
+// register: the bits above the extended width are what the instruction supplies.
+func (a *asmCtx) extend(mn string) error {
+	rd, w, _, err := a.reg(0)
+	if err != nil {
+		return err
+	}
+	rn, srcW64, _, err := a.reg(1)
+	if err != nil {
+		return err
+	}
+	if srcW64 {
+		return fmt.Errorf("%s: the source %q is an x register; an extend reads a w one", mn, a.ops[1])
+	}
+	switch mn {
+	case "sxtb":
+		a.p.Emit(Sxtb(w, rd, rn))
+	case "sxth":
+		a.p.Emit(Sxth(w, rd, rn))
+	case "sxtw":
+		if !w {
+			return fmt.Errorf("sxtw: the destination %q is a w register; sxtw widens to an x", a.ops[0])
+		}
+		a.p.Emit(Sxtw(rd, rn))
+	case "uxtb":
+		a.p.Emit(Uxtb(rd, rn))
+	case "uxth":
+		a.p.Emit(Uxth(rd, rn))
+	}
+	return nil
+}
+
+func (a *asmCtx) extr() error {
+	rd, w, _, err := a.reg(0)
+	if err != nil {
+		return err
+	}
+	rn, _, _, err := a.reg(1)
+	if err != nil {
+		return err
+	}
+	rm, _, _, err := a.reg(2)
+	if err != nil {
+		return err
+	}
+	lsb, ok := a.imm(3)
+	if !ok {
+		return fmt.Errorf("extr: the shift must be an immediate")
+	}
+	a.p.Emit(Extr(w, rd, rn, rm, uint32(lsb)))
+	return nil
+}
+
+// ror is EXTR with one source, so the assembler spells it separately.
+func (a *asmCtx) ror() error {
+	rd, w, _, err := a.reg(0)
+	if err != nil {
+		return err
+	}
+	rn, _, _, err := a.reg(1)
+	if err != nil {
+		return err
+	}
+	sh, ok := a.imm(2)
+	if !ok {
+		return fmt.Errorf("ror: the shift must be an immediate (a register rotate is not encoded here)")
+	}
+	a.p.Emit(RorImm(w, rd, rn, uint32(sh)))
+	return nil
+}
+
+func (a *asmCtx) csel() error {
+	rd, w, _, err := a.reg(0)
+	if err != nil {
+		return err
+	}
+	rn, _, _, err := a.reg(1)
+	if err != nil {
+		return err
+	}
+	rm, _, _, err := a.reg(2)
+	if err != nil {
+		return err
+	}
+	if len(a.ops) != 4 {
+		return fmt.Errorf("csel takes three registers and a condition")
+	}
+	c, ok := condNamed(a.ops[3])
+	if !ok {
+		return fmt.Errorf("csel: %q is not a condition", a.ops[3])
+	}
+	a.p.Emit(Csel(w, rd, rn, rm, c))
+	return nil
+}
+
+func (a *asmCtx) cset() error {
+	rd, w, _, err := a.reg(0)
+	if err != nil {
+		return err
+	}
+	if len(a.ops) != 2 {
+		return fmt.Errorf("cset takes a register and a condition")
+	}
+	c, ok := condNamed(a.ops[1])
+	if !ok {
+		return fmt.Errorf("cset: %q is not a condition", a.ops[1])
+	}
+	a.p.Emit(Cset(w, rd, c))
+	return nil
+}
+
+// mrs reads a system register. Only the thread pointer is encoded: it is the one
+// the compiler itself emits, and a wrong system register number is not something
+// to guess at.
+func (a *asmCtx) mrs() error {
+	rt, w64, _, err := a.reg(0)
+	if err != nil {
+		return err
+	}
+	if len(a.ops) != 2 {
+		return fmt.Errorf("mrs takes a register and a system register")
+	}
+	if !w64 {
+		return fmt.Errorf("mrs: %q is a w register; a system register read gives an x", a.ops[0])
+	}
+	if strings.ToLower(a.ops[1]) != "tpidr_el0" {
+		return fmt.Errorf("mrs: %q is not a system register this assembler encodes (only tpidr_el0)", a.ops[1])
+	}
+	a.p.Emit(MrsTPIDR(rt))
+	return nil
+}
+
+// pair is ldp/stp in the signed-offset form: `ldp x0, x1, [x2, #16]`. The
+// writeback forms the prologue uses are emitted by the compiler directly.
+func (a *asmCtx) pair(load bool) error {
+	rt, w, _, err := a.reg(0)
+	if err != nil {
+		return err
+	}
+	rt2, w2, _, err := a.reg(1)
+	if err != nil {
+		return err
+	}
+	if w != w2 {
+		return fmt.Errorf("%s: %q and %q are different widths", a.mn, a.ops[0], a.ops[1])
+	}
+	base, off, err := a.mem(2)
+	if err != nil {
+		return err
+	}
+	if load {
+		a.p.Emit(Ldp(w, rt, rt2, base, int(off), SignedOffset))
+	} else {
+		a.p.Emit(Stp(w, rt, rt2, base, int(off), SignedOffset))
+	}
+	return nil
+}
+
+// condNamed resolves a condition name, reporting false for one that is not a
+// condition at all -- condByName alone cannot say, since it has to return
+// something.
+func condNamed(s string) (Cond, bool) {
+	switch strings.ToLower(s) {
+	case "eq", "ne", "cs", "hs", "cc", "lo", "mi", "pl", "vs", "vc",
+		"hi", "ls", "ge", "lt", "gt", "le":
+		return condByName(strings.ToLower(s)), true
+	}
+	return 0, false
 }
