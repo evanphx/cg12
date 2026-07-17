@@ -723,6 +723,17 @@ func (g *gen) genAssign(n *cc.AssignmentExpression) ir.Ref {
 	}
 	addr, t := g.genAddr(n.UnaryExpression)
 	if n.Case == cc.AssignmentExpressionAssign {
+		// va_copy(dst, src) arrives here as `dst = src`: modernc defines the
+		// builtin as a macro that expands to a plain assignment. It models a
+		// va_list as an 8-byte pointer, so that assignment copies 8 bytes -- but
+		// cg12's va_list slot IS the state, and the state is vaListBytes long. The
+		// copy has to be of the state, or the destination is left uninitialised and
+		// the first va_arg through it reads whatever the slot held.
+		if isVaList(t) {
+			dst, src := g.vaListAddr(n.UnaryExpression), g.vaListAddr(n.AssignmentExpression)
+			g.copyAgg(dst, src, vaListBytes)
+			return dst
+		}
 		if isMemValue(t) { // struct/union/long-double/complex assignment is a byte copy
 			src := g.rval(n.AssignmentExpression, t)
 			g.copyAgg(addr, src, int(t.Size()))

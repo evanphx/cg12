@@ -16,6 +16,11 @@ import (
 
 // gen holds the state of translating one translation unit to a cg12 module.
 type gen struct {
+	// target is the machine this translation unit is being compiled for. It
+	// decides what the standard leaves to the implementation and what the ABI
+	// fixes -- the width of a long double, the shape of a va_list -- so a
+	// question with two answers must ask it rather than assume AArch64's.
+	target   Target
 	mod      *ir.Module
 	fn       *ir.Func
 	curRet   cc.Type
@@ -135,7 +140,7 @@ func CompileFor(target Target, name, src string) (*ir.Module, error) {
 		return nil, fmt.Errorf("cc parse: %w", err)
 	}
 
-	g := &gen{mod: ir.NewModule(), strs: map[string]string{}, ldconsts: map[string]string{}, cplx: map[ir.SubCls]*ir.AggType{}, aggs: map[cc.Type]*ir.AggType{}}
+	g := &gen{target: target, mod: ir.NewModule(), strs: map[string]string{}, ldconsts: map[string]string{}, cplx: map[ir.SubCls]*ir.AggType{}, aggs: map[cc.Type]*ir.AggType{}}
 	g.push() // file scope: holds globals, visible to every function
 	for tu := ast.TranslationUnit; tu != nil; tu = tu.TranslationUnit {
 		ed := tu.ExternalDeclaration
@@ -586,6 +591,11 @@ func (g *gen) globalItems(t cc.Type, init *cc.Initializer) []ir.DataItem {
 				leaves = append(leaves, leaf{off, sz, ir.DataItem{Sub: subFor(sz), Ints: []int64{v}}})
 			}
 		case isLongDouble(et):
+			// A long double initializer is written straight out as bytes, so it never
+			// reaches quadAgg and its target check. quadBytes encodes IEEE binary128;
+			// on a target whose long double is not that, these are the wrong bytes and
+			// nothing downstream would ever say so.
+			g.checkLongDouble()
 			if ldv, ok := e.Value().(*cc.LongDoubleValue); ok {
 				leaves = append(leaves, leaf{off, 16, ir.DataItem{Str: string(quadBytes((*big.Float)(ldv)))}})
 			}

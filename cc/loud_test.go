@@ -69,3 +69,28 @@ forward:
 	require.Equal(t, 0, code)
 	require.Equal(t, "100 200 700 999 0 4\n", out)
 }
+
+// long double means a different thing on each target, and cg12 implements one of
+// them: AArch64's 128-bit IEEE quad, lowered to the libgcc soft-float helpers
+// (__addtf3, __eqtf2, ...). x86-64's is an 80-bit x87 extended value.
+//
+// Compiling this C for amd64 emitted calls to the quad helpers regardless. That
+// failed loudly enough by luck -- x86-64 does not provide them, so the image did
+// not load (exit 127) -- but only by luck: the danger is a build that DOES supply
+// __addtf3, which computes IEEE binary128. The program would then run, compute in
+// a format libc does not share, and disagree the moment a long double reached
+// printf. A diagnostic at compile time is the honest answer until amd64 has x87.
+func TestLongDoubleIsRefusedForAmd64(t *testing.T) {
+	for _, src := range []string{
+		`int f(void){ long double a = 1.5L, b = 2.25L; return (a+b) == 3.75L; }`, // arithmetic
+		`long double g(long double x){ return x; }`,                              // across the ABI
+		`long double gv = 1.0L;`,                                                 // a global
+	} {
+		_, err := cc.CompileFor(cc.TargetAMD64, "p.c", src)
+		require.Error(t, err, "amd64's long double is not the quad cg12 implements")
+		require.Contains(t, err.Error(), "long double")
+
+		_, err = cc.CompileFor(cc.TargetARM64, "p.c", src)
+		require.NoError(t, err, "arm64's long double IS the quad cg12 implements")
+	}
+}

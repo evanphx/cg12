@@ -1,5 +1,10 @@
 package link_test
 
+// C constructs whose correctness only running shows, checked per backend. Each
+// lives here rather than in difftest/ because difftest compares against the host
+// gcc and so only ever runs arm64: the bugs below were worse on amd64, and one of
+// them was invisible on arm64 entirely.
+
 import (
 	"runtime"
 	"testing"
@@ -70,4 +75,36 @@ func TestAmd64GotoPastDeclaration(t *testing.T) {
 	exe, err := l.LinkExecutable("main")
 	require.NoError(t, err)
 	require.Equal(t, 42, runX86Static(t, exe), "the storage exists on the jumped-to path")
+}
+
+// va_copy on amd64, which segfaulted: modernc defines the builtin as a macro
+// expanding to `dst = src`, and models a va_list as an 8-byte pointer, so the
+// assignment copied 8 bytes where the state is longer. The destination kept the
+// source's address rather than its state, and va_arg through it dereferenced
+// that as a register-save area.
+//
+// The differential harness in difftest/ covers this against gcc, but only on
+// arm64 -- where the same bug merely returned a wrong answer. Only the amd64 run
+// showed it as a crash, and only this test runs it.
+func TestAmd64VaCopy(t *testing.T) {
+	m, err := cc.CompileFor(cc.TargetAMD64, "v.c", `
+#include <stdarg.h>
+static int sum(int n, ...) {
+	va_list a, b;
+	va_start(a, n);
+	va_copy(b, a);
+	int x = 0, y = 0;
+	for (int i = 0; i < n; i++) x += va_arg(a, int);
+	for (int i = 0; i < n; i++) y += va_arg(b, int);
+	va_end(a); va_end(b);
+	return x + y;
+}
+int main(void){ return sum(4, 1, 2, 3, 4) == 20 ? 0 : 1; }`)
+	require.NoError(t, err)
+
+	l := link.NewWith(amd64.Backend{})
+	require.NoError(t, l.AddModule(m))
+	exe, err := l.LinkExecutable("main")
+	require.NoError(t, err)
+	require.Equal(t, 0, runX86Static(t, exe), "a copied va_list walks the same arguments")
 }

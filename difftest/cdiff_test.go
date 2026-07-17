@@ -178,6 +178,42 @@ int main(void){
   printf("%d %d %d %d\n", l64[0], l64[63], g64[0], g64[63]);
   return 0;
 }`},
+
+	// va_copy expands to a plain assignment -- modernc defines the builtin as
+	// `dst = src` -- and a va_list is a pointer to it, so the assignment copied
+	// eight bytes where the state is longer. The destination was left holding the
+	// source's address instead of the source's state, and the first va_arg through
+	// it read whatever that was: a segfault on amd64, a wrong answer on arm64.
+	//
+	// A copy must be readable independently of the original, and must not disturb
+	// it: the two walk the same arguments from the point of the copy onward.
+	{"va-copy", `
+#include <stdio.h>
+#include <stdarg.h>
+static int sum(int n, ...) {
+  va_list a, b;
+  va_start(a, n);
+  va_copy(b, a);                 /* b starts where a is now */
+  int x = 0, y = 0;
+  for (int i = 0; i < n; i++) x += va_arg(a, int);
+  for (int i = 0; i < n; i++) y += va_arg(b, int);   /* the same arguments again */
+  va_end(a); va_end(b);
+  return x * 100 + y;
+}
+static int mid(int n, ...) {
+  va_list a, b;
+  va_start(a, n);
+  int first = va_arg(a, int);    /* advance a, THEN copy: b must start here */
+  va_copy(b, a);
+  int ra = va_arg(a, int), rb = va_arg(b, int);
+  va_end(a); va_end(b);
+  return first * 100 + ra * 10 + rb;
+}
+int main(void){
+  printf("%d\n", sum(4, 1, 2, 3, 4));   /* 1010: both walks see 10 */
+  printf("%d\n", mid(3, 7, 8, 9));      /* 788: b resumes where a was */
+  return 0;
+}`},
 }
 
 func TestCDiffAgainstGCC(t *testing.T) {

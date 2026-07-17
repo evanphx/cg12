@@ -14,13 +14,39 @@ import (
 // 16-byte slot and its "value" is that slot's address, which the AAPCS passes
 // and returns in a single SIMD register (the ir.ClsQ class and the quad
 // aggregate type).
+//
+// That is one machine's answer, and all of this assumes it. x86-64's long double
+// is an 80-bit x87 extended value in a 16-byte slot: different bits, different
+// operations (hardware x87, not soft-float), and different names for the libgcc
+// helpers if it had any. Compiling this C for amd64 emitted calls to __addtf3
+// and __eqtf2 -- the quad helpers -- which x86-64 does not provide, so the image
+// failed to load with an undefined symbol. Worse would be finding them: they
+// implement IEEE binary128, so the program would compute quietly in the wrong
+// format and disagree with libc the moment a long double crossed to printf.
+//
+// So amd64 is refused rather than mis-served. See checkLongDouble.
 
 // isLongDouble reports whether t is the long double type.
 func isLongDouble(t cc.Type) bool { return t.Kind() == cc.LongDouble }
 
+// checkLongDouble refuses a long double on a target whose long double is not the
+// 128-bit quad this file implements.
+func (g *gen) checkLongDouble() {
+	if g.target != TargetARM64 {
+		g.fail("cc: long double is not supported for %s: cg12 implements AArch64's "+
+			"128-bit IEEE quad (soft-float via __addtf3 and friends), and %s's long "+
+			"double is 80-bit x87 extended -- a different format, which those helpers "+
+			"do not compute", g.target, g.target)
+	}
+}
+
 // quadAgg returns the canonical aggregate type that models a 128-bit quad, so a
 // long double travels through the SIMD-register path of the aggregate ABI.
+//
+// Every long double reaches this: the type is how one is stored, passed and
+// returned, so refusing here catches them all.
 func (g *gen) quadAgg() *ir.AggType {
+	g.checkLongDouble()
 	if g.quad == nil {
 		g.quad = &ir.AggType{Name: "longdouble", Fields: []ir.Field{{Sub: ir.SubQ}}}
 		g.mod.AddType(g.quad)
