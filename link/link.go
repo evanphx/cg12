@@ -158,6 +158,11 @@ func (l *Linker) mergeWithStart(entry string, init, fini []string) (*obj.Object,
 	return merge(append([]*obj.Object{stub}, l.objs...))
 }
 
+// localName is the name a local symbol is placed under: qualified by the object
+// it came from, so it occupies a namespace of its own. Two objects may each have
+// a static "helper" and neither can see the other's.
+func localName(name string, obj int) string { return fmt.Sprintf("%s.%d", name, obj) }
+
 // merge concatenates the objects' .text/.data, resolves their symbols, re-bases
 // their relocations, and applies the intra-.text PC-relative ones.
 func merge(objs []*obj.Object) (*obj.Object, error) {
@@ -192,8 +197,15 @@ func merge(objs []*obj.Object) (*obj.Object, error) {
 			out.TlsAlign = o.TlsAlign
 		}
 
-		// Place this object's defined symbols; collect local renames (a local name
-		// that clashes with one already placed is uniquified per object).
+		// Place this object's defined symbols, renaming every local so no other
+		// object can reach it.
+		//
+		// A local symbol belongs to its own object: that is what `static` means.
+		// Filing one under its bare name would put it in the same namespace the
+		// relocations resolve against, and the next object's reference to that name
+		// would silently bind here instead of staying unresolved. Renaming only on a
+		// clash is not enough -- the first local to claim a name is exactly the one
+		// that gets captured.
 		local := map[string]string{}
 		for _, s := range o.Syms {
 			base, ok := sectionBase(s.Section, textBase, dataBase, tdataBase, bssBase, tbssBase)
@@ -206,8 +218,8 @@ func merge(objs []*obj.Object) (*obj.Object, error) {
 				if _, dup := defined[s.Name]; dup {
 					return nil, fmt.Errorf("link: duplicate symbol %q", s.Name)
 				}
-			} else if used[rebased.Name] {
-				rebased.Name = fmt.Sprintf("%s.%d", s.Name, oi)
+			} else {
+				rebased.Name = localName(s.Name, oi)
 				local[s.Name] = rebased.Name
 			}
 			defined[rebased.Name] = rebased
