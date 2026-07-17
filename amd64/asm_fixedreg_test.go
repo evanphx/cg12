@@ -29,6 +29,6 @@ int runtest(void){
 	if(rw_c(37) != 42) return 4;
 	return 0;
 }`
-	require.Equal(t, 0, runAsmText(t, src, false))
-	require.Equal(t, 0, runAsmText(t, src, true))
+	require.Equal(t, 0, runAsmSrc(t, src, false))
+	require.Equal(t, 0, runAsmSrc(t, src, true))
 }

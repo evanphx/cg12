@@ -1075,7 +1075,7 @@ func (m *mc) instr(in *ir.Instr) {
 		m.emit(x64.Lea(true, d.mreg(), x64.At(RBP.mreg(), int32(-m.allocOff[in]))))
 		commit()
 	case ir.OAsm:
-		m.fail(fmt.Errorf("amd64: inline assembly is only supported when emitting assembly text, not object code"))
+		m.emitAsm(in)
 	case ir.OVaStart:
 		m.vaStart(in)
 	case ir.OVaArg:
@@ -1105,4 +1105,118 @@ func (m *mc) memAddr(addr ir.Ref, scratch Reg) (x64.Mem, func()) {
 	// A thread-local symbol or a computed pointer resolves to a register first.
 	r := m.gpValue(addr, scratch)
 	return x64.At(r.mreg(), 0), func() {}
+}
+
+// emitAsm binds an inline-asm template's operands to registers and assembles the
+// result into machine code. The template is written for an assembler, so rather
+// than teach the object path to render every instruction a user might write, we
+// expand the operands and hand the text to x64.Assemble -- which drives the very
+// encoders this file uses, so a template only reaches instructions we can encode
+// and says so plainly when it does not.
+func (m *mc) emitAsm(in *ir.Instr) {
+	asm := in.Asm
+	vals := make([]asmVal, len(asm.Ops))
+	scratch := [...]Reg{gpScratch0, gpScratch1}
+	scratchN := 0
+	next := func() Reg {
+		if scratchN >= len(scratch) {
+			m.fail(fmt.Errorf("amd64: inline asm needs more scratch registers than are available"))
+			return gpScratch0
+		}
+		r := scratch[scratchN]
+		scratchN++
+		return r
+	}
+
+	// Walk the operands in %N order, drawing register outputs from To/Defs and
+	// every other operand's value from Args in order.
+	outs := in.AsmRegOuts()
+	oc, ac := 0, 0 // cursors into outs and in.Args
+	var finals []func()
+	resolveOut := func() (Reg, int) {
+		oref := outs[oc]
+		oc++
+		t := m.f.Temps[oref.ID]
+		w := m.f.ClassOf(oref).Size()
+		if t.Reg != ir.NoReg {
+			return Reg(t.Reg), w
+		}
+		// The output is spilled: give the template a scratch register and store it
+		// back once the template has run.
+		r := next()
+		slot := m.slotAddr(t.Slot)
+		finals = append(finals, func() {
+			m.emit(x64.Store(w*8, r.mreg(), x64.At(RBP.mreg(), slot)))
+		})
+		return r, w
+	}
+	for i, kind := range asm.Ops {
+		switch kind {
+		case ir.AsmRegOut:
+			r, w := resolveOut()
+			vals[i] = asmVal{reg: r, width: w}
+		case ir.AsmRegInOut:
+			r, w := resolveOut()
+			pre, _ := m.asmInputReg(in.Args[ac], next) // preload value
+			ac++
+			m.emit(x64.MovReg(w == 8, r.mreg(), pre.mreg())) // preload the read-write register
+			vals[i] = asmVal{reg: r, width: w}
+		case ir.AsmImm:
+			vals[i] = asmVal{lit: true, litS: fmt.Sprintf("$%d", m.f.Consts[in.Args[ac].ID].Int)}
+			ac++
+		case ir.AsmMem:
+			r, _ := m.asmInputReg(in.Args[ac], next) // the operand's address
+			vals[i] = asmVal{lit: true, litS: memn(r, 0)}
+			ac++
+		default: // AsmRegIn
+			r, w := m.asmInputReg(in.Args[ac], next)
+			vals[i] = asmVal{reg: r, width: w}
+			ac++
+		}
+	}
+
+	text, err := expandAsm(asm.Template, vals)
+	if err != nil {
+		m.fail(fmt.Errorf("amd64: %w", err))
+		return
+	}
+	code, err := x64.Assemble(text)
+	if err != nil {
+		m.fail(fmt.Errorf("amd64: inline assembly %q: %w", text, err))
+		return
+	}
+	m.emit(code)
+	for _, f := range finals {
+		f()
+	}
+}
+
+// asmInputReg yields a register holding an inline-asm operand's value, loading a
+// spilled temporary or materializing a constant into a scratch register first.
+func (m *mc) asmInputReg(ref ir.Ref, next func() Reg) (Reg, int) {
+	switch ref.Kind {
+	case ir.RefTemp:
+		t := m.f.Temps[ref.ID]
+		w := m.f.ClassOf(ref).Size()
+		if t.Reg != ir.NoReg {
+			return Reg(t.Reg), w
+		}
+		r := next()
+		m.emit(x64.Load(w == 8, r.mreg(), x64.At(RBP.mreg(), m.slotAddr(t.Slot))))
+		return r, w
+	case ir.RefConst:
+		c := m.f.Consts[ref.ID]
+		r := next()
+		switch c.Kind {
+		case ir.ConstInt:
+			m.movImm(r, c.Int, true)
+		case ir.ConstSym:
+			m.materializeSym(r, c.Sym, c.Int, c.Thread)
+		default:
+			m.fail(fmt.Errorf("amd64: unsupported inline-asm constant operand"))
+		}
+		return r, 8
+	}
+	m.fail(fmt.Errorf("amd64: unsupported inline-asm operand %v", ref))
+	return gpScratch0, 8
 }

@@ -12,10 +12,11 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
-// runAsmText compiles C to amd64 assembly text (the pass-through path for inline
-// asm), assembles it with clang, links it freestanding with the _start stub, and
-// runs it under qemu-x86_64, returning runtest's exit code.
-func runAsmText(t *testing.T, src string, optimize bool) int {
+// runAsmSrc compiles C containing inline asm to an x86-64 object, links it
+// freestanding with the _start stub, and runs it under qemu-x86_64, returning
+// runtest's exit code. The template is assembled by x64.Assemble, so this is
+// also what proves that path encodes what the template asked for.
+func runAsmSrc(t *testing.T, src string, optimize bool) int {
 	t.Helper()
 	clang, err := exec.LookPath("clang")
 	if err != nil {
@@ -34,21 +35,18 @@ func runAsmText(t *testing.T, src string, optimize bool) int {
 	if optimize {
 		opt.OptimizeModule(m)
 	}
-	asm, err := amd64.CompileModule(m)
+	code, err := amd64.CompileObject(m)
 	require.NoError(t, err)
 
 	dir := t.TempDir()
-	asmPath := filepath.Join(dir, "test.s")
 	objPath := filepath.Join(dir, "test.o")
 	stubS := filepath.Join(dir, "start.s")
 	stubO := filepath.Join(dir, "start.o")
 	bin := filepath.Join(dir, "prog")
-	require.NoError(t, os.WriteFile(asmPath, []byte(asm), 0o644))
+	require.NoError(t, os.WriteFile(objPath, code, 0o644))
 	require.NoError(t, os.WriteFile(stubS, []byte(startStub), 0o644))
 
-	out, err := exec.Command(clang, "--target=x86_64-linux-gnu", "-c", asmPath, "-o", objPath).CombinedOutput()
-	require.NoErrorf(t, err, "assemble failed: %s\n--- asm ---\n%s", out, asm)
-	out, err = exec.Command(clang, "--target=x86_64-linux-gnu", "-c", stubS, "-o", stubO).CombinedOutput()
+	out, err := exec.Command(clang, "--target=x86_64-linux-gnu", "-c", stubS, "-o", stubO).CombinedOutput()
 	require.NoErrorf(t, err, "assemble stub: %s", out)
 	out, err = exec.Command("ld.lld", "-static", "-nostdlib", "-o", bin, stubO, objPath).CombinedOutput()
 	require.NoErrorf(t, err, "link: %s", out)
@@ -109,17 +107,20 @@ int runtest(void){
 	if(accum(40, 2) != 42) return 7;
 	return 0;
 }`
-	require.Equal(t, 0, runAsmText(t, src, false))
-	require.Equal(t, 0, runAsmText(t, src, true))
+	require.Equal(t, 0, runAsmSrc(t, src, false))
+	require.Equal(t, 0, runAsmSrc(t, src, true))
 }
 
-// TestInlineAsmObjectRejected confirms the object emitter rejects inline asm
-// rather than emitting wrong code.
-func TestInlineAsmObjectRejected(t *testing.T) {
-	src := `int f(int a){ int r; __asm__("movl %k1, %k0" : "=r"(r) : "r"(a)); return r; }`
+// The object path assembles a template itself, and x64.Assemble knows a subset of
+// x86-64. A template reaching past that subset has to be an error naming what it
+// could not encode -- silently skipping the instruction would leave the
+// surrounding code reading a register nothing ever wrote.
+func TestInlineAsmUnsupportedMnemonicErrors(t *testing.T) {
+	src := `int f(int a){ int r; __asm__("cpuid\n\tmovl %k1, %k0" : "=r"(r) : "r"(a)); return r; }`
 	m, err := cc.Compile("asm.c", src)
 	require.NoError(t, err)
 	_, err = amd64.CompileObject(m)
 	require.Error(t, err)
 	require.Contains(t, err.Error(), "inline assembly")
+	require.Contains(t, err.Error(), "cpuid", "the error should name what it could not encode")
 }
