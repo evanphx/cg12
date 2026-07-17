@@ -176,3 +176,26 @@ func TestInstrArg(t *testing.T) {
 	assert.True(t, in.Arg(2).IsNone())
 	assert.True(t, in.Arg(-1).IsNone())
 }
+
+// A backend-private op is a lowering artifact, not portable IL, so the text
+// parser must refuse it even though it has a printed name.
+//
+// arm64 rewrites idioms and thread-local access into ops it alone produces and
+// consumes -- rotr, bic, the TLS trio. They still print (a lowered function has
+// to be readable when debugging), but a .ssa file naming one is not a portable
+// module: handed to another backend it is at best an "unsupported op", and the
+// text format is supposed to be the target-independent one.
+func TestPrivateOpsDoNotParse(t *testing.T) {
+	for _, o := range []Op{ORotr, OBic, OThreadPtr, OTLSOffset, OTLSIndexAddr} {
+		name := o.String()
+		assert.NotEmptyf(t, name, "op %d must still print for debugging", int(o))
+		_, ok := OpFromString(name)
+		assert.Falsef(t, ok, "%q is backend-private and must not parse as portable IL", name)
+	}
+	// The portable ops these sit among still parse -- including clz, which reads
+	// like an arm64 thing but is generic (__builtin_clz, any target).
+	for _, name := range []string{"add", "and", "clz", "loadl"} {
+		_, ok := OpFromString(name)
+		assert.Truef(t, ok, "%q is portable and must parse", name)
+	}
+}

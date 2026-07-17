@@ -184,6 +184,15 @@ type opInfo struct {
 	name        string // IL mnemonic; empty when computed (OCmp)
 	hasResult   bool   // defines Instr.To
 	commutative bool   // operands may be swapped freely
+
+	// private marks an op that a backend produces and consumes entirely within
+	// its own lowering: it is not part of the target-independent IR a front end
+	// builds or the text format transports. Such an op still has a name so the
+	// printer can render a lowered function for debugging, but the text PARSER
+	// refuses it -- a `.ssa` file naming one is not portable IR, it is one
+	// backend's internal state written where another backend would read it and,
+	// at best, reject it (arm64's `rotr` reaching amd64 is "unsupported op").
+	private bool
 }
 
 var opTable = [numOps]opInfo{
@@ -203,8 +212,8 @@ var opTable = [numOps]opInfo{
 	OShl:  {name: "shl", hasResult: true},
 	OShr:  {name: "shr", hasResult: true},
 	OSar:  {name: "sar", hasResult: true},
-	ORotr: {name: "rotr", hasResult: true},
-	OBic:  {name: "bic", hasResult: true},
+	ORotr: {name: "rotr", hasResult: true, private: true},
+	OBic:  {name: "bic", hasResult: true, private: true},
 	OClz:  {name: "clz", hasResult: true},
 
 	ONeg: {name: "neg", hasResult: true},
@@ -268,9 +277,9 @@ var opTable = [numOps]opInfo{
 
 	OSafepoint: {name: "safept"},
 
-	OThreadPtr:    {name: "threadptr", hasResult: true},
-	OTLSOffset:    {name: "tlsoffset", hasResult: true},
-	OTLSIndexAddr: {name: "tlsindexaddr", hasResult: true},
+	OThreadPtr:    {name: "threadptr", hasResult: true, private: true},
+	OTLSOffset:    {name: "tlsoffset", hasResult: true, private: true},
+	OTLSIndexAddr: {name: "tlsindexaddr", hasResult: true, private: true},
 
 	OGetReg: {name: "getreg", hasResult: true},
 	OSetReg: {name: "setreg"},
@@ -286,8 +295,8 @@ func (o Op) Info() opInfo { return opTable[o] }
 var opByName = func() map[string]Op {
 	m := make(map[string]Op, numOps)
 	for o := Op(0); o < numOps; o++ {
-		if n := opTable[o].name; n != "" {
-			m[n] = o
+		if n := opTable[o].name; n != "" && !opTable[o].private {
+			m[n] = o // private ops are backend internals, not portable IL
 		}
 	}
 	return m
