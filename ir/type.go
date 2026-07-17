@@ -203,22 +203,60 @@ func (f Field) sizeAlign() (size, align int) {
 	return s, s
 }
 
+// Leaf is one scalar element of an aggregate: its type, and its byte offset from
+// the start of the aggregate.
+type Leaf struct {
+	Sub SubCls
+	Off int
+}
+
 // Layout returns the total size and alignment of an aggregate, following the C
 // struct/union layout rules (fields placed at their natural alignment, the whole
 // rounded up to the aggregate's alignment; a union is the largest of its cases).
 // Opaque types report their declared size and alignment.
 func (t *AggType) Layout() (size, align int) {
+	size, align, _ = t.walk(0, nil)
+	return size, align
+}
+
+// Leaves returns every scalar element of an aggregate, each at its byte offset,
+// in the order they are laid out.
+//
+// This is the single answer to where a field is. An ABI classifier needs
+// per-leaf offsets and Layout gives only a total, so each one used to walk the
+// fields again and apply the placement rule itself -- three copies of it, two
+// backends, and nothing keeping them in step.
+//
+// A union's cases all begin at the same offset, so their leaves overlap: that is
+// what a union is, and what a classifier has to see. simple reports that no
+// union or opaque type was involved, for a caller that cannot answer its
+// question about one.
+func (t *AggType) Leaves() (leaves []Leaf, simple bool) {
+	_, _, simple = t.walk(0, func(l Leaf) { leaves = append(leaves, l) })
+	return leaves, simple
+}
+
+// walk lays an aggregate out once, reporting each scalar leaf at its offset from
+// base and returning the aggregate's size and alignment. emit may be nil, so the
+// callers that want only the size pay nothing for the ones that want the leaves.
+//
+// simple is false when a union or an opaque type was involved: their leaves
+// overlap, or are unknown, so a caller reasoning about a flat sequence cannot
+// use the answer.
+func (t *AggType) walk(base int, emit func(Leaf)) (size, align int, simple bool) {
 	if t.Opaque {
 		align = t.Align
 		if align == 0 {
 			align = 1
 		}
-		return t.Size, align
+		return t.Size, align, false
 	}
+	simple = true
 	if t.Union {
+		simple = false
 		align = 1
 		for _, c := range t.Cases {
-			s, a := layoutFields(c)
+			s, a := walkFields(c, base, emit)
 			if s > size {
 				size = s
 			}
@@ -227,17 +265,24 @@ func (t *AggType) Layout() (size, align int) {
 			}
 		}
 	} else {
-		size, align = layoutFields(t.Fields)
+		size, align = walkFieldsSimple(t.Fields, base, emit, &simple)
 	}
 	if t.Align > align {
 		align = t.Align // explicit alignment raises the minimum
 	}
-	return roundUpInt(size, align), align
+	return roundUpInt(size, align), align, simple
 }
 
-// layoutFields lays out a sequence of struct fields, returning the size (before
-// final rounding) and alignment.
-func layoutFields(fields []Field) (size, align int) {
+// walkFields lays out a sequence of struct fields, reporting each leaf at its
+// offset and returning the size (before final rounding) and alignment.
+func walkFields(fields []Field, base int, emit func(Leaf)) (size, align int) {
+	simple := true
+	return walkFieldsSimple(fields, base, emit, &simple)
+}
+
+// walkFieldsSimple is walkFields, and clears simple when a nested type is one
+// whose leaves cannot be read as a flat sequence.
+func walkFieldsSimple(fields []Field, base int, emit func(Leaf), simple *bool) (size, align int) {
 	align = 1
 	off := 0
 	for _, f := range fields {
@@ -246,7 +291,16 @@ func layoutFields(fields []Field) (size, align int) {
 			align = fa
 		}
 		off = roundUpInt(off, fa)
-		off += fs * f.count()
+		for i := 0; i < f.count(); i++ {
+			if f.Type != nil {
+				if _, _, s := f.Type.walk(base+off, emit); !s {
+					*simple = false
+				}
+			} else if emit != nil {
+				emit(Leaf{Sub: f.Sub, Off: base + off})
+			}
+			off += fs
+		}
 	}
 	return off, align
 }

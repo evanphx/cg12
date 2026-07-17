@@ -80,3 +80,84 @@ func newFuncWith(body func(*Func, *Block)) *Func {
 	b.Ret(f.Word(0))
 	return f
 }
+
+// Leaves and Layout must describe the same aggregate: a leaf past the end, or a
+// size that does not cover the leaves, means the placement rule and the size
+// rule have drifted apart -- which is exactly what happened when the ABI
+// classifiers each had their own copy of it.
+func TestLeavesAgreeWithLayout(t *testing.T) {
+	i32 := Field{Sub: SubW}
+	i8 := Field{Sub: SubB}
+	f64 := Field{Sub: SubD}
+	inner := &AggType{Name: "inner", Fields: []Field{i8, i32}}
+
+	for _, c := range []struct {
+		name  string
+		agg   *AggType
+		want  []Leaf // expected leaves, in order
+		size  int
+		align int
+	}{
+		{"scalars", &AggType{Fields: []Field{i32, i32}},
+			[]Leaf{{SubW, 0}, {SubW, 4}}, 8, 4},
+		{"padding", &AggType{Fields: []Field{i8, i32}},
+			[]Leaf{{SubB, 0}, {SubW, 4}}, 8, 4}, // the int aligns past the byte
+		{"trailing pad", &AggType{Fields: []Field{i32, i8}},
+			[]Leaf{{SubW, 0}, {SubB, 4}}, 8, 4}, // rounded up to the alignment
+		{"array", &AggType{Fields: []Field{{Sub: SubW, Count: 3}}},
+			[]Leaf{{SubW, 0}, {SubW, 4}, {SubW, 8}}, 12, 4},
+		{"nested", &AggType{Fields: []Field{i32, {Type: inner}}},
+			[]Leaf{{SubW, 0}, {SubB, 4}, {SubW, 8}}, 12, 4},
+		{"nested array", &AggType{Fields: []Field{{Type: inner, Count: 2}}},
+			[]Leaf{{SubB, 0}, {SubW, 4}, {SubB, 8}, {SubW, 12}}, 16, 4},
+		{"doubles", &AggType{Fields: []Field{f64, f64}},
+			[]Leaf{{SubD, 0}, {SubD, 8}}, 16, 8},
+	} {
+		t.Run(c.name, func(t *testing.T) {
+			leaves, simple := c.agg.Leaves()
+			require.True(t, simple, "no union or opaque type here")
+			require.Equal(t, c.want, leaves)
+
+			size, align := c.agg.Layout()
+			require.Equal(t, c.size, size)
+			require.Equal(t, c.align, align)
+			for _, l := range leaves {
+				require.LessOrEqualf(t, l.Off+l.Sub.Size(), size,
+					"leaf at %d runs past the aggregate's %d bytes", l.Off, size)
+			}
+		})
+	}
+}
+
+// A union's cases overlap: every case begins at the same offset. That is what a
+// union is, and a classifier has to see it -- so the leaves are reported, and
+// simple says they cannot be read as a flat sequence.
+func TestLeavesOfAUnionOverlap(t *testing.T) {
+	u := &AggType{Name: "u", Union: true, Cases: [][]Field{
+		{{Sub: SubW}},
+		{{Sub: SubD}},
+	}}
+	leaves, simple := u.Leaves()
+	require.False(t, simple, "a union's leaves are not a flat sequence")
+	require.Equal(t, []Leaf{{SubW, 0}, {SubD, 0}}, leaves, "both cases start at 0")
+
+	size, align := u.Layout()
+	require.Equal(t, 8, size, "the largest case")
+	require.Equal(t, 8, align)
+
+	// And a union nested inside a struct makes the whole thing non-simple.
+	s := &AggType{Fields: []Field{{Sub: SubW}, {Type: u}}}
+	_, simple = s.Leaves()
+	require.False(t, simple, "a union anywhere inside is still a union")
+}
+
+// An opaque type's members are unknown by construction.
+func TestLeavesOfAnOpaqueType(t *testing.T) {
+	o := &AggType{Name: "o", Opaque: true, Size: 16, Align: 8}
+	leaves, simple := o.Leaves()
+	require.False(t, simple)
+	require.Empty(t, leaves)
+	size, align := o.Layout()
+	require.Equal(t, 16, size)
+	require.Equal(t, 8, align)
+}

@@ -49,54 +49,23 @@ func isQuadAgg(t *ir.AggType) bool {
 // hfaOf reports whether t is a Homogeneous Floating-point Aggregate — every leaf
 // member is the same single/double type and there are 1 to 4 of them.
 func hfaOf(t *ir.AggType) (ir.Cls, int, bool) {
-	var elem ir.Cls
-	set := false
-	count := 0
-
-	var walk func(t *ir.AggType) bool
-	walk = func(t *ir.AggType) bool {
-		if t.Opaque || t.Union {
-			return false
-		}
-		for _, f := range t.Fields {
-			n := 1
-			if f.Count > 1 {
-				n = f.Count
-			}
-			if f.Type != nil {
-				if f.Type.Union {
-					return false
-				}
-				for i := 0; i < n; i++ {
-					if !walk(f.Type) {
-						return false
-					}
-				}
-				continue
-			}
-			if f.Sub != ir.SubS && f.Sub != ir.SubD && f.Sub != ir.SubQ {
-				return false
-			}
-			cls := f.Sub.Cls()
-			for i := 0; i < n; i++ {
-				if !set {
-					elem, set = cls, true
-				} else if cls != elem {
-					return false
-				}
-				count++
-				if count > 4 {
-					return false
-				}
-			}
-		}
-		return true
-	}
-
-	if !walk(t) || count == 0 || count > 4 {
+	// A union has no single sequence of members -- its cases overlap -- and an
+	// opaque type's members are unknown by construction, so neither can be
+	// homogeneous in a way this question means.
+	leaves, simple := t.Leaves()
+	if !simple || len(leaves) == 0 || len(leaves) > 4 {
 		return 0, 0, false
 	}
-	return elem, count, true
+	elem := leaves[0].Sub
+	if elem != ir.SubS && elem != ir.SubD && elem != ir.SubQ {
+		return 0, 0, false
+	}
+	for _, l := range leaves[1:] {
+		if l.Sub != elem {
+			return 0, 0, false
+		}
+	}
+	return elem.Cls(), len(leaves), true
 }
 
 // assignGP allocates n consecutive integer registers for an aggregate of the

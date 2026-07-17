@@ -72,52 +72,26 @@ func classifyAgg(t *ir.AggType) aggClass {
 
 // classifyAggInto merges every scalar leaf of t (offset by base) into the
 // eightbyte(s) it occupies.
+// classifyAggInto classifies every scalar leaf of t into the eightbytes it
+// covers, at base within the aggregate being classified.
+//
+// Where each leaf is comes from ir.AggType.Leaves rather than from walking the
+// fields and applying the placement rule again here. A union's cases overlap, so
+// several leaves land in one eightbyte and merge, which is exactly SysV's rule
+// for a union.
 func classifyAggInto(t *ir.AggType, base int, parts []ebClass) {
-	if t.Union {
-		for _, c := range t.Cases {
-			classifyFieldList(c, base, parts)
+	leaves, _ := t.Leaves()
+	for _, l := range leaves {
+		cls := ebInteger
+		if l.Sub == ir.SubS || l.Sub == ir.SubD {
+			cls = ebSSE
 		}
-		return
-	}
-	classifyFieldList(t.Fields, base, parts)
-}
-
-func classifyFieldList(fields []ir.Field, base int, parts []ebClass) {
-	off := base
-	for _, f := range fields {
-		fs, fa := fieldSizeAlign(f)
-		off = roundUp(off, fa)
-		for i := 0; i < fieldCount(f); i++ {
-			if f.Type != nil {
-				classifyAggInto(f.Type, off, parts)
-			} else {
-				cls := ebInteger
-				if f.Sub == ir.SubS || f.Sub == ir.SubD {
-					cls = ebSSE
-				}
-				lo, hi := off/8, (off+f.Sub.Size()-1)/8
-				for eb := lo; eb <= hi && eb < len(parts); eb++ {
-					parts[eb] = merge(parts[eb], cls)
-				}
-			}
-			off += fs
+		off := base + l.Off
+		lo, hi := off/8, (off+l.Sub.Size()-1)/8
+		for eb := lo; eb <= hi && eb < len(parts); eb++ {
+			parts[eb] = merge(parts[eb], cls)
 		}
 	}
-}
-
-func fieldSizeAlign(f ir.Field) (size, align int) {
-	if f.Type != nil {
-		return f.Type.Layout()
-	}
-	s := f.Sub.Size()
-	return s, s
-}
-
-func fieldCount(f ir.Field) int {
-	if f.Count > 1 {
-		return f.Count
-	}
-	return 1
 }
 
 // aggReg is one eightbyte's destination register plus whether it is an SSE
