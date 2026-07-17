@@ -108,3 +108,57 @@ int main(void){ return sum(4, 1, 2, 3, 4) == 20 ? 0 : 1; }`)
 	require.NoError(t, err)
 	require.Equal(t, 0, runX86Static(t, exe), "a copied va_list walks the same arguments")
 }
+
+// A module lowered for one target must not be lowered for another.
+//
+// Lowering rewrites a function in place and pins the target's physical registers
+// into its temporaries. Nothing recorded that, so compiling one module for arm64
+// and then for amd64 built an amd64 program around AArch64's register
+// assignment. It did not fail: `add(40, 2)` came back as something that is not
+// 42, from an image that linked and ran.
+//
+// The answer must stay an error rather than become a wrong number.
+func TestModuleCannotBeLoweredForTwoTargets(t *testing.T) {
+	src := `int add(int a, int b){ return a + b; }
+	        int main(void){ return add(40, 2) == 42 ? 0 : 1; }`
+	m, err := cc.CompileFor(cc.TargetARM64, "p.c", src)
+	require.NoError(t, err)
+
+	l := link.NewWith(arm64.Backend{})
+	require.NoError(t, l.AddModule(m), "the first target lowers it")
+
+	l2 := link.NewWith(amd64.Backend{})
+	err = l2.AddModule(m)
+	require.Error(t, err, "the second target must refuse the already-lowered module")
+	require.Contains(t, err.Error(), "already lowered for arm64")
+}
+
+// Lowering the same module again for the SAME target stays allowed: the passes
+// are idempotent on already-lowered IR, and compiling one module into two images
+// of one architecture is a reasonable thing to do. The marker exists to catch a
+// second TARGET, not a second call.
+func TestModuleCanBeLoweredTwiceForOneTarget(t *testing.T) {
+	if runtime.GOARCH != "arm64" {
+		t.Skip("arm64 executable runs natively only on an arm64 host")
+	}
+	// Not add(a,b): phis, a loop, a by-value aggregate and calls, so "idempotent"
+	// means something.
+	src := `
+	struct P { long a, b, c; };
+	static long acc(struct P p, int n){
+		long t = 0;
+		for (int i = 0; i < n; i++) t += (i & 1) ? p.a + i : p.b - i;
+		return t + p.c;
+	}
+	int main(void){ struct P p = {10, 20, 3}; return acc(p, 6) == 96 ? 0 : 1; }`
+	m, err := cc.CompileFor(cc.TargetARM64, "p.c", src)
+	require.NoError(t, err)
+
+	for _, pass := range []string{"first", "second"} {
+		l := link.NewWith(arm64.Backend{})
+		require.NoErrorf(t, l.AddModule(m), "%s lowering for the same target", pass)
+		exe, err := l.LinkExecutable("main")
+		require.NoErrorf(t, err, "%s link", pass)
+		require.Equalf(t, 0, runExe(t, exe), "%s image computes the same answer", pass)
+	}
+}

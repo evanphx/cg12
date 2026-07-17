@@ -1,5 +1,7 @@
 package ir
 
+import "fmt"
+
 // NoReg is the sentinel for a temporary that has not been assigned a physical
 // register.
 const NoReg = -1
@@ -122,9 +124,45 @@ type Func struct {
 	Temps  []*Temp
 	Consts []Const
 
+	// lowered names the target this function has been lowered for, or "" if it
+	// has not been. See MarkLowered.
+	lowered string
+
 	nameSeq  int
 	constIdx map[constKey]int
 }
+
+// MarkLowered records that f has been lowered for the named target, and reports
+// an error if it was already lowered for a different one.
+//
+// Lowering rewrites a function in place and pins the target's physical registers
+// into its temporaries. Nothing said so, and nothing stopped a second backend
+// reading the result: compiling one module for arm64 and then for amd64 produced
+// an amd64 program built around AArch64's register assignment. It did not fail --
+// it returned the wrong answer, from an image that linked and ran.
+//
+// Lowering again for the SAME target is allowed, because it works: the passes are
+// idempotent on already-lowered IR (verified on a function with phis, a loop,
+// by-value aggregates and calls, lowered three times over). Compiling one module
+// into two images of the same architecture is a reasonable thing to do, and
+// refusing it would buy nothing.
+//
+// This is a marker, not a type. A distinct type for lowered IR would catch the
+// mistake at compile time rather than here; that is the better answer and a much
+// larger change (every pass and emitter signature). This costs one field and
+// turns silence into a diagnostic.
+func (f *Func) MarkLowered(target string) error {
+	if f.lowered != "" && f.lowered != target {
+		return fmt.Errorf("ir: %s: already lowered for %s, cannot lower for %s: "+
+			"lowering pins the target's registers into the function, so the second "+
+			"target would emit code built around the first one's", f.Name, f.lowered, target)
+	}
+	f.lowered = target
+	return nil
+}
+
+// LoweredFor returns the target this function was lowered for, or "".
+func (f *Func) LoweredFor() string { return f.lowered }
 
 type constKey struct {
 	kind ConstKind

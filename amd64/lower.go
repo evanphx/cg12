@@ -16,6 +16,9 @@ import (
 // by-value aggregates, variadics, and tail calls return an explicit error rather
 // than emitting silently wrong code.
 func lower(f *ir.Func) error {
+	if err := f.MarkLowered("amd64"); err != nil {
+		return err
+	}
 	lowerpass.JumpTables(f) // dense switches -> indexed branch (JmpTable)
 	lowerpass.Switches(f)   // remaining multiway branches -> conditional branches
 	lowerpass.HoistAllocas(f)

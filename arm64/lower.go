@@ -16,6 +16,9 @@ import (
 // Only the integer subset (classes w and l) is handled; anything outside it
 // returns an explicit error rather than emitting silently wrong code.
 func lower(f *ir.Func, tlsModel TLSModel) error {
+	if err := f.MarkLowered("arm64"); err != nil {
+		return err
+	}
 	lowerpass.JumpTables(f) // dense switches -> indexed branch (JmpTable)
 	lowerpass.Switches(f)   // remaining multiway branches -> conditional branches
 	// Before the folds: they rewrite addressing, and a thread-local is not an
