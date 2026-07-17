@@ -31,23 +31,20 @@ func Assemble(src string) ([]byte, error) {
 func AssembleProgram(src string) (*Program, error) {
 	p := NewProgram()
 	for lineno, raw := range strings.Split(src, "\n") {
-		line := stripComment(raw)
-		line = strings.TrimSpace(line)
-		if line == "" {
-			continue
-		}
-		if strings.HasPrefix(line, ".") {
-			if err := directive(p, line); err != nil {
+		for _, line := range splitStatements(stripComment(raw)) {
+			if strings.HasPrefix(line, ".") {
+				if err := directive(p, line); err != nil {
+					return nil, fmt.Errorf("line %d: %q: %w", lineno+1, line, err)
+				}
+				continue
+			}
+			if strings.HasSuffix(line, ":") {
+				p.Label(strings.TrimSpace(line[:len(line)-1]))
+				continue
+			}
+			if err := asmLine(p, line); err != nil {
 				return nil, fmt.Errorf("line %d: %q: %w", lineno+1, line, err)
 			}
-			continue
-		}
-		if strings.HasSuffix(line, ":") {
-			p.Label(strings.TrimSpace(line[:len(line)-1]))
-			continue
-		}
-		if err := asmLine(p, line); err != nil {
-			return nil, fmt.Errorf("line %d: %q: %w", lineno+1, line, err)
 		}
 	}
 	return p, nil
@@ -72,10 +69,21 @@ func stripComment(s string) string {
 	if i := strings.Index(s, "//"); i >= 0 {
 		s = s[:i]
 	}
-	if i := strings.Index(s, ";"); i >= 0 {
-		s = s[:i]
-	}
 	return s
+}
+
+// splitStatements breaks a line into its statements. GAS separates statements
+// with ';' on both x86-64 and AArch64 -- it is not a comment character, and
+// treating it as one silently drops everything after the first instruction of
+// an `asm("cli; sti")`.
+func splitStatements(line string) []string {
+	var out []string
+	for _, s := range strings.Split(line, ";") {
+		if s = strings.TrimSpace(s); s != "" {
+			out = append(out, s)
+		}
+	}
+	return out
 }
 
 // asmLine assembles one instruction.
@@ -149,7 +157,14 @@ type asmCtx struct {
 	ops []string
 }
 
-// reg parses operand i as a register, returning it with its width and float-ness.
+// reg parses operand i as a general register, returning it with its width.
+//
+// A d/s register here is an error rather than an integer register of the same
+// number: the encoders reached from this parser are all integer ones, so
+// accepting `mov d0, d1` would quietly encode `mov x0, x1` -- a bit-copy between
+// entirely different registers. The FP encoders exist (Fadd, FmovReg, LdrFP and
+// the rest); the parser does not reach them yet, and saying so is the honest
+// answer until it does.
 func (a *asmCtx) reg(i int) (Reg, bool, bool, error) {
 	if i >= len(a.ops) {
 		return 0, false, false, fmt.Errorf("%s: missing operand %d", a.mn, i+1)
@@ -157,6 +172,9 @@ func (a *asmCtx) reg(i int) (Reg, bool, bool, error) {
 	r, w64, flt, ok := parseReg(a.ops[i])
 	if !ok {
 		return 0, false, false, fmt.Errorf("%s: %q is not a register", a.mn, a.ops[i])
+	}
+	if flt {
+		return 0, false, false, fmt.Errorf("%s: %q is a floating-point register, which this assembler cannot encode here", a.mn, a.ops[i])
 	}
 	return r, w64, flt, nil
 }
@@ -378,8 +396,11 @@ func (a *asmCtx) mem(i int) (Reg, int64, error) {
 	}
 	inner = strings.TrimSpace(inner[1 : len(inner)-1])
 	parts := strings.SplitN(inner, ",", 2)
-	base, _, _, ok := parseReg(strings.TrimSpace(parts[0]))
+	base, _, baseFlt, ok := parseReg(strings.TrimSpace(parts[0]))
 	if !ok {
+		return 0, 0, fmt.Errorf("%s: %q is not a base register", a.mn, parts[0])
+	}
+	if baseFlt {
 		return 0, 0, fmt.Errorf("%s: %q is not a base register", a.mn, parts[0])
 	}
 	var off int64

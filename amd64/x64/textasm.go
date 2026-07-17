@@ -32,22 +32,20 @@ func Assemble(src string) ([]byte, error) {
 func AssembleProgram(src string) (*Program, error) {
 	p := NewProgram()
 	for lineno, raw := range strings.Split(src, "\n") {
-		line := strings.TrimSpace(stripComment(raw))
-		if line == "" {
-			continue
-		}
-		if strings.HasPrefix(line, ".") {
-			if err := directive(p, line); err != nil {
+		for _, line := range splitStatements(stripComment(raw)) {
+			if strings.HasPrefix(line, ".") {
+				if err := directive(p, line); err != nil {
+					return nil, fmt.Errorf("line %d: %q: %w", lineno+1, line, err)
+				}
+				continue
+			}
+			if strings.HasSuffix(line, ":") {
+				p.Label(strings.TrimSpace(line[:len(line)-1]))
+				continue
+			}
+			if err := asmLine(p, line); err != nil {
 				return nil, fmt.Errorf("line %d: %q: %w", lineno+1, line, err)
 			}
-			continue
-		}
-		if strings.HasSuffix(line, ":") {
-			p.Label(strings.TrimSpace(line[:len(line)-1]))
-			continue
-		}
-		if err := asmLine(p, line); err != nil {
-			return nil, fmt.Errorf("line %d: %q: %w", lineno+1, line, err)
 		}
 	}
 	return p, nil
@@ -69,12 +67,26 @@ func directive(p *Program, line string) error {
 }
 
 func stripComment(s string) string {
-	for _, c := range []string{"#", "//", ";"} {
+	for _, c := range []string{"#", "//"} {
 		if i := strings.Index(s, c); i >= 0 {
 			s = s[:i]
 		}
 	}
 	return s
+}
+
+// splitStatements breaks a line into its statements. GAS separates statements
+// with ';' on both x86-64 and AArch64 -- it is not a comment character, and
+// treating it as one silently drops everything after the first instruction of
+// an `asm("cli; sti")`.
+func splitStatements(line string) []string {
+	var out []string
+	for _, s := range strings.Split(line, ";") {
+		if s = strings.TrimSpace(s); s != "" {
+			out = append(out, s)
+		}
+	}
+	return out
 }
 
 func asmLine(p *Program, line string) error {
@@ -137,7 +149,11 @@ func (a *asmCtx) mov() error {
 	src, dst := a.ops[0], a.ops[1]
 	// register or immediate into a register or memory.
 	if imm, ok := parseImm(src); ok {
-		if dr, ok := parseReg(dst); ok {
+		if isReg(dst) {
+			dr, err := a.reg(dst)
+			if err != nil {
+				return err
+			}
 			if a.w {
 				a.p.Emit(MovImm64(dr, imm))
 			} else {
@@ -151,18 +167,33 @@ func (a *asmCtx) mov() error {
 		}
 		return fmt.Errorf("mov: bad destination %q", dst)
 	}
-	sr, srcReg := parseReg(src)
-	dr, dstReg := parseReg(dst)
+	srcReg, dstReg := isReg(src), isReg(dst)
 	switch {
 	case srcReg && dstReg:
+		sr, err := a.reg(src)
+		if err != nil {
+			return err
+		}
+		dr, err := a.reg(dst)
+		if err != nil {
+			return err
+		}
 		a.p.Emit(MovReg(a.w, dr, sr))
 	case srcReg: // store: reg -> mem
+		sr, err := a.reg(src)
+		if err != nil {
+			return err
+		}
 		m, ok := parseMem(dst)
 		if !ok {
 			return fmt.Errorf("mov: bad destination %q", dst)
 		}
 		a.p.Emit(Store(a.sz*8, sr, m))
 	case dstReg: // load: mem -> reg
+		dr, err := a.reg(dst)
+		if err != nil {
+			return err
+		}
 		m, ok := parseMem(src)
 		if !ok {
 			return fmt.Errorf("mov: bad source %q", src)
@@ -174,14 +205,37 @@ func (a *asmCtx) mov() error {
 	return nil
 }
 
+// reg parses an operand as a register of this instruction's operand size. The
+// mnemonic's suffix and the register's name must agree: `movl %al` names a byte
+// register in a 32-bit instruction, and picking either width over the other
+// would be a guess.
+//
+// A size this assembler has no encoders for is refused outright. The register
+// encoding is the same 4 bits at every width, so a byte instruction reaching a
+// 32-bit encoder assembles cleanly and writes four times what was asked --
+// `movb %al, %bl` and `movl %eax, %ebx` are the same bytes.
+func (a *asmCtx) reg(s string) (Reg, error) {
+	r, sz, ok := parseReg(s)
+	if !ok {
+		return 0, fmt.Errorf("%s: %q is not a register", a.mn, s)
+	}
+	if sz != a.sz {
+		return 0, fmt.Errorf("%s: %q is a %d-byte register in a %d-byte instruction", a.mn, s, sz, a.sz)
+	}
+	if a.sz != 4 && a.sz != 8 {
+		return 0, fmt.Errorf("%s: %d-byte register operands are not encoded by this assembler", a.mn, a.sz)
+	}
+	return r, nil
+}
+
 func (a *asmCtx) binary() error {
 	if len(a.ops) != 2 {
 		return fmt.Errorf("%s takes two operands", a.base)
 	}
 	src, dst := a.ops[0], a.ops[1]
-	dr, ok := parseReg(dst)
-	if !ok {
-		return fmt.Errorf("%s: destination %q must be a register", a.base, dst)
+	dr, err := a.reg(dst)
+	if err != nil {
+		return err
 	}
 	if imm, ok := parseImm(src); ok {
 		enc := map[string]func(bool, Reg, int32) []byte{
@@ -190,9 +244,9 @@ func (a *asmCtx) binary() error {
 		a.p.Emit(enc(a.w, dr, int32(imm)))
 		return nil
 	}
-	sr, ok := parseReg(src)
-	if !ok {
-		return fmt.Errorf("%s: source %q must be a register or immediate", a.base, src)
+	sr, err := a.reg(src)
+	if err != nil {
+		return err
 	}
 	enc := map[string]func(bool, Reg, Reg) []byte{
 		"add": AddReg, "sub": SubReg, "and": AndReg, "or": OrReg, "xor": XorReg, "cmp": CmpReg,
@@ -205,13 +259,13 @@ func (a *asmCtx) imul() error {
 	if len(a.ops) != 2 {
 		return fmt.Errorf("imul takes two operands")
 	}
-	sr, ok := parseReg(a.ops[0])
-	if !ok {
-		return fmt.Errorf("imul: source must be a register")
+	sr, err := a.reg(a.ops[0])
+	if err != nil {
+		return err
 	}
-	dr, ok := parseReg(a.ops[1])
-	if !ok {
-		return fmt.Errorf("imul: destination must be a register")
+	dr, err := a.reg(a.ops[1])
+	if err != nil {
+		return err
 	}
 	a.p.Emit(Imul(a.w, dr, sr))
 	return nil
@@ -221,9 +275,9 @@ func (a *asmCtx) unary() error {
 	if len(a.ops) != 1 {
 		return fmt.Errorf("%s takes one operand", a.base)
 	}
-	dr, ok := parseReg(a.ops[0])
-	if !ok {
-		return fmt.Errorf("%s: operand must be a register", a.base)
+	dr, err := a.reg(a.ops[0])
+	if err != nil {
+		return err
 	}
 	if a.base == "neg" {
 		a.p.Emit(Neg(a.w, dr))
@@ -237,9 +291,9 @@ func (a *asmCtx) shift() error {
 	if len(a.ops) != 2 {
 		return fmt.Errorf("%s takes two operands", a.base)
 	}
-	dr, ok := parseReg(a.ops[1])
-	if !ok {
-		return fmt.Errorf("%s: destination must be a register", a.base)
+	dr, err := a.reg(a.ops[1])
+	if err != nil {
+		return err
 	}
 	if a.ops[0] == "%cl" {
 		switch a.base {
@@ -271,9 +325,9 @@ func (a *asmCtx) lea() error {
 	if len(a.ops) < 2 {
 		return fmt.Errorf("lea takes a memory operand and a register")
 	}
-	dr, ok := parseReg(a.ops[len(a.ops)-1])
-	if !ok {
-		return fmt.Errorf("lea: destination must be a register")
+	dr, err := a.reg(a.ops[len(a.ops)-1])
+	if err != nil {
+		return err
 	}
 	m, ok := parseMem(strings.Join(a.ops[:len(a.ops)-1], ", "))
 	if !ok {
@@ -379,42 +433,57 @@ func parseMem(s string) (Mem, bool) {
 		}
 		disp = v
 	}
-	base, ok := parseReg(strings.TrimSpace(s[open+1 : len(s)-1]))
-	if !ok {
-		return Mem{}, false
+	base, bsz, ok := parseReg(strings.TrimSpace(s[open+1 : len(s)-1]))
+	if !ok || bsz != 8 {
+		return Mem{}, false // an address is held in a 64-bit register
 	}
 	return At(base, int32(disp)), true
 }
 
-// attRegs maps every AT&T register name to its 4-bit encoding.
-var attRegs = func() map[string]Reg {
-	m := map[string]Reg{}
+// attReg is a register named in AT&T syntax: which register, and at what width.
+// The name says both -- %al and %eax are the same register through different
+// windows, and an instruction that takes one will not do for the other.
+type attReg struct {
+	reg  Reg
+	size int // 1, 2, 4 or 8 bytes
+}
+
+// attRegs maps every AT&T register name to its encoding and its width.
+var attRegs = func() map[string]attReg {
+	m := map[string]attReg{}
 	names := [16][4]string{
 		{"al", "ax", "eax", "rax"}, {"cl", "cx", "ecx", "rcx"},
 		{"dl", "dx", "edx", "rdx"}, {"bl", "bx", "ebx", "rbx"},
 		{"spl", "sp", "esp", "rsp"}, {"bpl", "bp", "ebp", "rbp"},
 		{"sil", "si", "esi", "rsi"}, {"dil", "di", "edi", "rdi"},
 	}
+	sizes := [4]int{1, 2, 4, 8}
 	for i, row := range names {
-		for _, n := range row {
-			m[n] = Reg(i)
+		for j, n := range row {
+			m[n] = attReg{Reg(i), sizes[j]}
 		}
 	}
 	for i := 8; i <= 15; i++ {
 		d := strconv.Itoa(i)
-		for _, suf := range []string{"", "b", "w", "d"} {
-			m["r"+d+suf] = Reg(i)
+		for suf, sz := range map[string]int{"b": 1, "w": 2, "d": 4, "": 8} {
+			m["r"+d+suf] = attReg{Reg(i), sz}
 		}
 	}
 	return m
 }()
 
-func parseReg(s string) (Reg, bool) {
+// isReg reports whether an operand names a register, at any width. The width
+// check belongs to asmCtx.reg, which knows the instruction's size.
+func isReg(s string) bool { _, _, ok := parseReg(s); return ok }
+
+// parseReg returns the register an AT&T name refers to, and the width the name
+// selects.
+func parseReg(s string) (Reg, int, bool) {
 	if !strings.HasPrefix(s, "%") {
-		return 0, false
+		return 0, 0, false
 	}
 	r, ok := attRegs[s[1:]]
-	return r, ok
+	return r.reg, r.size, ok
 }
 
 func condByName(c string) (Cond, bool) {
