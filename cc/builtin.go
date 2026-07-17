@@ -108,8 +108,11 @@ func (g *gen) bswap(v ir.Ref, width int) ir.Ref {
 
 // overflowBuiltin lowers __builtin_{add,sub,mul}_overflow(a, b, res): it computes
 // the wrapped result, stores it through res, and returns 1 when the true result
-// would not fit the (signed) result type, 0 otherwise. The overflow test is
-// branchless.
+// would not fit the result type, 0 otherwise. The overflow test is branchless.
+//
+// The result type's signedness picks the test: the signed and unsigned forms are
+// entirely different questions, and asking the signed one about unsigned operands
+// answers no for every value that only overflows unsigned.
 func (g *gen) overflowBuiltin(name string, args []cc.ExpressionNode) ir.Ref {
 	elem := pointee(args[2].Type())
 	cls := clsOf(elem)
@@ -124,24 +127,42 @@ func (g *gen) overflowBuiltin(name string, args []cc.ExpressionNode) ir.Ref {
 	switch name {
 	case "__builtin_add_overflow":
 		result = g.cur.Add(cls, a, b)
-		// Overflow iff a and b share a sign that differs from the sum's.
-		ovf = neg(g.cur.And(cls, g.cur.Xor(cls, a, result), g.cur.Xor(cls, b, result)))
+		if signed(elem) {
+			// Overflow iff a and b share a sign that differs from the sum's.
+			ovf = neg(g.cur.And(cls, g.cur.Xor(cls, a, result), g.cur.Xor(cls, b, result)))
+		} else {
+			// Unsigned addition wraps iff the sum came out below either operand.
+			ovf = g.cur.Cmp(ir.CmpUlt, ir.ClsW, result, a)
+		}
 	case "__builtin_sub_overflow":
 		result = g.cur.Sub(cls, a, b)
-		// Overflow iff a and b differ in sign and the result's sign differs from a's.
-		ovf = neg(g.cur.And(cls, g.cur.Xor(cls, a, b), g.cur.Xor(cls, a, result)))
+		if signed(elem) {
+			// Overflow iff a and b differ in sign and the result's sign differs from a's.
+			ovf = neg(g.cur.And(cls, g.cur.Xor(cls, a, b), g.cur.Xor(cls, a, result)))
+		} else {
+			// Unsigned subtraction wraps iff it borrowed, i.e. a was the smaller.
+			ovf = g.cur.Cmp(ir.CmpUlt, ir.ClsW, a, b)
+		}
 	default: // __builtin_mul_overflow
 		result = g.cur.Mul(cls, a, b)
 		// Overflow iff b != 0 and result/b != a (division does not trap on this
-		// target), plus the one case that check misses: MIN * -1.
+		// target). The division has to match the operands' signedness.
 		bNZ := g.cur.Cmp(ir.CmpNe, ir.ClsW, b, zero)
-		q := g.cur.Div(cls, result, b)
+		var q ir.Ref
+		if signed(elem) {
+			q = g.cur.Div(cls, result, b)
+		} else {
+			q = g.cur.UDiv(cls, result, b)
+		}
 		mism := g.cur.Cmp(ir.CmpNe, ir.ClsW, q, a)
 		ovf = g.cur.And(ir.ClsW, bNZ, mism)
-		minv := g.fn.ConstInt(cls, int64(-1)<<uint(elem.Size()*8-1)) // most-negative value
-		isMin := g.cur.Cmp(ir.CmpEq, ir.ClsW, a, minv)
-		isNeg1 := g.cur.Cmp(ir.CmpEq, ir.ClsW, b, g.fn.ConstInt(cls, -1))
-		ovf = g.cur.Or(ir.ClsW, ovf, g.cur.And(ir.ClsW, isMin, isNeg1))
+		if signed(elem) {
+			// The one case the division check misses: MIN * -1 divides back cleanly.
+			minv := g.fn.ConstInt(cls, int64(-1)<<uint(elem.Size()*8-1)) // most-negative value
+			isMin := g.cur.Cmp(ir.CmpEq, ir.ClsW, a, minv)
+			isNeg1 := g.cur.Cmp(ir.CmpEq, ir.ClsW, b, g.fn.ConstInt(cls, -1))
+			ovf = g.cur.Or(ir.ClsW, ovf, g.cur.And(ir.ClsW, isMin, isNeg1))
+		}
 	}
 	g.storeVal(res, result, elem)
 	return ovf

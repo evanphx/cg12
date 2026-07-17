@@ -492,13 +492,22 @@ func (g *gen) globalItems(t cc.Type, init *cc.Initializer) []ir.DataItem {
 				leaves = append(leaves, leaf{off + 8, 8, ir.DataItem{Sub: ir.SubL, Ints: []int64{hi}}})
 			}
 		case isFloat(et):
-			if v, ok := e.Value().(cc.Float64Value); ok {
-				leaves = append(leaves, leaf{off, sz, ir.DataItem{Sub: subFor(sz), Flts: []float64{float64(v)}}})
+			// The initializer is converted to the declared type, so an integer
+			// literal is as valid here as a floating one: `double d = 1;`.
+			v, ok := constFloat(e)
+			if !ok {
+				g.fail("initializer for a floating type is not a constant")
+				return
 			}
+			leaves = append(leaves, leaf{off, sz, ir.DataItem{Sub: subFor(sz), Flts: []float64{v}}})
 		default:
-			if v, ok := constInt(e); ok {
-				leaves = append(leaves, leaf{off, sz, ir.DataItem{Sub: subFor(sz), Ints: []int64{v}}})
+			// Likewise the other way: `int i = 1.9;` converts, truncating toward zero.
+			v, ok := constIntFrom(e)
+			if !ok {
+				g.fail("initializer for an integer type is not a constant")
+				return
 			}
+			leaves = append(leaves, leaf{off, sz, ir.DataItem{Sub: subFor(sz), Ints: []int64{v}}})
 		}
 	}
 	// Bit fields sharing an access unit are OR-ed together into one integer image
@@ -688,6 +697,38 @@ func subFor(size int) ir.SubCls {
 }
 
 // constInt returns the constant integer value of e, if it is one.
+// constFloat is the value of a constant expression as a float, whatever form the
+// literal took: an initializer is converted to the type it initializes, so an
+// integer literal is a perfectly good initializer for a double.
+func constFloat(e cc.ExpressionNode) (float64, bool) {
+	if e == nil {
+		return 0, false
+	}
+	switch v := e.Value().(type) {
+	case cc.Float64Value:
+		return float64(v), true
+	case cc.Int64Value:
+		return float64(v), true
+	case cc.UInt64Value:
+		return float64(v), true
+	}
+	return 0, false
+}
+
+// constIntFrom is constInt, but it also converts a floating literal, as C does
+// when one initializes an integer: the fractional part is discarded.
+func constIntFrom(e cc.ExpressionNode) (int64, bool) {
+	if v, ok := constInt(e); ok {
+		return v, true
+	}
+	if e != nil {
+		if v, ok := e.Value().(cc.Float64Value); ok {
+			return int64(float64(v)), true // C truncates toward zero
+		}
+	}
+	return 0, false
+}
+
 func constInt(e cc.ExpressionNode) (int64, bool) {
 	if e == nil {
 		return 0, false

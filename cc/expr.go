@@ -542,6 +542,7 @@ func (g *gen) compare(op string, ln, rn cc.ExpressionNode) ir.Ref {
 	// double to long.
 	lt, rt := ln.Type(), rn.Type()
 	var ct cc.Type
+	ctSigned := false
 	switch {
 	case isLongDouble(lt):
 		ct = lt
@@ -557,19 +558,39 @@ func (g *gen) compare(op string, ln, rn cc.ExpressionNode) ir.Ref {
 	case isFloat(rt):
 		ct = rt
 	default:
-		// Both operands are integer (or pointer). The usual arithmetic
-		// conversions pick the wider type; at equal width an unsigned operand
-		// makes the comparison unsigned -- so -1 < 1u is false, not true.
-		switch lc, rc := clsOf(lt).Size(), clsOf(rt).Size(); {
-		case lc > rc:
-			ct = lt
-		case rc > lc:
-			ct = rt
+		// Both operands are integer (or pointer). The usual arithmetic conversions
+		// apply integer promotion first: anything narrower than int becomes int,
+		// because int holds every char and short value. That is what makes
+		// `uc < -1` a SIGNED comparison and false -- promote first and the
+		// unsigned-wins rule never gets to see the unsigned char at all.
+		//
+		// Promotion costs no instruction here: loadVal and the narrowing
+		// conversions already present a sub-word value extended per its own type,
+		// so its register holds exactly the int it promotes to. It only decides
+		// which predicate to use, and whether a widening conversion is needed.
+		lsz, lsg := promotedInt(lt)
+		rsz, rsg := promotedInt(rt)
+		switch {
+		case lsz > rsz:
+			ct, ctSigned = lt, lsg
+		case rsz > lsz:
+			ct, ctSigned = rt, rsg
+		case lsg == rsg:
+			ct, ctSigned = lt, lsg
 		default:
-			ct = lt
-			if signed(lt) && !signed(rt) {
+			// Equal rank, one unsigned: the unsigned type wins, so -1 < 1u is false.
+			ct, ctSigned = lt, false
+			if lsg {
 				ct = rt
 			}
+		}
+		// Equal promoted width means both registers already hold the common type's
+		// value, whatever the declared types were -- converting would only narrow
+		// one of them back down.
+		if lsz == rsz {
+			l := g.genExpr(ln)
+			r := g.genExpr(rn)
+			return g.cur.Cmp(cmpPred(op, ctSigned, false), ir.ClsW, l, r)
 		}
 	}
 	l := g.convert(g.genExpr(ln), lt, ct)
@@ -577,7 +598,10 @@ func (g *gen) compare(op string, ln, rn cc.ExpressionNode) ir.Ref {
 	if isLongDouble(ct) { // soft-float comparison
 		return g.quadCompare(op, l, r)
 	}
-	pred := cmpPred(op, signed(ct), isFloat(ct))
+	if isFloat(ct) {
+		ctSigned = true // unused by the float predicates, but do not read as unsigned
+	}
+	pred := cmpPred(op, ctSigned, isFloat(ct))
 	// A comparison yields an int; the operand class is carried by l and r, and
 	// the predicate encodes signedness and float-ness.
 	return g.cur.Cmp(pred, ir.ClsW, l, r)

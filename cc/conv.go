@@ -46,38 +46,80 @@ func (g *gen) convert(v ir.Ref, from, to cc.Type) ir.Ref {
 	}
 	fc, tc := clsOf(from), clsOf(to)
 	ff, tf := isFloat(from), isFloat(to)
-	if fc == tc && ff == tf {
-		return v
-	}
 	b := g.cur
 	switch {
+	case fc == tc && ff == tf:
+		// The computation class is unchanged, but the declared width may not be:
+		// char and int are both ClsW, and a conversion between them still has to
+		// throw bits away.
+		return g.narrowInt(v, from, to, tc)
 	case ff && tf: // float <-> float
 		if tc == ir.ClsD {
 			return b.Exts(v) // single -> double
 		}
 		return b.Truncd(v) // double -> single
 	case ff && !tf: // float -> integer
+		var iv ir.Ref
 		if signed(to) {
-			return b.Stosi(tc, v)
+			iv = b.Stosi(tc, v)
+		} else {
+			iv = b.Stoui(tc, v)
 		}
-		return b.Stoui(tc, v)
+		return g.narrowInt(iv, nil, to, tc)
 	case !ff && tf: // integer -> float
 		if signed(from) {
 			return b.Sltof(tc, v)
 		}
 		return b.Ultof(tc, v)
 	default: // integer width change (a long and a pointer are the same width)
-		if wide(tc) && fc == ir.ClsW {
+		iv := v
+		switch {
+		case wide(tc) && fc == ir.ClsW:
 			if signed(from) {
-				return b.Extsw(ir.ClsL, v)
+				iv = b.Extsw(ir.ClsL, v)
+			} else {
+				iv = b.Extuw(ir.ClsL, v)
 			}
-			return b.Extuw(ir.ClsL, v)
+		case tc == ir.ClsW && wide(fc):
+			iv = b.Copy(ir.ClsW, v) // truncate 64 -> 32
 		}
-		if tc == ir.ClsW && wide(fc) {
-			return b.Copy(ir.ClsW, v) // truncate 64 -> 32
-		}
+		return g.narrowInt(iv, from, to, tc)
+	}
+}
+
+// narrowInt re-presents v in a sub-word integer type's declared width. C
+// conversion to char or short keeps only the low bits, and the target's
+// signedness decides how they read back -- so (unsigned char)300 is 44 and
+// (unsigned short)-1 is 65535. Nothing here is implied by the value class:
+// char, short and int are all ClsW, so without this a narrowing cast is a no-op.
+//
+// from may be nil when the source is not an integer (a float conversion), in
+// which case the narrowing always applies.
+func (g *gen) narrowInt(v ir.Ref, from, to cc.Type, tc ir.Cls) ir.Ref {
+	if !cc.IsIntegerType(to) || isInt128(to) {
 		return v
 	}
+	sz := int(to.Size())
+	if sz >= 4 {
+		return v // a word or wider: the class change already presented it
+	}
+	// Already held in exactly this width and signedness: nothing to re-present.
+	if from != nil && cc.IsIntegerType(from) && int(from.Size()) == sz && signed(from) == signed(to) {
+		return v
+	}
+	switch sz {
+	case 1:
+		if signed(to) {
+			return g.cur.Extsb(tc, v)
+		}
+		return g.cur.Extub(tc, v)
+	case 2:
+		if signed(to) {
+			return g.cur.Extsh(tc, v)
+		}
+		return g.cur.Extuh(tc, v)
+	}
+	return v
 }
 
 // toPtr converts an integer index to the abstract pointer class so that address
@@ -240,4 +282,21 @@ func (g *gen) genCall(n *cc.PostfixExpression) ir.Ref {
 // block, so a call's aggregate metadata can be attached after it is built.
 func (g *gen) lastInstr() *ir.Instr {
 	return &g.cur.Instrs[len(g.cur.Instrs)-1]
+}
+
+// promotedInt is a type's width and signedness after C's integer promotion: any
+// integer narrower than int becomes int, since int holds every value of a char
+// or a short. Pointers and anything else keep their own.
+//
+// This is the rank the usual arithmetic conversions actually compare. Comparing
+// value classes instead collapses char, short and int into one width and hands
+// the tiebreak to whichever operand happened to be unsigned.
+func promotedInt(t cc.Type) (size int, isSigned bool) {
+	if !cc.IsIntegerType(t) {
+		return int(t.Size()), signed(t)
+	}
+	if sz := int(t.Size()); sz < 4 {
+		return 4, true
+	}
+	return int(t.Size()), signed(t)
 }
