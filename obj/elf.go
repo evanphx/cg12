@@ -361,13 +361,23 @@ func (o *Object) MarshalELF() ([]byte, error) {
 		case SecStackMap:
 			shndx = uint16(secStackMap)
 		}
+		// A symbol defined in any data section is an object; only .rodata was
+		// missing here, so a const array or a string literal went out STT_NOTYPE --
+		// which is what an assembly label with no .type directive looks like, not
+		// what data looks like. gcc emits STT_OBJECT for the same source.
+		//
+		// No linker has been found that minds: GNU ld and lld both resolve against
+		// the NOTYPE symbol, and a shared library exporting one produces the same
+		// relocations as gcc's. This is fidelity rather than a fix -- but the type
+		// is a claim about what the symbol is, and the claim was false.
 		typ := byte(sttNotype)
 		switch {
 		case s.TLS:
 			typ = sttTLS
 		case s.Func:
 			typ = sttFunc
-		case s.Section == SecData || s.Section == SecBss || s.Section == SecRelro:
+		case s.Section == SecData || s.Section == SecBss ||
+			s.Section == SecRelro || s.Section == SecRodata:
 			typ = sttObject
 		}
 		bind := byte(stbLocal)

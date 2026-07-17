@@ -1,6 +1,8 @@
 package obj_test
 
 import (
+	"bytes"
+	"debug/elf"
 	"encoding/binary"
 	"os"
 	"os/exec"
@@ -169,4 +171,63 @@ func TestReadRealObjectFindsDataRelRo(t *testing.T) {
 	// so both come back with an empty target name. That is #134 -- it predates this
 	// section and hits any object with a string literal in it -- and asserting the
 	// wrong thing here would make this test fail for that reason instead of its own.
+}
+
+// A symbol's type says what the symbol is, and every data symbol we emit must
+// agree with what a real toolchain says about the same source.
+//
+// .rodata was the one section missing from the writer's STT_OBJECT case, so a
+// const array went out STT_NOTYPE -- what an assembly label with no .type looks
+// like. Nothing was found that minds: GNU ld and lld both link against it and the
+// program runs. This pins the classification anyway, because the type is a claim
+// and it was a false one, and because the next section added to the model will
+// copy whatever this switch does.
+func TestEmittedSymbolTypesMatchGcc(t *testing.T) {
+	src := `
+		const char romsg[] = "hello";  /* .rodata */
+		int rwval = 4;                 /* .data   */
+		int zeroed;                    /* .bss    */
+		int fn(void) { return 0; }     /* .text   */
+	`
+	// What gcc says, read back out of its own object.
+	want := map[string]elf.SymType{}
+	gf, err := elf.NewFile(bytes.NewReader(gccObject(t, src)))
+	require.NoError(t, err)
+	gsyms, err := gf.Symbols()
+	require.NoError(t, err)
+	for _, s := range gsyms {
+		switch s.Name {
+		case "romsg", "rwval", "zeroed", "fn":
+			want[s.Name] = elf.ST_TYPE(s.Info)
+		}
+	}
+	require.Len(t, want, 4, "gcc defines all four")
+	require.Equal(t, elf.STT_OBJECT, want["romsg"], "gcc calls const data an object")
+
+	// The same four, built through our own writer.
+	o := &obj.Object{Machine: uint16(elf.EM_AARCH64)}
+	o.Text = make([]byte, 8)
+	o.Rodata = []byte("hello\x00")
+	o.Data = make([]byte, 4)
+	o.BssSize = 4
+	o.Syms = []obj.Sym{
+		{Name: "romsg", Section: obj.SecRodata, Size: 6, Global: true},
+		{Name: "rwval", Section: obj.SecData, Size: 4, Global: true},
+		{Name: "zeroed", Section: obj.SecBss, Size: 4, Global: true},
+		{Name: "fn", Section: obj.SecText, Size: 8, Global: true, Func: true},
+	}
+	raw, err := o.MarshalELF()
+	require.NoError(t, err)
+	mf, err := elf.NewFile(bytes.NewReader(raw))
+	require.NoError(t, err)
+	msyms, err := mf.Symbols()
+	require.NoError(t, err)
+
+	got := map[string]elf.SymType{}
+	for _, s := range msyms {
+		if _, ok := want[s.Name]; ok {
+			got[s.Name] = elf.ST_TYPE(s.Info)
+		}
+	}
+	require.Equal(t, want, got, "our symbol types must say what gcc's do")
 }
