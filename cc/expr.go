@@ -206,11 +206,13 @@ func (g *gen) genAddr(e cc.ExpressionNode) (ir.Ref, cc.Type) {
 			}
 			return g.ptrIndex(base, false, g.genExpr(idxN), idxN.Type(), int64(elemT.Size())), elemT
 		case cc.PostfixExpressionSelect: // s.field
-			base, _ := g.genAddr(n.PostfixExpression)
+			base, bt := g.genAddr(n.PostfixExpression)
+			g.checkPacked(bt)
 			fld := n.Field()
 			return g.offset(base, int(fld.Offset())), fld.Type()
 		case cc.PostfixExpressionPSelect: // p->field
 			ptr := g.genExpr(n.PostfixExpression)
+			g.checkPacked(pointee(n.PostfixExpression.Type()))
 			fld := n.Field()
 			return g.offset(ptr, int(fld.Offset())), fld.Type()
 		case cc.PostfixExpressionComplit: // (T){ ... }
@@ -681,7 +683,7 @@ func (g *gen) boolOf(v ir.Ref) ir.Ref {
 
 // genCond3 emits the ?: conditional operator.
 func (g *gen) genCond3(n *cc.ConditionalExpression) ir.Ref {
-	res := g.cur.Alloc(align(n.Type()), int(n.Type().Size()))
+	res := g.allocAligned(n.Type(), int(n.Type().Size()))
 	thenB, elseB, endB := g.block("qt"), g.block("qf"), g.block("qend")
 	g.cur.Jnz(g.genCond(n.LogicalOrExpression), thenB, elseB)
 	g.cur = thenB

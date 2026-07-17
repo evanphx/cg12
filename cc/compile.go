@@ -391,7 +391,7 @@ func (g *gen) genFunc(fd *cc.FunctionDefinition) {
 			continue
 		}
 		pref := g.fn.Param(p.Name(), clsOf(pt))
-		addr := g.cur.Alloc(align(pt), int(pt.Size()))
+		addr := g.allocAligned(pt, int(pt.Size()))
 		g.setName(addr, p.Name()+".addr")
 		g.storeVal(addr, pref, pt)
 		// A va_list parameter's slot holds a pointer to the caller's __va_list
@@ -422,8 +422,18 @@ func (g *gen) genFunc(fd *cc.FunctionDefinition) {
 	}
 }
 
-// align returns a stack-allocation alignment for type t, rounded up to one of
-// cg12's supported alloc alignments (4, 8, 16).
+// maxAllocAlign is the strictest alignment a single alloc op can ask for: the
+// IR names the alignment in the opcode (alloc4/alloc8/alloc16), so there is no
+// op for more. A local wanting more is over-allocated and its address rounded up
+// instead — see allocAligned.
+const maxAllocAlign = 16
+
+// align returns the alloc op's alignment for type t: one of 4, 8, 16.
+//
+// This is what the op can promise, not what the type asked for. A type wanting
+// more than 16 does not get it from here, and a caller placing such a type must
+// go through allocAligned; align alone would silently under-align it, which is
+// what `char buf[64] __attribute__((aligned(64)))` used to get.
 func align(t cc.Type) int {
 	a := t.Align()
 	switch {
@@ -432,8 +442,37 @@ func align(t cc.Type) int {
 	case a <= 8:
 		return 8
 	default:
-		return 16
+		return maxAllocAlign
 	}
+}
+
+// dataAlign returns the alignment for a global's ir.Data. Unlike a stack slot,
+// this one is a number the object layer places the datum by, so it can be any
+// power of two the source asked for.
+func dataAlign(t cc.Type) int {
+	if a := t.Align(); a > 0 {
+		return a
+	}
+	return 1
+}
+
+// allocAligned reserves stack storage for a value of type t and returns its
+// address, honouring an alignment stricter than any alloc op can express.
+//
+// The stack pointer is only 16-aligned, so a slot at a fixed offset from it
+// cannot be 64-aligned however the frame is laid out: the alignment has to be
+// established at run time. This over-allocates by align-1 and rounds the address
+// up, which costs two instructions and no frame realignment. gcc realigns the
+// frame instead and gets a cheaper address; both give the program what it asked
+// for, which is what the alignment is for.
+func (g *gen) allocAligned(t cc.Type, size int) ir.Ref {
+	a := t.Align()
+	if a <= maxAllocAlign {
+		return g.cur.Alloc(align(t), size)
+	}
+	raw := g.cur.Alloc(maxAllocAlign, size+a-1)
+	up := g.cur.Add(ir.ClsL, raw, g.fn.Long(int64(a-1)))
+	return g.cur.And(ir.ClsL, up, g.fn.Long(int64(^(a - 1))))
 }
 
 // zero returns a zero constant of the given type's class.
@@ -497,7 +536,7 @@ func (g *gen) genGlobalDecl(d *cc.Declaration) {
 				sec = ".rodata"
 			}
 		}
-		data := &ir.Data{Name: dcl.Name(), Align: align(t), Linkage: ir.Linkage{
+		data := &ir.Data{Name: dcl.Name(), Align: dataAlign(t), Linkage: ir.Linkage{
 			Section: sec,
 			// External linkage is what makes a definition visible to the linker;
 			// `static` is internal and stays private to this unit.

@@ -154,6 +154,30 @@ int main(void){
          __builtin_offsetof(struct B, c), __builtin_offsetof(struct D, c));
   return 0;
 }`},
+
+	// An over-aligned object must actually land on its alignment. cg12's alloc op
+	// names its alignment in the opcode and stops at 16, and the stack pointer is
+	// only 16-aligned besides, so anything stricter has to be established at run
+	// time rather than by the frame layout. Asking where it landed is the only way
+	// to tell: a wrongly-aligned buffer reads and writes perfectly well.
+	{"over-aligned", `
+#include <stdio.h>
+char g64[64] __attribute__((aligned(64)));
+int main(void){
+  char l64[64] __attribute__((aligned(64)));
+  char l32[32] __attribute__((aligned(32)));
+  char l16[16] __attribute__((aligned(16)));
+  char l8[8]   __attribute__((aligned(8)));
+  printf("%d %d %d %d %d\n",
+         (int)((unsigned long)g64 % 64), (int)((unsigned long)l64 % 64),
+         (int)((unsigned long)l32 % 32), (int)((unsigned long)l16 % 16),
+         (int)((unsigned long)l8 % 8));
+  // The storage still has to work: the rounding must not hand back a slot that
+  // overlaps its neighbours or runs off the reservation.
+  for (int i = 0; i < 64; i++) { l64[i] = (char)i; g64[i] = (char)(63 - i); }
+  printf("%d %d %d %d\n", l64[0], l64[63], g64[0], g64[63]);
+  return 0;
+}`},
 }
 
 func TestCDiffAgainstGCC(t *testing.T) {

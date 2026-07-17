@@ -67,6 +67,7 @@ func (g *gen) aggOf(t cc.Type) *ir.AggType {
 		}
 	}
 	g.mod.AddType(agg)
+	g.checkPacked(t)
 	g.checkAggLayout(t, agg)
 	return agg
 }
@@ -78,15 +79,20 @@ func (g *gen) aggOf(t cc.Type) *ir.AggType {
 // one, and the type comes out five times too big. Same-unit calls still work,
 // because both sides share the same wrong layout -- it only shows when the
 // struct meets code someone else compiled, which no test did.
+//
+// Note what this cannot catch, and why checkPacked exists beside it: this
+// compares cg12's layout against the C type checker's, and for a packed struct
+// the type checker's is wrong in exactly the same way cg12's is. The two agree,
+// and both are wrong. A consistency check has nothing to say when its two
+// witnesses share the mistake.
 func (g *gen) checkAggLayout(t cc.Type, agg *ir.AggType) {
 	size, align := agg.Layout()
 	if size == int(t.Size()) && align == t.Align() {
 		return
 	}
 	g.fail("cc: cannot pass %s by value: cg12 lays it out as %d bytes (align %d) "+
-		"but C says %d (align %d) -- a bitfield, or a packed or aligned attribute, "+
-		"which cg12's aggregate types cannot yet express",
-		aggName(t), size, align, t.Size(), t.Align())
+		"but C says %d (align %d) -- a bitfield, which cg12's aggregate types "+
+		"cannot yet express", aggName(t), size, align, t.Size(), t.Align())
 }
 
 // fieldOf maps one C member type to an aggregate field: a nested aggregate keeps
@@ -149,4 +155,34 @@ func (g *gen) aggParam(name string, agg *ir.AggType) ir.Ref {
 	t.Agg = agg
 	g.fn.Params = append(g.fn.Params, t)
 	return r
+}
+
+// checkPacked refuses a struct that carries __attribute__((packed)), whose
+// layout cg12 would get wrong.
+//
+// modernc.org/cc/v4 (v4.29.1, the latest) records the attribute but does not
+// apply it: for `struct { char c; int i; }` it reports the fields at 0 and 4 and
+// the whole at 8, where C says 0 and 1 and 5. cg12 asks it for every offset, so
+// it reads and writes the wrong bytes -- silently, because cg12's own layout of
+// the same struct agrees with the wrong answer, which is why checkAggLayout
+// cannot see it either.
+//
+// So the attribute itself is the only evidence, and it is only half there:
+//
+//	struct S { ... } __attribute__((packed));    // recorded: refused here
+//	struct __attribute__((packed)) S { ... };    // discarded in the parser: invisible
+//
+// The second spelling is not detectable by any means this parser offers -- the
+// attribute reaches neither the type, nor DeclarationSpecifiers, nor either of
+// StructOrUnionSpecifier's two attribute lists. A program using it still
+// miscompiles silently. This catches what can be caught and does not pretend to
+// be a guarantee; the real fix is upstream.
+func (g *gen) checkPacked(t cc.Type) {
+	a := t.Attributes()
+	if a == nil || !a.IsAttrSet("packed") {
+		return
+	}
+	g.fail("cc: %s is __attribute__((packed)), which cg12 cannot lay out: "+
+		"the C type checker reports the unpacked field offsets, so every access "+
+		"would read the wrong bytes", aggName(t))
 }

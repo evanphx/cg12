@@ -71,3 +71,48 @@ int main(void){
 	require.Equal(t, 0, code)
 	require.Equal(t, "42 4\n", out)
 }
+
+// A packed struct is refused rather than silently read at the wrong offsets.
+//
+// modernc.org/cc/v4 records __attribute__((packed)) and does not apply it: it
+// reports `struct { char c; int i; }` with i at 4 and the whole at 8, where C
+// says 1 and 5. cg12 asks it for every offset, so every access is wrong -- and
+// checkAggLayout cannot notice, because cg12's own layout agrees with the wrong
+// answer. The attribute is the only evidence there is.
+func TestPackedStructIsRefused(t *testing.T) {
+	for _, src := range []string{
+		`struct P { char c; int i; } __attribute__((packed));
+		 int f(struct P *p){ return p->i; }`, // through a pointer
+		`struct P { char c; int i; } __attribute__((packed)) pv;
+		 int f(void){ return pv.i; }`, // through a value
+		`struct P { char c; int i; } __attribute__((packed));
+		 int f(struct P p){ return p.i; }`, // by value across the ABI
+	} {
+		_, err := cc.Compile("p.c", src)
+		require.Error(t, err, "a packed struct must not compile to unpacked offsets")
+		require.Contains(t, err.Error(), "packed")
+	}
+}
+
+// The refusal must not catch an ordinary struct: the attribute is the trigger,
+// not the shape. Every C program has structs like this one.
+func TestUnpackedStructStillCompiles(t *testing.T) {
+	_, err := cc.Compile("p.c", `struct P { char c; int i; };
+	                             int f(struct P *p){ return p->i; }`)
+	require.NoError(t, err)
+}
+
+// What the refusal does NOT catch, recorded so the gap is a known one rather
+// than a surprise: modernc discards the attribute when it is written between
+// `struct` and the tag -- it reaches neither the type, nor DeclarationSpecifiers,
+// nor either of StructOrUnionSpecifier's attribute lists, so there is nothing
+// left to detect. This program still compiles to the wrong offsets.
+//
+// If this test starts failing, modernc has learned to keep the attribute: make
+// checkPacked catch this spelling too, and delete this test.
+func TestPackedBeforeTagIsNotDetectable(t *testing.T) {
+	_, err := cc.Compile("p.c", `struct __attribute__((packed)) P { char c; int i; };
+	                             int f(struct P *p){ return p->i; }`)
+	require.NoError(t, err,
+		"known gap: the attribute is discarded by the parser before cg12 can see it")
+}

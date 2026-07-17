@@ -184,7 +184,7 @@ func (g *gen) genLocalDecl(d *cc.Declaration) {
 		if isVaList(t) {
 			size = vaListBytes // hold the target's larger va_list state, not a pointer
 		}
-		addr := g.cur.Alloc(align(t), size)
+		addr := g.allocAligned(t, size)
 		g.setName(addr, dcl.Name()+".addr")
 		g.define(dcl.Name(), lval{addr: addr, typ: t})
 		if id.Case == cc.InitDeclaratorInit {
@@ -221,7 +221,7 @@ func (g *gen) vlaBytes(at *cc.ArrayType) ir.Ref {
 func (g *gen) genStaticLocal(id *cc.InitDeclarator, dcl *cc.Declarator, t cc.Type) {
 	g.nstatic++
 	name := fmt.Sprintf("%s.static.%d", dcl.Name(), g.nstatic)
-	data := &ir.Data{Name: name, Align: align(t)} // zero Linkage = internal
+	data := &ir.Data{Name: name, Align: dataAlign(t)} // zero Linkage = internal
 	if id.Case == cc.InitDeclaratorInit {
 		data.Items = g.globalItems(t, id.Initializer)
 	}
@@ -266,7 +266,7 @@ func (g *gen) complit(n *cc.PostfixExpression) (ir.Ref, cc.Type) {
 	// Use the declared type, not n.Type(): an array literal's expression type has
 	// already decayed to a pointer, which would under-allocate the storage.
 	t := n.TypeName.Type()
-	addr := g.cur.Alloc(align(t), int(t.Size()))
+	addr := g.allocAligned(t, int(t.Size()))
 	g.zeroFill(addr, int(t.Size()))
 	g.genBraceInit(addr, n.InitializerList)
 	return addr, t
