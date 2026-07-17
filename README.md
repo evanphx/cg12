@@ -31,7 +31,7 @@ compiler backend. cg12 starts as an idiomatic-Go re-imagining of
 | `wasm` — WebAssembly backend: locals, structured control flow, linear memory, calls (direct/indirect), aggregates, variadics, WAT emit | ✅ runs on wasmtime, 95% covered (external/WASI calls pending) |
 | `arm64/a64` — direct A64 instruction encoder (integer, float, loads/stores, branches), validated byte-for-byte vs a reference assembler | ✅ implemented, 94% covered |
 | `obj` — ELF64 relocatable-object writer (symbols, .text/.data, relocations) | ✅ links + runs with `ld`/`gcc` |
-| `arm64.CompileObject` — machine-code path: IR → A64 bytes → ELF `.o`, **no external assembler** | ✅ at parity with the text emitter (integers, floats, calls, tail calls, variadics, aggregates, data) |
+| `arm64.CompileObject` — the arm64 backend: IR → A64 bytes → ELF `.o`, **no external assembler** | ✅ integers, floats, calls, tail calls, variadics, aggregates, data |
 | `link` — partial linker: merges objects from IR modules and `.o` files, resolves cross-object references | ✅ merges .text/.data, symbol resolution, PC-relative branch resolution |
 
 ## Example
@@ -77,22 +77,26 @@ When the module carries source positions, `CompileObject` also emits DWARF line
 info (`.debug_line`/`.debug_info`/`.debug_abbrev`) directly — a debugger can step
 the generated code with no assembler in the loop.
 
-An assembler-text path is also available for inspection and debugging:
+To read the generated code, disassemble it:
 
 ```go
-asm, err := arm64.CompileModule(m) // GNU-assembler text for AArch64
+o, err := arm64.CompileToObject(m)
+fmt.Print(arm64.Disassemble(o)) // A64 assembly, with the relocated symbols named
 ```
 
-The two paths are behavior-compatible.
+That is the same code that runs, read back out of the object rather than
+rendered a second time, so it cannot drift from it. It is meant for reading and
+not for feeding to an assembler: it names symbols without declaring them. `a64`
+also has the arch-only `a64.Disasm(word)` under it, which is checked against the
+very asm/word pairs the encoders are validated with, read the other way round.
 
 ## Debug info
 
 Instructions and blocks carry an optional source position (`ir.SrcPos` — a file,
 line, and column), set on the builder with `b.At(pos)` and interned into the
-module's file table with `m.File(name)`. Both backends turn these into real
+module's file table with `m.File(name)`. The backend turns these into real
 DWARF: `CompileObject` emits the `.debug_line`/`.debug_info`/`.debug_abbrev`
-sections (with relocations) directly, and `CompileModule` emits `.file`/`.loc`
-directives for the assembler to do the same. The object path's `.debug_info` is a
+sections (with relocations) directly. Its `.debug_info` is a
 full compilation unit — a subprogram DIE per function (name, PC range, frame
 base, return type, and typed formal parameters) over base-type DIEs — so a
 debugger can set breakpoints by name, produce backtraces, show signatures, and
@@ -410,14 +414,14 @@ Parse text IL, optimize, and compile:
 ```go
 m, _ := parse.Parse(ilSource)   // QBE-compatible textual IL -> ir.Module
 opt.OptimizeModule(m)
-asm, _ := arm64.CompileModule(m)
+code, _ := arm64.CompileObject(m)  // a relocatable ELF object
 ```
 
 Run the optimizer before lowering:
 
 ```go
 opt.OptimizeModule(m)          // runs opt.DefaultPipeline()
-asm, _ := arm64.CompileModule(m)
+code, _ := arm64.CompileObject(m)
 ```
 
 ### The pass pipeline

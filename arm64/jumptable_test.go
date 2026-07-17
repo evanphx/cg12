@@ -8,10 +8,8 @@ import (
 )
 
 // TestJumpTableArm64 exercises a dense switch that lowers to an indexed jump
-// table (contiguous and negative-based ranges) end-to-end on arm64. It runs the
-// same program through both emitters -- the assembly-text path (buildAndRun) and
-// the machine-code object path (buildObjAndRun) -- so the shared jumpTable
-// builder is validated in both backends by execution.
+// table -- both a contiguous range and one based at a negative case -- end to
+// end on arm64: the table is built, indexed, and branched through by running it.
 func TestJumpTableArm64(t *testing.T) {
 	src := `
 int contig(int n){ switch(n){
@@ -36,17 +34,8 @@ int check(void){
 }`
 	main := `extern int check(void); int main(void){ return check(); }`
 
-	// Compile a fresh module per subtest: lowering mutates the module in place.
-	t.Run("text", func(t *testing.T) {
-		m, err := cc.Compile("switch.c", src)
-		require.NoError(t, err)
-		_, code := buildAndRun(t, m, main)
-		require.Equal(t, 0, code)
-	})
-	t.Run("object", func(t *testing.T) {
-		m, err := cc.Compile("switch.c", src)
-		require.NoError(t, err)
-		_, code := buildObjAndRun(t, m, main)
-		require.Equal(t, 0, code)
-	})
+	m, err := cc.Compile("switch.c", src)
+	require.NoError(t, err)
+	_, code := buildAndRun(t, m, main)
+	require.Equal(t, 0, code)
 }

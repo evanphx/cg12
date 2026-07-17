@@ -4,8 +4,9 @@ import "github.com/evanphx/cg12/ir"
 
 // frameLayout is the stack-frame plan for one function: where everything the
 // function needs room for ends up, relative to the frame pointer. It is pure
-// computation over the register allocation, so both emitters share it rather
-// than deciding separately and risking two different answers.
+// computation over the register allocation: the prologue, the epilogue, and
+// every frame-relative access all read their offsets from here, so they cannot
+// disagree about where a spill slot went.
 type frameLayout struct {
 	frame       int               // total frame size in bytes (16-aligned)
 	calleeSaved []Reg             // callee-saved registers to preserve, in save order

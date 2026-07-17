@@ -104,7 +104,7 @@ func TestMorestackFixupEngineInIR(t *testing.T) {
 	e.CallVoid(f.Sym("gc_move", 0)) // the IR fixup engine, at a safepoint
 	e.Ret(e.Load(ir.ClsW, cell))
 
-	_, code := buildObjAndRun(t, m, `
+	_, code := buildAndRun(t, m, `
 extern int run(int);
 int g_relocated = 0;
 int main(void){
@@ -299,7 +299,7 @@ func TestStackGrowthEndToEnd(t *testing.T) {
 	re.Store(saved, rsp) // switch back to the C stack
 	re.Ret(result)
 
-	_, code := buildObjAndRun(t, m, `
+	_, code := buildAndRun(t, m, `
 #include <stdlib.h>
 #include <stdint.h>
 long g_stack_base = 0;
@@ -338,7 +338,7 @@ func TestStackSwitchInIR(t *testing.T) {
 	re.Store(saved, sp)                          // switch back
 	re.Ret(r)
 
-	_, code := buildObjAndRun(t, m, `
+	_, code := buildAndRun(t, m, `
 #include <stdlib.h>
 #include <stdint.h>
 extern long run_on_stack(long top);

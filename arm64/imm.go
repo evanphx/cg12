@@ -6,10 +6,9 @@ import (
 	"github.com/evanphx/cg12/ir"
 )
 
-// This file holds the pure decision logic for folding integer constants into
-// AArch64 immediate instruction forms. Both backends — the machine-code emitter
-// (mc.go) and the text emitter (emit.go) — use it so they agree on when an
-// operand becomes an immediate rather than a materialized register.
+// This file holds the pure decision logic for folding constants into AArch64
+// immediate instruction forms: whether an operand becomes an immediate at all,
+// or has to be materialized into a register first.
 
 // intConst returns the integer value of ref when it is a ConstInt.
 func intConst(f *ir.Func, ref ir.Ref) (int64, bool) {

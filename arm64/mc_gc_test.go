@@ -195,7 +195,7 @@ func TestObjEmitStackMapExplicitSafepoint(t *testing.T) {
 	require.Len(t, points[0], 1, "obj is a live root")
 
 	// It links and runs (the marker emits no code, returns its argument).
-	_, code := buildObjAndRun(t, m, `
+	_, code := buildAndRun(t, m, `
 extern void *poll(void*);
 int main(void){ int v; return poll(&v)==&v ? 0 : 1; }`)
 	require.Equal(t, 0, code)
@@ -227,7 +227,7 @@ func TestObjEmitStackMapLoopBackedge(t *testing.T) {
 	require.Len(t, points, 1)
 	require.Len(t, points[0], 1, "obj is live across the loop poll")
 
-	_, code := buildObjAndRun(t, m, `
+	_, code := buildAndRun(t, m, `
 extern void *spin(void*, int);
 int main(void){ int v; return spin(&v, 5)==&v ? 0 : 1; }`)
 	require.Equal(t, 0, code)
@@ -246,7 +246,7 @@ func TestObjEmitStackMapWalkedByCollector(t *testing.T) {
 	e.CallVoid(f.Sym("gc_collect", 0)) // the collection safepoint
 	e.Ret(obj)
 
-	_, code := buildObjAndRun(t, m, `
+	_, code := buildAndRun(t, m, `
 #include <stdint.h>
 #include <string.h>
 
@@ -363,7 +363,7 @@ func TestObjEmitStackMapSpilledAndRuns(t *testing.T) {
 	}
 
 	// It links and runs: gckeep returns its pointer argument untouched.
-	_, code := buildObjAndRun(t, m, `
+	_, code := buildAndRun(t, m, `
 #include <stdint.h>
 int sink(int x){ return x; }
 extern void *gckeep(void*, int);

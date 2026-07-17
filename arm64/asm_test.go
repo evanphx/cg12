@@ -61,7 +61,7 @@ int main(void){
 			if optimize {
 				opt.OptimizeModule(m)
 			}
-			out, code := buildObjAndRun(t, m, "")
+			out, code := buildAndRun(t, m, "")
 			require.Equal(t, 0, code)
 			require.Equal(t, "42 48 1042 123 28012 42042 42\n", out) // +,<<,sub+k,+imm,sumdiff,memops,+r
 		})

@@ -12,9 +12,8 @@ import (
 
 // CompileObject lowers, allocates, and emits every function and data definition
 // in m directly to an ELF relocatable object — machine-code bytes, no external
-// assembler. This is the primary output path; it handles the same programs as
-// the assembler-text path (CompileModule) — integers, floats, direct/indirect/
-// tail calls, variadics, aggregates, and data with relocations — and, when the
+// assembler. It handles integers, floats, direct/indirect/tail calls, variadics,
+// aggregates, and data with relocations — and, when the
 // module carries source positions, emits DWARF line info (.debug_line/
 // .debug_info/.debug_abbrev) directly, no assembler required.
 // Options configures object emission.
@@ -517,8 +516,8 @@ func emitMachine(f *ir.Func, alloc *allocation, gc GCStrategy, tlsModel TLSModel
 	return &machineCode{code: code, relocs: m.relocs, rows: m.rows, inl: m.inl, safepoints: m.safepoints, blockSyms: blockSyms, m: m}, nil
 }
 
-// recordLoc appends a line-table row when the source position changes, mirroring
-// the .loc directives the assembler-text emitter produces.
+// recordLoc appends a line-table row when the source position changes: the row
+// is the line program's own record of which instruction belongs to which line.
 func (m *mc) recordLoc(pos ir.SrcPos) {
 	if !pos.Valid() || pos == m.lastPos {
 		return

@@ -17,7 +17,7 @@ func TestRegVarReadRegister(t *testing.T) {
 	x0 := f.RegVar("x0", int(arm64.X0))
 	e.Ret(e.Load(ir.ClsL, x0)) // return whatever is in register x0
 
-	_, code := buildObjAndRun(t, m, `
+	_, code := buildAndRun(t, m, `
 extern long readx0(long);
 int main(void){ return readx0(0x12345678L) == 0x12345678L ? 0 : 1; }`)
 	require.Equal(t, 0, code)
@@ -35,7 +35,7 @@ func TestRegVarWriteReadRoundTrip(t *testing.T) {
 	e.Store(v, x18)          // x18 = v
 	e.Ret(e.Load(ir.ClsL, x18))
 
-	_, code := buildObjAndRun(t, m, `
+	_, code := buildAndRun(t, m, `
 extern long rt(long);
 int main(void){ return rt(0xABCDEF012L) == 0xABCDEF012L ? 0 : 1; }`)
 	require.Equal(t, 0, code)
@@ -49,7 +49,7 @@ func TestRegVarStackPointer(t *testing.T) {
 	sp := f.RegVar("sp", int(arm64.SP))
 	e.Ret(e.Load(ir.ClsL, sp))
 
-	_, code := buildObjAndRun(t, m, `
+	_, code := buildAndRun(t, m, `
 extern long getsp(void);
 int main(void){
   long local;
@@ -76,7 +76,7 @@ func TestRegVarWriteStackPointer(t *testing.T) {
 	e.Store(s0, sp) // restore sp
 	e.Ret(v)
 
-	_, code := buildObjAndRun(t, m, `
+	_, code := buildAndRun(t, m, `
 extern int spscratch(void);
 int main(void){ return spscratch() == 0xBEEF ? 0 : 1; }`)
 	require.Equal(t, 0, code)

@@ -7,9 +7,8 @@ import (
 
 // sel drives instruction selection against an asmb builder. It resolves each
 // operand to a physical register -- loading a spilled temporary or materializing
-// a constant through the builder -- so the selection logic is written once and
-// serves both the machine-code and the text emitter. Each emitter constructs a
-// sel over its own builder backend.
+// a constant through the builder -- so that choosing which instruction to emit
+// stays separate from encoding it.
 type sel struct {
 	f         *ir.Func
 	b         asmb
@@ -202,7 +201,7 @@ func (s *sel) selectData(in *ir.Instr) bool {
 		s.b.movReg(false, d, s.src(in.Args[0], 1, 4))
 		done()
 
-	// Stack pointer and block addresses (OAlloc4/8/16 stay per-emitter: they need
+	// Stack pointer and block addresses (OAlloc4/8/16 stay in the emitter: they need
 	// the frame-layout offset).
 	case ir.OAllocN:
 		size := s.src(in.Args[0], 1, 8)
@@ -290,8 +289,9 @@ func (s *sel) cmp(in *ir.Instr) {
 }
 
 // parallelMove performs a set of simultaneous moves, ordering them so no source
-// is clobbered before it is read and breaking register cycles with a scratch. It
-// is written once here and drives both emitters through the moveLoc primitive.
+// is clobbered before it is read and breaking register cycles with a scratch.
+// The ordering is the difficult part and lives here, above the moveLoc that
+// actually emits each one.
 func (s *sel) parallelMove(pairs []movePairLoc) {
 	var work []movePairLoc
 	for _, p := range pairs {
@@ -350,7 +350,7 @@ func (s *sel) parallelMove(pairs []movePairLoc) {
 // the frame, leaving x30 (lr) at the caller's return address but not returning.
 // It is shared by the return epilogue and the tail-call branch. Callee-saved
 // slots are addressed from x29, which equals sp here (after any VLA growth is
-// undone), so the reload is frame-base-relative in both emitters.
+// undone), so the reload is frame-base-relative.
 func (s *sel) frameTeardown(frame int, hasDynAlloc bool, calleeSaved []Reg) {
 	if hasDynAlloc {
 		s.b.movSPFromFP() // undo any VLA growth before the frame-relative reloads

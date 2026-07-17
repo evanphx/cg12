@@ -1,51 +1,11 @@
 package arm64_test
 
 import (
-	"bytes"
-	"os"
-	"os/exec"
-	"path/filepath"
 	"testing"
 
-	"github.com/evanphx/cg12/arm64"
 	"github.com/evanphx/cg12/ir"
 	"github.com/stretchr/testify/require"
 )
-
-// buildObjAndRun compiles m straight to an ELF object with the machine-code
-// emitter (no external assembler), links the .o with a C driver, runs it, and
-// returns stdout and the exit code.
-func buildObjAndRun(t *testing.T, m *ir.Module, cmain string) (string, int) {
-	t.Helper()
-	cc, ok := assembler()
-	if !ok {
-		t.Skip("no AArch64 toolchain available")
-	}
-	code, err := arm64.CompileObject(m)
-	require.NoError(t, err)
-
-	dir := t.TempDir()
-	objPath := filepath.Join(dir, "unit.o")
-	cPath := filepath.Join(dir, "main.c")
-	bin := filepath.Join(dir, "prog")
-	require.NoError(t, os.WriteFile(objPath, code, 0o644))
-	require.NoError(t, os.WriteFile(cPath, []byte(cmain), 0o644))
-
-	out, err := exec.Command(cc, "-o", bin, objPath, cPath).CombinedOutput()
-	require.NoErrorf(t, err, "link failed: %s", out)
-
-	cmd := exec.Command(bin)
-	var stdout bytes.Buffer
-	cmd.Stdout = &stdout
-	err = cmd.Run()
-	ec := 0
-	if ee, ok := err.(*exec.ExitError); ok {
-		ec = ee.ExitCode()
-	} else if err != nil {
-		t.Fatalf("run: %v", err)
-	}
-	return stdout.String(), ec
-}
 
 func TestObjEmitAdd(t *testing.T) {
 	m := ir.NewModule()
@@ -54,7 +14,7 @@ func TestObjEmitAdd(t *testing.T) {
 	e := f.Entry()
 	e.Ret(e.Add(ir.ClsW, e.Mul(ir.ClsW, a, b), e.Sub(ir.ClsW, a, b)))
 
-	_, code := buildObjAndRun(t, m, `
+	_, code := buildAndRun(t, m, `
 extern int mcadd(int,int);
 int main(void){ return mcadd(6,4)==(6*4)+(6-4) ? 0 : 1; }`)
 	require.Equal(t, 0, code)
@@ -80,7 +40,7 @@ func TestObjEmitSumtoLoop(t *testing.T) {
 	loop.Phis[1].Add(body, s2)
 	exit.Ret(s)
 
-	_, code := buildObjAndRun(t, m, `
+	_, code := buildAndRun(t, m, `
 extern int mcsumto(int);
 int main(void){ return mcsumto(10)==45 && mcsumto(100)==4950 ? 0 : 1; }`)
 	require.Equal(t, 0, code)
@@ -101,7 +61,7 @@ func TestObjEmitInternalCall(t *testing.T) {
 	sym := f.Sym("mchelper", 0)
 	fe.Ret(fe.Add(ir.ClsW, fe.Call(ir.ClsW, sym, a), f.Word(1)))
 
-	_, code := buildObjAndRun(t, m, `
+	_, code := buildAndRun(t, m, `
 extern int mccaller(int);
 int main(void){ return mccaller(14)==14*3+1 ? 0 : 1; }`)
 	require.Equal(t, 0, code)
@@ -119,7 +79,7 @@ func TestObjEmitLargeFrame(t *testing.T) {
 	e.Store(n, buf)
 	e.Ret(e.Load(ir.ClsW, buf))
 
-	_, code := buildObjAndRun(t, m, `
+	_, code := buildAndRun(t, m, `
 extern int bigf(int);
 int main(void){ return bigf(7) == 7 ? 0 : 1; }`)
 	require.Equal(t, 0, code)
@@ -137,7 +97,7 @@ func TestObjEmitSubwordMemory(t *testing.T) {
 	hh := e.LoadSub(ir.ClsW, ir.SubH, p)
 	e.Ret(e.Add(ir.ClsW, b, hh))
 
-	_, code := buildObjAndRun(t, m, `
+	_, code := buildAndRun(t, m, `
 extern int mcround(int);
 int main(void){
   int xs[]={0x1234,-1,0x80,0x7fff,0x8000};
@@ -159,7 +119,7 @@ func TestObjEmitFloat(t *testing.T) {
 	prod := e.Add(ir.ClsD, e.Mul(ir.ClsD, a, b), c)
 	e.Ret(prod)
 
-	_, code := buildObjAndRun(t, m, `
+	_, code := buildAndRun(t, m, `
 #include <math.h>
 extern double mcfma(double,double,double);
 int main(void){ return fabs(mcfma(2.5,4.0,1.5) - 11.5) < 1e-9 ? 0 : 1; }`)
@@ -174,7 +134,7 @@ func TestObjEmitFloatConvert(t *testing.T) {
 	i := e.Stosi(ir.ClsL, a)   // double -> signed 64
 	e.Ret(e.Sltof(ir.ClsD, i)) // signed 64 -> double (truncated)
 
-	_, code := buildObjAndRun(t, m, `
+	_, code := buildAndRun(t, m, `
 #include <math.h>
 extern double mcd2i2d(double);
 int main(void){ return fabs(mcd2i2d(7.9) - 7.0) < 1e-9 ? 0 : 1; }`)
@@ -189,7 +149,7 @@ func TestObjEmitIndirectCall(t *testing.T) {
 	e := f.Entry()
 	e.Ret(e.Call(ir.ClsW, fp, x))
 
-	_, code := buildObjAndRun(t, m, `
+	_, code := buildAndRun(t, m, `
 int dbl(int x){ return x*2; }
 extern int mccallfp(int(*)(int), int);
 int main(void){ return mccallfp(dbl, 21)==42 ? 0 : 1; }`)
@@ -208,7 +168,7 @@ func TestObjEmitTailCall(t *testing.T) {
 	fe := f.Entry()
 	fe.TailCall(ir.ClsW, f.Sym("mctarget", 0), fe.Mul(ir.ClsW, a, f.Word(2)))
 
-	_, code := buildObjAndRun(t, m, `
+	_, code := buildAndRun(t, m, `
 extern int mctail(int);
 int main(void){ return mctail(21)==21*2+100 ? 0 : 1; }`)
 	require.Equal(t, 0, code)
@@ -230,7 +190,7 @@ func TestObjEmitDataReference(t *testing.T) {
 	off := e.Mul(ir.ClsL, i, f.Long(4))
 	e.Ret(e.Load(ir.ClsW, e.Add(ir.ClsL, f.Sym("mctable", 0), off)))
 
-	_, code := buildObjAndRun(t, m, `
+	_, code := buildAndRun(t, m, `
 extern int mcget(long);
 int main(void){ return mcget(0)==10 && mcget(2)==30 && mcget(3)==40 ? 0 : 1; }`)
 	require.Equal(t, 0, code)
@@ -256,7 +216,7 @@ func TestObjEmitIntCompareSweep(t *testing.T) {
 	}
 	e.Ret(acc)
 
-	_, code := buildObjAndRun(t, m, `
+	_, code := buildAndRun(t, m, `
 extern long mccmp(long,long);
 static long expect(long a,long b){
   unsigned long ua=a, ub=b;
@@ -287,7 +247,7 @@ func TestObjEmitRemAndExtend(t *testing.T) {
 	sum := e.Add(ir.ClsL, e.Add(ir.ClsL, rem, urem), e.Add(ir.ClsL, e.Add(ir.ClsL, sb, sh), e.Add(ir.ClsL, ub, uh)))
 	e.Ret(e.Sar(ir.ClsL, e.Shl(ir.ClsL, sum, f.Long(1)), f.Long(1))) // shift roundtrip
 
-	_, code := buildObjAndRun(t, m, `
+	_, code := buildAndRun(t, m, `
 #include <stdint.h>
 extern long mcmix(long, int);
 static long expect(long a, int b){
@@ -317,7 +277,7 @@ func TestObjEmitFloatCompareSweep(t *testing.T) {
 	}
 	e.Ret(acc)
 
-	_, code := buildObjAndRun(t, m, `
+	_, code := buildAndRun(t, m, `
 extern int mcfcmp(double,double);
 static int expect(double a,double b){
   return (a==b)|((a!=b)<<1)|((a<b)<<2)|((a<=b)<<3)|((a>b)<<4)|((a>=b)<<5);
@@ -345,7 +305,7 @@ func TestObjEmitFibRecursive(t *testing.T) {
 	b := rec.Call(ir.ClsW, f.Sym("mcfib", 0), rec.Sub(ir.ClsW, n, f.Word(2)))
 	rec.Ret(rec.Add(ir.ClsW, a, b))
 
-	_, code := buildObjAndRun(t, m, `
+	_, code := buildAndRun(t, m, `
 extern int mcfib(int);
 int main(void){ return mcfib(10)==55 && mcfib(15)==610 ? 0 : 1; }`)
 	require.Equal(t, 0, code)
@@ -377,7 +337,7 @@ func TestObjEmitStackArgs(t *testing.T) {
 	}
 	fe.Ret(fe.Call(ir.ClsW, f.Sym("mcsum10", 0), args...))
 
-	_, code := buildObjAndRun(t, m, `
+	_, code := buildAndRun(t, m, `
 extern int mccall10(void);
 int main(void){ return mccall10()==55 ? 0 : 1; }`)
 	require.Equal(t, 0, code)
@@ -398,7 +358,7 @@ func TestObjEmitAggregateArg(t *testing.T) {
 	hi := e.Load(ir.ClsW, e.Add(ir.ClsL, p, f.Long(4)))
 	e.Ret(e.Add(ir.ClsW, lo, hi))
 
-	_, code := buildObjAndRun(t, m, `
+	_, code := buildAndRun(t, m, `
 struct pair { int a, b; };
 extern int mcsum2(struct pair);
 int main(void){ struct pair p={7,35}; return mcsum2(p)==42 ? 0 : 1; }`)
@@ -427,7 +387,7 @@ func TestObjEmitDataPointer(t *testing.T) {
 	ptr := e.Load(ir.ClsL, f.Sym("mcvptr", 0)) // load the stored pointer
 	e.Ret(e.Load(ir.ClsW, ptr))                // *ptr == mcvalues[2]
 
-	_, code := buildObjAndRun(t, m, `
+	_, code := buildAndRun(t, m, `
 extern int mcderef(void);
 int main(void){ return mcderef()==30 ? 0 : 1; }`)
 	require.Equal(t, 0, code)
@@ -447,7 +407,7 @@ func TestObjEmitVariadic(t *testing.T) {
 	acc = e.Add(ir.ClsW, acc, e.VaArg(ir.ClsW, ap))
 	e.Ret(acc)
 
-	_, code := buildObjAndRun(t, m, `
+	_, code := buildAndRun(t, m, `
 extern int mcsum(int, ...);
 int main(void){ return mcsum(3, 11, 22, 33)==66 ? 0 : 1; }`)
 	require.Equal(t, 0, code)
