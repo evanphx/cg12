@@ -2,7 +2,6 @@ package arm64
 
 import (
 	"fmt"
-	"math"
 	"strings"
 
 	"github.com/evanphx/cg12/arm64/a64"
@@ -22,16 +21,6 @@ type emitter struct {
 	blockDone bool      // the current block emitted its own terminator (a tail branch)
 	lastPos   ir.SrcPos // last source position emitted as a .loc directive
 	vaSeq     int       // counter for unique vaarg labels
-}
-
-// location kinds for parallel moves.
-type loc struct {
-	reg  Reg  // valid when !mem && !imm
-	mem  bool // spilled: use slot offset
-	slot int
-	imm  bool // immediate constant
-	val  int64
-	size int
 }
 
 func emitFunc(f *ir.Func, alloc *allocation, sb *strings.Builder) error {
@@ -508,15 +497,6 @@ func amodeSuffix(option, s uint32, op ir.Op) string {
 	return fmt.Sprintf(", %s #%d", kw, log2Bytes(accessBytes(op)))
 }
 
-// intScratch and fscratch map a slot to a reserved scratch register. Slot 2
-// (x15) is used only by 3-operand indexed stores.
-var intScratchRegs = [3]Reg{scratch0, scratch1, scratch2}
-var floatScratchRegs = [2]Reg{fscratch0, fscratch1}
-
-// srcReg returns the assembler name of a register holding ref's value at the
-// given width, loading from a spill slot or materialising a constant into a
-// class-appropriate scratch register when necessary. slot (0 or 1) selects which
-// scratch register to borrow.
 func (e *emitter) srcReg(ref ir.Ref, slot, size int) string {
 	if e.f.ClassOf(ref).IsFloat() {
 		return e.srcFloat(ref, slot, size)
@@ -577,20 +557,6 @@ func (e *emitter) srcFloat(ref ir.Ref, slot, size int) string {
 	return fs.Name(size)
 }
 
-// floatConstBits returns the bit pattern of a float-valued constant, whether
-// written as a float (Flt) or as a raw integer bit pattern (Int of float class).
-func floatConstBits(c ir.Const) (int64, bool) {
-	switch c.Kind {
-	case ir.ConstFloat:
-		return floatBits(c), true
-	case ir.ConstInt:
-		return c.Int, true
-	}
-	return 0, false
-}
-
-// dstReg returns the register to write a result into and a finaliser that
-// stores it back to the stack when the result is spilled.
 func (e *emitter) dstReg(ref ir.Ref, size int) (string, func()) {
 	t := e.f.Temps[ref.ID]
 	if t.Reg != ir.NoReg {
@@ -635,17 +601,6 @@ func (e *emitter) emitTLSOffset(r Reg, c ir.Const) {
 	e.line("ldr %s, [%s, #:gottprel_lo12:%s]", r.xName(), r.xName(), sym)
 }
 
-// floatBits returns the IEEE-754 bit pattern of a floating constant.
-func floatBits(c ir.Const) int64 {
-	if c.Cls == ir.ClsS {
-		return int64(math.Float32bits(float32(c.Flt)))
-	}
-	return int64(math.Float64bits(c.Flt))
-}
-
-// locOf resolves a ref to a parallel-move location.
-// locOf is where a value lives. A symbol address has no location -- it must be
-// materialized -- so asking for one is an error.
 func (e *emitter) locOf(ref ir.Ref) loc {
 	l, ok := locOf(e.f, ref)
 	if !ok {

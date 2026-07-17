@@ -2,6 +2,7 @@ package arm64
 
 import (
 	"sort"
+	"strings"
 
 	"github.com/evanphx/cg12/arm64/a64"
 	"github.com/evanphx/cg12/ir"
@@ -117,4 +118,23 @@ func aarch64RelType(k a64.RelKind) uint32 {
 		return obj.R_AARCH64_CALL26
 	}
 	return obj.R_AARCH64_JUMP26
+}
+
+// ptrCls is arm64's pointer class: pointers are 64-bit and live in x-registers,
+// so the pointer width is identical to the general-register width.
+const ptrCls = ir.ClsL
+
+func sanitize(name string) string {
+	var sb strings.Builder
+	for _, r := range name {
+		if r == '_' || (r >= 'a' && r <= 'z') || (r >= 'A' && r <= 'Z') || (r >= '0' && r <= '9') {
+			sb.WriteRune(r)
+		} else {
+			sb.WriteByte('_')
+		}
+	}
+	if sb.Len() == 0 {
+		return "anon"
+	}
+	return sb.String()
 }

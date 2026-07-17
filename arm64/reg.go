@@ -194,3 +194,14 @@ var calleeSavedFloat = func() map[Reg]bool {
 // calleeSavedReg reports whether r (integer or float) must be preserved across a
 // call.
 func calleeSavedReg(r Reg) bool { return calleeSaved[r] || calleeSavedFloat[r] }
+
+// intScratch and fscratch map a slot to a reserved scratch register. Slot 2
+// (x15) is used only by 3-operand indexed stores.
+var intScratchRegs = [3]Reg{scratch0, scratch1, scratch2}
+
+var floatScratchRegs = [2]Reg{fscratch0, fscratch1}
+
+// srcReg returns the assembler name of a register holding ref's value at the
+// given width, loading from a spill slot or materialising a constant into a
+// class-appropriate scratch register when necessary. slot (0 or 1) selects which
+// scratch register to borrow.

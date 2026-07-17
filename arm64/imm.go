@@ -1,6 +1,10 @@
 package arm64
 
-import "github.com/evanphx/cg12/ir"
+import (
+	"math"
+
+	"github.com/evanphx/cg12/ir"
+)
 
 // This file holds the pure decision logic for folding integer constants into
 // AArch64 immediate instruction forms. Both backends — the machine-code emitter
@@ -85,4 +89,24 @@ func rotateMatch(f *ir.Func, or *ir.Instr, defOf func(ir.Ref) *ir.Instr) (x ir.R
 		return ir.Ref{}, 0, false
 	}
 	return a.Args[0], uint32(sr), true
+}
+
+// floatConstBits returns the bit pattern of a float-valued constant, whether
+// written as a float (Flt) or as a raw integer bit pattern (Int of float class).
+func floatConstBits(c ir.Const) (int64, bool) {
+	switch c.Kind {
+	case ir.ConstFloat:
+		return floatBits(c), true
+	case ir.ConstInt:
+		return c.Int, true
+	}
+	return 0, false
+}
+
+// floatBits returns the IEEE-754 bit pattern of a floating constant.
+func floatBits(c ir.Const) int64 {
+	if c.Cls == ir.ClsS {
+		return int64(math.Float32bits(float32(c.Flt)))
+	}
+	return int64(math.Float64bits(c.Flt))
 }

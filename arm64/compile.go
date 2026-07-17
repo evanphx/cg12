@@ -7,13 +7,6 @@ import (
 	"github.com/evanphx/cg12/ir"
 )
 
-// Compile lowers, allocates registers for, and emits GNU-assembler text for a
-// single function. It mutates f in place (SSA destruction and ABI lowering), so
-// pass a function you no longer need in SSA form.
-// ptrCls is arm64's pointer class: pointers are 64-bit and live in x-registers,
-// so the pointer width is identical to the general-register width.
-const ptrCls = ir.ClsL
-
 func Compile(f *ir.Func) (string, error) {
 	ir.LowerPointers(f, ptrCls)
 	if err := lower(f, TLSLocalExec); err != nil {

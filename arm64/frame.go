@@ -84,32 +84,50 @@ func computeFrame(f *ir.Func, alloc *allocation) frameLayout {
 	return lay
 }
 
-// locOf is where a value lives: a register, a spill slot, or an immediate. It
-// reports false for an operand that is not a movable value -- a symbol's address
-// has to be materialized before it can be moved, so it has no location of its
-// own, and the caller decides how to complain.
-func locOf(f *ir.Func, ref ir.Ref) (loc, bool) {
-	switch ref.Kind {
-	case ir.RefTemp:
-		t := f.Temps[ref.ID]
-		if t.Reg != ir.NoReg {
-			return loc{reg: Reg(t.Reg), size: t.Cls.Size()}, true
-		}
-		return loc{mem: true, slot: t.Slot, size: t.Cls.Size()}, true
-	case ir.RefConst:
-		switch c := f.Consts[ref.ID]; c.Kind {
-		case ir.ConstFloat:
-			// Carry the bit pattern; the move goes via a GPR into the SIMD register.
-			return loc{imm: true, val: floatBits(c), size: c.Cls.Size()}, true
-		case ir.ConstInt:
-			return loc{imm: true, val: c.Int, size: c.Cls.Size()}, true
+// allocShape returns the alignment and byte size of a stack allocation.
+func allocShape(f *ir.Func, in *ir.Instr) (align, size int) {
+	switch in.Op {
+	case ir.OAlloc4:
+		align = 4
+	case ir.OAlloc8:
+		align = 8
+	default:
+		align = 16
+	}
+	size = align
+	if a := in.Arg(0); a.Kind == ir.RefConst {
+		if c := f.Consts[a.ID]; c.Kind == ir.ConstInt && c.Int > 0 {
+			size = int(c.Int)
 		}
 	}
-	return loc{}, false
+	return align, roundUp(size, align)
 }
 
-// isConstSym reports whether ref is a symbol's address, which is materialized
-// rather than moved.
-func isConstSym(f *ir.Func, ref ir.Ref) bool {
-	return ref.Kind == ir.RefConst && f.Consts[ref.ID].Kind == ir.ConstSym
+func roundUp(n, a int) int {
+	if a <= 0 {
+		return n
+	}
+	return ((n + a - 1) / a) * a
+}
+
+// computeNamedCounts replays argument assignment over a variadic function's named
+// parameters, returning how many GP/SIMD registers and stack bytes they used.
+func computeNamedCounts(f *ir.Func) (ngrn, nsrn, stack int) {
+	var a argAssigner
+	for _, p := range f.Params {
+		if p.Agg != nil {
+			cls := classifyAgg(p.Agg)
+			switch cls.kind {
+			case aggGP:
+				a.assignGP(cls.nregs, cls.size)
+			case aggHFA:
+				a.assignHFA(cls.nregs, cls.size)
+			default:
+				a.assign(ir.ClsL)
+			}
+			continue
+		}
+		a.assign(p.Cls)
+	}
+	return a.ngrn, a.nsrn, a.nsaa
 }

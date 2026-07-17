@@ -1,38 +1,9 @@
 package arm64
 
 import (
-	"strings"
-
 	"github.com/evanphx/cg12/ir"
 )
 
-type movePairLoc struct{ dst, src loc }
-
-func sameLoc(a, b loc) bool {
-	if a.reg == b.reg && !a.mem && !b.mem && !a.imm && !b.imm {
-		return true
-	}
-	if a.mem && b.mem && a.slot == b.slot {
-		return true
-	}
-	return false
-}
-
-// srcReadsDst reports whether reading src touches the destination location dst.
-func srcReadsDst(src, dst loc) bool {
-	if src.imm {
-		return false
-	}
-	if !src.mem && !dst.mem {
-		return src.reg == dst.reg
-	}
-	if src.mem && dst.mem {
-		return src.slot == dst.slot
-	}
-	return false
-}
-
-// parallelMove selects the simultaneous-move ordering once, through the shared sel.
 func (e *emitter) parallelMove(pairs []movePairLoc) {
 	(&sel{f: e.f, b: &textAsm{e: e}, spillBase: e.spillBase}).parallelMove(pairs)
 }
@@ -172,46 +143,4 @@ func storeInfo(op ir.Op) (string, int) {
 		return "str", 16
 	}
 	return "", 0
-}
-
-// allocShape returns the alignment and byte size of a stack allocation.
-func allocShape(f *ir.Func, in *ir.Instr) (align, size int) {
-	switch in.Op {
-	case ir.OAlloc4:
-		align = 4
-	case ir.OAlloc8:
-		align = 8
-	default:
-		align = 16
-	}
-	size = align
-	if a := in.Arg(0); a.Kind == ir.RefConst {
-		if c := f.Consts[a.ID]; c.Kind == ir.ConstInt && c.Int > 0 {
-			size = int(c.Int)
-		}
-	}
-	return align, roundUp(size, align)
-}
-
-func roundUp(n, a int) int {
-	if a <= 0 {
-		return n
-	}
-	return ((n + a - 1) / a) * a
-}
-
-// sanitize turns an IR name into a valid assembler label component.
-func sanitize(name string) string {
-	var sb strings.Builder
-	for _, r := range name {
-		if r == '_' || (r >= 'a' && r <= 'z') || (r >= 'A' && r <= 'Z') || (r >= '0' && r <= '9') {
-			sb.WriteRune(r)
-		} else {
-			sb.WriteByte('_')
-		}
-	}
-	if sb.Len() == 0 {
-		return "anon"
-	}
-	return sb.String()
 }

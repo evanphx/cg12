@@ -6,31 +6,6 @@ import (
 	"github.com/evanphx/cg12/ir"
 )
 
-// computeNamedCounts replays argument assignment over a variadic function's named
-// parameters, returning how many GP/SIMD registers and stack bytes they used.
-func computeNamedCounts(f *ir.Func) (ngrn, nsrn, stack int) {
-	var a argAssigner
-	for _, p := range f.Params {
-		if p.Agg != nil {
-			cls := classifyAgg(p.Agg)
-			switch cls.kind {
-			case aggGP:
-				a.assignGP(cls.nregs, cls.size)
-			case aggHFA:
-				a.assignHFA(cls.nregs, cls.size)
-			default:
-				a.assign(ir.ClsL)
-			}
-			continue
-		}
-		a.assign(p.Cls)
-	}
-	return a.ngrn, a.nsrn, a.nsaa
-}
-
-// vaPtr returns the register holding a va_list pointer operand, loading a
-// spilled pointer into scratch2 (kept clear of the x16/x17 scratch that the
-// vaarg/vastart sequences use for scratch values).
 func (e *emitter) vaPtr(ref ir.Ref) string {
 	t := e.f.Temps[ref.ID]
 	if t.Reg != ir.NoReg {
