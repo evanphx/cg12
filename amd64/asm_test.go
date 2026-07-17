@@ -117,3 +117,42 @@ func TestInlineAsmUnsupportedMnemonicErrors(t *testing.T) {
 	require.Contains(t, err.Error(), "inline assembly")
 	require.Contains(t, err.Error(), "cpuid", "the error should name what it could not encode")
 }
+
+// syscall is why most inline assembly on this target exists, and cg12 could not
+// assemble the word: the encoder was here, and nothing could name it. This is
+// the real thing -- write(1, "ok\n", 3) and exit(0), by hand, with no libc.
+func TestInlineAsmSyscall(t *testing.T) {
+	src := `
+static long sys_write(long fd, const char *buf, long n){
+	long r;
+	__asm__ volatile("syscall"
+		: "=a"(r)
+		: "a"(1L), "D"(fd), "S"(buf), "d"(n)
+		: "rcx", "r11", "memory");   /* the kernel clobbers rcx and r11 */
+	return r;
+}
+int runtest(void){
+	const char msg[4]; ((char*)msg)[0]='o'; ((char*)msg)[1]='k'; ((char*)msg)[2]='\n'; ((char*)msg)[3]=0;
+	return sys_write(1, msg, 3) == 3 ? 0 : 1;
+}`
+	require.Equal(t, 0, runAsmSrc(t, src, false))
+	require.Equal(t, 0, runAsmSrc(t, src, true))
+}
+
+// cdq/cqo and the one-operand divides: the dividend is rdx:rax, so only the
+// divisor is named, and the sign-extend that fills rdx is a separate step.
+func TestInlineAsmDivide(t *testing.T) {
+	src := `
+static long sdiv(long a, long b){
+	long q;
+	__asm__("cqo\n\tidivq %q2" : "=a"(q) : "a"(a), "r"(b) : "rdx","cc");
+	return q;
+}
+int runtest(void){
+	if (sdiv(84, 2) != 42) return 1;
+	if (sdiv(-84, 2) != -42) return 2;
+	return 0;
+}`
+	require.Equal(t, 0, runAsmSrc(t, src, false))
+	require.Equal(t, 0, runAsmSrc(t, src, true))
+}

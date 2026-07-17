@@ -93,10 +93,16 @@ func asmLine(p *Program, line string) error {
 	mn, rest := splitFields(line)
 	ops := splitOperands(rest)
 
-	// Control flow (no size suffix).
+	// No size suffix: the operand size is the instruction's own.
 	switch mn {
 	case "nop":
 		return emit0(p, ops, []byte{0x90})
+	case "syscall":
+		return emit0(p, ops, Syscall())
+	case "cdq": // sign-extend eax into edx:eax, for a 32-bit idiv
+		return emit0(p, ops, Cdq())
+	case "cqo": // and rax into rdx:rax, for a 64-bit one
+		return emit0(p, ops, Cqo())
 	case "ret":
 		return emit0(p, ops, Ret())
 	case "jmp":
@@ -125,6 +131,14 @@ func asmLine(p *Program, line string) error {
 		return a.imul()
 	case "neg", "not":
 		return a.unary()
+	case "test":
+		return a.test()
+	case "push":
+		return a.pushPop(true)
+	case "pop":
+		return a.pushPop(false)
+	case "div", "idiv":
+		return a.divide(base == "idiv")
 	case "shl", "shr", "sar":
 		return a.shift()
 	case "lea":
@@ -495,4 +509,66 @@ func condByName(c string) (Cond, bool) {
 	}
 	v, ok := m[c]
 	return v, ok
+}
+
+// --- forms the parser could not reach --------------------------------------
+//
+// The encoders for these were already here and already checked against llvm-mc.
+// syscall in particular is why most inline asm on this target exists at all.
+
+func (a *asmCtx) test() error {
+	if len(a.ops) != 2 {
+		return fmt.Errorf("test takes two operands")
+	}
+	// AT&T names the source first, and the encoders take (dst, src) -- the same
+	// order AddReg and the rest are called with.
+	src, err := a.reg(a.ops[0])
+	if err != nil {
+		return err
+	}
+	dst, err := a.reg(a.ops[1])
+	if err != nil {
+		return err
+	}
+	a.p.Emit(TestReg(a.w, dst, src))
+	return nil
+}
+
+// pushPop moves a register to or from the stack. There is one operand size: the
+// 64-bit push, which needs no suffix and takes no other width.
+func (a *asmCtx) pushPop(push bool) error {
+	if len(a.ops) != 1 {
+		return fmt.Errorf("%s takes one operand", a.mn)
+	}
+	r, sz, ok := parseReg(a.ops[0])
+	if !ok {
+		return fmt.Errorf("%s: %q is not a register", a.mn, a.ops[0])
+	}
+	if sz != 8 {
+		return fmt.Errorf("%s: %q is a %d-byte register; push and pop move 8 bytes on this target", a.mn, a.ops[0], sz)
+	}
+	if push {
+		a.p.Emit(Push(r))
+	} else {
+		a.p.Emit(Pop(r))
+	}
+	return nil
+}
+
+// divide is the one-operand div/idiv: the dividend is in rdx:rax and the
+// quotient and remainder come back there, so only the divisor is named.
+func (a *asmCtx) divide(signed bool) error {
+	if len(a.ops) != 1 {
+		return fmt.Errorf("%s takes one operand (the dividend is rdx:rax)", a.mn)
+	}
+	r, err := a.reg(a.ops[0])
+	if err != nil {
+		return err
+	}
+	if signed {
+		a.p.Emit(Idiv(a.w, r))
+	} else {
+		a.p.Emit(Div(a.w, r))
+	}
+	return nil
 }
