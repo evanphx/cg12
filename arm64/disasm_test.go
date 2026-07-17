@@ -15,6 +15,7 @@ import (
 	"github.com/evanphx/cg12/arm64"
 	"github.com/evanphx/cg12/arm64/a64"
 	"github.com/evanphx/cg12/cc"
+	"github.com/evanphx/cg12/internal/testenv"
 	"github.com/evanphx/cg12/ir"
 	"github.com/evanphx/cg12/obj"
 	"github.com/stretchr/testify/assert"
@@ -156,33 +157,16 @@ func disasmLines(text []byte) []string {
 // disasmTools locates an AArch64 assembler and objcopy, or skips.
 func disasmTools(t *testing.T) (as, objcopy string) {
 	t.Helper()
-	find := func(names ...string) (string, bool) {
-		for _, n := range names {
-			if p, err := exec.LookPath(n); err == nil {
-				return p, true
-			}
-		}
-		return "", false
+	// A cross toolchain works anywhere; the native one only when the host is the
+	// target, so on another architecture there is no tool to insist on.
+	cross, haveAs := testenv.Have("aarch64-linux-gnu-as")
+	if !haveAs && runtime.GOARCH != "arm64" {
+		t.Skip("no AArch64 assembler: this host is not arm64 and there is no cross assembler")
 	}
-	as, ok := find("aarch64-linux-gnu-as")
-	if !ok {
-		if runtime.GOARCH != "arm64" {
-			t.Skip("no AArch64 assembler available")
-		}
-		if as, ok = find("as"); !ok {
-			t.Skip("no assembler available")
-		}
+	if haveAs {
+		return cross, testenv.Tool(t, "aarch64-linux-gnu-objcopy", "objcopy")
 	}
-	objcopy, ok = find("aarch64-linux-gnu-objcopy")
-	if !ok {
-		if runtime.GOARCH != "arm64" {
-			t.Skip("no AArch64 objcopy available")
-		}
-		if objcopy, ok = find("objcopy"); !ok {
-			t.Skip("no objcopy available")
-		}
-	}
-	return as, objcopy
+	return testenv.Tool(t, "as"), testenv.Tool(t, "aarch64-linux-gnu-objcopy", "objcopy")
 }
 
 // A call, a branch, and a global's address must come back with the symbol named,

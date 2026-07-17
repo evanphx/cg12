@@ -8,6 +8,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/evanphx/cg12/internal/testenv"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
@@ -15,17 +16,8 @@ import (
 // tools locates an AArch64 assembler and objcopy, or skips.
 func tools(t *testing.T) (as, objcopy string) {
 	t.Helper()
-	as, err := exec.LookPath("aarch64-linux-gnu-as")
-	if err != nil {
-		if as, err = exec.LookPath("aarch64-linux-gnu-gcc"); err != nil {
-			t.Skip("no AArch64 assembler available")
-		}
-	}
-	objcopy, err = exec.LookPath("aarch64-linux-gnu-objcopy")
-	if err != nil {
-		t.Skip("aarch64-linux-gnu-objcopy not available")
-	}
-	return as, objcopy
+	return testenv.Tool(t, "aarch64-linux-gnu-as", "aarch64-linux-gnu-gcc"),
+		testenv.Tool(t, "aarch64-linux-gnu-objcopy")
 }
 
 // assemble assembles the instruction lines and returns the .text bytes.

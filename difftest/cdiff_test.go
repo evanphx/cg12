@@ -10,6 +10,7 @@ import (
 
 	"github.com/evanphx/cg12/arm64"
 	"github.com/evanphx/cg12/cc"
+	"github.com/evanphx/cg12/internal/testenv"
 	"github.com/evanphx/cg12/opt"
 	"github.com/stretchr/testify/require"
 )
@@ -206,11 +207,8 @@ func runBin(t *testing.T, bin string) string {
 // cross-compiler.
 func cDiffTool(t *testing.T) string {
 	t.Helper()
-	if runtime.GOARCH == "arm64" {
-		if p, err := exec.LookPath("gcc"); err == nil {
-			return p
-		}
+	if runtime.GOARCH != "arm64" {
+		t.Skip("cc targets arm64, so only an arm64 host's gcc is the right arbiter")
 	}
-	t.Skip("no native gcc to compare against")
-	return ""
+	return testenv.Tool(t, "gcc")
 }

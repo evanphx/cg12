@@ -7,6 +7,7 @@ import (
 	"testing"
 
 	"github.com/evanphx/cg12/amd64"
+	"github.com/evanphx/cg12/internal/testenv"
 	"github.com/evanphx/cg12/ir"
 	"github.com/stretchr/testify/require"
 )
@@ -34,17 +35,9 @@ func runObj(t *testing.T, m *ir.Module) int {
 // runObjWith is runObj with explicit compilation options (e.g. a GC strategy).
 func runObjWith(t *testing.T, m *ir.Module, opts amd64.Options) int {
 	t.Helper()
-	clang, err := exec.LookPath("clang")
-	if err != nil {
-		t.Skip("clang not available")
-	}
-	if _, err := exec.LookPath("ld.lld"); err != nil {
-		t.Skip("ld.lld not available")
-	}
-	qemu, err := exec.LookPath("qemu-x86_64")
-	if err != nil {
-		t.Skip("qemu-x86_64 not available")
-	}
+	clang := testenv.Tool(t, "clang")
+	testenv.Tool(t, "ld.lld")
+	qemu := testenv.Tool(t, "qemu-x86_64")
 
 	code, err := amd64.CompileObjectWith(m, opts)
 	require.NoError(t, err)

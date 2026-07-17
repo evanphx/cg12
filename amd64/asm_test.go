@@ -8,6 +8,7 @@ import (
 
 	"github.com/evanphx/cg12/amd64"
 	"github.com/evanphx/cg12/cc"
+	"github.com/evanphx/cg12/internal/testenv"
 	"github.com/evanphx/cg12/opt"
 	"github.com/stretchr/testify/require"
 )
@@ -18,17 +19,9 @@ import (
 // also what proves that path encodes what the template asked for.
 func runAsmSrc(t *testing.T, src string, optimize bool) int {
 	t.Helper()
-	clang, err := exec.LookPath("clang")
-	if err != nil {
-		t.Skip("clang not available")
-	}
-	if _, err := exec.LookPath("ld.lld"); err != nil {
-		t.Skip("ld.lld not available")
-	}
-	qemu, err := exec.LookPath("qemu-x86_64")
-	if err != nil {
-		t.Skip("qemu-x86_64 not available")
-	}
+	clang := testenv.Tool(t, "clang")
+	testenv.Tool(t, "ld.lld")
+	qemu := testenv.Tool(t, "qemu-x86_64")
 
 	m, err := cc.Compile("asm.c", src)
 	require.NoError(t, err)

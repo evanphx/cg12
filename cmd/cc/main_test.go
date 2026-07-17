@@ -6,14 +6,14 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+
+	"github.com/evanphx/cg12/internal/testenv"
 )
 
 // TestDriver builds the cc driver and exercises its modes end-to-end on a small
 // program: -run executes it, -c produces an object, -dis shows the code.
 func TestDriver(t *testing.T) {
-	if _, err := exec.LookPath("gcc"); err != nil {
-		t.Skip("gcc not available")
-	}
+	testenv.Tool(t, "gcc")
 	dir := t.TempDir()
 	bin := filepath.Join(dir, "cc")
 	if out, err := exec.Command("go", "build", "-o", bin, ".").CombinedOutput(); err != nil {

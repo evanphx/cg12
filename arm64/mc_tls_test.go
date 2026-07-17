@@ -15,10 +15,7 @@ import (
 // flags, runs it, and returns the exit code.
 func runObjectCC(t *testing.T, data []byte, cmain string, extra ...string) int {
 	t.Helper()
-	cc, ok := assembler()
-	if !ok {
-		t.Skip("no AArch64 toolchain available")
-	}
+	cc := assembler(t)
 	dir := t.TempDir()
 	objPath := filepath.Join(dir, "u.o")
 	cPath := filepath.Join(dir, "main.c")

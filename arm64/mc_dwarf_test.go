@@ -12,6 +12,7 @@ import (
 	"testing"
 
 	"github.com/evanphx/cg12/arm64"
+	"github.com/evanphx/cg12/internal/testenv"
 	"github.com/evanphx/cg12/ir"
 	"github.com/evanphx/cg12/obj"
 	"github.com/evanphx/cg12/opt"
@@ -363,14 +364,8 @@ func TestObjEmitDwarfNestedInline(t *testing.T) {
 // TestObjEmitDwarfLinks confirms a real linker (gcc/ld) accepts and relocates the
 // object's DWARF: after linking, objdump's decoded line table shows both lines.
 func TestObjEmitDwarfLinks(t *testing.T) {
-	cc, ok := assembler()
-	if !ok {
-		t.Skip("no AArch64 toolchain available")
-	}
-	objdump := "aarch64-linux-gnu-objdump"
-	if _, err := exec.LookPath(objdump); err != nil {
-		t.Skip("aarch64-linux-gnu-objdump not available")
-	}
+	cc := assembler(t)
+	objdump := testenv.Tool(t, "aarch64-linux-gnu-objdump", "objdump")
 
 	data, err := arm64.CompileObject(dwarfModule())
 	require.NoError(t, err)

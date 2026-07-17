@@ -10,6 +10,7 @@ import (
 
 	"github.com/evanphx/cg12/amd64"
 	"github.com/evanphx/cg12/arm64"
+	"github.com/evanphx/cg12/internal/testenv"
 	"github.com/evanphx/cg12/ir"
 	"github.com/evanphx/cg12/link"
 	"github.com/stretchr/testify/require"
@@ -42,11 +43,7 @@ func runExe(t *testing.T, data []byte, runner ...string) int {
 // qemuX86 returns the qemu-x86_64 user-mode emulator, or skips.
 func qemuX86(t *testing.T) string {
 	t.Helper()
-	p, err := exec.LookPath("qemu-x86_64")
-	if err != nil {
-		t.Skip("qemu-x86_64 not available")
-	}
-	return p
+	return testenv.Tool(t, "qemu-x86_64")
 }
 
 // moduleReturns builds a function that returns the constant v.

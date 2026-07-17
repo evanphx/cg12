@@ -6,6 +6,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/evanphx/cg12/internal/testenv"
 	"github.com/stretchr/testify/require"
 )
 
@@ -21,12 +22,10 @@ func disasm(t *testing.T, code []byte) string {
 	for _, b := range code {
 		hexb = append(hexb, fmt.Sprintf("0x%02x", b))
 	}
-	cmd := exec.Command("llvm-mc", "--triple=x86_64", "--disassemble")
+	cmd := exec.Command(testenv.Tool(t, "llvm-mc"), "--triple=x86_64", "--disassemble")
 	cmd.Stdin = strings.NewReader(strings.Join(hexb, " ") + "\n")
 	out, err := cmd.Output()
-	if err != nil {
-		t.Skipf("llvm-mc unavailable: %v", err)
-	}
+	require.NoErrorf(t, err, "llvm-mc could not disassemble % x", code)
 	for _, line := range strings.Split(string(out), "\n") {
 		line = strings.TrimSpace(line)
 		if line == "" || strings.HasPrefix(line, ".") {

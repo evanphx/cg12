@@ -17,6 +17,7 @@ import (
 	"testing"
 
 	"github.com/evanphx/cg12/arm64"
+	"github.com/evanphx/cg12/internal/testenv"
 	"github.com/evanphx/cg12/opt"
 	"github.com/evanphx/cg12/parse"
 	"github.com/stretchr/testify/require"
@@ -32,18 +33,13 @@ type Case struct {
 }
 
 func assembler(t *testing.T) string {
-	if p, err := exec.LookPath("aarch64-linux-gnu-gcc"); err == nil {
+	if p, ok := testenv.Have("aarch64-linux-gnu-gcc"); ok {
 		return p
 	}
-	if runtime.GOARCH == "arm64" {
-		for _, c := range []string{"cc", "gcc", "clang"} {
-			if p, err := exec.LookPath(c); err == nil {
-				return p
-			}
-		}
+	if runtime.GOARCH != "arm64" {
+		t.Skip("no AArch64 assembler: this host is not arm64 and there is no cross compiler")
 	}
-	t.Skip("no AArch64 assembler available")
-	return ""
+	return testenv.Tool(t, "cc", "gcc", "clang")
 }
 
 // qbePath returns a QBE binary if one is configured.

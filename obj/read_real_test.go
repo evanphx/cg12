@@ -7,6 +7,7 @@ import (
 	"path/filepath"
 	"testing"
 
+	"github.com/evanphx/cg12/internal/testenv"
 	"github.com/evanphx/cg12/obj"
 	"github.com/stretchr/testify/require"
 )
@@ -14,10 +15,7 @@ import (
 // gccObject compiles C with the host gcc and returns the .o bytes.
 func gccObject(t *testing.T, src string) []byte {
 	t.Helper()
-	gcc, err := exec.LookPath("gcc")
-	if err != nil {
-		t.Skip("gcc not available")
-	}
+	gcc := testenv.Tool(t, "gcc")
 	dir := t.TempDir()
 	c := filepath.Join(dir, "x.c")
 	o := filepath.Join(dir, "x.o")

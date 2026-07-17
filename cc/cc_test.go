@@ -9,6 +9,7 @@ import (
 
 	"github.com/evanphx/cg12/arm64"
 	"github.com/evanphx/cg12/cc"
+	"github.com/evanphx/cg12/internal/testenv"
 	"github.com/evanphx/cg12/opt"
 	"github.com/stretchr/testify/require"
 )
@@ -23,10 +24,7 @@ func compileAndRun(t *testing.T, src string) (string, int) {
 // compileAndRunOpt is compileAndRun, optionally running the cg12 optimizer first.
 func compileAndRunOpt(t *testing.T, src string, optimize bool) (string, int) {
 	t.Helper()
-	gcc, err := exec.LookPath("gcc")
-	if err != nil {
-		t.Skip("gcc not available")
-	}
+	gcc := testenv.Tool(t, "gcc")
 
 	mod, err := cc.Compile("main.c", src)
 	require.NoError(t, err)

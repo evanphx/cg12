@@ -9,23 +9,24 @@ import (
 	"testing"
 
 	"github.com/evanphx/cg12/arm64"
+	"github.com/evanphx/cg12/internal/testenv"
 	"github.com/evanphx/cg12/ir"
 	"github.com/stretchr/testify/require"
 )
 
-// assembler finds a C compiler that produces native AArch64 objects.
-func assembler() (string, bool) {
-	if p, err := exec.LookPath("aarch64-linux-gnu-gcc"); err == nil {
-		return p, true
+// assembler finds a C compiler that produces native AArch64 objects, or skips
+// -- unless CG12_REQUIRE_TOOLS says a run without one is a failure rather than a
+// pass that checked nothing. On a host that is not arm64 and has no cross
+// compiler there is no tool to demand, so that stays a plain skip.
+func assembler(t testing.TB) string {
+	t.Helper()
+	if p, ok := testenv.Have("aarch64-linux-gnu-gcc"); ok {
+		return p
 	}
-	if runtime.GOARCH == "arm64" {
-		for _, c := range []string{"cc", "gcc", "clang"} {
-			if p, err := exec.LookPath(c); err == nil {
-				return p, true
-			}
-		}
+	if runtime.GOARCH != "arm64" {
+		t.Skip("no AArch64 toolchain: this host is not arm64 and there is no cross compiler")
 	}
-	return "", false
+	return testenv.Tool(t, "cc", "gcc", "clang")
 }
 
 // buildAndRun compiles m to an object, links it with a C driver, runs the
@@ -33,10 +34,7 @@ func assembler() (string, bool) {
 // toolchain is available so the suite stays portable.
 func buildAndRun(t *testing.T, m *ir.Module, cmain string) (string, int) {
 	t.Helper()
-	cc, ok := assembler()
-	if !ok {
-		t.Skip("no AArch64 assembler available")
-	}
+	cc := assembler(t)
 	o, err := arm64.CompileToObject(m)
 	require.NoError(t, err)
 	data, err := o.MarshalELF()

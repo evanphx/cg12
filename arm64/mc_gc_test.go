@@ -19,10 +19,7 @@ import (
 // the exit code.
 func runObject(t *testing.T, data []byte, cmain string) int {
 	t.Helper()
-	cc, ok := assembler()
-	if !ok {
-		t.Skip("no AArch64 toolchain available")
-	}
+	cc := assembler(t)
 	dir := t.TempDir()
 	objPath := filepath.Join(dir, "u.o")
 	cPath := filepath.Join(dir, "main.c")

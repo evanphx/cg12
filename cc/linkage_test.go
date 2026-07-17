@@ -8,6 +8,7 @@ import (
 
 	"github.com/evanphx/cg12/arm64"
 	"github.com/evanphx/cg12/cc"
+	"github.com/evanphx/cg12/internal/testenv"
 	"github.com/stretchr/testify/require"
 )
 
@@ -17,10 +18,7 @@ import (
 // call is a relocation. Sharing a VARIABLE is what was broken in both directions.
 func linkWithC(t *testing.T, cg12Src, peerSrc string) int {
 	t.Helper()
-	gcc, err := exec.LookPath("gcc")
-	if err != nil {
-		t.Skip("gcc not available")
-	}
+	gcc := testenv.Tool(t, "gcc")
 	m, err := cc.Compile("unit.c", cg12Src)
 	require.NoError(t, err)
 	code, err := arm64.CompileObject(m)
