@@ -445,30 +445,21 @@ type mc struct {
 	alloc    *allocation
 	gc       GCStrategy
 	tlsModel TLSModel
-	lay      *emitter // reused only for pure layout/lookup helpers
 	prog     *a64.Program
 	relocs   []obj.Reloc
+
+	frameLayout // where everything lives in the frame
 
 	instrPC    map[*ir.Instr]uint64 // PC at the start of each instruction
 	safepoints []safepoint
 
-	frame       int
-	spillBase   int
-	calleeSaved []Reg
-	allocOff    map[*ir.Instr]int
-
-	variadic                     bool
-	gpSaveOff, fpSaveOff         int
-	namedGr, namedSr, namedStack int
-
-	blockDone   bool
-	hasDynAlloc bool // the function contains a variable-length-array alloca
-	vaSeq       int
-	rows        []obj.LineRow // source positions, keyed by func-relative byte offset
-	lastPos     ir.SrcPos
-	inl         []inlSample // inline-context changes, keyed by func-relative offset
-	lastInl     *ir.InlineSite
-	err         error
+	blockDone bool
+	vaSeq     int
+	rows      []obj.LineRow // source positions, keyed by func-relative byte offset
+	lastPos   ir.SrcPos
+	inl       []inlSample // inline-context changes, keyed by func-relative offset
+	lastInl   *ir.InlineSite
+	err       error
 }
 
 // inlSample records that, from byte offset off onward, emitted code belongs to
@@ -497,22 +488,10 @@ type blockSym struct {
 }
 
 func emitMachine(f *ir.Func, alloc *allocation, gc GCStrategy, tlsModel TLSModel) (*machineCode, error) {
-	// Reuse the text emitter's frame layout — it is pure computation.
-	lay := &emitter{f: f, alloc: alloc, allocOff: map[*ir.Instr]int{}}
-	lay.planFrame()
-
 	m := &mc{
-		f: f, alloc: alloc, gc: gc, tlsModel: tlsModel, lay: lay, prog: a64.NewProgram(), instrPC: map[*ir.Instr]uint64{},
-		frame: lay.frame, spillBase: lay.spillBase, calleeSaved: lay.calleeSaved, allocOff: lay.allocOff,
-		variadic: lay.variadic, gpSaveOff: lay.gpSaveOff, fpSaveOff: lay.fpSaveOff,
-		namedGr: lay.namedGr, namedSr: lay.namedSr, namedStack: lay.namedStack,
-	}
-	for _, b := range f.Blocks { // a VLA alloca means the epilogue must restore sp from x29
-		for i := range b.Instrs {
-			if b.Instrs[i].Op == ir.OAllocN {
-				m.hasDynAlloc = true
-			}
-		}
+		f: f, alloc: alloc, gc: gc, tlsModel: tlsModel,
+		prog: a64.NewProgram(), instrPC: map[*ir.Instr]uint64{},
+		frameLayout: computeFrame(f, alloc),
 	}
 	m.prologue()
 	for _, b := range f.Blocks {
@@ -559,6 +538,16 @@ func (m *mc) recordInline(site *ir.InlineSite) {
 	}
 	m.lastInl = site
 	m.inl = append(m.inl, inlSample{off: uint64(m.prog.Len() * 4), site: site})
+}
+
+// locOf is where a value lives. A symbol address has no location -- it must be
+// materialized -- so asking for one is an error.
+func (m *mc) locOf(ref ir.Ref) loc {
+	l, ok := locOf(m.f, ref)
+	if !ok {
+		m.fail("arm64: cannot move operand %v", ref)
+	}
+	return l
 }
 
 func (m *mc) fail(format string, a ...any) {
@@ -1001,7 +990,7 @@ func (m *mc) block(b *ir.Block) {
 			if len(in.Args) == 0 {
 				stackParams = append(stackParams, in)
 			} else {
-				pairs = append(pairs, movePairLoc{dst: m.lay.locOf(in.To), src: m.lay.locOf(in.Args[0])})
+				pairs = append(pairs, movePairLoc{dst: m.locOf(in.To), src: m.locOf(in.Args[0])})
 			}
 			i++
 		}
@@ -1077,10 +1066,10 @@ func (m *mc) callSequence(b *ir.Block, i int) int {
 		switch {
 		case a.To.IsNone():
 			stackArgs = append(stackArgs, a)
-		case m.lay.isConstSym(a.Args[0]):
+		case isConstSym(m.f, a.Args[0]):
 			symArgs = append(symArgs, a)
 		default:
-			regPairs = append(regPairs, movePairLoc{dst: m.lay.locOf(a.To), src: m.lay.locOf(a.Args[0])})
+			regPairs = append(regPairs, movePairLoc{dst: m.locOf(a.To), src: m.locOf(a.Args[0])})
 		}
 		i++
 	}

@@ -15,25 +15,13 @@ type emitter struct {
 	sb    *strings.Builder
 	alloc *allocation
 
-	frame       int               // total frame size in bytes (16-aligned)
-	calleeSaved []Reg             // callee-saved registers to preserve
-	spillBase   int               // byte offset of the spill area within the frame
-	allocOff    map[*ir.Instr]int // OAlloc instruction -> frame offset
-	hasDynAlloc bool              // the function has a VLA (dynamic) alloca
-	label       string            // sanitized function label
-	err         error             // first emission error, if any
-	blockDone   bool              // the current block emitted its own terminator (a tail branch)
-	lastPos     ir.SrcPos         // last source position emitted as a .loc directive
+	frameLayout // where everything lives in the frame
 
-	// Variadic support: the register save area and how many registers the named
-	// parameters consumed.
-	variadic   bool
-	gpSaveOff  int // frame offset of the x0..x7 save area
-	fpSaveOff  int // frame offset of the v0..v7 save area
-	namedGr    int // GP registers used by named parameters
-	namedSr    int // SIMD registers used by named parameters
-	namedStack int // bytes of stack used by named parameters
-	vaSeq      int // counter for unique vaarg labels
+	label     string    // sanitized function label
+	err       error     // first emission error, if any
+	blockDone bool      // the current block emitted its own terminator (a tail branch)
+	lastPos   ir.SrcPos // last source position emitted as a .loc directive
+	vaSeq     int       // counter for unique vaarg labels
 }
 
 // location kinds for parallel moves.
@@ -47,8 +35,7 @@ type loc struct {
 }
 
 func emitFunc(f *ir.Func, alloc *allocation, sb *strings.Builder) error {
-	e := &emitter{f: f, sb: sb, alloc: alloc, allocOff: map[*ir.Instr]int{}, label: sanitize(f.Name)}
-	e.planFrame()
+	e := &emitter{f: f, sb: sb, alloc: alloc, label: sanitize(f.Name), frameLayout: computeFrame(f, alloc)}
 	e.prologueHeader()
 	for _, b := range f.Blocks {
 		e.emitBlock(b)
@@ -71,63 +58,8 @@ func (e *emitter) line(format string, a ...any) {
 	fmt.Fprintf(e.sb, "\t"+format+"\n", a...)
 }
 
-// planFrame decides callee-saved registers to preserve, the spill area, and any
-// stack allocations, then computes the (16-aligned) frame size.
-func (e *emitter) planFrame() {
-	used := map[Reg]bool{}
-	for _, t := range e.f.Temps {
-		if t.Reg != ir.NoReg {
-			r := Reg(t.Reg)
-			if calleeSavedReg(r) {
-				used[r] = true
-			}
-		}
-	}
-	for _, r := range intAllocOrder {
-		if used[r] {
-			e.calleeSaved = append(e.calleeSaved, r)
-		}
-	}
-	for _, r := range floatAllocOrder {
-		if used[r] {
-			e.calleeSaved = append(e.calleeSaved, r)
-		}
-	}
-
-	off := 16 + 8*len(e.calleeSaved) // x29/x30 occupy [0,16)
-	e.spillBase = off
-	off += e.alloc.spillBytes
-
-	// Reserve stack for each OAlloc, honouring its alignment.
-	for _, b := range e.f.Blocks {
-		for k := range b.Instrs {
-			in := &b.Instrs[k]
-			if in.Op.IsAlloc() {
-				align, size := allocShape(e.f, in)
-				off = roundUp(off, align)
-				e.allocOff[in] = off
-				off += size
-			}
-			if in.Op == ir.OAllocN {
-				e.hasDynAlloc = true
-			}
-		}
-	}
-
-	if e.f.Variadic {
-		e.variadic = true
-		e.namedGr, e.namedSr, e.namedStack = computeNamedCounts(e.f)
-		off = roundUp(off, 8)
-		e.gpSaveOff = off
-		off += 8 * 8 // x0..x7
-		off = roundUp(off, 16)
-		e.fpSaveOff = off
-		off += 8 * 16 // v0..v7 (16-byte stride)
-	}
-
-	e.frame = roundUp(off, 16)
-}
-
+// prologueHeader emits the directives that introduce the function: its section,
+// visibility, and symbol type.
 func (e *emitter) prologueHeader() {
 	fmt.Fprintf(e.sb, "\t.text\n")
 	if e.f.Linkage.Export {
@@ -304,7 +236,7 @@ func (e *emitter) emitCallSequence(b *ir.Block, i int) int {
 		switch {
 		case a.To.IsNone():
 			stackArgs = append(stackArgs, a)
-		case e.isConstSym(a.Args[0]):
+		case isConstSym(e.f, a.Args[0]):
 			// A symbol address needs adrp/add; it can't go through the register
 			// parallel move, but it depends on nothing, so materialise it after.
 			symArgs = append(symArgs, a)
@@ -675,9 +607,6 @@ func (e *emitter) dstReg(ref ir.Ref, size int) (string, func()) {
 }
 
 // isConstSym reports whether ref is a symbol-address constant.
-func (e *emitter) isConstSym(ref ir.Ref) bool {
-	return ref.Kind == ir.RefConst && e.f.Consts[ref.ID].Kind == ir.ConstSym
-}
 
 // materializeSym loads a symbol address (plus offset) into r via adrp/add.
 func (e *emitter) materializeSym(r Reg, c ir.Const) {
@@ -715,27 +644,14 @@ func floatBits(c ir.Const) int64 {
 }
 
 // locOf resolves a ref to a parallel-move location.
+// locOf is where a value lives. A symbol address has no location -- it must be
+// materialized -- so asking for one is an error.
 func (e *emitter) locOf(ref ir.Ref) loc {
-	switch ref.Kind {
-	case ir.RefTemp:
-		t := e.f.Temps[ref.ID]
-		if t.Reg != ir.NoReg {
-			return loc{reg: Reg(t.Reg), size: t.Cls.Size()}
-		}
-		return loc{mem: true, slot: t.Slot, size: t.Cls.Size()}
-	case ir.RefConst:
-		c := e.f.Consts[ref.ID]
-		if c.Kind == ir.ConstFloat {
-			// Carry the bit pattern; emitMoveLoc moves it via a GPR into the
-			// SIMD destination.
-			return loc{imm: true, val: floatBits(c), size: c.Cls.Size()}
-		}
-		if c.Kind == ir.ConstInt {
-			return loc{imm: true, val: c.Int, size: c.Cls.Size()}
-		}
+	l, ok := locOf(e.f, ref)
+	if !ok {
+		e.fail("arm64: cannot move operand %v", ref)
 	}
-	e.fail("arm64: cannot move operand %v", ref)
-	return loc{}
+	return l
 }
 
 func (e *emitter) movImm(r Reg, val int64, size int) {

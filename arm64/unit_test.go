@@ -448,7 +448,8 @@ func disasmModule(t *testing.T, m *ir.Module) string {
 // newMC builds a bare machine-code emitter for exercising one piece of it in
 // isolation, without going through a whole compile.
 func newMC(f *ir.Func) *mc {
-	return &mc{f: f, prog: a64.NewProgram(), instrPC: map[*ir.Instr]uint64{}, allocOff: map[*ir.Instr]int{}}
+	return &mc{f: f, prog: a64.NewProgram(), instrPC: map[*ir.Instr]uint64{},
+		frameLayout: frameLayout{allocOff: map[*ir.Instr]int{}}}
 }
 
 // mcText reads back what the emitter produced, as assembly.
@@ -506,7 +507,7 @@ func TestEmitMoveLocCombos(t *testing.T) {
 
 func TestLocOf(t *testing.T) {
 	f := ir.NewModule().NewFuncVoid("x")
-	e := &emitter{f: f, allocOff: map[*ir.Instr]int{}}
+	e := &emitter{f: f}
 
 	reg := f.NewTemp("r", ir.ClsL)
 	f.Temp(reg).Reg = int(X5)
