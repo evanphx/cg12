@@ -79,14 +79,14 @@ func (g *gen) genAsm(as *cc.AsmStatement) {
 	}
 	tmpl := asmTemplate(a)
 
-	if tmpl == "" || tmpl == "nop" {
-		// The empty template is the standard compiler barrier
-		// (`__asm__ volatile("" ::: "memory")`) and `nop` is a hint; both are
-		// no-ops for the values cg12 computes. Input operands are still evaluated
-		// so their side effects are not lost.
-		g.asmEvalInputs(a)
-		return
-	}
+	// The empty template is the standard compiler barrier,
+	// `__asm__ volatile("" ::: "memory")`. It emits no instructions, which is
+	// exactly why it must still reach the IR: its whole purpose is to stop the
+	// optimizer moving memory across it, and dropping it here for emitting
+	// nothing gets that backwards. opt/loadelim and opt/dce already treat an OAsm
+	// as an unknown memory effect, so the barrier works the moment it exists.
+	//
+	// Both assemblers encode an empty template to zero bytes, so it costs no code.
 
 	specs, outLvals, ok := g.asmCollect(a)
 	if !ok {
@@ -217,21 +217,4 @@ func asmTemplate(a *cc.Asm) string {
 		s = s[1 : len(s)-1]
 	}
 	return strings.TrimSpace(s)
-}
-
-// asmEvalInputs evaluates the input operand expressions (the second `:` group)
-// for their side effects, discarding the values. Outputs (group 0) are lvalues
-// and clobbers (group 2) are string literals, so neither is evaluated.
-func (g *gen) asmEvalInputs(a *cc.Asm) {
-	group := 0
-	for al := a.AsmArgList; al != nil; al = al.AsmArgList {
-		if group == 1 {
-			for el := al.AsmExpressionList; el != nil; el = el.AsmExpressionList {
-				if _, operand, ok := asmOperand(el.AssignmentExpression); ok {
-					g.genExpr(operand)
-				}
-			}
-		}
-		group++
-	}
 }
