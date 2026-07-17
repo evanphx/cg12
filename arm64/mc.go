@@ -1580,10 +1580,35 @@ func indexSize(option uint32) int {
 	return 8
 }
 
-// loadSize / storeSize give the access width; they reuse the text emitter's
-// tables and drop the (unused-here) mnemonic.
-func loadSize(op ir.Op, cls ir.Cls) int { _, sz := loadInfo(op, cls); return sz }
-func storeSize(op ir.Op) int            { _, sz := storeInfo(op); return sz }
+// loadSize is the width of the register a load writes. It is not simply the
+// class size: a sub-word load zero-extends into a w register, and a sign-
+// extending one widens to whatever its result class asks for.
+func loadSize(op ir.Op, cls ir.Cls) int {
+	switch op {
+	case ir.OLoadub, ir.OLoaduh, ir.OLoaduw, ir.OLoads:
+		return 4
+	case ir.OLoadsb, ir.OLoadsh:
+		return cls.Size()
+	case ir.OLoadsw, ir.OLoadl, ir.OLoadd:
+		return 8
+	case ir.OLoadq:
+		return 16
+	}
+	return 0
+}
+
+// storeSize is the width of the register a store reads.
+func storeSize(op ir.Op) int {
+	switch op {
+	case ir.OStoreb, ir.OStoreh, ir.OStorew, ir.OStores:
+		return 4
+	case ir.OStorel, ir.OStored:
+		return 8
+	case ir.OStoreq:
+		return 16
+	}
+	return 0
+}
 
 func (m *mc) term(b *ir.Block) {
 	if (&sel{f: m.f, b: &mcAsm{prog: m.prog, m: m}, spillBase: m.spillBase}).term(b) {

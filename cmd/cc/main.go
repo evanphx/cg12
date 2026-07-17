@@ -1,11 +1,11 @@
 // Command cc is a tiny C compiler driver built on cg12: it compiles a single .c
-// file to a native (arm64) executable, object, or assembly, or runs it directly.
+// file to a native (arm64) executable or object, or runs it directly.
 //
 //	cc hello.c            # compile + link -> ./hello
 //	cc -o prog hello.c    # ... to ./prog
 //	cc -run hello.c       # compile, link, run (exit code propagates)
 //	cc -c hello.c         # -> hello.o (relocatable object)
-//	cc -S hello.c         # -> hello.s (assembly text)
+//	cc -dis hello.c       # print the generated code, read back out of the object
 //	cc -emit-ir hello.c   # print the cg12 IR to stdout
 //	cc -O -emit-ir hello.c # ... after running the optimizer
 //	cc -O -bpf prog.c     # compile to eBPF and print the disassembly
@@ -29,7 +29,7 @@ import (
 func main() {
 	out := flag.String("o", "", "output file (default derived from the input name)")
 	emitObj := flag.Bool("c", false, "compile to a relocatable object (.o), do not link")
-	emitAsm := flag.Bool("S", false, "emit assembly text (.s), do not assemble")
+	emitDis := flag.Bool("dis", false, "print the generated code, read back out of the object")
 	emitIR := flag.Bool("emit-ir", false, "print the cg12 IR to stdout")
 	emitBPF := flag.Bool("bpf", false, "compile each function to eBPF and print the disassembly")
 	emitBPFELF := flag.Bool("bpf-elf", false, "compile to a loadable eBPF ELF object (.bpf.o)")
@@ -74,10 +74,10 @@ func main() {
 		obj, err := bpf.CompileModule(mod)
 		check(err)
 		writeOut(outputPath(*out, input, ".bpf.o"), obj.ELF())
-	case *emitAsm:
-		asm, err := arm64.CompileModule(mod)
+	case *emitDis:
+		o, err := arm64.CompileToObject(mod)
 		check(err)
-		writeOut(outputPath(*out, input, ".s"), []byte(asm))
+		fmt.Print(arm64.Disassemble(o))
 	case *emitObj:
 		writeObject(mod, outputPath(*out, input, ".o"))
 	default:
@@ -176,7 +176,7 @@ func writeOut(path string, data []byte) {
 }
 
 func usage() {
-	fmt.Fprintf(os.Stderr, "usage: cc [-O] [-o out] [-c|-S|-emit-ir|-run] file.c\n")
+	fmt.Fprintf(os.Stderr, "usage: cc [-O] [-o out] [-c|-dis|-emit-ir|-run] file.c\n")
 	flag.PrintDefaults()
 }
 

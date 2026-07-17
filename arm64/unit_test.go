@@ -49,55 +49,54 @@ func TestRegisterPools(t *testing.T) {
 	assert.False(t, calleeSaved[X9])
 }
 
+// The signed and unsigned orderings are different conditions on AArch64 -- lt/le
+// against lo/ls -- and picking from the wrong column compares the wrong way
+// round on exactly the inputs that straddle the sign bit.
 func TestCondCode(t *testing.T) {
-	want := map[ir.Cmp]string{
-		ir.CmpEq: "eq", ir.CmpNe: "ne",
-		ir.CmpSlt: "lt", ir.CmpSle: "le", ir.CmpSgt: "gt", ir.CmpSge: "ge",
-		ir.CmpUlt: "lo", ir.CmpUle: "ls", ir.CmpUgt: "hi", ir.CmpUge: "hs",
+	want := map[ir.Cmp]a64.Cond{
+		ir.CmpEq: a64.EQ, ir.CmpNe: a64.NE,
+		ir.CmpSlt: a64.LT, ir.CmpSle: a64.LE, ir.CmpSgt: a64.GT, ir.CmpSge: a64.GE,
+		ir.CmpUlt: a64.CC, ir.CmpUle: a64.LS, ir.CmpUgt: a64.HI, ir.CmpUge: a64.CS,
 	}
-	for pred, code := range want {
-		got, ok := condCode(pred)
+	for pred, cond := range want {
+		got, ok := intCondOf(pred)
 		assert.Truef(t, ok, "%v", pred)
-		assert.Equal(t, code, got)
+		assert.Equalf(t, cond, got, "%v", pred)
 	}
-	_, ok := condCode(ir.CmpFeq) // float predicates unsupported here
+	_, ok := intCondOf(ir.CmpFeq) // float predicates are a separate table
 	assert.False(t, ok)
 }
 
-func TestLoadStoreInfo(t *testing.T) {
+// The access width is not just the class size: a sub-word load zero-extends into
+// a w register whatever it was asked for, while a sign-extending one widens to
+// its result class.
+func TestLoadStoreSize(t *testing.T) {
 	loads := []struct {
 		op   ir.Op
 		cls  ir.Cls
-		mn   string
 		size int
 	}{
-		{ir.OLoadub, ir.ClsW, "ldrb", 4},
-		{ir.OLoaduh, ir.ClsW, "ldrh", 4},
-		{ir.OLoaduw, ir.ClsL, "ldr", 4},
-		{ir.OLoadsb, ir.ClsL, "ldrsb", 8},
-		{ir.OLoadsh, ir.ClsW, "ldrsh", 4},
-		{ir.OLoadsw, ir.ClsL, "ldrsw", 8},
-		{ir.OLoadl, ir.ClsL, "ldr", 8},
+		{ir.OLoadub, ir.ClsW, 4},
+		{ir.OLoaduh, ir.ClsW, 4},
+		{ir.OLoaduw, ir.ClsL, 4}, // zero-extends: still a w destination
+		{ir.OLoadsb, ir.ClsL, 8}, // sign-extends into an x
+		{ir.OLoadsh, ir.ClsW, 4},
+		{ir.OLoadsw, ir.ClsL, 8},
+		{ir.OLoadl, ir.ClsL, 8},
+		{ir.OLoadq, ir.ClsD, 16},
 	}
 	for _, c := range loads {
-		mn, sz := loadInfo(c.op, c.cls)
-		assert.Equal(t, c.mn, mn, c.op.String())
-		assert.Equal(t, c.size, sz, c.op.String())
+		assert.Equal(t, c.size, loadSize(c.op, c.cls), c.op.String())
 	}
 	stores := []struct {
 		op   ir.Op
-		mn   string
 		size int
 	}{
-		{ir.OStoreb, "strb", 4},
-		{ir.OStoreh, "strh", 4},
-		{ir.OStorew, "str", 4},
-		{ir.OStorel, "str", 8},
+		{ir.OStoreb, 4}, {ir.OStoreh, 4}, {ir.OStorew, 4},
+		{ir.OStorel, 8}, {ir.OStores, 4}, {ir.OStored, 8}, {ir.OStoreq, 16},
 	}
 	for _, c := range stores {
-		mn, sz := storeInfo(c.op)
-		assert.Equal(t, c.mn, mn, c.op.String())
-		assert.Equal(t, c.size, sz, c.op.String())
+		assert.Equal(t, c.size, storeSize(c.op), c.op.String())
 	}
 }
 
@@ -111,15 +110,6 @@ func TestRoundUpAndSanitize(t *testing.T) {
 	assert.Equal(t, "foo_1", sanitize("foo_1"))
 	assert.Equal(t, "anon", sanitize(""))
 	assert.Equal(t, "x__y", sanitize("x$.y"))
-}
-
-func TestDataDirective(t *testing.T) {
-	assert.Equal(t, ".byte", dataDirective(ir.SubB))
-	assert.Equal(t, ".hword", dataDirective(ir.SubH))
-	assert.Equal(t, ".word", dataDirective(ir.SubW))
-	assert.Equal(t, ".quad", dataDirective(ir.SubL))
-	assert.Equal(t, ".word", dataDirective(ir.SubS))
-	assert.Equal(t, ".quad", dataDirective(ir.SubD))
 }
 
 func TestLocHelpers(t *testing.T) {
@@ -507,23 +497,28 @@ func TestEmitMoveLocCombos(t *testing.T) {
 
 func TestLocOf(t *testing.T) {
 	f := ir.NewModule().NewFuncVoid("x")
-	e := &emitter{f: f}
 
 	reg := f.NewTemp("r", ir.ClsL)
 	f.Temp(reg).Reg = int(X5)
-	assert.Equal(t, loc{reg: X5, size: 8}, e.locOf(reg))
+	l, ok := locOf(f, reg)
+	require.True(t, ok)
+	assert.Equal(t, loc{reg: X5, size: 8}, l)
 
 	sp := f.NewTemp("s", ir.ClsW)
 	f.Temp(sp).Reg = ir.NoReg
 	f.Temp(sp).Slot = 12
-	assert.Equal(t, loc{mem: true, slot: 12, size: 4}, e.locOf(sp))
+	l, ok = locOf(f, sp)
+	require.True(t, ok)
+	assert.Equal(t, loc{mem: true, slot: 12, size: 4}, l)
 
-	im := f.Word(9)
-	assert.Equal(t, loc{imm: true, val: 9, size: 4}, e.locOf(im))
+	l, ok = locOf(f, f.Word(9))
+	require.True(t, ok)
+	assert.Equal(t, loc{imm: true, val: 9, size: 4}, l)
 
-	// A symbol constant cannot be a move source: it must fail.
-	e.locOf(f.Sym("g", 0))
-	require.Error(t, e.err)
+	// A symbol's address is not somewhere a value already is: it has to be
+	// materialized, so it has no location to report.
+	_, ok = locOf(f, f.Sym("g", 0))
+	assert.False(t, ok)
 }
 
 func TestEmitCallErrors(t *testing.T) {

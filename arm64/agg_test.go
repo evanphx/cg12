@@ -173,8 +173,8 @@ func TestCompileAggregateReturnGP(t *testing.T) {
 	m := ir.NewModule()
 	pair := &ir.AggType{Name: "pair", Fields: []ir.Field{{Sub: ir.SubW}, {Sub: ir.SubW}}}
 	m.AddType(pair)
-	asm, err := Compile(aggReturnFunc(m, "f", pair))
-	require.NoError(t, err)
+	aggReturnFunc(m, "f", pair)
+	asm := disasmModule(t, m)
 	assert.Contains(t, asm, "mov x0", "GP result ends up in x0")
 }
 
@@ -182,8 +182,8 @@ func TestCompileAggregateReturnHFA(t *testing.T) {
 	m := ir.NewModule()
 	vec := &ir.AggType{Name: "vec3", Fields: []ir.Field{{Sub: ir.SubS}, {Sub: ir.SubS}, {Sub: ir.SubS}}}
 	m.AddType(vec)
-	asm, err := Compile(aggReturnFunc(m, "f", vec))
-	require.NoError(t, err)
+	aggReturnFunc(m, "f", vec)
+	asm := disasmModule(t, m)
 	assert.Contains(t, asm, "fmov s0")
 	assert.Contains(t, asm, "fmov s2") // three HFA elements into s0/s1/s2
 }
@@ -192,8 +192,8 @@ func TestCompileAggregateReturnMemory(t *testing.T) {
 	m := ir.NewModule()
 	big := &ir.AggType{Name: "big", Fields: []ir.Field{{Sub: ir.SubB, Count: 20}}}
 	m.AddType(big)
-	asm, err := Compile(aggReturnFunc(m, "f", big))
-	require.NoError(t, err)
+	aggReturnFunc(m, "f", big)
+	asm := disasmModule(t, m)
 	// The 20-byte result is copied into the caller's x8 buffer (16 + 4 bytes).
 	assert.Contains(t, asm, "ldr x")
 	assert.Contains(t, asm, "str w") // the trailing 4-byte chunk
