@@ -31,17 +31,26 @@ type interval struct {
 	crossSafe bool // live across at least one safepoint (call or OSafepoint)
 	precolor  Reg  // fixed register, or -1
 	float     bool // temp is a floating-point value (allocate from V registers)
+
+	// avoid holds registers this interval may not use because an inline asm it
+	// is live across writes them. Being callee-saved is no protection: a clobber
+	// list is exactly how an asm says it writes one.
+	avoid map[Reg]bool
 }
 
 // numbering assigns each instruction (and block boundary) a position. Positions
 // increase in reverse-postorder so live-range endpoints compare sensibly.
 type numbering struct {
-	pos      map[*ir.Block][2]int // [firstPos, lastPos] of the block body
-	callAt   []int                // positions holding a call
-	safeAt   []int                // positions that are safepoints (calls + OSafepoint)
-	posInstr []*ir.Instr          // position -> instruction (nil at terminator slots)
-	order    []*ir.Block
-	next     int
+	pos    map[*ir.Block][2]int // [firstPos, lastPos] of the block body
+	callAt []int                // positions holding a call
+	// asmClobbers maps an OAsm's position to the registers its template writes
+	// beyond its outputs. Being live across one of these rules those registers out,
+	// which "crosses a call" does not say: that only rules out the caller-saved set.
+	asmClobbers map[int][]Reg
+	safeAt      []int       // positions that are safepoints (calls + OSafepoint)
+	posInstr    []*ir.Instr // position -> instruction (nil at terminator slots)
+	order       []*ir.Block
+	next        int
 }
 
 // regAlloc runs linear-scan allocation on the already-lowered function.
@@ -103,6 +112,12 @@ func numberInstrs(cfg *analysis.CFG) *numbering {
 				n.safeAt = append(n.safeAt, n.next)
 			case ir.OAsm:
 				n.callAt = append(n.callAt, n.next) // clobbers like a call, but is not a GC safepoint
+				if regs := asmClobberRegs(&b.Instrs[k]); len(regs) > 0 {
+					if n.asmClobbers == nil {
+						n.asmClobbers = map[int][]Reg{}
+					}
+					n.asmClobbers[n.next] = regs
+				}
 			case ir.OSafepoint:
 				n.safeAt = append(n.safeAt, n.next)
 			}
@@ -204,7 +219,12 @@ func buildIntervals(f *ir.Func, cfg *analysis.CFG, live *analysis.Liveness, num 
 		for _, c := range num.callAt {
 			if iv.start <= c && c < iv.end {
 				iv.crosses = true
-				break
+				for _, r := range num.asmClobbers[c] {
+					if iv.avoid == nil {
+						iv.avoid = map[Reg]bool{}
+					}
+					iv.avoid[r] = true
+				}
 			}
 		}
 		for _, p := range num.safeAt {
@@ -316,6 +336,9 @@ func pickRegister(iv *interval, inUse map[Reg]bool) (Reg, bool) {
 		}
 		if iv.crosses && !calleeSavedReg(r) {
 			continue
+		}
+		if iv.avoid[r] {
+			continue // an inline asm this value is live across writes r
 		}
 		return r, true
 	}

@@ -2,6 +2,7 @@ package amd64
 
 import (
 	"fmt"
+	"strconv"
 	"strings"
 
 	"github.com/evanphx/cg12/ir"
@@ -43,6 +44,21 @@ func asmPrecolor(f *ir.Func) error {
 		t := f.Temps[ref.ID]
 		t.Fixed = true
 		t.Reg = int(reg)
+	}
+	for _, b := range f.Blocks {
+		for i := range b.Instrs {
+			if b.Instrs[i].Op != ir.OAsm {
+				continue
+			}
+			// A clobber list is a promise the allocator keeps; a name it cannot
+			// resolve is one it cannot keep, and passing over it silently keeps
+			// exactly the promises that needed no keeping.
+			for _, name := range b.Instrs[i].Asm.Clobbers {
+				if _, ok := asmClobberReg(name); !ok {
+					return fmt.Errorf("amd64: inline-asm clobbers %q, which is not a register this backend knows", name)
+				}
+			}
+		}
 	}
 	for _, b := range f.Blocks {
 		var out []ir.Instr
@@ -207,4 +223,49 @@ func memn(base Reg, disp int32) string {
 		return "(" + gpn(base, 8) + ")"
 	}
 	return fmt.Sprintf("%d(%s)", disp, gpn(base, 8))
+}
+
+// asmClobberRegs is the registers an inline-asm template declares it writes.
+func asmClobberRegs(in *ir.Instr) []Reg {
+	if in.Asm == nil {
+		return nil
+	}
+	var out []Reg
+	for _, name := range in.Asm.Clobbers {
+		if r, ok := asmClobberReg(name); ok && r >= 0 {
+			out = append(out, r)
+		}
+	}
+	return out
+}
+
+// asmClobberReg resolves one clobber name. It reports ok for a name this backend
+// understands, and a negative register for one that names no register at all:
+// "memory" is already implied, since an OAsm is an unknown memory effect to
+// every pass that could reason across it, and cg12 does not allocate the
+// condition flags that "cc" names.
+//
+// A clobber list is a promise the allocator keeps, so a name we cannot resolve
+// is an error rather than something to pass over -- honouring the ones we
+// recognise and ignoring the rest keeps exactly the promises that need no
+// keeping.
+func asmClobberReg(name string) (Reg, bool) {
+	switch name {
+	case "memory", "cc":
+		return -1, true
+	}
+	// Any of a register's names -- %rbx, %ebx, %bl -- clobbers the one register.
+	for r, row := range gpNames {
+		for _, n := range row {
+			if n == name {
+				return Reg(r), true
+			}
+		}
+	}
+	if strings.HasPrefix(name, "xmm") {
+		if n, err := strconv.Atoi(name[3:]); err == nil && n < 16 {
+			return XMM0 + Reg(n), true
+		}
+	}
+	return 0, false
 }

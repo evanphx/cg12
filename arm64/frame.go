@@ -38,6 +38,20 @@ func computeFrame(f *ir.Func, alloc *allocation) frameLayout {
 			}
 		}
 	}
+	// An inline asm that declares it writes a callee-saved register makes this
+	// function responsible for it, exactly as using it would: the ABI promise is
+	// to the caller, and it does not care whether the write came from the
+	// allocator or from a template. Keeping the allocator out of those registers
+	// is a different job (regalloc's avoid set) and does not discharge this one.
+	for _, b := range f.Blocks {
+		for i := range b.Instrs {
+			for _, r := range asmClobberRegs(&b.Instrs[i]) {
+				if calleeSavedReg(r) {
+					used[r] = true
+				}
+			}
+		}
+	}
 	// Walk the allocation orders rather than the map, so the save order is stable.
 	for _, r := range intAllocOrder {
 		if used[r] {

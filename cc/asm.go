@@ -88,11 +88,14 @@ func (g *gen) genAsm(as *cc.AsmStatement) {
 	//
 	// Both assemblers encode an empty template to zero bytes, so it costs no code.
 
-	specs, outLvals, ok := g.asmCollect(a)
+	specs, outLvals, clobbers, ok := g.asmCollect(a)
 	if !ok {
 		return // asmCollect already recorded the failure
 	}
 	res := g.cur.Asm(tmpl, specs)
+	if len(clobbers) > 0 {
+		g.cur.Instrs[len(g.cur.Instrs)-1].Asm.Clobbers = clobbers
+	}
 	// res holds the register-output temporaries in order; store each back to its
 	// lvalue. Memory outputs ("=m") are written by the asm directly.
 	for i, lv := range outLvals {
@@ -114,23 +117,31 @@ type asmOut struct {
 // immediate), or "m" (memory). outLvals, parallel to the register-output specs,
 // records where to store each register result back. Unsupported constraints fail
 // loudly.
-func (g *gen) asmCollect(a *cc.Asm) (specs []ir.AsmSpec, outLvals []asmOut, ok bool) {
+func (g *gen) asmCollect(a *cc.Asm) (specs []ir.AsmSpec, outLvals []asmOut, clobbers []string, ok bool) {
 	group := 0
 	for al := a.AsmArgList; al != nil; al = al.AsmArgList {
 		for el := al.AsmExpressionList; el != nil; el = el.AsmExpressionList {
 			cons, operand, isOp := asmOperand(el.AssignmentExpression)
 			if !isOp {
-				continue // a clobber string, not an operand
+				// A bare string in the third group is a clobber. It names a register
+				// the template writes, which the allocator has to know about: a value
+				// it is holding there cannot survive the asm.
+				if group >= 2 {
+					if name, isStr := asmStringLit(el.AssignmentExpression); isStr {
+						clobbers = append(clobbers, name)
+					}
+				}
+				continue
 			}
 			base, output, rw := asmParseConstraint(cons)
 			if (group == 0) != output {
 				g.fail("cc: inline-asm operand %q is in the wrong constraint group", cons)
-				return nil, nil, false
+				return nil, nil, nil, false
 			}
 			spec, lval, err := g.asmOperandSpec(base, output, rw, operand)
 			if err != "" {
 				g.fail("cc: %s", err)
-				return nil, nil, false
+				return nil, nil, nil, false
 			}
 			specs = append(specs, spec)
 			if spec.Kind == ir.AsmRegOut || spec.Kind == ir.AsmRegInOut {
@@ -139,7 +150,7 @@ func (g *gen) asmCollect(a *cc.Asm) (specs []ir.AsmSpec, outLvals []asmOut, ok b
 		}
 		group++
 	}
-	return specs, outLvals, true
+	return specs, outLvals, clobbers, true
 }
 
 // asmParseConstraint strips the '='/'+'/'&' modifiers from a constraint, yielding

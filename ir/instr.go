@@ -92,6 +92,16 @@ type AsmOp struct {
 	// each operand ("a", "d", "S", ...) or "" when the allocator may choose. A
 	// backend precolors the operand's temporary to the named register.
 	Regs []string
+
+	// Clobbers names the registers the template writes besides its outputs, as
+	// written in the source ("x19", "rbx", "cc", "memory"). A value the allocator
+	// is holding in one of them cannot survive the asm, so it must not be there.
+	//
+	// An OAsm already clobbers like a call, which covers the caller-saved set.
+	// This is what the caller-saved assumption misses: GNU asm explicitly permits
+	// clobbering a callee-saved register, and a value live across the asm is
+	// exactly what the allocator puts in one.
+	Clobbers []string
 }
 
 // AsmRegOuts returns the register-output result temporaries in %N order (To then

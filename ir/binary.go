@@ -383,6 +383,10 @@ func (e *enc) asmOp(a *AsmOp) {
 	for _, r := range a.Regs {
 		e.str(r)
 	}
+	e.uv(uint64(len(a.Clobbers)))
+	for _, c := range a.Clobbers {
+		e.str(c)
+	}
 }
 
 // inlineSite encodes an inline context: a chain of call sites, innermost first.
@@ -688,6 +692,12 @@ func (d *dec) asmOp() *AsmOp {
 		a.Regs = make([]string, n)
 		for i := range a.Regs {
 			a.Regs[i] = d.str()
+		}
+	}
+	if n := int(d.uv()); n > 0 {
+		a.Clobbers = make([]string, n)
+		for i := range a.Clobbers {
+			a.Clobbers[i] = d.str()
 		}
 	}
 	return a

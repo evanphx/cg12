@@ -376,6 +376,21 @@ func computeFrame(f *ir.Func, alloc *allocation) frameLayout {
 			used[Reg(t.Reg)] = true
 		}
 	}
+	// An inline asm that declares it writes a callee-saved register makes this
+	// function responsible for it, exactly as using it would: the ABI promise is
+	// to the caller, and it does not care whether the write came from the
+	// allocator or from a template. Keeping the allocator out of those registers
+	// is a different job and does not discharge this one -- which is why the
+	// cpuid idiom (: "rbx") needs both.
+	for _, b := range f.Blocks {
+		for i := range b.Instrs {
+			for _, r := range asmClobberRegs(&b.Instrs[i]) {
+				if calleeSavedReg(r) {
+					used[r] = true
+				}
+			}
+		}
+	}
 	for r := range used {
 		lay.calleeSaved = append(lay.calleeSaved, r)
 	}

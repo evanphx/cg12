@@ -63,6 +63,7 @@ func TestInstrRoundTripsEveryField(t *testing.T) {
 			Template: "movl %k1, %k0",
 			Ops:      []AsmOperandKind{AsmRegOut, AsmRegIn},
 			Regs:     []string{"", "a"},
+			Clobbers: []string{"cc"},
 		},
 		Inl: &InlineSite{
 			Callee: "inner",
@@ -72,6 +73,11 @@ func TestInstrRoundTripsEveryField(t *testing.T) {
 		Blk: &Block{Name: "target"},
 	}
 	allFieldsSet(t, in)
+	// The carried structs need the same treatment: a field added to one of them
+	// is a field the encoder can drop just as quietly, and enumerating only
+	// Instr's own fields does not see it.
+	allFieldsSet(t, *in.Asm)
+	allFieldsSet(t, *in.Inl, "Parent") // the innermost site has no parent to set
 
 	got := roundTripInstr(t, in)
 
