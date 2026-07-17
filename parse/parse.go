@@ -17,6 +17,14 @@ func Parse(src string) (*ir.Module, error) {
 	if p.err != nil {
 		return nil, p.err
 	}
+	// The grammar accepts any op in the table and checks nothing beyond its name,
+	// so it can build instructions whose meaning lives somewhere the text cannot
+	// say -- an `asm` with no template, a `blockaddr` with no block. A backend
+	// dereferences those without asking. Rejecting them here means the parser
+	// cannot hand anything downstream that the builder could not have made.
+	if err := ir.VerifyModule(m); err != nil {
+		return nil, err
+	}
 	return m, nil
 }
 

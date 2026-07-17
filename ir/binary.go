@@ -95,6 +95,13 @@ func DecodeModule(data []byte) (*Module, error) {
 	if d.err != nil {
 		return nil, d.err
 	}
+	// The format's promise is that a decoded module is the module. Bytes that
+	// decode without complaint can still describe a function no builder would
+	// make -- a truncated or hand-edited unit, or one written by a version that
+	// carried a field this one does not.
+	if err := VerifyModule(m); err != nil {
+		return nil, err
+	}
 	return m, nil
 }
 
