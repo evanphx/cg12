@@ -158,6 +158,30 @@ func (l *Linker) mergeWithStart(entry string, init, fini []string) (*obj.Object,
 	return merge(append([]*obj.Object{stub}, l.objs...))
 }
 
+// alignUp rounds n up to a multiple of a; a of 0 or 1 means no rounding.
+func alignUp(n, a int) int {
+	if a < 2 {
+		return n
+	}
+	return (n + a - 1) / a * a
+}
+
+// padTo grows b to n bytes with zeros, so the next object's contents begin where
+// its alignment requires.
+func padTo(b []byte, n int) []byte {
+	for len(b) < n {
+		b = append(b, 0)
+	}
+	return b
+}
+
+func maxInt(a, b int) int {
+	if a > b {
+		return a
+	}
+	return b
+}
+
 // localName is the name a local symbol is placed under: qualified by the object
 // it came from, so it occupies a namespace of its own. Two objects may each have
 // a static "helper" and neither can see the other's.
@@ -183,19 +207,24 @@ func merge(objs []*obj.Object) (*obj.Object, error) {
 		if o.Machine != out.Machine {
 			return nil, fmt.Errorf("link: object %d has machine %d, expected %d", oi, o.Machine, out.Machine)
 		}
+		// Each object's contents are placed at the alignment they were laid out
+		// for. Concatenating at whatever length the previous object happened to end
+		// at would shift every datum within by that much, undoing the padding the
+		// backend put in.
+		out.DataAlign = maxInt(out.DataAlign, o.DataAlign)
+		out.BssAlign = maxInt(out.BssAlign, o.BssAlign)
+		out.TlsAlign = maxInt(out.TlsAlign, o.TlsAlign)
+
 		textBase := uint64(len(out.Text))
-		dataBase := uint64(len(out.Data))
-		tdataBase := uint64(len(out.Tdata))
-		bssBase := uint64(out.BssSize)
-		tbssBase := uint64(out.TbssSize)
+		dataBase := uint64(alignUp(len(out.Data), o.DataAlign))
+		tdataBase := uint64(alignUp(len(out.Tdata), o.TlsAlign))
+		bssBase := uint64(alignUp(out.BssSize, o.BssAlign))
+		tbssBase := uint64(alignUp(out.TbssSize, o.TlsAlign))
 		out.Text = append(out.Text, o.Text...)
-		out.Data = append(out.Data, o.Data...)
-		out.Tdata = append(out.Tdata, o.Tdata...)
-		out.BssSize += o.BssSize
-		out.TbssSize += o.TbssSize
-		if o.TlsAlign > out.TlsAlign {
-			out.TlsAlign = o.TlsAlign
-		}
+		out.Data = append(padTo(out.Data, int(dataBase)), o.Data...)
+		out.Tdata = append(padTo(out.Tdata, int(tdataBase)), o.Tdata...)
+		out.BssSize = int(bssBase) + o.BssSize
+		out.TbssSize = int(tbssBase) + o.TbssSize
 
 		// Place this object's defined symbols, renaming every local so no other
 		// object can reach it.

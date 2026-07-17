@@ -144,19 +144,27 @@ type Object struct {
 	Machine uint16
 	Text    []byte
 	Data    []byte
-	Rodata  []byte
 
 	// Tdata is the thread-local initialization image (.tdata): not data used in
-	// place, but the bytes each new thread's TLS block starts life as. TlsAlign is
-	// the alignment the block requires.
-	Tdata    []byte
-	TlsAlign int
+	// place, but the bytes each new thread's TLS block starts life as.
+	Tdata []byte
 
 	// BssSize and TbssSize are zero-filled regions that take up no room in the
 	// file: the loader supplies the zeroes. .bss follows .data in memory, .tbss
 	// follows .tdata in each thread's block.
 	BssSize  int
 	TbssSize int
+
+	// The alignment each section's contents require. A datum is padded to its own
+	// alignment within its section, which only means anything if the section
+	// itself is placed at least that well -- align a 16-byte value inside a
+	// section the image put on an 8-byte boundary and it is 16-aligned relative to
+	// nothing. Zero means no requirement.
+	//
+	// TlsAlign covers both .tdata and .tbss, which are one block per thread.
+	DataAlign int
+	BssAlign  int
+	TlsAlign  int
 
 	Syms       []Sym
 	Relocs     []Reloc // relocations against .text
@@ -376,10 +384,10 @@ func (o *Object) MarshalELF() ([]byte, error) {
 	secs[secNull] = section{}
 	secs[secText] = section{name: ".text", typ: shtProgbits, flags: shfAlloc | shfExecinstr, addralign: 4, data: o.Text}
 	secs[secRela] = section{name: ".rela.text", typ: shtRela, link: uint32(secSymtab), info: uint32(secText), addralign: 8, entsize: 24, data: rela.b}
-	secs[secData] = section{name: ".data", typ: shtProgbits, flags: shfAlloc | shfWrite, addralign: 8, data: o.Data}
+	secs[secData] = section{name: ".data", typ: shtProgbits, flags: shfAlloc | shfWrite, addralign: uint64(alignOr(o.DataAlign, 8)), data: o.Data}
 	secs[secRelaData] = section{name: ".rela.data", typ: shtRela, link: uint32(secSymtab), info: uint32(secData), addralign: 8, entsize: 24, data: relaData.b}
 	if secBss >= 0 {
-		secs[secBss] = section{name: ".bss", typ: shtNobits, flags: shfAlloc | shfWrite, addralign: 8, nobits: uint64(o.BssSize)}
+		secs[secBss] = section{name: ".bss", typ: shtNobits, flags: shfAlloc | shfWrite, addralign: uint64(alignOr(o.BssAlign, 8)), nobits: uint64(o.BssSize)}
 	}
 	if secTdata >= 0 {
 		secs[secTdata] = section{name: ".tdata", typ: shtProgbits, flags: shfAlloc | shfWrite | shfTLS, addralign: uint64(tlsAlignOf(o)), data: o.Tdata}
@@ -536,9 +544,18 @@ func AlignInt(n, a int) int {
 }
 
 // tlsAlignOf is an object's TLS block alignment, defaulting to a single byte.
-func tlsAlignOf(o *Object) int {
-	if o.TlsAlign < 1 {
-		return 1
+func tlsAlignOf(o *Object) int { return alignOr(o.TlsAlign, 1) }
+
+// bssStart is where .bss begins relative to the start of .data: after .data's
+// bytes, rounded up to what .bss's own contents require. .bss has no bytes in
+// the file, so this is a memory offset only.
+func bssStart(o *Object) int { return AlignInt(len(o.Data), alignOr(o.BssAlign, 1)) }
+
+// alignOr is a recorded alignment, or def where nothing asked for one. A section
+// with no requirement still needs a positive addralign in its header.
+func alignOr(a, def int) int {
+	if a < def {
+		return def
 	}
-	return o.TlsAlign
+	return a
 }

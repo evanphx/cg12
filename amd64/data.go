@@ -18,11 +18,15 @@ func addData(o *obj.Object, d *ir.Data) error {
 	// so the symbol's value counts from the start of its own zero-filled region.
 	if allZero(d) {
 		size, sec, at := zeroSize(d), obj.SecBss, &o.BssSize
+		align := &o.BssAlign
 		if d.Linkage.Thread {
-			sec, at = obj.SecTbss, &o.TbssSize
-			if d.Align > o.TlsAlign {
-				o.TlsAlign = d.Align
-			}
+			sec, at, align = obj.SecTbss, &o.TbssSize, &o.TlsAlign
+		}
+		// The datum is padded to its alignment within the section; the section
+		// itself has to be placed at least that well, or the padding aligns it
+		// relative to nothing.
+		if d.Align > *align {
+			*align = d.Align
 		}
 		if d.Align > 0 {
 			*at = obj.AlignInt(*at, d.Align)
@@ -40,11 +44,12 @@ func addData(o *obj.Object, d *ir.Data) error {
 	// new thread's block is initialized from. They go to .tdata, and the symbol
 	// records an offset within that block rather than an address.
 	buf, sec := &o.Data, obj.SecData
+	align := &o.DataAlign
 	if d.Linkage.Thread {
-		buf, sec = &o.Tdata, obj.SecTdata
-		if d.Align > o.TlsAlign {
-			o.TlsAlign = d.Align
-		}
+		buf, sec, align = &o.Tdata, obj.SecTdata, &o.TlsAlign
+	}
+	if d.Align > *align {
+		*align = d.Align
 	}
 	if d.Align > 0 {
 		for len(*buf)%d.Align != 0 {

@@ -656,10 +656,12 @@ func (o *Object) writeDynImage(im dynImage) ([]byte, error) {
 	dynamicOff := gotOff + gotSize // every size here is a multiple of 8, so this stays aligned
 	off = dynamicOff + ndyn*16
 
-	dataOff := alignUp(off, 8)
+	// .data starts where its own contents need it to, not merely 8-aligned: a
+	// datum padded to 16 within the section is only 16-aligned if the section is.
+	dataOff := alignUp(off, alignOr(o.DataAlign, 8))
 	relroEnd := off // == rwOff + relroSize, a page boundary when relro is on
 	if relro {
-		dataOff = relroEnd
+		dataOff = relroEnd // a page boundary, which satisfies any datum's alignment
 	}
 	off = dataOff + len(o.Data)
 	rwEnd := off
@@ -742,8 +744,12 @@ func (o *Object) writeDynImage(im dynImage) ([]byte, error) {
 		case SecData:
 			symVaddr[s.Name] = va(dataOff) + s.Value
 		case SecBss:
-			// .bss has no bytes in the file; it picks up where .data ends in memory.
-			symVaddr[s.Name] = va(dataOff) + uint64(len(o.Data)) + s.Value
+			// .bss has no bytes in the file; it picks up where .data ends in memory,
+			// rounded up to what its own contents need. Without the rounding it
+			// begins wherever .data happened to stop -- so a 5-byte string in .data
+			// leaves every .bss word on an odd address, which arm64 tolerates for
+			// ordinary loads and faults on for an exclusive.
+			symVaddr[s.Name] = va(dataOff) + uint64(bssStart(o)) + s.Value
 		}
 	}
 	for i, n := range pltNames {
@@ -1033,7 +1039,7 @@ func (o *Object) writeDynImage(im dynImage) ([]byte, error) {
 	// .bss lives past the file's end: memsz exceeds filesz and the loader zeroes
 	// the difference.
 	phdrMem(ptLoad, pfR|pfW, uint64(rwOff), va(rwOff), uint64(rwEnd-rwOff),
-		uint64(rwEnd-rwOff+o.BssSize), execAlign)
+		uint64(dataOff+bssStart(o)+o.BssSize-rwOff), execAlign)
 	phdr(ptDynamic, pfR|pfW, uint64(dynamicOff), va(dynamicOff), uint64(ndyn*16), 8)
 	if relro {
 		// Read-only after relocation: the GOT and .dynamic, up to the page boundary
@@ -1116,7 +1122,7 @@ func (o *Object) writeDynImage(im dynImage) ([]byte, error) {
 	set(secData, ".data", shtProgbits, shfAlloc|shfWrite, dataOff, len(data), 0, 0, 8, 0)
 	// NOBITS: these take up addresses and run-time space but no file bytes, so
 	// their offsets are only where they would have begun.
-	set(secBss, ".bss", shtNobits, shfAlloc|shfWrite, dataOff+len(data), o.BssSize, 0, 0, 8, 0)
+	set(secBss, ".bss", shtNobits, shfAlloc|shfWrite, dataOff+bssStart(o), o.BssSize, 0, 0, uint64(alignOr(o.BssAlign, 8)), 0)
 	set(secTbss, ".tbss", shtNobits, shfAlloc|shfWrite|shfTLS, tdataOff+tdataSize, o.TbssSize, 0, 0, uint64(tlsAlign), 0)
 
 	// .shstrtab is not loaded, so it goes after the image's mapped content.
