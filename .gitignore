@@ -1,6 +1,9 @@
-# Core dumps
+# Core dumps. qemu names its own qemu_<prog>_<timestamp>_<pid>.core, which
+# neither of the first two patterns matches -- four of them were committed
+# before the third was added.
 core
 core.*
+*.core
 
 # Test / build binaries
 *.o

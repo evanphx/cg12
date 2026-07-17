@@ -133,3 +133,21 @@ func TestAmd64SharedLibraryRuns(t *testing.T) {
 	out, err := cmd.CombinedOutput()
 	require.NoErrorf(t, err, "our library, our executable, the real loader: %s", out)
 }
+
+// runX86Static runs a static x86-64 image under qemu, returning its exit code.
+// A static image needs no loader and no libraries, so unlike runX86Dyn it wants
+// only the emulator -- no sysroot.
+func runX86Static(t *testing.T, image []byte) int {
+	t.Helper()
+	qemu := testenv.Tool(t, "qemu-x86_64")
+	bin := filepath.Join(t.TempDir(), "prog")
+	require.NoError(t, os.WriteFile(bin, image, 0o755))
+	out, err := exec.Command(qemu, bin).CombinedOutput()
+	if err != nil {
+		if ee, ok := err.(*exec.ExitError); ok {
+			return ee.ExitCode()
+		}
+		t.Fatalf("run: %v\n%s", err, out)
+	}
+	return 0
+}

@@ -18,6 +18,7 @@ import (
 func lower(f *ir.Func) error {
 	lowerpass.JumpTables(f) // dense switches -> indexed branch (JmpTable)
 	lowerpass.Switches(f)   // remaining multiway branches -> conditional branches
+	lowerpass.HoistAllocas(f)
 	lowerpass.SplitCriticalEdges(f)
 	lowerpass.DestructSSA(f)
 	return lowerABI(f)
