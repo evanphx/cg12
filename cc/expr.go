@@ -388,7 +388,10 @@ func (g *gen) genUnary(n *cc.UnaryExpression) ir.Ref {
 		if at, ok := t.(*cc.ArrayType); ok && at.IsVLA() {
 			return g.vlaBytes(at) // sizeof a VLA is its runtime byte size
 		}
-		v, _ := constInt(n)
+		v, ok := constInt(n)
+		if !ok {
+			return g.fail("cc: sizeof is not a constant here")
+		}
 		return g.fn.Long(v)
 	case cc.UnaryExpressionAlignofType: // _Alignof(type)
 		return g.fn.Long(int64(n.TypeName.Type().Align()))

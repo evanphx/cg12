@@ -424,13 +424,23 @@ func (g *gen) collectCases(s *cc.Statement, cases *[]switchCase, defBlk **ir.Blo
 		ls := s.LabeledStatement
 		switch ls.Case {
 		case cc.LabeledStatementCaseLabel:
-			v, _ := constInt(ls.ConstantExpression)
+			v, ok := constInt(ls.ConstantExpression)
+			if !ok {
+				// Silently taking 0 puts the case somewhere the source never asked
+				// for, and the switch still compiles and runs.
+				g.fail("cc: case label is not a constant expression")
+				return
+			}
 			blk := g.block("case")
 			g.caseBlk[ls] = blk
 			*cases = append(*cases, switchCase{v, blk})
 		case cc.LabeledStatementRange: // GNU "case lo ... hi:"
-			lo, _ := constInt(ls.ConstantExpression)
-			hi, _ := constInt(ls.ConstantExpression2)
+			lo, okLo := constInt(ls.ConstantExpression)
+			hi, okHi := constInt(ls.ConstantExpression2)
+			if !okLo || !okHi {
+				g.fail("cc: case range bound is not a constant expression")
+				return
+			}
 			blk := g.block("case")
 			g.caseBlk[ls] = blk
 			if hi < lo {
@@ -614,9 +624,16 @@ func (g *gen) genJump(js *cc.JumpStatement) {
 			g.cur.Goto(g.cont[len(g.cont)-1])
 		}
 	case cc.JumpStatementGoto:
-		if b, ok := g.labels[js.Token2.SrcStr()]; ok {
-			g.cur.Goto(b)
+		// collectLabels pre-allocates a block for every label in the function, so a
+		// forward goto resolves here too and a name that is still missing is one
+		// that does not exist. Emitting nothing would fall through to whatever
+		// follows -- a jump to the wrong place, silently.
+		b, ok := g.labels[js.Token2.SrcStr()]
+		if !ok {
+			g.fail("cc: goto %s: no such label", js.Token2.SrcStr())
+			return
 		}
+		g.cur.Goto(b)
 	case cc.JumpStatementGotoExpr: // computed goto: goto *expr
 		g.cur.BrIndirect(g.genExpr(js.ExpressionList), g.labelBlocks()...)
 	}
