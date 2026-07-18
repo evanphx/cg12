@@ -69,6 +69,20 @@ const (
 	// Conditional set: Rd = 1 if Cond else 0.
 	OpCset
 
+	// Loads and stores. Rd is the transfer register, Rn the base, MemOff the
+	// offset; ldp/stp add Rt2 and Mode (pre/post/signed-offset writeback).
+	OpLdr
+	OpStr
+	OpLdrb
+	OpStrb
+	OpLdrh
+	OpStrh
+	OpLdrsb
+	OpLdrsh
+	OpLdrsw
+	OpLdp
+	OpStp
+
 	// Branches. Target is a pc-relative byte offset.
 	OpB
 	OpBl
@@ -96,6 +110,11 @@ type Inst struct {
 
 	Cond Cond // BCOND / CSET
 
+	// Memory addressing (loads/stores).
+	MemOff int64
+	Mode   PairMode // ldp/stp writeback mode
+	Rt2    Reg      // second transfer register (ldp/stp)
+
 	Target int32 // pc-relative byte offset (branches)
 }
 
@@ -106,6 +125,7 @@ func Decode(w uint32) (Inst, bool) {
 		decodeBranch,
 		decodeDPImm,
 		decodeDPReg,
+		decodeLdSt,
 	} {
 		if in, ok := try(w); ok {
 			return in, true
@@ -333,4 +353,70 @@ func decodeDP3(w uint32) (Inst, bool) {
 		return Inst{Op: OpMul, W64: w64, Rd: rd, Rn: rn, Rm: rm}, true
 	}
 	return Inst{Op: op, W64: w64, Rd: rd, Rn: rn, Rm: rm, Ra: ra}, true
+}
+
+func decodeLdSt(w uint32) (Inst, bool) {
+	switch {
+	case bits(w, 29, 24) == 0x39: // unsigned offset, integer
+		size, opc := bits(w, 31, 30), bits(w, 23, 22)
+		op, w64, ok := ldStMnem(size, opc)
+		if !ok {
+			return Inst{}, false
+		}
+		return Inst{Op: op, W64: w64, Rd: Reg(w & 0x1f), Rn: Reg(bits(w, 9, 5)),
+			MemOff: int64(bits(w, 21, 10) << size)}, true
+
+	case bits(w, 29, 25) == 0x14 && bits(w, 24, 23) != 0: // load/store pair
+		opc := bits(w, 31, 30)
+		if opc == 1 {
+			return Inst{}, false // the FP pair forms
+		}
+		w64 := opc == 2
+		scale := int32(4)
+		if w64 {
+			scale = 8
+		}
+		op := OpStp
+		if bit(w, 22) {
+			op = OpLdp
+		}
+		return Inst{Op: op, W64: w64, Rd: Reg(w & 0x1f), Rt2: Reg(bits(w, 14, 10)),
+			Rn: Reg(bits(w, 9, 5)), MemOff: int64(sext(bits(w, 21, 15), 7) * scale),
+			Mode: PairMode(bits(w, 24, 23))}, true
+	}
+	return Inst{}, false
+}
+
+// ldStMnem names an integer load/store by its size and opc fields and reports the
+// transfer-register width. It mirrors intLdSt.
+func ldStMnem(size, opc uint32) (Mnemonic, bool, bool) {
+	switch size<<2 | opc {
+	case 0b00_00:
+		return OpStrb, false, true
+	case 0b00_01:
+		return OpLdrb, false, true
+	case 0b00_10:
+		return OpLdrsb, true, true
+	case 0b00_11:
+		return OpLdrsb, false, true
+	case 0b01_00:
+		return OpStrh, false, true
+	case 0b01_01:
+		return OpLdrh, false, true
+	case 0b01_10:
+		return OpLdrsh, true, true
+	case 0b01_11:
+		return OpLdrsh, false, true
+	case 0b10_00:
+		return OpStr, false, true
+	case 0b10_01:
+		return OpLdr, false, true
+	case 0b10_10:
+		return OpLdrsw, true, true
+	case 0b11_00:
+		return OpStr, true, true
+	case 0b11_01:
+		return OpLdr, true, true
+	}
+	return OpUnknown, false, false
 }

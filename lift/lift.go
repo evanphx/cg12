@@ -1,0 +1,142 @@
+// Package lift rebuilds cg12 SSA IR from the arm64 machine code cg12 emits: it
+// decodes each word (a64.Decode), models the machine registers as stack slots,
+// lowers each instruction to load-operate-store on those slots, and lets
+// opt.Mem2Reg promote them back to SSA. The recovered IR runs on the interpreter,
+// so the whole round trip — IR → arm64 → IR′ — is checked by
+// interp(IR) == interp(IR′) with no host or qemu.
+//
+// It lifts only what the backend emits (the subset a64.Decode recognizes). A word
+// it cannot decode, or an instruction it cannot yet lift, is an error, not a
+// guess.
+package lift
+
+import (
+	"fmt"
+	"sort"
+
+	"github.com/evanphx/cg12/arm64/a64"
+	"github.com/evanphx/cg12/ir"
+)
+
+// numGPR is the count of general registers modeled (x0..x30); x31 is zr/sp and is
+// handled without a slot.
+const numGPR = 31
+
+// Lift rebuilds an ir.Module with one function `name` from its machine code. The
+// AArch64 ABI puts the arguments in x0.., so params are stored into those slots on
+// entry and the result is read from x0 by the function's `ret`. retty is the
+// return class (use ir.ClsV-style void via hasRet=false through a nil retty is not
+// possible, so pass the concrete class and voidRet to choose).
+func Lift(name string, code []uint32, params []ir.Cls, retty ir.Cls, voidRet bool) (*ir.Module, error) {
+	insts := make([]a64.Inst, len(code))
+	for i, w := range code {
+		in, ok := a64.Decode(w)
+		if !ok {
+			return nil, fmt.Errorf("lift %s: cannot decode word %d (%#08x)", name, i, w)
+		}
+		insts[i] = in
+	}
+
+	m := ir.NewModule()
+	var f *ir.Func
+	if voidRet {
+		f = m.NewFuncVoid(name)
+	} else {
+		f = m.NewFunc(name, retty)
+	}
+	f.Export()
+
+	l := &lifter{f: f, insts: insts, voidRet: voidRet, paramCls: params}
+	for i, cls := range params {
+		l.params = append(l.params, f.Param(fmt.Sprintf("a%d", i), cls))
+	}
+
+	l.buildBlocks()
+	if err := l.emit(); err != nil {
+		return nil, err
+	}
+	if err := ir.VerifyModule(m); err != nil {
+		return nil, fmt.Errorf("lift %s: %w", name, err)
+	}
+	return m, nil
+}
+
+type lifter struct {
+	f        *ir.Func
+	insts    []a64.Inst
+	params   []ir.Ref
+	paramCls []ir.Cls
+	voidRet  bool
+
+	reg     [numGPR]ir.Ref    // x0..x30 -> alloca slot
+	spSlot  ir.Ref            // sp value (a pointer into the stack buffer)
+	blockAt map[int]*ir.Block // word index -> block starting there
+	leaders []int             // sorted block-leader word indices
+	pending *pendingCmp       // last flag-setting compare, for cset/b.cond
+}
+
+// pendingCmp holds the operands of the most recent compare, already narrowed to
+// the compare width, so a following cset or b.cond can turn a condition into an
+// ir.OCmp — cg12 never models NZCV, it recomputes the boolean.
+type pendingCmp struct {
+	a, b  ir.Ref
+	float bool
+}
+
+// buildBlocks finds the block leaders (word 0, every branch target, and the word
+// after any branch or return) and creates a block per leader.
+func (l *lifter) buildBlocks() {
+	leader := map[int]bool{0: true}
+	for i := range l.insts {
+		in := &l.insts[i]
+		if tgt, ok := branchTarget(i, in); ok {
+			leader[tgt] = true
+		}
+		if isBlockEnd(in.Op) && i+1 < len(l.insts) {
+			leader[i+1] = true
+		}
+	}
+	for idx := range leader {
+		if idx >= 0 && idx < len(l.insts) {
+			l.leaders = append(l.leaders, idx)
+		}
+	}
+	sort.Ints(l.leaders)
+
+	l.blockAt = make(map[int]*ir.Block, len(l.leaders))
+	for _, idx := range l.leaders {
+		l.blockAt[idx] = l.f.NewBlock(fmt.Sprintf("b%d", idx))
+	}
+}
+
+// branchTarget returns the word index a branch instruction reaches, if it is a
+// direct pc-relative branch.
+func branchTarget(idx int, in *a64.Inst) (int, bool) {
+	switch in.Op {
+	case a64.OpB, a64.OpBcond, a64.OpCbz, a64.OpCbnz:
+		return idx + int(in.Target)/4, true
+	}
+	return 0, false
+}
+
+func isBlockEnd(op a64.Mnemonic) bool {
+	switch op {
+	case a64.OpB, a64.OpBcond, a64.OpCbz, a64.OpCbnz, a64.OpRet, a64.OpBr:
+		return true
+	}
+	return false
+}
+
+// blockRange returns the [start, end) word span of the block that starts at the
+// given leader index.
+func (l *lifter) blockRange(start int) (int, int) {
+	for i, ld := range l.leaders {
+		if ld == start {
+			if i+1 < len(l.leaders) {
+				return start, l.leaders[i+1]
+			}
+			return start, len(l.insts)
+		}
+	}
+	return start, len(l.insts)
+}
