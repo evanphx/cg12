@@ -45,7 +45,140 @@ func Verify(f *Func) error {
 			return err
 		}
 	}
+	// The SSA shape -- one definition per temp, every use defined, phis that match
+	// the control flow -- holds only before lowering destructs it into machine
+	// registers. After that a temp is reassigned freely and phis are gone, so these
+	// checks would reject the very form lowering produces.
+	if f.LoweredFor() == "" {
+		if err := verifySSA(f); err != nil {
+			return err
+		}
+	}
 	return nil
+}
+
+// verifySSA checks the well-formedness an optimizer assumes but the reference
+// bounds check in verifyRef does not establish: that every temporary is assigned
+// exactly once, that no use reads a temporary nothing defines, and that phis and
+// the entry agree with the control-flow graph. A temp that is in range but never
+// defined, or a phi naming a block that does not branch to it, passes structural
+// verification yet sends a dominance-frontier pass (mem2reg) into a loop.
+func verifySSA(f *Func) error {
+	// One definition per temporary; collect them all first.
+	defined := make([]bool, len(f.Temps))
+	def := func(what string, r Ref) error {
+		if r.Kind != RefTemp {
+			return nil
+		}
+		if int(r.ID) >= len(defined) {
+			return nil // verifyRef already reported the out-of-range id
+		}
+		if defined[r.ID] {
+			return fmt.Errorf("ir: %s: %%%d is assigned more than once (not in SSA form)", f.Name, r.ID)
+		}
+		defined[r.ID] = true
+		return nil
+	}
+	for _, p := range f.Params {
+		if p.ID < len(defined) {
+			defined[p.ID] = true
+		}
+	}
+	for _, b := range f.Blocks {
+		for _, p := range b.Phis {
+			if err := def("phi", p.To); err != nil {
+				return err
+			}
+		}
+		for i := range b.Instrs {
+			in := &b.Instrs[i]
+			if err := def(in.Op.String(), in.To); err != nil {
+				return err
+			}
+			for _, d := range in.Defs {
+				if err := def(in.Op.String(), d); err != nil {
+					return err
+				}
+			}
+		}
+	}
+	// Every temporary a use reads must have a definition somewhere.
+	use := func(where, what string, r Ref) error {
+		if r.Kind == RefTemp && int(r.ID) < len(defined) && !defined[r.ID] {
+			return fmt.Errorf("ir: %s: %s: %s reads %%%d, which nothing defines", f.Name, where, what, r.ID)
+		}
+		return nil
+	}
+	for _, b := range f.Blocks {
+		for _, p := range b.Phis {
+			for _, a := range p.Args {
+				if err := use(b.Name, "phi", a); err != nil {
+					return err
+				}
+			}
+		}
+		for i := range b.Instrs {
+			in := &b.Instrs[i]
+			for _, a := range in.Args {
+				if err := use(b.Name, in.Op.String(), a); err != nil {
+					return err
+				}
+			}
+		}
+		if err := use(b.Name, "terminator", b.Jmp.Arg); err != nil {
+			return err
+		}
+		for _, a := range b.Jmp.Args {
+			if err := use(b.Name, "terminator", a); err != nil {
+				return err
+			}
+		}
+	}
+	return verifyPhiEdges(f)
+}
+
+// verifyPhiEdges checks that every phi's incoming blocks are exactly the block's
+// control-flow predecessors -- the premise a phi encodes, which a fuzzed or
+// hand-built module can violate while still passing the argument-count check. (The
+// entry may itself be a loop header, so it is allowed predecessors.)
+func verifyPhiEdges(f *Func) error {
+	preds := make(map[*Block]map[*Block]bool, len(f.Blocks))
+	for _, b := range f.Blocks {
+		preds[b] = map[*Block]bool{}
+	}
+	for _, b := range f.Blocks {
+		for _, s := range b.Succs() {
+			if s != nil && preds[s] != nil {
+				preds[s][b] = true
+			}
+		}
+	}
+	for _, b := range f.Blocks {
+		for _, p := range b.Phis {
+			seen := map[*Block]bool{}
+			for _, from := range p.Blocks {
+				if !preds[b][from] {
+					return fmt.Errorf("ir: %s: block %q: phi names %q as a predecessor, but it does not branch here",
+						f.Name, b.Name, blockLabel(from))
+				}
+				seen[from] = true
+			}
+			for from := range preds[b] {
+				if !seen[from] {
+					return fmt.Errorf("ir: %s: block %q: phi has no argument for predecessor %q",
+						f.Name, b.Name, from.Name)
+				}
+			}
+		}
+	}
+	return nil
+}
+
+func blockLabel(b *Block) string {
+	if b == nil {
+		return "<nil>"
+	}
+	return b.Name
 }
 
 func verifyInstr(f *Func, b *Block, in *Instr) error {

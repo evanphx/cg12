@@ -138,6 +138,13 @@ func roundTripInstr(t *testing.T, in Instr) Instr {
 	target.RetVoid()
 	e := f.Entry()
 	e.Instrs = append(e.Instrs, in)
+	// in reads %2 and %3; define them so the module is well-formed SSA (decode
+	// verifies). Order within a block is not checked, so these can follow in,
+	// keeping it at index 0 for the round-trip comparison.
+	e.Instrs = append(e.Instrs,
+		Instr{Op: OCopy, Cls: ClsW, To: Ref{Kind: RefTemp, ID: 2}, Args: []Ref{f.Word(0)}},
+		Instr{Op: OCopy, Cls: ClsW, To: Ref{Kind: RefTemp, ID: 3}, Args: []Ref{f.Word(0)}},
+	)
 	e.Goto(target)
 
 	data, err := m.MarshalBinary()

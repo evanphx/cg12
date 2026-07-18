@@ -37,8 +37,8 @@ func TestE2EParsedArrayPointers(t *testing.T) {
 	%i2 =w add %i, 1
 	jmp @fill
 @sum
-	%j =w phi @start 0, @sbody %j2
-	%acc =w phi @start 0, @sbody %acc2
+	%j =w phi @fill 0, @sbody %j2
+	%acc =w phi @fill 0, @sbody %acc2
 	%cs =w csgew %j, %n
 	jnz %cs, @exit, @sbody
 @sbody

@@ -6,10 +6,8 @@ import (
 	"os"
 	"path/filepath"
 	"testing"
-	"time"
 
 	"github.com/evanphx/cg12/interp"
-	"github.com/evanphx/cg12/ir"
 	"github.com/evanphx/cg12/opt"
 	"github.com/evanphx/cg12/parse"
 	"github.com/stretchr/testify/require"
@@ -194,163 +192,16 @@ func runTestProgram(t *testing.T, src string, passes []opt.Pass, global string) 
 	return obs
 }
 
-// FuzzInterpOpt explores the same translation-validation property over mutated
-// IL: a program that runs to completion must return the same value whether or not
-// the optimizer touched it. Only completed runs are compared — a pass may legally
-// add or remove a trap on a dead computation (e.g. DCE dropping an unused load),
-// so a trap on one side alone is inconclusive, not a divergence. Div-by-zero is
-// made to yield zero (as an AArch64 sdiv does) for the same reason.
-//
-// To validate the fuzzer itself: revert a fold.go arithmetic fix and confirm this
-// reports a divergence.
-func FuzzInterpOpt(f *testing.F) {
-	for _, file := range []string{"collatz.ssa", "eucl.ssa", "loop.ssa", "max.ssa", "double.ssa", "euclc.ssa", "prime.ssa"} {
-		src, err := os.ReadFile(filepath.Join("testdata", "qbe", file))
-		if err == nil {
-			f.Add(string(src))
-		}
-	}
-	f.Fuzz(func(t *testing.T, src string) {
-		m, err := parse.Parse(src)
-		if err != nil || !fuzzWellFormed(m) {
-			return // not IL, or references temps nothing defines
-		}
-		entry, ok := fuzzEntry(m)
-		if !ok {
-			return // no zero-argument entry to drive
-		}
-		base, baseOK := fuzzRun(src, entry)
-		if !baseOK {
-			return
-		}
-		optd, optOK := fuzzRun(src, entry, opt.DefaultPipeline()...)
-		if !optOK {
-			return
-		}
-		require.Equalf(t, base, optd, "optimization changed the result of %s", entry)
-	})
-}
-
-// fuzzWellFormed reports whether every temporary a module reads is defined
-// somewhere (by a parameter, an instruction result, or a phi). The parser mints a
-// temp on first mention, so a typo'd or dropped definition survives as an
-// ever-undefined temp; VerifyModule does not reject that, and the optimizer, which
-// assumes well-formed SSA, can loop on it. This is a structural gate for the
-// fuzzer, not a dominance check.
-func fuzzWellFormed(m *ir.Module) bool {
-	for _, f := range m.Funcs {
-		if f.Start == nil {
-			continue
-		}
-		defined := map[int]bool{}
-		mark := func(r ir.Ref) {
-			if r.Kind == ir.RefTemp {
-				defined[int(r.ID)] = true
-			}
-		}
-		for _, p := range f.Params {
-			defined[p.ID] = true
-		}
-		for _, b := range f.Blocks {
-			for _, ph := range b.Phis {
-				mark(ph.To)
-			}
-			for i := range b.Instrs {
-				mark(b.Instrs[i].To)
-			}
-		}
-		used := true
-		check := func(r ir.Ref) {
-			if r.Kind == ir.RefTemp && !defined[int(r.ID)] {
-				used = false
-			}
-		}
-		for _, b := range f.Blocks {
-			for _, ph := range b.Phis {
-				for _, a := range ph.Args {
-					check(a)
-				}
-			}
-			for i := range b.Instrs {
-				for _, a := range b.Instrs[i].Args {
-					check(a)
-				}
-			}
-			check(b.Jmp.Arg)
-			for _, a := range b.Jmp.Args {
-				check(a)
-			}
-		}
-		if !used {
-			return false
-		}
-	}
-	return true
-}
-
-// fuzzEntry reports a zero-parameter, non-variadic function with a body to drive,
-// preferring the conventional names.
-func fuzzEntry(m *ir.Module) (string, bool) {
-	var fallback string
-	for _, fn := range m.Funcs {
-		if fn.Start == nil || len(fn.Params) != 0 || fn.Variadic {
-			continue
-		}
-		if fn.Name == "test" || fn.Name == "main" {
-			return fn.Name, true
-		}
-		if fallback == "" {
-			fallback = fn.Name
-		}
-	}
-	return fallback, fallback != ""
-}
-
-// fuzzRun parses src fresh, applies passes, and drives entry with a fuel bound and
-// zero-yielding division; ok is false if the program could not be loaded or did
-// not run to completion. It runs under a watchdog: mutated IL can violate SSA
-// invariants that VerifyModule does not catch (undefined-in-scope phis, dominance
-// violations), on which the optimizer — which assumes well-formed SSA — can loop
-// or panic. Those are optimizer-robustness concerns, orthogonal to the semantic
-// property under test, so a non-terminating or panicking optimization is treated
-// as inconclusive rather than a divergence.
-func fuzzRun(src, entry string, passes ...opt.Pass) (uint64, bool) {
-	type result struct {
-		v  uint64
-		ok bool
-	}
-	ch := make(chan result, 1)
-	go func() {
-		defer func() {
-			if recover() != nil {
-				ch <- result{0, false}
-			}
-		}()
-		m, err := parse.Parse(src)
-		if err != nil {
-			ch <- result{0, false}
-			return
-		}
-		opt.Run(m, passes)
-		mc, err := interp.New(m, interp.WithFuel(5_000_000), interp.WithDivZeroYieldsZero())
-		if err != nil {
-			ch <- result{0, false}
-			return
-		}
-		ret, err := mc.Call(entry)
-		if err != nil {
-			ch <- result{0, false}
-			return
-		}
-		ch <- result{ret.U64(), true}
-	}()
-	select {
-	case r := <-ch:
-		return r.v, r.ok
-	case <-time.After(3 * time.Second):
-		return 0, false // did not terminate; inconclusive
-	}
-}
+// A fuzzer over mutated IL was tried here (interp baseline vs interp-after-
+// pipeline) and deliberately removed: raw-text mutation produces programs with
+// undefined behavior — zero-size allocations that alias, out-of-bounds and
+// type-punned loads, uninitialized reads — on which the interpreter's concrete
+// memory and the optimizer's alias analysis legitimately disagree without either
+// being wrong. Distinguishing a real miscompile from a UB divergence needs a UB
+// model the interpreter does not have, so the fuzzer reported false positives. It
+// served its purpose first: it found that mem2reg could loop on IR VerifyModule
+// accepted, which is now fixed in ir/verify.go. TestInterpOptEquivalence remains
+// the sound, curated translation validator.
 
 func finish(out string, ret interp.Value, err error) observable {
 	if err != nil {

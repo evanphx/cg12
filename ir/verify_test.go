@@ -56,6 +56,48 @@ func TestVerifyCatchesAMismatchedPhi(t *testing.T) {
 	require.ErrorContains(t, Verify(f), "2 arguments for 1 predecessors")
 }
 
+// A temporary that exists in Temps but is never assigned passes the bounds check
+// yet is undefined -- the parser mints one on first mention, so a dropped
+// definition survives as a read of nothing, on which a dominance-frontier pass can
+// loop. verifyRef cannot see it; the def/use pass must.
+func TestVerifyCatchesAnUndefinedTemp(t *testing.T) {
+	f := newFuncWith(func(f *Func, b *Block) {
+		x := f.NewTemp("x", ClsW) // in Temps, but nothing ever assigns it
+		b.Instrs = append(b.Instrs, Instr{Op: OCopy, Cls: ClsW, To: f.NewTemp("r", ClsW), Args: []Ref{x}})
+	})
+	require.ErrorContains(t, Verify(f), "which nothing defines")
+}
+
+// A temporary assigned twice is not in SSA form; the passes that assume one
+// definition per name would read the wrong one.
+func TestVerifyCatchesADoubleAssignment(t *testing.T) {
+	f := newFuncWith(func(f *Func, b *Block) {
+		r := f.NewTemp("r", ClsW)
+		b.Instrs = append(b.Instrs,
+			Instr{Op: OCopy, Cls: ClsW, To: r, Args: []Ref{f.Word(1)}},
+			Instr{Op: OCopy, Cls: ClsW, To: r, Args: []Ref{f.Word(2)}},
+		)
+	})
+	require.ErrorContains(t, Verify(f), "assigned more than once")
+}
+
+// A phi naming an incoming block that does not branch to it encodes a premise the
+// control flow contradicts -- the argument-count check passes, but the edge is a
+// fiction.
+func TestVerifyCatchesAPhiFromANonPredecessor(t *testing.T) {
+	m := NewModule()
+	f := m.NewFunc("f", ClsW)
+	e := f.Entry()
+	a := f.NewBlock("a")
+	b := f.NewBlock("b")
+	e.Jnz(f.Word(1), a, b) // e -> a, e -> b; a does not branch to b
+	a.Ret(f.Word(0))
+	p := f.NewTemp("p", ClsW)
+	b.Phis = append(b.Phis, &Phi{Cls: ClsW, To: p, Args: []Ref{f.Word(3)}, Blocks: []*Block{a}})
+	b.Ret(p)
+	require.ErrorContains(t, Verify(f), "does not branch here")
+}
+
 // What the builder makes is well-formed, so verifying costs nothing real.
 func TestVerifyAcceptsAWellFormedFunction(t *testing.T) {
 	m := NewModule()
