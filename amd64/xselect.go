@@ -146,6 +146,14 @@ func (s *xsel) selectInt(in *ir.Instr) bool {
 		case "constant_p":
 			// An unresolved __builtin_constant_p (normally settled by opt): 0 is sound.
 			s.b.move(s.b.refLoc(in.To), s.b.refLoc(s.f.ConstInt(in.Cls, 0)))
+		case "getcallerpc":
+			d, commit := s.gpDst(in.To)
+			s.b.callerPC(d)
+			commit()
+		case "getcallersp":
+			d, commit := s.gpDst(in.To)
+			s.b.callerSP(d)
+			commit()
 		default:
 			s.b.fail("amd64: unsupported intrinsic %q", in.Intrin.Name)
 		}

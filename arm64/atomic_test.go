@@ -68,6 +68,29 @@ func TestAtomicsE2E(t *testing.T) {
 		e.AtomicFence()
 		e.RetVoid()
 	}
+	// Keep more values live than the allocator has registers around a CAS. The
+	// lowering must still find distinct registers for its retry loop, whether the
+	// allocator chooses to spill the operands, unrelated live values, or both.
+	var pressureOperands []ir.Ref
+	var pressureResult ir.Ref
+	{
+		f := m.NewFunc("acas_pressure", ir.ClsL).Export()
+		for index := 0; index < 25; index++ {
+			pressureOperands = append(pressureOperands, f.Param("live", ir.ClsL))
+		}
+		address := f.Param("p", ir.ClsL)
+		expected := f.Param("expected", ir.ClsL)
+		replacement := f.Param("replacement", ir.ClsL)
+		pressureOperands = append(pressureOperands, address, expected, replacement)
+
+		entry := f.Entry()
+		pressureResult = entry.AtomicCAS(ir.ClsL, address, expected, replacement)
+		result := pressureResult
+		for _, value := range pressureOperands[:25] {
+			result = entry.Add(ir.ClsL, result, value)
+		}
+		entry.Ret(result)
+	}
 
 	data, err := arm64.CompileObject(m)
 	require.NoError(t, err)

@@ -301,12 +301,12 @@ func (f *Func) RegVar(name string, reg int) Ref {
 
 // CallerPC returns the address to which the current function will return.
 func (b *Block) CallerPC() Ref {
-	return b.emit(OGetCallerPC, ClsL)
+	return b.Intrinsic("getcallerpc", ClsL)
 }
 
 // CallerSP returns the caller's stack pointer at function entry.
 func (b *Block) CallerSP() Ref {
-	return b.emit(OGetCallerSP, ClsL)
+	return b.Intrinsic("getcallersp", ClsL)
 }
 
 func (b *Block) Load(cls Cls, addr Ref) Ref {

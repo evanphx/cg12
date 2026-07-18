@@ -190,5 +190,7 @@ func TestWireNumbersSurviveTheBurnedSlots(t *testing.T) {
 	// The burned op's slot must not have acquired a live op: the array is indexed
 	// by Op, so a new op landing there would answer to the dead one's number.
 	assert.Empty(t, opTable[OArg+1].name, "the slot after OArg is the burned OArgEnv")
+	assert.Empty(t, opTable[OSetReg+1].name, "the slot after OSetReg is the burned OGetCallerPC")
+	assert.Empty(t, opTable[OSetReg+2].name, "the second slot after OSetReg is the burned OGetCallerSP")
 
 }

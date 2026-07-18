@@ -15,14 +15,16 @@ control flow the passes need to see. Reach for a real opcode only when a pass ha
 to pattern-match on the operation itself (as GVN and instruction selection do for
 `OAdd`, `OCmp`, loads, and stores).
 
-The intrinsics in the tree today are `stacksave`/`stackrestore` and the atomic
-family (`atomic.load.l`, `atomic.add.w`, `atomic.cas.l`, `atomic.fence`, …). Read
+The intrinsics in the tree today are `stacksave`/`stackrestore`, the caller-frame
+queries `getcallerpc`/`getcallersp`, and the atomic family (`atomic.load.l`,
+`atomic.add.w`, `atomic.cas.l`, `atomic.fence`, …). Read
 `stacksave`/`stackrestore` end to end as a worked example of a lowered intrinsic
 (`ir/intrinsic.go`, `interp/ops.go`, `interp/bc_exec.go`, `arm64/select.go`,
-`amd64/xselect.go`); read the atomics (`ir/intrinsic.go`, `interp/atomic.go`) as
-an example of a whole *family* — the operation and access width encoded in the
-name, effects that make every one a barrier, and interpreter-only semantics with
-backend lowering still to come.
+`amd64/xselect.go`); the caller-frame queries show an intrinsic whose backend
+lowering depends on final frame layout. Read the atomics (`ir/intrinsic.go`,
+`interp/atomic.go`) as an example of a whole *family* — the operation and access
+width encoded in the name, effects that make every one a barrier, interpreter
+semantics, and ARM64 retry-loop lowering.
 
 ## What you get for free
 

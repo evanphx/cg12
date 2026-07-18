@@ -2919,14 +2919,6 @@ func (m *mc) instr(in *ir.Instr) {
 		m.emitReg(in.Cls, phys, v)
 	case ir.OPacia:
 		m.emitPacia(in)
-	case ir.OGetCallerPC:
-		destination, done := m.dst(in.To, 8)
-		m.emit(a64.LdrImm(true, destination, mcX29, 8))
-		done()
-	case ir.OGetCallerSP:
-		destination, done := m.dst(in.To, 8)
-		m.frameAddr(destination, m.frame+8)
-		done()
 	case ir.OSafepoint:
 		// Let the GC strategy emit code here (e.g. a poll); the stack map is then
 		// recorded at the resulting PC — the point a collection would resume at.

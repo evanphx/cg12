@@ -91,9 +91,11 @@ func TestCallerFrameIntrinsics(t *testing.T) {
 	entry.Ret(callerPC)
 
 	require.Len(t, entry.Instrs, 2)
-	assert.Equal(t, OGetCallerPC, entry.Instrs[0].Op)
+	assert.Equal(t, OIntrinsic, entry.Instrs[0].Op)
+	assert.Equal(t, "getcallerpc", entry.Instrs[0].Intrin.Name)
 	assert.Equal(t, ClsL, function.ClassOf(callerPC))
-	assert.Equal(t, OGetCallerSP, entry.Instrs[1].Op)
+	assert.Equal(t, OIntrinsic, entry.Instrs[1].Op)
+	assert.Equal(t, "getcallersp", entry.Instrs[1].Intrin.Name)
 	assert.Equal(t, ClsL, function.ClassOf(callerSP))
 }
 

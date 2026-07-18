@@ -264,6 +264,14 @@ func (s *sel) selectData(in *ir.Instr) bool {
 			done()
 		case in.Intrin.Name == "stackrestore":
 			s.b.movToSP(s.src(in.Args[0], 0, 8))
+		case in.Intrin.Name == "getcallerpc":
+			d, done := s.dst(in.To, 8)
+			s.b.callerPC(d)
+			done()
+		case in.Intrin.Name == "getcallersp":
+			d, done := s.dst(in.To, 8)
+			s.b.callerSP(d)
+			done()
 		case strings.HasPrefix(in.Intrin.Name, "atomic."):
 			s.atomic(in)
 		case in.Intrin.Name == "constant_p":
@@ -532,18 +540,16 @@ func (s *sel) atomic(in *ir.Instr) {
 	}
 
 	addr := s.src(in.Args[0], 0, 8)
-	old, done := s.dst(in.To, regSize) // the result is always the previous value
-	if old == addr {
-		// A spilled result and a spilled/constant address both claimed scratch 0;
-		// the loop needs them distinct (it re-reads the address every iteration).
-		pressure()
-		return
-	}
 	retry := s.b.freshLabel("atomic_retry")
 
 	switch base {
 	case "xchg":
 		val := s.src(in.Args[1], 1, regSize)
+		old, done, ok := s.atomicResult(in.To, regSize, addr, val)
+		if !ok {
+			pressure()
+			return
+		}
 		status, ok := freeScratch(addr, val, old)
 		if !ok {
 			pressure()
@@ -553,33 +559,44 @@ func (s *sel) atomic(in *ir.Instr) {
 		s.b.ldaxr(bytes, old, addr)
 		s.b.stlxr(bytes, status, val, addr)
 		s.b.cbnzTo(false, status, retry)
+		done()
 
 	case "add", "sub", "and", "or", "xor":
 		val := s.src(in.Args[1], 1, regSize)
+		old, done, ok := s.atomicResult(in.To, regSize, addr, val)
+		if !ok {
+			pressure()
+			return
+		}
 		newv, ok := freeScratch(addr, val, old)
 		if !ok {
 			pressure()
 			return
 		}
-		// The store-status register can reuse val's register once the new value is
-		// computed -- but only when val sits in a scratch register (a constant or a
-		// reloaded spill), never an allocated temporary that stays live afterward.
-		status := val
-		if !isScratchReg(val) {
-			if status, ok = freeScratch(addr, val, old, newv); !ok {
-				pressure()
-				return
-			}
+		// The retry path needs val again after a failed store-exclusive, so its
+		// register cannot also receive the store status.
+		status, ok := freeScratch(addr, val, old, newv)
+		if !ok {
+			pressure()
+			return
 		}
 		s.b.label(retry)
 		s.b.ldaxr(bytes, old, addr)
 		s.atomicCompute(base, w64, newv, old, val)
 		s.b.stlxr(bytes, status, newv, addr)
 		s.b.cbnzTo(false, status, retry)
+		done()
 
 	case "cas":
 		exp := s.src(in.Args[1], 1, regSize)
 		newv := s.src(in.Args[2], 2, regSize)
+		old, done, ok := s.atomicResult(in.To, regSize, addr, exp, newv)
+		if !ok {
+			pressure()
+			return
+		}
+		// A failed store-exclusive retries the comparison, so the status register
+		// must not overwrite expected, even when expected came from a spill.
 		status, ok := freeScratch(addr, exp, newv, old)
 		if !ok {
 			pressure()
@@ -593,12 +610,51 @@ func (s *sel) atomic(in *ir.Instr) {
 		s.b.stlxr(bytes, status, newv, addr)
 		s.b.cbnzTo(false, status, retry)
 		s.b.label(out)
+		done()
 
 	default:
 		pressure()
 		return
 	}
-	done()
+}
+
+// atomicResult chooses a register in which an atomic retry loop can keep the
+// value it observed. An allocated result register may overlap a now-live input
+// because linear scan is allowed to reuse a dying operand's register; in that
+// case the loop uses a fixed scratch and moves the result into place afterward.
+// A spilled result similarly uses a non-conflicting scratch until the loop ends.
+func (s *sel) atomicResult(result ir.Ref, size int, live ...Reg) (Reg, func(), bool) {
+	temporary := s.f.Temps[result.ID]
+	if temporary.Reg != ir.NoReg {
+		destination := Reg(temporary.Reg)
+		conflict := false
+		for _, register := range live {
+			if destination == register {
+				conflict = true
+				break
+			}
+		}
+		if !conflict {
+			return destination, func() {}, true
+		}
+
+		working, ok := freeScratch(live...)
+		if !ok {
+			return 0, nil, false
+		}
+		return working, func() {
+			s.b.movReg(size == 8, destination, working)
+		}, true
+	}
+
+	working, ok := freeScratch(live...)
+	if !ok {
+		return 0, nil, false
+	}
+	offset := s.spillBase + temporary.Slot
+	return working, func() {
+		s.b.strSpill(working, false, offset, size)
+	}, true
 }
 
 // atomicCompute emits the fetch-and-op step new = op(old, val).
@@ -652,18 +708,8 @@ func atomicHoldsResult(in *ir.Instr) bool {
 	return true
 }
 
-// isScratchReg reports whether r is one of the fixed scratch registers.
-func isScratchReg(r Reg) bool {
-	for _, s := range intScratchRegs {
-		if r == s {
-			return true
-		}
-	}
-	return false
-}
-
 // freeScratch returns a fixed scratch register that is none of used, or ok=false
-// when register pressure has claimed all three.
+// when register pressure has claimed all five.
 func freeScratch(used ...Reg) (Reg, bool) {
 	for _, s := range intScratchRegs {
 		free := true

@@ -52,12 +52,15 @@ const (
 	FP = X29
 	LR = X30
 
-	// Three fixed scratch registers, never handed out by the allocator: two for
-	// spilled/immediate operands and one extra for rem's quotient and for
-	// breaking parallel-move cycles.
+	// Five fixed scratch registers, never handed out by the allocator. Ordinary
+	// instructions use the first two for spilled/immediate operands and the third
+	// for remainder and parallel-move cycles. Atomic retry loops may also use one
+	// caller-saved register and the architecture's dedicated temporary register.
 	scratch0 = X16
 	scratch1 = X17
 	scratch2 = X15
+	scratch3 = X27
+	scratch4 = X14
 )
 
 // IsFloat reports whether r is a SIMD/FP register.
@@ -124,11 +127,12 @@ func (r Reg) Name(size int) string {
 }
 
 // intAllocOrder is the integer allocation order: caller-saved temporaries first
-// (cheaper, no save/restore), then callee-saved. X16/X17 (scratch), X18
-// (platform), X29/X30/SP/ZR are intentionally excluded.
+// (cheaper, no save/restore), then callee-saved. X14-X17 (scratch), X18
+// (platform), X26 (closure context), X27 (temporary), and X29/X30/SP/ZR are
+// intentionally excluded.
 var intAllocOrder = []Reg{
-	// caller-saved (clobbered by calls); X15/X16/X17 are reserved as scratch
-	X9, X10, X11, X12, X13, X14,
+	// caller-saved (clobbered by calls); X14-X17 are reserved as scratch
+	X9, X10, X11, X12, X13,
 	X0, X1, X2, X3, X4, X5, X6, X7, X8,
 	// callee-saved (preserved across calls)
 	// X26 and X27 are reserved for the Go runtime's system-stack transition.
@@ -228,9 +232,9 @@ func calleeSavedFor(goABI bool, r Reg) bool {
 	return calleeSavedReg(r)
 }
 
-// intScratch and fscratch map a slot to a reserved scratch register. Slot 2
-// (x15) is used only by 3-operand indexed stores.
-var intScratchRegs = [3]Reg{scratch0, scratch1, scratch2}
+// intScratch and fscratch map a slot to a reserved scratch register. General
+// operand materialization uses slots 0-2; atomic retry loops may borrow all five.
+var intScratchRegs = [5]Reg{scratch0, scratch1, scratch2, scratch3, scratch4}
 
 var floatScratchRegs = [2]Reg{fscratch0, fscratch1}
 

@@ -162,6 +162,8 @@ type asmb interface {
 	allocN(rd, size Reg)
 	movFromSP(rd Reg)
 	movToSP(rn Reg)
+	callerPC(rd Reg)
+	callerSP(rd Reg)
 	adr(rd Reg, to *ir.Block)
 
 	// Spill traffic: a load into / store from a frame slot at x29+off.
@@ -647,6 +649,8 @@ func (b *mcAsm) allocN(rd, size Reg) {
 }
 func (b *mcAsm) movFromSP(rd Reg)          { b.prog.Emit(a64.AddImm(true, mreg(rd), mcSP, 0)) }
 func (b *mcAsm) movToSP(rn Reg)            { b.prog.Emit(a64.AddImm(true, mcSP, mreg(rn), 0)) }
+func (b *mcAsm) callerPC(rd Reg)           { b.prog.Emit(a64.LdrImm(true, mreg(rd), mcX29, 8)) }
+func (b *mcAsm) callerSP(rd Reg)           { b.m.frameAddr(mreg(rd), b.m.frame+8) }
 func (b *mcAsm) adr(rd Reg, to *ir.Block)  { b.prog.Adr(mreg(rd), to.Name) }
 func (b *mcAsm) frameAddr(rd Reg, off int) { b.m.frameAddr(mreg(rd), off) }
 func (b *mcAsm) ldrSpill(rd Reg, float bool, off, size int) {

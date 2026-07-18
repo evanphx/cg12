@@ -127,13 +127,14 @@ func TestOpClassification(t *testing.T) {
 
 // Every opcode below numOps must have a table entry (non-nil name) unless it is
 // intentionally blank: OCmp, whose mnemonic is computed from its predicate, and
-// the burned slots -- the one after OArg (was OArgEnv) and the two after OAllocN
-// (were OStackSave/OStackRestore, now the stacksave/stackrestore intrinsics) --
-// kept to preserve the wire numbers of every op after them (see
+// the burned slots -- the one after OArg (was OArgEnv), the two after OAllocN
+// (were OStackSave/OStackRestore), and the two after OSetReg (were
+// OGetCallerPC/OGetCallerSP). The low-level operations now use intrinsics, but
+// their old slots remain to preserve every later wire number (see
 // TestWireNumbersSurviveTheBurnedSlots).
 func TestOpTableComplete(t *testing.T) {
 	for o := Op(0); o < numOps; o++ {
-		if o == OCmp || o == OArg+1 || o == OAllocN+1 || o == OAllocN+2 {
+		if o == OCmp || o == OArg+1 || o == OAllocN+1 || o == OAllocN+2 || o == OSetReg+1 || o == OSetReg+2 {
 			continue
 		}
 		assert.NotEmptyf(t, opTable[o].name, "op %d missing name", o)

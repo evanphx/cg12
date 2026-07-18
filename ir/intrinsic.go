@@ -97,6 +97,12 @@ func init() {
 	// meets an unresolved one treats it as 0, which is always sound.
 	RegisterIntrinsic("constant_p", IntrinsicEffects{HasResult: true, Pure: true})
 
+	// The caller-frame intrinsics are resolved after frame layout. They have a
+	// result but no side effect, and are intentionally impure: their value
+	// depends on the current invocation rather than only on explicit operands.
+	RegisterIntrinsic("getcallerpc", IntrinsicEffects{HasResult: true})
+	RegisterIntrinsic("getcallersp", IntrinsicEffects{HasResult: true})
+
 	registerAtomics()
 }
 

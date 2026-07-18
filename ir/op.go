@@ -134,12 +134,11 @@ const (
 	OGetReg // result = register Args[0] (a RefReg)
 	OSetReg // register Args[1] (a RefReg) = Args[0]
 
-	// Runtime frame intrinsics. OGetCallerPC returns the address to which the
-	// current function will return. OGetCallerSP returns the caller's stack
-	// pointer as it was immediately before entering the current function. The
-	// backend resolves both after it has planned the current frame.
-	OGetCallerPC
-	OGetCallerSP
+	// These two slots were OGetCallerPC and OGetCallerSP. They are now the
+	// "getcallerpc" and "getcallersp" intrinsics. Keep their numbers burned so
+	// old binary modules cannot decode later operations as the wrong instruction.
+	_
+	_
 
 	// Thread-local storage. A thread-local has no address of its own: each thread
 	// holds a copy, and how one is reached depends on the model the backend was
@@ -371,9 +370,6 @@ var opTable = [numOps]opInfo{
 
 	OGetReg: {name: "getreg", hasResult: true},
 	OSetReg: {name: "setreg"},
-
-	OGetCallerPC: {name: "getcallerpc", hasResult: true},
-	OGetCallerSP: {name: "getcallersp", hasResult: true},
 
 	OAsm: {name: "asm", hasResult: true},
 

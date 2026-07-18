@@ -1059,6 +1059,162 @@ type gen struct {
 	nextCallUsesClosure         bool
 }
 
+type atomicCallResult uint8
+
+const (
+	atomicReturnsValue atomicCallResult = iota
+	atomicReturnsNewValue
+	atomicReturnsBool
+	atomicReturnsNothing
+)
+
+type atomicCallSpec struct {
+	operation string
+	class     ir.Cls
+	result    atomicCallResult
+}
+
+func runtimeAtomicCallSpec(name string) (atomicCallSpec, bool) {
+	switch name {
+	case "Load", "LoadAcq", "Loadint32":
+		return atomicCallSpec{operation: "load", class: ir.ClsW, result: atomicReturnsValue}, true
+	case "Store", "StoreRel", "Storeint32":
+		return atomicCallSpec{operation: "store", class: ir.ClsW, result: atomicReturnsNothing}, true
+	case "Xchg", "Xchgint32":
+		return atomicCallSpec{operation: "xchg", class: ir.ClsW, result: atomicReturnsValue}, true
+	case "Cas", "CasRel", "Casint32":
+		return atomicCallSpec{operation: "cas", class: ir.ClsW, result: atomicReturnsBool}, true
+	case "Xadd", "Xaddint32":
+		return atomicCallSpec{operation: "add", class: ir.ClsW, result: atomicReturnsNewValue}, true
+	case "And":
+		return atomicCallSpec{operation: "and", class: ir.ClsW, result: atomicReturnsNothing}, true
+	case "Or":
+		return atomicCallSpec{operation: "or", class: ir.ClsW, result: atomicReturnsNothing}, true
+	case "And32":
+		return atomicCallSpec{operation: "and", class: ir.ClsW, result: atomicReturnsValue}, true
+	case "Or32":
+		return atomicCallSpec{operation: "or", class: ir.ClsW, result: atomicReturnsValue}, true
+
+	case "Load64", "LoadAcq64", "LoadAcquintptr", "Loaduintptr", "Loaduint", "Loadint64":
+		return atomicCallSpec{operation: "load", class: ir.ClsL, result: atomicReturnsValue}, true
+	case "Store64", "StoreRel64", "StoreReluintptr", "Storeint64", "Storeuintptr":
+		return atomicCallSpec{operation: "store", class: ir.ClsL, result: atomicReturnsNothing}, true
+	case "Xchg64", "Xchguintptr", "Xchgint64":
+		return atomicCallSpec{operation: "xchg", class: ir.ClsL, result: atomicReturnsValue}, true
+	case "Cas64", "Casuintptr", "Casint64":
+		return atomicCallSpec{operation: "cas", class: ir.ClsL, result: atomicReturnsBool}, true
+	case "Xadd64", "Xadduintptr", "Xaddint64":
+		return atomicCallSpec{operation: "add", class: ir.ClsL, result: atomicReturnsNewValue}, true
+	case "And64", "Anduintptr":
+		return atomicCallSpec{operation: "and", class: ir.ClsL, result: atomicReturnsValue}, true
+	case "Or64", "Oruintptr":
+		return atomicCallSpec{operation: "or", class: ir.ClsL, result: atomicReturnsValue}, true
+
+	case "Loadp":
+		return atomicCallSpec{operation: "load", class: ir.ClsP, result: atomicReturnsValue}, true
+	case "StorepNoWB":
+		return atomicCallSpec{operation: "store", class: ir.ClsP, result: atomicReturnsNothing}, true
+	case "Casp1":
+		return atomicCallSpec{operation: "cas", class: ir.ClsP, result: atomicReturnsBool}, true
+	}
+	return atomicCallSpec{}, false
+}
+
+func syncAtomicCallSpec(name string) (atomicCallSpec, bool) {
+	if name == "LoadPointer" {
+		return atomicCallSpec{operation: "load", class: ir.ClsP, result: atomicReturnsValue}, true
+	}
+
+	class := ir.ClsW
+	suffixes := []string{"Int32", "Uint32"}
+	for _, suffix := range suffixes {
+		if strings.HasSuffix(name, suffix) {
+			return syncAtomicOperationSpec(strings.TrimSuffix(name, suffix), class)
+		}
+	}
+
+	class = ir.ClsL
+	suffixes = []string{"Int64", "Uint64", "Uintptr"}
+	for _, suffix := range suffixes {
+		if strings.HasSuffix(name, suffix) {
+			return syncAtomicOperationSpec(strings.TrimSuffix(name, suffix), class)
+		}
+	}
+
+	// StorePointer, SwapPointer, and CompareAndSwapPointer deliberately remain
+	// calls. Their runtime implementations perform Go's write barrier before
+	// reaching the uintptr atomic operation that is lowered here.
+	return atomicCallSpec{}, false
+}
+
+func syncAtomicOperationSpec(operation string, class ir.Cls) (atomicCallSpec, bool) {
+	switch operation {
+	case "Load":
+		return atomicCallSpec{operation: "load", class: class, result: atomicReturnsValue}, true
+	case "Store":
+		return atomicCallSpec{operation: "store", class: class, result: atomicReturnsNothing}, true
+	case "Swap":
+		return atomicCallSpec{operation: "xchg", class: class, result: atomicReturnsValue}, true
+	case "CompareAndSwap":
+		return atomicCallSpec{operation: "cas", class: class, result: atomicReturnsBool}, true
+	case "Add":
+		return atomicCallSpec{operation: "add", class: class, result: atomicReturnsNewValue}, true
+	case "And":
+		return atomicCallSpec{operation: "and", class: class, result: atomicReturnsValue}, true
+	case "Or":
+		return atomicCallSpec{operation: "or", class: class, result: atomicReturnsValue}, true
+	}
+	return atomicCallSpec{}, false
+}
+
+func atomicIntrinsicCallSpec(symbol string) (atomicCallSpec, bool) {
+	const runtimeAtomicPrefix = "internal/runtime/atomic."
+	if strings.HasPrefix(symbol, runtimeAtomicPrefix) {
+		return runtimeAtomicCallSpec(strings.TrimPrefix(symbol, runtimeAtomicPrefix))
+	}
+
+	const syncAtomicPrefix = "sync/atomic."
+	if strings.HasPrefix(symbol, syncAtomicPrefix) {
+		return syncAtomicCallSpec(strings.TrimPrefix(symbol, syncAtomicPrefix))
+	}
+
+	return atomicCallSpec{}, false
+}
+
+func (g *gen) lowerAtomicCall(symbol string, arguments []ir.Ref) (ir.Ref, bool) {
+	specification, ok := atomicIntrinsicCallSpec(symbol)
+	if !ok {
+		return ir.R, false
+	}
+
+	switch specification.operation {
+	case "load":
+		return g.cur.AtomicLoad(specification.class, arguments[0]), true
+	case "store":
+		g.cur.AtomicStore(specification.class, arguments[0], arguments[1])
+		return g.fn.Word(0), true
+	case "xchg":
+		return g.cur.AtomicXchg(specification.class, arguments[0], arguments[1]), true
+	case "cas":
+		observed := g.cur.AtomicCAS(specification.class, arguments[0], arguments[1], arguments[2])
+		swapped := g.cur.Cmp(ir.CmpEq, ir.ClsW, observed, arguments[1])
+		return swapped, true
+	case "add", "and", "or":
+		previous := g.cur.AtomicRMW(specification.operation, specification.class, arguments[0], arguments[1])
+		switch specification.result {
+		case atomicReturnsNewValue:
+			updated := g.cur.Add(specification.class, previous, arguments[1])
+			return updated, true
+		case atomicReturnsNothing:
+			return g.fn.Word(0), true
+		default:
+			return previous, true
+		}
+	}
+
+	panic("goc: unsupported atomic intrinsic operation " + specification.operation)
+}
+
 type globalInitializer struct {
 	expression ast.Expr
 	info       *types.Info
@@ -7676,6 +7832,12 @@ func (g *gen) expr(e ast.Expr) (result ir.Ref) {
 		}
 		args = append(args, g.callArguments(n.Args, n.Ellipsis.IsValid(), sig)...)
 		args = g.adaptSharedGenericArguments(args, sig, callSignature, receiver != ir.R)
+		if obj != nil && receiver == ir.R {
+			g.at(n)
+			if result, lowered := g.lowerAtomicCall(g.functionSymbol(obj), args); lowered {
+				return result
+			}
+		}
 		if closure != ir.R {
 			g.pinClosure(closure)
 		}

@@ -13,6 +13,119 @@ import (
 	"github.com/evanphx/cg12/ir"
 )
 
+func TestCompileLowersSyncAtomicCallsToIntrinsics(t *testing.T) {
+	source := []byte(`package atomictest
+
+import "sync/atomic"
+
+func exercise(word *uint32, wide *uint64) {
+	atomic.StoreUint32(word, 1)
+	atomic.LoadUint32(word)
+	atomic.SwapUint32(word, 2)
+	atomic.CompareAndSwapUint32(word, 2, 3)
+	atomic.AddUint32(word, 4)
+	atomic.AndUint32(word, 5)
+	atomic.OrUint32(word, 6)
+
+	atomic.StoreUint64(wide, 1)
+	atomic.LoadUint64(wide)
+	atomic.SwapUint64(wide, 2)
+	atomic.CompareAndSwapUint64(wide, 2, 3)
+	atomic.AddUint64(wide, 4)
+	atomic.AndUint64(wide, 5)
+	atomic.OrUint64(wide, 6)
+}
+`)
+
+	module, err := Compile("atomic_intrinsics.go", source)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	function := findCompiledFunction(t, module, "atomictest.exercise")
+	counts := make(map[string]int)
+	for _, block := range function.Blocks {
+		for _, instruction := range block.Instrs {
+			if instruction.Op == ir.OIntrinsic {
+				counts[instruction.Intrin.Name]++
+			}
+			if instruction.Op == ir.OCall {
+				calleeReference := instruction.Arg(0)
+				if calleeReference.Kind != ir.RefConst {
+					continue
+				}
+				callee := function.Consts[calleeReference.ID]
+				if callee.Kind == ir.ConstSym && strings.HasPrefix(callee.Sym, "sync/atomic.") {
+					t.Errorf("sync atomic call was not lowered: %s", callee.Sym)
+				}
+			}
+		}
+	}
+
+	for _, width := range []string{"w", "l"} {
+		for _, operation := range []string{"store", "load", "xchg", "cas", "add", "and", "or"} {
+			name := "atomic." + operation + "." + width
+			if counts[name] != 1 {
+				t.Errorf("%s count = %d, want 1", name, counts[name])
+			}
+		}
+	}
+}
+
+func TestCompilePreservesSyncAtomicPointerWriteBarrierCalls(t *testing.T) {
+	source := []byte(`package atomictest
+
+import (
+	"sync/atomic"
+	"unsafe"
+)
+
+func storePointer(address *unsafe.Pointer, value unsafe.Pointer) {
+	atomic.StorePointer(address, value)
+}
+`)
+
+	module, err := Compile("atomic_pointer.go", source)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	function := findCompiledFunction(t, module, "atomictest.storePointer")
+	foundBarrierCall := false
+	for _, block := range function.Blocks {
+		for _, instruction := range block.Instrs {
+			if instruction.Op == ir.OIntrinsic && strings.HasPrefix(instruction.Intrin.Name, "atomic.") {
+				t.Errorf("pointer store bypassed its write-barrier call with %s", instruction.Intrin.Name)
+			}
+			if instruction.Op != ir.OCall {
+				continue
+			}
+			calleeReference := instruction.Arg(0)
+			if calleeReference.Kind != ir.RefConst {
+				continue
+			}
+			callee := function.Consts[calleeReference.ID]
+			if callee.Kind == ir.ConstSym && callee.Sym == "sync/atomic.StorePointer" {
+				foundBarrierCall = true
+			}
+		}
+	}
+	if !foundBarrierCall {
+		t.Fatal("sync/atomic.StorePointer write-barrier call was not preserved")
+	}
+}
+
+func findCompiledFunction(t *testing.T, module *ir.Module, name string) *ir.Func {
+	t.Helper()
+	for _, function := range module.Funcs {
+		if function.Name == name {
+			return function
+		}
+	}
+	t.Fatalf("compiled module does not contain %s", name)
+	return nil
+}
+
 func TestRuntimeTypeKeyCanonicalizesAliasesInGenericArguments(t *testing.T) {
 	netipPackage := types.NewPackage("net/netip", "netip")
 	addressDetailName := types.NewTypeName(token.NoPos, netipPackage, "addrDetail", nil)

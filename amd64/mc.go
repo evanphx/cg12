@@ -1249,14 +1249,6 @@ func (m *mc) instr(in *ir.Instr) {
 		m.reloadReg(Reg(t.Reg), int(in.Aux), t.Cls)
 	case ir.OAsm:
 		m.emitAsm(in)
-	case ir.OGetCallerPC:
-		destination, commit := m.gpDst(in.To)
-		m.emit(x64.Load(true, destination.mreg(), x64.At(RBP.mreg(), 8)))
-		commit()
-	case ir.OGetCallerSP:
-		destination, commit := m.gpDst(in.To)
-		m.emit(x64.Lea(true, destination.mreg(), x64.At(RBP.mreg(), 16)))
-		commit()
 	case ir.OVaStart:
 		m.vaStart(in)
 	case ir.OVaArg:

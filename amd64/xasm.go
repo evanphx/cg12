@@ -45,6 +45,8 @@ type xasm interface {
 	allocNSP(dst, size Reg)
 	movFromSP(dst Reg)
 	movToSP(src Reg)
+	callerPC(dst Reg)
+	callerSP(dst Reg)
 
 	// Control flow. Branch targets are blocks so each backend formats its label;
 	// jnz tests a register and branches to `to`, else falls through to `to2`.
@@ -242,6 +244,8 @@ func (b *mcXasm) allocNSP(dst, size Reg) {
 }
 func (b *mcXasm) movFromSP(dst Reg) { b.m.emit(x64.MovReg(true, dst.mreg(), RSP.mreg())) }
 func (b *mcXasm) movToSP(src Reg)   { b.m.emit(x64.MovReg(true, RSP.mreg(), src.mreg())) }
+func (b *mcXasm) callerPC(dst Reg)  { b.m.emit(x64.Load(true, dst.mreg(), x64.At(RBP.mreg(), 8))) }
+func (b *mcXasm) callerSP(dst Reg)  { b.m.emit(x64.Lea(true, dst.mreg(), x64.At(RBP.mreg(), 16))) }
 func (b *mcXasm) jmp(to *ir.Block)  { b.m.prog.Jmp(to.Name) }
 func (b *mcXasm) jnz(r Reg, w bool, to, to2 *ir.Block) {
 	b.m.emit(x64.TestReg(w, r.mreg(), r.mreg()))

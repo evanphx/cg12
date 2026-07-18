@@ -20,6 +20,14 @@ func TestIntrinsicRegistry(t *testing.T) {
 	assert.True(t, restore.SideEffect, "stackrestore moves the stack pointer")
 	assert.False(t, restore.HasResult)
 
+	for _, name := range []string{"getcallerpc", "getcallersp"} {
+		callerFrame := LookupIntrinsic(name)
+		require.NotNil(t, callerFrame)
+		assert.True(t, callerFrame.HasResult)
+		assert.False(t, callerFrame.SideEffect)
+		assert.False(t, callerFrame.Pure, "the caller frame depends on the current invocation")
+	}
+
 	assert.Nil(t, LookupIntrinsic("no-such-intrinsic"))
 }
 
