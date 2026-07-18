@@ -128,16 +128,54 @@ func (mc *Machine) execCall(fr *frame, in *ir.Instr) error {
 		return mc.trapf("call has no callee operand")
 	}
 	callee := in.Args[0]
+	// A directly named callee (the common case) is resolved by name.
 	if callee.Kind == ir.RefConst {
 		c := &fr.fn.Consts[callee.ID]
 		if c.Kind == ir.ConstSym {
-			if f, ok := mc.funcs[c.Sym]; ok {
-				return mc.doIRCall(fr, in, f)
-			}
-			return mc.trapf("call to undefined symbol %q (external intrinsics are Phase B)", c.Sym)
+			return mc.dispatchCall(fr, in, c.Sym)
 		}
 	}
-	return mc.trapf("indirect call (function pointer) requires memory (Phase B)")
+	// Otherwise the callee is a value (a function pointer): resolve its address.
+	addr, err := mc.evalRef(fr, callee)
+	if err != nil {
+		return err
+	}
+	if f, ok := mc.funcAt[addr.u64()]; ok {
+		return mc.doIRCall(fr, in, f)
+	}
+	if name, ok := mc.externAt[addr.u64()]; ok {
+		return mc.doExternCall(fr, in, name)
+	}
+	return mc.trapf("indirect call to %#x is not a known function", addr.u64())
+}
+
+func (mc *Machine) dispatchCall(fr *frame, in *ir.Instr, name string) error {
+	if f, ok := mc.funcs[name]; ok {
+		return mc.doIRCall(fr, in, f)
+	}
+	if _, ok := mc.externs[name]; ok {
+		return mc.doExternCall(fr, in, name)
+	}
+	return mc.trapf("call to undefined symbol %q (register it with WithExtern)", name)
+}
+
+func (mc *Machine) doExternCall(fr *frame, in *ir.Instr, name string) error {
+	args := make([]Value, 0, len(in.Args)-1)
+	for _, a := range in.Args[1:] {
+		v, err := mc.evalRef(fr, a)
+		if err != nil {
+			return err
+		}
+		args = append(args, v)
+	}
+	ret, err := mc.externs[name](mc, args)
+	if err != nil {
+		return err
+	}
+	if !in.To.IsNone() {
+		fr.vals[in.To.ID] = ret.asClass(in.Cls)
+	}
+	return nil
 }
 
 func (mc *Machine) doIRCall(fr *frame, in *ir.Instr, f *ir.Func) error {

@@ -14,9 +14,24 @@ func (mc *Machine) execInstr(fr *frame, in *ir.Instr) error {
 		return mc.execCall(fr, in)
 	case in.Op == ir.OSafepoint, in.Op == ir.ONop:
 		return nil
-	case in.Op.IsLoad(), in.Op.IsStore(), in.Op.IsAlloc(),
-		in.Op == ir.OBlit, in.Op == ir.OStackSave, in.Op == ir.OStackRestore:
-		return mc.trapf("memory op %s not yet supported (Phase B)", in.Op)
+	case in.Op.IsLoad():
+		return mc.execLoad(fr, in)
+	case in.Op.IsStore():
+		return mc.execStore(fr, in)
+	case in.Op.IsAlloc():
+		return mc.execAlloc(fr, in)
+	case in.Op == ir.OBlit:
+		return mc.execBlit(fr, in)
+	case in.Op == ir.OStackSave:
+		fr.vals[in.To.ID] = ptrVal(mc.sp)
+		return nil
+	case in.Op == ir.OStackRestore:
+		v, err := mc.evalRef(fr, in.Arg(0))
+		if err != nil {
+			return err
+		}
+		mc.sp = v.u64()
+		return nil
 	case in.Op == ir.OVaStart, in.Op == ir.OVaArg:
 		return mc.trapf("variadic op %s not yet supported (Phase C)", in.Op)
 	case in.Op == ir.OBlockAddr:
@@ -450,3 +465,168 @@ func f2iUnsigned(x float64, bitWidth int) uint64 {
 // uint64ToFloat converts an unsigned integer to float64 with round-to-nearest,
 // matching ucvtf.
 func uint64ToFloat(u uint64) float64 { return float64(u) }
+
+// --- memory operations -------------------------------------------------------
+
+func (mc *Machine) memLoad(addr uint64, size int) (uint64, error) {
+	v, ok := mc.mem.load(addr, size)
+	if !ok {
+		return 0, mc.trapf("load %d bytes at %#x: unmapped", size, addr)
+	}
+	return v, nil
+}
+
+// execLoad reads memory at Args[0], extending per the op's width and signedness
+// into the result class.
+func (mc *Machine) execLoad(fr *frame, in *ir.Instr) error {
+	av, err := mc.evalRef(fr, in.Arg(0))
+	if err != nil {
+		return err
+	}
+	addr := av.u64()
+	var out Value
+	switch in.Op {
+	case ir.OLoadsb:
+		v, err := mc.memLoad(addr, 1)
+		if err != nil {
+			return err
+		}
+		out = intVal(in.Cls, int64(int8(v)))
+	case ir.OLoadub:
+		v, err := mc.memLoad(addr, 1)
+		if err != nil {
+			return err
+		}
+		out = intVal(in.Cls, int64(uint8(v)))
+	case ir.OLoadsh:
+		v, err := mc.memLoad(addr, 2)
+		if err != nil {
+			return err
+		}
+		out = intVal(in.Cls, int64(int16(v)))
+	case ir.OLoaduh:
+		v, err := mc.memLoad(addr, 2)
+		if err != nil {
+			return err
+		}
+		out = intVal(in.Cls, int64(uint16(v)))
+	case ir.OLoadsw:
+		v, err := mc.memLoad(addr, 4)
+		if err != nil {
+			return err
+		}
+		out = intVal(in.Cls, int64(int32(v)))
+	case ir.OLoaduw:
+		v, err := mc.memLoad(addr, 4)
+		if err != nil {
+			return err
+		}
+		out = intVal(in.Cls, int64(uint32(v)))
+	case ir.OLoadl:
+		v, err := mc.memLoad(addr, 8)
+		if err != nil {
+			return err
+		}
+		out = intVal(in.Cls, int64(v))
+	case ir.OLoads:
+		v, err := mc.memLoad(addr, 4)
+		if err != nil {
+			return err
+		}
+		out = Value{Cls: ir.ClsS, Bits: v & 0xffffffff}
+	case ir.OLoadd:
+		v, err := mc.memLoad(addr, 8)
+		if err != nil {
+			return err
+		}
+		out = Value{Cls: ir.ClsD, Bits: v}
+	default:
+		return mc.trapf("unhandled load %s", in.Op)
+	}
+	if !in.To.IsNone() {
+		fr.vals[in.To.ID] = out.asClass(in.Cls)
+	}
+	return nil
+}
+
+// execStore writes the value (Args[0]) to the address (Args[1]) at the op's width.
+func (mc *Machine) execStore(fr *frame, in *ir.Instr) error {
+	vv, err := mc.evalRef(fr, in.Arg(0))
+	if err != nil {
+		return err
+	}
+	av, err := mc.evalRef(fr, in.Arg(1))
+	if err != nil {
+		return err
+	}
+	size := storeSize(in.Op)
+	if size == 0 {
+		return mc.trapf("unhandled store %s", in.Op)
+	}
+	if !mc.mem.store(av.u64(), size, vv.Bits) {
+		return mc.trapf("store %d bytes at %#x: unmapped", size, av.u64())
+	}
+	return nil
+}
+
+func storeSize(op ir.Op) int {
+	switch op {
+	case ir.OStoreb:
+		return 1
+	case ir.OStoreh:
+		return 2
+	case ir.OStorew, ir.OStores:
+		return 4
+	case ir.OStorel, ir.OStored:
+		return 8
+	}
+	return 0
+}
+
+// execAlloc reserves stack space and yields its address.
+func (mc *Machine) execAlloc(fr *frame, in *ir.Instr) error {
+	sv, err := mc.evalRef(fr, in.Arg(0))
+	if err != nil {
+		return err
+	}
+	size := sv.u64()
+	var align uint64
+	switch in.Op {
+	case ir.OAlloc4:
+		align = 4
+	case ir.OAlloc8:
+		align = 8
+	default: // OAlloc16, OAllocN
+		align = 16
+		if in.Op == ir.OAllocN && size%16 != 0 {
+			return mc.trapf("allocn size %d is not a multiple of 16", size)
+		}
+	}
+	mc.sp = (mc.sp - size) &^ (align - 1)
+	mc.mem.mapRange(mc.sp, maxU(size, 1))
+	if !in.To.IsNone() {
+		fr.vals[in.To.ID] = ptrVal(mc.sp)
+	}
+	return nil
+}
+
+// execBlit copies Aux bytes from Args[1] to Args[0], overlap-safe.
+func (mc *Machine) execBlit(fr *frame, in *ir.Instr) error {
+	dv, err := mc.evalRef(fr, in.Arg(0))
+	if err != nil {
+		return err
+	}
+	sv, err := mc.evalRef(fr, in.Arg(1))
+	if err != nil {
+		return err
+	}
+	n := int(in.Aux)
+	buf, ok := mc.mem.readBytes(sv.u64(), n)
+	if !ok {
+		return mc.trapf("blit source [%#x,+%d) unmapped", sv.u64(), n)
+	}
+	if !mc.mem.writeBytes(dv.u64(), buf) {
+		return mc.trapf("blit dest [%#x,+%d) unmapped", dv.u64(), n)
+	}
+	return nil
+}

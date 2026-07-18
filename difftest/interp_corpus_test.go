@@ -1,6 +1,7 @@
 package difftest
 
 import (
+	"math"
 	"strconv"
 	"testing"
 
@@ -20,19 +21,32 @@ type interpCall struct {
 	fn   string
 	args []interp.Value
 	verb string // the C conversion the driver used: "d", "lld", "u", "g"
+	// setup, when set, builds memory the C driver would have built and returns the
+	// argument list (so a case whose driver passes a pointer can run).
+	setup func(mc *interp.Machine) []interp.Value
 }
 
 var interpCorpus = map[string]interpCall{
-	"add":          {"add", []interp.Value{interp.W(17), interp.W(25)}, "d"},
-	"factorial":    {"fact", []interp.Value{interp.W(10)}, "lld"},
-	"fib":          {"fib", []interp.Value{interp.W(15)}, "d"},
-	"gcd":          {"gcd", []interp.Value{interp.W(1071), interp.W(462)}, "d"},
-	"darith":       {"darith", []interp.Value{interp.D(10), interp.D(4), interp.D(3)}, "g"},
-	"conversions":  {"conv", []interp.Value{interp.W(3), interp.S(2.9)}, "g"},
-	"dtosi-alias":  {"toint", []interp.Value{interp.D(3.9)}, "lld"},
-	"compares":     {"cmps", []interp.Value{interp.W(3), interp.W(5)}, "d"},
-	"bitops":       {"bits", []interp.Value{interp.W(12), interp.W(10)}, "d"},
-	"unsigned-div": {"u", []interp.Value{interp.W(-16 /* 0xfffffff0 */), interp.W(16)}, "u"},
+	"add":          {fn: "add", args: []interp.Value{interp.W(17), interp.W(25)}, verb: "d"},
+	"factorial":    {fn: "fact", args: []interp.Value{interp.W(10)}, verb: "lld"},
+	"fib":          {fn: "fib", args: []interp.Value{interp.W(15)}, verb: "d"},
+	"gcd":          {fn: "gcd", args: []interp.Value{interp.W(1071), interp.W(462)}, verb: "d"},
+	"darith":       {fn: "darith", args: []interp.Value{interp.D(10), interp.D(4), interp.D(3)}, verb: "g"},
+	"conversions":  {fn: "conv", args: []interp.Value{interp.W(3), interp.S(2.9)}, verb: "g"},
+	"dtosi-alias":  {fn: "toint", args: []interp.Value{interp.D(3.9)}, verb: "lld"},
+	"compares":     {fn: "cmps", args: []interp.Value{interp.W(3), interp.W(5)}, verb: "d"},
+	"bitops":       {fn: "bits", args: []interp.Value{interp.W(12), interp.W(10)}, verb: "d"},
+	"unsigned-div": {fn: "u", args: []interp.Value{interp.W(-16 /* 0xfffffff0 */), interp.W(16)}, verb: "u"},
+	"memory":       {fn: "mem", args: []interp.Value{interp.W(14)}, verb: "d"},
+	// dsum sums a double[4]; the C driver builds `a[4]={1.5,2.5,3.0,4.0}` on its
+	// stack and passes a pointer. The interpreter builds the same array in memory.
+	"dsum": {fn: "dsum", verb: "g", setup: func(mc *interp.Machine) []interp.Value {
+		p := mc.Alloc(4 * 8)
+		for i, v := range []float64{1.5, 2.5, 3.0, 4.0} {
+			_ = mc.Store(p+uint64(i*8), 8, math.Float64bits(v))
+		}
+		return []interp.Value{interp.Ptr(p), interp.W(4)}
+	}},
 }
 
 func TestCorpusInterp(t *testing.T) {
@@ -51,7 +65,11 @@ func TestCorpusInterp(t *testing.T) {
 					}
 					mc, err := interp.New(m)
 					require.NoError(t, err, "load")
-					v, err := mc.Call(call.fn, call.args...)
+					args := call.args
+					if call.setup != nil {
+						args = call.setup(mc)
+					}
+					v, err := mc.Call(call.fn, args...)
 					require.NoError(t, err, "call")
 					require.Equal(t, c.Want, cFormat(call.verb, v)+"\n",
 						"interp %s(%s) formatted %%%s", call.fn, call.verb, call.verb)

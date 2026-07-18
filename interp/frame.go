@@ -34,7 +34,7 @@ func (mc *Machine) callFunc(f *ir.Func, args []Value) (Value, error) {
 		return Value{}, mc.trapf("call stack too deep (%d frames)", mc.depth)
 	}
 
-	fr := &frame{fn: f, vals: make([]Value, len(f.Temps)), index: -1}
+	fr := &frame{fn: f, vals: make([]Value, len(f.Temps)), index: -1, spBase: mc.sp}
 	for i, p := range f.Params {
 		fr.vals[p.ID] = args[i].asClass(p.Cls)
 	}
@@ -46,6 +46,7 @@ func (mc *Machine) callFunc(f *ir.Func, args []Value) (Value, error) {
 	mc.cur, mc.depth = fr, mc.depth+1
 	ret, err := mc.run(fr)
 	mc.cur, mc.depth = prev, mc.depth-1
+	mc.sp = fr.spBase // free this frame's stack allocations
 	return ret, err
 }
 
@@ -74,7 +75,11 @@ func (mc *Machine) evalConst(c *ir.Const) (Value, error) {
 	case ir.ConstFloat:
 		return floatVal(c.Cls, c.Flt), nil
 	case ir.ConstSym:
-		return Value{}, mc.trapf("symbol address %q requires memory (Phase B)", c.Sym)
+		addr, ok := mc.symAddr(c.Sym)
+		if !ok {
+			return Value{}, mc.trapf("undefined symbol %q", c.Sym)
+		}
+		return ptrVal(addr + uint64(c.Int)), nil
 	}
 	return Value{}, mc.trapf("unknown constant kind %d", c.Kind)
 }
