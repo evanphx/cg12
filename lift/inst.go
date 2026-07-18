@@ -14,6 +14,8 @@ func (l *lifter) liftInst(b *ir.Block, idx int, in *a64.Inst) error {
 	c := cls(in.W64)
 
 	switch in.Op {
+	case a64.OpNop:
+		return nil
 	case a64.OpBl:
 		return l.liftCall(b, idx)
 	case a64.OpMovz:
@@ -123,6 +125,9 @@ func (l *lifter) liftInst(b *ir.Block, idx int, in *a64.Inst) error {
 		}
 		l.def(b, in.Rd, b.Cmp(pred, ir.ClsL, l.pending.a, l.pending.b), in.W64)
 
+	case a64.OpCsel, a64.OpCsinc, a64.OpCsinv, a64.OpCsneg:
+		return l.liftCondSel(b, in)
+
 	case a64.OpStp, a64.OpLdp:
 		return l.liftPair(b, in)
 	case a64.OpStr, a64.OpStrb, a64.OpStrh:
@@ -209,6 +214,38 @@ func (l *lifter) liftCall(b *ir.Block, idx int) error {
 	} else {
 		l.def(b, 0, r, sig.retty != ir.ClsW)
 	}
+	return nil
+}
+
+// liftCondSel lifts csel and its cousins branchlessly: cg12 has no select op, so
+// a mask (all-ones when the condition holds) chooses between the two inputs.
+// gcc emits these where cg12 would use a branch diamond; mem2reg is not involved.
+func (l *lifter) liftCondSel(b *ir.Block, in *a64.Inst) error {
+	if l.pending == nil {
+		return fmt.Errorf("conditional select with no preceding compare")
+	}
+	pred, ok := predOf(in.Cond, l.pending.float)
+	if !ok {
+		return fmt.Errorf("unsupported condition %d", in.Cond)
+	}
+	c := cls(in.W64)
+	cond := b.Cmp(pred, ir.ClsL, l.pending.a, l.pending.b) // 0 or 1
+	mask := b.Sub(c, l.f.ConstInt(c, 0), cond)             // all-ones if the condition holds
+	rn := l.src(b, in.Rn)
+
+	var other ir.Ref
+	switch in.Op {
+	case a64.OpCsel:
+		other = l.src(b, in.Rm)
+	case a64.OpCsinc:
+		other = b.Add(c, l.src(b, in.Rm), l.f.ConstInt(c, 1))
+	case a64.OpCsinv:
+		other = b.Xor(c, l.src(b, in.Rm), allOnes(l.f, c))
+	case a64.OpCsneg:
+		other = b.Neg(c, l.src(b, in.Rm))
+	}
+	sel := b.Or(c, b.And(c, rn, mask), b.And(c, other, b.Xor(c, mask, allOnes(l.f, c))))
+	l.def(b, in.Rd, sel, in.W64)
 	return nil
 }
 

@@ -69,6 +69,13 @@ const (
 	// Conditional set: Rd = 1 if Cond else 0.
 	OpCset
 
+	// Conditional select: Rd = Cond ? Rn : f(Rm), where f is identity (csel),
+	// +1 (csinc), bitwise-not (csinv), or negate (csneg).
+	OpCsel
+	OpCsinc
+	OpCsinv
+	OpCsneg
+
 	// Loads and stores. Rd is the transfer register, Rn the base, MemOff the
 	// offset; ldp/stp add Rt2 and Mode (pre/post/signed-offset writeback).
 	OpLdr
@@ -113,6 +120,8 @@ const (
 	OpRet
 	OpBr
 	OpBlr
+
+	OpNop // padding, no effect
 )
 
 // Inst is a decoded A64 instruction. Only the fields an op uses are set.
@@ -143,6 +152,9 @@ type Inst struct {
 // Decode returns the typed form of one instruction word, and whether it was
 // recognized. It mirrors Disasm's dispatch but stops at the integer/branch core.
 func Decode(w uint32) (Inst, bool) {
+	if w == 0xd503201f { // nop (a HINT); gcc emits it for alignment
+		return Inst{Op: OpNop}, true
+	}
 	for _, try := range []func(uint32) (Inst, bool){
 		decodeBranch,
 		decodeDPImm,
@@ -356,11 +368,18 @@ func decodeDP1(w uint32) (Inst, bool) {
 func decodeCondSel(w uint32) (Inst, bool) {
 	w64, rd, rn, rm := bit(w, 31), Reg(w&0x1f), Reg(bits(w, 9, 5)), Reg(bits(w, 20, 16))
 	cond := Cond(bits(w, 15, 12))
+	op, op2 := bits(w, 30, 30), bits(w, 11, 10)
 	// CSET is CSINC of the two zero registers under the inverted condition.
-	if bits(w, 30, 30) == 0 && bits(w, 11, 10) == 1 && rn == 31 && rm == 31 && cond&0xe != 0xe {
+	if op == 0 && op2 == 1 && rn == 31 && rm == 31 && cond&0xe != 0xe {
 		return Inst{Op: OpCset, W64: w64, Rd: rd, Cond: cond.invert()}, true
 	}
-	return Inst{}, false // csel/csinv/csneg are not on the IR path, so not lifted
+	mn, ok := map[[2]uint32]Mnemonic{
+		{0, 0}: OpCsel, {0, 1}: OpCsinc, {1, 0}: OpCsinv, {1, 1}: OpCsneg,
+	}[[2]uint32{op, op2}]
+	if !ok {
+		return Inst{}, false
+	}
+	return Inst{Op: mn, W64: w64, Rd: rd, Rn: rn, Rm: rm, Cond: cond}, true
 }
 
 func decodeDP3(w uint32) (Inst, bool) {

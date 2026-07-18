@@ -40,44 +40,28 @@ func Lift(name string, code []uint32, params []ir.Cls, retty ir.Cls, voidRet boo
 	return m, nil
 }
 
-// LiftModule lifts every function of a compiled object back into one IR module,
-// resolving bl calls through the object's .text relocations and the original
-// module's signatures. The result is self-contained: a recursive or
-// mutually-calling program lifts whole and runs on the interpreter.
-func LiftModule(orig *ir.Module, o *obj.Object) (*ir.Module, error) {
-	sigs := map[string]sigInfo{}
-	for _, f := range orig.Funcs {
-		if f.Start == nil {
-			continue // a declaration, no body
-		}
-		var ps []ir.Cls
-		for _, p := range f.Params {
-			ps = append(ps, p.Cls)
-		}
-		sigs[f.Name] = sigInfo{params: ps, retty: f.Retty, void: !f.HasRet}
-	}
-	relocAt := map[uint64]string{}
-	for _, r := range o.Relocs {
-		relocAt[r.Offset] = r.Sym
-	}
+// FuncCode is one function to lift: its machine code, signature, and the callee
+// each bl resolves to (by word index, from relocations). It is the input the
+// foreign-code path (e.g. gcc output read from an ELF) supplies directly.
+type FuncCode struct {
+	Name   string
+	Code   []uint32
+	Params []ir.Cls
+	Retty  ir.Cls
+	Void   bool
+	Calls  map[int]string // bl word index -> callee name
+}
 
+// LiftFuncs lifts a set of functions into one self-contained IR module. Calls
+// resolve among the set by name, so recursion and mutual calls lift whole.
+func LiftFuncs(funcs []FuncCode) (*ir.Module, error) {
+	sigs := map[string]sigInfo{}
+	for _, fc := range funcs {
+		sigs[fc.Name] = sigInfo{params: fc.Params, retty: fc.Retty, void: fc.Void}
+	}
 	m := ir.NewModule()
-	for _, s := range o.Syms {
-		if s.Section != obj.SecText || !s.Func {
-			continue
-		}
-		sig, ok := sigs[s.Name]
-		if !ok {
-			continue
-		}
-		code := textWords(o.Text, s.Value, s.Size)
-		callName := map[int]string{}
-		for wi := range code {
-			if name, ok := relocAt[s.Value+uint64(wi*4)]; ok {
-				callName[wi] = name
-			}
-		}
-		if err := liftOne(m, s.Name, code, sig, sigs, callName); err != nil {
+	for _, fc := range funcs {
+		if err := liftOne(m, fc.Name, fc.Code, sigs[fc.Name], sigs, fc.Calls); err != nil {
 			return nil, err
 		}
 	}
@@ -85,6 +69,42 @@ func LiftModule(orig *ir.Module, o *obj.Object) (*ir.Module, error) {
 		return nil, fmt.Errorf("lift module: %w", err)
 	}
 	return m, nil
+}
+
+// LiftModule lifts every function of a cg12-compiled object back into one IR
+// module, taking signatures from the original module and resolving bl calls
+// through the object's .text relocations.
+func LiftModule(orig *ir.Module, o *obj.Object) (*ir.Module, error) {
+	sig := map[string]*ir.Func{}
+	for _, f := range orig.Funcs {
+		sig[f.Name] = f
+	}
+	relocAt := map[uint64]string{}
+	for _, r := range o.Relocs {
+		relocAt[r.Offset] = r.Sym
+	}
+
+	var funcs []FuncCode
+	for _, s := range o.Syms {
+		f := sig[s.Name]
+		if s.Section != obj.SecText || !s.Func || f == nil || f.Start == nil {
+			continue
+		}
+		var ps []ir.Cls
+		for _, p := range f.Params {
+			ps = append(ps, p.Cls)
+		}
+		code := textWords(o.Text, s.Value, s.Size)
+		calls := map[int]string{}
+		for wi := range code {
+			if name, ok := relocAt[s.Value+uint64(wi*4)]; ok {
+				calls[wi] = name
+			}
+		}
+		funcs = append(funcs, FuncCode{Name: s.Name, Code: code, Params: ps,
+			Retty: f.Retty, Void: !f.HasRet, Calls: calls})
+	}
+	return LiftFuncs(funcs)
 }
 
 type sigInfo struct {
