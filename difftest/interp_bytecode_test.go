@@ -1,6 +1,8 @@
 package difftest
 
 import (
+	"bytes"
+	"errors"
 	"os"
 	"path/filepath"
 	"testing"
@@ -75,4 +77,80 @@ func runQBEEngine(t *testing.T, src, global string, bytecode bool) uint64 {
 		u |= uint64(by) << (8 * i)
 	}
 	return u
+}
+
+// The QBE $main programs -- mandel (floats + printf + loops), echo (argv), puts10
+// -- run through both engines end to end; the bytecode output must match both the
+// tree-walker and the embedded expected block.
+func TestBytecodeMatchesTreeWalkerMain(t *testing.T) {
+	for _, file := range []string{"mandel.ssa", "echo.ssa", "puts10.ssa"} {
+		t.Run(file, func(t *testing.T) {
+			src, err := os.ReadFile(filepath.Join("testdata", "qbe", file))
+			require.NoError(t, err)
+			tc := loadQBETest(string(src))
+
+			tw := runMainEngine(t, string(src), false)
+			bc := runMainEngine(t, string(src), true)
+			require.Equal(t, tw, bc, "tree-walker vs bytecode stdout for %s", file)
+			require.Equal(t, tc.output, bc, "output of %s", file)
+		})
+	}
+}
+
+// runMainEngine drives $main through one engine and returns its captured stdout.
+func runMainEngine(t *testing.T, src string, bytecode bool) string {
+	t.Helper()
+	m, err := parse.Parse(src)
+	require.NoError(t, err)
+
+	var buf bytes.Buffer
+	opts := []interp.Option{interp.WithStdout(&buf), interp.WithFuel(500_000_000)}
+	if bytecode {
+		opts = append(opts, interp.WithBytecode())
+	}
+	mc, err := interp.New(m, opts...)
+	require.NoError(t, err)
+
+	var call []interp.Value
+	if mainParamCount(m) == 2 {
+		args := []string{"prog", "a", "b", "c"}
+		argvArr := mc.Alloc(len(args) * 8)
+		for i, s := range args {
+			require.NoError(t, mc.Store(argvArr+uint64(i*8), 8, mc.NewCString(s)))
+		}
+		call = []interp.Value{interp.W(int32(len(args))), interp.Ptr(argvArr)}
+	}
+	_, err = mc.Call("main", call...)
+	var exit *interp.ExitTrap
+	if errors.As(err, &exit) {
+		err = nil
+	}
+	require.NoError(t, err)
+	return buf.String()
+}
+
+// BenchmarkEngines contrasts the two interpreters on mandel (compute-heavy). The
+// bytecode VM's pre-compiled instruction stream should outrun the tree-walk.
+func BenchmarkEngines(b *testing.B) {
+	src, err := os.ReadFile(filepath.Join("testdata", "qbe", "mandel.ssa"))
+	require.NoError(b, err)
+	run := func(bytecode bool) {
+		m, _ := parse.Parse(string(src))
+		opts := []interp.Option{interp.WithFuel(500_000_000)}
+		if bytecode {
+			opts = append(opts, interp.WithBytecode())
+		}
+		mc, _ := interp.New(m, opts...)
+		mc.Call("main")
+	}
+	b.Run("treewalk", func(b *testing.B) {
+		for i := 0; i < b.N; i++ {
+			run(false)
+		}
+	})
+	b.Run("bytecode", func(b *testing.B) {
+		for i := 0; i < b.N; i++ {
+			run(true)
+		}
+	})
 }

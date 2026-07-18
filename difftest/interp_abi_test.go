@@ -21,12 +21,35 @@ import (
 // functions run in the interpreter, driver-defined functions are registered as
 // externs, and the result is compared to the embedded `# >>> output`.
 func TestInterpABI(t *testing.T) {
-	t.Run("abi1", testABI1)
-	t.Run("abi2", testABI2)
-	t.Run("abi3", testABI3)
-	t.Run("abi4", testABI4)
-	t.Run("abi5", testABI5)
-	t.Run("abi6", testABI6)
+	// Each abi file runs through both engines against the same expected output, so
+	// the tree-walker and the bytecode VM are both validated (and thus agree).
+	for _, bc := range []bool{false, true} {
+		name := "treewalk"
+		if bc {
+			name = "bytecode"
+		}
+		t.Run(name, func(t *testing.T) {
+			abiBytecode = bc
+			t.Run("abi1", testABI1)
+			t.Run("abi2", testABI2)
+			t.Run("abi3", testABI3)
+			t.Run("abi4", testABI4)
+			t.Run("abi5", testABI5)
+			t.Run("abi6", testABI6)
+			abiBytecode = false
+		})
+	}
+}
+
+// abiBytecode selects the engine for the abi subtests; abiNew threads it into New.
+var abiBytecode bool
+
+func abiNew(t *testing.T, m *ir.Module, opts ...interp.Option) (*interp.Machine, error) {
+	t.Helper()
+	if abiBytecode {
+		opts = append(opts, interp.WithBytecode())
+	}
+	return interp.New(m, opts...)
 }
 
 func loadABI(t *testing.T, file string) (*ir.Module, qbeTest) {
@@ -73,7 +96,7 @@ func readCStr(mc *interp.Machine, addr uint64) string {
 // builds fps{1.23, -1, 2.34} and checks sum == 1.23f + 2.34f.
 func testABI2(t *testing.T) {
 	m, _ := loadABI(t, "abi2.ssa")
-	mc, err := interp.New(m)
+	mc, err := abiNew(t, m)
 	require.NoError(t, err)
 
 	// fps = { s @0, b @4, s @8 } — 12 bytes.
@@ -91,7 +114,7 @@ func testABI2(t *testing.T) {
 // with 'A'..'P'. The driver prints it with "%s\n".
 func testABI4(t *testing.T) {
 	m, tc := loadABI(t, "abi4.ssa")
-	mc, err := interp.New(m)
+	mc, err := abiNew(t, m)
 	require.NoError(t, err)
 
 	r, err := mc.Call("test")
@@ -111,7 +134,7 @@ func testABI6(t *testing.T) {
 		fmt.Fprintf(&buf, "{ %g, %g, %g }\n", loadF32(mc, h), loadF32(mc, h+4), loadF32(mc, h+8))
 		return interp.Value{}, nil
 	}
-	mc, err := interp.New(m, interp.WithStdout(&buf), interp.WithExtern("phfa3", phfa3))
+	mc, err := abiNew(t, m, interp.WithStdout(&buf), interp.WithExtern("phfa3", phfa3))
 	require.NoError(t, err)
 
 	mkHfa := func(a, b, c float32) uint64 {
@@ -149,7 +172,7 @@ func testABI3(t *testing.T) {
 			args[0].I64(), args[1].I64(), args[2].I64(), args[3].I64(), l, i, args[5].I64())
 		return interp.W(42), nil
 	}
-	mc, err := interp.New(m, interp.WithExtern("F", fFn))
+	mc, err := abiNew(t, m, interp.WithExtern("F", fFn))
 	require.NoError(t, err)
 	mc.DefineExtern("a", 4, 4) // int a; the driver's global
 
@@ -177,7 +200,7 @@ func testABI1(t *testing.T) {
 		}
 		return interp.W(0), nil
 	}
-	mc, err := interp.New(m, interp.WithExtern("fcb", fcb))
+	mc, err := abiNew(t, m, interp.WithExtern("fcb", fcb))
 	require.NoError(t, err)
 
 	_, err = mc.Call("test")
@@ -205,7 +228,7 @@ func testABI5(t *testing.T) {
 		}
 	}
 
-	mc, err := interp.New(m, interp.WithStdout(&buf),
+	mc, err := abiNew(t, m, interp.WithStdout(&buf),
 		interp.WithExtern("t1", agg(17, func(mc *interp.Machine, p uint64) { writeStr(mc, p, "abcdefghijklmnop") })),
 		interp.WithExtern("t2", agg(4, func(mc *interp.Machine, p uint64) { mc.Store(p, 4, 2) })),
 		interp.WithExtern("t3", agg(8, func(mc *interp.Machine, p uint64) { storeF32(t, mc, p, 3.0); mc.Store(p+4, 4, 30) })),

@@ -69,25 +69,37 @@ func TestInterpVararg1(t *testing.T) {
 	tc := loadQBETest(string(src))
 	require.True(t, tc.hasOut)
 
-	m, err := parse.Parse(string(src))
-	require.NoError(t, err)
+	for _, bc := range []bool{false, true} {
+		name := "treewalk"
+		if bc {
+			name = "bytecode"
+		}
+		t.Run(name, func(t *testing.T) {
+			m, err := parse.Parse(string(src))
+			require.NoError(t, err)
 
-	var buf bytes.Buffer
-	mc, err := interp.New(m, interp.WithStdout(&buf))
-	require.NoError(t, err)
+			var buf bytes.Buffer
+			opts := []interp.Option{interp.WithStdout(&buf)}
+			if bc {
+				opts = append(opts, interp.WithBytecode())
+			}
+			mc, err := interp.New(m, opts...)
+			require.NoError(t, err)
 
-	// r = f(42, "x", 42.0) — f skips the "x" pointer and returns the 42.0 double.
-	r, err := mc.Call("f", interp.L(42), interp.Ptr(mc.NewCString("x")), interp.D(42.0))
-	require.NoError(t, err)
-	require.Equal(t, 42.0, r.F64())
+			// r = f(42, "x", 42.0) — f skips the "x" pointer and returns the 42.0 double.
+			r, err := mc.Call("f", interp.L(42), interp.Ptr(mc.NewCString("x")), interp.D(42.0))
+			require.NoError(t, err)
+			require.Equal(t, 42.0, r.F64())
 
-	// g("Hell%c %s %g!\n", 'o', "world", r) — g vprintf's the trailing args.
-	fmt := mc.NewCString("Hell%c %s %g!\n")
-	world := mc.NewCString("world")
-	_, err = mc.Call("g", interp.Ptr(fmt), interp.W('o'), interp.Ptr(world), interp.D(r.F64()))
-	require.NoError(t, err)
+			// g("Hell%c %s %g!\n", 'o', "world", r) — g vprintf's the trailing args.
+			fmt := mc.NewCString("Hell%c %s %g!\n")
+			world := mc.NewCString("world")
+			_, err = mc.Call("g", interp.Ptr(fmt), interp.W('o'), interp.Ptr(world), interp.D(r.F64()))
+			require.NoError(t, err)
 
-	require.Equal(t, tc.output, buf.String())
+			require.Equal(t, tc.output, buf.String())
+		})
+	}
 }
 
 func mainParamCount(m *ir.Module) int {
