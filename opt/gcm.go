@@ -89,7 +89,7 @@ func (s *gcmScheduler) classify() {
 			if in.To.Kind != ir.RefTemp {
 				continue
 			}
-			if gvnEligible(in.Op) {
+			if movable(&in) {
 				s.movInstr[in.To.ID] = in
 				s.origBlock[in.To.ID] = b
 				s.movIDs = append(s.movIDs, in.To.ID)
@@ -105,7 +105,7 @@ func (s *gcmScheduler) unpin() {
 	for _, b := range s.cfg.RPO {
 		out := b.Instrs[:0]
 		for _, in := range b.Instrs {
-			if in.To.Kind == ir.RefTemp && gvnEligible(in.Op) {
+			if in.To.Kind == ir.RefTemp && movable(&in) {
 				continue
 			}
 			out = append(out, in)

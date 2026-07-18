@@ -1,6 +1,8 @@
 package arm64
 
 import (
+	"strings"
+
 	"github.com/evanphx/cg12/arm64/a64"
 	"github.com/evanphx/cg12/ir"
 )
@@ -210,12 +212,19 @@ func (s *sel) selectData(in *ir.Instr) bool {
 		d, done := s.dst(in.To, 8)
 		s.b.allocN(d, size)
 		done()
-	case ir.OStackSave:
-		d, done := s.dst(in.To, 8)
-		s.b.movFromSP(d)
-		done()
-	case ir.OStackRestore:
-		s.b.movToSP(s.src(in.Args[0], 0, 8))
+	case ir.OIntrinsic:
+		switch {
+		case in.Intrin.Name == "stacksave":
+			d, done := s.dst(in.To, 8)
+			s.b.movFromSP(d)
+			done()
+		case in.Intrin.Name == "stackrestore":
+			s.b.movToSP(s.src(in.Args[0], 0, 8))
+		case strings.HasPrefix(in.Intrin.Name, "atomic."):
+			s.atomic(in)
+		default:
+			s.b.fail("arm64: unsupported intrinsic %q", in.Intrin.Name)
+		}
 	case ir.OBlockAddr:
 		d, done := s.dst(in.To, 8)
 		s.b.adr(d, in.Blk)
@@ -318,6 +327,167 @@ func (s *sel) sel(in *ir.Instr) {
 		s.b.csel(w64, d, a, b, a64.NE)
 	}
 	done()
+}
+
+// atomic lowers an atomic.* intrinsic. A plain load and store are a single
+// acquire-load and release-store; a fence is a data memory barrier; every other
+// operation (exchange, compare-and-swap, and the fetch-and-op family) is a
+// load-exclusive / store-exclusive retry loop that repeats until the store
+// succeeds. Each read-modify-write yields the previous value.
+func (s *sel) atomic(in *ir.Instr) {
+	base, w64 := atomicParts(in.Intrin.Name)
+	size := 4
+	if w64 {
+		size = 8
+	}
+
+	switch base {
+	case "fence":
+		s.b.dmb(a64.BarrierISH)
+		return
+	case "load":
+		addr := s.src(in.Args[0], 0, 8)
+		d, done := s.dst(in.To, size)
+		s.b.ldar(w64, d, addr)
+		done()
+		return
+	case "store":
+		addr := s.src(in.Args[0], 0, 8)
+		val := s.src(in.Args[1], 1, size)
+		s.b.stlr(w64, val, addr)
+		return
+	}
+
+	pressure := func() {
+		s.b.fail("arm64: atomic %q: not enough scratch registers under this register pressure", in.Intrin.Name)
+	}
+
+	addr := s.src(in.Args[0], 0, 8)
+	old, done := s.dst(in.To, size) // the result is always the previous value
+	if old == addr {
+		// A spilled result and a spilled/constant address both claimed scratch 0;
+		// the loop needs them distinct (it re-reads the address every iteration).
+		pressure()
+		return
+	}
+	retry := s.b.freshLabel("atomic_retry")
+
+	switch base {
+	case "xchg":
+		val := s.src(in.Args[1], 1, size)
+		status, ok := freeScratch(addr, val, old)
+		if !ok {
+			pressure()
+			return
+		}
+		s.b.label(retry)
+		s.b.ldaxr(w64, old, addr)
+		s.b.stlxr(w64, status, val, addr)
+		s.b.cbnzTo(false, status, retry)
+
+	case "add", "sub", "and", "or", "xor":
+		val := s.src(in.Args[1], 1, size)
+		newv, ok := freeScratch(addr, val, old)
+		if !ok {
+			pressure()
+			return
+		}
+		// The store-status register can reuse val's register once the new value is
+		// computed -- but only when val sits in a scratch register (a constant or a
+		// reloaded spill), never an allocated temporary that stays live afterward.
+		status := val
+		if !isScratchReg(val) {
+			if status, ok = freeScratch(addr, val, old, newv); !ok {
+				pressure()
+				return
+			}
+		}
+		s.b.label(retry)
+		s.b.ldaxr(w64, old, addr)
+		s.atomicCompute(base, w64, newv, old, val)
+		s.b.stlxr(w64, status, newv, addr)
+		s.b.cbnzTo(false, status, retry)
+
+	case "cas":
+		exp := s.src(in.Args[1], 1, size)
+		newv := s.src(in.Args[2], 2, size)
+		status, ok := freeScratch(addr, exp, newv, old)
+		if !ok {
+			pressure()
+			return
+		}
+		out := s.b.freshLabel("atomic_cas_out")
+		s.b.label(retry)
+		s.b.ldaxr(w64, old, addr)
+		s.b.cmpReg(w64, old, exp)
+		s.b.bcondTo(a64.NE, out) // mismatch: leave old in place, do not store
+		s.b.stlxr(w64, status, newv, addr)
+		s.b.cbnzTo(false, status, retry)
+		s.b.label(out)
+
+	default:
+		pressure()
+		return
+	}
+	done()
+}
+
+// atomicCompute emits the fetch-and-op step new = op(old, val).
+func (s *sel) atomicCompute(op string, w64 bool, dst, old, val Reg) {
+	switch op {
+	case "add":
+		s.b.addReg(w64, dst, old, val)
+	case "sub":
+		s.b.subReg(w64, dst, old, val)
+	case "and":
+		s.b.logicalReg(logAnd, w64, dst, old, val)
+	case "or":
+		s.b.logicalReg(logOrr, w64, dst, old, val)
+	case "xor":
+		s.b.logicalReg(logEor, w64, dst, old, val)
+	}
+}
+
+// atomicParts splits an atomic intrinsic name into its base operation and its
+// 64-bit-ness: "atomic.add.l" -> ("add", true). A bare "atomic.fence" has no
+// width suffix.
+func atomicParts(name string) (base string, w64 bool) {
+	s := strings.TrimPrefix(name, "atomic.")
+	switch {
+	case strings.HasSuffix(s, ".l"):
+		return strings.TrimSuffix(s, ".l"), true
+	case strings.HasSuffix(s, ".w"):
+		return strings.TrimSuffix(s, ".w"), false
+	}
+	return s, false
+}
+
+// isScratchReg reports whether r is one of the fixed scratch registers.
+func isScratchReg(r Reg) bool {
+	for _, s := range intScratchRegs {
+		if r == s {
+			return true
+		}
+	}
+	return false
+}
+
+// freeScratch returns a fixed scratch register that is none of used, or ok=false
+// when register pressure has claimed all three.
+func freeScratch(used ...Reg) (Reg, bool) {
+	for _, s := range intScratchRegs {
+		free := true
+		for _, u := range used {
+			if s == u {
+				free = false
+				break
+			}
+		}
+		if free {
+			return s, true
+		}
+	}
+	return 0, false
 }
 
 // parallelMove performs a set of simultaneous moves, ordering them so no source

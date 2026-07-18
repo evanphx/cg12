@@ -56,6 +56,7 @@ const (
 	bcTable          // jump table R[a] via switches[bx]  (iABx)
 	bcBr             // computed goto to address in R[a]
 	bcHlt            // trap: unreachable
+	bcIntrin         // named intrinsic via intrins[bx]         (iABx)
 )
 
 // Bit layout (from the MSB): op[56:64) cls[48:56) aux[40:48) a[28:40) b[16:28)
@@ -114,6 +115,15 @@ type selInfo struct {
 	cond, a, b uint16
 }
 
+// intrinInfo backs a bcIntrin: the intrinsic name to dispatch on, the result
+// register (dst, unused when the intrinsic yields no value), and the operand
+// registers -- more than one word can carry. Indexed by bx.
+type intrinInfo struct {
+	name string
+	dst  uint16
+	args []uint16
+}
+
 // bcFunc is a compiled function: its instruction stream, the side tables its
 // instructions index, and the window size to reserve for a call.
 type bcFunc struct {
@@ -123,6 +133,7 @@ type bcFunc struct {
 	calls     []callSite           // indexed by bcCall's bx
 	switches  []switchInfo         // indexed by bcSwitch/bcTable's bx
 	sels      []selInfo            // indexed by bcSel's bx
+	intrins   []intrinInfo         // indexed by bcIntrin's bx
 	blockPC   map[*ir.Block]uint32 // address-taken block -> its pc, for computed goto (bcBr)
 	frameSize uint16               // window slots to reserve
 	nParams   int

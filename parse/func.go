@@ -208,6 +208,10 @@ func (p *parser) parseInstr(b *ir.Block, resName string, cls ir.Cls, opWord stri
 		p.parseCall(b, resName, cls, true)
 		return
 	}
+	if opWord == "intrinsic" {
+		p.parseIntrinsic(b, resName, cls)
+		return
+	}
 	if op, ok := ir.OpFromString(opWord); ok {
 		if op == ir.OCall {
 			p.parseCall(b, resName, cls, false)
@@ -234,12 +238,31 @@ func (p *parser) parseInstr(b *ir.Block, resName string, cls ir.Cls, opWord stri
 	p.fail("unknown instruction %q", opWord)
 }
 
+// parseIntrinsic parses `intrinsic NAME arg, arg, ...`: a bare NAME word naming
+// the intrinsic, then its operands. A result (resName) is present iff the text
+// assigns one. Operands are parsed at ClsL, the class of the pointer and long
+// values intrinsics carry (the registry does not record per-operand classes).
+func (p *parser) parseIntrinsic(b *ir.Block, resName string, cls ir.Cls) {
+	name := p.expectWord()
+	in := ir.Instr{Op: ir.OIntrinsic, Cls: cls, Intrin: &ir.IntrinOp{Name: name}}
+	if resName != "" {
+		in.To = p.defTemp(resName, cls)
+	}
+	for isValueStart(p.tok) && !p.atStmtStart() {
+		in.Args = append(in.Args, p.parseValue(ir.ClsL))
+		if !p.acceptPunct(",") {
+			break
+		}
+	}
+	b.Instrs = append(b.Instrs, in)
+}
+
 func (p *parser) parseGeneric(b *ir.Block, resName string, cls ir.Cls, op ir.Op) {
 	in := ir.Instr{Op: op, Cls: cls}
 	if resName != "" && op.HasResult() {
 		in.To = p.defTemp(resName, cls)
 	}
-	for i := 0; isValueStart(p.tok); i++ {
+	for i := 0; isValueStart(p.tok) && !p.atStmtStart(); i++ {
 		in.Args = append(in.Args, p.parseValue(opArgClass(op, cls, i)))
 		if !p.acceptPunct(",") {
 			break

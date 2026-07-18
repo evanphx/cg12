@@ -142,6 +142,31 @@ author's responsibility. Register reads and writes are volatile — the optimize
 never removes, reorders, or CSEs them. In the textual IL they are `getreg`/
 `setreg`.
 
+## Intrinsics
+
+A low-level primitive that has no internal control flow — reading the stack
+pointer, an atomic add, a memory fence, a byte swap — is an **intrinsic**: a
+named operation carried by one generic `intrinsic` instruction, rather than its
+own opcode. In the tree today are `stacksave`/`stackrestore` (which bracket a
+variable-length array) and the atomic family (`atomic.load.l`, `atomic.cas.w`,
+`atomic.fence`, …, with the operation and width in the name):
+
+```
+%sp =l intrinsic stacksave
+intrinsic stackrestore %sp
+
+%old =l intrinsic atomic.add.l %counter, 1
+```
+
+An intrinsic is registered with a description of its **effects** — whether an
+unused one is dead, whether two equal ones may be shared, whether it moves, and
+whether it touches memory — so the optimizer (DCE, GVN, GCM, load elimination,
+alias analysis) reasons about it correctly without knowing what it does. The
+printer, parser, binary format, and verifier all handle it by name, so adding
+one is: register its effects, teach the interpreter to run it, and teach each
+backend that supports it to lower it. See
+[docs/intrinsics.md](docs/intrinsics.md) for the step-by-step guide.
+
 ## Linking
 
 The `link` package combines relocatable objects into one, from either front-end:

@@ -25,7 +25,7 @@ func GVN(f *ir.Func) bool {
 		var added []valueKey
 		for i := range b.Instrs {
 			in := &b.Instrs[i]
-			if !gvnEligible(in.Op) || in.To.Kind != ir.RefTemp {
+			if !movable(in) || in.To.Kind != ir.RefTemp {
 				continue
 			}
 			k := makeKey(in, sub)
@@ -56,12 +56,14 @@ func GVN(f *ir.Func) bool {
 	return changed
 }
 
-// valueKey identifies a pure computation by its op, class, predicate, and
-// canonicalised operands (resolved through prior substitutions).
+// valueKey identifies a pure computation by its op, class, predicate, intrinsic
+// name (for an OIntrinsic), and canonicalised operands (resolved through prior
+// substitutions).
 type valueKey struct {
 	op   ir.Op
 	cls  ir.Cls
 	cmp  ir.Cmp
+	name string // intrinsic name, so two different pure intrinsics do not collide
 	a, b ir.Ref
 }
 
@@ -71,7 +73,11 @@ func makeKey(in *ir.Instr, sub subst) valueKey {
 	if in.Op.IsCommutative() && lessRef(b, a) {
 		a, b = b, a
 	}
-	return valueKey{op: in.Op, cls: in.Cls, cmp: in.Cmp, a: a, b: b}
+	name := ""
+	if in.Op == ir.OIntrinsic && in.Intrin != nil {
+		name = in.Intrin.Name
+	}
+	return valueKey{op: in.Op, cls: in.Cls, cmp: in.Cmp, name: name, a: a, b: b}
 }
 
 func lessRef(x, y ir.Ref) bool {
@@ -95,4 +101,16 @@ func gvnEligible(op ir.Op) bool {
 		return true
 	}
 	return false
+}
+
+// movable reports whether an instruction is a pure computation that GVN may share
+// and GCM may reschedule. It extends gvnEligible to a pure intrinsic, which the
+// registry describes: it must be pure and have at most two operands, since the
+// value key (makeKey) canonicalises only two.
+func movable(in *ir.Instr) bool {
+	if in.Op == ir.OIntrinsic {
+		e := ir.LookupIntrinsic(in.Intrin.Name)
+		return e != nil && e.Pure && len(in.Args) <= 2
+	}
+	return gvnEligible(in.Op)
 }

@@ -3,6 +3,7 @@ package interp
 import (
 	"math"
 	"math/bits"
+	"strings"
 
 	"github.com/evanphx/cg12/ir"
 )
@@ -18,20 +19,12 @@ func (mc *Machine) execInstr(fr *frame, in *ir.Instr) error {
 		return mc.execLoad(fr, in)
 	case in.Op.IsStore():
 		return mc.execStore(fr, in)
-	case in.Op.IsAlloc():
+	case in.Op.IsAlloc() || in.Op == ir.OAllocN:
 		return mc.execAlloc(fr, in)
 	case in.Op == ir.OBlit:
 		return mc.execBlit(fr, in)
-	case in.Op == ir.OStackSave:
-		fr.vals[in.To.ID] = ptrVal(mc.sp)
-		return nil
-	case in.Op == ir.OStackRestore:
-		v, err := mc.evalRef(fr, in.Arg(0))
-		if err != nil {
-			return err
-		}
-		mc.sp = v.u64()
-		return nil
+	case in.Op == ir.OIntrinsic:
+		return mc.execIntrinsic(fr, in)
 	case in.Op == ir.OVaStart:
 		return mc.execVaStart(fr, in)
 	case in.Op == ir.OVaArg:
@@ -55,6 +48,43 @@ func (mc *Machine) execInstr(fr *frame, in *ir.Instr) error {
 		fr.vals[in.To.ID] = v.asClass(in.Cls)
 	}
 	return nil
+}
+
+// execIntrinsic runs a named intrinsic. The names it knows are the low-level
+// primitives the interpreter can model; an unknown one is a trap rather than a
+// silent no-op.
+func (mc *Machine) execIntrinsic(fr *frame, in *ir.Instr) error {
+	switch in.Intrin.Name {
+	case "stacksave":
+		fr.vals[in.To.ID] = ptrVal(mc.sp)
+		return nil
+	case "stackrestore":
+		v, err := mc.evalRef(fr, in.Arg(0))
+		if err != nil {
+			return err
+		}
+		mc.sp = v.u64()
+		return nil
+	}
+	if strings.HasPrefix(in.Intrin.Name, "atomic.") {
+		args := make([]Value, len(in.Args))
+		for i := range in.Args {
+			v, err := mc.evalRef(fr, in.Arg(i))
+			if err != nil {
+				return err
+			}
+			args[i] = v
+		}
+		res, hasResult, err := mc.atomicOp(in.Intrin.Name, args)
+		if err != nil {
+			return err
+		}
+		if hasResult && !in.To.IsNone() {
+			fr.vals[in.To.ID] = res
+		}
+		return nil
+	}
+	return mc.trapf("interp: unknown intrinsic %q", in.Intrin.Name)
 }
 
 // evalValueOp evaluates a pure (result-producing, side-effect-free) op.

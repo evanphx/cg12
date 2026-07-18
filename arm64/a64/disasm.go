@@ -738,8 +738,22 @@ func disasmExclusive(w uint32) string {
 	load := bits(w, 22, 22) == 1
 	acqrel := bits(w, 15, 15) == 1
 	rt, rn, rs := w&0x1f, bits(w, 9, 5), bits(w, 20, 16)
+
+	// Bit 23 set is the ordered, non-exclusive pair (LDAR/STLR): no status
+	// register, and acquire/release is implied.
+	if bits(w, 23, 23) == 1 {
+		if rs != 31 {
+			return ""
+		}
+		mn := "stlr"
+		if load {
+			mn = "ldar"
+		}
+		return fmt.Sprintf("%s %s, [%s]", mn, gpr(w64, rt), gprSP(true, rn))
+	}
+
 	switch {
-	case load && bits(w, 20, 16) == 31:
+	case load && rs == 31:
 		mn := "ldxr"
 		if acqrel {
 			mn = "ldaxr"

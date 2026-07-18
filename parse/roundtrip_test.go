@@ -29,6 +29,47 @@ func TestRoundTripAdd(t *testing.T) {
 	roundTrip(t, m)
 }
 
+func TestRoundTripIntrinsic(t *testing.T) {
+	// Both intrinsic forms survive a print/parse/print cycle: the value-producing
+	// stacksave (names a result) and the void stackrestore (takes an operand).
+	m := ir.NewModule()
+	f := m.NewFuncVoid("f").Export()
+	e := f.Entry()
+	sp := e.StackSave()
+	e.StackRestore(sp)
+	e.RetVoid()
+	roundTrip(t, m)
+
+	// The parsed form has the payload the backends and optimizer read.
+	m2, err := parse.Parse(m.String())
+	require.NoError(t, err)
+	in := m2.Funcs[0].Start.Instrs
+	require.Len(t, in, 2)
+	assert.Equal(t, "stacksave", in[0].Intrin.Name)
+	assert.Equal(t, "stackrestore", in[1].Intrin.Name)
+}
+
+func TestRoundTripAtomics(t *testing.T) {
+	// Atomic intrinsics carry the operation and width in a dotted name, and a
+	// store is void; both survive print/parse/print.
+	m := ir.NewModule()
+	f := m.NewFuncVoid("f").Export()
+	p := f.Param("p", ir.ClsL)
+	e := f.Entry()
+	e.AtomicStore(ir.ClsL, p, f.Long(1))
+	e.AtomicRMW("add", ir.ClsL, p, f.Long(2))
+	e.AtomicFence()
+	e.RetVoid()
+	roundTrip(t, m)
+
+	m2, err := parse.Parse(m.String())
+	require.NoError(t, err)
+	in := m2.Funcs[0].Start.Instrs
+	assert.Equal(t, "atomic.store.l", in[0].Intrin.Name)
+	assert.Equal(t, "atomic.add.l", in[1].Intrin.Name)
+	assert.Equal(t, "atomic.fence", in[2].Intrin.Name)
+}
+
 func TestRoundTripLoopWithPhis(t *testing.T) {
 	m := ir.NewModule()
 	f := m.NewFunc("sumto", ir.ClsW).Export()

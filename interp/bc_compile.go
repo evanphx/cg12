@@ -52,6 +52,7 @@ func (mc *Machine) compile(f *ir.Func) (*bcFunc, error) {
 		calls:     c.calls,
 		switches:  c.switches,
 		sels:      c.sels,
+		intrins:   c.intrins,
 		blockPC:   blockPC,
 		frameSize: c.frameTop,
 		nParams:   len(f.Params),
@@ -75,6 +76,7 @@ type compiler struct {
 	calls      []callSite
 	switches   []switchInfo
 	sels       []selInfo
+	intrins    []intrinInfo
 	blockStart map[*ir.Block]uint32
 	fixups     []fixup
 

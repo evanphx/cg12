@@ -104,6 +104,10 @@ type Instr struct {
 
 	// Asm carries an OAsm's inline-assembly template and operand layout.
 	Asm *AsmOp
+
+	// Intrin carries an OIntrinsic's dispatch name (the intrinsic being invoked).
+	// nil for every other op.
+	Intrin *IntrinOp
 }
 
 // AsmOperandKind classifies an inline-asm operand for template substitution.

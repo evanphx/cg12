@@ -29,9 +29,10 @@ func Parse(src string) (*ir.Module, error) {
 }
 
 type parser struct {
-	lex *lexer
-	tok token
-	err error
+	lex    *lexer
+	tok    token
+	peeked *token // one-token lookahead buffer, filled by peek
+	err    error
 
 	typesByName map[string]*ir.AggType
 	m           *ir.Module // the module under construction (for the file table)
@@ -49,7 +50,38 @@ func (p *parser) advance() {
 	if p.err != nil {
 		return
 	}
+	if p.peeked != nil {
+		p.tok, p.peeked = *p.peeked, nil
+		return
+	}
 	p.tok, p.err = p.lex.next()
+}
+
+// peek returns the token after the current one without consuming it. It lets a
+// value loop tell an operand from the start of the next statement: a temporary
+// that a following '=' turns into a result assignment, not an operand.
+func (p *parser) peek() token {
+	if p.peeked == nil && p.err == nil {
+		var t token
+		t, p.err = p.lex.next()
+		p.peeked = &t
+	}
+	if p.peeked == nil {
+		return token{kind: tEOF}
+	}
+	return *p.peeked
+}
+
+// atStmtStart reports whether the current token begins a new statement -- a
+// result temporary immediately followed by '=' -- rather than continuing the
+// operand list being read. Without this a zero-operand instruction would consume
+// the next line's result temporary as its operand.
+func (p *parser) atStmtStart() bool {
+	if p.tok.kind != tTemp {
+		return false
+	}
+	n := p.peek()
+	return n.kind == tPunct && n.s == "="
 }
 
 func (p *parser) fail(format string, a ...any) {

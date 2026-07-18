@@ -174,6 +174,35 @@ func TestBytecodeMatchesTreeWalker(t *testing.T) {
 			fn:   "f", args: []interp.Value{interp.L(0), interp.L(10), interp.L(20)},
 		},
 		{
+			name: "stack-intrinsics",
+			// stacksave/stackrestore bracket a VLA; both engines run the same
+			// intrinsic dispatch and must agree on the value read from it.
+			il: `export function w $f() {
+				@s
+				%sp =l intrinsic stacksave
+				%p =l alloc4 16
+				storew 7, %p
+				%v =w loadw %p
+				intrinsic stackrestore %sp
+				ret %v
+			}`,
+			fn: "f",
+		},
+		{
+			name: "allocn",
+			// A runtime-sized (VLA) stack allocation: n*16 bytes, written and read
+			// back, exercised under both engines.
+			il: `export function w $f(l %n) {
+				@s
+				%sz =l mul %n, 16
+				%p =l allocn %sz
+				storew 7, %p
+				%v =w loadw %p
+				ret %v
+			}`,
+			fn: "f", args: []interp.Value{interp.L(2)},
+		},
+		{
 			name: "variadic-sum",
 			il: `export function w $sum(w %n, ...) {
 				@start

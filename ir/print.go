@@ -200,7 +200,7 @@ func (f *Func) printPos(sb *strings.Builder, pos, last SrcPos) SrcPos {
 
 func (f *Func) printInstr(sb *strings.Builder, in *Instr) {
 	sb.WriteByte('\t')
-	if in.Op.HasResult() && !in.To.IsNone() {
+	if (in.Op.HasResult() || in.Op == OIntrinsic) && !in.To.IsNone() {
 		if in.Op == OCall && in.RetAgg != nil {
 			fmt.Fprintf(sb, "%s =:%s ", f.refString(in.To), in.RetAgg.Name)
 		} else {
@@ -219,6 +219,15 @@ func (f *Func) printInstr(sb *strings.Builder, in *Instr) {
 		}
 		fmt.Fprintf(sb, " @%s\n", name)
 		return
+	}
+	if in.Op == OIntrinsic {
+		name := "?"
+		if in.Intrin != nil {
+			name = in.Intrin.Name
+		}
+		sb.WriteByte(' ')
+		sb.WriteString(name)
+		// The operands follow, printed by the generic loop below.
 	}
 	if in.Op == OCall {
 		fmt.Fprintf(sb, " %s(", f.refString(in.Args[0]))

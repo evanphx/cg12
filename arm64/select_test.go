@@ -30,6 +30,29 @@ int main(){
 	require.Equal(t, 0, runObject(t, data, main))
 }
 
+// The stacksave/stackrestore intrinsics lower to SP moves (the OIntrinsic
+// dispatch replacing the former OStackSave/OStackRestore ops). This brackets a
+// runtime stack allocation with them and checks the value survives and the stack
+// pointer is left where it began, end to end.
+func TestStackIntrinsics(t *testing.T) {
+	m := ir.NewModule()
+	f := m.NewFunc("stk", ir.ClsL).Export()
+	e := f.Entry()
+	sp := e.StackSave()
+	p := e.AllocN(f.Long(16)) // a 16-byte dynamic allocation
+	e.Store(f.Long(42), p)
+	v := e.Load(ir.ClsL, p)
+	e.StackRestore(sp) // reclaim it
+	e.Ret(v)
+
+	data, err := arm64.CompileObject(m)
+	require.NoError(t, err)
+
+	main := `extern long stk(void);
+int main(){ return stk()==42 ? 0 : 1; }`
+	require.Equal(t, 0, runObject(t, data, main))
+}
+
 func TestSelectFcsel(t *testing.T) {
 	m := ir.NewModule()
 	f := m.NewFunc("seld", ir.ClsD).Export()

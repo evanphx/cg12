@@ -329,6 +329,10 @@ var encodingCases = []encodingCase{
 	{"stxr w3, x4, [x5]", Stxr(true, 3, 4, 5)},
 	{"stlxr w6, w7, [x8]", Stlxr(false, 6, 7, 8)},
 	{"stlxr w9, x10, [x11]", Stlxr(true, 9, 10, 11)},
+	{"ldar w0, [x1]", Ldar(false, 0, 1)},
+	{"ldar x2, [x3]", Ldar(true, 2, 3)},
+	{"stlr w4, [x5]", Stlr(false, 4, 5)},
+	{"stlr x6, [x7]", Stlr(true, 6, 7)},
 
 	// System-register transfer (mrs already had tpidr_el0; the rest are new).
 	{"mrs x0, fpcr", Mrs(0, SysRegs["fpcr"])},

@@ -72,7 +72,8 @@ func TestInstrRoundTripsEveryField(t *testing.T) {
 			Call:   SrcPos{File: 1, Line: 9, Col: 1},
 			Parent: &InlineSite{Callee: "outer", Call: SrcPos{File: 1, Line: 4, Col: 2}},
 		},
-		Blk: &Block{Name: "target"},
+		Blk:    &Block{Name: "target"},
+		Intrin: &IntrinOp{Name: "stacksave"},
 	}
 	allFieldsSet(t, in)
 	// The carried structs need the same treatment: a field added to one of them
@@ -80,6 +81,7 @@ func TestInstrRoundTripsEveryField(t *testing.T) {
 	// Instr's own fields does not see it.
 	allFieldsSet(t, *in.Asm)
 	allFieldsSet(t, *in.Inl, "Parent") // the innermost site has no parent to set
+	allFieldsSet(t, *in.Intrin)
 
 	got := roundTripInstr(t, in)
 

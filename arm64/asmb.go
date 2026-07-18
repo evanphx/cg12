@@ -1,6 +1,8 @@
 package arm64
 
 import (
+	"fmt"
+
 	"github.com/evanphx/cg12/arm64/a64"
 	"github.com/evanphx/cg12/ir"
 	"github.com/evanphx/cg12/obj"
@@ -92,6 +94,22 @@ type asmb interface {
 	cbnz(w64 bool, rn Reg, to *ir.Block)
 	brind(rn Reg)
 	brk()
+
+	// Atomics and barriers. ldar/stlr are an acquire load and release store; the
+	// exclusive pair (ldaxr/stlxr) plus these build an atomic read-modify-write as
+	// a retry loop, and dmb is the fence. The retry loop is emitted with a
+	// selector-local label: freshLabel mints a unique name, label plants it, and
+	// branchTo/cbnzTo/bcondTo branch to it by name.
+	ldar(w64 bool, rt, rn Reg)
+	stlr(w64 bool, rt, rn Reg)
+	ldaxr(w64 bool, rt, rn Reg)
+	stlxr(w64 bool, rs, rt, rn Reg)
+	dmb(o a64.BarrierOption)
+	freshLabel(prefix string) string
+	label(name string)
+	branchTo(name string)
+	cbnzTo(w64 bool, rn Reg, name string)
+	bcondTo(cond a64.Cond, name string)
 
 	// jumpTable emits an indexed branch through a PC-relative offset table placed
 	// just past the branch: target = table + (int32)table[idx]. idx is already
@@ -497,7 +515,22 @@ func (b *mcAsm) ldrSpill(rd Reg, float bool, off, size int) {
 func (b *mcAsm) strSpill(rs Reg, float bool, off, size int) {
 	b.m.spillStore(mreg(rs), float, off, size)
 }
-func (b *mcAsm) raw(word uint32)              { b.prog.Emit(word) }
-func (b *mcAsm) fail(format string, a ...any) { b.m.fail(format, a...) }
+func (b *mcAsm) ldar(w64 bool, rt, rn Reg)  { b.prog.Emit(a64.Ldar(w64, mreg(rt), mreg(rn))) }
+func (b *mcAsm) stlr(w64 bool, rt, rn Reg)  { b.prog.Emit(a64.Stlr(w64, mreg(rt), mreg(rn))) }
+func (b *mcAsm) ldaxr(w64 bool, rt, rn Reg) { b.prog.Emit(a64.Ldaxr(w64, mreg(rt), mreg(rn))) }
+func (b *mcAsm) stlxr(w64 bool, rs, rt, rn Reg) {
+	b.prog.Emit(a64.Stlxr(w64, mreg(rs), mreg(rt), mreg(rn)))
+}
+func (b *mcAsm) dmb(o a64.BarrierOption) { b.prog.Emit(a64.Dmb(o)) }
+func (b *mcAsm) freshLabel(prefix string) string {
+	b.m.atomicSeq++
+	return fmt.Sprintf("%s_%d", prefix, b.m.atomicSeq)
+}
+func (b *mcAsm) label(name string)                    { b.prog.Label(name) }
+func (b *mcAsm) branchTo(name string)                 { b.prog.B(name) }
+func (b *mcAsm) cbnzTo(w64 bool, rn Reg, name string) { b.prog.Cbnz(w64, mreg(rn), name) }
+func (b *mcAsm) bcondTo(cond a64.Cond, name string)   { b.prog.Bcond(cond, name) }
+func (b *mcAsm) raw(word uint32)                      { b.prog.Emit(word) }
+func (b *mcAsm) fail(format string, a ...any)         { b.m.fail(format, a...) }
 
 // --- text backend ----------------------------------------------------------

@@ -83,6 +83,22 @@ func TestIsDeadClassification(t *testing.T) {
 	assert.False(t, isDead(&ir.Instr{Op: ir.OCall}, uses))
 }
 
+// An intrinsic's effect registry entry decides whether DCE may remove it. The
+// two stack intrinsics sit on opposite sides of that line: stacksave has a
+// result but no side effect, so an unused one is dead; stackrestore is a side
+// effect, so it is kept even though it yields nothing.
+func TestDCEIntrinsicEffects(t *testing.T) {
+	f := ir.NewModule().NewFuncVoid("d")
+	e := f.Entry()
+	e.StackSave()                              // result unused: removable
+	e.IntrinsicVoid("stackrestore", f.Word(0)) // side effect: kept
+	e.RetVoid()
+
+	assert.True(t, DCE(f))
+	require.Len(t, e.Instrs, 1)
+	assert.Equal(t, "stackrestore", e.Instrs[0].Intrin.Name, "stackrestore survives DCE")
+}
+
 func TestDCENoChange(t *testing.T) {
 	f := ir.NewModule().NewFunc("d", ir.ClsW)
 	a := f.Param("a", ir.ClsW)

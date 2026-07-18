@@ -203,6 +203,13 @@ func verifyInstr(f *Func, b *Block, in *Instr) error {
 		if len(in.Args) != 3 {
 			return where("select needs 3 operands (cond, a, b), has %d", len(in.Args))
 		}
+	case OIntrinsic:
+		if in.Intrin == nil {
+			return where("no name: an intrinsic is dispatched by name, and there is no default")
+		}
+		if LookupIntrinsic(in.Intrin.Name) == nil {
+			return where("unknown intrinsic %q (not registered)", in.Intrin.Name)
+		}
 	}
 	for _, a := range in.Args {
 		if err := verifyRef(f, b, in.Op.String(), a); err != nil {

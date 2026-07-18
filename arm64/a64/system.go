@@ -75,6 +75,22 @@ func exSize(w64 bool) uint32 {
 	return 2
 }
 
+// The ordered, non-exclusive pair. LDAR reads with acquire ordering and STLR
+// writes with release ordering, each in a single instruction and without the
+// monitor an exclusive pair sets. They are what a plain atomic load and store
+// lower to -- no retry loop, because there is nothing to lose a reservation on.
+// They share the load/store-exclusive encoding but with the ordered bit set and
+// no status/second register (Rs and Rt2 are 31).
+func ordered(size, l uint32, rn, rt Reg) uint32 {
+	return size<<30 | 0x8<<24 | 1<<23 | l<<22 | 31<<16 | 1<<15 | 31<<10 | r(rn)<<5 | r(rt)
+}
+
+// Ldar encodes LDAR <Wt|Xt>, [<Xn>]: a load with acquire ordering.
+func Ldar(w64 bool, rt, rn Reg) uint32 { return ordered(exSize(w64), 1, rn, rt) }
+
+// Stlr encodes STLR <Wt|Xt>, [<Xn>]: a store with release ordering.
+func Stlr(w64 bool, rt, rn Reg) uint32 { return ordered(exSize(w64), 0, rn, rt) }
+
 // System-register access. A system register is named by five small fields
 // (op0/op1, CRn, CRm, op2); MRS reads one into a general register, MSR writes
 // one from it. The named-register set below is the user-accessible common ones

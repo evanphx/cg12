@@ -481,6 +481,7 @@ type mc struct {
 
 	blockDone bool
 	vaSeq     int
+	atomicSeq int
 	rows      []obj.LineRow // source positions, keyed by func-relative byte offset
 	lastPos   ir.SrcPos
 	inl       []inlSample // inline-context changes, keyed by func-relative offset

@@ -55,6 +55,15 @@ func LoadElim(f *ir.Func) bool {
 				}
 			case in.Op == ir.OCall || in.Op == ir.OBlit || in.Op == ir.OVaStart || in.Op == ir.OAsm:
 				avail = nil // an unknown memory effect clears everything
+			case in.Op == ir.OIntrinsic:
+				// An intrinsic that touches memory (or an unregistered one) clobbers
+				// cached loads. Writing invalidates the obvious way; reading matters
+				// too, because an atomic acquire load synchronizes-with another
+				// thread and can make a previously-cached value stale. One that
+				// touches no memory (stacksave) is transparent.
+				if e := ir.LookupIntrinsic(in.Intrin.Name); e == nil || e.WritesMemory || e.ReadsMemory {
+					avail = nil
+				}
 			}
 		}
 		exit[b] = avail

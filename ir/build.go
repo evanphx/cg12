@@ -365,12 +365,69 @@ func (b *Block) AllocN(size Ref) Ref {
 	return b.emit(OAllocN, ClsP, size)
 }
 
+// Intrinsic invokes the named intrinsic with the given operands and returns its
+// result (class cls). For an intrinsic that yields no value use IntrinsicVoid.
+func (b *Block) Intrinsic(name string, cls Cls, args ...Ref) Ref {
+	res := b.fn.newTemp("", cls)
+	b.Instrs = append(b.Instrs, Instr{
+		Op: OIntrinsic, Cls: cls, To: res, Args: args,
+		Intrin: &IntrinOp{Name: name}, Pos: b.curPos,
+	})
+	return res
+}
+
+// IntrinsicVoid invokes the named intrinsic for effect only.
+func (b *Block) IntrinsicVoid(name string, args ...Ref) {
+	b.Instrs = append(b.Instrs, Instr{
+		Op: OIntrinsic, Args: args, Intrin: &IntrinOp{Name: name}, Pos: b.curPos,
+	})
+}
+
 // StackSave captures the current stack pointer, and StackRestore sets it back to
 // a saved value, reclaiming any VLAs allocated in between.
-func (b *Block) StackSave() Ref { return b.emit(OStackSave, ClsP) }
-func (b *Block) StackRestore(sp Ref) {
-	b.Instrs = append(b.Instrs, Instr{Op: OStackRestore, Args: []Ref{sp}, Pos: b.curPos})
+func (b *Block) StackSave() Ref      { return b.Intrinsic("stacksave", ClsP) }
+func (b *Block) StackRestore(sp Ref) { b.IntrinsicVoid("stackrestore", sp) }
+
+// atomicName is the registered name of an atomic operation at a given width: the
+// class picks the ".w" (4-byte) or ".l" (8-byte) suffix. The width lives in the
+// name, so it survives the textual IL even for a void store.
+func atomicName(op string, cls Cls) string {
+	if cls == ClsL || cls == ClsP {
+		return "atomic." + op + ".l"
+	}
+	return "atomic." + op + ".w"
 }
+
+// AtomicLoad atomically reads a cls-width value from addr.
+func (b *Block) AtomicLoad(cls Cls, addr Ref) Ref {
+	return b.Intrinsic(atomicName("load", cls), cls, addr)
+}
+
+// AtomicStore atomically writes val (cls-width) to addr.
+func (b *Block) AtomicStore(cls Cls, addr, val Ref) {
+	b.IntrinsicVoid(atomicName("store", cls), addr, val)
+}
+
+// AtomicXchg atomically stores val to addr and returns the previous value.
+func (b *Block) AtomicXchg(cls Cls, addr, val Ref) Ref {
+	return b.Intrinsic(atomicName("xchg", cls), cls, addr, val)
+}
+
+// AtomicCAS atomically compares *addr against expected and, when equal, stores
+// newVal; it returns the value that was in *addr (which equals expected exactly
+// when the swap happened).
+func (b *Block) AtomicCAS(cls Cls, addr, expected, newVal Ref) Ref {
+	return b.Intrinsic(atomicName("cas", cls), cls, addr, expected, newVal)
+}
+
+// AtomicRMW atomically applies op (one of add, sub, and, or, xor) to *addr with
+// val and returns the previous value.
+func (b *Block) AtomicRMW(op string, cls Cls, addr, val Ref) Ref {
+	return b.Intrinsic(atomicName(op, cls), cls, addr, val)
+}
+
+// AtomicFence emits a full memory barrier.
+func (b *Block) AtomicFence() { b.IntrinsicVoid("atomic.fence") }
 
 // Call invokes callee with args and returns the result (class retCls). For a
 // void call use CallVoid.

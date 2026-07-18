@@ -2,6 +2,7 @@ package interp
 
 import (
 	"math/bits"
+	"strings"
 
 	"github.com/evanphx/cg12/ir"
 )
@@ -130,18 +131,33 @@ func (mc *Machine) vmLoop(bf *bcFunc, base uint32, va []Value) (Value, error) {
 			mc.regs[base+uint32(w.ra())] = mc.regs[base+uint32(pick)].asClass(w.cls())
 			pc++
 		case bcUnop:
-			op := ir.Op(w.aux())
-			switch op {
-			case ir.OStackSave:
-				mc.regs[base+uint32(w.ra())] = ptrVal(mc.sp)
-			case ir.OStackRestore:
-				mc.sp = mc.regs[base+uint32(w.rb())].u64()
-			default:
-				r, err := mc.evalUnop(op, w.cls(), mc.regs[base+uint32(w.rb())])
+			r, err := mc.evalUnop(ir.Op(w.aux()), w.cls(), mc.regs[base+uint32(w.rb())])
+			if err != nil {
+				return Value{}, err
+			}
+			mc.regs[base+uint32(w.ra())] = r
+			pc++
+		case bcIntrin:
+			ii := &bf.intrins[w.bx()]
+			switch {
+			case ii.name == "stacksave":
+				mc.regs[base+uint32(ii.dst)] = ptrVal(mc.sp)
+			case ii.name == "stackrestore":
+				mc.sp = mc.regs[base+uint32(ii.args[0])].u64()
+			case strings.HasPrefix(ii.name, "atomic."):
+				args := make([]Value, len(ii.args))
+				for i, r := range ii.args {
+					args[i] = mc.regs[base+uint32(r)]
+				}
+				res, hasResult, err := mc.atomicOp(ii.name, args)
 				if err != nil {
 					return Value{}, err
 				}
-				mc.regs[base+uint32(w.ra())] = r
+				if hasResult {
+					mc.regs[base+uint32(ii.dst)] = res.asClass(w.cls())
+				}
+			default:
+				return Value{}, mc.trapf("bytecode: unknown intrinsic %q", ii.name)
 			}
 			pc++
 		case bcLoad:

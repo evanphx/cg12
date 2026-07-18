@@ -134,12 +134,17 @@ func (s *xsel) selectInt(in *ir.Instr) bool {
 		d, commit := s.gpDst(in.To)
 		s.b.allocNSP(d, size)
 		commit()
-	case ir.OStackSave:
-		d, commit := s.gpDst(in.To)
-		s.b.movFromSP(d)
-		commit()
-	case ir.OStackRestore:
-		s.b.movToSP(s.gpValue(in.Args[0], gpScratch0))
+	case ir.OIntrinsic:
+		switch in.Intrin.Name {
+		case "stacksave":
+			d, commit := s.gpDst(in.To)
+			s.b.movFromSP(d)
+			commit()
+		case "stackrestore":
+			s.b.movToSP(s.gpValue(in.Args[0], gpScratch0))
+		default:
+			s.b.fail("amd64: unsupported intrinsic %q", in.Intrin.Name)
+		}
 	case ir.OGetReg:
 		src := regLoc(Reg(in.Arg(0).ID), in.Cls.Size(), in.Cls.IsFloat())
 		s.b.move(s.b.refLoc(in.To), src)

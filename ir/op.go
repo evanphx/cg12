@@ -68,11 +68,13 @@ const (
 	// 16-aligned pointer, valid until the function returns.
 	OAllocN
 
-	// OStackSave captures the current stack pointer (result is a pointer);
-	// OStackRestore sets the stack pointer to Args[0]. Together they bracket a
-	// scope so its variable-length arrays are reclaimed on exit.
-	OStackSave
-	OStackRestore
+	// These two slots were OStackSave and OStackRestore. They are now the
+	// "stacksave" and "stackrestore" intrinsics (see OIntrinsic). Their numbers
+	// are burned rather than reclaimed: an Op is written to the binary encoding as
+	// its number, so renumbering every op after them would decode old modules as
+	// different instructions.
+	_
+	_
 
 	// Memory-to-memory copy of Aux bytes from Args[1] to Args[0].
 	OBlit
@@ -182,6 +184,17 @@ const (
 	// value operands, one result of Instr.Cls.
 	OSel
 
+	// OIntrinsic invokes a named intrinsic: Instr.Intrin holds the name, Args are
+	// its operands, and To its result (when it has one). The name dispatches
+	// execution and lowering, and indexes a registry (RegisterIntrinsic) whose
+	// effect descriptor tells the optimizer how the call behaves -- whether an
+	// unused one may be removed, whether two equal ones may be shared, whether it
+	// moves, and whether it touches memory. It is the general form that specialized
+	// ops -- the former stacksave/stackrestore among them -- collapse into, so a
+	// new low-level primitive needs a registry entry, not a new opcode threaded
+	// through every pass and backend.
+	OIntrinsic
+
 	numOps
 )
 
@@ -245,12 +258,10 @@ var opTable = [numOps]opInfo{
 	OLoadd:  {name: "loadd", hasResult: true},
 	OLoadq:  {name: "loadq", hasResult: true},
 
-	OAlloc4:       {name: "alloc4", hasResult: true},
-	OAlloc8:       {name: "alloc8", hasResult: true},
-	OAlloc16:      {name: "alloc16", hasResult: true},
-	OAllocN:       {name: "allocn", hasResult: true},
-	OStackSave:    {name: "stacksave", hasResult: true},
-	OStackRestore: {name: "stackrestore"},
+	OAlloc4:  {name: "alloc4", hasResult: true},
+	OAlloc8:  {name: "alloc8", hasResult: true},
+	OAlloc16: {name: "alloc16", hasResult: true},
+	OAllocN:  {name: "allocn", hasResult: true},
 
 	OBlit: {name: "blit"},
 
@@ -293,6 +304,11 @@ var opTable = [numOps]opInfo{
 	OAsm: {name: "asm", hasResult: true},
 
 	OSel: {name: "select", hasResult: true},
+
+	// OIntrinsic has no static hasResult: an intrinsic may or may not produce a
+	// value, so its To is set (by the builder or parser) only when it does, and the
+	// printer keys off To rather than this table.
+	OIntrinsic: {name: "intrinsic"},
 }
 
 // Info returns the static metadata for an opcode.

@@ -74,8 +74,14 @@ func hasSideEffect(in *ir.Instr) bool {
 		return true // reads/writes of a live machine register are volatile
 	case op == ir.OThreadPtr, op == ir.OTLSOffset, op == ir.OTLSIndexAddr:
 		return false // both are constant for a thread, so an unused one is dead
-	case op == ir.OAllocN, op == ir.OStackSave, op == ir.OStackRestore:
-		return true // these move or snapshot the stack pointer; never remove them
+	case op == ir.OAllocN:
+		return true // moves the stack pointer to reserve a VLA; never remove it
+	case op == ir.OIntrinsic:
+		// An intrinsic's effects come from its registry entry. It matters (must be
+		// kept) if it has a side effect or writes memory; an unregistered name is
+		// treated conservatively.
+		e := ir.LookupIntrinsic(in.Intrin.Name)
+		return e == nil || e.SideEffect || e.WritesMemory
 	case op == ir.OAsm:
 		return true // inline asm is volatile: it may read/write memory and registers
 	}

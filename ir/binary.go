@@ -372,8 +372,19 @@ func (e *enc) encInstr(in *Instr, blockRef func(*Block)) {
 	e.boolean(in.Tail)
 	e.boolean(in.Volatile)
 	e.asmOp(in.Asm)
+	e.intrinOp(in.Intrin)
 	e.inlineSite(in.Inl)
 	blockRef(in.Blk) // OBlockAddr target (nil for every other op)
+}
+
+// intrinOp encodes an OIntrinsic's dispatch name, or its absence.
+func (e *enc) intrinOp(in *IntrinOp) {
+	if in == nil {
+		e.boolean(false)
+		return
+	}
+	e.boolean(true)
+	e.str(in.Name)
 }
 
 // asmOp encodes an inline-asm template and its operand kinds, or its absence.
@@ -683,9 +694,17 @@ func (d *dec) decInstr(blockRef func() *Block) Instr {
 	in.Tail = d.boolean()
 	in.Volatile = d.boolean()
 	in.Asm = d.asmOp()
+	in.Intrin = d.intrinOp()
 	in.Inl = d.inlineSite()
 	in.Blk = blockRef()
 	return in
+}
+
+func (d *dec) intrinOp() *IntrinOp {
+	if !d.boolean() {
+		return nil
+	}
+	return &IntrinOp{Name: d.str()}
 }
 
 func (d *dec) asmOp() *AsmOp {

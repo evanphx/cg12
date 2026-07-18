@@ -19,7 +19,7 @@ func (c *compiler) emitInstr(in *ir.Instr) {
 	case in.Op.IsStore():
 		c.emit(mkABC(bcStore, in.Cls, uint8(in.Op), c.refReg(in.Arg(0)), c.refReg(in.Arg(1)), 0))
 		return
-	case in.Op.IsAlloc():
+	case in.Op.IsAlloc() || in.Op == ir.OAllocN:
 		c.emit(mkABC(bcAlloc, in.Cls, uint8(in.Op), c.dst(in), c.refReg(in.Arg(0)), 0))
 		return
 	case in.Op == ir.OBlit:
@@ -29,11 +29,14 @@ func (c *compiler) emitInstr(in *ir.Instr) {
 		}
 		c.emit(mkABC(bcBlit, ir.ClsL, 0, c.refReg(in.Arg(0)), c.refReg(in.Arg(1)), uint16(in.Aux)))
 		return
-	case in.Op == ir.OStackSave:
-		c.emit(mkABC(bcUnop, ir.ClsL, uint8(ir.OStackSave), c.dst(in), 0, 0))
-		return
-	case in.Op == ir.OStackRestore:
-		c.emit(mkABC(bcUnop, ir.ClsL, uint8(ir.OStackRestore), 0, c.refReg(in.Arg(0)), 0))
+	case in.Op == ir.OIntrinsic:
+		ii := intrinInfo{name: in.Intrin.Name, dst: c.dst(in)}
+		for _, a := range in.Args {
+			ii.args = append(ii.args, c.refReg(a))
+		}
+		idx := uint32(len(c.intrins))
+		c.intrins = append(c.intrins, ii)
+		c.emit(mkABx(bcIntrin, in.Cls, 0, c.dst(in), idx))
 		return
 	case in.Op == ir.OVaStart:
 		c.emit(mkABC(bcVaStart, ir.ClsL, 0, c.refReg(in.Arg(0)), 0, 0))
