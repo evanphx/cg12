@@ -252,6 +252,17 @@ func (e *emitter) pushAddr(r ir.Ref) {
 	}
 }
 
+// pushCond leaves r on the stack as an i32 truth value (0/1), for wasm constructs
+// that require an i32 condition (if, select). A ClsL condition is reduced with a
+// compare against zero.
+func (e *emitter) pushCond(r ir.Ref) {
+	e.push(r)
+	if e.f.ClassOf(r) == ir.ClsL {
+		e.line("i64.const 0")
+		e.line("i64.ne")
+	}
+}
+
 // push emits code leaving the value of r on the operand stack.
 func (e *emitter) push(r ir.Ref) {
 	switch r.Kind {

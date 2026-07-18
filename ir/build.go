@@ -212,6 +212,11 @@ func (b *Block) Cmp(pred Cmp, resCls Cls, x, y Ref) Ref {
 	return res
 }
 
+// Select yields a when cond != 0, else b -- the branchless conditional (arm64
+// csel, LLVM select). cond is an integer tested against zero; a and b share the
+// result class cls.
+func (b *Block) Select(cls Cls, cond, a, x Ref) Ref { return b.emit(OSel, cls, cond, a, x) }
+
 // Copy returns a copy of x, optionally re-typed to cls.
 func (b *Block) Copy(cls Cls, x Ref) Ref { return b.emit(OCopy, cls, x) }
 

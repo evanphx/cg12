@@ -176,6 +176,12 @@ const (
 	// registers) while an object-emitting backend, having no assembler, rejects it.
 	OAsm
 
+	// OSel is a conditional select (arm64 csel, LLVM select, wasm select): its
+	// result is Args[1] when Args[0] != 0, else Args[2]. It is the branchless form
+	// of a c?a:b that would otherwise be a control-flow diamond and a phi. Three
+	// value operands, one result of Instr.Cls.
+	OSel
+
 	numOps
 )
 
@@ -285,6 +291,8 @@ var opTable = [numOps]opInfo{
 	OSetReg: {name: "setreg"},
 
 	OAsm: {name: "asm", hasResult: true},
+
+	OSel: {name: "select", hasResult: true},
 }
 
 // Info returns the static metadata for an opcode.

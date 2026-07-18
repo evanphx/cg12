@@ -121,6 +121,14 @@ func (mc *Machine) vmLoop(bf *bcFunc, base uint32, va []Value) (Value, error) {
 			}
 			mc.regs[base+uint32(w.ra())] = intVal(w.cls(), b2i(r))
 			pc++
+		case bcSel:
+			si := &bf.sels[w.bx()]
+			pick := si.b
+			if mc.regs[base+uint32(si.cond)].u64() != 0 {
+				pick = si.a
+			}
+			mc.regs[base+uint32(w.ra())] = mc.regs[base+uint32(pick)].asClass(w.cls())
+			pc++
 		case bcUnop:
 			op := ir.Op(w.aux())
 			switch op {

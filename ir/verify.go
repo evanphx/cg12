@@ -199,6 +199,10 @@ func verifyInstr(f *Func, b *Block, in *Instr) error {
 		if in.Blk == nil {
 			return where("no target block: the address of a label needs the label")
 		}
+	case OSel:
+		if len(in.Args) != 3 {
+			return where("select needs 3 operands (cond, a, b), has %d", len(in.Args))
+		}
 	}
 	for _, a := range in.Args {
 		if err := verifyRef(f, b, in.Op.String(), a); err != nil {

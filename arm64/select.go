@@ -161,6 +161,8 @@ func (s *sel) selectData(in *ir.Instr) bool {
 		done()
 	case ir.OCmp:
 		s.cmp(in)
+	case ir.OSel:
+		s.sel(in)
 
 	// Conversions.
 	case ir.OExts:
@@ -285,6 +287,36 @@ func (s *sel) cmp(in *ir.Instr) {
 	}
 	d, done := s.dst(in.To, in.Cls.Size())
 	s.b.cset(d, in.Cmp, float)
+	done()
+}
+
+// sel emits a conditional select (csel / fcsel): its boolean condition is turned
+// back into flags with cmp #0, then csel picks between the two arms. cond is an
+// integer (int scratch), so its scratch bank is distinct from a/b's when those
+// are floats.
+func (s *sel) sel(in *ir.Instr) {
+	sz := in.Cls.Size()
+	w64 := sz == 8
+	float := in.Cls.IsFloat()
+
+	condCls := s.f.ClassOf(in.Args[0])
+	cond := s.src(in.Args[0], 0, condCls.Size())
+	s.b.cmpImm(condCls.Size() == 8, cond, 0)
+
+	var a, b Reg
+	if float {
+		a = s.src(in.Args[1], 0, sz)
+		b = s.src(in.Args[2], 1, sz)
+	} else {
+		a = s.src(in.Args[1], 1, sz)
+		b = s.src(in.Args[2], 2, sz)
+	}
+	d, done := s.dst(in.To, sz)
+	if float {
+		s.b.fcsel(w64, d, a, b, a64.NE)
+	} else {
+		s.b.csel(w64, d, a, b, a64.NE)
+	}
 	done()
 }
 

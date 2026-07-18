@@ -101,6 +101,21 @@ func (mc *Machine) evalValueOp(fr *frame, in *ir.Instr) (Value, error) {
 	case ir.OCmp:
 		return mc.evalCmp(fr, in)
 
+	case ir.OSel:
+		cond, err := arg(0)
+		if err != nil {
+			return Value{}, err
+		}
+		pick := 2
+		if cond.u64() != 0 {
+			pick = 1
+		}
+		v, err := mc.evalRef(fr, in.Arg(pick))
+		if err != nil {
+			return Value{}, err
+		}
+		return v.asClass(in.Cls), nil
+
 	// Integer sub-word extends (transliterate opt/fold.go:107-120).
 	case ir.OExtsb, ir.OExtub, ir.OExtsh, ir.OExtuh, ir.OExtsw, ir.OExtuw:
 		a, err := arg(0)

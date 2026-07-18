@@ -98,6 +98,18 @@ func foldInstr(f *ir.Func, in *ir.Instr) (ir.Ref, bool) {
 			return f.ConstInt(in.Cls, truncCls(in.Cls, -c)), true
 		}
 
+	case ir.OSel:
+		// A constant condition selects one arm; identical arms collapse.
+		if c, ok := constInt(f, in.Args[0]); ok {
+			if c != 0 {
+				return in.Args[1], true
+			}
+			return in.Args[2], true
+		}
+		if in.Args[1] == in.Args[2] {
+			return in.Args[1], true
+		}
+
 	case ir.OExtsw, ir.OExtuw, ir.OExtsb, ir.OExtub, ir.OExtsh, ir.OExtuh:
 		// Fold an integer width extension of a constant; this collapses the
 		// constant-offset address arithmetic (extsw i; mul _,sz; add base,_) that a

@@ -138,6 +138,32 @@ func TestFoldMoreIdentities(t *testing.T) {
 	}
 }
 
+func TestFoldSelect(t *testing.T) {
+	// A constant-true condition picks the first arm.
+	f := ir.NewModule().NewFunc("t", ir.ClsW)
+	x := f.Param("x", ir.ClsW)
+	e := f.Entry()
+	e.Ret(e.Select(ir.ClsW, f.Word(1), x, f.Word(99)))
+	Fold(f)
+	assert.Equal(t, x, e.Jmp.Arg)
+
+	// A constant-false condition picks the second arm.
+	f2 := ir.NewModule().NewFunc("t2", ir.ClsW)
+	y := f2.Param("y", ir.ClsW)
+	e2 := f2.Entry()
+	e2.Ret(e2.Select(ir.ClsW, f2.Word(0), f2.Word(99), y))
+	Fold(f2)
+	assert.Equal(t, y, e2.Jmp.Arg)
+
+	// Identical arms collapse regardless of the condition.
+	f3 := ir.NewModule().NewFunc("t3", ir.ClsW)
+	c, z := f3.Param("c", ir.ClsW), f3.Param("z", ir.ClsW)
+	e3 := f3.Entry()
+	e3.Ret(e3.Select(ir.ClsW, c, z, z))
+	Fold(f3)
+	assert.Equal(t, z, e3.Jmp.Arg)
+}
+
 func TestEvalCmpAllPredicates(t *testing.T) {
 	assert.Equal(t, int64(1), evalCmp(ir.CmpSle, ir.ClsW, 3, 3))
 	assert.Equal(t, int64(1), evalCmp(ir.CmpSgt, ir.ClsW, 4, 3))

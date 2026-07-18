@@ -4,6 +4,7 @@ import (
 	"fmt"
 
 	"github.com/evanphx/cg12/ir"
+	"github.com/evanphx/cg12/lower"
 )
 
 // Compile lowers a single cg12 function to an eBPF program using linear-scan
@@ -34,6 +35,7 @@ func newComp(f *ir.Func, maps map[string]bool, data map[string]dataRef, funcs ma
 // run lowers, allocates, and emits the function, returning the first error.
 func (c *comp) run() error {
 	ir.LowerPointers(c.f, ir.ClsL) // eBPF is 64-bit; pointers are longs
+	lower.Selects(c.f)             // eBPF has no cmov: selects become diamonds
 	c.buildUsed()
 	c.allocStack()
 	c.regAlloc()

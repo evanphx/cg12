@@ -39,6 +39,7 @@ const (
 	bcLoadK          // R[a] = const[bx]                  (iABx)
 	bcBinop          // R[a] = binop(aux, cls, R[b], R[c])
 	bcCmp            // R[a] = cmp(aux, R[b], R[c])       (aux = ir.Cmp)
+	bcSel            // R[a] = select via sels[bx]        (iABx; needs 3 source regs)
 	bcUnop           // R[a] = unop(aux, cls, R[b])       (neg/clz/ext/conv/cast/copy)
 	bcLoad           // R[a] = load(aux) from R[b]        (aux = ir.OLoad*)
 	bcStore          // store(aux) R[a] to R[b]           (aux = ir.OStore*)
@@ -107,6 +108,12 @@ type switchCasePC struct {
 	pc  uint32
 }
 
+// selInfo backs a bcSel: the three source registers of a select, since one word
+// cannot hold a destination plus three sources. Indexed by bx.
+type selInfo struct {
+	cond, a, b uint16
+}
+
 // bcFunc is a compiled function: its instruction stream, the side tables its
 // instructions index, and the window size to reserve for a call.
 type bcFunc struct {
@@ -115,6 +122,7 @@ type bcFunc struct {
 	consts    []Value              // const pool, indexed by bcLoadK's bx
 	calls     []callSite           // indexed by bcCall's bx
 	switches  []switchInfo         // indexed by bcSwitch/bcTable's bx
+	sels      []selInfo            // indexed by bcSel's bx
 	blockPC   map[*ir.Block]uint32 // address-taken block -> its pc, for computed goto (bcBr)
 	frameSize uint16               // window slots to reserve
 	nParams   int

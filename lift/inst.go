@@ -230,7 +230,6 @@ func (l *lifter) liftCondSel(b *ir.Block, in *a64.Inst) error {
 	}
 	c := cls(in.W64)
 	cond := b.Cmp(pred, ir.ClsL, l.pending.a, l.pending.b) // 0 or 1
-	mask := b.Sub(c, l.f.ConstInt(c, 0), cond)             // all-ones if the condition holds
 	rn := l.src(b, in.Rn)
 
 	var other ir.Ref
@@ -244,8 +243,8 @@ func (l *lifter) liftCondSel(b *ir.Block, in *a64.Inst) error {
 	case a64.OpCsneg:
 		other = b.Neg(c, l.src(b, in.Rm))
 	}
-	sel := b.Or(c, b.And(c, rn, mask), b.And(c, other, b.Xor(c, mask, allOnes(l.f, c))))
-	l.def(b, in.Rd, sel, in.W64)
+	// The IR now has a native select, so csel lifts directly to it.
+	l.def(b, in.Rd, b.Select(c, cond, rn, other), in.W64)
 	return nil
 }
 

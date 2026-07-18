@@ -51,6 +51,11 @@ func Fcmp(dbl bool, rn, rm Reg) uint32 {
 	return 0x1e<<24 | ftype(dbl)<<22 | 1<<21 | r(rm)<<16 | 0b001000<<10 | r(rn)<<5
 }
 
+// Fcsel encodes FCSEL rd, rn, rm, cond (rd = cond ? rn : rm).
+func Fcsel(dbl bool, rd, rn, rm Reg, c Cond) uint32 {
+	return 0x1e<<24 | ftype(dbl)<<22 | 1<<21 | r(rm)<<16 | uint32(c)<<12 | 0b11<<10 | r(rn)<<5 | r(rd)
+}
+
 // --- conversions between FP and integer ------------------------------------
 
 func fpIntConv(sfb, ft, rmode, opcode uint32, rd, rn Reg) uint32 {

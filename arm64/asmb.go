@@ -59,6 +59,8 @@ type asmb interface {
 	cmpImm(w64 bool, rn Reg, imm uint32)
 	fcmp(dbl bool, rn, rm Reg)
 	cset(rd Reg, cmp ir.Cmp, float bool)
+	csel(w64 bool, rd, rn, rm Reg, cond a64.Cond)
+	fcsel(dbl bool, rd, rn, rm Reg, cond a64.Cond)
 
 	// Constant materialization: an integer (movz/movk/movn) or a symbol address
 	// (adrp+add, recording relocations or emitting :lo12: syntax per backend).
@@ -348,6 +350,12 @@ func (b *mcAsm) cset(rd Reg, cmp ir.Cmp, float bool) {
 		return
 	}
 	b.prog.Emit(a64.Cset(false, mreg(rd), cond))
+}
+func (b *mcAsm) csel(w64 bool, rd, rn, rm Reg, cond a64.Cond) {
+	b.prog.Emit(a64.Csel(w64, mreg(rd), mreg(rn), mreg(rm), cond))
+}
+func (b *mcAsm) fcsel(dbl bool, rd, rn, rm Reg, cond a64.Cond) {
+	b.prog.Emit(a64.Fcsel(dbl, mreg(rd), mreg(rn), mreg(rm), cond))
 }
 func (b *mcAsm) load(op ir.Op, cls ir.Cls, rd, base Reg) {
 	d, a := mreg(rd), mreg(base)

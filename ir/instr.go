@@ -2,10 +2,10 @@ package ir
 
 // Instr is a single non-phi SSA instruction.
 //
-// Args holds the operands (0-2 for every modelled op except calls, whose extra
-// arguments are carried by preceding OArg instructions). Keeping Args a slice
-// rather than a fixed array trades a little density for a builder API that reads
-// naturally and for uniform iteration in the passes.
+// Args holds the operands (0-2 for most modelled ops; 3 for OSel; calls carry
+// their extra arguments inline). Keeping Args a slice rather than a fixed array
+// trades a little density for a builder API that reads naturally and for uniform
+// iteration in the passes.
 type Instr struct {
 	Op   Op
 	Cls  Cls   // class of the result (and of integer operands, where relevant)

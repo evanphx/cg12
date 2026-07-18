@@ -164,6 +164,16 @@ func TestBytecodeMatchesTreeWalker(t *testing.T) {
 			fn: "test",
 		},
 		{
+			name: "select",
+			il:   `export function l $f(l %c, l %a, l %b) { @s %r =l select %c, %a, %b  ret %r }`,
+			fn:   "f", args: []interp.Value{interp.L(1), interp.L(10), interp.L(20)},
+		},
+		{
+			name: "select-zero",
+			il:   `export function l $f(l %c, l %a, l %b) { @s %r =l select %c, %a, %b  ret %r }`,
+			fn:   "f", args: []interp.Value{interp.L(0), interp.L(10), interp.L(20)},
+		},
+		{
 			name: "variadic-sum",
 			il: `export function w $sum(w %n, ...) {
 				@start

@@ -26,6 +26,13 @@ func (e *emitter) instr(in *ir.Instr) {
 	case ir.OCmp:
 		e.compare(in)
 
+	case ir.OSel:
+		// wasm select pops cond (i32), val2, val1 -> val1 if cond else val2.
+		e.push(in.Args[1]) // a  (val1)
+		e.push(in.Args[2]) // b  (val2)
+		e.pushCond(in.Args[0])
+		e.line("select")
+
 	case ir.OExtsb, ir.OExtub, ir.OExtsh, ir.OExtuh, ir.OExtsw, ir.OExtuw,
 		ir.OExts, ir.OTruncd, ir.OStosi, ir.OStoui, ir.OSltof, ir.OUltof,
 		ir.OCast:

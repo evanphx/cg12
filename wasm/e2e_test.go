@@ -66,6 +66,17 @@ func TestE2EArithmetic(t *testing.T) {
 	require.Equal(t, "19", runFunc(t, m, "f", "3", "4")) // (3+4)*3 - 4/2 = 21 - 2 = 19
 }
 
+func TestE2ESelect(t *testing.T) {
+	m := ir.NewModule()
+	f := m.NewFunc("sel", ir.ClsW).Export()
+	c, a, b := f.Param("c", ir.ClsW), f.Param("a", ir.ClsW), f.Param("b", ir.ClsW)
+	e := f.Entry()
+	e.Ret(e.Select(ir.ClsW, c, a, b))
+
+	require.Equal(t, "7", runFunc(t, m, "sel", "1", "7", "9"))
+	require.Equal(t, "9", runFunc(t, m, "sel", "0", "7", "9"))
+}
+
 func TestE2ELongArith(t *testing.T) {
 	m := unary("dbl", ir.ClsL, ir.ClsL, func(f *ir.Func, e *ir.Block, x ir.Ref) ir.Ref {
 		return e.Mul(ir.ClsL, x, f.Long(1000000000))

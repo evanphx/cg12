@@ -55,6 +55,11 @@ func (c *compiler) emitInstr(in *ir.Instr) {
 	case in.Op == ir.OCmp:
 		c.emit(mkABC(bcCmp, in.Cls, uint8(in.Cmp), c.dst(in), c.refReg(in.Arg(0)), c.refReg(in.Arg(1))))
 		return
+	case in.Op == ir.OSel:
+		idx := uint32(len(c.sels))
+		c.sels = append(c.sels, selInfo{cond: c.refReg(in.Arg(0)), a: c.refReg(in.Arg(1)), b: c.refReg(in.Arg(2))})
+		c.emit(mkABx(bcSel, in.Cls, 0, c.dst(in), idx))
+		return
 	}
 
 	// Pure value ops: binary vs unary.
