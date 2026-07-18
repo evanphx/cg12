@@ -182,17 +182,19 @@ func (f *Func) printBlock(sb *strings.Builder, b *Block) {
 	f.printJmp(sb, b.Jmp)
 }
 
-// printPos emits the debug directives needed to move from position last to pos,
-// returning the new current position. dbgfile changes the source file; dbgloc
-// sets the line and column, persisting until the next change (QBE style).
+// printPos emits the loc directive needed to move from position last to pos,
+// returning the new current position. loc carries the file, line, and column
+// together; the file is repeated only when it changes, and the position persists
+// until the next loc (QBE style).
 func (f *Func) printPos(sb *strings.Builder, pos, last SrcPos) SrcPos {
 	if !pos.Valid() || pos == last || f.mod == nil {
 		return last
 	}
 	if pos.File != last.File {
-		fmt.Fprintf(sb, "\tdbgfile \"%s\"\n", f.mod.FileName(pos.File))
+		fmt.Fprintf(sb, "\tloc \"%s\" %d %d\n", f.mod.FileName(pos.File), pos.Line, pos.Col)
+	} else {
+		fmt.Fprintf(sb, "\tloc %d %d\n", pos.Line, pos.Col)
 	}
-	fmt.Fprintf(sb, "\tdbgloc %d %d\n", pos.Line, pos.Col)
 	return pos
 }
 

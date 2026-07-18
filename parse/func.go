@@ -94,7 +94,9 @@ func (p *parser) parseBlock() {
 				b.Jmp = ir.Jmp{Kind: ir.JmpJmp, To: p.block(p.tok.s)}
 			}
 			return
-		case p.isWord("dbgfile"):
+		case p.isWord("loc"):
+			p.parseLoc()
+		case p.isWord("dbgfile"): // the older, verbose form; still accepted
 			p.advance()
 			p.curPos.File = p.m.File(p.expect(tStr, "file name").s)
 		case p.isWord("dbgloc"):
@@ -116,6 +118,32 @@ func (p *parser) parseBlock() {
 			p.fail("unexpected %s in block body", p.tok)
 			return
 		}
+	}
+}
+
+// parseLoc reads the compact debug-position directive, which sets file, line, and
+// column together:
+//
+//	loc "file.c" 12 3   file, line, column
+//	loc "file.c" 12     file, line (column 0)
+//	loc "file.c"        just change the file
+//	loc 12 3            new line and column, same file
+//	loc 12             new line (column 0), same file
+//
+// A new line without a column resets the column to 0 (the start of the line).
+func (p *parser) parseLoc() {
+	p.advance()
+	if p.tok.kind == tStr {
+		p.curPos.File = p.m.File(p.expect(tStr, "file name").s)
+	}
+	if p.tok.kind == tInt {
+		p.curPos.Line = uint32(p.expect(tInt, "line").i)
+		p.curPos.Col = 0
+		if p.tok.kind == tInt {
+			p.curPos.Col = uint32(p.expect(tInt, "column").i)
+		}
+	} else if !p.curPos.Valid() {
+		p.fail("loc needs a line (loc \"file\" line, or loc line)")
 	}
 }
 
