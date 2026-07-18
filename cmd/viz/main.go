@@ -169,19 +169,30 @@ var (
 	asmToken = regexp.MustCompile(`([xw]\d+|[sdq]\d+|wzr|xzr|wsp|sp|#-?\w+|\b-?\d+\b)`)
 )
 
-// highlight wraps the recognizable tokens of one already-escaped line in spans.
-func highlight(kind, escaped string) string {
+// highlight escapes one raw line and wraps its recognizable tokens in spans. It
+// works on the raw text (not pre-escaped) so a token pattern like the #imm form
+// can never match the digits inside an HTML entity such as &#34;.
+func highlight(kind, raw string) string {
+	var re *regexp.Regexp
+	var classOf func(string) string
 	switch kind {
 	case "ir":
-		return irToken.ReplaceAllStringFunc(escaped, func(m string) string {
-			return span(irClass(m), m)
-		})
+		re, classOf = irToken, irClass
 	case "asm":
-		return asmToken.ReplaceAllStringFunc(escaped, func(m string) string {
-			return span(asmClass(m), m)
-		})
+		re, classOf = asmToken, asmClass
+	default:
+		return html.EscapeString(raw)
 	}
-	return escaped
+	var b strings.Builder
+	last := 0
+	for _, loc := range re.FindAllStringIndex(raw, -1) {
+		b.WriteString(html.EscapeString(raw[last:loc[0]]))
+		m := raw[loc[0]:loc[1]]
+		b.WriteString(span(classOf(m), html.EscapeString(m)))
+		last = loc[1]
+	}
+	b.WriteString(html.EscapeString(raw[last:]))
+	return b.String()
 }
 
 func irClass(m string) string {
@@ -214,9 +225,8 @@ func span(class, s string) string { return `<span class="` + class + `">` + s + 
 func codeLines(kind, text string) string {
 	var b strings.Builder
 	for _, line := range strings.Split(strings.TrimRight(text, "\n"), "\n") {
-		esc := html.EscapeString(line)
 		b.WriteString(`<div class="ln">`)
-		b.WriteString(highlight(kind, esc))
+		b.WriteString(highlight(kind, line))
 		b.WriteString("</div>")
 	}
 	return b.String()
