@@ -38,6 +38,12 @@ type Machine struct {
 	fuel        int64
 	maxDepth    int
 	divZeroZero bool
+
+	// Bytecode VM (bc_*.go): an alternative execution strategy over a rolling
+	// register window, selected by WithBytecode. When off, nothing here is used.
+	bytecode bool
+	bc       map[*ir.Func]*bcFunc // compiled functions, memoized
+	regs     []Value              // the shared register stack (the rolling window)
 }
 
 // Option configures a Machine.
@@ -53,6 +59,11 @@ func WithFuel(n int64) Option { return func(mc *Machine) { mc.fuel = n } }
 // WithDivZeroYieldsZero makes integer div/rem by zero yield 0 (matching an
 // AArch64 sdiv/udiv) instead of trapping.
 func WithDivZeroYieldsZero() Option { return func(mc *Machine) { mc.divZeroZero = true } }
+
+// WithBytecode selects the register bytecode VM (bc_*.go) instead of the
+// tree-walker. Both engines share this Machine's runtime and must produce
+// identical results; the choice is which execution strategy Call uses.
+func WithBytecode() Option { return func(mc *Machine) { mc.bytecode = true } }
 
 // New loads a module: it verifies structure, lays out globals into memory,
 // assigns symbol addresses, and refuses (up front) any function that is not
@@ -70,6 +81,7 @@ func New(m *ir.Module, opts ...Option) (*Machine, error) {
 		externAt:   map[uint64]string{},
 		blockAddr:  map[*ir.Block]uint64{},
 		blockAt:    map[uint64]*ir.Block{},
+		bc:         map[*ir.Func]*bcFunc{},
 		stdout:     io.Discard,
 		maxDepth:   100000,
 		sp:         segStack,
@@ -148,6 +160,9 @@ func (mc *Machine) Call(name string, args ...Value) (Value, error) {
 	f, ok := mc.funcs[name]
 	if !ok {
 		return Value{}, fmt.Errorf("interp: no function %q", name)
+	}
+	if mc.bytecode {
+		return mc.vmCall(f, args)
 	}
 	return mc.callFunc(f, args)
 }
