@@ -16,6 +16,7 @@ import (
 
 	"github.com/evanphx/cg12/arm64/a64"
 	"github.com/evanphx/cg12/ir"
+	"github.com/evanphx/cg12/obj"
 )
 
 // numGPR is the count of general registers modeled (x0..x30); x31 is zr/sp and is
@@ -28,37 +29,104 @@ const numGPR = 31
 // return class (use ir.ClsV-style void via hasRet=false through a nil retty is not
 // possible, so pass the concrete class and voidRet to choose).
 func Lift(name string, code []uint32, params []ir.Cls, retty ir.Cls, voidRet bool) (*ir.Module, error) {
-	insts := make([]a64.Inst, len(code))
-	for i, w := range code {
-		in, ok := a64.Decode(w)
-		if !ok {
-			return nil, fmt.Errorf("lift %s: cannot decode word %d (%#08x)", name, i, w)
-		}
-		insts[i] = in
-	}
-
 	m := ir.NewModule()
-	var f *ir.Func
-	if voidRet {
-		f = m.NewFuncVoid(name)
-	} else {
-		f = m.NewFunc(name, retty)
-	}
-	f.Export()
-
-	l := &lifter{f: f, insts: insts, voidRet: voidRet, paramCls: params}
-	for i, cls := range params {
-		l.params = append(l.params, f.Param(fmt.Sprintf("a%d", i), cls))
-	}
-
-	l.buildBlocks()
-	if err := l.emit(); err != nil {
+	sig := sigInfo{params: params, retty: retty, void: voidRet}
+	if err := liftOne(m, name, code, sig, map[string]sigInfo{name: sig}, nil); err != nil {
 		return nil, err
 	}
 	if err := ir.VerifyModule(m); err != nil {
 		return nil, fmt.Errorf("lift %s: %w", name, err)
 	}
 	return m, nil
+}
+
+// LiftModule lifts every function of a compiled object back into one IR module,
+// resolving bl calls through the object's .text relocations and the original
+// module's signatures. The result is self-contained: a recursive or
+// mutually-calling program lifts whole and runs on the interpreter.
+func LiftModule(orig *ir.Module, o *obj.Object) (*ir.Module, error) {
+	sigs := map[string]sigInfo{}
+	for _, f := range orig.Funcs {
+		if f.Start == nil {
+			continue // a declaration, no body
+		}
+		var ps []ir.Cls
+		for _, p := range f.Params {
+			ps = append(ps, p.Cls)
+		}
+		sigs[f.Name] = sigInfo{params: ps, retty: f.Retty, void: !f.HasRet}
+	}
+	relocAt := map[uint64]string{}
+	for _, r := range o.Relocs {
+		relocAt[r.Offset] = r.Sym
+	}
+
+	m := ir.NewModule()
+	for _, s := range o.Syms {
+		if s.Section != obj.SecText || !s.Func {
+			continue
+		}
+		sig, ok := sigs[s.Name]
+		if !ok {
+			continue
+		}
+		code := textWords(o.Text, s.Value, s.Size)
+		callName := map[int]string{}
+		for wi := range code {
+			if name, ok := relocAt[s.Value+uint64(wi*4)]; ok {
+				callName[wi] = name
+			}
+		}
+		if err := liftOne(m, s.Name, code, sig, sigs, callName); err != nil {
+			return nil, err
+		}
+	}
+	if err := ir.VerifyModule(m); err != nil {
+		return nil, fmt.Errorf("lift module: %w", err)
+	}
+	return m, nil
+}
+
+type sigInfo struct {
+	params []ir.Cls
+	retty  ir.Cls
+	void   bool
+}
+
+// liftOne builds one function into an existing module.
+func liftOne(out *ir.Module, name string, code []uint32, sig sigInfo, sigs map[string]sigInfo, callName map[int]string) error {
+	insts := make([]a64.Inst, len(code))
+	for i, w := range code {
+		in, ok := a64.Decode(w)
+		if !ok {
+			return fmt.Errorf("lift %s: cannot decode word %d (%#08x)", name, i, w)
+		}
+		insts[i] = in
+	}
+
+	var f *ir.Func
+	if sig.void {
+		f = out.NewFuncVoid(name)
+	} else {
+		f = out.NewFunc(name, sig.retty)
+	}
+	f.Export()
+
+	l := &lifter{f: f, insts: insts, voidRet: sig.void, paramCls: sig.params, sigs: sigs, callName: callName}
+	for i, cls := range sig.params {
+		l.params = append(l.params, f.Param(fmt.Sprintf("a%d", i), cls))
+	}
+	l.buildBlocks()
+	return l.emit()
+}
+
+func textWords(text []byte, off, size uint64) []uint32 {
+	b := text[off : off+size]
+	out := make([]uint32, len(b)/4)
+	for i := range out {
+		out[i] = uint32(b[i*4]) | uint32(b[i*4+1])<<8 | uint32(b[i*4+2])<<16 | uint32(b[i*4+3])<<24
+	}
+	return out
 }
 
 type lifter struct {
@@ -68,12 +136,14 @@ type lifter struct {
 	paramCls []ir.Cls
 	voidRet  bool
 
-	reg     [numGPR]ir.Ref    // x0..x30 -> alloca slot
-	vreg    [numGPR]ir.Ref    // v0..v30 -> alloca slot (floating point)
-	spSlot  ir.Ref            // sp value (a pointer into the stack buffer)
-	blockAt map[int]*ir.Block // word index -> block starting there
-	leaders []int             // sorted block-leader word indices
-	pending *pendingCmp       // last flag-setting compare, for cset/b.cond
+	reg      [numGPR]ir.Ref     // x0..x30 -> alloca slot
+	vreg     [numGPR]ir.Ref     // v0..v30 -> alloca slot (floating point)
+	spSlot   ir.Ref             // sp value (a pointer into the stack buffer)
+	blockAt  map[int]*ir.Block  // word index -> block starting there
+	leaders  []int              // sorted block-leader word indices
+	pending  *pendingCmp        // last flag-setting compare, for cset/b.cond
+	sigs     map[string]sigInfo // callee signatures, for bl
+	callName map[int]string     // word index of a bl -> callee name (from relocs)
 }
 
 // pendingCmp holds the operands of the most recent compare, already narrowed to

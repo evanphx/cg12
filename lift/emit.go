@@ -57,7 +57,7 @@ func (l *lifter) emit() error {
 			term = e - 1
 		}
 		for i := s; i < term; i++ {
-			if err := l.liftInst(b, &l.insts[i]); err != nil {
+			if err := l.liftInst(b, i, &l.insts[i]); err != nil {
 				return fmt.Errorf("word %d (%s): %w", i, mnemName(l.insts[i].Op), err)
 			}
 		}

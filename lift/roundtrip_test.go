@@ -195,6 +195,85 @@ func dargs(ps ...[2]float64) [][]interp.Value {
 	return out
 }
 
+// TestRoundTripCalls lifts whole modules through LiftModule so bl calls resolve:
+// a recursive fib that calls itself, and a caller/callee pair.
+func TestRoundTripCalls(t *testing.T) {
+	cases := []struct {
+		name string
+		fn   string
+		il   string
+		args []int64
+	}{
+		{
+			name: "fib", fn: "fib",
+			il: `export function l $fib(l %n) {
+				@s
+				%c =w cslel %n, 1
+				jnz %c, @base, @rec
+				@base
+				ret %n
+				@rec
+				%n1 =l sub %n, 1
+				%a =l call $fib(l %n1)
+				%n2 =l sub %n, 2
+				%b =l call $fib(l %n2)
+				%r =l add %a, %b
+				ret %r
+			}`,
+			args: []int64{0, 1, 5, 10, 15},
+		},
+		{
+			name: "caller-callee", fn: "caller",
+			il: `function l $dbl(l %x) { @s %r =l mul %x, 2  ret %r }
+				export function l $caller(l %a, l %b) {
+				@s
+				%x =l call $dbl(l %a)
+				%y =l call $dbl(l %b)
+				%r =l add %x, %y
+				ret %r
+			}`,
+			args: []int64{3, 4, 100, -5},
+		},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			m, err := parse.Parse(c.il)
+			require.NoError(t, err)
+			o, err := arm64.CompileToObject(m)
+			require.NoError(t, err)
+			lifted, err := lift.LiftModule(m, o)
+			require.NoError(t, err, "lift module")
+
+			call := func(mod *ir.Module, args []interp.Value) uint64 {
+				return interpCall(t, mod, c.fn, args)
+			}
+			// caller takes two args, fib one; build the vector from the flat list.
+			vectors := singleOrPair(c.fn, c.args)
+
+			promoted := freshCopy(t, lifted)
+			for _, f := range promoted.Funcs {
+				opt.Mem2Reg(f)
+			}
+			require.NoError(t, ir.VerifyModule(promoted))
+
+			for _, args := range vectors {
+				want := call(mustParse(t, c.il), args)
+				require.Equal(t, want, call(freshCopy(t, lifted), args), "raw args=%v", args)
+				require.Equal(t, want, call(promoted, args), "mem2reg args=%v", args)
+			}
+		})
+	}
+}
+
+// singleOrPair packs the flat argument list as one-arg vectors for fib, two-arg
+// for caller.
+func singleOrPair(fn string, v []int64) [][]interp.Value {
+	if fn == "caller" {
+		return pairs(v...)
+	}
+	return singles(v...)
+}
+
 func sigOf(m *ir.Module, name string) ([]ir.Cls, ir.Cls, bool) {
 	for _, f := range m.Funcs {
 		if f.Name == name {

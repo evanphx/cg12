@@ -10,10 +10,12 @@ import (
 // liftInst lowers one non-terminator instruction to load-operate-store on the
 // register slots. The class handling mirrors the hardware: a w-op computes in
 // ClsW (which truncates) and def zero-extends the 32-bit result into the slot.
-func (l *lifter) liftInst(b *ir.Block, in *a64.Inst) error {
+func (l *lifter) liftInst(b *ir.Block, idx int, in *a64.Inst) error {
 	c := cls(in.W64)
 
 	switch in.Op {
+	case a64.OpBl:
+		return l.liftCall(b, idx)
 	case a64.OpMovz:
 		l.def(b, in.Rd, l.f.ConstInt(c, int64(uint64(in.Imm)<<in.ShiftAmt)), in.W64)
 	case a64.OpMovn:
@@ -168,6 +170,44 @@ func (l *lifter) liftInst(b *ir.Block, in *a64.Inst) error {
 
 	default:
 		return fmt.Errorf("unsupported op %s", mnemName(in.Op))
+	}
+	return nil
+}
+
+// liftCall lifts a bl: it reads the arguments from the AAPCS registers, emits an
+// OCall to the resolved callee, and writes the result back to x0/v0.
+func (l *lifter) liftCall(b *ir.Block, idx int) error {
+	name, ok := l.callName[idx]
+	if !ok {
+		return fmt.Errorf("unresolved call at word %d", idx)
+	}
+	sig, ok := l.sigs[name]
+	if !ok {
+		return fmt.Errorf("call to unknown function %q", name)
+	}
+
+	var args []ir.Ref
+	ngrn, nsrn := 0, 0
+	for _, pc := range sig.params {
+		if pc.IsFloat() {
+			args = append(args, l.vsrc(b, a64.Reg(nsrn), pc == ir.ClsD))
+			nsrn++
+		} else {
+			args = append(args, l.src(b, a64.Reg(ngrn)))
+			ngrn++
+		}
+	}
+
+	callee := l.f.Sym(name, 0)
+	if sig.void {
+		b.CallVoid(callee, args...)
+		return nil
+	}
+	r := b.Call(sig.retty, callee, args...)
+	if sig.retty.IsFloat() {
+		l.vdef(b, 0, r)
+	} else {
+		l.def(b, 0, r, sig.retty != ir.ClsW)
 	}
 	return nil
 }
