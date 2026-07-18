@@ -32,8 +32,10 @@ func (mc *Machine) execInstr(fr *frame, in *ir.Instr) error {
 		}
 		mc.sp = v.u64()
 		return nil
-	case in.Op == ir.OVaStart, in.Op == ir.OVaArg:
-		return mc.trapf("variadic op %s not yet supported (Phase C)", in.Op)
+	case in.Op == ir.OVaStart:
+		return mc.execVaStart(fr, in)
+	case in.Op == ir.OVaArg:
+		return mc.execVaArg(fr, in)
 	case in.Op == ir.OBlockAddr:
 		return mc.trapf("block address not yet supported (Phase C)")
 	}

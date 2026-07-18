@@ -26,6 +26,8 @@ type Machine struct {
 	commonNext uint64 // DefineExtern cursor
 	textNext   uint64 // next text descriptor
 
+	vaLists []vaState // va_list iteration state, indexed by the token stored in memory
+
 	cur   *frame // currently executing frame, for trap locations
 	depth int    // call-stack depth, for the recursion guard
 

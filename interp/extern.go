@@ -30,7 +30,50 @@ func defaultExterns() map[string]ExternFunc {
 		"exit":    func(mc *Machine, a []Value) (Value, error) { return Value{}, &ExitTrap{Code: int(argAt(a, 0).i64())} },
 		"putchar": extPutchar,
 		"puts":    extPuts,
+		"printf":  extPrintf,
+		"vprintf": extVprintf,
 	}
+}
+
+func extPrintf(mc *Machine, a []Value) (Value, error) {
+	fmt, ok := mc.readCString(argAt(a, 0).u64())
+	if !ok {
+		return Value{}, mc.trapf("printf: format at %#x unmapped", argAt(a, 0).u64())
+	}
+	i := 1
+	next := func() (Value, bool) {
+		if i < len(a) {
+			v := a[i]
+			i++
+			return v, true
+		}
+		return Value{}, false
+	}
+	s, err := mc.cPrintf(fmt, next)
+	if err != nil {
+		return Value{}, err
+	}
+	mc.stdout.Write([]byte(s))
+	return W(int32(len(s))), nil
+}
+
+func extVprintf(mc *Machine, a []Value) (Value, error) {
+	fmt, ok := mc.readCString(argAt(a, 0).u64())
+	if !ok {
+		return Value{}, mc.trapf("vprintf: format unmapped")
+	}
+	ap := argAt(a, 1).u64()
+	token, ok := mc.mem.load(ap, 8)
+	if !ok || token >= uint64(len(mc.vaLists)) {
+		return Value{}, mc.trapf("vprintf: invalid va_list at %#x", ap)
+	}
+	st := &mc.vaLists[token]
+	s, err := mc.cPrintf(fmt, st.take)
+	if err != nil {
+		return Value{}, err
+	}
+	mc.stdout.Write([]byte(s))
+	return W(int32(len(s))), nil
 }
 
 // heapAlloc reserves size bytes on the bump heap (16-aligned) and returns the

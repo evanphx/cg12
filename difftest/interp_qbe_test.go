@@ -30,6 +30,7 @@ func TestInterpQBESimple(t *testing.T) {
 		{"max.ssa", "a", "200"},
 		{"prime.ssa", "a", "104743"},
 		{"euclc.ssa", "", "1"},
+		{"fixarg.ssa", "", "1"}, // cnel of two distinct allocs is 1
 	}
 	for _, c := range cases {
 		t.Run(c.file, func(t *testing.T) {
