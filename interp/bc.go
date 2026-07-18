@@ -112,11 +112,11 @@ type switchCasePC struct {
 type bcFunc struct {
 	fn        *ir.Func
 	code      []inst
-	consts    []Value      // const pool, indexed by bcLoadK's bx
-	calls     []callSite   // indexed by bcCall's bx
-	switches  []switchInfo // indexed by bcSwitch/bcTable's bx
-	blockPCs  []uint32     // indexed by bcBlockAddr's bx: the address-taken block's pc
-	frameSize uint16       // window slots to reserve
+	consts    []Value              // const pool, indexed by bcLoadK's bx
+	calls     []callSite           // indexed by bcCall's bx
+	switches  []switchInfo         // indexed by bcSwitch/bcTable's bx
+	blockPC   map[*ir.Block]uint32 // address-taken block -> its pc, for computed goto (bcBr)
+	frameSize uint16               // window slots to reserve
 	nParams   int
 	paramCls  []ir.Cls // params, for normalizing incoming values
 }

@@ -35,8 +35,22 @@ func (c *compiler) emitInstr(in *ir.Instr) {
 	case in.Op == ir.OStackRestore:
 		c.emit(mkABC(bcUnop, ir.ClsL, uint8(ir.OStackRestore), 0, c.refReg(in.Arg(0)), 0))
 		return
-	case in.Op == ir.OVaStart, in.Op == ir.OVaArg, in.Op == ir.OBlockAddr:
-		c.fail("%s is not supported in bytecode yet (Phase C)", in.Op)
+	case in.Op == ir.OVaStart:
+		c.emit(mkABC(bcVaStart, ir.ClsL, 0, c.refReg(in.Arg(0)), 0, 0))
+		return
+	case in.Op == ir.OVaArg:
+		c.emit(mkABC(bcVaArg, in.Cls, 0, c.dst(in), c.refReg(in.Arg(0)), 0))
+		return
+	case in.Op == ir.OBlockAddr:
+		addr, ok := c.mc.blockAddr[in.Blk]
+		if !ok {
+			c.fail("block address of a block whose address was not taken at load")
+			return
+		}
+		// The address is a compile-time constant; load it like any other.
+		poolIdx := uint32(len(c.consts))
+		c.consts = append(c.consts, ptrVal(addr))
+		c.emit(mkABx(bcLoadK, ir.ClsL, 0, c.dst(in), poolIdx))
 		return
 	case in.Op == ir.OCmp:
 		c.emit(mkABC(bcCmp, in.Cls, uint8(in.Cmp), c.dst(in), c.refReg(in.Arg(0)), c.refReg(in.Arg(1))))
@@ -86,10 +100,6 @@ func isUnop(op ir.Op) bool {
 
 // emitCall stages the arguments into the outgoing region and records a call site.
 func (c *compiler) emitCall(in *ir.Instr) {
-	if in.AggArgs != nil || in.RetAgg != nil {
-		c.fail("aggregate-by-value call is not supported in bytecode yet (Phase C)")
-		return
-	}
 	args := in.Args[1:]
 	if len(args) > c.maxArgs {
 		c.fail("call with %d args exceeds staged max %d", len(args), c.maxArgs)
@@ -102,6 +112,8 @@ func (c *compiler) emitCall(in *ir.Instr) {
 	site := callSite{
 		argBase: c.argBase,
 		nArgs:   len(args),
+		aggArgs: in.AggArgs,
+		retAgg:  in.RetAgg,
 	}
 	if !in.To.IsNone() {
 		site.hasResult = true
@@ -157,7 +169,15 @@ func (c *compiler) emitTerminator(b *ir.Block) {
 		c.emitTable(b)
 
 	case ir.JmpBr:
-		c.fail("computed goto is not supported in bytecode yet (Phase C)")
+		// A computed-goto target is dynamic, so per-edge phi moves cannot be
+		// staged; the tree-walker has the same restriction.
+		for _, tgt := range j.Targets {
+			if len(tgt.Phis) != 0 {
+				c.fail("computed-goto target %q has phis", tgt.Name)
+				return
+			}
+		}
+		c.emit(mkABC(bcBr, ir.ClsL, 0, c.refReg(j.Arg), 0, 0))
 
 	default:
 		c.fail("block %q has terminator kind %d", b.Name, j.Kind)

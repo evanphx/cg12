@@ -37,13 +37,18 @@ func (mc *Machine) vmCall(f *ir.Func, args []Value) (Value, error) {
 	for i, a := range args {
 		mc.regs[i] = a // normalized in vmInvoke
 	}
-	return mc.vmInvoke(bf, 0)
+	var va []Value
+	if f.Variadic {
+		va = append([]Value(nil), args[bf.nParams:]...)
+	}
+	return mc.vmInvoke(bf, 0, va)
 }
 
 // vmInvoke runs a compiled function with its parameters already staged at
-// regs[base..]. It reuses callFunc's discipline exactly: the depth guard and the
-// sp-restore that frees the frame's stack allocations on return.
-func (mc *Machine) vmInvoke(bf *bcFunc, base uint32) (Value, error) {
+// regs[base..], and va holding the variadic arguments (for OVaStart). It reuses
+// callFunc's discipline exactly: the depth guard and the sp-restore that frees
+// the frame's stack allocations on return.
+func (mc *Machine) vmInvoke(bf *bcFunc, base uint32, va []Value) (Value, error) {
 	if mc.depth >= mc.maxDepth {
 		return Value{}, mc.trapf("call stack too deep (%d frames)", mc.depth)
 	}
@@ -53,7 +58,7 @@ func (mc *Machine) vmInvoke(bf *bcFunc, base uint32) (Value, error) {
 	}
 	savedSP := mc.sp
 	mc.depth++
-	ret, err := mc.vmLoop(bf, base)
+	ret, err := mc.vmLoop(bf, base, va)
 	mc.depth--
 	mc.sp = savedSP
 	return ret, err
@@ -73,7 +78,7 @@ func (mc *Machine) ensureRegs(n uint32) {
 }
 
 // vmLoop is the dispatch loop: the bytecode counterpart of the tree-walker's run.
-func (mc *Machine) vmLoop(bf *bcFunc, base uint32) (Value, error) {
+func (mc *Machine) vmLoop(bf *bcFunc, base uint32, va []Value) (Value, error) {
 	pc := uint32(0)
 	for {
 		if err := mc.tick(); err != nil {
@@ -160,6 +165,32 @@ func (mc *Machine) vmLoop(bf *bcFunc, base uint32) (Value, error) {
 				return Value{}, err
 			}
 			pc++
+		case bcVaStart:
+			token := uint64(len(mc.vaLists))
+			mc.vaLists = append(mc.vaLists, vaState{args: va})
+			ap := mc.regs[base+uint32(w.ra())].u64()
+			if !mc.mem.store(ap, 8, token) {
+				return Value{}, mc.trapf("va_start: list storage at %#x unmapped", ap)
+			}
+			pc++
+		case bcVaArg:
+			ap := mc.regs[base+uint32(w.rb())].u64()
+			token, ok := mc.mem.load(ap, 8)
+			if !ok || token >= uint64(len(mc.vaLists)) {
+				return Value{}, mc.trapf("va_arg: invalid va_list at %#x", ap)
+			}
+			v, ok := mc.vaLists[token].take()
+			if !ok {
+				return Value{}, mc.trapf("va_arg: no more variadic arguments")
+			}
+			mc.regs[base+uint32(w.ra())] = v.asClass(w.cls())
+			pc++
+		case bcBr:
+			next, err := mc.vmBr(bf, base, w)
+			if err != nil {
+				return Value{}, err
+			}
+			pc = next
 		case bcJmp:
 			pc = w.bx()
 		case bcJnz:
@@ -256,9 +287,44 @@ func (mc *Machine) vmCallSite(bf *bcFunc, base uint32, site *callSite) error {
 func (mc *Machine) vmIRCall(bf *bcFunc, base uint32, site *callSite, f *ir.Func) error {
 	// The callee's window rolls up to where its arguments were staged.
 	calleeBase := base + uint32(site.argBase)
-	ret, err := mc.vmInvoke2(f, calleeBase)
+
+	// A by-value aggregate argument arrives as a pointer; copy the aggregate into
+	// fresh stack so the callee gets its own copy (the tree-walker's discipline).
+	for k := 0; k < site.nArgs; k++ {
+		if k < len(site.aggArgs) && site.aggArgs[k] != nil {
+			size, align := site.aggArgs[k].Layout()
+			buf := mc.stackAlloc(uint64(size), uint64(align))
+			if err := mc.copyMem(buf, mc.regs[calleeBase+uint32(k)].u64(), size); err != nil {
+				return err
+			}
+			mc.regs[calleeBase+uint32(k)] = ptrVal(buf)
+		}
+	}
+
+	callee, err := mc.compileCached(f)
 	if err != nil {
 		return err
+	}
+	var vararg []Value
+	if f.Variadic {
+		for i := callee.nParams; i < site.nArgs; i++ {
+			vararg = append(vararg, mc.regs[calleeBase+uint32(i)])
+		}
+	}
+	ret, err := mc.vmInvoke(callee, calleeBase, vararg)
+	if err != nil {
+		return err
+	}
+
+	// A by-value aggregate result is a pointer into the callee's now-freed stack;
+	// copy it into caller storage that outlives the call.
+	if site.retAgg != nil {
+		size, align := site.retAgg.Layout()
+		buf := mc.stackAlloc(uint64(size), uint64(align))
+		if err := mc.copyMem(buf, ret.u64(), size); err != nil {
+			return err
+		}
+		ret = ptrVal(buf)
 	}
 	if site.hasResult {
 		mc.regs[base+uint32(site.resultReg)] = ret.asClass(site.resultCls)
@@ -266,14 +332,19 @@ func (mc *Machine) vmIRCall(bf *bcFunc, base uint32, site *callSite, f *ir.Func)
 	return nil
 }
 
-// vmInvoke2 compiles then invokes; separate from vmInvoke only so the caller need
-// not resolve *bcFunc.
-func (mc *Machine) vmInvoke2(f *ir.Func, base uint32) (Value, error) {
-	bf, err := mc.compileCached(f)
-	if err != nil {
-		return Value{}, err
+// vmBr resolves a computed goto: the address a BLOCKADDR minted maps back to a
+// block, whose pc is this function's landing point.
+func (mc *Machine) vmBr(bf *bcFunc, base uint32, w inst) (uint32, error) {
+	addr := mc.regs[base+uint32(w.ra())].u64()
+	blk, ok := mc.blockAt[addr]
+	if !ok {
+		return 0, mc.trapf("computed goto to %#x is not a block address", addr)
 	}
-	return mc.vmInvoke(bf, base)
+	pc, ok := bf.blockPC[blk]
+	if !ok {
+		return 0, mc.trapf("computed goto leaves the current function")
+	}
+	return pc, nil
 }
 
 func (mc *Machine) vmExternCall(base uint32, site *callSite, name string) error {

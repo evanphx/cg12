@@ -1,9 +1,11 @@
 package interp_test
 
 import (
+	"bytes"
 	"testing"
 
 	"github.com/evanphx/cg12/interp"
+	"github.com/evanphx/cg12/ir"
 	"github.com/evanphx/cg12/parse"
 	"github.com/stretchr/testify/require"
 )
@@ -116,6 +118,72 @@ func TestBytecodeMatchesTreeWalker(t *testing.T) {
 			}`,
 			fn: "f", args: []interp.Value{interp.D(1.5), interp.D(2.5)},
 		},
+		{
+			name: "aggregate-return-param-arg",
+			il: `type :pt = { w, w }
+				function :pt $mkpt(w %x, w %y) {
+				@start
+				%r =l alloc4 8
+				storew %x, %r
+				%r4 =l add %r, 4
+				storew %y, %r4
+				ret %r
+				}
+				function w $sumpt(:pt %p) {
+				@start
+				%a =w loadw %p
+				%p4 =l add %p, 4
+				%b =w loadw %p4
+				%s =w add %a, %b
+				ret %s
+				}
+				export function w $test() {
+				@start
+				%p =:pt call $mkpt(w 3, w 4)
+				%s =w call $sumpt(:pt %p)
+				ret %s
+				}`,
+			fn: "test",
+		},
+		{
+			name: "aggregate-arg-copied",
+			il: `type :pt = { w, w }
+				function $clobber(:pt %p) {
+				@start
+				storew 99, %p
+				ret
+				}
+				export function w $test() {
+				@start
+				%p =l alloc4 8
+				storew 5, %p
+				call $clobber(:pt %p)
+				%v =w loadw %p
+				ret %v
+				}`,
+			fn: "test",
+		},
+		{
+			name: "variadic-sum",
+			il: `export function w $sum(w %n, ...) {
+				@start
+				%ap =l alloc8 8
+				vastart %ap
+				jmp @loop
+				@loop
+				%i =w phi @start 0, @body %i1
+				%t =w phi @start 0, @body %t1
+				%done =w csgew %i, %n
+				jnz %done, @exit, @body
+				@body
+				%v =w vaarg %ap
+				%t1 =w add %t, %v
+				%i1 =w add %i, 1
+				jmp @loop
+				@exit
+				ret %t }`,
+			fn: "sum", args: []interp.Value{interp.W(3), interp.W(10), interp.W(20), interp.W(30)},
+		},
 	}
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) {
@@ -123,5 +191,69 @@ func TestBytecodeMatchesTreeWalker(t *testing.T) {
 			bc := runBC(t, c.il, c.fn, c.args...)
 			require.Equal(t, tw, bc, "tree-walker vs bytecode")
 		})
+	}
+}
+
+// printf (a variadic extern) produces identical output under both engines.
+func TestBytecodePrintfMatches(t *testing.T) {
+	il := `data $fmt = { b "n=%d s=%s x=%x", b 0 }
+	data $str = { b "hi", b 0 }
+	export function w $go() {
+	@start
+		%r =w call $printf(l $fmt, w 42, l $str, w 255, ...)
+		ret %r }`
+	m, err := parse.Parse(il)
+	require.NoError(t, err)
+
+	var twBuf, bcBuf bytes.Buffer
+	tw, err := interp.New(m, interp.WithStdout(&twBuf))
+	require.NoError(t, err)
+	_, err = tw.Call("go")
+	require.NoError(t, err)
+
+	vm, err := interp.New(m, interp.WithStdout(&bcBuf), interp.WithBytecode())
+	require.NoError(t, err)
+	_, err = vm.Call("go")
+	require.NoError(t, err)
+
+	require.Equal(t, twBuf.String(), bcBuf.String())
+	require.Equal(t, "n=42 s=hi x=ff", bcBuf.String())
+}
+
+// A computed goto (blockaddr + br) runs the same under both engines. The parser
+// never emits these ops, so the function is built directly.
+func TestBytecodeComputedGoto(t *testing.T) {
+	build := func() *ir.Module {
+		m := &ir.Module{}
+		f := m.NewFunc("pick", ir.ClsW).Export()
+		sel := f.Param("sel", ir.ClsW)
+		entry := f.Entry()
+		tA := f.NewBlock("tA")
+		tB := f.NewBlock("tB")
+		disp := f.NewBlock("disp")
+		blkA := f.NewBlock("A")
+		blkB := f.NewBlock("B")
+		aA := entry.BlockAddr(blkA)
+		aB := entry.BlockAddr(blkB)
+		entry.Jnz(sel, tA, tB)
+		tA.Goto(disp)
+		tB.Goto(disp)
+		addr := disp.Phi(ir.ClsL, ir.PhiEdge{From: tA, Val: aA}, ir.PhiEdge{From: tB, Val: aB})
+		disp.BrIndirect(addr, blkA, blkB)
+		blkA.Ret(f.Word(10))
+		blkB.Ret(f.Word(20))
+		return m
+	}
+	for _, sel := range []int32{1, 0} {
+		tw, err := interp.New(build())
+		require.NoError(t, err)
+		got, err := tw.Call("pick", interp.W(sel))
+		require.NoError(t, err)
+
+		vm, err := interp.New(build(), interp.WithBytecode())
+		require.NoError(t, err)
+		gotVM, err := vm.Call("pick", interp.W(sel))
+		require.NoError(t, err)
+		require.Equal(t, got, gotVM, "sel=%d", sel)
 	}
 }

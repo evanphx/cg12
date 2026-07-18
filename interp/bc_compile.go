@@ -13,9 +13,6 @@ import (
 // edge in the linear stream, so every edge gets its own landing pad and critical
 // edges need no block splitting.
 func (mc *Machine) compile(f *ir.Func) (*bcFunc, error) {
-	if f.RetAgg != nil {
-		return nil, fmt.Errorf("interp: bytecode: %s returns an aggregate (Phase C)", f.Name)
-	}
 	c := &compiler{
 		mc:         mc,
 		f:          f,
@@ -44,13 +41,17 @@ func (mc *Machine) compile(f *ir.Func) (*bcFunc, error) {
 	for i, p := range f.Params {
 		paramCls[i] = p.Cls
 	}
+	blockPC := make(map[*ir.Block]uint32, len(c.blockStart))
+	for b, pc := range c.blockStart {
+		blockPC[b] = pc
+	}
 	return &bcFunc{
 		fn:        f,
 		code:      c.code,
 		consts:    c.consts,
 		calls:     c.calls,
 		switches:  c.switches,
-		blockPCs:  c.blockPCs,
+		blockPC:   blockPC,
 		frameSize: c.frameTop,
 		nParams:   len(f.Params),
 		paramCls:  paramCls,
@@ -72,7 +73,6 @@ type compiler struct {
 	code       []inst
 	calls      []callSite
 	switches   []switchInfo
-	blockPCs   []uint32
 	blockStart map[*ir.Block]uint32
 	fixups     []fixup
 
