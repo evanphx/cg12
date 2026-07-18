@@ -83,6 +83,27 @@ const (
 	OpLdp
 	OpStp
 
+	// Floating point. Dbl selects double vs single; conversions also use W64 for
+	// the integer width. Rd/Rn/Rm are v-registers unless the op names a gp side.
+	OpFadd
+	OpFsub
+	OpFmul
+	OpFdiv
+	OpFneg
+	OpFmovReg    // d <- d
+	OpFmovVec    // v.16b <- v.16b (a whole-register copy)
+	OpFmovToGP   // gp <- fp bits
+	OpFmovFromGP // fp <- gp bits
+	OpFcmp
+	OpFcvtStoD
+	OpFcvtDtoS
+	OpFcvtzs // fp -> signed int, round toward zero
+	OpFcvtzu
+	OpScvtf // signed int -> fp
+	OpUcvtf
+	OpLdrFP
+	OpStrFP
+
 	// Branches. Target is a pc-relative byte offset.
 	OpB
 	OpBl
@@ -109,6 +130,7 @@ type Inst struct {
 	ShiftAmt uint32 // shifted-register operand: kind (lsl/lsr/asr/ror) + amount
 
 	Cond Cond // BCOND / CSET
+	Dbl  bool // floating-point width: double vs single
 
 	// Memory addressing (loads/stores).
 	MemOff int64
@@ -126,6 +148,7 @@ func Decode(w uint32) (Inst, bool) {
 		decodeDPImm,
 		decodeDPReg,
 		decodeLdSt,
+		decodeFP,
 	} {
 		if in, ok := try(w); ok {
 			return in, true
@@ -383,6 +406,80 @@ func decodeLdSt(w uint32) (Inst, bool) {
 		return Inst{Op: op, W64: w64, Rd: Reg(w & 0x1f), Rt2: Reg(bits(w, 14, 10)),
 			Rn: Reg(bits(w, 9, 5)), MemOff: int64(sext(bits(w, 21, 15), 7) * scale),
 			Mode: PairMode(bits(w, 24, 23))}, true
+	}
+	return Inst{}, false
+}
+
+func decodeFP(w uint32) (Inst, bool) {
+	// Whole-register copy (mov v.16b, an orr of a register with itself).
+	if w&0xffe0fc00 == 0x4ea01c00 && bits(w, 20, 16) == bits(w, 9, 5) {
+		return Inst{Op: OpFmovVec, Rd: Reg(w & 0x1f), Rn: Reg(bits(w, 9, 5))}, true
+	}
+	// FP scalar load/store, unsigned offset (S and D).
+	if bits(w, 29, 24) == 0x3d {
+		size := bits(w, 31, 30)
+		if size != 2 && size != 3 {
+			return Inst{}, false
+		}
+		op := OpLdrFP
+		if bits(w, 23, 22) == 0 {
+			op = OpStrFP
+		} else if bits(w, 23, 22) != 1 {
+			return Inst{}, false
+		}
+		return Inst{Op: op, Dbl: size == 3, Rd: Reg(w & 0x1f), Rn: Reg(bits(w, 9, 5)),
+			MemOff: int64(bits(w, 21, 10) << size)}, true
+	}
+
+	if bits(w, 30, 24) != 0x1e || !bit(w, 21) {
+		return Inst{}, false
+	}
+	dbl, rd, rn, rm := bit(w, 22), Reg(w&0x1f), Reg(bits(w, 9, 5)), Reg(bits(w, 20, 16))
+
+	switch {
+	case bits(w, 11, 10) == 0b10: // FP data processing (2 source)
+		op, ok := map[uint32]Mnemonic{0: OpFmul, 1: OpFdiv, 2: OpFadd, 3: OpFsub}[bits(w, 15, 12)]
+		if !ok {
+			return Inst{}, false
+		}
+		return Inst{Op: op, Dbl: dbl, Rd: rd, Rn: rn, Rm: rm}, true
+
+	case bits(w, 14, 10) == 0b10000: // FP data processing (1 source)
+		switch bits(w, 20, 15) {
+		case 0b000000:
+			return Inst{Op: OpFmovReg, Dbl: dbl, Rd: rd, Rn: rn}, true
+		case 0b000010:
+			return Inst{Op: OpFneg, Dbl: dbl, Rd: rd, Rn: rn}, true
+		case 0b000100: // FCVT single -> double
+			return Inst{Op: OpFcvtStoD, Rd: rd, Rn: rn}, true
+		case 0b000101: // FCVT double -> single
+			return Inst{Op: OpFcvtDtoS, Rd: rd, Rn: rn}, true
+		}
+		return Inst{}, false
+
+	case bits(w, 14, 10) == 0b01000: // FP compare
+		if bits(w, 4, 0) != 0 || bits(w, 15, 14) != 0 {
+			return Inst{}, false
+		}
+		return Inst{Op: OpFcmp, Dbl: dbl, Rn: rn, Rm: rm}, true
+
+	case bits(w, 15, 10) == 0: // conversion between FP and integer
+		w64, rmode, opcode := bit(w, 31), bits(w, 20, 19), bits(w, 18, 16)
+		switch {
+		case rmode == 0b11 && opcode == 0b000:
+			return Inst{Op: OpFcvtzs, W64: w64, Dbl: dbl, Rd: rd, Rn: rn}, true
+		case rmode == 0b11 && opcode == 0b001:
+			return Inst{Op: OpFcvtzu, W64: w64, Dbl: dbl, Rd: rd, Rn: rn}, true
+		case rmode == 0 && opcode == 0b010:
+			return Inst{Op: OpScvtf, W64: w64, Dbl: dbl, Rd: rd, Rn: rn}, true
+		case rmode == 0 && opcode == 0b011:
+			return Inst{Op: OpUcvtf, W64: w64, Dbl: dbl, Rd: rd, Rn: rn}, true
+		case rmode == 0 && opcode == 0b110:
+			return Inst{Op: OpFmovToGP, W64: w64, Dbl: dbl, Rd: rd, Rn: rn}, true
+		case rmode == 0 && opcode == 0b111:
+			return Inst{Op: OpFmovFromGP, W64: w64, Dbl: dbl, Rd: rd, Rn: rn}, true
+		}
+		return Inst{}, false
 	}
 	return Inst{}, false
 }

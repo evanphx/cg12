@@ -17,6 +17,7 @@ func (l *lifter) emit() error {
 	entry := l.blockAt[0]
 	for i := 0; i < numGPR; i++ {
 		l.reg[i] = entry.Alloc(8, 8)
+		l.vreg[i] = entry.Alloc(8, 8)
 	}
 	// The stack: sp starts at the top of a buffer and grows down. The buffer is
 	// addressed by computed sp-relative addresses, so mem2reg leaves it as memory
@@ -25,14 +26,26 @@ func (l *lifter) emit() error {
 	stack := entry.Copy(ir.ClsL, entry.Alloc(16, stackBytes))
 	entry.Store(entry.Add(ir.ClsL, stack, l.f.Long(stackBytes)), l.spSlot)
 
-	if len(l.params) > 8 {
-		return fmt.Errorf("more than 8 arguments is unsupported")
-	}
+	// AAPCS: integer arguments fill x0.. and float arguments fill v0.. on separate
+	// counters; the result comes back in x0 (int) or v0 (float).
+	ngrn, nsrn := 0, 0
 	for i, p := range l.params {
+		if l.paramCls[i].IsFloat() {
+			if nsrn >= 8 {
+				return fmt.Errorf("more than 8 float arguments is unsupported")
+			}
+			entry.Store(p, l.vreg[nsrn])
+			nsrn++
+			continue
+		}
+		if ngrn >= 8 {
+			return fmt.Errorf("more than 8 integer arguments is unsupported")
+		}
 		if l.paramCls[i] == ir.ClsW {
 			p = entry.Extuw(ir.ClsL, p) // a w-arg occupies the low 32 of x_i
 		}
-		entry.Store(p, l.reg[i])
+		entry.Store(p, l.reg[ngrn])
+		ngrn++
 	}
 
 	for _, start := range l.leaders {
@@ -68,9 +81,12 @@ func (l *lifter) terminate(b *ir.Block, term, end int) error {
 		tgt, _ := branchTarget(term, in)
 		b.Goto(l.blockAt[tgt])
 	case a64.OpRet:
-		if l.voidRet {
+		switch {
+		case l.voidRet:
 			b.RetVoid()
-		} else {
+		case l.f.Retty.IsFloat():
+			b.Ret(b.Load(l.f.Retty, l.vreg[0])) // float result in v0
+		default:
 			b.Ret(b.Load(l.f.Retty, l.reg[0]))
 		}
 	case a64.OpCbz, a64.OpCbnz:
@@ -194,8 +210,25 @@ func predOf(c a64.Cond, float bool) (ir.Cmp, bool) {
 	return 0, false
 }
 
-// fpPredOf is the float counterpart (arm64/mc.go fpCondOf); filled in with the
-// float phase.
+// fpPredOf is the float counterpart, inverting arm64/mc.go fpCondOf.
 func fpPredOf(c a64.Cond) (ir.Cmp, bool) {
+	switch c {
+	case a64.EQ:
+		return ir.CmpFeq, true
+	case a64.NE:
+		return ir.CmpFne, true
+	case a64.MI:
+		return ir.CmpFlt, true
+	case a64.LS:
+		return ir.CmpFle, true
+	case a64.GT:
+		return ir.CmpFgt, true
+	case a64.GE:
+		return ir.CmpFge, true
+	case a64.VC:
+		return ir.CmpFo, true
+	case a64.VS:
+		return ir.CmpFuo, true
+	}
 	return 0, false
 }

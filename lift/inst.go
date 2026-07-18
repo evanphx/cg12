@@ -128,6 +128,44 @@ func (l *lifter) liftInst(b *ir.Block, in *a64.Inst) error {
 	case a64.OpLdr, a64.OpLdrb, a64.OpLdrh, a64.OpLdrsb, a64.OpLdrsh, a64.OpLdrsw:
 		return l.liftLoad(b, in)
 
+	// Floating point. cg12 ops are class-polymorphic, so a float add is Add(ClsD).
+	case a64.OpFadd:
+		l.vdef(b, in.Rd, b.Add(fcls(in.Dbl), l.vsrc(b, in.Rn, in.Dbl), l.vsrc(b, in.Rm, in.Dbl)))
+	case a64.OpFsub:
+		l.vdef(b, in.Rd, b.Sub(fcls(in.Dbl), l.vsrc(b, in.Rn, in.Dbl), l.vsrc(b, in.Rm, in.Dbl)))
+	case a64.OpFmul:
+		l.vdef(b, in.Rd, b.Mul(fcls(in.Dbl), l.vsrc(b, in.Rn, in.Dbl), l.vsrc(b, in.Rm, in.Dbl)))
+	case a64.OpFdiv:
+		l.vdef(b, in.Rd, b.Div(fcls(in.Dbl), l.vsrc(b, in.Rn, in.Dbl), l.vsrc(b, in.Rm, in.Dbl)))
+	case a64.OpFneg:
+		l.vdef(b, in.Rd, b.Neg(fcls(in.Dbl), l.vsrc(b, in.Rn, in.Dbl)))
+	case a64.OpFmovReg:
+		l.vdef(b, in.Rd, l.vsrc(b, in.Rn, in.Dbl))
+	case a64.OpFmovVec:
+		l.vdef(b, in.Rd, l.vsrc(b, in.Rn, true)) // whole-register copy
+	case a64.OpFcmp:
+		l.pending = &pendingCmp{a: l.vsrc(b, in.Rn, in.Dbl), b: l.vsrc(b, in.Rm, in.Dbl), float: true}
+	case a64.OpFcvtStoD:
+		l.vdef(b, in.Rd, b.Exts(l.vsrc(b, in.Rn, false)))
+	case a64.OpFcvtDtoS:
+		l.vdef(b, in.Rd, b.Truncd(l.vsrc(b, in.Rn, true)))
+	case a64.OpFcvtzs:
+		l.def(b, in.Rd, b.Stosi(c, l.vsrc(b, in.Rn, in.Dbl)), in.W64)
+	case a64.OpFcvtzu:
+		l.def(b, in.Rd, b.Stoui(c, l.vsrc(b, in.Rn, in.Dbl)), in.W64)
+	case a64.OpScvtf:
+		l.vdef(b, in.Rd, b.Sltof(fcls(in.Dbl), l.narrowInt(b, l.src(b, in.Rn), in.W64)))
+	case a64.OpUcvtf:
+		l.vdef(b, in.Rd, b.Ultof(fcls(in.Dbl), l.narrowInt(b, l.src(b, in.Rn), in.W64)))
+	case a64.OpFmovFromGP:
+		l.vdef(b, in.Rd, b.Cast(fcls(in.Dbl), l.narrowInt(b, l.src(b, in.Rn), in.W64)))
+	case a64.OpFmovToGP:
+		l.def(b, in.Rd, b.Cast(c, l.vsrc(b, in.Rn, in.Dbl)), in.W64)
+	case a64.OpLdrFP:
+		l.vdef(b, in.Rd, b.Load(fcls(in.Dbl), l.memAddr(b, in)))
+	case a64.OpStrFP:
+		b.Store(l.vsrc(b, in.Rd, in.Dbl), l.memAddr(b, in))
+
 	default:
 		return fmt.Errorf("unsupported op %s", mnemName(in.Op))
 	}
@@ -215,6 +253,29 @@ func (l *lifter) storeWidth(b *ir.Block, addr, val ir.Ref, w64 bool) {
 		val = b.Copy(ir.ClsW, val)
 	}
 	b.Store(val, addr)
+}
+
+// fcls maps the float width to its class.
+func fcls(dbl bool) ir.Cls {
+	if dbl {
+		return ir.ClsD
+	}
+	return ir.ClsS
+}
+
+// vsrc reads a v-register at the fp width. vdef writes one.
+func (l *lifter) vsrc(b *ir.Block, r a64.Reg, dbl bool) ir.Ref {
+	return b.Load(fcls(dbl), l.vreg[r])
+}
+func (l *lifter) vdef(b *ir.Block, r a64.Reg, val ir.Ref) { b.Store(val, l.vreg[r]) }
+
+// narrowInt views a 64-bit slot value as a 32-bit integer for a w-form
+// conversion, so its signedness is interpreted at the right width.
+func (l *lifter) narrowInt(b *ir.Block, v ir.Ref, w64 bool) ir.Ref {
+	if w64 {
+		return v
+	}
+	return b.Copy(ir.ClsW, v)
 }
 
 // binop dispatches the plain integer binaries.

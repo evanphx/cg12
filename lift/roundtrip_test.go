@@ -98,39 +98,101 @@ func TestRoundTrip(t *testing.T) {
 		},
 	}
 	for _, c := range cases {
-		t.Run(c.name, func(t *testing.T) {
-			m, err := parse.Parse(c.il)
-			require.NoError(t, err)
-			params, retty, voidRet := sigOf(m, c.fn)
-
-			o, err := arm64.CompileToObject(m)
-			require.NoError(t, err)
-			code := extractText(t, o, c.fn)
-
-			// Fresh parse for the lifted comparison, so the original module is not
-			// mutated by mem2reg between input vectors.
-			lifted, err := lift.Lift(c.fn, code, params, retty, voidRet)
-			require.NoError(t, err, "lift")
-
-			for _, args := range c.args {
-				want := interpCall(t, mustParse(t, c.il), c.fn, args)
-				got := interpCall(t, freshCopy(t, lifted), c.fn, args)
-				require.Equalf(t, want, got, "raw-lift args=%v", args)
-			}
-
-			// Also validate after mem2reg promotes the register slots to SSA.
-			promoted := freshCopy(t, lifted)
-			for _, f := range promoted.Funcs {
-				opt.Mem2Reg(f)
-			}
-			require.NoError(t, ir.VerifyModule(promoted))
-			for _, args := range c.args {
-				want := interpCall(t, mustParse(t, c.il), c.fn, args)
-				got := interpCall(t, promoted, c.fn, args)
-				require.Equalf(t, want, got, "mem2reg-lift args=%v", args)
-			}
-		})
+		t.Run(c.name, func(t *testing.T) { roundTrip(t, c.il, c.fn, c.args) })
 	}
+}
+
+// TestRoundTripFloat closes the same loop for floating-point functions: v-register
+// modeling, float arithmetic/compare, and the AAPCS float argument/result
+// registers.
+func TestRoundTripFloat(t *testing.T) {
+	cases := []struct {
+		name string
+		fn   string
+		il   string
+		args [][]interp.Value
+	}{
+		{
+			name: "dmath", fn: "f",
+			il: `export function d $f(d %x, d %y) {
+				@s
+				%a =d add %x, %y
+				%b =d mul %a, %x
+				%c =d sub %b, %y
+				ret %c
+			}`,
+			args: dargs([2]float64{1.5, 2.5}, [2]float64{-3.0, 4.25}, [2]float64{0.1, 0.2}),
+		},
+		{
+			name: "fmax-branch", fn: "fmax",
+			il: `export function d $fmax(d %a, d %b) {
+				@s
+				%c =w cgtd %a, %b
+				jnz %c, @ta, @tb
+				@ta
+				ret %a
+				@tb
+				ret %b
+			}`,
+			args: dargs([2]float64{1.5, 2.5}, [2]float64{9.0, 2.0}, [2]float64{-1.0, -5.0}),
+		},
+		{
+			name: "int-to-double", fn: "f",
+			il: `export function d $f(l %n) {
+				@s
+				%d =d sltof %n
+				%r =d mul %d, %d
+				ret %r
+			}`,
+			args: [][]interp.Value{{interp.L(7)}, {interp.L(-3)}, {interp.L(100)}},
+		},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) { roundTrip(t, c.il, c.fn, c.args) })
+	}
+}
+
+// roundTrip compiles the function to arm64, lifts it, and requires the
+// interpreter to agree with the original over every input vector — both on the
+// raw register-slot form and after mem2reg promotes it to SSA.
+func roundTrip(t *testing.T, il, fn string, argVectors [][]interp.Value) {
+	t.Helper()
+	m, err := parse.Parse(il)
+	require.NoError(t, err)
+	params, retty, voidRet := sigOf(m, fn)
+
+	o, err := arm64.CompileToObject(m)
+	require.NoError(t, err)
+	code := extractText(t, o, fn)
+
+	lifted, err := lift.Lift(fn, code, params, retty, voidRet)
+	require.NoError(t, err, "lift")
+
+	for _, args := range argVectors {
+		want := interpCall(t, mustParse(t, il), fn, args)
+		got := interpCall(t, freshCopy(t, lifted), fn, args)
+		require.Equalf(t, want, got, "raw-lift args=%v", args)
+	}
+
+	promoted := freshCopy(t, lifted)
+	for _, f := range promoted.Funcs {
+		opt.Mem2Reg(f)
+	}
+	require.NoError(t, ir.VerifyModule(promoted))
+	for _, args := range argVectors {
+		want := interpCall(t, mustParse(t, il), fn, args)
+		got := interpCall(t, promoted, fn, args)
+		require.Equalf(t, want, got, "mem2reg-lift args=%v", args)
+	}
+}
+
+// dargs builds double argument vectors from pairs.
+func dargs(ps ...[2]float64) [][]interp.Value {
+	var out [][]interp.Value
+	for _, p := range ps {
+		out = append(out, []interp.Value{interp.D(p[0]), interp.D(p[1])})
+	}
+	return out
 }
 
 func sigOf(m *ir.Module, name string) ([]ir.Cls, ir.Cls, bool) {

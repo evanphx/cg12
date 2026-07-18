@@ -69,6 +69,7 @@ type lifter struct {
 	voidRet  bool
 
 	reg     [numGPR]ir.Ref    // x0..x30 -> alloca slot
+	vreg    [numGPR]ir.Ref    // v0..v30 -> alloca slot (floating point)
 	spSlot  ir.Ref            // sp value (a pointer into the stack buffer)
 	blockAt map[int]*ir.Block // word index -> block starting there
 	leaders []int             // sorted block-leader word indices
