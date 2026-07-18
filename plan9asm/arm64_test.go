@@ -91,6 +91,55 @@ func TestTranslateARM64LargeWordImmediateUsesWordScratch(t *testing.T) {
 	assert.NotContains(t, assembly, "add w4, w4, x27")
 }
 
+func TestTranslateARM64CarryAndHighMultiplyInstructions(t *testing.T) {
+	file, err := Parse(strings.NewReader(`
+TEXT ·arithmetic<ABIInternal>(SB),NOSPLIT,$0
+	ADCS R2, R1
+	ADC ZR, R3, R4
+	SBCS R6, R5
+	SBC R8, R7
+	UMULH R10, R9, R11
+	RET
+`))
+	require.NoError(t, err)
+	assembly, err := TranslateARM64(file, ARM64Options{PackagePath: "math/big", Filename: "arith_arm64.s"})
+	require.NoError(t, err)
+
+	assert.Contains(t, assembly, "\tadcs x1, x1, x2")
+	assert.Contains(t, assembly, "\tadc x4, x3, xzr")
+	assert.Contains(t, assembly, "\tsbcs x5, x5, x6")
+	assert.Contains(t, assembly, "\tsbc x7, x7, x8")
+	assert.Contains(t, assembly, "\tumulh x11, x9, x10")
+}
+
+func TestTranslateARM64DirectABIUsesFloatRegisterBankForRawFloatBits(t *testing.T) {
+	file, err := Parse(strings.NewReader(`
+TEXT ·maximum(SB),NOSPLIT,$0-24
+	MOVD $0x7ff0000000000000, R0
+	MOVD x+0(FP), R1
+	MOVD y+8(FP), R2
+	FMOVD R1, F0
+	FMOVD R2, F1
+	FMAXD F0, F1, F0
+	FMOVD F0, ret+16(FP)
+	RET
+`))
+	require.NoError(t, err)
+	translation, err := CompileARM64(file, ARM64Options{
+		PackagePath:      "math",
+		Filename:         "dim_arm64.s",
+		FloatInputs:      map[string][]int{"maximum": {0, 8}},
+		FloatOutputs:     map[string][]int{"maximum": {16}},
+		PreferDirectABI0: true,
+	})
+	require.NoError(t, err)
+
+	assert.Contains(t, translation.Assembly, "\tfmov x1, d0\n")
+	assert.Contains(t, translation.Assembly, "\tfmov x2, d1\n")
+	assert.NotContains(t, translation.Assembly, "\tmov x1, x0\n")
+	assert.NotContains(t, translation.Assembly, "\tfmov x0, d0\n")
+}
+
 func TestTranslateARM64ConditionalAndIndexedInstructions(t *testing.T) {
 	file, err := Parse(strings.NewReader(`
 TEXT ·compare<ABIInternal>(SB),NOSPLIT|NOFRAME,$0-0
@@ -499,6 +548,23 @@ GLOBL message<>(SB), RODATA, $6
 	assert.Equal(t, []string{"runtime_target"}, translation.ExternalReferences)
 }
 
+func TestTranslatePreservesNoLocalPointersMetadata(t *testing.T) {
+	file, err := Parse(strings.NewReader(`
+TEXT runtime·large<ABIInternal>(SB),WRAPPER,$134217728-48
+	FUNCDATA $1, no_pointers_stackmap(SB)
+	RET
+`))
+	require.NoError(t, err)
+	translation, err := CompileARM64(file, ARM64Options{
+		PackagePath: "runtime",
+		Filename:    "large_arm64.s",
+	})
+	require.NoError(t, err)
+
+	require.Len(t, translation.Functions, 1)
+	assert.True(t, translation.Functions[0].NoLocalPointers)
+}
+
 func TestTranslateExactChacha8FrameAndReadOnlyData(t *testing.T) {
 	path := filepath.Join("..", "stdlib", "src", "internal", "chacha8rand", "chacha8_arm64.s")
 	source, err := os.ReadFile(path)
@@ -548,10 +614,11 @@ func TestTranslateExactReflectAssembly(t *testing.T) {
 		Flags:      []string{"NOSPLIT", "WRAPPER"},
 	}, translation.Functions[0])
 	assert.Equal(t, ARM64Function{
-		Name:       "reflect_makeFuncStub_abi0",
-		Frame:      448,
-		FrameStart: 4,
-		Flags:      []string{"NOSPLIT", "WRAPPER"},
+		Name:            "reflect_makeFuncStub_abi0",
+		Frame:           448,
+		FrameStart:      4,
+		Flags:           []string{"NOSPLIT", "WRAPPER"},
+		NoLocalPointers: true,
 	}, translation.Functions[1])
 	assert.Equal(t, "reflect_methodValueCall", translation.Functions[2].Name)
 	assert.Equal(t, "reflect_methodValueCall_abi0", translation.Functions[3].Name)
@@ -680,10 +747,15 @@ func TestSupportsARM64FileKeepsTargetPolicyWithTranslator(t *testing.T) {
 	assert.True(t, SupportsARM64File("internal/runtime/sys", "empty.s"))
 	assert.True(t, SupportsARM64File("internal/runtime/syscall/linux", "asm_linux_arm64.s"))
 	assert.True(t, SupportsARM64File("internal/runtime/atomic", "atomic_arm64.s"))
+	assert.True(t, SupportsARM64File("math", "dim_arm64.s"))
+	assert.True(t, SupportsARM64File("math", "exp_arm64.s"))
+	assert.True(t, SupportsARM64File("math", "floor_arm64.s"))
+	assert.True(t, SupportsARM64File("math/big", "arith_arm64.s"))
 	assert.True(t, SupportsARM64File("internal/reflectlite", "asm.s"))
 	assert.True(t, SupportsARM64File("reflect", "asm_arm64.s"))
 	assert.True(t, SupportsARM64File("crypto/internal/fips140/sha256", "sha256block_arm64.s"))
 	assert.True(t, SupportsARM64File("crypto/internal/fips140/sha512", "sha512block_arm64.s"))
+	assert.True(t, SupportsARM64File("crypto/internal/boring/sig", "sig_other.s"))
 	assert.True(t, SupportsARM64File("crypto/md5", "md5block_arm64.s"))
 	assert.True(t, SupportsARM64File("crypto/sha1", "sha1block_arm64.s"))
 	assert.True(t, SupportsARM64File("hash/crc32", "crc32_arm64.s"))
@@ -734,6 +806,11 @@ func TestTranslateExactRuntimeARM64FilesAssemble(t *testing.T) {
 		{packagePath: "internal/chacha8rand", name: "chacha8_arm64.s"},
 		{packagePath: "internal/reflectlite", name: "asm.s"},
 		{packagePath: "internal/runtime/atomic", name: "atomic_arm64.s", defines: map[string]int64{"const_offsetARM64HasATOMICS": 135}},
+		{packagePath: "math", name: "dim_arm64.s"},
+		{packagePath: "math", name: "exp_arm64.s"},
+		{packagePath: "math", name: "floor_arm64.s"},
+		{packagePath: "math/big", name: "arith_arm64.s"},
+		{packagePath: "crypto/internal/boring/sig", name: "sig_other.s"},
 		{packagePath: "sync/atomic", name: "asm.s"},
 		{packagePath: "syscall", name: "asm_linux_arm64.s"},
 	}

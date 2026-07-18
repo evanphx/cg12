@@ -57,6 +57,39 @@ func addfnObject() *obj.Object {
 	}
 }
 
+func TestWriteELFMatchesMarshalELF(t *testing.T) {
+	o := &obj.Object{
+		Machine:     obj.EM_AARCH64,
+		Text:        words(a64.Ret(30)),
+		Data:        []byte{1, 2, 3},
+		Rodata:      []byte("constant"),
+		Relro:       make([]byte, 8),
+		Tdata:       []byte{4, 5},
+		BssSize:     19,
+		TbssSize:    7,
+		DataAlign:   16,
+		RodataAlign: 8,
+		RelroAlign:  16,
+		BssAlign:    32,
+		TlsAlign:    8,
+		StackMap:    []byte{6, 7, 8},
+		Syms: []obj.Sym{
+			{Name: "entry", Section: obj.SecText, Size: 4, Global: true, Func: true},
+			{Name: "slot", Section: obj.SecRelro, Size: 8},
+		},
+		RelroRelocs: []obj.Reloc{
+			{Offset: 0, Sym: "external", Type: obj.R_AARCH64_ABS64},
+		},
+	}
+
+	want, err := o.MarshalELF()
+	require.NoError(t, err)
+
+	var output bytes.Buffer
+	require.NoError(t, o.WriteELF(&output))
+	assert.Equal(t, want, output.Bytes())
+}
+
 func TestObjectDefinedSymbolLinksAndRuns(t *testing.T) {
 	data, err := addfnObject().MarshalELF()
 	require.NoError(t, err)

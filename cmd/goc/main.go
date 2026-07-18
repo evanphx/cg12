@@ -90,7 +90,7 @@ func testCommand(arguments []string) int {
 	}
 
 	packagePath := flags.Arg(0)
-	module, _, err := goc.CompileTestExecutable(packagePath)
+	module, _, err := goc.CompileTestExecutableMatching(packagePath, *runPattern)
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "goc: %v\n", err)
 		return 1
@@ -156,18 +156,19 @@ func write(name string, b []byte) {
 
 func link(m *ir.Module, exe string) {
 	var translatedAssembly string
-	var b []byte
-	var err error
-	if runtime.GOARCH == "arm64" {
-		b, translatedAssembly, err = arm64.CompileObjectAndAssembly(m)
-	} else {
-		b, err = compileObject(m)
-	}
-	check(err)
 	f, err := os.CreateTemp("", "cg12-goc-*.o")
 	check(err)
 	defer os.Remove(f.Name())
-	_, err = f.Write(b)
+
+	if runtime.GOARCH == "arm64" {
+		translatedAssembly, err = arm64.WriteObjectAndAssembly(f, m)
+	} else {
+		var objectBytes []byte
+		objectBytes, err = compileObject(m)
+		if err == nil {
+			_, err = f.Write(objectBytes)
+		}
+	}
 	check(err)
 	check(f.Close())
 	cc, err := exec.LookPath("cc")

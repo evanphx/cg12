@@ -19,7 +19,7 @@ import (
 // references. Value references (ir.Ref) already index Temps/Consts by ID.
 const (
 	binMagic   = "cg12"
-	binVersion = 7
+	binVersion = 8
 )
 
 // MarshalBinary encodes the module to cg12's binary unit format.
@@ -69,6 +69,8 @@ func (m *Module) MarshalBinary() ([]byte, error) {
 			e.str(name)
 			e.str(assembly.Includes[name])
 		}
+		e.encAssemblyFloatSlots(assembly.FloatInputs)
+		e.encAssemblyFloatSlots(assembly.FloatOutputs)
 	}
 	e.uv(uint64(len(m.Data)))
 	for _, d := range m.Data {
@@ -130,6 +132,8 @@ func DecodeModule(data []byte) (*Module, error) {
 				m.Assembly[i].Includes[d.str()] = d.str()
 			}
 		}
+		m.Assembly[i].FloatInputs = d.decAssemblyFloatSlots()
+		m.Assembly[i].FloatOutputs = d.decAssemblyFloatSlots()
 	}
 	m.Data = make([]*Data, int(d.uv()))
 	for i := range m.Data {
@@ -228,6 +232,23 @@ func (e *enc) boolean(v bool) {
 }
 func (e *enc) str(s string) { e.uv(uint64(len(s))); e.buf = append(e.buf, s...) }
 func (e *enc) ref(r Ref)    { e.u8(byte(r.Kind)); e.uv(uint64(r.ID)) }
+
+func (e *enc) encAssemblyFloatSlots(slots map[string][]int) {
+	names := make([]string, 0, len(slots))
+	for name := range slots {
+		names = append(names, name)
+	}
+	sort.Strings(names)
+	e.uv(uint64(len(names)))
+	for _, name := range names {
+		e.str(name)
+		offsets := slots[name]
+		e.uv(uint64(len(offsets)))
+		for _, offset := range offsets {
+			e.iv(int64(offset))
+		}
+	}
+}
 
 func (e *enc) f64(v float64) {
 	var b [8]byte
@@ -585,6 +606,23 @@ func (d *dec) str() string {
 	s := string(d.buf[d.pos : d.pos+n])
 	d.pos += n
 	return s
+}
+
+func (d *dec) decAssemblyFloatSlots() map[string][]int {
+	count := int(d.uv())
+	if count == 0 {
+		return nil
+	}
+	slots := make(map[string][]int, count)
+	for range count {
+		name := d.str()
+		offsets := make([]int, int(d.uv()))
+		for index := range offsets {
+			offsets[index] = int(d.iv())
+		}
+		slots[name] = offsets
+	}
+	return slots
 }
 
 func (d *dec) ref() Ref { return Ref{Kind: RefKind(d.u8()), ID: uint32(d.uv())} }

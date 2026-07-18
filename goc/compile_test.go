@@ -13,6 +13,98 @@ import (
 	"github.com/evanphx/cg12/ir"
 )
 
+func TestRuntimeTypeKeyCanonicalizesAliasesInGenericArguments(t *testing.T) {
+	netipPackage := types.NewPackage("net/netip", "netip")
+	addressDetailName := types.NewTypeName(token.NoPos, netipPackage, "addrDetail", nil)
+	addressDetail := types.NewNamed(addressDetailName, types.NewStruct(nil, nil), nil)
+	aliasName := types.NewTypeName(token.NoPos, netipPackage, "AddrDetail", nil)
+	addressDetailAlias := types.NewAlias(aliasName, addressDetail)
+
+	uniquePackage := types.NewPackage("unique", "unique")
+	typeParameterName := types.NewTypeName(token.NoPos, uniquePackage, "T", nil)
+	typeParameter := types.NewTypeParam(typeParameterName, types.NewInterfaceType(nil, nil).Complete())
+	mapName := types.NewTypeName(token.NoPos, uniquePackage, "uniqueMap", nil)
+	mapType := types.NewNamed(mapName, types.NewStruct(nil, nil), nil)
+	mapType.SetTypeParams([]*types.TypeParam{typeParameter})
+
+	aliasInstance, err := types.Instantiate(nil, mapType, []types.Type{addressDetailAlias}, true)
+	if err != nil {
+		t.Fatal(err)
+	}
+	concreteInstance, err := types.Instantiate(nil, mapType, []types.Type{addressDetail}, true)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	aliasPointer := types.NewPointer(aliasInstance)
+	concretePointer := types.NewPointer(concreteInstance)
+	if got, want := runtimeTypeKey(aliasPointer), runtimeTypeKey(concretePointer); got != want {
+		t.Fatalf("runtime type keys differ: %q != %q", got, want)
+	}
+}
+
+func TestTypeKeysDistinguishLocalNamedTypes(t *testing.T) {
+	fset := token.NewFileSet()
+	file, err := parser.ParseFile(fset, "local_types.go", `package sample
+
+type T struct {
+	PackageField int
+}
+
+func first() {
+	type T struct {
+		FirstField int
+	}
+	_ = T{}
+}
+
+func second() {
+	type T struct {
+		SecondField int
+	}
+	_ = T{}
+}
+`, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	info := &types.Info{Defs: make(map[*ast.Ident]types.Object)}
+	configuration := types.Config{}
+	checkedPackage, err := configuration.Check("sample", fset, []*ast.File{file}, info)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	packageType := checkedPackage.Scope().Lookup("T").Type()
+	localTypes := make([]types.Type, 0, 2)
+	for identifier, object := range info.Defs {
+		if identifier.Name != "T" {
+			continue
+		}
+		typeName, ok := object.(*types.TypeName)
+		if !ok || typeName.Parent() == checkedPackage.Scope() {
+			continue
+		}
+		localTypes = append(localTypes, typeName.Type())
+	}
+	if len(localTypes) != 2 {
+		t.Fatalf("local T declarations = %d, want 2", len(localTypes))
+	}
+
+	keys := map[string]bool{
+		runtimeTypeKey(types.NewPointer(packageType)): true,
+		goTypeKey(types.NewSlice(packageType)):        true,
+	}
+	for _, localType := range localTypes {
+		keys[runtimeTypeKey(types.NewPointer(localType))] = true
+		keys[goTypeKey(types.NewSlice(localType))] = true
+	}
+	if len(keys) != 6 {
+		t.Fatalf("type keys collapsed distinct local declarations: %#v", keys)
+	}
+}
+
 func TestAssemblyPackageDefinesIncludeConstantsAndStructLayouts(t *testing.T) {
 	fset := token.NewFileSet()
 	file, err := parser.ParseFile(fset, "layout.go", `package layout
@@ -78,6 +170,44 @@ func main() { if sum(5) != 12 { for { break } } }
 	}
 }
 
+func TestCompileGeneratesWrapperForPromotedInterfaceMultiResultMethod(t *testing.T) {
+	module, err := Compile("promoted.go", []byte(`package main
+
+type scanner interface {
+	Read() (int, int, error)
+}
+
+type implementation struct{}
+
+func (implementation) Read() (int, int, error) {
+	return 17, 25, nil
+}
+
+type reader struct {
+	scanner
+}
+
+func Test() int {
+	value := reader{scanner: implementation{}}
+	left, right, err := value.Read()
+	if err != nil {
+		return 0
+	}
+	return left + right
+}
+`))
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	for _, function := range module.Funcs {
+		if function.Name == "main.scanner.Read" {
+			return
+		}
+	}
+	t.Fatal("promoted interface method wrapper main.scanner.Read was not generated")
+}
+
 func TestStaticInitializerIgnoresKeyedStructFieldNames(t *testing.T) {
 	fset := token.NewFileSet()
 	file, err := parser.ParseFile(fset, "initializer.go", `package initializer
@@ -115,6 +245,74 @@ var dbgvars = []*debugVar{
 	}
 }
 
+func TestStaticInitializerRejectsMapLiteral(t *testing.T) {
+	fset := token.NewFileSet()
+	file, err := parser.ParseFile(fset, "initializer.go", `package initializer
+type holder struct {
+	values map[string]int
+}
+var global = holder{values: map[string]int{"answer": 42}}
+`, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	info := &types.Info{
+		Types: make(map[ast.Expr]types.TypeAndValue),
+		Defs:  make(map[*ast.Ident]types.Object),
+		Uses:  make(map[*ast.Ident]types.Object),
+	}
+	configuration := types.Config{Sizes: types.SizesFor("gc", runtime.GOARCH)}
+	if _, err := configuration.Check("initializer", fset, []*ast.File{file}, info); err != nil {
+		t.Fatal(err)
+	}
+
+	declaration := file.Decls[1].(*ast.GenDecl)
+	specification := declaration.Specs[0].(*ast.ValueSpec)
+	if staticallyInitialized(specification.Values[0], info) {
+		t.Fatal("map-containing composite requires dynamic initialization")
+	}
+}
+
+func TestStaticNonEmptyInterfaceKeepsImplementationMethodReachable(t *testing.T) {
+	module, err := CompileExecutable("interface.go", []byte(`package main
+
+type stringError string
+
+func (value stringError) Error() string {
+	return string(value)
+}
+
+var staticError error = error(stringError("failure"))
+
+func main() {}
+`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	foundMethod := false
+	for _, function := range module.Funcs {
+		if strings.HasSuffix(function.Name, "stringError.Error") {
+			foundMethod = true
+			break
+		}
+	}
+	if !foundMethod {
+		t.Fatal("static interface implementation method is not reachable")
+	}
+
+	foundItab := false
+	for _, data := range module.Data {
+		if strings.HasPrefix(data.Name, ".goc.itab.") {
+			foundItab = true
+			break
+		}
+	}
+	if !foundItab {
+		t.Fatal("static non-empty interface has no itab")
+	}
+}
+
 func TestCompileAllowsExternalLinknameDeclaration(t *testing.T) {
 	module, err := Compile("linkname.go", []byte(`package main
 import _ "unsafe"
@@ -144,6 +342,27 @@ func helper() {}
 		if function.Name == "main.helper" {
 			if !function.NoSplit {
 				t.Fatal("main.helper did not preserve //go:nosplit")
+			}
+			return
+		}
+	}
+	t.Fatal("main.helper was not compiled")
+}
+
+func TestCompilePreservesSystemStackDirective(t *testing.T) {
+	module, err := Compile("systemstack.go", []byte(`package main
+
+//go:systemstack
+func helper() {}
+`))
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	for _, function := range module.Funcs {
+		if function.Name == "main.helper" {
+			if !function.SystemStack {
+				t.Fatal("main.helper did not preserve //go:systemstack")
 			}
 			return
 		}
@@ -292,9 +511,15 @@ func main() {
 func TestCompileExecutableUsesExactRuntimeFIPSIndicator(t *testing.T) {
 	source := `package main
 
-import "crypto/sha256"
+import (
+	"crypto/md5"
+	"crypto/sha1"
+	"crypto/sha256"
+)
 
 func main() {
+	_ = md5.Sum(nil)
+	_ = sha1.Sum(nil)
 	_ = sha256.Sum256(nil)
 }
 `
@@ -327,6 +552,21 @@ func main() {
 		}
 		if !usesRuntimeG {
 			t.Errorf("%s does not use the exact runtime per-g implementation", symbol)
+		}
+	}
+
+	for _, symbol := range []string{
+		"crypto/internal/fips140only.Enforced",
+		"crypto/internal/boring.Unreachable",
+	} {
+		count := 0
+		for _, function := range module.Funcs {
+			if function.Name == symbol {
+				count++
+			}
+		}
+		if count != 1 {
+			t.Errorf("%s definitions = %d, want the exact runtime definition only", symbol, count)
 		}
 	}
 }
@@ -485,6 +725,51 @@ func main() { _ = values }
 	}
 	if len(global.Items) != 2 || global.Items[0].Sym != "main.values.backing" || len(global.Items[1].Ints) != 2 {
 		t.Fatalf("main.values data = %#v, want inline data/length/capacity header", global.Items)
+	}
+}
+
+func TestCompileExecutableDynamicallyInitializesNestedByteSlice(t *testing.T) {
+	module, err := CompileExecutable("main.go", []byte(`package main
+type result struct {
+	line []byte
+}
+type testCase struct {
+	expect []result
+}
+var tests = []testCase{{expect: []result{{line: []byte("expected")}}}}
+func main() { _ = tests[0].expect[0].line }
+`))
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	foundInitializer := false
+	heapAllocations := 0
+	for _, function := range module.Funcs {
+		if strings.Contains(function.Name, "global.initfunc") && strings.HasSuffix(function.Name, ".main.tests") {
+			foundInitializer = true
+			for _, block := range function.Blocks {
+				for _, instruction := range block.Instrs {
+					if instruction.Op != ir.OCall || len(instruction.Args) == 0 {
+						continue
+					}
+					calleeReference := instruction.Arg(0)
+					if calleeReference.Kind != ir.RefConst {
+						continue
+					}
+					callee := function.Consts[calleeReference.ID]
+					if callee.Kind == ir.ConstSym && callee.Sym == "runtime.newobject" {
+						heapAllocations++
+					}
+				}
+			}
+		}
+	}
+	if !foundInitializer {
+		t.Fatal("main.tests has no dynamic initializer")
+	}
+	if heapAllocations < 2 {
+		t.Fatalf("main.tests initializer has %d heap allocations, want at least 2 for the outer and nested backing arrays", heapAllocations)
 	}
 }
 

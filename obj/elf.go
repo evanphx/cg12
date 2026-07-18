@@ -5,7 +5,10 @@
 // constants for convenience).
 package obj
 
-import "fmt"
+import (
+	"fmt"
+	"io"
+)
 
 // ELF machine types.
 const (
@@ -260,6 +263,26 @@ const (
 
 // MarshalELF serializes the object to ELF64 relocatable-object bytes.
 func (o *Object) MarshalELF() ([]byte, error) {
+	file, err := o.prepareELF()
+	if err != nil {
+		return nil, err
+	}
+	return file.marshal(), nil
+}
+
+// WriteELF serializes the object to w as an ELF64 relocatable object. Unlike
+// MarshalELF, it does not allocate a second byte slice containing the complete
+// object, so callers can emit large objects without temporarily doubling their
+// memory use.
+func (o *Object) WriteELF(w io.Writer) error {
+	file, err := o.prepareELF()
+	if err != nil {
+		return err
+	}
+	return file.write(w)
+}
+
+func (o *Object) prepareELF() (*elfFile, error) {
 	// String table for section names.
 	shstr := &strtab{}
 	// String table for symbol names.
@@ -285,23 +308,34 @@ func (o *Object) MarshalELF() ([]byte, error) {
 	// Every relocation section that encodeRela emits below must be scanned here, or
 	// a symbol referenced only from a section left out (a function pointer in
 	// read-only data, say) is never added as undefined and encoding it fails.
-	var allRelocs []Reloc
-	allRelocs = append(allRelocs, o.Relocs...)
-	allRelocs = append(allRelocs, o.DataRelocs...)
-	allRelocs = append(allRelocs, o.RodataRelocs...)
-	allRelocs = append(allRelocs, o.RelroRelocs...)
-	allRelocs = append(allRelocs, o.DebugInfoRelocs...)
-	allRelocs = append(allRelocs, o.DebugLineRelocs...)
-	for _, rl := range allRelocs {
-		if isAnyTLSReloc(rl.Type) {
-			tlsSym[rl.Sym] = true
+	relocationSets := [][]Reloc{
+		o.Relocs,
+		o.DataRelocs,
+		o.RodataRelocs,
+		o.RelroRelocs,
+		o.DebugInfoRelocs,
+		o.DebugLineRelocs,
+		o.StackMapRelocs,
+	}
+	for _, relocs := range relocationSets {
+		for _, relocation := range relocs {
+			if isAnyTLSReloc(relocation.Type) {
+				tlsSym[relocation.Sym] = true
+			}
 		}
 	}
 	seen := make(map[string]bool)
-	for _, rl := range allRelocs {
-		if !defined[rl.Sym] && !seen[rl.Sym] {
-			seen[rl.Sym] = true
-			globals = append(globals, Sym{Name: rl.Sym, Section: SecUndef, Global: true, TLS: tlsSym[rl.Sym]})
+	for _, relocs := range relocationSets {
+		for _, relocation := range relocs {
+			if !defined[relocation.Sym] && !seen[relocation.Sym] {
+				seen[relocation.Sym] = true
+				globals = append(globals, Sym{
+					Name:    relocation.Sym,
+					Section: SecUndef,
+					Global:  true,
+					TLS:     tlsSym[relocation.Sym],
+				})
+			}
 		}
 	}
 
@@ -513,39 +547,96 @@ func (o *Object) MarshalELF() ([]byte, error) {
 	}
 	secs[secShstrtab].data = shstr.b // finalized after all names are interned
 
-	// Lay out the file: header, section data, then the section header table.
-	out := &elfBuf{}
-	out.pad(64) // ELF header, filled in at the end
-	for i := range secs {
-		if secs[i].typ == shtNull || len(secs[i].data) == 0 && secs[i].typ != shtProgbits {
+	return &elfFile{
+		machine:  o.Machine,
+		sections: secs,
+		shstrtab: secShstrtab,
+	}, nil
+}
+
+type elfFile struct {
+	machine  uint16
+	sections []section
+	shstrtab int
+}
+
+func (f *elfFile) marshal() []byte {
+	sectionHeaderOffset := f.layout()
+	totalSize := sectionHeaderOffset + uint64(len(f.sections))*64
+	out := &elfBuf{b: make([]byte, 64, int(totalSize))}
+	for i := range f.sections {
+		section := &f.sections[i]
+		if !section.hasFileData() {
 			continue
 		}
-		out.align(secs[i].addralign)
-		secs[i].offset = uint64(len(out.b))
-		out.bytes(secs[i].data) // a NOBITS section has none, which is the point
+		out.align(section.addralign)
+		out.bytes(section.data)
 	}
 	out.align(8)
-	shoff := uint64(len(out.b))
-	for i := range secs {
-		s := secs[i]
-		out.u32(s.nameOff)
-		out.u32(s.typ)
-		out.u64(s.flags)
-		out.u64(0) // sh_addr
-		out.u64(s.offset)
-		if s.typ == shtNobits {
-			out.u64(s.nobits)
-		} else {
-			out.u64(uint64(len(s.data)))
-		}
-		out.u32(s.link)
-		out.u32(s.info)
-		out.u64(s.addralign)
-		out.u64(s.entsize)
+	for i := range f.sections {
+		writeSectionHeader(out, f.sections[i])
 	}
 
-	writeHeader(out.b, o.Machine, shoff, numSec, secShstrtab)
-	return out.b, nil
+	writeHeader(out.b, f.machine, sectionHeaderOffset, len(f.sections), f.shstrtab)
+	return out.b
+}
+
+func (f *elfFile) write(w io.Writer) error {
+	sectionHeaderOffset := f.layout()
+	header := make([]byte, 64)
+	writeHeader(header, f.machine, sectionHeaderOffset, len(f.sections), f.shstrtab)
+	if err := writeAll(w, header); err != nil {
+		return err
+	}
+
+	offset := uint64(len(header))
+	for i := range f.sections {
+		section := &f.sections[i]
+		if !section.hasFileData() {
+			continue
+		}
+		if err := writePadding(w, section.offset-offset); err != nil {
+			return err
+		}
+		if err := writeAll(w, section.data); err != nil {
+			return err
+		}
+		offset = section.offset + uint64(len(section.data))
+	}
+	if err := writePadding(w, sectionHeaderOffset-offset); err != nil {
+		return err
+	}
+
+	sectionHeader := &elfBuf{b: make([]byte, 0, 64)}
+	for i := range f.sections {
+		sectionHeader.b = sectionHeader.b[:0]
+		writeSectionHeader(sectionHeader, f.sections[i])
+		if err := writeAll(w, sectionHeader.b); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+func (f *elfFile) layout() uint64 {
+	offset := uint64(64)
+	for i := range f.sections {
+		section := &f.sections[i]
+		if !section.hasFileData() {
+			continue
+		}
+		offset = alignOffset(offset, section.addralign)
+		section.offset = offset
+		offset += uint64(len(section.data))
+	}
+	return alignOffset(offset, 8)
+}
+
+func alignOffset(offset, alignment uint64) uint64 {
+	if alignment < 1 {
+		alignment = 1
+	}
+	return (offset + alignment - 1) &^ (alignment - 1)
 }
 
 type section struct {
@@ -562,6 +653,61 @@ type section struct {
 	nobits  uint64
 	nameOff uint32
 	offset  uint64
+}
+
+func (s section) hasFileData() bool {
+	if s.typ == shtNull {
+		return false
+	}
+	return len(s.data) > 0 || s.typ == shtProgbits
+}
+
+func writeSectionHeader(out *elfBuf, section section) {
+	out.u32(section.nameOff)
+	out.u32(section.typ)
+	out.u64(section.flags)
+	out.u64(0) // sh_addr
+	out.u64(section.offset)
+	if section.typ == shtNobits {
+		out.u64(section.nobits)
+	} else {
+		out.u64(uint64(len(section.data)))
+	}
+	out.u32(section.link)
+	out.u32(section.info)
+	out.u64(section.addralign)
+	out.u64(section.entsize)
+}
+
+func writeAll(w io.Writer, data []byte) error {
+	for len(data) > 0 {
+		written, err := w.Write(data)
+		if written > 0 {
+			data = data[written:]
+		}
+		if err != nil {
+			return err
+		}
+		if written == 0 {
+			return io.ErrShortWrite
+		}
+	}
+	return nil
+}
+
+func writePadding(w io.Writer, size uint64) error {
+	var zeroes [4096]byte
+	for size > 0 {
+		chunkSize := uint64(len(zeroes))
+		if size < chunkSize {
+			chunkSize = size
+		}
+		if err := writeAll(w, zeroes[:int(chunkSize)]); err != nil {
+			return err
+		}
+		size -= chunkSize
+	}
+	return nil
 }
 
 // writeHeader fills the 64-byte ELF header in place.

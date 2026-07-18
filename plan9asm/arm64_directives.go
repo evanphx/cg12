@@ -140,14 +140,32 @@ func (t *arm64Translator) translateDirective(directive *Directive) error {
 		return t.translateGlobal(directive)
 	case "DATA":
 		return t.translateData(directive)
-	case "FUNCDATA", "PCDATA":
+	case "FUNCDATA":
 		// These directives describe Go runtime metadata rather than machine
-		// instructions. cg12 emits pclntab and stack-map metadata in its object
-		// writer, so they have no GNU assembler sidecar representation.
+		// instructions. Preserve the standard no-local-pointers declaration for
+		// cg12's stack-map writer; it has no GNU assembler sidecar representation.
+		if isNoLocalPointersDirective(directive) && len(t.functions) > 0 {
+			t.functions[len(t.functions)-1].NoLocalPointers = true
+		}
+		return nil
+	case "PCDATA":
+		// cg12 emits pc-value tables in its object writer.
 		return nil
 	default:
 		return fmt.Errorf("unsupported directive %s", directive.Name)
 	}
+}
+
+func isNoLocalPointersDirective(directive *Directive) bool {
+	if len(directive.Operands) != 2 {
+		return false
+	}
+	index := directive.Operands[0]
+	if index.Kind != OperandImmediate || index.Immediate != "1" {
+		return false
+	}
+	symbol, ok := operandSymbol(directive.Operands[1])
+	return ok && symbol.Name == "no_pointers_stackmap"
 }
 
 func (t *arm64Translator) translateGlobal(directive *Directive) error {

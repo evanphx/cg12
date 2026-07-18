@@ -1,10 +1,12 @@
 package arm64
 
 import (
+	"encoding/binary"
 	"fmt"
 	"strings"
 	"testing"
 
+	"github.com/evanphx/cg12/analysis"
 	"github.com/evanphx/cg12/arm64/a64"
 	"github.com/evanphx/cg12/ir"
 	"github.com/evanphx/cg12/obj"
@@ -508,6 +510,122 @@ func TestGoABIZerosPointerLocalsBeforeCalls(t *testing.T) {
 	assert.Contains(t, disasmModule(t, module), "str xzr, [x29")
 }
 
+func TestGoABIRematerializesFixedStackAddressesAfterCalls(t *testing.T) {
+	module := ir.NewModule()
+	function := module.NewFunc("stack_address", ir.ClsW)
+	function.GoABI = true
+	entry := function.Entry()
+	value := entry.Alloc(8, 8)
+	entry.Store(function.Long(42), value)
+	entry.CallVoid(function.Sym("observe", 0))
+	entry.Ret(entry.Load(ir.ClsW, value))
+
+	assembly := disasmModule(t, module)
+	callOffset := strings.Index(assembly, "bl observe")
+	require.NotEqual(t, -1, callOffset)
+	assert.Contains(t, assembly[callOffset:], "add x17, x29", "the post-call load must derive the local address from the current frame")
+}
+
+func TestGoABIRematerializesCopiedFixedStackAddressesAfterCalls(t *testing.T) {
+	module := ir.NewModule()
+	function := module.NewFunc("copied_stack_address", ir.ClsW)
+	function.GoABI = true
+	entry := function.Entry()
+	value := entry.Alloc(8, 8)
+	copiedAddress := entry.Copy(ir.ClsP, value)
+	entry.Store(function.Long(42), copiedAddress)
+	entry.CallVoid(function.Sym("observe", 0))
+	entry.Ret(entry.Load(ir.ClsW, copiedAddress))
+
+	assembly := disasmModule(t, module)
+	callOffset := strings.Index(assembly, "bl observe")
+	require.NotEqual(t, -1, callOffset)
+	assert.Contains(t, assembly[callOffset:], "add x17, x29", "the copied post-call address must be derived from the current frame")
+}
+
+func TestInferFrameAddressOffsetsHandlesLongReverseDependencyChain(t *testing.T) {
+	const chainLength = 20_000
+
+	function := ir.NewModule().NewFuncVoid("reverse_frame_addresses")
+	addresses := make([]ir.Ref, chainLength+1)
+	for index := range addresses {
+		addresses[index] = function.NewTemp(fmt.Sprintf("address%d", index), ir.ClsP)
+	}
+	one := function.Long(1)
+	additionCount := 0
+	for index := 0; index < chainLength; index++ {
+		instruction := ir.Instr{
+			Op:   ir.OCopy,
+			Cls:  ir.ClsP,
+			To:   addresses[index],
+			Args: []ir.Ref{addresses[index+1]},
+		}
+		if index%2 == 0 {
+			instruction.Op = ir.OAdd
+			instruction.Args = append(instruction.Args, one)
+			additionCount++
+		}
+		block := function.NewBlock(fmt.Sprintf("dependency%d", index))
+		block.Instrs = append(block.Instrs, instruction)
+	}
+
+	const rootOffset = 96
+	machine := &mc{
+		f:        function,
+		allocTmp: map[uint32]int{addresses[chainLength].ID: rootOffset},
+	}
+	machine.inferFrameAddressOffsets()
+
+	require.Len(t, machine.allocTmp, chainLength+1)
+	assert.Equal(t, rootOffset+additionCount, machine.allocTmp[addresses[0].ID])
+}
+
+func TestInferFrameAddressOffsetsDoesNotCollapsePhiCopies(t *testing.T) {
+	function := ir.NewModule().NewFuncVoid("selected_frame_address")
+	leftAddress := function.NewTemp("left", ir.ClsP)
+	rightAddress := function.NewTemp("right", ir.ClsP)
+	selectedAddress := function.NewTemp("selected", ir.ClsP)
+
+	leftBlock := function.NewBlock("left")
+	leftBlock.Instrs = append(leftBlock.Instrs, ir.Instr{
+		Op:   ir.OCopy,
+		Cls:  ir.ClsP,
+		To:   selectedAddress,
+		Args: []ir.Ref{leftAddress},
+	})
+	rightBlock := function.NewBlock("right")
+	rightBlock.Instrs = append(rightBlock.Instrs, ir.Instr{
+		Op:   ir.OCopy,
+		Cls:  ir.ClsP,
+		To:   selectedAddress,
+		Args: []ir.Ref{rightAddress},
+	})
+
+	machine := &mc{
+		f: function,
+		allocTmp: map[uint32]int{
+			leftAddress.ID:  40,
+			rightAddress.ID: 80,
+		},
+	}
+	machine.inferFrameAddressOffsets()
+
+	_, inferred := machine.allocTmp[selectedAddress.ID]
+	assert.False(t, inferred, "a runtime-selected frame address must not be replaced by one incoming offset")
+}
+
+func TestPrepareGoABIDoesNotTreatRawPointerClassAsGCRoot(t *testing.T) {
+	function := ir.NewModule().NewFunc("raw_pointer", ir.ClsP)
+	function.GoABI = true
+	raw := function.Param("raw", ir.ClsP)
+	entry := function.Entry()
+	entry.CallVoid(function.Sym("observe", 0))
+	entry.Ret(raw)
+
+	prepareGoABI(function)
+	assert.False(t, function.Temp(raw).GCRef)
+}
+
 func TestGoABINoSplitOmitsStackGrowthCheck(t *testing.T) {
 	module := ir.NewModule()
 	function := module.NewFuncVoid("nosplit")
@@ -519,6 +637,19 @@ func TestGoABINoSplitOmitsStackGrowthCheck(t *testing.T) {
 	assert.NotContains(t, assembly, "runtime_morestack_noctxt")
 }
 
+func TestGoABISystemStackUsesSystemStackGuard(t *testing.T) {
+	module := ir.NewModule()
+	function := module.NewFuncVoid("system_stack")
+	function.GoABI = true
+	function.SystemStack = true
+	function.Entry().RetVoid()
+
+	assembly := disasmModule(t, module)
+	assert.Contains(t, assembly, "ldr x16, [x28, #24]")
+	assert.Contains(t, assembly, "runtime_morestackc")
+	assert.NotContains(t, assembly, "runtime_morestack_noctxt")
+}
+
 func TestGoABICallerFrameIntrinsicsUseSavedFrame(t *testing.T) {
 	pcModule := ir.NewModule()
 	callerPC := pcModule.NewFunc("caller_pc", ir.ClsL)
@@ -527,7 +658,7 @@ func TestGoABICallerFrameIntrinsicsUseSavedFrame(t *testing.T) {
 	callerPC.Entry().Ret(callerPC.Entry().CallerPC())
 
 	pcAssembly := disasmModule(t, pcModule)
-	assert.Contains(t, pcAssembly, "ldr x9, [x29, #8]")
+	assert.Contains(t, pcAssembly, "ldr x0, [x29, #8]")
 
 	spModule := ir.NewModule()
 	callerSP := spModule.NewFunc("caller_sp", ir.ClsL)
@@ -536,7 +667,7 @@ func TestGoABICallerFrameIntrinsicsUseSavedFrame(t *testing.T) {
 	callerSP.Entry().Ret(callerSP.Entry().CallerSP())
 
 	spAssembly := disasmModule(t, spModule)
-	assert.Contains(t, spAssembly, "add x9, x29, #24")
+	assert.Contains(t, spAssembly, "add x0, x29, #24")
 }
 
 func TestGoABISpillsPointerLiveAcrossCall(t *testing.T) {
@@ -551,6 +682,52 @@ func TestGoABISpillsPointerLiveAcrossCall(t *testing.T) {
 	assembly := disasmModule(t, module)
 	assert.Equal(t, ir.NoReg, f.Temps[pointer.ID].Reg)
 	assert.Contains(t, assembly, "str xzr, [x29")
+}
+
+func TestSafepointRootsExcludeDeadControlFlowIntervals(t *testing.T) {
+	function := ir.NewModule().NewFunc("branch_root", ir.ClsP)
+	pointer := function.ParamRef("pointer")
+	condition := function.Param("condition", ir.ClsW)
+	entry := function.Entry()
+	usePointer := function.NewBlock("use_pointer")
+	safepointBlock := function.NewBlock("safepoint")
+
+	// With this successor order, reverse postorder places safepoint between the
+	// pointer's entry definition and its use in usePointer. Its conservative
+	// linear interval therefore crosses the safepoint even though CFG liveness
+	// correctly says it is dead on that branch.
+	entry.Jnz(condition, usePointer, safepointBlock)
+	usePointer.Ret(pointer)
+	safepointBlock.Safepoint()
+	safepointBlock.Ret(function.ConstInt(ir.ClsP, 0))
+
+	cfg := analysis.BuildCFG(function)
+	liveness := cfg.Liveness()
+	numbering := numberInstrs(cfg)
+	intervals := buildIntervals(function, cfg, liveness, numbering)
+	safepoint := &safepointBlock.Instrs[0]
+	safepointPosition := -1
+	for position, instruction := range numbering.posInstr {
+		if instruction == safepoint {
+			safepointPosition = position
+			break
+		}
+	}
+	require.NotEqual(t, -1, safepointPosition)
+
+	var pointerInterval *interval
+	for _, candidate := range intervals {
+		if candidate.temp == int(pointer.ID) {
+			pointerInterval = candidate
+			break
+		}
+	}
+	require.NotNil(t, pointerInterval)
+	require.Less(t, pointerInterval.start, safepointPosition)
+	require.Greater(t, pointerInterval.end, safepointPosition)
+
+	roots := computeSafepointRoots(function, cfg, liveness)
+	assert.Empty(t, roots[safepoint])
 }
 
 func TestGoABIGroupedSliceValuesUseRegistersOrWholeStack(t *testing.T) {
@@ -574,7 +751,7 @@ func TestGoABIGroupedSliceValuesUseRegistersOrWholeStack(t *testing.T) {
 	parts := callee.ParamGroup("values", sliceType, ir.ClsP, ir.ClsL, ir.ClsL)
 	callee.Entry().Ret(parts[1])
 	calleeAssembly := disasmModule(t, calleeModule)
-	assert.Contains(t, calleeAssembly, "mov x")
+	assert.Contains(t, calleeAssembly, "ldr x0, [x29, #40]")
 
 	callerModule := ir.NewModule()
 	caller := callerModule.NewFunc("call_slice_len", ir.ClsL)
@@ -830,6 +1007,30 @@ func TestCompileModuleWithData(t *testing.T) {
 	})
 }
 
+func TestCompileModuleWithRelativeAndWordSymbolData(t *testing.T) {
+	m := ir.NewModule()
+	m.Data = append(m.Data,
+		&ir.Data{Name: "base", Items: []ir.DataItem{{Sub: ir.SubUB, Ints: []int64{0}}}},
+		&ir.Data{Name: "target", Align: 8, Items: []ir.DataItem{{Sub: ir.SubL, Ints: []int64{42}}}},
+		&ir.Data{Name: "offset", Align: 4, Items: []ir.DataItem{{Sub: ir.SubW, Sym: "target", RelativeTo: "base"}}},
+		&ir.Data{Name: "address", Align: 4, Items: []ir.DataItem{{Sub: ir.SubW, Sym: "function"}}},
+	)
+	function := m.NewFuncVoid("function")
+	function.Entry().RetVoid()
+
+	o, err := CompileToObject(m)
+	require.NoError(t, err)
+
+	base := findSym(t, o, "base")
+	target := findSym(t, o, "target")
+	offset := findSym(t, o, "offset")
+	address := findSym(t, o, "address")
+	assert.Equal(t, uint32(target.Value-base.Value), binary.LittleEndian.Uint32(o.Data[offset.Value:]))
+	assert.Contains(t, o.DataRelocs, obj.Reloc{
+		Offset: address.Value, Sym: "function", Type: obj.R_AARCH64_ABS32,
+	})
+}
+
 // findSym returns the named symbol, failing if the object has no such thing.
 func findSym(t *testing.T, o *obj.Object, name string) obj.Sym {
 	t.Helper()
@@ -936,6 +1137,14 @@ func TestCompileModulePropagatesError(t *testing.T) {
 	_, err := CompileToObject(m)
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "bad")
+}
+
+func TestStackAggregateCopyUsesLegalWidthForFourByteAlignedDestination(t *testing.T) {
+	machine := &mc{prog: a64.NewProgram()}
+	machine.emitStackAggregateCopy(mcSP, 268, mcGP2, 0, 260)
+
+	_, err := machine.prog.Bytes()
+	require.NoError(t, err)
 }
 
 // disasmModule compiles a module and reads its machine code back as assembly,

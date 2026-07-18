@@ -5,6 +5,7 @@ import (
 	"go/ast"
 	"go/token"
 	"go/types"
+	"regexp"
 	"sort"
 	"strconv"
 	"strings"
@@ -25,9 +26,27 @@ type PackageTest struct {
 // normal Go executable linked against the cg12-compiled runtime. Test selection
 // remains a runtime concern handled by the copied testing and regexp packages.
 func CompileTestExecutable(packagePath string) (*ir.Module, []PackageTest, error) {
+	return compileTestExecutable(packagePath, "")
+}
+
+// CompileTestExecutableMatching compiles a test executable whose generated
+// test table contains only top-level tests selected by runPattern. All package
+// files are still parsed and type-checked before unreachable test bodies are
+// omitted from code generation.
+func CompileTestExecutableMatching(packagePath, runPattern string) (*ir.Module, []PackageTest, error) {
+	return compileTestExecutable(packagePath, runPattern)
+}
+
+func compileTestExecutable(packagePath, runPattern string) (*ir.Module, []PackageTest, error) {
 	tests, hasExternalTests, err := discoverPackageTests(packagePath)
 	if err != nil {
 		return nil, nil, err
+	}
+	if runPattern != "" {
+		tests, err = matchingPackageTests(tests, runPattern)
+		if err != nil {
+			return nil, nil, err
+		}
 	}
 
 	externalPackagePath := packagePath + "_test"
@@ -44,6 +63,25 @@ func CompileTestExecutable(packagePath string) (*ir.Module, []PackageTest, error
 		return nil, nil, err
 	}
 	return module, tests, nil
+}
+
+func matchingPackageTests(tests []PackageTest, runPattern string) ([]PackageTest, error) {
+	topLevelPattern := runPattern
+	if slash := strings.IndexByte(topLevelPattern, '/'); slash >= 0 {
+		topLevelPattern = topLevelPattern[:slash]
+	}
+	matcher, err := regexp.Compile(topLevelPattern)
+	if err != nil {
+		return nil, fmt.Errorf("goc test: invalid -run pattern: %w", err)
+	}
+
+	selected := make([]PackageTest, 0, len(tests))
+	for _, test := range tests {
+		if matcher.MatchString(test.Name) {
+			selected = append(selected, test)
+		}
+	}
+	return selected, nil
 }
 
 func discoverPackageTests(packagePath string) ([]PackageTest, bool, error) {

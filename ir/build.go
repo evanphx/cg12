@@ -311,7 +311,11 @@ func (b *Block) CallerSP() Ref {
 
 func (b *Block) Load(cls Cls, addr Ref) Ref {
 	if addr.Kind == RefReg {
-		return b.emit(OGetReg, cls, addr) // read a machine register
+		value := b.emit(OGetReg, cls, addr) // read a machine register
+		if cls == ClsP {
+			b.fn.MarkGCRef(value)
+		}
+		return value
 	}
 	var op Op
 	switch cls {
@@ -326,7 +330,11 @@ func (b *Block) Load(cls Cls, addr Ref) Ref {
 	case ClsQ:
 		op = OLoadq
 	}
-	return b.emit(op, cls, addr)
+	value := b.emit(op, cls, addr)
+	if cls == ClsP {
+		b.fn.MarkGCRef(value)
+	}
+	return value
 }
 
 // LoadSub reads a sub-word value from addr, extended into class cls per the
@@ -516,6 +524,7 @@ func (b *Block) HeapAlloc(allocator, typeDescriptor Ref, size, align int) Ref {
 		Pos:  b.curPos,
 	}
 	in.To = b.fn.newTemp("", ClsP)
+	b.fn.MarkGCRef(in.To)
 	b.Instrs = append(b.Instrs, in)
 	return in.To
 }
@@ -592,8 +601,28 @@ func (b *Block) CallAggregate(aggregate *AggType, classes []Cls, callee Ref, arg
 			instruction.Defs = append(instruction.Defs, result)
 		}
 	}
+	markAggregateResultGCRefs(b.fn, aggregate.Fields, results, new(int))
 	b.Instrs = append(b.Instrs, instruction)
 	return results
+}
+
+func markAggregateResultGCRefs(function *Func, fields []Field, results []Ref, resultIndex *int) {
+	for _, field := range fields {
+		count := field.count()
+		for element := 0; element < count; element++ {
+			if field.Type != nil {
+				markAggregateResultGCRefs(function, field.Type.Fields, results, resultIndex)
+				continue
+			}
+			if *resultIndex >= len(results) {
+				return
+			}
+			if field.Pointer {
+				function.MarkGCRef(results[*resultIndex])
+			}
+			*resultIndex = *resultIndex + 1
+		}
+	}
 }
 
 // Safepoint marks a garbage-collector safepoint that is not a call (an inlined

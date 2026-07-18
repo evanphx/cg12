@@ -40,6 +40,8 @@ func prepareAssembly(module *ir.Module) (assemblyBundle, error) {
 			PackagePath:      source.PackagePath,
 			Filename:         source.Path,
 			Defines:          source.Defines,
+			FloatInputs:      source.FloatInputs,
+			FloatOutputs:     source.FloatOutputs,
 			PreferDirectABI0: true,
 		})
 		if err != nil {
@@ -66,12 +68,13 @@ func prepareAssembly(module *ir.Module) (assemblyBundle, error) {
 			}
 			flags |= assemblyFunctionFlags(function.Name)
 			bundle.functions = append(bundle.functions, goFunctionInfo{
-				name:         function.Name,
-				frameSize:    function.Frame,
-				frameStart:   function.FrameStart,
-				argumentSize: function.Args,
-				funcID:       assemblyFunctionID(function.Name),
-				funcFlag:     flags,
+				name:            function.Name,
+				frameSize:       function.Frame,
+				frameStart:      function.FrameStart,
+				argumentSize:    function.Args,
+				funcID:          assemblyFunctionID(function.Name),
+				funcFlag:        flags,
+				noLocalPointers: function.NoLocalPointers,
 			})
 		}
 	}

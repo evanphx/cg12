@@ -41,7 +41,7 @@ func TestGoFunctionMetadataPreservesRuntimeFunctionID(t *testing.T) {
 		},
 	}
 
-	builder.build(functions, nil, &ir.Data{Name: "runtime.firstmoduledata"}, []byte{0}, ".goc.runtime.dataend", 0, 0)
+	builder.build(functions, nil, &ir.Data{Name: "runtime.firstmoduledata"}, []byte{0}, ".goc.runtime.dataend", 0, 0, 0)
 	pclntableOffset := builder.labels[".goc.go.pclntable"] - builder.base
 	const funcIDOffset = 40
 
@@ -71,6 +71,34 @@ func TestGoRuntimeModuledataReferencesModuleInitTasks(t *testing.T) {
 	assert.Equal(t, sanitize(goModuleInitTasksName), relocations[moduledata.Value+472].Sym)
 	assert.Equal(t, uint64(1), binary.LittleEndian.Uint64(object.Data[moduledata.Value+480:]))
 	assert.Equal(t, uint64(1), binary.LittleEndian.Uint64(object.Data[moduledata.Value+488:]))
+}
+
+func TestGoRuntimeModuledataReferencesInterfaceTables(t *testing.T) {
+	module := ir.NewModule()
+	schedinit := module.NewFuncVoid("runtime.schedinit")
+	schedinit.GoABI = true
+	schedinit.Entry().RetVoid()
+	module.Data = append(module.Data,
+		&ir.Data{Name: ".goc.runtime.datastart", Align: 8, Items: []ir.DataItem{{Sub: ir.SubUB, Ints: []int64{0}}}},
+		&ir.Data{Name: goModuleItabLinksName, Align: 8, Items: []ir.DataItem{
+			{Sub: ir.SubL, Ints: []int64{0}},
+			{Sub: ir.SubL, Ints: []int64{0}},
+		}},
+		&ir.Data{Name: ".goc.runtime.dataend", Align: 8, Items: []ir.DataItem{{Sub: ir.SubUB, Ints: []int64{0}}}},
+		&ir.Data{Name: "runtime.firstmoduledata", Align: 8},
+	)
+
+	object, err := CompileToObject(module)
+	require.NoError(t, err)
+	moduledata, ok := dataSymbol(object, sanitize("runtime.firstmoduledata"))
+	require.True(t, ok)
+	relocations := make(map[uint64]obj.Reloc)
+	for _, relocation := range object.DataRelocs {
+		relocations[relocation.Offset] = relocation
+	}
+	assert.Equal(t, sanitize(goModuleItabLinksName), relocations[moduledata.Value+384].Sym)
+	assert.Equal(t, uint64(2), binary.LittleEndian.Uint64(object.Data[moduledata.Value+392:]))
+	assert.Equal(t, uint64(2), binary.LittleEndian.Uint64(object.Data[moduledata.Value+400:]))
 }
 
 func TestGoRuntimeMetadataIncludesTranslatedAssemblyFunctions(t *testing.T) {
@@ -111,8 +139,41 @@ func TestGoUnsafePointPCDataDisablesAsyncPreemption(t *testing.T) {
 }
 
 func TestGoStackMapPCDataSwitchesAfterPrologue(t *testing.T) {
-	assert.Equal(t, []byte{4, 0xff, 0xff, 0xff, 0xff, 0x0f, 0}, goStackMapPCData(0))
-	assert.Equal(t, []byte{2, 9, 2, 0xff, 0xff, 0xff, 0xff, 0x0f, 0}, goStackMapPCData(36))
+	assert.Equal(t, []byte{4, 0xff, 0xff, 0xff, 0xff, 0x0f, 0}, goStackMapPCData(0, nil))
+	assert.Equal(t, []byte{2, 9, 2, 0xff, 0xff, 0xff, 0xff, 0x0f, 0}, goStackMapPCData(36, nil))
+	assert.Equal(t, []byte{
+		2, 9,
+		2, 11,
+		2, 10,
+		1, 0xff, 0xff, 0xff, 0xff, 0x0f,
+		0,
+	}, goStackMapPCData(36, []goStackMapIndexPoint{
+		{pc: 80, index: 2},
+		{pc: 120, index: 1},
+	}))
+}
+
+func TestGoFunctionStackMapsKeepSafepointRootsPrecise(t *testing.T) {
+	pointerMaps, indexPoints := goFunctionStackMaps(goFunctionInfo{
+		localPointerWords: []int{1},
+		stackMapPoints: []goStackMapPoint{
+			{pc: 80, pointerWords: []int{4}},
+			{pc: 120, pointerWords: []int{1}},
+		},
+	})
+
+	assert.Equal(t, [][]int{nil, {1}, {1, 4}}, pointerMaps)
+	assert.Equal(t, []goStackMapIndexPoint{
+		{pc: 80, index: 2},
+		{pc: 120, index: 1},
+	}, indexPoints)
+}
+
+func TestMergePointerWordsCombinesSortedSetsWithoutDuplicates(t *testing.T) {
+	assert.Equal(t, []int{1, 2, 4, 7, 9}, mergePointerWords(
+		[]int{1, 4, 7},
+		[]int{2, 4, 9},
+	))
 }
 
 func TestGoStackMapsSeparateEntryAndBodyRoots(t *testing.T) {
@@ -123,6 +184,22 @@ func TestGoStackMapsSeparateEntryAndBodyRoots(t *testing.T) {
 		8, 0, 0, 0,
 		0b00000010,
 		0b01000000,
+	}, builder.data)
+}
+
+func TestNoLocalPointersAssemblyUsesZeroBitStackMap(t *testing.T) {
+	function := goFunctionInfo{
+		frameSize:       134217744,
+		noLocalPointers: true,
+	}
+	assert.Equal(t, 0, goLocalStackMapWords(function))
+
+	builder := &goMetadataBuilder{}
+	pointerMaps, _ := goFunctionStackMaps(function)
+	builder.stackMaps(goLocalStackMapWords(function), pointerMaps...)
+	assert.Equal(t, []byte{
+		2, 0, 0, 0,
+		0, 0, 0, 0,
 	}, builder.data)
 }
 

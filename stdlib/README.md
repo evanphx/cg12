@@ -71,6 +71,14 @@ currently pass through this path. The complete copied suites for `unicode/utf8`,
 `unicode/utf16`, `path`, and `hash/adler32` also pass, including their
 allocation-count, interface, clone, and binary-marshaling tests.
 
+The next package-test progression starts with `testing/iotest`, `log/internal`,
+and `log`. Their sources are copied unchanged from the same Go 1.26.1 tree and
+are compiled from this repository rather than resolved from host export data.
+`encoding/json` is mirrored and active as the next dependency required by the
+unchanged `net/netip` tests. Its unchanged tests now also source-load the copied
+`math/big`, `net/http`, and `net/http/httptest` packages as the dependency
+frontier expands.
+
 The complete Go 1.26.1 `runtime` source tree is also mirrored here unchanged.
 The cg12 loader build-selects and type-checks it from this repository. Normal
 ARM64 executables compile the runtime through cg12, initialize the scheduler,

@@ -143,6 +143,10 @@ type Func struct {
 	Variadic  bool // accepts variadic arguments (a trailing "..." in the IL)
 	GoABI     bool // use the Go runtime's platform frame convention
 	NoSplit   bool // omit the Go stack-growth check at function entry
+	// SystemStack marks a //go:systemstack function. Such functions must only run
+	// on g0 or gsignal: their stack check uses g.stackguard1 and reports an
+	// attempted call from an ordinary goroutine through runtime.morestackc.
+	SystemStack bool
 	// HasClosureContext reports that ABIInternal supplies this function's
 	// closure environment in the architecture's dedicated closure register.
 	HasClosureContext bool
@@ -252,11 +256,13 @@ type Module struct {
 // translation after IR compilation. Source uses the Go toolchain's Plan 9
 // assembly syntax.
 type AssemblyFile struct {
-	PackagePath string
-	Path        string
-	Source      string
-	Defines     map[string]int64
-	Includes    map[string]string
+	PackagePath  string
+	Path         string
+	Source       string
+	Defines      map[string]int64
+	Includes     map[string]string
+	FloatInputs  map[string][]int
+	FloatOutputs map[string][]int
 }
 
 // Module returns the module this function belongs to (nil if standalone).
@@ -315,13 +321,14 @@ func (d *Data) HoldsAddress() bool {
 
 // DataItem is one initialiser field of a Data definition.
 type DataItem struct {
-	Sub  SubCls // element type
-	Zero int    // when > 0, this item is Zero bytes of zero-fill
-	Ints []int64
-	Flts []float64
-	Sym  string // when set, the item is the address of Sym
-	Off  int64  // offset added to Sym
-	Str  string // when set, a raw byte string
+	Sub        SubCls // element type
+	Zero       int    // when > 0, this item is Zero bytes of zero-fill
+	Ints       []int64
+	Flts       []float64
+	Sym        string // when set, the item refers to Sym
+	RelativeTo string // when set with Sym, encode Sym - RelativeTo
+	Off        int64  // offset added to Sym
+	Str        string // when set, a raw byte string
 }
 
 // ClassOf returns the class of a value reference within this function.

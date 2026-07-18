@@ -165,6 +165,7 @@ type asmb interface {
 	adr(rd Reg, to *ir.Block)
 
 	// Spill traffic: a load into / store from a frame slot at x29+off.
+	frameAddr(rd Reg, off int)
 	ldrSpill(rd Reg, float bool, off, size int)
 	strSpill(rs Reg, float bool, off, size int)
 	// ldpFrame restores two integer registers from adjacent frame slots at
@@ -644,9 +645,10 @@ func (b *mcAsm) allocN(rd, size Reg) {
 	b.prog.Emit(a64.SubReg(true, mreg(rd), mcGP2, mreg(size))) // rd = sp - size
 	b.prog.Emit(a64.AddImm(true, mcSP, mreg(rd), 0))           // sp = rd
 }
-func (b *mcAsm) movFromSP(rd Reg)         { b.prog.Emit(a64.AddImm(true, mreg(rd), mcSP, 0)) }
-func (b *mcAsm) movToSP(rn Reg)           { b.prog.Emit(a64.AddImm(true, mcSP, mreg(rn), 0)) }
-func (b *mcAsm) adr(rd Reg, to *ir.Block) { b.prog.Adr(mreg(rd), to.Name) }
+func (b *mcAsm) movFromSP(rd Reg)          { b.prog.Emit(a64.AddImm(true, mreg(rd), mcSP, 0)) }
+func (b *mcAsm) movToSP(rn Reg)            { b.prog.Emit(a64.AddImm(true, mcSP, mreg(rn), 0)) }
+func (b *mcAsm) adr(rd Reg, to *ir.Block)  { b.prog.Adr(mreg(rd), to.Name) }
+func (b *mcAsm) frameAddr(rd Reg, off int) { b.m.frameAddr(mreg(rd), off) }
 func (b *mcAsm) ldrSpill(rd Reg, float bool, off, size int) {
 	b.m.spillLoad(mreg(rd), float, off, size)
 }

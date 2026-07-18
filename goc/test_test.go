@@ -84,6 +84,29 @@ func TestCompilePackageTests(t *testing.T) {
 	}
 }
 
+func TestMatchingPackageTestsSelectsTopLevelRunPattern(t *testing.T) {
+	tests := []PackageTest{
+		{Name: "TestAlpha", PackagePath: "example"},
+		{Name: "TestBeta", PackagePath: "example"},
+		{Name: "TestGamma", PackagePath: "example"},
+	}
+
+	selected, err := matchingPackageTests(tests, "^(TestAlpha|TestGamma)$/subtest")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(selected) != 2 || selected[0].Name != "TestAlpha" || selected[1].Name != "TestGamma" {
+		t.Fatalf("selected tests = %#v", selected)
+	}
+}
+
+func TestMatchingPackageTestsRejectsInvalidPattern(t *testing.T) {
+	_, err := matchingPackageTests(nil, "[")
+	if err == nil {
+		t.Fatal("invalid pattern unexpectedly succeeded")
+	}
+}
+
 func TestCompileUTF8TestsKeepsFunctionSizeBounded(t *testing.T) {
 	module, _, err := CompileTestExecutable("unicode/utf8")
 	if err != nil {

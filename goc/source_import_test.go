@@ -159,6 +159,53 @@ func TestLoadExactStandardTestingSource(t *testing.T) {
 	}
 }
 
+func TestLoadVendoredDNSMessageSource(t *testing.T) {
+	loader := newSourceLoader(token.NewFileSet())
+	const packagePath = "golang.org/x/net/dns/dnsmessage"
+	loaded, err := loader.Import(packagePath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if loaded.Path() != packagePath {
+		t.Fatalf("package path = %q, want %q", loaded.Path(), packagePath)
+	}
+	unit := loader.units[packagePath]
+	if unit == nil || len(unit.files) == 0 {
+		t.Fatal("vendored DNS package source AST was not retained")
+	}
+	wantDirectory := filepath.Join("stdlib", "src", "vendor", "golang.org", "x", "net", "dns", "dnsmessage")
+	for _, file := range unit.files {
+		position := loader.fset.Position(file.Package)
+		if !strings.Contains(position.Filename, wantDirectory) {
+			t.Fatalf("loaded vendored DNS source from %q, want repository stdlib", position.Filename)
+		}
+	}
+}
+
+func TestLoadStandardNetWithoutCgo(t *testing.T) {
+	loader := newSourceLoader(token.NewFileSet())
+	if _, err := loader.Import("net"); err != nil {
+		t.Fatal(err)
+	}
+	unit := loader.units["net"]
+	if unit == nil {
+		t.Fatal("net source unit was not retained")
+	}
+	foundStub := false
+	for _, file := range unit.files {
+		filename := filepath.Base(loader.fset.Position(file.Package).Filename)
+		if filename == "cgo_unix.go" {
+			t.Fatal("net/cgo_unix.go was selected for the non-cgo cg12 target")
+		}
+		if filename == "cgo_stub.go" {
+			foundStub = true
+		}
+	}
+	if !foundStub {
+		t.Fatal("net/cgo_stub.go was not selected for the non-cgo cg12 target")
+	}
+}
+
 func TestLoadExactStandardBytealgAssembly(t *testing.T) {
 	loader := newSourceLoader(token.NewFileSet())
 	_, err := loader.Import("internal/bytealg")
@@ -270,6 +317,7 @@ func TestRepositoryStandardLibraryInventory(t *testing.T) {
 		"crypto/sha256",
 		"encoding/binary",
 		"encoding/hex",
+		"encoding/json",
 		"hash/adler32",
 		"hash/crc32",
 		"hash/fnv",
@@ -289,6 +337,45 @@ func TestRepositoryStandardLibraryInventory(t *testing.T) {
 		"encoding/base32",
 		"encoding/base64",
 		"encoding/csv",
+		"testing/iotest",
+		"testing/synctest",
+		"compress/flate",
+		"compress/gzip",
+		"crypto/tls",
+		"crypto/x509",
+		"encoding/asn1",
+		"encoding/pem",
+		"math/big",
+		"log/internal",
+		"log",
+		"vendor/golang.org/x/net/dns/dnsmessage",
+		"vendor/golang.org/x/net/http/httpguts",
+		"vendor/golang.org/x/net/http/httpproxy",
+		"vendor/golang.org/x/net/http2/hpack",
+		"vendor/golang.org/x/net/idna",
+		"vendor/golang.org/x/crypto/chacha20poly1305",
+		"vendor/golang.org/x/crypto/cryptobyte",
+		"vendor/golang.org/x/text/secure/bidirule",
+		"vendor/golang.org/x/text/transform",
+		"vendor/golang.org/x/text/unicode/bidi",
+		"vendor/golang.org/x/text/unicode/norm",
+		"internal/nettrace",
+		"internal/singleflight",
+		"net",
+		"net/http",
+		"net/http/httptest",
+		"net/http/httptrace",
+		"net/http/internal",
+		"net/http/internal/ascii",
+		"net/http/internal/httpcommon",
+		"net/http/internal/testcert",
+		"net/netip",
+		"net/textproto",
+		"net/url",
+		"mime",
+		"mime/multipart",
+		"unique",
+		"weak",
 		"runtime",
 	}
 	for _, path := range packages {

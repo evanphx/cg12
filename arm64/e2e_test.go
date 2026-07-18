@@ -213,6 +213,37 @@ int main(void){ int x=5; int want=40*x + 40*39/2; return bigsum(x)==want?0:1; }`
 	require.Equal(t, 0, code)
 }
 
+func TestE2EZeroExtendSpillWritesFullResult(t *testing.T) {
+	const valueCount = 40
+	module := ir.NewModule()
+	function := module.NewFunc("sumzeroextended", ir.ClsL).Export()
+	input := function.Param("input", ir.ClsW)
+	entry := function.Entry()
+	values := make([]ir.Ref, valueCount)
+	for index := range values {
+		word := entry.Add(ir.ClsW, input, function.Word(int64(index)))
+		values[index] = entry.Extuw(ir.ClsL, word)
+	}
+	sum := function.Long(0)
+	for _, value := range values {
+		sum = entry.Add(ir.ClsL, sum, value)
+	}
+	entry.Ret(sum)
+
+	_, code := buildAndRun(t, module, `
+#include <stdint.h>
+extern unsigned long sumzeroextended(unsigned int);
+__attribute__((noinline)) static void poison_stack(void) {
+  volatile uint64_t words[256];
+  for (int i = 0; i < 256; i++) words[i] = UINT64_MAX;
+}
+int main(void) {
+  poison_stack();
+  return sumzeroextended(1) == 820 ? 0 : 1;
+}`)
+	require.Equal(t, 0, code)
+}
+
 // TestE2EAllocInNonEntryBlock is a regression test for a stack-offset bug the
 // QBE corpus surfaced: an alloc in a block other than the entry was assigned the
 // wrong frame offset because the offset map was keyed by a global instruction

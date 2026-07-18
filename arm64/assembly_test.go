@@ -30,6 +30,23 @@ func TestPrepareAssemblyCollectsCodeReferencesAndFunctions(t *testing.T) {
 	assert.Equal(t, byte(goFuncFlagAsm), bundle.functions[0].funcFlag)
 }
 
+func TestPrepareAssemblyCarriesNoLocalPointersMetadata(t *testing.T) {
+	module := ir.NewModule()
+	module.Assembly = append(module.Assembly, ir.AssemblyFile{
+		PackagePath: "runtime",
+		Path:        "runtime/large_arm64.s",
+		Source: `TEXT runtime·large<ABIInternal>(SB),WRAPPER,$134217728-48
+	FUNCDATA $1, no_pointers_stackmap(SB)
+	RET
+`,
+	})
+
+	bundle, err := prepareAssembly(module)
+	require.NoError(t, err)
+	require.Len(t, bundle.functions, 1)
+	assert.True(t, bundle.functions[0].noLocalPointers)
+}
+
 func TestAssemblyGlobalReplacesIRDataDefinition(t *testing.T) {
 	module := ir.NewModule()
 	module.Data = append(module.Data, &ir.Data{

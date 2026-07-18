@@ -277,6 +277,7 @@ func TestAdvancedExecutionCorpus(t *testing.T) {
 		{"mutable globals", `var total=3; func add(x int){ total+=x }; func Test() int { add(4); add(5); return total }`, 12},
 		{"global zero and constant strings", `var empty string; var text = "abc"; func Test() int { return len(empty)*100 + len(text)*10 + int(text[1]) }`, 128},
 		{"constant struct global", `type bounds struct { low uint16; high uintptr }; var limits = bounds{low: 7, high: 0x123456789}; func Test() int { return int(limits.low) + int(limits.high&0xff) }`, 144},
+		{"global float32 preserves following string alignment", `type entry struct { number float32; text string }; var value = entry{number: 39, text: "gopher"}; func Test() int { return int(value.number) + len(value.text)/2 }`, 42},
 		{"global slice assignment", `var values []byte; func set(){ values = []byte{7, 11, 13} }; func Test() int { set(); return len(values)*1000 + cap(values)*100 + int(values[0]+values[1]+values[2]) }`, 3331},
 		{"static numeric global slice", `var values = []uint32{7, 11, 24}; func Test() int { return int(values[0] + values[1] + values[2]) }`, 42},
 		{"dynamic fields in global composite", `type entry struct { predicate func(int) bool }; func atLeast(limit int) func(int) bool { return func(value int) bool { return value >= limit } }; var entries = []entry{{predicate: atLeast(17)}, {predicate: atLeast(25)}}; func Test() int { if entries[0].predicate(16) || !entries[0].predicate(17) || entries[1].predicate(24) || !entries[1].predicate(25) { return 0 }; return 42 }`, 42},
@@ -310,13 +311,28 @@ func TestAdvancedExecutionCorpus(t *testing.T) {
 		{"generic globals function values and forwarded results", `func identity[T any](value T) T { return value }; var global = identity(func() int { return 17 }); func retry[T any](fn func() (T, error)) (T, error) { return fn() }; func forward() (int, error) { return retry(func() (int, error) { return 25, nil }) }; func Test() int { selected := identity[int]; first := selected(global()); second, err := forward(); if err != nil { return -1 }; return first + second }`, 42},
 		{"named aggregate results", `type pair struct { left, right int }; func values() (first pair, second pair) { first = pair{17, 25}; second = pair{5, 7}; return }; func Test() int { first, second := values(); return first.left + first.right + second.left - second.right + 2 }`, 42},
 		{"slice first multi result", `func step(values []byte) ([]byte, bool) { return values[1:], true }; func Test() int { values, ok := step([]byte{7, 11, 13}); values, ok = step(values); if !ok { return 0 }; return len(values)*10 + int(values[0]) }`, 23},
+		{"slice base evaluated once", `var calls int
+
+			var values = []int{1, 2, 3}
+
+			func source() []int {
+				calls++
+				return values
+			}
+
+			func Test() int {
+				selected := source()[1:2]
+				return calls*30 + len(selected)*10 + selected[0]
+			}`, 42},
 		{"slice multi result loop", `func step(values []byte) ([]byte, bool) { if len(values) == 1 { return nil, false }; return values[1:], true }; func Test() int { values := []byte{7, 11, 13}; count := 0; for { var ok bool; values, ok = step(values); if !ok { break }; count++ }; return count * 10 }`, 20},
 		{"nil aggregate result", `func value() (int, error) { return 42, nil }; func Test() int { result, err := value(); if err != nil { return 0 }; return result }`, 42},
 		{"named interface result assignment", `func value() (result any) { result = 42; return }; func Test() int { return value().(int) }`, 42},
 		{"implicit pointer method receiver", `type counter int; func (value *counter) add(amount int) { *value += counter(amount) }; func Test() int { var value counter = 17; value.add(25); return int(value) }`, 42},
+		{"implicit dereference for value method receiver", `type control uint64; func (value control) low() int { return int(value & 0xff) }; func current() *control { value := control(42); return &value }; func Test() int { return current().low() }`, 42},
 		{"promoted embedded method receiver", `type flags uint8; func (f *flags) set() { *f |= 1 }; type state struct { count uint16; flags }; func Test() int { s := state{count: 510}; s.set(); return int(s.count) + int(s.flags)*1000 }`, 1510},
 		{"promoted embedded scalar value receiver", `type flags uintptr; func (f flags) kind() int { return int(f & 31) }; type value struct { flags }; func Test() int { v := value{flags: 42}; return v.kind() }`, 10},
 		{"promoted embedded interface method", `type source interface { Value() int }; type implementation struct { value int }; func (value *implementation) Value() int { return value.value }; type wrapper struct { source }; func Test() int { var value source = &wrapper{source: &implementation{value: 42}}; return value.Value() }`, 42},
+		{"promoted embedded interface multi-result method", `type source interface { Pair() (int, int, error) }; type implementation struct{}; func (implementation) Pair() (int, int, error) { return 17, 25, nil }; type wrapper struct { source }; func Test() int { value := wrapper{source: implementation{}}; left, right, err := value.Pair(); if err != nil { return 0 }; return left + right }`, 42},
 		{"promoted field through embedded pointer", `type inner struct { value int }; type outer struct { *inner }; func Test() int { value := outer{inner: &inner{value: 42}}; return value.value }`, 42},
 		{"global elided pointer struct slice", `type item struct { value int }; var items = []*item{{value: 17}, {value: 25}}; func Test() int { return items[0].value + items[1].value }`, 42},
 		{"global concrete error interface", `type textError string; func (value textError) Error() string { return string(value) }; var failure error = textError("bad"); func Test() int { if failure != nil { return 42 }; return 0 }`, 42},
@@ -324,6 +340,8 @@ func TestAdvancedExecutionCorpus(t *testing.T) {
 		{"global string slice inline headers", `var values = []string{0: "a", 1: "forty-two", 2: "z"}; func Test() int { if values[1] != "forty-two" { return 0 }; return len(values[0])*40 + len(values[2])*2 }`, 42},
 		{"global float slice data", `var values = []float64{0: -3.25, 1: 42.5, 2: 1000.75}; func Test() int { if values[0] != -3.25 || values[2] != 1000.75 { return 0 }; return int(values[1]) }`, 42},
 		{"global struct nil interface field", `var values = []struct { failure error; value int }{{failure: nil, value: 42}}; func Test() int { if values[0].failure != nil { return 0 }; return values[0].value }`, 42},
+		{"global static scalar interface payloads", `type holder struct { floating any; integer any; text any }; var values = []holder{{floating: float64(0), integer: int16(7), text: string("gopher")}, {floating: float64(29)}}; func Test() int { first, firstOK := values[0].floating.(float64); second, secondOK := values[1].floating.(float64); integer, integerOK := values[0].integer.(int16); text, textOK := values[0].text.(string); if !firstOK || !secondOK || !integerOK || !textOK || first != 0 || text != "gopher" { return 0 }; return int(second) + int(integer) + len(text) }`, 42},
+		{"map-containing global composite initializes dynamically", `type holder struct { values map[string]int; boxed any }; var global = holder{values: map[string]int{"left": 17, "right": 20}, boxed: float64(5)}; func Test() int { boxed, ok := global.boxed.(float64); if !ok { return 0 }; return global.values["left"] + global.values["right"] + int(boxed) }`, 42},
 		{"global static struct interface field", `type source interface {
 			Value() int
 		}
@@ -363,6 +381,7 @@ func TestAdvancedExecutionCorpus(t *testing.T) {
 		{"direct interface assertion", `type source interface { Value() int }; type extended interface { source; Extra() int }; type implementation struct{}; func (*implementation) Value() int { return 17 }; func (*implementation) Extra() int { return 25 }; func Test() int { var value source = &implementation{}; converted := value.(extended); return converted.Value() + converted.Extra() }`, 42},
 		{"pointer to slice local through interface", `func value() any { values := make([]int, 35); values[34] = 7; return &values }; func Test() int { values := value().(*[]int); return len(*values) + (*values)[34] }`, 42},
 		{"interface struct field assignment", `type item struct { value int }; type holder struct { value any }; func set(target *holder, value any) { target.value = value }; func Test() int { var target holder; set(&target, &item{value: 42}); return target.value.(*item).value }`, 42},
+		{"multi result interface struct field assignment", `type holder struct { failure error }; type textError string; func (value textError) Error() string { return string(value) }; func values() (int, error) { return 42, textError("bad") }; func Test() int { var target holder; var result int; result, target.failure = values(); if target.failure == nil || target.failure.Error() != "bad" { return 0 }; return result }`, 42},
 		{"interface struct field composite", `type item struct { value int }; type holder struct { value any }; func Test() int { target := holder{value: &item{value: 42}}; return target.value.(*item).value }`, 42},
 		{"interface method in composite field", `type source interface {
 			Value() int
@@ -888,6 +907,528 @@ func Test() int {
 `, 42)
 }
 
+func TestRuntimeEscapingMethodValuePreservesReceiver(t *testing.T) {
+	runExecutableCase(t, `package main
+
+type pair struct {
+	left  int
+	right int
+}
+
+func (value pair) sum() int {
+	return value.left + value.right
+}
+
+func makeSum() func() int {
+	value := pair{left: 17, right: 25}
+	return value.sum
+}
+
+func Test() int {
+	sum := makeSum()
+	return sum()
+}
+`, 42)
+}
+
+func TestRuntimeOnceValueReturningFunction(t *testing.T) {
+	runExecutableCase(t, `package main
+
+import "sync"
+
+func Test() int {
+	once := sync.OnceValue(func() func() int {
+		return func() int {
+			return 42
+		}
+	})
+	return once()()
+}
+`, 42)
+}
+
+func TestRuntimeReflectRecognizesConcreteInterfaceMethods(t *testing.T) {
+	runExecutableCase(t, `package main
+
+import (
+	"encoding"
+	"net/netip"
+	"reflect"
+)
+
+func Test() int {
+	addressType := reflect.TypeOf(netip.Addr{})
+	textMarshalerType := reflect.TypeOf((*encoding.TextMarshaler)(nil)).Elem()
+	if addressType.NumMethod() == 0 {
+		return 1
+	}
+	if !addressType.Implements(textMarshalerType) {
+		return 2
+	}
+	return 42
+}
+`, 42)
+}
+
+func TestRuntimeReflectNewUsesCanonicalPointerType(t *testing.T) {
+	runExecutableCase(t, `package main
+
+import "reflect"
+
+func Test() int {
+	left := new(bool)
+	leftType := reflect.TypeOf(left)
+	right := reflect.New(leftType.Elem()).Interface()
+	if leftType != reflect.TypeOf(right) {
+		return 1
+	}
+	if !reflect.DeepEqual(left, right) {
+		return 2
+	}
+	return 42
+}
+`, 42)
+}
+
+func TestRuntimeReflectDistinguishesLocalNamedTypes(t *testing.T) {
+	runExecutableCase(t, `package main
+
+import "reflect"
+
+type localName struct {
+	PackageField int
+}
+
+func firstLocalType() reflect.Type {
+	type localName struct {
+		FirstField int
+	}
+	return reflect.TypeOf((*localName)(nil)).Elem()
+}
+
+func secondLocalType() reflect.Type {
+	type localName struct {
+		SecondField int
+	}
+	return reflect.TypeOf((*localName)(nil)).Elem()
+}
+
+func Test() int {
+	packageType := reflect.TypeOf(localName{})
+	firstType := firstLocalType()
+	secondType := secondLocalType()
+	if packageType == firstType || packageType == secondType || firstType == secondType {
+		return 1
+	}
+	if packageType.Field(0).Name != "PackageField" {
+		return 2
+	}
+	if firstType.Field(0).Name != "FirstField" {
+		return 3
+	}
+	if secondType.Field(0).Name != "SecondField" {
+		return 4
+	}
+	return 42
+}
+`, 42)
+}
+
+func TestRuntimeReflectiveInterfaceAssertionKeepsMethodReachable(t *testing.T) {
+	runExecutableCase(t, `package main
+
+import "reflect"
+
+type decoder interface {
+	Decode() int
+}
+
+type concreteDecoder struct{}
+
+func (*concreteDecoder) Decode() int {
+	return 42
+}
+
+type decoderHolder struct {
+	Value concreteDecoder
+}
+
+func callReflectively(value any) int {
+	decoderType := reflect.TypeFor[decoder]()
+	valueType := reflect.TypeOf(value)
+	if !valueType.Implements(decoderType) {
+		return 1
+	}
+	asserted, ok := reflect.TypeAssert[decoder](reflect.ValueOf(value))
+	if !ok {
+		return 2
+	}
+	return asserted.Decode()
+}
+
+func Test() int {
+	holder := &decoderHolder{}
+	field := reflect.ValueOf(holder).Elem().Field(0).Addr()
+	return callReflectively(field.Interface())
+}
+`, 42)
+}
+
+func TestRuntimePointerReflectsValueReceiverMethod(t *testing.T) {
+	runExecutableCase(t, `package main
+
+import "reflect"
+
+type decoder interface {
+	Decode() int
+}
+
+type concreteDecoder struct {
+	value int
+}
+
+func (value concreteDecoder) Decode() int {
+	return value.value
+}
+
+func Test() int {
+	value := &concreteDecoder{value: 42}
+	valueType := reflect.TypeOf(value)
+	decoderType := reflect.TypeFor[decoder]()
+	if valueType.NumMethod() == 0 {
+		return 1
+	}
+	if !valueType.Implements(decoderType) {
+		return 2
+	}
+	asserted, ok := reflect.TypeAssert[decoder](reflect.ValueOf(value))
+	if !ok {
+		return 3
+	}
+	return asserted.Decode()
+}
+`, 42)
+}
+
+func TestRuntimeErrorStoredThroughInterfaceParameter(t *testing.T) {
+	runExecutableCase(t, `package main
+
+import "errors"
+
+type holder struct {
+	err error
+}
+
+func contextualize(err error) error {
+	return err
+}
+
+func save(target *holder, err error) {
+	if target.err == nil {
+		target.err = contextualize(err)
+	}
+}
+
+func Test() int {
+	var target holder
+	save(&target, errors.New("failure"))
+	if target.err == nil {
+		return 1
+	}
+	return len(target.err.Error()) + 35
+}
+`, 42)
+}
+
+func TestRuntimeReflectSetZeroClearsPointerField(t *testing.T) {
+	runExecutableCase(t, `package main
+
+import "reflect"
+
+type holder struct {
+	Value *int
+}
+
+func Test() int {
+	value := 17
+	target := holder{Value: &value}
+	reflect.ValueOf(&target).Elem().Field(0).SetZero()
+	if target.Value != nil {
+		return 1
+	}
+	return 42
+}
+`, 42)
+}
+
+func TestRuntimeGenericReceiverMethodValueUsesInstantiatedSymbol(t *testing.T) {
+	runExecutableCase(t, `package main
+
+type box[T any] struct {
+	value T
+}
+
+func (value *box[T]) get() T {
+	return value.value
+}
+
+func Test() int {
+	value := &box[int]{value: 42}
+	get := value.get
+	return get()
+}
+`, 42)
+}
+
+func TestRuntimeInterfaceMethodReturningStringSurvivesStackGrowth(t *testing.T) {
+	runExecutableCase(t, `package main
+
+type stringValue struct {
+	text string
+}
+
+func (value stringValue) String() string {
+	growStringStack(100)
+	return value.text
+}
+
+func growStringStack(depth int) int {
+	if depth == 0 {
+		return 0
+	}
+	return depth + growStringStack(depth-1)
+}
+
+func callString(value interface{ String() string }) string {
+	return value.String()
+}
+
+func Test() int {
+	return len(callString(stringValue{text: "the answer has forty-two characters!......"}))
+}
+`, 42)
+}
+
+func TestRuntimeAddressesOfSliceAndMapLiterals(t *testing.T) {
+	runExecutableCase(t, `package main
+
+func Test() int {
+	var sliceValue any = &[]int{1, 2}
+	var mapValue any = &map[string]int{"answer": 40}
+	slicePointer := sliceValue.(*[]int)
+	mapPointer := mapValue.(*map[string]int)
+	return (*slicePointer)[1] + (*mapPointer)["answer"]
+}
+`, 42)
+}
+
+func TestRuntimeNestedGlobalStructLiteral(t *testing.T) {
+	runExecutableCase(t, `package main
+
+type inner struct {
+	enabled bool
+	left    string
+	right   string
+}
+
+type outer struct {
+	value inner
+}
+
+var global = outer{value: inner{enabled: true, left: "seventeen", right: "twenty-five"}}
+
+func Test() int {
+	if !global.value.enabled {
+		return 1
+	}
+	return len(global.value.left) + len(global.value.right) + 22
+}
+`, 42)
+}
+
+func TestRuntimeGlobalByteSliceFromConstantString(t *testing.T) {
+	runExecutableCase(t, `package main
+
+var literal = []byte("null")
+
+func Test() int {
+	if len(literal) != 4 || cap(literal) != 4 {
+		return 1
+	}
+	if literal[0] != 'n' || literal[1] != 'u' || literal[2] != 'l' || literal[3] != 'l' {
+		return 2
+	}
+	literal[0] = 'N'
+	return int(literal[0]) - 36
+}
+`, 42)
+}
+
+func TestRuntimeMapGrowthKeepsDirectoryBackingAlive(t *testing.T) {
+	runExecutableCase(t, `package main
+
+func Test() int {
+	values := make(map[string]int)
+	for index := 0; index < 40; index++ {
+		key := string(rune('a' + index))
+		values[key] = index
+	}
+	if len(values) != 40 {
+		return 1
+	}
+	value, ok := values["b"]
+	if !ok {
+		return 2
+	}
+	return value + 41
+}
+`, 42)
+}
+
+func TestRuntimeMapCompositeKeyUsesGeneratedEquality(t *testing.T) {
+	runExecutableCase(t, `package main
+
+type key struct {
+	left  int
+	right string
+	value any
+}
+
+func Test() int {
+	values := map[key]int{
+		{left: 17, right: "answer", value: int64(25)}: 42,
+	}
+	lookup := key{left: 17, right: "answer", value: int64(25)}
+	return values[lookup]
+}
+`, 42)
+}
+
+func TestRuntimeIncrementInterfaceKeyedMapElement(t *testing.T) {
+	runExecutableCase(t, `package main
+
+func Test() int {
+	values := make(map[any]int)
+	key := any("answer")
+	values[key]++
+	values[key]++
+	return values[key] + 40
+}
+`, 42)
+}
+
+func TestRuntimeGenericMapRangeUsesRuntimeIterator(t *testing.T) {
+	runExecutableCase(t, `package main
+
+import "maps"
+
+type key string
+
+func Test() int {
+	want := map[key]int{
+		"seventeen": 17,
+		"twenty-five": 25,
+	}
+	got := map[key]int{
+		"twenty-five": 25,
+		"seventeen": 17,
+	}
+	if !maps.Equal(got, want) {
+		return 1
+	}
+	return 42
+}
+`, 42)
+}
+
+func TestRuntimeNestedSlicePointerSurvivesEscapingRangeValue(t *testing.T) {
+	runExecutableCase(t, `package main
+
+import "runtime"
+
+type row struct {
+	value any
+}
+
+var readValue func() int
+
+func Test() int {
+	rows := []row{{value: &[]int{2}}}
+	for _, current := range rows {
+		readValue = func() int {
+			values := current.value.(*[]int)
+			return (*values)[0]
+		}
+	}
+	runtime.GC()
+	return readValue() + 40
+}
+`, 42)
+}
+
+func TestRuntimeEscapingSlicePointerKeepsBackingAlive(t *testing.T) {
+	runExecutableCase(t, `package main
+
+import "runtime"
+
+var saved any
+
+func save() {
+	saved = &[]int{2}
+}
+
+func disturbStack() int {
+	var values [128]int
+	for index := range values {
+		values[index] = index + 1
+	}
+	return values[41]
+}
+
+func Test() int {
+	save()
+	disturbStack()
+	runtime.GC()
+	values := saved.(*[]int)
+	return (*values)[0] + 40
+}
+`, 42)
+}
+
+func TestRuntimeInterfaceSliceStoresUseWriteBarriers(t *testing.T) {
+	runExecutableCase(t, `package main
+
+import "runtime"
+
+func Test() int {
+	var value any = 42
+	const depth = 512
+	for index := 0; index < depth; index++ {
+		values := make([]any, 1)
+		values[0] = value
+		value = values
+		if index%16 == 0 {
+			runtime.GC()
+		}
+	}
+
+	for index := 0; index < depth; index++ {
+		values, ok := value.([]any)
+		if !ok || len(values) != 1 {
+			return 1
+		}
+		value = values[0]
+	}
+
+	result, ok := value.(int)
+	if !ok {
+		return 2
+	}
+	return result
+}
+`, 42)
+}
+
 func TestRuntimeSliceValuePassedToGoroutine(t *testing.T) {
 	runExecutableCase(t, `package main
 
@@ -935,6 +1476,35 @@ func Test() int {
 		done <- value + 2
 	}(40)
 	return <-done
+}
+`, 42)
+}
+
+func TestRuntimeGoroutineClosureSurvivesGarbageCollection(t *testing.T) {
+	runExecutableCase(t, `package main
+
+import "runtime"
+
+func run(callback func() int, done chan int) {
+	runtime.GC()
+	done <- callback()
+}
+
+func start(callback func() int) int {
+	done := make(chan int, 1)
+	go run(callback, done)
+	return <-done
+}
+
+func Test() int {
+	result := 0
+	for index := 0; index < 100; index++ {
+		value := index
+		result += start(func() int {
+			return value
+		}) - index
+	}
+	return result + 42
 }
 `, 42)
 }
@@ -1056,6 +1626,26 @@ func Test() int {
 `, 42)
 }
 
+func TestRuntimeSelectWithoutCommunicationCases(t *testing.T) {
+	runExecutableCase(t, `package main
+
+func maybeBlock(enabled bool) {
+	if enabled {
+		select {}
+	}
+}
+
+func Test() int {
+	maybeBlock(false)
+	select {
+	default:
+		return 42
+	}
+	return 0
+}
+`, 42)
+}
+
 func TestRuntimeSliceToArrayConversionCopiesValue(t *testing.T) {
 	runExecutableCase(t, `package main
 
@@ -1064,6 +1654,20 @@ func Test() int {
 	converted := [4]int(values)
 	values[0] = 99
 	return converted[0]*10 + converted[3]
+}
+`, 42)
+}
+
+func TestRuntimeSliceToArrayPointerConversionBoxesPointer(t *testing.T) {
+	runExecutableCase(t, `package main
+
+func Test() int {
+	values := []byte{17, 25, 99, 100}
+	var boxed any = (*[4]byte)(values)
+	pointer := boxed.(*[4]byte)
+	pointer[2] = 0
+	pointer[3] = 0
+	return int(values[0]) + int(values[1]) + int(values[2]) + int(values[3])
 }
 `, 42)
 }
@@ -1120,6 +1724,112 @@ func Test() int {
 `, 42)
 }
 
+func TestRuntimeMakeEmptySliceIsNonNil(t *testing.T) {
+	runExecutableCase(t, `package main
+
+func Test() int {
+	values := make([]int, 0)
+	if values == nil {
+		return 1
+	}
+
+	var nilValues []int
+	if nilValues != nil {
+		return 2
+	}
+	return 42
+}
+`, 42)
+}
+
+func TestRuntimeReflectMakeEmptySliceIsNonNil(t *testing.T) {
+	runExecutableCase(t, `package main
+
+import "reflect"
+
+func Test() int {
+	typeOfSlice := reflect.TypeFor[[]int]()
+	value := reflect.MakeSlice(typeOfSlice, 0, 0)
+	if value.IsNil() {
+		return 1
+	}
+
+	values := value.Interface().([]int)
+	if values == nil {
+		return 2
+	}
+
+	var target []int
+	reflect.ValueOf(&target).Elem().Set(value)
+	if target == nil {
+		return 3
+	}
+	return 42
+}
+`, 42)
+}
+
+func TestRuntimeLengthOfSliceFieldInRangedStruct(t *testing.T) {
+	runExecutableCase(t, `package main
+
+type field struct {
+	name  string
+	index []int
+	typ   any
+}
+
+func Test() int {
+	current := []field{{name: "answer", index: []int{1, 2}, typ: int64(7)}}
+	for _, candidate := range current {
+		index := make([]int, len(candidate.index)+1)
+		copy(index, candidate.index)
+		index[len(candidate.index)] = 39
+		return index[0] + index[1] + index[2] - len(candidate.index) + 2
+	}
+	return -1
+}
+`, 42)
+}
+
+func TestRuntimeAppendInterfaceValuesCopiesHeaders(t *testing.T) {
+	runExecutableCase(t, `package main
+
+import "runtime"
+
+func boxed(value int) any {
+	return value
+}
+
+func appendValues() []any {
+	var values []any
+	values = append(values, boxed(17), boxed(25), nil)
+	return values
+}
+
+func disturbStack(depth int) int {
+	var padding [128]uintptr
+	padding[depth%len(padding)] = uintptr(depth)
+	if depth == 0 {
+		return int(padding[0])
+	}
+	return disturbStack(depth-1) + int(padding[depth%len(padding)])
+}
+
+func Test() int {
+	values := appendValues()
+	_ = disturbStack(32)
+	runtime.GC()
+
+	left, leftOK := values[0].(int)
+	right, rightOK := values[1].(int)
+	if !leftOK || !rightOK || values[2] != nil {
+		return -1
+	}
+	return left + right
+}
+`, 42)
+}
+
 func TestRuntimeReturnedStringStoredInSlice(t *testing.T) {
 	runExecutableCase(t, `package main
 
@@ -1167,6 +1877,38 @@ var values = [...]float64{17, math.Inf(1), math.NaN()}
 func Test() int {
 	if values[0] != 17 || !math.IsInf(values[1], 1) || !math.IsNaN(values[2]) {
 		return 1
+	}
+	return 42
+}
+`, 42)
+}
+
+func TestRuntimeMathARM64Assembly(t *testing.T) {
+	runExecutableCase(t, `package main
+
+import "math"
+
+func Test() int {
+	if math.Max(-3, 9) != 9 {
+		return 1
+	}
+	if math.Min(-3, 9) != -3 {
+		return 2
+	}
+	if math.Floor(4.75) != 4 {
+		return 3
+	}
+	if math.Ceil(-4.75) != -4 {
+		return 4
+	}
+	if math.Trunc(-4.75) != -4 {
+		return 5
+	}
+	if math.Exp(0) != 1 {
+		return 6
+	}
+	if math.Exp2(5) != 32 {
+		return 7
 	}
 	return 42
 }
@@ -1525,6 +2267,100 @@ func Test() int {
 `, 4200)
 }
 
+func TestRuntimeConditionalEscapingClosureCapturesParameter(t *testing.T) {
+	runExecutableCase(t, `package main
+
+type holder struct {
+	callback func(int) int
+	value    int
+}
+
+func consume(callback func(int) int) int {
+	if callback == nil {
+		return 0
+	}
+	return callback(1)
+}
+
+func apply(value *holder) int {
+	var callback func(int) int
+	if value.callback != nil {
+		callback = func(argument int) int {
+			return value.callback(argument)
+		}
+	}
+	if consume(callback) != 0 {
+		return -1
+	}
+	return value.value
+}
+
+func Test() int {
+	return apply(&holder{value: 42})
+}
+`, 42)
+}
+
+func TestRuntimeClosurePassedToEscapingParameter(t *testing.T) {
+	runExecutableCase(t, `package main
+
+var saved func()
+
+func save(callback func()) {
+	saved = callback
+}
+
+func install(value *int) {
+	save(func() {
+		*value = 42
+	})
+}
+
+func Test() int {
+	result := 0
+	install(&result)
+	scratch := [16]int{}
+	for index := range scratch {
+		scratch[index] = index + 100
+	}
+	saved()
+	return result + scratch[0] - 100
+}
+`, 42)
+}
+
+func TestRuntimeInterfaceSwitchBoxesTypedScalarCases(t *testing.T) {
+	runExecutableCase(t, `package main
+
+type status uintptr
+
+func (value status) Error() string {
+	return "status"
+}
+
+const (
+	first  status = 31
+	second status = 40
+)
+
+func matches(failure error) bool {
+	switch failure {
+	case first, second:
+		return true
+	}
+	return false
+}
+
+func Test() int {
+	var failure error = second
+	if matches(failure) {
+		return 42
+	}
+	return 0
+}
+`, 42)
+}
+
 func TestRepositoryStandardLibraryContainerList(t *testing.T) {
 	runExecutableCase(t, `package main
 
@@ -1683,6 +2519,27 @@ func Test() int {
 `, 203)
 }
 
+func TestRepositoryStandardLibraryMapsCloneGlobal(t *testing.T) {
+	runExecutableCase(t, `package main
+
+import "maps"
+
+var original = map[int]int{1: 2, 2: 4, 4: 8, 8: 16}
+
+func Test() int {
+	clone := maps.Clone(original)
+	if !maps.Equal(clone, original) {
+		return -1
+	}
+	clone[16] = 32
+	if maps.Equal(clone, original) {
+		return -2
+	}
+	return len(clone)*10 + clone[2]/2
+}
+`, 52)
+}
+
 func TestRepositoryStandardLibraryBufio(t *testing.T) {
 	runExecutableCase(t, `package main
 
@@ -1709,6 +2566,42 @@ func Test() int {
 	return len(first)*10 + len(second) + len(third)
 }
 `, 64)
+}
+
+func TestRepositoryStandardLibraryBufioLinesAfterRead(t *testing.T) {
+	runExecutableCase(t, `package main
+
+import (
+	"bufio"
+	"bytes"
+	"io"
+)
+
+func Test() int {
+	reader := bufio.NewReaderSize(bytes.NewReader([]byte("foo")), 16)
+	contents, readError := io.ReadAll(reader)
+	if readError != nil {
+		return -1
+	}
+	if string(contents) != "foo" {
+		return -2
+	}
+	line, prefix, lineError := reader.ReadLine()
+	if len(line) != 0 {
+		return -3
+	}
+	if prefix {
+		return -4
+	}
+	if lineError == nil {
+		return -5
+	}
+	if lineError != io.EOF {
+		return -6
+	}
+	return 42
+}
+`, 42)
 }
 
 func TestRepositoryStandardLibraryASCII85(t *testing.T) {
@@ -1836,6 +2729,311 @@ func Test() int {
 		return -1
 	}
 	return entries[0].value + entries[1].value
+}
+`, 42)
+}
+
+func TestRuntimeNestedGlobalSliceInitializer(t *testing.T) {
+	runExecutableCase(t, `package main
+
+type result struct {
+	line     []byte
+	isPrefix bool
+	err      error
+}
+
+type testCase struct {
+	input  string
+	expect []result
+}
+
+var tests = []testCase{
+	{
+		input: "input",
+		expect: []result{
+			{line: []byte("expected"), isPrefix: true},
+			{err: nil},
+		},
+	},
+}
+
+func checkResult(value result) int {
+	if len(value.line) != len("expected") {
+		return -1
+	}
+	for index, character := range []byte("expected") {
+		if value.line[index] != character {
+			return -2
+		}
+	}
+	if !value.isPrefix {
+		return -3
+	}
+	if value.err != nil {
+		return -4
+	}
+	return 42
+}
+
+func Test() int {
+	if direct := checkResult(tests[0].expect[0]); direct != 42 {
+		return direct
+	}
+	for _, current := range tests {
+		for _, expected := range current.expect[:1] {
+			return checkResult(expected)
+		}
+	}
+	return -5
+}
+`, 42)
+}
+
+func TestRuntimeStringStructFieldCompoundAssignment(t *testing.T) {
+	runExecutableCase(t, `package main
+
+type holder struct {
+	text string
+}
+
+func Test() int {
+	value := holder{text: "forty"}
+	value.text += "-two"
+	if value.text != "forty-two" {
+		return -1
+	}
+	return len(value.text) + 33
+}
+`, 42)
+}
+
+func TestRuntimeInterfaceChannelRoundTrip(t *testing.T) {
+	runExecutableCase(t, `package main
+
+type problem int
+
+func (value problem) Error() string {
+	return "problem"
+}
+
+func Test() int {
+	values := make(chan error, 2)
+	var sent error = problem(42)
+	values <- sent
+	select {
+	case values <- sent:
+	default:
+		return -1
+	}
+
+	first := <-values
+	if first == nil {
+		return -2
+	}
+	select {
+	case second := <-values:
+		value, ok := second.(problem)
+		if !ok {
+			return -3
+		}
+		return int(value)
+	default:
+		return -4
+	}
+}
+`, 42)
+}
+
+func TestRuntimeAddressRetainedThroughInterface(t *testing.T) {
+	runExecutableCase(t, `package main
+
+type incrementer interface {
+	Increment()
+}
+
+type counter int
+
+func (value *counter) Increment() {
+	*value++
+}
+
+type holder struct {
+	value incrementer
+}
+
+func retain(value incrementer) *holder {
+	return &holder{value: value}
+}
+
+func Test() int {
+	var value counter = 41
+	retained := retain(&value)
+	retained.value.Increment()
+	return int(value)
+}
+`, 42)
+}
+
+func TestRuntimeAddressOfStringParameterEscapes(t *testing.T) {
+	runExecutableCase(t, `package main
+
+import "runtime"
+
+var retained *string
+
+func retain(value string) {
+	retained = &value
+}
+
+func disturbStack(depth int) int {
+	var padding [128]uintptr
+	padding[depth%len(padding)] = uintptr(depth)
+	if depth == 0 {
+		return int(padding[0])
+	}
+	return disturbStack(depth - 1) + int(padding[depth%len(padding)])
+}
+
+func Test() int {
+	retain("forty-two")
+	_ = disturbStack(32)
+	runtime.GC()
+	if *retained != "forty-two" {
+		return -1
+	}
+	return len(*retained) + 33
+}
+`, 42)
+}
+
+func TestRuntimeZeroSizeConcreteInterfaceEquality(t *testing.T) {
+	runExecutableCase(t, `package main
+
+type empty struct{}
+
+func Test() int {
+	var left any = empty{}
+	var right any = empty{}
+	if left != right {
+		return -1
+	}
+	return 42
+}
+`, 42)
+}
+
+func TestRuntimeEscapingSliceOfLocalArray(t *testing.T) {
+	runExecutableCase(t, `package main
+
+import "runtime"
+
+type holder struct {
+	values []uintptr
+}
+
+var retained *holder
+
+func retain() {
+	var values [50]uintptr
+	values[0] = 42
+	retained = &holder{values: values[:1]}
+}
+
+func disturbStack(depth int) uintptr {
+	var padding [128]uintptr
+	padding[depth%len(padding)] = uintptr(depth)
+	if depth == 0 {
+		return padding[0]
+	}
+	return disturbStack(depth-1) + padding[depth%len(padding)]
+}
+
+func Test() int {
+	done := make(chan bool, 1)
+	go func() {
+		retain()
+		_ = disturbStack(32)
+		done <- true
+	}()
+	<-done
+	runtime.GC()
+	return int(retained.values[0])
+}
+`, 42)
+}
+
+func TestRuntimeGoCallWithBlankParameters(t *testing.T) {
+	runExecutableCase(t, `package main
+
+var done = make(chan bool, 1)
+
+func consume(_, _ int) {
+	done <- true
+}
+
+func Test() int {
+	go consume(17, 25)
+	<-done
+	return 42
+}
+`, 42)
+}
+
+func TestRuntimeDeferredDelete(t *testing.T) {
+	runExecutableCase(t, `package main
+
+func removeAfterReturn(values map[int]int) {
+	defer delete(values, 17)
+	values[25] = 25
+}
+
+func Test() int {
+	values := map[int]int{17: 17}
+	removeAfterReturn(values)
+	if _, exists := values[17]; exists {
+		return -1
+	}
+	return values[25] + len(values)*17
+}
+`, 42)
+}
+
+func TestRuntimeDeferredAndAsynchronousClose(t *testing.T) {
+	runExecutableCase(t, `package main
+
+func closeOnReturn(channel chan int) {
+	defer close(channel)
+}
+
+func Test() int {
+	deferred := make(chan int)
+	closeOnReturn(deferred)
+	<-deferred
+
+	asynchronous := make(chan int)
+	go close(asynchronous)
+	<-asynchronous
+	return 42
+}
+`, 42)
+}
+
+func TestRuntimeChannelReceiveCommaOKAssignment(t *testing.T) {
+	runExecutableCase(t, `package main
+
+func Test() int {
+	values := make(chan int, 1)
+	values <- 42
+	close(values)
+	value, open := <-values
+	if !open || value != 42 {
+		return 1
+	}
+	value, open = <-values
+	if open || value != 0 {
+		return 2
+	}
+	return 42
 }
 `, 42)
 }
@@ -1989,6 +3187,76 @@ func Test() int {
 	return apply(40)
 }
 `, 42, false)
+}
+
+func TestRuntimeGenericInterfaceFieldPreservesDescriptor(t *testing.T) {
+	runExecutableCase(t, `package main
+
+type genericHolder[T any] struct {
+	value T
+}
+
+type genericPayload struct {
+	value int
+}
+
+func loadGenericValue[T any](holder *genericHolder[T]) T {
+	return holder.value
+}
+
+func Test() int {
+	var original any = &genericPayload{value: 42}
+	holder := &genericHolder[any]{value: original}
+	loaded := loadGenericValue(holder)
+	return loaded.(*genericPayload).value
+}
+`, 42)
+}
+
+func TestRuntimeNamedSliceCommaOKTypeAssertion(t *testing.T) {
+	runExecutableCase(t, `package main
+
+type byteSequence []byte
+
+func Test() int {
+	var boxed any = byteSequence{17, 25}
+	value, ok := boxed.(byteSequence)
+	if !ok || len(value) != 2 {
+		return 1
+	}
+	var other any = 99
+	missing, ok := other.(byteSequence)
+	if ok || missing != nil {
+		return 2
+	}
+	return int(value[0]) + int(value[1])
+}
+`, 42)
+}
+
+func TestRuntimeMultiValueReturnBoxesConcreteSliceAsInterface(t *testing.T) {
+	runExecutableCase(t, `package main
+
+func source() ([]int, error) {
+	return []int{17, 25}, nil
+}
+
+func forward() (any, error) {
+	return source()
+}
+
+func Test() int {
+	boxed, err := forward()
+	if err != nil {
+		return 1
+	}
+	values, ok := boxed.([]int)
+	if !ok || len(values) != 2 {
+		return 2
+	}
+	return values[0] + values[1]
+}
+`, 42)
 }
 
 func runCase(t *testing.T, src string, want int, optimized bool) {

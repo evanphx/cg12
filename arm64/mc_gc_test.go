@@ -172,6 +172,41 @@ func TestObjEmitStackMapRootAcrossCall(t *testing.T) {
 	assert.GreaterOrEqual(t, points[0][0].val, int32(0), "frame-pointer offset")
 }
 
+func TestObjEmitStackMapKeepsAggregatePointerResultAcrossCall(t *testing.T) {
+	m := ir.NewModule()
+	f := m.NewFunc("aggregateResultRoot", ir.ClsP).Export()
+	f.GoABI = true
+	sliceType := &ir.AggType{
+		Name:  "slice",
+		Align: 8,
+		Fields: []ir.Field{
+			{Sub: ir.SubL, Pointer: true},
+			{Sub: ir.SubL},
+			{Sub: ir.SubL},
+		},
+	}
+	block := f.Entry()
+	parts := block.CallAggregate(
+		sliceType,
+		[]ir.Cls{ir.ClsP, ir.ClsL, ir.ClsL},
+		f.Sym("returnSlice", 0),
+	)
+	block.CallVoid(f.Sym("collect", 0))
+	block.Ret(parts[0])
+
+	data, err := arm64.CompileObject(m)
+	require.NoError(t, err)
+
+	points := parseStackMap(t, data)
+	foundRoot := false
+	for _, roots := range points {
+		if len(roots) != 0 {
+			foundRoot = true
+		}
+	}
+	assert.True(t, foundRoot, "the aggregate pointer result is live across collect")
+}
+
 // An explicit safepoint that is NOT a call still emits a stack map for the
 // references live there — the inlined-allocation / loop-poll case.
 func TestObjEmitStackMapExplicitSafepoint(t *testing.T) {

@@ -3,7 +3,9 @@ package arm64
 import (
 	"encoding/binary"
 	"fmt"
+	"io"
 	"math"
+	"runtime"
 	"sort"
 	"strings"
 
@@ -84,6 +86,24 @@ func CompileObjectAndAssembly(m *ir.Module) ([]byte, string, error) {
 	return data, bundle.source, nil
 }
 
+// WriteObjectAndAssembly emits the cg12 ELF object directly to w and returns
+// the GNU assembly translated from the module's Plan 9 sources. Streaming the
+// ELF object avoids allocating another complete copy of large program images.
+func WriteObjectAndAssembly(w io.Writer, m *ir.Module) (string, error) {
+	bundle, err := prepareAssembly(m)
+	if err != nil {
+		return "", err
+	}
+	object, err := compileToObjectWithBundle(m, Options{}, bundle)
+	if err != nil {
+		return "", err
+	}
+	if err := object.WriteELF(w); err != nil {
+		return "", err
+	}
+	return bundle.source, nil
+}
+
 func compileObjectWithBundle(m *ir.Module, opts Options, bundle assemblyBundle) ([]byte, error) {
 	o, err := compileToObjectWithBundle(m, opts, bundle)
 	if err != nil {
@@ -141,7 +161,8 @@ func compileToObjectWithBundle(m *ir.Module, opts Options, bundle assemblyBundle
 	var smFuncs []stackMapFunc
 	var goFunctions []goFunctionInfo
 	anchor := ""
-	for _, f := range m.Funcs {
+	releaseFunctionIR := len(m.Funcs) > 2048
+	for functionIndex, f := range m.Funcs {
 		name := sanitize(f.Name)
 		params := dwarfParams(f)
 		paramTemps := paramTempIDs(f)
@@ -176,7 +197,8 @@ func compileToObjectWithBundle(m *ir.Module, opts Options, bundle assemblyBundle
 			size:                 uint64(len(mc.code)),
 			funcID:               goRuntimeFunctionID(name),
 			deferReturn:          mc.m.deferReturnOffset(),
-			pointerWords:         mc.m.goPointerWords(),
+			localPointerWords:    mc.m.goLocalPointerWords(),
+			stackMapPoints:       mc.m.goStackMapPoints(),
 			argumentSize:         argumentFrame.size,
 			argumentPointerWords: argumentFrame.pointerWords,
 		})
@@ -211,12 +233,24 @@ func compileToObjectWithBundle(m *ir.Module, opts Options, bundle assemblyBundle
 			r.TextOff += base
 			rows = append(rows, r)
 		}
-		if len(mc.safepoints) > 0 {
+		if safepointsHaveRoots(mc.safepoints) {
 			smFuncs = append(smFuncs, stackMapFunc{sym: name, points: mc.safepoints})
 		}
+		if releaseFunctionIR {
+			// Large source-compiled standard-library modules are one-shot inputs.
+			// Every object, debug, and runtime-metadata detail for this function has
+			// been copied above, so retaining its lowered IR only inflates the peak
+			// while stack maps are encoded.
+			m.Funcs[functionIndex] = nil
+		}
+	}
+	if releaseFunctionIR {
+		m.Funcs = nil
+		runtime.GC()
 	}
 	var moduledata *ir.Data
 	var dataPointerOffsets []uint64
+	var relativeDataFixups []relativeDataFixup
 	for _, d := range m.Data {
 		if goRuntime && d.Name == "runtime.firstmoduledata" {
 			moduledata = d
@@ -225,11 +259,13 @@ func compileToObjectWithBundle(m *ir.Module, opts Options, bundle assemblyBundle
 		if bundle.definitions[sanitize(d.Name)] {
 			continue
 		}
-		add := addData
+		var err error
 		if goRuntime {
-			add = addGoData
+			err = addDataWithBSSAndFixups(o, d, false, &relativeDataFixups)
+		} else {
+			err = addData(o, d)
 		}
-		if err := add(o, d); err != nil {
+		if err != nil {
 			return nil, fmt.Errorf("data %s: %w", d.Name, err)
 		}
 		if goRuntime {
@@ -241,8 +277,11 @@ func compileToObjectWithBundle(m *ir.Module, opts Options, bundle assemblyBundle
 			dataPointerOffsets = append(dataPointerOffsets, offsets...)
 		}
 	}
+	if err := resolveRelativeDataFixups(o, relativeDataFixups); err != nil {
+		return nil, fmt.Errorf("relative data reference: %w", err)
+	}
 	if moduledata != nil {
-		if err := addGoRuntimeObjectMetadata(o, goFunctions, bundle.functions, moduledata, dataPointerOffsets, goModuleInitTaskCount(m)); err != nil {
+		if err := addGoRuntimeObjectMetadata(o, goFunctions, bundle.functions, moduledata, dataPointerOffsets, goModuleInitTaskCount(m), goModuleItabLinkCount(m)); err != nil {
 			return nil, err
 		}
 	}
@@ -265,6 +304,15 @@ func compileToObjectWithBundle(m *ir.Module, opts Options, bundle assemblyBundle
 	return o, nil
 }
 
+func safepointsHaveRoots(safepoints []safepoint) bool {
+	for _, safepoint := range safepoints {
+		if len(safepoint.roots) > 0 {
+			return true
+		}
+	}
+	return false
+}
+
 func goDataPointerOffsets(data *ir.Data, base, size uint64) ([]uint64, error) {
 	pointers := make(map[uint64]bool)
 	for _, word := range data.PointerWords {
@@ -281,12 +329,19 @@ func goDataPointerOffsets(data *ir.Data, base, size uint64) ([]uint64, error) {
 			cursor += uint64(item.Zero)
 		case item.Str != "":
 			cursor += uint64(len(item.Str))
+		case item.Sym != "" && item.RelativeTo != "":
+			cursor += uint64(item.Sub.Size())
 		case item.Sym != "":
+			size := uint64(item.Sub.Size())
+			if size != 8 {
+				cursor += size
+				continue
+			}
 			if cursor%8 != 0 {
 				return nil, fmt.Errorf("pointer relocation at unaligned byte offset %d", cursor)
 			}
 			pointers[base+cursor] = true
-			cursor += 8
+			cursor += size
 		case len(item.Flts) > 0:
 			cursor += uint64(len(item.Flts) * item.Sub.Size())
 		default:
@@ -335,7 +390,21 @@ type stackMapFunc struct {
 //	  repeated nroots times:
 //	    kind u8 (0=register, 1=frame), reserved u8[3], value i32, type u32
 func setStackMap(o *obj.Object, funcs []stackMapFunc) {
-	var b []byte
+	total := 0
+	totalRoots := 0
+	for _, function := range funcs {
+		total += len(function.points)
+		for _, safepoint := range function.points {
+			totalRoots += len(safepoint.roots)
+		}
+	}
+	encodedSize := 12 + total*12 + totalRoots*12
+	b := make([]byte, 0, encodedSize)
+	if additional := total; additional > 0 {
+		relocations := make([]obj.Reloc, len(o.StackMapRelocs), len(o.StackMapRelocs)+additional)
+		copy(relocations, o.StackMapRelocs)
+		o.StackMapRelocs = relocations
+	}
 	put16 := func(v uint16) { b = append(b, byte(v), byte(v>>8)) }
 	put32 := func(v uint32) { b = append(b, byte(v), byte(v>>8), byte(v>>16), byte(v>>24)) }
 	put64 := func(v uint64) {
@@ -344,10 +413,6 @@ func setStackMap(o *obj.Object, funcs []stackMapFunc) {
 		}
 	}
 
-	total := 0
-	for _, f := range funcs {
-		total += len(f.points)
-	}
 	b = append(b, 'S', 'M', 'A', 'P')
 	put16(2)
 	put16(0)
@@ -485,17 +550,30 @@ func convInlineNodes(ns []*inlineNode) []obj.InlineRange {
 
 // addData appends a data definition to the object's .data section.
 func addData(o *obj.Object, d *ir.Data) error {
-	return addDataWithBSS(o, d, true)
+	return addDataWithBSSAndFixups(o, d, true, nil)
 }
 
 // addGoData keeps Go globals in one contiguous data range. The runtime's
 // moduledata and GC program describe that range precisely; splitting zeroed
 // pointer globals into ELF BSS requires a separate gcbss program and bounds.
 func addGoData(o *obj.Object, d *ir.Data) error {
-	return addDataWithBSS(o, d, false)
+	return addDataWithBSSAndFixups(o, d, false, nil)
 }
 
 func addDataWithBSS(o *obj.Object, d *ir.Data, allowBSS bool) error {
+	return addDataWithBSSAndFixups(o, d, allowBSS, nil)
+}
+
+type relativeDataFixup struct {
+	section    obj.SecKind
+	offset     uint64
+	target     string
+	relativeTo string
+	addend     int64
+	size       int
+}
+
+func addDataWithBSSAndFixups(o *obj.Object, d *ir.Data, allowBSS bool, fixups *[]relativeDataFixup) error {
 	// Nothing but zero fill: it needs no bytes in the file, only room at run time.
 	// .bss follows .data in memory and .tbss follows .tdata in each thread's block,
 	// so the symbol's value counts from the start of its own zero-filled region.
@@ -557,9 +635,35 @@ func addDataWithBSS(o *obj.Object, d *ir.Data, allowBSS bool) error {
 			*buf = append(*buf, make([]byte, it.Zero)...)
 		case it.Str != "":
 			*buf = append(*buf, []byte(it.Str)...)
+		case it.Sym != "" && it.RelativeTo != "":
+			if fixups == nil {
+				target, targetFound := dataSymbol(o, sanitize(it.Sym))
+				relativeTo, baseFound := dataSymbol(o, sanitize(it.RelativeTo))
+				if !targetFound {
+					return fmt.Errorf("arm64: relative data reference %q is undefined", it.Sym)
+				}
+				if !baseFound {
+					return fmt.Errorf("arm64: relative data base %q is undefined", it.RelativeTo)
+				}
+				if target.Section != relativeTo.Section {
+					return fmt.Errorf("arm64: relative data reference %q and base %q are in different sections", it.Sym, it.RelativeTo)
+				}
+				value := int64(target.Value) - int64(relativeTo.Value) + it.Off
+				*buf = appendInt(*buf, value, it.Sub.Size())
+				continue
+			}
+			*fixups = append(*fixups, relativeDataFixup{
+				section:    sec,
+				offset:     uint64(len(*buf)),
+				target:     sanitize(it.Sym),
+				relativeTo: sanitize(it.RelativeTo),
+				addend:     it.Off,
+				size:       it.Sub.Size(),
+			})
+			*buf = append(*buf, make([]byte, it.Sub.Size())...)
 		case it.Sym != "":
 			// A pointer stored in data: emit an 8-byte slot and a .rela.data
-			// ABS64 relocation carrying the (symbol + offset) addend.
+			// relocation carrying the (symbol + offset) addend.
 			if sec == obj.SecTdata {
 				return fmt.Errorf("arm64: thread-local %q cannot hold the address of %q: every thread's copy would need its own relocation", d.Name, it.Sym)
 			}
@@ -574,11 +678,17 @@ func addDataWithBSS(o *obj.Object, d *ir.Data, allowBSS bool) error {
 			if sec == obj.SecRelro {
 				list = &o.RelroRelocs
 			}
+			relocationType := uint32(obj.R_AARCH64_ABS64)
+			relocationSize := 8
+			if it.Sub.Size() == 4 {
+				relocationType = obj.R_AARCH64_ABS32
+				relocationSize = 4
+			}
 			*list = append(*list, obj.Reloc{
 				Offset: uint64(len(*buf)), Sym: sanitize(it.Sym),
-				Type: obj.R_AARCH64_ABS64, Addend: it.Off,
+				Type: relocationType, Addend: it.Off,
 			})
-			*buf = append(*buf, make([]byte, 8)...)
+			*buf = append(*buf, make([]byte, relocationSize)...)
 		case len(it.Flts) > 0:
 			for _, v := range it.Flts {
 				*buf = appendInt(*buf, floatBitsOf(it.Sub, v), it.Sub.Size())
@@ -596,6 +706,49 @@ func addDataWithBSS(o *obj.Object, d *ir.Data, allowBSS bool) error {
 		TLS: sec == obj.SecTdata,
 	})
 	return nil
+}
+
+func resolveRelativeDataFixups(o *obj.Object, fixups []relativeDataFixup) error {
+	for _, fixup := range fixups {
+		target, targetFound := dataSymbol(o, fixup.target)
+		if !targetFound {
+			return fmt.Errorf("target %q is undefined", fixup.target)
+		}
+		relativeTo, baseFound := dataSymbol(o, fixup.relativeTo)
+		if !baseFound {
+			return fmt.Errorf("base %q is undefined", fixup.relativeTo)
+		}
+		if target.Section != relativeTo.Section {
+			return fmt.Errorf("target %q and base %q are in different sections", fixup.target, fixup.relativeTo)
+		}
+
+		buffer, ok := objectSectionData(o, fixup.section)
+		if !ok {
+			return fmt.Errorf("unsupported destination section %d", fixup.section)
+		}
+		if fixup.offset+uint64(fixup.size) > uint64(len(buffer)) {
+			return fmt.Errorf("destination for %q lies outside section", fixup.target)
+		}
+		value := int64(target.Value) - int64(relativeTo.Value) + fixup.addend
+		encoded := appendInt(nil, value, fixup.size)
+		copy(buffer[fixup.offset:], encoded)
+	}
+	return nil
+}
+
+func objectSectionData(o *obj.Object, section obj.SecKind) ([]byte, bool) {
+	switch section {
+	case obj.SecData:
+		return o.Data, true
+	case obj.SecRodata:
+		return o.Rodata, true
+	case obj.SecRelro:
+		return o.Relro, true
+	case obj.SecTdata:
+		return o.Tdata, true
+	default:
+		return nil, false
+	}
 }
 
 func appendInt(b []byte, v int64, size int) []byte {
@@ -623,8 +776,9 @@ type rootLoc struct {
 // safepoint is a call site's return address (func-relative) and the GC roots
 // live across the call.
 type safepoint struct {
-	pc    uint64
-	roots []rootLoc
+	pc      uint64
+	startPC uint64
+	roots   []rootLoc
 }
 
 // mc emits AArch64 machine code for one function.
@@ -635,6 +789,7 @@ type mc struct {
 	tlsModel TLSModel
 	prog     *a64.Program
 	relocs   []obj.Reloc
+	allocTmp map[uint32]int // fixed stack allocation temporary -> frame offset
 
 	frameLayout      // where everything lives in the frame
 	frameless   bool // leaf function needing no frame: no prologue/epilogue, ret directly
@@ -693,11 +848,6 @@ type blockSym struct {
 
 func prepareGoABI(function *ir.Func) {
 	inferStackPointerWords(function)
-	for _, temporary := range function.Temps {
-		if temporary.Cls == ir.ClsP {
-			temporary.GCRef = true
-		}
-	}
 }
 
 func inferStackPointerWords(function *ir.Func) {
@@ -747,7 +897,12 @@ func inferStackPointerWords(function *ir.Func) {
 				continue
 			}
 			value := instruction.Args[0]
-			if function.ClassOf(value) != ir.ClsP {
+			if value.Kind != ir.RefTemp {
+				continue
+			}
+			definition := definitions[value.ID]
+			managed := function.Temp(value).GCRef || definition != nil && definition.Op.IsAlloc()
+			if !managed {
 				continue
 			}
 			allocation, offset, ok := resolveAddress(instruction.Args[1])
@@ -808,14 +963,21 @@ func goRegisterPointerMask(function *ir.Func) uint16 {
 }
 
 func newEmitter(f *ir.Func, alloc *allocation, gc GCStrategy, tlsModel TLSModel) *mc {
+	frameLayout := computeFrame(f, alloc)
 	m := &mc{
 		f: f, alloc: alloc, gc: gc, tlsModel: tlsModel,
 		prog: a64.NewProgram(), instrPC: map[*ir.Instr]uint64{},
-		frameLayout: computeFrame(f, alloc),
+		frameLayout: frameLayout, allocTmp: make(map[uint32]int),
 	}
 	m.frameless = framelessEligible(f, m.frameLayout, gc)
 	m.useCount = countTempUses(f)
 	m.preds = blockPreds(f)
+	for instruction, offset := range frameLayout.allocOff {
+		if instruction.To.Kind == ir.RefTemp && !f.Temp(instruction.To).GCRef {
+			m.allocTmp[instruction.To.ID] = offset
+		}
+	}
+	m.inferFrameAddressOffsets()
 	return m
 }
 
@@ -883,6 +1045,99 @@ func emitMachine(f *ir.Func, alloc *allocation, gc GCStrategy, tlsModel TLSModel
 		}
 	}
 	return &machineCode{code: code, relocs: m.relocs, rows: m.rows, inl: m.inl, safepoints: m.safepoints, blockSyms: blockSyms, m: m}, nil
+}
+
+func (m *mc) inferFrameAddressOffsets() {
+	type dependentAddress struct {
+		result uint32
+		addend int
+	}
+	type addressDependency struct {
+		base   uint32
+		result uint32
+		addend int
+	}
+
+	definitionCounts := make(map[uint32]int)
+	var dependencies []addressDependency
+	for _, block := range m.f.Blocks {
+		for index := range block.Instrs {
+			instruction := &block.Instrs[index]
+			// OReload restores the same logical value after a call; it is not an
+			// independent address definition and must not prevent propagation from
+			// the original fixed-frame address.
+			if instruction.To.Kind == ir.RefTemp && instruction.Op != ir.OReload {
+				definitionCounts[instruction.To.ID]++
+			}
+			base, addend, known := m.frameAddressDependency(instruction)
+			if !known {
+				continue
+			}
+			dependencies = append(dependencies, addressDependency{
+				base:   base,
+				result: instruction.To.ID,
+				addend: addend,
+			})
+		}
+	}
+
+	// SSA destruction represents a phi with one copy to the same destination
+	// on each incoming edge. Such a temporary is not a fixed frame address when
+	// the edges supply different locals, so only propagate through values with a
+	// single logical definition.
+	dependents := make(map[uint32][]dependentAddress)
+	for _, dependency := range dependencies {
+		if definitionCounts[dependency.result] != 1 {
+			continue
+		}
+		dependents[dependency.base] = append(dependents[dependency.base], dependentAddress{
+			result: dependency.result,
+			addend: dependency.addend,
+		})
+	}
+
+	work := make([]uint32, 0, len(m.allocTmp))
+	for temporary := range m.allocTmp {
+		work = append(work, temporary)
+	}
+	for next := 0; next < len(work); next++ {
+		base := work[next]
+		baseOffset := m.allocTmp[base]
+		for _, dependent := range dependents[base] {
+			if _, alreadyKnown := m.allocTmp[dependent.result]; alreadyKnown {
+				continue
+			}
+			m.allocTmp[dependent.result] = baseOffset + dependent.addend
+			work = append(work, dependent.result)
+		}
+	}
+}
+
+func (m *mc) frameAddressDependency(instruction *ir.Instr) (uint32, int, bool) {
+	if instruction.To.Kind != ir.RefTemp {
+		return 0, 0, false
+	}
+
+	switch instruction.Op {
+	case ir.OCopy:
+		if len(instruction.Args) != 1 || instruction.Args[0].Kind != ir.RefTemp {
+			return 0, 0, false
+		}
+		return instruction.Args[0].ID, 0, true
+
+	case ir.OAdd:
+		if len(instruction.Args) != 2 || instruction.Args[0].Kind != ir.RefTemp || instruction.Args[1].Kind != ir.RefConst {
+			return 0, 0, false
+		}
+		constant := m.f.Consts[instruction.Args[1].ID]
+		if constant.Kind != ir.ConstInt {
+			return 0, 0, false
+		}
+		return instruction.Args[0].ID, int(constant.Int), true
+
+	default:
+		return 0, 0, false
+	}
 }
 
 // recordLoc appends a line-table row when the source position changes: the row
@@ -1073,8 +1328,15 @@ func (m *mc) goStackPrologue() {
 	const retry = "__cg12_go_prologue"
 	const enough = "__cg12_go_stack_ok"
 
+	stackGuardOffset := 16
+	morestackSymbol := "runtime_morestack_noctxt"
+	if m.f.SystemStack {
+		stackGuardOffset = 24
+		morestackSymbol = "runtime_morestackc"
+	}
+
 	m.prog.Label(retry)
-	m.emit(a64.LdrImm(true, mcGP0, a64.Reg(28), 16))
+	m.emit(a64.LdrImm(true, mcGP0, a64.Reg(28), uint32(stackGuardOffset)))
 	m.emit(a64.AddImm(true, mcGP1, mcSP, 0))
 	hi, lo := m.frame>>12, m.frame&0xfff
 	if hi > 0 {
@@ -1090,7 +1352,7 @@ func (m *mc) goStackPrologue() {
 		m.emitGoRegisterSpill(spill, false)
 	}
 	m.emit(a64.AddImm(true, a64.Reg(3), mcX30, 0))
-	m.reloc("runtime_morestack_noctxt", obj.R_AARCH64_CALL26)
+	m.reloc(morestackSymbol, obj.R_AARCH64_CALL26)
 	m.emit(a64.Bl(0))
 	for _, spill := range spills {
 		m.emitGoRegisterSpill(spill, true)
@@ -1219,6 +1481,33 @@ func (m *mc) goPointerWords() []int {
 	return goPointerWordIndexes(m.f, m.allocOff, m.spillBase)
 }
 
+func (m *mc) goLocalPointerWords() []int {
+	return goLocalPointerWordIndexes(m.f, m.allocOff)
+}
+
+func (m *mc) goStackMapPoints() []goStackMapPoint {
+	points := make([]goStackMapPoint, 0, len(m.safepoints))
+	for _, safepoint := range m.safepoints {
+		seen := make(map[int]bool)
+		for _, root := range safepoint.roots {
+			if root.kind != rootFrame || root.val < 16 || root.val%8 != 0 {
+				continue
+			}
+			seen[(int(root.val)-16)/8] = true
+		}
+		pointerWords := make([]int, 0, len(seen))
+		for word := range seen {
+			pointerWords = append(pointerWords, word)
+		}
+		sort.Ints(pointerWords)
+		points = append(points, goStackMapPoint{
+			pc:           int(safepoint.startPC),
+			pointerWords: pointerWords,
+		})
+	}
+	return points
+}
+
 func (m *mc) deferReturnOffset() uint32 {
 	for _, block := range m.f.Blocks {
 		for index := range block.Instrs {
@@ -1246,6 +1535,24 @@ func goPointerWordIndexes(function *ir.Func, allocations map[*ir.Instr]int, spil
 		word := (frameOffset - 16) / 8
 		if frameOffset >= 16 {
 			seen[word] = true
+		}
+	}
+	words := make([]int, 0, len(seen))
+	for word := range seen {
+		words = append(words, word)
+	}
+	sort.Ints(words)
+	return words
+}
+
+func goLocalPointerWordIndexes(function *ir.Func, allocations map[*ir.Instr]int) []int {
+	seen := make(map[int]bool)
+	for instruction, allocationOffset := range allocations {
+		for wordOffset := range function.StackPointerWords[instruction.To.ID] {
+			frameOffset := allocationOffset + wordOffset
+			if frameOffset >= 16 && frameOffset%8 == 0 {
+				seen[(frameOffset-16)/8] = true
+			}
 		}
 	}
 	words := make([]int, 0, len(seen))
@@ -1508,6 +1815,17 @@ func (m *mc) reloc(sym string, typ uint32) {
 // src returns a raw register holding ref's value, loading a spilled temporary or
 // materializing a constant into a class-appropriate scratch (slot 0 or 1).
 func (m *mc) src(ref ir.Ref, slot, size int) a64.Reg {
+	if ref.Kind == ir.RefAggregate {
+		m.fail("arm64: function %s has aggregate operand %v where a scalar is required", m.f.Name, ref)
+		return mcIntScratch[slot]
+	}
+	if ref.Kind == ir.RefTemp {
+		if offset, ok := m.allocTmp[ref.ID]; ok {
+			scratch := mcIntScratch[slot]
+			m.frameAddr(scratch, offset)
+			return scratch
+		}
+	}
 	if m.f.ClassOf(ref).IsFloat() {
 		fs := mcFPScratch[slot]
 		switch ref.Kind {
@@ -2268,7 +2586,7 @@ func (m *mc) spillFromFrame(r a64.Reg, float bool, off, size int) {
 
 func (m *mc) callSequence(b *ir.Block, i int) int {
 	var regPairs []movePairLoc
-	var stackArgs, symArgs []*ir.Instr
+	var stackArgs, symArgs, frameArgs []*ir.Instr
 	for i < len(b.Instrs) && b.Instrs[i].Op == ir.OArg {
 		a := &b.Instrs[i]
 		switch {
@@ -2276,12 +2594,15 @@ func (m *mc) callSequence(b *ir.Block, i int) int {
 			stackArgs = append(stackArgs, a)
 		case isConstSym(m.f, a.Args[0]):
 			symArgs = append(symArgs, a)
+		case a.Args[0].Kind == ir.RefTemp && m.hasFrameAllocation(a.Args[0]):
+			frameArgs = append(frameArgs, a)
 		default:
 			regPairs = append(regPairs, movePairLoc{dst: m.locOf(a.To), src: m.locOf(a.Args[0])})
 		}
 		i++
 	}
 	call := &b.Instrs[i]
+	m.instrPC[call] = uint64(m.prog.Len() * 4)
 	m.recordLoc(call.Pos) // the OArg run carries no position; the call does
 	m.recordInline(call.Inl)
 
@@ -2297,6 +2618,9 @@ func (m *mc) callSequence(b *ir.Block, i int) int {
 		m.parallelMove(regPairs)
 		for _, a := range symArgs {
 			m.materializeSym(mreg(Reg(m.f.Temps[a.To.ID].Reg)), m.f.Consts[a.Args[0].ID])
+		}
+		for _, a := range frameArgs {
+			m.materializeFrameAllocation(a)
 		}
 		m.tailBranch(call)
 		m.blockDone = true
@@ -2328,6 +2652,9 @@ func (m *mc) callSequence(b *ir.Block, i int) int {
 	for _, a := range symArgs {
 		m.materializeSym(mreg(Reg(m.f.Temps[a.To.ID].Reg)), m.f.Consts[a.Args[0].ID])
 	}
+	for _, a := range frameArgs {
+		m.materializeFrameAllocation(a)
+	}
 	m.emitCall(call)
 	if call.RetAgg != nil && !call.StackResult.IsNone() {
 		m.emitStackAggregateResult(call)
@@ -2336,6 +2663,21 @@ func (m *mc) callSequence(b *ir.Block, i int) int {
 		m.adjustSP(false, stackBytes)
 	}
 	return i + 1
+}
+
+func (m *mc) hasFrameAllocation(reference ir.Ref) bool {
+	_, ok := m.allocTmp[reference.ID]
+	return ok
+}
+
+func (m *mc) materializeFrameAllocation(argument *ir.Instr) {
+	offset := m.allocTmp[argument.Args[0].ID]
+	destination := m.f.Temp(argument.To)
+	if destination.Reg == ir.NoReg {
+		m.fail("arm64: stack-allocation argument has no ABI register")
+		return
+	}
+	m.frameAddr(mreg(Reg(destination.Reg)), offset)
 }
 
 func (m *mc) emitStackAggregateArgument(argument *ir.Instr) {
@@ -2357,25 +2699,32 @@ func (m *mc) emitStackAggregateResult(call *ir.Instr) {
 }
 
 func (m *mc) emitStackAggregateCopy(destination a64.Reg, destinationOffset int, source a64.Reg, sourceOffset int, size int) {
-	offset := 0
-	for size-offset >= 8 {
-		m.emit(a64.LdrImm(true, mcGP0, source, uint32(sourceOffset+offset)))
-		m.emit(a64.StrImm(true, mcGP0, destination, uint32(destinationOffset+offset)))
-		offset += 8
-	}
-	if size-offset >= 4 {
-		m.emit(a64.LdrImm(false, mcGP0, source, uint32(sourceOffset+offset)))
-		m.emit(a64.StrImm(false, mcGP0, destination, uint32(destinationOffset+offset)))
-		offset += 4
-	}
-	if size-offset >= 2 {
-		m.emit(a64.LdrhImm(mcGP0, source, uint32(sourceOffset+offset)))
-		m.emit(a64.StrhImm(mcGP0, destination, uint32(destinationOffset+offset)))
-		offset += 2
-	}
-	if size-offset == 1 {
-		m.emit(a64.LdrbImm(mcGP0, source, uint32(sourceOffset+offset)))
-		m.emit(a64.StrbImm(mcGP0, destination, uint32(destinationOffset+offset)))
+	for offset := 0; offset < size; {
+		remaining := size - offset
+		sourceAddress := sourceOffset + offset
+		destinationAddress := destinationOffset + offset
+		width := 1
+		for _, candidate := range []int{8, 4, 2} {
+			if remaining >= candidate && sourceAddress%candidate == 0 && destinationAddress%candidate == 0 {
+				width = candidate
+				break
+			}
+		}
+		switch width {
+		case 8:
+			m.emit(a64.LdrImm(true, mcGP0, source, uint32(sourceAddress)))
+			m.emit(a64.StrImm(true, mcGP0, destination, uint32(destinationAddress)))
+		case 4:
+			m.emit(a64.LdrImm(false, mcGP0, source, uint32(sourceAddress)))
+			m.emit(a64.StrImm(false, mcGP0, destination, uint32(destinationAddress)))
+		case 2:
+			m.emit(a64.LdrhImm(mcGP0, source, uint32(sourceAddress)))
+			m.emit(a64.StrhImm(mcGP0, destination, uint32(destinationAddress)))
+		case 1:
+			m.emit(a64.LdrbImm(mcGP0, source, uint32(sourceAddress)))
+			m.emit(a64.StrbImm(mcGP0, destination, uint32(destinationAddress)))
+		}
+		offset += width
 	}
 }
 
@@ -2390,9 +2739,6 @@ func (m *mc) emitCall(in *ir.Instr) {
 // for an explicit OSafepoint it is invoked at the marker (which emits no code).
 func (m *mc) recordSafepoint(in *ir.Instr) {
 	roots := m.alloc.safeRoots[in]
-	if len(roots) == 0 {
-		return
-	}
 	locs := make([]rootLoc, 0, len(roots))
 	for _, id := range roots {
 		t := m.f.Temps[id]
@@ -2402,7 +2748,15 @@ func (m *mc) recordSafepoint(in *ir.Instr) {
 			locs = append(locs, rootLoc{kind: rootFrame, val: int32(m.spillBase + t.Slot), typ: t.GCType})
 		}
 	}
-	m.safepoints = append(m.safepoints, safepoint{pc: uint64(m.prog.Len() * 4), roots: locs})
+	startPC, found := m.instrPC[in]
+	if !found {
+		startPC = uint64(m.prog.Len() * 4)
+	}
+	m.safepoints = append(m.safepoints, safepoint{
+		pc:      uint64(m.prog.Len() * 4),
+		startPC: startPC,
+		roots:   locs,
+	})
 }
 
 const (
@@ -2503,7 +2857,13 @@ func (m *mc) tailBranch(in *ir.Instr) {
 // newSel builds a selection driver over the machine-code encoder, carrying the
 // rematerialisation table so spilled-but-recomputable operands are rebuilt in place.
 func (m *mc) newSel() *sel {
-	s := &sel{f: m.f, b: &mcAsm{prog: m.prog, m: m}, spillBase: m.spillBase, next: m.nextBlock}
+	s := &sel{
+		f:         m.f,
+		b:         &mcAsm{prog: m.prog, m: m},
+		spillBase: m.spillBase,
+		next:      m.nextBlock,
+		allocTmp:  m.allocTmp,
+	}
 	if m.alloc != nil {
 		s.remat = m.alloc.remat
 	}

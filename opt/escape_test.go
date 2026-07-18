@@ -192,16 +192,75 @@ func TestLowerHeapAllocationsAllowsCompilerMemoryHelpers(t *testing.T) {
 	}
 }
 
-func TestLowerHeapAllocationsAllowsPointerStoreIntoCandidate(t *testing.T) {
+func TestLowerHeapAllocationsTracksPointerCopiedIntoGlobalMemory(t *testing.T) {
 	module := ir.NewModule()
-	function := module.NewFunc("localPointerField", ir.ClsL)
+	function := module.NewFuncVoid("copyPointerIntoGlobal")
 	block := function.Entry()
-	object := block.HeapAlloc(function.Sym("runtime.newobject", 0), function.Sym("type.pointerHolder", 0), 8, 8)
-	block.CallVoid(function.Sym("runtime.atomicstorep", 0), object, function.Sym("global.pointer", 0))
-	block.Ret(block.Load(ir.ClsL, object))
+	objectType := function.Sym("type.object", 0)
+	object := block.HeapAlloc(function.Sym("runtime.newobject", 0), objectType, 8, 8)
+	descriptor := block.Alloc(8, 24)
+	block.Store(object, descriptor)
+	copy := block.Alloc(8, 24)
+	block.CallVoid(
+		function.Sym("goc_memcpy", 0),
+		copy,
+		descriptor,
+		function.Long(24),
+	)
+	block.CallVoid(
+		function.Sym("goc_memcpy", 0),
+		function.Sym("global.descriptor", 0),
+		copy,
+		function.Long(24),
+	)
+	block.RetVoid()
+
+	require.True(t, LowerHeapAllocations(module))
+	assert.Equal(t, ir.OCall, block.Instrs[0].Op)
+	assert.Equal(t, []ir.Ref{function.Sym("runtime.newobject", 0), objectType}, block.Instrs[0].Args)
+}
+
+func TestLowerHeapAllocationsAllowsPointerCopiedWithinLocalMemory(t *testing.T) {
+	module := ir.NewModule()
+	function := module.NewFunc("copyPointerLocally", ir.ClsL)
+	block := function.Entry()
+	object := block.HeapAlloc(
+		function.Sym("runtime.newobject", 0),
+		function.Sym("type.object", 0),
+		8,
+		8,
+	)
+	descriptor := block.Alloc(8, 24)
+	block.Store(object, descriptor)
+	copy := block.Alloc(8, 24)
+	block.CallVoid(
+		function.Sym("goc_memcpy", 0),
+		copy,
+		descriptor,
+		function.Long(24),
+	)
+	copiedObject := block.Load(ir.ClsP, copy)
+	block.Store(function.Long(42), copiedObject)
+	block.Ret(block.Load(ir.ClsL, copiedObject))
 
 	require.True(t, LowerHeapAllocations(module))
 	assert.Equal(t, ir.OAlloc8, block.Instrs[0].Op)
+}
+
+func TestLowerHeapAllocationsAllowsPointerStoreIntoCandidate(t *testing.T) {
+	for _, storeFunction := range []string{"runtime.atomicstorep", "goc_storep"} {
+		t.Run(storeFunction, func(t *testing.T) {
+			module := ir.NewModule()
+			function := module.NewFunc("localPointerField", ir.ClsL)
+			block := function.Entry()
+			object := block.HeapAlloc(function.Sym("runtime.newobject", 0), function.Sym("type.pointerHolder", 0), 8, 8)
+			block.CallVoid(function.Sym(storeFunction, 0), object, function.Sym("global.pointer", 0))
+			block.Ret(block.Load(ir.ClsL, object))
+
+			require.True(t, LowerHeapAllocations(module))
+			assert.Equal(t, ir.OAlloc8, block.Instrs[0].Op)
+		})
+	}
 }
 
 func TestLowerHeapAllocationsAllowsGrowSliceToObserveCandidate(t *testing.T) {

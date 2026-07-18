@@ -18,9 +18,21 @@ type goFunctionInfo struct {
 	funcID               byte
 	funcFlag             byte
 	deferReturn          uint32
-	pointerWords         []int
+	localPointerWords    []int
+	stackMapPoints       []goStackMapPoint
 	argumentSize         int
 	argumentPointerWords []int
+	noLocalPointers      bool
+}
+
+type goStackMapPoint struct {
+	pc           int
+	pointerWords []int
+}
+
+type goStackMapIndexPoint struct {
+	pc    int
+	index int
 }
 
 func goRuntimeFunctionID(name string) byte {
@@ -46,10 +58,20 @@ const (
 )
 
 const goModuleInitTasksName = ".goc.module.inittasks"
+const goModuleItabLinksName = ".goc.module.itablinks"
 
 func goModuleInitTaskCount(module *ir.Module) int {
 	for _, data := range module.Data {
 		if data.Name == goModuleInitTasksName {
+			return len(data.Items)
+		}
+	}
+	return 0
+}
+
+func goModuleItabLinkCount(module *ir.Module) int {
+	for _, data := range module.Data {
+		if data.Name == goModuleItabLinksName {
 			return len(data.Items)
 		}
 	}
@@ -73,7 +95,7 @@ type goMetadataBuilder struct {
 	relocs []obj.Reloc
 }
 
-func addGoRuntimeObjectMetadata(object *obj.Object, functions, translatedFunctions []goFunctionInfo, moduledata *ir.Data, pointerOffsets []uint64, moduleInitTaskCount int) error {
+func addGoRuntimeObjectMetadata(object *obj.Object, functions, translatedFunctions []goFunctionInfo, moduledata *ir.Data, pointerOffsets []uint64, moduleInitTaskCount, moduleItabLinkCount int) error {
 	if len(functions) == 0 && len(translatedFunctions) == 0 {
 		return addData(object, moduledata)
 	}
@@ -99,9 +121,9 @@ func addGoRuntimeObjectMetadata(object *obj.Object, functions, translatedFunctio
 	for len(object.Data)%8 != 0 {
 		object.Data = append(object.Data, 0)
 	}
-	builder := &goMetadataBuilder{object: object, base: uint64(len(object.Data)), labels: make(map[string]uint64)}
-	builder.build(functions, translatedFunctions, moduledata, gcProgram, noptrBSSName, noptrBSSSize, moduleInitTaskCount)
-	object.Data = append(object.Data, builder.data...)
+	builder := &goMetadataBuilder{object: object, data: object.Data, labels: make(map[string]uint64)}
+	builder.build(functions, translatedFunctions, moduledata, gcProgram, noptrBSSName, noptrBSSSize, moduleInitTaskCount, moduleItabLinkCount)
+	object.Data = builder.data
 	object.DataRelocs = append(object.DataRelocs, builder.relocs...)
 	return nil
 }
@@ -176,9 +198,16 @@ func goGCProgram(dataStart, dataEnd uint64, pointerOffsets []uint64) ([]byte, er
 	return program, nil
 }
 
-func (builder *goMetadataBuilder) build(functions, translatedFunctions []goFunctionInfo, moduledata *ir.Data, gcProgram []byte, noptrBSSName string, noptrBSSSize uint64, moduleInitTaskCount int) {
+func (builder *goMetadataBuilder) build(functions, translatedFunctions []goFunctionInfo, moduledata *ir.Data, gcProgram []byte, noptrBSSName string, noptrBSSSize uint64, moduleInitTaskCount, moduleItabLinkCount int) {
 	const findFuncBuckets = 4096
 	functions = append(functions, translatedFunctions...)
+	stackMapIndexPoints := make([][]goStackMapIndexPoint, len(functions))
+	stackMapEntryCounts := make([]int, len(functions))
+	for index, function := range functions {
+		pointerMaps, indexPoints := goFunctionStackMaps(function)
+		stackMapEntryCounts[index] = len(pointerMaps)
+		stackMapIndexPoints[index] = indexPoints
+	}
 
 	builder.label(".goc.go.gcbss")
 	builder.bytes(0)
@@ -222,7 +251,7 @@ func (builder *goMetadataBuilder) build(functions, translatedFunctions []goFunct
 	stackMapOffsets := make([]uint32, len(functions))
 	for index, function := range functions {
 		stackMapOffsets[index] = uint32(builder.offset(".goc.go.pctab"))
-		builder.data = append(builder.data, goStackMapPCData(function.frameStart)...)
+		builder.data = append(builder.data, goStackMapPCData(function.frameStart, stackMapIndexPoints[index])...)
 	}
 	builder.label(".goc.go.pctab.end")
 	builder.align(4)
@@ -235,17 +264,17 @@ func (builder *goMetadataBuilder) build(functions, translatedFunctions []goFunct
 		builder.align(4)
 		argumentOffsets[index] = uint32(builder.position() - builder.labels[".goc.go.gofunc"])
 		words := (function.argumentSize + 7) / 8
-		builder.stackMaps(words, function.argumentPointerWords, nil)
+		argumentMaps := make([][]int, stackMapEntryCounts[index])
+		argumentMaps[0] = function.argumentPointerWords
+		builder.stackMaps(words, argumentMaps...)
 	}
 	localOffsets := make([]uint32, len(functions))
 	for index, function := range functions {
 		builder.align(4)
 		localOffsets[index] = uint32(builder.position() - builder.labels[".goc.go.gofunc"])
-		words := (function.frameSize - 16) / 8
-		if words < 0 {
-			words = 0
-		}
-		builder.stackMaps(words, nil, function.pointerWords)
+		words := goLocalStackMapWords(function)
+		pointerMaps, _ := goFunctionStackMaps(function)
+		builder.stackMaps(words, pointerMaps...)
 	}
 	builder.label(".goc.go.gofunc.end")
 	builder.align(4)
@@ -320,10 +349,17 @@ func (builder *goMetadataBuilder) build(functions, translatedFunctions []goFunct
 	builder.externalPointer(sanitize(".goc.runtime.datastart"))      // rodata
 	builder.pointer(".goc.go.gofunc")
 	builder.pointer(".goc.go.pclntable.end")
-	for range 4 {
+	builder.emptySlice() // textsectmap
+	builder.emptySlice() // typelinks
+	if moduleItabLinkCount > 0 {
+		builder.externalPointer(sanitize(goModuleItabLinksName))
+		builder.u64(uint64(moduleItabLinkCount))
+		builder.u64(uint64(moduleItabLinkCount))
+	} else {
 		builder.emptySlice()
 	}
-	builder.u64(0) // pluginpath
+	builder.emptySlice() // ptab
+	builder.u64(0)       // pluginpath
 	builder.u64(0)
 	builder.emptySlice() // pkghashes
 	if moduleInitTaskCount > 0 {
@@ -348,6 +384,17 @@ func (builder *goMetadataBuilder) build(functions, translatedFunctions []goFunct
 		offset := builder.labels[label] - builder.labels[".goc.go.pcheader"]
 		binary.LittleEndian.PutUint64(builder.data[header+32+uint64(index*8):], offset)
 	}
+}
+
+func goLocalStackMapWords(function goFunctionInfo) int {
+	if function.noLocalPointers {
+		return 0
+	}
+	words := (function.frameSize - 16) / 8
+	if words < 0 {
+		return 0
+	}
+	return words
 }
 
 func goPCSP(frameStart, frameSize int) []byte {
@@ -403,7 +450,66 @@ func goUnsafePointPCData() []byte {
 // growth prologue, then switches to the body maps once the frame exists. The
 // entry argument map describes the temporary register spills used by
 // morestack. Those spill slots are not valid roots during ordinary execution.
-func goStackMapPCData(frameStart int) []byte {
+func goFunctionStackMaps(function goFunctionInfo) ([][]int, []goStackMapIndexPoint) {
+	pointerMaps := [][]int{nil, append([]int(nil), function.localPointerWords...)}
+	indexPoints := make([]goStackMapIndexPoint, 0, len(function.stackMapPoints))
+	for _, point := range function.stackMapPoints {
+		pointerWords := mergePointerWords(function.localPointerWords, point.pointerWords)
+		index := pointerMapIndex(pointerMaps, pointerWords)
+		if index < 0 {
+			index = len(pointerMaps)
+			pointerMaps = append(pointerMaps, pointerWords)
+		}
+		indexPoints = append(indexPoints, goStackMapIndexPoint{pc: point.pc, index: index})
+	}
+	return pointerMaps, indexPoints
+}
+
+func mergePointerWords(left, right []int) []int {
+	words := make([]int, 0, len(left)+len(right))
+	leftIndex := 0
+	rightIndex := 0
+	for leftIndex < len(left) && rightIndex < len(right) {
+		leftWord := left[leftIndex]
+		rightWord := right[rightIndex]
+		switch {
+		case leftWord < rightWord:
+			words = append(words, leftWord)
+			leftIndex++
+		case rightWord < leftWord:
+			words = append(words, rightWord)
+			rightIndex++
+		default:
+			words = append(words, leftWord)
+			leftIndex++
+			rightIndex++
+		}
+	}
+	words = append(words, left[leftIndex:]...)
+	words = append(words, right[rightIndex:]...)
+	return words
+}
+
+func pointerMapIndex(pointerMaps [][]int, candidate []int) int {
+	for index, pointerMap := range pointerMaps {
+		if len(pointerMap) != len(candidate) {
+			continue
+		}
+		equal := true
+		for word := range pointerMap {
+			if pointerMap[word] != candidate[word] {
+				equal = false
+				break
+			}
+		}
+		if equal {
+			return index
+		}
+	}
+	return -1
+}
+
+func goStackMapPCData(frameStart int, indexPoints []goStackMapIndexPoint) []byte {
 	var data []byte
 	appendUvarint := func(value uint32) {
 		for value >= 0x80 {
@@ -420,14 +526,42 @@ func goStackMapPCData(frameStart int) []byte {
 		appendUvarint(encoded)
 	}
 
-	value := -1
+	points := make([]goStackMapIndexPoint, 0, len(indexPoints)+2)
 	if frameStart > 0 {
-		appendVarint(-value)
-		value = 0
-		appendUvarint(uint32(frameStart / 4))
+		points = append(points, goStackMapIndexPoint{pc: 0, index: 0})
 	}
-	appendVarint(1 - value)
-	appendUvarint(^uint32(0))
+	points = append(points, goStackMapIndexPoint{pc: frameStart, index: 1})
+	for _, point := range indexPoints {
+		if point.pc >= frameStart {
+			points = append(points, point)
+		}
+	}
+	sort.SliceStable(points, func(left, right int) bool {
+		return points[left].pc < points[right].pc
+	})
+
+	unique := points[:0]
+	for _, point := range points {
+		if len(unique) > 0 && unique[len(unique)-1].pc == point.pc {
+			unique[len(unique)-1] = point
+			continue
+		}
+		if len(unique) > 0 && unique[len(unique)-1].index == point.index {
+			continue
+		}
+		unique = append(unique, point)
+	}
+
+	value := -1
+	for index, point := range unique {
+		appendVarint(point.index - value)
+		value = point.index
+		if index+1 < len(unique) {
+			appendUvarint(uint32((unique[index+1].pc - point.pc) / 4))
+		} else {
+			appendUvarint(^uint32(0))
+		}
+	}
 	appendUvarint(0)
 	return data
 }

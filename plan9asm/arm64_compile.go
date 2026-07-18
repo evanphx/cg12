@@ -13,16 +13,19 @@ type ARM64Options struct {
 	PackagePath      string
 	Filename         string
 	Defines          map[string]int64
+	FloatInputs      map[string][]int
+	FloatOutputs     map[string][]int
 	PreferDirectABI0 bool
 }
 
 // ARM64Function describes one translated TEXT declaration in source order.
 type ARM64Function struct {
-	Name       string
-	Frame      int
-	FrameStart int
-	Args       int
-	Flags      []string
+	Name            string
+	Frame           int
+	FrameStart      int
+	Args            int
+	Flags           []string
+	NoLocalPointers bool
 }
 
 // ARM64Translation is the complete result of parsing one source file for the
@@ -51,6 +54,9 @@ var supportedARM64Files = map[string]map[string]bool{
 	"crypto/internal/fips140/sha512": {
 		"sha512block_arm64.s": true,
 	},
+	"crypto/internal/boring/sig": {
+		"sig_other.s": true,
+	},
 	"internal/bytealg": {
 		"compare_arm64.s":   true,
 		"count_arm64.s":     true,
@@ -78,6 +84,14 @@ var supportedARM64Files = map[string]map[string]bool{
 	},
 	"internal/runtime/atomic": {
 		"atomic_arm64.s": true,
+	},
+	"math": {
+		"dim_arm64.s":   true,
+		"exp_arm64.s":   true,
+		"floor_arm64.s": true,
+	},
+	"math/big": {
+		"arith_arm64.s": true,
 	},
 	"internal/reflectlite": {
 		"asm.s": true,
@@ -130,7 +144,7 @@ func CompileARM64(file *File, options ARM64Options) (ARM64Translation, error) {
 		labels:            make(map[int]map[string]string),
 		references:        make(map[string]bool),
 		abi0References:    make(map[string]bool),
-		abi0Layouts:       collectABI0Layouts(file),
+		abi0Layouts:       collectABI0Layouts(file, options),
 		abi0Symbols:       make(map[string]bool),
 		directABI0Symbols: make(map[string]bool),
 		functionCalls:     make(map[int]bool),

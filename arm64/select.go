@@ -17,12 +17,20 @@ type sel struct {
 	spillBase int
 	remat     map[int]rematRule // temps recomputed at each use (no spill slot)
 	next      *ir.Block         // the block laid out next, for fall-through elision
+	allocTmp  map[uint32]int    // fixed stack allocation temporary -> frame offset
 }
 
 // src resolves a source operand to a register, loading a spilled temporary into
 // scratch register slot `slot` or materializing a constant there. It is
 // class-aware: a floating operand uses the FP scratch registers and FP loads.
 func (s *sel) src(ref ir.Ref, slot, size int) Reg {
+	if ref.Kind == ir.RefTemp {
+		if offset, ok := s.allocTmp[ref.ID]; ok {
+			scratch := intScratchRegs[slot]
+			s.b.frameAddr(scratch, offset)
+			return scratch
+		}
+	}
 	float := s.f.ClassOf(ref).IsFloat()
 	scr := intScratchRegs[slot]
 	if float {
@@ -234,7 +242,10 @@ func (s *sel) selectData(in *ir.Instr) bool {
 		s.extend(in, extSw)
 	case ir.OExtuw:
 		// A 32-bit mov zero-extends into the X register.
-		d, done := s.dst(in.To, 4)
+		// The result is nevertheless a 64-bit value. If it is spilled, write
+		// the full zero-extended register so a later 64-bit reload cannot pick
+		// up stale bytes from the adjacent stack slot.
+		d, done := s.dst(in.To, 8)
 		s.b.movReg(false, d, s.src(in.Args[0], 1, 4))
 		done()
 

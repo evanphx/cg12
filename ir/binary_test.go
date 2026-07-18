@@ -17,11 +17,13 @@ func richModule() *Module {
 	m := NewModule()
 	m.Types = append(m.Types, pair, slice, un)
 	m.Assembly = append(m.Assembly, AssemblyFile{
-		PackagePath: "runtime",
-		Path:        "runtime/atomic_arm64.s",
-		Source:      "TEXT ·publicationBarrier(SB),$0-0\n",
-		Defines:     map[string]int64{"const_offset": 128},
-		Includes:    map[string]string{"textflag.h": "#define NOSPLIT 4\n"},
+		PackagePath:  "runtime",
+		Path:         "runtime/atomic_arm64.s",
+		Source:       "TEXT ·publicationBarrier(SB),$0-0\n",
+		Defines:      map[string]int64{"const_offset": 128},
+		Includes:     map[string]string{"textflag.h": "#define NOSPLIT 4\n"},
+		FloatInputs:  map[string][]int{"floatBits": {0, 8}},
+		FloatOutputs: map[string][]int{"floatBits": {16}},
 	})
 	m.Data = append(m.Data, &Data{
 		Name: "tbl", Linkage: Linkage{Export: true}, Align: 8,

@@ -166,13 +166,32 @@ func reachableFunctions(roots []*ast.FuncDecl, rootFiles []*ast.File, rootInfo *
 	collectAssertedInterfaces := func(files []*ast.File, info *types.Info) {
 		for _, file := range files {
 			ast.Inspect(file, func(node ast.Node) bool {
-				assertion, ok := node.(*ast.TypeAssertExpr)
-				if !ok || assertion.Type == nil {
-					return true
-				}
-				assertedType := info.Types[assertion.Type].Type
-				if interfaceType, ok := assertedType.Underlying().(*types.Interface); ok {
-					assertedInterfaces = append(assertedInterfaces, interfaceType)
+				switch expression := node.(type) {
+				case *ast.TypeAssertExpr:
+					if expression.Type == nil {
+						return true
+					}
+					assertedType := info.Types[expression.Type].Type
+					if interfaceType, ok := assertedType.Underlying().(*types.Interface); ok {
+						assertedInterfaces = append(assertedInterfaces, interfaceType)
+					}
+				case *ast.CallExpr:
+					identifier := functionIdentifier(expression.Fun)
+					if identifier == nil {
+						return true
+					}
+					function, ok := info.Uses[identifier].(*types.Func)
+					if !ok || function.Pkg() == nil || function.Pkg().Path() != "reflect" || function.Name() != "TypeAssert" {
+						return true
+					}
+					instance, ok := info.Instances[identifier]
+					if !ok || instance.TypeArgs.Len() == 0 {
+						return true
+					}
+					assertedType := instance.TypeArgs.At(0)
+					if interfaceType, ok := assertedType.Underlying().(*types.Interface); ok {
+						assertedInterfaces = append(assertedInterfaces, interfaceType)
+					}
 				}
 				return true
 			})
@@ -181,6 +200,38 @@ func reachableFunctions(roots []*ast.FuncDecl, rootFiles []*ast.File, rootInfo *
 	collectAssertedInterfaces(rootFiles, rootInfo)
 	for _, unit := range units {
 		collectAssertedInterfaces(unit.files, unit.info)
+	}
+	dynamicInterfaceTypes := make(map[string]types.Type)
+	var addDynamicInterfaceType func(types.Type)
+	addDynamicInterfaceType = func(valueType types.Type) {
+		if valueType == nil {
+			return
+		}
+		valueType = canonicalAliasType(valueType)
+		key := goTypeKey(valueType)
+		if dynamicInterfaceTypes[key] != nil {
+			return
+		}
+		dynamicInterfaceTypes[key] = valueType
+
+		if named, ok := types.Unalias(valueType).(*types.Named); ok {
+			addDynamicInterfaceType(types.NewPointer(named))
+		}
+		switch value := valueType.Underlying().(type) {
+		case *types.Pointer:
+			addDynamicInterfaceType(value.Elem())
+		case *types.Array:
+			addDynamicInterfaceType(value.Elem())
+		case *types.Slice:
+			addDynamicInterfaceType(value.Elem())
+		case *types.Map:
+			addDynamicInterfaceType(value.Key())
+			addDynamicInterfaceType(value.Elem())
+		case *types.Struct:
+			for fieldIndex := 0; fieldIndex < value.NumFields(); fieldIndex++ {
+				addDynamicInterfaceType(value.Field(fieldIndex).Type())
+			}
+		}
 	}
 	for function, declaration := range declarations {
 		symbol := functionSymbol(function)
@@ -217,6 +268,7 @@ func reachableFunctions(roots []*ast.FuncDecl, rootFiles []*ast.File, rootInfo *
 		if _, alreadyInterface := sourceType.Underlying().(*types.Interface); alreadyInterface {
 			return
 		}
+		addDynamicInterfaceType(sourceType)
 		if !types.Implements(sourceType, interfaceType) {
 			return
 		}
@@ -324,6 +376,9 @@ func reachableFunctions(roots []*ast.FuncDecl, rootFiles []*ast.File, rootInfo *
 		for _, expression := range initializer.expressions {
 			enqueueValueImplementation(expression, object.Type(), initializer.info)
 			ast.Inspect(expression, func(node ast.Node) bool {
+				if call, ok := node.(*ast.CallExpr); ok && len(call.Args) == 1 && initializer.info.Types[call.Fun].IsType() {
+					enqueueValueImplementation(call.Args[0], initializer.info.Types[call].Type, initializer.info)
+				}
 				if literal, ok := node.(*ast.CompositeLit); ok {
 					enqueueCompositeImplementations(literal, initializer.info)
 				}
@@ -373,14 +428,22 @@ func reachableFunctions(roots []*ast.FuncDecl, rootFiles []*ast.File, rootInfo *
 		queue = append(queue, initializers...)
 		queue = append(queue, genericRuntimeMethods...)
 		for _, name := range []string{
-			"args", "c128equal", "c64equal", "check", "concatstring2", "deferproc", "deferreturn", "f32equal", "f64equal", "gopanic", "gorecover", "growslice",
-			"goPanicSliceConvert", "interequal", "interhash", "main", "makeslice", "mallocgc", "memequal8",
-			"memequal16", "memequal32", "memequal64", "memequal128", "mstart0",
-			"newobject", "newstack", "nilinterequal", "nilinterhash", "osinit", "persistentalloc",
+			"args", "atomicstorep", "c128equal", "c64equal", "check", "concatstring2", "deferproc", "deferreturn", "f32equal", "f64equal", "gopanic", "gorecover", "growslice",
+			"goPanicSliceConvert", "interequal", "interhash", "main", "makeslice", "mallocgc",
+			"getitab", "inheap", "inHeapOrStack", "makemap", "mapclear", "mapdelete",
+			"memclrHasPointers",
+			"memequal0", "memequal8", "memequal16", "memequal32", "memequal64", "memequal128",
+			"memhash0", "memhash8", "memhash16", "memhash128", "mstart0",
+			"morestackc", "newobject", "newstack", "nilinterequal", "nilinterhash", "osinit", "persistentalloc", "unreachableMethod",
 			"printbool", "printfloat32", "printfloat64", "printhex", "printint", "printnl",
-			"printstring", "printuint", "schedinit", "strequal",
+			"printstring", "printuint", "schedinit", "strequal", "typehash", "typedslicecopy",
 		} {
 			if declaration, exists := runtimeFunctions[name]; exists {
+				queue = append(queue, declaration)
+			}
+		}
+		for _, symbol := range []string{"runtime.mapaccess2", "runtime.mapassign"} {
+			if declaration, exists := linkedDeclarations[symbol]; exists {
 				queue = append(queue, declaration)
 			}
 		}
@@ -452,9 +515,19 @@ func reachableFunctions(roots []*ast.FuncDecl, rootFiles []*ast.File, rootInfo *
 					}
 				}
 				if statement, ok := node.(*ast.RangeStmt); ok {
-					if basic, ok := current.info.Types[statement.X].Type.Underlying().(*types.Basic); ok && (basic.Kind() == types.String || basic.Kind() == types.UntypedString) {
+					rangeType := current.info.Types[statement.X].Type
+					if basic, ok := rangeType.Underlying().(*types.Basic); ok && (basic.Kind() == types.String || basic.Kind() == types.UntypedString) {
 						if decoderune, exists := runtimeFunctions["decoderune"]; exists {
 							queue = append(queue, decoderune)
+						}
+					}
+					if runtimeAllocation {
+						if isMapRangeType(rangeType) {
+							for _, name := range []string{"mapiterinit", "mapiternext"} {
+								if iteratorFunction, exists := runtimeFunctions[name]; exists {
+									queue = append(queue, iteratorFunction)
+								}
+							}
 						}
 					}
 				}
@@ -476,14 +549,21 @@ func reachableFunctions(roots []*ast.FuncDecl, rootFiles []*ast.File, rootInfo *
 					if chanrecv, exists := runtimeFunctions["chanrecv1"]; exists {
 						queue = append(queue, chanrecv)
 					}
+					if chanrecv, exists := runtimeFunctions["chanrecv2"]; exists {
+						queue = append(queue, chanrecv)
+					}
 				}
 				if _, ok := node.(*ast.SendStmt); ok {
 					if chansend, exists := runtimeFunctions["chansend1"]; exists {
 						queue = append(queue, chansend)
 					}
 				}
-				if _, ok := node.(*ast.SelectStmt); ok {
-					if selectGo, exists := runtimeFunctions["selectgo"]; exists {
+				if statement, ok := node.(*ast.SelectStmt); ok {
+					if len(statement.Body.List) == 0 {
+						if block, exists := runtimeFunctions["block"]; exists {
+							queue = append(queue, block)
+						}
+					} else if selectGo, exists := runtimeFunctions["selectgo"]; exists {
 						queue = append(queue, selectGo)
 					}
 				}
@@ -614,13 +694,66 @@ func reachableFunctions(roots []*ast.FuncDecl, rootFiles []*ast.File, rootInfo *
 						}
 					}
 				}
+				origin := object.Origin()
+				originSignature := origin.Type().(*types.Signature)
+				if originSignature.RecvTypeParams().Len() != 0 {
+					arguments := receiverTypeArguments(object)
+					if len(arguments) == originSignature.RecvTypeParams().Len() {
+						substitutions := functionTypeSubstitutions(current)
+						for index := range arguments {
+							arguments[index] = substituteType(arguments[index], substitutions)
+						}
+						if declaration, exists := declarations[origin]; exists {
+							declaration.typeArguments = arguments
+							declaration.symbol = genericInstanceSymbol(origin, arguments)
+							queue = append(queue, declaration)
+							return true
+						}
+					}
+				}
 				enqueueObject(object)
 				return true
 			})
 		}
 	}
-	processQueue()
+	checkedDynamicTypes := make(map[string]bool)
+	for {
+		processQueue()
+		added := false
+		for key, dynamicType := range dynamicInterfaceTypes {
+			if checkedDynamicTypes[key] {
+				continue
+			}
+			checkedDynamicTypes[key] = true
+			added = true
+			for _, assertedInterface := range assertedInterfaces {
+				enqueueImplementation(dynamicType, assertedInterface)
+			}
+		}
+		if !added {
+			break
+		}
+	}
 	return reachable, seenGlobals
+}
+
+func isMapRangeType(valueType types.Type) bool {
+	if valueType == nil {
+		return false
+	}
+	if _, isMap := valueType.Underlying().(*types.Map); isMap {
+		return true
+	}
+	parameter, isTypeParameter := valueType.(*types.TypeParam)
+	if !isTypeParameter {
+		return false
+	}
+	for _, term := range typeParameterTerms(parameter) {
+		if _, isMap := term.Underlying().(*types.Map); isMap {
+			return true
+		}
+	}
+	return false
 }
 
 func collectDynamicTypes(rootInfo *types.Info, units map[string]*sourceUnit) []types.Type {

@@ -2,6 +2,7 @@ package plan9asm
 
 import (
 	"fmt"
+	"math"
 	"strconv"
 	"strings"
 )
@@ -91,6 +92,18 @@ func (t *arm64Translator) translateInstruction(instruction *Instruction) error {
 		return t.translateMove(instruction)
 	case "FMOVD", "FMOVS":
 		return t.translateFloatMove(instruction)
+	case "FADDD", "FADDS", "FSUBD", "FSUBS", "FMULD", "FMULS", "FDIVD", "FDIVS", "FMAXD", "FMAXS", "FMIND", "FMINS", "FNMULD", "FNMULS":
+		return t.translateFloatBinary(instruction)
+	case "FABSD", "FABSS", "FRINTMD", "FRINTMS", "FRINTPD", "FRINTPS", "FRINTZD", "FRINTZS":
+		return t.translateFloatUnary(instruction)
+	case "FMADDD", "FMADDS", "FMSUBD", "FMSUBS", "FNMSUBD", "FNMSUBS":
+		return t.translateFloatFused(instruction)
+	case "FCMPD", "FCMPS":
+		return t.translateFloatCompare(instruction)
+	case "FCSELD", "FCSELS":
+		return t.translateFloatConditionalSelect(instruction)
+	case "FCVTZSD", "FCVTZSS", "SCVTFD", "SCVTFS":
+		return t.translateFloatConversion(instruction)
 	case "VMOV":
 		return t.translateVectorMove(instruction)
 	case "VDUP":
@@ -125,9 +138,9 @@ func (t *arm64Translator) translateInstruction(instruction *Instruction) error {
 		return t.translateRegisterPair(instruction)
 	case "FLDPD", "FSTPD":
 		return t.translateFloatRegisterPair(instruction)
-	case "ADD", "ADDW", "ADDS", "ADDSW", "SUB", "SUBW", "SUBS", "SUBSW", "AND", "ANDW", "ANDS", "ANDSW", "BIC", "BICW", "BICS", "BICSW", "ORR", "ORRW", "EOR", "EORW", "LSL", "LSLW", "LSR", "LSRW", "ASR", "ASRW":
+	case "ADD", "ADDW", "ADDS", "ADDSW", "ADC", "ADCW", "ADCS", "ADCSW", "SUB", "SUBW", "SUBS", "SUBSW", "SBC", "SBCW", "SBCS", "SBCSW", "AND", "ANDW", "ANDS", "ANDSW", "BIC", "BICW", "BICS", "BICSW", "ORR", "ORRW", "EOR", "EORW", "LSL", "LSLW", "LSR", "LSRW", "ASR", "ASRW":
 		return t.translateALU(instruction)
-	case "MUL", "MULW", "UDIV", "UDIVW":
+	case "MUL", "MULW", "UMULH", "UDIV", "UDIVW":
 		return t.translateMultiplyDivide(instruction)
 	case "NEG", "NEGW", "NEGS", "NEGSW":
 		return t.translateNegate(instruction)
@@ -273,12 +286,80 @@ func (t *arm64Translator) translateFloatMove(instruction *Instruction) error {
 		fmt.Fprintf(&t.output, "\tfmov %s, %s\n", destinationRegister, arm64ZeroRegister(width))
 		return nil
 	}
+	if source.Kind == OperandImmediate && destination.Kind == OperandRegister {
+		destinationRegister, err := arm64FloatRegister(destination.Register, width)
+		if err != nil {
+			return err
+		}
+		value, err := strconv.ParseFloat(source.Immediate, width)
+		if err != nil {
+			return fmt.Errorf("invalid floating-point immediate $%s: %w", source.Immediate, err)
+		}
+		integerRegister := "x27"
+		bits := uint64(math.Float64bits(value))
+		if width == 32 {
+			integerRegister = "w27"
+			bits = uint64(math.Float32bits(float32(value)))
+		}
+		if err := t.emitMoveImmediate(integerRegister, width, strconv.FormatUint(bits, 10)); err != nil {
+			return err
+		}
+		fmt.Fprintf(&t.output, "\tfmov %s, %s\n", destinationRegister, integerRegister)
+		return nil
+	}
+	if source.Kind == OperandRegister && destination.Kind == OperandRegister {
+		sourceFloat := isARM64FloatRegister(source.Register)
+		destinationFloat := isARM64FloatRegister(destination.Register)
+		switch {
+		case sourceFloat && destinationFloat:
+			sourceRegister, err := arm64FloatRegister(source.Register, width)
+			if err != nil {
+				return err
+			}
+			destinationRegister, err := arm64FloatRegister(destination.Register, width)
+			if err != nil {
+				return err
+			}
+			fmt.Fprintf(&t.output, "\tfmov %s, %s\n", destinationRegister, sourceRegister)
+			return nil
+		case sourceFloat:
+			sourceRegister, err := arm64FloatRegister(source.Register, width)
+			if err != nil {
+				return err
+			}
+			destinationRegister, err := arm64Register(destination.Register, width)
+			if err != nil {
+				return err
+			}
+			fmt.Fprintf(&t.output, "\tfmov %s, %s\n", destinationRegister, sourceRegister)
+			return nil
+		case destinationFloat:
+			sourceRegister, err := arm64Register(source.Register, width)
+			if err != nil {
+				return err
+			}
+			destinationRegister, err := arm64FloatRegister(destination.Register, width)
+			if err != nil {
+				return err
+			}
+			fmt.Fprintf(&t.output, "\tfmov %s, %s\n", destinationRegister, sourceRegister)
+			return nil
+		}
+	}
 	if source.Kind == OperandMemory && destination.Kind == OperandRegister {
 		destinationRegister, err := arm64FloatRegister(destination.Register, width)
 		if err != nil {
 			return err
 		}
-		address, err := t.memoryAddress(source, instruction.Suffix)
+		if source.Base == "FP" && t.currentDirectABI0 {
+			return t.emitDirectABI0FloatLoad(source, destinationRegister, width)
+		}
+		var address string
+		if source.Base == "FP" && t.currentABI0 {
+			address, err = t.abi0FrameAddress(source, instruction.Suffix)
+		} else {
+			address, err = t.memoryAddress(source, instruction.Suffix)
+		}
 		if err != nil {
 			return err
 		}
@@ -290,7 +371,15 @@ func (t *arm64Translator) translateFloatMove(instruction *Instruction) error {
 		if err != nil {
 			return err
 		}
-		address, err := t.memoryAddress(destination, instruction.Suffix)
+		if destination.Base == "FP" && t.currentDirectABI0 {
+			return t.emitDirectABI0FloatStore(sourceRegister, destination, width)
+		}
+		var address string
+		if destination.Base == "FP" && t.currentABI0 {
+			address, err = t.abi0FrameAddressAvoiding(destination, instruction.Suffix)
+		} else {
+			address, err = t.memoryAddress(destination, instruction.Suffix)
+		}
 		if err != nil {
 			return err
 		}
@@ -298,6 +387,184 @@ func (t *arm64Translator) translateFloatMove(instruction *Instruction) error {
 		return nil
 	}
 	return fmt.Errorf("unsupported %s operands %q, %q", instruction.Opcode, source.Text, destination.Text)
+}
+
+func isARM64FloatRegister(register string) bool {
+	register = strings.ToUpper(register)
+	if !strings.HasPrefix(register, "F") {
+		return false
+	}
+	number, err := strconv.Atoi(strings.TrimPrefix(register, "F"))
+	return err == nil && number >= 0 && number <= 31
+}
+
+func (t *arm64Translator) translateFloatBinary(instruction *Instruction) error {
+	if len(instruction.Operands) != 2 && len(instruction.Operands) != 3 {
+		return fmt.Errorf("%s requires two or three operands", instruction.Opcode)
+	}
+	width := floatInstructionWidth(instruction.Opcode)
+	source, err := arm64FloatOperand(instruction.Operands[0], width)
+	if err != nil {
+		return err
+	}
+	destinationOperand := instruction.Operands[len(instruction.Operands)-1]
+	destination, err := arm64FloatOperand(destinationOperand, width)
+	if err != nil {
+		return err
+	}
+	left := destination
+	if len(instruction.Operands) == 3 {
+		left, err = arm64FloatOperand(instruction.Operands[1], width)
+		if err != nil {
+			return err
+		}
+	}
+	mnemonic := floatInstructionMnemonic(instruction.Opcode)
+	fmt.Fprintf(&t.output, "\t%s %s, %s, %s\n", mnemonic, destination, left, source)
+	return nil
+}
+
+func (t *arm64Translator) translateFloatUnary(instruction *Instruction) error {
+	if len(instruction.Operands) != 2 {
+		return fmt.Errorf("%s requires a source and destination", instruction.Opcode)
+	}
+	width := floatInstructionWidth(instruction.Opcode)
+	source, err := arm64FloatOperand(instruction.Operands[0], width)
+	if err != nil {
+		return err
+	}
+	destination, err := arm64FloatOperand(instruction.Operands[1], width)
+	if err != nil {
+		return err
+	}
+	mnemonic := floatInstructionMnemonic(instruction.Opcode)
+	fmt.Fprintf(&t.output, "\t%s %s, %s\n", mnemonic, destination, source)
+	return nil
+}
+
+func (t *arm64Translator) translateFloatFused(instruction *Instruction) error {
+	if len(instruction.Operands) != 4 {
+		return fmt.Errorf("%s requires four operands", instruction.Opcode)
+	}
+	width := floatInstructionWidth(instruction.Opcode)
+	multiplier, err := arm64FloatOperand(instruction.Operands[0], width)
+	if err != nil {
+		return err
+	}
+	addend, err := arm64FloatOperand(instruction.Operands[1], width)
+	if err != nil {
+		return err
+	}
+	multiplicand, err := arm64FloatOperand(instruction.Operands[2], width)
+	if err != nil {
+		return err
+	}
+	destination, err := arm64FloatOperand(instruction.Operands[3], width)
+	if err != nil {
+		return err
+	}
+	mnemonic := floatInstructionMnemonic(instruction.Opcode)
+	fmt.Fprintf(&t.output, "\t%s %s, %s, %s, %s\n", mnemonic, destination, multiplicand, multiplier, addend)
+	return nil
+}
+
+func (t *arm64Translator) translateFloatCompare(instruction *Instruction) error {
+	if len(instruction.Operands) != 2 {
+		return fmt.Errorf("%s requires two operands", instruction.Opcode)
+	}
+	width := floatInstructionWidth(instruction.Opcode)
+	left, err := arm64FloatOperand(instruction.Operands[1], width)
+	if err != nil {
+		return err
+	}
+	rightOperand := instruction.Operands[0]
+	if rightOperand.Kind == OperandImmediate {
+		value, err := strconv.ParseFloat(rightOperand.Immediate, width)
+		if err != nil {
+			return fmt.Errorf("invalid floating-point immediate $%s: %w", rightOperand.Immediate, err)
+		}
+		if value != 0 {
+			return fmt.Errorf("%s only supports an immediate comparison with zero", instruction.Opcode)
+		}
+		fmt.Fprintf(&t.output, "\tfcmp %s, #0.0\n", left)
+		return nil
+	}
+	right, err := arm64FloatOperand(rightOperand, width)
+	if err != nil {
+		return err
+	}
+	fmt.Fprintf(&t.output, "\tfcmp %s, %s\n", left, right)
+	return nil
+}
+
+func (t *arm64Translator) translateFloatConditionalSelect(instruction *Instruction) error {
+	if len(instruction.Operands) != 4 {
+		return fmt.Errorf("%s requires a condition, two sources, and destination", instruction.Opcode)
+	}
+	width := floatInstructionWidth(instruction.Opcode)
+	first, err := arm64FloatOperand(instruction.Operands[1], width)
+	if err != nil {
+		return err
+	}
+	second, err := arm64FloatOperand(instruction.Operands[2], width)
+	if err != nil {
+		return err
+	}
+	destination, err := arm64FloatOperand(instruction.Operands[3], width)
+	if err != nil {
+		return err
+	}
+	condition := strings.ToLower(instruction.Operands[0].Text)
+	fmt.Fprintf(&t.output, "\tfcsel %s, %s, %s, %s\n", destination, first, second, condition)
+	return nil
+}
+
+func (t *arm64Translator) translateFloatConversion(instruction *Instruction) error {
+	if len(instruction.Operands) != 2 {
+		return fmt.Errorf("%s requires a source and destination", instruction.Opcode)
+	}
+	width := floatInstructionWidth(instruction.Opcode)
+	mnemonic := floatInstructionMnemonic(instruction.Opcode)
+	if strings.HasPrefix(instruction.Opcode, "FCVT") {
+		source, err := arm64FloatOperand(instruction.Operands[0], width)
+		if err != nil {
+			return err
+		}
+		destination, err := registerOperand(instruction.Operands[1], 64)
+		if err != nil {
+			return err
+		}
+		fmt.Fprintf(&t.output, "\t%s %s, %s\n", mnemonic, destination, source)
+		return nil
+	}
+	source, err := registerOperand(instruction.Operands[0], 64)
+	if err != nil {
+		return err
+	}
+	destination, err := arm64FloatOperand(instruction.Operands[1], width)
+	if err != nil {
+		return err
+	}
+	fmt.Fprintf(&t.output, "\t%s %s, %s\n", mnemonic, destination, source)
+	return nil
+}
+
+func floatInstructionWidth(opcode string) int {
+	if strings.HasSuffix(opcode, "S") {
+		return 32
+	}
+	return 64
+}
+
+func floatInstructionMnemonic(opcode string) string {
+	return strings.ToLower(opcode[:len(opcode)-1])
+}
+
+func arm64FloatOperand(operand Operand, width int) (string, error) {
+	if operand.Kind != OperandRegister {
+		return "", fmt.Errorf("operand %q must be a floating-point register", operand.Text)
+	}
+	return arm64FloatRegister(operand.Register, width)
 }
 
 func arm64FloatRegister(register string, width int) (string, error) {

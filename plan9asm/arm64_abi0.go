@@ -10,6 +10,7 @@ import (
 type abi0Slot struct {
 	offset int
 	width  int
+	float  bool
 }
 
 type abi0Layout struct {
@@ -85,12 +86,39 @@ func abi0SlotIndex(slots []abi0Slot, offset int) int {
 	return -1
 }
 
+func abi0SlotRegisterIndex(slots []abi0Slot, offset int, floatingPoint bool) int {
+	registerIndex := 0
+	for _, slot := range slots {
+		if slot.float != floatingPoint {
+			continue
+		}
+		if slot.offset == offset {
+			return registerIndex
+		}
+		registerIndex++
+	}
+	return -1
+}
+
 func (t *arm64Translator) emitDirectABI0Load(instruction *Instruction, source Operand, destination string) error {
 	offset, err := namedFrameOffset(source.Offset)
 	if err != nil {
 		return err
 	}
-	index := abi0SlotIndex(t.currentABI0Layout.inputs, offset)
+	slotIndex := abi0SlotIndex(t.currentABI0Layout.inputs, offset)
+	if slotIndex < 0 {
+		return fmt.Errorf("ABI0 input offset %d has no register", offset)
+	}
+	if t.currentABI0Layout.inputs[slotIndex].float {
+		index := abi0SlotRegisterIndex(t.currentABI0Layout.inputs, offset, true)
+		input, err := arm64FloatRegister("F"+strconv.Itoa(index), moveWidth(instruction.Opcode))
+		if err != nil {
+			return err
+		}
+		fmt.Fprintf(&t.output, "\tfmov %s, %s\n", destination, input)
+		return nil
+	}
+	index := abi0SlotRegisterIndex(t.currentABI0Layout.inputs, offset, false)
 	if index < 0 {
 		return fmt.Errorf("ABI0 input offset %d has no register", offset)
 	}
@@ -114,6 +142,14 @@ func (t *arm64Translator) emitDirectABI0Store(instruction *Instruction, sourceRe
 		return fmt.Errorf("ABI0 output offset %d is not the primary result", offset)
 	}
 	width := abi0MoveWidth(instruction.Opcode)
+	if t.currentABI0Layout.outputs[0].float {
+		result, err := arm64FloatRegister("F0", width*8)
+		if err != nil {
+			return err
+		}
+		fmt.Fprintf(&t.output, "\tfmov %s, %s\n", result, sourceRegister)
+		return nil
+	}
 	resultWidth := 64
 	if width < 8 {
 		resultWidth = 32
@@ -128,7 +164,44 @@ func (t *arm64Translator) emitDirectABI0Store(instruction *Instruction, sourceRe
 	return nil
 }
 
-func collectABI0Layouts(file *File) map[int]abi0Layout {
+func (t *arm64Translator) emitDirectABI0FloatLoad(source Operand, destination string, width int) error {
+	offset, err := namedFrameOffset(source.Offset)
+	if err != nil {
+		return err
+	}
+	index := abi0SlotRegisterIndex(t.currentABI0Layout.inputs, offset, true)
+	if index < 0 {
+		return fmt.Errorf("ABI0 floating-point input offset %d has no register", offset)
+	}
+	input, err := arm64FloatRegister("F"+strconv.Itoa(index), width)
+	if err != nil {
+		return err
+	}
+	if input != destination {
+		fmt.Fprintf(&t.output, "\tfmov %s, %s\n", destination, input)
+	}
+	return nil
+}
+
+func (t *arm64Translator) emitDirectABI0FloatStore(source string, destination Operand, width int) error {
+	offset, err := namedFrameOffset(destination.Offset)
+	if err != nil {
+		return err
+	}
+	if len(t.currentABI0Layout.outputs) != 1 || t.currentABI0Layout.outputs[0].offset != offset {
+		return fmt.Errorf("ABI0 floating-point output offset %d is not the primary result", offset)
+	}
+	result, err := arm64FloatRegister("F0", width)
+	if err != nil {
+		return err
+	}
+	if result != source {
+		fmt.Fprintf(&t.output, "\tfmov %s, %s\n", result, source)
+	}
+	return nil
+}
+
+func collectABI0Layouts(file *File, options ARM64Options) map[int]abi0Layout {
 	layouts := make(map[int]abi0Layout)
 	functionNames := make(map[string]int)
 	aliases := make(map[int]string)
@@ -136,13 +209,22 @@ func collectABI0Layouts(file *File) map[int]abi0Layout {
 	var text *Text
 	inputSlots := make(map[int]int)
 	outputSlots := make(map[int]int)
+	inputFloats := make(map[int]bool)
+	outputFloats := make(map[int]bool)
 	finish := func() {
 		if text == nil || text.Symbol.Static || text.Symbol.ABI != "" {
 			return
 		}
+		functionName := strings.TrimPrefix(text.Symbol.Name, "·")
+		for _, offset := range options.FloatInputs[functionName] {
+			inputFloats[offset] = true
+		}
+		for _, offset := range options.FloatOutputs[functionName] {
+			outputFloats[offset] = true
+		}
 		layouts[functionIndex] = abi0Layout{
-			inputs:  sortedABI0Slots(inputSlots),
-			outputs: sortedABI0Slots(outputSlots),
+			inputs:  sortedABI0Slots(inputSlots, inputFloats),
+			outputs: sortedABI0Slots(outputSlots, outputFloats),
 		}
 	}
 
@@ -155,6 +237,8 @@ func collectABI0Layouts(file *File) map[int]abi0Layout {
 			functionNames[statement.Symbol.Name] = functionIndex
 			inputSlots = make(map[int]int)
 			outputSlots = make(map[int]int)
+			inputFloats = make(map[int]bool)
+			outputFloats = make(map[int]bool)
 		case *Instruction:
 			if text == nil || text.Symbol.Static || text.Symbol.ABI != "" {
 				continue
@@ -174,6 +258,7 @@ func collectABI0Layouts(file *File) map[int]abi0Layout {
 			if source := statement.Operands[0]; source.Kind == OperandMemory && source.Base == "FP" {
 				if offset, err := namedFrameOffset(source.Offset); err == nil {
 					inputSlots[offset] = max(inputSlots[offset], width)
+					inputFloats[offset] = strings.HasPrefix(statement.Opcode, "FMOV")
 					if strings.HasSuffix(namedFrameField(source.Offset), "_base") {
 						// Go names a slice's three ABI0 words name_base,
 						// name_len, and name_cap. Assembly commonly reads only the
@@ -187,6 +272,7 @@ func collectABI0Layouts(file *File) map[int]abi0Layout {
 			if destination := statement.Operands[1]; destination.Kind == OperandMemory && destination.Base == "FP" {
 				if offset, err := namedFrameOffset(destination.Offset); err == nil {
 					outputSlots[offset] = max(outputSlots[offset], width)
+					outputFloats[offset] = strings.HasPrefix(statement.Opcode, "FMOV")
 				}
 			}
 		}
@@ -227,10 +313,10 @@ func namedFrameField(source string) string {
 	return ""
 }
 
-func sortedABI0Slots(widths map[int]int) []abi0Slot {
+func sortedABI0Slots(widths map[int]int, floats map[int]bool) []abi0Slot {
 	slots := make([]abi0Slot, 0, len(widths))
 	for offset, width := range widths {
-		slots = append(slots, abi0Slot{offset: offset, width: width})
+		slots = append(slots, abi0Slot{offset: offset, width: width, float: floats[offset]})
 	}
 	sort.Slice(slots, func(left, right int) bool {
 		return slots[left].offset < slots[right].offset
@@ -240,9 +326,9 @@ func sortedABI0Slots(widths map[int]int) []abi0Slot {
 
 func abi0MoveWidth(opcode string) int {
 	switch opcode {
-	case "MOVD":
+	case "MOVD", "FMOVD":
 		return 8
-	case "MOVW", "MOVWU":
+	case "MOVW", "MOVWU", "FMOVS":
 		return 4
 	case "MOVH", "MOVHU":
 		return 2
@@ -274,7 +360,16 @@ func (t *arm64Translator) emitABI0Wrapper(text *Text, layout abi0Layout) (string
 	name := t.symbol(text.Symbol)
 	abi0Name := abi0Symbol(name)
 	extraResults := max(0, len(layout.outputs)-1)
-	if len(layout.inputs)+extraResults > 16 {
+	integerInputs := 0
+	floatInputs := 0
+	for _, slot := range layout.inputs {
+		if slot.float {
+			floatInputs++
+		} else {
+			integerInputs++
+		}
+	}
+	if integerInputs+extraResults > 16 || floatInputs > 16 {
 		return "", 0, fmt.Errorf("ABI0 wrapper for %s needs more than 16 integer registers", name)
 	}
 
@@ -304,25 +399,34 @@ func (t *arm64Translator) emitABI0Wrapper(text *Text, layout abi0Layout) (string
 	// Preserve the wrapper's caller frame pointer outside the ABI0 argument and
 	// result area so returning through the wrapper restores the Go frame chain.
 	fmt.Fprintf(&t.output, "\tstr x29, [sp, #%d]\n", framePointerOffset)
-	for index, slot := range layout.inputs {
-		if err := emitABI0Store(&t.output, index, 8+slot.offset, slot.width); err != nil {
+	integerRegister := 0
+	floatRegister := 0
+	for _, slot := range layout.inputs {
+		register := integerRegister
+		if slot.float {
+			register = floatRegister
+			floatRegister++
+		} else {
+			integerRegister++
+		}
+		if err := emitABI0Store(&t.output, register, 8+slot.offset, slot); err != nil {
 			return "", 0, err
 		}
 	}
 	for index := 0; index < extraResults; index++ {
-		register := len(layout.inputs) + index
+		register := integerInputs + index
 		fmt.Fprintf(&t.output, "\tstr x%d, [sp, #%d]\n", register, preservedPointers+index*8)
 	}
 	fmt.Fprintf(&t.output, "\tbl %s\n", abi0Name)
 	if len(layout.outputs) > 0 {
-		if err := emitABI0Load(&t.output, 0, 8+layout.outputs[0].offset, layout.outputs[0].width); err != nil {
+		if err := emitABI0Load(&t.output, 0, 8+layout.outputs[0].offset, layout.outputs[0]); err != nil {
 			return "", 0, err
 		}
 	}
 	for index := 1; index < len(layout.outputs); index++ {
 		pointerOffset := preservedPointers + (index-1)*8
 		fmt.Fprintf(&t.output, "\tldr x17, [sp, #%d]\n", pointerOffset)
-		if err := emitABI0Load(&t.output, 16, 8+layout.outputs[index].offset, layout.outputs[index].width); err != nil {
+		if err := emitABI0Load(&t.output, 16, 8+layout.outputs[index].offset, layout.outputs[index]); err != nil {
 			return "", 0, err
 		}
 		if err := emitRegisterStore(&t.output, 16, 17, layout.outputs[index].width); err != nil {
@@ -336,8 +440,19 @@ func (t *arm64Translator) emitABI0Wrapper(text *Text, layout abi0Layout) (string
 	return abi0Name, frameSize, nil
 }
 
-func emitABI0Store(output *strings.Builder, register, offset, width int) error {
-	switch width {
+func emitABI0Store(output *strings.Builder, register, offset int, slot abi0Slot) error {
+	if slot.float {
+		switch slot.width {
+		case 4:
+			fmt.Fprintf(output, "\tstr s%d, [sp, #%d]\n", register, offset)
+		case 8:
+			fmt.Fprintf(output, "\tstr d%d, [sp, #%d]\n", register, offset)
+		default:
+			return fmt.Errorf("unsupported floating-point ABI0 store width %d", slot.width)
+		}
+		return nil
+	}
+	switch slot.width {
 	case 1:
 		fmt.Fprintf(output, "\tstrb w%d, [sp, #%d]\n", register, offset)
 	case 2:
@@ -347,13 +462,24 @@ func emitABI0Store(output *strings.Builder, register, offset, width int) error {
 	case 8:
 		fmt.Fprintf(output, "\tstr x%d, [sp, #%d]\n", register, offset)
 	default:
-		return fmt.Errorf("unsupported ABI0 store width %d", width)
+		return fmt.Errorf("unsupported ABI0 store width %d", slot.width)
 	}
 	return nil
 }
 
-func emitABI0Load(output *strings.Builder, register, offset, width int) error {
-	switch width {
+func emitABI0Load(output *strings.Builder, register, offset int, slot abi0Slot) error {
+	if slot.float {
+		switch slot.width {
+		case 4:
+			fmt.Fprintf(output, "\tldr s%d, [sp, #%d]\n", register, offset)
+		case 8:
+			fmt.Fprintf(output, "\tldr d%d, [sp, #%d]\n", register, offset)
+		default:
+			return fmt.Errorf("unsupported floating-point ABI0 load width %d", slot.width)
+		}
+		return nil
+	}
+	switch slot.width {
 	case 1:
 		fmt.Fprintf(output, "\tldrb w%d, [sp, #%d]\n", register, offset)
 	case 2:
@@ -363,7 +489,7 @@ func emitABI0Load(output *strings.Builder, register, offset, width int) error {
 	case 8:
 		fmt.Fprintf(output, "\tldr x%d, [sp, #%d]\n", register, offset)
 	default:
-		return fmt.Errorf("unsupported ABI0 load width %d", width)
+		return fmt.Errorf("unsupported ABI0 load width %d", slot.width)
 	}
 	return nil
 }

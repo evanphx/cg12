@@ -80,6 +80,44 @@ func lowerFunctionHeapAllocations(function *ir.Func) bool {
 		}
 		for _, block := range function.Blocks {
 			for _, instruction := range block.Instrs {
+				destination, source, size, memoryCopy := memoryCopyOperands(function, instruction)
+				if memoryCopy {
+					sourceLocation := aliases.locOf(source, int(size))
+					destinationLocation := aliases.locOf(destination, int(size))
+					if sourceLocation.class == cLocal {
+						for sourceSlot, base := range slotBases {
+							if sourceSlot.base != sourceLocation.key {
+								continue
+							}
+							if sourceSlot.offset < sourceLocation.offset || sourceSlot.offset+8 > sourceLocation.offset+size {
+								continue
+							}
+							if destinationLocation.class != cLocal {
+								escaped[base] = true
+								continue
+							}
+							destinationSlot := localSlot{
+								base:   destinationLocation.key,
+								offset: destinationLocation.offset + sourceSlot.offset - sourceLocation.offset,
+							}
+							if conflictedSlots[destinationSlot] {
+								escaped[base] = true
+								continue
+							}
+							if previous, exists := slotBases[destinationSlot]; exists && previous != base {
+								escaped[previous] = true
+								escaped[base] = true
+								delete(slotBases, destinationSlot)
+								conflictedSlots[destinationSlot] = true
+								continue
+							}
+							if _, exists := slotBases[destinationSlot]; !exists {
+								slotBases[destinationSlot] = base
+								updated = true
+							}
+						}
+					}
+				}
 				if instruction.Op.IsStore() {
 					base, tracked := heapBase(instruction.Arg(0), bases)
 					location := aliases.locOf(instruction.Arg(1), 1)
@@ -254,7 +292,10 @@ func isAtomicPointerStore(function *ir.Func, instruction ir.Instr) bool {
 		return false
 	}
 	constant := function.Consts[callee.ID]
-	return constant.Kind == ir.ConstSym && constant.Sym == "runtime.atomicstorep"
+	if constant.Kind != ir.ConstSym {
+		return false
+	}
+	return constant.Sym == "runtime.atomicstorep" || constant.Sym == "goc_storep"
 }
 
 func derivedHeapBase(instruction ir.Instr, bases map[uint32]uint32) (uint32, bool) {
@@ -311,4 +352,28 @@ func benignMemoryCall(function *ir.Func, instruction ir.Instr) bool {
 	default:
 		return false
 	}
+}
+
+func memoryCopyOperands(function *ir.Func, instruction ir.Instr) (ir.Ref, ir.Ref, int64, bool) {
+	if instruction.Op != ir.OCall || len(instruction.Args) != 4 {
+		return ir.R, ir.R, 0, false
+	}
+	callee := instruction.Arg(0)
+	if callee.Kind != ir.RefConst {
+		return ir.R, ir.R, 0, false
+	}
+	constant := function.Consts[callee.ID]
+	if constant.Kind != ir.ConstSym {
+		return ir.R, ir.R, 0, false
+	}
+	switch constant.Sym {
+	case "memcpy", "memmove", "goc_memcpy", "goc_memmove":
+	default:
+		return ir.R, ir.R, 0, false
+	}
+	size, knownSize := constInt(function, instruction.Arg(3))
+	if !knownSize || size < 0 {
+		return ir.R, ir.R, 0, false
+	}
+	return instruction.Arg(1), instruction.Arg(2), size, true
 }

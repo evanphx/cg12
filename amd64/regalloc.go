@@ -98,7 +98,7 @@ func regAlloc(f *ir.Func) (*allocation, error) {
 	num := numberInstrs(cfg)
 	alloc.intervals = buildIntervals(f, cfg, live, num)
 	alloc.posInstr = num.posInstr
-	alloc.safeRoots = computeSafepointRoots(f, alloc.intervals, num)
+	alloc.safeRoots = computeSafepointRoots(f, cfg, live)
 	return alloc, nil
 }
 
@@ -108,21 +108,48 @@ func regAlloc(f *ir.Func) (*allocation, error) {
 // (dead at the call) and result (not yet defined) are naturally excluded; for an
 // OSafepoint, which neither defines nor uses anything, every live reference is a
 // root.
-func computeSafepointRoots(f *ir.Func, intervals []*interval, num *numbering) map[*ir.Instr][]int {
+func computeSafepointRoots(f *ir.Func, cfg *analysis.CFG, liveness *analysis.Liveness) map[*ir.Instr][]int {
 	roots := map[*ir.Instr][]int{}
-	for _, p := range num.safeAt {
-		in := num.posInstr[p]
-		if in == nil {
-			continue
+	for _, block := range cfg.RPO {
+		live := liveness.LiveOut(block).Copy()
+		live.AddRef(block.Jmp.Arg)
+		for _, argument := range block.Jmp.Args {
+			live.AddRef(argument)
 		}
-		var live []int
-		for _, iv := range intervals {
-			if iv.start < p && p < iv.end && f.Temps[iv.temp].GCRef {
-				live = append(live, iv.temp)
+
+		for index := len(block.Instrs) - 1; index >= 0; index-- {
+			instruction := &block.Instrs[index]
+
+			// A result does not exist until after its defining instruction, so it
+			// cannot be a root while a call is executing. Remove definitions before
+			// recording the values which are live across this instruction.
+			if instruction.To.IsTemp() {
+				live.Remove(int(instruction.To.ID))
+			}
+			for _, definition := range instruction.Defs {
+				if definition.IsTemp() {
+					live.Remove(int(definition.ID))
+				}
+			}
+
+			if instruction.Op == ir.OCall || instruction.Op == ir.OSafepoint {
+				var managed []int
+				for _, temporary := range live.Members() {
+					if f.Temps[temporary].GCRef {
+						managed = append(managed, temporary)
+					}
+				}
+				sort.Ints(managed)
+				roots[instruction] = managed
+			}
+
+			// Arguments become live before the instruction. Recording roots first
+			// excludes call-only arguments, while retaining an argument that also
+			// has a genuine use after the call.
+			for _, argument := range instruction.Args {
+				live.AddRef(argument)
 			}
 		}
-		sort.Ints(live)
-		roots[in] = live
 	}
 	return roots
 }
