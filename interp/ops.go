@@ -37,7 +37,14 @@ func (mc *Machine) execInstr(fr *frame, in *ir.Instr) error {
 	case in.Op == ir.OVaArg:
 		return mc.execVaArg(fr, in)
 	case in.Op == ir.OBlockAddr:
-		return mc.trapf("block address not yet supported (Phase C)")
+		addr, ok := mc.blockAddr[in.Blk]
+		if !ok {
+			return mc.trapf("block address of a block whose address was not taken at load")
+		}
+		if !in.To.IsNone() {
+			fr.vals[in.To.ID] = ptrVal(addr)
+		}
+		return nil
 	}
 
 	v, err := mc.evalValueOp(fr, in)
@@ -604,10 +611,32 @@ func (mc *Machine) execAlloc(fr *frame, in *ir.Instr) error {
 			return mc.trapf("allocn size %d is not a multiple of 16", size)
 		}
 	}
+	addr := mc.stackAlloc(size, align)
+	if !in.To.IsNone() {
+		fr.vals[in.To.ID] = ptrVal(addr)
+	}
+	return nil
+}
+
+// stackAlloc reserves size bytes of stack (descending, aligned) and returns the
+// address. It backs both alloc ops and by-value aggregate argument/return copies.
+func (mc *Machine) stackAlloc(size, align uint64) uint64 {
+	if align == 0 {
+		align = 1
+	}
 	mc.sp = (mc.sp - size) &^ (align - 1)
 	mc.mem.mapRange(mc.sp, maxU(size, 1))
-	if !in.To.IsNone() {
-		fr.vals[in.To.ID] = ptrVal(mc.sp)
+	return mc.sp
+}
+
+// copyMem copies n bytes from src to dst, trapping if either range is unmapped.
+func (mc *Machine) copyMem(dst, src uint64, n int) error {
+	buf, ok := mc.mem.readBytes(src, n)
+	if !ok {
+		return mc.trapf("aggregate copy source [%#x,+%d) unmapped", src, n)
+	}
+	if !mc.mem.writeBytes(dst, buf) {
+		return mc.trapf("aggregate copy dest [%#x,+%d) unmapped", dst, n)
 	}
 	return nil
 }

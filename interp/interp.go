@@ -15,11 +15,13 @@ type Machine struct {
 	mod   *ir.Module
 	funcs map[string]*ir.Func
 
-	mem      *memory
-	syms     map[string]uint64   // symbol name -> address
-	funcAt   map[uint64]*ir.Func // text descriptor -> function (indirect calls)
-	externAt map[uint64]string   // text descriptor -> extern name
-	externs  map[string]ExternFunc
+	mem       *memory
+	syms      map[string]uint64   // symbol name -> address
+	funcAt    map[uint64]*ir.Func // text descriptor -> function (indirect calls)
+	externAt  map[uint64]string   // text descriptor -> extern name
+	externs   map[string]ExternFunc
+	blockAddr map[*ir.Block]uint64 // address-taken block -> its code descriptor
+	blockAt   map[uint64]*ir.Block // code descriptor -> block (computed goto)
 
 	sp         uint64 // stack pointer, descends as frames allocate
 	heapNext   uint64 // bump heap cursor
@@ -66,6 +68,8 @@ func New(m *ir.Module, opts ...Option) (*Machine, error) {
 		syms:       map[string]uint64{},
 		funcAt:     map[uint64]*ir.Func{},
 		externAt:   map[uint64]string{},
+		blockAddr:  map[*ir.Block]uint64{},
+		blockAt:    map[uint64]*ir.Block{},
 		stdout:     io.Discard,
 		maxDepth:   100000,
 		sp:         segStack,
@@ -103,6 +107,24 @@ func New(m *ir.Module, opts ...Option) (*Machine, error) {
 		mc.syms[name] = mc.textNext
 		mc.externAt[mc.textNext] = name
 		mc.textNext += 16
+	}
+	// A distinct code descriptor per address-taken block (the &&label extension),
+	// so OBlockAddr round-trips through memory and JmpBr resolves its destination.
+	for _, f := range m.Funcs {
+		for _, b := range f.Blocks {
+			for i := range b.Instrs {
+				in := &b.Instrs[i]
+				if in.Op != ir.OBlockAddr || in.Blk == nil {
+					continue
+				}
+				if _, ok := mc.blockAddr[in.Blk]; ok {
+					continue
+				}
+				mc.blockAddr[in.Blk] = mc.textNext
+				mc.blockAt[mc.textNext] = in.Blk
+				mc.textNext += 16
+			}
+		}
 	}
 	if err := mc.layoutGlobals(); err != nil {
 		return nil, err
@@ -202,9 +224,6 @@ func refuseFunc(f *ir.Func) error {
 			}
 			if len(in.Defs) != 0 {
 				return loadErr(f.Name, b.Name, in.Op, "multi-register (Defs) result — lowering artifact")
-			}
-			if in.AggArgs != nil || in.RetAgg != nil {
-				return loadErr(f.Name, b.Name, in.Op, "aggregate-by-value call — not yet supported (Phase C)")
 			}
 			if msg, bad := refusedOp(in.Op); bad {
 				return loadErr(f.Name, b.Name, in.Op, msg)

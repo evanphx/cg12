@@ -105,7 +105,15 @@ func (mc *Machine) execTerminator(fr *frame, b *ir.Block) (next *ir.Block, ret V
 		return j.Targets[idx], Value{}, false, nil
 
 	case ir.JmpBr:
-		return nil, Value{}, false, mc.trapf("computed goto requires block-address memory (Phase C)")
+		v, err := mc.evalRef(fr, j.Arg)
+		if err != nil {
+			return nil, Value{}, false, err
+		}
+		blk, ok := mc.blockAt[v.u64()]
+		if !ok {
+			return nil, Value{}, false, mc.trapf("computed goto to %#x is not a block address", v.u64())
+		}
+		return blk, Value{}, false, nil
 
 	default:
 		return nil, Value{}, false, mc.trapf("unterminated or unknown terminator kind %d", j.Kind)
@@ -180,16 +188,38 @@ func (mc *Machine) doExternCall(fr *frame, in *ir.Instr, name string) error {
 
 func (mc *Machine) doIRCall(fr *frame, in *ir.Instr, f *ir.Func) error {
 	args := make([]Value, 0, len(in.Args)-1)
-	for _, a := range in.Args[1:] {
+	for k, a := range in.Args[1:] {
 		v, err := mc.evalRef(fr, a)
 		if err != nil {
 			return err
+		}
+		// A by-value aggregate argument arrives as a pointer; copy the aggregate
+		// into fresh stack storage so the callee mutating its parameter cannot be
+		// seen by the caller (QBE's by-value semantics).
+		if k < len(in.AggArgs) && in.AggArgs[k] != nil {
+			size, align := in.AggArgs[k].Layout()
+			buf := mc.stackAlloc(uint64(size), uint64(align))
+			if err := mc.copyMem(buf, v.u64(), size); err != nil {
+				return err
+			}
+			v = ptrVal(buf)
 		}
 		args = append(args, v)
 	}
 	ret, err := mc.callFunc(f, args)
 	if err != nil {
 		return err
+	}
+	// A by-value aggregate result is returned as a pointer into the callee's
+	// now-freed stack; copy it into caller storage that outlives the call before
+	// anything can reuse those bytes.
+	if in.RetAgg != nil {
+		size, align := in.RetAgg.Layout()
+		buf := mc.stackAlloc(uint64(size), uint64(align))
+		if err := mc.copyMem(buf, ret.u64(), size); err != nil {
+			return err
+		}
+		ret = ptrVal(buf)
 	}
 	if !in.To.IsNone() {
 		fr.vals[in.To.ID] = ret.asClass(in.Cls)
