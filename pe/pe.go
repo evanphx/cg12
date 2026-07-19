@@ -125,7 +125,17 @@ type engine struct {
 	stopAt   *ir.Block               // emit stops before this block (a diamond's join)
 	nphi     int                     // for distinct residual phi names
 	depth    int                     // emit recursion depth (guards runaway inlining)
+	loops    map[*ir.Block]*loopInfo // merge-free loop headers to residualize
+	active   map[*ir.Block]*loopState
 	err      error
+}
+
+// loopState tracks a residual loop currently being emitted: its header block, the
+// memory cells it carries, and their phis (so a back-edge can feed and close them).
+type loopState struct {
+	hdr   *ir.Block
+	cells [][2]int64
+	phis  []*ir.Phi
 }
 
 // maxEmitDepth bounds emit's recursive descent so an unmarked, non-converging loop
@@ -182,6 +192,8 @@ func (e *engine) fail(format string, a ...any) {
 func (e *engine) run() {
 	e.ipdom = computePostIdom(e.src)
 	e.stackStride = detectStackStride(e.src)
+	e.loops = analyzeLoops(e.src, e.isMerge)
+	e.active = map[*ir.Block]*loopState{}
 
 	// Classify the parameters. "code" is the green program. A pointer parameter is a
 	// runtime array: read-only ones synthesize a scalar per element, but one whose
@@ -297,6 +309,18 @@ func (e *engine) emitFrom(b *ir.Block, start int) {
 	if start == 0 && b == e.stopAt {
 		return // reached a diamond's join; the caller resumes here after merging
 	}
+	if start == 0 {
+		if li, ok := e.loops[b]; ok {
+			// A merge-free loop with a runtime trip count: residualize it. On the
+			// back-edge (the header is already active) close the loop; otherwise open it.
+			if ls := e.active[b]; ls != nil {
+				e.closeLoop(ls)
+			} else {
+				e.beginLoop(b, li)
+			}
+			return
+		}
+	}
 	for k := start; k < len(b.Instrs); k++ {
 		in := &b.Instrs[k]
 		if e.isMerge(in) {
@@ -375,6 +399,104 @@ func (e *engine) control(b *ir.Block) {
 	default:
 		e.fail("unsupported terminator %v", b.Jmp.Kind)
 	}
+}
+
+// beginLoop residualizes a merge-free loop as a real loop. The loop-carried scalar
+// cells become phis at a fresh residual header: their pre-loop values feed the phis
+// on entry, and the body's back-edge feeds them their next-iteration values. Once
+// the cells are red phis the loop condition and body residualize like any runtime
+// code, so the residual is a genuine loop rather than an unrolling.
+func (e *engine) beginLoop(h *ir.Block, li *loopInfo) {
+	if h.Jmp.Kind != ir.JmpJnz {
+		e.fail("unsupported loop shape: header does not end in a conditional branch")
+		return
+	}
+	inLoopTo := li.blocks[h.Jmp.To]
+	if inLoopTo == li.blocks[h.Jmp.To2] {
+		e.fail("unsupported loop shape: neither or both arms stay in the loop")
+		return
+	}
+
+	// Every block dominating the header has already run, so its allocas have regions.
+	// A carried alloca with no region yet is allocated inside the loop -- a loop-local
+	// whose value does not cross the back-edge, so it needs no phi.
+	cells := make([][2]int64, 0, len(li.carried))
+	for _, aid := range li.carried {
+		if reg := e.regionOf[aid]; reg != nil {
+			cells = append(cells, cell(reg, 0))
+		}
+	}
+
+	// The residual header, with a phi per carried cell fed the pre-loop value.
+	hb := e.out.NewBlock("loop")
+	phis := make([]*ir.Phi, len(cells))
+	for i, c := range cells {
+		cur := e.mem[c]
+		cls := cur.cls
+		if cls == 0 {
+			cls = ir.ClsL
+		}
+		p := &ir.Phi{Cls: cls, To: e.out.NewTemp(fmt.Sprintf("lv%d", e.nphi), cls)}
+		e.nphi++
+		p.Args = append(p.Args, e.materialize(cur))
+		p.Blocks = append(p.Blocks, e.cur)
+		hb.Phis = append(hb.Phis, p)
+		phis[i] = p
+	}
+	e.cur.Goto(hb)
+	if e.err != nil {
+		return
+	}
+
+	ls := &loopState{hdr: hb, cells: cells, phis: phis}
+	e.active[h] = ls
+	defer delete(e.active, h)
+
+	// Enter the header: the carried cells now read as their phis (runtime), and the
+	// header's own instructions (the loop condition) run there.
+	e.cur = hb
+	for i, c := range cells {
+		e.mem[c] = value{kind: vResid, ref: phis[i].To, cls: phis[i].Cls}
+	}
+	for k := range h.Instrs {
+		e.exec(&h.Instrs[k])
+		if e.err != nil {
+			return
+		}
+	}
+
+	// The condition splits into the loop body (which re-enters the header via its
+	// back-edge, closing the loop) and the exit (which continues after the loop).
+	cond := e.materialize(e.valueOf(h.Jmp.Arg))
+	body, exit := h.Jmp.To, h.Jmp.To2
+	if !inLoopTo {
+		body, exit = h.Jmp.To2, h.Jmp.To
+	}
+	rb, rx := e.out.NewBlock("lbody"), e.out.NewBlock("lexit")
+	if inLoopTo {
+		e.cur.Jnz(cond, rb, rx)
+	} else {
+		e.cur.Jnz(cond, rx, rb)
+	}
+
+	env0, mem0 := e.env, e.mem
+	e.env, e.mem = copyEnv(env0), copyMem(mem0)
+	e.cur = rb
+	e.emit(body)
+
+	e.env, e.mem = copyEnv(env0), copyMem(mem0)
+	e.cur = rx
+	e.emit(exit)
+}
+
+// closeLoop is reached at a loop's back-edge: feed each carried cell's current value
+// to its header phi and jump back to the header.
+func (e *engine) closeLoop(ls *loopState) {
+	for i, c := range ls.cells {
+		ls.phis[i].Args = append(ls.phis[i].Args, e.materialize(e.mem[c]))
+		ls.phis[i].Blocks = append(ls.phis[i].Blocks, e.cur)
+	}
+	e.cur.Goto(ls.hdr)
 }
 
 // diamond specializes a runtime branch whose arms re-converge at join. It emits
