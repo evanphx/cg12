@@ -24,6 +24,7 @@ func lower(f *ir.Func) error {
 	lowerpass.Selects(f)    // conditional selects -> control-flow diamonds (no cmov path)
 	lowerpass.HoistAllocas(f)
 	lowerpass.SplitCriticalEdges(f)
+	lowerpass.CoalescePhis(f)
 	lowerpass.DestructSSA(f)
 	return lowerABI(f)
 }

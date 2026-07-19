@@ -170,11 +170,11 @@ func TestMem2RegNoAllocs(t *testing.T) {
 }
 
 func TestMem2RegSkipsComputedGoto(t *testing.T) {
-	// A variable live across a merge that a computed goto reaches would, if
-	// promoted, put a phi at that merge -- and SSA destruction cannot resolve one
-	// without a copy in every predecessor of an indirect branch, which on an
-	// interpreter's near-complete CFG explodes quadratically. mem2reg leaves the
-	// whole function in memory form instead, so no such phi is ever created.
+	// A function with a computed goto is left in memory form. Not for correctness --
+	// lower.CoalescePhis can resolve the dispatch phis -- but for speed: promoting a
+	// variable live across the dispatch coalesces it into one function-spanning live
+	// range that linear scan spills across every handler, which measured slower than
+	// the memory form on a real interpreter. So mem2reg declines the whole function.
 	f := ir.NewModule().NewFunc("interp", ir.ClsW)
 	e := f.Entry()
 	p := e.Alloc(4, 4)

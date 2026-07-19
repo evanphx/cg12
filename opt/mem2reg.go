@@ -24,7 +24,8 @@ func varBase(name string) string {
 // full-width loads and stores into SSA temporaries, inserting phi nodes at the
 // iterated dominance frontier and renaming loads/stores away. This is the
 // classic Cytron et al. SSA construction, run over the alloc-backed variables.
-// hasComputedGoto reports whether f contains an indirect (computed) branch.
+//
+// A function with a computed goto is left alone -- see hasComputedGoto.
 func hasComputedGoto(f *ir.Func) bool {
 	for _, b := range f.Blocks {
 		if b.Jmp.Kind == ir.JmpBr {
@@ -35,17 +36,15 @@ func hasComputedGoto(f *ir.Func) bool {
 }
 
 func Mem2Reg(f *ir.Func) bool {
-	// A computed goto builds an interpreter's near-complete CFG: each dispatch
-	// block branches to every handler, so each handler is a merge point with as
-	// many predecessors. Promoting a variable that is live across the dispatch puts
-	// a phi at each handler, and SSA destruction -- which cannot split a
-	// computed-goto critical edge, since all the sources jump to one runtime
-	// address -- then has to place a copy for that phi in every predecessor:
-	// O(handlers^2 x variables) copies. On QuickJS's JS_CallInternal that is ~7
-	// million instructions, past any branch's reach. Until SSA destruction
-	// coalesces phis across an indirect branch, leave such a function in memory
-	// form (it still gets the non-promoting cleanups); the rest of the module
-	// promotes normally.
+	// Promoting a variable that lives across a computed goto is a performance loss,
+	// not a correctness problem. lower.CoalescePhis resolves the phis it puts at the
+	// dispatch handlers without the O(handlers^2) copy explosion a naive SSA
+	// destruction would hit -- but only by coalescing each such variable into one
+	// temporary whose live range spans the whole dispatch. Linear-scan allocation
+	// then spills it across every handler, and the result runs slower than leaving
+	// it in memory (measured ~33% slower on QuickJS's JS_CallInternal, which also
+	// takes ~5x longer to compile). So an interpreter stays in memory form; the rest
+	// of the module, which has no such spanning ranges, promotes normally.
 	if hasComputedGoto(f) {
 		return false
 	}

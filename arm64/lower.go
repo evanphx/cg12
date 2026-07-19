@@ -28,6 +28,7 @@ func lower(f *ir.Func, tlsModel TLSModel) error {
 	foldIdioms(f)
 	foldAddressing(f)
 	lowerpass.SplitCriticalEdges(f)
+	lowerpass.CoalescePhis(f)
 	lowerpass.DestructSSA(f)
 	return lowerABI(f)
 }
