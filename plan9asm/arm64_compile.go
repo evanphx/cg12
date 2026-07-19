@@ -142,6 +142,8 @@ func CompileARM64(file *File, options ARM64Options) (ARM64Translation, error) {
 		options:           options,
 		fileTag:           sanitizeSymbol(options.PackagePath + "_" + filename),
 		labels:            make(map[int]map[string]string),
+		pcLabels:          make(map[int]map[int]string),
+		instructionIndex:  make(map[*Instruction]int),
 		references:        make(map[string]bool),
 		abi0References:    make(map[string]bool),
 		abi0Layouts:       collectABI0Layouts(file, options),
@@ -193,6 +195,9 @@ func CompileARM64(file *File, options ARM64Options) (ARM64Translation, error) {
 		}
 	}
 	translator.collectLabels(file)
+	if err := translator.collectPCLabels(file); err != nil {
+		return ARM64Translation{}, fmt.Errorf("%s: %w", options.Filename, err)
+	}
 
 	for _, statement := range file.Statements {
 		if err := translator.translate(statement); err != nil {

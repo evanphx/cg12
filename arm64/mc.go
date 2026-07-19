@@ -250,6 +250,13 @@ func compileToObjectWithBundle(m *ir.Module, opts Options, bundle assemblyBundle
 			m.Funcs[functionIndex] = nil
 		}
 	}
+	if goRuntime && len(goFunctions) > 0 {
+		o.Syms = append(o.Syms, obj.Sym{
+			Name:    sanitize(".goc.runtime.text"),
+			Section: obj.SecText,
+			Value:   0,
+		})
+	}
 	if releaseFunctionIR {
 		m.Funcs = nil
 		runtime.GC()
@@ -676,8 +683,8 @@ func addDataWithBSSAndFixups(o *obj.Object, d *ir.Data, allowBSS bool, fixups *[
 			*buf = append(*buf, []byte(it.Str)...)
 		case it.Sym != "" && it.RelativeTo != "":
 			if fixups == nil {
-				target, targetFound := dataSymbol(o, sanitize(it.Sym))
-				relativeTo, baseFound := dataSymbol(o, sanitize(it.RelativeTo))
+				target, targetFound := objectSymbol(o, sanitize(it.Sym))
+				relativeTo, baseFound := objectSymbol(o, sanitize(it.RelativeTo))
 				if !targetFound {
 					return fmt.Errorf("arm64: relative data reference %q is undefined", it.Sym)
 				}
@@ -749,11 +756,11 @@ func addDataWithBSSAndFixups(o *obj.Object, d *ir.Data, allowBSS bool, fixups *[
 
 func resolveRelativeDataFixups(o *obj.Object, fixups []relativeDataFixup) error {
 	for _, fixup := range fixups {
-		target, targetFound := dataSymbol(o, fixup.target)
+		target, targetFound := objectSymbol(o, fixup.target)
 		if !targetFound {
 			return fmt.Errorf("target %q is undefined", fixup.target)
 		}
-		relativeTo, baseFound := dataSymbol(o, fixup.relativeTo)
+		relativeTo, baseFound := objectSymbol(o, fixup.relativeTo)
 		if !baseFound {
 			return fmt.Errorf("base %q is undefined", fixup.relativeTo)
 		}

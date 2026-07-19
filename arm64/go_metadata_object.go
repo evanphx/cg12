@@ -184,8 +184,16 @@ func dataSymbolValue(object *obj.Object, name string) (uint64, bool) {
 }
 
 func dataSymbol(object *obj.Object, name string) (obj.Sym, bool) {
+	symbol, ok := objectSymbol(object, name)
+	if !ok || (symbol.Section != obj.SecData && symbol.Section != obj.SecBss) {
+		return obj.Sym{}, false
+	}
+	return symbol, true
+}
+
+func objectSymbol(object *obj.Object, name string) (obj.Sym, bool) {
 	for _, symbol := range object.Syms {
-		if symbol.Name == name && (symbol.Section == obj.SecData || symbol.Section == obj.SecBss) {
+		if symbol.Name == name {
 			return symbol, true
 		}
 	}

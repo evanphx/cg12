@@ -1256,9 +1256,12 @@ func TestCompileModuleWithRelativeAndWordSymbolData(t *testing.T) {
 		&ir.Data{Name: "target", Align: 8, Items: []ir.DataItem{{Sub: ir.SubL, Ints: []int64{42}}}},
 		&ir.Data{Name: "offset", Align: 4, Items: []ir.DataItem{{Sub: ir.SubW, Sym: "target", RelativeTo: "base"}}},
 		&ir.Data{Name: "address", Align: 4, Items: []ir.DataItem{{Sub: ir.SubW, Sym: "function"}}},
+		&ir.Data{Name: "textoffset", Align: 4, Items: []ir.DataItem{{Sub: ir.SubW, Sym: "target_function", RelativeTo: "function"}}},
 	)
 	function := m.NewFuncVoid("function")
 	function.Entry().RetVoid()
+	targetFunction := m.NewFuncVoid("target_function")
+	targetFunction.Entry().RetVoid()
 
 	o, err := CompileToObject(m)
 	require.NoError(t, err)
@@ -1267,7 +1270,11 @@ func TestCompileModuleWithRelativeAndWordSymbolData(t *testing.T) {
 	target := findSym(t, o, "target")
 	offset := findSym(t, o, "offset")
 	address := findSym(t, o, "address")
+	textOffset := findSym(t, o, "textoffset")
+	functionSymbol := findSym(t, o, "function")
+	targetFunctionSymbol := findSym(t, o, "target_function")
 	assert.Equal(t, uint32(target.Value-base.Value), binary.LittleEndian.Uint32(o.Data[offset.Value:]))
+	assert.Equal(t, uint32(targetFunctionSymbol.Value-functionSymbol.Value), binary.LittleEndian.Uint32(o.Data[textOffset.Value:]))
 	assert.Contains(t, o.DataRelocs, obj.Reloc{
 		Offset: address.Value, Sym: "function", Type: obj.R_AARCH64_ABS32,
 	})

@@ -94,6 +94,24 @@ func TestRuntimeAssemblyOffsetsMatchStandardLibraryTypes(t *testing.T) {
 	}
 }
 
+func TestInternalABIArrayTypeOffsetsMatchRuntime(t *testing.T) {
+	loader := newSourceLoader(token.NewFileSet())
+	pkg, err := loader.Import("internal/abi")
+	require.NoError(t, err)
+
+	object := pkg.Scope().Lookup("ArrayType")
+	require.NotNil(t, object)
+	structure, ok := object.Type().Underlying().(*types.Struct)
+	require.True(t, ok)
+
+	sizes := types.SizesFor("gc", "arm64")
+	offsets := sizes.Offsetsof(structFields(structure))
+	assert.Equal(t, int64(48), offsets[runtimeFieldIndex(structure, "Elem")])
+	assert.Equal(t, int64(56), offsets[runtimeFieldIndex(structure, "Slice")])
+	assert.Equal(t, int64(64), offsets[runtimeFieldIndex(structure, "Len")])
+	assert.Equal(t, int64(72), sizes.Sizeof(structure))
+}
+
 func runtimeFieldIndex(structure *types.Struct, name string) int {
 	for index := 0; index < structure.NumFields(); index++ {
 		if structure.Field(index).Name() == name {

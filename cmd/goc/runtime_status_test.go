@@ -78,6 +78,48 @@ func TestARM64RuntimeCapabilityStatus(t *testing.T) {
 			expectation: runtimeCapabilityMustPass,
 		},
 		{
+			category:    "core-types",
+			name:        "interface-comparable-map",
+			source:      "runtime_interface_comparable_map.go",
+			expectation: runtimeCapabilityMustPass,
+		},
+		{
+			category:    "core-types",
+			name:        "slice-copy-overlap",
+			source:      "runtime_slice_copy_overlap.go",
+			expectation: runtimeCapabilityMustPass,
+		},
+		{
+			category:    "core-types",
+			name:        "string-rune-map",
+			source:      "runtime_string_rune_map.go",
+			expectation: runtimeCapabilityMustPass,
+		},
+		{
+			category:    "core-types",
+			name:        "array-map-key",
+			source:      "runtime_array_map_key.go",
+			expectation: runtimeCapabilityMustPass,
+		},
+		{
+			category:    "core-types",
+			name:        "nil-interface-typed-pointer",
+			source:      "runtime_nil_interface_typed_pointer.go",
+			expectation: runtimeCapabilityMustPass,
+		},
+		{
+			category:    "core-types",
+			name:        "complex-arithmetic",
+			source:      "runtime_complex_arithmetic.go",
+			expectation: runtimeCapabilityMustPass,
+		},
+		{
+			category:    "core-types",
+			name:        "append-growth-pointer-elements",
+			source:      "runtime_append_growth_pointer_elements.go",
+			expectation: runtimeCapabilityMustPass,
+		},
+		{
 			category:    "gc",
 			name:        "heap-struct-graph",
 			source:      "gc_struct.go",
@@ -87,6 +129,12 @@ func TestARM64RuntimeCapabilityStatus(t *testing.T) {
 			category:    "gc",
 			name:        "scalar-stack-slots",
 			source:      "runtime_accurate_gc_scalars.go",
+			expectation: runtimeCapabilityMustPass,
+		},
+		{
+			category:    "gc",
+			name:        "keepalive-finalizer",
+			source:      "runtime_keepalive_finalizer.go",
 			expectation: runtimeCapabilityMustPass,
 		},
 		{
@@ -105,6 +153,24 @@ func TestARM64RuntimeCapabilityStatus(t *testing.T) {
 			category:    "stack",
 			name:        "recursive-struct-chain-gc",
 			source:      "runtime_recursive_struct_chain_gc.go",
+			expectation: runtimeCapabilityMustPass,
+		},
+		{
+			category:    "stack",
+			name:        "method-value-gc",
+			source:      "runtime_method_value_gc.go",
+			expectation: runtimeCapabilityMustPass,
+		},
+		{
+			category:    "stack",
+			name:        "interface-method-gc",
+			source:      "runtime_interface_method_gc.go",
+			expectation: runtimeCapabilityMustPass,
+		},
+		{
+			category:    "stack",
+			name:        "defer-closure-stack-gc",
+			source:      "runtime_defer_closure_stack_gc.go",
 			expectation: runtimeCapabilityMustPass,
 		},
 		{
@@ -198,6 +264,30 @@ func TestARM64RuntimeCapabilityStatus(t *testing.T) {
 			expectation: runtimeCapabilityMustPass,
 		},
 		{
+			category:    "goroutine",
+			name:        "channel-struct-pointer-gc",
+			source:      "runtime_channel_struct_pointer_gc.go",
+			expectation: runtimeCapabilityMustPass,
+		},
+		{
+			category:    "goroutine",
+			name:        "select-send-default",
+			source:      "runtime_select_send_default.go",
+			expectation: runtimeCapabilityMustPass,
+		},
+		{
+			category:    "goroutine",
+			name:        "buffered-channel-fifo",
+			source:      "runtime_buffered_channel_fifo.go",
+			expectation: runtimeCapabilityMustPass,
+		},
+		{
+			category:    "goroutine",
+			name:        "channel-of-slices-gc",
+			source:      "runtime_channel_of_slices_gc.go",
+			expectation: runtimeCapabilityMustPass,
+		},
+		{
 			category:    "stdlib-runtime",
 			name:        "context-cancel-channel",
 			source:      "context_cancel.go",
@@ -261,6 +351,18 @@ func TestARM64RuntimeCapabilityStatus(t *testing.T) {
 			category:    "defer-panic",
 			name:        "sync-once-panic",
 			source:      "runtime_sync_once_panic.go",
+			expectation: runtimeCapabilityMustPass,
+		},
+		{
+			category:    "defer-panic",
+			name:        "panic-repanic",
+			source:      "runtime_panic_repanic.go",
+			expectation: runtimeCapabilityMustPass,
+		},
+		{
+			category:    "defer-panic",
+			name:        "recover-outside-panic",
+			source:      "runtime_recover_outside_panic.go",
 			expectation: runtimeCapabilityMustPass,
 		},
 		{
@@ -361,6 +463,18 @@ func TestARM64RuntimeCapabilityStatus(t *testing.T) {
 		},
 		{
 			category:    "runtime-packages",
+			name:        "reflect-select",
+			source:      "runtime_reflect_select.go",
+			expectation: runtimeCapabilityMustPass,
+		},
+		{
+			category:    "runtime-packages",
+			name:        "reflect-interface-method",
+			source:      "runtime_reflect_interface_method.go",
+			expectation: runtimeCapabilityMustPass,
+		},
+		{
+			category:    "runtime-packages",
 			name:        "finalizer-basic",
 			source:      "runtime_finalizer_basic.go",
 			expectation: runtimeCapabilityMustPass,
@@ -387,7 +501,13 @@ func TestARM64RuntimeCapabilityStatus(t *testing.T) {
 				t.Fatalf("%s should pass: %v\n%s", capability.source, result.err, result.output)
 			}
 			if capability.expectation == runtimeCapabilityKnownGap && result.err != nil {
-				t.Logf("KNOWN GAP %s: %s\n%v\n%s", capability.source, capability.note, result.err, result.output)
+				t.Logf(
+					"KNOWN GAP %s: %s\n%v\n%s",
+					capability.source,
+					capability.note,
+					result.err,
+					truncateRuntimeCapabilityOutput(result.output),
+				)
 				return
 			}
 			if capability.expectation == runtimeCapabilityKnownGap && result.err == nil {
@@ -397,6 +517,14 @@ func TestARM64RuntimeCapabilityStatus(t *testing.T) {
 			t.Logf("PASS %s", capability.source)
 		})
 	}
+}
+
+func truncateRuntimeCapabilityOutput(output string) string {
+	const limit = 2000
+	if len(output) <= limit {
+		return output
+	}
+	return output[:limit] + "\n... truncated ..."
 }
 
 type runtimeCapabilityResult struct {

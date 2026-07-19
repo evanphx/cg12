@@ -9,31 +9,34 @@ import (
 )
 
 type arm64Translator struct {
-	options           ARM64Options
-	fileTag           string
-	functionIndex     int
-	labels            map[int]map[string]string
-	references        map[string]bool
-	abi0References    map[string]bool
-	abi0Layouts       map[int]abi0Layout
-	directABI0        map[int]bool
-	abi0Symbols       map[string]bool
-	directABI0Symbols map[string]bool
-	functionCalls     map[int]bool
-	currentABI0       bool
-	currentDirectABI0 bool
-	currentABI0Layout abi0Layout
-	currentFrame      int
-	currentPlan9Frame int
-	currentLeaf       bool
-	currentSymbol     string
-	functions         []ARM64Function
-	data              map[string][]arm64DataValue
-	lseEnabled        bool
-	cryptoEnabled     bool
-	sha512Enabled     bool
-	crcEnabled        bool
-	output            strings.Builder
+	options                 ARM64Options
+	fileTag                 string
+	functionIndex           int
+	labels                  map[int]map[string]string
+	pcLabels                map[int]map[int]string
+	instructionIndex        map[*Instruction]int
+	currentInstructionIndex int
+	references              map[string]bool
+	abi0References          map[string]bool
+	abi0Layouts             map[int]abi0Layout
+	directABI0              map[int]bool
+	abi0Symbols             map[string]bool
+	directABI0Symbols       map[string]bool
+	functionCalls           map[int]bool
+	currentABI0             bool
+	currentDirectABI0       bool
+	currentABI0Layout       abi0Layout
+	currentFrame            int
+	currentPlan9Frame       int
+	currentLeaf             bool
+	currentSymbol           string
+	functions               []ARM64Function
+	data                    map[string][]arm64DataValue
+	lseEnabled              bool
+	cryptoEnabled           bool
+	sha512Enabled           bool
+	crcEnabled              bool
+	output                  strings.Builder
 }
 
 func (t *arm64Translator) collectLabels(file *File) {
@@ -52,6 +55,39 @@ func (t *arm64Translator) collectLabels(file *File) {
 	t.functionIndex = -1
 }
 
+func (t *arm64Translator) collectPCLabels(file *File) error {
+	functionIndex := -1
+	instructionIndex := 0
+	for _, statement := range file.Statements {
+		switch statement := statement.(type) {
+		case *Text:
+			functionIndex++
+			instructionIndex = 0
+		case *Instruction:
+			t.instructionIndex[statement] = instructionIndex
+			for _, operand := range statement.Operands {
+				if operand.Kind != OperandMemory || operand.Base != "PC" || operand.Index != "" {
+					continue
+				}
+				offset, err := t.resolveIntegerExpression(operand.Offset)
+				if err != nil {
+					return err
+				}
+				targetIndex := instructionIndex + int(offset)
+				if targetIndex < 0 {
+					return fmt.Errorf("PC-relative target before function start")
+				}
+				if t.pcLabels[functionIndex] == nil {
+					t.pcLabels[functionIndex] = make(map[int]string)
+				}
+				t.pcLabels[functionIndex][targetIndex] = fmt.Sprintf(".L%s_%d_pc_%d", t.fileTag, functionIndex, targetIndex)
+			}
+			instructionIndex++
+		}
+	}
+	return nil
+}
+
 func (t *arm64Translator) translate(statement Statement) error {
 	switch statement := statement.(type) {
 	case *Preprocessor:
@@ -67,10 +103,29 @@ func (t *arm64Translator) translate(statement Statement) error {
 	case *Directive:
 		return t.translateDirective(statement)
 	case *Instruction:
+		if err := t.emitPCLabelForInstruction(statement); err != nil {
+			return err
+		}
+		defer func() {
+			t.currentInstructionIndex++
+		}()
 		return t.translateInstruction(statement)
 	default:
 		return fmt.Errorf("unsupported statement %T", statement)
 	}
+}
+
+func (t *arm64Translator) emitPCLabelForInstruction(instruction *Instruction) error {
+	index, ok := t.instructionIndex[instruction]
+	if !ok {
+		return fmt.Errorf("instruction index not collected")
+	}
+	t.currentInstructionIndex = index
+	label := t.pcLabels[t.functionIndex][index]
+	if label != "" {
+		fmt.Fprintf(&t.output, "%s:\n", label)
+	}
+	return nil
 }
 
 func (t *arm64Translator) translateInstruction(instruction *Instruction) error {
@@ -1518,14 +1573,12 @@ func (t *arm64Translator) branchTarget(operand Operand) (string, bool, error) {
 		if err != nil {
 			return "", false, err
 		}
-		byteOffset := offset * 4
-		if byteOffset == 0 {
-			return ".", false, nil
+		targetIndex := t.currentInstructionIndex + int(offset)
+		label := t.pcLabels[t.functionIndex][targetIndex]
+		if label == "" {
+			return "", false, fmt.Errorf("PC-relative target %d has no label", targetIndex)
 		}
-		if byteOffset > 0 {
-			return fmt.Sprintf(".+%d", byteOffset), false, nil
-		}
-		return fmt.Sprintf(".%d", byteOffset), false, nil
+		return label, false, nil
 	}
 	return "", false, fmt.Errorf("unsupported branch target %q", operand.Text)
 }

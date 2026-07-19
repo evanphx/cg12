@@ -665,10 +665,19 @@ func TestTranslateRuntimeReflectcallKeepsABI0StackFrame(t *testing.T) {
 TEXT ·reflectcall(SB), NOSPLIT|NOFRAME, $0-48
 	MOVWU	frameSize+32(FP), R16
 	DISPATCH(runtime·call16, 16)
+	DISPATCH(runtime·call32, 32)
 	MOVD	$runtime·badreflectcall(SB), R0
 	B	(R0)
 
 TEXT ·call16(SB), WRAPPER, $16-48
+	MOVD	regArgs+40(FP), R20
+	CALL	·unspillArgs(SB)
+	MOVD	f+8(FP), R26
+	MOVD	(R26), R20
+	BL	(R20)
+	RET
+
+TEXT ·call32(SB), WRAPPER, $32-48
 	MOVD	regArgs+40(FP), R20
 	CALL	·unspillArgs(SB)
 	MOVD	f+8(FP), R26
@@ -689,6 +698,8 @@ TEXT ·call16(SB), WRAPPER, $16-48
 	assert.Contains(t, translation.Assembly, "\tbl runtime_reflectcall_abi0")
 	assert.Contains(t, translation.Assembly, "runtime_reflectcall_abi0:\n")
 	assert.Contains(t, translation.Assembly, "\tadrp x27, runtime_call16_abi0")
+	assert.Regexp(t, `b\.gt \.Lruntime_asm_arm64_[0-9]+_pc_6`, translation.Assembly)
+	assert.Regexp(t, `\.Lruntime_asm_arm64_[0-9]+_pc_6:\n\tmov x27, #32`, translation.Assembly)
 }
 
 func TestTranslateExactSHA256Assembly(t *testing.T) {
