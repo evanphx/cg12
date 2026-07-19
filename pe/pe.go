@@ -40,9 +40,11 @@ const MergePoint = "__cg12_merge_point"
 type vkind int
 
 const (
-	vConst vkind = iota // a known integer (green)
-	vAddr               // a known address: a region and a static byte offset (green)
-	vResid              // a runtime value: a reference in the residual (red)
+	vConst     vkind = iota // a known integer (green)
+	vAddr                   // a known address: a region and a static byte offset (green)
+	vResid                  // a runtime value: a reference in the residual (red)
+	vSym                    // a global data/function symbol + offset (green)
+	vBlockAddr              // the address of a code block, e.g. a dispatch-table entry (green)
 )
 
 type value struct {
@@ -52,6 +54,8 @@ type value struct {
 	off  int64
 	ref  ir.Ref
 	cls  ir.Cls
+	sym  string    // vSym: symbol name
+	blk  *ir.Block // vBlockAddr: the target block
 }
 
 // role classifies what an interpreter memory region holds.
@@ -86,22 +90,25 @@ type engine struct {
 	src, out *ir.Func
 	prog     []byte
 
+	srcMod   *ir.Module           // the module the interpreter lives in (for global data)
+	blockSym map[string]*ir.Block // block-address symbol -> block (dispatch tables)
+
 	cur     *ir.Block // residual block currently being emitted into
 	env     map[uint32]value
 	mem     map[[2]int64]value
 	baseEnv map[uint32]value // the green state established by the interpreter's setup
 	baseMem map[[2]int64]value
-	atEntry bool // skip the merge point that heads the state being specialized
 
 	ins     map[int64]ir.Ref // input byte offset -> synthesized residual param
 	inOrder []int64
 
-	nreg     int
-	dispatch *ir.Block // the interpreter block holding the merge-point marker
-	pcReg    *region
-	spReg    *region
-	stackReg *region
-	varRegs  []*region
+	nreg        int
+	dispatch    *ir.Block // the interpreter block a specialized state resumes in
+	dispatchIdx int       // the instruction in dispatch to resume at (just past the merge point)
+	pcReg       *region
+	spReg       *region
+	stackReg    *region
+	varRegs     []*region
 
 	states   map[greenState]*state
 	work     []greenState
@@ -129,6 +136,7 @@ func Specialize(m *ir.Module, interp string, prog []byte) (*ir.Module, string, [
 	name := interp + "$spec"
 	e := &engine{
 		src:      src,
+		srcMod:   m,
 		prog:     prog,
 		out:      out.NewFunc(name, src.Retty),
 		env:      map[uint32]value{},
@@ -136,6 +144,12 @@ func Specialize(m *ir.Module, interp string, prog []byte) (*ir.Module, string, [
 		ins:      map[int64]ir.Ref{},
 		states:   map[greenState]*state{},
 		regionOf: map[uint32]*region{},
+		blockSym: map[string]*ir.Block{},
+	}
+	for _, b := range src.Blocks {
+		if b.Sym != "" {
+			e.blockSym[b.Sym] = b
+		}
 	}
 	e.out.Export()
 	e.run()
@@ -190,27 +204,30 @@ func (e *engine) specialize(gs greenState) {
 	e.mem[cell(e.spReg, 0)] = value{kind: vConst, k: gs.sp, cls: ir.ClsW}
 	e.bindRedState(gs.sp, st.phis)
 	e.cur = st.blk
-	e.atEntry = true
-	e.emit(e.dispatch)
+	e.emitFrom(e.dispatch, e.dispatchIdx)
 }
 
 // emit symbolically executes interpreter block b (and its successors) into the
 // current residual block, until the path returns or reaches a merge point.
-func (e *engine) emit(b *ir.Block) {
+func (e *engine) emit(b *ir.Block) { e.emitFrom(b, 0) }
+
+// emitFrom is emit resuming at instruction start -- used to continue just past the
+// merge point that heads a specialized state, so the handler that produced it is
+// not re-executed.
+func (e *engine) emitFrom(b *ir.Block, start int) {
 	if e.err != nil {
 		return
 	}
-	if b == e.stopAt {
+	if start == 0 && b == e.stopAt {
 		return // reached a diamond's join; the caller resumes here after merging
 	}
-	for k := range b.Instrs {
+	for k := start; k < len(b.Instrs); k++ {
 		in := &b.Instrs[k]
 		if e.isMerge(in) {
-			if e.atEntry {
-				e.atEntry = false
-				continue // this is the head of the state we are specializing
-			}
+			// A merge point: this path reaches a green state. Record where to resume
+			// (just past the marker) and hand off to the memoizing transition.
 			e.dispatch = b
+			e.dispatchIdx = k + 1
 			e.transition()
 			return
 		}
@@ -267,6 +284,16 @@ func (e *engine) control(b *ir.Block) {
 		e.env, e.mem = env, mem
 		e.cur = bf
 		e.emit(b.Jmp.To2)
+	case ir.JmpBr:
+		// A computed goto (an interpreter's dispatch): the target address is green --
+		// a block address read from the dispatch table at the green opcode -- so we
+		// follow it, and the dispatch resolves to the one handler.
+		a := e.valueOf(b.Jmp.Arg)
+		if a.kind != vBlockAddr {
+			e.fail("computed goto on a non-green target")
+			return
+		}
+		e.emit(a.blk)
 	case ir.JmpRet:
 		e.cur.Ret(e.materialize(e.valueOf(b.Jmp.Arg)))
 	default:
@@ -449,6 +476,12 @@ func (e *engine) valueOf(r ir.Ref) value {
 	switch r.Kind {
 	case ir.RefConst:
 		c := e.src.Consts[r.ID]
+		if c.Kind == ir.ConstSym {
+			if blk := e.blockSym[c.Sym]; blk != nil {
+				return value{kind: vBlockAddr, blk: blk}
+			}
+			return value{kind: vSym, sym: c.Sym, off: c.Int}
+		}
 		return value{kind: vConst, k: c.Int, cls: c.Cls}
 	case ir.RefTemp:
 		v, ok := e.env[r.ID]
@@ -536,6 +569,8 @@ func (e *engine) execData(in *ir.Instr) {
 		e.set(in.To, e.extend(in))
 	case ir.OCmp:
 		e.set(in.To, e.compare(in))
+	case ir.OBlockAddr:
+		e.set(in.To, value{kind: vBlockAddr, blk: in.Blk})
 	case ir.OCall:
 		name := e.calleeName(in)
 		if name == MergePoint {
@@ -584,6 +619,12 @@ func (e *engine) binop(in *ir.Instr) value {
 		}
 		if a.kind == vConst && b.kind == vAddr {
 			return value{kind: vAddr, reg: b.reg, off: b.off + a.k}
+		}
+		if a.kind == vSym && b.kind == vConst {
+			return value{kind: vSym, sym: a.sym, off: a.off + b.k}
+		}
+		if a.kind == vConst && b.kind == vSym {
+			return value{kind: vSym, sym: b.sym, off: b.off + a.k}
 		}
 	}
 	res := e.emitBin(in.Op, in.Cls, e.materialize(a), e.materialize(b))
@@ -638,6 +679,15 @@ func (e *engine) load(op ir.Op, addr value) value {
 		// A load from a runtime address at a green offset -- an inline-cache slot
 		// keyed by the (green) program position, say: residualize it.
 		return value{kind: vResid, ref: e.cur.Load(loadCls(op), addr.ref), cls: loadCls(op)}
+	}
+	if addr.kind == vSym {
+		// A load from global data at a green offset -- a dispatch-table entry: read
+		// it from the module.
+		if v, ok := e.readData(addr.sym, addr.off); ok {
+			return v
+		}
+		e.fail("cannot read global %q at offset %d", addr.sym, addr.off)
+		return value{}
 	}
 	if addr.kind != vAddr {
 		e.fail("load from an unknown address")
@@ -741,6 +791,69 @@ func (e *engine) calleeName(in *ir.Instr) string {
 		return ""
 	}
 	return c.Sym
+}
+
+// readData reads the value at byte offset off of the named global -- used to read
+// a dispatch table's entries (block addresses) at the green opcode.
+func (e *engine) readData(name string, off int64) (value, bool) {
+	var d *ir.Data
+	for _, dd := range e.srcMod.Data {
+		if dd.Name == name {
+			d = dd
+			break
+		}
+	}
+	if d == nil {
+		return value{}, false
+	}
+	pos := int64(0)
+	for i := range d.Items {
+		it := &d.Items[i]
+		sz := itemBytes(it)
+		if off >= pos && off < pos+sz {
+			return e.itemValue(it, off-pos)
+		}
+		pos += sz
+	}
+	return value{}, false
+}
+
+func (e *engine) itemValue(it *ir.DataItem, rel int64) (value, bool) {
+	switch {
+	case it.Sym != "":
+		if blk := e.blockSym[it.Sym]; blk != nil {
+			return value{kind: vBlockAddr, blk: blk}, true
+		}
+		return value{kind: vSym, sym: it.Sym, off: it.Off + rel}, true
+	case len(it.Ints) > 0:
+		esz := int64(it.Sub.Size())
+		if idx := rel / esz; int(idx) < len(it.Ints) {
+			return value{kind: vConst, k: it.Ints[idx], cls: it.Sub.Cls()}, true
+		}
+	case it.Zero > 0:
+		return value{kind: vConst, k: 0, cls: ir.ClsL}, true
+	case it.Str != "":
+		if int(rel) < len(it.Str) {
+			return value{kind: vConst, k: int64(it.Str[rel]), cls: ir.ClsW}, true
+		}
+	}
+	return value{}, false
+}
+
+func itemBytes(it *ir.DataItem) int64 {
+	switch {
+	case it.Sym != "":
+		return int64(it.Sub.Size())
+	case len(it.Ints) > 0:
+		return int64(len(it.Ints)) * int64(it.Sub.Size())
+	case len(it.Flts) > 0:
+		return int64(len(it.Flts)) * int64(it.Sub.Size())
+	case it.Zero > 0:
+		return int64(it.Zero)
+	case it.Str != "":
+		return int64(len(it.Str))
+	}
+	return 0
 }
 
 func (e *engine) readProg(op ir.Op, off int64) (int64, bool) {
