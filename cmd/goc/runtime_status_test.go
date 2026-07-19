@@ -222,6 +222,24 @@ func TestARM64RuntimeCapabilityStatus(t *testing.T) {
 			expectation: runtimeCapabilityMustPass,
 		},
 		{
+			category:    "core-types",
+			name:        "append-variadic-pointer-gc",
+			source:      "runtime_append_variadic_pointer_gc.go",
+			expectation: runtimeCapabilityMustPass,
+		},
+		{
+			category:    "core-types",
+			name:        "copy-interface-slice-gc",
+			source:      "runtime_copy_interface_slice_gc.go",
+			expectation: runtimeCapabilityMustPass,
+		},
+		{
+			category:    "core-types",
+			name:        "map-range-insert-growth",
+			source:      "runtime_map_range_insert_growth.go",
+			expectation: runtimeCapabilityMustPass,
+		},
+		{
 			category:    "gc",
 			name:        "heap-struct-graph",
 			source:      "gc_struct.go",
@@ -468,6 +486,18 @@ func TestARM64RuntimeCapabilityStatus(t *testing.T) {
 			expectation: runtimeCapabilityMustPass,
 		},
 		{
+			category:    "goroutine",
+			name:        "channel-interface-close-gc",
+			source:      "runtime_channel_interface_close_gc.go",
+			expectation: runtimeCapabilityMustPass,
+		},
+		{
+			category:    "goroutine",
+			name:        "channel-struct-zero-close",
+			source:      "runtime_channel_struct_zero_close.go",
+			expectation: runtimeCapabilityMustPass,
+		},
+		{
 			category:    "stdlib-runtime",
 			name:        "context-cancel-channel",
 			source:      "context_cancel.go",
@@ -573,6 +603,18 @@ func TestARM64RuntimeCapabilityStatus(t *testing.T) {
 			category:    "defer-panic",
 			name:        "panic-deep-unwind",
 			source:      "runtime_panic_deep_unwind.go",
+			expectation: runtimeCapabilityMustPass,
+		},
+		{
+			category:    "defer-panic",
+			name:        "panic-struct-recover",
+			source:      "runtime_panic_struct_recover.go",
+			expectation: runtimeCapabilityMustPass,
+		},
+		{
+			category:    "defer-panic",
+			name:        "defer-named-result-panic",
+			source:      "runtime_defer_named_result_panic.go",
 			expectation: runtimeCapabilityMustPass,
 		},
 		{
@@ -762,9 +804,27 @@ func TestARM64RuntimeCapabilityStatus(t *testing.T) {
 			expectation: runtimeCapabilityMustPass,
 		},
 		{
+			category:    "runtime-packages",
+			name:        "sync-once-concurrent",
+			source:      "runtime_sync_once_concurrent.go",
+			expectation: runtimeCapabilityMustPass,
+		},
+		{
+			category:    "runtime-packages",
+			name:        "ticker-multi-tick",
+			source:      "runtime_ticker_multi_tick.go",
+			expectation: runtimeCapabilityMustPass,
+		},
+		{
 			category:    "stack",
 			name:        "panic-stack-gc",
 			source:      "runtime_panic_stack_gc.go",
+			expectation: runtimeCapabilityMustPass,
+		},
+		{
+			category:    "stack",
+			name:        "many-defers-stack",
+			source:      "runtime_many_defers_stack.go",
 			expectation: runtimeCapabilityMustPass,
 		},
 	}
