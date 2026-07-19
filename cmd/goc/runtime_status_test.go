@@ -240,6 +240,24 @@ func TestARM64RuntimeCapabilityStatus(t *testing.T) {
 			expectation: runtimeCapabilityMustPass,
 		},
 		{
+			category:    "core-types",
+			name:        "unsafe-struct-field",
+			source:      "runtime_unsafe_struct_field.go",
+			expectation: runtimeCapabilityMustPass,
+		},
+		{
+			category:    "core-types",
+			name:        "map-range-delete-all",
+			source:      "runtime_map_range_delete_all.go",
+			expectation: runtimeCapabilityMustPass,
+		},
+		{
+			category:    "core-types",
+			name:        "interface-pointer-equality-gc",
+			source:      "runtime_interface_pointer_equality_gc.go",
+			expectation: runtimeCapabilityMustPass,
+		},
+		{
 			category:    "gc",
 			name:        "heap-struct-graph",
 			source:      "gc_struct.go",
@@ -297,6 +315,18 @@ func TestARM64RuntimeCapabilityStatus(t *testing.T) {
 			category:    "gc",
 			name:        "global-roots-gc",
 			source:      "runtime_global_roots_gc.go",
+			expectation: runtimeCapabilityMustPass,
+		},
+		{
+			category:    "gc",
+			name:        "closure-captures-roots-gc",
+			source:      "runtime_closure_captures_roots_gc.go",
+			expectation: runtimeCapabilityMustPass,
+		},
+		{
+			category:    "gc",
+			name:        "slice-struct-values-gc",
+			source:      "runtime_slice_struct_values_gc.go",
 			expectation: runtimeCapabilityMustPass,
 		},
 		{
@@ -498,6 +528,18 @@ func TestARM64RuntimeCapabilityStatus(t *testing.T) {
 			expectation: runtimeCapabilityMustPass,
 		},
 		{
+			category:    "goroutine",
+			name:        "select-two-ready",
+			source:      "runtime_select_two_ready.go",
+			expectation: runtimeCapabilityMustPass,
+		},
+		{
+			category:    "goroutine",
+			name:        "channel-pointer-zero-close",
+			source:      "runtime_channel_pointer_zero_close.go",
+			expectation: runtimeCapabilityMustPass,
+		},
+		{
 			category:    "stdlib-runtime",
 			name:        "context-cancel-channel",
 			source:      "context_cancel.go",
@@ -615,6 +657,12 @@ func TestARM64RuntimeCapabilityStatus(t *testing.T) {
 			category:    "defer-panic",
 			name:        "defer-named-result-panic",
 			source:      "runtime_defer_named_result_panic.go",
+			expectation: runtimeCapabilityMustPass,
+		},
+		{
+			category:    "defer-panic",
+			name:        "panic-alloc-recover-gc",
+			source:      "runtime_panic_alloc_recover_gc.go",
 			expectation: runtimeCapabilityMustPass,
 		},
 		{
@@ -813,6 +861,18 @@ func TestARM64RuntimeCapabilityStatus(t *testing.T) {
 			category:    "runtime-packages",
 			name:        "ticker-multi-tick",
 			source:      "runtime_ticker_multi_tick.go",
+			expectation: runtimeCapabilityMustPass,
+		},
+		{
+			category:    "runtime-packages",
+			name:        "waitgroup-reuse",
+			source:      "runtime_waitgroup_reuse.go",
+			expectation: runtimeCapabilityMustPass,
+		},
+		{
+			category:    "runtime-packages",
+			name:        "timer-reset-after-drain",
+			source:      "runtime_timer_reset_after_drain.go",
 			expectation: runtimeCapabilityMustPass,
 		},
 		{
