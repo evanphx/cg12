@@ -601,6 +601,29 @@ func (g *gen) collectLabels(cs *cc.CompoundStatement) {
 // labelBlocks returns every label's block, sorted by name for determinism. It is
 // the conservative target set for a computed goto: any address-taken label is a
 // possible destination, and listing the rest only over-approximates the CFG.
+// gotoDispatch returns the function's single computed-goto dispatch block,
+// creating it on first use. Every `goto *p` stores p into a shared slot and jumps
+// here; here, and only here, the indirect branch fans out to the labels.
+//
+// This is what clang does, and it keeps the CFG a funnel rather than a mesh. A
+// branch per `goto *` site would make every handler a successor of every other,
+// so every handler is a merge point and each interpreter local live across the
+// dispatch needs a phi at each one -- O(handlers x variables) phis, which the SSA
+// destruction cannot resolve across the unsplittable indirect edges without
+// exploding (see lower.CoalescePhis). Funnelled, the dispatch is the one merge
+// point and each handler has a single predecessor, so promotion costs a handful of
+// phis on ordinary, splittable edges.
+func (g *gen) gotoDispatch() *ir.Block {
+	if g.gotoDisp == nil {
+		g.gotoSlot = g.fn.Entry().Alloc(8, 8)
+		g.setName(g.gotoSlot, "indirect.goto.dest")
+		d := g.block("indirectgoto")
+		d.BrIndirect(d.Load(ir.ClsP, g.gotoSlot), g.labelBlocks()...)
+		g.gotoDisp = d
+	}
+	return g.gotoDisp
+}
+
 func (g *gen) labelBlocks() []*ir.Block {
 	blocks := make([]*ir.Block, 0, len(g.labels))
 	for _, b := range g.labels {
@@ -749,7 +772,12 @@ func (g *gen) genJump(js *cc.JumpStatement) {
 		}
 		g.cur.Goto(b)
 	case cc.JumpStatementGotoExpr: // computed goto: goto *expr
-		g.cur.BrIndirect(g.genExpr(js.ExpressionList), g.labelBlocks()...)
+		// Route every computed goto through one shared dispatch block: store the
+		// target, then a plain jump there. See gotoDispatch for why a funnel and not
+		// a branch per site.
+		disp := g.gotoDispatch()
+		g.cur.Store(g.genExpr(js.ExpressionList), g.gotoSlot)
+		g.cur.Goto(disp)
 	}
 }
 

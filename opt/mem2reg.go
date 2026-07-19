@@ -37,14 +37,15 @@ func hasComputedGoto(f *ir.Func) bool {
 
 func Mem2Reg(f *ir.Func) bool {
 	// Promoting a variable that lives across a computed goto is a performance loss,
-	// not a correctness problem. lower.CoalescePhis resolves the phis it puts at the
-	// dispatch handlers without the O(handlers^2) copy explosion a naive SSA
-	// destruction would hit -- but only by coalescing each such variable into one
-	// temporary whose live range spans the whole dispatch. Linear-scan allocation
-	// then spills it across every handler, and the result runs slower than leaving
-	// it in memory (measured ~33% slower on QuickJS's JS_CallInternal, which also
-	// takes ~5x longer to compile). So an interpreter stays in memory form; the rest
-	// of the module, which has no such spanning ranges, promotes normally.
+	// not a correctness problem. The frontend funnels the dispatch to a single
+	// indirect branch (see the gotoDispatch method in package cc), so a promoted
+	// interpreter no longer explodes into O(handlers^2) copies -- but each promoted
+	// variable still becomes one live range spanning the whole dispatch, which
+	// linear scan spills across every handler. Measured on QuickJS's JS_CallInternal,
+	// promoting it runs ~5% slower than leaving it in memory. So an interpreter stays
+	// in memory form; the rest of the module, which has no such spanning ranges,
+	// promotes normally. (lower.CoalescePhis is the net that keeps a mesh reaching
+	// SSA destruction from some other source from exploding if this guard is lifted.)
 	if hasComputedGoto(f) {
 		return false
 	}
