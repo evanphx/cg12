@@ -30,6 +30,9 @@ func collectDirectABI0(file *File, layouts map[int]abi0Layout) map[int]bool {
 			text = statement
 			called = false
 			direct[functionIndex] = !text.Symbol.Static && text.Symbol.ABI == "" && len(layouts[functionIndex].outputs) <= 1
+			if text.Symbol.Name == "·reflectcall" {
+				direct[functionIndex] = false
+			}
 		case *Instruction:
 			if text == nil || !direct[functionIndex] {
 				continue
@@ -216,6 +219,19 @@ func collectABI0Layouts(file *File, options ARM64Options) map[int]abi0Layout {
 			return
 		}
 		functionName := strings.TrimPrefix(text.Symbol.Name, "·")
+		if text.Symbol.Name == "·reflectcall" {
+			for _, slot := range []abi0Slot{
+				{offset: 0, width: 8},
+				{offset: 8, width: 8},
+				{offset: 16, width: 8},
+				{offset: 24, width: 4},
+				{offset: 28, width: 4},
+				{offset: 32, width: 4},
+				{offset: 40, width: 8},
+			} {
+				inputSlots[slot.offset] = max(inputSlots[slot.offset], slot.width)
+			}
+		}
 		for _, offset := range options.FloatInputs[functionName] {
 			inputFloats[offset] = true
 		}

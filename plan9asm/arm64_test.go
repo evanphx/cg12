@@ -34,6 +34,8 @@ func runtimeAssemblyDefines() map[string]int64 {
 		"g_sched":         56,
 		"g_secret":        0,
 		"g_stack":         0,
+		"g_stackguard0":   16,
+		"g_stackguard1":   24,
 		"g_syscallsp":     112,
 		"gobuf_sp":        16,
 		"m_cgoCallers":    0,
@@ -45,6 +47,7 @@ func runtimeAssemblyDefines() map[string]int64 {
 		"m_procid":        0,
 		"m_vdsoPC":        0,
 		"m_vdsoSP":        0,
+		"stack_hi":        8,
 		"stack_lo":        0,
 	}
 }
@@ -355,6 +358,7 @@ TEXT runtime·systemstack(SB), NOSPLIT, $0-8
 	translation, err := CompileARM64(file, ARM64Options{
 		PackagePath:      "runtime",
 		Filename:         "asm_arm64.s",
+		Defines:          runtimeAssemblyDefines(),
 		PreferDirectABI0: true,
 	})
 	require.NoError(t, err)
@@ -378,6 +382,7 @@ TEXT runtime·systemstack(SB), NOSPLIT, $0-8
 	translation, err := CompileARM64(file, ARM64Options{
 		PackagePath:      "runtime",
 		Filename:         "asm_arm64.s",
+		Defines:          runtimeAssemblyDefines(),
 		PreferDirectABI0: true,
 	})
 	require.NoError(t, err)
@@ -646,6 +651,44 @@ func TestTranslateExactReflectAssembly(t *testing.T) {
 	assert.Contains(t, translation.Assembly, "\tbl reflect_moveMakeFuncArgPtrs")
 	assert.Contains(t, translation.Assembly, "\tbl reflect_callReflect_abi0")
 	assert.Contains(t, translation.Assembly, "\tbl runtime_unspillArgs_abi0")
+}
+
+func TestTranslateRuntimeReflectcallKeepsABI0StackFrame(t *testing.T) {
+	source := `
+#define DISPATCH(NAME,MAXSIZE) \
+	MOVD	$MAXSIZE, R27; \
+	CMP	R27, R16; \
+	BGT	3(PC); \
+	MOVD	$NAME(SB), R27; \
+	B	(R27)
+
+TEXT ·reflectcall(SB), NOSPLIT|NOFRAME, $0-48
+	MOVWU	frameSize+32(FP), R16
+	DISPATCH(runtime·call16, 16)
+	MOVD	$runtime·badreflectcall(SB), R0
+	B	(R0)
+
+TEXT ·call16(SB), WRAPPER, $16-48
+	MOVD	regArgs+40(FP), R20
+	CALL	·unspillArgs(SB)
+	MOVD	f+8(FP), R26
+	MOVD	(R26), R20
+	BL	(R20)
+	RET
+`
+	file, err := ParseWithOptions(strings.NewReader(source), runtimeARM64ParseOptions(t))
+	require.NoError(t, err)
+	translation, err := CompileARM64(file, ARM64Options{
+		PackagePath:      "runtime",
+		Filename:         "asm_arm64.s",
+		PreferDirectABI0: true,
+	})
+	require.NoError(t, err)
+
+	assert.Contains(t, translation.Assembly, "runtime_reflectcall:\n")
+	assert.Contains(t, translation.Assembly, "\tbl runtime_reflectcall_abi0")
+	assert.Contains(t, translation.Assembly, "runtime_reflectcall_abi0:\n")
+	assert.Contains(t, translation.Assembly, "\tadrp x27, runtime_call16_abi0")
 }
 
 func TestTranslateExactSHA256Assembly(t *testing.T) {

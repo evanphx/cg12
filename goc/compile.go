@@ -6430,6 +6430,10 @@ func (g *gen) rangeStmt(statement *ast.RangeStmt, label string) {
 		g.iteratorRangeStmt(statement, label, iteratorSignature)
 		return
 	}
+	if channelType, ok := rangeType.Underlying().(*types.Chan); ok {
+		g.channelRangeStmt(statement, label, channelType)
+		return
+	}
 
 	indexType := types.Typ[types.Int]
 	var indexSlot ir.Ref
@@ -6570,6 +6574,60 @@ func (g *gen) rangeStmt(statement *ast.RangeStmt, label string) {
 		index = g.cur.Add(ir.ClsL, index, g.fn.Long(1))
 	}
 	g.store(index, indexSlot, indexType)
+	g.cur.Goto(test)
+	g.breaks = g.breaks[:len(g.breaks)-1]
+	g.continues = g.continues[:len(g.continues)-1]
+	g.clearLabeledControl(label)
+	g.cur = done
+}
+
+func (g *gen) channelRangeStmt(statement *ast.RangeStmt, label string, channelType *types.Chan) {
+	channel := g.expr(statement.X)
+	elementType := channelType.Elem()
+
+	size := typeSize(elementType)
+	if size < 4 {
+		size = 4
+	}
+	valueAddress := g.localAlloc(4, int(size))
+	visitPointerWords(elementType, 0, func(offset int64) {
+		g.markStackPointerWord(valueAddress, int(offset))
+	})
+
+	var valueSlot ir.Ref
+	if key, ok := statement.Key.(*ast.Ident); ok && key.Name != "_" {
+		object := g.info.Defs[key]
+		if object == nil {
+			object = g.info.Uses[key]
+		}
+		valueSlot = g.variableStorage(object, elementType)
+	}
+
+	test := g.block("rangetest")
+	body := g.block("rangebody")
+	post := g.block("rangepost")
+	done := g.block("rangeend")
+	g.cur.Goto(test)
+
+	g.cur = test
+	received := g.cur.Call(ir.ClsW, g.fn.Sym("runtime.chanrecv2", 0), channel, valueAddress)
+	g.cur.Jnz(received, body, done)
+
+	g.breaks = append(g.breaks, done)
+	g.continues = append(g.continues, post)
+	g.setLabeledControl(label, done, post)
+
+	g.cur = body
+	if valueSlot != ir.R {
+		value := g.channelReceiveValue(valueAddress, elementType)
+		g.assignLocal(value, valueSlot, elementType)
+	}
+	g.stmts(statement.Body.List)
+	if g.live() {
+		g.cur.Goto(post)
+	}
+
+	g.cur = post
 	g.cur.Goto(test)
 	g.breaks = g.breaks[:len(g.breaks)-1]
 	g.continues = g.continues[:len(g.continues)-1]
@@ -8905,6 +8963,21 @@ func (g *gen) functionLiteral(literal *ast.FuncLit) ir.Ref {
 	if child.err != nil {
 		g.err = child.err
 		return ir.R
+	}
+	if !child.live() && child.runtimeAllocation && len(child.deferActions) != 0 {
+		child.cur = child.block("deferreturn")
+		child.runDefers()
+		if signature.Results().Len() == 0 {
+			child.cur.RetVoid()
+		} else if child.resultSlot != ir.R {
+			value := child.resultSlot
+			if !(isInlineAggregate(child.resultType) || isInterfaceValue(child.resultType)) || (child.runtimeAllocation && isSliceType(child.resultType)) {
+				value = child.load(child.resultSlot, child.resultType)
+			}
+			child.returnValue(value, child.resultType)
+		} else {
+			child.returnValue(child.zeroValue(child.resultType), child.resultType)
+		}
 	}
 	if child.live() {
 		child.runDefers()
