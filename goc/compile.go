@@ -8589,6 +8589,9 @@ func (g *gen) expr(e ast.Expr) (result ir.Ref) {
 			}
 			if selection.Kind() == types.MethodExpr {
 				if function, ok := g.info.Uses[n.Sel].(*types.Func); ok {
+					if methodHasInterfaceReceiver(function) {
+						g.interfaceMethods[function] = true
+					}
 					return g.functionValue(function)
 				}
 			}

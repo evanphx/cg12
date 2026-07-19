@@ -359,6 +359,39 @@ func Test() int {
 	t.Fatal("promoted interface method wrapper main.scanner.Read was not generated")
 }
 
+func TestCompileGeneratesWrapperForInterfaceMethodExpression(t *testing.T) {
+	module, err := Compile("method_expression.go", []byte(`package main
+
+type reader interface {
+	Value(int) int
+}
+
+type box struct {
+	base int
+}
+
+func (value *box) Value(delta int) int {
+	return value.base + delta
+}
+
+func Test() int {
+	var value reader = &box{base: 37}
+	method := reader.Value
+	return method(value, 5)
+}
+`))
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	for _, function := range module.Funcs {
+		if function.Name == "main.reader.Value" {
+			return
+		}
+	}
+	t.Fatal("interface method expression wrapper main.reader.Value was not generated")
+}
+
 func TestStaticInitializerIgnoresKeyedStructFieldNames(t *testing.T) {
 	fset := token.NewFileSet()
 	file, err := parser.ParseFile(fset, "initializer.go", `package initializer
