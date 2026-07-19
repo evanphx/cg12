@@ -615,14 +615,18 @@ func TestARM64RuntimeCapabilityStatus(t *testing.T) {
 			category:    "stdlib-netpoll",
 			name:        "pipe-deadline",
 			source:      "stdlib_netpoll_pipe_deadline.go",
-			expectation: runtimeCapabilityKnownGap,
-			timeout:     time.Second,
-			note:        "future poll deadlines do not wake blocked reads yet; past deadlines are covered separately",
+			expectation: runtimeCapabilityMustPass,
 		},
 		{
 			category:    "stdlib-netpoll",
 			name:        "pipe-close-unblocks-read",
 			source:      "stdlib_netpoll_pipe_close_unblocks_read.go",
+			expectation: runtimeCapabilityMustPass,
+		},
+		{
+			category:    "stdlib-netpoll",
+			name:        "pipe-afterfunc-close",
+			source:      "stdlib_netpoll_pipe_afterfunc_close.go",
 			expectation: runtimeCapabilityMustPass,
 		},
 		{
@@ -1009,6 +1013,12 @@ func TestARM64RuntimeCapabilityStatus(t *testing.T) {
 			category:    "runtime-packages",
 			name:        "waitgroup-reuse",
 			source:      "runtime_waitgroup_reuse.go",
+			expectation: runtimeCapabilityMustPass,
+		},
+		{
+			category:    "runtime-packages",
+			name:        "timer-callback-shape",
+			source:      "runtime_timer_callback_shape.go",
 			expectation: runtimeCapabilityMustPass,
 		},
 		{

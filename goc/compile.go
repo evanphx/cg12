@@ -5540,13 +5540,52 @@ func isRuntimeRegularMemory(valueType types.Type) bool {
 
 func isDirectInterfaceType(valueType types.Type) bool {
 	switch value := valueType.Underlying().(type) {
-	case *types.Pointer, *types.Map, *types.Chan, *types.Signature:
+	case *types.Pointer:
+		return !isNotInHeapPointerType(value)
+	case *types.Map, *types.Chan, *types.Signature:
 		return true
 	case *types.Basic:
 		return value.Kind() == types.UnsafePointer
 	default:
 		return false
 	}
+}
+
+func isNotInHeapPointerType(pointer *types.Pointer) bool {
+	return typeEmbedsNotInHeap(pointer.Elem(), make(map[types.Type]bool))
+}
+
+func typeEmbedsNotInHeap(valueType types.Type, seen map[types.Type]bool) bool {
+	valueType = canonicalAliasType(valueType)
+	if seen[valueType] {
+		return false
+	}
+	seen[valueType] = true
+
+	if named, ok := valueType.(*types.Named); ok {
+		object := named.Obj()
+		if object != nil && object.Name() == "NotInHeap" {
+			if pkg := object.Pkg(); pkg != nil && pkg.Path() == "internal/runtime/sys" {
+				return true
+			}
+		}
+		return typeEmbedsNotInHeap(named.Underlying(), seen)
+	}
+
+	structure, ok := valueType.Underlying().(*types.Struct)
+	if !ok {
+		return false
+	}
+	for fieldIndex := 0; fieldIndex < structure.NumFields(); fieldIndex++ {
+		field := structure.Field(fieldIndex)
+		if field.Embedded() && typeEmbedsNotInHeap(field.Type(), seen) {
+			return true
+		}
+		if field.Name() == "_" && typeEmbedsNotInHeap(field.Type(), seen) {
+			return true
+		}
+	}
+	return false
 }
 
 func pointerMask(valueType types.Type) []int64 {
