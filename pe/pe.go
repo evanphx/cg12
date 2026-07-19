@@ -109,7 +109,10 @@ type engine struct {
 	pcReg       *region
 	spReg       *region
 	stackReg    *region
+	codeReg     *region // the program-bytes region (pc may be a pointer into it)
 	varRegs     []*region
+	pcIsPtr     bool // pc is a pointer walking the code (QuickJS style), not an int index
+	spIsPtr     bool // sp is a pointer walking the stack, not an int depth
 
 	states   map[greenState]*state
 	work     []greenState
@@ -176,7 +179,11 @@ func (e *engine) run() {
 		if t.Name == "code" {
 			r = roleCode
 		}
-		e.env[uint32(t.ID)] = value{kind: vAddr, reg: e.newRegion(r, 0)}
+		reg := e.newRegion(r, 0)
+		if r == roleCode {
+			e.codeReg = reg
+		}
+		e.env[uint32(t.ID)] = value{kind: vAddr, reg: reg}
 	}
 
 	// The interpreter's setup runs once, into the entry block; it reaches the first
@@ -202,11 +209,48 @@ func (e *engine) specialize(gs greenState) {
 	st := e.states[gs]
 	e.env = copyEnv(e.baseEnv)
 	e.mem = copyMem(e.baseMem)
-	e.mem[cell(e.pcReg, 0)] = value{kind: vConst, k: gs.pc, cls: ir.ClsW}
-	e.mem[cell(e.spReg, 0)] = value{kind: vConst, k: gs.sp, cls: ir.ClsW}
+	e.setPC(gs.pc)
+	e.setSP(gs.sp)
 	e.bindRedState(gs.sp, st.phis)
 	e.cur = st.blk
 	e.emitFrom(e.dispatch, e.dispatchIdx)
+}
+
+// The green loop variables pc and sp are read and written two ways: as integers (an
+// index into the program, a stack depth) or as pointers walking the program and the
+// stack (the QuickJS style). Either way the green key holds pc's byte offset into
+// the program and sp's byte offset into the stack.
+
+func (e *engine) greenPC() int64 {
+	v := e.mem[cell(e.pcReg, 0)]
+	if v.kind == vAddr {
+		return v.off
+	}
+	return v.k
+}
+
+func (e *engine) spBytes() int64 {
+	v := e.mem[cell(e.spReg, 0)]
+	if v.kind == vAddr {
+		return v.off
+	}
+	return v.k * e.stackStride
+}
+
+func (e *engine) setPC(pc int64) {
+	if e.pcIsPtr {
+		e.mem[cell(e.pcReg, 0)] = value{kind: vAddr, reg: e.codeReg, off: pc}
+	} else {
+		e.mem[cell(e.pcReg, 0)] = value{kind: vConst, k: pc, cls: ir.ClsW}
+	}
+}
+
+func (e *engine) setSP(spBytes int64) {
+	if e.spIsPtr {
+		e.mem[cell(e.spReg, 0)] = value{kind: vAddr, reg: e.stackReg, off: spBytes}
+	} else {
+		e.mem[cell(e.spReg, 0)] = value{kind: vConst, k: spBytes / e.stackStride, cls: ir.ClsW}
+	}
 }
 
 // emit symbolically executes interpreter block b (and its successors) into the
@@ -402,9 +446,11 @@ func (e *engine) caseOf(b *ir.Block, v int64) *ir.Block {
 func (e *engine) transition() {
 	if e.baseMem == nil {
 		e.baseEnv, e.baseMem = copyEnv(e.env), copyMem(e.mem)
+		e.pcIsPtr = e.mem[cell(e.pcReg, 0)].kind == vAddr
+		e.spIsPtr = e.mem[cell(e.spReg, 0)].kind == vAddr
 	}
-	sp := e.mem[cell(e.spReg, 0)].k
-	gs := greenState{pc: e.mem[cell(e.pcReg, 0)].k, sp: sp}
+	sp := e.spBytes()
+	gs := greenState{pc: e.greenPC(), sp: sp}
 	red := e.redState(sp)
 
 	st, seen := e.states[gs]
@@ -436,15 +482,13 @@ func (e *engine) transition() {
 
 // redState is the vector of runtime values carried across a merge point: the live
 // operand-stack cells (0..sp-1) then every local-variable cell, in a fixed order.
-func (e *engine) redState(sp int64) []value {
+func (e *engine) redState(spBytes int64) []value {
 	var red []value
 	if e.stackReg != nil {
-		// Each live operand-stack element spans one stride; its cells sit on the
-		// 8-byte grain within it (a struct value's two halves, say).
-		for i := int64(0); i < sp; i++ {
-			for off := int64(0); off < e.stackStride; off += 8 {
-				red = append(red, e.load(ir.OLoadl, value{kind: vAddr, reg: e.stackReg, off: i*e.stackStride + off}))
-			}
+		// The live operand stack is the bytes below the top, on the 8-byte grain (a
+		// struct value's two halves, say).
+		for off := int64(0); off < spBytes; off += 8 {
+			red = append(red, e.load(ir.OLoadl, value{kind: vAddr, reg: e.stackReg, off: off}))
 		}
 	}
 	for _, vr := range e.sortedVars() {
@@ -457,7 +501,7 @@ func (e *engine) redState(sp int64) []value {
 
 // bindRedState installs the state block's phis as the current value of each red
 // cell, in the same order redState produced them.
-func (e *engine) bindRedState(sp int64, phis []*ir.Phi) {
+func (e *engine) bindRedState(spBytes int64, phis []*ir.Phi) {
 	i := 0
 	put := func(reg *region, off int64) {
 		if i < len(phis) {
@@ -466,10 +510,8 @@ func (e *engine) bindRedState(sp int64, phis []*ir.Phi) {
 		}
 	}
 	if e.stackReg != nil {
-		for j := int64(0); j < sp; j++ {
-			for off := int64(0); off < e.stackStride; off += 8 {
-				put(e.stackReg, j*e.stackStride+off)
-			}
+		for off := int64(0); off < spBytes; off += 8 {
+			put(e.stackReg, off)
 		}
 	}
 	for _, vr := range e.sortedVars() {
@@ -579,6 +621,13 @@ func (e *engine) execData(in *ir.Instr) {
 		e.set(in.To, e.binop(in))
 	case ir.OExtsb, ir.OExtub, ir.OExtsh, ir.OExtuh, ir.OExtsw, ir.OExtuw, ir.OCopy:
 		e.set(in.To, e.extend(in))
+	case ir.ONeg:
+		a := e.valueOf(in.Args[0])
+		if a.kind == vConst {
+			e.set(in.To, value{kind: vConst, k: -a.k, cls: in.Cls})
+		} else {
+			e.set(in.To, value{kind: vResid, ref: e.cur.Sub(in.Cls, e.out.ConstInt(in.Cls, 0), e.materialize(a)), cls: in.Cls})
+		}
 	case ir.OCmp:
 		e.set(in.To, e.compare(in))
 	case ir.OBlockAddr:
@@ -683,6 +732,17 @@ func (e *engine) binop(in *ir.Instr) value {
 		}
 		if a.kind == vConst && b.kind == vSym {
 			return value{kind: vSym, sym: b.sym, off: b.off + a.k}
+		}
+	}
+	if in.Op == ir.OSub {
+		// Pointer walks the other way: sp -= 1 (a pop), sp[-1].
+		if a.kind == vAddr && b.kind == vConst {
+			return value{kind: vAddr, reg: a.reg, off: a.off - b.k}
+		}
+		// Pointer difference within one region -- the byte distance, which the
+		// interpreter then scales to a depth (sp - stack).
+		if a.kind == vAddr && b.kind == vAddr && a.reg == b.reg {
+			return value{kind: vConst, k: a.off - b.off, cls: in.Cls}
 		}
 	}
 	res := e.emitBin(in.Op, in.Cls, e.materialize(a), e.materialize(b))
