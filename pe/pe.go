@@ -34,8 +34,17 @@ import (
 	"github.com/evanphx/cg12/ir"
 )
 
-// MergePoint is the marker the interpreter calls at its dispatch head.
-const MergePoint = "__cg12_merge_point"
+// The markers an interpreter uses to tell the specializer what is green. MergePoint
+// heads the dispatch, naming the green loop variables. CodeMarker yields the green
+// program pointer, so the bytecode need not be traced out of a runtime object.
+// GreenMarker yields a green integer the specializer supplies -- the frame-layout
+// metadata (argument, local, and stack counts) that must be static for the operand
+// stack pointer to stay green.
+const (
+	MergePoint  = "__cg12_merge_point"
+	CodeMarker  = "__cg12_code"
+	GreenMarker = "__cg12_green"
+)
 
 type vkind int
 
@@ -97,6 +106,7 @@ type engine struct {
 
 	srcMod   *ir.Module           // the module the interpreter lives in (for global data)
 	blockSym map[string]*ir.Block // block-address symbol -> block (dispatch tables)
+	meta     []int64              // green frame-layout metadata, indexed by __cg12_green id
 
 	cur     *ir.Block // residual block currently being emitted into
 	env     map[uint32]value
@@ -149,6 +159,14 @@ const maxEmitDepth = 20000
 // module holding the residual function (same name, suffixed), its name, and the
 // byte offsets of the runtime inputs it reads (in parameter order).
 func Specialize(m *ir.Module, interp string, prog []byte) (*ir.Module, string, []int64, error) {
+	return SpecializeWithMeta(m, interp, prog, nil)
+}
+
+// SpecializeWithMeta is Specialize with green frame-layout metadata: the integers a
+// __cg12_green(id) marker resolves to, indexed by id. An interpreter whose program
+// and frame counts live in a runtime object (QuickJS's JSFunctionBytecode) uses the
+// markers to declare them green, so its operand stack and dispatch stay static.
+func SpecializeWithMeta(m *ir.Module, interp string, prog []byte, meta []int64) (*ir.Module, string, []int64, error) {
 	var src *ir.Func
 	for _, f := range m.Funcs {
 		if f.Name == interp {
@@ -164,6 +182,7 @@ func Specialize(m *ir.Module, interp string, prog []byte) (*ir.Module, string, [
 		src:      src,
 		srcMod:   m,
 		prog:     prog,
+		meta:     meta,
 		out:      out.NewFunc(name, src.Retty),
 		env:      map[uint32]value{},
 		mem:      map[[2]int64]value{},
@@ -219,6 +238,10 @@ func (e *engine) run() {
 		}
 		cls := e.src.ClassOf(ref)
 		e.env[id] = value{kind: vResid, ref: e.out.Param(t.Name, cls), cls: cls}
+	}
+	if e.codeReg == nil {
+		// No "code" parameter: the program arrives through the __cg12_code() marker.
+		e.codeReg = e.newRegion(roleCode, 0)
 	}
 
 	// The interpreter's setup runs once, into the entry block; it reaches the first
@@ -315,14 +338,16 @@ func (e *engine) emitFrom(b *ir.Block, start int) {
 	}
 	if start == 0 {
 		if li, ok := e.loops[b]; ok {
-			// A merge-free loop with a runtime trip count: residualize it. On the
-			// back-edge (the header is already active) close the loop; otherwise open it.
 			if ls := e.active[b]; ls != nil {
-				e.closeLoop(ls)
-			} else {
-				e.beginLoop(b, li)
+				e.closeLoop(ls) // the back-edge of a loop we are residualizing
+				return
 			}
-			return
+			// A merge-free loop residualizes only if its trip count is a runtime value.
+			// A static one (a green-bounded init loop) unrolls through the ordinary emit.
+			if !e.headerGreen(b) {
+				e.beginLoop(b, li)
+				return
+			}
 		}
 	}
 	for k := start; k < len(b.Instrs); k++ {
@@ -403,6 +428,60 @@ func (e *engine) control(b *ir.Block) {
 	default:
 		e.fail("unsupported terminator %v", b.Jmp.Kind)
 	}
+}
+
+// headerGreen reports whether a loop header's branch condition is static right now,
+// tracing the condition back through the header's own instructions without emitting
+// anything. A green-bounded loop (var_count from __cg12_green, say) is unrolled; a
+// loop whose condition reads a runtime value is residualized. Anything the trace
+// cannot resolve is treated as runtime -- the safe default is to residualize.
+func (e *engine) headerGreen(h *ir.Block) bool {
+	if h.Jmp.Kind != ir.JmpJnz {
+		return false
+	}
+	val := map[uint32]value{}
+	green := func(v value) bool {
+		return v.kind == vConst || v.kind == vAddr || v.kind == vBlockAddr || v.kind == vSym
+	}
+	lookup := func(r ir.Ref) value {
+		if r.Kind == ir.RefConst {
+			return e.valueOf(r)
+		}
+		if v, ok := val[r.ID]; ok {
+			return v
+		}
+		if v, ok := e.env[r.ID]; ok {
+			return v
+		}
+		return value{kind: vResid} // an unknown temp: treat as runtime
+	}
+	for k := range h.Instrs {
+		in := &h.Instrs[k]
+		switch {
+		case in.Op.IsAlloc() || in.Op.IsStore():
+			// A condition header does not allocate or store; ignore if one appears.
+		case in.Op.IsLoad():
+			a := lookup(in.Args[0])
+			if a.kind == vAddr {
+				val[in.To.ID] = e.mem[cell(a.reg, a.off)] // an unset cell is the zero value: green
+			} else {
+				val[in.To.ID] = value{kind: vResid}
+			}
+		default:
+			allGreen := true
+			for _, arg := range in.Args {
+				if !green(lookup(arg)) {
+					allGreen = false
+				}
+			}
+			if allGreen {
+				val[in.To.ID] = value{kind: vConst}
+			} else {
+				val[in.To.ID] = value{kind: vResid}
+			}
+		}
+	}
+	return green(lookup(h.Jmp.Arg))
 }
 
 // beginLoop residualizes a merge-free loop as a real loop. The loop-carried scalar
@@ -795,7 +874,26 @@ func (e *engine) execData(in *ir.Instr) {
 		e.set(in.To, value{kind: vBlockAddr, blk: in.Blk})
 	case ir.OCall:
 		name := e.calleeName(in)
-		if name == MergePoint {
+		switch name {
+		case MergePoint:
+			return
+		case CodeMarker:
+			// The green program pointer -- pc walks this instead of bytecode reached
+			// through a runtime object.
+			e.set(in.To, value{kind: vAddr, reg: e.codeReg, off: 0})
+			return
+		case GreenMarker:
+			// A green metadata integer the specializer supplies, selected by a static id.
+			id := e.valueOf(in.Args[1])
+			if id.kind != vConst {
+				e.fail("__cg12_green: id is not static")
+				return
+			}
+			if id.k < 0 || int(id.k) >= len(e.meta) {
+				e.fail("__cg12_green(%d): no metadata supplied", id.k)
+				return
+			}
+			e.set(in.To, value{kind: vConst, k: e.meta[id.k], cls: in.Cls})
 			return
 		}
 		e.residualCall(in, name)
@@ -934,6 +1032,13 @@ func (e *engine) compare(in *ir.Instr) value {
 	a, b := e.valueOf(in.Args[0]), e.valueOf(in.Args[1])
 	if a.kind == vConst && b.kind == vConst {
 		return value{kind: vConst, k: foldCmp(in.Cmp, a.k, b.k), cls: ir.ClsW}
+	}
+	// Two green addresses in the same region compare by their offsets -- a stack
+	// pointer against the stack base, say (`pval < sp` walking the frame). Without
+	// this the comparison would residualize and force the green addresses into the
+	// runtime, escaping the region.
+	if a.kind == vAddr && b.kind == vAddr && a.reg == b.reg {
+		return value{kind: vConst, k: foldCmp(in.Cmp, a.off, b.off), cls: ir.ClsW}
 	}
 	res := e.cur.Cmp(in.Cmp, in.Cls, e.materialize(a), e.materialize(b))
 	return value{kind: vResid, ref: res, cls: in.Cls}
