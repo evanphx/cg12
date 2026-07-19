@@ -168,3 +168,26 @@ func TestMem2RegNoAllocs(t *testing.T) {
 	e.Ret(e.Add(ir.ClsW, a, b))
 	assert.False(t, Mem2Reg(f))
 }
+
+func TestMem2RegSkipsComputedGoto(t *testing.T) {
+	// A variable live across a merge that a computed goto reaches would, if
+	// promoted, put a phi at that merge -- and SSA destruction cannot resolve one
+	// without a copy in every predecessor of an indirect branch, which on an
+	// interpreter's near-complete CFG explodes quadratically. mem2reg leaves the
+	// whole function in memory form instead, so no such phi is ever created.
+	f := ir.NewModule().NewFunc("interp", ir.ClsW)
+	e := f.Entry()
+	p := e.Alloc(4, 4)
+	e.Store(f.Word(1), p)
+	a := f.NewBlock("a")
+	b := f.NewBlock("b")
+	e.BrIndirect(e.BlockAddr(a), a, b) // computed goto to a or b
+	a.Store(f.Word(2), p)
+	a.Ret(a.Load(ir.ClsW, p))
+	b.Ret(b.Load(ir.ClsW, p))
+
+	assert.False(t, Mem2Reg(f), "a computed-goto function is left in memory form")
+	for _, blk := range f.Blocks {
+		assert.Empty(t, blk.Phis, "no phi is created for a computed-goto function")
+	}
+}

@@ -24,7 +24,31 @@ func varBase(name string) string {
 // full-width loads and stores into SSA temporaries, inserting phi nodes at the
 // iterated dominance frontier and renaming loads/stores away. This is the
 // classic Cytron et al. SSA construction, run over the alloc-backed variables.
+// hasComputedGoto reports whether f contains an indirect (computed) branch.
+func hasComputedGoto(f *ir.Func) bool {
+	for _, b := range f.Blocks {
+		if b.Jmp.Kind == ir.JmpBr {
+			return true
+		}
+	}
+	return false
+}
+
 func Mem2Reg(f *ir.Func) bool {
+	// A computed goto builds an interpreter's near-complete CFG: each dispatch
+	// block branches to every handler, so each handler is a merge point with as
+	// many predecessors. Promoting a variable that is live across the dispatch puts
+	// a phi at each handler, and SSA destruction -- which cannot split a
+	// computed-goto critical edge, since all the sources jump to one runtime
+	// address -- then has to place a copy for that phi in every predecessor:
+	// O(handlers^2 x variables) copies. On QuickJS's JS_CallInternal that is ~7
+	// million instructions, past any branch's reach. Until SSA destruction
+	// coalesces phis across an indirect branch, leave such a function in memory
+	// form (it still gets the non-promoting cleanups); the rest of the module
+	// promotes normally.
+	if hasComputedGoto(f) {
+		return false
+	}
 	vars, varOf := findPromotable(f)
 	if len(vars) == 0 {
 		return false
