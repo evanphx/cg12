@@ -71,3 +71,28 @@ int f(int a){ int r; __asm__("mov %w0, %w1" : "=r"(r) : "r"(a) : "memory","cc");
 	_, err = arm64.CompileObject(m)
 	require.NoError(t, err)
 }
+
+func TestInlineAsmMaterializationAvoidsClobberedScratchRegisters(t *testing.T) {
+	m, err := cc.Compile("c.c", `
+long f(void) {
+	long result;
+	__asm__("mov %x0, %x1" : "=r"(result) : "r"(123456789L) : "x15", "x16", "x17", "x27");
+	return result;
+}`)
+	require.NoError(t, err)
+	_, err = arm64.CompileObject(m)
+	require.NoError(t, err)
+}
+
+func TestInlineAsmReportsWhenEveryScratchRegisterIsClobbered(t *testing.T) {
+	m, err := cc.Compile("c.c", `
+long f(void) {
+	long result;
+	__asm__("mov %x0, %x1" : "=r"(result) : "r"(123456789L) : "x14", "x15", "x16", "x17", "x27");
+	return result;
+}`)
+	require.NoError(t, err)
+	_, err = arm64.CompileObject(m)
+	require.Error(t, err)
+	require.Contains(t, err.Error(), "non-clobbered integer scratch")
+}

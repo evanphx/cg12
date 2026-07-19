@@ -532,7 +532,25 @@ func (b *Block) HeapAlloc(allocator, typeDescriptor Ref, size, align int) Ref {
 // Call invokes callee with args and returns the result (class retCls). For a
 // void call use CallVoid.
 func (b *Block) Call(retCls Cls, callee Ref, args ...Ref) Ref {
-	in := Instr{Op: OCall, Cls: retCls, Args: append([]Ref{callee}, args...), Pos: b.curPos}
+	return b.call(retCls, callee, false, CallConvAAPCS64, args...)
+}
+
+// CallWithConvention invokes callee using an explicit physical calling
+// convention. It is intended for foreign calls and the small set of raw runtime
+// entry points whose register contract differs from the containing function.
+func (b *Block) CallWithConvention(retCls Cls, convention CallConvention, callee Ref, args ...Ref) Ref {
+	return b.call(retCls, callee, true, convention, args...)
+}
+
+func (b *Block) call(retCls Cls, callee Ref, conventionSet bool, convention CallConvention, args ...Ref) Ref {
+	in := Instr{
+		Op:          OCall,
+		Cls:         retCls,
+		Args:        append([]Ref{callee}, args...),
+		Pos:         b.curPos,
+		CallConv:    convention,
+		CallConvSet: conventionSet,
+	}
 	res := b.fn.newTemp("", retCls)
 	in.To = res
 	b.Instrs = append(b.Instrs, in)
@@ -580,16 +598,28 @@ func (b *Block) Asm(template string, specs []AsmSpec) []Ref {
 // CallAggregate invokes a function returning an aggregate already represented
 // as scalar SSA parts. The result refs are defined together by the call.
 func (b *Block) CallAggregate(aggregate *AggType, classes []Cls, callee Ref, args ...Ref) []Ref {
+	return b.callAggregate(aggregate, classes, callee, false, CallConvAAPCS64, args...)
+}
+
+// CallAggregateWithConvention is CallAggregate with an explicit physical call
+// convention.
+func (b *Block) CallAggregateWithConvention(aggregate *AggType, classes []Cls, convention CallConvention, callee Ref, args ...Ref) []Ref {
+	return b.callAggregate(aggregate, classes, callee, true, convention, args...)
+}
+
+func (b *Block) callAggregate(aggregate *AggType, classes []Cls, callee Ref, conventionSet bool, convention CallConvention, args ...Ref) []Ref {
 	if len(classes) == 0 {
 		panic("ir: aggregate call has no result parts")
 	}
 	instruction := Instr{
-		Op:        OCall,
-		Cls:       classes[0],
-		Args:      append([]Ref{callee}, args...),
-		RetAgg:    aggregate,
-		RetValues: true,
-		Pos:       b.curPos,
+		Op:          OCall,
+		Cls:         classes[0],
+		Args:        append([]Ref{callee}, args...),
+		RetAgg:      aggregate,
+		RetValues:   true,
+		Pos:         b.curPos,
+		CallConv:    convention,
+		CallConvSet: conventionSet,
 	}
 	results := make([]Ref, len(classes))
 	for index, class := range classes {
@@ -638,7 +668,25 @@ func (b *Block) VaArg(cls Cls, ap Ref) Ref { return b.emit(OVaArg, cls, ap) }
 
 // CallVoid invokes callee for effect only.
 func (b *Block) CallVoid(callee Ref, args ...Ref) {
-	in := Instr{Op: OCall, Cls: ClsW, Args: append([]Ref{callee}, args...), Pos: b.curPos}
+	b.callVoid(callee, false, CallConvAAPCS64, args...)
+
+}
+
+// CallVoidWithConvention is CallVoid with an explicit physical call
+// convention.
+func (b *Block) CallVoidWithConvention(convention CallConvention, callee Ref, args ...Ref) {
+	b.callVoid(callee, true, convention, args...)
+}
+
+func (b *Block) callVoid(callee Ref, conventionSet bool, convention CallConvention, args ...Ref) {
+	in := Instr{
+		Op:          OCall,
+		Cls:         ClsW,
+		Args:        append([]Ref{callee}, args...),
+		Pos:         b.curPos,
+		CallConv:    convention,
+		CallConvSet: conventionSet,
+	}
 	b.Instrs = append(b.Instrs, in)
 }
 

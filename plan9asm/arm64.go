@@ -3,6 +3,7 @@ package plan9asm
 import (
 	"fmt"
 	"math"
+	"path/filepath"
 	"strconv"
 	"strings"
 )
@@ -25,6 +26,7 @@ type arm64Translator struct {
 	currentFrame      int
 	currentPlan9Frame int
 	currentLeaf       bool
+	currentSymbol     string
 	functions         []ARM64Function
 	data              map[string][]arm64DataValue
 	lseEnabled        bool
@@ -967,6 +969,15 @@ func (t *arm64Translator) translateALU(instruction *Instruction) error {
 	if len(instruction.Operands) != 2 && len(instruction.Operands) != 3 {
 		return fmt.Errorf("%s requires two or three operands", instruction.Opcode)
 	}
+	if t.isRuntimeSystemstackFrameRestore(instruction) {
+		// systemstack's noswitch path normally reconstructs the caller frame
+		// pointer as callerSP-8. cg12's managed AAPCS frame keeps its frame
+		// record above the outgoing argument area, so restore the value saved by
+		// this assembly function's translated prologue instead. The preceding
+		// post-indexed load has already advanced SP by 16 bytes.
+		t.output.WriteString("\tldur x29, [sp, #-24]\n")
+		return nil
+	}
 	width := instructionWidth(instruction.Opcode)
 	mnemonic := aluMnemonic(instruction.Opcode)
 	source := instruction.Operands[0]
@@ -1015,6 +1026,29 @@ func (t *arm64Translator) translateALU(instruction *Instruction) error {
 	}
 	fmt.Fprintf(&t.output, "\t%s %s, %s, %s\n", mnemonic, destinationRegister, leftRegister, right)
 	return nil
+}
+
+func (t *arm64Translator) isRuntimeSystemstackFrameRestore(instruction *Instruction) bool {
+	if t.options.PackagePath != "runtime" || filepath.Base(t.options.Filename) != "asm_arm64.s" {
+		return false
+	}
+	if t.currentSymbol != "runtime_systemstack" || instruction.Opcode != "SUB" {
+		return false
+	}
+	if len(instruction.Operands) != 3 {
+		return false
+	}
+	source := instruction.Operands[0]
+	left := instruction.Operands[1]
+	destination := instruction.Operands[2]
+	if source.Kind != OperandImmediate || left.Kind != OperandRegister || destination.Kind != OperandRegister {
+		return false
+	}
+	value, err := t.resolveIntegerExpression(source.Immediate)
+	if err != nil || value != 8 {
+		return false
+	}
+	return left.Register == "RSP" && destination.Register == "R29"
 }
 
 func arm64AddSubImmediate(value int64) bool {

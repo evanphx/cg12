@@ -51,8 +51,9 @@ func AssembleProgram(src string) (*Program, error) {
 }
 
 // directive handles the assembler directives the object path needs; `.globl`
-// (or `.global`) marks a symbol exported. Unknown directives are ignored so
-// common section/type noise in hand-written asm does not fail the parse.
+// (or `.global`) marks a symbol exported and `.inst` emits an exact instruction
+// word. Unknown directives are ignored so common section/type noise in
+// hand-written asm does not fail the parse.
 func directive(p *Program, line string) error {
 	name, rest := splitMnemonic(line)
 	switch name {
@@ -61,6 +62,12 @@ func directive(p *Program, line string) error {
 			return fmt.Errorf("%s needs a symbol name", name)
 		}
 		p.Globl(strings.TrimSpace(rest))
+	case ".inst":
+		value, err := strconv.ParseUint(strings.TrimSpace(rest), 0, 32)
+		if err != nil {
+			return fmt.Errorf(".inst requires one 32-bit integer: %w", err)
+		}
+		p.Emit(uint32(value))
 	}
 	return nil
 }
@@ -137,8 +144,8 @@ func asmLine(p *Program, line string) error {
 		return a.arith2(NegReg)
 	case "mvn":
 		return a.arith2(MvnReg)
-	case "cmp":
-		return a.cmp()
+	case "cmp", "cmn":
+		return a.compare(mn == "cmn")
 	case "ldr", "ldrb", "ldrh", "ldrsw", "str", "strb", "strh":
 		return a.loadStore(mn)
 	case "b":
@@ -155,6 +162,8 @@ func asmLine(p *Program, line string) error {
 		return a.reg1(Blr)
 	case "clz":
 		return a.arith2(Clz)
+	case "ubfx", "sbfx":
+		return a.bitfieldExtract(mn == "sbfx")
 	case "sxtb", "sxth", "sxtw", "uxtb", "uxth":
 		return a.extend(mn)
 	case "madd":
@@ -218,10 +227,16 @@ func asmLine(p *Program, line string) error {
 		}
 		p.Emit(Isb())
 		return nil
-	case "ldxr", "ldaxr":
-		return a.loadExclusive(mn == "ldaxr")
-	case "stxr", "stlxr":
-		return a.storeExclusive(mn == "stlxr")
+	case "ldar", "ldarb":
+		return a.orderedLoad(mn == "ldarb")
+	case "stlr", "stlrb":
+		return a.orderedStore(mn == "stlrb")
+	case "ldxr", "ldaxr", "ldxrb", "ldaxrb":
+		return a.loadExclusive(strings.HasPrefix(mn, "ldax"), strings.HasSuffix(mn, "b"))
+	case "stxr", "stlxr", "stxrb", "stlxrb":
+		return a.storeExclusive(strings.HasPrefix(mn, "stlx"), strings.HasSuffix(mn, "b"))
+	case "casal", "swpal", "swpalb", "ldaddal", "ldclral", "ldclralb", "ldsetal", "ldsetalb":
+		return a.lseAtomic(mn)
 	case "adrp", "adr":
 		return a.adr(mn == "adrp")
 	}
@@ -308,11 +323,8 @@ func (a *asmCtx) mov() error {
 		return err
 	}
 	if v, ok := a.imm(1); ok {
-		if v >= 0 && v <= 0xffff {
-			a.p.Emit(Movz(w, rd, uint16(v), 0))
-			return nil
-		}
-		return fmt.Errorf("mov: immediate %d needs a movz/movk sequence", v)
+		a.emitMoveImmediate(rd, w, v)
+		return nil
 	}
 	rm, _, _, err := a.reg(1)
 	if err != nil {
@@ -335,6 +347,60 @@ func (a *asmCtx) mov() error {
 // register number 31 with the zero register, so only the name tells them apart).
 func isSPName(op string) bool {
 	return op == "sp" || op == "wsp"
+}
+
+func (a *asmCtx) emitMoveImmediate(register Reg, w64 bool, value int64) {
+	bits := uint64(value)
+	chunks := 4
+	if !w64 {
+		bits &= 0xffffffff
+		chunks = 2
+	}
+	ones := 0
+	zeros := 0
+	for index := 0; index < chunks; index++ {
+		switch (bits >> (16 * index)) & 0xffff {
+		case 0xffff:
+			ones++
+		case 0:
+			zeros++
+		}
+	}
+	if ones > zeros {
+		first := true
+		for index := 0; index < chunks; index++ {
+			chunk := uint16((bits >> (16 * index)) & 0xffff)
+			if chunk == 0xffff {
+				continue
+			}
+			if first {
+				a.p.Emit(Movn(w64, register, ^chunk, uint32(16*index)))
+				first = false
+			} else {
+				a.p.Emit(Movk(w64, register, chunk, uint32(16*index)))
+			}
+		}
+		if first {
+			a.p.Emit(Movn(w64, register, 0, 0))
+		}
+		return
+	}
+	first := true
+	for index := 0; index < chunks; index++ {
+		chunk := uint16((bits >> (16 * index)) & 0xffff)
+		if chunk == 0 {
+			continue
+		}
+		if first {
+			a.p.Emit(Movz(w64, register, chunk, uint32(16*index)))
+			first = false
+		} else {
+			a.p.Emit(Movk(w64, register, chunk, uint32(16*index)))
+		}
+	}
+	if first {
+		a.p.Emit(Movz(w64, register, 0, 0))
+	}
 }
 
 func (a *asmCtx) addSub(sub bool) error {
@@ -443,7 +509,7 @@ func (a *asmCtx) shift(mn string) error {
 	return nil
 }
 
-func (a *asmCtx) cmp() error {
+func (a *asmCtx) compare(add bool) error {
 	rn, w, _, err := a.reg(0)
 	if err != nil {
 		return err
@@ -452,14 +518,22 @@ func (a *asmCtx) cmp() error {
 		if v < 0 || v > 0xfff {
 			return fmt.Errorf("cmp: immediate %d out of range", v)
 		}
-		a.p.Emit(CmpImm(w, rn, uint32(v)))
+		if add {
+			a.p.Emit(CmnImm(w, rn, uint32(v)))
+		} else {
+			a.p.Emit(CmpImm(w, rn, uint32(v)))
+		}
 		return nil
 	}
 	rm, _, _, err := a.reg(1)
 	if err != nil {
 		return err
 	}
-	a.p.Emit(CmpReg(w, rn, rm))
+	if add {
+		a.p.Emit(CmnReg(w, rn, rm))
+	} else {
+		a.p.Emit(CmpReg(w, rn, rm))
+	}
 	return nil
 }
 
@@ -1085,6 +1159,41 @@ func (a *asmCtx) cset() error {
 	return nil
 }
 
+func (a *asmCtx) bitfieldExtract(signed bool) error {
+	rd, w64, _, err := a.reg(0)
+	if err != nil {
+		return err
+	}
+	rn, sourceW64, _, err := a.reg(1)
+	if err != nil {
+		return err
+	}
+	if w64 != sourceW64 {
+		return fmt.Errorf("%s: source and destination have different widths", a.mn)
+	}
+	lsb, ok := a.imm(2)
+	if !ok {
+		return fmt.Errorf("%s: bit offset must be immediate", a.mn)
+	}
+	width, ok := a.imm(3)
+	if !ok || len(a.ops) != 4 {
+		return fmt.Errorf("%s takes two registers, a bit offset, and a width", a.mn)
+	}
+	registerWidth := int64(32)
+	if w64 {
+		registerWidth = 64
+	}
+	if lsb < 0 || width <= 0 || lsb+width > registerWidth {
+		return fmt.Errorf("%s: bit range %d/%d is outside %d bits", a.mn, lsb, width, registerWidth)
+	}
+	if signed {
+		a.p.Emit(Sbfx(w64, rd, rn, uint32(lsb), uint32(width)))
+	} else {
+		a.p.Emit(Ubfx(w64, rd, rn, uint32(lsb), uint32(width)))
+	}
+	return nil
+}
+
 // mrs reads a system register. Only the thread pointer is encoded: it is the one
 // the compiler itself emits, and a wrong system register number is not something
 // to guess at.
@@ -1115,6 +1224,15 @@ func (a *asmCtx) msr() error {
 	s, ok := SysRegs[strings.ToLower(a.ops[0])]
 	if !ok {
 		return fmt.Errorf("msr: %q is not a system register this assembler names", a.ops[0])
+	}
+	if strings.ToLower(a.ops[0]) == "dit" {
+		if value, immediate := a.imm(1); immediate {
+			if value < 0 || value > 1 {
+				return fmt.Errorf("msr dit: immediate must be zero or one")
+			}
+			a.p.Emit(MsrDIT(uint8(value)))
+			return nil
+		}
 	}
 	rt, w64, _, err := a.reg(1)
 	if err != nil {
@@ -1194,6 +1312,8 @@ func barrierByName(s string) (BarrierOption, bool) {
 		return BarrierISH, true
 	case "ishst":
 		return BarrierISHST, true
+	case "nsh":
+		return BarrierNSH, true
 	case "ld":
 		return BarrierLD, true
 	case "st":
@@ -1202,8 +1322,47 @@ func barrierByName(s string) (BarrierOption, bool) {
 	return 0, false
 }
 
+func (a *asmCtx) atomicSize(w64, byteAccess bool) AtomicSize {
+	if byteAccess {
+		return AtomicByte
+	}
+	return exSize(w64)
+}
+
+func (a *asmCtx) orderedLoad(byteAccess bool) error {
+	rt, w64, _, err := a.reg(0)
+	if err != nil {
+		return err
+	}
+	rn, off, err := a.mem(1)
+	if err != nil {
+		return err
+	}
+	if off != 0 {
+		return fmt.Errorf("%s: an ordered access takes no offset", a.mn)
+	}
+	a.p.Emit(LdarSize(a.atomicSize(w64, byteAccess), rt, rn))
+	return nil
+}
+
+func (a *asmCtx) orderedStore(byteAccess bool) error {
+	rt, w64, _, err := a.reg(0)
+	if err != nil {
+		return err
+	}
+	rn, off, err := a.mem(1)
+	if err != nil {
+		return err
+	}
+	if off != 0 {
+		return fmt.Errorf("%s: an ordered access takes no offset", a.mn)
+	}
+	a.p.Emit(StlrSize(a.atomicSize(w64, byteAccess), rt, rn))
+	return nil
+}
+
 // loadExclusive assembles LDXR/LDAXR <Wt|Xt>, [<Xn>].
-func (a *asmCtx) loadExclusive(acquire bool) error {
+func (a *asmCtx) loadExclusive(acquire, byteAccess bool) error {
 	rt, w64, _, err := a.reg(0)
 	if err != nil {
 		return err
@@ -1215,21 +1374,18 @@ func (a *asmCtx) loadExclusive(acquire bool) error {
 	if off != 0 {
 		return fmt.Errorf("%s: an exclusive access takes no offset", a.mn)
 	}
-	bytes := 4
-	if w64 {
-		bytes = 8
-	}
+	size := a.atomicSize(w64, byteAccess)
 	if acquire {
-		a.p.Emit(Ldaxr(bytes, rt, rn))
+		a.p.Emit(LdaxrSize(size, rt, rn))
 	} else {
-		a.p.Emit(Ldxr(bytes, rt, rn))
+		a.p.Emit(LdxrSize(size, rt, rn))
 	}
 	return nil
 }
 
 // storeExclusive assembles STXR/STLXR <Ws>, <Wt|Xt>, [<Xn>]. The status register
 // Ws is always a 32-bit register; the width of the stored value comes from Wt/Xt.
-func (a *asmCtx) storeExclusive(release bool) error {
+func (a *asmCtx) storeExclusive(release, byteAccess bool) error {
 	rs, sw, _, err := a.reg(0)
 	if err != nil {
 		return err
@@ -1248,14 +1404,48 @@ func (a *asmCtx) storeExclusive(release bool) error {
 	if off != 0 {
 		return fmt.Errorf("%s: an exclusive access takes no offset", a.mn)
 	}
-	bytes := 4
-	if w64 {
-		bytes = 8
-	}
+	size := a.atomicSize(w64, byteAccess)
 	if release {
-		a.p.Emit(Stlxr(bytes, rs, rt, rn))
+		a.p.Emit(StlxrSize(size, rs, rt, rn))
 	} else {
-		a.p.Emit(Stxr(bytes, rs, rt, rn))
+		a.p.Emit(StxrSize(size, rs, rt, rn))
+	}
+	return nil
+}
+
+func (a *asmCtx) lseAtomic(mnemonic string) error {
+	first, first64, _, err := a.reg(0)
+	if err != nil {
+		return err
+	}
+	second, second64, _, err := a.reg(1)
+	if err != nil {
+		return err
+	}
+	if first64 != second64 {
+		return fmt.Errorf("%s: %q and %q are different widths", mnemonic, a.ops[0], a.ops[1])
+	}
+	address, offset, err := a.mem(2)
+	if err != nil {
+		return err
+	}
+	if offset != 0 {
+		return fmt.Errorf("%s: an atomic access takes no offset", mnemonic)
+	}
+	size := a.atomicSize(first64, strings.HasSuffix(mnemonic, "b"))
+	switch strings.TrimSuffix(mnemonic, "b") {
+	case "casal":
+		a.p.Emit(Casal(size, first, second, address))
+	case "swpal":
+		a.p.Emit(Swpal(size, first, second, address))
+	case "ldaddal":
+		a.p.Emit(Ldaddal(size, first, second, address))
+	case "ldclral":
+		a.p.Emit(Ldclral(size, first, second, address))
+	case "ldsetal":
+		a.p.Emit(Ldsetal(size, first, second, address))
+	default:
+		return fmt.Errorf("unsupported LSE atomic %q", mnemonic)
 	}
 	return nil
 }

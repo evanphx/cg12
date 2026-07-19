@@ -63,8 +63,9 @@ type asmVal struct {
 // a callee-saved register and the template may freely use the caller-saved set.
 
 // expandAsm substitutes the operand placeholders in a template. A %N names
-// operand N at its natural width; %wN and %xN force the 32- and 64-bit register
-// names; %% is a literal percent. An immediate operand ignores any width form.
+// operand N at its natural width; %wN and %xN force the 32- and 64-bit general
+// register names, %sN/%dN/%qN select scalar or full-width SIMD names, and %% is
+// a literal percent. An immediate operand ignores any width form.
 func expandAsm(tmpl string, vals []asmVal) (string, error) {
 	var sb strings.Builder
 	for i := 0; i < len(tmpl); {
@@ -83,12 +84,12 @@ func expandAsm(tmpl string, vals []asmVal) (string, error) {
 			continue
 		}
 		// A width modifier names the operand's register through a particular
-		// window: %w0/%x0 the 32- and 64-bit general ones, %s0/%d0 the single and
-		// double floating ones. Without it the operand is named at the width its C
-		// type gives it.
+		// window: %w0/%x0 the 32- and 64-bit general ones, %s0/%d0/%q0 the
+		// single, double, and 128-bit SIMD ones. Without it the operand is named at
+		// the width its source type gives it.
 		var mod byte
 		switch tmpl[i] {
-		case 'w', 'x', 's', 'd':
+		case 'w', 'x', 's', 'd', 'q':
 			mod = tmpl[i]
 			i++
 		}
@@ -114,7 +115,7 @@ func expandAsm(tmpl string, vals []asmVal) (string, error) {
 			sb.WriteString(v.reg.wName())
 		case mod == 'x':
 			sb.WriteString(v.reg.xName())
-		case mod == 's' || mod == 'd':
+		case mod == 's' || mod == 'd' || mod == 'q':
 			if !v.reg.IsFloat() {
 				return "", fmt.Errorf("inline asm: %%%c%d names a floating-point register, but operand %%%d is in %s",
 					mod, num, num, v.reg.xName())
@@ -187,6 +188,9 @@ func regByName(name string) (Reg, bool) {
 
 // fpWidth is the byte width a floating-point operand modifier names.
 func fpWidth(mod byte) int {
+	if mod == 'q' {
+		return 16
+	}
 	if mod == 'd' {
 		return 8
 	}

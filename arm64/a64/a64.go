@@ -116,6 +116,11 @@ func SubsReg(w64 bool, rd, rn, rm Reg) uint32 { return addSubReg(w64, 1, 1, rd, 
 // CmpReg encodes CMP rn, rm.
 func CmpReg(w64 bool, rn, rm Reg) uint32 { return SubsReg(w64, ZR, rn, rm) }
 
+// AddsReg sets flags from addition; CmnReg is ADDS ZR, rn, rm.
+func AddsReg(w64 bool, rd, rn, rm Reg) uint32 { return addSubReg(w64, 0, 1, rd, rn, rm) }
+
+func CmnReg(w64 bool, rn, rm Reg) uint32 { return AddsReg(w64, ZR, rn, rm) }
+
 func addSubImm(w64 bool, op, s uint32, rd, rn Reg, imm12 uint32) uint32 {
 	return sf(w64)<<31 | op<<30 | s<<29 | 0x11<<24 | field(imm12, 12, "add/sub")<<10 | r(rn)<<5 | r(rd)
 }
@@ -484,6 +489,16 @@ func Ubfm(w64 bool, rd, rn Reg, immr, imms uint32) uint32 {
 	return bitfield(w64, 2, rd, rn, immr, imms)
 }
 
+// Sbfx and Ubfx extract width bits starting at lsb and sign- or zero-extend the
+// result to the destination register width.
+func Sbfx(w64 bool, rd, rn Reg, lsb, width uint32) uint32 {
+	return Sbfm(w64, rd, rn, lsb, lsb+width-1)
+}
+
+func Ubfx(w64 bool, rd, rn Reg, lsb, width uint32) uint32 {
+	return Ubfm(w64, rd, rn, lsb, lsb+width-1)
+}
+
 // Sign/zero extends. Sxtb/Sxth take a destination width; Sxtw is always X, and
 // Uxtb/Uxth are always W (the zero-extend fills the 64-bit register anyway).
 func Sxtb(w64 bool, rd, rn Reg) uint32 { return Sbfm(w64, rd, rn, 0, 7) }
@@ -502,6 +517,13 @@ func SubsImm(w64 bool, rd, rn Reg, imm12 uint32) uint32 { return addSubImm(w64, 
 
 // CmpImm encodes CMP rn, #imm12 (SUBS ZR, rn, #imm12).
 func CmpImm(w64 bool, rn Reg, imm12 uint32) uint32 { return SubsImm(w64, ZR, rn, imm12) }
+
+// AddsImm sets flags from immediate addition; CmnImm is ADDS ZR, rn, #imm.
+func AddsImm(w64 bool, rd, rn Reg, imm12 uint32) uint32 {
+	return addSubImm(w64, 0, 1, rd, rn, imm12)
+}
+
+func CmnImm(w64 bool, rn Reg, imm12 uint32) uint32 { return AddsImm(w64, ZR, rn, imm12) }
 
 // LslImm encodes LSL rd, rn, #sh (an alias of UBFM). sh is 0..width-1.
 func LslImm(w64 bool, rd, rn Reg, sh uint32) uint32 {

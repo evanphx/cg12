@@ -102,11 +102,9 @@ func TestCompileAggregateArgMemoryOnStack(t *testing.T) {
 	assert.Contains(t, asm, "sub sp", "outgoing stack area reserved")
 }
 
-func TestCompileAggregateArgStacked(t *testing.T) {
-	// A GP aggregate that doesn't fit in the remaining integer registers is passed
-	// on the stack: with x0..x7 taken by the eight word arguments, the pair spills
-	// to the outgoing stack area. The caller reserves that area and stores the
-	// aggregate's words into it.
+func TestCompileAggregateArgOnStack(t *testing.T) {
+	// A GP aggregate that doesn't fit in the remaining integer registers is
+	// copied into the AAPCS outgoing stack area.
 	m := ir.NewModule()
 	pair := &ir.AggType{Name: "pair", Fields: []ir.Field{{Sub: ir.SubW}, {Sub: ir.SubW}}}
 	m.AddType(pair)
@@ -120,9 +118,9 @@ func TestCompileAggregateArgStacked(t *testing.T) {
 	call.AggArgs[8] = pair // all x0..x7 used -> the aggregate is stacked
 	e.RetVoid()
 
-	asm := disasmModule(t, m) // compiles cleanly and reads back the machine code
-	assert.Contains(t, asm, "sub sp", "the outgoing stack-argument area is reserved")
-	assert.Contains(t, asm, "[sp", "the aggregate's words are stored into it")
+	asm := disasmModule(t, m)
+	assert.Contains(t, asm, "str x", "aggregate copied to outgoing stack area")
+	assert.Contains(t, asm, "bl sink")
 }
 
 func TestCompileAggregateByReference(t *testing.T) {

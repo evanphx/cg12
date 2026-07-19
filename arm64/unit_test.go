@@ -510,6 +510,207 @@ func TestGoABIZerosPointerLocalsBeforeCalls(t *testing.T) {
 	assert.Contains(t, disasmModule(t, module), "str xzr, [x29")
 }
 
+func TestManagedFrameKeepsAAPCS64ParameterAssignment(t *testing.T) {
+	module := ir.NewModule()
+	function := module.NewFunc("managed_aapcs", ir.ClsL)
+	function.ManagedFrame = true
+	var ninth ir.Ref
+	for index := 0; index < 9; index++ {
+		parameter := function.Param(fmt.Sprintf("p%d", index), ir.ClsL)
+		if index == 8 {
+			ninth = parameter
+		}
+	}
+	function.Entry().Ret(ninth)
+
+	prepareGoABI(function)
+	ir.LowerPointers(function, ptrCls)
+	require.NoError(t, lower(function, TLSLocalExec))
+
+	stackParameterFound := false
+	for index := range function.Start.Instrs {
+		instruction := &function.Start.Instrs[index]
+		if instruction.Op == ir.OPar && instruction.To == ninth && len(instruction.Args) == 0 {
+			stackParameterFound = true
+			assert.Equal(t, int64(0), instruction.Aux)
+		}
+	}
+	assert.True(t, stackParameterFound, "the ninth AAPCS64 parameter should arrive at stack offset zero")
+}
+
+func TestAAPCS64FunctionCanCallGoInternalContract(t *testing.T) {
+	module := ir.NewModule()
+	function := module.NewFuncVoid("managed_caller")
+	function.ManagedFrame = true
+	arguments := make([]ir.Ref, 9)
+	for index := range arguments {
+		arguments[index] = function.Long(int64(index + 1))
+	}
+	entry := function.Entry()
+	entry.CallVoidWithConvention(ir.CallConvGoInternal, function.Sym("runtime_contract", 0), arguments...)
+	entry.RetVoid()
+
+	prepareGoABI(function)
+	ir.LowerPointers(function, ptrCls)
+	require.NoError(t, lower(function, TLSLocalExec))
+
+	var loweredCall *ir.Instr
+	goInternalNinthRegister := false
+	for index := range function.Start.Instrs {
+		instruction := &function.Start.Instrs[index]
+		if instruction.Op == ir.OArg && instruction.To.Kind == ir.RefTemp {
+			temporary := function.Temp(instruction.To)
+			if temporary.Fixed && temporary.Reg == int(X8) {
+				goInternalNinthRegister = true
+			}
+		}
+		if instruction.Op == ir.OCall {
+			loweredCall = instruction
+		}
+	}
+	require.NotNil(t, loweredCall)
+	assert.True(t, loweredCall.CallConvSet)
+	assert.Equal(t, ir.CallConvGoInternal, loweredCall.CallConv)
+	assert.True(t, goInternalNinthRegister, "GoInternal should pass the ninth integer in x8")
+}
+
+func TestAAPCS64GroupedSliceValuesUseIndirectAggregateResult(t *testing.T) {
+	module := ir.NewModule()
+	slice := &ir.AggType{Name: "slice", Fields: []ir.Field{
+		{Sub: ir.SubL, Pointer: true},
+		{Sub: ir.SubL},
+		{Sub: ir.SubL},
+	}}
+
+	callee := module.NewFunc("slice_identity", ir.ClsP)
+	callee.RetAgg = slice
+	callee.RetValues = true
+	parts := callee.ParamGroup("value", slice, ir.ClsP, ir.ClsL, ir.ClsL)
+	callee.Entry().RetAggregate(parts...)
+
+	caller := module.NewFunc("slice_length", ir.ClsL)
+	arguments := []ir.Ref{caller.Sym("buffer", 0), caller.Long(7), caller.Long(9)}
+	results := caller.Entry().CallAggregate(slice, []ir.Cls{ir.ClsP, ir.ClsL, ir.ClsL}, caller.Sym("slice_identity", 0), arguments...)
+	call := &caller.Entry().Instrs[0]
+	call.ArgGroups = []ir.ValueGroup{{Index: 0, Count: 3, Type: slice}}
+	caller.Entry().Ret(results[1])
+
+	assembly := disasmModule(t, module)
+	assert.Contains(t, assembly, "x8", "a 24-byte AAPCS64 result must use the indirect-result register")
+}
+
+func TestAAPCS64IndirectResultBufferIsStackCopyRoot(t *testing.T) {
+	resultType := &ir.AggType{Name: "large_result", Fields: []ir.Field{
+		{Sub: ir.SubL, Pointer: true},
+		{Sub: ir.SubL},
+		{Sub: ir.SubL},
+	}}
+	function := ir.NewModule().NewFunc("return_large_result", ir.ClsP)
+	function.ManagedFrame = true
+	function.RetAgg = resultType
+	function.RetValues = true
+	function.Entry().RetAggregate(
+		function.Long(0),
+		function.Long(1),
+		function.Long(1),
+	)
+
+	require.NoError(t, lower(function, TLSLocalExec))
+
+	var resultBuffer *ir.Temp
+	for _, temporary := range function.Temps {
+		if temporary.Name == "retbuf" {
+			resultBuffer = temporary
+			break
+		}
+	}
+	require.NotNil(t, resultBuffer)
+	assert.True(t, resultBuffer.GCRef)
+}
+
+func TestAAPCS64AggregateParameterPointersAreStackCopyRoots(t *testing.T) {
+	interfaceType := &ir.AggType{Name: "interface", Fields: []ir.Field{
+		{Sub: ir.SubL, Pointer: true},
+		{Sub: ir.SubL, Pointer: true},
+	}}
+	function := ir.NewModule().NewFuncVoid("consume_interface")
+	function.ManagedFrame = true
+	parameter := function.Param("value", ir.ClsL)
+	function.Temp(parameter).Agg = interfaceType
+	function.Entry().CallVoid(function.Sym("observe", 0))
+	function.Entry().RetVoid()
+
+	require.NoError(t, lower(function, TLSLocalExec))
+	assert.True(t, function.Temp(parameter).GCRef)
+
+	pointerRegisters := make(map[int]bool)
+	for _, temporary := range function.Temps {
+		if temporary.Fixed && temporary.GCRef {
+			pointerRegisters[temporary.Reg] = true
+		}
+	}
+	assert.True(t, pointerRegisters[int(X0)])
+	assert.True(t, pointerRegisters[int(X1)])
+
+	foundInterfaceHome := false
+	for allocationID, pointerWords := range function.StackPointerWords {
+		if pointerWords[0] && pointerWords[8] {
+			foundInterfaceHome = true
+			assert.True(t, function.Temps[allocationID].GCRef)
+			break
+		}
+	}
+	assert.True(t, foundInterfaceHome)
+}
+
+func TestManagedAAPCS64HomesGroupedSliceRegistersForStackGrowth(t *testing.T) {
+	slice := &ir.AggType{Name: "slice", Fields: []ir.Field{
+		{Sub: ir.SubL, Pointer: true},
+		{Sub: ir.SubL},
+		{Sub: ir.SubL},
+	}}
+	function := ir.NewModule().NewFuncVoid("consume_slice")
+	function.ManagedFrame = true
+	function.ParamGroup("value", slice, ir.ClsP, ir.ClsL, ir.ClsL)
+
+	frame := goArgumentFrameFor(function)
+	require.Equal(t, 24, frame.size)
+	require.Equal(t, []int{0}, frame.pointerWords)
+	require.Len(t, frame.spills, 3)
+	require.Equal(t, X0, frame.spills[0].reg)
+	require.Equal(t, 8, frame.spills[0].offset)
+	require.True(t, frame.spills[0].pointer)
+	require.Equal(t, X1, frame.spills[1].reg)
+	require.Equal(t, X2, frame.spills[2].reg)
+}
+
+func TestManagedAAPCS64DoesNotHomeEmptyAggregate(t *testing.T) {
+	empty := &ir.AggType{Name: "empty"}
+	function := ir.NewModule().NewFuncVoid("consume_empty")
+	function.ManagedFrame = true
+	aggParam(function, "value", empty)
+
+	frame := goArgumentFrameFor(function)
+	require.Empty(t, frame.spills)
+	require.Zero(t, frame.size)
+}
+
+func TestManagedAAPCS64CallerReservesRegisterHomes(t *testing.T) {
+	module := ir.NewModule()
+	function := module.NewFunc("call_two_pointers", ir.ClsL)
+	function.ManagedFrame = true
+	left := function.ParamRef("left")
+	right := function.ParamRef("right")
+	result := function.Entry().Call(ir.ClsL, function.Sym("hash", 0), left, right)
+	function.Entry().Ret(result)
+
+	assembly := disasmModule(t, module)
+	callOffset := strings.Index(assembly, "bl hash")
+	require.NotEqual(t, -1, callOffset)
+	assert.Contains(t, assembly[:callOffset], "sub sp, sp, #48")
+	assert.NotContains(t, assembly[callOffset:], "add sp, sp, #32")
+}
+
 func TestGoABIRematerializesFixedStackAddressesAfterCalls(t *testing.T) {
 	module := ir.NewModule()
 	function := module.NewFunc("stack_address", ir.ClsW)
@@ -667,7 +868,27 @@ func TestGoABICallerFrameIntrinsicsUseSavedFrame(t *testing.T) {
 	callerSP.Entry().Ret(callerSP.Entry().CallerSP())
 
 	spAssembly := disasmModule(t, spModule)
-	assert.Contains(t, spAssembly, "add x0, x29, #24")
+	assert.Contains(t, spAssembly, "add x0, x29, #16")
+}
+
+func TestManagedAAPCS64OutgoingArgumentsDoNotOverlapFrameRecord(t *testing.T) {
+	module := ir.NewModule()
+	function := module.NewFuncVoid("wide_call")
+	function.ManagedFrame = true
+	function.NoSplit = true
+
+	arguments := make([]ir.Ref, 9)
+	for index := range arguments {
+		arguments[index] = function.Long(int64(index + 1))
+	}
+	function.Entry().CallVoid(function.Sym("callee", 0), arguments...)
+	function.Entry().RetVoid()
+
+	assembly := disasmModule(t, module)
+	assert.Contains(t, assembly, "stp x29, x30, [x17]", "frame record must sit above the outgoing area")
+	assert.Contains(t, assembly, "str x", "the ninth argument must be stored in the outgoing area")
+	assert.Contains(t, assembly, "[sp]", "AAPCS64 stack arguments begin at the stable SP")
+	assert.NotContains(t, assembly, "stp x29, x30, [sp]", "the frame record must not share [sp] with the ninth argument")
 }
 
 func TestGoABISpillsPointerLiveAcrossCall(t *testing.T) {
@@ -751,7 +972,7 @@ func TestGoABIGroupedSliceValuesUseRegistersOrWholeStack(t *testing.T) {
 	parts := callee.ParamGroup("values", sliceType, ir.ClsP, ir.ClsL, ir.ClsL)
 	callee.Entry().Ret(parts[1])
 	calleeAssembly := disasmModule(t, calleeModule)
-	assert.Contains(t, calleeAssembly, "ldr x0, [x29, #40]")
+	assert.Contains(t, calleeAssembly, "ldr x0, [x29, #32]")
 
 	callerModule := ir.NewModule()
 	caller := callerModule.NewFunc("call_slice_len", ir.ClsL)

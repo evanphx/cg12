@@ -24,6 +24,12 @@ func richModule() *Module {
 		Includes:     map[string]string{"textflag.h": "#define NOSPLIT 4\n"},
 		FloatInputs:  map[string][]int{"floatBits": {0, 8}},
 		FloatOutputs: map[string][]int{"floatBits": {16}},
+		Signatures: map[string]AsmSignature{
+			"runtime_floatBits": {
+				Params:  []AsmSlot{{Name: "value", Offset: 0, Cls: ClsD, Width: 8}},
+				Results: []AsmSlot{{Name: "bits", Offset: 8, Cls: ClsL, Width: 8}},
+			},
+		},
 	})
 	m.Data = append(m.Data, &Data{
 		Name: "tbl", Linkage: Linkage{Export: true}, Align: 8,
@@ -51,9 +57,16 @@ func richModule() *Module {
 	g := m.NewFunc("go", ClsW).Export()
 	n := g.Param("n", ClsW)
 	g.Entry().TailCall(ClsW, g.Sym("sumpair", 0), n)
+	g.Entry().Instrs[0].CallConv = CallConvGoInternal
+	g.Entry().Instrs[0].CallConvSet = true
 
 	v := m.NewFunc("vf", ClsD)
 	v.Variadic = true
+	v.CallConv = CallConvGoInternal
+	v.ManagedFrame = true
+	v.NoSplit = true
+	v.SystemStack = true
+	v.HasClosureContext = true
 	v.Param("k", ClsW)
 	v.Entry().Ret(v.Double(1.5))
 

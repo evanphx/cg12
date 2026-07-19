@@ -1,6 +1,10 @@
 package parse
 
-import "github.com/evanphx/cg12/ir"
+import (
+	"strings"
+
+	"github.com/evanphx/cg12/ir"
+)
 
 // --- functions ------------------------------------------------------------
 
@@ -212,6 +216,10 @@ func (p *parser) parseInstr(b *ir.Block, resName string, cls ir.Cls, opWord stri
 		p.parseIntrinsic(b, resName, cls)
 		return
 	}
+	if opWord == "asm" {
+		p.parseAsm(b, resName, cls)
+		return
+	}
 	if op, ok := ir.OpFromString(opWord); ok {
 		if op == ir.OCall {
 			p.parseCall(b, resName, cls, false)
@@ -236,6 +244,144 @@ func (p *parser) parseInstr(b *ir.Block, resName string, cls ir.Cls, opWord stri
 		return
 	}
 	p.fail("unknown instruction %q", opWord)
+}
+
+// parseAsm parses cg12's native inline-assembly form:
+//
+//	%out =w asm "mov %w0, #1" (("=r", w, %out)) exact clobbers("cc")
+//
+// Each operand is its own parenthesized tuple. Register outputs name their SSA
+// definition and class; read-write outputs additionally name the value to
+// preload. Inputs and memory operands name only their value.
+func (p *parser) parseAsm(b *ir.Block, resName string, cls ir.Cls) {
+	template := p.expect(tStr, "inline-assembly template").s
+	instruction := ir.Instr{
+		Op:  ir.OAsm,
+		Cls: cls,
+		Asm: &ir.AsmOp{Template: template},
+	}
+	p.expectPunct("(")
+	for p.err == nil && !p.acceptPunct(")") {
+		p.expectPunct("(")
+		constraint := p.expect(tStr, "inline-assembly constraint").s
+		kind, register, output, readWrite, ok := parseAsmConstraint(constraint)
+		if !ok {
+			p.fail("unsupported inline-assembly constraint %q", constraint)
+			return
+		}
+		instruction.Asm.Ops = append(instruction.Asm.Ops, kind)
+		instruction.Asm.Regs = append(instruction.Asm.Regs, register)
+
+		if output {
+			p.expectPunct(",")
+			outputClass := p.parseClass()
+			p.expectPunct(",")
+			outputName := p.expect(tTemp, "inline-assembly output").s
+			outputRef := p.defTemp(outputName, outputClass)
+			if instruction.To.IsNone() {
+				if resName == "" {
+					p.fail("inline assembly with a register output needs an assigned result")
+					return
+				}
+				if outputName != resName {
+					p.fail("first inline-assembly output is %%%s, assigned result is %%%s", outputName, resName)
+					return
+				}
+				if outputClass != cls {
+					p.fail("inline-assembly output class is %s, assigned result class is %s", outputClass, cls)
+					return
+				}
+				instruction.Cls = outputClass
+				instruction.To = outputRef
+			} else {
+				instruction.Defs = append(instruction.Defs, outputRef)
+			}
+			if readWrite {
+				p.expectPunct(",")
+				instruction.Args = append(instruction.Args, p.parseAsmValue())
+			}
+		} else {
+			p.expectPunct(",")
+			if kind == ir.AsmImm && p.tok.kind != tInt {
+				p.fail("inline-assembly immediate operand must be an integer constant")
+				return
+			}
+			instruction.Args = append(instruction.Args, p.parseAsmValue())
+		}
+		p.expectPunct(")")
+		if !p.acceptPunct(",") {
+			p.expectPunct(")")
+			break
+		}
+	}
+	if resName != "" && instruction.To.IsNone() {
+		p.fail("assigned inline assembly has no register output")
+		return
+	}
+	for p.err == nil {
+		switch {
+		case p.acceptWord("exact"):
+			instruction.Asm.ExactClobbers = true
+		case p.acceptWord("clobbers"):
+			p.expectPunct("(")
+			for p.err == nil && !p.acceptPunct(")") {
+				instruction.Asm.Clobbers = append(instruction.Asm.Clobbers, p.expect(tStr, "clobber name").s)
+				if !p.acceptPunct(",") {
+					p.expectPunct(")")
+					break
+				}
+			}
+		default:
+			b.Instrs = append(b.Instrs, instruction)
+			return
+		}
+	}
+}
+
+func parseAsmConstraint(constraint string) (kind ir.AsmOperandKind, register string, output, readWrite, ok bool) {
+	constraint = strings.TrimSpace(constraint)
+	mode := byte(0)
+	if constraint != "" && (constraint[0] == '=' || constraint[0] == '+') {
+		mode = constraint[0]
+		constraint = constraint[1:]
+	}
+	constraint = strings.TrimPrefix(constraint, "&")
+	if constraint == "" {
+		return 0, "", false, false, false
+	}
+
+	if constraint == "m" {
+		return ir.AsmMem, "", false, false, mode != '+'
+	}
+	if constraint == "i" && mode == 0 {
+		return ir.AsmImm, "", false, false, true
+	}
+	if mode == '=' || mode == '+' {
+		kind := ir.AsmRegOut
+		if mode == '+' {
+			kind = ir.AsmRegInOut
+		}
+		return kind, asmConstraintRegister(constraint), true, mode == '+', true
+	}
+	return ir.AsmRegIn, asmConstraintRegister(constraint), false, false, true
+}
+
+func asmConstraintRegister(constraint string) string {
+	if constraint == "r" {
+		return ""
+	}
+	return constraint
+}
+
+func (p *parser) parseAsmValue() ir.Ref {
+	switch p.tok.kind {
+	case tTemp:
+		return p.parseValue(ir.ClsL)
+	case tFloat:
+		return p.parseValue(ir.ClsD)
+	default:
+		return p.parseValue(ir.ClsL)
+	}
 }
 
 // parseIntrinsic parses `intrinsic NAME arg, arg, ...`: a bare NAME word naming

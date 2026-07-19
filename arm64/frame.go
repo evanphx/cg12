@@ -12,6 +12,7 @@ import (
 // disagree about where a spill slot went.
 type frameLayout struct {
 	frame       int               // total frame size in bytes (16-aligned)
+	outgoing    int               // fixed call area below x29 for managed AAPCS64 calls
 	calleeSaved []Reg             // callee-saved registers to preserve, in save order
 	spillBase   int               // byte offset of the spill area within the frame
 	allocOff    map[*ir.Instr]int // OAlloc instruction -> frame offset
@@ -27,16 +28,18 @@ type frameLayout struct {
 	namedStack int // bytes of stack used by named parameters
 }
 
-// computeFrame lays out a function's stack frame from its allocation. The frame
-// grows upward from x29: the saved x29/x30 pair, the callee-saved registers,
-// the spill area, the allocas, and finally the variadic save area.
+// computeFrame lays out a function's stack frame from its allocation. Managed
+// AAPCS64 functions reserve a fixed outgoing-call area below x29. The frame
+// record begins at x29, followed by callee saves, spills, allocas, and the
+// variadic save area. Keeping outgoing arguments below the frame record lets SP
+// remain stable across calls without allowing a stack argument to overwrite LR.
 func computeFrame(f *ir.Func, alloc *allocation) frameLayout {
 	lay := frameLayout{allocOff: map[*ir.Instr]int{}}
 
 	used := map[Reg]bool{}
 	for _, t := range f.Temps {
 		if t.Reg != ir.NoReg {
-			if r := Reg(t.Reg); calleeSavedFor(f.GoABI, r) {
+			if r := Reg(t.Reg); calleeSavedFor(f.UsesGoInternalCallConvention(), r) {
 				used[r] = true
 			}
 		}
@@ -49,7 +52,7 @@ func computeFrame(f *ir.Func, alloc *allocation) frameLayout {
 	for _, b := range f.Blocks {
 		for i := range b.Instrs {
 			for _, r := range asmClobberRegs(&b.Instrs[i]) {
-				if calleeSavedFor(f.GoABI, r) {
+				if calleeSavedFor(f.UsesGoInternalCallConvention(), r) {
 					used[r] = true
 				}
 			}
@@ -67,12 +70,10 @@ func computeFrame(f *ir.Func, alloc *allocation) frameLayout {
 		}
 	}
 
-	off := 16 + 8*len(lay.calleeSaved) // x29/x30 occupy [0,16)
-	if f.GoABI {
-		// ABIInternal reserves one fixed outgoing-call area at the bottom of
-		// the frame so SP remains stable across calls for stack copying.
-		off = max(off, goStackLinkSize+maxOutgoingCallSize(f))
+	if f.UsesManagedFrame() {
+		lay.outgoing = maxOutgoingCallSize(f)
 	}
+	off := 16 + 8*len(lay.calleeSaved) // x29/x30 occupy [0,16)
 	lay.spillBase = off
 	off += alloc.spillBytes
 
@@ -119,7 +120,7 @@ func computeFrame(f *ir.Func, alloc *allocation) frameLayout {
 		off += 8 * 16 // v0..v7 (16-byte stride)
 	}
 
-	lay.frame = roundUp(off, 16)
+	lay.frame = roundUp(lay.outgoing+off, 16)
 	return lay
 }
 
@@ -152,7 +153,7 @@ func roundUp(n, a int) int {
 // computeNamedCounts replays argument assignment over a variadic function's named
 // parameters, returning how many GP/SIMD registers and stack bytes they used.
 func computeNamedCounts(f *ir.Func) (ngrn, nsrn, stack int) {
-	a := newArgAssigner(f.GoABI)
+	a := newArgAssigner(f.UsesGoInternalCallConvention())
 	for _, p := range f.Params {
 		if p.Agg != nil {
 			cls := classifyAgg(p.Agg)

@@ -366,6 +366,26 @@ TEXT runtime·systemstack(SB), NOSPLIT, $0-8
 	require.Len(t, translation.Functions, 1)
 }
 
+func TestTranslateARM64SystemstackRestoresTranslatedCallerFramePointer(t *testing.T) {
+	file, err := Parse(strings.NewReader(`
+TEXT runtime·systemstack(SB), NOSPLIT, $0-8
+	MOVD 0(R26), R3
+	MOVD.P 16(RSP), R30
+	SUB $8, RSP, R29
+	B (R3)
+`))
+	require.NoError(t, err)
+	translation, err := CompileARM64(file, ARM64Options{
+		PackagePath:      "runtime",
+		Filename:         "asm_arm64.s",
+		PreferDirectABI0: true,
+	})
+	require.NoError(t, err)
+
+	assert.Contains(t, translation.Assembly, "\tldr x30, [sp], #16\n\tldur x29, [sp, #-24]\n\tbr x3")
+	assert.NotContains(t, translation.Assembly, "\tsub x29, sp, #8")
+}
+
 func TestTranslateARM64KeepsABI0WrapperWhenReadingArgumentsAfterCall(t *testing.T) {
 	file, err := Parse(strings.NewReader(`
 TEXT ·callThenRead(SB), NOSPLIT, $0-8

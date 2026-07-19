@@ -231,7 +231,7 @@ func TestARM64RuntimeAtomicSupportExecutes(t *testing.T) {
 		t.Skip("cc unavailable")
 	}
 	directory := t.TempDir()
-	assembly := filepath.Join(directory, "runtime.S")
+	objectPath := filepath.Join(directory, "runtime.o")
 	harness := filepath.Join(directory, "atomic.c")
 	executable := filepath.Join(directory, "atomic")
 	atomicPath := filepath.Join("..", "..", "stdlib", "src", "internal", "runtime", "atomic", "atomic_arm64.s")
@@ -239,20 +239,21 @@ func TestARM64RuntimeAtomicSupportExecutes(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	atomicFile, err := plan9asm.Parse(strings.NewReader(string(atomicSource)))
-	if err != nil {
-		t.Fatal(err)
-	}
-	translated, err := plan9asm.TranslateARM64(atomicFile, plan9asm.ARM64Options{
-		PackagePath:      "internal/runtime/atomic",
-		Filename:         "atomic_arm64.s",
-		Defines:          map[string]int64{"const_offsetARM64HasATOMICS": 135},
-		PreferDirectABI0: true,
+	module := ir.NewModule()
+	module.Assembly = append(module.Assembly, ir.AssemblyFile{
+		PackagePath: "internal/runtime/atomic",
+		Path:        "internal/runtime/atomic/atomic_arm64.s",
+		Source:      string(atomicSource),
+		Defines:     map[string]int64{"const_offsetARM64HasATOMICS": 135},
 	})
+	object, sidecar, err := arm64.CompileObjectAndAssembly(module)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err := os.WriteFile(assembly, []byte(translated), 0o644); err != nil {
+	if sidecar != "" {
+		t.Fatalf("migrated atomic assembly emitted a GNU sidecar:\n%s", sidecar)
+	}
+	if err := os.WriteFile(objectPath, object, 0o644); err != nil {
 		t.Fatal(err)
 	}
 	const source = `
@@ -281,7 +282,7 @@ int main(void) {
 	if err := os.WriteFile(harness, []byte(source), 0o644); err != nil {
 		t.Fatal(err)
 	}
-	if output, err := exec.Command(cc, "-no-pie", "-o", executable, harness, assembly).CombinedOutput(); err != nil {
+	if output, err := exec.Command(cc, "-no-pie", "-o", executable, harness, objectPath).CombinedOutput(); err != nil {
 		t.Fatalf("compile runtime support: %v\n%s", err, output)
 	}
 	if output, err := exec.Command(executable).CombinedOutput(); err != nil {

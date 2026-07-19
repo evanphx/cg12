@@ -510,7 +510,7 @@ func (g *colorGraph) assign() (*allocation, error) {
 		// freely (cheap when the crossed calls are cold, the interpreter's case).
 		float := f.Temps[t].Cls.IsFloat()
 		crossing := g.crossFreq[t] > 0
-		preferCallee := !f.GoABI && crossing && g.crossFreq[t]*2 >= 2.0
+		preferCallee := !f.UsesManagedFrame() && crossing && g.crossFreq[t]*2 >= 2.0
 		pool := intAllocOrder
 		switch {
 		case preferCallee && float:
@@ -527,7 +527,7 @@ func (g *colorGraph) assign() (*allocation, error) {
 		prefer := map[Reg]bool{}
 		for _, p := range g.mv[t] {
 			if r := f.Temps[p].Reg; r != ir.NoReg {
-				if preferCallee && !calleeSavedFor(f.GoABI, Reg(r)) {
+				if preferCallee && !registerSurvivesManagedCalls(f, Reg(r)) {
 					continue
 				}
 				prefer[Reg(r)] = true
@@ -551,7 +551,7 @@ func (g *colorGraph) assign() (*allocation, error) {
 		}
 		// If the only register a hot-crossing value could get is caller-saved, wrapping
 		// it costs crossFreq×2; spilling costs its reference weight. Take the cheaper.
-		if picked != Reg(ir.NoReg) && preferCallee && !calleeSavedFor(f.GoABI, picked) &&
+		if picked != Reg(ir.NoReg) && preferCallee && !registerSurvivesManagedCalls(f, picked) &&
 			g.crossFreq[t]*2 >= g.cost[t] {
 			picked = Reg(ir.NoReg)
 		}

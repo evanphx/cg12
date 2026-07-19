@@ -1,8 +1,6 @@
 package arm64
 
-import (
-	"github.com/evanphx/cg12/ir"
-)
+import "github.com/evanphx/cg12/ir"
 
 // aggKind is how AAPCS64 passes a by-value aggregate.
 type aggKind int
@@ -150,8 +148,8 @@ func aggArgAt(in *ir.Instr, k int) *ir.AggType {
 // (loads/address arithmetic) is appended to *out; the OArg moves that place the
 // pieces into registers or the outgoing stack area are appended to argSetup
 // (returned) so they form one contiguous run before the call.
-func lowerAggArg(f *ir.Func, argRef ir.Ref, agg *ir.AggType, a *argAssigner, out *[]ir.Instr, argSetup []ir.Instr, pins []ir.Ref) ([]ir.Instr, []ir.Ref, error) {
-	if f.GoABI {
+func lowerAggArg(f *ir.Func, argRef ir.Ref, agg *ir.AggType, goInternal bool, a *argAssigner, out *[]ir.Instr, argSetup []ir.Instr, pins []ir.Ref) ([]ir.Instr, []ir.Ref, error) {
+	if goInternal {
 		return lowerGoAggregateArg(f, argRef, agg, a, out, argSetup, pins)
 	}
 	cls := classifyAgg(agg)
@@ -171,25 +169,22 @@ func lowerAggArg(f *ir.Func, argRef ir.Ref, agg *ir.AggType, a *argAssigner, out
 	var elemCls ir.Cls
 	var elemSize int
 	var onStack bool
-	var off int
+	var stackOffset int
 	if cls.kind == aggGP {
-		regs, onStack, off = a.assignGP(cls.nregs, cls.size)
+		regs, onStack, stackOffset = a.assignGP(cls.nregs, cls.size)
 		elemCls, elemSize = ir.ClsL, 8
 	} else {
-		regs, onStack, off = a.assignHFA(cls.nregs, cls.size)
+		regs, onStack, stackOffset = a.assignHFA(cls.nregs, cls.size)
 		elemCls, elemSize = cls.elem, cls.elem.Size()
 	}
 	if onStack {
-		// The argument registers are exhausted, so the whole aggregate travels as
-		// its bytes in the outgoing stack area at offset off; the callee reads it
-		// there by address (see lowerAggParam). Store each piece with a stacked
-		// OArg, mirroring the register loop below.
-		for i := 0; i < cls.nregs; i++ {
-			addr := offsetAddr(f, argRef, i*elemSize, out)
-			val := f.NewTemp("", elemCls)
-			*out = append(*out, ir.Instr{Op: loadOpFor(elemCls), Cls: elemCls, To: val, Args: []ir.Ref{addr}})
-			argSetup = append(argSetup, ir.Instr{Op: ir.OArg, Cls: elemCls, To: ir.R, Aux: int64(off + i*elemSize), Args: []ir.Ref{val}})
-		}
+		argSetup = append(argSetup, ir.Instr{
+			Op:     ir.OArg,
+			To:     ir.R,
+			Aux:    int64(stackOffset),
+			Args:   []ir.Ref{argRef},
+			RetAgg: agg,
+		})
 		return argSetup, pins, nil
 	}
 
@@ -217,8 +212,7 @@ func lowerAggResult(f *ir.Func, dst ir.Ref, agg *ir.AggType, a *argAssigner, out
 	cls := classifyAgg(agg)
 	if cls.kind == aggMemory {
 		// Allocate a buffer and hand its address to the callee in x8.
-		buf := f.NewTemp("", ir.ClsL)
-		*out = append(*out, ir.Instr{Op: ir.OAlloc16, Cls: ir.ClsL, To: buf, Args: []ir.Ref{f.Long(int64(cls.size))}})
+		buf := aggregateAlloc(f, agg, out)
 		pinX8 := newPinned(f, X8, ir.ClsL)
 		argSetup = append(argSetup, ir.Instr{Op: ir.OArg, Cls: ir.ClsL, To: pinX8, Args: []ir.Ref{buf}})
 		pins = append(pins, pinX8)
@@ -232,8 +226,7 @@ func lowerAggResult(f *ir.Func, dst ir.Ref, agg *ir.AggType, a *argAssigner, out
 	if cls.kind == aggHFA {
 		base, elemCls, elemSize = V0, cls.elem, cls.elem.Size()
 	}
-	slot := f.NewTemp("", ir.ClsL)
-	*out = append(*out, ir.Instr{Op: ir.OAlloc16, Cls: ir.ClsL, To: slot, Args: []ir.Ref{f.Long(int64(cls.nregs * elemSize))}})
+	slot := aggregateAlloc(f, agg, out)
 
 	var defRefs []ir.Ref
 	for i := 0; i < cls.nregs; i++ {

@@ -1404,6 +1404,14 @@ func recovery(gp *g) {
 		// the caller
 		gp.sched.bp = fp - 2*goarch.PtrSize
 	case goarch.IsArm64 != 0:
+		if f := findfunc(gotoPc); f.valid() {
+			if outgoingSize := cg12AAPCSOutgoingSize(f, gotoPc); outgoingSize >= 0 {
+				// cg12's managed AAPCS frame record starts after the
+				// caller-reserved outgoing argument area.
+				gp.sched.bp = sp + uintptr(outgoingSize)
+				break
+			}
+		}
 		// on arm64, the architectural bp points one word higher
 		// than the sp. fp is totally useless to us here, because it
 		// only gets us to the caller's fp.

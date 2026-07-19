@@ -141,8 +141,19 @@ type Func struct {
 	// Without it, the historical representation uses Jmp.Arg as an address.
 	RetValues bool
 	Variadic  bool // accepts variadic arguments (a trailing "..." in the IL)
-	GoABI     bool // use the Go runtime's platform frame convention
-	NoSplit   bool // omit the Go stack-growth check at function entry
+
+	// CallConv controls the physical argument, result, and callee-save rules.
+	// The zero value is AAPCS64 so ordinary cg12 functions interoperate with C
+	// and with other cg12 front ends by default.
+	CallConv CallConvention
+	// ManagedFrame enables Go runtime stack growth, precise stack metadata, and
+	// the runtime's frame-chain layout independently of the call convention.
+	ManagedFrame bool
+	// GoABI is retained as a source-compatibility bridge for existing IR
+	// producers. New code should set CallConv and ManagedFrame separately. When
+	// true it selects both GoInternal and a managed Go frame.
+	GoABI   bool
+	NoSplit bool // omit the Go stack-growth check at function entry
 	// SystemStack marks a //go:systemstack function. Such functions must only run
 	// on g0 or gsignal: their stack check uses g.stackguard1 and reports an
 	// attempted call from an ordinary goroutine through runtime.morestackc.
@@ -192,6 +203,27 @@ type Func struct {
 
 	nameSeq  int
 	constIdx map[constKey]int
+}
+
+// CallConvention names a physical function-call contract. It deliberately
+// does not describe stack ownership, garbage collection, or unwinding; those
+// are properties of a function's frame rather than of its argument registers.
+type CallConvention uint8
+
+const (
+	CallConvAAPCS64 CallConvention = iota
+	CallConvGoInternal
+)
+
+// UsesGoInternalCallConvention reports the function's physical call ABI.
+func (f *Func) UsesGoInternalCallConvention() bool {
+	return f.CallConv == CallConvGoInternal || f.GoABI
+}
+
+// UsesManagedFrame reports whether the Go runtime owns this function's stack
+// growth and frame metadata.
+func (f *Func) UsesManagedFrame() bool {
+	return f.ManagedFrame || f.GoABI
 }
 
 // MarkLowered records that f has been lowered for the named target, and reports
@@ -263,6 +295,25 @@ type AssemblyFile struct {
 	Includes     map[string]string
 	FloatInputs  map[string][]int
 	FloatOutputs map[string][]int
+	Signatures   map[string]AsmSignature
+}
+
+// AsmSignature describes the source-level values consumed and produced by a
+// Plan 9 assembly function. Offsets identify the ABI0 FP names used in the
+// source; lowering binds the slots to ordinary IR parameters and results rather
+// than re-emitting those stack offsets.
+type AsmSignature struct {
+	Params  []AsmSlot
+	Results []AsmSlot
+}
+
+type AsmSlot struct {
+	Name   string
+	Offset int
+	Cls    Cls
+	Width  int
+	GCRef  bool
+	Group  int
 }
 
 // Module returns the module this function belongs to (nil if standalone).

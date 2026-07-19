@@ -19,7 +19,7 @@ import (
 // references. Value references (ir.Ref) already index Temps/Consts by ID.
 const (
 	binMagic   = "cg12"
-	binVersion = 8
+	binVersion = 11
 )
 
 // MarshalBinary encodes the module to cg12's binary unit format.
@@ -71,6 +71,7 @@ func (m *Module) MarshalBinary() ([]byte, error) {
 		}
 		e.encAssemblyFloatSlots(assembly.FloatInputs)
 		e.encAssemblyFloatSlots(assembly.FloatOutputs)
+		e.encAssemblySignatures(assembly.Signatures)
 	}
 	e.uv(uint64(len(m.Data)))
 	for _, d := range m.Data {
@@ -134,6 +135,7 @@ func DecodeModule(data []byte) (*Module, error) {
 		}
 		m.Assembly[i].FloatInputs = d.decAssemblyFloatSlots()
 		m.Assembly[i].FloatOutputs = d.decAssemblyFloatSlots()
+		m.Assembly[i].Signatures = d.decAssemblySignatures()
 	}
 	m.Data = make([]*Data, int(d.uv()))
 	for i := range m.Data {
@@ -250,6 +252,33 @@ func (e *enc) encAssemblyFloatSlots(slots map[string][]int) {
 	}
 }
 
+func (e *enc) encAssemblySignatures(signatures map[string]AsmSignature) {
+	names := make([]string, 0, len(signatures))
+	for name := range signatures {
+		names = append(names, name)
+	}
+	sort.Strings(names)
+	e.uv(uint64(len(names)))
+	for _, name := range names {
+		e.str(name)
+		signature := signatures[name]
+		e.encAssemblySlots(signature.Params)
+		e.encAssemblySlots(signature.Results)
+	}
+}
+
+func (e *enc) encAssemblySlots(slots []AsmSlot) {
+	e.uv(uint64(len(slots)))
+	for _, slot := range slots {
+		e.str(slot.Name)
+		e.iv(int64(slot.Offset))
+		e.u8(byte(slot.Cls))
+		e.uv(uint64(slot.Width))
+		e.boolean(slot.GCRef)
+		e.iv(int64(slot.Group))
+	}
+}
+
 func (e *enc) f64(v float64) {
 	var b [8]byte
 	binary.LittleEndian.PutUint64(b[:], math.Float64bits(v))
@@ -343,6 +372,12 @@ func (e *enc) encFunc(f *Func) {
 	e.typeRef(f.RetAgg)
 	e.boolean(f.RetValues)
 	e.boolean(f.Variadic)
+	e.u8(byte(f.CallConv))
+	e.boolean(f.ManagedFrame)
+	e.boolean(f.GoABI)
+	e.boolean(f.NoSplit)
+	e.boolean(f.SystemStack)
+	e.boolean(f.HasClosureContext)
 
 	e.uv(uint64(len(f.Temps)))
 	for _, t := range f.Temps {
@@ -459,6 +494,8 @@ func (e *enc) encInstr(in *Instr, blockRef func(*Block)) {
 	e.u8(byte(in.Cmp))
 	e.iv(in.Aux)
 	e.iv(int64(in.Unroll))
+	e.u8(byte(in.CallConv))
+	e.boolean(in.CallConvSet)
 	e.iv(int64(in.Amode))
 	e.uv(uint64(len(in.AggArgs)))
 	for _, t := range in.AggArgs {
@@ -501,6 +538,7 @@ func (e *enc) asmOp(a *AsmOp) {
 	}
 	e.boolean(true)
 	e.str(a.Template)
+	e.boolean(a.ExactClobbers)
 	e.uv(uint64(len(a.Ops)))
 	for _, k := range a.Ops {
 		e.u8(byte(k))
@@ -625,6 +663,37 @@ func (d *dec) decAssemblyFloatSlots() map[string][]int {
 	return slots
 }
 
+func (d *dec) decAssemblySignatures() map[string]AsmSignature {
+	count := int(d.uv())
+	if count == 0 {
+		return nil
+	}
+	signatures := make(map[string]AsmSignature, count)
+	for range count {
+		name := d.str()
+		signatures[name] = AsmSignature{
+			Params:  d.decAssemblySlots(),
+			Results: d.decAssemblySlots(),
+		}
+	}
+	return signatures
+}
+
+func (d *dec) decAssemblySlots() []AsmSlot {
+	slots := make([]AsmSlot, int(d.uv()))
+	for index := range slots {
+		slots[index] = AsmSlot{
+			Name:   d.str(),
+			Offset: int(d.iv()),
+			Cls:    Cls(d.u8()),
+			Width:  int(d.uv()),
+			GCRef:  d.boolean(),
+			Group:  int(d.iv()),
+		}
+	}
+	return slots
+}
+
 func (d *dec) ref() Ref { return Ref{Kind: RefKind(d.u8()), ID: uint32(d.uv())} }
 
 func (d *dec) typeRef() *AggType {
@@ -700,6 +769,12 @@ func (d *dec) decFunc(m *Module) *Func {
 	f.RetAgg = d.typeRef()
 	f.RetValues = d.boolean()
 	f.Variadic = d.boolean()
+	f.CallConv = CallConvention(d.u8())
+	f.ManagedFrame = d.boolean()
+	f.GoABI = d.boolean()
+	f.NoSplit = d.boolean()
+	f.SystemStack = d.boolean()
+	f.HasClosureContext = d.boolean()
 
 	f.Temps = make([]*Temp, int(d.uv()))
 	for i := range f.Temps {
@@ -826,6 +901,8 @@ func (d *dec) decInstr(blockRef func() *Block) Instr {
 	in.Cmp = Cmp(d.u8())
 	in.Aux = d.iv()
 	in.Unroll = int32(d.iv())
+	in.CallConv = CallConvention(d.u8())
+	in.CallConvSet = d.boolean()
 	in.Amode = int32(d.iv())
 	if n := int(d.uv()); n > 0 {
 		in.AggArgs = make([]*AggType, n)
@@ -866,7 +943,7 @@ func (d *dec) asmOp() *AsmOp {
 	if !d.boolean() {
 		return nil
 	}
-	a := &AsmOp{Template: d.str()}
+	a := &AsmOp{Template: d.str(), ExactClobbers: d.boolean()}
 	if n := int(d.uv()); n > 0 {
 		a.Ops = make([]AsmOperandKind, n)
 		for i := range a.Ops {

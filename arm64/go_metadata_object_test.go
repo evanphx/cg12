@@ -134,6 +134,24 @@ func TestGoPCSPTerminatesBeforeFollowingFunction(t *testing.T) {
 	assert.Equal(t, []byte{2, 9, 64, 0xff, 0xff, 0xff, 0xff, 0x0f, 0}, goPCSP(36, 32))
 }
 
+func TestGoAAPCSFramePCDataMarksManagedFrameBody(t *testing.T) {
+	assert.Equal(t, []byte{0, 2, 98, 0xff, 0xff, 0xff, 0xff, 0x0f, 0}, goAAPCSFramePCData(8, 48))
+}
+
+func TestGoAAPCSFramePCDataLeavesAssemblyUnmarked(t *testing.T) {
+	assert.Equal(t, []byte{0, 0xff, 0xff, 0xff, 0xff, 0x0f, 0}, goAAPCSFramePCData(4, -1))
+}
+
+func TestGoLocalStackMapExcludesAAPCSOutgoingArea(t *testing.T) {
+	function := goFunctionInfo{
+		frameSize:    96,
+		managedAAPCS: true,
+		outgoingSize: 32,
+	}
+
+	assert.Equal(t, 6, goLocalStackMapWords(function))
+}
+
 func TestGoUnsafePointPCDataDisablesAsyncPreemption(t *testing.T) {
 	assert.Equal(t, []byte{1, 0xff, 0xff, 0xff, 0xff, 0x0f, 0}, goUnsafePointPCData())
 }

@@ -53,6 +53,13 @@ type Instr struct {
 	// turns into a wrong stack frame.
 	Unroll int32
 
+	// CallConv is the physical convention used by this OCall. Calls default to
+	// the containing function's convention; an explicit override is represented
+	// by CallConvSet. Keeping this on the call makes foreign and raw-runtime
+	// boundaries local facts instead of properties inferred from the caller.
+	CallConv    CallConvention
+	CallConvSet bool
+
 	// AggArgs types by-value aggregate call arguments: for an OCall, AggArgs[k]
 	// (when non-nil) is the aggregate type of the value argument Args[1+k],
 	// which is a pointer to that aggregate. nil entries are scalar arguments.
@@ -151,6 +158,10 @@ const (
 type AsmOp struct {
 	Template string           // the assembler template, verbatim between the quotes
 	Ops      []AsmOperandKind // operand kinds in %N order
+	// ExactClobbers says Clobbers is a complete register-use boundary. Semantic
+	// assembly lowering can prove this; ordinary user inline assembly remains
+	// conservative and clobbers the target's caller-saved set as before.
+	ExactClobbers bool
 	// Regs, parallel to Ops, holds a fixed physical-register constraint letter for
 	// each operand ("a", "d", "S", ...) or "" when the allocator may choose. A
 	// backend precolors the operand's temporary to the named register.

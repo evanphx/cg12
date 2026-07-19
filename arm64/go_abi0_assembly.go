@@ -56,7 +56,7 @@ func emitGoABI0AssemblyWrappers(module *ir.Module, references, assemblyFunctions
 }
 
 func emitGoABI0AssemblyWrapper(name string, function *ir.Func) (string, goFunctionInfo, error) {
-	if !function.GoABI {
+	if !function.UsesGoInternalCallConvention() {
 		return "", goFunctionInfo{}, fmt.Errorf("target does not use the Go ABI")
 	}
 

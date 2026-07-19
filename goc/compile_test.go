@@ -267,6 +267,44 @@ type outer struct {
 	}
 }
 
+func TestAssemblyABI0OffsetsAlignResultArea(t *testing.T) {
+	sizes := types.SizesFor("gc", runtime.GOARCH)
+	parameters := types.NewTuple(
+		types.NewVar(token.NoPos, nil, "ptr", types.NewPointer(types.Typ[types.Uint32])),
+		types.NewVar(token.NoPos, nil, "new", types.Typ[types.Uint32]),
+	)
+	results := types.NewTuple(
+		types.NewVar(token.NoPos, nil, "ret", types.Typ[types.Uint32]),
+	)
+
+	parameterOffsets, resultOffsets := assemblyABI0Offsets(parameters, results, sizes)
+	if !reflect.DeepEqual(parameterOffsets, []int64{0, 8}) {
+		t.Fatalf("parameter offsets = %v, want [0 8]", parameterOffsets)
+	}
+	if !reflect.DeepEqual(resultOffsets, []int64{16}) {
+		t.Fatalf("result offsets = %v, want [16]", resultOffsets)
+	}
+}
+
+func TestAssemblyABI0OffsetsPackNarrowParameters(t *testing.T) {
+	sizes := types.SizesFor("gc", runtime.GOARCH)
+	parameters := types.NewTuple(
+		types.NewVar(token.NoPos, nil, "left", types.Typ[types.Uint8]),
+		types.NewVar(token.NoPos, nil, "right", types.Typ[types.Uint16]),
+	)
+	results := types.NewTuple(
+		types.NewVar(token.NoPos, nil, "ret", types.Typ[types.Uint8]),
+	)
+
+	parameterOffsets, resultOffsets := assemblyABI0Offsets(parameters, results, sizes)
+	if !reflect.DeepEqual(parameterOffsets, []int64{0, 2}) {
+		t.Fatalf("parameter offsets = %v, want [0 2]", parameterOffsets)
+	}
+	if !reflect.DeepEqual(resultOffsets, []int64{8}) {
+		t.Fatalf("result offsets = %v, want [8]", resultOffsets)
+	}
+}
+
 func TestCompileCoreGo(t *testing.T) {
 	m, err := Compile("sum.go", []byte(`package main
 func sum(n int64) int64 { s := int64(0); for i := int64(1); i <= n; i++ { if i == 3 { continue }; s += i }; return s }
@@ -619,6 +657,43 @@ func main() {
 	if initTasks == nil || len(initTasks.Items) != 1 || initTasks.Items[0].Sym != ".goc.module.inittask.0" {
 		t.Errorf("module init tasks = %#v", initTasks)
 	}
+}
+
+func TestCompileExecutableIncludesNativeRuntimeOverlay(t *testing.T) {
+	if runtime.GOOS != "linux" || runtime.GOARCH != "arm64" {
+		t.Skip("the initial runtime overlay targets linux/arm64")
+	}
+
+	module, err := CompileExecutable("main.go", []byte("package main\nfunc main() {}\n"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, function := range module.Funcs {
+		if function.Name != "runtime_cg12OverlayActive" {
+			continue
+		}
+		if function.ManagedFrame {
+			t.Fatal("native runtime marker unexpectedly has a managed frame")
+		}
+		if !function.NoSplit {
+			t.Fatal("native runtime marker is not nosplit")
+		}
+		if function.CallConv != ir.CallConvAAPCS64 {
+			t.Fatalf("native runtime marker call convention = %v, want AAPCS64", function.CallConv)
+		}
+		if len(function.Entry().Instrs) != 1 {
+			t.Fatalf("native runtime marker instructions = %d, want 1", len(function.Entry().Instrs))
+		}
+		instruction := function.Entry().Instrs[0]
+		if instruction.Op != ir.OAsm || instruction.Asm == nil {
+			t.Fatalf("native runtime marker instruction = %v, want inline assembly", instruction.Op)
+		}
+		if instruction.Asm.Template != "mov %w0, #1" {
+			t.Fatalf("native runtime marker assembly = %q", instruction.Asm.Template)
+		}
+		return
+	}
+	t.Fatal("native runtime overlay marker was not compiled")
 }
 
 func TestCompileExecutableUsesExactRuntimeFIPSIndicator(t *testing.T) {

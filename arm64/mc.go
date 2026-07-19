@@ -162,11 +162,15 @@ func compileToObjectWithBundle(m *ir.Module, opts Options, bundle assemblyBundle
 	var goFunctions []goFunctionInfo
 	anchor := ""
 	releaseFunctionIR := len(m.Funcs) > 2048
-	for functionIndex, f := range m.Funcs {
+	functions := make([]*ir.Func, 0, len(m.Funcs)+len(bundle.lowered))
+	functions = append(functions, m.Funcs...)
+	functions = append(functions, bundle.lowered...)
+	for functionIndex, f := range functions {
+		applyAssemblyCallConventions(f, bundle.callConventions)
 		name := sanitize(f.Name)
 		params := dwarfParams(f)
 		paramTemps := paramTempIDs(f)
-		if f.GoABI {
+		if f.UsesManagedFrame() {
 			prepareGoABI(f)
 		}
 		ir.LowerPointers(f, ptrCls)
@@ -182,7 +186,7 @@ func compileToObjectWithBundle(m *ir.Module, opts Options, bundle assemblyBundle
 			return nil, fmt.Errorf("function %s: %w", f.Name, err)
 		}
 		argumentFrame := goArgumentFrame{}
-		if f.GoABI {
+		if f.UsesManagedFrame() {
 			argumentFrame = goArgumentFrameFor(f)
 		}
 		base := uint64(len(o.Text))
@@ -194,6 +198,8 @@ func compileToObjectWithBundle(m *ir.Module, opts Options, bundle assemblyBundle
 			name:                 name,
 			frameSize:            mc.m.frame,
 			frameStart:           mc.m.frameStart,
+			managedAAPCS:         f.UsesManagedFrame(),
+			outgoingSize:         mc.m.outgoing,
 			size:                 uint64(len(mc.code)),
 			funcID:               goRuntimeFunctionID(name),
 			deferReturn:          mc.m.deferReturnOffset(),
@@ -236,7 +242,7 @@ func compileToObjectWithBundle(m *ir.Module, opts Options, bundle assemblyBundle
 		if safepointsHaveRoots(mc.safepoints) {
 			smFuncs = append(smFuncs, stackMapFunc{sym: name, points: mc.safepoints})
 		}
-		if releaseFunctionIR {
+		if releaseFunctionIR && functionIndex < len(m.Funcs) {
 			// Large source-compiled standard-library modules are one-shot inputs.
 			// Every object, debug, and runtime-metadata detail for this function has
 			// been copied above, so retaining its lowered IR only inflates the peak
@@ -251,12 +257,15 @@ func compileToObjectWithBundle(m *ir.Module, opts Options, bundle assemblyBundle
 	var moduledata *ir.Data
 	var dataPointerOffsets []uint64
 	var relativeDataFixups []relativeDataFixup
-	for _, d := range m.Data {
+	dataDefinitions := make([]*ir.Data, 0, len(m.Data)+len(bundle.loweredData))
+	dataDefinitions = append(dataDefinitions, m.Data...)
+	dataDefinitions = append(dataDefinitions, bundle.loweredData...)
+	for _, d := range dataDefinitions {
 		if goRuntime && d.Name == "runtime.firstmoduledata" {
 			moduledata = d
 			continue
 		}
-		if bundle.definitions[sanitize(d.Name)] {
+		if bundle.definitions[sanitize(d.Name)] && !semanticDataDefinition(bundle.loweredData, d) {
 			continue
 		}
 		var err error
@@ -302,6 +311,36 @@ func compileToObjectWithBundle(m *ir.Module, opts Options, bundle assemblyBundle
 		}
 	}
 	return o, nil
+}
+
+func applyAssemblyCallConventions(function *ir.Func, conventions map[string]ir.CallConvention) {
+	for _, block := range function.Blocks {
+		for index := range block.Instrs {
+			instruction := &block.Instrs[index]
+			if instruction.Op != ir.OCall || len(instruction.Args) == 0 || instruction.Args[0].Kind != ir.RefConst {
+				continue
+			}
+			callee := function.Consts[instruction.Args[0].ID]
+			if callee.Kind != ir.ConstSym {
+				continue
+			}
+			convention, ok := conventions[sanitize(callee.Sym)]
+			if !ok {
+				continue
+			}
+			instruction.CallConv = convention
+			instruction.CallConvSet = true
+		}
+	}
+}
+
+func semanticDataDefinition(definitions []*ir.Data, candidate *ir.Data) bool {
+	for _, definition := range definitions {
+		if definition == candidate {
+			return true
+		}
+	}
+	return false
 }
 
 func safepointsHaveRoots(safepoints []safepoint) bool {
@@ -1270,7 +1309,7 @@ func (m *mc) prologue() {
 	if m.frameless {
 		return
 	}
-	if m.f.GoABI {
+	if m.f.UsesManagedFrame() {
 		if !m.f.NoSplit {
 			m.goStackPrologue()
 		}
@@ -1316,7 +1355,7 @@ func stpPairable(a, b Reg, off int) bool {
 }
 
 func (m *mc) zeroGoPointerSlots() {
-	if !m.f.GoABI {
+	if !m.f.UsesManagedFrame() {
 		return
 	}
 	for _, off := range goPointerFrameOffsets(m.f, m.allocOff, m.spillBase) {
@@ -1378,7 +1417,7 @@ func (m *mc) emitGoRegisterSpill(spill goRegisterSpill, load bool) {
 }
 
 func (m *mc) allocFrame() {
-	if !m.f.GoABI {
+	if !m.f.UsesManagedFrame() {
 		if m.frame <= 504 {
 			m.emit(a64.Stp(true, mcX29, mcX30, mcSP, -m.frame, a64.PreIndex))
 		} else {
@@ -1389,26 +1428,40 @@ func (m *mc) allocFrame() {
 		return
 	}
 	m.adjustSP(true, m.frame)
-	m.emit(a64.Stp(true, mcX29, mcX30, mcSP, -8, a64.SignedOffset))
-	m.emit(a64.SubImm(true, mcX29, mcSP, 8))
+	if m.outgoing == 0 {
+		m.emit(a64.Stp(true, mcX29, mcX30, mcSP, 0, a64.SignedOffset))
+		m.emit(a64.AddImm(true, mcX29, mcSP, 0))
+		return
+	}
+	m.emit(a64.AddImm(true, mcGP1, mcSP, 0))
+	outgoingHigh := m.outgoing >> 12
+	outgoingLow := m.outgoing & 0xfff
+	if outgoingHigh > 0 {
+		m.emit(a64.AddImmLSL12(true, mcGP1, mcGP1, uint32(outgoingHigh)))
+	}
+	if outgoingLow > 0 {
+		m.emit(a64.AddImm(true, mcGP1, mcGP1, uint32(outgoingLow)))
+	}
+	m.emit(a64.Stp(true, mcX29, mcX30, mcGP1, 0, a64.SignedOffset))
+	m.emit(a64.AddImm(true, mcX29, mcGP1, 0))
 }
 
 func (m *mc) frameTeardown() {
-	if !m.f.GoABI {
+	if !m.f.UsesManagedFrame() {
 		(m.newSel()).
 			frameTeardown(m.frame, m.hasDynAlloc, m.calleeSaved)
 		return
 	}
-	if m.hasDynAlloc {
-		m.emit(a64.AddImm(true, mcSP, mcX29, 8)) // undo any VLA growth
-	}
 	for i, r := range m.calleeSaved {
 		m.spillLoad(mreg(r), r.IsFloat(), 16+i*8, 8)
 	}
-	if !m.hasDynAlloc {
-		m.emit(a64.AddImm(true, mcSP, mcX29, 8))
-	}
-	m.emit(a64.Ldp(true, mcX29, mcX30, mcSP, -8, a64.SignedOffset))
+	// Read the frame record before changing x29, then reconstruct the bottom of
+	// this frame from FP. This also discards any dynamic allocation below SP.
+	m.emit(a64.LdrImm(true, mcGP1, mcX29, 0))
+	m.emit(a64.LdrImm(true, mcX30, mcX29, 8))
+	m.emit(a64.AddImm(true, mcSP, mcX29, 0))
+	m.adjustSP(true, m.outgoing)
+	m.emit(a64.AddImm(true, mcX29, mcGP1, 0))
 	m.adjustSP(false, m.frame)
 }
 
@@ -1471,8 +1524,8 @@ func (m *mc) adjustSP(sub bool, n int) {
 }
 
 func (m *mc) frameTop() int {
-	if m.f.GoABI {
-		return m.frame + 8
+	if m.f.UsesManagedFrame() {
+		return m.frame - m.outgoing
 	}
 	return m.frame
 }
@@ -1573,7 +1626,7 @@ func goPointerFrameOffsets(function *ir.Func, allocations map[*ir.Instr]int, spi
 			}
 		}
 	}
-	if function.GoABI {
+	if function.UsesManagedFrame() {
 		for _, temporary := range function.Temps {
 			if temporary.GCRef && temporary.Reg == ir.NoReg && temporary.Slot >= 0 {
 				seen[spillBase+temporary.Slot] = true
@@ -2542,7 +2595,7 @@ func (m *mc) regDiffers(r ir.Ref, avoid Reg) bool {
 
 func (m *mc) stackParam(in *ir.Instr) {
 	off := m.frameTop() + int(in.Aux)
-	if m.f.GoABI {
+	if m.f.UsesGoInternalCallConvention() {
 		off += goStackLinkSize
 	}
 	t := m.f.Temps[in.To.ID]
@@ -2602,6 +2655,7 @@ func (m *mc) callSequence(b *ir.Block, i int) int {
 		i++
 	}
 	call := &b.Instrs[i]
+	goInternal := callUsesGoInternal(m.f, call)
 	m.instrPC[call] = uint64(m.prog.Len() * 4)
 	m.recordLoc(call.Pos) // the OArg run carries no position; the call does
 	m.recordInline(call.Inl)
@@ -2610,7 +2664,7 @@ func (m *mc) callSequence(b *ir.Block, i int) int {
 		for _, a := range stackArgs {
 			r := m.src(a.Args[0], 0, a.Cls.Size())
 			offset := m.frameTop() + int(a.Aux)
-			if m.f.GoABI {
+			if goInternal {
 				offset += goStackLinkSize
 			}
 			m.emit(a64.StrImm(a.Cls.Size() == 8, r, mcX29, uint32(offset)))
@@ -2628,18 +2682,19 @@ func (m *mc) callSequence(b *ir.Block, i int) int {
 	}
 
 	stackBytes := int(call.Aux)
-	if stackBytes > 0 && !m.f.GoABI {
+	dynamicAAPCSFrame := stackBytes > 0 && !goInternal && !m.f.UsesManagedFrame()
+	if dynamicAAPCSFrame {
 		m.adjustSP(true, stackBytes)
 	}
 	for _, a := range stackArgs {
 		if a.RetAgg != nil {
-			m.emitStackAggregateArgument(a)
+			m.emitStackAggregateArgument(a, goInternal)
 			continue
 		}
 		sz := a.Cls.Size()
 		r := m.src(a.Args[0], 0, sz)
 		offset := int(a.Aux)
-		if m.f.GoABI {
+		if goInternal {
 			offset += goStackLinkSize
 		}
 		if a.Cls.IsFloat() {
@@ -2659,7 +2714,7 @@ func (m *mc) callSequence(b *ir.Block, i int) int {
 	if call.RetAgg != nil && !call.StackResult.IsNone() {
 		m.emitStackAggregateResult(call)
 	}
-	if stackBytes > 0 && !m.f.GoABI {
+	if dynamicAAPCSFrame {
 		m.adjustSP(false, stackBytes)
 	}
 	return i + 1
@@ -2680,13 +2735,17 @@ func (m *mc) materializeFrameAllocation(argument *ir.Instr) {
 	m.frameAddr(mreg(Reg(destination.Reg)), offset)
 }
 
-func (m *mc) emitStackAggregateArgument(argument *ir.Instr) {
+func (m *mc) emitStackAggregateArgument(argument *ir.Instr, goInternal bool) {
 	source := m.src(argument.Args[0], 0, 8)
 	if source != mcGP2 {
 		m.emit(a64.AddImm(true, mcGP2, source, 0))
 	}
 	size, _ := argument.RetAgg.Layout()
-	m.emitStackAggregateCopy(mcSP, goStackLinkSize+int(argument.Aux), mcGP2, 0, size)
+	destinationOffset := int(argument.Aux)
+	if goInternal {
+		destinationOffset += goStackLinkSize
+	}
+	m.emitStackAggregateCopy(mcSP, destinationOffset, mcGP2, 0, size)
 }
 
 func (m *mc) emitStackAggregateResult(call *ir.Instr) {
@@ -3468,15 +3527,32 @@ func zeroSize(d *ir.Data) int {
 func (m *mc) emitAsm(in *ir.Instr) {
 	asm := in.Asm
 	vals := make([]asmVal, len(asm.Ops))
-	scratchN := 0
-	nextScratch := func() Reg {
-		if scratchN >= len(intScratchRegs) {
-			m.fail("arm64: inline asm needs more scratch registers than are available")
-			return scratch0
+	clobbered := make(map[Reg]bool)
+	for _, register := range asmClobberRegs(in) {
+		clobbered[register] = true
+	}
+	integerScratch := availableAsmScratch(intScratchRegs[:], clobbered)
+	floatScratch := availableAsmScratch(floatScratchRegs[:], clobbered)
+	integerScratchIndex := 0
+	floatScratchIndex := 0
+	nextScratch := func(floatingPoint bool) Reg {
+		registers := integerScratch
+		index := &integerScratchIndex
+		kind := "integer"
+		fallback := scratch0
+		if floatingPoint {
+			registers = floatScratch
+			index = &floatScratchIndex
+			kind = "floating-point"
+			fallback = fscratch0
 		}
-		r := intScratchRegs[scratchN]
-		scratchN++
-		return r
+		if *index >= len(registers) {
+			m.fail("arm64: inline asm needs more non-clobbered %s scratch registers than are available", kind)
+			return fallback
+		}
+		register := registers[*index]
+		(*index)++
+		return register
 	}
 
 	// Walk the operands in %N order, drawing register outputs from To/Defs and
@@ -3492,7 +3568,7 @@ func (m *mc) emitAsm(in *ir.Instr) {
 		if t.Reg != ir.NoReg {
 			return Reg(t.Reg), w
 		}
-		r := nextScratch()
+		r := nextScratch(m.f.ClassOf(oref).IsFloat())
 		slot := m.spillBase + t.Slot
 		finals = append(finals, func() { m.spillStore(mreg(r), r.IsFloat(), slot, w) })
 		return r, w
@@ -3506,7 +3582,14 @@ func (m *mc) emitAsm(in *ir.Instr) {
 			r, w := resolveOut()
 			pre, _ := m.asmInputReg(in.Args[ac], nextScratch) // preload value
 			ac++
-			m.emit(a64.MovReg(w == 8, mreg(r), mreg(pre))) // preload the read-write register
+			switch {
+			case r.IsFloat() && w == 16:
+				m.emit(a64.MovVec16b(mreg(r), mreg(pre)))
+			case r.IsFloat():
+				m.emit(a64.FmovReg(w == 8, mreg(r), mreg(pre)))
+			default:
+				m.emit(a64.MovReg(w == 8, mreg(r), mreg(pre)))
+			}
 			vals[i] = asmVal{reg: r, width: w}
 		case ir.AsmImm:
 			vals[i] = asmVal{lit: true, litS: fmt.Sprintf("#%d", m.f.Consts[in.Args[ac].ID].Int)}
@@ -3555,9 +3638,19 @@ func (m *mc) emitAsm(in *ir.Instr) {
 	}
 }
 
+func availableAsmScratch(candidates []Reg, clobbered map[Reg]bool) []Reg {
+	available := make([]Reg, 0, len(candidates))
+	for _, register := range candidates {
+		if !clobbered[register] {
+			available = append(available, register)
+		}
+	}
+	return available
+}
+
 // asmInputReg yields a register holding an inline-asm operand's value, loading a
 // spilled temporary or materializing a constant into a scratch register first.
-func (m *mc) asmInputReg(ref ir.Ref, nextScratch func() Reg) (Reg, int) {
+func (m *mc) asmInputReg(ref ir.Ref, nextScratch func(bool) Reg) (Reg, int) {
 	switch ref.Kind {
 	case ir.RefTemp:
 		t := m.f.Temps[ref.ID]
@@ -3565,12 +3658,12 @@ func (m *mc) asmInputReg(ref ir.Ref, nextScratch func() Reg) (Reg, int) {
 		if t.Reg != ir.NoReg {
 			return Reg(t.Reg), w
 		}
-		r := nextScratch()
+		r := nextScratch(m.f.ClassOf(ref).IsFloat())
 		m.spillLoad(mreg(r), r.IsFloat(), m.spillBase+t.Slot, w)
 		return r, w
 	case ir.RefConst:
 		c := m.f.Consts[ref.ID]
-		r := nextScratch()
+		r := nextScratch(false)
 		switch c.Kind {
 		case ir.ConstInt:
 			m.movImm(mreg(r), c.Int, true)

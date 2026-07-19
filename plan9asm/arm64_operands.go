@@ -267,6 +267,13 @@ func normalizeImmediate(immediate string) string {
 }
 
 func (t *arm64Translator) resolveIntegerExpression(source string) (int64, error) {
+	return ResolveIntegerExpression(source, t.options.Defines)
+}
+
+// ResolveIntegerExpression evaluates an integer expression used by Plan 9
+// assembly after include and macro expansion. Defines supplies constants from
+// generated go_asm.h data and package declarations.
+func ResolveIntegerExpression(source string, defines map[string]int64) (int64, error) {
 	source = strings.TrimSpace(source)
 	if strings.HasPrefix(source, "~") {
 		source = "^" + strings.TrimSpace(strings.TrimPrefix(source, "~"))
@@ -275,10 +282,14 @@ func (t *arm64Translator) resolveIntegerExpression(source string) (int64, error)
 	if err != nil {
 		return 0, err
 	}
-	return t.evaluateIntegerExpression(expression)
+	return evaluateIntegerExpression(expression, defines)
 }
 
 func (t *arm64Translator) evaluateIntegerExpression(expression ast.Expr) (int64, error) {
+	return evaluateIntegerExpression(expression, t.options.Defines)
+}
+
+func evaluateIntegerExpression(expression ast.Expr, defines map[string]int64) (int64, error) {
 	switch expression := expression.(type) {
 	case *ast.BasicLit:
 		if expression.Kind != token.INT {
@@ -294,15 +305,15 @@ func (t *arm64Translator) evaluateIntegerExpression(expression ast.Expr) (int64,
 		}
 		return int64(unsigned), nil
 	case *ast.Ident:
-		value, ok := t.options.Defines[expression.Name]
+		value, ok := defines[expression.Name]
 		if !ok {
 			return 0, fmt.Errorf("undefined assembly constant %s", expression.Name)
 		}
 		return value, nil
 	case *ast.ParenExpr:
-		return t.evaluateIntegerExpression(expression.X)
+		return evaluateIntegerExpression(expression.X, defines)
 	case *ast.UnaryExpr:
-		value, err := t.evaluateIntegerExpression(expression.X)
+		value, err := evaluateIntegerExpression(expression.X, defines)
 		if err != nil {
 			return 0, err
 		}
@@ -317,11 +328,11 @@ func (t *arm64Translator) evaluateIntegerExpression(expression ast.Expr) (int64,
 			return 0, fmt.Errorf("unsupported unary operator %s", expression.Op)
 		}
 	case *ast.BinaryExpr:
-		left, err := t.evaluateIntegerExpression(expression.X)
+		left, err := evaluateIntegerExpression(expression.X, defines)
 		if err != nil {
 			return 0, err
 		}
-		right, err := t.evaluateIntegerExpression(expression.Y)
+		right, err := evaluateIntegerExpression(expression.Y, defines)
 		if err != nil {
 			return 0, err
 		}

@@ -14,6 +14,8 @@ type goFunctionInfo struct {
 	name                 string
 	frameSize            int
 	frameStart           int
+	managedAAPCS         bool
+	outgoingSize         int
 	size                 uint64
 	funcID               byte
 	funcFlag             byte
@@ -253,6 +255,15 @@ func (builder *goMetadataBuilder) build(functions, translatedFunctions []goFunct
 		stackMapOffsets[index] = uint32(builder.offset(".goc.go.pctab"))
 		builder.data = append(builder.data, goStackMapPCData(function.frameStart, stackMapIndexPoints[index])...)
 	}
+	aapcsFrameOffsets := make([]uint32, len(functions))
+	for index, function := range functions {
+		aapcsFrameOffsets[index] = uint32(builder.offset(".goc.go.pctab"))
+		outgoingSize := -1
+		if function.managedAAPCS {
+			outgoingSize = function.outgoingSize
+		}
+		builder.data = append(builder.data, goAAPCSFramePCData(function.frameStart, outgoingSize)...)
+	}
 	builder.label(".goc.go.pctab.end")
 	builder.align(4)
 
@@ -290,12 +301,16 @@ func (builder *goMetadataBuilder) build(functions, translatedFunctions []goFunct
 		builder.u32(pcspOffsets[index])
 		builder.u32(0)
 		builder.u32(0)
-		builder.u32(2)
+		builder.u32(6)
 		builder.u32(0)
 		builder.u32(0)
 		builder.bytes(function.funcID, function.funcFlag, 0, 2)
 		builder.u32(unsafePointOffsets[index])
 		builder.u32(stackMapOffsets[index])
+		builder.u32(0)
+		builder.u32(0)
+		builder.u32(0)
+		builder.u32(aapcsFrameOffsets[index])
 		builder.u32(argumentOffsets[index])
 		builder.u32(localOffsets[index])
 	}
@@ -386,11 +401,54 @@ func (builder *goMetadataBuilder) build(functions, translatedFunctions []goFunct
 	}
 }
 
+// goAAPCSFramePCData describes cg12's managed AAPCS frame record to the copied
+// runtime. PCDATA slots 0-4 are defined by Go; cg12 reserves slot 5 for the
+// outgoing area between the physical SP and the saved {FP, LR} pair. A value
+// of -1 identifies functions that retain the standard Go assembly frame shape.
+func goAAPCSFramePCData(frameStart, outgoingSize int) []byte {
+	if outgoingSize < 0 {
+		return goPCValueTable(0, -1)
+	}
+	return goPCValueTable(frameStart, outgoingSize)
+}
+
+func goPCValueTable(frameStart, value int) []byte {
+	var data []byte
+	appendUvarint := func(value uint32) {
+		for value >= 0x80 {
+			data = append(data, byte(value)|0x80)
+			value >>= 7
+		}
+		data = append(data, byte(value))
+	}
+	appendVarint := func(value int) {
+		encoded := uint32(value << 1)
+		if value < 0 {
+			encoded = ^encoded
+		}
+		appendUvarint(encoded)
+	}
+
+	current := -1
+	if frameStart > 0 {
+		appendVarint(0)
+		appendUvarint(uint32(frameStart / 4))
+	}
+	appendVarint(value - current)
+	appendUvarint(^uint32(0))
+	appendUvarint(0)
+	return data
+}
+
 func goLocalStackMapWords(function goFunctionInfo) int {
 	if function.noLocalPointers {
 		return 0
 	}
-	words := (function.frameSize - 16) / 8
+	frameSize := function.frameSize
+	if function.managedAAPCS {
+		frameSize -= function.outgoingSize
+	}
+	words := (frameSize - 16) / 8
 	if words < 0 {
 		return 0
 	}

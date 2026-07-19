@@ -3,7 +3,11 @@
 // register allocation, and GNU-assembler text emission.
 package arm64
 
-import "fmt"
+import (
+	"fmt"
+
+	"github.com/evanphx/cg12/ir"
+)
 
 // Reg is a physical AArch64 register identifier. Integer registers X0..X30 use
 // ids 0..30; SP and the zero register follow; the SIMD/FP registers V0..V31
@@ -230,6 +234,17 @@ func calleeSavedFor(goABI bool, r Reg) bool {
 		return false
 	}
 	return calleeSavedReg(r)
+}
+
+// registerSurvivesManagedCalls reports whether a value may remain in register
+// across an arbitrary call. Managed functions can enter the raw stack-growth
+// path, which follows Go's volatile-register contract even when the function's
+// ordinary calls use AAPCS64.
+func registerSurvivesManagedCalls(function *ir.Func, register Reg) bool {
+	if function.UsesManagedFrame() {
+		return false
+	}
+	return calleeSavedFor(function.UsesGoInternalCallConvention(), register)
 }
 
 // intScratch and fscratch map a slot to a reserved scratch register. General

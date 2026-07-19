@@ -1,0 +1,39 @@
+{
+  "version": 1,
+  "files": [
+    {
+      "package": "runtime",
+      "path": "src/runtime/set_vma_name_linux.go",
+      "file": "linux_arm64/runtime/set_vma_name_linux.go",
+      "mode": "replace",
+      "reason": "VMA labels are diagnostic-only and currently force a nine-value managed AAPCS64 call through Syscall6 while the dedicated outgoing stack area is being implemented.",
+      "upstream_sha256": "d4360e1d3e9ca42ec05150de6820e5ac551b4cb6ad669a4eac50e5da0090659c",
+      "goos": ["linux"],
+      "goarch": ["arm64"],
+      "remove_when": "Managed AAPCS64 stack arguments have a fixed outgoing area that does not overlap the Go saved-LR slot."
+    },
+    {
+      "package": "runtime",
+      "path": "src/runtime/cg12_overlay_linux_arm64.go",
+      "file": "linux_arm64/runtime/cg12_overlay_linux_arm64.go",
+      "mode": "add",
+      "reason": "Expose the active bootstrap overlay revision inside the runtime package for diagnostics and tests.",
+      "goos": ["linux"],
+      "goarch": ["arm64"],
+      "remove_when": "The runtime builds without any cg12-specific source overlays."
+    },
+    {
+      "package": "runtime",
+      "path": "src/runtime/cg12_overlay.ssa",
+      "file": "linux_arm64/runtime/cg12_overlay.ssa",
+      "mode": "add",
+      "reason": "Exercise native cg12 textual overlays independently of Go parsing and Plan 9 assembly translation.",
+      "call_convention": "aapcs64",
+      "managed_frame": false,
+      "nosplit": true,
+      "goos": ["linux"],
+      "goarch": ["arm64"],
+      "remove_when": "No runtime bootstrap or foreign-entry bridge needs a native cg12 implementation."
+    }
+  ]
+}

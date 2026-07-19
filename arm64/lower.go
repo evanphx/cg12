@@ -845,7 +845,7 @@ func lowerABI(f *ir.Func) error {
 	// address in x8; capture it at entry so the returns can write there.
 	var retBuf ir.Ref
 	if f.RetAgg != nil {
-		if f.GoABI {
+		if f.UsesGoInternalCallConvention() {
 			resultAssigner := newArgAssigner(true)
 			_, onStack, _ := assignGoAggregate(&resultAssigner, f.RetAgg)
 			if onStack {
@@ -855,6 +855,12 @@ func lowerABI(f *ir.Func) error {
 		} else if classifyAgg(f.RetAgg).kind == aggMemory {
 			retBuf = f.NewTemp("retbuf", ir.ClsL)
 		}
+	}
+	if !retBuf.IsNone() {
+		// The hidden result buffer points into the caller's stack. It remains
+		// live for the entire function and must be rewritten if a nested call
+		// grows and copies that stack.
+		f.MarkGCRef(retBuf)
 	}
 	if err := lowerParams(f, retBuf); err != nil {
 		return err
@@ -888,17 +894,17 @@ func lowerTailCalls(f *ir.Func) error {
 }
 
 func lowerParams(f *ir.Func, retBuf ir.Ref) error {
-	a := newArgAssigner(f.GoABI)
+	a := newArgAssigner(f.UsesGoInternalCallConvention())
 	// Register/stack parameter moves (OPar) must precede any aggregate
 	// reconstruction, so the emitter can treat the OPar run as one parallel move.
 	var pars, recon []ir.Instr
-	if !retBuf.IsNone() && !f.GoABI {
+	if !retBuf.IsNone() && !f.UsesGoInternalCallConvention() {
 		// The indirect-result pointer arrives in x8, alongside the arguments.
 		pin := newPinned(f, X8, ir.ClsL)
 		pars = append(pars, ir.Instr{Op: ir.OPar, Cls: ir.ClsL, To: retBuf, Args: []ir.Ref{pin}})
 	}
 	for parameterIndex := 0; parameterIndex < len(f.Params); {
-		if group, ok := valueGroupAt(f.ParamGroups, parameterIndex); ok {
+		if group, ok := valueGroupAt(f.ParamGroups, parameterIndex); f.UsesGoInternalCallConvention() && ok {
 			end := parameterIndex + group.Count
 			if end > len(f.Params) {
 				return fmt.Errorf("arm64: aggregate parameter group extends beyond parameter list")
@@ -933,7 +939,7 @@ func lowerParams(f *ir.Func, retBuf ir.Ref) error {
 		pars = append(pars, ir.Instr{Op: ir.OPar, Cls: p.Cls, To: p.Ref(), Args: []ir.Ref{pin}})
 		parameterIndex++
 	}
-	if !retBuf.IsNone() && f.GoABI {
+	if !retBuf.IsNone() && f.UsesGoInternalCallConvention() {
 		resultAssigner := newArgAssigner(true)
 		resultAssigner.nsaa = roundUp(a.nsaa, 8)
 		_, onStack, resultOffset := assignGoAggregate(&resultAssigner, f.RetAgg)
@@ -951,9 +957,14 @@ func lowerParams(f *ir.Func, retBuf ir.Ref) error {
 // instructions (for a Memory-class pointer) and the reconstruction instructions
 // (for register-class aggregates, which are rebuilt into a stack slot).
 func lowerAggParam(f *ir.Func, p *ir.Temp, a *argAssigner) (pars, recon []ir.Instr, err error) {
-	if f.GoABI {
+	if f.UsesGoInternalCallConvention() {
 		return lowerGoAggregateParam(f, p, a)
 	}
+	// Aggregate parameters are represented by an address. Depending on their
+	// classification, it points into this frame, the incoming argument area, or
+	// caller-owned storage. A copying stack must relocate it whenever that
+	// storage is on the stack.
+	f.MarkGCRef(p.Ref())
 	cls := classifyAgg(p.Agg)
 	if cls.kind == aggMemory {
 		// Passed by reference: the incoming value is already a pointer.
@@ -985,10 +996,16 @@ func lowerAggParam(f *ir.Func, p *ir.Temp, a *argAssigner) (pars, recon []ir.Ins
 
 	// Reconstruct: allocate a slot, store each incoming register into it, and
 	// make the parameter point at the slot.
-	slot := f.NewTemp("", ir.ClsL)
-	recon = append(recon, ir.Instr{Op: ir.OAlloc16, Cls: ir.ClsL, To: slot, Args: []ir.Ref{f.Long(int64(len(regs) * elemSize))}})
+	slot := aggregateAlloc(f, p.Agg, &recon)
+	pointerAt := make(map[int]bool)
+	for _, offset := range goAggregatePointerOffsets(p.Agg) {
+		pointerAt[offset] = true
+	}
 	for i, r := range regs {
 		pin := newPinned(f, r, elemCls)
+		if pointerAt[i*elemSize] {
+			f.MarkGCRef(pin)
+		}
 		addr := slot
 		if i > 0 {
 			tmp := f.NewTemp("", ir.ClsL)
@@ -1007,7 +1024,7 @@ func lowerReturns(f *ir.Func, retBuf ir.Ref) error {
 			continue
 		}
 		if f.RetAgg != nil {
-			if f.GoABI {
+			if f.UsesGoInternalCallConvention() {
 				var err error
 				if f.RetValues {
 					err = lowerGoValueReturn(f, b, retBuf)
@@ -1015,6 +1032,10 @@ func lowerReturns(f *ir.Func, retBuf ir.Ref) error {
 					err = lowerGoAggregateReturn(f, b, retBuf)
 				}
 				if err != nil {
+					return err
+				}
+			} else if f.RetValues {
+				if err := lowerAAPCSValueReturn(f, b, retBuf); err != nil {
 					return err
 				}
 			} else {
@@ -1075,11 +1096,12 @@ func lowerCalls(f *ir.Func) error {
 			}
 			callee := in.Args[0]
 			callArgs := in.Args[1:]
+			goInternal := callUsesGoInternal(f, &in)
 			pins := make([]ir.Ref, 0, len(callArgs))
 			var argSetup []ir.Instr // the OArg run, emitted after value computation
-			a := newArgAssigner(f.GoABI)
+			a := newArgAssigner(goInternal)
 			for argumentIndex := 0; argumentIndex < len(callArgs); {
-				if group, ok := valueGroupAt(in.ArgGroups, argumentIndex); ok {
+				if group, ok := valueGroupAt(in.ArgGroups, argumentIndex); goInternal && ok {
 					end := argumentIndex + group.Count
 					if end > len(callArgs) {
 						return fmt.Errorf("arm64: aggregate argument group extends beyond call argument list")
@@ -1096,7 +1118,7 @@ func lowerCalls(f *ir.Func) error {
 				arg := callArgs[argumentIndex]
 				if agg := aggArgAt(&in, argumentIndex); agg != nil {
 					var err error
-					argSetup, pins, err = lowerAggArg(f, arg, agg, &a, &out, argSetup, pins)
+					argSetup, pins, err = lowerAggArg(f, arg, agg, goInternal, &a, &out, argSetup, pins)
 					if err != nil {
 						return err
 					}
@@ -1138,7 +1160,7 @@ func lowerCalls(f *ir.Func) error {
 			case in.To.IsNone():
 				// no result
 			case in.RetAgg != nil:
-				if f.GoABI {
+				if goInternal {
 					var err error
 					if in.RetValues {
 						destinations := append([]ir.Ref{in.To}, in.Defs...)
@@ -1148,6 +1170,14 @@ func lowerCalls(f *ir.Func) error {
 						callTo, callCls, callDefs, argSetup, pins, post, stackResult, stackResultOffset, resultEnd, err =
 							lowerGoAggregateResult(f, in.To, in.RetAgg, resultEnd, &out, argSetup, pins)
 					}
+					if err != nil {
+						return err
+					}
+				} else if in.RetValues {
+					var err error
+					destinations := append([]ir.Ref{in.To}, in.Defs...)
+					callTo, callCls, callDefs, argSetup, pins, post, err =
+						lowerAAPCSValueResult(f, destinations, in.RetAgg, &a, &out, argSetup, pins)
 					if err != nil {
 						return err
 					}
@@ -1162,6 +1192,9 @@ func lowerCalls(f *ir.Func) error {
 			}
 
 			if in.Tail {
+				if goInternal != f.UsesGoInternalCallConvention() {
+					return fmt.Errorf("arm64: cannot tail-call across calling conventions")
+				}
 				// A tail call writes its stack arguments into this function's own
 				// incoming-argument area (reused after the frame is torn down), so
 				// the callee's stack args must fit in the space our caller gave us.
@@ -1172,13 +1205,19 @@ func lowerCalls(f *ir.Func) error {
 			}
 			out = append(out, argSetup...)
 			stackBytes := a.stackBytes()
-			if f.GoABI {
+			if goInternal {
 				stackBytes = goCallStackBytes(f, &in, resultEnd)
+			} else if f.UsesManagedFrame() {
+				stackBytes = aapcsCallStackBytes(f, &in)
 			}
 			loweredCall := ir.Instr{
 				Op: ir.OCall, Args: append([]ir.Ref{callee}, pins...),
 				Aux: int64(stackBytes), To: callTo, Cls: callCls, Defs: callDefs,
 				Tail: in.Tail, ClosureCall: in.ClosureCall, Pos: in.Pos, Inl: in.Inl,
+				CallConv: ir.CallConvAAPCS64, CallConvSet: true,
+			}
+			if goInternal {
+				loweredCall.CallConv = ir.CallConvGoInternal
 			}
 			if !stackResult.IsNone() {
 				loweredCall.RetAgg = in.RetAgg
@@ -1191,6 +1230,77 @@ func lowerCalls(f *ir.Func) error {
 		b.Instrs = out
 	}
 	return nil
+}
+
+func lowerAAPCSValueResult(
+	function *ir.Func,
+	destinations []ir.Ref,
+	aggregate *ir.AggType,
+	assigner *argAssigner,
+	out *[]ir.Instr,
+	setup []ir.Instr,
+	pins []ir.Ref,
+) (ir.Ref, ir.Cls, []ir.Ref, []ir.Instr, []ir.Ref, []ir.Instr, error) {
+	parts, flattenable := flattenGoAggregate(aggregate)
+	if !flattenable || len(parts) != len(destinations) {
+		return ir.R, 0, nil, nil, nil, nil,
+			fmt.Errorf("arm64: AAPCS aggregate result has %d SSA parts, want %d", len(destinations), len(parts))
+	}
+	for index, destination := range destinations {
+		class := function.ClassOf(destination)
+		if class != parts[index].sub.Cls() {
+			return ir.R, 0, nil, nil, nil, nil,
+				fmt.Errorf("arm64: AAPCS aggregate result part %d has class %s, want %s", index, class, parts[index].sub.Cls())
+		}
+	}
+
+	resultPointer := function.NewTemp("", ir.ClsL)
+	callTo, callClass, definitions, setup, pins, post :=
+		lowerAggResult(function, resultPointer, aggregate, assigner, out, setup, pins)
+	for index, part := range parts {
+		address := offsetAddr(function, resultPointer, part.offset, &post)
+		post = append(post, ir.Instr{
+			Op:   loadOpForSub(part.sub),
+			Cls:  part.sub.Cls(),
+			To:   destinations[index],
+			Args: []ir.Ref{address},
+		})
+	}
+	return callTo, callClass, definitions, setup, pins, post, nil
+}
+
+func lowerAAPCSValueReturn(function *ir.Func, block *ir.Block, resultBuffer ir.Ref) error {
+	values := append([]ir.Ref{block.Jmp.Arg}, block.Jmp.Args...)
+	parts, flattenable := flattenGoAggregate(function.RetAgg)
+	if !flattenable || len(parts) != len(values) {
+		return fmt.Errorf("arm64: AAPCS aggregate return has %d SSA parts, want %d", len(values), len(parts))
+	}
+
+	resultPointer := aggregateAlloc(function, function.RetAgg, &block.Instrs)
+	for index, part := range parts {
+		value := values[index]
+		class := function.ClassOf(value)
+		if class != part.sub.Cls() {
+			return fmt.Errorf("arm64: AAPCS aggregate return part %d has class %s, want %s", index, class, part.sub.Cls())
+		}
+		address := offsetAddr(function, resultPointer, part.offset, &block.Instrs)
+		block.Instrs = append(block.Instrs, ir.Instr{
+			Op:   storeOpForSub(part.sub),
+			Cls:  part.sub.Cls(),
+			Args: []ir.Ref{value, address},
+		})
+	}
+	block.Jmp.Arg = resultPointer
+	block.Jmp.Args = nil
+	lowerAggReturn(function, block, resultBuffer)
+	return nil
+}
+
+func callUsesGoInternal(function *ir.Func, call *ir.Instr) bool {
+	if call.CallConvSet {
+		return call.CallConv == ir.CallConvGoInternal
+	}
+	return function.UsesGoInternalCallConvention()
 }
 
 // lowerTLS rewrites references to thread-local variables into instructions the

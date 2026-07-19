@@ -1,0 +1,5 @@
+export function w $runtime_cg12OverlayActive() {
+@start
+	%active =w asm "mov %w0, #1" (("=r", w, %active)) exact
+	ret %active
+}

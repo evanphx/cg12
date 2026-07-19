@@ -32,20 +32,21 @@ type goArgumentFrame struct {
 	pointerWords []int
 }
 
-// goRegisterSpills returns the ABIInternal entry spills used by the standard
+// goRegisterSpills returns the managed-frame entry spills used by the standard
 // stack-growth prologue. Register arguments have home slots after all stack
-// arguments and stack results. morestack copies those slots with the caller's
-// frame, and the retry path reloads the argument registers from them.
+// arguments (and ABIInternal stack results). morestack copies those slots with
+// the caller's frame, and the retry path reloads the argument registers.
 func goRegisterSpills(function *ir.Func) []goRegisterSpill {
 	return goArgumentFrameFor(function).spills
 }
 
 func goArgumentFrameFor(function *ir.Func) goArgumentFrame {
-	assigner := newArgAssigner(true)
+	goInternal := function.UsesGoInternalCallConvention()
+	assigner := newArgAssigner(goInternal)
 	groups := make([]goRegisterSpillGroup, 0, len(function.Params))
 	pointerOffsets := make(map[int]bool)
 	for parameterIndex := 0; parameterIndex < len(function.Params); {
-		if group, ok := valueGroupAt(function.ParamGroups, parameterIndex); ok {
+		if group, ok := valueGroupAt(function.ParamGroups, parameterIndex); goInternal && ok {
 			parts, onStack, stackOffset := assignGoAggregate(&assigner, group.Type)
 			if onStack {
 				for _, offset := range goAggregatePointerOffsets(group.Type) {
@@ -62,9 +63,44 @@ func goArgumentFrameFor(function *ir.Func) goArgumentFrame {
 			parameterIndex += group.Count
 			continue
 		}
+		if group, ok := valueGroupAt(function.ParamGroups, parameterIndex); !goInternal && ok {
+			parts, flattenable := flattenGoAggregate(group.Type)
+			if !flattenable || len(parts) != group.Count {
+				parts = make([]goABIPart, group.Count)
+			}
+			for partIndex := 0; partIndex < group.Count; partIndex++ {
+				parameter := function.Params[parameterIndex+partIndex]
+				location := assigner.assign(parameter.Cls)
+				pointer := parameter.GCRef || parts[partIndex].pointer
+				if location.onStack {
+					if pointer {
+						pointerOffsets[location.stacky] = true
+					}
+					continue
+				}
+				groups = append(groups, goRegisterSpillGroup{
+					reg:       location.reg,
+					size:      parameter.Cls.Size(),
+					alignment: parameter.Cls.Size(),
+					float:     parameter.Cls.IsFloat(),
+					pointer:   pointer,
+				})
+			}
+			parameterIndex += group.Count
+			continue
+		}
 
 		parameter := function.Params[parameterIndex]
 		if parameter.Agg != nil {
+			if !goInternal {
+				aapcsGroups, stackPointers := aapcsAggregateSpillGroups(&assigner, parameter.Agg)
+				groups = append(groups, aapcsGroups...)
+				for _, offset := range stackPointers {
+					pointerOffsets[offset] = true
+				}
+				parameterIndex++
+				continue
+			}
 			parts, onStack, stackOffset := assignGoAggregate(&assigner, parameter.Agg)
 			if onStack {
 				for _, offset := range goAggregatePointerOffsets(parameter.Agg) {
@@ -116,7 +152,7 @@ func goArgumentFrameFor(function *ir.Func) goArgumentFrame {
 	}
 
 	resultEnd := roundUp(assigner.nsaa, 8)
-	if function.RetAgg != nil {
+	if function.RetAgg != nil && goInternal {
 		results := newArgAssigner(true)
 		results.nsaa = resultEnd
 		_, onStack, stackOffset := assignGoAggregate(&results, function.RetAgg)
@@ -127,10 +163,21 @@ func goArgumentFrameFor(function *ir.Func) goArgumentFrame {
 		}
 		resultEnd = results.nsaa
 	}
+	if function.RetAgg != nil && !goInternal && classifyAgg(function.RetAgg).kind == aggMemory {
+		groups = append(groups, goRegisterSpillGroup{
+			reg:       X8,
+			size:      8,
+			alignment: 8,
+			pointer:   true,
+		})
+	}
 
 	cursor := roundUp(resultEnd, 8)
 	var spills []goRegisterSpill
 	for _, group := range groups {
+		if group.size == 0 {
+			continue
+		}
 		cursor = roundUp(cursor, group.alignment)
 		if len(group.parts) == 0 {
 			spill := goRegisterSpill{
@@ -170,6 +217,87 @@ func goArgumentFrameFor(function *ir.Func) goArgumentFrame {
 	}
 	sort.Ints(pointerWords)
 	return goArgumentFrame{spills: spills, size: cursor, pointerWords: pointerWords}
+}
+
+func aapcsAggregateSpillGroups(assigner *argAssigner, aggregate *ir.AggType) ([]goRegisterSpillGroup, []int) {
+	classification := classifyAgg(aggregate)
+	if classification.size == 0 {
+		return nil, nil
+	}
+	pointerOffsets := goAggregatePointerOffsets(aggregate)
+	pointerAt := make(map[int]bool, len(pointerOffsets))
+	for _, offset := range pointerOffsets {
+		pointerAt[offset] = true
+	}
+
+	switch classification.kind {
+	case aggMemory:
+		location := assigner.assign(ir.ClsL)
+		if location.onStack {
+			return nil, []int{location.stacky}
+		}
+		return []goRegisterSpillGroup{{
+			reg:       location.reg,
+			size:      8,
+			alignment: 8,
+			pointer:   true,
+		}}, nil
+	case aggGP:
+		registers, onStack, stackOffset := assigner.assignGP(classification.nregs, classification.size)
+		if onStack {
+			stackPointers := make([]int, 0, len(pointerOffsets))
+			for _, offset := range pointerOffsets {
+				stackPointers = append(stackPointers, stackOffset+offset)
+			}
+			return nil, stackPointers
+		}
+		parts := make([]goABIPart, len(registers))
+		for index, register := range registers {
+			parts[index] = goABIPart{
+				sub:     ir.SubL,
+				offset:  index * 8,
+				pointer: pointerAt[index*8],
+				reg:     register,
+			}
+		}
+		return []goRegisterSpillGroup{{
+			parts:     parts,
+			size:      len(registers) * 8,
+			alignment: 8,
+		}}, nil
+	case aggHFA:
+		registers, onStack, _ := assigner.assignHFA(classification.nregs, classification.size)
+		if onStack {
+			return nil, nil
+		}
+		parts := make([]goABIPart, len(registers))
+		for index, register := range registers {
+			parts[index] = goABIPart{
+				sub:    semanticSubClass(classification.elem),
+				offset: index * classification.elem.Size(),
+				reg:    register,
+			}
+		}
+		return []goRegisterSpillGroup{{
+			parts:     parts,
+			size:      classification.size,
+			alignment: classification.elem.Size(),
+		}}, nil
+	}
+	return nil, nil
+}
+
+func semanticSubClass(class ir.Cls) ir.SubCls {
+	switch class {
+	case ir.ClsS:
+		return ir.SubS
+	case ir.ClsD:
+		return ir.SubD
+	case ir.ClsQ:
+		return ir.SubQ
+	default:
+		return ir.SubL
+	}
 }
 
 func valueGroupAt(groups []ir.ValueGroup, index int) (ir.ValueGroup, bool) {
@@ -217,6 +345,9 @@ func maxOutgoingCallSize(function *ir.Func) int {
 		for index := range block.Instrs {
 			instruction := &block.Instrs[index]
 			if instruction.Op != ir.OCall || instruction.Tail {
+				continue
+			}
+			if !function.UsesManagedFrame() && !callUsesGoInternal(function, instruction) {
 				continue
 			}
 			maximum = max(maximum, int(instruction.Aux))
@@ -345,6 +476,9 @@ func aggregateAlloc(f *ir.Func, aggregate *ir.AggType, out *[]ir.Instr) ir.Ref {
 	}
 	slot := f.NewTemp("", ir.ClsL)
 	*out = append(*out, ir.Instr{Op: operation, Cls: ir.ClsL, To: slot, Args: []ir.Ref{f.Long(int64(size))}})
+	// The aggregate is addressed through this temporary after nested calls.
+	// Relocate that interior stack pointer when a goroutine stack is copied.
+	f.MarkGCRef(slot)
 	markAggregatePointerWords(f, slot, aggregate)
 	return slot
 }
@@ -353,6 +487,9 @@ func markAggregatePointerWords(f *ir.Func, slot ir.Ref, aggregate *ir.AggType) {
 	parts, ok := flattenGoAggregate(aggregate)
 	if !ok {
 		return
+	}
+	if f.StackPointerWords == nil {
+		f.StackPointerWords = make(map[uint32]map[int]bool)
 	}
 	for _, part := range parts {
 		if !part.pointer || part.offset%8 != 0 {
@@ -788,6 +925,85 @@ func goCallStackBytes(f *ir.Func, call *ir.Instr, resultEnd int) int {
 	for _, spill := range spills {
 		cursor = roundUp(cursor, spill.alignment)
 		cursor += spill.size
+	}
+	if call.ClosureCall {
+		cursor = roundUp(cursor, 8)
+		cursor += 8
+	}
+	cursor = roundUp(cursor, 8)
+	if cursor == 0 {
+		return 0
+	}
+	return roundUp(goStackLinkSize+cursor, 16)
+}
+
+// aapcsCallStackBytes returns the temporary call area a managed AAPCS64 caller
+// must reserve. Stack arguments retain their ordinary AAPCS64 offsets at the
+// bottom of the area. Register arguments are given Go stack-growth home slots
+// above them so a callee can preserve them across morestack.
+func aapcsCallStackBytes(f *ir.Func, call *ir.Instr) int {
+	assigner := newArgAssigner(false)
+	var homes []goABISpill
+	arguments := call.Args[1:]
+	for argumentIndex := 0; argumentIndex < len(arguments); {
+		if group, ok := valueGroupAt(call.ArgGroups, argumentIndex); ok {
+			for partIndex := 0; partIndex < group.Count; partIndex++ {
+				class := f.ClassOf(arguments[argumentIndex+partIndex])
+				location := assigner.assign(class)
+				if !location.onStack {
+					homes = append(homes, goABISpill{size: class.Size(), alignment: class.Size()})
+				}
+			}
+			argumentIndex += group.Count
+			continue
+		}
+
+		aggregate := aggArgAt(call, argumentIndex)
+		if aggregate != nil {
+			classification := classifyAgg(aggregate)
+			switch classification.kind {
+			case aggMemory:
+				location := assigner.assign(ir.ClsL)
+				if !location.onStack {
+					homes = append(homes, goABISpill{size: 8, alignment: 8})
+				}
+			case aggGP:
+				registers, onStack, _ := assigner.assignGP(classification.nregs, classification.size)
+				if !onStack && len(registers) > 0 {
+					homes = append(homes, goABISpill{size: len(registers) * 8, alignment: 8})
+				}
+			case aggHFA:
+				registers, onStack, _ := assigner.assignHFA(classification.nregs, classification.size)
+				if !onStack && len(registers) > 0 {
+					homes = append(homes, goABISpill{
+						size:      classification.size,
+						alignment: classification.elem.Size(),
+					})
+				}
+			}
+			argumentIndex++
+			continue
+		}
+
+		class := f.ClassOf(arguments[argumentIndex])
+		location := assigner.assign(class)
+		if !location.onStack {
+			homes = append(homes, goABISpill{size: class.Size(), alignment: class.Size()})
+		}
+		argumentIndex++
+	}
+
+	if call.RetAgg != nil && !call.RetValues && classifyAgg(call.RetAgg).kind == aggMemory {
+		homes = append(homes, goABISpill{size: 8, alignment: 8})
+	}
+
+	cursor := roundUp(assigner.nsaa, 8)
+	for _, home := range homes {
+		if home.size == 0 {
+			continue
+		}
+		cursor = roundUp(cursor, home.alignment)
+		cursor += home.size
 	}
 	if call.ClosureCall {
 		cursor = roundUp(cursor, 8)

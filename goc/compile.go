@@ -160,6 +160,7 @@ func compile(name string, src []byte, options compileOptions) (*ir.Module, error
 		unit := loader.units[path]
 		defines := assemblyPackageDefines(unit.pkg)
 		floatInputs, floatOutputs := assemblyPackageFloatSlots(unit)
+		signatures := assemblyPackageSignatures(unit)
 		for _, assembly := range unit.assembly {
 			mod.Assembly = append(mod.Assembly, ir.AssemblyFile{
 				PackagePath:  path,
@@ -169,6 +170,7 @@ func compile(name string, src []byte, options compileOptions) (*ir.Module, error
 				Includes:     assembly.includes,
 				FloatInputs:  floatInputs,
 				FloatOutputs: floatOutputs,
+				Signatures:   signatures,
 			})
 		}
 	}
@@ -338,13 +340,35 @@ func compile(name string, src []byte, options compileOptions) (*ir.Module, error
 	addMemoryHelpers(mod, compileRuntime)
 	if compileRuntime {
 		for _, function := range mod.Funcs {
-			function.GoABI = true
+			function.CallConv = ir.CallConvAAPCS64
+			function.ManagedFrame = true
 		}
 		opt.InlineNoSplitCalls(mod)
 	}
 	opt.InlineHeapAllocations(mod)
 	opt.LowerHeapAllocations(mod)
+	if compileRuntime {
+		setAAPCS64CallConvention(mod)
+	}
+	if err := applyNativeStdlibOverlays(mod, loader.units); err != nil {
+		return nil, err
+	}
 	return g.mod, nil
+}
+
+func setAAPCS64CallConvention(module *ir.Module) {
+	for _, function := range module.Funcs {
+		for _, block := range function.Blocks {
+			for index := range block.Instrs {
+				instruction := &block.Instrs[index]
+				if instruction.Op != ir.OCall || instruction.CallConvSet {
+					continue
+				}
+				instruction.CallConv = ir.CallConvAAPCS64
+				instruction.CallConvSet = true
+			}
+		}
+	}
 }
 
 func assemblyPackageDefines(pkg *types.Package) map[string]int64 {
@@ -426,23 +450,15 @@ func assemblyPackageFloatSlots(unit *sourceUnit) (map[string][]int, map[string][
 		if !hasFloat {
 			continue
 		}
-		variables := make([]*types.Var, 0, parameters.Len()+results.Len())
-		for index := range parameters.Len() {
-			variables = append(variables, parameters.At(index))
-		}
-		for index := range results.Len() {
-			variables = append(variables, results.At(index))
-		}
-		offsets := sizes.Offsetsof(variables)
+		parameterOffsets, resultOffsets := assemblyABI0Offsets(parameters, results, sizes)
 		for index := range parameters.Len() {
 			if isAssemblyFloatType(parameters.At(index).Type()) {
-				inputs[name] = append(inputs[name], int(offsets[index]))
+				inputs[name] = append(inputs[name], int(parameterOffsets[index]))
 			}
 		}
 		for index := range results.Len() {
 			if isAssemblyFloatType(results.At(index).Type()) {
-				offsetIndex := parameters.Len() + index
-				outputs[name] = append(outputs[name], int(offsets[offsetIndex]))
+				outputs[name] = append(outputs[name], int(resultOffsets[index]))
 			}
 		}
 	}
@@ -455,6 +471,167 @@ func isAssemblyFloatType(typ types.Type) bool {
 		return false
 	}
 	return basic.Kind() == types.Float32 || basic.Kind() == types.Float64
+}
+
+func assemblyPackageSignatures(unit *sourceUnit) map[string]ir.AsmSignature {
+	signatures := make(map[string]ir.AsmSignature)
+	sizes := types.SizesFor("gc", runtime.GOARCH)
+	if sizes == nil {
+		return signatures
+	}
+	for _, file := range unit.files {
+		for _, declaration := range file.Decls {
+			functionDeclaration, ok := declaration.(*ast.FuncDecl)
+			if !ok || functionDeclaration.Recv != nil || functionDeclaration.Body != nil {
+				continue
+			}
+			function, ok := unit.pkg.Scope().Lookup(functionDeclaration.Name.Name).(*types.Func)
+			if !ok {
+				continue
+			}
+			signature, ok := function.Type().(*types.Signature)
+			if !ok || signature.Recv() != nil {
+				continue
+			}
+			parameters := signature.Params()
+			results := signature.Results()
+			parameterOffsets, resultOffsets := assemblyABI0Offsets(parameters, results, sizes)
+			nextGroup := 1
+			var assemblySignature ir.AsmSignature
+			for index := range parameters.Len() {
+				variable := parameters.At(index)
+				name := variable.Name()
+				if name == "" {
+					name = fmt.Sprintf("arg%d", index)
+				}
+				slots, grouped := assemblyValueSlots(name, variable.Type(), int(parameterOffsets[index]), nextGroup, sizes)
+				assemblySignature.Params = append(assemblySignature.Params, slots...)
+				if grouped {
+					nextGroup++
+				}
+			}
+			for index := range results.Len() {
+				variable := results.At(index)
+				name := variable.Name()
+				if name == "" {
+					name = "ret"
+					if index != 0 {
+						name = fmt.Sprintf("ret%d", index)
+					}
+				}
+				slots, grouped := assemblyValueSlots(name, variable.Type(), int(resultOffsets[index]), nextGroup, sizes)
+				assemblySignature.Results = append(assemblySignature.Results, slots...)
+				if grouped {
+					nextGroup++
+				}
+			}
+			symbol := assemblySemanticSymbol(unit.pkg.Path(), function.Name())
+			signatures[symbol] = assemblySignature
+		}
+	}
+	return signatures
+}
+
+// assemblyABI0Offsets lays out the stack-only Go ABI. Parameters use their
+// ordinary memory alignment. The result area begins at the next pointer-sized
+// boundary, as required by Go's ABI0 function-argument layout.
+func assemblyABI0Offsets(parameters, results *types.Tuple, sizes types.Sizes) ([]int64, []int64) {
+	parameterOffsets, offset := assemblyTupleOffsets(parameters, 0, sizes)
+	pointerSize := sizes.Sizeof(types.Typ[types.Uintptr])
+	offset = alignAssemblyOffset(offset, pointerSize)
+	resultOffsets, _ := assemblyTupleOffsets(results, offset, sizes)
+	return parameterOffsets, resultOffsets
+}
+
+func assemblyTupleOffsets(tuple *types.Tuple, offset int64, sizes types.Sizes) ([]int64, int64) {
+	offsets := make([]int64, tuple.Len())
+	for index := range tuple.Len() {
+		valueType := tuple.At(index).Type()
+		offset = alignAssemblyOffset(offset, int64(sizes.Alignof(valueType)))
+		offsets[index] = offset
+		offset += sizes.Sizeof(valueType)
+	}
+	return offsets, offset
+}
+
+func alignAssemblyOffset(offset, alignment int64) int64 {
+	return (offset + alignment - 1) &^ (alignment - 1)
+}
+
+func assemblyValueSlots(name string, valueType types.Type, base, group int, sizes types.Sizes) ([]ir.AsmSlot, bool) {
+	valueType = types.Unalias(valueType)
+	switch value := valueType.Underlying().(type) {
+	case *types.Slice:
+		return []ir.AsmSlot{
+			{Name: name + "_base", Offset: base, Cls: ir.ClsP, Width: 8, GCRef: true, Group: group},
+			{Name: name + "_len", Offset: base + 8, Cls: ir.ClsL, Width: 8, Group: group},
+			{Name: name + "_cap", Offset: base + 16, Cls: ir.ClsL, Width: 8, Group: group},
+		}, true
+	case *types.Interface:
+		return []ir.AsmSlot{
+			{Name: name + "_type", Offset: base, Cls: ir.ClsP, Width: 8, GCRef: true, Group: group},
+			{Name: name + "_data", Offset: base + 8, Cls: ir.ClsP, Width: 8, GCRef: true, Group: group},
+		}, true
+	case *types.Pointer, *types.Map, *types.Chan, *types.Signature:
+		return []ir.AsmSlot{{Name: name, Offset: base, Cls: ir.ClsP, Width: 8, GCRef: true}}, false
+	case *types.Array:
+		var slots []ir.AsmSlot
+		elementSize := int(sizes.Sizeof(value.Elem()))
+		for index := int64(0); index < value.Len(); index++ {
+			part, _ := assemblyValueSlots(fmt.Sprintf("%s_%d", name, index), value.Elem(), base+int(index)*elementSize, group, sizes)
+			for slotIndex := range part {
+				part[slotIndex].Group = group
+			}
+			slots = append(slots, part...)
+		}
+		return slots, true
+	case *types.Struct:
+		fields := make([]*types.Var, value.NumFields())
+		for index := range fields {
+			fields[index] = value.Field(index)
+		}
+		offsets := sizes.Offsetsof(fields)
+		var slots []ir.AsmSlot
+		for index, field := range fields {
+			part, _ := assemblyValueSlots(name+"_"+field.Name(), field.Type(), base+int(offsets[index]), group, sizes)
+			for slotIndex := range part {
+				part[slotIndex].Group = group
+			}
+			slots = append(slots, part...)
+		}
+		return slots, true
+	case *types.Basic:
+		if value.Kind() == types.String || value.Kind() == types.UntypedString {
+			return []ir.AsmSlot{
+				{Name: name + "_base", Offset: base, Cls: ir.ClsP, Width: 8, GCRef: true, Group: group},
+				{Name: name + "_len", Offset: base + 8, Cls: ir.ClsL, Width: 8, Group: group},
+			}, true
+		}
+		class, ok := scalar(valueType)
+		if !ok {
+			return nil, false
+		}
+		width := int(sizes.Sizeof(valueType))
+		gcReference := value.Kind() == types.UnsafePointer
+		if gcReference {
+			class = ir.ClsP
+		}
+		return []ir.AsmSlot{{Name: name, Offset: base, Cls: class, Width: width, GCRef: gcReference}}, false
+	default:
+		return nil, false
+	}
+}
+
+func assemblySemanticSymbol(packagePath, name string) string {
+	var symbol strings.Builder
+	for _, character := range packagePath + "." + name {
+		if character == '_' || character >= 'a' && character <= 'z' || character >= 'A' && character <= 'Z' || character >= '0' && character <= '9' {
+			symbol.WriteRune(character)
+		} else {
+			symbol.WriteByte('_')
+		}
+	}
+	return symbol.String()
 }
 
 func sourceAssemblyReferences(units map[string]*sourceUnit) (map[string]bool, error) {

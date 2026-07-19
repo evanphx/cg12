@@ -370,7 +370,12 @@ func (u *unwinder) resolveInternal(innermost, isSyscall bool) {
 		var lrPtr uintptr
 		if usesLR {
 			if innermost && frame.sp < frame.fp || frame.lr == 0 {
-				lrPtr = frame.sp
+				outgoingSize := cg12AAPCSOutgoingSize(f, frame.pc)
+				if outgoingSize >= 0 {
+					lrPtr = frame.sp + uintptr(outgoingSize) + goarch.PtrSize
+				} else {
+					lrPtr = frame.sp
+				}
 				frame.lr = *(*uintptr)(unsafe.Pointer(lrPtr))
 			}
 		} else {
@@ -404,11 +409,15 @@ func (u *unwinder) resolveInternal(innermost, isSyscall bool) {
 	// This is technically ABI-compatible but not standard.
 	// And it happens to end up mimicking the x86 layout.
 	// Other architectures may make different decisions.
-	if frame.varp > frame.sp && framepointer_enabled {
+	if frame.varp > frame.sp && framepointer_enabled && cg12AAPCSOutgoingSize(f, frame.pc) < 0 {
 		frame.varp -= goarch.PtrSize
 	}
 
-	frame.argp = frame.fp + sys.MinFrameSize
+	if cg12AAPCSOutgoingSize(f, frame.pc) >= 0 {
+		frame.argp = frame.fp
+	} else {
+		frame.argp = frame.fp + sys.MinFrameSize
+	}
 
 	// Determine frame's 'continuation PC', where it can continue.
 	// Normally this is the return address on the stack, but if sigpanic
@@ -436,6 +445,12 @@ func (u *unwinder) resolveInternal(innermost, isSyscall bool) {
 			frame.continpc = 0
 		}
 	}
+}
+
+const cg12AAPCSFramePCData = 5
+
+func cg12AAPCSOutgoingSize(f funcInfo, pc uintptr) int32 {
+	return pcdatavalue(f, cg12AAPCSFramePCData, pc)
 }
 
 func (u *unwinder) next() {

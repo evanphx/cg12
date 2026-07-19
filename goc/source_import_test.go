@@ -5,6 +5,7 @@ import (
 	"go/token"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"testing"
 )
@@ -52,6 +53,8 @@ func TestLoadExactStandardSHA256Source(t *testing.T) {
 }
 
 func TestLoadExactStandardRuntimeSource(t *testing.T) {
+	t.Setenv(stdlibOverlayEnvironment, "off")
+
 	loader := newSourceLoader(token.NewFileSet())
 	pkg, err := loader.Import("runtime")
 	if err != nil {
@@ -64,6 +67,9 @@ func TestLoadExactStandardRuntimeSource(t *testing.T) {
 	unit := loader.units[pkg.Path()]
 	if unit == nil || len(unit.files) == 0 {
 		t.Fatal("source AST was not retained")
+	}
+	if len(unit.native) != 0 || len(unit.overlays) != 0 {
+		t.Fatalf("exact runtime load applied %d native and %d source overlays", len(unit.native), len(unit.overlays))
 	}
 	for _, file := range unit.files {
 		position := loader.fset.Position(file.Package)
@@ -119,6 +125,52 @@ func TestLoadExactStandardRuntimeSource(t *testing.T) {
 		return
 	}
 	t.Fatal("runtime tls_arm64.s assembly unit was not retained")
+}
+
+func TestLoadStandardRuntimeOverlay(t *testing.T) {
+	if runtime.GOOS != "linux" || runtime.GOARCH != "arm64" {
+		t.Skip("the initial runtime overlay targets linux/arm64")
+	}
+
+	loader := newSourceLoader(token.NewFileSet())
+	pkg, err := loader.Import("runtime")
+	if err != nil {
+		t.Fatal(err)
+	}
+	unit := loader.units[pkg.Path()]
+	if unit == nil {
+		t.Fatal("runtime source unit was not retained")
+	}
+
+	foundReplacement := false
+	foundAddition := false
+	for _, file := range unit.files {
+		filename := loader.fset.Position(file.Package).Filename
+		switch filepath.Base(filename) {
+		case "set_vma_name_linux.go":
+			if !strings.Contains(filename, filepath.Join("stdlib", "overlays")) {
+				t.Fatalf("set_vma_name_linux.go loaded from %q, want overlay", filename)
+			}
+			foundReplacement = true
+		case "cg12_overlay_linux_arm64.go":
+			foundAddition = true
+		}
+	}
+	if !foundReplacement {
+		t.Fatal("runtime VMA replacement was not loaded")
+	}
+	if !foundAddition {
+		t.Fatal("runtime Go overlay addition was not loaded")
+	}
+	if len(unit.native) != 1 {
+		t.Fatalf("runtime native overlays = %d, want 1", len(unit.native))
+	}
+	if filepath.Base(unit.native[0].path) != "cg12_overlay.ssa" {
+		t.Fatalf("runtime native overlay = %q, want cg12_overlay.ssa", unit.native[0].path)
+	}
+	if len(unit.overlays) != 3 {
+		t.Fatalf("runtime applied overlays = %d, want 3", len(unit.overlays))
+	}
 }
 
 func TestLoadExactStandardTestingSource(t *testing.T) {

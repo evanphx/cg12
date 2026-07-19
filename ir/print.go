@@ -229,6 +229,10 @@ func (f *Func) printInstr(sb *strings.Builder, in *Instr) {
 		sb.WriteString(name)
 		// The operands follow, printed by the generic loop below.
 	}
+	if in.Op == OAsm {
+		f.printAsm(sb, in)
+		return
+	}
 	if in.Op == OCall {
 		fmt.Fprintf(sb, " %s(", f.refString(in.Args[0]))
 		for i, a := range in.Args[1:] {
@@ -253,6 +257,72 @@ func (f *Func) printInstr(sb *strings.Builder, in *Instr) {
 		sb.WriteString(f.refString(a))
 	}
 	sb.WriteByte('\n')
+}
+
+func (f *Func) printAsm(sb *strings.Builder, in *Instr) {
+	fmt.Fprintf(sb, " %q (", in.Asm.Template)
+	outputs := in.AsmRegOuts()
+	outputIndex := 0
+	argumentIndex := 0
+	for index, kind := range in.Asm.Ops {
+		if index > 0 {
+			sb.WriteString(", ")
+		}
+		register := ""
+		if index < len(in.Asm.Regs) {
+			register = in.Asm.Regs[index]
+		}
+		constraint := asmConstraint(kind, register)
+		fmt.Fprintf(sb, "(%q", constraint)
+		switch kind {
+		case AsmRegOut, AsmRegInOut:
+			output := outputs[outputIndex]
+			outputIndex++
+			fmt.Fprintf(sb, ", %s, %s", f.ClassOf(output), f.refString(output))
+			if kind == AsmRegInOut {
+				fmt.Fprintf(sb, ", %s", f.refString(in.Args[argumentIndex]))
+				argumentIndex++
+			}
+		default:
+			fmt.Fprintf(sb, ", %s", f.refString(in.Args[argumentIndex]))
+			argumentIndex++
+		}
+		sb.WriteByte(')')
+	}
+	sb.WriteByte(')')
+	if in.Asm.ExactClobbers {
+		sb.WriteString(" exact")
+	}
+	if len(in.Asm.Clobbers) > 0 {
+		sb.WriteString(" clobbers(")
+		for index, clobber := range in.Asm.Clobbers {
+			if index > 0 {
+				sb.WriteString(", ")
+			}
+			fmt.Fprintf(sb, "%q", clobber)
+		}
+		sb.WriteByte(')')
+	}
+	sb.WriteByte('\n')
+}
+
+func asmConstraint(kind AsmOperandKind, register string) string {
+	base := register
+	if base == "" {
+		base = "r"
+	}
+	switch kind {
+	case AsmRegOut:
+		return "=" + base
+	case AsmRegInOut:
+		return "+" + base
+	case AsmImm:
+		return "i"
+	case AsmMem:
+		return "m"
+	default:
+		return base
+	}
 }
 
 // mnemonic returns the printed opcode, computing compare mnemonics from the

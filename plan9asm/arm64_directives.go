@@ -29,6 +29,7 @@ func (t *arm64Translator) translateText(text *Text) error {
 		t.currentPlan9Frame = roundUpInteger(localSize+8, 16)
 	}
 	symbol := t.symbol(text.Symbol)
+	t.currentSymbol = symbol
 	if t.currentABI0 && !t.currentDirectABI0 {
 		abi0Name, wrapperFrame, err := t.emitABI0Wrapper(text, t.abi0Layouts[t.functionIndex])
 		if err != nil {

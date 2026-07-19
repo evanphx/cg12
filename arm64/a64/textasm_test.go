@@ -49,6 +49,21 @@ func TestAssembleEncodings(t *testing.T) {
 		{"hint #0", 0xd503201f},  // hint #0 is nop
 		{"hint #8", 0xd503211f},  // pacia1716
 		{"hint #12", 0xd503219f}, // autia1716
+		{"casal w0, w1, [x2]", uint32(0x88e0fc41)},
+		{"casal x3, x4, [x5]", uint32(0xc8e3fca4)},
+		{"swpalb w6, w7, [x8]", uint32(0x38e68107)},
+		{"swpal w9, w10, [x11]", uint32(0xb8e9816a)},
+		{"swpal x12, x13, [x14]", uint32(0xf8ec81cd)},
+		{"ldaddal w15, w16, [x17]", uint32(0xb8ef0230)},
+		{"ldaddal x18, x19, [x20]", uint32(0xf8f20293)},
+		{"ldclralb w21, w22, [x23]", uint32(0x38f512f6)},
+		{"ldclral w24, w25, [x26]", uint32(0xb8f81359)},
+		{"ldsetalb w3, w4, [x5]", uint32(0x38e330a4)},
+		{"ldsetal x9, x10, [x11]", uint32(0xf8e9316a)},
+		{"ldarb w12, [x13]", uint32(0x08dffdac)},
+		{"stlrb w14, [x15]", uint32(0x089ffdee)},
+		{"ldaxrb w16, [x17]", uint32(0x085ffe30)},
+		{"stlxrb w18, w19, [x20]", uint32(0x0812fe93)},
 	}
 	for _, c := range cases {
 		t.Run(c.asm, func(t *testing.T) {
@@ -74,6 +89,55 @@ func TestAssembleBranches(t *testing.T) {
 	// cbnz branches back one instruction: byte offset -4.
 	require.Equal(t, Cbnz(true, 0, -4), word(t, b, 1))
 	require.Equal(t, Ret(30), word(t, b, 2))
+}
+
+func TestAssembleRawInstructionWord(t *testing.T) {
+	b, err := Assemble(".inst 0xd503201f")
+	require.NoError(t, err)
+	require.Len(t, b, 4)
+	require.Equal(t, uint32(0xd503201f), word(t, b, 0))
+}
+
+func TestTextAssemblerCPUIdentificationRegisters(t *testing.T) {
+	program, err := AssembleProgram(`
+mrs x0, id_aa64isar0_el1
+mrs x1, id_aa64pfr0_el1
+mrs x2, midr_el1
+`)
+	require.NoError(t, err)
+
+	code, relocations, err := program.Link()
+	require.NoError(t, err)
+	require.Empty(t, relocations)
+	require.Equal(t, []byte{
+		0x00, 0x06, 0x38, 0xd5,
+		0x01, 0x04, 0x38, 0xd5,
+		0x02, 0x00, 0x38, 0xd5,
+	}, code)
+}
+
+func TestTextAssemblerDITSequence(t *testing.T) {
+	program, err := AssembleProgram(`
+mrs x0, dit
+msr dit, #1
+msr dit, #0
+ubfx x1, x0, #24, #1
+dsb nsh
+isb sy
+`)
+	require.NoError(t, err)
+
+	code, relocations, err := program.Link()
+	require.NoError(t, err)
+	require.Empty(t, relocations)
+	require.Equal(t, []byte{
+		0xa0, 0x42, 0x3b, 0xd5,
+		0x5f, 0x41, 0x03, 0xd5,
+		0x5f, 0x40, 0x03, 0xd5,
+		0x01, 0x60, 0x58, 0xd3,
+		0x9f, 0x37, 0x03, 0xd5,
+		0xdf, 0x3f, 0x03, 0xd5,
+	}, code)
 }
 
 // TestAssembleErrors confirms bad input is reported, never silently dropped.

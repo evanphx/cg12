@@ -709,7 +709,10 @@ func adjustframe(frame *stkframe, adjinfo *adjustinfo) {
 	}
 
 	// Adjust saved frame pointer if there is one.
-	if (goarch.ArchFamily == goarch.AMD64 || goarch.ArchFamily == goarch.ARM64) && frame.argp-frame.varp == 2*goarch.PtrSize {
+	if outgoingSize := cg12AAPCSOutgoingSize(f, frame.pc); outgoingSize >= 0 {
+		framePointer := frame.sp + uintptr(outgoingSize)
+		adjustpointer(adjinfo, unsafe.Pointer(framePointer))
+	} else if (goarch.ArchFamily == goarch.AMD64 || goarch.ArchFamily == goarch.ARM64) && frame.argp-frame.varp == 2*goarch.PtrSize {
 		if stackDebug >= 3 {
 			print("      saved bp\n")
 		}
@@ -788,7 +791,9 @@ func adjustctxt(gp *g, adjinfo *adjustinfo) {
 	}
 	oldfp := gp.sched.bp
 	adjustpointer(adjinfo, unsafe.Pointer(&gp.sched.bp))
-	if GOARCH == "arm64" {
+	if f := findfunc(gp.sched.pc); f.valid() && cg12AAPCSOutgoingSize(f, gp.sched.pc) >= 0 {
+		adjustpointer(adjinfo, unsafe.Pointer(gp.sched.bp))
+	} else if GOARCH == "arm64" {
 		// On ARM64, the frame pointer is saved one word *below* the SP,
 		// which is not copied or adjusted in any frame. Do it explicitly
 		// here.

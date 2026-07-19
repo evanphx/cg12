@@ -7,21 +7,27 @@ import (
 
 	"github.com/evanphx/cg12/ir"
 	"github.com/evanphx/cg12/plan9asm"
+	plan9sem "github.com/evanphx/cg12/plan9asm/sem"
 )
 
 type assemblyBundle struct {
-	source         string
-	references     map[string]bool
-	abi0References map[string]bool
-	definitions    map[string]bool
-	functions      []goFunctionInfo
+	source          string
+	references      map[string]bool
+	abi0References  map[string]bool
+	definitions     map[string]bool
+	functions       []goFunctionInfo
+	semantic        []*plan9sem.Unit
+	lowered         []*ir.Func
+	loweredData     []*ir.Data
+	callConventions map[string]ir.CallConvention
 }
 
 func prepareAssembly(module *ir.Module) (assemblyBundle, error) {
 	bundle := assemblyBundle{
-		references:     make(map[string]bool),
-		abi0References: make(map[string]bool),
-		definitions:    make(map[string]bool),
+		references:      make(map[string]bool),
+		abi0References:  make(map[string]bool),
+		definitions:     make(map[string]bool),
+		callConventions: make(map[string]ir.CallConvention),
 	}
 	assemblyFunctions := make(map[string]bool)
 	var output strings.Builder
@@ -35,6 +41,41 @@ func prepareAssembly(module *ir.Module) (assemblyBundle, error) {
 		})
 		if err != nil {
 			return assemblyBundle{}, fmt.Errorf("parse assembly %s: %w", source.Path, err)
+		}
+		semanticUnit, err := plan9sem.Build(file, plan9sem.Options{
+			PackagePath:  source.PackagePath,
+			Filename:     source.Path,
+			Defines:      source.Defines,
+			FloatInputs:  source.FloatInputs,
+			FloatOutputs: source.FloatOutputs,
+			Signatures:   semanticAssemblySignatures(source.Signatures),
+		})
+		if err != nil {
+			return assemblyBundle{}, fmt.Errorf("analyze assembly %s: %w", source.Path, err)
+		}
+		bundle.semantic = append(bundle.semantic, semanticUnit)
+		if semanticallyLowerAssembly(source) {
+			functions, err := lowerSemanticAssembly(semanticUnit, semanticAssemblyPolicyFor(module))
+			if err != nil {
+				return assemblyBundle{}, fmt.Errorf("lower assembly %s: %w", source.Path, err)
+			}
+			bundle.lowered = append(bundle.lowered, functions...)
+			for _, sourceData := range semanticUnit.Data {
+				data, err := lowerSemanticData(sourceData)
+				if err != nil {
+					return assemblyBundle{}, fmt.Errorf("lower assembly data %s: %w", source.Path, err)
+				}
+				bundle.loweredData = append(bundle.loweredData, data)
+				bundle.definitions[sanitize(data.Name)] = true
+			}
+			for _, reference := range semanticUnit.References {
+				bundle.references[reference.Name] = true
+			}
+			for _, function := range functions {
+				assemblyFunctions[function.Name] = true
+				bundle.callConventions[sanitize(function.Name)] = function.CallConv
+			}
+			continue
 		}
 		translation, err := plan9asm.CompileARM64(file, plan9asm.ARM64Options{
 			PackagePath:      source.PackagePath,
@@ -60,6 +101,7 @@ func prepareAssembly(module *ir.Module) (assemblyBundle, error) {
 		}
 		for _, function := range translation.Functions {
 			assemblyFunctions[function.Name] = true
+			bundle.callConventions[strings.TrimSuffix(function.Name, "_abi0")] = ir.CallConvGoInternal
 			flags := byte(goFuncFlagAsm)
 			for _, flag := range function.Flags {
 				if flag == "TOPFRAME" {
@@ -78,6 +120,13 @@ func prepareAssembly(module *ir.Module) (assemblyBundle, error) {
 			})
 		}
 	}
+	for _, function := range module.Funcs {
+		name := sanitize(function.Name)
+		if bundle.abi0References[name] {
+			function.CallConv = ir.CallConvGoInternal
+		}
+		bundle.callConventions[name] = function.CallConv
+	}
 	wrappers, wrapperFunctions, err := emitGoABI0AssemblyWrappers(module, bundle.abi0References, assemblyFunctions)
 	if err != nil {
 		return assemblyBundle{}, err
@@ -92,6 +141,65 @@ func prepareAssembly(module *ir.Module) (assemblyBundle, error) {
 	}
 	bundle.source = output.String()
 	return bundle, nil
+}
+
+func semanticAssemblyPolicyFor(module *ir.Module) semanticAssemblyPolicy {
+	policy := semanticAssemblyPolicy{CallConv: ir.CallConvAAPCS64}
+	allGoInternal := len(module.Funcs) != 0
+	for _, function := range module.Funcs {
+		if !function.UsesGoInternalCallConvention() {
+			allGoInternal = false
+			break
+		}
+	}
+	if allGoInternal {
+		policy.CallConv = ir.CallConvGoInternal
+	}
+	policy.ManagedFrame = moduleUsesGoRuntime(module)
+	return policy
+}
+
+func semanticallyLowerAssembly(source ir.AssemblyFile) bool {
+	if source.PackagePath == "internal/runtime/atomic" && strings.HasSuffix(source.Path, "atomic_arm64.s") {
+		return true
+	}
+	if source.PackagePath == "internal/cpu" && (strings.HasSuffix(source.Path, "cpu_arm64.s") || strings.HasSuffix(source.Path, "cpu.s")) {
+		return true
+	}
+	if source.PackagePath == "internal/runtime/sys" && (strings.HasSuffix(source.Path, "dit_arm64.s") || strings.HasSuffix(source.Path, "empty.s")) {
+		return true
+	}
+	if source.PackagePath == "runtime" && strings.HasSuffix(source.Path, "atomic_arm64.s") {
+		return true
+	}
+	if source.PackagePath == "internal/runtime/syscall/linux" && strings.HasSuffix(source.Path, "asm_linux_arm64.s") {
+		return true
+	}
+	return source.PackagePath == "sync/atomic" && strings.HasSuffix(source.Path, "asm.s")
+}
+
+func semanticAssemblySignatures(signatures map[string]ir.AsmSignature) map[string]plan9sem.Signature {
+	semantic := make(map[string]plan9sem.Signature, len(signatures))
+	for name, signature := range signatures {
+		converted := plan9sem.Signature{
+			Params:  make([]plan9sem.Slot, len(signature.Params)),
+			Results: make([]plan9sem.Slot, len(signature.Results)),
+		}
+		for index, slot := range signature.Params {
+			converted.Params[index] = plan9sem.Slot{
+				Name: slot.Name, Offset: slot.Offset, Width: slot.Width,
+				Float: slot.Cls.IsFloat(), GCRef: slot.GCRef, Group: slot.Group,
+			}
+		}
+		for index, slot := range signature.Results {
+			converted.Results[index] = plan9sem.Slot{
+				Name: slot.Name, Offset: slot.Offset, Width: slot.Width,
+				Float: slot.Cls.IsFloat(), GCRef: slot.GCRef, Group: slot.Group,
+			}
+		}
+		semantic[name] = converted
+	}
+	return semantic
 }
 
 func assemblyFunctionID(name string) byte {

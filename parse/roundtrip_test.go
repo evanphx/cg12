@@ -49,6 +49,32 @@ func TestRoundTripIntrinsic(t *testing.T) {
 	assert.Equal(t, "stackrestore", in[1].Intrin.Name)
 }
 
+func TestRoundTripInlineAssembly(t *testing.T) {
+	module := ir.NewModule()
+	function := module.NewFunc("addOne", ir.ClsW).Export()
+	input := function.Param("input", ir.ClsW)
+	entry := function.Entry()
+	outputs := entry.Asm("add %w0, %w1, #1", []ir.AsmSpec{
+		{Kind: ir.AsmRegOut, Cls: ir.ClsW},
+		{Kind: ir.AsmRegIn, Ref: input},
+	})
+	instruction := &entry.Instrs[len(entry.Instrs)-1]
+	instruction.Asm.ExactClobbers = true
+	instruction.Asm.Clobbers = []string{"cc", "memory"}
+	entry.Ret(outputs[0])
+
+	roundTrip(t, module)
+
+	parsed, err := parse.Parse(module.String())
+	require.NoError(t, err)
+	assembly := parsed.Funcs[0].Entry().Instrs[0]
+	require.NotNil(t, assembly.Asm)
+	assert.Equal(t, "add %w0, %w1, #1", assembly.Asm.Template)
+	assert.Equal(t, []ir.AsmOperandKind{ir.AsmRegOut, ir.AsmRegIn}, assembly.Asm.Ops)
+	assert.True(t, assembly.Asm.ExactClobbers)
+	assert.Equal(t, []string{"cc", "memory"}, assembly.Asm.Clobbers)
+}
+
 func TestRoundTripAtomics(t *testing.T) {
 	// Atomic intrinsics carry the operation and width in a dotted name, and a
 	// store is void; both survive print/parse/print.

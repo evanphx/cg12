@@ -18,11 +18,14 @@ import (
 	"github.com/evanphx/cg12/plan9asm"
 )
 
-// sourceUnit is the unchanged, build-selected source for an imported package.
+// sourceUnit is the build-selected source for an imported package, including
+// any explicit standard-library overlay files and their provenance.
 type sourceUnit struct {
 	path     string
 	files    []*ast.File
 	assembly []sourceAssemblyFile
+	native   []sourceNativeFile
+	overlays []sourceOverlayUse
 	info     *types.Info
 	pkg      *types.Package
 }
@@ -31,6 +34,12 @@ type sourceAssemblyFile struct {
 	path     string
 	source   string
 	includes map[string]string
+}
+
+type sourceNativeFile struct {
+	path   string
+	source string
+	entry  stdlibOverlayEntry
 }
 
 // sourceLoader imports selected packages from source while retaining their AST
@@ -46,10 +55,12 @@ type sourceLoader struct {
 	base                 types.Importer
 	root                 string
 	forcePureGo          bool
+	overlay              *stdlibOverlay
+	overlayErr           error
 }
 
 func newSourceLoader(fset *token.FileSet) *sourceLoader {
-	return &sourceLoader{
+	loader := &sourceLoader{
 		fset:                 fset,
 		units:                make(map[string]*sourceUnit),
 		loading:              make(map[string]bool),
@@ -266,6 +277,8 @@ func newSourceLoader(fset *token.FileSet) *sourceLoader {
 		base: importer.Default(),
 		root: repositoryStdlibRoot(),
 	}
+	loader.overlay, loader.overlayErr = loadStdlibOverlay(loader.root)
+	return loader
 }
 
 func repositoryStdlibRoot() string {
@@ -277,6 +290,9 @@ func repositoryStdlibRoot() string {
 }
 
 func (l *sourceLoader) Import(path string) (*types.Package, error) {
+	if l.overlayErr != nil {
+		return nil, l.overlayErr
+	}
 	if u := l.units[path]; u != nil {
 		return u.pkg, nil
 	}
@@ -335,11 +351,27 @@ func (l *sourceLoader) Import(path string) (*types.Package, error) {
 	}
 	for _, name := range goFiles {
 		full := filepath.Join(bp.Dir, name)
-		file, err := parser.ParseFile(l.fset, full, nil, parser.ParseComments|parser.AllErrors)
+		origin, source, overlayEntry, deleted, err := l.overlay.resolve(full)
+		if err != nil {
+			return nil, err
+		}
+		if deleted {
+			u.overlays = append(u.overlays, overlayUse(overlayEntry))
+			continue
+		}
+		file, err := parser.ParseFile(l.fset, origin, source, parser.ParseComments|parser.AllErrors)
 		if err != nil {
 			return nil, err
 		}
 		u.files = append(u.files, file)
+		if overlayEntry != nil {
+			u.overlays = append(u.overlays, overlayUse(overlayEntry))
+		}
+	}
+	if !externalTestPackage {
+		if err := l.addOverlayFiles(&ctx, u); err != nil {
+			return nil, err
+		}
 	}
 	for _, name := range bp.SFiles {
 		if !useAssembly {
@@ -349,15 +381,22 @@ func (l *sourceLoader) Import(path string) (*types.Package, error) {
 			return nil, fmt.Errorf("translate %s: unsupported build-selected assembly file %s", path, name)
 		}
 		full := filepath.Join(bp.Dir, name)
-		source, err := os.ReadFile(full)
+		origin, source, overlayEntry, deleted, err := l.overlay.resolve(full)
 		if err != nil {
 			return nil, err
+		}
+		if deleted {
+			u.overlays = append(u.overlays, overlayUse(overlayEntry))
+			continue
 		}
 		u.assembly = append(u.assembly, sourceAssemblyFile{
 			path:     filepath.ToSlash(filepath.Join(path, name)),
 			source:   string(source),
-			includes: l.assemblyIncludes(bp.Dir, string(source)),
+			includes: l.assemblyIncludes(filepath.Dir(origin), string(source)),
 		})
+		if overlayEntry != nil {
+			u.overlays = append(u.overlays, overlayUse(overlayEntry))
+		}
 	}
 	conf := types.Config{Importer: l}
 	u.pkg, err = conf.Check(path, l.fset, u.files, u.info)
@@ -366,6 +405,52 @@ func (l *sourceLoader) Import(path string) (*types.Package, error) {
 	}
 	l.units[path] = u
 	return u.pkg, nil
+}
+
+func (l *sourceLoader) addOverlayFiles(ctx *build.Context, unit *sourceUnit) error {
+	if l.overlay == nil {
+		return nil
+	}
+	for _, entry := range l.overlay.additions[unit.path] {
+		extension := strings.ToLower(filepath.Ext(entry.origin))
+		switch extension {
+		case ".go":
+			name := filepath.Base(entry.origin)
+			if strings.HasSuffix(name, "_test.go") && !l.testPackages[unit.path] {
+				continue
+			}
+			matches, err := ctx.MatchFile(filepath.Dir(entry.origin), name)
+			if err != nil {
+				return fmt.Errorf("select standard library overlay %s: %w", entry.Path, err)
+			}
+			if !matches {
+				continue
+			}
+			source, err := os.ReadFile(entry.origin)
+			if err != nil {
+				return err
+			}
+			file, err := parser.ParseFile(l.fset, entry.origin, source, parser.ParseComments|parser.AllErrors)
+			if err != nil {
+				return err
+			}
+			unit.files = append(unit.files, file)
+		case ".ssa":
+			source, err := os.ReadFile(entry.origin)
+			if err != nil {
+				return err
+			}
+			unit.native = append(unit.native, sourceNativeFile{
+				path:   entry.origin,
+				source: string(source),
+				entry:  entry,
+			})
+		default:
+			return fmt.Errorf("standard library overlay %s is neither Go nor native cg12 text", entry.Path)
+		}
+		unit.overlays = append(unit.overlays, overlayUse(&entry))
+	}
+	return nil
 }
 
 func (l *sourceLoader) assemblyIncludes(packageDirectory, source string) map[string]string {
