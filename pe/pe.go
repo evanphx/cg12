@@ -103,6 +103,7 @@ type engine struct {
 	inOrder []int64
 
 	nreg        int
+	stackStride int64     // bytes between operand-stack elements (8 for a long, 16 for a struct)
 	dispatch    *ir.Block // the interpreter block a specialized state resumes in
 	dispatchIdx int       // the instruction in dispatch to resume at (just past the merge point)
 	pcReg       *region
@@ -167,6 +168,7 @@ func (e *engine) fail(format string, a ...any) {
 
 func (e *engine) run() {
 	e.ipdom = computePostIdom(e.src)
+	e.stackStride = detectStackStride(e.src)
 
 	// The pointer parameters: "code" is the green program, others are runtime inputs.
 	for _, t := range e.src.Params {
@@ -436,8 +438,14 @@ func (e *engine) transition() {
 // operand-stack cells (0..sp-1) then every local-variable cell, in a fixed order.
 func (e *engine) redState(sp int64) []value {
 	var red []value
-	for i := int64(0); i < sp; i++ {
-		red = append(red, e.load(ir.OLoadl, value{kind: vAddr, reg: e.stackReg, off: i * 8}))
+	if e.stackReg != nil {
+		// Each live operand-stack element spans one stride; its cells sit on the
+		// 8-byte grain within it (a struct value's two halves, say).
+		for i := int64(0); i < sp; i++ {
+			for off := int64(0); off < e.stackStride; off += 8 {
+				red = append(red, e.load(ir.OLoadl, value{kind: vAddr, reg: e.stackReg, off: i*e.stackStride + off}))
+			}
+		}
 	}
 	for _, vr := range e.sortedVars() {
 		for off := int64(0); off < vr.size; off += 8 {
@@ -457,8 +465,12 @@ func (e *engine) bindRedState(sp int64, phis []*ir.Phi) {
 			i++
 		}
 	}
-	for j := int64(0); j < sp; j++ {
-		put(e.stackReg, j*8)
+	if e.stackReg != nil {
+		for j := int64(0); j < sp; j++ {
+			for off := int64(0); off < e.stackStride; off += 8 {
+				put(e.stackReg, j*e.stackStride+off)
+			}
+		}
 	}
 	for _, vr := range e.sortedVars() {
 		for off := int64(0); off < vr.size; off += 8 {
@@ -979,6 +991,63 @@ func boolCount(a []bool) int {
 		}
 	}
 	return n
+}
+
+// detectStackStride finds the byte stride between operand-stack elements by the
+// scaling of the stack index in the interpreter: an add of the "stack" alloca and a
+// multiply-by-constant. It is 8 for a stack of longs, 16 for a stack of two-word
+// structs (a tagged value like a JSValue). Defaults to 8.
+func detectStackStride(f *ir.Func) int64 {
+	def := map[uint32]*ir.Instr{}
+	var stackID uint32
+	found := false
+	for _, b := range f.Blocks {
+		for k := range b.Instrs {
+			in := &b.Instrs[k]
+			if in.To.Kind == ir.RefTemp {
+				def[in.To.ID] = in
+			}
+			if in.Op.IsAlloc() && in.To.Kind == ir.RefTemp {
+				if t := f.Temp(in.To); t != nil && allocBase(t.Name) == "stack" {
+					stackID, found = in.To.ID, true
+				}
+			}
+		}
+	}
+	if !found {
+		return 8
+	}
+	for _, b := range f.Blocks {
+		for k := range b.Instrs {
+			in := &b.Instrs[k]
+			if in.Op != ir.OAdd || len(in.Args) != 2 {
+				continue
+			}
+			for oi := 0; oi < 2; oi++ {
+				if in.Args[oi].Kind != ir.RefTemp || in.Args[oi].ID != stackID {
+					continue
+				}
+				if d := def[in.Args[1-oi].ID]; d != nil && d.Op == ir.OMul {
+					for _, a := range d.Args {
+						if a.Kind == ir.RefConst {
+							if c := f.Consts[a.ID]; c.Kind == ir.ConstInt && c.Int > 0 {
+								return c.Int
+							}
+						}
+					}
+				}
+			}
+		}
+	}
+	return 8
+}
+
+// allocBase strips the ".addr" suffix cc gives a variable's storage slot.
+func allocBase(name string) string {
+	if n := len(name); n > 5 && name[n-5:] == ".addr" {
+		return name[:n-5]
+	}
+	return name
 }
 
 func cell(r *region, off int64) [2]int64 { return [2]int64{int64(r.id), off} }
