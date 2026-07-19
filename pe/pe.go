@@ -105,8 +105,10 @@ type engine struct {
 
 	states   map[greenState]*state
 	work     []greenState
-	regionOf map[uint32]*region // alloca temp id -> its region (stable across re-execution)
-	nphi     int                // for distinct residual phi names
+	regionOf map[uint32]*region      // alloca temp id -> its region (stable across re-execution)
+	ipdom    map[*ir.Block]*ir.Block // source block -> its immediate post-dominator
+	stopAt   *ir.Block               // emit stops before this block (a diamond's join)
+	nphi     int                     // for distinct residual phi names
 	err      error
 }
 
@@ -150,6 +152,8 @@ func (e *engine) fail(format string, a ...any) {
 }
 
 func (e *engine) run() {
+	e.ipdom = computePostIdom(e.src)
+
 	// The pointer parameters: "code" is the green program, others are runtime inputs.
 	for _, t := range e.src.Params {
 		r := roleInput
@@ -196,6 +200,9 @@ func (e *engine) emit(b *ir.Block) {
 	if e.err != nil {
 		return
 	}
+	if b == e.stopAt {
+		return // reached a diamond's join; the caller resumes here after merging
+	}
 	for k := range b.Instrs {
 		in := &b.Instrs[k]
 		if e.isMerge(in) {
@@ -241,7 +248,15 @@ func (e *engine) control(b *ir.Block) {
 			}
 			return
 		}
-		// A branch on a runtime value: residualize, and specialize both targets.
+		// A branch on a runtime value. When the two arms re-converge (the branch has
+		// a post-dominator before the next merge point), specialize each only up to
+		// that join and merge there, so the shared tail is emitted once. Otherwise
+		// (the arms genuinely diverge -- one returns, one loops) specialize both to
+		// completion.
+		if j := e.ipdom[b]; j != nil && j != e.stopAt {
+			e.diamond(b, e.materialize(c), j)
+			return
+		}
 		cond := e.materialize(c)
 		bt, bf := e.out.NewBlock("bt"), e.out.NewBlock("bf")
 		e.cur.Jnz(cond, bt, bf)
@@ -257,6 +272,90 @@ func (e *engine) control(b *ir.Block) {
 	default:
 		e.fail("unsupported terminator %v", b.Jmp.Kind)
 	}
+}
+
+// diamond specializes a runtime branch whose arms re-converge at join. It emits
+// the residual Jnz, then specializes each arm only up to join. If the arms arrive
+// with the same green state -- the branch decided only runtime data, like an
+// inline-cache hit-or-miss -- they merge: a phi for each memory cell they leave
+// differing, and the tail after join is emitted once. If instead they arrive with
+// different green state -- the branch chose the program's next position, like a
+// conditional jump -- there is nothing to share, and each arm continues from join
+// on its own.
+func (e *engine) diamond(b *ir.Block, cond ir.Ref, join *ir.Block) {
+	bt, bf := e.out.NewBlock("t"), e.out.NewBlock("f")
+	e.cur.Jnz(cond, bt, bf)
+
+	saveStop := e.stopAt
+	e.stopAt = join
+	env0, mem0 := e.env, e.mem
+
+	e.env, e.mem = copyEnv(env0), copyMem(mem0)
+	e.cur = bt
+	e.emit(b.Jmp.To)
+	tEnd, tEnv, tMem := e.cur, e.env, e.mem
+
+	e.env, e.mem = copyEnv(env0), copyMem(mem0)
+	e.cur = bf
+	e.emit(b.Jmp.To2)
+	fEnd, fEnv, fMem := e.cur, e.env, e.mem
+
+	e.stopAt = saveStop
+
+	if !greenMatch(tMem, fMem) {
+		// The arms diverge into different green states; continue each on its own.
+		e.env, e.mem, e.cur = tEnv, tMem, tEnd
+		e.emit(join)
+		e.env, e.mem, e.cur = fEnv, fMem, fEnd
+		e.emit(join)
+		return
+	}
+
+	jr := e.out.NewBlock("join")
+	merged := copyMem(fMem)
+	for c, tv := range tMem {
+		fv := fMem[c]
+		if valueEqual(tv, fv) {
+			continue
+		}
+		cls := tv.cls
+		if cls == 0 {
+			cls = ir.ClsL
+		}
+		p := &ir.Phi{Cls: cls, To: e.out.NewTemp(fmt.Sprintf("r%d", e.nphi), cls)}
+		e.nphi++
+		p.Args = []ir.Ref{e.materialize(tv), e.materialize(fv)}
+		p.Blocks = []*ir.Block{tEnd, fEnd}
+		jr.Phis = append(jr.Phis, p)
+		merged[c] = value{kind: vResid, ref: p.To, cls: cls}
+	}
+	tEnd.Goto(jr)
+	fEnd.Goto(jr)
+
+	e.cur = jr
+	e.env = fEnv // the join reads its inputs from memory; either arm's env serves
+	e.mem = merged
+	e.emit(join)
+}
+
+// greenMatch reports whether two memory states agree on every green cell (constant
+// or address) they share -- the condition for merging a runtime branch's arms. A
+// differing green cell (a program counter set two ways) or a green/red mismatch
+// means the arms belong to different specializations.
+func greenMatch(a, b map[[2]int64]value) bool {
+	for c, av := range a {
+		bv, ok := b[c]
+		if !ok {
+			continue
+		}
+		if av.kind == vResid && bv.kind == vResid {
+			continue // both runtime: a phi will reconcile them
+		}
+		if !valueEqual(av, bv) {
+			return false
+		}
+	}
+	return true
 }
 
 func (e *engine) caseOf(b *ir.Block, v int64) *ir.Block {
@@ -658,6 +757,115 @@ func (e *engine) readProg(op ir.Op, off int64) (int64, bool) {
 		return int64(u<<s) >> s, true
 	}
 	return int64(u), true
+}
+
+func valueEqual(a, b value) bool {
+	if a.kind != b.kind {
+		return false
+	}
+	switch a.kind {
+	case vConst:
+		return a.k == b.k
+	case vAddr:
+		return a.reg == b.reg && a.off == b.off
+	case vResid:
+		return a.ref == b.ref
+	}
+	return true
+}
+
+// computePostIdom returns each source block's immediate post-dominator (the
+// nearest block all its outgoing paths must pass through), or absent when a block
+// has none -- its paths diverge for good, one returning while another loops. Used
+// to find where a runtime branch's arms re-converge. Exit blocks (no successors)
+// are the roots; the iterative intersection is fine for the small interpreter CFGs
+// this handles.
+func computePostIdom(f *ir.Func) map[*ir.Block]*ir.Block {
+	blocks := f.Blocks
+	n := len(blocks)
+	idx := make(map[*ir.Block]int, n)
+	for i, b := range blocks {
+		idx[b] = i
+	}
+	pdom := make([][]bool, n)
+	exit := make([]bool, n)
+	for i, b := range blocks {
+		set := make([]bool, n)
+		if len(b.Succs()) == 0 {
+			exit[i] = true
+			set[i] = true
+		} else {
+			for k := range set {
+				set[k] = true
+			}
+		}
+		pdom[i] = set
+	}
+	for changed := true; changed; {
+		changed = false
+		for i := n - 1; i >= 0; i-- {
+			if exit[i] {
+				continue
+			}
+			var nw []bool
+			for _, s := range blocks[i].Succs() {
+				if s == nil {
+					continue
+				}
+				si := idx[s]
+				if nw == nil {
+					nw = append([]bool(nil), pdom[si]...)
+				} else {
+					for k := range nw {
+						nw[k] = nw[k] && pdom[si][k]
+					}
+				}
+			}
+			if nw == nil {
+				nw = make([]bool, n)
+			}
+			nw[i] = true
+			if !boolEq(nw, pdom[i]) {
+				pdom[i] = nw
+				changed = true
+			}
+		}
+	}
+	ipdom := make(map[*ir.Block]*ir.Block)
+	for i, b := range blocks {
+		best, bestCount := -1, -1
+		for k := 0; k < n; k++ {
+			if k == i || !pdom[i][k] {
+				continue
+			}
+			if c := boolCount(pdom[k]); c > bestCount { // closest strict post-dom has the most
+				best, bestCount = k, c
+			}
+		}
+		if best >= 0 {
+			ipdom[b] = blocks[best]
+		}
+	}
+	return ipdom
+}
+
+func boolEq(a, b []bool) bool {
+	for i := range a {
+		if a[i] != b[i] {
+			return false
+		}
+	}
+	return true
+}
+
+func boolCount(a []bool) int {
+	n := 0
+	for _, v := range a {
+		if v {
+			n++
+		}
+	}
+	return n
 }
 
 func cell(r *region, off int64) [2]int64 { return [2]int64{int64(r.id), off} }

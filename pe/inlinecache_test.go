@@ -1,6 +1,7 @@
 package pe_test
 
 import (
+	"strings"
 	"testing"
 
 	"github.com/evanphx/cg12/cc"
@@ -115,6 +116,11 @@ func TestSpecializeInlineCache(t *testing.T) {
 	require.NotContains(t, residual, "switch")
 	require.Contains(t, residual, "call $rt_lookup")
 	require.Contains(t, residual, "call $rt_invoke")
+
+	// The cache hit and miss paths re-converge: the send is emitted once, not
+	// duplicated down each arm.
+	require.Equal(t, 1, strings.Count(spec.String(), "call $rt_invoke"),
+		"the shared tail after the cache check is not duplicated")
 
 	opt.Run(spec, opt.DefaultPipeline())
 
