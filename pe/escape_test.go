@@ -130,6 +130,74 @@ func TestSpecializeEscapingLocalAddress(t *testing.T) {
 	}
 }
 
+// A local built inside a HANDLER (not setup) whose address escapes into a runtime
+// call -- QuickJS's common `JSValue v = ...; f(&v)`. It is not persistent VM state
+// (so not carried across merges), and its buffer lives in the specialized handler's
+// own blocks: two MAKE ops at different positions become two handler copies, each
+// needing its own buffer, so this also checks the per-copy buffer scoping.
+const toyHandlerLocalInterp = `
+void __cg12_merge_point(int pc, int sp);
+struct Val { long tag; long data; };
+long rt_use(struct Val *v) { return v->tag + v->data; }
+enum { OP_HALT, OP_MAKE, OP_ADD };
+
+long interp(const unsigned char *code, const long *in) {
+    long stack[64];
+    int sp = 0, pc = 0;
+    for (;;) {
+        __cg12_merge_point(pc, sp);
+        switch (code[pc]) {
+        case OP_MAKE: {
+            struct Val v;
+            v.tag = 7;
+            v.data = in[code[pc+1]];
+            stack[sp++] = rt_use(&v);   /* &v (a handler local) escapes */
+            pc += 2; break;
+        }
+        case OP_ADD: { long b = stack[--sp]; stack[sp-1] += b; pc += 1; break; }
+        case OP_HALT: return stack[sp-1];
+        }
+    }
+}
+`
+
+func TestSpecializeEscapingHandlerLocal(t *testing.T) {
+	// MAKE 0, MAKE 1, ADD, HALT  ->  (7+in0) + (7+in1) == 14 + in0 + in1
+	prog := []byte{1, 0, 1, 1, 2, 0}
+	m, err := cc.Compile("toy.c", toyHandlerLocalInterp)
+	require.NoError(t, err)
+	spec, name, _, err := pe.Specialize(m, "interp", prog)
+	require.NoError(t, err)
+	residual := spec.String()
+	t.Logf("residual:\n%s", residual)
+	require.Contains(t, residual, "call $rt_use", "the call through &v remains")
+
+	opt.Run(spec, opt.DefaultPipeline())
+	m.Funcs = append(m.Funcs, spec.Funcs...)
+	mc, err := interp.New(m)
+	require.NoError(t, err)
+
+	var rf *ir.Func
+	for _, f := range spec.Funcs {
+		if f.Name == name {
+			rf = f
+		}
+	}
+	for _, tc := range []struct{ in0, in1 int64 }{{5, 9}, {100, -4}, {-7, 8}} {
+		args := make([]interp.Value, len(rf.Params))
+		for i, p := range rf.Params {
+			if p.Name == "in0" {
+				args[i] = interp.L(tc.in0)
+			} else {
+				args[i] = interp.L(tc.in1)
+			}
+		}
+		v, err := mc.Call(name, args...)
+		require.NoError(t, err)
+		require.Equal(t, 14+tc.in0+tc.in1, v.I64(), "in0=%d in1=%d", tc.in0, tc.in1)
+	}
+}
+
 // A by-value aggregate argument that is itself another call's aggregate RESULT --
 // rt_inc(rt_mk(x)). rt_mk's result is an opaque residual struct pointer, not a
 // struct whose cells the engine tracks, so the aggregate-argument copy must read it

@@ -72,13 +72,14 @@ const (
 )
 
 type region struct {
-	id       int
-	role     role
-	size     int64
-	escapes  bool   // rInput: the pointer value is used by value, not just dereferenced
-	name     string // rInput: the parameter name (for the residual pointer parameter)
-	base     ir.Ref // rInput escaping: the synthesized residual pointer parameter
-	haveBase bool
+	id        int
+	role      role
+	size      int64
+	escapes   bool   // rInput: the pointer value is used by value, not just dereferenced
+	name      string // rInput: the parameter name (for the residual pointer parameter)
+	base      ir.Ref // rInput escaping, or a setup local's residualized buffer
+	haveBase  bool
+	setupTime bool // created during the one-time setup (before the first merge point)
 }
 
 // greenState is the memoization key: everything static that shapes the residual.
@@ -127,6 +128,7 @@ type engine struct {
 	depth    int                     // emit recursion depth (guards runaway inlining)
 	loops    map[*ir.Block]*loopInfo // merge-free loop headers to residualize
 	active   map[*ir.Block]*loopState
+	localBuf map[*region]ir.Ref // handler-local escape buffers (reset per specialization)
 	err      error
 }
 
@@ -194,6 +196,7 @@ func (e *engine) run() {
 	e.stackStride = detectStackStride(e.src)
 	e.loops = analyzeLoops(e.src, e.isMerge)
 	e.active = map[*ir.Block]*loopState{}
+	e.localBuf = map[*region]ir.Ref{}
 
 	// Classify the parameters. "code" is the green program. A pointer parameter is a
 	// runtime array: read-only ones synthesize a scalar per element, but one whose
@@ -231,7 +234,7 @@ func (e *engine) run() {
 
 func (e *engine) newRegion(r role, size int64) *region {
 	e.nreg++
-	return &region{id: e.nreg, role: r, size: size}
+	return &region{id: e.nreg, role: r, size: size, setupTime: e.baseMem == nil}
 }
 
 // specialize emits the residual for one green state: reset the interpreter's
@@ -241,6 +244,7 @@ func (e *engine) specialize(gs greenState) {
 	st := e.states[gs]
 	e.env = copyEnv(e.baseEnv)
 	e.mem = copyMem(e.baseMem)
+	e.localBuf = map[*region]ir.Ref{} // buffers are per handler copy: this state's blocks
 	e.setPC(gs.pc)
 	e.setSP(gs.sp)
 	e.bindRedState(gs.sp, st.phis)
@@ -755,9 +759,14 @@ func (e *engine) allocRegion(in *ir.Instr) *region {
 	case "code", "in":
 		r.role = roleBase
 	default:
-		if size > 8 { // a local array: persistent VM state carried across merges
+		if size > 8 {
 			r.role = roleVar
-			e.varRegs = append(e.varRegs, r)
+			// A local array declared before the interpreter loop is persistent VM
+			// state, carried across merges. One allocated inside a handler (a JSValue
+			// built on the stack, say) is a handler temporary, not carried.
+			if r.setupTime {
+				e.varRegs = append(e.varRegs, r)
+			}
 		}
 		// otherwise roleOther: a handler-local scalar, not carried across merges
 	}
@@ -966,7 +975,7 @@ func (e *engine) store(addr, val value) {
 		}
 		e.fail("a read-only input array was written")
 	default:
-		if addr.reg.haveBase {
+		if _, ok := e.bufferOf(addr.reg); ok {
 			// The region was residualized (its address escaped); write to its buffer.
 			e.cur.Store(e.materialize(val), e.materialize(addr))
 			return
@@ -985,20 +994,33 @@ func (e *engine) inputBase(reg *region) ir.Ref {
 	return reg.base
 }
 
-// localBuffer backs a local region with residual storage on first escape: it
-// allocates a buffer, flushes the region's currently-tracked cells into it, and
-// thereafter the region is real residual memory (loads and stores route through
-// the buffer, and it is no longer carried across merge points as phis). The flush
-// reads the abstract store, so it must run before haveBase redirects loads.
-func (e *engine) localBuffer(reg *region) ir.Ref {
-	if reg.haveBase {
-		return reg.base
+// bufferOf returns a local region's residual buffer, if it has been given one. A
+// setup local's buffer lives in the entry block and is cached on the region; a
+// handler local's buffer lives in this specialization's blocks and is tracked in a
+// per-copy map that resets each specialization.
+func (e *engine) bufferOf(reg *region) (ir.Ref, bool) {
+	if reg.setupTime {
+		return reg.base, reg.haveBase
 	}
-	// Only the one-time setup can de-green a carried region without desyncing the
-	// merge states that already carry it. A local escaping inside a handler needs a
-	// per-copy buffer and invalidation we don't model yet.
-	if e.baseMem != nil {
-		e.fail("a local's address escaped into a runtime value after setup")
+	b, ok := e.localBuf[reg]
+	return b, ok
+}
+
+// ensureBuffer backs a local region with residual storage on first escape: it
+// allocates a buffer, flushes the region's currently-tracked cells into it, and
+// thereafter the region is real residual memory (loads and stores route through the
+// buffer). The flush reads the abstract store, so it must run before the buffer
+// redirects loads.
+func (e *engine) ensureBuffer(reg *region) ir.Ref {
+	if b, ok := e.bufferOf(reg); ok {
+		return b
+	}
+	// A setup local's buffer sits in the entry block, valid everywhere, so a later
+	// escape (even inside a handler) reuses it. But a setup local escaping for the
+	// FIRST time inside a handler would get a buffer in one copy's block -- invalid in
+	// the others -- and de-greening a carried region mid-run desyncs the merge states.
+	if reg.setupTime && e.baseMem != nil {
+		e.fail("a persistent local's address escaped after setup")
 		return ir.R
 	}
 	size := reg.size
@@ -1014,8 +1036,12 @@ func (e *engine) localBuffer(reg *region) ir.Ref {
 		}
 		e.cur.Store(e.materialize(cv), dst)
 	}
-	reg.base, reg.haveBase = buf, true
-	e.removeVar(reg)
+	if reg.setupTime {
+		reg.base, reg.haveBase = buf, true
+		e.removeVar(reg) // de-green persistent state (safe only during setup)
+	} else {
+		e.localBuf[reg] = buf // a handler local is not carried, so nothing to remove
+	}
 	return buf
 }
 
@@ -1147,7 +1173,7 @@ func (e *engine) load(op ir.Op, addr value) value {
 		}
 		return value{kind: vResid, ref: e.inputParam(addr.off, loadCls(op)), cls: loadCls(op)}
 	default:
-		if addr.reg.haveBase {
+		if _, ok := e.bufferOf(addr.reg); ok {
 			// The region was residualized (its address escaped); read from its buffer.
 			return value{kind: vResid, ref: e.cur.Load(loadCls(op), e.materialize(addr)), cls: loadCls(op)}
 		}
@@ -1197,7 +1223,7 @@ func (e *engine) materialize(v value) ir.Ref {
 		case roleVar, roleOther:
 			// A local (a JSValue built on the stack, say) whose address is handed to a
 			// runtime routine: back it with residual storage holding its current cells.
-			base = e.localBuffer(v.reg)
+			base = e.ensureBuffer(v.reg)
 		default:
 			e.fail("a green address escaped into a runtime value")
 			return ir.R
