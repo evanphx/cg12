@@ -67,11 +67,44 @@ func (g *gen) vlaUnwind(depth int) {
 	}
 }
 
-// labeledItem reports whether a block item is a labeled statement (a goto label,
-// or a switch case/default), which begins a fresh block even after a terminator.
+// labeledItem reports whether a block item contains a label (a goto/computed-goto
+// target, or a switch case/default) anywhere within it, so a fresh block can
+// resume from it even after a terminator. The label need not be at the item's
+// head: an interpreter's opcode handlers, for instance, are labels nested inside
+// a plain { } block reached only by computed goto, and skipping that block as
+// unreachable would drop every handler. This mirrors labelsIn's traversal, since
+// the same nesting hides a label from either.
 func labeledItem(bi *cc.BlockItem) bool {
-	return bi.Case == cc.BlockItemStmt && bi.Statement != nil &&
-		bi.Statement.Case == cc.StatementLabeled
+	return bi.Case == cc.BlockItemStmt && stmtHasLabel(bi.Statement)
+}
+
+// stmtHasLabel reports whether a statement contains a label at any depth,
+// descending the same compound/selection/iteration nesting labelsIn collects
+// labels through.
+func stmtHasLabel(s *cc.Statement) bool {
+	if s == nil {
+		return false
+	}
+	switch s.Case {
+	case cc.StatementLabeled:
+		return true
+	case cc.StatementCompound:
+		cs := s.CompoundStatement
+		if cs == nil {
+			return false
+		}
+		for l := cs.BlockItemList; l != nil; l = l.BlockItemList {
+			if bi := l.BlockItem; bi.Case == cc.BlockItemStmt && stmtHasLabel(bi.Statement) {
+				return true
+			}
+		}
+	case cc.StatementSelection:
+		return stmtHasLabel(s.SelectionStatement.Statement) ||
+			stmtHasLabel(s.SelectionStatement.Statement2)
+	case cc.StatementIteration:
+		return stmtHasLabel(s.IterationStatement.Statement)
+	}
+	return false
 }
 
 // trailingExpr peels any labels off a statement and reports the expression
@@ -157,6 +190,23 @@ func (g *gen) genBlockItem(bi *cc.BlockItem) {
 }
 
 func (g *gen) genLocalDecl(d *cc.Declaration) {
+	// `__auto_type v = e;` (a GNU extension whose type is the initializer's) is a
+	// declaration of its own kind: the declarator and initializer hang directly off
+	// the Declaration rather than an InitDeclaratorList. GCC's <stdatomic.h> builds
+	// its generic atomic accessors out of it, so mishandling it turned every
+	// atomic_load/store into a reference to an undefined symbol.
+	if d.Case == cc.DeclarationAuto {
+		dcl := d.Declarator
+		if dcl == nil || dcl.IsSynthetic() {
+			return
+		}
+		t := dcl.Type()
+		addr := g.allocAligned(t, int(t.Size()))
+		g.setName(addr, dcl.Name()+".addr")
+		g.define(dcl.Name(), lval{addr: addr, typ: t})
+		g.genInit(addr, t, d.Initializer)
+		return
+	}
 	if d.Case != cc.DeclarationDecl {
 		return
 	}

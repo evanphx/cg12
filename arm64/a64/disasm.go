@@ -730,10 +730,10 @@ func disasmExclusive(w uint32) string {
 	if bits(w, 29, 24) != 0x8 || bits(w, 21, 21) != 0 || bits(w, 14, 10) != 31 {
 		return "" // not the exclusive-access group
 	}
+	// size selects the access width and its mnemonic suffix: byte, halfword, word,
+	// doubleword. The data register is W for all but the doubleword form.
 	size := bits(w, 31, 30)
-	if size != 2 && size != 3 { // only word/doubleword are encoded here
-		return ""
-	}
+	suffix := [4]string{"b", "h", "", ""}[size]
 	w64 := size == 3
 	load := bits(w, 22, 22) == 1
 	acqrel := bits(w, 15, 15) == 1
@@ -745,24 +745,24 @@ func disasmExclusive(w uint32) string {
 		if rs != 31 {
 			return ""
 		}
-		mn := "stlr"
+		mn := "stlr" + suffix
 		if load {
-			mn = "ldar"
+			mn = "ldar" + suffix
 		}
 		return fmt.Sprintf("%s %s, [%s]", mn, gpr(w64, rt), gprSP(true, rn))
 	}
 
 	switch {
 	case load && rs == 31:
-		mn := "ldxr"
+		mn := "ldxr" + suffix
 		if acqrel {
-			mn = "ldaxr"
+			mn = "ldaxr" + suffix
 		}
 		return fmt.Sprintf("%s %s, [%s]", mn, gpr(w64, rt), gprSP(true, rn))
 	case !load:
-		mn := "stxr"
+		mn := "stxr" + suffix
 		if acqrel {
-			mn = "stlxr"
+			mn = "stlxr" + suffix
 		}
 		return fmt.Sprintf("%s %s, %s, [%s]", mn, gpr(false, rs), gpr(w64, rt), gprSP(true, rn))
 	}

@@ -95,26 +95,23 @@ func TestLongDoubleIsRefusedForAmd64(t *testing.T) {
 	}
 }
 
-// cg12 does not implement atomics, and used to compile them anyway.
-//
-// `_Atomic int g; g++;` became loaduw/add/storew -- a read-modify-write with no
-// atomicity at all -- and __atomic_load_n(&g, __ATOMIC_SEQ_CST) became a plain
-// load with its memory-order argument dropped. Both produced a program that runs,
-// passes any single-threaded test, and races under contention: the failure
-// arrives on someone else's machine, months later, as corruption with nothing to
-// trace it to. That is the worst way for a compiler to be wrong, and an error is
-// the only honest answer until the IR has an ordering and the ops to carry it.
-func TestAtomicsAreRefused(t *testing.T) {
+// The explicit __atomic_* builtins now lower to the atomic intrinsics (see
+// TestExplicitAtomicsRun), but an _Atomic-qualified OBJECT still is not supported:
+// the language makes every access to it atomic, and the general expression path
+// does not yet route ordinary loads/stores/read-modify-writes through the atomic
+// ops. Letting it through would compile `g++` on an _Atomic int to an ordinary
+// non-atomic read-modify-write -- code that runs, passes any single-threaded test,
+// and races under contention. An error is the honest answer until the access paths
+// learn the qualifier.
+func TestAtomicObjectsAreRefused(t *testing.T) {
 	for _, src := range []string{
 		`_Atomic int g; void f(void){ g++; }`,                             // an atomic object
 		`void f(void){ _Atomic int x = 0; x++; }`,                         // a local one
 		`struct S { _Atomic int a; }; int f(struct S *s){ return s->a; }`, // read via a member
 		`struct S { _Atomic int a; }; void f(struct S *s){ s->a = 1; }`,   // written via a member
-		`int g; int f(void){ return __atomic_load_n(&g, 5); }`,            // SEQ_CST load
-		`int g; void f(int v){ __atomic_store_n(&g, v, 5); }`,             // SEQ_CST store
 	} {
 		_, err := cc.Compile("a.c", src)
-		require.Error(t, err, "an atomic that compiles to ordinary memory access is worse than one that fails")
+		require.Error(t, err, "an atomic object that compiles to ordinary memory access is worse than one that fails")
 		require.Contains(t, err.Error(), "not supported")
 	}
 }

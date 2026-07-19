@@ -106,7 +106,7 @@ func registerAtomics() {
 		HasResult: true, SideEffect: true,
 		ReadsMemory: true, WritesMemory: true, EscapesArgs: true,
 	}
-	for _, w := range []string{"w", "l"} {
+	for _, w := range []string{"b", "h", "w", "l"} {
 		// A pure load reads memory; a pure store writes it (and may publish a
 		// pointer value, so its operands escape).
 		RegisterIntrinsic("atomic.load."+w, IntrinsicEffects{

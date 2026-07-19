@@ -7,31 +7,41 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
-// cg12 builds an aggregate's type from its members' types and then assumes its
-// own layout rules land where C did. For a bitfield they do not: a bitfield's
-// type is its whole storage type, so `unsigned a:1, b:1, c:1, d:1, e:1` becomes
-// five four-byte fields -- twenty bytes for a struct C makes four.
-//
-// The backends classify a by-value argument from that type, so the struct
-// arrives at the callee with its fields somewhere else entirely. It looks fine
-// within one translation unit, because both sides agree on the same wrong
-// layout; it corrupts the moment it meets code someone else compiled. An error
-// is the honest answer until ir.AggType can express a bitfield.
-func TestBitfieldByValueIsRefused(t *testing.T) {
-	for _, src := range []string{
-		`struct W { unsigned a:1, b:1, c:1, d:1, e:1; };
-		 int use(struct W w){ return w.a; }`, // by-value parameter
-		`struct W { unsigned a:1, b:1; };
-		 extern int peer(struct W);
-		 int use(void){ struct W w = {1,0}; return peer(w); }`, // by-value argument
-		`struct W { unsigned a:1, b:1; };
-		 struct W make(void){ struct W w = {1,0}; return w; }`, // by-value return
-	} {
-		_, err := cc.Compile("w.c", src)
-		require.Error(t, err, "a bitfield struct crossing the ABI must not compile silently")
-		require.Contains(t, err.Error(), "by value")
-		require.Contains(t, err.Error(), "bitfield")
-	}
+// cg12 builds an aggregate's type from its members' types, but a bitfield has no
+// field type it can mirror -- its storage is packed bits, not a member of some
+// class. So a struct with a bitfield becomes an opaque aggregate of the C size:
+// enough for the ABI to classify it (GP registers when small, memory when large)
+// and to copy its bytes, while an individual bitfield is still reached through a
+// pointer at its own offset. This checks a bitfield struct survives crossing the
+// ABI by value, in both register and memory classes, with its bits intact.
+func TestBitfieldStructByValueWorks(t *testing.T) {
+	out, code := compileAndRun(t, `
+#include <stdio.h>
+struct Small { unsigned a:1, b:3, c:4; int x; };   // 8 bytes: two GP registers
+struct Big   { long p, q; unsigned f:5; };         // 24 bytes: passed by reference
+int  usesmall(struct Small s){ return s.a + s.b*10 + s.c*100 + s.x*1000; }
+long usebig(struct Big b){ return b.p + b.q + b.f; }
+int main(void){
+	struct Small s = { 1, 5, 9, 7 };     // a=1 b=5 c=9 x=7 -> 7951
+	struct Big   g = { 100, 200, 17 };   // 100+200+17 -> 317
+	printf("%d %ld\n", usesmall(s), usebig(g));
+	return 0;
+}`)
+	require.Equal(t, 0, code)
+	require.Equal(t, "7951 317\n", out)
+}
+
+// A memory-value argument (here an __int128) passed to a narrower scalar parameter
+// is coerced to that scalar and travels as an ordinary value -- it must not be
+// tagged as a by-value aggregate of the scalar's type (which has no aggregate).
+func TestWideArgToScalarParam(t *testing.T) {
+	_, code := compileAndRun(t, `
+long low64(long x){ return x; }
+int main(void){
+	unsigned __int128 big = ((unsigned __int128)123 << 64) | 456;
+	return low64(big) == 456 ? 0 : 1;   // truncated to the low 64 bits
+}`)
+	require.Equal(t, 0, code)
 }
 
 // Bitfields themselves are fine: member access uses the type checker's offsets,

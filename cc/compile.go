@@ -6,6 +6,7 @@ package cc
 
 import (
 	"fmt"
+	"math"
 	"math/big"
 	"sort"
 	"strings"
@@ -142,6 +143,41 @@ func CompileFor(target Target, name, src string) (*ir.Module, error) {
 
 	g := &gen{target: target, mod: ir.NewModule(), strs: map[string]string{}, ldconsts: map[string]string{}, cplx: map[ir.SubCls]*ir.AggType{}, aggs: map[cc.Type]*ir.AggType{}}
 	g.push() // file scope: holds globals, visible to every function
+
+	// Internal-linkage functions (static, and static inline) defined in headers
+	// have no definition in any other object, so a translation unit that uses one
+	// must emit its own copy. Index them by name -- from the whole unit, headers
+	// included -- and pull in the ones actually referenced below, rather than
+	// compiling every static inline in every system header.
+	localFuncs := map[string]*cc.FunctionDefinition{}
+	localData := map[string]*cc.Declaration{} // internal-linkage globals a header defines
+	for tu := ast.TranslationUnit; tu != nil; tu = tu.TranslationUnit {
+		ed := tu.ExternalDeclaration
+		if ed == nil {
+			continue
+		}
+		switch ed.Case {
+		case cc.ExternalDeclarationFuncDef:
+			if d := ed.FunctionDefinition.Declarator; d != nil && d.Linkage() == cc.Internal {
+				localFuncs[d.Name()] = ed.FunctionDefinition
+			}
+		case cc.ExternalDeclarationDecl:
+			if ed.Position().Filename == name {
+				continue // a primary-file global is emitted by the main loop below
+			}
+			for l := ed.Declaration.InitDeclaratorList; l != nil; l = l.InitDeclaratorList {
+				dcl := l.InitDeclarator.Declarator
+				if dcl == nil || dcl.Type().Kind() == cc.Function || dcl.IsExtern() {
+					continue
+				}
+				if dcl.Linkage() == cc.Internal {
+					localData[dcl.Name()] = ed.Declaration
+				}
+			}
+		}
+	}
+
+	emitted := map[string]bool{}
 	for tu := ast.TranslationUnit; tu != nil; tu = tu.TranslationUnit {
 		ed := tu.ExternalDeclaration
 		if ed == nil || ed.Position().Filename != name {
@@ -149,12 +185,65 @@ func CompileFor(target Target, name, src string) (*ir.Module, error) {
 		}
 		switch ed.Case {
 		case cc.ExternalDeclarationFuncDef:
+			emitted[ed.FunctionDefinition.Declarator.Name()] = true
 			g.genFunc(ed.FunctionDefinition)
 		case cc.ExternalDeclarationDecl:
 			g.genGlobalDecl(ed.Declaration)
 		}
 		if g.err != nil {
 			return nil, g.err
+		}
+	}
+
+	// Reachability: emitted code and data reference symbols (as ConstSyms in a
+	// function, or symbol items in a data definition). Pull in any that names a
+	// not-yet-emitted internal-linkage function or global from a header, and repeat
+	// until the referenced set closes -- an external symbol (libc, another object)
+	// is left for the linker.
+	for {
+		need := map[string]bool{}
+		for _, f := range g.mod.Funcs {
+			for i := range f.Consts {
+				if c := f.Consts[i]; c.Kind == ir.ConstSym {
+					need[c.Sym] = true
+				}
+			}
+		}
+		for _, d := range g.mod.Data {
+			for _, it := range d.Items {
+				if it.Sym != "" {
+					need[it.Sym] = true
+				}
+			}
+		}
+		progress := false
+		for sym := range need {
+			if emitted[sym] {
+				continue
+			}
+			switch {
+			case localFuncs[sym] != nil:
+				emitted[sym] = true
+				g.genFunc(localFuncs[sym])
+				progress = true
+			case localData[sym] != nil:
+				decl := localData[sym]
+				// One declaration can define several names; mark them all so a
+				// sibling reference does not emit it a second time.
+				for l := decl.InitDeclaratorList; l != nil; l = l.InitDeclaratorList {
+					if dcl := l.InitDeclarator.Declarator; dcl != nil {
+						emitted[dcl.Name()] = true
+					}
+				}
+				g.genGlobalDecl(decl)
+				progress = true
+			}
+			if g.err != nil {
+				return nil, g.err
+			}
+		}
+		if !progress {
+			break
 		}
 	}
 	return g.mod, nil
@@ -617,7 +706,7 @@ func (g *gen) globalItems(t cc.Type, init *cc.Initializer) []ir.DataItem {
 			// literal is as valid here as a floating one: `double d = 1;`.
 			v, ok := constFloat(e)
 			if !ok {
-				g.fail("initializer for a floating type is not a constant")
+				g.fail("%s: initializer for a floating type is not a constant", e.Position())
 				return
 			}
 			leaves = append(leaves, leaf{off, sz, ir.DataItem{Sub: subFor(sz), Flts: []float64{v}}})
@@ -825,6 +914,19 @@ func constFloat(e cc.ExpressionNode) (float64, bool) {
 	if e == nil {
 		return 0, false
 	}
+	return foldFloatConst(e)
+}
+
+// foldFloatConst evaluates a floating constant initializer. It takes the value
+// modernc folded when there is one, and otherwise handles what modernc leaves
+// alone: the __builtin_nan / __builtin_inf / __builtin_huge_val family (what
+// <math.h>'s NAN, INFINITY, and HUGE_VAL expand to), and a unary sign on a
+// literal (modernc does not fold `-1.5` in every context), each seen through
+// parentheses and a cast. It returns ok=false for anything else.
+func foldFloatConst(e cc.ExpressionNode) (float64, bool) {
+	if e == nil {
+		return 0, false
+	}
 	switch v := e.Value().(type) {
 	case cc.Float64Value:
 		return float64(v), true
@@ -832,6 +934,37 @@ func constFloat(e cc.ExpressionNode) (float64, bool) {
 		return float64(v), true
 	case cc.UInt64Value:
 		return float64(v), true
+	}
+	switch n := e.(type) {
+	case *cc.PrimaryExpression:
+		if n.Case == cc.PrimaryExpressionExpr {
+			return foldFloatConst(n.ExpressionList)
+		}
+	case *cc.ExpressionList:
+		if n.ExpressionList == nil {
+			return foldFloatConst(n.AssignmentExpression)
+		}
+	case *cc.CastExpression:
+		return foldFloatConst(n.CastExpression)
+	case *cc.UnaryExpression:
+		switch n.Case {
+		case cc.UnaryExpressionPlus:
+			return foldFloatConst(n.CastExpression)
+		case cc.UnaryExpressionMinus:
+			if v, ok := foldFloatConst(n.CastExpression); ok {
+				return -v, true
+			}
+		}
+	case *cc.PostfixExpression:
+		if n.Case == cc.PostfixExpressionCall {
+			switch calleeIdent(n) {
+			case "__builtin_nan", "__builtin_nanf", "__builtin_nanl":
+				return math.NaN(), true
+			case "__builtin_inf", "__builtin_inff", "__builtin_infl",
+				"__builtin_huge_val", "__builtin_huge_valf", "__builtin_huge_vall":
+				return math.Inf(1), true
+			}
+		}
 	}
 	return 0, false
 }

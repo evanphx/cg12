@@ -271,7 +271,16 @@ func (o *Object) MarshalELF() ([]byte, error) {
 	}
 	// An undefined symbol referenced by a TLS relocation must be typed STT_TLS.
 	tlsSym := map[string]bool{}
-	allRelocs := append(append(append([]Reloc{}, o.Relocs...), o.DataRelocs...), o.DebugInfoRelocs...)
+	// Every relocation section that encodeRela emits below must be scanned here, or
+	// a symbol referenced only from a section left out (a function pointer in
+	// read-only data, say) is never added as undefined and encoding it fails.
+	var allRelocs []Reloc
+	allRelocs = append(allRelocs, o.Relocs...)
+	allRelocs = append(allRelocs, o.DataRelocs...)
+	allRelocs = append(allRelocs, o.RodataRelocs...)
+	allRelocs = append(allRelocs, o.RelroRelocs...)
+	allRelocs = append(allRelocs, o.DebugInfoRelocs...)
+	allRelocs = append(allRelocs, o.DebugLineRelocs...)
 	for _, rl := range allRelocs {
 		if isAnyTLSReloc(rl.Type) {
 			tlsSym[rl.Sym] = true

@@ -55,6 +55,23 @@ func (g *gen) aggOf(t cc.Type) *ir.AggType {
 	}
 	agg := &ir.AggType{Name: aggName(t)}
 	g.aggs[t] = agg // register before recursing so a self-referential pointer resolves
+
+	// A bitfield defeats the field-by-field model: its Type() is the whole storage
+	// unit, so cg12 would lay `unsigned a:1, b:1` out as two words where C packs
+	// both into one. cg12's aggregate types cannot express a bitfield, but they do
+	// not need to for a struct that is copied by value or passed to a call: only its
+	// size and alignment matter there (an individual bitfield is reached through a
+	// pointer at its own offset, see bitfield.go, never through this type). So model
+	// the whole aggregate as an opaque blob of C's size.
+	if hasBitfield(t) {
+		agg.Opaque = true
+		agg.Size = int(t.Size())
+		agg.Align = t.Align()
+		g.mod.AddType(agg)
+		g.checkPacked(t)
+		return agg
+	}
+
 	switch st := t.(type) {
 	case *cc.StructType:
 		for i := 0; i < st.NumFields(); i++ {
@@ -70,6 +87,25 @@ func (g *gen) aggOf(t cc.Type) *ir.AggType {
 	g.checkPacked(t)
 	g.checkAggLayout(t, agg)
 	return agg
+}
+
+// hasBitfield reports whether a struct or union has a bitfield member.
+func hasBitfield(t cc.Type) bool {
+	switch st := t.(type) {
+	case *cc.StructType:
+		for i := 0; i < st.NumFields(); i++ {
+			if st.FieldByIndex(i).IsBitfield() {
+				return true
+			}
+		}
+	case *cc.UnionType:
+		for i := 0; i < st.NumFields(); i++ {
+			if st.FieldByIndex(i).IsBitfield() {
+				return true
+			}
+		}
+	}
+	return false
 }
 
 // checkAggLayout requires cg12's layout of an aggregate to be the one C gave it.

@@ -2,6 +2,7 @@ package cc
 
 import (
 	"math"
+	"strings"
 
 	"github.com/evanphx/cg12/ir"
 	"modernc.org/cc/v4"
@@ -29,6 +30,13 @@ func (g *gen) builtinCall(n *cc.PostfixExpression) (ir.Ref, bool) {
 	case "__builtin_huge_valf":
 		return g.fn.Single(math.Inf(1)), true
 
+	case "__builtin_nanf":
+		return g.fn.Single(math.NaN()), true
+	case "__builtin_nan", "__builtin_nanl":
+		// nanl would be a long double; the payload string argument is ignored (a
+		// quiet NaN), and a double NaN widens to it without loss.
+		return g.fn.Double(math.NaN()), true
+
 	case "__builtin_bswap16":
 		return g.bswap(g.genExpr(args[0]), 2), true
 	case "__builtin_bswap32":
@@ -40,13 +48,123 @@ func (g *gen) builtinCall(n *cc.PostfixExpression) (ir.Ref, bool) {
 		cls := clsOf(args[0].Type())
 		return g.cur.Clz(cls, g.genExpr(args[0])), true
 
-	case "__atomic_load_n", "__atomic_store_n":
-		// These took the address and the value and threw the memory order away, so
-		// __ATOMIC_SEQ_CST compiled to a plain load or store with no fence on either
-		// side of it. The access is atomic by accident on both targets -- an aligned
-		// word-sized load does not tear -- but the ORDER it was asked for is the
-		// entire reason the builtin was written rather than a plain assignment.
-		g.atomicUnsupported(name)
+	case "__builtin_frame_address", "__builtin_return_address":
+		// Only level 0 is meaningful here; callers use it (js_get_stack_pointer)
+		// to sample the current stack depth, which the live stack pointer answers.
+		return g.cur.StackSave(), true
+
+	case "__builtin_alloca", "__builtin_alloca_with_align":
+		// A dynamic stack allocation, reclaimed when the function returns. AllocN
+		// needs a 16-byte multiple, so round the size up.
+		cls := clsOf(args[0].Type())
+		sz := g.genExpr(args[0])
+		sz = g.cur.And(cls, g.cur.Add(cls, sz, g.fn.ConstInt(cls, 15)), g.fn.ConstInt(cls, -16))
+		return g.cur.AllocN(sz), true
+
+	case "__builtin_isnan":
+		// NaN is the only value unordered with itself.
+		return g.cur.Cmp(ir.CmpFuo, ir.ClsW, g.genExpr(args[0]), g.genExpr(args[0])), true
+
+	case "__builtin_constant_p":
+		// Whether the argument is a compile-time constant. Reporting "no" is always
+		// sound: it only steers the caller to the runtime path.
+		return g.fn.Word(0), true
+
+	case "__builtin_ctz", "__builtin_ctzl", "__builtin_ctzll":
+		// Count trailing zeros: isolate the lowest set bit (x & -x) and count the
+		// leading zeros of that. Like clz, undefined for zero.
+		cls := clsOf(args[0].Type())
+		x := g.genExpr(args[0])
+		low := g.cur.And(cls, x, g.cur.Neg(cls, x))
+		width := int64(cls.Size()) * 8
+		return g.cur.Sub(cls, g.fn.ConstInt(cls, width-1), g.cur.Clz(cls, low)), true
+
+	case "__builtin_isfinite":
+		// x - x is 0 for a finite x, and NaN for an infinity or NaN, so the ordered
+		// compare against 0 is true only when x is finite.
+		cls := clsOf(args[0].Type())
+		x := g.genExpr(args[0])
+		diff := g.cur.Sub(cls, x, x)
+		zero := g.fn.Double(0)
+		if cls == ir.ClsS {
+			zero = g.fn.Single(0)
+		}
+		return g.cur.Cmp(ir.CmpFeq, ir.ClsW, diff, zero), true
+
+	case "__builtin_signbit", "__builtin_signbitf":
+		// The sign bit is the top bit of the value's bit pattern, so reinterpret it
+		// as an integer and test whether that is negative.
+		cls := clsOf(args[0].Type())
+		intCls := ir.ClsL
+		if cls == ir.ClsS {
+			intCls = ir.ClsW
+		}
+		bits := g.cur.Cast(intCls, g.genExpr(args[0]))
+		return g.cur.Cmp(ir.CmpSlt, ir.ClsW, bits, g.fn.ConstInt(intCls, 0)), true
+
+	case "__atomic_fetch_add", "__atomic_fetch_sub", "__atomic_fetch_and",
+		"__atomic_fetch_or", "__atomic_fetch_xor":
+		return g.atomicFetchOp(strings.TrimPrefix(name, "__atomic_fetch_"), args, false), true
+	case "__atomic_add_fetch", "__atomic_sub_fetch", "__atomic_and_fetch",
+		"__atomic_or_fetch", "__atomic_xor_fetch":
+		op := strings.TrimSuffix(strings.TrimPrefix(name, "__atomic_"), "_fetch")
+		return g.atomicFetchOp(op, args, true), true
+
+	case "__atomic_load_n":
+		return g.atomicLoad(args[0]), true
+	case "__atomic_store_n":
+		g.atomicStore(args[0], args[1])
+		return ir.R, true
+	case "__atomic_exchange_n":
+		return g.atomicXchg(args[0], args[1]), true
+	case "__atomic_compare_exchange_n":
+		return g.atomicCAS(args[0], args[1], args[2]), true
+
+	// The generic forms pass the value and result by pointer rather than by value.
+	case "__atomic_load": // (ptr, ret_ptr, order): *ret_ptr = atomic load *ptr
+		suf, cls, width, ok := atomicWidth(args[0])
+		if !ok {
+			g.atomicUnsupported(name)
+			return ir.R, true
+		}
+		v := g.cur.Intrinsic("atomic.load."+suf, cls, g.genExpr(args[0]))
+		g.storeWidth(width, v, g.genExpr(args[1]))
+		return ir.R, true
+	case "__atomic_store": // (ptr, val_ptr, order): *ptr = *val_ptr
+		suf, _, width, ok := atomicWidth(args[0])
+		if !ok {
+			g.atomicUnsupported(name)
+			return ir.R, true
+		}
+		ptr := g.genExpr(args[0])
+		g.cur.IntrinsicVoid("atomic.store."+suf, ptr, g.loadWidth(width, g.genExpr(args[1])))
+		return ir.R, true
+	case "__atomic_exchange": // (ptr, val_ptr, ret_ptr, order)
+		suf, cls, width, ok := atomicWidth(args[0])
+		if !ok {
+			g.atomicUnsupported(name)
+			return ir.R, true
+		}
+		ptr := g.genExpr(args[0])
+		v := g.loadWidth(width, g.genExpr(args[1]))
+		old := g.cur.Intrinsic("atomic.xchg."+suf, cls, ptr, v)
+		g.storeWidth(width, old, g.genExpr(args[2]))
+		return ir.R, true
+	case "__atomic_compare_exchange": // (ptr, expected_ptr, desired_ptr, weak, s, f)
+		suf, cls, width, ok := atomicWidth(args[0])
+		if !ok {
+			g.atomicUnsupported(name)
+			return ir.R, true
+		}
+		ptr := g.genExpr(args[0])
+		expPtr := g.genExpr(args[1])
+		exp := g.loadWidth(width, expPtr)
+		old := g.cur.Intrinsic("atomic.cas."+suf, cls, ptr, exp, g.loadWidth(width, g.genExpr(args[2])))
+		g.storeWidth(width, old, expPtr) // *expected = old (a no-op on success)
+		return g.cur.Cmp(ir.CmpEq, ir.ClsW, old, exp), true
+
+	case "__atomic_thread_fence", "__atomic_signal_fence":
+		g.cur.IntrinsicVoid("atomic.fence")
 		return ir.R, true
 
 	case "__builtin_add_overflow", "__builtin_sub_overflow", "__builtin_mul_overflow":

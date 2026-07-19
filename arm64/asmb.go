@@ -100,10 +100,10 @@ type asmb interface {
 	// a retry loop, and dmb is the fence. The retry loop is emitted with a
 	// selector-local label: freshLabel mints a unique name, label plants it, and
 	// branchTo/cbnzTo/bcondTo branch to it by name.
-	ldar(w64 bool, rt, rn Reg)
-	stlr(w64 bool, rt, rn Reg)
-	ldaxr(w64 bool, rt, rn Reg)
-	stlxr(w64 bool, rs, rt, rn Reg)
+	ldar(bytes int, rt, rn Reg)
+	stlr(bytes int, rt, rn Reg)
+	ldaxr(bytes int, rt, rn Reg)
+	stlxr(bytes int, rs, rt, rn Reg)
 	dmb(o a64.BarrierOption)
 	freshLabel(prefix string) string
 	label(name string)
@@ -515,11 +515,11 @@ func (b *mcAsm) ldrSpill(rd Reg, float bool, off, size int) {
 func (b *mcAsm) strSpill(rs Reg, float bool, off, size int) {
 	b.m.spillStore(mreg(rs), float, off, size)
 }
-func (b *mcAsm) ldar(w64 bool, rt, rn Reg)  { b.prog.Emit(a64.Ldar(w64, mreg(rt), mreg(rn))) }
-func (b *mcAsm) stlr(w64 bool, rt, rn Reg)  { b.prog.Emit(a64.Stlr(w64, mreg(rt), mreg(rn))) }
-func (b *mcAsm) ldaxr(w64 bool, rt, rn Reg) { b.prog.Emit(a64.Ldaxr(w64, mreg(rt), mreg(rn))) }
-func (b *mcAsm) stlxr(w64 bool, rs, rt, rn Reg) {
-	b.prog.Emit(a64.Stlxr(w64, mreg(rs), mreg(rt), mreg(rn)))
+func (b *mcAsm) ldar(bytes int, rt, rn Reg)  { b.prog.Emit(a64.Ldar(bytes, mreg(rt), mreg(rn))) }
+func (b *mcAsm) stlr(bytes int, rt, rn Reg)  { b.prog.Emit(a64.Stlr(bytes, mreg(rt), mreg(rn))) }
+func (b *mcAsm) ldaxr(bytes int, rt, rn Reg) { b.prog.Emit(a64.Ldaxr(bytes, mreg(rt), mreg(rn))) }
+func (b *mcAsm) stlxr(bytes int, rs, rt, rn Reg) {
+	b.prog.Emit(a64.Stlxr(bytes, mreg(rs), mreg(rt), mreg(rn)))
 }
 func (b *mcAsm) dmb(o a64.BarrierOption) { b.prog.Emit(a64.Dmb(o)) }
 func (b *mcAsm) freshLabel(prefix string) string {

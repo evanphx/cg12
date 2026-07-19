@@ -53,26 +53,38 @@ func exclusive(size, l, o0 uint32, rs, rt2, rn, rt Reg) uint32 {
 		field(uint32(rt2), 5, "reg")<<10 | r(rn)<<5 | r(rt)
 }
 
-// Ldxr encodes LDXR <Wt|Xt>, [<Xn>]: an exclusive load that begins a monitored
-// sequence.
-func Ldxr(w64 bool, rt, rn Reg) uint32 { return exclusive(exSize(w64), 1, 0, 31, 31, rn, rt) }
-
-// Ldaxr encodes LDAXR <Wt|Xt>, [<Xn>]: an exclusive load with acquire ordering.
-func Ldaxr(w64 bool, rt, rn Reg) uint32 { return exclusive(exSize(w64), 1, 1, 31, 31, rn, rt) }
-
-// Stxr encodes STXR <Ws>, <Wt|Xt>, [<Xn>]: an exclusive store. Ws receives 0 on
-// success and 1 if the monitor was lost, so the caller retries on non-zero.
-func Stxr(w64 bool, rs, rt, rn Reg) uint32 { return exclusive(exSize(w64), 0, 0, rs, 31, rn, rt) }
-
-// Stlxr encodes STLXR <Ws>, <Wt|Xt>, [<Xn>]: an exclusive store with release
-// ordering.
-func Stlxr(w64 bool, rs, rt, rn Reg) uint32 { return exclusive(exSize(w64), 0, 1, rs, 31, rn, rt) }
-
-func exSize(w64 bool) uint32 {
-	if w64 {
+// atomicSize maps an access width in bytes (1/2/4/8) to the 2-bit size field the
+// exclusive and ordered load/store forms share: byte, halfword, word, doubleword.
+func atomicSize(bytes int) uint32 {
+	switch bytes {
+	case 1:
+		return 0
+	case 2:
+		return 1
+	case 4:
+		return 2
+	default:
 		return 3
 	}
-	return 2
+}
+
+// Ldxr encodes LDXR{B,H} <Wt|Xt>, [<Xn>]: an exclusive load of `bytes` bytes that
+// begins a monitored sequence.
+func Ldxr(bytes int, rt, rn Reg) uint32 { return exclusive(atomicSize(bytes), 1, 0, 31, 31, rn, rt) }
+
+// Ldaxr encodes LDAXR{B,H} <Wt|Xt>, [<Xn>]: an exclusive load with acquire order.
+func Ldaxr(bytes int, rt, rn Reg) uint32 { return exclusive(atomicSize(bytes), 1, 1, 31, 31, rn, rt) }
+
+// Stxr encodes STXR{B,H} <Ws>, <Wt|Xt>, [<Xn>]: an exclusive store. Ws receives 0
+// on success and 1 if the monitor was lost, so the caller retries on non-zero.
+func Stxr(bytes int, rs, rt, rn Reg) uint32 {
+	return exclusive(atomicSize(bytes), 0, 0, rs, 31, rn, rt)
+}
+
+// Stlxr encodes STLXR{B,H} <Ws>, <Wt|Xt>, [<Xn>]: an exclusive store with release
+// order.
+func Stlxr(bytes int, rs, rt, rn Reg) uint32 {
+	return exclusive(atomicSize(bytes), 0, 1, rs, 31, rn, rt)
 }
 
 // The ordered, non-exclusive pair. LDAR reads with acquire ordering and STLR
@@ -85,11 +97,11 @@ func ordered(size, l uint32, rn, rt Reg) uint32 {
 	return size<<30 | 0x8<<24 | 1<<23 | l<<22 | 31<<16 | 1<<15 | 31<<10 | r(rn)<<5 | r(rt)
 }
 
-// Ldar encodes LDAR <Wt|Xt>, [<Xn>]: a load with acquire ordering.
-func Ldar(w64 bool, rt, rn Reg) uint32 { return ordered(exSize(w64), 1, rn, rt) }
+// Ldar encodes LDAR{B,H} <Wt|Xt>, [<Xn>]: a load of `bytes` bytes with acquire order.
+func Ldar(bytes int, rt, rn Reg) uint32 { return ordered(atomicSize(bytes), 1, rn, rt) }
 
-// Stlr encodes STLR <Wt|Xt>, [<Xn>]: a store with release ordering.
-func Stlr(w64 bool, rt, rn Reg) uint32 { return ordered(exSize(w64), 0, rn, rt) }
+// Stlr encodes STLR{B,H} <Wt|Xt>, [<Xn>]: a store of `bytes` bytes with release order.
+func Stlr(bytes int, rt, rn Reg) uint32 { return ordered(atomicSize(bytes), 0, rn, rt) }
 
 // System-register access. A system register is named by five small fields
 // (op0/op1, CRn, CRm, op2); MRS reads one into a general register, MSR writes

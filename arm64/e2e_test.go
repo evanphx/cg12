@@ -327,3 +327,32 @@ int main(void){
 }`)
 	require.Equal(t, 0, code)
 }
+
+func TestE2EStackedAggregateArg(t *testing.T) {
+	// Eight word arguments fill x0..x7, so a by-value pair passed as the ninth
+	// argument spills onto the stack. The C callee reads it there and returns the
+	// sum of its fields, exercising the caller-side stacked-aggregate path.
+	m := ir.NewModule()
+	pair := &ir.AggType{Name: "pair", Fields: []ir.Field{{Sub: ir.SubW}, {Sub: ir.SubW}}}
+	m.AddType(pair)
+	f := m.NewFunc("caller", ir.ClsW).Export()
+	e := f.Entry()
+	p := e.Alloc(8, 8)
+	e.Store(f.Word(30), p)                            // p.a = 30
+	e.Store(f.Word(12), e.Add(ir.ClsL, p, f.Long(4))) // p.b = 12
+	args := []ir.Ref{f.Word(0), f.Word(0), f.Word(0), f.Word(0), f.Word(0), f.Word(0), f.Word(0), f.Word(0), p}
+	r := e.Call(ir.ClsW, f.Sym("sink", 0), args...)
+	call := &e.Instrs[len(e.Instrs)-1]
+	call.AggArgs = make([]*ir.AggType, 9)
+	call.AggArgs[8] = pair
+	e.Ret(r)
+
+	_, code := buildAndRun(t, m, `
+struct pair { int a, b; };
+int sink(int a0,int a1,int a2,int a3,int a4,int a5,int a6,int a7, struct pair p){
+  return p.a + p.b;
+}
+extern int caller(void);
+int main(void){ return caller() == 42 ? 0 : 1; }`)
+	require.Equal(t, 0, code)
+}

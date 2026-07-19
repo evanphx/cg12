@@ -5,7 +5,6 @@ import (
 
 	"github.com/evanphx/cg12/ir"
 	"github.com/stretchr/testify/assert"
-	"github.com/stretchr/testify/require"
 )
 
 // aggParam adds an aggregate-by-value parameter of type agg to f and returns its
@@ -103,9 +102,11 @@ func TestCompileAggregateArgMemoryOnStack(t *testing.T) {
 	assert.Contains(t, asm, "sub sp", "outgoing stack area reserved")
 }
 
-func TestCompileAggregateArgStackErrors(t *testing.T) {
-	// A GP aggregate that doesn't fit in the remaining integer registers would be
-	// stack-passed, which cg12 doesn't reconstruct yet.
+func TestCompileAggregateArgStacked(t *testing.T) {
+	// A GP aggregate that doesn't fit in the remaining integer registers is passed
+	// on the stack: with x0..x7 taken by the eight word arguments, the pair spills
+	// to the outgoing stack area. The caller reserves that area and stores the
+	// aggregate's words into it.
 	m := ir.NewModule()
 	pair := &ir.AggType{Name: "pair", Fields: []ir.Field{{Sub: ir.SubW}, {Sub: ir.SubW}}}
 	m.AddType(pair)
@@ -119,9 +120,9 @@ func TestCompileAggregateArgStackErrors(t *testing.T) {
 	call.AggArgs[8] = pair // all x0..x7 used -> the aggregate is stacked
 	e.RetVoid()
 
-	_, err := CompileToObject(m)
-	require.Error(t, err)
-	assert.Contains(t, err.Error(), "stack-passed aggregate")
+	asm := disasmModule(t, m) // compiles cleanly and reads back the machine code
+	assert.Contains(t, asm, "sub sp", "the outgoing stack-argument area is reserved")
+	assert.Contains(t, asm, "[sp", "the aggregate's words are stored into it")
 }
 
 func TestCompileAggregateByReference(t *testing.T) {

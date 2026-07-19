@@ -243,10 +243,17 @@ func (g *gen) genCall(n *cc.PostfixExpression) ir.Ref {
 				}
 				v = g.genExpr(an) // variadic aggregate/complex: pass as-is
 			}
-			for len(aggArgs) <= i {
-				aggArgs = append(aggArgs, nil)
+			// Only a by-value argument that stays a memory value is passed as a
+			// pointer-to-storage. When the parameter is a scalar, a memory-value
+			// argument (an __int128 handed to an unsigned long, say) was already
+			// coerced to that scalar by rval above, so it travels as an ordinary
+			// scalar and must not be tagged as an aggregate.
+			if isMemValue(byValT) {
+				for len(aggArgs) <= i {
+					aggArgs = append(aggArgs, nil)
+				}
+				aggArgs[i] = g.aggTypeOf(byValT)
 			}
-			aggArgs[i] = g.aggTypeOf(byValT)
 		case pt != nil:
 			v = g.rval(an, pt)
 		default:

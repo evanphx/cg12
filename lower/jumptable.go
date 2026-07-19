@@ -45,10 +45,15 @@ func tryJumpTable(f *ir.Func, b *ir.Block) {
 			hi = c.Val
 		}
 	}
-	span := uint64(hi) - uint64(lo) + 1 // in-range by the density check below
-	if span > jtMaxSpan || span > uint64(jtMaxRatio*len(cases)) {
+	// spread is the span minus one; testing it before the +1 avoids the overflow
+	// that a case set covering the full integer range (min and max both present)
+	// would hit, which wrapped span to 0, slipped past the cap, and built a
+	// zero-length table.
+	spread := uint64(hi) - uint64(lo)
+	if spread >= jtMaxSpan || spread >= uint64(jtMaxRatio*len(cases)) {
 		return
 	}
+	span := spread + 1
 
 	// A table entry branches straight to its case block, so a target carrying a
 	// phi (its value would depend on the edge) can't be handled here; fall back

@@ -1190,10 +1190,14 @@ func (a *asmCtx) loadExclusive(acquire bool) error {
 	if off != 0 {
 		return fmt.Errorf("%s: an exclusive access takes no offset", a.mn)
 	}
+	bytes := 4
+	if w64 {
+		bytes = 8
+	}
 	if acquire {
-		a.p.Emit(Ldaxr(w64, rt, rn))
+		a.p.Emit(Ldaxr(bytes, rt, rn))
 	} else {
-		a.p.Emit(Ldxr(w64, rt, rn))
+		a.p.Emit(Ldxr(bytes, rt, rn))
 	}
 	return nil
 }
@@ -1219,10 +1223,14 @@ func (a *asmCtx) storeExclusive(release bool) error {
 	if off != 0 {
 		return fmt.Errorf("%s: an exclusive access takes no offset", a.mn)
 	}
+	bytes := 4
+	if w64 {
+		bytes = 8
+	}
 	if release {
-		a.p.Emit(Stlxr(w64, rs, rt, rn))
+		a.p.Emit(Stlxr(bytes, rs, rt, rn))
 	} else {
-		a.p.Emit(Stxr(w64, rs, rt, rn))
+		a.p.Emit(Stxr(bytes, rs, rt, rn))
 	}
 	return nil
 }

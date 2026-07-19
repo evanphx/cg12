@@ -1,8 +1,6 @@
 package arm64
 
 import (
-	"fmt"
-
 	"github.com/evanphx/cg12/ir"
 )
 
@@ -170,15 +168,26 @@ func lowerAggArg(f *ir.Func, argRef ir.Ref, agg *ir.AggType, a *argAssigner, out
 	var elemCls ir.Cls
 	var elemSize int
 	var onStack bool
+	var off int
 	if cls.kind == aggGP {
-		regs, onStack, _ = a.assignGP(cls.nregs, cls.size)
+		regs, onStack, off = a.assignGP(cls.nregs, cls.size)
 		elemCls, elemSize = ir.ClsL, 8
 	} else {
-		regs, onStack, _ = a.assignHFA(cls.nregs, cls.size)
+		regs, onStack, off = a.assignHFA(cls.nregs, cls.size)
 		elemCls, elemSize = cls.elem, cls.elem.Size()
 	}
 	if onStack {
-		return nil, nil, fmt.Errorf("arm64: stack-passed aggregate arguments are not yet supported")
+		// The argument registers are exhausted, so the whole aggregate travels as
+		// its bytes in the outgoing stack area at offset off; the callee reads it
+		// there by address (see lowerAggParam). Store each piece with a stacked
+		// OArg, mirroring the register loop below.
+		for i := 0; i < cls.nregs; i++ {
+			addr := offsetAddr(f, argRef, i*elemSize, out)
+			val := f.NewTemp("", elemCls)
+			*out = append(*out, ir.Instr{Op: loadOpFor(elemCls), Cls: elemCls, To: val, Args: []ir.Ref{addr}})
+			argSetup = append(argSetup, ir.Instr{Op: ir.OArg, Cls: elemCls, To: ir.R, Aux: int64(off + i*elemSize), Args: []ir.Ref{val}})
+		}
+		return argSetup, pins, nil
 	}
 
 	for i, r := range regs {

@@ -359,20 +359,17 @@ func findSym(t *testing.T, o *obj.Object, name string) obj.Sym {
 }
 
 func TestCompileModulePropagatesError(t *testing.T) {
-	// A stack-passed aggregate argument is not yet supported; the error must
+	// A parameterless caller cannot tail-call through stack arguments (it has no
+	// incoming-argument area to reuse); the backend rejects it, and the error must
 	// surface with the function name.
 	m := ir.NewModule()
-	pair := &ir.AggType{Name: "pair", Fields: []ir.Field{{Sub: ir.SubW}, {Sub: ir.SubW}}}
-	m.AddType(pair)
 	f := m.NewFuncVoid("bad")
 	e := f.Entry()
-	ptr := e.Alloc(8, 8)
-	args := []ir.Ref{f.Word(0), f.Word(1), f.Word(2), f.Word(3), f.Word(4), f.Word(5), f.Word(6), f.Word(7), ptr}
-	e.CallVoid(f.Sym("sink", 0), args...)
-	call := &e.Instrs[len(e.Instrs)-1]
-	call.AggArgs = make([]*ir.AggType, 9)
-	call.AggArgs[8] = pair
-	e.RetVoid()
+	var args []ir.Ref
+	for i := 0; i < 10; i++ {
+		args = append(args, f.Word(int64(i)))
+	}
+	e.TailCallVoid(f.Sym("sink", 0), args...)
 	_, err := CompileToObject(m)
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "bad")

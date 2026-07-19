@@ -335,10 +335,13 @@ func (s *sel) sel(in *ir.Instr) {
 // load-exclusive / store-exclusive retry loop that repeats until the store
 // succeeds. Each read-modify-write yields the previous value.
 func (s *sel) atomic(in *ir.Instr) {
-	base, w64 := atomicParts(in.Intrin.Name)
-	size := 4
+	base, bytes := atomicParts(in.Intrin.Name)
+	// bytes is the memory access width; a sub-word access still uses a W register
+	// and computes in W, so the register width (w64/regSize) is separate.
+	w64 := bytes == 8
+	regSize := 4
 	if w64 {
-		size = 8
+		regSize = 8
 	}
 
 	switch base {
@@ -347,14 +350,14 @@ func (s *sel) atomic(in *ir.Instr) {
 		return
 	case "load":
 		addr := s.src(in.Args[0], 0, 8)
-		d, done := s.dst(in.To, size)
-		s.b.ldar(w64, d, addr)
+		d, done := s.dst(in.To, regSize)
+		s.b.ldar(bytes, d, addr)
 		done()
 		return
 	case "store":
 		addr := s.src(in.Args[0], 0, 8)
-		val := s.src(in.Args[1], 1, size)
-		s.b.stlr(w64, val, addr)
+		val := s.src(in.Args[1], 1, regSize)
+		s.b.stlr(bytes, val, addr)
 		return
 	}
 
@@ -363,7 +366,7 @@ func (s *sel) atomic(in *ir.Instr) {
 	}
 
 	addr := s.src(in.Args[0], 0, 8)
-	old, done := s.dst(in.To, size) // the result is always the previous value
+	old, done := s.dst(in.To, regSize) // the result is always the previous value
 	if old == addr {
 		// A spilled result and a spilled/constant address both claimed scratch 0;
 		// the loop needs them distinct (it re-reads the address every iteration).
@@ -374,19 +377,19 @@ func (s *sel) atomic(in *ir.Instr) {
 
 	switch base {
 	case "xchg":
-		val := s.src(in.Args[1], 1, size)
+		val := s.src(in.Args[1], 1, regSize)
 		status, ok := freeScratch(addr, val, old)
 		if !ok {
 			pressure()
 			return
 		}
 		s.b.label(retry)
-		s.b.ldaxr(w64, old, addr)
-		s.b.stlxr(w64, status, val, addr)
+		s.b.ldaxr(bytes, old, addr)
+		s.b.stlxr(bytes, status, val, addr)
 		s.b.cbnzTo(false, status, retry)
 
 	case "add", "sub", "and", "or", "xor":
-		val := s.src(in.Args[1], 1, size)
+		val := s.src(in.Args[1], 1, regSize)
 		newv, ok := freeScratch(addr, val, old)
 		if !ok {
 			pressure()
@@ -403,14 +406,14 @@ func (s *sel) atomic(in *ir.Instr) {
 			}
 		}
 		s.b.label(retry)
-		s.b.ldaxr(w64, old, addr)
+		s.b.ldaxr(bytes, old, addr)
 		s.atomicCompute(base, w64, newv, old, val)
-		s.b.stlxr(w64, status, newv, addr)
+		s.b.stlxr(bytes, status, newv, addr)
 		s.b.cbnzTo(false, status, retry)
 
 	case "cas":
-		exp := s.src(in.Args[1], 1, size)
-		newv := s.src(in.Args[2], 2, size)
+		exp := s.src(in.Args[1], 1, regSize)
+		newv := s.src(in.Args[2], 2, regSize)
 		status, ok := freeScratch(addr, exp, newv, old)
 		if !ok {
 			pressure()
@@ -418,10 +421,10 @@ func (s *sel) atomic(in *ir.Instr) {
 		}
 		out := s.b.freshLabel("atomic_cas_out")
 		s.b.label(retry)
-		s.b.ldaxr(w64, old, addr)
+		s.b.ldaxr(bytes, old, addr)
 		s.b.cmpReg(w64, old, exp)
 		s.b.bcondTo(a64.NE, out) // mismatch: leave old in place, do not store
-		s.b.stlxr(w64, status, newv, addr)
+		s.b.stlxr(bytes, status, newv, addr)
 		s.b.cbnzTo(false, status, retry)
 		s.b.label(out)
 
@@ -449,17 +452,21 @@ func (s *sel) atomicCompute(op string, w64 bool, dst, old, val Reg) {
 }
 
 // atomicParts splits an atomic intrinsic name into its base operation and its
-// 64-bit-ness: "atomic.add.l" -> ("add", true). A bare "atomic.fence" has no
-// width suffix.
-func atomicParts(name string) (base string, w64 bool) {
+// access width in bytes: "atomic.add.l" -> ("add", 8), "atomic.and.b" -> ("and",
+// 1). A bare "atomic.fence" has no width suffix and reports 0.
+func atomicParts(name string) (base string, bytes int) {
 	s := strings.TrimPrefix(name, "atomic.")
 	switch {
-	case strings.HasSuffix(s, ".l"):
-		return strings.TrimSuffix(s, ".l"), true
+	case strings.HasSuffix(s, ".b"):
+		return strings.TrimSuffix(s, ".b"), 1
+	case strings.HasSuffix(s, ".h"):
+		return strings.TrimSuffix(s, ".h"), 2
 	case strings.HasSuffix(s, ".w"):
-		return strings.TrimSuffix(s, ".w"), false
+		return strings.TrimSuffix(s, ".w"), 4
+	case strings.HasSuffix(s, ".l"):
+		return strings.TrimSuffix(s, ".l"), 8
 	}
-	return s, false
+	return s, 0
 }
 
 // isScratchReg reports whether r is one of the fixed scratch registers.
