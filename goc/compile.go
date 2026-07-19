@@ -4333,13 +4333,51 @@ func (g *gen) interfaceTypeWord(dynamicType ir.Ref, targetType types.Type) ir.Re
 	if !g.runtimeAllocation || !interfaceHasMethods(targetType) {
 		return dynamicType
 	}
-	return g.cur.Call(
+	targetInterface := targetType.Underlying().(*types.Interface)
+	implementations := g.interfaceImplementations(targetInterface)
+	if len(implementations) == 0 {
+		return g.cur.Call(
+			ir.ClsP,
+			g.fn.Sym("runtime.getitab", 0),
+			g.typeTag(targetType),
+			dynamicType,
+			g.fn.Word(0),
+		)
+	}
+
+	done := g.block("interfaceitabdone")
+	fallback := g.block("interfaceitabfallback")
+	edges := make([]ir.PhiEdge, 0, len(implementations)+1)
+	for index, implementation := range implementations {
+		match := g.block(fmt.Sprintf("interfaceitabmatch%d_", index))
+		next := g.block(fmt.Sprintf("interfaceitabnext%d_", index))
+		matches := g.cur.Cmp(ir.CmpEq, ir.ClsP, dynamicType, g.typeTag(implementation))
+		g.cur.Jnz(matches, match, next)
+
+		g.cur = match
+		g.cur.Goto(done)
+		edges = append(edges, ir.PhiEdge{
+			From: match,
+			Val:  g.fn.Sym(g.ensureInterfaceItab(implementation, targetType), 0),
+		})
+
+		g.cur = next
+	}
+	g.cur.Goto(fallback)
+
+	g.cur = fallback
+	runtimeItab := g.cur.Call(
 		ir.ClsP,
 		g.fn.Sym("runtime.getitab", 0),
 		g.typeTag(targetType),
 		dynamicType,
 		g.fn.Word(0),
 	)
+	g.cur.Goto(done)
+	edges = append(edges, ir.PhiEdge{From: fallback, Val: runtimeItab})
+
+	g.cur = done
+	return done.Phi(ir.ClsP, edges...)
 }
 
 func (g *gen) interfaceDynamicType(descriptor ir.Ref, staticType types.Type) ir.Ref {
@@ -5736,6 +5774,14 @@ func (g *gen) functionParameter(name string, valueType types.Type, class ir.Cls)
 		aggregate := g.goABIAggregate(valueType)
 		parts := g.fn.ParamGroup(name, aggregate, ir.ClsP, ir.ClsL, ir.ClsL)
 		value := g.fn.Aggregate(aggregate, parts...)
+		return g.markManagedValue(value, valueType)
+	}
+	if g.runtimeAllocation && isInterfaceValue(valueType) {
+		aggregate := g.goABIAggregate(valueType)
+		parts := g.fn.ParamGroup(name, aggregate, ir.ClsP, ir.ClsP)
+		value := g.localAllocTyped(valueType)
+		g.cur.Store(parts[0], value)
+		g.cur.Store(parts[1], g.offset(value, 8))
 		return g.markManagedValue(value, valueType)
 	}
 	parameter := g.fn.Param(name, class)

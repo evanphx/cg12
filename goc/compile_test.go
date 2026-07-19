@@ -881,6 +881,60 @@ func main() {
 	}
 }
 
+func TestCompileExecutableUsesAggregateABIForInterfaceMethodWrapperParameters(t *testing.T) {
+	module, err := CompileExecutable("main.go", []byte(`package main
+
+type Writer interface {
+	Write([]byte) (int, error)
+}
+
+type WriterTo interface {
+	WriteTo(Writer) (int64, error)
+}
+
+type sink struct{}
+
+func (sink) Write(data []byte) (int, error) {
+	return len(data), nil
+}
+
+type source struct{}
+
+func (source) WriteTo(writer Writer) (int64, error) {
+	n, err := writer.Write([]byte("x"))
+	return int64(n), err
+}
+
+func main() {
+	var writer Writer = sink{}
+	var writerTo WriterTo = source{}
+	_, _ = writerTo.WriteTo(writer)
+}
+`))
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	var wrapper *ir.Func
+	for _, function := range module.Funcs {
+		if function.Name == "main.WriterTo.WriteTo" {
+			wrapper = function
+			break
+		}
+	}
+	if wrapper == nil {
+		t.Fatal("interface method wrapper main.WriterTo.WriteTo was not generated")
+	}
+	if len(wrapper.ParamGroups) < 2 {
+		t.Fatalf("wrapper parameter groups = %#v, want receiver and interface argument groups", wrapper.ParamGroups)
+	}
+	for index, group := range wrapper.ParamGroups[:2] {
+		if group.Count != 2 {
+			t.Fatalf("wrapper parameter group %d count = %d, want 2", index, group.Count)
+		}
+	}
+}
+
 func TestCompileExecutableRepresentsSlicesAsGroupedScalarValues(t *testing.T) {
 	module, err := CompileExecutable("main.go", []byte(`package main
 func shorten(values []int) { values = values[:1] }
