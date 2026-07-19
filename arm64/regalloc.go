@@ -238,9 +238,25 @@ func buildIntervals(f *ir.Func, cfg *analysis.CFG, live *analysis.Liveness, num 
 	return out
 }
 
+// noHint marks the absence of a register hint.
+const noHint = Reg(-1)
+
 // linearScan assigns registers to intervals in start order, spilling to the
 // stack when no suitable register is free.
+//
+// It coalesces copies by hinting: a temp defined by (or feeding) a copy prefers
+// the register of the copy's other end, so the copy becomes a mov of a register to
+// itself, which the emitter drops. When that other end is a value whose last use
+// is the copy, it is freed here so its register can be reused even though its
+// interval only just ended -- the read-before-write of a mov makes the overlap
+// harmless.
 func linearScan(f *ir.Func, intervals []*interval, num *numbering) (*allocation, error) {
+	copyDef, hintFixed := copyHints(f)
+	ivByTemp := make(map[int]*interval, len(intervals))
+	for _, iv := range intervals {
+		ivByTemp[iv.temp] = iv
+	}
+
 	sort.Slice(intervals, func(i, j int) bool {
 		if intervals[i].start != intervals[j].start {
 			return intervals[i].start < intervals[j].start
@@ -253,6 +269,17 @@ func linearScan(f *ir.Func, intervals []*interval, num *numbering) (*allocation,
 	inUse := map[Reg]bool{}
 	slotFor := map[int]int{}
 
+	free := func(iv *interval) {
+		if r := f.Temps[iv.temp].Reg; r != ir.NoReg {
+			delete(inUse, Reg(r))
+		}
+		for i, a := range active {
+			if a == iv {
+				active = append(active[:i], active[i+1:]...)
+				break
+			}
+		}
+	}
 	freeExpired := func(start int) {
 		kept := active[:0]
 		for _, a := range active {
@@ -279,13 +306,39 @@ func linearScan(f *ir.Func, intervals []*interval, num *numbering) (*allocation,
 		t.Slot = slotFor[iv.temp]
 		t.Reg = ir.NoReg
 	}
+	// freeCoalesceSrc frees the register of iv's copy source when the copy defining
+	// iv is that source's last use, so iv (or a pre-coloured target) can reuse it.
+	freeCoalesceSrc := func(iv *interval) {
+		s, ok := copyDef[iv.temp]
+		if !ok {
+			return
+		}
+		if siv := ivByTemp[s]; siv != nil && siv.end == iv.start && f.Temps[s].Reg != ir.NoReg {
+			free(siv)
+		}
+	}
+	// hintFor is the register iv prefers to coalesce a copy away: a fixed hint from
+	// a pre-coloured partner, else the partner's already-assigned register.
+	hintFor := func(iv *interval) Reg {
+		if r, ok := hintFixed[iv.temp]; ok {
+			return r
+		}
+		if s, ok := copyDef[iv.temp]; ok {
+			if f.Temps[s].Reg != ir.NoReg {
+				return Reg(f.Temps[s].Reg)
+			}
+		}
+		return noHint
+	}
 
 	for _, iv := range intervals {
 		freeExpired(iv.start)
 
-		// Pre-coloured intervals must take their register; evict any conflict.
+		// Pre-coloured intervals must take their register; evict any conflict —
+		// unless the conflict is this copy's source dying right here, which coalesces.
 		if iv.precolor >= 0 {
 			r := iv.precolor
+			freeCoalesceSrc(iv)
 			if inUse[r] {
 				evictFrom(f, active, r, spill)
 				delete(inUse, r)
@@ -305,7 +358,8 @@ func linearScan(f *ir.Func, intervals []*interval, num *numbering) (*allocation,
 			continue
 		}
 
-		if r, ok := pickRegister(iv, inUse); ok {
+		freeCoalesceSrc(iv)
+		if r, ok := pickRegister(iv, inUse, hintFor(iv)); ok {
 			f.Temps[iv.temp].Reg = int(r)
 			inUse[r] = true
 			addActive(iv)
@@ -324,25 +378,59 @@ func linearScan(f *ir.Func, intervals []*interval, num *numbering) (*allocation,
 
 // pickRegister chooses a free register for iv from the pool matching its class,
 // honouring the call-crossing constraint (such intervals must land in
-// callee-saved registers).
-func pickRegister(iv *interval, inUse map[Reg]bool) (Reg, bool) {
+// callee-saved registers). A usable hint register is taken first, so a copy
+// coalesces away; otherwise the pool is scanned in order.
+func pickRegister(iv *interval, inUse map[Reg]bool, hint Reg) (Reg, bool) {
 	order := intAllocOrder
 	if iv.float {
 		order = floatAllocOrder
 	}
+	usable := func(r Reg) bool {
+		return !inUse[r] && !(iv.crosses && !calleeSavedReg(r)) && !iv.avoid[r]
+	}
+	if hint != noHint && usable(hint) {
+		for _, r := range order { // only a register in this class's pool
+			if r == hint {
+				return hint, true
+			}
+		}
+	}
 	for _, r := range order {
-		if inUse[r] {
-			continue
+		if usable(r) {
+			return r, true
 		}
-		if iv.crosses && !calleeSavedReg(r) {
-			continue
-		}
-		if iv.avoid[r] {
-			continue // an inline asm this value is live across writes r
-		}
-		return r, true
 	}
 	return 0, false
+}
+
+// copyHints scans f for copy-like ops (OCopy/OPar/OArg with a temp source and
+// destination) and returns, per destination temp, its source temp, plus a fixed
+// register hint for whichever end of a copy is pre-coloured -- the other end
+// prefers that register so the copy can be coalesced away.
+func copyHints(f *ir.Func) (copyDef map[int]int, hintFixed map[int]Reg) {
+	copyDef = map[int]int{}
+	hintFixed = map[int]Reg{}
+	for _, b := range f.Blocks {
+		for k := range b.Instrs {
+			in := &b.Instrs[k]
+			switch in.Op {
+			case ir.OCopy, ir.OPar, ir.OArg:
+			default:
+				continue
+			}
+			if in.To.Kind != ir.RefTemp || len(in.Args) != 1 || in.Args[0].Kind != ir.RefTemp {
+				continue
+			}
+			dst, src := int(in.To.ID), int(in.Args[0].ID)
+			copyDef[dst] = src
+			if f.Temps[src].Fixed {
+				hintFixed[dst] = Reg(f.Temps[src].Reg)
+			} else if f.Temps[dst].Fixed {
+				hintFixed[src] = Reg(f.Temps[dst].Reg)
+			}
+		}
+	}
+	return copyDef, hintFixed
 }
 
 // evictFrom spills whichever active interval currently holds register r.
