@@ -174,10 +174,7 @@ func TestCompileAggregateReturnGP(t *testing.T) {
 	m.AddType(pair)
 	aggReturnFunc(m, "f", pair)
 	asm := disasmModule(t, m)
-	// The GP result ends up in x0 -- now loaded straight into it, since copy
-	// coalescing folds away the move the return once needed. "x0," is x0 as a
-	// destination (first operand).
-	assert.Contains(t, asm, "x0,", "GP result ends up in x0")
+	assert.Contains(t, asm, "ldr x0", "GP result is loaded directly into x0")
 }
 
 func TestCompileAggregateReturnHFA(t *testing.T) {
@@ -186,11 +183,8 @@ func TestCompileAggregateReturnHFA(t *testing.T) {
 	m.AddType(vec)
 	aggReturnFunc(m, "f", vec)
 	asm := disasmModule(t, m)
-	// Three HFA elements end up in s0/s1/s2 -- loaded straight into them now that
-	// copy coalescing folds away the moves. "s0,"/"s2," is the register as a
-	// destination (first operand).
-	assert.Contains(t, asm, "s0,")
-	assert.Contains(t, asm, "s2,")
+	assert.Contains(t, asm, "ldr s0")
+	assert.Contains(t, asm, "ldr s2") // three HFA elements into s0/s1/s2
 }
 
 func TestCompileAggregateReturnMemory(t *testing.T) {

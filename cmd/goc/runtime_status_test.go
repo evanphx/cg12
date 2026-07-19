@@ -132,6 +132,42 @@ func TestARM64RuntimeCapabilityStatus(t *testing.T) {
 			expectation: runtimeCapabilityMustPass,
 		},
 		{
+			category:    "core-types",
+			name:        "interface-to-interface",
+			source:      "runtime_interface_to_interface.go",
+			expectation: runtimeCapabilityMustPass,
+		},
+		{
+			category:    "core-types",
+			name:        "slice-three-index",
+			source:      "runtime_slice_three_index.go",
+			expectation: runtimeCapabilityMustPass,
+		},
+		{
+			category:    "core-types",
+			name:        "copy-string-to-bytes",
+			source:      "runtime_copy_string_to_bytes.go",
+			expectation: runtimeCapabilityMustPass,
+		},
+		{
+			category:    "core-types",
+			name:        "method-expression",
+			source:      "runtime_method_expression.go",
+			expectation: runtimeCapabilityMustPass,
+		},
+		{
+			category:    "core-types",
+			name:        "append-self-overlap",
+			source:      "runtime_append_self_overlap.go",
+			expectation: runtimeCapabilityMustPass,
+		},
+		{
+			category:    "core-types",
+			name:        "map-struct-value-replace",
+			source:      "runtime_map_struct_value_replace.go",
+			expectation: runtimeCapabilityMustPass,
+		},
+		{
 			category:    "gc",
 			name:        "heap-struct-graph",
 			source:      "gc_struct.go",
@@ -171,6 +207,18 @@ func TestARM64RuntimeCapabilityStatus(t *testing.T) {
 			category:    "gc",
 			name:        "setfinalizer-clear",
 			source:      "runtime_setfinalizer_nil.go",
+			expectation: runtimeCapabilityMustPass,
+		},
+		{
+			category:    "gc",
+			name:        "map-pointer-values-gc",
+			source:      "runtime_map_pointer_values_gc.go",
+			expectation: runtimeCapabilityMustPass,
+		},
+		{
+			category:    "gc",
+			name:        "loop-closure-gc",
+			source:      "runtime_loop_closure_gc.go",
 			expectation: runtimeCapabilityMustPass,
 		},
 		{
@@ -336,6 +384,12 @@ func TestARM64RuntimeCapabilityStatus(t *testing.T) {
 			expectation: runtimeCapabilityMustPass,
 		},
 		{
+			category:    "goroutine",
+			name:        "select-buffered-send-receive",
+			source:      "runtime_select_buffered_send_receive.go",
+			expectation: runtimeCapabilityMustPass,
+		},
+		{
 			category:    "stdlib-runtime",
 			name:        "context-cancel-channel",
 			source:      "context_cancel.go",
@@ -411,6 +465,18 @@ func TestARM64RuntimeCapabilityStatus(t *testing.T) {
 			category:    "defer-panic",
 			name:        "recover-outside-panic",
 			source:      "runtime_recover_outside_panic.go",
+			expectation: runtimeCapabilityMustPass,
+		},
+		{
+			category:    "defer-panic",
+			name:        "panic-recover-identity",
+			source:      "runtime_panic_recover_identity.go",
+			expectation: runtimeCapabilityMustPass,
+		},
+		{
+			category:    "defer-panic",
+			name:        "defer-replace-panic",
+			source:      "runtime_defer_replace_panic.go",
 			expectation: runtimeCapabilityMustPass,
 		},
 		{
@@ -541,6 +607,18 @@ func TestARM64RuntimeCapabilityStatus(t *testing.T) {
 		},
 		{
 			category:    "runtime-packages",
+			name:        "reflect-method-metadata",
+			source:      "runtime_reflect_method_metadata.go",
+			expectation: runtimeCapabilityMustPass,
+		},
+		{
+			category:    "runtime-packages",
+			name:        "reflect-interface-extract",
+			source:      "runtime_reflect_interface_extract.go",
+			expectation: runtimeCapabilityMustPass,
+		},
+		{
+			category:    "runtime-packages",
 			name:        "finalizer-basic",
 			source:      "runtime_finalizer_basic.go",
 			expectation: runtimeCapabilityMustPass,
@@ -555,6 +633,12 @@ func TestARM64RuntimeCapabilityStatus(t *testing.T) {
 			category:    "runtime-packages",
 			name:        "sync-once-value",
 			source:      "runtime_sync_once_value.go",
+			expectation: runtimeCapabilityMustPass,
+		},
+		{
+			category:    "runtime-packages",
+			name:        "time-after",
+			source:      "runtime_time_after.go",
 			expectation: runtimeCapabilityMustPass,
 		},
 		{

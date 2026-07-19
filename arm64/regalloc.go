@@ -153,11 +153,12 @@ func computeSafepointRoots(f *ir.Func, cfg *analysis.CFG, liveness *analysis.Liv
 	return roots
 }
 
-// numberInstrs lays instructions out in RPO and assigns each a position, noting
-// which positions are calls and which instruction occupies each position.
+// numberInstrs lays instructions out in reachable RPO followed by any
+// unreachable synthetic blocks that still need code emission, noting which
+// positions are calls and which instruction occupies each position.
 func numberInstrs(cfg *analysis.CFG) *numbering {
-	n := &numbering{pos: map[*ir.Block][2]int{}, order: cfg.RPO}
-	for _, b := range cfg.RPO {
+	n := &numbering{pos: map[*ir.Block][2]int{}, order: allocationBlockOrder(cfg)}
+	for _, b := range n.order {
 		first := n.next
 		for k := range b.Instrs {
 			switch b.Instrs[k].Op {
@@ -185,6 +186,22 @@ func numberInstrs(cfg *analysis.CFG) *numbering {
 	return n
 }
 
+func allocationBlockOrder(cfg *analysis.CFG) []*ir.Block {
+	order := make([]*ir.Block, 0, len(cfg.Fn.Blocks))
+	seen := make(map[*ir.Block]bool, len(cfg.Fn.Blocks))
+	for _, block := range cfg.RPO {
+		order = append(order, block)
+		seen[block] = true
+	}
+	for _, block := range cfg.Fn.Blocks {
+		if seen[block] {
+			continue
+		}
+		order = append(order, block)
+	}
+	return order
+}
+
 // buildIntervals derives one conservative live interval per temporary from block
 // liveness plus the precise def/use positions inside blocks.
 func buildIntervals(f *ir.Func, cfg *analysis.CFG, live *analysis.Liveness, num *numbering) []*interval {
@@ -206,15 +223,17 @@ func buildIntervals(f *ir.Func, cfg *analysis.CFG, live *analysis.Liveness, num 
 		}
 	}
 
-	for _, b := range cfg.RPO {
+	for _, b := range num.order {
 		bp := num.pos[b]
 		// Live-in temps are live from the block's first position...
-		for _, id := range live.LiveIn(b).Members() {
-			extend(id, bp[0])
-		}
-		// ...live-out temps through the terminator position.
-		for _, id := range live.LiveOut(b).Members() {
-			extend(id, bp[1])
+		if cfg.Reachable(b) {
+			for _, id := range live.LiveIn(b).Members() {
+				extend(id, bp[0])
+			}
+			// ...live-out temps through the terminator position.
+			for _, id := range live.LiveOut(b).Members() {
+				extend(id, bp[1])
+			}
 		}
 		p := bp[0]
 		for k := range b.Instrs {

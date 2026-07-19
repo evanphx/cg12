@@ -854,17 +854,19 @@ type mc struct {
 	safepoints []safepoint
 	frameStart int
 
-	blockDone bool
-	useCount  []int                     // per-temp use count, for the fused compare-branch
-	nextBlock *ir.Block                 // block laid out after the current one, for fall-through elision
-	preds     map[*ir.Block][]*ir.Block // predecessors, for cross-block flag reuse
-	vaSeq     int
-	atomicSeq int
-	rows      []obj.LineRow // source positions, keyed by func-relative byte offset
-	lastPos   ir.SrcPos
-	inl       []inlSample // inline-context changes, keyed by func-relative offset
-	lastInl   *ir.InlineSite
-	err       error
+	blockDone    bool
+	useCount     []int                     // per-temp use count, for the fused compare-branch
+	nextBlock    *ir.Block                 // block laid out after the current one, for fall-through elision
+	preds        map[*ir.Block][]*ir.Block // predecessors, for cross-block flag reuse
+	vaSeq        int
+	atomicSeq    int
+	currentBlock string
+	currentOp    ir.Op
+	rows         []obj.LineRow // source positions, keyed by func-relative byte offset
+	lastPos      ir.SrcPos
+	inl          []inlSample // inline-context changes, keyed by func-relative offset
+	lastInl      *ir.InlineSite
+	err          error
 }
 
 // inlSample records that, from byte offset off onward, emitted code belongs to
@@ -1221,7 +1223,14 @@ func (m *mc) locOf(ref ir.Ref) loc {
 
 func (m *mc) fail(format string, a ...any) {
 	if m.err == nil {
-		m.err = fmt.Errorf(format, a...)
+		message := fmt.Sprintf(format, a...)
+		if m.currentBlock != "" {
+			message = fmt.Sprintf("%s while emitting %s.%s", message, m.f.Name, m.currentBlock)
+			if m.currentOp != 0 {
+				message = fmt.Sprintf("%s %s", message, m.currentOp)
+			}
+		}
+		m.err = fmt.Errorf("%s", message)
 	}
 }
 
@@ -2046,6 +2055,8 @@ func (m *mc) emitMoveLoc(dst, src loc) {
 // --- block / call sequences ------------------------------------------------
 
 func (m *mc) block(b *ir.Block) {
+	m.currentBlock = b.Name
+	m.currentOp = 0
 	i := 0
 	if b == m.f.Start {
 		var pairs []movePairLoc
@@ -2071,6 +2082,7 @@ func (m *mc) block(b *ir.Block) {
 		m.instrPC[in] = uint64(m.prog.Len() * 4)
 		m.recordLoc(in.Pos)
 		m.recordInline(in.Inl)
+		m.currentOp = in.Op
 		if in == fuseCmp {
 			switch {
 			case fuseCmp.Op == ir.OAnd:
@@ -2119,6 +2131,7 @@ func (m *mc) block(b *ir.Block) {
 		return
 	}
 	if !m.blockDone {
+		m.currentOp = 0
 		m.term(b)
 	}
 }

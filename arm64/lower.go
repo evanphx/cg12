@@ -1074,11 +1074,9 @@ func lowerAggReturn(f *ir.Func, b *ir.Block, retBuf ir.Ref) {
 	}
 	var pins []ir.Ref
 	for i := 0; i < cls.nregs; i++ {
-		addr := offsetAddr(f, ptr, i*elemSize, &b.Instrs)
-		val := f.NewTemp("", elemCls)
-		b.Instrs = append(b.Instrs, ir.Instr{Op: loadOpFor(elemCls), Cls: elemCls, To: val, Args: []ir.Ref{addr}})
+		addr := returnFieldAddress(f, ptr, i*elemSize, &b.Instrs)
 		pin := newPinned(f, base+Reg(i), elemCls)
-		b.Instrs = append(b.Instrs, ir.Instr{Op: ir.OCopy, Cls: elemCls, To: pin, Args: []ir.Ref{val}})
+		b.Instrs = append(b.Instrs, ir.Instr{Op: loadOpFor(elemCls), Cls: elemCls, To: pin, Args: []ir.Ref{addr}})
 		pins = append(pins, pin)
 	}
 	b.Jmp.Arg = pins[0]

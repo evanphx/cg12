@@ -799,23 +799,16 @@ func lowerGoAggregateReturn(f *ir.Func, block *ir.Block, resultBuffer ir.Ref) er
 	pointer := block.Jmp.Arg
 	var resultRegisters []ir.Ref
 	for _, part := range parts {
-		address := offsetAddr(f, pointer, part.offset, &block.Instrs)
-		value := f.NewTemp("", part.sub.Cls())
-		block.Instrs = append(block.Instrs, ir.Instr{
-			Op:   loadOpForSub(part.sub),
-			Cls:  part.sub.Cls(),
-			To:   value,
-			Args: []ir.Ref{address},
-		})
+		address := returnFieldAddress(f, pointer, part.offset, &block.Instrs)
 		pin := newPinned(f, part.reg, part.sub.Cls())
 		if part.pointer {
 			f.Temp(pin).GCRef = true
 		}
 		block.Instrs = append(block.Instrs, ir.Instr{
-			Op:   ir.OCopy,
+			Op:   loadOpForSub(part.sub),
 			Cls:  part.sub.Cls(),
 			To:   pin,
-			Args: []ir.Ref{value},
+			Args: []ir.Ref{address},
 		})
 		resultRegisters = append(resultRegisters, pin)
 	}
@@ -825,6 +818,20 @@ func lowerGoAggregateReturn(f *ir.Func, block *ir.Block, resultBuffer ir.Ref) er
 	block.Jmp.Arg = resultRegisters[0]
 	block.Jmp.Args = resultRegisters[1:]
 	return nil
+}
+
+func returnFieldAddress(f *ir.Func, base ir.Ref, offset int, out *[]ir.Instr) ir.Ref {
+	if offset == 0 {
+		return base
+	}
+	address := newPinned(f, scratch0, ir.ClsL)
+	*out = append(*out, ir.Instr{
+		Op:   ir.OAdd,
+		Cls:  ir.ClsL,
+		To:   address,
+		Args: []ir.Ref{base, f.Long(int64(offset))},
+	})
+	return address
 }
 
 func lowerGoValueReturn(f *ir.Func, block *ir.Block, resultBuffer ir.Ref) error {

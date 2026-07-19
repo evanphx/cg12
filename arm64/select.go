@@ -46,6 +46,10 @@ func (s *sel) src(ref ir.Ref, slot, size int) Reg {
 			s.b.rematerialize(scr, rule, size)
 			return scr
 		}
+		if t.Slot < 0 {
+			s.b.fail("arm64: temp %%%s has no register or spill slot (fixed=%v reg=%d slot=%d)", t.Name, t.Fixed, t.Reg, t.Slot)
+			return scr
+		}
 		s.b.ldrSpill(scr, float, s.spillBase+t.Slot, size)
 		return scr
 	case ir.RefConst:
@@ -87,6 +91,10 @@ func (s *sel) dst(ref ir.Ref, size int) (Reg, func()) {
 	t := s.f.Temps[ref.ID]
 	if t.Reg != ir.NoReg {
 		return Reg(t.Reg), func() {}
+	}
+	if t.Slot < 0 {
+		s.b.fail("arm64: temp %%%s has no register or spill slot (fixed=%v reg=%d slot=%d)", t.Name, t.Fixed, t.Reg, t.Slot)
+		return intScratchRegs[0], func() {}
 	}
 	float := t.Cls.IsFloat()
 	scr := intScratchRegs[0]
