@@ -29,6 +29,59 @@ func TestGoFunctionMetadataFollowsEmittedTextOffsets(t *testing.T) {
 	assert.Equal(t, "later", sorted[1].name)
 }
 
+func TestGoFunctionMetadataSortsTranslatedAssemblyWithGeneratedFunctions(t *testing.T) {
+	object := &obj.Object{Syms: []obj.Sym{
+		{Name: "generated_later", Section: obj.SecText, Value: 64, Func: true},
+		{Name: "translated_earlier", Section: obj.SecText, Value: 16, Func: true},
+		{Name: "runtime_gocTextEnd", Section: obj.SecText, Value: 80, Func: true},
+	}}
+	builder := &goMetadataBuilder{
+		object: object,
+		labels: make(map[string]uint64),
+	}
+
+	builder.build(
+		[]goFunctionInfo{{name: "generated_later", size: 4}},
+		[]goFunctionInfo{{name: "translated_earlier", size: 4}},
+		&ir.Data{Name: "runtime.firstmoduledata"},
+		[]byte{0},
+		".goc.runtime.dataend",
+		0,
+		0,
+		0,
+	)
+
+	functab := builder.labels[".goc.go.functab"]
+	relocations := make(map[uint64]string)
+	for _, relocation := range builder.relocs {
+		relocations[relocation.Offset] = relocation.Sym
+	}
+	assert.Equal(t, "translated_earlier", relocations[functab])
+	assert.Equal(t, "generated_later", relocations[functab+8])
+	assert.Equal(t, "runtime_gocTextEnd", relocations[functab+16])
+}
+
+func TestGoFindFuncBucketCountCoversLargeTextRanges(t *testing.T) {
+	object := &obj.Object{Syms: []obj.Sym{
+		{Name: "first", Section: obj.SecText, Value: 0x400580, Func: true},
+		{Name: "runtime_gocTextEnd", Section: obj.SecText, Value: 0x14aa5a8, Func: true},
+	}}
+	functions := []goFunctionInfo{{name: "first"}}
+
+	buckets := goFindFuncBucketCount(object, functions, "runtime_gocTextEnd")
+	assert.Greater(t, buckets, 4096)
+}
+
+func TestGoFindFuncBucketCountUsesConservativeFallbackWhenTextEndIsExternal(t *testing.T) {
+	object := &obj.Object{Syms: []obj.Sym{
+		{Name: "first", Section: obj.SecText, Value: 0x400580, Func: true},
+	}}
+	functions := []goFunctionInfo{{name: "first"}}
+
+	buckets := goFindFuncBucketCount(object, functions, "runtime_gocTextEnd")
+	assert.Equal(t, minimumGoFindFuncBucketCap, buckets)
+}
+
 func TestGoFunctionMetadataPreservesRuntimeFunctionID(t *testing.T) {
 	builder := &goMetadataBuilder{
 		object: &obj.Object{},
@@ -169,6 +222,13 @@ func TestGoStackMapPCDataSwitchesAfterPrologue(t *testing.T) {
 		{pc: 80, index: 2},
 		{pc: 120, index: 1},
 	}))
+}
+
+func TestGoStackMapPCDataCoalescesDuplicateFrameStartPoint(t *testing.T) {
+	assert.Equal(t,
+		[]byte{2, 0xff, 0xff, 0xff, 0xff, 0x0f, 0},
+		goStackMapPCData(52, []goStackMapIndexPoint{{pc: 52, index: 0}}),
+	)
 }
 
 func TestGoFunctionStackMapsKeepSafepointRootsPrecise(t *testing.T) {

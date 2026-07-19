@@ -1209,6 +1209,271 @@ func Test() int {
 `, 42)
 }
 
+func TestRuntimeInterfaceReadReturnsMultipleValuesAcrossStackGrowth(t *testing.T) {
+	runExecutableCase(t, `package main
+
+type reader interface {
+	Read([]byte) (int, error)
+}
+
+type byteReader struct{}
+
+func (byteReader) Read(buffer []byte) (int, error) {
+	growReadStack(100)
+	copy(buffer, "forty-two")
+	return 9, nil
+}
+
+func growReadStack(depth int) int {
+	if depth == 0 {
+		return 0
+	}
+	return depth + growReadStack(depth-1)
+}
+
+func read(value reader, buffer []byte) (int, error) {
+	return value.Read(buffer)
+}
+
+func Test() int {
+	buffer := make([]byte, 16)
+	count, err := read(byteReader{}, buffer)
+	if err != nil || string(buffer[:count]) != "forty-two" {
+		return 0
+	}
+	return count + 33
+}
+`, 42)
+}
+
+func TestRuntimePointerInInterfaceSurvivesStackGrowth(t *testing.T) {
+	runExecutableCase(t, `package main
+
+type value struct {
+	number int
+}
+
+func growPointerInterfaceStack(depth int) int {
+	if depth == 0 {
+		return 0
+	}
+	return depth + growPointerInterfaceStack(depth-1)
+}
+
+func update(boxed *any) {
+	growPointerInterfaceStack(100)
+	(*boxed).(*value).number = 42
+}
+
+func Test() int {
+	var target value
+	var boxed any = &target
+	update(&boxed)
+	return target.number
+}
+`, 42)
+}
+
+func TestRuntimeReflectUpdatesConcretePointerStoredInInterface(t *testing.T) {
+	runExecutableCase(t, `package main
+
+import "reflect"
+
+type value struct {
+	Number int
+}
+
+func Test() int {
+	var target value
+	var boxed any = &target
+	field := reflect.ValueOf(&boxed).Elem().Elem().Elem().Field(0)
+	field.SetInt(42)
+	return target.Number
+}
+`, 42)
+}
+
+func TestRuntimeReflectValueEqualDistinguishesDifferentPointers(t *testing.T) {
+	runExecutableCase(t, `package main
+
+import "reflect"
+
+type value struct {
+	Number int
+}
+
+func Test() int {
+	var target value
+	var boxed any = &target
+	boxedPointer := reflect.ValueOf(&boxed)
+	targetPointer := boxedPointer.Elem().Elem()
+	if targetPointer.Equal(boxedPointer) {
+		return 0
+	}
+	if !targetPointer.Equal(reflect.ValueOf(&target)) {
+		return 1
+	}
+	return 42
+}
+`, 42)
+}
+
+func TestRuntimeReflectWalksPointerStoredInInterface(t *testing.T) {
+	runExecutableCase(t, `package main
+
+import "reflect"
+
+type value struct {
+	Number int
+}
+
+func indirect(input reflect.Value) reflect.Value {
+	for {
+		if input.Kind() == reflect.Interface && !input.IsNil() {
+			element := input.Elem()
+			if element.Kind() == reflect.Pointer && !element.IsNil() {
+				input = element
+				continue
+			}
+		}
+		if input.Kind() != reflect.Pointer {
+			break
+		}
+		if input.Elem().Kind() == reflect.Interface && input.Elem().Elem().Equal(input) {
+			input = input.Elem()
+			break
+		}
+		input = input.Elem()
+	}
+	return input
+}
+
+func Test() int {
+	var target value
+	var boxed any = &target
+	result := indirect(reflect.ValueOf(&boxed))
+	result.Field(0).SetInt(42)
+	return target.Number
+}
+`, 42)
+}
+
+func TestRuntimeJSONUpdatesConcretePointerStoredInInterface(t *testing.T) {
+	runExecutableCase(t, `package main
+
+import "encoding/json"
+
+type value struct {
+	Number int
+}
+
+func Test() int {
+	var target value
+	var boxed any = &target
+	if err := json.Unmarshal([]byte("{\"Number\":42}"), &boxed); err != nil {
+		return 1
+	}
+	pointer, ok := boxed.(*value)
+	if !ok {
+		return 2
+	}
+	if pointer != &target {
+		return 3
+	}
+	return target.Number
+}
+`, 42)
+}
+
+func TestRuntimeGlobalNamedIntegerErrorInterface(t *testing.T) {
+	runExecutableCase(t, `package main
+
+type errno uintptr
+
+func (errno) Error() string {
+	return "failure"
+}
+
+const again errno = 11
+
+var errAgain error = again
+
+func Test() int {
+	if errAgain == nil {
+		return 0
+	}
+	return int(errAgain.(errno)) + 31
+}
+`, 42)
+}
+
+func TestRuntimeEnvironmentUpdateAndLookup(t *testing.T) {
+	runExecutableCase(t, `package main
+
+import "os"
+
+func Test() int {
+	if err := os.Setenv("CG12_TEST_ENVIRONMENT", "forty-two"); err != nil {
+		return 0
+	}
+	if os.Getenv("CG12_TEST_ENVIRONMENT") != "forty-two" {
+		return 1
+	}
+	if err := os.Setenv("CG12_TEST_ENVIRONMENT", ""); err != nil {
+		return 2
+	}
+	if os.Getenv("CG12_TEST_ENVIRONMENT") != "" {
+		return 3
+	}
+	return 42
+}
+`, 42)
+}
+
+func TestRuntimeReturnedStringsInStructLiteral(t *testing.T) {
+	runExecutableCase(t, `package main
+
+type config struct {
+	httpProxy  string
+	httpsProxy string
+	noProxy    string
+	cgi        bool
+}
+
+type parsedConfig struct {
+	config
+	marker *int
+}
+
+func (value *parsedConfig) proxyLength() int {
+	return len(value.httpProxy) + len(value.httpsProxy) + len(value.noProxy)
+}
+
+func environmentValue(name string) string {
+	if name == "set" {
+		return "value"
+	}
+	return ""
+}
+
+func makeConfig() func() int {
+	base := &config{
+		httpProxy:  environmentValue("empty"),
+		httpsProxy: environmentValue("empty"),
+		noProxy:    environmentValue("set"),
+		cgi:        environmentValue("empty") != "",
+	}
+	parsed := &parsedConfig{config: *base}
+	return parsed.proxyLength
+}
+
+func Test() int {
+	proxyLength := makeConfig()
+	return proxyLength() + 37
+}
+`, 42)
+}
+
 func TestRuntimeAddressesOfSliceAndMapLiterals(t *testing.T) {
 	runExecutableCase(t, `package main
 
@@ -1826,6 +2091,80 @@ func Test() int {
 		return -1
 	}
 	return left + right
+}
+`, 42)
+}
+
+func TestRuntimeAppendNonEmptyInterfaceAcrossStackGrowth(t *testing.T) {
+	runExecutableCase(t, `package main
+
+type value interface {
+	number() int
+}
+
+type boxedValue struct {
+	value int
+}
+
+func (value *boxedValue) number() int {
+	return value.value
+}
+
+func appendValue(depth int) []value {
+	var padding [128]uintptr
+	padding[depth%len(padding)] = uintptr(depth)
+	if depth != 0 {
+		return appendValue(depth - 1)
+	}
+
+	var values []value
+	values = append(values, &boxedValue{value: 42})
+	return values
+}
+
+func Test() int {
+	values := appendValue(32)
+	return values[0].number()
+}
+`, 42)
+}
+
+func TestMultiValueAssignmentConvertsConcreteResultToInterface(t *testing.T) {
+	runExecutableCase(t, `package main
+
+type value interface {
+	number() int
+}
+
+type boxedValue struct {
+	value int
+}
+
+func (value *boxedValue) number() int {
+	return value.value
+}
+
+type otherValue struct{}
+
+func (value *otherValue) number() int {
+	return -100
+}
+
+func pair() (*boxedValue, error) {
+	return &boxedValue{value: 42}, nil
+}
+
+func Test() int {
+	other := &otherValue{}
+	_ = other.number()
+
+	var result value
+	var err error
+	result, err = pair()
+	if err != nil {
+		return -1
+	}
+	return result.number()
 }
 `, 42)
 }

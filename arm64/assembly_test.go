@@ -96,6 +96,40 @@ func TestPrepareAssemblyMarksAsyncPreemptForRuntimeStackScanning(t *testing.T) {
 	assert.Equal(t, byte(goFuncFlagAsm), bundle.functions[0].funcFlag)
 }
 
+func TestPrepareAssemblyMarksMorestackForRuntimeUnwinder(t *testing.T) {
+	module := ir.NewModule()
+	module.Assembly = append(module.Assembly, ir.AssemblyFile{
+		PackagePath: "runtime",
+		Path:        "runtime/asm_arm64.s",
+		Source: `TEXT runtime·goexit(SB),NOSPLIT|NOFRAME,$0-0
+	RET
+
+TEXT runtime·morestack(SB),NOSPLIT|NOFRAME,$0-0
+	RET
+
+TEXT runtime·morestack_noctxt(SB),NOSPLIT|NOFRAME,$0-0
+	MOVD RSP, RSP
+	B runtime·morestack(SB)
+`,
+	})
+
+	bundle, err := prepareAssembly(module)
+	require.NoError(t, err)
+	require.Len(t, bundle.functions, 3)
+
+	assert.Equal(t, "runtime_goexit", bundle.functions[0].name)
+	assert.Equal(t, byte(8), bundle.functions[0].funcID)
+	assert.Equal(t, byte(goFuncFlagAsm|goFuncFlagTopFrame), bundle.functions[0].funcFlag)
+
+	assert.Equal(t, "runtime_morestack", bundle.functions[1].name)
+	assert.Equal(t, byte(13), bundle.functions[1].funcID)
+	assert.Equal(t, byte(goFuncFlagAsm), bundle.functions[1].funcFlag)
+
+	assert.Equal(t, "runtime_morestack_noctxt", bundle.functions[2].name)
+	assert.Equal(t, byte(13), bundle.functions[2].funcID)
+	assert.Equal(t, byte(goFuncFlagAsm|goFuncFlagSPWrite), bundle.functions[2].funcFlag)
+}
+
 func TestPrepareAssemblyBuildsGoABI0EntryWrapper(t *testing.T) {
 	module := ir.NewModule()
 	args := module.NewFunc("runtime.args", ir.ClsW)

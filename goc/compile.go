@@ -1817,6 +1817,22 @@ func (g *gen) addressEscapesWithin(
 			return true
 		case *ast.AssignStmt:
 			return !g.assignedNodeDoesNotEscapeWithin(current, info, parents, body, checking)
+		case *ast.ValueSpec:
+			valueIndex := -1
+			for index, value := range parent.Values {
+				if value == current {
+					valueIndex = index
+					break
+				}
+			}
+			if valueIndex < 0 || valueIndex >= len(parent.Names) {
+				return true
+			}
+			object := info.Defs[parent.Names[valueIndex]]
+			if object == nil || body == nil {
+				return true
+			}
+			return !g.objectDoesNotEscape(object, info, parents, body, checking)
 		case *ast.ReturnStmt:
 			return true
 		default:
@@ -2030,7 +2046,15 @@ func (g *gen) nonEscapingObjectUse(
 	case *ast.SliceExpr:
 		return parent.X == identifier
 	case *ast.SelectorExpr:
-		return parent.X == identifier
+		if parent.X != identifier {
+			return false
+		}
+		selection := info.Selections[parent]
+		if selection == nil || selection.Kind() == types.FieldVal {
+			return true
+		}
+		call, calledImmediately := parents[parent].(*ast.CallExpr)
+		return calledImmediately && call.Fun == parent
 	case *ast.StarExpr:
 		return parent.X == identifier
 	case *ast.RangeStmt:
@@ -2289,33 +2313,30 @@ func (g *gen) globalInterface(id *ast.Ident, object types.Object, spec *ast.Valu
 
 	initializer := spec.Values[valueIndex]
 	sourceType := g.info.Types[initializer].Type
-	call, ok := initializer.(*ast.CallExpr)
-	if !ok || len(call.Args) != 1 {
+	valueExpression := initializer
+	if _, isInterface := sourceType.Underlying().(*types.Interface); isInterface {
+		conversion, ok := initializer.(*ast.CallExpr)
+		if ok && len(conversion.Args) == 1 && g.info.Types[conversion.Fun].IsType() {
+			valueExpression = conversion.Args[0]
+			sourceType = g.info.Types[valueExpression].Type
+		}
+	}
+	if isNilExpression(valueExpression) {
 		emitZero()
 		return
 	}
-	value := g.info.Types[call.Args[0]].Value
-	basic, ok := sourceType.Underlying().(*types.Basic)
-	if !ok || basic.Kind() != types.String || value == nil || value.Kind() != constant.String {
+	if g.info.Types[valueExpression].Value == nil {
 		emitZero()
 		return
 	}
 
-	contents := constant.StringVal(value)
-	textName := name + ".text"
-	stringName := name + ".string"
-	typeWord := g.staticInterfaceTypeWord(sourceType, object.Type())
-	g.mod.Data = append(g.mod.Data,
-		&ir.Data{Name: textName, Align: 1, Items: []ir.DataItem{{Sub: ir.SubUB, Str: contents}}},
-		&ir.Data{Name: stringName, Align: 8, Items: []ir.DataItem{
-			{Sub: ir.SubL, Sym: textName},
-			{Sub: ir.SubL, Ints: []int64{int64(len(contents))}},
-		}},
-		&ir.Data{Name: name, Align: 8, Linkage: ir.Linkage{Export: ast.IsExported(id.Name)}, Items: []ir.DataItem{
-			typeWord,
-			{Sub: ir.SubL, Sym: stringName},
-		}},
-	)
+	items := g.staticInterfaceItems(name+".value", sourceType, object.Type(), valueExpression)
+	g.mod.Data = append(g.mod.Data, &ir.Data{
+		Name:    name,
+		Align:   8,
+		Linkage: ir.Linkage{Export: ast.IsExported(id.Name)},
+		Items:   items,
+	})
 	g.globals[object] = name
 }
 
@@ -3684,6 +3705,8 @@ func subOf(t types.Type) (ir.SubCls, bool) {
 		return ir.SubH, true
 	case types.Int32, types.Uint32:
 		return ir.SubW, true
+	case types.Int, types.Uint, types.Int64, types.Uint64, types.Uintptr, types.UnsafePointer:
+		return ir.SubL, true
 	}
 	return 0, false
 }
@@ -5556,35 +5579,45 @@ func (g *gen) multiValueAssignment(statement *ast.AssignStmt, call *ast.CallExpr
 		}
 
 		var slot ir.Ref
+		targetType := g.typeAndValue(lhs).Type
 		localIdentifier := false
 		if identifier, ok := lhs.(*ast.Ident); ok {
 			variable := g.info.Uses[identifier]
 			if statement.Tok == token.DEFINE && variable == nil {
 				variable = g.info.Defs[identifier]
 			}
+			if variable != nil {
+				targetType = g.objectType(variable)
+			}
 			var exists bool
 			slot, exists = g.addr(variable)
 			if !exists {
-				slot = g.variableStorage(variable, resultType)
+				slot = g.variableStorage(variable, targetType)
 			}
 			_, global := g.globals[variable]
 			localIdentifier = !global && !g.directValues[variable]
 		} else {
 			slot = g.lvalue(lhs)
 		}
-		value = g.coerce(value, resultType)
-		if localIdentifier && isMemoryValue(resultType) {
-			g.assignLocal(value, slot, resultType)
-		} else if localIdentifier && isInterfaceValue(resultType) {
-			g.store(value, slot, resultType)
-		} else if localIdentifier && isDescriptorValue(resultType) {
-			g.store(value, slot, resultType)
-		} else if g.runtimeAllocation && isSliceType(resultType) {
-			g.store(value, slot, resultType)
-		} else if isInlineAggregate(resultType) || isInterfaceValue(resultType) {
-			g.storeInlineValue(value, slot, resultType)
+		if targetType == nil {
+			targetType = resultType
+		}
+		if isInterfaceValue(targetType) && !types.Identical(resultType, targetType) {
+			value = g.adaptValueToInterface(value, resultType, targetType, ir.R, call)
+		}
+		value = g.coerce(value, targetType)
+		if localIdentifier && isMemoryValue(targetType) {
+			g.assignLocal(value, slot, targetType)
+		} else if localIdentifier && isInterfaceValue(targetType) {
+			g.store(value, slot, targetType)
+		} else if localIdentifier && isDescriptorValue(targetType) {
+			g.store(value, slot, targetType)
+		} else if g.runtimeAllocation && isSliceType(targetType) {
+			g.store(value, slot, targetType)
+		} else if isInlineAggregate(targetType) || isInterfaceValue(targetType) {
+			g.storeInlineValue(value, slot, targetType)
 		} else {
-			g.store(value, slot, resultType)
+			g.store(value, slot, targetType)
 		}
 	}
 }
@@ -7809,7 +7842,7 @@ func (g *gen) expr(e ast.Expr) (result ir.Ref) {
 					value := g.compositeLiteral(literal, heap)
 					storage := g.localAllocTyped(literalType)
 					if heap {
-						storage = g.allocateTyped(literalType)
+						storage = g.allocateEscapingTyped(literalType)
 					}
 					if isSliceType(literalType) {
 						g.storeInlineValue(value, storage, literalType)
@@ -8509,7 +8542,7 @@ func (g *gen) methodValue(expression *ast.SelectorExpr, selection *types.Selecti
 	}
 	descriptor := g.localAllocTyped(descriptorType)
 	if !g.valueDoesNotEscape(expression) {
-		descriptor = g.allocateTyped(descriptorType)
+		descriptor = g.allocateEscapingTyped(descriptorType)
 	}
 	g.cur.Store(g.fn.Sym(wrapperName, 0), g.offset(descriptor, descriptorOffsets[0]))
 	receiverValue := g.methodReceiver(expression, method)
@@ -8530,7 +8563,12 @@ func (g *gen) compositeLiteral(literal *ast.CompositeLit, heap bool) ir.Ref {
 			g.fail(literal, "unsupported pointer composite literal type %s", t)
 			return ir.R
 		}
-		backing := g.allocateTyped(pointer.Elem())
+		var backing ir.Ref
+		if heap {
+			backing = g.allocateEscapingTyped(pointer.Elem())
+		} else {
+			backing = g.allocateTyped(pointer.Elem())
+		}
 		g.zero(backing, pointer.Elem())
 		g.initializeStructLiteral(backing, structure, literal)
 		return backing
@@ -8585,7 +8623,7 @@ func (g *gen) compositeLiteral(literal *ast.CompositeLit, heap bool) ir.Ref {
 			g.markStackPointerWord(backing, int(offset))
 		})
 		if heap || !g.valueDoesNotEscape(literal) {
-			backing = g.allocateTyped(backingType)
+			backing = g.allocateEscapingTyped(backingType)
 		}
 		g.zero(backing, types.NewArray(elementType, length))
 		for i, expression := range literal.Elts {
@@ -8620,7 +8658,7 @@ func (g *gen) compositeLiteral(literal *ast.CompositeLit, heap bool) ir.Ref {
 		g.markStackPointerWord(backing, int(offset))
 	})
 	if heap {
-		backing = g.allocateTyped(t)
+		backing = g.allocateEscapingTyped(t)
 	}
 	memset := g.fn.Sym("goc_memset", 0)
 	g.cur.Call(ir.ClsP, memset, backing, g.fn.Word(0), g.fn.Long(size))
@@ -9472,6 +9510,18 @@ func (g *gen) allocateTyped(valueType types.Type) ir.Ref {
 			g.markStackPointerWord(allocation, int(offset))
 		})
 		return allocation
+	}
+	return g.cur.Call(ir.ClsP, g.fn.Sym("calloc", 0), g.fn.Long(1), g.fn.Long(typeSize(valueType)))
+}
+
+func (g *gen) allocateEscapingTyped(valueType types.Type) ir.Ref {
+	if g.runtimeAllocation {
+		allocation := g.cur.Call(
+			ir.ClsP,
+			g.fn.Sym("runtime.newobject", 0),
+			g.runtimeType(valueType),
+		)
+		return g.fn.MarkGCRef(allocation)
 	}
 	return g.cur.Call(ir.ClsP, g.fn.Sym("calloc", 0), g.fn.Long(1), g.fn.Long(typeSize(valueType)))
 }

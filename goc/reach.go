@@ -292,21 +292,24 @@ func reachableFunctions(roots []*ast.FuncDecl, rootFiles []*ast.File, rootInfo *
 			}
 		}
 	}
-	enqueueValueImplementation := func(expression ast.Expr, targetType types.Type, info *types.Info) {
-		if expression == nil || targetType == nil {
+	enqueueTypeImplementation := func(sourceType, targetType types.Type) {
+		if sourceType == nil || targetType == nil {
 			return
 		}
 		interfaceType, ok := targetType.Underlying().(*types.Interface)
 		if !ok {
 			return
 		}
-		sourceType := info.Types[expression].Type
 		if basic, ok := sourceType.Underlying().(*types.Basic); ok && basic.Info()&types.IsUntyped != 0 {
 			sourceType = types.Default(sourceType)
 		}
-		if sourceType != nil {
-			enqueueImplementation(sourceType, interfaceType)
+		enqueueImplementation(sourceType, interfaceType)
+	}
+	enqueueValueImplementation := func(expression ast.Expr, targetType types.Type, info *types.Info) {
+		if expression == nil {
+			return
 		}
+		enqueueTypeImplementation(info.Types[expression].Type, targetType)
 	}
 	enqueueCompositeImplementations := func(literal *ast.CompositeLit, info *types.Info) {
 		literalType := info.Types[literal].Type
@@ -481,6 +484,20 @@ func reachableFunctions(roots []*ast.FuncDecl, rootFiles []*ast.File, rootInfo *
 						for index, value := range statement.Rhs {
 							targetType := current.info.Types[statement.Lhs[index]].Type
 							enqueueValueImplementation(value, targetType, current.info)
+						}
+					} else if len(statement.Rhs) == 1 && len(statement.Lhs) > 1 {
+						call, ok := statement.Rhs[0].(*ast.CallExpr)
+						if !ok {
+							break
+						}
+						signature, ok := current.info.Types[call.Fun].Type.Underlying().(*types.Signature)
+						if !ok || signature.Results().Len() != len(statement.Lhs) {
+							break
+						}
+						for index, lhs := range statement.Lhs {
+							targetType := current.info.Types[lhs].Type
+							sourceType := signature.Results().At(index).Type()
+							enqueueTypeImplementation(sourceType, targetType)
 						}
 					}
 				case *ast.ValueSpec:

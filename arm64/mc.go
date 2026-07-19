@@ -1313,7 +1313,6 @@ func (m *mc) prologue() {
 		if !m.f.NoSplit {
 			m.goStackPrologue()
 		}
-		m.frameStart = m.prog.Len() * 4
 	}
 	// A strategy may emit a stack-growth guard before the frame is set up; its
 	// slow path branches back to this label to re-check after the stack grows.
@@ -1322,6 +1321,9 @@ func (m *mc) prologue() {
 		pe.EmitPrologue(&PrologueContext{mc: m, retry: "__cg12_prologue"})
 	}
 	m.allocFrame()
+	if m.f.UsesManagedFrame() {
+		m.frameStart = m.prog.Len() * 4
+	}
 	// Save the callee-saved registers, pairing two adjacent integer ones into a
 	// single stp (they occupy adjacent 8-byte slots), as gcc does. Float saves and
 	// a lone trailing register stay individual.

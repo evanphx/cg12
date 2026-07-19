@@ -263,6 +263,28 @@ func TestLowerHeapAllocationsAllowsPointerStoreIntoCandidate(t *testing.T) {
 	}
 }
 
+func TestLowerHeapAllocationsKeepsPointerLoadedFromLocalSlotWhenStoredIntoCandidate(t *testing.T) {
+	module := ir.NewModule()
+	function := module.NewFunc("capturePointer", ir.ClsP)
+	block := function.Entry()
+
+	objectType := function.Sym("type.object", 0)
+	object := block.HeapAlloc(function.Sym("runtime.newobject", 0), objectType, 8, 8)
+	objectSlot := block.Alloc(8, 8)
+	block.Store(object, objectSlot)
+
+	descriptorType := function.Sym("type.descriptor", 0)
+	descriptor := block.HeapAlloc(function.Sym("runtime.newobject", 0), descriptorType, 16, 8)
+	receiverField := block.Add(ir.ClsP, descriptor, function.Long(8))
+	loadedObject := block.Load(ir.ClsP, objectSlot)
+	block.CallVoid(function.Sym("goc_storep", 0), receiverField, loadedObject)
+	block.Ret(descriptor)
+
+	require.True(t, LowerHeapAllocations(module))
+	assert.Equal(t, ir.OCall, block.Instrs[0].Op)
+	assert.Equal(t, ir.OCall, block.Instrs[3].Op)
+}
+
 func TestLowerHeapAllocationsAllowsGrowSliceToObserveCandidate(t *testing.T) {
 	module := ir.NewModule()
 	function := module.NewFunc("growLocalSlice", ir.ClsL)

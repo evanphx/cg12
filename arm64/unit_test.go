@@ -594,6 +594,7 @@ func TestAAPCS64GroupedSliceValuesUseIndirectAggregateResult(t *testing.T) {
 	call := &caller.Entry().Instrs[0]
 	call.ArgGroups = []ir.ValueGroup{{Index: 0, Count: 3, Type: slice}}
 	caller.Entry().Ret(results[1])
+	assert.Equal(t, 48, aapcsCallStackBytes(caller, call), "outgoing area must include the x8 morestack spill home")
 
 	assembly := disasmModule(t, module)
 	assert.Contains(t, assembly, "x8", "a 24-byte AAPCS64 result must use the indirect-result register")
@@ -849,6 +850,26 @@ func TestGoABISystemStackUsesSystemStackGuard(t *testing.T) {
 	assert.Contains(t, assembly, "ldr x16, [x28, #24]")
 	assert.Contains(t, assembly, "runtime_morestackc")
 	assert.NotContains(t, assembly, "runtime_morestack_noctxt")
+}
+
+func TestManagedFrameMetadataStartsAfterFrameAllocation(t *testing.T) {
+	module := ir.NewModule()
+	function := module.NewFuncVoid("metadata_start")
+	function.GoABI = true
+	function.ManagedFrame = true
+	entry := function.Entry()
+	slot := entry.Alloc(8, 1024)
+	entry.Store(function.ConstInt(ir.ClsL, 1), slot)
+	entry.RetVoid()
+
+	require.NoError(t, lower(function, TLSLocalExec))
+	allocation, err := regAlloc(function)
+	require.NoError(t, err)
+	machine, err := emitMachine(function, allocation, nil, TLSLocalExec)
+	require.NoError(t, err)
+
+	assert.GreaterOrEqual(t, machine.m.frameStart, 44)
+	assert.Equal(t, 0, machine.m.frameStart%4)
 }
 
 func TestGoABICallerFrameIntrinsicsUseSavedFrame(t *testing.T) {

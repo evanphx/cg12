@@ -993,7 +993,7 @@ func aapcsCallStackBytes(f *ir.Func, call *ir.Instr) int {
 		argumentIndex++
 	}
 
-	if call.RetAgg != nil && !call.RetValues && classifyAgg(call.RetAgg).kind == aggMemory {
+	if call.RetAgg != nil && classifyAgg(call.RetAgg).kind == aggMemory {
 		homes = append(homes, goABISpill{size: 8, alignment: 8})
 	}
 

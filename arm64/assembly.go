@@ -206,9 +206,12 @@ func assemblyFunctionID(name string) byte {
 	functionIDs := map[string]byte{
 		"runtime_asmcgocall_abi0":         2,
 		"runtime_asyncPreempt":            3,
+		"runtime_goexit":                  8,
 		"runtime_goexit_abi0":             8,
 		"runtime_gogo_abi0":               9,
 		"runtime_mcall":                   12,
+		"runtime_morestack":               13,
+		"runtime_morestack_noctxt":        13,
 		"runtime_mstart_abi0":             14,
 		"runtime_systemstack_abi0":        21,
 		"runtime_systemstack_switch_abi0": 22,
@@ -219,8 +222,11 @@ func assemblyFunctionID(name string) byte {
 func assemblyFunctionFlags(name string) byte {
 	flags := map[string]byte{
 		"runtime_asmcgocall_abi0":  goFuncFlagTopFrame,
+		"runtime_goexit":           goFuncFlagTopFrame,
+		"runtime_goexit_abi0":      goFuncFlagTopFrame,
 		"runtime_gogo_abi0":        goFuncFlagSPWrite,
 		"runtime_mcall":            goFuncFlagSPWrite,
+		"runtime_morestack_noctxt": goFuncFlagSPWrite,
 		"runtime_systemstack_abi0": goFuncFlagSPWrite,
 	}
 	return flags[name]

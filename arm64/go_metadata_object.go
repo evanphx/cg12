@@ -37,6 +37,11 @@ type goStackMapIndexPoint struct {
 	index int
 }
 
+const (
+	goFuncTabBucketSize        = 4096
+	minimumGoFindFuncBucketCap = 131072
+)
+
 func goRuntimeFunctionID(name string) byte {
 	if strings.Contains(name, "_deferwrap_") || strings.Contains(name, "_gowrap_") || strings.Contains(name, "_methodvalue_") {
 		return 23
@@ -101,7 +106,6 @@ func addGoRuntimeObjectMetadata(object *obj.Object, functions, translatedFunctio
 	if len(functions) == 0 && len(translatedFunctions) == 0 {
 		return addData(object, moduledata)
 	}
-	functions = sortGoFunctionsByTextOffset(object, functions)
 	dataStart, ok := dataSymbolValue(object, sanitize(".goc.runtime.datastart"))
 	if !ok {
 		return fmt.Errorf("Go runtime metadata: missing data-start symbol")
@@ -150,6 +154,28 @@ func sortGoFunctionsByTextOffset(object *obj.Object, functions []goFunctionInfo)
 		return leftOffset < rightOffset
 	})
 	return sorted
+}
+
+func goFindFuncBucketCount(object *obj.Object, functions []goFunctionInfo, endSymbol string) int {
+	if len(functions) == 0 {
+		return minimumGoFindFuncBucketCap
+	}
+	offsets := make(map[string]uint64, len(functions)+1)
+	for _, symbol := range object.Syms {
+		if symbol.Section == obj.SecText && symbol.Func {
+			offsets[symbol.Name] = symbol.Value
+		}
+	}
+	minPC, minFound := offsets[functions[0].name]
+	endPC, endFound := offsets[endSymbol]
+	if !minFound || !endFound || endPC <= minPC {
+		return minimumGoFindFuncBucketCap
+	}
+	buckets := int((endPC-minPC)/goFuncTabBucketSize) + 1
+	if buckets < minimumGoFindFuncBucketCap {
+		return minimumGoFindFuncBucketCap
+	}
+	return buckets
 }
 
 func dataSymbolValue(object *obj.Object, name string) (uint64, bool) {
@@ -201,8 +227,10 @@ func goGCProgram(dataStart, dataEnd uint64, pointerOffsets []uint64) ([]byte, er
 }
 
 func (builder *goMetadataBuilder) build(functions, translatedFunctions []goFunctionInfo, moduledata *ir.Data, gcProgram []byte, noptrBSSName string, noptrBSSSize uint64, moduleInitTaskCount, moduleItabLinkCount int) {
-	const findFuncBuckets = 4096
+	endSymbol := "runtime_gocTextEnd"
 	functions = append(functions, translatedFunctions...)
+	functions = sortGoFunctionsByTextOffset(builder.object, functions)
+	findFuncBuckets := goFindFuncBucketCount(builder.object, functions, endSymbol)
 	stackMapIndexPoints := make([][]goStackMapIndexPoint, len(functions))
 	stackMapEntryCounts := make([]int, len(functions))
 	for index, function := range functions {
@@ -322,7 +350,6 @@ func (builder *goMetadataBuilder) build(functions, translatedFunctions []goFunct
 		builder.reloc32(function.name)
 		builder.u32(functionOffsets[index])
 	}
-	endSymbol := "runtime_gocTextEnd"
 	builder.reloc32(endSymbol)
 	builder.u32(0)
 	builder.label(".goc.go.functab.end")
@@ -602,6 +629,9 @@ func goStackMapPCData(frameStart int, indexPoints []goStackMapIndexPoint) []byte
 	for _, point := range points {
 		if len(unique) > 0 && unique[len(unique)-1].pc == point.pc {
 			unique[len(unique)-1] = point
+			if len(unique) > 1 && unique[len(unique)-2].index == point.index {
+				unique = unique[:len(unique)-1]
+			}
 			continue
 		}
 		if len(unique) > 0 && unique[len(unique)-1].index == point.index {
