@@ -79,3 +79,100 @@ func TestSpecializeEscapingPointerParam(t *testing.T) {
 		require.Equal(t, 2+in0, v.I64(), "specialized(%d)", in0)
 	}
 }
+
+// A local built during setup whose ADDRESS is handed to a runtime routine -- like
+// QuickJS constructing a JSValue on the stack and passing &val. It is not a green
+// input; the engine backs it with residual storage, flushes the cells it set (3, 4)
+// into that storage, and passes the pointer, so rt_sum reads 7 through it.
+const toyLocalEscapeInterp = `
+void __cg12_merge_point(int pc, int sp);
+struct Ctx { long a; long b; };
+long rt_sum(struct Ctx *c) { return c->a + c->b; }
+enum { OP_HALT, OP_GET };
+
+long interp(const unsigned char *code, const long *in) {
+    struct Ctx ctx;
+    ctx.a = 3;
+    ctx.b = 4;
+    long base = rt_sum(&ctx);   /* &ctx escapes into a runtime call during setup */
+    long stack[64];
+    int sp = 0, pc = 0;
+    for (;;) {
+        __cg12_merge_point(pc, sp);
+        switch (code[pc]) {
+        case OP_GET:  stack[sp++] = base + in[code[pc+1]]; pc += 2; break;
+        case OP_HALT: return stack[sp-1];
+        }
+    }
+}
+`
+
+func TestSpecializeEscapingLocalAddress(t *testing.T) {
+	// GET 0, HALT  ->  rt_sum({3,4}) + in0 == 7 + in0
+	prog := []byte{1, 0, 0}
+	m, err := cc.Compile("toy.c", toyLocalEscapeInterp)
+	require.NoError(t, err)
+	spec, name, _, err := pe.Specialize(m, "interp", prog)
+	require.NoError(t, err)
+	residual := spec.String()
+	t.Logf("residual:\n%s", residual)
+	require.Contains(t, residual, "call $rt_sum", "the setup call through &ctx remains")
+
+	opt.Run(spec, opt.DefaultPipeline())
+	// rt_sum reads the struct, so it needs its real body, not a scalar extern.
+	m.Funcs = append(m.Funcs, spec.Funcs...)
+	mc, err := interp.New(m)
+	require.NoError(t, err)
+	for _, in0 := range []int64{5, 100, -7} {
+		v, err := mc.Call(name, interp.L(in0))
+		require.NoError(t, err)
+		require.Equal(t, 7+in0, v.I64(), "specialized(%d)", in0)
+	}
+}
+
+// A by-value aggregate argument that is itself another call's aggregate RESULT --
+// rt_inc(rt_mk(x)). rt_mk's result is an opaque residual struct pointer, not a
+// struct whose cells the engine tracks, so the aggregate-argument copy must read it
+// back with residual loads (aggCell's vResid path) to hand rt_inc its own copy.
+const toyAggResultInterp = `
+void __cg12_merge_point(int pc, int sp);
+struct Val { long tag; long data; };
+struct Val rt_mk(long x)          { struct Val v; v.tag = 0; v.data = x; return v; }
+struct Val rt_inc(struct Val a)   { struct Val r; r.tag = a.tag; r.data = a.data + 1; return r; }
+enum { OP_HALT, OP_MKINC };
+
+long interp(const unsigned char *code, const long *in) {
+    struct Val stack[64];
+    int sp = 0, pc = 0;
+    for (;;) {
+        __cg12_merge_point(pc, sp);
+        switch (code[pc]) {
+        case OP_MKINC: stack[sp++] = rt_inc(rt_mk(in[code[pc+1]])); pc += 2; break;
+        case OP_HALT:  return stack[sp-1].data;
+        }
+    }
+}
+`
+
+func TestSpecializeAggregateArgFromResult(t *testing.T) {
+	// MKINC 0, HALT  ->  rt_inc(rt_mk(in0)).data == in0 + 1
+	prog := []byte{1, 0, 0}
+	m, err := cc.Compile("toy.c", toyAggResultInterp)
+	require.NoError(t, err)
+	spec, name, _, err := pe.Specialize(m, "interp", prog)
+	require.NoError(t, err)
+	residual := spec.String()
+	t.Logf("residual:\n%s", residual)
+	require.Contains(t, residual, "call $rt_mk", "the inner call remains")
+	require.Contains(t, residual, "call $rt_inc", "the outer by-value call remains")
+
+	opt.Run(spec, opt.DefaultPipeline())
+	m.Funcs = append(m.Funcs, spec.Funcs...)
+	mc, err := interp.New(m)
+	require.NoError(t, err)
+	for _, in0 := range []int64{5, 100, -7} {
+		v, err := mc.Call(name, interp.L(in0))
+		require.NoError(t, err)
+		require.Equal(t, in0+1, v.I64(), "specialized(%d)", in0)
+	}
+}

@@ -124,8 +124,14 @@ type engine struct {
 	ipdom    map[*ir.Block]*ir.Block // source block -> its immediate post-dominator
 	stopAt   *ir.Block               // emit stops before this block (a diamond's join)
 	nphi     int                     // for distinct residual phi names
+	depth    int                     // emit recursion depth (guards runaway inlining)
 	err      error
 }
+
+// maxEmitDepth bounds emit's recursive descent so an unmarked, non-converging loop
+// fails cleanly rather than overflowing the Go stack. Legitimate straight-line
+// setup stays far below this; a true cycle blows past it immediately.
+const maxEmitDepth = 20000
 
 // Specialize specializes the named interpreter in m against prog, returning a new
 // module holding the residual function (same name, suffixed), its name, and the
@@ -276,6 +282,16 @@ func (e *engine) emit(b *ir.Block) { e.emitFrom(b, 0) }
 // not re-executed.
 func (e *engine) emitFrom(b *ir.Block, start int) {
 	if e.err != nil {
+		return
+	}
+	// emit is a recursive descent that terminates at a merge point or a return. An
+	// unmarked loop (a red-trip-count setup loop that ought to be residualized, not
+	// unrolled) has no merge point, so the descent would recurse without bound; cap
+	// it and fail cleanly instead of overflowing the stack.
+	e.depth++
+	defer func() { e.depth-- }()
+	if e.depth > maxEmitDepth {
+		e.fail("control flow did not converge (an unmarked loop with a runtime trip count?)")
 		return
 	}
 	if start == 0 && b == e.stopAt {
@@ -678,17 +694,18 @@ func (e *engine) residualCall(in *ir.Instr, name string) {
 			continue
 		}
 		// A by-value aggregate argument (a JSValue, say) is a pointer to struct
-		// storage. Copy its tracked cells into fresh residual storage and pass a
-		// pointer, matching the ABI.
+		// storage. Copy its cells into fresh residual storage and pass a pointer,
+		// matching the ABI. The source is either a struct we track cell-by-cell
+		// (vAddr) or an opaque struct another call returned (vResid pointer).
 		av := e.valueOf(a)
-		if av.kind != vAddr {
+		if av.kind != vAddr && av.kind != vResid {
 			e.fail("call to %q: aggregate argument is not a known struct", name)
 			return
 		}
 		size, align := aggT.Layout()
 		slot := e.cur.Alloc(allocAlign(align), size)
 		for off := int64(0); off < int64(size); off += 8 {
-			cv := e.load(ir.OLoadl, value{kind: vAddr, reg: av.reg, off: av.off + off})
+			cv := e.aggCell(av, off)
 			dst := slot
 			if off != 0 {
 				dst = e.cur.Add(ir.ClsP, slot, e.out.ConstInt(ir.ClsL, off))
@@ -716,6 +733,25 @@ func (e *engine) tagCall(in *ir.Instr) {
 	last := &e.cur.Instrs[len(e.cur.Instrs)-1]
 	last.RetAgg = in.RetAgg
 	last.AggArgs = in.AggArgs
+}
+
+// aggCell reads one 8-byte word at offset off of an aggregate value, whether it is
+// a struct whose cells we track (vAddr) or an opaque struct pointer another call
+// returned (vResid), which we read with a residual load.
+func (e *engine) aggCell(av value, off int64) value {
+	switch av.kind {
+	case vAddr:
+		return e.load(ir.OLoadl, value{kind: vAddr, reg: av.reg, off: av.off + off})
+	case vResid:
+		addr := av.ref
+		if off != 0 {
+			addr = e.cur.Add(ir.ClsP, av.ref, e.out.ConstInt(ir.ClsL, off))
+		}
+		return value{kind: vResid, ref: e.cur.Load(ir.ClsL, addr), cls: ir.ClsL}
+	default:
+		e.fail("aggregate argument is not a known struct")
+		return value{}
+	}
 }
 
 func allocAlign(a int) int {
@@ -808,6 +844,11 @@ func (e *engine) store(addr, val value) {
 		}
 		e.fail("a read-only input array was written")
 	default:
+		if addr.reg.haveBase {
+			// The region was residualized (its address escaped); write to its buffer.
+			e.cur.Store(e.materialize(val), e.materialize(addr))
+			return
+		}
 		e.mem[cell(addr.reg, addr.off)] = val
 	}
 }
@@ -820,6 +861,49 @@ func (e *engine) inputBase(reg *region) ir.Ref {
 		reg.haveBase = true
 	}
 	return reg.base
+}
+
+// localBuffer backs a local region with residual storage on first escape: it
+// allocates a buffer, flushes the region's currently-tracked cells into it, and
+// thereafter the region is real residual memory (loads and stores route through
+// the buffer, and it is no longer carried across merge points as phis). The flush
+// reads the abstract store, so it must run before haveBase redirects loads.
+func (e *engine) localBuffer(reg *region) ir.Ref {
+	if reg.haveBase {
+		return reg.base
+	}
+	// Only the one-time setup can de-green a carried region without desyncing the
+	// merge states that already carry it. A local escaping inside a handler needs a
+	// per-copy buffer and invalidation we don't model yet.
+	if e.baseMem != nil {
+		e.fail("a local's address escaped into a runtime value after setup")
+		return ir.R
+	}
+	size := reg.size
+	if size < 8 {
+		size = 8
+	}
+	buf := e.cur.Alloc(allocAlign(int(size)), int(size))
+	for off := int64(0); off < reg.size; off += 8 {
+		cv := e.load(ir.OLoadl, value{kind: vAddr, reg: reg, off: off})
+		dst := buf
+		if off != 0 {
+			dst = e.cur.Add(ir.ClsP, buf, e.out.ConstInt(ir.ClsL, off))
+		}
+		e.cur.Store(e.materialize(cv), dst)
+	}
+	reg.base, reg.haveBase = buf, true
+	e.removeVar(reg)
+	return buf
+}
+
+func (e *engine) removeVar(reg *region) {
+	for i, r := range e.varRegs {
+		if r == reg {
+			e.varRegs = append(e.varRegs[:i], e.varRegs[i+1:]...)
+			return
+		}
+	}
 }
 
 // escapingParams reports which pointer parameters have their pointer value used by
@@ -941,6 +1025,10 @@ func (e *engine) load(op ir.Op, addr value) value {
 		}
 		return value{kind: vResid, ref: e.inputParam(addr.off, loadCls(op)), cls: loadCls(op)}
 	default:
+		if addr.reg.haveBase {
+			// The region was residualized (its address escaped); read from its buffer.
+			return value{kind: vResid, ref: e.cur.Load(loadCls(op), e.materialize(addr)), cls: loadCls(op)}
+		}
 		v, ok := e.mem[cell(addr.reg, addr.off)]
 		if !ok {
 			return value{kind: vConst, k: 0, cls: loadCls(op)}
@@ -970,17 +1058,35 @@ func (e *engine) materialize(v value) ir.Ref {
 	case vResid:
 		return v.ref
 	case vAddr:
-		if v.reg != nil && v.reg.role == roleInput && v.reg.escapes {
+		if v.reg == nil {
+			e.fail("a green address escaped into a runtime value")
+			return ir.R
+		}
+		var base ir.Ref
+		switch v.reg.role {
+		case roleInput:
+			if !v.reg.escapes {
+				e.fail("a read-only input array escaped into a runtime value")
+				return ir.R
+			}
 			// An escaping runtime pointer (ctx, argv): its base is a residual pointer
 			// parameter, and this is that pointer offset by a static amount.
-			base := e.inputBase(v.reg)
-			if v.off == 0 {
-				return base
-			}
-			return e.cur.Add(ir.ClsP, base, e.out.ConstInt(ir.ClsL, v.off))
+			base = e.inputBase(v.reg)
+		case roleVar, roleOther:
+			// A local (a JSValue built on the stack, say) whose address is handed to a
+			// runtime routine: back it with residual storage holding its current cells.
+			base = e.localBuffer(v.reg)
+		default:
+			e.fail("a green address escaped into a runtime value")
+			return ir.R
 		}
-		e.fail("a green address escaped into a runtime value")
-		return ir.R
+		if e.err != nil {
+			return ir.R
+		}
+		if v.off == 0 {
+			return base
+		}
+		return e.cur.Add(ir.ClsP, base, e.out.ConstInt(ir.ClsL, v.off))
 	default:
 		e.fail("a green address escaped into a runtime value")
 		return ir.R
