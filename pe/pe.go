@@ -103,10 +103,11 @@ type engine struct {
 	stackReg *region
 	varRegs  []*region
 
-	states map[greenState]*state
-	work   []greenState
-	nphi   int // for distinct residual phi names
-	err    error
+	states   map[greenState]*state
+	work     []greenState
+	regionOf map[uint32]*region // alloca temp id -> its region (stable across re-execution)
+	nphi     int                // for distinct residual phi names
+	err      error
 }
 
 // Specialize specializes the named interpreter in m against prog, returning a new
@@ -125,13 +126,14 @@ func Specialize(m *ir.Module, interp string, prog []byte) (*ir.Module, string, [
 	out := ir.NewModule()
 	name := interp + "$spec"
 	e := &engine{
-		src:    src,
-		prog:   prog,
-		out:    out.NewFunc(name, src.Retty),
-		env:    map[uint32]value{},
-		mem:    map[[2]int64]value{},
-		ins:    map[int64]ir.Ref{},
-		states: map[greenState]*state{},
+		src:      src,
+		prog:     prog,
+		out:      out.NewFunc(name, src.Retty),
+		env:      map[uint32]value{},
+		mem:      map[[2]int64]value{},
+		ins:      map[int64]ir.Ref{},
+		states:   map[greenState]*state{},
+		regionOf: map[uint32]*region{},
 	}
 	e.out.Export()
 	e.run()
@@ -378,8 +380,18 @@ func (e *engine) exec(in *ir.Instr) {
 	}
 }
 
-// allocRegion classifies an interpreter alloca by the name cc gave its result.
+// allocRegion classifies an interpreter alloca and returns its region, stable
+// across re-execution (a handler's alloca runs once per specialized copy of that
+// handler, but names the same storage). The name cc gives the result identifies
+// the interpreter's structural regions; among the rest, a local array is
+// persistent VM state carried across merge points, while a scalar is a handler
+// temporary, plain memory that never crosses a merge.
 func (e *engine) allocRegion(in *ir.Instr) *region {
+	if in.To.Kind == ir.RefTemp {
+		if r, ok := e.regionOf[in.To.ID]; ok {
+			return r
+		}
+	}
 	base := ""
 	if t := e.src.Temp(in.To); t != nil {
 		base = t.Name
@@ -405,8 +417,14 @@ func (e *engine) allocRegion(in *ir.Instr) *region {
 	case "code", "in":
 		r.role = roleBase
 	default:
-		r.role = roleVar
-		e.varRegs = append(e.varRegs, r)
+		if size > 8 { // a local array: persistent VM state carried across merges
+			r.role = roleVar
+			e.varRegs = append(e.varRegs, r)
+		}
+		// otherwise roleOther: a handler-local scalar, not carried across merges
+	}
+	if in.To.Kind == ir.RefTemp {
+		e.regionOf[in.To.ID] = r
 	}
 	return r
 }
@@ -420,12 +438,39 @@ func (e *engine) execData(in *ir.Instr) {
 	case ir.OCmp:
 		e.set(in.To, e.compare(in))
 	case ir.OCall:
-		if e.calleeName(in) == MergePoint {
+		name := e.calleeName(in)
+		if name == MergePoint {
 			return
 		}
-		e.fail("call to %q is not supported", e.calleeName(in))
+		e.residualCall(in, name)
 	default:
 		e.fail("unsupported op %v", in.Op)
+	}
+}
+
+// residualCall emits a call to a runtime helper the interpreter's handler makes.
+// The helper is a black box -- its arguments are materialized (green ones become
+// constants, so a green opcode selector folds into the call) and its result is a
+// fresh runtime value. The dispatch that reached the handler is gone; the call the
+// program actually performs remains, in order.
+func (e *engine) residualCall(in *ir.Instr, name string) {
+	if name == "" {
+		e.fail("indirect calls are not supported")
+		return
+	}
+	if len(in.AggArgs) != 0 || in.RetAgg != nil {
+		e.fail("call to %q: aggregate arguments/results are not supported", name)
+		return
+	}
+	args := make([]ir.Ref, 0, len(in.Args)-1)
+	for _, a := range in.Args[1:] {
+		args = append(args, e.materialize(e.valueOf(a)))
+	}
+	callee := e.out.Sym(name, 0)
+	if in.To.Kind == ir.RefTemp {
+		e.set(in.To, value{kind: vResid, ref: e.cur.Call(in.Cls, callee, args...), cls: in.Cls})
+	} else {
+		e.cur.CallVoid(callee, args...)
 	}
 }
 
