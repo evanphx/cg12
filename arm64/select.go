@@ -261,7 +261,7 @@ func (s *sel) load(in *ir.Instr) {
 	}
 	addr := s.src(in.Args[0], 1, 8)
 	d, done := s.dst(in.To, sz)
-	s.b.load(in.Op, in.Cls, d, addr)
+	s.b.load(in.Op, in.Cls, d, addr, uint32(in.Aux))
 	done()
 }
 
@@ -275,7 +275,7 @@ func (s *sel) store(in *ir.Instr) {
 		s.b.storeIdx(in.Op, val, base, index, in.Amode)
 		return
 	}
-	s.b.store(in.Op, val, s.src(in.Args[1], 1, 8))
+	s.b.store(in.Op, val, s.src(in.Args[1], 1, 8), uint32(in.Aux))
 }
 
 // cmp emits a comparison and a conditional-set of the boolean result, folding a

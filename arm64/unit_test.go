@@ -292,6 +292,32 @@ func TestSelectMulAddFuses(t *testing.T) {
 	assert.NotContains(t, sub, "mul x")
 }
 
+func TestSelectConstOffsetAddressing(t *testing.T) {
+	// A load or store at a constant offset uses the [base, #imm] addressing mode
+	// rather than materializing the offset into a register and indexing.
+	load := func() string {
+		m := ir.NewModule()
+		f := m.NewFunc("f", ir.ClsL).Export()
+		p := f.Param("p", ir.ClsL)
+		e := f.Entry()
+		e.Ret(e.Load(ir.ClsL, e.Add(ir.ClsL, p, f.Long(40))))
+		return disasmModule(t, m)
+	}()
+	assert.Contains(t, load, "#40]", "immediate offset, not a register index")
+
+	store := func() string {
+		m := ir.NewModule()
+		f := m.NewFuncVoid("g").Export()
+		p := f.Param("p", ir.ClsL)
+		v := f.Param("v", ir.ClsL)
+		e := f.Entry()
+		e.Store(v, e.Add(ir.ClsL, p, f.Long(24)))
+		e.RetVoid()
+		return disasmModule(t, m)
+	}()
+	assert.Contains(t, store, "#24]", "immediate offset, not a register index")
+}
+
 func TestCompileLargeFrame(t *testing.T) {
 	// A frame larger than the stp pre-index reach (504 bytes) must adjust sp
 	// separately in the prologue and epilogue. Add/sub immediate only carries 12

@@ -70,6 +70,18 @@ func foldAddressing(f *ir.Func) {
 			if add == nil || add.Op != ir.OAdd {
 				continue
 			}
+			// A constant offset that fits the scaled unsigned immediate becomes
+			// [base, #imm] with no index register at all.
+			if c, cbase, ok := immOffset(f, add, access); ok {
+				nop(add)
+				in.Aux = c
+				if in.Op.IsLoad() {
+					in.Args = []ir.Ref{cbase}
+				} else {
+					in.Args = []ir.Ref{in.Args[0], cbase}
+				}
+				continue
+			}
 			base, off := add.Args[0], add.Args[1]
 			// The index side is whichever operand is a shift or sign-extension; a
 			// plain add folds too (base + index, no scale).
@@ -103,6 +115,21 @@ func foldAddressing(f *ir.Func) {
 			}
 		}
 	}
+}
+
+// immOffset reports whether one operand of add is a constant that fits an
+// AArch64 scaled unsigned load/store offset for an access of the given width: a
+// non-negative multiple of the width, at most 4095 of them. It returns the byte
+// offset and the other operand (the base).
+func immOffset(f *ir.Func, add *ir.Instr, access int) (int64, ir.Ref, bool) {
+	for i := 0; i < 2; i++ {
+		if c, ok := intConst(f, add.Args[i]); ok {
+			if c >= 0 && c%int64(access) == 0 && c/int64(access) <= 4095 {
+				return c, add.Args[1-i], true
+			}
+		}
+	}
+	return 0, ir.Ref{}, false
 }
 
 // isIndexExpr reports whether an instruction looks like the index side of an

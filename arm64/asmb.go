@@ -83,9 +83,9 @@ type asmb interface {
 
 	// Memory. load/store use [base]; loadIdx/storeIdx use [base, index] with the
 	// extend/scale encoded in aux. The op fixes the width and signedness.
-	load(op ir.Op, cls ir.Cls, rd, base Reg)
+	load(op ir.Op, cls ir.Cls, rd, base Reg, off uint32)
 	loadIdx(op ir.Op, cls ir.Cls, rd, base, index Reg, amode int32)
-	store(op ir.Op, val, base Reg)
+	store(op ir.Op, val, base Reg, off uint32)
 	storeIdx(op ir.Op, val, base, index Reg, amode int32)
 
 	// Control flow. Branch targets are blocks so each backend formats its own
@@ -375,30 +375,30 @@ func (b *mcAsm) csel(w64 bool, rd, rn, rm Reg, cond a64.Cond) {
 func (b *mcAsm) fcsel(dbl bool, rd, rn, rm Reg, cond a64.Cond) {
 	b.prog.Emit(a64.Fcsel(dbl, mreg(rd), mreg(rn), mreg(rm), cond))
 }
-func (b *mcAsm) load(op ir.Op, cls ir.Cls, rd, base Reg) {
+func (b *mcAsm) load(op ir.Op, cls ir.Cls, rd, base Reg, off uint32) {
 	d, a := mreg(rd), mreg(base)
 	sz := loadSize(op, cls)
 	switch op {
 	case ir.OLoadl:
-		b.prog.Emit(a64.LdrImm(true, d, a, 0))
+		b.prog.Emit(a64.LdrImm(true, d, a, off))
 	case ir.OLoaduw:
-		b.prog.Emit(a64.LdrImm(false, d, a, 0))
+		b.prog.Emit(a64.LdrImm(false, d, a, off))
 	case ir.OLoadsw:
-		b.prog.Emit(a64.LdrswImm(d, a, 0))
+		b.prog.Emit(a64.LdrswImm(d, a, off))
 	case ir.OLoadub:
-		b.prog.Emit(a64.LdrbImm(d, a, 0))
+		b.prog.Emit(a64.LdrbImm(d, a, off))
 	case ir.OLoadsb:
-		b.prog.Emit(a64.LdrsbImm(sz == 8, d, a, 0))
+		b.prog.Emit(a64.LdrsbImm(sz == 8, d, a, off))
 	case ir.OLoaduh:
-		b.prog.Emit(a64.LdrhImm(d, a, 0))
+		b.prog.Emit(a64.LdrhImm(d, a, off))
 	case ir.OLoadsh:
-		b.prog.Emit(a64.LdrshImm(sz == 8, d, a, 0))
+		b.prog.Emit(a64.LdrshImm(sz == 8, d, a, off))
 	case ir.OLoads:
-		b.prog.Emit(a64.LdrFP(false, d, a, 0))
+		b.prog.Emit(a64.LdrFP(false, d, a, off))
 	case ir.OLoadd:
-		b.prog.Emit(a64.LdrFP(true, d, a, 0))
+		b.prog.Emit(a64.LdrFP(true, d, a, off))
 	case ir.OLoadq:
-		b.prog.Emit(a64.LdrQ(d, a, 0))
+		b.prog.Emit(a64.LdrQ(d, a, off))
 	default:
 		b.fail("arm64: unsupported load %s", op)
 	}
@@ -426,23 +426,23 @@ func (b *mcAsm) loadIdx(op ir.Op, cls ir.Cls, rd, base, index Reg, amode int32) 
 		b.fail("arm64: unsupported indexed load %s", op)
 	}
 }
-func (b *mcAsm) store(op ir.Op, val, base Reg) {
+func (b *mcAsm) store(op ir.Op, val, base Reg, off uint32) {
 	v, a := mreg(val), mreg(base)
 	switch op {
 	case ir.OStorel:
-		b.prog.Emit(a64.StrImm(true, v, a, 0))
+		b.prog.Emit(a64.StrImm(true, v, a, off))
 	case ir.OStorew:
-		b.prog.Emit(a64.StrImm(false, v, a, 0))
+		b.prog.Emit(a64.StrImm(false, v, a, off))
 	case ir.OStoreb:
-		b.prog.Emit(a64.StrbImm(v, a, 0))
+		b.prog.Emit(a64.StrbImm(v, a, off))
 	case ir.OStoreh:
-		b.prog.Emit(a64.StrhImm(v, a, 0))
+		b.prog.Emit(a64.StrhImm(v, a, off))
 	case ir.OStores:
-		b.prog.Emit(a64.StrFP(false, v, a, 0))
+		b.prog.Emit(a64.StrFP(false, v, a, off))
 	case ir.OStored:
-		b.prog.Emit(a64.StrFP(true, v, a, 0))
+		b.prog.Emit(a64.StrFP(true, v, a, off))
 	case ir.OStoreq:
-		b.prog.Emit(a64.StrQ(v, a, 0))
+		b.prog.Emit(a64.StrQ(v, a, off))
 	default:
 		b.fail("arm64: unsupported store %s", op)
 	}
