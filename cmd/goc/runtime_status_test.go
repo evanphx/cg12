@@ -168,6 +168,42 @@ func TestARM64RuntimeCapabilityStatus(t *testing.T) {
 			expectation: runtimeCapabilityMustPass,
 		},
 		{
+			category:    "core-types",
+			name:        "nil-map-read-delete",
+			source:      "runtime_nil_map_read_delete.go",
+			expectation: runtimeCapabilityMustPass,
+		},
+		{
+			category:    "core-types",
+			name:        "map-pointer-keys",
+			source:      "runtime_map_pointer_keys.go",
+			expectation: runtimeCapabilityMustPass,
+		},
+		{
+			category:    "core-types",
+			name:        "interface-nil-assertions",
+			source:      "runtime_interface_nil_assertions.go",
+			expectation: runtimeCapabilityMustPass,
+		},
+		{
+			category:    "core-types",
+			name:        "interface-method-value",
+			source:      "runtime_interface_method_value.go",
+			expectation: runtimeCapabilityMustPass,
+		},
+		{
+			category:    "core-types",
+			name:        "slice-to-array-pointer",
+			source:      "runtime_slice_to_array_pointer.go",
+			expectation: runtimeCapabilityMustPass,
+		},
+		{
+			category:    "core-types",
+			name:        "string-byte-round-trip",
+			source:      "runtime_string_byte_round_trip.go",
+			expectation: runtimeCapabilityMustPass,
+		},
+		{
 			category:    "gc",
 			name:        "heap-struct-graph",
 			source:      "gc_struct.go",
@@ -390,6 +426,12 @@ func TestARM64RuntimeCapabilityStatus(t *testing.T) {
 			expectation: runtimeCapabilityMustPass,
 		},
 		{
+			category:    "goroutine",
+			name:        "gosched-progress",
+			source:      "runtime_gosched_progress.go",
+			expectation: runtimeCapabilityMustPass,
+		},
+		{
 			category:    "stdlib-runtime",
 			name:        "context-cancel-channel",
 			source:      "context_cancel.go",
@@ -477,6 +519,18 @@ func TestARM64RuntimeCapabilityStatus(t *testing.T) {
 			category:    "defer-panic",
 			name:        "defer-replace-panic",
 			source:      "runtime_defer_replace_panic.go",
+			expectation: runtimeCapabilityMustPass,
+		},
+		{
+			category:    "defer-panic",
+			name:        "defer-method-value-order",
+			source:      "runtime_defer_method_value_order.go",
+			expectation: runtimeCapabilityMustPass,
+		},
+		{
+			category:    "defer-panic",
+			name:        "panic-nil-recover",
+			source:      "runtime_panic_nil_recover.go",
 			expectation: runtimeCapabilityMustPass,
 		},
 		{
@@ -639,6 +693,12 @@ func TestARM64RuntimeCapabilityStatus(t *testing.T) {
 			category:    "runtime-packages",
 			name:        "time-after",
 			source:      "runtime_time_after.go",
+			expectation: runtimeCapabilityMustPass,
+		},
+		{
+			category:    "runtime-packages",
+			name:        "sync-mutex-defer",
+			source:      "runtime_sync_mutex_defer.go",
 			expectation: runtimeCapabilityMustPass,
 		},
 		{

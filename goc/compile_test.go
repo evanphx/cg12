@@ -479,6 +479,38 @@ func main() { _ = external(42) }
 	}
 }
 
+func TestCompileAppliesLinknameToInterfaceGlobal(t *testing.T) {
+	module, err := Compile("linkname_interface.go", []byte(`package main
+import _ "unsafe"
+
+type stringError string
+
+func (err stringError) Error() string {
+	return string(err)
+}
+
+//go:linkname linkedError runtime.linkedError
+var linkedError error = stringError("boom")
+`))
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	var linked *ir.Data
+	for _, data := range module.Data {
+		if data.Name == "runtime.linkedError" {
+			linked = data
+			break
+		}
+	}
+	if linked == nil {
+		t.Fatal("linknamed interface global was not emitted under its linked name")
+	}
+	if !linked.Linkage.Export {
+		t.Fatal("linknamed interface global is not exported")
+	}
+}
+
 func TestCompilePreservesNoSplitDirective(t *testing.T) {
 	module, err := Compile("nosplit.go", []byte(`package main
 

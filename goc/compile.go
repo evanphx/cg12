@@ -2207,7 +2207,11 @@ func (g *gen) globalDecl(gd *ast.GenDecl) {
 			}
 			if _, ok := obj.Type().Underlying().(*types.Interface); ok {
 				g.globalInterface(id, obj, vs, i)
-				g.markDataPointerWords(g.pkg.Path()+"."+id.Name, obj.Type())
+				name := g.pkg.Path() + "." + id.Name
+				if linkedName := g.globalLinkNames[obj]; linkedName != "" {
+					name = linkedName
+				}
+				g.markDataPointerWords(name, obj.Type())
 				continue
 			}
 			if basic, ok := obj.Type().Underlying().(*types.Basic); ok && basic.Kind() == types.String {
@@ -2311,6 +2315,10 @@ func (g *gen) globalDecl(gd *ast.GenDecl) {
 
 func (g *gen) globalInterface(id *ast.Ident, object types.Object, spec *ast.ValueSpec, valueIndex int) {
 	name := g.pkg.Path() + "." + id.Name
+	linkedName := g.globalLinkNames[object]
+	if linkedName != "" {
+		name = linkedName
+	}
 	emitZero := func() {
 		g.mod.Data = append(g.mod.Data, &ir.Data{Name: name, Align: 8, Items: []ir.DataItem{{Sub: ir.SubL, Ints: []int64{0, 0}}}})
 		g.globals[object] = name
@@ -2343,7 +2351,7 @@ func (g *gen) globalInterface(id *ast.Ident, object types.Object, spec *ast.Valu
 	g.mod.Data = append(g.mod.Data, &ir.Data{
 		Name:    name,
 		Align:   8,
-		Linkage: ir.Linkage{Export: ast.IsExported(id.Name)},
+		Linkage: ir.Linkage{Export: ast.IsExported(id.Name) || linkedName != ""},
 		Items:   items,
 	})
 	g.globals[object] = name
