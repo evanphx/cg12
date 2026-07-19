@@ -190,8 +190,45 @@ func foldIdioms(f *ir.Func) {
 				foldRotate(f, in, uses, defOf)
 			case ir.OAnd:
 				foldBic(f, in, uses, defOf)
+			case ir.OAdd, ir.OSub:
+				foldMulAdd(f, in, uses, defOf)
 			}
 		}
+	}
+}
+
+// foldMulAdd fuses an integer multiply feeding an add or subtract into a single
+// OMAdd/OMSub (AArch64 madd/msub: rd = ra + rn*rm and rd = ra - rn*rm), when the
+// multiply feeds only this op so dropping it changes nothing else. A subtract
+// fuses only when the multiply is the subtrahend, since msub negates the product.
+func foldMulAdd(f *ir.Func, in *ir.Instr, uses map[uint32]int, defOf func(ir.Ref) *ir.Instr) {
+	if in.Cls.IsFloat() {
+		return
+	}
+	mulOf := func(r ir.Ref) *ir.Instr {
+		if r.Kind != ir.RefTemp || uses[r.ID] != 1 {
+			return nil
+		}
+		if d := defOf(r); d != nil && d.Op == ir.OMul && d.Cls == in.Cls {
+			return d
+		}
+		return nil
+	}
+	fuse := func(op ir.Op, m *ir.Instr, addend ir.Ref) {
+		in.Op = op
+		in.Args = []ir.Ref{m.Args[0], m.Args[1], addend}
+		nop(m)
+	}
+	if in.Op == ir.OAdd {
+		if m := mulOf(in.Args[0]); m != nil {
+			fuse(ir.OMAdd, m, in.Args[1])
+		} else if m := mulOf(in.Args[1]); m != nil {
+			fuse(ir.OMAdd, m, in.Args[0])
+		}
+		return
+	}
+	if m := mulOf(in.Args[1]); m != nil { // sub(z, x*y) -> msub x,y,z
+		fuse(ir.OMSub, m, in.Args[0])
 	}
 }
 

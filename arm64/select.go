@@ -140,6 +140,10 @@ func (s *sel) selectData(in *ir.Instr) bool {
 		s.logical(in, logEor)
 	case ir.OBic:
 		s.binReg(in, sz, func(rd, rn, rm Reg) { s.b.logicalReg(logBic, w64, rd, rn, rm) })
+	case ir.OMAdd:
+		s.triReg(in, sz, func(rd, rn, rm, ra Reg) { s.b.madd(w64, rd, rn, rm, ra) })
+	case ir.OMSub:
+		s.triReg(in, sz, func(rd, rn, rm, ra Reg) { s.b.msub(w64, rd, rn, rm, ra) })
 	case ir.OShl:
 		s.shift(in, shLsl)
 	case ir.OShr:
@@ -644,6 +648,18 @@ func (s *sel) binReg(in *ir.Instr, sz int, emit func(rd, rn, rm Reg)) {
 	s2 := s.src(in.Args[1], 1, sz)
 	d, done := s.dst(in.To, sz)
 	emit(d, s1, s2)
+	done()
+}
+
+// triReg selects a three-source op. A spilled result reuses scratch slot 0, which
+// a spilled first operand also holds; the fused instruction reads all its sources
+// before writing the destination, so the overlap is harmless.
+func (s *sel) triReg(in *ir.Instr, sz int, emit func(rd, rn, rm, ra Reg)) {
+	s1 := s.src(in.Args[0], 0, sz)
+	s2 := s.src(in.Args[1], 1, sz)
+	s3 := s.src(in.Args[2], 2, sz)
+	d, done := s.dst(in.To, sz)
+	emit(d, s1, s2, s3)
 	done()
 }
 

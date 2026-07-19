@@ -195,6 +195,12 @@ const (
 	// through every pass and backend.
 	OIntrinsic
 
+	// OMAdd / OMSub fuse a multiply with an add or subtract: rd = ra + rn*rm and
+	// rd = ra - rn*rm, with Args [rn, rm, ra]. A backend that recognizes the idiom
+	// and has a fused multiply-add (currently arm64) produces them.
+	OMAdd
+	OMSub
+
 	numOps
 )
 
@@ -233,6 +239,8 @@ var opTable = [numOps]opInfo{
 	OSar:  {name: "sar", hasResult: true},
 	ORotr: {name: "rotr", hasResult: true, private: true},
 	OBic:  {name: "bic", hasResult: true, private: true},
+	OMAdd: {name: "madd", hasResult: true, private: true},
+	OMSub: {name: "msub", hasResult: true, private: true},
 	OClz:  {name: "clz", hasResult: true},
 
 	ONeg: {name: "neg", hasResult: true},

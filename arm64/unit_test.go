@@ -268,6 +268,30 @@ func TestCompileFloatFunction(t *testing.T) {
 	assert.Contains(t, disasmModule(t, m), "fadd s")
 }
 
+func TestSelectMulAddFuses(t *testing.T) {
+	// A single-use integer multiply feeding an add fuses to one madd; feeding a
+	// subtract's subtrahend fuses to msub (c - a*b). The separate mul disappears.
+	build := func(name string, body func(e *ir.Block, a, b, c ir.Ref) ir.Ref) string {
+		m := ir.NewModule()
+		f := m.NewFunc(name, ir.ClsL).Export()
+		a, b, c := f.Param("a", ir.ClsL), f.Param("b", ir.ClsL), f.Param("c", ir.ClsL)
+		e := f.Entry()
+		e.Ret(body(e, a, b, c))
+		return disasmModule(t, m)
+	}
+	add := build("f", func(e *ir.Block, a, b, c ir.Ref) ir.Ref {
+		return e.Add(ir.ClsL, e.Mul(ir.ClsL, a, b), c)
+	})
+	assert.Contains(t, add, "madd x")
+	assert.NotContains(t, add, "mul x")
+
+	sub := build("g", func(e *ir.Block, a, b, c ir.Ref) ir.Ref {
+		return e.Sub(ir.ClsL, c, e.Mul(ir.ClsL, a, b))
+	})
+	assert.Contains(t, sub, "msub x")
+	assert.NotContains(t, sub, "mul x")
+}
+
 func TestCompileLargeFrame(t *testing.T) {
 	// A frame larger than the stp pre-index reach (504 bytes) must adjust sp
 	// separately in the prologue and epilogue. Add/sub immediate only carries 12
