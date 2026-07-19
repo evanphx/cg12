@@ -604,19 +604,65 @@ func (e *engine) residualCall(in *ir.Instr, name string) {
 		e.fail("indirect calls are not supported")
 		return
 	}
-	if len(in.AggArgs) != 0 || in.RetAgg != nil {
-		e.fail("call to %q: aggregate arguments/results are not supported", name)
-		return
-	}
 	args := make([]ir.Ref, 0, len(in.Args)-1)
-	for _, a := range in.Args[1:] {
-		args = append(args, e.materialize(e.valueOf(a)))
+	for k, a := range in.Args[1:] {
+		var aggT *ir.AggType
+		if k < len(in.AggArgs) {
+			aggT = in.AggArgs[k]
+		}
+		if aggT == nil {
+			args = append(args, e.materialize(e.valueOf(a)))
+			continue
+		}
+		// A by-value aggregate argument (a JSValue, say) is a pointer to struct
+		// storage. Copy its tracked cells into fresh residual storage and pass a
+		// pointer, matching the ABI.
+		av := e.valueOf(a)
+		if av.kind != vAddr {
+			e.fail("call to %q: aggregate argument is not a known struct", name)
+			return
+		}
+		size, align := aggT.Layout()
+		slot := e.cur.Alloc(allocAlign(align), size)
+		for off := int64(0); off < int64(size); off += 8 {
+			cv := e.load(ir.OLoadl, value{kind: vAddr, reg: av.reg, off: av.off + off})
+			dst := slot
+			if off != 0 {
+				dst = e.cur.Add(ir.ClsP, slot, e.out.ConstInt(ir.ClsL, off))
+			}
+			e.cur.Store(e.materialize(cv), dst)
+		}
+		args = append(args, slot)
 	}
 	callee := e.out.Sym(name, 0)
-	if in.To.Kind == ir.RefTemp {
-		e.set(in.To, value{kind: vResid, ref: e.cur.Call(in.Cls, callee, args...), cls: in.Cls})
-	} else {
+	if in.To.Kind != ir.RefTemp {
 		e.cur.CallVoid(callee, args...)
+		e.tagCall(in)
+		return
+	}
+	// An aggregate result is a pointer to the returned struct; the handler reads its
+	// fields with ordinary loads, which residualize against that pointer.
+	res := e.cur.Call(in.Cls, callee, args...)
+	e.tagCall(in)
+	e.set(in.To, value{kind: vResid, ref: res, cls: in.Cls})
+}
+
+// tagCall copies the just-emitted residual call's aggregate metadata from the
+// interpreter's call, so its by-value struct arguments and result use the same ABI.
+func (e *engine) tagCall(in *ir.Instr) {
+	last := &e.cur.Instrs[len(e.cur.Instrs)-1]
+	last.RetAgg = in.RetAgg
+	last.AggArgs = in.AggArgs
+}
+
+func allocAlign(a int) int {
+	switch {
+	case a >= 16:
+		return 16
+	case a >= 8:
+		return 8
+	default:
+		return 4
 	}
 }
 
