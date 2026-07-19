@@ -72,9 +72,13 @@ const (
 )
 
 type region struct {
-	id   int
-	role role
-	size int64
+	id       int
+	role     role
+	size     int64
+	escapes  bool   // rInput: the pointer value is used by value, not just dereferenced
+	name     string // rInput: the parameter name (for the residual pointer parameter)
+	base     ir.Ref // rInput escaping: the synthesized residual pointer parameter
+	haveBase bool
 }
 
 // greenState is the memoization key: everything static that shapes the residual.
@@ -173,17 +177,27 @@ func (e *engine) run() {
 	e.ipdom = computePostIdom(e.src)
 	e.stackStride = detectStackStride(e.src)
 
-	// The pointer parameters: "code" is the green program, others are runtime inputs.
+	// Classify the parameters. "code" is the green program. A pointer parameter is a
+	// runtime array: read-only ones synthesize a scalar per element, but one whose
+	// pointer value escapes (a JSContext handed to runtime routines) becomes a
+	// residual pointer parameter. A scalar parameter is a plain runtime value.
+	esc := escapingParams(e.src)
 	for _, t := range e.src.Params {
-		r := roleInput
+		id := uint32(t.ID)
+		ref := ir.Ref{Kind: ir.RefTemp, ID: id}
 		if t.Name == "code" {
-			r = roleCode
+			e.codeReg = e.newRegion(roleCode, 0)
+			e.env[id] = value{kind: vAddr, reg: e.codeReg}
+			continue
 		}
-		reg := e.newRegion(r, 0)
-		if r == roleCode {
-			e.codeReg = reg
+		if e.src.ClassOf(ref) == ir.ClsP {
+			reg := e.newRegion(roleInput, 0)
+			reg.name, reg.escapes = t.Name, esc[t.Name]
+			e.env[id] = value{kind: vAddr, reg: reg}
+			continue
 		}
-		e.env[uint32(t.ID)] = value{kind: vAddr, reg: reg}
+		cls := e.src.ClassOf(ref)
+		e.env[id] = value{kind: vResid, ref: e.out.Param(t.Name, cls), cls: cls}
 	}
 
 	// The interpreter's setup runs once, into the entry block; it reaches the first
@@ -785,11 +799,111 @@ func (e *engine) store(addr, val value) {
 		return
 	}
 	switch addr.reg.role {
-	case roleCode, roleInput:
-		e.fail("the program and inputs are read-only")
+	case roleCode:
+		e.fail("the program is read-only")
+	case roleInput:
+		if addr.reg.escapes {
+			e.cur.Store(e.materialize(val), e.materialize(addr))
+			return
+		}
+		e.fail("a read-only input array was written")
 	default:
 		e.mem[cell(addr.reg, addr.off)] = val
 	}
+}
+
+// inputBase returns the residual pointer parameter standing for an escaping runtime
+// pointer, creating it on first use.
+func (e *engine) inputBase(reg *region) ir.Ref {
+	if !reg.haveBase {
+		reg.base = e.out.Param(reg.name, ir.ClsP)
+		reg.haveBase = true
+	}
+	return reg.base
+}
+
+// escapingParams reports which pointer parameters have their pointer value used by
+// value -- passed to a call, stored, or returned -- rather than only dereferenced.
+// Such a parameter cannot be modeled as a read-only array of synthesized scalars; it
+// becomes a residual pointer parameter.
+func escapingParams(f *ir.Func) map[string]bool {
+	out := map[string]bool{}
+	for _, t := range f.Params {
+		if f.ClassOf(ir.Ref{Kind: ir.RefTemp, ID: uint32(t.ID)}) != ir.ClsP || t.Name == "code" {
+			continue
+		}
+		if paramEscapes(f, t.Name+".addr") {
+			out[t.Name] = true
+		}
+	}
+	return out
+}
+
+func paramEscapes(f *ir.Func, addrName string) bool {
+	var addrID uint32
+	found := false
+	for _, b := range f.Blocks {
+		for k := range b.Instrs {
+			in := &b.Instrs[k]
+			if in.Op.IsAlloc() && in.To.Kind == ir.RefTemp {
+				if tt := f.Temp(in.To); tt != nil && tt.Name == addrName {
+					addrID, found = in.To.ID, true
+				}
+			}
+		}
+	}
+	if !found {
+		return false
+	}
+	// A "pointer temp" holds the parameter's pointer: a load of its slot, or an add
+	// or copy of one. Grow the set to a fixpoint.
+	ptr := map[uint32]bool{}
+	for changed := true; changed; {
+		changed = false
+		for _, b := range f.Blocks {
+			for k := range b.Instrs {
+				in := &b.Instrs[k]
+				if in.To.Kind != ir.RefTemp || ptr[in.To.ID] {
+					continue
+				}
+				is := false
+				switch {
+				case in.Op.IsLoad() && len(in.Args) == 1 && in.Args[0].Kind == ir.RefTemp && in.Args[0].ID == addrID:
+					is = true
+				case in.Op == ir.OAdd || in.Op == ir.OCopy:
+					for _, a := range in.Args {
+						if a.Kind == ir.RefTemp && ptr[a.ID] {
+							is = true
+						}
+					}
+				}
+				if is {
+					ptr[in.To.ID], changed = true, true
+				}
+			}
+		}
+	}
+	// It escapes if a pointer temp is a call argument, a stored value, or returned --
+	// as opposed to a load/store address, which is a dereference.
+	for _, b := range f.Blocks {
+		for k := range b.Instrs {
+			in := &b.Instrs[k]
+			if in.Op == ir.OCall {
+				for _, a := range in.Args[1:] {
+					if a.Kind == ir.RefTemp && ptr[a.ID] {
+						return true
+					}
+				}
+			}
+			if in.Op.IsStore() && in.Args[0].Kind == ir.RefTemp && ptr[in.Args[0].ID] {
+				return true
+			}
+		}
+		if b.Jmp.Kind == ir.JmpRet && b.Jmp.Arg.Kind == ir.RefTemp && ptr[b.Jmp.Arg.ID] {
+			return true
+		}
+	}
+	return false
 }
 
 func (e *engine) load(op ir.Op, addr value) value {
@@ -820,6 +934,11 @@ func (e *engine) load(op ir.Op, addr value) value {
 		}
 		return value{kind: vConst, k: k, cls: loadCls(op)}
 	case roleInput:
+		if addr.reg.escapes {
+			// A dereference of an escaping runtime pointer: load through the residual
+			// pointer parameter.
+			return value{kind: vResid, ref: e.cur.Load(loadCls(op), e.materialize(addr)), cls: loadCls(op)}
+		}
 		return value{kind: vResid, ref: e.inputParam(addr.off, loadCls(op)), cls: loadCls(op)}
 	default:
 		v, ok := e.mem[cell(addr.reg, addr.off)]
@@ -850,6 +969,18 @@ func (e *engine) materialize(v value) ir.Ref {
 		return e.out.ConstInt(cls, v.k)
 	case vResid:
 		return v.ref
+	case vAddr:
+		if v.reg != nil && v.reg.role == roleInput && v.reg.escapes {
+			// An escaping runtime pointer (ctx, argv): its base is a residual pointer
+			// parameter, and this is that pointer offset by a static amount.
+			base := e.inputBase(v.reg)
+			if v.off == 0 {
+				return base
+			}
+			return e.cur.Add(ir.ClsP, base, e.out.ConstInt(ir.ClsL, v.off))
+		}
+		e.fail("a green address escaped into a runtime value")
+		return ir.R
 	default:
 		e.fail("a green address escaped into a runtime value")
 		return ir.R
