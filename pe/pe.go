@@ -516,8 +516,14 @@ func (e *engine) extend(in *ir.Instr) value {
 }
 
 func (e *engine) store(addr, val value) {
+	if addr.kind == vResid {
+		// A store to a runtime address (e.g. a per-position inline-cache slot,
+		// reached through a runtime base at a green offset): residualize it.
+		e.cur.Store(e.materialize(val), addr.ref)
+		return
+	}
 	if addr.kind != vAddr {
-		e.fail("store to a runtime address is not supported")
+		e.fail("store to an unknown address")
 		return
 	}
 	switch addr.reg.role {
@@ -529,8 +535,13 @@ func (e *engine) store(addr, val value) {
 }
 
 func (e *engine) load(op ir.Op, addr value) value {
+	if addr.kind == vResid {
+		// A load from a runtime address at a green offset -- an inline-cache slot
+		// keyed by the (green) program position, say: residualize it.
+		return value{kind: vResid, ref: e.cur.Load(loadCls(op), addr.ref), cls: loadCls(op)}
+	}
 	if addr.kind != vAddr {
-		e.fail("load from a runtime address is not supported")
+		e.fail("load from an unknown address")
 		return value{}
 	}
 	switch addr.reg.role {
