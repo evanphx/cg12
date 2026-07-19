@@ -120,6 +120,18 @@ func TestARM64RuntimeCapabilityStatus(t *testing.T) {
 			expectation: runtimeCapabilityMustPass,
 		},
 		{
+			category:    "core-types",
+			name:        "map-clear",
+			source:      "runtime_map_clear.go",
+			expectation: runtimeCapabilityMustPass,
+		},
+		{
+			category:    "core-types",
+			name:        "map-iter-delete-insert",
+			source:      "runtime_map_iter_delete_insert.go",
+			expectation: runtimeCapabilityMustPass,
+		},
+		{
 			category:    "gc",
 			name:        "heap-struct-graph",
 			source:      "gc_struct.go",
@@ -135,6 +147,30 @@ func TestARM64RuntimeCapabilityStatus(t *testing.T) {
 			category:    "gc",
 			name:        "keepalive-finalizer",
 			source:      "runtime_keepalive_finalizer.go",
+			expectation: runtimeCapabilityMustPass,
+		},
+		{
+			category:    "gc",
+			name:        "new-composite-gc",
+			source:      "runtime_new_composite_gc.go",
+			expectation: runtimeCapabilityMustPass,
+		},
+		{
+			category:    "gc",
+			name:        "finalizer-stack-growth",
+			source:      "runtime_finalizer_stack_growth.go",
+			expectation: runtimeCapabilityMustPass,
+		},
+		{
+			category:    "gc",
+			name:        "array-copy-pointer-gc",
+			source:      "runtime_array_copy_pointer_gc.go",
+			expectation: runtimeCapabilityMustPass,
+		},
+		{
+			category:    "gc",
+			name:        "setfinalizer-clear",
+			source:      "runtime_setfinalizer_nil.go",
 			expectation: runtimeCapabilityMustPass,
 		},
 		{
@@ -285,6 +321,18 @@ func TestARM64RuntimeCapabilityStatus(t *testing.T) {
 			category:    "goroutine",
 			name:        "channel-of-slices-gc",
 			source:      "runtime_channel_of_slices_gc.go",
+			expectation: runtimeCapabilityMustPass,
+		},
+		{
+			category:    "goroutine",
+			name:        "channel-nonblocking-receive",
+			source:      "runtime_channel_nonblocking_receive.go",
+			expectation: runtimeCapabilityMustPass,
+		},
+		{
+			category:    "goroutine",
+			name:        "channel-close-buffered-receive",
+			source:      "runtime_channel_close_buffered_receive.go",
 			expectation: runtimeCapabilityMustPass,
 		},
 		{
@@ -475,6 +523,24 @@ func TestARM64RuntimeCapabilityStatus(t *testing.T) {
 		},
 		{
 			category:    "runtime-packages",
+			name:        "reflect-deep-equal",
+			source:      "runtime_reflect_deep_equal.go",
+			expectation: runtimeCapabilityMustPass,
+		},
+		{
+			category:    "runtime-packages",
+			name:        "reflect-type-metadata",
+			source:      "runtime_reflect_type_metadata.go",
+			expectation: runtimeCapabilityMustPass,
+		},
+		{
+			category:    "runtime-packages",
+			name:        "reflect-set-fields",
+			source:      "runtime_reflect_set_fields.go",
+			expectation: runtimeCapabilityMustPass,
+		},
+		{
+			category:    "runtime-packages",
 			name:        "finalizer-basic",
 			source:      "runtime_finalizer_basic.go",
 			expectation: runtimeCapabilityMustPass,
@@ -483,6 +549,12 @@ func TestARM64RuntimeCapabilityStatus(t *testing.T) {
 			category:    "runtime-packages",
 			name:        "time-afterfunc",
 			source:      "runtime_time_afterfunc.go",
+			expectation: runtimeCapabilityMustPass,
+		},
+		{
+			category:    "runtime-packages",
+			name:        "sync-once-value",
+			source:      "runtime_sync_once_value.go",
 			expectation: runtimeCapabilityMustPass,
 		},
 		{
