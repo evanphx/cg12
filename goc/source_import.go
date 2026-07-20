@@ -234,6 +234,7 @@ func newSourceLoader(fset *token.FileSet) *sourceLoader {
 			"math":                                       true,
 			"math/big":                                   true,
 			"math/bits":                                  true,
+			"math/cmplx":                                 true,
 			"math/rand":                                  true,
 			"math/rand/v2":                               true,
 			"net":                                        true,

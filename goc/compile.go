@@ -6254,6 +6254,9 @@ func (g *gen) stmt(s ast.Stmt) {
 				targetType = g.typeAndValue(e).Type
 			}
 			vals[i] = g.assignmentValue(e, targetType)
+			if len(n.Rhs) > 1 {
+				vals[i] = g.snapshotAssignmentValue(vals[i], targetType)
+			}
 		}
 		for i, lhs := range n.Lhs {
 			if id, ok := lhs.(*ast.Ident); ok && id.Name == "_" {
@@ -7489,6 +7492,13 @@ func (g *gen) copyInlineValue(value ir.Ref, valueType types.Type) ir.Ref {
 	return copy
 }
 
+func (g *gen) snapshotAssignmentValue(value ir.Ref, valueType types.Type) ir.Ref {
+	if isMemoryValue(valueType) || isDescriptorValue(valueType) || isInterfaceValue(valueType) {
+		return g.copyInlineValue(value, valueType)
+	}
+	return value
+}
+
 func (g *gen) zeroValue(valueType types.Type) ir.Ref {
 	if _, ok := valueType.Underlying().(*types.Slice); ok {
 		zero := g.fn.Long(0)
@@ -8415,7 +8425,7 @@ func (g *gen) expr(e ast.Expr) (result ir.Ref) {
 				// compilers do not accidentally treat it as an ordinary function.
 				return g.expr(n.Args[0])
 			}
-			if obj.Pkg() != nil && obj.Pkg().Path() == "maps" && obj.Name() == "clone" && len(n.Args) == 1 {
+			if !g.runtimeAllocation && obj.Pkg() != nil && obj.Pkg().Path() == "maps" && obj.Name() == "clone" && len(n.Args) == 1 {
 				mapType, ok := g.typeAndValue(n.Args[0]).Type.Underlying().(*types.Map)
 				if !ok {
 					g.fail(n, "maps.clone argument is not a map")
