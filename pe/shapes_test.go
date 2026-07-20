@@ -125,6 +125,58 @@ long interp(const long *in) {
 }
 `
 
+// A handler whose runtime branch has both arms end the opcode (each `break`s to the
+// next dispatch) via its own label, rather than falling through to a shared tail --
+// the shape of QuickJS's OP_is_null (goto set_true / goto free_and_set_false, both
+// BREAK). The residual must not diverge. (The real diamond-terminated-arm bug this
+// motivates -- a diamond reviving arms that already transitioned -- only reproduces
+// with QuickJS's computed-goto dispatch; it is validated there directly.)
+const toyBothArmsBreak = `
+extern const unsigned char *__cg12_code(void);
+void __cg12_merge_point(const unsigned char *pc, long *sp);
+
+long interp(const long *in) {
+    long stack[64];
+    long *sp = stack;
+    const unsigned char *pc = __cg12_code();
+    for (;;) {
+        __cg12_merge_point(pc, sp);
+        unsigned char op = *pc++;
+        switch (op) {
+        case 1: {
+            long v = in[*pc++];
+            if (v > 0) goto set_one;
+            else goto set_zero;
+        set_one:  *sp++ = 1; break;   /* each arm ends the opcode via its own break */
+        set_zero: *sp++ = 0; break;
+        }
+        case 0: return sp[-1];
+        }
+    }
+}
+`
+
+func TestSpecializeBothArmsBreak(t *testing.T) {
+	prog := []byte{1, 0, 0} // CLASSIFY 0, HALT
+	m, err := cc.Compile("toy.c", toyBothArmsBreak)
+	require.NoError(t, err)
+	spec, name, _, err := pe.Specialize(m, "interp", prog)
+	require.NoError(t, err) // must not diverge
+	require.NoError(t, ir.VerifyModule(spec))
+
+	opt.Run(spec, opt.DefaultPipeline())
+	mc, err := interp.New(spec)
+	require.NoError(t, err)
+	call := func(in0 int64) int64 {
+		v, err := mc.Call(name, interp.L(in0))
+		require.NoError(t, err)
+		return v.I64()
+	}
+	require.Equal(t, int64(1), call(5))
+	require.Equal(t, int64(0), call(-3))
+	require.Equal(t, int64(0), call(0))
+}
+
 func TestSpecializeJumpPastAlloca(t *testing.T) {
 	prog := []byte{1, 0, 0} // OP 0, HALT
 	run := func(in0 int64) int64 {

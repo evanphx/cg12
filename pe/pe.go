@@ -665,17 +665,30 @@ func (e *engine) diamond(b *ir.Block, cond ir.Ref, join *ir.Block) {
 
 	e.stopAt = saveStop
 
-	if !e.sameState(tMem, fMem) {
-		// The arms diverge into different green states; continue each on its own.
+	// Only an arm still open (no terminator) reached the join; one that terminated
+	// early -- a merge point that jumped to a memoized state, or a return inside the
+	// arm -- is already done and must not be revived (overwriting its terminator
+	// would resurrect it and loop).
+	tOpen := tEnd.Jmp.Kind == ir.JmpNone
+	fOpen := fEnd.Jmp.Kind == ir.JmpNone
+	switch {
+	case tOpen && fOpen && e.sameState(tMem, fMem):
+		// Both reached the join at the same program point: merge, emit the tail once.
+		e.mergeArms(tEnd, fEnd, tMem, fMem, fEnv)
+		e.emit(join)
+	case tOpen && fOpen:
+		// Both reached the join but at different program points: continue each alone.
 		e.env, e.mem, e.cur = tEnv, tMem, tEnd
 		e.emit(join)
 		e.env, e.mem, e.cur = fEnv, fMem, fEnd
 		e.emit(join)
-		return
+	case tOpen:
+		e.env, e.mem, e.cur = tEnv, tMem, tEnd
+		e.emit(join)
+	case fOpen:
+		e.env, e.mem, e.cur = fEnv, fMem, fEnd
+		e.emit(join)
 	}
-
-	e.mergeArms(tEnd, fEnd, tMem, fMem, fEnv)
-	e.emit(join)
 }
 
 // mergeArms joins two runtime-branch arms that arrive with the same green state: a
