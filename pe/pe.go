@@ -138,9 +138,10 @@ type engine struct {
 	depth     int                     // emit recursion depth (guards runaway inlining)
 	loops     map[*ir.Block]*loopInfo // merge-free loop headers to residualize
 	active    map[*ir.Block]*loopState
-	localBuf  map[*region]ir.Ref // handler-local escape buffers (reset per specialization)
-	escLocal  map[uint32]bool    // alloca temps whose address escapes -> stable storage
-	codeIsPtr bool               // pc walks the code region (set by the __cg12_code marker)
+	localBuf  map[*region]ir.Ref   // handler-local escape buffers (reset per specialization)
+	escLocal  map[uint32]bool      // alloca temps whose address escapes -> stable storage
+	codeIsPtr bool                 // pc walks the code region (set by the __cg12_code marker)
+	allocDefs map[uint32]*ir.Instr // temp id -> its alloca instruction (for jump-skipped allocas)
 	err       error
 }
 
@@ -221,6 +222,14 @@ func (e *engine) run() {
 	e.active = map[*ir.Block]*loopState{}
 	e.localBuf = map[*region]ir.Ref{}
 	e.escLocal = escapingLocals(e.src)
+	e.allocDefs = map[uint32]*ir.Instr{}
+	for _, b := range e.src.Blocks {
+		for k := range b.Instrs {
+			if in := &b.Instrs[k]; (in.Op.IsAlloc() || in.Op == ir.OAllocN) && in.To.Kind == ir.RefTemp {
+				e.allocDefs[in.To.ID] = in
+			}
+		}
+	}
 
 	// Classify the parameters. "code" is the green program. A pointer parameter is a
 	// runtime array: read-only ones synthesize a scalar per element, but one whose
@@ -415,9 +424,17 @@ func (e *engine) control(b *ir.Block) {
 		e.env, e.mem = copyEnv(env), copyMem(mem)
 		e.cur = bt
 		e.emit(b.Jmp.To)
-		e.env, e.mem = env, mem
+		tEnd, tMem := e.cur, e.mem
+		e.env, e.mem = copyEnv(env), copyMem(mem)
 		e.cur = bf
 		e.emit(b.Jmp.To2)
+		fEnd, fEnv, fMem := e.cur, e.env, e.mem
+		// Both arms reconverged at the enclosing stop (a nested branch inside a diamond
+		// arm, both reaching the outer join): neither self-terminated, so merge them so
+		// no block is left dangling and the caller continues from a single join.
+		if tEnd != fEnd && tEnd.Jmp.Kind == ir.JmpNone && fEnd.Jmp.Kind == ir.JmpNone && e.sameState(tMem, fMem) {
+			e.mergeArms(tEnd, fEnd, tMem, fMem, fEnv)
+		}
 	case ir.JmpBr:
 		// A computed goto (an interpreter's dispatch): the target address is green --
 		// a block address read from the dispatch table at the green opcode -- so we
@@ -643,7 +660,7 @@ func (e *engine) diamond(b *ir.Block, cond ir.Ref, join *ir.Block) {
 
 	e.stopAt = saveStop
 
-	if !greenMatch(tMem, fMem) {
+	if !e.sameState(tMem, fMem) {
 		// The arms diverge into different green states; continue each on its own.
 		e.env, e.mem, e.cur = tEnv, tMem, tEnd
 		e.emit(join)
@@ -652,6 +669,15 @@ func (e *engine) diamond(b *ir.Block, cond ir.Ref, join *ir.Block) {
 		return
 	}
 
+	e.mergeArms(tEnd, fEnd, tMem, fMem, fEnv)
+	e.emit(join)
+}
+
+// mergeArms joins two runtime-branch arms that arrive with the same green state: a
+// phi for each memory cell they leave differing, both ends jumping to a fresh join
+// block, which becomes the current block. It leaves the join unterminated for the
+// caller to continue from.
+func (e *engine) mergeArms(tEnd, fEnd *ir.Block, tMem, fMem map[[2]int64]value, fEnv map[uint32]value) {
 	jr := e.out.NewBlock("join")
 	merged := copyMem(fMem)
 	for c, tv := range tMem {
@@ -676,25 +702,20 @@ func (e *engine) diamond(b *ir.Block, cond ir.Ref, join *ir.Block) {
 	e.cur = jr
 	e.env = fEnv // the join reads its inputs from memory; either arm's env serves
 	e.mem = merged
-	e.emit(join)
 }
 
-// greenMatch reports whether two memory states agree on every green cell (constant
-// or address) they share -- the condition for merging a runtime branch's arms. A
-// differing green cell (a program counter set two ways) or a green/red mismatch
-// means the arms belong to different specializations.
-func greenMatch(a, b map[[2]int64]value) bool {
-	for c, av := range a {
-		bv, ok := b[c]
-		if !ok {
-			continue
-		}
-		if av.kind == vResid && bv.kind == vResid {
-			continue // both runtime: a phi will reconcile them
-		}
-		if !valueEqual(av, bv) {
-			return false
-		}
+// sameState reports whether two memory states are at the same program point -- the
+// green pc and sp agree. That, not agreement on every cell, is the condition for
+// merging a runtime branch's arms: arms at one program point reconcile any differing
+// data cell with a phi, while arms that reached different green pc/sp (a conditional
+// jump chose the program's next position) belong to different specializations and
+// each continue on their own.
+func (e *engine) sameState(a, b map[[2]int64]value) bool {
+	if e.pcReg != nil && !valueEqual(a[cell(e.pcReg, 0)], b[cell(e.pcReg, 0)]) {
+		return false
+	}
+	if e.spReg != nil && !valueEqual(a[cell(e.spReg, 0)], b[cell(e.spReg, 0)]) {
+		return false
 	}
 	return true
 }
@@ -815,6 +836,15 @@ func (e *engine) valueOf(r ir.Ref) value {
 	case ir.RefTemp:
 		v, ok := e.env[r.ID]
 		if !ok {
+			// An alloca whose defining instruction a jump skipped: cc places an alloca
+			// at its C declaration, but a goto into the block (a shared slow-path label,
+			// say) can bypass it. The storage exists regardless of the path, so create
+			// its region on demand.
+			if in := e.allocDefs[r.ID]; in != nil {
+				av := value{kind: vAddr, reg: e.allocRegion(in)}
+				e.set(r, av)
+				return av
+			}
 			e.fail("use of an undefined temporary %%%d", r.ID)
 		}
 		return v
