@@ -155,6 +155,7 @@ type loopState struct {
 // maxEmitDepth bounds emit's recursive descent so an unmarked, non-converging loop
 // fails cleanly rather than overflowing the Go stack. Legitimate straight-line
 // setup stays far below this; a true cycle blows past it immediately.
+
 const maxEmitDepth = 20000
 
 // Specialize specializes the named interpreter in m against prog, returning a new
@@ -916,6 +917,11 @@ func (e *engine) execData(in *ir.Instr) {
 		e.set(in.To, e.binop(in))
 	case ir.OExtsb, ir.OExtub, ir.OExtsh, ir.OExtuh, ir.OExtsw, ir.OExtuw, ir.OCopy:
 		e.set(in.To, e.extend(in))
+	case ir.OExts, ir.OTruncd, ir.OStosi, ir.OStoui, ir.OSltof, ir.OUltof, ir.OCast:
+		// Numeric conversions (JS arithmetic works in doubles): residualize against the
+		// runtime operand.
+		a := e.materialize(e.valueOf(in.Args[0]))
+		e.set(in.To, value{kind: vResid, ref: e.emitConv(in.Op, in.Cls, a), cls: in.Cls})
 	case ir.ONeg:
 		a := e.valueOf(in.Args[0])
 		if a.kind == vConst {
@@ -1484,6 +1490,27 @@ func (e *engine) materialize(v value) ir.Ref {
 		e.fail("a green address escaped into a runtime value")
 		return ir.R
 	}
+}
+
+func (e *engine) emitConv(op ir.Op, cls ir.Cls, x ir.Ref) ir.Ref {
+	switch op {
+	case ir.OExts:
+		return e.cur.Exts(x)
+	case ir.OTruncd:
+		return e.cur.Truncd(x)
+	case ir.OStosi:
+		return e.cur.Stosi(cls, x)
+	case ir.OStoui:
+		return e.cur.Stoui(cls, x)
+	case ir.OSltof:
+		return e.cur.Sltof(cls, x)
+	case ir.OUltof:
+		return e.cur.Ultof(cls, x)
+	case ir.OCast:
+		return e.cur.Cast(cls, x)
+	}
+	e.fail("cannot residualize conversion %v", op)
+	return ir.R
 }
 
 func (e *engine) emitBin(op ir.Op, cls ir.Cls, a, b ir.Ref) ir.Ref {
