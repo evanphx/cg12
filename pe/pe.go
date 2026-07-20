@@ -257,6 +257,15 @@ func (e *engine) run() {
 			e.env[id] = value{kind: vAddr, reg: e.codeReg}
 			continue
 		}
+		if t.Agg != nil {
+			// A by-value aggregate parameter (a JSValue passed by value): a residual
+			// aggregate parameter, so the backend uses the right ABI. Its value is the
+			// address of the struct storage; field accesses residualize against it.
+			pr := e.out.Param(t.Name, ir.ClsL)
+			e.out.Temp(pr).Agg = t.Agg
+			e.env[id] = value{kind: vResid, ref: pr, cls: ir.ClsL}
+			continue
+		}
 		if e.src.ClassOf(ref) == ir.ClsP {
 			reg := e.newRegion(roleInput, 0)
 			reg.name, reg.escapes = t.Name, esc[t.Name]
