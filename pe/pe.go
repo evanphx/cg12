@@ -95,9 +95,14 @@ type region struct {
 type greenState struct{ pc, sp int64 }
 
 // state is the residual block for a green state and the phis carrying its red state.
+// dispatch/dispatchIdx are where to resume interpreting for this state -- captured
+// when it is created, since with inline dispatch each opcode's merge point sits in
+// its own block.
 type state struct {
-	blk  *ir.Block
-	phis []*ir.Phi
+	blk         *ir.Block
+	phis        []*ir.Phi
+	dispatch    *ir.Block
+	dispatchIdx int
 }
 
 type engine struct {
@@ -286,7 +291,7 @@ func (e *engine) specialize(gs greenState) {
 	e.setSP(gs.sp)
 	e.bindRedState(gs.sp, st.phis)
 	e.cur = st.blk
-	e.emitFrom(e.dispatch, e.dispatchIdx)
+	e.emitFrom(st.dispatch, st.dispatchIdx)
 }
 
 // The green loop variables pc and sp are read and written two ways: as integers (an
@@ -344,7 +349,7 @@ func (e *engine) emitFrom(b *ir.Block, start int) {
 	e.depth++
 	defer func() { e.depth-- }()
 	if e.depth > maxEmitDepth {
-		e.fail("control flow did not converge (an unmarked loop with a runtime trip count?)")
+		e.fail("control flow did not converge")
 		return
 	}
 	if start == 0 && b == e.stopAt {
@@ -750,7 +755,7 @@ func (e *engine) transition() {
 
 	st, seen := e.states[gs]
 	if !seen {
-		st = &state{blk: e.out.NewBlock(fmt.Sprintf("s_pc%d_sp%d", gs.pc, sp))}
+		st = &state{blk: e.out.NewBlock(fmt.Sprintf("s_pc%d_sp%d", gs.pc, sp)), dispatch: e.dispatch, dispatchIdx: e.dispatchIdx}
 		for _, rv := range red {
 			cls := rv.cls
 			if cls == 0 {
@@ -943,7 +948,8 @@ func (e *engine) allocRegion(in *ir.Instr) *region {
 
 func (e *engine) execData(in *ir.Instr) {
 	switch in.Op {
-	case ir.OAdd, ir.OSub, ir.OMul, ir.OAnd, ir.OOr, ir.OXor, ir.OShl, ir.OShr, ir.OSar:
+	case ir.OAdd, ir.OSub, ir.OMul, ir.ODiv, ir.OUDiv, ir.ORem, ir.OURem,
+		ir.OAnd, ir.OOr, ir.OXor, ir.OShl, ir.OShr, ir.OSar:
 		e.set(in.To, e.binop(in))
 	case ir.OExtsb, ir.OExtub, ir.OExtsh, ir.OExtuh, ir.OExtsw, ir.OExtuw, ir.OCopy:
 		e.set(in.To, e.extend(in))
@@ -1097,7 +1103,7 @@ func allocAlign(a int) int {
 
 func (e *engine) binop(in *ir.Instr) value {
 	a, b := e.valueOf(in.Args[0]), e.valueOf(in.Args[1])
-	if a.kind == vConst && b.kind == vConst {
+	if a.kind == vConst && b.kind == vConst && !(isDivRem(in.Op) && b.k == 0) {
 		return value{kind: vConst, k: fold(in.Op, a.k, b.k), cls: in.Cls}
 	}
 	if in.Op == ir.OAdd {
@@ -1551,6 +1557,14 @@ func (e *engine) emitBin(op ir.Op, cls ir.Cls, a, b ir.Ref) ir.Ref {
 		return e.cur.Sub(cls, a, b)
 	case ir.OMul:
 		return e.cur.Mul(cls, a, b)
+	case ir.ODiv:
+		return e.cur.Div(cls, a, b)
+	case ir.OUDiv:
+		return e.cur.UDiv(cls, a, b)
+	case ir.ORem:
+		return e.cur.Rem(cls, a, b)
+	case ir.OURem:
+		return e.cur.URem(cls, a, b)
 	case ir.OAnd:
 		return e.cur.And(cls, a, b)
 	case ir.OOr:
@@ -1861,6 +1875,10 @@ func copyMem(m map[[2]int64]value) map[[2]int64]value {
 	return c
 }
 
+func isDivRem(op ir.Op) bool {
+	return op == ir.ODiv || op == ir.OUDiv || op == ir.ORem || op == ir.OURem
+}
+
 func fold(op ir.Op, a, b int64) int64 {
 	switch op {
 	case ir.OAdd:
@@ -1869,6 +1887,14 @@ func fold(op ir.Op, a, b int64) int64 {
 		return a - b
 	case ir.OMul:
 		return a * b
+	case ir.ODiv:
+		return a / b
+	case ir.OUDiv:
+		return int64(uint64(a) / uint64(b))
+	case ir.ORem:
+		return a % b
+	case ir.OURem:
+		return int64(uint64(a) % uint64(b))
 	case ir.OAnd:
 		return a & b
 	case ir.OOr:
