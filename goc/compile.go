@@ -10148,6 +10148,8 @@ func (g *gen) builtinCall(call *ast.CallExpr, builtin *types.Builtin) ir.Ref {
 		return g.cur.Load(ir.ClsP, descriptor)
 	case "real", "imag":
 		return g.complexComponent(call, builtin.Name() == "imag")
+	case "complex":
+		return g.complexValue(call)
 	case "min", "max":
 		result := g.expr(call.Args[0])
 		resultType := g.typeAndValue(call.Args[0]).Type
@@ -10307,6 +10309,29 @@ func (g *gen) builtinCall(call *ast.CallExpr, builtin *types.Builtin) ir.Ref {
 		return g.appendCall(call)
 	default:
 		g.fail(call, "unsupported builtin %s", builtin.Name())
+		return ir.R
+	}
+}
+
+func (g *gen) complexValue(call *ast.CallExpr) ir.Ref {
+	resultType, ok := g.typeAndValue(call).Type.Underlying().(*types.Basic)
+	if !ok {
+		g.fail(call, "complex result is not a complex number")
+		return ir.R
+	}
+
+	realPart := g.expr(call.Args[0])
+	imaginaryPart := g.expr(call.Args[1])
+	switch resultType.Kind() {
+	case types.Complex64:
+		return g.packComplex64(realPart, imaginaryPart)
+	case types.Complex128:
+		result := g.localAllocTyped(g.typeAndValue(call).Type)
+		g.cur.StoreSub(ir.SubD, realPart, result)
+		g.cur.StoreSub(ir.SubD, imaginaryPart, g.offset(result, 8))
+		return result
+	default:
+		g.fail(call, "complex result is not a complex number")
 		return ir.R
 	}
 }

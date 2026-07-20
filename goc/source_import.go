@@ -267,6 +267,8 @@ func newSourceLoader(fset *token.FileSet) *sourceLoader {
 			"testing":                                    true,
 			"testing/iotest":                             true,
 			"testing/synctest":                           true,
+			"text/template":                              true,
+			"text/template/parse":                        true,
 			"time":                                       true,
 			"unicode":                                    true,
 			"unicode/utf8":                               true,

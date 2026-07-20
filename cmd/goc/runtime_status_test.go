@@ -671,6 +671,43 @@ func TestARM64RuntimeCapabilityStatus(t *testing.T) {
 			expectation: runtimeCapabilityMustPass,
 		},
 		{
+			category:    "stdlib-text",
+			name:        "strconv-roundtrip",
+			source:      "stdlib_strconv_roundtrip.go",
+			expectation: runtimeCapabilityMustPass,
+		},
+		{
+			category:    "stdlib-text",
+			name:        "regexp-find-replace",
+			source:      "stdlib_regexp_find_replace.go",
+			expectation: runtimeCapabilityMustPass,
+		},
+		{
+			category:    "stdlib-text",
+			name:        "strings-transform",
+			source:      "stdlib_strings_transform.go",
+			expectation: runtimeCapabilityMustPass,
+		},
+		{
+			category:    "stdlib-text",
+			name:        "text-template-parse",
+			source:      "stdlib_text_template_parse.go",
+			expectation: runtimeCapabilityMustPass,
+		},
+		{
+			category:    "stdlib-text",
+			name:        "text-template-execute",
+			source:      "stdlib_text_template_execute.go",
+			expectation: runtimeCapabilityKnownGap,
+			note:        "template Execute currently exposes a reflect/stack-map pointer validation failure",
+		},
+		{
+			category:    "stdlib-text",
+			name:        "sort-search-slice",
+			source:      "stdlib_sort_search_slice.go",
+			expectation: runtimeCapabilityMustPass,
+		},
+		{
 			category:    "stdlib-netpoll",
 			name:        "pipe-past-deadline",
 			source:      "stdlib_netpoll_pipe_past_deadline.go",
