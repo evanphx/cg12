@@ -1,7 +1,6 @@
 package arm64
 
 import (
-	"fmt"
 	"sort"
 
 	"github.com/evanphx/cg12/analysis"
@@ -53,7 +52,11 @@ type numbering struct {
 	next        int
 }
 
-// regAlloc runs linear-scan allocation on the already-lowered function.
+// regAlloc runs graph-colouring allocation on the already-lowered function.
+//
+// The colouring engine (colorAlloc) decides each temp's register or spill slot; the
+// conservative per-temp intervals are still built here, but only as the liveness
+// substrate that DWARF variable locations and GC stack maps read.
 func regAlloc(f *ir.Func) (*allocation, error) {
 	if err := asmPrecolor(f); err != nil {
 		return nil, err
@@ -64,7 +67,7 @@ func regAlloc(f *ir.Func) (*allocation, error) {
 	num := numberInstrs(cfg)
 	intervals := buildIntervals(f, cfg, live, num)
 
-	alloc, err := linearScan(f, intervals, num)
+	alloc, err := colorAlloc(f, cfg, live)
 	if err != nil {
 		return nil, err
 	}
@@ -236,218 +239,4 @@ func buildIntervals(f *ir.Func, cfg *analysis.CFG, live *analysis.Liveness, num 
 		out = append(out, iv)
 	}
 	return out
-}
-
-// noHint marks the absence of a register hint.
-const noHint = Reg(-1)
-
-// linearScan assigns registers to intervals in start order, spilling to the
-// stack when no suitable register is free.
-//
-// It coalesces copies by hinting: a temp defined by (or feeding) a copy prefers
-// the register of the copy's other end, so the copy becomes a mov of a register to
-// itself, which the emitter drops. When that other end is a value whose last use
-// is the copy, it is freed here so its register can be reused even though its
-// interval only just ended -- the read-before-write of a mov makes the overlap
-// harmless.
-func linearScan(f *ir.Func, intervals []*interval, num *numbering) (*allocation, error) {
-	copyDef, hintFixed := copyHints(f)
-	ivByTemp := make(map[int]*interval, len(intervals))
-	for _, iv := range intervals {
-		ivByTemp[iv.temp] = iv
-	}
-
-	sort.Slice(intervals, func(i, j int) bool {
-		if intervals[i].start != intervals[j].start {
-			return intervals[i].start < intervals[j].start
-		}
-		return intervals[i].end < intervals[j].end
-	})
-
-	alloc := &allocation{}
-	active := []*interval{} // sorted by end
-	inUse := map[Reg]bool{}
-	slotFor := map[int]int{}
-
-	free := func(iv *interval) {
-		if r := f.Temps[iv.temp].Reg; r != ir.NoReg {
-			delete(inUse, Reg(r))
-		}
-		for i, a := range active {
-			if a == iv {
-				active = append(active[:i], active[i+1:]...)
-				break
-			}
-		}
-	}
-	freeExpired := func(start int) {
-		kept := active[:0]
-		for _, a := range active {
-			if a.end < start {
-				if r := Reg(f.Temps[a.temp].Reg); f.Temps[a.temp].Reg != ir.NoReg {
-					delete(inUse, r)
-				}
-			} else {
-				kept = append(kept, a)
-			}
-		}
-		active = kept
-	}
-	addActive := func(iv *interval) {
-		active = append(active, iv)
-		sort.Slice(active, func(i, j int) bool { return active[i].end < active[j].end })
-	}
-	spill := func(iv *interval) {
-		t := f.Temps[iv.temp]
-		if _, ok := slotFor[iv.temp]; !ok {
-			slotFor[iv.temp] = alloc.spillBytes
-			alloc.spillBytes += 8
-		}
-		t.Slot = slotFor[iv.temp]
-		t.Reg = ir.NoReg
-	}
-	// freeCoalesceSrc frees the register of iv's copy source when the copy defining
-	// iv is that source's last use, so iv (or a pre-coloured target) can reuse it.
-	freeCoalesceSrc := func(iv *interval) {
-		s, ok := copyDef[iv.temp]
-		if !ok {
-			return
-		}
-		if siv := ivByTemp[s]; siv != nil && siv.end == iv.start && f.Temps[s].Reg != ir.NoReg {
-			free(siv)
-		}
-	}
-	// hintFor is the register iv prefers to coalesce a copy away: a fixed hint from
-	// a pre-coloured partner, else the partner's already-assigned register.
-	hintFor := func(iv *interval) Reg {
-		if r, ok := hintFixed[iv.temp]; ok {
-			return r
-		}
-		if s, ok := copyDef[iv.temp]; ok {
-			if f.Temps[s].Reg != ir.NoReg {
-				return Reg(f.Temps[s].Reg)
-			}
-		}
-		return noHint
-	}
-
-	for _, iv := range intervals {
-		freeExpired(iv.start)
-
-		// Pre-coloured intervals must take their register; evict any conflict —
-		// unless the conflict is this copy's source dying right here, which coalesces.
-		if iv.precolor >= 0 {
-			r := iv.precolor
-			freeCoalesceSrc(iv)
-			if inUse[r] {
-				evictFrom(f, active, r, spill)
-				delete(inUse, r)
-			}
-			f.Temps[iv.temp].Reg = int(r)
-			inUse[r] = true
-			addActive(iv)
-			continue
-		}
-
-		// A managed reference live across a safepoint is kept in a stack slot, so
-		// the GC finds every root at a frame offset — no callee-saved register
-		// tracking needed. (We don't split live ranges, so it stays spilled for
-		// its whole life.)
-		if iv.crossSafe && f.Temps[iv.temp].GCRef {
-			spill(iv)
-			continue
-		}
-
-		freeCoalesceSrc(iv)
-		if r, ok := pickRegister(iv, inUse, hintFor(iv)); ok {
-			f.Temps[iv.temp].Reg = int(r)
-			inUse[r] = true
-			addActive(iv)
-		} else {
-			spill(iv)
-		}
-	}
-
-	// Rewrite each spilled temp's binding is already recorded on ir.Temp; the
-	// emitter reads Temp.Slot / Temp.Reg directly.
-	if err := verifyNoSpillOfPrecolor(f, intervals); err != nil {
-		return nil, err
-	}
-	return alloc, nil
-}
-
-// pickRegister chooses a free register for iv from the pool matching its class,
-// honouring the call-crossing constraint (such intervals must land in
-// callee-saved registers). A usable hint register is taken first, so a copy
-// coalesces away; otherwise the pool is scanned in order.
-func pickRegister(iv *interval, inUse map[Reg]bool, hint Reg) (Reg, bool) {
-	order := intAllocOrder
-	if iv.float {
-		order = floatAllocOrder
-	}
-	usable := func(r Reg) bool {
-		return !inUse[r] && !(iv.crosses && !calleeSavedReg(r)) && !iv.avoid[r]
-	}
-	if hint != noHint && usable(hint) {
-		for _, r := range order { // only a register in this class's pool
-			if r == hint {
-				return hint, true
-			}
-		}
-	}
-	for _, r := range order {
-		if usable(r) {
-			return r, true
-		}
-	}
-	return 0, false
-}
-
-// copyHints scans f for copy-like ops (OCopy/OPar/OArg with a temp source and
-// destination) and returns, per destination temp, its source temp, plus a fixed
-// register hint for whichever end of a copy is pre-coloured -- the other end
-// prefers that register so the copy can be coalesced away.
-func copyHints(f *ir.Func) (copyDef map[int]int, hintFixed map[int]Reg) {
-	copyDef = map[int]int{}
-	hintFixed = map[int]Reg{}
-	for _, b := range f.Blocks {
-		for k := range b.Instrs {
-			in := &b.Instrs[k]
-			switch in.Op {
-			case ir.OCopy, ir.OPar, ir.OArg:
-			default:
-				continue
-			}
-			if in.To.Kind != ir.RefTemp || len(in.Args) != 1 || in.Args[0].Kind != ir.RefTemp {
-				continue
-			}
-			dst, src := int(in.To.ID), int(in.Args[0].ID)
-			copyDef[dst] = src
-			if f.Temps[src].Fixed {
-				hintFixed[dst] = Reg(f.Temps[src].Reg)
-			} else if f.Temps[dst].Fixed {
-				hintFixed[src] = Reg(f.Temps[dst].Reg)
-			}
-		}
-	}
-	return copyDef, hintFixed
-}
-
-// evictFrom spills whichever active interval currently holds register r.
-func evictFrom(f *ir.Func, active []*interval, r Reg, spill func(*interval)) {
-	for _, a := range active {
-		if a.precolor < 0 && f.Temps[a.temp].Reg == int(r) {
-			spill(a)
-			return
-		}
-	}
-}
-
-func verifyNoSpillOfPrecolor(f *ir.Func, intervals []*interval) error {
-	for _, iv := range intervals {
-		if iv.precolor >= 0 && f.Temps[iv.temp].Reg != int(iv.precolor) {
-			return fmt.Errorf("arm64: could not honour pre-coloured register for temp %%%s", f.Temps[iv.temp].Name)
-		}
-	}
-	return nil
 }

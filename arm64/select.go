@@ -473,6 +473,23 @@ func atomicParts(name string) (base string, bytes int) {
 	return s, 0
 }
 
+// atomicHoldsResult reports whether an atomic intrinsic expands to an LDAXR/STLXR
+// retry loop that keeps its result (the previously-loaded value) live while it still
+// reads its address and value operands. For those the result register must differ
+// from every operand register, or the loop would clobber an operand it re-reads --
+// so register allocation must make the result interfere with its operands. The
+// single-instruction forms (load/store/fence) have no such constraint.
+func atomicHoldsResult(in *ir.Instr) bool {
+	if in.Op != ir.OIntrinsic || !strings.HasPrefix(in.Intrin.Name, "atomic.") {
+		return false
+	}
+	switch base, _ := atomicParts(in.Intrin.Name); base {
+	case "load", "store", "fence":
+		return false
+	}
+	return true
+}
+
 // isScratchReg reports whether r is one of the fixed scratch registers.
 func isScratchReg(r Reg) bool {
 	for _, s := range intScratchRegs {
