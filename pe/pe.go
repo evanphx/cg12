@@ -147,7 +147,15 @@ type engine struct {
 	escLocal  map[uint32]bool      // alloca temps whose address escapes -> stable storage
 	codeIsPtr bool                 // pc walks the code region (set by the __cg12_code marker)
 	allocDefs map[uint32]*ir.Instr // temp id -> its alloca instruction (for jump-skipped allocas)
+	nblk      int                  // for unique residual block names (labels must not collide)
 	err       error
+}
+
+// block creates a residual block with a name unique across the residual, so the
+// backend's labels do not collide (many arms share a base name like "bt" or "join").
+func (e *engine) block(prefix string) *ir.Block {
+	e.nblk++
+	return e.out.NewBlock(fmt.Sprintf("%s%d", prefix, e.nblk))
 }
 
 // loopState tracks a residual loop currently being emitted: its header block, the
@@ -423,7 +431,7 @@ func (e *engine) control(b *ir.Block) {
 			return
 		}
 		cond := e.materialize(c)
-		bt, bf := e.out.NewBlock("bt"), e.out.NewBlock("bf")
+		bt, bf := e.block("bt"), e.block("bf")
 		e.cur.Jnz(cond, bt, bf)
 		env, mem := e.env, e.mem
 		e.env, e.mem = copyEnv(env), copyMem(mem)
@@ -566,7 +574,7 @@ func (e *engine) beginLoop(h *ir.Block, li *loopInfo) {
 	}
 
 	// The residual header, with a phi per carried cell fed the pre-loop value.
-	hb := e.out.NewBlock("loop")
+	hb := e.block("loop")
 	phis := make([]*ir.Phi, len(cells))
 	for i, c := range cells {
 		cur := e.mem[c]
@@ -610,7 +618,7 @@ func (e *engine) beginLoop(h *ir.Block, li *loopInfo) {
 	if !inLoopTo {
 		body, exit = h.Jmp.To2, h.Jmp.To
 	}
-	rb, rx := e.out.NewBlock("lbody"), e.out.NewBlock("lexit")
+	rb, rx := e.block("lbody"), e.block("lexit")
 	if inLoopTo {
 		e.cur.Jnz(cond, rb, rx)
 	} else {
@@ -646,7 +654,7 @@ func (e *engine) closeLoop(ls *loopState) {
 // conditional jump -- there is nothing to share, and each arm continues from join
 // on its own.
 func (e *engine) diamond(b *ir.Block, cond ir.Ref, join *ir.Block) {
-	bt, bf := e.out.NewBlock("t"), e.out.NewBlock("f")
+	bt, bf := e.block("t"), e.block("f")
 	e.cur.Jnz(cond, bt, bf)
 
 	saveStop := e.stopAt
@@ -696,7 +704,7 @@ func (e *engine) diamond(b *ir.Block, cond ir.Ref, join *ir.Block) {
 // block, which becomes the current block. It leaves the join unterminated for the
 // caller to continue from.
 func (e *engine) mergeArms(tEnd, fEnd *ir.Block, tMem, fMem map[[2]int64]value, fEnv map[uint32]value) {
-	jr := e.out.NewBlock("join")
+	jr := e.block("join")
 	merged := copyMem(fMem)
 	for c, tv := range tMem {
 		fv := fMem[c]
