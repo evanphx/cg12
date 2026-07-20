@@ -629,6 +629,30 @@ func TestARM64RuntimeCapabilityStatus(t *testing.T) {
 			expectation: runtimeCapabilityMustPass,
 		},
 		{
+			category:    "stdlib-os",
+			name:        "file-roundtrip",
+			source:      "stdlib_os_file_roundtrip.go",
+			expectation: runtimeCapabilityMustPass,
+		},
+		{
+			category:    "stdlib-os",
+			name:        "rename-stat",
+			source:      "stdlib_os_rename_stat.go",
+			expectation: runtimeCapabilityMustPass,
+		},
+		{
+			category:    "stdlib-os",
+			name:        "readdir-walkdir",
+			source:      "stdlib_os_readdir_walkdir.go",
+			expectation: runtimeCapabilityMustPass,
+		},
+		{
+			category:    "stdlib-os",
+			name:        "filepath-glob-clean",
+			source:      "stdlib_filepath_glob_clean.go",
+			expectation: runtimeCapabilityMustPass,
+		},
+		{
 			category:    "stdlib-netpoll",
 			name:        "pipe-past-deadline",
 			source:      "stdlib_netpoll_pipe_past_deadline.go",
