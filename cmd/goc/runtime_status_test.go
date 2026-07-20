@@ -551,6 +551,24 @@ func TestARM64RuntimeCapabilityStatus(t *testing.T) {
 			expectation: runtimeCapabilityMustPass,
 		},
 		{
+			category:    "scheduler-stress",
+			name:        "ring-handoff",
+			source:      "runtime_scheduler_ring_handoff.go",
+			expectation: runtimeCapabilityMustPass,
+		},
+		{
+			category:    "scheduler-stress",
+			name:        "timer-select-churn",
+			source:      "runtime_timer_select_churn.go",
+			expectation: runtimeCapabilityMustPass,
+		},
+		{
+			category:    "scheduler-stress",
+			name:        "gc-churn",
+			source:      "runtime_scheduler_gc_churn.go",
+			expectation: runtimeCapabilityMustPass,
+		},
+		{
 			category:    "stdlib-io",
 			name:        "readall-limited-reader",
 			source:      "stdlib_io_readall_limited_reader.go",
