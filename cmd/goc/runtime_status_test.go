@@ -653,6 +653,24 @@ func TestARM64RuntimeCapabilityStatus(t *testing.T) {
 			expectation: runtimeCapabilityMustPass,
 		},
 		{
+			category:    "stdlib-encoding",
+			name:        "base64",
+			source:      "stdlib_encoding_base64.go",
+			expectation: runtimeCapabilityMustPass,
+		},
+		{
+			category:    "stdlib-encoding",
+			name:        "hex",
+			source:      "stdlib_encoding_hex.go",
+			expectation: runtimeCapabilityMustPass,
+		},
+		{
+			category:    "stdlib-encoding",
+			name:        "csv",
+			source:      "stdlib_encoding_csv.go",
+			expectation: runtimeCapabilityMustPass,
+		},
+		{
 			category:    "stdlib-netpoll",
 			name:        "pipe-past-deadline",
 			source:      "stdlib_netpoll_pipe_past_deadline.go",
