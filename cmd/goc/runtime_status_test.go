@@ -864,6 +864,30 @@ func TestARM64RuntimeCapabilityStatus(t *testing.T) {
 			expectation: runtimeCapabilityMustPass,
 		},
 		{
+			category:    "stdlib-sync",
+			name:        "once-map-cond",
+			source:      "stdlib_sync_once_map_cond.go",
+			expectation: runtimeCapabilityMustPass,
+		},
+		{
+			category:    "stdlib-sync",
+			name:        "atomic-typed",
+			source:      "stdlib_sync_atomic_typed.go",
+			expectation: runtimeCapabilityMustPass,
+		},
+		{
+			category:    "stdlib-runtime-values",
+			name:        "unique-handle",
+			source:      "stdlib_unique_handle.go",
+			expectation: runtimeCapabilityMustPass,
+		},
+		{
+			category:    "stdlib-runtime-values",
+			name:        "weak-pointer",
+			source:      "stdlib_weak_pointer.go",
+			expectation: runtimeCapabilityMustPass,
+		},
+		{
 			category:    "stdlib-netpoll",
 			name:        "pipe-past-deadline",
 			source:      "stdlib_netpoll_pipe_past_deadline.go",
