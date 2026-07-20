@@ -1455,6 +1455,16 @@ func (e *engine) materialize(v value) ir.Ref {
 			// An escaping runtime pointer (ctx, argv): its base is a residual pointer
 			// parameter, and this is that pointer offset by a static amount.
 			base = e.inputBase(v.reg)
+		case roleCode:
+			// A green program pointer handed to runtime code (stored as cur_pc for a
+			// backtrace, say): its bytes are static, but the pointer itself needs a
+			// runtime base -- a residual "code" parameter the caller sets to the real
+			// bytecode buffer. Reads still fold; only the escaping pointer uses this.
+			if !v.reg.haveBase {
+				v.reg.base = e.out.Param("code", ir.ClsP)
+				v.reg.haveBase = true
+			}
+			base = v.reg.base
 		case roleVar, roleOther:
 			// A local (a JSValue built on the stack, say) whose address is handed to a
 			// runtime routine: back it with residual storage holding its current cells.

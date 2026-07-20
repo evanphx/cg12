@@ -5,6 +5,7 @@ import (
 
 	"github.com/evanphx/cg12/cc"
 	"github.com/evanphx/cg12/interp"
+	"github.com/evanphx/cg12/ir"
 	"github.com/evanphx/cg12/opt"
 	"github.com/evanphx/cg12/pe"
 	"github.com/stretchr/testify/require"
@@ -99,6 +100,67 @@ long interp(const long *in) {
     }
 }
 `
+
+// A green program pointer handed to a runtime routine (QuickJS stores pc as cur_pc
+// for a backtrace). Its bytes stay static -- reads still fold -- but the pointer
+// itself becomes a residual "code" parameter the caller sets to the real bytecode
+// buffer, rather than escaping.
+const toyCodePtrInterp = `
+extern const unsigned char *__cg12_code(void);
+void __cg12_merge_point(const unsigned char *pc, long *sp);
+long rt_at(const unsigned char *p, long x) { (void)p; return x; }
+
+long interp(const long *in) {
+    long stack[64];
+    long *sp = stack;
+    const unsigned char *pc = __cg12_code();
+    for (;;) {
+        __cg12_merge_point(pc, sp);
+        unsigned char op = *pc++;
+        switch (op) {
+        case 1: *sp++ = rt_at(pc, in[*pc]); pc++; break;  /* pc (a code ptr) escapes */
+        case 0: return sp[-1];
+        }
+    }
+}
+`
+
+func TestSpecializeEscapingCodePointer(t *testing.T) {
+	// AT 0, HALT  ->  rt_at(pc, in0) == in0
+	prog := []byte{1, 0, 0}
+	m, err := cc.Compile("toy.c", toyCodePtrInterp)
+	require.NoError(t, err)
+	spec, name, _, err := pe.Specialize(m, "interp", prog)
+	require.NoError(t, err)
+	residual := spec.String()
+	t.Logf("residual:\n%s", residual)
+	require.Contains(t, residual, "p %code", "the code pointer became a residual parameter")
+	require.Contains(t, residual, "call $rt_at")
+
+	opt.Run(spec, opt.DefaultPipeline())
+	m.Funcs = append(m.Funcs, spec.Funcs...)
+	mc, err := interp.New(m)
+	require.NoError(t, err)
+	var rf *ir.Func
+	for _, f := range spec.Funcs {
+		if f.Name == name {
+			rf = f
+		}
+	}
+	for _, in0 := range []int64{5, 100, -7} {
+		args := make([]interp.Value, len(rf.Params))
+		for i, p := range rf.Params {
+			if p.Cls == ir.ClsP {
+				args[i] = interp.Ptr(0) // a dummy code base; rt_at ignores it
+			} else {
+				args[i] = interp.L(in0)
+			}
+		}
+		v, err := mc.Call(name, args...)
+		require.NoError(t, err)
+		require.Equal(t, in0, v.I64(), "specialized(%d)", in0)
+	}
+}
 
 func TestSpecializeGreenPointerCompare(t *testing.T) {
 	// PUSH 3, PUSH 4, INPUT 0, SUMALL, HALT  ->  3 + 4 + in0
