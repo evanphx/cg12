@@ -11999,6 +11999,17 @@ func (g *gen) functionSymbol(function *types.Func) string {
 	if name := g.linkNames[function]; name != "" {
 		return name
 	}
+	if name := g.linkNames[function.Origin()]; name != "" {
+		return name
+	}
+	if function.Pkg() != nil && function.Pkg().Path() == "iter" {
+		switch function.Name() {
+		case "newcoro":
+			return "runtime.newcoro"
+		case "coroswitch":
+			return "runtime.coroswitch"
+		}
+	}
 	if name := g.initSymbols[function]; name != "" {
 		return name
 	}

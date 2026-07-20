@@ -888,6 +888,36 @@ func TestARM64RuntimeCapabilityStatus(t *testing.T) {
 			expectation: runtimeCapabilityMustPass,
 		},
 		{
+			category:    "stdlib-math",
+			name:        "big-rat-int",
+			source:      "stdlib_math_big_rat_int.go",
+			expectation: runtimeCapabilityMustPass,
+		},
+		{
+			category:    "stdlib-math",
+			name:        "rand-v2",
+			source:      "stdlib_rand_v2.go",
+			expectation: runtimeCapabilityMustPass,
+		},
+		{
+			category:    "stdlib-generics",
+			name:        "cmp-order",
+			source:      "stdlib_cmp_order.go",
+			expectation: runtimeCapabilityMustPass,
+		},
+		{
+			category:    "stdlib-generics",
+			name:        "iter-pull",
+			source:      "stdlib_iter_pull.go",
+			expectation: runtimeCapabilityMustPass,
+		},
+		{
+			category:    "stdlib-io",
+			name:        "ioutil-tempfile",
+			source:      "stdlib_ioutil_tempfile.go",
+			expectation: runtimeCapabilityMustPass,
+		},
+		{
 			category:    "stdlib-netpoll",
 			name:        "pipe-past-deadline",
 			source:      "stdlib_netpoll_pipe_past_deadline.go",

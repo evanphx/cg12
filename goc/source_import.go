@@ -157,6 +157,7 @@ func newSourceLoader(fset *token.FileSet) *sourceLoader {
 			"golang.org/x/text/unicode/norm":             true,
 			"io":                                         true,
 			"io/fs":                                      true,
+			"io/ioutil":                                  true,
 			"crypto/sha256":                              true,
 			"crypto/internal/fips140":                    true,
 			"crypto/internal/fips140/sha256":             true,
@@ -324,6 +325,10 @@ func (l *sourceLoader) Import(path string) (*types.Package, error) {
 	useAssembly := !externalTestPackage && !l.forcePureGo && runtime.GOARCH == "arm64" && plan9asm.SupportsARM64Package(path)
 	if !useAssembly {
 		ctx.BuildTags = append(ctx.BuildTags, "purego")
+	}
+	if packagePath == "math/big" {
+		ctx.BuildTags = append(ctx.BuildTags, "math_big_pure_go")
+		useAssembly = false
 	}
 	ctx.GOROOT = l.root
 	var bp *build.Package
