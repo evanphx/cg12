@@ -249,6 +249,7 @@ func newSourceLoader(fset *token.FileSet) *sourceLoader {
 			"net/http/internal/ascii":                    true,
 			"net/http/internal/httpcommon":               true,
 			"net/http/internal/testcert":                 true,
+			"net/mail":                                   true,
 			"net/netip":                                  true,
 			"net/textproto":                              true,
 			"net/url":                                    true,

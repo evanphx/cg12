@@ -834,6 +834,36 @@ func TestARM64RuntimeCapabilityStatus(t *testing.T) {
 			expectation: runtimeCapabilityMustPass,
 		},
 		{
+			category:    "stdlib-context",
+			name:        "cancel-value",
+			source:      "stdlib_context_cancel_value.go",
+			expectation: runtimeCapabilityMustPass,
+		},
+		{
+			category:    "stdlib-flag",
+			name:        "parse",
+			source:      "stdlib_flag_parse.go",
+			expectation: runtimeCapabilityMustPass,
+		},
+		{
+			category:    "stdlib-log",
+			name:        "buffer",
+			source:      "stdlib_log_buffer.go",
+			expectation: runtimeCapabilityMustPass,
+		},
+		{
+			category:    "stdlib-net-values",
+			name:        "mail-textproto",
+			source:      "stdlib_net_mail_textproto.go",
+			expectation: runtimeCapabilityMustPass,
+		},
+		{
+			category:    "stdlib-net-values",
+			name:        "netip",
+			source:      "stdlib_net_netip.go",
+			expectation: runtimeCapabilityMustPass,
+		},
+		{
 			category:    "stdlib-netpoll",
 			name:        "pipe-past-deadline",
 			source:      "stdlib_netpoll_pipe_past_deadline.go",
