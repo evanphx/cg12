@@ -129,17 +129,19 @@ type engine struct {
 	pcIsPtr     bool // pc is a pointer walking the code (QuickJS style), not an int index
 	spIsPtr     bool // sp is a pointer walking the stack, not an int depth
 
-	states   map[greenState]*state
-	work     []greenState
-	regionOf map[uint32]*region      // alloca temp id -> its region (stable across re-execution)
-	ipdom    map[*ir.Block]*ir.Block // source block -> its immediate post-dominator
-	stopAt   *ir.Block               // emit stops before this block (a diamond's join)
-	nphi     int                     // for distinct residual phi names
-	depth    int                     // emit recursion depth (guards runaway inlining)
-	loops    map[*ir.Block]*loopInfo // merge-free loop headers to residualize
-	active   map[*ir.Block]*loopState
-	localBuf map[*region]ir.Ref // handler-local escape buffers (reset per specialization)
-	err      error
+	states    map[greenState]*state
+	work      []greenState
+	regionOf  map[uint32]*region      // alloca temp id -> its region (stable across re-execution)
+	ipdom     map[*ir.Block]*ir.Block // source block -> its immediate post-dominator
+	stopAt    *ir.Block               // emit stops before this block (a diamond's join)
+	nphi      int                     // for distinct residual phi names
+	depth     int                     // emit recursion depth (guards runaway inlining)
+	loops     map[*ir.Block]*loopInfo // merge-free loop headers to residualize
+	active    map[*ir.Block]*loopState
+	localBuf  map[*region]ir.Ref // handler-local escape buffers (reset per specialization)
+	escLocal  map[uint32]bool    // alloca temps whose address escapes -> stable storage
+	codeIsPtr bool               // pc walks the code region (set by the __cg12_code marker)
+	err       error
 }
 
 // loopState tracks a residual loop currently being emitted: its header block, the
@@ -196,6 +198,7 @@ func SpecializeWithMeta(m *ir.Module, interp string, prog []byte, meta []int64) 
 			e.blockSym[b.Sym] = b
 		}
 	}
+	e.out.RetAgg = src.RetAgg // the residual returns the same aggregate the interpreter does
 	e.out.Export()
 	e.run()
 	if e.err != nil {
@@ -216,6 +219,7 @@ func (e *engine) run() {
 	e.loops = analyzeLoops(e.src, e.isMerge)
 	e.active = map[*ir.Block]*loopState{}
 	e.localBuf = map[*region]ir.Ref{}
+	e.escLocal = escapingLocals(e.src)
 
 	// Classify the parameters. "code" is the green program. A pointer parameter is a
 	// runtime array: read-only ones synthesize a scalar per element, but one whose
@@ -424,10 +428,38 @@ func (e *engine) control(b *ir.Block) {
 		}
 		e.emit(a.blk)
 	case ir.JmpRet:
+		if e.src.RetAgg != nil && b.Jmp.Arg != ir.R {
+			// An aggregate return (a JSValue): the value is a pointer to struct storage.
+			// Copy its cells into a fresh residual slot and return that, matching the ABI
+			// -- the same shape as a by-value aggregate call argument.
+			e.retAggregate(e.valueOf(b.Jmp.Arg))
+			return
+		}
 		e.cur.Ret(e.materialize(e.valueOf(b.Jmp.Arg)))
 	default:
 		e.fail("unsupported terminator %v", b.Jmp.Kind)
 	}
+}
+
+// retAggregate emits an aggregate return: copy the returned struct's cells into fresh
+// residual storage and return a pointer to it, the mirror of a by-value aggregate
+// call argument.
+func (e *engine) retAggregate(av value) {
+	if av.kind != vAddr && av.kind != vResid {
+		e.fail("aggregate return value is not a known struct")
+		return
+	}
+	size, align := e.src.RetAgg.Layout()
+	slot := e.cur.Alloc(allocAlign(align), size)
+	for off := int64(0); off < int64(size); off += 8 {
+		cv := e.aggCell(av, off)
+		dst := slot
+		if off != 0 {
+			dst = e.cur.Add(ir.ClsP, slot, e.out.ConstInt(ir.ClsL, off))
+		}
+		e.cur.Store(e.materialize(cv), dst)
+	}
+	e.cur.Ret(slot)
 }
 
 // headerGreen reports whether a loop header's branch condition is static right now,
@@ -681,8 +713,14 @@ func (e *engine) caseOf(b *ir.Block, v int64) *ir.Block {
 func (e *engine) transition() {
 	if e.baseMem == nil {
 		e.baseEnv, e.baseMem = copyEnv(e.env), copyMem(e.mem)
-		e.pcIsPtr = e.mem[cell(e.pcReg, 0)].kind == vAddr
-		e.spIsPtr = e.mem[cell(e.spReg, 0)].kind == vAddr
+		e.pcIsPtr = e.codeIsPtr || e.mem[cell(e.pcReg, 0)].kind == vAddr
+		spv := e.mem[cell(e.spReg, 0)]
+		e.spIsPtr = spv.kind == vAddr
+		if e.spIsPtr && e.stackReg == nil && spv.reg != nil {
+			// The operand stack has no alloca named "stack" (QuickJS keeps it inside
+			// local_buf); learn the region sp actually points into.
+			e.stackReg = spv.reg
+		}
 	}
 	sp := e.spBytes()
 	gs := greenState{pc: e.greenPC(), sp: sp}
@@ -719,9 +757,10 @@ func (e *engine) transition() {
 // operand-stack cells (0..sp-1) then every local-variable cell, in a fixed order.
 func (e *engine) redState(spBytes int64) []value {
 	var red []value
-	if e.stackReg != nil {
+	if e.stackReg != nil && !e.stackReg.haveBase {
 		// The live operand stack is the bytes below the top, on the 8-byte grain (a
-		// struct value's two halves, say).
+		// struct value's two halves, say). A stack that lives in residualized storage
+		// (real memory) is not carried -- its cells persist in that buffer.
 		for off := int64(0); off < spBytes; off += 8 {
 			red = append(red, e.load(ir.OLoadl, value{kind: vAddr, reg: e.stackReg, off: off}))
 		}
@@ -744,7 +783,7 @@ func (e *engine) bindRedState(spBytes int64, phis []*ir.Phi) {
 			i++
 		}
 	}
-	if e.stackReg != nil {
+	if e.stackReg != nil && !e.stackReg.haveBase {
 		for off := int64(0); off < spBytes; off += 8 {
 			put(e.stackReg, off)
 		}
@@ -790,7 +829,7 @@ func (e *engine) set(r ir.Ref, v value) {
 
 func (e *engine) exec(in *ir.Instr) {
 	switch {
-	case in.Op.IsAlloc():
+	case in.Op.IsAlloc() || in.Op == ir.OAllocN:
 		e.set(in.To, value{kind: vAddr, reg: e.allocRegion(in)})
 	case in.Op.IsStore():
 		e.store(e.valueOf(in.Args[1]), e.valueOf(in.Args[0]))
@@ -820,9 +859,15 @@ func (e *engine) allocRegion(in *ir.Instr) *region {
 	if n := len(base); n > 5 && base[n-5:] == ".addr" {
 		base = base[:n-5]
 	}
+	// A fixed alloca carries its size as a constant; a dynamic alloca (alloca of a
+	// green-computed frame size) carries it as a value that has folded to a constant.
 	size := int64(0)
-	if len(in.Args) > 0 && in.Args[0].Kind == ir.RefConst {
-		size = e.src.Consts[in.Args[0].ID].Int
+	if len(in.Args) > 0 {
+		if a := in.Args[0]; a.Kind == ir.RefConst {
+			size = e.src.Consts[a.ID].Int
+		} else if v := e.valueOf(a); v.kind == vConst {
+			size = v.k
+		}
 	}
 	r := e.newRegion(roleOther, size)
 	switch base {
@@ -840,12 +885,22 @@ func (e *engine) allocRegion(in *ir.Instr) *region {
 	default:
 		if size > 8 {
 			r.role = roleVar
-			// A local array declared before the interpreter loop is persistent VM
-			// state, carried across merges. One allocated inside a handler (a JSValue
-			// built on the stack, say) is a handler temporary, not carried.
-			if r.setupTime {
+			switch {
+			case in.To.Kind == ir.RefTemp && e.escLocal[in.To.ID] && r.setupTime:
+				// A persistent frame structure whose address escapes to runtime code
+				// (QuickJS's JSStackFrame, or local_buf holding by-value JSValues). It
+				// cannot be phi-carried; back it with stable setup storage now, so its
+				// cells are real memory and pointers into it can be passed. Allocated
+				// during setup, so it dominates every handler and needs no phi.
+				r.base = e.cur.Alloc(allocAlign(int(size)), int(size))
+				r.haveBase = true
+			case r.setupTime:
+				// A local array declared before the interpreter loop is persistent VM
+				// state, carried across merges as phis.
 				e.varRegs = append(e.varRegs, r)
 			}
+			// A size>8 local allocated inside a handler (a JSValue built on the stack)
+			// is a handler temporary, handled per-copy on escape.
 		}
 		// otherwise roleOther: a handler-local scalar, not carried across merges
 	}
@@ -879,7 +934,10 @@ func (e *engine) execData(in *ir.Instr) {
 			return
 		case CodeMarker:
 			// The green program pointer -- pc walks this instead of bytecode reached
-			// through a runtime object.
+			// through a runtime object. Because the marker defines pc as a pointer into
+			// the code region, the walk is pointer-style regardless of what a runtime
+			// setup branch (a generator or type-check preamble) leaves pc holding.
+			e.codeIsPtr = true
 			e.set(in.To, value{kind: vAddr, reg: e.codeReg, off: 0})
 			return
 		case GreenMarker:
@@ -908,10 +966,6 @@ func (e *engine) execData(in *ir.Instr) {
 // fresh runtime value. The dispatch that reached the handler is gone; the call the
 // program actually performs remains, in order.
 func (e *engine) residualCall(in *ir.Instr, name string) {
-	if name == "" {
-		e.fail("indirect calls are not supported")
-		return
-	}
 	args := make([]ir.Ref, 0, len(in.Args)-1)
 	for k, a := range in.Args[1:] {
 		var aggT *ir.AggType
@@ -943,7 +997,18 @@ func (e *engine) residualCall(in *ir.Instr, name string) {
 		}
 		args = append(args, slot)
 	}
-	callee := e.out.Sym(name, 0)
+	// A named callee is a direct call; otherwise the callee is a runtime function
+	// pointer (a dispatch through a class or method table), materialized and called
+	// indirectly.
+	var callee ir.Ref
+	if name != "" {
+		callee = e.out.Sym(name, 0)
+	} else {
+		callee = e.materialize(e.valueOf(in.Args[0]))
+		if e.err != nil {
+			return
+		}
+	}
 	if in.To.Kind != ir.RefTemp {
 		e.cur.CallVoid(callee, args...)
 		e.tagCall(in)
@@ -1176,6 +1241,67 @@ func escapingParams(f *ir.Func) map[string]bool {
 	return out
 }
 
+// escapingLocals returns the alloca temps whose own address (or a pointer computed
+// from it) is handed to a runtime call, stored, or returned -- a frame structure
+// like QuickJS's JSStackFrame, or the local_buf holding by-value JSValues. Such a
+// region cannot be modeled as phi-carried cells; it becomes stable residual storage.
+func escapingLocals(f *ir.Func) map[uint32]bool {
+	out := map[uint32]bool{}
+	for _, b := range f.Blocks {
+		for k := range b.Instrs {
+			in := &b.Instrs[k]
+			if in.Op.IsAlloc() && in.To.Kind == ir.RefTemp && structAddrEscapes(f, in.To.ID) {
+				out[in.To.ID] = true
+			}
+		}
+	}
+	return out
+}
+
+// structAddrEscapes reports whether the address of alloca allocID (or a pointer
+// derived from it by pointer arithmetic) is used as a value -- a call argument, a
+// stored value, or a return -- rather than only as the address of a load or store.
+func structAddrEscapes(f *ir.Func, allocID uint32) bool {
+	ptr := map[uint32]bool{allocID: true} // the alloca's address is itself a pointer
+	for changed := true; changed; {
+		changed = false
+		for _, b := range f.Blocks {
+			for k := range b.Instrs {
+				in := &b.Instrs[k]
+				if in.To.Kind != ir.RefTemp || ptr[in.To.ID] {
+					continue
+				}
+				if in.Op == ir.OAdd || in.Op == ir.OCopy {
+					for _, a := range in.Args {
+						if a.Kind == ir.RefTemp && ptr[a.ID] {
+							ptr[in.To.ID], changed = true, true
+						}
+					}
+				}
+			}
+		}
+	}
+	for _, b := range f.Blocks {
+		for k := range b.Instrs {
+			in := &b.Instrs[k]
+			if in.Op == ir.OCall {
+				for _, a := range in.Args[1:] { // Args[0] is the callee, not an escape
+					if a.Kind == ir.RefTemp && ptr[a.ID] {
+						return true
+					}
+				}
+			}
+			if in.Op.IsStore() && in.Args[0].Kind == ir.RefTemp && ptr[in.Args[0].ID] {
+				return true // a pointer into the region stored as a value (Args[1] is the address)
+			}
+		}
+		if b.Jmp.Kind == ir.JmpRet && b.Jmp.Arg.Kind == ir.RefTemp && ptr[b.Jmp.Arg.ID] {
+			return true
+		}
+	}
+	return false
+}
+
 func paramEscapes(f *ir.Func, addrName string) bool {
 	var addrID uint32
 	found := false
@@ -1310,6 +1436,10 @@ func (e *engine) materialize(v value) ir.Ref {
 		return e.out.ConstInt(cls, v.k)
 	case vResid:
 		return v.ref
+	case vSym:
+		// A green pointer to global data or a function (a string literal, a table):
+		// materialize it as a reference to that symbol.
+		return e.out.Sym(v.sym, v.off)
 	case vAddr:
 		if v.reg == nil {
 			e.fail("a green address escaped into a runtime value")
