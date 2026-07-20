@@ -677,6 +677,36 @@ func TestARM64RuntimeCapabilityStatus(t *testing.T) {
 			expectation: runtimeCapabilityMustPass,
 		},
 		{
+			category:    "stdlib-encoding",
+			name:        "binary",
+			source:      "stdlib_encoding_binary.go",
+			expectation: runtimeCapabilityMustPass,
+		},
+		{
+			category:    "stdlib-encoding",
+			name:        "base32",
+			source:      "stdlib_encoding_base32.go",
+			expectation: runtimeCapabilityMustPass,
+		},
+		{
+			category:    "stdlib-encoding",
+			name:        "ascii85",
+			source:      "stdlib_encoding_ascii85.go",
+			expectation: runtimeCapabilityMustPass,
+		},
+		{
+			category:    "stdlib-encoding",
+			name:        "pem",
+			source:      "stdlib_encoding_pem.go",
+			expectation: runtimeCapabilityMustPass,
+		},
+		{
+			category:    "stdlib-encoding",
+			name:        "xml",
+			source:      "stdlib_encoding_xml.go",
+			expectation: runtimeCapabilityMustPass,
+		},
+		{
 			category:    "stdlib-text",
 			name:        "strconv-roundtrip",
 			source:      "stdlib_strconv_roundtrip.go",
@@ -783,6 +813,18 @@ func TestARM64RuntimeCapabilityStatus(t *testing.T) {
 			category:    "stdlib-compress",
 			name:        "gzip-roundtrip",
 			source:      "stdlib_compress_gzip_roundtrip.go",
+			expectation: runtimeCapabilityMustPass,
+		},
+		{
+			category:    "stdlib-compress",
+			name:        "zlib-lzw",
+			source:      "stdlib_compress_zlib_lzw.go",
+			expectation: runtimeCapabilityMustPass,
+		},
+		{
+			category:    "stdlib-compress",
+			name:        "bzip2",
+			source:      "stdlib_compress_bzip2.go",
 			expectation: runtimeCapabilityMustPass,
 		},
 		{
