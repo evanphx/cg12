@@ -641,6 +641,32 @@ func TestARM64RuntimeCapabilityStatus(t *testing.T) {
 			expectation: runtimeCapabilityMustPass,
 		},
 		{
+			category:    "stdlib-netpoll-stress",
+			name:        "pipe-deadline-reset",
+			source:      "stdlib_netpoll_stress_pipe_deadline_reset.go",
+			expectation: runtimeCapabilityMustPass,
+		},
+		{
+			category:    "stdlib-netpoll-stress",
+			name:        "pipe-close-churn",
+			source:      "stdlib_netpoll_stress_pipe_close_churn.go",
+			expectation: runtimeCapabilityMustPass,
+		},
+		{
+			category:       "stdlib-netpoll-stress",
+			name:           "tcp-churn",
+			source:         "stdlib_netpoll_stress_tcp_churn.go",
+			expectation:    runtimeCapabilityMustPass,
+			requiresAFINET: true,
+		},
+		{
+			category:       "stdlib-netpoll-stress",
+			name:           "udp-burst",
+			source:         "stdlib_netpoll_stress_udp_burst.go",
+			expectation:    runtimeCapabilityMustPass,
+			requiresAFINET: true,
+		},
+		{
 			category:       "stdlib-netpoll",
 			name:           "syscall-socket-listen",
 			source:         "stdlib_netpoll_syscall_socket_listen.go",
