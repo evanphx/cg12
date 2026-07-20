@@ -9,17 +9,20 @@ import (
 	"path/filepath"
 	"runtime"
 	"strings"
+	"syscall"
 	"testing"
 	"time"
 )
 
 type runtimeCapability struct {
-	category    string
-	name        string
-	source      string
-	expectation runtimeCapabilityExpectation
-	timeout     time.Duration
-	note        string
+	category       string
+	name           string
+	source         string
+	expectation    runtimeCapabilityExpectation
+	timeout        time.Duration
+	note           string
+	output         string
+	requiresAFINET bool
 }
 
 type runtimeCapabilityExpectation int
@@ -27,6 +30,7 @@ type runtimeCapabilityExpectation int
 const (
 	runtimeCapabilityMustPass runtimeCapabilityExpectation = iota
 	runtimeCapabilityKnownGap
+	runtimeCapabilityExpectedFailure
 )
 
 func TestARM64RuntimeCapabilityStatus(t *testing.T) {
@@ -39,6 +43,7 @@ func TestARM64RuntimeCapabilityStatus(t *testing.T) {
 
 	directory := t.TempDir()
 	compiler := buildGOCForRuntimeCapabilityStatus(t, directory)
+	afinetSocketAvailable, afinetSocketErr := runtimeCapabilityAFINETSocketAvailable()
 
 	capabilities := []runtimeCapability{
 		{
@@ -636,60 +641,67 @@ func TestARM64RuntimeCapabilityStatus(t *testing.T) {
 			expectation: runtimeCapabilityMustPass,
 		},
 		{
-			category:    "stdlib-netpoll",
-			name:        "syscall-socket-listen",
-			source:      "stdlib_netpoll_syscall_socket_listen.go",
-			expectation: runtimeCapabilityKnownGap,
-			note:        "AF_INET sockets return EPERM in this sandbox for both cg12go and reference Go",
+			category:       "stdlib-netpoll",
+			name:           "syscall-socket-listen",
+			source:         "stdlib_netpoll_syscall_socket_listen.go",
+			expectation:    runtimeCapabilityMustPass,
+			requiresAFINET: true,
 		},
 		{
-			category:    "stdlib-netpoll",
-			name:        "tcp-echo",
-			source:      "stdlib_netpoll_tcp_echo.go",
-			expectation: runtimeCapabilityKnownGap,
-			note:        "AF_INET sockets return EPERM in this sandbox for both cg12go and reference Go",
+			category:       "stdlib-netpoll",
+			name:           "tcp-echo",
+			source:         "stdlib_netpoll_tcp_echo.go",
+			expectation:    runtimeCapabilityMustPass,
+			requiresAFINET: true,
 		},
 		{
-			category:    "stdlib-netpoll",
-			name:        "tcp-read-deadline",
-			source:      "stdlib_netpoll_tcp_read_deadline.go",
-			expectation: runtimeCapabilityKnownGap,
-			note:        "AF_INET sockets return EPERM in this sandbox for both cg12go and reference Go",
+			category:       "stdlib-netpoll",
+			name:           "tcp-read-deadline",
+			source:         "stdlib_netpoll_tcp_read_deadline.go",
+			expectation:    runtimeCapabilityMustPass,
+			requiresAFINET: true,
 		},
 		{
-			category:    "stdlib-netpoll",
-			name:        "tcp-accept-deadline",
-			source:      "stdlib_netpoll_tcp_accept_deadline.go",
-			expectation: runtimeCapabilityKnownGap,
-			note:        "AF_INET sockets return EPERM in this sandbox for both cg12go and reference Go",
+			category:       "stdlib-netpoll",
+			name:           "tcp-accept-deadline",
+			source:         "stdlib_netpoll_tcp_accept_deadline.go",
+			expectation:    runtimeCapabilityMustPass,
+			requiresAFINET: true,
 		},
 		{
-			category:    "stdlib-netpoll",
-			name:        "tcp-concurrent-clients",
-			source:      "stdlib_netpoll_tcp_concurrent_clients.go",
-			expectation: runtimeCapabilityKnownGap,
-			note:        "AF_INET sockets return EPERM in this sandbox for both cg12go and reference Go",
+			category:       "stdlib-netpoll",
+			name:           "tcp-concurrent-clients",
+			source:         "stdlib_netpoll_tcp_concurrent_clients.go",
+			expectation:    runtimeCapabilityMustPass,
+			requiresAFINET: true,
 		},
 		{
-			category:    "stdlib-netpoll",
-			name:        "udp-loopback",
-			source:      "stdlib_netpoll_udp_loopback.go",
-			expectation: runtimeCapabilityKnownGap,
-			note:        "AF_INET sockets return EPERM in this sandbox for both cg12go and reference Go",
+			category:       "stdlib-netpoll",
+			name:           "udp-loopback",
+			source:         "stdlib_netpoll_udp_loopback.go",
+			expectation:    runtimeCapabilityMustPass,
+			requiresAFINET: true,
 		},
 		{
-			category:    "stdlib-netpoll",
-			name:        "udp-deadline",
-			source:      "stdlib_netpoll_udp_deadline.go",
-			expectation: runtimeCapabilityKnownGap,
-			note:        "AF_INET sockets return EPERM in this sandbox for both cg12go and reference Go",
+			category:       "stdlib-netpoll",
+			name:           "udp-deadline",
+			source:         "stdlib_netpoll_udp_deadline.go",
+			expectation:    runtimeCapabilityMustPass,
+			requiresAFINET: true,
 		},
 		{
-			category:    "stdlib-netpoll",
-			name:        "close-unblocks-read",
-			source:      "stdlib_netpoll_close_unblocks_read.go",
-			expectation: runtimeCapabilityKnownGap,
-			note:        "AF_INET sockets return EPERM in this sandbox for both cg12go and reference Go",
+			category:       "stdlib-netpoll",
+			name:           "close-unblocks-read",
+			source:         "stdlib_netpoll_close_unblocks_read.go",
+			expectation:    runtimeCapabilityMustPass,
+			requiresAFINET: true,
+		},
+		{
+			category:    "defer-panic",
+			name:        "panic-string-output",
+			source:      "runtime_panic_print_string.go",
+			expectation: runtimeCapabilityExpectedFailure,
+			output:      "panic: boom",
 		},
 		{
 			category:    "defer-panic",
@@ -1044,6 +1056,9 @@ func TestARM64RuntimeCapabilityStatus(t *testing.T) {
 	for _, capability := range capabilities {
 		capability := capability
 		t.Run(capability.category+"/"+capability.name, func(t *testing.T) {
+			if capability.requiresAFINET && !afinetSocketAvailable {
+				t.Skipf("AF_INET sockets unavailable in this execution environment: %v", afinetSocketErr)
+			}
 			result := runRuntimeCapabilityProgram(t, compiler, directory, capability)
 			if capability.expectation == runtimeCapabilityMustPass && result.err != nil {
 				t.Fatalf("%s should pass: %v\n%s", capability.source, result.err, result.output)
@@ -1062,6 +1077,16 @@ func TestARM64RuntimeCapabilityStatus(t *testing.T) {
 				t.Logf("KNOWN GAP NOW PASSES %s: %s", capability.source, capability.note)
 				return
 			}
+			if capability.expectation == runtimeCapabilityExpectedFailure {
+				if result.err == nil {
+					t.Fatalf("%s should fail", capability.source)
+				}
+				if capability.output != "" && !strings.Contains(result.output, capability.output) {
+					t.Fatalf("%s failed without expected output %q:\n%s", capability.source, capability.output, result.output)
+				}
+				t.Logf("EXPECTED FAILURE %s", capability.source)
+				return
+			}
 			t.Logf("PASS %s", capability.source)
 		})
 	}
@@ -1073,6 +1098,17 @@ func truncateRuntimeCapabilityOutput(output string) string {
 		return output
 	}
 	return output[:limit] + "\n... truncated ..."
+}
+
+func runtimeCapabilityAFINETSocketAvailable() (bool, error) {
+	fileDescriptor, err := syscall.Socket(syscall.AF_INET, syscall.SOCK_STREAM, syscall.IPPROTO_TCP)
+	if err != nil {
+		return false, err
+	}
+	if err := syscall.Close(fileDescriptor); err != nil {
+		return false, err
+	}
+	return true, nil
 }
 
 type runtimeCapabilityResult struct {

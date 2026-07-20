@@ -10215,7 +10215,15 @@ func (g *gen) builtinCall(call *ast.CallExpr, builtin *types.Builtin) ir.Ref {
 		anyType := types.NewInterfaceType(nil, nil)
 		anyType.Complete()
 		value := g.assignmentValue(call.Args[0], anyType)
-		g.cur.CallVoid(g.fn.Sym("runtime.gopanic", 0), value)
+		panicSignature := types.NewSignatureType(
+			nil,
+			nil,
+			nil,
+			types.NewTuple(types.NewParam(token.NoPos, nil, "e", anyType)),
+			nil,
+			false,
+		)
+		g.callVoidWithSignature(g.fn.Sym("runtime.gopanic", 0), []ir.Ref{value}, panicSignature, nil)
 		g.cur.Hlt()
 		return g.fn.Word(0)
 	case "recover":

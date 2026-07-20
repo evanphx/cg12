@@ -7,7 +7,6 @@ import (
 )
 
 func main() {
-	println("tcp-echo: before Listen")
 	listener, err := net.Listen("tcp", "127.0.0.1:0")
 	if err != nil {
 		println("tcp-echo: Listen failed")
