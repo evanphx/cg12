@@ -4,6 +4,7 @@ import (
 	"testing"
 
 	"github.com/evanphx/cg12/cc"
+	"github.com/evanphx/cg12/opt"
 	"github.com/stretchr/testify/require"
 )
 
@@ -13,6 +14,16 @@ func runC(t *testing.T, src string) int {
 	t.Helper()
 	m, err := cc.CompileFor(cc.TargetAMD64, "x.c", src)
 	require.NoError(t, err)
+	return runObj(t, m)
+}
+
+// runCOpt is runC with the optimizer run first, so the test exercises the
+// optimized code path (mem2reg promotion, phi coalescing, and the like).
+func runCOpt(t *testing.T, src string) int {
+	t.Helper()
+	m, err := cc.CompileFor(cc.TargetAMD64, "x.c", src)
+	require.NoError(t, err)
+	opt.Run(m, opt.DefaultPipeline())
 	return runObj(t, m)
 }
 

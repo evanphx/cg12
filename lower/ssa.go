@@ -59,11 +59,15 @@ func SplitCriticalEdges(f *ir.Func) {
 //
 // This is what lets -O run on a computed-goto interpreter. Its handlers form a
 // near-complete-bipartite CFG whose critical edges cannot be split, so a phi left
-// standing there would force O(handlers^2) copies (see opt.Mem2Reg). But a phi
-// argument on such an edge can only reach its block through that phi -- SSA
-// dominance forbids any other use -- so its live range ends at the edge and never
-// overlaps the phi result. It therefore always coalesces, and the copies that
-// would have exploded never appear.
+// standing there would force O(handlers^2) copies (see opt.Mem2Reg). A phi argument
+// arriving from a handler coalesces cleanly -- it reaches the phi only through that
+// edge, so its live range ends there and never overlaps the result -- collapsing
+// the whole mesh of a loop-carried variable to one temporary the handlers update
+// in place. A residual copy can still remain (a variable's initial value, arriving
+// over the entry block's own indirect branch, where several variables share an
+// init constant that cannot coalesce with all of them). DestructSSA places that
+// copy before the indirect branch in the predecessor: correct, because the branch
+// takes exactly one target and every target reads that one register.
 //
 // Only the indirect edges are touched. Ordinary phi copies sit on splittable
 // edges and cost one copy each, which DestructSSA handles; coalescing them too
@@ -278,33 +282,42 @@ func buildPhiInterference(f *ir.Func, live *analysis.Liveness, nt int, involved 
 // entry, so they all happen at once -- which is what sequentialize is for.
 // Requires SplitCriticalEdges to have run.
 func DestructSSA(f *ir.Func) {
+	// Group phi (dst <- src) pairs by predecessor edge, across the whole function.
+	// A predecessor with several phi-bearing successors is a computed goto (an
+	// ordinary block's critical edges were split, so it feeds only one such block);
+	// it feeds the same coalesced value to every target, so identical copies are
+	// deduplicated -- otherwise the init copies would be emitted once per handler.
+	byPred := map[*ir.Block][]movePair{}
+	seen := map[*ir.Block]map[[4]uint32]bool{}
+	var order []*ir.Block
 	for _, v := range f.Blocks {
-		if len(v.Phis) == 0 {
-			continue
-		}
-		// Group phi (dst <- src) pairs by predecessor edge.
-		perPred := map[*ir.Block][]movePair{}
-		var order []*ir.Block
 		for _, p := range v.Phis {
 			for k, pred := range p.Blocks {
-				if _, ok := perPred[pred]; !ok {
+				if seen[pred] == nil {
+					seen[pred] = map[[4]uint32]bool{}
 					order = append(order, pred)
 				}
-				perPred[pred] = append(perPred[pred], movePair{dst: p.To, src: p.Args[k]})
-			}
-		}
-		for _, pred := range order {
-			seq := sequentialize(f, perPred[pred])
-			for _, mv := range seq {
-				pred.Instrs = append(pred.Instrs, ir.Instr{
-					Op:   ir.OCopy,
-					Cls:  f.ClassOf(mv.dst),
-					To:   mv.dst,
-					Args: []ir.Ref{mv.src},
-				})
+				mv := movePair{dst: p.To, src: p.Args[k]}
+				key := [4]uint32{uint32(mv.dst.Kind), mv.dst.ID, uint32(mv.src.Kind), mv.src.ID}
+				if seen[pred][key] {
+					continue
+				}
+				seen[pred][key] = true
+				byPred[pred] = append(byPred[pred], mv)
 			}
 		}
 		v.Phis = nil
+	}
+	for _, pred := range order {
+		seq := sequentialize(f, byPred[pred])
+		for _, mv := range seq {
+			pred.Instrs = append(pred.Instrs, ir.Instr{
+				Op:   ir.OCopy,
+				Cls:  f.ClassOf(mv.dst),
+				To:   mv.dst,
+				Args: []ir.Ref{mv.src},
+			})
+		}
 	}
 }
 

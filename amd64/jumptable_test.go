@@ -60,6 +60,31 @@ int runtest(void){
 	require.Equal(t, 0, runC(t, src))
 }
 
+// TestThreadedInterpLoopAmd64 runs a threaded bytecode interpreter whose dispatch
+// loops -- so the computed-goto CFG is a mesh and its loop-carried state (acc, pc)
+// is promoted to registers with a phi at every handler. It exercises the whole
+// path: CoalescePhis unifying each variable across the mesh, DestructSSA placing
+// the residual init copies before the entry's indirect branch, and the colourer
+// keeping those copies off the branch-target register. Before that last piece was
+// fixed, this shape miscompiled (a phi copy clobbered the jump target).
+func TestThreadedInterpLoopAmd64(t *testing.T) {
+	src := `
+long interp(const unsigned char *code){
+	static void * const tab[] = {&&H, &&IN, &&JN};
+	long acc = 0; const unsigned char *pc = code;
+	#define NEXT goto *tab[*pc++]
+	NEXT;
+ H:  return acc;
+ IN: acc++; NEXT;
+ JN: { long off = (signed char)*pc++; if (acc < 100) pc += off; } NEXT;
+}
+int runtest(void){
+	unsigned char prog[] = {1, 2, (unsigned char)-3, 0}; // INC; JN back-if<100; HALT
+	return interp(prog) == 100 ? 0 : 1;
+}`
+	require.Equal(t, 0, runCOpt(t, src))
+}
+
 // TestStaticLabelTableAmd64 exercises a static dispatch table of &&label
 // addresses (the threaded-interpreter pattern), which places each block's
 // address as a relocation in .data.

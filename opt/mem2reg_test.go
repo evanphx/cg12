@@ -169,12 +169,11 @@ func TestMem2RegNoAllocs(t *testing.T) {
 	assert.False(t, Mem2Reg(f))
 }
 
-func TestMem2RegSkipsComputedGoto(t *testing.T) {
-	// A function with a computed goto is left in memory form. The dispatch is
-	// threaded -- an indirect branch to every label -- so the CFG is a mesh, and a
-	// phi merging a promoted variable at a handler would need copies on the
-	// indirect edges, which have no block to hold them. So mem2reg declines the
-	// whole function and the loop-carried state stays in loads and stores.
+func TestMem2RegPromotesComputedGoto(t *testing.T) {
+	// A computed-goto function is promoted like any other; lower.CoalescePhis later
+	// unifies the mesh phis into one temp per variable, and any residual phi copy
+	// (an initial value on the entry's own indirect branch) is placeable before that
+	// branch. So mem2reg promotes, replacing the loads with the stored values.
 	f := ir.NewModule().NewFunc("interp", ir.ClsW)
 	e := f.Entry()
 	p := e.Alloc(4, 4)
@@ -186,8 +185,10 @@ func TestMem2RegSkipsComputedGoto(t *testing.T) {
 	a.Ret(a.Load(ir.ClsW, p))
 	b.Ret(b.Load(ir.ClsW, p))
 
-	assert.False(t, Mem2Reg(f), "a computed-goto function is left in memory form")
+	assert.True(t, Mem2Reg(f), "a computed-goto function is promoted")
 	for _, blk := range f.Blocks {
-		assert.Empty(t, blk.Phis, "no phi is created for a computed-goto function")
+		for _, in := range blk.Instrs {
+			assert.False(t, in.Op.IsLoad(), "loads are replaced by promoted values")
+		}
 	}
 }

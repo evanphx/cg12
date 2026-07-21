@@ -128,6 +128,18 @@ func (g *colorGraph) build(cfg *analysis.CFG, live *analysis.Liveness) {
 		// ice-cold (or unreachable-but-emitted) references stay allocatable.
 		weight := math.Max(g.freq.Of(b), 1e-4)
 		liveSet := live.LiveOut(b).Copy()
+		// The terminator's operands are used at the block's end -- after the last
+		// instruction -- so they are live there and interfere with anything defined
+		// among the trailing instructions (a phi copy DestructSSA appended before a
+		// computed goto must not land on the register holding the branch target).
+		if b.Jmp.Arg.Kind == ir.RefTemp {
+			liveSet.Add(int(b.Jmp.Arg.ID))
+		}
+		for _, a := range b.Jmp.Args {
+			if a.Kind == ir.RefTemp {
+				liveSet.Add(int(a.ID))
+			}
+		}
 		for k := len(b.Instrs) - 1; k >= 0; k-- {
 			in := &b.Instrs[k]
 			defs := instrDefs(in)

@@ -44,6 +44,36 @@ int main(void){
 	require.Greater(t, brs, 1, "threaded dispatch emits an indirect branch per goto site, not one funnel")
 }
 
+// TestThreadedInterpLoop runs a threaded bytecode interpreter whose dispatch
+// loops -- so the computed-goto CFG is a mesh and its loop-carried state (acc,
+// pc) is promoted to registers with a phi at every handler. It exercises the
+// whole path: CoalescePhis unifying each variable across the mesh, DestructSSA
+// placing the residual init copies before the entry's indirect branch, and the
+// colourer keeping those copies off the branch-target register. Before that last
+// piece was fixed, this shape miscompiled (a phi copy clobbered the jump target).
+func TestThreadedInterpLoop(t *testing.T) {
+	src := `
+long interp(const unsigned char *code){
+    static void * const tab[] = {&&H, &&IN, &&JN};
+    long acc = 0; const unsigned char *pc = code;
+    #define NEXT goto *tab[*pc++]
+    NEXT;
+ H:  return acc;
+ IN: acc++; NEXT;
+ JN: { long off = (signed char)*pc++; if (acc < 100) pc += off; } NEXT;
+}`
+	main := `extern long interp(const unsigned char*);
+int main(void){
+    unsigned char prog[] = {1, 2, (unsigned char)-3, 0}; /* INC; JN back-if<100; HALT */
+    return interp(prog) == 100 ? 0 : 1;
+}`
+	m, err := cc.Compile("i.c", src)
+	require.NoError(t, err)
+	opt.Run(m, opt.DefaultPipeline())
+	_, code := buildAndRun(t, m, main)
+	require.Equal(t, 0, code)
+}
+
 // ThreadJumps (run during lowering) collapses empty forwarding blocks but must
 // never bypass or drop a block whose address is taken by a computed goto -- an
 // indirect branch reaches it with no explicit edge. This runs a computed-goto
