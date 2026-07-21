@@ -3,24 +3,13 @@ package analysis
 import "github.com/evanphx/cg12/ir"
 
 // LoopDepth returns the loop-nesting depth of every block: 0 outside all loops,
-// and incremented once for each natural loop containing the block. A natural
-// loop is identified by a back edge b->h where the header h dominates b.
+// and incremented once for each natural loop containing the block. It is a thin
+// wrapper over LoopForest: a block's depth is the depth of its innermost loop (the
+// length of that loop's parent chain), which equals the number of loops containing it.
 func (c *CFG) LoopDepth(dom *DomTree) map[*ir.Block]int {
 	depth := map[*ir.Block]int{}
-
-	// Group latches (back-edge sources) by loop header.
-	latches := map[*ir.Block][]*ir.Block{}
-	for _, b := range c.RPO {
-		for _, s := range b.Succs() {
-			if s != nil && dom.Dominates(s, b) {
-				latches[s] = append(latches[s], b)
-			}
-		}
-	}
-	for header, ls := range latches {
-		for n := range naturalLoop(header, ls) {
-			depth[n]++
-		}
+	for b, l := range c.LoopForest(dom).In {
+		depth[b] = l.Depth
 	}
 	return depth
 }

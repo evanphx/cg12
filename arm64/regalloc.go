@@ -18,6 +18,10 @@ type allocation struct {
 	intervals []*interval         // per-temp live ranges in the numbering
 	posInstr  []*ir.Instr         // numbering position -> instruction (nil at block ends)
 	safeRoots map[*ir.Instr][]int // safepoint (call or OSafepoint) -> live GC-ref temps
+
+	// remat maps a spilled-but-rematerialisable temp to the rule for recomputing it
+	// at each use (it has no spill slot).
+	remat map[int]rematRule
 }
 
 // interval is a temporary's live range over a linear instruction numbering,
@@ -63,17 +67,31 @@ func regAlloc(f *ir.Func) (*allocation, error) {
 	}
 	cfg := analysis.BuildCFG(f)
 	live := cfg.Liveness()
+	freq := cfg.Frequency(cfg.Dominators())
 
-	num := numberInstrs(cfg)
-	intervals := buildIntervals(f, cfg, live, num)
-
-	alloc, err := colorAlloc(f, cfg, live)
+	alloc, err := colorAlloc(f, cfg, live, freq)
 	if err != nil {
 		return nil, err
 	}
-	alloc.intervals = intervals
+
+	// Colouring may place a call-crossing value in a caller-saved register; save and
+	// restore it around each call it crosses. This inserts instructions into the
+	// blocks, so the liveness substrate (which holds *ir.Instr pointers) is built
+	// afterward, on the final instruction list.
+	if err := insertCallerSaves(f, cfg, live, alloc); err != nil {
+		return nil, err
+	}
+	// insertCallerSaves rebuilds block instruction slices, relocating the OAlloc
+	// instructions a rematerialised alloca-address rule points at; re-resolve those
+	// pointers so computeFrame's allocOff (keyed by the final instruction) matches.
+	refreshRematAllocas(f, alloc.remat)
+
+	cfg = analysis.BuildCFG(f)
+	live = cfg.Liveness()
+	num := numberInstrs(cfg)
+	alloc.intervals = buildIntervals(f, cfg, live, num)
 	alloc.posInstr = num.posInstr
-	alloc.safeRoots = computeSafepointRoots(f, intervals, num)
+	alloc.safeRoots = computeSafepointRoots(f, alloc.intervals, num)
 	return alloc, nil
 }
 

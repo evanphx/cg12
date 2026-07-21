@@ -69,6 +69,10 @@ type asmb interface {
 	movImm(rd Reg, val int64, w64 bool)
 	materializeSym(rd Reg, c ir.Const)
 
+	// rematerialize recomputes a rematerialisable value (a stack-slot address,
+	// constant, or symbol address) into rd, in place of reloading it from a slot.
+	rematerialize(rd Reg, rule rematRule, size int)
+
 	// moveLoc emits a single move between two locations (register or frame slot),
 	// the primitive the shared parallel-move ordering drives.
 	moveLoc(dst, src loc)
@@ -465,11 +469,15 @@ func (b *mcAsm) storeIdx(op ir.Op, val, base, index Reg, amode int32) {
 }
 func (b *mcAsm) movImm(rd Reg, val int64, w64 bool) { b.m.movImm(mreg(rd), val, w64) }
 func (b *mcAsm) materializeSym(rd Reg, c ir.Const)  { b.m.materializeSym(mreg(rd), c) }
-func (b *mcAsm) moveLoc(dst, src loc)               { b.m.emitMoveLoc(dst, src) }
-func (b *mcAsm) threadPtr(rd Reg)                   { b.prog.Emit(a64.MrsTPIDR(mreg(rd))) }
-func (b *mcAsm) tlsOffset(rd Reg, c ir.Const)       { b.m.emitTLSOffset(mreg(rd), c) }
-func (b *mcAsm) tlsIndexAddr(rd Reg, c ir.Const)    { b.m.emitTLSIndexAddr(mreg(rd), c) }
-func (b *mcAsm) branch(to *ir.Block)                { b.prog.B(to.Name) }
+
+func (b *mcAsm) rematerialize(rd Reg, rule rematRule, size int) {
+	b.m.rematerialize(mreg(rd), rule, size)
+}
+func (b *mcAsm) moveLoc(dst, src loc)            { b.m.emitMoveLoc(dst, src) }
+func (b *mcAsm) threadPtr(rd Reg)                { b.prog.Emit(a64.MrsTPIDR(mreg(rd))) }
+func (b *mcAsm) tlsOffset(rd Reg, c ir.Const)    { b.m.emitTLSOffset(mreg(rd), c) }
+func (b *mcAsm) tlsIndexAddr(rd Reg, c ir.Const) { b.m.emitTLSIndexAddr(mreg(rd), c) }
+func (b *mcAsm) branch(to *ir.Block)             { b.prog.B(to.Name) }
 func (b *mcAsm) cbnz(w64 bool, rn Reg, to *ir.Block) {
 	b.prog.Cbnz(w64, mreg(rn), to.Name)
 }

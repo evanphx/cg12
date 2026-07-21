@@ -15,6 +15,7 @@ type sel struct {
 	f         *ir.Func
 	b         asmb
 	spillBase int
+	remat     map[int]rematRule // temps recomputed at each use (no spill slot)
 }
 
 // src resolves a source operand to a register, loading a spilled temporary into
@@ -31,6 +32,10 @@ func (s *sel) src(ref ir.Ref, slot, size int) Reg {
 		t := s.f.Temps[ref.ID]
 		if t.Reg != ir.NoReg {
 			return Reg(t.Reg)
+		}
+		if rule, ok := s.remat[int(ref.ID)]; ok {
+			s.b.rematerialize(scr, rule, size)
+			return scr
 		}
 		s.b.ldrSpill(scr, float, s.spillBase+t.Slot, size)
 		return scr

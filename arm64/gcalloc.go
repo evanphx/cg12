@@ -2,6 +2,7 @@ package arm64
 
 import (
 	"fmt"
+	"math"
 
 	"github.com/evanphx/cg12/analysis"
 	"github.com/evanphx/cg12/ir"
@@ -22,33 +23,50 @@ import (
 //
 // The binding is written in place on ir.Temp (Reg / Slot); the returned allocation
 // carries only spillBytes (its liveness substrate is filled by the caller).
-func colorAlloc(f *ir.Func, cfg *analysis.CFG, live *analysis.Liveness) (*allocation, error) {
+func colorAlloc(f *ir.Func, cfg *analysis.CFG, live *analysis.Liveness, freq *analysis.Freq) (*allocation, error) {
 	g := newColorGraph(f)
+	g.freq = freq
+	g.remat = rematRules(f)
 	g.build(cfg, live)
-	return g.assign()
+	// A rematerialisable value is cheap to "spill" -- one ALU op per use, no memory --
+	// so make it a preferred spill victim.
+	for t := range f.Temps {
+		if _, ok := g.remat[t]; ok {
+			g.cost[t] *= 0.5
+		}
+	}
+	alloc, err := g.assign()
+	if alloc != nil {
+		alloc.remat = g.remat
+	}
+	return alloc, err
 }
 
 type colorGraph struct {
-	f *ir.Func
+	f     *ir.Func
+	freq  *analysis.Freq    // per-block execution frequency, for the spill cost model
+	remat map[int]rematRule // temps recomputable at each use instead of reloaded
 
-	adj  []map[int]bool // temp id -> interfering temp ids (nodes only; same class)
-	forb []map[Reg]bool // temp id -> physical registers it may not use
-	node []bool         // temp id -> is a colourable node (used, not pre-coloured)
-	gc   []bool         // temp id -> must be spilled (GC ref live across a safepoint)
-	mv   [][]int        // temp id -> temps it is copied to/from (coalescing bias)
-	cost []float64      // temp id -> spill cost (references weighted by loop depth)
+	adj       []map[int]bool // temp id -> interfering temp ids (nodes only; same class)
+	forb      []map[Reg]bool // temp id -> physical registers it may not use
+	node      []bool         // temp id -> is a colourable node (used, not pre-coloured)
+	gc        []bool         // temp id -> must be spilled (GC ref live across a safepoint)
+	mv        [][]int        // temp id -> temps it is copied to/from (coalescing bias)
+	cost      []float64      // temp id -> spill cost (references weighted by block frequency)
+	crossFreq []float64      // temp id -> summed frequency of the calls it is live across
 }
 
 func newColorGraph(f *ir.Func) *colorGraph {
 	n := len(f.Temps)
 	g := &colorGraph{
-		f:    f,
-		adj:  make([]map[int]bool, n),
-		forb: make([]map[Reg]bool, n),
-		node: make([]bool, n),
-		gc:   make([]bool, n),
-		mv:   make([][]int, n),
-		cost: make([]float64, n),
+		f:         f,
+		adj:       make([]map[int]bool, n),
+		forb:      make([]map[Reg]bool, n),
+		node:      make([]bool, n),
+		gc:        make([]bool, n),
+		mv:        make([][]int, n),
+		cost:      make([]float64, n),
+		crossFreq: make([]float64, n),
 	}
 	for i, t := range f.Temps {
 		// A pre-coloured (Fixed) temp already holds its ABI register; it is not a
@@ -101,14 +119,12 @@ func (g *colorGraph) addEdge(a, b int) {
 // Implementation, ch. 11).
 func (g *colorGraph) build(cfg *analysis.CFG, live *analysis.Liveness) {
 	f := g.f
-	depth := cfg.LoopDepth(cfg.Dominators())
 	for _, b := range cfg.RPO {
-		// A reference inside a loop is worth spilling far less than one outside: it
-		// would reload on every iteration. Weight each reference by 10^loop-depth.
-		weight := 1.0
-		for d := depth[b]; d > 0; d-- {
-			weight *= 10
-		}
+		// A reference's spill cost is its execution frequency: reloading in a hot loop
+		// is expensive, in a rarely-hit switch case nearly free. Unlike loop depth, this
+		// distinguishes a cold handler from the dispatch loop it sits inside. Floor it so
+		// even ice-cold (or unreachable-but-emitted) references stay allocatable.
+		weight := math.Max(g.freq.Of(b), 1e-4)
 		liveSet := live.LiveOut(b).Copy()
 		for k := len(b.Instrs) - 1; k >= 0; k-- {
 			in := &b.Instrs[k]
@@ -130,18 +146,17 @@ func (g *colorGraph) build(cfg *analysis.CFG, live *analysis.Liveness) {
 				g.mv[msrc] = append(g.mv[msrc], mdst)
 			}
 
-			// A value live across a call must avoid the caller-saved registers the
-			// call clobbers, so it survives in a callee-saved one. This applies per
-			// class: an integer value avoids the caller-saved X registers, a float
-			// value the caller-saved V registers.
+			// A value live across a call prefers a callee-saved register (no save/restore)
+			// but may use a caller-saved one, which insertCallerSaves then saves and
+			// restores around each crossed call. Accumulate the frequency of the crossed
+			// calls so colouring can weigh that cost. Exception: a 128-bit vector has NO
+			// register that survives a call -- AAPCS64 preserves only the low 64 bits of
+			// V8-V15 -- so it must stay out of every register across a call (hard forbid).
 			if in.Op == ir.OCall {
 				for _, t := range liveSet.Members() {
-					pool := intAllocOrder
-					if f.Temps[t].Cls.IsFloat() {
-						pool = floatAllocOrder
-					}
-					for _, r := range pool {
-						if !calleeSavedReg(r) {
+					g.crossFreq[t] += weight
+					if f.Temps[t].Cls == ir.ClsQ {
+						for r := V0; r <= vLast; r++ {
 							g.forbid(t, r)
 						}
 					}
@@ -216,6 +231,12 @@ func (g *colorGraph) assign() (*allocation, error) {
 	slotOf := map[int]int{}
 	spill := func(t int) {
 		tt := f.Temps[t]
+		tt.Reg = ir.NoReg
+		// A rematerialisable value needs no slot: the emitter recomputes it at each use.
+		if _, ok := g.remat[t]; ok {
+			tt.Slot = -1
+			return
+		}
 		if _, ok := slotOf[t]; !ok {
 			sz := 8
 			if tt.Cls == ir.ClsQ {
@@ -228,7 +249,6 @@ func (g *colorGraph) assign() (*allocation, error) {
 			alloc.spillBytes += sz
 		}
 		tt.Slot = slotOf[t]
-		tt.Reg = ir.NoReg
 	}
 
 	removed := make([]bool, len(f.Temps))
@@ -320,17 +340,33 @@ func (g *colorGraph) assign() (*allocation, error) {
 				used[Reg(r)] = true
 			}
 		}
+		// A value live across a call weighs callee-saved (one prologue save/restore,
+		// cost ~2) against caller-saved (a save+restore around each crossed call, cost
+		// crossFreq×2). preferCallee holds when the caller-saved bill is the larger, so
+		// the value tries callee-saved registers first; otherwise it takes caller-saved
+		// freely (cheap when the crossed calls are cold, the interpreter's case).
+		float := f.Temps[t].Cls.IsFloat()
+		crossing := g.crossFreq[t] > 0
+		preferCallee := crossing && g.crossFreq[t]*2 >= 2.0
 		pool := intAllocOrder
-		if f.Temps[t].Cls.IsFloat() {
+		switch {
+		case preferCallee && float:
+			pool = floatAllocOrderCalleeFirst
+		case preferCallee:
+			pool = intAllocOrderCalleeFirst
+		case float:
 			pool = floatAllocOrder
 		}
-		// Coalesce by biasing: if t is copied to/from a temp already bound to a
-		// register (a pre-coloured ABI temp, or a partner coloured earlier), prefer
-		// that register. When it lands there the copy becomes a move of a register to
-		// itself, which the emitter drops.
+		// Coalesce by biasing: prefer a register a move partner already holds so the copy
+		// drops. For a value whose crossings are hot, never bias onto a caller-saved
+		// register -- that would trade one dropped move for a save/restore at every
+		// crossed call.
 		prefer := map[Reg]bool{}
 		for _, p := range g.mv[t] {
 			if r := f.Temps[p].Reg; r != ir.NoReg {
+				if preferCallee && !calleeSavedReg(Reg(r)) {
+					continue
+				}
 				prefer[Reg(r)] = true
 			}
 		}
@@ -349,6 +385,12 @@ func (g *colorGraph) assign() (*allocation, error) {
 					break
 				}
 			}
+		}
+		// If the only register a hot-crossing value could get is caller-saved, wrapping
+		// it costs crossFreq×2; spilling costs its reference weight. Take the cheaper.
+		if picked != Reg(ir.NoReg) && preferCallee && !calleeSavedReg(picked) &&
+			g.crossFreq[t]*2 >= g.cost[t] {
+			picked = Reg(ir.NoReg)
 		}
 		if picked == Reg(ir.NoReg) {
 			spill(t)

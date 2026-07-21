@@ -195,6 +195,28 @@ var calleeSavedFloat = func() map[Reg]bool {
 // call.
 func calleeSavedReg(r Reg) bool { return calleeSaved[r] || calleeSavedFloat[r] }
 
+// intAllocOrderCalleeFirst / floatAllocOrderCalleeFirst try callee-saved registers
+// before caller-saved. A value live across a call whose crossings are hot prefers a
+// callee-saved register (saved once in the prologue); only when those run out does it
+// fall back to a caller-saved one (which the caller-save pass then saves and restores
+// around each crossed call). Non-crossing values keep the caller-first orders above.
+var (
+	intAllocOrderCalleeFirst   = calleeFirstOrder(intAllocOrder)
+	floatAllocOrderCalleeFirst = calleeFirstOrder(floatAllocOrder)
+)
+
+func calleeFirstOrder(order []Reg) []Reg {
+	var callee, caller []Reg
+	for _, r := range order {
+		if calleeSavedReg(r) {
+			callee = append(callee, r)
+		} else {
+			caller = append(caller, r)
+		}
+	}
+	return append(callee, caller...)
+}
+
 // intScratch and fscratch map a slot to a reserved scratch register. Slot 2
 // (x15) is used only by 3-operand indexed stores.
 var intScratchRegs = [3]Reg{scratch0, scratch1, scratch2}

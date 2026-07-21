@@ -201,6 +201,15 @@ const (
 	OMAdd
 	OMSub
 
+	// OSpill / OReload move a value between a register and its spill slot. The
+	// register allocator inserts them to save a caller-saved value around a call it is
+	// live across: OSpill (Args[0] the value, Aux the slot's byte offset) stores it
+	// before the call, OReload (To the value, Aux the same offset) loads it back into
+	// the same register afterward. Backend-internal: created after allocation, never in
+	// the text or binary formats.
+	OSpill
+	OReload
+
 	numOps
 )
 
@@ -241,7 +250,10 @@ var opTable = [numOps]opInfo{
 	OBic:  {name: "bic", hasResult: true, private: true},
 	OMAdd: {name: "madd", hasResult: true, private: true},
 	OMSub: {name: "msub", hasResult: true, private: true},
-	OClz:  {name: "clz", hasResult: true},
+
+	OSpill:  {name: "spill", private: true},
+	OReload: {name: "reload", hasResult: true, private: true},
+	OClz:    {name: "clz", hasResult: true},
 
 	ONeg: {name: "neg", hasResult: true},
 

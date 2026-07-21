@@ -647,12 +647,12 @@ func (m *mc) allocFrame() {
 }
 
 func (m *mc) frameTeardown() {
-	(&sel{f: m.f, b: &mcAsm{prog: m.prog, m: m}, spillBase: m.spillBase}).
+	(m.newSel()).
 		frameTeardown(m.frame, m.hasDynAlloc, m.calleeSaved)
 }
 
 func (m *mc) epilogue() {
-	(&sel{f: m.f, b: &mcAsm{prog: m.prog, m: m}, spillBase: m.spillBase}).
+	(m.newSel()).
 		epilogue(m.frame, m.hasDynAlloc, m.calleeSaved)
 }
 
@@ -892,6 +892,28 @@ func (m *mc) materializeSym(r a64.Reg, c ir.Const) {
 	}
 }
 
+// rematOf returns the rematerialisation rule for temp id, if it has one.
+func (m *mc) rematOf(id int) (rematRule, bool) {
+	if m.alloc.remat == nil {
+		return rematRule{}, false
+	}
+	r, ok := m.alloc.remat[id]
+	return r, ok
+}
+
+// rematerialize recomputes a rematerialisable value into register r: a stack-slot
+// address as x29+offset, a constant via movz/movk, a symbol via adrp+add.
+func (m *mc) rematerialize(r a64.Reg, rule rematRule, size int) {
+	switch rule.kind {
+	case rematAlloca:
+		m.frameAddr(r, m.allocOff[rule.in])
+	case rematConst:
+		m.movImm(r, rule.c.Int, size == 8)
+	case rematSym:
+		m.materializeSym(r, rule.c)
+	}
+}
+
 // reloc records a relocation at the current instruction position.
 func (m *mc) reloc(sym string, typ uint32) {
 	m.relocs = append(m.relocs, obj.Reloc{Offset: uint64(m.prog.Len() * 4), Sym: sym, Type: typ})
@@ -929,6 +951,10 @@ func (m *mc) src(ref ir.Ref, slot, size int) a64.Reg {
 		if t.Reg != ir.NoReg {
 			return mreg(Reg(t.Reg))
 		}
+		if rule, ok := m.rematOf(int(ref.ID)); ok {
+			m.rematerialize(scr, rule, size)
+			return scr
+		}
 		m.spillLoad(scr, false, m.spillBase+t.Slot, size)
 		return scr
 	case ir.RefConst:
@@ -965,7 +991,7 @@ func (m *mc) dst(ref ir.Ref, size int) (a64.Reg, func()) {
 // --- parallel moves --------------------------------------------------------
 
 func (m *mc) parallelMove(pairs []movePairLoc) {
-	(&sel{f: m.f, b: &mcAsm{prog: m.prog, m: m}, spillBase: m.spillBase}).parallelMove(pairs)
+	(m.newSel()).parallelMove(pairs)
 }
 
 func (m *mc) emitMoveLoc(dst, src loc) {
@@ -1143,7 +1169,7 @@ func (m *mc) callSequence(b *ir.Block, i int) int {
 }
 
 func (m *mc) emitCall(in *ir.Instr) {
-	(&sel{f: m.f, b: &mcAsm{prog: m.prog, m: m}, spillBase: m.spillBase}).call(in)
+	(m.newSel()).call(in)
 	m.recordSafepoint(in) // the branch just emitted; the return address is next
 }
 
@@ -1263,15 +1289,40 @@ func (m *mc) tailBranch(in *ir.Instr) {
 
 // --- instructions ----------------------------------------------------------
 
+// newSel builds a selection driver over the machine-code encoder, carrying the
+// rematerialisation table so spilled-but-recomputable operands are rebuilt in place.
+func (m *mc) newSel() *sel {
+	s := &sel{f: m.f, b: &mcAsm{prog: m.prog, m: m}, spillBase: m.spillBase}
+	if m.alloc != nil {
+		s.remat = m.alloc.remat
+	}
+	return s
+}
+
 func (m *mc) instr(in *ir.Instr) {
+	// A rematerialisable result (a spilled alloca address or constant with no slot)
+	// emits nothing at its definition -- every use recomputes it.
+	if in.To.Kind == ir.RefTemp && m.f.Temps[in.To.ID].Reg == ir.NoReg {
+		if _, ok := m.rematOf(int(in.To.ID)); ok {
+			return
+		}
+	}
 	// Integer data-processing instructions are selected once, through the shared
 	// builder (here backed by the machine-code encoder).
-	if (&sel{f: m.f, b: &mcAsm{prog: m.prog, m: m}, spillBase: m.spillBase}).selectData(in) {
+	if (m.newSel()).selectData(in) {
 		return
 	}
 	switch in.Op {
 	case ir.ONop:
 		return
+	case ir.OSpill:
+		// Save a caller-saved value to its slot before a call it is live across.
+		t := m.f.Temps[in.Args[0].ID]
+		m.spillStore(mreg(Reg(t.Reg)), t.Cls.IsFloat(), m.spillBase+int(in.Aux), t.Cls.Size())
+	case ir.OReload:
+		// Restore it into the same register after the call.
+		t := m.f.Temps[in.To.ID]
+		m.spillLoad(mreg(Reg(t.Reg)), t.Cls.IsFloat(), m.spillBase+int(in.Aux), t.Cls.Size())
 	case ir.OCopy, ir.OPar, ir.OArg:
 		m.copy(in)
 	// The data-processing, compare, conversion, extend, and load/store
@@ -1638,7 +1689,7 @@ func storeSize(op ir.Op) int {
 }
 
 func (m *mc) term(b *ir.Block) {
-	if (&sel{f: m.f, b: &mcAsm{prog: m.prog, m: m}, spillBase: m.spillBase}).term(b) {
+	if (m.newSel()).term(b) {
 		return
 	}
 	switch b.Jmp.Kind {
