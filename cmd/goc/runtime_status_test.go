@@ -797,6 +797,18 @@ func TestARM64RuntimeCapabilityStatus(t *testing.T) {
 			expectation: runtimeCapabilityMustPass,
 		},
 		{
+			category:    "stdlib-encoding",
+			name:        "gob-roundtrip",
+			source:      "stdlib_encoding_gob_roundtrip.go",
+			expectation: runtimeCapabilityMustPass,
+		},
+		{
+			category:    "stdlib-encoding",
+			name:        "asn1-roundtrip",
+			source:      "stdlib_encoding_asn1_roundtrip.go",
+			expectation: runtimeCapabilityMustPass,
+		},
+		{
 			category:    "stdlib-crypto",
 			name:        "hash-hmac",
 			source:      "stdlib_crypto_hash_hmac.go",
@@ -825,6 +837,25 @@ func TestARM64RuntimeCapabilityStatus(t *testing.T) {
 			name:        "ecdh-x25519",
 			source:      "stdlib_crypto_ecdh_x25519.go",
 			expectation: runtimeCapabilityMustPass,
+		},
+		{
+			category:    "stdlib-crypto",
+			name:        "x509-ed25519",
+			source:      "stdlib_crypto_x509_ed25519.go",
+			expectation: runtimeCapabilityMustPass,
+		},
+		{
+			category:    "stdlib-crypto",
+			name:        "rsa",
+			source:      "stdlib_crypto_rsa.go",
+			expectation: runtimeCapabilityMustPass,
+		},
+		{
+			category:    "stdlib-crypto",
+			name:        "ecdsa",
+			source:      "stdlib_crypto_ecdsa.go",
+			expectation: runtimeCapabilityKnownGap,
+			note:        "the shared generic P-256 point body does not contribute its concrete type to Point method dispatch",
 		},
 		{
 			category:    "stdlib-errors",

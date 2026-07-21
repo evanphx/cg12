@@ -114,6 +114,86 @@ func equal(left byte, right byte) int {
 	}
 }
 
+func TestCompilePreservesIdenticalInterfaceHeader(t *testing.T) {
+	source := []byte(`package main
+
+type statusError struct{}
+
+func (statusError) Error() string {
+	return "status"
+}
+
+type holder struct {
+	Err error
+}
+
+func hold(err error) holder {
+	return holder{Err: err}
+}
+
+func main() {
+	value := hold(statusError{})
+	if value.Err == nil {
+		panic("missing error")
+	}
+}
+`)
+
+	module, err := CompileExecutable("interface_identity.go", source)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	function := findCompiledFunction(t, module, "main.hold")
+	for _, block := range function.Blocks {
+		for _, instruction := range block.Instrs {
+			if instruction.Op != ir.OCall {
+				continue
+			}
+			calleeReference := instruction.Arg(0)
+			if calleeReference.Kind != ir.RefConst {
+				continue
+			}
+			callee := function.Consts[calleeReference.ID]
+			if callee.Kind == ir.ConstSym && callee.Sym == "runtime.getitab" {
+				t.Fatal("identical interface assignment rebuilt its itab")
+			}
+		}
+	}
+}
+
+func TestCompileExecutableSchedulesImportedPackageInitializers(t *testing.T) {
+	module, err := CompileExecutable("crypto_init.go", []byte(`package main
+
+import (
+	"crypto"
+	_ "crypto/sha256"
+)
+
+func main() {
+	if !crypto.SHA256.Available() {
+		panic("sha256 unavailable")
+	}
+}
+`))
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	wantSymbol := "crypto/sha256.init.0"
+	for _, data := range module.Data {
+		if !strings.HasPrefix(data.Name, ".goc.module.inittask.") {
+			continue
+		}
+		for _, item := range data.Items {
+			if item.Sym == wantSymbol {
+				return
+			}
+		}
+	}
+	t.Fatalf("module init tasks do not contain %s", wantSymbol)
+}
+
 func TestCompilePreservesSyncAtomicPointerWriteBarrierCalls(t *testing.T) {
 	source := []byte(`package atomictest
 
@@ -1074,6 +1154,34 @@ func main() { _ = values }
 	}
 	if len(global.Items) != 2 || global.Items[0].Sym != "main.values.backing" || len(global.Items[1].Ints) != 2 {
 		t.Fatalf("main.values data = %#v, want inline data/length/capacity header", global.Items)
+	}
+}
+
+func TestCompileExecutablePreservesKeyedGlobalSliceIndices(t *testing.T) {
+	module, err := CompileExecutable("main.go", []byte(`package main
+var values = []uint8{1: 7, 4: 11, 13}
+func main() { _ = values }
+`))
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	var header *ir.Data
+	var backing *ir.Data
+	for _, data := range module.Data {
+		switch data.Name {
+		case "main.values":
+			header = data
+		case "main.values.backing":
+			backing = data
+		}
+	}
+	if header == nil || len(header.Items) != 2 || !reflect.DeepEqual(header.Items[1].Ints, []int64{6, 6}) {
+		t.Fatalf("main.values header = %#v, want length and capacity 6", header)
+	}
+	want := []int64{0, 7, 0, 0, 11, 13}
+	if backing == nil || len(backing.Items) != 1 || !reflect.DeepEqual(backing.Items[0].Ints, want) {
+		t.Fatalf("main.values backing = %#v, want %v", backing, want)
 	}
 }
 

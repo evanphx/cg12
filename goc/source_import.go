@@ -175,6 +175,7 @@ func newSourceLoader(fset *token.FileSet) *sourceLoader {
 			"encoding/base64":                            true,
 			"encoding/binary":                            true,
 			"encoding/csv":                               true,
+			"encoding/gob":                               true,
 			"encoding/hex":                               true,
 			"encoding/json":                              true,
 			"encoding/xml":                               true,

@@ -337,7 +337,7 @@ func compile(name string, src []byte, options compileOptions) (*ir.Module, error
 		if err := addRuntimeInitTask(mod, runtimeInits, initSymbols); err != nil {
 			return nil, err
 		}
-		if err := addModuleInitTasks(mod, moduleInits, initSymbols); err != nil {
+		if err := addModuleInitTasks(mod, moduleInits, initSymbols, dynamicInitializers, dynamicInitializerFunctions); err != nil {
 			return nil, err
 		}
 		mod.Data = append(mod.Data, &ir.Data{Name: ".goc.runtime.dataend", Align: 8, Items: []ir.DataItem{{Sub: ir.SubUB, Ints: []int64{0}}}})
@@ -681,12 +681,30 @@ func sourceAssemblyReferences(units map[string]*sourceUnit) (map[string]bool, er
 	return references, nil
 }
 
-func addModuleInitTasks(mod *ir.Module, packages []packageInit, initSymbols map[*types.Func]string) error {
+func addModuleInitTasks(
+	mod *ir.Module,
+	packages []packageInit,
+	initSymbols map[*types.Func]string,
+	dynamicInitializers map[types.Object]*globalInitializer,
+	dynamicInitializerFunctions map[types.Object]string,
+) error {
 	var backingItems []ir.DataItem
 	var pointerWords []int
 	for packageIndex, packageInitializer := range packages {
+		dynamicSymbols := packageDynamicInitializerSymbols(
+			packageInitializer.info,
+			dynamicInitializers,
+			dynamicInitializerFunctions,
+		)
+		functionCount := len(dynamicSymbols) + len(packageInitializer.declarations)
+		if functionCount == 0 {
+			continue
+		}
 		taskName := fmt.Sprintf(".goc.module.inittask.%d", packageIndex)
-		taskItems := []ir.DataItem{{Sub: ir.SubW, Ints: []int64{0, int64(len(packageInitializer.declarations))}}}
+		taskItems := []ir.DataItem{{Sub: ir.SubW, Ints: []int64{0, int64(functionCount)}}}
+		for _, symbol := range dynamicSymbols {
+			taskItems = append(taskItems, ir.DataItem{Sub: ir.SubL, Sym: symbol})
+		}
 		for _, declaration := range packageInitializer.declarations {
 			object, ok := declaration.info.Defs[declaration.decl.Name].(*types.Func)
 			if !ok || initSymbols[object] == "" {
@@ -695,8 +713,8 @@ func addModuleInitTasks(mod *ir.Module, packages []packageInit, initSymbols map[
 			taskItems = append(taskItems, ir.DataItem{Sub: ir.SubL, Sym: initSymbols[object]})
 		}
 		mod.Data = append(mod.Data, &ir.Data{Name: taskName, Align: 8, Items: taskItems})
+		pointerWords = append(pointerWords, len(backingItems))
 		backingItems = append(backingItems, ir.DataItem{Sub: ir.SubL, Sym: taskName})
-		pointerWords = append(pointerWords, packageIndex)
 	}
 	if len(backingItems) == 0 {
 		return nil
@@ -708,6 +726,33 @@ func addModuleInitTasks(mod *ir.Module, packages []packageInit, initSymbols map[
 		PointerWords: pointerWords,
 	})
 	return nil
+}
+
+func packageDynamicInitializerSymbols(
+	info *types.Info,
+	dynamicInitializers map[types.Object]*globalInitializer,
+	dynamicInitializerFunctions map[types.Object]string,
+) []string {
+	if info == nil {
+		return nil
+	}
+
+	var symbols []string
+	seen := make(map[string]bool)
+	for _, initializer := range info.InitOrder {
+		for _, variable := range initializer.Lhs {
+			if dynamicInitializers[variable] == nil {
+				continue
+			}
+			symbol := dynamicInitializerFunctions[variable]
+			if symbol == "" || seen[symbol] {
+				continue
+			}
+			seen[symbol] = true
+			symbols = append(symbols, symbol)
+		}
+	}
+	return symbols
 }
 
 func addInterfaceItabLinks(mod *ir.Module, itabs map[string]string) {
@@ -888,7 +933,7 @@ func interfaceMethodCandidates(g *gen, reachable []functionDecl, method *types.F
 		if !ok {
 			continue
 		}
-		if reachableMethods[function] {
+		if reachableMethods[function] || reachableMethods[function.Origin()] {
 			if len(index) > 1 {
 				add(function, dynamicType, index)
 			} else {
@@ -2505,22 +2550,31 @@ func (g *gen) globalSlice(id *ast.Ident, object types.Object, slice *types.Slice
 		emitZero()
 		return
 	}
+	elementIndices, literalLength := compositeLiteralIndices(literal, g.info)
 	backingName := name + ".backing"
 	if structure, ok := slice.Elem().Underlying().(*types.Struct); ok {
-		items := make([]ir.DataItem, 0, len(literal.Elts)*structure.NumFields())
-		for index, expression := range literal.Elts {
+		elements := make([][]ir.DataItem, literalLength)
+		for expressionIndex, expression := range literal.Elts {
 			if keyed, ok := expression.(*ast.KeyValueExpr); ok {
 				expression = keyed.Value
 			}
 			element, ok := expression.(*ast.CompositeLit)
 			if !ok {
-				items = append(items, ir.DataItem{Zero: int(typeSize(slice.Elem()))})
+				elements[elementIndices[expressionIndex]] = []ir.DataItem{{Zero: int(typeSize(slice.Elem()))}}
 				continue
 			}
-			elementName := fmt.Sprintf("%s.element.%d", backingName, index)
-			items = append(items, g.staticStructItems(elementName, structure, element)...)
+			elementIndex := elementIndices[expressionIndex]
+			elementName := fmt.Sprintf("%s.element.%d", backingName, elementIndex)
+			elements[elementIndex] = g.staticStructItems(elementName, structure, element)
 		}
-		arrayType := types.NewArray(slice.Elem(), int64(len(literal.Elts)))
+		items := make([]ir.DataItem, 0, literalLength*structure.NumFields())
+		for _, elementItems := range elements {
+			if elementItems == nil {
+				elementItems = []ir.DataItem{{Zero: int(typeSize(slice.Elem()))}}
+			}
+			items = append(items, elementItems...)
+		}
+		arrayType := types.NewArray(slice.Elem(), int64(literalLength))
 		g.mod.Data = append(g.mod.Data, &ir.Data{
 			Name:         backingName,
 			Align:        int(typeAlign(slice.Elem())),
@@ -2529,14 +2583,14 @@ func (g *gen) globalSlice(id *ast.Ident, object types.Object, slice *types.Slice
 		})
 		emitHeader([]ir.DataItem{
 			{Sub: ir.SubL, Sym: backingName},
-			{Sub: ir.SubL, Ints: []int64{int64(len(literal.Elts)), int64(len(literal.Elts))}},
+			{Sub: ir.SubL, Ints: []int64{int64(literalLength), int64(literalLength)}},
 		})
 		return
 	}
 	if pointer, ok := slice.Elem().Underlying().(*types.Pointer); ok {
 		if structure, ok := pointer.Elem().Underlying().(*types.Struct); ok {
-			items := make([]ir.DataItem, 0, len(literal.Elts))
-			for index, expression := range literal.Elts {
+			items := make([]ir.DataItem, literalLength)
+			for expressionIndex, expression := range literal.Elts {
 				var value *ast.CompositeLit
 				switch expression := expression.(type) {
 				case *ast.CompositeLit:
@@ -2546,23 +2600,24 @@ func (g *gen) globalSlice(id *ast.Ident, object types.Object, slice *types.Slice
 						value, _ = expression.X.(*ast.CompositeLit)
 					}
 				}
+				elementIndex := elementIndices[expressionIndex]
 				if value == nil {
-					items = append(items, ir.DataItem{Sub: ir.SubL, Ints: []int64{0}})
+					items[elementIndex] = ir.DataItem{Sub: ir.SubL, Ints: []int64{0}}
 					continue
 				}
-				elementName := fmt.Sprintf("%s.element.%d", backingName, index)
+				elementName := fmt.Sprintf("%s.element.%d", backingName, elementIndex)
 				g.mod.Data = append(g.mod.Data, &ir.Data{
 					Name:         elementName,
 					Align:        8,
 					Items:        g.staticStructItems(elementName, structure, value),
 					PointerWords: pointerWordIndices(structure),
 				})
-				items = append(items, ir.DataItem{Sub: ir.SubL, Sym: elementName})
+				items[elementIndex] = ir.DataItem{Sub: ir.SubL, Sym: elementName}
 			}
-			g.mod.Data = append(g.mod.Data, &ir.Data{Name: backingName, Align: 8, Items: items, PointerWords: pointerWordIndices(types.NewArray(slice.Elem(), int64(len(literal.Elts))))})
+			g.mod.Data = append(g.mod.Data, &ir.Data{Name: backingName, Align: 8, Items: items, PointerWords: pointerWordIndices(types.NewArray(slice.Elem(), int64(literalLength)))})
 			emitHeader([]ir.DataItem{
 				{Sub: ir.SubL, Sym: backingName},
-				{Sub: ir.SubL, Ints: []int64{int64(len(literal.Elts)), int64(len(literal.Elts))}},
+				{Sub: ir.SubL, Ints: []int64{int64(literalLength), int64(literalLength)}},
 			})
 			return
 		}
@@ -2572,18 +2627,19 @@ func (g *gen) globalSlice(id *ast.Ident, object types.Object, slice *types.Slice
 	elementBasic, basicElements := slice.Elem().Underlying().(*types.Basic)
 	switch {
 	case basicElements && elementBasic.Kind() == types.String:
-		items = make([]ir.DataItem, 0, len(literal.Elts)*2)
-		for index, expression := range literal.Elts {
+		elements := make([][]ir.DataItem, literalLength)
+		for expressionIndex, expression := range literal.Elts {
 			if keyed, ok := expression.(*ast.KeyValueExpr); ok {
 				expression = keyed.Value
 			}
+			elementIndex := elementIndices[expressionIndex]
 			value := g.info.Types[expression].Value
 			if value == nil || value.Kind() != constant.String {
-				items = append(items, ir.DataItem{Zero: int(typeSize(slice.Elem()))})
+				elements[elementIndex] = []ir.DataItem{{Zero: int(typeSize(slice.Elem()))}}
 				continue
 			}
 			contents := constant.StringVal(value)
-			textName := fmt.Sprintf("%s.element.%d", backingName, index)
+			textName := fmt.Sprintf("%s.element.%d", backingName, elementIndex)
 			g.mod.Data = append(g.mod.Data, &ir.Data{
 				Name:  textName,
 				Align: 1,
@@ -2591,21 +2647,28 @@ func (g *gen) globalSlice(id *ast.Ident, object types.Object, slice *types.Slice
 					{Sub: ir.SubUB, Str: contents},
 				},
 			})
-			items = append(items,
+			elements[elementIndex] = []ir.DataItem{
 				ir.DataItem{Sub: ir.SubL, Sym: textName},
 				ir.DataItem{Sub: ir.SubL, Ints: []int64{int64(len(contents))}},
-			)
+			}
 		}
-		backingPointerWords = pointerWordIndices(types.NewArray(slice.Elem(), int64(len(literal.Elts))))
+		items = make([]ir.DataItem, 0, literalLength*2)
+		for _, elementItems := range elements {
+			if elementItems == nil {
+				elementItems = []ir.DataItem{{Zero: int(typeSize(slice.Elem()))}}
+			}
+			items = append(items, elementItems...)
+		}
+		backingPointerWords = pointerWordIndices(types.NewArray(slice.Elem(), int64(literalLength)))
 	case basicElements && elementBasic.Info()&(types.IsInteger|types.IsBoolean) != 0:
-		values := make([]int64, len(literal.Elts))
-		for index, expression := range literal.Elts {
+		values := make([]int64, literalLength)
+		for expressionIndex, expression := range literal.Elts {
 			if keyed, ok := expression.(*ast.KeyValueExpr); ok {
 				expression = keyed.Value
 			}
 			value := g.info.Types[expression].Value
 			if value != nil {
-				values[index] = constInt(value)
+				values[elementIndices[expressionIndex]] = constInt(value)
 			}
 		}
 		sub, ok := subOf(slice.Elem())
@@ -2618,8 +2681,8 @@ func (g *gen) globalSlice(id *ast.Ident, object types.Object, slice *types.Slice
 		}
 		items = []ir.DataItem{{Sub: sub, Ints: values}}
 	case basicElements && elementBasic.Info()&types.IsFloat != 0:
-		values := make([]float64, len(literal.Elts))
-		for index, expression := range literal.Elts {
+		values := make([]float64, literalLength)
+		for expressionIndex, expression := range literal.Elts {
 			if keyed, ok := expression.(*ast.KeyValueExpr); ok {
 				expression = keyed.Value
 			}
@@ -2628,7 +2691,7 @@ func (g *gen) globalSlice(id *ast.Ident, object types.Object, slice *types.Slice
 				continue
 			}
 			converted, _ := constant.Float64Val(value)
-			values[index] = converted
+			values[elementIndices[expressionIndex]] = converted
 		}
 		sub := ir.SubD
 		if elementBasic.Kind() == types.Float32 {
@@ -2636,14 +2699,31 @@ func (g *gen) globalSlice(id *ast.Ident, object types.Object, slice *types.Slice
 		}
 		items = []ir.DataItem{{Sub: sub, Flts: values}}
 	default:
-		items = []ir.DataItem{{Zero: int(typeSize(slice.Elem())) * len(literal.Elts)}}
-		backingPointerWords = pointerWordIndices(types.NewArray(slice.Elem(), int64(len(literal.Elts))))
+		items = []ir.DataItem{{Zero: int(typeSize(slice.Elem())) * literalLength}}
+		backingPointerWords = pointerWordIndices(types.NewArray(slice.Elem(), int64(literalLength)))
 	}
 	g.mod.Data = append(g.mod.Data, &ir.Data{Name: backingName, Align: 8, Items: items, PointerWords: backingPointerWords})
 	emitHeader([]ir.DataItem{
 		{Sub: ir.SubL, Sym: backingName},
-		{Sub: ir.SubL, Ints: []int64{int64(len(literal.Elts)), int64(len(literal.Elts))}},
+		{Sub: ir.SubL, Ints: []int64{int64(literalLength), int64(literalLength)}},
 	})
+}
+
+func compositeLiteralIndices(literal *ast.CompositeLit, info *types.Info) ([]int, int) {
+	indices := make([]int, len(literal.Elts))
+	nextIndex := 0
+	literalLength := 0
+	for expressionIndex, expression := range literal.Elts {
+		if keyed, ok := expression.(*ast.KeyValueExpr); ok {
+			nextIndex = int(constInt(info.Types[keyed.Key].Value))
+		}
+		indices[expressionIndex] = nextIndex
+		nextIndex++
+		if nextIndex > literalLength {
+			literalLength = nextIndex
+		}
+	}
+	return indices, literalLength
 }
 
 func (g *gen) staticStructItems(name string, structure *types.Struct, literal *ast.CompositeLit) []ir.DataItem {
@@ -3634,6 +3714,67 @@ func (g *gen) normalizeCallInterfaces(arguments []ir.Ref, signature *types.Signa
 		return arguments
 	}
 	normalized := append([]ir.Ref(nil), arguments...)
+	argumentTypes := make([]types.Type, 0, signature.Params().Len()+1)
+	if receiverType != nil {
+		argumentTypes = append(argumentTypes, receiverType)
+	}
+	for parameterIndex := 0; parameterIndex < signature.Params().Len(); parameterIndex++ {
+		argumentTypes = append(argumentTypes, signature.Params().At(parameterIndex).Type())
+	}
+
+	type preservedArgument struct {
+		index     int
+		storage   ir.Ref
+		valueType types.Type
+		class     ir.Cls
+		slice     bool
+	}
+	var preserved []preservedArgument
+	hasInterface := false
+	for _, valueType := range argumentTypes {
+		if isInterfaceValue(valueType) {
+			hasInterface = true
+			break
+		}
+	}
+	if hasInterface {
+		for argumentIndex, valueType := range argumentTypes {
+			if argumentIndex >= len(normalized) || isInterfaceValue(valueType) {
+				continue
+			}
+			value := normalized[argumentIndex]
+			if isSliceType(valueType) {
+				storage := g.localAllocTyped(valueType)
+				g.store(value, storage, valueType)
+				preserved = append(preserved, preservedArgument{
+					index:     argumentIndex,
+					storage:   storage,
+					valueType: valueType,
+					slice:     true,
+				})
+				continue
+			}
+			if value.Kind == ir.RefAggregate {
+				continue
+			}
+			class := g.fn.ClassOf(value)
+			alignment := class.Size()
+			if alignment < 4 {
+				alignment = 4
+			}
+			storage := g.localAlloc(alignment, class.Size())
+			if class == ir.ClsP {
+				g.markStackPointerWord(storage, 0)
+			}
+			g.cur.Store(value, storage)
+			preserved = append(preserved, preservedArgument{
+				index:   argumentIndex,
+				storage: storage,
+				class:   class,
+			})
+		}
+	}
+
 	argumentIndex := 0
 	normalize := func(valueType types.Type) {
 		if argumentIndex >= len(normalized) {
@@ -3657,6 +3798,13 @@ func (g *gen) normalizeCallInterfaces(arguments []ir.Ref, signature *types.Signa
 	}
 	for parameterIndex := 0; parameterIndex < signature.Params().Len(); parameterIndex++ {
 		normalize(signature.Params().At(parameterIndex).Type())
+	}
+	for _, argument := range preserved {
+		if argument.slice {
+			normalized[argument.index] = g.load(argument.storage, argument.valueType)
+			continue
+		}
+		normalized[argument.index] = g.cur.Load(argument.class, argument.storage)
 	}
 	return normalized
 }
@@ -4567,6 +4715,32 @@ func (g *gen) adaptInterfaceToInterface(value ir.Ref, sourceType, targetType typ
 	g.markStackPointerWord(descriptor, 0)
 	g.markStackPointerWord(descriptor, 8)
 	g.markTransientInterfaceDescriptor(descriptor)
+
+	if types.Identical(sourceType, targetType) {
+		// Assignment between identical interface types preserves the existing
+		// type and data words. Copy them into fresh descriptor storage: returning
+		// the source descriptor directly could retain a pointer to a temporary
+		// call-result or parameter header.
+		nilValue := g.block("interfacecopynil")
+		nonNilValue := g.block("interfacecopynonnil")
+		done := g.block("interfacecopyend")
+		isNil := g.interfaceIsNil(value)
+		g.cur.Jnz(isNil, nilValue, nonNilValue)
+
+		g.cur = nilValue
+		g.cur.Store(g.fn.ConstInt(ir.ClsP, 0), descriptor)
+		g.cur.Store(g.fn.ConstInt(ir.ClsP, 0), g.offset(descriptor, 8))
+		g.cur.Goto(done)
+
+		g.cur = nonNilValue
+		g.cur.Store(g.cur.Load(ir.ClsP, value), descriptor)
+		data := g.cur.Load(ir.ClsP, g.offset(value, 8))
+		g.cur.Store(data, g.offset(descriptor, 8))
+		g.cur.Goto(done)
+
+		g.cur = done
+		return descriptor
+	}
 
 	nilValue := g.block("interfaceconvertnil")
 	nonNilValue := g.block("interfaceconvertnonnil")

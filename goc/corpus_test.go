@@ -717,6 +717,75 @@ func Test() int {
 `, 42)
 }
 
+func TestRuntimePackageInitializersRunInDeclarationOrder(t *testing.T) {
+	runExecutableCase(t, `package main
+
+var initializationStep int
+var first = initialize(1)
+var second = initialize(first + 1)
+
+func initialize(step int) int {
+	if initializationStep != step-1 {
+		panic("global initializer ran out of order")
+	}
+	initializationStep = step
+	return step
+}
+
+func init() {
+	if first != 1 || second != 2 || initializationStep != 2 {
+		panic("init ran before global initializers")
+	}
+	initializationStep = 3
+}
+
+func Test() int {
+	if initializationStep != 3 {
+		return -1
+	}
+	return 42
+}
+`, 42)
+}
+
+func TestRuntimeCallArgumentsSurviveInterfaceNormalization(t *testing.T) {
+	runExecutableCase(t, `package main
+
+func inspect(err error, pointer *int, marker int, bytes []byte) int {
+	if err != nil {
+		return -1
+	}
+	if pointer == nil || *pointer != 7 {
+		return -2
+	}
+	if marker != 11 {
+		return -3
+	}
+	if len(bytes) != 4 || cap(bytes) != 4 {
+		return -4
+	}
+	return marker + *pointer + int(bytes[0]+bytes[1]+bytes[2]+bytes[3])
+}
+
+func Test() int {
+	value := 7
+	array := [4]byte{1, 2, 3, 18}
+	return inspect(nil, &value, 11, array[:])
+}
+`, 42)
+}
+
+func TestRuntimeKeyedGlobalSliceLiteral(t *testing.T) {
+	runExecutableCase(t, `package main
+
+var values = []uint8{1: 7, 4: 11, 13}
+
+func Test() int {
+	return len(values) + int(values[1]+values[4]+values[5]) + 5
+}
+`, 42)
+}
+
 func TestRuntimeReturnedSlicePromotesCallerArray(t *testing.T) {
 	runExecutableCase(t, `package main
 

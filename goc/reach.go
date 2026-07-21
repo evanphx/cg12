@@ -19,6 +19,7 @@ type functionDecl struct {
 
 type packageInit struct {
 	path         string
+	info         *types.Info
 	declarations []functionDecl
 }
 
@@ -78,9 +79,7 @@ func moduleInitDeclarations(rootFiles []*ast.File, rootInfo *types.Info, rootPkg
 			info = unit.info
 		}
 		declarations := packageInitDeclarations(files, info, pkg, initSymbols)
-		if len(declarations) > 0 {
-			packages = append(packages, packageInit{path: pkg.Path(), declarations: declarations})
-		}
+		packages = append(packages, packageInit{path: pkg.Path(), info: info, declarations: declarations})
 	}
 	visit(rootPkg)
 	return packages
