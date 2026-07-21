@@ -148,6 +148,18 @@ func (g *colorGraph) build(cfg *analysis.CFG, live *analysis.Liveness) {
 				g.mv[msrc] = append(g.mv[msrc], mdst)
 			}
 
+			// A two-operand instruction (dst = dst OP src) is emitted as
+			// `mov dst, arg0; op dst, arg1`. Bias the result toward arg0's register so
+			// that leading move becomes reg-to-self and the emitter drops it -- the x86
+			// equivalent of coalescing. Only a preference: when arg0 is still live after
+			// (it interferes with the result), colouring keeps them apart and the move
+			// stays, as it must.
+			if src, ok := twoAddressSrc(in); ok {
+				dst := int(in.To.ID)
+				g.mv[dst] = append(g.mv[dst], src)
+				g.mv[src] = append(g.mv[src], dst)
+			}
+
 			// A value live across a call prefers a callee-saved register (no
 			// save/restore) but may use a caller-saved one, which insertCallerSaves then
 			// saves and restores around each crossed call. Accumulate the frequency of
@@ -435,6 +447,29 @@ func instrUses(in *ir.Instr) []int {
 		}
 	}
 	return u
+}
+
+// twoAddressSrc returns the first-operand temp a two-address instruction's result
+// is computed in place from (dst = dst OP src on x86), so the colourer can bias the
+// two toward one register and let the leading `mov dst, src` drop. Integer division
+// and remainder are excluded: they use the fixed RDX:RAX pair, not a two-address
+// destination.
+func twoAddressSrc(in *ir.Instr) (int, bool) {
+	switch in.Op {
+	case ir.OAdd, ir.OSub, ir.OMul, ir.OAnd, ir.OOr, ir.OXor, ir.ONeg,
+		ir.OShl, ir.OShr, ir.OSar:
+		// two-address for both integer and float
+	case ir.ODiv:
+		if !in.Cls.IsFloat() {
+			return 0, false // integer division is fixed-register, not two-address
+		}
+	default:
+		return 0, false
+	}
+	if in.To.Kind == ir.RefTemp && len(in.Args) >= 1 && in.Args[0].Kind == ir.RefTemp {
+		return int(in.Args[0].ID), true
+	}
+	return 0, false
 }
 
 // moveEnds reports whether an instruction is a register-to-register move and
