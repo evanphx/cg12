@@ -18,6 +18,10 @@ type allocation struct {
 	intervals []*interval         // per-temp live ranges in the numbering
 	posInstr  []*ir.Instr         // numbering position -> instruction (nil at block ends)
 	safeRoots map[*ir.Instr][]int // safepoint (call or OSafepoint) -> live GC-ref temps
+
+	// remat maps a spilled-but-rematerialisable temp to the rule for recomputing it
+	// at each use (it has no spill slot).
+	remat map[int]rematRule
 }
 
 // interval is a temporary's live range over a linear instruction numbering,
@@ -84,6 +88,10 @@ func regAlloc(f *ir.Func) (*allocation, error) {
 	if err := insertCallerSaves(f, cfg, live, alloc); err != nil {
 		return nil, err
 	}
+	// insertCallerSaves rebuilds block instruction slices, relocating the OAlloc
+	// instructions a rematerialised alloca-address rule points at; re-resolve those
+	// pointers so the frame offset lookup matches the final instruction.
+	refreshRematAllocas(f, alloc.remat)
 
 	cfg = analysis.BuildCFG(f)
 	live = cfg.Liveness()

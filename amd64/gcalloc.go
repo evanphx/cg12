@@ -28,21 +28,34 @@ import (
 func colorAlloc(f *ir.Func, cfg *analysis.CFG, live *analysis.Liveness, freq *analysis.Freq) (*allocation, error) {
 	g := newColorGraph(f)
 	g.freq = freq
+	g.remat = rematRules(f)
 	g.build(cfg, live)
-	return g.assign()
+	// A rematerialisable value is cheap to "spill" -- one instruction per use, no
+	// memory -- so make it a preferred spill victim.
+	for t := range f.Temps {
+		if _, ok := g.remat[t]; ok {
+			g.cost[t] *= 0.5
+		}
+	}
+	alloc, err := g.assign()
+	if alloc != nil {
+		alloc.remat = g.remat
+	}
+	return alloc, err
 }
 
 type colorGraph struct {
 	f    *ir.Func
 	freq *analysis.Freq // per-block execution frequency, for the spill cost model
 
-	adj       []map[int]bool // temp id -> interfering temp ids (nodes only; same class)
-	forb      []map[Reg]bool // temp id -> physical registers it may not use
-	node      []bool         // temp id -> is a colourable node (used, not pre-coloured)
-	gc        []bool         // temp id -> must be spilled (GC ref live across a safepoint)
-	mv        [][]int        // temp id -> temps it is copied to/from (coalescing bias)
-	cost      []float64      // temp id -> spill cost (references weighted by block frequency)
-	crossFreq []float64      // temp id -> summed frequency of the calls it is live across
+	adj       []map[int]bool    // temp id -> interfering temp ids (nodes only; same class)
+	forb      []map[Reg]bool    // temp id -> physical registers it may not use
+	node      []bool            // temp id -> is a colourable node (used, not pre-coloured)
+	gc        []bool            // temp id -> must be spilled (GC ref live across a safepoint)
+	mv        [][]int           // temp id -> temps it is copied to/from (coalescing bias)
+	cost      []float64         // temp id -> spill cost (references weighted by block frequency)
+	crossFreq []float64         // temp id -> summed frequency of the calls it is live across
+	remat     map[int]rematRule // temps recomputable at each use instead of reloaded
 }
 
 func newColorGraph(f *ir.Func) *colorGraph {
@@ -211,6 +224,11 @@ func (g *colorGraph) assign() (*allocation, error) {
 	spill := func(t int) {
 		tt := f.Temps[t]
 		tt.Reg = ir.NoReg
+		// A rematerialisable value needs no slot: the emitter recomputes it at each use.
+		if _, ok := g.remat[t]; ok {
+			tt.Slot = -1
+			return
+		}
 		if _, ok := slotOf[t]; !ok {
 			slotOf[t] = alloc.spillBytes
 			alloc.spillBytes += 8

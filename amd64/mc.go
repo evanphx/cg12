@@ -675,6 +675,7 @@ const (
 	locMem
 	locImm
 	locSym
+	locFrameAddr // the ADDRESS base+off (an lea), not a load from it: a rematerialised alloca
 )
 
 // loc is a value's home: a register, a memory cell (base+off), an immediate, or
@@ -709,6 +710,11 @@ func (m *mc) refLoc(r ir.Ref) loc {
 		if t.Reg != ir.NoReg {
 			return regLoc(Reg(t.Reg), size, fl)
 		}
+		if m.alloc != nil {
+			if rule, ok := m.alloc.remat[int(r.ID)]; ok {
+				return m.rematLoc(rule, size, fl)
+			}
+		}
 		return memLoc(RBP, m.slotAddr(t.Slot), size, fl)
 	case ir.RefConst:
 		c := m.f.Consts[r.ID]
@@ -726,6 +732,35 @@ func (m *mc) refLoc(r ir.Ref) loc {
 	}
 	m.fail(fmt.Errorf("amd64: unsupported operand ref kind %d", r.Kind))
 	return loc{}
+}
+
+// rematLoc is the location a rematerialisable temp resolves to: its source
+// computation (an immediate, a symbol address, or a frame-slot address), which the
+// move machinery then materialises at the point of use.
+func (m *mc) rematLoc(rule rematRule, size int, fl bool) loc {
+	switch rule.kind {
+	case rematConst:
+		return loc{kind: locImm, val: rule.c.Int, size: size, float: fl}
+	case rematSym:
+		return loc{kind: locSym, sym: rule.c.Sym, symoff: rule.c.Int, size: 8}
+	case rematAlloca:
+		return loc{kind: locFrameAddr, base: RBP, off: -int32(m.allocOff[rule.in]), size: 8}
+	}
+	m.fail(fmt.Errorf("amd64: unknown remat rule kind %d", rule.kind))
+	return loc{}
+}
+
+// isRematDef reports whether in defines a rematerialised temp -- one recomputed at
+// each use and given no register or slot -- so its defining instruction is skipped.
+func (m *mc) isRematDef(in *ir.Instr) bool {
+	if in.To.Kind != ir.RefTemp || m.alloc == nil {
+		return false
+	}
+	if m.f.Temps[in.To.ID].Reg != ir.NoReg {
+		return false
+	}
+	_, ok := m.alloc.remat[int(in.To.ID)]
+	return ok
 }
 
 func w64(size int) bool { return size == 8 }
@@ -776,6 +811,8 @@ func (m *mc) moveToReg(dst, src loc) {
 		}
 	case locSym:
 		m.materializeSym(dst.reg, src.sym, src.symoff, src.tls)
+	case locFrameAddr:
+		m.emit(x64.Lea(true, dst.reg.mreg(), x64.At(src.base.mreg(), src.off)))
 	}
 }
 
@@ -806,6 +843,9 @@ func (m *mc) moveToMem(dst, src loc) {
 		}
 	case locSym:
 		m.materializeSym(gpScratch0, src.sym, src.symoff, src.tls)
+		m.emit(x64.Store(64, gpScratch0.mreg(), mem))
+	case locFrameAddr:
+		m.emit(x64.Lea(true, gpScratch0.mreg(), x64.At(src.base.mreg(), src.off)))
 		m.emit(x64.Store(64, gpScratch0.mreg(), mem))
 	}
 }
@@ -994,6 +1034,11 @@ func (m *mc) block(b *ir.Block) {
 		if in == fuseCmp {
 			// Emit the comparison as flags only (no setcc); term() branches on them.
 			(&xsel{f: m.f, b: &mcXasm{m: m}}).cmpFlags(in)
+			m.instrPC[in] = [2]uint64{start, uint64(m.prog.Len())}
+			continue
+		}
+		if m.isRematDef(in) {
+			// The value is recomputed at each use; its definition emits nothing.
 			m.instrPC[in] = [2]uint64{start, uint64(m.prog.Len())}
 			continue
 		}
