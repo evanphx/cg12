@@ -4,8 +4,8 @@ import (
 	"fmt"
 	"math/big"
 
+	moderncc "github.com/evanphx/cg12/internal/cc"
 	"github.com/evanphx/cg12/ir"
-	"modernc.org/cc/v4"
 )
 
 // long double is a 128-bit IEEE quad on AArch64. There is no hardware quad, so
@@ -27,7 +27,7 @@ import (
 // So amd64 is refused rather than mis-served. See checkLongDouble.
 
 // isLongDouble reports whether t is the long double type.
-func isLongDouble(t cc.Type) bool { return t.Kind() == cc.LongDouble }
+func isLongDouble(t moderncc.Type) bool { return t.Kind() == moderncc.LongDouble }
 
 // checkLongDouble refuses a long double on a target whose long double is not the
 // 128-bit quad this file implements.
@@ -56,11 +56,11 @@ func (g *gen) quadAgg() *ir.AggType {
 
 // aggTypeOf returns the aggregate type used to pass t by value: the quad type for
 // a long double, otherwise the struct/union's own type.
-func (g *gen) aggTypeOf(t cc.Type) *ir.AggType {
+func (g *gen) aggTypeOf(t moderncc.Type) *ir.AggType {
 	if isLongDouble(t) {
 		return g.quadAgg()
 	}
-	if cc.IsComplexType(t) {
+	if moderncc.IsComplexType(t) {
 		return g.complexAgg(t)
 	}
 	if isInt128(t) {
@@ -143,11 +143,11 @@ func (g *gen) quadCompare(op string, a, b ir.Ref) ir.Ref {
 }
 
 // toQuad converts a scalar value to a quad, returning the result's address.
-func (g *gen) toQuad(v ir.Ref, from cc.Type) ir.Ref {
+func (g *gen) toQuad(v ir.Ref, from moderncc.Type) ir.Ref {
 	switch {
-	case from.Kind() == cc.Double:
+	case from.Kind() == moderncc.Double:
 		return g.softcall("__extenddftf2", true, 0, sa(v))
-	case from.Kind() == cc.Float:
+	case from.Kind() == moderncc.Float:
 		return g.softcall("__extendsftf2", true, 0, sa(v))
 	case wide(clsOf(from)): // 64-bit integer
 		if signed(from) {
@@ -163,13 +163,13 @@ func (g *gen) toQuad(v ir.Ref, from cc.Type) ir.Ref {
 }
 
 // fromQuad converts a quad (address a) to a scalar of type to.
-func (g *gen) fromQuad(a ir.Ref, to cc.Type) ir.Ref {
+func (g *gen) fromQuad(a ir.Ref, to moderncc.Type) ir.Ref {
 	switch {
-	case to.Kind() == cc.Double:
+	case to.Kind() == moderncc.Double:
 		return g.softcall("__trunctfdf2", false, ir.ClsD, qa(a))
-	case to.Kind() == cc.Float:
+	case to.Kind() == moderncc.Float:
 		return g.softcall("__trunctfsf2", false, ir.ClsS, qa(a))
-	case to.Kind() == cc.Bool:
+	case to.Kind() == moderncc.Bool:
 		c := g.softcall("__netf2", false, ir.ClsW, qa(a), qa(g.quadZero()))
 		return g.cur.Cmp(ir.CmpNe, ir.ClsW, c, g.fn.Word(0))
 	case wide(clsOf(to)): // 64-bit integer

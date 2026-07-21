@@ -4,14 +4,14 @@ import (
 	"math"
 	"strings"
 
+	moderncc "github.com/evanphx/cg12/internal/cc"
 	"github.com/evanphx/cg12/ir"
-	"modernc.org/cc/v4"
 )
 
 // builtinCall lowers the GCC/Clang compiler builtins that ordinary code and
 // system libraries lean on, so the front end need not emit an out-of-line call
 // to a nonexistent function. It reports whether it handled the call.
-func (g *gen) builtinCall(n *cc.PostfixExpression) (ir.Ref, bool) {
+func (g *gen) builtinCall(n *moderncc.PostfixExpression) (ir.Ref, bool) {
 	name := calleeIdent(n)
 	args := builtinArgs(n)
 
@@ -174,8 +174,8 @@ func (g *gen) builtinCall(n *cc.PostfixExpression) (ir.Ref, bool) {
 }
 
 // builtinArgs collects a call's argument expression nodes, head first.
-func builtinArgs(n *cc.PostfixExpression) []cc.ExpressionNode {
-	var out []cc.ExpressionNode
+func builtinArgs(n *moderncc.PostfixExpression) []moderncc.ExpressionNode {
+	var out []moderncc.ExpressionNode
 	for l := n.ArgumentExpressionList; l != nil; l = l.ArgumentExpressionList {
 		out = append(out, l.AssignmentExpression)
 	}
@@ -183,8 +183,8 @@ func builtinArgs(n *cc.PostfixExpression) []cc.ExpressionNode {
 }
 
 // pointee returns the type a pointer points at, or int as a harmless fallback.
-func pointee(t cc.Type) cc.Type {
-	if pt, ok := t.(*cc.PointerType); ok {
+func pointee(t moderncc.Type) moderncc.Type {
+	if pt, ok := t.(*moderncc.PointerType); ok {
 		return pt.Elem()
 	}
 	return t
@@ -230,7 +230,7 @@ func (g *gen) bswap(v ir.Ref, width int) ir.Ref {
 // The result type's signedness picks the test: the signed and unsigned forms are
 // entirely different questions, and asking the signed one about unsigned operands
 // answers no for every value that only overflows unsigned.
-func (g *gen) overflowBuiltin(name string, args []cc.ExpressionNode) ir.Ref {
+func (g *gen) overflowBuiltin(name string, args []moderncc.ExpressionNode) ir.Ref {
 	elem := pointee(args[2].Type())
 	cls := clsOf(elem)
 	a := g.convert(g.genExpr(args[0]), args[0].Type(), elem)

@@ -4,11 +4,11 @@ import (
 	"fmt"
 	"sort"
 
+	moderncc "github.com/evanphx/cg12/internal/cc"
 	"github.com/evanphx/cg12/ir"
-	"modernc.org/cc/v4"
 )
 
-func (g *gen) genCompound(cs *cc.CompoundStatement) {
+func (g *gen) genCompound(cs *moderncc.CompoundStatement) {
 	if cs == nil {
 		return
 	}
@@ -39,10 +39,10 @@ func (g *gen) genCompound(cs *cc.CompoundStatement) {
 
 // blockDeclaresVLA reports whether a compound statement directly declares a
 // variable-length array (a nested block has its own scope handling).
-func blockDeclaresVLA(cs *cc.CompoundStatement) bool {
+func blockDeclaresVLA(cs *moderncc.CompoundStatement) bool {
 	for l := cs.BlockItemList; l != nil; l = l.BlockItemList {
 		bi := l.BlockItem
-		if bi.Case != cc.BlockItemDecl || bi.Declaration == nil || bi.Declaration.Case != cc.DeclarationDecl {
+		if bi.Case != moderncc.BlockItemDecl || bi.Declaration == nil || bi.Declaration.Case != moderncc.DeclarationDecl {
 			continue
 		}
 		for il := bi.Declaration.InitDeclaratorList; il != nil; il = il.InitDeclaratorList {
@@ -50,7 +50,7 @@ func blockDeclaresVLA(cs *cc.CompoundStatement) bool {
 			if dcl == nil || dcl.IsStatic() {
 				continue
 			}
-			if at, ok := dcl.Type().(*cc.ArrayType); ok && at.IsVLA() {
+			if at, ok := dcl.Type().(*moderncc.ArrayType); ok && at.IsVLA() {
 				return true
 			}
 		}
@@ -74,34 +74,34 @@ func (g *gen) vlaUnwind(depth int) {
 // a plain { } block reached only by computed goto, and skipping that block as
 // unreachable would drop every handler. This mirrors labelsIn's traversal, since
 // the same nesting hides a label from either.
-func labeledItem(bi *cc.BlockItem) bool {
-	return bi.Case == cc.BlockItemStmt && stmtHasLabel(bi.Statement)
+func labeledItem(bi *moderncc.BlockItem) bool {
+	return bi.Case == moderncc.BlockItemStmt && stmtHasLabel(bi.Statement)
 }
 
 // stmtHasLabel reports whether a statement contains a label at any depth,
 // descending the same compound/selection/iteration nesting labelsIn collects
 // labels through.
-func stmtHasLabel(s *cc.Statement) bool {
+func stmtHasLabel(s *moderncc.Statement) bool {
 	if s == nil {
 		return false
 	}
 	switch s.Case {
-	case cc.StatementLabeled:
+	case moderncc.StatementLabeled:
 		return true
-	case cc.StatementCompound:
+	case moderncc.StatementCompound:
 		cs := s.CompoundStatement
 		if cs == nil {
 			return false
 		}
 		for l := cs.BlockItemList; l != nil; l = l.BlockItemList {
-			if bi := l.BlockItem; bi.Case == cc.BlockItemStmt && stmtHasLabel(bi.Statement) {
+			if bi := l.BlockItem; bi.Case == moderncc.BlockItemStmt && stmtHasLabel(bi.Statement) {
 				return true
 			}
 		}
-	case cc.StatementSelection:
+	case moderncc.StatementSelection:
 		return stmtHasLabel(s.SelectionStatement.Statement) ||
 			stmtHasLabel(s.SelectionStatement.Statement2)
-	case cc.StatementIteration:
+	case moderncc.StatementIteration:
 		return stmtHasLabel(s.IterationStatement.Statement)
 	}
 	return false
@@ -111,8 +111,8 @@ func stmtHasLabel(s *cc.Statement) bool {
 // underneath, which is a statement expression's value. The labels come back so
 // the caller can start their blocks first: they are jump targets, and the
 // expression is what the last of them runs.
-func trailingExpr(s *cc.Statement) (labels []*cc.LabeledStatement, expr cc.ExpressionNode, ok bool) {
-	for s != nil && s.Case == cc.StatementLabeled {
+func trailingExpr(s *moderncc.Statement) (labels []*moderncc.LabeledStatement, expr moderncc.ExpressionNode, ok bool) {
+	for s != nil && s.Case == moderncc.StatementLabeled {
 		ls := s.LabeledStatement
 		if ls == nil {
 			return nil, nil, false
@@ -120,7 +120,7 @@ func trailingExpr(s *cc.Statement) (labels []*cc.LabeledStatement, expr cc.Expre
 		labels = append(labels, ls)
 		s = ls.Statement
 	}
-	if s == nil || s.Case != cc.StatementExpr {
+	if s == nil || s.Case != moderncc.StatementExpr {
 		return nil, nil, false
 	}
 	es := s.ExpressionStatement
@@ -133,7 +133,7 @@ func trailingExpr(s *cc.Statement) (labels []*cc.LabeledStatement, expr cc.Expre
 // genStmtExpr evaluates a GNU statement expression ({ ... }): its statements run
 // in a fresh scope, and the value of the whole expression is the value of the
 // final expression statement.
-func (g *gen) genStmtExpr(cs *cc.CompoundStatement) ir.Ref {
+func (g *gen) genStmtExpr(cs *moderncc.CompoundStatement) ir.Ref {
 	if cs == nil {
 		return ir.R
 	}
@@ -158,7 +158,7 @@ func (g *gen) genStmtExpr(cs *cc.CompoundStatement) ir.Ref {
 	result := ir.R
 	for l := cs.BlockItemList; l != nil; l = l.BlockItemList {
 		bi := l.BlockItem
-		if l.BlockItemList == nil && bi.Case == cc.BlockItemStmt && bi.Statement != nil {
+		if l.BlockItemList == nil && bi.Case == moderncc.BlockItemStmt && bi.Statement != nil {
 			if labels, es, ok := trailingExpr(bi.Statement); ok {
 				// The value is the final expression, which may sit behind labels:
 				// `({ ...; done: x; })` is legal and its value is x. Testing for a
@@ -179,23 +179,23 @@ func (g *gen) genStmtExpr(cs *cc.CompoundStatement) ir.Ref {
 	return result
 }
 
-func (g *gen) genBlockItem(bi *cc.BlockItem) {
+func (g *gen) genBlockItem(bi *moderncc.BlockItem) {
 	switch bi.Case {
-	case cc.BlockItemDecl:
+	case moderncc.BlockItemDecl:
 		g.at(bi.Declaration)
 		g.genLocalDecl(bi.Declaration)
-	case cc.BlockItemStmt:
+	case moderncc.BlockItemStmt:
 		g.genStmt(bi.Statement)
 	}
 }
 
-func (g *gen) genLocalDecl(d *cc.Declaration) {
+func (g *gen) genLocalDecl(d *moderncc.Declaration) {
 	// `__auto_type v = e;` (a GNU extension whose type is the initializer's) is a
 	// declaration of its own kind: the declarator and initializer hang directly off
 	// the Declaration rather than an InitDeclaratorList. GCC's <stdatomic.h> builds
 	// its generic atomic accessors out of it, so mishandling it turned every
 	// atomic_load/store into a reference to an undefined symbol.
-	if d.Case == cc.DeclarationAuto {
+	if d.Case == moderncc.DeclarationAuto {
 		dcl := d.Declarator
 		if dcl == nil || dcl.IsSynthetic() {
 			return
@@ -207,7 +207,7 @@ func (g *gen) genLocalDecl(d *cc.Declaration) {
 		g.genInit(addr, t, d.Initializer)
 		return
 	}
-	if d.Case != cc.DeclarationDecl {
+	if d.Case != moderncc.DeclarationDecl {
 		return
 	}
 	for l := d.InitDeclaratorList; l != nil; l = l.InitDeclaratorList {
@@ -218,14 +218,14 @@ func (g *gen) genLocalDecl(d *cc.Declaration) {
 		}
 		g.checkAtomicDecl(dcl)
 		t := dcl.Type()
-		if t.Kind() == cc.Function {
+		if t.Kind() == moderncc.Function {
 			continue // a local prototype
 		}
 		if dcl.IsStatic() {
 			g.genStaticLocal(id, dcl, t)
 			continue
 		}
-		if at, ok := t.(*cc.ArrayType); ok && at.IsVLA() {
+		if at, ok := t.(*moderncc.ArrayType); ok && at.IsVLA() {
 			addr := g.vlaAlloc(at) // runtime-sized stack storage; no initializer allowed
 			g.setName(addr, dcl.Name()+".addr")
 			g.define(dcl.Name(), lval{addr: addr, typ: t})
@@ -238,7 +238,7 @@ func (g *gen) genLocalDecl(d *cc.Declaration) {
 		addr := g.allocAligned(t, size)
 		g.setName(addr, dcl.Name()+".addr")
 		g.define(dcl.Name(), lval{addr: addr, typ: t})
-		if id.Case == cc.InitDeclaratorInit {
+		if id.Case == moderncc.InitDeclaratorInit {
 			g.genInit(addr, t, id.Initializer)
 		}
 	}
@@ -247,7 +247,7 @@ func (g *gen) genLocalDecl(d *cc.Declaration) {
 // vlaAlloc allocates a variable-length array on the stack. Its size is the
 // runtime length times the element size, rounded up to keep the stack 16-aligned;
 // the storage lives until the function returns.
-func (g *gen) vlaAlloc(at *cc.ArrayType) ir.Ref {
+func (g *gen) vlaAlloc(at *moderncc.ArrayType) ir.Ref {
 	raw := g.vlaBytes(at)
 	up := g.cur.Add(ir.ClsP, raw, g.fn.ConstInt(ir.ClsP, 15))
 	sz := g.cur.And(ir.ClsP, up, g.fn.ConstInt(ir.ClsP, ^int64(15)))
@@ -256,10 +256,10 @@ func (g *gen) vlaAlloc(at *cc.ArrayType) ir.Ref {
 
 // vlaBytes computes a VLA type's total byte size at run time: the product of its
 // variable dimensions and the innermost fixed element size.
-func (g *gen) vlaBytes(at *cc.ArrayType) ir.Ref {
+func (g *gen) vlaBytes(at *moderncc.ArrayType) ir.Ref {
 	e := at.SizeExpression()
 	n := g.toPtr(g.genExpr(e), e.Type())
-	if inner, ok := at.Elem().(*cc.ArrayType); ok && inner.IsVLA() {
+	if inner, ok := at.Elem().(*moderncc.ArrayType); ok && inner.IsVLA() {
 		return g.cur.Mul(ir.ClsP, n, g.vlaBytes(inner))
 	}
 	return g.cur.Mul(ir.ClsP, n, g.fn.ConstInt(ir.ClsP, int64(at.Elem().Size())))
@@ -269,11 +269,11 @@ func (g *gen) vlaBytes(at *cc.ArrayType) ir.Ref {
 // mangled name (so two functions may each declare "static int n") and binds the
 // name to that symbol. Its constant initializer becomes the data image; C
 // requires static initializers to be constant, so no code runs at entry.
-func (g *gen) genStaticLocal(id *cc.InitDeclarator, dcl *cc.Declarator, t cc.Type) {
+func (g *gen) genStaticLocal(id *moderncc.InitDeclarator, dcl *moderncc.Declarator, t moderncc.Type) {
 	g.nstatic++
 	name := fmt.Sprintf("%s.static.%d", dcl.Name(), g.nstatic)
 	data := &ir.Data{Name: name, Align: dataAlign(t)} // zero Linkage = internal
-	if id.Case == cc.InitDeclaratorInit {
+	if id.Case == moderncc.InitDeclaratorInit {
 		data.Items = g.globalItems(t, id.Initializer)
 	}
 	if len(data.Items) == 0 {
@@ -284,8 +284,8 @@ func (g *gen) genStaticLocal(id *cc.InitDeclarator, dcl *cc.Declarator, t cc.Typ
 }
 
 // genInit stores an initializer into the storage at addr.
-func (g *gen) genInit(addr ir.Ref, t cc.Type, init *cc.Initializer) {
-	if init.Case == cc.InitializerInitList {
+func (g *gen) genInit(addr ir.Ref, t moderncc.Type, init *moderncc.Initializer) {
+	if init.Case == moderncc.InitializerInitList {
 		// A brace initializer: zero the whole aggregate, then fill the elements
 		// that are named. Every leaf carries its absolute offset, so nested
 		// braces and designated initializers need no bookkeeping here.
@@ -296,7 +296,7 @@ func (g *gen) genInit(addr ir.Ref, t cc.Type, init *cc.Initializer) {
 	e := init.AssignmentExpression
 	// char buf[] = "literal": copy the bytes into the array.
 	if isArray(t) {
-		if s, ok := e.Value().(cc.StringValue); ok {
+		if s, ok := e.Value().(moderncc.StringValue); ok {
 			g.initString(addr, t, s)
 			return
 		}
@@ -313,7 +313,7 @@ func (g *gen) genInit(addr ir.Ref, t cc.Type, init *cc.Initializer) {
 // complit materializes a compound literal (T){...}: it reserves storage, zeroes
 // it, and runs the brace initializer, yielding the object's address and type so
 // the literal can be read, indexed, or have its address taken like any lvalue.
-func (g *gen) complit(n *cc.PostfixExpression) (ir.Ref, cc.Type) {
+func (g *gen) complit(n *moderncc.PostfixExpression) (ir.Ref, moderncc.Type) {
 	// Use the declared type, not n.Type(): an array literal's expression type has
 	// already decayed to a pointer, which would under-allocate the storage.
 	t := n.TypeName.Type()
@@ -324,10 +324,10 @@ func (g *gen) complit(n *cc.PostfixExpression) (ir.Ref, cc.Type) {
 }
 
 // genBraceInit stores each leaf of a brace initializer at its absolute offset.
-func (g *gen) genBraceInit(addr ir.Ref, il *cc.InitializerList) {
+func (g *gen) genBraceInit(addr ir.Ref, il *moderncc.InitializerList) {
 	for ; il != nil; il = il.InitializerList {
 		in := il.Initializer
-		if in.Case == cc.InitializerInitList {
+		if in.Case == moderncc.InitializerInitList {
 			g.genBraceInit(addr, in.InitializerList)
 			continue
 		}
@@ -340,7 +340,7 @@ func (g *gen) genBraceInit(addr ir.Ref, il *cc.InitializerList) {
 		}
 		dst := g.offset(addr, int(in.Offset()))
 		if isArray(et) {
-			if s, ok := e.Value().(cc.StringValue); ok {
+			if s, ok := e.Value().(moderncc.StringValue); ok {
 				g.initString(dst, et, s)
 				continue
 			}
@@ -356,8 +356,8 @@ func (g *gen) genBraceInit(addr ir.Ref, il *cc.InitializerList) {
 
 // initString copies a string literal (with its terminating NUL, truncated to
 // fit) into a char array at addr.
-func (g *gen) initString(addr ir.Ref, t cc.Type, s cc.StringValue) {
-	at := t.(*cc.ArrayType)
+func (g *gen) initString(addr ir.Ref, t moderncc.Type, s moderncc.StringValue) {
+	at := t.(*moderncc.ArrayType)
 	b := append([]byte(s), 0)
 	for i, c := range b {
 		if int64(i) >= at.Len() {
@@ -388,34 +388,34 @@ func (g *gen) zeroFill(addr ir.Ref, size int) {
 	}
 }
 
-func (g *gen) genStmt(s *cc.Statement) {
+func (g *gen) genStmt(s *moderncc.Statement) {
 	if s == nil {
 		return
 	}
 	g.at(s)
 	switch s.Case {
-	case cc.StatementExpr:
+	case moderncc.StatementExpr:
 		if s.ExpressionStatement != nil && s.ExpressionStatement.ExpressionList != nil {
 			g.genExpr(s.ExpressionStatement.ExpressionList)
 		}
-	case cc.StatementCompound:
+	case moderncc.StatementCompound:
 		g.genCompound(s.CompoundStatement)
-	case cc.StatementSelection:
+	case moderncc.StatementSelection:
 		g.genSelection(s.SelectionStatement)
-	case cc.StatementIteration:
+	case moderncc.StatementIteration:
 		g.genIteration(s.IterationStatement)
-	case cc.StatementJump:
+	case moderncc.StatementJump:
 		g.genJump(s.JumpStatement)
-	case cc.StatementLabeled:
+	case moderncc.StatementLabeled:
 		g.genLabeled(s.LabeledStatement)
-	case cc.StatementAsm:
+	case moderncc.StatementAsm:
 		g.genAsm(s.AsmStatement)
 	}
 }
 
 // genCond evaluates a controlling expression to a value that Jnz treats as true
 // when nonzero (comparisons already yield 0/1; floats are compared against 0).
-func (g *gen) genCond(e cc.ExpressionNode) ir.Ref {
+func (g *gen) genCond(e moderncc.ExpressionNode) ir.Ref {
 	v := g.genExpr(e)
 	if isFloat(e.Type()) {
 		return g.cur.Cmp(ir.CmpFne, ir.ClsW, v, g.floatOf(0, e.Type()))
@@ -423,8 +423,8 @@ func (g *gen) genCond(e cc.ExpressionNode) ir.Ref {
 	return v
 }
 
-func (g *gen) genSelection(ss *cc.SelectionStatement) {
-	if ss.Case == cc.SelectionStatementSwitch {
+func (g *gen) genSelection(ss *moderncc.SelectionStatement) {
+	if ss.Case == moderncc.SelectionStatementSwitch {
 		g.genSwitch(ss)
 		return
 	}
@@ -432,7 +432,7 @@ func (g *gen) genSelection(ss *cc.SelectionStatement) {
 	thenB := g.block("then")
 	endB := g.block("endif")
 	elseB := endB
-	if ss.Case == cc.SelectionStatementIfElse {
+	if ss.Case == moderncc.SelectionStatementIfElse {
 		elseB = g.block("else")
 	}
 	g.cur.Jnz(cond, thenB, elseB)
@@ -442,7 +442,7 @@ func (g *gen) genSelection(ss *cc.SelectionStatement) {
 	if !g.terminated() {
 		g.cur.Goto(endB)
 	}
-	if ss.Case == cc.SelectionStatementIfElse {
+	if ss.Case == moderncc.SelectionStatementIfElse {
 		g.cur = elseB
 		g.genStmt(ss.Statement2)
 		if !g.terminated() {
@@ -463,7 +463,7 @@ type switchCase struct {
 // body is then generated so that cases fall through in source order and break
 // exits to the end. Case blocks are pre-allocated by collectCases and shared with
 // genLabeled, which begins each block when its label is reached in the body.
-func (g *gen) genSwitch(ss *cc.SelectionStatement) {
+func (g *gen) genSwitch(ss *moderncc.SelectionStatement) {
 	ct := ss.ExpressionList.Type()
 	cond := g.genExpr(ss.ExpressionList)
 
@@ -503,23 +503,23 @@ func (g *gen) genSwitch(ss *cc.SelectionStatement) {
 // default label and recording the case values. It descends through compounds,
 // conditionals, and loops (so labels inside them are found) but not into a
 // nested switch, whose labels belong to it.
-func (g *gen) collectCases(s *cc.Statement, cases *[]switchCase, defBlk **ir.Block) {
+func (g *gen) collectCases(s *moderncc.Statement, cases *[]switchCase, defBlk **ir.Block) {
 	if s == nil {
 		return
 	}
 	switch s.Case {
-	case cc.StatementCompound:
+	case moderncc.StatementCompound:
 		if cs := s.CompoundStatement; cs != nil {
 			for l := cs.BlockItemList; l != nil; l = l.BlockItemList {
-				if l.BlockItem.Case == cc.BlockItemStmt {
+				if l.BlockItem.Case == moderncc.BlockItemStmt {
 					g.collectCases(l.BlockItem.Statement, cases, defBlk)
 				}
 			}
 		}
-	case cc.StatementLabeled:
+	case moderncc.StatementLabeled:
 		ls := s.LabeledStatement
 		switch ls.Case {
-		case cc.LabeledStatementCaseLabel:
+		case moderncc.LabeledStatementCaseLabel:
 			v, ok := constInt(ls.ConstantExpression)
 			if !ok {
 				// Silently taking 0 puts the case somewhere the source never asked
@@ -530,7 +530,7 @@ func (g *gen) collectCases(s *cc.Statement, cases *[]switchCase, defBlk **ir.Blo
 			blk := g.block("case")
 			g.caseBlk[ls] = blk
 			*cases = append(*cases, switchCase{v, blk})
-		case cc.LabeledStatementRange: // GNU "case lo ... hi:"
+		case moderncc.LabeledStatementRange: // GNU "case lo ... hi:"
 			lo, okLo := constInt(ls.ConstantExpression)
 			hi, okHi := constInt(ls.ConstantExpression2)
 			if !okLo || !okHi {
@@ -550,19 +550,19 @@ func (g *gen) collectCases(s *cc.Statement, cases *[]switchCase, defBlk **ir.Blo
 					*cases = append(*cases, switchCase{lo + int64(i), blk})
 				}
 			}
-		case cc.LabeledStatementDefault:
+		case moderncc.LabeledStatementDefault:
 			blk := g.block("default")
 			g.caseBlk[ls] = blk
 			*defBlk = blk
 		}
 		g.collectCases(ls.Statement, cases, defBlk)
-	case cc.StatementSelection:
-		if s.SelectionStatement.Case == cc.SelectionStatementSwitch {
+	case moderncc.StatementSelection:
+		if s.SelectionStatement.Case == moderncc.SelectionStatementSwitch {
 			return // a nested switch owns its own cases
 		}
 		g.collectCases(s.SelectionStatement.Statement, cases, defBlk)
 		g.collectCases(s.SelectionStatement.Statement2, cases, defBlk)
-	case cc.StatementIteration:
+	case moderncc.StatementIteration:
 		g.collectCases(s.IterationStatement.Statement, cases, defBlk)
 	}
 }
@@ -570,7 +570,7 @@ func (g *gen) collectCases(s *cc.Statement, cases *[]switchCase, defBlk **ir.Blo
 // collectInnerLabels pre-allocates a block for every label in a statement
 // expression, returning their names so the caller can drop them again: they are
 // reachable only from within it.
-func (g *gen) collectInnerLabels(cs *cc.CompoundStatement) []string {
+func (g *gen) collectInnerLabels(cs *moderncc.CompoundStatement) []string {
 	before := make(map[string]bool, len(g.labels))
 	for n := range g.labels {
 		before[n] = true
@@ -587,12 +587,12 @@ func (g *gen) collectInnerLabels(cs *cc.CompoundStatement) []string {
 
 // collectLabels pre-allocates a block for every goto label in the function, so a
 // forward goto can target a block that has not yet been generated.
-func (g *gen) collectLabels(cs *cc.CompoundStatement) {
+func (g *gen) collectLabels(cs *moderncc.CompoundStatement) {
 	if cs == nil {
 		return
 	}
 	for l := cs.BlockItemList; l != nil; l = l.BlockItemList {
-		if l.BlockItem.Case == cc.BlockItemStmt {
+		if l.BlockItem.Case == moderncc.BlockItemStmt {
 			g.labelsIn(l.BlockItem.Statement)
 		}
 	}
@@ -610,35 +610,35 @@ func (g *gen) labelBlocks() []*ir.Block {
 	return blocks
 }
 
-func (g *gen) labelsIn(s *cc.Statement) {
+func (g *gen) labelsIn(s *moderncc.Statement) {
 	if s == nil {
 		return
 	}
 	switch s.Case {
-	case cc.StatementCompound:
+	case moderncc.StatementCompound:
 		g.collectLabels(s.CompoundStatement)
-	case cc.StatementLabeled:
+	case moderncc.StatementLabeled:
 		ls := s.LabeledStatement
-		if ls.Case == cc.LabeledStatementLabel {
+		if ls.Case == moderncc.LabeledStatementLabel {
 			g.labels[ls.Token.SrcStr()] = g.block("L." + ls.Token.SrcStr())
 		}
 		g.labelsIn(ls.Statement)
-	case cc.StatementSelection:
+	case moderncc.StatementSelection:
 		g.labelsIn(s.SelectionStatement.Statement)
 		g.labelsIn(s.SelectionStatement.Statement2)
-	case cc.StatementIteration:
+	case moderncc.StatementIteration:
 		g.labelsIn(s.IterationStatement.Statement)
 	}
 }
 
 // genLabeled begins the block a label names — a goto target, or a switch case or
 // default — flowing into it from the preceding code if that code falls through.
-func (g *gen) genLabeled(ls *cc.LabeledStatement) {
+func (g *gen) genLabeled(ls *moderncc.LabeledStatement) {
 	var target *ir.Block
 	switch ls.Case {
-	case cc.LabeledStatementLabel:
+	case moderncc.LabeledStatementLabel:
 		target = g.labels[ls.Token.SrcStr()]
-	case cc.LabeledStatementCaseLabel, cc.LabeledStatementRange, cc.LabeledStatementDefault:
+	case moderncc.LabeledStatementCaseLabel, moderncc.LabeledStatementRange, moderncc.LabeledStatementDefault:
 		target = g.caseBlk[ls]
 	}
 	if target != nil {
@@ -650,29 +650,29 @@ func (g *gen) genLabeled(ls *cc.LabeledStatement) {
 	g.genStmt(ls.Statement)
 }
 
-func (g *gen) genIteration(is *cc.IterationStatement) {
+func (g *gen) genIteration(is *moderncc.IterationStatement) {
 	switch is.Case {
-	case cc.IterationStatementWhile:
+	case moderncc.IterationStatementWhile:
 		condB, bodyB, endB := g.block("cond"), g.block("body"), g.block("end")
 		g.cur.Goto(condB)
 		g.cur = condB
 		g.cur.Jnz(g.genCond(is.ExpressionList), bodyB, endB)
 		g.loopBody(is.Statement, bodyB, condB, endB, condB)
 		g.cur = endB
-	case cc.IterationStatementDo:
+	case moderncc.IterationStatementDo:
 		bodyB, condB, endB := g.block("do"), g.block("cond"), g.block("end")
 		g.cur.Goto(bodyB)
 		g.loopBody(is.Statement, bodyB, condB, endB, condB)
 		g.cur = condB
 		g.cur.Jnz(g.genCond(is.ExpressionList), bodyB, endB)
 		g.cur = endB
-	case cc.IterationStatementFor, cc.IterationStatementForDecl:
+	case moderncc.IterationStatementFor, moderncc.IterationStatementForDecl:
 		g.push()
 		// The field layout differs: a for with a declaration puts the condition in
 		// ExpressionList and the post-expression in ExpressionList2, whereas a plain
 		// for uses ExpressionList (init), ExpressionList2 (cond), ExpressionList3 (post).
-		var condE, postE cc.ExpressionNode
-		if is.Case == cc.IterationStatementForDecl {
+		var condE, postE moderncc.ExpressionNode
+		if is.Case == moderncc.IterationStatementForDecl {
 			g.genLocalDecl(is.Declaration)
 			condE, postE = is.ExpressionList, is.ExpressionList2
 		} else {
@@ -702,7 +702,7 @@ func (g *gen) genIteration(is *cc.IterationStatement) {
 
 // loopBody emits a loop body: the body runs in bodyB, break jumps to endB,
 // continue jumps to contB, and (if the body falls through) it flows to next.
-func (g *gen) loopBody(body *cc.Statement, bodyB, contB, endB, next *ir.Block) {
+func (g *gen) loopBody(body *moderncc.Statement, bodyB, contB, endB, next *ir.Block) {
 	g.cur = bodyB
 	g.brk = append(g.brk, endB)
 	g.brkVla = append(g.brkVla, len(g.vlaScope))
@@ -718,26 +718,26 @@ func (g *gen) loopBody(body *cc.Statement, bodyB, contB, endB, next *ir.Block) {
 	}
 }
 
-func (g *gen) genJump(js *cc.JumpStatement) {
+func (g *gen) genJump(js *moderncc.JumpStatement) {
 	switch js.Case {
-	case cc.JumpStatementReturn:
+	case moderncc.JumpStatementReturn:
 		if js.ExpressionList == nil {
 			g.cur.RetVoid()
 			return
 		}
 		v := g.rval(js.ExpressionList, g.retType())
 		g.cur.Ret(v)
-	case cc.JumpStatementBreak:
+	case moderncc.JumpStatementBreak:
 		if len(g.brk) > 0 {
 			g.vlaUnwind(g.brkVla[len(g.brkVla)-1]) // reclaim VLAs left by the break
 			g.cur.Goto(g.brk[len(g.brk)-1])
 		}
-	case cc.JumpStatementContinue:
+	case moderncc.JumpStatementContinue:
 		if len(g.cont) > 0 {
 			g.vlaUnwind(g.contVla[len(g.contVla)-1]) // reclaim VLAs left by the continue
 			g.cur.Goto(g.cont[len(g.cont)-1])
 		}
-	case cc.JumpStatementGoto:
+	case moderncc.JumpStatementGoto:
 		// collectLabels pre-allocates a block for every label in the function, so a
 		// forward goto resolves here too and a name that is still missing is one
 		// that does not exist. Emitting nothing would fall through to whatever
@@ -748,11 +748,11 @@ func (g *gen) genJump(js *cc.JumpStatement) {
 			return
 		}
 		g.cur.Goto(b)
-	case cc.JumpStatementGotoExpr: // computed goto: goto *expr
+	case moderncc.JumpStatementGotoExpr: // computed goto: goto *expr
 		g.cur.BrIndirect(g.genExpr(js.ExpressionList), g.labelBlocks()...)
 	}
 }
 
 // retType returns the current function's C return type class as a synthetic cc
 // type is unavailable; we approximate with the function's IR return class.
-func (g *gen) retType() cc.Type { return g.curRet }
+func (g *gen) retType() moderncc.Type { return g.curRet }

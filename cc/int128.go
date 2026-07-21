@@ -3,8 +3,8 @@ package cc
 import (
 	"math/big"
 
+	moderncc "github.com/evanphx/cg12/internal/cc"
 	"github.com/evanphx/cg12/ir"
-	"modernc.org/cc/v4"
 )
 
 // A __int128 / unsigned __int128 value is modelled as a two-element {lo, hi}
@@ -23,9 +23,9 @@ import (
 // helper used here -- agree, and self-consistent cg12 code is unaffected.)
 
 // isInt128 reports whether t is a signed or unsigned 128-bit integer.
-func isInt128(t cc.Type) bool {
+func isInt128(t moderncc.Type) bool {
 	switch t.Kind() {
-	case cc.Int128, cc.UInt128:
+	case moderncc.Int128, moderncc.UInt128:
 		return true
 	}
 	return false
@@ -52,7 +52,7 @@ func (g *gen) int128Result(lo, hi ir.Ref) ir.Ref {
 
 // int128Parts loads the lo and hi halves of operand e. A narrower integer is
 // widened: its value fills lo and its sign (0 when unsigned) fills hi.
-func (g *gen) int128Parts(e cc.ExpressionNode) (lo, hi ir.Ref) {
+func (g *gen) int128Parts(e moderncc.ExpressionNode) (lo, hi ir.Ref) {
 	if isInt128(e.Type()) {
 		addr := g.genExpr(e)
 		return g.loadParts(addr, e.Type())
@@ -61,14 +61,14 @@ func (g *gen) int128Parts(e cc.ExpressionNode) (lo, hi ir.Ref) {
 }
 
 // loadParts reads the {lo,hi} halves from a 128-bit value's storage.
-func (g *gen) loadParts(addr ir.Ref, _ cc.Type) (lo, hi ir.Ref) {
+func (g *gen) loadParts(addr ir.Ref, _ moderncc.Type) (lo, hi ir.Ref) {
 	lo = g.cur.Load(ir.ClsL, addr)
 	hi = g.cur.Load(ir.ClsL, g.offset(addr, 8))
 	return
 }
 
 // widenTo128 extends an integer value v of type from into 128-bit halves.
-func (g *gen) widenTo128(v ir.Ref, from cc.Type) (lo, hi ir.Ref) {
+func (g *gen) widenTo128(v ir.Ref, from moderncc.Type) (lo, hi ir.Ref) {
 	lo = g.to64(v, from)
 	if signed(from) {
 		hi = g.cur.Sar(ir.ClsL, lo, g.fn.Long(63)) // replicate the sign bit
@@ -80,7 +80,7 @@ func (g *gen) widenTo128(v ir.Ref, from cc.Type) (lo, hi ir.Ref) {
 
 // to64 widens an integer value of type from to a 64-bit half (a no-op for a
 // value already 64-bit wide).
-func (g *gen) to64(v ir.Ref, from cc.Type) ir.Ref {
+func (g *gen) to64(v ir.Ref, from moderncc.Type) ir.Ref {
 	if wide(clsOf(from)) {
 		return v
 	}
@@ -92,7 +92,7 @@ func (g *gen) to64(v ir.Ref, from cc.Type) ir.Ref {
 
 // int128Operand yields the address of operand e as a 128-bit value, widening a
 // narrower integer into a fresh slot.
-func (g *gen) int128Operand(e cc.ExpressionNode) ir.Ref {
+func (g *gen) int128Operand(e moderncc.ExpressionNode) ir.Ref {
 	if isInt128(e.Type()) {
 		return g.genExpr(e)
 	}
@@ -102,7 +102,7 @@ func (g *gen) int128Operand(e cc.ExpressionNode) ir.Ref {
 
 // int128Arith lowers a 128-bit +, -, *, /, %, <<, >>, &, |, or ^, returning the
 // address of the result.
-func (g *gen) int128Arith(op string, ln, rn cc.ExpressionNode, resT cc.Type) ir.Ref {
+func (g *gen) int128Arith(op string, ln, rn moderncc.ExpressionNode, resT moderncc.Type) ir.Ref {
 	uns := !signed(resT)
 	switch op {
 	case "*":
@@ -154,7 +154,7 @@ func (g *gen) int128Arith(op string, ln, rn cc.ExpressionNode, resT cc.Type) ir.
 func (g *gen) ext1(v ir.Ref) ir.Ref { return g.cur.Extuw(ir.ClsL, v) }
 
 // int128Neg lowers unary minus: 0 - a.
-func (g *gen) int128Neg(e cc.ExpressionNode) ir.Ref {
+func (g *gen) int128Neg(e moderncc.ExpressionNode) ir.Ref {
 	alo, ahi := g.int128Parts(e)
 	b := g.cur
 	lo := b.Sub(ir.ClsL, g.fn.Long(0), alo)
@@ -164,7 +164,7 @@ func (g *gen) int128Neg(e cc.ExpressionNode) ir.Ref {
 }
 
 // int128Cpl lowers ~a: complement both halves.
-func (g *gen) int128Cpl(e cc.ExpressionNode) ir.Ref {
+func (g *gen) int128Cpl(e moderncc.ExpressionNode) ir.Ref {
 	alo, ahi := g.int128Parts(e)
 	b := g.cur
 	return g.int128Result(b.Xor(ir.ClsL, alo, g.fn.Long(-1)), b.Xor(ir.ClsL, ahi, g.fn.Long(-1)))
@@ -173,7 +173,7 @@ func (g *gen) int128Cpl(e cc.ExpressionNode) ir.Ref {
 // int128Compare lowers a 128-bit relational or equality comparison to a 0/1 int.
 // Equality tests both halves; ordering compares the high halves (signed for a
 // signed type) and, when they are equal, the low halves (always unsigned).
-func (g *gen) int128Compare(op string, ln, rn cc.ExpressionNode, signedCmp bool) ir.Ref {
+func (g *gen) int128Compare(op string, ln, rn moderncc.ExpressionNode, signedCmp bool) ir.Ref {
 	alo, ahi := g.int128Parts(ln)
 	blo, bhi := g.int128Parts(rn)
 	b := g.cur
@@ -212,7 +212,7 @@ func pick(cond bool, a, b ir.Cmp) ir.Cmp {
 // int128Convert coerces to/from a 128-bit integer: a narrower integer widens, a
 // float converts through a libgcc helper, and a 128-bit value narrows to its low
 // half (or, for a float or _Bool target, converts / tests both halves).
-func (g *gen) int128Convert(v ir.Ref, from, to cc.Type) ir.Ref {
+func (g *gen) int128Convert(v ir.Ref, from, to moderncc.Type) ir.Ref {
 	switch {
 	case isInt128(from) && isInt128(to):
 		return v // signed<->unsigned 128 share a representation
@@ -224,7 +224,7 @@ func (g *gen) int128Convert(v ir.Ref, from, to cc.Type) ir.Ref {
 		return g.int128Result(lo, hi)
 	default: // 128 -> narrower
 		lo, hi := g.loadParts(v, from)
-		if to.Kind() == cc.Bool {
+		if to.Kind() == moderncc.Bool {
 			nz := g.cur.Or(ir.ClsL, lo, hi)
 			return g.cur.Cmp(ir.CmpNe, ir.ClsW, nz, g.fn.Long(0))
 		}
@@ -244,8 +244,8 @@ func (g *gen) int128Convert(v ir.Ref, from, to cc.Type) ir.Ref {
 }
 
 // floatToInt128 converts a float/double to a 128-bit integer via libgcc.
-func (g *gen) floatToInt128(v ir.Ref, from, to cc.Type) ir.Ref {
-	dbl := from.Kind() == cc.Double
+func (g *gen) floatToInt128(v ir.Ref, from, to moderncc.Type) ir.Ref {
+	dbl := from.Kind() == moderncc.Double
 	var fn string
 	switch {
 	case signed(to) && dbl:
@@ -262,8 +262,8 @@ func (g *gen) floatToInt128(v ir.Ref, from, to cc.Type) ir.Ref {
 
 // int128ToFloat converts a 128-bit integer (at address v) to a float/double via
 // libgcc.
-func (g *gen) int128ToFloat(v ir.Ref, from, to cc.Type) ir.Ref {
-	dbl := to.Kind() == cc.Double
+func (g *gen) int128ToFloat(v ir.Ref, from, to moderncc.Type) ir.Ref {
+	dbl := to.Kind() == moderncc.Double
 	var fn string
 	switch {
 	case signed(from) && dbl:
@@ -303,7 +303,7 @@ func (g *gen) int128Copy(addr ir.Ref) ir.Ref {
 }
 
 // int128Compound performs a 128-bit compound assignment a op= rhs.
-func (g *gen) int128Compound(op string, addr ir.Ref, t cc.Type, rhs cc.ExpressionNode) ir.Ref {
+func (g *gen) int128Compound(op string, addr ir.Ref, t moderncc.Type, rhs moderncc.ExpressionNode) ir.Ref {
 	res := g.int128ArithAddr(op, addr, t, rhs)
 	g.copyAgg(addr, res, 16)
 	return addr
@@ -311,7 +311,7 @@ func (g *gen) int128Compound(op string, addr ir.Ref, t cc.Type, rhs cc.Expressio
 
 // int128ArithAddr performs (value at addr) op rhs, reusing the binary lowering by
 // treating the current storage as the left operand.
-func (g *gen) int128ArithAddr(op string, addr ir.Ref, t cc.Type, rhs cc.ExpressionNode) ir.Ref {
+func (g *gen) int128ArithAddr(op string, addr ir.Ref, t moderncc.Type, rhs moderncc.ExpressionNode) ir.Ref {
 	uns := !signed(t)
 	switch op {
 	case "*":
@@ -358,71 +358,71 @@ func pickStr(cond bool, a, b string) string {
 // initialization. modernc folds most 64-bit constant arithmetic but leaves
 // wider results (a shift past 64, a product overflowing 64 bits) unfolded, so
 // the operators are evaluated here at full precision over big.Int.
-func constInt128(e cc.ExpressionNode) (*big.Int, bool) {
+func constInt128(e moderncc.ExpressionNode) (*big.Int, bool) {
 	if e == nil {
 		return nil, false
 	}
 	switch n := e.(type) {
-	case *cc.AdditiveExpression:
+	case *moderncc.AdditiveExpression:
 		if l, r, ok := constInt128Pair(n.AdditiveExpression, n.MultiplicativeExpression); ok {
-			if n.Case == cc.AdditiveExpressionSub {
+			if n.Case == moderncc.AdditiveExpressionSub {
 				return new(big.Int).Sub(l, r), true
 			}
 			return new(big.Int).Add(l, r), true
 		}
-	case *cc.MultiplicativeExpression:
+	case *moderncc.MultiplicativeExpression:
 		if l, r, ok := constInt128Pair(n.MultiplicativeExpression, n.CastExpression); ok {
 			switch n.Case {
-			case cc.MultiplicativeExpressionMul:
+			case moderncc.MultiplicativeExpressionMul:
 				return new(big.Int).Mul(l, r), true
-			case cc.MultiplicativeExpressionDiv:
+			case moderncc.MultiplicativeExpressionDiv:
 				if r.Sign() != 0 {
 					return new(big.Int).Quo(l, r), true
 				}
-			case cc.MultiplicativeExpressionMod:
+			case moderncc.MultiplicativeExpressionMod:
 				if r.Sign() != 0 {
 					return new(big.Int).Rem(l, r), true
 				}
 			}
 		}
-	case *cc.ShiftExpression:
+	case *moderncc.ShiftExpression:
 		if l, r, ok := constInt128Pair(n.ShiftExpression, n.AdditiveExpression); ok && r.IsInt64() {
 			s := uint(r.Int64())
-			if n.Case == cc.ShiftExpressionRsh {
+			if n.Case == moderncc.ShiftExpressionRsh {
 				return new(big.Int).Rsh(l, s), true
 			}
 			return new(big.Int).Lsh(l, s), true
 		}
-	case *cc.AndExpression:
+	case *moderncc.AndExpression:
 		if l, r, ok := constInt128Pair(n.AndExpression, n.EqualityExpression); ok {
 			return new(big.Int).And(l, r), true
 		}
-	case *cc.ExclusiveOrExpression:
+	case *moderncc.ExclusiveOrExpression:
 		if l, r, ok := constInt128Pair(n.ExclusiveOrExpression, n.AndExpression); ok {
 			return new(big.Int).Xor(l, r), true
 		}
-	case *cc.InclusiveOrExpression:
+	case *moderncc.InclusiveOrExpression:
 		if l, r, ok := constInt128Pair(n.InclusiveOrExpression, n.ExclusiveOrExpression); ok {
 			return new(big.Int).Or(l, r), true
 		}
-	case *cc.UnaryExpression:
+	case *moderncc.UnaryExpression:
 		if v, ok := constInt128(n.CastExpression); ok {
 			switch n.Case {
-			case cc.UnaryExpressionMinus:
+			case moderncc.UnaryExpressionMinus:
 				return new(big.Int).Neg(v), true
-			case cc.UnaryExpressionPlus:
+			case moderncc.UnaryExpressionPlus:
 				return v, true
-			case cc.UnaryExpressionCpl:
+			case moderncc.UnaryExpressionCpl:
 				return new(big.Int).Not(v), true
 			}
 		}
-	case *cc.CastExpression:
+	case *moderncc.CastExpression:
 		return constInt128(n.CastExpression)
-	case *cc.PrimaryExpression:
-		if n.Case == cc.PrimaryExpressionExpr {
+	case *moderncc.PrimaryExpression:
+		if n.Case == moderncc.PrimaryExpressionExpr {
 			return constInt128(n.ExpressionList)
 		}
-	case *cc.ExpressionList:
+	case *moderncc.ExpressionList:
 		if n.ExpressionList == nil {
 			return constInt128(n.AssignmentExpression)
 		}
@@ -433,7 +433,7 @@ func constInt128(e cc.ExpressionNode) (*big.Int, bool) {
 	return nil, false
 }
 
-func constInt128Pair(a, b cc.ExpressionNode) (*big.Int, *big.Int, bool) {
+func constInt128Pair(a, b moderncc.ExpressionNode) (*big.Int, *big.Int, bool) {
 	l, lok := constInt128(a)
 	r, rok := constInt128(b)
 	if lok && rok {
@@ -471,11 +471,11 @@ func (g *gen) ti3Scalar(fn string, v ir.Ref) ir.Ref {
 }
 
 // ti3Shift calls a libgcc 128-bit shift helper: a 128-bit value and an int count.
-func (g *gen) ti3Shift(fn string, ln, rn cc.ExpressionNode) ir.Ref {
+func (g *gen) ti3Shift(fn string, ln, rn moderncc.ExpressionNode) ir.Ref {
 	return g.ti3ShiftAddr(fn, g.int128Operand(ln), rn)
 }
 
-func (g *gen) ti3ShiftAddr(fn string, addr ir.Ref, rn cc.ExpressionNode) ir.Ref {
+func (g *gen) ti3ShiftAddr(fn string, addr ir.Ref, rn moderncc.ExpressionNode) ir.Ref {
 	n := g.cur.Copy(ir.ClsW, g.genExpr(rn)) // the shift count is an int
 	r := g.cur.Call(ir.ClsL, g.fn.Sym(fn, 0), addr, n)
 	call := g.lastInstr()

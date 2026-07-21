@@ -4,8 +4,8 @@ import (
 	"strconv"
 	"strings"
 
+	moderncc "github.com/evanphx/cg12/internal/cc"
 	"github.com/evanphx/cg12/ir"
-	"modernc.org/cc/v4"
 )
 
 // GNU inline assembly.
@@ -25,9 +25,9 @@ import (
 
 // asmOperand recovers the constraint string and operand expression from an asm
 // operand, which modernc parses as a call `"constraint"(operand)`.
-func asmOperand(e cc.ExpressionNode) (constraint string, operand cc.ExpressionNode, ok bool) {
-	pe, ok := e.(*cc.PostfixExpression)
-	if !ok || pe.Case != cc.PostfixExpressionCall {
+func asmOperand(e moderncc.ExpressionNode) (constraint string, operand moderncc.ExpressionNode, ok bool) {
+	pe, ok := e.(*moderncc.PostfixExpression)
+	if !ok || pe.Case != moderncc.PostfixExpressionCall {
 		return "", nil, false
 	}
 	if s, ok := asmStringLit(pe.PostfixExpression); ok {
@@ -40,9 +40,9 @@ func asmOperand(e cc.ExpressionNode) (constraint string, operand cc.ExpressionNo
 }
 
 // asmIsGoto reports whether an asm statement carries the `goto` qualifier.
-func asmIsGoto(a *cc.Asm) bool {
+func asmIsGoto(a *moderncc.Asm) bool {
 	for q := a.AsmQualifierList; q != nil; q = q.AsmQualifierList {
-		if q.AsmQualifier != nil && q.AsmQualifier.Case == cc.AsmQualifierGoto {
+		if q.AsmQualifier != nil && q.AsmQualifier.Case == moderncc.AsmQualifierGoto {
 			return true
 		}
 	}
@@ -50,9 +50,9 @@ func asmIsGoto(a *cc.Asm) bool {
 }
 
 // asmStringLit returns the value of a string-literal expression.
-func asmStringLit(e cc.ExpressionNode) (string, bool) {
-	if pe, ok := e.(*cc.PrimaryExpression); ok && pe.Case == cc.PrimaryExpressionString {
-		if s, ok := pe.Value().(cc.StringValue); ok {
+func asmStringLit(e moderncc.ExpressionNode) (string, bool) {
+	if pe, ok := e.(*moderncc.PrimaryExpression); ok && pe.Case == moderncc.PrimaryExpressionString {
+		if s, ok := pe.Value().(moderncc.StringValue); ok {
 			return strings.TrimRight(string(s), "\x00"), true
 		}
 	}
@@ -65,7 +65,7 @@ func asmStringLit(e cc.ExpressionNode) (string, bool) {
 // register outputs ("=r"/"=&r"), register inputs ("r"), immediate inputs ("i"),
 // and memory operands ("m"/"=m", substituted as a reference through the operand's
 // address); any other constraint fails loudly rather than miscompiling.
-func (g *gen) genAsm(as *cc.AsmStatement) {
+func (g *gen) genAsm(as *moderncc.AsmStatement) {
 	if as == nil || as.Asm == nil {
 		return
 	}
@@ -107,7 +107,7 @@ func (g *gen) genAsm(as *cc.AsmStatement) {
 // and the C type of that lvalue.
 type asmOut struct {
 	addr ir.Ref
-	typ  cc.Type
+	typ  moderncc.Type
 }
 
 // asmCollect gathers an inline-asm statement's operands into specs in %N order.
@@ -117,7 +117,7 @@ type asmOut struct {
 // immediate), or "m" (memory). outLvals, parallel to the register-output specs,
 // records where to store each register result back. Unsupported constraints fail
 // loudly.
-func (g *gen) asmCollect(a *cc.Asm) (specs []ir.AsmSpec, outLvals []asmOut, clobbers []string, ok bool) {
+func (g *gen) asmCollect(a *moderncc.Asm) (specs []ir.AsmSpec, outLvals []asmOut, clobbers []string, ok bool) {
 	group := 0
 	for al := a.AsmArgList; al != nil; al = al.AsmArgList {
 		for el := al.AsmExpressionList; el != nil; el = el.AsmExpressionList {
@@ -184,7 +184,7 @@ func asmFixedReg(base string) bool {
 
 // asmOperandSpec builds the AsmSpec (and, for a register output, the store-back
 // lvalue) for one operand from its base constraint.
-func (g *gen) asmOperandSpec(base string, output, rw bool, operand cc.ExpressionNode) (ir.AsmSpec, asmOut, string) {
+func (g *gen) asmOperandSpec(base string, output, rw bool, operand moderncc.ExpressionNode) (ir.AsmSpec, asmOut, string) {
 	switch {
 	case base == "r" || base == "w" || (base == "x" && g.target == TargetAMD64) || asmFixedReg(base):
 		// "w" is how AArch64 spells a floating-point register operand, "x" is how
@@ -230,7 +230,7 @@ func (g *gen) asmOperandSpec(base string, output, rw bool, operand cc.Expression
 // asmTemplate returns the assembler template with its surrounding quotes removed
 // and its escape sequences (\n, \t, ...) decoded, so a multi-instruction template
 // becomes real newlines the emitter can split on.
-func asmTemplate(a *cc.Asm) string {
+func asmTemplate(a *moderncc.Asm) string {
 	s := a.Token3.SrcStr()
 	if unq, err := strconv.Unquote(s); err == nil {
 		return strings.TrimSpace(unq)

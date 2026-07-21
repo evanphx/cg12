@@ -6,7 +6,7 @@ import (
 	"reflect"
 	"strings"
 
-	"modernc.org/cc/v4"
+	moderncc "github.com/evanphx/cg12/internal/cc"
 )
 
 func dump(v reflect.Value, depth int, w *strings.Builder) {
@@ -50,10 +50,10 @@ func dump(v reflect.Value, depth int, w *strings.Builder) {
 }
 
 func main() {
-	cfg, _ := cc.NewConfig("linux", "arm64")
-	ast, err := cc.Translate(cfg, []cc.Source{
+	cfg, _ := moderncc.NewConfig("linux", "arm64")
+	ast, err := moderncc.Translate(cfg, []moderncc.Source{
 		{Name: "<predefined>", Value: cfg.Predefined},
-		{Name: "<builtin>", Value: cc.Builtin},
+		{Name: "<builtin>", Value: moderncc.Builtin},
 		{Name: "main.c", Value: os.Args[1]},
 	})
 	if err != nil {

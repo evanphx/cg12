@@ -3,13 +3,13 @@ package cc
 import (
 	"fmt"
 
+	moderncc "github.com/evanphx/cg12/internal/cc"
 	"github.com/evanphx/cg12/ir"
-	"modernc.org/cc/v4"
 )
 
 // convert coerces a value from one C type to another (integer width and
 // signedness, integer<->float, float<->float, pointers).
-func (g *gen) convert(v ir.Ref, from, to cc.Type) ir.Ref {
+func (g *gen) convert(v ir.Ref, from, to moderncc.Type) ir.Ref {
 	if from == nil || to == nil {
 		return v
 	}
@@ -17,7 +17,7 @@ func (g *gen) convert(v ir.Ref, from, to cc.Type) ir.Ref {
 	if isComplex(from) || isComplex(to) {
 		return g.complexConvert(v, from, to)
 	}
-	if cc.IsComplexType(from) || cc.IsComplexType(to) {
+	if moderncc.IsComplexType(from) || moderncc.IsComplexType(to) {
 		return g.fail("cc: unsupported complex conversion %v -> %v", from, to)
 	}
 	// A conversion touching a 128-bit integer is lowered on its {lo,hi} halves.
@@ -38,7 +38,7 @@ func (g *gen) convert(v ir.Ref, from, to cc.Type) ir.Ref {
 	}
 	// A conversion to _Bool normalizes to 0/1 (any nonzero value becomes 1),
 	// which a plain width change would not do.
-	if to.Kind() == cc.Bool && from.Kind() != cc.Bool {
+	if to.Kind() == moderncc.Bool && from.Kind() != moderncc.Bool {
 		if isFloat(from) {
 			return g.cur.Cmp(ir.CmpFne, ir.ClsW, v, g.floatOf(0, from))
 		}
@@ -95,8 +95,8 @@ func (g *gen) convert(v ir.Ref, from, to cc.Type) ir.Ref {
 //
 // from may be nil when the source is not an integer (a float conversion), in
 // which case the narrowing always applies.
-func (g *gen) narrowInt(v ir.Ref, from, to cc.Type, tc ir.Cls) ir.Ref {
-	if !cc.IsIntegerType(to) || isInt128(to) {
+func (g *gen) narrowInt(v ir.Ref, from, to moderncc.Type, tc ir.Cls) ir.Ref {
+	if !moderncc.IsIntegerType(to) || isInt128(to) {
 		return v
 	}
 	sz := int(to.Size())
@@ -104,7 +104,7 @@ func (g *gen) narrowInt(v ir.Ref, from, to cc.Type, tc ir.Cls) ir.Ref {
 		return v // a word or wider: the class change already presented it
 	}
 	// Already held in exactly this width and signedness: nothing to re-present.
-	if from != nil && cc.IsIntegerType(from) && int(from.Size()) == sz && signed(from) == signed(to) {
+	if from != nil && moderncc.IsIntegerType(from) && int(from.Size()) == sz && signed(from) == signed(to) {
 		return v
 	}
 	switch sz {
@@ -127,7 +127,7 @@ func (g *gen) narrowInt(v ir.Ref, from, to cc.Type, tc ir.Cls) ir.Ref {
 // widen to a real word->long extend on a 64-bit target and to a no-op on wasm32
 // (where the pointer and a word are the same width); a wider-than-pointer long
 // index is reclassified with Copy, which truncates on a 32-bit target.
-func (g *gen) toPtr(v ir.Ref, t cc.Type) ir.Ref {
+func (g *gen) toPtr(v ir.Ref, t moderncc.Type) ir.Ref {
 	switch c := clsOf(t); {
 	case c == ir.ClsP:
 		return v
@@ -142,8 +142,8 @@ func (g *gen) toPtr(v ir.Ref, t cc.Type) ir.Ref {
 
 // promote applies the default argument promotions for a variadic argument
 // (float widens to double; integers already compute at int width).
-func (g *gen) promote(v ir.Ref, t cc.Type) ir.Ref {
-	if t.Kind() == cc.Float {
+func (g *gen) promote(v ir.Ref, t moderncc.Type) ir.Ref {
+	if t.Kind() == moderncc.Float {
 		return g.cur.Exts(v)
 	}
 	return v
@@ -172,12 +172,12 @@ func (g *gen) strSym(s string) ir.Ref {
 }
 
 // funcTypeOf extracts a function type from t (following one pointer level).
-func funcTypeOf(t cc.Type) *cc.FunctionType {
-	if ft, ok := t.(*cc.FunctionType); ok {
+func funcTypeOf(t moderncc.Type) *moderncc.FunctionType {
+	if ft, ok := t.(*moderncc.FunctionType); ok {
 		return ft
 	}
-	if pt, ok := t.(*cc.PointerType); ok {
-		if ft, ok := pt.Elem().(*cc.FunctionType); ok {
+	if pt, ok := t.(*moderncc.PointerType); ok {
+		if ft, ok := pt.Elem().(*moderncc.FunctionType); ok {
 			return ft
 		}
 	}
@@ -186,7 +186,7 @@ func funcTypeOf(t cc.Type) *cc.FunctionType {
 
 // genCall emits a function call, handling direct/indirect callees, fixed-argument
 // coercion, and default promotions for variadic arguments.
-func (g *gen) genCall(n *cc.PostfixExpression) ir.Ref {
+func (g *gen) genCall(n *moderncc.PostfixExpression) ir.Ref {
 	if r, ok := g.vaBuiltin(n); ok {
 		return r
 	}
@@ -197,7 +197,7 @@ func (g *gen) genCall(n *cc.PostfixExpression) ir.Ref {
 	ft := funcTypeOf(calleeNode.Type())
 
 	var callee ir.Ref
-	if pe, ok := calleeNode.(*cc.PrimaryExpression); ok && pe.Case == cc.PrimaryExpressionIdent {
+	if pe, ok := calleeNode.(*moderncc.PrimaryExpression); ok && pe.Case == moderncc.PrimaryExpressionIdent {
 		if v, found := g.lookup(pe.Token.SrcStr()); found {
 			callee = g.loadVal(g.addrOf(v), v.typ) // a function-pointer variable
 		} else {
@@ -209,7 +209,7 @@ func (g *gen) genCall(n *cc.PostfixExpression) ir.Ref {
 
 	// The argument list is stored head-first: each node's AssignmentExpression is
 	// the earlier argument and ArgumentExpressionList holds the rest.
-	var argNodes []cc.ExpressionNode
+	var argNodes []moderncc.ExpressionNode
 	for l := n.ArgumentExpressionList; l != nil; l = l.ArgumentExpressionList {
 		argNodes = append(argNodes, l.AssignmentExpression)
 	}
@@ -221,7 +221,7 @@ func (g *gen) genCall(n *cc.PostfixExpression) ir.Ref {
 	args := make([]ir.Ref, 0, len(argNodes))
 	var aggArgs []*ir.AggType // parallel to args; non-nil where an arg is by-value aggregate
 	for i, an := range argNodes {
-		var pt cc.Type
+		var pt moderncc.Type
 		if ft != nil && i < nfixed {
 			pt = ft.Parameters()[i].Type()
 		}
@@ -271,7 +271,7 @@ func (g *gen) genCall(n *cc.PostfixExpression) ir.Ref {
 		call.AggArgs = aggArgs
 		return r
 	}
-	if ft != nil && ft.Result().Kind() == cc.Void {
+	if ft != nil && ft.Result().Kind() == moderncc.Void {
 		g.cur.CallVoid(callee, args...)
 		g.lastInstr().AggArgs = aggArgs
 		return ir.R
@@ -298,8 +298,8 @@ func (g *gen) lastInstr() *ir.Instr {
 // This is the rank the usual arithmetic conversions actually compare. Comparing
 // value classes instead collapses char, short and int into one width and hands
 // the tiebreak to whichever operand happened to be unsigned.
-func promotedInt(t cc.Type) (size int, isSigned bool) {
-	if !cc.IsIntegerType(t) {
+func promotedInt(t moderncc.Type) (size int, isSigned bool) {
+	if !moderncc.IsIntegerType(t) {
 		return int(t.Size()), signed(t)
 	}
 	if sz := int(t.Size()); sz < 4 {

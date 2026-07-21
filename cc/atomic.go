@@ -1,8 +1,8 @@
 package cc
 
 import (
+	moderncc "github.com/evanphx/cg12/internal/cc"
 	"github.com/evanphx/cg12/ir"
-	"modernc.org/cc/v4"
 )
 
 // Atomics. The IR now carries atomic operations (the atomic.* intrinsics with a
@@ -30,7 +30,7 @@ func (g *gen) atomicUnsupported(what string) {
 // atomicWidth returns the atomic-intrinsic name suffix, result class, and access
 // width in bytes for an atomic reached through ptr (a pointer to the atomic
 // object). ok is false for a width cg12 has no atomic op for.
-func atomicWidth(ptr cc.ExpressionNode) (suffix string, cls ir.Cls, width int, ok bool) {
+func atomicWidth(ptr moderncc.ExpressionNode) (suffix string, cls ir.Cls, width int, ok bool) {
 	switch pointee(ptr.Type()).Size() {
 	case 1:
 		return "b", ir.ClsW, 1, true
@@ -73,7 +73,7 @@ func (g *gen) storeWidth(width int, val, addr ir.Ref) {
 
 // atomicFetchOp lowers a fetch-and-op (add/sub/and/or/xor). The intrinsic returns
 // the previous value; newValue instead asks for the value after the op.
-func (g *gen) atomicFetchOp(op string, args []cc.ExpressionNode, newValue bool) ir.Ref {
+func (g *gen) atomicFetchOp(op string, args []moderncc.ExpressionNode, newValue bool) ir.Ref {
 	suf, cls, _, ok := atomicWidth(args[0])
 	if !ok {
 		g.atomicUnsupported("atomic " + op)
@@ -100,7 +100,7 @@ func (g *gen) atomicFetchOp(op string, args []cc.ExpressionNode, newValue bool) 
 	return old
 }
 
-func (g *gen) atomicLoad(ptr cc.ExpressionNode) ir.Ref {
+func (g *gen) atomicLoad(ptr moderncc.ExpressionNode) ir.Ref {
 	suf, cls, _, ok := atomicWidth(ptr)
 	if !ok {
 		g.atomicUnsupported("atomic load")
@@ -109,7 +109,7 @@ func (g *gen) atomicLoad(ptr cc.ExpressionNode) ir.Ref {
 	return g.cur.Intrinsic("atomic.load."+suf, cls, g.genExpr(ptr))
 }
 
-func (g *gen) atomicStore(ptr, val cc.ExpressionNode) {
+func (g *gen) atomicStore(ptr, val moderncc.ExpressionNode) {
 	suf, _, _, ok := atomicWidth(ptr)
 	if !ok {
 		g.atomicUnsupported("atomic store")
@@ -119,7 +119,7 @@ func (g *gen) atomicStore(ptr, val cc.ExpressionNode) {
 	g.cur.IntrinsicVoid("atomic.store."+suf, p, g.genExpr(val))
 }
 
-func (g *gen) atomicXchg(ptr, val cc.ExpressionNode) ir.Ref {
+func (g *gen) atomicXchg(ptr, val moderncc.ExpressionNode) ir.Ref {
 	suf, cls, _, ok := atomicWidth(ptr)
 	if !ok {
 		g.atomicUnsupported("atomic exchange")
@@ -132,7 +132,7 @@ func (g *gen) atomicXchg(ptr, val cc.ExpressionNode) ir.Ref {
 // atomicCAS lowers a compare-exchange whose expected value is at *expPtr and whose
 // desired value is by value. It returns whether the swap happened, and updates
 // *expPtr to the value seen (a no-op on success).
-func (g *gen) atomicCAS(ptr, expPtr, desired cc.ExpressionNode) ir.Ref {
+func (g *gen) atomicCAS(ptr, expPtr, desired moderncc.ExpressionNode) ir.Ref {
 	suf, cls, width, ok := atomicWidth(ptr)
 	if !ok {
 		g.atomicUnsupported("atomic compare-exchange")
@@ -149,7 +149,7 @@ func (g *gen) atomicCAS(ptr, expPtr, desired cc.ExpressionNode) ir.Ref {
 
 // checkAtomicDecl refuses an _Atomic object. C says every access to it is atomic;
 // cg12 would give it ordinary ones.
-func (g *gen) checkAtomicDecl(d *cc.Declarator) {
+func (g *gen) checkAtomicDecl(d *moderncc.Declarator) {
 	if d != nil && d.IsAtomic() {
 		g.atomicUnsupported("_Atomic " + d.Name())
 	}
@@ -162,7 +162,7 @@ func (g *gen) checkAtomicDecl(d *cc.Declarator) {
 // A struct may hold an atomic member beside ordinary ones, and reading an
 // ordinary one is an ordinary load -- refusing that would refuse programs cg12
 // compiles correctly.
-func (g *gen) checkAtomicMember(f *cc.Field) {
+func (g *gen) checkAtomicMember(f *moderncc.Field) {
 	if f == nil {
 		return
 	}

@@ -3,46 +3,46 @@ package cc
 import (
 	"math/big"
 
+	moderncc "github.com/evanphx/cg12/internal/cc"
 	"github.com/evanphx/cg12/ir"
-	"modernc.org/cc/v4"
 )
 
 // genExpr evaluates an expression to its rvalue.
-func (g *gen) genExpr(e cc.ExpressionNode) ir.Ref {
+func (g *gen) genExpr(e moderncc.ExpressionNode) ir.Ref {
 	switch n := e.(type) {
-	case *cc.PrimaryExpression:
+	case *moderncc.PrimaryExpression:
 		return g.genPrimary(n)
-	case *cc.PostfixExpression:
+	case *moderncc.PostfixExpression:
 		return g.genPostfix(n)
-	case *cc.UnaryExpression:
+	case *moderncc.UnaryExpression:
 		return g.genUnary(n)
-	case *cc.CastExpression:
+	case *moderncc.CastExpression:
 		return g.rval(n.CastExpression, n.Type())
-	case *cc.MultiplicativeExpression:
+	case *moderncc.MultiplicativeExpression:
 		return g.arith(mulOp(n.Case), n.MultiplicativeExpression, n.CastExpression, n.Type())
-	case *cc.AdditiveExpression:
+	case *moderncc.AdditiveExpression:
 		return g.arith(addOp(n.Case), n.AdditiveExpression, n.MultiplicativeExpression, n.Type())
-	case *cc.ShiftExpression:
+	case *moderncc.ShiftExpression:
 		return g.arith(shiftOp(n.Case), n.ShiftExpression, n.AdditiveExpression, n.Type())
-	case *cc.AndExpression:
+	case *moderncc.AndExpression:
 		return g.arith("&", n.AndExpression, n.EqualityExpression, n.Type())
-	case *cc.ExclusiveOrExpression:
+	case *moderncc.ExclusiveOrExpression:
 		return g.arith("^", n.ExclusiveOrExpression, n.AndExpression, n.Type())
-	case *cc.InclusiveOrExpression:
+	case *moderncc.InclusiveOrExpression:
 		return g.arith("|", n.InclusiveOrExpression, n.ExclusiveOrExpression, n.Type())
-	case *cc.RelationalExpression:
+	case *moderncc.RelationalExpression:
 		return g.compare(relOp(n.Case), n.RelationalExpression, n.ShiftExpression)
-	case *cc.EqualityExpression:
+	case *moderncc.EqualityExpression:
 		return g.compare(eqOp(n.Case), n.EqualityExpression, n.RelationalExpression)
-	case *cc.LogicalAndExpression:
+	case *moderncc.LogicalAndExpression:
 		return g.logical(true, n.LogicalAndExpression, n.InclusiveOrExpression)
-	case *cc.LogicalOrExpression:
+	case *moderncc.LogicalOrExpression:
 		return g.logical(false, n.LogicalOrExpression, n.LogicalAndExpression)
-	case *cc.ConditionalExpression:
+	case *moderncc.ConditionalExpression:
 		return g.genCond3(n)
-	case *cc.AssignmentExpression:
+	case *moderncc.AssignmentExpression:
 		return g.genAssign(n)
-	case *cc.ExpressionList:
+	case *moderncc.ExpressionList:
 		// A comma expression, stored head-first: AssignmentExpression is the
 		// earlier operand (evaluated for effect), ExpressionList the rest, whose
 		// value is the value of the whole expression.
@@ -55,42 +55,42 @@ func (g *gen) genExpr(e cc.ExpressionNode) ir.Ref {
 	return g.fail("cc: unsupported expression %T", e)
 }
 
-func mulOp(c cc.MultiplicativeExpressionCase) string {
+func mulOp(c moderncc.MultiplicativeExpressionCase) string {
 	switch c {
-	case cc.MultiplicativeExpressionDiv:
+	case moderncc.MultiplicativeExpressionDiv:
 		return "/"
-	case cc.MultiplicativeExpressionMod:
+	case moderncc.MultiplicativeExpressionMod:
 		return "%"
 	default:
 		return "*"
 	}
 }
-func addOp(c cc.AdditiveExpressionCase) string {
-	if c == cc.AdditiveExpressionSub {
+func addOp(c moderncc.AdditiveExpressionCase) string {
+	if c == moderncc.AdditiveExpressionSub {
 		return "-"
 	}
 	return "+"
 }
-func shiftOp(c cc.ShiftExpressionCase) string {
-	if c == cc.ShiftExpressionRsh {
+func shiftOp(c moderncc.ShiftExpressionCase) string {
+	if c == moderncc.ShiftExpressionRsh {
 		return ">>"
 	}
 	return "<<"
 }
-func relOp(c cc.RelationalExpressionCase) string {
+func relOp(c moderncc.RelationalExpressionCase) string {
 	switch c {
-	case cc.RelationalExpressionGt:
+	case moderncc.RelationalExpressionGt:
 		return ">"
-	case cc.RelationalExpressionLeq:
+	case moderncc.RelationalExpressionLeq:
 		return "<="
-	case cc.RelationalExpressionGeq:
+	case moderncc.RelationalExpressionGeq:
 		return ">="
 	default:
 		return "<"
 	}
 }
-func eqOp(c cc.EqualityExpressionCase) string {
-	if c == cc.EqualityExpressionNeq {
+func eqOp(c moderncc.EqualityExpressionCase) string {
+	if c == moderncc.EqualityExpressionNeq {
 		return "!="
 	}
 	return "=="
@@ -98,7 +98,7 @@ func eqOp(c cc.EqualityExpressionCase) string {
 
 // --- primary expressions ---------------------------------------------------
 
-func (g *gen) genPrimary(n *cc.PrimaryExpression) ir.Ref {
+func (g *gen) genPrimary(n *moderncc.PrimaryExpression) ir.Ref {
 	// A folded complex constant (an imaginary literal like 2.0i, or _Complex_I)
 	// materializes into a {re,im} slot.
 	if isComplex(n.Type()) {
@@ -107,31 +107,31 @@ func (g *gen) genPrimary(n *cc.PrimaryExpression) ir.Ref {
 		}
 	}
 	switch n.Case {
-	case cc.PrimaryExpressionInt, cc.PrimaryExpressionChar, cc.PrimaryExpressionLChar:
+	case moderncc.PrimaryExpressionInt, moderncc.PrimaryExpressionChar, moderncc.PrimaryExpressionLChar:
 		v, _ := constInt(n)
 		return g.constOf(v, n.Type())
-	case cc.PrimaryExpressionFloat:
-		if ldv, ok := n.Value().(*cc.LongDoubleValue); ok {
+	case moderncc.PrimaryExpressionFloat:
+		if ldv, ok := n.Value().(*moderncc.LongDoubleValue); ok {
 			return g.quadConst((*big.Float)(ldv))
 		}
-		if v, ok := n.Value().(cc.Float64Value); ok {
+		if v, ok := n.Value().(moderncc.Float64Value); ok {
 			return g.floatOf(float64(v), n.Type())
 		}
 		return g.floatOf(0, n.Type())
-	case cc.PrimaryExpressionString:
-		s, _ := n.Value().(cc.StringValue)
+	case moderncc.PrimaryExpressionString:
+		s, _ := n.Value().(moderncc.StringValue)
 		return g.strSym(string(s))
-	case cc.PrimaryExpressionIdent:
+	case moderncc.PrimaryExpressionIdent:
 		return g.loadLval(n)
-	case cc.PrimaryExpressionExpr:
+	case moderncc.PrimaryExpressionExpr:
 		return g.genExpr(n.ExpressionList)
-	case cc.PrimaryExpressionGeneric:
+	case moderncc.PrimaryExpressionGeneric:
 		// _Generic: the type checker already picked the matching association.
 		if a := n.GenericSelection.Associated(); a != nil {
 			return g.genExpr(a.AssignmentExpression)
 		}
 		return g.fail("cc: _Generic with no matching association")
-	case cc.PrimaryExpressionStmt:
+	case moderncc.PrimaryExpressionStmt:
 		// A GNU statement expression ({ ... }): its value is the last statement.
 		return g.genStmtExpr(n.CompoundStatement)
 	}
@@ -139,7 +139,7 @@ func (g *gen) genPrimary(n *cc.PrimaryExpression) ir.Ref {
 }
 
 // constOf builds an integer/pointer constant of the given type's class.
-func (g *gen) constOf(v int64, t cc.Type) ir.Ref {
+func (g *gen) constOf(v int64, t moderncc.Type) ir.Ref {
 	if wide(clsOf(t)) {
 		return g.fn.Long(v)
 	}
@@ -148,7 +148,7 @@ func (g *gen) constOf(v int64, t cc.Type) ir.Ref {
 
 // loadLval loads the value of a named identifier (variable or the address of a
 // function/array).
-func (g *gen) loadLval(n *cc.PrimaryExpression) ir.Ref {
+func (g *gen) loadLval(n *moderncc.PrimaryExpression) ir.Ref {
 	name := n.Token.SrcStr()
 	if v, ok := g.lookup(name); ok {
 		addr := g.addrOf(v)
@@ -174,50 +174,50 @@ func (g *gen) loadLval(n *cc.PrimaryExpression) ir.Ref {
 // --- lvalue addresses ------------------------------------------------------
 
 // genAddr returns the address of an lvalue expression.
-func (g *gen) genAddr(e cc.ExpressionNode) (ir.Ref, cc.Type) {
+func (g *gen) genAddr(e moderncc.ExpressionNode) (ir.Ref, moderncc.Type) {
 	switch n := e.(type) {
-	case *cc.PrimaryExpression:
-		if n.Case == cc.PrimaryExpressionIdent {
+	case *moderncc.PrimaryExpression:
+		if n.Case == moderncc.PrimaryExpressionIdent {
 			if v, ok := g.lookup(n.Token.SrcStr()); ok {
 				return g.addrOf(v), v.typ
 			}
 			return g.fn.Sym(n.Token.SrcStr(), 0), n.Type()
 		}
-		if n.Case == cc.PrimaryExpressionExpr {
+		if n.Case == moderncc.PrimaryExpressionExpr {
 			return g.genAddr(n.ExpressionList)
 		}
-	case *cc.UnaryExpression:
-		if n.Case == cc.UnaryExpressionDeref { // *p
+	case *moderncc.UnaryExpression:
+		if n.Case == moderncc.UnaryExpressionDeref { // *p
 			return g.genExpr(n.CastExpression), n.Type()
 		}
-	case *cc.PostfixExpression:
+	case *moderncc.PostfixExpression:
 		switch n.Case {
-		case cc.PostfixExpressionIndex: // a[i], equivalently i[a]
-			var arrN, idxN cc.ExpressionNode = n.PostfixExpression, n.ExpressionList
+		case moderncc.PostfixExpressionIndex: // a[i], equivalently i[a]
+			var arrN, idxN moderncc.ExpressionNode = n.PostfixExpression, n.ExpressionList
 			if !isPtrOrArray(arrN.Type()) {
 				arrN, idxN = idxN, arrN
 			}
 			base, elemT := g.arrayBase(arrN)
-			if at, ok := elemT.(*cc.ArrayType); ok && at.IsVLA() {
+			if at, ok := elemT.(*moderncc.ArrayType); ok && at.IsVLA() {
 				// Indexing a multi-dimensional VLA: the row stride is a runtime value.
 				idx := g.toPtr(g.genExpr(idxN), idxN.Type())
 				off := g.cur.Mul(ir.ClsP, idx, g.vlaBytes(at))
 				return g.cur.Add(ir.ClsP, base, off), elemT
 			}
 			return g.ptrIndex(base, false, g.genExpr(idxN), idxN.Type(), int64(elemT.Size())), elemT
-		case cc.PostfixExpressionSelect: // s.field
+		case moderncc.PostfixExpressionSelect: // s.field
 			base, bt := g.genAddr(n.PostfixExpression)
 			g.checkPacked(bt)
 			fld := n.Field()
 			g.checkAtomicMember(fld)
 			return g.offset(base, int(fld.Offset())), fld.Type()
-		case cc.PostfixExpressionPSelect: // p->field
+		case moderncc.PostfixExpressionPSelect: // p->field
 			ptr := g.genExpr(n.PostfixExpression)
 			g.checkPacked(pointee(n.PostfixExpression.Type()))
 			fld := n.Field()
 			g.checkAtomicMember(fld)
 			return g.offset(ptr, int(fld.Offset())), fld.Type()
-		case cc.PostfixExpressionComplit: // (T){ ... }
+		case moderncc.PostfixExpressionComplit: // (T){ ... }
 			return g.complit(n)
 		}
 	}
@@ -233,11 +233,11 @@ func (g *gen) genAddr(e cc.ExpressionNode) (ir.Ref, cc.Type) {
 
 // arrayBase returns the base pointer and element type for indexing a[i] where a
 // is an array (decays to a pointer) or a pointer.
-func (g *gen) arrayBase(e cc.ExpressionNode) (ir.Ref, cc.Type) {
-	if pt, ok := e.Type().(*cc.PointerType); ok {
+func (g *gen) arrayBase(e moderncc.ExpressionNode) (ir.Ref, moderncc.Type) {
+	if pt, ok := e.Type().(*moderncc.PointerType); ok {
 		return g.genExpr(e), pt.Elem()
 	}
-	if at, ok := e.Type().(*cc.ArrayType); ok {
+	if at, ok := e.Type().(*moderncc.ArrayType); ok {
 		base, _ := g.genAddr(e)
 		return base, at.Elem()
 	}
@@ -253,45 +253,45 @@ func (g *gen) offset(addr ir.Ref, off int) ir.Ref {
 
 // --- postfix ---------------------------------------------------------------
 
-func (g *gen) genPostfix(n *cc.PostfixExpression) ir.Ref {
+func (g *gen) genPostfix(n *moderncc.PostfixExpression) ir.Ref {
 	switch n.Case {
-	case cc.PostfixExpressionCall:
+	case moderncc.PostfixExpressionCall:
 		return g.genCall(n)
-	case cc.PostfixExpressionIndex:
+	case moderncc.PostfixExpressionIndex:
 		addr, t := g.genAddr(n)
 		return g.rvalue(addr, t)
-	case cc.PostfixExpressionSelect, cc.PostfixExpressionPSelect:
+	case moderncc.PostfixExpressionSelect, moderncc.PostfixExpressionPSelect:
 		if f, unit, ok := g.asBitfield(n); ok {
 			return g.readBitfield(unit, f)
 		}
 		addr, t := g.genAddr(n)
 		return g.rvalue(addr, t)
-	case cc.PostfixExpressionComplit:
+	case moderncc.PostfixExpressionComplit:
 		addr, t := g.complit(n)
 		return g.rvalue(addr, t)
-	case cc.PostfixExpressionInc, cc.PostfixExpressionDec:
+	case moderncc.PostfixExpressionInc, moderncc.PostfixExpressionDec:
 		if f, unit, ok := g.asBitfield(n.PostfixExpression); ok {
 			old := g.readBitfield(unit, f)
-			g.writeBitfield(unit, g.incDec(old, f.Type(), n.Case == cc.PostfixExpressionInc), f)
+			g.writeBitfield(unit, g.incDec(old, f.Type(), n.Case == moderncc.PostfixExpressionInc), f)
 			return old
 		}
 		addr, t := g.genAddr(n.PostfixExpression)
 		if isInt128(t) {
 			old := g.int128Copy(addr)
-			g.copyAgg(addr, g.int128IncDec(addr, n.Case == cc.PostfixExpressionInc), 16)
+			g.copyAgg(addr, g.int128IncDec(addr, n.Case == moderncc.PostfixExpressionInc), 16)
 			return old
 		}
 		old := g.loadVal(addr, t)
-		g.storeVal(addr, g.incDec(old, t, n.Case == cc.PostfixExpressionInc), t)
+		g.storeVal(addr, g.incDec(old, t, n.Case == moderncc.PostfixExpressionInc), t)
 		return old // post-inc/dec yields the old value
 	}
 	return g.fail("cc: unsupported postfix case %v", n.Case)
 }
 
 // incDec adds or subtracts one (scaled by element size for pointers).
-func (g *gen) incDec(v ir.Ref, t cc.Type, inc bool) ir.Ref {
+func (g *gen) incDec(v ir.Ref, t moderncc.Type, inc bool) ir.Ref {
 	step := int64(1)
-	if pt, ok := t.(*cc.PointerType); ok {
+	if pt, ok := t.(*moderncc.PointerType); ok {
 		step = int64(pt.Elem().Size())
 	}
 	cls := clsOf(t)
@@ -307,9 +307,9 @@ func (g *gen) incDec(v ir.Ref, t cc.Type, inc bool) ir.Ref {
 
 // --- unary -----------------------------------------------------------------
 
-func (g *gen) genUnary(n *cc.UnaryExpression) ir.Ref {
+func (g *gen) genUnary(n *moderncc.UnaryExpression) ir.Ref {
 	switch n.Case {
-	case cc.UnaryExpressionMinus:
+	case moderncc.UnaryExpressionMinus:
 		if isInt128(n.Type()) {
 			return g.int128Neg(n.CastExpression)
 		}
@@ -321,13 +321,13 @@ func (g *gen) genUnary(n *cc.UnaryExpression) ir.Ref {
 		}
 		v := g.genExpr(n.CastExpression)
 		return g.cur.Neg(clsOf(n.Type()), v)
-	case cc.UnaryExpressionReal: // __real__ z
+	case moderncc.UnaryExpressionReal: // __real__ z
 		return g.complexReal(complexOperand(n))
-	case cc.UnaryExpressionImag: // __imag__ z
+	case moderncc.UnaryExpressionImag: // __imag__ z
 		return g.complexImag(complexOperand(n))
-	case cc.UnaryExpressionPlus:
+	case moderncc.UnaryExpressionPlus:
 		return g.genExpr(n.CastExpression)
-	case cc.UnaryExpressionNot: // !x  ==  x == 0
+	case moderncc.UnaryExpressionNot: // !x  ==  x == 0
 		t := n.CastExpression.Type()
 		if isLongDouble(t) { // !x  ==  (x == 0.0L)
 			c := g.softcall("__eqtf2", false, ir.ClsW, qa(g.genExpr(n.CastExpression)), qa(g.quadZero()))
@@ -338,7 +338,7 @@ func (g *gen) genUnary(n *cc.UnaryExpression) ir.Ref {
 			return g.cur.Cmp(ir.CmpFeq, ir.ClsW, v, g.floatOf(0, t))
 		}
 		return g.cur.Cmp(ir.CmpEq, ir.ClsW, v, g.constOf(0, t))
-	case cc.UnaryExpressionCpl: // ~x
+	case moderncc.UnaryExpressionCpl: // ~x
 		if isInt128(n.Type()) {
 			return g.int128Cpl(n.CastExpression)
 		}
@@ -348,7 +348,7 @@ func (g *gen) genUnary(n *cc.UnaryExpression) ir.Ref {
 			return g.cur.Xor(cls, v, g.fn.Long(-1))
 		}
 		return g.cur.Xor(cls, v, g.fn.Word(-1))
-	case cc.UnaryExpressionDeref: // *p
+	case moderncc.UnaryExpressionDeref: // *p
 		if r, ok := g.vaArgExpr(n); ok { // *(T*)__builtin_va_arg_impl(ap)
 			return r
 		}
@@ -361,35 +361,35 @@ func (g *gen) genUnary(n *cc.UnaryExpression) ir.Ref {
 			return p
 		}
 		return g.rvalue(p, n.Type())
-	case cc.UnaryExpressionAddrof: // &x
+	case moderncc.UnaryExpressionAddrof: // &x
 		addr, _ := g.genAddr(n.CastExpression)
 		return addr
-	case cc.UnaryExpressionInc, cc.UnaryExpressionDec:
+	case moderncc.UnaryExpressionInc, moderncc.UnaryExpressionDec:
 		if f, unit, ok := g.asBitfield(n.UnaryExpression); ok {
-			v := g.incDec(g.readBitfield(unit, f), f.Type(), n.Case == cc.UnaryExpressionInc)
+			v := g.incDec(g.readBitfield(unit, f), f.Type(), n.Case == moderncc.UnaryExpressionInc)
 			g.writeBitfield(unit, v, f)
 			return v
 		}
 		addr, t := g.genAddr(n.UnaryExpression)
 		if isInt128(t) {
-			g.copyAgg(addr, g.int128IncDec(addr, n.Case == cc.UnaryExpressionInc), 16)
+			g.copyAgg(addr, g.int128IncDec(addr, n.Case == moderncc.UnaryExpressionInc), 16)
 			return addr // prefix yields the new value
 		}
-		v := g.incDec(g.loadVal(addr, t), t, n.Case == cc.UnaryExpressionInc)
+		v := g.incDec(g.loadVal(addr, t), t, n.Case == moderncc.UnaryExpressionInc)
 		g.storeVal(addr, v, t)
 		return v
-	case cc.UnaryExpressionSizeofExpr, cc.UnaryExpressionSizeofType:
-		var t cc.Type
-		if n.Case == cc.UnaryExpressionSizeofType {
+	case moderncc.UnaryExpressionSizeofExpr, moderncc.UnaryExpressionSizeofType:
+		var t moderncc.Type
+		if n.Case == moderncc.UnaryExpressionSizeofType {
 			t = n.TypeName.Type()
 		} else {
 			// sizeof does not decay its array operand; recover the array type.
 			t = n.UnaryExpression.Type()
-			if pt, ok := t.(*cc.PointerType); ok && pt.Undecay() != nil {
+			if pt, ok := t.(*moderncc.PointerType); ok && pt.Undecay() != nil {
 				t = pt.Undecay()
 			}
 		}
-		if at, ok := t.(*cc.ArrayType); ok && at.IsVLA() {
+		if at, ok := t.(*moderncc.ArrayType); ok && at.IsVLA() {
 			return g.vlaBytes(at) // sizeof a VLA is its runtime byte size
 		}
 		v, ok := constInt(n)
@@ -397,11 +397,11 @@ func (g *gen) genUnary(n *cc.UnaryExpression) ir.Ref {
 			return g.fail("cc: sizeof is not a constant here")
 		}
 		return g.fn.Long(v)
-	case cc.UnaryExpressionAlignofType: // _Alignof(type)
+	case moderncc.UnaryExpressionAlignofType: // _Alignof(type)
 		return g.fn.Long(int64(n.TypeName.Type().Align()))
-	case cc.UnaryExpressionAlignofExpr: // _Alignof expr (GNU)
+	case moderncc.UnaryExpressionAlignofExpr: // _Alignof expr (GNU)
 		return g.fn.Long(int64(n.UnaryExpression.Type().Align()))
-	case cc.UnaryExpressionLabelAddr: // &&label
+	case moderncc.UnaryExpressionLabelAddr: // &&label
 		if b, ok := g.labels[n.Token2.SrcStr()]; ok {
 			return g.cur.BlockAddr(b)
 		}
@@ -412,9 +412,9 @@ func (g *gen) genUnary(n *cc.UnaryExpression) ir.Ref {
 
 // --- binary arithmetic -----------------------------------------------------
 
-func (g *gen) arith(op string, ln, rn cc.ExpressionNode, resT cc.Type) ir.Ref {
+func (g *gen) arith(op string, ln, rn moderncc.ExpressionNode, resT moderncc.Type) ir.Ref {
 	// Pointer arithmetic: p +/- n scales n by the element size.
-	if pt, ok := resT.(*cc.PointerType); ok && (op == "+" || op == "-") {
+	if pt, ok := resT.(*moderncc.PointerType); ok && (op == "+" || op == "-") {
 		return g.ptrArith(op, ln, rn, pt)
 	}
 	// Pointer difference: p - q is the byte distance divided by the element
@@ -431,7 +431,7 @@ func (g *gen) arith(op string, ln, rn cc.ExpressionNode, resT cc.Type) ir.Ref {
 		if comp, ok := g.complexArithComp(ln, rn, resT); ok {
 			return g.complexArith(op, ln, rn, comp)
 		}
-		if cc.IsComplexType(resT) {
+		if moderncc.IsComplexType(resT) {
 			return g.fail("cc: unsupported complex type %v", resT)
 		}
 	}
@@ -489,7 +489,7 @@ func (g *gen) arith(op string, ln, rn cc.ExpressionNode, resT cc.Type) ir.Ref {
 
 // ptrOffset scales an integer index by the element size, producing a byte
 // offset in the pointer class. A unit element size needs no multiply.
-func (g *gen) ptrOffset(idx ir.Ref, idxType cc.Type, elem int64) ir.Ref {
+func (g *gen) ptrOffset(idx ir.Ref, idxType moderncc.Type, elem int64) ir.Ref {
 	off := g.toPtr(idx, idxType)
 	if elem != 1 {
 		off = g.cur.Mul(ir.ClsP, off, g.fn.ConstInt(ir.ClsP, elem))
@@ -499,7 +499,7 @@ func (g *gen) ptrOffset(idx ir.Ref, idxType cc.Type, elem int64) ir.Ref {
 
 // ptrIndex computes the address of the idx-th element from base:
 // base +/- idx*elem in the pointer class (subtracting when sub is true).
-func (g *gen) ptrIndex(base ir.Ref, sub bool, idx ir.Ref, idxType cc.Type, elem int64) ir.Ref {
+func (g *gen) ptrIndex(base ir.Ref, sub bool, idx ir.Ref, idxType moderncc.Type, elem int64) ir.Ref {
 	off := g.ptrOffset(idx, idxType, elem)
 	if sub {
 		return g.cur.Sub(ir.ClsP, base, off)
@@ -521,7 +521,7 @@ func (g *gen) ptrDiff(l, r ir.Ref, elem int64) ir.Ref {
 // operand (p - n); for addition either operand may be the pointer, since C
 // makes p + n and n + p equivalent. The element size comes from the result
 // (pointer) type, which matches whichever operand is the pointer.
-func (g *gen) ptrArith(op string, ln, rn cc.ExpressionNode, pt *cc.PointerType) ir.Ref {
+func (g *gen) ptrArith(op string, ln, rn moderncc.ExpressionNode, pt *moderncc.PointerType) ir.Ref {
 	baseN, idxN := ln, rn
 	if op == "+" && !isPtrOrArray(ln.Type()) {
 		baseN, idxN = rn, ln
@@ -530,7 +530,7 @@ func (g *gen) ptrArith(op string, ln, rn cc.ExpressionNode, pt *cc.PointerType) 
 }
 
 // compare emits a relational/equality comparison producing a 0/1 int.
-func (g *gen) compare(op string, ln, rn cc.ExpressionNode) ir.Ref {
+func (g *gen) compare(op string, ln, rn moderncc.ExpressionNode) ir.Ref {
 	// Complex operands admit only == and !=, comparing both components.
 	if isComplex(ln.Type()) || isComplex(rn.Type()) {
 		return g.complexCompare(op, ln, rn)
@@ -539,7 +539,7 @@ func (g *gen) compare(op string, ln, rn cc.ExpressionNode) ir.Ref {
 	// common type floating) is done on the {lo,hi} halves. The comparison is
 	// unsigned when either operand is an unsigned __int128.
 	if (isInt128(ln.Type()) || isInt128(rn.Type())) && !isFloat(ln.Type()) && !isFloat(rn.Type()) {
-		signedCmp := ln.Type().Kind() != cc.UInt128 && rn.Type().Kind() != cc.UInt128
+		signedCmp := ln.Type().Kind() != moderncc.UInt128 && rn.Type().Kind() != moderncc.UInt128
 		return g.int128Compare(op, ln, rn, signedCmp)
 	}
 	// Compare in the common type of the operands, following the usual
@@ -548,7 +548,7 @@ func (g *gen) compare(op string, ln, rn cc.ExpressionNode) ir.Ref {
 	// double against a long must widen the long to double, not truncate the
 	// double to long.
 	lt, rt := ln.Type(), rn.Type()
-	var ct cc.Type
+	var ct moderncc.Type
 	ctSigned := false
 	switch {
 	case isLongDouble(lt):
@@ -557,7 +557,7 @@ func (g *gen) compare(op string, ln, rn cc.ExpressionNode) ir.Ref {
 		ct = rt
 	case isFloat(lt) && isFloat(rt):
 		ct = lt
-		if rt.Kind() == cc.Double {
+		if rt.Kind() == moderncc.Double {
 			ct = rt // double dominates float
 		}
 	case isFloat(lt):
@@ -660,7 +660,7 @@ func cmpPred(op string, signed, flt bool) ir.Cmp {
 }
 
 // logical emits short-circuiting && / || producing a 0/1 int.
-func (g *gen) logical(and bool, ln, rn cc.ExpressionNode) ir.Ref {
+func (g *gen) logical(and bool, ln, rn moderncc.ExpressionNode) ir.Ref {
 	res := g.cur.Alloc(4, 4)
 	rhsB, endB := g.block("logrhs"), g.block("logend")
 	l := g.genCond(ln)
@@ -684,7 +684,7 @@ func (g *gen) boolOf(v ir.Ref) ir.Ref {
 }
 
 // genCond3 emits the ?: conditional operator.
-func (g *gen) genCond3(n *cc.ConditionalExpression) ir.Ref {
+func (g *gen) genCond3(n *moderncc.ConditionalExpression) ir.Ref {
 	res := g.allocAligned(n.Type(), int(n.Type().Size()))
 	thenB, elseB, endB := g.block("qt"), g.block("qf"), g.block("qend")
 	g.cur.Jnz(g.genCond(n.LogicalOrExpression), thenB, elseB)
@@ -700,7 +700,7 @@ func (g *gen) genCond3(n *cc.ConditionalExpression) ir.Ref {
 
 // condArm stores one arm of a ?: into the result slot: a byte copy for a
 // memory value (struct/union/long double), a plain store otherwise.
-func (g *gen) condArm(res ir.Ref, e cc.ExpressionNode, t cc.Type) {
+func (g *gen) condArm(res ir.Ref, e moderncc.ExpressionNode, t moderncc.Type) {
 	v := g.convert(g.genExpr(e), e.Type(), t)
 	if isMemValue(t) {
 		g.copyAgg(res, v, int(t.Size()))
@@ -711,11 +711,11 @@ func (g *gen) condArm(res ir.Ref, e cc.ExpressionNode, t cc.Type) {
 
 // --- assignment ------------------------------------------------------------
 
-func (g *gen) genAssign(n *cc.AssignmentExpression) ir.Ref {
+func (g *gen) genAssign(n *moderncc.AssignmentExpression) ir.Ref {
 	// A bit-field target is spliced into its access unit rather than stored.
 	if f, unit, ok := g.asBitfield(n.UnaryExpression); ok {
 		rhs := g.convert(g.genExpr(n.AssignmentExpression), n.AssignmentExpression.Type(), f.Type())
-		if n.Case == cc.AssignmentExpressionAssign {
+		if n.Case == moderncc.AssignmentExpressionAssign {
 			g.writeBitfield(unit, rhs, f)
 			return rhs
 		}
@@ -724,7 +724,7 @@ func (g *gen) genAssign(n *cc.AssignmentExpression) ir.Ref {
 		return v
 	}
 	addr, t := g.genAddr(n.UnaryExpression)
-	if n.Case == cc.AssignmentExpressionAssign {
+	if n.Case == moderncc.AssignmentExpressionAssign {
 		// va_copy(dst, src) arrives here as `dst = src`: modernc defines the
 		// builtin as a macro that expands to a plain assignment. It models a
 		// va_list as an 8-byte pointer, so that assignment copies 8 bytes -- but
@@ -760,9 +760,9 @@ func (g *gen) genAssign(n *cc.AssignmentExpression) ir.Ref {
 		return addr
 	}
 	// p += n / p -= n on a pointer scales n by the element size, like p = p +/- n.
-	if pt, ok := t.(*cc.PointerType); ok && (n.Case == cc.AssignmentExpressionAdd || n.Case == cc.AssignmentExpressionSub) {
+	if pt, ok := t.(*moderncc.PointerType); ok && (n.Case == moderncc.AssignmentExpressionAdd || n.Case == moderncc.AssignmentExpressionSub) {
 		old := g.loadVal(addr, t)
-		v := g.ptrIndex(old, n.Case == cc.AssignmentExpressionSub,
+		v := g.ptrIndex(old, n.Case == moderncc.AssignmentExpressionSub,
 			g.genExpr(n.AssignmentExpression), n.AssignmentExpression.Type(), int64(pt.Elem().Size()))
 		g.storeVal(addr, v, t)
 		return v
@@ -776,15 +776,15 @@ func (g *gen) genAssign(n *cc.AssignmentExpression) ir.Ref {
 
 // compoundArithOp maps a compound-assignment case to its binary operator (only
 // the arithmetic cases that apply to floating types).
-func compoundArithOp(c cc.AssignmentExpressionCase) string {
+func compoundArithOp(c moderncc.AssignmentExpressionCase) string {
 	switch c {
-	case cc.AssignmentExpressionAdd:
+	case moderncc.AssignmentExpressionAdd:
 		return "+"
-	case cc.AssignmentExpressionSub:
+	case moderncc.AssignmentExpressionSub:
 		return "-"
-	case cc.AssignmentExpressionMul:
+	case moderncc.AssignmentExpressionMul:
 		return "*"
-	case cc.AssignmentExpressionDiv:
+	case moderncc.AssignmentExpressionDiv:
 		return "/"
 	}
 	return ""
@@ -792,53 +792,53 @@ func compoundArithOp(c cc.AssignmentExpressionCase) string {
 
 // compoundAllOp maps every compound-assignment case to its binary operator,
 // including the integer-only ones (%, shifts, bitwise) that __int128 admits.
-func compoundAllOp(c cc.AssignmentExpressionCase) string {
+func compoundAllOp(c moderncc.AssignmentExpressionCase) string {
 	switch c {
-	case cc.AssignmentExpressionMod:
+	case moderncc.AssignmentExpressionMod:
 		return "%"
-	case cc.AssignmentExpressionLsh:
+	case moderncc.AssignmentExpressionLsh:
 		return "<<"
-	case cc.AssignmentExpressionRsh:
+	case moderncc.AssignmentExpressionRsh:
 		return ">>"
-	case cc.AssignmentExpressionAnd:
+	case moderncc.AssignmentExpressionAnd:
 		return "&"
-	case cc.AssignmentExpressionOr:
+	case moderncc.AssignmentExpressionOr:
 		return "|"
-	case cc.AssignmentExpressionXor:
+	case moderncc.AssignmentExpressionXor:
 		return "^"
 	}
 	return compoundArithOp(c)
 }
 
-func (g *gen) combineOp(c cc.AssignmentExpressionCase, l, r ir.Ref, t cc.Type) ir.Ref {
+func (g *gen) combineOp(c moderncc.AssignmentExpressionCase, l, r ir.Ref, t moderncc.Type) ir.Ref {
 	cls := clsOf(t)
 	b := g.cur
 	switch c {
-	case cc.AssignmentExpressionAdd:
+	case moderncc.AssignmentExpressionAdd:
 		return b.Add(cls, l, r)
-	case cc.AssignmentExpressionSub:
+	case moderncc.AssignmentExpressionSub:
 		return b.Sub(cls, l, r)
-	case cc.AssignmentExpressionMul:
+	case moderncc.AssignmentExpressionMul:
 		return b.Mul(cls, l, r)
-	case cc.AssignmentExpressionDiv:
+	case moderncc.AssignmentExpressionDiv:
 		if signed(t) || isFloat(t) {
 			return b.Div(cls, l, r)
 		}
 		return b.UDiv(cls, l, r)
-	case cc.AssignmentExpressionMod:
+	case moderncc.AssignmentExpressionMod:
 		if signed(t) {
 			return b.Rem(cls, l, r)
 		}
 		return b.URem(cls, l, r)
-	case cc.AssignmentExpressionAnd:
+	case moderncc.AssignmentExpressionAnd:
 		return b.And(cls, l, r)
-	case cc.AssignmentExpressionOr:
+	case moderncc.AssignmentExpressionOr:
 		return b.Or(cls, l, r)
-	case cc.AssignmentExpressionXor:
+	case moderncc.AssignmentExpressionXor:
 		return b.Xor(cls, l, r)
-	case cc.AssignmentExpressionLsh:
+	case moderncc.AssignmentExpressionLsh:
 		return b.Shl(cls, l, r)
-	case cc.AssignmentExpressionRsh:
+	case moderncc.AssignmentExpressionRsh:
 		if signed(t) {
 			return b.Sar(cls, l, r)
 		}

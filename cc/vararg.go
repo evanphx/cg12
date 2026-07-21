@@ -3,8 +3,8 @@ package cc
 import (
 	"strings"
 
+	moderncc "github.com/evanphx/cg12/internal/cc"
 	"github.com/evanphx/cg12/ir"
-	"modernc.org/cc/v4"
 )
 
 // vaListBytes is the size of the target's va_list state. cg12's VaStart/VaArg
@@ -14,8 +14,8 @@ import (
 const vaListBytes = 32
 
 // isVaList reports whether t is the va_list type.
-func isVaList(t cc.Type) bool {
-	if _, ok := t.(*cc.PointerType); !ok {
+func isVaList(t moderncc.Type) bool {
+	if _, ok := t.(*moderncc.PointerType); !ok {
 		return false
 	}
 	return strings.Contains(t.String(), "va_list")
@@ -34,8 +34,8 @@ func isVaList(t cc.Type) bool {
 
 // calleeIdent returns the name of a direct call's callee, or "" if the callee is
 // not a plain identifier.
-func calleeIdent(pe *cc.PostfixExpression) string {
-	if p, ok := pe.PostfixExpression.(*cc.PrimaryExpression); ok && p.Case == cc.PrimaryExpressionIdent {
+func calleeIdent(pe *moderncc.PostfixExpression) string {
+	if p, ok := pe.PostfixExpression.(*moderncc.PrimaryExpression); ok && p.Case == moderncc.PrimaryExpressionIdent {
 		return p.Token.SrcStr()
 	}
 	return ""
@@ -44,7 +44,7 @@ func calleeIdent(pe *cc.PostfixExpression) string {
 // vaBuiltin handles the va_start/va_end builtin calls, reporting whether the
 // call was one of them. va_arg is handled separately (it is wrapped in a
 // dereference that carries the requested type).
-func (g *gen) vaBuiltin(n *cc.PostfixExpression) (ir.Ref, bool) {
+func (g *gen) vaBuiltin(n *moderncc.PostfixExpression) (ir.Ref, bool) {
 	switch calleeIdent(n) {
 	case "__builtin_va_start":
 		// __builtin_va_start(ap, last): the second argument (the last named
@@ -62,7 +62,7 @@ func (g *gen) vaBuiltin(n *cc.PostfixExpression) (ir.Ref, bool) {
 
 // vaArgExpr matches the *(T*)__builtin_va_arg_impl(ap) shape that va_arg expands
 // to and, if it fits, emits a VaArg for the next argument of type T.
-func (g *gen) vaArgExpr(n *cc.UnaryExpression) (ir.Ref, bool) {
+func (g *gen) vaArgExpr(n *moderncc.UnaryExpression) (ir.Ref, bool) {
 	call := unwrapToCall(n.CastExpression)
 	if call == nil || calleeIdent(call) != "__builtin_va_arg_impl" {
 		return ir.R, false
@@ -74,7 +74,7 @@ func (g *gen) vaArgExpr(n *cc.UnaryExpression) (ir.Ref, bool) {
 // vaListAddr returns the address of the __va_list state named by e. A local
 // va_list is that state (its address is used); a va_list parameter holds a
 // pointer to state in the caller (the pointer is loaded).
-func (g *gen) vaListAddr(e cc.ExpressionNode) ir.Ref {
+func (g *gen) vaListAddr(e moderncc.ExpressionNode) ir.Ref {
 	if name, ok := identName(e); ok {
 		if v, found := g.lookup(name); found {
 			return g.vaStorage(v)
@@ -86,19 +86,19 @@ func (g *gen) vaListAddr(e cc.ExpressionNode) ir.Ref {
 
 // identName peels casts and parentheses to reach a bare identifier, returning
 // its name.
-func identName(e cc.ExpressionNode) (string, bool) {
+func identName(e moderncc.ExpressionNode) (string, bool) {
 	for {
 		switch x := e.(type) {
-		case *cc.PrimaryExpression:
+		case *moderncc.PrimaryExpression:
 			switch x.Case {
-			case cc.PrimaryExpressionIdent:
+			case moderncc.PrimaryExpressionIdent:
 				return x.Token.SrcStr(), true
-			case cc.PrimaryExpressionExpr:
+			case moderncc.PrimaryExpressionExpr:
 				e = x.ExpressionList
 			default:
 				return "", false
 			}
-		case *cc.CastExpression:
+		case *moderncc.CastExpression:
 			e = x.CastExpression
 		default:
 			return "", false
@@ -108,19 +108,19 @@ func identName(e cc.ExpressionNode) (string, bool) {
 
 // unwrapToCall peels casts and parentheses off e to reach the call it wraps, if
 // any.
-func unwrapToCall(e cc.ExpressionNode) *cc.PostfixExpression {
+func unwrapToCall(e moderncc.ExpressionNode) *moderncc.PostfixExpression {
 	for {
 		switch x := e.(type) {
-		case *cc.CastExpression:
+		case *moderncc.CastExpression:
 			e = x.CastExpression
-		case *cc.PrimaryExpression:
-			if x.Case == cc.PrimaryExpressionExpr {
+		case *moderncc.PrimaryExpression:
+			if x.Case == moderncc.PrimaryExpressionExpr {
 				e = x.ExpressionList
 				continue
 			}
 			return nil
-		case *cc.PostfixExpression:
-			if x.Case == cc.PostfixExpressionCall {
+		case *moderncc.PostfixExpression:
+			if x.Case == moderncc.PostfixExpressionCall {
 				return x
 			}
 			return nil

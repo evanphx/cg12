@@ -11,8 +11,8 @@ import (
 	"sort"
 	"strings"
 
+	moderncc "github.com/evanphx/cg12/internal/cc"
 	"github.com/evanphx/cg12/ir"
-	"modernc.org/cc/v4"
 )
 
 // gen holds the state of translating one translation unit to a cg12 module.
@@ -24,25 +24,25 @@ type gen struct {
 	target   Target
 	mod      *ir.Module
 	fn       *ir.Func
-	curRet   cc.Type
+	curRet   moderncc.Type
 	cur      *ir.Block
 	scopes   []map[string]lval
-	strs     map[string]string                  // decoded string literal -> data symbol name
-	ldconsts map[string]string                  // quad constant bytes -> data symbol name
-	quad     *ir.AggType                        // the canonical long-double (quad) aggregate type
-	ti128    *ir.AggType                        // the canonical __int128 {lo,hi} aggregate type
-	cplx     map[ir.SubCls]*ir.AggType          // memoized _Complex {re,im} aggregate types
-	aggs     map[cc.Type]*ir.AggType            // memoized C struct/union -> cg12 aggregate type
-	names    map[string]int                     // per-function temp-name uniquifier
-	labels   map[string]*ir.Block               // goto label -> block (per function)
-	caseBlk  map[*cc.LabeledStatement]*ir.Block // switch case/default -> block
-	nblk     int                                // block-name counter
-	nstatic  int                                // static-local mangling counter
-	brk      []*ir.Block                        // break targets
-	brkVla   []int                              // vlaScope depth at each break target
-	cont     []*ir.Block                        // continue targets
-	contVla  []int                              // vlaScope depth at each continue target
-	vlaScope []ir.Ref                           // saved stack pointers of active VLA scopes
+	strs     map[string]string                        // decoded string literal -> data symbol name
+	ldconsts map[string]string                        // quad constant bytes -> data symbol name
+	quad     *ir.AggType                              // the canonical long-double (quad) aggregate type
+	ti128    *ir.AggType                              // the canonical __int128 {lo,hi} aggregate type
+	cplx     map[ir.SubCls]*ir.AggType                // memoized _Complex {re,im} aggregate types
+	aggs     map[moderncc.Type]*ir.AggType            // memoized C struct/union -> cg12 aggregate type
+	names    map[string]int                           // per-function temp-name uniquifier
+	labels   map[string]*ir.Block                     // goto label -> block (per function)
+	caseBlk  map[*moderncc.LabeledStatement]*ir.Block // switch case/default -> block
+	nblk     int                                      // block-name counter
+	nstatic  int                                      // static-local mangling counter
+	brk      []*ir.Block                              // break targets
+	brkVla   []int                                    // vlaScope depth at each break target
+	cont     []*ir.Block                              // continue targets
+	contVla  []int                                    // vlaScope depth at each continue target
+	vlaScope []ir.Ref                                 // saved stack pointers of active VLA scopes
 	err      error
 }
 
@@ -52,7 +52,7 @@ type gen struct {
 type lval struct {
 	addr ir.Ref
 	sym  string
-	typ  cc.Type
+	typ  moderncc.Type
 	// vaRef marks a va_list that is a parameter: its storage holds a pointer to
 	// the actual __va_list state (which lives in the caller), rather than being
 	// the state itself as a local va_list is.
@@ -128,20 +128,20 @@ func Compile(name, src string) (*ir.Module, error) {
 // else. cg12's amd64 backend has its own tests that feed this C, and every one
 // of them was getting AArch64's answers.
 func CompileFor(target Target, name, src string) (*ir.Module, error) {
-	cfg, err := cc.NewConfig("linux", string(target))
+	cfg, err := moderncc.NewConfig("linux", string(target))
 	if err != nil {
 		return nil, fmt.Errorf("cc config for %s: %w", target, err)
 	}
-	ast, err := cc.Translate(cfg, []cc.Source{
+	ast, err := moderncc.Translate(cfg, []moderncc.Source{
 		{Name: "<predefined>", Value: cfg.Predefined + headerCompat},
-		{Name: "<builtin>", Value: cc.Builtin},
+		{Name: "<builtin>", Value: moderncc.Builtin},
 		{Name: name, Value: src},
 	})
 	if err != nil {
 		return nil, fmt.Errorf("cc parse: %w", err)
 	}
 
-	g := &gen{target: target, mod: ir.NewModule(), strs: map[string]string{}, ldconsts: map[string]string{}, cplx: map[ir.SubCls]*ir.AggType{}, aggs: map[cc.Type]*ir.AggType{}}
+	g := &gen{target: target, mod: ir.NewModule(), strs: map[string]string{}, ldconsts: map[string]string{}, cplx: map[ir.SubCls]*ir.AggType{}, aggs: map[moderncc.Type]*ir.AggType{}}
 	g.push() // file scope: holds globals, visible to every function
 
 	// Internal-linkage functions (static, and static inline) defined in headers
@@ -149,28 +149,28 @@ func CompileFor(target Target, name, src string) (*ir.Module, error) {
 	// must emit its own copy. Index them by name -- from the whole unit, headers
 	// included -- and pull in the ones actually referenced below, rather than
 	// compiling every static inline in every system header.
-	localFuncs := map[string]*cc.FunctionDefinition{}
-	localData := map[string]*cc.Declaration{} // internal-linkage globals a header defines
+	localFuncs := map[string]*moderncc.FunctionDefinition{}
+	localData := map[string]*moderncc.Declaration{} // internal-linkage globals a header defines
 	for tu := ast.TranslationUnit; tu != nil; tu = tu.TranslationUnit {
 		ed := tu.ExternalDeclaration
 		if ed == nil {
 			continue
 		}
 		switch ed.Case {
-		case cc.ExternalDeclarationFuncDef:
-			if d := ed.FunctionDefinition.Declarator; d != nil && d.Linkage() == cc.Internal {
+		case moderncc.ExternalDeclarationFuncDef:
+			if d := ed.FunctionDefinition.Declarator; d != nil && d.Linkage() == moderncc.Internal {
 				localFuncs[d.Name()] = ed.FunctionDefinition
 			}
-		case cc.ExternalDeclarationDecl:
+		case moderncc.ExternalDeclarationDecl:
 			if ed.Position().Filename == name {
 				continue // a primary-file global is emitted by the main loop below
 			}
 			for l := ed.Declaration.InitDeclaratorList; l != nil; l = l.InitDeclaratorList {
 				dcl := l.InitDeclarator.Declarator
-				if dcl == nil || dcl.Type().Kind() == cc.Function || dcl.IsExtern() {
+				if dcl == nil || dcl.Type().Kind() == moderncc.Function || dcl.IsExtern() {
 					continue
 				}
-				if dcl.Linkage() == cc.Internal {
+				if dcl.Linkage() == moderncc.Internal {
 					localData[dcl.Name()] = ed.Declaration
 				}
 			}
@@ -184,10 +184,10 @@ func CompileFor(target Target, name, src string) (*ir.Module, error) {
 			continue // skip predefined/builtin declarations
 		}
 		switch ed.Case {
-		case cc.ExternalDeclarationFuncDef:
+		case moderncc.ExternalDeclarationFuncDef:
 			emitted[ed.FunctionDefinition.Declarator.Name()] = true
 			g.genFunc(ed.FunctionDefinition)
-		case cc.ExternalDeclarationDecl:
+		case moderncc.ExternalDeclarationDecl:
 			g.genGlobalDecl(ed.Declaration)
 		}
 		if g.err != nil {
@@ -261,23 +261,23 @@ func (g *gen) fail(format string, a ...any) ir.Ref {
 // clsOf maps a C type to the cg12 value class used to compute with it. Pointers
 // use the abstract pointer class ClsP, which each backend resolves to its native
 // pointer width with LowerPointers (ClsL on 64-bit targets, ClsW on wasm32).
-func clsOf(t cc.Type) ir.Cls {
-	if cc.IsComplexType(t) {
+func clsOf(t moderncc.Type) ir.Cls {
+	if moderncc.IsComplexType(t) {
 		return ir.ClsP // a complex value is the address of its {re,im} storage
 	}
 	if isInt128(t) {
 		return ir.ClsP // a 128-bit integer is the address of its {lo,hi} storage
 	}
 	switch t.Kind() {
-	case cc.Float:
+	case moderncc.Float:
 		return ir.ClsS
-	case cc.Double:
+	case moderncc.Double:
 		return ir.ClsD
-	case cc.LongDouble:
+	case moderncc.LongDouble:
 		return ir.ClsQ // 128-bit quad (handled entirely via memory + soft-float calls)
-	case cc.Ptr, cc.Function, cc.Array, cc.Struct, cc.Union:
+	case moderncc.Ptr, moderncc.Function, moderncc.Array, moderncc.Struct, moderncc.Union:
 		return ir.ClsP // an aggregate value is handled as a pointer to its storage
-	case cc.Long, cc.ULong, cc.LongLong, cc.ULongLong:
+	case moderncc.Long, moderncc.ULong, moderncc.LongLong, moderncc.ULongLong:
 		return ir.ClsL
 	default: // Bool, Char, SChar, UChar, Short, UShort, Int, UInt, Enum
 		return ir.ClsW
@@ -295,19 +295,19 @@ func wide(c ir.Cls) bool { return c == ir.ClsL || c == ir.ClsP }
 // and a list here would have to name one of them. An address compares unsigned;
 // everything else -- the floating types -- compares signed, where the question
 // arises at all.
-func signed(t cc.Type) bool {
-	if t.Kind() == cc.Ptr {
+func signed(t moderncc.Type) bool {
+	if t.Kind() == moderncc.Ptr {
 		return false
 	}
-	if cc.IsIntegerType(t) {
-		return cc.IsSignedInteger(t)
+	if moderncc.IsIntegerType(t) {
+		return moderncc.IsSignedInteger(t)
 	}
 	return true
 }
 
-func isFloat(t cc.Type) bool {
+func isFloat(t moderncc.Type) bool {
 	k := t.Kind()
-	return k == cc.Float || k == cc.Double || k == cc.LongDouble
+	return k == moderncc.Float || k == moderncc.Double || k == moderncc.LongDouble
 }
 
 // --- scopes ----------------------------------------------------------------
@@ -334,7 +334,7 @@ func (g *gen) block(prefix string) *ir.Block {
 // at stamps the current block's emit position from an AST node's source
 // location, so instructions emitted next carry a line and column for debug info
 // (DWARF on native backends, BTF.ext line_info on eBPF).
-func (g *gen) at(n cc.Node) {
+func (g *gen) at(n moderncc.Node) {
 	if n == nil || g.cur == nil {
 		return
 	}
@@ -369,7 +369,7 @@ func (g *gen) terminated() bool { return g.cur.Jmp.Kind != ir.JmpNone }
 // rvalue reads the value of an lvalue at addr. An array decays to its own
 // address, and a by-value aggregate is likewise represented by its address (it
 // is too big for a register); everything else loads.
-func (g *gen) rvalue(addr ir.Ref, t cc.Type) ir.Ref {
+func (g *gen) rvalue(addr ir.Ref, t moderncc.Type) ir.Ref {
 	if isArray(t) || isMemValue(t) || isVaList(t) {
 		return addr // an array, aggregate, long double, or va_list is its address
 	}
@@ -379,12 +379,12 @@ func (g *gen) rvalue(addr ir.Ref, t cc.Type) ir.Ref {
 // isMemValue reports whether a value of type t is represented by the address of
 // its storage rather than loaded into a register: a struct/union or a long
 // double (a 128-bit quad), both of which are passed and copied through memory.
-func isMemValue(t cc.Type) bool {
-	return isAggType(t) || isLongDouble(t) || cc.IsComplexType(t) || isInt128(t)
+func isMemValue(t moderncc.Type) bool {
+	return isAggType(t) || isLongDouble(t) || moderncc.IsComplexType(t) || isInt128(t)
 }
 
 // loadVal loads a value of type t from addr, sign/zero-extending narrow types.
-func (g *gen) loadVal(addr ir.Ref, t cc.Type) ir.Ref {
+func (g *gen) loadVal(addr ir.Ref, t moderncc.Type) ir.Ref {
 	cls := clsOf(t)
 	var r ir.Ref
 	switch t.Size() {
@@ -411,7 +411,7 @@ func (g *gen) loadVal(addr ir.Ref, t cc.Type) ir.Ref {
 // the type it accesses is volatile. Reading a volatile object is an event, not
 // just a way to obtain its value, so the optimizer must not fold two reads
 // together or drop one whose value goes unused.
-func (g *gen) markVolatile(t cc.Type) {
+func (g *gen) markVolatile(t moderncc.Type) {
 	if a := t.Attributes(); a != nil && a.IsVolatile() {
 		if n := len(g.cur.Instrs); n > 0 {
 			g.cur.Instrs[n-1].Volatile = true
@@ -420,7 +420,7 @@ func (g *gen) markVolatile(t cc.Type) {
 }
 
 // storeVal stores val (already of type t's class) to addr at t's width.
-func (g *gen) storeVal(addr, val ir.Ref, t cc.Type) {
+func (g *gen) storeVal(addr, val ir.Ref, t moderncc.Type) {
 	switch t.Size() {
 	case 1:
 		g.cur.StoreSub(ir.SubB, val, addr)
@@ -434,9 +434,9 @@ func (g *gen) storeVal(addr, val ir.Ref, t cc.Type) {
 
 // --- functions -------------------------------------------------------------
 
-func (g *gen) genFunc(fd *cc.FunctionDefinition) {
+func (g *gen) genFunc(fd *moderncc.FunctionDefinition) {
 	d := fd.Declarator
-	ft, ok := d.Type().(*cc.FunctionType)
+	ft, ok := d.Type().(*moderncc.FunctionType)
 	if !ok {
 		g.fail("cc: %s is not a function", d.Name())
 		return
@@ -444,7 +444,7 @@ func (g *gen) genFunc(fd *cc.FunctionDefinition) {
 	ret := ft.Result()
 	g.curRet = ret
 	switch {
-	case ret.Kind() == cc.Void:
+	case ret.Kind() == moderncc.Void:
 		g.fn = g.mod.NewFuncVoid(d.Name())
 	case isMemValue(ret):
 		// Returning a struct/union or long double by value: the function yields a
@@ -455,7 +455,7 @@ func (g *gen) genFunc(fd *cc.FunctionDefinition) {
 	default:
 		g.fn = g.mod.NewFunc(d.Name(), clsOf(ret))
 	}
-	if d.Linkage() != cc.Internal { // a `static` function keeps internal linkage
+	if d.Linkage() != moderncc.Internal { // a `static` function keeps internal linkage
 		g.fn.Export()
 	}
 	g.fn.Linkage.Section = sectionOf(ft) // eBPF attach section (xdp, kprobe/..., ...)
@@ -464,7 +464,7 @@ func (g *gen) genFunc(fd *cc.FunctionDefinition) {
 	g.nblk = 0
 	g.names = map[string]int{}
 	g.labels = map[string]*ir.Block{}
-	g.caseBlk = map[*cc.LabeledStatement]*ir.Block{}
+	g.caseBlk = map[*moderncc.LabeledStatement]*ir.Block{}
 	g.collectLabels(fd.CompoundStatement)
 	g.push()
 	defer g.pop()
@@ -498,7 +498,7 @@ func (g *gen) genFunc(fd *cc.FunctionDefinition) {
 
 	// Fall-through: supply a default return.
 	if !g.terminated() {
-		if ret.Kind() == cc.Void {
+		if ret.Kind() == moderncc.Void {
 			g.cur.RetVoid()
 		} else {
 			g.cur.Ret(g.zero(ret))
@@ -528,7 +528,7 @@ const maxAllocAlign = 16
 // more than 16 does not get it from here, and a caller placing such a type must
 // go through allocAligned; align alone would silently under-align it, which is
 // what `char buf[64] __attribute__((aligned(64)))` used to get.
-func align(t cc.Type) int {
+func align(t moderncc.Type) int {
 	a := t.Align()
 	switch {
 	case a <= 4:
@@ -543,7 +543,7 @@ func align(t cc.Type) int {
 // dataAlign returns the alignment for a global's ir.Data. Unlike a stack slot,
 // this one is a number the object layer places the datum by, so it can be any
 // power of two the source asked for.
-func dataAlign(t cc.Type) int {
+func dataAlign(t moderncc.Type) int {
 	if a := t.Align(); a > 0 {
 		return a
 	}
@@ -559,7 +559,7 @@ func dataAlign(t cc.Type) int {
 // up, which costs two instructions and no frame realignment. gcc realigns the
 // frame instead and gets a cheaper address; both give the program what it asked
 // for, which is what the alignment is for.
-func (g *gen) allocAligned(t cc.Type, size int) ir.Ref {
+func (g *gen) allocAligned(t moderncc.Type, size int) ir.Ref {
 	a := t.Align()
 	if a <= maxAllocAlign {
 		return g.cur.Alloc(align(t), size)
@@ -570,7 +570,7 @@ func (g *gen) allocAligned(t cc.Type, size int) ir.Ref {
 }
 
 // zero returns a zero constant of the given type's class.
-func (g *gen) zero(t cc.Type) ir.Ref {
+func (g *gen) zero(t moderncc.Type) ir.Ref {
 	if isLongDouble(t) {
 		return g.quadZero()
 	}
@@ -587,7 +587,7 @@ func (g *gen) zero(t cc.Type) ir.Ref {
 // floatOf builds a floating-point constant of t's class: a single for float, a
 // double for double. Using the wrong width both stores the wrong number of bytes
 // and mismatches the class of neighbouring float operations.
-func (g *gen) floatOf(v float64, t cc.Type) ir.Ref {
+func (g *gen) floatOf(v float64, t moderncc.Type) ir.Ref {
 	if clsOf(t) == ir.ClsS {
 		return g.fn.Single(v)
 	}
@@ -596,8 +596,8 @@ func (g *gen) floatOf(v float64, t cc.Type) ir.Ref {
 
 // genGlobalDecl handles a file-scope declaration: prototypes and globals with
 // constant scalar, aggregate, or string initializers.
-func (g *gen) genGlobalDecl(d *cc.Declaration) {
-	if d.Case != cc.DeclarationDecl {
+func (g *gen) genGlobalDecl(d *moderncc.Declaration) {
+	if d.Case != moderncc.DeclarationDecl {
 		return
 	}
 	for l := d.InitDeclaratorList; l != nil; l = l.InitDeclaratorList {
@@ -608,7 +608,7 @@ func (g *gen) genGlobalDecl(d *cc.Declaration) {
 			continue
 		}
 		t := dcl.Type()
-		if t.Kind() == cc.Function {
+		if t.Kind() == moderncc.Function {
 			continue // a prototype needs no storage
 		}
 		thread := dcl.IsThreadLocal()
@@ -635,12 +635,12 @@ func (g *gen) genGlobalDecl(d *cc.Declaration) {
 			Section: sec,
 			// External linkage is what makes a definition visible to the linker;
 			// `static` is internal and stays private to this unit.
-			Export: dcl.Linkage() == cc.External,
+			Export: dcl.Linkage() == moderncc.External,
 			// A thread-local's bytes are the image each thread's block starts from,
 			// not data used in place.
 			Thread: thread,
 		}}
-		if id.Case == cc.InitDeclaratorInit {
+		if id.Case == moderncc.InitDeclaratorInit {
 			data.Items = g.globalItems(t, id.Initializer)
 		}
 		if len(data.Items) == 0 {
@@ -655,17 +655,17 @@ func (g *gen) genGlobalDecl(d *cc.Declaration) {
 // filling gaps between initialized fields (and the trailing remainder) with
 // zero. Each leaf initializer carries its absolute byte offset within the
 // aggregate, so nested braces and designated initializers need no special care.
-func (g *gen) globalItems(t cc.Type, init *cc.Initializer) []ir.DataItem {
+func (g *gen) globalItems(t moderncc.Type, init *moderncc.Initializer) []ir.DataItem {
 	type leaf struct {
 		off, sz int
 		item    ir.DataItem
 	}
 	var leaves []leaf
-	add := func(off int, et cc.Type, e cc.ExpressionNode) {
+	add := func(off int, et moderncc.Type, e moderncc.ExpressionNode) {
 		sz := int(et.Size())
 		switch {
 		case isArray(et):
-			if s, ok := e.Value().(cc.StringValue); ok {
+			if s, ok := e.Value().(moderncc.StringValue); ok {
 				b := append([]byte(s), 0)
 				if len(b) > sz {
 					b = b[:sz]
@@ -673,7 +673,7 @@ func (g *gen) globalItems(t cc.Type, init *cc.Initializer) []ir.DataItem {
 				leaves = append(leaves, leaf{off, len(b), ir.DataItem{Str: string(b)}})
 			}
 		case isPointer(et):
-			if s, ok := e.Value().(cc.StringValue); ok {
+			if s, ok := e.Value().(moderncc.StringValue); ok {
 				leaves = append(leaves, leaf{off, sz, ir.DataItem{Sub: subFor(sz), Sym: g.internStr(string(s))}})
 			} else if sym, symOff, ok := g.constAddr(e); ok {
 				leaves = append(leaves, leaf{off, sz, ir.DataItem{Sub: subFor(sz), Sym: sym, Off: symOff}})
@@ -686,7 +686,7 @@ func (g *gen) globalItems(t cc.Type, init *cc.Initializer) []ir.DataItem {
 			// on a target whose long double is not that, these are the wrong bytes and
 			// nothing downstream would ever say so.
 			g.checkLongDouble()
-			if ldv, ok := e.Value().(*cc.LongDoubleValue); ok {
+			if ldv, ok := e.Value().(*moderncc.LongDoubleValue); ok {
 				leaves = append(leaves, leaf{off, 16, ir.DataItem{Str: string(quadBytes((*big.Float)(ldv)))}})
 			}
 		case isComplex(et):
@@ -726,12 +726,12 @@ func (g *gen) globalItems(t cc.Type, init *cc.Initializer) []ir.DataItem {
 		bytes int
 		val   uint64
 	}{}
-	var walk func(il *cc.InitializerList)
-	walk = func(il *cc.InitializerList) {
+	var walk func(il *moderncc.InitializerList)
+	walk = func(il *moderncc.InitializerList) {
 		for ; il != nil; il = il.InitializerList {
 			in := il.Initializer
 			switch {
-			case in.Case == cc.InitializerInitList:
+			case in.Case == moderncc.InitializerInitList:
 				walk(in.InitializerList)
 			case in.Field() != nil && in.Field().IsBitfield():
 				f := in.Field()
@@ -752,7 +752,7 @@ func (g *gen) globalItems(t cc.Type, init *cc.Initializer) []ir.DataItem {
 			}
 		}
 	}
-	if init.Case == cc.InitializerInitList {
+	if init.Case == moderncc.InitializerInitList {
 		walk(init.InitializerList)
 	} else {
 		add(0, t, init.AssignmentExpression)
@@ -777,20 +777,20 @@ func (g *gen) globalItems(t cc.Type, init *cc.Initializer) []ir.DataItem {
 	return items
 }
 
-func isArray(t cc.Type) bool   { _, ok := t.(*cc.ArrayType); return ok }
-func isPointer(t cc.Type) bool { _, ok := t.(*cc.PointerType); return ok }
+func isArray(t moderncc.Type) bool   { _, ok := t.(*moderncc.ArrayType); return ok }
+func isPointer(t moderncc.Type) bool { _, ok := t.(*moderncc.PointerType); return ok }
 
 // sectionOf returns the __attribute__((section("..."))) name attached to t, with
 // its trailing NUL trimmed, or "" if none. It carries eBPF placement — a map
 // ("maps"), a program's attach type ("xdp", "kprobe/..."), the license, etc. —
 // through to the backend as ir.Linkage.Section.
-func sectionOf(t cc.Type) string {
+func sectionOf(t moderncc.Type) string {
 	a := t.Attributes()
 	if a == nil {
 		return ""
 	}
 	for _, v := range a.AttrValue("section") {
-		if s, ok := v.(cc.StringValue); ok {
+		if s, ok := v.(moderncc.StringValue); ok {
 			return strings.TrimRight(string(s), "\x00")
 		}
 	}
@@ -803,12 +803,12 @@ func sectionOf(t cc.Type) string {
 // resolves to a relocation rather than code.
 // isFuncDesignator reports whether t is a function type or a pointer to one — as
 // a bare function name has after its function-to-pointer decay.
-func isFuncDesignator(t cc.Type) bool {
-	if t.Kind() == cc.Function {
+func isFuncDesignator(t moderncc.Type) bool {
+	if t.Kind() == moderncc.Function {
 		return true
 	}
-	if pt, ok := t.(*cc.PointerType); ok {
-		return pt.Elem().Kind() == cc.Function
+	if pt, ok := t.(*moderncc.PointerType); ok {
+		return pt.Elem().Kind() == moderncc.Function
 	}
 	return false
 }
@@ -823,11 +823,11 @@ func (g *gen) blockSym(b *ir.Block) string {
 	return b.Sym
 }
 
-func (g *gen) constAddr(e cc.ExpressionNode) (string, int64, bool) {
+func (g *gen) constAddr(e moderncc.ExpressionNode) (string, int64, bool) {
 	switch n := e.(type) {
-	case *cc.PrimaryExpression:
+	case *moderncc.PrimaryExpression:
 		switch n.Case {
-		case cc.PrimaryExpressionIdent: // a global object (an array here decays to its address)
+		case moderncc.PrimaryExpressionIdent: // a global object (an array here decays to its address)
 			name := n.Token.SrcStr()
 			if v, ok := g.lookup(name); ok && v.sym != "" {
 				return v.sym, 0, true
@@ -837,33 +837,33 @@ func (g *gen) constAddr(e cc.ExpressionNode) (string, int64, bool) {
 			if isFuncDesignator(n.Type()) {
 				return name, 0, true
 			}
-		case cc.PrimaryExpressionString: // a string literal decays to its data symbol
-			if s, ok := n.Value().(cc.StringValue); ok {
+		case moderncc.PrimaryExpressionString: // a string literal decays to its data symbol
+			if s, ok := n.Value().(moderncc.StringValue); ok {
 				return g.internStr(string(s)), 0, true
 			}
-		case cc.PrimaryExpressionExpr:
+		case moderncc.PrimaryExpressionExpr:
 			return g.constAddr(n.ExpressionList)
 		}
-	case *cc.CastExpression:
+	case *moderncc.CastExpression:
 		return g.constAddr(n.CastExpression)
-	case *cc.UnaryExpression:
+	case *moderncc.UnaryExpression:
 		switch n.Case {
-		case cc.UnaryExpressionAddrof: // &lvalue
+		case moderncc.UnaryExpressionAddrof: // &lvalue
 			return g.constAddr(n.CastExpression)
-		case cc.UnaryExpressionLabelAddr: // &&label as a static initializer
+		case moderncc.UnaryExpressionLabelAddr: // &&label as a static initializer
 			if b, ok := g.labels[n.Token2.SrcStr()]; ok {
 				return g.blockSym(b), 0, true
 			}
 		}
-	case *cc.PostfixExpression:
+	case *moderncc.PostfixExpression:
 		switch n.Case {
-		case cc.PostfixExpressionIndex: // base[i]
+		case moderncc.PostfixExpressionIndex: // base[i]
 			if sym, off, ok := g.constAddr(n.PostfixExpression); ok {
 				if idx, ok := constInt(n.ExpressionList); ok {
 					return sym, off + idx*elemSize(n.PostfixExpression.Type()), true
 				}
 			}
-		case cc.PostfixExpressionSelect: // base.field
+		case moderncc.PostfixExpressionSelect: // base.field
 			if sym, off, ok := g.constAddr(n.PostfixExpression); ok {
 				return sym, off + n.Field().Offset(), true
 			}
@@ -873,11 +873,11 @@ func (g *gen) constAddr(e cc.ExpressionNode) (string, int64, bool) {
 }
 
 // elemSize returns the element size of an array or pointer type.
-func elemSize(t cc.Type) int64 {
+func elemSize(t moderncc.Type) int64 {
 	switch x := t.(type) {
-	case *cc.ArrayType:
+	case *moderncc.ArrayType:
 		return int64(x.Elem().Size())
-	case *cc.PointerType:
+	case *moderncc.PointerType:
 		return int64(x.Elem().Size())
 	}
 	return 1
@@ -885,9 +885,9 @@ func elemSize(t cc.Type) int64 {
 
 // isPtrOrArray reports whether t participates in pointer arithmetic as the
 // pointer operand: a pointer, or an array that decays to one.
-func isPtrOrArray(t cc.Type) bool {
+func isPtrOrArray(t moderncc.Type) bool {
 	switch t.(type) {
-	case *cc.PointerType, *cc.ArrayType:
+	case *moderncc.PointerType, *moderncc.ArrayType:
 		return true
 	}
 	return false
@@ -910,7 +910,7 @@ func subFor(size int) ir.SubCls {
 // constFloat is the value of a constant expression as a float, whatever form the
 // literal took: an initializer is converted to the type it initializes, so an
 // integer literal is a perfectly good initializer for a double.
-func constFloat(e cc.ExpressionNode) (float64, bool) {
+func constFloat(e moderncc.ExpressionNode) (float64, bool) {
 	if e == nil {
 		return 0, false
 	}
@@ -923,40 +923,40 @@ func constFloat(e cc.ExpressionNode) (float64, bool) {
 // <math.h>'s NAN, INFINITY, and HUGE_VAL expand to), and a unary sign on a
 // literal (modernc does not fold `-1.5` in every context), each seen through
 // parentheses and a cast. It returns ok=false for anything else.
-func foldFloatConst(e cc.ExpressionNode) (float64, bool) {
+func foldFloatConst(e moderncc.ExpressionNode) (float64, bool) {
 	if e == nil {
 		return 0, false
 	}
 	switch v := e.Value().(type) {
-	case cc.Float64Value:
+	case moderncc.Float64Value:
 		return float64(v), true
-	case cc.Int64Value:
+	case moderncc.Int64Value:
 		return float64(v), true
-	case cc.UInt64Value:
+	case moderncc.UInt64Value:
 		return float64(v), true
 	}
 	switch n := e.(type) {
-	case *cc.PrimaryExpression:
-		if n.Case == cc.PrimaryExpressionExpr {
+	case *moderncc.PrimaryExpression:
+		if n.Case == moderncc.PrimaryExpressionExpr {
 			return foldFloatConst(n.ExpressionList)
 		}
-	case *cc.ExpressionList:
+	case *moderncc.ExpressionList:
 		if n.ExpressionList == nil {
 			return foldFloatConst(n.AssignmentExpression)
 		}
-	case *cc.CastExpression:
+	case *moderncc.CastExpression:
 		return foldFloatConst(n.CastExpression)
-	case *cc.UnaryExpression:
+	case *moderncc.UnaryExpression:
 		switch n.Case {
-		case cc.UnaryExpressionPlus:
+		case moderncc.UnaryExpressionPlus:
 			return foldFloatConst(n.CastExpression)
-		case cc.UnaryExpressionMinus:
+		case moderncc.UnaryExpressionMinus:
 			if v, ok := foldFloatConst(n.CastExpression); ok {
 				return -v, true
 			}
 		}
-	case *cc.PostfixExpression:
-		if n.Case == cc.PostfixExpressionCall {
+	case *moderncc.PostfixExpression:
+		if n.Case == moderncc.PostfixExpressionCall {
 			switch calleeIdent(n) {
 			case "__builtin_nan", "__builtin_nanf", "__builtin_nanl":
 				return math.NaN(), true
@@ -971,26 +971,26 @@ func foldFloatConst(e cc.ExpressionNode) (float64, bool) {
 
 // constIntFrom is constInt, but it also converts a floating literal, as C does
 // when one initializes an integer: the fractional part is discarded.
-func constIntFrom(e cc.ExpressionNode) (int64, bool) {
+func constIntFrom(e moderncc.ExpressionNode) (int64, bool) {
 	if v, ok := constInt(e); ok {
 		return v, true
 	}
 	if e != nil {
-		if v, ok := e.Value().(cc.Float64Value); ok {
+		if v, ok := e.Value().(moderncc.Float64Value); ok {
 			return int64(float64(v)), true // C truncates toward zero
 		}
 	}
 	return 0, false
 }
 
-func constInt(e cc.ExpressionNode) (int64, bool) {
+func constInt(e moderncc.ExpressionNode) (int64, bool) {
 	if e == nil {
 		return 0, false
 	}
-	if v, ok := e.Value().(cc.Int64Value); ok {
+	if v, ok := e.Value().(moderncc.Int64Value); ok {
 		return int64(v), true
 	}
-	if v, ok := e.Value().(cc.UInt64Value); ok {
+	if v, ok := e.Value().(moderncc.UInt64Value); ok {
 		return int64(v), true
 	}
 	return 0, false

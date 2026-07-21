@@ -1,8 +1,8 @@
 package cc
 
 import (
+	moderncc "github.com/evanphx/cg12/internal/cc"
 	"github.com/evanphx/cg12/ir"
-	"modernc.org/cc/v4"
 )
 
 // This file handles by-value aggregates (structs and unions passed, returned,
@@ -15,9 +15,9 @@ import (
 
 // isAggType reports whether t is a struct or union (an aggregate passed by value
 // rather than in a single register).
-func isAggType(t cc.Type) bool {
+func isAggType(t moderncc.Type) bool {
 	switch t.(type) {
-	case *cc.StructType, *cc.UnionType:
+	case *moderncc.StructType, *moderncc.UnionType:
 		return true
 	}
 	return false
@@ -25,13 +25,13 @@ func isAggType(t cc.Type) bool {
 
 // subOfType maps a scalar C type to the cg12 sub-class that records its width
 // and kind for aggregate field layout and ABI classification.
-func subOfType(t cc.Type) ir.SubCls {
+func subOfType(t moderncc.Type) ir.SubCls {
 	switch t.Kind() {
-	case cc.Float:
+	case moderncc.Float:
 		return ir.SubS
-	case cc.Double:
+	case moderncc.Double:
 		return ir.SubD
-	case cc.LongDouble:
+	case moderncc.LongDouble:
 		return ir.SubQ
 	default:
 		return subFor(int(t.Size()))
@@ -49,7 +49,7 @@ func subOfType(t cc.Type) ir.SubCls {
 // backends classify from this type and place the fields somewhere C did not, so
 // the check below is what stands between a disagreement and a struct that
 // arrives at a gcc-compiled callee with its fields moved.
-func (g *gen) aggOf(t cc.Type) *ir.AggType {
+func (g *gen) aggOf(t moderncc.Type) *ir.AggType {
 	if a, ok := g.aggs[t]; ok {
 		return a
 	}
@@ -73,11 +73,11 @@ func (g *gen) aggOf(t cc.Type) *ir.AggType {
 	}
 
 	switch st := t.(type) {
-	case *cc.StructType:
+	case *moderncc.StructType:
 		for i := 0; i < st.NumFields(); i++ {
 			agg.Fields = append(agg.Fields, g.fieldOf(st.FieldByIndex(i).Type()))
 		}
-	case *cc.UnionType:
+	case *moderncc.UnionType:
 		agg.Union = true
 		for i := 0; i < st.NumFields(); i++ {
 			agg.Cases = append(agg.Cases, []ir.Field{g.fieldOf(st.FieldByIndex(i).Type())})
@@ -90,15 +90,15 @@ func (g *gen) aggOf(t cc.Type) *ir.AggType {
 }
 
 // hasBitfield reports whether a struct or union has a bitfield member.
-func hasBitfield(t cc.Type) bool {
+func hasBitfield(t moderncc.Type) bool {
 	switch st := t.(type) {
-	case *cc.StructType:
+	case *moderncc.StructType:
 		for i := 0; i < st.NumFields(); i++ {
 			if st.FieldByIndex(i).IsBitfield() {
 				return true
 			}
 		}
-	case *cc.UnionType:
+	case *moderncc.UnionType:
 		for i := 0; i < st.NumFields(); i++ {
 			if st.FieldByIndex(i).IsBitfield() {
 				return true
@@ -121,7 +121,7 @@ func hasBitfield(t cc.Type) bool {
 // the type checker's is wrong in exactly the same way cg12's is. The two agree,
 // and both are wrong. A consistency check has nothing to say when its two
 // witnesses share the mistake.
-func (g *gen) checkAggLayout(t cc.Type, agg *ir.AggType) {
+func (g *gen) checkAggLayout(t moderncc.Type, agg *ir.AggType) {
 	size, align := agg.Layout()
 	if size == int(t.Size()) && align == t.Align() {
 		return
@@ -133,11 +133,11 @@ func (g *gen) checkAggLayout(t cc.Type, agg *ir.AggType) {
 
 // fieldOf maps one C member type to an aggregate field: a nested aggregate keeps
 // its type, an array becomes a repeated element, and a scalar becomes its sub-class.
-func (g *gen) fieldOf(t cc.Type) ir.Field {
+func (g *gen) fieldOf(t moderncc.Type) ir.Field {
 	if isAggType(t) {
 		return ir.Field{Type: g.aggOf(t)}
 	}
-	if at, ok := t.(*cc.ArrayType); ok {
+	if at, ok := t.(*moderncc.ArrayType); ok {
 		elem := at.Elem()
 		if isAggType(elem) {
 			return ir.Field{Type: g.aggOf(elem), Count: int(at.Len())}
@@ -148,13 +148,13 @@ func (g *gen) fieldOf(t cc.Type) ir.Field {
 }
 
 // aggName returns a readable name for an aggregate type (for the printed IL).
-func aggName(t cc.Type) string {
-	if st, ok := t.(*cc.StructType); ok {
+func aggName(t moderncc.Type) string {
+	if st, ok := t.(*moderncc.StructType); ok {
 		if tok := st.Tag(); tok.SrcStr() != "" {
 			return "struct." + tok.SrcStr()
 		}
 	}
-	if ut, ok := t.(*cc.UnionType); ok {
+	if ut, ok := t.(*moderncc.UnionType); ok {
 		if tok := ut.Tag(); tok.SrcStr() != "" {
 			return "union." + tok.SrcStr()
 		}
@@ -213,7 +213,7 @@ func (g *gen) aggParam(name string, agg *ir.AggType) ir.Ref {
 // StructOrUnionSpecifier's two attribute lists. A program using it still
 // miscompiles silently. This catches what can be caught and does not pretend to
 // be a guarantee; the real fix is upstream.
-func (g *gen) checkPacked(t cc.Type) {
+func (g *gen) checkPacked(t moderncc.Type) {
 	a := t.Attributes()
 	if a == nil || !a.IsAttrSet("packed") {
 		return

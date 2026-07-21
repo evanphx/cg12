@@ -1,8 +1,8 @@
 package cc
 
 import (
+	moderncc "github.com/evanphx/cg12/internal/cc"
 	"github.com/evanphx/cg12/ir"
-	"modernc.org/cc/v4"
 )
 
 // Bit fields are stored packed inside an "access unit" of AccessBytes bytes at
@@ -14,8 +14,8 @@ import (
 // asBitfield reports whether e is a bit-field member access, returning the field
 // and the address of its access unit. It evaluates the base once (so callers
 // must not also evaluate it), which is what a read-modify-write needs.
-func (g *gen) asBitfield(e cc.ExpressionNode) (*cc.Field, ir.Ref, bool) {
-	pe, ok := e.(*cc.PostfixExpression)
+func (g *gen) asBitfield(e moderncc.ExpressionNode) (*moderncc.Field, ir.Ref, bool) {
+	pe, ok := e.(*moderncc.PostfixExpression)
 	if !ok {
 		return nil, ir.R, false
 	}
@@ -25,9 +25,9 @@ func (g *gen) asBitfield(e cc.ExpressionNode) (*cc.Field, ir.Ref, bool) {
 	}
 	var base ir.Ref
 	switch pe.Case {
-	case cc.PostfixExpressionSelect: // s.f
+	case moderncc.PostfixExpressionSelect: // s.f
 		base, _ = g.genAddr(pe.PostfixExpression)
-	case cc.PostfixExpressionPSelect: // p->f
+	case moderncc.PostfixExpressionPSelect: // p->f
 		base = g.genExpr(pe.PostfixExpression)
 	default:
 		return nil, ir.R, false
@@ -81,7 +81,7 @@ func (g *gen) storeUnit(addr, val ir.Ref, bytes int64) {
 // readBitfield loads the access unit and extracts the field: shift it up so its
 // top bit sits at the register's sign bit, then shift back down — arithmetically
 // for a signed field so the value sign-extends, logically otherwise.
-func (g *gen) readBitfield(unit ir.Ref, f *cc.Field) ir.Ref {
+func (g *gen) readBitfield(unit ir.Ref, f *moderncc.Field) ir.Ref {
 	cls, regBits := bitCls(f.AccessBytes())
 	v := g.loadUnit(unit, f.AccessBytes(), cls)
 	off := int64(f.OffsetBits())
@@ -97,7 +97,7 @@ func (g *gen) readBitfield(unit ir.Ref, f *cc.Field) ir.Ref {
 
 // writeBitfield splices val into the field's bits, preserving the rest of the
 // access unit: clear the masked bits, OR in the shifted-and-masked value.
-func (g *gen) writeBitfield(unit, val ir.Ref, f *cc.Field) {
+func (g *gen) writeBitfield(unit, val ir.Ref, f *moderncc.Field) {
 	cls, _ := bitCls(f.AccessBytes())
 	val = g.toCls(val, cls)
 	old := g.loadUnit(unit, f.AccessBytes(), cls)
