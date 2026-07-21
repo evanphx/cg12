@@ -25,30 +25,17 @@ func varBase(name string) string {
 // iterated dominance frontier and renaming loads/stores away. This is the
 // classic Cytron et al. SSA construction, run over the alloc-backed variables.
 //
-// A function with a computed goto is left alone -- see hasComputedGoto.
-func hasComputedGoto(f *ir.Func) bool {
-	for _, b := range f.Blocks {
-		if b.Jmp.Kind == ir.JmpBr {
-			return true
-		}
-	}
-	return false
-}
-
+// A function with a computed goto (an interpreter) is promoted like any other.
+// The frontend funnels the dispatch to a single indirect branch (see gotoDispatch
+// in package cc), so a promoted variable needs only a handful of phis on ordinary,
+// splittable edges rather than O(handlers^2) copies, and lower.CoalescePhis
+// resolves the dispatch phis. The graph-colouring allocator keeps the hot
+// loop-carried values (pc, sp) in registers and spills only the cold
+// handler-local ones -- so promoting is a win (~13% on a computed-goto
+// interpreter). The old linear-scan allocator lacked that selectivity: a promoted
+// variable became one range spilled across every handler, slower than the memory
+// form, so mem2reg used to decline the whole function.
 func Mem2Reg(f *ir.Func) bool {
-	// Promoting a variable that lives across a computed goto is a performance loss,
-	// not a correctness problem. The frontend funnels the dispatch to a single
-	// indirect branch (see the gotoDispatch method in package cc), so a promoted
-	// interpreter no longer explodes into O(handlers^2) copies -- but each promoted
-	// variable still becomes one live range spanning the whole dispatch, which
-	// linear scan spills across every handler. Measured on QuickJS's JS_CallInternal,
-	// promoting it runs ~5% slower than leaving it in memory. So an interpreter stays
-	// in memory form; the rest of the module, which has no such spanning ranges,
-	// promotes normally. (lower.CoalescePhis is the net that keeps a mesh reaching
-	// SSA destruction from some other source from exploding if this guard is lifted.)
-	if hasComputedGoto(f) {
-		return false
-	}
 	vars, varOf := findPromotable(f)
 	if len(vars) == 0 {
 		return false
