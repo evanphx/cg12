@@ -1083,6 +1083,10 @@ func (m *mc) block(b *ir.Block) {
 			i = m.callSequence(b, i)
 			continue
 		}
+		if n := m.tryWriteback(b, i); n > 0 {
+			i += n
+			continue
+		}
 		m.instr(in)
 		i++
 	}
@@ -1232,6 +1236,120 @@ func countTempUses(f *ir.Func) []int {
 		}
 	}
 	return n
+}
+
+// tryWriteback folds a pointer-advancing load or store together with the add/sub
+// that advances the pointer, emitting a single pre/post-indexed access:
+//
+//	ldrb w, [pc] ; add pc, pc, #1   ->   ldrb w, [pc], #1     (post-index)
+//	sub sp, sp, #8 ; ldr x, [sp]     ->   ldr x, [sp, #-8]!    (pre-index)
+//
+// It returns the number of instructions consumed (2) or 0. The safety proof is the
+// register equality: the allocator placed the pointer update in the base's own
+// register, so the base's pre-update value is dead past it, and b is reached only
+// along this straight run so nothing else observes the intermediate pointer.
+func (m *mc) tryWriteback(b *ir.Block, i int) int {
+	if i+1 >= len(b.Instrs) {
+		return 0
+	}
+	x, y := &b.Instrs[i], &b.Instrs[i+1]
+
+	// Post-index: access [base]; then base += delta.
+	if base, dv, ok := wbAccess(x); ok {
+		if br, ok := m.physReg(base); ok && m.regDiffers(dv, br) {
+			if reg, delta, ok := m.selfIncrement(y); ok && reg == br {
+				if m.emitWriteback(x, base, dv, delta, a64.Post) {
+					return 2
+				}
+			}
+		}
+	}
+	// Pre-index: base += delta; then access [base].
+	if reg, delta, ok := m.selfIncrement(x); ok {
+		if base, dv, ok := wbAccess(y); ok {
+			if br, ok := m.physReg(base); ok && br == reg && m.regDiffers(dv, br) {
+				if m.emitWriteback(y, base, dv, delta, a64.Pre) {
+					return 2
+				}
+			}
+		}
+	}
+	return 0
+}
+
+// wbAccess reports a simple base-only load or store (offset zero, no index) as a
+// write-back candidate: base is the pointer, dv the value loaded or stored (which
+// must not share the base register).
+func wbAccess(in *ir.Instr) (base, dv ir.Ref, ok bool) {
+	if in.Aux != 0 {
+		return ir.Ref{}, ir.Ref{}, false
+	}
+	switch {
+	case in.Op.IsLoad() && len(in.Args) == 1:
+		return in.Args[0], in.To, true
+	case in.Op.IsStore() && len(in.Args) == 2:
+		return in.Args[1], in.Args[0], true
+	}
+	return ir.Ref{}, ir.Ref{}, false
+}
+
+// selfIncrement reports an add/sub of a register by a small constant back into the
+// same register (base += delta), the shape a write-back folds in. delta is a
+// signed byte offset in [-256, 255].
+func (m *mc) selfIncrement(in *ir.Instr) (Reg, int32, bool) {
+	if (in.Op != ir.OAdd && in.Op != ir.OSub) || len(in.Args) != 2 {
+		return 0, 0, false
+	}
+	to, ok := m.physReg(in.To)
+	if !ok {
+		return 0, 0, false
+	}
+	if a0, ok := m.physReg(in.Args[0]); !ok || a0 != to {
+		return 0, 0, false
+	}
+	c, ok := intConst(m.f, in.Args[1])
+	if !ok {
+		return 0, 0, false
+	}
+	if in.Op == ir.OSub {
+		c = -c
+	}
+	if c < -256 || c > 255 {
+		return 0, 0, false
+	}
+	return to, int32(c), true
+}
+
+// emitWriteback emits access as a pre/post-indexed load or store; it declines
+// (returns false) for FP or other forms the write-back encoders do not cover.
+func (m *mc) emitWriteback(access *ir.Instr, base, dv ir.Ref, delta int32, wb a64.WriteBack) bool {
+	s := m.newSel()
+	br, _ := m.physReg(base)
+	vr, _ := m.physReg(dv)
+	if access.Op.IsLoad() {
+		return s.b.loadWB(access.Op, access.Cls, vr, br, delta, wb)
+	}
+	return s.b.storeWB(access.Op, vr, br, delta, wb)
+}
+
+// physReg is the physical register a temp is bound to, or ok=false when it is a
+// non-temp, spilled, or rematerialised (no register to write back through).
+func (m *mc) physReg(r ir.Ref) (Reg, bool) {
+	if r.Kind != ir.RefTemp {
+		return 0, false
+	}
+	t := m.f.Temps[r.ID]
+	if t == nil || t.Reg == ir.NoReg {
+		return 0, false
+	}
+	return Reg(t.Reg), true
+}
+
+// regDiffers reports that r is in a register other than avoid -- a write-back must
+// not name the base as its data register (constrained unpredictable on AArch64).
+func (m *mc) regDiffers(r ir.Ref, avoid Reg) bool {
+	rr, ok := m.physReg(r)
+	return ok && rr != avoid
 }
 
 func (m *mc) stackParam(in *ir.Instr) {

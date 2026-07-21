@@ -538,6 +538,23 @@ func disasmLdSt(w uint32) string {
 		}
 		return fmt.Sprintf("%s %s, [%s, %s%s]", op, gpr(w64, w&0x1f), gprSP(true, bits(w, 9, 5)), idx, ext)
 
+	case bits(w, 29, 24) == 0x38 && !bit(w, 21) && (bits(w, 11, 10) == 0b01 || bits(w, 11, 10) == 0b11):
+		// pre/post-indexed writeback: [rn], #imm  or  [rn, #imm]!
+		size, opc := bits(w, 31, 30), bits(w, 23, 22)
+		op, w64, ok := intLdSt(size, opc)
+		if !ok {
+			return ""
+		}
+		imm9 := int32(bits(w, 20, 12))
+		if imm9 >= 256 { // sign-extend the 9-bit offset
+			imm9 -= 512
+		}
+		rt, rn := gpr(w64, w&0x1f), gprSP(true, bits(w, 9, 5))
+		if bits(w, 11, 10) == 0b11 { // pre-index
+			return fmt.Sprintf("%s %s, [%s, #%d]!", op, rt, rn, imm9)
+		}
+		return fmt.Sprintf("%s %s, [%s], #%d", op, rt, rn, imm9) // post-index
+
 	case bits(w, 29, 25) == 0x14 && bits(w, 24, 23) != 0: // load/store pair
 		return disasmPair(w)
 	}

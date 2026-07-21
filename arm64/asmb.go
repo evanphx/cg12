@@ -91,6 +91,11 @@ type asmb interface {
 	loadIdx(op ir.Op, cls ir.Cls, rd, base, index Reg, amode int32)
 	store(op ir.Op, val, base Reg, off uint32)
 	storeIdx(op ir.Op, val, base, index Reg, amode int32)
+	// loadWB/storeWB fold a pointer advance into the access with pre/post-indexed
+	// write-back; they report false for forms not covered (FP), leaving the caller
+	// to emit the access and the advance separately.
+	loadWB(op ir.Op, cls ir.Cls, rd, base Reg, imm int32, wb a64.WriteBack) bool
+	storeWB(op ir.Op, val, base Reg, imm int32, wb a64.WriteBack) bool
 
 	// Control flow. Branch targets are blocks so each backend formats its own
 	// label; brind is a computed goto through a register, brk halts.
@@ -407,6 +412,52 @@ func (b *mcAsm) load(op ir.Op, cls ir.Cls, rd, base Reg, off uint32) {
 		b.fail("arm64: unsupported load %s", op)
 	}
 }
+
+// loadWB emits a load with pre/post-indexed write-back: the base register is
+// updated by imm (an unscaled signed byte offset) as a side effect. Only the
+// integer forms are handled; the caller (the write-back peephole) declines FP.
+func (b *mcAsm) loadWB(op ir.Op, cls ir.Cls, rd, base Reg, imm int32, wb a64.WriteBack) bool {
+	d, a := mreg(rd), mreg(base)
+	sz := loadSize(op, cls)
+	switch op {
+	case ir.OLoadl:
+		b.prog.Emit(a64.LdrWB(true, d, a, imm, wb))
+	case ir.OLoaduw:
+		b.prog.Emit(a64.LdrWB(false, d, a, imm, wb))
+	case ir.OLoadsw:
+		b.prog.Emit(a64.LdrswWB(d, a, imm, wb))
+	case ir.OLoadub:
+		b.prog.Emit(a64.LdrbWB(d, a, imm, wb))
+	case ir.OLoadsb:
+		b.prog.Emit(a64.LdrsbWB(sz == 8, d, a, imm, wb))
+	case ir.OLoaduh:
+		b.prog.Emit(a64.LdrhWB(d, a, imm, wb))
+	case ir.OLoadsh:
+		b.prog.Emit(a64.LdrshWB(sz == 8, d, a, imm, wb))
+	default:
+		return false
+	}
+	return true
+}
+
+// storeWB emits a store with pre/post-indexed write-back.
+func (b *mcAsm) storeWB(op ir.Op, val, base Reg, imm int32, wb a64.WriteBack) bool {
+	v, a := mreg(val), mreg(base)
+	switch op {
+	case ir.OStorel:
+		b.prog.Emit(a64.StrWB(true, v, a, imm, wb))
+	case ir.OStorew:
+		b.prog.Emit(a64.StrWB(false, v, a, imm, wb))
+	case ir.OStoreb:
+		b.prog.Emit(a64.StrbWB(v, a, imm, wb))
+	case ir.OStoreh:
+		b.prog.Emit(a64.StrhWB(v, a, imm, wb))
+	default:
+		return false
+	}
+	return true
+}
+
 func (b *mcAsm) loadIdx(op ir.Op, cls ir.Cls, rd, base, index Reg, amode int32) {
 	d, ba, ix := mreg(rd), mreg(base), mreg(index)
 	option, s := decodeAmode(amode)

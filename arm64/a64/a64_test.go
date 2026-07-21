@@ -404,4 +404,18 @@ var moreEncodingCases = []encodingCase{
 	{"add x5, x9, w10, sxtw", AddExtSxtw(5, 9, 10)},
 	{"mrs x0, tpidr_el0", MrsTPIDR(0)},
 	{"mrs x5, tpidr_el0", MrsTPIDR(5)},
+	// Pre/post-indexed single loads and stores (write-back).
+	{"ldr x0, [x1], #8", LdrWB(true, 0, 1, 8, Post)},
+	{"ldr x0, [x1, #8]!", LdrWB(true, 0, 1, 8, Pre)},
+	{"ldr w2, [x3], #-4", LdrWB(false, 2, 3, -4, Post)},
+	{"str x4, [x5], #8", StrWB(true, 4, 5, 8, Post)},
+	{"str x6, [x7, #-8]!", StrWB(true, 6, 7, -8, Pre)},
+	{"ldrb w4, [x1], #1", LdrbWB(4, 1, 1, Post)},
+	{"strb w8, [x9], #1", StrbWB(8, 9, 1, Post)},
+	{"ldrsb x9, [x10], #1", LdrsbWB(true, 9, 10, 1, Post)},
+	{"ldrsb w9, [x10], #1", LdrsbWB(false, 9, 10, 1, Post)},
+	{"ldrh w0, [x1], #2", LdrhWB(0, 1, 2, Post)},
+	{"strh w2, [x3, #-2]!", StrhWB(2, 3, -2, Pre)},
+	{"ldrsh x4, [x5], #2", LdrshWB(true, 4, 5, 2, Post)},
+	{"ldrsw x6, [x7], #4", LdrswWB(6, 7, 4, Post)},
 }
