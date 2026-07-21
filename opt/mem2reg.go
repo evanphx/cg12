@@ -25,17 +25,22 @@ func varBase(name string) string {
 // iterated dominance frontier and renaming loads/stores away. This is the
 // classic Cytron et al. SSA construction, run over the alloc-backed variables.
 //
-// A function with a computed goto (an interpreter) is promoted like any other.
-// The frontend funnels the dispatch to a single indirect branch (see gotoDispatch
-// in package cc), so a promoted variable needs only a handful of phis on ordinary,
-// splittable edges rather than O(handlers^2) copies, and lower.CoalescePhis
-// resolves the dispatch phis. The graph-colouring allocator keeps the hot
-// loop-carried values (pc, sp) in registers and spills only the cold
-// handler-local ones -- so promoting is a win (~13% on a computed-goto
-// interpreter). The old linear-scan allocator lacked that selectivity: a promoted
-// variable became one range spilled across every handler, slower than the memory
-// form, so mem2reg used to decline the whole function.
+// A function with a computed goto (an interpreter) is left in memory form. The
+// frontend threads the dispatch -- each `goto *p` is its own indirect branch to
+// every label -- so the CFG is a mesh: every handler is a predecessor of every
+// other. A promoted variable live across the dispatch would need a phi at each
+// handler with one entry per predecessor, and those entries cannot be resolved:
+// SSA destruction places a phi's copies on its incoming edges, but an indirect
+// branch jumps to a runtime address, so its edges cannot carry a copy (there is no
+// block to put one in). Promoting therefore miscompiles across a threaded
+// dispatch. Kept in memory, the loop-carried state is just loads and stores every
+// handler agrees on, and the threaded branches make the dispatch cheap regardless.
 func Mem2Reg(f *ir.Func) bool {
+	for _, b := range f.Blocks {
+		if b.Jmp.Kind == ir.JmpBr {
+			return false
+		}
+	}
 	vars, varOf := findPromotable(f)
 	if len(vars) == 0 {
 		return false

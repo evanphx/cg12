@@ -35,8 +35,6 @@ type gen struct {
 	aggs     map[cc.Type]*ir.AggType            // memoized C struct/union -> cg12 aggregate type
 	names    map[string]int                     // per-function temp-name uniquifier
 	labels   map[string]*ir.Block               // goto label -> block (per function)
-	gotoDisp *ir.Block                          // shared computed-goto dispatch block (lazy, per function)
-	gotoSlot ir.Ref                             // slot holding the computed-goto target address
 	caseBlk  map[*cc.LabeledStatement]*ir.Block // switch case/default -> block
 	nblk     int                                // block-name counter
 	nstatic  int                                // static-local mangling counter
@@ -466,7 +464,6 @@ func (g *gen) genFunc(fd *cc.FunctionDefinition) {
 	g.nblk = 0
 	g.names = map[string]int{}
 	g.labels = map[string]*ir.Block{}
-	g.gotoDisp = nil
 	g.caseBlk = map[*cc.LabeledStatement]*ir.Block{}
 	g.collectLabels(fd.CompoundStatement)
 	g.push()

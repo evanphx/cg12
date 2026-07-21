@@ -169,13 +169,12 @@ func TestMem2RegNoAllocs(t *testing.T) {
 	assert.False(t, Mem2Reg(f))
 }
 
-func TestMem2RegPromotesComputedGoto(t *testing.T) {
-	// A function with a computed goto is promoted like any other. The frontend
-	// funnels the dispatch to a single indirect branch, so a promoted variable
-	// needs only a handful of phis on ordinary, splittable edges, and the
-	// graph-colouring allocator keeps the hot ones in registers -- unlike the old
-	// linear scan, which spilled a function-spanning range across every handler and
-	// so preferred the memory form.
+func TestMem2RegSkipsComputedGoto(t *testing.T) {
+	// A function with a computed goto is left in memory form. The dispatch is
+	// threaded -- an indirect branch to every label -- so the CFG is a mesh, and a
+	// phi merging a promoted variable at a handler would need copies on the
+	// indirect edges, which have no block to hold them. So mem2reg declines the
+	// whole function and the loop-carried state stays in loads and stores.
 	f := ir.NewModule().NewFunc("interp", ir.ClsW)
 	e := f.Entry()
 	p := e.Alloc(4, 4)
@@ -187,15 +186,8 @@ func TestMem2RegPromotesComputedGoto(t *testing.T) {
 	a.Ret(a.Load(ir.ClsW, p))
 	b.Ret(b.Load(ir.ClsW, p))
 
-	assert.True(t, Mem2Reg(f), "a computed-goto function is now promoted")
+	assert.False(t, Mem2Reg(f), "a computed-goto function is left in memory form")
 	for _, blk := range f.Blocks {
-		for _, in := range blk.Instrs {
-			assert.False(t, in.Op.IsLoad(), "loads are replaced by promoted values")
-			assert.False(t, in.Op.IsAlloc(), "the promoted alloc is removed")
-		}
+		assert.Empty(t, blk.Phis, "no phi is created for a computed-goto function")
 	}
-	// b reads the value from entry (1); a overwrites it with 2 -- both resolved
-	// without a phi since each handler has the single dispatch as its predecessor.
-	assert.Equal(t, f.Word(1), b.Jmp.Arg, "b returns the entry value")
-	assert.Equal(t, f.Word(2), a.Jmp.Arg, "a returns its own store")
 }

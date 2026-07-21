@@ -1,11 +1,48 @@
 package arm64_test
 
 import (
+	"strings"
 	"testing"
 
+	"github.com/evanphx/cg12/arm64"
 	"github.com/evanphx/cg12/cc"
+	"github.com/evanphx/cg12/opt"
 	"github.com/stretchr/testify/require"
 )
+
+// A computed-goto dispatch is threaded: each `goto *p` is its own indirect
+// branch, so an interpreter's handlers each end in their own dispatch rather than
+// funnelling through one shared branch. This checks a small bytecode interpreter
+// both dispatches correctly and emits an indirect branch per goto site.
+func TestComputedGotoIsThreaded(t *testing.T) {
+	src := `
+long interp(const unsigned char *code){
+    static void * const tab[] = {&&H, &&ADD, &&PUSH};
+    long acc = 0; const unsigned char *pc = code;
+    goto *tab[*pc++];
+ H:    return acc;
+ ADD:  acc += (signed char)*pc++; goto *tab[*pc++];
+ PUSH: acc = (signed char)*pc++;  goto *tab[*pc++];
+}`
+	main := `extern long interp(const unsigned char*);
+int main(void){
+    unsigned char code[] = {2, 10, 1, 5, 1, 7, 0}; /* PUSH 10; ADD 5; ADD 7; HALT */
+    return interp(code) == 22 ? 0 : 1;
+}`
+	m, err := cc.Compile("i.c", src)
+	require.NoError(t, err)
+	opt.Run(m, opt.DefaultPipeline())
+	_, code := buildAndRun(t, m, main)
+	require.Equal(t, 0, code)
+
+	m2, err := cc.Compile("i.c", src)
+	require.NoError(t, err)
+	opt.Run(m2, opt.DefaultPipeline())
+	o, err := arm64.CompileToObject(m2)
+	require.NoError(t, err)
+	brs := strings.Count(arm64.Disassemble(o), "\tbr x")
+	require.Greater(t, brs, 1, "threaded dispatch emits an indirect branch per goto site, not one funnel")
+}
 
 // ThreadJumps (run during lowering) collapses empty forwarding blocks but must
 // never bypass or drop a block whose address is taken by a computed goto -- an
