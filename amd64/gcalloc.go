@@ -30,13 +30,13 @@ func colorAlloc(f *ir.Func, cfg *analysis.CFG, live *analysis.Liveness, freq *an
 	g.freq = freq
 	g.remat = rematRules(f)
 	g.build(cfg, live)
-	// A rematerialisable value is cheap to "spill" -- one instruction per use, no
-	// memory -- so make it a preferred spill victim.
-	for t := range f.Temps {
-		if _, ok := g.remat[t]; ok {
-			g.cost[t] *= 0.5
-		}
-	}
+	// Remat recomputes a value at each use rather than reloading it, so a spilled
+	// rematerialisable temp is never worse than a spilled ordinary one (an lea/mov
+	// immediate instead of a memory load). But it is NOT made a preferred spill
+	// victim: biasing its cost down spilled hot alloca addresses that are used as
+	// memory bases every loop iteration, turning a kept register into a recomputed
+	// lea per use -- a large regression. So remat only helps values the frequency
+	// cost model already chose to spill; it never causes an extra spill.
 	alloc, err := g.assign()
 	if alloc != nil {
 		alloc.remat = g.remat
