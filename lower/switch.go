@@ -77,28 +77,40 @@ func emitLinear(f *ir.Func, cur *ir.Block, val ir.Ref, cls ir.Cls, cases []ir.Sw
 }
 
 // emitSearch dispatches with an ordered binary search over the sorted cases.
-// Each internal node narrows the range with a single "val <= median" test
-// (left arm keeps the median), so any path costs about log2(n) comparisons;
-// small subranges finish as a linear chain of equality tests against the
-// default. This is one comparison per level rather than two, at the cost of not
-// short-circuiting an exact hit on an internal pivot.
+// Each internal node is a three-way test against the median pivot: == pivot hits
+// that case, < pivot descends the lower half, > pivot descends the upper half.
+// The equality test and the ordering test share operands, so the backend fuses
+// them into one comparison feeding two conditional branches (the AArch64
+// cmp; b.eq; b.lt idiom), reusing the flags -- exactly what GCC emits. A hit
+// short-circuits at any level, so a path costs about log2(n) comparisons; small
+// subranges finish as a linear chain of equality tests against the default.
 func emitSearch(f *ir.Func, root *ir.Block, val ir.Ref, cls ir.Cls, signed bool, cases []ir.SwitchCase, deflt *ir.Block) {
-	lePred := ir.CmpUle
+	ltPred := ir.CmpUlt
 	if signed {
-		lePred = ir.CmpSle
+		ltPred = ir.CmpSlt
 	}
 	var rec func(cur *ir.Block, lo, hi int)
 	rec = func(cur *ir.Block, lo, hi int) {
+		if hi < lo {
+			cur.Goto(deflt)
+			return
+		}
 		if hi-lo+1 <= linearMax {
 			emitLinear(f, cur, val, cls, cases[lo:hi+1], deflt)
 			return
 		}
 		mid := (lo + hi) / 2
-		le := cur.Cmp(lePred, ir.ClsW, val, f.ConstInt(cls, cases[mid].Val))
+		// One pivot constant, shared by both tests so the backend sees identical
+		// operands and reuses the comparison's flags for the second branch.
+		pivot := f.ConstInt(cls, cases[mid].Val)
+		eq := cur.Cmp(ir.CmpEq, ir.ClsW, val, pivot)
+		order := f.NewBlock("")
+		cur.Jnz(eq, cases[mid].Blk, order)
+		lt := order.Cmp(ltPred, ir.ClsW, val, pivot)
 		left := f.NewBlock("")
 		right := f.NewBlock("")
-		cur.Jnz(le, left, right)
-		rec(left, lo, mid)
+		order.Jnz(lt, left, right)
+		rec(left, lo, mid-1)
 		rec(right, mid+1, hi)
 	}
 	rec(root, 0, len(cases)-1)

@@ -480,8 +480,9 @@ type mc struct {
 	safepoints []safepoint
 
 	blockDone bool
-	useCount  []int     // per-temp use count, for the fused compare-branch
-	nextBlock *ir.Block // block laid out after the current one, for fall-through elision
+	useCount  []int                     // per-temp use count, for the fused compare-branch
+	nextBlock *ir.Block                 // block laid out after the current one, for fall-through elision
+	preds     map[*ir.Block][]*ir.Block // predecessors, for cross-block flag reuse
 	vaSeq     int
 	atomicSeq int
 	rows      []obj.LineRow // source positions, keyed by func-relative byte offset
@@ -523,6 +524,7 @@ func emitMachine(f *ir.Func, alloc *allocation, gc GCStrategy, tlsModel TLSModel
 		frameLayout: computeFrame(f, alloc),
 	}
 	m.useCount = countTempUses(f)
+	m.preds = blockPreds(f)
 	m.prologue()
 	for i, b := range f.Blocks {
 		m.prog.Label(b.Name)
@@ -1064,12 +1066,19 @@ func (m *mc) block(b *ir.Block) {
 	fuseCmp := m.fusableCmp(b)
 	for i < len(b.Instrs) {
 		in := &b.Instrs[i]
-		if in == fuseCmp {
-			break // emitted as flags for the fused conditional branch below
-		}
 		m.instrPC[in] = uint64(m.prog.Len() * 4)
 		m.recordLoc(in.Pos)
 		m.recordInline(in.Inl)
+		if in == fuseCmp {
+			// Emit the comparison as flags only (no cset); the block's terminator
+			// branches on those flags. Reuse the predecessor's identical comparison
+			// when it already set them.
+			if !m.reusesPredFlags(b, fuseCmp) {
+				m.newSel().cmpFlags(fuseCmp)
+			}
+			i++
+			continue
+		}
 		if in.Op == ir.OArg {
 			i = m.callSequence(b, i)
 			continue
@@ -1078,9 +1087,6 @@ func (m *mc) block(b *ir.Block) {
 		i++
 	}
 	if fuseCmp != nil {
-		m.instrPC[fuseCmp] = uint64(m.prog.Len() * 4)
-		m.recordLoc(fuseCmp.Pos)
-		m.recordInline(fuseCmp.Inl)
 		m.emitFusedBranch(b, fuseCmp)
 		return
 	}
@@ -1102,30 +1108,98 @@ func (m *mc) fusableCmp(b *ir.Block) *ir.Instr {
 	if len(b.Instrs) == 0 {
 		return nil
 	}
-	last := &b.Instrs[len(b.Instrs)-1]
-	if last.Op != ir.OCmp || last.To.Kind != ir.RefTemp || last.To.ID != b.Jmp.Arg.ID {
+	if m.useCount[b.Jmp.Arg.ID] != 1 { // the sole use must be the branch
 		return nil
 	}
-	if m.useCount[last.To.ID] != 1 { // the sole use must be the branch
+	// Find the comparison that defines the branch condition. It need not be the
+	// last instruction: SSA destruction can append phi-resolution copies after it
+	// (e.g. in a loop header). Those, and anything else between the comparison and
+	// the terminator, must preserve the flags -- only a copy/move does, so require
+	// exactly that. The branch then reads the comparison's flags across them.
+	idx := -1
+	for i := range b.Instrs {
+		if in := &b.Instrs[i]; in.To.Kind == ir.RefTemp && in.To.ID == b.Jmp.Arg.ID {
+			if in.Op != ir.OCmp {
+				return nil
+			}
+			idx = i
+		}
+	}
+	if idx < 0 {
 		return nil
 	}
-	return last
+	for i := idx + 1; i < len(b.Instrs); i++ {
+		if b.Instrs[i].Op != ir.OCopy {
+			return nil
+		}
+	}
+	return &b.Instrs[idx]
 }
 
 // emitFusedBranch emits a trailing comparison as flags-only and branches on them
 // directly: to To when the predicate holds (the jnz's non-zero arm), else to To2.
+// When the block's sole predecessor already set the flags with the identical
+// comparison (a three-way switch node's ordering test following its equality
+// test), the comparison is omitted and only the branch is emitted -- the AArch64
+// cmp; b.eq; b.lt idiom, one cmp feeding two conditional branches.
+// emitFusedBranch emits the block's terminator as a branch on the flags the
+// fused comparison (already emitted flags-only in the block body) set: to To when
+// the predicate holds (the jnz's non-zero arm), else to To2.
 func (m *mc) emitFusedBranch(b *ir.Block, cmp *ir.Instr) {
-	s := m.newSel()
-	float := s.cmpFlags(cmp)
+	float := m.f.ClassOf(cmp.Args[0]).IsFloat()
 	cond, ok := condOf(cmp.Cmp, float)
 	if !ok {
 		m.fail("arm64: cannot fuse comparison %v into a branch", cmp.Cmp)
 		return
 	}
+	s := m.newSel()
 	s.b.bcondTo(cond, b.Jmp.To.Name)
 	if b.Jmp.To2 != m.nextBlock { // else fall through
 		s.b.branch(b.Jmp.To2)
 	}
+}
+
+// reusesPredFlags reports whether b's fused comparison can read the flags its
+// predecessor already set, instead of recomputing them. It holds when b has a
+// single predecessor that ends in a fused compare-branch over the identical
+// operands, and b contains nothing that disturbs the flags before its own
+// comparison -- so on the one path into b (from that predecessor) the
+// predecessor's comparison flags still hold. Stream layout is irrelevant: b is
+// reached only from that predecessor at run time, whatever blocks sit between them
+// in the emission order.
+func (m *mc) reusesPredFlags(b *ir.Block, cmp *ir.Instr) bool {
+	if len(cmp.Args) != 2 {
+		return false
+	}
+	for i := range b.Instrs {
+		if in := &b.Instrs[i]; in != cmp && in.Op != ir.OCopy {
+			return false // a flag-clobbering instruction reaches b's branch first
+		}
+	}
+	preds := m.preds[b]
+	if len(preds) != 1 {
+		return false
+	}
+	pc := m.fusableCmp(preds[0])
+	if pc == nil || len(pc.Args) != 2 {
+		return false
+	}
+	// Same operands in the same order produce the same cmp, so its flags answer
+	// b's comparison too (a different predicate reads different flag bits).
+	return pc.Args[0] == cmp.Args[0] && pc.Args[1] == cmp.Args[1] &&
+		m.f.ClassOf(pc.Args[0]) == m.f.ClassOf(cmp.Args[0])
+}
+
+// blockPreds returns each block's predecessors, following every terminator's
+// explicit successors (jumps, the two arms of a conditional, switch/table arms).
+func blockPreds(f *ir.Func) map[*ir.Block][]*ir.Block {
+	preds := map[*ir.Block][]*ir.Block{}
+	for _, b := range f.Blocks {
+		for _, s := range b.Succs() {
+			preds[s] = append(preds[s], b)
+		}
+	}
+	return preds
 }
 
 // condOf maps a comparison predicate to its AArch64 branch condition, choosing the

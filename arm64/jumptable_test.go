@@ -43,6 +43,62 @@ int check(void){
 	require.Equal(t, 0, code)
 }
 
+// A sparse switch lowers to a three-way binary-search tree: each internal node
+// tests the pivot for equality (hit) and ordering (descend) with one comparison
+// feeding two conditional branches -- the cmp; b.eq; b.<lt> flag-reuse idiom.
+func TestSwitchTreeThreeWayFlagReuse(t *testing.T) {
+	src := `int classify(int n){ switch(n){
+	 case 3:return 1;   case 17:return 2;   case 42:return 3;   case 100:return 4;
+	 case 250:return 5; case 999:return 6;  case 5000:return 7; case 40000:return 8;
+	 case 90000:return 9; default:return 0; } }`
+	main := `extern int classify(int);
+int main(void){
+	int in[]={3,17,42,100,250,999,5000,40000,90000,7,-1};
+	int want[]={1,2,3,4,5,6,7,8,9,0,0};
+	for(int i=0;i<11;i++) if(classify(in[i])!=want[i]) return i+1;
+	return 0;
+}`
+	// End to end: the tree dispatches every case (and the gaps) correctly.
+	m, err := cc.Compile("sw.c", src)
+	require.NoError(t, err)
+	opt.Run(m, opt.DefaultPipeline())
+	_, code := buildAndRun(t, m, main)
+	require.Equal(t, 0, code)
+
+	// A pivot's equality branch is immediately followed by an ordering branch,
+	// with no second comparison between them -- the two share one cmp's flags.
+	m2, err := cc.Compile("sw.c", src)
+	require.NoError(t, err)
+	opt.Run(m2, opt.DefaultPipeline())
+	o, err := arm64.CompileToObject(m2)
+	require.NoError(t, err)
+	// A three-way node feeds two conditional branches from one comparison, so the
+	// conditional branches outnumber the comparisons -- impossible if every branch
+	// had its own cmp.
+	cmps, condBranches := 0, 0
+	for _, l := range strings.Split(arm64.Disassemble(o), "\n") {
+		l = strings.TrimSpace(l)
+		if strings.HasPrefix(l, "cmp ") || strings.HasPrefix(l, "fcmp ") {
+			cmps++
+		}
+		if isCondBranch(l) {
+			condBranches++
+		}
+	}
+	require.Greater(t, condBranches, cmps,
+		"a three-way node shares one cmp between its equality and ordering branches")
+}
+
+func isCondBranch(line string) bool {
+	for _, c := range []string{"b.eq", "b.ne", "b.lt", "b.le", "b.gt", "b.ge",
+		"b.cc", "b.cs", "b.lo", "b.hi", "b.ls", "b.mi", "b.pl"} {
+		if strings.HasPrefix(line, c) {
+			return true
+		}
+	}
+	return false
+}
+
 // A dense switch inside a loop still lowers to a jump table after the optimizer
 // promotes the loop's variables: mem2reg gives the loop's merge block (the
 // switch's implicit default, since no case falls through to it) phis for every
