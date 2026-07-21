@@ -1216,6 +1216,119 @@ func main() {
 	}
 }
 
+func TestCompileInterfaceMethodWrappersDistinguishSignatures(t *testing.T) {
+	module, err := CompileExecutable("unwrap_interfaces.go", []byte(`package main
+
+type singleUnwrapper interface {
+	Unwrap() error
+}
+
+type multiUnwrapper interface {
+	Unwrap() []error
+}
+
+type single struct{}
+
+func (single) Unwrap() error {
+	return nil
+}
+
+type multi struct{}
+
+func (multi) Unwrap() []error {
+	return nil
+}
+
+func callSingle(value singleUnwrapper) error {
+	return value.Unwrap()
+}
+
+func callMulti(value multiUnwrapper) []error {
+	return value.Unwrap()
+}
+
+func main() {
+	_ = callSingle(single{})
+	_ = callMulti(multi{})
+}
+`))
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	seenFunctionNames := make(map[string]bool)
+	seenObjectNames := make(map[string]string)
+	wrapperCount := 0
+	for _, function := range module.Funcs {
+		if seenFunctionNames[function.Name] {
+			t.Fatalf("duplicate function name generated: %s", function.Name)
+		}
+		seenFunctionNames[function.Name] = true
+
+		objectName := testARM64SanitizeSymbol(function.Name)
+		if previous := seenObjectNames[objectName]; previous != "" {
+			t.Fatalf("function names %q and %q collide as object symbol %q", previous, function.Name, objectName)
+		}
+		seenObjectNames[objectName] = function.Name
+
+		if strings.Contains(function.Name, ".Unwrap.interfacecall.") || strings.Contains(function.Name, "interface{Unwrap()") {
+			wrapperCount++
+		}
+	}
+	if wrapperCount != 2 {
+		t.Fatalf("generated %d Unwrap interface-call wrappers, want 2", wrapperCount)
+	}
+}
+
+func TestCompileErrorsUnwrapWrappersHaveUniqueObjectSymbols(t *testing.T) {
+	module, err := CompileExecutable("errors_unwrap.go", []byte(`package main
+
+import "errors"
+
+type customError struct{}
+
+func (customError) Error() string {
+	return "custom"
+}
+
+func main() {
+	left := customError{}
+	right := errors.New("right")
+	joined := errors.Join(left, right)
+	if !errors.Is(joined, left) {
+		panic("missing left")
+	}
+}
+`))
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	seenObjectNames := make(map[string]string)
+	for _, function := range module.Funcs {
+		objectName := testARM64SanitizeSymbol(function.Name)
+		if previous := seenObjectNames[objectName]; previous != "" {
+			t.Fatalf("function names %q and %q collide as object symbol %q", previous, function.Name, objectName)
+		}
+		seenObjectNames[objectName] = function.Name
+	}
+}
+
+func testARM64SanitizeSymbol(name string) string {
+	var builder strings.Builder
+	for _, r := range name {
+		if r == '_' || (r >= 'a' && r <= 'z') || (r >= 'A' && r <= 'Z') || (r >= '0' && r <= '9') {
+			builder.WriteRune(r)
+		} else {
+			builder.WriteByte('_')
+		}
+	}
+	if builder.Len() == 0 {
+		return "anon"
+	}
+	return builder.String()
+}
+
 func TestCompilePromotedInterfaceMethodWrappersLoadScalarReceiver(t *testing.T) {
 	module, err := CompileExecutable("promoted_scalar.go", []byte(`package main
 

@@ -742,6 +742,7 @@ func addInterfaceMethodWrappers(g *gen, reachable []functionDecl) {
 		return g.functionSymbol(methods[i]) < g.functionSymbol(methods[j])
 	})
 
+	generated := make(map[string]bool)
 	for _, method := range methods {
 		signature := method.Type().(*types.Signature)
 		interfaceType, ok := signature.Recv().Type().Underlying().(*types.Interface)
@@ -749,6 +750,10 @@ func addInterfaceMethodWrappers(g *gen, reachable []functionDecl) {
 			continue
 		}
 		name := g.functionSymbol(method)
+		if generated[name] {
+			continue
+		}
+		generated[name] = true
 		var function *ir.Func
 		if signature.Results().Len() == 0 {
 			function = g.mod.NewFuncVoid(name)
@@ -4344,11 +4349,14 @@ func indexPathKey(indexes []int) string {
 
 func (g *gen) ensureInterfaceCallWrapper(method *types.Func) string {
 	methodSymbol := g.functionSymbol(method)
-	wrapperSymbol := methodSymbol + ".interfacecall"
-	for _, function := range g.mod.Funcs {
-		if function.Name == wrapperSymbol {
-			return wrapperSymbol
+	signatureKey := methodSymbol + "|" + types.TypeString(method.Type(), func(pkg *types.Package) string {
+		if pkg == nil {
+			return ""
 		}
+		return pkg.Path()
+	})
+	if symbol := g.interfaceCallWrappers[signatureKey]; symbol != "" {
+		return symbol
 	}
 
 	signature := method.Type().(*types.Signature)
@@ -4356,6 +4364,8 @@ func (g *gen) ensureInterfaceCallWrapper(method *types.Func) string {
 	if receiver == nil {
 		return methodSymbol
 	}
+	wrapperSymbol := fmt.Sprintf("%s.interfacecall.%d", methodSymbol, len(g.interfaceCallWrappers))
+	g.interfaceCallWrappers[signatureKey] = wrapperSymbol
 
 	var function *ir.Func
 	if signature.Results().Len() == 0 {
@@ -5320,6 +5330,10 @@ func interfaceCallWrapperMethodSymbol(symbol string) (string, bool) {
 	const suffix = ".interfacecall"
 	if strings.HasSuffix(symbol, suffix) {
 		return strings.TrimSuffix(symbol, suffix), true
+	}
+	const numbered = ".interfacecall."
+	if index := strings.Index(symbol, numbered); index >= 0 {
+		return symbol[:index], true
 	}
 	const promoted = ".interfacecall.promoted."
 	if index := strings.Index(symbol, promoted); index >= 0 {
@@ -9843,6 +9857,7 @@ func (g *gen) closureContext() ir.Ref {
 	g.fn.HasClosureContext = true
 	context := g.fn.NewTemp("closure", ir.ClsP)
 	temporary := g.fn.Temp(context)
+	temporary.GCRef = true
 	temporary.Fixed = true
 	temporary.Reg = g.closureRegister()
 	return context
@@ -9851,6 +9866,7 @@ func (g *gen) closureContext() ir.Ref {
 func (g *gen) pinClosure(closure ir.Ref) {
 	context := g.cur.Copy(ir.ClsP, closure)
 	temporary := g.fn.Temp(context)
+	temporary.GCRef = true
 	temporary.Fixed = true
 	temporary.Reg = g.closureRegister()
 	g.nextCallUsesClosure = true
@@ -11773,7 +11789,9 @@ func functionSymbol(function *types.Func) string {
 		}
 		typeName := types.TypeString(receiver, func(*types.Package) string { return "" })
 		typeName = strings.TrimPrefix(typeName, ".")
-		if open := strings.IndexByte(typeName, '['); open >= 0 {
+		named, namedReceiver := types.Unalias(receiver).(*types.Named)
+		if namedReceiver && named.TypeArgs().Len() > 0 {
+			open := strings.IndexByte(typeName, '[')
 			if close := strings.LastIndexByte(typeName, ']'); close > open {
 				typeName = typeName[:open] + typeName[close+1:]
 			}

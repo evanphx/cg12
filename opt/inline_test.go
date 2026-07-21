@@ -101,6 +101,38 @@ func TestInlineNoSplitCallsOnlyChangesNoSplitCallers(t *testing.T) {
 	assert.Zero(t, nosplitCalls)
 }
 
+func TestInlinePreservesFixedRegisterTemps(t *testing.T) {
+	module := ir.NewModule()
+
+	helper := module.NewFuncVoid("callClosure")
+	closure := helper.Param("closure", ir.ClsP)
+	helperBlock := helper.Entry()
+	context := helperBlock.Copy(ir.ClsP, closure)
+	contextTemp := helper.Temp(context)
+	contextTemp.Fixed = true
+	contextTemp.Reg = 26
+	contextTemp.GCRef = true
+	code := helperBlock.Load(ir.ClsP, context)
+	helperBlock.CallVoid(code)
+	helperBlock.Instrs[len(helperBlock.Instrs)-1].ClosureCall = true
+	helperBlock.RetVoid()
+
+	caller := module.NewFuncVoid("caller")
+	value := caller.Param("value", ir.ClsP)
+	caller.Entry().CallVoid(caller.Sym("callClosure", 0), value)
+	caller.Entry().RetVoid()
+
+	require.True(t, opt.Inline(module))
+
+	foundFixedContext := false
+	for _, temporary := range caller.Temps {
+		if temporary.Fixed && temporary.Reg == 26 && temporary.GCRef {
+			foundFixedContext = true
+		}
+	}
+	assert.True(t, foundFixedContext, "inlined closure context must remain pinned to x26")
+}
+
 func TestInlineHeapAllocationExposesCallerLocalObject(t *testing.T) {
 	module := ir.NewModule()
 	constructor := module.NewFunc("newValue", ir.ClsP)

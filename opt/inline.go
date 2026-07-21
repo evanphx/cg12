@@ -725,6 +725,8 @@ func spliceCall(caller *ir.Func, b *ir.Block, idx int, callee *ir.Func, cg *call
 			cloned.Agg = t.Agg
 			cloned.GCRef = t.GCRef
 			cloned.GCType = t.GCType
+			cloned.Fixed = t.Fixed
+			cloned.Reg = t.Reg
 			tempMap[id] = mapped
 		}
 	}

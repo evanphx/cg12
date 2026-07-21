@@ -618,6 +618,12 @@ func TestARM64RuntimeCapabilityStatus(t *testing.T) {
 		},
 		{
 			category:    "stdlib-io",
+			name:        "bufio-lines-after-read",
+			source:      "bufio_lines_after_read.go",
+			expectation: runtimeCapabilityMustPass,
+		},
+		{
+			category:    "stdlib-io",
 			name:        "bytes-buffer",
 			source:      "stdlib_bytes_buffer.go",
 			expectation: runtimeCapabilityMustPass,
@@ -632,6 +638,36 @@ func TestARM64RuntimeCapabilityStatus(t *testing.T) {
 			category:    "stdlib-io",
 			name:        "section-reader",
 			source:      "stdlib_io_section_reader.go",
+			expectation: runtimeCapabilityMustPass,
+		},
+		{
+			category:    "stdlib-io",
+			name:        "copy-n",
+			source:      "io_copy_n.go",
+			expectation: runtimeCapabilityMustPass,
+		},
+		{
+			category:    "stdlib-io",
+			name:        "copy-n-writer-only",
+			source:      "io_copy_n_writer_only.go",
+			expectation: runtimeCapabilityMustPass,
+		},
+		{
+			category:    "stdlib-io",
+			name:        "discard-write",
+			source:      "io_discard_write.go",
+			expectation: runtimeCapabilityMustPass,
+		},
+		{
+			category:    "stdlib-io",
+			name:        "limited-reader",
+			source:      "io_limited_reader.go",
+			expectation: runtimeCapabilityMustPass,
+		},
+		{
+			category:    "stdlib-io",
+			name:        "write-string",
+			source:      "io_write_string.go",
 			expectation: runtimeCapabilityMustPass,
 		},
 		{
@@ -695,6 +731,12 @@ func TestARM64RuntimeCapabilityStatus(t *testing.T) {
 			expectation: runtimeCapabilityMustPass,
 		},
 		{
+			category:    "stdlib-os",
+			name:        "filemode-string",
+			source:      "filemode_string.go",
+			expectation: runtimeCapabilityMustPass,
+		},
+		{
 			category:    "stdlib-encoding",
 			name:        "base64",
 			source:      "stdlib_encoding_base64.go",
@@ -716,6 +758,12 @@ func TestARM64RuntimeCapabilityStatus(t *testing.T) {
 			category:    "stdlib-encoding",
 			name:        "binary",
 			source:      "stdlib_encoding_binary.go",
+			expectation: runtimeCapabilityMustPass,
+		},
+		{
+			category:    "stdlib-encoding",
+			name:        "binary-varint",
+			source:      "stdlib_encoding_binary_varint.go",
 			expectation: runtimeCapabilityMustPass,
 		},
 		{
@@ -743,9 +791,21 @@ func TestARM64RuntimeCapabilityStatus(t *testing.T) {
 			expectation: runtimeCapabilityMustPass,
 		},
 		{
+			category:    "stdlib-errors",
+			name:        "join-is-as",
+			source:      "stdlib_errors_join_is_as.go",
+			expectation: runtimeCapabilityMustPass,
+		},
+		{
 			category:    "stdlib-text",
 			name:        "strconv-roundtrip",
 			source:      "stdlib_strconv_roundtrip.go",
+			expectation: runtimeCapabilityMustPass,
+		},
+		{
+			category:    "stdlib-text",
+			name:        "strconv-parse-edges",
+			source:      "stdlib_strconv_parse_edges.go",
 			expectation: runtimeCapabilityMustPass,
 		},
 		{
@@ -758,6 +818,12 @@ func TestARM64RuntimeCapabilityStatus(t *testing.T) {
 			category:    "stdlib-text",
 			name:        "strings-transform",
 			source:      "stdlib_strings_transform.go",
+			expectation: runtimeCapabilityMustPass,
+		},
+		{
+			category:    "stdlib-text",
+			name:        "strings-builder-cut",
+			source:      "stdlib_strings_builder_cut.go",
 			expectation: runtimeCapabilityMustPass,
 		},
 		{
@@ -782,6 +848,60 @@ func TestARM64RuntimeCapabilityStatus(t *testing.T) {
 			category:    "stdlib-text",
 			name:        "sort-search-slice",
 			source:      "stdlib_sort_search_slice.go",
+			expectation: runtimeCapabilityMustPass,
+		},
+		{
+			category:    "stdlib-text",
+			name:        "sort-find-edges",
+			source:      "stdlib_sort_find_edges.go",
+			expectation: runtimeCapabilityMustPass,
+		},
+		{
+			category:    "stdlib-fmt",
+			name:        "println",
+			source:      "fmt_println.go",
+			expectation: runtimeCapabilityMustPass,
+		},
+		{
+			category:    "stdlib-fmt",
+			name:        "sprintf",
+			source:      "fmt_sprintf.go",
+			expectation: runtimeCapabilityMustPass,
+		},
+		{
+			category:    "stdlib-bytes",
+			name:        "grow-capacity",
+			source:      "bytes_grow_capacity.go",
+			expectation: runtimeCapabilityMustPass,
+		},
+		{
+			category:    "stdlib-bytes",
+			name:        "grow-compare",
+			source:      "bytes_grow_compare.go",
+			expectation: runtimeCapabilityMustPass,
+		},
+		{
+			category:    "stdlib-bytes",
+			name:        "grow-stats",
+			source:      "bytes_grow_stats.go",
+			expectation: runtimeCapabilityMustPass,
+		},
+		{
+			category:    "stdlib-bytes",
+			name:        "grow-allocs",
+			source:      "bytes_grow_allocs.go",
+			expectation: runtimeCapabilityMustPass,
+		},
+		{
+			category:    "stdlib-bytes",
+			name:        "replace-allocs",
+			source:      "bytes_replace_allocs.go",
+			expectation: runtimeCapabilityMustPass,
+		},
+		{
+			category:    "stdlib-bytes",
+			name:        "reader-unread",
+			source:      "stdlib_bytes_reader_unread.go",
 			expectation: runtimeCapabilityMustPass,
 		},
 		{
@@ -842,6 +962,12 @@ func TestARM64RuntimeCapabilityStatus(t *testing.T) {
 			category:    "stdlib-url",
 			name:        "resolve-query",
 			source:      "stdlib_url_resolve_query.go",
+			expectation: runtimeCapabilityMustPass,
+		},
+		{
+			category:    "stdlib-url",
+			name:        "values-encode",
+			source:      "stdlib_url_values_encode.go",
 			expectation: runtimeCapabilityMustPass,
 		},
 		{
@@ -912,6 +1038,12 @@ func TestARM64RuntimeCapabilityStatus(t *testing.T) {
 		},
 		{
 			category:    "stdlib-sync",
+			name:        "once-func",
+			source:      "runtime_sync_once_func.go",
+			expectation: runtimeCapabilityMustPass,
+		},
+		{
+			category:    "stdlib-sync",
 			name:        "atomic-typed",
 			source:      "stdlib_sync_atomic_typed.go",
 			expectation: runtimeCapabilityMustPass,
@@ -929,6 +1061,18 @@ func TestARM64RuntimeCapabilityStatus(t *testing.T) {
 			expectation: runtimeCapabilityMustPass,
 		},
 		{
+			category:    "stdlib-path",
+			name:        "match-clean",
+			source:      "stdlib_path_match_clean.go",
+			expectation: runtimeCapabilityMustPass,
+		},
+		{
+			category:    "stdlib-unicode",
+			name:        "utf8-decode",
+			source:      "stdlib_unicode_utf8_decode.go",
+			expectation: runtimeCapabilityMustPass,
+		},
+		{
 			category:    "stdlib-math",
 			name:        "big-rat-int",
 			source:      "stdlib_math_big_rat_int.go",
@@ -938,6 +1082,18 @@ func TestARM64RuntimeCapabilityStatus(t *testing.T) {
 			category:    "stdlib-math",
 			name:        "rand-v2",
 			source:      "stdlib_rand_v2.go",
+			expectation: runtimeCapabilityMustPass,
+		},
+		{
+			category:    "stdlib-hash",
+			name:        "crc32-fnv",
+			source:      "stdlib_hash_crc32_fnv.go",
+			expectation: runtimeCapabilityMustPass,
+		},
+		{
+			category:    "stdlib-hash",
+			name:        "adler32-state",
+			source:      "adler32_marshal_loop.go",
 			expectation: runtimeCapabilityMustPass,
 		},
 		{
@@ -974,6 +1130,12 @@ func TestARM64RuntimeCapabilityStatus(t *testing.T) {
 			category:    "stdlib-runtime-diagnostics",
 			name:        "trace-buffer",
 			source:      "stdlib_runtime_trace_buffer.go",
+			expectation: runtimeCapabilityMustPass,
+		},
+		{
+			category:    "stdlib-runtime-diagnostics",
+			name:        "allocs-per-run",
+			source:      "allocs_per_run.go",
 			expectation: runtimeCapabilityMustPass,
 		},
 		{
