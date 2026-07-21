@@ -396,6 +396,10 @@ func (s *xsel) shift(in *ir.Instr) {
 func (s *xsel) cmpFlags(in *ir.Instr) {
 	argW := s.f.ClassOf(in.Arg(0)) == ir.ClsL
 	ra := s.gpValue(in.Arg(0), gpScratch0)
+	if lb := s.b.refLoc(in.Arg(1)); lb.kind == locMem {
+		s.b.cmpGPMem(argW, ra, lb.base, lb.off)
+		return
+	}
 	rb := s.gpValue(in.Arg(1), gpScratch1)
 	s.b.cmpGP(argW, ra, rb)
 }
@@ -423,6 +427,15 @@ func intConstAMD(f *ir.Func, ref ir.Ref) *ir.Const {
 func (s *xsel) binInt(in *ir.Instr) {
 	w := in.Cls == ir.ClsL
 	d, commit := s.gpDst(in.To)
+	// If the second operand is spilled, read it straight from its slot as a memory
+	// operand rather than loading it into a scratch register first. The base is the
+	// frame pointer, which gpInto (writing d) never disturbs, so ordering is free.
+	if lb := s.b.refLoc(in.Arg(1)); lb.kind == locMem {
+		s.gpInto(d, in.Arg(0))
+		s.b.binGPMem(in.Op, w, d, lb.base, lb.off)
+		commit()
+		return
+	}
 	rb := s.gpValue(in.Arg(1), gpScratch1)
 	if rb == d {
 		s.b.movReg(w, gpScratch1, rb)

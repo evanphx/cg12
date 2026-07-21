@@ -292,6 +292,28 @@ func XorReg(w bool, dst, src Reg) []byte { return aluRR(opXor, w, dst, src) }
 // CmpReg encodes CMP a, b (sets flags from a - b).
 func CmpReg(w bool, a, b Reg) []byte { return aluRR(opCmp, w, a, b) }
 
+// aluRM encodes "dst op= [mem]" via the reg<-r/m direction: for every ALU op the
+// register-destination opcode is the register-source one plus two (ADD 0x01/0x03,
+// SUB 0x29/0x2b, ...). This is the memory-operand fold: an arithmetic instruction
+// reads a spilled operand from its slot instead of a separate load into a scratch.
+func aluRM(o aluOp, w bool, dst Reg, m Mem) []byte {
+	return op_rm(nil, nil, w, []byte{o.rmReg + 2}, dst, m, false)
+}
+
+func AddMem(w bool, dst Reg, m Mem) []byte { return aluRM(opAdd, w, dst, m) }
+func SubMem(w bool, dst Reg, m Mem) []byte { return aluRM(opSub, w, dst, m) }
+func AndMem(w bool, dst Reg, m Mem) []byte { return aluRM(opAnd, w, dst, m) }
+func OrMem(w bool, dst Reg, m Mem) []byte  { return aluRM(opOr, w, dst, m) }
+func XorMem(w bool, dst Reg, m Mem) []byte { return aluRM(opXor, w, dst, m) }
+
+// CmpMem encodes CMP dst, [mem] (flags from dst - [mem]).
+func CmpMem(w bool, dst Reg, m Mem) []byte { return aluRM(opCmp, w, dst, m) }
+
+// ImulMem encodes IMUL dst, [mem] (dst *= [mem]) via 0F AF /r.
+func ImulMem(w bool, dst Reg, m Mem) []byte {
+	return op_rm(nil, nil, w, []byte{0x0f, 0xaf}, dst, m, false)
+}
+
 // AddImm/SubImm/AndImm/OrImm/XorImm/CmpImm encode "dst op= imm".
 func AddImm(w bool, dst Reg, imm int32) []byte { return aluImm(opAdd, w, dst, imm) }
 func SubImm(w bool, dst Reg, imm int32) []byte { return aluImm(opSub, w, dst, imm) }

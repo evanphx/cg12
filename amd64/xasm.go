@@ -23,12 +23,16 @@ type xasm interface {
 	move(dst, src loc)
 	movReg(w bool, dst, src Reg)
 
-	// Two-operand integer arithmetic: dst = dst OP src.
+	// Two-operand integer arithmetic: dst = dst OP src. The *Mem forms read the
+	// source (or, for cmp, the second operand) from memory -- a spilled operand's
+	// slot -- rather than a register, folding the load into the instruction.
 	binGP(op ir.Op, w bool, dst, src Reg)
+	binGPMem(op ir.Op, w bool, dst, base Reg, off int32)
 	negGP(w bool, dst Reg)
 	shiftImmGP(op ir.Op, w bool, dst Reg, imm byte)
 	shiftCLGP(op ir.Op, w bool, dst Reg)
 	cmpGP(w bool, a, b Reg)
+	cmpGPMem(w bool, a, base Reg, off int32)
 	setccMovzx(cmp ir.Cmp, dst Reg)
 	extGP(op ir.Op, w bool, dst, src Reg)
 
@@ -124,6 +128,33 @@ func (b *mcXasm) binGP(op ir.Op, w bool, dst, src Reg) {
 	default:
 		b.fail("amd64: %s is not a two-operand arithmetic op", op)
 	}
+}
+
+// binGPMem is binGP with the source read from memory (a spilled operand's slot)
+// rather than a register -- the x86 memory-operand fold, saving a load.
+func (b *mcXasm) binGPMem(op ir.Op, w bool, dst, base Reg, off int32) {
+	d, src := dst.mreg(), x64.At(base.mreg(), off)
+	switch op {
+	case ir.OAdd:
+		b.m.emit(x64.AddMem(w, d, src))
+	case ir.OSub:
+		b.m.emit(x64.SubMem(w, d, src))
+	case ir.OMul:
+		b.m.emit(x64.ImulMem(w, d, src))
+	case ir.OAnd:
+		b.m.emit(x64.AndMem(w, d, src))
+	case ir.OOr:
+		b.m.emit(x64.OrMem(w, d, src))
+	case ir.OXor:
+		b.m.emit(x64.XorMem(w, d, src))
+	default:
+		b.fail("amd64: %s is not a two-operand arithmetic op", op)
+	}
+}
+
+// cmpGPMem is cmpGP with the second operand read from memory.
+func (b *mcXasm) cmpGPMem(w bool, a, base Reg, off int32) {
+	b.m.emit(x64.CmpMem(w, a.mreg(), x64.At(base.mreg(), off)))
 }
 func (b *mcXasm) negGP(w bool, dst Reg) { b.m.emit(x64.Neg(w, dst.mreg())) }
 func (b *mcXasm) shiftImmGP(op ir.Op, w bool, dst Reg, imm byte) {

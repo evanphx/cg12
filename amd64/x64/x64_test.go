@@ -85,6 +85,17 @@ func TestLoadStore(t *testing.T) {
 	check(t, "movq %rbp, (%rbp)", Store(64, RBP, At(RBP, 0)))
 }
 
+func TestAluMem(t *testing.T) {
+	check(t, "addq -16(%rbp), %rax", AddMem(true, RAX, At(RBP, -16)))
+	check(t, "addl 8(%rbx), %ecx", AddMem(false, RCX, At(RBX, 8)))
+	check(t, "subq 8(%rbx), %rcx", SubMem(true, RCX, At(RBX, 8)))
+	check(t, "andq (%rsp), %rdx", AndMem(true, RDX, At(RSP, 0)))
+	check(t, "orq -8(%rbp), %rsi", OrMem(true, RSI, At(RBP, -8)))
+	check(t, "xorl 4(%r12), %r13d", XorMem(false, R13, At(R12, 4)))
+	check(t, "cmpq -8(%rbp), %r12", CmpMem(true, R12, At(RBP, -8)))
+	check(t, "imulq 16(%r13), %rax", ImulMem(true, RAX, At(R13, 16)))
+}
+
 func TestLoadStoreRIP(t *testing.T) {
 	// RIP-relative with disp 0: the disp32 is where a PC-relative relocation
 	// against a symbol will be patched; llvm disassembles it as (%rip).
