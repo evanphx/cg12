@@ -917,6 +917,22 @@ func lowerParams(f *ir.Func, retBuf ir.Ref) error {
 			parameterIndex = end
 			continue
 		}
+		if group, ok := valueGroupAt(f.ParamGroups, parameterIndex); !f.UsesGoInternalCallConvention() && ok {
+			classification := classifyAgg(group.Type)
+			if classification.kind != aggMemory {
+				end := parameterIndex + group.Count
+				if end > len(f.Params) {
+					return fmt.Errorf("arm64: aggregate parameter group extends beyond parameter list")
+				}
+				groupParameters, err := lowerGoValueParams(f, f.Params[parameterIndex:end], group.Type, &a)
+				if err != nil {
+					return err
+				}
+				pars = append(pars, groupParameters...)
+				parameterIndex = end
+				continue
+			}
+		}
 
 		p := f.Params[parameterIndex]
 		if p.Agg != nil {

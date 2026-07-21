@@ -64,6 +64,23 @@ func goArgumentFrameFor(function *ir.Func) goArgumentFrame {
 			continue
 		}
 		if group, ok := valueGroupAt(function.ParamGroups, parameterIndex); !goInternal && ok {
+			if classifyAgg(group.Type).kind != aggMemory {
+				parts, onStack, stackOffset := assignGoAggregate(&assigner, group.Type)
+				if onStack {
+					for _, offset := range goAggregatePointerOffsets(group.Type) {
+						pointerOffsets[stackOffset+offset] = true
+					}
+				} else {
+					size, alignment := group.Type.Layout()
+					groups = append(groups, goRegisterSpillGroup{
+						parts:     parts,
+						size:      size,
+						alignment: alignment,
+					})
+				}
+				parameterIndex += group.Count
+				continue
+			}
 			parts, flattenable := flattenGoAggregate(group.Type)
 			if !flattenable || len(parts) != group.Count {
 				parts = make([]goABIPart, group.Count)
@@ -416,9 +433,10 @@ func goFieldSizeAlign(field ir.Field) (int, int) {
 	return size, size
 }
 
-// assignGoAggregate assigns one complete Go value. If any of its parts cannot
-// fit, the register indexes are rolled back and the whole value is placed on
-// the stack, as required by ABIInternal.
+// assignGoAggregate assigns one complete flattened Go value. If any of its
+// parts cannot fit, the whole value is placed on the stack. ABIInternal leaves
+// unused registers available to later values, while AAPCS64 exhausts the
+// corresponding register bank before assigning subsequent values.
 func assignGoAggregate(assigner *argAssigner, aggregate *ir.AggType) (parts []goABIPart, onStack bool, stackOffset int) {
 	parts, flattenable := flattenGoAggregate(aggregate)
 	size, alignment := aggregate.Layout()
@@ -436,6 +454,14 @@ func assignGoAggregate(assigner *argAssigner, aggregate *ir.AggType) (parts []go
 		}
 	}
 	if assigner.ngrn+integerCount > assigner.intRegs || assigner.nsrn+floatCount > assigner.floatRegs {
+		if !assigner.goABI {
+			if integerCount > 0 {
+				assigner.ngrn = assigner.intRegs
+			}
+			if floatCount > 0 {
+				assigner.nsrn = assigner.floatRegs
+			}
+		}
 		return nil, true, assigner.assignStack(size, alignment)
 	}
 
@@ -594,7 +620,9 @@ func lowerGoValueParams(f *ir.Func, parameters []*ir.Temp, aggregate *ir.AggType
 	lowered := make([]ir.Instr, 0, len(parts))
 	for index, part := range parts {
 		parameter := parameters[index]
-		if parameter.Cls != part.sub.Cls() {
+		partClass := part.sub.Cls()
+		pointerClass := part.pointer && parameter.Cls == ir.ClsP && partClass == ir.ClsL
+		if parameter.Cls != partClass && !pointerClass {
 			return nil, fmt.Errorf("arm64: aggregate parameter part %d has class %s, want %s", index, parameter.Cls, part.sub.Cls())
 		}
 		if onStack {

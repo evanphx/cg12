@@ -685,6 +685,41 @@ func TestManagedAAPCS64HomesGroupedSliceRegistersForStackGrowth(t *testing.T) {
 	require.Equal(t, X2, frame.spills[2].reg)
 }
 
+func TestManagedAAPCS64DoesNotSplitGroupedInterfaceAcrossRegisterBoundary(t *testing.T) {
+	interfaceType := &ir.AggType{Name: "interface", Fields: []ir.Field{
+		{Sub: ir.SubL, Pointer: true},
+		{Sub: ir.SubL, Pointer: true},
+	}}
+	function := ir.NewModule().NewFuncVoid("consume_interface_after_seven_words")
+	function.ManagedFrame = true
+	for index := 0; index < 7; index++ {
+		function.Param(fmt.Sprintf("word%d", index), ir.ClsL)
+	}
+	function.ParamGroup("value", interfaceType, ir.ClsP, ir.ClsP)
+	function.Entry().RetVoid()
+
+	frame := goArgumentFrameFor(function)
+	require.Equal(t, []int{0, 1}, frame.pointerWords)
+	for _, spill := range frame.spills {
+		require.NotEqual(t, X7, spill.reg, "the complete interface must move to the stack")
+	}
+
+	require.NoError(t, lower(function, TLSLocalExec))
+	interfaceParameters := function.Params[7:]
+	require.Len(t, interfaceParameters, 2)
+	for index, parameter := range interfaceParameters {
+		found := false
+		for _, instruction := range function.Start.Instrs {
+			if instruction.Op == ir.OPar && instruction.To == parameter.Ref() {
+				require.Equal(t, int64(index*8), instruction.Aux)
+				found = true
+				break
+			}
+		}
+		require.True(t, found, "missing stack parameter %d", index)
+	}
+}
+
 func TestManagedAAPCS64DoesNotHomeEmptyAggregate(t *testing.T) {
 	empty := &ir.AggType{Name: "empty"}
 	function := ir.NewModule().NewFuncVoid("consume_empty")

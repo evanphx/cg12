@@ -1057,6 +1057,46 @@ func main() {
 	}
 }
 
+func TestCompileExecutableInterfaceDispatchFallbackUsesRuntimeDiagnostic(t *testing.T) {
+	module, err := CompileExecutable("main.go", []byte(`package main
+
+type valueSource interface {
+	Value() int
+}
+
+type value struct{}
+
+func (value) Value() int {
+	return 42
+}
+
+func main() {
+	var source valueSource = value{}
+	_ = source.Value()
+}
+`))
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	foundDiagnostic := false
+	foundFallback := false
+	for _, function := range module.Funcs {
+		switch function.Name {
+		case "runtime.gocInterfaceDispatchFailure":
+			foundDiagnostic = true
+		case "main.valueSource.Value":
+			foundFallback = strings.Contains(function.String(), "call $runtime_gocInterfaceDispatchFailure")
+		}
+	}
+	if !foundDiagnostic {
+		t.Fatal("runtime interface dispatch diagnostic was not retained")
+	}
+	if !foundFallback {
+		t.Fatal("interface dispatch fallback does not call the runtime diagnostic")
+	}
+}
+
 func TestCompileExecutableRepresentsSlicesAsGroupedScalarValues(t *testing.T) {
 	module, err := CompileExecutable("main.go", []byte(`package main
 func shorten(values []int) { values = values[:1] }
@@ -1182,6 +1222,35 @@ func main() { _ = values }
 	want := []int64{0, 7, 0, 0, 11, 13}
 	if backing == nil || len(backing.Items) != 1 || !reflect.DeepEqual(backing.Items[0].Ints, want) {
 		t.Fatalf("main.values backing = %#v, want %v", backing, want)
+	}
+}
+
+func TestCompileExecutableInitializesNestedGlobalArrays(t *testing.T) {
+	module, err := CompileExecutable("main.go", []byte(`package main
+var values = [2][3]uint8{{1, 2, 3}, {4, 5, 6}}
+func main() { _ = values }
+`))
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	var global *ir.Data
+	for _, data := range module.Data {
+		if data.Name == "main.values" {
+			global = data
+			break
+		}
+	}
+	if global == nil {
+		t.Fatal("main.values global is missing")
+	}
+	var values []int64
+	for _, item := range global.Items {
+		values = append(values, item.Ints...)
+	}
+	want := []int64{1, 2, 3, 4, 5, 6}
+	if !reflect.DeepEqual(values, want) {
+		t.Fatalf("main.values = %v, want %v", values, want)
 	}
 }
 

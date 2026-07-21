@@ -858,6 +858,30 @@ func TestARM64RuntimeCapabilityStatus(t *testing.T) {
 			note:        "the shared generic P-256 point body does not contribute its concrete type to Point method dispatch",
 		},
 		{
+			category:    "stdlib-crypto",
+			name:        "sha3-pbkdf2",
+			source:      "stdlib_crypto_sha3_pbkdf2.go",
+			expectation: runtimeCapabilityMustPass,
+		},
+		{
+			category:    "stdlib-crypto",
+			name:        "des-rc4",
+			source:      "stdlib_crypto_des_rc4.go",
+			expectation: runtimeCapabilityMustPass,
+		},
+		{
+			category:    "stdlib-crypto",
+			name:        "mlkem",
+			source:      "stdlib_crypto_mlkem.go",
+			expectation: runtimeCapabilityMustPass,
+		},
+		{
+			category:    "stdlib-crypto",
+			name:        "hpke",
+			source:      "stdlib_crypto_hpke.go",
+			expectation: runtimeCapabilityMustPass,
+		},
+		{
 			category:    "stdlib-errors",
 			name:        "join-is-as",
 			source:      "stdlib_errors_join_is_as.go",

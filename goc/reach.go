@@ -432,7 +432,7 @@ func reachableFunctions(roots []*ast.FuncDecl, rootFiles []*ast.File, rootInfo *
 		for _, name := range []string{
 			"args", "atomicstorep", "c128equal", "c64equal", "check", "concatstring2", "deferproc", "deferreturn", "f32equal", "f64equal", "gopanic", "gorecover", "growslice",
 			"goPanicSliceConvert", "interequal", "interhash", "main", "makeslice", "mallocgc",
-			"getitab", "inheap", "inHeapOrStack", "makemap", "mapclear", "mapdelete",
+			"getitab", "gocInterfaceDispatchFailure", "inheap", "inHeapOrStack", "makemap", "mapclear", "mapdelete",
 			"memclrHasPointers",
 			"memequal0", "memequal8", "memequal16", "memequal32", "memequal64", "memequal128",
 			"memhash0", "memhash8", "memhash16", "memhash128", "mstart0",
@@ -523,6 +523,18 @@ func reachableFunctions(roots []*ast.FuncDecl, rootFiles []*ast.File, rootInfo *
 					if signature != nil && len(statement.Results) == signature.Results().Len() {
 						for index, value := range statement.Results {
 							enqueueValueImplementation(value, signature.Results().At(index).Type(), current.info)
+						}
+					} else if signature != nil && len(statement.Results) == 1 {
+						call, ok := statement.Results[0].(*ast.CallExpr)
+						if ok {
+							forwarded, ok := current.info.Types[call.Fun].Type.Underlying().(*types.Signature)
+							if ok && forwarded.Results().Len() == signature.Results().Len() {
+								for index := 0; index < forwarded.Results().Len(); index++ {
+									sourceType := forwarded.Results().At(index).Type()
+									targetType := signature.Results().At(index).Type()
+									enqueueTypeImplementation(sourceType, targetType)
+								}
+							}
 						}
 					}
 				case *ast.SendStmt:

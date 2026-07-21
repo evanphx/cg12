@@ -888,7 +888,11 @@ func addInterfaceMethodWrappers(g *gen, reachable []functionDecl) {
 			}
 			wrapper.cur = next
 		}
-		wrapper.cur.CallVoid(function.Sym("abort", 0))
+		if wrapper.runtimeAllocation {
+			wrapper.cur.CallVoid(function.Sym("runtime_gocInterfaceDispatchFailure", 0), dynamicTag)
+		} else {
+			wrapper.cur.CallVoid(function.Sym("abort", 0))
+		}
 		wrapper.cur.Hlt()
 	}
 }
@@ -3285,6 +3289,23 @@ func (g *gen) globalStruct(id *ast.Ident, object types.Object, spec *ast.ValueSp
 func (g *gen) globalArray(id *ast.Ident, object types.Object, array *types.Array, spec *ast.ValueSpec, valueIndex int) {
 	name := g.pkg.Path() + "." + id.Name
 	element := array.Elem()
+	if _, isArray := element.Underlying().(*types.Array); isArray {
+		items := []ir.DataItem{{Zero: int(typeSize(array))}}
+		if valueIndex < len(spec.Values) && staticallyInitializedGlobal(spec.Values[valueIndex], object.Type(), g.info) {
+			literal, ok := spec.Values[valueIndex].(*ast.CompositeLit)
+			if ok {
+				items = g.staticArrayItems(name, array, literal)
+			}
+		}
+		g.mod.Data = append(g.mod.Data, &ir.Data{
+			Name:         name,
+			Align:        int(typeAlign(array)),
+			Items:        items,
+			PointerWords: pointerWordIndices(array),
+		})
+		g.globals[object] = name
+		return
+	}
 	if structure, isStructure := element.Underlying().(*types.Struct); isStructure {
 		initializers := make(map[int64]ast.Expr)
 		if valueIndex < len(spec.Values) {

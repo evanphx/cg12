@@ -460,6 +460,54 @@ func TestAdvancedExecutionCorpus(t *testing.T) {
 			func makeCounter() (int, counterValue) { return 17, &returnedCounter{value: 25} }
 			func Test() int { first, counter := makeCounter(); return first + counter.Value() }
 		`, 42},
+		{"function field nonempty interface result survives storage", `
+			type counterValue interface { Value() int }
+			type returnedCounter struct { value int }
+			func (counter *returnedCounter) Value() int { return counter.value }
+			type factory struct { make func(int) (counterValue, error) }
+			type holder struct { counter counterValue }
+			func Test() int {
+				factory := factory{make: func(value int) (counterValue, error) {
+					return &returnedCounter{value: value}, nil
+				}}
+				counter, err := factory.make(42)
+				if err != nil { return 0 }
+				stored := holder{counter: counter}
+				return stored.counter.Value()
+			}
+		`, 42},
+		{"global function field nonempty interface result survives storage", `
+			type counterValue interface { Value() int }
+			type returnedCounter struct { value int }
+			func (counter *returnedCounter) Value() int { return counter.value }
+			type factory struct { make func(int) (counterValue, error) }
+			type holder struct { counter counterValue }
+			var globalFactory = &factory{make: func(value int) (counterValue, error) {
+				return &returnedCounter{value: value}, nil
+			}}
+			func Test() int {
+				counter, err := globalFactory.make(42)
+				if err != nil { return 0 }
+				stored := &holder{counter: counter}
+				return stored.counter.Value()
+			}
+		`, 42},
+		{"forwarded multi result converts concrete value to interface", `
+			type counterValue interface { Value() int }
+			type returnedCounter struct { value int }
+			func (counter *returnedCounter) Value() int { return counter.value }
+			func makeConcrete(value int) (*returnedCounter, error) {
+				return &returnedCounter{value: value}, nil
+			}
+			func makeInterface(value int) (counterValue, error) {
+				return makeConcrete(value)
+			}
+			func Test() int {
+				counter, err := makeInterface(42)
+				if err != nil { return 0 }
+				return counter.Value()
+			}
+		`, 42},
 		{"global struct slice contains string slice", `type entry struct { name string; values []string }; var entries = []entry{{name: "first", values: []string{"a", "bc"}}, {name: "second", values: []string{"def"}}}; func Test() int { return len(entries[0].name) + len(entries[0].values)*10 + len(entries[0].values[1]) + len(entries[1].values[0]) + len(entries[1].name) }`, 36},
 		{"global array of structs", `type pair struct { low byte; high byte }; var pairs = [4]pair{{1, 2}, {3, 4}, 3: {19, 23}}; func Test() int { return int(pairs[0].low + pairs[0].high + pairs[1].low + pairs[1].high + pairs[2].low + pairs[3].low + pairs[3].high) }`, 52},
 		{"global struct slice with array field", `type caseRange struct { low uint32; delta [3]int32 }; var ranges = []caseRange{{low: 0x391, delta: [3]int32{0, 32, 0}}}; func Test() int { return int(ranges[0].delta[1]) + 10 }`, 42},
@@ -782,6 +830,23 @@ var values = []uint8{1: 7, 4: 11, 13}
 
 func Test() int {
 	return len(values) + int(values[1]+values[4]+values[5]) + 5
+}
+`, 42)
+}
+
+func TestRuntimeNestedGlobalArrayLiteral(t *testing.T) {
+	runExecutableCase(t, `package main
+
+var values = [2][3]uint8{{1, 2, 3}, {4, 5, 6}}
+
+func Test() int {
+	total := 0
+	for _, row := range values {
+		for _, value := range row {
+			total += int(value)
+		}
+	}
+	return total * 2
 }
 `, 42)
 }
@@ -1336,6 +1401,111 @@ func callString(value interface{ String() string }) string {
 
 func Test() int {
 	return len(callString(stringValue{text: "the answer has forty-two characters!......"}))
+}
+`, 42)
+}
+
+func TestRuntimeFunctionFieldReturnsNonEmptyInterface(t *testing.T) {
+	runExecutableCase(t, `package main
+
+type counterValue interface {
+	Value() int
+}
+
+type returnedCounter struct {
+	value int
+}
+
+func (counter *returnedCounter) Value() int {
+	return counter.value
+}
+
+type factory struct {
+	make func(int) (counterValue, error)
+}
+
+type holder struct {
+	counter counterValue
+}
+
+var globalFactory = &factory{
+	make: func(value int) (counterValue, error) {
+		return &returnedCounter{value: value}, nil
+	},
+}
+
+func Test() int {
+	counter, err := globalFactory.make(42)
+	if err != nil {
+		return 0
+	}
+	stored := &holder{counter: counter}
+	return stored.counter.Value()
+}
+`, 42)
+}
+
+func TestRuntimeForwardedMultiResultConvertsConcreteToInterface(t *testing.T) {
+	runExecutableCase(t, `package main
+
+type counterValue interface {
+	Value() int
+}
+
+type returnedCounter struct {
+	value int
+}
+
+func (counter *returnedCounter) Value() int {
+	return counter.value
+}
+
+func makeConcrete(value int) (*returnedCounter, error) {
+	return &returnedCounter{value: value}, nil
+}
+
+func makeInterface(value int) (counterValue, error) {
+	return makeConcrete(value)
+}
+
+func Test() int {
+	counter, err := makeInterface(42)
+	if err != nil {
+		return 0
+	}
+	return counter.Value()
+}
+`, 42)
+}
+
+func TestRuntimeStackArgumentsPreserveInterfaceDataWord(t *testing.T) {
+	runExecutableCase(t, `package main
+
+type valueSource interface {
+	Value() int
+}
+
+type storedValue struct {
+	value int
+}
+
+func (value *storedValue) Value() int {
+	return value.value
+}
+
+func consume(prefix []byte, first, second, third valueSource, suffix []byte) int {
+	return len(prefix) + first.Value() + second.Value() + third.Value() + len(suffix)
+}
+
+func forward(prefix []byte, first, second, third valueSource, suffix []byte) int {
+	return consume(prefix, first, second, third, suffix)
+}
+
+func Test() int {
+	first := &storedValue{value: 5}
+	second := &storedValue{value: 7}
+	third := &storedValue{value: 11}
+	return forward([]byte{1, 2, 3}, first, second, third, []byte{4, 5, 6, 7}) + 12
 }
 `, 42)
 }
