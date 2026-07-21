@@ -809,6 +809,24 @@ func TestARM64RuntimeCapabilityStatus(t *testing.T) {
 			expectation: runtimeCapabilityMustPass,
 		},
 		{
+			category:    "stdlib-crypto",
+			name:        "hkdf",
+			source:      "stdlib_crypto_hkdf.go",
+			expectation: runtimeCapabilityMustPass,
+		},
+		{
+			category:    "stdlib-crypto",
+			name:        "ed25519",
+			source:      "stdlib_crypto_ed25519.go",
+			expectation: runtimeCapabilityMustPass,
+		},
+		{
+			category:    "stdlib-crypto",
+			name:        "ecdh-x25519",
+			source:      "stdlib_crypto_ecdh_x25519.go",
+			expectation: runtimeCapabilityMustPass,
+		},
+		{
 			category:    "stdlib-errors",
 			name:        "join-is-as",
 			source:      "stdlib_errors_join_is_as.go",
@@ -938,6 +956,12 @@ func TestARM64RuntimeCapabilityStatus(t *testing.T) {
 			category:    "stdlib-math",
 			name:        "math-bits",
 			source:      "stdlib_math_bits.go",
+			expectation: runtimeCapabilityMustPass,
+		},
+		{
+			category:    "stdlib-math",
+			name:        "bits-wide-arithmetic",
+			source:      "stdlib_math_bits_wide.go",
 			expectation: runtimeCapabilityMustPass,
 		},
 		{

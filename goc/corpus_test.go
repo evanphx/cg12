@@ -684,6 +684,68 @@ func Test() int {
 `, 42)
 }
 
+func TestRuntimeMultiResultGlobalInitializers(t *testing.T) {
+	runExecutableCase(t, `package main
+
+var pairCalls int
+var pointer, extra = makePair()
+
+var errorPairCalls int
+var errorPointer, _ = makeErrorPair()
+
+func makePair() (*int, int) {
+	pairCalls++
+	value := 35
+	return &value, 7
+}
+
+func makeErrorPair() (*int, error) {
+	errorPairCalls++
+	value := 42
+	return &value, nil
+}
+
+func Test() int {
+	if *pointer+extra != 42 || pairCalls != 1 {
+		return -1
+	}
+	if *errorPointer != 42 || errorPairCalls != 1 {
+		return -2
+	}
+	return 42
+}
+`, 42)
+}
+
+func TestRuntimeReturnedSlicePromotesCallerArray(t *testing.T) {
+	runExecutableCase(t, `package main
+
+func expose(array *[32]byte) []byte {
+	return array[:]
+}
+
+func makeBytes() []byte {
+	var array [32]byte
+	array[0] = 17
+	array[31] = 25
+	return expose(&array)
+}
+
+func disturbStack() {
+	var values [64]byte
+	for index := range values {
+		values[index] = byte(index)
+	}
+}
+
+func Test() int {
+	bytes := makeBytes()
+	disturbStack()
+	return int(bytes[0]) + int(bytes[31])
+}
+`, 42)
+}
+
 func TestRepositoryStandardLibraryHex(t *testing.T) {
 	runCase(t, `package main
 

@@ -1249,7 +1249,7 @@ type gen struct {
 	keepAliveSlots                map[types.Object]string
 	transientInterfaceDescriptors map[uint32]bool
 	noWriteBarrier                bool
-	dynamicInitializers           map[types.Object]globalInitializer
+	dynamicInitializers           map[types.Object]*globalInitializer
 	dynamicInitializerGuards      map[types.Object]string
 	dynamicInitializerFunctions   map[types.Object]string
 	initializingGlobals           map[types.Object]bool
@@ -1429,9 +1429,11 @@ func (g *gen) lowerCompilerIntrinsicCall(symbol string, arguments []ir.Ref) (ir.
 }
 
 type globalInitializer struct {
-	expression ast.Expr
-	info       *types.Info
-	pkg        *types.Package
+	expression    ast.Expr
+	info          *types.Info
+	pkg           *types.Package
+	objects       []types.Object
+	resultIndices []int
 }
 
 func collectLinkNames(files []*ast.File, info *types.Info, names map[*types.Func]string) {
@@ -1501,8 +1503,8 @@ func collectDynamicInitializers(
 	rootPackage *types.Package,
 	units map[string]*sourceUnit,
 	packageGlobals map[string]map[types.Object]string,
-) map[types.Object]globalInitializer {
-	initializers := make(map[types.Object]globalInitializer)
+) map[types.Object]*globalInitializer {
+	initializers := make(map[types.Object]*globalInitializer)
 	collect := func(files []*ast.File, info *types.Info, pkg *types.Package) {
 		globals := packageGlobals[pkg.Path()]
 		for _, file := range files {
@@ -1513,6 +1515,25 @@ func collectDynamicInitializers(
 				}
 				for _, specification := range global.Specs {
 					values := specification.(*ast.ValueSpec)
+					if len(values.Values) == 1 && len(values.Names) > 1 {
+						initializer := &globalInitializer{
+							expression: values.Values[0],
+							info:       info,
+							pkg:        pkg,
+						}
+						for index, name := range values.Names {
+							object := info.Defs[name]
+							if object == nil || globals[object] == "" {
+								continue
+							}
+							initializer.objects = append(initializer.objects, object)
+							initializer.resultIndices = append(initializer.resultIndices, index)
+						}
+						for _, object := range initializer.objects {
+							initializers[object] = initializer
+						}
+						continue
+					}
 					if len(values.Values) != len(values.Names) {
 						continue
 					}
@@ -1522,10 +1543,12 @@ func collectDynamicInitializers(
 						if object == nil || globals[object] == "" || info.Types[expression].Value != nil || staticallyInitializedGlobal(expression, object.Type(), info) {
 							continue
 						}
-						initializers[object] = globalInitializer{
-							expression: expression,
-							info:       info,
-							pkg:        pkg,
+						initializers[object] = &globalInitializer{
+							expression:    expression,
+							info:          info,
+							pkg:           pkg,
+							objects:       []types.Object{object},
+							resultIndices: []int{0},
 						}
 					}
 				}
@@ -1539,48 +1562,64 @@ func collectDynamicInitializers(
 	return initializers
 }
 
-func dynamicInitializerFunctionSymbols(initializers map[types.Object]globalInitializer) map[types.Object]string {
-	objects := make([]types.Object, 0, len(initializers))
-	for object := range initializers {
-		objects = append(objects, object)
+func dynamicInitializerFunctionSymbols(initializers map[types.Object]*globalInitializer) map[types.Object]string {
+	groups := make([]*globalInitializer, 0, len(initializers))
+	seen := make(map[*globalInitializer]bool)
+	for _, initializer := range initializers {
+		if seen[initializer] {
+			continue
+		}
+		seen[initializer] = true
+		groups = append(groups, initializer)
 	}
-	sort.Slice(objects, func(left, right int) bool {
+	sort.Slice(groups, func(left, right int) bool {
+		leftObject := groups[left].objects[0]
+		rightObject := groups[right].objects[0]
 		leftPackage := ""
-		if objects[left].Pkg() != nil {
-			leftPackage = objects[left].Pkg().Path()
+		if leftObject.Pkg() != nil {
+			leftPackage = leftObject.Pkg().Path()
 		}
 		rightPackage := ""
-		if objects[right].Pkg() != nil {
-			rightPackage = objects[right].Pkg().Path()
+		if rightObject.Pkg() != nil {
+			rightPackage = rightObject.Pkg().Path()
 		}
 		if leftPackage != rightPackage {
 			return leftPackage < rightPackage
 		}
-		return objects[left].Name() < objects[right].Name()
+		return leftObject.Name() < rightObject.Name()
 	})
 
-	symbols := make(map[types.Object]string, len(objects))
-	for index, object := range objects {
+	symbols := make(map[types.Object]string, len(initializers))
+	for index, initializer := range groups {
+		object := initializer.objects[0]
 		packagePath := "builtin"
 		if object.Pkg() != nil {
 			packagePath = object.Pkg().Path()
 		}
-		symbols[object] = fmt.Sprintf(".goc.global.initfunc.%d.%s.%s", index, packagePath, object.Name())
+		symbol := fmt.Sprintf(".goc.global.initfunc.%d.%s.%s", index, packagePath, object.Name())
+		for _, groupObject := range initializer.objects {
+			symbols[groupObject] = symbol
+		}
 	}
 	return symbols
 }
 
-func generateDynamicInitializerFunctions(base *gen, initializers map[types.Object]globalInitializer) error {
-	objects := make([]types.Object, 0, len(initializers))
-	for object := range initializers {
-		objects = append(objects, object)
+func generateDynamicInitializerFunctions(base *gen, initializers map[types.Object]*globalInitializer) error {
+	groups := make([]*globalInitializer, 0, len(initializers))
+	seen := make(map[*globalInitializer]bool)
+	for _, initializer := range initializers {
+		if seen[initializer] {
+			continue
+		}
+		seen[initializer] = true
+		groups = append(groups, initializer)
 	}
-	sort.Slice(objects, func(left, right int) bool {
-		return base.dynamicInitializerFunctions[objects[left]] < base.dynamicInitializerFunctions[objects[right]]
+	sort.Slice(groups, func(left, right int) bool {
+		return base.dynamicInitializerFunctions[groups[left].objects[0]] < base.dynamicInitializerFunctions[groups[right].objects[0]]
 	})
 
-	for _, object := range objects {
-		initializer := initializers[object]
+	for _, initializer := range groups {
+		object := initializer.objects[0]
 		generator := *base
 		generator.info = initializer.info
 		generator.pkg = initializer.pkg
@@ -1611,7 +1650,7 @@ func generateDynamicInitializerFunctions(base *gen, initializers map[types.Objec
 		generator.functionName = base.dynamicInitializerFunctions[object]
 		generator.currentFunction = nil
 
-		generator.emitDynamicGlobalInitializer(object, initializer)
+		generator.emitDynamicGlobalInitializer(initializer)
 		if generator.err != nil {
 			return generator.err
 		}
@@ -2083,7 +2122,12 @@ func (g *gen) nonEscapingObjectUse(
 		address := addressedExpression(parent, parents)
 		return address == nil || !g.addressEscapesWithin(address, info, parents, body, checking)
 	case *ast.SliceExpr:
-		return parent.X == identifier
+		// A slice can carry the referenced storage into a result, interface, or
+		// longer-lived aggregate. Treat slicing a parameter as escaping unless a
+		// later flow-sensitive analysis proves otherwise. In particular, helpers
+		// such as func bytes(out *[32]byte) []byte { return out[:] } must force a
+		// caller's local array onto the heap.
+		return false
 	case *ast.SelectorExpr:
 		if parent.X != identifier {
 			return false
@@ -4774,14 +4818,17 @@ func (g *gen) initializeGlobal(object types.Object) {
 	g.cur.CallVoid(g.fn.Sym(symbol, 0))
 }
 
-func (g *gen) emitDynamicGlobalInitializer(object types.Object, initializer globalInitializer) {
+func (g *gen) emitDynamicGlobalInitializer(initializer *globalInitializer) {
 	if !g.live() {
 		return
 	}
+	object := initializer.objects[0]
 	guardName := g.dynamicInitializerGuards[object]
 	if guardName == "" {
 		guardName = fmt.Sprintf(".goc.global.init.%d", len(g.dynamicInitializerGuards))
-		g.dynamicInitializerGuards[object] = guardName
+		for _, groupObject := range initializer.objects {
+			g.dynamicInitializerGuards[groupObject] = guardName
+		}
 		g.mod.Data = append(g.mod.Data, &ir.Data{Name: guardName, Align: 4, Items: []ir.DataItem{{Sub: ir.SubW, Ints: []int64{0}}}})
 	}
 
@@ -4801,9 +4848,41 @@ func (g *gen) emitDynamicGlobalInitializer(object types.Object, initializer glob
 	g.pkg = initializer.pkg
 	g.parents = astParents(initializer.expression)
 	g.currentBody = nil
-	g.initializingGlobals[object] = true
+	for _, groupObject := range initializer.objects {
+		g.initializingGlobals[groupObject] = true
+	}
 
-	value := g.assignmentValue(initializer.expression, object.Type())
+	values := make([]ir.Ref, 1)
+	if len(initializer.resultIndices) > 1 || initializer.resultIndices[0] != 0 {
+		call, ok := initializer.expression.(*ast.CallExpr)
+		if !ok {
+			g.fail(initializer.expression, "multi-valued global initializer is not a call")
+			return
+		}
+		values, _ = g.evaluateMultiValueCall(call)
+	} else {
+		values[0] = g.assignmentValue(initializer.expression, object.Type())
+	}
+
+	for index, groupObject := range initializer.objects {
+		resultIndex := initializer.resultIndices[index]
+		g.storeDynamicGlobalInitializer(groupObject, values[resultIndex])
+	}
+
+	for _, groupObject := range initializer.objects {
+		delete(g.initializingGlobals, groupObject)
+	}
+	g.info = savedInfo
+	g.pkg = savedPackage
+	g.parents = savedParents
+	g.currentBody = savedBody
+	if g.live() {
+		g.cur.Goto(done)
+	}
+	g.cur = done
+}
+
+func (g *gen) storeDynamicGlobalInitializer(object types.Object, value ir.Ref) {
 	destination := g.fn.Sym(g.globals[object], 0)
 	valueType := object.Type()
 	switch {
@@ -4820,16 +4899,6 @@ func (g *gen) emitDynamicGlobalInitializer(object types.Object, initializer glob
 	default:
 		g.store(value, destination, valueType)
 	}
-
-	delete(g.initializingGlobals, object)
-	g.info = savedInfo
-	g.pkg = savedPackage
-	g.parents = savedParents
-	g.currentBody = savedBody
-	if g.live() {
-		g.cur.Goto(done)
-	}
-	g.cur = done
 }
 
 func (g *gen) typeTag(valueType types.Type) ir.Ref {
