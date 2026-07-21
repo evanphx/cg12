@@ -1,7 +1,6 @@
 package amd64
 
 import (
-	"fmt"
 	"sort"
 
 	"github.com/evanphx/cg12/analysis"
@@ -60,24 +59,28 @@ type numbering struct {
 	next       int
 }
 
-// regAlloc runs linear-scan allocation on the already-lowered function.
+// regAlloc runs graph-colouring allocation on the already-lowered function.
+//
+// colorAlloc (Chaitin-Briggs) decides each temp's register or spill slot; the
+// conservative per-temp intervals are still built here, but only as the liveness
+// substrate that DWARF variable locations and GC stack maps read.
 func regAlloc(f *ir.Func) (*allocation, error) {
 	if err := asmPrecolor(f); err != nil {
 		return nil, err
 	}
 	cfg := analysis.BuildCFG(f)
 	live := cfg.Liveness()
+	freq := cfg.Frequency(cfg.Dominators())
 
-	num := numberInstrs(cfg)
-	intervals := buildIntervals(f, cfg, live, num)
-
-	alloc, err := linearScan(f, intervals, num)
+	alloc, err := colorAlloc(f, cfg, live, freq)
 	if err != nil {
 		return nil, err
 	}
-	alloc.intervals = intervals
+
+	num := numberInstrs(cfg)
+	alloc.intervals = buildIntervals(f, cfg, live, num)
 	alloc.posInstr = num.posInstr
-	alloc.safeRoots = computeSafepointRoots(f, intervals, num)
+	alloc.safeRoots = computeSafepointRoots(f, alloc.intervals, num)
 	return alloc, nil
 }
 
@@ -275,130 +278,4 @@ func buildIntervals(f *ir.Func, cfg *analysis.CFG, live *analysis.Liveness, num 
 		out = append(out, iv)
 	}
 	return out
-}
-
-// linearScan assigns registers to intervals in start order, spilling to the
-// stack when no suitable register is free.
-func linearScan(f *ir.Func, intervals []*interval, num *numbering) (*allocation, error) {
-	sort.Slice(intervals, func(i, j int) bool {
-		if intervals[i].start != intervals[j].start {
-			return intervals[i].start < intervals[j].start
-		}
-		return intervals[i].end < intervals[j].end
-	})
-
-	alloc := &allocation{}
-	active := []*interval{} // sorted by end
-	inUse := map[Reg]bool{}
-	slotFor := map[int]int{}
-
-	freeExpired := func(start int) {
-		kept := active[:0]
-		for _, a := range active {
-			if a.end < start {
-				if r := Reg(f.Temps[a.temp].Reg); f.Temps[a.temp].Reg != ir.NoReg {
-					delete(inUse, r)
-				}
-			} else {
-				kept = append(kept, a)
-			}
-		}
-		active = kept
-	}
-	addActive := func(iv *interval) {
-		active = append(active, iv)
-		sort.Slice(active, func(i, j int) bool { return active[i].end < active[j].end })
-	}
-	spill := func(iv *interval) {
-		t := f.Temps[iv.temp]
-		if _, ok := slotFor[iv.temp]; !ok {
-			slotFor[iv.temp] = alloc.spillBytes
-			alloc.spillBytes += 8
-		}
-		t.Slot = slotFor[iv.temp]
-		t.Reg = ir.NoReg
-	}
-
-	for _, iv := range intervals {
-		freeExpired(iv.start)
-
-		// Pre-coloured intervals must take their register; evict any conflict.
-		if iv.precolor >= 0 {
-			r := iv.precolor
-			if inUse[r] {
-				evictFrom(f, active, r, spill)
-				delete(inUse, r)
-			}
-			f.Temps[iv.temp].Reg = int(r)
-			inUse[r] = true
-			addActive(iv)
-			continue
-		}
-
-		// A managed reference live across a safepoint is kept in a stack slot, so
-		// the GC finds every root at a frame offset — no callee-saved register
-		// tracking needed. (We don't split live ranges, so it stays spilled for
-		// its whole life.)
-		if iv.crossSafe && f.Temps[iv.temp].GCRef {
-			spill(iv)
-			continue
-		}
-
-		if r, ok := pickRegister(iv, inUse); ok {
-			f.Temps[iv.temp].Reg = int(r)
-			inUse[r] = true
-			addActive(iv)
-		} else {
-			spill(iv)
-		}
-	}
-
-	// Rewrite each spilled temp's binding is already recorded on ir.Temp; the
-	// emitter reads Temp.Slot / Temp.Reg directly.
-	if err := verifyNoSpillOfPrecolor(f, intervals); err != nil {
-		return nil, err
-	}
-	return alloc, nil
-}
-
-// pickRegister chooses a free register for iv from the pool matching its class,
-// honouring the call-crossing constraint (such intervals must land in
-// callee-saved registers).
-func pickRegister(iv *interval, inUse map[Reg]bool) (Reg, bool) {
-	order := intAllocOrder
-	if iv.float {
-		order = floatAllocOrder
-	}
-	for _, r := range order {
-		if inUse[r] {
-			continue
-		}
-		if iv.crosses && !calleeSavedReg(r) {
-			continue
-		}
-		if iv.avoid[r] {
-			continue // an inline asm this value is live across writes r
-		}
-		return r, true
-	}
-	return 0, false
-}
-
-// evictFrom spills whichever active interval currently holds register r.
-func evictFrom(f *ir.Func, active []*interval, r Reg, spill func(*interval)) {
-	for _, a := range active {
-		if a.precolor < 0 && f.Temps[a.temp].Reg == int(r) {
-			spill(a)
-			return
-		}
-	}
-}
-
-func verifyNoSpillOfPrecolor(f *ir.Func, intervals []*interval) error {
-	for _, iv := range intervals {
-		if iv.precolor >= 0 && f.Temps[iv.temp].Reg != int(iv.precolor) {
-			return fmt.Errorf("amd64: could not honour pre-coloured register for temp %%%s", f.Temps[iv.temp].Name)
-		}
-	}
-	return nil
 }
