@@ -1272,6 +1272,14 @@ func (m *mc) memAddr(addr ir.Ref, scratch Reg) (x64.Mem, func()) {
 			m.recordReloc(m.prog.Len()-4, sym, obj.R_X86_64_PC32, off-4)
 		}
 	}
+	// A rematerialised alloca address is [rbp+off]; fold it straight into the
+	// memory operand -- mov reg, [rbp+off] -- rather than materialising the address
+	// with an lea into a register and dereferencing that.
+	if addr.Kind == ir.RefTemp {
+		if l := m.refLoc(addr); l.kind == locFrameAddr {
+			return x64.At(l.base.mreg(), l.off), func() {}
+		}
+	}
 	// A thread-local symbol or a computed pointer resolves to a register first.
 	r := m.gpValue(addr, scratch)
 	return x64.At(r.mreg(), 0), func() {}
