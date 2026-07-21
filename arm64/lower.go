@@ -30,6 +30,7 @@ func lower(f *ir.Func, tlsModel TLSModel) error {
 	lowerpass.SplitCriticalEdges(f)
 	lowerpass.CoalescePhis(f)
 	lowerpass.DestructSSA(f)
+	lowerpass.ThreadJumps(f) // collapse the empty forwarding blocks edge splitting left
 	return lowerABI(f)
 }
 
