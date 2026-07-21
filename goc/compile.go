@@ -1415,6 +1415,19 @@ func (g *gen) lowerAtomicCall(symbol string, arguments []ir.Ref) (ir.Ref, bool) 
 	panic("goc: unsupported atomic intrinsic operation " + specification.operation)
 }
 
+func (g *gen) lowerCompilerIntrinsicCall(symbol string, arguments []ir.Ref) (ir.Ref, bool) {
+	if symbol == "crypto/internal/constanttime.boolToUint8" {
+		// The standard library deliberately gives boolToUint8 a panicking body.
+		// Go compilers replace the call with a zero-extending conversion. Boolean
+		// values are represented in the word class here, so masking the low bit
+		// gives the required canonical uint8 value without a call.
+		value := g.cur.And(ir.ClsW, arguments[0], g.fn.Word(1))
+		return value, true
+	}
+
+	return g.lowerAtomicCall(symbol, arguments)
+}
+
 type globalInitializer struct {
 	expression ast.Expr
 	info       *types.Info
@@ -8626,7 +8639,7 @@ func (g *gen) expr(e ast.Expr) (result ir.Ref) {
 		args = g.adaptSharedGenericArguments(args, sig, callSignature, receiver != ir.R)
 		if obj != nil && receiver == ir.R {
 			g.at(n)
-			if result, lowered := g.lowerAtomicCall(g.functionSymbol(obj), args); lowered {
+			if result, lowered := g.lowerCompilerIntrinsicCall(g.functionSymbol(obj), args); lowered {
 				return result
 			}
 		}

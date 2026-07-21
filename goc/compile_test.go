@@ -72,6 +72,48 @@ func exercise(word *uint32, wide *uint64) {
 	}
 }
 
+func TestCompileLowersConstantTimeBoolConversion(t *testing.T) {
+	source := []byte(`package constanttimetest
+
+import "crypto/subtle"
+
+func equal(left byte, right byte) int {
+	return subtle.ConstantTimeByteEq(left, right)
+}
+`)
+
+	module, err := Compile("constanttime_intrinsic.go", source)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	const intrinsicSymbol = "crypto/internal/constanttime.boolToUint8"
+	foundConstantTimeFunction := false
+	for _, function := range module.Funcs {
+		if function.Name == "crypto/internal/constanttime.ByteEq" {
+			foundConstantTimeFunction = true
+		}
+		for _, block := range function.Blocks {
+			for _, instruction := range block.Instrs {
+				if instruction.Op != ir.OCall {
+					continue
+				}
+				calleeReference := instruction.Arg(0)
+				if calleeReference.Kind != ir.RefConst {
+					continue
+				}
+				callee := function.Consts[calleeReference.ID]
+				if callee.Kind == ir.ConstSym && callee.Sym == intrinsicSymbol {
+					t.Fatalf("constant-time bool conversion was not lowered in %s", function.Name)
+				}
+			}
+		}
+	}
+	if !foundConstantTimeFunction {
+		t.Fatal("crypto/internal/constanttime.ByteEq was not compiled")
+	}
+}
+
 func TestCompilePreservesSyncAtomicPointerWriteBarrierCalls(t *testing.T) {
 	source := []byte(`package atomictest
 

@@ -791,6 +791,24 @@ func TestARM64RuntimeCapabilityStatus(t *testing.T) {
 			expectation: runtimeCapabilityMustPass,
 		},
 		{
+			category:    "stdlib-encoding",
+			name:        "json-roundtrip",
+			source:      "stdlib_encoding_json_roundtrip.go",
+			expectation: runtimeCapabilityMustPass,
+		},
+		{
+			category:    "stdlib-crypto",
+			name:        "hash-hmac",
+			source:      "stdlib_crypto_hash_hmac.go",
+			expectation: runtimeCapabilityMustPass,
+		},
+		{
+			category:    "stdlib-crypto",
+			name:        "aes-modes",
+			source:      "stdlib_crypto_aes_modes.go",
+			expectation: runtimeCapabilityMustPass,
+		},
+		{
 			category:    "stdlib-errors",
 			name:        "join-is-as",
 			source:      "stdlib_errors_join_is_as.go",
