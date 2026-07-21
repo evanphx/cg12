@@ -46,6 +46,7 @@ type xasm interface {
 	// jnz tests a register and branches to `to`, else falls through to `to2`.
 	jmp(to *ir.Block)
 	jnz(r Reg, w bool, to, to2 *ir.Block)
+	jcc(cond x64.Cond, to, to2, next *ir.Block)
 	jmpReg(r Reg)
 	hlt()
 
@@ -215,6 +216,15 @@ func (b *mcXasm) jnz(r Reg, w bool, to, to2 *ir.Block) {
 	b.m.emit(x64.TestReg(w, r.mreg(), r.mreg()))
 	b.m.prog.Jcc(x64.NE, to.Name)
 	b.m.prog.Jmp(to2.Name)
+}
+
+// jcc branches on the flags a preceding cmp set: to `to` when cond holds, else to
+// `to2` -- with the fall-through to `to2` elided when it is the next block.
+func (b *mcXasm) jcc(cond x64.Cond, to, to2, next *ir.Block) {
+	b.m.prog.Jcc(cond, to.Name)
+	if to2 != next {
+		b.m.prog.Jmp(to2.Name)
+	}
 }
 func (b *mcXasm) jmpReg(r Reg) { b.m.emit(x64.JmpReg(r.mreg())) }
 func (b *mcXasm) hlt()         { b.m.emit(x64.Ud2()) }

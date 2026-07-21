@@ -436,7 +436,9 @@ type mc struct {
 
 	gc GCStrategy // pluggable GC strategy, or nil
 
-	blockDone bool // a tail call already emitted the block's exit; skip the terminator
+	blockDone bool      // a tail call already emitted the block's exit; skip the terminator
+	nextBlock *ir.Block // block laid out after the current one, for fall-through elision
+	useCount  []int     // per-temp use count, for the fused compare-branch
 
 	vaSeq int // counter for unique va_arg branch labels
 	gcSeq int // counter for unique GC poll labels
@@ -505,9 +507,15 @@ type blockSym struct {
 func emitMachine(f *ir.Func, alloc *allocation, gc GCStrategy) (*machineCode, error) {
 	m := &mc{f: f, alloc: alloc, gc: gc, prog: x64.NewProgram(), instrPC: map[*ir.Instr][2]uint64{}}
 	m.planFrame()
+	m.useCount = countTempUses(f)
 	m.prologue()
-	for _, b := range f.Blocks {
+	for i, b := range f.Blocks {
 		m.prog.Label(b.Name)
+		if i+1 < len(f.Blocks) {
+			m.nextBlock = f.Blocks[i+1]
+		} else {
+			m.nextBlock = nil
+		}
 		m.block(b)
 	}
 	if m.err != nil {
@@ -976,12 +984,19 @@ func (m *mc) block(b *ir.Block) {
 	}
 
 	m.blockDone = false
+	fuseCmp := m.fusableCmp(b)
 	var argPending []*ir.Instr
 	for ; i < len(b.Instrs); i++ {
 		in := &b.Instrs[i]
 		start := uint64(m.prog.Len())
 		m.recordLoc(in.Pos)
 		m.recordInline(in.Inl)
+		if in == fuseCmp {
+			// Emit the comparison as flags only (no setcc); term() branches on them.
+			(&xsel{f: m.f, b: &mcXasm{m: m}}).cmpFlags(in)
+			m.instrPC[in] = [2]uint64{start, uint64(m.prog.Len())}
+			continue
+		}
 		switch in.Op {
 		case ir.OArg:
 			argPending = append(argPending, in)
@@ -1068,7 +1083,12 @@ func (m *mc) term(b *ir.Block) {
 	if m.blockDone {
 		return // a tail call already emitted this block's exit
 	}
-	if (&xsel{f: m.f, b: &mcXasm{m: m}}).term(b) {
+	x := &xsel{f: m.f, b: &mcXasm{m: m}, next: m.nextBlock}
+	if fuse := m.fusableCmp(b); fuse != nil {
+		x.fusedBranch(b, fuse)
+		return
+	}
+	if x.term(b) {
 		return
 	}
 	switch b.Jmp.Kind {
@@ -1077,6 +1097,60 @@ func (m *mc) term(b *ir.Block) {
 	default:
 		m.fail(fmt.Errorf("amd64: block %q has an unsupported terminator %d", b.Name, b.Jmp.Kind))
 	}
+}
+
+// fusableCmp reports the block's integer comparison when it feeds only the block's
+// own jnz terminator, so the comparison and branch fuse into `cmp; jcc` instead of
+// materialising a boolean with setcc and then testing it. The comparison need not
+// be the last instruction: SSA destruction can append flag-preserving copies after
+// it. Returns nil when no fusion applies.
+func (m *mc) fusableCmp(b *ir.Block) *ir.Instr {
+	if b.Jmp.Kind != ir.JmpJnz || b.Jmp.Arg.Kind != ir.RefTemp {
+		return nil
+	}
+	if m.useCount[b.Jmp.Arg.ID] != 1 { // the sole use must be the branch
+		return nil
+	}
+	idx := -1
+	for i := range b.Instrs {
+		if in := &b.Instrs[i]; in.To.Kind == ir.RefTemp && in.To.ID == b.Jmp.Arg.ID {
+			if in.Op != ir.OCmp || in.Cmp.IsFloat() {
+				return nil // only an integer compare fuses to jcc
+			}
+			idx = i
+		}
+	}
+	if idx < 0 {
+		return nil
+	}
+	for i := idx + 1; i < len(b.Instrs); i++ {
+		if b.Instrs[i].Op != ir.OCopy { // a copy preserves the flags; anything else may not
+			return nil
+		}
+	}
+	return &b.Instrs[idx]
+}
+
+// countTempUses counts, per temp, how many times it appears as an operand.
+func countTempUses(f *ir.Func) []int {
+	n := make([]int, len(f.Temps))
+	bump := func(r ir.Ref) {
+		if r.Kind == ir.RefTemp && int(r.ID) < len(n) {
+			n[r.ID]++
+		}
+	}
+	for _, b := range f.Blocks {
+		for k := range b.Instrs {
+			for _, a := range b.Instrs[k].Args {
+				bump(a)
+			}
+		}
+		bump(b.Jmp.Arg)
+		for _, a := range b.Jmp.Args {
+			bump(a)
+		}
+	}
+	return n
 }
 
 // --- instruction selection -------------------------------------------------

@@ -7,8 +7,9 @@ import "github.com/evanphx/cg12/ir"
 // which instruction to emit stays separate from encoding it (mirroring arm64's
 // sel).
 type xsel struct {
-	f *ir.Func
-	b xasm
+	f    *ir.Func
+	b    xasm
+	next *ir.Block // block laid out next, for fall-through elision
 }
 
 // gpValue returns a GPR holding ref's value, loading it into scratch if it is not
@@ -163,10 +164,19 @@ func (s *xsel) selectInt(in *ir.Instr) bool {
 // term selects a block terminator through the builder, handling the branch forms
 // and the jump table. It returns false only for the return terminator, which
 // stays on each emitter's own path because it drives the frame epilogue.
+// fusedBranch emits a trailing integer comparison (already emitted flags-only in
+// the block body) as a direct conditional jump: to To when the predicate holds,
+// else to To2.
+func (s *xsel) fusedBranch(b *ir.Block, cmp *ir.Instr) {
+	s.b.jcc(intCond(cmp.Cmp), b.Jmp.To, b.Jmp.To2, s.next)
+}
+
 func (s *xsel) term(b *ir.Block) bool {
 	switch b.Jmp.Kind {
 	case ir.JmpJmp:
-		s.b.jmp(b.Jmp.To)
+		if b.Jmp.To != s.next { // else fall through
+			s.b.jmp(b.Jmp.To)
+		}
 	case ir.JmpJnz:
 		w := s.f.ClassOf(b.Jmp.Arg) == ir.ClsL
 		s.b.jnz(s.gpValue(b.Jmp.Arg, gpScratch0), w, b.Jmp.To, b.Jmp.To2)
@@ -380,11 +390,18 @@ func (s *xsel) shift(in *ir.Instr) {
 }
 
 // cmp emits a compare and a movzx'd conditional-set of the boolean result.
-func (s *xsel) cmp(in *ir.Instr) {
+// cmpFlags emits just the comparison, leaving the result in the flags for a
+// caller that branches on them directly (see the fused compare-branch in
+// mc.block). It handles the integer forms; a float compare is not fused.
+func (s *xsel) cmpFlags(in *ir.Instr) {
 	argW := s.f.ClassOf(in.Arg(0)) == ir.ClsL
 	ra := s.gpValue(in.Arg(0), gpScratch0)
 	rb := s.gpValue(in.Arg(1), gpScratch1)
 	s.b.cmpGP(argW, ra, rb)
+}
+
+func (s *xsel) cmp(in *ir.Instr) {
+	s.cmpFlags(in)
 	d, commit := s.gpDst(in.To)
 	s.b.setccMovzx(in.Cmp, d)
 	commit()
