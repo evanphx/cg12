@@ -55,10 +55,17 @@ func tryJumpTable(f *ir.Func, b *ir.Block) {
 	}
 	span := spread + 1
 
-	// A table entry branches straight to its case block, so a target carrying a
-	// phi (its value would depend on the edge) can't be handled here; fall back
-	// to the ordered lowering for those.
-	if hasPhi(deflt) {
+	// A table entry branches straight to its target, so a target carrying a phi
+	// (its value would depend on the edge) can't be handled here; fall back to the
+	// ordered lowering for those. The default block is a table target only when
+	// the value range has gaps -- uncovered indices route to it. With no gaps
+	// (case values are distinct in C, so this is len(cases) == span) the default
+	// is reached only by the range check's out-of-range edge, straight from b, and
+	// its phis are unaffected; a promoted interpreter, whose dispatch's merge block
+	// (the switch's implicit default) gathers phis for every loop-carried value,
+	// relies on exactly this to still get an indexed dispatch.
+	hasGap := uint64(len(cases)) < span
+	if hasGap && hasPhi(deflt) {
 		return
 	}
 	for _, c := range cases {
