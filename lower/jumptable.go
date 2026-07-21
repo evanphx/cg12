@@ -96,6 +96,31 @@ func tryJumpTable(f *ir.Func, b *ir.Block) {
 	tbl := f.NewBlock("")
 	b.Jnz(above, deflt, tbl)
 	tbl.Jmp = ir.Jmp{Kind: ir.JmpTable, Arg: idx, Targets: table}
+
+	// Lay tbl immediately after b so the in-range edge (b's fall-through arm) needs
+	// no branch to reach the indexed jump -- the range check falls straight into it.
+	// NewBlock appended tbl at the end; move it to just after b.
+	moveBlockAfter(f, tbl, b)
+}
+
+// moveBlockAfter reorders f.Blocks so blk immediately follows after.
+func moveBlockAfter(f *ir.Func, blk, after *ir.Block) {
+	rest := f.Blocks[:0]
+	for _, b := range f.Blocks {
+		if b != blk {
+			rest = append(rest, b)
+		}
+	}
+	f.Blocks = rest
+	for i, b := range f.Blocks {
+		if b == after {
+			f.Blocks = append(f.Blocks, nil)
+			copy(f.Blocks[i+2:], f.Blocks[i+1:])
+			f.Blocks[i+1] = blk
+			return
+		}
+	}
+	f.Blocks = append(f.Blocks, blk) // after not found (shouldn't happen)
 }
 
 func hasPhi(b *ir.Block) bool { return len(b.Phis) > 0 }

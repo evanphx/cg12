@@ -28,6 +28,22 @@ func TestCompareBranchFusion(t *testing.T) {
 	require.NotContains(t, text, "cbnz", "the branch should not test a materialized boolean")
 }
 
+// An unconditional jump to the block laid out next is elided -- the block simply
+// falls through instead of branching to its immediate successor.
+func TestFallThroughElision(t *testing.T) {
+	m := ir.NewModule()
+	f := m.NewFunc("fallthru", ir.ClsL).Export()
+	a, b := f.Param("a", ir.ClsL), f.Param("b", ir.ClsL)
+	e := f.Entry()
+	cont := f.NewBlock("cont") // laid out immediately after entry
+	e.Goto(cont)               // ...so this jump should vanish
+	cont.Ret(cont.Add(ir.ClsL, a, b))
+
+	text := disasmModule(t, m)
+	require.NotContains(t, text, "\tb\t", "a jump to the next block should be elided")
+	require.Contains(t, text, "ret")
+}
+
 // When the comparison's boolean has another use, it must still be materialized
 // (the fusion applies only when the branch is the sole consumer).
 func TestCompareBranchNoFusionWhenReused(t *testing.T) {

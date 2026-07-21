@@ -480,7 +480,8 @@ type mc struct {
 	safepoints []safepoint
 
 	blockDone bool
-	useCount  []int // per-temp use count, for the fused compare-branch
+	useCount  []int     // per-temp use count, for the fused compare-branch
+	nextBlock *ir.Block // block laid out after the current one, for fall-through elision
 	vaSeq     int
 	atomicSeq int
 	rows      []obj.LineRow // source positions, keyed by func-relative byte offset
@@ -523,8 +524,13 @@ func emitMachine(f *ir.Func, alloc *allocation, gc GCStrategy, tlsModel TLSModel
 	}
 	m.useCount = countTempUses(f)
 	m.prologue()
-	for _, b := range f.Blocks {
+	for i, b := range f.Blocks {
 		m.prog.Label(b.Name)
+		if i+1 < len(f.Blocks) {
+			m.nextBlock = f.Blocks[i+1]
+		} else {
+			m.nextBlock = nil
+		}
 		m.block(b)
 	}
 	if m.err != nil {
@@ -1117,7 +1123,9 @@ func (m *mc) emitFusedBranch(b *ir.Block, cmp *ir.Instr) {
 		return
 	}
 	s.b.bcondTo(cond, b.Jmp.To.Name)
-	s.b.branch(b.Jmp.To2)
+	if b.Jmp.To2 != m.nextBlock { // else fall through
+		s.b.branch(b.Jmp.To2)
+	}
 }
 
 // condOf maps a comparison predicate to its AArch64 branch condition, choosing the
@@ -1374,7 +1382,7 @@ func (m *mc) tailBranch(in *ir.Instr) {
 // newSel builds a selection driver over the machine-code encoder, carrying the
 // rematerialisation table so spilled-but-recomputable operands are rebuilt in place.
 func (m *mc) newSel() *sel {
-	s := &sel{f: m.f, b: &mcAsm{prog: m.prog, m: m}, spillBase: m.spillBase}
+	s := &sel{f: m.f, b: &mcAsm{prog: m.prog, m: m}, spillBase: m.spillBase, next: m.nextBlock}
 	if m.alloc != nil {
 		s.remat = m.alloc.remat
 	}

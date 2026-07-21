@@ -16,6 +16,7 @@ type sel struct {
 	b         asmb
 	spillBase int
 	remat     map[int]rematRule // temps recomputed at each use (no spill slot)
+	next      *ir.Block         // the block laid out next, for fall-through elision
 }
 
 // src resolves a source operand to a register, loading a spilled temporary into
@@ -632,12 +633,16 @@ func (s *sel) call(in *ir.Instr) {
 func (s *sel) term(b *ir.Block) bool {
 	switch b.Jmp.Kind {
 	case ir.JmpJmp:
-		s.b.branch(b.Jmp.To)
+		if b.Jmp.To != s.next { // else fall through
+			s.b.branch(b.Jmp.To)
+		}
 	case ir.JmpJnz:
 		sz := s.f.ClassOf(b.Jmp.Arg).Size()
 		r := s.src(b.Jmp.Arg, 0, sz)
 		s.b.cbnz(sz == 8, r, b.Jmp.To)
-		s.b.branch(b.Jmp.To2)
+		if b.Jmp.To2 != s.next { // else fall through
+			s.b.branch(b.Jmp.To2)
+		}
 	case ir.JmpHlt:
 		s.b.brk()
 	case ir.JmpBr:
