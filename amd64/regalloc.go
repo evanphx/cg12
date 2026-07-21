@@ -77,6 +77,16 @@ func regAlloc(f *ir.Func) (*allocation, error) {
 		return nil, err
 	}
 
+	// Colouring may place a call-crossing value in a caller-saved register; save and
+	// restore it around each call it crosses. This inserts instructions into the
+	// blocks, so the liveness substrate (which holds *ir.Instr pointers) is built
+	// afterward, on the final instruction list.
+	if err := insertCallerSaves(f, cfg, live, alloc); err != nil {
+		return nil, err
+	}
+
+	cfg = analysis.BuildCFG(f)
+	live = cfg.Liveness()
 	num := numberInstrs(cfg)
 	alloc.intervals = buildIntervals(f, cfg, live, num)
 	alloc.posInstr = num.posInstr

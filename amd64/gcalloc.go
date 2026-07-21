@@ -36,24 +36,26 @@ type colorGraph struct {
 	f    *ir.Func
 	freq *analysis.Freq // per-block execution frequency, for the spill cost model
 
-	adj  []map[int]bool // temp id -> interfering temp ids (nodes only; same class)
-	forb []map[Reg]bool // temp id -> physical registers it may not use
-	node []bool         // temp id -> is a colourable node (used, not pre-coloured)
-	gc   []bool         // temp id -> must be spilled (GC ref live across a safepoint)
-	mv   [][]int        // temp id -> temps it is copied to/from (coalescing bias)
-	cost []float64      // temp id -> spill cost (references weighted by block frequency)
+	adj       []map[int]bool // temp id -> interfering temp ids (nodes only; same class)
+	forb      []map[Reg]bool // temp id -> physical registers it may not use
+	node      []bool         // temp id -> is a colourable node (used, not pre-coloured)
+	gc        []bool         // temp id -> must be spilled (GC ref live across a safepoint)
+	mv        [][]int        // temp id -> temps it is copied to/from (coalescing bias)
+	cost      []float64      // temp id -> spill cost (references weighted by block frequency)
+	crossFreq []float64      // temp id -> summed frequency of the calls it is live across
 }
 
 func newColorGraph(f *ir.Func) *colorGraph {
 	n := len(f.Temps)
 	g := &colorGraph{
-		f:    f,
-		adj:  make([]map[int]bool, n),
-		forb: make([]map[Reg]bool, n),
-		node: make([]bool, n),
-		gc:   make([]bool, n),
-		mv:   make([][]int, n),
-		cost: make([]float64, n),
+		f:         f,
+		adj:       make([]map[int]bool, n),
+		forb:      make([]map[Reg]bool, n),
+		node:      make([]bool, n),
+		gc:        make([]bool, n),
+		mv:        make([][]int, n),
+		cost:      make([]float64, n),
+		crossFreq: make([]float64, n),
 	}
 	for i, t := range f.Temps {
 		// A pre-coloured (Fixed) temp already holds its ABI/fixed register (a
@@ -133,22 +135,14 @@ func (g *colorGraph) build(cfg *analysis.CFG, live *analysis.Liveness) {
 				g.mv[msrc] = append(g.mv[msrc], mdst)
 			}
 
-			// A value live across a call must survive it: System V clobbers every
-			// caller-saved register, so the value can only sit in a callee-saved one
-			// (RBX, R12..R15). Forbid the caller-saved registers of its class -- for a
-			// float, that is every XMM (System V has no callee-saved XMM), so a float
-			// live across a call is forced to spill, matching the ABI.
+			// A value live across a call prefers a callee-saved register (no
+			// save/restore) but may use a caller-saved one, which insertCallerSaves then
+			// saves and restores around each crossed call. Accumulate the frequency of
+			// the crossed calls so colouring can weigh that cost against callee-saved and
+			// against spilling.
 			if in.Op == ir.OCall {
 				for _, t := range liveSet.Members() {
-					pool := intAllocOrder
-					if f.Temps[t].Cls.IsFloat() {
-						pool = floatAllocOrder
-					}
-					for _, r := range pool {
-						if !calleeSavedReg(r) {
-							g.forbid(t, r)
-						}
-					}
+					g.crossFreq[t] += weight
 				}
 			}
 			// An asm's clobber list names registers its template writes. Every value
@@ -310,27 +304,53 @@ func (g *colorGraph) assign() (*allocation, error) {
 				used[Reg(r)] = true
 			}
 		}
+		// A value live across a call weighs callee-saved (one prologue save/restore,
+		// cost ~2) against caller-saved (a save+restore around each crossed call, cost
+		// crossFreq×2). preferCallee holds when the caller-saved bill is the larger, so
+		// the value tries callee-saved registers first; otherwise it takes caller-saved
+		// freely (cheap when the crossed calls are cold, the interpreter's case).
+		crossing := g.crossFreq[t] > 0
+		preferCallee := crossing && g.crossFreq[t]*2 >= 2.0
+		pool := g.pool(t)
+		if preferCallee {
+			pool = intAllocOrderCalleeFirst
+			if f.Temps[t].Cls.IsFloat() {
+				pool = floatAllocOrderCalleeFirst
+			}
+		}
+		// Coalesce by biasing: prefer a register a move partner already holds. For a
+		// value whose crossings are hot, never bias onto a caller-saved register --
+		// that would trade one dropped move for a save/restore at every crossed call.
 		prefer := map[Reg]bool{}
 		for _, p := range g.mv[t] {
 			if r := f.Temps[p].Reg; r != ir.NoReg {
+				if preferCallee && !calleeSavedReg(Reg(r)) {
+					continue
+				}
 				prefer[Reg(r)] = true
 			}
 		}
 		usable := func(r Reg) bool { return !used[r] && !g.forb[t][r] }
 		picked := Reg(ir.NoReg)
-		for _, r := range g.pool(t) {
+		for _, r := range pool {
 			if prefer[r] && usable(r) {
 				picked = r
 				break
 			}
 		}
 		if picked == Reg(ir.NoReg) {
-			for _, r := range g.pool(t) {
+			for _, r := range pool {
 				if usable(r) {
 					picked = r
 					break
 				}
 			}
+		}
+		// If the only register a hot-crossing value could get is caller-saved, wrapping
+		// it costs crossFreq×2; spilling costs its reference weight. Take the cheaper.
+		if picked != Reg(ir.NoReg) && preferCallee && !calleeSavedReg(picked) &&
+			g.crossFreq[t]*2 >= g.cost[t] {
+			picked = Reg(ir.NoReg)
 		}
 		if picked == Reg(ir.NoReg) {
 			spill(t)

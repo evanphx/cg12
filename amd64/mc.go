@@ -1165,6 +1165,14 @@ func (m *mc) instr(in *ir.Instr) {
 		d, commit := m.gpDst(in.To)
 		m.emit(x64.Lea(true, d.mreg(), x64.At(RBP.mreg(), int32(-m.allocOff[in]))))
 		commit()
+	case ir.OSpill:
+		// Save a caller-saved value to its slot before a call it is live across.
+		t := m.f.Temps[in.Args[0].ID]
+		m.spillReg(Reg(t.Reg), int(in.Aux), t.Cls)
+	case ir.OReload:
+		// Restore it into the same register after the call.
+		t := m.f.Temps[in.To.ID]
+		m.reloadReg(Reg(t.Reg), int(in.Aux), t.Cls)
 	case ir.OAsm:
 		m.emitAsm(in)
 	case ir.OVaStart:
@@ -1179,6 +1187,32 @@ func (m *mc) instr(in *ir.Instr) {
 		m.recordSafepoint(in)
 	default:
 		m.fail(fmt.Errorf("amd64: unsupported op %s", in.Op))
+	}
+}
+
+// spillReg stores a register to spill slot s; reloadReg loads it back. Used by the
+// caller-save OSpill/OReload wrapping a call a value is live across.
+func (m *mc) spillReg(r Reg, s int, cls ir.Cls) {
+	at := x64.At(RBP.mreg(), m.slotAddr(s))
+	switch {
+	case cls.IsFloat() && cls.Size() == 8:
+		m.emit(x64.MovsdStore(r.mreg(), at))
+	case cls.IsFloat():
+		m.emit(x64.MovssStore(r.mreg(), at))
+	default:
+		m.emit(x64.Store(cls.Size()*8, r.mreg(), at))
+	}
+}
+
+func (m *mc) reloadReg(r Reg, s int, cls ir.Cls) {
+	at := x64.At(RBP.mreg(), m.slotAddr(s))
+	switch {
+	case cls.IsFloat() && cls.Size() == 8:
+		m.emit(x64.MovsdLoad(r.mreg(), at))
+	case cls.IsFloat():
+		m.emit(x64.MovssLoad(r.mreg(), at))
+	default:
+		m.emit(x64.Load(cls.Size() == 8, r.mreg(), at))
 	}
 }
 

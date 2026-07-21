@@ -85,6 +85,22 @@ var calleeSaved = map[Reg]bool{
 // calleeSavedReg reports whether r must be preserved across a call.
 func calleeSavedReg(r Reg) bool { return calleeSaved[r] }
 
+// callerClobbered reports whether a call clobbers register r: everything but the
+// callee-saved GP registers, which includes every XMM (System V has no
+// callee-saved XMM), so a float held across a call is always caller-clobbered.
+func callerClobbered(r Reg) bool { return !calleeSavedReg(r) }
+
+// intAllocOrderCalleeFirst / floatAllocOrderCalleeFirst try the callee-saved
+// registers first. A value that lives across a call prefers these -- one prologue
+// save/restore rather than a save/restore around every crossed call. (System V has
+// no callee-saved XMM, so the float order is unchanged; a call-crossing float that
+// takes a caller-saved XMM is wrapped by insertCallerSaves.)
+var intAllocOrderCalleeFirst = []Reg{
+	RBX, R12, R13, R14, R15, // callee-saved
+	RSI, RDI, R8, R9, // caller-saved
+}
+var floatAllocOrderCalleeFirst = floatAllocOrder
+
 // argGP / argFP are the System V argument registers in order.
 var argGP = []Reg{RDI, RSI, RDX, RCX, R8, R9}
 var argFP = []Reg{XMM(0), XMM(1), XMM(2), XMM(3), XMM(4), XMM(5), XMM(6), XMM(7)}
