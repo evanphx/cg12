@@ -2622,11 +2622,20 @@ func (m *mc) stackParam(in *ir.Instr) {
 	}
 	t := m.f.Temps[in.To.ID]
 	if t.Agg != nil {
-		if t.Reg != ir.NoReg {
-			m.frameAddr(mreg(Reg(t.Reg)), off)
+		if in.RetAgg != nil {
+			if t.Reg != ir.NoReg {
+				m.frameAddr(mreg(Reg(t.Reg)), off)
+				return
+			}
+			m.frameAddr(mcGP0, off)
+			m.spillStore(mcGP0, false, m.spillBase+t.Slot, 8)
 			return
 		}
-		m.frameAddr(mcGP0, off)
+		if t.Reg != ir.NoReg {
+			m.spillFromFrame(mreg(Reg(t.Reg)), false, off, 8)
+			return
+		}
+		m.spillFromFrame(mcGP0, false, off, 8)
 		m.spillStore(mcGP0, false, m.spillBase+t.Slot, 8)
 		return
 	}

@@ -946,7 +946,13 @@ func lowerParams(f *ir.Func, retBuf ir.Ref) error {
 		if !onStack {
 			return fmt.Errorf("arm64: internal error: Go ABI result buffer assigned to registers")
 		}
-		pars = append(pars, ir.Instr{Op: ir.OPar, Cls: ir.ClsL, To: retBuf, Aux: int64(resultOffset)})
+		pars = append(pars, ir.Instr{
+			Op:     ir.OPar,
+			Cls:    ir.ClsL,
+			To:     retBuf,
+			Aux:    int64(resultOffset),
+			RetAgg: f.RetAgg,
+		})
 	}
 	prefix := append(pars, recon...)
 	f.Start.Instrs = append(prefix, f.Start.Instrs...)
@@ -991,7 +997,13 @@ func lowerAggParam(f *ir.Func, p *ir.Temp, a *argAssigner) (pars, recon []ir.Ins
 	if onStack {
 		// The aggregate sits in the incoming argument area; the parameter is its
 		// address (emitStackParam takes the address for aggregate temps).
-		return []ir.Instr{{Op: ir.OPar, Cls: ir.ClsL, To: p.Ref(), Aux: int64(off)}}, nil, nil
+		return []ir.Instr{{
+			Op:     ir.OPar,
+			Cls:    ir.ClsL,
+			To:     p.Ref(),
+			Aux:    int64(off),
+			RetAgg: p.Agg,
+		}}, nil, nil
 	}
 
 	// Reconstruct: allocate a slot, store each incoming register into it, and

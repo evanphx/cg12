@@ -30,6 +30,7 @@ type arm64Translator struct {
 	currentPlan9Frame       int
 	currentLeaf             bool
 	currentSymbol           string
+	skipFunction            bool
 	functions               []ARM64Function
 	data                    map[string][]arm64DataValue
 	lseEnabled              bool
@@ -98,11 +99,21 @@ func (t *arm64Translator) translate(statement Statement) error {
 	case *Text:
 		return t.translateText(statement)
 	case *Label:
+		if t.skipFunction {
+			return nil
+		}
 		fmt.Fprintf(&t.output, "%s:\n", t.localLabel(statement.Name))
 		return nil
 	case *Directive:
+		if t.skipFunction {
+			return nil
+		}
 		return t.translateDirective(statement)
 	case *Instruction:
+		if t.skipFunction {
+			t.currentInstructionIndex++
+			return nil
+		}
 		if err := t.emitPCLabelForInstruction(statement); err != nil {
 			return err
 		}

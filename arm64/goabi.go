@@ -551,7 +551,13 @@ func storeOpForSub(sub ir.SubCls) ir.Op {
 func lowerGoAggregateParam(f *ir.Func, parameter *ir.Temp, assigner *argAssigner) (parameters, reconstruction []ir.Instr, err error) {
 	parts, onStack, stackOffset := assignGoAggregate(assigner, parameter.Agg)
 	if onStack {
-		return []ir.Instr{{Op: ir.OPar, Cls: ir.ClsL, To: parameter.Ref(), Aux: int64(stackOffset)}}, nil, nil
+		return []ir.Instr{{
+			Op:     ir.OPar,
+			Cls:    ir.ClsL,
+			To:     parameter.Ref(),
+			Aux:    int64(stackOffset),
+			RetAgg: parameter.Agg,
+		}}, nil, nil
 	}
 
 	slot := aggregateAlloc(f, parameter.Agg, &reconstruction)

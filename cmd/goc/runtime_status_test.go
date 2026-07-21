@@ -654,6 +654,42 @@ func TestARM64RuntimeCapabilityStatus(t *testing.T) {
 		},
 		{
 			category:    "stdlib-os",
+			name:        "pipe-goroutine-close",
+			source:      "stdlib_os_pipe_goroutine_close.go",
+			expectation: runtimeCapabilityMustPass,
+		},
+		{
+			category:    "stdlib-os",
+			name:        "pipe-returned-closure-close",
+			source:      "stdlib_os_pipe_returned_closure_close.go",
+			expectation: runtimeCapabilityMustPass,
+		},
+		{
+			category:    "stdlib-os",
+			name:        "pipe-interface-capture-close",
+			source:      "stdlib_os_pipe_interface_capture_close.go",
+			expectation: runtimeCapabilityMustPass,
+		},
+		{
+			category:    "stdlib-os",
+			name:        "pipe-manual-copy-shape",
+			source:      "stdlib_os_pipe_manual_copy_shape.go",
+			expectation: runtimeCapabilityMustPass,
+		},
+		{
+			category:    "stdlib-os",
+			name:        "pipe-embedded-file-copy",
+			source:      "stdlib_os_pipe_embedded_file_copy.go",
+			expectation: runtimeCapabilityMustPass,
+		},
+		{
+			category:    "stdlib-os",
+			name:        "exec-goroutine-shape",
+			source:      "stdlib_os_exec_goroutine_shape.go",
+			expectation: runtimeCapabilityMustPass,
+		},
+		{
+			category:    "stdlib-os",
 			name:        "filepath-glob-clean",
 			source:      "stdlib_filepath_glob_clean.go",
 			expectation: runtimeCapabilityMustPass,
@@ -732,10 +768,15 @@ func TestARM64RuntimeCapabilityStatus(t *testing.T) {
 		},
 		{
 			category:    "stdlib-text",
+			name:        "text-template-execute-parse-only",
+			source:      "stdlib_text_template_execute_parse_only.go",
+			expectation: runtimeCapabilityMustPass,
+		},
+		{
+			category:    "stdlib-text",
 			name:        "text-template-execute",
 			source:      "stdlib_text_template_execute.go",
-			expectation: runtimeCapabilityKnownGap,
-			note:        "template Execute currently exposes a reflect/stack-map pointer validation failure",
+			expectation: runtimeCapabilityMustPass,
 		},
 		{
 			category:    "stdlib-text",
@@ -918,6 +959,30 @@ func TestARM64RuntimeCapabilityStatus(t *testing.T) {
 			expectation: runtimeCapabilityMustPass,
 		},
 		{
+			category:    "stdlib-runtime-diagnostics",
+			name:        "debug-stack-gc",
+			source:      "stdlib_runtime_debug_stack_gc.go",
+			expectation: runtimeCapabilityMustPass,
+		},
+		{
+			category:    "stdlib-runtime-diagnostics",
+			name:        "metrics-read",
+			source:      "stdlib_runtime_metrics_read.go",
+			expectation: runtimeCapabilityMustPass,
+		},
+		{
+			category:    "stdlib-runtime-diagnostics",
+			name:        "trace-buffer",
+			source:      "stdlib_runtime_trace_buffer.go",
+			expectation: runtimeCapabilityMustPass,
+		},
+		{
+			category:    "stdlib-os-process",
+			name:        "exec-echo",
+			source:      "stdlib_os_exec_echo.go",
+			expectation: runtimeCapabilityMustPass,
+		},
+		{
 			category:    "stdlib-netpoll",
 			name:        "pipe-past-deadline",
 			source:      "stdlib_netpoll_pipe_past_deadline.go",
@@ -1052,6 +1117,12 @@ func TestARM64RuntimeCapabilityStatus(t *testing.T) {
 			category:    "defer-panic",
 			name:        "typed-recover",
 			source:      "runtime_panic_typed_recover.go",
+			expectation: runtimeCapabilityMustPass,
+		},
+		{
+			category:    "defer-panic",
+			name:        "error-recover",
+			source:      "runtime_panic_error_recover.go",
 			expectation: runtimeCapabilityMustPass,
 		},
 		{

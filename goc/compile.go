@@ -99,6 +99,7 @@ func compile(name string, src []byte, options compileOptions) (*ir.Module, error
 	globalLinkNames := make(map[types.Object]string)
 	interfaceMethods := make(map[*types.Func]bool)
 	interfaceItabs := make(map[string]string)
+	interfaceCallWrappers := make(map[string]string)
 	collectLinkNames([]*ast.File{file}, info, linkNames)
 	collectGlobalLinkNames([]*ast.File{file}, pkg, globalLinkNames)
 	for _, unit := range loader.units {
@@ -193,6 +194,7 @@ func compile(name string, src []byte, options compileOptions) (*ir.Module, error
 		noWriteBarrierFunctions: noWriteBarriers,
 		interfaceMethods:        interfaceMethods,
 		interfaceItabs:          interfaceItabs,
+		interfaceCallWrappers:   interfaceCallWrappers,
 		dynamicTypes:            dynamicTypes,
 		reachableGlobals:        reachableGlobals,
 	}
@@ -227,6 +229,7 @@ func compile(name string, src []byte, options compileOptions) (*ir.Module, error
 			noWriteBarrierFunctions: noWriteBarriers,
 			interfaceMethods:        interfaceMethods,
 			interfaceItabs:          interfaceItabs,
+			interfaceCallWrappers:   interfaceCallWrappers,
 			reachableGlobals:        reachableGlobals,
 			filterGlobals:           !compileRuntime,
 		}
@@ -300,6 +303,7 @@ func compile(name string, src []byte, options compileOptions) (*ir.Module, error
 				noWriteBarrierFunctions:     noWriteBarriers,
 				interfaceMethods:            interfaceMethods,
 				interfaceItabs:              interfaceItabs,
+				interfaceCallWrappers:       interfaceCallWrappers,
 				dynamicInitializers:         dynamicInitializers,
 				dynamicInitializerGuards:    dynamicInitializerGuards,
 				dynamicInitializerFunctions: dynamicInitializerFunctions,
@@ -757,16 +761,17 @@ func addInterfaceMethodWrappers(g *gen, reachable []functionDecl) {
 			function = g.mod.NewFunc(name, resultClass)
 		}
 		wrapper := &gen{
-			fn:                function,
-			cur:               function.Entry(),
-			mod:               g.mod,
-			typeTags:          g.typeTags,
-			runtimeTypes:      g.runtimeTypes,
-			goABITypes:        g.goABITypes,
-			linkNames:         g.linkNames,
-			initSymbols:       g.initSymbols,
-			interfaceItabs:    g.interfaceItabs,
-			runtimeAllocation: g.runtimeAllocation,
+			fn:                    function,
+			cur:                   function.Entry(),
+			mod:                   g.mod,
+			typeTags:              g.typeTags,
+			runtimeTypes:          g.runtimeTypes,
+			goABITypes:            g.goABITypes,
+			linkNames:             g.linkNames,
+			initSymbols:           g.initSymbols,
+			interfaceItabs:        g.interfaceItabs,
+			interfaceCallWrappers: g.interfaceCallWrappers,
+			runtimeAllocation:     g.runtimeAllocation,
 		}
 		if signature.Results().Len() > 0 {
 			resultType := signature.Results().At(0).Type()
@@ -812,10 +817,12 @@ func addInterfaceMethodWrappers(g *gen, reachable []functionDecl) {
 			callSignature := candidateSignature
 			callReceiverType := receiverType
 			if len(candidate.interfacePath) > 0 {
-				arguments = append(arguments, wrapper.embeddedInterfaceMethodReceiver(receiver, candidate.dynamicType, candidate.interfacePath))
-				callee = function.Sym(name, 0)
-				callSignature = signature
-				callReceiverType = signature.Recv().Type()
+				arguments = append(arguments, wrapper.embeddedInterfaceMethodReceiver(receiver, candidate.dynamicType, candidate.interfacePath, candidate.function))
+				if methodHasInterfaceReceiver(candidate.function) {
+					callee = function.Sym(name, 0)
+					callSignature = signature
+					callReceiverType = signature.Recv().Type()
+				}
 			} else {
 				arguments = append(arguments, wrapper.interfaceMethodReceiver(receiver, candidate.function))
 			}
@@ -877,7 +884,11 @@ func interfaceMethodCandidates(g *gen, reachable []functionDecl, method *types.F
 			continue
 		}
 		if reachableMethods[function] {
-			add(function, dynamicType, nil)
+			if len(index) > 1 {
+				add(function, dynamicType, index)
+			} else {
+				add(function, dynamicType, nil)
+			}
 			continue
 		}
 		candidateSignature, _ := function.Type().(*types.Signature)
@@ -1213,6 +1224,7 @@ type gen struct {
 	noWriteBarrierFunctions       map[*types.Func]bool
 	interfaceMethods              map[*types.Func]bool
 	interfaceItabs                map[string]string
+	interfaceCallWrappers         map[string]string
 	dynamicTypes                  []types.Type
 	reachableGlobals              map[types.Object]bool
 	filterGlobals                 bool
@@ -3552,9 +3564,6 @@ func (g *gen) materializeNilInterface(value ir.Ref) ir.Ref {
 		ir.PhiEdge{From: useZero, Val: zeroDescriptor},
 		ir.PhiEdge{From: useValue, Val: value},
 	)
-	if value.Kind == ir.RefTemp && g.transientInterfaceDescriptors[value.ID] {
-		g.markTransientInterfaceDescriptor(descriptor)
-	}
 	return descriptor
 }
 
@@ -4218,14 +4227,15 @@ func (g *gen) ensureInterfaceItab(sourceType, targetType types.Type) string {
 	}
 	for methodIndex := 0; methodIndex < interfaceType.NumMethods(); methodIndex++ {
 		interfaceMethod := interfaceType.Method(methodIndex)
-		object, _, _ := types.LookupFieldOrMethod(sourceType, true, interfaceMethod.Pkg(), interfaceMethod.Name())
+		object, indexes, _ := types.LookupFieldOrMethod(sourceType, true, interfaceMethod.Pkg(), interfaceMethod.Name())
 		method, ok := object.(*types.Func)
 		if !ok {
 			g.err = fmt.Errorf("goc: %s does not implement %s", sourceType, targetType)
 			items = append(items, ir.DataItem{Sub: ir.SubL, Ints: []int64{0}})
 			continue
 		}
-		items = append(items, ir.DataItem{Sub: ir.SubL, Sym: g.ensureInterfaceCallWrapper(method)})
+		wrapper := g.ensureInterfaceCallWrapperFor(sourceType, method, indexes)
+		items = append(items, ir.DataItem{Sub: ir.SubL, Sym: wrapper})
 	}
 	g.mod.Data = append(g.mod.Data, &ir.Data{
 		Name:         symbol,
@@ -4234,6 +4244,102 @@ func (g *gen) ensureInterfaceItab(sourceType, targetType types.Type) string {
 		PointerWords: []int{0, 1},
 	})
 	return symbol
+}
+
+func (g *gen) ensureInterfaceCallWrapperFor(sourceType types.Type, method *types.Func, indexes []int) string {
+	if len(indexes) <= 1 {
+		return g.ensureInterfaceCallWrapper(method)
+	}
+
+	methodSymbol := g.functionSymbol(method)
+	key := runtimeTypeKey(sourceType) + "|" + methodSymbol + "|" + indexPathKey(indexes)
+	if symbol := g.interfaceCallWrappers[key]; symbol != "" {
+		return symbol
+	}
+
+	wrapperSymbol := fmt.Sprintf("%s.interfacecall.promoted.%d", methodSymbol, len(g.interfaceCallWrappers))
+	g.interfaceCallWrappers[key] = wrapperSymbol
+
+	signature := method.Type().(*types.Signature)
+	receiver := signature.Recv()
+	if receiver == nil {
+		return methodSymbol
+	}
+	if methodHasInterfaceReceiver(method) {
+		g.interfaceMethods[method] = true
+	}
+
+	var function *ir.Func
+	if signature.Results().Len() == 0 {
+		function = g.mod.NewFuncVoid(wrapperSymbol)
+	} else {
+		resultClass, supported := scalar(signature.Results().At(0).Type())
+		if !supported {
+			g.err = fmt.Errorf("goc: interface call wrapper %s has unsupported result %s", wrapperSymbol, signature.Results().At(0).Type())
+			return methodSymbol
+		}
+		function = g.mod.NewFunc(wrapperSymbol, resultClass)
+	}
+
+	wrapper := &gen{
+		fn:                    function,
+		cur:                   function.Entry(),
+		mod:                   g.mod,
+		runtimeAllocation:     g.runtimeAllocation,
+		typeTags:              g.typeTags,
+		runtimeTypes:          g.runtimeTypes,
+		goABITypes:            g.goABITypes,
+		linkNames:             g.linkNames,
+		initSymbols:           g.initSymbols,
+		interfaceItabs:        g.interfaceItabs,
+		interfaceCallWrappers: g.interfaceCallWrappers,
+	}
+	if signature.Results().Len() > 0 {
+		resultType := signature.Results().At(0).Type()
+		function.RetAgg = wrapper.goABIAggregate(resultType)
+		function.RetValues = wrapper.runtimeAllocation && isSliceType(resultType)
+	}
+
+	payload := function.Param("receiver", ir.ClsP)
+	receiverValue := wrapper.promotedInterfaceMethodReceiver(payload, sourceType, indexes, method)
+
+	arguments := make([]ir.Ref, 0, 1+signature.Params().Len()+signature.Results().Len())
+	arguments = append(arguments, receiverValue)
+	for index := 0; index < signature.Params().Len(); index++ {
+		parameter := signature.Params().At(index)
+		parameterClass, supported := scalar(parameter.Type())
+		if !supported {
+			g.err = fmt.Errorf("goc: interface call wrapper %s has unsupported parameter %s", wrapperSymbol, parameter.Type())
+			return wrapperSymbol
+		}
+		arguments = append(arguments, wrapper.functionParameter(parameter.Name(), parameter.Type(), parameterClass))
+	}
+	if signature.Results().Len() > 0 && isInlineAggregate(signature.Results().At(0).Type()) && function.RetAgg == nil {
+		arguments = append(arguments, function.ParamRef("result0"))
+	}
+	for index := 1; index < signature.Results().Len(); index++ {
+		arguments = append(arguments, function.ParamRef(fmt.Sprintf("result%d", index)))
+	}
+
+	callee := function.Sym(methodSymbol, 0)
+	if signature.Results().Len() == 0 {
+		wrapper.callVoidWithSignature(callee, arguments, signature, receiver.Type())
+		wrapper.cur.RetVoid()
+		return wrapperSymbol
+	}
+
+	resultClass, _ := scalar(signature.Results().At(0).Type())
+	result := wrapper.callWithSignature(resultClass, callee, arguments, signature, receiver.Type())
+	wrapper.returnValue(result, signature.Results().At(0).Type())
+	return wrapperSymbol
+}
+
+func indexPathKey(indexes []int) string {
+	parts := make([]string, len(indexes))
+	for index, value := range indexes {
+		parts[index] = fmt.Sprintf("%d", value)
+	}
+	return strings.Join(parts, ".")
 }
 
 func (g *gen) ensureInterfaceCallWrapper(method *types.Func) string {
@@ -4264,16 +4370,17 @@ func (g *gen) ensureInterfaceCallWrapper(method *types.Func) string {
 	}
 
 	wrapper := &gen{
-		fn:                function,
-		cur:               function.Entry(),
-		mod:               g.mod,
-		runtimeAllocation: g.runtimeAllocation,
-		typeTags:          g.typeTags,
-		runtimeTypes:      g.runtimeTypes,
-		goABITypes:        g.goABITypes,
-		linkNames:         g.linkNames,
-		initSymbols:       g.initSymbols,
-		interfaceItabs:    g.interfaceItabs,
+		fn:                    function,
+		cur:                   function.Entry(),
+		mod:                   g.mod,
+		runtimeAllocation:     g.runtimeAllocation,
+		typeTags:              g.typeTags,
+		runtimeTypes:          g.runtimeTypes,
+		goABITypes:            g.goABITypes,
+		linkNames:             g.linkNames,
+		initSymbols:           g.initSymbols,
+		interfaceItabs:        g.interfaceItabs,
+		interfaceCallWrappers: g.interfaceCallWrappers,
 	}
 	if signature.Results().Len() > 0 {
 		resultType := signature.Results().At(0).Type()
@@ -5211,10 +5318,14 @@ func interfaceCallWrapperTargetUnavailable(symbol string, functions map[string]b
 
 func interfaceCallWrapperMethodSymbol(symbol string) (string, bool) {
 	const suffix = ".interfacecall"
-	if !strings.HasSuffix(symbol, suffix) {
-		return "", false
+	if strings.HasSuffix(symbol, suffix) {
+		return strings.TrimSuffix(symbol, suffix), true
 	}
-	return strings.TrimSuffix(symbol, suffix), true
+	const promoted = ".interfacecall.promoted."
+	if index := strings.Index(symbol, promoted); index >= 0 {
+		return symbol[:index], true
+	}
+	return "", false
 }
 
 func (g *gen) emitRuntimeTypeHasher(valueType types.Type, typeTag string) string {
@@ -6672,15 +6783,16 @@ func (g *gen) callClosure(call *ast.CallExpr, wrapperPrefix string) ir.Ref {
 	closureOffsets := structOffsets(closureFields)
 
 	wrapper := &gen{
-		fn:                g.mod.NewFuncVoid(wrapperName),
-		mod:               g.mod,
-		runtimeAllocation: g.runtimeAllocation,
-		typeTags:          g.typeTags,
-		runtimeTypes:      g.runtimeTypes,
-		goABITypes:        g.goABITypes,
-		linkNames:         g.linkNames,
-		initSymbols:       g.initSymbols,
-		interfaceItabs:    g.interfaceItabs,
+		fn:                    g.mod.NewFuncVoid(wrapperName),
+		mod:                   g.mod,
+		runtimeAllocation:     g.runtimeAllocation,
+		typeTags:              g.typeTags,
+		runtimeTypes:          g.runtimeTypes,
+		goABITypes:            g.goABITypes,
+		linkNames:             g.linkNames,
+		initSymbols:           g.initSymbols,
+		interfaceItabs:        g.interfaceItabs,
+		interfaceCallWrappers: g.interfaceCallWrappers,
 	}
 	wrapper.cur = wrapper.fn.Entry()
 	context := wrapper.closureContext()
@@ -7109,6 +7221,7 @@ func (g *gen) iteratorRangeStmt(statement *ast.RangeStmt, label string, iterator
 		noWriteBarrierFunctions:     g.noWriteBarrierFunctions,
 		interfaceMethods:            g.interfaceMethods,
 		interfaceItabs:              g.interfaceItabs,
+		interfaceCallWrappers:       g.interfaceCallWrappers,
 		dynamicInitializers:         g.dynamicInitializers,
 		dynamicInitializerGuards:    g.dynamicInitializerGuards,
 		dynamicInitializerFunctions: g.dynamicInitializerFunctions,
@@ -8877,8 +8990,24 @@ func (g *gen) interfaceMethodReceiver(descriptor ir.Ref, method *types.Func) ir.
 	return g.load(payload, receiverType)
 }
 
-func (g *gen) embeddedInterfaceMethodReceiver(descriptor ir.Ref, dynamicType types.Type, indexes []int) ir.Ref {
+func (g *gen) embeddedInterfaceMethodReceiver(descriptor ir.Ref, dynamicType types.Type, indexes []int, method *types.Func) ir.Ref {
 	receiver := g.cur.Load(ir.ClsP, g.offset(descriptor, 8))
+	return g.promotedInterfaceMethodReceiver(receiver, dynamicType, indexes, method)
+}
+
+func (g *gen) promotedInterfaceMethodReceiver(receiver ir.Ref, dynamicType types.Type, indexes []int, method *types.Func) ir.Ref {
+	receiver = g.promotedInterfaceCallReceiver(receiver, dynamicType, indexes)
+	methodReceiverType := method.Type().(*types.Signature).Recv().Type()
+	if _, pointer := methodReceiverType.Underlying().(*types.Pointer); pointer {
+		return receiver
+	}
+	if isInlineAggregate(methodReceiverType) || isInterfaceValue(methodReceiverType) {
+		return receiver
+	}
+	return g.load(receiver, methodReceiverType)
+}
+
+func (g *gen) promotedInterfaceCallReceiver(receiver ir.Ref, dynamicType types.Type, indexes []int) ir.Ref {
 	currentType := dynamicType
 	if pointer, ok := currentType.(*types.Pointer); ok {
 		currentType = pointer.Elem()
@@ -8942,16 +9071,17 @@ func (g *gen) methodValue(expression *ast.SelectorExpr, selection *types.Selecti
 		function = g.mod.NewFunc(wrapperName, resultClass)
 	}
 	wrapper := &gen{
-		fn:                function,
-		cur:               function.Entry(),
-		mod:               g.mod,
-		runtimeAllocation: g.runtimeAllocation,
-		typeTags:          g.typeTags,
-		runtimeTypes:      g.runtimeTypes,
-		goABITypes:        g.goABITypes,
-		linkNames:         g.linkNames,
-		initSymbols:       g.initSymbols,
-		interfaceItabs:    g.interfaceItabs,
+		fn:                    function,
+		cur:                   function.Entry(),
+		mod:                   g.mod,
+		runtimeAllocation:     g.runtimeAllocation,
+		typeTags:              g.typeTags,
+		runtimeTypes:          g.runtimeTypes,
+		goABITypes:            g.goABITypes,
+		linkNames:             g.linkNames,
+		initSymbols:           g.initSymbols,
+		interfaceItabs:        g.interfaceItabs,
+		interfaceCallWrappers: g.interfaceCallWrappers,
 	}
 	if signature.Results().Len() > 0 {
 		resultType := signature.Results().At(0).Type()
@@ -9218,6 +9348,7 @@ func (g *gen) functionLiteral(literal *ast.FuncLit) ir.Ref {
 		noWriteBarrierFunctions:     g.noWriteBarrierFunctions,
 		interfaceMethods:            g.interfaceMethods,
 		interfaceItabs:              g.interfaceItabs,
+		interfaceCallWrappers:       g.interfaceCallWrappers,
 		dynamicInitializers:         g.dynamicInitializers,
 		dynamicInitializerGuards:    g.dynamicInitializerGuards,
 		dynamicInitializerFunctions: g.dynamicInitializerFunctions,
@@ -10240,7 +10371,18 @@ func (g *gen) builtinCall(call *ast.CallExpr, builtin *types.Builtin) ir.Ref {
 		return g.fn.Word(0)
 	case "recover":
 		if g.runtimeAllocation {
-			return g.cur.Call(ir.ClsP, g.fn.Sym("runtime.gorecover", 0))
+			anyType := types.NewInterfaceType(nil, nil)
+			anyType.Complete()
+			recoverSignature := types.NewSignatureType(
+				nil,
+				nil,
+				nil,
+				nil,
+				types.NewTuple(types.NewParam(token.NoPos, nil, "", anyType)),
+				false,
+			)
+			resultClass, _ := scalar(anyType)
+			return g.callWithSignature(resultClass, g.fn.Sym("runtime.gorecover", 0), nil, recoverSignature, nil)
 		}
 		return g.fn.ConstInt(ir.ClsP, 0)
 	case "print", "println":

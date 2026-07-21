@@ -165,6 +165,14 @@ func CompileARM64(file *File, options ARM64Options) (ARM64Translation, error) {
 				// declaration has no explicit ABI selector.
 				translator.directABI0[functionIndex] = true
 			}
+			if options.PackagePath == "syscall" && filepath.Base(options.Filename) == "asm_linux_arm64.s" && translator.symbol(statement.Symbol) == "syscall_rawVforkSyscall" {
+				// rawVforkSyscall must not return through a generated ABI0
+				// wrapper: after CLONE_VFORK|CLONE_VM the child shares the
+				// parent stack until exec/exit, so wrapper stack traffic after
+				// the syscall corrupts runtime unwinding. Emit a direct
+				// ABIInternal entry for this fixed multi-result shape instead.
+				translator.directABI0[functionIndex] = true
+			}
 			if !statement.Symbol.Static && statement.Symbol.ABI == "" {
 				translator.abi0Symbols[translator.symbol(statement.Symbol)] = true
 			}

@@ -24,12 +24,23 @@ func (t *arm64Translator) translateText(text *Text) error {
 	t.currentFrame = 0
 	t.currentPlan9Frame = 0
 	t.currentLeaf = !t.functionCalls[t.functionIndex]
+	t.skipFunction = false
 	if localSize != 0 || t.functionCalls[t.functionIndex] && !textHasFlag(text, "NOFRAME") {
 		t.currentFrame = roundUpInteger(localSize+16, 16)
 		t.currentPlan9Frame = roundUpInteger(localSize+8, 16)
 	}
 	symbol := t.symbol(text.Symbol)
 	t.currentSymbol = symbol
+	if t.directRawVforkSyscall() {
+		t.functions = append(t.functions, ARM64Function{
+			Name:  symbol,
+			Args:  argumentSize,
+			Flags: append([]string(nil), text.Flags...),
+		})
+		t.emitRawVforkSyscall()
+		t.skipFunction = true
+		return nil
+	}
 	if t.currentABI0 && !t.currentDirectABI0 {
 		abi0Name, wrapperFrame, err := t.emitABI0Wrapper(text, t.abi0Layouts[t.functionIndex])
 		if err != nil {

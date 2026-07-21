@@ -263,6 +263,7 @@ func newSourceLoader(fset *token.FileSet) *sourceLoader {
 			"regexp/syntax":                              true,
 			"runtime":                                    true,
 			"runtime/debug":                              true,
+			"runtime/metrics":                            true,
 			"runtime/trace":                              true,
 			"slices":                                     true,
 			"sort":                                       true,

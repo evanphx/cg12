@@ -1023,6 +1023,35 @@ func TestGoABIGroupedSliceValuesUseRegistersOrWholeStack(t *testing.T) {
 	assert.Contains(t, argumentFrame.pointerWords, 0, "stack-passed slice data must remain visible to the garbage collector")
 }
 
+func TestAAPCSStackMemoryAggregateParameterLoadsSpilledPointer(t *testing.T) {
+	big := &ir.AggType{
+		Name:  "big",
+		Align: 8,
+		Fields: []ir.Field{
+			{Sub: ir.SubL, Pointer: true},
+			{Sub: ir.SubL, Pointer: true},
+			{Sub: ir.SubL},
+		},
+	}
+	module := ir.NewModule()
+	module.AddType(big)
+	function := module.NewFunc("stack_memory_aggregate_pointer", ir.ClsL)
+	for index := 0; index < 8; index++ {
+		function.Param(fmt.Sprintf("value%d", index), ir.ClsL)
+	}
+	aggregate := function.Param("aggregate", ir.ClsP)
+	aggregateTemp := function.Temp(aggregate)
+	aggregateTemp.Agg = big
+	aggregateTemp.Fixed = true
+	aggregateTemp.Reg = int(X0)
+	entry := function.Entry()
+	entry.Ret(entry.Load(ir.ClsL, aggregate))
+
+	assembly := disasmModule(t, module)
+	assert.Contains(t, assembly, "ldr x0, [x29")
+	assert.NotContains(t, assembly, "add x0, x29")
+}
+
 func TestGoABIGroupedSliceResultUsesThreeValueRegisters(t *testing.T) {
 	sliceType := &ir.AggType{
 		Name:  "slice_result",

@@ -167,6 +167,40 @@ func (t *arm64Translator) emitDirectABI0Store(instruction *Instruction, sourceRe
 	return nil
 }
 
+func (t *arm64Translator) directRawVforkSyscall() bool {
+	return t.currentDirectABI0 && t.currentSymbol == "syscall_rawVforkSyscall"
+}
+
+func (t *arm64Translator) emitRawVforkSyscall() {
+	const symbol = "syscall_rawVforkSyscall"
+	t.output.WriteString("\n.text\n")
+	fmt.Fprintf(&t.output, ".global %s\n", symbol)
+	fmt.Fprintf(&t.output, ".type %s, %%function\n", symbol)
+	fmt.Fprintf(&t.output, "%s:\n", symbol)
+	alias := abi0Symbol(symbol)
+	fmt.Fprintf(&t.output, ".global %s\n", alias)
+	fmt.Fprintf(&t.output, ".hidden %s\n", alias)
+	fmt.Fprintf(&t.output, "%s:\n", alias)
+	t.output.WriteString("\tmov x17, x4\n")
+	t.output.WriteString("\tmov x8, x0\n")
+	t.output.WriteString("\tmov x0, x1\n")
+	t.output.WriteString("\tmov x1, x2\n")
+	t.output.WriteString("\tmov x2, x3\n")
+	t.output.WriteString("\tmov x3, #0\n")
+	t.output.WriteString("\tmov x4, #0\n")
+	t.output.WriteString("\tmov x5, #0\n")
+	t.output.WriteString("\tsvc #0\n")
+	t.output.WriteString("\tcmn x0, #4095\n")
+	t.output.WriteString("\tb.lo .Lsyscall_rawVforkSyscall_ok\n")
+	t.output.WriteString("\tneg x16, x0\n")
+	t.output.WriteString("\tstr x16, [x17]\n")
+	t.output.WriteString("\tmov x0, #-1\n")
+	t.output.WriteString("\tret\n")
+	t.output.WriteString(".Lsyscall_rawVforkSyscall_ok:\n")
+	t.output.WriteString("\tstr xzr, [x17]\n")
+	t.output.WriteString("\tret\n")
+}
+
 func (t *arm64Translator) emitDirectABI0FloatLoad(source Operand, destination string, width int) error {
 	offset, err := namedFrameOffset(source.Offset)
 	if err != nil {

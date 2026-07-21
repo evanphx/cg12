@@ -346,6 +346,42 @@ TEXT ·Load(SB), NOSPLIT, $0-12
 	assert.Equal(t, "internal_runtime_atomic_Load", translation.Functions[0].Name)
 }
 
+func TestTranslateARM64RawVforkSyscallUsesNoStackDirectBody(t *testing.T) {
+	file, err := Parse(strings.NewReader(`
+TEXT ·rawVforkSyscall(SB), NOSPLIT, $0-40
+	MOVD trap+0(FP), R0
+	MOVD a1+8(FP), R1
+	MOVD a2+16(FP), R2
+	MOVD a3+24(FP), R3
+	SVC
+	MOVD R0, r1+32(FP)
+	MOVD ZR, err+40(FP)
+	RET
+`))
+	require.NoError(t, err)
+	translation, err := CompileARM64(file, ARM64Options{
+		PackagePath:      "syscall",
+		Filename:         "asm_linux_arm64.s",
+		PreferDirectABI0: true,
+	})
+	require.NoError(t, err)
+
+	assembly := translation.Assembly
+	assert.Contains(t, assembly, "syscall_rawVforkSyscall:\n")
+	assert.Contains(t, assembly, "syscall_rawVforkSyscall_abi0:\n")
+	assert.Contains(t, assembly, "\tmov x17, x4\n")
+	assert.Contains(t, assembly, "\tsvc #0\n")
+	assert.Contains(t, assembly, "\tstr x16, [x17]\n")
+	assert.Contains(t, assembly, "\tstr xzr, [x17]\n")
+	assert.NotContains(t, assembly, "\tbl syscall_rawVforkSyscall_abi0")
+
+	start := strings.Index(assembly, "syscall_rawVforkSyscall:\n")
+	require.NotEqual(t, -1, start)
+	body := assembly[start:]
+	assert.NotContains(t, body, "\tsub sp")
+	assert.NotContains(t, body, "\tstr x29")
+}
+
 func TestTranslateARM64DirectABI0CallAfterReadingArguments(t *testing.T) {
 	file, err := Parse(strings.NewReader(`
 TEXT runtime·systemstack(SB), NOSPLIT, $0-8

@@ -1156,6 +1156,114 @@ var values []int
 	}
 }
 
+func TestCompilePromotedInterfaceMethodWrappersExtractEmbeddedReceiver(t *testing.T) {
+	module, err := CompileExecutable("promoted_reader.go", []byte(`package main
+
+type reader interface {
+	Read([]byte) (int, error)
+}
+
+type file struct {
+	value int
+}
+
+func (f *file) Read(buffer []byte) (int, error) {
+	return f.value, nil
+}
+
+type wrapper struct {
+	*file
+}
+
+func consume(r reader) int {
+	n, _ := r.Read(nil)
+	return n
+}
+
+func main() {
+	_ = consume(wrapper{file: &file{value: 7}})
+}
+`))
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	foundItabWrapper := false
+	foundDynamicWrapper := false
+	for _, function := range module.Funcs {
+		rendered := function.String()
+		if strings.Contains(function.Name, "main.file.Read.interfacecall.promoted") {
+			foundItabWrapper = true
+			if !strings.Contains(rendered, "loadl %receiver") {
+				t.Fatalf("%s does not load the embedded receiver:\n%s", function.Name, rendered)
+			}
+			if !strings.Contains(rendered, "call $main.file.Read") {
+				t.Fatalf("%s does not call the concrete method:\n%s", function.Name, rendered)
+			}
+		}
+		if function.Name == "main.reader.Read" {
+			foundDynamicWrapper = true
+			if !strings.Contains(rendered, "call $main.file.Read") {
+				t.Fatalf("dynamic wrapper does not call the concrete promoted method:\n%s", rendered)
+			}
+		}
+	}
+	if !foundItabWrapper {
+		t.Fatal("missing promoted itab wrapper for main.file.Read")
+	}
+	if !foundDynamicWrapper {
+		t.Fatal("missing dynamic interface wrapper for main.reader.Read")
+	}
+}
+
+func TestCompilePromotedInterfaceMethodWrappersLoadScalarReceiver(t *testing.T) {
+	module, err := CompileExecutable("promoted_scalar.go", []byte(`package main
+
+type node interface {
+	Type() int
+}
+
+type nodeType int
+
+func (n nodeType) Type() int {
+	return int(n)
+}
+
+type endNode struct {
+	nodeType
+}
+
+func consume(n node) int {
+	return n.Type()
+}
+
+func main() {
+	_ = consume(&endNode{nodeType: 7})
+}
+`))
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	foundWrapper := false
+	for _, function := range module.Funcs {
+		if !strings.Contains(function.Name, "main.nodeType.Type.interfacecall.promoted") {
+			continue
+		}
+		foundWrapper = true
+		rendered := function.String()
+		if !strings.Contains(rendered, "loadw %receiver") && !strings.Contains(rendered, "loadl %receiver") {
+			t.Fatalf("%s does not load scalar promoted receiver:\n%s", function.Name, rendered)
+		}
+		if !strings.Contains(rendered, "call $main.nodeType.Type") {
+			t.Fatalf("%s does not call the concrete method:\n%s", function.Name, rendered)
+		}
+	}
+	if !foundWrapper {
+		t.Fatal("missing promoted wrapper for main.nodeType.Type")
+	}
+}
+
 func TestSharedTypeParameterUsesOnePointerWord(t *testing.T) {
 	constraint := types.NewInterfaceType(nil, nil)
 	constraint.Complete()
