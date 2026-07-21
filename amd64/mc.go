@@ -1206,6 +1206,8 @@ func (m *mc) instr(in *ir.Instr) {
 		return
 	}
 	switch in.Op {
+	case ir.ONop:
+		// A dead address computation the addressing-mode fold consumed.
 	case ir.OAlloc4, ir.OAlloc8, ir.OAlloc16:
 		d, commit := m.gpDst(in.To)
 		m.emit(x64.Lea(true, d.mreg(), x64.At(RBP.mreg(), int32(-m.allocOff[in]))))
@@ -1265,6 +1267,40 @@ func (m *mc) reloadReg(r Reg, s int, cls ir.Cls) {
 // handling a direct symbol (RIP-relative) or a computed pointer in a register.
 // It returns the operand and, for the symbol case, records the PC32 relocation
 // after the caller emits the instruction (via the returned fixup).
+// memFor builds the memory operand for a (possibly address-folded) load or store.
+// ai is the index of the base among the instruction's args (0 for a load, 1 for a
+// store, past the stored value). in.Aux is the displacement and in.Amode the index
+// scale (0 = no index). An alloca base resolves to rbp+off folded into the
+// displacement, needing no register; a spilled non-alloca base (the base+disp
+// shape, which never carries an index) is loaded into scratch. The index, when
+// present, has an alloca base, so scratch1 is free for it.
+func (m *mc) memFor(in *ir.Instr, ai int) (x64.Mem, func()) {
+	base := in.Args[ai]
+	disp := int32(in.Aux)
+	if c := m.constOf(base); c != nil && c.Kind == ir.ConstSym && !c.Thread {
+		sym, off := c.Sym, c.Int+int64(disp)
+		return x64.RIPRel(0), func() {
+			m.recordReloc(m.prog.Len()-4, sym, obj.R_X86_64_PC32, off-4)
+		}
+	}
+	var mem x64.Mem
+	mem.Disp = disp
+	switch l := m.refLoc(base); l.kind {
+	case locFrameAddr:
+		mem.Base, mem.Disp = l.base.mreg(), mem.Disp+l.off
+	case locReg:
+		mem.Base = l.reg.mreg()
+	default:
+		mem.Base = m.gpValue(base, gpScratch1).mreg()
+	}
+	if in.Amode != 0 {
+		mem.Index = m.gpValue(in.Args[ai+1], gpScratch1).mreg()
+		mem.Scale = byte(in.Amode)
+		mem.HasIndex = true
+	}
+	return mem, func() {}
+}
+
 func (m *mc) memAddr(addr ir.Ref, scratch Reg) (x64.Mem, func()) {
 	if c := m.constOf(addr); c != nil && c.Kind == ir.ConstSym && !c.Thread {
 		sym, off := c.Sym, c.Int

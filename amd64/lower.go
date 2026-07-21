@@ -23,6 +23,7 @@ func lower(f *ir.Func) error {
 	lowerpass.Switches(f)   // remaining multiway branches -> conditional branches
 	lowerpass.Selects(f)    // conditional selects -> control-flow diamonds (no cmov path)
 	lowerpass.HoistAllocas(f)
+	foldAddressing(f) // array/alloca address computations -> [base+index*scale+disp]
 	lowerpass.SplitCriticalEdges(f)
 	lowerpass.CoalescePhis(f)
 	lowerpass.DestructSSA(f)

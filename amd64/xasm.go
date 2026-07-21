@@ -91,9 +91,9 @@ type xasm interface {
 
 	// Memory. Each method resolves the address (base+disp, RIP-relative symbol, or
 	// a computed pointer) internally, so the addressing model stays per-backend.
-	loadGP(op ir.Op, w bool, dst Reg, addr ir.Ref)
+	loadGP(in *ir.Instr, w bool, dst Reg)
 	loadFP(op ir.Op, dst Reg, addr ir.Ref)
-	storeGP(op ir.Op, val Reg, addr ir.Ref)
+	storeGP(in *ir.Instr, val Reg)
 	storeFP(op ir.Op, val Reg, addr ir.Ref)
 
 	// spillStore/spillStoreFP write a scratch register back to a result's slot.
@@ -405,8 +405,9 @@ func (b *mcXasm) castG2F(dbl bool, dst, src Reg) {
 func (b *mcXasm) castF2G(long bool, dst, src Reg) {
 	b.m.emit(x64.MovqFromXmm(long, dst.mreg(), src.mreg()))
 }
-func (b *mcXasm) loadGP(op ir.Op, w bool, dst Reg, addr ir.Ref) {
-	mem, fixup := b.m.memAddr(addr, gpScratch1)
+func (b *mcXasm) loadGP(in *ir.Instr, w bool, dst Reg) {
+	op := in.Op
+	mem, fixup := b.m.memFor(in, 0)
 	dm := dst.mreg()
 	switch op {
 	case ir.OLoadub:
@@ -435,9 +436,9 @@ func (b *mcXasm) loadFP(op ir.Op, dst Reg, addr ir.Ref) {
 	}
 	fixup()
 }
-func (b *mcXasm) storeGP(op ir.Op, val Reg, addr ir.Ref) {
-	mem, fixup := b.m.memAddr(addr, gpScratch1)
-	sz := map[ir.Op]int{ir.OStoreb: 8, ir.OStoreh: 16, ir.OStorew: 32, ir.OStorel: 64}[op]
+func (b *mcXasm) storeGP(in *ir.Instr, val Reg) {
+	mem, fixup := b.m.memFor(in, 1)
+	sz := map[ir.Op]int{ir.OStoreb: 8, ir.OStoreh: 16, ir.OStorew: 32, ir.OStorel: 64}[in.Op]
 	b.m.emit(x64.Store(sz, val.mreg(), mem))
 	fixup()
 }

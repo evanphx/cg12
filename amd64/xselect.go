@@ -288,7 +288,7 @@ func (s *xsel) load(in *ir.Instr) {
 		return
 	}
 	d, commit := s.gpDst(in.To)
-	s.b.loadGP(in.Op, in.Cls == ir.ClsL, d, in.Arg(0))
+	s.b.loadGP(in, in.Cls == ir.ClsL, d)
 	commit()
 }
 
@@ -298,7 +298,7 @@ func (s *xsel) store(in *ir.Instr) {
 		s.b.storeFP(in.Op, s.fpValue(in.Arg(0), fpScratch0), in.Arg(1))
 		return
 	}
-	s.b.storeGP(in.Op, s.gpValue(in.Arg(0), gpScratch0), in.Arg(1))
+	s.b.storeGP(in, s.gpValue(in.Arg(0), gpScratch0))
 }
 
 // binFP computes dst = arg0 OP arg1 in x86's two-operand form for floats.
