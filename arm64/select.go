@@ -283,9 +283,12 @@ func (s *sel) store(in *ir.Instr) {
 	s.b.store(in.Op, val, s.src(in.Args[1], 1, 8), uint32(in.Aux))
 }
 
-// cmp emits a comparison and a conditional-set of the boolean result, folding a
-// small constant into a cmp immediate.
-func (s *sel) cmp(in *ir.Instr) {
+// cmpFlags emits the comparison of in's two operands, setting the condition
+// flags, folding a small constant into a cmp immediate. It reports whether the
+// comparison was floating-point (which selects the FP condition mapping). It does
+// not materialize the boolean result, so a caller that branches directly on the
+// flags (see the fused compare-branch in mc.block) can skip the cset.
+func (s *sel) cmpFlags(in *ir.Instr) bool {
 	argCls := s.f.ClassOf(in.Args[0])
 	sz := argCls.Size()
 	w64 := sz == 8
@@ -298,11 +301,17 @@ func (s *sel) cmp(in *ir.Instr) {
 		if v, ok := intConst(s.f, in.Args[1]); ok {
 			if imm, lsl12, flip, iok := addSubImm(v); iok && !lsl12 && !flip {
 				s.b.cmpImm(w64, s1, imm)
-				break
+				return float
 			}
 		}
 		s.b.cmpReg(w64, s1, s.src(in.Args[1], 1, sz))
 	}
+	return float
+}
+
+// cmp emits a comparison and a conditional-set of the boolean result.
+func (s *sel) cmp(in *ir.Instr) {
+	float := s.cmpFlags(in)
 	d, done := s.dst(in.To, in.Cls.Size())
 	s.b.cset(d, in.Cmp, float)
 	done()

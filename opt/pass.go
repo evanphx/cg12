@@ -113,6 +113,13 @@ func DefaultPipeline() []Pass {
 			ModulePass("inline", Inline),
 			clean,
 		),
+		// Inlining a helper that took the address of a caller's local (e.g. an
+		// interpreter's pop(&sp)/push(&sp)) dissolves the address-taking, leaving a
+		// scalar that is now only loaded and stored -- promotable, but the initial
+		// mem2reg ran before inlining and could not see it. Promote again, then clean
+		// up the phis and redundant loads it exposes.
+		FuncPass("mem2reg", Mem2Reg),
+		clean,
 		ModulePass("unroll", UnrollRecursion), // bounded in-place recursion unrolling
 		Fixpoint("inline", // inline/simplify what unrolling exposed
 			ModulePass("inline", Inline),

@@ -480,6 +480,7 @@ type mc struct {
 	safepoints []safepoint
 
 	blockDone bool
+	useCount  []int // per-temp use count, for the fused compare-branch
 	vaSeq     int
 	atomicSeq int
 	rows      []obj.LineRow // source positions, keyed by func-relative byte offset
@@ -520,6 +521,7 @@ func emitMachine(f *ir.Func, alloc *allocation, gc GCStrategy, tlsModel TLSModel
 		prog: a64.NewProgram(), instrPC: map[*ir.Instr]uint64{},
 		frameLayout: computeFrame(f, alloc),
 	}
+	m.useCount = countTempUses(f)
 	m.prologue()
 	for _, b := range f.Blocks {
 		m.prog.Label(b.Name)
@@ -1053,8 +1055,12 @@ func (m *mc) block(b *ir.Block) {
 		}
 	}
 	m.blockDone = false
+	fuseCmp := m.fusableCmp(b)
 	for i < len(b.Instrs) {
 		in := &b.Instrs[i]
+		if in == fuseCmp {
+			break // emitted as flags for the fused conditional branch below
+		}
 		m.instrPC[in] = uint64(m.prog.Len() * 4)
 		m.recordLoc(in.Pos)
 		m.recordInline(in.Inl)
@@ -1065,9 +1071,85 @@ func (m *mc) block(b *ir.Block) {
 		m.instr(in)
 		i++
 	}
+	if fuseCmp != nil {
+		m.instrPC[fuseCmp] = uint64(m.prog.Len() * 4)
+		m.recordLoc(fuseCmp.Pos)
+		m.recordInline(fuseCmp.Inl)
+		m.emitFusedBranch(b, fuseCmp)
+		return
+	}
 	if !m.blockDone {
 		m.term(b)
 	}
+}
+
+// fusableCmp reports the block's trailing comparison when it feeds the block's
+// own jnz terminator and nothing else -- the shape `t = cmp a, b; jnz t` -- so the
+// comparison and branch can be emitted as `cmp; b.cond` instead of materializing a
+// boolean with cset and testing it with cbnz. It requires the comparison to be the
+// final instruction (so its flags reach the branch unclobbered) and single-use (so
+// the boolean is genuinely dead). Returns nil when no fusion applies.
+func (m *mc) fusableCmp(b *ir.Block) *ir.Instr {
+	if b.Jmp.Kind != ir.JmpJnz || b.Jmp.Arg.Kind != ir.RefTemp {
+		return nil
+	}
+	if len(b.Instrs) == 0 {
+		return nil
+	}
+	last := &b.Instrs[len(b.Instrs)-1]
+	if last.Op != ir.OCmp || last.To.Kind != ir.RefTemp || last.To.ID != b.Jmp.Arg.ID {
+		return nil
+	}
+	if m.useCount[last.To.ID] != 1 { // the sole use must be the branch
+		return nil
+	}
+	return last
+}
+
+// emitFusedBranch emits a trailing comparison as flags-only and branches on them
+// directly: to To when the predicate holds (the jnz's non-zero arm), else to To2.
+func (m *mc) emitFusedBranch(b *ir.Block, cmp *ir.Instr) {
+	s := m.newSel()
+	float := s.cmpFlags(cmp)
+	cond, ok := condOf(cmp.Cmp, float)
+	if !ok {
+		m.fail("arm64: cannot fuse comparison %v into a branch", cmp.Cmp)
+		return
+	}
+	s.b.bcondTo(cond, b.Jmp.To.Name)
+	s.b.branch(b.Jmp.To2)
+}
+
+// condOf maps a comparison predicate to its AArch64 branch condition, choosing the
+// integer or floating-point mapping.
+func condOf(c ir.Cmp, float bool) (a64.Cond, bool) {
+	if float {
+		return fpCondOf(c)
+	}
+	return intCondOf(c)
+}
+
+// countTempUses counts, per temp, how many times it appears as an operand (in any
+// instruction's Args or a block terminator's arguments). Definitions do not count.
+func countTempUses(f *ir.Func) []int {
+	n := make([]int, len(f.Temps))
+	bump := func(r ir.Ref) {
+		if r.Kind == ir.RefTemp && int(r.ID) < len(n) {
+			n[r.ID]++
+		}
+	}
+	for _, b := range f.Blocks {
+		for k := range b.Instrs {
+			for _, a := range b.Instrs[k].Args {
+				bump(a)
+			}
+		}
+		bump(b.Jmp.Arg)
+		for _, a := range b.Jmp.Args {
+			bump(a)
+		}
+	}
+	return n
 }
 
 func (m *mc) stackParam(in *ir.Instr) {
