@@ -168,7 +168,21 @@ func (g *gen) loadLval(n *moderncc.PrimaryExpression) ir.Ref {
 		return g.constOf(val, n.Type())
 	}
 	// An unknown identifier is a global function or object referenced by symbol.
+	// A thread-local object (declared extern in a header, so never defined here)
+	// must still be reached through the TLS ABI, or the link fails with a mismatch
+	// against its real thread-local definition.
+	if isThreadLocalIdent(n) {
+		return g.fn.ThreadSym(name)
+	}
 	return g.fn.Sym(name, 0)
+}
+
+// isThreadLocalIdent reports whether an identifier primary expression refers to a
+// thread-local variable, so a symbol reference to it uses the TLS ABI even when
+// the variable was declared extern in a header and thus never defined here.
+func isThreadLocalIdent(n *moderncc.PrimaryExpression) bool {
+	d, ok := n.ResolvedTo().(*moderncc.Declarator)
+	return ok && d.IsThreadLocal()
 }
 
 // --- lvalue addresses ------------------------------------------------------
@@ -180,6 +194,9 @@ func (g *gen) genAddr(e moderncc.ExpressionNode) (ir.Ref, moderncc.Type) {
 		if n.Case == moderncc.PrimaryExpressionIdent {
 			if v, ok := g.lookup(n.Token.SrcStr()); ok {
 				return g.addrOf(v), v.typ
+			}
+			if isThreadLocalIdent(n) {
+				return g.fn.ThreadSym(n.Token.SrcStr()), n.Type()
 			}
 			return g.fn.Sym(n.Token.SrcStr(), 0), n.Type()
 		}
@@ -685,16 +702,37 @@ func (g *gen) boolOf(v ir.Ref) ir.Ref {
 
 // genCond3 emits the ?: conditional operator.
 func (g *gen) genCond3(n *moderncc.ConditionalExpression) ir.Ref {
-	res := g.allocAligned(n.Type(), int(n.Type().Size()))
 	thenB, elseB, endB := g.block("qt"), g.block("qf"), g.block("qend")
 	g.cur.Jnz(g.genCond(n.LogicalOrExpression), thenB, elseB)
+
+	// A void ?: (both arms void -- e.g. `cond ? (void)0 : __builtin_unreachable()`,
+	// the shape of assume/assert macros) yields no value, so evaluate each arm only
+	// for its effect. Otherwise store each arm into a result slot. Either way an arm
+	// may terminate its block (a __builtin_unreachable traps), so only fall through
+	// to the join when it did not.
+	voidCond := n.Type().Kind() == moderncc.Void
+	var res ir.Ref
+	if !voidCond {
+		res = g.allocAligned(n.Type(), int(n.Type().Size()))
+	}
+	arm := func(e moderncc.ExpressionNode) {
+		if voidCond {
+			g.genExpr(e)
+		} else {
+			g.condArm(res, e, n.Type())
+		}
+		if !g.terminated() {
+			g.cur.Goto(endB)
+		}
+	}
 	g.cur = thenB
-	g.condArm(res, n.ExpressionList, n.Type())
-	g.cur.Goto(endB)
+	arm(n.ExpressionList)
 	g.cur = elseB
-	g.condArm(res, n.ConditionalExpression, n.Type())
-	g.cur.Goto(endB)
+	arm(n.ConditionalExpression)
 	g.cur = endB
+	if voidCond {
+		return ir.R
+	}
 	return g.rvalue(res, n.Type())
 }
 

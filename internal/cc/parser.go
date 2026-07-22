@@ -492,13 +492,17 @@ func (p *parser) compoundStatement(inFreshNewScope, isFnScope bool, d *Declarato
 		gotos := p.gotos
 		p.gotos = nil
 		if d != nil {
+			// Declare the function's own parameters into the body -- the innermost
+			// parameter list, the one applied directly to its name. Any list further
+			// out belongs to the return type (a function returning a function
+			// pointer, `T (*f(a))(b)`; a function cannot return a function, so an
+			// outer list is always separated from the name by a pointer). Those
+			// parameter names live in their own prototype scope and must not enter
+			// the body, where a repeated name would look like a redeclaration.
+			var own *Scope
 			for dd := d.DirectDeclarator; dd != nil; {
-				if s := dd.params; s != nil {
-					for nm, nodes := range s.Nodes {
-						for _, node := range nodes {
-							p.scope.declare(p.cpp.eh, nm, node)
-						}
-					}
+				if dd.params != nil {
+					own = dd.params
 				}
 				switch dd.Case {
 				case DirectDeclaratorIdent:
@@ -507,6 +511,13 @@ func (p *parser) compoundStatement(inFreshNewScope, isFnScope bool, d *Declarato
 					dd = dd.Declarator.DirectDeclarator
 				default:
 					dd = dd.DirectDeclarator
+				}
+			}
+			if own != nil {
+				for nm, nodes := range own.Nodes {
+					for _, node := range nodes {
+						p.scope.declare(p.cpp.eh, nm, node)
+					}
 				}
 			}
 		}

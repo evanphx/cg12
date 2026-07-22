@@ -140,7 +140,73 @@ func CompileFor(target Target, name, src string) (*ir.Module, error) {
 	if err != nil {
 		return nil, fmt.Errorf("cc parse: %w", err)
 	}
+	return genModule(target, ast, name)
+}
 
+// Options controls a compilation the way a build system does: the target machine,
+// and the preprocessor state supplied through -I / -D / -U / -include flags.
+type Options struct {
+	Target      Target
+	IncludeDirs []string // -I: searched before the system include paths
+	Defines     []string // -D name[=value] (value defaults to 1)
+	Undefines   []string // -U name
+	PreIncludes []string // -include file: processed before the primary source
+	ExtraOpts   []string // forwarded to the underlying config (e.g. -ffreestanding)
+}
+
+// CompileWith parses C source with an explicit set of preprocessor options, as a
+// compiler driver invoked by a build system needs: include search paths and
+// command-line macros. src is the primary translation unit and name its path,
+// used for diagnostics and for resolving #include "..." relative to it.
+func CompileWith(name, src string, opts Options) (*ir.Module, error) {
+	target := opts.Target
+	if target == "" {
+		target = TargetARM64
+	}
+	cfg, err := moderncc.NewConfig("linux", string(target), opts.ExtraOpts...)
+	if err != nil {
+		return nil, fmt.Errorf("cc config for %s: %w", target, err)
+	}
+	// -I directories are searched before the system paths, for both <...> and
+	// "..." includes. IncludePaths[0] is "" (the including file's own directory);
+	// keep it first so a sibling #include "x" still resolves.
+	cfg.IncludePaths = append(append([]string{""}, opts.IncludeDirs...), cfg.IncludePaths[1:]...)
+	cfg.SysIncludePaths = append(append([]string(nil), opts.IncludeDirs...), cfg.SysIncludePaths...)
+
+	// Command-line macros and forced includes form a preamble, applied after the
+	// predefined macros and before the primary file -- the order gcc uses.
+	var pre strings.Builder
+	pre.WriteString(cfg.Predefined)
+	pre.WriteString(headerCompat)
+	for _, u := range opts.Undefines {
+		fmt.Fprintf(&pre, "\n#undef %s\n", u)
+	}
+	for _, d := range opts.Defines {
+		nm, val, ok := strings.Cut(d, "=")
+		if !ok {
+			val = "1"
+		}
+		fmt.Fprintf(&pre, "\n#define %s %s\n", nm, val)
+	}
+	for _, inc := range opts.PreIncludes {
+		fmt.Fprintf(&pre, "\n#include \"%s\"\n", inc)
+	}
+
+	ast, err := moderncc.Translate(cfg, []moderncc.Source{
+		{Name: "<predefined>", Value: pre.String()},
+		{Name: "<builtin>", Value: moderncc.Builtin},
+		{Name: name, Value: src},
+	})
+	if err != nil {
+		return nil, fmt.Errorf("cc parse: %w", err)
+	}
+	return genModule(target, ast, name)
+}
+
+// genModule turns a type-checked translation unit into a cg12 module, emitting the
+// primary file's definitions (name) and pulling in the internal-linkage functions
+// and data from headers that they reference.
+func genModule(target Target, ast *moderncc.AST, name string) (*ir.Module, error) {
 	g := &gen{target: target, mod: ir.NewModule(), strs: map[string]string{}, ldconsts: map[string]string{}, cplx: map[ir.SubCls]*ir.AggType{}, aggs: map[moderncc.Type]*ir.AggType{}}
 	g.push() // file scope: holds globals, visible to every function
 
@@ -180,8 +246,16 @@ func CompileFor(target Target, name, src string) (*ir.Module, error) {
 	emitted := map[string]bool{}
 	for tu := ast.TranslationUnit; tu != nil; tu = tu.TranslationUnit {
 		ed := tu.ExternalDeclaration
-		if ed == nil || ed.Position().Filename != name {
-			continue // skip predefined/builtin declarations
+		if ed == nil {
+			continue
+		}
+		// Emit the primary file's declarations, and -- from any #included file --
+		// the initialized external-linkage data it defines. Ruby carries generated
+		// tables (its insns_info.inc) this way: textually included, defining real
+		// external globals other objects link against. Internal-linkage definitions
+		// from headers are emitted on demand below; declarations and inlines are not.
+		if ed.Position().Filename != name && !isIncludedDef(ed) {
+			continue
 		}
 		switch ed.Case {
 		case moderncc.ExternalDeclarationFuncDef:
@@ -247,6 +321,38 @@ func CompileFor(target Target, name, src string) (*ir.Module, error) {
 		}
 	}
 	return g.mod, nil
+}
+
+// isIncludedDef reports whether an external declaration from an #included file
+// provides an external-linkage definition this translation unit must emit. Ruby
+// textually includes both generated data tables (.inc) and whole .c files
+// (vm_insnhelper.c into vm.c) that define real external symbols other objects
+// link against.
+//
+// It is deliberately narrow, to keep system-header content out: for data, only an
+// explicitly initialized non-extern global; for functions, only a non-inline
+// definition (so glibc's extern-inline math is excluded). A tentative definition,
+// an extern declaration, or a prototype is not one.
+func isIncludedDef(ed *moderncc.ExternalDeclaration) bool {
+	switch ed.Case {
+	case moderncc.ExternalDeclarationFuncDef:
+		d := ed.FunctionDefinition.Declarator
+		return d != nil && d.Linkage() == moderncc.External && !d.IsInline()
+	case moderncc.ExternalDeclarationDecl:
+		if ed.Declaration == nil {
+			return false
+		}
+		for l := ed.Declaration.InitDeclaratorList; l != nil; l = l.InitDeclaratorList {
+			dcl := l.InitDeclarator.Declarator
+			if dcl == nil || dcl.Type().Kind() == moderncc.Function {
+				continue
+			}
+			if dcl.Linkage() == moderncc.External && !dcl.IsExtern() && dcl.HasInitializer() {
+				return true
+			}
+		}
+	}
+	return false
 }
 
 func (g *gen) fail(format string, a ...any) ir.Ref {
@@ -946,6 +1052,40 @@ func foldFloatConst(e moderncc.ExpressionNode) (float64, bool) {
 		}
 	case *moderncc.CastExpression:
 		return foldFloatConst(n.CastExpression)
+	case *moderncc.ConditionalExpression:
+		// A ?: in a constant float expression: fold the condition, then the taken
+		// arm. modernc leaves this unfolded when an arm is an integer that the ?:
+		// converts to double (`cond ? (1ul<<31) : 1.0`).
+		if c, ok := constInt(n.LogicalOrExpression); ok {
+			if c != 0 {
+				return foldFloatConst(n.ExpressionList)
+			}
+			return foldFloatConst(n.ConditionalExpression)
+		}
+	case *moderncc.MultiplicativeExpression:
+		a, aok := foldFloatConst(n.MultiplicativeExpression)
+		b, bok := foldFloatConst(n.CastExpression)
+		if aok && bok {
+			switch n.Case {
+			case moderncc.MultiplicativeExpressionMul:
+				return a * b, true
+			case moderncc.MultiplicativeExpressionDiv:
+				if b != 0 {
+					return a / b, true
+				}
+			}
+		}
+	case *moderncc.AdditiveExpression:
+		a, aok := foldFloatConst(n.AdditiveExpression)
+		b, bok := foldFloatConst(n.MultiplicativeExpression)
+		if aok && bok {
+			switch n.Case {
+			case moderncc.AdditiveExpressionAdd:
+				return a + b, true
+			case moderncc.AdditiveExpressionSub:
+				return a - b, true
+			}
+		}
 	case *moderncc.UnaryExpression:
 		switch n.Case {
 		case moderncc.UnaryExpressionPlus:

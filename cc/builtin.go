@@ -23,6 +23,39 @@ func (g *gen) builtinCall(n *moderncc.PostfixExpression) (ir.Ref, bool) {
 		}
 		return ir.R, true
 
+	case "__builtin_choose_expr":
+		// A compile-time ?: -- the condition is a constant, and only the chosen arm
+		// is evaluated (the other need not even be valid). Emit the chosen arm.
+		if len(args) == 3 {
+			if c, ok := constInt(args[0]); ok {
+				if c != 0 {
+					return g.genExpr(args[1]), true
+				}
+				return g.genExpr(args[2]), true
+			}
+		}
+		return ir.R, false
+
+	case "__builtin_rotateleft8", "__builtin_rotateleft16", "__builtin_rotateleft32", "__builtin_rotateleft64",
+		"__builtin_rotateright8", "__builtin_rotateright16", "__builtin_rotateright32", "__builtin_rotateright64":
+		if len(args) == 2 {
+			return g.rotate(name, args[0], args[1]), true
+		}
+		return ir.R, false
+
+	case "__builtin___clear_cache":
+		// Flush the instruction cache for a range -- only meaningful after writing
+		// code to execute (a JIT). cg12 does not emit the flush yet; a no-op is
+		// correct for everything that is not running freshly generated machine code.
+		return ir.R, true
+
+	case "__builtin_unreachable", "__builtin_trap":
+		// The program asserts control never reaches here. Terminate the block as
+		// unreachable (a trap) rather than emitting a call to a nonexistent
+		// function; it yields no value.
+		g.cur.Hlt()
+		return ir.R, true
+
 	case "__builtin_inff":
 		return g.fn.Single(math.Inf(1)), true
 	case "__builtin_inf", "__builtin_huge_val":
@@ -64,6 +97,18 @@ func (g *gen) builtinCall(n *moderncc.PostfixExpression) (ir.Ref, bool) {
 	case "__builtin_isnan":
 		// NaN is the only value unordered with itself.
 		return g.cur.Cmp(ir.CmpFuo, ir.ClsW, g.genExpr(args[0]), g.genExpr(args[0])), true
+
+	case "__builtin_isinf", "__builtin_isinf_sign":
+		// isinf is nonzero for either infinity; isinf_sign is +1 for +inf and -1
+		// for -inf. Both fall out of comparing against the two infinities.
+		x := g.genExpr(args[0])
+		pinf, ninf := g.inf(args[0].Type(), 1), g.inf(args[0].Type(), -1)
+		p := g.cur.Cmp(ir.CmpFeq, ir.ClsW, x, pinf)
+		n := g.cur.Cmp(ir.CmpFeq, ir.ClsW, x, ninf)
+		if name == "__builtin_isinf" {
+			return g.cur.Or(ir.ClsW, p, n), true
+		}
+		return g.cur.Sub(ir.ClsW, p, n), true
 
 	case "__builtin_constant_p":
 		// Whether the argument is a compile-time constant. Reporting "no" is always
@@ -192,6 +237,52 @@ func pointee(t moderncc.Type) moderncc.Type {
 
 // bswap reverses the byte order of v, an integer of the given width, using
 // portable shift/mask arithmetic.
+// rotate lowers __builtin_rotateleft/right<N>(x, n) with shifts, since cg12's
+// rotate primitive takes only a constant amount. The count is reduced modulo the
+// width, so a zero rotate shifts by zero rather than by the width (which is
+// undefined). Sub-word widths mask the operand and result to their bits.
+func (g *gen) rotate(name string, xe, ne moderncc.ExpressionNode) ir.Ref {
+	var width int64 = 64
+	switch {
+	case strings.HasSuffix(name, "8"):
+		width = 8
+	case strings.HasSuffix(name, "16"):
+		width = 16
+	case strings.HasSuffix(name, "32"):
+		width = 32
+	}
+	left := strings.Contains(name, "left")
+	cls := ir.ClsW
+	if width == 64 {
+		cls = ir.ClsL
+	}
+	x := g.toCls(g.genExpr(xe), cls)
+	if width < 32 {
+		x = g.cur.And(cls, x, g.fn.ConstInt(cls, (1<<width)-1))
+	}
+	mask := g.fn.ConstInt(cls, width-1)
+	n := g.cur.And(cls, g.toCls(g.genExpr(ne), cls), mask)
+	negn := g.cur.And(cls, g.cur.Sub(cls, g.fn.ConstInt(cls, 0), n), mask)
+	shl, shr := n, negn // rotate left: (x << n) | (x >> (width-n))
+	if !left {
+		shl, shr = negn, n // rotate right: (x >> n) | (x << (width-n))
+	}
+	r := g.cur.Or(cls, g.cur.Shl(cls, x, shl), g.cur.Shr(cls, x, shr))
+	if width < 32 {
+		r = g.cur.And(cls, r, g.fn.ConstInt(cls, (1<<width)-1))
+	}
+	return r
+}
+
+// inf returns a floating infinity constant of t's class (single or double), with
+// the given sign (+1 or -1).
+func (g *gen) inf(t moderncc.Type, sign int) ir.Ref {
+	if clsOf(t) == ir.ClsS {
+		return g.fn.Single(math.Inf(sign))
+	}
+	return g.fn.Double(math.Inf(sign))
+}
+
 func (g *gen) bswap(v ir.Ref, width int) ir.Ref {
 	cls := ir.ClsW
 	if width == 8 {

@@ -36,5 +36,12 @@ Called out here so the delta from upstream stays legible:
   the trailing attributes in the second list, as the anonymous-struct case already
   did, so both spellings reach the type checker.
 
+- **Nested prototype scopes in a function definition.** For a function returning a
+  function pointer, `T (*f(a))(b)`, the parser declared *both* parameter lists into
+  the function body, so a name repeated between them (`f(int argc)` returning a
+  pointer to `(int argc, ...)`) looked like a redeclaration. It now declares only
+  the function's own parameters -- the innermost list -- into the body
+  (`compoundStatement` in `parser.go`). GCC accepts this; Ruby's `vm_method.c` uses it.
+
 Beyond that, the sources are upstream's. Any further cg12-specific behavior changes
 should be called out in commit messages so the delta from v4.29.1 stays legible.
