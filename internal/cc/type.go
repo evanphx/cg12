@@ -2879,6 +2879,13 @@ func (n *Attributes) IsAttrSet(name string) (r bool) {
 	return r
 }
 
+// IsPacked reports whether __attribute__((packed)) (or its __packed__ spelling)
+// is present. On a struct or union it removes inter-member padding and lowers
+// the aggregate's alignment to 1 (unless an explicit aligned(N) raises it).
+func (n *Attributes) IsPacked() bool {
+	return n != nil && (n.IsAttrSet("packed") || n.IsAttrSet("__packed__"))
+}
+
 // AttrValue reports the value associated with a custom attribute, if present. For example,
 // with __attribute__((my_attribute1, my_attribute2(42))), it reports nil for my_attribute1
 // but a Value containing 42 for my_attribute2

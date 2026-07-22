@@ -26,8 +26,10 @@ func (g *gen) asBitfield(e moderncc.ExpressionNode) (*moderncc.Field, ir.Ref, bo
 	var base ir.Ref
 	switch pe.Case {
 	case moderncc.PostfixExpressionSelect: // s.f
+		g.checkPackedBitfield(pe.PostfixExpression.Type())
 		base, _ = g.genAddr(pe.PostfixExpression)
 	case moderncc.PostfixExpressionPSelect: // p->f
+		g.checkPackedBitfield(pointee(pe.PostfixExpression.Type()))
 		base = g.genExpr(pe.PostfixExpression)
 	default:
 		return nil, ir.R, false

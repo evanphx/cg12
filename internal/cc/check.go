@@ -3153,7 +3153,8 @@ func (n *StructDeclarationList) check(c *ctx, s *StructOrUnionSpecifier, isVolat
 		// trc("fld %q.%d at %p, set parent type %s", f.Name(), f.Index(), f, s.Type())
 		f.parentType = s.Type()
 	}
-	a := &fieldAllocator{align: 1, fields: fields, list: n, bigEndian: c.ast.ABI.isBigEndian()}
+	packed := s.typ.Attributes().IsPacked()
+	a := &fieldAllocator{align: 1, fields: fields, list: n, bigEndian: c.ast.ABI.isBigEndian(), packed: packed}
 	switch x := s.typ.(type) {
 	case *StructType:
 		if len(fields) == 0 {
@@ -3163,9 +3164,9 @@ func (n *StructDeclarationList) check(c *ctx, s *StructOrUnionSpecifier, isVolat
 		}
 
 		n.checkStruct(c, a, fields)
-		x.align = a.align
+		x.align = packedAlign(a, s.typ)
 		x.fields = fields
-		x.size = roundup(a.brkBytes, int64(a.align))
+		x.size = roundup(a.brkBytes, int64(x.align))
 		x.padding = int(x.size - a.brkBytes)
 	case *UnionType:
 		if len(fields) == 0 {
@@ -3175,9 +3176,9 @@ func (n *StructDeclarationList) check(c *ctx, s *StructOrUnionSpecifier, isVolat
 		}
 
 		n.checkUnion(c, a, fields)
-		x.align = a.align
+		x.align = packedAlign(a, s.typ)
 		x.fields = fields
-		x.size = roundup(a.brkBytes, int64(a.align))
+		x.size = roundup(a.brkBytes, int64(x.align))
 		x.padding = int(x.size - a.brkBytes)
 	default:
 		c.errors.add(errorf("%v: internal error", n.Position()))
@@ -3225,6 +3226,23 @@ func (n *StructDeclarationList) checkUnion(c *ctx, a *fieldAllocator, s []*Field
 	}
 }
 
+// packedAlign returns the alignment for a (possibly packed) struct or union.
+// Unpacked, it is the largest member alignment the allocator accumulated. Packed
+// lowers it to 1 -- except an explicit aligned(N) still raises it to N, which is
+// also what makes the aggregate's size round up to N (GCC's packed+aligned).
+func packedAlign(a *fieldAllocator, t Type) int {
+	if !a.packed {
+		return a.align
+	}
+	align := 1
+	if at := t.Attributes(); at != nil {
+		if v := at.Aligned(); v > 0 {
+			align = int(v)
+		}
+	}
+	return align
+}
+
 type fieldAllocator struct {
 	align     int
 	bits      int64
@@ -3234,6 +3252,7 @@ type fieldAllocator struct {
 	groupSize int64
 	list      *StructDeclarationList
 	bigEndian bool
+	packed    bool // __attribute__((packed)): place members with no padding
 }
 
 func (a *fieldAllocator) close() {
@@ -3418,7 +3437,11 @@ func (a *fieldAllocator) field(f *Field) {
 	if f.isFlexibleArrayMember || isEmpty(t) {
 		sz = 0
 	}
-	a.brkBytes = roundup(a.brkBytes, int64(t.Align()))
+	align := int64(t.Align())
+	if a.packed {
+		align = 1 // packed removes the padding that member alignment would add
+	}
+	a.brkBytes = roundup(a.brkBytes, align)
 	f.accessBytes = sz
 	f.groupSize = int(sz)
 	f.offsetBytes = a.brkBytes

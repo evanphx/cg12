@@ -207,13 +207,13 @@ func (g *gen) genAddr(e moderncc.ExpressionNode) (ir.Ref, moderncc.Type) {
 			return g.ptrIndex(base, false, g.genExpr(idxN), idxN.Type(), int64(elemT.Size())), elemT
 		case moderncc.PostfixExpressionSelect: // s.field
 			base, bt := g.genAddr(n.PostfixExpression)
-			g.checkPacked(bt)
+			g.checkPackedBitfield(bt)
 			fld := n.Field()
 			g.checkAtomicMember(fld)
 			return g.offset(base, int(fld.Offset())), fld.Type()
 		case moderncc.PostfixExpressionPSelect: // p->field
 			ptr := g.genExpr(n.PostfixExpression)
-			g.checkPacked(pointee(n.PostfixExpression.Type()))
+			g.checkPackedBitfield(pointee(n.PostfixExpression.Type()))
 			fld := n.Field()
 			g.checkAtomicMember(fld)
 			return g.offset(ptr, int(fld.Offset())), fld.Type()

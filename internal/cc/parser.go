@@ -3472,7 +3472,11 @@ func (p *parser) structOrUnionSpecifier() (r *StructOrUnionSpecifier) {
 			r.Token2 = p.shift(false)
 			r.StructDeclarationList = p.structDeclarationList()
 			r.Token3 = p.must('}')
-			r.AttributeSpecifierList = p.attributeSpecifierListOpt()
+			// The attributes after `}` go in the second slot: the first already
+			// holds any that appeared between `struct` and the tag (`struct
+			// __attribute__((packed)) S { ... }`), and assigning here would drop
+			// them. check merges both lists.
+			r.AttributeSpecifierList2 = p.attributeSpecifierListOpt()
 			return r
 		default:
 			r.Case = StructOrUnionSpecifierTag

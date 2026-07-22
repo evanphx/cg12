@@ -68,7 +68,6 @@ func (g *gen) aggOf(t moderncc.Type) *ir.AggType {
 		agg.Size = int(t.Size())
 		agg.Align = t.Align()
 		g.mod.AddType(agg)
-		g.checkPacked(t)
 		return agg
 	}
 
@@ -84,7 +83,6 @@ func (g *gen) aggOf(t moderncc.Type) *ir.AggType {
 		}
 	}
 	g.mod.AddType(agg)
-	g.checkPacked(t)
 	g.checkAggLayout(t, agg)
 	return agg
 }
@@ -116,19 +114,19 @@ func hasBitfield(t moderncc.Type) bool {
 // because both sides share the same wrong layout -- it only shows when the
 // struct meets code someone else compiled, which no test did.
 //
-// Note what this cannot catch, and why checkPacked exists beside it: this
-// compares cg12's layout against the C type checker's, and for a packed struct
-// the type checker's is wrong in exactly the same way cg12's is. The two agree,
-// and both are wrong. A consistency check has nothing to say when its two
-// witnesses share the mistake.
+// A packed struct is the other case: the type checker lays it out with no
+// padding (size 5, align 1 for `struct { char c; int i; }`), but cg12 builds the
+// aggregate from member types alone and gets the natural layout (size 8, align
+// 4). Member access still works -- it uses the checker's offsets directly -- but
+// passing such a struct by value would misclassify it, so this refuses that too.
 func (g *gen) checkAggLayout(t moderncc.Type, agg *ir.AggType) {
 	size, align := agg.Layout()
 	if size == int(t.Size()) && align == t.Align() {
 		return
 	}
 	g.fail("cc: cannot pass %s by value: cg12 lays it out as %d bytes (align %d) "+
-		"but C says %d (align %d) -- a bitfield, which cg12's aggregate types "+
-		"cannot yet express", aggName(t), size, align, t.Size(), t.Align())
+		"but C says %d (align %d) -- a bitfield or __attribute__((packed)) layout, "+
+		"which cg12's aggregate types cannot yet express", aggName(t), size, align, t.Size(), t.Align())
 }
 
 // fieldOf maps one C member type to an aggregate field: a nested aggregate keeps
@@ -193,32 +191,18 @@ func (g *gen) aggParam(name string, agg *ir.AggType) ir.Ref {
 	return r
 }
 
-// checkPacked refuses a struct that carries __attribute__((packed)), whose
-// layout cg12 would get wrong.
+// checkPackedBitfield refuses access to a packed struct that has a bitfield.
 //
-// modernc.org/cc/v4 (v4.29.1, the latest) records the attribute but does not
-// apply it: for `struct { char c; int i; }` it reports the fields at 0 and 4 and
-// the whole at 8, where C says 0 and 1 and 5. cg12 asks it for every offset, so
-// it reads and writes the wrong bytes -- silently, because cg12's own layout of
-// the same struct agrees with the wrong answer, which is why checkAggLayout
-// cannot see it either.
-//
-// So the attribute itself is the only evidence, and it is only half there:
-//
-//	struct S { ... } __attribute__((packed));    // recorded: refused here
-//	struct __attribute__((packed)) S { ... };    // discarded in the parser: invisible
-//
-// The second spelling is not detectable by any means this parser offers -- the
-// attribute reaches neither the type, nor DeclarationSpecifiers, nor either of
-// StructOrUnionSpecifier's two attribute lists. A program using it still
-// miscompiles silently. This catches what can be caught and does not pretend to
-// be a guarantee; the real fix is upstream.
-func (g *gen) checkPacked(t moderncc.Type) {
-	a := t.Attributes()
-	if a == nil || !a.IsAttrSet("packed") {
+// Ordinary __attribute__((packed)) layout is handled: the vendored type checker
+// (internal/cc) removes inter-member padding and lowers the alignment, so cg12's
+// member offsets are the packed ones. Packed *bitfield* allocation is a separate,
+// intricate rule that is not modeled yet, so a packed struct that contains a
+// bitfield still reports unpacked bit positions -- refuse rather than read the
+// wrong bits silently. A non-packed bitfield is fine (see bitfield.go).
+func (g *gen) checkPackedBitfield(t moderncc.Type) {
+	if !t.Attributes().IsPacked() || !hasBitfield(t) {
 		return
 	}
-	g.fail("cc: %s is __attribute__((packed)), which cg12 cannot lay out: "+
-		"the C type checker reports the unpacked field offsets, so every access "+
-		"would read the wrong bytes", aggName(t))
+	g.fail("cc: %s is __attribute__((packed)) with a bitfield, whose packed bit "+
+		"layout cg12 does not yet model", aggName(t))
 }

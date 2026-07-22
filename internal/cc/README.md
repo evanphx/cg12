@@ -17,6 +17,22 @@ cg12 can modify it for its own use.
   vendored — cg12 validates the front end through its own `cc` package tests and
   the difftest corpus.
 
-Beyond that, the sources are upstream's. Any cg12-specific behavior changes made
-from here on should be called out in commit messages so the delta from v4.29.1
-stays legible.
+## Behavior fixes on top of v4.29.1
+
+Called out here so the delta from upstream stays legible:
+
+- **`__attribute__((packed))` is applied, not just recorded.** Upstream parses the
+  attribute but lays structs/unions out with natural alignment anyway (`struct {
+  char c; int i; }` reported as size 8 with `i` at 4, where C says size 5 and `i`
+  at 1). The field allocator now removes inter-member padding and lowers the
+  aggregate alignment to 1 for packed types, composing with `aligned(N)`. See
+  `fieldAllocator.packed` / `packedAlign` in `check.go` and `Attributes.IsPacked`
+  in `type.go`. (Packed *bitfield* allocation is still not modeled.)
+- **The leading-attribute spelling is preserved.** `struct __attribute__((packed))
+  S { ... }` had its attribute dropped: `structOrUnionSpecifier` in `parser.go`
+  overwrote the leading attribute list with the (empty) post-`}` one. It now stores
+  the trailing attributes in the second list, as the anonymous-struct case already
+  did, so both spellings reach the type checker.
+
+Beyond that, the sources are upstream's. Any further cg12-specific behavior changes
+should be called out in commit messages so the delta from v4.29.1 stays legible.
