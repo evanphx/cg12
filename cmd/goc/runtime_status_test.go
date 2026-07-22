@@ -47,6 +47,9 @@ func TestARM64RuntimeCapabilityStatus(t *testing.T) {
 	if *runtimeCoverageProfile == "" && *runtimeCoverageRuns != 1 {
 		t.Fatalf("-runtime-coverruns requires -runtime-coverprofile")
 	}
+	if *runtimeProcs < 1 {
+		t.Fatalf("-runtime-procs must be at least 1")
+	}
 
 	directory := t.TempDir()
 	compiler := buildGOCForRuntimeCapabilityStatus(t, directory)
@@ -2092,6 +2095,6 @@ func runtimeCapabilityExecutionEnv() []string {
 		filtered = append(filtered, entry)
 	}
 
-	filtered = append(filtered, "GOMAXPROCS=1")
+	filtered = append(filtered, fmt.Sprintf("GOMAXPROCS=%d", *runtimeProcs))
 	return filtered
 }

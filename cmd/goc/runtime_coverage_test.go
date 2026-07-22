@@ -37,6 +37,12 @@ var runtimeOptimize = flag.Bool(
 	"compile runtime capability programs with goc optimization enabled",
 )
 
+var runtimeProcs = flag.Int(
+	"runtime-procs",
+	1,
+	"set GOMAXPROCS for each runtime capability program",
+)
+
 var runtimeCoverageCollector = newRuntimeCorpusCoverage()
 
 type runtimeCapabilityCoverageResult struct {

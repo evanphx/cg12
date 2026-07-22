@@ -199,8 +199,8 @@ Current checkpoint:
 - [x] Pass the complete defer/panic batch under optimization (21 of 21
   must-pass cases, plus the deliberate uncaught-panic subprocess).
 - [x] Run all three optimized panic/stack GC cases 100 times with `GOGC=1`.
-- [ ] Run the complete defer/panic batch under the remaining multi-P stress
-  configurations.
+- [x] Pass the complete optimized defer/panic batch with `GOMAXPROCS=1`, `2`,
+  and `4` under the 3 GiB compiler/process limit.
 
 Start with the smallest `no deferreturn` case, then move through nested defers,
 typed values, named results, panic replacement, goroutine recovery, Goexit,

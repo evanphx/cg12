@@ -624,6 +624,7 @@ example:
 go test ./cmd/goc \
   -run '^TestARM64RuntimeCapabilityStatus$/defer-panic' \
   -runtime-opt \
+  -runtime-procs=4 \
   -timeout=15m
 ```
 
