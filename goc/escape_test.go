@@ -104,10 +104,7 @@ func TestUnsafePointerConvertedToUintptrDoesNotEscapeLocalArray(t *testing.T) {
 	module, err := goc.Compile("escape.go", []byte(`
 package main
 
-import (
-	"runtime"
-	"unsafe"
-)
+import "runtime"
 
 func consume(value uintptr) {
 }
@@ -307,6 +304,123 @@ func Test() {
 
 	install := functionWithSuffix(t, module, "install")
 	assert.True(t, callsSymbol(install, "runtime.newobject"), "goroutine closure remained on the caller stack")
+}
+
+func TestSynchronousFunctionLiteralCaptureDoesNotPromoteStackSliceHeader(t *testing.T) {
+	module, err := goc.Compile("sync_closure_slice.go", []byte(`
+package main
+
+import "runtime"
+
+var result int
+
+func consume(values []int) {
+	result += len(values)
+}
+
+func invoke(callback func()) {
+	callback()
+}
+
+func localSliceHeader() {
+	var backing [4]int
+	values := backing[:2:2]
+	invoke(func() {
+		consume(values)
+	})
+}
+
+func Test() {
+	runtime.GC()
+	localSliceHeader()
+}
+`))
+	require.NoError(t, err)
+
+	local := functionWithSuffix(t, module, "localSliceHeader")
+	assert.False(t, callsSymbol(local, "runtime.newobject"), "synchronous closure promoted a stack slice header to the heap")
+}
+
+func TestRuntimeSelectShapedSynchronousCaptureDoesNotPromoteStackSliceHeaders(t *testing.T) {
+	module, err := goc.Compile("select_shaped_closure.go", []byte(`
+package main
+
+import (
+	"runtime"
+	"unsafe"
+)
+
+type scase struct {
+	channel *int
+	elem    *int
+}
+
+func unlock(cases []scase, order []uint16) {
+	var item *scase
+	for _, index := range order {
+		item = &cases[index]
+		if item.channel != nil {
+			item.elem = nil
+		}
+	}
+}
+
+func recv(unlockf func()) {
+	unlockf()
+}
+
+func localSelectShape(cas0 *scase, order0 *uint16, ncases int) {
+	cas1 := (*[1 << 16]scase)(unsafe.Pointer(cas0))
+	order1 := (*[1 << 17]uint16)(unsafe.Pointer(order0))
+	cases := cas1[:ncases:ncases]
+	order := order1[ncases:][:ncases:ncases]
+	order = order[:1]
+	recv(func() {
+		unlock(cases, order)
+	})
+}
+
+func Test() {
+	runtime.GC()
+}
+`))
+	require.NoError(t, err)
+
+	local := functionWithSuffix(t, module, "localSelectShape")
+	assert.False(t, callsSymbol(local, "runtime.newobject"), "select-shaped synchronous closure promoted stack slice headers to the heap")
+}
+
+func TestFunctionAssignedGlobalSliceLiteralUsesEscapingBacking(t *testing.T) {
+	module, err := goc.Compile("global_slice_literal.go", []byte(`
+package main
+
+import "runtime"
+
+type option struct {
+	name    string
+	enabled *bool
+}
+
+var aes bool
+var sha bool
+var options []option
+
+func initializeOptions() {
+	options = []option{
+		{name: "aes", enabled: &aes},
+		{name: "sha", enabled: &sha},
+	}
+}
+
+func Test() {
+	runtime.GC()
+	initializeOptions()
+}
+`))
+	require.NoError(t, err)
+
+	initialize := functionWithSuffix(t, module, "initializeOptions")
+	assert.True(t, callsSymbol(initialize, "runtime.newobject"), "global slice literal backing was not promoted out of the init stack")
 }
 
 func TestZeroCaptureFunctionLiteralUsesStaticDescriptor(t *testing.T) {

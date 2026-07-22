@@ -31,6 +31,12 @@ var runtimeCoverageRuns = flag.Int(
 	"run each successfully compiled coverage program this many times and merge its hits",
 )
 
+var runtimeStatusRuns = flag.Int(
+	"runtime-status-runs",
+	1,
+	"run each successfully compiled runtime capability program this many times",
+)
+
 var runtimeOptimize = flag.Bool(
 	"runtime-opt",
 	false,

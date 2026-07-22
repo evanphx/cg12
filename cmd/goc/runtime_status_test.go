@@ -47,6 +47,9 @@ func TestARM64RuntimeCapabilityStatus(t *testing.T) {
 	if *runtimeCoverageProfile == "" && *runtimeCoverageRuns != 1 {
 		t.Fatalf("-runtime-coverruns requires -runtime-coverprofile")
 	}
+	if *runtimeStatusRuns < 1 {
+		t.Fatalf("-runtime-status-runs must be at least 1")
+	}
 	if *runtimeProcs < 1 {
 		t.Fatalf("-runtime-procs must be at least 1")
 	}
@@ -2001,9 +2004,9 @@ func runRuntimeCapabilityProgram(t *testing.T, compiler string, directory string
 		timeout = 30 * time.Second
 	}
 
-	runCount := 1
+	runCount := *runtimeStatusRuns
 	if metadata != "" {
-		runCount = *runtimeCoverageRuns
+		runCount = max(runCount, *runtimeCoverageRuns)
 	}
 	var output []byte
 	var err error

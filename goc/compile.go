@@ -1330,6 +1330,7 @@ type gen struct {
 	stackAddresses                map[uint32]bool
 	heapCaptures                  map[types.Object]ir.Ref
 	escapingCaptures              map[types.Object]bool
+	objectEscapeChecks            map[types.Object]bool
 	keepAliveObjects              map[types.Object]bool
 	keepAliveValues               map[types.Object]ir.Ref
 	keepAliveSlots                map[types.Object]string
@@ -2079,6 +2080,9 @@ func (g *gen) assignedNodeDoesNotEscapeWithin(
 	if object == nil || object.Pkg() == nil || body == nil {
 		return false
 	}
+	if _, global := g.globals[object]; global {
+		return false
+	}
 	if g.resultObjects[object] {
 		return false
 	}
@@ -2172,6 +2176,15 @@ type parameterKey struct {
 }
 
 func (g *gen) objectDoesNotEscape(object types.Object, info *types.Info, parents map[ast.Node]ast.Node, body *ast.BlockStmt, checking map[parameterKey]bool) bool {
+	if g.objectEscapeChecks == nil {
+		g.objectEscapeChecks = make(map[types.Object]bool)
+	}
+	if g.objectEscapeChecks[object] {
+		return false
+	}
+	g.objectEscapeChecks[object] = true
+	defer delete(g.objectEscapeChecks, object)
+
 	escaped := false
 	ast.Inspect(body, func(node ast.Node) bool {
 		if escaped {
@@ -2272,20 +2285,40 @@ func (g *gen) nonEscapingObjectUse(
 	case *ast.BinaryExpr:
 		return parent.Op == token.EQL || parent.Op == token.NEQ
 	case *ast.AssignStmt:
-		object := info.Uses[identifier]
-		if object == nil {
-			return false
-		}
-		basic, isBasic := object.Type().Underlying().(*types.Basic)
-		if !isBasic || basic.Kind() != types.UnsafePointer {
-			return false
-		}
 		for _, leftHandSide := range parent.Lhs {
 			if leftHandSide == identifier {
 				return true
 			}
 		}
-		return false
+		assignmentIndex := -1
+		for index, rightHandSide := range parent.Rhs {
+			if rightHandSide == identifier {
+				assignmentIndex = index
+				break
+			}
+		}
+		if assignmentIndex < 0 || assignmentIndex >= len(parent.Lhs) {
+			return false
+		}
+		leftIdentifier, ok := parent.Lhs[assignmentIndex].(*ast.Ident)
+		if !ok {
+			return false
+		}
+		leftObject := info.Defs[leftIdentifier]
+		if leftObject == nil {
+			leftObject = info.Uses[leftIdentifier]
+		}
+		rightObject := info.Uses[identifier]
+		if rightObject == nil {
+			rightObject = info.Defs[identifier]
+		}
+		if leftObject == nil || leftObject == rightObject || leftObject.Pkg() == nil || g.resultObjects[leftObject] {
+			return false
+		}
+		if !isPointerLikeObject(rightObject) || !isPointerLikeObject(leftObject) {
+			return false
+		}
+		return g.objectDoesNotEscape(leftObject, info, parents, body, checking)
 	case *ast.CallExpr:
 		if _, asynchronous := parents[parent].(*ast.GoStmt); asynchronous {
 			return false
@@ -2306,7 +2339,7 @@ func (g *gen) nonEscapingObjectUse(
 		if calledIdentifier, ok := parent.Fun.(*ast.Ident); ok {
 			if builtin, ok := info.Uses[calledIdentifier].(*types.Builtin); ok {
 				switch builtin.Name() {
-				case "len", "cap", "copy":
+				case "len", "cap", "copy", "print", "println":
 					return true
 				}
 			}
@@ -2324,6 +2357,18 @@ func (g *gen) nonEscapingObjectUse(
 	default:
 		return false
 	}
+}
+
+func isPointerLikeObject(object types.Object) bool {
+	if object == nil {
+		return false
+	}
+	switch object.Type().Underlying().(type) {
+	case *types.Pointer, *types.Chan, *types.Map, *types.Signature:
+		return true
+	}
+	basic, ok := object.Type().Underlying().(*types.Basic)
+	return ok && basic.Kind() == types.UnsafePointer
 }
 
 func calledFunction(expression ast.Expr, info *types.Info) *types.Func {

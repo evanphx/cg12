@@ -232,8 +232,12 @@ Current status: the full `stdlib-signals` status category has passed once with
 notification context, repeated stop/reset, delivery during GC, delivery during
 netpoll, and concurrent atomic contention. An earlier run still saw
 `runtime.ensureSigM` crash in its two-channel blocking `selectgo` path while
-locking channel wait queues, so keep stressing the general `selectgo`
-stack/root/state preservation case under repeated runs and higher `GOMAXPROCS`.
+locking channel wait queues. Escape analysis now keeps the temporary slice
+headers captured by `runtime.selectgo`'s synchronous unlock closure on the
+stack, while still promoting slice backing storage assigned to globals. The
+locked-global-select case and the full signal category pass ten executions per
+program with optimization and `GOMAXPROCS=4`; repeat the same bounded batch at
+the remaining P counts before closing this item.
 
 Exit criterion: signal tests pass under `GOMAXPROCS=1`, `2`, and `4`, including
 race-like stress, without deadlock or runtime lock corruption.

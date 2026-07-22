@@ -425,6 +425,44 @@ func TestCompileExecutableKeepsRuntimePanicRecordOnStack(t *testing.T) {
 	}
 }
 
+func TestCompileExecutableKeepsRuntimeSelectgoStackSliceHeadersOnStack(t *testing.T) {
+	module, err := CompileExecutable("main.go", []byte(`package main
+
+func main() {
+	left := make(chan int)
+	right := make(chan int)
+	select {
+	case left <- 1:
+	case <-right:
+	}
+}
+`))
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	selectgo := findCompiledFunction(t, module, "runtime.selectgo")
+	newObjectCalls := 0
+	for _, block := range selectgo.Blocks {
+		for _, instruction := range block.Instrs {
+			if instruction.Op != ir.OCall || len(instruction.Args) == 0 {
+				continue
+			}
+			calleeReference := instruction.Args[0]
+			if calleeReference.Kind != ir.RefConst {
+				continue
+			}
+			callee := selectgo.Consts[calleeReference.ID]
+			if callee.Kind == ir.ConstSym && callee.Sym == "runtime.newobject" {
+				newObjectCalls++
+			}
+		}
+	}
+	if newObjectCalls != 1 {
+		t.Fatalf("runtime.selectgo runtime.newobject calls = %d, want only the send-on-closed panic allocation", newObjectCalls)
+	}
+}
+
 func TestRuntimeTypeKeyCanonicalizesAliasesInGenericArguments(t *testing.T) {
 	netipPackage := types.NewPackage("net/netip", "netip")
 	addressDetailName := types.NewTypeName(token.NoPos, netipPackage, "addrDetail", nil)
@@ -1927,9 +1965,9 @@ func TestSharedTypeParameterUsesOnePointerWord(t *testing.T) {
 	}
 }
 
-func TestRejectUnsupportedSelect(t *testing.T) {
-	_, err := Compile("bad.go", []byte("package p\nfunc f() { select {} }"))
-	if err == nil || !strings.Contains(err.Error(), "select with no communication cases") {
-		t.Fatalf("error = %v", err)
+func TestCompileEmptySelect(t *testing.T) {
+	_, err := Compile("empty_select.go", []byte("package p\nfunc f() { select {} }"))
+	if err != nil {
+		t.Fatal(err)
 	}
 }
