@@ -187,10 +187,15 @@ Current checkpoint:
 
 - [x] Preserve metadata-entered `runtime.deferreturn` continuations through IR
   lowering, and reject defer registrations without an emitted continuation PC.
+- [x] Model the standard compiler's synthetic edge from each defer registration
+  to the shared recovery exit so recovery-result liveness and register
+  allocation remain valid on metadata-entered paths.
+- [x] Keep the runtime's `_panic` record stack-resident through
+  `unsafe.Pointer` conversions passed to `runtime.noescape`; both panic-time GC
+  cases now pass with `GOGC=1`.
 - [x] Pass the basic, nested, typed, named-result, panic-replacement, goroutine,
-  Goexit, and deep-unwind cases in normal builds (18 of 21 must-pass cases).
-- [ ] Repair the remaining error-interface recovery failure and the two
-  panic-time GC stack-map failures.
+  Goexit, deep-unwind, error-interface, and panic-time GC cases in normal builds
+  (21 of 21 must-pass cases).
 - [ ] Make the defer/panic batch pass under optimization and the required stress
   configurations.
 

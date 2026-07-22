@@ -1294,6 +1294,7 @@ type gen struct {
 	deferFunctions                map[*ast.DeferStmt]ir.Ref
 	deferOrder                    []*ast.DeferStmt
 	deferActions                  []*ast.DeferStmt
+	deferBlocks                   []*ir.Block
 	runningDefers                 bool
 	parents                       map[ast.Node]ast.Node
 	currentBody                   *ast.BlockStmt
@@ -2066,12 +2067,28 @@ func (g *gen) assignedNodeDoesNotEscapeWithin(
 // are ordinary stack temporaries in Go, and allocating one on every range
 // iteration can make runtime code allocate while scanning the stack.
 func (g *gen) valueDoesNotEscape(expression ast.Expr) bool {
+	return g.valueDoesNotEscapeWithin(
+		expression,
+		g.info,
+		g.parents,
+		g.currentBody,
+		make(map[parameterKey]bool),
+	)
+}
+
+func (g *gen) valueDoesNotEscapeWithin(
+	expression ast.Expr,
+	info *types.Info,
+	parents map[ast.Node]ast.Node,
+	body *ast.BlockStmt,
+	checking map[parameterKey]bool,
+) bool {
 	var current ast.Node = expression
 	for {
-		if g.assignedNodeDoesNotEscape(current) {
+		if g.assignedNodeDoesNotEscapeWithin(current, info, parents, body, checking) {
 			return true
 		}
-		parent := g.parents[current]
+		parent := parents[current]
 		switch parent := parent.(type) {
 		case *ast.ParenExpr:
 			current = parent
@@ -2106,19 +2123,19 @@ func (g *gen) valueDoesNotEscape(expression ast.Expr) bool {
 				return false
 			}
 			if calledIdentifier, ok := parent.Fun.(*ast.Ident); ok {
-				if builtin, ok := g.info.Uses[calledIdentifier].(*types.Builtin); ok {
+				if builtin, ok := info.Uses[calledIdentifier].(*types.Builtin); ok {
 					switch builtin.Name() {
 					case "len", "cap", "copy":
 						return true
 					}
 				}
 			}
-			if g.info.Types[parent.Fun].IsType() {
+			if info.Types[parent.Fun].IsType() {
 				current = parent
 				continue
 			}
-			function := calledFunction(parent.Fun, g.info)
-			return function != nil && g.parameterDoesNotEscape(function, argumentIndex, make(map[parameterKey]bool))
+			function := calledFunction(parent.Fun, info)
+			return function != nil && g.parameterDoesNotEscape(function, argumentIndex, checking)
 		default:
 			return false
 		}
@@ -2273,7 +2290,10 @@ func (g *gen) nonEscapingObjectUse(
 		if info.Types[parent.Fun].IsType() {
 			convertedType := info.Types[parent].Type
 			basic, ok := convertedType.Underlying().(*types.Basic)
-			return ok && basic.Kind() == types.Uintptr
+			if ok && basic.Kind() == types.Uintptr {
+				return true
+			}
+			return g.valueDoesNotEscapeWithin(parent, info, parents, body, checking)
 		}
 		function := calledFunction(parent.Fun, info)
 		return function != nil && g.parameterDoesNotEscape(function, argumentIndex, checking)
@@ -6237,6 +6257,7 @@ func (g *gen) funcDecl(fd *ast.FuncDecl) {
 	if g.err == nil && !g.live() && g.runtimeAllocation && len(g.deferActions) != 0 {
 		deferReturn := g.block("deferreturn")
 		deferReturn.SecondaryEntry = true
+		g.addDeferRecoveryEdges(deferReturn)
 		g.cur = deferReturn
 		g.runDefers()
 		if sig.Results().Len() == 0 {
@@ -6987,6 +7008,7 @@ func (g *gen) stmt(s ast.Stmt) {
 				return
 			}
 			g.cur.CallVoid(g.fn.Sym("runtime.deferproc", 0), functionValue)
+			g.deferBlocks = append(g.deferBlocks, g.cur)
 			g.deferActions = append(g.deferActions, n)
 			return
 		}
@@ -7259,6 +7281,21 @@ func (g *gen) runDefers() {
 			g.cur.Goto(done)
 		}
 		g.cur = done
+	}
+}
+
+// addDeferRecoveryEdges mirrors the Go compiler's synthetic edge from every
+// defer registration to the shared recovery exit. The runtime never follows
+// these edges as ordinary branches; they keep named results and other frame
+// state live on the metadata-entered deferreturn path.
+func (g *gen) addDeferRecoveryEdges(recovery *ir.Block) {
+	seen := make(map[*ir.Block]bool)
+	for _, block := range g.deferBlocks {
+		if block == nil || seen[block] {
+			continue
+		}
+		seen[block] = true
+		block.SyntheticSuccs = append(block.SyntheticSuccs, recovery)
 	}
 }
 
@@ -9872,6 +9909,7 @@ func (g *gen) functionLiteral(literal *ast.FuncLit) ir.Ref {
 	if !child.live() && child.runtimeAllocation && len(child.deferActions) != 0 {
 		deferReturn := child.block("deferreturn")
 		deferReturn.SecondaryEntry = true
+		child.addDeferRecoveryEdges(deferReturn)
 		child.cur = deferReturn
 		child.runDefers()
 		if signature.Results().Len() == 0 {

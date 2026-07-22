@@ -290,6 +290,30 @@ func main() {
 	if calls["runtime.deferreturn"] != 1 {
 		t.Fatalf("runtime.deferreturn calls = %d, want 1", calls["runtime.deferreturn"])
 	}
+	recoveryEdges := 0
+	for _, block := range function.Blocks {
+		for _, instruction := range block.Instrs {
+			if instruction.Op != ir.OCall || len(instruction.Args) == 0 {
+				continue
+			}
+			calleeReference := instruction.Args[0]
+			if calleeReference.Kind != ir.RefConst {
+				continue
+			}
+			callee := function.Consts[calleeReference.ID]
+			if callee.Kind != ir.ConstSym || callee.Sym != "runtime.deferproc" {
+				continue
+			}
+			for _, successor := range block.SyntheticSuccs {
+				if successor.SecondaryEntry {
+					recoveryEdges++
+				}
+			}
+		}
+	}
+	if recoveryEdges != 1 {
+		t.Fatalf("synthetic defer recovery edges = %d, want 1", recoveryEdges)
+	}
 
 	for _, compiledFunction := range module.Funcs {
 		deferProcCalls := 0
@@ -318,6 +342,34 @@ func main() {
 		if deferProcCalls != 0 && deferReturnCalls == 0 {
 			t.Errorf("%s registers a defer without a defer-return continuation", compiledFunction.Name)
 		}
+	}
+}
+
+func TestCompileExecutableKeepsRuntimePanicRecordOnStack(t *testing.T) {
+	module, err := CompileExecutable("main.go", []byte("package main\nfunc main() {}\n"))
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	gopanic := findCompiledFunction(t, module, "runtime.gopanic")
+	newObjectCalls := 0
+	for _, block := range gopanic.Blocks {
+		for _, instruction := range block.Instrs {
+			if instruction.Op != ir.OCall || len(instruction.Args) == 0 {
+				continue
+			}
+			calleeReference := instruction.Args[0]
+			if calleeReference.Kind != ir.RefConst {
+				continue
+			}
+			callee := gopanic.Consts[calleeReference.ID]
+			if callee.Kind == ir.ConstSym && callee.Sym == "runtime.newobject" {
+				newObjectCalls++
+			}
+		}
+	}
+	if newObjectCalls != 1 {
+		t.Fatalf("runtime.gopanic runtime.newobject calls = %d, want only the PanicNilError allocation", newObjectCalls)
 	}
 }
 

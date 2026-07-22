@@ -33,7 +33,7 @@ func (c *CFG) Liveness() *Liveness {
 
 			out := NewTempSet(nt)
 			// Successors of a reachable block are reachable, hence in l.In.
-			for _, s := range b.Succs() {
+			for _, s := range c.Succs(b) {
 				out.Union(l.In[s])
 				// Operands of successor phis flow out along this edge.
 				for _, p := range s.Phis {

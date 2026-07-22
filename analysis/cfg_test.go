@@ -70,6 +70,22 @@ func TestUnreachableBlock(t *testing.T) {
 	assert.Len(t, c.RPO, 1)
 }
 
+func TestSyntheticSuccessorParticipatesInControlFlow(t *testing.T) {
+	f := NewModuleFunc()
+	start := f.Entry()
+	recovery := f.NewBlock("recovery")
+	value := start.Alloc(8, 8)
+	start.Hlt()
+	start.SyntheticSuccs = []*ir.Block{recovery}
+	recovery.Store(f.Long(1), value)
+	recovery.RetVoid()
+
+	cfg := BuildCFG(f)
+	assert.True(t, cfg.Reachable(recovery))
+	assert.Equal(t, []*ir.Block{start}, recovery.Preds)
+	assert.True(t, cfg.Liveness().LiveOut(start).Has(int(value.ID)))
+}
+
 func TestRPORebuildsPredsIdempotent(t *testing.T) {
 	f, _ := diamond()
 	BuildCFG(f)

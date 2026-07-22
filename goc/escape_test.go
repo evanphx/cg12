@@ -133,6 +133,42 @@ func Test() {
 	assert.False(t, callsSymbol(local, "runtime.newobject"), "uintptr-only syscall storage escaped to the heap")
 }
 
+func TestPointerConversionPassedToNoEscapeFunctionStaysLocal(t *testing.T) {
+	module, err := goc.Compile("noescape_conversion.go", []byte(`
+package main
+
+import (
+	"runtime"
+	"unsafe"
+)
+
+//go:noescape
+func hide(pointer unsafe.Pointer) unsafe.Pointer
+
+type record struct {
+	value int
+}
+
+func (record *record) touch() {
+	_ = hide(unsafe.Pointer(record))
+}
+
+func localRecord() {
+	var record record
+	record.touch()
+}
+
+func Test() {
+	runtime.GC()
+	localRecord()
+}
+`))
+	require.NoError(t, err)
+
+	local := functionWithSuffix(t, module, "localRecord")
+	assert.False(t, callsSymbol(local, "runtime.newobject"), "noescape pointer conversion moved local storage to the heap")
+}
+
 func TestRuntimeAggregateStorePublishesEveryPointerWord(t *testing.T) {
 	module, err := goc.Compile("aggregate_store.go", []byte(`
 package main

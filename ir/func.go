@@ -92,6 +92,10 @@ type Block struct {
 	// an ordinary CFG edge. Go panic recovery, for example, resumes at a
 	// runtime.deferreturn call recorded in the function metadata.
 	SecondaryEntry bool
+	// SyntheticSuccs are analysis-only control-flow edges. They describe paths
+	// that the machine terminator does not branch along, such as the recovery
+	// edge from a Go defer registration to its shared defer-return sequence.
+	SyntheticSuccs []*Block
 
 	Phis   []*Phi
 	Instrs []Instr

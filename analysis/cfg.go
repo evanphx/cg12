@@ -21,15 +21,27 @@ func BuildCFG(f *ir.Func) *CFG {
 	return c
 }
 
-// fillPreds rebuilds each block's predecessor list from the terminators.
-// A predecessor is listed once even if it targets a block on both edges.
+// Succs returns the executable and synthetic analysis successors of b.
+func (c *CFG) Succs(b *ir.Block) []*ir.Block {
+	successors := make([]*ir.Block, 0, len(b.Succs())+len(b.SyntheticSuccs))
+	successors = append(successors, b.Succs()...)
+	successors = append(successors, b.SyntheticSuccs...)
+	return successors
+}
+
+// fillPreds rebuilds each block's predecessor list from the executable and
+// synthetic control-flow edges. A predecessor is listed once even if several
+// edges target the same block.
 func fillPreds(f *ir.Func) {
 	for _, b := range f.Blocks {
 		b.Preds = b.Preds[:0]
 	}
 	for _, b := range f.Blocks {
 		seen := map[*ir.Block]bool{}
-		for _, s := range b.Succs() {
+		successors := make([]*ir.Block, 0, len(b.Succs())+len(b.SyntheticSuccs))
+		successors = append(successors, b.Succs()...)
+		successors = append(successors, b.SyntheticSuccs...)
+		for _, s := range successors {
 			if s == nil || seen[s] {
 				continue
 			}
@@ -45,7 +57,7 @@ func (c *CFG) computeRPO() {
 	var dfs func(b *ir.Block)
 	dfs = func(b *ir.Block) {
 		visited[b] = true
-		for _, s := range b.Succs() {
+		for _, s := range c.Succs(b) {
 			if s != nil && !visited[s] {
 				dfs(s)
 			}
