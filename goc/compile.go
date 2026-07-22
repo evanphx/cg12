@@ -6235,7 +6235,9 @@ func (g *gen) funcDecl(fd *ast.FuncDecl) {
 	}
 	g.stmts(fd.Body.List)
 	if g.err == nil && !g.live() && g.runtimeAllocation && len(g.deferActions) != 0 {
-		g.cur = g.block("deferreturn")
+		deferReturn := g.block("deferreturn")
+		deferReturn.SecondaryEntry = true
+		g.cur = deferReturn
 		g.runDefers()
 		if sig.Results().Len() == 0 {
 			g.cur.RetVoid()
@@ -9868,7 +9870,9 @@ func (g *gen) functionLiteral(literal *ast.FuncLit) ir.Ref {
 		return ir.R
 	}
 	if !child.live() && child.runtimeAllocation && len(child.deferActions) != 0 {
-		child.cur = child.block("deferreturn")
+		deferReturn := child.block("deferreturn")
+		deferReturn.SecondaryEntry = true
+		child.cur = deferReturn
 		child.runDefers()
 		if signature.Results().Len() == 0 {
 			child.cur.RetVoid()

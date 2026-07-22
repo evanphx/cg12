@@ -6,6 +6,11 @@ import "github.com/evanphx/cg12/ir"
 // elimination, CFG simplification, and dead-code elimination. It mutates f in
 // place and leaves it in valid SSA form for target lowering.
 func Optimize(f *ir.Func) {
+	// The dataflow passes currently model a single CFG entry. A secondary entry
+	// needs a virtual root before those transforms can safely move frame values.
+	if hasSecondaryEntry(f) {
+		return
+	}
 	Mem2Reg(f) // promote memory to SSA once, up front
 	for {
 		folded := Fold(f)
@@ -22,6 +27,15 @@ func Optimize(f *ir.Func) {
 	// fixpoint, then clean up any values it stranded.
 	GCM(f)
 	DCE(f)
+}
+
+func hasSecondaryEntry(function *ir.Func) bool {
+	for _, block := range function.Blocks {
+		if block.SecondaryEntry {
+			return true
+		}
+	}
+	return false
 }
 
 // OptimizeModule runs the default whole-module pipeline: the intraprocedural

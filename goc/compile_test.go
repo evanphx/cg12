@@ -248,6 +248,79 @@ func findCompiledFunction(t *testing.T, module *ir.Module, name string) *ir.Func
 	return nil
 }
 
+func TestCompileExecutablePreservesDeferReturnRecoveryEntry(t *testing.T) {
+	module, err := CompileExecutable("defer_recovery.go", []byte(`package main
+
+func trigger() {
+	defer func() {}()
+	panic("boom")
+}
+
+func main() {
+	func() {
+		defer func() {}()
+		panic("nested boom")
+	}()
+}
+`))
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	function := findCompiledFunction(t, module, "main.trigger")
+	calls := make(map[string]int)
+	for _, block := range function.Blocks {
+		for _, instruction := range block.Instrs {
+			if instruction.Op != ir.OCall || len(instruction.Args) == 0 {
+				continue
+			}
+			calleeReference := instruction.Args[0]
+			if calleeReference.Kind != ir.RefConst {
+				continue
+			}
+			callee := function.Consts[calleeReference.ID]
+			if callee.Kind == ir.ConstSym {
+				calls[callee.Sym]++
+			}
+		}
+	}
+	if calls["runtime.deferproc"] != 1 {
+		t.Fatalf("runtime.deferproc calls = %d, want 1", calls["runtime.deferproc"])
+	}
+	if calls["runtime.deferreturn"] != 1 {
+		t.Fatalf("runtime.deferreturn calls = %d, want 1", calls["runtime.deferreturn"])
+	}
+
+	for _, compiledFunction := range module.Funcs {
+		deferProcCalls := 0
+		deferReturnCalls := 0
+		for _, block := range compiledFunction.Blocks {
+			for _, instruction := range block.Instrs {
+				if instruction.Op != ir.OCall || len(instruction.Args) == 0 {
+					continue
+				}
+				calleeReference := instruction.Args[0]
+				if calleeReference.Kind != ir.RefConst {
+					continue
+				}
+				callee := compiledFunction.Consts[calleeReference.ID]
+				if callee.Kind != ir.ConstSym {
+					continue
+				}
+				switch callee.Sym {
+				case "runtime.deferproc":
+					deferProcCalls++
+				case "runtime.deferreturn":
+					deferReturnCalls++
+				}
+			}
+		}
+		if deferProcCalls != 0 && deferReturnCalls == 0 {
+			t.Errorf("%s registers a defer without a defer-return continuation", compiledFunction.Name)
+		}
+	}
+}
+
 func TestRuntimeTypeKeyCanonicalizesAliasesInGenericArguments(t *testing.T) {
 	netipPackage := types.NewPackage("net/netip", "netip")
 	addressDetailName := types.NewTypeName(token.NoPos, netipPackage, "addrDetail", nil)

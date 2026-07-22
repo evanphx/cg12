@@ -900,3 +900,15 @@ extern int fac(int);
 int main(void){ return (fac(5) == 120 && fac(6) == 720 && fac(1) == 1) ? 0 : 1; }`)
 	assert.Equal(t, 0, code)
 }
+
+func TestUnrollSkipsCallWithMismatchedParameters(t *testing.T) {
+	module := ir.NewModule()
+	function := module.NewFuncVoid("recursive")
+	function.Param("value", ir.ClsW)
+	function.Entry().CallVoid(function.Sym("recursive", 0))
+	function.Entry().RetVoid()
+
+	assert.NotPanics(t, func() {
+		assert.False(t, opt.UnrollRecursion(module))
+	})
+}

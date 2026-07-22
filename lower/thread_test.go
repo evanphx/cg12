@@ -59,3 +59,15 @@ func TestThreadJumpsKeepsAddressTakenBlock(t *testing.T) {
 	}
 	assert.True(t, found, "address-taken block must be kept")
 }
+
+func TestThreadJumpsKeepsSecondaryEntry(t *testing.T) {
+	function := ir.NewModule().NewFuncVoid("f")
+	function.Entry().Hlt()
+	recovery := function.NewBlock("recovery")
+	recovery.SecondaryEntry = true
+	recovery.RetVoid()
+
+	ThreadJumps(function)
+
+	assert.Contains(t, function.Blocks, recovery)
+}

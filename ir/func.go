@@ -88,6 +88,10 @@ type Block struct {
 	fn   *Func
 	Name string
 	ID   int // position in Func.Blocks; becomes the RPO index after ordering
+	// SecondaryEntry keeps a block that is entered through metadata rather than
+	// an ordinary CFG edge. Go panic recovery, for example, resumes at a
+	// runtime.deferreturn call recorded in the function metadata.
+	SecondaryEntry bool
 
 	Phis   []*Phi
 	Instrs []Instr

@@ -44,6 +44,7 @@ func richModule() *Module {
 	sp.Temp(p).Agg = pair
 	e := sp.Entry()
 	ra, rb, end := sp.NewBlock("ra"), sp.NewBlock("rb"), sp.NewBlock("end")
+	ra.SecondaryEntry = true
 	e.At(SrcPos{File: fi, Line: 3, Col: 1})
 	a := e.Load(ClsW, p)
 	b := e.Load(ClsW, e.Add(ClsP, p, sp.ConstInt(ClsP, 4)))
@@ -120,6 +121,7 @@ func TestBinaryRoundTrip(t *testing.T) {
 	assert.Equal(t, m.Files, m2.Files)
 	assert.Equal(t, m.Assembly, m2.Assembly)
 	assert.Equal(t, m.Data[0].PointerWords, m2.Data[0].PointerWords)
+	assert.True(t, m2.Funcs[0].Blocks[1].SecondaryEntry)
 	// The decoded aggregate reference is resolved, not nil.
 	require.NotNil(t, m2.Funcs[0].Params[0].Agg)
 	assert.Equal(t, "pair", m2.Funcs[0].Params[0].Agg.Name)

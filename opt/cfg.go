@@ -111,6 +111,23 @@ func SimplifyCFG(f *ir.Func) bool {
 			}
 		}
 	}
+	for _, entry := range f.Blocks {
+		if !entry.SecondaryEntry || reach[entry] {
+			continue
+		}
+		stack := []*ir.Block{entry}
+		reach[entry] = true
+		for len(stack) > 0 {
+			block := stack[len(stack)-1]
+			stack = stack[:len(stack)-1]
+			for _, successor := range block.Succs() {
+				if successor != nil && !reach[successor] {
+					reach[successor] = true
+					stack = append(stack, successor)
+				}
+			}
+		}
+	}
 
 	// 3. Drop unreachable blocks.
 	if len(reach) != len(f.Blocks) {
@@ -182,7 +199,7 @@ func SimplifyCFG(f *ir.Func) bool {
 				continue
 			}
 			b := a.Jmp.To
-			if b == nil || b == a || len(b.Preds) != 1 || len(b.Phis) != 0 {
+			if b == nil || b == a || b.SecondaryEntry || len(b.Preds) != 1 || len(b.Phis) != 0 {
 				continue
 			}
 			a.Instrs = append(a.Instrs, b.Instrs...)

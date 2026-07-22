@@ -19,7 +19,7 @@ import (
 // references. Value references (ir.Ref) already index Temps/Consts by ID.
 const (
 	binMagic   = "cg12"
-	binVersion = 11
+	binVersion = 12
 )
 
 // MarshalBinary encodes the module to cg12's binary unit format.
@@ -443,6 +443,7 @@ func (e *enc) encBlock(b *Block, blockRef func(*Block)) {
 	e.str(b.Name)
 	e.str(b.Sym)
 	e.iv(int64(b.ID))
+	e.boolean(b.SecondaryEntry)
 	e.srcPos(b.Pos)
 
 	e.uv(uint64(len(b.Phis)))
@@ -850,6 +851,7 @@ func (d *dec) decBlock(b *Block, blockRef func() *Block) {
 	b.Name = d.str()
 	b.Sym = d.str()
 	b.ID = int(d.iv())
+	b.SecondaryEntry = d.boolean()
 	b.Pos = d.srcPos()
 
 	b.Phis = make([]*Phi, int(d.uv()))

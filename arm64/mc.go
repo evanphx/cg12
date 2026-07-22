@@ -185,6 +185,10 @@ func compileToObjectWithBundle(m *ir.Module, opts Options, bundle assemblyBundle
 		if err != nil {
 			return nil, fmt.Errorf("function %s: %w", f.Name, err)
 		}
+		deferReturn, err := mc.m.deferReturnOffset()
+		if err != nil {
+			return nil, fmt.Errorf("function %s: %w", f.Name, err)
+		}
 		argumentFrame := goArgumentFrame{}
 		if f.UsesManagedFrame() {
 			argumentFrame = goArgumentFrameFor(f)
@@ -202,7 +206,7 @@ func compileToObjectWithBundle(m *ir.Module, opts Options, bundle assemblyBundle
 			outgoingSize:         mc.m.outgoing,
 			size:                 uint64(len(mc.code)),
 			funcID:               goRuntimeFunctionID(name),
-			deferReturn:          mc.m.deferReturnOffset(),
+			deferReturn:          deferReturn,
 			localPointerWords:    mc.m.goLocalPointerWords(),
 			stackMapPoints:       mc.m.goStackMapPoints(),
 			argumentSize:         argumentFrame.size,
@@ -1579,25 +1583,52 @@ func (m *mc) goStackMapPoints() []goStackMapPoint {
 	return points
 }
 
-func (m *mc) deferReturnOffset() uint32 {
+func (m *mc) deferReturnOffset() (uint32, error) {
+	registersDefer := false
+	var deferReturn *ir.Instr
 	for _, block := range m.f.Blocks {
 		for index := range block.Instrs {
 			instruction := &block.Instrs[index]
-			if instruction.Op != ir.OCall || len(instruction.Args) == 0 {
+			symbol, ok := directCallSymbol(m.f, instruction)
+			if !ok {
 				continue
 			}
-			callee := instruction.Args[0]
-			if callee.Kind != ir.RefConst {
-				continue
+			switch symbol {
+			case "runtime_deferproc", "runtime_deferprocStack", "runtime_deferprocat":
+				registersDefer = true
+			case "runtime_deferreturn":
+				if deferReturn == nil {
+					deferReturn = instruction
+				}
 			}
-			constant := m.f.Consts[callee.ID]
-			if constant.Kind != ir.ConstSym || sanitize(constant.Sym) != "runtime_deferreturn" {
-				continue
-			}
-			return uint32(m.instrPC[instruction])
 		}
 	}
-	return 0
+	if deferReturn != nil {
+		offset, emitted := m.instrPC[deferReturn]
+		if !emitted || offset == 0 {
+			return 0, fmt.Errorf("runtime.deferreturn has no valid emitted call-site PC")
+		}
+		return uint32(offset), nil
+	}
+	if registersDefer {
+		return 0, fmt.Errorf("runtime defer registration has no defer-return continuation")
+	}
+	return 0, nil
+}
+
+func directCallSymbol(function *ir.Func, instruction *ir.Instr) (string, bool) {
+	if instruction.Op != ir.OCall || len(instruction.Args) == 0 {
+		return "", false
+	}
+	callee := instruction.Args[0]
+	if callee.Kind != ir.RefConst {
+		return "", false
+	}
+	constant := function.Consts[callee.ID]
+	if constant.Kind != ir.ConstSym {
+		return "", false
+	}
+	return sanitize(constant.Sym), true
 }
 
 func goPointerWordIndexes(function *ir.Func, allocations map[*ir.Instr]int, spillBase int) []int {

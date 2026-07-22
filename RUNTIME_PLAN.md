@@ -183,6 +183,17 @@ This phase has priority over increasing coverage.
 
 ### 5.1 Defer, panic, recover, and stack unwinding
 
+Current checkpoint:
+
+- [x] Preserve metadata-entered `runtime.deferreturn` continuations through IR
+  lowering, and reject defer registrations without an emitted continuation PC.
+- [x] Pass the basic, nested, typed, named-result, panic-replacement, goroutine,
+  Goexit, and deep-unwind cases in normal builds (18 of 21 must-pass cases).
+- [ ] Repair the remaining error-interface recovery failure and the two
+  panic-time GC stack-map failures.
+- [ ] Make the defer/panic batch pass under optimization and the required stress
+  configurations.
+
 Start with the smallest `no deferreturn` case, then move through nested defers,
 typed values, named results, panic replacement, goroutine recovery, Goexit,
 stack growth, and panic-time GC.

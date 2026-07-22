@@ -204,7 +204,7 @@ func inlineModule(m *ir.Module, base map[*ir.Func]int, costDone *bool) bool {
 	sites := callSiteCounts(m, cg.byName)
 	changed := false
 	for _, f := range scc.order {
-		if f.Start == nil {
+		if f.Start == nil || hasSecondaryEntry(f) {
 			continue
 		}
 		if _, ok := base[f]; !ok {
@@ -255,7 +255,7 @@ func InlineNoSplitCalls(m *ir.Module) bool {
 	scc := computeSCC(cg)
 	changed := false
 	for _, caller := range scc.order {
-		if caller.Start == nil || !caller.NoSplit {
+		if caller.Start == nil || !caller.NoSplit || hasSecondaryEntry(caller) {
 			continue
 		}
 		for count := 0; count < inlineFuncBudget; count++ {
@@ -280,7 +280,7 @@ func InlineHeapAllocations(module *ir.Module) bool {
 	components := computeSCC(graph)
 	changed := false
 	for _, caller := range components.order {
-		if caller.Start == nil {
+		if caller.Start == nil || hasSecondaryEntry(caller) {
 			continue
 		}
 		for count := 0; count < inlineFuncBudget; count++ {
@@ -296,7 +296,7 @@ func InlineHeapAllocations(module *ir.Module) bool {
 	graph = buildCallGraph(module)
 	components = computeSCC(graph)
 	for _, caller := range components.order {
-		if caller.Start == nil {
+		if caller.Start == nil || hasSecondaryEntry(caller) {
 			continue
 		}
 		for count := 0; count < inlineFuncBudget; count++ {
@@ -571,7 +571,7 @@ func directCallee(caller *ir.Func, call *ir.Instr, byName map[string]*ir.Func) *
 // findInlinable. Whether an inlinable callee is worth inlining is a separate cost
 // decision (worthInlining).
 func inlinableStructure(callee *ir.Func) bool {
-	if callee.Start == nil || callee.Variadic {
+	if callee.Start == nil || hasSecondaryEntry(callee) || callee.Variadic {
 		return false
 	}
 	// An aggregate-returning callee is inlinable: spliceCall materializes the

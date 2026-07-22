@@ -11,14 +11,18 @@ import "github.com/evanphx/cg12/ir"
 //
 // It runs after SSA destruction, so a forwarded-through block holds no phi (there
 // is no per-predecessor value that block was needed to carry). A block whose
-// address is taken (a computed-goto landing pad, via OBlockAddr) is never bypassed
-// or removed: an indirect branch can reach it without any explicit edge.
+// address is taken (a computed-goto landing pad, via OBlockAddr), or which is a
+// secondary function entry, is never bypassed or removed: both can be reached
+// without any explicit CFG edge.
 func ThreadJumps(f *ir.Func) {
-	addrTaken := map[*ir.Block]bool{}
+	externalEntry := map[*ir.Block]bool{}
 	for _, b := range f.Blocks {
+		if b.SecondaryEntry {
+			externalEntry[b] = true
+		}
 		for k := range b.Instrs {
 			if in := &b.Instrs[k]; in.Op == ir.OBlockAddr && in.Blk != nil {
-				addrTaken[in.Blk] = true
+				externalEntry[in.Blk] = true
 			}
 		}
 	}
@@ -28,7 +32,7 @@ func ThreadJumps(f *ir.Func) {
 	// blocks such as `for(;;);`.
 	forward := func(t *ir.Block) *ir.Block {
 		seen := map[*ir.Block]bool{}
-		for t != nil && !addrTaken[t] && len(t.Instrs) == 0 &&
+		for t != nil && !externalEntry[t] && len(t.Instrs) == 0 &&
 			len(t.Phis) == 0 && t.Jmp.Kind == ir.JmpJmp {
 			if seen[t] {
 				break
@@ -73,7 +77,7 @@ func ThreadJumps(f *ir.Func) {
 	}
 	walk(f.Start)
 	for _, b := range f.Blocks {
-		if addrTaken[b] {
+		if externalEntry[b] {
 			walk(b)
 		}
 	}

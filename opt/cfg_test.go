@@ -167,3 +167,30 @@ func TestSimplifyNoChange(t *testing.T) {
 	b.Ret(f.Word(2))
 	assert.False(t, SimplifyCFG(f))
 }
+
+func TestSimplifyCFGKeepsSecondaryEntry(t *testing.T) {
+	function := ir.NewModule().NewFuncVoid("f")
+	function.Entry().Hlt()
+	recovery := function.NewBlock("recovery")
+	recovery.SecondaryEntry = true
+	recovery.RetVoid()
+
+	SimplifyCFG(function)
+
+	assert.Contains(t, function.Blocks, recovery)
+}
+
+func TestOptimizeLeavesMultiEntryFunctionAlone(t *testing.T) {
+	function := ir.NewModule().NewFuncVoid("f")
+	function.Entry().Hlt()
+	recovery := function.NewBlock("recovery")
+	recovery.SecondaryEntry = true
+	recovery.CallVoid(function.Sym("runtime.deferreturn", 0))
+	recovery.RetVoid()
+
+	Optimize(function)
+
+	assert.Contains(t, function.Blocks, recovery)
+	require.Len(t, recovery.Instrs, 1)
+	assert.Equal(t, ir.OCall, recovery.Instrs[0].Op)
+}

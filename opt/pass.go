@@ -31,6 +31,11 @@ func (p funcPass) Run(m *ir.Module) bool {
 		if f.Start == nil {
 			continue // a declaration with no body
 		}
+		// CFG analyses currently model a single entry. Leave metadata-entered
+		// functions intact until those analyses grow an explicit virtual root.
+		if hasSecondaryEntry(f) {
+			continue
+		}
 		if p.run(f) {
 			changed = true
 		}
