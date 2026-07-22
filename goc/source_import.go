@@ -22,6 +22,7 @@ import (
 // any explicit standard-library overlay files and their provenance.
 type sourceUnit struct {
 	path     string
+	fset     *token.FileSet
 	files    []*ast.File
 	assembly []sourceAssemblyFile
 	native   []sourceNativeFile
@@ -367,6 +368,7 @@ func (l *sourceLoader) Import(path string) (*types.Package, error) {
 	}
 	u := &sourceUnit{
 		path: path,
+		fset: l.fset,
 		info: &types.Info{
 			Types:      make(map[ast.Expr]types.TypeAndValue),
 			Defs:       make(map[*ast.Ident]types.Object),

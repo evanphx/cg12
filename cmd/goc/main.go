@@ -2,6 +2,7 @@
 package main
 
 import (
+	"encoding/json"
 	"flag"
 	"fmt"
 	"os"
@@ -21,6 +22,9 @@ func main() {
 	if len(os.Args) > 1 && os.Args[1] == "test" {
 		os.Exit(testCommand(os.Args[2:]))
 	}
+	if len(os.Args) > 1 && os.Args[1] == "runtime-cover-diff" {
+		os.Exit(runtimeCoverageDiffCommand(os.Args[2:], os.Stdout, os.Stderr))
+	}
 
 	out := flag.String("o", "", "output file")
 	obj := flag.Bool("c", false, "emit a relocatable object")
@@ -28,6 +32,7 @@ func main() {
 	emitIR := flag.Bool("emit-ir", false, "print cg12 IR")
 	optimize := flag.Bool("O", false, "optimize cg12 IR")
 	run := flag.Bool("run", false, "link and run the program")
+	runtimeCoverMeta := flag.String("runtime-covermeta", "", "instrument runtime and write coverage metadata")
 	flag.Parse()
 	if flag.NArg() != 1 {
 		fmt.Fprintln(os.Stderr, "usage: goc [-O] [-o out] [-c|-S|-emit-ir|-run] file.go")
@@ -38,7 +43,13 @@ func main() {
 	check(err)
 	buildExecutable := !*obj && !*asm && !*emitIR
 	var m *ir.Module
-	if buildExecutable && runtime.GOARCH == "arm64" {
+	var runtimeCoverage *goc.RuntimeCoverage
+	if *runtimeCoverMeta != "" {
+		if !buildExecutable {
+			check(fmt.Errorf("-runtime-covermeta requires an executable build"))
+		}
+		m, runtimeCoverage, err = goc.CompileExecutableWithRuntimeCoverage(filepath.Base(input), src)
+	} else if buildExecutable && runtime.GOARCH == "arm64" {
 		m, err = goc.CompileExecutable(filepath.Base(input), src)
 	} else {
 		m, err = goc.Compile(filepath.Base(input), src)
@@ -64,6 +75,12 @@ func main() {
 			exe = goc.OutputName(input)
 		}
 		link(m, exe)
+		if runtimeCoverage != nil {
+			metadata, marshalErr := json.MarshalIndent(runtimeCoverage, "", "  ")
+			check(marshalErr)
+			metadata = append(metadata, '\n')
+			check(os.WriteFile(*runtimeCoverMeta, metadata, 0o644))
+		}
 		if *run {
 			os.Exit(runProgram(exe))
 		}

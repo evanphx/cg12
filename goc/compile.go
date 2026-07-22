@@ -33,10 +33,26 @@ func CompileExecutable(name string, src []byte) (*ir.Module, error) {
 	return compile(name, src, compileOptions{executable: true})
 }
 
+// CompileExecutableWithRuntimeCoverage lowers an executable and instruments
+// the build-selected runtime package. The returned metadata maps the binary
+// coverage bitmap back to runtime source files and basic blocks.
+func CompileExecutableWithRuntimeCoverage(name string, src []byte) (*ir.Module, *RuntimeCoverage, error) {
+	coverage := &RuntimeCoverage{}
+	module, err := compile(name, src, compileOptions{
+		executable:      true,
+		runtimeCoverage: coverage,
+	})
+	if err != nil {
+		return nil, nil, err
+	}
+	return module, coverage, nil
+}
+
 type compileOptions struct {
 	executable           bool
 	testPackages         map[string]bool
 	externalTestPackages map[string]string
+	runtimeCoverage      *RuntimeCoverage
 }
 
 func compile(name string, src []byte, options compileOptions) (*ir.Module, error) {
@@ -359,6 +375,11 @@ func compile(name string, src []byte, options compileOptions) (*ir.Module, error
 	}
 	if err := applyNativeStdlibOverlays(mod, loader.units); err != nil {
 		return nil, err
+	}
+	if options.runtimeCoverage != nil {
+		if err := instrumentRuntimeCoverage(mod, loader.units["runtime"], options.runtimeCoverage, linkNames, initSymbols); err != nil {
+			return nil, err
+		}
 	}
 	return g.mod, nil
 }
@@ -3535,7 +3556,8 @@ func (g *gen) at(n ast.Node) {
 		return
 	}
 	p := g.fset.Position(n.Pos())
-	g.cur.At(ir.SrcPos{File: 1, Line: uint32(p.Line), Col: uint32(p.Column)})
+	file := g.mod.File(p.Filename)
+	g.cur.At(ir.SrcPos{File: file, Line: uint32(p.Line), Col: uint32(p.Column)})
 }
 
 func scalar(t types.Type) (ir.Cls, bool) {

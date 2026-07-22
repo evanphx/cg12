@@ -1834,6 +1834,7 @@ func TestARM64RuntimeCapabilityStatus(t *testing.T) {
 				t.Skipf("AF_INET sockets unavailable in this execution environment: %v", afinetSocketErr)
 			}
 			result := runRuntimeCapabilityProgram(t, compiler, directory, capability)
+			runtimeCoverageCollector.add(capability, result)
 			if capability.expectation == runtimeCapabilityMustPass && result.err != nil {
 				t.Fatalf("%s should pass: %v\n%s", capability.source, result.err, result.output)
 			}
@@ -1864,6 +1865,7 @@ func TestARM64RuntimeCapabilityStatus(t *testing.T) {
 			t.Logf("PASS %s", capability.source)
 		})
 	}
+	runtimeCoverageCollector.write(t)
 }
 
 func truncateRuntimeCapabilityOutput(output string) string {
@@ -1886,8 +1888,13 @@ func runtimeCapabilityAFINETSocketAvailable() (bool, error) {
 }
 
 type runtimeCapabilityResult struct {
-	output string
-	err    error
+	output          string
+	err             error
+	coverage        *runtimeCapabilityCoverageResult
+	compileOutcome  string
+	runOutcome      string
+	coverageOutcome string
+	coverageErr     error
 }
 
 func buildGOCForRuntimeCapabilityStatus(t *testing.T, directory string) string {
@@ -1915,11 +1922,22 @@ func runRuntimeCapabilityProgram(t *testing.T, compiler string, directory string
 		}
 	}()
 
-	compile := exec.Command(compiler, "-o", executable, source)
+	compileArguments := []string{"-o", executable}
+	metadata := ""
+	if *runtimeCoverageProfile != "" {
+		metadata = executable + ".runtime-cover.json"
+		defer os.Remove(metadata)
+		compileArguments = append(compileArguments, "-runtime-covermeta", metadata)
+	}
+	compileArguments = append(compileArguments, source)
+	compile := exec.Command(compiler, compileArguments...)
 	if output, err := compile.CombinedOutput(); err != nil {
 		return runtimeCapabilityResult{
-			output: string(output),
-			err:    errors.New("compile failed: " + err.Error()),
+			output:          string(output),
+			err:             errors.New("compile failed: " + err.Error()),
+			compileOutcome:  "failed",
+			runOutcome:      "not-run",
+			coverageOutcome: "not-run",
 		}
 	}
 
@@ -1934,13 +1952,37 @@ func runRuntimeCapabilityProgram(t *testing.T, compiler string, directory string
 	run := exec.CommandContext(ctx, executable)
 	run.Env = runtimeCapabilityExecutionEnv()
 	output, err := run.CombinedOutput()
+	runOutcome := "passed"
 	if ctx.Err() != nil {
 		err = ctx.Err()
+		runOutcome = "timeout"
+	} else if err != nil {
+		runOutcome = "failed"
+	}
+
+	var coverageResult *runtimeCapabilityCoverageResult
+	coverageOutcome := "not-requested"
+	var coverageErr error
+	if metadata != "" {
+		coverageResult, output, coverageErr = readRuntimeCapabilityCoverage(metadata, output)
+		if coverageErr != nil {
+			coverageOutcome = "missing"
+			if err == nil {
+				err = coverageErr
+			}
+		} else {
+			coverageOutcome = "collected"
+		}
 	}
 
 	return runtimeCapabilityResult{
-		output: string(bytes.TrimSpace(output)),
-		err:    err,
+		output:          string(bytes.TrimSpace(output)),
+		err:             err,
+		coverage:        coverageResult,
+		compileOutcome:  "passed",
+		runOutcome:      runOutcome,
+		coverageOutcome: coverageOutcome,
+		coverageErr:     coverageErr,
 	}
 }
 

@@ -594,6 +594,52 @@ Custom pipelines compose the same building blocks: `opt.Run(m, myPasses)`.
 go test ./...
 ```
 
+### Go runtime coverage
+
+On Linux/ARM64, `goc` can instrument the Go runtime basic blocks in an
+executable and write the counter-to-source mapping beside it:
+
+```
+goc -runtime-covermeta=/tmp/program.runtime-cover.json -o /tmp/program program.go
+/tmp/program >/tmp/program.output 2>&1
+```
+
+The runtime status corpus aggregates those counters directly. The command is
+intentionally given a long outer timeout because it compiles and runs every
+corpus program separately:
+
+```
+go test ./cmd/goc \
+  -run '^TestARM64RuntimeCapabilityStatus$' \
+  -runtime-coverprofile=/tmp/runtime-coverage.json \
+  -timeout=45m
+```
+
+The JSON report distinguishes active functions that cg12 never compiled from
+compiled functions and blocks that never executed. Its denominator comes from
+the runtime files selected by the Go build rules for the host Linux/ARM64
+target, so code for other operating systems and architectures is excluded.
+Selected Plan 9 assembly files are listed in the report but are not currently
+instrumented or counted as uncovered Go code.
+
+Reports contain a fingerprint of the exact build-selected runtime Go sources.
+Compare two version-2 reports with:
+
+```
+goc runtime-cover-diff baseline.json current.json
+goc runtime-cover-diff -fail-on-regression baseline.json current.json
+```
+
+The comparison refuses reports from different targets or runtime source trees.
+Missing functions are classified using
+`cmd/goc/runtime_coverage_classifications.json`; unmatched functions remain
+`unknown` so coverage debt cannot disappear through an implicit exclusion. Use
+`-runtime-coverclassifications` on the `go test` command to select a different
+reviewed classification file.
+
+The ordered repair, stress, and coverage-expansion work is tracked in
+[`RUNTIME_PLAN.md`](RUNTIME_PLAN.md).
+
 The project aims for maximum test coverage; every package ships with thorough
 `testify`-based tests. On a native aarch64 host the backend and end-to-end tests
 assemble their output with `aarch64-linux-gnu-gcc` (or `cc`) and run it.

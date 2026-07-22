@@ -1,0 +1,67 @@
+{
+  "version": 1,
+  "goos": "linux",
+  "goarch": "arm64",
+  "rules": [
+    {
+      "file": "runtime/asan0.go",
+      "classification": "configuration-disabled",
+      "reason": "The ordinary Linux/ARM64 corpus is built without AddressSanitizer instrumentation."
+    },
+    {
+      "file": "runtime/msan0.go",
+      "classification": "configuration-disabled",
+      "reason": "The ordinary Linux/ARM64 corpus is built without MemorySanitizer instrumentation."
+    },
+    {
+      "file": "runtime/race0.go",
+      "classification": "configuration-disabled",
+      "reason": "The ordinary Linux/ARM64 corpus is built without race instrumentation."
+    },
+    {
+      "file": "runtime/valgrind0.go",
+      "classification": "configuration-disabled",
+      "reason": "The ordinary Linux/ARM64 corpus is built without Valgrind integration."
+    },
+    {
+      "file": "runtime/malloc_generated.go",
+      "classification": "required",
+      "reason": "Specialized allocation entry points must be exercised by generated Go allocation shapes."
+    },
+    {
+      "file": "runtime/pinner.go",
+      "classification": "required",
+      "reason": "Runtime pinning backs supported public APIs and needs direct semantic coverage."
+    },
+    {
+      "file": "runtime/debuglog.go",
+      "classification": "rare-required",
+      "reason": "Runtime diagnostic logging is required on unusual failure and debugging paths."
+    },
+    {
+      "file": "runtime/heapdump.go",
+      "classification": "rare-required",
+      "reason": "Heap dump support is an explicit diagnostic path that needs a subprocess test."
+    },
+    {
+      "file": "runtime/profbuf.go",
+      "classification": "rare-required",
+      "reason": "Profiling buffer behavior requires explicit profiling and overflow tests."
+    },
+    {
+      "file": "runtime/trace.go",
+      "classification": "rare-required",
+      "reason": "Runtime tracing requires explicit start, stop, drain, and parseability tests."
+    },
+    {
+      "file": "runtime/tracebuf.go",
+      "classification": "rare-required",
+      "reason": "Runtime trace buffer transitions require explicit tracing stress tests."
+    },
+    {
+      "file": "runtime/traceruntime.go",
+      "classification": "rare-required",
+      "reason": "Runtime-generated trace events require explicit scheduler and GC tracing tests."
+    }
+  ]
+}
