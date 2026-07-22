@@ -1134,6 +1134,33 @@ func TestGoABIStackGrowthPreservesClosureContext(t *testing.T) {
 	assert.True(t, foundClosureSpill, "closure context must survive morestack")
 }
 
+func TestGoABIClosureContextLiveAcrossCallGetsStableSpill(t *testing.T) {
+	module := ir.NewModule()
+	function := module.NewFunc("closure_across_call", ir.ClsL)
+	function.GoABI = true
+	function.HasClosureContext = true
+	context := function.NewTemp("closure", ir.ClsP)
+	contextTemporary := function.Temp(context)
+	contextTemporary.GCRef = true
+	contextTemporary.Fixed = true
+	contextTemporary.Reg = int(X26)
+	entry := function.Entry()
+	entry.CallVoid(function.Sym("observe", 0))
+	entry.Ret(entry.Load(ir.ClsL, context))
+
+	disasmModule(t, module)
+	var saved *ir.Temp
+	for _, temporary := range function.Temps {
+		if temporary.Name == "closure.saved" {
+			saved = temporary
+			break
+		}
+	}
+	require.NotNil(t, saved)
+	assert.Equal(t, ir.NoReg, saved.Reg)
+	assert.GreaterOrEqual(t, saved.Slot, 0)
+}
+
 func TestGoABICallSiteClosureRegisterIsNotAnIncomingContext(t *testing.T) {
 	function := ir.NewModule().NewFunc("call_function_value", ir.ClsL)
 	function.GoABI = true

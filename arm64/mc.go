@@ -3139,6 +3139,10 @@ func (m *mc) rem(in *ir.Instr, div func(w64 bool, rd, rn, rm a64.Reg) uint32) {
 }
 
 func (m *mc) copy(in *ir.Instr) {
+	if len(in.Args) != 1 {
+		m.fail("arm64: %s to %v has %d operands, want 1", in.Op, in.To, len(in.Args))
+		return
+	}
 	sz := in.Cls.Size()
 	// An integer-constant source materializes straight into the destination register.
 	// The general src path would load it into a scratch and then move it (movImm into

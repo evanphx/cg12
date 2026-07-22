@@ -46,10 +46,77 @@ func lower(f *ir.Func, tlsModel TLSModel) error {
 	if err := lowerABI(f); err != nil {
 		return err
 	}
+	stabilizeClosureContext(f)
 	if err := validateComparisonPredicates(f); err != nil {
 		return fmt.Errorf("after ABI lowering: %w", err)
 	}
 	return nil
+}
+
+// stabilizeClosureContext copies an incoming ABIInternal closure environment
+// out of X26 after ABI lowering. X26 is fixed for entry but volatile across
+// calls; the ordinary temporary can therefore be spilled for precise GC when
+// the closure remains live at a safepoint.
+func stabilizeClosureContext(function *ir.Func) {
+	if !function.HasClosureContext {
+		return
+	}
+
+	var incoming ir.Ref
+	for _, temporary := range function.Temps {
+		if temporary != nil && temporary.Name == "closure" && temporary.Fixed && temporary.Reg == int(X26) {
+			incoming = temporary.Ref()
+			break
+		}
+	}
+	if incoming.IsNone() {
+		return
+	}
+
+	incomingTemporary := function.Temp(incoming)
+	saved := function.NewTemp("closure.saved", incomingTemporary.Cls)
+	savedTemporary := function.Temp(saved)
+	savedTemporary.GCRef = incomingTemporary.GCRef
+	savedTemporary.GCType = incomingTemporary.GCType
+
+	for _, block := range function.Blocks {
+		for _, phi := range block.Phis {
+			for index, argument := range phi.Args {
+				if argument == incoming {
+					phi.Args[index] = saved
+				}
+			}
+		}
+		for index := range block.Instrs {
+			for argumentIndex, argument := range block.Instrs[index].Args {
+				if argument == incoming {
+					block.Instrs[index].Args[argumentIndex] = saved
+				}
+			}
+		}
+		if block.Jmp.Arg == incoming {
+			block.Jmp.Arg = saved
+		}
+		for index, argument := range block.Jmp.Args {
+			if argument == incoming {
+				block.Jmp.Args[index] = saved
+			}
+		}
+	}
+
+	copyContext := ir.Instr{
+		Op:   ir.OCopy,
+		Cls:  incomingTemporary.Cls,
+		To:   saved,
+		Args: []ir.Ref{incoming},
+	}
+	insertAt := 0
+	for insertAt < len(function.Start.Instrs) && function.Start.Instrs[insertAt].Op == ir.OPar {
+		insertAt++
+	}
+	function.Start.Instrs = append(function.Start.Instrs, ir.Instr{})
+	copy(function.Start.Instrs[insertAt+1:], function.Start.Instrs[insertAt:])
+	function.Start.Instrs[insertAt] = copyContext
 }
 
 func validateComparisonPredicates(function *ir.Func) error {

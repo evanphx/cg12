@@ -53,8 +53,10 @@ func insertCallerSaves(f *ir.Func, cfg *analysis.CFG, live *analysis.Liveness, a
 					// (gcalloc), so it must never be register-resident here -- a stack map
 					// pointing at a register while the value transits a save slot is a hole.
 					if f.Temps[t].GCRef {
-						return fmt.Errorf("arm64: GC ref %%%s held in caller-saved %s across a call",
-							f.Temps[t].Name, Reg(r).xName())
+						_, rematerialized := alloc.remat[t]
+						return fmt.Errorf("arm64: GC ref %%%s held in caller-saved %s across a call (managed=%v go-internal=%v fixed=%v slot=%d remat=%v)",
+							f.Temps[t].Name, Reg(r).xName(), f.UsesManagedFrame(), f.UsesGoInternalCallConvention(),
+							f.Temps[t].Fixed, f.Temps[t].Slot, rematerialized)
 					}
 					sv = append(sv, t)
 				}
