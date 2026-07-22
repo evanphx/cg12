@@ -191,18 +191,36 @@ func (g *gen) aggParam(name string, agg *ir.AggType) ir.Ref {
 	return r
 }
 
-// checkPackedBitfield refuses access to a packed struct that has a bitfield.
+// checkPackedBitfield refuses the packed-bitfield cases cg12 cannot access safely.
 //
-// Ordinary __attribute__((packed)) layout is handled: the vendored type checker
-// (internal/cc) removes inter-member padding and lowers the alignment, so cg12's
-// member offsets are the packed ones. Packed *bitfield* allocation is a separate,
-// intricate rule that is not modeled yet, so a packed struct that contains a
-// bitfield still reports unpacked bit positions -- refuse rather than read the
-// wrong bits silently. A non-packed bitfield is fine (see bitfield.go).
+// The type checker lays a packed struct's bit fields out as a bit stream and
+// gives each one an access unit (Offset/AccessBytes) that cg12 reads and writes
+// as a whole. A read-modify-write of that unit is only safe if it stays within
+// the struct's own storage, and cg12 loads only 1/2/4/8-byte units. A bit field
+// wide enough to need a unit that overruns the struct is refused rather than read
+// or written out of bounds. Packed unions with bit fields are not modeled at all.
+// A non-packed bitfield, or a packed struct whose bit fields all fit, is fine.
 func (g *gen) checkPackedBitfield(t moderncc.Type) {
 	if !t.Attributes().IsPacked() || !hasBitfield(t) {
 		return
 	}
-	g.fail("cc: %s is __attribute__((packed)) with a bitfield, whose packed bit "+
-		"layout cg12 does not yet model", aggName(t))
+	st, ok := t.(*moderncc.StructType)
+	if !ok {
+		g.fail("cc: %s is a packed union with a bitfield, which cg12 does not model", aggName(t))
+		return
+	}
+	size := st.Size()
+	for i := 0; i < st.NumFields(); i++ {
+		f := st.FieldByIndex(i)
+		if !f.IsBitfield() {
+			continue
+		}
+		ab := f.AccessBytes()
+		if ab != 1 && ab != 2 && ab != 4 && ab != 8 || f.Offset()+ab > size {
+			g.fail("cc: %s has a packed bitfield too wide for cg12 to access "+
+				"within the struct's %d bytes (it would need an out-of-bounds load)",
+				aggName(t), size)
+			return
+		}
+	}
 }

@@ -3,6 +3,7 @@ package cc_test
 import (
 	"testing"
 
+	"github.com/evanphx/cg12/cc"
 	"github.com/stretchr/testify/require"
 )
 
@@ -34,6 +35,46 @@ int main(void){
 			"B 0 2 3 11 15\n"+
 			"D 0 4 8 4\n"+
 			"F 0 4 8 4\n", out)
+}
+
+// Packed bitfields are laid out as a little-endian bit stream. Reading and
+// writing them back through cg12 must agree with GCC (the expected values are
+// GCC's for the same source), and a non-bitfield member interleaved with them
+// lands on the flushed byte boundary.
+func TestPackedBitfieldAccess(t *testing.T) {
+	out, code := compileAndRun(t, `
+#include <stdio.h>
+#include <string.h>
+struct C { char c; unsigned a:5, b:5; int i; } __attribute__((packed));
+struct A { unsigned a:3, b:5; } __attribute__((packed));
+struct E { unsigned a:3; int i; unsigned b:4; } __attribute__((packed));
+int main(void){
+	printf("sizeC=%zu sizeA=%zu sizeE=%zu\n", sizeof(struct C), sizeof(struct A), sizeof(struct E));
+	struct C s; memset(&s,0,sizeof s);
+	s.c=0x7F; s.a=0x15; s.b=0x0A; s.i=0x11223344;
+	printf("C c=%d a=%u b=%u i=%x\n", s.c, s.a, s.b, s.i);
+	struct A t; memset(&t,0,sizeof t); t.a=6; t.b=25;
+	printf("A a=%u b=%u\n", t.a, t.b);
+	struct E e; memset(&e,0,sizeof e); e.a=5; e.i=-7; e.b=9;
+	printf("E a=%u i=%d b=%u\n", e.a, e.i, e.b);
+	return 0;
+}`)
+	require.Equal(t, 0, code)
+	require.Equal(t,
+		"sizeC=7 sizeA=1 sizeE=6\n"+
+			"C c=127 a=21 b=10 i=11223344\n"+
+			"A a=6 b=25\n"+
+			"E a=5 i=-7 b=9\n", out)
+}
+
+// A packed bitfield whose access unit would overrun the struct is refused rather
+// than compiled to an out-of-bounds load: `b:40` needs a 6-byte span, which only
+// an 8-byte unit covers, past the end of a 6-byte struct.
+func TestPackedWideBitfieldRefused(t *testing.T) {
+	_, err := cc.Compile("p.c", `struct W { char c:3; long l:40; } __attribute__((packed));
+	                             long f(struct W *p){ return p->l; }`)
+	require.Error(t, err, "a packed bitfield needing an out-of-bounds unit is refused")
+	require.Contains(t, err.Error(), "packed")
 }
 
 // Beyond offsets: writing a packed struct's members must place the bytes where

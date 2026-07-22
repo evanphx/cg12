@@ -102,16 +102,6 @@ func TestPackedStructByValueRefused(t *testing.T) {
 	require.Contains(t, err.Error(), "packed")
 }
 
-// A packed struct that carries a bitfield is refused: packed bitfield allocation
-// is a distinct rule the layout does not model yet, so its bit positions would be
-// unreliable. A non-packed bitfield is fine (bitfield.go).
-func TestPackedBitfieldRefused(t *testing.T) {
-	_, err := cc.Compile("p.c", `struct P { unsigned a:3, b:5; int i; } __attribute__((packed));
-	                             int f(struct P *p){ return p->a; }`)
-	require.Error(t, err, "a packed bitfield's layout is not modeled")
-	require.Contains(t, err.Error(), "packed")
-}
-
 // The refusal must not catch an ordinary struct: the attribute is the trigger,
 // not the shape. Every C program has structs like this one.
 func TestUnpackedStructStillCompiles(t *testing.T) {

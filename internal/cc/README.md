@@ -27,7 +27,9 @@ Called out here so the delta from upstream stays legible:
   at 1). The field allocator now removes inter-member padding and lowers the
   aggregate alignment to 1 for packed types, composing with `aligned(N)`. See
   `fieldAllocator.packed` / `packedAlign` in `check.go` and `Attributes.IsPacked`
-  in `type.go`. (Packed *bitfield* allocation is still not modeled.)
+  in `type.go`. Packed *bit fields* are laid out too (`fieldAllocator.packedStruct`
+  is a little-endian bit stream); the front end refuses only a field so wide its
+  access unit would fall outside the struct.
 - **The leading-attribute spelling is preserved.** `struct __attribute__((packed))
   S { ... }` had its attribute dropped: `structOrUnionSpecifier` in `parser.go`
   overwrote the leading attribute list with the (empty) post-`}` one. It now stores

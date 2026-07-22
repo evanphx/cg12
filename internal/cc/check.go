@@ -3437,11 +3437,7 @@ func (a *fieldAllocator) field(f *Field) {
 	if f.isFlexibleArrayMember || isEmpty(t) {
 		sz = 0
 	}
-	align := int64(t.Align())
-	if a.packed {
-		align = 1 // packed removes the padding that member alignment would add
-	}
-	a.brkBytes = roundup(a.brkBytes, align)
+	a.brkBytes = roundup(a.brkBytes, int64(t.Align()))
 	f.accessBytes = sz
 	f.groupSize = int(sz)
 	f.offsetBytes = a.brkBytes
@@ -3449,8 +3445,6 @@ func (a *fieldAllocator) field(f *Field) {
 }
 
 func (n *StructDeclarationList) checkStruct(c *ctx, a *fieldAllocator, s []*Field) {
-	defer a.close()
-
 	for i, f := range s {
 		if ft := f.Type(); (ft.IsIncomplete() || ft.Size() == 0) &&
 			ft.Kind() == Array && i == len(s)-1 { // https://en.wikipedia.org/wiki/Flexible_array_member
@@ -3461,13 +3455,86 @@ func (n *StructDeclarationList) checkStruct(c *ctx, a *fieldAllocator, s []*Fiel
 				f.isFlexibleArrayMember = true
 			}
 		}
+	}
 
+	if a.packed {
+		a.packedStruct(s)
+		return
+	}
+
+	defer a.close()
+	for _, f := range s {
 		switch {
 		case f.IsBitfield():
 			a.bitField(f)
 		default:
 			a.field(f)
 		}
+	}
+}
+
+// packedStruct lays out a __attribute__((packed)) struct as a little-endian bit
+// stream: members follow one another with no padding, bit fields packed to the
+// bit. A non-bit-field member and a `:0` bit field flush the cursor to the next
+// byte. It fills each field's Offset/AccessBytes/OffsetBits/Mask directly -- there
+// are no storage-unit groups to form -- and sets a.brkBytes to the byte size.
+//
+// A bit field's access unit is the smallest in-bounds 1/2/4/8-byte load/store
+// that covers its bits. A field wide enough to need a unit that would overrun the
+// struct (e.g. a :40 in a 6-byte struct, where only an 8-byte load reaches it) is
+// given that overrunning unit deliberately, so checkPackedBitfield can see Offset
+// + AccessBytes exceed the size and refuse the struct rather than read or write
+// out of bounds.
+func (a *fieldAllocator) packedStruct(s []*Field) {
+	type pending struct {
+		f            *Field
+		start, width int64
+	}
+	var bit int64 // running bit position from the struct's start
+	var bfs []pending
+	for _, f := range s {
+		switch {
+		case f.IsBitfield():
+			w := f.ValueBits()
+			if w == 0 { // `:0` aligns the stream to the next byte
+				bit = roundup(bit, 8)
+				continue
+			}
+			bfs = append(bfs, pending{f, bit, w})
+			bit += w
+		default:
+			bit = roundup(bit, 8)
+			t := f.Type()
+			sz := t.Size()
+			if f.isFlexibleArrayMember || isEmpty(t) {
+				sz = 0
+			}
+			f.offsetBytes = bit / 8
+			f.accessBytes = sz
+			f.groupSize = int(sz)
+			bit += sz * 8
+		}
+	}
+	a.brkBytes = roundup(bit, 8) / 8
+
+	// With the byte size known, give each bit field an access unit.
+	for _, b := range bfs {
+		firstByte := b.start / 8
+		lastByte := (b.start + b.width - 1) / 8
+		span := lastByte - firstByte + 1
+		ab := int64(1)
+		for ab < span {
+			ab *= 2 // 1, 2, 4, 8 -- the sizes loadUnit/storeUnit handle
+		}
+		off := firstByte
+		if off+ab > a.brkBytes && a.brkBytes-ab >= 0 && a.brkBytes-ab <= firstByte {
+			off = a.brkBytes - ab // pull the unit back so it ends at the struct's edge
+		}
+		b.f.offsetBytes = off
+		b.f.accessBytes = ab
+		b.f.groupSize = int(ab)
+		b.f.offsetBits = int(b.start - off*8)
+		b.f.mask = a.mask(int(b.width)) << b.f.offsetBits
 	}
 }
 
