@@ -2296,6 +2296,28 @@ func (g *gen) parameterDoesNotEscape(function *types.Func, index int, checking m
 	return g.objectDoesNotEscape(signature.Params().At(index), declaration.info, parents, declaration.decl.Body, checking)
 }
 
+func (g *gen) receiverDoesNotEscape(function *types.Func, checking map[parameterKey]bool) bool {
+	declaration, ok := g.functionDecls[function]
+	if !ok {
+		return false
+	}
+	signature := function.Type().(*types.Signature)
+	if signature.Recv() == nil {
+		return true
+	}
+	if declaration.decl.Body == nil {
+		return hasCompilerDirective(declaration.decl, "go:noescape")
+	}
+	key := parameterKey{function: function, index: -1}
+	if checking[key] {
+		return false
+	}
+	checking[key] = true
+	defer delete(checking, key)
+	parents := astParents(declaration.decl.Body)
+	return g.objectDoesNotEscape(signature.Recv(), declaration.info, parents, declaration.decl.Body, checking)
+}
+
 func constInt(v constant.Value) int64 {
 	if v.Kind() == constant.Bool {
 		if constant.BoolVal(v) {
@@ -9101,7 +9123,7 @@ func (g *gen) expr(e ast.Expr) (result ir.Ref) {
 					if methodHasInterfaceReceiver(function) {
 						g.interfaceMethods[function] = true
 					}
-					return g.functionValue(function)
+					return g.methodExpressionValue(function, selection)
 				}
 			}
 			g.fail(n, "unsupported selector %s", n.Sel.Name)
@@ -10057,6 +10079,32 @@ func (g *gen) findEscapingCaptures(body *ast.BlockStmt, predeclared ...types.Obj
 
 	captures := make(map[types.Object]bool)
 	ast.Inspect(body, func(node ast.Node) bool {
+		call, isCall := node.(*ast.CallExpr)
+		if isCall {
+			selector, ok := call.Fun.(*ast.SelectorExpr)
+			if ok {
+				selection := g.info.Selections[selector]
+				method, methodCall := g.info.Uses[selector.Sel].(*types.Func)
+				if selection != nil && selection.Kind() == types.MethodVal && methodCall {
+					signature := method.Type().(*types.Signature)
+					_, wantsPointer := signature.Recv().Type().Underlying().(*types.Pointer)
+					_, hasPointer := g.typeAndValue(selector.X).Type.Underlying().(*types.Pointer)
+					if wantsPointer && !hasPointer && !g.receiverDoesNotEscape(method, make(map[parameterKey]bool)) {
+						identifier, found := addressBaseIdentifier(selector.X)
+						if found {
+							object := g.info.Uses[identifier]
+							if object == nil {
+								object = g.info.Defs[identifier]
+							}
+							if locals[object] {
+								captures[object] = true
+							}
+						}
+					}
+				}
+			}
+		}
+
 		slice, isSlice := node.(*ast.SliceExpr)
 		if isSlice && !g.valueDoesNotEscape(slice) {
 			base := slice.X
@@ -10142,20 +10190,38 @@ func (g *gen) functionValue(function *types.Func) ir.Ref {
 }
 
 func (g *gen) goInternalFunctionAdapter(symbol string, signature *types.Signature) string {
+	return g.goInternalCallAdapter(symbol, signature, signature, nil)
+}
+
+func (g *gen) methodExpressionValue(function *types.Func, selection *types.Selection) ir.Ref {
+	symbol := g.functionSymbol(function)
+	entrySignature := g.concreteType(selection.Type()).(*types.Signature)
+	calleeSignature := g.concreteType(function.Type()).(*types.Signature)
+	receiverType := calleeSignature.Recv().Type()
+	adapter := g.goInternalCallAdapter(symbol, entrySignature, calleeSignature, receiverType)
+	return g.staticFunctionValue(adapter)
+}
+
+func (g *gen) goInternalCallAdapter(
+	symbol string,
+	entrySignature *types.Signature,
+	calleeSignature *types.Signature,
+	receiverType types.Type,
+) string {
 	adapterName := fmt.Sprintf("%s.gointernal.funcvalue.%d", symbol, len(g.mod.Funcs))
 	resultClass := ir.ClsW
-	if signature.Results().Len() > 0 {
-		resultClass, _ = scalar(signature.Results().At(0).Type())
+	if entrySignature.Results().Len() > 0 {
+		resultClass, _ = scalar(entrySignature.Results().At(0).Type())
 	}
 
 	var function *ir.Func
-	if signature.Results().Len() == 0 {
+	if entrySignature.Results().Len() == 0 {
 		function = g.mod.NewFuncVoid(adapterName)
 	} else {
 		function = g.mod.NewFunc(adapterName, resultClass)
 	}
 	function.CallConv = ir.CallConvGoInternal
-	function.ManagedFrame = true
+	function.ManagedFrame = g.runtimeAllocation
 
 	adapter := &gen{
 		fn:                function,
@@ -10168,34 +10234,34 @@ func (g *gen) goInternalFunctionAdapter(symbol string, signature *types.Signatur
 		linkNames:         g.linkNames,
 		initSymbols:       g.initSymbols,
 	}
-	if signature.Results().Len() > 0 {
-		resultType := signature.Results().At(0).Type()
+	if entrySignature.Results().Len() > 0 {
+		resultType := entrySignature.Results().At(0).Type()
 		function.RetAgg = adapter.goABIAggregate(resultType)
 		function.RetValues = adapter.runtimeAllocation && isSliceType(resultType)
 	}
 
-	arguments := make([]ir.Ref, 0, signature.Params().Len()+signature.Results().Len())
-	for index := 0; index < signature.Params().Len(); index++ {
-		parameter := signature.Params().At(index)
+	arguments := make([]ir.Ref, 0, entrySignature.Params().Len()+entrySignature.Results().Len())
+	for index := 0; index < entrySignature.Params().Len(); index++ {
+		parameter := entrySignature.Params().At(index)
 		parameterClass, _ := scalar(parameter.Type())
 		arguments = append(arguments, adapter.functionParameter(parameter.Name(), parameter.Type(), parameterClass))
 	}
-	if signature.Results().Len() > 0 && isInlineAggregate(signature.Results().At(0).Type()) && function.RetAgg == nil {
+	if entrySignature.Results().Len() > 0 && isInlineAggregate(entrySignature.Results().At(0).Type()) && function.RetAgg == nil {
 		arguments = append(arguments, function.ParamRef("result0"))
 	}
-	for index := 1; index < signature.Results().Len(); index++ {
+	for index := 1; index < entrySignature.Results().Len(); index++ {
 		arguments = append(arguments, function.ParamRef(fmt.Sprintf("result%d", index)))
 	}
 
 	callee := function.Sym(symbol, 0)
-	if signature.Results().Len() == 0 {
-		adapter.callVoidWithSignature(callee, arguments, signature, nil)
+	if entrySignature.Results().Len() == 0 {
+		adapter.callVoidWithSignature(callee, arguments, calleeSignature, receiverType)
 		adapter.cur.RetVoid()
 		return adapterName
 	}
 
-	result := adapter.callWithSignature(resultClass, callee, arguments, signature, nil)
-	adapter.returnValue(result, signature.Results().At(0).Type())
+	result := adapter.callWithSignature(resultClass, callee, arguments, calleeSignature, receiverType)
+	adapter.returnValue(result, entrySignature.Results().At(0).Type())
 	return adapterName
 }
 

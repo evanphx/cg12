@@ -7,6 +7,22 @@ import (
 	"io"
 )
 
+type lzwByteWriter struct {
+	destination *bytes.Buffer
+}
+
+func (writer lzwByteWriter) Write(data []byte) (int, error) {
+	return writer.destination.Write(data)
+}
+
+func (writer lzwByteWriter) WriteByte(value byte) error {
+	return writer.destination.WriteByte(value)
+}
+
+func (lzwByteWriter) Flush() error {
+	return nil
+}
+
 func main() {
 	input := []byte("cg12 compression status cg12 compression status")
 
@@ -51,5 +67,27 @@ func main() {
 	}
 	if !bytes.Equal(lzwOutput, input) {
 		panic("lzw roundtrip mismatch")
+	}
+
+	lowWidthInput := []byte{0, 1, 2, 3, 0, 2, 1, 3, 3, 2, 1, 0}
+	var lowWidthBuffer bytes.Buffer
+	lowWidthDestination := lzwByteWriter{destination: &lowWidthBuffer}
+	lowWidthWriter := lzw.NewWriter(lowWidthDestination, lzw.LSB, 2)
+	if _, err := lowWidthWriter.Write(lowWidthInput); err != nil {
+		panic("low-width lzw Write failed")
+	}
+	if err := lowWidthWriter.Close(); err != nil {
+		panic("low-width lzw Close failed")
+	}
+	lowWidthReader := lzw.NewReader(&lowWidthBuffer, lzw.LSB, 2)
+	lowWidthOutput, err := io.ReadAll(lowWidthReader)
+	if err != nil {
+		panic("low-width lzw ReadAll failed")
+	}
+	if err := lowWidthReader.Close(); err != nil {
+		panic("low-width lzw reader Close failed")
+	}
+	if !bytes.Equal(lowWidthOutput, lowWidthInput) {
+		panic("low-width lzw roundtrip mismatch")
 	}
 }

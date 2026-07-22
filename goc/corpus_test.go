@@ -1474,6 +1474,68 @@ func Test() int {
 `, 42)
 }
 
+func TestRuntimeMethodExpressionFunctionValuePreservesReceiver(t *testing.T) {
+	runExecutableCase(t, `package main
+
+type accumulator struct {
+	value uint32
+}
+
+func (target *accumulator) Add(delta uint32) uint32 {
+	target.value += delta
+	return target.value
+}
+
+func Test() int {
+	add := (*accumulator).Add
+	target := &accumulator{value: 17}
+	return int(add(target, 25))
+}
+`, 42)
+}
+
+func TestRuntimePromotesImplicitPointerReceiverWhenReceiverEscapes(t *testing.T) {
+	runExecutableCase(t, `package main
+
+type state struct {
+	value   int
+	padding [64]int
+}
+
+type stateReader interface {
+	ReadState() int
+}
+
+type stateReference struct {
+	target *state
+}
+
+func (reference stateReference) ReadState() int {
+	return reference.target.value
+}
+
+func (value *state) Observe() int {
+	var reader stateReader = stateReference{target: value}
+	growStack(48)
+	return reader.ReadState()
+}
+
+func growStack(depth int) int {
+	var padding [64]int
+	padding[0] = depth
+	if depth == 0 {
+		return padding[0]
+	}
+	return padding[0] + growStack(depth-1)
+}
+
+func Test() int {
+	value := state{value: 42}
+	return value.Observe()
+}
+`, 42)
+}
+
 func TestRuntimeGenericReceiverMethodValueUsesInstantiatedSymbol(t *testing.T) {
 	runExecutableCase(t, `package main
 

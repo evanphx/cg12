@@ -1110,6 +1110,24 @@ func TestARM64RuntimeCapabilityStatus(t *testing.T) {
 			expectation: runtimeCapabilityMustPass,
 		},
 		{
+			category:    "stdlib-image",
+			name:        "png-roundtrip",
+			source:      "stdlib_image_png_roundtrip.go",
+			expectation: runtimeCapabilityMustPass,
+		},
+		{
+			category:    "stdlib-image",
+			name:        "jpeg-roundtrip",
+			source:      "stdlib_image_jpeg_roundtrip.go",
+			expectation: runtimeCapabilityMustPass,
+		},
+		{
+			category:    "stdlib-image",
+			name:        "gif-animation",
+			source:      "stdlib_image_gif_animation.go",
+			expectation: runtimeCapabilityMustPass,
+		},
+		{
 			category:    "stdlib-math",
 			name:        "rand-shuffle-permutation",
 			source:      "stdlib_rand_shuffle_permutation.go",

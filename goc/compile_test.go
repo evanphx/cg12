@@ -1070,6 +1070,40 @@ func main() {
 	}
 }
 
+func TestCompileBareFunctionValueAdapterDoesNotUseManagedFrame(t *testing.T) {
+	module, err := Compile("function_value.go", []byte(`package main
+
+func addTwo(value int) int {
+	return value + 2
+}
+
+func call() int {
+	function := addTwo
+	return function(40)
+}
+`))
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	foundAdapter := false
+	for _, function := range module.Funcs {
+		if !strings.Contains(function.Name, "addTwo") || !strings.Contains(function.Name, ".gointernal.funcvalue.") {
+			continue
+		}
+		foundAdapter = true
+		if function.CallConv != ir.CallConvGoInternal {
+			t.Errorf("bare function-value adapter convention = %v, want GoInternal", function.CallConv)
+		}
+		if function.ManagedFrame {
+			t.Error("bare function-value adapter unexpectedly uses a managed runtime frame")
+		}
+	}
+	if !foundAdapter {
+		t.Error("bare function-value adapter was not generated")
+	}
+}
+
 func TestCompileExecutableUsesAggregateABIForInterfaceMethodWrapperParameters(t *testing.T) {
 	module, err := CompileExecutable("main.go", []byte(`package main
 
