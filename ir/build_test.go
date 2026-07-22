@@ -490,6 +490,20 @@ func TestAggTypeLayout(t *testing.T) {
 	s, a = (&AggType{Align: 16, Fields: []Field{{Sub: SubW}}}).Layout()
 	assert.Equal(t, 16, s)
 	assert.Equal(t, 16, a)
+
+	// packed { b, w }: no padding, align 1 -> b@0, w@1, size 5
+	s, a = (&AggType{Packed: true, Align: 1, Fields: []Field{{Sub: SubB}, {Sub: SubW}}}).Layout()
+	assert.Equal(t, 5, s)
+	assert.Equal(t, 1, a)
+
+	// packed leaves are at the packed offsets, so a member can straddle an eightbyte
+	leaves, _ := (&AggType{Packed: true, Align: 1, Fields: []Field{{Sub: SubB}, {Sub: SubL}}}).Leaves()
+	assert.Equal(t, []Leaf{{Sub: SubB, Off: 0}, {Sub: SubL, Off: 1}}, leaves)
+
+	// packed with an explicit aligned(4) keeps padding out but rounds the size up
+	s, a = (&AggType{Packed: true, Align: 4, Fields: []Field{{Sub: SubW}, {Sub: SubB}}}).Layout()
+	assert.Equal(t, 8, s) // w@0, b@4, raw size 5 rounded up to align 4
+	assert.Equal(t, 4, a)
 }
 
 func TestAggTypeWithNestedAndArray(t *testing.T) {

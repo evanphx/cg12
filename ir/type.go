@@ -174,6 +174,7 @@ type AggType struct {
 	Align  int  // explicit alignment in bytes; 0 means natural
 	Size   int  // total size in bytes (opaque types only)
 	Opaque bool // opaque type: only Size/Align are known
+	Packed bool // __attribute__((packed)): members are placed with no padding
 	Fields []Field
 	Union  bool      // union: Cases overlap (Fields unused)
 	Cases  [][]Field // one field list per union case
@@ -256,7 +257,7 @@ func (t *AggType) walk(base int, emit func(Leaf)) (size, align int, simple bool)
 		simple = false
 		align = 1
 		for _, c := range t.Cases {
-			s, a := walkFields(c, base, emit)
+			s, a := walkFields(c, base, emit, t.Packed)
 			if s > size {
 				size = s
 			}
@@ -265,7 +266,7 @@ func (t *AggType) walk(base int, emit func(Leaf)) (size, align int, simple bool)
 			}
 		}
 	} else {
-		size, align = walkFieldsSimple(t.Fields, base, emit, &simple)
+		size, align = walkFieldsSimple(t.Fields, base, emit, &simple, t.Packed)
 	}
 	if t.Align > align {
 		align = t.Align // explicit alignment raises the minimum
@@ -275,22 +276,26 @@ func (t *AggType) walk(base int, emit func(Leaf)) (size, align int, simple bool)
 
 // walkFields lays out a sequence of struct fields, reporting each leaf at its
 // offset and returning the size (before final rounding) and alignment.
-func walkFields(fields []Field, base int, emit func(Leaf)) (size, align int) {
+func walkFields(fields []Field, base int, emit func(Leaf), packed bool) (size, align int) {
 	simple := true
-	return walkFieldsSimple(fields, base, emit, &simple)
+	return walkFieldsSimple(fields, base, emit, &simple, packed)
 }
 
 // walkFieldsSimple is walkFields, and clears simple when a nested type is one
-// whose leaves cannot be read as a flat sequence.
-func walkFieldsSimple(fields []Field, base int, emit func(Leaf), simple *bool) (size, align int) {
+// whose leaves cannot be read as a flat sequence. When packed, members follow one
+// another with no inter-member padding and no field raises the aggregate's
+// alignment (__attribute__((packed))).
+func walkFieldsSimple(fields []Field, base int, emit func(Leaf), simple *bool, packed bool) (size, align int) {
 	align = 1
 	off := 0
 	for _, f := range fields {
 		fs, fa := f.sizeAlign()
-		if fa > align {
-			align = fa
+		if !packed {
+			if fa > align {
+				align = fa
+			}
+			off = roundUpInt(off, fa)
 		}
-		off = roundUpInt(off, fa)
 		for i := 0; i < f.count(); i++ {
 			if f.Type != nil {
 				if _, _, s := f.Type.walk(base+off, emit); !s {

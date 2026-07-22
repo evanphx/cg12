@@ -54,6 +54,14 @@ func (g *gen) aggOf(t moderncc.Type) *ir.AggType {
 		return a
 	}
 	agg := &ir.AggType{Name: aggName(t)}
+	// A packed aggregate places its members with no padding; the ir type carries a
+	// Packed flag so its Layout and by-value ABI classification see the packed
+	// offsets. The explicit Align keeps a packed struct's alignment (1, or a raised
+	// aligned(N)) even though no member sets it.
+	if t.Attributes().IsPacked() {
+		agg.Packed = true
+		agg.Align = t.Align()
+	}
 	g.aggs[t] = agg // register before recursing so a self-referential pointer resolves
 
 	// A bitfield defeats the field-by-field model: its Type() is the whole storage
@@ -106,27 +114,22 @@ func hasBitfield(t moderncc.Type) bool {
 	return false
 }
 
-// checkAggLayout requires cg12's layout of an aggregate to be the one C gave it.
+// checkAggLayout requires cg12's layout of an aggregate to be the one C gave it,
+// a safety net for the by-value paths that reason from the ir aggregate.
 //
-// A bitfield is the case that breaks it: its Type() is the whole storage type,
-// so `unsigned a:1, b:1` builds two four-byte fields where C packs both into
-// one, and the type comes out five times too big. Same-unit calls still work,
-// because both sides share the same wrong layout -- it only shows when the
-// struct meets code someone else compiled, which no test did.
-//
-// A packed struct is the other case: the type checker lays it out with no
-// padding (size 5, align 1 for `struct { char c; int i; }`), but cg12 builds the
-// aggregate from member types alone and gets the natural layout (size 8, align
-// 4). Member access still works -- it uses the checker's offsets directly -- but
-// passing such a struct by value would misclassify it, so this refuses that too.
+// A bitfield is the case it guards: its Type() is the whole storage type, so
+// `unsigned a:1, b:1` builds two four-byte fields where C packs both into one,
+// and the type comes out too big. (Bitfield aggregates take the opaque path
+// before reaching here; this catches any that slip through.) A packed struct now
+// carries the Packed flag, so its layout matches the checker's and passes.
 func (g *gen) checkAggLayout(t moderncc.Type, agg *ir.AggType) {
 	size, align := agg.Layout()
 	if size == int(t.Size()) && align == t.Align() {
 		return
 	}
 	g.fail("cc: cannot pass %s by value: cg12 lays it out as %d bytes (align %d) "+
-		"but C says %d (align %d) -- a bitfield or __attribute__((packed)) layout, "+
-		"which cg12's aggregate types cannot yet express", aggName(t), size, align, t.Size(), t.Align())
+		"but C says %d (align %d) -- a bitfield, which cg12's aggregate types "+
+		"cannot yet express", aggName(t), size, align, t.Size(), t.Align())
 }
 
 // fieldOf maps one C member type to an aggregate field: a nested aggregate keeps

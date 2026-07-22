@@ -82,24 +82,22 @@ int main(void){
 	require.Equal(t, "42 4\n", out)
 }
 
-// A packed struct is now laid out with the packed offsets (see packed_test.go
-// for the numbers), so access through a pointer or a value compiles. What is
-// still refused is passing one by value across the ABI: cg12's aggregate types
-// carry the natural layout and cannot describe a packed struct to the classifier.
-func TestPackedStructByValueRefused(t *testing.T) {
+// A packed struct compiles for every use: laid out with the packed offsets (see
+// packed_test.go for the numbers and the by-value execution), it is accessed
+// through a pointer or a value, and -- with the ir aggregate carrying its Packed
+// flag -- passed across the ABI by value.
+func TestPackedStructCompiles(t *testing.T) {
 	for _, src := range []string{
 		`struct P { char c; int i; } __attribute__((packed));
 		 int f(struct P *p){ return p->i; }`, // through a pointer
 		`struct P { char c; int i; } __attribute__((packed)) pv;
 		 int f(void){ return pv.i; }`, // through a value
+		`struct P { char c; int i; } __attribute__((packed));
+		 int f(struct P p){ return p.i; }`, // by value across the ABI
 	} {
 		_, err := cc.Compile("p.c", src)
-		require.NoError(t, err, "packed access uses the packed offsets and compiles")
+		require.NoError(t, err, "a packed struct compiles for any use")
 	}
-	_, err := cc.Compile("p.c", `struct P { char c; int i; } __attribute__((packed));
-	                             int f(struct P p){ return p.i; }`)
-	require.Error(t, err, "a packed struct cannot cross the ABI by value")
-	require.Contains(t, err.Error(), "packed")
 }
 
 // The refusal must not catch an ordinary struct: the attribute is the trigger,

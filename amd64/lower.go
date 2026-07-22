@@ -181,10 +181,17 @@ func lowerAggParam(f *ir.Func, p *ir.Temp, a *argAssigner) (pars, recon []ir.Ins
 	slot := f.NewTemp("", ir.ClsL)
 	recon = append(recon, ir.Instr{Op: ir.OAlloc16, Cls: ir.ClsL, To: slot, Args: []ir.Ref{f.Long(int64(len(regs) * 8))}})
 	for i, r := range regs {
-		_, storeOp, elemCls := ebOps(r.float, ebBytes(cls.size, i))
-		pin := newPinned(f, r.reg, elemCls)
 		addr := offsetAddr(f, slot, i*8, &recon)
-		recon = append(recon, ir.Instr{Op: storeOp, Cls: elemCls, Args: []ir.Ref{pin, addr}})
+		if r.float {
+			_, storeOp, elemCls := ebOps(true, ebBytes(cls.size, i))
+			pin := newPinned(f, r.reg, elemCls)
+			recon = append(recon, ir.Instr{Op: storeOp, Cls: elemCls, Args: []ir.Ref{pin, addr}})
+			continue
+		}
+		// The slot is a whole eightbyte, so storing the full register writes every
+		// meaningful byte (its high bytes past an odd size are unused padding).
+		pin := newPinned(f, r.reg, ir.ClsL)
+		recon = append(recon, ir.Instr{Op: ir.OStorel, Cls: ir.ClsL, Args: []ir.Ref{pin, addr}})
 	}
 	recon = append(recon, ir.Instr{Op: ir.OCopy, Cls: ir.ClsL, To: p.Ref(), Args: []ir.Ref{slot}})
 	return nil, recon
@@ -229,16 +236,20 @@ func lowerAggReturn(f *ir.Func, b *ir.Block, retBuf ir.Ref) {
 	var pins []ir.Ref
 	for i, part := range cls.parts {
 		float := part == ebSSE
-		loadOp, _, elemCls := ebOps(float, ebBytes(cls.size, i))
+		addr := offsetAddr(f, ptr, i*8, &b.Instrs)
 		var rr Reg
+		elemCls := ir.ClsL
+		var val ir.Ref
 		if float {
+			var loadOp ir.Op
+			loadOp, _, elemCls = ebOps(true, ebBytes(cls.size, i))
 			rr, ns = retSSERegs[ns], ns+1
+			val = f.NewTemp("", elemCls)
+			b.Instrs = append(b.Instrs, ir.Instr{Op: loadOp, Cls: elemCls, To: val, Args: []ir.Ref{addr}})
 		} else {
 			rr, ni = retIntRegs[ni], ni+1
+			val = loadAggInt(f, addr, ebBytes(cls.size, i), &b.Instrs)
 		}
-		addr := offsetAddr(f, ptr, i*8, &b.Instrs)
-		val := f.NewTemp("", elemCls)
-		b.Instrs = append(b.Instrs, ir.Instr{Op: loadOp, Cls: elemCls, To: val, Args: []ir.Ref{addr}})
 		pin := newPinned(f, rr, elemCls)
 		b.Instrs = append(b.Instrs, ir.Instr{Op: ir.OCopy, Cls: elemCls, To: pin, Args: []ir.Ref{val}})
 		pins = append(pins, pin)
@@ -358,10 +369,17 @@ func lowerAggArg(f *ir.Func, argRef ir.Ref, agg *ir.AggType, a *argAssigner, out
 		return argSetup, pins
 	}
 	for i, r := range regs {
-		loadOp, _, elemCls := ebOps(r.float, ebBytes(cls.size, i))
 		addr := offsetAddr(f, argRef, i*8, out)
-		val := f.NewTemp("", elemCls)
-		*out = append(*out, ir.Instr{Op: loadOp, Cls: elemCls, To: val, Args: []ir.Ref{addr}})
+		elemCls := ir.ClsL
+		var val ir.Ref
+		if r.float {
+			var loadOp ir.Op
+			loadOp, _, elemCls = ebOps(true, ebBytes(cls.size, i))
+			val = f.NewTemp("", elemCls)
+			*out = append(*out, ir.Instr{Op: loadOp, Cls: elemCls, To: val, Args: []ir.Ref{addr}})
+		} else {
+			val = loadAggInt(f, addr, ebBytes(cls.size, i), out)
+		}
 		pin := newPinned(f, r.reg, elemCls)
 		argSetup = append(argSetup, ir.Instr{Op: ir.OArg, Cls: elemCls, To: pin, Args: []ir.Ref{val}})
 		pins = append(pins, pin)
@@ -379,12 +397,14 @@ func lowerAggResultReg(f *ir.Func, dst ir.Ref, agg *ir.AggType, out *[]ir.Instr)
 	ni, ns := 0, 0
 	for i, part := range cls.parts {
 		float := part == ebSSE
-		_, storeOp, elemCls := ebOps(float, ebBytes(cls.size, i))
 		var rr Reg
+		elemCls := ir.ClsL
+		storeOp := ir.OStorel
 		if float {
+			_, storeOp, elemCls = ebOps(true, ebBytes(cls.size, i))
 			rr, ns = retSSERegs[ns], ns+1
 		} else {
-			rr, ni = retIntRegs[ni], ni+1
+			rr, ni = retIntRegs[ni], ni+1 // whole register: full store covers every byte
 		}
 		pin := newPinned(f, rr, elemCls)
 		if i == 0 {

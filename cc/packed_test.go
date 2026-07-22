@@ -67,6 +67,32 @@ int main(void){
 			"E a=5 i=-7 b=9\n", out)
 }
 
+// A packed struct passed and returned by value crosses the ABI with the packed
+// layout: the ir aggregate carries the Packed flag, so the classifier sees the
+// packed offsets (a member that straddles an eightbyte boundary is handled). The
+// expected values are GCC's for the same source.
+func TestPackedStructByValue(t *testing.T) {
+	out, code := compileAndRun(t, `
+#include <stdio.h>
+struct A { char c; int i; } __attribute__((packed));     // 5 bytes, one GP register
+struct B { char c; long l; } __attribute__((packed));    // 9 bytes, two GP registers
+struct M { char c; double d; } __attribute__((packed));  // 9 bytes, mixed int/float eightbytes
+long usea(struct A a){ return a.c + a.i; }
+long useb(struct B b){ return b.c + b.l; }
+double usem(struct M m){ return m.c + m.d; }
+struct A mka(char c, int i){ struct A a = { c, i }; return a; }  // returned by value
+int main(void){
+	struct A a = { 3, 1000 };
+	struct B b = { 7, 1000000000L };
+	struct M m = { 2, 3.5 };
+	struct A r = mka(9, 40);
+	printf("%ld %ld %g %ld\n", usea(a), useb(b), usem(m), r.c + r.i);
+	return 0;
+}`)
+	require.Equal(t, 0, code)
+	require.Equal(t, "1003 1000000007 5.5 49\n", out)
+}
+
 // A packed bitfield whose access unit would overrun the struct is refused rather
 // than compiled to an out-of-bounds load: `b:40` needs a 6-byte span, which only
 // an 8-byte unit covers, past the end of a 6-byte struct.

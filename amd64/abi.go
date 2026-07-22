@@ -190,3 +190,45 @@ func ebBytes(size, i int) int {
 	}
 	return 8
 }
+
+// loadAggInt assembles the low `bytes` (1..8) of an integer eightbyte at addr
+// into a full 64-bit value, loading no more than `bytes` so it never reads past
+// an odd-sized aggregate -- a packed struct, or any struct whose eightbyte has a
+// 3/5/6/7-byte tail. Chunks are zero-extended and OR'd at their byte positions; a
+// whole eightbyte is a single 8-byte load. The value is ClsL because an integer
+// eightbyte travels in a whole general register.
+func loadAggInt(f *ir.Func, addr ir.Ref, bytes int, out *[]ir.Instr) ir.Ref {
+	if bytes >= 8 {
+		v := f.NewTemp("", ir.ClsL)
+		*out = append(*out, ir.Instr{Op: ir.OLoadl, Cls: ir.ClsL, To: v, Args: []ir.Ref{addr}})
+		return v
+	}
+	var acc ir.Ref
+	first := true
+	off, shift := 0, 0
+	for _, ch := range []struct {
+		w  int
+		op ir.Op
+	}{{4, ir.OLoaduw}, {2, ir.OLoaduh}, {1, ir.OLoadub}} {
+		if bytes-off < ch.w {
+			continue
+		}
+		v := f.NewTemp("", ir.ClsL)
+		*out = append(*out, ir.Instr{Op: ch.op, Cls: ir.ClsL, To: v, Args: []ir.Ref{offsetAddr(f, addr, off, out)}})
+		if shift > 0 {
+			s := f.NewTemp("", ir.ClsL)
+			*out = append(*out, ir.Instr{Op: ir.OShl, Cls: ir.ClsL, To: s, Args: []ir.Ref{v, f.Long(int64(shift))}})
+			v = s
+		}
+		if first {
+			acc, first = v, false
+		} else {
+			o := f.NewTemp("", ir.ClsL)
+			*out = append(*out, ir.Instr{Op: ir.OOr, Cls: ir.ClsL, To: o, Args: []ir.Ref{acc, v}})
+			acc = o
+		}
+		off += ch.w
+		shift += ch.w * 8
+	}
+	return acc
+}
