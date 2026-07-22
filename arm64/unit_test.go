@@ -1007,6 +1007,38 @@ func TestSafepointRootsExcludeDeadControlFlowIntervals(t *testing.T) {
 	assert.Empty(t, roots[safepoint])
 }
 
+func TestGoStackMapsDropDeadPointerBearingLocal(t *testing.T) {
+	function := ir.NewModule().NewFuncVoid("dead_pointer_local")
+	function.GoABI = true
+	input := function.ParamRef("input")
+	entry := function.Entry()
+	local := entry.Alloc(8, 8)
+	function.MarkGCRef(local)
+	function.StackPointerWords = map[uint32]map[int]bool{
+		local.ID: map[int]bool{0: true},
+	}
+	entry.Store(input, local)
+	entry.CallVoid(function.Sym("first", 0))
+	entry.Store(function.ConstInt(ir.ClsP, 0), local)
+	entry.CallVoid(function.Sym("second", 0))
+	entry.RetVoid()
+
+	prepareGoABI(function)
+	ir.LowerPointers(function, ptrCls)
+	require.NoError(t, lower(function, TLSLocalExec))
+	allocation, err := regAlloc(function)
+	require.NoError(t, err)
+	machine, err := emitMachine(function, allocation, nil, TLSLocalExec)
+	require.NoError(t, err)
+
+	points := machine.m.goStackMapPoints()
+	require.Len(t, points, 2)
+	localOffset := machine.m.stackAllocTmp[local.ID]
+	localWord := (localOffset - 16) / 8
+	assert.Contains(t, points[0].pointerWords, localWord)
+	assert.NotContains(t, points[1].pointerWords, localWord)
+}
+
 func TestGoABIGroupedSliceValuesUseRegistersOrWholeStack(t *testing.T) {
 	sliceType := &ir.AggType{
 		Name:  "slice",

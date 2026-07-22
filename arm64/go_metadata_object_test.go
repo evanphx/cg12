@@ -240,18 +240,11 @@ func TestGoFunctionStackMapsKeepSafepointRootsPrecise(t *testing.T) {
 		},
 	})
 
-	assert.Equal(t, [][]int{nil, {1}, {1, 4}}, pointerMaps)
+	assert.Equal(t, [][]int{nil, {1}, {4}}, pointerMaps)
 	assert.Equal(t, []goStackMapIndexPoint{
 		{pc: 80, index: 2},
 		{pc: 120, index: 1},
 	}, indexPoints)
-}
-
-func TestMergePointerWordsCombinesSortedSetsWithoutDuplicates(t *testing.T) {
-	assert.Equal(t, []int{1, 2, 4, 7, 9}, mergePointerWords(
-		[]int{1, 4, 7},
-		[]int{2, 4, 9},
-	))
 }
 
 func TestGoStackMapsSeparateEntryAndBodyRoots(t *testing.T) {

@@ -840,6 +840,10 @@ type mc struct {
 	prog     *a64.Program
 	relocs   []obj.Reloc
 	allocTmp map[uint32]int // fixed stack allocation temporary -> frame offset
+	// stackAllocTmp includes pointer-bearing allocas as well as ordinary fixed
+	// allocas. It is used to turn a live alloca address into the pointer words
+	// contained by that alloca at each GC safepoint.
+	stackAllocTmp map[uint32]int
 
 	frameLayout      // where everything lives in the frame
 	frameless   bool // leaf function needing no frame: no prologue/epilogue, ret directly
@@ -1019,13 +1023,19 @@ func newEmitter(f *ir.Func, alloc *allocation, gc GCStrategy, tlsModel TLSModel)
 	m := &mc{
 		f: f, alloc: alloc, gc: gc, tlsModel: tlsModel,
 		prog: a64.NewProgram(), instrPC: map[*ir.Instr]uint64{},
-		frameLayout: frameLayout, allocTmp: make(map[uint32]int),
+		frameLayout:   frameLayout,
+		allocTmp:      make(map[uint32]int),
+		stackAllocTmp: make(map[uint32]int),
 	}
 	m.frameless = framelessEligible(f, m.frameLayout, gc)
 	m.useCount = countTempUses(f)
 	m.preds = blockPreds(f)
 	for instruction, offset := range frameLayout.allocOff {
-		if instruction.To.Kind == ir.RefTemp && !f.Temp(instruction.To).GCRef {
+		if instruction.To.Kind != ir.RefTemp {
+			continue
+		}
+		m.stackAllocTmp[instruction.To.ID] = offset
+		if !f.Temp(instruction.To).GCRef {
 			m.allocTmp[instruction.To.ID] = offset
 		}
 	}
@@ -2863,6 +2873,14 @@ func (m *mc) recordSafepoint(in *ir.Instr) {
 	locs := make([]rootLoc, 0, len(roots))
 	for _, id := range roots {
 		t := m.f.Temps[id]
+		if allocationOffset, ok := m.stackAllocTmp[uint32(id)]; ok {
+			for wordOffset := range m.f.StackPointerWords[uint32(id)] {
+				locs = append(locs, rootLoc{
+					kind: rootFrame,
+					val:  int32(allocationOffset + wordOffset),
+				})
+			}
+		}
 		if t.Reg != ir.NoReg {
 			locs = append(locs, rootLoc{kind: rootReg, val: int32(mreg(Reg(t.Reg))), typ: t.GCType})
 		} else {

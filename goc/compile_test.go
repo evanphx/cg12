@@ -463,6 +463,54 @@ func main() {
 	}
 }
 
+func TestCompileExecutablePromotesFinalizedPointerGraph(t *testing.T) {
+	module, err := CompileExecutable("main.go", []byte(`package main
+
+import "runtime"
+
+type node struct {
+	value int
+	next  *node
+}
+
+var resurrected *node
+
+func main() {
+	object := &node{
+		value: 41,
+		next:  &node{value: 1},
+	}
+	runtime.SetFinalizer(object, func(value *node) {
+		resurrected = value
+	})
+}
+`))
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	mainFunction := findCompiledFunction(t, module, "main.main")
+	newObjectCalls := 0
+	for _, block := range mainFunction.Blocks {
+		for _, instruction := range block.Instrs {
+			if instruction.Op != ir.OCall || len(instruction.Args) == 0 {
+				continue
+			}
+			calleeReference := instruction.Args[0]
+			if calleeReference.Kind != ir.RefConst {
+				continue
+			}
+			callee := mainFunction.Consts[calleeReference.ID]
+			if callee.Kind == ir.ConstSym && callee.Sym == "runtime.newobject" {
+				newObjectCalls++
+			}
+		}
+	}
+	if newObjectCalls != 2 {
+		t.Fatalf("main.main runtime.newobject calls = %d, want the finalized object and its child", newObjectCalls)
+	}
+}
+
 func TestRuntimeTypeKeyCanonicalizesAliasesInGenericArguments(t *testing.T) {
 	netipPackage := types.NewPackage("net/netip", "netip")
 	addressDetailName := types.NewTypeName(token.NoPos, netipPackage, "addrDetail", nil)

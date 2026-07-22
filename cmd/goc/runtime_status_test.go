@@ -325,6 +325,36 @@ func TestARM64RuntimeCapabilityStatus(t *testing.T) {
 		},
 		{
 			category:    "gc",
+			name:        "cleanup-basic",
+			source:      "runtime_cleanup_basic.go",
+			expectation: runtimeCapabilityMustPass,
+		},
+		{
+			category:    "gc",
+			name:        "cleanup-stop",
+			source:      "runtime_cleanup_stop.go",
+			expectation: runtimeCapabilityMustPass,
+		},
+		{
+			category:    "gc",
+			name:        "finalizer-cleanup-order",
+			source:      "runtime_finalizer_cleanup_order.go",
+			expectation: runtimeCapabilityMustPass,
+		},
+		{
+			category:    "gc",
+			name:        "finalizer-dependency-order",
+			source:      "runtime_finalizer_dependency_order.go",
+			expectation: runtimeCapabilityMustPass,
+		},
+		{
+			category:    "gc",
+			name:        "finalizer-tiny",
+			source:      "runtime_finalizer_tiny.go",
+			expectation: runtimeCapabilityMustPass,
+		},
+		{
+			category:    "gc",
 			name:        "map-pointer-values-gc",
 			source:      "runtime_map_pointer_values_gc.go",
 			expectation: runtimeCapabilityMustPass,

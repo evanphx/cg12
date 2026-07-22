@@ -228,16 +228,15 @@ Add tests for notification, stop/reset, repeated delivery, delivery during GC,
 delivery while blocked in netpoll, and concurrent atomic operations. Keep
 unsupported fatal-signal behavior in subprocess tests.
 
-Current status: the full `stdlib-signals` status category has passed once with
-notification context, repeated stop/reset, delivery during GC, delivery during
-netpoll, and concurrent atomic contention. An earlier run still saw
-`runtime.ensureSigM` crash in its two-channel blocking `selectgo` path while
-locking channel wait queues. Escape analysis now keeps the temporary slice
-headers captured by `runtime.selectgo`'s synchronous unlock closure on the
-stack, while still promoting slice backing storage assigned to globals. The
-locked-global-select case and the full signal category pass ten executions per
-program with optimization and `GOMAXPROCS=4`; repeat the same bounded batch at
-the remaining P counts before closing this item.
+Current checkpoint:
+
+- [x] Pass notification context, repeated stop/reset, delivery during GC,
+  delivery during netpoll, and concurrent atomic contention.
+- [x] Keep the temporary slice headers captured by `runtime.selectgo`'s
+  synchronous unlock closure on the stack, while still promoting slice backing
+  storage assigned to globals.
+- [x] Pass the locked-global-select case and the full signal category ten
+  executions per program with optimization and `GOMAXPROCS=1`, `2`, and `4`.
 
 Exit criterion: signal tests pass under `GOMAXPROCS=1`, `2`, and `4`, including
 race-like stress, without deadlock or runtime lock corruption.
@@ -249,6 +248,21 @@ finalizer, tiny objects, pointerful objects, stack growth in a finalizer,
 KeepAlive, cleanup callbacks, and repeated GC cycles. Validate that pointer
 liveness at `runtime.KeepAlive` and finalizer registration sites survives
 optimization.
+
+Current checkpoint:
+
+- [x] Emit safepoint-specific local stack maps instead of conservatively
+  retaining every pointer-bearing local for the entire function. Pointer words
+  contained in a live alloca are now expanded into that safepoint's map.
+- [x] Pass synchronized finalizer resurrection after explicitly clearing the
+  last local pointer in a still-running frame.
+- [x] Pass basic finalization, clearing, KeepAlive, pointerful stack growth,
+  dependency ordering, tiny-object finalization, cleanup callbacks,
+  `Cleanup.Stop`, and finalizer-before-cleanup ordering.
+- [x] Pass the complete ten-program finalizer/cleanup batch ten times per
+  program with optimization and `GOMAXPROCS=4`.
+- [ ] Add multiple-cleanup and `Pinner` lifecycle cases, then repeat the batch
+  at the remaining P counts before closing this item.
 
 Exit criterion: finalizer and cleanup tests pass deterministically using bounded
 GC/yield loops, and pinner/finalizer/cleanup coverage has deliberate tests for
