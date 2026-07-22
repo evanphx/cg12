@@ -612,7 +612,8 @@ corpus program separately:
 go test ./cmd/goc \
   -run '^TestARM64RuntimeCapabilityStatus$' \
   -runtime-coverprofile=/tmp/runtime-coverage.json \
-  -timeout=45m
+  -runtime-coverruns=3 \
+  -timeout=60m
 ```
 
 The JSON report distinguishes active functions that cg12 never compiled from
@@ -630,12 +631,32 @@ goc runtime-cover-diff baseline.json current.json
 goc runtime-cover-diff -fail-on-regression baseline.json current.json
 ```
 
+After reviewing a complete run, write its canonical baseline and compare future
+runs against it:
+
+```
+goc runtime-cover-baseline \
+  /tmp/runtime-coverage.json \
+  cmd/goc/testdata/runtime_coverage_linux_arm64.json
+goc runtime-cover-diff -fail-on-regression \
+  cmd/goc/testdata/runtime_coverage_linux_arm64.json \
+  /tmp/runtime-coverage.json
+```
+
+The canonical baseline retains executed source identities, program outcomes,
+category summaries, and resource measurements while dropping volatile failure
+output and redundant uncovered inventories.
+
 The comparison refuses reports from different targets or runtime source trees.
 Missing functions are classified using
 `cmd/goc/runtime_coverage_classifications.json`; unmatched functions remain
 `unknown` so coverage debt cannot disappear through an implicit exclusion. Use
 `-runtime-coverclassifications` on the `go test` command to select a different
-reviewed classification file.
+reviewed classification file. Reports also break execution coverage down by
+corpus category and record elapsed time and peak resident memory separately for
+the `goc` compiler process and the generated program. Coverage repetitions
+reuse each compiled executable and merge their hit maps; a failing or timed-out
+program stops after its first unsuccessful attempt.
 
 The ordered repair, stress, and coverage-expansion work is tracked in
 [`RUNTIME_PLAN.md`](RUNTIME_PLAN.md).

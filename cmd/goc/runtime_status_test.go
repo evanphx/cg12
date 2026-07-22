@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"errors"
+	"fmt"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -39,6 +40,12 @@ func TestARM64RuntimeCapabilityStatus(t *testing.T) {
 	}
 	if _, err := exec.LookPath("cc"); err != nil {
 		t.Skip("cc unavailable")
+	}
+	if *runtimeCoverageRuns < 1 {
+		t.Fatalf("-runtime-coverruns must be at least 1")
+	}
+	if *runtimeCoverageProfile == "" && *runtimeCoverageRuns != 1 {
+		t.Fatalf("-runtime-coverruns requires -runtime-coverprofile")
 	}
 
 	directory := t.TempDir()
@@ -1895,6 +1902,11 @@ type runtimeCapabilityResult struct {
 	runOutcome      string
 	coverageOutcome string
 	coverageErr     error
+	compileDuration time.Duration
+	compilePeakRSS  uint64
+	runDuration     time.Duration
+	runPeakRSS      uint64
+	runAttempts     int
 }
 
 func buildGOCForRuntimeCapabilityStatus(t *testing.T, directory string) string {
@@ -1931,13 +1943,19 @@ func runRuntimeCapabilityProgram(t *testing.T, compiler string, directory string
 	}
 	compileArguments = append(compileArguments, source)
 	compile := exec.Command(compiler, compileArguments...)
-	if output, err := compile.CombinedOutput(); err != nil {
+	compileStarted := time.Now()
+	compileOutput, compileErr := compile.CombinedOutput()
+	compileDuration := time.Since(compileStarted)
+	compilePeakRSS := runtimeCapabilityPeakRSS(compile)
+	if compileErr != nil {
 		return runtimeCapabilityResult{
-			output:          string(output),
-			err:             errors.New("compile failed: " + err.Error()),
+			output:          string(compileOutput),
+			err:             errors.New("compile failed: " + compileErr.Error()),
 			compileOutcome:  "failed",
 			runOutcome:      "not-run",
 			coverageOutcome: "not-run",
+			compileDuration: compileDuration,
+			compilePeakRSS:  compilePeakRSS,
 		}
 	}
 
@@ -1946,32 +1964,59 @@ func runRuntimeCapabilityProgram(t *testing.T, compiler string, directory string
 		timeout = 30 * time.Second
 	}
 
-	ctx, cancel := context.WithTimeout(context.Background(), timeout)
-	defer cancel()
-
-	run := exec.CommandContext(ctx, executable)
-	run.Env = runtimeCapabilityExecutionEnv()
-	output, err := run.CombinedOutput()
-	runOutcome := "passed"
-	if ctx.Err() != nil {
-		err = ctx.Err()
-		runOutcome = "timeout"
-	} else if err != nil {
-		runOutcome = "failed"
-	}
-
-	var coverageResult *runtimeCapabilityCoverageResult
-	coverageOutcome := "not-requested"
-	var coverageErr error
+	runCount := 1
 	if metadata != "" {
-		coverageResult, output, coverageErr = readRuntimeCapabilityCoverage(metadata, output)
-		if coverageErr != nil {
-			coverageOutcome = "missing"
-			if err == nil {
-				err = coverageErr
+		runCount = *runtimeCoverageRuns
+	}
+	var output []byte
+	var err error
+	var coverageResult *runtimeCapabilityCoverageResult
+	var coverageErr error
+	coverageOutcome := "not-requested"
+	runOutcome := "passed"
+	var runDuration time.Duration
+	var runPeakRSS uint64
+	runAttempts := 0
+	for attempt := 0; attempt < runCount; attempt++ {
+		runAttempts++
+		ctx, cancel := context.WithTimeout(context.Background(), timeout)
+		run := exec.CommandContext(ctx, executable)
+		run.Env = runtimeCapabilityExecutionEnv()
+		runStarted := time.Now()
+		attemptOutput, attemptErr := run.CombinedOutput()
+		runDuration += time.Since(runStarted)
+		runPeakRSS = max(runPeakRSS, runtimeCapabilityPeakRSS(run))
+		if ctx.Err() != nil {
+			attemptErr = ctx.Err()
+			runOutcome = "timeout"
+		} else if attemptErr != nil {
+			runOutcome = "failed"
+		}
+		cancel()
+
+		if metadata != "" {
+			var attemptCoverage *runtimeCapabilityCoverageResult
+			attemptCoverage, attemptOutput, coverageErr = readRuntimeCapabilityCoverage(metadata, attemptOutput)
+			if coverageErr != nil {
+				coverageOutcome = "missing"
+				if attemptErr == nil {
+					attemptErr = coverageErr
+				}
+			} else {
+				coverageOutcome = "collected"
+				coverageErr = mergeRuntimeCapabilityCoverage(&coverageResult, attemptCoverage)
+				if coverageErr != nil {
+					coverageOutcome = "missing"
+					if attemptErr == nil {
+						attemptErr = coverageErr
+					}
+				}
 			}
-		} else {
-			coverageOutcome = "collected"
+		}
+		output = attemptOutput
+		err = attemptErr
+		if err != nil {
+			break
 		}
 	}
 
@@ -1983,7 +2028,47 @@ func runRuntimeCapabilityProgram(t *testing.T, compiler string, directory string
 		runOutcome:      runOutcome,
 		coverageOutcome: coverageOutcome,
 		coverageErr:     coverageErr,
+		compileDuration: compileDuration,
+		compilePeakRSS:  compilePeakRSS,
+		runDuration:     runDuration,
+		runPeakRSS:      runPeakRSS,
+		runAttempts:     runAttempts,
 	}
+}
+
+func mergeRuntimeCapabilityCoverage(
+	merged **runtimeCapabilityCoverageResult,
+	attempt *runtimeCapabilityCoverageResult,
+) error {
+	if *merged == nil {
+		*merged = attempt
+		return nil
+	}
+	if (*merged).metadata.RuntimeSourceID != attempt.metadata.RuntimeSourceID {
+		return fmt.Errorf(
+			"runtime source changed between coverage runs: %s then %s",
+			(*merged).metadata.RuntimeSourceID,
+			attempt.metadata.RuntimeSourceID,
+		)
+	}
+	if len((*merged).hits) != len(attempt.hits) {
+		return fmt.Errorf("runtime coverage bitmap changed size between runs: %d then %d", len((*merged).hits), len(attempt.hits))
+	}
+	for index, hit := range attempt.hits {
+		(*merged).hits[index] = (*merged).hits[index] || hit
+	}
+	return nil
+}
+
+func runtimeCapabilityPeakRSS(command *exec.Cmd) uint64 {
+	if command.ProcessState == nil {
+		return 0
+	}
+	usage, ok := command.ProcessState.SysUsage().(*syscall.Rusage)
+	if !ok || usage.Maxrss <= 0 {
+		return 0
+	}
+	return uint64(usage.Maxrss) * 1024
 }
 
 func runtimeCapabilityExecutionEnv() []string {

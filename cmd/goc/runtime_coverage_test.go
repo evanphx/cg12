@@ -25,6 +25,12 @@ var runtimeCoverageClassifications = flag.String(
 	"classify missing runtime functions using this JSON file",
 )
 
+var runtimeCoverageRuns = flag.Int(
+	"runtime-coverruns",
+	1,
+	"run each successfully compiled coverage program this many times and merge its hits",
+)
+
 var runtimeCoverageCollector = newRuntimeCorpusCoverage()
 
 type runtimeCapabilityCoverageResult struct {
@@ -69,6 +75,7 @@ type runtimeCorpusCoverage struct {
 	coveredPrograms   int
 	runtimeSourceID   string
 	collectionErrors  []string
+	categories        map[string]*runtimeCoverageCategoryAccumulator
 	assemblyFiles     map[string]bool
 	programResults    []runtimeCoverageProgramReport
 	activeFunctions   map[runtimeFunctionKey]goc.RuntimeCoverageFunction
@@ -78,8 +85,19 @@ type runtimeCorpusCoverage struct {
 	executedBlocks    map[runtimeBlockKey]bool
 }
 
+type runtimeCoverageCategoryAccumulator struct {
+	programs          []runtimeCoverageProgramReport
+	coveredPrograms   int
+	activeFunctions   map[runtimeFunctionKey]bool
+	compiledFunctions map[runtimeFunctionKey]bool
+	executedFunctions map[runtimeFunctionKey]bool
+	compiledBlocks    map[runtimeBlockKey]bool
+	executedBlocks    map[runtimeBlockKey]bool
+}
+
 func newRuntimeCorpusCoverage() *runtimeCorpusCoverage {
 	return &runtimeCorpusCoverage{
+		categories:        make(map[string]*runtimeCoverageCategoryAccumulator),
 		assemblyFiles:     make(map[string]bool),
 		activeFunctions:   make(map[runtimeFunctionKey]goc.RuntimeCoverageFunction),
 		compiledFunctions: make(map[runtimeFunctionKey]bool),
@@ -95,13 +113,18 @@ func (coverage *runtimeCorpusCoverage) add(capability runtimeCapability, result 
 	}
 	coverage.programs++
 	program := runtimeCoverageProgramReport{
-		Category:        capability.category,
-		Name:            capability.name,
-		Source:          capability.source,
-		Expectation:     runtimeCoverageExpectationName(capability.expectation),
-		CompileOutcome:  result.compileOutcome,
-		RunOutcome:      result.runOutcome,
-		CoverageOutcome: result.coverageOutcome,
+		Category:            capability.category,
+		Name:                capability.name,
+		Source:              capability.source,
+		Expectation:         runtimeCoverageExpectationName(capability.expectation),
+		CompileOutcome:      result.compileOutcome,
+		RunOutcome:          result.runOutcome,
+		CoverageOutcome:     result.coverageOutcome,
+		CompileMilliseconds: result.compileDuration.Milliseconds(),
+		CompilePeakRSSBytes: result.compilePeakRSS,
+		RunMilliseconds:     result.runDuration.Milliseconds(),
+		RunPeakRSSBytes:     result.runPeakRSS,
+		RunAttempts:         result.runAttempts,
 	}
 	if result.err != nil {
 		program.Error = result.err.Error()
@@ -111,6 +134,8 @@ func (coverage *runtimeCorpusCoverage) add(capability runtimeCapability, result 
 		program.CoverageError = result.coverageErr.Error()
 	}
 	coverage.programResults = append(coverage.programResults, program)
+	category := coverage.category(capability.category)
+	category.programs = append(category.programs, program)
 	if result.coverage == nil {
 		return
 	}
@@ -138,6 +163,7 @@ func (coverage *runtimeCorpusCoverage) add(capability runtimeCapability, result 
 		return
 	}
 	coverage.coveredPrograms++
+	category.coveredPrograms++
 	for _, assembly := range result.coverage.metadata.AssemblyFiles {
 		coverage.assemblyFiles[assembly] = true
 	}
@@ -145,11 +171,14 @@ func (coverage *runtimeCorpusCoverage) add(capability runtimeCapability, result 
 	for _, function := range result.coverage.metadata.Functions {
 		key := runtimeFunctionKey{name: function.Name, file: function.File, line: function.Line}
 		coverage.activeFunctions[key] = function
+		category.activeFunctions[key] = true
 		if function.Compiled {
 			coverage.compiledFunctions[key] = true
+			category.compiledFunctions[key] = true
 		}
 		if function.Entry >= 0 && function.Entry < len(result.coverage.hits) && result.coverage.hits[function.Entry] {
 			coverage.executedFunctions[key] = true
+			category.executedFunctions[key] = true
 		}
 	}
 	for _, block := range result.coverage.metadata.Blocks {
@@ -160,15 +189,34 @@ func (coverage *runtimeCorpusCoverage) add(capability runtimeCapability, result 
 			block:    block.Block,
 		}
 		coverage.compiledBlocks[key] = block
+		category.compiledBlocks[key] = true
 		if block.ID >= 0 && block.ID < len(result.coverage.hits) && result.coverage.hits[block.ID] {
 			coverage.executedBlocks[key] = true
+			category.executedBlocks[key] = true
 		}
 	}
+}
+
+func (coverage *runtimeCorpusCoverage) category(name string) *runtimeCoverageCategoryAccumulator {
+	category := coverage.categories[name]
+	if category != nil {
+		return category
+	}
+	category = &runtimeCoverageCategoryAccumulator{
+		activeFunctions:   make(map[runtimeFunctionKey]bool),
+		compiledFunctions: make(map[runtimeFunctionKey]bool),
+		executedFunctions: make(map[runtimeFunctionKey]bool),
+		compiledBlocks:    make(map[runtimeBlockKey]bool),
+		executedBlocks:    make(map[runtimeBlockKey]bool),
+	}
+	coverage.categories[name] = category
+	return category
 }
 
 func (coverage *runtimeCorpusCoverage) report() runtimeCoverageReport {
 	report := runtimeCoverageReport{
 		Version:         runtimeCoverageReportVersion,
+		Kind:            runtimeCoverageReportFull,
 		GOOS:            "linux",
 		GOARCH:          "arm64",
 		RuntimeSourceID: coverage.runtimeSourceID,
@@ -194,10 +242,29 @@ func (coverage *runtimeCorpusCoverage) report() runtimeCoverageReport {
 		return runtimeCoverageProgramName(report.Programs[left]) < runtimeCoverageProgramName(report.Programs[right])
 	})
 	for _, program := range report.Programs {
-		if program.Error != "" && program.Expectation == "must-pass" {
-			report.Summary.UnexpectedFailures++
-		}
+		addRuntimeCoverageSummaryProgram(&report.Summary, program)
 	}
+	for name, accumulated := range coverage.categories {
+		category := runtimeCoverageCategoryReport{
+			Category:          name,
+			Programs:          len(accumulated.programs),
+			CoveredPrograms:   accumulated.coveredPrograms,
+			ActiveFunctions:   len(accumulated.activeFunctions),
+			CompiledFunctions: len(accumulated.compiledFunctions),
+			ExecutedFunctions: len(accumulated.executedFunctions),
+			FunctionCoverage:  coveragePercent(len(accumulated.executedFunctions), len(accumulated.activeFunctions)),
+			CompiledBlocks:    len(accumulated.compiledBlocks),
+			ExecutedBlocks:    len(accumulated.executedBlocks),
+			BlockCoverage:     coveragePercent(len(accumulated.executedBlocks), len(accumulated.compiledBlocks)),
+		}
+		for _, program := range accumulated.programs {
+			addRuntimeCoverageCategoryProgram(&category, program)
+		}
+		report.Categories = append(report.Categories, category)
+	}
+	sort.Slice(report.Categories, func(left, right int) bool {
+		return report.Categories[left].Category < report.Categories[right].Category
+	})
 
 	files := make(map[string]*runtimeCoverageFileReport)
 	fileReport := func(name string) *runtimeCoverageFileReport {
@@ -281,6 +348,52 @@ func (coverage *runtimeCorpusCoverage) report() runtimeCoverageReport {
 	return report
 }
 
+func addRuntimeCoverageSummaryProgram(summary *runtimeCoverageSummary, program runtimeCoverageProgramReport) {
+	if runtimeCoverageProgramFailed(program) {
+		summary.UnexpectedFailures++
+	}
+	if program.CompileOutcome == "failed" {
+		summary.CompileFailures++
+	}
+	if program.RunOutcome == "failed" {
+		summary.RunFailures++
+	}
+	if program.RunOutcome == "timeout" {
+		summary.RunTimeouts++
+	}
+	if program.CoverageOutcome != "collected" {
+		summary.MissingCoveragePrograms++
+	}
+	summary.CompileMilliseconds += program.CompileMilliseconds
+	summary.CompilePeakRSSBytes = max(summary.CompilePeakRSSBytes, program.CompilePeakRSSBytes)
+	summary.RunMilliseconds += program.RunMilliseconds
+	summary.RunPeakRSSBytes = max(summary.RunPeakRSSBytes, program.RunPeakRSSBytes)
+	summary.RunAttempts += program.RunAttempts
+}
+
+func addRuntimeCoverageCategoryProgram(category *runtimeCoverageCategoryReport, program runtimeCoverageProgramReport) {
+	if runtimeCoverageProgramFailed(program) {
+		category.UnexpectedFailures++
+	}
+	if program.CompileOutcome == "failed" {
+		category.CompileFailures++
+	}
+	if program.RunOutcome == "failed" {
+		category.RunFailures++
+	}
+	if program.RunOutcome == "timeout" {
+		category.RunTimeouts++
+	}
+	if program.CoverageOutcome != "collected" {
+		category.MissingCoveragePrograms++
+	}
+	category.CompileMilliseconds += program.CompileMilliseconds
+	category.CompilePeakRSSBytes = max(category.CompilePeakRSSBytes, program.CompilePeakRSSBytes)
+	category.RunMilliseconds += program.RunMilliseconds
+	category.RunPeakRSSBytes = max(category.RunPeakRSSBytes, program.RunPeakRSSBytes)
+	category.RunAttempts += program.RunAttempts
+}
+
 func (coverage *runtimeCorpusCoverage) write(t *testing.T) {
 	if *runtimeCoverageProfile == "" {
 		return
@@ -312,13 +425,15 @@ func (coverage *runtimeCorpusCoverage) write(t *testing.T) {
 		t.Fatal(err)
 	}
 	t.Logf(
-		"runtime coverage: %d/%d active functions (%.2f%%), %d/%d compiled blocks (%.2f%%); report %s",
+		"runtime coverage: %d/%d active functions (%.2f%%), %d/%d compiled blocks (%.2f%%); compile peak %.1f MiB, run peak %.1f MiB; report %s",
 		report.Summary.ExecutedFunctions,
 		report.Summary.ActiveFunctions,
 		report.Summary.FunctionCoverage,
 		report.Summary.ExecutedBlocks,
 		report.Summary.CompiledBlocks,
 		report.Summary.BlockCoverage,
+		float64(report.Summary.CompilePeakRSSBytes)/(1024*1024),
+		float64(report.Summary.RunPeakRSSBytes)/(1024*1024),
 		*runtimeCoverageProfile,
 	)
 }

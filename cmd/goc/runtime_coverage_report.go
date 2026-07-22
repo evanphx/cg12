@@ -8,25 +8,33 @@ import (
 	"io"
 	"os"
 	pathpkg "path"
+	"path/filepath"
 	"sort"
 )
 
 const runtimeCoverageReportVersion = 2
 
+const (
+	runtimeCoverageReportFull     = "full"
+	runtimeCoverageReportBaseline = "baseline"
+)
+
 type runtimeCoverageReport struct {
 	Version           int                              `json:"version"`
+	Kind              string                           `json:"kind"`
 	GOOS              string                           `json:"goos"`
 	GOARCH            string                           `json:"goarch"`
 	RuntimeSourceID   string                           `json:"runtime_source_id"`
 	Scope             string                           `json:"scope"`
 	AssemblyFiles     []string                         `json:"uninstrumented_assembly_files"`
 	Summary           runtimeCoverageSummary           `json:"summary"`
+	Categories        []runtimeCoverageCategoryReport  `json:"categories"`
 	Programs          []runtimeCoverageProgramReport   `json:"programs"`
-	Files             []runtimeCoverageFileReport      `json:"files"`
+	Files             []runtimeCoverageFileReport      `json:"files,omitempty"`
 	ExecutedFunctions []runtimeCoverageFunctionDiff    `json:"executed_functions"`
-	MissingFunctions  []runtimeCoverageMissingFunction `json:"missing_functions"`
+	MissingFunctions  []runtimeCoverageMissingFunction `json:"missing_functions,omitempty"`
 	ExecutedBlocks    []runtimeCoverageBlockReport     `json:"executed_blocks"`
-	UncoveredBlocks   []runtimeCoverageBlockReport     `json:"uncovered_blocks"`
+	UncoveredBlocks   []runtimeCoverageBlockReport     `json:"uncovered_blocks,omitempty"`
 }
 
 type runtimeCoverageSummary struct {
@@ -42,6 +50,38 @@ type runtimeCoverageSummary struct {
 	ClassifiedMissingFunctions int     `json:"classified_missing_functions"`
 	UnknownMissingFunctions    int     `json:"unknown_missing_functions"`
 	UnexpectedFailures         int     `json:"unexpected_failures"`
+	CompileFailures            int     `json:"compile_failures"`
+	RunFailures                int     `json:"run_failures"`
+	RunTimeouts                int     `json:"run_timeouts"`
+	MissingCoveragePrograms    int     `json:"missing_coverage_programs"`
+	CompileMilliseconds        int64   `json:"compile_milliseconds"`
+	CompilePeakRSSBytes        uint64  `json:"compile_peak_rss_bytes"`
+	RunMilliseconds            int64   `json:"run_milliseconds"`
+	RunPeakRSSBytes            uint64  `json:"run_peak_rss_bytes"`
+	RunAttempts                int     `json:"run_attempts"`
+}
+
+type runtimeCoverageCategoryReport struct {
+	Category                string  `json:"category"`
+	Programs                int     `json:"programs"`
+	CoveredPrograms         int     `json:"covered_programs"`
+	ActiveFunctions         int     `json:"active_functions"`
+	CompiledFunctions       int     `json:"compiled_functions"`
+	ExecutedFunctions       int     `json:"executed_functions"`
+	FunctionCoverage        float64 `json:"function_coverage_percent"`
+	CompiledBlocks          int     `json:"compiled_blocks"`
+	ExecutedBlocks          int     `json:"executed_blocks"`
+	BlockCoverage           float64 `json:"block_coverage_percent"`
+	UnexpectedFailures      int     `json:"unexpected_failures"`
+	CompileFailures         int     `json:"compile_failures"`
+	RunFailures             int     `json:"run_failures"`
+	RunTimeouts             int     `json:"run_timeouts"`
+	MissingCoveragePrograms int     `json:"missing_coverage_programs"`
+	CompileMilliseconds     int64   `json:"compile_milliseconds"`
+	CompilePeakRSSBytes     uint64  `json:"compile_peak_rss_bytes"`
+	RunMilliseconds         int64   `json:"run_milliseconds"`
+	RunPeakRSSBytes         uint64  `json:"run_peak_rss_bytes"`
+	RunAttempts             int     `json:"run_attempts"`
 }
 
 type runtimeCoverageFileReport struct {
@@ -70,16 +110,21 @@ type runtimeCoverageBlockReport struct {
 }
 
 type runtimeCoverageProgramReport struct {
-	Category        string `json:"category"`
-	Name            string `json:"name"`
-	Source          string `json:"source"`
-	Expectation     string `json:"expectation"`
-	CompileOutcome  string `json:"compile_outcome"`
-	RunOutcome      string `json:"run_outcome"`
-	CoverageOutcome string `json:"coverage_outcome"`
-	Error           string `json:"error,omitempty"`
-	CoverageError   string `json:"coverage_error,omitempty"`
-	Output          string `json:"output,omitempty"`
+	Category            string `json:"category"`
+	Name                string `json:"name"`
+	Source              string `json:"source"`
+	Expectation         string `json:"expectation"`
+	CompileOutcome      string `json:"compile_outcome"`
+	RunOutcome          string `json:"run_outcome"`
+	CoverageOutcome     string `json:"coverage_outcome"`
+	Error               string `json:"error,omitempty"`
+	CoverageError       string `json:"coverage_error,omitempty"`
+	Output              string `json:"output,omitempty"`
+	CompileMilliseconds int64  `json:"compile_milliseconds"`
+	CompilePeakRSSBytes uint64 `json:"compile_peak_rss_bytes"`
+	RunMilliseconds     int64  `json:"run_milliseconds"`
+	RunPeakRSSBytes     uint64 `json:"run_peak_rss_bytes"`
+	RunAttempts         int    `json:"run_attempts"`
 }
 
 type runtimeCoverageClassification string
@@ -352,18 +397,53 @@ func validateRuntimeCoverageReport(report runtimeCoverageReport) error {
 	if report.RuntimeSourceID == "" {
 		return errors.New("runtime_source_id is empty")
 	}
+	kind := report.Kind
+	if kind == "" {
+		kind = runtimeCoverageReportFull
+	}
+	if kind != runtimeCoverageReportFull && kind != runtimeCoverageReportBaseline {
+		return fmt.Errorf("kind is %q, want %q or %q", kind, runtimeCoverageReportFull, runtimeCoverageReportBaseline)
+	}
 	if report.Summary.Programs != len(report.Programs) {
 		return fmt.Errorf("program count is %d, but report contains %d programs", report.Summary.Programs, len(report.Programs))
 	}
 	coveredPrograms := 0
 	unexpectedFailures := 0
+	compileFailures := 0
+	runFailures := 0
+	runTimeouts := 0
+	missingCoveragePrograms := 0
+	var compileMilliseconds int64
+	var compilePeakRSSBytes uint64
+	var runMilliseconds int64
+	var runPeakRSSBytes uint64
+	runAttempts := 0
 	for _, program := range report.Programs {
+		if err := validateRuntimeCoverageProgram(program); err != nil {
+			return fmt.Errorf("program %s: %w", runtimeCoverageProgramName(program), err)
+		}
 		if program.CoverageOutcome == "collected" {
 			coveredPrograms++
+		} else {
+			missingCoveragePrograms++
 		}
 		if runtimeCoverageProgramFailed(program) {
 			unexpectedFailures++
 		}
+		if program.CompileOutcome == "failed" {
+			compileFailures++
+		}
+		if program.RunOutcome == "failed" {
+			runFailures++
+		}
+		if program.RunOutcome == "timeout" {
+			runTimeouts++
+		}
+		compileMilliseconds += program.CompileMilliseconds
+		compilePeakRSSBytes = max(compilePeakRSSBytes, program.CompilePeakRSSBytes)
+		runMilliseconds += program.RunMilliseconds
+		runPeakRSSBytes = max(runPeakRSSBytes, program.RunPeakRSSBytes)
+		runAttempts += program.RunAttempts
 	}
 	if report.Summary.CoveredPrograms != coveredPrograms {
 		return fmt.Errorf(
@@ -379,19 +459,60 @@ func validateRuntimeCoverageReport(report runtimeCoverageReport) error {
 			unexpectedFailures,
 		)
 	}
-	activeFunctions := len(report.ExecutedFunctions) + len(report.MissingFunctions)
-	if report.Summary.ActiveFunctions != activeFunctions {
+	if report.Summary.CompileFailures != compileFailures {
+		return fmt.Errorf("compile failure count is %d, but report contains %d", report.Summary.CompileFailures, compileFailures)
+	}
+	if report.Summary.RunFailures != runFailures {
+		return fmt.Errorf("run failure count is %d, but report contains %d", report.Summary.RunFailures, runFailures)
+	}
+	if report.Summary.RunTimeouts != runTimeouts {
+		return fmt.Errorf("run timeout count is %d, but report contains %d", report.Summary.RunTimeouts, runTimeouts)
+	}
+	if report.Summary.MissingCoveragePrograms != missingCoveragePrograms {
 		return fmt.Errorf(
-			"active function count is %d, but report contains %d function outcomes",
-			report.Summary.ActiveFunctions,
-			activeFunctions,
+			"missing coverage program count is %d, but report contains %d",
+			report.Summary.MissingCoveragePrograms,
+			missingCoveragePrograms,
 		)
+	}
+	if report.Summary.CompileMilliseconds != compileMilliseconds || report.Summary.CompilePeakRSSBytes != compilePeakRSSBytes {
+		return errors.New("compile resource summary does not match program measurements")
+	}
+	if report.Summary.RunMilliseconds != runMilliseconds || report.Summary.RunPeakRSSBytes != runPeakRSSBytes {
+		return errors.New("run resource summary does not match program measurements")
+	}
+	if report.Summary.RunAttempts != runAttempts {
+		return fmt.Errorf("run attempt count is %d, but report contains %d", report.Summary.RunAttempts, runAttempts)
 	}
 	if report.Summary.ExecutedFunctions != len(report.ExecutedFunctions) {
 		return fmt.Errorf(
 			"executed function count is %d, but report contains %d executed functions",
 			report.Summary.ExecutedFunctions,
 			len(report.ExecutedFunctions),
+		)
+	}
+	if report.Summary.ExecutedBlocks != len(report.ExecutedBlocks) {
+		return fmt.Errorf(
+			"executed block count is %d, but report contains %d executed blocks",
+			report.Summary.ExecutedBlocks,
+			len(report.ExecutedBlocks),
+		)
+	}
+	if kind == runtimeCoverageReportFull {
+		if err := validateFullRuntimeCoverageInventory(report); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+func validateFullRuntimeCoverageInventory(report runtimeCoverageReport) error {
+	activeFunctions := len(report.ExecutedFunctions) + len(report.MissingFunctions)
+	if report.Summary.ActiveFunctions != activeFunctions {
+		return fmt.Errorf(
+			"active function count is %d, but report contains %d function outcomes",
+			report.Summary.ActiveFunctions,
+			activeFunctions,
 		)
 	}
 	compiledFunctions := len(report.ExecutedFunctions)
@@ -443,12 +564,37 @@ func validateRuntimeCoverageReport(report runtimeCoverageReport) error {
 			compiledBlocks,
 		)
 	}
-	if report.Summary.ExecutedBlocks != len(report.ExecutedBlocks) {
-		return fmt.Errorf(
-			"executed block count is %d, but report contains %d executed blocks",
-			report.Summary.ExecutedBlocks,
-			len(report.ExecutedBlocks),
-		)
+	return nil
+}
+
+func validateRuntimeCoverageProgram(program runtimeCoverageProgramReport) error {
+	switch program.CompileOutcome {
+	case "passed":
+		if program.RunOutcome == "not-run" {
+			return errors.New("successful compilation has a not-run execution outcome")
+		}
+		if program.RunAttempts < 1 {
+			return errors.New("successful compilation has no run attempts")
+		}
+	case "failed":
+		if program.RunOutcome != "not-run" || program.CoverageOutcome != "not-run" {
+			return errors.New("failed compilation must have not-run execution and coverage outcomes")
+		}
+		if program.RunAttempts != 0 {
+			return errors.New("failed compilation has run attempts")
+		}
+	default:
+		return fmt.Errorf("invalid compile outcome %q", program.CompileOutcome)
+	}
+	switch program.RunOutcome {
+	case "passed", "failed", "timeout", "not-run":
+	default:
+		return fmt.Errorf("invalid run outcome %q", program.RunOutcome)
+	}
+	switch program.CoverageOutcome {
+	case "collected", "missing", "not-run":
+	default:
+		return fmt.Errorf("invalid coverage outcome %q", program.CoverageOutcome)
 	}
 	return nil
 }
@@ -576,6 +722,46 @@ func runtimeCoverageDiffCommand(arguments []string, stdout, stderr io.Writer) in
 	return 0
 }
 
+func runtimeCoverageBaselineCommand(arguments []string, stderr io.Writer) int {
+	flags := flag.NewFlagSet("goc runtime-cover-baseline", flag.ContinueOnError)
+	flags.SetOutput(stderr)
+	if err := flags.Parse(arguments); err != nil {
+		return 2
+	}
+	if flags.NArg() != 2 {
+		fmt.Fprintln(stderr, "usage: goc runtime-cover-baseline full-report.json baseline.json")
+		return 2
+	}
+
+	report, err := readRuntimeCoverageReport(flags.Arg(0))
+	if err != nil {
+		fmt.Fprintf(stderr, "goc: %v\n", err)
+		return 1
+	}
+	if err := validateRuntimeCoverageReport(report); err != nil {
+		fmt.Fprintf(stderr, "goc: full runtime coverage report: %v\n", err)
+		return 1
+	}
+	if report.Kind == runtimeCoverageReportBaseline {
+		fmt.Fprintln(stderr, "goc: input is already a runtime coverage baseline")
+		return 1
+	}
+
+	report.Kind = runtimeCoverageReportBaseline
+	report.Files = nil
+	report.MissingFunctions = nil
+	report.UncoveredBlocks = nil
+	for index := range report.Programs {
+		report.Programs[index].CoverageError = ""
+		report.Programs[index].Output = ""
+	}
+	if err := writeRuntimeCoverageReport(flags.Arg(1), report); err != nil {
+		fmt.Fprintf(stderr, "goc: %v\n", err)
+		return 1
+	}
+	return 0
+}
+
 func readRuntimeCoverageReport(filename string) (runtimeCoverageReport, error) {
 	content, err := os.ReadFile(filename)
 	if err != nil {
@@ -588,12 +774,48 @@ func readRuntimeCoverageReport(filename string) (runtimeCoverageReport, error) {
 	return report, nil
 }
 
+func writeRuntimeCoverageReport(filename string, report runtimeCoverageReport) error {
+	content, err := json.MarshalIndent(report, "", "  ")
+	if err != nil {
+		return fmt.Errorf("encode runtime coverage report: %w", err)
+	}
+	content = append(content, '\n')
+	if err := os.MkdirAll(filepath.Dir(filename), 0o755); err != nil {
+		return fmt.Errorf("create runtime coverage report directory: %w", err)
+	}
+	temporary, err := os.CreateTemp(filepath.Dir(filename), ".runtime-coverage-*.json")
+	if err != nil {
+		return fmt.Errorf("create runtime coverage report: %w", err)
+	}
+	temporaryName := temporary.Name()
+	defer os.Remove(temporaryName)
+	if _, err := temporary.Write(content); err != nil {
+		temporary.Close()
+		return fmt.Errorf("write runtime coverage report: %w", err)
+	}
+	if err := temporary.Chmod(0o644); err != nil {
+		temporary.Close()
+		return fmt.Errorf("set runtime coverage report permissions: %w", err)
+	}
+	if err := temporary.Close(); err != nil {
+		return fmt.Errorf("close runtime coverage report: %w", err)
+	}
+	if err := os.Rename(temporaryName, filename); err != nil {
+		return fmt.Errorf("install runtime coverage report: %w", err)
+	}
+	return nil
+}
+
 func writeRuntimeCoverageDiff(output io.Writer, difference runtimeCoverageDiff) {
 	fmt.Fprintf(output, "runtime coverage %s/%s source %s\n", difference.GOOS, difference.GOARCH, difference.RuntimeSourceID)
 	writeRuntimeCoverageMetric(output, "covered programs", difference.Baseline.CoveredPrograms, difference.Current.CoveredPrograms)
 	writeRuntimeCoverageMetric(output, "executed functions", difference.Baseline.ExecutedFunctions, difference.Current.ExecutedFunctions)
 	writeRuntimeCoverageMetric(output, "executed blocks", difference.Baseline.ExecutedBlocks, difference.Current.ExecutedBlocks)
 	writeRuntimeCoverageMetric(output, "unexpected failures", difference.Baseline.UnexpectedFailures, difference.Current.UnexpectedFailures)
+	writeRuntimeCoverageDuration(output, "compile milliseconds", difference.Baseline.CompileMilliseconds, difference.Current.CompileMilliseconds)
+	writeRuntimeCoverageBytes(output, "compile peak RSS", difference.Baseline.CompilePeakRSSBytes, difference.Current.CompilePeakRSSBytes)
+	writeRuntimeCoverageDuration(output, "run milliseconds", difference.Baseline.RunMilliseconds, difference.Current.RunMilliseconds)
+	writeRuntimeCoverageBytes(output, "run peak RSS", difference.Baseline.RunPeakRSSBytes, difference.Current.RunPeakRSSBytes)
 	fmt.Fprintf(output, "gained functions: %d\n", len(difference.GainedFunctions))
 	fmt.Fprintf(output, "lost functions: %d\n", len(difference.LostFunctions))
 	fmt.Fprintf(output, "gained blocks: %d\n", len(difference.GainedBlocks))
@@ -611,6 +833,22 @@ func writeRuntimeCoverageDiff(output io.Writer, difference runtimeCoverageDiff) 
 
 func writeRuntimeCoverageMetric(output io.Writer, name string, baseline, current int) {
 	fmt.Fprintf(output, "%s: %d -> %d (%+d)\n", name, baseline, current, current-baseline)
+}
+
+func writeRuntimeCoverageDuration(output io.Writer, name string, baseline, current int64) {
+	fmt.Fprintf(output, "%s: %d -> %d (%+d)\n", name, baseline, current, current-baseline)
+}
+
+func writeRuntimeCoverageBytes(output io.Writer, name string, baseline, current uint64) {
+	const mebibyte = 1024 * 1024
+	fmt.Fprintf(
+		output,
+		"%s: %.1f MiB -> %.1f MiB (%+.1f MiB)\n",
+		name,
+		float64(baseline)/mebibyte,
+		float64(current)/mebibyte,
+		(float64(current)-float64(baseline))/mebibyte,
+	)
 }
 
 func runtimeCoverageRegressed(difference runtimeCoverageDiff) bool {

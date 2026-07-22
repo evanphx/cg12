@@ -14,19 +14,20 @@ assembly is tracked separately until it can be instrumented meaningfully.
 
 ## 1. Baseline
 
-The 2026-07-21 coverage run compiled and ran the 294-program runtime capability
-corpus. The full report is `/tmp/cg12-runtime-corpus-coverage.json`.
+The accepted 2026-07-22 coverage run compiled and ran the 294-program runtime
+capability corpus, executing each successful binary three times. Its canonical
+baseline is `cmd/goc/testdata/runtime_coverage_linux_arm64.json`.
 
 | Measurement | Baseline |
 | --- | ---: |
 | Programs | 294 |
-| Programs returning coverage | 290 |
+| Programs returning coverage | 291 |
 | Active Linux/ARM64 runtime Go functions | 2,561 |
 | Compiled runtime functions | 2,050 |
-| Executed runtime functions | 1,262 |
-| Active-function coverage | 49.3% |
-| Compiled runtime blocks | 25,794 |
-| Executed runtime blocks | 7,887 |
+| Executed runtime functions | 1,269 |
+| Active-function coverage | 49.6% |
+| Compiled runtime blocks | 25,929 |
+| Executed runtime blocks | 7,936 |
 | Compiled-block coverage | 30.6% |
 
 The baseline already exercises useful portions of allocation, marking,
@@ -40,7 +41,7 @@ that must not be hidden by adding more tests:
 - finalizer resurrection does not run correctly;
 - the gob round trip reaches an invalid zero `reflect.Value`;
 - the runtime trace program runs out of memory or times out;
-- three large HTTP programs exceed the current 3 GiB compilation limit;
+- two large HTTP programs exceed the current 3 GiB compilation limit;
 - the existing ECDSA case remains a known compiler/stdlib gap.
 
 Control runs without coverage instrumentation reproduce the runtime failures
@@ -123,8 +124,11 @@ Current M0 checkpoint:
 - [x] Add a report comparison command with an optional regression exit status.
 - [x] Add a reviewed classification format and leave unmatched functions
   explicitly `unknown`.
-- [ ] Produce and check in an accepted version-2 full-corpus baseline.
-- [ ] Add category/subsystem summaries and compile/run peak-memory reporting.
+- [x] Add category summaries and separate compiler/program elapsed-time and
+  peak-memory measurements.
+- [x] Merge repeated executions of each compiled program so scheduling noise is
+  less likely to produce false coverage regressions.
+- [x] Produce and check in an accepted version-2 full-corpus baseline.
 - [ ] Reach 294/294 usable coverage outcomes by repairing the current failures.
 
 ### 4.1 Make reports stable and comparable

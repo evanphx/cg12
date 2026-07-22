@@ -7,6 +7,9 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
+
+	"github.com/evanphx/cg12/goc"
 )
 
 func TestRuntimeCoverageClassifications(t *testing.T) {
@@ -99,6 +102,8 @@ func TestCompareRuntimeCoverageReports(t *testing.T) {
 	current := runtimeCoverageTestReport()
 	current.Summary.CoveredPrograms = 0
 	current.Summary.UnexpectedFailures = 1
+	current.Summary.RunFailures = 1
+	current.Summary.MissingCoveragePrograms = 1
 	current.MissingFunctions = []runtimeCoverageMissingFunction{
 		{
 			Name:           "runtime.first",
@@ -183,6 +188,150 @@ func TestRuntimeCoverageDiffCommand(t *testing.T) {
 	}
 }
 
+func TestRuntimeCoverageBaselineCommand(t *testing.T) {
+	directory := t.TempDir()
+	fullPath := filepath.Join(directory, "full.json")
+	baselinePath := filepath.Join(directory, "baseline", "runtime.json")
+	full := runtimeCoverageTestReport()
+	full.Kind = runtimeCoverageReportFull
+	full.Programs[0].CoverageError = "volatile coverage detail"
+	full.Programs[0].Output = "volatile process output"
+	writeRuntimeCoverageTestReport(t, fullPath, full)
+
+	var stderr bytes.Buffer
+	exitCode := runtimeCoverageBaselineCommand([]string{fullPath, baselinePath}, &stderr)
+	if exitCode != 0 {
+		t.Fatalf("runtime-cover-baseline exit = %d, stderr = %s", exitCode, stderr.String())
+	}
+	baseline, err := readRuntimeCoverageReport(baselinePath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if baseline.Kind != runtimeCoverageReportBaseline {
+		t.Fatalf("baseline kind = %q", baseline.Kind)
+	}
+	if baseline.Files != nil || baseline.MissingFunctions != nil || baseline.UncoveredBlocks != nil {
+		t.Fatal("baseline retained redundant full-report inventories")
+	}
+	if baseline.Programs[0].CoverageError != "" || baseline.Programs[0].Output != "" {
+		t.Fatal("baseline retained volatile program diagnostics")
+	}
+	if _, err := compareRuntimeCoverageReports(baseline, full); err != nil {
+		t.Fatalf("compare baseline to full report: %v", err)
+	}
+}
+
+func TestCheckedRuntimeCoverageBaseline(t *testing.T) {
+	baselinePath := filepath.Join("testdata", "runtime_coverage_linux_arm64.json")
+	baseline, err := readRuntimeCoverageReport(baselinePath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := validateRuntimeCoverageReport(baseline); err != nil {
+		t.Fatal(err)
+	}
+	if baseline.Kind != runtimeCoverageReportBaseline {
+		t.Fatalf("checked runtime coverage kind = %q", baseline.Kind)
+	}
+	if baseline.GOOS != "linux" || baseline.GOARCH != "arm64" {
+		t.Fatalf("checked runtime coverage target = %s/%s", baseline.GOOS, baseline.GOARCH)
+	}
+	if baseline.Summary.Programs != 294 {
+		t.Fatalf("checked runtime coverage programs = %d, want 294", baseline.Summary.Programs)
+	}
+}
+
+func TestRuntimeCorpusCoverageReportsCategoryResources(t *testing.T) {
+	previousProfile := *runtimeCoverageProfile
+	*runtimeCoverageProfile = filepath.Join(t.TempDir(), "coverage.json")
+	t.Cleanup(func() {
+		*runtimeCoverageProfile = previousProfile
+	})
+
+	coverage := newRuntimeCorpusCoverage()
+	capability := runtimeCapability{
+		category:    "scheduler",
+		name:        "work-steal",
+		source:      "runtime_work_steal.go",
+		expectation: runtimeCapabilityMustPass,
+	}
+	result := runtimeCapabilityResult{
+		coverage: &runtimeCapabilityCoverageResult{
+			metadata: &goc.RuntimeCoverage{
+				RuntimeSourceID: "test-runtime",
+				Functions: []goc.RuntimeCoverageFunction{
+					{Name: "runtime.first", File: "runtime/proc.go", Line: 10, Compiled: true, Entry: 0},
+					{Name: "runtime.second", File: "runtime/proc.go", Line: 20, Compiled: true, Entry: 1},
+				},
+				Blocks: []goc.RuntimeCoverageBlock{
+					{ID: 0, Function: "runtime.first", File: "runtime/proc.go", Line: 11, Block: 0},
+					{ID: 1, Function: "runtime.second", File: "runtime/proc.go", Line: 21, Block: 0},
+				},
+			},
+			hits: []bool{true, false},
+		},
+		compileOutcome:  "passed",
+		runOutcome:      "passed",
+		coverageOutcome: "collected",
+		compileDuration: 1500 * time.Millisecond,
+		compilePeakRSS:  512 << 20,
+		runDuration:     250 * time.Millisecond,
+		runPeakRSS:      32 << 20,
+		runAttempts:     3,
+	}
+
+	coverage.add(capability, result)
+	report := coverage.report()
+	if len(report.Categories) != 1 {
+		t.Fatalf("categories = %v", report.Categories)
+	}
+	category := report.Categories[0]
+	if category.Category != "scheduler" || category.Programs != 1 || category.CoveredPrograms != 1 {
+		t.Fatalf("category program summary = %+v", category)
+	}
+	if category.ActiveFunctions != 2 || category.CompiledFunctions != 2 || category.ExecutedFunctions != 1 {
+		t.Fatalf("category function summary = %+v", category)
+	}
+	if category.CompiledBlocks != 2 || category.ExecutedBlocks != 1 {
+		t.Fatalf("category block summary = %+v", category)
+	}
+	if category.CompileMilliseconds != 1500 || category.CompilePeakRSSBytes != 512<<20 {
+		t.Fatalf("category compile resources = %+v", category)
+	}
+	if category.RunMilliseconds != 250 || category.RunPeakRSSBytes != 32<<20 {
+		t.Fatalf("category run resources = %+v", category)
+	}
+	if category.RunAttempts != 3 {
+		t.Fatalf("category run attempts = %d, want 3", category.RunAttempts)
+	}
+	if report.Summary.CompileMilliseconds != 1500 || report.Summary.RunMilliseconds != 250 {
+		t.Fatalf("global resource summary = %+v", report.Summary)
+	}
+}
+
+func TestMergeRuntimeCapabilityCoverage(t *testing.T) {
+	metadata := &goc.RuntimeCoverage{RuntimeSourceID: "test-runtime"}
+	var merged *runtimeCapabilityCoverageResult
+	if err := mergeRuntimeCapabilityCoverage(&merged, &runtimeCapabilityCoverageResult{
+		metadata: metadata,
+		hits:     []bool{true, false, false},
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if err := mergeRuntimeCapabilityCoverage(&merged, &runtimeCapabilityCoverageResult{
+		metadata: metadata,
+		hits:     []bool{false, true, false},
+	}); err != nil {
+		t.Fatal(err)
+	}
+	want := []bool{true, true, false}
+	for index := range want {
+		if merged.hits[index] != want[index] {
+			t.Fatalf("merged hits = %v, want %v", merged.hits, want)
+		}
+	}
+}
+
 func runtimeCoverageTestReport() runtimeCoverageReport {
 	return runtimeCoverageReport{
 		Version:         runtimeCoverageReportVersion,
@@ -199,6 +348,7 @@ func runtimeCoverageTestReport() runtimeCoverageReport {
 			ExecutedBlocks:          1,
 			UnknownMissingFunctions: 2,
 			UnexpectedFailures:      0,
+			RunAttempts:             1,
 		},
 		Programs: []runtimeCoverageProgramReport{
 			{
@@ -208,6 +358,7 @@ func runtimeCoverageTestReport() runtimeCoverageReport {
 				CompileOutcome:  "passed",
 				RunOutcome:      "passed",
 				CoverageOutcome: "collected",
+				RunAttempts:     1,
 			},
 		},
 		ExecutedFunctions: []runtimeCoverageFunctionDiff{

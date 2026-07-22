@@ -25,6 +25,9 @@ func main() {
 	if len(os.Args) > 1 && os.Args[1] == "runtime-cover-diff" {
 		os.Exit(runtimeCoverageDiffCommand(os.Args[2:], os.Stdout, os.Stderr))
 	}
+	if len(os.Args) > 1 && os.Args[1] == "runtime-cover-baseline" {
+		os.Exit(runtimeCoverageBaselineCommand(os.Args[2:], os.Stderr))
+	}
 
 	out := flag.String("o", "", "output file")
 	obj := flag.Bool("c", false, "emit a relocatable object")
