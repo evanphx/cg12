@@ -118,6 +118,10 @@ type Instr struct {
 	// environment in the architecture's dedicated closure register. ABIInternal
 	// reserves an additional spill word for that register in the outgoing frame.
 	ClosureCall bool
+	// ClosureContext is the source-level closure object placed in the dedicated
+	// register for a ClosureCall. Keeping it explicit lets the inliner replace a
+	// callee's incoming closure register with the caller's ordinary SSA value.
+	ClosureContext Ref
 
 	// Blk names the target block of an OBlockAddr (the address of a label taken
 	// with the &&label extension), whose result is that block's code address.
@@ -135,6 +139,18 @@ type Instr struct {
 	// Intrin carries an OIntrinsic's dispatch name (the intrinsic being invoked).
 	// nil for every other op.
 	Intrin *IntrinOp
+}
+
+// Uses returns every SSA value read by the instruction, including operands
+// carried outside Args for ABI purposes.
+func (in *Instr) Uses() []Ref {
+	if in.ClosureContext.IsNone() {
+		return in.Args
+	}
+	uses := make([]Ref, 0, len(in.Args)+1)
+	uses = append(uses, in.Args...)
+	uses = append(uses, in.ClosureContext)
+	return uses
 }
 
 // AsmOperandKind classifies an inline-asm operand for template substitution.

@@ -47,7 +47,7 @@ func rematRules(f *ir.Func) map[int]rematRule {
 			// through a parallel move / memcpy / frame-address path that reads a spill
 			// slot directly and cannot recompute, so those operands are not remat-safe.
 			if !srcResolvesOperands(in) {
-				for _, a := range in.Args {
+				for _, a := range in.Uses() {
 					if a.Kind == ir.RefTemp {
 						unsafe[a.ID] = true
 					}

@@ -615,7 +615,7 @@ func instrUses(in *ir.Instr) []int {
 		return nil
 	}
 	var u []int
-	for _, a := range in.Args {
+	for _, a := range in.Uses() {
 		if a.Kind == ir.RefTemp {
 			u = append(u, int(a.ID))
 		}

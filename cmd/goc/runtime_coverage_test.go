@@ -31,6 +31,12 @@ var runtimeCoverageRuns = flag.Int(
 	"run each successfully compiled coverage program this many times and merge its hits",
 )
 
+var runtimeOptimize = flag.Bool(
+	"runtime-opt",
+	false,
+	"compile runtime capability programs with goc optimization enabled",
+)
+
 var runtimeCoverageCollector = newRuntimeCorpusCoverage()
 
 type runtimeCapabilityCoverageResult struct {

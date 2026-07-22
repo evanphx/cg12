@@ -74,6 +74,31 @@ func TestGCMNoMovable(t *testing.T) {
 	assert.False(t, GCM(f))
 }
 
+func TestGCMPreservesFixedRegisterMoveAtCallSite(t *testing.T) {
+	f := ir.NewModule().NewFuncVoid("closure_call")
+	condition := f.Param("condition", ir.ClsW)
+	closure := f.Param("closure", ir.ClsP)
+	entry := f.Entry()
+	invoke := f.NewBlock("invoke")
+	done := f.NewBlock("done")
+	entry.Jnz(condition, invoke, done)
+
+	context := invoke.Copy(ir.ClsP, closure)
+	contextTemporary := f.Temp(context)
+	contextTemporary.Fixed = true
+	contextTemporary.Reg = 26
+	invoke.CallVoid(f.Sym("call", 0))
+	call := &invoke.Instrs[1]
+	call.ClosureCall = true
+	call.ClosureContext = context
+	invoke.Goto(done)
+	done.RetVoid()
+
+	GCM(f)
+	assert.False(t, blockHasOp(entry, ir.OCopy))
+	assert.True(t, blockHasOp(invoke, ir.OCopy), "fixed register setup must remain beside its call")
+}
+
 func TestGCMEmptyFunction(t *testing.T) {
 	f := ir.NewModule().NewFuncVoid("empty") // no blocks
 	assert.False(t, GCM(f))

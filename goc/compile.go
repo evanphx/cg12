@@ -360,6 +360,7 @@ func compile(name string, src []byte, options compileOptions) (*ir.Module, error
 	}
 	addMemoryHelpers(mod, compileRuntime)
 	if compileRuntime {
+		exportAssemblyReferencedFunctions(mod, assemblyReferences)
 		for _, function := range mod.Funcs {
 			if function.CallConv != ir.CallConvGoInternal {
 				function.CallConv = ir.CallConvAAPCS64
@@ -382,6 +383,18 @@ func compile(name string, src []byte, options compileOptions) (*ir.Module, error
 		}
 	}
 	return g.mod, nil
+}
+
+// exportAssemblyReferencedFunctions keeps Go functions named by a separately
+// assembled source file visible to both the linker and whole-module dead-code
+// elimination. Those references do not appear as operands in the Go IR, but
+// they are ordinary external roots of the completed program.
+func exportAssemblyReferencedFunctions(module *ir.Module, references map[string]bool) {
+	for _, function := range module.Funcs {
+		if references[assemblySymbolName(function.Name)] {
+			function.Export()
+		}
+	}
 }
 
 func setAAPCS64CallConvention(module *ir.Module) {
@@ -1330,6 +1343,7 @@ type gen struct {
 	functionName                  string
 	currentFunction               *types.Func
 	nextCallUsesClosure           bool
+	nextCallClosure               ir.Ref
 }
 
 type atomicCallResult uint8
@@ -1522,7 +1536,17 @@ func collectLinkNames(files []*ast.File, info *types.Info, names map[*types.Func
 			}
 			for _, comment := range function.Doc.List {
 				fields := strings.Fields(strings.TrimPrefix(comment.Text, "//"))
-				if len(fields) == 3 && fields[0] == "go:linkname" {
+				if len(fields) < 2 || fields[0] != "go:linkname" {
+					continue
+				}
+				if len(fields) == 2 {
+					// A one-argument linkname exposes the function under its
+					// ordinary linker name. Runtime assembly and compiler-generated
+					// calls rely on these symbols even when Go IR has no callsite.
+					names[object] = functionSymbol(object)
+					continue
+				}
+				if len(fields) == 3 {
 					names[object] = fields[2]
 				}
 			}
@@ -3943,7 +3967,7 @@ func (g *gen) callWithSignature(resultClass ir.Cls, callee ir.Ref, arguments []i
 		result = g.cur.Call(resultClass, callee, arguments...)
 	}
 	instruction := &g.cur.Instrs[len(g.cur.Instrs)-1]
-	instruction.ClosureCall = g.consumeClosureCall()
+	instruction.ClosureCall, instruction.ClosureContext = g.consumeClosureCall()
 	if instruction.ClosureCall {
 		instruction.CallConv = ir.CallConvGoInternal
 		instruction.CallConvSet = true
@@ -3963,7 +3987,7 @@ func (g *gen) callVoidWithSignature(callee ir.Ref, arguments []ir.Ref, signature
 	arguments, argumentGroups, aggregateArguments := g.flattenCallArguments(arguments, signature, receiverType)
 	g.cur.CallVoid(callee, arguments...)
 	instruction := &g.cur.Instrs[len(g.cur.Instrs)-1]
-	instruction.ClosureCall = g.consumeClosureCall()
+	instruction.ClosureCall, instruction.ClosureContext = g.consumeClosureCall()
 	if instruction.ClosureCall {
 		instruction.CallConv = ir.CallConvGoInternal
 		instruction.CallConvSet = true
@@ -10368,12 +10392,15 @@ func (g *gen) pinClosure(closure ir.Ref) {
 	temporary.Fixed = true
 	temporary.Reg = g.closureRegister()
 	g.nextCallUsesClosure = true
+	g.nextCallClosure = context
 }
 
-func (g *gen) consumeClosureCall() bool {
+func (g *gen) consumeClosureCall() (bool, ir.Ref) {
 	closureCall := g.nextCallUsesClosure
+	closure := g.nextCallClosure
 	g.nextCallUsesClosure = false
-	return closureCall
+	g.nextCallClosure = ir.R
+	return closureCall, closure
 }
 
 func (g *gen) stringSlice(expression ast.Expr, targetType types.Type) ir.Ref {

@@ -200,6 +200,7 @@ func CoalescePhis(f *ir.Func) {
 			for k := range in.Args {
 				rename(&in.Args[k])
 			}
+			rename(&in.ClosureContext)
 			for k := range in.Defs {
 				rename(&in.Defs[k])
 			}
@@ -255,7 +256,7 @@ func buildPhiInterference(f *ir.Func, live *analysis.Liveness, nt int, involved 
 					liveNow.Remove(int(dr.ID))
 				}
 			}
-			for _, a := range in.Args {
+			for _, a := range in.Uses() {
 				liveNow.AddRef(a)
 			}
 		}

@@ -57,3 +57,22 @@ func TestCopyPreservesClassConversion(t *testing.T) {
 	assert.Equal(t, ir.OCopy, entry.Instrs[0].Op)
 	assert.Equal(t, ir.ClsW, entry.Instrs[0].Cls)
 }
+
+func TestCopyPreservesFixedRegisterMove(t *testing.T) {
+	f := ir.NewModule().NewFuncVoid("closure_call")
+	value := f.Param("value", ir.ClsP)
+	entry := f.Entry()
+	context := entry.Copy(ir.ClsP, value)
+	contextTemporary := f.Temp(context)
+	contextTemporary.Fixed = true
+	contextTemporary.Reg = 26
+	entry.CallVoid(f.Sym("invoke", 0))
+	call := &entry.Instrs[1]
+	call.ClosureCall = true
+	call.ClosureContext = context
+	entry.RetVoid()
+
+	assert.False(t, Copy(f))
+	assert.Equal(t, ir.OCopy, entry.Instrs[0].Op)
+	assert.Equal(t, context, entry.Instrs[1].ClosureContext)
+}

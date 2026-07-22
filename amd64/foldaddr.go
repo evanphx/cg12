@@ -131,7 +131,7 @@ func defUse(f *ir.Func) (uses map[uint32]int, defOf func(ir.Ref) *ir.Instr) {
 		}
 		for i := range b.Instrs {
 			in := &b.Instrs[i]
-			for _, a := range in.Args {
+			for _, a := range in.Uses() {
 				mark(a)
 			}
 			if in.To.Kind == ir.RefTemp {

@@ -44,7 +44,7 @@ func rematRules(f *ir.Func) map[int]rematRule {
 				defInstr[d] = in
 			}
 			if !srcResolvesOperands(in) {
-				for _, a := range in.Args {
+				for _, a := range in.Uses() {
 					if a.Kind == ir.RefTemp {
 						unsafe[a.ID] = true
 					}

@@ -616,6 +616,17 @@ go test ./cmd/goc \
   -timeout=60m
 ```
 
+Pass `-runtime-opt` to compile every selected capability with `goc -O`. Go's
+subtest filter can select a subsystem while retaining the same harness, for
+example:
+
+```
+go test ./cmd/goc \
+  -run '^TestARM64RuntimeCapabilityStatus$/defer-panic' \
+  -runtime-opt \
+  -timeout=15m
+```
+
 The JSON report distinguishes active functions that cg12 never compiled from
 compiled functions and blocks that never executed. Its denominator comes from
 the runtime files selected by the Go build rules for the host Linux/ARM64

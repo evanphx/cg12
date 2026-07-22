@@ -1935,6 +1935,9 @@ func runRuntimeCapabilityProgram(t *testing.T, compiler string, directory string
 	}()
 
 	compileArguments := []string{"-o", executable}
+	if *runtimeOptimize {
+		compileArguments = append(compileArguments, "-O")
+	}
 	metadata := ""
 	if *runtimeCoverageProfile != "" {
 		metadata = executable + ".runtime-cover.json"

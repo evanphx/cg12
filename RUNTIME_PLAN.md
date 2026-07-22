@@ -196,7 +196,10 @@ Current checkpoint:
 - [x] Pass the basic, nested, typed, named-result, panic-replacement, goroutine,
   Goexit, deep-unwind, error-interface, and panic-time GC cases in normal builds
   (21 of 21 must-pass cases).
-- [ ] Make the defer/panic batch pass under optimization and the required stress
+- [x] Pass the complete defer/panic batch under optimization (21 of 21
+  must-pass cases, plus the deliberate uncaught-panic subprocess).
+- [x] Run all three optimized panic/stack GC cases 100 times with `GOGC=1`.
+- [ ] Run the complete defer/panic batch under the remaining multi-P stress
   configurations.
 
 Start with the smallest `no deferreturn` case, then move through nested defers,

@@ -102,6 +102,18 @@ func TestFoldIdentities(t *testing.T) {
 	check(func(f *ir.Func, e *ir.Block, x ir.Ref) ir.Ref { return e.Shl(ir.ClsW, x, f.Word(0)) }, true, 0)  // x<<0 = x
 }
 
+func TestFoldPreservesWidthChangingIdentity(t *testing.T) {
+	f := ir.NewModule().NewFunc("widen", ir.ClsL)
+	value := f.Param("value", ir.ClsW)
+	entry := f.Entry()
+	widened := entry.Sub(ir.ClsL, value, f.Long(0))
+	entry.Ret(widened)
+
+	assert.False(t, Fold(f))
+	assert.Len(t, entry.Instrs, 1)
+	assert.Equal(t, ir.ClsL, f.ClassOf(entry.Jmp.Arg))
+}
+
 func TestFoldMoreIdentities(t *testing.T) {
 	// Each builder returns the value to return; want is either x or a constant.
 	cases := []struct {

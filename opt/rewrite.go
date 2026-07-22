@@ -37,6 +37,7 @@ func applySubst(f *ir.Func, s subst) {
 			for j := range in.Args {
 				in.Args[j] = s.resolve(in.Args[j])
 			}
+			in.ClosureContext = s.resolve(in.ClosureContext)
 		}
 		b.Jmp.Arg = s.resolve(b.Jmp.Arg)
 		for index := range b.Jmp.Args {
@@ -60,7 +61,7 @@ func useCounts(f *ir.Func) map[uint32]int {
 			}
 		}
 		for i := range b.Instrs {
-			for _, a := range b.Instrs[i].Args {
+			for _, a := range b.Instrs[i].Uses() {
 				add(a)
 			}
 		}

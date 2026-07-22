@@ -53,3 +53,16 @@ func TestDeadFuncElimKeepsAddressTakenViaPhi(t *testing.T) {
 	DeadFuncElim(m)
 	assert.True(t, funcNames(m)["helper"], "helper kept: its address is taken in a phi")
 }
+
+func TestDeadFuncElimMatchesSemanticAndLinkerSymbolSpellings(t *testing.T) {
+	m := ir.NewModule()
+	helper := m.NewFuncVoid("runtime.interfaceDispatchFailure")
+	helper.Entry().RetVoid()
+
+	caller := m.NewFuncVoid("caller").Export()
+	caller.Entry().CallVoid(caller.Sym("runtime_interfaceDispatchFailure", 0))
+	caller.Entry().RetVoid()
+
+	DeadFuncElim(m)
+	assert.True(t, funcNames(m)[helper.Name], "linker-spelled reference keeps semantic function name")
+}

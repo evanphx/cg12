@@ -68,7 +68,7 @@ func (c *CFG) Liveness() *Liveness {
 						live.Remove(int(d.ID)) // extra call-defined registers
 					}
 				}
-				for _, a := range in.Args {
+				for _, a := range in.Uses() {
 					live.AddRef(a) // use
 				}
 			}

@@ -101,36 +101,63 @@ func TestInlineNoSplitCallsOnlyChangesNoSplitCallers(t *testing.T) {
 	assert.Zero(t, nosplitCalls)
 }
 
-func TestInlinePreservesFixedRegisterTemps(t *testing.T) {
+func TestInlineMapsClosureContextToCallSiteValue(t *testing.T) {
 	module := ir.NewModule()
 
 	helper := module.NewFuncVoid("callClosure")
-	closure := helper.Param("closure", ir.ClsP)
+	helper.HasClosureContext = true
+	closure := helper.NewTemp("closure", ir.ClsP)
 	helperBlock := helper.Entry()
-	context := helperBlock.Copy(ir.ClsP, closure)
-	contextTemp := helper.Temp(context)
+	contextTemp := helper.Temp(closure)
 	contextTemp.Fixed = true
 	contextTemp.Reg = 26
 	contextTemp.GCRef = true
-	code := helperBlock.Load(ir.ClsP, context)
+	code := helperBlock.Load(ir.ClsP, closure)
 	helperBlock.CallVoid(code)
-	helperBlock.Instrs[len(helperBlock.Instrs)-1].ClosureCall = true
 	helperBlock.RetVoid()
 
 	caller := module.NewFuncVoid("caller")
 	value := caller.Param("value", ir.ClsP)
-	caller.Entry().CallVoid(caller.Sym("callClosure", 0), value)
+	caller.Entry().CallVoid(caller.Sym("callClosure", 0))
+	call := &caller.Entry().Instrs[0]
+	call.ClosureCall = true
+	call.ClosureContext = value
 	caller.Entry().RetVoid()
 
 	require.True(t, opt.Inline(module))
 
-	foundFixedContext := false
+	foundContextLoad := false
 	for _, temporary := range caller.Temps {
-		if temporary.Fixed && temporary.Reg == 26 && temporary.GCRef {
-			foundFixedContext = true
+		if temporary.Name == "closure" && temporary.Fixed {
+			t.Fatal("inlined closure retained a synthetic incoming register")
 		}
 	}
-	assert.True(t, foundFixedContext, "inlined closure context must remain pinned to x26")
+	for _, block := range caller.Blocks {
+		for _, instruction := range block.Instrs {
+			if instruction.Op.IsLoad() && instruction.Arg(0) == value {
+				foundContextLoad = true
+			}
+		}
+	}
+	assert.True(t, foundContextLoad, "inlined closure must read the call-site context")
+}
+
+func TestInlineRejectsClosureWithoutCallSiteContext(t *testing.T) {
+	module := ir.NewModule()
+	helper := module.NewFuncVoid("closure")
+	helper.HasClosureContext = true
+	context := helper.NewTemp("closure", ir.ClsP)
+	contextTemporary := helper.Temp(context)
+	contextTemporary.Fixed = true
+	contextTemporary.Reg = 26
+	helper.Entry().Store(helper.Word(1), context)
+	helper.Entry().RetVoid()
+
+	caller := module.NewFuncVoid("caller")
+	caller.Entry().CallVoid(caller.Sym("closure", 0))
+	caller.Entry().RetVoid()
+
+	assert.False(t, opt.Inline(module))
 }
 
 func TestInlineHeapAllocationExposesCallerLocalObject(t *testing.T) {
@@ -313,6 +340,41 @@ func TestInlineSkipsFrameScopedDefers(t *testing.T) {
 
 	assert.False(t, opt.Inline(module))
 	assert.Equal(t, 3, countCalls(module))
+}
+
+func TestInlinePreservesFrameScopedRuntimeCallsite(t *testing.T) {
+	module := ir.NewModule()
+	deferReturn := module.NewFuncVoid("runtime.deferreturn")
+	deferReturn.Entry().RetVoid()
+
+	caller := module.NewFuncVoid("caller")
+	caller.Entry().CallVoid(caller.Sym("runtime.deferreturn", 0))
+	caller.Entry().RetVoid()
+
+	assert.False(t, opt.Inline(module))
+	assert.Equal(t, 1, countCalls(module))
+}
+
+func TestInlineSkipsCallerFrameIntrinsics(t *testing.T) {
+	for _, test := range []struct {
+		name string
+		emit func(*ir.Block) ir.Ref
+	}{
+		{name: "caller-pc", emit: func(block *ir.Block) ir.Ref { return block.CallerPC() }},
+		{name: "caller-sp", emit: func(block *ir.Block) ir.Ref { return block.CallerSP() }},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			module := ir.NewModule()
+			callee := module.NewFunc("callee", ir.ClsL)
+			callee.Entry().Ret(test.emit(callee.Entry()))
+
+			caller := module.NewFunc("caller", ir.ClsL).Export()
+			caller.Entry().Ret(caller.Entry().Call(ir.ClsL, caller.Sym("callee", 0)))
+
+			assert.False(t, opt.Inline(module))
+			assert.Equal(t, 1, countCalls(module))
+		})
+	}
 }
 
 func TestInlineRecordsProvenance(t *testing.T) {

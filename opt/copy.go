@@ -9,7 +9,7 @@ func Copy(f *ir.Func) bool {
 	for _, b := range f.Blocks {
 		for i := range b.Instrs {
 			in := &b.Instrs[i]
-			if in.Op == ir.OCopy && in.To.Kind == ir.RefTemp && f.ClassOf(in.Args[0]) == in.Cls {
+			if in.Op == ir.OCopy && in.To.Kind == ir.RefTemp && !f.Temp(in.To).Fixed && f.ClassOf(in.Args[0]) == in.Cls {
 				raw[in.To.ID] = in.Args[0]
 			}
 		}
@@ -39,7 +39,8 @@ func Copy(f *ir.Func) bool {
 	applySubst(f, resolved)
 	for _, b := range f.Blocks {
 		for i := range b.Instrs {
-			if b.Instrs[i].Op == ir.OCopy && f.ClassOf(b.Instrs[i].Args[0]) == b.Instrs[i].Cls {
+			instruction := &b.Instrs[i]
+			if instruction.Op == ir.OCopy && instruction.To.Kind == ir.RefTemp && !f.Temp(instruction.To).Fixed && f.ClassOf(instruction.Args[0]) == instruction.Cls {
 				b.Instrs[i] = ir.Instr{Op: ir.ONop}
 			}
 		}

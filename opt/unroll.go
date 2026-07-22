@@ -66,6 +66,9 @@ func findUnrollable(caller *ir.Func, cg *callGraph, scc *sccInfo) (*ir.Block, in
 			if callee == nil || scc.comp[callee] != scc.comp[caller] {
 				continue // not a back-edge inside this recursion cycle
 			}
+			if !canInlineCall(caller, in, callee) {
+				continue
+			}
 			if len(in.Args)-1 != len(callee.Params) {
 				continue
 			}

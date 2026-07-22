@@ -89,7 +89,7 @@ func (s *gcmScheduler) classify() {
 			if in.To.Kind != ir.RefTemp {
 				continue
 			}
-			if movable(&in) {
+			if movable(&in) && !s.f.Temp(in.To).Fixed {
 				s.movInstr[in.To.ID] = in
 				s.origBlock[in.To.ID] = b
 				s.movIDs = append(s.movIDs, in.To.ID)
@@ -105,7 +105,7 @@ func (s *gcmScheduler) unpin() {
 	for _, b := range s.cfg.RPO {
 		out := b.Instrs[:0]
 		for _, in := range b.Instrs {
-			if in.To.Kind == ir.RefTemp && movable(&in) {
+			if in.To.Kind == ir.RefTemp && movable(&in) && !s.f.Temp(in.To).Fixed {
 				continue
 			}
 			out = append(out, in)
@@ -161,8 +161,8 @@ func (s *gcmScheduler) collectUses() {
 				}
 			}
 		}
-		for _, in := range b.Instrs { // pinned instructions only (movables removed)
-			for _, a := range in.Args {
+		for index := range b.Instrs { // pinned instructions only (movables removed)
+			for _, a := range b.Instrs[index].Uses() {
 				if a.Kind == ir.RefTemp {
 					addFixed(a.ID, b)
 				}
@@ -300,8 +300,8 @@ func scheduleBlock(pinned, movable []ir.Instr) []ir.Instr {
 		adj[from] = append(adj[from], to)
 		indeg[to]++
 	}
-	for i, it := range items {
-		for _, a := range it.Args {
+	for i := range items {
+		for _, a := range items[i].Uses() {
 			if a.Kind == ir.RefTemp {
 				if j, ok := defIndex[a.ID]; ok && j != i {
 					addEdge(j, i)

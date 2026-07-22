@@ -145,7 +145,7 @@ func computeSafepointRoots(f *ir.Func, cfg *analysis.CFG, liveness *analysis.Liv
 			// Arguments become live before the instruction. Recording roots first
 			// excludes call-only arguments, while retaining an argument that also
 			// has a genuine use after the call.
-			for _, argument := range instruction.Args {
+			for _, argument := range instruction.Uses() {
 				live.AddRef(argument)
 			}
 		}
@@ -253,7 +253,7 @@ func buildIntervals(f *ir.Func, cfg *analysis.CFG, live *analysis.Liveness, num 
 			if in.Op == ir.OAsm {
 				argEnd = p + 1
 			}
-			for _, a := range in.Args {
+			for _, a := range in.Uses() {
 				if a.Kind == ir.RefTemp {
 					extend(int(a.ID), argEnd)
 				}

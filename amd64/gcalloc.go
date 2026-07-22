@@ -453,7 +453,7 @@ func instrDefs(in *ir.Instr) []int {
 // instrUses returns the temporaries an instruction reads.
 func instrUses(in *ir.Instr) []int {
 	var u []int
-	for _, a := range in.Args {
+	for _, a := range in.Uses() {
 		if a.Kind == ir.RefTemp {
 			u = append(u, int(a.ID))
 		}

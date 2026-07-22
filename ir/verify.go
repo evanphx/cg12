@@ -223,6 +223,9 @@ func verifyInstr(f *Func, b *Block, in *Instr) error {
 			return err
 		}
 	}
+	if err := verifyRef(f, b, in.Op.String(), in.ClosureContext); err != nil {
+		return err
+	}
 	if err := verifyRef(f, b, in.Op.String(), in.To); err != nil {
 		return err
 	}

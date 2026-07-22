@@ -1109,6 +1109,43 @@ func main() {
 	t.Fatal("reachable syscall/asm_linux_arm64.s was not retained")
 }
 
+func TestExportAssemblyReferencedFunctions(t *testing.T) {
+	module := ir.NewModule()
+	referenced := module.NewFuncVoid("runtime.morestackc")
+	referenced.Entry().RetVoid()
+	unreferenced := module.NewFuncVoid("runtime.ordinaryHelper")
+	unreferenced.Entry().RetVoid()
+
+	exportAssemblyReferencedFunctions(module, map[string]bool{
+		"runtime_morestackc": true,
+	})
+
+	if !referenced.Linkage.Export {
+		t.Fatal("assembly-referenced function was not exported")
+	}
+	if unreferenced.Linkage.Export {
+		t.Fatal("unreferenced function was unexpectedly exported")
+	}
+}
+
+func TestCompileExecutableExportsSingleArgumentLinkname(t *testing.T) {
+	module, err := CompileExecutable("main.go", []byte("package main\nfunc main() {}\n"))
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	for _, function := range module.Funcs {
+		if function.Name != "runtime.morestackc" {
+			continue
+		}
+		if !function.Linkage.Export {
+			t.Fatal("single-argument //go:linkname function is not exported")
+		}
+		return
+	}
+	t.Fatal("single-argument //go:linkname function was not compiled")
+}
+
 func TestCompileExecutableUsesAggregateABIForInterfaceResults(t *testing.T) {
 	module, err := CompileExecutable("main.go", []byte(`package main
 import "sync"

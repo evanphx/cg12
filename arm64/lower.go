@@ -93,6 +93,9 @@ func stabilizeClosureContext(function *ir.Func) {
 					block.Instrs[index].Args[argumentIndex] = saved
 				}
 			}
+			if block.Instrs[index].ClosureContext == incoming {
+				block.Instrs[index].ClosureContext = saved
+			}
 		}
 		if block.Jmp.Arg == incoming {
 			block.Jmp.Arg = saved
@@ -621,7 +624,7 @@ func defUse(f *ir.Func) (uses map[uint32]int, defOf func(ir.Ref) *ir.Instr) {
 		}
 		for i := range b.Instrs {
 			in := &b.Instrs[i]
-			for _, a := range in.Args {
+			for _, a := range in.Uses() {
 				mark(a)
 			}
 			if in.To.Kind == ir.RefTemp {
@@ -1306,7 +1309,8 @@ func lowerCalls(f *ir.Func) error {
 			loweredCall := ir.Instr{
 				Op: ir.OCall, Args: append([]ir.Ref{callee}, pins...),
 				Aux: int64(stackBytes), To: callTo, Cls: callCls, Defs: callDefs,
-				Tail: in.Tail, ClosureCall: in.ClosureCall, Pos: in.Pos, Inl: in.Inl,
+				Tail: in.Tail, ClosureCall: in.ClosureCall, ClosureContext: in.ClosureContext,
+				Pos: in.Pos, Inl: in.Inl,
 				CallConv: ir.CallConvAAPCS64, CallConvSet: true,
 			}
 			if goInternal {

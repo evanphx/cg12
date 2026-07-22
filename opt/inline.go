@@ -319,7 +319,7 @@ func findHeapAllocatingConstructor(caller *ir.Func, graph *callGraph, components
 				continue
 			}
 			callee := directCallee(caller, instruction, graph.byName)
-			if callee == nil || components.recursive[callee] {
+			if callee == nil || components.recursive[callee] || !canInlineCall(caller, instruction, callee) {
 				continue
 			}
 			if len(instruction.Args)-1 != len(callee.Params) {
@@ -348,7 +348,7 @@ func findHeapAllocationConsumer(caller *ir.Func, graph *callGraph, components *s
 				continue
 			}
 			callee := directCallee(caller, instruction, graph.byName)
-			if callee == nil || components.recursive[callee] {
+			if callee == nil || components.recursive[callee] || !canInlineCall(caller, instruction, callee) {
 				continue
 			}
 			if len(instruction.Args)-1 != len(callee.Params) {
@@ -456,7 +456,7 @@ func findSplitCalleeToInline(caller *ir.Func, cg *callGraph, scc *sccInfo) (*ir.
 				continue
 			}
 			callee := directCallee(caller, instruction, cg.byName)
-			if callee == nil || callee.NoSplit || scc.recursive[callee] {
+			if callee == nil || callee.NoSplit || scc.recursive[callee] || !canInlineCall(caller, instruction, callee) {
 				continue
 			}
 			if len(instruction.Args)-1 != len(callee.Params) {
@@ -537,7 +537,7 @@ func findInlinable(caller *ir.Func, cg *callGraph, scc *sccInfo, sites map[*ir.F
 				continue
 			}
 			callee := directCallee(caller, in, cg.byName)
-			if callee == nil || scc.recursive[callee] {
+			if callee == nil || scc.recursive[callee] || !canInlineCall(caller, in, callee) {
 				continue // indirect/external, or part of a recursion cycle
 			}
 			if !accept(callee) {
@@ -562,6 +562,16 @@ func directCallee(caller *ir.Func, call *ir.Instr, byName map[string]*ir.Func) *
 		return nil
 	}
 	return byName[caller.Consts[c.ID].Sym]
+}
+
+func canInlineCall(caller *ir.Func, call *ir.Instr, callee *ir.Func) bool {
+	if isFrameScopedRuntimeCall(caller, call) {
+		return false
+	}
+	if !callee.HasClosureContext {
+		return true
+	}
+	return call.ClosureCall && !call.ClosureContext.IsNone()
 }
 
 // inlinableStructure reports whether callee can be inlined mechanically: it has a
@@ -598,7 +608,7 @@ func inlinableStructure(callee *ir.Func) bool {
 			if b.Instrs[k].Op == ir.OBlockAddr {
 				return false
 			}
-			if isFrameScopedRuntimeCall(callee, &b.Instrs[k]) {
+			if isFrameScopedRuntimeCall(callee, &b.Instrs[k]) || isCallerFrameIntrinsic(&b.Instrs[k]) {
 				return false
 			}
 		}
@@ -618,6 +628,22 @@ func inlinableWithBudget(callee *ir.Func, instructionBudget int) bool {
 		return false
 	}
 	return funcSize(callee) <= instructionBudget
+}
+
+// isCallerFrameIntrinsic reports operations whose result names the physical
+// caller's frame. Inlining their containing function would change that caller
+// and therefore change program semantics. This is the same restriction used by
+// the Go compiler for internal/runtime/sys.GetCallerPC and GetCallerSP.
+func isCallerFrameIntrinsic(instruction *ir.Instr) bool {
+	if instruction.Op != ir.OIntrinsic || instruction.Intrin == nil {
+		return false
+	}
+	switch instruction.Intrin.Name {
+	case "getcallerpc", "getcallersp":
+		return true
+	default:
+		return false
+	}
 }
 
 func isFrameScopedRuntimeCall(function *ir.Func, instruction *ir.Instr) bool {
@@ -714,12 +740,17 @@ func spliceCall(caller *ir.Func, b *ir.Block, idx int, callee *ir.Func, cg *call
 
 	tempMap := make([]ir.Ref, nTemps)
 	isParam := make([]bool, nTemps)
+	closureContext := inlineClosureContext(caller, call)
 	for k, p := range callee.Params {
 		tempMap[p.ID] = args[k] // a parameter becomes its argument, in the caller's terms
 		isParam[p.ID] = true
 	}
 	for id := 0; id < nTemps; id++ {
 		if t := callee.Temps[id]; t != nil && !isParam[id] {
+			if callee.HasClosureContext && t.Name == "closure" && t.Fixed && call.ClosureCall {
+				tempMap[id] = closureContext
+				continue
+			}
 			mapped := caller.NewTemp(t.Name, t.Cls)
 			cloned := caller.Temp(mapped)
 			cloned.Agg = t.Agg
@@ -958,6 +989,22 @@ func aggOffset(f *ir.Func, base ir.Ref, off int, out *[]ir.Instr) ir.Ref {
 	return t
 }
 
+func inlineClosureContext(caller *ir.Func, call ir.Instr) ir.Ref {
+	context := call.ClosureContext
+	if context.Kind != ir.RefTemp {
+		return context
+	}
+	for _, block := range caller.Blocks {
+		for index := range block.Instrs {
+			instruction := &block.Instrs[index]
+			if instruction.To == context && instruction.Op == ir.OCopy && len(instruction.Args) == 1 {
+				return instruction.Args[0]
+			}
+		}
+	}
+	return context
+}
+
 // cloneInstr copies an instruction, remapping every value reference and any block
 // reference (an OBlockAddr's &&label target) into the caller's cloned body.
 func cloneInstr(caller *ir.Func, in *ir.Instr, mapRef func(ir.Ref) ir.Ref, mapBlock func(*ir.Block) *ir.Block) ir.Instr {
@@ -979,12 +1026,13 @@ func cloneInstr(caller *ir.Func, in *ir.Instr, mapRef func(ir.Ref) ir.Ref, mapBl
 		RetValues:         in.RetValues,
 		StackResult:       mapRef(in.StackResult),
 		StackResultOffset: in.StackResultOffset,
+		Tail:              in.Tail,
+		Volatile:          in.Volatile,
+		ClosureCall:       in.ClosureCall,
+		ClosureContext:    mapRef(in.ClosureContext),
 		Asm:               in.Asm,
 		Intrin:            in.Intrin,
 		Pos:               in.Pos,
-		Volatile:          in.Volatile,
-		Tail:              in.Tail,
-		ClosureCall:       in.ClosureCall,
 	}
 	if in.Blk != nil {
 		out.Blk = mapBlock(in.Blk)

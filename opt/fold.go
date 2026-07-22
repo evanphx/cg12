@@ -25,6 +25,9 @@ func Fold(f *ir.Func) bool {
 				continue
 			}
 			if r, ok := foldInstr(f, def, in); ok {
+				if f.ClassOf(r) != in.Cls {
+					continue
+				}
 				s[in.To.ID] = r
 				b.Instrs[i] = ir.Instr{Op: ir.ONop}
 				changed = true

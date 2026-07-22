@@ -326,7 +326,8 @@ func lowerCalls(f *ir.Func) error {
 			out = append(out, ir.Instr{
 				Op: ir.OCall, Args: append([]ir.Ref{callee}, pins...),
 				Aux: int64(a.stackBytes()), To: callTo, Cls: callCls, Defs: callDefs,
-				Tail: in.Tail, Pos: in.Pos, Inl: in.Inl,
+				Tail: in.Tail, ClosureCall: in.ClosureCall, ClosureContext: in.ClosureContext,
+				Pos: in.Pos, Inl: in.Inl,
 			})
 			out = append(out, post...)
 		}

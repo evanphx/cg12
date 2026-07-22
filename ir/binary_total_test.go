@@ -68,6 +68,7 @@ func TestInstrRoundTripsEveryField(t *testing.T) {
 		Tail:              true,
 		Volatile:          true,
 		ClosureCall:       true,
+		ClosureContext:    Ref{Kind: RefTemp, ID: 3},
 		Asm: &AsmOp{
 			Template:      "movl %k1, %k0",
 			Ops:           []AsmOperandKind{AsmRegOut, AsmRegIn},

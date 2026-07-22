@@ -1,6 +1,10 @@
 package opt
 
-import "github.com/evanphx/cg12/ir"
+import (
+	"strings"
+
+	"github.com/evanphx/cg12/ir"
+)
 
 // DeadFuncElim removes functions that are neither exported nor referenced by any
 // symbol operand anywhere in the module — chiefly helpers that inlining has
@@ -11,14 +15,14 @@ func DeadFuncElim(m *ir.Module) bool {
 	referenced := make(map[string]bool)
 	mark := func(f *ir.Func, r ir.Ref) {
 		if r.Kind == ir.RefConst && f.Consts[r.ID].Kind == ir.ConstSym {
-			referenced[f.Consts[r.ID].Sym] = true
+			referenced[linkerSymbol(f.Consts[r.ID].Sym)] = true
 		}
 	}
 	for _, f := range m.Funcs {
 		for _, b := range f.Blocks {
 			for i := range b.Instrs {
 				in := &b.Instrs[i]
-				for _, a := range in.Args {
+				for _, a := range in.Uses() {
 					mark(f, a)
 				}
 			}
@@ -39,7 +43,7 @@ func DeadFuncElim(m *ir.Module) bool {
 	for _, d := range m.Data {
 		for _, it := range d.Items {
 			if it.Sym != "" {
-				referenced[it.Sym] = true
+				referenced[linkerSymbol(it.Sym)] = true
 			}
 		}
 	}
@@ -47,7 +51,7 @@ func DeadFuncElim(m *ir.Module) bool {
 	kept := m.Funcs[:0]
 	changed := false
 	for _, f := range m.Funcs {
-		if f.Linkage.Export || referenced[f.Name] {
+		if f.Linkage.Export || referenced[linkerSymbol(f.Name)] {
 			kept = append(kept, f)
 			continue
 		}
@@ -55,4 +59,23 @@ func DeadFuncElim(m *ir.Module) bool {
 	}
 	m.Funcs = kept
 	return changed
+}
+
+// linkerSymbol mirrors the target backends' symbol spelling. Frontend-created
+// helper calls sometimes already use linker spelling (runtime_foo), while Go
+// function definitions retain semantic spelling (runtime.foo). They denote the
+// same ELF symbol and therefore must participate in the same reachability set.
+func linkerSymbol(name string) string {
+	var symbol strings.Builder
+	for _, character := range name {
+		if character == '_' || character >= 'a' && character <= 'z' || character >= 'A' && character <= 'Z' || character >= '0' && character <= '9' {
+			symbol.WriteRune(character)
+		} else {
+			symbol.WriteByte('_')
+		}
+	}
+	if symbol.Len() == 0 {
+		return "anon"
+	}
+	return symbol.String()
 }
