@@ -406,6 +406,12 @@ func TestARM64RuntimeCapabilityStatus(t *testing.T) {
 		},
 		{
 			category:    "goroutine",
+			name:        "select-global-locked-gc",
+			source:      "runtime_select_global_locked_gc.go",
+			expectation: runtimeCapabilityMustPass,
+		},
+		{
+			category:    "goroutine",
 			name:        "closed-channel-receive",
 			source:      "runtime_closed_channel_receive.go",
 			expectation: runtimeCapabilityMustPass,

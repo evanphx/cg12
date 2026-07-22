@@ -228,12 +228,12 @@ Add tests for notification, stop/reset, repeated delivery, delivery during GC,
 delivery while blocked in netpoll, and concurrent atomic operations. Keep
 unsupported fatal-signal behavior in subprocess tests.
 
-Current status: repeated stop/reset, delivery during GC, delivery during netpoll,
-and concurrent atomic contention pass in the runtime status suite. The
-notification-context case still fails in `runtime.ensureSigM`'s two-channel
-blocking `selectgo` path while locking channel wait queues, so the remaining
-work is the general `selectgo` stack/root/state preservation case rather than
-the single-case nonblocking select lowering.
+Current status: the full `stdlib-signals` status category has passed once with
+notification context, repeated stop/reset, delivery during GC, delivery during
+netpoll, and concurrent atomic contention. An earlier run still saw
+`runtime.ensureSigM` crash in its two-channel blocking `selectgo` path while
+locking channel wait queues, so keep stressing the general `selectgo`
+stack/root/state preservation case under repeated runs and higher `GOMAXPROCS`.
 
 Exit criterion: signal tests pass under `GOMAXPROCS=1`, `2`, and `4`, including
 race-like stress, without deadlock or runtime lock corruption.
