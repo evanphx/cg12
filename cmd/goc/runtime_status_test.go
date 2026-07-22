@@ -1204,6 +1204,31 @@ func TestARM64RuntimeCapabilityStatus(t *testing.T) {
 			expectation: runtimeCapabilityMustPass,
 		},
 		{
+			category:    "stdlib-signals",
+			name:        "repeated-stop-reset",
+			source:      "stdlib_signal_repeated_stop_reset.go",
+			expectation: runtimeCapabilityMustPass,
+		},
+		{
+			category:    "stdlib-signals",
+			name:        "during-gc",
+			source:      "stdlib_signal_during_gc.go",
+			expectation: runtimeCapabilityMustPass,
+		},
+		{
+			category:       "stdlib-signals",
+			name:           "during-netpoll",
+			source:         "stdlib_signal_during_netpoll.go",
+			expectation:    runtimeCapabilityMustPass,
+			requiresAFINET: true,
+		},
+		{
+			category:    "stdlib-signals",
+			name:        "atomic-contention",
+			source:      "stdlib_signal_atomic_contention.go",
+			expectation: runtimeCapabilityMustPass,
+		},
+		{
 			category:       "stdlib-http",
 			name:           "client-server",
 			source:         "stdlib_http_client_server.go",

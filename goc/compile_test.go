@@ -248,6 +248,58 @@ func findCompiledFunction(t *testing.T, module *ir.Module, name string) *ir.Func
 	return nil
 }
 
+func TestCompileExecutableKeepsClosureCapturesLiveAtSafepoints(t *testing.T) {
+	module, err := CompileExecutable("closure_capture.go", []byte(`package main
+
+func use(value *int) {
+	println(*value)
+}
+
+func main() {
+	value := 42
+	done := make(chan struct{})
+	go func() {
+		use(&value)
+		close(done)
+	}()
+	<-done
+}
+`))
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	var closure *ir.Func
+	for _, function := range module.Funcs {
+		if strings.HasPrefix(function.Name, "main.func.") {
+			closure = function
+			break
+		}
+	}
+	if closure == nil {
+		t.Fatal("compiled module does not contain the function literal")
+	}
+
+	captureLoads := 0
+	for _, block := range closure.Blocks {
+		for _, instruction := range block.Instrs {
+			if !instruction.Op.IsLoad() || instruction.To.Kind != ir.RefTemp {
+				continue
+			}
+			if instruction.Pos.Valid() {
+				continue
+			}
+			captureLoads++
+			if !closure.Temp(instruction.To).GCRef {
+				t.Errorf("closure capture %%%d is not a managed GC reference", instruction.To.ID)
+			}
+		}
+	}
+	if captureLoads != 2 {
+		t.Fatalf("closure capture loads = %d, want 2", captureLoads)
+	}
+}
+
 func TestCompileExecutablePreservesDeferReturnRecoveryEntry(t *testing.T) {
 	module, err := CompileExecutable("defer_recovery.go", []byte(`package main
 

@@ -7690,7 +7690,9 @@ func (g *gen) iteratorRangeStmt(statement *ast.RangeStmt, label string, iterator
 	}
 	environment := child.closureContext()
 	for index, capture := range captures {
-		child.vars[capture] = child.cur.Load(ir.ClsP, child.offset(environment, int64(8*(index+1))))
+		captureAddress := child.cur.Load(ir.ClsP, child.offset(environment, int64(8*(index+1))))
+		child.fn.MarkGCRef(captureAddress)
+		child.vars[capture] = captureAddress
 	}
 	bindVariable := func(expression ast.Expr, value ir.Ref, valueType types.Type) {
 		identifier, ok := expression.(*ast.Ident)
@@ -8480,6 +8482,10 @@ func (g *gen) selectStmt(statement *ast.SelectStmt, label string) {
 		g.cur = done
 		return
 	}
+	if communicationCount == 1 && defaultClause != nil {
+		g.selectSingleDefault(clauses, defaultClause, label)
+		return
+	}
 
 	caseStorage := g.localAlloc(8, communicationCount*16)
 	for index := 0; index < communicationCount; index++ {
@@ -8601,6 +8607,113 @@ func (g *gen) selectStmt(statement *ast.SelectStmt, label string) {
 			g.cur.Goto(done)
 		}
 	}
+	g.breaks = g.breaks[:len(g.breaks)-1]
+	g.clearLabeledControl(label)
+	g.cur = done
+	if !continues {
+		done.Hlt()
+	}
+}
+
+func (g *gen) selectSingleDefault(clauses []*ast.CommClause, defaultClause *ast.CommClause, label string) {
+	var communicationClause *ast.CommClause
+	for _, clause := range clauses {
+		if clause != defaultClause {
+			communicationClause = clause
+			break
+		}
+	}
+	if communicationClause == nil {
+		g.fail(defaultClause, "select default optimization missing communication case")
+		return
+	}
+
+	selectedBlock := g.block("selectcase")
+	defaultBlock := g.block("selectdefault")
+	done := g.block("selectend")
+
+	g.breaks = append(g.breaks, done)
+	g.setLabeledControl(label, done, nil)
+	continues := false
+
+	switch operation := communicationClause.Comm.(type) {
+	case *ast.SendStmt:
+		channel := g.expr(operation.Chan)
+		channelType := g.typeAndValue(operation.Chan).Type.Underlying().(*types.Chan)
+		elementAddress := g.channelSendAddress(operation.Value, channelType.Elem())
+		selected := g.cur.Call(ir.ClsW, g.fn.Sym("runtime.selectnbsend", 0), channel, elementAddress)
+		g.cur.Jnz(selected, selectedBlock, defaultBlock)
+	case *ast.ExprStmt:
+		receive, ok := operation.X.(*ast.UnaryExpr)
+		if !ok || receive.Op != token.ARROW {
+			g.fail(operation, "invalid select receive case")
+			return
+		}
+		channel, elementAddress, _ := g.prepareSelectReceive(receive)
+		receivedSlot := g.alloc(types.Typ[types.Bool])
+		selected := g.cur.Call(ir.ClsW, g.fn.Sym("runtime.selectnbrecv", 0), elementAddress, channel, receivedSlot)
+		g.cur.Jnz(selected, selectedBlock, defaultBlock)
+	case *ast.AssignStmt:
+		if len(operation.Rhs) != 1 || len(operation.Lhs) < 1 || len(operation.Lhs) > 2 {
+			g.fail(operation, "invalid select receive assignment")
+			return
+		}
+		receive, ok := operation.Rhs[0].(*ast.UnaryExpr)
+		if !ok || receive.Op != token.ARROW {
+			g.fail(operation, "invalid select receive assignment")
+			return
+		}
+		channel, elementAddress, receiveType := g.prepareSelectReceive(receive)
+		receivedSlot := g.alloc(types.Typ[types.Bool])
+		selected := g.cur.Call(ir.ClsW, g.fn.Sym("runtime.selectnbrecv", 0), elementAddress, channel, receivedSlot)
+		g.cur.Jnz(selected, selectedBlock, defaultBlock)
+
+		g.cur = selectedBlock
+		value := g.channelReceiveValue(elementAddress, receiveType)
+		g.assignSelectValue(operation.Lhs[0], operation.Tok, value, receiveType)
+		if len(operation.Lhs) == 2 {
+			received := g.load(receivedSlot, types.Typ[types.Bool])
+			g.assignSelectValue(operation.Lhs[1], operation.Tok, received, types.Typ[types.Bool])
+		}
+		g.stmts(communicationClause.Body)
+		if g.live() {
+			continues = true
+			g.cur.Goto(done)
+		}
+
+		g.cur = defaultBlock
+		g.stmts(defaultClause.Body)
+		if g.live() {
+			continues = true
+			g.cur.Goto(done)
+		}
+
+		g.breaks = g.breaks[:len(g.breaks)-1]
+		g.clearLabeledControl(label)
+		g.cur = done
+		if !continues {
+			done.Hlt()
+		}
+		return
+	default:
+		g.fail(communicationClause.Comm, "unsupported select communication %T", communicationClause.Comm)
+		return
+	}
+
+	g.cur = selectedBlock
+	g.stmts(communicationClause.Body)
+	if g.live() {
+		continues = true
+		g.cur.Goto(done)
+	}
+
+	g.cur = defaultBlock
+	g.stmts(defaultClause.Body)
+	if g.live() {
+		continues = true
+		g.cur.Goto(done)
+	}
+
 	g.breaks = g.breaks[:len(g.breaks)-1]
 	g.clearLabeledControl(label)
 	g.cur = done
@@ -9866,7 +9979,9 @@ func (g *gen) functionLiteral(literal *ast.FuncLit) ir.Ref {
 	}
 	environment := child.closureContext()
 	for i, capture := range captures {
-		child.vars[capture] = child.cur.Load(ir.ClsP, child.offset(environment, int64(8*(i+1))))
+		captureAddress := child.cur.Load(ir.ClsP, child.offset(environment, int64(8*(i+1))))
+		child.fn.MarkGCRef(captureAddress)
+		child.vars[capture] = captureAddress
 		if escaping || g.heapCaptures[capture] != ir.R {
 			child.heapCaptures[capture] = child.vars[capture]
 		}

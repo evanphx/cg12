@@ -603,8 +603,18 @@ func reachableFunctions(roots []*ast.FuncDecl, rootFiles []*ast.File, rootInfo *
 						if block, exists := runtimeFunctions["block"]; exists {
 							queue = append(queue, block)
 						}
-					} else if selectGo, exists := runtimeFunctions["selectgo"]; exists {
-						queue = append(queue, selectGo)
+					} else if nonblocking, send := singleDefaultSelect(statement); nonblocking {
+						name := "selectnbrecv"
+						if send {
+							name = "selectnbsend"
+						}
+						if function, exists := runtimeFunctions[name]; exists {
+							queue = append(queue, function)
+						}
+					} else {
+						if selectGo, exists := runtimeFunctions["selectgo"]; exists {
+							queue = append(queue, selectGo)
+						}
 					}
 				}
 				if call, ok := node.(*ast.CallExpr); ok {
@@ -851,6 +861,26 @@ func assemblySymbolName(name string) string {
 		}
 	}
 	return symbol.String()
+}
+
+func singleDefaultSelect(statement *ast.SelectStmt) (ok bool, send bool) {
+	communicationCount := 0
+	for _, item := range statement.Body.List {
+		clause := item.(*ast.CommClause)
+		if clause.Comm == nil {
+			continue
+		}
+		communicationCount++
+		switch clause.Comm.(type) {
+		case *ast.SendStmt:
+			send = true
+		case *ast.ExprStmt, *ast.AssignStmt:
+			send = false
+		default:
+			return false, false
+		}
+	}
+	return len(statement.Body.List) == 2 && communicationCount == 1, send
 }
 
 func hasRuntimeMapsLinkName(function *ast.FuncDecl) bool {
