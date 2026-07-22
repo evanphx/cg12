@@ -67,6 +67,8 @@ func newSourceLoader(fset *token.FileSet) *sourceLoader {
 		testPackages:         make(map[string]bool),
 		externalTestPackages: make(map[string]string),
 		sources: map[string]bool{
+			"archive/tar":                          true,
+			"archive/zip":                          true,
 			"bufio":                                true,
 			"bytes":                                true,
 			"cmp":                                  true,
@@ -265,6 +267,7 @@ func newSourceLoader(fset *token.FileSet) *sourceLoader {
 			"os":                                         true,
 			"os/exec":                                    true,
 			"os/signal":                                  true,
+			"os/user":                                    true,
 			"path":                                       true,
 			"path/filepath":                              true,
 			"reflect":                                    true,

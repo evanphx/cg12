@@ -87,3 +87,9 @@ tasks. Supported build-selected Plan 9 files, including the unchanged
 `runtime/sys_linux_arm64.s`, are retained with their included headers and
 translated after cg12 IR generation rather than replaced with generated Go or
 handwritten syscall substitutes.
+
+The unchanged `archive/tar` and `archive/zip` packages are mirrored and active.
+Their cg12 status probes write and read in-memory archives, covering USTAR and
+PAX tar headers, stored and deflated zip members, central-directory metadata,
+and the zip reader's `fs.FS` implementation. The pure-Go `os/user` package is
+also active to complete tar's Unix source dependency closure.

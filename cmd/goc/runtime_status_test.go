@@ -737,6 +737,12 @@ func TestARM64RuntimeCapabilityStatus(t *testing.T) {
 			expectation: runtimeCapabilityMustPass,
 		},
 		{
+			category:    "stdlib-os",
+			name:        "user-lookup",
+			source:      "stdlib_os_user_lookup.go",
+			expectation: runtimeCapabilityMustPass,
+		},
+		{
 			category:    "stdlib-encoding",
 			name:        "base64",
 			source:      "stdlib_encoding_base64.go",
@@ -1089,6 +1095,18 @@ func TestARM64RuntimeCapabilityStatus(t *testing.T) {
 			category:    "stdlib-compress",
 			name:        "bzip2",
 			source:      "stdlib_compress_bzip2.go",
+			expectation: runtimeCapabilityMustPass,
+		},
+		{
+			category:    "stdlib-archive",
+			name:        "tar-roundtrip",
+			source:      "stdlib_archive_tar_roundtrip.go",
+			expectation: runtimeCapabilityMustPass,
+		},
+		{
+			category:    "stdlib-archive",
+			name:        "zip-roundtrip",
+			source:      "stdlib_archive_zip_roundtrip.go",
 			expectation: runtimeCapabilityMustPass,
 		},
 		{
