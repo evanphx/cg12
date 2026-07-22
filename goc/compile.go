@@ -345,7 +345,9 @@ func compile(name string, src []byte, options compileOptions) (*ir.Module, error
 	addMemoryHelpers(mod, compileRuntime)
 	if compileRuntime {
 		for _, function := range mod.Funcs {
-			function.CallConv = ir.CallConvAAPCS64
+			if function.CallConv != ir.CallConvGoInternal {
+				function.CallConv = ir.CallConvAAPCS64
+			}
 			function.ManagedFrame = true
 		}
 		opt.InlineNoSplitCalls(mod)
@@ -946,7 +948,7 @@ func interfaceMethodCandidates(g *gen, reachable []functionDecl, method *types.F
 			continue
 		}
 		candidateSignature, _ := function.Type().(*types.Signature)
-		if function == method && candidateSignature != nil && candidateSignature.Recv() != nil && len(index) > 1 {
+		if candidateSignature != nil && candidateSignature.Recv() != nil && len(index) > 1 {
 			if _, embeddedInterface := candidateSignature.Recv().Type().Underlying().(*types.Interface); embeddedInterface {
 				add(function, dynamicType, index)
 			}
@@ -3878,6 +3880,10 @@ func (g *gen) callWithSignature(resultClass ir.Cls, callee ir.Ref, arguments []i
 	}
 	instruction := &g.cur.Instrs[len(g.cur.Instrs)-1]
 	instruction.ClosureCall = g.consumeClosureCall()
+	if instruction.ClosureCall {
+		instruction.CallConv = ir.CallConvGoInternal
+		instruction.CallConvSet = true
+	}
 	instruction.ArgGroups = argumentGroups
 	instruction.AggArgs = aggregateArguments
 	if signature.Results().Len() > 0 && instruction.RetAgg == nil {
@@ -3894,6 +3900,10 @@ func (g *gen) callVoidWithSignature(callee ir.Ref, arguments []ir.Ref, signature
 	g.cur.CallVoid(callee, arguments...)
 	instruction := &g.cur.Instrs[len(g.cur.Instrs)-1]
 	instruction.ClosureCall = g.consumeClosureCall()
+	if instruction.ClosureCall {
+		instruction.CallConv = ir.CallConvGoInternal
+		instruction.CallConvSet = true
+	}
 	instruction.ArgGroups = argumentGroups
 	instruction.AggArgs = aggregateArguments
 	g.clearTransientInterfaceCallArguments(transientArguments, signature, receiverType)
@@ -9155,18 +9165,25 @@ func (g *gen) markManagedValue(value ir.Ref, valueType types.Type) ir.Ref {
 }
 
 func (g *gen) instantiatedFunctionValue(expression ast.Expr, instantiation ast.Expr) ir.Ref {
+	signature, ok := g.typeAndValue(instantiation).Type.Underlying().(*types.Signature)
+	if !ok {
+		g.fail(instantiation, "generic function value has non-function type")
+		return ir.R
+	}
 	switch expression := expression.(type) {
 	case *ast.Ident:
 		if function, ok := g.info.Uses[expression].(*types.Func); ok {
 			if symbol, instantiated := g.instantiatedFunctionSymbol(function, expression); instantiated {
-				return g.staticFunctionValue(symbol)
+				adapter := g.goInternalFunctionAdapter(symbol, signature)
+				return g.staticFunctionValue(adapter)
 			}
 			return g.functionValue(function)
 		}
 	case *ast.SelectorExpr:
 		if function, ok := g.info.Uses[expression.Sel].(*types.Func); ok {
 			if symbol, instantiated := g.instantiatedFunctionSymbol(function, expression); instantiated {
-				return g.staticFunctionValue(symbol)
+				adapter := g.goInternalFunctionAdapter(symbol, signature)
+				return g.staticFunctionValue(adapter)
 			}
 			return g.functionValue(function)
 		}
@@ -9367,6 +9384,7 @@ func (g *gen) methodValue(expression *ast.SelectorExpr, selection *types.Selecti
 	} else {
 		function = g.mod.NewFunc(wrapperName, resultClass)
 	}
+	function.CallConv = ir.CallConvGoInternal
 	wrapper := &gen{
 		fn:                    function,
 		cur:                   function.Entry(),
@@ -9674,6 +9692,7 @@ func (g *gen) functionLiteral(literal *ast.FuncLit) ir.Ref {
 		}
 		child.fn = g.mod.NewFunc(symbol, class)
 	}
+	child.fn.CallConv = ir.CallConvGoInternal
 	var resultAggregate *ir.AggType
 	if signature.Results().Len() > 0 {
 		resultAggregate = child.goABIAggregate(signature.Results().At(0).Type())
@@ -10116,7 +10135,68 @@ func addressBaseIdentifier(expression ast.Expr) (*ast.Ident, bool) {
 }
 
 func (g *gen) functionValue(function *types.Func) ir.Ref {
-	return g.staticFunctionValue(g.functionSymbol(function))
+	symbol := g.functionSymbol(function)
+	signature := compiledFunctionSignature(function)
+	adapter := g.goInternalFunctionAdapter(symbol, signature)
+	return g.staticFunctionValue(adapter)
+}
+
+func (g *gen) goInternalFunctionAdapter(symbol string, signature *types.Signature) string {
+	adapterName := fmt.Sprintf("%s.gointernal.funcvalue.%d", symbol, len(g.mod.Funcs))
+	resultClass := ir.ClsW
+	if signature.Results().Len() > 0 {
+		resultClass, _ = scalar(signature.Results().At(0).Type())
+	}
+
+	var function *ir.Func
+	if signature.Results().Len() == 0 {
+		function = g.mod.NewFuncVoid(adapterName)
+	} else {
+		function = g.mod.NewFunc(adapterName, resultClass)
+	}
+	function.CallConv = ir.CallConvGoInternal
+	function.ManagedFrame = true
+
+	adapter := &gen{
+		fn:                function,
+		cur:               function.Entry(),
+		mod:               g.mod,
+		runtimeAllocation: g.runtimeAllocation,
+		typeTags:          g.typeTags,
+		runtimeTypes:      g.runtimeTypes,
+		goABITypes:        g.goABITypes,
+		linkNames:         g.linkNames,
+		initSymbols:       g.initSymbols,
+	}
+	if signature.Results().Len() > 0 {
+		resultType := signature.Results().At(0).Type()
+		function.RetAgg = adapter.goABIAggregate(resultType)
+		function.RetValues = adapter.runtimeAllocation && isSliceType(resultType)
+	}
+
+	arguments := make([]ir.Ref, 0, signature.Params().Len()+signature.Results().Len())
+	for index := 0; index < signature.Params().Len(); index++ {
+		parameter := signature.Params().At(index)
+		parameterClass, _ := scalar(parameter.Type())
+		arguments = append(arguments, adapter.functionParameter(parameter.Name(), parameter.Type(), parameterClass))
+	}
+	if signature.Results().Len() > 0 && isInlineAggregate(signature.Results().At(0).Type()) && function.RetAgg == nil {
+		arguments = append(arguments, function.ParamRef("result0"))
+	}
+	for index := 1; index < signature.Results().Len(); index++ {
+		arguments = append(arguments, function.ParamRef(fmt.Sprintf("result%d", index)))
+	}
+
+	callee := function.Sym(symbol, 0)
+	if signature.Results().Len() == 0 {
+		adapter.callVoidWithSignature(callee, arguments, signature, nil)
+		adapter.cur.RetVoid()
+		return adapterName
+	}
+
+	result := adapter.callWithSignature(resultClass, callee, arguments, signature, nil)
+	adapter.returnValue(result, signature.Results().At(0).Type())
+	return adapterName
 }
 
 func (g *gen) staticFunctionValue(symbol string) ir.Ref {

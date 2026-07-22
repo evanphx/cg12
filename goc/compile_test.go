@@ -1020,6 +1020,56 @@ func main() {
 	}
 }
 
+func TestCompileExecutableBridgesInstantiatedFunctionValuesToGoInternal(t *testing.T) {
+	module, err := CompileExecutable("main.go", []byte(`package main
+
+type record struct {
+	count int
+	text string
+}
+
+func identity[T any](value T) T {
+	return value
+}
+
+func main() {
+	function := identity[record]
+	value := function(record{count: 42, text: "cg12"})
+	if value.count != 42 {
+		panic("generic function value result mismatch")
+	}
+}
+`))
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	foundBody := false
+	foundAdapter := false
+	for _, function := range module.Funcs {
+		if !strings.Contains(function.Name, "main.identity") {
+			continue
+		}
+		if strings.Contains(function.Name, ".gointernal.funcvalue.") {
+			foundAdapter = true
+			if function.CallConv != ir.CallConvGoInternal {
+				t.Errorf("instantiated function-value adapter convention = %v, want GoInternal", function.CallConv)
+			}
+			continue
+		}
+		foundBody = true
+		if function.CallConv != ir.CallConvAAPCS64 {
+			t.Errorf("instantiated function body convention = %v, want AAPCS64", function.CallConv)
+		}
+	}
+	if !foundBody {
+		t.Error("instantiated function body was not compiled")
+	}
+	if !foundAdapter {
+		t.Error("GoInternal adapter for instantiated function value was not generated")
+	}
+}
+
 func TestCompileExecutableUsesAggregateABIForInterfaceMethodWrapperParameters(t *testing.T) {
 	module, err := CompileExecutable("main.go", []byte(`package main
 

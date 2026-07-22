@@ -163,6 +163,14 @@ func reachableFunctions(roots []*ast.FuncDecl, rootFiles []*ast.File, rootInfo *
 	}
 	var assertedInterfaces []*types.Interface
 	collectAssertedInterfaces := func(files []*ast.File, info *types.Info) {
+		addAssertedType := func(assertedType types.Type) {
+			if assertedType == nil {
+				return
+			}
+			if interfaceType, ok := assertedType.Underlying().(*types.Interface); ok {
+				assertedInterfaces = append(assertedInterfaces, interfaceType)
+			}
+		}
 		for _, file := range files {
 			ast.Inspect(file, func(node ast.Node) bool {
 				switch expression := node.(type) {
@@ -170,9 +178,16 @@ func reachableFunctions(roots []*ast.FuncDecl, rootFiles []*ast.File, rootInfo *
 					if expression.Type == nil {
 						return true
 					}
-					assertedType := info.Types[expression.Type].Type
-					if interfaceType, ok := assertedType.Underlying().(*types.Interface); ok {
-						assertedInterfaces = append(assertedInterfaces, interfaceType)
+					addAssertedType(info.Types[expression.Type].Type)
+				case *ast.TypeSwitchStmt:
+					for _, statement := range expression.Body.List {
+						clause, ok := statement.(*ast.CaseClause)
+						if !ok {
+							continue
+						}
+						for _, caseType := range clause.List {
+							addAssertedType(info.Types[caseType].Type)
+						}
 					}
 				case *ast.CallExpr:
 					identifier := functionIdentifier(expression.Fun)
@@ -187,10 +202,7 @@ func reachableFunctions(roots []*ast.FuncDecl, rootFiles []*ast.File, rootInfo *
 					if !ok || instance.TypeArgs.Len() == 0 {
 						return true
 					}
-					assertedType := instance.TypeArgs.At(0)
-					if interfaceType, ok := assertedType.Underlying().(*types.Interface); ok {
-						assertedInterfaces = append(assertedInterfaces, interfaceType)
-					}
+					addAssertedType(instance.TypeArgs.At(0))
 				}
 				return true
 			})

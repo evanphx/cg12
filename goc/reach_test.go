@@ -122,3 +122,54 @@ func Test() byte { return sha256.Sum256(nil)[0] }
 		}
 	}
 }
+
+func TestTypeSwitchInterfaceCaseMakesConcreteMethodsReachable(t *testing.T) {
+	fset := token.NewFileSet()
+	file, err := parser.ParseFile(fset, "main.go", `package main
+
+import (
+	"fmt"
+	"io/fs"
+)
+
+func Test() string {
+	return fmt.Sprintf("%v", fs.FileMode(0))
+}
+`, parser.AllErrors)
+	if err != nil {
+		t.Fatal(err)
+	}
+	loader := newSourceLoader(fset)
+	info := &types.Info{
+		Types:      make(map[ast.Expr]types.TypeAndValue),
+		Defs:       make(map[*ast.Ident]types.Object),
+		Uses:       make(map[*ast.Ident]types.Object),
+		Selections: make(map[*ast.SelectorExpr]*types.Selection),
+		Instances:  make(map[*ast.Ident]types.Instance),
+	}
+	pkg, err := (&types.Config{Importer: loader}).Check("main", fset, []*ast.File{file}, info)
+	if err != nil {
+		t.Fatal(err)
+	}
+	root := file.Decls[1].(*ast.FuncDecl)
+	dynamicTypes := collectDynamicTypes(info, loader.units)
+	reachable, _ := reachableFunctions(
+		[]*ast.FuncDecl{root},
+		[]*ast.File{file},
+		info,
+		pkg,
+		loader.units,
+		dynamicTypes,
+		false,
+		nil,
+		nil,
+		nil,
+	)
+
+	for _, declaration := range reachable {
+		if declaration.pkg.Path() == "io/fs" && declaration.decl.Name.Name == "String" {
+			return
+		}
+	}
+	t.Fatal("io/fs.FileMode.String was not reachable through fmt's stringer type-switch case")
+}

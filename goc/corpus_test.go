@@ -1306,6 +1306,50 @@ func Test() int {
 `, 42)
 }
 
+func TestRuntimeReflectTypeAssertSupportsDirectInterfaceValue(t *testing.T) {
+	runExecutableCase(t, `package main
+
+import (
+	"reflect"
+	"unsafe"
+)
+
+type stringer interface {
+	String() string
+}
+
+type number int
+
+func (value number) String() string {
+	if value == 42 {
+		return "forty-two"
+	}
+	return "other"
+}
+
+func Test() int {
+	reflected := reflect.ValueOf(number(42))
+	empty := reflected.Interface()
+	emptyWords := (*[2]unsafe.Pointer)(unsafe.Pointer(&empty))
+	if emptyWords[0] == nil || emptyWords[1] == nil {
+		return 1
+	}
+	value, ok := reflect.TypeAssert[stringer](reflected)
+	if !ok {
+		return 2
+	}
+	interfaceWords := (*[2]unsafe.Pointer)(unsafe.Pointer(&value))
+	if interfaceWords[0] == nil || interfaceWords[1] == nil {
+		return 3
+	}
+	if value.String() != "forty-two" {
+		return 4
+	}
+	return 42
+}
+`, 42)
+}
+
 func TestRuntimeErrorStoredThroughInterfaceParameter(t *testing.T) {
 	runExecutableCase(t, `package main
 
@@ -1351,6 +1395,79 @@ func Test() int {
 	reflect.ValueOf(&target).Elem().Field(0).SetZero()
 	if target.Value != nil {
 		return 1
+	}
+	return 42
+}
+`, 42)
+}
+
+func TestRuntimeReflectCallPassesStructWithStringAndSliceFields(t *testing.T) {
+	runExecutableCase(t, `package main
+
+import "reflect"
+
+type input struct {
+	count int
+	text  string
+	data  []byte
+}
+
+func inspect(value input) int {
+	if value.count != 5 {
+		return 1
+	}
+	if value.text != "runtime" {
+		return 2
+	}
+	if len(value.data) != 3 || value.data[0] != 10 || value.data[2] != 30 {
+		return 3
+	}
+	return 42
+}
+
+func Test() int {
+	function := reflect.ValueOf(inspect)
+	argument := input{
+		count: 5,
+		text:  "runtime",
+		data:  []byte{10, 20, 30},
+	}
+	results := function.Call([]reflect.Value{reflect.ValueOf(argument)})
+	return int(results[0].Int())
+}
+`, 42)
+}
+
+func TestRuntimeDispatchesMethodPromotedFromEmbeddedInterface(t *testing.T) {
+	runExecutableCase(t, `package main
+
+import "io"
+
+type recorder struct {
+	data []byte
+}
+
+func (recorder *recorder) Write(data []byte) (int, error) {
+	recorder.data = append(recorder.data, data...)
+	return len(data), nil
+}
+
+func (recorder *recorder) Close() error {
+	return nil
+}
+
+type promotedWriter struct {
+	io.WriteCloser
+}
+
+func Test() int {
+	recorder := &recorder{}
+	var writer io.Writer = &promotedWriter{WriteCloser: recorder}
+	if _, err := io.WriteString(writer, "forty-two"); err != nil {
+		return 1
+	}
+	if string(recorder.data) != "forty-two" {
+		return 2
 	}
 	return 42
 }

@@ -1116,6 +1116,24 @@ func TestARM64RuntimeCapabilityStatus(t *testing.T) {
 			expectation: runtimeCapabilityMustPass,
 		},
 		{
+			category:    "stdlib-log",
+			name:        "slog-structured",
+			source:      "stdlib_slog_structured.go",
+			expectation: runtimeCapabilityMustPass,
+		},
+		{
+			category:    "stdlib-fs",
+			name:        "mapfs-walk",
+			source:      "stdlib_fstest_mapfs.go",
+			expectation: runtimeCapabilityMustPass,
+		},
+		{
+			category:    "stdlib-testing",
+			name:        "quick-check",
+			source:      "stdlib_testing_quick.go",
+			expectation: runtimeCapabilityMustPass,
+		},
+		{
 			category:    "stdlib-net-values",
 			name:        "mail-textproto",
 			source:      "stdlib_net_mail_textproto.go",
@@ -1125,6 +1143,18 @@ func TestARM64RuntimeCapabilityStatus(t *testing.T) {
 			category:    "stdlib-net-values",
 			name:        "netip",
 			source:      "stdlib_net_netip.go",
+			expectation: runtimeCapabilityMustPass,
+		},
+		{
+			category:    "stdlib-net-values",
+			name:        "smtp-session",
+			source:      "stdlib_smtp_session.go",
+			expectation: runtimeCapabilityMustPass,
+		},
+		{
+			category:    "stdlib-signals",
+			name:        "notify-context",
+			source:      "stdlib_signal_notify_context.go",
 			expectation: runtimeCapabilityMustPass,
 		},
 		{
@@ -1607,6 +1637,12 @@ func TestARM64RuntimeCapabilityStatus(t *testing.T) {
 			category:    "runtime-packages",
 			name:        "reflect-value-call",
 			source:      "runtime_reflect_value_call.go",
+			expectation: runtimeCapabilityMustPass,
+		},
+		{
+			category:    "runtime-packages",
+			name:        "reflect-call-aggregate",
+			source:      "runtime_reflect_call_aggregate.go",
 			expectation: runtimeCapabilityMustPass,
 		},
 		{
