@@ -1128,6 +1128,45 @@ func TestARM64RuntimeCapabilityStatus(t *testing.T) {
 			expectation: runtimeCapabilityMustPass,
 		},
 		{
+			category:       "stdlib-http",
+			name:           "client-server",
+			source:         "stdlib_http_client_server.go",
+			expectation:    runtimeCapabilityMustPass,
+			requiresAFINET: true,
+		},
+		{
+			category:    "stdlib-http",
+			name:        "parse-roundtrip",
+			source:      "stdlib_http_parse_roundtrip.go",
+			expectation: runtimeCapabilityMustPass,
+		},
+		{
+			category:    "stdlib-http",
+			name:        "cookiejar",
+			source:      "stdlib_http_cookiejar.go",
+			expectation: runtimeCapabilityMustPass,
+		},
+		{
+			category:    "stdlib-http",
+			name:        "multipart-form",
+			source:      "stdlib_http_multipart_form.go",
+			expectation: runtimeCapabilityMustPass,
+		},
+		{
+			category:       "stdlib-http",
+			name:           "tls-client-server",
+			source:         "stdlib_http_tls_client_server.go",
+			expectation:    runtimeCapabilityMustPass,
+			requiresAFINET: true,
+		},
+		{
+			category:       "stdlib-http",
+			name:           "redirect-keepalive",
+			source:         "stdlib_http_redirect_keepalive.go",
+			expectation:    runtimeCapabilityMustPass,
+			requiresAFINET: true,
+		},
+		{
 			category:    "stdlib-sync",
 			name:        "once-map-cond",
 			source:      "stdlib_sync_once_map_cond.go",
@@ -1798,6 +1837,11 @@ func runRuntimeCapabilityProgram(t *testing.T, compiler string, directory string
 	sourceName := capability.source
 	source := filepath.Join("..", "..", "goc", "testdata", sourceName)
 	executable := filepath.Join(directory, strings.TrimSuffix(sourceName, ".go")+".bin")
+	defer func() {
+		if err := os.Remove(executable); err != nil && !errors.Is(err, os.ErrNotExist) {
+			t.Logf("remove runtime capability executable: %v", err)
+		}
+	}()
 
 	compile := exec.Command(compiler, "-o", executable, source)
 	if output, err := compile.CombinedOutput(); err != nil {

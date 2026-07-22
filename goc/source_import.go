@@ -247,6 +247,7 @@ func newSourceLoader(fset *token.FileSet) *sourceLoader {
 			"math/rand/v2":                               true,
 			"net":                                        true,
 			"net/http":                                   true,
+			"net/http/cookiejar":                         true,
 			"net/http/httptest":                          true,
 			"net/http/httptrace":                         true,
 			"net/http/internal":                          true,

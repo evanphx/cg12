@@ -1510,6 +1510,60 @@ func Test() int {
 `, 42)
 }
 
+func TestRuntimeDeferredPointerMethodOnStructFieldUsesFieldAddress(t *testing.T) {
+	runExecutableCase(t, `package main
+
+import "sync"
+
+type holder struct {
+	mutex sync.Mutex
+	value int
+}
+
+func (target *holder) update() {
+	target.mutex.Lock()
+	defer target.mutex.Unlock()
+	target.value = 42
+}
+
+func Test() int {
+	var target holder
+	target.update()
+	target.mutex.Lock()
+	target.mutex.Unlock()
+	return target.value
+}
+`, 42)
+}
+
+func TestRuntimeDeferredRWMutexLockTransition(t *testing.T) {
+	runExecutableCase(t, `package main
+
+import "sync"
+
+type holder struct {
+	mutex sync.RWMutex
+	value int
+}
+
+func (target *holder) updateWhileReadLocked() {
+	target.mutex.RUnlock()
+	defer target.mutex.RLock()
+	target.mutex.Lock()
+	defer target.mutex.Unlock()
+	target.value = 42
+}
+
+func Test() int {
+	var target holder
+	target.mutex.RLock()
+	target.updateWhileReadLocked()
+	target.mutex.RUnlock()
+	return target.value
+}
+`, 42)
+}
+
 func TestRuntimeInterfaceReadReturnsMultipleValuesAcrossStackGrowth(t *testing.T) {
 	runExecutableCase(t, `package main
 

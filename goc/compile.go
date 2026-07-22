@@ -9349,8 +9349,14 @@ func (g *gen) methodValue(expression *ast.SelectorExpr, selection *types.Selecti
 		g.interfaceMethods[method] = true
 	}
 	signature := g.concreteType(selection.Type()).(*types.Signature)
+	methodSignature := method.Type().(*types.Signature)
+	receiverType := methodSignature.Recv().Type()
+	methodSymbol := g.functionSymbol(method)
+	if instantiatedSymbol, instantiated := g.instantiatedFunctionSymbol(method, expression); instantiated {
+		methodSymbol = instantiatedSymbol
+	}
 	position := g.fset.Position(expression.Pos())
-	wrapperName := fmt.Sprintf("%s.methodvalue.%d.%d", g.pkg.Path(), position.Line, position.Column)
+	wrapperName := methodValueWrapperName(g.pkg.Path(), methodSymbol, position, len(g.mod.Funcs))
 	resultClass := ir.ClsW
 	if signature.Results().Len() > 0 {
 		resultClass, _ = scalar(signature.Results().At(0).Type())
@@ -9380,8 +9386,6 @@ func (g *gen) methodValue(expression *ast.SelectorExpr, selection *types.Selecti
 		function.RetValues = wrapper.runtimeAllocation && isSliceType(resultType)
 	}
 	context := wrapper.closureContext()
-	methodSignature := method.Type().(*types.Signature)
-	receiverType := methodSignature.Recv().Type()
 	descriptorFields := []*types.Var{
 		types.NewVar(token.NoPos, nil, "code", types.Typ[types.Uintptr]),
 		types.NewVar(token.NoPos, nil, "receiver", receiverType),
@@ -9407,10 +9411,6 @@ func (g *gen) methodValue(expression *ast.SelectorExpr, selection *types.Selecti
 	for index := 1; index < signature.Results().Len(); index++ {
 		arguments = append(arguments, function.ParamRef(fmt.Sprintf("result%d", index)))
 	}
-	methodSymbol := g.functionSymbol(method)
-	if instantiatedSymbol, instantiated := g.instantiatedFunctionSymbol(method, expression); instantiated {
-		methodSymbol = instantiatedSymbol
-	}
 	callee := function.Sym(methodSymbol, 0)
 	if signature.Results().Len() == 0 {
 		wrapper.callVoidWithSignature(callee, arguments, methodSignature, receiverType)
@@ -9432,6 +9432,17 @@ func (g *gen) methodValue(expression *ast.SelectorExpr, selection *types.Selecti
 		g.store(receiverValue, receiverStorage, receiverType)
 	}
 	return descriptor
+}
+
+func methodValueWrapperName(packagePath, methodSymbol string, position token.Position, sequence int) string {
+	return fmt.Sprintf(
+		"%s.methodvalue.%s.%d.%d.%d",
+		packagePath,
+		methodSymbol,
+		position.Line,
+		position.Column,
+		sequence,
+	)
 }
 
 func (g *gen) compositeLiteral(literal *ast.CompositeLit, heap bool) ir.Ref {

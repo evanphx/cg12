@@ -514,6 +514,23 @@ func Test() int {
 	t.Fatal("interface method expression wrapper main.reader.Value was not generated")
 }
 
+func TestMethodValueWrapperNamesDoNotCollideAtSameSourcePosition(t *testing.T) {
+	position := token.Position{Line: 1056, Column: 8}
+	readLock := methodValueWrapperName("crypto/tls", "sync.RWMutex.RLock", position, 100)
+	unlock := methodValueWrapperName("crypto/tls", "sync.Mutex.Unlock", position, 100)
+	secondReadLock := methodValueWrapperName("crypto/tls", "sync.RWMutex.RLock", position, 101)
+
+	readLockObject := testARM64SanitizeSymbol(readLock)
+	unlockObject := testARM64SanitizeSymbol(unlock)
+	if readLockObject == unlockObject {
+		t.Fatalf("method-value wrappers collide as object symbol %q", readLockObject)
+	}
+	secondReadLockObject := testARM64SanitizeSymbol(secondReadLock)
+	if readLockObject == secondReadLockObject {
+		t.Fatalf("repeated method-value wrappers collide as object symbol %q", readLockObject)
+	}
+}
+
 func TestStaticInitializerIgnoresKeyedStructFieldNames(t *testing.T) {
 	fset := token.NewFileSet()
 	file, err := parser.ParseFile(fset, "initializer.go", `package initializer
