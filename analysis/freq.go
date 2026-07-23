@@ -80,12 +80,22 @@ func (c *CFG) Frequency(dom *DomTree) *Freq {
 			}
 			local[b] = s
 		}
-		cp := 0.0
-		for _, latch := range l.Latches {
-			if c.Num(latch) >= 0 {
-				cp += local[latch] * probEdge(latch, l.Header)
+		// Cyclic probability: the chance an iteration stays in the loop rather than
+		// leaving it, i.e. 1 minus the per-iteration probability of taking an edge out
+		// of the body. Summing the local frequency that leaves counts every exit, not
+		// only a back edge to the header -- so a computed-goto interpreter's dispatch
+		// mesh, which continues by branching to any handler (never back to a single
+		// header), is recognized as the hot loop it is instead of a run-once region.
+		// For an ordinary single-exit loop this equals the old header-return sum.
+		exit := 0.0
+		for b, lb := range local {
+			for i, s := range b.Succs() {
+				if s != nil && !l.Body[s] {
+					exit += lb * fr.Edge[b][i]
+				}
 			}
 		}
+		cp := 1 - exit
 		if cp > 1-1/maxTrip {
 			cp = 1 - 1/maxTrip
 		}
