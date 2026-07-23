@@ -171,12 +171,25 @@ func inlinableStructure(callee *ir.Func) bool {
 			return false // by-value aggregate parameter
 		}
 	}
+	hasRet := false
 	for _, b := range callee.Blocks {
+		// A computed goto (JmpBr) or a taken label address (OBlockAddr) makes the
+		// body's control flow depend on block addresses; splicing it into a caller,
+		// where those addresses move, is unsound, so leave it a call -- as gcc does
+		// for a function containing an address-of-label.
+		if b.Jmp.Kind == ir.JmpBr {
+			return false
+		}
+		for k := range b.Instrs {
+			if b.Instrs[k].Op == ir.OBlockAddr {
+				return false
+			}
+		}
 		if b.Jmp.Kind == ir.JmpRet {
-			return true
+			hasRet = true
 		}
 	}
-	return false // no return to splice the continuation onto
+	return hasRet // needs a return to splice the continuation onto
 }
 
 // worthInlining applies the cost model to a structurally-inlinable callee named at
@@ -273,6 +286,16 @@ func spliceCall(caller *ir.Func, b *ir.Block, idx int, callee *ir.Func, cg *call
 	for _, s := range body {
 		blockMap[s.orig] = caller.NewBlock("")
 	}
+	// mapBlock re-points a block reference (an OBlockAddr's &&label target) at its
+	// clone, so an inlined computed-goto pad names the copied block, not the callee's
+	// original -- which after inlining is unreachable and dropped, leaving a dangling
+	// address. A reference outside the callee body is left as is (should not occur).
+	mapBlock := func(b *ir.Block) *ir.Block {
+		if nb, ok := blockMap[b]; ok {
+			return nb
+		}
+		return b
+	}
 	// Inline provenance: cloned instructions record that they came from callee,
 	// called at this call's position, nested under the call's own inline context.
 	site := &ir.InlineSite{Callee: callee.Name, Call: call.Pos, Parent: call.Inl}
@@ -290,7 +313,7 @@ func spliceCall(caller *ir.Func, b *ir.Block, idx int, callee *ir.Func, cg *call
 			tb.Phis = append(tb.Phis, np)
 		}
 		for i := range s.instrs {
-			cl := cloneInstr(&s.instrs[i], mapRef)
+			cl := cloneInstr(&s.instrs[i], mapRef, mapBlock)
 			cl.Inl = rebaseInline(s.instrs[i].Inl, site, rebaseCache)
 			tb.Instrs = append(tb.Instrs, cl)
 		}
@@ -363,9 +386,13 @@ func spliceCall(caller *ir.Func, b *ir.Block, idx int, callee *ir.Func, cg *call
 	}
 }
 
-// cloneInstr copies an instruction, remapping every value reference.
-func cloneInstr(in *ir.Instr, mapRef func(ir.Ref) ir.Ref) ir.Instr {
+// cloneInstr copies an instruction, remapping every value reference and any block
+// reference (an OBlockAddr's &&label target) into the caller's cloned body.
+func cloneInstr(in *ir.Instr, mapRef func(ir.Ref) ir.Ref, mapBlock func(*ir.Block) *ir.Block) ir.Instr {
 	out := ir.Instr{Op: in.Op, Cls: in.Cls, To: mapRef(in.To), Cmp: in.Cmp, Aux: in.Aux, Unroll: in.Unroll, RetAgg: in.RetAgg, Asm: in.Asm, Intrin: in.Intrin, Pos: in.Pos}
+	if in.Blk != nil {
+		out.Blk = mapBlock(in.Blk)
+	}
 	for _, a := range in.Args {
 		out.Args = append(out.Args, mapRef(a))
 	}
