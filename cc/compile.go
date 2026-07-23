@@ -102,6 +102,40 @@ const headerCompat = `
 #define __HAVE_FLOAT64 0
 #define __HAVE_FLOAT32X 0
 #define __HAVE_FLOAT16 0
+
+/* The value-returning atomic builtins are type-generic in GCC (their result is
+ * the accessed object's type), which modernc.org/cc/v4 does not model, so it
+ * types an undeclared use as returning int -- and a return of an 8-byte atomic
+ * result then gets truncated to 32 bits and sign-extended. Declare them K&R-style
+ * (no parameter list, so the width still comes from the real pointer argument)
+ * with a wide unsigned result, so the result is not narrowed. */
+unsigned long __atomic_load_n();
+unsigned long __atomic_exchange_n();
+unsigned long __atomic_fetch_add();
+unsigned long __atomic_fetch_sub();
+unsigned long __atomic_fetch_and();
+unsigned long __atomic_fetch_or();
+unsigned long __atomic_fetch_xor();
+unsigned long __atomic_fetch_nand();
+unsigned long __atomic_add_fetch();
+unsigned long __atomic_sub_fetch();
+unsigned long __atomic_and_fetch();
+unsigned long __atomic_or_fetch();
+unsigned long __atomic_xor_fetch();
+unsigned long __atomic_nand_fetch();
+
+/* Likewise the rotate builtins return the width of their operand, which modernc
+ * types as int for an undeclared use -- truncating a 64-bit rotate when its
+ * result feeds a wider expression (Ruby's flonum encoding rotates the bits of a
+ * double). Declare each at its true result width. */
+unsigned char __builtin_rotateleft8();
+unsigned short __builtin_rotateleft16();
+unsigned int __builtin_rotateleft32();
+unsigned long __builtin_rotateleft64();
+unsigned char __builtin_rotateright8();
+unsigned short __builtin_rotateright16();
+unsigned int __builtin_rotateright32();
+unsigned long __builtin_rotateright64();
 `
 
 // Target names the machine C is being compiled for. It decides the semantics
@@ -404,6 +438,13 @@ func wide(c ir.Cls) bool { return c == ir.ClsL || c == ir.ClsP }
 func signed(t moderncc.Type) bool {
 	if t.Kind() == moderncc.Ptr {
 		return false
+	}
+	// An enum's underlying type is unsigned unless it has a negative enumerator
+	// (the GCC rule). This matters for an enum bit field: reading `type : 4` where
+	// the value is 9 must give 9, not -7, or a switch on it takes the wrong arm --
+	// which is how Ruby's method dispatch misread VM_METHOD_TYPE_OPTIMIZED.
+	if et, ok := t.(*moderncc.EnumType); ok {
+		return et.Min() < 0
 	}
 	if moderncc.IsIntegerType(t) {
 		return moderncc.IsSignedInteger(t)
@@ -957,6 +998,14 @@ func (g *gen) constAddr(e moderncc.ExpressionNode) (string, int64, bool) {
 			if isFuncDesignator(n.Type()) {
 				return name, 0, true
 			}
+			// A file-scope object not (yet) in the map: the variable being defined,
+			// referenced by its own initializer (`static T x = { &x }`, a list head
+			// pointing to itself), one defined later, or an extern from a header. Its
+			// symbol is its name; without this the initializer is dropped and the
+			// object is wrongly zeroed into .bss.
+			if d, ok := n.ResolvedTo().(*moderncc.Declarator); ok && d.Linkage() != moderncc.None {
+				return name, 0, true
+			}
 		case moderncc.PrimaryExpressionString: // a string literal decays to its data symbol
 			if s, ok := n.Value().(moderncc.StringValue); ok {
 				return g.internStr(string(s)), 0, true
@@ -966,6 +1015,16 @@ func (g *gen) constAddr(e moderncc.ExpressionNode) (string, int64, bool) {
 		}
 	case *moderncc.CastExpression:
 		return g.constAddr(n.CastExpression)
+	case *moderncc.ConditionalExpression:
+		// A constant ?: in a static address initializer: fold the condition and take
+		// that arm. Ruby's builtin-function tables use `i < 0 ? NULL : #name` to give
+		// real entries a name string and the sentinel a null one.
+		if c, ok := constInt(n.LogicalOrExpression); ok {
+			if c != 0 {
+				return g.constAddr(n.ExpressionList)
+			}
+			return g.constAddr(n.ConditionalExpression)
+		}
 	case *moderncc.UnaryExpression:
 		switch n.Case {
 		case moderncc.UnaryExpressionAddrof: // &lvalue

@@ -167,13 +167,24 @@ func (g *gen) loadLval(n *moderncc.PrimaryExpression) ir.Ref {
 	if val, ok := constInt(n); ok {
 		return g.constOf(val, n.Type())
 	}
-	// An unknown identifier is a global function or object referenced by symbol.
-	// A thread-local object (declared extern in a header, so never defined here)
-	// must still be reached through the TLS ABI, or the link fails with a mismatch
-	// against its real thread-local definition.
-	if isThreadLocalIdent(n) {
-		return g.fn.ThreadSym(name)
+	// An identifier not in the local map is a global declared in a header: a
+	// function, whose symbol is its value, or an object, whose value must be
+	// loaded. Resolving it through its declaration is what lets a read of an extern
+	// _Thread_local from a header (Ruby's ruby_current_ec) load the pointer through
+	// the TLS ABI rather than yield its address -- the difference between a working
+	// interpreter and one that dereferences &ruby_current_ec as if it were the ec.
+	if d, ok := n.ResolvedTo().(*moderncc.Declarator); ok && d.Type().Kind() != moderncc.Function {
+		v := lval{sym: name, typ: d.Type(), thread: d.IsThreadLocal()}
+		addr := g.addrOf(v)
+		if isArray(v.typ) || isMemValue(v.typ) {
+			return addr // an array or aggregate value is its address
+		}
+		val := g.loadVal(addr, v.typ)
+		g.setName(val, name)
+		return val
 	}
+	// A function (or a name the type checker could not resolve): its symbol is used
+	// as its own value, the function's address.
 	return g.fn.Sym(name, 0)
 }
 

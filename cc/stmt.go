@@ -232,6 +232,14 @@ func (g *gen) genLocalDecl(d *moderncc.Declaration) {
 		if t.Kind() == moderncc.Function {
 			continue // a local prototype
 		}
+		if dcl.IsExtern() {
+			// A block-scope `extern` names a global object defined elsewhere; it has
+			// no storage of its own and is reached through its symbol. Allocating a
+			// local slot instead (as if it were an ordinary local) made a reference
+			// like `char **envp = environ;` read uninitialized stack.
+			g.define(dcl.Name(), lval{sym: dcl.Name(), typ: t, thread: dcl.IsThreadLocal()})
+			continue
+		}
 		if dcl.IsStatic() {
 			g.genStaticLocal(id, dcl, t)
 			continue

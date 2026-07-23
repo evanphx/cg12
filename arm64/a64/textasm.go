@@ -308,8 +308,23 @@ func (a *asmCtx) mov() error {
 	if err != nil {
 		return err
 	}
+	// A mov to or from SP must use the add-immediate form (add rd, rm, #0). In the
+	// register-move (orr) form, register 31 is the zero register, not SP, so
+	// `mov xd, sp` would read zero and `mov sp, xd` write nowhere -- which broke,
+	// among other things, the stack-pointer sampling an interpreter uses to detect
+	// overflow.
+	if isSPName(a.ops[0]) || isSPName(a.ops[1]) {
+		a.p.Emit(AddImm(w, rd, rm, 0))
+		return nil
+	}
 	a.p.Emit(MovReg(w, rd, rm))
 	return nil
+}
+
+// isSPName reports whether an operand names the stack pointer (which shares
+// register number 31 with the zero register, so only the name tells them apart).
+func isSPName(op string) bool {
+	return op == "sp" || op == "wsp"
 }
 
 func (a *asmCtx) addSub(sub bool) error {
