@@ -145,13 +145,14 @@ func TestInlineSkipsIndirectAndOversized(t *testing.T) {
 	opt.OptimizeModule(m)
 	assert.Equal(t, 1, countCalls(m), "indirect call not inlined")
 
-	// Oversized callee: a body past the instruction budget stays a call.
+	// Oversized callee: a body past the single-site budget stays a call, even with
+	// only one caller (its size outweighs relocating it).
 	m2 := ir.NewModule()
 	big := m2.NewFunc("big", ir.ClsW)
 	bx := big.Param("x", ir.ClsW)
 	be := big.Entry()
 	acc := bx
-	for i := 0; i < 40; i++ {
+	for i := 0; i < 400; i++ {
 		acc = be.Add(ir.ClsW, acc, big.Word(int64(i)))
 	}
 	be.Ret(acc)

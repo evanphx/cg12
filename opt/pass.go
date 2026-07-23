@@ -106,11 +106,15 @@ func DefaultPipeline() []Pass {
 		FuncPass("simplifycfg", SimplifyCFG),
 		FuncPass("dce", DCE),
 	)
+	// One inline pass instance, shared by both inline stages, so a function's growth
+	// cap is measured against its original size across the whole pipeline (not reset
+	// to the already-grown size at the second stage, which would let growth compound).
+	inline := InlinePass()
 	return []Pass{
 		FuncPass("mem2reg", Mem2Reg),
 		clean,
 		Fixpoint("inline",
-			ModulePass("inline", Inline),
+			inline,
 			clean,
 		),
 		// Inlining a helper that took the address of a caller's local (e.g. an
@@ -122,7 +126,7 @@ func DefaultPipeline() []Pass {
 		clean,
 		ModulePass("unroll", UnrollRecursion), // bounded in-place recursion unrolling
 		Fixpoint("inline", // inline/simplify what unrolling exposed
-			ModulePass("inline", Inline),
+			inline,
 			clean,
 		),
 		ModulePass("deadfunc", DeadFuncElim),

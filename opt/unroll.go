@@ -69,7 +69,7 @@ func findUnrollable(caller *ir.Func, cg *callGraph, scc *sccInfo) (*ir.Block, in
 			if int(in.Unroll) >= maxRecursionDepth {
 				continue // this chain is already unrolled to the limit
 			}
-			if inlinable(callee) {
+			if inlinableStructure(callee) && funcSize(callee) <= inlineSmallBudget {
 				return b, i, callee
 			}
 		}

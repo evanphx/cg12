@@ -2,16 +2,36 @@ package opt
 
 import "github.com/evanphx/cg12/ir"
 
-// inlineInstrBudget bounds the size (in instructions) of a callee that will be
-// inlined. Small functions are the ones where inlining pays: the call overhead
-// is a large fraction of the body, and the caller's context (constant
-// arguments, known aliasing) folds through what remains.
-const inlineInstrBudget = 24
+// A callee's size budget depends on how many call sites name it. A function with a
+// single site inlines up to inlineOnceBudget: doing so moves its body rather than
+// duplicating it (the original becomes dead and is dropped), so a large one still
+// pays. Each additional site duplicates the body, so the budget falls off as
+// inlineOnceBudget/sites, never below inlineSmallBudget -- tiny functions inline
+// anywhere, since the call overhead alone rivals the body. This is gcc's inlining
+// cost model in miniature (its inline-functions-called-once plus a size/growth
+// trade), and it is what lets an interpreter's fast-path helpers fold into the
+// dispatch loop without the hundreds of shared helpers cascading in and bloating it.
+const (
+	inlineSmallBudget = 24  // a multi-site callee inlines only when at most this size
+	inlineOnceBudget  = 300 // a single-site callee inlines up to this size
+)
 
 // inlineFuncBudget bounds how many calls are inlined into one function per pass,
 // a backstop against code-size blow-up; the pipeline's fixpoint applies more on
 // later rounds if they remain worthwhile.
-const inlineFuncBudget = 64
+const inlineFuncBudget = 200
+
+// inlineGrowthCap bounds how large inlining may make one function, as a multiple of
+// its pre-inlining size plus a fixed allowance -- a backstop against a pathological
+// cascade of single-site inlines (each individually "free" at the unit level) turning
+// one function into the whole program.
+func inlineGrowthCap(initial int) int {
+	cap := initial + initial/2 // allow ~50% growth from inlining
+	if cap < initial+256 {
+		cap = initial + 256 // but always enough headroom for a small function
+	}
+	return cap
+}
 
 // Inline replaces direct calls to small, non-recursive module functions with a
 // clone of the callee's body. It is the pipeline's only transform that reasons
@@ -24,28 +44,78 @@ const inlineFuncBudget = 64
 // SCC membership and never inlined, which guarantees termination without relying
 // on the size budget.
 func Inline(m *ir.Module) bool {
+	return inlineModule(m, map[*ir.Func]int{})
+}
+
+// InlinePass returns a module pass that inlines with a growth cap fixed to each
+// function's size when the pass first saw it. The pipeline runs inlining in a
+// fixpoint with cleanup; a fresh InlinePass per fixpoint keeps the cap from being
+// recomputed against the already-grown body each round (which would let a single-site
+// cascade compound past the cap).
+func InlinePass() Pass {
+	base := map[*ir.Func]int{}
+	return ModulePass("inline", func(m *ir.Module) bool { return inlineModule(m, base) })
+}
+
+func inlineModule(m *ir.Module, base map[*ir.Func]int) bool {
 	cg := buildCallGraph(m)
 	scc := computeSCC(cg)
+	sites := callSiteCounts(m, cg.byName)
 	changed := false
 	for _, f := range scc.order {
 		if f.Start == nil {
 			continue
 		}
-		if inlineInto(f, cg, scc) {
+		if _, ok := base[f]; !ok {
+			base[f] = funcSize(f)
+		}
+		if inlineInto(f, cg, scc, sites, base[f]) {
 			changed = true
 		}
 	}
 	return changed
 }
 
+// callSiteCounts returns, per module function, the number of direct call sites that
+// name it -- the signal for whether inlining it duplicates code (many sites) or just
+// relocates it (one site, after which the original is dead).
+func callSiteCounts(m *ir.Module, byName map[string]*ir.Func) map[*ir.Func]int {
+	n := map[*ir.Func]int{}
+	for _, f := range m.Funcs {
+		for _, b := range f.Blocks {
+			for i := range b.Instrs {
+				if in := &b.Instrs[i]; in.Op == ir.OCall {
+					if g := directCallee(f, in, byName); g != nil {
+						n[g]++
+					}
+				}
+			}
+		}
+	}
+	return n
+}
+
+// funcSize is a function's body size in IR instructions, the inliner's size proxy.
+func funcSize(f *ir.Func) int {
+	n := 0
+	for _, b := range f.Blocks {
+		n += len(b.Instrs)
+	}
+	return n
+}
+
 // inlineInto repeatedly inlines eligible calls in caller until none remain or
 // the per-function budget is spent. Re-scanning after each splice lets calls
 // exposed by a previous inline (the callee's own calls) be inlined in turn; the
 // budget bounds code-size growth (e.g. a diamond call graph inlined repeatedly).
-func inlineInto(caller *ir.Func, cg *callGraph, scc *sccInfo) bool {
+func inlineInto(caller *ir.Func, cg *callGraph, scc *sccInfo, sites map[*ir.Func]int, baseSize int) bool {
 	changed := false
+	cap := inlineGrowthCap(baseSize)
 	for n := 0; n < inlineFuncBudget; n++ {
-		b, idx, callee := findInlinable(caller, cg, scc)
+		if funcSize(caller) > cap {
+			break // this function has grown enough; stop feeding the cascade
+		}
+		b, idx, callee := findInlinable(caller, cg, scc, sites)
 		if callee == nil {
 			break
 		}
@@ -55,9 +125,9 @@ func inlineInto(caller *ir.Func, cg *callGraph, scc *sccInfo) bool {
 	return changed
 }
 
-// findInlinable returns the first call in caller that should be inlined: a
-// direct call to a non-recursive, suitably small module function.
-func findInlinable(caller *ir.Func, cg *callGraph, scc *sccInfo) (*ir.Block, int, *ir.Func) {
+// findInlinable returns the first call in caller worth inlining: a direct call to a
+// non-recursive module function the cost model accepts.
+func findInlinable(caller *ir.Func, cg *callGraph, scc *sccInfo, sites map[*ir.Func]int) (*ir.Block, int, *ir.Func) {
 	for _, b := range caller.Blocks {
 		for i := range b.Instrs {
 			in := &b.Instrs[i]
@@ -68,7 +138,7 @@ func findInlinable(caller *ir.Func, cg *callGraph, scc *sccInfo) (*ir.Block, int
 			if callee == nil || scc.recursive[callee] {
 				continue // indirect/external, or part of a recursion cycle
 			}
-			if inlinable(callee) {
+			if worthInlining(callee, sites[callee]) {
 				return b, i, callee
 			}
 		}
@@ -86,10 +156,13 @@ func directCallee(caller *ir.Func, call *ir.Instr, byName map[string]*ir.Func) *
 	return byName[caller.Consts[c.ID].Sym]
 }
 
-// inlinable reports whether callee is a small, self-contained scalar function
-// suitable for inlining. Recursion is not checked here — it is a call-graph
-// property handled by the SCC classification in findInlinable.
-func inlinable(callee *ir.Func) bool {
+// inlinableStructure reports whether callee can be inlined mechanically: it has a
+// body and a return to splice into, and neither a variadic signature nor a by-value
+// aggregate parameter or result (which the splice does not model). Recursion is not
+// checked here -- it is a call-graph property handled by the SCC classification in
+// findInlinable. Whether an inlinable callee is worth inlining is a separate cost
+// decision (worthInlining).
+func inlinableStructure(callee *ir.Func) bool {
 	if callee.Start == nil || callee.Variadic || callee.RetAgg != nil {
 		return false
 	}
@@ -98,22 +171,34 @@ func inlinable(callee *ir.Func) bool {
 			return false // by-value aggregate parameter
 		}
 	}
-	instrs, hasRet := 0, false
 	for _, b := range callee.Blocks {
-		instrs += len(b.Instrs)
 		if b.Jmp.Kind == ir.JmpRet {
-			hasRet = true
+			return true
 		}
 	}
-	if !hasRet {
+	return false // no return to splice the continuation onto
+}
+
+// worthInlining applies the cost model to a structurally-inlinable callee named at
+// `sites` call sites across the module. A forced callee always inlines. Otherwise the
+// size budget is inlineOnceBudget/sites (floored at inlineSmallBudget): a lone site
+// inlines a large body cheaply because the original is then dead, while a body copied
+// into many sites must be small to be worth the duplication.
+func worthInlining(callee *ir.Func, sites int) bool {
+	if !inlinableStructure(callee) {
 		return false
 	}
-	// __attribute__((always_inline)) overrides the size budget: the source marked
-	// this function to be folded into every caller, and gcc/clang honour that
-	// regardless of size. An interpreter's hot fast-path helpers (vm_getivar,
-	// vm_opt_plus, ...) rely on it to dissolve into the dispatch loop rather than
-	// pay a call at every opcode.
-	return callee.ForceInline || instrs <= inlineInstrBudget
+	if callee.ForceInline {
+		return true
+	}
+	if sites < 1 {
+		sites = 1
+	}
+	budget := inlineOnceBudget / sites
+	if budget < inlineSmallBudget {
+		budget = inlineSmallBudget
+	}
+	return funcSize(callee) <= budget
 }
 
 // spliceCall replaces the call at caller block b, instruction idx, with a clone
