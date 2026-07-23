@@ -1025,6 +1025,39 @@ func helper() {}
 	t.Fatal("main.helper was not compiled")
 }
 
+func TestCompileMarksSystemStackFunctionLiteralNoSplit(t *testing.T) {
+	module, err := Compile("systemstack_literal.go", []byte(`package runtime
+
+func systemstack(fn func())
+
+func refill() {
+	systemstack(func() {
+		println("on g0")
+	})
+}
+`))
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	found := false
+	for _, function := range module.Funcs {
+		if !strings.Contains(function.Name, "runtime.func.") {
+			continue
+		}
+		found = true
+		if !function.NoSplit {
+			t.Fatal("systemstack function literal is not nosplit")
+		}
+		if !function.SystemStack {
+			t.Fatal("systemstack function literal is not marked system stack")
+		}
+	}
+	if !found {
+		t.Fatal("systemstack function literal was not compiled")
+	}
+}
+
 func TestCompileKeepsAssignedNonEscapingAddressOnStack(t *testing.T) {
 	module, err := Compile("address.go", []byte(`package main
 type pair struct { left, right int }

@@ -1440,6 +1440,30 @@ func TestARM64RuntimeCapabilityStatus(t *testing.T) {
 		},
 		{
 			category:    "stdlib-runtime-diagnostics",
+			name:        "trace-start-stop",
+			source:      "stdlib_runtime_trace_start_stop.go",
+			expectation: runtimeCapabilityMustPass,
+		},
+		{
+			category:    "stdlib-runtime-diagnostics",
+			name:        "trace-start-only",
+			source:      "stdlib_runtime_trace_start_only.go",
+			expectation: runtimeCapabilityMustPass,
+		},
+		{
+			category:    "stdlib-runtime-diagnostics",
+			name:        "trace-start-probe",
+			source:      "stdlib_runtime_trace_start_probe.go",
+			expectation: runtimeCapabilityMustPass,
+		},
+		{
+			category:    "stdlib-runtime-diagnostics",
+			name:        "trace-log",
+			source:      "stdlib_runtime_trace_log.go",
+			expectation: runtimeCapabilityMustPass,
+		},
+		{
+			category:    "stdlib-runtime-diagnostics",
 			name:        "trace-buffer",
 			source:      "stdlib_runtime_trace_buffer.go",
 			expectation: runtimeCapabilityMustPass,

@@ -3363,6 +3363,33 @@ func (g *gen) staticFunctionLiteral(literal *ast.FuncLit) string {
 	return descriptor
 }
 
+func (g *gen) functionLiteralRunsOnSystemStack(literal *ast.FuncLit) bool {
+	call, ok := g.parents[literal].(*ast.CallExpr)
+	if !ok {
+		return false
+	}
+	isArgument := false
+	for _, argument := range call.Args {
+		if argument == literal {
+			isArgument = true
+			break
+		}
+	}
+	if !isArgument {
+		return false
+	}
+	function := calledFunction(call.Fun, g.info)
+	if function == nil || function.Pkg() == nil || function.Pkg().Path() != "runtime" {
+		return false
+	}
+	switch function.Name() {
+	case "systemstack", "mcall":
+		return true
+	default:
+		return false
+	}
+}
+
 func (g *gen) globalStruct(id *ast.Ident, object types.Object, spec *ast.ValueSpec, valueIndex int) {
 	var literal *ast.CompositeLit
 	if valueIndex < len(spec.Values) && staticallyInitializedGlobal(spec.Values[valueIndex], object.Type(), g.info) {
@@ -9949,6 +9976,10 @@ func (g *gen) functionLiteral(literal *ast.FuncLit) ir.Ref {
 		child.fn = g.mod.NewFunc(symbol, class)
 	}
 	child.fn.CallConv = ir.CallConvGoInternal
+	if g.functionLiteralRunsOnSystemStack(literal) {
+		child.fn.NoSplit = true
+		child.fn.SystemStack = true
+	}
 	var resultAggregate *ir.AggType
 	if signature.Results().Len() > 0 {
 		resultAggregate = child.goABIAggregate(signature.Results().At(0).Type())
