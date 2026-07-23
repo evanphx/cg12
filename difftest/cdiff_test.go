@@ -2,11 +2,13 @@ package difftest
 
 import (
 	"bytes"
+	"context"
 	"os"
 	"os/exec"
 	"path/filepath"
 	"runtime"
 	"testing"
+	"time"
 
 	"github.com/evanphx/cg12/arm64"
 	"github.com/evanphx/cg12/cc"
@@ -214,6 +216,173 @@ int main(void){
   printf("%d\n", mid(3, 7, 8, 9));      /* 788: b resumes where a was */
   return 0;
 }`},
+
+	// --- control-flow stress: the shapes jump threading, short-circuit lowering,
+	// and CFG simplification rewrite. Each computes a checksum over many iterations so
+	// a wrong edge or dropped value shows up as a mismatch, and each terminates so a
+	// miscompiled loop shows up as a timeout.
+
+	{"short-circuit-and-or", `
+#include <stdio.h>
+int main(void){
+  long acc = 0;
+  for (long i = 0; i < 200; i++) {
+    long a = i & 1, b = i & 2, c = i & 4;
+    if (a && b) acc += 1;
+    if (a || b) acc += 2;
+    if (a && b && c) acc += 4;
+    if (a || b || c) acc += 8;
+    if ((a && b) || c) acc += 16;
+    if (a && (b || c)) acc += 32;
+    acc += (a && b) ? 100 : 200;
+    acc += (a || c) ? 1000 : 2000;
+  }
+  printf("%ld\n", acc);
+  return 0;
+}`},
+
+	{"sentinel-return", `
+#include <stdio.h>
+#define UNDEF 0x7fffffffL
+static long fast(long a, long b) {
+  if ((a & 1) && (b & 1)) return a + b;
+  if ((a & 2) && (b & 2)) return a * b;
+  return UNDEF;                     /* fall back */
+}
+static long slow(long a, long b) { return a - b; }
+int main(void){
+  long acc = 0;
+  for (long i = 0; i < 300; i++) {
+    long r = fast(i, i + 1);
+    if (r == UNDEF) r = slow(i, i + 1);   /* branch on the sentinel */
+    acc += r;
+  }
+  printf("%ld\n", acc);
+  return 0;
+}`},
+
+	{"nested-conditions-loop", `
+#include <stdio.h>
+int main(void){
+  long acc = 0;
+  for (long i = 0; i < 150; i++) {
+    for (long j = 0; j < 5; j++) {
+      if (i > j && (i + j) % 3 == 0) {
+        if (i % 2 == 0 || j == 2) acc += i * j;
+        else acc -= j;
+      } else if (i < j || (i ^ j) & 1) {
+        acc += (i > 100) ? j : -j;
+      }
+    }
+  }
+  printf("%ld\n", acc);
+  return 0;
+}`},
+
+	{"switch-and-fallthrough", `
+#include <stdio.h>
+int main(void){
+  long acc = 0;
+  for (long i = 0; i < 400; i++) {
+    switch (i % 7) {
+      case 0: acc += 1; /* fallthrough */
+      case 1: acc += 2; break;
+      case 2:
+      case 3: acc += (i & 1) ? 10 : 20; break;
+      case 4: if (i > 200) acc += 100; else acc += 50; break;
+      default: acc += (i % 2 == 0 && i % 3 == 0) ? 7 : 3;
+    }
+  }
+  printf("%ld\n", acc);
+  return 0;
+}`},
+
+	{"early-exit-loops", `
+#include <stdio.h>
+static int find(const int *a, int n, int x) {
+  for (int i = 0; i < n; i++) {
+    if (a[i] == x) return i;
+    if (a[i] > x && i > 0 && a[i-1] < x) return -i;
+  }
+  return -100;
+}
+int main(void){
+  int a[16]; for (int i = 0; i < 16; i++) a[i] = i * i - 20;
+  long acc = 0;
+  for (int x = -30; x < 260; x++) acc += find(a, 16, x);
+  printf("%ld\n", acc);
+  return 0;
+}`},
+
+	{"goto-and-labels", `
+#include <stdio.h>
+int main(void){
+  long acc = 0;
+  for (long i = 0; i < 100; i++) {
+    long j = 0;
+  again:
+    if (j >= i) goto done;
+    if ((i + j) & 1) { acc += j; j += 2; goto again; }
+    acc -= 1; j += 1; goto again;
+  done:
+    acc += i;
+  }
+  printf("%ld\n", acc);
+  return 0;
+}`},
+
+	{"boolean-arith", `
+#include <stdio.h>
+int main(void){
+  long acc = 0;
+  for (long i = 0; i < 256; i++) {
+    long b0 = (i & 1) != 0, b1 = (i & 2) != 0, b2 = (i & 4) != 0;
+    acc += b0 + 2*b1 + 4*b2;
+    acc += (b0 && b1) + (b1 || b2) * 3;
+    long m = (i > 128) && (i < 200);           /* range test */
+    acc += m ? i : -i;
+    int t = !(i & 7) ? 5 : (i & 3) ? 6 : 7;    /* nested ternary */
+    acc += t;
+  }
+  printf("%ld\n", acc);
+  return 0;
+}`},
+
+	{"while-do-mixed", `
+#include <stdio.h>
+int main(void){
+  long acc = 0, i = 1;
+  while (i < 10000) {
+    long n = i, steps = 0;
+    do {
+      if (n & 1) n = 3*n + 1; else n = n / 2;   /* collatz */
+      steps++;
+    } while (n != 1 && steps < 500);
+    acc += steps;
+    i = i * 3 + 1;
+  }
+  printf("%ld\n", acc);
+  return 0;
+}`},
+
+	{"pointer-walk-cond", `
+#include <stdio.h>
+struct node { long v; int next; };
+int main(void){
+  struct node pool[32];
+  for (int i = 0; i < 32; i++) { pool[i].v = i*7 % 13; pool[i].next = (i+1) % 32; }
+  long acc = 0;
+  int cur = 0;
+  for (int steps = 0; steps < 500; steps++) {
+    struct node *p = &pool[cur];
+    if (p->v > 5 && p->v < 11) acc += p->v;
+    else if (p->v == 0 || p->v == 12) acc -= 1;
+    cur = p->next;
+    if (cur == 0 && steps > 100) break;
+  }
+  printf("%ld\n", acc);
+  return 0;
+}`},
 }
 
 func TestCDiffAgainstGCC(t *testing.T) {
@@ -271,10 +440,19 @@ func cg12Output(t *testing.T, gcc, src string, optimize bool) string {
 
 func runBin(t *testing.T, bin string) string {
 	t.Helper()
-	cmd := exec.Command(bin)
+	// A bounded run: a miscompile that turns a terminating program into an infinite
+	// loop (the exact failure a wrong jump-threading edge produces) must surface as a
+	// test failure, not hang the suite until its global deadline.
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	cmd := exec.CommandContext(ctx, bin)
 	var stdout bytes.Buffer
 	cmd.Stdout = &stdout
-	if err := cmd.Run(); err != nil {
+	err := cmd.Run()
+	if ctx.Err() == context.DeadlineExceeded {
+		t.Fatalf("run %s: timed out after 10s (likely a miscompiled infinite loop)", bin)
+	}
+	if err != nil {
 		if _, ok := err.(*exec.ExitError); !ok {
 			t.Fatalf("run %s: %v", bin, err)
 		}
