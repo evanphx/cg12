@@ -692,7 +692,10 @@ func (g *gen) logical(and bool, ln, rn moderncc.ExpressionNode) ir.Ref {
 	res := g.cur.Alloc(4, 4)
 	rhsB, endB := g.block("logrhs"), g.block("logend")
 	l := g.genCond(ln)
-	g.cur.StoreSub(ir.SubW, g.boolOf(l), res)
+	// Store and load the 0/1 result at full width. A byte-wide load of the word-wide
+	// store would leave the slot accessed at mixed widths, which mem2reg cannot
+	// promote -- so every && / || would keep its result in memory and reload it.
+	g.cur.Store(g.boolOf(l), res)
 	if and {
 		g.cur.Jnz(l, rhsB, endB) // if false, short-circuit to end
 	} else {
@@ -700,10 +703,10 @@ func (g *gen) logical(and bool, ln, rn moderncc.ExpressionNode) ir.Ref {
 	}
 	g.cur = rhsB
 	r := g.genCond(rn)
-	g.cur.StoreSub(ir.SubW, g.boolOf(r), res)
+	g.cur.Store(g.boolOf(r), res)
 	g.cur.Goto(endB)
 	g.cur = endB
-	return g.cur.LoadSub(ir.ClsW, ir.SubUB, res)
+	return g.cur.Load(ir.ClsW, res)
 }
 
 // boolOf normalizes a value to 0/1.
