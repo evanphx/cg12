@@ -74,6 +74,30 @@ func CompileToObject(m *ir.Module) (*obj.Object, error) {
 }
 
 // CompileToObjectWith is CompileToObject with options (e.g. a GC strategy).
+// addAliases emits a symbol for each __attribute__((alias)) at its target's own
+// location, so both names resolve to the same code or data. The target must be
+// defined in this object (the C rule for the attribute).
+func addAliases(o *obj.Object, aliases []*ir.Alias) error {
+	if len(aliases) == 0 {
+		return nil
+	}
+	byName := map[string]obj.Sym{}
+	for _, s := range o.Syms {
+		byName[s.Name] = s
+	}
+	for _, a := range aliases {
+		tgt, ok := byName[sanitize(a.Target)]
+		if !ok {
+			return fmt.Errorf("alias %q: target %q is not defined in this object", a.Name, a.Target)
+		}
+		o.Syms = append(o.Syms, obj.Sym{
+			Name: sanitize(a.Name), Section: tgt.Section, Value: tgt.Value,
+			Size: tgt.Size, Global: a.Export, Func: a.Func, TLS: tgt.TLS,
+		})
+	}
+	return nil
+}
+
 func CompileToObjectWith(m *ir.Module, opts Options) (*obj.Object, error) {
 	o := &obj.Object{Machine: obj.EM_AARCH64}
 	var rows []obj.LineRow
@@ -140,6 +164,9 @@ func CompileToObjectWith(m *ir.Module, opts Options) (*obj.Object, error) {
 		if err := addData(o, d); err != nil {
 			return nil, fmt.Errorf("data %s: %w", d.Name, err)
 		}
+	}
+	if err := addAliases(o, m.Aliases); err != nil {
+		return nil, err
 	}
 	// Emit DWARF when the module carries a source-file table.
 	if len(m.Files) > 0 && anchor != "" {

@@ -115,6 +115,9 @@ func (g *gen) builtinCall(n *moderncc.PostfixExpression) (ir.Ref, bool) {
 		// sound: it only steers the caller to the runtime path.
 		return g.fn.Word(0), true
 
+	case "__builtin_popcount", "__builtin_popcountl", "__builtin_popcountll":
+		return g.popcount(g.genExpr(args[0]), clsOf(args[0].Type())), true
+
 	case "__builtin_ctz", "__builtin_ctzl", "__builtin_ctzll":
 		// Count trailing zeros: isolate the lowest set bit (x & -x) and count the
 		// leading zeros of that. Like clz, undefined for zero.
@@ -213,7 +216,22 @@ func (g *gen) builtinCall(n *moderncc.PostfixExpression) (ir.Ref, bool) {
 		return ir.R, true
 
 	case "__builtin_add_overflow", "__builtin_sub_overflow", "__builtin_mul_overflow":
-		return g.overflowBuiltin(name, args), true
+		return g.overflowBuiltin(name, args, false), true
+	case "__builtin_add_overflow_p", "__builtin_sub_overflow_p", "__builtin_mul_overflow_p":
+		// The _p forms only ask whether the operation overflows the third argument's
+		// type; they compute no result and store nothing.
+		return g.overflowBuiltin(name, args, true), true
+
+	case "__builtin_prefetch":
+		// A cache hint with no value and no observable effect here.
+		return ir.R, true
+
+	case "__builtin_assume_aligned":
+		// Asserts the pointer's alignment and evaluates to it unchanged.
+		if len(args) > 0 {
+			return g.genExpr(args[0]), true
+		}
+		return ir.R, true
 	}
 	return ir.R, false
 }
@@ -274,6 +292,22 @@ func (g *gen) rotate(name string, xe, ne moderncc.ExpressionNode) ir.Ref {
 	return r
 }
 
+// popcount counts set bits with the classic SWAR sequence (cg12 has no popcount
+// primitive): pairwise sums that fold up to a single byte, extracted by a
+// multiply. Works for a 32- or 64-bit operand.
+func (g *gen) popcount(x ir.Ref, cls ir.Cls) ir.Ref {
+	width := int64(cls.Size()) * 8
+	c := func(v int64) ir.Ref { return g.fn.ConstInt(cls, v) }
+	m1, m2, m4, h01 := int64(0x55555555), int64(0x33333333), int64(0x0f0f0f0f), int64(0x01010101)
+	if width == 64 {
+		m1, m2, m4, h01 = 0x5555555555555555, 0x3333333333333333, 0x0f0f0f0f0f0f0f0f, 0x0101010101010101
+	}
+	x = g.cur.Sub(cls, x, g.cur.And(cls, g.cur.Shr(cls, x, c(1)), c(m1)))
+	x = g.cur.Add(cls, g.cur.And(cls, x, c(m2)), g.cur.And(cls, g.cur.Shr(cls, x, c(2)), c(m2)))
+	x = g.cur.And(cls, g.cur.Add(cls, x, g.cur.Shr(cls, x, c(4))), c(m4))
+	return g.cur.Shr(cls, g.cur.Mul(cls, x, c(h01)), c(width-8))
+}
+
 // inf returns a floating infinity constant of t's class (single or double), with
 // the given sign (+1 or -1).
 func (g *gen) inf(t moderncc.Type, sign int) ir.Ref {
@@ -321,12 +355,19 @@ func (g *gen) bswap(v ir.Ref, width int) ir.Ref {
 // The result type's signedness picks the test: the signed and unsigned forms are
 // entirely different questions, and asking the signed one about unsigned operands
 // answers no for every value that only overflows unsigned.
-func (g *gen) overflowBuiltin(name string, args []moderncc.ExpressionNode) ir.Ref {
-	elem := pointee(args[2].Type())
+func (g *gen) overflowBuiltin(name string, args []moderncc.ExpressionNode, predicate bool) ir.Ref {
+	// The _p forms carry the result type directly in the third argument; the
+	// storing forms carry a pointer to it. Only the storing forms evaluate it.
+	var elem moderncc.Type
+	if predicate {
+		name = strings.TrimSuffix(name, "_p")
+		elem = args[2].Type()
+	} else {
+		elem = pointee(args[2].Type())
+	}
 	cls := clsOf(elem)
 	a := g.convert(g.genExpr(args[0]), args[0].Type(), elem)
 	b := g.convert(g.genExpr(args[1]), args[1].Type(), elem)
-	res := g.genExpr(args[2])
 
 	zero := g.fn.ConstInt(cls, 0)
 	neg := func(x ir.Ref) ir.Ref { return g.cur.Cmp(ir.CmpSlt, ir.ClsW, x, zero) } // x < 0 ? 1 : 0
@@ -372,6 +413,8 @@ func (g *gen) overflowBuiltin(name string, args []moderncc.ExpressionNode) ir.Re
 			ovf = g.cur.Or(ir.ClsW, ovf, g.cur.And(ir.ClsW, isMin, isNeg1))
 		}
 	}
-	g.storeVal(res, result, elem)
+	if !predicate {
+		g.storeVal(g.genExpr(args[2]), result, elem)
+	}
 	return ovf
 }

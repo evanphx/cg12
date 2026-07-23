@@ -2,6 +2,7 @@ package cc
 
 import (
 	"fmt"
+	"strings"
 
 	moderncc "github.com/evanphx/cg12/internal/cc"
 	"github.com/evanphx/cg12/ir"
@@ -186,6 +187,28 @@ func funcTypeOf(t moderncc.Type) *moderncc.FunctionType {
 
 // genCall emits a function call, handling direct/indirect callees, fixed-argument
 // coercion, and default promotions for variadic arguments.
+// libcBuiltin maps a GCC __builtin_ name that is just the library function of the
+// same name (the compiler emits these when it does not fold the call itself) to
+// that libc symbol, so the call links. Names that are real compiler intrinsics
+// are handled in builtinCall and never reach here.
+func libcBuiltin(name string) string {
+	s, ok := strings.CutPrefix(name, "__builtin_")
+	if !ok {
+		return name
+	}
+	switch s {
+	case "memcpy", "memmove", "memset", "memcmp", "mempcpy",
+		"strlen", "strnlen", "strcpy", "strncpy", "strcat", "strncat",
+		"strcmp", "strncmp", "strchr", "strrchr", "strstr", "strdup",
+		"malloc", "calloc", "realloc", "free", "alloca",
+		"abort", "exit", "_exit", "abs", "labs", "llabs",
+		"printf", "fprintf", "sprintf", "snprintf", "puts", "putchar",
+		"memchr", "bcopy", "bzero", "index", "rindex":
+		return s
+	}
+	return name
+}
+
 func (g *gen) genCall(n *moderncc.PostfixExpression) ir.Ref {
 	if r, ok := g.vaBuiltin(n); ok {
 		return r
@@ -201,7 +224,7 @@ func (g *gen) genCall(n *moderncc.PostfixExpression) ir.Ref {
 		if v, found := g.lookup(pe.Token.SrcStr()); found {
 			callee = g.loadVal(g.addrOf(v), v.typ) // a function-pointer variable
 		} else {
-			callee = g.fn.Sym(pe.Token.SrcStr(), 0)
+			callee = g.fn.Sym(libcBuiltin(pe.Token.SrcStr()), 0)
 		}
 	} else {
 		callee = g.genExpr(calleeNode)

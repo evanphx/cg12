@@ -39,6 +39,30 @@ func CompileToObject(m *ir.Module) (*obj.Object, error) {
 
 // CompileToObjectWith compiles a module to an in-memory relocatable object with
 // the given options.
+// addAliases emits a symbol for each __attribute__((alias)) at its target's own
+// location, so both names resolve to the same code or data. The target must be
+// defined in this object (the C rule for the attribute).
+func addAliases(o *obj.Object, aliases []*ir.Alias) error {
+	if len(aliases) == 0 {
+		return nil
+	}
+	byName := map[string]obj.Sym{}
+	for _, s := range o.Syms {
+		byName[s.Name] = s
+	}
+	for _, a := range aliases {
+		tgt, ok := byName[sanitize(a.Target)]
+		if !ok {
+			return fmt.Errorf("alias %q: target %q is not defined in this object", a.Name, a.Target)
+		}
+		o.Syms = append(o.Syms, obj.Sym{
+			Name: sanitize(a.Name), Section: tgt.Section, Value: tgt.Value,
+			Size: tgt.Size, Global: a.Export, Func: a.Func, TLS: tgt.TLS,
+		})
+	}
+	return nil
+}
+
 func CompileToObjectWith(m *ir.Module, opts Options) (*obj.Object, error) {
 	o := &obj.Object{Machine: obj.EM_X86_64}
 	var smFuncs []stackMapFunc
@@ -104,6 +128,9 @@ func CompileToObjectWith(m *ir.Module, opts Options) (*obj.Object, error) {
 		if err := addData(o, d); err != nil {
 			return nil, err
 		}
+	}
+	if err := addAliases(o, m.Aliases); err != nil {
+		return nil, err
 	}
 	if len(m.Files) > 0 && anchor != "" {
 		o.SetDWARF(m.Files, rows, dfuncs, uint64(len(o.Text)), anchor, "cg12", ".", m.Files[0], obj.R_X86_64_64, 0x56) // DW_OP_reg6 (rbp)

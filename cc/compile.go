@@ -714,6 +714,20 @@ func (g *gen) genGlobalDecl(d *moderncc.Declaration) {
 			continue
 		}
 		t := dcl.Type()
+		// __attribute__((alias("target"))): a second name for a symbol defined in
+		// this unit (Ruby's RUBY_ALIAS_FUNCTION, e.g. rb_str_buf_cat -> rb_str_cat).
+		// The backend emits it at the target's location; no storage of its own.
+		if at := t.Attributes(); at != nil {
+			if target := at.Alias(); target != "" {
+				g.mod.Aliases = append(g.mod.Aliases, &ir.Alias{
+					Name:   dcl.Name(),
+					Target: target,
+					Export: dcl.Linkage() == moderncc.External,
+					Func:   t.Kind() == moderncc.Function,
+				})
+				continue
+			}
+		}
 		if t.Kind() == moderncc.Function {
 			continue // a prototype needs no storage
 		}

@@ -23,8 +23,11 @@ func (g *gen) genCompound(cs *moderncc.CompoundStatement) {
 	}
 	for l := cs.BlockItemList; l != nil; l = l.BlockItemList {
 		// After a terminator the rest of the block is unreachable, but a label or
-		// case ahead can resume a new block, so keep scanning for one.
-		if g.terminated() && !labeledItem(l.BlockItem) {
+		// case ahead can resume a new block, so keep scanning for one. A declaration
+		// in between still creates a local that resumed code may use (a variable
+		// declared after a return, before a goto label), so process it too -- for its
+		// storage; its initializer, being dead, is skipped in genLocalDecl.
+		if g.terminated() && !labeledItem(l.BlockItem) && !declItem(l.BlockItem) {
 			continue
 		}
 		g.genBlockItem(l.BlockItem)
@@ -76,6 +79,12 @@ func (g *gen) vlaUnwind(depth int) {
 // the same nesting hides a label from either.
 func labeledItem(bi *moderncc.BlockItem) bool {
 	return bi.Case == moderncc.BlockItemStmt && stmtHasLabel(bi.Statement)
+}
+
+// declItem reports whether a block item is a declaration (which creates a local
+// whether or not it is reached, so it is processed even past a terminator).
+func declItem(bi *moderncc.BlockItem) bool {
+	return bi.Case == moderncc.BlockItemDecl
 }
 
 // stmtHasLabel reports whether a statement contains a label at any depth,
@@ -204,7 +213,9 @@ func (g *gen) genLocalDecl(d *moderncc.Declaration) {
 		addr := g.allocAligned(t, int(t.Size()))
 		g.setName(addr, dcl.Name()+".addr")
 		g.define(dcl.Name(), lval{addr: addr, typ: t})
-		g.genInit(addr, t, d.Initializer)
+		if !g.terminated() {
+			g.genInit(addr, t, d.Initializer)
+		}
 		return
 	}
 	if d.Case != moderncc.DeclarationDecl {
@@ -238,7 +249,7 @@ func (g *gen) genLocalDecl(d *moderncc.Declaration) {
 		addr := g.allocAligned(t, size)
 		g.setName(addr, dcl.Name()+".addr")
 		g.define(dcl.Name(), lval{addr: addr, typ: t})
-		if id.Case == moderncc.InitDeclaratorInit {
+		if id.Case == moderncc.InitDeclaratorInit && !g.terminated() {
 			g.genInit(addr, t, id.Initializer)
 		}
 	}

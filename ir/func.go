@@ -174,10 +174,21 @@ type constKey struct {
 
 // Module is a translation unit: a set of functions, aggregate types, and data.
 type Module struct {
-	Funcs []*Func
-	Types []*AggType
-	Data  []*Data
-	Files []string // source-file table indexed (1-based) by SrcPos.File
+	Funcs   []*Func
+	Types   []*AggType
+	Data    []*Data
+	Aliases []*Alias
+	Files   []string // source-file table indexed (1-based) by SrcPos.File
+}
+
+// Alias is a second name for a symbol already defined in this module, as
+// __attribute__((alias("target"))) requests. The backend emits it as a symbol at
+// the target's own location, so the two names resolve to the same code or data.
+type Alias struct {
+	Name   string
+	Target string
+	Export bool // external linkage: visible to the linker
+	Func   bool // aliases a function (STT_FUNC) rather than data (STT_OBJECT)
 }
 
 // Data is a global data definition (initialised or zeroed memory).

@@ -45,6 +45,62 @@ int main(void){
 			"rot0=123456789abcdef\n", out)
 }
 
+// More builtins real code reaches for: popcount, the _p overflow predicates, and
+// __builtin_memcpy routed to libc.
+func TestMoreBuiltins(t *testing.T) {
+	out, code := compileAndRun(t, `
+#include <stdio.h>
+#include <string.h>
+int main(void){
+	printf("popcount=%d,%d,%d\n", __builtin_popcount(0xffu), __builtin_popcountl(0x10101ul), __builtin_popcountll(0ull));
+	printf("mulov=%d,%d\n", __builtin_mul_overflow_p(1<<20, 1<<20, (int)0), __builtin_mul_overflow_p(3, 4, (int)0));
+	char dst[8] = {0};
+	__builtin_memcpy(dst, "hello", 5);
+	printf("copied=%s\n", dst);
+	return 0;
+}`)
+	require.Equal(t, 0, code)
+	require.Equal(t,
+		"popcount=8,3,0\n"+
+			"mulov=1,0\n"+
+			"copied=hello\n", out)
+}
+
+// A __attribute__((alias)) function (Ruby's RUBY_ALIAS_FUNCTION) resolves to its
+// target's code; calling either name runs the same function.
+func TestFunctionAlias(t *testing.T) {
+	out, code := compileAndRun(t, `
+#include <stdio.h>
+int real_add(int a, int b){ return a + b; }
+int alias_add(int a, int b) __attribute__((alias("real_add")));
+int main(void){
+	printf("%d %d\n", real_add(2, 3), alias_add(2, 3));
+	return 0;
+}`)
+	require.Equal(t, 0, code)
+	require.Equal(t, "5 5\n", out)
+}
+
+// A variable declared after a return, reached only through a later goto label,
+// must still get its storage (cg12 once skipped the declaration as dead code, so
+// the label's code referenced an undefined symbol). Ruby's numeric.c does this.
+func TestVariableDeclaredAfterReturn(t *testing.T) {
+	out, code := compileAndRun(t, `
+#include <stdio.h>
+static int f(int x){
+	if (x > 0) goto late;
+	return -1;
+
+	int v;
+late:
+	v = x * 10;
+	return v + 1;
+}
+int main(void){ printf("%d\n", f(5)); return 0; }`)
+	require.Equal(t, 0, code)
+	require.Equal(t, "51\n", out)
+}
+
 // A function returning a function pointer, where a parameter name repeats between
 // the function's own parameter list and the returned pointer's signature. The two
 // live in different prototype scopes; GCC accepts it and so must cg12 (this once
