@@ -78,8 +78,20 @@ func Mem2Reg(f *ir.Func) bool {
 		return name
 	}
 
-	// Insert phi placeholders at the iterated dominance frontier of each
-	// variable's defining blocks.
+	// Per-variable live-in sets, for pruned SSA. Placing a phi only where a variable
+	// is live-in matters most for an irreducible computed-goto mesh (an interpreter's
+	// threaded dispatch): its dominance frontier is the whole mesh, so unpruned
+	// (minimal) SSA sprouts a phi for every promoted handler-local at every handler,
+	// and the rename chains them into one live range spanning the entire mesh. Hundreds
+	// of such spurious mesh-wide ranges then swamp the register allocator -- each is
+	// live across every call, so they oversubscribe the callee-saved registers and push
+	// the genuinely hot loop-carried state (pc, sp, cfp) into caller-saved registers
+	// that must be saved and restored around every dispatched call. Liveness (a load is
+	// a use, a store a def) is a standard backward fixpoint over the CFG.
+	liveIn := variableLiveIn(f, cfg, varOf)
+
+	// Insert phi placeholders at the iterated dominance frontier of each variable's
+	// defining blocks, pruned to blocks where the variable is actually live-in.
 	phiOf := map[*ir.Block]map[int]*ir.Phi{}
 	for vi, v := range vars {
 		defs := analysis.BlockSet{}
@@ -92,6 +104,9 @@ func Mem2Reg(f *ir.Func) bool {
 			}
 		}
 		for b := range analysis.IteratedFrontier(df, defs) {
+			if !liveIn[b][vi] {
+				continue // dead here; a phi would only create a spurious live range
+			}
 			p := &ir.Phi{Cls: v.cls, To: f.NewTemp(uniq(varBase(v.name)), v.cls)}
 			b.Phis = append(b.Phis, p)
 			if phiOf[b] == nil {
@@ -309,6 +324,70 @@ func copyDefs(m map[int]ir.Ref) map[int]ir.Ref {
 		out[k] = v
 	}
 	return out
+}
+
+// variableLiveIn computes, for each block, the set of promoted-variable indices that
+// are live-in (a use is reachable before any redefinition). It is the classic backward
+// liveness dataflow specialized to the variables being promoted: a load of a variable
+// is a use, a store a def. Within a block, only a variable's first touch matters -- a
+// leading load is upward-exposed (live-in), a leading store kills any incoming value.
+func variableLiveIn(f *ir.Func, cfg *analysis.CFG, varOf map[uint32]int) map[*ir.Block]map[int]bool {
+	upExposed := map[*ir.Block]map[int]bool{}
+	killed := map[*ir.Block]map[int]bool{}
+	for _, b := range f.Blocks {
+		ue, kl, seen := map[int]bool{}, map[int]bool{}, map[int]bool{}
+		for k := range b.Instrs {
+			in := &b.Instrs[k]
+			if vi := loadVar(in, varOf); vi >= 0 {
+				if !seen[vi] {
+					ue[vi], seen[vi] = true, true
+				}
+			} else if vi := addrVar(in, varOf); vi >= 0 {
+				if !seen[vi] {
+					kl[vi], seen[vi] = true, true
+				}
+			}
+		}
+		upExposed[b], killed[b] = ue, kl
+	}
+
+	liveIn := map[*ir.Block]map[int]bool{}
+	liveOut := map[*ir.Block]map[int]bool{}
+	for _, b := range f.Blocks {
+		liveIn[b], liveOut[b] = map[int]bool{}, map[int]bool{}
+	}
+	// Iterate to a fixpoint, visiting blocks in reverse RPO (a post-order) so live
+	// information flows backward quickly.
+	for changed := true; changed; {
+		changed = false
+		for i := len(cfg.RPO) - 1; i >= 0; i-- {
+			b := cfg.RPO[i]
+			out := liveOut[b]
+			for _, s := range b.Succs() {
+				if s == nil {
+					continue
+				}
+				for vi := range liveIn[s] {
+					if !out[vi] {
+						out[vi], changed = true, true
+					}
+				}
+			}
+			in := liveIn[b]
+			for vi := range upExposed[b] {
+				if !in[vi] {
+					in[vi], changed = true, true
+				}
+			}
+			kl := killed[b]
+			for vi := range out {
+				if !kl[vi] && !in[vi] {
+					in[vi], changed = true, true
+				}
+			}
+		}
+	}
+	return liveIn
 }
 
 func isVarAlloc(id uint32, varOf map[uint32]int) bool {

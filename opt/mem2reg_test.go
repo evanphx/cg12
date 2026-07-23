@@ -192,3 +192,28 @@ func TestMem2RegPromotesComputedGoto(t *testing.T) {
 		}
 	}
 }
+
+func TestMem2RegPrunesDeadPhi(t *testing.T) {
+	// A variable stored on two paths that reach a join, but never loaded from the
+	// join onward, is dead there. Minimal SSA would still place a phi at the join
+	// (it sits in the dominance frontier of the stores); pruned SSA must not -- a
+	// phi for a dead variable only creates a spurious live range. This is what keeps
+	// an irreducible computed-goto mesh from sprouting a mesh-wide range for every
+	// promoted handler-local, which otherwise swamps the register allocator.
+	f := ir.NewModule().NewFunc("m", ir.ClsW)
+	cond := f.Param("c", ir.ClsW)
+	e := f.Entry()
+	p := e.Alloc(4, 4)
+	e.Store(f.Word(1), p)
+	a := f.NewBlock("a")
+	b := f.NewBlock("b")
+	join := f.NewBlock("join")
+	e.Jnz(cond, a, b)
+	a.Store(f.Word(2), p) // p is stored on the a-path...
+	a.Goto(join)
+	b.Goto(join)
+	join.Ret(f.Word(7)) // ...but never loaded at or after the join: p is dead here.
+
+	require.True(t, Mem2Reg(f))
+	assert.Empty(t, join.Phis, "no phi for a variable that is dead at the join")
+}

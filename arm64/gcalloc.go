@@ -313,6 +313,25 @@ func (g *colorGraph) assign() (*allocation, error) {
 	// remain, remove the cheapest to spill -- lowest spill-cost per neighbour freed --
 	// as an optimistic potential spill: it is coloured first and only actually spills
 	// if no colour is left.
+	//
+	// Since colouring is the reverse of removal, removing a guaranteed-colourable node
+	// first colours it last, so it takes whatever register is left. Removing the cold
+	// low nodes first therefore colours the warm ones first, with the widest choice --
+	// which lets the hottest call-crossing values (an interpreter's pc, sp, cfp) win
+	// the scarce callee-saved registers over the many cold values that are also live
+	// across every dispatched call. "Cold" is cost below 1.0, cheaper than a single
+	// reference at the function's base (entry) frequency; among comparable-cost nodes
+	// the original least-constrained (min-degree) order stands, so pressure-free code
+	// -- where cost priority is irrelevant -- keeps the incidental register coincidence
+	// that lets adjacent pointer walks fold into pre/post-indexed writebacks. Reordering
+	// low nodes never changes which node spills (degree < availK holds for any order
+	// among them), only the register each is given.
+	coldRank := func(t int) int {
+		if g.cost[t] < 1.0 {
+			return 0
+		}
+		return 1
+	}
 	stack := make([]int, 0, active)
 	for active > 0 {
 		low, spillCand := -1, -1
@@ -321,7 +340,8 @@ func (g *colorGraph) assign() (*allocation, error) {
 				continue
 			}
 			if degree[t] < availK[t] {
-				if low < 0 || degree[t] < degree[low] {
+				if low < 0 || coldRank(t) < coldRank(low) ||
+					(coldRank(t) == coldRank(low) && degree[t] < degree[low]) {
 					low = t
 				}
 			}
