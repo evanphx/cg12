@@ -2980,7 +2980,7 @@ func (g *gen) staticStructItems(name string, structure *types.Struct, literal *a
 				items = append(items, ir.DataItem{Zero: int(fieldSize)})
 			}
 		} else if function := calledFunction(expression, g.info); function != nil {
-			descriptor := g.staticFunctionDescriptor(g.functionSymbol(function))
+			descriptor := g.staticNamedFunctionDescriptor(function)
 			items = append(items, ir.DataItem{Sub: ir.SubL, Sym: descriptor})
 		} else if function, ok := expression.(*ast.FuncLit); ok {
 			descriptor := g.staticFunctionLiteral(function)
@@ -3135,7 +3135,7 @@ func (g *gen) staticDirectInterfacePayload(name string, sourceType types.Type, e
 		}
 	}
 	if function := calledFunction(expression, g.info); function != nil {
-		descriptor := g.staticFunctionDescriptor(g.functionSymbol(function))
+		descriptor := g.staticNamedFunctionDescriptor(function)
 		return ir.DataItem{Sub: ir.SubL, Sym: descriptor}, true
 	}
 	return ir.DataItem{}, false
@@ -3504,12 +3504,7 @@ func (g *gen) globalArray(id *ast.Ident, object types.Object, array *types.Array
 				if !ok {
 					return
 				}
-				descriptor := fmt.Sprintf(".goc.funcval.%d", len(g.mod.Data))
-				g.mod.Data = append(g.mod.Data, &ir.Data{
-					Name:  descriptor,
-					Align: 8,
-					Items: []ir.DataItem{{Sub: ir.SubL, Sym: g.functionSymbol(function)}},
-				})
+				descriptor := g.staticNamedFunctionDescriptor(function)
 				items[index] = ir.DataItem{Sub: ir.SubL, Sym: descriptor}
 			}
 		}
@@ -10511,6 +10506,13 @@ func (g *gen) goInternalCallAdapter(
 
 func (g *gen) staticFunctionValue(symbol string) ir.Ref {
 	return g.fn.Sym(g.staticFunctionDescriptor(symbol), 0)
+}
+
+func (g *gen) staticNamedFunctionDescriptor(function *types.Func) string {
+	symbol := g.functionSymbol(function)
+	signature := compiledFunctionSignature(function)
+	adapter := g.goInternalFunctionAdapter(symbol, signature)
+	return g.staticFunctionDescriptor(adapter)
 }
 
 func (g *gen) staticFunctionDescriptor(symbol string) string {

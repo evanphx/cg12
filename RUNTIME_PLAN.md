@@ -39,7 +39,6 @@ that must not be hidden by adding more tests:
 - signal notification can crash in `internal/runtime/atomic.Xchg8` or runtime
   locking;
 - finalizer resurrection does not run correctly;
-- the gob round trip reaches an invalid zero `reflect.Value`;
 - the runtime trace program runs out of memory or times out;
 - two large HTTP programs exceed the current 3 GiB compilation limit;
 - the existing ECDSA case remains a known compiler/stdlib gap.
@@ -281,6 +280,18 @@ GC/yield loops, and pinner/finalizer/cleanup coverage has deliberate tests for
 every supported public behavior.
 
 ### 5.4 Reflection/gob failure
+
+Current checkpoint:
+
+- [x] Reduce the gob failure to `gob.NewEncoder(&buf).Encode(42)`, where the
+  `encOpTable` static function value pointed directly at `encoding/gob.encInt`
+  instead of a Go-internal function-value adapter.
+- [x] Route static named function values in global composites through the same
+  `.gointernal.funcvalue` adapters used for dynamic function values.
+- [x] Add focused reflect and gob reducers for direct `Value.Int`, indirect
+  `reflect.Value` calls, gob int encoding, gob single-int structs, and gob mixed
+  structs.
+- [x] Pass the optimized gob reducer batch and complete gob round trip.
 
 Reduce gob to the first invalid `reflect.Value` operation. Exercise zero values,
 interfaces, addressability, method calls, maps, slices, structs, pointers, and

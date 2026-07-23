@@ -1441,6 +1441,54 @@ func call() int {
 	}
 }
 
+func TestCompileStaticFunctionValueUsesGoInternalAdapter(t *testing.T) {
+	module, err := CompileExecutable("main.go", []byte(`package main
+
+type payload struct {
+	left  int
+	right int
+}
+
+type operation func(payload) int
+
+func inspect(value payload) int {
+	return value.left + value.right
+}
+
+var operations = [...]operation{
+	inspect,
+}
+
+func main() {
+	value := payload{left: 17, right: 25}
+	if operations[0](value) != 42 {
+		panic("static function value result mismatch")
+	}
+}
+`))
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	foundDescriptor := false
+	for _, data := range module.Data {
+		if !strings.HasPrefix(data.Name, ".goc.funcval.") || len(data.Items) != 1 {
+			continue
+		}
+		symbol := data.Items[0].Sym
+		if !strings.Contains(symbol, "main.inspect") {
+			continue
+		}
+		foundDescriptor = true
+		if !strings.Contains(symbol, ".gointernal.funcvalue.") {
+			t.Fatalf("static function-value descriptor points at %q, want GoInternal adapter", symbol)
+		}
+	}
+	if !foundDescriptor {
+		t.Fatal("static function-value descriptor for inspect was not generated")
+	}
+}
+
 func TestCompileExecutableUsesAggregateABIForInterfaceMethodWrapperParameters(t *testing.T) {
 	module, err := CompileExecutable("main.go", []byte(`package main
 

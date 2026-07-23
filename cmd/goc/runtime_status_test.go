@@ -871,6 +871,24 @@ func TestARM64RuntimeCapabilityStatus(t *testing.T) {
 		},
 		{
 			category:    "stdlib-encoding",
+			name:        "gob-int",
+			source:      "stdlib_encoding_gob_int.go",
+			expectation: runtimeCapabilityMustPass,
+		},
+		{
+			category:    "stdlib-encoding",
+			name:        "gob-struct-int",
+			source:      "stdlib_encoding_gob_struct_int.go",
+			expectation: runtimeCapabilityMustPass,
+		},
+		{
+			category:    "stdlib-encoding",
+			name:        "gob-struct-mixed",
+			source:      "stdlib_encoding_gob_struct_mixed.go",
+			expectation: runtimeCapabilityMustPass,
+		},
+		{
+			category:    "stdlib-encoding",
 			name:        "gob-roundtrip",
 			source:      "stdlib_encoding_gob_roundtrip.go",
 			expectation: runtimeCapabilityMustPass,
@@ -1765,6 +1783,24 @@ func TestARM64RuntimeCapabilityStatus(t *testing.T) {
 			category:    "runtime-packages",
 			name:        "reflect-value-call",
 			source:      "runtime_reflect_value_call.go",
+			expectation: runtimeCapabilityMustPass,
+		},
+		{
+			category:    "runtime-packages",
+			name:        "reflect-value-int",
+			source:      "runtime_reflect_value_int.go",
+			expectation: runtimeCapabilityMustPass,
+		},
+		{
+			category:    "runtime-packages",
+			name:        "reflect-value-indirect-call",
+			source:      "runtime_reflect_value_indirect_call.go",
+			expectation: runtimeCapabilityMustPass,
+		},
+		{
+			category:    "runtime-packages",
+			name:        "reflect-value-instruction-op",
+			source:      "runtime_reflect_value_instruction_op.go",
 			expectation: runtimeCapabilityMustPass,
 		},
 		{
