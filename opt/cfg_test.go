@@ -28,6 +28,31 @@ func TestSimplifyConstantBranch(t *testing.T) {
 	}
 }
 
+func TestSimplifyThreadsEmptyForwardingArms(t *testing.T) {
+	// `cond ? {} : {}` where both empty arms continue to the same join: the branch
+	// threads past the empty forwarding blocks, its two targets coincide, and the
+	// conditional collapses to an unconditional jump -- so the condition is dead.
+	// This is the shape (a flag whose two arms reach one block) that filled Ruby's
+	// dispatch loop with pointless compare-and-branch pairs.
+	f := ir.NewModule().NewFunc("b", ir.ClsW)
+	cond := f.Param("c", ir.ClsW)
+	start := f.Entry()
+	thenB := f.NewBlock("then")
+	elseB := f.NewBlock("else")
+	join := f.NewBlock("join")
+	start.Jnz(cond, thenB, elseB)
+	thenB.Goto(join) // empty forwarding block
+	elseB.Goto(join) // empty forwarding block
+	join.Ret(f.Word(7))
+
+	assert.True(t, SimplifyCFG(f))
+	// Threaded to jnz(c, join, join) -> jmp join; then/else unreachable and removed;
+	// join coalesced into start, which now just returns.
+	assert.Len(t, f.Blocks, 1)
+	assert.Same(t, start, f.Blocks[0])
+	assert.Equal(t, ir.JmpRet, start.Jmp.Kind)
+}
+
 func TestSimplifyConstantBranchFalse(t *testing.T) {
 	f := ir.NewModule().NewFunc("b", ir.ClsW)
 	start := f.Entry()

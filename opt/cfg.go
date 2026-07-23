@@ -11,6 +11,43 @@ import (
 func SimplifyCFG(f *ir.Func) bool {
 	changed := false
 
+	// 0. Thread branches through empty forwarding blocks: if a terminator targets a
+	// block that only jumps unconditionally onward, retarget it past that block.
+	// This is what turns a conditional whose two empty arms both reach one block
+	// into Jnz(c, X, X), which step 1 then collapses -- and with the condition now
+	// dead, DCE removes the flag an interpreter stored, loaded, and branched on when
+	// both arms went to the same place (124 such branches in Ruby's dispatch loop).
+	forward := func(t *ir.Block) *ir.Block {
+		// Follow a chain of empty, phi-free forwarding blocks to its end, stopping
+		// short of any block that carries phis (their operands are edge-sensitive) or
+		// of a cycle.
+		seen := map[*ir.Block]bool{}
+		for t != nil && len(t.Instrs) == 0 && len(t.Phis) == 0 && t.Jmp.Kind == ir.JmpJmp && !seen[t] {
+			u := t.Jmp.To
+			if u == nil || u == t || len(u.Phis) != 0 {
+				break
+			}
+			seen[t] = true
+			t = u
+		}
+		return t
+	}
+	for _, b := range f.Blocks {
+		switch b.Jmp.Kind {
+		case ir.JmpJnz:
+			if nt := forward(b.Jmp.To); nt != b.Jmp.To {
+				b.Jmp.To, changed = nt, true
+			}
+			if nt := forward(b.Jmp.To2); nt != b.Jmp.To2 {
+				b.Jmp.To2, changed = nt, true
+			}
+		case ir.JmpJmp:
+			if nt := forward(b.Jmp.To); nt != b.Jmp.To {
+				b.Jmp.To, changed = nt, true
+			}
+		}
+	}
+
 	// 1. Fold conditional branches with a constant or coincident target.
 	for _, b := range f.Blocks {
 		if b.Jmp.Kind != ir.JmpJnz {
