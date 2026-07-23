@@ -3,6 +3,7 @@ package arm64
 import (
 	"fmt"
 	"math"
+	"sort"
 
 	"github.com/evanphx/cg12/analysis"
 	"github.com/evanphx/cg12/ir"
@@ -276,6 +277,55 @@ func (g *colorGraph) assign() (*allocation, error) {
 			removed[t] = true
 		}
 	}
+	// Pre-assign callee-saved registers to the hottest call-crossing values, costliest
+	// first. Such a value is live across many calls -- a caller-saved register would
+	// force a save/restore around each -- and it interferes with almost everything (a
+	// whole interpreter dispatch mesh), so the graph colourer removes it, and thus
+	// colours it, in an order set by when its degree falls below availK, not by cost.
+	// A hotter value (the interpreter's cfp) is then coloured only after a colder one
+	// (a cost-1 argument temp) has taken the last callee-saved register, and spills to
+	// a caller-saved one that is save/restored at every dispatched call. Greedily giving
+	// each the first callee-saved register no higher-priority interfering neighbour has
+	// taken fixes the priority directly -- as gcc's IRA allocates high-priority allocnos
+	// first -- keeping pc/cfp/ec/sp in callee-saved registers across the whole mesh. A
+	// pre-coloured value is removed from the graph; its register becomes a forbidden
+	// colour for every interfering neighbour, exactly like an ABI-fixed temp.
+	type crossCand struct {
+		t    int
+		cost float64
+	}
+	var cands []crossCand
+	for t := range f.Temps {
+		if removed[t] || !g.node[t] || f.Temps[t].Cls.IsFloat() {
+			continue
+		}
+		// preferCallee: the save/restore bill of a caller-saved register (crossFreq*2)
+		// outweighs the single prologue save/restore of a callee-saved one (cost ~2).
+		if g.crossFreq[t] > 0 && g.crossFreq[t]*2 >= 2.0 && g.cost[t] >= 1.0 {
+			cands = append(cands, crossCand{t, g.cost[t]})
+		}
+	}
+	sort.SliceStable(cands, func(i, j int) bool { return cands[i].cost > cands[j].cost })
+	for _, c := range cands {
+		pick := Reg(ir.NoReg)
+		for _, r := range intAllocOrder {
+			if calleeSavedReg(r) && !g.forb[c.t][r] {
+				pick = r
+				break
+			}
+		}
+		if pick == Reg(ir.NoReg) {
+			continue // no callee-saved register free; leave this one to the colourer
+		}
+		f.Temps[c.t].Reg = int(pick)
+		removed[c.t] = true
+		for w := range g.adj[c.t] {
+			if !removed[w] {
+				g.forbid(w, pick)
+			}
+		}
+	}
+
 	// availK is how many colours a node could actually take: its class pool minus
 	// the registers forbidden to it. A node with fewer interfering neighbours than
 	// that (degree < availK) is guaranteed a colour.
@@ -315,22 +365,44 @@ func (g *colorGraph) assign() (*allocation, error) {
 	// if no colour is left.
 	//
 	// Since colouring is the reverse of removal, removing a guaranteed-colourable node
-	// first colours it last, so it takes whatever register is left. Removing the cold
-	// low nodes first therefore colours the warm ones first, with the widest choice --
-	// which lets the hottest call-crossing values (an interpreter's pc, sp, cfp) win
-	// the scarce callee-saved registers over the many cold values that are also live
-	// across every dispatched call. "Cold" is cost below 1.0, cheaper than a single
-	// reference at the function's base (entry) frequency; among comparable-cost nodes
-	// the original least-constrained (min-degree) order stands, so pressure-free code
-	// -- where cost priority is irrelevant -- keeps the incidental register coincidence
-	// that lets adjacent pointer walks fold into pre/post-indexed writebacks. Reordering
-	// low nodes never changes which node spills (degree < availK holds for any order
-	// among them), only the register each is given.
+	// first colours it last, so it takes whatever register is left; keeping a node in
+	// the graph until last colours it first, with the widest choice. That choice of
+	// order matters most for a value live across a call: it prefers a callee-saved
+	// register (no save/restore around every crossed call), and those are scarce.
+	//
+	// A warm (non-trivially used) call-crossing value is therefore kept for last, so it
+	// is coloured first and wins a callee-saved register -- this is what lets an
+	// interpreter's hot loop-carried state (pc, cfp, ec) stay in callee-saved registers
+	// across the whole dispatch mesh instead of being save/restored at every handler
+	// call. Left to min-degree, the smallest-degree such value (often the hottest, e.g.
+	// pc) becomes colourable first and is pushed to the bottom of the stack, coloured
+	// last, into a caller-saved register. Among several warm crossing values the costlier
+	// is kept for last (coloured first). Everything else keeps the cold-first, then
+	// least-constrained (min-degree) order -- so pressure-free code, and pointer walks
+	// whose values do not cross calls, keep the incidental register coincidence that
+	// folds an advance into a pre/post-indexed writeback. Reordering low nodes never
+	// changes which node spills (degree < availK holds for any order among them), only
+	// the register each is given.
 	coldRank := func(t int) int {
 		if g.cost[t] < 1.0 {
 			return 0
 		}
 		return 1
+	}
+	warmCross := func(t int) bool { return g.crossFreq[t] > 0 && g.cost[t] >= 1.0 }
+	// moreRemovable reports whether a should be removed before b (thus coloured after).
+	moreRemovable := func(a, b int) bool {
+		wa, wb := warmCross(a), warmCross(b)
+		if wa != wb {
+			return !wa // keep warm-crossing values in the graph until last
+		}
+		if wa { // both warm-crossing: remove the cheaper first, colour the costlier first
+			return g.cost[a] < g.cost[b]
+		}
+		if coldRank(a) != coldRank(b) {
+			return coldRank(a) < coldRank(b) // cold first
+		}
+		return degree[a] < degree[b] // then least constrained
 	}
 	stack := make([]int, 0, active)
 	for active > 0 {
@@ -340,8 +412,7 @@ func (g *colorGraph) assign() (*allocation, error) {
 				continue
 			}
 			if degree[t] < availK[t] {
-				if low < 0 || coldRank(t) < coldRank(low) ||
-					(coldRank(t) == coldRank(low) && degree[t] < degree[low]) {
+				if low < 0 || moreRemovable(t, low) {
 					low = t
 				}
 			}
