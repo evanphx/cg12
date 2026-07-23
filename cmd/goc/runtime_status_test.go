@@ -1775,6 +1775,24 @@ func TestARM64RuntimeCapabilityStatus(t *testing.T) {
 		},
 		{
 			category:    "runtime-packages",
+			name:        "reflect-call-aggregate-probe",
+			source:      "runtime_reflect_call_aggregate_probe.go",
+			expectation: runtimeCapabilityMustPass,
+		},
+		{
+			category:    "runtime-packages",
+			name:        "reflect-call-aggregate-matrix",
+			source:      "runtime_reflect_call_aggregate_matrix.go",
+			expectation: runtimeCapabilityMustPass,
+		},
+		{
+			category:    "runtime-packages",
+			name:        "reflect-call-aggregate-function",
+			source:      "runtime_reflect_call_aggregate_function_probe.go",
+			expectation: runtimeCapabilityMustPass,
+		},
+		{
+			category:    "runtime-packages",
 			name:        "reflect-make-values",
 			source:      "runtime_reflect_make_values.go",
 			expectation: runtimeCapabilityMustPass,
@@ -1825,6 +1843,18 @@ func TestARM64RuntimeCapabilityStatus(t *testing.T) {
 			category:    "runtime-packages",
 			name:        "reflect-interface-extract",
 			source:      "runtime_reflect_interface_extract.go",
+			expectation: runtimeCapabilityMustPass,
+		},
+		{
+			category:    "runtime-packages",
+			name:        "reflect-interface-extract-probe",
+			source:      "runtime_reflect_interface_extract_probe.go",
+			expectation: runtimeCapabilityMustPass,
+		},
+		{
+			category:    "runtime-packages",
+			name:        "reflect-type-assert",
+			source:      "runtime_reflect_type_assert_probe.go",
 			expectation: runtimeCapabilityMustPass,
 		},
 		{

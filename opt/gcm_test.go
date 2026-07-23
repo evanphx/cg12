@@ -207,3 +207,29 @@ func TestGCMPreservesStoreOrderAndDeps(t *testing.T) {
 	}
 	assert.Equal(t, []uint32{uint32(p.ID), uint32(q.ID)}, order)
 }
+
+func TestGCMPinsPointerComputations(t *testing.T) {
+	f := ir.NewModule().NewFuncVoid("copy")
+	src := f.Param("src", ir.ClsP)
+	dst := f.Param("dst", ir.ClsP)
+	index := f.Param("index", ir.ClsL)
+	entry := f.Entry()
+	loop := f.NewBlock("loop")
+	done := f.NewBlock("done")
+
+	entry.Goto(loop)
+	offset := loop.Phi(ir.ClsL, ir.PhiEdge{From: entry, Val: f.Long(0)})
+	sourceElement := loop.Add(ir.ClsP, src, offset)
+	value := loop.LoadSub(ir.ClsW, ir.SubUB, sourceElement)
+	destinationElement := loop.Add(ir.ClsP, dst, offset)
+	loop.StoreSub(ir.SubB, value, destinationElement)
+	next := loop.Add(ir.ClsL, offset, f.Long(1))
+	loop.Jnz(loop.Cmp(ir.CmpUlt, ir.ClsL, next, index), loop, done)
+	loop.Phis[0].Add(loop, next)
+	done.RetVoid()
+
+	assert.False(t, blockHasOp(entry, ir.OAdd), "pointer arithmetic must remain pinned")
+	assert.False(t, GCM(f), "pinning pointer computations leaves this copy loop unchanged")
+	assert.False(t, blockHasOp(entry, ir.OAdd), "GCM must not hoist pointer arithmetic")
+	assert.True(t, blockHasOp(loop, ir.OAdd), "pointer arithmetic stays in the memory block")
+}

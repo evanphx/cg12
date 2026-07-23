@@ -6596,6 +6596,7 @@ func (g *gen) typeAssertion(assertion *ast.TypeAssertExpr) (ir.Ref, ir.Ref) {
 	if sliceResult {
 		g.store(successValue, resultStorage, targetType)
 	}
+	successFrom := g.cur
 	g.cur.Goto(done)
 
 	g.cur = failure
@@ -6610,12 +6611,12 @@ func (g *gen) typeAssertion(assertion *ast.TypeAssertExpr) (ir.Ref, ir.Ref) {
 		value = g.load(resultStorage, targetType)
 	} else {
 		value = done.Phi(targetClass,
-			ir.PhiEdge{From: success, Val: successValue},
+			ir.PhiEdge{From: successFrom, Val: successValue},
 			ir.PhiEdge{From: failure, Val: failureValue},
 		)
 	}
 	asserted := done.Phi(ir.ClsW,
-		ir.PhiEdge{From: success, Val: g.fn.Word(1)},
+		ir.PhiEdge{From: successFrom, Val: g.fn.Word(1)},
 		ir.PhiEdge{From: failure, Val: g.fn.Word(0)},
 	)
 	return value, asserted

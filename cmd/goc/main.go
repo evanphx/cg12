@@ -44,11 +44,14 @@ func main() {
 	input := flag.Arg(0)
 	src, err := os.ReadFile(input)
 	check(err)
-	buildExecutable := !*obj && !*asm && !*emitIR
+	buildExecutable := !*obj && !*asm
 	var m *ir.Module
 	var runtimeCoverage *goc.RuntimeCoverage
 	if *runtimeCoverMeta != "" {
-		if !buildExecutable {
+		if *emitIR {
+			check(fmt.Errorf("-runtime-covermeta cannot be combined with -emit-ir"))
+		}
+		if *obj || *asm {
 			check(fmt.Errorf("-runtime-covermeta requires an executable build"))
 		}
 		m, runtimeCoverage, err = goc.CompileExecutableWithRuntimeCoverage(filepath.Base(input), src)

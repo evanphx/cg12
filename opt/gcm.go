@@ -89,7 +89,7 @@ func (s *gcmScheduler) classify() {
 			if in.To.Kind != ir.RefTemp {
 				continue
 			}
-			if movable(&in) && !s.f.Temp(in.To).Fixed {
+			if gcmMovable(&in) && !s.f.Temp(in.To).Fixed {
 				s.movInstr[in.To.ID] = in
 				s.origBlock[in.To.ID] = b
 				s.movIDs = append(s.movIDs, in.To.ID)
@@ -105,13 +105,20 @@ func (s *gcmScheduler) unpin() {
 	for _, b := range s.cfg.RPO {
 		out := b.Instrs[:0]
 		for _, in := range b.Instrs {
-			if in.To.Kind == ir.RefTemp && movable(&in) && !s.f.Temp(in.To).Fixed {
+			if in.To.Kind == ir.RefTemp && gcmMovable(&in) && !s.f.Temp(in.To).Fixed {
 				continue
 			}
 			out = append(out, in)
 		}
 		b.Instrs = out
 	}
+}
+
+func gcmMovable(in *ir.Instr) bool {
+	if in.Cls == ir.ClsP {
+		return false
+	}
+	return movable(in)
 }
 
 func (s *gcmScheduler) defBlock(r ir.Ref) *ir.Block {

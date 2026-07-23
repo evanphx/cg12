@@ -4195,15 +4195,19 @@ func main() {
 	if err != nil {
 		t.Fatalf("compile executable: %v", err)
 	}
-	objectData, assemblySource, err := arm64.CompileObjectAndAssembly(module)
+	directory := t.TempDir()
+	objectPath := filepath.Join(directory, "case.o")
+	objectFile, err := os.Create(objectPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	assemblySource, err := arm64.WriteObjectAndAssembly(objectFile, module)
+	closeErr := objectFile.Close()
 	if err != nil {
 		t.Fatalf("machine code: %v", err)
 	}
-
-	directory := t.TempDir()
-	objectPath := filepath.Join(directory, "case.o")
-	if err := os.WriteFile(objectPath, objectData, 0o644); err != nil {
-		t.Fatal(err)
+	if closeErr != nil {
+		t.Fatal(closeErr)
 	}
 	assemblyPath := filepath.Join(directory, "runtime.S")
 	if err := os.WriteFile(assemblyPath, []byte(assemblySource), 0o644); err != nil {
@@ -4219,7 +4223,9 @@ func main() {
 	if output, err := link.CombinedOutput(); err != nil {
 		t.Fatalf("link executable: %v\n%s", err, output)
 	}
-	if output, err := exec.Command(executable).CombinedOutput(); err != nil {
+	command := exec.Command(executable)
+	command.Env = append(os.Environ(), "GOMAXPROCS=1")
+	if output, err := command.CombinedOutput(); err != nil {
 		t.Fatalf("result != %d: %v\n%s", want, err, output)
 	}
 }
