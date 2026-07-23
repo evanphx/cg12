@@ -959,7 +959,7 @@ func Test() int {
 }
 
 func TestRepositoryStandardLibraryMD5(t *testing.T) {
-	runCase(t, `package main
+	runExecutableCase(t, `package main
 
 import "crypto/md5"
 
@@ -967,11 +967,11 @@ func Test() int {
 	sum := md5.Sum([]byte("abc"))
 	return int(sum[0]) + int(sum[15])
 }
-`, 258, false)
+`, 258)
 }
 
 func TestRepositoryStandardLibrarySHA1(t *testing.T) {
-	runCase(t, `package main
+	runExecutableCase(t, `package main
 
 import "crypto/sha1"
 
@@ -979,7 +979,7 @@ func Test() int {
 	sum := sha1.Sum([]byte("abc"))
 	return int(sum[0]) + int(sum[19])
 }
-`, 326, false)
+`, 326)
 }
 
 func TestRepositoryStandardLibraryFNVConstructor(t *testing.T) {

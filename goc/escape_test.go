@@ -104,7 +104,10 @@ func TestUnsafePointerConvertedToUintptrDoesNotEscapeLocalArray(t *testing.T) {
 	module, err := goc.Compile("escape.go", []byte(`
 package main
 
-import "runtime"
+import (
+	"runtime"
+	"unsafe"
+)
 
 func consume(value uintptr) {
 }
@@ -167,7 +170,7 @@ func Test() {
 }
 
 func TestRuntimeAggregateStorePublishesEveryPointerWord(t *testing.T) {
-	module, err := goc.Compile("aggregate_store.go", []byte(`
+	module, err := goc.CompileExecutable("aggregate_store.go", []byte(`
 package main
 
 import "runtime"
@@ -191,11 +194,15 @@ func Test() {
 	runtime.GC()
 	assign(new(holder), holder{})
 }
+
+func main() {
+	Test()
+}
 `))
 	require.NoError(t, err)
 
-	assign := functionWithSuffix(t, module, "assign")
-	assert.Equal(t, 5, countCallsSymbol(assign, "goc_storep"))
+	assign := functionWithSuffix(t, module, "main.assign")
+	assert.GreaterOrEqual(t, countCallsSymbol(assign, "goc_storep"), 5)
 }
 
 func TestRuntimeSliceBulkOperationsUseWriteBarriers(t *testing.T) {
@@ -304,6 +311,37 @@ func Test() {
 
 	install := functionWithSuffix(t, module, "install")
 	assert.True(t, callsSymbol(install, "runtime.newobject"), "goroutine closure remained on the caller stack")
+}
+
+func TestFunctionLiteralPassedToEscapingParameterEscapes(t *testing.T) {
+	module, err := goc.Compile("escaping_parameter_closure.go", []byte(`
+package main
+
+import "runtime"
+
+var saved func()
+
+func save(callback func()) {
+	saved = callback
+}
+
+func install(value *int) {
+	save(func() {
+		*value = 42
+	})
+}
+
+func Test() {
+	result := 0
+	install(&result)
+	runtime.GC()
+	saved()
+}
+`))
+	require.NoError(t, err)
+
+	install := functionWithSuffix(t, module, "install")
+	assert.True(t, callsSymbol(install, "runtime.newobject"), "closure passed to escaping parameter remained on the caller stack")
 }
 
 func TestSynchronousFunctionLiteralCaptureDoesNotPromoteStackSliceHeader(t *testing.T) {

@@ -1366,6 +1366,7 @@ type gen struct {
 	currentFunction               *types.Func
 	nextCallUsesClosure           bool
 	nextCallClosure               ir.Ref
+	forceStackVariadic            bool
 }
 
 type atomicCallResult uint8
@@ -2334,6 +2335,9 @@ func (g *gen) nonEscapingObjectUse(
 			rightObject = info.Defs[identifier]
 		}
 		if leftObject == nil || leftObject == rightObject || leftObject.Pkg() == nil || g.resultObjects[leftObject] {
+			return false
+		}
+		if _, global := g.globals[leftObject]; global {
 			return false
 		}
 		if !isPointerLikeObject(rightObject) || !isPointerLikeObject(leftObject) {
@@ -4289,6 +4293,7 @@ func (g *gen) storePointerAwareInlineValue(value, address ir.Ref, valueType type
 	pointerWords := pointerWordIndices(valueType)
 	valueSize := typeSize(valueType)
 	nextOffset := int64(0)
+	destinationIsStack := g.isStackAddress(address)
 
 	copyBytes := func(offset, size int64) {
 		if size == 0 {
@@ -4299,7 +4304,6 @@ func (g *gen) storePointerAwareInlineValue(value, address ir.Ref, valueType type
 		g.cur.Call(ir.ClsP, g.fn.Sym("goc_memcpy", 0), destination, source, g.fn.Long(size))
 	}
 
-	pointerType := types.Typ[types.UnsafePointer]
 	for _, pointerWord := range pointerWords {
 		pointerOffset := int64(pointerWord) * pointerSize()
 		copyBytes(nextOffset, pointerOffset-nextOffset)
@@ -4307,7 +4311,11 @@ func (g *gen) storePointerAwareInlineValue(value, address ir.Ref, valueType type
 		source := g.offset(value, pointerOffset)
 		destination := g.offset(address, pointerOffset)
 		pointer := g.cur.Load(ir.ClsP, source)
-		g.store(pointer, destination, pointerType)
+		if destinationIsStack {
+			g.cur.Store(pointer, destination)
+		} else {
+			g.cur.CallVoid(g.fn.Sym("goc_storep", 0), destination, pointer)
+		}
 		nextOffset = pointerOffset + pointerSize()
 	}
 	copyBytes(nextOffset, valueSize-nextOffset)
@@ -5047,7 +5055,7 @@ func (g *gen) callArguments(arguments []ast.Expr, hasEllipsis bool, signature *t
 	arrayType := types.NewArray(elementType, length)
 	var backing ir.Ref
 	interfacePayloads := make(map[int]ir.Ref)
-	stackAllocateVariadic := !g.runtimeAllocation || g.fn.NoSplit
+	stackAllocateVariadic := !g.runtimeAllocation || g.fn.NoSplit || g.forceStackVariadic
 	if !stackAllocateVariadic {
 		allocationType := types.Type(arrayType)
 		fields := []*types.Var{
@@ -6415,6 +6423,15 @@ func runtimeImplicitNoSplit(pkg *types.Package, name string) bool {
 		// into mallocgc variants. cg12 keeps it outlined, so mark these helpers
 		// nosplit to preserve the same runtime invariant: allocator fast paths
 		// must not call morestack while tracing or while mallocing is set.
+		return true
+	default:
+		return false
+	}
+}
+
+func runtimeStackVariadicSymbol(symbol string) bool {
+	switch symbol {
+	case "runtime.traceWriter.event", "runtime.traceEventWriter.event":
 		return true
 	default:
 		return false
@@ -9160,6 +9177,7 @@ func (g *gen) expr(e ast.Expr) (result ir.Ref) {
 		var sig *types.Signature
 		var callSignature *types.Signature
 		var closure ir.Ref
+		stackVariadicCall := false
 		if obj != nil {
 			if obj.Pkg() != nil && obj.Pkg().Path() == "internal/abi" && obj.Name() == "EscapeNonString" && len(n.Args) == 1 {
 				// EscapeNonString is an escape-analysis marker in the standard
@@ -9221,6 +9239,7 @@ func (g *gen) expr(e ast.Expr) (result ir.Ref) {
 				calleeName = instanceName
 				callSignature = sig
 			}
+			stackVariadicCall = runtimeStackVariadicSymbol(calleeName)
 			callee = g.fn.Sym(calleeName, 0)
 		} else {
 			var ok bool
@@ -9237,7 +9256,10 @@ func (g *gen) expr(e ast.Expr) (result ir.Ref) {
 		if receiver != ir.R {
 			args = append(args, receiver)
 		}
+		previousStackVariadic := g.forceStackVariadic
+		g.forceStackVariadic = previousStackVariadic || stackVariadicCall
 		args = append(args, g.callArguments(n.Args, n.Ellipsis.IsValid(), sig)...)
+		g.forceStackVariadic = previousStackVariadic
 		args = g.adaptSharedGenericArguments(args, sig, callSignature, receiver != ir.R)
 		if obj != nil && receiver == ir.R {
 			g.at(n)

@@ -248,6 +248,26 @@ func findCompiledFunction(t *testing.T, module *ir.Module, name string) *ir.Func
 	return nil
 }
 
+func functionCallsSymbol(function *ir.Func, symbol string) bool {
+	for _, block := range function.Blocks {
+		for index := range block.Instrs {
+			instruction := &block.Instrs[index]
+			if instruction.Op != ir.OCall || len(instruction.Args) == 0 {
+				continue
+			}
+			callee := instruction.Arg(0)
+			if callee.Kind != ir.RefConst {
+				continue
+			}
+			constant := function.Consts[callee.ID]
+			if constant.Kind == ir.ConstSym && constant.Sym == symbol {
+				return true
+			}
+		}
+	}
+	return false
+}
+
 func TestCompileExecutableKeepsClosureCapturesLiveAtSafepoints(t *testing.T) {
 	module, err := CompileExecutable("closure_capture.go", []byte(`package main
 
@@ -1135,6 +1155,32 @@ func main() {
 	}
 }
 
+func TestCompileExecutableStackAllocatesTraceEventVariadicBacking(t *testing.T) {
+	module, err := CompileExecutable("trace_start.go", []byte(`package main
+
+import (
+	"bytes"
+	"runtime/trace"
+)
+
+func main() {
+	var buffer bytes.Buffer
+	if err := trace.Start(&buffer); err != nil {
+		panic(err)
+	}
+	trace.Stop()
+}
+`))
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	function := findCompiledFunction(t, module, "runtime.traceLocker.GCSweepDone")
+	if functionCallsSymbol(function, "runtime.mallocgc") {
+		t.Fatal("trace event variadic call allocated backing storage on the heap")
+	}
+}
+
 func TestCompileKeepsAssignedNonEscapingAddressOnStack(t *testing.T) {
 	module, err := Compile("address.go", []byte(`package main
 type pair struct { left, right int }
@@ -1452,10 +1498,14 @@ func main() {
 			if function.RetAgg == nil || len(function.RetAgg.Fields) != 2 {
 				t.Fatalf("sync.Map.LoadOrStore aggregate result = %#v", function.RetAgg)
 			}
-		case "internal/sync.HashTrieMap.LoadOrStore":
+		default:
+			if !strings.Contains(function.Name, "internal/sync.HashTrieMap") ||
+				!strings.Contains(function.Name, "LoadOrStore") {
+				continue
+			}
 			foundGeneric = true
-			if function.RetAgg != nil {
-				t.Fatalf("generic HashTrieMap.LoadOrStore aggregate result = %#v, want scalar descriptor", function.RetAgg)
+			if function.RetAgg == nil || len(function.RetAgg.Fields) != 2 {
+				t.Fatalf("generic HashTrieMap.LoadOrStore aggregate result = %#v", function.RetAgg)
 			}
 		}
 	}

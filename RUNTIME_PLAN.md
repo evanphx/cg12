@@ -323,12 +323,23 @@ Current checkpoint:
   `unsafe.Sizeof(traceBuf{})` lowers to 64 KiB, while the constrained run OOMs
   in 512 MiB heap arena reservations and the unconstrained run reaches
   allocator stack-growth failures.
-- [ ] Define and implement a coherent policy for outlined allocator helpers.
+- [x] Define and implement a coherent policy for outlined allocator helpers.
   The first failing stack-growth points after `StartTrace` were
   `runtime.nextFreeFast`, `runtime.mcache.nextFree`, `runtime.mcache.refill`,
   and then `runtime.mcentral.cacheSpan`. cg12 currently outlines helpers that
   the upstream compiler either inlines into malloc paths or compiles with a
   stack budget that avoids `morestack` while `mallocing` is set.
+- [x] Mark the outlined allocator fast-path helpers that can execute while
+  `mallocing` as implicit nosplit functions, and force trace event writer
+  variadic backing arrays onto the stack. This avoids recursive heap allocation
+  while the runtime is emitting allocator/sweeper trace events.
+- [x] Pass the optimized trace start-only, start/stop, start-probe, log, and
+  buffer reducers individually under `GOMAXPROCS=1`, `GOGC=10`,
+  `GOMEMLIMIT=768MiB`, and the 3 GiB process limit.
+- [x] Re-check the stale large-program failures from the accepted baseline:
+  optimized `stdlib-http/redirect-keepalive`, `stdlib-http/tls-client-server`,
+  and `stdlib-crypto/ecdsa` now pass individually under the 3 GiB process
+  limit. A full corpus rerun is still required before accepting a new baseline.
 
 Exit criterion: trace terminates and produces parseable output within its
 budget; all three HTTP programs compile below the agreed memory ceiling and
