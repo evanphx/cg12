@@ -13,22 +13,22 @@ import "github.com/evanphx/cg12/ir"
 // dispatch loop without the hundreds of shared helpers cascading in and bloating it.
 const (
 	inlineSmallBudget = 24  // a multi-site callee inlines only when at most this size
-	inlineOnceBudget  = 300 // a single-site callee inlines up to this size
+	inlineOnceBudget  = 24 // a single-site callee inlines up to this size
 )
 
 // inlineFuncBudget bounds how many calls are inlined into one function per pass,
 // a backstop against code-size blow-up; the pipeline's fixpoint applies more on
 // later rounds if they remain worthwhile.
-const inlineFuncBudget = 200
+const inlineFuncBudget = 64
 
 // inlineGrowthCap bounds how large inlining may make one function, as a multiple of
 // its pre-inlining size plus a fixed allowance -- a backstop against a pathological
 // cascade of single-site inlines (each individually "free" at the unit level) turning
 // one function into the whole program.
 func inlineGrowthCap(initial int) int {
-	cap := initial + initial/2 // allow ~50% growth from inlining
-	if cap < initial+256 {
-		cap = initial + 256 // but always enough headroom for a small function
+	cap := initial + 128 // allow only a small absolute growth (conservative until frequency-aware)
+	if cap < initial+128 {
+		cap = initial + 128 // but always enough headroom for a small function
 	}
 	return cap
 }
