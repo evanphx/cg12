@@ -12,6 +12,7 @@ import (
 
 	"github.com/evanphx/cg12/arm64"
 	"github.com/evanphx/cg12/cc"
+	"github.com/evanphx/cg12/ir"
 	"github.com/evanphx/cg12/internal/testenv"
 	"github.com/evanphx/cg12/opt"
 	"github.com/stretchr/testify/require"
@@ -425,6 +426,11 @@ func cg12Output(t *testing.T, gcc, src string, optimize bool) string {
 	require.NoError(t, err)
 	if optimize {
 		opt.OptimizeModule(m)
+		// Verify SSA well-formedness after optimization: a pass that leaves a use with
+		// no definition, or a phi disagreeing with the CFG, is a bug the differential
+		// run might not exercise (it depends on inputs) but that verification catches
+		// unconditionally.
+		require.NoError(t, ir.VerifyModule(m), "optimized IR is malformed")
 	}
 	code, err := arm64.CompileObject(m)
 	require.NoError(t, err)

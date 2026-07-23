@@ -18,6 +18,7 @@ import (
 
 	"github.com/evanphx/cg12/arm64"
 	"github.com/evanphx/cg12/cc"
+	"github.com/evanphx/cg12/ir"
 	"github.com/evanphx/cg12/opt"
 )
 
@@ -200,6 +201,11 @@ func (d *driver) compile(src, obj string) error {
 	}
 	if d.optimize {
 		opt.OptimizeModule(mod)
+	}
+	if os.Getenv("CG12_VERIFY") != "" {
+		if err := ir.VerifyModule(mod); err != nil {
+			fmt.Fprintf(os.Stderr, "VERIFY FAIL %s: %v\n", src, err)
+		}
 	}
 	code, err := arm64.CompileObject(mod)
 	if err != nil {
