@@ -605,6 +605,9 @@ func (g *gen) genFunc(fd *moderncc.FunctionDefinition) {
 	if d.Linkage() != moderncc.Internal { // a `static` function keeps internal linkage
 		g.fn.Export()
 	}
+	if a := ft.Attributes(); a != nil && a.AlwaysInline() {
+		g.fn.ForceInline = true
+	}
 	g.fn.Linkage.Section = sectionOf(ft) // eBPF attach section (xdp, kprobe/..., ...)
 	g.fn.Variadic = ft.IsVariadic()
 	g.cur = g.fn.Entry()

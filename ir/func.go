@@ -117,6 +117,12 @@ type Func struct {
 	RetAgg   *AggType // non-nil when returning an aggregate by value
 	Variadic bool     // accepts variadic arguments (a trailing "..." in the IL)
 
+	// ForceInline is set when the source marked the function
+	// __attribute__((always_inline)) -- the inliner then inlines every call to it
+	// regardless of its size budget (an interpreter's hot fast-path helpers rely on
+	// this to fold into the dispatch loop, as they do under gcc/clang).
+	ForceInline bool
+
 	Params []*Temp
 	Blocks []*Block
 	Start  *Block

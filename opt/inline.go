@@ -105,7 +105,15 @@ func inlinable(callee *ir.Func) bool {
 			hasRet = true
 		}
 	}
-	return hasRet && instrs <= inlineInstrBudget
+	if !hasRet {
+		return false
+	}
+	// __attribute__((always_inline)) overrides the size budget: the source marked
+	// this function to be folded into every caller, and gcc/clang honour that
+	// regardless of size. An interpreter's hot fast-path helpers (vm_getivar,
+	// vm_opt_plus, ...) rely on it to dissolve into the dispatch loop rather than
+	// pay a call at every opcode.
+	return callee.ForceInline || instrs <= inlineInstrBudget
 }
 
 // spliceCall replaces the call at caller block b, instruction idx, with a clone
