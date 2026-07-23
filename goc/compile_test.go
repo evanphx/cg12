@@ -1025,6 +1025,45 @@ func helper() {}
 	t.Fatal("main.helper was not compiled")
 }
 
+func TestCompileMarksRuntimeNextFreeFastNoSplit(t *testing.T) {
+	module, err := Compile("malloc.go", []byte(`package runtime
+
+type mspan struct{}
+type mcache struct{}
+type gclinkptr uintptr
+
+func nextFreeFast(s *mspan) gclinkptr {
+	return 0
+}
+
+func (c *mcache) nextFree(spc uintptr) (gclinkptr, *mspan, bool) {
+	return 0, nil, false
+}
+
+func (c *mcache) refill(spc uintptr) {
+}
+
+func (s *mspan) nextFreeIndex() uint16 {
+	return 0
+}
+`))
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	for _, name := range []string{
+		"runtime.nextFreeFast",
+		"runtime.mcache.nextFree",
+		"runtime.mcache.refill",
+		"runtime.mspan.nextFreeIndex",
+	} {
+		function := findCompiledFunction(t, module, name)
+		if !function.NoSplit {
+			t.Fatalf("%s was not marked nosplit", name)
+		}
+	}
+}
+
 func TestCompileMarksSystemStackFunctionLiteralNoSplit(t *testing.T) {
 	module, err := Compile("systemstack_literal.go", []byte(`package runtime
 
@@ -1055,6 +1094,44 @@ func refill() {
 	}
 	if !found {
 		t.Fatal("systemstack function literal was not compiled")
+	}
+}
+
+func TestCompileExecutableStackAllocatesNoSplitVariadicBacking(t *testing.T) {
+	module, err := CompileExecutable("nosplit_variadic.go", []byte(`package main
+
+//go:nosplit
+func consume(values ...uintptr) uintptr {
+	return sink(20, 22)
+}
+
+func sink(values ...uintptr) uintptr {
+	return values[0] + values[1]
+}
+
+func main() {
+	if consume() != 42 {
+		panic("bad sum")
+	}
+}
+`))
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	function := findCompiledFunction(t, module, "main.consume")
+	for _, block := range function.Blocks {
+		for index := range block.Instrs {
+			instruction := &block.Instrs[index]
+			if instruction.Op != ir.OCall || len(instruction.Args) == 0 {
+				continue
+			}
+			callee := instruction.Arg(0)
+			if callee.Kind == ir.RefConst && function.Consts[callee.ID].Kind == ir.ConstSym &&
+				function.Consts[callee.ID].Sym == "runtime.newobject" {
+				t.Fatal("nosplit variadic call allocated backing storage on the heap")
+			}
+		}
 	}
 }
 

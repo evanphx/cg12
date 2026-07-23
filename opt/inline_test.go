@@ -101,6 +101,37 @@ func TestInlineNoSplitCallsOnlyChangesNoSplitCallers(t *testing.T) {
 	assert.Zero(t, nosplitCalls)
 }
 
+func TestAuditNoSplitCallsReportsRemainingSplitCallee(t *testing.T) {
+	module := ir.NewModule()
+
+	small := module.NewFunc("small", ir.ClsW)
+	value := small.Param("value", ir.ClsW)
+	small.Entry().Ret(value)
+	small.NoSplit = true
+
+	large := module.NewFunc("large", ir.ClsW)
+	largeValue := large.Param("value", ir.ClsW)
+	entry := large.Entry()
+	current := largeValue
+	for index := 0; index < 32; index++ {
+		current = entry.Add(ir.ClsW, current, large.Word(int64(index)))
+	}
+	entry.Ret(current)
+
+	caller := module.NewFunc("caller", ir.ClsW)
+	caller.NoSplit = true
+	argument := caller.Param("value", ir.ClsW)
+	first := caller.Entry().Call(ir.ClsW, caller.Sym("small", 0), argument)
+	caller.Entry().Ret(caller.Entry().Call(ir.ClsW, caller.Sym("large", 0), first))
+
+	opt.InlineNoSplitCalls(module)
+
+	violations := opt.AuditNoSplitCalls(module)
+	require.Len(t, violations, 1)
+	assert.Equal(t, "caller", violations[0].Caller)
+	assert.Equal(t, "large", violations[0].Callee)
+}
+
 func TestInlineMapsClosureContextToCallSiteValue(t *testing.T) {
 	module := ir.NewModule()
 

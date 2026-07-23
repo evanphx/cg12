@@ -307,6 +307,29 @@ whether growth is in compilation, runtime trace buffers, goroutine leakage, or
 failure to drain. For HTTP, profile compilation by phase and package so the
 largest retained structure is visible.
 
+Current checkpoint:
+
+- [x] Add focused trace reducers for start-only, start/stop, trace logging, and
+  a probe that proves the failure occurs before `trace.Start` returns.
+- [x] Add an opt-in nosplit audit (`GOC_DEBUG_NOSPLIT=1`) that reports direct
+  calls from nosplit functions to functions that still contain stack-growth
+  checks.
+- [x] Preserve systemstack/mcall function literals as nosplit system-stack
+  functions so cg12 does not emit stack-growth checks at the closure entry.
+- [x] Avoid heap allocation for non-ellipsis variadic backing arrays created
+  inside nosplit functions. This matches trace event writer requirements, where
+  allocation while emitting trace events can recurse through the allocator.
+- [x] Isolate the current trace-start crash beyond the trace buffer allocation:
+  `unsafe.Sizeof(traceBuf{})` lowers to 64 KiB, while the constrained run OOMs
+  in 512 MiB heap arena reservations and the unconstrained run reaches
+  allocator stack-growth failures.
+- [ ] Define and implement a coherent policy for outlined allocator helpers.
+  The first failing stack-growth points after `StartTrace` were
+  `runtime.nextFreeFast`, `runtime.mcache.nextFree`, `runtime.mcache.refill`,
+  and then `runtime.mcentral.cacheSpan`. cg12 currently outlines helpers that
+  the upstream compiler either inlines into malloc paths or compiles with a
+  stack budget that avoids `morestack` while `mallocing` is set.
+
 Exit criterion: trace terminates and produces parseable output within its
 budget; all three HTTP programs compile below the agreed memory ceiling and
 return coverage packets. The corpus reaches 294/294 covered programs.

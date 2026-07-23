@@ -12,6 +12,7 @@ import (
 	"go/token"
 	"go/types"
 	"math"
+	"os"
 	"path/filepath"
 	"runtime"
 	"sort"
@@ -46,6 +47,25 @@ func CompileExecutableWithRuntimeCoverage(name string, src []byte) (*ir.Module, 
 		return nil, nil, err
 	}
 	return module, coverage, nil
+}
+
+func reportNoSplitViolations(module *ir.Module) {
+	if os.Getenv("GOC_DEBUG_NOSPLIT") == "" {
+		return
+	}
+	violations := opt.AuditNoSplitCalls(module)
+	if len(violations) == 0 {
+		fmt.Fprintln(os.Stderr, "goc: nosplit audit: no direct split callees")
+		return
+	}
+	fmt.Fprintf(os.Stderr, "goc: nosplit audit: %d direct split callees remain\n", len(violations))
+	for index, violation := range violations {
+		if index >= 200 {
+			fmt.Fprintf(os.Stderr, "goc: nosplit audit: ... %d more\n", len(violations)-index)
+			break
+		}
+		fmt.Fprintf(os.Stderr, "goc: nosplit audit: %s -> %s\n", violation.Caller, violation.Callee)
+	}
 }
 
 type compileOptions struct {
@@ -368,6 +388,7 @@ func compile(name string, src []byte, options compileOptions) (*ir.Module, error
 			function.ManagedFrame = true
 		}
 		opt.InlineNoSplitCalls(mod)
+		reportNoSplitViolations(mod)
 	}
 	opt.InlineHeapAllocations(mod)
 	opt.LowerHeapAllocations(mod)
@@ -5026,7 +5047,8 @@ func (g *gen) callArguments(arguments []ast.Expr, hasEllipsis bool, signature *t
 	arrayType := types.NewArray(elementType, length)
 	var backing ir.Ref
 	interfacePayloads := make(map[int]ir.Ref)
-	if g.runtimeAllocation {
+	stackAllocateVariadic := !g.runtimeAllocation || g.fn.NoSplit
+	if !stackAllocateVariadic {
 		allocationType := types.Type(arrayType)
 		fields := []*types.Var{
 			types.NewVar(token.NoPos, nil, "values", arrayType),
@@ -5056,7 +5078,9 @@ func (g *gen) callArguments(arguments []ast.Expr, hasEllipsis bool, signature *t
 		}
 	} else {
 		backing = g.localAllocTyped(arrayType)
-		g.cur.Call(ir.ClsP, g.fn.Sym("goc_memset", 0), backing, g.fn.Word(0), g.fn.Long(typeSize(arrayType)))
+		if !g.runtimeAllocation {
+			g.cur.Call(ir.ClsP, g.fn.Sym("goc_memset", 0), backing, g.fn.Word(0), g.fn.Long(typeSize(arrayType)))
+		}
 	}
 	elementSize := typeSize(elementType)
 	for index, argument := range variadicArguments {
@@ -6208,6 +6232,9 @@ func (g *gen) funcDecl(fd *ast.FuncDecl) {
 		g.fn.RetValues = g.runtimeAllocation && isSliceType(sig.Results().At(0).Type())
 	}
 	g.fn.NoSplit = hasCompilerDirective(fd, "go:nosplit")
+	if runtimeImplicitNoSplit(g.pkg, fd.Name.Name) {
+		g.fn.NoSplit = true
+	}
 	g.fn.SystemStack = hasCompilerDirective(fd, "go:systemstack")
 	exportRuntimeBootstrap := g.pkg.Path() == "runtime" && (fd.Name.Name == "args" || fd.Name.Name == "check" || fd.Name.Name == "main" || fd.Name.Name == "mstart0" || fd.Name.Name == "newproc" || fd.Name.Name == "newstack" || fd.Name.Name == "osinit" || fd.Name.Name == "schedinit" || fd.Name.Name == "throw")
 	if ast.IsExported(fd.Name.Name) || isMain || exportRuntimeBootstrap || g.linkNames[obj] != "" {
@@ -6375,6 +6402,22 @@ func (g *gen) funcDecl(fd *ast.FuncDecl) {
 	}
 	if g.err == nil {
 		g.terminateUnusedLabels()
+	}
+}
+
+func runtimeImplicitNoSplit(pkg *types.Package, name string) bool {
+	if pkg == nil || pkg.Path() != "runtime" {
+		return false
+	}
+	switch name {
+	case "nextFreeFast", "nextFree", "nextFreeIndex", "refill":
+		// The upstream compiler normally inlines this allocator fast-path helper
+		// into mallocgc variants. cg12 keeps it outlined, so mark these helpers
+		// nosplit to preserve the same runtime invariant: allocator fast paths
+		// must not call morestack while tracing or while mallocing is set.
+		return true
+	default:
+		return false
 	}
 }
 
