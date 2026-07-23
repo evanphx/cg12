@@ -314,6 +314,11 @@ func cloneConst(f *ir.Func, c ir.Const) ir.Ref {
 		}
 		return f.Double(c.Flt)
 	case ir.ConstSym:
+		if c.Thread {
+			// A thread-local symbol must stay thread-local when inlined, or its
+			// reference is emitted with a non-TLS relocation and the link fails.
+			return f.ThreadSym(c.Sym)
+		}
 		return f.SymClass(c.Sym, c.Int, c.Cls)
 	}
 	return ir.R

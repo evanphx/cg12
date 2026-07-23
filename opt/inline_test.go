@@ -215,6 +215,37 @@ int main(void){ return go(5) == 105 ? 0 : 1; }`) // (5+100) round-tripped throug
 	assert.Equal(t, 0, code)
 }
 
+func TestInlinePreservesThreadLocalSymbol(t *testing.T) {
+	// A callee that reads a thread-local through a ThreadSym constant (an
+	// interpreter's per-thread state, reached via an inlined accessor). When it is
+	// inlined, the cloned symbol must stay thread-local, or its reference is emitted
+	// with a non-TLS relocation and the link fails against the real TLS definition.
+	m := ir.NewModule()
+	h := m.NewFunc("readtls", ir.ClsL)
+	e := h.Entry()
+	e.Ret(e.Load(ir.ClsL, h.ThreadSym("tlsvar")))
+
+	mn := m.NewFunc("go", ir.ClsL).Export()
+	mn.Entry().Ret(mn.Entry().Call(ir.ClsL, mn.Sym("readtls", 0)))
+
+	opt.OptimizeModule(m)
+	require.Equal(t, 0, countCalls(m), "callee inlined")
+
+	var found, thread bool
+	for _, f := range m.Funcs {
+		if f.Name != "go" {
+			continue
+		}
+		for i := range f.Consts {
+			if c := f.Consts[i]; c.Kind == ir.ConstSym && c.Sym == "tlsvar" {
+				found, thread = true, c.Thread
+			}
+		}
+	}
+	require.True(t, found, "the thread-local symbol survived inlining")
+	assert.True(t, thread, "and stayed thread-local")
+}
+
 func TestInlineVoidCall(t *testing.T) {
 	// A void callee: inlining leaves no result phi.
 	m := ir.NewModule()

@@ -113,7 +113,7 @@ func (f *Func) newTemp(name string, cls Cls) Ref {
 func (f *Func) NewTemp(name string, cls Cls) Ref { return f.newTemp(name, cls) }
 
 func (f *Func) internConst(c Const) Ref {
-	k := constKey{c.Kind, c.Cls, c.Int, c.Flt, c.Sym}
+	k := constKey{c.Kind, c.Cls, c.Int, c.Flt, c.Sym, c.Thread}
 	if f.constIdx == nil {
 		f.constIdx = map[constKey]int{}
 	}

@@ -18,6 +18,7 @@ import (
 
 	"github.com/evanphx/cg12/arm64"
 	"github.com/evanphx/cg12/cc"
+	"github.com/evanphx/cg12/opt"
 )
 
 type driver struct {
@@ -33,6 +34,7 @@ type driver struct {
 	depTargets  []string // -MMD/-MD: also emit a .d via the host preprocessor
 	depFile     string   // -MF
 	verbose     bool
+	optimize    bool // -O1/-O2/-O3/-Os/... (anything but -O0): run the cg12 optimizer
 }
 
 func main() {
@@ -124,6 +126,14 @@ func parseArgs(args []string) *driver {
 		case a == "-v" || a == "--verbose":
 			d.verbose = true
 			d.passthru = append(d.passthru, a)
+		case a == "-O0":
+			d.optimize = false
+			d.passthru = append(d.passthru, a)
+		case strings.HasPrefix(a, "-O"):
+			// -O1/-O2/-O3/-Os/-Ofast/-Og: run the cg12 optimizer (also forward the
+			// flag so the host cc optimizes at link/LTO if it does anything there).
+			d.optimize = true
+			d.passthru = append(d.passthru, a)
 		case strings.HasSuffix(a, ".c"):
 			d.sources = append(d.sources, a)
 		case strings.HasSuffix(a, ".o") || strings.HasSuffix(a, ".a") ||
@@ -187,6 +197,9 @@ func (d *driver) compile(src, obj string) error {
 	})
 	if err != nil {
 		return fmt.Errorf("%s: %w", src, err)
+	}
+	if d.optimize {
+		opt.OptimizeModule(mod)
 	}
 	code, err := arm64.CompileObject(mod)
 	if err != nil {

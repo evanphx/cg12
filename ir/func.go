@@ -165,11 +165,12 @@ func (f *Func) MarkLowered(target string) error {
 func (f *Func) LoweredFor() string { return f.lowered }
 
 type constKey struct {
-	kind ConstKind
-	cls  Cls
-	i    int64
-	f    float64
-	sym  string
+	kind   ConstKind
+	cls    Cls
+	i      int64
+	f      float64
+	sym    string
+	thread bool // a thread-local symbol is a distinct constant from a plain one
 }
 
 // Module is a translation unit: a set of functions, aggregate types, and data.
