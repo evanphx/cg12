@@ -131,7 +131,100 @@ func (c *CFG) Frequency(dom *DomTree) *Freq {
 		}
 		fr.Block[b] = s
 	}
+
+	redistributeMesh(c, fr, probEdge)
 	return fr
+}
+
+// meshIters is how many times the mesh flow is relaxed. A computed-goto dispatch
+// connects every handler in a single step, so the visit *distribution* mixes in a
+// handful of iterations; the magnitude is preserved separately, so full convergence
+// (which would take ~the trip count) is unnecessary.
+const meshIters = 50
+
+// redistributeMesh corrects the within-region visit distribution of every irreducible
+// cyclic region reached through a computed goto -- an interpreter's dispatch mesh. The
+// two passes above propagate frequency only along a spanning DAG (retreating edges
+// dropped), so a handler the dispatch reaches by `goto *pc` lands at near-entry
+// frequency while another gets the loop's whole multiplier: within the mesh the
+// distribution is meaningless even though its total magnitude is about right. Relax the
+// real flow over the region's own edges (the computed-goto back edges included), seeded
+// by the frequency entering from outside, then rescale to the total mass the passes
+// already assigned -- so only the distribution changes, not the region's overall
+// weight. Ordinary reducible loops carry no computed goto and are left untouched.
+func redistributeMesh(c *CFG, fr *Freq, probEdge func(p, b *ir.Block) float64) {
+	for _, comp := range c.SCCs() {
+		if len(comp) < 2 {
+			continue
+		}
+		mesh := false
+		for _, b := range comp {
+			if b.Jmp.Kind == ir.JmpBr {
+				mesh = true
+				break
+			}
+		}
+		if !mesh {
+			continue
+		}
+		in := make(map[*ir.Block]bool, len(comp))
+		for _, b := range comp {
+			in[b] = true
+		}
+		// External inflow per block (fixed), and the mass to preserve.
+		inflow := make(map[*ir.Block]float64, len(comp))
+		mass := 0.0
+		for _, b := range comp {
+			mass += fr.Block[b]
+			for _, p := range b.Preds {
+				if c.Num(p) >= 0 && !in[p] {
+					inflow[b] += fr.Block[p] * probEdge(p, b)
+				}
+			}
+		}
+		// Relax flow[b] = inflow[b] + sum over internal predecessors flow[p]*prob(p->b),
+		// pushing along successor edges so the computed goto's back edges are honoured.
+		flow := make(map[*ir.Block]float64, len(comp))
+		for _, b := range comp {
+			flow[b] = inflow[b]
+		}
+		for iter := 0; iter < meshIters; iter++ {
+			next := make(map[*ir.Block]float64, len(comp))
+			for b, v := range inflow {
+				next[b] = v
+			}
+			for _, b := range comp {
+				fb := flow[b]
+				if fb == 0 {
+					continue
+				}
+				for i, s := range b.Succs() {
+					if s != nil && in[s] {
+						next[s] += fb * fr.Prob(b, i)
+					}
+				}
+			}
+			flow = next
+		}
+		total := 0.0
+		for _, v := range flow {
+			total += v
+		}
+		if total <= 0 {
+			continue
+		}
+		scale := mass / total
+		for _, b := range comp {
+			s := flow[b] * scale
+			if s < minFreq {
+				s = minFreq
+			}
+			if s > maxFreq {
+				s = maxFreq
+			}
+			fr.Block[b] = s
+		}
+	}
 }
 
 // edgeProbs assigns probabilities to b's out-edges, parallel to b.Succs().
