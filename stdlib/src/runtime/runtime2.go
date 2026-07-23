@@ -537,35 +537,36 @@ type g struct {
 	inMarkAssist bool
 	coroexit     bool // argument to coroswitch_m
 
-	raceignore      int8  // ignore race detection events
-	nocgocallback   bool  // whether disable callback from C
-	tracking        bool  // whether we're tracking this G for sched latency statistics
-	trackingSeq     uint8 // used to decide whether to track this G
-	trackingStamp   int64 // timestamp of when the G last started being tracked
-	runnableTime    int64 // the amount of time spent runnable, cleared when running, only used when tracking
-	lockedm         muintptr
-	fipsIndicator   uint8
-	fipsOnlyBypass  bool
-	ditWanted       bool // set if g wants to be executed with DIT enabled
-	syncSafePoint   bool // set if g is stopped at a synchronous safe point.
-	runningCleanups atomic.Bool
-	sig             uint32
-	secret          int32 // current nesting of runtime/secret.Do calls.
-	writebuf        []byte
-	sigcode0        uintptr
-	sigcode1        uintptr
-	sigpc           uintptr
-	parentGoid      uint64          // goid of goroutine that created this goroutine
-	gopc            uintptr         // pc of go statement that created this goroutine
-	ancestors       *[]ancestorInfo // ancestor information goroutine(s) that created this goroutine (only used if debug.tracebackancestors)
-	startpc         uintptr         // pc of goroutine function
-	racectx         uintptr
-	waiting         *sudog         // sudog structures this g is waiting on (that have a valid elem ptr); in lock order
-	cgoCtxt         []uintptr      // cgo traceback context
-	labels          unsafe.Pointer // profiler labels
-	timer           *timer         // cached timer for time.Sleep
-	sleepWhen       int64          // when to sleep until
-	selectDone      atomic.Uint32  // are we participating in a select and did someone win the race?
+	raceignore         int8  // ignore race detection events
+	nocgocallback      bool  // whether disable callback from C
+	tracking           bool  // whether we're tracking this G for sched latency statistics
+	trackingSeq        uint8 // used to decide whether to track this G
+	trackingStamp      int64 // timestamp of when the G last started being tracked
+	runnableTime       int64 // the amount of time spent runnable, cleared when running, only used when tracking
+	lockedm            muintptr
+	fipsIndicator      uint8
+	fipsOnlyBypass     bool
+	ditWanted          bool // set if g wants to be executed with DIT enabled
+	syncSafePoint      bool // set if g is stopped at a synchronous safe point.
+	runningCleanups    atomic.Bool
+	cg12StackCopyEpoch uint64
+	sig                uint32
+	secret             int32 // current nesting of runtime/secret.Do calls.
+	writebuf           []byte
+	sigcode0           uintptr
+	sigcode1           uintptr
+	sigpc              uintptr
+	parentGoid         uint64          // goid of goroutine that created this goroutine
+	gopc               uintptr         // pc of go statement that created this goroutine
+	ancestors          *[]ancestorInfo // ancestor information goroutine(s) that created this goroutine (only used if debug.tracebackancestors)
+	startpc            uintptr         // pc of goroutine function
+	racectx            uintptr
+	waiting            *sudog         // sudog structures this g is waiting on (that have a valid elem ptr); in lock order
+	cgoCtxt            []uintptr      // cgo traceback context
+	labels             unsafe.Pointer // profiler labels
+	timer              *timer         // cached timer for time.Sleep
+	sleepWhen          int64          // when to sleep until
+	selectDone         atomic.Uint32  // are we participating in a select and did someone win the race?
 
 	// goroutineProfiled indicates the status of this goroutine's stack for the
 	// current in-progress goroutine profile

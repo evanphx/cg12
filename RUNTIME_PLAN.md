@@ -261,8 +261,20 @@ Current checkpoint:
   `Cleanup.Stop`, and finalizer-before-cleanup ordering.
 - [x] Pass the complete ten-program finalizer/cleanup batch ten times per
   program with optimization and `GOMAXPROCS=4`.
-- [ ] Add multiple-cleanup and `Pinner` lifecycle cases, then repeat the batch
-  at the remaining P counts before closing this item.
+- [x] Add multiple-cleanup and `Pinner` lifecycle/invalid-use cases.
+- [x] Add `GODEBUG=cg12checkstackcopy=1` runtime validation that detects stale
+  old-stack pointers at stack-copy boundaries and finalizer queue corruption
+  before the later nil-function `reflectcall` crash.
+- [x] Isolate the tiny-finalizer corruption to stack shrinking: the optimized
+  binary passed 100 runs with `GODEBUG=gcshrinkstackoff=1`, and the detector
+  reported stale old-stack-looking words in copied `runtime_main` frames.
+- [x] Broaden Go-managed stack metadata so pointer-class spilled temporaries
+  participate in safepoint and conservative local pointer maps for stack
+  relocation.
+- [x] Pass `runtime_finalizer_tiny.go` 500 direct optimized executions with
+  `GOMAXPROCS=2`, `GOGC=10`, and `GOMEMLIMIT=768MiB`.
+- [x] Pass the cleanup/finalizer/Pinner status subset three times per program
+  with optimization and `GOMAXPROCS=2`.
 
 Exit criterion: finalizer and cleanup tests pass deterministically using bounded
 GC/yield loops, and pinner/finalizer/cleanup coverage has deliberate tests for

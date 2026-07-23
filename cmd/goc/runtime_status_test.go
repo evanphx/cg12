@@ -337,6 +337,12 @@ func TestARM64RuntimeCapabilityStatus(t *testing.T) {
 		},
 		{
 			category:    "gc",
+			name:        "cleanup-multiple",
+			source:      "runtime_cleanup_multiple.go",
+			expectation: runtimeCapabilityMustPass,
+		},
+		{
+			category:    "gc",
 			name:        "finalizer-cleanup-order",
 			source:      "runtime_finalizer_cleanup_order.go",
 			expectation: runtimeCapabilityMustPass,
@@ -351,6 +357,18 @@ func TestARM64RuntimeCapabilityStatus(t *testing.T) {
 			category:    "gc",
 			name:        "finalizer-tiny",
 			source:      "runtime_finalizer_tiny.go",
+			expectation: runtimeCapabilityMustPass,
+		},
+		{
+			category:    "gc",
+			name:        "pinner-lifecycle",
+			source:      "runtime_pinner_lifecycle.go",
+			expectation: runtimeCapabilityMustPass,
+		},
+		{
+			category:    "gc",
+			name:        "pinner-invalid",
+			source:      "runtime_pinner_invalid.go",
 			expectation: runtimeCapabilityMustPass,
 		},
 		{

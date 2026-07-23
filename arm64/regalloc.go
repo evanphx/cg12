@@ -134,7 +134,8 @@ func computeSafepointRoots(f *ir.Func, cfg *analysis.CFG, liveness *analysis.Liv
 			if instruction.Op == ir.OCall || instruction.Op == ir.OSafepoint {
 				var managed []int
 				for _, temporary := range live.Members() {
-					if f.Temps[temporary].GCRef {
+					temp := f.Temps[temporary]
+					if temp.GCRef || ((f.UsesManagedFrame() || f.UsesGoInternalCallConvention()) && temp.Cls == ir.ClsP) {
 						managed = append(managed, temporary)
 					}
 				}

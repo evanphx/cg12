@@ -706,6 +706,43 @@ func main() { if sum(5) != 12 { for { break } } }
 	}
 }
 
+func TestCompileWidensArrayIndexBeforePointerOffset(t *testing.T) {
+	module, err := Compile("index.go", []byte(`package main
+
+type pair struct {
+	left  int
+	right int
+}
+
+func pick(values *[4]pair, index uint32) int {
+	return values[index].right
+}
+`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	rendered := module.String()
+	if !strings.Contains(rendered, "extuw") {
+		t.Fatalf("IR does not zero-extend uint32 index before pointer offset:\n%s", rendered)
+	}
+}
+
+func TestCompileWidensSliceBoundsBeforeDescriptorMath(t *testing.T) {
+	module, err := Compile("slice.go", []byte(`package main
+
+func tail(data []byte, offset uint32) []byte {
+	return data[offset:]
+}
+`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	rendered := module.String()
+	if !strings.Contains(rendered, "extuw") {
+		t.Fatalf("IR does not zero-extend uint32 slice bound before descriptor math:\n%s", rendered)
+	}
+}
+
 func TestCompileGeneratesWrapperForPromotedInterfaceMultiResultMethod(t *testing.T) {
 	module, err := Compile("promoted.go", []byte(`package main
 

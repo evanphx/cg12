@@ -961,6 +961,42 @@ func TestGoABISpillsPointerLiveAcrossCall(t *testing.T) {
 	assert.Contains(t, assembly, "str xzr, [x29")
 }
 
+func TestGoABISpillsScalarLiveAcrossCall(t *testing.T) {
+	module := ir.NewModule()
+	function := module.NewFunc("scalar_across_call", ir.ClsW)
+	function.GoABI = true
+	function.ManagedFrame = true
+	value := function.Param("value", ir.ClsW)
+
+	entry := function.Entry()
+	entry.CallVoid(function.Sym("observe", 0), function.Word(1), function.Word(2), function.Word(3), function.Word(4))
+	entry.Ret(value)
+
+	disasmModule(t, module)
+	temporary := function.Temp(value)
+	assert.Equal(t, ir.NoReg, temporary.Reg)
+	assert.GreaterOrEqual(t, temporary.Slot, 0)
+}
+
+func TestGoABISafepointRootsIncludePointerClassTempsForStackCopy(t *testing.T) {
+	function := ir.NewModule().NewFunc("go_pointer_across_call", ir.ClsP)
+	function.GoABI = true
+	raw := function.Param("raw", ir.ClsP)
+	n := function.Param("n", ir.ClsW)
+	entry := function.Entry()
+	result := entry.Call(ir.ClsW, function.Sym("observe", 0), n)
+	entry.Ret(raw)
+
+	cfg := analysis.BuildCFG(function)
+	liveness := cfg.Liveness()
+	roots := computeSafepointRoots(function, cfg, liveness)
+
+	call := &entry.Instrs[0]
+	require.Equal(t, result, call.To)
+	require.Contains(t, roots, call)
+	require.Contains(t, roots[call], int(raw.ID))
+}
+
 func TestSafepointRootsExcludeDeadControlFlowIntervals(t *testing.T) {
 	function := ir.NewModule().NewFunc("branch_root", ir.ClsP)
 	pointer := function.ParamRef("pointer")
@@ -1033,6 +1069,9 @@ func TestGoStackMapsDropDeadPointerBearingLocal(t *testing.T) {
 
 	points := machine.m.goStackMapPoints()
 	require.Len(t, points, 2)
+	require.Len(t, machine.m.safepoints, 2)
+	assert.Equal(t, int(machine.m.safepoints[0].startPC), points[0].pc)
+	assert.Equal(t, int(machine.m.safepoints[1].startPC), points[1].pc)
 	localOffset := machine.m.stackAllocTmp[local.ID]
 	localWord := (localOffset - 16) / 8
 	assert.Contains(t, points[0].pointerWords, localWord)

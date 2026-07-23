@@ -217,8 +217,23 @@ func runFinalizers() {
 		}
 		for fb != nil {
 			n := fb.cnt
+			blockStackCopyEpoch := gp.cg12StackCopyEpoch
 			for i := n; i > 0; i-- {
 				f := &fb.fin[i-1]
+				if debug.cg12checkstackcopy != 0 {
+					if i > fb.cnt {
+						print("cg12 finalizer: loop index past current count fb=", fb, " i=", i, " n=", n, " cnt=", fb.cnt, " epoch=", gp.cg12StackCopyEpoch, " blockEpoch=", blockStackCopyEpoch, " stack=[", hex(gp.stack.lo), ",", hex(gp.stack.hi), ")\n")
+						throw("cg12 finalizer queue count corruption")
+					}
+					if f.fn == nil {
+						print("cg12 finalizer: nil function fb=", fb, " i=", i, " n=", n, " cnt=", fb.cnt, " epoch=", gp.cg12StackCopyEpoch, " blockEpoch=", blockStackCopyEpoch, " stack=[", hex(gp.stack.lo), ",", hex(gp.stack.hi), ")\n")
+						throw("cg12 finalizer function corruption")
+					}
+					if f.arg == nil {
+						print("cg12 finalizer: nil argument fb=", fb, " i=", i, " n=", n, " cnt=", fb.cnt, " epoch=", gp.cg12StackCopyEpoch, " blockEpoch=", blockStackCopyEpoch, " stack=[", hex(gp.stack.lo), ",", hex(gp.stack.hi), ")\n")
+						throw("cg12 finalizer argument corruption")
+					}
+				}
 
 				var regs abi.RegArgs
 				// The args may be passed in registers or on stack. Even for

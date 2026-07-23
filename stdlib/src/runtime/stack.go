@@ -599,10 +599,141 @@ var ptrnames = []string{
 
 type adjustinfo struct {
 	old   stack
+	new   stack
+	used  uintptr
 	delta uintptr // ptr distance from old to new stack (newbase - oldbase)
 
 	// sghi is the highest sudog.elem on the stack.
 	sghi uintptr
+}
+
+func cg12CheckStackCopy() bool {
+	return debug.cg12checkstackcopy != 0
+}
+
+func cg12PointerInStack(pointer uintptr, stack stack) bool {
+	return stack.lo <= pointer && pointer < stack.hi
+}
+
+func cg12ValidateBitmapPointers(frame *stkframe, adjinfo *adjustinfo, scanp unsafe.Pointer, bv *bitvector, name string, phase string, f funcInfo) {
+	if !cg12CheckStackCopy() || bv.n <= 0 {
+		return
+	}
+	base := uintptr(scanp)
+	for index := uintptr(0); index < uintptr(bv.n); index++ {
+		if bv.ptrbit(index) == 0 {
+			continue
+		}
+		slot := base + index*goarch.PtrSize
+		value := *(*uintptr)(unsafe.Pointer(slot))
+		if value == 0 {
+			continue
+		}
+		oldStack := cg12PointerInStack(value, adjinfo.old)
+		newStack := cg12PointerInStack(value, adjinfo.new)
+		if phase == "before" && oldStack {
+			if debug.cg12checkstackcopy < 2 {
+				continue
+			}
+			print("cg12 stackcopy: ", name, " pointer before adjust frame=")
+			if f.valid() {
+				print(funcname(f))
+			} else {
+				print("<unknown>")
+			}
+			print(" slot=", hex(slot), " value=", hex(value), " old=[", hex(adjinfo.old.lo), ",", hex(adjinfo.old.hi), ") new=[", hex(adjinfo.new.lo), ",", hex(adjinfo.new.hi), ")\n")
+			continue
+		}
+		if phase == "after" && oldStack {
+			print("cg12 stackcopy: stale old-stack pointer after adjust frame=")
+			if f.valid() {
+				print(funcname(f))
+			} else {
+				print("<unknown>")
+			}
+			print(" map=", name, " slot=", hex(slot), " value=", hex(value), " frame=[", hex(frame.sp), ",", hex(frame.fp), "] pc=", hex(frame.pc), " continpc=", hex(frame.continpc), "\n")
+			throw("cg12 stale stack pointer after frame adjustment")
+		}
+		if phase == "after" && newStack {
+			continue
+		}
+	}
+}
+
+func cg12ScanCopiedStack(gp *g, adjinfo *adjustinfo) {
+	if !cg12CheckStackCopy() {
+		return
+	}
+	start := adjinfo.new.hi - adjinfo.used
+	end := adjinfo.new.hi
+	for slot := start; slot+goarch.PtrSize <= end; slot += goarch.PtrSize {
+		value := *(*uintptr)(unsafe.Pointer(slot))
+		if cg12PointerInStack(value, adjinfo.old) {
+			shouldThrow := cg12ReportStaleStackWord(gp, adjinfo, slot, value)
+			if shouldThrow {
+				print("cg12 stackcopy: unadjusted old-stack pointer gp=", gp, " slot=", hex(slot), " value=", hex(value), " old=[", hex(adjinfo.old.lo), ",", hex(adjinfo.old.hi), ") new=[", hex(adjinfo.new.lo), ",", hex(adjinfo.new.hi), ") epoch=", gp.cg12StackCopyEpoch, "\n")
+				throw("cg12 unadjusted stack pointer after copystack")
+			}
+		}
+	}
+}
+
+func cg12ReportStaleStackWord(gp *g, adjinfo *adjustinfo, slot uintptr, value uintptr) bool {
+	var u unwinder
+	for u.init(gp, 0); u.valid(); u.next() {
+		frame := &u.frame
+		if slot < frame.sp || slot >= frame.argp {
+			continue
+		}
+		shouldPrint := debug.cg12checkstackcopy >= 2
+		shouldThrow := false
+		if shouldPrint {
+			print("cg12 stackcopy: stale word is in frame=", funcname(frame.fn), " frame=[", hex(frame.sp), ",", hex(frame.fp), "] varp=", hex(frame.varp), " argp=", hex(frame.argp), " pc=", hex(frame.pc), " continpc=", hex(frame.continpc), "\n")
+		}
+		locals, args, _ := frame.getStackMap(true)
+		if locals.n > 0 {
+			localSize := uintptr(locals.n) * goarch.PtrSize
+			localBase := frame.varp - localSize
+			if localBase <= slot && slot < frame.varp {
+				index := (slot - localBase) / goarch.PtrSize
+				marked := locals.ptrbit(index)
+				if shouldPrint || marked != 0 {
+					print("cg12 stackcopy: locals index=", index, " locals.n=", locals.n, " marked=", marked, " localBase=", hex(localBase), "\n")
+				}
+				if marked != 0 {
+					shouldThrow = true
+				}
+			}
+		}
+		if args.n > 0 {
+			argsEnd := frame.argp + uintptr(args.n)*goarch.PtrSize
+			if frame.argp <= slot && slot < argsEnd {
+				index := (slot - frame.argp) / goarch.PtrSize
+				marked := args.ptrbit(index)
+				if shouldPrint || marked != 0 {
+					print("cg12 stackcopy: args index=", index, " args.n=", args.n, " marked=", marked, "\n")
+				}
+				if marked != 0 {
+					shouldThrow = true
+				}
+			}
+		}
+		if outgoingSize := cg12AAPCSOutgoingSize(frame.fn, frame.pc); outgoingSize >= 0 {
+			savedFPslot := frame.sp + uintptr(outgoingSize)
+			if shouldPrint || slot == savedFPslot {
+				print("cg12 stackcopy: cg12 AAPCS outgoingSize=", outgoingSize, " savedFPslot=", hex(savedFPslot), "\n")
+			}
+			if slot == savedFPslot {
+				shouldThrow = true
+			}
+		}
+		return shouldThrow
+	}
+	if debug.cg12checkstackcopy >= 2 {
+		print("cg12 stackcopy: stale word is not inside any unwound frame slot=", hex(slot), " value=", hex(value), "\n")
+	}
+	_ = adjinfo
+	return false
 }
 
 // adjustpointer checks whether *vpp is in the old stack described by adjinfo.
@@ -738,7 +869,10 @@ func adjustframe(frame *stkframe, adjinfo *adjustinfo) {
 	// Adjust local variables if stack frame has been allocated.
 	if locals.n > 0 {
 		size := uintptr(locals.n) * goarch.PtrSize
-		adjustpointers(unsafe.Pointer(frame.varp-size), &locals, adjinfo, f)
+		scanp := unsafe.Pointer(frame.varp - size)
+		cg12ValidateBitmapPointers(frame, adjinfo, scanp, &locals, "locals", "before", f)
+		adjustpointers(scanp, &locals, adjinfo, f)
+		cg12ValidateBitmapPointers(frame, adjinfo, scanp, &locals, "locals", "after", f)
 	}
 
 	// Adjust arguments.
@@ -746,7 +880,10 @@ func adjustframe(frame *stkframe, adjinfo *adjustinfo) {
 		if stackDebug >= 3 {
 			print("      args\n")
 		}
-		adjustpointers(unsafe.Pointer(frame.argp), &args, adjinfo, funcInfo{})
+		scanp := unsafe.Pointer(frame.argp)
+		cg12ValidateBitmapPointers(frame, adjinfo, scanp, &args, "args", "before", f)
+		adjustpointers(scanp, &args, adjinfo, funcInfo{})
+		cg12ValidateBitmapPointers(frame, adjinfo, scanp, &args, "args", "after", f)
 	}
 
 	// Adjust pointers in all stack objects (whether they are live or not).
@@ -929,6 +1066,8 @@ func copystack(gp *g, newsize uintptr) {
 	// Compute adjustment.
 	var adjinfo adjustinfo
 	adjinfo.old = old
+	adjinfo.new = new
+	adjinfo.used = used
 	adjinfo.delta = new.hi - old.hi
 
 	// Adjust sudogs, synchronizing with channel ops if necessary.
@@ -981,6 +1120,8 @@ func copystack(gp *g, newsize uintptr) {
 	for u.init(gp, 0); u.valid(); u.next() {
 		adjustframe(&u.frame, &adjinfo)
 	}
+	gp.cg12StackCopyEpoch++
+	cg12ScanCopiedStack(gp, &adjinfo)
 
 	if valgrindenabled {
 		if gp.valgrindStackID == 0 {

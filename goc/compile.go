@@ -8145,10 +8145,7 @@ func (g *gen) lvalue(expression ast.Expr) ir.Ref {
 	case *ast.IndexExpr:
 		base := g.indexBase(expression.X)
 		index := g.expr(expression.Index)
-		size := typeSize(g.typeAndValue(expression).Type)
-		if size != 1 {
-			index = g.cur.Mul(ir.ClsL, index, g.fn.Long(size))
-		}
+		index = g.indexOffset(index, g.typeAndValue(expression.Index).Type, typeSize(g.typeAndValue(expression).Type))
 		return g.cur.Add(ir.ClsP, base, index)
 	case *ast.StarExpr:
 		return g.expr(expression.X)
@@ -9220,10 +9217,7 @@ func (g *gen) expr(e ast.Expr) (result ir.Ref) {
 		base := g.indexBase(n.X)
 		idx := g.expr(n.Index)
 		element := g.typeAndValue(n).Type
-		size := typeSize(element)
-		if size != 1 {
-			idx = g.cur.Mul(ir.ClsL, idx, g.fn.Long(size))
-		}
+		idx = g.indexOffset(idx, g.typeAndValue(n.Index).Type, typeSize(element))
 		addr := g.cur.Add(ir.ClsP, base, idx)
 		if g.runtimeAllocation && isSliceType(element) {
 			return g.load(addr, element)
@@ -9250,12 +9244,12 @@ func (g *gen) expr(e ast.Expr) (result ir.Ref) {
 		}
 		low := g.fn.Long(0)
 		if n.Low != nil {
-			low = g.expr(n.Low)
+			low = g.widenIndex(g.expr(n.Low), g.typeAndValue(n.Low).Type)
 		}
 		high := ir.R
 		capacity := ir.R
 		if n.High != nil {
-			high = g.expr(n.High)
+			high = g.widenIndex(g.expr(n.High), g.typeAndValue(n.High).Type)
 		} else if array, ok := sourceType.Underlying().(*types.Array); ok {
 			high = g.fn.Long(array.Len())
 		} else if pointer, ok := sourceType.Underlying().(*types.Pointer); ok {
@@ -9280,7 +9274,8 @@ func (g *gen) expr(e ast.Expr) (result ir.Ref) {
 		}
 		element := slice.Elem()
 		if n.Max != nil {
-			capacity = g.cur.Sub(ir.ClsL, g.expr(n.Max), low)
+			maximum := g.widenIndex(g.expr(n.Max), g.typeAndValue(n.Max).Type)
+			capacity = g.cur.Sub(ir.ClsL, maximum, low)
 		} else if array, ok := sourceType.Underlying().(*types.Array); ok {
 			capacity = g.cur.Sub(ir.ClsL, g.fn.Long(array.Len()), low)
 		} else if pointer, ok := sourceType.Underlying().(*types.Pointer); ok {
@@ -10787,6 +10782,30 @@ func (g *gen) indexBase(expression ast.Expr) ir.Ref {
 		return g.cur.Load(ir.ClsP, base)
 	}
 	return base
+}
+
+func (g *gen) indexOffset(index ir.Ref, indexType types.Type, elementSize int64) ir.Ref {
+	index = g.widenIndex(index, indexType)
+	if elementSize != 1 {
+		index = g.cur.Mul(ir.ClsL, index, g.fn.Long(elementSize))
+	}
+	return index
+}
+
+func (g *gen) widenIndex(index ir.Ref, indexType types.Type) ir.Ref {
+	switch g.fn.ClassOf(index) {
+	case ir.ClsW:
+		if signed(indexType) {
+			index = g.cur.Extsw(ir.ClsL, index)
+		} else {
+			index = g.cur.Extuw(ir.ClsL, index)
+		}
+	case ir.ClsL:
+		// Already pointer-width.
+	default:
+		index = g.cur.Copy(ir.ClsL, index)
+	}
+	return index
 }
 
 func (g *gen) sliceDescriptor(data, length, capacity ir.Ref) ir.Ref {

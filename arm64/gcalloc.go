@@ -331,8 +331,16 @@ func (g *colorGraph) assign() (*allocation, error) {
 	}
 	// A managed reference live across a safepoint is kept in a stack slot for its
 	// whole life so the GC finds it at a fixed frame offset.
+	//
+	// Managed frames and Go-internal functions also cannot rely on any ordinary
+	// register surviving an arbitrary call. Keep every call-crossing value in a
+	// stack slot there instead of depending on caller-save moves around ABI
+	// argument setup.
 	for t := range f.Temps {
-		if g.node[t] && g.gc[t] {
+		if !g.node[t] {
+			continue
+		}
+		if g.gc[t] || ((f.UsesManagedFrame() || f.UsesGoInternalCallConvention()) && g.crossFreq[t] > 0) {
 			spill(t)
 			removed[t] = true
 		}

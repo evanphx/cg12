@@ -305,6 +305,7 @@ type dbgVar struct {
 // already have an initial value.
 var debug struct {
 	cgocheck                 int32
+	cg12checkstackcopy       int32
 	clobberfree              int32
 	containermaxprocs        int32
 	decoratemappings         int32
@@ -370,6 +371,7 @@ var dbgvars = []*dbgVar{
 	{name: "adaptivestackstart", value: &debug.adaptivestackstart},
 	{name: "asyncpreemptoff", value: &debug.asyncpreemptoff},
 	{name: "asynctimerchan", atomic: &debug.asynctimerchan},
+	{name: "cg12checkstackcopy", value: &debug.cg12checkstackcopy},
 	{name: "cgocheck", value: &debug.cgocheck},
 	{name: "clobberfree", value: &debug.clobberfree},
 	{name: "containermaxprocs", value: &debug.containermaxprocs, def: 1},

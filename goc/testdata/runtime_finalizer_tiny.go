@@ -7,12 +7,15 @@ import (
 
 var tinyFinalized chan struct{}
 
+const tinyFinalizerCount = 4096
+const tinyFinalizerMinimum = 16
+
 func finishTinyObject(*byte) {
 	tinyFinalized <- struct{}{}
 }
 
 func registerTinyFinalizers() {
-	for index := 0; index < 4096; index++ {
+	for index := 0; index < tinyFinalizerCount; index++ {
 		value := new(byte)
 		*value = byte(index)
 		runtime.SetFinalizer(value, finishTinyObject)
@@ -20,19 +23,27 @@ func registerTinyFinalizers() {
 }
 
 func main() {
-	tinyFinalized = make(chan struct{}, 4096)
+	tinyFinalized = make(chan struct{}, tinyFinalizerCount)
 	registerTinyFinalizers()
 
+	finalized := 0
 	for attempt := 0; attempt < 1000; attempt++ {
 		runtime.GC()
 		runtime.Gosched()
 		time.Sleep(time.Millisecond)
-		select {
-		case <-tinyFinalized:
-			return
-		default:
+		for {
+			select {
+			case <-tinyFinalized:
+				finalized++
+				if finalized == tinyFinalizerMinimum {
+					return
+				}
+			default:
+				goto drained
+			}
 		}
+	drained:
 	}
 
-	panic("no tiny-object finalizer ran")
+	panic("too few tiny-object finalizers ran")
 }

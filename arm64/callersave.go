@@ -3,6 +3,7 @@ package arm64
 import (
 	"fmt"
 	"sort"
+	"strings"
 
 	"github.com/evanphx/cg12/analysis"
 	"github.com/evanphx/cg12/ir"
@@ -62,6 +63,13 @@ func insertCallerSaves(f *ir.Func, cfg *analysis.CFG, live *analysis.Liveness, a
 				}
 				if len(sv) > 0 {
 					sort.Ints(sv) // deterministic order
+					if f.UsesManagedFrame() || f.UsesGoInternalCallConvention() {
+						names := make([]string, 0, len(sv))
+						for _, t := range sv {
+							names = append(names, fmt.Sprintf("%%%s/%s", f.Temps[t].Name, Reg(f.Temps[t].Reg).xName()))
+						}
+						return fmt.Errorf("arm64: %s keeps caller-saved values live across a managed/go-internal call: %s", f.Name, strings.Join(names, ", "))
+					}
 					saves[in] = sv
 				}
 			}

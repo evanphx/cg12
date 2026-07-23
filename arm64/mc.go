@@ -1567,7 +1567,7 @@ func (m *mc) goPointerWords() []int {
 }
 
 func (m *mc) goLocalPointerWords() []int {
-	return goLocalPointerWordIndexes(m.f, m.allocOff)
+	return goLocalPointerWordIndexes(m.f, m.allocOff, m.spillBase)
 }
 
 func (m *mc) goStackMapPoints() []goStackMapPoint {
@@ -1657,14 +1657,11 @@ func goPointerWordIndexes(function *ir.Func, allocations map[*ir.Instr]int, spil
 	return words
 }
 
-func goLocalPointerWordIndexes(function *ir.Func, allocations map[*ir.Instr]int) []int {
+func goLocalPointerWordIndexes(function *ir.Func, allocations map[*ir.Instr]int, spillBase int) []int {
 	seen := make(map[int]bool)
-	for instruction, allocationOffset := range allocations {
-		for wordOffset := range function.StackPointerWords[instruction.To.ID] {
-			frameOffset := allocationOffset + wordOffset
-			if frameOffset >= 16 && frameOffset%8 == 0 {
-				seen[(frameOffset-16)/8] = true
-			}
+	for _, frameOffset := range goPointerFrameOffsets(function, allocations, spillBase) {
+		if frameOffset >= 16 && frameOffset%8 == 0 {
+			seen[(frameOffset-16)/8] = true
 		}
 	}
 	words := make([]int, 0, len(seen))
@@ -1687,7 +1684,8 @@ func goPointerFrameOffsets(function *ir.Func, allocations map[*ir.Instr]int, spi
 	}
 	if function.UsesManagedFrame() {
 		for _, temporary := range function.Temps {
-			if temporary.GCRef && temporary.Reg == ir.NoReg && temporary.Slot >= 0 {
+			pointer := temporary.GCRef || temporary.Cls == ir.ClsP
+			if pointer && temporary.Reg == ir.NoReg && temporary.Slot >= 0 {
 				seen[spillBase+temporary.Slot] = true
 			}
 		}
