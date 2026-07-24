@@ -25,6 +25,8 @@ type asmb interface {
 	mul(w64 bool, rd, rn, rm Reg)
 	madd(w64 bool, rd, rn, rm, ra Reg)
 	msub(w64 bool, rd, rn, rm, ra Reg)
+	umulh(rd, rn, rm Reg)
+	smulh(rd, rn, rm Reg)
 	sdiv(w64 bool, rd, rn, rm Reg)
 	udiv(w64 bool, rd, rn, rm Reg)
 	logicalReg(op logicalOp, w64 bool, rd, rn, rm Reg)
@@ -220,6 +222,12 @@ func (b *mcAsm) madd(w64 bool, rd, rn, rm, ra Reg) {
 }
 func (b *mcAsm) msub(w64 bool, rd, rn, rm, ra Reg) {
 	b.prog.Emit(a64.Msub(w64, mreg(rd), mreg(rn), mreg(rm), mreg(ra)))
+}
+func (b *mcAsm) umulh(rd, rn, rm Reg) {
+	b.prog.Emit(a64.Umulh(mreg(rd), mreg(rn), mreg(rm)))
+}
+func (b *mcAsm) smulh(rd, rn, rm Reg) {
+	b.prog.Emit(a64.Smulh(mreg(rd), mreg(rn), mreg(rm)))
 }
 func (b *mcAsm) sdiv(w64 bool, rd, rn, rm Reg) {
 	b.prog.Emit(a64.Sdiv(w64, mreg(rd), mreg(rn), mreg(rm)))

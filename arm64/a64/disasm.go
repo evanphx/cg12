@@ -436,8 +436,15 @@ func disasmCondSel(w uint32) string {
 }
 
 func disasmDP3(w uint32) string {
-	if bits(w, 23, 21) != 0 {
-		return "" // the widening multiplies, which we never emit
+	if op31 := bits(w, 23, 21); op31 != 0 {
+		rd, rn, rm := w&0x1f, bits(w, 9, 5), bits(w, 20, 16)
+		switch op31 {
+		case 0b110:
+			return fmt.Sprintf("umulh %s, %s, %s", gpr(true, rd), gpr(true, rn), gpr(true, rm))
+		case 0b010:
+			return fmt.Sprintf("smulh %s, %s, %s", gpr(true, rd), gpr(true, rn), gpr(true, rm))
+		}
+		return "" // other three-source encodings are not emitted
 	}
 	w64, rd, rn, rm, ra := bit(w, 31), w&0x1f, bits(w, 9, 5), bits(w, 20, 16), bits(w, 14, 10)
 	op, alias := "madd", "mul"

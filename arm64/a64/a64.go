@@ -209,6 +209,18 @@ func Msub(w64 bool, rd, rn, rm, ra Reg) uint32 { return dataProc3(w64, 1, rd, rn
 // Mul encodes MUL rd, rn, rm.
 func Mul(w64 bool, rd, rn, rm Reg) uint32 { return Madd(w64, rd, rn, rm, ZR) }
 
+// Umulh encodes UMULH rd, rn, rm: rd = high 64 bits of the unsigned product
+// rn*rm. It is a widening multiply (op31 = 0b110, Ra = ZR), 64-bit only.
+func Umulh(rd, rn, rm Reg) uint32 {
+	return 1<<31 | 0x1b<<24 | 0b110<<21 | r(rm)<<16 | r(ZR)<<10 | r(rn)<<5 | r(rd)
+}
+
+// Smulh encodes SMULH rd, rn, rm: rd = high 64 bits of the signed product
+// rn*rm (op31 = 0b010, Ra = ZR), 64-bit only.
+func Smulh(rd, rn, rm Reg) uint32 {
+	return 1<<31 | 0x1b<<24 | 0b010<<21 | r(rm)<<16 | r(ZR)<<10 | r(rn)<<5 | r(rd)
+}
+
 // --- conditional select ----------------------------------------------------
 
 // Cond is an AArch64 condition code.

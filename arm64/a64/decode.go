@@ -33,6 +33,8 @@ const (
 	OpMul
 	OpMadd
 	OpMsub
+	OpUmulh // high 64 bits of an unsigned 64x64 product
+	OpSmulh // high 64 bits of a signed 64x64 product
 	OpUDiv
 	OpSDiv
 
@@ -383,8 +385,17 @@ func decodeCondSel(w uint32) (Inst, bool) {
 }
 
 func decodeDP3(w uint32) (Inst, bool) {
-	if bits(w, 23, 21) != 0 {
-		return Inst{}, false // widening multiplies, never emitted
+	if op31 := bits(w, 23, 21); op31 != 0 {
+		// The two widening multiplies we emit (for overflow tests); other
+		// three-source encodings are not produced.
+		rd, rn, rm := Reg(w&0x1f), Reg(bits(w, 9, 5)), Reg(bits(w, 20, 16))
+		switch op31 {
+		case 0b110:
+			return Inst{Op: OpUmulh, W64: true, Rd: rd, Rn: rn, Rm: rm}, true
+		case 0b010:
+			return Inst{Op: OpSmulh, W64: true, Rd: rd, Rn: rn, Rm: rm}, true
+		}
+		return Inst{}, false
 	}
 	w64, rd, rn, rm, ra := bit(w, 31), Reg(w&0x1f), Reg(bits(w, 9, 5)), Reg(bits(w, 20, 16)), Reg(bits(w, 14, 10))
 	op := OpMadd

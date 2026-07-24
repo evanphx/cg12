@@ -229,6 +229,14 @@ const (
 	OLifeStart
 	OLifeEnd
 
+	// High half of a full 64x64->128-bit integer multiply (the bits above the
+	// low word an OMul keeps). Used to test multiplication overflow without a
+	// division: an unsigned 64-bit product overflows iff OUMulh is non-zero, a
+	// signed one iff OSMulh differs from the low word's sign extension. 64-bit
+	// operands and result only.
+	OUMulh
+	OSMulh
+
 	numOps
 )
 
@@ -251,13 +259,15 @@ type opInfo struct {
 var opTable = [numOps]opInfo{
 	ONop: {name: "nop"},
 
-	OAdd:  {name: "add", hasResult: true, commutative: true},
-	OSub:  {name: "sub", hasResult: true},
-	OMul:  {name: "mul", hasResult: true, commutative: true},
-	ODiv:  {name: "div", hasResult: true},
-	OUDiv: {name: "udiv", hasResult: true},
-	ORem:  {name: "rem", hasResult: true},
-	OURem: {name: "urem", hasResult: true},
+	OAdd:   {name: "add", hasResult: true, commutative: true},
+	OSub:   {name: "sub", hasResult: true},
+	OMul:   {name: "mul", hasResult: true, commutative: true},
+	OUMulh: {name: "umulh", hasResult: true, commutative: true},
+	OSMulh: {name: "smulh", hasResult: true, commutative: true},
+	ODiv:   {name: "div", hasResult: true},
+	OUDiv:  {name: "udiv", hasResult: true},
+	ORem:   {name: "rem", hasResult: true},
+	OURem:  {name: "urem", hasResult: true},
 
 	OAnd:   {name: "and", hasResult: true, commutative: true},
 	OOr:    {name: "or", hasResult: true, commutative: true},

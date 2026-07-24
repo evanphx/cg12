@@ -119,6 +119,28 @@ int main(void){
 			"copied=hello\n", out)
 }
 
+// 64-bit __builtin_mul_overflow uses the widening multiply (umulh/smulh) to test
+// overflow, so exercise both signednesses through the storing form: normal
+// products, an unsigned wrap, a signed wrap, and the MIN*-1 corner.
+func TestMulOverflow64(t *testing.T) {
+	out, code := compileAndRun(t, `
+#include <stdio.h>
+typedef unsigned long u64; typedef long s64;
+int main(void){
+	u64 uo; s64 so;
+	int a = __builtin_mul_overflow((u64)3, (u64)4, &uo);
+	int b = __builtin_mul_overflow(0xFFFFFFFFFFFFFFFFUL, (u64)2, &uo);
+	int c = __builtin_mul_overflow((u64)1<<40, (u64)1<<40, &uo);
+	int d = __builtin_mul_overflow((s64)-3, (s64)4, &so);
+	int e = __builtin_mul_overflow((s64)0x8000000000000000L, (s64)-1, &so);
+	int f = __builtin_mul_overflow((s64)1<<40, (s64)1<<40, &so);
+	printf("%d %d %d %d %d %d\n", a, b, c, d, e, f);
+	return 0;
+}`)
+	require.Equal(t, 0, code)
+	require.Equal(t, "0 1 1 0 1 1\n", out)
+}
+
 // A __attribute__((alias)) function (Ruby's RUBY_ALIAS_FUNCTION) resolves to its
 // target's code; calling either name runs the same function.
 func TestFunctionAlias(t *testing.T) {

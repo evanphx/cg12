@@ -394,8 +394,20 @@ func (g *gen) overflowBuiltin(name string, args []moderncc.ExpressionNode, predi
 		}
 	default: // __builtin_mul_overflow
 		result = g.cur.Mul(cls, a, b)
-		// Overflow iff b != 0 and result/b != a (division does not trap on this
-		// target). The division has to match the operands' signedness.
+		if cls == ir.ClsL {
+			// The full product is 128 bits; the high half tells us directly whether
+			// it fits in 64. Unsigned overflows iff any high bit is set; signed
+			// overflows iff the high half is not the low word's sign extension.
+			if signed(elem) {
+				hi := g.cur.SMulh(a, b)
+				ovf = g.cur.Cmp(ir.CmpNe, ir.ClsW, hi, g.cur.Sar(cls, result, g.fn.ConstInt(cls, 63)))
+			} else {
+				ovf = g.cur.Cmp(ir.CmpNe, ir.ClsW, g.cur.UMulh(a, b), zero)
+			}
+			break
+		}
+		// Narrower than a word: overflow iff b != 0 and result/b != a (division does
+		// not trap on this target). The division has to match the operands' signedness.
 		bNZ := g.cur.Cmp(ir.CmpNe, ir.ClsW, b, zero)
 		var q ir.Ref
 		if signed(elem) {

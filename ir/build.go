@@ -187,9 +187,15 @@ func (b *Block) emit(op Op, cls Cls, args ...Ref) Ref {
 func (b *Block) Pacia(x, y Ref) Ref { return b.emit(OPacia, ClsL, x, y) }
 
 // Binary arithmetic and bitwise operations.
-func (b *Block) Add(cls Cls, x, y Ref) Ref  { return b.emit(OAdd, cls, x, y) }
-func (b *Block) Sub(cls Cls, x, y Ref) Ref  { return b.emit(OSub, cls, x, y) }
-func (b *Block) Mul(cls Cls, x, y Ref) Ref  { return b.emit(OMul, cls, x, y) }
+func (b *Block) Add(cls Cls, x, y Ref) Ref { return b.emit(OAdd, cls, x, y) }
+func (b *Block) Sub(cls Cls, x, y Ref) Ref { return b.emit(OSub, cls, x, y) }
+func (b *Block) Mul(cls Cls, x, y Ref) Ref { return b.emit(OMul, cls, x, y) }
+
+// UMulh and SMulh return the high 64 bits of the 128-bit product x*y (unsigned
+// and signed respectively); 64-bit operands only. They exist for overflow tests.
+func (b *Block) UMulh(x, y Ref) Ref { return b.emit(OUMulh, ClsL, x, y) }
+func (b *Block) SMulh(x, y Ref) Ref { return b.emit(OSMulh, ClsL, x, y) }
+
 func (b *Block) Div(cls Cls, x, y Ref) Ref  { return b.emit(ODiv, cls, x, y) }
 func (b *Block) UDiv(cls Cls, x, y Ref) Ref { return b.emit(OUDiv, cls, x, y) }
 func (b *Block) Rem(cls Cls, x, y Ref) Ref  { return b.emit(ORem, cls, x, y) }

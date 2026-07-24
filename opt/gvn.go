@@ -92,7 +92,7 @@ func lessRef(x, y ir.Ref) bool {
 // Loads are excluded: without alias analysis two loads are not known equal.
 func gvnEligible(op ir.Op) bool {
 	switch op {
-	case ir.OAdd, ir.OSub, ir.OMul, ir.ODiv, ir.OUDiv, ir.ORem, ir.OURem,
+	case ir.OAdd, ir.OSub, ir.OMul, ir.OUMulh, ir.OSMulh, ir.ODiv, ir.OUDiv, ir.ORem, ir.OURem,
 		ir.OAnd, ir.OOr, ir.OXor, ir.OShl, ir.OShr, ir.OSar,
 		ir.ONeg, ir.OCmp,
 		ir.OExtsb, ir.OExtub, ir.OExtsh, ir.OExtuh, ir.OExtsw, ir.OExtuw,

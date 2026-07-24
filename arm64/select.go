@@ -126,6 +126,10 @@ func (s *sel) selectData(in *ir.Instr) bool {
 		} else {
 			s.binReg(in, sz, func(rd, rn, rm Reg) { s.b.mul(w64, rd, rn, rm) })
 		}
+	case ir.OUMulh:
+		s.binReg(in, sz, func(rd, rn, rm Reg) { s.b.umulh(rd, rn, rm) })
+	case ir.OSMulh:
+		s.binReg(in, sz, func(rd, rn, rm Reg) { s.b.smulh(rd, rn, rm) })
 	case ir.ODiv:
 		if flt {
 			s.binReg(in, sz, func(rd, rn, rm Reg) { s.b.fop(fDiv, w64, rd, rn, rm) })

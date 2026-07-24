@@ -26,6 +26,8 @@ func TestDecodeFields(t *testing.T) {
 		{"movk-lsl16", Movk(true, 5, 0xabcd, 16), Inst{Op: OpMovk, W64: true, Rd: 5, Imm: 0xabcd, ShiftAmt: 16}},
 		{"mul", Mul(true, 0, 1, 2), Inst{Op: OpMul, W64: true, Rd: 0, Rn: 1, Rm: 2}},
 		{"madd", Madd(true, 0, 1, 2, 3), Inst{Op: OpMadd, W64: true, Rd: 0, Rn: 1, Rm: 2, Ra: 3}},
+		{"umulh", Umulh(0, 1, 2), Inst{Op: OpUmulh, W64: true, Rd: 0, Rn: 1, Rm: 2}},
+		{"smulh", Smulh(3, 4, 5), Inst{Op: OpSmulh, W64: true, Rd: 3, Rn: 4, Rm: 5}},
 		{"udiv", Udiv(true, 0, 1, 2), Inst{Op: OpUDiv, W64: true, Rd: 0, Rn: 1, Rm: 2}},
 		{"sdiv", Sdiv(false, 0, 1, 2), Inst{Op: OpSDiv, Rd: 0, Rn: 1, Rm: 2}},
 		{"and", AndReg(true, 0, 1, 2), Inst{Op: OpAnd, W64: true, Rd: 0, Rn: 1, Rm: 2}},
