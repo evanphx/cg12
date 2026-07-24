@@ -190,9 +190,15 @@ Current checkpoint:
 - [x] Model the standard compiler's synthetic edge from each defer registration
   to the shared recovery exit so recovery-result liveness and register
   allocation remain valid on metadata-entered paths.
+- [x] Heap-lift direct deferred function literals in runtime builds, and keep
+  named result slots on the same heap cell when an escaping deferred closure
+  captures the result.
 - [x] Keep the runtime's `_panic` record stack-resident through
   `unsafe.Pointer` conversions passed to `runtime.noescape`; both panic-time GC
   cases now pass with `GOGC=1`.
+- [x] Include stack-allocated local object pointer fields in every call-site
+  local stack map, not just the static local map, so stack copying relocates
+  `_panic.gopanicFP` and similar stack-resident runtime fields.
 - [x] Pass the basic, nested, typed, named-result, panic-replacement, goroutine,
   Goexit, deep-unwind, error-interface, and panic-time GC cases in normal builds
   (21 of 21 must-pass cases).
@@ -213,6 +219,11 @@ Add compiler validation for:
 - open-coded and linked defer records agree with the generated frame layout;
 - unwinding restores SP, FP, LR, and the goroutine stack bounds at every frame;
 - live pointer slots at panic and defer calls match emitted GC metadata.
+
+Current post-rebase checkpoint: the focused stack and recover reducers pass in
+normal builds, and the stack panic pair passes with `-runtime-opt` under the
+3 GiB limit. The complete defer/panic category and the 100-run `GOGC=1` stress
+batch still need to be rerun after the safepoint-map fix.
 
 Exit criterion: the entire defer/panic category passes at multiple optimization
 levels, with forced stack growth and `GOGC=1`, and the panic-stack-GC tests run

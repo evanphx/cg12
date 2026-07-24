@@ -547,7 +547,7 @@ func goFunctionStackMaps(function goFunctionInfo) ([][]int, []goStackMapIndexPoi
 	pointerMaps := [][]int{nil, append([]int(nil), function.localPointerWords...)}
 	indexPoints := make([]goStackMapIndexPoint, 0, len(function.stackMapPoints))
 	for _, point := range function.stackMapPoints {
-		pointerWords := point.pointerWords
+		pointerWords := unionPointerWords(function.localPointerWords, point.pointerWords)
 		index := pointerMapIndex(pointerMaps, pointerWords)
 		if index < 0 {
 			index = len(pointerMaps)
@@ -556,6 +556,28 @@ func goFunctionStackMaps(function goFunctionInfo) ([][]int, []goStackMapIndexPoi
 		indexPoints = append(indexPoints, goStackMapIndexPoint{pc: point.pc, index: index})
 	}
 	return pointerMaps, indexPoints
+}
+
+func unionPointerWords(left, right []int) []int {
+	if len(left) == 0 {
+		return append([]int(nil), right...)
+	}
+	if len(right) == 0 {
+		return append([]int(nil), left...)
+	}
+	seen := make(map[int]bool, len(left)+len(right))
+	for _, word := range left {
+		seen[word] = true
+	}
+	for _, word := range right {
+		seen[word] = true
+	}
+	words := make([]int, 0, len(seen))
+	for word := range seen {
+		words = append(words, word)
+	}
+	sort.Ints(words)
+	return words
 }
 
 func pointerMapIndex(pointerMaps [][]int, candidate []int) int {

@@ -231,7 +231,7 @@ func TestGoStackMapPCDataCoalescesDuplicateFrameStartPoint(t *testing.T) {
 	)
 }
 
-func TestGoFunctionStackMapsKeepSafepointRootsPrecise(t *testing.T) {
+func TestGoFunctionStackMapsIncludeLocalPointerWordsAtSafepoints(t *testing.T) {
 	pointerMaps, indexPoints := goFunctionStackMaps(goFunctionInfo{
 		localPointerWords: []int{1},
 		stackMapPoints: []goStackMapPoint{
@@ -240,7 +240,7 @@ func TestGoFunctionStackMapsKeepSafepointRootsPrecise(t *testing.T) {
 		},
 	})
 
-	assert.Equal(t, [][]int{nil, {1}, {4}}, pointerMaps)
+	assert.Equal(t, [][]int{nil, {1}, {1, 4}}, pointerMaps)
 	assert.Equal(t, []goStackMapIndexPoint{
 		{pc: 80, index: 2},
 		{pc: 120, index: 1},

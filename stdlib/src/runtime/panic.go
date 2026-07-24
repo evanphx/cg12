@@ -1117,6 +1117,8 @@ func gorecover() any {
 	//     defer recover()
 	// because there are 0 non-wrapper frames.
 	canRecover := false
+	var observedGopanicFP uintptr
+	var observedNonWrapperFrames int
 	systemstack(func() {
 		var u unwinder
 		u.init(gp, 0)
@@ -1131,6 +1133,8 @@ func gorecover() any {
 				case abi.FuncIDWrapper:
 					continue
 				case abi.FuncID_gopanic:
+					observedGopanicFP = u.frame.fp
+					observedNonWrapperFrames = nonWrapperFrames
 					if u.frame.fp == uintptr(p.gopanicFP) && nonWrapperFrames > 0 {
 						canRecover = true
 					}
@@ -1145,6 +1149,15 @@ func gorecover() any {
 		}
 	})
 	if !canRecover {
+		if debug.cg12checkstackcopy >= 2 {
+			print("cg12 gorecover: rejected gopanicFP=")
+			print(hex(uintptr(p.gopanicFP)))
+			print(" observedFP=")
+			print(hex(observedGopanicFP))
+			print(" nonWrapperFrames=")
+			print(observedNonWrapperFrames)
+			print("\n")
+		}
 		return nil
 	}
 	p.recovered = true

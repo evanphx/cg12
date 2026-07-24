@@ -4359,6 +4359,44 @@ func (g *gen) variableStorage(object types.Object, valueType types.Type) ir.Ref 
 	return storage
 }
 
+func (g *gen) resultStorage(object types.Object, valueType types.Type) ir.Ref {
+	if object != nil && g.runtimeAllocation && g.escapingCaptures[object] {
+		storage := g.allocateTyped(valueType)
+		g.zero(storage, valueType)
+		g.vars[object] = storage
+		g.heapCaptures[object] = storage
+		if isInlineAggregate(valueType) || isInterfaceValue(valueType) {
+			g.directValues[object] = true
+		}
+		return storage
+	}
+	if (isInlineAggregate(valueType) || isInterfaceValue(valueType)) && !(g.runtimeAllocation && isSliceType(valueType)) {
+		storage := g.aggregateResult
+		if storage == ir.R {
+			storage = g.aggregateResultStorage(valueType)
+		}
+		g.zero(storage, valueType)
+		if object != nil {
+			g.directValues[object] = true
+			g.vars[object] = storage
+		}
+		return storage
+	}
+	if g.runtimeAllocation && isSliceType(valueType) {
+		storage := g.allocLocal(valueType)
+		if object != nil {
+			g.vars[object] = storage
+		}
+		return storage
+	}
+	storage := g.alloc(valueType)
+	g.store(g.zeroValue(valueType), storage, valueType)
+	if object != nil {
+		g.vars[object] = storage
+	}
+	return storage
+}
+
 func (g *gen) findKeepAliveObjects(body *ast.BlockStmt) map[types.Object]bool {
 	objects := make(map[types.Object]bool)
 	ast.Inspect(body, func(node ast.Node) bool {
@@ -6360,23 +6398,10 @@ func (g *gen) funcDecl(fd *ast.FuncDecl) {
 		result := sig.Results().At(0)
 		originalResult := originalSignature.Results().At(0)
 		g.resultType = result.Type()
-		if (isInlineAggregate(result.Type()) || isInterfaceValue(result.Type())) && !(g.runtimeAllocation && isSliceType(result.Type())) {
-			g.resultSlot = g.aggregateResult
-			if g.resultSlot == ir.R {
-				g.resultSlot = g.aggregateResultStorage(result.Type())
-			}
-			g.zero(g.resultSlot, result.Type())
-			if result.Name() != "" {
-				g.directValues[originalResult] = true
-			}
-		} else if g.runtimeAllocation && isSliceType(result.Type()) {
-			g.resultSlot = g.allocLocal(result.Type())
-		} else {
-			g.resultSlot = g.alloc(result.Type())
-			g.store(g.zeroValue(result.Type()), g.resultSlot, result.Type())
-		}
 		if result.Name() != "" {
-			g.vars[originalResult] = g.resultSlot
+			g.resultSlot = g.resultStorage(originalResult, result.Type())
+		} else {
+			g.resultSlot = g.resultStorage(nil, result.Type())
 		}
 	}
 	g.stmts(fd.Body.List)
@@ -10150,26 +10175,13 @@ func (g *gen) functionLiteral(literal *ast.FuncLit) ir.Ref {
 		result := signature.Results().At(0)
 		originalResult := originalSignature.Results().At(0)
 		child.resultType = result.Type()
-		if (isInlineAggregate(result.Type()) || isInterfaceValue(result.Type())) && !(child.runtimeAllocation && isSliceType(result.Type())) {
-			child.resultSlot = child.aggregateResult
-			if child.resultSlot == ir.R {
-				child.resultSlot = child.aggregateResultStorage(result.Type())
-			}
-			child.zero(child.resultSlot, result.Type())
-			if result.Name() != "" {
-				child.directValues[originalResult] = true
-			}
-		} else if child.runtimeAllocation && isSliceType(result.Type()) {
-			child.resultSlot = child.allocLocal(result.Type())
-		} else {
-			child.resultSlot = child.alloc(result.Type())
-			child.store(child.zeroValue(result.Type()), child.resultSlot, result.Type())
-		}
 		if result.Name() != "" {
-			child.vars[originalResult] = child.resultSlot
+			child.resultSlot = child.resultStorage(originalResult, result.Type())
 			if len(resultObjects) > 0 && resultObjects[0] != nil {
 				child.vars[resultObjects[0]] = child.resultSlot
 			}
+		} else {
+			child.resultSlot = child.resultStorage(nil, result.Type())
 		}
 	}
 	child.stmts(literal.Body.List)
@@ -10313,6 +10325,9 @@ func (g *gen) functionLiteralEscapesWithin(
 	if call, ok := parent.(*ast.CallExpr); ok {
 		if call.Fun == literal {
 			if _, asynchronous := parents[call].(*ast.GoStmt); asynchronous {
+				return true
+			}
+			if _, deferred := parents[call].(*ast.DeferStmt); deferred && g.runtimeAllocation {
 				return true
 			}
 			return false

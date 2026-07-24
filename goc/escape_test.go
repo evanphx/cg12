@@ -313,6 +313,59 @@ func Test() {
 	assert.True(t, callsSymbol(install, "runtime.newobject"), "goroutine closure remained on the caller stack")
 }
 
+func TestDirectDeferredFunctionLiteralEscapesInRuntimeBuild(t *testing.T) {
+	module, err := goc.Compile("deferred_closure.go", []byte(`
+package main
+
+import "runtime"
+
+var result int
+
+func install() {
+	value := 42
+	defer func() {
+		result = value
+	}()
+	runtime.GC()
+}
+
+func Test() {
+	install()
+}
+`))
+	require.NoError(t, err)
+
+	install := functionWithSuffix(t, module, "install")
+	assert.True(t, callsSymbol(install, "runtime.newobject"), "deferred closure remained on the caller stack")
+}
+
+func TestDeferredClosureCapturedNamedResultEscapesInRuntimeBuild(t *testing.T) {
+	module, err := goc.Compile("deferred_named_result.go", []byte(`
+package main
+
+import "runtime"
+
+func compute() (result int) {
+	defer func() {
+		result++
+	}()
+	runtime.GC()
+	return 41
+}
+
+func Test() {
+	if compute() != 42 {
+		panic("bad result")
+	}
+}
+`))
+	require.NoError(t, err)
+
+	compute := functionWithSuffix(t, module, "compute")
+	newObjectCalls := countCallsSymbol(compute, "runtime.newobject")
+	assert.GreaterOrEqual(t, newObjectCalls, 2, "deferred closure and captured result should both escape")
+}
+
 func TestFunctionLiteralPassedToEscapingParameterEscapes(t *testing.T) {
 	module, err := goc.Compile("escaping_parameter_closure.go", []byte(`
 package main
