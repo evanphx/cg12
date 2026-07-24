@@ -268,6 +268,33 @@ func TestCompileFloatFunction(t *testing.T) {
 	assert.Contains(t, disasmModule(t, m), "fadd s")
 }
 
+func TestLifetimeMarkersAreNoOps(t *testing.T) {
+	// A function with a stack slot used by a store and a load, compiled with and
+	// without lifetime markers bracketing the slot, must produce byte-identical code:
+	// the markers emit nothing and (via analysis/live.go skipping them) do not perturb
+	// register allocation.
+	build := func(withMarkers bool) string {
+		m := ir.NewModule()
+		f := m.NewFuncVoid("life").Export()
+		p := f.Param("p", ir.ClsL)
+		e := f.Entry()
+		a := e.Alloc(8, 8)
+		if withMarkers {
+			e.LifeStart(a)
+		}
+		e.Store(p, a)           // *a = p
+		v := e.Load(ir.ClsL, a) // v = *a
+		e.Store(v, p)           // *p = v
+		if withMarkers {
+			e.LifeEnd(a)
+		}
+		e.RetVoid()
+		return disasmModule(t, m)
+	}
+	assert.Equal(t, build(false), build(true),
+		"lifetime markers must emit no machine code and not change allocation")
+}
+
 func TestSelectMulAddFuses(t *testing.T) {
 	// A single-use integer multiply feeding an add fuses to one madd; feeding a
 	// subtract's subtrahend fuses to msub (c - a*b). The separate mul disappears.

@@ -70,6 +70,8 @@ func hasSideEffect(in *ir.Instr) bool {
 		return true
 	case op == ir.OSafepoint:
 		return true // a safepoint pins the stack map; never remove it
+	case op.IsLifetime():
+		return true // a lifetime marker bounds a slot's live range; DCE must keep it
 	case op == ir.OGetReg, op == ir.OSetReg:
 		return true // reads/writes of a live machine register are volatile
 	case op == ir.OThreadPtr, op == ir.OTLSOffset, op == ir.OTLSIndexAddr:

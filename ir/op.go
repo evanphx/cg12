@@ -218,6 +218,17 @@ const (
 	OSpill
 	OReload
 
+	// OLifeStart / OLifeEnd bracket the region in which the stack slot whose address
+	// is Args[0] (an OAlloc result) holds a live value, modelling LLVM's
+	// llvm.lifetime.start / llvm.lifetime.end. Outside [start, end] the storage is
+	// dead and its slot may be reused. The front end emits them at C block-scope
+	// entry and exit; they let mem2reg's pruned SSA bound a promoted local to its
+	// scope (not the whole computed-goto mesh) and let the frame allocator share one
+	// slot between allocas whose lifetimes are disjoint. They carry a use of the
+	// alloca address but define nothing and emit no machine code.
+	OLifeStart
+	OLifeEnd
+
 	numOps
 )
 
@@ -338,6 +349,9 @@ var opTable = [numOps]opInfo{
 	// value, so its To is set (by the builder or parser) only when it does, and the
 	// printer keys off To rather than this table.
 	OIntrinsic: {name: "intrinsic"},
+
+	OLifeStart: {name: "lifetime.start"},
+	OLifeEnd:   {name: "lifetime.end"},
 }
 
 // Info returns the static metadata for an opcode.
@@ -376,6 +390,11 @@ func (o Op) IsStore() bool { return o >= OStoreb && o <= OStoreq }
 
 // IsAlloc reports whether the op allocates a stack slot.
 func (o Op) IsAlloc() bool { return o >= OAlloc4 && o <= OAlloc16 }
+
+// IsLifetime reports whether the op is an alloca lifetime marker (OLifeStart or
+// OLifeEnd). Such an op reads its alloca-address operand but defines nothing and emits
+// no machine code; liveness and mem2reg treat it specially rather than as a use.
+func (o Op) IsLifetime() bool { return o == OLifeStart || o == OLifeEnd }
 
 // String returns the op's IL mnemonic (empty for OCmp, whose mnemonic is
 // derived from its predicate and operand class at print time).

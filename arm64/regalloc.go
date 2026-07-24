@@ -1,6 +1,7 @@
 package arm64
 
 import (
+	"os"
 	"sort"
 
 	"github.com/evanphx/cg12/analysis"
@@ -62,6 +63,9 @@ type numbering struct {
 // conservative per-temp intervals are still built here, but only as the liveness
 // substrate that DWARF variable locations and GC stack maps read.
 func regAlloc(f *ir.Func) (*allocation, error) {
+	if os.Getenv("CG12_DUMP_IR") == f.Name {
+		os.Stderr.WriteString(f.String())
+	}
 	if err := asmPrecolor(f); err != nil {
 		return nil, err
 	}
@@ -92,6 +96,8 @@ func regAlloc(f *ir.Func) (*allocation, error) {
 	alloc.intervals = buildIntervals(f, cfg, live, num)
 	alloc.posInstr = num.posInstr
 	alloc.safeRoots = computeSafepointRoots(f, alloc.intervals, num)
+	maybeDumpRanges(f, alloc, num, cfg, freq)
+	dumpPressureReport(f, alloc, num, cfg, live, freq)
 	return alloc, nil
 }
 
@@ -186,6 +192,13 @@ func buildIntervals(f *ir.Func, cfg *analysis.CFG, live *analysis.Liveness, num 
 		p := bp[0]
 		for k := range b.Instrs {
 			in := &b.Instrs[k]
+			// A lifetime marker references its alloca to bound the slot's region, not
+			// to read the value; extending the interval to it would misreport the
+			// address temp as live there (matching instrUses / analysis.Liveness).
+			if in.Op.IsLifetime() {
+				p++
+				continue
+			}
 			// Inline-asm inputs are early-clobber against the outputs: extending
 			// them one position past the instruction keeps them live through the
 			// output definitions, so the allocator never reuses an input register

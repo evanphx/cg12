@@ -46,13 +46,22 @@ func DeadAlloc(f *ir.Func) bool {
 		return false
 	}
 
-	// Drop every store into a dead allocation.
+	// Drop every store into a dead allocation, and any lifetime marker bracketing
+	// one -- a dead slot needs no live-range bounds, and leaving the markers would
+	// keep the allocation (and its address arithmetic) artificially live so DCE
+	// could not delete it.
 	changed := false
 	for _, b := range f.Blocks {
 		out := b.Instrs[:0]
 		for _, in := range b.Instrs {
 			if in.Op.IsStore() {
 				if base, ok := ai.allocBase[in.Arg(1).ID]; ok && dead[base] {
+					changed = true
+					continue
+				}
+			}
+			if in.Op.IsLifetime() {
+				if base, ok := ai.allocBase[in.Arg(0).ID]; ok && dead[base] {
 					changed = true
 					continue
 				}

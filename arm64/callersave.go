@@ -75,23 +75,45 @@ func insertCallerSaves(f *ir.Func, cfg *analysis.CFG, live *analysis.Liveness, a
 		return nil
 	}
 
-	// One slot per saved temp, reused across every call it crosses, appended to the
-	// spill area (computeFrame reserves spillBytes, so the frame just grows).
+	// Coalesce the save slots: two saved values whose live ranges never overlap can
+	// share one slot. In an interpreter the saved values are overwhelmingly per-handler
+	// and mutually disjoint, so without this each takes its own slot and the save area
+	// dominates the frame.
+	sizeOf := func(t int) int {
+		if f.Temps[t].Cls == ir.ClsQ {
+			return 16
+		}
+		return 8
+	}
+	savedSet := map[int]bool{}
+	for _, sv := range saves {
+		for _, t := range sv {
+			savedSet[t] = true
+		}
+	}
+	var savedList []int
+	for t := range savedSet {
+		savedList = append(savedList, t)
+	}
+	groupRep := slotGroups(f, cfg, live, savedList, sizeOf)
+
+	// One slot per group, keyed by representative, appended to the spill area.
 	slotOf := map[int]int{}
 	slot := func(t int) int {
-		if s, ok := slotOf[t]; ok {
+		rep := t
+		if groupRep != nil {
+			rep = groupRep[t]
+		}
+		if s, ok := slotOf[rep]; ok {
 			return s
 		}
-		sz := 8
-		if f.Temps[t].Cls == ir.ClsQ {
-			sz = 16
-		}
+		sz := sizeOf(rep)
 		if alloc.spillBytes%sz != 0 {
 			alloc.spillBytes += sz - alloc.spillBytes%sz
 		}
-		slotOf[t] = alloc.spillBytes
+		slotOf[rep] = alloc.spillBytes
 		alloc.spillBytes += sz
-		return slotOf[t]
+		return slotOf[rep]
 	}
 
 	// Pass 2: wrap each call sequence -- saves before the first OArg of its contiguous

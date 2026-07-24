@@ -53,6 +53,13 @@ func (c *CFG) Liveness() *Liveness {
 			}
 			for k := len(b.Instrs) - 1; k >= 0; k-- {
 				in := &b.Instrs[k]
+				// A lifetime marker names an alloca address but does not use its value —
+				// it only bounds the slot's live range for mem2reg and the frame
+				// allocator. Counting it as a use would extend the address temp's live
+				// range, the opposite of the marker's purpose, so skip it entirely.
+				if in.Op.IsLifetime() {
+					continue
+				}
 				if in.To.IsTemp() {
 					live.Remove(int(in.To.ID)) // def kills
 				}

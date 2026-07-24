@@ -1,6 +1,9 @@
 package arm64
 
-import "github.com/evanphx/cg12/ir"
+import (
+	"github.com/evanphx/cg12/analysis"
+	"github.com/evanphx/cg12/ir"
+)
 
 // frameLayout is the stack-frame plan for one function: where everything the
 // function needs room for ends up, relative to the frame pointer. It is pure
@@ -68,12 +71,28 @@ func computeFrame(f *ir.Func, alloc *allocation) frameLayout {
 	lay.spillBase = off
 	off += alloc.spillBytes
 
-	// Reserve stack for each OAlloc, honouring its alignment.
+	// Reserve stack for each OAlloc, honouring its alignment. Allocations whose
+	// lifetimes are disjoint (per their lifetime.start/end markers) share one slot;
+	// allocaGroups maps each such alloc to its group's representative, and the group
+	// is laid out once, when its first member is reached.
+	groups := allocaGroups(f, analysis.BuildCFG(f))
+	groupOff := map[*ir.Instr]int{}
 	for _, b := range f.Blocks {
 		for k := range b.Instrs {
 			in := &b.Instrs[k]
 			if in.Op.IsAlloc() {
 				align, size := allocShape(f, in)
+				if rep, shared := groups[in]; shared {
+					if o, done := groupOff[rep]; done {
+						lay.allocOff[in] = o // reuse the group's slot
+						continue
+					}
+					off = roundUp(off, align)
+					groupOff[rep] = off
+					lay.allocOff[in] = off
+					off += size
+					continue
+				}
 				off = roundUp(off, align)
 				lay.allocOff[in] = off
 				off += size

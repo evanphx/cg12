@@ -149,6 +149,17 @@ type promotable struct {
 	name string // the alloc temp's name, so phis can inherit it (readability)
 }
 
+// sameSlotClass reports whether two access classes on one stack slot are compatible
+// for promotion. ClsP (the abstract pointer class) is the target's word register
+// class -- ClsL on the pointer-width backends -- so a slot touched as both ClsP and
+// ClsL is one word and promotable; ClsW stays distinct (it is genuinely narrower).
+func sameSlotClass(a, b ir.Cls) bool {
+	if a == b {
+		return true
+	}
+	return (a == ir.ClsL && b == ir.ClsP) || (a == ir.ClsP && b == ir.ClsL)
+}
+
 // findPromotable identifies alloc slots that can be promoted and returns them
 // with a map from the alloc's result-temp id to the variable index.
 func findPromotable(f *ir.Func) ([]promotable, map[uint32]int) {
@@ -169,10 +180,16 @@ func findPromotable(f *ir.Func) ([]promotable, map[uint32]int) {
 	}
 
 	note := func(id uint32, cls ir.Cls) {
-		if classSet[id] && class[id] != cls {
+		if classSet[id] && !sameSlotClass(class[id], cls) {
 			ok[id] = false // inconsistent access width/class
 		}
-		class[id] = cls
+		// Keep the pointer class when a slot is touched as both ClsP and ClsL, so the
+		// promoted value stays a pointer -- LowerPointers resolves its width and the GC
+		// still sees a managed reference. (A pointer local read as a plain long, common
+		// from pointer/integer-punning macros, would otherwise defeat promotion.)
+		if !classSet[id] || cls == ir.ClsP {
+			class[id] = cls
+		}
 		classSet[id] = true
 	}
 	escape := func(r ir.Ref) {
@@ -192,6 +209,9 @@ func findPromotable(f *ir.Func) ([]promotable, map[uint32]int) {
 			switch {
 			case in.Op.IsAlloc():
 				// its result is a candidate; its size operand is not a temp
+			case in.Op.IsLifetime():
+				// a lifetime marker names the alloca to bound its live range, not to
+				// leak its address — it must not count as an escape.
 			case in.Op.IsLoad():
 				cls, full := fullLoadClass(in)
 				if full && !in.Volatile && in.Args[0].Kind == ir.RefTemp && isAlloc[in.Args[0].ID] {
@@ -262,6 +282,13 @@ func renameBlock(
 		switch {
 		case in.Op.IsAlloc() && in.To.Kind == ir.RefTemp && isVarAlloc(in.To.ID, varOf):
 			// drop the allocation
+		case in.Op.IsLifetime() && in.Args[0].Kind == ir.RefTemp && isVarAlloc(in.Args[0].ID, varOf):
+			// A lifetime marker on a promoted local is dropped: its bounding effect
+			// was already consumed by variableLiveIn (which stops the variable being
+			// live-in past its scope), and the alloca it names no longer exists, so a
+			// surviving marker would reference a dropped temp. Markers on allocas that
+			// stayed in memory fall through to default and are kept for the frame
+			// allocator's slot coloring.
 		case in.Op.IsStore() && addrVar(&in, varOf) >= 0:
 			vi := addrVar(&in, varOf)
 			nameVal(in.Args[0], vi)
@@ -344,6 +371,17 @@ func variableLiveIn(f *ir.Func, cfg *analysis.CFG, varOf map[uint32]int) map[*ir
 				}
 			} else if vi := addrVar(in, varOf); vi >= 0 {
 				if !seen[vi] {
+					kl[vi], seen[vi] = true, true
+				}
+			} else if in.Op == ir.OLifeStart && in.Args[0].Kind == ir.RefTemp {
+				// lifetime.start marks the slot as fresh (indeterminate) above this
+				// point: nothing above reads its value, so as a first touch it kills any
+				// incoming liveness. That is what stops a handler-local from being live-in
+				// at every mesh block and chained into one whole-function range. (Only the
+				// start bounds the top of the range; lifetime.end is used by the frame
+				// allocator, not here -- treating end as a kill can wrongly prune a phi a
+				// still-live value needs.)
+				if vi, ok := varOf[in.Args[0].ID]; ok && !seen[vi] {
 					kl[vi], seen[vi] = true, true
 				}
 			}

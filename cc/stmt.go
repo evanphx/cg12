@@ -2,6 +2,7 @@ package cc
 
 import (
 	"fmt"
+	"reflect"
 	"sort"
 
 	moderncc "github.com/evanphx/cg12/internal/cc"
@@ -14,6 +15,14 @@ func (g *gen) genCompound(cs *moderncc.CompoundStatement) {
 	}
 	g.push()
 	defer g.pop()
+	// Open a lifetime scope for this block: its fixed-size locals' lifetime.start /
+	// lifetime.end markers bracket exactly this block, letting the frame allocator
+	// share a slot between blocks whose lifetimes are disjoint and letting mem2reg
+	// bound a promoted local to its scope rather than the whole computed-goto mesh.
+	if g.lifeOn {
+		g.lifeScope = append(g.lifeScope, nil)
+		g.lifeLabel = append(g.lifeLabel, g.compoundHasLabel(cs))
+	}
 	// A block that declares a VLA saves the stack pointer on entry and restores it
 	// on exit, so the array is reclaimed when the scope ends (crucial for a VLA in
 	// a loop, which would otherwise grow the stack each iteration).
@@ -37,6 +46,111 @@ func (g *gen) genCompound(cs *moderncc.CompoundStatement) {
 			g.cur.StackRestore(g.vlaScope[len(g.vlaScope)-1])
 		}
 		g.vlaScope = g.vlaScope[:len(g.vlaScope)-1]
+	}
+	// Fall-through exit: end this block's locals before the scope closes. A block
+	// that leaves by a jump (break/continue/return/goto) is already terminated and
+	// ended its locals at the jump, so this is skipped for it.
+	if g.lifeOn {
+		if !g.terminated() {
+			g.lifeEndScope(len(g.lifeScope) - 1)
+		}
+		g.lifeScope = g.lifeScope[:len(g.lifeScope)-1]
+		g.lifeLabel = g.lifeLabel[:len(g.lifeLabel)-1]
+	}
+}
+
+// compoundHasLabel reports whether a compound statement's subtree contains a goto
+// label (a computed goto may branch to it, so a scope that contains one must not be
+// lifetime-ended when a goto leaves an inner scope).
+// collectAddrLabels records every label whose address is taken (`&&label`) anywhere
+// in the function body. Those are the only labels a computed goto (`goto *p`) can
+// reach, so only they may keep a scope alive across such a goto -- an internal label
+// reached solely by ordinary goto does not. It runs before body generation, so the
+// set is complete when scope decisions are made. The AST is walked by reflection over
+// exported fields only, which reaches every subexpression while skipping the
+// unexported metadata and parent back-pointers that would otherwise cycle.
+func (g *gen) collectAddrLabels(root *moderncc.CompoundStatement) {
+	var walk func(v reflect.Value)
+	walk = func(v reflect.Value) {
+		switch v.Kind() {
+		case reflect.Interface:
+			if !v.IsNil() {
+				walk(v.Elem())
+			}
+		case reflect.Ptr:
+			if v.IsNil() {
+				return
+			}
+			if ue, ok := v.Interface().(*moderncc.UnaryExpression); ok && ue.Case == moderncc.UnaryExpressionLabelAddr {
+				g.addrLabels[ue.Token2.SrcStr()] = true
+			}
+			walk(v.Elem())
+		case reflect.Struct:
+			t := v.Type()
+			for i := 0; i < v.NumField(); i++ {
+				if t.Field(i).PkgPath != "" {
+					continue // unexported: metadata/back-pointers -- skip to avoid cycles
+				}
+				walk(v.Field(i))
+			}
+		case reflect.Slice, reflect.Array:
+			for i := 0; i < v.Len(); i++ {
+				walk(v.Index(i))
+			}
+		}
+	}
+	walk(reflect.ValueOf(root))
+}
+
+// compoundHasLabel reports whether a compound statement's subtree contains a label
+// that a computed goto could target (an address-taken label). Such a scope must not
+// be lifetime-ended when a `goto *p` leaves an inner scope, since the goto might land
+// on that label. Labels reached only by ordinary goto do not count -- an inner scope
+// holding only those is still fully exited by a computed goto.
+func (g *gen) compoundHasLabel(cs *moderncc.CompoundStatement) bool {
+	if !g.hasComputedGoto {
+		return false // lifeLabel is only consulted at a computed goto
+	}
+	for l := cs.BlockItemList; l != nil; l = l.BlockItemList {
+		if g.stmtHasAddrLabel(l.BlockItem) {
+			return true
+		}
+	}
+	return false
+}
+
+func (g *gen) stmtHasAddrLabel(bi *moderncc.BlockItem) bool {
+	if bi.Case != moderncc.BlockItemStmt {
+		return false
+	}
+	return g.walkAddrLabel(bi.Statement)
+}
+
+func (g *gen) walkAddrLabel(s *moderncc.Statement) bool {
+	if s == nil {
+		return false
+	}
+	switch s.Case {
+	case moderncc.StatementLabeled:
+		ls := s.LabeledStatement
+		if ls.Case == moderncc.LabeledStatementLabel && g.addrLabels[ls.Token.SrcStr()] {
+			return true
+		}
+		return g.walkAddrLabel(ls.Statement)
+	case moderncc.StatementCompound:
+		return g.compoundHasLabel(s.CompoundStatement)
+	case moderncc.StatementSelection:
+		return g.walkAddrLabel(s.SelectionStatement.Statement) || g.walkAddrLabel(s.SelectionStatement.Statement2)
+	case moderncc.StatementIteration:
+		return g.walkAddrLabel(s.IterationStatement.Statement)
+	}
+	return false
+}
+
+// lifeEndScope emits a lifetime.end for every alloca declared in lifeScope[i].
+func (g *gen) lifeEndScope(i int) {
+	for _, addr := range g.lifeScope[i] {
+		g.cur.LifeEnd(addr)
 	}
 }
 
@@ -213,6 +327,7 @@ func (g *gen) genLocalDecl(d *moderncc.Declaration) {
 		addr := g.allocAligned(t, int(t.Size()))
 		g.setName(addr, dcl.Name()+".addr")
 		g.define(dcl.Name(), lval{addr: addr, typ: t})
+		g.beginLife(addr)
 		if !g.terminated() {
 			g.genInit(addr, t, d.Initializer)
 		}
@@ -257,10 +372,24 @@ func (g *gen) genLocalDecl(d *moderncc.Declaration) {
 		addr := g.allocAligned(t, size)
 		g.setName(addr, dcl.Name()+".addr")
 		g.define(dcl.Name(), lval{addr: addr, typ: t})
+		g.beginLife(addr)
 		if id.Case == moderncc.InitDeclaratorInit && !g.terminated() {
 			g.genInit(addr, t, id.Initializer)
 		}
 	}
+}
+
+// beginLife opens the lifetime of a fixed-size local's stack slot: it emits a
+// lifetime.start and records the slot in the innermost block scope so the matching
+// lifetime.end is emitted when that scope is left. It is a no-op in a terminated
+// (unreachable) block, where a marker would land after the block's jump.
+func (g *gen) beginLife(addr ir.Ref) {
+	if !g.lifeOn || len(g.lifeScope) == 0 || g.terminated() {
+		return
+	}
+	g.cur.LifeStart(addr)
+	top := len(g.lifeScope) - 1
+	g.lifeScope[top] = append(g.lifeScope[top], addr)
 }
 
 // vlaAlloc allocates a variable-length array on the stack. Its size is the
@@ -509,9 +638,11 @@ func (g *gen) genSwitch(ss *moderncc.SelectionStatement) {
 	g.cur = g.block("swbody")
 	g.brk = append(g.brk, endB)
 	g.brkVla = append(g.brkVla, len(g.vlaScope))
+	g.brkLife = append(g.brkLife, len(g.lifeScope))
 	g.genStmt(ss.Statement)
 	g.brk = g.brk[:len(g.brk)-1]
 	g.brkVla = g.brkVla[:len(g.brkVla)-1]
+	g.brkLife = g.brkLife[:len(g.brkLife)-1]
 	if !g.terminated() {
 		g.cur.Goto(endB)
 	}
@@ -647,6 +778,10 @@ func (g *gen) labelsIn(s *moderncc.Statement) {
 		g.labelsIn(s.SelectionStatement.Statement2)
 	case moderncc.StatementIteration:
 		g.labelsIn(s.IterationStatement.Statement)
+	case moderncc.StatementJump:
+		if s.JumpStatement != nil && s.JumpStatement.Case == moderncc.JumpStatementGotoExpr {
+			g.hasComputedGoto = true // a `goto *p`: lifetime scope-ending must respect address-taken labels
+		}
 	}
 }
 
@@ -725,13 +860,17 @@ func (g *gen) loopBody(body *moderncc.Statement, bodyB, contB, endB, next *ir.Bl
 	g.cur = bodyB
 	g.brk = append(g.brk, endB)
 	g.brkVla = append(g.brkVla, len(g.vlaScope))
+	g.brkLife = append(g.brkLife, len(g.lifeScope))
 	g.cont = append(g.cont, contB)
 	g.contVla = append(g.contVla, len(g.vlaScope))
+	g.contLife = append(g.contLife, len(g.lifeScope))
 	g.genStmt(body)
 	g.brk = g.brk[:len(g.brk)-1]
 	g.brkVla = g.brkVla[:len(g.brkVla)-1]
+	g.brkLife = g.brkLife[:len(g.brkLife)-1]
 	g.cont = g.cont[:len(g.cont)-1]
 	g.contVla = g.contVla[:len(g.contVla)-1]
+	g.contLife = g.contLife[:len(g.contLife)-1]
 	if !g.terminated() {
 		g.cur.Goto(next)
 	}
@@ -748,12 +887,14 @@ func (g *gen) genJump(js *moderncc.JumpStatement) {
 		g.cur.Ret(v)
 	case moderncc.JumpStatementBreak:
 		if len(g.brk) > 0 {
-			g.vlaUnwind(g.brkVla[len(g.brkVla)-1]) // reclaim VLAs left by the break
+			g.lifeUnwind(g.brkLife[len(g.brkLife)-1]) // end locals of scopes the break leaves
+			g.vlaUnwind(g.brkVla[len(g.brkVla)-1])    // reclaim VLAs left by the break
 			g.cur.Goto(g.brk[len(g.brk)-1])
 		}
 	case moderncc.JumpStatementContinue:
 		if len(g.cont) > 0 {
-			g.vlaUnwind(g.contVla[len(g.contVla)-1]) // reclaim VLAs left by the continue
+			g.lifeUnwind(g.contLife[len(g.contLife)-1]) // end locals of scopes the continue leaves
+			g.vlaUnwind(g.contVla[len(g.contVla)-1])    // reclaim VLAs left by the continue
 			g.cur.Goto(g.cont[len(g.cont)-1])
 		}
 	case moderncc.JumpStatementGoto:
@@ -768,7 +909,37 @@ func (g *gen) genJump(js *moderncc.JumpStatement) {
 		}
 		g.cur.Goto(b)
 	case moderncc.JumpStatementGotoExpr: // computed goto: goto *expr
-		g.cur.BrIndirect(g.genExpr(js.ExpressionList), g.labelBlocks()...)
+		// Evaluate the target first, then end the locals of the scopes this goto
+		// leaves: a computed goto may only branch to a label, so any innermost scope
+		// whose subtree holds no label is fully exited and its locals are dead. Stop
+		// at the first label-bearing scope (a target could resume inside it).
+		target := g.genExpr(js.ExpressionList)
+		g.lifeEndComputedGoto()
+		g.cur.BrIndirect(target, g.labelBlocks()...)
+	}
+}
+
+// lifeUnwind ends the locals of every block scope from the innermost down to (but
+// not including) depth, in innermost-first order. It mirrors vlaUnwind and is used
+// when a break/continue jumps out of one or more scopes.
+func (g *gen) lifeUnwind(depth int) {
+	if !g.lifeOn {
+		return
+	}
+	for i := len(g.lifeScope) - 1; i >= depth; i-- {
+		g.lifeEndScope(i)
+	}
+}
+
+// lifeEndComputedGoto ends the locals of the innermost scopes a computed goto
+// leaves: the contiguous innermost scopes whose subtree contains no label. It stops
+// at the first label-bearing scope, which the goto might re-enter.
+func (g *gen) lifeEndComputedGoto() {
+	if !g.lifeOn {
+		return
+	}
+	for i := len(g.lifeScope) - 1; i >= 0 && !g.lifeLabel[i]; i-- {
+		g.lifeEndScope(i)
 	}
 }
 

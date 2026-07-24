@@ -39,8 +39,68 @@ func colorAlloc(f *ir.Func, cfg *analysis.CFG, live *analysis.Liveness, freq *an
 	alloc, err := g.assign()
 	if alloc != nil {
 		alloc.remat = g.remat
+		coalesceSpillSlots(f, cfg, live, alloc)
 	}
 	return alloc, err
+}
+
+// coalesceSpillSlots re-lays the spill area so ordinary spilled temps with disjoint
+// live ranges share a slot, shrinking the frame (assign gives each its own slot). GC
+// references keep private slots: their whole-life stack home is part of the safepoint
+// stack map, and keeping them separate keeps that mapping trivially sound.
+func coalesceSpillSlots(f *ir.Func, cfg *analysis.CFG, live *analysis.Liveness, alloc *allocation) {
+	var gc, ord []int
+	for t := range f.Temps {
+		tt := f.Temps[t]
+		if tt == nil || tt.Reg != ir.NoReg || tt.Slot < 0 {
+			continue // in a register, or rematerialised (Slot == -1)
+		}
+		if _, remat := alloc.remat[t]; remat {
+			continue
+		}
+		if tt.GCRef {
+			gc = append(gc, t)
+		} else {
+			ord = append(ord, t)
+		}
+	}
+	sizeOf := func(t int) int {
+		if f.Temps[t].Cls == ir.ClsQ {
+			return 16
+		}
+		return 8
+	}
+	rep := slotGroups(f, cfg, live, ord, sizeOf)
+
+	alloc.spillBytes = 0
+	slotOf := map[int]int{}
+	place := func(t int) {
+		key := t
+		if rep != nil {
+			if r, ok := rep[t]; ok {
+				key = r
+			}
+		}
+		if s, ok := slotOf[key]; ok {
+			f.Temps[t].Slot = s
+			return
+		}
+		sz := sizeOf(key)
+		if alloc.spillBytes%sz != 0 {
+			alloc.spillBytes += sz - alloc.spillBytes%sz
+		}
+		slotOf[key] = alloc.spillBytes
+		f.Temps[t].Slot = alloc.spillBytes
+		alloc.spillBytes += sz
+	}
+	sort.Ints(gc)
+	sort.Ints(ord)
+	for _, t := range gc {
+		place(t) // each GC ref its own slot (key == t)
+	}
+	for _, t := range ord {
+		place(t) // ordinary spills coalesced via rep
+	}
 }
 
 type colorGraph struct {
@@ -546,8 +606,14 @@ func instrDefs(in *ir.Instr) []int {
 	return d
 }
 
-// instrUses returns the temporaries an instruction reads.
+// instrUses returns the temporaries an instruction reads. A lifetime marker names
+// an alloca to bound its slot's live region, not to read the address value, so it
+// reads nothing — counting its operand would spuriously extend the alloca's live
+// range in the allocator's interference and caller-save analyses.
 func instrUses(in *ir.Instr) []int {
+	if in.Op.IsLifetime() {
+		return nil
+	}
 	var u []int
 	for _, a := range in.Args {
 		if a.Kind == ir.RefTemp {

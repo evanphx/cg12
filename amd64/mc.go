@@ -1259,6 +1259,9 @@ func (m *mc) instr(in *ir.Instr) {
 			m.gc.EmitSafepoint(&GCContext{mc: m, roots: m.gcRoots(in)})
 		}
 		m.recordSafepoint(in)
+	case ir.OLifeStart, ir.OLifeEnd:
+		// Alloca lifetime markers carry no code; they only bound live ranges and
+		// stack-slot lifetimes for earlier passes.
 	default:
 		m.fail(fmt.Errorf("amd64: unsupported op %s", in.Op))
 	}

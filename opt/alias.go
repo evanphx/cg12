@@ -122,6 +122,9 @@ func (ai *aliasInfo) computeEscape() {
 				mark(in.Arg(0)) // storing the pointer value escapes it
 			case in.Op.IsAlloc():
 				// its own result is the allocation
+			case in.Op.IsLifetime():
+				// a lifetime marker names the allocation to bound its live region, not
+				// to leak its address, so it does not escape its operand
 			case (in.Op == ir.OAdd || in.Op == ir.OSub) && ai.tracked(in.To):
 				// constant-offset derivation: operands stay local
 			case in.Op == ir.OIntrinsic:

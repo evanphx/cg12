@@ -210,6 +210,13 @@ func verifyInstr(f *Func, b *Block, in *Instr) error {
 		if LookupIntrinsic(in.Intrin.Name) == nil {
 			return where("unknown intrinsic %q (not registered)", in.Intrin.Name)
 		}
+	case OLifeStart, OLifeEnd:
+		if len(in.Args) != 1 {
+			return where("a lifetime marker brackets exactly one alloca address, has %d operands", len(in.Args))
+		}
+		if in.To.Kind != RefNone {
+			return where("a lifetime marker defines nothing")
+		}
 	}
 	for _, a := range in.Args {
 		if err := verifyRef(f, b, in.Op.String(), a); err != nil {

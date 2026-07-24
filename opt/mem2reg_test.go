@@ -67,6 +67,63 @@ func TestMem2RegReadBeforeWriteIsZero(t *testing.T) {
 	assert.Equal(t, int64(0), v)
 }
 
+func TestMem2RegPromotesThroughLifetimeMarkersAndStripsThem(t *testing.T) {
+	// A promotable variable bracketed by lifetime.start/end is still promoted (the
+	// markers must not count as an escape), and both markers are removed afterward so
+	// downstream passes and the backend never see them.
+	f := ir.NewModule().NewFunc("m", ir.ClsW)
+	x := f.Param("x", ir.ClsW)
+	e := f.Entry()
+	p := e.Alloc(4, 4)
+	e.LifeStart(p)
+	e.Store(x, p)
+	r := e.Load(ir.ClsW, p)
+	e.LifeEnd(p)
+	e.Ret(r)
+
+	assert.True(t, Mem2Reg(f))
+	assert.Empty(t, e.Instrs, "alloc, store, load, and both lifetime markers all removed")
+	assert.Equal(t, x, e.Jmp.Arg, "load result replaced by the stored value")
+}
+
+func TestMem2RegKeepsLifetimeMarkersOnNonPromotedAlloca(t *testing.T) {
+	// Markers on an alloca that is NOT promoted (its address escapes by being
+	// returned) survive mem2reg: they carry the slot's live region to the backend's
+	// frame stack-slot coloring. (Dead allocas' markers are cleaned up later by
+	// DeadAlloc; this slot is live -- its address is returned.)
+	f := ir.NewModule().NewFunc("m", ir.ClsL)
+	e := f.Entry()
+	p := e.Alloc(8, 8)
+	e.LifeStart(p)
+	e.LifeEnd(p)
+	e.Ret(p) // returning the address escapes it: not promotable
+
+	Mem2Reg(f)
+	nLife := 0
+	for i := range e.Instrs {
+		if e.Instrs[i].Op.IsLifetime() {
+			nLife++
+		}
+	}
+	assert.Equal(t, 2, nLife, "both lifetime markers survive on a non-promoted alloca")
+}
+
+func TestMem2RegPromotesPointerSlotAccessedAsLong(t *testing.T) {
+	// A pointer local written as ClsP and read as a plain ClsL (common from
+	// pointer/integer-punning macros) is still one word and must promote: ClsP is the
+	// target's word register class, so the two accesses are the same width.
+	f := ir.NewModule().NewFunc("m", ir.ClsL)
+	p := f.Param("p", ir.ClsP)
+	e := f.Entry()
+	a := e.Alloc(8, 8)
+	e.Store(p, a)           // storep %p, %a
+	r := e.Load(ir.ClsL, a) // loadl %a
+	e.Ret(r)
+
+	assert.True(t, Mem2Reg(f), "pointer slot touched as ClsP and ClsL promotes")
+	assert.Empty(t, e.Instrs, "alloc/store/load removed")
+}
+
 func TestMem2RegDoesNotPromoteEscaped(t *testing.T) {
 	// Passing the slot address to a call makes it escape.
 	f := ir.NewModule().NewFuncVoid("m")

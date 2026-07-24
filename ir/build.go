@@ -368,6 +368,15 @@ func (b *Block) AllocN(size Ref) Ref {
 	return b.emit(OAllocN, ClsP, size)
 }
 
+// LifeStart / LifeEnd bracket the live region of the stack slot at address addr (an
+// OAlloc result), modelling LLVM's lifetime intrinsics. They read addr, define
+// nothing, and emit no machine code.
+func (b *Block) LifeStart(addr Ref) { b.lifetime(OLifeStart, addr) }
+func (b *Block) LifeEnd(addr Ref)   { b.lifetime(OLifeEnd, addr) }
+func (b *Block) lifetime(op Op, addr Ref) {
+	b.Instrs = append(b.Instrs, Instr{Op: op, Args: []Ref{addr}, Pos: b.curPos})
+}
+
 // Intrinsic invokes the named intrinsic with the given operands and returns its
 // result (class cls). For an intrinsic that yields no value use IntrinsicVoid.
 func (b *Block) Intrinsic(name string, cls Cls, args ...Ref) Ref {

@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"math"
 	"math/big"
+	"os"
 	"sort"
 	"strings"
 
@@ -21,30 +22,42 @@ type gen struct {
 	// decides what the standard leaves to the implementation and what the ABI
 	// fixes -- the width of a long double, the shape of a va_list -- so a
 	// question with two answers must ask it rather than assume AArch64's.
-	target   Target
-	mod      *ir.Module
-	fn       *ir.Func
-	curRet   moderncc.Type
-	cur      *ir.Block
-	scopes   []map[string]lval
-	strs     map[string]string                        // decoded string literal -> data symbol name
-	ldconsts map[string]string                        // quad constant bytes -> data symbol name
-	quad     *ir.AggType                              // the canonical long-double (quad) aggregate type
-	ti128    *ir.AggType                              // the canonical __int128 {lo,hi} aggregate type
-	cplx     map[ir.SubCls]*ir.AggType                // memoized _Complex {re,im} aggregate types
-	aggs     map[moderncc.Type]*ir.AggType            // memoized C struct/union -> cg12 aggregate type
-	globals  map[string]*ir.Data                      // file-scope object -> its data, to merge tentative and full definitions
-	names    map[string]int                           // per-function temp-name uniquifier
-	labels   map[string]*ir.Block                     // goto label -> block (per function)
-	caseBlk  map[*moderncc.LabeledStatement]*ir.Block // switch case/default -> block
-	nblk     int                                      // block-name counter
-	nstatic  int                                      // static-local mangling counter
-	brk      []*ir.Block                              // break targets
-	brkVla   []int                                    // vlaScope depth at each break target
-	cont     []*ir.Block                              // continue targets
-	contVla  []int                                    // vlaScope depth at each continue target
-	vlaScope []ir.Ref                                 // saved stack pointers of active VLA scopes
-	err      error
+	target          Target
+	mod             *ir.Module
+	fn              *ir.Func
+	curRet          moderncc.Type
+	cur             *ir.Block
+	scopes          []map[string]lval
+	strs            map[string]string                        // decoded string literal -> data symbol name
+	ldconsts        map[string]string                        // quad constant bytes -> data symbol name
+	quad            *ir.AggType                              // the canonical long-double (quad) aggregate type
+	ti128           *ir.AggType                              // the canonical __int128 {lo,hi} aggregate type
+	cplx            map[ir.SubCls]*ir.AggType                // memoized _Complex {re,im} aggregate types
+	aggs            map[moderncc.Type]*ir.AggType            // memoized C struct/union -> cg12 aggregate type
+	globals         map[string]*ir.Data                      // file-scope object -> its data, to merge tentative and full definitions
+	names           map[string]int                           // per-function temp-name uniquifier
+	labels          map[string]*ir.Block                     // goto label -> block (per function)
+	addrLabels      map[string]bool                          // labels whose address is taken via &&label (computed-goto targets)
+	hasComputedGoto bool                                     // the function contains a `goto *p`
+	caseBlk         map[*moderncc.LabeledStatement]*ir.Block // switch case/default -> block
+	nblk            int                                      // block-name counter
+	nstatic         int                                      // static-local mangling counter
+	brk             []*ir.Block                              // break targets
+	brkVla          []int                                    // vlaScope depth at each break target
+	cont            []*ir.Block                              // continue targets
+	contVla         []int                                    // vlaScope depth at each continue target
+	vlaScope        []ir.Ref                                 // saved stack pointers of active VLA scopes
+	// Alloca lifetime tracking (emit lifetime.start/.end markers when lifeOn), one
+	// entry per active block scope. lifeScope holds the fixed-size allocas declared
+	// in each scope; lifeLabel records whether a scope's subtree contains a goto
+	// label (so a computed goto knows which scopes it may end); brkLife/contLife hold
+	// the lifeScope depth at each break/continue target.
+	lifeOn    bool
+	lifeScope [][]ir.Ref
+	lifeLabel []bool
+	brkLife   []int
+	contLife  []int
+	err       error
 }
 
 // lval is a named lvalue: its storage and its C type. A local or parameter is
@@ -243,6 +256,7 @@ func CompileWith(name, src string, opts Options) (*ir.Module, error) {
 // and data from headers that they reference.
 func genModule(target Target, ast *moderncc.AST, name string) (*ir.Module, error) {
 	g := &gen{target: target, mod: ir.NewModule(), strs: map[string]string{}, ldconsts: map[string]string{}, cplx: map[ir.SubCls]*ir.AggType{}, aggs: map[moderncc.Type]*ir.AggType{}, globals: map[string]*ir.Data{}}
+	g.lifeOn = os.Getenv("CG12_LIFETIMES") != ""
 	g.push() // file scope: holds globals, visible to every function
 
 	// Internal-linkage functions (static, and static inline) defined in headers
@@ -616,7 +630,14 @@ func (g *gen) genFunc(fd *moderncc.FunctionDefinition) {
 	g.names = map[string]int{}
 	g.labels = map[string]*ir.Block{}
 	g.caseBlk = map[*moderncc.LabeledStatement]*ir.Block{}
-	g.collectLabels(fd.CompoundStatement)
+	g.addrLabels = map[string]bool{}
+	g.hasComputedGoto = false
+	g.collectLabels(fd.CompoundStatement) // also sets hasComputedGoto
+	if g.hasComputedGoto {
+		// Only a function with a computed goto needs the address-taken-label set (for
+		// lifetime scope-ending); skip the reflection walk for everything else.
+		g.collectAddrLabels(fd.CompoundStatement)
+	}
 	g.push()
 	defer g.pop()
 
