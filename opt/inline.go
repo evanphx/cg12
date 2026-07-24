@@ -25,12 +25,15 @@ const inlineFuncBudget = 64
 // its pre-inlining size plus a fixed allowance -- a backstop against a pathological
 // cascade of single-site inlines (each individually "free" at the unit level) turning
 // one function into the whole program.
+//
+// A proportional allowance was tried, to fold the interpreter's tiny leaf helpers
+// (vm_base_ptr, rb_simple_iseq_p, ...) into vm_exec_core. It measurably REGRESSED
+// call-heavy code (~2%): the extra bodies raise register pressure in the irreducible
+// computed-goto mesh faster than they save call overhead, so the allocator spills
+// more. Inlining into that mesh is gated on a register allocator that can absorb it,
+// which cg12 does not yet have; until then, keep the conservative flat allowance.
 func inlineGrowthCap(initial int) int {
-	cap := initial + 128 // allow only a small absolute growth (conservative until frequency-aware)
-	if cap < initial+128 {
-		cap = initial + 128 // but always enough headroom for a small function
-	}
-	return cap
+	return initial + 128 // small absolute growth; conservative until frequency-aware
 }
 
 // Inline replaces direct calls to small, non-recursive module functions with a
