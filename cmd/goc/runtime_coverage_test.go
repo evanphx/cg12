@@ -49,6 +49,12 @@ var runtimeProcs = flag.Int(
 	"set GOMAXPROCS for each runtime capability program",
 )
 
+var runtimeStatusProgress = flag.Bool(
+	"runtime-status-progress",
+	false,
+	"write runtime capability progress to stderr as each program starts and finishes",
+)
+
 var runtimeCoverageCollector = newRuntimeCorpusCoverage()
 
 type runtimeCapabilityCoverageResult struct {

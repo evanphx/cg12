@@ -68,3 +68,15 @@ func TestDefaultPipelineShape(t *testing.T) {
 	opt.Run(m, opt.DefaultPipeline()) // must not panic on a trivial module
 	assert.True(t, hasFunc(m, "id"))
 }
+
+func TestBoundedPipelineShape(t *testing.T) {
+	m := ir.NewModule()
+	f := m.NewFunc("main", ir.ClsW)
+	entry := f.Entry()
+	value := entry.Copy(ir.ClsW, f.Word(1))
+	entry.Ret(value)
+
+	assert.NotEmpty(t, opt.BoundedPipeline())
+	opt.Run(m, opt.BoundedPipeline())
+	assert.Equal(t, f.Word(1), entry.Jmp.Arg)
+}

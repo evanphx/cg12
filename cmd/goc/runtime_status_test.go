@@ -2015,7 +2015,30 @@ func TestARM64RuntimeCapabilityStatus(t *testing.T) {
 			if capability.requiresAFINET && !afinetSocketAvailable {
 				t.Skipf("AF_INET sockets unavailable in this execution environment: %v", afinetSocketErr)
 			}
+			if *runtimeStatusProgress {
+				fmt.Fprintf(os.Stderr, "runtime-status: start %s/%s %s\n", capability.category, capability.name, capability.source)
+			}
 			result := runRuntimeCapabilityProgram(t, compiler, directory, capability)
+			if *runtimeStatusProgress {
+				status := "pass"
+				if result.err != nil {
+					status = "fail"
+				}
+				fmt.Fprintf(
+					os.Stderr,
+					"runtime-status: %s %s/%s compile=%s %s peak=%.1fMiB run=%s %s peak=%.1fMiB coverage=%s\n",
+					status,
+					capability.category,
+					capability.name,
+					result.compileOutcome,
+					result.compileDuration.Round(time.Millisecond),
+					float64(result.compilePeakRSS)/(1024*1024),
+					result.runOutcome,
+					result.runDuration.Round(time.Millisecond),
+					float64(result.runPeakRSS)/(1024*1024),
+					result.coverageOutcome,
+				)
+			}
 			runtimeCoverageCollector.add(capability, result)
 			if capability.expectation == runtimeCapabilityMustPass && result.err != nil {
 				t.Fatalf("%s should pass: %v\n%s", capability.source, result.err, result.output)

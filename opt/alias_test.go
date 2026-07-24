@@ -54,40 +54,44 @@ func TestLocOfStripsConstOffset(t *testing.T) {
 	assert.Equal(t, int64(8), loc.offset)
 	assert.Equal(t, cLocal, loc.class)
 	base := ai.locOf(a, 4)
-	assert.Equal(t, base.key, loc.key, "derived pointer shares the alloc base")
+	assert.Equal(t, base.key(), loc.key(), "derived pointer shares the alloc base")
 }
 
 func TestMustAlias(t *testing.T) {
-	l := func(key string, off int64, w int) locInfo {
-		return locInfo{key: key, class: cLocal, offset: off, offKnown: true, width: w}
+	l := func(id uint64, off int64, w int) locInfo {
+		return locInfo{keyKind: keyLocal, keyID: id, class: cLocal, offset: off, offKnown: true, width: w}
 	}
-	assert.True(t, mustAlias(l("a:1", 0, 4), l("a:1", 0, 4)))
-	assert.False(t, mustAlias(l("a:1", 0, 4), l("a:1", 4, 4)), "different offset")
-	assert.False(t, mustAlias(l("a:1", 0, 8), l("a:1", 0, 4)), "different width")
-	assert.False(t, mustAlias(l("a:1", 0, 4), l("a:2", 0, 4)), "different base")
+	assert.True(t, mustAlias(l(1, 0, 4), l(1, 0, 4)))
+	assert.False(t, mustAlias(l(1, 0, 4), l(1, 4, 4)), "different offset")
+	assert.False(t, mustAlias(l(1, 0, 8), l(1, 0, 4)), "different width")
+	assert.False(t, mustAlias(l(1, 0, 4), l(2, 0, 4)), "different base")
 
-	unknown := locInfo{key: "?", class: cUnknown, offKnown: false, width: 4}
+	unknown := locInfo{keyKind: keyInvalid, class: cUnknown, offKnown: false, width: 4}
 	assert.False(t, mustAlias(unknown, unknown), "unresolved base never must-aliases")
 }
 
 func TestMayAliasAndDistinct(t *testing.T) {
-	mk := func(key string, class int, off int64, w int) locInfo {
-		return locInfo{key: key, class: class, offset: off, offKnown: true, width: w}
+	mk := func(kind int, id uint64, symbol string, class int, off int64, w int) locInfo {
+		return locInfo{keyKind: kind, keyID: id, keySym: symbol, class: class, offset: off, offKnown: true, width: w}
 	}
-	localA := mk("a:1", cLocal, 0, 4)
-	localA2 := mk("a:1", cLocal, 4, 4)
-	localB := mk("a:2", cLocal, 0, 4)
-	escA := mk("e:1", cEscaped, 0, 8)
-	escB := mk("e:2", cEscaped, 0, 8)
-	glob1 := mk("g:x", cGlobal, 0, 8)
-	glob2 := mk("g:y", cGlobal, 0, 8)
-	unkP := mk("t:5", cUnknown, 0, 8)
-	unkQ := mk("t:6", cUnknown, 0, 8)
+	localA := mk(keyLocal, 1, "", cLocal, 0, 4)
+	localA2 := mk(keyLocal, 1, "", cLocal, 4, 4)
+	localB := mk(keyLocal, 2, "", cLocal, 0, 4)
+	escA := mk(keyEscaped, 1, "", cEscaped, 0, 8)
+	escB := mk(keyEscaped, 2, "", cEscaped, 0, 8)
+	glob1 := mk(keyGlobal, 0, "x", cGlobal, 0, 8)
+	glob2 := mk(keyGlobal, 0, "y", cGlobal, 0, 8)
+	unkP := mk(keyTemp, 5, "", cUnknown, 0, 8)
+	unkQ := mk(keyTemp, 6, "", cUnknown, 0, 8)
 
 	// Same base: decided by offset overlap.
-	assert.True(t, mayAlias(localA, mk("a:1", cLocal, 0, 4)))
+	assert.True(t, mayAlias(localA, mk(keyLocal, 1, "", cLocal, 0, 4)))
 	assert.False(t, mayAlias(localA, localA2), "disjoint offsets in same base")
-	assert.True(t, mayAlias(mk("a:1", cLocal, 0, 8), mk("a:1", cLocal, 4, 8)), "overlapping offsets")
+	assert.True(
+		t,
+		mayAlias(mk(keyLocal, 1, "", cLocal, 0, 8), mk(keyLocal, 1, "", cLocal, 4, 8)),
+		"overlapping offsets",
+	)
 
 	// Distinct regions never alias.
 	assert.False(t, mayAlias(localA, localB), "two distinct non-escaped allocs")
@@ -123,7 +127,7 @@ func TestLocOfVariants(t *testing.T) {
 	li := ai.locOf(f.Long(4096), 4)
 	assert.Equal(t, cUnknown, li.class)
 	ln := ai.locOf(ir.R, 4)
-	assert.Equal(t, "?", ln.key)
+	assert.Equal(t, keyInvalid, ln.keyKind)
 }
 
 func TestLocOfNonConstOffsetEscapes(t *testing.T) {
@@ -149,8 +153,8 @@ func TestTrackedAndMayAliasUnknownOffset(t *testing.T) {
 	assert.False(t, ai.tracked(f.Word(1)), "a constant is not an alloc-derived pointer")
 
 	// Same base with an unknown offset must be treated as a possible alias.
-	a := locInfo{key: "a:1", class: cLocal, offKnown: false, width: 4}
-	b := locInfo{key: "a:1", class: cLocal, offset: 100, offKnown: true, width: 4}
+	a := locInfo{keyKind: keyLocal, keyID: 1, class: cLocal, offKnown: false, width: 4}
+	b := locInfo{keyKind: keyLocal, keyID: 1, class: cLocal, offset: 100, offKnown: true, width: 4}
 	assert.True(t, mayAlias(a, b))
 }
 
@@ -162,5 +166,5 @@ func TestLocOfGlobalOffset(t *testing.T) {
 	loc := ai.locOf(f.Sym("g", 16), 8)
 	assert.Equal(t, cGlobal, loc.class)
 	assert.Equal(t, int64(16), loc.offset)
-	require.Equal(t, "g:g", loc.key)
+	require.Equal(t, locKey{kind: keyGlobal, sym: "g"}, loc.key())
 }

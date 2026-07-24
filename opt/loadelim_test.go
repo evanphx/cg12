@@ -211,6 +211,33 @@ func TestLoadElimStoreBackAfterCallKept(t *testing.T) {
 	assert.Equal(t, 1, countOp(f, ir.OStorel), "a call clears availability, so the store stays")
 }
 
+func TestLoadElimSkipsOverBudgetFunction(t *testing.T) {
+	f := ir.NewModule().NewFunc("m", ir.ClsW)
+	p := f.Param("p", ir.ClsL)
+	entry := f.Entry()
+	for i := 0; i <= cfgOptimizationInstructionBudget; i++ {
+		value := entry.Load(ir.ClsW, p)
+		entry.Store(value, p)
+	}
+	entry.Ret(entry.Load(ir.ClsW, p))
+
+	assert.True(t, loadElimOverBudget(f))
+	assert.False(t, LoadElim(f))
+}
+
+func TestLoadElimSkipsFunctionWithTooManyTemps(t *testing.T) {
+	f := ir.NewModule().NewFunc("m", ir.ClsW)
+	entry := f.Entry()
+	value := f.Param("value", ir.ClsW)
+	for i := 0; i <= cfgOptimizationTempBudget; i++ {
+		value = entry.Add(ir.ClsW, value, f.Word(1))
+	}
+	entry.Ret(value)
+
+	assert.True(t, loadElimOverBudget(f))
+	assert.False(t, LoadElim(f))
+}
+
 func TestAccessWidthAndCanonicalLoad(t *testing.T) {
 	width := map[ir.Op]int{
 		ir.OLoadsb: 1, ir.OLoadub: 1, ir.OStoreb: 1,

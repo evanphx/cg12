@@ -243,7 +243,7 @@ func compileToObjectWithBundle(m *ir.Module, opts Options, bundle assemblyBundle
 			r.TextOff += base
 			rows = append(rows, r)
 		}
-		if safepointsHaveRoots(mc.safepoints) {
+		if !goRuntime && safepointsHaveRoots(mc.safepoints) {
 			smFuncs = append(smFuncs, stackMapFunc{sym: name, points: mc.safepoints})
 		}
 		if releaseFunctionIR && functionIndex < len(m.Funcs) {
@@ -312,7 +312,10 @@ func compileToObjectWithBundle(m *ir.Module, opts Options, bundle assemblyBundle
 	if len(m.Files) > 0 && anchor != "" {
 		o.SetDWARF(m.Files, rows, dfuncs, uint64(len(o.Text)), anchor, "cg12", ".", m.Files[0], obj.R_AARCH64_ABS64, 0x6d) // DW_OP_reg29 (x29)
 	}
-	// Emit GC stack maps when any safepoint carries a live root.
+	// Emit legacy cg12 GC stack maps when any safepoint carries a live root.
+	// Go-runtime modules already carry the runtime's native stack-map metadata in
+	// moduledata/pclntab, so emitting the legacy section there only duplicates
+	// the data and can dominate memory for large standard-library binaries.
 	if len(smFuncs) > 0 {
 		setStackMap(o, smFuncs)
 	}

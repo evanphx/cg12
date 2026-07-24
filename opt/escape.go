@@ -3,7 +3,7 @@ package opt
 import "github.com/evanphx/cg12/ir"
 
 type localSlot struct {
-	base   string
+	base   locKey
 	offset int64
 }
 
@@ -86,7 +86,7 @@ func lowerFunctionHeapAllocations(function *ir.Func) bool {
 					destinationLocation := aliases.locOf(destination, int(size))
 					if sourceLocation.class == cLocal {
 						for sourceSlot, base := range slotBases {
-							if sourceSlot.base != sourceLocation.key {
+							if sourceSlot.base != sourceLocation.key() {
 								continue
 							}
 							if sourceSlot.offset < sourceLocation.offset || sourceSlot.offset+8 > sourceLocation.offset+size {
@@ -97,7 +97,7 @@ func lowerFunctionHeapAllocations(function *ir.Func) bool {
 								continue
 							}
 							destinationSlot := localSlot{
-								base:   destinationLocation.key,
+								base:   destinationLocation.key(),
 								offset: destinationLocation.offset + sourceSlot.offset - sourceLocation.offset,
 							}
 							if conflictedSlots[destinationSlot] {
@@ -124,7 +124,7 @@ func lowerFunctionHeapAllocations(function *ir.Func) bool {
 					if !tracked || location.class != cLocal {
 						continue
 					}
-					slot := localSlot{base: location.key, offset: location.offset}
+					slot := localSlot{base: location.key(), offset: location.offset}
 					if conflictedSlots[slot] {
 						escaped[base] = true
 						continue
@@ -149,7 +149,7 @@ func lowerFunctionHeapAllocations(function *ir.Func) bool {
 				if location.class != cLocal {
 					continue
 				}
-				slot := localSlot{base: location.key, offset: location.offset}
+				slot := localSlot{base: location.key(), offset: location.offset}
 				base, tracked := slotBases[slot]
 				if !tracked {
 					continue

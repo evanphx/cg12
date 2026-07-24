@@ -9,6 +9,9 @@ import (
 // unconditional ones, deletes blocks that become unreachable, repairs phi nodes
 // whose predecessors disappeared, and collapses trivial single-edge phis.
 func SimplifyCFG(f *ir.Func) bool {
+	if simplifyCFGCoalesceOverBudget(f) {
+		return false
+	}
 	changed := false
 
 	// 0. Thread branches through empty forwarding blocks: if a terminator targets a
@@ -225,6 +228,10 @@ func SimplifyCFG(f *ir.Func) bool {
 
 	analysis.BuildCFG(f) // refresh predecessor lists
 	return changed
+}
+
+func simplifyCFGCoalesceOverBudget(function *ir.Func) bool {
+	return cfgOptimizationOverBudget(function)
 }
 
 // removeBlock drops b from the function's block list.

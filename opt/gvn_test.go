@@ -130,3 +130,16 @@ func TestGVNPreservesPointerTemporaryIdentity(t *testing.T) {
 	assert.False(t, GVN(f))
 	assert.Equal(t, 2, countOp(f, ir.OAdd))
 }
+
+func TestGVNSkipsOverBudgetFunction(t *testing.T) {
+	f := ir.NewModule().NewFunc("large", ir.ClsW)
+	value := f.Param("value", ir.ClsW)
+	entry := f.Entry()
+	for i := 0; i <= cfgOptimizationInstructionBudget; i++ {
+		value = entry.Add(ir.ClsW, value, f.Word(1))
+	}
+	entry.Ret(value)
+
+	assert.True(t, gvnOverBudget(f))
+	assert.False(t, GVN(f))
+}

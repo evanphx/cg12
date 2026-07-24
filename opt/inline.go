@@ -67,6 +67,11 @@ func inlineGrowthCap(initial int) int {
 	return initial + 128 // small absolute growth; conservative until frequency-aware
 }
 
+// inlineCallerInstrBudget stops the general inliner from growing already-large
+// functions. Very large functions are exactly where cloning even tiny helpers
+// can push the rest of the optimization pipeline over its memory budget.
+const inlineCallerInstrBudget = 2000
+
 // Inline replaces direct calls to small, non-recursive module functions with a
 // clone of the callee's body. It is the pipeline's only transform that reasons
 // across functions; every other pass runs afterward, intraprocedurally, over
@@ -382,7 +387,7 @@ func callUsesHeapAllocation(function *ir.Func, call *ir.Instr) bool {
 					if instruction.Op.IsLoad() {
 						location := aliases.locOf(instruction.Arg(0), 1)
 						if location.class == cLocal {
-							slot := localSlot{base: location.key, offset: location.offset}
+							slot := localSlot{base: location.key(), offset: location.offset}
 							if heapSlots[slot] {
 								derived = true
 							}
@@ -401,7 +406,7 @@ func callUsesHeapAllocation(function *ir.Func, call *ir.Instr) bool {
 				if location.class != cLocal {
 					continue
 				}
-				slot := localSlot{base: location.key, offset: location.offset}
+				slot := localSlot{base: location.key(), offset: location.offset}
 				if !heapSlots[slot] {
 					heapSlots[slot] = true
 					changed = true
@@ -475,6 +480,9 @@ func findSplitCalleeToInline(caller *ir.Func, cg *callGraph, scc *sccInfo) (*ir.
 // exposed by a previous inline (the callee's own calls) be inlined in turn; the
 // budget bounds code-size growth (e.g. a diamond call graph inlined repeatedly).
 func inlineInto(caller *ir.Func, cg *callGraph, scc *sccInfo, sites map[*ir.Func]int, base map[*ir.Func]int) bool {
+	if inlineCallerOverBudget(caller) {
+		return false
+	}
 	changed := false
 
 	// A CostInline callee (the cost model's choice, e.g. vm_sendish) is big -- it blows
@@ -502,6 +510,9 @@ func inlineInto(caller *ir.Func, cg *callGraph, scc *sccInfo, sites map[*ir.Func
 
 	before := funcSize(caller)
 	for n := 0; n < inlineFuncBudget; n++ {
+		if inlineCallerOverBudget(caller) {
+			break
+		}
 		b, idx, callee := findInlinable(caller, cg, scc, sites, forced)
 		if callee == nil {
 			break
@@ -513,7 +524,7 @@ func inlineInto(caller *ir.Func, cg *callGraph, scc *sccInfo, sites map[*ir.Func
 
 	cap := inlineGrowthCap(base[caller])
 	for n := 0; n < inlineFuncBudget; n++ {
-		if funcSize(caller) > cap {
+		if inlineCallerOverBudget(caller) || funcSize(caller) > cap {
 			break // this function has grown enough; stop feeding the cascade
 		}
 		b, idx, callee := findInlinable(caller, cg, scc, sites, func(c *ir.Func) bool { return !forced(c) })
@@ -524,6 +535,18 @@ func inlineInto(caller *ir.Func, cg *callGraph, scc *sccInfo, sites map[*ir.Func
 		changed = true
 	}
 	return changed
+}
+
+func inlineCallerOverBudget(function *ir.Func) bool {
+	return functionInstructionCount(function) > inlineCallerInstrBudget
+}
+
+func functionInstructionCount(function *ir.Func) int {
+	count := 0
+	for _, block := range function.Blocks {
+		count += len(block.Phis) + len(block.Instrs)
+	}
+	return count
 }
 
 // findInlinable returns the first call in caller worth inlining that the accept

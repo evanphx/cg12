@@ -43,5 +43,42 @@ func hasSecondaryEntry(function *ir.Func) bool {
 // elimination, sequenced by [DefaultPipeline]. Unlike [Optimize] on a single
 // function, it can inline across functions.
 func OptimizeModule(m *ir.Module) {
+	if moduleOptimizationOverBudget(m) {
+		Run(m, BoundedPipeline())
+		return
+	}
 	Run(m, DefaultPipeline())
+}
+
+const (
+	moduleOptimizationFunctionBudget    = 2048
+	moduleOptimizationInstructionBudget = 200000
+	moduleOptimizationBlockBudget       = 50000
+	moduleOptimizationTempBudget        = 400000
+)
+
+func moduleOptimizationOverBudget(module *ir.Module) bool {
+	if len(module.Funcs) > moduleOptimizationFunctionBudget {
+		return true
+	}
+	blocks := 0
+	instructions := 0
+	temps := 0
+	for _, function := range module.Funcs {
+		if function == nil || function.Start == nil {
+			continue
+		}
+		blocks += len(function.Blocks)
+		temps += len(function.Temps)
+		if blocks > moduleOptimizationBlockBudget || temps > moduleOptimizationTempBudget {
+			return true
+		}
+		for _, block := range function.Blocks {
+			instructions += len(block.Phis) + len(block.Instrs)
+			if instructions > moduleOptimizationInstructionBudget {
+				return true
+			}
+		}
+	}
+	return false
 }

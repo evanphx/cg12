@@ -156,3 +156,15 @@ func DefaultPipeline() []Pass {
 		FuncPass("dce", DCE),
 	}
 }
+
+// BoundedPipeline is used for very large whole-runtime binaries where the full
+// pipeline's CFG and interprocedural passes can dominate peak memory. It keeps
+// only local linear-time cleanup passes that do not build CFGs or clone code.
+func BoundedPipeline() []Pass {
+	clean := Fixpoint("bounded-clean",
+		FuncPass("fold", Fold),
+		FuncPass("copy", Copy),
+		FuncPass("dce", DCE),
+	)
+	return []Pass{clean}
+}

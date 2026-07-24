@@ -386,6 +386,24 @@ func TestInlinePreservesFrameScopedRuntimeCallsite(t *testing.T) {
 	assert.Equal(t, 1, countCalls(module))
 }
 
+func TestInlineSkipsOverBudgetCaller(t *testing.T) {
+	module := ir.NewModule()
+	callee := module.NewFunc("callee", ir.ClsW)
+	value := callee.Param("value", ir.ClsW)
+	callee.Entry().Ret(value)
+
+	caller := module.NewFunc("caller", ir.ClsW)
+	current := caller.Param("current", ir.ClsW)
+	entry := caller.Entry()
+	for i := 0; i < 6000; i++ {
+		current = entry.Add(ir.ClsW, current, caller.Word(1))
+	}
+	entry.Ret(entry.Call(ir.ClsW, caller.Sym("callee", 0), current))
+
+	assert.False(t, opt.Inline(module))
+	assert.Equal(t, 1, countCalls(module))
+}
+
 func TestInlineSkipsCallerFrameIntrinsics(t *testing.T) {
 	for _, test := range []struct {
 		name string

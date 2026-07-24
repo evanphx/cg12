@@ -9,6 +9,9 @@ import "github.com/evanphx/cg12/ir"
 // allocation and its address arithmetic unused, which DCE then deletes — so a
 // non-escaping aggregate is fully decomposed into SSA values.
 func DeadAlloc(f *ir.Func) bool {
+	if deadAllocOverBudget(f) {
+		return false
+	}
 	ai := newAliasInfo(f)
 
 	// Collect the allocations and which of them are ever loaded.
@@ -21,8 +24,10 @@ func DeadAlloc(f *ir.Func) bool {
 				allocs[in.To.ID] = true
 			}
 			if in.Op.IsLoad() {
-				if base, ok := ai.allocBase[in.Arg(0).ID]; ok {
-					loaded[base] = true
+				if in.Arg(0).Kind == ir.RefTemp {
+					if base, ok := ai.allocBase(in.Arg(0).ID); ok {
+						loaded[base] = true
+					}
 				}
 			}
 			// Calls to the recognized memory helpers do not retain local pointers,
@@ -34,7 +39,7 @@ func DeadAlloc(f *ir.Func) bool {
 					if argument.Kind != ir.RefTemp {
 						continue
 					}
-					if base, ok := ai.allocBase[argument.ID]; ok {
+					if base, ok := ai.allocBase(argument.ID); ok {
 						loaded[base] = true
 					}
 				}
@@ -42,8 +47,10 @@ func DeadAlloc(f *ir.Func) bool {
 			// A volatile store is observable even when nothing reads the value
 			// back, so the storage it writes to is not dead.
 			if in.Volatile && in.Op.IsStore() {
-				if base, ok := ai.allocBase[in.Arg(1).ID]; ok {
-					loaded[base] = true
+				if in.Arg(1).Kind == ir.RefTemp {
+					if base, ok := ai.allocBase(in.Arg(1).ID); ok {
+						loaded[base] = true
+					}
 				}
 			}
 		}
@@ -52,7 +59,7 @@ func DeadAlloc(f *ir.Func) bool {
 	// An allocation is dead if it neither escapes nor is ever loaded.
 	dead := map[uint32]bool{}
 	for id := range allocs {
-		if !ai.escaped[id] && !loaded[id] {
+		if int(id) >= len(ai.escaped) || (!ai.escaped[id] && !loaded[id]) {
 			dead[id] = true
 		}
 	}
@@ -68,14 +75,14 @@ func DeadAlloc(f *ir.Func) bool {
 	for _, b := range f.Blocks {
 		out := b.Instrs[:0]
 		for _, in := range b.Instrs {
-			if in.Op.IsStore() {
-				if base, ok := ai.allocBase[in.Arg(1).ID]; ok && dead[base] {
+			if in.Op.IsStore() && in.Arg(1).Kind == ir.RefTemp {
+				if base, ok := ai.allocBase(in.Arg(1).ID); ok && dead[base] {
 					changed = true
 					continue
 				}
 			}
 			if in.Op.IsLifetime() {
-				if base, ok := ai.allocBase[in.Arg(0).ID]; ok && dead[base] {
+				if base, ok := ai.allocBase(in.Arg(0).ID); ok && dead[base] {
 					changed = true
 					continue
 				}
@@ -85,4 +92,8 @@ func DeadAlloc(f *ir.Func) bool {
 		b.Instrs = out
 	}
 	return changed
+}
+
+func deadAllocOverBudget(function *ir.Func) bool {
+	return loadElimOverBudget(function)
 }

@@ -11,6 +11,9 @@ import (
 // only way in (an extended basic block), and using alias analysis to decide
 // which stores and calls invalidate which cached values.
 func LoadElim(f *ir.Func) bool {
+	if loadElimOverBudget(f) {
+		return false
+	}
 	ai := newAliasInfo(f)
 	cfg := analysis.BuildCFG(f)
 
@@ -88,6 +91,10 @@ func LoadElim(f *ir.Func) bool {
 		removeNops(f)
 	}
 	return changed
+}
+
+func loadElimOverBudget(function *ir.Func) bool {
+	return cfgOptimizationOverBudget(function)
 }
 
 // availEntry records that location loc holds value, readable with load op.

@@ -12,6 +12,9 @@ import (
 // available. Commutative operands are canonicalised so add(x,y) and add(y,x)
 // number identically.
 func GVN(f *ir.Func) bool {
+	if gvnOverBudget(f) {
+		return false
+	}
 	cfg := analysis.BuildCFG(f)
 	dom := cfg.Dominators()
 	children := domChildren(cfg, dom)
@@ -57,6 +60,10 @@ func GVN(f *ir.Func) bool {
 		removeNops(f)
 	}
 	return changed
+}
+
+func gvnOverBudget(function *ir.Func) bool {
+	return cfgOptimizationOverBudget(function)
 }
 
 // valueKey identifies a pure computation by its op, class, predicate, intrinsic

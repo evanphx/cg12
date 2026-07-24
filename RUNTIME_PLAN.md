@@ -40,7 +40,8 @@ that must not be hidden by adding more tests:
   locking;
 - finalizer resurrection does not run correctly;
 - the runtime trace program runs out of memory or times out;
-- two large HTTP programs exceed the current 3 GiB compilation limit;
+- the accepted baseline still needs a rerun after recent trace and large HTTP
+  fixes;
 - the existing ECDSA case remains a known compiler/stdlib gap.
 
 Control runs without coverage instrumentation reproduce the runtime failures
@@ -340,6 +341,15 @@ Current checkpoint:
   optimized `stdlib-http/redirect-keepalive`, `stdlib-http/tls-client-server`,
   and `stdlib-crypto/ecdsa` now pass individually under the 3 GiB process
   limit. A full corpus rerun is still required before accepting a new baseline.
+- [x] Remove the duplicate legacy `.cg12_stackmaps` section from Go-runtime
+  binaries; the native Go `moduledata`/pclntab stack maps are the authoritative
+  metadata there. This fixed the unoptimized `stdlib-http/parse-roundtrip`
+  object-emission OOM caused by a 54 MiB sparse stack-map allocation.
+- [x] Add memory budgets for large-function CFG optimizations and switch
+  huge modules to a bounded linear cleanup pipeline. Optimized
+  `stdlib-http/parse-roundtrip`, `stdlib-http/cookiejar`, and
+  `stdlib-http/multipart-form` now compile and run under the 3 GiB process
+  limit with peak compile usage around 1.2-1.3 GiB.
 
 Exit criterion: trace terminates and produces parseable output within its
 budget; all three HTTP programs compile below the agreed memory ceiling and

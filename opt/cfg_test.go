@@ -180,6 +180,22 @@ func TestSimplifyCFGKeepsSecondaryEntry(t *testing.T) {
 	assert.Contains(t, function.Blocks, recovery)
 }
 
+func TestSimplifyCFGSkipsLargeFunctionCoalescing(t *testing.T) {
+	function := ir.NewModule().NewFunc("f", ir.ClsW)
+	entry := function.Entry()
+	current := entry
+	for i := 0; i <= cfgOptimizationBlockBudget; i++ {
+		next := function.NewBlock("next")
+		current.Goto(next)
+		current = next
+	}
+	current.Ret(function.Word(1))
+
+	assert.False(t, SimplifyCFG(function))
+	assert.True(t, simplifyCFGCoalesceOverBudget(function))
+	assert.Greater(t, len(function.Blocks), 1)
+}
+
 func TestOptimizeLeavesMultiEntryFunctionAlone(t *testing.T) {
 	function := ir.NewModule().NewFuncVoid("f")
 	function.Entry().Hlt()

@@ -1,10 +1,6 @@
 package opt
 
-import (
-	"fmt"
-
-	"github.com/evanphx/cg12/ir"
-)
+import "github.com/evanphx/cg12/ir"
 
 // Memory-region classes for a resolved pointer base.
 const (
@@ -14,35 +10,57 @@ const (
 	cUnknown        // a parameter or otherwise opaque pointer
 )
 
+const (
+	keyInvalid = iota
+	keyGlobal
+	keyConst
+	keyTemp
+	keyLocal
+	keyEscaped
+)
+
 // aliasInfo answers must/may-alias questions about pointers in a function. It is
 // deliberately conservative: it only ever reports "no alias" when it can prove
 // two accesses touch disjoint memory.
 type aliasInfo struct {
-	f         *ir.Func
-	def       map[uint32]ir.Instr // temp -> defining instruction
-	allocBase map[uint32]uint32   // alloc-derived pointer temp -> its alloc temp id
-	escaped   map[uint32]bool     // alloc ids whose address escapes
+	f             *ir.Func
+	def           []*ir.Instr // temp -> defining instruction
+	allocBasePlus []uint32    // alloc-derived pointer temp -> alloc temp id + 1; 0 means none
+	escaped       []bool      // alloc ids whose address escapes
 }
 
 // locInfo is a resolved memory location: a base region plus a (possibly known)
 // byte offset and an access width.
 type locInfo struct {
-	key      string // identity of the base region
+	keyKind  int
+	keyID    uint64
+	keySym   string
 	class    int
 	offset   int64
 	offKnown bool
 	width    int
 }
 
+type locKey struct {
+	kind int
+	id   uint64
+	sym  string
+}
+
+func (loc locInfo) key() locKey {
+	return locKey{kind: loc.keyKind, id: loc.keyID, sym: loc.keySym}
+}
+
 func newAliasInfo(f *ir.Func) *aliasInfo {
 	ai := &aliasInfo{
-		f:         f,
-		def:       map[uint32]ir.Instr{},
-		allocBase: map[uint32]uint32{},
-		escaped:   map[uint32]bool{},
+		f:             f,
+		def:           make([]*ir.Instr, len(f.Temps)),
+		allocBasePlus: make([]uint32, len(f.Temps)),
+		escaped:       make([]bool, len(f.Temps)),
 	}
 	for _, b := range f.Blocks {
-		for _, in := range b.Instrs {
+		for index := range b.Instrs {
+			in := &b.Instrs[index]
 			if in.To.Kind == ir.RefTemp {
 				ai.def[in.To.ID] = in
 			}
@@ -57,14 +75,17 @@ func newAliasInfo(f *ir.Func) *aliasInfo {
 // derivative of one, to the underlying alloc's temp id.
 func (ai *aliasInfo) buildAllocBase() {
 	for id, in := range ai.def {
-		if in.Op.IsAlloc() {
-			ai.allocBase[id] = id
+		if in != nil && in.Op.IsAlloc() {
+			ai.setAllocBase(uint32(id), uint32(id))
 		}
 	}
 	for changed := true; changed; {
 		changed = false
 		for id, in := range ai.def {
-			if _, done := ai.allocBase[id]; done {
+			if in == nil {
+				continue
+			}
+			if _, done := ai.allocBase(uint32(id)); done {
 				continue
 			}
 			if in.Op != ir.OAdd && in.Op != ir.OSub {
@@ -72,16 +93,34 @@ func (ai *aliasInfo) buildAllocBase() {
 			}
 			x, y := in.Arg(0), in.Arg(1)
 			if base, ok := ai.derivedBase(x, y); ok {
-				ai.allocBase[id] = base
+				ai.setAllocBase(uint32(id), base)
 				changed = true
 			} else if in.Op == ir.OAdd {
 				if base, ok := ai.derivedBase(y, x); ok {
-					ai.allocBase[id] = base
+					ai.setAllocBase(uint32(id), base)
 					changed = true
 				}
 			}
 		}
 	}
+}
+
+func (ai *aliasInfo) setAllocBase(id uint32, base uint32) {
+	if int(id) >= len(ai.allocBasePlus) {
+		return
+	}
+	ai.allocBasePlus[id] = base + 1
+}
+
+func (ai *aliasInfo) allocBase(id uint32) (uint32, bool) {
+	if int(id) >= len(ai.allocBasePlus) {
+		return 0, false
+	}
+	base := ai.allocBasePlus[id]
+	if base == 0 {
+		return 0, false
+	}
+	return base - 1, true
 }
 
 // derivedBase reports the alloc base of ptr when off is a constant (so ptr+off
@@ -93,7 +132,7 @@ func (ai *aliasInfo) derivedBase(ptr, off ir.Ref) (uint32, bool) {
 	if _, ok := constInt(ai.f, off); !ok {
 		return 0, false
 	}
-	base, ok := ai.allocBase[ptr.ID]
+	base, ok := ai.allocBase(ptr.ID)
 	return base, ok
 }
 
@@ -103,7 +142,7 @@ func (ai *aliasInfo) derivedBase(ptr, off ir.Ref) (uint32, bool) {
 func (ai *aliasInfo) computeEscape() {
 	mark := func(r ir.Ref) {
 		if r.Kind == ir.RefTemp {
-			if base, ok := ai.allocBase[r.ID]; ok {
+			if base, ok := ai.allocBase(r.ID); ok && int(base) < len(ai.escaped) {
 				ai.escaped[base] = true
 			}
 		}
@@ -158,7 +197,7 @@ func (ai *aliasInfo) tracked(r ir.Ref) bool {
 	if r.Kind != ir.RefTemp {
 		return false
 	}
-	_, ok := ai.allocBase[r.ID]
+	_, ok := ai.allocBase(r.ID)
 	return ok
 }
 
@@ -168,8 +207,11 @@ func (ai *aliasInfo) locOf(addr ir.Ref, width int) locInfo {
 	var offset int64
 	cur := addr
 	for cur.Kind == ir.RefTemp {
-		in, ok := ai.def[cur.ID]
-		if !ok || (in.Op != ir.OAdd && in.Op != ir.OSub) {
+		if int(cur.ID) >= len(ai.def) {
+			break
+		}
+		in := ai.def[cur.ID]
+		if in == nil || (in.Op != ir.OAdd && in.Op != ir.OSub) {
 			break
 		}
 		if c, ok := constInt(ai.f, in.Arg(1)); ok {
@@ -188,50 +230,71 @@ func (ai *aliasInfo) locOf(addr ir.Ref, width int) locInfo {
 		}
 		break
 	}
-	key, class := ai.baseKind(cur)
+	keyKind, keyID, keySym, class := ai.baseKind(cur)
 	if cur.Kind == ir.RefConst {
 		if c := ai.f.Consts[cur.ID]; c.Kind == ir.ConstSym {
 			offset += c.Int
 		}
 	}
-	return locInfo{key: key, class: class, offset: offset, offKnown: true, width: width}
+	return locInfo{
+		keyKind:  keyKind,
+		keyID:    keyID,
+		keySym:   keySym,
+		class:    class,
+		offset:   offset,
+		offKnown: true,
+		width:    width,
+	}
 }
 
-func (ai *aliasInfo) baseKind(r ir.Ref) (string, int) {
+func (ai *aliasInfo) baseKind(r ir.Ref) (int, uint64, string, int) {
 	switch r.Kind {
 	case ir.RefConst:
 		c := ai.f.Consts[r.ID]
 		if c.Kind == ir.ConstSym {
-			return "g:" + c.Sym, cGlobal
+			return keyGlobal, 0, c.Sym, cGlobal
 		}
-		return fmt.Sprintf("i:%d", c.Int), cUnknown
+		return keyConst, uint64(c.Int), "", cUnknown
 	case ir.RefTemp:
-		if base, ok := ai.allocBase[r.ID]; ok {
-			if ai.escaped[base] {
-				return fmt.Sprintf("e:%d", base), cEscaped
+		if base, ok := ai.allocBase(r.ID); ok {
+			if int(base) < len(ai.escaped) && ai.escaped[base] {
+				return keyEscaped, uint64(base), "", cEscaped
 			}
-			return fmt.Sprintf("a:%d", base), cLocal
+			return keyLocal, uint64(base), "", cLocal
 		}
-		return fmt.Sprintf("t:%d", r.ID), cUnknown
+		return keyTemp, uint64(r.ID), "", cUnknown
 	}
-	return "?", cUnknown
+	return keyInvalid, 0, "", cUnknown
 }
 
 // mustAlias reports that two accesses touch exactly the same bytes.
 func mustAlias(a, b locInfo) bool {
-	return a.key != "?" && a.key == b.key && a.offKnown && b.offKnown &&
+	return a.keyKind != keyInvalid && sameBase(a, b) && a.offKnown && b.offKnown &&
 		a.offset == b.offset && a.width == b.width
 }
 
 // mayAlias reports that two accesses might touch overlapping bytes.
 func mayAlias(a, b locInfo) bool {
-	if a.key == b.key {
+	if sameBase(a, b) {
 		if a.offKnown && b.offKnown {
 			return overlap(a.offset, a.width, b.offset, b.width)
 		}
 		return true
 	}
 	return !distinct(a, b)
+}
+
+func sameBase(a, b locInfo) bool {
+	if a.keyKind != b.keyKind {
+		return false
+	}
+	if a.keyKind == keyInvalid {
+		return false
+	}
+	if a.keyKind == keyGlobal {
+		return a.keySym == b.keySym
+	}
+	return a.keyID == b.keyID
 }
 
 // distinct proves two different base regions never overlap.
