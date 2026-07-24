@@ -249,6 +249,7 @@ void *__builtin___memset_chk(void * dest, int c, __SIZE_TYPE__ len, __SIZE_TYPE_
 void *__builtin___strncpy_chk (char *dest, char *src, __SIZE_TYPE__ len, __SIZE_TYPE__ dstlen);
 void *__builtin__strncpy_chk (char *dest, char *src, __SIZE_TYPE__ len, __SIZE_TYPE__ dstlen);
 void *__builtin_alloca(__SIZE_TYPE__ size);
+void *__builtin_assume_aligned(const void *, __SIZE_TYPE__, ...);
 void *__builtin_calloc(__SIZE_TYPE__ nmemb, __SIZE_TYPE__ size);
 void *__builtin_malloc(__SIZE_TYPE__ size);
 void *__builtin_memchr(const void *s, int c, __SIZE_TYPE__ n);

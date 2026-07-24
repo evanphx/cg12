@@ -45,6 +45,27 @@ int main(void){
 			"rot0=123456789abcdef\n", out)
 }
 
+// __builtin_assume_aligned evaluates to its pointer argument unchanged. Without a
+// prototype it defaulted to returning int, so the enclosing cast to a pointer
+// sign-extended it from 32 bits -- truncating any address with high bits set (a
+// stack pointer, a >4GB heap). Ruby's st_hash dereferences a pointer through it
+// and crashed. Deref through it and check the value survives.
+func TestAssumeAlignedPointer(t *testing.T) {
+	out, code := compileAndRun(t, `
+#include <stdio.h>
+int main(void){
+	unsigned long buf[3] = {0x1122334455667788UL, 0xdeadbeefcafebabeUL, 7};
+	unsigned long *p = (unsigned long*)__builtin_assume_aligned(buf, 8);
+	printf("p0=%lx\n", p[0]);
+	printf("p1=%lx\n", p[1]);
+	// The exact idiom st.c uses: cast the builtin result and dereference it.
+	printf("d=%lx\n", *(unsigned long*)__builtin_assume_aligned(buf + 2, 8));
+	return 0;
+}`)
+	require.Equal(t, 0, code)
+	require.Equal(t, "p0=1122334455667788\np1=deadbeefcafebabe\nd=7\n", out)
+}
+
 // More builtins real code reaches for: popcount, the _p overflow predicates, and
 // __builtin_memcpy routed to libc.
 func TestMoreBuiltins(t *testing.T) {
