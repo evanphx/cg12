@@ -63,6 +63,30 @@ int main(void){
 	require.Equal(t, "self\n", out)
 }
 
+// A file-scope object declared tentatively (no initializer) and then defined
+// with an initializer names one object. cg12 emitted both -- a zeroed symbol and
+// the initialized one -- so a reference could bind to the zeros. Ruby's
+// vm_empty_cc is declared this way (forward-declared, then defined with its call
+// handler), and the zero copy gave a null handler that crashed every
+// method-missing dispatch (calling any undefined method). The initialized
+// definition must win.
+func TestTentativeThenFullDefinition(t *testing.T) {
+	out, code := compileAndRun(t, `
+#include <stdio.h>
+static long fortytwo(void){ return 42; }
+struct cc { long flags; long (*call)(void); };
+static const struct cc empty;                                  /* tentative */
+long get_flags(void){ return empty.flags; }
+long call_it(void){ return empty.call(); }
+static const struct cc empty = { .flags = 7, .call = fortytwo }; /* full def */
+int main(void){
+	printf("%ld %ld\n", get_flags(), call_it());
+	return 0;
+}`)
+	require.Equal(t, 0, code)
+	require.Equal(t, "7 42\n", out)
+}
+
 // A block-scope `extern` names a global defined elsewhere; it has no local
 // storage. cg12 had given it a stack slot, so `char **envp = environ;` read
 // uninitialized stack instead of the real environ.

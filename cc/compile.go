@@ -33,6 +33,7 @@ type gen struct {
 	ti128    *ir.AggType                              // the canonical __int128 {lo,hi} aggregate type
 	cplx     map[ir.SubCls]*ir.AggType                // memoized _Complex {re,im} aggregate types
 	aggs     map[moderncc.Type]*ir.AggType            // memoized C struct/union -> cg12 aggregate type
+	globals  map[string]*ir.Data                      // file-scope object -> its data, to merge tentative and full definitions
 	names    map[string]int                           // per-function temp-name uniquifier
 	labels   map[string]*ir.Block                     // goto label -> block (per function)
 	caseBlk  map[*moderncc.LabeledStatement]*ir.Block // switch case/default -> block
@@ -241,7 +242,7 @@ func CompileWith(name, src string, opts Options) (*ir.Module, error) {
 // primary file's definitions (name) and pulling in the internal-linkage functions
 // and data from headers that they reference.
 func genModule(target Target, ast *moderncc.AST, name string) (*ir.Module, error) {
-	g := &gen{target: target, mod: ir.NewModule(), strs: map[string]string{}, ldconsts: map[string]string{}, cplx: map[ir.SubCls]*ir.AggType{}, aggs: map[moderncc.Type]*ir.AggType{}}
+	g := &gen{target: target, mod: ir.NewModule(), strs: map[string]string{}, ldconsts: map[string]string{}, cplx: map[ir.SubCls]*ir.AggType{}, aggs: map[moderncc.Type]*ir.AggType{}, globals: map[string]*ir.Data{}}
 	g.push() // file scope: holds globals, visible to every function
 
 	// Internal-linkage functions (static, and static inline) defined in headers
@@ -795,6 +796,28 @@ func (g *gen) genGlobalDecl(d *moderncc.Declaration) {
 				sec = ".rodata"
 			}
 		}
+		hasInit := id.Case == moderncc.InitDeclaratorInit
+
+		// A file-scope object may be declared more than once in a translation unit:
+		// a tentative definition (no initializer) and, elsewhere, the real one --
+		// which is exactly how Ruby declares vm_empty_cc (forward-declared in
+		// vm_insnhelper.c, defined with its call handler in vm.c, both in vm.c's
+		// unit). They name one object, so emit one datum: the initialized definition
+		// wins over a tentative's zeros. Emitting both left a second, zeroed symbol
+		// that references could bind to -- a null call handler that crashed every
+		// method-missing dispatch.
+		if prev, ok := g.globals[dcl.Name()]; ok {
+			if hasInit {
+				prev.Items = g.globalItems(t, id.Initializer)
+				if len(prev.Items) == 0 {
+					prev.Items = []ir.DataItem{{Zero: int(t.Size())}}
+				}
+				prev.Linkage.Section = sec
+			}
+			g.define(dcl.Name(), lval{sym: dcl.Name(), typ: t, thread: thread})
+			continue
+		}
+
 		data := &ir.Data{Name: dcl.Name(), Align: dataAlign(t), Linkage: ir.Linkage{
 			Section: sec,
 			// External linkage is what makes a definition visible to the linker;
@@ -804,13 +827,14 @@ func (g *gen) genGlobalDecl(d *moderncc.Declaration) {
 			// not data used in place.
 			Thread: thread,
 		}}
-		if id.Case == moderncc.InitDeclaratorInit {
+		if hasInit {
 			data.Items = g.globalItems(t, id.Initializer)
 		}
 		if len(data.Items) == 0 {
 			data.Items = []ir.DataItem{{Zero: int(t.Size())}}
 		}
 		g.mod.Data = append(g.mod.Data, data)
+		g.globals[dcl.Name()] = data
 		g.define(dcl.Name(), lval{sym: dcl.Name(), typ: t, thread: thread}) // reachable via symbol
 	}
 }
