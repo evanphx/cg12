@@ -225,6 +225,12 @@ normal builds, and the stack panic pair passes with `-runtime-opt` under the
 3 GiB limit. The complete defer/panic category and the 100-run `GOGC=1` stress
 batch still need to be rerun after the safepoint-map fix.
 
+The previous full optimized run's hard failures were spot-checked after the
+safepoint-map fix. `gc/pinner-lifecycle`,
+`stdlib-signals/notify-context`, `stdlib-os-process/exec-echo`, and
+`runtime-packages/timer-gc-channel` now pass in both normal and `-runtime-opt`
+single-run configurations under the 3 GiB limit.
+
 Exit criterion: the entire defer/panic category passes at multiple optimization
 levels, with forced stack growth and `GOGC=1`, and the panic-stack-GC tests run
 at least 100 repetitions without invariant failures.
