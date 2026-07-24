@@ -49,8 +49,22 @@ func LoadElim(f *ir.Func) bool {
 				}
 			case in.Op.IsStore():
 				loc := ai.locOf(in.Arg(1), accessWidth(in.Op))
+				lop, canLoad := canonicalLoadOp(in.Op)
+				// Redundant store: the location already holds exactly this value (from a
+				// prior load or store of it), so writing it again is a no-op. This is the
+				// `*p = *p` field write-back an interpreter emits on its hot path (e.g.
+				// `cfp->pc = cfp->pc`, `cfp->sp = cfp->sp`). The cached value is unchanged,
+				// so leave avail intact. Volatile stores are handled above and never reach
+				// here.
+				if canLoad {
+					if v, ok := avail.lookup(lop, loc); ok && v == in.Arg(0) {
+						b.Instrs[i] = ir.Instr{Op: ir.ONop}
+						changed = true
+						continue
+					}
+				}
 				avail = avail.invalidate(loc)
-				if lop, ok := canonicalLoadOp(in.Op); ok {
+				if canLoad {
 					avail = avail.record(loc, in.Arg(0), lop)
 				}
 			case in.Op == ir.OCall || in.Op == ir.OBlit || in.Op == ir.OVaStart || in.Op == ir.OAsm:

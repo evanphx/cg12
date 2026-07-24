@@ -156,6 +156,61 @@ func TestLoadElimSubwordStoreNotForwarded(t *testing.T) {
 	assert.False(t, LoadElim(f))
 }
 
+func TestLoadElimRedundantStoreBack(t *testing.T) {
+	// x = load p ; store x, p ; ret x  ->  the store-back is a no-op (`*p = *p`).
+	f := ir.NewModule().NewFunc("m", ir.ClsL)
+	p := f.Param("p", ir.ClsL)
+	e := f.Entry()
+	x := e.Load(ir.ClsL, p)
+	e.Store(x, p)
+	e.Ret(x)
+
+	assert.True(t, LoadElim(f))
+	assert.Equal(t, 0, countOp(f, ir.OStorel), "store of the just-loaded value is removed")
+	assert.Equal(t, 1, countOp(f, ir.OLoadl), "the load itself stays (its value is returned)")
+}
+
+func TestLoadElimRedundantStoreSameValue(t *testing.T) {
+	// store 5, p ; store 5, p  ->  the second store is redundant.
+	f := ir.NewModule().NewFunc("m", ir.ClsW)
+	p := f.Param("p", ir.ClsL)
+	e := f.Entry()
+	e.Store(f.Word(5), p)
+	e.Store(f.Word(5), p)
+	e.Ret(f.Word(0))
+
+	assert.True(t, LoadElim(f))
+	assert.Equal(t, 1, countOp(f, ir.OStorew), "only the first store survives")
+}
+
+func TestLoadElimDifferentValueStoreKept(t *testing.T) {
+	// store 5, p ; store 6, p  ->  both stores are meaningful.
+	f := ir.NewModule().NewFunc("m", ir.ClsW)
+	p := f.Param("p", ir.ClsL)
+	e := f.Entry()
+	e.Store(f.Word(5), p)
+	e.Store(f.Word(6), p)
+	e.Ret(f.Word(0))
+
+	LoadElim(f)
+	assert.Equal(t, 2, countOp(f, ir.OStorew), "a store of a new value is not redundant")
+}
+
+func TestLoadElimStoreBackAfterCallKept(t *testing.T) {
+	// x = load p ; call g ; store x, p  ->  the call may have changed *p, so
+	// writing x back is a real store, not a no-op.
+	f := ir.NewModule().NewFunc("m", ir.ClsL)
+	p := f.Param("p", ir.ClsL)
+	e := f.Entry()
+	x := e.Load(ir.ClsL, p)
+	e.CallVoid(f.Sym("g", 0))
+	e.Store(x, p)
+	e.Ret(x)
+
+	LoadElim(f)
+	assert.Equal(t, 1, countOp(f, ir.OStorel), "a call clears availability, so the store stays")
+}
+
 func TestAccessWidthAndCanonicalLoad(t *testing.T) {
 	width := map[ir.Op]int{
 		ir.OLoadsb: 1, ir.OLoadub: 1, ir.OStoreb: 1,
