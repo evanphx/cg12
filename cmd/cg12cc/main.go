@@ -136,6 +136,17 @@ func parseArgs(args []string) *driver {
 			// flag so the host cc optimizes at link/LTO if it does anything there).
 			d.optimize = true
 			d.passthru = append(d.passthru, a)
+		case strings.HasPrefix(a, "-mbranch-protection="):
+			// A pac-ret build signs return addresses. cg12 does not protect its own
+			// frames, but code that manufactures a return address and signs it by hand
+			// (a coroutine's initial PC) is guarded on __ARM_FEATURE_PAC_DEFAULT, which
+			// gcc defines for this flag; define it too so that signing happens (it
+			// lowers to a PACIA cg12 emits), matching the gcc-assembled context switch.
+			v := a[len("-mbranch-protection="):]
+			if strings.Contains(v, "pac-ret") || strings.Contains(v, "standard") {
+				d.defines = append(d.defines, "__ARM_FEATURE_PAC_DEFAULT=1")
+			}
+			d.passthru = append(d.passthru, a)
 		case strings.HasSuffix(a, ".c"):
 			d.sources = append(d.sources, a)
 		case strings.HasSuffix(a, ".o") || strings.HasSuffix(a, ".a") ||

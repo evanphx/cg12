@@ -46,6 +46,9 @@ func TestAssembleEncodings(t *testing.T) {
 		{"ret x5", Ret(5)},
 		{"brk #0", Brk(0)},
 		{"nop", 0xd503201f},
+		{"hint #0", 0xd503201f},  // hint #0 is nop
+		{"hint #8", 0xd503211f},  // pacia1716
+		{"hint #12", 0xd503219f}, // autia1716
 	}
 	for _, c := range cases {
 		t.Run(c.asm, func(t *testing.T) {

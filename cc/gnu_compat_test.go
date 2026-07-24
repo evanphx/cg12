@@ -66,6 +66,38 @@ int main(void){
 	require.Equal(t, "p0=1122334455667788\np1=deadbeefcafebabe\nd=7\n", out)
 }
 
+// The pointer-authentication signing idiom a pac-ret build uses to sign a
+// coroutine's initial return address (coroutine/arm64/Context.h): a hint #8
+// (PACIA1716) with the operands pinned to x17/x16 by GCC local register
+// variables. cg12 recognizes it and lowers it to a PACIA. The signature lives in
+// the pointer's high bits; the low (address) bits must survive, and a different
+// modifier must change the result -- confirming both operands are wired through.
+func TestPtrauthSignIdiom(t *testing.T) {
+	out, code := compileAndRun(t, `
+#include <stdio.h>
+static inline void *sign(void *addr, void *modifier) {
+	register void *r17 __asm("r17") = addr;
+	register void *r16 __asm("r16") = modifier;
+	asm ("hint #8;" : "+r"(r17) : "r"(r16));
+	return r17;
+}
+int main(void){
+	int x = 0;
+	void *p = &x;
+	unsigned long mask = 0x0000ffffffffffffUL; // low 48 bits: the address itself
+	void *s1 = sign(p, (void*)0x1111);
+	void *s2 = sign(p, (void*)0x2222);
+	printf("low=%d\n", ((unsigned long)s1 & mask) == ((unsigned long)p & mask));
+	// If the CPU implements PAC the two signatures differ; if it treats the hint
+	// as a nop both equal p. Either way they agree with each other iff PAC is off,
+	// so "s1==s2 implies signatures==p" holds in both worlds.
+	printf("mod=%d\n", (s1 == s2) == ((unsigned long)s1 == (unsigned long)p));
+	return 0;
+}`)
+	require.Equal(t, 0, code)
+	require.Equal(t, "low=1\nmod=1\n", out)
+}
+
 // More builtins real code reaches for: popcount, the _p overflow predicates, and
 // __builtin_memcpy routed to libc.
 func TestMoreBuiltins(t *testing.T) {

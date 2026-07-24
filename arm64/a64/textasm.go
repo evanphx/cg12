@@ -95,6 +95,16 @@ func asmLine(p *Program, line string) error {
 	case "nop":
 		p.Emit(0xd503201f)
 		return nil
+	case "hint":
+		v, ok := a.imm(0)
+		if !ok || len(ops) != 1 {
+			return fmt.Errorf("hint takes one immediate")
+		}
+		if v < 0 || v > 0x7f {
+			return fmt.Errorf("hint: #%d out of range", v)
+		}
+		p.Emit(Hint(int(v)))
+		return nil
 	case "ret":
 		rn := Reg(30) // x30 (the link register) by default
 		if len(ops) == 1 {

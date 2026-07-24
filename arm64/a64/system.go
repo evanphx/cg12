@@ -10,6 +10,12 @@ package a64
 // this is how a system call is made once its number and arguments are in place.
 func Svc(imm16 uint16) uint32 { return 0xd4000001 | uint32(imm16)<<5 }
 
+// Hint encodes HINT #imm7, the hint-space instruction whose operand selects a
+// named hint: #0 is NOP, and the pointer-authentication signs/authenticates live
+// here too (#8 is PACIA1716, #12 is AUTIA1716), which is how a pac-ret build's
+// coroutine signs the return address it hands to the context switch.
+func Hint(imm int) uint32 { return 0xd503201f | uint32(imm&0x7f)<<5 }
+
 // BarrierOption is the shareability/access domain of a memory barrier, the CRm
 // field of DMB/DSB. The common ones are the full-system and inner-shareable
 // domains; a value outside 0..15 is not encodable.

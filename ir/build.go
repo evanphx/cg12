@@ -183,6 +183,9 @@ func (b *Block) emit(op Op, cls Cls, args ...Ref) Ref {
 	return res
 }
 
+// Pacia signs the pointer x with modifier y under pointer-authentication key A.
+func (b *Block) Pacia(x, y Ref) Ref { return b.emit(OPacia, ClsL, x, y) }
+
 // Binary arithmetic and bitwise operations.
 func (b *Block) Add(cls Cls, x, y Ref) Ref  { return b.emit(OAdd, cls, x, y) }
 func (b *Block) Sub(cls Cls, x, y Ref) Ref  { return b.emit(OSub, cls, x, y) }

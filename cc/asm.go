@@ -79,6 +79,10 @@ func (g *gen) genAsm(as *moderncc.AsmStatement) {
 	}
 	tmpl := asmTemplate(a)
 
+	if g.tryPacia(a, tmpl) {
+		return
+	}
+
 	// The empty template is the standard compiler barrier,
 	// `__asm__ volatile("" ::: "memory")`. It emits no instructions, which is
 	// exactly why it must still reach the IR: its whole purpose is to stop the
@@ -101,6 +105,66 @@ func (g *gen) genAsm(as *moderncc.AsmStatement) {
 	for i, lv := range outLvals {
 		g.storeVal(lv.addr, res[i], lv.typ)
 	}
+}
+
+// tryPacia recognizes the pointer-authentication signing idiom a pac-ret build
+// uses to sign a manufactured return address (a coroutine's initial PC, in
+// coroutine/arm64/Context.h):
+//
+//	asm("hint #8" : "+r"(data) : "r"(modifier))
+//
+// which is PACIA1716 -- sign the pointer in x17 with the modifier in x16. The
+// operands are GCC local register variables pinned to x17/x16, which cg12 treats
+// as ordinary locals; since x16/x17 are the backend's scratch registers (outside
+// the allocatable pool), they cannot be delivered as register-pinned asm operands.
+// So the whole idiom is lowered to an OPacia over the operand values, whose
+// emitter shuffles them through x17/x16 itself. Reports whether it matched.
+func (g *gen) tryPacia(a *moderncc.Asm, tmpl string) bool {
+	if strings.TrimRight(tmpl, "; \t\n") != "hint #8" {
+		return false
+	}
+	// Exactly one output ("+r") in the first group and one input ("r") in the next.
+	var out, in moderncc.ExpressionNode
+	var outCons, inCons string
+	group := 0
+	for al := a.AsmArgList; al != nil; al = al.AsmArgList {
+		for el := al.AsmExpressionList; el != nil; el = el.AsmExpressionList {
+			cons, operand, isOp := asmOperand(el.AssignmentExpression)
+			if !isOp {
+				return false // a clobber where the idiom has none
+			}
+			switch group {
+			case 0:
+				if out != nil {
+					return false
+				}
+				out, outCons = operand, cons
+			case 1:
+				if in != nil {
+					return false
+				}
+				in, inCons = operand, cons
+			default:
+				return false
+			}
+		}
+		group++
+	}
+	if out == nil || in == nil {
+		return false
+	}
+	if base, output, rw := asmParseConstraint(outCons); !(base == "r" && output && rw) {
+		return false // not "+r"
+	}
+	if base, output, _ := asmParseConstraint(inCons); !(base == "r" && !output) {
+		return false // not a plain "r" input
+	}
+
+	addr, typ := g.genAddr(out)
+	data := g.loadVal(addr, typ)
+	modifier := g.genExpr(in)
+	g.storeVal(addr, g.cur.Pacia(data, modifier), typ)
+	return true
 }
 
 // asmOut is a register-output lvalue: the address to store the asm's result to

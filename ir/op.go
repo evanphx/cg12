@@ -166,6 +166,14 @@ const (
 	// single-instruction form.
 	OBic
 
+	// OPacia signs the pointer Args[0] with modifier Args[1] under pointer-
+	// authentication key A (the arm64 PACIA operation). The frontend produces it
+	// when it recognizes the `hint #8` / PACIA1716 inline-asm idiom a pac-ret build
+	// uses to sign a manufactured return address (a coroutine's initial PC). The
+	// arm64 emitter shuffles the operands through x17/x16 -- the registers PACIA1716
+	// is defined on -- itself, so no register-pinned asm operand is needed.
+	OPacia
+
 	// OClz counts the leading zero bits of Args[0], at the width of Instr.Cls
 	// (32 or 64). It backs __builtin_clz / __builtin_clzll.
 	OClz
@@ -240,16 +248,17 @@ var opTable = [numOps]opInfo{
 	ORem:  {name: "rem", hasResult: true},
 	OURem: {name: "urem", hasResult: true},
 
-	OAnd:  {name: "and", hasResult: true, commutative: true},
-	OOr:   {name: "or", hasResult: true, commutative: true},
-	OXor:  {name: "xor", hasResult: true, commutative: true},
-	OShl:  {name: "shl", hasResult: true},
-	OShr:  {name: "shr", hasResult: true},
-	OSar:  {name: "sar", hasResult: true},
-	ORotr: {name: "rotr", hasResult: true, private: true},
-	OBic:  {name: "bic", hasResult: true, private: true},
-	OMAdd: {name: "madd", hasResult: true, private: true},
-	OMSub: {name: "msub", hasResult: true, private: true},
+	OAnd:   {name: "and", hasResult: true, commutative: true},
+	OOr:    {name: "or", hasResult: true, commutative: true},
+	OXor:   {name: "xor", hasResult: true, commutative: true},
+	OShl:   {name: "shl", hasResult: true},
+	OShr:   {name: "shr", hasResult: true},
+	OSar:   {name: "sar", hasResult: true},
+	ORotr:  {name: "rotr", hasResult: true, private: true},
+	OBic:   {name: "bic", hasResult: true, private: true},
+	OPacia: {name: "pacia", hasResult: true, private: true},
+	OMAdd:  {name: "madd", hasResult: true, private: true},
+	OMSub:  {name: "msub", hasResult: true, private: true},
 
 	OSpill:  {name: "spill", private: true},
 	OReload: {name: "reload", hasResult: true, private: true},

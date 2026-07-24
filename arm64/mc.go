@@ -1025,6 +1025,54 @@ func (m *mc) dst(ref ir.Ref, size int) (a64.Reg, func()) {
 	return scr, func() { m.spillStore(scr, float, off, size) }
 }
 
+// emitPacia emits PACIA1716: sign the pointer in Args[0] with the modifier in
+// Args[1], leaving the result in To. PACIA1716 is defined on x17 (the data) and
+// x16 (the modifier), which are cg12's scratch registers and thus outside the
+// allocatable pool -- so the operands cannot be delivered through a register-
+// pinned asm operand. They are instead loaded directly into x17/x16 here. An
+// integer spill load reuses its own target register for the address, so loading
+// x17 then x16 never has one clobber the other, and the result is read from x17
+// before x16 is reused for the store-back.
+func (m *mc) emitPacia(in *ir.Instr) {
+	const x16, x17 = a64.Reg(16), a64.Reg(17)
+	m.loadReg(x17, in.Args[0]) // data
+	m.loadReg(x16, in.Args[1]) // modifier
+	m.emit(a64.Hint(8))        // PACIA1716
+	d, done := m.dst(in.To, 8)
+	m.emitReg(in.Cls, d, x17)
+	done()
+}
+
+// loadReg materializes ref's value directly into the physical register reg,
+// never borrowing a scratch register. It exists for emitPacia, whose target
+// registers are themselves the scratch registers m.src would use.
+func (m *mc) loadReg(reg a64.Reg, ref ir.Ref) {
+	switch ref.Kind {
+	case ir.RefTemp:
+		t := m.f.Temps[ref.ID]
+		if t.Reg != ir.NoReg {
+			m.emitReg(ir.ClsL, reg, mreg(Reg(t.Reg)))
+			return
+		}
+		if rule, ok := m.rematOf(int(ref.ID)); ok {
+			m.rematerialize(reg, rule, 8)
+			return
+		}
+		m.spillLoad(reg, false, m.spillBase+t.Slot, 8)
+		return
+	case ir.RefConst:
+		switch c := m.f.Consts[ref.ID]; c.Kind {
+		case ir.ConstInt:
+			m.movImm(reg, c.Int, true)
+			return
+		case ir.ConstSym:
+			m.materializeSym(reg, c)
+			return
+		}
+	}
+	m.fail("arm64: cannot materialize pacia operand %v", ref)
+}
+
 // --- parallel moves --------------------------------------------------------
 
 func (m *mc) parallelMove(pairs []movePairLoc) {
@@ -1655,6 +1703,8 @@ func (m *mc) instr(in *ir.Instr) {
 		phys := mreg(Reg(in.Args[1].ID))
 		v := m.src(in.Args[0], 0, in.Cls.Size())
 		m.emitReg(in.Cls, phys, v)
+	case ir.OPacia:
+		m.emitPacia(in)
 	case ir.OSafepoint:
 		// Let the GC strategy emit code here (e.g. a poll); the stack map is then
 		// recorded at the resulting PC — the point a collection would resume at.
