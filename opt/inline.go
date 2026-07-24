@@ -12,7 +12,7 @@ import "github.com/evanphx/cg12/ir"
 // trade), and it is what lets an interpreter's fast-path helpers fold into the
 // dispatch loop without the hundreds of shared helpers cascading in and bloating it.
 const (
-	inlineSmallBudget = 24  // a multi-site callee inlines only when at most this size
+	inlineSmallBudget = 24 // a multi-site callee inlines only when at most this size
 	inlineOnceBudget  = 24 // a single-site callee inlines up to this size
 )
 
@@ -389,7 +389,12 @@ func spliceCall(caller *ir.Func, b *ir.Block, idx int, callee *ir.Func, cg *call
 // cloneInstr copies an instruction, remapping every value reference and any block
 // reference (an OBlockAddr's &&label target) into the caller's cloned body.
 func cloneInstr(in *ir.Instr, mapRef func(ir.Ref) ir.Ref, mapBlock func(*ir.Block) *ir.Block) ir.Instr {
-	out := ir.Instr{Op: in.Op, Cls: in.Cls, To: mapRef(in.To), Cmp: in.Cmp, Aux: in.Aux, Unroll: in.Unroll, RetAgg: in.RetAgg, Asm: in.Asm, Intrin: in.Intrin, Pos: in.Pos}
+	// Volatile and Tail are semantic flags, not scheduling hints: a cloned
+	// volatile store is still observable and a cloned tail call is still in tail
+	// position, so both must ride along. Amode is deliberately not copied -- it is
+	// set only during lowering, after every pass that clones instructions has run,
+	// so it is always zero here.
+	out := ir.Instr{Op: in.Op, Cls: in.Cls, To: mapRef(in.To), Cmp: in.Cmp, Aux: in.Aux, Unroll: in.Unroll, RetAgg: in.RetAgg, Asm: in.Asm, Intrin: in.Intrin, Pos: in.Pos, Volatile: in.Volatile, Tail: in.Tail}
 	if in.Blk != nil {
 		out.Blk = mapBlock(in.Blk)
 	}

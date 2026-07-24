@@ -103,6 +103,10 @@ func DefaultPipeline() []Pass {
 		FuncPass("loadelim", LoadElim),
 		FuncPass("deadalloc", DeadAlloc),
 		FuncPass("gvn", GVN),
+		// Threading turns a phi-then-rebranch into a direct edge; fold/gvn above
+		// canonicalize the condition so it fires, and simplifycfg below absorbs the
+		// clone into its predecessor and folds the branches threading exposes.
+		JumpThreadPass(),
 		FuncPass("simplifycfg", SimplifyCFG),
 		FuncPass("dce", DCE),
 	)

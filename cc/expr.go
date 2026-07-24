@@ -695,7 +695,18 @@ func (g *gen) logical(and bool, ln, rn moderncc.ExpressionNode) ir.Ref {
 	// Store and load the 0/1 result at full width. A byte-wide load of the word-wide
 	// store would leave the slot accessed at mixed widths, which mem2reg cannot
 	// promote -- so every && / || would keep its result in memory and reload it.
-	g.cur.Store(g.boolOf(l), res)
+	//
+	// On this edge the stored value is only ever observed when the branch below
+	// short-circuits to endB: for && that is l == false (result 0), for || it is
+	// l == true (result 1). Storing that constant instead of boolOf(l) is identical
+	// on the only path that reads it, drops the boolean materialization, and -- once
+	// mem2reg promotes the slot -- leaves the merge phi's short-circuit operand a
+	// constant that jump threading can fold through the consumer branch.
+	short := g.fn.Word(0)
+	if !and {
+		short = g.fn.Word(1)
+	}
+	g.cur.Store(short, res)
 	if and {
 		g.cur.Jnz(l, rhsB, endB) // if false, short-circuit to end
 	} else {

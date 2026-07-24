@@ -10,10 +10,11 @@ import (
 	"testing"
 	"time"
 
+	"github.com/evanphx/cg12/analysis"
 	"github.com/evanphx/cg12/arm64"
 	"github.com/evanphx/cg12/cc"
-	"github.com/evanphx/cg12/ir"
 	"github.com/evanphx/cg12/internal/testenv"
+	"github.com/evanphx/cg12/ir"
 	"github.com/evanphx/cg12/opt"
 	"github.com/stretchr/testify/require"
 )
@@ -38,7 +39,22 @@ type cDiffCase struct {
 	src  string
 }
 
+// readTestdata loads a committed C program from testdata. The jump-threading
+// reproducers live as real files (not inline strings) because they are also the
+// objdump targets for the instruction-count acceptance checks, so the file on
+// disk is the single source of truth for both the differential run and objdump.
+func readTestdata(name string) string {
+	b, err := os.ReadFile(filepath.Join("testdata", name))
+	if err != nil {
+		panic(err)
+	}
+	return string(b)
+}
+
 var cDiffCases = []cDiffCase{
+	{"mini-and-fastpath", readTestdata("mini_and.c")},
+	{"sentinel-comp", readTestdata("comp.c")},
+
 	{"constant-initializers", `
 #include <stdio.h>
 double  di = 1;          /* an int literal initializing a double */
@@ -431,6 +447,7 @@ func cg12Output(t *testing.T, gcc, src string, optimize bool) string {
 		// run might not exercise (it depends on inputs) but that verification catches
 		// unconditionally.
 		require.NoError(t, ir.VerifyModule(m), "optimized IR is malformed")
+		require.NoError(t, analysis.VerifyDominanceModule(m), "optimized IR breaks SSA dominance")
 	}
 	code, err := arm64.CompileObject(m)
 	require.NoError(t, err)

@@ -271,6 +271,44 @@ int main(void){ return go(41) == 42 ? 0 : 1; }`)
 	assert.Equal(t, 0, code)
 }
 
+func TestInlinePreservesVolatile(t *testing.T) {
+	// A callee with a volatile store: cloning it into the caller must keep the
+	// store volatile, or the observable write can be reordered or eliminated once
+	// it is inlined. cloneInstr used to drop the flag.
+	m := ir.NewModule()
+	st := m.NewFuncVoid("vstore")
+	p, v := st.Param("p", ir.ClsP), st.Param("v", ir.ClsW)
+	se := st.Entry()
+	se.Store(v, p)
+	se.Instrs[len(se.Instrs)-1].Volatile = true // mark the store volatile
+	se.RetVoid()
+
+	mn := m.NewFunc("go", ir.ClsW).Export()
+	x := mn.Param("x", ir.ClsW)
+	me := mn.Entry()
+	buf := me.Alloc(4, 4)
+	me.CallVoid(mn.Sym("vstore", 0), buf, x)
+	me.Ret(me.Load(ir.ClsW, buf))
+
+	require.True(t, opt.Inline(m))
+
+	var found, vol bool
+	for _, f := range m.Funcs {
+		if f.Name != "go" {
+			continue
+		}
+		for _, b := range f.Blocks {
+			for i := range b.Instrs {
+				if in := &b.Instrs[i]; in.Op == ir.OStorew {
+					found, vol = true, in.Volatile
+				}
+			}
+		}
+	}
+	require.True(t, found, "inlined store present in caller")
+	assert.True(t, vol, "inlined store stayed volatile")
+}
+
 func TestUnrollMutualRecursion(t *testing.T) {
 	// iseven <-> isodd is a two-function recursion cycle. Bounded unrolling
 	// expands the cycle a fixed number of levels and leaves a residual recursive
