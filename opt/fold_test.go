@@ -199,6 +199,80 @@ func TestFoldReflexiveCompare(t *testing.T) {
 	assert.Equal(t, int64(1), v)
 }
 
+func TestFoldRedundantBooleanReTestRemoved(t *testing.T) {
+	// (a == b) is already 0/1, so ((a==b) != 0) is just (a==b).
+	f := ir.NewModule().NewFunc("c", ir.ClsW)
+	a := f.Param("a", ir.ClsW)
+	b := f.Param("b", ir.ClsW)
+	e := f.Entry()
+	inner := e.Cmp(ir.CmpEq, ir.ClsW, a, b)
+	e.Ret(e.Cmp(ir.CmpNe, ir.ClsW, inner, f.Word(0)))
+
+	assert.True(t, Fold(f))
+	assert.Equal(t, 1, countOp(f, ir.OCmp), "the redundant != 0 re-test is removed")
+	assert.Equal(t, inner, e.Jmp.Arg, "the return value is the original comparison")
+}
+
+func TestFoldAndOneIsBoolean(t *testing.T) {
+	// (x & 1) is 0/1, so ((x & 1) != 0) folds back to (x & 1).
+	f := ir.NewModule().NewFunc("c", ir.ClsW)
+	x := f.Param("x", ir.ClsW)
+	e := f.Entry()
+	bit := e.And(ir.ClsW, x, f.Word(1))
+	e.Ret(e.Cmp(ir.CmpNe, ir.ClsW, bit, f.Word(0)))
+
+	assert.True(t, Fold(f))
+	assert.Equal(t, 0, countOp(f, ir.OCmp), "the != 0 on a one-bit value is removed")
+	assert.Equal(t, bit, e.Jmp.Arg)
+}
+
+func TestFoldNonBooleanCompareKept(t *testing.T) {
+	// (a + b) is not a boolean, so ((a+b) != 0) must be preserved.
+	f := ir.NewModule().NewFunc("c", ir.ClsW)
+	a := f.Param("a", ir.ClsW)
+	b := f.Param("b", ir.ClsW)
+	e := f.Entry()
+	sum := e.Add(ir.ClsW, a, b)
+	e.Ret(e.Cmp(ir.CmpNe, ir.ClsW, sum, f.Word(0)))
+
+	Fold(f)
+	assert.Equal(t, 1, countOp(f, ir.OCmp), "a compare of a non-boolean against 0 stays")
+}
+
+func TestFoldBranchThroughNeZero(t *testing.T) {
+	// jnz (x != 0), T, F  ->  jnz x, T, F  (any x).
+	f := ir.NewModule().NewFuncVoid("b")
+	x := f.Param("x", ir.ClsW)
+	e := f.Entry()
+	tb := f.NewBlock("t")
+	fb := f.NewBlock("f")
+	e.Jnz(e.Cmp(ir.CmpNe, ir.ClsW, x, f.Word(0)), tb, fb)
+	tb.RetVoid()
+	fb.RetVoid()
+
+	assert.True(t, Fold(f))
+	assert.Equal(t, x, e.Jmp.Arg, "the branch tests x directly")
+	assert.Equal(t, tb, e.Jmp.To, "!= 0 keeps the arms")
+	// The compare is now unused; DCE (a later pass) removes it, not Fold itself.
+}
+
+func TestFoldBranchThroughEqZeroSwapsArms(t *testing.T) {
+	// jnz (x == 0), T, F  ->  jnz x, F, T.
+	f := ir.NewModule().NewFuncVoid("b")
+	x := f.Param("x", ir.ClsW)
+	e := f.Entry()
+	tb := f.NewBlock("t")
+	fb := f.NewBlock("f")
+	e.Jnz(e.Cmp(ir.CmpEq, ir.ClsW, x, f.Word(0)), tb, fb)
+	tb.RetVoid()
+	fb.RetVoid()
+
+	assert.True(t, Fold(f))
+	assert.Equal(t, x, e.Jmp.Arg)
+	assert.Equal(t, fb, e.Jmp.To, "== 0 swaps the arms")
+	assert.Equal(t, tb, e.Jmp.To2)
+}
+
 func TestFoldDivByZeroKept(t *testing.T) {
 	f := ir.NewModule().NewFunc("d", ir.ClsW)
 	e := f.Entry()

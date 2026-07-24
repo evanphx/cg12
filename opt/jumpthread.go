@@ -284,7 +284,9 @@ func edgeEnv(f *ir.Func, b, p *ir.Block) map[uint32]ir.Ref {
 		for k, a := range in.Args {
 			tmp.Args[k] = resolveRef(env, a)
 		}
-		if r, ok := foldInstr(f, &tmp); ok {
+		// nil def map: this edge-specialised fold only needs constant folding, not
+		// the boolean-def analysis (isBoolean treats a missing def as non-boolean).
+		if r, ok := foldInstr(f, nil, &tmp); ok {
 			env[in.To.ID] = r
 		}
 	}

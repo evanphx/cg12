@@ -11,6 +11,7 @@ import (
 // value) is replaced and its uses rewritten. Running it inside [Optimize]'s
 // fixpoint yields full constant propagation.
 func Fold(f *ir.Func) bool {
+	def := defMap(f)
 	s := subst{}
 	changed := false
 	for _, b := range f.Blocks {
@@ -19,7 +20,7 @@ func Fold(f *ir.Func) bool {
 			if in.To.IsNone() {
 				continue
 			}
-			if r, ok := foldInstr(f, in); ok {
+			if r, ok := foldInstr(f, def, in); ok {
 				s[in.To.ID] = r
 				b.Instrs[i] = ir.Instr{Op: ir.ONop}
 				changed = true
@@ -30,11 +31,96 @@ func Fold(f *ir.Func) bool {
 			}
 		}
 	}
+	for _, b := range f.Blocks {
+		if foldBranch(f, def, b) {
+			changed = true
+		}
+	}
 	if changed {
 		applySubst(f, s)
 		removeNops(f)
 	}
 	return changed
+}
+
+// defMap indexes each temporary to its defining instruction, so a fold can look
+// at how an operand was produced (e.g. whether it is already a 0/1 boolean).
+func defMap(f *ir.Func) map[uint32]*ir.Instr {
+	def := map[uint32]*ir.Instr{}
+	for _, b := range f.Blocks {
+		for i := range b.Instrs {
+			if in := &b.Instrs[i]; in.To.Kind == ir.RefTemp {
+				def[in.To.ID] = in
+			}
+		}
+	}
+	return def
+}
+
+// isBoolean reports whether r is known to hold 0 or 1. A comparison result is the
+// common case; an AND against 1 also is. This lets a redundant compare-against-zero
+// on an already-boolean value be dropped rather than re-materialized.
+func isBoolean(f *ir.Func, def map[uint32]*ir.Instr, r ir.Ref) bool {
+	if r.Kind != ir.RefTemp {
+		return false
+	}
+	d := def[r.ID]
+	if d == nil {
+		return false
+	}
+	switch d.Op {
+	case ir.OCmp:
+		return true
+	case ir.OAnd:
+		if c, ok := constInt(f, d.Args[0]); ok && c == 1 {
+			return true
+		}
+		if c, ok := constInt(f, d.Args[1]); ok && c == 1 {
+			return true
+		}
+	}
+	return false
+}
+
+// zeroCmpOperand returns the non-zero operand x of a compare against a zero
+// constant (x != 0 or x == 0), along with the predicate. It is the hook for
+// collapsing the boolean re-tests a front end emits for !, &&, and ||.
+func zeroCmpOperand(f *ir.Func, in *ir.Instr) (ir.Ref, ir.Cmp, bool) {
+	if in.Op != ir.OCmp || (in.Cmp != ir.CmpEq && in.Cmp != ir.CmpNe) {
+		return ir.R, 0, false
+	}
+	if c, ok := constInt(f, in.Args[1]); ok && c == 0 {
+		return in.Args[0], in.Cmp, true
+	}
+	if c, ok := constInt(f, in.Args[0]); ok && c == 0 {
+		return in.Args[1], in.Cmp, true
+	}
+	return ir.R, 0, false
+}
+
+// foldBranch rewrites a conditional branch that tests a compare-against-zero so
+// it tests the compared value directly: jnz (a != 0) -> jnz a, and jnz (a == 0)
+// -> jnz a with the arms swapped. This is valid for any a (the branch only asks
+// whether the condition is non-zero), and it lets the backend fuse the real
+// comparison, or the value itself, into the branch instead of materializing an
+// intermediate boolean. It collapses the cnew/ceqw chains produced by !, &&, ||.
+func foldBranch(f *ir.Func, def map[uint32]*ir.Instr, b *ir.Block) bool {
+	if b.Jmp.Kind != ir.JmpJnz || b.Jmp.Arg.Kind != ir.RefTemp {
+		return false
+	}
+	d := def[b.Jmp.Arg.ID]
+	if d == nil {
+		return false
+	}
+	x, pred, ok := zeroCmpOperand(f, d)
+	if !ok {
+		return false
+	}
+	b.Jmp.Arg = x
+	if pred == ir.CmpEq {
+		b.Jmp.To, b.Jmp.To2 = b.Jmp.To2, b.Jmp.To
+	}
+	return true
 }
 
 // strengthReduce rewrites a multiply by a power of two into a left shift, in
@@ -73,7 +159,7 @@ func log2(v int64) int64 {
 }
 
 // foldInstr returns the replacement reference for an instruction, if any.
-func foldInstr(f *ir.Func, in *ir.Instr) (ir.Ref, bool) {
+func foldInstr(f *ir.Func, def map[uint32]*ir.Instr, in *ir.Instr) (ir.Ref, bool) {
 	switch in.Op {
 	case ir.OAdd, ir.OSub, ir.OMul, ir.ODiv, ir.OUDiv, ir.ORem, ir.OURem,
 		ir.OAnd, ir.OOr, ir.OXor, ir.OShl, ir.OShr, ir.OSar:
@@ -142,6 +228,14 @@ func foldInstr(f *ir.Func, in *ir.Instr) (ir.Ref, bool) {
 		cb, bok := constInt(f, b)
 		if aok && bok && !in.Cmp.IsFloat() {
 			return f.ConstInt(in.Cls, evalCmp(in.Cmp, f.ClassOf(a), ca, cb)), true
+		}
+		// (bool != 0) is just bool: when a value is already 0/1, comparing it
+		// against zero re-materializes what it already is. Requires matching class
+		// so the result stays well-typed.
+		if in.Cmp == ir.CmpNe {
+			if x, _, ok := zeroCmpOperand(f, in); ok && isBoolean(f, def, x) && f.ClassOf(x) == in.Cls {
+				return x, true
+			}
 		}
 	}
 	return ir.R, false
