@@ -461,6 +461,13 @@ func EorImm(w64 bool, rd, rn Reg, n, immr, imms uint32) uint32 {
 	return logicalImm(w64, 2, rd, rn, n, immr, imms)
 }
 
+// AndsImm/AndsReg encode ANDS (AND setting the flags). With rd = XZR (31) this is
+// TST -- a flags-only mask test, the `if (x & mask)` branch condition.
+func AndsImm(w64 bool, rd, rn Reg, n, immr, imms uint32) uint32 {
+	return logicalImm(w64, 3, rd, rn, n, immr, imms)
+}
+func AndsReg(w64 bool, rd, rn, rm Reg) uint32 { return logicalReg(w64, 3, rd, rn, rm) }
+
 // Extr encodes EXTR rd, rn, rm, #lsb (the low bits are taken from rm, the high
 // bits from rn). ROR is EXTR rd, rn, rn, #shift.
 func Extr(w64 bool, rd, rn, rm Reg, lsb uint32) uint32 {

@@ -1145,10 +1145,16 @@ func (m *mc) block(b *ir.Block) {
 		m.recordLoc(in.Pos)
 		m.recordInline(in.Inl)
 		if in == fuseCmp {
-			// Emit the comparison as flags only (no cset); the block's terminator
-			// branches on those flags. Reuse the predecessor's identical comparison
-			// when it already set them.
-			if !m.reusesPredFlags(b, fuseCmp) {
+			switch {
+			case fuseCmp.Op == ir.OAnd:
+				// `if (x & mask)` -> tst (flags-only); the terminator branches on it.
+				m.newSel().tstFlags(fuseCmp)
+			case m.isZeroCmp(fuseCmp):
+				// `== 0` / `!= 0` needs no flags: the terminator emits cbz/cbnz on the
+				// operand directly, so emit nothing here.
+			case !m.reusesPredFlags(b, fuseCmp):
+				// Any other comparison, emitted flags-only (no cset), reusing a
+				// predecessor's identical comparison when it already set the flags.
 				m.newSel().cmpFlags(fuseCmp)
 			}
 			i++
@@ -1198,7 +1204,7 @@ func (m *mc) fusableCmp(b *ir.Block) *ir.Instr {
 	idx := -1
 	for i := range b.Instrs {
 		if in := &b.Instrs[i]; in.To.Kind == ir.RefTemp && in.To.ID == b.Jmp.Arg.ID {
-			if in.Op != ir.OCmp {
+			if in.Op != ir.OCmp && !m.tstableAnd(in) {
 				return nil
 			}
 			idx = i
@@ -1224,14 +1230,90 @@ func (m *mc) fusableCmp(b *ir.Block) *ir.Instr {
 // emitFusedBranch emits the block's terminator as a branch on the flags the
 // fused comparison (already emitted flags-only in the block body) set: to To when
 // the predicate holds (the jnz's non-zero arm), else to To2.
+// cmpZeroReg reports an integer comparison that is an equality test against the
+// constant 0 (`x == 0` or `x != 0`), returning x and whether the test is `== 0`.
+// Fused into a branch, such a test becomes a single cbz/cbnz on x, rather than
+// `cmp x,#0; b.cond`.
+func (m *mc) cmpZeroReg(cmp *ir.Instr) (ir.Ref, bool, bool) {
+	if cmp.Op != ir.OCmp || (cmp.Cmp != ir.CmpEq && cmp.Cmp != ir.CmpNe) {
+		return ir.R, false, false
+	}
+	if m.f.ClassOf(cmp.Args[0]).IsFloat() {
+		return ir.R, false, false // fcmp sets flags; there is no fp cbz
+	}
+	a, bb := cmp.Args[0], cmp.Args[1]
+	if v, ok := intConst(m.f, bb); ok && v == 0 {
+		return a, cmp.Cmp == ir.CmpEq, true
+	}
+	if v, ok := intConst(m.f, a); ok && v == 0 {
+		return bb, cmp.Cmp == ir.CmpEq, true
+	}
+	return ir.R, false, false
+}
+
+// tstableAnd reports whether in is an integer AND that can be emitted as a
+// flags-only tst feeding a branch. A constant mask must be a valid logical
+// immediate; a register mask always works.
+func (m *mc) tstableAnd(in *ir.Instr) bool {
+	if in.Op != ir.OAnd || in.Cls.IsFloat() {
+		return false
+	}
+	for _, a := range in.Args {
+		if v, ok := intConst(m.f, a); ok {
+			sz := int(in.Cls.Size())
+			mask := uint64(v)
+			if sz == 4 {
+				mask &= 0xffffffff
+			}
+			_, _, _, ok := a64.EncodeBitmask(mask, sz)
+			return ok
+		}
+	}
+	return true
+}
+
+// isZeroCmp reports whether cmp is an equality test against 0 (see cmpZeroReg).
+func (m *mc) isZeroCmp(cmp *ir.Instr) bool {
+	_, _, ok := m.cmpZeroReg(cmp)
+	return ok
+}
+
 func (m *mc) emitFusedBranch(b *ir.Block, cmp *ir.Instr) {
+	s := m.newSel()
+	// `if (x & mask)` fuses to `tst x, mask` (flags-only, already emitted in the
+	// body) then a branch on the result being non-zero -- no materialized AND
+	// result, no register tied up.
+	if cmp.Op == ir.OAnd {
+		cond, _ := condOf(ir.CmpNe, false)
+		s.b.bcondTo(cond, b.Jmp.To.Name)
+		if b.Jmp.To2 != m.nextBlock { // else fall through
+			s.b.branch(b.Jmp.To2)
+		}
+		return
+	}
+	// `x == 0` / `x != 0` is a cbz/cbnz on x -- one instruction, no flags, no
+	// materialized boolean. The jnz takes To when its condition (the comparison
+	// result) is non-zero: for `== 0` that is when x is zero (cbz), for `!= 0` when
+	// x is non-zero (cbnz).
+	if reg, isEq, ok := m.cmpZeroReg(cmp); ok {
+		sz := m.f.ClassOf(reg).Size()
+		r := s.src(reg, 0, sz)
+		if isEq {
+			s.b.cbzTo(sz == 8, r, b.Jmp.To.Name)
+		} else {
+			s.b.cbnzTo(sz == 8, r, b.Jmp.To.Name)
+		}
+		if b.Jmp.To2 != m.nextBlock { // else fall through
+			s.b.branch(b.Jmp.To2)
+		}
+		return
+	}
 	float := m.f.ClassOf(cmp.Args[0]).IsFloat()
 	cond, ok := condOf(cmp.Cmp, float)
 	if !ok {
 		m.fail("arm64: cannot fuse comparison %v into a branch", cmp.Cmp)
 		return
 	}
-	s := m.newSel()
 	s.b.bcondTo(cond, b.Jmp.To.Name)
 	if b.Jmp.To2 != m.nextBlock { // else fall through
 		s.b.branch(b.Jmp.To2)
@@ -1260,7 +1342,10 @@ func (m *mc) reusesPredFlags(b *ir.Block, cmp *ir.Instr) bool {
 		return false
 	}
 	pc := m.fusableCmp(preds[0])
-	if pc == nil || len(pc.Args) != 2 {
+	// Only a real comparison leaves reusable subtraction flags. An AND fuses to
+	// tst (different flag meaning) and an `== 0`/`!= 0` fuses to cbz/cbnz (no flags
+	// at all), so neither predecessor can lend its flags to b's comparison.
+	if pc == nil || pc.Op != ir.OCmp || m.isZeroCmp(pc) || len(pc.Args) != 2 {
 		return false
 	}
 	// Same operands in the same order produce the same cmp, so its flags answer

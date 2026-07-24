@@ -761,6 +761,30 @@ func (s *sel) logical(in *ir.Instr, op logicalOp) {
 	s.binReg(in, sz, func(rd, rn, rm Reg) { s.b.logicalReg(op, w64, rd, rn, rm) })
 }
 
+// tstFlags emits an AND as a flags-only tst (ANDS into XZR), for a fused
+// `if (x & mask)` branch: the mask result is never materialized into a register.
+func (s *sel) tstFlags(in *ir.Instr) {
+	sz := in.Cls.Size()
+	w64 := sz == 8
+	aRef, bRef := in.Args[0], in.Args[1]
+	if _, ok := intConst(s.f, bRef); !ok {
+		if _, ok := intConst(s.f, aRef); ok {
+			aRef, bRef = bRef, aRef
+		}
+	}
+	if v, ok := intConst(s.f, bRef); ok {
+		val := uint64(v)
+		if sz == 4 {
+			val &= 0xffffffff
+		}
+		s.b.tstImm(w64, s.src(aRef, 0, sz), val)
+		return
+	}
+	r1 := s.src(aRef, 0, sz)
+	r2 := s.src(bRef, 1, sz)
+	s.b.tstReg(w64, r1, r2)
+}
+
 // shift emits a shift, using the immediate form for a constant amount.
 func (s *sel) shift(in *ir.Instr, op shiftOp) {
 	sz := in.Cls.Size()

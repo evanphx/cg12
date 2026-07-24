@@ -38,6 +38,8 @@ type asmb interface {
 	addImm(w64 bool, rd, rn Reg, imm uint32, lsl12 bool)
 	subImm(w64 bool, rd, rn Reg, imm uint32, lsl12 bool)
 	logicalImm(op logicalOp, w64 bool, rd, rn Reg, imm uint64)
+	tstImm(w64 bool, rn Reg, imm uint64)
+	tstReg(w64 bool, rn, rm Reg)
 	shiftImm(op shiftOp, w64 bool, rd, rn Reg, sh uint32)
 	rotrImm(w64 bool, rd, rn Reg, sh uint32)
 
@@ -117,6 +119,7 @@ type asmb interface {
 	freshLabel(prefix string) string
 	label(name string)
 	branchTo(name string)
+	cbzTo(w64 bool, rn Reg, name string)
 	cbnzTo(w64 bool, rn Reg, name string)
 	bcondTo(cond a64.Cond, name string)
 
@@ -223,6 +226,24 @@ func (b *mcAsm) sdiv(w64 bool, rd, rn, rm Reg) {
 }
 func (b *mcAsm) udiv(w64 bool, rd, rn, rm Reg) {
 	b.prog.Emit(a64.Udiv(w64, mreg(rd), mreg(rn), mreg(rm)))
+}
+
+// tstImm/tstReg emit TST -- ANDS into XZR, a flags-only mask test for a fused
+// `if (x & mask)` branch.
+func (b *mcAsm) tstImm(w64 bool, rn Reg, imm uint64) {
+	size := 8
+	if !w64 {
+		size = 4
+	}
+	n, immr, imms, ok := a64.EncodeBitmask(imm, size)
+	if !ok {
+		b.fail("arm64: %#x is not a logical immediate", imm)
+		return
+	}
+	b.prog.Emit(a64.AndsImm(w64, a64.Reg(31), mreg(rn), n, immr, imms))
+}
+func (b *mcAsm) tstReg(w64 bool, rn, rm Reg) {
+	b.prog.Emit(a64.AndsReg(w64, a64.Reg(31), mreg(rn), mreg(rm)))
 }
 
 func (b *mcAsm) logicalReg(op logicalOp, w64 bool, rd, rn, rm Reg) {
@@ -587,6 +608,7 @@ func (b *mcAsm) freshLabel(prefix string) string {
 }
 func (b *mcAsm) label(name string)                    { b.prog.Label(name) }
 func (b *mcAsm) branchTo(name string)                 { b.prog.B(name) }
+func (b *mcAsm) cbzTo(w64 bool, rn Reg, name string)  { b.prog.Cbz(w64, mreg(rn), name) }
 func (b *mcAsm) cbnzTo(w64 bool, rn Reg, name string) { b.prog.Cbnz(w64, mreg(rn), name) }
 func (b *mcAsm) bcondTo(cond a64.Cond, name string)   { b.prog.Bcond(cond, name) }
 func (b *mcAsm) raw(word uint32)                      { b.prog.Emit(word) }
