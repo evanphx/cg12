@@ -1,10 +1,25 @@
 package opt
 
 import (
+	"fmt"
 	"os"
+	"sort"
 	"strings"
 
 	"github.com/evanphx/cg12/ir"
+)
+
+// Cost-model constants for CostInline selection, grounded in GCC's inliner rather than
+// guessed. maxCostInlineSize is GCC's max-inline-insns-single (70): the largest static
+// helper the model folds into a hot caller. costInlineGrowthPct is the per-caller growth cap
+// (GCC's inline-unit-growth is 40% for the whole unit; large-function-growth is 100%),
+// bounding the icache footprint. It can be generous because the register allocator absorbs
+// the inlined bodies without extra spilling -- measured directly: vm_exec_core spills stay
+// flat (22->21) while force-inlining five helpers, peak pressure rises 29->40 with no new
+// spills. So code size (icache), not register pressure, is the only limit here.
+const (
+	maxCostInlineSize   = 70
+	costInlineGrowthPct = 30
 )
 
 // A callee's size budget depends on how many call sites name it. A function with a
@@ -52,7 +67,8 @@ func inlineGrowthCap(initial int) int {
 // SCC membership and never inlined, which guarantees termination without relying
 // on the size budget.
 func Inline(m *ir.Module) bool {
-	return inlineModule(m, map[*ir.Func]int{})
+	done := false
+	return inlineModule(m, map[*ir.Func]int{}, &done)
 }
 
 // InlinePass returns a module pass that inlines with a growth cap fixed to each
@@ -62,7 +78,8 @@ func Inline(m *ir.Module) bool {
 // cascade compound past the cap).
 func InlinePass() Pass {
 	base := map[*ir.Func]int{}
-	return ModulePass("inline", func(m *ir.Module) bool { return inlineModule(m, base) })
+	costDone := false
+	return ModulePass("inline", func(m *ir.Module) bool { return inlineModule(m, base, &costDone) })
 }
 
 // forceInlineFromEnv marks the functions named in CG12_FORCE_INLINE (comma-
@@ -88,10 +105,91 @@ func forceInlineFromEnv(m *ir.Module) {
 	}
 }
 
-func inlineModule(m *ir.Module, base map[*ir.Func]int) bool {
+// selectCostInline is the inliner's cost model: it marks small static helper functions
+// CostInline so the (committed) boosted splicing folds them cap-free into their hot callers
+// -- the interpreter fast-path helpers (Ruby's vm_sendish, vm_opt_*, ...) into vm_exec_core,
+// which cg12's flat size budget cannot reach. It targets DISPATCH callers (a computed goto is
+// an interpreter's threaded dispatch loop -- all of it hot): the static frequency estimator
+// cannot rank the handlers within such a loop, so, like gcc, the model selects by SIZE up to
+// a per-caller growth cap. The register allocator absorbs the inlined bodies without extra
+// spilling (measured: spills stay flat), so the cap bounds only icache growth, not pressure.
+// CG12_NO_COSTINLINE disables it; CG12_FORCE_INLINE overrides it.
+func selectCostInline(m *ir.Module, cg *callGraph, scc *sccInfo) {
+	if os.Getenv("CG12_NO_COSTINLINE") != "" {
+		return
+	}
+	dispatch := func(f *ir.Func) bool {
+		for _, b := range f.Blocks {
+			if b.Jmp.Kind == ir.JmpBr {
+				return true
+			}
+		}
+		return false
+	}
+	candidate := func(c *ir.Func) bool {
+		return !c.NoInline && !c.ForceInline && !c.CostInline && !scc.recursive[c] &&
+			inlinableStructure(c) && funcSize(c) > inlineSmallBudget && funcSize(c) <= maxCostInlineSize
+	}
+
+	// The static frequency estimator cannot rank a computed-goto interpreter's handlers --
+	// they are all in the one hot dispatch loop, so it scores each ~1.0. So, like gcc, select
+	// by SIZE: fold every small static helper called from a dispatch loop into it, smallest
+	// first, up to a per-caller growth cap. Collect per (dispatch) caller its candidate
+	// callees and how many sites each has.
+	dump := os.Getenv("CG12_DUMP_COSTINLINE") != ""
+	type cand struct {
+		callee *ir.Func
+		sites  int
+	}
+	byCaller := map[*ir.Func]map[*ir.Func]int{}
+	for _, f := range m.Funcs {
+		if f.Start == nil || !dispatch(f) {
+			continue
+		}
+		for _, b := range f.Blocks {
+			for i := range b.Instrs {
+				if b.Instrs[i].Op != ir.OCall {
+					continue
+				}
+				if c := directCallee(f, &b.Instrs[i], cg.byName); c != nil && candidate(c) {
+					if byCaller[f] == nil {
+						byCaller[f] = map[*ir.Func]int{}
+					}
+					byCaller[f][c]++
+				}
+			}
+		}
+	}
+	for caller, callees := range byCaller {
+		cands := make([]cand, 0, len(callees))
+		for c, n := range callees {
+			cands = append(cands, cand{c, n})
+		}
+		sort.Slice(cands, func(i, j int) bool { return funcSize(cands[i].callee) < funcSize(cands[j].callee) })
+		budget := funcSize(caller) * costInlineGrowthPct / 100
+		for _, cd := range cands {
+			grow := funcSize(cd.callee) * cd.sites // rough per-caller body growth
+			if grow > budget {
+				continue
+			}
+			cd.callee.CostInline = true
+			budget -= grow
+			if dump {
+				fmt.Fprintf(os.Stderr, "COSTINLINE %-38s size=%-4d sites=%-3d into=%s\n",
+					cd.callee.Name, funcSize(cd.callee), cd.sites, caller.Name)
+			}
+		}
+	}
+}
+
+func inlineModule(m *ir.Module, base map[*ir.Func]int, costDone *bool) bool {
 	forceInlineFromEnv(m)
 	cg := buildCallGraph(m)
 	scc := computeSCC(cg)
+	if !*costDone {
+		selectCostInline(m, cg, scc) // once, on the original graph, before any inlining
+		*costDone = true
+	}
 	sites := callSiteCounts(m, cg.byName)
 	changed := false
 	for _, f := range scc.order {

@@ -213,6 +213,60 @@ func TestInlineCostInlineNoEviction(t *testing.T) {
 	assert.Equal(t, 0, countCalls(m), "both the large CostInline callee and the small helper are inlined")
 }
 
+func TestCostInlineSelectsDispatchHelpers(t *testing.T) {
+	// The cost model folds a medium static helper (past the ordinary size budget, so it
+	// would otherwise stay a call) into a computed-goto dispatch loop -- an interpreter's
+	// fast-path helper into its threaded core. An identically sized helper in ORDINARY code
+	// is left alone: the dispatch gate is what distinguishes the interpreter's hot loop.
+	medium := func(m *ir.Module, name string) {
+		f := m.NewFunc(name, ir.ClsW)
+		x := f.Param("x", ir.ClsW)
+		e := f.Entry()
+		acc := x
+		for i := 0; i < 40; i++ { // ~40 instrs: past inlineOnceBudget (24), under maxCostInlineSize (70)
+			acc = e.Add(ir.ClsW, acc, f.Word(int64(i)))
+		}
+		e.Ret(acc)
+	}
+	build := func() *ir.Module {
+		m := ir.NewModule()
+		medium(m, "hot")  // called from the dispatch loop -> selected
+		medium(m, "cold") // called from ordinary code -> not selected
+
+		// interp: a computed-goto dispatch loop, padded so its 30% growth budget admits hot.
+		interp := m.NewFunc("interp", ir.ClsW).Export()
+		pc := interp.Param("pc", ir.ClsP)
+		x := interp.Param("x", ir.ClsW)
+		e := interp.Entry()
+		acc := x
+		for i := 0; i < 150; i++ {
+			acc = e.Add(ir.ClsW, acc, interp.Word(int64(i)))
+		}
+		h1, h2 := interp.NewBlock("h1"), interp.NewBlock("h2")
+		e.BrIndirect(pc, h1, h2) // JmpBr: the dispatch
+		h1.Ret(h1.Call(ir.ClsW, interp.Sym("hot", 0), acc))
+		h2.Ret(acc)
+
+		// plain: ordinary (non-dispatch) code calling the identical cold helper.
+		plain := m.NewFunc("plain", ir.ClsW).Export()
+		p := plain.Param("p", ir.ClsW)
+		plain.Entry().Ret(plain.Entry().Call(ir.ClsW, plain.Sym("cold", 0), p))
+		return m
+	}
+
+	m := build()
+	opt.OptimizeModule(m)
+	assert.False(t, hasFunc(m, "hot"), "medium helper folded into the dispatch loop")
+	assert.True(t, hasFunc(m, "cold"), "identical helper in ordinary code left a call")
+
+	// CG12_NO_COSTINLINE turns the selector off: hot stays a call, like cold.
+	t.Setenv("CG12_NO_COSTINLINE", "1")
+	m2 := build()
+	opt.OptimizeModule(m2)
+	assert.True(t, hasFunc(m2, "hot"), "selector disabled: dispatch helper stays a call")
+	assert.True(t, hasFunc(m2, "cold"), "selector disabled: ordinary helper stays a call")
+}
+
 func TestInlineNoInlineBeatsForceInline(t *testing.T) {
 	// NoInline takes precedence if a function somehow carries both marks.
 	m := ir.NewModule()
