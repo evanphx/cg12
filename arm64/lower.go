@@ -29,6 +29,7 @@ func lower(f *ir.Func, tlsModel TLSModel) error {
 	foldIdioms(f)
 	foldAddressing(f)
 	fuseArithShift(f) // after foldAddressing: it gets first claim on address shifts
+	fuseBitfield(f)
 	lowerpass.SplitCriticalEdges(f)
 	lowerpass.CoalescePhis(f)
 	lowerpass.DestructSSA(f)
@@ -156,6 +157,70 @@ func canonCompares(f *ir.Func) {
 			}
 		}
 	}
+}
+
+// fuseBitfield rewrites `and(shr(x, lsb), mask)` -- a value shifted down and masked
+// to its low bits -- into a single unsigned bitfield extract (UBFX), the way gcc and
+// LLVM lower a `(v >> lsb) & mask` flag test. It requires the shift to be single-use
+// (so dropping it is free) and the mask to be a contiguous low run of bits, 2^width-1.
+// The lsb and width ride in the AND's Aux (otherwise unused on an AND); the selector
+// reads them back and emits ubfx. The shift stays logical (OShr) so the extracted
+// bits are exactly the source's.
+func fuseBitfield(f *ir.Func) {
+	uses, defOf := defUse(f)
+	single := func(r ir.Ref) bool { return r.Kind == ir.RefTemp && uses[r.ID] == 1 }
+	for _, b := range f.Blocks {
+		for i := range b.Instrs {
+			in := &b.Instrs[i]
+			if in.Op != ir.OAnd || in.Cls.IsFloat() {
+				continue
+			}
+			var maskRef, valRef ir.Ref
+			if _, ok := intConst(f, in.Args[1]); ok {
+				maskRef, valRef = in.Args[1], in.Args[0]
+			} else if _, ok := intConst(f, in.Args[0]); ok {
+				maskRef, valRef = in.Args[0], in.Args[1]
+			} else {
+				continue
+			}
+			mask, _ := intConst(f, maskRef)
+			width, ok := lowMaskWidth(uint64(mask), in.Cls.Size())
+			if !ok || !single(valRef) {
+				continue
+			}
+			sd := defOf(valRef)
+			if sd == nil || sd.Op != ir.OShr {
+				continue
+			}
+			lsb, ok := intConst(f, sd.Args[1])
+			if !ok || lsb <= 0 || int(lsb)+width > in.Cls.Size()*8 {
+				continue
+			}
+			src := sd.Args[0]
+			nop(sd)
+			in.Args = []ir.Ref{src, maskRef} // selection uses Args[0] + Aux; the mask is inert
+			in.Aux = lsb<<8 | int64(width)
+		}
+	}
+}
+
+// lowMaskWidth returns width when mask is the contiguous low mask 2^width-1, with
+// 1 <= width < the register's bit count (a full-width mask is a no-op, not extract).
+func lowMaskWidth(mask uint64, size int) (int, bool) {
+	if size == 4 {
+		mask &= 0xffffffff
+	}
+	if mask == 0 || mask&(mask+1) != 0 { // not of the form 2^width - 1
+		return 0, false
+	}
+	width := 0
+	for m := mask; m != 0; m >>= 1 {
+		width++
+	}
+	if width >= size*8 {
+		return 0, false
+	}
+	return width, true
 }
 
 // swapCmp is the predicate that holds when a comparison's operands are exchanged.

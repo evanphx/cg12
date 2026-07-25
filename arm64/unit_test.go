@@ -319,6 +319,19 @@ func TestSelectMulAddFuses(t *testing.T) {
 	assert.NotContains(t, sub, "mul x")
 }
 
+func TestBitfieldExtractFuses(t *testing.T) {
+	// (x >> lsb) & (2^width - 1) folds into a single ubfx, dropping the shift-and-mask.
+	m := ir.NewModule()
+	f := m.NewFunc("f", ir.ClsL).Export()
+	x := f.Param("x", ir.ClsL)
+	e := f.Entry()
+	e.Ret(e.And(ir.ClsL, e.Shr(ir.ClsL, x, f.Long(12)), f.Long(0xf)))
+	asm := disasmModule(t, m)
+	assert.Contains(t, asm, "ubfx x0, x0, #12, #4", "shift-and-mask becomes a bitfield extract")
+	assert.NotContains(t, asm, "lsr", "the standalone shift is gone")
+	assert.NotContains(t, asm, "and x", "the standalone mask is gone")
+}
+
 func TestCompareConstantFolds(t *testing.T) {
 	// A comparison with the constant first (CONST == x) folds into a compare-immediate
 	// by swapping the operands, rather than materializing the constant into a register.

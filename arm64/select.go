@@ -756,6 +756,16 @@ func (s *sel) addSub(in *ir.Instr, sub bool) {
 func (s *sel) logical(in *ir.Instr, op logicalOp) {
 	sz := in.Cls.Size()
 	w64 := sz == 8
+	// fuseBitfield marks an AND that is an unsigned bitfield extract of a shifted
+	// value (and(shr(x, lsb), 2^width-1)) with lsb/width packed in Aux.
+	if op == logAnd && in.Aux != 0 {
+		lsb, width := uint32(in.Aux>>8), uint32(in.Aux&0xff)
+		rn := s.src(in.Args[0], 0, sz)
+		d, done := s.dst(in.To, sz)
+		s.b.ubfx(w64, d, rn, lsb, width)
+		done()
+		return
+	}
 	aRef, bRef := in.Args[0], in.Args[1]
 	if _, ok := intConst(s.f, bRef); !ok {
 		if _, ok := intConst(s.f, aRef); ok {

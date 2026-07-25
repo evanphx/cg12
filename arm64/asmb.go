@@ -46,6 +46,7 @@ type asmb interface {
 	tstReg(w64 bool, rn, rm Reg)
 	shiftImm(op shiftOp, w64 bool, rd, rn Reg, sh uint32)
 	rotrImm(w64 bool, rd, rn Reg, sh uint32)
+	ubfx(w64 bool, rd, rn Reg, lsb, width uint32)
 
 	// Floating point.
 	fop(op floatOp, dbl bool, rd, rn, rm Reg)
@@ -347,6 +348,9 @@ func (b *mcAsm) shiftImm(op shiftOp, w64 bool, rd, rn Reg, sh uint32) {
 }
 func (b *mcAsm) rotrImm(w64 bool, rd, rn Reg, sh uint32) {
 	b.prog.Emit(a64.RorImm(w64, mreg(rd), mreg(rn), sh))
+}
+func (b *mcAsm) ubfx(w64 bool, rd, rn Reg, lsb, width uint32) {
+	b.prog.Emit(a64.Ubfm(w64, mreg(rd), mreg(rn), lsb, lsb+width-1))
 }
 func (b *mcAsm) fop(op floatOp, dbl bool, rd, rn, rm Reg) {
 	var enc func(bool, a64.Reg, a64.Reg, a64.Reg) uint32
