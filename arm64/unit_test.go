@@ -466,6 +466,36 @@ func findSym(t *testing.T, o *obj.Object, name string) obj.Sym {
 	return obj.Sym{}
 }
 
+func TestBlockLayoutFallThrough(t *testing.T) {
+	// A conditional's fall-through-capable successor (the false edge of a JmpJnz) is
+	// laid out immediately after it, so the branch to it is elided. Here `mid` sits
+	// between the conditional and its false target in creation order; the layout must
+	// pull the false target up to fall through, leaving only the taken branch to `hi`.
+	m := ir.NewModule()
+	f := m.NewFunc("f", ir.ClsL).Export()
+	x := f.Param("x", ir.ClsL)
+	e := f.Entry()
+	hi := f.NewBlock("hi")
+	lo := f.NewBlock("lo")
+	e.Jnz(e.Cmp(ir.CmpSgt, ir.ClsL, x, f.Long(10)), hi, lo)
+	hi.Ret(f.Long(1))
+	lo.Ret(f.Long(0))
+
+	order := layoutBlocks(f)
+	// Entry first, then its false target (lo) so the branch to it is elided, then hi.
+	// Creation order is [entry, hi, lo]; the layout pulls lo up behind the conditional.
+	require.Equal(t, []string{e.Name, "lo", "hi"}, blockNames(order),
+		"the false edge is laid out to fall through")
+}
+
+func blockNames(bs []*ir.Block) []string {
+	out := make([]string, len(bs))
+	for i, b := range bs {
+		out[i] = b.Name
+	}
+	return out
+}
+
 func TestCompileModulePropagatesError(t *testing.T) {
 	// A parameterless caller cannot tail-call through stack arguments (it has no
 	// incoming-argument area to reuse); the backend rejects it, and the error must

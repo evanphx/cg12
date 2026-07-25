@@ -555,10 +555,11 @@ func emitMachine(f *ir.Func, alloc *allocation, gc GCStrategy, tlsModel TLSModel
 	m.useCount = countTempUses(f)
 	m.preds = blockPreds(f)
 	m.prologue()
-	for i, b := range f.Blocks {
+	order := layoutBlocks(f)
+	for i, b := range order {
 		m.prog.Label(b.Name)
-		if i+1 < len(f.Blocks) {
-			m.nextBlock = f.Blocks[i+1]
+		if i+1 < len(order) {
+			m.nextBlock = order[i+1]
 		} else {
 			m.nextBlock = nil
 		}
