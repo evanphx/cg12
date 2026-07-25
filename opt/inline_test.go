@@ -267,6 +267,46 @@ func TestCostInlineSelectsDispatchHelpers(t *testing.T) {
 	assert.True(t, hasFunc(m2, "cold"), "selector disabled: ordinary helper stays a call")
 }
 
+func TestInlineAggregateReturn(t *testing.T) {
+	// An aggregate-returning callee inlines: spliceCall materializes the struct
+	// copy-at-return the ABI would emit, so the result is correct and the call is gone.
+	build := func() *ir.Module {
+		m := ir.NewModule()
+		pair := &ir.AggType{Name: "pair", Fields: []ir.Field{{Sub: ir.SubW}, {Sub: ir.SubW}}}
+		m.AddType(pair)
+		// mk(x) returns {x+1, x*2}
+		mk := m.NewFuncVoid("mk")
+		mk.HasRet = true
+		mk.RetAgg = pair
+		mx := mk.Param("x", ir.ClsW)
+		me := mk.Entry()
+		buf := me.Alloc(16, 8)
+		me.Store(me.Add(ir.ClsW, mx, mk.Word(1)), buf)
+		me.Store(me.Mul(ir.ClsW, mx, mk.Word(2)), me.Add(ir.ClsL, buf, mk.Long(4)))
+		me.Ret(buf)
+		// go(x) = mk(x).lo + mk(x).hi = (x+1) + (x*2) = 3x+1
+		g := m.NewFunc("go", ir.ClsW).Export()
+		gx := g.Param("x", ir.ClsW)
+		ge := g.Entry()
+		r := ge.Call(ir.ClsL, g.Sym("mk", 0), gx)
+		ge.Instrs[len(ge.Instrs)-1].RetAgg = pair
+		lo := ge.Load(ir.ClsW, r)
+		hi := ge.Load(ir.ClsW, ge.Add(ir.ClsL, r, g.Long(4)))
+		ge.Ret(ge.Add(ir.ClsW, lo, hi))
+		return m
+	}
+
+	m := build()
+	opt.OptimizeModule(m)
+	assert.Equal(t, 0, countCalls(m), "the aggregate-returning call is inlined")
+	assert.False(t, hasFunc(m, "mk"), "the dead callee is removed")
+
+	code := runModule(t, m, `
+extern int go(int);
+int main(void){ return (go(5) == 16 && go(10) == 31) ? 0 : 1; }`)
+	assert.Equal(t, 0, code)
+}
+
 func TestInlineNoInlineBeatsForceInline(t *testing.T) {
 	// NoInline takes precedence if a function somehow carries both marks.
 	m := ir.NewModule()

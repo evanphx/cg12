@@ -332,12 +332,18 @@ func directCallee(caller *ir.Func, call *ir.Instr, byName map[string]*ir.Func) *
 // findInlinable. Whether an inlinable callee is worth inlining is a separate cost
 // decision (worthInlining).
 func inlinableStructure(callee *ir.Func) bool {
-	if callee.Start == nil || callee.Variadic || callee.RetAgg != nil {
+	if callee.Start == nil || callee.Variadic {
+		return false
+	}
+	// An aggregate-returning callee is inlinable: spliceCall materializes the
+	// copy-at-return the ABI would otherwise emit (see aggCopy). CG12_NO_AGGINLINE
+	// disables it for bisection.
+	if callee.RetAgg != nil && os.Getenv("CG12_NO_AGGINLINE") != "" {
 		return false
 	}
 	for _, p := range callee.Params {
 		if p.Agg != nil {
-			return false // by-value aggregate parameter
+			return false // by-value aggregate parameter (Stage B)
 		}
 	}
 	hasRet := false
@@ -405,6 +411,15 @@ func spliceCall(caller *ir.Func, b *ir.Block, idx int, callee *ir.Func, cg *call
 	args := call.Args[1:]
 	result := call.To
 
+	// An aggregate-returning callee returns a pointer to its value; the call's
+	// result is a pointer to a buffer holding a copy of it. Materialize that buffer
+	// and copy at each return (below), reproducing what the return ABI would emit.
+	aggRet := callee.RetAgg
+	aggSize := 0
+	if aggRet != nil {
+		aggSize, _ = aggRet.Layout()
+	}
+
 	// Snapshot the callee's body before mutating anything. The callee may BE the
 	// caller (self-recursion unrolling), in which case its temp/const/block
 	// slices alias the caller's and grow as we clone; the snapshot keeps the
@@ -456,6 +471,15 @@ func spliceCall(caller *ir.Func, b *ir.Block, idx int, callee *ir.Func, cg *call
 	cont.Jmp = b.Jmp
 	b.Instrs = b.Instrs[:idx:idx]
 
+	// The aggregate result buffer is allocated in the pre-call block, which
+	// dominates every cloned block and cont, so it is a legal definition of result.
+	if aggRet != nil && !result.IsNone() {
+		b.Instrs = append(b.Instrs, ir.Instr{
+			Op: ir.OAlloc16, Cls: ir.ClsL, To: result,
+			Args: []ir.Ref{caller.Long(int64(aggSize))},
+		})
+	}
+
 	// Clone the snapshotted blocks, then their contents (remapping every value
 	// and block reference), turning returns into jumps to the continuation.
 	blockMap := make(map[*ir.Block]*ir.Block, len(body))
@@ -491,11 +515,23 @@ func spliceCall(caller *ir.Func, b *ir.Block, idx int, callee *ir.Func, cg *call
 		for i := range s.instrs {
 			cl := cloneInstr(&s.instrs[i], mapRef, mapBlock)
 			cl.Inl = rebaseInline(s.instrs[i].Inl, site, rebaseCache)
+			if cl.Op == ir.OCall {
+				// After inlining, control returns to cont, so a call that was in tail
+				// position in the callee no longer is; a stray Tail flag would make
+				// tail-call lowering reject it.
+				cl.Tail = false
+			}
 			tb.Instrs = append(tb.Instrs, cl)
 		}
 		switch s.jmp.Kind {
 		case ir.JmpRet:
-			if !result.IsNone() && !s.jmp.Arg.IsNone() {
+			switch {
+			case aggRet != nil:
+				// Snapshot the returned aggregate into the result buffer.
+				if !result.IsNone() && !s.jmp.Arg.IsNone() {
+					aggCopy(caller, result, mapRef(s.jmp.Arg), aggSize, &tb.Instrs)
+				}
+			case !result.IsNone() && !s.jmp.Arg.IsNone():
 				retVals = append(retVals, mapRef(s.jmp.Arg))
 				retBlocks = append(retBlocks, tb)
 			}
@@ -524,8 +560,10 @@ func spliceCall(caller *ir.Func, b *ir.Block, idx int, callee *ir.Func, cg *call
 	// Enter the inlined body.
 	b.Jmp = ir.Jmp{Kind: ir.JmpJmp, To: blockMap[entry]}
 
-	// The call's result is the phi of the values the returns carried.
-	if !result.IsNone() {
+	// A scalar call's result is the phi of the values the returns carried. An
+	// aggregate result was placed in its buffer at each return above, so it needs no
+	// phi (result is defined once, by the OAlloc16 in the pre-call block).
+	if !result.IsNone() && aggRet == nil {
 		ph := &ir.Phi{Cls: caller.ClassOf(result), To: result, Args: retVals, Blocks: retBlocks}
 		cont.Phis = append(cont.Phis, ph)
 	}
@@ -562,14 +600,50 @@ func spliceCall(caller *ir.Func, b *ir.Block, idx int, callee *ir.Func, cg *call
 	}
 }
 
+// aggCopy appends chunked load/store instructions copying size bytes from src to
+// dst, the same lowering the aggregate-return ABI uses (arm64/amd64 emitMemcpy) but
+// at the target-independent IR level. Splicing an aggregate-returning callee needs
+// it: the callee returns a pointer to its value, and C's copy-at-return semantics
+// require snapshotting that value into the caller's result buffer at the return
+// point (the pointee may be caller-reachable memory mutated after the call). The
+// later SROA/forwarding pass collapses these chunks back to registers where it can.
+func aggCopy(f *ir.Func, dst, src ir.Ref, size int, out *[]ir.Instr) {
+	off := 0
+	chunk := func(w int, loadOp, storeOp ir.Op, cls ir.Cls) {
+		for size-off >= w {
+			s := aggOffset(f, src, off, out)
+			d := aggOffset(f, dst, off, out)
+			v := f.NewTemp("", cls)
+			*out = append(*out, ir.Instr{Op: loadOp, Cls: cls, To: v, Args: []ir.Ref{s}})
+			*out = append(*out, ir.Instr{Op: storeOp, Cls: cls, Args: []ir.Ref{v, d}})
+			off += w
+		}
+	}
+	chunk(8, ir.OLoadl, ir.OStorel, ir.ClsL)
+	chunk(4, ir.OLoaduw, ir.OStorew, ir.ClsW)
+	chunk(2, ir.OLoaduh, ir.OStoreh, ir.ClsW)
+	chunk(1, ir.OLoadub, ir.OStoreb, ir.ClsW)
+}
+
+// aggOffset returns a reference to base + off, appending an add when off != 0.
+func aggOffset(f *ir.Func, base ir.Ref, off int, out *[]ir.Instr) ir.Ref {
+	if off == 0 {
+		return base
+	}
+	t := f.NewTemp("", ir.ClsL)
+	*out = append(*out, ir.Instr{Op: ir.OAdd, Cls: ir.ClsL, To: t, Args: []ir.Ref{base, f.Long(int64(off))}})
+	return t
+}
+
 // cloneInstr copies an instruction, remapping every value reference and any block
 // reference (an OBlockAddr's &&label target) into the caller's cloned body.
 func cloneInstr(in *ir.Instr, mapRef func(ir.Ref) ir.Ref, mapBlock func(*ir.Block) *ir.Block) ir.Instr {
-	// Volatile and Tail are semantic flags, not scheduling hints: a cloned
-	// volatile store is still observable and a cloned tail call is still in tail
-	// position, so both must ride along. Amode is deliberately not copied -- it is
-	// set only during lowering, after every pass that clones instructions has run,
-	// so it is always zero here.
+	// Volatile is a semantic flag that must ride along: a cloned volatile store is
+	// still observable. Tail is copied here too, but spliceCall clears it on the
+	// clone, because a call inlined into a caller returns to the continuation and is
+	// no longer in tail position. Amode is deliberately not copied -- it is set only
+	// during lowering, after every pass that clones instructions has run, so it is
+	// always zero here.
 	out := ir.Instr{Op: in.Op, Cls: in.Cls, To: mapRef(in.To), Cmp: in.Cmp, Aux: in.Aux, Unroll: in.Unroll, RetAgg: in.RetAgg, Asm: in.Asm, Intrin: in.Intrin, Pos: in.Pos, Volatile: in.Volatile, Tail: in.Tail}
 	if in.Blk != nil {
 		out.Blk = mapBlock(in.Blk)
