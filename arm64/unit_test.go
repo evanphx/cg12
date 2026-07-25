@@ -319,6 +319,35 @@ func TestSelectMulAddFuses(t *testing.T) {
 	assert.NotContains(t, sub, "mul x")
 }
 
+func TestCompareConstantFolds(t *testing.T) {
+	// A comparison with the constant first (CONST == x) folds into a compare-immediate
+	// by swapping the operands, rather than materializing the constant into a register.
+	// The ordered predicate flips when swapped; equality is unchanged.
+	eq := func() string {
+		m := ir.NewModule()
+		f := m.NewFunc("f", ir.ClsW).Export()
+		x := f.Param("x", ir.ClsL)
+		e := f.Entry()
+		e.Ret(e.Cmp(ir.CmpEq, ir.ClsL, f.Long(28), x)) // 28 == x
+		return disasmModule(t, m)
+	}()
+	assert.Contains(t, eq, "cmp x", "compares the register directly")
+	assert.Contains(t, eq, "#28", "against the immediate 28")
+	assert.NotRegexp(t, `mov\s+\w+, #28[\s\S]*cmp`, eq, "no materialize-then-compare")
+
+	lt := func() string {
+		m := ir.NewModule()
+		f := m.NewFunc("g", ir.ClsW).Export()
+		x := f.Param("x", ir.ClsL)
+		e := f.Entry()
+		// 5 < x  becomes  x > 5, so the result is set on gt.
+		e.Ret(e.Cmp(ir.CmpSlt, ir.ClsL, f.Long(5), x))
+		return disasmModule(t, m)
+	}()
+	assert.Contains(t, lt, "#5", "compares against 5 directly")
+	assert.Contains(t, lt, "cset w0, gt", "5 < x becomes x > 5")
+}
+
 func TestCopyConstMaterializesDirect(t *testing.T) {
 	// A copy of a constant (as phi destruction produces on an edge) materializes the
 	// constant straight into the destination register, not into a scratch and then a

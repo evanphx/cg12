@@ -25,6 +25,7 @@ func lower(f *ir.Func, tlsModel TLSModel) error {
 	// address they can reason about.
 	lowerTLS(f, tlsModel)
 	lowerpass.HoistAllocas(f)
+	canonCompares(f)
 	foldIdioms(f)
 	foldAddressing(f)
 	fuseArithShift(f) // after foldAddressing: it gets first claim on address shifts
@@ -132,6 +133,52 @@ func immOffset(f *ir.Func, add *ir.Instr, access int) (int64, ir.Ref, bool) {
 		}
 	}
 	return 0, ir.Ref{}, false
+}
+
+// canonCompares puts a constant comparison operand second, so instruction
+// selection can fold it into a compare-immediate. A compare with the constant first
+// (`CONST == x`, or one an earlier rewrite produced) otherwise materializes the
+// constant into a scratch register and does a register compare -- `mov w16, #28 ;
+// cmp w16, w11` instead of `cmp w11, #28`. Swapping the operands flips an ordered
+// predicate (< becomes >, <= becomes >=); equality and inequality are unchanged.
+func canonCompares(f *ir.Func) {
+	for _, b := range f.Blocks {
+		for i := range b.Instrs {
+			in := &b.Instrs[i]
+			if in.Op != ir.OCmp || in.Cmp.IsFloat() || len(in.Args) != 2 {
+				continue
+			}
+			_, c0 := intConst(f, in.Args[0])
+			_, c1 := intConst(f, in.Args[1])
+			if c0 && !c1 {
+				in.Args[0], in.Args[1] = in.Args[1], in.Args[0]
+				in.Cmp = swapCmp(in.Cmp)
+			}
+		}
+	}
+}
+
+// swapCmp is the predicate that holds when a comparison's operands are exchanged.
+func swapCmp(c ir.Cmp) ir.Cmp {
+	switch c {
+	case ir.CmpSle:
+		return ir.CmpSge
+	case ir.CmpSlt:
+		return ir.CmpSgt
+	case ir.CmpSge:
+		return ir.CmpSle
+	case ir.CmpSgt:
+		return ir.CmpSlt
+	case ir.CmpUle:
+		return ir.CmpUge
+	case ir.CmpUlt:
+		return ir.CmpUgt
+	case ir.CmpUge:
+		return ir.CmpUle
+	case ir.CmpUgt:
+		return ir.CmpUlt
+	}
+	return c // CmpEq, CmpNe: commutative
 }
 
 // isIndexExpr reports whether an instruction looks like the index side of an
