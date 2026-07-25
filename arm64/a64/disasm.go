@@ -129,6 +129,14 @@ func disasmBranch(w uint32) string {
 		}
 		return fmt.Sprintf("%s %s, %s", op, gpr(bit(w, 31), w&0x1f), pcrel(sext(bits(w, 23, 5), 19)*4))
 
+	case w&0x7e000000 == 0x36000000: // TBZ / TBNZ
+		op := "tbz"
+		if bit(w, 24) {
+			op = "tbnz"
+		}
+		bitNo := bits(w, 31, 31)<<5 | bits(w, 23, 19)
+		return fmt.Sprintf("%s %s, #%d, %s", op, gpr(bit(w, 31), w&0x1f), bitNo, pcrel(sext(bits(w, 18, 5), 14)*4))
+
 	case w&^uint32(0x3e0) == 0xd65f0000: // RET
 		if rn := bits(w, 9, 5); rn != 30 {
 			return fmt.Sprintf("ret x%d", rn)

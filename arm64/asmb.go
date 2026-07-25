@@ -108,6 +108,8 @@ type asmb interface {
 	// label; brind is a computed goto through a register, brk halts.
 	branch(to *ir.Block)
 	cbnz(w64 bool, rn Reg, to *ir.Block)
+	tbz(bit uint32, rn Reg, to *ir.Block)
+	tbnz(bit uint32, rn Reg, to *ir.Block)
 	brind(rn Reg)
 	brk()
 
@@ -573,8 +575,10 @@ func (b *mcAsm) branch(to *ir.Block)             { b.prog.B(to.Name) }
 func (b *mcAsm) cbnz(w64 bool, rn Reg, to *ir.Block) {
 	b.prog.Cbnz(w64, mreg(rn), to.Name)
 }
-func (b *mcAsm) brind(rn Reg) { b.prog.Emit(a64.Br(mreg(rn))) }
-func (b *mcAsm) brk()         { b.prog.Emit(a64.Brk(0)) }
+func (b *mcAsm) tbz(bit uint32, rn Reg, to *ir.Block)  { b.prog.Tbz(bit, mreg(rn), to.Name) }
+func (b *mcAsm) tbnz(bit uint32, rn Reg, to *ir.Block) { b.prog.Tbnz(bit, mreg(rn), to.Name) }
+func (b *mcAsm) brind(rn Reg)                          { b.prog.Emit(a64.Br(mreg(rn))) }
+func (b *mcAsm) brk()                                  { b.prog.Emit(a64.Brk(0)) }
 func (b *mcAsm) jumpTable(idx Reg, blk *ir.Block, targets []*ir.Block) {
 	tbl := blk.Name + ".tbl"
 	b.prog.Adr(mcGP1, tbl)                                             // adr  x17, tbl

@@ -115,6 +115,16 @@ func (p *Program) Cbnz(w64 bool, rt Reg, label string) {
 	p.branch(label, 21, "cbnz", func(off int32) uint32 { return Cbnz(w64, rt, off) })
 }
 
+// Tbz / Tbnz branch on a single bit of rt. Their reach is only +/-32 KiB (a 16-bit
+// signed byte range); an out-of-range target is an assembly-time error, so the
+// selector emits them only within functions small enough to stay in range.
+func (p *Program) Tbz(bit uint32, rt Reg, label string) {
+	p.branch(label, 16, "tbz", func(off int32) uint32 { return Tbz(bit, rt, off) })
+}
+func (p *Program) Tbnz(bit uint32, rt Reg, label string) {
+	p.branch(label, 16, "tbnz", func(off int32) uint32 { return Tbnz(bit, rt, off) })
+}
+
 // Adr materializes a label's PC-relative address into rd (an ADR fixup: a 21-bit
 // signed byte offset, not scaled by 4).
 func (p *Program) Adr(rd Reg, label string) {

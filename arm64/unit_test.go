@@ -319,6 +319,23 @@ func TestSelectMulAddFuses(t *testing.T) {
 	assert.NotContains(t, sub, "mul x")
 }
 
+func TestSingleBitTestBranchFuses(t *testing.T) {
+	// `if (x & (1<<k))` driving a branch becomes a single tbnz on the register,
+	// with no tst and no materialized boolean.
+	m := ir.NewModule()
+	f := m.NewFunc("f", ir.ClsL).Export()
+	x := f.Param("x", ir.ClsL)
+	e := f.Entry()
+	hi, lo := f.NewBlock("hi"), f.NewBlock("lo")
+	e.Jnz(e.And(ir.ClsL, x, f.Long(1<<12)), hi, lo)
+	hi.Ret(f.Long(1))
+	lo.Ret(f.Long(0))
+
+	asm := disasmModule(t, m)
+	assert.Regexp(t, `tbnz\s+\w+, #12,`, asm, "single-bit test becomes tbnz on bit 12")
+	assert.NotContains(t, asm, "tst", "no flags-setting tst is needed")
+}
+
 func TestBitfieldExtractFuses(t *testing.T) {
 	// (x >> lsb) & (2^width - 1) folds into a single ubfx, dropping the shift-and-mask.
 	m := ir.NewModule()

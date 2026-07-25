@@ -503,6 +503,7 @@ type mc struct {
 
 	frameLayout      // where everything lives in the frame
 	frameless   bool // leaf function needing no frame: no prologue/epilogue, ret directly
+	tbzSafe     bool // small enough that a tbz/tbnz can always reach its target (+/-32 KiB)
 
 	instrPC    map[*ir.Instr]uint64 // PC at the start of each instruction
 	safepoints []safepoint
@@ -552,6 +553,7 @@ func emitMachine(f *ir.Func, alloc *allocation, gc GCStrategy, tlsModel TLSModel
 		frameLayout: computeFrame(f, alloc),
 	}
 	m.frameless = framelessEligible(f, m.frameLayout, gc)
+	m.tbzSafe = tbzSafe(f)
 	m.useCount = countTempUses(f)
 	m.preds = blockPreds(f)
 	m.prologue()
@@ -1209,7 +1211,12 @@ func (m *mc) block(b *ir.Block) {
 		if in == fuseCmp {
 			switch {
 			case fuseCmp.Op == ir.OAnd:
-				// `if (x & mask)` -> tst (flags-only); the terminator branches on it.
+				// `if (x & (1<<k))` needs no flags when it becomes a tbnz: the terminator
+				// tests the bit on the register directly, so emit nothing here. Any other
+				// `if (x & mask)` is a tst (flags-only) the terminator branches on.
+				if _, _, ok := m.tbzBranch(fuseCmp); ok && m.tbzSafe {
+					break
+				}
 				m.newSel().tstFlags(fuseCmp)
 			case m.isZeroCmp(fuseCmp):
 				// `== 0` / `!= 0` needs no flags: the terminator emits cbz/cbnz on the
@@ -1313,6 +1320,51 @@ func (m *mc) cmpZeroReg(cmp *ir.Instr) (ir.Ref, bool, bool) {
 	return ir.R, false, false
 }
 
+// tbzSafe reports whether every conditional branch within f is guaranteed to reach
+// its target with a tbz/tbnz (a +/-32 KiB signed range). A tbz/tbnz can only branch
+// within f, so if f's whole body is comfortably under 32 KiB, any such branch is in
+// range. The bound is on IR instructions with a generous machine-expansion margin;
+// a huge function (the interpreter's dispatch core) falls back to tst; b.cond.
+func tbzSafe(f *ir.Func) bool {
+	n := 0
+	for _, b := range f.Blocks {
+		n += len(b.Instrs)
+	}
+	return n < tbzSafeIRLimit
+}
+
+// tbzSafeIRLimit bounds the IR-instruction count for which tbz/tbnz stays in range.
+// ~4000 IR instructions is well under 8192 machine instructions (32 KiB / 4), leaving
+// room for the ~1.5x IR-to-machine expansion.
+const tbzSafeIRLimit = 4000
+
+// tbzBranch reports whether the AND condition `x & (1<<k)` can drive a single tbz/
+// tbnz: one operand is a register and the other a constant that is exactly one bit.
+// It returns the register operand and the bit index.
+func (m *mc) tbzBranch(and *ir.Instr) (ir.Ref, uint32, bool) {
+	if and.Op != ir.OAnd || and.Cls.IsFloat() {
+		return ir.R, 0, false
+	}
+	for i := 0; i < 2; i++ {
+		if v, ok := intConst(m.f, and.Args[i]); ok {
+			u := uint64(v)
+			if and.Cls.Size() == 4 {
+				u &= 0xffffffff
+			}
+			if u != 0 && u&(u-1) == 0 { // a single set bit
+				bit := 0
+				for u > 1 {
+					u >>= 1
+					bit++
+				}
+				return and.Args[1-i], uint32(bit), true
+			}
+			return ir.R, 0, false // a multi-bit mask is a tst, not a tbz
+		}
+	}
+	return ir.R, 0, false
+}
+
 // tstableAnd reports whether in is an integer AND that can be emitted as a
 // flags-only tst feeding a branch. A constant mask must be a valid logical
 // immediate; a register mask always works.
@@ -1346,6 +1398,16 @@ func (m *mc) emitFusedBranch(b *ir.Block, cmp *ir.Instr) {
 	// body) then a branch on the result being non-zero -- no materialized AND
 	// result, no register tied up.
 	if cmp.Op == ir.OAnd {
+		// A single-bit test `if (x & (1<<k))` is a tbnz on x directly -- one
+		// instruction, no tst and no flags -- when the target is in tbz range.
+		if reg, bit, ok := m.tbzBranch(cmp); ok && m.tbzSafe {
+			r := s.src(reg, 0, m.f.ClassOf(reg).Size())
+			s.b.tbnz(bit, r, b.Jmp.To) // jnz's non-zero arm: bit set
+			if b.Jmp.To2 != m.nextBlock {
+				s.b.branch(b.Jmp.To2)
+			}
+			return
+		}
 		cond, _ := condOf(ir.CmpNe, false)
 		s.b.bcondTo(cond, b.Jmp.To.Name)
 		if b.Jmp.To2 != m.nextBlock { // else fall through

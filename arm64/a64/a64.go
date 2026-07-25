@@ -300,6 +300,19 @@ func Cbz(w64 bool, rt Reg, off int32) uint32 { return cmpBranch(w64, 0, rt, off)
 // Cbnz encodes CBNZ rt, offset.
 func Cbnz(w64 bool, rt Reg, off int32) uint32 { return cmpBranch(w64, 1, rt, off) }
 
+// testBranch encodes TBZ/TBNZ: branch on bit `bit` (0..63) of rt being zero (op=0)
+// or non-zero (op=1). The offset is a 14-bit signed byte offset, so the reach is
+// only +/-32 KiB -- callers must ensure the target is within range.
+func testBranch(op, bit uint32, rt Reg, off int32) uint32 {
+	return (bit>>5)<<31 | 0x1b<<25 | op<<24 | (bit&0x1f)<<19 | branchOff(off, 14, "tbz/tbnz")<<5 | r(rt)
+}
+
+// Tbz encodes TBZ rt, #bit, offset (branch if bit clear).
+func Tbz(bit uint32, rt Reg, off int32) uint32 { return testBranch(0, bit, rt, off) }
+
+// Tbnz encodes TBNZ rt, #bit, offset (branch if bit set).
+func Tbnz(bit uint32, rt Reg, off int32) uint32 { return testBranch(1, bit, rt, off) }
+
 // Ret encodes RET rn (defaults to the link register when rn is X30).
 func Ret(rn Reg) uint32 { return 0xd65f0000 | r(rn)<<5 }
 
