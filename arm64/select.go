@@ -708,6 +708,19 @@ func (s *sel) triReg(in *ir.Instr, sz int, emit func(rd, rn, rm, ra Reg)) {
 func (s *sel) addSub(in *ir.Instr, sub bool) {
 	sz := in.Cls.Size()
 	w64 := sz == 8
+	if in.Aux != 0 { // fuseArithShift folded a shift into Args[1]: add a, b, lsl #k
+		sh, amt := shiftOp(in.Aux>>6), uint32(in.Aux&63)
+		rn := s.src(in.Args[0], 0, sz)
+		rm := s.src(in.Args[1], 1, sz)
+		d, done := s.dst(in.To, sz)
+		if sub {
+			s.b.subShiftedReg(w64, sh, amt, d, rn, rm)
+		} else {
+			s.b.addShiftedReg(w64, sh, amt, d, rn, rm)
+		}
+		done()
+		return
+	}
 	aRef, bRef := in.Args[0], in.Args[1]
 	if !sub {
 		if _, ok := intConst(s.f, bRef); !ok {

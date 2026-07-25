@@ -22,6 +22,8 @@ type asmb interface {
 	// Data processing (register forms).
 	addReg(w64 bool, rd, rn, rm Reg)
 	subReg(w64 bool, rd, rn, rm Reg)
+	addShiftedReg(w64 bool, sh shiftOp, amt uint32, rd, rn, rm Reg)
+	subShiftedReg(w64 bool, sh shiftOp, amt uint32, rd, rn, rm Reg)
 	mul(w64 bool, rd, rn, rm Reg)
 	madd(w64 bool, rd, rn, rm, ra Reg)
 	msub(w64 bool, rd, rn, rm, ra Reg)
@@ -213,6 +215,12 @@ func (b *mcAsm) addReg(w64 bool, rd, rn, rm Reg) {
 }
 func (b *mcAsm) subReg(w64 bool, rd, rn, rm Reg) {
 	b.prog.Emit(a64.SubReg(w64, mreg(rd), mreg(rn), mreg(rm)))
+}
+func (b *mcAsm) addShiftedReg(w64 bool, sh shiftOp, amt uint32, rd, rn, rm Reg) {
+	b.prog.Emit(a64.AddShiftedReg(w64, uint32(sh), amt, mreg(rd), mreg(rn), mreg(rm)))
+}
+func (b *mcAsm) subShiftedReg(w64 bool, sh shiftOp, amt uint32, rd, rn, rm Reg) {
+	b.prog.Emit(a64.SubShiftedReg(w64, uint32(sh), amt, mreg(rd), mreg(rn), mreg(rm)))
 }
 func (b *mcAsm) mul(w64 bool, rd, rn, rm Reg) {
 	b.prog.Emit(a64.Mul(w64, mreg(rd), mreg(rn), mreg(rm)))

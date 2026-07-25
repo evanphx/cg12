@@ -27,6 +27,7 @@ func lower(f *ir.Func, tlsModel TLSModel) error {
 	lowerpass.HoistAllocas(f)
 	foldIdioms(f)
 	foldAddressing(f)
+	fuseArithShift(f) // after foldAddressing: it gets first claim on address shifts
 	lowerpass.SplitCriticalEdges(f)
 	lowerpass.CoalescePhis(f)
 	lowerpass.DestructSSA(f)
@@ -332,6 +333,71 @@ func nop(in *ir.Instr) {
 	in.Op = ir.ONop
 	in.To = ir.Ref{}
 	in.Args = nil
+}
+
+// fuseArithShift folds a single-use constant shift feeding an add or subtract into
+// the shifted-register form of the instruction: add(a, shl(b,k)) becomes
+// `add a, b, lsl #k`, dropping the standalone shift. It runs after foldAddressing,
+// which gets first claim on shifts feeding a load/store address -- a scaled index
+// belongs in the addressing mode, not a shifted add. The shift kind and amount ride
+// in Aux (which OAdd/OSub do not otherwise use) with the shifted operand pinned to
+// Args[1]; addSub reads it back at emit time. A subtract only fuses its subtrahend
+// (a - (b<<k)); an add, being commutative, fuses either operand.
+func fuseArithShift(f *ir.Func) {
+	uses, defOf := defUse(f)
+	single := func(r ir.Ref) bool { return r.Kind == ir.RefTemp && uses[r.ID] == 1 }
+	for _, b := range f.Blocks {
+		for i := range b.Instrs {
+			in := &b.Instrs[i]
+			if in.Op != ir.OAdd && in.Op != ir.OSub {
+				continue
+			}
+			if in.Cls.IsFloat() || in.Aux != 0 {
+				continue
+			}
+			cands := []int{1} // sub: only the subtrahend
+			if in.Op == ir.OAdd {
+				cands = []int{1, 0} // add: either operand
+			}
+			for _, ai := range cands {
+				operand := in.Args[ai]
+				if !single(operand) {
+					continue
+				}
+				sd := defOf(operand)
+				sh, ok := shiftKind(sd)
+				if !ok {
+					continue
+				}
+				amt, ok := intConst(f, sd.Args[1])
+				if !ok || amt < 1 || int(amt) >= in.Cls.Size()*8 {
+					continue
+				}
+				shiftInput := sd.Args[0]
+				nop(sd)                                       // wipes sd.Args, so read its input first
+				in.Args = []ir.Ref{in.Args[1-ai], shiftInput} // shifted operand -> Args[1]
+				in.Aux = int64(sh)<<6 | amt
+				break
+			}
+		}
+	}
+}
+
+// shiftKind maps a shift instruction to the emitter's shiftOp, reporting false for
+// anything that is not a constant-amount shift.
+func shiftKind(d *ir.Instr) (shiftOp, bool) {
+	if d == nil {
+		return 0, false
+	}
+	switch d.Op {
+	case ir.OShl:
+		return shLsl, true
+	case ir.OShr:
+		return shLsr, true
+	case ir.OSar:
+		return shAsr, true
+	}
+	return 0, false
 }
 
 // argLoc is where one AAPCS64 argument is passed: either a physical register or

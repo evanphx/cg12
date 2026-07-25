@@ -466,6 +466,32 @@ func findSym(t *testing.T, o *obj.Object, name string) obj.Sym {
 	return obj.Sym{}
 }
 
+func TestFuseArithShift(t *testing.T) {
+	// A single-use constant shift feeding an add or subtract folds into the shifted-
+	// register form, dropping the standalone shift. add fuses either operand; sub only
+	// its subtrahend.
+	build := func(name string, body func(f *ir.Func, e *ir.Block, a, b ir.Ref) ir.Ref) string {
+		m := ir.NewModule()
+		f := m.NewFunc(name, ir.ClsL).Export()
+		a, b := f.Param("a", ir.ClsL), f.Param("b", ir.ClsL)
+		e := f.Entry()
+		e.Ret(body(f, e, a, b))
+		return disasmModule(t, m)
+	}
+
+	add := build("f", func(f *ir.Func, e *ir.Block, a, b ir.Ref) ir.Ref {
+		return e.Add(ir.ClsL, a, e.Shl(ir.ClsL, b, f.Long(3)))
+	})
+	assert.Contains(t, add, "add x0, x0, x1, lsl #3", "a + (b<<3) fuses")
+	assert.NotContains(t, add, "lsl x", "the standalone shift is gone")
+
+	sub := build("g", func(f *ir.Func, e *ir.Block, a, b ir.Ref) ir.Ref {
+		return e.Sub(ir.ClsL, a, e.Sar(ir.ClsL, b, f.Long(2)))
+	})
+	assert.Contains(t, sub, "sub x0, x0, x1, asr #2", "a - (b>>2 arithmetic) fuses")
+	assert.NotContains(t, sub, "asr x", "the standalone shift is gone")
+}
+
 func TestBlockLayoutFallThrough(t *testing.T) {
 	// A conditional's fall-through-capable successor (the false edge of a JmpJnz) is
 	// laid out immediately after it, so the branch to it is elided. Here `mid` sits

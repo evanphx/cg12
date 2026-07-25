@@ -93,6 +93,23 @@ func AddExtSxtw(rd, rn, rm Reg) uint32 {
 // SubReg encodes SUB rd, rn, rm.
 func SubReg(w64 bool, rd, rn, rm Reg) uint32 { return addSubReg(w64, 1, 0, rd, rn, rm) }
 
+// addSubShiftedReg encodes add/sub with rm shifted by a constant: shift selects
+// LSL (0), LSR (1), or ASR (2); amount is 0..63 (0..31 for a W operand).
+func addSubShiftedReg(w64 bool, op, shift, amount uint32, rd, rn, rm Reg) uint32 {
+	return sf(w64)<<31 | op<<30 | 0x0b<<24 | shift<<22 |
+		r(rm)<<16 | field(amount, 6, "shift amount")<<10 | r(rn)<<5 | r(rd)
+}
+
+// AddShiftedReg encodes ADD rd, rn, rm, {lsl|lsr|asr} #amount.
+func AddShiftedReg(w64 bool, shift, amount uint32, rd, rn, rm Reg) uint32 {
+	return addSubShiftedReg(w64, 0, shift, amount, rd, rn, rm)
+}
+
+// SubShiftedReg encodes SUB rd, rn, rm, {lsl|lsr|asr} #amount.
+func SubShiftedReg(w64 bool, shift, amount uint32, rd, rn, rm Reg) uint32 {
+	return addSubShiftedReg(w64, 1, shift, amount, rd, rn, rm)
+}
+
 // SubsReg encodes SUBS rd, rn, rm (sets flags); CmpReg is SUBS ZR, rn, rm.
 func SubsReg(w64 bool, rd, rn, rm Reg) uint32 { return addSubReg(w64, 1, 1, rd, rn, rm) }
 
