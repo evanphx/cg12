@@ -620,8 +620,17 @@ func (g *gen) genFunc(fd *moderncc.FunctionDefinition) {
 	if d.Linkage() != moderncc.Internal { // a `static` function keeps internal linkage
 		g.fn.Export()
 	}
-	if a := ft.Attributes(); a != nil && a.AlwaysInline() {
-		g.fn.ForceInline = true
+	if a := ft.Attributes(); a != nil {
+		if a.AlwaysInline() {
+			g.fn.ForceInline = true
+		}
+		// noinline/cold keep a function out of the inliner (there is no typed accessor,
+		// so query generically, matching both plain and reserved spellings). cold is
+		// treated as noinline: gcc deprioritises inlining cold callees, and for the
+		// hot/cold-split goal keeping the slow path a call is what matters.
+		if a.IsAttrSet("noinline") || a.IsAttrSet("__noinline__") || a.IsAttrSet("cold") || a.IsAttrSet("__cold__") {
+			g.fn.NoInline = true
+		}
 	}
 	g.fn.Linkage.Section = sectionOf(ft) // eBPF attach section (xdp, kprobe/..., ...)
 	g.fn.Variadic = ft.IsVariadic()

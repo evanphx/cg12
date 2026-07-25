@@ -123,6 +123,12 @@ type Func struct {
 	// this to fold into the dispatch loop, as they do under gcc/clang).
 	ForceInline bool
 
+	// NoInline is set when the source marked the function __attribute__((noinline))
+	// or ((cold)) -- the inliner never inlines a call to it, so a cold slow-path helper
+	// stays a call and out of the hot inlined body (gcc's hot/cold split; Ruby annotates
+	// its slow paths this way). It takes precedence over ForceInline.
+	NoInline bool
+
 	Params []*Temp
 	Blocks []*Block
 	Start  *Block

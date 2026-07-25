@@ -163,6 +163,46 @@ func TestInlineSkipsIndirectAndOversized(t *testing.T) {
 	assert.Equal(t, 1, countCalls(m2), "oversized callee not inlined")
 }
 
+func TestInlineHonorsNoInline(t *testing.T) {
+	// A small callee inlines by default; marking it NoInline (from noinline/cold)
+	// keeps it a call, so a cold slow-path stays out of the hot inlined body.
+	build := func(noinline bool) *ir.Module {
+		m := ir.NewModule()
+		h := m.NewFunc("h", ir.ClsW)
+		hx := h.Param("x", ir.ClsW)
+		h.Entry().Ret(h.Entry().Add(ir.ClsW, hx, h.Word(1)))
+		h.NoInline = noinline
+		mn := m.NewFunc("go", ir.ClsW).Export()
+		p := mn.Param("p", ir.ClsW)
+		mn.Entry().Ret(mn.Entry().Call(ir.ClsW, mn.Sym("h", 0), p))
+		return m
+	}
+
+	m1 := build(false)
+	opt.OptimizeModule(m1)
+	assert.Equal(t, 0, countCalls(m1), "a small callee inlines by default")
+
+	m2 := build(true)
+	opt.OptimizeModule(m2)
+	assert.Equal(t, 1, countCalls(m2), "a NoInline callee stays a call")
+}
+
+func TestInlineNoInlineBeatsForceInline(t *testing.T) {
+	// NoInline takes precedence if a function somehow carries both marks.
+	m := ir.NewModule()
+	h := m.NewFunc("h", ir.ClsW)
+	hx := h.Param("x", ir.ClsW)
+	h.Entry().Ret(h.Entry().Add(ir.ClsW, hx, h.Word(1)))
+	h.ForceInline = true
+	h.NoInline = true
+	mn := m.NewFunc("go", ir.ClsW).Export()
+	p := mn.Param("p", ir.ClsW)
+	mn.Entry().Ret(mn.Entry().Call(ir.ClsW, mn.Sym("h", 0), p))
+
+	opt.OptimizeModule(m)
+	assert.Equal(t, 1, countCalls(m), "NoInline wins over ForceInline")
+}
+
 func TestDeadFuncElim(t *testing.T) {
 	m := ir.NewModule()
 	// used: called by exported main. dead: never referenced. keep: exported.

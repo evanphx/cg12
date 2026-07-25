@@ -1,6 +1,11 @@
 package opt
 
-import "github.com/evanphx/cg12/ir"
+import (
+	"os"
+	"strings"
+
+	"github.com/evanphx/cg12/ir"
+)
 
 // A callee's size budget depends on how many call sites name it. A function with a
 // single site inlines up to inlineOnceBudget: doing so moves its body rather than
@@ -60,7 +65,30 @@ func InlinePass() Pass {
 	return ModulePass("inline", func(m *ir.Module) bool { return inlineModule(m, base) })
 }
 
+// forceInlineFromEnv marks the functions named in CG12_FORCE_INLINE (comma-
+// separated) as ForceInline, so an experiment can force gcc's always_inline
+// choices (e.g. the vm_sendish fast-path subtree into vm_exec_core) without
+// editing the C source. Idempotent; a no-op when the variable is unset.
+func forceInlineFromEnv(m *ir.Module) {
+	list := os.Getenv("CG12_FORCE_INLINE")
+	if list == "" {
+		return
+	}
+	names := map[string]bool{}
+	for _, n := range strings.Split(list, ",") {
+		if n = strings.TrimSpace(n); n != "" {
+			names[n] = true
+		}
+	}
+	for _, f := range m.Funcs {
+		if names[f.Name] {
+			f.ForceInline = true
+		}
+	}
+}
+
 func inlineModule(m *ir.Module, base map[*ir.Func]int) bool {
+	forceInlineFromEnv(m)
 	cg := buildCallGraph(m)
 	scc := computeSCC(cg)
 	sites := callSiteCounts(m, cg.byName)
@@ -118,7 +146,18 @@ func inlineInto(caller *ir.Func, cg *callGraph, scc *sccInfo, sites map[*ir.Func
 		if funcSize(caller) > cap {
 			break // this function has grown enough; stop feeding the cascade
 		}
-		b, idx, callee := findInlinable(caller, cg, scc, sites)
+		b, idx, callee := findInlinable(caller, cg, scc, sites, false)
+		if callee == nil {
+			break
+		}
+		spliceCall(caller, b, idx, callee, cg, scc, 0)
+		changed = true
+	}
+	// A forced (always_inline) callee is mandatory regardless of the growth cap --
+	// gcc inlines it into a caller of any size. Splice any that the budgeted loop
+	// left behind (because the cap was already spent), ignoring the cap.
+	for n := 0; n < inlineFuncBudget; n++ {
+		b, idx, callee := findInlinable(caller, cg, scc, sites, true)
 		if callee == nil {
 			break
 		}
@@ -130,7 +169,7 @@ func inlineInto(caller *ir.Func, cg *callGraph, scc *sccInfo, sites map[*ir.Func
 
 // findInlinable returns the first call in caller worth inlining: a direct call to a
 // non-recursive module function the cost model accepts.
-func findInlinable(caller *ir.Func, cg *callGraph, scc *sccInfo, sites map[*ir.Func]int) (*ir.Block, int, *ir.Func) {
+func findInlinable(caller *ir.Func, cg *callGraph, scc *sccInfo, sites map[*ir.Func]int, forcedOnly bool) (*ir.Block, int, *ir.Func) {
 	for _, b := range caller.Blocks {
 		for i := range b.Instrs {
 			in := &b.Instrs[i]
@@ -140,6 +179,9 @@ func findInlinable(caller *ir.Func, cg *callGraph, scc *sccInfo, sites map[*ir.F
 			callee := directCallee(caller, in, cg.byName)
 			if callee == nil || scc.recursive[callee] {
 				continue // indirect/external, or part of a recursion cycle
+			}
+			if forcedOnly && !callee.ForceInline {
+				continue // the cap-exempt pass considers only forced callees
 			}
 			if worthInlining(callee, sites[callee]) {
 				return b, i, callee
@@ -201,6 +243,13 @@ func inlinableStructure(callee *ir.Func) bool {
 // inlines a large body cheaply because the original is then dead, while a body copied
 // into many sites must be small to be worth the duplication.
 func worthInlining(callee *ir.Func, sites int) bool {
+	// noinline/cold is honored before everything else, so a cold slow-path helper is
+	// never inlined -- it stays a call, out of the hot inlined body (gcc's hot/cold
+	// split). This wins over ForceInline: the two attributes are mutually exclusive,
+	// but if both were somehow set, "do not inline" is the safe resolution.
+	if callee.NoInline {
+		return false
+	}
 	if !inlinableStructure(callee) {
 		return false
 	}
