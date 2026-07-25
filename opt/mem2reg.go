@@ -90,6 +90,10 @@ func Mem2Reg(f *ir.Func) bool {
 	// a use, a store a def) is a standard backward fixpoint over the CFG.
 	liveIn := variableLiveIn(f, cfg, varOf)
 
+	// Diagnostic (env-gated, read-only): report each marked variable's lifetime
+	// region before renaming drops the markers. See dumpLifeRegions.
+	dumpLifeRegions(f, cfg, vars, varOf)
+
 	// Insert phi placeholders at the iterated dominance frontier of each variable's
 	// defining blocks, pruned to blocks where the variable is actually live-in.
 	phiOf := map[*ir.Block]map[int]*ir.Phi{}

@@ -149,6 +149,16 @@ func dumpPressureReport(f *ir.Func, alloc *allocation, num *numbering, cfg *anal
 		}
 		return false
 	}
+	// A managed reference live across a safepoint is force-spilled whole-life to a
+	// fixed frame slot (gcalloc.go), so the GC finds it -- a major source of mesh
+	// spilling. crossSafe reads the same crossing the allocator's g.gc decision uses.
+	crossSafe := func(t int) bool {
+		if iv := ivByTemp[t]; iv != nil {
+			return iv.crossSafe
+		}
+		return false
+	}
+	gcForced := func(t int) bool { return f.Temps[t].GCRef && crossSafe(t) }
 
 	var sb strings.Builder
 	p := func(format string, a ...any) { fmt.Fprintf(&sb, format, a...) }
@@ -236,11 +246,22 @@ func dumpPressureReport(f *ir.Func, alloc *allocation, num *numbering, cfg *anal
 		}
 	}
 	sort.Slice(sp, func(i, j int) bool { return wuse[sp[i]] > wuse[sp[j]] })
-	p("name                     slot        span            defs uses wuse   cross\n")
+	nGC := 0
+	for _, t := range sp {
+		if gcForced(t) {
+			nGC++
+		}
+	}
+	p("%d spilled; %d are GC-forced whole-life (GCRef live across a safepoint)\n", len(sp), nGC)
+	p("name                     slot        span            defs uses wuse   cross gc\n")
 	for _, t := range sp {
 		s, e := span(t)
-		p("%-24s %-11s [%5d..%5d]  %3d  %3d  %5.0f  %v\n",
-			f.Temps[t].Name, alloced(t), s, e, defs[t], uses[t], wuse[t], crosses(t))
+		gc := ""
+		if gcForced(t) {
+			gc = "GC"
+		}
+		p("%-24s %-11s [%5d..%5d]  %3d  %3d  %5.0f  %-5v %s\n",
+			f.Temps[t].Name, alloced(t), s, e, defs[t], uses[t], wuse[t], crosses(t), gc)
 	}
 
 	path := os.Getenv("CG12_DUMP_REPORT_FILE")
