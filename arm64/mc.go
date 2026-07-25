@@ -1983,6 +1983,16 @@ func (m *mc) rem(in *ir.Instr, div func(w64 bool, rd, rn, rm a64.Reg) uint32) {
 
 func (m *mc) copy(in *ir.Instr) {
 	sz := in.Cls.Size()
+	// An integer-constant source materializes straight into the destination register.
+	// The general src path would load it into a scratch and then move it (movImm into
+	// x16, then `mov dst, x16`); a copy of a constant is the common phi-destruction
+	// case, so the extra move showed up on nearly a thousand sites.
+	if c, ok := intConst(m.f, in.Args[0]); ok {
+		d, done := m.dst(in.To, sz)
+		m.movImm(d, c, sz == 8)
+		done()
+		return
+	}
 	s := m.src(in.Args[0], 0, sz)
 	d, done := m.dst(in.To, sz)
 	if d != s {

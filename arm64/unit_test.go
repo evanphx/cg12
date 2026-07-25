@@ -319,6 +319,26 @@ func TestSelectMulAddFuses(t *testing.T) {
 	assert.NotContains(t, sub, "mul x")
 }
 
+func TestCopyConstMaterializesDirect(t *testing.T) {
+	// A copy of a constant (as phi destruction produces on an edge) materializes the
+	// constant straight into the destination register, not into a scratch and then a
+	// move. The anti-pattern is `mov x16, #imm` immediately followed by `mov dst, x16`.
+	m := ir.NewModule()
+	f := m.NewFunc("f", ir.ClsL).Export()
+	x := f.Param("x", ir.ClsL)
+	e := f.Entry()
+	then, done := f.NewBlock("then"), f.NewBlock("done")
+	e.Jnz(x, then, done)
+	then.Goto(done)
+	r := done.Phi(ir.ClsL, ir.PhiEdge{From: e, Val: f.Long(0)}, ir.PhiEdge{From: then, Val: f.Long(42)})
+	done.Ret(r)
+
+	asm := disasmModule(t, m)
+	assert.Contains(t, asm, "#0x2a", "the constant 42 is materialized")
+	assert.NotRegexp(t, `mov\s+x1[67], #[^\n]*\n\s*mov\s+\w+, x1[67]\b`, asm,
+		"no materialize-into-scratch-then-move")
+}
+
 func TestSelectConstOffsetAddressing(t *testing.T) {
 	// A load or store at a constant offset uses the [base, #imm] addressing mode
 	// rather than materializing the offset into a register and indexing.
