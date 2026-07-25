@@ -28,6 +28,41 @@ func TestSimplifyConstantBranch(t *testing.T) {
 	}
 }
 
+func TestSimplifyConstantSwitch(t *testing.T) {
+	// switch(1) over {0->a, 1->b, 2->c} default d folds to jmp b; the other arms
+	// become unreachable and are removed. This is what specializes an inlined
+	// helper whose call site passes a constant selector.
+	f := ir.NewModule().NewFunc("s", ir.ClsW)
+	start := f.Entry()
+	a, b, c, d := f.NewBlock("a"), f.NewBlock("b"), f.NewBlock("c"), f.NewBlock("d")
+	start.Switch(f.Word(1), d, false, []ir.SwitchCase{{Val: 0, Blk: a}, {Val: 1, Blk: b}, {Val: 2, Blk: c}})
+	a.Ret(f.Word(10))
+	b.Ret(f.Word(20))
+	c.Ret(f.Word(30))
+	d.Ret(f.Word(40))
+
+	assert.True(t, SimplifyCFG(f))
+	assert.Equal(t, ir.JmpRet, start.Jmp.Kind, "switch folded to the matching arm and coalesced")
+	v, ok := constInt(f, start.Jmp.Arg)
+	require.True(t, ok)
+	assert.Equal(t, int64(20), v)
+}
+
+func TestSimplifyConstantSwitchDefault(t *testing.T) {
+	// switch(9) matches no case, so it folds to the default block.
+	f := ir.NewModule().NewFunc("s", ir.ClsW)
+	start := f.Entry()
+	a, d := f.NewBlock("a"), f.NewBlock("d")
+	start.Switch(f.Word(9), d, false, []ir.SwitchCase{{Val: 0, Blk: a}, {Val: 1, Blk: a}})
+	a.Ret(f.Word(10))
+	d.Ret(f.Word(40))
+
+	assert.True(t, SimplifyCFG(f))
+	v, ok := constInt(f, start.Jmp.Arg)
+	require.True(t, ok)
+	assert.Equal(t, int64(40), v)
+}
+
 func TestSimplifyThreadsEmptyForwardingArms(t *testing.T) {
 	// `cond ? {} : {}` where both empty arms continue to the same join: the branch
 	// threads past the empty forwarding blocks, its two targets coincide, and the

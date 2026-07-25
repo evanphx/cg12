@@ -68,6 +68,33 @@ func SimplifyCFG(f *ir.Func) bool {
 		}
 	}
 
+	// 1b. Fold a switch on a constant to a direct jump to the matching case (or the
+	// default). This is what specializes an inlined helper whose call sites pass a
+	// constant selector -- e.g. Ruby's vm_sendish(..., method_explorer), inlined into
+	// vm_exec_core with a constant explorer, collapses to the one live arm; the dead
+	// arms then become unreachable and are dropped below. Compare at the arg's class
+	// width so a sub-word case value matches soundly.
+	for _, b := range f.Blocks {
+		if b.Jmp.Kind != ir.JmpSwitch {
+			continue
+		}
+		c, ok := constInt(f, b.Jmp.Arg)
+		if !ok {
+			continue
+		}
+		cls := f.ClassOf(b.Jmp.Arg)
+		cv := truncCls(cls, c)
+		target := b.Jmp.To // default
+		for _, cs := range b.Jmp.Cases {
+			if truncCls(cls, cs.Val) == cv {
+				target = cs.Blk
+				break
+			}
+		}
+		b.Jmp = ir.Jmp{Kind: ir.JmpJmp, To: target}
+		changed = true
+	}
+
 	// 2. Compute reachability from the entry.
 	reach := map[*ir.Block]bool{}
 	if f.Start != nil {
