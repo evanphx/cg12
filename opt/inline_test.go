@@ -187,6 +187,32 @@ func TestInlineHonorsNoInline(t *testing.T) {
 	assert.Equal(t, 1, countCalls(m2), "a NoInline callee stays a call")
 }
 
+func TestInlineCostInlineNoEviction(t *testing.T) {
+	// A large CostInline callee (the cost model's pick) is inlined cap-free, and it must
+	// NOT consume the budgeted headroom the small helper needs -- both end up inlined.
+	// This is the fix for a big forced inline evicting an interpreter's small hot helpers.
+	m := ir.NewModule()
+	h := m.NewFunc("h", ir.ClsW) // small helper, inlines by default
+	hx := h.Param("x", ir.ClsW)
+	h.Entry().Ret(h.Entry().Add(ir.ClsW, hx, h.Word(1)))
+	big := m.NewFunc("big", ir.ClsW) // large, past the size budget, but cost-model-chosen
+	bx := big.Param("x", ir.ClsW)
+	be := big.Entry()
+	acc := bx
+	for i := 0; i < 400; i++ {
+		acc = be.Add(ir.ClsW, acc, big.Word(int64(i)))
+	}
+	be.Ret(acc)
+	big.CostInline = true
+	c := m.NewFunc("go", ir.ClsW).Export()
+	cp := c.Param("p", ir.ClsW)
+	t1 := c.Entry().Call(ir.ClsW, c.Sym("big", 0), cp)
+	c.Entry().Ret(c.Entry().Call(ir.ClsW, c.Sym("h", 0), t1))
+
+	opt.OptimizeModule(m)
+	assert.Equal(t, 0, countCalls(m), "both the large CostInline callee and the small helper are inlined")
+}
+
 func TestInlineNoInlineBeatsForceInline(t *testing.T) {
 	// NoInline takes precedence if a function somehow carries both marks.
 	m := ir.NewModule()

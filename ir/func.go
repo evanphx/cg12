@@ -123,6 +123,13 @@ type Func struct {
 	// this to fold into the dispatch loop, as they do under gcc/clang).
 	ForceInline bool
 
+	// CostInline marks a function the inliner's cost model (or an experiment) chose to
+	// inline into its hot callers even though it exceeds the size budget -- distinct from
+	// ForceInline (source always_inline) so honoring it never changes how always_inline
+	// is treated. A caller receiving a CostInline splice inlines its whole always_inline
+	// subtree cap-free too, so the big inline does not evict the caller's small hot helpers.
+	CostInline bool
+
 	// NoInline is set when the source marked the function __attribute__((noinline))
 	// or ((cold)) -- the inliner never inlines a call to it, so a cold slow-path helper
 	// stays a call and out of the hot inlined body (gcc's hot/cold split; Ruby annotates

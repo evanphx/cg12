@@ -66,9 +66,10 @@ func InlinePass() Pass {
 }
 
 // forceInlineFromEnv marks the functions named in CG12_FORCE_INLINE (comma-
-// separated) as ForceInline, so an experiment can force gcc's always_inline
-// choices (e.g. the vm_sendish fast-path subtree into vm_exec_core) without
-// editing the C source. Idempotent; a no-op when the variable is unset.
+// separated) as CostInline, standing in for the cost model that will eventually
+// pick hot helpers (e.g. vm_sendish) to inline into their hot callers. Using
+// CostInline rather than ForceInline keeps always_inline handling untouched.
+// Idempotent; a no-op when the variable is unset.
 func forceInlineFromEnv(m *ir.Module) {
 	list := os.Getenv("CG12_FORCE_INLINE")
 	if list == "" {
@@ -82,7 +83,7 @@ func forceInlineFromEnv(m *ir.Module) {
 	}
 	for _, f := range m.Funcs {
 		if names[f.Name] {
-			f.ForceInline = true
+			f.CostInline = true
 		}
 	}
 }
@@ -100,7 +101,7 @@ func inlineModule(m *ir.Module, base map[*ir.Func]int) bool {
 		if _, ok := base[f]; !ok {
 			base[f] = funcSize(f)
 		}
-		if inlineInto(f, cg, scc, sites, base[f]) {
+		if inlineInto(f, cg, scc, sites, base) {
 			changed = true
 		}
 	}
@@ -139,25 +140,49 @@ func funcSize(f *ir.Func) int {
 // the per-function budget is spent. Re-scanning after each splice lets calls
 // exposed by a previous inline (the callee's own calls) be inlined in turn; the
 // budget bounds code-size growth (e.g. a diamond call graph inlined repeatedly).
-func inlineInto(caller *ir.Func, cg *callGraph, scc *sccInfo, sites map[*ir.Func]int, baseSize int) bool {
+func inlineInto(caller *ir.Func, cg *callGraph, scc *sccInfo, sites map[*ir.Func]int, base map[*ir.Func]int) bool {
 	changed := false
-	cap := inlineGrowthCap(baseSize)
-	for n := 0; n < inlineFuncBudget; n++ {
-		if funcSize(caller) > cap {
-			break // this function has grown enough; stop feeding the cascade
+
+	// A CostInline callee (the cost model's choice, e.g. vm_sendish) is big -- it blows
+	// the growth cap on its own -- but must not consume the discretionary headroom the
+	// budgeted pass needs, or it evicts the small hot helpers that pass folds in (measured:
+	// inlining vm_sendish into vm_exec_core left vm_get_ep/... as calls, ~2x slower). A
+	// caller that receives one goes "boosted": its CostInline AND its whole always_inline
+	// subtree (the small helpers the big inline pulls in) are spliced first, cap-free, and
+	// their growth folded into the budget anchor -- so the budgeted pass spends its headroom
+	// entirely on the small NON-forced hot helpers (vm_get_ep, ...). A caller with no
+	// CostInline (every default build, until the cost model exists) is never boosted, so its
+	// always_inline stay in the budgeted pass and it inlines byte-identically to before.
+	boosted := false
+	for _, b := range caller.Blocks {
+		for i := range b.Instrs {
+			if c := directCallee(caller, &b.Instrs[i], cg.byName); c != nil && c.CostInline {
+				boosted = true
+			}
 		}
-		b, idx, callee := findInlinable(caller, cg, scc, sites, false)
+	}
+	forced := func(c *ir.Func) bool { return c.CostInline }
+	if boosted {
+		forced = func(c *ir.Func) bool { return c.CostInline || c.ForceInline }
+	}
+
+	before := funcSize(caller)
+	for n := 0; n < inlineFuncBudget; n++ {
+		b, idx, callee := findInlinable(caller, cg, scc, sites, forced)
 		if callee == nil {
 			break
 		}
 		spliceCall(caller, b, idx, callee, cg, scc, 0)
 		changed = true
 	}
-	// A forced (always_inline) callee is mandatory regardless of the growth cap --
-	// gcc inlines it into a caller of any size. Splice any that the budgeted loop
-	// left behind (because the cap was already spent), ignoring the cap.
+	base[caller] += funcSize(caller) - before
+
+	cap := inlineGrowthCap(base[caller])
 	for n := 0; n < inlineFuncBudget; n++ {
-		b, idx, callee := findInlinable(caller, cg, scc, sites, true)
+		if funcSize(caller) > cap {
+			break // this function has grown enough; stop feeding the cascade
+		}
+		b, idx, callee := findInlinable(caller, cg, scc, sites, func(c *ir.Func) bool { return !forced(c) })
 		if callee == nil {
 			break
 		}
@@ -167,9 +192,10 @@ func inlineInto(caller *ir.Func, cg *callGraph, scc *sccInfo, sites map[*ir.Func
 	return changed
 }
 
-// findInlinable returns the first call in caller worth inlining: a direct call to a
-// non-recursive module function the cost model accepts.
-func findInlinable(caller *ir.Func, cg *callGraph, scc *sccInfo, sites map[*ir.Func]int, forcedOnly bool) (*ir.Block, int, *ir.Func) {
+// findInlinable returns the first call in caller worth inlining that the accept
+// predicate admits: a direct call to a non-recursive module function the cost model
+// accepts.
+func findInlinable(caller *ir.Func, cg *callGraph, scc *sccInfo, sites map[*ir.Func]int, accept func(*ir.Func) bool) (*ir.Block, int, *ir.Func) {
 	for _, b := range caller.Blocks {
 		for i := range b.Instrs {
 			in := &b.Instrs[i]
@@ -180,8 +206,8 @@ func findInlinable(caller *ir.Func, cg *callGraph, scc *sccInfo, sites map[*ir.F
 			if callee == nil || scc.recursive[callee] {
 				continue // indirect/external, or part of a recursion cycle
 			}
-			if forcedOnly && !callee.ForceInline {
-				continue // the cap-exempt pass considers only forced callees
+			if !accept(callee) {
+				continue // this pass (large-forced vs budgeted) is not handling this callee
 			}
 			if worthInlining(callee, sites[callee]) {
 				return b, i, callee
@@ -253,8 +279,8 @@ func worthInlining(callee *ir.Func, sites int) bool {
 	if !inlinableStructure(callee) {
 		return false
 	}
-	if callee.ForceInline {
-		return true
+	if callee.ForceInline || callee.CostInline {
+		return true // mandatory (always_inline) or cost-model-chosen: size budget bypassed
 	}
 	if sites < 1 {
 		sites = 1
