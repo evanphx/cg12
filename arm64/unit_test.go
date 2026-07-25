@@ -375,6 +375,37 @@ func TestCompileLargeFrame(t *testing.T) {
 	assert.Contains(t, huge, "add sp, sp, #832")
 }
 
+func TestFramelessLeaf(t *testing.T) {
+	// A leaf function whose only frame would be the x29/x30 save needs no frame at
+	// all: nothing clobbers x30 (the return address stays live to `ret`) and x29 is
+	// never allocated. So the prologue and epilogue vanish. A function that calls,
+	// by contrast, must save x30 and keeps its frame.
+	leaf := func() string {
+		m := ir.NewModule()
+		f := m.NewFunc("leaf", ir.ClsL).Export()
+		a, b := f.Param("a", ir.ClsL), f.Param("b", ir.ClsL)
+		e := f.Entry()
+		e.Ret(e.Add(ir.ClsL, e.Mul(ir.ClsL, a, b), a))
+		return disasmModule(t, m)
+	}()
+	assert.NotContains(t, leaf, "stp x29, x30", "leaf function needs no frame")
+	assert.NotContains(t, leaf, "ldp x29, x30", "leaf function needs no epilogue")
+	assert.Contains(t, leaf, "ret", "still returns")
+
+	caller := func() string {
+		m := ir.NewModule()
+		g := m.NewFunc("g", ir.ClsL)
+		g.Param("x", ir.ClsL)
+		g.Entry().Ret(g.Long(0))
+		f := m.NewFunc("caller", ir.ClsL).Export()
+		p := f.Param("p", ir.ClsL)
+		e := f.Entry()
+		e.Ret(e.Call(ir.ClsL, f.Sym("g", 0), p))
+		return disasmModule(t, m)
+	}()
+	assert.Contains(t, caller, "stp x29, x30", "a function that calls must save the return address")
+}
+
 // Static data reaches the object as bytes, a symbol, and -- where it names
 // another symbol -- a relocation. Checking those directly says what the data
 // actually is; the directives it used to be spelled with were only a rendering

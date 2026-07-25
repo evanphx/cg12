@@ -501,7 +501,8 @@ type mc struct {
 	prog     *a64.Program
 	relocs   []obj.Reloc
 
-	frameLayout // where everything lives in the frame
+	frameLayout      // where everything lives in the frame
+	frameless   bool // leaf function needing no frame: no prologue/epilogue, ret directly
 
 	instrPC    map[*ir.Instr]uint64 // PC at the start of each instruction
 	safepoints []safepoint
@@ -550,6 +551,7 @@ func emitMachine(f *ir.Func, alloc *allocation, gc GCStrategy, tlsModel TLSModel
 		prog: a64.NewProgram(), instrPC: map[*ir.Instr]uint64{},
 		frameLayout: computeFrame(f, alloc),
 	}
+	m.frameless = framelessEligible(f, m.frameLayout, gc)
 	m.useCount = countTempUses(f)
 	m.preds = blockPreds(f)
 	m.prologue()
@@ -652,7 +654,62 @@ const (
 
 // --- prologue / epilogue ---------------------------------------------------
 
+// framelessEligible reports whether f needs no stack frame at all: the AArch64
+// ABI only forces the x29/x30 save when the function calls (which clobbers x30,
+// the return address) or has something to store on the stack. A leaf whose frame
+// is just the x29/x30 slot has neither, so the save is pure overhead -- x30 still
+// holds the return address at `ret` (nothing called), and x29 is never allocated
+// (it is excluded from intAllocOrder), so leaving it untouched keeps the caller's
+// frame pointer intact. A stack-growth prologue needs the frame, so it disables
+// this. Because the frame is exactly 16 bytes here there are no spills, allocas,
+// callee-saved registers, or a variadic save area to address off x29.
+func framelessEligible(f *ir.Func, lay frameLayout, gc GCStrategy) bool {
+	if lay.frame != 16 || lay.hasDynAlloc || lay.variadic {
+		return false
+	}
+	if _, ok := gc.(PrologueEmitter); ok {
+		return false
+	}
+	// An incoming stack argument lives above the frame and is read as [x29, #frame+off]
+	// (mc.stackParam); it does not add to lay.frame, so frame==16 does not rule it out.
+	// Without the frame those offsets are wrong, so a function that takes one keeps its
+	// frame. Stack params are the arg-less OPar instructions at the start of the entry.
+	if f.Start != nil {
+		for i := range f.Start.Instrs {
+			in := &f.Start.Instrs[i]
+			if in.Op != ir.OPar {
+				break // params are a prefix of the entry block
+			}
+			if len(in.Args) == 0 {
+				return false
+			}
+		}
+	}
+	return isLeaf(f)
+}
+
+// isLeaf reports whether f emits no call. A call clobbers x30 (the return
+// address), so a non-leaf must save it. Calls come from OCall (direct, indirect,
+// or tail), a hidden call in an inline-asm template (OAsm), and -- crucially -- an
+// OSafepoint, which a GC strategy may lower into a cooperative-poll call at emit
+// time even though the IR marker itself is call-free. Treating the marker as a
+// call keeps a polled function's frame, so the poll's bl finds x30 saved.
+func isLeaf(f *ir.Func) bool {
+	for _, b := range f.Blocks {
+		for i := range b.Instrs {
+			switch b.Instrs[i].Op {
+			case ir.OCall, ir.OAsm, ir.OSafepoint:
+				return false
+			}
+		}
+	}
+	return true
+}
+
 func (m *mc) prologue() {
+	if m.frameless {
+		return
+	}
 	// A strategy may emit a stack-growth guard before the frame is set up; its
 	// slow path branches back to this label to re-check after the stack grows.
 	if pe, ok := m.gc.(PrologueEmitter); ok {
@@ -689,6 +746,10 @@ func (m *mc) frameTeardown() {
 }
 
 func (m *mc) epilogue() {
+	if m.frameless {
+		m.emit(a64.Ret(mcX30)) // no frame to tear down
+		return
+	}
 	(m.newSel()).
 		epilogue(m.frame, m.hasDynAlloc, m.calleeSaved)
 }
