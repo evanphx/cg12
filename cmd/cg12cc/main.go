@@ -16,6 +16,7 @@ import (
 	"path/filepath"
 	"strings"
 
+	"github.com/evanphx/cg12/amd64"
 	"github.com/evanphx/cg12/analysis"
 	"github.com/evanphx/cg12/arm64"
 	"github.com/evanphx/cg12/cc"
@@ -201,8 +202,12 @@ func (d *driver) compile(src, obj string) error {
 	if d.verbose {
 		fmt.Fprintf(os.Stderr, "cg12cc: compiling %s -> %s\n", src, obj)
 	}
+	target := cc.TargetARM64
+	if os.Getenv("CG12_TARGET") == "amd64" {
+		target = cc.TargetAMD64
+	}
 	mod, err := cc.CompileWith(src, string(text), cc.Options{
-		Target:      cc.TargetARM64,
+		Target:      target,
 		IncludeDirs: d.includes,
 		Defines:     d.defines,
 		Undefines:   d.undefines,
@@ -222,7 +227,12 @@ func (d *driver) compile(src, obj string) error {
 			fmt.Fprintf(os.Stderr, "VERIFY FAIL %s: %v\n", src, err)
 		}
 	}
-	code, err := arm64.CompileObject(mod)
+	var code []byte
+	if target == cc.TargetAMD64 {
+		code, err = amd64.CompileObject(mod)
+	} else {
+		code, err = arm64.CompileObject(mod)
+	}
 	if err != nil {
 		return fmt.Errorf("%s: codegen: %w", src, err)
 	}
