@@ -13,6 +13,7 @@ const (
 	probBackEdge = 0.9    // a loop back edge is taken ~90% of the time
 	probLoopStay = 0.9    // staying in a loop is far likelier than exiting
 	probExit     = 0.1    // an arm that soon returns/traps (an error path) is unlikely
+	probExpect   = 0.9    // a __builtin_expect-hinted edge is taken almost always
 	maxTrip      = 1000.0 // cap a loop's estimated trip count
 	minFreq      = 1e-9   // reachable blocks never underflow to zero
 	maxFreq      = 1e12   // keeps float64 exact (< 2^53) even for deep nests
@@ -259,6 +260,14 @@ func jnzProbs(b *ir.Block, succs []*ir.Block, lf *LoopForest, dom *DomTree) []fl
 		return skew(pick(hlt), probHlt)
 	case back(0) != back(1): // the back edge is the likely arm
 		return skew(pick(back), probBackEdge)
+	}
+	// An explicit __builtin_expect (Ruby's RB_LIKELY/RB_UNLIKELY) overrides the
+	// softer heuristics below: the source states which edge is taken.
+	switch b.Jmp.Likely {
+	case ir.LikelyTo:
+		return skew(0, probExpect)
+	case ir.LikelyTo2:
+		return skew(1, probExpect)
 	}
 	if l := lf.In[b]; l != nil { // loop exit: staying is likely
 		out0, out1 := !l.Body[succs[0]], !l.Body[succs[1]]

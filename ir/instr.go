@@ -254,4 +254,20 @@ type Jmp struct {
 	// Signed selects signed vs unsigned comparison when the switch is lowered.
 	Cases  []SwitchCase
 	Signed bool
+
+	// Likely records a __builtin_expect hint on a JmpJnz: which edge the source
+	// says is taken almost always. Static block-frequency estimation uses it to
+	// bias the two edges (so the register allocator keeps hot-edge values in
+	// registers and spills cold-edge ones). It is advisory and may be dropped by a
+	// pass that rewrites the branch.
+	Likely LikelyEdge
 }
+
+// LikelyEdge names the expected-taken edge of a conditional branch.
+type LikelyEdge uint8
+
+const (
+	LikelyNone LikelyEdge = iota // no hint
+	LikelyTo                     // the true (To) edge is taken almost always
+	LikelyTo2                    // the false (To2) edge is taken almost always
+)

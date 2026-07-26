@@ -6,6 +6,7 @@ import (
 	"testing"
 
 	"github.com/evanphx/cg12/cc"
+	"github.com/evanphx/cg12/ir"
 	"github.com/stretchr/testify/require"
 )
 
@@ -60,6 +61,25 @@ int f(int x){ __builtin_assume(x > 0); return x * 2 + 1; }
 int main(void){ printf("%d\n", f(20)); return 0; }`)
 	require.Equal(t, 0, code)
 	require.Equal(t, "41\n", out)
+}
+
+// __builtin_expect (Ruby's RB_LIKELY/RB_UNLIKELY) records which branch edge the
+// source expects taken, for static block-frequency estimation. The value is
+// unchanged; the hint rides on the conditional branch.
+func TestBuiltinExpectHint(t *testing.T) {
+	likely := func(src string) ir.LikelyEdge {
+		m, err := cc.Compile("c.c", src)
+		require.NoError(t, err)
+		for _, b := range m.Funcs[0].Blocks {
+			if b.Jmp.Kind == ir.JmpJnz && b.Jmp.Likely != ir.LikelyNone {
+				return b.Jmp.Likely
+			}
+		}
+		return ir.LikelyNone
+	}
+	require.Equal(t, ir.LikelyTo, likely(`int g(int); int f(int c){ if (__builtin_expect(c!=0, 1)) return g(1); return 0; }`))
+	require.Equal(t, ir.LikelyTo2, likely(`int g(int); int f(int c){ if (__builtin_expect(c!=0, 0)) return g(1); return 0; }`))
+	require.Equal(t, ir.LikelyNone, likely(`int g(int); int f(int c){ if (c!=0) return g(1); return 0; }`))
 }
 
 // A compiler builtin cg12 does not implement fails at compile time with a clear

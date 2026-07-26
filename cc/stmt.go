@@ -583,7 +583,11 @@ func (g *gen) genSelection(ss *moderncc.SelectionStatement) {
 	if ss.Case == moderncc.SelectionStatementIfElse {
 		elseB = g.block("else")
 	}
-	g.cur.Jnz(cond, thenB, elseB)
+	br := g.cur
+	br.Jnz(cond, thenB, elseB)
+	if dir, ok := builtinExpectLikely(ss.ExpressionList); ok {
+		br.Jmp.Likely = dir // __builtin_expect: bias block frequency
+	}
 
 	g.cur = thenB
 	g.genStmt(ss.Statement)

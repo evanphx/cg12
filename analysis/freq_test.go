@@ -21,6 +21,23 @@ func TestFrequencyDiamond(t *testing.T) {
 	assert.InDelta(t, 1.0, fr.Of(bl["c"]), 1e-9)
 }
 
+// A __builtin_expect hint biases an otherwise-even diamond toward its likely arm.
+func TestFrequencyExpect(t *testing.T) {
+	f := NewModuleFunc()
+	c := f.Param("c", ir.ClsW)
+	entry := f.Entry()
+	hot, cold, join := f.NewBlock("hot"), f.NewBlock("cold"), f.NewBlock("join")
+	entry.Jnz(c, hot, cold)
+	entry.Jmp.Likely = ir.LikelyTo // the source says the To (hot) arm is taken
+	hot.Goto(join)
+	cold.Goto(join)
+	join.RetVoid()
+
+	_, fr := freqOf(f)
+	assert.InDelta(t, 0.9, fr.Of(hot), 1e-9)
+	assert.InDelta(t, 0.1, fr.Of(cold), 1e-9)
+}
+
 func TestFrequencySumLoop(t *testing.T) {
 	f, bl, _ := sumLoop()
 	_, fr := freqOf(f)

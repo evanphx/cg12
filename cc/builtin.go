@@ -256,6 +256,34 @@ func (g *gen) builtinCall(n *moderncc.PostfixExpression) (ir.Ref, bool) {
 	return ir.R, false
 }
 
+// builtinExpectLikely reports the edge a __builtin_expect on a controlling
+// expression predicts: LikelyTo when the condition is expected nonzero (the
+// then-branch, Ruby's RB_LIKELY), LikelyTo2 when expected zero (RB_UNLIKELY).
+// The hint biases static block-frequency estimation; it is dropped when absent.
+func builtinExpectLikely(e moderncc.ExpressionNode) (ir.LikelyEdge, bool) {
+	pe, ok := e.(*moderncc.PostfixExpression)
+	if !ok || pe.Case != moderncc.PostfixExpressionCall {
+		return ir.LikelyNone, false
+	}
+	switch calleeIdent(pe) {
+	case "__builtin_expect", "__builtin_expect_with_probability":
+	default:
+		return ir.LikelyNone, false
+	}
+	args := builtinArgs(pe)
+	if len(args) < 2 {
+		return ir.LikelyNone, false
+	}
+	k, ok := constInt(args[1])
+	if !ok {
+		return ir.LikelyNone, false
+	}
+	if k != 0 {
+		return ir.LikelyTo, true
+	}
+	return ir.LikelyTo2, true
+}
+
 // builtinArgs collects a call's argument expression nodes, head first.
 func builtinArgs(n *moderncc.PostfixExpression) []moderncc.ExpressionNode {
 	var out []moderncc.ExpressionNode
