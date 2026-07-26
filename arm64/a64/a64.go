@@ -263,6 +263,12 @@ const (
 // invert flips a condition, as CSET needs (CSET uses the inverted condition).
 func (c Cond) invert() Cond { return c ^ 1 }
 
+// Invert returns the exact complement condition: a branch on Invert(c) is taken in
+// precisely the NZCV states where a branch on c is not, so `b.c To; fall To2` and
+// `b.Invert(c) To2; fall To` are equivalent (true for float/unordered too, since it
+// complements the flag test, not the comparison).
+func (c Cond) Invert() Cond { return c ^ 1 }
+
 // Csel encodes CSEL rd, rn, rm, cond.
 func Csel(w64 bool, rd, rn, rm Reg, c Cond) uint32 {
 	return sf(w64)<<31 | 0xd4<<21 | r(rm)<<16 | uint32(c)<<12 | r(rn)<<5 | r(rd)

@@ -1280,7 +1280,7 @@ func (m *mc) block(b *ir.Block) {
 				// `if (x & (1<<k))` needs no flags when it becomes a tbnz: the terminator
 				// tests the bit on the register directly, so emit nothing here. Any other
 				// `if (x & mask)` is a tst (flags-only) the terminator branches on.
-				if _, _, ok := m.tbzBranch(fuseCmp); ok && m.tbzInRange(b, b.Jmp.To) {
+				if m.tbzFires(b, fuseCmp) {
 					break
 				}
 				m.newSel().tstFlags(fuseCmp)
@@ -1531,44 +1531,73 @@ func (m *mc) isZeroCmp(cmp *ir.Instr) bool {
 	return ok
 }
 
+// branchArm chooses which arm of b's two-way terminator is branched to and which
+// is the fall-through. Normally the branch goes to To (the non-zero arm) and To2
+// falls through; but when To is the block laid out next, the branch instead goes to
+// To2 (with the condition inverted) so To falls through -- avoiding a branch to the
+// block already sitting next. It returns the branch target and whether the condition
+// is inverted.
+func (m *mc) branchArm(b *ir.Block) (target *ir.Block, invert bool) {
+	if b.Jmp.To == m.nextBlock && b.Jmp.To2 != m.nextBlock {
+		return b.Jmp.To2, true
+	}
+	return b.Jmp.To, false
+}
+
+// tbzFires reports whether b's fused single-bit test emits as a tbz/tbnz -- so the
+// block body needs no flags-setting tst. It must agree with emitFusedBranch's arm
+// and range choice, or the body would omit the tst while the terminator falls back
+// to a flags branch.
+func (m *mc) tbzFires(b *ir.Block, cmp *ir.Instr) bool {
+	if _, _, ok := m.tbzBranch(cmp); !ok {
+		return false
+	}
+	target, _ := m.branchArm(b)
+	return m.tbzInRange(b, target)
+}
+
 func (m *mc) emitFusedBranch(b *ir.Block, cmp *ir.Instr) {
 	s := m.newSel()
-	// `if (x & mask)` fuses to `tst x, mask` (flags-only, already emitted in the
-	// body) then a branch on the result being non-zero -- no materialized AND
-	// result, no register tied up.
+	To2 := b.Jmp.To2
+	target, invert := m.branchArm(b)
+	tail := func() {
+		if !invert && To2 != m.nextBlock {
+			s.b.branch(To2)
+		}
+	}
+
+	// `if (x & mask)`: a single-bit test is a tbnz/tbz on x directly (in tbz range),
+	// else a tst (flags-only, already in the body) branched on being non-zero.
 	if cmp.Op == ir.OAnd {
-		// A single-bit test `if (x & (1<<k))` is a tbnz on x directly -- one
-		// instruction, no tst and no flags -- when the target is in tbz range.
-		if reg, bit, ok := m.tbzBranch(cmp); ok && m.tbzInRange(b, b.Jmp.To) {
+		if reg, bit, ok := m.tbzBranch(cmp); ok && m.tbzInRange(b, target) {
 			r := s.src(reg, 0, m.f.ClassOf(reg).Size())
-			s.b.tbnz(bit, r, b.Jmp.To) // jnz's non-zero arm: bit set
-			if b.Jmp.To2 != m.nextBlock {
-				s.b.branch(b.Jmp.To2)
+			if invert {
+				s.b.tbz(bit, r, target) // fall into the bit-set arm (To)
+			} else {
+				s.b.tbnz(bit, r, target) // branch to the bit-set arm
 			}
+			tail()
 			return
 		}
 		cond, _ := condOf(ir.CmpNe, false)
-		s.b.bcondTo(cond, b.Jmp.To.Name)
-		if b.Jmp.To2 != m.nextBlock { // else fall through
-			s.b.branch(b.Jmp.To2)
+		if invert {
+			cond = cond.Invert()
 		}
+		s.b.bcondTo(cond, target.Name)
+		tail()
 		return
 	}
-	// `x == 0` / `x != 0` is a cbz/cbnz on x -- one instruction, no flags, no
-	// materialized boolean. The jnz takes To when its condition (the comparison
-	// result) is non-zero: for `== 0` that is when x is zero (cbz), for `!= 0` when
-	// x is non-zero (cbnz).
+	// `x == 0` / `x != 0` is a cbz/cbnz on x. To (the non-zero-result arm) is taken
+	// on cbnz for `!= 0` and cbz for `== 0`; inverting swaps which of the two we emit.
 	if reg, isEq, ok := m.cmpZeroReg(cmp); ok {
 		sz := m.f.ClassOf(reg).Size()
 		r := s.src(reg, 0, sz)
-		if isEq {
-			s.b.cbzTo(sz == 8, r, b.Jmp.To.Name)
+		if isEq != invert { // == 0 (and not inverted), or != 0 inverted
+			s.b.cbzTo(sz == 8, r, target.Name)
 		} else {
-			s.b.cbnzTo(sz == 8, r, b.Jmp.To.Name)
+			s.b.cbnzTo(sz == 8, r, target.Name)
 		}
-		if b.Jmp.To2 != m.nextBlock { // else fall through
-			s.b.branch(b.Jmp.To2)
-		}
+		tail()
 		return
 	}
 	float := m.f.ClassOf(cmp.Args[0]).IsFloat()
@@ -1577,10 +1606,11 @@ func (m *mc) emitFusedBranch(b *ir.Block, cmp *ir.Instr) {
 		m.fail("arm64: cannot fuse comparison %v into a branch", cmp.Cmp)
 		return
 	}
-	s.b.bcondTo(cond, b.Jmp.To.Name)
-	if b.Jmp.To2 != m.nextBlock { // else fall through
-		s.b.branch(b.Jmp.To2)
+	if invert {
+		cond = cond.Invert()
 	}
+	s.b.bcondTo(cond, target.Name)
+	tail()
 }
 
 // reusesPredFlags reports whether b's fused comparison can read the flags its

@@ -115,6 +115,7 @@ type asmb interface {
 	// label; brind is a computed goto through a register, brk halts.
 	branch(to *ir.Block)
 	cbnz(w64 bool, rn Reg, to *ir.Block)
+	cbz(w64 bool, rn Reg, to *ir.Block)
 	tbz(bit uint32, rn Reg, to *ir.Block)
 	tbnz(bit uint32, rn Reg, to *ir.Block)
 	brind(rn Reg)
@@ -604,6 +605,9 @@ func (b *mcAsm) tlsIndexAddr(rd Reg, c ir.Const) { b.m.emitTLSIndexAddr(mreg(rd)
 func (b *mcAsm) branch(to *ir.Block)             { b.prog.B(to.Name) }
 func (b *mcAsm) cbnz(w64 bool, rn Reg, to *ir.Block) {
 	b.prog.Cbnz(w64, mreg(rn), to.Name)
+}
+func (b *mcAsm) cbz(w64 bool, rn Reg, to *ir.Block) {
+	b.prog.Cbz(w64, mreg(rn), to.Name)
 }
 func (b *mcAsm) tbz(bit uint32, rn Reg, to *ir.Block)  { b.prog.Tbz(bit, mreg(rn), to.Name) }
 func (b *mcAsm) tbnz(bit uint32, rn Reg, to *ir.Block) { b.prog.Tbnz(bit, mreg(rn), to.Name) }

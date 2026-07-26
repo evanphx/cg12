@@ -662,6 +662,29 @@ func TestBlockLayoutFallThrough(t *testing.T) {
 		"the false edge is laid out to fall through")
 }
 
+func TestLayoutPullsUpEitherArm(t *testing.T) {
+	// The matching maximizes fall-throughs across both arms of a conditional, not
+	// just its false (To2) arm. Here block a's non-zero (To) arm, b, must be pulled up
+	// to fall through -- forced because b then flows to c, so the chain entry-a-b-c
+	// realizes three fall-throughs where following only To2 would strand b out of
+	// line. The emitter inverts a's condition to branch to c instead (verified for
+	// correctness by the interpreter differential).
+	m := ir.NewModule()
+	f := m.NewFunc("f", ir.ClsL).Export()
+	x := f.Param("x", ir.ClsL)
+	e := f.Entry()
+	a := f.NewBlock("a")
+	b := f.NewBlock("b")
+	c := f.NewBlock("c")
+	e.Goto(a)
+	a.Jnz(a.Cmp(ir.CmpSgt, ir.ClsL, x, f.Long(10)), b, c) // To=b (x>10), To2=c
+	b.Goto(c)
+	c.Ret(f.Long(0))
+
+	require.Equal(t, []string{e.Name, "a", "b", "c"}, blockNames(layoutBlocks(f)),
+		"a's non-zero arm b is pulled up to fall through")
+}
+
 func blockNames(bs []*ir.Block) []string {
 	out := make([]string, len(bs))
 	for i, b := range bs {

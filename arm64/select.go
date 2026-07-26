@@ -783,9 +783,16 @@ func (s *sel) term(b *ir.Block) bool {
 	case ir.JmpJnz:
 		sz := s.f.ClassOf(b.Jmp.Arg).Size()
 		r := s.src(b.Jmp.Arg, 0, sz)
-		s.b.cbnz(sz == 8, r, b.Jmp.To)
-		if b.Jmp.To2 != s.next { // else fall through
-			s.b.branch(b.Jmp.To2)
+		// Fall through to whichever arm is laid out next. To is the non-zero arm; if
+		// it is next, branch to To2 on zero (cbz) and fall into To, rather than a
+		// cbnz to the very next block followed by a branch to To2.
+		if b.Jmp.To == s.next && b.Jmp.To2 != s.next {
+			s.b.cbz(sz == 8, r, b.Jmp.To2)
+		} else {
+			s.b.cbnz(sz == 8, r, b.Jmp.To)
+			if b.Jmp.To2 != s.next { // else fall through
+				s.b.branch(b.Jmp.To2)
+			}
 		}
 	case ir.JmpHlt:
 		s.b.brk()
