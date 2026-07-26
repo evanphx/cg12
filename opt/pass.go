@@ -141,6 +141,11 @@ func DefaultPipeline() []Pass {
 		// arms and fold any select whose condition simplification made constant.
 		FuncPass("ifconvert", IfConvert),
 		clean,
+		// Share each function's return epilogue: fold its duplicate return blocks
+		// into one, then drop the blocks that leaves unreachable.
+		FuncPass("tailmerge", TailMerge),
+		FuncPass("simplifycfg", SimplifyCFG),
+		FuncPass("dce", DCE),
 		ModulePass("deadfunc", DeadFuncElim),
 		FuncPass("gcm", GCM),
 		FuncPass("dce", DCE),
