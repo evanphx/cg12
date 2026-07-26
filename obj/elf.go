@@ -22,6 +22,16 @@ const (
 	R_AARCH64_ADR_PREL_PG_HI21 = 275 // adrp: page of a symbol
 	R_AARCH64_ADD_ABS_LO12_NC  = 277 // add: low 12 bits of a symbol
 
+	// ldr/str: low 12 bits of a symbol, folded into the access's scaled offset
+	// field (so `adrp x, sym; ldr d, [x, #:lo12:sym]` needs no separate add). The
+	// suffix is the access width in bits; the offset the linker writes is scaled by
+	// that width, matching the unsigned-offset encoding.
+	R_AARCH64_LDST8_ABS_LO12_NC   = 278
+	R_AARCH64_LDST16_ABS_LO12_NC  = 284
+	R_AARCH64_LDST32_ABS_LO12_NC  = 285
+	R_AARCH64_LDST64_ABS_LO12_NC  = 286
+	R_AARCH64_LDST128_ABS_LO12_NC = 299
+
 	// Thread-local storage, local-exec model: add the variable's offset from the
 	// thread pointer (read via MRS TPIDR_EL0).
 	// The pair is HI12 then LO12_NC: the offset is split across two adds. The

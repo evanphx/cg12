@@ -283,6 +283,35 @@ int main(){
 	require.Equal(t, 0, runObject(t, data, main))
 }
 
+// Reading and writing a global through the folded symbol addressing must be
+// correct end to end -- the linker patches the LDSTn_ABS_LO12_NC relocation into
+// the access's scaled-offset field.
+func TestSymbolAddressFoldE2E(t *testing.T) {
+	m := ir.NewModule()
+	m.NoteSymAlign("counter", 8) // 8-aligned long -> folds
+	rd := m.NewFunc("readg", ir.ClsL).Export()
+	e := rd.Entry()
+	e.Ret(e.Load(ir.ClsL, rd.Sym("counter", 0)))
+	st := m.NewFuncVoid("setg").Export()
+	v := st.Param("v", ir.ClsL)
+	e2 := st.Entry()
+	e2.Store(v, st.Sym("counter", 0))
+	e2.RetVoid()
+
+	data, err := arm64.CompileObject(m)
+	require.NoError(t, err)
+	main := `extern long readg(void); extern void setg(long);
+long counter = 12345;
+int main(){
+  if (readg() != 12345) return 1;   /* initial value through the fold */
+  setg(99999);                        /* store through the fold */
+  if (readg() != 99999) return 2;
+  if (counter != 99999) return 3;
+  return 0;
+}`
+	require.Equal(t, 0, runObject(t, data, main))
+}
+
 func TestSelectFcsel(t *testing.T) {
 	m := ir.NewModule()
 	f := m.NewFunc("seld", ir.ClsD).Export()

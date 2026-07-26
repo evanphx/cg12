@@ -2281,6 +2281,43 @@ func storeSize(op ir.Op) int {
 	return 0
 }
 
+// accessWidth is the number of bytes a load or store touches in memory, distinct
+// from the register width (a byte load targets a 32-bit W register). It selects
+// the scaled-offset relocation when a symbol's low bits fold into the access.
+func accessWidth(op ir.Op) int {
+	switch op {
+	case ir.OLoadub, ir.OLoadsb, ir.OStoreb:
+		return 1
+	case ir.OLoaduh, ir.OLoadsh, ir.OStoreh:
+		return 2
+	case ir.OLoaduw, ir.OLoadsw, ir.OStorew, ir.OLoads, ir.OStores:
+		return 4
+	case ir.OLoadl, ir.OLoadd, ir.OStorel, ir.OStored:
+		return 8
+	case ir.OLoadq, ir.OStoreq:
+		return 16
+	}
+	return 0
+}
+
+// ldstLo12Reloc is the low-12 relocation for a memory access of the given width,
+// or 0 for an unsupported one.
+func ldstLo12Reloc(bytes int) uint32 {
+	switch bytes {
+	case 1:
+		return obj.R_AARCH64_LDST8_ABS_LO12_NC
+	case 2:
+		return obj.R_AARCH64_LDST16_ABS_LO12_NC
+	case 4:
+		return obj.R_AARCH64_LDST32_ABS_LO12_NC
+	case 8:
+		return obj.R_AARCH64_LDST64_ABS_LO12_NC
+	case 16:
+		return obj.R_AARCH64_LDST128_ABS_LO12_NC
+	}
+	return 0
+}
+
 func (m *mc) term(b *ir.Block) {
 	if (m.newSel()).term(b) {
 		return

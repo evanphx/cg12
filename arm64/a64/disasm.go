@@ -517,6 +517,31 @@ func intLdSt(size, opc uint32) (op string, w64, ok bool) {
 	return "", false, false
 }
 
+// LdStOperands decodes an unsigned-offset load or store, returning its mnemonic,
+// the transferred register (rendered with its width), and the base register
+// number. It reports false for anything that is not such an access. It lets a
+// relocated access be re-rendered with a symbolic `#:lo12:` offset.
+func LdStOperands(w uint32) (op, reg string, base uint32, ok bool) {
+	switch {
+	case bits(w, 29, 24) == 0x39: // unsigned offset, integer
+		size, opc := bits(w, 31, 30), bits(w, 23, 22)
+		o, w64, k := intLdSt(size, opc)
+		if !k {
+			return "", "", 0, false
+		}
+		return o, gpr(w64, w&0x1f), bits(w, 9, 5), true
+	case bits(w, 29, 24) == 0x3d: // unsigned offset, FP/SIMD
+		size, opc := bits(w, 31, 30), bits(w, 23, 22)
+		switch {
+		case size == 2 || size == 3: // S and D
+			return ldOrStr(opc), fpr(size == 3, w&0x1f), bits(w, 9, 5), true
+		case size == 0 && opc >= 2: // Q
+			return ldOrStr(opc & 1), fmt.Sprintf("q%d", w&0x1f), bits(w, 9, 5), true
+		}
+	}
+	return "", "", 0, false
+}
+
 func disasmLdSt(w uint32) string {
 	if s := disasmExclusive(w); s != "" {
 		return s

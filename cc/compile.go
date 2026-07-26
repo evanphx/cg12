@@ -95,6 +95,9 @@ func (g *gen) addrOf(v lval) ir.Ref {
 		if v.thread {
 			return g.fn.ThreadSym(v.sym)
 		}
+		// Record the symbol's declared alignment so the backend may fold its low
+		// bits into a scaled access when the access is no wider than that.
+		g.mod.NoteSymAlign(v.sym, dataAlign(v.typ))
 		return g.fn.Sym(v.sym, 0)
 	}
 	return v.addr
@@ -848,6 +851,7 @@ func (g *gen) genGlobalDecl(d *moderncc.Declaration) {
 			continue
 		}
 
+		g.mod.NoteSymAlign(dcl.Name(), dataAlign(t))
 		data := &ir.Data{Name: dcl.Name(), Align: dataAlign(t), Linkage: ir.Linkage{
 			Section: sec,
 			// External linkage is what makes a definition visible to the linker;

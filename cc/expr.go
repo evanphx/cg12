@@ -209,6 +209,9 @@ func (g *gen) genAddr(e moderncc.ExpressionNode) (ir.Ref, moderncc.Type) {
 			if isThreadLocalIdent(n) {
 				return g.fn.ThreadSym(n.Token.SrcStr()), n.Type()
 			}
+			// An external global: record its declared alignment so the backend may
+			// fold its low bits into a scaled access only when that is sound.
+			g.mod.NoteSymAlign(n.Token.SrcStr(), dataAlign(n.Type()))
 			return g.fn.Sym(n.Token.SrcStr(), 0), n.Type()
 		}
 		if n.Case == moderncc.PrimaryExpressionExpr {

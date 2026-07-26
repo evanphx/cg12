@@ -199,6 +199,29 @@ type Module struct {
 	Data    []*Data
 	Aliases []*Alias
 	Files   []string // source-file table indexed (1-based) by SrcPos.File
+
+	// SymAlign records the guaranteed alignment (bytes) of a data symbol, keyed by
+	// its unmangled name -- from a definition or from the type of a reference. A
+	// backend folding a symbol's low bits into a scaled load/store offset consults
+	// it: that fold is only sound when the symbol is aligned to the access width.
+	SymAlign map[string]int
+}
+
+// Module returns the module this function belongs to (nil if standalone).
+func (f *Func) Module() *Module { return f.mod }
+
+// NoteSymAlign records align as symbol name's guaranteed alignment, keeping the
+// smallest seen so a wider-typed reference never overstates it.
+func (m *Module) NoteSymAlign(name string, align int) {
+	if align <= 0 {
+		return
+	}
+	if m.SymAlign == nil {
+		m.SymAlign = map[string]int{}
+	}
+	if cur, ok := m.SymAlign[name]; !ok || align < cur {
+		m.SymAlign[name] = align
+	}
 }
 
 // Alias is a second name for a symbol already defined in this module, as

@@ -215,6 +215,20 @@ func resolveAArch64(sec []byte, r Reloc, target, place int64) error {
 		w := binary.LittleEndian.Uint32(sec[r.Offset:])
 		w = (w &^ (0xfff << 10)) | (uint32(target&0xfff) << 10)
 		binary.LittleEndian.PutUint32(sec[r.Offset:], w)
+	case R_AARCH64_LDST8_ABS_LO12_NC, R_AARCH64_LDST16_ABS_LO12_NC,
+		R_AARCH64_LDST32_ABS_LO12_NC, R_AARCH64_LDST64_ABS_LO12_NC,
+		R_AARCH64_LDST128_ABS_LO12_NC:
+		// The load/store unsigned-offset immediate is scaled by the access width, so
+		// the low 12 bits of the target are shifted right by the log2 of that width.
+		shift := map[uint32]uint{
+			R_AARCH64_LDST8_ABS_LO12_NC: 0, R_AARCH64_LDST16_ABS_LO12_NC: 1,
+			R_AARCH64_LDST32_ABS_LO12_NC: 2, R_AARCH64_LDST64_ABS_LO12_NC: 3,
+			R_AARCH64_LDST128_ABS_LO12_NC: 4,
+		}[r.Type]
+		imm := (uint32(target&0xfff) >> shift) & 0xfff
+		w := binary.LittleEndian.Uint32(sec[r.Offset:])
+		w = (w &^ (0xfff << 10)) | (imm << 10)
+		binary.LittleEndian.PutUint32(sec[r.Offset:], w)
 	default:
 		return fmt.Errorf("obj: cannot statically resolve aarch64 relocation type %d (symbol %q)", r.Type, r.Sym)
 	}

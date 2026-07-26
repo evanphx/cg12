@@ -100,6 +100,11 @@ type asmb interface {
 	loadIdx(op ir.Op, cls ir.Cls, rd, base, index Reg, amode int32)
 	store(op ir.Op, val, base Reg, off uint32)
 	storeIdx(op ir.Op, val, base, index Reg, amode int32)
+	// loadSym/storeSym access a symbol at offset 0 with the low-12 bits folded into
+	// the access: `adrp page, sym; ldr/str [page, #:lo12:sym]`, no separate address
+	// add. page is a scratch register the adrp writes.
+	loadSym(op ir.Op, cls ir.Cls, rd, page Reg, sym string)
+	storeSym(op ir.Op, val, page Reg, sym string)
 	// loadWB/storeWB fold a pointer advance into the access with pre/post-indexed
 	// write-back; they report false for forms not covered (FP), leaving the caller
 	// to emit the access and the advance separately.
@@ -552,6 +557,20 @@ func (b *mcAsm) store(op ir.Op, val, base Reg, off uint32) {
 	default:
 		b.fail("arm64: unsupported store %s", op)
 	}
+}
+func (b *mcAsm) loadSym(op ir.Op, cls ir.Cls, rd, page Reg, sym string) {
+	s := sanitize(sym)
+	b.m.reloc(s, obj.R_AARCH64_ADR_PREL_PG_HI21)
+	b.prog.Emit(a64.Adrp(mreg(page), 0))
+	b.m.reloc(s, ldstLo12Reloc(accessWidth(op)))
+	b.load(op, cls, rd, page, 0) // the reloc just recorded patches this access's offset
+}
+func (b *mcAsm) storeSym(op ir.Op, val, page Reg, sym string) {
+	s := sanitize(sym)
+	b.m.reloc(s, obj.R_AARCH64_ADR_PREL_PG_HI21)
+	b.prog.Emit(a64.Adrp(mreg(page), 0))
+	b.m.reloc(s, ldstLo12Reloc(accessWidth(op)))
+	b.store(op, val, page, 0)
 }
 func (b *mcAsm) storeIdx(op ir.Op, val, base, index Reg, amode int32) {
 	v, ba, ix := mreg(val), mreg(base), mreg(index)

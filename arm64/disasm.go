@@ -77,6 +77,13 @@ func symbolic(r obj.Reloc, w uint32) (string, bool) {
 		return fmt.Sprintf("adrp x%d, %s", rd, target), true
 	case obj.R_AARCH64_ADD_ABS_LO12_NC:
 		return fmt.Sprintf("add x%d, x%d, #:lo12:%s", rd, rn, target), true
+	case obj.R_AARCH64_LDST8_ABS_LO12_NC, obj.R_AARCH64_LDST16_ABS_LO12_NC,
+		obj.R_AARCH64_LDST32_ABS_LO12_NC, obj.R_AARCH64_LDST64_ABS_LO12_NC,
+		obj.R_AARCH64_LDST128_ABS_LO12_NC:
+		if op, reg, base, ok := a64.LdStOperands(w); ok {
+			return fmt.Sprintf("%s %s, [x%d, #:lo12:%s]", op, reg, base, target), true
+		}
+		return "", false
 
 	case obj.R_AARCH64_TLSLE_ADD_TPREL_HI12:
 		return fmt.Sprintf("add x%d, x%d, #:tprel_hi12:%s, lsl #12", rd, rn, target), true

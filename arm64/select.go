@@ -270,6 +270,30 @@ func (s *sel) selectData(in *ir.Instr) bool {
 	return true
 }
 
+// foldableSym reports whether an access of the given width to ref may fold the
+// symbol's low bits into its scaled offset: ref must be a plain, offset-0 symbol,
+// and the symbol must be aligned to at least the access width -- otherwise the
+// scaled offset cannot represent its low bits and the linker rejects it (an
+// under-aligned struct global copied word by word, say). The frontend records the
+// alignment; an unknown symbol does not fold.
+func (s *sel) foldableSym(ref ir.Ref, access int) (string, bool) {
+	if ref.Kind != ir.RefConst {
+		return "", false
+	}
+	c := s.f.Consts[ref.ID]
+	if c.Kind != ir.ConstSym || c.Thread || c.Int != 0 {
+		return "", false
+	}
+	m := s.f.Module()
+	if m == nil {
+		return "", false
+	}
+	if a, ok := m.SymAlign[c.Sym]; ok && a >= access {
+		return c.Sym, true
+	}
+	return "", false
+}
+
 // load emits a load, [base] or indexed [base, index] with the extend/scale in Aux.
 func (s *sel) load(in *ir.Instr) {
 	sz := loadSize(in.Op, in.Cls)
@@ -281,6 +305,17 @@ func (s *sel) load(in *ir.Instr) {
 		s.b.loadIdx(in.Op, in.Cls, d, base, index, in.Amode)
 		done()
 		return
+	}
+	// A load straight from a (sufficiently aligned) global folds the symbol's low
+	// bits into the access (adrp; ldr [page, #:lo12:sym]) rather than materializing
+	// the whole address.
+	if in.Aux == 0 {
+		if sym, ok := s.foldableSym(in.Args[0], accessWidth(in.Op)); ok {
+			d, done := s.dst(in.To, sz)
+			s.b.loadSym(in.Op, in.Cls, d, intScratchRegs[1], sym)
+			done()
+			return
+		}
 	}
 	addr := s.src(in.Args[0], 1, 8)
 	d, done := s.dst(in.To, sz)
@@ -297,6 +332,12 @@ func (s *sel) store(in *ir.Instr) {
 		index := s.src(in.Args[2], 2, indexSize(option))
 		s.b.storeIdx(in.Op, val, base, index, in.Amode)
 		return
+	}
+	if in.Aux == 0 {
+		if sym, ok := s.foldableSym(in.Args[1], accessWidth(in.Op)); ok {
+			s.b.storeSym(in.Op, val, intScratchRegs[1], sym)
+			return
+		}
 	}
 	s.b.store(in.Op, val, s.src(in.Args[1], 1, 8), uint32(in.Aux))
 }

@@ -44,6 +44,37 @@ func TestFallThroughElision(t *testing.T) {
 	require.Contains(t, text, "ret")
 }
 
+// A load or store straight from a global folds the symbol's low bits into the
+// access (adrp; ldr [reg, #:lo12:sym]) rather than materializing the whole
+// address with a separate add.
+func TestSymbolAddressFoldsIntoAccess(t *testing.T) {
+	m := ir.NewModule()
+	m.NoteSymAlign("myglobal", 8) // an 8-byte-aligned global permits the fold
+	f := m.NewFunc("getg", ir.ClsL).Export()
+	e := f.Entry()
+	e.Ret(e.Load(ir.ClsL, f.Sym("myglobal", 0)))
+
+	text := disasmModule(t, m)
+	require.Contains(t, text, "adrp", "the page address is still an adrp")
+	require.Contains(t, text, "[x17, #:lo12:myglobal]", "the low bits fold into the load's offset")
+	require.NotContains(t, text, "add x17", "no separate address add")
+}
+
+// An under-aligned global (aligned less than the access width) does NOT fold --
+// the scaled offset could not represent its low bits and the linker would reject
+// it -- so the full address is materialized with a separate add.
+func TestUnderAlignedSymbolDoesNotFold(t *testing.T) {
+	m := ir.NewModule()
+	m.NoteSymAlign("packed", 4) // 4-aligned, but an 8-byte load needs 8
+	f := m.NewFunc("getp", ir.ClsL).Export()
+	e := f.Entry()
+	e.Ret(e.Load(ir.ClsL, f.Sym("packed", 0)))
+
+	text := disasmModule(t, m)
+	require.Contains(t, text, "add x17", "an under-aligned symbol keeps the address add")
+	require.NotContains(t, text, "[x17, #:lo12:", "and does not fold into the access")
+}
+
 // A comparison that feeds only a conditional select is emitted as `cmp; csel
 // <cond>`, selecting on the flags directly, rather than materializing the boolean
 // (cset) and re-testing it against zero (cmp #0; csel ne).
