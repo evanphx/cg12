@@ -61,6 +61,17 @@ func (s *sel) src(ref ir.Ref, slot, size int) Reg {
 	return scr
 }
 
+// srcZ resolves an operand, but returns the zero register for an integer constant 0
+// rather than materializing it with a mov. Use it ONLY where reg 31 reads as xzr/wzr
+// -- a store's value (Rt) or an ALU/compare register operand (Rn/Rm) -- never a
+// load/store base or an add/sub-immediate Rn, where reg 31 is the stack pointer.
+func (s *sel) srcZ(ref ir.Ref, slot, size int) Reg {
+	if v, ok := intConst(s.f, ref); ok && v == 0 && !s.f.ClassOf(ref).IsFloat() {
+		return ZR
+	}
+	return s.src(ref, slot, size)
+}
+
 // dst resolves a destination operand to a register plus a finalizer that stores a
 // spilled result back. A spilled result uses scratch slot 0, which a single
 // three-operand instruction may share with its first source (read before write).
@@ -325,7 +336,7 @@ func (s *sel) load(in *ir.Instr) {
 
 // store emits a store, [base] or indexed [base, index].
 func (s *sel) store(in *ir.Instr) {
-	val := s.src(in.Args[0], 0, storeSize(in.Op))
+	val := s.srcZ(in.Args[0], 0, storeSize(in.Op))
 	if len(in.Args) == 3 { // indexed
 		base := s.src(in.Args[1], 1, 8)
 		option, _ := decodeAmode(in.Amode)

@@ -354,6 +354,21 @@ func TestTbzRangeGating(t *testing.T) {
 	assert.False(t, em.tbzInRange(b, target), "35000-byte distance is out of reach")
 }
 
+func TestStoreZeroUsesZeroRegister(t *testing.T) {
+	// Storing the constant 0 uses the zero register (str xzr) instead of first
+	// materializing 0 into a scratch with a mov.
+	m := ir.NewModule()
+	f := m.NewFunc("clr", ir.ClsL)
+	p := f.Param("p", ir.ClsL)
+	e := f.Entry()
+	e.Store(f.Long(0), p) // *p = 0
+	e.Ret(f.Long(0))
+
+	asm := disasmModule(t, m)
+	assert.Regexp(t, `str\s+xzr, \[`, asm, "store of 0 uses xzr")
+	assert.NotContains(t, asm, "mov x9, #0", "no zero is materialized for the store")
+}
+
 func TestSharedOffsetFoldsIntoEachAccess(t *testing.T) {
 	// A constant field offset shared by a read AND a write of the same address (a
 	// read-modify-write: `s->b += 8`) folds into both the load and the store, so the
