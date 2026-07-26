@@ -133,6 +133,11 @@ func DefaultPipeline() []Pass {
 			inline,
 			clean,
 		),
+		// With inlining and simplification settled, convert short branch diamonds
+		// exposed anywhere in the pipeline into selects, then clean up the drained
+		// arms and fold any select whose condition simplification made constant.
+		FuncPass("ifconvert", IfConvert),
+		clean,
 		ModulePass("deadfunc", DeadFuncElim),
 		FuncPass("gcm", GCM),
 		FuncPass("dce", DCE),
