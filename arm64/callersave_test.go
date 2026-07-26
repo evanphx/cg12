@@ -74,3 +74,23 @@ int main(void){ return runtest(); }`
 	_, code := buildAndRun(t, m, main)
 	require.Equal(t, 0, code)
 }
+
+// The prologue/epilogue save and restore adjacent callee-saved integer registers
+// as paired stp/ldp (matching gcc). This forces several values into the
+// callee-saved bank across calls and checks the pairing preserves every one.
+func TestCalleeSavedPairing(t *testing.T) {
+	m, err := cc.Compile("c.c", `
+long dbl(long x){ return x*2; }
+long f(long a,long b,long c,long d,long e,long g){
+	long s = dbl(a) + dbl(g);            /* a..g live across the calls */
+	return s + a + b + c + d + e + g;    /* 2+12 + 21 = 35 */
+}
+int runtest(void){ return (int)f(1,2,3,4,5,6); }`)
+	require.NoError(t, err)
+	text := disasmModule(t, m)
+	require.Contains(t, text, "stp x19, x20", "adjacent callee-saved saves pair into stp")
+	require.Contains(t, text, "ldp x19, x20", "and restore as ldp")
+
+	_, code := buildAndRun(t, m, "extern int runtest(void); int main(){ return (int)runtest()==35?0:1; }")
+	require.Equal(t, 0, code, "the pairing must preserve every callee-saved value")
+}

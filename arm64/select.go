@@ -725,8 +725,16 @@ func (s *sel) frameTeardown(frame int, hasDynAlloc bool, calleeSaved []Reg) {
 	if hasDynAlloc {
 		s.b.movSPFromFP() // undo any VLA growth before the frame-relative reloads
 	}
-	for i, r := range calleeSaved {
-		s.b.ldrSpill(r, r.IsFloat(), 16+i*8, 8)
+	// Restore the callee-saved registers, pairing adjacent integer ones into an
+	// ldp to mirror the prologue's stp.
+	for i := 0; i < len(calleeSaved); {
+		if i+1 < len(calleeSaved) && stpPairable(calleeSaved[i], calleeSaved[i+1], 16+i*8) {
+			s.b.ldpFrame(calleeSaved[i], calleeSaved[i+1], 16+i*8)
+			i += 2
+			continue
+		}
+		s.b.ldrSpill(calleeSaved[i], calleeSaved[i].IsFloat(), 16+i*8, 8)
+		i++
 	}
 	s.b.frameClose(frame)
 }

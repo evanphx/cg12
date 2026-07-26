@@ -720,8 +720,18 @@ func (m *mc) prologue() {
 		pe.EmitPrologue(&PrologueContext{mc: m, retry: "__cg12_prologue"})
 	}
 	m.allocFrame()
-	for i, r := range m.calleeSaved {
-		m.spillStore(mreg(r), r.IsFloat(), 16+i*8, 8)
+	// Save the callee-saved registers, pairing two adjacent integer ones into a
+	// single stp (they occupy adjacent 8-byte slots), as gcc does. Float saves and
+	// a lone trailing register stay individual.
+	cs := m.calleeSaved
+	for i := 0; i < len(cs); {
+		if i+1 < len(cs) && stpPairable(cs[i], cs[i+1], 16+i*8) {
+			m.emit(a64.Stp(true, mreg(cs[i]), mreg(cs[i+1]), mcX29, 16+i*8, a64.SignedOffset))
+			i += 2
+			continue
+		}
+		m.spillStore(mreg(cs[i]), cs[i].IsFloat(), 16+i*8, 8)
+		i++
 	}
 	if m.variadic {
 		for i := 0; i < 8; i++ {
@@ -731,6 +741,14 @@ func (m *mc) prologue() {
 			m.emit(a64.StrFP(true, a64.Reg(i), mcX29, uint32(m.fpSaveOff+i*16)))
 		}
 	}
+}
+
+// stpPairable reports whether two adjacent callee-saved registers at frame offset
+// off can be saved or restored with a single 64-bit stp/ldp: both must be integer
+// (a float pair uses a distinct encoding) and off a multiple of 8 within the
+// scaled 7-bit signed range.
+func stpPairable(a, b Reg, off int) bool {
+	return !a.IsFloat() && !b.IsFloat() && off%8 == 0 && off >= -512 && off <= 504
 }
 
 func (m *mc) allocFrame() {

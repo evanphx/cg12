@@ -166,6 +166,9 @@ type asmb interface {
 	// Spill traffic: a load into / store from a frame slot at x29+off.
 	ldrSpill(rd Reg, float bool, off, size int)
 	strSpill(rs Reg, float bool, off, size int)
+	// ldpFrame restores two integer registers from adjacent frame slots at
+	// [x29, #off] with one ldp -- the epilogue counterpart of the prologue's stp.
+	ldpFrame(rt, rt2 Reg, off int)
 
 	// Escape hatch: a fully-encoded instruction word (for forms not yet modelled).
 	raw(word uint32)
@@ -645,6 +648,9 @@ func (b *mcAsm) ldrSpill(rd Reg, float bool, off, size int) {
 }
 func (b *mcAsm) strSpill(rs Reg, float bool, off, size int) {
 	b.m.spillStore(mreg(rs), float, off, size)
+}
+func (b *mcAsm) ldpFrame(rt, rt2 Reg, off int) {
+	b.prog.Emit(a64.Ldp(true, mreg(rt), mreg(rt2), mcX29, off, a64.SignedOffset))
 }
 func (b *mcAsm) ldar(bytes int, rt, rn Reg)  { b.prog.Emit(a64.Ldar(bytes, mreg(rt), mreg(rn))) }
 func (b *mcAsm) stlr(bytes int, rt, rn Reg)  { b.prog.Emit(a64.Stlr(bytes, mreg(rt), mreg(rn))) }
