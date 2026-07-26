@@ -80,9 +80,10 @@ func IfConvert(f *ir.Func) bool {
 	// later round. Bounded by the block count (each round removes a branch).
 	for range f.Blocks {
 		preds := predMap(f)
+		uses, defOf := defUses(f)
 		did := false
 		for _, b := range f.Blocks {
-			if convertRegion(f, b, preds, freq) {
+			if convertRegion(f, b, preds, freq) || collapseShortCircuit(f, b, preds, freq, uses, defOf) {
 				did, changed = true, true
 				break
 			}
@@ -92,6 +93,134 @@ func IfConvert(f *ir.Func) bool {
 		}
 	}
 	return changed
+}
+
+// defUses returns, per temporary, its use count and defining instruction.
+func defUses(f *ir.Func) (uses []int, defOf func(ir.Ref) *ir.Instr) {
+	uses = make([]int, len(f.Temps))
+	def := make([]*ir.Instr, len(f.Temps))
+	bump := func(r ir.Ref) {
+		if r.Kind == ir.RefTemp && int(r.ID) < len(uses) {
+			uses[r.ID]++
+		}
+	}
+	for _, b := range f.Blocks {
+		for _, p := range b.Phis {
+			for _, a := range p.Args {
+				bump(a)
+			}
+		}
+		for i := range b.Instrs {
+			in := &b.Instrs[i]
+			for _, a := range in.Args {
+				bump(a)
+			}
+			if in.To.Kind == ir.RefTemp && int(in.To.ID) < len(def) {
+				def[in.To.ID] = in
+			}
+		}
+		bump(b.Jmp.Arg)
+		for _, a := range b.Jmp.Args {
+			bump(a)
+		}
+	}
+	return uses, func(r ir.Ref) *ir.Instr {
+		if r.Kind != ir.RefTemp || int(r.ID) >= len(def) {
+			return nil
+		}
+		return def[r.ID]
+	}
+}
+
+// collapseShortCircuit rewrites a short-circuit `if (c1 && c2)` / `if (c1 || c2)`
+// -- two conditional branches where the second test sits in its own block -- into
+// a single branch on c1&c2 / c1|c2, which the arm64 backend fuses to cmp; ccmp;
+// b.cond. It fires only when both conditions are single-use integer compares (so
+// the fuse happens and the collapse is not a pessimization) and the second test's
+// block holds only speculatable instructions (so evaluating it unconditionally is
+// safe). The hot-branch and one-region-per-round guards match convertRegion.
+func collapseShortCircuit(f *ir.Func, H *ir.Block, preds map[*ir.Block][]*ir.Block, freq *analysis.Freq, uses []int, defOf func(ir.Ref) *ir.Instr) bool {
+	if H.Jmp.Kind != ir.JmpJnz || freq.Of(H) > ifConvHotFreq || H.Jmp.Arg.Kind != ir.RefTemp {
+		return false
+	}
+	c1 := H.Jmp.Arg
+	a, b := H.Jmp.To, H.Jmp.To2
+	if a == nil || b == nil || a == b {
+		return false
+	}
+
+	// Identify the second-test block M and the two exits. The shared exit is the
+	// one both H and M branch to; the other is reached only through M.
+	var M, trueTgt, falseTgt, shared *ir.Block
+	var op ir.Op
+	switch {
+	case isShortCircuitArm(a, H, preds) && a.Jmp.To2 == b: // c1 && c2
+		M, op, trueTgt, falseTgt, shared = a, ir.OAnd, a.Jmp.To, b, b
+	case isShortCircuitArm(b, H, preds) && b.Jmp.To == a: // c1 || c2
+		M, op, trueTgt, falseTgt, shared = b, ir.OOr, a, b.Jmp.To2, a
+	default:
+		return false
+	}
+	nonShared := trueTgt
+	if shared == trueTgt {
+		nonShared = falseTgt
+	}
+
+	c2 := M.Jmp.Arg
+	if !singleUseIntCmp(c1, uses, defOf) || !singleUseIntCmp(c2, uses, defOf) {
+		return false // only worth it when it will fuse to a ccmp
+	}
+	if countInstrs(M) > ifConvMaxSpecInstrs {
+		return false
+	}
+	// Guard the degenerate and self-referential shapes.
+	if trueTgt == falseTgt || nonShared == shared {
+		return false
+	}
+	for _, blk := range []*ir.Block{trueTgt, falseTgt, shared, nonShared} {
+		if blk == nil || blk == H || blk == M {
+			return false
+		}
+	}
+	// The collapse merges H's and M's edges into the shared exit; a phi there
+	// cannot tell the two apart, so require it to have none. The non-shared exit's
+	// M edge becomes an H edge -- relabel its phis (a pure predecessor rename, the
+	// hoisted values now dominate from H).
+	if len(shared.Phis) != 0 {
+		return false
+	}
+	for _, p := range nonShared.Phis {
+		for i, blk := range p.Blocks {
+			if blk == M {
+				p.Blocks[i] = H
+			}
+		}
+	}
+
+	H.Instrs = append(H.Instrs, M.Instrs...) // hoist the (pure) second test
+	t := f.NewTemp("", f.ClassOf(c1))
+	H.Instrs = append(H.Instrs, ir.Instr{Op: op, Cls: f.ClassOf(c1), To: t, Args: []ir.Ref{c1, c2}})
+	H.Jmp = ir.Jmp{Kind: ir.JmpJnz, Arg: t, To: trueTgt, To2: falseTgt}
+	drainBlock(M)
+	return true
+}
+
+// isShortCircuitArm reports whether M is exclusively H's arm and holds only a
+// speculatable second test (single predecessor H, no phis, a conditional branch
+// on a temporary, every instruction speculatable).
+func isShortCircuitArm(M, H *ir.Block, preds map[*ir.Block][]*ir.Block) bool {
+	p := preds[M]
+	return len(p) == 1 && p[0] == H && len(M.Phis) == 0 &&
+		M.Jmp.Kind == ir.JmpJnz && M.Jmp.Arg.Kind == ir.RefTemp && allSpeculatable(M)
+}
+
+// singleUseIntCmp reports whether r is a single-use integer comparison result.
+func singleUseIntCmp(r ir.Ref, uses []int, defOf func(ir.Ref) *ir.Instr) bool {
+	if r.Kind != ir.RefTemp || int(r.ID) >= len(uses) || uses[r.ID] != 1 {
+		return false
+	}
+	d := defOf(r)
+	return d != nil && d.Op == ir.OCmp && !d.Cmp.IsFloat()
 }
 
 // predMap returns each block's predecessors, derived from the terminators.

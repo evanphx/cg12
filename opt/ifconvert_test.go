@@ -248,6 +248,135 @@ func TestIfConvertPreservesOtherPreds(t *testing.T) {
 	require.Equal(t, int64(3), got.I64())
 }
 
+// A short-circuit `if (a<b && c<d)` -- two conditional branches, the second in
+// its own block -- collapses to one branch on an AND of the two compares.
+func TestShortCircuitAnd(t *testing.T) {
+	m := ir.NewModule()
+	f := m.NewFunc("sand", ir.ClsL).Export()
+	a, b, c, d := f.Param("a", ir.ClsL), f.Param("b", ir.ClsL), f.Param("c", ir.ClsL), f.Param("d", ir.ClsL)
+	h := f.Entry()
+	mid, yes, no := f.NewBlock("mid"), f.NewBlock("yes"), f.NewBlock("no")
+	h.Jnz(h.Cmp(ir.CmpSlt, ir.ClsL, a, b), mid, no) // a<b ? check c<d : false
+	mid.Jnz(mid.Cmp(ir.CmpSlt, ir.ClsL, c, d), yes, no)
+	yes.Ret(f.ConstInt(ir.ClsL, 1))
+	no.Ret(f.ConstInt(ir.ClsL, 0))
+
+	require.True(t, opt.IfConvert(f), "the short-circuit should collapse")
+	opt.SimplifyCFG(f)
+	require.Equal(t, 1, countOp(f, ir.OAnd), "one combined AND of the two compares")
+
+	mc, err := interp.New(m)
+	require.NoError(t, err)
+	for _, tc := range []struct {
+		a, b, c, d, want int64
+	}{{1, 2, 3, 4, 1}, {2, 1, 3, 4, 0}, {1, 2, 4, 3, 0}, {2, 1, 4, 3, 0}} {
+		got, err := mc.Call("sand", interp.L(tc.a), interp.L(tc.b), interp.L(tc.c), interp.L(tc.d))
+		require.NoError(t, err)
+		require.Equalf(t, tc.want, got.I64(), "sand(%d,%d,%d,%d)", tc.a, tc.b, tc.c, tc.d)
+	}
+}
+
+// A short-circuit `if (a>b || c==5)` collapses to a branch on an OR.
+func TestShortCircuitOr(t *testing.T) {
+	m := ir.NewModule()
+	f := m.NewFunc("sor", ir.ClsL).Export()
+	a, b, c := f.Param("a", ir.ClsL), f.Param("b", ir.ClsL), f.Param("c", ir.ClsL)
+	h := f.Entry()
+	mid, yes, no := f.NewBlock("mid"), f.NewBlock("yes"), f.NewBlock("no")
+	h.Jnz(h.Cmp(ir.CmpSgt, ir.ClsL, a, b), yes, mid) // a>b ? true : check c==5
+	mid.Jnz(mid.Cmp(ir.CmpEq, ir.ClsL, c, f.ConstInt(ir.ClsL, 5)), yes, no)
+	yes.Ret(f.ConstInt(ir.ClsL, 1))
+	no.Ret(f.ConstInt(ir.ClsL, 0))
+
+	require.True(t, opt.IfConvert(f))
+	opt.SimplifyCFG(f)
+	require.Equal(t, 1, countOp(f, ir.OOr), "one combined OR of the two compares")
+
+	mc, err := interp.New(m)
+	require.NoError(t, err)
+	for _, tc := range []struct{ a, b, c, want int64 }{{9, 1, 0, 1}, {1, 9, 5, 1}, {9, 1, 5, 1}, {1, 9, 3, 0}} {
+		got, err := mc.Call("sor", interp.L(tc.a), interp.L(tc.b), interp.L(tc.c))
+		require.NoError(t, err)
+		require.Equalf(t, tc.want, got.I64(), "sor(%d,%d,%d)", tc.a, tc.b, tc.c)
+	}
+}
+
+// When the shared exit carries a phi that distinguishes how the condition failed
+// (via c1 vs via c2), the collapse would merge those two edges and lose the
+// distinction. It must be rejected, and the result stays correct.
+func TestShortCircuitSharedExitPhi(t *testing.T) {
+	m := ir.NewModule()
+	f := m.NewFunc("scphi", ir.ClsL).Export()
+	a, b, c, d := f.Param("a", ir.ClsL), f.Param("b", ir.ClsL), f.Param("c", ir.ClsL), f.Param("d", ir.ClsL)
+	h := f.Entry()
+	mid, yes, no := f.NewBlock("mid"), f.NewBlock("yes"), f.NewBlock("no")
+	h.Jnz(h.Cmp(ir.CmpSlt, ir.ClsL, a, b), mid, no)
+	mid.Jnz(mid.Cmp(ir.CmpSlt, ir.ClsL, c, d), yes, no)
+	yes.Ret(f.ConstInt(ir.ClsL, 1))
+	// `no` is the shared exit: 100 when a>=b (via h), 200 when a<b but c>=d (via mid).
+	r := no.Phi(ir.ClsL, ir.PhiEdge{From: h, Val: f.ConstInt(ir.ClsL, 100)}, ir.PhiEdge{From: mid, Val: f.ConstInt(ir.ClsL, 200)})
+	no.Ret(r)
+
+	opt.IfConvert(f)
+	opt.SimplifyCFG(f)
+	require.Equal(t, 0, countOp(f, ir.OAnd), "a phi-bearing shared exit must block the collapse")
+
+	mc, err := interp.New(m)
+	require.NoError(t, err)
+	for _, tc := range []struct {
+		a, b, c, d, want int64
+	}{{2, 1, 3, 4, 100}, {1, 2, 4, 3, 200}, {1, 2, 3, 4, 1}} {
+		got, err := mc.Call("scphi", interp.L(tc.a), interp.L(tc.b), interp.L(tc.c), interp.L(tc.d))
+		require.NoError(t, err)
+		require.Equalf(t, tc.want, got.I64(), "scphi(%d,%d,%d,%d)", tc.a, tc.b, tc.c, tc.d)
+	}
+}
+
+// When the non-shared exit carries a phi, its edge from the second-test block is
+// relabeled to the head and the collapse still computes correctly.
+func TestShortCircuitNonSharedExitPhi(t *testing.T) {
+	m := ir.NewModule()
+	f := m.NewFunc("scns", ir.ClsL).Export()
+	a, b, c, d := f.Param("a", ir.ClsL), f.Param("b", ir.ClsL), f.Param("c", ir.ClsL), f.Param("d", ir.ClsL)
+	h := f.Entry()
+	mid, yes, no := f.NewBlock("mid"), f.NewBlock("yes"), f.NewBlock("no")
+	h.Jnz(h.Cmp(ir.CmpSlt, ir.ClsL, a, b), mid, no)
+	mid.Jnz(mid.Cmp(ir.CmpSlt, ir.ClsL, c, d), yes, no)
+	// `yes` is the non-shared exit (reached only via mid); its phi entry is relabeled.
+	r := yes.Phi(ir.ClsL, ir.PhiEdge{From: mid, Val: f.ConstInt(ir.ClsL, 7)})
+	yes.Ret(r)
+	no.Ret(f.ConstInt(ir.ClsL, 0))
+
+	require.True(t, opt.IfConvert(f), "collapse should proceed; the non-shared phi is just relabeled")
+	opt.SimplifyCFG(f)
+	require.Equal(t, 1, countOp(f, ir.OAnd))
+
+	mc, err := interp.New(m)
+	require.NoError(t, err)
+	got, _ := mc.Call("scns", interp.L(1), interp.L(2), interp.L(3), interp.L(4)) // both true -> 7
+	require.Equal(t, int64(7), got.I64())
+	got, _ = mc.Call("scns", interp.L(2), interp.L(1), interp.L(3), interp.L(4)) // c1 false -> 0
+	require.Equal(t, int64(0), got.I64())
+}
+
+// A second-test block with a non-speculatable instruction (a load) must not
+// collapse: evaluating it unconditionally could fault.
+func TestShortCircuitRejectsUnsafe(t *testing.T) {
+	m := ir.NewModule()
+	f := m.NewFunc("ssafe", ir.ClsL).Export()
+	a, b, p := f.Param("a", ir.ClsL), f.Param("b", ir.ClsL), f.Param("p", ir.ClsL)
+	h := f.Entry()
+	mid, yes, no := f.NewBlock("mid"), f.NewBlock("yes"), f.NewBlock("no")
+	h.Jnz(h.Cmp(ir.CmpSlt, ir.ClsL, a, b), mid, no)
+	ld := mid.Load(ir.ClsL, p) // may fault if reached only when a<b
+	mid.Jnz(mid.Cmp(ir.CmpNe, ir.ClsL, ld, f.ConstInt(ir.ClsL, 0)), yes, no)
+	yes.Ret(f.ConstInt(ir.ClsL, 1))
+	no.Ret(f.ConstInt(ir.ClsL, 0))
+
+	require.False(t, opt.IfConvert(f), "a faulting second test must not collapse")
+	require.Equal(t, 0, countOp(f, ir.OAnd))
+}
+
 // The env switch disables the pass, for A/B measurement.
 func TestIfConvertEnvDisable(t *testing.T) {
 	t.Setenv("CG12_NO_IFCONVERT", "1")
