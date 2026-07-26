@@ -27,6 +27,7 @@ func lower(f *ir.Func, tlsModel TLSModel) error {
 	lowerpass.HoistAllocas(f)
 	canonCompares(f)
 	foldIdioms(f)
+	foldSharedOffset(f)
 	foldAddressing(f)
 	fuseArithShift(f) // after foldAddressing: it gets first claim on address shifts
 	fuseBitfield(f)
@@ -37,6 +38,127 @@ func lower(f *ir.Func, tlsModel TLSModel) error {
 	lowerpass.DestructSSA(f)
 	lowerpass.ThreadJumps(f) // collapse the empty forwarding blocks edge splitting left
 	return lowerABI(f)
+}
+
+// foldSharedOffset folds a constant-offset address computation `a = add(base, #c)`
+// into the immediate offset of EVERY load/store that uses a, dropping the now-dead
+// add -- the multi-use case foldAddressing declines. Its motivating shape is a
+// read-modify-write of a struct field (`cfp->sp += n`, pervasive in the interpreter's
+// stack pushes): the address feeds both a load and a store, so foldAddressing leaves
+// the add and reuses the address register, one instruction more than gcc's
+// `ldr [base,#c] ; ... ; str [base,#c]`. Offset folding is free per access and folding
+// every use removes the address register entirely, so it is never worse. It runs in
+// SSA, where base dominates every use of a, so referencing base at each use is sound.
+func foldSharedOffset(f *ir.Func) {
+	// Collect every use site of every temp, and the temps a non-foldable context
+	// (a phi arg or a block terminator) touches -- those block the fold.
+	type useSite struct {
+		in   *ir.Instr
+		argi int
+	}
+	sites := map[uint32][]useSite{}
+	poisoned := map[uint32]bool{}
+	for _, b := range f.Blocks {
+		for _, p := range b.Phis {
+			for _, a := range p.Args {
+				if a.Kind == ir.RefTemp {
+					poisoned[a.ID] = true
+				}
+			}
+		}
+		for i := range b.Instrs {
+			in := &b.Instrs[i]
+			for ai, a := range in.Args {
+				if a.Kind == ir.RefTemp {
+					sites[a.ID] = append(sites[a.ID], useSite{in, ai})
+				}
+			}
+		}
+		if b.Jmp.Arg.Kind == ir.RefTemp {
+			poisoned[b.Jmp.Arg.ID] = true
+		}
+		for _, a := range b.Jmp.Args {
+			if a.Kind == ir.RefTemp {
+				poisoned[a.ID] = true
+			}
+		}
+	}
+
+	for _, b := range f.Blocks {
+		for i := range b.Instrs {
+			add := &b.Instrs[i]
+			if add.Op != ir.OAdd || add.Aux != 0 || add.To.Kind != ir.RefTemp {
+				continue
+			}
+			d := add.To.ID
+			if poisoned[d] {
+				continue
+			}
+			c, base, ok := constAddOffset(f, add)
+			if !ok || base.Kind != ir.RefTemp {
+				continue
+			}
+			us := sites[d]
+			if len(us) < 2 { // single-use: foldAddressing handles it (and index forms)
+				continue
+			}
+			foldable := true
+			for _, s := range us {
+				if !memBaseFits(s.in, s.argi, c) {
+					foldable = false
+					break
+				}
+			}
+			if !foldable {
+				continue
+			}
+			for _, s := range us {
+				s.in.Aux = c
+				s.in.Args[s.argi] = base
+			}
+			nop(add)
+		}
+	}
+}
+
+// constAddOffset reports whether add has exactly one integer-constant operand,
+// returning that offset and the other (base) operand.
+func constAddOffset(f *ir.Func, add *ir.Instr) (int64, ir.Ref, bool) {
+	if len(add.Args) != 2 {
+		return 0, ir.Ref{}, false
+	}
+	if c, ok := intConst(f, add.Args[1]); ok {
+		if _, ok := intConst(f, add.Args[0]); !ok {
+			return c, add.Args[0], true
+		}
+	}
+	if c, ok := intConst(f, add.Args[0]); ok {
+		if _, ok := intConst(f, add.Args[1]); !ok {
+			return c, add.Args[1], true
+		}
+	}
+	return 0, ir.Ref{}, false
+}
+
+// memBaseFits reports whether in is a simple (non-indexed, integer) load or store
+// using its argi operand as the base address, with no existing offset, and whose
+// access width admits c as a scaled unsigned immediate. A use as the stored value
+// or an index (any other position) fails, forcing the caller to keep the add.
+func memBaseFits(in *ir.Instr, argi int, c int64) bool {
+	if in.Aux != 0 || in.Cls.IsFloat() {
+		return false
+	}
+	access := accessBytes(in.Op)
+	if access == 0 {
+		return false
+	}
+	switch {
+	case in.Op.IsLoad() && len(in.Args) == 1 && argi == 0:
+	case in.Op.IsStore() && len(in.Args) == 2 && argi == 1:
+	default:
+		return false
+	}
+	return c >= 0 && c%int64(access) == 0 && c/int64(access) <= 4095
 }
 
 // foldAddressing folds a load/store's address computation into an AArch64

@@ -354,6 +354,42 @@ func TestTbzRangeGating(t *testing.T) {
 	assert.False(t, em.tbzInRange(b, target), "35000-byte distance is out of reach")
 }
 
+func TestSharedOffsetFoldsIntoEachAccess(t *testing.T) {
+	// A constant field offset shared by a read AND a write of the same address (a
+	// read-modify-write: `s->b += 8`) folds into both the load and the store, so the
+	// shared address `add base, #8` is dropped and each access carries [base, #8].
+	m := ir.NewModule()
+	f := m.NewFunc("rmw", ir.ClsL)
+	base := f.Param("s", ir.ClsL)
+	e := f.Entry()
+	addr := e.Add(ir.ClsL, base, f.Long(8)) // a = s + 8, feeding both the load and store
+	v := e.Load(ir.ClsL, addr)
+	e.Store(e.Add(ir.ClsL, v, f.Long(8)), addr) // *(a) = *(a) + 8
+	e.Ret(v)
+
+	foldSharedOffset(f)
+
+	var loads, stores, sharedAddGone int
+	for i := range e.Instrs {
+		in := &e.Instrs[i]
+		switch in.Op {
+		case ir.OLoadl:
+			assert.Equal(t, int64(8), in.Aux, "load carries the folded offset")
+			assert.Equal(t, base, in.Args[0], "load reads base directly")
+			loads++
+		case ir.OStorel:
+			assert.Equal(t, int64(8), in.Aux, "store carries the folded offset")
+			assert.Equal(t, base, in.Args[1], "store writes through base directly")
+			stores++
+		case ir.ONop:
+			sharedAddGone++ // the shared address add was removed
+		}
+	}
+	assert.Equal(t, 1, loads)
+	assert.Equal(t, 1, stores)
+	assert.Equal(t, 1, sharedAddGone, "exactly the shared address add is dropped (the v+8 add stays)")
+}
+
 func TestBitfieldExtractFuses(t *testing.T) {
 	// (x >> lsb) & (2^width - 1) folds into a single ubfx, dropping the shift-and-mask.
 	m := ir.NewModule()
