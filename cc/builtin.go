@@ -245,6 +245,13 @@ func (g *gen) builtinCall(n *moderncc.PostfixExpression) (ir.Ref, bool) {
 			return g.genExpr(args[0]), true
 		}
 		return ir.R, true
+
+	case "__builtin_assume":
+		// An optimization hint that the condition holds. cg12 does not exploit it;
+		// ignoring an assumption is always sound. Like Clang, the argument is not
+		// evaluated, so a side-effecting one has no effect (and __has_builtin still
+		// reports it as supported, which this makes honest).
+		return ir.R, true
 	}
 	return ir.R, false
 }

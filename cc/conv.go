@@ -224,7 +224,16 @@ func (g *gen) genCall(n *moderncc.PostfixExpression) ir.Ref {
 		if v, found := g.lookup(pe.Token.SrcStr()); found {
 			callee = g.loadVal(g.addrOf(v), v.typ) // a function-pointer variable
 		} else {
-			callee = g.fn.Sym(libcBuiltin(pe.Token.SrcStr()), 0)
+			sym := libcBuiltin(pe.Token.SrcStr())
+			// A __builtin_ name that survived builtinCall and is not a libc passthrough
+			// is a compiler builtin cg12 does not implement. Emitting a call to it would
+			// only fail at link time (a missing __builtin_ symbol); fail here, clearly.
+			// __has_builtin reports every __builtin_ as supported, so this is the seam
+			// that catches the ones that are not.
+			if strings.HasPrefix(sym, "__builtin_") {
+				return g.fail("cc: unimplemented compiler builtin %s", sym)
+			}
+			callee = g.fn.Sym(sym, 0)
 		}
 	} else {
 		callee = g.genExpr(calleeNode)

@@ -50,6 +50,27 @@ int main(void){
 // sign-extended it from 32 bits -- truncating any address with high bits set (a
 // stack pointer, a >4GB heap). Ruby's st_hash dereferences a pointer through it
 // and crashed. Deref through it and check the value survives.
+// __builtin_assume is an optimization hint cg12 ignores. It must compile to
+// nothing (not a call to a nonexistent __builtin_assume symbol) and the program
+// must run correctly.
+func TestBuiltinAssume(t *testing.T) {
+	out, code := compileAndRun(t, `
+#include <stdio.h>
+int f(int x){ __builtin_assume(x > 0); return x * 2 + 1; }
+int main(void){ printf("%d\n", f(20)); return 0; }`)
+	require.Equal(t, 0, code)
+	require.Equal(t, "41\n", out)
+}
+
+// A compiler builtin cg12 does not implement fails at compile time with a clear
+// message, rather than emitting a call that only breaks at link time. __has_builtin
+// reports every __builtin_ as available, so this is the backstop for the gap.
+func TestUnimplementedBuiltinFails(t *testing.T) {
+	_, err := cc.Compile("c.c", `int f(void){ return __builtin_totally_fake(1); }`)
+	require.Error(t, err)
+	require.Contains(t, err.Error(), "unimplemented compiler builtin")
+}
+
 func TestAssumeAlignedPointer(t *testing.T) {
 	out, code := compileAndRun(t, `
 #include <stdio.h>
