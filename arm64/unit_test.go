@@ -336,6 +336,24 @@ func TestSingleBitTestBranchFuses(t *testing.T) {
 	assert.NotContains(t, asm, "tst", "no flags-setting tst is needed")
 }
 
+func TestTbzRangeGating(t *testing.T) {
+	// tbzInRange fuses a single-bit test only when the pass-1 distance to its target
+	// is within tbz's reach. In pass 1 (no offsets recorded) it never fuses, so the
+	// measurement pass emits no tbz.
+	f := ir.NewModule().NewFunc("f", ir.ClsL)
+	b, target := f.Entry(), f.NewBlock("t")
+	em := newMC(f)
+
+	assert.False(t, em.tbzInRange(b, target), "pass 1 (no offsets) never fuses a tbz")
+
+	em.refTermPC = map[*ir.Block]int{b: 40000}
+	em.refBlockPC = map[*ir.Block]int{target: 20000}
+	assert.True(t, em.tbzInRange(b, target), "20000-byte distance is within reach")
+
+	em.refBlockPC[target] = 5000 // 35000 bytes away, past tbzRangeLimit
+	assert.False(t, em.tbzInRange(b, target), "35000-byte distance is out of reach")
+}
+
 func TestBitfieldExtractFuses(t *testing.T) {
 	// (x >> lsb) & (2^width - 1) folds into a single ubfx, dropping the shift-and-mask.
 	m := ir.NewModule()

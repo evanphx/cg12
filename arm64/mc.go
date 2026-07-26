@@ -4,6 +4,7 @@ import (
 	"encoding/binary"
 	"fmt"
 	"math"
+	"strings"
 
 	"github.com/evanphx/cg12/arm64/a64"
 	"github.com/evanphx/cg12/ir"
@@ -503,7 +504,16 @@ type mc struct {
 
 	frameLayout      // where everything lives in the frame
 	frameless   bool // leaf function needing no frame: no prologue/epilogue, ret directly
-	tbzSafe     bool // small enough that a tbz/tbnz can always reach its target (+/-32 KiB)
+
+	// tbz/tbnz reach only +/-32 KiB, so whether a single-bit test can fuse into one
+	// depends on the byte distance to its target. A first emission pass with tbz
+	// disabled records these real offsets; the second pass fuses a tbz only when the
+	// pass-1 distance is in range. Enabling a tbz only ever replaces a two-word
+	// tst;b.cond with a one-word tbz, so pass-1 distances are a strict upper bound --
+	// a branch in range under pass 1 stays in range under pass 2. Both nil in pass 1.
+	refBlockPC map[*ir.Block]int // pass-1 byte offset of each block's start
+	refTermPC  map[*ir.Block]int // pass-1 byte offset of each block's terminator
+	gotTermPC  map[*ir.Block]int // terminator offsets recorded during THIS pass (nil to skip)
 
 	instrPC    map[*ir.Instr]uint64 // PC at the start of each instruction
 	safepoints []safepoint
@@ -546,18 +556,24 @@ type blockSym struct {
 	off  int
 }
 
-func emitMachine(f *ir.Func, alloc *allocation, gc GCStrategy, tlsModel TLSModel) (*machineCode, error) {
+func newEmitter(f *ir.Func, alloc *allocation, gc GCStrategy, tlsModel TLSModel) *mc {
 	m := &mc{
 		f: f, alloc: alloc, gc: gc, tlsModel: tlsModel,
 		prog: a64.NewProgram(), instrPC: map[*ir.Instr]uint64{},
 		frameLayout: computeFrame(f, alloc),
 	}
 	m.frameless = framelessEligible(f, m.frameLayout, gc)
-	m.tbzSafe = tbzSafe(f)
 	m.useCount = countTempUses(f)
 	m.preds = blockPreds(f)
+	return m
+}
+
+// emitBody runs the prologue and every block in layout order, recording each
+// block's terminator offset when gotTermPC is set. It leaves the program
+// unresolved (branches unpatched); the caller resolves it with Bytes.
+func (m *mc) emitBody() error {
 	m.prologue()
-	order := layoutBlocks(f)
+	order := layoutBlocks(m.f)
 	for i, b := range order {
 		m.prog.Label(b.Name)
 		if i+1 < len(order) {
@@ -567,12 +583,44 @@ func emitMachine(f *ir.Func, alloc *allocation, gc GCStrategy, tlsModel TLSModel
 		}
 		m.block(b)
 	}
-	if m.err != nil {
-		return nil, m.err
+	return m.err
+}
+
+func emitMachine(f *ir.Func, alloc *allocation, gc GCStrategy, tlsModel TLSModel) (*machineCode, error) {
+	// Pass 1: tbz disabled (refTermPC nil), to measure real block/terminator
+	// offsets. See the refBlockPC/refTermPC comment for why these are an upper bound.
+	m1 := newEmitter(f, alloc, gc, tlsModel)
+	m1.gotTermPC = map[*ir.Block]int{}
+	if err := m1.emitBody(); err != nil {
+		return nil, err
+	}
+	blockPC := map[*ir.Block]int{}
+	for _, b := range f.Blocks {
+		if off, ok := m1.prog.LabelOffset(b.Name); ok {
+			blockPC[b] = off
+		}
+	}
+
+	// Pass 2: tbz enabled, each fusion decided from the pass-1 distance.
+	m := newEmitter(f, alloc, gc, tlsModel)
+	m.refBlockPC, m.refTermPC = blockPC, m1.gotTermPC
+	if err := m.emitBody(); err != nil {
+		return nil, err
 	}
 	code, err := m.prog.Bytes()
 	if err != nil {
-		return nil, err
+		if !isTbzRangeErr(err) {
+			return nil, err
+		}
+		// A fused tbz slipped out of range despite the upper-bound argument (should
+		// not happen). Re-emit with tbz disabled -- correctness over the fusion.
+		m = newEmitter(f, alloc, gc, tlsModel)
+		if err := m.emitBody(); err != nil {
+			return nil, err
+		}
+		if code, err = m.prog.Bytes(); err != nil {
+			return nil, err
+		}
 	}
 	var blockSyms []blockSym
 	for _, b := range f.Blocks {
@@ -1232,7 +1280,7 @@ func (m *mc) block(b *ir.Block) {
 				// `if (x & (1<<k))` needs no flags when it becomes a tbnz: the terminator
 				// tests the bit on the register directly, so emit nothing here. Any other
 				// `if (x & mask)` is a tst (flags-only) the terminator branches on.
-				if _, _, ok := m.tbzBranch(fuseCmp); ok && m.tbzSafe {
+				if _, _, ok := m.tbzBranch(fuseCmp); ok && m.tbzInRange(b, b.Jmp.To) {
 					break
 				}
 				m.newSel().tstFlags(fuseCmp)
@@ -1265,6 +1313,9 @@ func (m *mc) block(b *ir.Block) {
 		}
 		m.instr(in)
 		i++
+	}
+	if m.gotTermPC != nil {
+		m.gotTermPC[b] = m.prog.Len() * 4
 	}
 	if fuseCmp != nil {
 		m.emitFusedBranch(b, fuseCmp)
@@ -1381,23 +1432,42 @@ func (m *mc) cmpZeroReg(cmp *ir.Instr) (ir.Ref, bool, bool) {
 	return ir.R, false, false
 }
 
-// tbzSafe reports whether every conditional branch within f is guaranteed to reach
-// its target with a tbz/tbnz (a +/-32 KiB signed range). A tbz/tbnz can only branch
-// within f, so if f's whole body is comfortably under 32 KiB, any such branch is in
-// range. The bound is on IR instructions with a generous machine-expansion margin;
-// a huge function (the interpreter's dispatch core) falls back to tst; b.cond.
-func tbzSafe(f *ir.Func) bool {
-	n := 0
-	for _, b := range f.Blocks {
-		n += len(b.Instrs)
+// tbzInRange reports whether a single-bit test in block b, branching to target,
+// can fuse into a tbz/tbnz: its target must be within tbz's +/-32 KiB reach. The
+// distance is the pass-1 (tbz-disabled) offset between b's terminator and target's
+// start; that pass is a strict upper bound on the pass-2 distance (enabling a tbz
+// only removes words between them), so an in-range pass-1 branch is in range now.
+// Always false in pass 1 (refTermPC nil), so pass 1 emits no tbz.
+func (m *mc) tbzInRange(b, target *ir.Block) bool {
+	if m.refTermPC == nil {
+		return false
 	}
-	return n < tbzSafeIRLimit
+	tp, ok := m.refTermPC[b]
+	if !ok {
+		return false
+	}
+	bp, ok := m.refBlockPC[target]
+	if !ok {
+		return false
+	}
+	d := tp - bp
+	if d < 0 {
+		d = -d
+	}
+	return d <= tbzRangeLimit
 }
 
-// tbzSafeIRLimit bounds the IR-instruction count for which tbz/tbnz stays in range.
-// ~4000 IR instructions is well under 8192 machine instructions (32 KiB / 4), leaving
-// room for the ~1.5x IR-to-machine expansion.
-const tbzSafeIRLimit = 4000
+// tbzRangeLimit is the byte reach used to gate tbz/tbnz fusion. The hardware reach
+// is +/-32768; the margin below it absorbs any slack between the pass-1 measurement
+// and the shorter pass-2 layout.
+const tbzRangeLimit = 30000
+
+// isTbzRangeErr reports whether err is the assembler's out-of-range diagnostic for
+// a tbz/tbnz -- the signal to fall back to the tbz-disabled layout.
+func isTbzRangeErr(err error) bool {
+	s := err.Error()
+	return strings.Contains(s, "out of range") && (strings.Contains(s, "tbz") || strings.Contains(s, "tbnz"))
+}
 
 // tbzBranch reports whether the AND condition `x & (1<<k)` can drive a single tbz/
 // tbnz: one operand is a register and the other a constant that is exactly one bit.
@@ -1469,7 +1539,7 @@ func (m *mc) emitFusedBranch(b *ir.Block, cmp *ir.Instr) {
 	if cmp.Op == ir.OAnd {
 		// A single-bit test `if (x & (1<<k))` is a tbnz on x directly -- one
 		// instruction, no tst and no flags -- when the target is in tbz range.
-		if reg, bit, ok := m.tbzBranch(cmp); ok && m.tbzSafe {
+		if reg, bit, ok := m.tbzBranch(cmp); ok && m.tbzInRange(b, b.Jmp.To) {
 			r := s.src(reg, 0, m.f.ClassOf(reg).Size())
 			s.b.tbnz(bit, r, b.Jmp.To) // jnz's non-zero arm: bit set
 			if b.Jmp.To2 != m.nextBlock {
