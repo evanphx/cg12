@@ -1255,6 +1255,10 @@ func (m *mc) block(b *ir.Block) {
 			i = m.callSequence(b, i)
 			continue
 		}
+		if n := m.tryPairSpill(b, i); n > 0 {
+			i += n
+			continue
+		}
 		if n := m.tryWriteback(b, i); n > 0 {
 			i += n
 			continue
@@ -1269,6 +1273,41 @@ func (m *mc) block(b *ir.Block) {
 	if !m.blockDone {
 		m.term(b)
 	}
+}
+
+// tryPairSpill fuses two consecutive OSpill (or two OReload) instructions that
+// target adjacent 8-byte integer frame slots into one stp (or ldp), as gcc pairs
+// caller-saved spills around a call. callersave emits each run in slot order, so
+// two landing in adjacent slots sit next to each other here. It returns the
+// number of instructions consumed (2) or 0.
+func (m *mc) tryPairSpill(b *ir.Block, i int) int {
+	if i+1 >= len(b.Instrs) {
+		return 0
+	}
+	a, c := &b.Instrs[i], &b.Instrs[i+1]
+	if a.Op != c.Op || (a.Op != ir.OSpill && a.Op != ir.OReload) {
+		return 0
+	}
+	var t1, t2 *ir.Temp
+	if a.Op == ir.OSpill {
+		t1, t2 = m.f.Temps[a.Args[0].ID], m.f.Temps[c.Args[0].ID]
+	} else {
+		t1, t2 = m.f.Temps[a.To.ID], m.f.Temps[c.To.ID]
+	}
+	if t1.Cls.IsFloat() || t2.Cls.IsFloat() || t1.Cls.Size() != 8 || t2.Cls.Size() != 8 {
+		return 0
+	}
+	off := m.spillBase + int(a.Aux)
+	if m.spillBase+int(c.Aux) != off+8 || off%8 != 0 || off < -512 || off > 504 {
+		return 0
+	}
+	r1, r2 := mreg(Reg(t1.Reg)), mreg(Reg(t2.Reg))
+	if a.Op == ir.OSpill {
+		m.emit(a64.Stp(true, r1, r2, mcX29, off, a64.SignedOffset))
+	} else {
+		m.emit(a64.Ldp(true, r1, r2, mcX29, off, a64.SignedOffset))
+	}
+	return 2
 }
 
 // fusableCmp reports the block's trailing comparison when it feeds the block's

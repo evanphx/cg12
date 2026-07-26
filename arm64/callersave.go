@@ -139,13 +139,19 @@ func insertCallerSaves(f *ir.Func, cfg *analysis.CFG, live *analysis.Liveness, a
 				continue
 			}
 			sv := saves[&b.Instrs[k]]
-			for _, t := range sv {
+			// Emit the saves and reloads in slot order, so two landing in adjacent
+			// slots are consecutive and the emitter can pair them into an stp/ldp.
+			// Order within a run is free: the saves are independent stores before the
+			// call, the reloads independent loads after it.
+			svo := append([]int(nil), sv...)
+			sort.Slice(svo, func(i, j int) bool { return slot(svo[i]) < slot(svo[j]) })
+			for _, t := range svo {
 				out = append(out, ir.Instr{Op: ir.OSpill, Cls: f.Temps[t].Cls, Args: []ir.Ref{f.Temps[t].Ref()}, Aux: int64(slot(t))})
 			}
 			for idx := start; idx <= k; idx++ {
 				out = append(out, b.Instrs[idx])
 			}
-			for _, t := range sv {
+			for _, t := range svo {
 				out = append(out, ir.Instr{Op: ir.OReload, Cls: f.Temps[t].Cls, To: f.Temps[t].Ref(), Aux: int64(slot(t))})
 			}
 			k++

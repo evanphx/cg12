@@ -94,3 +94,24 @@ int runtest(void){ return (int)f(1,2,3,4,5,6); }`)
 	_, code := buildAndRun(t, m, "extern int runtest(void); int main(){ return (int)runtest()==35?0:1; }")
 	require.Equal(t, 0, code, "the pairing must preserve every callee-saved value")
 }
+
+// Caller-saved values spilled around a call are stored and reloaded in slot
+// order, so adjacent ones pair into stp/ldp (as gcc does). This computes several
+// values in caller-saved registers, calls across them, and uses them after --
+// forcing spills -- then checks correctness (a mispaired slot would corrupt one).
+func TestCallerSavedSpillPairing(t *testing.T) {
+	m, err := cc.Compile("c.c", `
+long sink(long);
+long f(long a, long b, long c, long d, long e) {
+	long p = a*3, q = b*5, r = c*7, s = d*11, u = e*13;  /* caller-saved */
+	long acc = sink(p) + sink(q);                          /* calls spill p..u */
+	return acc + p + q + r + s + u;
+}
+int runtest(void){ return (int)f(1,2,3,4,5); }`)
+	require.NoError(t, err)
+	// p=3 q=10 r=21 s=44 u=65; sink(x)=x (below) -> acc=3+10=13; +3+10+21+44+65=156
+	_, code := buildAndRun(t, m,
+		"extern long f(long,long,long,long,long); long sink(long x){return x;}\n"+
+			"int main(){ return f(1,2,3,4,5)==156?0:1; }")
+	require.Equal(t, 0, code, "spill pairing must preserve every caller-saved value")
+}
