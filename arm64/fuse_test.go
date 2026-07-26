@@ -44,6 +44,68 @@ func TestFallThroughElision(t *testing.T) {
 	require.Contains(t, text, "ret")
 }
 
+// A comparison that feeds only a conditional select is emitted as `cmp; csel
+// <cond>`, selecting on the flags directly, rather than materializing the boolean
+// (cset) and re-testing it against zero (cmp #0; csel ne).
+func TestCompareSelectFusion(t *testing.T) {
+	m := ir.NewModule()
+	f := m.NewFunc("selcmp", ir.ClsL).Export()
+	a, b := f.Param("a", ir.ClsL), f.Param("b", ir.ClsL)
+	e := f.Entry()
+	e.Ret(e.Select(ir.ClsL, e.Cmp(ir.CmpSlt, ir.ClsL, a, b), a, b))
+
+	text := disasmModule(t, m)
+	require.Contains(t, text, "csel", "the select should be a csel")
+	require.Contains(t, text, ", lt", "the csel should carry the compare's condition")
+	require.NotContains(t, text, "cset", "the boolean should not be materialized")
+	require.Equal(t, 1, strings.Count(text, "\tcmp"), "exactly one compare, and no cmp #0 re-test")
+}
+
+// A mask-test condition `(x & mask) ? a : b` fuses to `tst; csel ne`, with no
+// materialized AND result.
+func TestMaskSelectFusion(t *testing.T) {
+	m := ir.NewModule()
+	f := m.NewFunc("seltst", ir.ClsL).Export()
+	x, a, b := f.Param("x", ir.ClsL), f.Param("a", ir.ClsL), f.Param("b", ir.ClsL)
+	e := f.Entry()
+	e.Ret(e.Select(ir.ClsL, e.And(ir.ClsL, x, f.ConstInt(ir.ClsL, 8)), a, b))
+
+	text := disasmModule(t, m)
+	require.Contains(t, text, "tst", "the mask test should be a flags-only tst")
+	require.Contains(t, text, "csel", "the select should be a csel")
+	require.Contains(t, text, ", ne", "the csel should select on the mask being non-zero")
+	require.NotContains(t, text, "cset")
+}
+
+// A constant-zero arm selects the zero register, so `c ? a : 0` needs no
+// materializing mov.
+func TestSelectZeroArmUsesZeroReg(t *testing.T) {
+	m := ir.NewModule()
+	f := m.NewFunc("selz", ir.ClsL).Export()
+	a, b := f.Param("a", ir.ClsL), f.Param("b", ir.ClsL)
+	e := f.Entry()
+	e.Ret(e.Select(ir.ClsL, e.Cmp(ir.CmpSgt, ir.ClsL, a, b), a, f.ConstInt(ir.ClsL, 0)))
+
+	text := disasmModule(t, m)
+	require.Contains(t, text, "xzr", "a constant-zero arm should use the zero register")
+	require.Contains(t, text, "csel")
+}
+
+// The fusion applies only when the compare feeds the select alone; a compare
+// whose boolean has another use must still be materialized.
+func TestCompareSelectNoFusionWhenReused(t *testing.T) {
+	m := ir.NewModule()
+	f := m.NewFunc("selcmp2", ir.ClsL).Export()
+	a, b := f.Param("a", ir.ClsL), f.Param("b", ir.ClsL)
+	e := f.Entry()
+	c := e.Cmp(ir.CmpSlt, ir.ClsL, a, b)
+	r := e.Select(ir.ClsL, c, a, b)
+	e.Ret(e.Add(ir.ClsL, r, c)) // second use of the boolean
+
+	text := disasmModule(t, m)
+	require.Contains(t, text, "cset", "a reused comparison result must still be materialized")
+}
+
 // When the comparison's boolean has another use, it must still be materialized
 // (the fusion applies only when the branch is the sole consumer).
 func TestCompareBranchNoFusionWhenReused(t *testing.T) {

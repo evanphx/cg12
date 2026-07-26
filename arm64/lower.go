@@ -30,6 +30,7 @@ func lower(f *ir.Func, tlsModel TLSModel) error {
 	foldAddressing(f)
 	fuseArithShift(f) // after foldAddressing: it gets first claim on address shifts
 	fuseBitfield(f)
+	fuseCmpSel(f) // after fuseBitfield: it gets first claim on ANDs (ubfx)
 	lowerpass.SplitCriticalEdges(f)
 	lowerpass.CoalescePhis(f)
 	lowerpass.DestructSSA(f)
@@ -221,6 +222,54 @@ func lowMaskWidth(mask uint64, size int) (int, bool) {
 		return 0, false
 	}
 	return width, true
+}
+
+// fuseCmpSel folds a single-use comparison feeding a conditional select into the
+// select, so the emitter produces `cmp; csel <cond>` rather than materializing
+// the boolean and re-testing it (`cmp; cset; cmp #0; csel`). It mirrors the
+// compare-branch fusion in mc.go but is simpler: the comparison is pure and
+// re-emitted at the select site, so there is no flags-lifetime constraint -- the
+// operands dominate the select (they dominated the compare, which dominated its
+// sole use), and register allocation, running after lowering, extends their live
+// ranges to the select automatically.
+//
+// The condition may be an ordinary compare (OCmp) or a mask test (a tstable
+// OAnd, `(x & mask) ? a : b`). The fused OSel carries the compare's two operands
+// in Args[0:2] and the arms in Args[2:4], the predicate in Cmp, and the mode in
+// Aux; the fused OSel is the private 4-operand form sel() reads back. A compare
+// with any other use, or an AND already claimed by fuseBitfield (Aux set, a
+// ubfx), is left alone -- the select then keeps the unfused cmp #0 path.
+func fuseCmpSel(f *ir.Func) {
+	uses, defOf := defUse(f)
+	single := func(r ir.Ref) bool { return r.Kind == ir.RefTemp && uses[r.ID] == 1 }
+	for _, b := range f.Blocks {
+		for i := range b.Instrs {
+			in := &b.Instrs[i]
+			if in.Op != ir.OSel || len(in.Args) != 3 || !single(in.Args[0]) {
+				continue
+			}
+			d := defOf(in.Args[0])
+			if d == nil {
+				continue
+			}
+			armT, armF := in.Args[1], in.Args[2]
+			switch {
+			case d.Op == ir.OCmp:
+				if _, ok := condOf(d.Cmp, d.Cmp.IsFloat()); !ok {
+					continue
+				}
+				in.Cmp = d.Cmp
+				in.Aux = selFuseCmp
+			case d.Op == ir.OAnd && d.Aux == 0 && tstableAnd(f, d):
+				in.Cmp = ir.CmpNe
+				in.Aux = selFuseTst
+			default:
+				continue
+			}
+			in.Args = []ir.Ref{d.Args[0], d.Args[1], armT, armF}
+			nop(d)
+		}
+	}
 }
 
 // swapCmp is the predicate that holds when a comparison's operands are exchanged.

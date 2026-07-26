@@ -1369,11 +1369,19 @@ func (m *mc) tbzBranch(and *ir.Instr) (ir.Ref, uint32, bool) {
 // flags-only tst feeding a branch. A constant mask must be a valid logical
 // immediate; a register mask always works.
 func (m *mc) tstableAnd(in *ir.Instr) bool {
+	return tstableAnd(m.f, in)
+}
+
+// tstableAnd reports whether in is an integer AND emittable as a flags-only tst.
+// A constant mask must be a valid logical immediate; a register mask always
+// works. Shared by the compare-branch fusion (mc) and the compare-select fusion
+// (lower).
+func tstableAnd(f *ir.Func, in *ir.Instr) bool {
 	if in.Op != ir.OAnd || in.Cls.IsFloat() {
 		return false
 	}
 	for _, a := range in.Args {
-		if v, ok := intConst(m.f, a); ok {
+		if v, ok := intConst(f, a); ok {
 			sz := int(in.Cls.Size())
 			mask := uint64(v)
 			if sz == 4 {

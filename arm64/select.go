@@ -294,22 +294,29 @@ func (s *sel) store(in *ir.Instr) {
 // not materialize the boolean result, so a caller that branches directly on the
 // flags (see the fused compare-branch in mc.block) can skip the cset.
 func (s *sel) cmpFlags(in *ir.Instr) bool {
-	argCls := s.f.ClassOf(in.Args[0])
+	return s.cmpFlagsPair(in.Args[0], in.Args[1])
+}
+
+// cmpFlagsPair is cmpFlags over an explicit operand pair, so the fused
+// compare-select (sel) can re-emit the comparison from a compare it absorbed.
+// It uses scratch slots 0 and 1.
+func (s *sel) cmpFlagsPair(aRef, bRef ir.Ref) bool {
+	argCls := s.f.ClassOf(aRef)
 	sz := argCls.Size()
 	w64 := sz == 8
 	float := argCls.IsFloat()
-	s1 := s.src(in.Args[0], 0, sz)
+	s1 := s.src(aRef, 0, sz)
 	switch {
 	case float:
-		s.b.fcmp(w64, s1, s.src(in.Args[1], 1, sz))
+		s.b.fcmp(w64, s1, s.src(bRef, 1, sz))
 	default:
-		if v, ok := intConst(s.f, in.Args[1]); ok {
+		if v, ok := intConst(s.f, bRef); ok {
 			if imm, lsl12, flip, iok := addSubImm(v); iok && !lsl12 && !flip {
 				s.b.cmpImm(w64, s1, imm)
 				return float
 			}
 		}
-		s.b.cmpReg(w64, s1, s.src(in.Args[1], 1, sz))
+		s.b.cmpReg(w64, s1, s.src(bRef, 1, sz))
 	}
 	return float
 }
@@ -322,11 +329,25 @@ func (s *sel) cmp(in *ir.Instr) {
 	done()
 }
 
-// sel emits a conditional select (csel / fcsel): its boolean condition is turned
-// back into flags with cmp #0, then csel picks between the two arms. cond is an
-// integer (int scratch), so its scratch bank is distinct from a/b's when those
-// are floats.
+// Fused-select modes, carried in a fused OSel's Aux to say how its condition's
+// flags are produced. A fused OSel has 4 operands -- the compare's two operands
+// then the two arms -- with the predicate in Cmp (see fuseCmpSel).
+const (
+	selFuseCmp = 1 // flags from `cmp a, b`; Cmp is the (int or float) predicate
+	selFuseTst = 2 // flags from `tst a, b`; Cmp is CmpNe
+)
+
+// sel emits a conditional select (csel / fcsel). A fused select (4 operands, see
+// fuseCmpSel) emits its absorbed comparison directly ahead of the csel; an
+// unfused one has an already-materialized boolean, turned back into flags with
+// cmp #0 and selected on NE. cond is an integer (int scratch), so its scratch
+// bank is distinct from a/b's when those are floats.
 func (s *sel) sel(in *ir.Instr) {
+	if len(in.Args) == 4 {
+		s.selFused(in)
+		return
+	}
+
 	sz := in.Cls.Size()
 	w64 := sz == 8
 	float := in.Cls.IsFloat()
@@ -350,6 +371,52 @@ func (s *sel) sel(in *ir.Instr) {
 		s.b.csel(w64, d, a, b, a64.NE)
 	}
 	done()
+}
+
+// selFused emits a compare-select whose comparison was absorbed by fuseCmpSel:
+// `cmp a, b ; csel d, t, f, <cond>` (or tst / fcsel). The comparison writes only
+// NZCV, and every operand materialization below is flags-preserving (spill
+// loads, movz/movk, adrp+add, fmov -- none touch the flags), so the flags set
+// here survive to the csel. The comparison uses scratch slots 0 and 1, dead by
+// the time the arms load into slots 1 and 2, so the destination (slot 0) and the
+// two arms occupy distinct registers.
+func (s *sel) selFused(in *ir.Instr) {
+	sz := in.Cls.Size()
+	w64 := sz == 8
+	float := in.Cls.IsFloat()
+
+	var cmpFloat bool
+	if in.Aux == selFuseTst {
+		s.tstFlagsPair(in.Args[0], in.Args[1])
+	} else {
+		cmpFloat = s.cmpFlagsPair(in.Args[0], in.Args[1])
+	}
+	cond, _ := condOf(in.Cmp, cmpFloat) // fuseCmpSel verified the predicate maps
+
+	var a, b Reg
+	if float {
+		a = s.src(in.Args[2], 0, sz)
+		b = s.src(in.Args[3], 1, sz)
+	} else {
+		a = s.selArm(in.Args[2], 1, sz)
+		b = s.selArm(in.Args[3], 2, sz)
+	}
+	d, done := s.dst(in.To, sz)
+	if float {
+		s.b.fcsel(w64, d, a, b, cond)
+	} else {
+		s.b.csel(w64, d, a, b, cond)
+	}
+	done()
+}
+
+// selArm resolves an integer select arm, using the zero register for a constant
+// 0 so `c ? a : 0` needs no materializing mov.
+func (s *sel) selArm(ref ir.Ref, slot, sz int) Reg {
+	if v, ok := intConst(s.f, ref); ok && v == 0 {
+		return ZR
+	}
+	return s.src(ref, slot, sz)
 }
 
 // atomic lowers an atomic.* intrinsic. A plain load and store are a single
@@ -791,14 +858,21 @@ func (s *sel) logical(in *ir.Instr, op logicalOp) {
 // tstFlags emits an AND as a flags-only tst (ANDS into XZR), for a fused
 // `if (x & mask)` branch: the mask result is never materialized into a register.
 func (s *sel) tstFlags(in *ir.Instr) {
-	sz := in.Cls.Size()
-	w64 := sz == 8
-	aRef, bRef := in.Args[0], in.Args[1]
-	if _, ok := intConst(s.f, bRef); !ok {
-		if _, ok := intConst(s.f, aRef); ok {
-			aRef, bRef = bRef, aRef
+	s.tstFlagsPair(in.Args[0], in.Args[1])
+}
+
+// tstFlagsPair is tstFlags over an explicit operand pair, so the fused
+// compare-select (sel) can re-emit the mask test from an AND it absorbed. The
+// width comes from the register operand's class (the arms may be wider or
+// narrower than the mask test), and it uses scratch slots 0 and 1.
+func (s *sel) tstFlagsPair(aRef, bRef ir.Ref) {
+	if _, ok := intConst(s.f, aRef); ok {
+		if _, ok := intConst(s.f, bRef); !ok {
+			aRef, bRef = bRef, aRef // register operand -> aRef
 		}
 	}
+	sz := s.f.ClassOf(aRef).Size()
+	w64 := sz == 8
 	if v, ok := intConst(s.f, bRef); ok {
 		val := uint64(v)
 		if sz == 4 {
