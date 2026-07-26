@@ -1218,6 +1218,10 @@ func (m *mc) block(b *ir.Block) {
 					break
 				}
 				m.newSel().tstFlags(fuseCmp)
+			case fuseCmp.Op == ir.OCCmp:
+				// A conjoined `cmp1 && cmp2` / `cmp1 || cmp2` is cmp; ccmp (flags
+				// only); the terminator branches on the second predicate.
+				m.newSel().ccmpFlags(fuseCmp)
 			case m.isZeroCmp(fuseCmp):
 				// `== 0` / `!= 0` needs no flags: the terminator emits cbz/cbnz on the
 				// operand directly, so emit nothing here.
@@ -1273,7 +1277,7 @@ func (m *mc) fusableCmp(b *ir.Block) *ir.Instr {
 	idx := -1
 	for i := range b.Instrs {
 		if in := &b.Instrs[i]; in.To.Kind == ir.RefTemp && in.To.ID == b.Jmp.Arg.ID {
-			if in.Op != ir.OCmp && !m.tstableAnd(in) {
+			if in.Op != ir.OCmp && in.Op != ir.OCCmp && !m.tstableAnd(in) {
 				return nil
 			}
 			idx = i

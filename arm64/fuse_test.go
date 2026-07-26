@@ -106,6 +106,43 @@ func TestCompareSelectNoFusionWhenReused(t *testing.T) {
 	require.Contains(t, text, "cset", "a reused comparison result must still be materialized")
 }
 
+// A conjoined `if (cmp1 && cmp2)` branch fuses to cmp; ccmp; b.cond -- no branch
+// between the compares and no materialized booleans.
+func TestConjoinedAndFuses(t *testing.T) {
+	m := ir.NewModule()
+	f := m.NewFunc("cand", ir.ClsL).Export()
+	a, b, c, d := f.Param("a", ir.ClsL), f.Param("b", ir.ClsL), f.Param("c", ir.ClsL), f.Param("d", ir.ClsL)
+	e := f.Entry()
+	yes, no := f.NewBlock("yes"), f.NewBlock("no")
+	c1 := e.Cmp(ir.CmpSlt, ir.ClsL, a, b)
+	c2 := e.Cmp(ir.CmpSlt, ir.ClsL, c, d)
+	e.Jnz(e.And(ir.ClsL, c1, c2), yes, no)
+	yes.Ret(f.ConstInt(ir.ClsL, 1))
+	no.Ret(f.ConstInt(ir.ClsL, 0))
+
+	text := disasmModule(t, m)
+	require.Contains(t, text, "ccmp", "the second compare should be a ccmp")
+	require.Equal(t, 1, strings.Count(text, "\tcmp"), "one plain cmp, the other folded into the ccmp")
+	require.Contains(t, text, "b.lt", "the branch tests the second predicate")
+	require.NotContains(t, text, "cset", "no boolean should be materialized")
+}
+
+// A conjoined condition whose AND result is used elsewhere must not fuse.
+func TestConjoinedNoFusionWhenReused(t *testing.T) {
+	m := ir.NewModule()
+	f := m.NewFunc("cand2", ir.ClsL).Export()
+	a, b, c, d := f.Param("a", ir.ClsL), f.Param("b", ir.ClsL), f.Param("c", ir.ClsL), f.Param("d", ir.ClsL)
+	e := f.Entry()
+	yes, no := f.NewBlock("yes"), f.NewBlock("no")
+	and := e.And(ir.ClsL, e.Cmp(ir.CmpSlt, ir.ClsL, a, b), e.Cmp(ir.CmpSlt, ir.ClsL, c, d))
+	e.Jnz(and, yes, no)
+	yes.Ret(and) // second use of the AND result
+	no.Ret(f.ConstInt(ir.ClsL, 0))
+
+	text := disasmModule(t, m)
+	require.NotContains(t, text, "ccmp", "a reused conjoined result must not fuse to ccmp")
+}
+
 // When the comparison's boolean has another use, it must still be materialized
 // (the fusion applies only when the branch is the sole consumer).
 func TestCompareBranchNoFusionWhenReused(t *testing.T) {

@@ -273,6 +273,43 @@ func Cset(w64 bool, rd Reg, c Cond) uint32 {
 	return sf(w64)<<31 | 0xd4<<21 | r(ZR)<<16 | uint32(c.invert())<<12 | 1<<10 | r(ZR)<<5 | r(rd)
 }
 
+// CcmpReg encodes CCMP rn, rm, #nzcv, cond: if cond holds, compare rn,rm and set
+// the flags; otherwise set the flags to nzcv. It chains comparisons for a
+// conjoined condition without a branch between them.
+func CcmpReg(w64 bool, rn, rm Reg, nzcv uint32, c Cond) uint32 {
+	return sf(w64)<<31 | 1<<30 | 1<<29 | 0xd2<<21 | r(rm)<<16 | uint32(c)<<12 | r(rn)<<5 | field(nzcv, 4, "ccmp nzcv")
+}
+
+// CcmpImm encodes CCMP rn, #imm5, #nzcv, cond (imm5 an unsigned 0..31).
+func CcmpImm(w64 bool, rn Reg, imm5, nzcv uint32, c Cond) uint32 {
+	return sf(w64)<<31 | 1<<30 | 1<<29 | 0xd2<<21 | field(imm5, 5, "ccmp imm")<<16 | uint32(c)<<12 | 1<<11 | r(rn)<<5 | field(nzcv, 4, "ccmp nzcv")
+}
+
+// FailNZCV returns an NZCV flag value (bit3=N,2=Z,1=C,0=V) under which condition
+// c evaluates false -- the value a CCMP feeds forward so a conjoined test folds:
+// for `a && b`, CCMP on cond(a) forwards FailNZCV(cond(b)) so the final branch on
+// cond(b) is not taken when a failed. PassNZCV(c) = FailNZCV(c.invert()).
+func FailNZCV(c Cond) uint32 {
+	switch c {
+	case EQ, CS, MI, VS, LT, LE:
+		return 0b0000
+	case NE, HI, GT:
+		return 0b0100 // Z=1
+	case CC, LS:
+		return 0b0010 // C=1
+	case PL, GE:
+		return 0b1000 // N=1
+	case VC:
+		return 0b0001 // V=1
+	}
+	return 0b0000
+}
+
+// PassNZCV returns an NZCV value under which condition c evaluates true, for the
+// `a || b` fold: CCMP on cond(a).invert() forwards PassNZCV(cond(b)) so the final
+// branch is taken when a already succeeded.
+func PassNZCV(c Cond) uint32 { return FailNZCV(c.invert()) }
+
 // --- branches --------------------------------------------------------------
 
 func branchImm(link uint32, off int32) uint32 {

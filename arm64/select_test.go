@@ -200,6 +200,89 @@ int main(){
 	require.Equal(t, 0, runObject(t, data, main))
 }
 
+// A conjoined branch condition `if (a<b && c<d)` fuses to cmp; ccmp; b.cond.
+// This runs the full truth table end to end so the ccmp nzcv and condition are
+// exercised in every combination.
+func TestConjoinedAndBranch(t *testing.T) {
+	m := ir.NewModule()
+	f := m.NewFunc("band", ir.ClsL).Export()
+	a, b, c, d := f.Param("a", ir.ClsL), f.Param("b", ir.ClsL), f.Param("c", ir.ClsL), f.Param("d", ir.ClsL)
+	e := f.Entry()
+	yes, no := f.NewBlock("yes"), f.NewBlock("no")
+	c1 := e.Cmp(ir.CmpSlt, ir.ClsL, a, b)
+	c2 := e.Cmp(ir.CmpSlt, ir.ClsL, c, d)
+	e.Jnz(e.And(ir.ClsL, c1, c2), yes, no)
+	yes.Ret(f.ConstInt(ir.ClsL, 1))
+	no.Ret(f.ConstInt(ir.ClsL, 0))
+
+	data, err := arm64.CompileObject(m)
+	require.NoError(t, err)
+	// band returns 1 iff a<b AND c<d.
+	main := `extern long band(long,long,long,long);
+int main(){
+  if (band(1,2,3,4) != 1) return 1;  /* T&&T */
+  if (band(2,1,3,4) != 0) return 2;  /* F&&T */
+  if (band(1,2,4,3) != 0) return 3;  /* T&&F */
+  if (band(2,1,4,3) != 0) return 4;  /* F&&F */
+  return 0;
+}`
+	require.Equal(t, 0, runObject(t, data, main))
+}
+
+// A disjoined branch `if (a>b || c==5)` fuses to cmp; ccmp; b.cond, with the
+// ccmp using the inverted first condition and a pass-forward nzcv.
+func TestConjoinedOrBranch(t *testing.T) {
+	m := ir.NewModule()
+	f := m.NewFunc("bor", ir.ClsL).Export()
+	a, b, c := f.Param("a", ir.ClsL), f.Param("b", ir.ClsL), f.Param("c", ir.ClsL)
+	e := f.Entry()
+	yes, no := f.NewBlock("yes"), f.NewBlock("no")
+	c1 := e.Cmp(ir.CmpSgt, ir.ClsL, a, b)
+	c2 := e.Cmp(ir.CmpEq, ir.ClsL, c, f.ConstInt(ir.ClsL, 5))
+	e.Jnz(e.Or(ir.ClsL, c1, c2), yes, no)
+	yes.Ret(f.ConstInt(ir.ClsL, 1))
+	no.Ret(f.ConstInt(ir.ClsL, 0))
+
+	data, err := arm64.CompileObject(m)
+	require.NoError(t, err)
+	// bor returns 1 iff a>b OR c==5.
+	main := `extern long bor(long,long,long);
+int main(){
+  if (bor(9,1,0) != 1) return 1;  /* T||F */
+  if (bor(1,9,5) != 1) return 2;  /* F||T */
+  if (bor(9,1,5) != 1) return 3;  /* T||T */
+  if (bor(1,9,3) != 0) return 4;  /* F||F */
+  return 0;
+}`
+	require.Equal(t, 0, runObject(t, data, main))
+}
+
+// Mixed predicates, unsigned, and a register second operand exercise the
+// condition mapping and the register ccmp form.
+func TestConjoinedMixedPredicates(t *testing.T) {
+	m := ir.NewModule()
+	f := m.NewFunc("bmix", ir.ClsL).Export()
+	x, y, z := f.Param("x", ir.ClsL), f.Param("y", ir.ClsL), f.Param("z", ir.ClsL)
+	e := f.Entry()
+	yes, no := f.NewBlock("yes"), f.NewBlock("no")
+	c1 := e.Cmp(ir.CmpUlt, ir.ClsL, x, y) // unsigned <
+	c2 := e.Cmp(ir.CmpNe, ir.ClsL, z, x)  // register operand
+	e.Jnz(e.And(ir.ClsL, c1, c2), yes, no)
+	yes.Ret(f.ConstInt(ir.ClsL, 1))
+	no.Ret(f.ConstInt(ir.ClsL, 0))
+
+	data, err := arm64.CompileObject(m)
+	require.NoError(t, err)
+	main := `extern long bmix(unsigned long,unsigned long,unsigned long);
+int main(){
+  if (bmix(1,2,9) != 1) return 1;  /* 1<2 && 9!=1 */
+  if (bmix(2,1,9) != 0) return 2;  /* !(2<1) */
+  if (bmix(1,2,1) != 0) return 3;  /* 1<2 && !(1!=1) */
+  return 0;
+}`
+	require.Equal(t, 0, runObject(t, data, main))
+}
+
 func TestSelectFcsel(t *testing.T) {
 	m := ir.NewModule()
 	f := m.NewFunc("seld", ir.ClsD).Export()

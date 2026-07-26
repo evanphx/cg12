@@ -336,6 +336,8 @@ func disasmDPReg(w uint32) string {
 		return disasmDP1(w)
 	case bits(w, 28, 21) == 0xd4:
 		return disasmCondSel(w)
+	case bits(w, 28, 21) == 0xd2:
+		return disasmCondCmp(w)
 	case bits(w, 28, 24) == 0x1b:
 		return disasmDP3(w)
 	}
@@ -441,6 +443,20 @@ func disasmCondSel(w uint32) string {
 		return fmt.Sprintf("cset %s, %s", gpr(w64, rd), condNames[cond.invert()])
 	}
 	return fmt.Sprintf("%s %s, %s, %s, %s", op, gpr(w64, rd), gpr(w64, rn), gpr(w64, rm), condNames[cond])
+}
+
+func disasmCondCmp(w uint32) string {
+	w64 := bit(w, 31)
+	op := "ccmn"
+	if bit(w, 30) {
+		op = "ccmp"
+	}
+	cond := Cond(bits(w, 15, 12))
+	rn, nzcv := bits(w, 9, 5), bits(w, 3, 0)
+	if bit(w, 11) { // immediate form
+		return fmt.Sprintf("%s %s, #%d, #%d, %s", op, gpr(w64, rn), bits(w, 20, 16), nzcv, condNames[cond])
+	}
+	return fmt.Sprintf("%s %s, %s, #%d, %s", op, gpr(w64, rn), gpr(w64, bits(w, 20, 16)), nzcv, condNames[cond])
 }
 
 func disasmDP3(w uint32) string {

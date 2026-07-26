@@ -237,6 +237,14 @@ const (
 	OUMulh
 	OSMulh
 
+	// OCCmp is a conjoined comparison (AArch64 CCMP chain): the branch-taken
+	// boolean of `cmp1 && cmp2` or `cmp1 || cmp2`, produced by a backend that
+	// folds two single-use compares feeding one branch (currently arm64). Args are
+	// the two compares' operands [a1, b1, a2, b2]; Cmp is the second compare's
+	// predicate (the one the branch tests); Aux packs the first predicate and the
+	// and/or mode. It only ever feeds a conditional branch.
+	OCCmp
+
 	numOps
 )
 
@@ -354,6 +362,8 @@ var opTable = [numOps]opInfo{
 	OAsm: {name: "asm", hasResult: true},
 
 	OSel: {name: "select", hasResult: true},
+
+	OCCmp: {name: "ccmp", hasResult: true, private: true},
 
 	// OIntrinsic has no static hasResult: an intrinsic may or may not produce a
 	// value, so its To is set (by the builder or parser) only when it does, and the

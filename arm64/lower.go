@@ -31,6 +31,7 @@ func lower(f *ir.Func, tlsModel TLSModel) error {
 	fuseArithShift(f) // after foldAddressing: it gets first claim on address shifts
 	fuseBitfield(f)
 	fuseCmpSel(f) // after fuseBitfield: it gets first claim on ANDs (ubfx)
+	fuseCcmp(f)   // conjoined compares feeding a branch -> ccmp chain
 	lowerpass.SplitCriticalEdges(f)
 	lowerpass.CoalescePhis(f)
 	lowerpass.DestructSSA(f)
@@ -269,6 +270,59 @@ func fuseCmpSel(f *ir.Func) {
 			in.Args = []ir.Ref{d.Args[0], d.Args[1], armT, armF}
 			nop(d)
 		}
+	}
+}
+
+// fuseCcmp folds a conjoined branch condition -- `if (cmp1 && cmp2)` or
+// `if (cmp1 || cmp2)` reassociated to a single AND/OR of two compares feeding the
+// block's jnz -- into one OCCmp, which the emitter lowers to cmp; ccmp; b.cond
+// (no branch between the two compares, no materialized booleans). It fires only
+// when the AND/OR is the branch condition and both operands are single-use
+// integer compares, so the private OCCmp only ever reaches the branch path.
+//
+// OCCmp carries the two compares' operands in Args [a1,b1,a2,b2], the second
+// compare's predicate in Cmp (the branch tests it), and Aux = pred1<<8 | orBit.
+// Floating compares are left alone (no FCCMP support yet).
+func fuseCcmp(f *ir.Func) {
+	uses, defOf := defUse(f)
+	single := func(r ir.Ref) bool { return r.Kind == ir.RefTemp && uses[r.ID] == 1 }
+	intCmp := func(r ir.Ref) *ir.Instr {
+		if !single(r) {
+			return nil
+		}
+		d := defOf(r)
+		if d == nil || d.Op != ir.OCmp || d.Cmp.IsFloat() {
+			return nil
+		}
+		if _, ok := condOf(d.Cmp, false); !ok {
+			return nil
+		}
+		return d
+	}
+	for _, b := range f.Blocks {
+		if b.Jmp.Kind != ir.JmpJnz || b.Jmp.Arg.Kind != ir.RefTemp || uses[b.Jmp.Arg.ID] != 1 {
+			continue
+		}
+		d := defOf(b.Jmp.Arg)
+		if d == nil || (d.Op != ir.OAnd && d.Op != ir.OOr) || d.Aux != 0 || d.Cls.IsFloat() {
+			continue
+		}
+		c1, c2 := intCmp(d.Args[0]), intCmp(d.Args[1])
+		if c1 == nil || c2 == nil {
+			continue
+		}
+		var orBit int64
+		if d.Op == ir.OOr {
+			orBit = 1
+		}
+		pred1 := c1.Cmp
+		a1, b1, a2, b2 := c1.Args[0], c1.Args[1], c2.Args[0], c2.Args[1]
+		d.Op = ir.OCCmp
+		d.Cmp = c2.Cmp // the branch tests the second compare's predicate
+		d.Args = []ir.Ref{a1, b1, a2, b2}
+		d.Aux = int64(pred1)<<8 | orBit
+		nop(c1)
+		nop(c2)
 	}
 }
 

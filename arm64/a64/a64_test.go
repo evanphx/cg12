@@ -418,4 +418,11 @@ var moreEncodingCases = []encodingCase{
 	{"strh w2, [x3, #-2]!", StrhWB(2, 3, -2, Pre)},
 	{"ldrsh x4, [x5], #2", LdrshWB(true, 4, 5, 2, Post)},
 	{"ldrsw x6, [x7], #4", LdrswWB(6, 7, 4, Post)},
+	// Conditional compare (register and immediate forms).
+	{"ccmp x1, x2, #0, eq", CcmpReg(true, 1, 2, 0, EQ)},
+	{"ccmp x3, x4, #4, ne", CcmpReg(true, 3, 4, 4, NE)},
+	{"ccmp w5, w6, #2, lt", CcmpReg(false, 5, 6, 2, LT)},
+	{"ccmp x6, x7, #15, gt", CcmpReg(true, 6, 7, 15, GT)},
+	{"ccmp w5, #7, #2, lt", CcmpImm(false, 5, 7, 2, LT)},
+	{"ccmp x8, #31, #8, ge", CcmpImm(true, 8, 31, 8, GE)},
 }

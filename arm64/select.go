@@ -177,6 +177,14 @@ func (s *sel) selectData(in *ir.Instr) bool {
 		done()
 	case ir.OCmp:
 		s.cmp(in)
+	case ir.OCCmp:
+		// Normally consumed by the block's branch (see fuseCcmp/ccmpFlags). If an
+		// instruction sits between it and the terminator so the branch fusion does
+		// not claim it, materialize the boolean: cmp; ccmp; cset on the predicate.
+		s.ccmpFlags(in)
+		d, done := s.dst(in.To, in.Cls.Size())
+		s.b.cset(d, in.Cmp, false)
+		done()
 	case ir.OSel:
 		s.sel(in)
 
@@ -859,6 +867,40 @@ func (s *sel) logical(in *ir.Instr, op logicalOp) {
 // `if (x & mask)` branch: the mask result is never materialized into a register.
 func (s *sel) tstFlags(in *ir.Instr) {
 	s.tstFlagsPair(in.Args[0], in.Args[1])
+}
+
+// ccmpFlags emits a conjoined comparison (OCCmp) as flags-only: `cmp a1, b1 ;
+// ccmp a2, b2, #nzcv, cond1`, so a following branch on the second predicate is
+// taken exactly when cmp1 && cmp2 (or cmp1 || cmp2). The first compare sets the
+// flags; the ccmp recomputes them from the second compare when cond1 selects it,
+// else forwards a constant nzcv chosen so the branch reads the right way. Every
+// materialization between the two is flags-preserving, so cmp1's flags reach the
+// ccmp. Integer compares only (fuseCcmp gates floats out).
+func (s *sel) ccmpFlags(in *ir.Instr) {
+	pred1 := ir.Cmp(in.Aux >> 8)
+	or := in.Aux&1 != 0
+	cond1, _ := condOf(pred1, false)
+	cond2, _ := condOf(in.Cmp, false)
+
+	s.cmpFlagsPair(in.Args[0], in.Args[1]) // cmp a1, b1 (folds an immediate)
+
+	ccmpCond := cond1
+	nzcv := a64.FailNZCV(cond2) // &&: fail-forward so the branch is not taken
+	if or {
+		ccmpCond = cond1 ^ 1       // ||: run the ccmp when cond1 did NOT hold
+		nzcv = a64.PassNZCV(cond2) // and pass-forward so the branch is taken
+	}
+
+	sz := s.f.ClassOf(in.Args[2]).Size()
+	w64 := sz == 8
+	a2, b2 := in.Args[2], in.Args[3]
+	if v, ok := intConst(s.f, b2); ok && v >= 0 && v <= 31 {
+		s.b.ccmpImm(w64, s.src(a2, 0, sz), uint32(v), nzcv, ccmpCond)
+		return
+	}
+	r1 := s.src(a2, 0, sz)
+	r2 := s.src(b2, 1, sz)
+	s.b.ccmpReg(w64, r1, r2, nzcv, ccmpCond)
 }
 
 // tstFlagsPair is tstFlags over an explicit operand pair, so the fused

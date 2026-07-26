@@ -66,6 +66,8 @@ type asmb interface {
 	// Compare and conditional set.
 	cmpReg(w64 bool, rn, rm Reg)
 	cmpImm(w64 bool, rn Reg, imm uint32)
+	ccmpReg(w64 bool, rn, rm Reg, nzcv uint32, cond a64.Cond)
+	ccmpImm(w64 bool, rn Reg, imm5, nzcv uint32, cond a64.Cond)
 	fcmp(dbl bool, rn, rm Reg)
 	cset(rd Reg, cmp ir.Cmp, float bool)
 	csel(w64 bool, rd, rn, rm Reg, cond a64.Cond)
@@ -406,7 +408,13 @@ func (b *mcAsm) ext(op extOp, rd, rn Reg, dstSize, srcSize int) {
 }
 func (b *mcAsm) cmpReg(w64 bool, rn, rm Reg)         { b.prog.Emit(a64.CmpReg(w64, mreg(rn), mreg(rm))) }
 func (b *mcAsm) cmpImm(w64 bool, rn Reg, imm uint32) { b.prog.Emit(a64.CmpImm(w64, mreg(rn), imm)) }
-func (b *mcAsm) fcmp(dbl bool, rn, rm Reg)           { b.prog.Emit(a64.Fcmp(dbl, mreg(rn), mreg(rm))) }
+func (b *mcAsm) ccmpReg(w64 bool, rn, rm Reg, nzcv uint32, cond a64.Cond) {
+	b.prog.Emit(a64.CcmpReg(w64, mreg(rn), mreg(rm), nzcv, cond))
+}
+func (b *mcAsm) ccmpImm(w64 bool, rn Reg, imm5, nzcv uint32, cond a64.Cond) {
+	b.prog.Emit(a64.CcmpImm(w64, mreg(rn), imm5, nzcv, cond))
+}
+func (b *mcAsm) fcmp(dbl bool, rn, rm Reg) { b.prog.Emit(a64.Fcmp(dbl, mreg(rn), mreg(rm))) }
 func (b *mcAsm) cset(rd Reg, cmp ir.Cmp, float bool) {
 	var cond a64.Cond
 	var ok bool
