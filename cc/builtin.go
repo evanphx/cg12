@@ -111,8 +111,21 @@ func (g *gen) builtinCall(n *moderncc.PostfixExpression) (ir.Ref, bool) {
 		return g.cur.Sub(ir.ClsW, p, n), true
 
 	case "__builtin_constant_p":
-		// Whether the argument is a compile-time constant. Reporting "no" is always
-		// sound: it only steers the caller to the runtime path.
+		// Whether the argument is a compile-time constant. A literal is one now; a
+		// bare variable or parameter may become one after inlining (the pervasive
+		// RB_TYPE_P / RBIMPL_CONSTANT_P idiom passes a type parameter here), so emit
+		// a marker the optimizer resolves once inlining has propagated constants
+		// (opt.ResolveConstantP). Anything else -- a computed or side-effecting
+		// expression -- reports "no" (always sound, and such an argument never folds
+		// to a constant anyway), and is not evaluated.
+		if len(args) == 1 {
+			if _, ok := constInt(args[0]); ok {
+				return g.fn.Word(1), true
+			}
+			if p, ok := args[0].(*moderncc.PrimaryExpression); ok && p.Case == moderncc.PrimaryExpressionIdent {
+				return g.cur.Intrinsic("constant_p", ir.ClsW, g.genExpr(args[0])), true
+			}
+		}
 		return g.fn.Word(0), true
 
 	case "__builtin_popcount", "__builtin_popcountl", "__builtin_popcountll":

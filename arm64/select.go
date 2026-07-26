@@ -244,6 +244,11 @@ func (s *sel) selectData(in *ir.Instr) bool {
 			s.b.movToSP(s.src(in.Args[0], 0, 8))
 		case strings.HasPrefix(in.Intrin.Name, "atomic."):
 			s.atomic(in)
+		case in.Intrin.Name == "constant_p":
+			// An unresolved __builtin_constant_p (normally settled by opt): 0 is sound.
+			d, done := s.dst(in.To, in.Cls.Size())
+			s.b.movImm(d, 0, in.Cls.Size() == 8)
+			done()
 		default:
 			s.b.fail("arm64: unsupported intrinsic %q", in.Intrin.Name)
 		}

@@ -143,6 +143,9 @@ func (s *xsel) selectInt(in *ir.Instr) bool {
 			commit()
 		case "stackrestore":
 			s.b.movToSP(s.gpValue(in.Args[0], gpScratch0))
+		case "constant_p":
+			// An unresolved __builtin_constant_p (normally settled by opt): 0 is sound.
+			s.b.move(s.b.refLoc(in.To), s.b.refLoc(s.f.ConstInt(in.Cls, 0)))
 		default:
 			s.b.fail("amd64: unsupported intrinsic %q", in.Intrin.Name)
 		}

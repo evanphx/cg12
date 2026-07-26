@@ -144,6 +144,9 @@ func (mc *Machine) vmLoop(bf *bcFunc, base uint32, va []Value) (Value, error) {
 				mc.regs[base+uint32(ii.dst)] = ptrVal(mc.sp)
 			case ii.name == "stackrestore":
 				mc.sp = mc.regs[base+uint32(ii.args[0])].u64()
+			case ii.name == "constant_p":
+				// Unresolved __builtin_constant_p (opt settles it in a normal build): 0.
+				mc.regs[base+uint32(ii.dst)] = W(0)
 			case strings.HasPrefix(ii.name, "atomic."):
 				args := make([]Value, len(ii.args))
 				for i, r := range ii.args {

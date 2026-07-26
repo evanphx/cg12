@@ -90,6 +90,13 @@ func init() {
 	// allocated since. That is a side effect: it must be kept and never moved.
 	RegisterIntrinsic("stackrestore", IntrinsicEffects{SideEffect: true})
 
+	// constant_p carries a pending __builtin_constant_p: a marker the optimizer
+	// resolves once inlining has propagated constants -- to 1 when its operand is a
+	// constant, else 0 (see opt.ResolveConstantP). It is pure (a function of its
+	// operand, no state) and, until resolved, opaque. A backend or interpreter that
+	// meets an unresolved one treats it as 0, which is always sound.
+	RegisterIntrinsic("constant_p", IntrinsicEffects{HasResult: true, Pure: true})
+
 	registerAtomics()
 }
 

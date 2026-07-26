@@ -133,6 +133,9 @@ func DefaultPipeline() []Pass {
 			inline,
 			clean,
 		),
+		// Inlining has now propagated constants into the __builtin_constant_p markers;
+		// resolve them and let clean fold the fast paths they gate (Ruby's RB_TYPE_P).
+		FuncPass("constantp", ResolveConstantP),
 		// With inlining and simplification settled, convert short branch diamonds
 		// exposed anywhere in the pipeline into selects, then clean up the drained
 		// arms and fold any select whose condition simplification made constant.

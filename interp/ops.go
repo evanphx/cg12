@@ -65,6 +65,13 @@ func (mc *Machine) execIntrinsic(fr *frame, in *ir.Instr) error {
 		}
 		mc.sp = v.u64()
 		return nil
+	case "constant_p":
+		// An unresolved __builtin_constant_p marker (opt.ResolveConstantP settles it
+		// in a normal build): reporting "not constant" is always sound.
+		if !in.To.IsNone() {
+			fr.vals[in.To.ID] = W(0)
+		}
+		return nil
 	}
 	if strings.HasPrefix(in.Intrin.Name, "atomic.") {
 		args := make([]Value, len(in.Args))
