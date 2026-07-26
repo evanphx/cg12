@@ -52,6 +52,27 @@ func readTestdata(name string) string {
 }
 
 var cDiffCases = []cDiffCase{
+	// A computed-goto interpreter where a value is saved while a new one is used, so
+	// the two live versions interfere across the mesh and their phi cannot coalesce.
+	// DestructSSA must resolve that phi through memory rather than a copy before the
+	// indirect branch (which would clobber the value for every other handler): a
+	// mis-resolution here produced 60060 instead of 40010.
+	{"computed-goto-interfering-mesh", `
+#include <stdio.h>
+long interp(int *code, int n) {
+  static void *tab[] = {&&SET, &&SAVE, &&ADDSAVED, &&END};
+  int pc = 0; long acc = 0, saved = 0;
+  goto *tab[code[pc]];
+SET:      acc = (pc+1)*10; pc++;   goto *tab[pc<n?code[pc]:3];
+SAVE:     saved = acc;     pc++;   goto *tab[pc<n?code[pc]:3];
+ADDSAVED: acc = acc + saved; pc++; goto *tab[pc<n?code[pc]:3];
+END:      return acc*1000 + saved;
+}
+int main(void){
+  int prog[] = {0,1,0,2};
+  printf("%ld\n", interp(prog, 4));
+  return 0;
+}`},
 	{"mini-and-fastpath", readTestdata("mini_and.c")},
 	{"sentinel-comp", readTestdata("comp.c")},
 

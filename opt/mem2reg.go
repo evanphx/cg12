@@ -30,11 +30,10 @@ func varBase(name string) string {
 // to every label -- so the CFG is a mesh, and a promoted loop-carried variable
 // gets a phi at each handler. lower.CoalescePhis unifies each such variable across
 // the whole mesh into one temporary, so the loop state becomes a register every
-// handler reads and writes in place. What phi copies remain (a variable's initial
-// value, arriving over the entry block's own goto) sit before that indirect branch
-// in the predecessor: correct, because the branch transfers to exactly one target
-// and every target reads that one register. This lets the interpreter's hot state
-// live in registers rather than memory.
+// handler reads and writes in place. A mesh value that genuinely interferes with the
+// phi result cannot coalesce; lower.DestructSSA resolves that phi through memory
+// rather than a copy the indirect branch has nowhere to put. This lets the
+// interpreter's hot state live in registers rather than memory.
 func Mem2Reg(f *ir.Func) bool {
 	vars, varOf := findPromotable(f)
 	if len(vars) == 0 {

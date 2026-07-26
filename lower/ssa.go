@@ -63,11 +63,11 @@ func SplitCriticalEdges(f *ir.Func) {
 // arriving from a handler coalesces cleanly -- it reaches the phi only through that
 // edge, so its live range ends there and never overlaps the result -- collapsing
 // the whole mesh of a loop-carried variable to one temporary the handlers update
-// in place. A residual copy can still remain (a variable's initial value, arriving
-// over the entry block's own indirect branch, where several variables share an
-// init constant that cannot coalesce with all of them). DestructSSA places that
-// copy before the indirect branch in the predecessor: correct, because the branch
-// takes exactly one target and every target reads that one register.
+// in place. An operand that genuinely interferes with the result (two live values
+// that cannot share a register, e.g. a saved and a current bytecode pointer during
+// backtracking) does not coalesce; DestructSSA cannot bridge it with a copy before
+// the indirect branch -- that would clobber the value for every other target -- so
+// it resolves such a phi through memory instead (see DestructSSA).
 //
 // Only the indirect edges are touched. Ordinary phi copies sit on splittable
 // edges and cost one copy each, which DestructSSA handles; coalescing them too
@@ -281,6 +281,15 @@ func buildPhiInterference(f *ir.Func, live *analysis.Liveness, nt int, involved 
 // The copies on one edge are parallel -- a phi reads the values as they were on
 // entry, so they all happen at once -- which is what sequentialize is for.
 // Requires SplitCriticalEdges to have run.
+//
+// A phi operand arriving over a multi-target computed goto that CoalescePhis
+// could not coalesce (the result and operand genuinely interfere) cannot be
+// resolved by a copy: the copy would have to sit before the indirect branch,
+// where it runs for whichever target the branch takes and clobbers that value
+// for every other handler. Such a phi is resolved through memory instead -- the
+// operand is stored to a stack slot in each predecessor and the result loaded
+// from it at the block's top -- so each target loads exactly the value the taken
+// predecessor stored, with no shared register to clobber.
 func DestructSSA(f *ir.Func) {
 	// Group phi (dst <- src) pairs by predecessor edge, across the whole function.
 	// A predecessor with several phi-bearing successors is a computed goto (an
@@ -290,8 +299,13 @@ func DestructSSA(f *ir.Func) {
 	byPred := map[*ir.Block][]movePair{}
 	seen := map[*ir.Block]map[[4]uint32]bool{}
 	var order []*ir.Block
+	var slots []ir.Instr // stack slots for memory-resolved phis, hoisted into entry
 	for _, v := range f.Blocks {
 		for _, p := range v.Phis {
+			if memoryResolvedPhi(p) {
+				slots = append(slots, resolvePhiViaMemory(f, v, p))
+				continue
+			}
 			for k, pred := range p.Blocks {
 				if seen[pred] == nil {
 					seen[pred] = map[[4]uint32]bool{}
@@ -319,6 +333,61 @@ func DestructSSA(f *ir.Func) {
 			})
 		}
 	}
+	if len(slots) > 0 {
+		hoistSlots(f, slots)
+	}
+}
+
+// memoryResolvedPhi reports whether a phi must be taken out of registers: it has an
+// operand arriving over a multi-target computed goto that did not coalesce (result
+// and operand are distinct temps, so a copy would be needed -- but there is nowhere
+// to put a per-target copy before an indirect branch).
+func memoryResolvedPhi(p *ir.Phi) bool {
+	if p.To.Kind != ir.RefTemp {
+		return false
+	}
+	for k, pred := range p.Blocks {
+		if pred.Jmp.Kind == ir.JmpBr && len(pred.Jmp.Targets) > 1 &&
+			!(p.Args[k].Kind == ir.RefTemp && p.Args[k].ID == p.To.ID) {
+			return true
+		}
+	}
+	return false
+}
+
+// resolvePhiViaMemory rewrites one phi into a stack slot: a store of each operand at
+// the end of its predecessor and a load of the result at the top of the phi's block.
+// It returns the slot's OAlloc instruction for the caller to hoist into the entry.
+func resolvePhiViaMemory(f *ir.Func, b *ir.Block, p *ir.Phi) ir.Instr {
+	cls := p.Cls
+	slot := f.NewTemp("phislot", ir.ClsP)
+	alloc := ir.Instr{Op: ir.OAlloc8, Cls: ir.ClsP, To: slot, Args: []ir.Ref{f.Long(8)}}
+
+	storeOp, loadOp := ir.OStorel, ir.OLoadl
+	if cls == ir.ClsW {
+		storeOp, loadOp = ir.OStorew, ir.OLoaduw
+	}
+	// Store each operand in its predecessor, before the terminator.
+	for k, pred := range p.Blocks {
+		pred.Instrs = append(pred.Instrs, ir.Instr{
+			Op: storeOp, Cls: cls, Args: []ir.Ref{p.Args[k], slot},
+		})
+	}
+	// Load the result at the block's top, ahead of any use of it.
+	load := ir.Instr{Op: loadOp, Cls: cls, To: p.To, Args: []ir.Ref{slot}}
+	b.Instrs = append([]ir.Instr{load}, b.Instrs...)
+	return alloc
+}
+
+// hoistSlots places memory-resolved-phi allocations in the entry block, after its
+// leading parameters (which the emitter expects first) and any existing allocations.
+func hoistSlots(f *ir.Func, slots []ir.Instr) {
+	e := f.Start
+	i := 0
+	for i < len(e.Instrs) && (e.Instrs[i].Op == ir.OPar || e.Instrs[i].Op.IsAlloc()) {
+		i++
+	}
+	e.Instrs = append(e.Instrs[:i:i], append(slots, e.Instrs[i:]...)...)
 }
 
 type movePair struct{ dst, src ir.Ref }
