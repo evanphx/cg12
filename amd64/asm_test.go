@@ -4,6 +4,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"runtime"
 	"testing"
 
 	"github.com/evanphx/cg12/amd64"
@@ -14,14 +15,22 @@ import (
 )
 
 // runAsmSrc compiles C containing inline asm to an x86-64 object, links it
-// freestanding with the _start stub, and runs it under qemu-x86_64, returning
-// runtest's exit code. The template is assembled by x64.Assemble, so this is
-// also what proves that path encodes what the template asked for.
+// freestanding with the _start stub, and runs it, returning runtest's exit code.
+// The template is assembled by x64.Assemble, so this is also what proves that
+// path encodes what the template asked for.
 func runAsmSrc(t *testing.T, src string, optimize bool) int {
 	t.Helper()
 	clang := testenv.Tool(t, "clang")
 	testenv.Tool(t, "ld.lld")
-	qemu := testenv.Tool(t, "qemu-x86_64")
+
+	// As in runObjWith: an x86-64 image on an x86-64 host is a host binary, so
+	// exec it directly and reserve the emulator for reaching x86-64 from another
+	// architecture. Resolving qemu-x86_64 only there is what keeps a native run
+	// from skipping this test, while a cross host without it still skips.
+	var runner string
+	if runtime.GOARCH != "amd64" {
+		runner = testenv.Tool(t, "qemu-x86_64")
+	}
 
 	m, err := cc.CompileFor(cc.TargetAMD64, "asm.c", src)
 	require.NoError(t, err)
@@ -44,7 +53,12 @@ func runAsmSrc(t *testing.T, src string, optimize bool) int {
 	out, err = exec.Command("ld.lld", "-static", "-nostdlib", "-o", bin, stubO, objPath).CombinedOutput()
 	require.NoErrorf(t, err, "link: %s", out)
 
-	cmd := exec.Command(qemu, bin)
+	var cmd *exec.Cmd
+	if runner == "" {
+		cmd = exec.Command(bin)
+	} else {
+		cmd = exec.Command(runner, bin)
+	}
 	if err := cmd.Run(); err != nil {
 		if ee, ok := err.(*exec.ExitError); ok {
 			return ee.ExitCode()

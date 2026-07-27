@@ -4,6 +4,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"runtime"
 	"testing"
 
 	"github.com/evanphx/cg12/amd64"
@@ -13,8 +14,9 @@ import (
 )
 
 // _start stub: call the exported entry `runtest`, then exit(status = its return
-// value). Freestanding — no libc — so it runs under qemu-x86_64 with just the
-// SYS_exit syscall. The tested backend output is linked alongside it.
+// value). Freestanding — no libc — so the image needs nothing but the SYS_exit
+// syscall, whether the kernel running it is the host's or qemu's. The tested
+// backend output is linked alongside it.
 const startStub = `
 	.text
 	.globl _start
@@ -26,8 +28,8 @@ _start:
 `
 
 // runObj compiles m to an x86-64 object, links it (freestanding, static) with the
-// _start stub via lld, runs the result under qemu-x86_64, and returns the exit
-// code. The module must export a function named "runtest" returning a word.
+// _start stub via lld, runs the result, and returns the exit code. The module
+// must export a function named "runtest" returning a word.
 func runObj(t *testing.T, m *ir.Module) int {
 	return runObjWith(t, m, amd64.Options{})
 }
@@ -37,7 +39,22 @@ func runObjWith(t *testing.T, m *ir.Module, opts amd64.Options) int {
 	t.Helper()
 	clang := testenv.Tool(t, "clang")
 	testenv.Tool(t, "ld.lld")
-	qemu := testenv.Tool(t, "qemu-x86_64")
+
+	// The image we build is x86-64, so on an x86-64 host it is simply a host
+	// binary: exec it. An emulator is what it takes to reach x86-64 from some
+	// other architecture -- the arm64 box this harness was written on, and the
+	// project's arm64 CI -- and only there. Demanding qemu-x86_64 regardless is
+	// how a native run came to skip every execution test in this package and
+	// still report ok.
+	//
+	// runner is the emulator to exec the image through, or empty to exec it
+	// directly. Resolving it only when it is needed keeps the skip honest: a
+	// cross-architecture host without qemu still skips (and still fails under
+	// CG12_REQUIRE_TOOLS), because there it really cannot run the image.
+	var runner string
+	if runtime.GOARCH != "amd64" {
+		runner = testenv.Tool(t, "qemu-x86_64")
+	}
 
 	code, err := amd64.CompileObjectWith(m, opts)
 	require.NoError(t, err)
@@ -56,7 +73,12 @@ func runObjWith(t *testing.T, m *ir.Module, opts amd64.Options) int {
 	out, err = exec.Command("ld.lld", "-static", "-nostdlib", "-o", bin, stubO, objPath).CombinedOutput()
 	require.NoErrorf(t, err, "link: %s", out)
 
-	cmd := exec.Command(qemu, bin)
+	var cmd *exec.Cmd
+	if runner == "" {
+		cmd = exec.Command(bin)
+	} else {
+		cmd = exec.Command(runner, bin)
+	}
 	err = cmd.Run()
 	if ee, ok := err.(*exec.ExitError); ok {
 		return ee.ExitCode()
