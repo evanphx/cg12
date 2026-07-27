@@ -402,7 +402,19 @@ var dbgvars = []*dbgVar{
 	{name: "tracebackancestors", value: &debug.tracebackancestors},
 	{name: "tracebacklabels", atomic: &debug.tracebacklabels, def: 0},
 	{name: "tracefpunwindoff", value: &debug.tracefpunwindoff},
-	{name: "updatemaxprocs", value: &debug.updatemaxprocs, def: 1},
+	// cg12: default the dynamic GOMAXPROCS updater OFF (upstream default is 1).
+	// When GOMAXPROCS is unset, sysmon periodically calls defaultGOMAXPROCS,
+	// which reads and parses the cgroup CPU limit. That parse does
+	// string([]byte) conversions; cg12 does not yet implement the
+	// non-escaping string([]byte) optimization, so it emits a real
+	// slicebytetostring heap allocation. sysmon runs on a P-less M whose
+	// getMCache returns the post-bootstrap-nil mcache0, so the allocation
+	// dereferences a nil mcache and segfaults -- crashing every binary run
+	// without GOMAXPROCS set. def:0 is the well-tested pre-1.25 behavior
+	// (see internal/godebugs table: Changed:25, Old:"0") and still keeps the
+	// container-aware *startup* default, which runs on m0 while mcache0 is
+	// valid. Re-enable once cg12 elides non-escaping string([]byte).
+	{name: "updatemaxprocs", value: &debug.updatemaxprocs, def: 0},
 }
 
 func parseRuntimeDebugVars(godebug string) {
