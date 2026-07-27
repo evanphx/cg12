@@ -765,7 +765,7 @@ func spliceCall(caller *ir.Func, b *ir.Block, idx int, callee *ir.Func, cg *call
 	}
 	for id := 0; id < nTemps; id++ {
 		if t := callee.Temps[id]; t != nil && !isParam[id] {
-			if callee.HasClosureContext && t.Name == "closure" && t.Fixed && call.ClosureCall {
+			if t.ClosureContext && call.ClosureCall {
 				tempMap[id] = closureContext
 				continue
 			}

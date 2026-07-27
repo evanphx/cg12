@@ -64,7 +64,7 @@ func stabilizeClosureContext(function *ir.Func) {
 
 	var incoming ir.Ref
 	for _, temporary := range function.Temps {
-		if temporary != nil && temporary.Name == "closure" && temporary.Fixed && temporary.Reg == int(X26) {
+		if temporary != nil && temporary.ClosureContext {
 			incoming = temporary.Ref()
 			break
 		}

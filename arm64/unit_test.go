@@ -1226,6 +1226,7 @@ func TestGoABIStackGrowthPreservesClosureContext(t *testing.T) {
 	temporary := function.Temp(context)
 	temporary.Fixed = true
 	temporary.Reg = 26
+	temporary.ClosureContext = true
 	function.Entry().Ret(function.Entry().Load(ir.ClsL, context))
 
 	argumentFrame := goArgumentFrameFor(function)
@@ -1250,6 +1251,7 @@ func TestGoABIClosureContextLiveAcrossCallGetsStableSpill(t *testing.T) {
 	contextTemporary.GCRef = true
 	contextTemporary.Fixed = true
 	contextTemporary.Reg = int(X26)
+	contextTemporary.ClosureContext = true
 	entry := function.Entry()
 	entry.CallVoid(function.Sym("observe", 0))
 	entry.Ret(entry.Load(ir.ClsL, context))

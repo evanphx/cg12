@@ -33,6 +33,13 @@ type Temp struct {
 	// scan, whether it may point into the stack (for a copying stack), and so on.
 	// Zero means an untyped reference. Its meaning is defined by the runtime.
 	GCType uint32
+
+	// ClosureContext marks the temporary that receives a function's ABIInternal
+	// closure environment (the dedicated closure register at entry). Passes that
+	// must find it — the backend stabilizing it out of the volatile register, the
+	// inliner substituting the caller's closure — test this flag rather than
+	// matching a magic temporary name.
+	ClosureContext bool
 }
 
 // ValueGroup records a run of scalar SSA values that together form one

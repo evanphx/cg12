@@ -19,7 +19,7 @@ import (
 // references. Value references (ir.Ref) already index Temps/Consts by ID.
 const (
 	binMagic   = "cg12"
-	binVersion = 16
+	binVersion = 17
 )
 
 // MarshalBinary encodes the module to cg12's binary unit format.
@@ -430,6 +430,7 @@ func (e *enc) encTemp(t *Temp) {
 	e.typeRef(t.Agg)
 	e.boolean(t.GCRef)
 	e.uv(uint64(t.GCType))
+	e.boolean(t.ClosureContext)
 }
 
 func (e *enc) encConst(c Const) {
@@ -839,6 +840,7 @@ func (d *dec) decTemp(id int) *Temp {
 		GCRef: d.boolean(),
 	}
 	t.GCType = uint32(d.uv())
+	t.ClosureContext = d.boolean()
 	return t
 }
 

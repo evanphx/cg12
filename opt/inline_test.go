@@ -143,6 +143,7 @@ func TestInlineMapsClosureContextToCallSiteValue(t *testing.T) {
 	contextTemp.Fixed = true
 	contextTemp.Reg = 26
 	contextTemp.GCRef = true
+	contextTemp.ClosureContext = true
 	code := helperBlock.Load(ir.ClsP, closure)
 	helperBlock.CallVoid(code)
 	helperBlock.RetVoid()

@@ -10672,6 +10672,7 @@ func (g *gen) closureContext() ir.Ref {
 	temporary.GCRef = true
 	temporary.Fixed = true
 	temporary.Reg = g.closureRegister()
+	temporary.ClosureContext = true
 	return context
 }
 

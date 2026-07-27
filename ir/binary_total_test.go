@@ -111,15 +111,16 @@ func TestInstrRoundTripsEveryField(t *testing.T) {
 
 func TestTempRoundTripsEveryField(t *testing.T) {
 	tmp := Temp{
-		ID:     0,
-		Name:   "x",
-		Cls:    ClsL,
-		Slot:   8,
-		Reg:    3,
-		Fixed:  true,
-		Agg:    &AggType{Name: "pair", Fields: []Field{{Sub: SubW}}},
-		GCRef:  true,
-		GCType: 7,
+		ID:             0,
+		Name:           "x",
+		Cls:            ClsL,
+		Slot:           8,
+		Reg:            3,
+		Fixed:          true,
+		Agg:            &AggType{Name: "pair", Fields: []Field{{Sub: SubW}}},
+		GCRef:          true,
+		GCType:         7,
+		ClosureContext: true,
 	}
 	allFieldsSet(t, tmp, "ID") // ID is the index, restored by position
 

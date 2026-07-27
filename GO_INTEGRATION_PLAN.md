@@ -172,9 +172,13 @@ and can never silently desync or drop.
 - **3c. De-Go doc comments/names**: `ManagedFrame`, `ClosureContext` (static
   chain / `nest`), `StackResult`, `Field.Pointer`; rename `flattenGoAggregate` →
   `flattenAggregate`.
-- **3d. Kill the `Name == "closure"` magic-temp match** (`lower.go`
-  `stabilizeClosureContext`, `inline.go`) → explicit IR designation; move
-  `stabilizeClosureContext` to `goabi.go`.
+- **3d. Kill the `Name == "closure"` magic-temp match. DONE.** Added an explicit
+  `ir.Temp.ClosureContext` flag (serialized, unit format v16→v17), set by goc on
+  the closure-environment temporary. `stabilizeClosureContext` (`arm64/lower.go`)
+  and the inliner (`opt/inline.go`) now test the flag instead of matching the
+  magic temporary name `"closure"` plus `Fixed`/`Reg==X26`. Enforced by
+  `binary_total_test.go`'s field-completeness check. **Remaining (cosmetic):**
+  move `stabilizeClosureContext` from `lower.go` to `goabi.go`.
 
 ## Priority 4 — Bugs & cosmetics
 
