@@ -1,8 +1,6 @@
 package opt
 
 import (
-	"strings"
-
 	"github.com/evanphx/cg12/ir"
 )
 
@@ -61,21 +59,9 @@ func DeadFuncElim(m *ir.Module) bool {
 	return changed
 }
 
-// linkerSymbol mirrors the target backends' symbol spelling. Frontend-created
-// helper calls sometimes already use linker spelling (runtime_foo), while Go
-// function definitions retain semantic spelling (runtime.foo). They denote the
-// same ELF symbol and therefore must participate in the same reachability set.
-func linkerSymbol(name string) string {
-	var symbol strings.Builder
-	for _, character := range name {
-		if character == '_' || character >= 'a' && character <= 'z' || character >= 'A' && character <= 'Z' || character >= '0' && character <= '9' {
-			symbol.WriteRune(character)
-		} else {
-			symbol.WriteByte('_')
-		}
-	}
-	if symbol.Len() == 0 {
-		return "anon"
-	}
-	return symbol.String()
-}
+// linkerSymbol canonicalizes a name to its linker spelling so definitions and
+// references denote the same reachability-set entry: a "runtime.foo" definition
+// and an already-mangled "runtime_foo" helper call must match. It uses the
+// single canonical mangler (ir.LinkerSymbol) shared with the backend rather than
+// re-implementing the spelling here.
+func linkerSymbol(name string) string { return ir.LinkerSymbol(name) }

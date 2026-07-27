@@ -193,13 +193,30 @@ and can never silently desync or drop.
 
 ## Priority 4 — Bugs & cosmetics
 
-- **4a. Serialize `Func.StackPointerWords`** in `ir/binary.go` (cache-correctness;
-  the per-alloca pointer-word map, distinct from scalar `ClsM`).
-- **4b. `floatingComparison`**: `goc` generics emit int-cmp predicates on float
-  operands, patched downstream in the shared inliner/folder. Fix the frontend and
-  have the verifier reject the malformed form.
-- **4c. `opt/deadfunc.go` `linkerSymbol`** bakes one backend's name mangling into a
-  shared pass → single canonical mangler exported by the backend.
+- **4a. Serialize `Func.StackPointerWords`. MOOT.** After 2b hoisted
+  `prepareGoABI`/`inferStackPointerWords` to recompute this map in the backend on
+  every compile (over frontend IR, independent of emission), a cache-loaded
+  module's nil map is fully recomputed before use — so there is nothing to
+  serialize and no cache-correctness bug.
+- **4b. `floatingComparison`. NOT A BUG (analyzed).** goc's comparison emission is
+  self-consistent: `compile.go:~13160` and the `min`/`max` builtin pick the float
+  or integer predicate from the operand class, so a generic body compiled with an
+  integer *representative* type has an integer operand AND an integer predicate.
+  The float-operand/integer-predicate mismatch is created only *transiently* by
+  the **inliner** when it substitutes a float argument into that shared body, and
+  `opt/inline.go` fixes it in the same pass via `floatingComparison` (correct
+  specialization, not a bug-patch); `opt/fold.go` is a safety net. `ir.Verify`
+  runs inside the `clean` fixpoint *before* inlining, so it never sees the
+  transient form, and the passing float-generics tests show nothing malformed
+  reaches the backend. There is no frontend bug to fix and no escaping form for
+  the verifier to reject — the shared-body + inline-specialization design is
+  correct. (A true fix would be monomorphization, a large change with no bug to
+  justify it.)
+- **4c. `opt/deadfunc.go` `linkerSymbol` → canonical mangler. DONE.** `linkerSymbol`
+  (opt) and `sanitize` (arm64) were byte-identical manglings. Added
+  `ir.LinkerSymbol` as the single canonical mangler (in `ir`, the package both
+  peers import — opt and arm64 do not import each other); both now delegate to it,
+  so the spelling cannot drift.
 - **4d. Cosmetics:** `msr dit` string carve-out → `MsrPstate` field table; LSE
   acquire-release-only note; trim debug state in `callersave.go`/`select.go` error
   strings; print/parse the new `Func` flags in the text IR.
