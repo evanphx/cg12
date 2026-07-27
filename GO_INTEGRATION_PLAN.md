@@ -109,12 +109,24 @@ and can never silently desync or drop.
   [dead code], `framelessEligible` [redundant with the `PrologueEmitter` check])
   are non-issues left in place. Per-call `CallConv` stamping and the
   cross-convention tail-call error are unchanged.
-- **2b. Split the emit driver.** `arm64/mc.go` `compileToObjectWithBundle` is both
-  the neutral object driver and the Go metadata orchestrator. The function loop
-  records a neutral facts struct; a frontend-registered `moduleFinisher` (Go's in
-  `go_metadata_object.go`) consumes it. Move `goStackPrologue` behind the existing
-  `PrologueEmitter`/`GCStrategy` hook; move `prepareGoABI`/`inferStackPointerWords`
-  to an IR pass.
+- **2b. Split the emit driver. Core DONE.** `compileToObjectWithBundle` was both
+  the neutral object driver and the Go metadata orchestrator, threaded together.
+  Now:
+  - `prepareGoABI`/`inferStackPointerWords` run as a pre-loop IR-annotation pass
+    (proven order-independent of the emit loop), out of the per-function body.
+  - The per-function loop is neutral but for one `goFunctionInfoFor` call that
+    gathers the Go facts (`goFunctionInfo` was already the loop→finisher boundary).
+  - The after-loop orchestration is split into `finishGoModule` (Go finisher:
+    runtime text symbol, BSS/fixup data layout, pclntab/moduledata) and
+    `addNeutralData`, dispatched once instead of `goRuntime` branches scattered
+    through the data loop.
+  Behavior-preserving (facts struct and call sequence unchanged). **Remaining
+  refinements (optional):** a *frontend-registered* finisher instead of the single
+  `if goRuntime` dispatch (arguably over-engineering for two frontends); moving
+  `goStackPrologue` behind the `PrologueEmitter`/`GCStrategy` hook (delicate — it
+  currently runs *before* the generic prologue hook, needs a Go `GCStrategy`);
+  and relocating `inferStackPointerWords` from `arm64` into the `ir`/`opt` package
+  (it is already a pure IR-to-IR pass, just not yet in a shared package).
 - **2c. Replace symbol-name sniffing with IR attributes. Largely DONE.**
   - `ir.Module.Runtime` flag replaced `moduleUsesGoRuntime` (the
     `runtime.schedinit` sniff), serialized in the unit format (v14→v15).
