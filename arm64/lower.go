@@ -926,10 +926,11 @@ func lowerABI(f *ir.Func) error {
 			retBuf = f.NewTemp("retbuf", ir.ClsL)
 		}
 	}
-	if !retBuf.IsNone() {
-		// The hidden result buffer points into the caller's stack. It remains
-		// live for the entire function and must be rewritten if a nested call
-		// grows and copies that stack.
+	if !retBuf.IsNone() && f.UsesManagedFrame() {
+		// Under a managed (growable, copied) stack the hidden result buffer points
+		// into the caller's stack and must be rewritten if a nested call grows and
+		// copies it, so the collector has to track it. A fixed C/Ruby stack never
+		// moves, so the pointer is an ordinary address needing no GC identity.
 		f.MarkGCRef(retBuf)
 	}
 	if err := lowerParams(f, retBuf); err != nil {
@@ -1054,9 +1055,11 @@ func lowerAggParam(f *ir.Func, p *ir.Temp, a *argAssigner) (pars, recon []ir.Ins
 	}
 	// Aggregate parameters are represented by an address. Depending on their
 	// classification, it points into this frame, the incoming argument area, or
-	// caller-owned storage. A copying stack must relocate it whenever that
-	// storage is on the stack.
-	f.MarkGCRef(p.Ref())
+	// caller-owned storage. Only a managed (copying) stack must relocate it and so
+	// track it; a fixed C/Ruby stack leaves it an ordinary address.
+	if f.UsesManagedFrame() {
+		f.MarkGCRef(p.Ref())
+	}
 	cls := classifyAgg(p.Agg)
 	if cls.kind == aggMemory {
 		// Passed by reference: the incoming value is already a pointer.
@@ -1101,7 +1104,7 @@ func lowerAggParam(f *ir.Func, p *ir.Temp, a *argAssigner) (pars, recon []ir.Ins
 	}
 	for i, r := range regs {
 		pin := newPinned(f, r, elemCls)
-		if pointerAt[i*elemSize] {
+		if pointerAt[i*elemSize] && f.UsesManagedFrame() {
 			f.MarkGCRef(pin)
 		}
 		addr := slot

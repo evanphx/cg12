@@ -502,10 +502,14 @@ func aggregateAlloc(f *ir.Func, aggregate *ir.AggType, out *[]ir.Instr) ir.Ref {
 	}
 	slot := f.NewTemp("", ir.ClsL)
 	*out = append(*out, ir.Instr{Op: operation, Cls: ir.ClsL, To: slot, Args: []ir.Ref{f.Long(int64(size))}})
-	// The aggregate is addressed through this temporary after nested calls.
-	// Relocate that interior stack pointer when a goroutine stack is copied.
-	f.MarkGCRef(slot)
-	markAggregatePointerWords(f, slot, aggregate)
+	// The aggregate is addressed through this temporary after nested calls. Under a
+	// managed (copied) stack that interior pointer must be relocated and its
+	// pointer words scanned, so the collector tracks it. A fixed C/Ruby stack does
+	// not move, so the slot is an ordinary local needing no GC metadata.
+	if f.UsesManagedFrame() {
+		f.MarkGCRef(slot)
+		markAggregatePointerWords(f, slot, aggregate)
+	}
 	return slot
 }
 
