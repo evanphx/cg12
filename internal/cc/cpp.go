@@ -2708,7 +2708,6 @@ func (c *cpp) primaryExpression(s *cppTokens, eval bool) interface{} {
 						return int64(0)
 					}
 				}
-				return int64(0)
 			}
 			s.shift()
 			var b []byte

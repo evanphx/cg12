@@ -473,7 +473,6 @@ func (p *parser) declarationListOpt() (r *DeclarationList) {
 		}
 		prev = dl
 	}
-	return r
 }
 
 // [0], 6.8.2 Compound statement
@@ -2524,7 +2523,6 @@ func (p *parser) directDeclarator2(dd *DirectDeclarator, declare bool) (r *Direc
 			return r
 		}
 	}
-	return r
 }
 
 //	 identifier-list:
