@@ -53,6 +53,12 @@ func TestARM64RuntimeCapabilityStatus(t *testing.T) {
 	if *runtimeProcs < 1 {
 		t.Fatalf("-runtime-procs must be at least 1")
 	}
+	if *runtimeStatusShards < 1 {
+		t.Fatalf("-runtime-status-shards must be at least 1")
+	}
+	if *runtimeStatusShard < 0 || *runtimeStatusShard >= *runtimeStatusShards {
+		t.Fatalf("-runtime-status-shard must be in [0, %d)", *runtimeStatusShards)
+	}
 
 	directory := t.TempDir()
 	compiler := buildGOCForRuntimeCapabilityStatus(t, directory)
@@ -2009,8 +2015,15 @@ func TestARM64RuntimeCapabilityStatus(t *testing.T) {
 		},
 	}
 
-	for _, capability := range capabilities {
+	for index, capability := range capabilities {
 		capability := capability
+		// Shard the matrix across parallel CI jobs: each shard owns the
+		// capabilities whose index is congruent to it modulo the shard count.
+		// Index-based partitioning keeps the shards balanced and stays correct
+		// as capabilities are added, unlike a category-name filter.
+		if index%*runtimeStatusShards != *runtimeStatusShard {
+			continue
+		}
 		t.Run(capability.category+"/"+capability.name, func(t *testing.T) {
 			if capability.requiresAFINET && !afinetSocketAvailable {
 				t.Skipf("AF_INET sockets unavailable in this execution environment: %v", afinetSocketErr)

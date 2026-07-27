@@ -55,6 +55,18 @@ var runtimeStatusProgress = flag.Bool(
 	"write runtime capability progress to stderr as each program starts and finishes",
 )
 
+var runtimeStatusShards = flag.Int(
+	"runtime-status-shards",
+	1,
+	"partition the runtime capability matrix into this many shards (for parallel CI jobs)",
+)
+
+var runtimeStatusShard = flag.Int(
+	"runtime-status-shard",
+	0,
+	"run only this shard index (0-based) of the runtime capability matrix",
+)
+
 var runtimeCoverageCollector = newRuntimeCorpusCoverage()
 
 type runtimeCapabilityCoverageResult struct {

@@ -7,7 +7,8 @@ on:
 
 # cg12 targets arm64: the goc corpus and the cg12-vs-gcc differential skip on
 # any other architecture, so CI runs on GitHub's arm64 Linux runners where the
-# whole suite actually executes.
+# whole suite actually executes. The test work is split across parallel jobs
+# (and the runtime-capability matrix is further sharded) to keep wall-clock low.
 jobs:
   build:
     runs-on: ubuntu-24.04-arm
@@ -34,13 +35,22 @@ jobs:
       fail-fast: false
       matrix:
         include:
-          # The three tracked categories, each a separate status check.
-          - name: unit          # Go unit tests: IR, optimizer, backends, ...
+          # Fast Go unit tests: IR, optimizer, backends, analysis, ...
+          - name: unit
             target: test-unit
-          - name: go-compiler   # the goc corpus: compile, link, run Go programs
-            target: test-go
-          - name: ruby-compiler # cg12 C frontend vs gcc + miniruby regressions
+            timeout: 15
+          # The goc corpus: compile, link, and run real Go programs.
+          - name: goc-corpus
+            target: test-goc-corpus
+            timeout: 25
+          # The goc driver end-to-end tests (minus the capability matrix).
+          - name: goc-cmd
+            target: test-goc-cmd
+            timeout: 20
+          # cg12 C frontend vs gcc + miniruby regressions.
+          - name: ruby-compiler
             target: test-ruby
+            timeout: 25
     name: test (${{ matrix.name }})
     steps:
       - uses: actions/checkout@v4
@@ -51,4 +61,25 @@ jobs:
         run: sudo apt-get update && sudo apt-get install -y build-essential
       - name: make ${{ matrix.target }}
         run: make ${{ matrix.target }}
-        timeout-minutes: 25
+        timeout-minutes: ${{ matrix.timeout }}
+
+  # The runtime-capability matrix (~322 Go programs compiled and executed),
+  # sharded by capability index across parallel jobs.
+  runtime-status:
+    needs: build
+    runs-on: ubuntu-24.04-arm
+    strategy:
+      fail-fast: false
+      matrix:
+        shard: [0, 1, 2, 3]
+    name: runtime-status (${{ matrix.shard }}/4)
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+      - name: Install C toolchain (cc for goc linking)
+        run: sudo apt-get update && sudo apt-get install -y build-essential
+      - name: make test-goc-status (shard ${{ matrix.shard }})
+        run: make test-goc-status STATUS_SHARDS=4 STATUS_SHARD=${{ matrix.shard }}
+        timeout-minutes: 20
