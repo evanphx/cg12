@@ -153,10 +153,19 @@ and can never silently desync or drop.
 
 ## Priority 3 — Core IR hygiene
 
-- **3a. Extract `Module.Assembly []AssemblyFile`** from the core IR + binary
-  format (~200 lines of `ir/binary.go` serialize Plan 9 asm source + Go ABI0 into
-  the frontend-agnostic unit format). Move to a `goc`-owned artifact or an opaque
-  "frontend attachment" section (`map[string][]byte`).
+- **3a. Extract `Module.Assembly` serialization from the core unit format. DONE.**
+  The ~200 lines of Plan 9 asm / ABI0 serialization moved out of
+  `MarshalBinary`/`DecodeModule` into a standalone `EncodeAssembly`/`DecodeAssembly`
+  codec (`ir/asm_binary.go`). `ir.Module` gained a generic
+  `Attachments map[string][]byte` frontend-attachment section; the core format now
+  serializes that (sorted keys, opaque length-prefixed bytes) and assembly rides
+  under a reserved key, so the unit format is frontend-agnostic and extensible.
+  The typed `Module.Assembly` field stays as the in-memory representation (goc
+  producer, arm64 consumer, and all tests unchanged) — it is bridged to the
+  attachment only at the serialization boundary. `binary_test` round-trips both a
+  populated `Assembly` and a raw `Attachments` entry. Unit format v17→v18.
+  (`AssemblyFile` itself stays in `ir` because goc and arm64 are peers that both
+  use it; a fully goc-owned artifact would need a new shared package.)
 - **3b. Delete `Func.GoABI`; rename `CallConvAAPCS64` → `CallConvPlatform`. DONE.**
   `GoABI` was the legacy dual-meaning bridge (it forced both `GoInternal` and a
   managed frame); no production code set it — only tests. Deleted the field, the

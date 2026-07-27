@@ -302,11 +302,15 @@ type constKey struct {
 // Module is a translation unit: a set of functions, aggregate types, data, and
 // source assembly selected by the front end.
 type Module struct {
-	Funcs    []*Func
-	Types    []*AggType
-	Data     []*Data
-	Aliases  []*Alias
-	Files    []string // source-file table indexed (1-based) by SrcPos.File
+	Funcs   []*Func
+	Types   []*AggType
+	Data    []*Data
+	Aliases []*Alias
+	Files   []string // source-file table indexed (1-based) by SrcPos.File
+	// Assembly is a frontend's package assembly (Plan 9 source, ABI0 signatures)
+	// for the backend to translate. It is frontend-specific: the core unit format
+	// carries it as an opaque attachment (see Attachments) rather than a typed
+	// section, so the format stays frontend-agnostic.
 	Assembly []AssemblyFile
 
 	// Runtime marks a module that provides (or is linked against) the Go runtime,
@@ -326,6 +330,13 @@ type Module struct {
 	// GC write barrier, a defer registration) by declared attribute rather than by
 	// sniffing the symbol's name. A frontend that has no such calls leaves it nil.
 	SymAttrs map[string]SymAttr
+
+	// Attachments carries opaque frontend-specific payloads through the unit
+	// format, keyed by name, so a frontend can round-trip data the core IR does
+	// not model without the format growing a typed section for it. Assembly is
+	// carried here under a reserved key (see EncodeAssembly); a frontend may add
+	// its own keys. Nil when there is nothing to attach.
+	Attachments map[string][]byte
 }
 
 // SymAttr is a bitset of semantic attributes a frontend declares about a symbol

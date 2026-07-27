@@ -31,6 +31,9 @@ func richModule() *Module {
 			},
 		},
 	})
+	// An opaque frontend attachment under a non-reserved key, to exercise the
+	// generic attachment path alongside the reserved assembly one.
+	m.Attachments = map[string][]byte{"goc.custom": {0, 1, 2, 'x', 255}}
 	m.Data = append(m.Data, &Data{
 		Name: "tbl", Linkage: Linkage{Export: true}, Align: 8,
 		Items:        []DataItem{{Sub: SubW, Ints: []int64{1, 2, 3}}, {Sym: "tbl", Off: 4}, {Str: "hi"}, {Zero: 4}},
@@ -121,6 +124,7 @@ func TestBinaryRoundTrip(t *testing.T) {
 	assert.Equal(t, m.String(), m2.String())
 	assert.Equal(t, m.Files, m2.Files)
 	assert.Equal(t, m.Assembly, m2.Assembly)
+	assert.Equal(t, m.Attachments, m2.Attachments)
 	assert.Equal(t, m.Data[0].PointerWords, m2.Data[0].PointerWords)
 	assert.True(t, m2.Funcs[0].Blocks[1].SecondaryEntry)
 	require.Len(t, m2.Funcs[0].Blocks[2].SyntheticSuccs, 1)

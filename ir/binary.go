@@ -19,7 +19,7 @@ import (
 // references. Value references (ir.Ref) already index Temps/Consts by ID.
 const (
 	binMagic   = "cg12"
-	binVersion = 17
+	binVersion = 18
 )
 
 // MarshalBinary encodes the module to cg12's binary unit format.
@@ -45,34 +45,25 @@ func (m *Module) MarshalBinary() ([]byte, error) {
 	for _, f := range m.Files {
 		e.str(f)
 	}
-	e.uv(uint64(len(m.Assembly)))
-	for _, assembly := range m.Assembly {
-		e.str(assembly.PackagePath)
-		e.str(assembly.Path)
-		e.str(assembly.Source)
-		names := make([]string, 0, len(assembly.Defines))
-		for name := range assembly.Defines {
-			names = append(names, name)
-		}
-		sort.Strings(names)
-		e.uv(uint64(len(names)))
-		for _, name := range names {
-			e.str(name)
-			e.iv(assembly.Defines[name])
-		}
-		includeNames := make([]string, 0, len(assembly.Includes))
-		for name := range assembly.Includes {
-			includeNames = append(includeNames, name)
-		}
-		sort.Strings(includeNames)
-		e.uv(uint64(len(includeNames)))
-		for _, name := range includeNames {
-			e.str(name)
-			e.str(assembly.Includes[name])
-		}
-		e.encAssemblyFloatSlots(assembly.FloatInputs)
-		e.encAssemblyFloatSlots(assembly.FloatOutputs)
-		e.encAssemblySignatures(assembly.Signatures)
+	// Frontend attachments: opaque payloads keyed by name. Assembly rides here
+	// under its reserved key so the core format stays frontend-agnostic. Sorted
+	// keys keep the encoding deterministic (cache correctness).
+	attachments := map[string][]byte{}
+	for key, value := range m.Attachments {
+		attachments[key] = value
+	}
+	if len(m.Assembly) > 0 {
+		attachments[asmAttachmentKey] = EncodeAssembly(m.Assembly)
+	}
+	attachmentKeys := make([]string, 0, len(attachments))
+	for key := range attachments {
+		attachmentKeys = append(attachmentKeys, key)
+	}
+	sort.Strings(attachmentKeys)
+	e.uv(uint64(len(attachmentKeys)))
+	for _, key := range attachmentKeys {
+		e.str(key)
+		e.str(string(attachments[key]))
 	}
 	e.uv(uint64(len(m.Data)))
 	for _, d := range m.Data {
@@ -116,28 +107,22 @@ func DecodeModule(data []byte) (*Module, error) {
 	for i := range m.Files {
 		m.Files[i] = d.str()
 	}
-	m.Assembly = make([]AssemblyFile, int(d.uv()))
-	for i := range m.Assembly {
-		m.Assembly[i].PackagePath = d.str()
-		m.Assembly[i].Path = d.str()
-		m.Assembly[i].Source = d.str()
-		defineCount := int(d.uv())
-		if defineCount != 0 {
-			m.Assembly[i].Defines = make(map[string]int64, defineCount)
-			for range defineCount {
-				m.Assembly[i].Defines[d.str()] = d.iv()
+	attachmentCount := int(d.uv())
+	for range attachmentCount {
+		key := d.str()
+		value := []byte(d.str())
+		if key == asmAttachmentKey {
+			assembly, err := DecodeAssembly(value)
+			if err != nil {
+				return nil, err
 			}
+			m.Assembly = assembly
+			continue
 		}
-		includeCount := int(d.uv())
-		if includeCount != 0 {
-			m.Assembly[i].Includes = make(map[string]string, includeCount)
-			for range includeCount {
-				m.Assembly[i].Includes[d.str()] = d.str()
-			}
+		if m.Attachments == nil {
+			m.Attachments = map[string][]byte{}
 		}
-		m.Assembly[i].FloatInputs = d.decAssemblyFloatSlots()
-		m.Assembly[i].FloatOutputs = d.decAssemblyFloatSlots()
-		m.Assembly[i].Signatures = d.decAssemblySignatures()
+		m.Attachments[key] = value
 	}
 	m.Data = make([]*Data, int(d.uv()))
 	for i := range m.Data {
@@ -236,50 +221,6 @@ func (e *enc) boolean(v bool) {
 }
 func (e *enc) str(s string) { e.uv(uint64(len(s))); e.buf = append(e.buf, s...) }
 func (e *enc) ref(r Ref)    { e.u8(byte(r.Kind)); e.uv(uint64(r.ID)) }
-
-func (e *enc) encAssemblyFloatSlots(slots map[string][]int) {
-	names := make([]string, 0, len(slots))
-	for name := range slots {
-		names = append(names, name)
-	}
-	sort.Strings(names)
-	e.uv(uint64(len(names)))
-	for _, name := range names {
-		e.str(name)
-		offsets := slots[name]
-		e.uv(uint64(len(offsets)))
-		for _, offset := range offsets {
-			e.iv(int64(offset))
-		}
-	}
-}
-
-func (e *enc) encAssemblySignatures(signatures map[string]AsmSignature) {
-	names := make([]string, 0, len(signatures))
-	for name := range signatures {
-		names = append(names, name)
-	}
-	sort.Strings(names)
-	e.uv(uint64(len(names)))
-	for _, name := range names {
-		e.str(name)
-		signature := signatures[name]
-		e.encAssemblySlots(signature.Params)
-		e.encAssemblySlots(signature.Results)
-	}
-}
-
-func (e *enc) encAssemblySlots(slots []AsmSlot) {
-	e.uv(uint64(len(slots)))
-	for _, slot := range slots {
-		e.str(slot.Name)
-		e.iv(int64(slot.Offset))
-		e.u8(byte(slot.Cls))
-		e.uv(uint64(slot.Width))
-		e.boolean(slot.GCRef)
-		e.iv(int64(slot.Group))
-	}
-}
 
 func (e *enc) f64(v float64) {
 	var b [8]byte
@@ -652,54 +593,6 @@ func (d *dec) str() string {
 	s := string(d.buf[d.pos : d.pos+n])
 	d.pos += n
 	return s
-}
-
-func (d *dec) decAssemblyFloatSlots() map[string][]int {
-	count := int(d.uv())
-	if count == 0 {
-		return nil
-	}
-	slots := make(map[string][]int, count)
-	for range count {
-		name := d.str()
-		offsets := make([]int, int(d.uv()))
-		for index := range offsets {
-			offsets[index] = int(d.iv())
-		}
-		slots[name] = offsets
-	}
-	return slots
-}
-
-func (d *dec) decAssemblySignatures() map[string]AsmSignature {
-	count := int(d.uv())
-	if count == 0 {
-		return nil
-	}
-	signatures := make(map[string]AsmSignature, count)
-	for range count {
-		name := d.str()
-		signatures[name] = AsmSignature{
-			Params:  d.decAssemblySlots(),
-			Results: d.decAssemblySlots(),
-		}
-	}
-	return signatures
-}
-
-func (d *dec) decAssemblySlots() []AsmSlot {
-	slots := make([]AsmSlot, int(d.uv()))
-	for index := range slots {
-		slots[index] = AsmSlot{
-			Name:   d.str(),
-			Offset: int(d.iv()),
-			Cls:    Cls(d.u8()),
-			Width:  int(d.uv()),
-			GCRef:  d.boolean(),
-			Group:  int(d.iv()),
-		}
-	}
-	return slots
 }
 
 func (d *dec) ref() Ref { return Ref{Kind: RefKind(d.u8()), ID: uint32(d.uv())} }
