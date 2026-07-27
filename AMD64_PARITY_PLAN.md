@@ -193,6 +193,20 @@ it has only `reg ← reg OP mem`. Required for every locked RMW. Assign to A1.
 `argAssigner{intRegs, floatRegs, goABI}` + `assignStack`. Owns
 `amd64/convention.go`, `amd64/reg.go`.
 
+> **B0 must not key the convention table on `CallConv` alone without first
+> resolving this.** Found while building the Phase 0b tripwire: goc marks every
+> function literal (`goc/compile.go:10119`), method-value wrapper (`:9781`), and
+> funcvalue adapter (`:10638`) `CallConvGoInternal` *unconditionally*, while
+> actually passing the closure environment through a fixed-register temp rather
+> than through the convention's register assignment. Because amd64 ignores
+> `CallConv` today, those bodies come out as self-consistent System V code and
+> run correctly — 14 corpus subtests depend on it. So `CallConvGoInternal`
+> currently means "closure-shaped" as often as it means "Go's ABIInternal", and
+> lowering that keys off it will mis-lower those functions the moment amd64 starts
+> honouring the flag. Either narrow the frontend's marking, or introduce a
+> distinct signal for a genuine ABIInternal call. Decide this in B0 and record it;
+> B1 cannot be written safely against the current semantics.
+
 Then, disjoint ownership:
 
 | Agent | Work | Files |
@@ -243,6 +257,7 @@ fidelity/performance pass rather than a blocker.
 | # | Work |
 | --- | --- |
 | D0 | **Still required.** De-arch `plan9asm/parser.go:968-987` `isRegister`; add `Scale` to `ir.Operand` (`ast.go:101`). Not deferrable even though the translator is: today the parser accepts x86 assembly and silently degrades every register and memory operand to untyped raw, which is a latent trap for anything that later feeds it amd64 input. Make it *error* instead. |
+| D0b | While in `plan9asm`: two further copies of the canonical linker mangling live at `plan9asm/sem/build.go:843` and `plan9asm/arm64_operands.go:380`, spelled via `unicode.IsLetter`/`IsDigit` gated on ASCII. They look equivalent to `ir.LinkerSymbol` but were not verified to that standard, so GO_INTEGRATION_PLAN 4c likely missed them too. Collapse them only after checking equivalence the same way amd64's was checked (all 256 byte values, Go-style paths, invalid UTF-8). **`wasm/emit.go:349` is a genuinely different mangler** — it preserves `.` and `$` and has no `"anon"` fallback — and must not be collapsed. |
 | D1 | `linux_amd64` overlay tree + manifest, covering the packages whose assembly bodies currently dangle. Note the specific trap found in recon: the `purego` build tag does **not** satisfy `//go:build amd64 && !plan9`, so Go's own constraints still select declaration-only files (e.g. `internal/bytealg/indexbyte_native.go`) while skipping their `.s` bodies. Overlays must replace those declarations, not merely add a tag. Also widen `goc/native_overlay.go:57` to accept `"sysv"` alongside `"aapcs64"`. |
 
 **Deferred (revisit after amd64 runs Go programs):** per-arch tables behind an
