@@ -1,0 +1,23 @@
+name: CRuby
+
+# Build real CRuby with cg12 and check correctness and performance against a
+# reference build. Heavier and out-of-tree, so it is separate from CI: manual
+# for now, and ready to run nightly once scripts/cruby-diff.sh is filled in
+# (uncomment the schedule below).
+on:
+  workflow_dispatch:
+  # schedule:
+  #   - cron: '0 6 * * *'
+
+jobs:
+  cruby:
+    runs-on: ubuntu-24.04-arm
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+      - name: Install C toolchain
+        run: sudo apt-get update && sudo apt-get install -y build-essential autoconf bison
+      - name: CRuby correctness + performance
+        run: make test-cruby

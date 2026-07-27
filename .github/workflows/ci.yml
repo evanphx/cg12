@@ -1,0 +1,54 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+# cg12 targets arm64: the goc corpus and the cg12-vs-gcc differential skip on
+# any other architecture, so CI runs on GitHub's arm64 Linux runners where the
+# whole suite actually executes.
+jobs:
+  build:
+    runs-on: ubuntu-24.04-arm
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+      - run: go build ./...
+      - name: gofmt
+        # stdlib/ is vendored Go standard-library source (compiled by goc, kept
+        # as upstream), so it is excluded from formatting checks.
+        run: |
+          unformatted=$(find . -name '*.go' -not -path './stdlib/*' | xargs gofmt -l)
+          if [ -n "$unformatted" ]; then
+            echo "These files need gofmt:"; echo "$unformatted"; exit 1
+          fi
+      - run: go vet ./...
+
+  test:
+    needs: build
+    runs-on: ubuntu-24.04-arm
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          # The three tracked categories, each a separate status check.
+          - name: unit          # Go unit tests: IR, optimizer, backends, ...
+            target: test-unit
+          - name: go-compiler   # the goc corpus: compile, link, run Go programs
+            target: test-go
+          - name: ruby-compiler # cg12 C frontend vs gcc + miniruby regressions
+            target: test-ruby
+    name: test (${{ matrix.name }})
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+      - name: Install C toolchain (cc/gcc for goc linking and the differential)
+        run: sudo apt-get update && sudo apt-get install -y build-essential
+      - name: make ${{ matrix.target }}
+        run: make ${{ matrix.target }}
+        timeout-minutes: 25
