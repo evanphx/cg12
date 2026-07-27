@@ -31,7 +31,7 @@ func (p *parser) parseSub() ir.SubCls {
 }
 
 var classByName = map[string]ir.Cls{
-	"w": ir.ClsW, "l": ir.ClsL, "s": ir.ClsS, "d": ir.ClsD, "p": ir.ClsP,
+	"w": ir.ClsW, "l": ir.ClsL, "s": ir.ClsS, "d": ir.ClsD, "p": ir.ClsP, "m": ir.ClsM,
 }
 
 var subByName = map[string]ir.SubCls{

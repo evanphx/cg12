@@ -73,5 +73,34 @@ func TestPointerClassProperties(t *testing.T) {
 	assert.True(t, ClsP.IsInt())
 	assert.True(t, ClsP.IsPtr())
 	assert.False(t, ClsP.IsFloat())
+	assert.False(t, ClsP.IsManaged())
 	assert.Equal(t, "p", ClsP.String())
+}
+
+func TestManagedClassProperties(t *testing.T) {
+	// ClsM behaves like a pointer for every width/register query, and differs only
+	// in being managed -- so generic passes treat it as a pointer while GC-semantic
+	// passes can single it out.
+	assert.True(t, ClsM.IsInt())
+	assert.True(t, ClsM.IsPtr())
+	assert.True(t, ClsM.IsManaged())
+	assert.False(t, ClsM.IsFloat())
+	assert.Equal(t, ClsP.Size(), ClsM.Size(), "managed pointer is pointer-width")
+	assert.Equal(t, "m", ClsM.String())
+}
+
+func TestClsMLowersToGCRef(t *testing.T) {
+	// A managed pointer typed ClsM resolves to the concrete register class like any
+	// pointer, and additionally becomes a GC reference so the backend scans it.
+	f := NewModule().NewFunc("g", ClsL)
+	m := f.Param("obj", ClsM)
+	assert.Equal(t, ClsM, f.Temp(m).Cls)
+	assert.False(t, f.Temp(m).GCRef, "not yet a GCRef -- the class carries managed-ness")
+
+	LowerPointers(f, ClsL)
+	assert.Equal(t, ClsL, f.Temp(m).Cls, "resolved to the word-register class")
+	assert.True(t, f.Temp(m).GCRef, "managed-ness lowered to the GC-root flag")
+	for _, tmp := range f.Temps {
+		assert.False(t, tmp.Cls.IsManaged(), "no ClsM survives lowering")
+	}
 }

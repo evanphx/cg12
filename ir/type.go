@@ -23,27 +23,46 @@ const (
 	// arithmetic; the front end lowers every quad operation to a libgcc soft-float
 	// call. The value occupies a full SIMD (V) register or a 16-byte memory slot.
 	ClsQ
+
+	// ClsM is the abstract *managed* pointer class: a pointer a garbage collector
+	// tracks as a root. It is register- and width-identical to [ClsP] and lowers
+	// the same way — [LowerPointers] resolves it to the concrete word-register
+	// class — but additionally marks the value a GC reference, so managed-ness
+	// rides the value's class rather than a side flag that cloning or serialization
+	// could drop. Only the GC-semantic passes (root collection, write barriers,
+	// value numbering / code motion) distinguish it from [ClsP]; everything that
+	// reasons about register width or bank treats the two alike (see [Cls.IsPtr]).
+	// Kept last so its enum value does not renumber the serialized classes above.
+	ClsM
 )
 
-// IsInt reports whether the class is integer-valued (W, L, or a pointer).
-func (c Cls) IsInt() bool { return c == ClsW || c == ClsL || c == ClsP }
+// IsInt reports whether the class is integer-valued (W, L, or a pointer, managed
+// or not).
+func (c Cls) IsInt() bool { return c == ClsW || c == ClsL || c == ClsP || c == ClsM }
 
 // IsFloat reports whether the class is a floating-point class (S, D, or Q) — one
 // that lives in a SIMD/FP register.
 func (c Cls) IsFloat() bool { return c == ClsS || c == ClsD || c == ClsQ }
 
-// IsPtr reports whether the class is the abstract pointer class.
-func (c Cls) IsPtr() bool { return c == ClsP }
+// IsPtr reports whether the class is an abstract pointer class — raw [ClsP] or
+// managed [ClsM]. Both are pointer-width integers that [LowerPointers] resolves
+// to the target's word-register class, so width/register logic treats them alike.
+func (c Cls) IsPtr() bool { return c == ClsP || c == ClsM }
 
-// Size returns the width of a value of this class in bytes. ClsP has no width
-// of its own — a target's pointer size is exactly its resolved word-register
-// class's size (see [LowerPointers]); the fallback here is the widest pointer
-// so an accidental pre-resolution query never under-allocates.
+// IsManaged reports whether the class is the managed (GC-tracked) pointer class.
+// It is the value-level answer to "is this a garbage-collector root?"; the
+// GC-semantic passes gate on it, while raw [ClsP] pointers stay freely optimizable.
+func (c Cls) IsManaged() bool { return c == ClsM }
+
+// Size returns the width of a value of this class in bytes. ClsP/ClsM have no
+// width of their own — a target's pointer size is exactly its resolved
+// word-register class's size (see [LowerPointers]); the fallback here is the
+// widest pointer so an accidental pre-resolution query never under-allocates.
 func (c Cls) Size() int {
 	switch c {
 	case ClsW, ClsS:
 		return 4
-	case ClsL, ClsD, ClsP:
+	case ClsL, ClsD, ClsP, ClsM:
 		return 8
 	case ClsQ:
 		return 16
@@ -66,6 +85,8 @@ func (c Cls) String() string {
 		return "p"
 	case ClsQ:
 		return "q"
+	case ClsM:
+		return "m"
 	}
 	return "?"
 }
