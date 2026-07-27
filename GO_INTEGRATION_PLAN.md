@@ -41,9 +41,16 @@ and can never silently desync or drop.
   `ClsM`.
 - **1b. GVN/GCM: `Cls == ClsP` → `Cls == ClsM`** (`opt/gvn.go:34`,
   `opt/gcm.go:118`). Raw C/Ruby pointers become CSE-able and movable again.
-- **1c. Regalloc safepoint roots** (`arm64/regalloc.go:138`): drop the
-  `(UsesManagedFrame || GoInternal) && Cls == ClsP` proxy — roots are exactly the
-  managed values, per-value.
+- **1c. ~~Regalloc safepoint roots — drop the `(managed-frame && ClsP)` proxy.~~
+  RETRACTED.** Investigation (and `TestGoABISafepointRootsIncludePointerClass...`)
+  showed the proxy is not leakage: it correctly encodes Go's *copying-stack*
+  requirement — when a goroutine stack grows/moves, every pointer *into* the stack
+  must be found and relocated, not just heap references — which is inherently
+  function-level and which per-value `ClsM` does not replace. goc does not (and
+  need not) `GCRef`-mark those raw stack-interior pointers. The proxy stays; it is
+  also managed-frame-gated, so it is Go-only and not a C/Ruby regression. The only
+  possible cleanup is cosmetic: fold the two ABI predicates behind one
+  `HasCopyingStack()` accessor.
 - **1d. Aggregate-buffer GC marking** (`arm64/lower.go:933,1059`; `abi.go`
   `lowerAggResult`): mark `MarkGCRef` only when the buffer holds managed data, not
   on every AAPCS aggregate param/result.
