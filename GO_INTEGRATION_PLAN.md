@@ -38,7 +38,29 @@ and can never silently desync or drop.
   ClsL`), so the backend is unchanged. Frontends emit `ClsM` for managed refs.
   Audit the ~329 `== ClsP` sites: register/width uses move to an "any pointer"
   predicate (`IsPtr()` over `ClsP`+`ClsM`); only the ~4 GC-semantic sites test
-  `ClsM`.
+  `ClsM`. **DONE for the class + backend + 1b/1c/1d/1e. The frontend migration
+  (goc emitting `ClsM`) is DEFERRED — see 1a′ below.**
+- **1a′. Migrate goc onto `ClsM` (value axis). DEFERRED — not safely incremental.**
+  Two attempts, both reverted after validation:
+  1. *Choke point* (`MarkGCRef` sets `Cls = ClsM`): unsafe. `MarkGCRef` has only
+     the value's `Ref`, so it retypes the temporary but not its defining
+     instruction, and optimizer passes assume `temp.Cls == defInstr.Cls`. The
+     divergence miscompiles — demonstrated: a C computed-goto interpreter whose
+     pointer parameter constant-folds to `0` (`loadub 0`).
+  2. *Gated loads only* (`Load` emits `ClsM` when `HasCopyingStack()`,
+     divergence-free): still unsafe. It broke ~20 goc GC tests, including
+     non-optimized `CompileExecutable` cases (`fault`/crash). goc's collector
+     machinery is tightly coupled to the current representation: e.g. the `Load`
+     gate also caught the `OGetReg` register-read path, so special runtime
+     pointers (`g`, `sp`) became relocatable roots and corrupted the collector.
+  Findings that constrain any future attempt: `ir/build.go`'s `Load` already
+  auto-marks every `Load(ClsP,…)` as `GCRef` (shared by C and goc, so the value
+  axis is *already* largely class-coupled); it fixes no current bug (the inliner
+  and binary serialization already preserve `GCRef`); and the safe path is a
+  large, goc-specific, per-creation-site emission of `ClsM` that must not touch
+  `OAlloc` addresses (remat regression) or widen the root set — a dedicated
+  effort with the GCRef-set harness and full goc GC validation, not an
+  incremental change.
 - **1b. GVN/GCM: `Cls == ClsP` → `Cls == ClsM`** (`opt/gvn.go:34`,
   `opt/gcm.go:118`). Raw C/Ruby pointers become CSE-able and movable again.
 - **1c. Regalloc safepoint roots — drop the `(managed-frame && ClsP)` proxy. DONE.**
