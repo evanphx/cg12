@@ -169,7 +169,9 @@ and can never silently desync or drop.
   **Remaining:** move `SystemStack` (`//go:systemstack`) to a frontend attribute
   table — more involved, as the backend reads it for the morestack prologue;
   deferred.
-- **3c. De-Go doc comments/names**: `ManagedFrame`, `ClosureContext` (static
+- **3c. De-Go doc comments/names. Partly done:** renamed `flattenGoAggregate` →
+  `flattenAggregate` (it lives in `goabi.go`, so the "Go" only repeated the file
+  context). Remaining (cosmetic doc edits): `ManagedFrame`, `ClosureContext` (static
   chain / `nest`), `StackResult`, `Field.Pointer`; rename `flattenGoAggregate` →
   `flattenAggregate`.
 - **3d. Kill the `Name == "closure"` magic-temp match. DONE.** Added an explicit
