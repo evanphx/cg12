@@ -295,7 +295,7 @@ func isAtomicPointerStore(function *ir.Func, instruction ir.Instr) bool {
 	if constant.Kind != ir.ConstSym {
 		return false
 	}
-	return constant.Sym == "runtime.atomicstorep" || constant.Sym == "goc_storep"
+	return function.Module().SymAttrOf(constant.Sym).Has(ir.SymAtomicPointerStore)
 }
 
 func derivedHeapBase(instruction ir.Instr, bases map[uint32]uint32) (uint32, bool) {

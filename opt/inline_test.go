@@ -359,6 +359,10 @@ func TestInlineHeapAllocationThroughLocalAggregateSlot(t *testing.T) {
 
 func TestInlineSkipsFrameScopedDefers(t *testing.T) {
 	module := ir.NewModule()
+	module.SymAttrs = map[string]ir.SymAttr{
+		"runtime.deferproc":   ir.SymFrameScoped,
+		"runtime.deferreturn": ir.SymFrameScoped,
+	}
 	deferred := module.NewFuncVoid("deferred")
 	deferredBlock := deferred.Entry()
 	deferredBlock.CallVoid(deferred.Sym("runtime.deferproc", 0), deferred.Sym("deferred.fn", 0))
@@ -375,6 +379,7 @@ func TestInlineSkipsFrameScopedDefers(t *testing.T) {
 
 func TestInlinePreservesFrameScopedRuntimeCallsite(t *testing.T) {
 	module := ir.NewModule()
+	module.SymAttrs = map[string]ir.SymAttr{"runtime.deferreturn": ir.SymFrameScoped}
 	deferReturn := module.NewFuncVoid("runtime.deferreturn")
 	deferReturn.Entry().RetVoid()
 

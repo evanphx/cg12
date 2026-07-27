@@ -313,7 +313,35 @@ type Module struct {
 	// backend folding a symbol's low bits into a scaled load/store offset consults
 	// it: that fold is only sound when the symbol is aligned to the access width.
 	SymAlign map[string]int
+
+	// SymAttrs records frontend-declared semantic attributes of called symbols,
+	// keyed by unmangled name, so optimization passes recognize special calls (a
+	// GC write barrier, a defer registration) by declared attribute rather than by
+	// sniffing the symbol's name. A frontend that has no such calls leaves it nil.
+	SymAttrs map[string]SymAttr
 }
+
+// SymAttr is a bitset of semantic attributes a frontend declares about a symbol
+// it calls (see Module.SymAttrs).
+type SymAttr uint8
+
+const (
+	// SymAtomicPointerStore marks a call that atomically stores a pointer through
+	// its destination argument and does not otherwise retain it -- the GC write
+	// barrier. Escape analysis treats the stored value as observed for the store's
+	// duration only.
+	SymAtomicPointerStore SymAttr = 1 << iota
+	// SymFrameScoped marks a call whose effect is scoped to the caller's frame,
+	// such as a Go defer registration or return. Inlining must not relocate it into
+	// a different frame.
+	SymFrameScoped
+)
+
+// Has reports whether a includes every attribute in b.
+func (a SymAttr) Has(b SymAttr) bool { return a&b == b }
+
+// SymAttrOf returns the attributes recorded for the named symbol (zero if none).
+func (m *Module) SymAttrOf(sym string) SymAttr { return m.SymAttrs[sym] }
 
 // AssemblyFile is a package assembly source retained for parsing and target
 // translation after IR compilation. Source uses the Go toolchain's Plan 9

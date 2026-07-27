@@ -681,12 +681,7 @@ func isFrameScopedRuntimeCall(function *ir.Func, instruction *ir.Instr) bool {
 	if constant.Kind != ir.ConstSym {
 		return false
 	}
-	switch constant.Sym {
-	case "runtime.deferproc", "runtime.deferprocStack", "runtime.deferprocat", "runtime.deferreturn":
-		return true
-	default:
-		return false
-	}
+	return function.Module().SymAttrOf(constant.Sym).Has(ir.SymFrameScoped)
 }
 
 // worthInlining applies the cost model to a structurally-inlinable callee named at

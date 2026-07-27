@@ -380,6 +380,7 @@ func compile(name string, src []byte, options compileOptions) (*ir.Module, error
 	}
 	addMemoryHelpers(mod, compileRuntime)
 	mod.Runtime = compileRuntime
+	registerSymAttrs(mod)
 	if compileRuntime {
 		exportAssemblyReferencedFunctions(mod, assemblyReferences)
 		for _, function := range mod.Funcs {
@@ -1164,6 +1165,25 @@ func addRuntimeInitTask(mod *ir.Module, declarations []functionDecl, initSymbols
 // cg12 calling convention. In particular, Go's ARM64 frame layout reserves a
 // word below SP for its frame-pointer chain, which arbitrary libc routines are
 // not required to preserve.
+// registerSymAttrs declares the semantic attributes of the runtime symbols the
+// shared optimizer must recognize -- GC write barriers and defer registration --
+// so the escape and inline passes test a declared attribute instead of sniffing
+// these Go-specific names.
+func registerSymAttrs(mod *ir.Module) {
+	if mod.SymAttrs == nil {
+		mod.SymAttrs = map[string]ir.SymAttr{}
+	}
+	for _, sym := range []string{"runtime.atomicstorep", "goc_storep"} {
+		mod.SymAttrs[sym] |= ir.SymAtomicPointerStore
+	}
+	for _, sym := range []string{
+		"runtime.deferproc", "runtime.deferprocStack",
+		"runtime.deferprocat", "runtime.deferreturn",
+	} {
+		mod.SymAttrs[sym] |= ir.SymFrameScoped
+	}
+}
+
 func addMemoryHelpers(mod *ir.Module, runtimeAllocation bool) {
 	copyFunction := mod.NewFunc("goc_memcpy", ir.ClsP)
 	copyFunction.NoSplit = true

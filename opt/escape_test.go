@@ -251,6 +251,7 @@ func TestLowerHeapAllocationsAllowsPointerStoreIntoCandidate(t *testing.T) {
 	for _, storeFunction := range []string{"runtime.atomicstorep", "goc_storep"} {
 		t.Run(storeFunction, func(t *testing.T) {
 			module := ir.NewModule()
+			module.SymAttrs = map[string]ir.SymAttr{storeFunction: ir.SymAtomicPointerStore}
 			function := module.NewFunc("localPointerField", ir.ClsL)
 			block := function.Entry()
 			object := block.HeapAlloc(function.Sym("runtime.newobject", 0), function.Sym("type.pointerHolder", 0), 8, 8)
@@ -265,6 +266,7 @@ func TestLowerHeapAllocationsAllowsPointerStoreIntoCandidate(t *testing.T) {
 
 func TestLowerHeapAllocationsKeepsPointerLoadedFromLocalSlotWhenStoredIntoCandidate(t *testing.T) {
 	module := ir.NewModule()
+	module.SymAttrs = map[string]ir.SymAttr{"goc_storep": ir.SymAtomicPointerStore}
 	function := module.NewFunc("capturePointer", ir.ClsP)
 	block := function.Entry()
 
