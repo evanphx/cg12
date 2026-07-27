@@ -63,7 +63,66 @@ func addAliases(o *obj.Object, aliases []*ir.Alias) error {
 	return nil
 }
 
+// goABIUnsupported names the Go-ABI feature f asks for that this backend cannot
+// provide, or returns nil when f is compilable. amd64 has no runtime-managed frame
+// at all: no morestack prologue, no g-relative stack-guard check, no Go stack-map
+// metadata. It nevertheless used to accept the annotation and emit an ordinary
+// System V frame anyway, so a function whose stack the Go runtime is supposed to
+// grow got one that simply overruns it -- a silent miscompile with err == nil.
+// ManagedFrame is the flag that gates that machinery (arm64 keys both its
+// morestack prologue and its Go stack maps on UsesManagedFrame), so it is the
+// tripwire worth having, and it is the one rejected here.
+//
+// The Go internal calling convention is deliberately NOT rejected, even though
+// amd64 does not implement ABIInternal's register assignment either. CallConv is
+// not currently a trustworthy signal that a function needs Go's ABI: goc applies
+// CallConvGoInternal unconditionally to closure-shaped functions -- function
+// literals (goc/compile.go:10119), method-value wrappers (:9781) and funcvalue
+// adapters (:10638) -- which then pass their environment through an ordinary
+// fixed-register temporary (rdx via goc's closureRegister) rather than through the
+// convention's register assignment. Those bodies are self-consistent System V code
+// and are correct today; rejecting them catches no latent miscompile and instead
+// breaks working code (measured: 14 goc corpus subtests that build natively on
+// amd64). Check whether those frontend sites still over-apply the annotation
+// before tightening this.
+//
+// NoSplit and SystemStack are likewise not rejected. Neither describes the frame
+// on its own: they only tune the managed frame's stack-growth check (arm64 reads
+// NoSplit only inside its UsesManagedFrame prologue branch, and SystemStack only
+// within that check, to pick g.stackguard1 and runtime_morestackc). A platform-ABI,
+// unmanaged function emits no such check, so the flags have nothing to change --
+// and the C path already sets NoSplit benignly on plain platform-ABI functions
+// (goc's runtime coverage dump, semantic assembly's NOSPLIT flag), which compile
+// correctly today. Rejecting them would break working code without catching any
+// wrong code.
+func goABIUnsupported(f *ir.Func) error {
+	if f.UsesManagedFrame() {
+		return fmt.Errorf("amd64: unsupported managed frame")
+	}
+	return nil
+}
+
+// rejectGoABI fails the whole module before any of it is compiled. It runs up
+// front rather than per function inside the emit loop because lowering rewrites
+// each function in place: bailing out midway would leave the caller's module
+// partly lowered.
+func rejectGoABI(m *ir.Module) error {
+	for _, f := range m.Funcs {
+		if err := goABIUnsupported(f); err != nil {
+			return fmt.Errorf("function %s: %w", f.Name, err)
+		}
+	}
+	return nil
+}
+
 func CompileToObjectWith(m *ir.Module, opts Options) (*obj.Object, error) {
+	// Every exported entry point (CompileObject, CompileObjectWith,
+	// CompileToObject) and Backend.CompileModule funnels through here, so this is
+	// the one place codegen can be reached from and the one place the guard needs
+	// to sit.
+	if err := rejectGoABI(m); err != nil {
+		return nil, err
+	}
 	o := &obj.Object{Machine: obj.EM_X86_64}
 	var smFuncs []stackMapFunc
 	var rows []obj.LineRow
