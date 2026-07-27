@@ -175,7 +175,8 @@ func TestObjEmitStackMapRootAcrossCall(t *testing.T) {
 func TestObjEmitStackMapKeepsAggregatePointerResultAcrossCall(t *testing.T) {
 	m := ir.NewModule()
 	f := m.NewFunc("aggregateResultRoot", ir.ClsP).Export()
-	f.GoABI = true
+	f.CallConv = ir.CallConvGoInternal
+	f.ManagedFrame = true
 	sliceType := &ir.AggType{
 		Name:  "slice",
 		Align: 8,

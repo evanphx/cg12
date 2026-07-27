@@ -151,17 +151,13 @@ type Func struct {
 	Variadic  bool // accepts variadic arguments (a trailing "..." in the IL)
 
 	// CallConv controls the physical argument, result, and callee-save rules.
-	// The zero value is AAPCS64 so ordinary cg12 functions interoperate with C
-	// and with other cg12 front ends by default.
+	// The zero value is the platform C ABI so ordinary cg12 functions interoperate
+	// with C and with other cg12 front ends by default.
 	CallConv CallConvention
 	// ManagedFrame enables Go runtime stack growth, precise stack metadata, and
 	// the runtime's frame-chain layout independently of the call convention.
 	ManagedFrame bool
-	// GoABI is retained as a source-compatibility bridge for existing IR
-	// producers. New code should set CallConv and ManagedFrame separately. When
-	// true it selects both GoInternal and a managed Go frame.
-	GoABI   bool
-	NoSplit bool // omit the Go stack-growth check at function entry
+	NoSplit      bool // omit the Go stack-growth check at function entry
 	// SystemStack marks a //go:systemstack function. Such functions must only run
 	// on g0 or gsignal: their stack check uses g.stackguard1 and reports an
 	// attempted call from an ordinary goroutine through runtime.morestackc.
@@ -219,19 +215,23 @@ type Func struct {
 type CallConvention uint8
 
 const (
-	CallConvAAPCS64 CallConvention = iota
+	// CallConvPlatform is the target's native C ABI (AAPCS64 on arm64, System V
+	// on amd64) -- the zero value, so ordinary cg12 functions interoperate with C
+	// and other frontends by default.
+	CallConvPlatform CallConvention = iota
+	// CallConvGoInternal is Go's ABIInternal register convention.
 	CallConvGoInternal
 )
 
 // UsesGoInternalCallConvention reports the function's physical call ABI.
 func (f *Func) UsesGoInternalCallConvention() bool {
-	return f.CallConv == CallConvGoInternal || f.GoABI
+	return f.CallConv == CallConvGoInternal
 }
 
 // UsesManagedFrame reports whether the Go runtime owns this function's stack
 // growth and frame metadata.
 func (f *Func) UsesManagedFrame() bool {
-	return f.ManagedFrame || f.GoABI
+	return f.ManagedFrame
 }
 
 // IsManagedDef reports whether in defines a garbage-collected pointer -- one the

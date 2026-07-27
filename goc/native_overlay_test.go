@@ -36,7 +36,7 @@ func TestApplyNativeStdlibOverlay(t *testing.T) {
 	if function.Name != "runtime_overlayMarker" {
 		t.Fatalf("native function name = %q, want runtime_overlayMarker", function.Name)
 	}
-	if function.CallConv != ir.CallConvAAPCS64 {
+	if function.CallConv != ir.CallConvPlatform {
 		t.Fatalf("native function call convention = %v, want AAPCS64", function.CallConv)
 	}
 	if function.ManagedFrame {

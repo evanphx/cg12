@@ -510,7 +510,8 @@ func TestSelectConstOffsetAddressing(t *testing.T) {
 func TestGoABIZerosPointerLocalsBeforeCalls(t *testing.T) {
 	module := ir.NewModule()
 	f := module.NewFunc("pointer_local", ir.ClsW)
-	f.GoABI = true
+	f.CallConv = ir.CallConvGoInternal
+	f.ManagedFrame = true
 	entry := f.Entry()
 	value := entry.Alloc(8, 8)
 	pointerSlot := entry.Alloc(8, 8)
@@ -761,7 +762,8 @@ func TestManagedAAPCS64CallerReservesRegisterHomes(t *testing.T) {
 func TestGoABIRematerializesFixedStackAddressesAfterCalls(t *testing.T) {
 	module := ir.NewModule()
 	function := module.NewFunc("stack_address", ir.ClsW)
-	function.GoABI = true
+	function.CallConv = ir.CallConvGoInternal
+	function.ManagedFrame = true
 	entry := function.Entry()
 	value := entry.Alloc(8, 8)
 	entry.Store(function.Long(42), value)
@@ -777,7 +779,8 @@ func TestGoABIRematerializesFixedStackAddressesAfterCalls(t *testing.T) {
 func TestGoABIRematerializesCopiedFixedStackAddressesAfterCalls(t *testing.T) {
 	module := ir.NewModule()
 	function := module.NewFunc("copied_stack_address", ir.ClsW)
-	function.GoABI = true
+	function.CallConv = ir.CallConvGoInternal
+	function.ManagedFrame = true
 	entry := function.Entry()
 	value := entry.Alloc(8, 8)
 	copiedAddress := entry.Copy(ir.ClsP, value)
@@ -864,7 +867,8 @@ func TestInferFrameAddressOffsetsDoesNotCollapsePhiCopies(t *testing.T) {
 
 func TestPrepareGoABIDoesNotTreatRawPointerClassAsGCRoot(t *testing.T) {
 	function := ir.NewModule().NewFunc("raw_pointer", ir.ClsP)
-	function.GoABI = true
+	function.CallConv = ir.CallConvGoInternal
+	function.ManagedFrame = true
 	raw := function.Param("raw", ir.ClsP)
 	entry := function.Entry()
 	entry.CallVoid(function.Sym("observe", 0))
@@ -877,7 +881,8 @@ func TestPrepareGoABIDoesNotTreatRawPointerClassAsGCRoot(t *testing.T) {
 func TestGoABINoSplitOmitsStackGrowthCheck(t *testing.T) {
 	module := ir.NewModule()
 	function := module.NewFuncVoid("nosplit")
-	function.GoABI = true
+	function.CallConv = ir.CallConvGoInternal
+	function.ManagedFrame = true
 	function.NoSplit = true
 	function.Entry().RetVoid()
 
@@ -888,7 +893,8 @@ func TestGoABINoSplitOmitsStackGrowthCheck(t *testing.T) {
 func TestGoABISystemStackUsesSystemStackGuard(t *testing.T) {
 	module := ir.NewModule()
 	function := module.NewFuncVoid("system_stack")
-	function.GoABI = true
+	function.CallConv = ir.CallConvGoInternal
+	function.ManagedFrame = true
 	function.SystemStack = true
 	function.Entry().RetVoid()
 
@@ -901,7 +907,8 @@ func TestGoABISystemStackUsesSystemStackGuard(t *testing.T) {
 func TestManagedFrameMetadataStartsAfterFrameAllocation(t *testing.T) {
 	module := ir.NewModule()
 	function := module.NewFuncVoid("metadata_start")
-	function.GoABI = true
+	function.CallConv = ir.CallConvGoInternal
+	function.ManagedFrame = true
 	function.ManagedFrame = true
 	entry := function.Entry()
 	slot := entry.Alloc(8, 1024)
@@ -921,7 +928,8 @@ func TestManagedFrameMetadataStartsAfterFrameAllocation(t *testing.T) {
 func TestGoABICallerFrameIntrinsicsUseSavedFrame(t *testing.T) {
 	pcModule := ir.NewModule()
 	callerPC := pcModule.NewFunc("caller_pc", ir.ClsL)
-	callerPC.GoABI = true
+	callerPC.CallConv = ir.CallConvGoInternal
+	callerPC.ManagedFrame = true
 	callerPC.NoSplit = true
 	callerPC.Entry().Ret(callerPC.Entry().CallerPC())
 
@@ -930,7 +938,8 @@ func TestGoABICallerFrameIntrinsicsUseSavedFrame(t *testing.T) {
 
 	spModule := ir.NewModule()
 	callerSP := spModule.NewFunc("caller_sp", ir.ClsL)
-	callerSP.GoABI = true
+	callerSP.CallConv = ir.CallConvGoInternal
+	callerSP.ManagedFrame = true
 	callerSP.NoSplit = true
 	callerSP.Entry().Ret(callerSP.Entry().CallerSP())
 
@@ -961,7 +970,8 @@ func TestManagedAAPCS64OutgoingArgumentsDoNotOverlapFrameRecord(t *testing.T) {
 func TestGoABISpillsPointerLiveAcrossCall(t *testing.T) {
 	module := ir.NewModule()
 	f := module.NewFunc("pointer_across_call", ir.ClsP)
-	f.GoABI = true
+	f.CallConv = ir.CallConvGoInternal
+	f.ManagedFrame = true
 	pointer := f.ParamRef("pointer")
 	entry := f.Entry()
 	entry.CallVoid(f.Sym("observe", 0))
@@ -975,7 +985,8 @@ func TestGoABISpillsPointerLiveAcrossCall(t *testing.T) {
 func TestGoABISpillsScalarLiveAcrossCall(t *testing.T) {
 	module := ir.NewModule()
 	function := module.NewFunc("scalar_across_call", ir.ClsW)
-	function.GoABI = true
+	function.CallConv = ir.CallConvGoInternal
+	function.ManagedFrame = true
 	function.ManagedFrame = true
 	value := function.Param("value", ir.ClsW)
 
@@ -996,7 +1007,8 @@ func TestSafepointRootsIncludeManagedPointerLiveAcrossCall(t *testing.T) {
 	// growth (see TestRuntimeStackGrowthRelocatesInteriorPointers for the
 	// end-to-end guarantee); the register allocator itself is ABI-agnostic.
 	function := ir.NewModule().NewFunc("pointer_across_call", ir.ClsP)
-	function.GoABI = true
+	function.CallConv = ir.CallConvGoInternal
+	function.ManagedFrame = true
 	ref := function.Param("ref", ir.ClsP)
 	n := function.Param("n", ir.ClsW)
 	function.Temp(ref).GCRef = true
@@ -1062,7 +1074,8 @@ func TestSafepointRootsExcludeDeadControlFlowIntervals(t *testing.T) {
 
 func TestGoStackMapsDropDeadPointerBearingLocal(t *testing.T) {
 	function := ir.NewModule().NewFuncVoid("dead_pointer_local")
-	function.GoABI = true
+	function.CallConv = ir.CallConvGoInternal
+	function.ManagedFrame = true
 	input := function.ParamRef("input")
 	entry := function.Entry()
 	local := entry.Alloc(8, 8)
@@ -1108,7 +1121,8 @@ func TestGoABIGroupedSliceValuesUseRegistersOrWholeStack(t *testing.T) {
 
 	calleeModule := ir.NewModule()
 	callee := calleeModule.NewFunc("consume_slice", ir.ClsL)
-	callee.GoABI = true
+	callee.CallConv = ir.CallConvGoInternal
+	callee.ManagedFrame = true
 	callee.NoSplit = true
 	for index := 0; index < 14; index++ {
 		callee.Param(fmt.Sprintf("value%d", index), ir.ClsL)
@@ -1120,7 +1134,8 @@ func TestGoABIGroupedSliceValuesUseRegistersOrWholeStack(t *testing.T) {
 
 	callerModule := ir.NewModule()
 	caller := callerModule.NewFunc("call_slice_len", ir.ClsL)
-	caller.GoABI = true
+	caller.CallConv = ir.CallConvGoInternal
+	caller.ManagedFrame = true
 	caller.NoSplit = true
 	entry := caller.Entry()
 	arguments := make([]ir.Ref, 0, 17)
@@ -1188,7 +1203,8 @@ func TestGoABIGroupedSliceResultUsesThreeValueRegisters(t *testing.T) {
 
 	module := ir.NewModule()
 	function := module.NewFunc("return_slice", ir.ClsP)
-	function.GoABI = true
+	function.CallConv = ir.CallConvGoInternal
+	function.ManagedFrame = true
 	function.NoSplit = true
 	function.RetAgg = sliceType
 	function.RetValues = true
@@ -1203,7 +1219,8 @@ func TestGoABIGroupedSliceResultUsesThreeValueRegisters(t *testing.T) {
 
 func TestGoABIStackGrowthPreservesClosureContext(t *testing.T) {
 	function := ir.NewModule().NewFunc("closure_value", ir.ClsL)
-	function.GoABI = true
+	function.CallConv = ir.CallConvGoInternal
+	function.ManagedFrame = true
 	function.HasClosureContext = true
 	context := function.NewTemp("closure", ir.ClsP)
 	temporary := function.Temp(context)
@@ -1225,7 +1242,8 @@ func TestGoABIStackGrowthPreservesClosureContext(t *testing.T) {
 func TestGoABIClosureContextLiveAcrossCallGetsStableSpill(t *testing.T) {
 	module := ir.NewModule()
 	function := module.NewFunc("closure_across_call", ir.ClsL)
-	function.GoABI = true
+	function.CallConv = ir.CallConvGoInternal
+	function.ManagedFrame = true
 	function.HasClosureContext = true
 	context := function.NewTemp("closure", ir.ClsP)
 	contextTemporary := function.Temp(context)
@@ -1251,7 +1269,8 @@ func TestGoABIClosureContextLiveAcrossCallGetsStableSpill(t *testing.T) {
 
 func TestGoABICallSiteClosureRegisterIsNotAnIncomingContext(t *testing.T) {
 	function := ir.NewModule().NewFunc("call_function_value", ir.ClsL)
-	function.GoABI = true
+	function.CallConv = ir.CallConvGoInternal
+	function.ManagedFrame = true
 	context := function.NewTemp("call_context", ir.ClsP)
 	temporary := function.Temp(context)
 	temporary.Fixed = true
@@ -1266,7 +1285,8 @@ func TestGoABICallSiteClosureRegisterIsNotAnIncomingContext(t *testing.T) {
 
 func TestGoABIClosureCallReservesContextSpillWord(t *testing.T) {
 	function := ir.NewModule().NewFuncVoid("closure_caller")
-	function.GoABI = true
+	function.CallConv = ir.CallConvGoInternal
+	function.ManagedFrame = true
 	callee := function.ParamRef("callee")
 	function.Entry().CallVoid(callee)
 	call := &function.Entry().Instrs[len(function.Entry().Instrs)-1]
@@ -1289,7 +1309,8 @@ func TestGoABIClosureCallReservesContextSpillWord(t *testing.T) {
 func TestGoABIReportsPointerResultSlotLiveAcrossCall(t *testing.T) {
 	module := ir.NewModule()
 	function := module.NewFunc("multi_result", ir.ClsP)
-	function.GoABI = true
+	function.CallConv = ir.CallConvGoInternal
+	function.ManagedFrame = true
 	function.Param("size", ir.ClsL)
 	result := function.ParamRef("result1")
 	entry := function.Entry()
@@ -1309,7 +1330,8 @@ func TestGoABIReportsPointerResultSlotLiveAcrossCall(t *testing.T) {
 
 func TestGoPointerFrameOffsetsIgnoreUnassignedSpillSlots(t *testing.T) {
 	f := ir.NewModule().NewFunc("pointer_slots", ir.ClsW)
-	f.GoABI = true
+	f.CallConv = ir.CallConvGoInternal
+	f.ManagedFrame = true
 	unassigned := f.NewTemp("unassigned", ir.ClsP)
 	f.Temps[unassigned.ID].GCRef = true
 	spilled := f.NewTemp("spilled", ir.ClsP)

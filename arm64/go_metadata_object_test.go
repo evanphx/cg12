@@ -105,7 +105,8 @@ func TestGoRuntimeModuledataReferencesModuleInitTasks(t *testing.T) {
 	module := ir.NewModule()
 	module.Runtime = true
 	schedinit := module.NewFuncVoid("runtime.schedinit")
-	schedinit.GoABI = true
+	schedinit.CallConv = ir.CallConvGoInternal
+	schedinit.ManagedFrame = true
 	schedinit.Entry().RetVoid()
 	module.Data = append(module.Data,
 		&ir.Data{Name: ".goc.runtime.datastart", Align: 8, Items: []ir.DataItem{{Sub: ir.SubUB, Ints: []int64{0}}}},
@@ -131,7 +132,8 @@ func TestGoRuntimeModuledataReferencesInterfaceTables(t *testing.T) {
 	module := ir.NewModule()
 	module.Runtime = true
 	schedinit := module.NewFuncVoid("runtime.schedinit")
-	schedinit.GoABI = true
+	schedinit.CallConv = ir.CallConvGoInternal
+	schedinit.ManagedFrame = true
 	schedinit.Entry().RetVoid()
 	module.Data = append(module.Data,
 		&ir.Data{Name: ".goc.runtime.datastart", Align: 8, Items: []ir.DataItem{{Sub: ir.SubUB, Ints: []int64{0}}}},
@@ -160,7 +162,8 @@ func TestGoRuntimeMetadataIncludesTranslatedAssemblyFunctions(t *testing.T) {
 	module := ir.NewModule()
 	module.Runtime = true
 	schedinit := module.NewFuncVoid("runtime.schedinit")
-	schedinit.GoABI = true
+	schedinit.CallConv = ir.CallConvGoInternal
+	schedinit.ManagedFrame = true
 	schedinit.Entry().RetVoid()
 	module.Assembly = append(module.Assembly, ir.AssemblyFile{
 		PackagePath: "runtime",
@@ -281,7 +284,8 @@ func TestGoRuntimeModuledataDescribesScannedGlobals(t *testing.T) {
 	module := ir.NewModule()
 	module.Runtime = true
 	schedinit := module.NewFuncVoid("runtime.schedinit")
-	schedinit.GoABI = true
+	schedinit.CallConv = ir.CallConvGoInternal
+	schedinit.ManagedFrame = true
 	schedinit.Entry().RetVoid()
 	module.Data = append(module.Data,
 		&ir.Data{Name: ".goc.runtime.datastart", Align: 8, Items: []ir.DataItem{{Sub: ir.SubUB, Ints: []int64{0}}}},

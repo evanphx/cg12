@@ -1338,7 +1338,7 @@ func TestCompileExecutableIncludesNativeRuntimeOverlay(t *testing.T) {
 		if !function.NoSplit {
 			t.Fatal("native runtime marker is not nosplit")
 		}
-		if function.CallConv != ir.CallConvAAPCS64 {
+		if function.CallConv != ir.CallConvPlatform {
 			t.Fatalf("native runtime marker call convention = %v, want AAPCS64", function.CallConv)
 		}
 		if len(function.Entry().Instrs) != 1 {
@@ -1555,7 +1555,7 @@ func main() {
 			continue
 		}
 		foundBody = true
-		if function.CallConv != ir.CallConvAAPCS64 {
+		if function.CallConv != ir.CallConvPlatform {
 			t.Errorf("instantiated function body convention = %v, want AAPCS64", function.CallConv)
 		}
 	}

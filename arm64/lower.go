@@ -1312,7 +1312,7 @@ func lowerCalls(f *ir.Func) error {
 				Aux: int64(stackBytes), To: callTo, Cls: callCls, Defs: callDefs,
 				Tail: in.Tail, ClosureCall: in.ClosureCall, ClosureContext: in.ClosureContext,
 				Pos: in.Pos, Inl: in.Inl,
-				CallConv: ir.CallConvAAPCS64, CallConvSet: true,
+				CallConv: ir.CallConvPlatform, CallConvSet: true,
 			}
 			if goInternal {
 				loweredCall.CallConv = ir.CallConvGoInternal

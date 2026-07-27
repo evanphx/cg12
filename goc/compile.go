@@ -385,7 +385,7 @@ func compile(name string, src []byte, options compileOptions) (*ir.Module, error
 		exportAssemblyReferencedFunctions(mod, assemblyReferences)
 		for _, function := range mod.Funcs {
 			if function.CallConv != ir.CallConvGoInternal {
-				function.CallConv = ir.CallConvAAPCS64
+				function.CallConv = ir.CallConvPlatform
 			}
 			function.ManagedFrame = true
 		}
@@ -428,7 +428,7 @@ func setAAPCS64CallConvention(module *ir.Module) {
 				if instruction.Op != ir.OCall || instruction.CallConvSet {
 					continue
 				}
-				instruction.CallConv = ir.CallConvAAPCS64
+				instruction.CallConv = ir.CallConvPlatform
 				instruction.CallConvSet = true
 			}
 		}

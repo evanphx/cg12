@@ -144,7 +144,7 @@ func prepareAssembly(module *ir.Module) (assemblyBundle, error) {
 }
 
 func semanticAssemblyPolicyFor(module *ir.Module) semanticAssemblyPolicy {
-	policy := semanticAssemblyPolicy{CallConv: ir.CallConvAAPCS64}
+	policy := semanticAssemblyPolicy{CallConv: ir.CallConvPlatform}
 	allGoInternal := len(module.Funcs) != 0
 	for _, function := range module.Funcs {
 		if !function.UsesGoInternalCallConvention() {

@@ -157,9 +157,18 @@ and can never silently desync or drop.
   format (~200 lines of `ir/binary.go` serialize Plan 9 asm source + Go ABI0 into
   the frontend-agnostic unit format). Move to a `goc`-owned artifact or an opaque
   "frontend attachment" section (`map[string][]byte`).
-- **3b. Delete `Func.GoABI`** (migrate `goc` to `CallConv`+`ManagedFrame`);
-  rename `CallConvAAPCS64` → `CallConvPlatform`; move `SystemStack` to a frontend
-  attribute table.
+- **3b. Delete `Func.GoABI`; rename `CallConvAAPCS64` → `CallConvPlatform`. DONE.**
+  `GoABI` was the legacy dual-meaning bridge (it forced both `GoInternal` and a
+  managed frame); no production code set it — only tests. Deleted the field, the
+  `|| f.GoABI` fallback in `UsesGoInternalCallConvention`/`UsesManagedFrame`, and
+  its serialization (unit format v15→v16); migrated the 28 test setters to
+  `CallConv = CallConvGoInternal` + `ManagedFrame = true`, and the two live
+  readers (`goRegisterPointerMask` [dead], `framelessEligible`) to the accessors.
+  Renamed `CallConvAAPCS64` → `CallConvPlatform` since the default is the target's
+  native C ABI (AAPCS64 on arm64, System V on amd64), not AAPCS specifically.
+  **Remaining:** move `SystemStack` (`//go:systemstack`) to a frontend attribute
+  table — more involved, as the backend reads it for the morestack prologue;
+  deferred.
 - **3c. De-Go doc comments/names**: `ManagedFrame`, `ClosureContext` (static
   chain / `nest`), `StackResult`, `Field.Pointer`; rename `flattenGoAggregate` →
   `flattenAggregate`.

@@ -954,11 +954,11 @@ func inferStackPointerWords(function *ir.Func) {
 // only actual pointers to the runtime stack copier while preserving every
 // untyped register value in an unscanned save area.
 func goRegisterPointerMask(function *ir.Func) uint16 {
-	assigner := newArgAssigner(function.GoABI)
+	assigner := newArgAssigner(function.UsesGoInternalCallConvention())
 	var mask uint16
 	for _, parameter := range function.Params {
 		if parameter.Agg != nil {
-			if function.GoABI {
+			if function.UsesGoInternalCallConvention() {
 				parts, onStack, _ := assignGoAggregate(&assigner, parameter.Agg)
 				if onStack {
 					continue
@@ -1266,7 +1266,7 @@ const (
 // this. Because the frame is exactly 16 bytes here there are no spills, allocas,
 // callee-saved registers, or a variadic save area to address off x29.
 func framelessEligible(f *ir.Func, lay frameLayout, gc GCStrategy) bool {
-	if f.GoABI {
+	if f.UsesManagedFrame() {
 		return false
 	}
 	if lay.frame != 16 || lay.hasDynAlloc || lay.variadic {

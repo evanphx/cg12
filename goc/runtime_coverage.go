@@ -362,7 +362,7 @@ func instrumentRuntimeBlock(function *ir.Func, block *ir.Block, id int) {
 func addRuntimeCoverageDump(module *ir.Module, size int) {
 	function := module.NewFuncVoid(runtimeCoverageDump)
 	function.NoSplit = true
-	function.CallConv = ir.CallConvAAPCS64
+	function.CallConv = ir.CallConvPlatform
 	function.ManagedFrame = false
 	block := function.Entry()
 	addRuntimeCoverageWrite(function, block, function.Sym(runtimeCoverageHeaderData, 0), len(runtimeCoverageHeader))
@@ -410,7 +410,7 @@ func insertRuntimeCoverageDumpCalls(module *ir.Module) bool {
 					continue
 				}
 
-				block.CallVoidWithConvention(ir.CallConvAAPCS64, function.Sym(runtimeCoverageDump, 0))
+				block.CallVoidWithConvention(ir.CallConvPlatform, function.Sym(runtimeCoverageDump, 0))
 				dumpCall := block.Instrs[len(block.Instrs)-1]
 				block.Instrs = block.Instrs[:len(block.Instrs)-1]
 				block.Instrs = append(block.Instrs, ir.Instr{})

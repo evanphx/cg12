@@ -27,7 +27,7 @@ type abiConvention struct {
 
 // abiConventions is indexed by ir.CallConvention.
 var abiConventions = [...]abiConvention{
-	ir.CallConvAAPCS64: {
+	ir.CallConvPlatform: {
 		intArgRegs:      8,
 		floatArgRegs:    8,
 		packsStackArgs:  false,
@@ -53,7 +53,7 @@ func goInternalConvention(goInternal bool) ir.CallConvention {
 	if goInternal {
 		return ir.CallConvGoInternal
 	}
-	return ir.CallConvAAPCS64
+	return ir.CallConvPlatform
 }
 
 // stackLinkBytesFor returns the frame-chain link a call resolved to goInternal

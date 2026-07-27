@@ -55,7 +55,7 @@ func applyNativeStdlibOverlays(module *ir.Module, units map[string]*sourceUnit) 
 func applyNativeOverlayFunctionPolicy(function *ir.Func, packagePath string, entry stdlibOverlayEntry) error {
 	switch entry.CallConvention {
 	case "", "aapcs64":
-		function.CallConv = ir.CallConvAAPCS64
+		function.CallConv = ir.CallConvPlatform
 	case "go_internal":
 		function.CallConv = ir.CallConvGoInternal
 	default:

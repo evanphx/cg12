@@ -532,7 +532,7 @@ func (b *Block) HeapAlloc(allocator, typeDescriptor Ref, size, align int) Ref {
 // Call invokes callee with args and returns the result (class retCls). For a
 // void call use CallVoid.
 func (b *Block) Call(retCls Cls, callee Ref, args ...Ref) Ref {
-	return b.call(retCls, callee, false, CallConvAAPCS64, args...)
+	return b.call(retCls, callee, false, CallConvPlatform, args...)
 }
 
 // CallWithConvention invokes callee using an explicit physical calling
@@ -598,7 +598,7 @@ func (b *Block) Asm(template string, specs []AsmSpec) []Ref {
 // CallAggregate invokes a function returning an aggregate already represented
 // as scalar SSA parts. The result refs are defined together by the call.
 func (b *Block) CallAggregate(aggregate *AggType, classes []Cls, callee Ref, args ...Ref) []Ref {
-	return b.callAggregate(aggregate, classes, callee, false, CallConvAAPCS64, args...)
+	return b.callAggregate(aggregate, classes, callee, false, CallConvPlatform, args...)
 }
 
 // CallAggregateWithConvention is CallAggregate with an explicit physical call
@@ -668,7 +668,7 @@ func (b *Block) VaArg(cls Cls, ap Ref) Ref { return b.emit(OVaArg, cls, ap) }
 
 // CallVoid invokes callee for effect only.
 func (b *Block) CallVoid(callee Ref, args ...Ref) {
-	b.callVoid(callee, false, CallConvAAPCS64, args...)
+	b.callVoid(callee, false, CallConvPlatform, args...)
 
 }
 

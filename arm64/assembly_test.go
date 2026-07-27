@@ -133,7 +133,8 @@ TEXT runtime·morestack_noctxt(SB),NOSPLIT|NOFRAME,$0-0
 func TestPrepareAssemblyBuildsGoABI0EntryWrapper(t *testing.T) {
 	module := ir.NewModule()
 	args := module.NewFunc("runtime.args", ir.ClsW)
-	args.GoABI = true
+	args.CallConv = ir.CallConvGoInternal
+	args.ManagedFrame = true
 	args.Param("argc", ir.ClsW)
 	args.Param("argv", ir.ClsL)
 	args.Entry().Ret(args.Word(0))
