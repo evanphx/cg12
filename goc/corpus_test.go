@@ -4173,6 +4173,30 @@ func runCase(t *testing.T, src string, want int, optimized bool) {
 	}
 }
 
+// TestRuntimeStackGrowthRelocatesInteriorPointers drives a goroutine stack deep
+// enough to force the runtime to grow (and copy) it while a pointer into a caller
+// frame is live across every recursion. If stack-growth relocation or the GC stack
+// maps were wrong, the pointer would dangle into the old stack and the read would
+// not return the original value. This is the end-to-end guarantee the safepoint
+// root set (now derived purely from GCRef) underwrites.
+func TestRuntimeStackGrowthRelocatesInteriorPointers(t *testing.T) {
+	runExecutableCase(t, `package main
+
+//go:noinline
+func deep(p *int, depth, max int) int {
+	if depth < max {
+		return deep(p, depth+1, max)
+	}
+	return *p
+}
+
+func Test() int {
+	x := 424242
+	return deep(&x, 0, 40000)
+}
+`, 424242)
+}
+
 func runExecutableCase(t *testing.T, source string, want int) {
 	t.Helper()
 	if runtime.GOOS != "linux" || runtime.GOARCH != "arm64" {

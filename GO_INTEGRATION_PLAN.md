@@ -41,16 +41,25 @@ and can never silently desync or drop.
   `ClsM`.
 - **1b. GVN/GCM: `Cls == ClsP` → `Cls == ClsM`** (`opt/gvn.go:34`,
   `opt/gcm.go:118`). Raw C/Ruby pointers become CSE-able and movable again.
-- **1c. ~~Regalloc safepoint roots — drop the `(managed-frame && ClsP)` proxy.~~
-  RETRACTED.** Investigation (and `TestGoABISafepointRootsIncludePointerClass...`)
-  showed the proxy is not leakage: it correctly encodes Go's *copying-stack*
-  requirement — when a goroutine stack grows/moves, every pointer *into* the stack
-  must be found and relocated, not just heap references — which is inherently
-  function-level and which per-value `ClsM` does not replace. goc does not (and
-  need not) `GCRef`-mark those raw stack-interior pointers. The proxy stays; it is
-  also managed-frame-gated, so it is Go-only and not a C/Ruby regression. The only
-  possible cleanup is cosmetic: fold the two ABI predicates behind one
-  `HasCopyingStack()` accessor.
+- **1c. Regalloc safepoint roots — drop the `(managed-frame && ClsP)` proxy. DONE.**
+  Roots are now identified purely per value via `GCRef`; the register allocator
+  has no calling-convention knowledge. Evidence that this is safe: the proxy's
+  `ClsP` clause was instrumented and fires **0 times** across the entire test
+  suite (arm64, opt, ir, and 360s of goc) — every managed pointer live at a
+  safepoint is already `GCRef`-marked by goc's frontend (heap refs, aggregate
+  pointer-words, pins). Two dead ends were ruled out along the way:
+  - *Widening `ClsM` to "every pointer"* (a `TrackAllPointers` pass marking all
+    pointers `GCRef`) is a **pessimization**: `remat.go` excludes `GCRef` temps
+    from rematerialization, so a frame address that was a cheap `add x17, x29`
+    after a call becomes a spill/reload (`TestGoABIRematerializes…` regress). The
+    proxy avoided this by computing roots from *liveness* without setting `GCRef`,
+    which is why a rematerialized frame address — recomputed from the
+    runtime-updated frame pointer after stack growth — is correctly *not* a root.
+  - The proxy caught *backend*-created `ClsP` temps (from arm64 `lower()`, which
+    runs after `ir.LowerPointers`), so a frontend-side `ClsM` migration would not
+    have reached them regardless. Since none are ever live-and-unmarked at a
+    safepoint, dropping the proxy is a no-op for real code and a strict no-op for
+    C/Ruby (the predicate was already false there).
 - **1d. Aggregate-buffer GC marking** (`arm64/lower.go:933,1059`; `abi.go`
   `lowerAggResult`): mark `MarkGCRef` only when the buffer holds managed data, not
   on every AAPCS aggregate param/result.

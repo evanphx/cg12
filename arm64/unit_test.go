@@ -989,14 +989,20 @@ func TestGoABISpillsScalarLiveAcrossCall(t *testing.T) {
 	assert.GreaterOrEqual(t, temporary.Slot, 0)
 }
 
-func TestGoABISafepointRootsIncludePointerClassTempsForStackCopy(t *testing.T) {
-	function := ir.NewModule().NewFunc("go_pointer_across_call", ir.ClsP)
+func TestSafepointRootsIncludeManagedPointerLiveAcrossCall(t *testing.T) {
+	// A GC root is identified purely by value: a GCRef pointer live across a
+	// safepoint is reported, regardless of calling convention. A copying-stack
+	// frontend relies on this by marking every pointer that must survive stack
+	// growth (see TestRuntimeStackGrowthRelocatesInteriorPointers for the
+	// end-to-end guarantee); the register allocator itself is ABI-agnostic.
+	function := ir.NewModule().NewFunc("pointer_across_call", ir.ClsP)
 	function.GoABI = true
-	raw := function.Param("raw", ir.ClsP)
+	ref := function.Param("ref", ir.ClsP)
 	n := function.Param("n", ir.ClsW)
+	function.Temp(ref).GCRef = true
 	entry := function.Entry()
 	result := entry.Call(ir.ClsW, function.Sym("observe", 0), n)
-	entry.Ret(raw)
+	entry.Ret(ref)
 
 	cfg := analysis.BuildCFG(function)
 	liveness := cfg.Liveness()
@@ -1005,7 +1011,7 @@ func TestGoABISafepointRootsIncludePointerClassTempsForStackCopy(t *testing.T) {
 	call := &entry.Instrs[0]
 	require.Equal(t, result, call.To)
 	require.Contains(t, roots, call)
-	require.Contains(t, roots[call], int(raw.ID))
+	require.Contains(t, roots[call], int(ref.ID))
 }
 
 func TestSafepointRootsExcludeDeadControlFlowIntervals(t *testing.T) {

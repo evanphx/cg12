@@ -134,8 +134,15 @@ func computeSafepointRoots(f *ir.Func, cfg *analysis.CFG, liveness *analysis.Liv
 			if instruction.Op == ir.OCall || instruction.Op == ir.OSafepoint {
 				var managed []int
 				for _, temporary := range live.Members() {
-					temp := f.Temps[temporary]
-					if temp.GCRef || ((f.UsesManagedFrame() || f.UsesGoInternalCallConvention()) && temp.Cls == ir.ClsP) {
+					// A root is a live managed pointer, identified purely by value
+					// via GCRef -- the register allocator needs no knowledge of the
+					// calling convention. A copying-stack frontend (goc) marks every
+					// pointer that must survive stack growth; a fixed-stack C/Ruby
+					// frontend marks only its genuine heap references. A pointer that
+					// is instead rematerialized (a frame address recomputed from the
+					// runtime-updated frame pointer) is not live here and correctly
+					// contributes no root.
+					if f.Temps[temporary].GCRef {
 						managed = append(managed, temporary)
 					}
 				}
