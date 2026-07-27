@@ -65,10 +65,11 @@ test-goc-cmd:
 	$(GO) test -timeout $(GOC_CMD_TIMEOUT) -skip '$(STATUS_TEST)' $(GOC_CMD_PKGS)
 
 # The runtime-capability matrix (optionally sharded via STATUS_SHARDS/STATUS_SHARD).
+# The shard flags are defined by the test binary, so they go after -args (and the
+# package) where `go test` passes them through unaltered.
 test-goc-status:
-	$(GO) test -timeout $(STATUS_TIMEOUT) -run '^$(STATUS_TEST)$$' \
-		-runtime-status-shards $(STATUS_SHARDS) -runtime-status-shard $(STATUS_SHARD) \
-		$(GOC_CMD_PKGS)
+	$(GO) test -timeout $(STATUS_TIMEOUT) -run '^$(STATUS_TEST)$$' $(GOC_CMD_PKGS) \
+		-args -runtime-status-shards=$(STATUS_SHARDS) -runtime-status-shard=$(STATUS_SHARD)
 
 # The Ruby/C compiler test: the cg12-vs-gcc differential and miniruby
 # regressions (arm64 Linux; needs gcc).
