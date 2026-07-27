@@ -115,14 +115,29 @@ and can never silently desync or drop.
   `go_metadata_object.go`) consumes it. Move `goStackPrologue` behind the existing
   `PrologueEmitter`/`GCStrategy` hook; move `prepareGoABI`/`inferStackPointerWords`
   to an IR pass.
-- **2c. Replace symbol-name sniffing with IR attributes.** `ir.Module.Runtime`
-  flag kills `moduleUsesGoRuntime` (`runtime.schedinit` sniff); call-site/function
-  attributes for defer/frame-scoped, benign-memory, caller-frame calls kill the
-  name lists in `opt/inline.go`, `escape.go`, `alias.go`, `dse.go`; intrinsic
-  flags for `getcallerpc/sp`.
-- **2d. Formalize frontend-owned pipeline extension:** `opt.OptimizeModuleWith(m,
-  opts)` with `PrePasses`/`PostPasses`; move `escape`, `nosplit`,
-  `InlineNoSplitCalls`, `InlineHeapAllocations` there.
+- **2c. Replace symbol-name sniffing with IR attributes. Largely DONE.**
+  - `ir.Module.Runtime` flag replaced `moduleUsesGoRuntime` (the
+    `runtime.schedinit` sniff), serialized in the unit format (v14→v15).
+  - `ir.Module.SymAttrs` (`SymAtomicPointerStore`, `SymFrameScoped`), populated
+    by goc, replaced the hardcoded Go name lists in `opt/escape.go` (write
+    barrier) and `opt/inline.go` (defer). The passes test the attribute via
+    `Func.Module().SymAttrOf`.
+  - **Left as-is on purpose:** the benign memory-intrinsic list
+    (`memcpy`/`memset`/`memcmp`) in `escape.go` — those are standard C names
+    legitimately recognized, shared by both frontends, not Go-specific sniffing.
+  - **Remaining:** any name lists in `alias.go`/`dse.go` (caller-frame calls),
+    and intrinsic flags for `getcallerpc`/`getcallersp` — audit and migrate if
+    they are Go-specific.
+- **2d. Formalize frontend-owned pipeline extension. RECONSIDERED — mostly moot.**
+  The shared `DefaultPipeline` (`opt/pass.go`) contains **no** Go-specific passes;
+  goc's Go passes (`InlineNoSplitCalls`, `InlineHeapAllocations`,
+  `LowerHeapAllocations`, `AuditNoSplitCalls`) already run inside `goc.Compile` as
+  mandatory frontend *lowering* (the non-optimized `CompileExecutable` path needs
+  them), not as optional optimization. So there is nothing to extract from the
+  shared default, and moving those passes to an optional `OptimizeModuleWith`
+  post-pass would break unoptimized builds. A `PrePasses`/`PostPasses` seam could
+  still be added as pure infrastructure, but it would have no current users — low
+  value. Deferred unless a real frontend post-pass need appears.
 
 ## Priority 3 — Core IR hygiene
 
