@@ -9,6 +9,13 @@ silently-wrong results rather than failures.
 Sizes below are measured, not estimated: arm64 is 21,798 lines across 68 files,
 amd64 is 7,189 across 34. Eighteen arm64 files have no amd64 counterpart.
 
+**Standing decisions.** Go runtime assembly is handled by pure-Go stdlib
+overlays first, with the Plan 9 amd64 translator deferred (§6, Track D) — the
+goal is a running Go program on amd64 early, not a faithful reproduction of how
+arm64 got there. Concurrency is capped at roughly six agents at the widest point,
+each wave gated on the previous wave's tests passing, so that contract drift is
+caught while it is still cheap to fix.
+
 ## 1. Measured starting state
 
 **amd64 is a working freestanding-Go-subset target, and not a Go target at all.**
@@ -224,13 +231,26 @@ Free wins found in recon: itabs, typelinks, inittasks, type descriptors, and
 write barriers are 100% frontend (`goc/compile.go` producing `ir.Data`) — no
 backend work. `link/link.go` contains no Go-specific code.
 
-### Track D · Plan 9 assembly (serial prereq, then 2 agents)
+### Track D · Go runtime assembly (2 agents; translator deferred)
+
+**Decided: pure-Go overlays first.** The `stdlib/overlays/` mechanism exists for
+exactly this — its README permits `.go` and cg12-native `.ssa` overlays and
+forbids assembly ones, with a hash-pinned `manifest.json` that fails closed when
+upstream changes. Building a `linux_amd64` overlay tree gets Go programs running
+on amd64 far sooner than a translator would, and the translator becomes a later
+fidelity/performance pass rather than a blocker.
 
 | # | Work |
 | --- | --- |
-| D0 | **Serial prereq.** De-arch `plan9asm/parser.go:968-987` `isRegister`; add `Scale` to `ir.Operand` (`ast.go:101`). Must come first — today it mis-parses silently rather than erroring. |
-| D1 | Per-arch tables behind an interface for `sem/build.go:808-832` `registerName` and `:923-971` `normalizeOperation` |
-| D2 | amd64 translator + allowlist paralleling `plan9asm/arm64_compile.go:39-121` (19 packages, ~38 files) |
+| D0 | **Still required.** De-arch `plan9asm/parser.go:968-987` `isRegister`; add `Scale` to `ir.Operand` (`ast.go:101`). Not deferrable even though the translator is: today the parser accepts x86 assembly and silently degrades every register and memory operand to untyped raw, which is a latent trap for anything that later feeds it amd64 input. Make it *error* instead. |
+| D1 | `linux_amd64` overlay tree + manifest, covering the packages whose assembly bodies currently dangle. Note the specific trap found in recon: the `purego` build tag does **not** satisfy `//go:build amd64 && !plan9`, so Go's own constraints still select declaration-only files (e.g. `internal/bytealg/indexbyte_native.go`) while skipping their `.s` bodies. Overlays must replace those declarations, not merely add a tag. Also widen `goc/native_overlay.go:57` to accept `"sysv"` alongside `"aapcs64"`. |
+
+**Deferred (revisit after amd64 runs Go programs):** per-arch tables behind an
+interface for `sem/build.go:808-832` `registerName` and `:923-971`
+`normalizeOperation`, and an amd64 translator + allowlist paralleling
+`plan9asm/arm64_compile.go:39-121`. Sizing if resurrected: ~1,100 LOC of shared
+parser/sem generalization plus a translator at the scale of the existing
+5,311-LOC arm64 one.
 
 ### Track E · tests (9 agents; see §7 for hazards)
 
