@@ -4,6 +4,8 @@
 core
 core.*
 *.core
+# ...but Go source files named core.go are not core dumps.
+!core.go
 
 # Test / build binaries
 *.o
