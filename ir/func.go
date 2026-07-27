@@ -234,6 +234,23 @@ func (f *Func) UsesManagedFrame() bool {
 	return f.ManagedFrame || f.GoABI
 }
 
+// IsManagedDef reports whether in defines a garbage-collected pointer -- one the
+// collector tracks as a root. Managed-ness is carried by the managed pointer
+// class ([ClsM]); until a frontend migrates fully onto it, the pre-existing
+// [Temp.GCRef] flag on the defined temporary is honored too. GC-semantic passes
+// (value numbering, code motion, root collection) gate on this so that raw
+// pointers ([ClsP] without GCRef) stay freely optimizable.
+func (f *Func) IsManagedDef(in *Instr) bool {
+	if in.Cls.IsManaged() {
+		return true
+	}
+	if in.To.Kind != RefTemp {
+		return false
+	}
+	t := f.Temp(in.To)
+	return t != nil && t.GCRef
+}
+
 // MarkLowered records that f has been lowered for the named target, and reports
 // an error if it was already lowered for a different one.
 //

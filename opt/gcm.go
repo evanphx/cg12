@@ -89,7 +89,7 @@ func (s *gcmScheduler) classify() {
 			if in.To.Kind != ir.RefTemp {
 				continue
 			}
-			if gcmMovable(&in) && !s.f.Temp(in.To).Fixed {
+			if gcmMovable(s.f, &in) && !s.f.Temp(in.To).Fixed {
 				s.movInstr[in.To.ID] = in
 				s.origBlock[in.To.ID] = b
 				s.movIDs = append(s.movIDs, in.To.ID)
@@ -105,7 +105,7 @@ func (s *gcmScheduler) unpin() {
 	for _, b := range s.cfg.RPO {
 		out := b.Instrs[:0]
 		for _, in := range b.Instrs {
-			if in.To.Kind == ir.RefTemp && gcmMovable(&in) && !s.f.Temp(in.To).Fixed {
+			if in.To.Kind == ir.RefTemp && gcmMovable(s.f, &in) && !s.f.Temp(in.To).Fixed {
 				continue
 			}
 			out = append(out, in)
@@ -114,8 +114,11 @@ func (s *gcmScheduler) unpin() {
 	}
 }
 
-func gcmMovable(in *ir.Instr) bool {
-	if in.Cls == ir.ClsP {
+// gcmMovable reports whether in may be rescheduled by global code motion. A
+// managed pointer is pinned: moving it would move a GC root across a safepoint
+// and desynchronize its stack-map lifetime. Raw pointers move freely.
+func gcmMovable(f *ir.Func, in *ir.Instr) bool {
+	if f.IsManagedDef(in) {
 		return false
 	}
 	return movable(in)

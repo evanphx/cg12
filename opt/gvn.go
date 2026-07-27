@@ -28,10 +28,11 @@ func GVN(f *ir.Func) bool {
 		var added []valueKey
 		for i := range b.Instrs {
 			in := &b.Instrs[i]
-			// Pointer temporaries carry GC root identity and stack-copy location
-			// metadata in addition to their numeric value. Merging them requires
-			// merging that metadata and its lifetime as well.
-			if !movable(in) || in.To.Kind != ir.RefTemp || in.Cls == ir.ClsP || f.Temp(in.To).Fixed {
+			// A managed pointer carries GC root identity and stack-copy location
+			// metadata in addition to its numeric value; merging two would have to
+			// merge that metadata and its lifetime as well. Raw pointers have no such
+			// identity and merge freely.
+			if !movable(in) || in.To.Kind != ir.RefTemp || f.IsManagedDef(in) || f.Temp(in.To).Fixed {
 				continue
 			}
 			k := makeKey(in, sub)

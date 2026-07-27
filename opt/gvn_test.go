@@ -119,16 +119,28 @@ func TestGVNNoChange(t *testing.T) {
 	assert.False(t, GVN(f))
 }
 
-func TestGVNPreservesPointerTemporaryIdentity(t *testing.T) {
-	f := ir.NewModule().NewFunc("pointers", ir.ClsP)
+func TestGVNMergesRawPointersPreservesManaged(t *testing.T) {
+	// A raw pointer (ClsP) has no GC-root identity, so two identical pointer
+	// computations are the same value: GVN merges them.
+	f := ir.NewModule().NewFunc("raw", ir.ClsP)
 	base := f.Param("base", ir.ClsP)
 	entry := f.Entry()
 	entry.Add(ir.ClsP, base, f.Long(8))
 	second := entry.Add(ir.ClsP, base, f.Long(8))
 	entry.Ret(second)
+	assert.True(t, GVN(f))
+	assert.Equal(t, 1, countOp(f, ir.OAdd), "identical raw-pointer adds merge")
 
-	assert.False(t, GVN(f))
-	assert.Equal(t, 2, countOp(f, ir.OAdd))
+	// A managed pointer (ClsM) carries GC-root identity and stack-map lifetime;
+	// GVN must keep the two distinct even though their numeric value is identical.
+	g := ir.NewModule().NewFunc("managed", ir.ClsM)
+	mbase := g.Param("base", ir.ClsM)
+	ge := g.Entry()
+	ge.Add(ir.ClsM, mbase, g.Long(8))
+	msecond := ge.Add(ir.ClsM, mbase, g.Long(8))
+	ge.Ret(msecond)
+	assert.False(t, GVN(g))
+	assert.Equal(t, 2, countOp(g, ir.OAdd), "managed-pointer adds keep distinct identity")
 }
 
 func TestGVNSkipsOverBudgetFunction(t *testing.T) {
