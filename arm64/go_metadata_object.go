@@ -27,6 +27,80 @@ type goFunctionInfo struct {
 	noLocalPointers      bool
 }
 
+// goFunctionInfoFor gathers the Go runtime metadata facts for one emitted
+// function -- frame geometry, defer-return offset, stack-map pointer words, and
+// argument-register pointer map -- that the Go module finisher later assembles
+// into pclntab and moduledata. It is the sole Go-specific step in the otherwise
+// frontend-neutral per-function emit loop.
+func goFunctionInfoFor(f *ir.Func, name string, mc *machineCode) (goFunctionInfo, error) {
+	deferReturn, err := mc.m.deferReturnOffset()
+	if err != nil {
+		return goFunctionInfo{}, err
+	}
+	argumentFrame := goArgumentFrame{}
+	if f.UsesManagedFrame() {
+		argumentFrame = goArgumentFrameFor(f)
+	}
+	return goFunctionInfo{
+		name:                 name,
+		frameSize:            mc.m.frame,
+		frameStart:           mc.m.frameStart,
+		managedAAPCS:         f.UsesManagedFrame(),
+		outgoingSize:         mc.m.outgoing,
+		size:                 uint64(len(mc.code)),
+		funcID:               goRuntimeFunctionID(name),
+		deferReturn:          deferReturn,
+		localPointerWords:    mc.m.goLocalPointerWords(),
+		stackMapPoints:       mc.m.goStackMapPoints(),
+		argumentSize:         argumentFrame.size,
+		argumentPointerWords: argumentFrame.pointerWords,
+	}, nil
+}
+
+// finishGoModule is the Go frontend's object-module finisher. With the neutral
+// emit loop's per-function facts (goFunctions) in hand, it appends the runtime
+// text symbol, lays the module data out with the runtime's BSS and relative-fixup
+// layout while recording data pointer offsets, and assembles pclntab/moduledata.
+// It is the Go-specific counterpart to addNeutralData, kept out of the neutral
+// object driver.
+func finishGoModule(o *obj.Object, m *ir.Module, goFunctions []goFunctionInfo, dataDefinitions []*ir.Data, bundle assemblyBundle) error {
+	if len(goFunctions) > 0 {
+		o.Syms = append(o.Syms, obj.Sym{
+			Name:    sanitize(".goc.runtime.text"),
+			Section: obj.SecText,
+			Value:   0,
+		})
+	}
+	var moduledata *ir.Data
+	var dataPointerOffsets []uint64
+	var relativeDataFixups []relativeDataFixup
+	for _, d := range dataDefinitions {
+		if d.Name == "runtime.firstmoduledata" {
+			moduledata = d
+			continue
+		}
+		if bundle.definitions[sanitize(d.Name)] && !semanticDataDefinition(bundle.loweredData, d) {
+			continue
+		}
+		if err := addDataWithBSSAndFixups(o, d, false, &relativeDataFixups); err != nil {
+			return fmt.Errorf("data %s: %w", d.Name, err)
+		}
+		symbol := o.Syms[len(o.Syms)-1]
+		offsets, err := goDataPointerOffsets(d, symbol.Value, symbol.Size)
+		if err != nil {
+			return fmt.Errorf("data %s: %w", d.Name, err)
+		}
+		dataPointerOffsets = append(dataPointerOffsets, offsets...)
+	}
+	if err := resolveRelativeDataFixups(o, relativeDataFixups); err != nil {
+		return fmt.Errorf("relative data reference: %w", err)
+	}
+	if moduledata != nil {
+		return addGoRuntimeObjectMetadata(o, goFunctions, bundle.functions, moduledata, dataPointerOffsets, goModuleInitTaskCount(m), goModuleItabLinkCount(m))
+	}
+	return nil
+}
+
 type goStackMapPoint struct {
 	pc           int
 	pointerWords []int

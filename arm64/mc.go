@@ -152,6 +152,20 @@ func CompileToObjectWith(m *ir.Module, opts Options) (*obj.Object, error) {
 	return compileToObjectWithBundle(m, opts, bundle)
 }
 
+// addNeutralData emits a platform (non-Go-runtime) module's data definitions
+// with the ordinary data layout. It is the neutral counterpart to finishGoModule.
+func addNeutralData(o *obj.Object, dataDefinitions []*ir.Data, bundle assemblyBundle) error {
+	for _, d := range dataDefinitions {
+		if bundle.definitions[sanitize(d.Name)] && !semanticDataDefinition(bundle.loweredData, d) {
+			continue
+		}
+		if err := addData(o, d); err != nil {
+			return fmt.Errorf("data %s: %w", d.Name, err)
+		}
+	}
+	return nil
+}
+
 func compileToObjectWithBundle(m *ir.Module, opts Options, bundle assemblyBundle) (*obj.Object, error) {
 	o := &obj.Object{Machine: obj.EM_AARCH64}
 	assemblyReferences := bundle.references
@@ -165,14 +179,20 @@ func compileToObjectWithBundle(m *ir.Module, opts Options, bundle assemblyBundle
 	functions := make([]*ir.Func, 0, len(m.Funcs)+len(bundle.lowered))
 	functions = append(functions, m.Funcs...)
 	functions = append(functions, bundle.lowered...)
+	// Annotate managed functions with their stack pointer-word maps first. This is
+	// a pure IR-to-IR pass -- it reads only frontend IR and writes
+	// f.StackPointerWords, with no dependency on code emission or on anything the
+	// emit loop computes -- so it runs once up front rather than inside the driver.
+	for _, f := range functions {
+		if f.UsesManagedFrame() {
+			prepareGoABI(f)
+		}
+	}
 	for functionIndex, f := range functions {
 		applyAssemblyCallConventions(f, bundle.callConventions)
 		name := sanitize(f.Name)
 		params := dwarfParams(f)
 		paramTemps := paramTempIDs(f)
-		if f.UsesManagedFrame() {
-			prepareGoABI(f)
-		}
 		ir.LowerPointers(f, ptrCls)
 		if err := lower(f, opts.TLSModel); err != nil {
 			return nil, fmt.Errorf("function %s: %w", f.Name, err)
@@ -185,33 +205,16 @@ func compileToObjectWithBundle(m *ir.Module, opts Options, bundle assemblyBundle
 		if err != nil {
 			return nil, fmt.Errorf("function %s: %w", f.Name, err)
 		}
-		deferReturn, err := mc.m.deferReturnOffset()
+		goFunction, err := goFunctionInfoFor(f, name, mc)
 		if err != nil {
 			return nil, fmt.Errorf("function %s: %w", f.Name, err)
-		}
-		argumentFrame := goArgumentFrame{}
-		if f.UsesManagedFrame() {
-			argumentFrame = goArgumentFrameFor(f)
 		}
 		base := uint64(len(o.Text))
 		if anchor == "" {
 			anchor = name
 		}
 		o.Text = append(o.Text, mc.code...)
-		goFunctions = append(goFunctions, goFunctionInfo{
-			name:                 name,
-			frameSize:            mc.m.frame,
-			frameStart:           mc.m.frameStart,
-			managedAAPCS:         f.UsesManagedFrame(),
-			outgoingSize:         mc.m.outgoing,
-			size:                 uint64(len(mc.code)),
-			funcID:               goRuntimeFunctionID(name),
-			deferReturn:          deferReturn,
-			localPointerWords:    mc.m.goLocalPointerWords(),
-			stackMapPoints:       mc.m.goStackMapPoints(),
-			argumentSize:         argumentFrame.size,
-			argumentPointerWords: argumentFrame.pointerWords,
-		})
+		goFunctions = append(goFunctions, goFunction)
 		o.Syms = append(o.Syms, obj.Sym{
 			Name: name, Section: obj.SecText, Value: base,
 			Size: uint64(len(mc.code)), Global: f.Linkage.Export || assemblyReferences[name], Func: true,
@@ -254,54 +257,24 @@ func compileToObjectWithBundle(m *ir.Module, opts Options, bundle assemblyBundle
 			m.Funcs[functionIndex] = nil
 		}
 	}
-	if goRuntime && len(goFunctions) > 0 {
-		o.Syms = append(o.Syms, obj.Sym{
-			Name:    sanitize(".goc.runtime.text"),
-			Section: obj.SecText,
-			Value:   0,
-		})
-	}
 	if releaseFunctionIR {
 		m.Funcs = nil
 		runtime.GC()
 	}
-	var moduledata *ir.Data
-	var dataPointerOffsets []uint64
-	var relativeDataFixups []relativeDataFixup
 	dataDefinitions := make([]*ir.Data, 0, len(m.Data)+len(bundle.loweredData))
 	dataDefinitions = append(dataDefinitions, m.Data...)
 	dataDefinitions = append(dataDefinitions, bundle.loweredData...)
-	for _, d := range dataDefinitions {
-		if goRuntime && d.Name == "runtime.firstmoduledata" {
-			moduledata = d
-			continue
+	// The neutral emit loop above has produced the code and gathered per-function
+	// facts; the module data layout and any runtime metadata are the frontend's to
+	// finish. A Go runtime module lays its data out with the runtime's BSS/fixup
+	// layout and assembles pclntab/moduledata from goFunctions; a platform module
+	// emits ordinary data and no metadata.
+	if goRuntime {
+		if err := finishGoModule(o, m, goFunctions, dataDefinitions, bundle); err != nil {
+			return nil, err
 		}
-		if bundle.definitions[sanitize(d.Name)] && !semanticDataDefinition(bundle.loweredData, d) {
-			continue
-		}
-		var err error
-		if goRuntime {
-			err = addDataWithBSSAndFixups(o, d, false, &relativeDataFixups)
-		} else {
-			err = addData(o, d)
-		}
-		if err != nil {
-			return nil, fmt.Errorf("data %s: %w", d.Name, err)
-		}
-		if goRuntime {
-			symbol := o.Syms[len(o.Syms)-1]
-			offsets, err := goDataPointerOffsets(d, symbol.Value, symbol.Size)
-			if err != nil {
-				return nil, fmt.Errorf("data %s: %w", d.Name, err)
-			}
-			dataPointerOffsets = append(dataPointerOffsets, offsets...)
-		}
-	}
-	if err := resolveRelativeDataFixups(o, relativeDataFixups); err != nil {
-		return nil, fmt.Errorf("relative data reference: %w", err)
-	}
-	if moduledata != nil {
-		if err := addGoRuntimeObjectMetadata(o, goFunctions, bundle.functions, moduledata, dataPointerOffsets, goModuleInitTaskCount(m), goModuleItabLinkCount(m)); err != nil {
+	} else {
+		if err := addNeutralData(o, dataDefinitions, bundle); err != nil {
 			return nil, err
 		}
 	}
