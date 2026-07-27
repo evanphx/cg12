@@ -58,8 +58,10 @@ func computeFrame(f *ir.Func, alloc *allocation) frameLayout {
 			}
 		}
 	}
-	// Walk the allocation orders rather than the map, so the save order is stable.
-	for _, r := range intAllocOrder {
+	// Walk the allocation orders rather than the map, so the save order is stable
+	// and every register the allocator could hand out (including a platform-ABI
+	// function's X26/X28) is a candidate for saving.
+	for _, r := range intAllocOrderFor(f) {
 		if used[r] {
 			lay.calleeSaved = append(lay.calleeSaved, r)
 		}

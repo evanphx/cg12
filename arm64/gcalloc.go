@@ -376,7 +376,7 @@ func (g *colorGraph) assign() (*allocation, error) {
 	sort.SliceStable(cands, func(i, j int) bool { return cands[i].cost > cands[j].cost })
 	for _, c := range cands {
 		pick := Reg(ir.NoReg)
-		for _, r := range intAllocOrder {
+		for _, r := range intAllocOrderFor(f) {
 			if calleeSavedReg(r) && !g.forb[c.t][r] {
 				pick = r
 				break
@@ -402,7 +402,7 @@ func (g *colorGraph) assign() (*allocation, error) {
 		if !g.node[t] {
 			continue
 		}
-		pool := intAllocOrder
+		pool := intAllocOrderFor(f)
 		if f.Temps[t].Cls.IsFloat() {
 			pool = floatAllocOrder
 		}
@@ -519,12 +519,12 @@ func (g *colorGraph) assign() (*allocation, error) {
 		float := f.Temps[t].Cls.IsFloat()
 		crossing := g.crossFreq[t] > 0
 		preferCallee := !f.UsesManagedFrame() && crossing && g.crossFreq[t]*2 >= 2.0
-		pool := intAllocOrder
+		pool := intAllocOrderFor(f)
 		switch {
 		case preferCallee && float:
 			pool = floatAllocOrderCalleeFirst
 		case preferCallee:
-			pool = intAllocOrderCalleeFirst
+			pool = intAllocOrderCalleeFirstFor(f)
 		case float:
 			pool = floatAllocOrder
 		}

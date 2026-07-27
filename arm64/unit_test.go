@@ -45,6 +45,17 @@ func TestRegisterPools(t *testing.T) {
 		assert.Falsef(t, seen[r], "duplicate %s in alloc order", r.xName())
 		seen[r] = true
 	}
+	// A platform-C-ABI function may also use X26 and X28 (which the Go runtime
+	// reserves for the closure context and the g register); the base order, used by
+	// Go-convention functions, must not.
+	assert.NotContains(t, intAllocOrder, X26, "base order reserves X26 for Go")
+	assert.NotContains(t, intAllocOrder, X28, "base order reserves X28 (g) for Go")
+	assert.Contains(t, intAllocOrderPlatform, X26, "platform ABI reclaims X26")
+	assert.Contains(t, intAllocOrderPlatform, X28, "platform ABI reclaims X28")
+	for _, r := range intAllocOrderPlatform {
+		assert.False(t, scratch[r] || reserved[r], "platform order excludes scratch/reserved %s", r.xName())
+	}
+
 	assert.True(t, isCallerSaved(X0))
 	assert.True(t, isCallerSaved(X9))
 	assert.False(t, isCallerSaved(X19))

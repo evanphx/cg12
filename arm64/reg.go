@@ -130,16 +130,16 @@ func (r Reg) Name(size int) string {
 	}
 }
 
-// intAllocOrder is the integer allocation order: caller-saved temporaries first
-// (cheaper, no save/restore), then callee-saved. X14-X17 (scratch), X18
-// (platform), X26 (closure context), X27 (temporary), and X29/X30/SP/ZR are
-// intentionally excluded.
+// intAllocOrder is the base integer allocation order: caller-saved temporaries
+// first (cheaper, no save/restore), then callee-saved. X14-X17 and X27 (scratch),
+// X18 (platform), X26 (Go closure context), X28 (the Go g register), and
+// X29/X30/SP/ZR are excluded. A platform-C-ABI function reserves neither X26 nor
+// X28 and gets them back via [intAllocOrderFor].
 var intAllocOrder = []Reg{
-	// caller-saved (clobbered by calls); X14-X17 are reserved as scratch
+	// caller-saved (clobbered by calls); X14-X17 and X27 are reserved as scratch
 	X9, X10, X11, X12, X13,
 	X0, X1, X2, X3, X4, X5, X6, X7, X8,
 	// callee-saved (preserved across calls)
-	// X26 and X27 are reserved for the Go runtime's system-stack transition.
 	X19, X20, X21, X22, X23, X24, X25,
 }
 
@@ -213,6 +213,39 @@ var (
 	intAllocOrderCalleeFirst   = calleeFirstOrder(intAllocOrder)
 	floatAllocOrderCalleeFirst = calleeFirstOrder(floatAllocOrder)
 )
+
+// intAllocOrder excludes X26 and X28 because the Go runtime reserves them (the
+// closure context and the g register). A function using the platform C ABI --
+// neither Go's internal convention nor a managed frame -- reserves neither, so it
+// may allocate both as ordinary callee-saved registers; they sit last so caller-
+// saved registers are still tried first. The frame builder walks the same
+// per-function order, so a used one is saved and restored in the prologue.
+var (
+	intAllocOrderPlatform            = append(append([]Reg(nil), intAllocOrder...), X26, X28)
+	intAllocOrderPlatformCalleeFirst = calleeFirstOrder(intAllocOrderPlatform)
+)
+
+// reservesRuntimeRegs reports whether f's convention reserves X26/X28 for the Go
+// runtime; only such functions use the narrower base allocation order.
+func reservesRuntimeRegs(f *ir.Func) bool {
+	return f.UsesGoInternalCallConvention() || f.UsesManagedFrame()
+}
+
+// intAllocOrderFor / intAllocOrderCalleeFirstFor return f's integer allocation
+// order, widened with X26/X28 for platform-ABI functions.
+func intAllocOrderFor(f *ir.Func) []Reg {
+	if reservesRuntimeRegs(f) {
+		return intAllocOrder
+	}
+	return intAllocOrderPlatform
+}
+
+func intAllocOrderCalleeFirstFor(f *ir.Func) []Reg {
+	if reservesRuntimeRegs(f) {
+		return intAllocOrderCalleeFirst
+	}
+	return intAllocOrderPlatformCalleeFirst
+}
 
 func calleeFirstOrder(order []Reg) []Reg {
 	var callee, caller []Reg
