@@ -1339,7 +1339,7 @@ func lowerAAPCSValueResult(
 	setup []ir.Instr,
 	pins []ir.Ref,
 ) (ir.Ref, ir.Cls, []ir.Ref, []ir.Instr, []ir.Ref, []ir.Instr, error) {
-	parts, flattenable := flattenGoAggregate(aggregate)
+	parts, flattenable := flattenAggregate(aggregate)
 	if !flattenable || len(parts) != len(destinations) {
 		return ir.R, 0, nil, nil, nil, nil,
 			fmt.Errorf("arm64: AAPCS aggregate result has %d SSA parts, want %d", len(destinations), len(parts))
@@ -1369,7 +1369,7 @@ func lowerAAPCSValueResult(
 
 func lowerAAPCSValueReturn(function *ir.Func, block *ir.Block, resultBuffer ir.Ref) error {
 	values := append([]ir.Ref{block.Jmp.Arg}, block.Jmp.Args...)
-	parts, flattenable := flattenGoAggregate(function.RetAgg)
+	parts, flattenable := flattenAggregate(function.RetAgg)
 	if !flattenable || len(parts) != len(values) {
 		return fmt.Errorf("arm64: AAPCS aggregate return has %d SSA parts, want %d", len(values), len(parts))
 	}

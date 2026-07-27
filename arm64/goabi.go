@@ -81,7 +81,7 @@ func goArgumentFrameFor(function *ir.Func) goArgumentFrame {
 				parameterIndex += group.Count
 				continue
 			}
-			parts, flattenable := flattenGoAggregate(group.Type)
+			parts, flattenable := flattenAggregate(group.Type)
 			if !flattenable || len(parts) != group.Count {
 				parts = make([]goABIPart, group.Count)
 			}
@@ -382,7 +382,7 @@ type goABIPart struct {
 	reg     Reg
 }
 
-func flattenGoAggregate(aggregate *ir.AggType) ([]goABIPart, bool) {
+func flattenAggregate(aggregate *ir.AggType) ([]goABIPart, bool) {
 	if aggregate == nil || aggregate.Opaque || aggregate.Union {
 		return nil, false
 	}
@@ -438,7 +438,7 @@ func goFieldSizeAlign(field ir.Field) (int, int) {
 // unused registers available to later values, while AAPCS64 exhausts the
 // corresponding register bank before assigning subsequent values.
 func assignGoAggregate(assigner *argAssigner, aggregate *ir.AggType) (parts []goABIPart, onStack bool, stackOffset int) {
-	parts, flattenable := flattenGoAggregate(aggregate)
+	parts, flattenable := flattenAggregate(aggregate)
 	size, alignment := aggregate.Layout()
 	if size == 0 || !flattenable {
 		return nil, true, assigner.assignStack(size, alignment)
@@ -514,7 +514,7 @@ func aggregateAlloc(f *ir.Func, aggregate *ir.AggType, out *[]ir.Instr) ir.Ref {
 }
 
 func markAggregatePointerWords(f *ir.Func, slot ir.Ref, aggregate *ir.AggType) {
-	parts, ok := flattenGoAggregate(aggregate)
+	parts, ok := flattenAggregate(aggregate)
 	if !ok {
 		return
 	}
@@ -615,7 +615,7 @@ func lowerGoAggregateParam(f *ir.Func, parameter *ir.Temp, assigner *argAssigner
 func lowerGoValueParams(f *ir.Func, parameters []*ir.Temp, aggregate *ir.AggType, assigner *argAssigner) ([]ir.Instr, error) {
 	parts, onStack, stackOffset := assignGoAggregate(assigner, aggregate)
 	if onStack {
-		parts, _ = flattenGoAggregate(aggregate)
+		parts, _ = flattenAggregate(aggregate)
 	}
 	if len(parts) != len(parameters) {
 		return nil, fmt.Errorf("arm64: aggregate parameter has %d SSA parts, want %d", len(parameters), len(parts))
@@ -693,7 +693,7 @@ func lowerGoAggregateArg(f *ir.Func, argument ir.Ref, aggregate *ir.AggType, ass
 func lowerGoValueArg(f *ir.Func, arguments []ir.Ref, aggregate *ir.AggType, assigner *argAssigner, setup []ir.Instr, pins []ir.Ref) ([]ir.Instr, []ir.Ref, error) {
 	parts, onStack, stackOffset := assignGoAggregate(assigner, aggregate)
 	if onStack {
-		parts, _ = flattenGoAggregate(aggregate)
+		parts, _ = flattenAggregate(aggregate)
 	}
 	if len(parts) != len(arguments) {
 		return nil, nil, fmt.Errorf("arm64: aggregate argument has %d SSA parts, want %d", len(arguments), len(parts))
@@ -769,7 +769,7 @@ func lowerGoValueResult(f *ir.Func, destinations []ir.Ref, aggregate *ir.AggType
 	resultAssigner.nsaa = stackBase
 	parts, onStack, resultOffset := assignGoAggregate(&resultAssigner, aggregate)
 	if onStack {
-		parts, _ = flattenGoAggregate(aggregate)
+		parts, _ = flattenAggregate(aggregate)
 	}
 	if len(parts) != len(destinations) {
 		err = fmt.Errorf("arm64: aggregate result has %d SSA parts, want %d", len(destinations), len(parts))
@@ -877,7 +877,7 @@ func lowerGoValueReturn(f *ir.Func, block *ir.Block, resultBuffer ir.Ref) error 
 	resultAssigner := newArgAssigner(true)
 	parts, onStack, _ := assignGoAggregate(&resultAssigner, f.RetAgg)
 	if onStack {
-		parts, _ = flattenGoAggregate(f.RetAgg)
+		parts, _ = flattenAggregate(f.RetAgg)
 	}
 	if len(parts) != len(values) {
 		return fmt.Errorf("arm64: aggregate return has %d SSA parts, want %d", len(values), len(parts))
