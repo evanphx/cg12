@@ -379,6 +379,7 @@ func compile(name string, src []byte, options compileOptions) (*ir.Module, error
 		mod.Data = append(mod.Data, &ir.Data{Name: ".goc.runtime.dataend", Align: 8, Items: []ir.DataItem{{Sub: ir.SubUB, Ints: []int64{0}}}})
 	}
 	addMemoryHelpers(mod, compileRuntime)
+	mod.Runtime = compileRuntime
 	if compileRuntime {
 		exportAssemblyReferencedFunctions(mod, assemblyReferences)
 		for _, function := range mod.Funcs {

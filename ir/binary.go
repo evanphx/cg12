@@ -19,7 +19,7 @@ import (
 // references. Value references (ir.Ref) already index Temps/Consts by ID.
 const (
 	binMagic   = "cg12"
-	binVersion = 14
+	binVersion = 15
 )
 
 // MarshalBinary encodes the module to cg12's binary unit format.
@@ -28,6 +28,7 @@ func (m *Module) MarshalBinary() ([]byte, error) {
 	e := &enc{typeIdx: typeIdx}
 	e.buf = append(e.buf, binMagic...)
 	e.u8(binVersion)
+	e.boolean(m.Runtime)
 
 	// The full type table (for reference resolution), then which of them are the
 	// module's declared types.
@@ -95,6 +96,7 @@ func DecodeModule(data []byte) (*Module, error) {
 	}
 
 	m := NewModule()
+	m.Runtime = d.boolean()
 	nt := int(d.uv())
 	types := make([]*AggType, nt)
 	for i := range types {

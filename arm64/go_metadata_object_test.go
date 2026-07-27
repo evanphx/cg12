@@ -103,6 +103,7 @@ func TestGoFunctionMetadataPreservesRuntimeFunctionID(t *testing.T) {
 
 func TestGoRuntimeModuledataReferencesModuleInitTasks(t *testing.T) {
 	module := ir.NewModule()
+	module.Runtime = true
 	schedinit := module.NewFuncVoid("runtime.schedinit")
 	schedinit.GoABI = true
 	schedinit.Entry().RetVoid()
@@ -128,6 +129,7 @@ func TestGoRuntimeModuledataReferencesModuleInitTasks(t *testing.T) {
 
 func TestGoRuntimeModuledataReferencesInterfaceTables(t *testing.T) {
 	module := ir.NewModule()
+	module.Runtime = true
 	schedinit := module.NewFuncVoid("runtime.schedinit")
 	schedinit.GoABI = true
 	schedinit.Entry().RetVoid()
@@ -156,6 +158,7 @@ func TestGoRuntimeModuledataReferencesInterfaceTables(t *testing.T) {
 
 func TestGoRuntimeMetadataIncludesTranslatedAssemblyFunctions(t *testing.T) {
 	module := ir.NewModule()
+	module.Runtime = true
 	schedinit := module.NewFuncVoid("runtime.schedinit")
 	schedinit.GoABI = true
 	schedinit.Entry().RetVoid()
@@ -276,6 +279,7 @@ func TestNoLocalPointersAssemblyUsesZeroBitStackMap(t *testing.T) {
 
 func TestGoRuntimeModuledataDescribesScannedGlobals(t *testing.T) {
 	module := ir.NewModule()
+	module.Runtime = true
 	schedinit := module.NewFuncVoid("runtime.schedinit")
 	schedinit.GoABI = true
 	schedinit.Entry().RetVoid()

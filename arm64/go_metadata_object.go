@@ -86,12 +86,7 @@ func goModuleItabLinkCount(module *ir.Module) int {
 }
 
 func moduleUsesGoRuntime(module *ir.Module) bool {
-	for _, function := range module.Funcs {
-		if function.Name == "runtime.schedinit" {
-			return true
-		}
-	}
-	return false
+	return module.Runtime
 }
 
 type goMetadataBuilder struct {

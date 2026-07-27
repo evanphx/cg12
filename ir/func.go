@@ -302,6 +302,12 @@ type Module struct {
 	Files    []string // source-file table indexed (1-based) by SrcPos.File
 	Assembly []AssemblyFile
 
+	// Runtime marks a module that provides (or is linked against) the Go runtime,
+	// so the backend emits Go runtime metadata (stack maps, module data). A
+	// frontend sets it explicitly rather than the backend sniffing for a
+	// runtime.schedinit symbol.
+	Runtime bool
+
 	// SymAlign records the guaranteed alignment (bytes) of a data symbol, keyed by
 	// its unmangled name -- from a definition or from the type of a reference. A
 	// backend folding a symbol's low bits into a scaled load/store offset consults
