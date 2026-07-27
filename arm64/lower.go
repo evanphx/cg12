@@ -857,10 +857,8 @@ type argAssigner struct {
 }
 
 func newArgAssigner(goABI bool) argAssigner {
-	if goABI {
-		return argAssigner{intRegs: 16, floatRegs: 16, goABI: true}
-	}
-	return argAssigner{intRegs: 8, floatRegs: 8}
+	c := conventionABI(goInternalConvention(goABI))
+	return argAssigner{intRegs: c.intArgRegs, floatRegs: c.floatArgRegs, goABI: c.packsStackArgs}
 }
 
 func (a *argAssigner) assign(cls ir.Cls) argLoc {

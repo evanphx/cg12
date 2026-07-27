@@ -91,11 +91,24 @@ and can never silently desync or drop.
 
 ## Priority 2 — Structural seams (collapse the `if go` branching)
 
-- **2a. Per-convention descriptor** keyed by `ir.CallConvention`:
-  `{intRegs, floatRegs, calleeSaved, clobberSet, stackLinkBytes, aggLowering}`.
-  Collapses the `goABI`-bool ladders in `lower.go`, `abi.go`, `frame.go`,
-  `callersave.go`, `reg.go` into property lookups. Keep per-call `CallConv`
-  stamping and the cross-convention tail-call error.
+- **2a. Per-convention descriptor** keyed by `ir.CallConvention`
+  (`arm64/convention.go`). **DONE for the value-based ABI-axis properties**:
+  `intArgRegs`/`floatArgRegs` (8/8 vs 16/16, via `newArgAssigner`),
+  `savesCalleeRegs` (via `calleeSavedFor`), `stackLinkBytes` (collapsed four
+  `if goInternal { += goStackLinkSize }` branches), `packsStackArgs`. Two listed
+  fields do **not** fit a `CallConvention` value table and stay as they are:
+  - `clobberSet` is **union-axis** (`UsesManagedFrame() || UsesGoInternalCallConvention()`,
+    `callersave.go:178`), not pure ABI — it depends on the frame axis too, so it
+    is not keyed by `CallConvention` alone.
+  - `aggLowering` is **control flow** (distinct param/result lowering functions
+    per convention in `lower.go`/`goabi.go`), not a value; tableizing it means
+    strategy function pointers — deferred as a larger, separate change.
+  The frame axis (morestack, outgoing area, GC marking) correctly stays on
+  `UsesManagedFrame` — `CallConvention`'s own doc says it does not describe stack
+  ownership. Three legacy `GoABI`-bool sites (`mc.go` `goRegisterPointerMask`
+  [dead code], `framelessEligible` [redundant with the `PrologueEmitter` check])
+  are non-issues left in place. Per-call `CallConv` stamping and the
+  cross-convention tail-call error are unchanged.
 - **2b. Split the emit driver.** `arm64/mc.go` `compileToObjectWithBundle` is both
   the neutral object driver and the Go metadata orchestrator. The function loop
   records a neutral facts struct; a frontend-registered `moduleFinisher` (Go's in

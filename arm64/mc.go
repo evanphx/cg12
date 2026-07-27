@@ -2658,10 +2658,7 @@ func (m *mc) regDiffers(r ir.Ref, avoid Reg) bool {
 }
 
 func (m *mc) stackParam(in *ir.Instr) {
-	off := m.frameTop() + int(in.Aux)
-	if m.f.UsesGoInternalCallConvention() {
-		off += goStackLinkSize
-	}
+	off := m.frameTop() + int(in.Aux) + stackLinkBytesFor(m.f.UsesGoInternalCallConvention())
 	t := m.f.Temps[in.To.ID]
 	if t.Agg != nil {
 		if in.RetAgg != nil {
@@ -2736,10 +2733,7 @@ func (m *mc) callSequence(b *ir.Block, i int) int {
 	if call.Tail {
 		for _, a := range stackArgs {
 			r := m.src(a.Args[0], 0, a.Cls.Size())
-			offset := m.frameTop() + int(a.Aux)
-			if goInternal {
-				offset += goStackLinkSize
-			}
+			offset := m.frameTop() + int(a.Aux) + stackLinkBytesFor(goInternal)
 			m.emit(a64.StrImm(a.Cls.Size() == 8, r, mcX29, uint32(offset)))
 		}
 		m.parallelMove(regPairs)
@@ -2766,10 +2760,7 @@ func (m *mc) callSequence(b *ir.Block, i int) int {
 		}
 		sz := a.Cls.Size()
 		r := m.src(a.Args[0], 0, sz)
-		offset := int(a.Aux)
-		if goInternal {
-			offset += goStackLinkSize
-		}
+		offset := int(a.Aux) + stackLinkBytesFor(goInternal)
 		if a.Cls.IsFloat() {
 			m.emit(a64.StrFP(sz == 8, r, mcSP, uint32(offset)))
 		} else {
@@ -2814,10 +2805,7 @@ func (m *mc) emitStackAggregateArgument(argument *ir.Instr, goInternal bool) {
 		m.emit(a64.AddImm(true, mcGP2, source, 0))
 	}
 	size, _ := argument.RetAgg.Layout()
-	destinationOffset := int(argument.Aux)
-	if goInternal {
-		destinationOffset += goStackLinkSize
-	}
+	destinationOffset := int(argument.Aux) + stackLinkBytesFor(goInternal)
 	m.emitStackAggregateCopy(mcSP, destinationOffset, mcGP2, 0, size)
 }
 

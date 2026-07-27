@@ -263,7 +263,7 @@ func calleeFirstOrder(order []Reg) []Reg {
 // ABIInternal has no callee-saved general-purpose or floating-point registers;
 // the platform ABI retains the AAPCS64 preservation rules.
 func calleeSavedFor(goABI bool, r Reg) bool {
-	if goABI {
+	if !conventionABI(goInternalConvention(goABI)).savesCalleeRegs {
 		return false
 	}
 	return calleeSavedReg(r)
