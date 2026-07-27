@@ -10013,10 +10013,40 @@ func (g *gen) initializeStructLiteral(backing ir.Ref, structure *types.Struct, l
 	}
 }
 
+// functionLiteralIsDeferred reports whether the literal is the callee of a
+// `defer func(){ ... }()` -- a directly-deferred closure, which runs within the
+// enclosing frame during deferreturn.
+func (g *gen) functionLiteralIsDeferred(literal *ast.FuncLit) bool {
+	call, ok := g.parents[literal].(*ast.CallExpr)
+	if !ok || call.Fun != literal {
+		return false
+	}
+	_, deferred := g.parents[call].(*ast.DeferStmt)
+	return deferred
+}
+
+// isResultParamSlot reports whether slot is one of the current function's extra
+// result slots -- the pointer parameters (result1, result2, ...) through which a
+// named result after the first is returned into the caller's storage. Such a
+// slot must be captured into a closure by reference, not copied.
+func (g *gen) isResultParamSlot(slot ir.Ref) bool {
+	for _, s := range g.extraResultSlots {
+		if s == slot {
+			return true
+		}
+	}
+	return false
+}
+
 func (g *gen) functionLiteral(literal *ast.FuncLit) ir.Ref {
 	originalSignature := g.typeAndValue(literal.Type).Type.(*types.Signature)
 	signature := g.concreteType(originalSignature).(*types.Signature)
 	escaping := g.functionLiteralEscapes(literal)
+	// A deferred closure escapes (it is stored in the defer record) yet is
+	// frame-scoped: it runs during deferreturn, before the frame is torn down.
+	// That lets it capture a result slot by reference (see the capture loop); a
+	// goroutine or a returned closure must not.
+	frameScopedDefer := g.functionLiteralIsDeferred(literal)
 	parameterObjects := g.fieldListObjects(literal.Type.Params)
 	resultObjects := g.fieldListObjects(literal.Type.Results)
 	position := g.fset.Position(literal.Pos())
@@ -10267,6 +10297,20 @@ func (g *gen) functionLiteral(literal *ast.FuncLit) ir.Ref {
 		if cell == ir.R {
 			captureType := capture.Type()
 			originalSlot := g.vars[capture]
+			if frameScopedDefer && g.isResultParamSlot(originalSlot) {
+				// A named result after the first is returned through the caller's
+				// result slot, which originalSlot already addresses. A deferred
+				// closure runs within the frame, so capture that slot by reference:
+				// its writes then land in the same location the return stores to and
+				// the caller reads. Copying the value into a fresh heap cell (as the
+				// branches below do) would strand the closure's updates -- the return
+				// would still write *result and the caller would read the un-updated
+				// slot. (A non-deferred escaping closure keeps the cell: it observes
+				// a snapshot and must not write the caller's slot after return.)
+				g.heapCaptures[capture] = originalSlot
+				g.store(originalSlot, g.offset(descriptor, int64(8*(i+1))), fields[i+1].Type())
+				continue
+			}
 			if basic, ok := captureType.Underlying().(*types.Basic); ok && basic.Info()&types.IsUntyped != 0 {
 				captureType = types.Default(captureType)
 				if captureType == nil || captureType == types.Typ[types.UntypedNil] {

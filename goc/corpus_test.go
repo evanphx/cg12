@@ -640,6 +640,24 @@ func Test() int {
 `, 42)
 }
 
+// Regression: a deferred closure that modifies a named result AFTER the first
+// must write through the caller's result slot, not a stranded heap copy.
+// Previously only the first named result's deferred update took effect, because
+// later results (returned via caller pointers) were captured into the closure by
+// value rather than by reference.
+func TestRuntimeDeferModifiesLaterNamedResults(t *testing.T) {
+	runExecutableCase(t, `package main
+func triple() (a int, b int, c int) {
+	defer func() { a += 1; b += 10; c += 100 }()
+	return 1, 2, 3
+}
+func Test() int {
+	a, b, c := triple() // (1+1), (2+10), (3+100)
+	return a*10000 + b*100 + c // 2*10000 + 12*100 + 103 = 21303
+}
+`, 21303)
+}
+
 func TestStandardLibrarySHA256(t *testing.T) {
 	runCase(t, `package main
 
