@@ -238,8 +238,11 @@ func TestCheckedRuntimeCoverageBaseline(t *testing.T) {
 	if baseline.GOOS != "linux" || baseline.GOARCH != "arm64" {
 		t.Fatalf("checked runtime coverage target = %s/%s", baseline.GOOS, baseline.GOARCH)
 	}
-	if baseline.Summary.Programs != 294 {
-		t.Fatalf("checked runtime coverage programs = %d, want 294", baseline.Summary.Programs)
+	// A literal count rather than the matrix length on purpose: accepting a
+	// baseline has to be a deliberate, reviewable edit, so a baseline collected
+	// from a corpus that quietly shrank cannot pass by following the matrix down.
+	if baseline.Summary.Programs != 338 {
+		t.Fatalf("checked runtime coverage programs = %d, want 338", baseline.Summary.Programs)
 	}
 }
 
