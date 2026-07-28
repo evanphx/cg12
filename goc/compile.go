@@ -10486,8 +10486,8 @@ func (g *gen) functionLiteralEscapesWithin(
 			if _, asynchronous := parents[call].(*ast.GoStmt); asynchronous {
 				return true
 			}
-			if _, deferred := parents[call].(*ast.DeferStmt); deferred && g.runtimeAllocation {
-				return true
+			if deferStatement, deferred := parents[call].(*ast.DeferStmt); deferred && g.runtimeAllocation {
+				return deferStatementRepeats(deferStatement, parents, body)
 			}
 			return false
 		}
@@ -10532,6 +10532,77 @@ func (g *gen) functionLiteralEscapesWithin(
 		return escapes
 	}
 	return true
+}
+
+// deferStatementRepeats reports whether one execution of the enclosing frame can
+// reach the same defer statement more than once.
+//
+// A directly-deferred function literal runs during deferreturn, inside the frame
+// that registered it, so it does not outlive that frame: its closure descriptor
+// fits in a frame slot and it can capture the enclosing variables by reference.
+// That reasoning only holds while the registration happens at most once. A defer
+// that runs again reuses the single frame slot its descriptor was assigned, so
+// every _defer record would point at the same descriptor and every deferred call
+// would observe the last registration's captures. A repeating defer therefore
+// still needs a fresh heap descriptor and heap-lifted captures per registration.
+//
+// A defer repeats when it sits inside a loop, or when a goto can jump back to a
+// label declared at or before it. Labels declared after the defer cannot re-reach
+// it, which is what keeps runtime.gcAssistAlloc's synctest defer -- it precedes
+// that function's own retry label -- on the non-repeating path.
+func deferStatementRepeats(deferStatement *ast.DeferStmt, parents map[ast.Node]ast.Node, body *ast.BlockStmt) bool {
+	for node := ast.Node(deferStatement); node != nil; node = parents[node] {
+		switch parents[node].(type) {
+		case *ast.ForStmt, *ast.RangeStmt:
+			return true
+		case *ast.FuncLit:
+			// The defer belongs to the nested literal's frame, which is entered
+			// afresh on every call. Whatever encloses that literal here cannot
+			// register this defer twice within one of those frames.
+			return false
+		}
+	}
+	return bodyJumpsBackTo(body, deferStatement.Pos())
+}
+
+// bodyJumpsBackTo reports whether the function body contains a goto whose target
+// label is declared at or before position, so control can return to that point.
+// Labels and gotos inside a nested function literal belong to a different frame
+// and Go forbids jumping between the two, so those are not considered.
+func bodyJumpsBackTo(body *ast.BlockStmt, position token.Pos) bool {
+	if body == nil {
+		return false
+	}
+	targetedLabels := make(map[string]bool)
+	ast.Inspect(body, func(node ast.Node) bool {
+		if _, nestedFunction := node.(*ast.FuncLit); nestedFunction {
+			return false
+		}
+		branch, ok := node.(*ast.BranchStmt)
+		if ok && branch.Tok == token.GOTO && branch.Label != nil {
+			targetedLabels[branch.Label.Name] = true
+		}
+		return true
+	})
+	if len(targetedLabels) == 0 {
+		return false
+	}
+
+	jumpsBack := false
+	ast.Inspect(body, func(node ast.Node) bool {
+		if jumpsBack {
+			return false
+		}
+		if _, nestedFunction := node.(*ast.FuncLit); nestedFunction {
+			return false
+		}
+		labeled, ok := node.(*ast.LabeledStmt)
+		if ok && targetedLabels[labeled.Label.Name] && labeled.Pos() <= position {
+			jumpsBack = true
+		}
+		return true
+	})
+	return jumpsBack
 }
 
 // findEscapingCaptures identifies variables declared by the current function

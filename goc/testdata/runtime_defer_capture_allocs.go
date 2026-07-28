@@ -4,21 +4,19 @@
 // conditionalCapture has exactly the shape of runtime.gcAssistAlloc's synctest
 // block: a variable declared in an if-statement's init, captured by a deferred
 // function literal that is only created when the branch is taken. The branch is
-// never taken here, yet cg12 still heap-lifts the variable, so the function
-// allocates on the path where no closure is ever built. That single allocation
-// is what makes runtime.gcAssistAlloc allocate, and therefore what makes
+// never taken here, yet cg12 used to heap-lift the variable, so the function
+// allocated on the path where no closure is ever built. That single allocation
+// is what made runtime.gcAssistAlloc allocate, and therefore what made
 // mallocgc -> deductAssistCredit -> gcAssistAlloc -> newobject -> mallocgc
 // recurse without bound during marking.
 //
-// Only conditionalCapture is asserted. deferCapture allocates twice under cg12
-// (a heap cell for the captured variable plus the closure) where the standard
-// compiler allocates nothing, but that is the deliberate heap-lift recorded in
-// RUNTIME_PLAN.md 5.1, so this program reports its count as a diagnostic rather
-// than requiring it to be zero. immediateCapture and deferNoCapture are the
-// controls that show the trigger is specifically "defer" plus "capture": both
-// already allocate nothing.
+// deferCapture is the same trigger without the branch: cg12 used to allocate
+// twice there, a heap cell for the captured variable plus the closure. Neither
+// closure outlives its frame, so neither may allocate. immediateCapture and
+// deferNoCapture are the controls that show the trigger was specifically
+// "defer" plus "capture": both always allocated nothing.
 //
-// Expected output on the host toolchain:
+// All four counts must be 0, which is what the host toolchain reports:
 //
 //	conditionalCapture allocs 0
 //	deferCapture allocs 0
@@ -93,11 +91,26 @@ func deferNoCapture() {
 func main() {
 	conditional := int(testing.AllocsPerRun(50, conditionalCapture))
 	println("conditionalCapture allocs", conditional)
-	println("deferCapture allocs", int(testing.AllocsPerRun(50, deferCapture)))
-	println("immediateCapture allocs", int(testing.AllocsPerRun(50, immediateCapture)))
-	println("deferNoCapture allocs", int(testing.AllocsPerRun(50, deferNoCapture)))
+
+	unconditional := int(testing.AllocsPerRun(50, deferCapture))
+	println("deferCapture allocs", unconditional)
+
+	immediate := int(testing.AllocsPerRun(50, immediateCapture))
+	println("immediateCapture allocs", immediate)
+
+	noCapture := int(testing.AllocsPerRun(50, deferNoCapture))
+	println("deferNoCapture allocs", noCapture)
 
 	if conditional != 0 {
 		panic("conditional deferred capture allocated on the untaken branch")
+	}
+	if unconditional != 0 {
+		panic("unconditional deferred capture allocated")
+	}
+	if immediate != 0 {
+		panic("immediately invoked capture allocated")
+	}
+	if noCapture != 0 {
+		panic("deferred literal without a capture allocated")
 	}
 }

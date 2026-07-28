@@ -313,7 +313,11 @@ func Test() {
 	assert.True(t, callsSymbol(install, "runtime.newobject"), "goroutine closure remained on the caller stack")
 }
 
-func TestDirectDeferredFunctionLiteralEscapesInRuntimeBuild(t *testing.T) {
+// A defer that runs at most once per frame is frame-scoped: deferreturn calls it
+// before the frame is torn down, so its descriptor is a frame slot and it
+// captures by reference. Heap-lifting it instead is what made
+// runtime.gcAssistAlloc allocate (RUNTIME_PLAN.md 5.2.1).
+func TestSingleDirectDeferredFunctionLiteralStaysOnTheFrame(t *testing.T) {
 	module, err := goc.Compile("deferred_closure.go", []byte(`
 package main
 
@@ -336,10 +340,10 @@ func Test() {
 	require.NoError(t, err)
 
 	install := functionWithSuffix(t, module, "install")
-	assert.True(t, callsSymbol(install, "runtime.newobject"), "deferred closure remained on the caller stack")
+	assert.False(t, callsSymbol(install, "runtime.newobject"), "a single deferred closure was heap-lifted")
 }
 
-func TestDeferredClosureCapturedNamedResultEscapesInRuntimeBuild(t *testing.T) {
+func TestDeferredClosureCapturedNamedResultStaysOnTheFrame(t *testing.T) {
 	module, err := goc.Compile("deferred_named_result.go", []byte(`
 package main
 
@@ -363,7 +367,150 @@ func Test() {
 
 	compute := functionWithSuffix(t, module, "compute")
 	newObjectCalls := countCallsSymbol(compute, "runtime.newobject")
-	assert.GreaterOrEqual(t, newObjectCalls, 2, "deferred closure and captured result should both escape")
+	assert.Equal(t, 0, newObjectCalls, "a single deferred closure and its captured result were heap-lifted")
+}
+
+// The shape of runtime.gcAssistAlloc's synctest block: the captured variable is
+// declared by an if-statement's init, which runs unconditionally, but the closure
+// is only built when the branch is taken. Nothing may be allocated ahead of the
+// test, or every call to gcAssistAlloc allocates and the assist path recurses.
+func TestConditionallyDeferredFunctionLiteralDoesNotAllocateBeforeItsBranch(t *testing.T) {
+	module, err := goc.Compile("conditional_deferred_closure.go", []byte(`
+package main
+
+import "runtime"
+
+type bubble struct {
+	value int
+}
+
+type goroutine struct {
+	bubble *bubble
+}
+
+var current goroutine
+
+func currentGoroutine() *goroutine {
+	return &current
+}
+
+func assist() {
+	if g := currentGoroutine(); g.bubble != nil {
+		saved := g.bubble
+		g.bubble = nil
+		defer func() {
+			g.bubble = saved
+		}()
+	}
+	runtime.GC()
+}
+
+func Test() {
+	assist()
+}
+`))
+	require.NoError(t, err)
+
+	assist := functionWithSuffix(t, module, "assist")
+	assert.Equal(t, 0, countCallsSymbol(assist, "runtime.newobject"), "the conditional deferred capture was heap-lifted")
+}
+
+// A defer that can run more than once must keep its heap descriptor: the frame
+// holds one slot per defer statement, so a reused stack descriptor would leave
+// every registration sharing the last iteration's captures.
+func TestRepeatedDeferredFunctionLiteralEscapes(t *testing.T) {
+	sources := map[string]string{
+		"loop body": `
+package main
+
+import "runtime"
+
+var total int
+
+func install() {
+	for index := 0; index < 3; index++ {
+		value := index
+		defer func() {
+			total += value
+		}()
+	}
+	runtime.GC()
+}
+
+func Test() {
+	install()
+}
+`,
+		"backward goto": `
+package main
+
+import "runtime"
+
+var total int
+
+func install() {
+	index := 0
+retry:
+	value := index
+	defer func() {
+		total += value
+	}()
+	index++
+	if index < 3 {
+		goto retry
+	}
+	runtime.GC()
+}
+
+func Test() {
+	install()
+}
+`,
+	}
+
+	for name, source := range sources {
+		t.Run(name, func(t *testing.T) {
+			module, err := goc.Compile("repeated_deferred_closure.go", []byte(source))
+			require.NoError(t, err)
+
+			install := functionWithSuffix(t, module, "install")
+			assert.True(t, callsSymbol(install, "runtime.newobject"), "a repeatable deferred closure stayed on the frame")
+		})
+	}
+}
+
+// A goto that only ever jumps forward cannot re-reach the defer, so the defer
+// still runs at most once. runtime.gcAssistAlloc depends on this: its synctest
+// defer sits above its own retry label.
+func TestDeferredFunctionLiteralAboveAForwardGotoStaysOnTheFrame(t *testing.T) {
+	module, err := goc.Compile("forward_goto_deferred_closure.go", []byte(`
+package main
+
+import "runtime"
+
+var total int
+
+func install(skip bool) {
+	value := 1
+	defer func() {
+		total += value
+	}()
+	if skip {
+		goto done
+	}
+	value = 2
+done:
+	runtime.GC()
+}
+
+func Test() {
+	install(false)
+}
+`))
+	require.NoError(t, err)
+
+	install := functionWithSuffix(t, module, "install")
+	assert.False(t, callsSymbol(install, "runtime.newobject"), "a deferred closure above a forward goto was heap-lifted")
 }
 
 func TestFunctionLiteralPassedToEscapingParameterEscapes(t *testing.T) {
