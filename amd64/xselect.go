@@ -68,10 +68,28 @@ func (s *xsel) gpDst(ref ir.Ref) (Reg, func()) {
 	return gpScratch0, func() { s.b.spillStore(gpScratch0, slot, size) }
 }
 
-// selectInt handles the two-operand integer arithmetic instructions
-// (add/sub/mul/and/or/xor) through the builder. It reports whether it handled the
-// instruction; everything else falls back to the emitter's own logic.
+// selectInt selects one instruction through the builder, reporting whether it
+// handled it; everything it does not claim falls back to the emitter's own logic.
+//
+// It is a probe chain rather than one switch: each operation family registered in
+// xselect_registry.go gets a look first, in order, and selectCore -- the ops the
+// backend started with -- runs last. First match wins, so adding a family cannot
+// change what is emitted for an op that family does not claim.
 func (s *xsel) selectInt(in *ir.Instr) bool {
+	for _, try := range selectors {
+		if try(s, in) {
+			return true
+		}
+	}
+	return s.selectCore(in)
+}
+
+// selectCore is the original selection switch: the two-operand integer and float
+// arithmetic, shifts, divides, compares, extensions, conversions, loads and
+// stores, VLA allocation, the intrinsics, and the fixed-register and block-address
+// ops. It is the chain's fallback, so it stays the one place an op with no family
+// of its own belongs.
+func (s *xsel) selectCore(in *ir.Instr) bool {
 	switch in.Op {
 	case ir.OAdd, ir.OSub, ir.OMul, ir.OAnd, ir.OOr, ir.OXor:
 		if in.Cls.IsFloat() {
