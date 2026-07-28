@@ -733,6 +733,65 @@ func TestManagedAAPCS64DoesNotSplitGroupedInterfaceAcrossRegisterBoundary(t *tes
 	}
 }
 
+// The argument frame carries two pointer maps because its words become valid at
+// different times. A stack-passed pointer argument is written by the caller
+// before the call, so it is a root for the whole call; a register argument's home
+// slot is written only by the stack-growth prologue on the path that calls
+// morestack, so outside that window it holds whatever the caller's stack held.
+// Only the entry map may name it.
+func TestManagedAAPCS64SeparatesIncomingArgumentsFromRegisterHomes(t *testing.T) {
+	function := ir.NewModule().NewFuncVoid("consume_nine_pointers")
+	function.ManagedFrame = true
+	function.ParamRef("registerPointer")
+	for index := 0; index < 7; index++ {
+		function.Param(fmt.Sprintf("word%d", index), ir.ClsL)
+	}
+	function.ParamRef("stackPointer")
+	function.Entry().RetVoid()
+
+	frame := goArgumentFrameFor(function)
+	assert.Equal(t, []int{0}, frame.incomingPointerWords, "only the stack-passed argument is caller-written")
+	assert.Equal(t, []int{0, 1}, frame.pointerWords, "the entry map adds the first register's home slot")
+	require.NotEmpty(t, frame.spills)
+	assert.Equal(t, X0, frame.spills[0].reg)
+	assert.True(t, frame.spills[0].pointer)
+	assert.Equal(t, 16, frame.spills[0].offset, "the home slots follow the stack-passed argument")
+}
+
+// A grouped aggregate that lands on the stack is caller-written like any other
+// stack argument, so all of its pointer words belong to both maps.
+func TestManagedAAPCS64KeepsStackedAggregateWordsInBothArgumentMaps(t *testing.T) {
+	interfaceType := &ir.AggType{Name: "interface", Fields: []ir.Field{
+		{Sub: ir.SubL, Pointer: true},
+		{Sub: ir.SubL, Pointer: true},
+	}}
+	function := ir.NewModule().NewFuncVoid("consume_stacked_interface")
+	function.ManagedFrame = true
+	for index := 0; index < 7; index++ {
+		function.Param(fmt.Sprintf("word%d", index), ir.ClsL)
+	}
+	function.ParamGroup("value", interfaceType, ir.ClsP, ir.ClsP)
+	function.Entry().RetVoid()
+
+	frame := goArgumentFrameFor(function)
+	assert.Equal(t, []int{0, 1}, frame.incomingPointerWords)
+	assert.Equal(t, []int{0, 1}, frame.pointerWords)
+}
+
+// A function with no stack-passed pointer argument has an empty body argument
+// map, so no safepoint reports a root in the argument frame at all.
+func TestManagedAAPCS64LeavesRegisterOnlyArgumentsOutOfTheBodyMap(t *testing.T) {
+	function := ir.NewModule().NewFuncVoid("consume_two_pointers")
+	function.ManagedFrame = true
+	function.ParamRef("left")
+	function.ParamRef("right")
+	function.Entry().RetVoid()
+
+	frame := goArgumentFrameFor(function)
+	assert.Equal(t, []int{0, 1}, frame.pointerWords)
+	assert.Empty(t, frame.incomingPointerWords)
+}
+
 func TestManagedAAPCS64DoesNotHomeEmptyAggregate(t *testing.T) {
 	empty := &ir.AggType{Name: "empty"}
 	function := ir.NewModule().NewFuncVoid("consume_empty")

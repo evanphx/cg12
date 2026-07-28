@@ -91,8 +91,25 @@ type FunctionInfo struct {
 	LocalPointerWords []int
 	StackMapPoints    []StackMapPoint
 
-	ArgumentSize         int
+	// ArgumentSize is the byte size of the argument frame the caller reserves for
+	// this function: its stack-passed arguments and stack results, followed by the
+	// home slots the stack-growth prologue spills register arguments into.
+	ArgumentSize int
+
+	// ArgumentPointerWords is the argument frame's pointer map in the entry
+	// window, which is the stack-growth prologue and therefore the call to
+	// morestack. Every pointer word the frame can hold belongs here: the caller
+	// has written the stack-passed arguments, and the prologue has just spilled
+	// the register arguments to their home slots.
 	ArgumentPointerWords []int
+
+	// SafepointArgumentPointerWords is the argument frame's pointer map at every
+	// safepoint in the body. It is the subset of ArgumentPointerWords the caller
+	// initialised -- the stack-passed arguments -- and excludes the register home
+	// slots, which the prologue writes only on the path that calls morestack and
+	// which hold whatever the caller's stack held everywhere else. Scanning those
+	// as roots would treat uninitialised stack memory as pointers.
+	SafepointArgumentPointerWords []int
 
 	// NoLocalPointers suppresses the locals stack map entirely, for assembly
 	// functions that declare they hold no roots.
@@ -309,6 +326,15 @@ func GCProgram(dataStart, dataEnd uint64, pointerOffsets []uint64) ([]byte, erro
 // is what kept an object registered by an inlined helper alive forever so its
 // cleanup and finalizer never ran (RUNTIME_PLAN.md 5.3).
 //
+// Index 0 is reserved for the entry window and a safepoint never resolves to it,
+// even when the safepoint holds no roots at all and its locals map would be
+// identical. The runtime reads one PCDATA_StackMapIndex value for both the
+// locals and the argument maps (runtime.stkframe.getStackMap), and the argument
+// map at index 0 is the entry map: it marks the register home slots, which the
+// prologue writes only on the path that calls morestack. Letting a body
+// safepoint share index 0 would point the collector at those never-written
+// words. A rootless safepoint therefore gets its own empty map instead.
+//
 // This is pure set algebra over word indexes -- see the package comment on why
 // no register numbers ever appear here.
 func FunctionStackMaps(function FunctionInfo) ([][]int, []StackMapIndexPoint) {
@@ -316,14 +342,37 @@ func FunctionStackMaps(function FunctionInfo) ([][]int, []StackMapIndexPoint) {
 	indexPoints := make([]StackMapIndexPoint, 0, len(function.StackMapPoints))
 	for _, point := range function.StackMapPoints {
 		pointerWords := normalizePointerWords(point.PointerWords)
-		index := pointerMapIndex(pointerMaps, pointerWords)
+		index := pointerMapIndex(pointerMaps[1:], pointerWords)
 		if index < 0 {
 			index = len(pointerMaps)
 			pointerMaps = append(pointerMaps, pointerWords)
+		} else {
+			index++ // pointerMapIndex searched from map 1
 		}
 		indexPoints = append(indexPoints, StackMapIndexPoint{PC: point.PC, Index: index})
 	}
 	return pointerMaps, indexPoints
+}
+
+// ArgumentStackMaps returns one argument pointer map per locals stack-map entry,
+// which is what keeps the two tables indexable by the same
+// PCDATA_StackMapIndex value.
+//
+// Index 0 is the entry window, so it gets the full argument map. Every other
+// index is a body safepoint and gets the caller-initialised subset. Writing the
+// argument map at index 0 alone -- which left every body safepoint with an
+// all-zero argument bitmap -- hid the caller's stack-passed pointer arguments
+// from the collector for the whole call.
+func ArgumentStackMaps(function FunctionInfo, entries int) [][]int {
+	argumentMaps := make([][]int, entries)
+	for index := range argumentMaps {
+		if index == 0 {
+			argumentMaps[index] = function.ArgumentPointerWords
+			continue
+		}
+		argumentMaps[index] = function.SafepointArgumentPointerWords
+	}
+	return argumentMaps
 }
 
 // normalizePointerWords returns a sorted, duplicate-free copy, which is the form

@@ -199,12 +199,82 @@ func TestGoFunctionStackMapsUseOnlyTheRootsLiveAtEachSafepoint(t *testing.T) {
 		},
 	})
 
-	assert.Equal(t, [][]int{nil, {1}, {4}}, pointerMaps)
+	assert.Equal(t, [][]int{nil, {1}, {4}, nil}, pointerMaps)
 	assert.Equal(t, []StackMapIndexPoint{
 		{PC: 80, Index: 2},
 		{PC: 120, Index: 1},
-		{PC: 160, Index: 0},
+		{PC: 160, Index: 3},
 	}, indexPoints)
+}
+
+// The rootless safepoint above gets its own empty map rather than sharing index
+// 0 with the entry window, even though the two locals maps are identical. The
+// runtime reads one PCDATA_StackMapIndex for both tables, and the argument map at
+// index 0 marks the register home slots the prologue only writes on the path to
+// morestack; sharing the index would point the collector at those never-written
+// words at an ordinary call.
+func TestGoFunctionStackMapsKeepRootlessSafepointsOffTheEntryIndex(t *testing.T) {
+	_, indexPoints := FunctionStackMaps(FunctionInfo{
+		LocalPointerWords: []int{1},
+		StackMapPoints: []StackMapPoint{
+			{PC: 80, PointerWords: nil},
+			{PC: 120, PointerWords: nil},
+		},
+	})
+
+	assert.Equal(t, []StackMapIndexPoint{
+		{PC: 80, Index: 2},
+		{PC: 120, Index: 2},
+	}, indexPoints)
+}
+
+// A function that never holds a frame root at all has an empty body map, so its
+// rootless safepoints share index 1 -- which is still not the entry index, so
+// the argument map they select is the body one.
+func TestGoFunctionStackMapsShareTheBodyIndexWhenNoFrameRootExists(t *testing.T) {
+	pointerMaps, indexPoints := FunctionStackMaps(FunctionInfo{
+		StackMapPoints: []StackMapPoint{{PC: 80, PointerWords: nil}},
+	})
+
+	assert.Equal(t, [][]int{nil, nil}, pointerMaps)
+	assert.Equal(t, []StackMapIndexPoint{{PC: 80, Index: 1}}, indexPoints)
+}
+
+// The argument map is written at every stack-map index, not only at index 0. The
+// entry index describes the whole argument frame, because the prologue has just
+// spilled the register arguments to their home slots before calling morestack;
+// every body index describes only what the caller wrote, so a stack-passed
+// pointer argument stays a root for the whole call while the home slots -- which
+// hold nothing on the path that does not call morestack -- do not.
+func TestGoArgumentStackMapsCoverEveryStackMapIndex(t *testing.T) {
+	function := FunctionInfo{
+		ArgumentPointerWords:          []int{0, 3},
+		SafepointArgumentPointerWords: []int{0},
+	}
+
+	assert.Equal(t, [][]int{{0, 3}, {0}, {0}, {0}}, ArgumentStackMaps(function, 4))
+}
+
+// The emitted bytes: four argument maps for four locals maps, so one
+// PCDATA_StackMapIndex value indexes both tables, and only the first carries the
+// register home slot at word 3.
+func TestGoArgumentStackMapsEmitOneBitmapPerLocalsMap(t *testing.T) {
+	function := FunctionInfo{
+		ArgumentSize:                  32,
+		ArgumentPointerWords:          []int{0, 3},
+		SafepointArgumentPointerWords: []int{0},
+	}
+
+	builder := NewBuilder(testArch, Options{}, nil, nil)
+	builder.stackMaps(4, ArgumentStackMaps(function, 3)...)
+
+	assert.Equal(t, []byte{
+		3, 0, 0, 0,
+		4, 0, 0, 0,
+		0b00001001,
+		0b00000001,
+		0b00000001,
+	}, builder.data)
 }
 
 func TestGoFunctionStackMapsNormalizeSafepointPointerWords(t *testing.T) {

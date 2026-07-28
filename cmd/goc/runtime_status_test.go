@@ -393,6 +393,12 @@ func TestARM64RuntimeCapabilityStatus(t *testing.T) {
 		},
 		{
 			category:    "gc",
+			name:        "stack-argument-roots",
+			source:      "runtime_stack_argument_roots.go",
+			expectation: runtimeCapabilityMustPass,
+		},
+		{
+			category:    "gc",
 			name:        "finalizer-cleanup-order",
 			source:      "runtime_finalizer_cleanup_order.go",
 			expectation: runtimeCapabilityMustPass,
