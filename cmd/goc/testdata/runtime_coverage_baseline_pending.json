@@ -4,6 +4,34 @@
   "note": "Capabilities the accepted baseline does not cover. TestCheckedRuntimeCoverageBaselineDenominator reconciles the capability matrix, the accepted baseline, and this list, so the corpus denominator cannot drift silently. Adding a capability requires either a baseline rerun or an entry here.",
   "capabilities": [
     {
+      "capability": "alloc/array-families",
+      "reason": "added to the capability matrix after the accepted 2026-07-22 baseline run; it enters the baseline at the next full-corpus rerun"
+    },
+    {
+      "capability": "alloc/large-objects",
+      "reason": "added to the capability matrix after the accepted 2026-07-22 baseline run; it enters the baseline at the next full-corpus rerun"
+    },
+    {
+      "capability": "alloc/noscan-size-classes",
+      "reason": "added to the capability matrix after the accepted 2026-07-22 baseline run; it enters the baseline at the next full-corpus rerun"
+    },
+    {
+      "capability": "alloc/pointer-bitmaps",
+      "reason": "added to the capability matrix after the accepted 2026-07-22 baseline run; it enters the baseline at the next full-corpus rerun"
+    },
+    {
+      "capability": "alloc/scan-size-classes",
+      "reason": "added to the capability matrix after the accepted 2026-07-22 baseline run; it enters the baseline at the next full-corpus rerun"
+    },
+    {
+      "capability": "alloc/tiny-sizes",
+      "reason": "added to the capability matrix after the accepted 2026-07-22 baseline run; it enters the baseline at the next full-corpus rerun"
+    },
+    {
+      "capability": "alloc/zero-sized",
+      "reason": "added to the capability matrix after the accepted 2026-07-22 baseline run; it enters the baseline at the next full-corpus rerun"
+    },
+    {
       "capability": "core-types/type-param-method-dispatch",
       "reason": "added to the capability matrix after the accepted 2026-07-22 baseline run; it enters the baseline at the next full-corpus rerun"
     },
@@ -41,6 +69,10 @@
     },
     {
       "capability": "gc/defer-capture-allocs",
+      "reason": "added to the capability matrix after the accepted 2026-07-22 baseline run; it enters the baseline at the next full-corpus rerun"
+    },
+    {
+      "capability": "gc/field-address-escape",
       "reason": "added to the capability matrix after the accepted 2026-07-22 baseline run; it enters the baseline at the next full-corpus rerun"
     },
     {
@@ -177,6 +209,30 @@
     },
     {
       "capability": "stdlib-signals/repeated-stop-reset",
+      "reason": "added to the capability matrix after the accepted 2026-07-22 baseline run; it enters the baseline at the next full-corpus rerun"
+    },
+    {
+      "capability": "write-barrier/finalizer",
+      "reason": "added to the capability matrix after the accepted 2026-07-22 baseline run; it enters the baseline at the next full-corpus rerun"
+    },
+    {
+      "capability": "write-barrier/global-roots",
+      "reason": "added to the capability matrix after the accepted 2026-07-22 baseline run; it enters the baseline at the next full-corpus rerun"
+    },
+    {
+      "capability": "write-barrier/heap-and-stack",
+      "reason": "added to the capability matrix after the accepted 2026-07-22 baseline run; it enters the baseline at the next full-corpus rerun"
+    },
+    {
+      "capability": "write-barrier/interface-closure",
+      "reason": "added to the capability matrix after the accepted 2026-07-22 baseline run; it enters the baseline at the next full-corpus rerun"
+    },
+    {
+      "capability": "write-barrier/map-channel",
+      "reason": "added to the capability matrix after the accepted 2026-07-22 baseline run; it enters the baseline at the next full-corpus rerun"
+    },
+    {
+      "capability": "write-barrier/slice-operations",
       "reason": "added to the capability matrix after the accepted 2026-07-22 baseline run; it enters the baseline at the next full-corpus rerun"
     }
   ]

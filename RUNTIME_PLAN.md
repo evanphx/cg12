@@ -50,15 +50,16 @@ this document:
 | the ECDSA case | generic method dispatch, §5.6 |
 
 The accepted baseline still needs a rerun. It is now stale in two ways: it
-covers 294 of the matrix's 338 capabilities, and the runtime source fingerprint
+covers 294 of the matrix's 352 capabilities, and the runtime source fingerprint
 has moved, so a diff against it is refused rather than silently misleading.
 
 ### Current state (2026-07-28)
 
-The capability matrix holds **338 capabilities and no `knownGap` at all**. The
+The capability matrix holds **352 capabilities and no `knownGap` at all**. The
 only declared exception is `defer-panic/panic-string-output`, a deliberate
 `expectedFailure`. Phase 1 (§5) is complete; §5.10 records what remains open,
-none of which is a failing capability.
+none of which is a failing capability. §6.1 adds the fourteen allocation-family
+and write-barrier capabilities that took the matrix from 338 to 352.
 
 That is a statement about the matrix, not about the runtime. Per §2, executing a
 line is not evidence that stack maps, write barriers, unwinding, or scheduler
@@ -84,11 +85,11 @@ The two denominators are now reconciled. There is only one denominator: the
 capability matrix *is* the coverage corpus, and every capability reports one
 explicit compile/run/coverage outcome, including the ones this environment
 cannot run. The accepted baseline covers 294 programs while the matrix holds
-338, and that gap is baseline staleness rather than an exclusion set — each of
-the 44 capabilities was added after the 2026-07-22 run. They are listed with a
+352, and that gap is baseline staleness rather than an exclusion set — each of
+the 58 capabilities was added after the 2026-07-22 run. They are listed with a
 reason in `cmd/goc/testdata/runtime_coverage_baseline_pending.json`, and
 `TestCheckedRuntimeCoverageBaselineDenominator` reconciles matrix, baseline, and
-list in both directions: 294 + 44 = 338, no capability may appear in both, and
+list in both directions: 294 + 58 = 352, no capability may appear in both, and
 no baseline program may name a capability the matrix has dropped. Adding a
 capability therefore requires either accepting a new baseline or recording why
 the baseline does not cover it. The list empties when the pending full-corpus
@@ -267,6 +268,14 @@ Maintain machine-readable classifications for uncovered active functions:
 
 Foreign-platform files never enter this inventory. Configuration-disabled
 functions remain visible but do not become artificial coverage targets.
+
+A classification is a claim and can be wrong in the direction that costs work
+rather than the direction that hides it. `runtime/malloc_generated.go` was
+`required` on the reasoning that "specialized allocation entry points must be
+exercised by generated Go allocation shapes"; no Go program can reach them,
+because the experiment that switches them on is off in this build. It is now
+`configuration-disabled` with the mechanism recorded and a test that proves the
+boundary. See section 6.1.
 
 ### 4.3 Cover abnormal termination and assembly
 
@@ -1574,6 +1583,13 @@ the reports of the jobs that found them.
   `println("a", 1, true)` prints `a1true` where the host toolchain prints
   `a 1 true`. Found while reducing §5.9. Affects the runtime's own diagnostics.
 
+- **A field address in a longer chain still does not make its object escape.**
+  `&v.a.b` and `&v[i].f` leave `v` on the frame, so every loop iteration reuses
+  one object and a heap or global slot can hold a goroutine stack address. The
+  direct case, `&v.f`, was fixed in §6.1; this is the residue, recorded by
+  `TestFieldAddressChainRemainsAKnownHole` and explained there, including why
+  the obvious widening cannot be applied.
+
 - **Per-iteration loop lowering is gated on `g.runtimeAllocation`.** With that
   mode off, escaping captures are not heap-lifted at all, so loops keep the
   pre-§5.9 shared-slot behaviour — that is, the miscompile returns. `goc` always
@@ -1602,6 +1618,14 @@ the reports of the jobs that found them.
   is the common case. This is real bloat throughout the runtime and the standard
   library, and removing it is a frontend change with a large blast radius, so it
   was deliberately not bundled into §5.3's fix.
+
+- **Every binary carries the whole size-specialized allocator as dead code.**
+  `runtime/malloc_generated.go`'s 66 functions plus a func-value thunk for each
+  of the 1026 dispatch-table entries are compiled into every program, 1090 of
+  4047 text symbols in a trivial one, and none of them can run: the tables are
+  indexed only under a `goexperiment` constant that is false for this build.
+  Reachability does not fold the constant before computing the reachable set.
+  See §6.1.
 
 - **`internal/poll/writev.go`'s `&chunk[0]`** is treated as addressing the slice
   header, so `chunk` is heap-lifted. Pre-existing conservatism, but since §5.9 it
@@ -1663,6 +1687,245 @@ Exit criterion: the allocation families are reached intentionally; GC stress
 passes with low `GOGC`, forced collection, stack movement, and concurrent
 mutation; no compiler validation fires; and core allocation/GC uncovered paths
 are either tested or classified.
+
+### 6.1 Allocation families and write barriers (2026-07-28)
+
+The allocation-family and write-barrier halves of the list above are done. Stack
+scanning, GC stress, checkmark, zombie detection, conservative scan boundaries,
+mark-worker kinds, the scavenger, huge-page transitions, the stack-slot
+validator and the dead-slot poisoner are **not** covered by this slice and
+remain open.
+
+Current checkpoint:
+
+- [x] Enumerate the families `malloc_generated.go` actually contains, and
+  classify them.
+- [x] Determine with the coverage collector which families the matrix reaches.
+- [x] Add capabilities that reach the live families deliberately, asserting a
+  semantic property rather than executing a path.
+- [x] Add a capability for each write-barrier shape section 6 lists, run under
+  `GODEBUG=cg12checkwb=2`.
+- [x] Add an opt-in audit of write-barrier insertion, and a test that detects an
+  *omitted* barrier rather than only a spurious one.
+- [ ] Stack scanning, GC stress, checkmark, the scavenger, the stack-slot
+  validator and the dead-slot poisoner. Not attempted here.
+
+#### The enumeration, and why none of it is live
+
+`malloc_generated.go` holds exactly **66 functions in three families**, and
+`malloc_tables_generated.go` maps a request size to one of them:
+
+| Family | Functions | Request sizes | Shape |
+| --- | --- | --- | --- |
+| `mallocgcSmallScanNoHeaderSC1` .. `SC26` | 26 | 1..512, one per size class | pointerful, bitmap in the span |
+| `mallocgcTinySize1` .. `TinySize15` | 15 | 1..15, one per exact size | pointer-free, combined into 16-byte blocks |
+| `mallocgcSmallNoScanSC2` .. `SC26` | 25 | 16..512, one per size class | pointer-free |
+
+There is no `mallocgcSmallNoScanSC1`: a pointer-free request below 16 bytes goes
+to the tiny allocator, so the eight-byte class has no pointer-free entry point of
+its own. The scan table's size-class boundaries are 8, 16, 24, 32, 48, 64, 80,
+96, 112, 128, 144, 160, 176, 192, 208, 224, 240, 256, 288, 320, 352, 384, 416,
+448, 480, 512, and the no-scan table's are the same from 16 up.
+
+**All 66 are unreachable in this build.** `runtime.mallocgc` indexes
+`mallocScanTable`/`mallocNoScanTable` only under
+`sizeSpecializedMallocEnabled`, which requires
+`goexperiment.SizeSpecializedMalloc`. goc builds the standard library with
+`go/build`'s default context, and Go 1.26.1's default tool tags do not include
+`goexperiment.sizespecializedmalloc`, so `internal/goexperiment` selects
+`exp_sizespecializedmalloc_off.go`. The coverage collector confirms it in two places. The accepted
+2026-07-22 baseline's executed-function list contains all five live entry points
+in `malloc.go` -- `mallocgcTiny`, `mallocgcSmallNoscan`,
+`mallocgcSmallScanNoHeader`, `mallocgcSmallScanHeader`, `mallocgcLarge` -- and no
+`SC` or `TinySize` function at all. A targeted collection over a program that
+allocates across the tiny, no-scan, scan-no-header and scan-header families
+showed those four executing and every one of the 66 generated functions
+**compiled but not executed**.
+
+`runtime/malloc_generated.go` was classified `required` in
+`cmd/goc/runtime_coverage_classifications.json`, with the reason "Specialized
+allocation entry points must be exercised by generated Go allocation shapes".
+That was wrong and is now `configuration-disabled` with the mechanism recorded.
+`TestSizeSpecializedMallocIsDisabledForThisBuild` in `goc/` proves the
+configuration boundary by checking both the tool-tag list and the file
+`internal/goexperiment` actually selects, and fails if the experiment ever
+becomes the default.
+
+The **live** families, which is what the new capabilities reach, are in
+`malloc.go`:
+
+| Family | Reached by |
+| --- | --- |
+| `&zerobase` (size 0) | `alloc/zero-sized` |
+| `mallocgcTiny` (pointer-free, < 16 bytes) | `alloc/tiny-sizes` |
+| `mallocgcSmallNoscan` (pointer-free, 16 .. 32760) | `alloc/noscan-size-classes`, `alloc/large-objects` |
+| `mallocgcSmallScanNoHeader` (pointerful, <= 512) | `alloc/scan-size-classes` |
+| `mallocgcSmallScanHeader` (pointerful, 513 .. 32760) | `alloc/large-objects`, `alloc/pointer-bitmaps` |
+| `mallocgcLarge` (> 32760) | `alloc/large-objects` |
+| `newarray` | `alloc/array-families` |
+
+#### Compiler bloat this exposed
+
+Because reachability does not fold `sizeSpecializedMallocEnabled` before
+computing it, cg12 compiles all 66 dead functions **and** a func-value thunk for
+every one of the 1026 table entries. In a program that only reads `MemStats`,
+that is 66 + 1024 = 1090 of 4047 text symbols -- **27% of the binary's
+functions** -- that can never run. Fixing it is a reachability change (constant
+folding before the reachable set is computed) with a wide blast radius and was
+not attempted here.
+
+#### New capabilities
+
+Fourteen, all `mustPass`. The matrix is now **352**.
+
+| Capability | What it asserts |
+| --- | --- |
+| `alloc/noscan-size-classes` | every pointer-free class 2..60: an exact-size request and a one-byte-above-the-previous-class request both land in that class, measured with `MemStats.BySize`, and the object is 8-aligned and survives a collection |
+| `alloc/scan-size-classes` | every pointerful class 1..26 up to the 512-byte header threshold: the object lands in the class, and every pointer word still names its own referent after a collection and a round of reuse, which is a check on the bitmap `writeHeapBitsSmall` wrote for that class |
+| `alloc/tiny-sizes` | each tiny request size 1..15 meets the alignment its size requires, tiny objects sharing a block do not overlap, 4096 one-byte objects consume fewer than 2048 blocks, and a block stays alive while any object in it is reachable |
+| `alloc/zero-sized` | zero-sized structs, fields, slices and arrays; that a trailing zero-sized field is padded so its address is not one past the end; and that an object retained only by a pointer to that field is not reused |
+| `alloc/large-objects` | large allocations are page aligned, zeroed to their last byte, non-overlapping; and pointerful objects above the header threshold and several pages long keep pointer words at the start, middle and end |
+| `alloc/array-families` | element stride equals `unsafe.Sizeof`, alignment matches the element type, a repeated pointer bitmap is right in every element and not only the first, and an impossible `make` panics |
+| `alloc/pointer-bitmaps` | pointer first, last, alone in the middle, alternating, in word 63 of a header-free object and past word 64 of a header-carrying one. Scalars hold plausible heap addresses, so a bit set on a scalar word is likely to fault rather than be ignored |
+| `gc/field-address-escape` | the reducer for the defect below |
+| `write-barrier/heap-and-stack` | heap-to-heap and stack-to-heap stores under a live mark phase |
+| `write-barrier/global-roots` | every shape of package-level variable: pointer, struct, slice, array, interface, map, string |
+| `write-barrier/interface-closure` | direct and indirect interface values, and closures with captured pointers |
+| `write-barrier/slice-operations` | element stores, growing append, `copy` (`typedslicecopy`), `clear` (`memclrHasPointers`), and append from another slice |
+| `write-barrier/map-channel` | pointerful map keys and elements across growth, replacement and deletion; buffered, unbuffered and select channel sends |
+| `write-barrier/finalizer` | every finalizer and cleanup runs exactly once, a resurrecting finalizer gets an intact object, and a cleanup's argument survives until it runs |
+
+Every one was run with the host Go toolchain first, per section 3 step 2. Four
+of them failed as first written and were wrong assertions rather than toolchain
+differences -- they failed identically on both toolchains, which is what
+identified them as mine. The fifth divergence was real: `alloc/zero-sized`
+passed on the host and failed under goc, and is the defect below.
+
+The six `write-barrier/*` capabilities carry `env: []string{"GODEBUG=cg12checkwb=2"}`,
+a new field on `runtimeCapability`, rather than re-executing themselves.
+`TestRuntimeCapabilityEnvironmentEntriesAreWellFormed` requires every capability
+in that category to declare it, so one cannot silently stop being a barrier
+check. That the barriers are really reached is not assumed: a coverage run over
+`write-barrier/heap-and-stack` shows `runtime.cg12CheckWriteBarrierPair`,
+`runtime.atomicwb`, `runtime.wbBufFlush1` and `runtime.gcmarknewobject` all
+executing.
+
+#### Fixed: an escaping field address left its object on the frame (2026-07-28)
+
+Found by `alloc/zero-sized`, which held a pointer to a trailing zero-sized field
+and read the object back. Reduced to:
+
+```go
+for i := 0; i < 4; i++ {
+	v := &node{}
+	v.payload[0] = byte(i)
+	sink = append(sink, &v.payload)   // the address of a FIELD, not of v
+}
+```
+
+Go gives each iteration its own object and four distinct field addresses. cg12
+gave all four the same address, and the last iteration's value was the only one
+that survived. `runtime.SetFinalizer` on one of those addresses threw
+`pointer not in allocated block`, and the address is in the traceback's frame
+range: the objects were **frame allocations, and a package-level slice was
+holding a goroutine stack address**. That is the invariant section 5.8 exists to
+protect, reached by a different route, plus a wrong answer in ordinary Go.
+
+The cause is in `nonEscapingObjectUse`. Its `*ast.IndexExpr` case asks whether
+the address of `v[i]` escapes; its `*ast.SelectorExpr` case returned "does not
+escape" for every field selection without asking the same question about
+`&v.f`. So no use of `v` ever reported that `v` was addressed, and
+`objectDoesNotEscape` left the composite literal on the frame.
+
+The fix adds that question, gated on a new `gen.fieldAddressesEscape` flag that
+is set only while `nonEscapingAddressOfFreshAllocation` decides whether one
+fresh allocation may stay on the frame. **The gate is the whole fix.** The same
+machinery has a second caller, `findEscapingCaptures`, which promotes the
+*variable's slot* rather than what the variable points at; answering yes there
+is both unnecessary and destructive. Three measurements say so, each on the same
+program compiled by the merge-base, the ungated and the gated compiler:
+
+- the set of frontend heap-allocation candidates gains 18
+  `internal/runtime/atomic.Pointer` instantiations -- `Load`, `Store`,
+  `CompareAndSwap` and their NoWB variants, all because of `&p.v` -- and five
+  `runtime.unwinder` values;
+- the set of functions that call `runtime.newobject` gains
+  `runtime.copystack`, `runtime.scanstack`, `runtime.cg12ReportStaleStackWord`
+  and two runtime closures;
+- the program dies with `morestack on g0` from `runtime.sweepLocked.sweep`,
+  which now allocates.
+
+Widening `addressedExpression` to walk selector chains, which is the natural way
+to close the remaining hole below, does the same thing by a slightly different
+route: it makes `runFinalizers`' `f := &fb.fin[i-1]` escape through
+`&f.ot.Type`, so `fb` becomes an escaping capture and the enclosing loop gets
+per-iteration heap storage. The exact variable that makes `sweep` allocate was
+not identified; only that the same widening causes it.
+
+Measured on `write-barrier/heap-and-stack` at `GOMAXPROCS=4`, 400 runs each,
+binaries built from identical sources: the ungated fix produced
+`fatal error: failed to set sweep barrier` **104 of 400 times**; the merge base
+and the gated fix each produced **0 of 400**. The gated fix leaves the set of
+functions that call `runtime.newobject` unchanged: 691 on both sides, and
+identical once the numbering of compiler-generated wrappers is normalised.
+
+Guarded by `TestFieldAddressThatEscapesPromotesItsObject` in
+`goc/escape_test.go`, which fails on the pre-fix tree, and end to end by the
+`gc/field-address-escape` capability, which fails deterministically on the
+pre-fix compiler with "two loop iterations shared one object behind a field
+address".
+
+**What is still open.** A longer chain is still not seen:
+`&v.a.b` and `&v[i].f` leave `v` on the frame, because `addressedExpression`
+looks only for an address applied directly to the expression it is given.
+Verified against the host toolchain: `nestedSink[0] != nestedSink[1]` is `true`
+on host Go and `false` under goc. `TestFieldAddressChainRemainsAKnownHole`
+records it and fails if it is closed without this section being updated. Closing
+it by walking `addressedExpression` up through selector chains reproduces the
+whole list of runtime damage above, because the ungated `findEscapingCaptures`
+consumer sees the wider set; closing it properly means teaching
+`findEscapingCaptures` that `&p.f` on a pointer-typed `p` addresses the pointee
+rather than `p`'s slot. That was not attempted here.
+
+#### The write-barrier audit
+
+`GOC_DEBUG_WRITEBARRIER=1` prints one line per pointer store the frontend
+lowered, saying whether a barrier was emitted or elided and which rule decided
+it: `pointer-store`, `aggregate-store`, `typedslicecopy`, `memclrHasPointers`,
+`stack-destination`, `not-in-heap-pointer`, `nowritebarrier-pragma` or
+`runtime-allocation-disabled`. It is opt-in and off by default, in the spirit of
+`GOC_DEBUG_NOSPLIT`, and lives in `goc/writebarrier_audit.go`.
+
+It exists because of the asymmetry section 6 asks about. Sections 5.7 and 5.8
+each found a barrier emitted where upstream emits none, and both were visible in
+the output. A barrier **missing** where upstream emits one is not visible at all:
+an elided barrier is an ordinary store, indistinguishable from a store of a
+scalar. Recording the decision where it is made is what makes the omission
+direction checkable.
+
+`TestEveryBarrierShapeEmitsABarrier` in `goc/writebarrier_audit_test.go` is the
+omission detector: it compiles one function per barrier shape and requires an
+emitted record for each. `TestBarriersAreElidedWhereTheyMustBe` is its
+counterpart, so the first test cannot be satisfied by barriering everything.
+
+**How sensitive is it, honestly.** It sees every store routed through
+`gen.store`, `gen.storeInlineValue` or the bulk builtins, which is where the
+frontend makes its barrier decisions, and it would catch a rule that stopped
+firing for a listed shape. It cannot see a pointer store emitted elsewhere in the
+frontend as a bare `ir.Block.Store`: such a site records nothing, so it is
+indistinguishable from a shape the test simply does not list. The list of shapes
+in the test is therefore the coverage, not the mechanism. Nothing here is a proof
+that no barrier is missing anywhere; a proof would need either an IR-level scan
+for pointer-class stores to non-frame destinations, or checkmark mode, and
+neither was built in this slice.
+
+No omission was found. The audit did surface one piece of conservatism worth
+recording: a store into a field of a `var local node` frame variable is recorded
+`emitted pointer-store` rather than `elided stack-destination`, because
+`isStackAddress` does not recognise the derived field address. It is sound --
+`goc_storep` classifies the destination dynamically and takes the direct path --
+but it is a call and a branch per store, and it is the same imprecision section
+5.7 leaves open in `goc_storep`.
 
 ## 7. Phase 3: Scheduler, goroutines, synchronization, and stacks
 
@@ -1840,11 +2103,18 @@ subsection. What follows replaces it.
    usable failure rate before it can be attributed, in the way §5.8's
    `gc/keepalive-stack-root` made its predecessor measurable.
 
-4. **Begin Phase 2 (§6).** The allocation-family, write-barrier and stack-map
-   work is now on a foundation that has been independently exercised, and §6's
-   compiler-emitted checks should be built on the diagnostics Phase 1 produced
-   rather than new ones: `cg12scanroots`, `cg12checkwb` and `cg12checkstackcopy`
-   already cover root reporting, barrier validation and stack-copy staleness.
+4. **Continue Phase 2 (§6).** The allocation-family and write-barrier halves are
+   done and recorded in §6.1, which also names the new
+   `GOC_DEBUG_WRITEBARRIER` audit. What remains in §6 is the stack-map and GC
+   half: stack scanning at calls, loops, panic points, channel blocking, syscall
+   transitions and stack copying; concurrent allocation during marking, assist
+   work and sweep pacing; checkmark, zombie detection, conservative scan
+   boundaries and mark-worker kinds; the scavenger and huge-page transitions;
+   and the two compiler-emitted checks §6 lists that were not built here, the
+   pointer-marked stack-slot validator and the dead-slot poisoner. Build them on
+   the diagnostics Phase 1 produced rather than new ones: `cg12scanroots`,
+   `cg12checkwb` and `cg12checkstackcopy` already cover root reporting, barrier
+   validation and stack-copy staleness.
 
 The original order was chosen so that the mechanisms used to diagnose later
 phases — unwinding, stack metadata, GC pointer accuracy, atomics, coverage

@@ -25,8 +25,8 @@
     },
     {
       "file": "runtime/malloc_generated.go",
-      "classification": "required",
-      "reason": "Specialized allocation entry points must be exercised by generated Go allocation shapes."
+      "classification": "configuration-disabled",
+      "reason": "The size-specialized allocation entry points are reached only through mallocScanTable and mallocNoScanTable, which runtime.mallocgc indexes only when sizeSpecializedMallocEnabled is true. That constant requires goexperiment.SizeSpecializedMalloc, and goc selects internal/goexperiment's files with go/build's default tool tags, which do not include goexperiment.sizespecializedmalloc for the Go 1.26.1 toolchain this repository builds against, so exp_sizespecializedmalloc_off.go is selected. All 66 functions in the file are therefore compiled but unreachable. The live families are runtime.mallocgcTiny, mallocgcSmallNoscan, mallocgcSmallScanNoHeader, mallocgcSmallScanHeader and mallocgcLarge in runtime/malloc.go, which the alloc/* capabilities cover. TestSizeSpecializedMallocIsDisabledForThisBuild proves the configuration boundary. See RUNTIME_PLAN.md section 6.1."
     },
     {
       "file": "runtime/pinner.go",

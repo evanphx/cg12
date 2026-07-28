@@ -966,3 +966,130 @@ func keepAliveSlotIsAFramePointerWord(function *ir.Func) bool {
 	}
 	return false
 }
+
+// Taking the address of a field of a local variable and letting that address
+// escape has to promote the variable, because a field address is an interior
+// pointer that keeps the whole object alive. cg12 treated every field selection
+// as a non-escaping use, so the object stayed on the frame and a package-level
+// slice ended up holding a goroutine stack address -- the invariant
+// RUNTIME_PLAN.md 5.8 protects -- while every loop iteration reused one slot.
+// The end-to-end reducer is the gc/field-address-escape capability.
+func TestFieldAddressThatEscapesPromotesItsObject(t *testing.T) {
+	module, err := goc.Compile("field_address.go", []byte(`
+package main
+
+import "runtime"
+
+type payload struct {
+	bytes [64]byte
+}
+
+type record struct {
+	first payload
+	tag   int64
+}
+
+var fieldSink []*payload
+var scalarSink []*int64
+var elementSink []*record
+
+func leakFieldAddress() {
+	object := &record{}
+	fieldSink = append(fieldSink, &object.first)
+}
+
+func leakScalarFieldAddress() {
+	object := &record{}
+	scalarSink = append(scalarSink, &object.tag)
+}
+
+func leakElementAddress() {
+	objects := &[2]record{}
+	elementSink = append(elementSink, &objects[1])
+}
+
+func keepFieldAddressLocal() int64 {
+	object := &record{}
+	pointer := &object.tag
+	*pointer = 7
+	return object.tag
+}
+
+func main() {
+	runtime.GC()
+	leakFieldAddress()
+	leakScalarFieldAddress()
+	leakElementAddress()
+	if keepFieldAddressLocal() != 7 {
+		panic("local field address mismatch")
+	}
+}
+`))
+	require.NoError(t, err)
+
+	leakField := functionWithSuffix(t, module, "main.leakFieldAddress")
+	assert.True(t, callsSymbol(leakField, "runtime.newobject"),
+		"an escaping field address left its object on the frame")
+
+	leakScalar := functionWithSuffix(t, module, "main.leakScalarFieldAddress")
+	assert.True(t, callsSymbol(leakScalar, "runtime.newobject"),
+		"an escaping scalar field address left its object on the frame")
+
+	leakElement := functionWithSuffix(t, module, "main.leakElementAddress")
+	assert.True(t, callsSymbol(leakElement, "runtime.newobject"),
+		"an escaping element address left its object on the frame")
+
+	// The counterpart: a field address that stays inside the function must not
+	// force the object onto the heap. Without this the fix would simply
+	// heap-allocate every addressed local, which is the conservatism that makes
+	// runtime code allocate on paths where allocation is forbidden.
+	keepLocal := functionWithSuffix(t, module, "main.keepFieldAddressLocal")
+	assert.False(t, callsSymbol(keepLocal, "runtime.newobject"),
+		"a field address confined to its function promoted the object to the heap")
+}
+
+// The escape rule above only sees an address applied directly to the field
+// selection. A longer chain -- &v.a.b, or &v[i].f -- still reports that v is not
+// addressed, so v stays on the frame and its interior pointer can be published.
+// This test records that hole so it cannot be lost, and fails if it is closed
+// without the plan being updated.
+//
+// Closing it by walking addressedExpression up through selector and index
+// chains was tried and rejected: it makes runtime.finalizer's f := &fb.fin[i-1]
+// escape through &f.ot.Type, which gives the enclosing loop per-iteration heap
+// storage, and it makes runtime.sweepLocked.sweep call runtime.newobject. The
+// sweeper runs on g0 where allocation is forbidden, so the tree dies with
+// "morestack on g0". See RUNTIME_PLAN.md section 6.
+func TestFieldAddressChainRemainsAKnownHole(t *testing.T) {
+	module, err := goc.Compile("field_address_chain.go", []byte(`
+package main
+
+import "runtime"
+
+type inner struct {
+	bytes [64]byte
+}
+
+type outer struct {
+	first inner
+	tag   int64
+}
+
+var nestedSink []*[64]byte
+
+func leakNestedFieldAddress() {
+	object := &outer{}
+	nestedSink = append(nestedSink, &object.first.bytes)
+}
+
+func main() {
+	runtime.GC()
+	leakNestedFieldAddress()
+}
+`))
+	require.NoError(t, err)
+
+	leakNested := functionWithSuffix(t, module, "main.leakNestedFieldAddress")
+	assert.False(t, callsSymbol(leakNested, "runtime.newobject"),
+		"the nested field-address hole is closed; update RUNTIME_PLAN.md section 6 and remove this test")
+}
