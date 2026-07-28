@@ -1259,17 +1259,35 @@ func (m *mc) reloadReg(r Reg, s int, cls ir.Cls) {
 	}
 }
 
-// memAddr resolves a load/store address operand to an x64 memory operand,
-// handling a direct symbol (RIP-relative) or a computed pointer in a register.
-// It returns the operand and, for the symbol case, records the PC32 relocation
-// after the caller emits the instruction (via the returned fixup).
 // memFor builds the memory operand for a (possibly address-folded) load or store.
 // ai is the index of the base among the instruction's args (0 for a load, 1 for a
 // store, past the stored value). in.Aux is the displacement and in.Amode the index
-// scale (0 = no index). An alloca base resolves to rbp+off folded into the
-// displacement, needing no register; a spilled non-alloca base (the base+disp
-// shape, which never carries an index) is loaded into scratch. The index, when
-// present, has an alloca base, so scratch1 is free for it.
+// scale (0 = no index).
+//
+// One general-purpose scratch register is available to it, gpScratch1, and only
+// that one. gpScratch0 is already spoken for by the callers: xselect.go's store
+// resolves the stored value with gpValue(..., gpScratch0) before handing it to
+// storeGP, so on a store of a spilled value gpScratch0 holds that value across the
+// whole address computation, and gpDst likewise hands out gpScratch0 as the
+// destination of a load whose result is spilled. So the operand is built to need at
+// most gpScratch1:
+//
+//   - A base already in a register is used as it is, and a rematerialised alloca
+//     base (locFrameAddr) folds into rbp + displacement. Neither costs a register,
+//     so an index that needs loading takes gpScratch1.
+//   - A base with no register of its own -- a spilled alloca, or the base+disp
+//     shape's general pointer -- is loaded into gpScratch1. If an index needs
+//     loading too there is no second register for it, so base + index*scale is
+//     computed into gpScratch1 alone (addrIntoScratch) and the operand degrades to
+//     [gpScratch1 + disp] rather than a SIB.
+//
+// That last case is the one this used to get wrong: it loaded the base into
+// gpScratch1 and then the index into gpScratch1 as well, silently addressing
+// [index + index*scale + disp]. It was reachable because an alloca whose address is
+// passed to a call is not rematerialisable (remat.go's srcResolvesOperands), so a
+// folded [alloca + index*scale] can have a base that lives in a spill slot after
+// all -- the invariant this comment used to assert, that an index's base always
+// resolves to rbp+off, was false.
 func (m *mc) memFor(in *ir.Instr, ai int) (x64.Mem, func()) {
 	base := in.Args[ai]
 	disp := int32(in.Aux)
@@ -1281,22 +1299,94 @@ func (m *mc) memFor(in *ir.Instr, ai int) (x64.Mem, func()) {
 	}
 	var mem x64.Mem
 	mem.Disp = disp
-	switch l := m.refLoc(base); l.kind {
-	case locFrameAddr:
-		mem.Base, mem.Disp = l.base.mreg(), mem.Disp+l.off
-	case locReg:
-		mem.Base = l.reg.mreg()
-	default:
+	baseLoc := m.refLoc(base)
+	if in.Amode == 0 {
+		switch baseLoc.kind {
+		case locFrameAddr:
+			mem.Base, mem.Disp = baseLoc.base.mreg(), mem.Disp+baseLoc.off
+		case locReg:
+			mem.Base = baseLoc.reg.mreg()
+		default:
+			mem.Base = m.gpValue(base, gpScratch1).mreg()
+		}
+		return mem, func() {}
+	}
+
+	index := in.Args[ai+1]
+	scale := byte(in.Amode)
+	indexLoc := m.refLoc(index)
+	// A pre-coloured temp could name gpScratch1 itself, in which case loading the
+	// base there would clobber it, so "the index has a register" means a register
+	// that is not the one the base would take.
+	indexHasReg := indexLoc.kind == locReg && indexLoc.reg != gpScratch1
+	switch {
+	case baseLoc.kind == locFrameAddr:
+		mem.Base, mem.Disp = baseLoc.base.mreg(), mem.Disp+baseLoc.off
+	case baseLoc.kind == locReg:
+		mem.Base = baseLoc.reg.mreg()
+	case indexHasReg:
+		// Only the base needs the scratch; loading it cannot disturb the index.
 		mem.Base = m.gpValue(base, gpScratch1).mreg()
+	default:
+		m.addrIntoScratch(baseLoc, index, scale)
+		mem.Base = gpScratch1.mreg()
+		return mem, func() {}
 	}
-	if in.Amode != 0 {
-		mem.Index = m.gpValue(in.Args[ai+1], gpScratch1).mreg()
-		mem.Scale = byte(in.Amode)
-		mem.HasIndex = true
-	}
+	mem.Index = m.gpValue(index, gpScratch1).mreg()
+	mem.Scale = scale
+	mem.HasIndex = true
 	return mem, func() {}
 }
 
+// addrIntoScratch computes base + index*scale into gpScratch1 without touching any
+// other register, for the one folded address that cannot be encoded directly: base
+// and index both need loading, and gpScratch1 is the only register memFor may use.
+//
+// The index is loaded first because it is the operand that has to be scaled, and
+// scaling it in place is a shift; the base then folds in from its home with a
+// single memory-operand add. Base-first would leave the index unscaled with no
+// register to scale it in -- the very register that is missing.
+func (m *mc) addrIntoScratch(baseLoc loc, index ir.Ref, scale byte) {
+	if baseLoc.kind != locMem {
+		// Unreachable from foldAddressing, which pairs an index only with an alloca
+		// base: an alloca temp's home is a register, a rematerialised frame address
+		// (both handled by memFor without coming here), or a spill slot, which is
+		// this locMem. An immediate or symbol-address base has no memory home to add
+		// from and would need the second register this path exists to avoid, so it is
+		// refused rather than encoded as something else.
+		m.fail(fmt.Errorf("amd64: folded indexed address with a base of kind %d needs two scratch registers", baseLoc.kind))
+		return
+	}
+	indexLoc := m.refLoc(index)
+	m.moveToReg(regLoc(gpScratch1, indexLoc.size, false), indexLoc)
+	// The scale multiplies the whole 64-bit register, exactly as the SIB byte's
+	// scale would, so the shift is 64-bit even for a 32-bit index -- whose load
+	// zero-extended it, so the high half is the zero the SIB form would have seen.
+	if shift := scaleShift(scale); shift != 0 {
+		m.emit(x64.ShlImm(true, gpScratch1.mreg(), shift))
+	}
+	m.emit(x64.AddMem(true, gpScratch1.mreg(), x64.At(baseLoc.base.mreg(), baseLoc.off)))
+}
+
+// scaleShift is the shift amount an index scale of 1, 2, 4 or 8 stands for, the
+// shift form of what x64's scaleBits encodes into a SIB byte.
+func scaleShift(scale byte) byte {
+	switch scale {
+	case 2:
+		return 1
+	case 4:
+		return 2
+	case 8:
+		return 3
+	default:
+		return 0
+	}
+}
+
+// memAddr resolves a load/store address operand to an x64 memory operand,
+// handling a direct symbol (RIP-relative) or a computed pointer in a register.
+// It returns the operand and, for the symbol case, records the PC32 relocation
+// after the caller emits the instruction (via the returned fixup).
 func (m *mc) memAddr(addr ir.Ref, scratch Reg) (x64.Mem, func()) {
 	if c := m.constOf(addr); c != nil && c.Kind == ir.ConstSym && !c.Thread {
 		sym, off := c.Sym, c.Int

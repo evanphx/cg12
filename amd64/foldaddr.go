@@ -7,14 +7,23 @@ import "github.com/evanphx/cg12/ir"
 // x86 addresses [base + index*scale + disp] in one instruction, so an array access
 // need not compute its address in a register first.
 //
-// Two shapes are folded, chosen so the emitter never needs more scratch registers
-// than exist:
+// Two shapes are folded:
 //
-//   - [base + disp]: base + a constant, for any base. One address register at most.
-//   - [alloca + index*scale (+ disp)]: an alloca base (which resolves to rbp+off,
-//     needing no register) plus a scaled index. A general (non-alloca) base with an
-//     index is left alone, since base and index together could exhaust the scratch
-//     registers a spilled value also needs.
+//   - [base + disp]: base + a constant, for any base.
+//   - [alloca + index*scale (+ disp)]: an alloca base plus a scaled index. A
+//     general (non-alloca) base with an index is left alone; widening that is a
+//     codegen change, not something the emitter needs.
+//
+// Note what this pass cannot know, and therefore what memFor must not assume. It
+// runs on the IR, before register allocation (see lower), so at fold time a base has
+// no home yet: whether an alloca ends up rematerialised to rbp+off, in a register,
+// or in a spill slot is decided later, and a spilled one does need a register in the
+// operand after all. A restriction phrased in terms of a base "needing no register"
+// is therefore not expressible here at all. memFor instead encodes whatever pair it
+// is handed out of the one scratch register it has, so what is folded here is a
+// codegen choice rather than a correctness constraint on the emitter (the one pair
+// it cannot encode -- an immediate or symbol base carrying an index, which this pass
+// never produces -- it refuses outright rather than mis-encoding).
 //
 // The result rides on the load/store: Args carry base and (when scaled) index after
 // the stored value, Aux is the displacement, and Amode is the scale (0 = no index).
