@@ -90,10 +90,12 @@ func (builder *Builder) Build(functions, translatedFunctions []FunctionInfo, mod
 	findFuncBuckets := findFuncBucketCount(builder.object, functions, endSymbol)
 	stackMapIndexPoints := make([][]StackMapIndexPoint, len(functions))
 	stackMapEntryCounts := make([]int, len(functions))
+	growthStackMapIndexes := make([]int, len(functions))
 	for index, function := range functions {
-		pointerMaps, indexPoints := FunctionStackMaps(function)
+		pointerMaps, indexPoints, growthIndex := FunctionStackMaps(function)
 		stackMapEntryCounts[index] = len(pointerMaps)
 		stackMapIndexPoints[index] = indexPoints
+		growthStackMapIndexes[index] = growthIndex
 	}
 	pcDataSlots := GoPCDataSlots
 	if builder.extraPCData != nil {
@@ -142,7 +144,7 @@ func (builder *Builder) Build(functions, translatedFunctions []FunctionInfo, mod
 	stackMapOffsets := make([]uint32, len(functions))
 	for index, function := range functions {
 		stackMapOffsets[index] = uint32(builder.offset(".goc.go.pctab"))
-		builder.data = append(builder.data, builder.arch.StackMapPCData(function.FrameStart, stackMapIndexPoints[index])...)
+		builder.data = append(builder.data, builder.arch.StackMapPCData(function.FrameStart, growthStackMapIndexes[index], stackMapIndexPoints[index])...)
 	}
 	extraPCDataOffsets := make([]uint32, len(functions))
 	if builder.extraPCData != nil {
@@ -162,14 +164,14 @@ func (builder *Builder) Build(functions, translatedFunctions []FunctionInfo, mod
 		builder.align(4)
 		argumentOffsets[index] = uint32(builder.position() - builder.labels[".goc.go.gofunc"])
 		words := (function.ArgumentSize + 7) / 8
-		builder.stackMaps(words, ArgumentStackMaps(function, stackMapEntryCounts[index])...)
+		builder.stackMaps(words, ArgumentStackMaps(function, stackMapEntryCounts[index], growthStackMapIndexes[index])...)
 	}
 	localOffsets := make([]uint32, len(functions))
 	for index, function := range functions {
 		builder.align(4)
 		localOffsets[index] = uint32(builder.position() - builder.labels[".goc.go.gofunc"])
 		words := builder.arch.LocalStackMapWords(function)
-		pointerMaps, _ := FunctionStackMaps(function)
+		pointerMaps, _, _ := FunctionStackMaps(function)
 		builder.stackMaps(words, pointerMaps...)
 	}
 	builder.label(".goc.go.gofunc.end")

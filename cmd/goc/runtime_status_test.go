@@ -413,6 +413,19 @@ func runtimeCapabilities() []runtimeCapability {
 			expectation: runtimeCapabilityMustPass,
 		},
 		{
+			category: "gc",
+			name:     "goroutine-entry-stack-map",
+			source:   "runtime_goroutine_entry_stack_map.go",
+			// The reducer for "found pointer to free object". Like
+			// keepalive-stack-root it sets GOMAXPROCS and GOGC itself: the failure
+			// needs many more goroutines than Ps so that a collection catches
+			// goroutines still stopped at their entry pc. Probabilistic: about 92
+			// runs in 100 before the fix at -O, none in several thousand after.
+			// See RUNTIME_PLAN.md 5.11.
+			timeout:     90 * time.Second,
+			expectation: runtimeCapabilityMustPass,
+		},
+		{
 			category:    "gc",
 			name:        "finalizer-cleanup-order",
 			source:      "runtime_finalizer_cleanup_order.go",

@@ -4356,13 +4356,21 @@ func (g *gen) store(v, addr ir.Ref, t types.Type) {
 			return
 		}
 	}
-	if sub, ok := subOf(t); ok {
-		g.cur.StoreSub(sub, v, addr)
-		return
-	}
+	// The barrier decision comes before the sub-width store, not after it.
+	// subOf reports a width for unsafe.Pointer as well as for the integer
+	// kinds, and unsafe.Pointer is the one type it accepts that scalar
+	// classifies as a pointer, so taking the sub-store path first silently
+	// dropped the write barrier from every unsafe.Pointer store -- including
+	// runtime.gostartcall's `buf.ctxt = ctxt`, which publishes a goroutine's
+	// funcval into a g the collector may already have blackened
+	// (RUNTIME_PLAN.md 5.12).
 	class, _ := scalar(t)
 	if g.runtimeAllocation && !g.noWriteBarrier && class == ir.ClsP && !g.isStackAddress(addr) && !isNotInHeapPointer(t) {
 		g.cur.CallVoid(g.fn.Sym("goc_storep", 0), addr, v)
+		return
+	}
+	if sub, ok := subOf(t); ok {
+		g.cur.StoreSub(sub, v, addr)
 		return
 	}
 	g.cur.Store(v, addr)
