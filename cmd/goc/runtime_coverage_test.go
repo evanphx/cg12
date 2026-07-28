@@ -111,6 +111,8 @@ type runtimeCorpusCoverage struct {
 	coveredPrograms   int
 	runtimeSourceID   string
 	collectionErrors  []string
+	expectedMatrix    []runtimeCapability
+	recordedPrograms  map[string]bool
 	categories        map[string]*runtimeCoverageCategoryAccumulator
 	assemblyFiles     map[string]bool
 	programResults    []runtimeCoverageProgramReport
@@ -133,6 +135,7 @@ type runtimeCoverageCategoryAccumulator struct {
 
 func newRuntimeCorpusCoverage() *runtimeCorpusCoverage {
 	return &runtimeCorpusCoverage{
+		recordedPrograms:  make(map[string]bool),
 		categories:        make(map[string]*runtimeCoverageCategoryAccumulator),
 		assemblyFiles:     make(map[string]bool),
 		activeFunctions:   make(map[runtimeFunctionKey]goc.RuntimeCoverageFunction),
@@ -143,11 +146,47 @@ func newRuntimeCorpusCoverage() *runtimeCorpusCoverage {
 	}
 }
 
+// expect records the capability matrix this run is drawn from. The collector
+// then knows the complete denominator, so a capability that never reports an
+// outcome is a detectable hole rather than a corpus that quietly shrank.
+func (coverage *runtimeCorpusCoverage) expect(capabilities []runtimeCapability) {
+	if *runtimeCoverageProfile == "" {
+		return
+	}
+	coverage.expectedMatrix = append(coverage.expectedMatrix[:0], capabilities...)
+}
+
 func (coverage *runtimeCorpusCoverage) add(capability runtimeCapability, result runtimeCapabilityResult) {
 	if *runtimeCoverageProfile == "" {
 		return
 	}
 	coverage.programs++
+	name := capability.category + "/" + capability.name
+	if coverage.recordedPrograms[name] {
+		coverage.collectionErrors = append(
+			coverage.collectionErrors,
+			fmt.Sprintf("%s reported more than one coverage outcome", name),
+		)
+	}
+	coverage.recordedPrograms[name] = true
+
+	// Whether the packet can join the corpus totals is decided before the row
+	// is built. Otherwise a packet the collector goes on to discard is still
+	// recorded as "collected", and the row and the totals disagree about which
+	// programs contributed coverage.
+	coverageOutcome := result.coverageOutcome
+	coverageReason := result.coverageReason
+	usablePacket := result.coverage != nil && coverageOutcome == runtimeCoverageOutcomeCollected
+	if usablePacket {
+		rejection := coverage.rejectRuntimeCoveragePacket(result.coverage)
+		if rejection != "" {
+			usablePacket = false
+			coverageOutcome = runtimeCoverageOutcomeMissing
+			coverageReason = rejection
+			coverage.collectionErrors = append(coverage.collectionErrors, name+" "+rejection)
+		}
+	}
+
 	program := runtimeCoverageProgramReport{
 		Category:            capability.category,
 		Name:                capability.name,
@@ -155,7 +194,10 @@ func (coverage *runtimeCorpusCoverage) add(capability runtimeCapability, result 
 		Expectation:         runtimeCoverageExpectationName(capability.expectation),
 		CompileOutcome:      result.compileOutcome,
 		RunOutcome:          result.runOutcome,
-		CoverageOutcome:     result.coverageOutcome,
+		CoverageOutcome:     coverageOutcome,
+		Termination:         runtimeCoverageTerminationName(capability.termination),
+		CoverageReason:      coverageReason,
+		SkipReason:          result.skipReason,
 		CompileMilliseconds: result.compileDuration.Milliseconds(),
 		CompilePeakRSSBytes: result.compilePeakRSS,
 		RunMilliseconds:     result.runDuration.Milliseconds(),
@@ -172,30 +214,7 @@ func (coverage *runtimeCorpusCoverage) add(capability runtimeCapability, result 
 	coverage.programResults = append(coverage.programResults, program)
 	category := coverage.category(capability.category)
 	category.programs = append(category.programs, program)
-	if result.coverage == nil {
-		return
-	}
-	programSourceID := result.coverage.metadata.RuntimeSourceID
-	if programSourceID == "" {
-		coverage.collectionErrors = append(
-			coverage.collectionErrors,
-			fmt.Sprintf("%s/%s returned coverage without a runtime source ID", capability.category, capability.name),
-		)
-		return
-	}
-	if coverage.runtimeSourceID == "" {
-		coverage.runtimeSourceID = programSourceID
-	} else if coverage.runtimeSourceID != programSourceID {
-		coverage.collectionErrors = append(
-			coverage.collectionErrors,
-			fmt.Sprintf(
-				"%s/%s runtime source ID is %s, want %s",
-				capability.category,
-				capability.name,
-				programSourceID,
-				coverage.runtimeSourceID,
-			),
-		)
+	if !usablePacket {
 		return
 	}
 	coverage.coveredPrograms++
@@ -233,6 +252,29 @@ func (coverage *runtimeCorpusCoverage) add(capability runtimeCapability, result 
 	}
 }
 
+// rejectRuntimeCoveragePacket reports why a returned packet cannot join the
+// corpus totals, or the empty string when it can. A packet built from a
+// different copy of the Go runtime describes a different denominator, so it is
+// refused rather than merged into one report that claims to describe both.
+func (coverage *runtimeCorpusCoverage) rejectRuntimeCoveragePacket(packet *runtimeCapabilityCoverageResult) string {
+	programSourceID := packet.metadata.RuntimeSourceID
+	if programSourceID == "" {
+		return "returned a coverage packet without a runtime source ID"
+	}
+	if coverage.runtimeSourceID == "" {
+		coverage.runtimeSourceID = programSourceID
+		return ""
+	}
+	if coverage.runtimeSourceID != programSourceID {
+		return fmt.Sprintf(
+			"returned a coverage packet for runtime source %s, but the corpus is collecting %s",
+			programSourceID,
+			coverage.runtimeSourceID,
+		)
+	}
+	return ""
+}
+
 func (coverage *runtimeCorpusCoverage) category(name string) *runtimeCoverageCategoryAccumulator {
 	category := coverage.categories[name]
 	if category != nil {
@@ -259,15 +301,16 @@ func (coverage *runtimeCorpusCoverage) report() runtimeCoverageReport {
 		Scope:           "build-selected runtime Go source functions and emitted cg12 basic blocks; selected Plan 9 assembly is listed separately",
 		Programs:        append([]runtimeCoverageProgramReport(nil), coverage.programResults...),
 		Summary: runtimeCoverageSummary{
-			Programs:          coverage.programs,
-			CoveredPrograms:   coverage.coveredPrograms,
-			ActiveFunctions:   len(coverage.activeFunctions),
-			CompiledFunctions: len(coverage.compiledFunctions),
-			ExecutedFunctions: len(coverage.executedFunctions),
-			FunctionCoverage:  coveragePercent(len(coverage.executedFunctions), len(coverage.activeFunctions)),
-			CompiledBlocks:    len(coverage.compiledBlocks),
-			ExecutedBlocks:    len(coverage.executedBlocks),
-			BlockCoverage:     coveragePercent(len(coverage.executedBlocks), len(coverage.compiledBlocks)),
+			Programs:           coverage.programs,
+			CoveredPrograms:    coverage.coveredPrograms,
+			MatrixCapabilities: len(coverage.expectedMatrix),
+			ActiveFunctions:    len(coverage.activeFunctions),
+			CompiledFunctions:  len(coverage.compiledFunctions),
+			ExecutedFunctions:  len(coverage.executedFunctions),
+			FunctionCoverage:   coveragePercent(len(coverage.executedFunctions), len(coverage.activeFunctions)),
+			CompiledBlocks:     len(coverage.compiledBlocks),
+			ExecutedBlocks:     len(coverage.executedBlocks),
+			BlockCoverage:      coveragePercent(len(coverage.executedBlocks), len(coverage.compiledBlocks)),
 		},
 	}
 	for assembly := range coverage.assemblyFiles {
@@ -388,17 +431,26 @@ func addRuntimeCoverageSummaryProgram(summary *runtimeCoverageSummary, program r
 	if runtimeCoverageProgramFailed(program) {
 		summary.UnexpectedFailures++
 	}
-	if program.CompileOutcome == "failed" {
+	if program.CompileOutcome == runtimeCoverageOutcomeFailed {
 		summary.CompileFailures++
 	}
-	if program.RunOutcome == "failed" {
+	if program.CompileOutcome == runtimeCoverageOutcomeSkipped {
+		summary.SkippedPrograms++
+	}
+	if program.CompileOutcome == runtimeCoverageOutcomeUnreported {
+		summary.UnreportedPrograms++
+	}
+	if program.RunOutcome == runtimeCoverageOutcomeFailed {
 		summary.RunFailures++
 	}
-	if program.RunOutcome == "timeout" {
+	if program.RunOutcome == runtimeCoverageOutcomeTimeout {
 		summary.RunTimeouts++
 	}
-	if program.CoverageOutcome != "collected" {
+	if program.CoverageOutcome != runtimeCoverageOutcomeCollected {
 		summary.MissingCoveragePrograms++
+	}
+	if program.CoverageOutcome == runtimeCoverageOutcomeExpectedUnavailable {
+		summary.ExpectedUnavailableCoveragePrograms++
 	}
 	summary.CompileMilliseconds += program.CompileMilliseconds
 	summary.CompilePeakRSSBytes = max(summary.CompilePeakRSSBytes, program.CompilePeakRSSBytes)
@@ -411,16 +463,19 @@ func addRuntimeCoverageCategoryProgram(category *runtimeCoverageCategoryReport, 
 	if runtimeCoverageProgramFailed(program) {
 		category.UnexpectedFailures++
 	}
-	if program.CompileOutcome == "failed" {
+	if program.CompileOutcome == runtimeCoverageOutcomeFailed {
 		category.CompileFailures++
 	}
-	if program.RunOutcome == "failed" {
+	if program.CompileOutcome == runtimeCoverageOutcomeSkipped {
+		category.SkippedPrograms++
+	}
+	if program.RunOutcome == runtimeCoverageOutcomeFailed {
 		category.RunFailures++
 	}
-	if program.RunOutcome == "timeout" {
+	if program.RunOutcome == runtimeCoverageOutcomeTimeout {
 		category.RunTimeouts++
 	}
-	if program.CoverageOutcome != "collected" {
+	if program.CoverageOutcome != runtimeCoverageOutcomeCollected {
 		category.MissingCoveragePrograms++
 	}
 	category.CompileMilliseconds += program.CompileMilliseconds
@@ -434,11 +489,9 @@ func (coverage *runtimeCorpusCoverage) write(t *testing.T) {
 	if *runtimeCoverageProfile == "" {
 		return
 	}
-	if len(coverage.collectionErrors) > 0 {
-		for _, collectionError := range coverage.collectionErrors {
-			t.Errorf("runtime coverage collection: %s", collectionError)
-		}
-		return
+	coverage.recordUnreportedCapabilities()
+	for _, collectionError := range coverage.collectionErrors {
+		t.Errorf("runtime coverage collection: %s", collectionError)
 	}
 	report := coverage.report()
 	classifications, err := readRuntimeCoverageClassifications(
@@ -451,6 +504,12 @@ func (coverage *runtimeCorpusCoverage) write(t *testing.T) {
 	}
 	if err := applyRuntimeCoverageClassifications(&report, classifications); err != nil {
 		t.Fatal(err)
+	}
+	// The collector holds itself to the same contract a checked-in baseline
+	// must satisfy: one explicit outcome per capability, consistent summaries,
+	// and a recorded reason wherever a coverage packet is absent.
+	if err := validateRuntimeCoverageReport(report); err != nil {
+		t.Errorf("generated runtime coverage report is invalid: %v", err)
 	}
 	encoded, err := json.MarshalIndent(report, "", "  ")
 	if err != nil {
@@ -474,6 +533,47 @@ func (coverage *runtimeCorpusCoverage) write(t *testing.T) {
 	)
 }
 
+// recordUnreportedCapabilities gives every capability that produced no outcome
+// an explicit unreported row. Such a capability is a collection failure, and it
+// is also exactly the case where a diffable report is most useful, so the run
+// still publishes one naming the capability that is unaccounted for rather than
+// suppressing the whole report and leaving the reviewer nothing to read.
+func (coverage *runtimeCorpusCoverage) recordUnreportedCapabilities() {
+	for _, capability := range coverage.unreportedCapabilities() {
+		coverage.collectionErrors = append(
+			coverage.collectionErrors,
+			fmt.Sprintf(
+				"%s/%s ran without reporting a compile, run, or coverage outcome",
+				capability.category,
+				capability.name,
+			),
+		)
+		coverage.add(capability, unreportedRuntimeCapabilityResult())
+	}
+}
+
+// unreportedCapabilities lists the expected capabilities that produced no
+// outcome at all. Section 4 of RUNTIME_PLAN.md requires an explicit outcome per
+// program, so an absence here is a collection failure rather than a smaller
+// corpus.
+func (coverage *runtimeCorpusCoverage) unreportedCapabilities() []runtimeCapability {
+	var missing []runtimeCapability
+	for _, capability := range coverage.expectedMatrix {
+		if !coverage.recordedPrograms[capability.category+"/"+capability.name] {
+			missing = append(missing, capability)
+		}
+	}
+	return missing
+}
+
+func (coverage *runtimeCorpusCoverage) unreportedPrograms() []string {
+	var missing []string
+	for _, capability := range coverage.unreportedCapabilities() {
+		missing = append(missing, capability.category+"/"+capability.name)
+	}
+	return missing
+}
+
 func defaultRuntimeCoverageClassifications() string {
 	_, filename, _, ok := runtime.Caller(0)
 	if !ok {
@@ -487,6 +587,13 @@ func coveragePercent(covered, total int) float64 {
 		return 0
 	}
 	return float64(covered) * 100 / float64(total)
+}
+
+func runtimeCoverageTerminationName(termination runtimeCapabilityTermination) string {
+	if termination == runtimeCapabilityTerminatesAbnormally {
+		return runtimeCoverageTerminationAbnormal
+	}
+	return runtimeCoverageTerminationNormal
 }
 
 func runtimeCoverageExpectationName(expectation runtimeCapabilityExpectation) string {

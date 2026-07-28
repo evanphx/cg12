@@ -1,0 +1,147 @@
+{
+  "version": 1,
+  "baseline": "runtime_coverage_linux_arm64.json",
+  "note": "Capabilities the accepted baseline does not cover. TestCheckedRuntimeCoverageBaselineDenominator reconciles the capability matrix, the accepted baseline, and this list, so the corpus denominator cannot drift silently. Adding a capability requires either a baseline rerun or an entry here.",
+  "capabilities": [
+    {
+      "capability": "core-types/type-param-method-dispatch",
+      "reason": "added to the capability matrix after the accepted 2026-07-22 baseline run; it enters the baseline at the next full-corpus rerun"
+    },
+    {
+      "capability": "core-types/type-param-method-shapes",
+      "reason": "added to the capability matrix after the accepted 2026-07-22 baseline run; it enters the baseline at the next full-corpus rerun"
+    },
+    {
+      "capability": "gc/assist-alloc-recursion",
+      "reason": "added to the capability matrix after the accepted 2026-07-22 baseline run; it enters the baseline at the next full-corpus rerun"
+    },
+    {
+      "capability": "gc/cleanup-basic",
+      "reason": "added to the capability matrix after the accepted 2026-07-22 baseline run; it enters the baseline at the next full-corpus rerun"
+    },
+    {
+      "capability": "gc/cleanup-frame-retention",
+      "reason": "added to the capability matrix after the accepted 2026-07-22 baseline run; it enters the baseline at the next full-corpus rerun"
+    },
+    {
+      "capability": "gc/cleanup-frame-retention-masked",
+      "reason": "added to the capability matrix after the accepted 2026-07-22 baseline run; it enters the baseline at the next full-corpus rerun"
+    },
+    {
+      "capability": "gc/cleanup-frame-retention-scribble",
+      "reason": "added to the capability matrix after the accepted 2026-07-22 baseline run; it enters the baseline at the next full-corpus rerun"
+    },
+    {
+      "capability": "gc/cleanup-multiple",
+      "reason": "added to the capability matrix after the accepted 2026-07-22 baseline run; it enters the baseline at the next full-corpus rerun"
+    },
+    {
+      "capability": "gc/cleanup-stop",
+      "reason": "added to the capability matrix after the accepted 2026-07-22 baseline run; it enters the baseline at the next full-corpus rerun"
+    },
+    {
+      "capability": "gc/defer-capture-allocs",
+      "reason": "added to the capability matrix after the accepted 2026-07-22 baseline run; it enters the baseline at the next full-corpus rerun"
+    },
+    {
+      "capability": "gc/finalizer-cleanup-order",
+      "reason": "added to the capability matrix after the accepted 2026-07-22 baseline run; it enters the baseline at the next full-corpus rerun"
+    },
+    {
+      "capability": "gc/finalizer-dependency-order",
+      "reason": "added to the capability matrix after the accepted 2026-07-22 baseline run; it enters the baseline at the next full-corpus rerun"
+    },
+    {
+      "capability": "gc/finalizer-tiny",
+      "reason": "added to the capability matrix after the accepted 2026-07-22 baseline run; it enters the baseline at the next full-corpus rerun"
+    },
+    {
+      "capability": "gc/pinner-invalid",
+      "reason": "added to the capability matrix after the accepted 2026-07-22 baseline run; it enters the baseline at the next full-corpus rerun"
+    },
+    {
+      "capability": "gc/pinner-lifecycle",
+      "reason": "added to the capability matrix after the accepted 2026-07-22 baseline run; it enters the baseline at the next full-corpus rerun"
+    },
+    {
+      "capability": "goroutine/select-global-locked-gc",
+      "reason": "added to the capability matrix after the accepted 2026-07-22 baseline run; it enters the baseline at the next full-corpus rerun"
+    },
+    {
+      "capability": "runtime-packages/reflect-call-aggregate-function",
+      "reason": "added to the capability matrix after the accepted 2026-07-22 baseline run; it enters the baseline at the next full-corpus rerun"
+    },
+    {
+      "capability": "runtime-packages/reflect-call-aggregate-matrix",
+      "reason": "added to the capability matrix after the accepted 2026-07-22 baseline run; it enters the baseline at the next full-corpus rerun"
+    },
+    {
+      "capability": "runtime-packages/reflect-call-aggregate-probe",
+      "reason": "added to the capability matrix after the accepted 2026-07-22 baseline run; it enters the baseline at the next full-corpus rerun"
+    },
+    {
+      "capability": "runtime-packages/reflect-interface-extract-probe",
+      "reason": "added to the capability matrix after the accepted 2026-07-22 baseline run; it enters the baseline at the next full-corpus rerun"
+    },
+    {
+      "capability": "runtime-packages/reflect-type-assert",
+      "reason": "added to the capability matrix after the accepted 2026-07-22 baseline run; it enters the baseline at the next full-corpus rerun"
+    },
+    {
+      "capability": "runtime-packages/reflect-value-indirect-call",
+      "reason": "added to the capability matrix after the accepted 2026-07-22 baseline run; it enters the baseline at the next full-corpus rerun"
+    },
+    {
+      "capability": "runtime-packages/reflect-value-instruction-op",
+      "reason": "added to the capability matrix after the accepted 2026-07-22 baseline run; it enters the baseline at the next full-corpus rerun"
+    },
+    {
+      "capability": "runtime-packages/reflect-value-int",
+      "reason": "added to the capability matrix after the accepted 2026-07-22 baseline run; it enters the baseline at the next full-corpus rerun"
+    },
+    {
+      "capability": "stdlib-encoding/gob-int",
+      "reason": "added to the capability matrix after the accepted 2026-07-22 baseline run; it enters the baseline at the next full-corpus rerun"
+    },
+    {
+      "capability": "stdlib-encoding/gob-struct-int",
+      "reason": "added to the capability matrix after the accepted 2026-07-22 baseline run; it enters the baseline at the next full-corpus rerun"
+    },
+    {
+      "capability": "stdlib-encoding/gob-struct-mixed",
+      "reason": "added to the capability matrix after the accepted 2026-07-22 baseline run; it enters the baseline at the next full-corpus rerun"
+    },
+    {
+      "capability": "stdlib-runtime-diagnostics/trace-log",
+      "reason": "added to the capability matrix after the accepted 2026-07-22 baseline run; it enters the baseline at the next full-corpus rerun"
+    },
+    {
+      "capability": "stdlib-runtime-diagnostics/trace-start-only",
+      "reason": "added to the capability matrix after the accepted 2026-07-22 baseline run; it enters the baseline at the next full-corpus rerun"
+    },
+    {
+      "capability": "stdlib-runtime-diagnostics/trace-start-probe",
+      "reason": "added to the capability matrix after the accepted 2026-07-22 baseline run; it enters the baseline at the next full-corpus rerun"
+    },
+    {
+      "capability": "stdlib-runtime-diagnostics/trace-start-stop",
+      "reason": "added to the capability matrix after the accepted 2026-07-22 baseline run; it enters the baseline at the next full-corpus rerun"
+    },
+    {
+      "capability": "stdlib-signals/atomic-contention",
+      "reason": "added to the capability matrix after the accepted 2026-07-22 baseline run; it enters the baseline at the next full-corpus rerun"
+    },
+    {
+      "capability": "stdlib-signals/during-gc",
+      "reason": "added to the capability matrix after the accepted 2026-07-22 baseline run; it enters the baseline at the next full-corpus rerun"
+    },
+    {
+      "capability": "stdlib-signals/during-netpoll",
+      "reason": "added to the capability matrix after the accepted 2026-07-22 baseline run; it enters the baseline at the next full-corpus rerun"
+    },
+    {
+      "capability": "stdlib-signals/repeated-stop-reset",
+      "reason": "added to the capability matrix after the accepted 2026-07-22 baseline run; it enters the baseline at the next full-corpus rerun"
+    }
+  ]
+}
