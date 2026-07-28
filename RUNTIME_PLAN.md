@@ -343,6 +343,22 @@ live. This is a general over-retention (leak-class) bug in GC reachability;
 finalizers and cleanups are merely the only way user code can observe it. The
 fix belongs in stack-map/frame-bound emission, not in `mcleanup.go`.
 
+The reduction is committed rather than left in a scratch directory, as three
+`gc` capabilities:
+
+| Capability | Expectation | Role |
+| --- | --- | --- |
+| `cleanup-frame-retention` | `knownGap` | the minimal failure; flips to passing when this is fixed |
+| `cleanup-frame-retention-masked` | `mustPass` | the eliminated hypotheses — argument shape, allocation pressure, cleanup count, finalizers-work |
+| `cleanup-frame-retention-scribble` | `mustPass` | the positive proof: overwriting the abandoned frame releases the object |
+
+All three are frame-layout sensitive, which is why they are three programs and
+not one. Folding the scribble proof in behind the other variants stops it
+reproducing, because the earlier calls change the stack it would need to
+overwrite. Do not consolidate them, and do not add statements to
+`runtime_cleanup_frame_retention.go` — either turns a real failure into a false
+pass. Each file records this in its own header.
+
 Next: identify which live frame's stack map covers the abandoned region during
 `runtime.GC()` — the stale word sits inside the frames the GC call tree builds
 over `register`'s old frame. The leading hypothesis is a pointer slot that some

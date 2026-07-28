@@ -351,6 +351,25 @@ func TestARM64RuntimeCapabilityStatus(t *testing.T) {
 		},
 		{
 			category:    "gc",
+			name:        "cleanup-frame-retention",
+			source:      "runtime_cleanup_frame_retention.go",
+			expectation: runtimeCapabilityKnownGap,
+			note:        "minimal reducer for the 5.3 over-retention bug; flips to passing when the stale-frame retention is fixed",
+		},
+		{
+			category:    "gc",
+			name:        "cleanup-frame-retention-masked",
+			source:      "runtime_cleanup_frame_retention_masked.go",
+			expectation: runtimeCapabilityMustPass,
+		},
+		{
+			category:    "gc",
+			name:        "cleanup-frame-retention-scribble",
+			source:      "runtime_cleanup_frame_retention_scribble.go",
+			expectation: runtimeCapabilityMustPass,
+		},
+		{
+			category:    "gc",
 			name:        "finalizer-cleanup-order",
 			source:      "runtime_finalizer_cleanup_order.go",
 			expectation: runtimeCapabilityMustPass,
