@@ -5270,7 +5270,8 @@ func (g *gen) evaluateMultiValueCall(call *ast.CallExpr) ([]ir.Ref, *types.Signa
 		function, _ = g.info.Uses[expression.Sel].(*types.Func)
 		selection := g.info.Selections[expression]
 		if selection != nil && selection.Kind() == types.MethodVal {
-			receiver = g.methodReceiver(expression, function)
+			selection, function = g.concreteMethodSelection(selection, function)
+			receiver = g.methodReceiver(expression, selection, function)
 			if methodHasInterfaceReceiver(function) {
 				g.interfaceMethods[function] = true
 			}
@@ -6631,7 +6632,8 @@ func (g *gen) multiValueAssignment(statement *ast.AssignStmt, call *ast.CallExpr
 		object, _ = g.info.Uses[function.Sel].(*types.Func)
 		selection := g.info.Selections[function]
 		if selection != nil && selection.Kind() == types.MethodVal {
-			receiver = g.methodReceiver(function, object)
+			selection, object = g.concreteMethodSelection(selection, object)
+			receiver = g.methodReceiver(function, selection, object)
 			if methodHasInterfaceReceiver(object) {
 				g.interfaceMethods[object] = true
 			}
@@ -7329,7 +7331,8 @@ func (g *gen) returnMultiValueCall(call *ast.CallExpr) {
 		function, _ = g.info.Uses[target.Sel].(*types.Func)
 		selection := g.info.Selections[target]
 		if selection != nil && selection.Kind() == types.MethodVal {
-			receiver = g.methodReceiver(target, function)
+			selection, function = g.concreteMethodSelection(selection, function)
+			receiver = g.methodReceiver(target, selection, function)
 			if methodHasInterfaceReceiver(function) {
 				g.interfaceMethods[function] = true
 			}
@@ -9260,7 +9263,8 @@ func (g *gen) expr(e ast.Expr) (result ir.Ref) {
 		case *ast.SelectorExpr:
 			obj, _ = g.info.Uses[fun.Sel].(*types.Func)
 			if selection := g.info.Selections[fun]; selection != nil && selection.Kind() == types.MethodVal {
-				receiver = g.methodReceiver(fun, obj)
+				selection, obj = g.concreteMethodSelection(selection, obj)
+				receiver = g.methodReceiver(fun, selection, obj)
 				if methodHasInterfaceReceiver(obj) {
 					g.interfaceMethods[obj] = true
 				}
@@ -9688,13 +9692,88 @@ func methodHasInterfaceReceiver(method *types.Func) bool {
 	return isInterface
 }
 
-func (g *gen) methodReceiver(selector *ast.SelectorExpr, method *types.Func) ir.Ref {
+// typeParameterMethodSelection re-selects a method chosen on a value whose
+// static type is a type parameter against the concrete type argument that the
+// parameter is bound to in the enclosing instantiation.
+//
+// go/types reports the selected object for `p.M()`, where p has type parameter
+// type P, as the method declared by P's constraint interface. That method has
+// no body, and its receiver's underlying type is an interface, so without this
+// resolution the call is lowered as dynamic interface dispatch against a
+// receiver that is not an interface value at all. Inside an instantiated body
+// the type argument is statically known, so the specification's meaning of the
+// call is an ordinary direct call on the type argument's method.
+//
+// The result is a full selection rather than just the method because the
+// concrete type may satisfy the constraint through an embedded field, in which
+// case the receiver has to be advanced to that field before the call.
+//
+// substitutions binds the enclosing instantiation's type parameters. The second
+// result is false when this is not a method selected through a type parameter,
+// or when the parameter is not bound to a concrete type here -- a shared
+// generic body keeps its existing lowering.
+func typeParameterMethodSelection(
+	selection *types.Selection,
+	method *types.Func,
+	substitutions map[*types.TypeParam]types.Type,
+) (*types.Selection, bool) {
+	if selection == nil || method == nil {
+		return nil, false
+	}
+	if selection.Kind() != types.MethodVal {
+		return nil, false
+	}
+	if _, isTypeParameter := types.Unalias(selection.Recv()).(*types.TypeParam); !isTypeParameter {
+		return nil, false
+	}
+	concreteReceiver := substituteType(selection.Recv(), substitutions)
+	if concreteReceiver == nil {
+		return nil, false
+	}
+	if _, stillParameter := types.Unalias(concreteReceiver).(*types.TypeParam); stillParameter {
+		return nil, false
+	}
+	concreteSelection := types.NewMethodSet(concreteReceiver).Lookup(method.Pkg(), method.Name())
+	if concreteSelection == nil || concreteSelection.Kind() != types.MethodVal {
+		return nil, false
+	}
+	if _, ok := concreteSelection.Obj().(*types.Func); !ok {
+		return nil, false
+	}
+	return concreteSelection, true
+}
+
+// concreteMethodSelection applies typeParameterMethodSelection using the
+// instantiation currently being generated. It returns the selection and method
+// unchanged when the selection is not a constraint method call.
+func (g *gen) concreteMethodSelection(
+	selection *types.Selection,
+	method *types.Func,
+) (*types.Selection, *types.Func) {
+	concreteSelection, resolved := typeParameterMethodSelection(selection, method, g.typeSubstitutions())
+	if !resolved {
+		return selection, method
+	}
+	return concreteSelection, concreteSelection.Obj().(*types.Func)
+}
+
+// methodReceiver evaluates the receiver for a method call. selection is the
+// selection the call actually targets, which for a method reached through a
+// type parameter is the one re-selected against the concrete type argument
+// rather than the constraint's, so that an embedded receiver is advanced to the
+// right field.
+func (g *gen) methodReceiver(selector *ast.SelectorExpr, selection *types.Selection, method *types.Func) ir.Ref {
 	var receiver ir.Ref
 	if method != nil {
 		signature := method.Type().(*types.Signature)
 		if signature.Recv() != nil {
 			_, wantsPointer := signature.Recv().Type().Underlying().(*types.Pointer)
-			receiverType := g.info.Types[selector.X].Type
+			// Use the substituted type: in an instantiated body a receiver
+			// expression typed as a type parameter already has the type
+			// argument's representation, and the parameter's own underlying
+			// type is its constraint interface, which describes nothing about
+			// how the value is passed.
+			receiverType := g.typeAndValue(selector.X).Type
 			_, hasPointer := receiverType.Underlying().(*types.Pointer)
 			if wantsPointer && !hasPointer {
 				if isMemoryValue(receiverType) {
@@ -9708,12 +9787,11 @@ func (g *gen) methodReceiver(selector *ast.SelectorExpr, method *types.Func) ir.
 	if receiver == ir.R {
 		receiver = g.expr(selector.X)
 	}
-	selection := g.info.Selections[selector]
 	if selection == nil || len(selection.Index()) <= 1 {
 		if method != nil {
 			methodReceiverType := method.Type().(*types.Signature).Recv().Type()
 			_, methodWantsPointer := methodReceiverType.Underlying().(*types.Pointer)
-			expressionType := g.info.Types[selector.X].Type
+			expressionType := g.typeAndValue(selector.X).Type
 			_, expressionHasPointer := expressionType.Underlying().(*types.Pointer)
 			if expressionHasPointer && !methodWantsPointer && !isInlineAggregate(methodReceiverType) && !isInterfaceValue(methodReceiverType) {
 				return g.load(receiver, methodReceiverType)
@@ -9808,6 +9886,7 @@ func (g *gen) methodValue(expression *ast.SelectorExpr, selection *types.Selecti
 		g.fail(expression, "method value target is not a function")
 		return ir.R
 	}
+	selection, method = g.concreteMethodSelection(selection, method)
 	if methodHasInterfaceReceiver(method) {
 		g.interfaceMethods[method] = true
 	}
@@ -9878,7 +9957,7 @@ func (g *gen) methodValue(expression *ast.SelectorExpr, selection *types.Selecti
 		descriptor = g.allocateEscapingTyped(descriptorType)
 	}
 	g.cur.Store(g.fn.Sym(wrapperName, 0), g.offset(descriptor, descriptorOffsets[0]))
-	receiverValue := g.methodReceiver(expression, method)
+	receiverValue := g.methodReceiver(expression, selection, method)
 	receiverStorage := g.offset(descriptor, descriptorOffsets[1])
 	if isInlineAggregate(receiverType) || isInterfaceValue(receiverType) {
 		g.storeInlineValue(receiverValue, receiverStorage, receiverType)

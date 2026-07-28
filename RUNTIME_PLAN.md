@@ -42,7 +42,8 @@ that must not be hidden by adding more tests:
 - the runtime trace program runs out of memory or times out;
 - the accepted baseline still needs a rerun after recent trace and large HTTP
   fixes;
-- the existing ECDSA case remains a known compiler/stdlib gap.
+- the ECDSA case was a compiler gap in generic method dispatch. It is fixed and
+  `stdlib-crypto/ecdsa` is `mustPass` as of 2026-07-28; see §5.6.
 
 The 2026-07-22 baseline predates the sysmon segfault fix (`54e7c7e`), which was
 the first change that let the capability matrix run to completion. Commit
@@ -478,6 +479,53 @@ Exit criterion: trace terminates and produces parseable output within its
 budget; all three HTTP programs compile below the agreed memory ceiling and
 return coverage packets. The corpus reaches 294/294 covered programs.
 
+### 5.6 Generic method dispatch (the ECDSA gap)
+
+Current checkpoint:
+
+- [x] Reduce `stdlib-crypto/ecdsa` to a standalone program: a constraint whose
+  type set is a union of pointer types and whose methods are written in terms
+  of the type parameter, a carrier struct holding a `func() P` constructor, and
+  one generic body instantiated for two concrete types.
+- [x] Resolve a method selected on a type-parameter-typed value against the
+  type argument bound by the enclosing instantiation, instead of leaving it on
+  the constraint interface's method.
+- [x] Carry the concrete selection, not just the concrete method, so a type
+  argument that satisfies its constraint through an embedded field has its
+  receiver advanced to that field.
+- [x] Make the resolved method reachable, including the correct instantiation
+  when the type argument is itself a generic type.
+- [x] Pass `stdlib-crypto/ecdsa` three times per program in normal and
+  `-runtime-opt` configurations.
+
+The failure was not in the runtime and not in stdlib. go/types reports the
+object selected by `p.M()`, where `p` has type-parameter type `P`, as the
+method declared by `P`'s *constraint interface*. goc took that object at face
+value: `methodHasInterfaceReceiver` saw an interface receiver, the call was
+routed to the synthesized interface-dispatch wrapper
+(`crypto/internal/fips140/ecdsa.Point.ScalarBaseMult`), and that wrapper
+decoded its receiver as a two-word interface descriptor even though the caller
+had passed a bare `*nistec.P256Point`. The wrapper also had no candidates,
+because `types.Implements` is false between a concrete type and an
+uninstantiated constraint whose method signatures still mention `P`. So the
+concrete type never reached dispatch from either side, and the program
+segfaulted in the wrapper's type-word load.
+
+The fix is at the selection layer, in `goc/compile.go` and `goc/reach.go`: in
+an instantiated body the type argument is statically known, so the call is an
+ordinary direct call on that type's method, and the shared interface-dispatch
+machinery is not involved at all. A body with no bound type argument keeps its
+previous lowering. Nothing in the change names a package, type, or method.
+
+Covered by `core-types/type-param-method-dispatch` and
+`core-types/type-param-method-shapes`, and by
+`TestTypeParameterMethodSelection`,
+`TestTypeParameterMethodCallsLowerToTheConcreteMethod`, and
+`TestOrdinaryInterfaceDispatchIsUnchanged` in `goc/`.
+
+Exit criterion: met. `stdlib-crypto/rsa` was already `mustPass` and was not
+affected.
+
 ## 6. Phase 2: Memory safety, allocation, and accurate GC
 
 Exercise both semantic behavior and generated metadata.
@@ -641,7 +689,10 @@ coverage classification.
    classifications, 294 explicit outcomes.
 2. **M1 — current failures are green:** defer/panic, signal, finalizer, gob,
    trace, HTTP compiler memory, and the existing ECDSA gap are resolved or
-   correctly reassigned outside runtime scope.
+   correctly reassigned outside runtime scope. The ECDSA gap is closed: it was
+   a generic method-dispatch bug in the compiler, not runtime scope at all
+   (§5.6). Signal delivery during GC (§5.2) and the cleanup/finalizer
+   over-retention (§5.3) are still open.
 3. **M2 — memory foundation is trusted:** allocation families, barriers, stack
    maps, stack copying, and GC stress pass with emitted validators.
 4. **M3 — concurrency is trusted:** multi-P scheduling, preemption, stacks,
