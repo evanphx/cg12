@@ -358,6 +358,20 @@ func TestARM64RuntimeCapabilityStatus(t *testing.T) {
 		},
 		{
 			category:    "gc",
+			name:        "assist-alloc-recursion",
+			source:      "runtime_gc_assist_stack_growth.go",
+			expectation: runtimeCapabilityKnownGap,
+			note:        "minimal reducer for the 5.2.1 GC-assist allocation recursion; concurrent runtime.GC() drives goroutine stacks past 4 MiB within one cycle (see RUNTIME_PLAN.md 5.2.1)",
+		},
+		{
+			category:    "gc",
+			name:        "defer-capture-allocs",
+			source:      "runtime_defer_capture_allocs.go",
+			expectation: runtimeCapabilityKnownGap,
+			note:        "compiler-level reducer for 5.2.1: a variable captured by a deferred literal on an untaken branch is still heap-lifted, so runtime.gcAssistAlloc allocates",
+		},
+		{
+			category:    "gc",
 			name:        "cleanup-frame-retention-masked",
 			source:      "runtime_cleanup_frame_retention_masked.go",
 			expectation: runtimeCapabilityMustPass,
@@ -517,7 +531,7 @@ func TestARM64RuntimeCapabilityStatus(t *testing.T) {
 			name:        "many-goroutines-gc",
 			source:      "runtime_many_goroutines_gc.go",
 			expectation: runtimeCapabilityKnownGap,
-			note:        "times out under sustained GC allocation pressure; root cause not yet separated from the 5.3 over-retention bug",
+			note:        "performance shortfall from the 5.2.1 GC-assist allocation recursion, not the 5.3 over-retention bug; the live heap stays flat while goroutine stacks and mark time grow superlinearly",
 		},
 		{
 			category:    "goroutine",
@@ -668,7 +682,7 @@ func TestARM64RuntimeCapabilityStatus(t *testing.T) {
 			name:        "gc-churn",
 			source:      "runtime_scheduler_gc_churn.go",
 			expectation: runtimeCapabilityKnownGap,
-			note:        "times out under sustained GC allocation pressure; root cause not yet separated from the 5.3 over-retention bug",
+			note:        "performance shortfall from the 5.2.1 GC-assist allocation recursion, not the 5.3 over-retention bug; the live heap stays flat while goroutine stacks and mark time grow superlinearly",
 		},
 		{
 			category:    "stdlib-io",
@@ -1102,7 +1116,7 @@ func TestARM64RuntimeCapabilityStatus(t *testing.T) {
 			name:        "grow-allocs",
 			source:      "bytes_grow_allocs.go",
 			expectation: runtimeCapabilityKnownGap,
-			note:        "times out under sustained GC allocation pressure; root cause not yet separated from the 5.3 over-retention bug",
+			note:        "performance shortfall from the 5.2.1 GC-assist allocation recursion, not the 5.3 over-retention bug; the recursive assist allocations are also what AllocsPerRun reports as spurious Buffer.Grow allocations",
 		},
 		{
 			category:    "stdlib-bytes",
@@ -1319,7 +1333,7 @@ func TestARM64RuntimeCapabilityStatus(t *testing.T) {
 			name:        "during-gc",
 			source:      "stdlib_signal_during_gc.go",
 			expectation: runtimeCapabilityKnownGap,
-			note:        "signal delivery during GC does not complete in time",
+			note:        "not a signal-delivery gap: every signal is delivered, but the 5.2.1 GC-assist allocation recursion stalls the receiving goroutine for up to 36s, past the program's own 2s deadline",
 		},
 		{
 			category:       "stdlib-signals",

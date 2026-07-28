@@ -262,17 +262,134 @@ Current checkpoint:
 - [x] Keep the temporary slice headers captured by `runtime.selectgo`'s
   synchronous unlock closure on the stack, while still promoting slice backing
   storage assigned to globals.
-- [ ] Pass delivery during GC. **Regressed.** `stdlib-signals/during-gc` fails
-  with `timed out waiting for signal during GC`; it is currently marked
-  `knownGap`. It is one of four capabilities that only became visible once the
-  sysmon segfault fix (`54e7c7e`) let the matrix run to completion, so it was
-  masked rather than newly broken.
+- [ ] Pass delivery during GC. **Regressed**, but not a signal bug.
+  `stdlib-signals/during-gc` fails with `timed out waiting for signal during
+  GC`; it is currently marked `knownGap`. Every signal is in fact delivered;
+  the receiving goroutine is simply stalled past the program's own 2 s deadline
+  by the GC-assist allocation recursion described in 5.2.1. It is one of four
+  capabilities that only became visible once the sysmon segfault fix
+  (`54e7c7e`) let the matrix run to completion, so it was masked rather than
+  newly broken.
 - [ ] Pass the locked-global-select case and the full signal category ten
   executions per program with optimization and `GOMAXPROCS=1`, `2`, and `4`.
   Blocked on `during-gc` above; the rest of the category passes.
 
 Exit criterion: signal tests pass under `GOMAXPROCS=1`, `2`, and `4`, including
 race-like stress, without deadlock or runtime lock corruption.
+
+#### 5.2.1 Root cause of the four GC-pressure failures (2026-07-28)
+
+`goroutine/many-goroutines-gc`, `scheduler-stress/gc-churn`,
+`stdlib-bytes/grow-allocs`, and `stdlib-signals/during-gc` were all recorded as
+"times out under sustained GC allocation pressure; root cause not yet separated
+from the 5.3 over-retention bug". They are one bug, and it is **not** the 5.3
+over-retention bug. It is:
+
+**`runtime.gcAssistAlloc` allocates, so the GC assist path recurses without
+bound during marking.**
+
+`mgcmark.go` opens `gcAssistAlloc` with the synctest block
+
+```go
+if gp := getg(); gp.bubble != nil {
+	bubble := gp.bubble
+	gp.bubble = nil
+	defer func() { gp.bubble = bubble }()
+}
+```
+
+cg12 heap-lifts `gp` because a deferred function literal captures it, and it
+emits that `runtime.newobject` call *before* the `gp.bubble != nil` test, so the
+allocation happens on every call even though the branch is never taken outside
+synctest. `mallocgc` calls `deductAssistCredit` whenever `gcBlackenEnabled != 0`,
+and `deductAssistCredit` calls `gcAssistAlloc` when the goroutine is in debt, so
+during the mark phase the cycle
+
+```
+mallocgc -> deductAssistCredit -> gcAssistAlloc -> newobject -> mallocgc
+```
+
+repeats. It is unbounded: the allocation sits above `gcAssistAlloc`'s `retry`
+label and above the `systemstack(gcAssistAlloc1)` call, so every level takes on
+fresh assist debt *before* any level performs scan work. `debug.SetMaxStack(1 <<
+20)` on eight goroutines calling `runtime.GC()` concurrently produces `fatal
+error: stack overflow` with 3,100+ frames of exactly that four-function cycle.
+
+Ordinarily the recursion unwinds when the background mark worker finishes and
+clears `gcBlackenEnabled`, so the depth is set by how long the mark phase lasts.
+That closes a positive feedback loop: deeper recursion means larger goroutine
+stacks, larger stacks mean a longer stack scan, a longer mark phase means deeper
+recursion on the next cycle. `shrinkstack` can only halve a stack per cycle and
+loses the race. Measured with eight goroutines calling `runtime.GC()`,
+`GOMAXPROCS=1`:
+
+| | host Go | cg12 |
+| --- | ---: | ---: |
+| `StackInuse` after cycle 1 | 288 KiB | 8.6 MiB |
+| after cycle 3 | 288 KiB | 53 MiB |
+| after cycle 5 | 288 KiB | 1.01 GiB |
+
+`GODEBUG=gctrace=1` on the failing capabilities shows the same shape from the
+other side: the heap is flat (`0->0->0 MB`) while the stack-scan volume and the
+mark phase quadruple per cycle — `many-goroutines-gc` reports 11 MB / 1842 ms,
+then 22 MB / 3856 ms, then 89 MB / 15030 ms. **Unbounded stack, flat live heap**
+is the opposite of the over-retention signature, which is why the 5.3 hypothesis
+is wrong.
+
+Classification of the four, all confirmed against the host toolchain, which runs
+each program in 0.00-0.04 s:
+
+| Capability | Verdict |
+| --- | --- |
+| `goroutine/many-goroutines-gc` | performance shortfall, not a hang; instrumented, 3 of its 48 workers finish their `runtime.GC()` in the first 60 s and only 5 in 400 s, because each cycle costs more than the last |
+| `scheduler-stress/gc-churn` | same |
+| `stdlib-bytes/grow-allocs` | same; it reaches the final case and stalls there. Its spurious `AllocsPerRun` counts are the recursive assist allocations, not a `bytes.Buffer` bug |
+| `stdlib-signals/during-gc` | performance shortfall, **not** a delivery gap. Instrumented delivery latencies were 150 ms, 437 ms, 1749 ms, 8657 ms, 2 ms, ..., 33441 ms, 25203 ms, 36106 ms. Every signal arrives; the program's own 2 s deadline is what fails |
+
+Proof of causality: rewriting the synctest block so the captured variable is
+declared inside the taken branch removes the hot-path allocation without
+changing semantics. With that one change all four capabilities pass, unoptimized
+and with `-O`, at `GOMAXPROCS=1`, `2`, and `4`, in 0.03-0.35 s. The experiment
+was reverted; the vendored stdlib is unmodified. `gc/cleanup-frame-retention`
+still fails with the experiment applied, which confirms 5.2.1 and 5.3 are
+independent bugs.
+
+The fix belongs in cg12's escape analysis, not in the runtime. Two reductions
+are committed:
+
+| Capability | Expectation | Role |
+| --- | --- | --- |
+| `gc/assist-alloc-recursion` | `knownGap` | the runtime-level failure: concurrent `runtime.GC()` drives `StackInuse` past 4 MiB in one cycle |
+| `gc/defer-capture-allocs` | `knownGap` | the compiler-level failure, with its controls |
+
+`gc/defer-capture-allocs` reports four allocation counts, all of which are 0 on
+the host toolchain:
+
+| Shape | cg12 |
+| --- | ---: |
+| variable captured by a deferred literal on an **untaken** branch | 1 |
+| variable captured by an unconditional deferred literal | 2 |
+| variable captured by an immediately invoked literal | 0 |
+| deferred literal with no capture | 0 |
+
+So the trigger is specifically `defer` plus capture. The narrow fix is to sink
+the heap lift into the branch that actually constructs the closure, which is
+enough for `gcAssistAlloc`. The general fix is to stop heap-lifting variables
+captured by deferred literals that do not outlive the frame; note that the
+current behaviour is the deliberate heap lift recorded in 5.1, so changing it
+needs the defer/panic batch rerun. Either way, this is the second instance of
+the same class as the print-routine allocation fixed in 5.3 — cg12 introducing a
+heap allocation into a runtime path that must not allocate — and an audit for
+further instances is worth doing.
+
+Incidental, found while probing and not investigated further:
+`runtime.NumGoroutine()` returns 5 in a cg12 program where the host toolchain
+returns 1. `isSystemGoroutine` classifies by `HasPrefix(funcname(f),
+"runtime.")`, and cg12's names appear as `runtime_bgsweep` rather than
+`runtime.bgsweep`, so `sched.ngsys` is never incremented and the runtime's own
+helper goroutines are counted as user goroutines. This is consistent with the
+observed counts but was not proven; anything else keyed on runtime function
+names deserves the same check.
 
 ### 5.3 Finalizer resurrection and cleanup
 
@@ -342,6 +459,10 @@ So cg12's goroutine stack scan is treating dead stack below the live frames as
 live. This is a general over-retention (leak-class) bug in GC reachability;
 finalizers and cleanups are merely the only way user code can observe it. The
 fix belongs in stack-map/frame-bound emission, not in `mcleanup.go`.
+
+This bug's blast radius is narrower than it looked. The four GC-pressure
+capabilities that were provisionally attributed to it are a separate bug with a
+separate fix; see 5.2.1.
 
 The reduction is committed rather than left in a scratch directory, as three
 `gc` capabilities:
