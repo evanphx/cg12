@@ -1238,11 +1238,11 @@ Current checkpoint:
   entry block in source order and zeroed there.
 - [x] Add `GODEBUG=cg12checkwb` write-barrier validation, which turns the
   invariant violation into a throw at the store that commits it.
-- [x] Land the reducer as the `gc/keepalive-stack-root` capability. The matrix
-  is 330 of 332 at `STATUS_SHARDS=4` with the same two declared exceptions as
-  before: `runtime-packages/finalizer-resurrect` (`knownGap`) and
-  `defer-panic/panic-string-output` (deliberate `expectedFailure`).
-- [ ] Explain the residual `fatal error: marked free object in span` recorded
+- [x] Land the reducer as the `gc/keepalive-stack-root` capability. After all of
+  wave 3 merged the matrix is 338 of 338 at `STATUS_SHARDS=8`, with
+  `defer-panic/panic-string-output` (deliberate `expectedFailure`) as the only
+  declared exception and no `knownGap` remaining.
+- [ ] Explain the residual `fatal error: found pointer to free object` recorded
   below. It is a different fault with a different traceback and is roughly two
   orders of magnitude rarer; it is not this section's bug and is not known to be
   fixed.
@@ -1355,8 +1355,15 @@ And on the capability this was found in, `goroutine/many-goroutines-gc`, `-O` at
 | `marked free object in span` | 2 | 3 |
 
 The two wrong-result panics are the sharing half of the defect showing through
-as a wrong answer rather than a fault. The zombie-span rate is unchanged
-(0.013% against 0.013%); see below.
+as a wrong answer rather than a fault. The residual-fault rate is unchanged; see
+below.
+
+Independent verification on 2026-07-28 reran this at 24000 runs on each side and
+reproduced the headline result exactly — 472 against **0** — but did not
+reproduce the last row: it saw `marked free object in span` zero times in about
+600000 executions, and the fault that actually survives at this scale is
+`found pointer to free object` (11 of 24000 before, 4 of 24000 after). Read the
+last row as misattributed rather than as a second measurement.
 
 The deterministic guard is
 `TestKeepAliveStoresIntoAFrameSlotRatherThanAGlobal` in `goc/escape_test.go`,
@@ -1380,20 +1387,24 @@ other instances of the same class, not a proof that none exists.
   presumably closed by §5.2.1 or §5.7. The §5.2 checkpoint text still describes
   it as live and should be read with that in mind.
 - A different fault survives, and it is **pre-existing and unaffected by this
-  change**: `fatal error: marked free object in span ... elemsize=32
-  freeindex=0`, thrown by `mspan.reportZombies` from `bgsweep`. Measured on
-  `many-goroutines-gc` at `GOMAXPROCS=4`, `-O`, `GOGC=10`: 2 of 16000 runs
-  before and 3 of 24000 after, the same rate within noise. It is a marked object
-  on a span's free list, not a pointer into a dead span, and its traceback
-  shares nothing with this section's. It has not been reduced. It is the next
-  thing to chase in this area and it is about two hundred times rarer than the
-  fault this section closes, so it needs a reducer of its own before it is
-  worth measuring.
+  change**: `fatal error: found pointer to free object`. This section originally
+  named it `marked free object in span` (from `mspan.reportZombies`); the
+  independent verification of 2026-07-28 saw that string zero times in roughly
+  600000 executions and identified the surviving fault as the one named above.
+  Measured with matched 160000-run controls on a KeepAlive-free variant of the
+  reducer, compiled by the merge-base and by the fixed compiler from
+  sha256-identical sources: 19 versus 20 occurrences, plus a residual
+  `found bad pointer in Go heap` at 4 versus 4 and rare hangs. Indistinguishable,
+  which is what establishes it as pre-existing rather than introduced here. On
+  `many-goroutines-gc` itself it ran 11 of 24000 on the merge base and 4 of 24000
+  on the fix. It has not been reduced, it is about two orders of magnitude rarer
+  than the fault this section closes, and it needs a reducer of its own before it
+  is worth measuring.
 
 Exit criterion: no global data word ever receives a goroutine stack address
 (checkable with `GODEBUG=cg12checkwb=2` over the corpus), `gc/keepalive-stack-root`
 passes at every `-runtime-procs` setting optimized and unoptimized, and the
-`marked free object in span` fault above is reduced and attributed.
+`found pointer to free object` fault above is reduced and attributed.
 
 ### 5.9 Fixed: loop variables were per-loop, not per-iteration (2026-07-28)
 
@@ -1504,10 +1515,13 @@ holds `runtime.gcAssistAlloc` at zero allocations.
   `TestOneCapturedScalarCostsOneAllocationPerIteration`, and
   `TestPerIterationCellSurvivesHeapAllocationLowering`.
 - [x] Verified on 2026-07-28: `make test-unit`, `go test -timeout 40m ./goc/...`
-  (869.7 s), `make test-goc-cmd`, and the full 337-capability matrix at
-  `STATUS_SHARDS=4`, all green. The only non-passing capabilities remain the
-  pre-existing `runtime-packages/finalizer-resurrect` known gap and the
-  deliberate `defer-panic/panic-string-output` expected failure.
+  (869.7 s), `make test-goc-cmd`, and the full matrix at `STATUS_SHARDS=4`, all
+  green. Re-verified after all of wave 3 merged: 338 of 338 at
+  `STATUS_SHARDS=8`, with `defer-panic/panic-string-output` the only deliberate
+  expected failure and no `knownGap` remaining. goc output is byte-identical to
+  the host toolchain across nine capture shapes in all six
+  optimization/GOMAXPROCS configurations, where the pre-fix compiler differs on
+  nine of ten lines.
 
 Still open: `println` with several operands does not print the spaces the spec
 requires (`println("a", 1)` gives `a1`). Found while reducing this bug, unrelated
