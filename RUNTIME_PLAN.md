@@ -656,9 +656,9 @@ The reduction is committed rather than left in a scratch directory, as three
 All three are frame-layout sensitive, which is why they are three programs and
 not one. Do not consolidate them, and do not add statements to
 `runtime_cleanup_frame_retention.go` — either turns a real failure into a false
-pass. Each file records this in its own header. Note that those headers still
-describe the scribble as demonstrating the mechanism, which the diagnostic below
-disproved; the headers need correcting.
+pass. Each file records this in its own header. The headers were corrected on
+2026-07-28: they previously described the scribble file as the positive proof of
+the stale-frame theory, which the diagnostic below disproved.
 
 #### The stack-scan diagnostic (2026-07-28)
 

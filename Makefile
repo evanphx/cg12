@@ -43,6 +43,9 @@ STATUS_SHARD    ?= 0
 # Generous default; a full unsharded matrix takes many minutes.
 STATUS_TIMEOUT  ?= 30m
 GOC_CMD_TIMEOUT ?= 15m
+# The corpus compiles and runs real Go programs and legitimately needs well over
+# go test's 10-minute default, which it was silently dying on.
+GOC_CORPUS_TIMEOUT ?= 40m
 
 # The runtime coverage collection. The report describes the whole corpus, so it
 # is deliberately unsharded: the test refuses -runtime-coverprofile together
@@ -76,7 +79,7 @@ test-unit:
 
 # The goc corpus (arm64 Linux; needs a system `cc`).
 test-goc-corpus:
-	$(GO) test $(GOC_CORPUS_PKGS)
+	$(GO) test -timeout $(GOC_CORPUS_TIMEOUT) $(GOC_CORPUS_PKGS)
 
 # The goc driver end-to-end tests, excluding the long capability matrix.
 test-goc-cmd:
