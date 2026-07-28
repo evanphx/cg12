@@ -514,6 +514,77 @@ func Test() {
 	assert.True(t, callsSymbol(initialize, "runtime.newobject"), "global slice literal backing was not promoted out of the init stack")
 }
 
+// The runtime's print routines slice a local scratch array and hand it to a
+// callee that does not retain it. They must not allocate: they run during mark
+// termination and on fatal paths where mallocgc throws. This mirrors the shape
+// of runtime.printuint feeding gwrite(buf[i:]).
+func TestLocalArraySlicedIntoNonRetainingCalleeStaysOnStack(t *testing.T) {
+	module, err := goc.Compile("sliced_scratch.go", []byte(`
+package main
+
+import "runtime"
+
+func consume(text []byte) int {
+	if len(text) == 0 {
+		return 0
+	}
+	return int(text[0]) + len(text)
+}
+
+func format(value uint64) {
+	var buf [20]byte
+	index := len(buf)
+	for {
+		index--
+		buf[index] = byte('0' + value%10)
+		value /= 10
+		if value == 0 {
+			break
+		}
+	}
+	_ = consume(buf[index:])
+}
+
+func Test() {
+	runtime.GC()
+	format(1234)
+}
+`))
+	require.NoError(t, err)
+
+	formatFunc := functionWithSuffix(t, module, "format")
+	assert.False(t, callsSymbol(formatFunc, "runtime.newobject"),
+		"scratch array sliced into a non-retaining callee was promoted to the heap")
+}
+
+// The counterpart: when the derived slice genuinely outlives the frame, the
+// backing array must still be promoted. Guards against over-relaxing the
+// slice-expression escape rule.
+func TestLocalArraySlicedIntoReturnedSliceEscapes(t *testing.T) {
+	module, err := goc.Compile("returned_scratch.go", []byte(`
+package main
+
+import "runtime"
+
+func leak() []byte {
+	var buf [20]byte
+	return buf[:]
+}
+
+var sink []byte
+
+func Test() {
+	runtime.GC()
+	sink = leak()
+}
+`))
+	require.NoError(t, err)
+
+	leakFunc := functionWithSuffix(t, module, "leak")
+	assert.True(t, callsSymbol(leakFunc, "runtime.newobject"),
+		"returned slice of a local array did not force the backing onto the heap")
+}
+
 func TestZeroCaptureFunctionLiteralUsesStaticDescriptor(t *testing.T) {
 	module, err := goc.Compile("closure.go", []byte(`
 package main
