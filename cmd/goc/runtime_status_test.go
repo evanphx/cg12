@@ -2240,6 +2240,21 @@ func skippedRuntimeCapabilityResult(reason string) runtimeCapabilityResult {
 	}
 }
 
+// unreportedRuntimeCapabilityResult stands in for a capability the run never
+// reached, which happens when the subtest aborts before it records anything.
+// It is always a collection failure, but naming it keeps the capability in the
+// report rather than letting the corpus lose a row without saying so.
+func unreportedRuntimeCapabilityResult() runtimeCapabilityResult {
+	const reason = "the capability produced no outcome of its own: the run ended before it reported one"
+	return runtimeCapabilityResult{
+		err:             errors.New(reason),
+		compileOutcome:  runtimeCoverageOutcomeUnreported,
+		runOutcome:      runtimeCoverageOutcomeUnreported,
+		coverageOutcome: runtimeCoverageOutcomeMissing,
+		coverageReason:  reason,
+	}
+}
+
 func buildGOCForRuntimeCapabilityStatus(t *testing.T, directory string) string {
 	t.Helper()
 

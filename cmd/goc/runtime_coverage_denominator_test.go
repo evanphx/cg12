@@ -49,6 +49,17 @@ func TestRuntimeCapabilityMatrixIsWellFormed(t *testing.T) {
 				"capability %q declares abnormal termination without a reason",
 				name,
 			)
+			// A must-pass capability has to exit cleanly, so declaring it
+			// abnormal is a contradiction. Rejecting it also closes the only
+			// route by which a lost packet could be silenced as
+			// expected-unavailable without the capability being reclassified.
+			require.NotEqual(
+				t,
+				runtimeCapabilityMustPass,
+				capability.expectation,
+				"capability %q must pass, so it cannot also be declared to terminate abnormally",
+				name,
+			)
 		}
 	}
 }
@@ -272,6 +283,156 @@ func TestRuntimeCorpusCoverageDetectsACapabilityThatReportsNothing(t *testing.T)
 	require.Equal(t, []string{"gc/silent"}, coverage.unreportedPrograms())
 }
 
+// A capability that reports nothing is the one case where the collector could
+// quietly publish a smaller corpus. It must instead keep the row, name the
+// absence, and still produce a valid report a reviewer can diff.
+func TestRuntimeCorpusCoverageKeepsAndNamesACapabilityThatReportsNothing(t *testing.T) {
+	withRuntimeCoverageProfile(t)
+
+	capabilities := []runtimeCapability{
+		{category: "gc", name: "reported", source: "a.go"},
+		{category: "gc", name: "silent", source: "b.go"},
+	}
+	coverage := newRuntimeCorpusCoverage()
+	coverage.expect(capabilities)
+	coverage.add(capabilities[0], runtimeCapabilityResult{
+		compileOutcome:  runtimeCoverageOutcomePassed,
+		runOutcome:      runtimeCoverageOutcomePassed,
+		coverageOutcome: runtimeCoverageOutcomeCollected,
+		runAttempts:     1,
+		coverage:        runtimeCoverageTestPacket(),
+	})
+
+	coverage.recordUnreportedCapabilities()
+
+	require.Empty(t, coverage.unreportedPrograms(), "the hole must have been filled with an explicit row")
+	require.Len(t, coverage.collectionErrors, 1)
+	require.Contains(
+		t,
+		coverage.collectionErrors[0],
+		"gc/silent ran without reporting a compile, run, or coverage outcome",
+	)
+
+	report := coverage.report()
+	require.Equal(t, len(capabilities), report.Summary.Programs)
+	require.Equal(t, len(capabilities), report.Summary.MatrixCapabilities)
+	require.Equal(t, 1, report.Summary.UnreportedPrograms)
+	require.Equal(t, 1, report.Summary.MissingCoveragePrograms)
+
+	silent := runtimeCoverageProgramSet(report.Programs)["gc/silent"]
+	require.Equal(t, runtimeCoverageOutcomeUnreported, silent.CompileOutcome)
+	require.Equal(t, runtimeCoverageOutcomeUnreported, silent.RunOutcome)
+	require.Equal(t, runtimeCoverageOutcomeMissing, silent.CoverageOutcome)
+	require.Equal(
+		t,
+		"the capability produced no outcome of its own: the run ended before it reported one",
+		silent.CoverageReason,
+	)
+	require.Equal(t, 0, silent.RunAttempts)
+
+	require.NoError(t, validateRuntimeCoverageReport(report))
+}
+
+// A packet the collector discards must not be recorded as collected coverage.
+// Otherwise the program row and the corpus totals disagree about which programs
+// contributed, which is the same silent shrinkage in a different disguise.
+func TestRuntimeCorpusCoverageNamesADiscardedPacket(t *testing.T) {
+	testCases := []struct {
+		name     string
+		result   runtimeCapabilityResult
+		outcome  string
+		reason   string
+		errorGot string
+	}{
+		{
+			name: "a packet from a different runtime source is refused",
+			result: runtimeCapabilityResult{
+				compileOutcome:  runtimeCoverageOutcomePassed,
+				runOutcome:      runtimeCoverageOutcomePassed,
+				coverageOutcome: runtimeCoverageOutcomeCollected,
+				runAttempts:     1,
+				coverage:        runtimeCoverageTestPacketFor("a-different-copy-of-the-go-runtime"),
+			},
+			outcome:  runtimeCoverageOutcomeMissing,
+			reason:   "returned a coverage packet for runtime source a-different-copy-of-the-go-runtime, but the corpus is collecting test-runtime",
+			errorGot: "gc/drifted returned a coverage packet for runtime source",
+		},
+		{
+			name: "a packet without a runtime source ID is refused",
+			result: runtimeCapabilityResult{
+				compileOutcome:  runtimeCoverageOutcomePassed,
+				runOutcome:      runtimeCoverageOutcomePassed,
+				coverageOutcome: runtimeCoverageOutcomeCollected,
+				runAttempts:     1,
+				coverage:        runtimeCoverageTestPacketFor(""),
+			},
+			outcome:  runtimeCoverageOutcomeMissing,
+			reason:   "returned a coverage packet without a runtime source ID",
+			errorGot: "gc/drifted returned a coverage packet without a runtime source ID",
+		},
+		{
+			name: "a later run that lost its packet discards the earlier merge",
+			result: runtimeCapabilityResult{
+				compileOutcome:  runtimeCoverageOutcomePassed,
+				runOutcome:      runtimeCoverageOutcomePassed,
+				coverageOutcome: runtimeCoverageOutcomeMissing,
+				coverageReason:  "goc: runtime coverage packet was not written",
+				runAttempts:     2,
+				coverage:        runtimeCoverageTestPacket(),
+			},
+			outcome: runtimeCoverageOutcomeMissing,
+			reason:  "goc: runtime coverage packet was not written",
+		},
+	}
+
+	for _, testCase := range testCases {
+		t.Run(testCase.name, func(t *testing.T) {
+			withRuntimeCoverageProfile(t)
+
+			anchor := runtimeCapability{category: "gc", name: "anchor", source: "a.go"}
+			drifted := runtimeCapability{category: "gc", name: "drifted", source: "b.go"}
+			coverage := newRuntimeCorpusCoverage()
+			coverage.expect([]runtimeCapability{anchor, drifted})
+			coverage.add(anchor, runtimeCapabilityResult{
+				compileOutcome:  runtimeCoverageOutcomePassed,
+				runOutcome:      runtimeCoverageOutcomePassed,
+				coverageOutcome: runtimeCoverageOutcomeCollected,
+				runAttempts:     1,
+				coverage:        runtimeCoverageTestPacket(),
+			})
+			coverage.add(drifted, testCase.result)
+
+			report := coverage.report()
+			row := runtimeCoverageProgramSet(report.Programs)["gc/drifted"]
+			require.Equal(t, testCase.outcome, row.CoverageOutcome)
+			require.Equal(t, testCase.reason, row.CoverageReason)
+			require.Equal(t, 1, report.Summary.CoveredPrograms, "only the anchor contributed coverage")
+			if testCase.errorGot == "" {
+				require.Empty(t, coverage.collectionErrors)
+			} else {
+				require.Len(t, coverage.collectionErrors, 1)
+				require.Contains(t, coverage.collectionErrors[0], testCase.errorGot)
+			}
+			require.NoError(t, validateRuntimeCoverageReport(report))
+		})
+	}
+}
+
+func TestValidateRuntimeCoverageReportRejectsADuplicatedProgram(t *testing.T) {
+	report := runtimeCoverageTestReport()
+	report.Kind = runtimeCoverageReportBaseline
+	// One capability reported twice while another reported nothing keeps the
+	// program count right, so only an identity check can catch it.
+	report.Programs = append(report.Programs, report.Programs[0])
+	report.Summary.Programs = 2
+	report.Summary.MatrixCapabilities = 2
+	report.Summary.CoveredPrograms = 2
+	report.Summary.RunAttempts = 2
+
+	err := validateRuntimeCoverageReport(report)
+	require.ErrorContains(t, err, "program scheduler/work-steal appears more than once")
+}
+
 func TestRuntimeCorpusCoverageRejectsADuplicateOutcome(t *testing.T) {
 	withRuntimeCoverageProfile(t)
 
@@ -410,9 +571,13 @@ func withRuntimeCoverageProfile(t *testing.T) {
 }
 
 func runtimeCoverageTestPacket() *runtimeCapabilityCoverageResult {
+	return runtimeCoverageTestPacketFor("test-runtime")
+}
+
+func runtimeCoverageTestPacketFor(runtimeSourceID string) *runtimeCapabilityCoverageResult {
 	return &runtimeCapabilityCoverageResult{
 		metadata: &goc.RuntimeCoverage{
-			RuntimeSourceID: "test-runtime",
+			RuntimeSourceID: runtimeSourceID,
 			Functions: []goc.RuntimeCoverageFunction{
 				{Name: "runtime.first", File: "runtime/proc.go", Line: 10, Compiled: true, Entry: 0},
 			},

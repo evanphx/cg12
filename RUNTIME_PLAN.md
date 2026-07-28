@@ -41,7 +41,8 @@ that must not be hidden by adding more tests:
 - finalizer resurrection does not run correctly;
 - the runtime trace program runs out of memory or times out;
 - the accepted baseline still needs a rerun after recent trace and large HTTP
-  fixes;
+  fixes, and the runtime source fingerprint has since moved, so a diff against
+  it is now refused rather than silently misleading;
 - the ECDSA case was a compiler gap in generic method dispatch. It is fixed and
   `stdlib-crypto/ecdsa` is `mustPass` as of 2026-07-28; see §5.6.
 
@@ -57,13 +58,15 @@ The two denominators are now reconciled. There is only one denominator: the
 capability matrix *is* the coverage corpus, and every capability reports one
 explicit compile/run/coverage outcome, including the ones this environment
 cannot run. The accepted baseline covers 294 programs while the matrix holds
-325, and that gap is baseline staleness rather than an exclusion set — each of
-the 31 capabilities was added after the 2026-07-22 run. They are listed with a
+329, and that gap is baseline staleness rather than an exclusion set — each of
+the 35 capabilities was added after the 2026-07-22 run. They are listed with a
 reason in `cmd/goc/testdata/runtime_coverage_baseline_pending.json`, and
 `TestCheckedRuntimeCoverageBaselineDenominator` reconciles matrix, baseline, and
-list, so adding a capability now requires either accepting a new baseline or
-recording why the baseline does not cover it. The list empties when the pending
-full-corpus rerun is accepted.
+list in both directions: 294 + 35 = 329, no capability may appear in both, and
+no baseline program may name a capability the matrix has dropped. Adding a
+capability therefore requires either accepting a new baseline or recording why
+the baseline does not cover it. The list empties when the pending full-corpus
+rerun is accepted.
 
 Control runs without coverage instrumentation reproduce the runtime failures
 and large-program compiler memory failures. They are not coverage-counter
@@ -155,31 +158,62 @@ Current M0 checkpoint:
   that reports no outcome is a collection failure, not a smaller corpus.
 - [x] Give every program an explicit named outcome. A capability the environment
   cannot run is `skipped` with a recorded reason instead of being dropped; a
-  deliberate abnormal termination is classified `expected-unavailable`; every
-  other absent packet keeps a `missing` outcome and says how the process ended.
+  deliberate abnormal termination is classified `expected-unavailable`; a
+  capability that reported nothing at all is `unreported`; every other absent
+  packet keeps a `missing` outcome and says how the process ended. Every outcome
+  other than `collected` carries a reason, and the report is published even when
+  the collector detected a hole, so the hole is diffable instead of costing the
+  reviewer the whole run.
+- [x] Keep the recorded outcome and the accumulated totals in agreement. A
+  packet the collector discards — no runtime source ID, a source ID from a
+  different copy of the runtime, or a repeat execution that lost its packet —
+  is recorded as `missing` with the rejection as its reason rather than as
+  collected coverage that never entered the totals.
+- [x] Check capability identity, not just capability count. A duplicated program
+  row is rejected by report validation, so it cannot cancel out a capability
+  that never reported and leave the totals looking correct.
 - [x] Reconcile the accepted baseline with the matrix in
   `testdata/runtime_coverage_baseline_pending.json`, checked by a test.
 - [x] Refuse a sharded coverage run, which would publish a fraction of the
   corpus as a complete report, and refuse a coverage run on a host that cannot
   execute the matrix rather than skipping silently.
 - [ ] Reach one usable coverage outcome per capability by repairing the current
-  failures. The remaining absences are the §5.2/§5.3 runtime failures and the
-  trace-buffer timeout, not collector gaps.
+  failures. The 2026-07-28 verification run reached 326 of 329: every capability
+  compiled and ran, none was skipped or unreported, and the three absences are
+  `goroutine/many-goroutines-gc`, `scheduler-stress/gc-churn`, and
+  `stdlib-bytes/grow-allocs`, each killed at its 30s timeout with that recorded
+  as its reason. All three are the §5.2.1 GC-assist failure, not a collector
+  gap, so this box stays open until that runtime work lands.
 
 ### 4.1 Make reports stable and comparable
 
+Each checkbox below names the test that proves it. A claim without a test is
+not ticked.
+
 - [x] Add a report-diff command keyed by function, file, line, and block index.
+  `TestCompareRuntimeCoverageReportsKeysFunctionsAndBlocksPrecisely` moves one
+  function's line, then its file, then one block's index, and requires each to
+  appear as a gain plus a loss rather than as the same entry.
 - [x] Store the accepted Linux/ARM64 baseline in the repository without
   generated binaries or per-program counter blobs.
+  `TestCheckedRuntimeCoverageBaseline` validates the checked-in file.
 - [x] Report gained/lost functions and blocks, missing packets, compile
   failures, runtime failures, timeouts, and peak compile/run memory separately.
   The diff also lists added and removed programs, so comparing against a stale
   baseline announces the capabilities that baseline never ran instead of
-  ignoring them.
+  ignoring them. `TestCompareRuntimeCoverageReportsSeparatesProgramOutcomes`
+  covers the compile-failure, timeout, added, and removed buckets;
+  `TestCompareRuntimeCoverageReportsReportsANewRunFailureOnItsOwn` covers a run
+  failure on its own; `TestRuntimeCoverageDiffCommandReportsEachOutcomeSeparately`
+  requires one printed line per bucket and separate compile and run peak RSS, so
+  a compiler OOM cannot be read as a runtime OOM.
 - [x] Add per-category and per-subsystem summaries in addition to per-file
-  totals.
+  totals. `TestRuntimeCorpusCoverageReportsCategoryResources`.
 - [x] Detect source drift so a report from a different copied Go runtime cannot
-  be compared silently.
+  be compared silently. `TestCompareRuntimeCoverageReportsRejectsSourceDrift`
+  and `TestRuntimeCoverageDiffCommandRejectsSourceDrift` refuse the comparison
+  and print nothing; `TestRuntimeCorpusCoverageNamesADiscardedPacket` refuses a
+  drifted packet inside a single collection run.
 - [x] Make coverage collection opt-in for normal tests and provide a documented,
   resource-bounded command for the complete run: `make test-goc-coverage`, then
   `make runtime-cover-diff`.
@@ -206,7 +240,15 @@ functions remain visible but do not become artificial coverage targets.
 ### 4.3 Cover abnormal termination and assembly
 
 - Preserve coverage on `runtime.exit`, panic, throw, and fatal subprocess paths
-  where it is safe to do so.
+  where it is safe to do so. This already holds for every abnormal termination
+  the corpus currently produces: `insertRuntimeCoverageDumpCalls` emits the dump
+  ahead of every call to `runtime.exit`, and Go's `fatalpanic` and `fatalthrow`
+  both reach `exit(2)`. In the 2026-07-28 run the deliberate uncaught panic and
+  all six programs that exited non-zero still returned their packets, so the
+  `expected-unavailable` classification is a guard that did not have to fire
+  rather than an active exclusion. It stays in place because terminations that
+  bypass `runtime.exit` — `runtime.abort`, `dieFromSignal` re-raising a fatal
+  signal — would otherwise silently lose a packet.
 - List selected Plan 9 assembly entry points and callers in the report.
 - First add scenario coverage for assembly routines such as stack switching,
   signal trampolines, atomics, memmove/memclr, syscall entry, and preemption.
@@ -215,9 +257,28 @@ functions remain visible but do not become artificial coverage targets.
 
 Exit criterion: two consecutive full runs have the same denominator, every
 capability in the matrix reports an explicit compile/run/coverage outcome, and
-report diffs are usable in code review. The denominator and the explicit
-outcomes are now enforced by the collector and its tests; what remains is the
-runtime repair work that turns the classified failures into collected packets.
+report diffs are usable in code review.
+
+The denominator is no longer an empirical observation across runs. It is
+`len(runtimeCapabilities())`, recorded in every report as `matrix_capabilities`,
+and a run either emits one row per capability or fails: a capability that
+reports nothing gets an `unreported` row plus a collection error, a duplicated
+row is rejected by report validation, and a sharded coverage run is refused
+outright. Two runs cannot disagree about the denominator without one of them
+failing.
+
+The explicit outcomes hold as well. The 2026-07-28 verification run over all
+329 capabilities produced 329 compile outcomes, 329 run outcomes, and 329
+coverage outcomes, with a recorded reason on every outcome other than
+`collected` and no silent absences. What remains is the runtime repair work that
+turns the three classified timeouts into collected packets.
+
+One consequence is worth stating plainly: the runtime source fingerprint has
+moved since the accepted 2026-07-22 baseline, so `make runtime-cover-diff`
+against that baseline now correctly refuses to compare rather than producing a
+misleading delta. Diffing is usable between reports built from the same runtime
+source; comparing against the accepted baseline again requires accepting a new
+one, which needs the open runtime failures resolved first.
 
 ## 5. Phase 1: Repair current hard failures
 
@@ -935,8 +996,8 @@ Start with the following bounded sequence:
 7. Reduce the gob reflection failure.
 8. Separate and fix trace runtime growth from compiler memory growth.
 9. Profile and reduce the three HTTP compilation OOMs.
-10. Re-run the complete capability matrix, accept the first stable baseline, and begin the
-    allocation/GC phase.
+10. Re-run the complete capability matrix, accept the first stable baseline, and
+    begin the allocation/GC phase.
 
 This order deliberately repairs the mechanisms used to diagnose later phases:
 unwinding, stack metadata, GC pointer accuracy, atomics, and coverage reporting

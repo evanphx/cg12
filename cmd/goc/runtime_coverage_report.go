@@ -31,6 +31,11 @@ const (
 	// environment could not run, such as a network test without AF_INET
 	// sockets. The program stays in the denominator with a recorded reason.
 	runtimeCoverageOutcomeSkipped = "skipped"
+	// runtimeCoverageOutcomeUnreported marks a capability the run never reached,
+	// so it produced no compile or execution outcome of its own. It is always a
+	// collection failure, but naming it keeps the capability in the report
+	// instead of letting the corpus quietly shrink by one row.
+	runtimeCoverageOutcomeUnreported = "unreported"
 
 	runtimeCoverageOutcomeCollected = "collected"
 	runtimeCoverageOutcomeMissing   = "missing"
@@ -93,12 +98,16 @@ type runtimeCoverageSummary struct {
 	SkippedPrograms int `json:"skipped_programs,omitempty"`
 	// ExpectedUnavailableCoveragePrograms counts programs whose missing packet
 	// is explained by a declared abnormal termination.
-	ExpectedUnavailableCoveragePrograms int    `json:"expected_unavailable_coverage_programs,omitempty"`
-	CompileMilliseconds                 int64  `json:"compile_milliseconds"`
-	CompilePeakRSSBytes                 uint64 `json:"compile_peak_rss_bytes"`
-	RunMilliseconds                     int64  `json:"run_milliseconds"`
-	RunPeakRSSBytes                     uint64 `json:"run_peak_rss_bytes"`
-	RunAttempts                         int    `json:"run_attempts"`
+	ExpectedUnavailableCoveragePrograms int `json:"expected_unavailable_coverage_programs,omitempty"`
+	// UnreportedPrograms counts capabilities the run never reached. It is
+	// always a collection failure; it is summarised separately so a reviewer
+	// can tell an unaccounted-for capability from one that ran and failed.
+	UnreportedPrograms  int    `json:"unreported_programs,omitempty"`
+	CompileMilliseconds int64  `json:"compile_milliseconds"`
+	CompilePeakRSSBytes uint64 `json:"compile_peak_rss_bytes"`
+	RunMilliseconds     int64  `json:"run_milliseconds"`
+	RunPeakRSSBytes     uint64 `json:"run_peak_rss_bytes"`
+	RunAttempts         int    `json:"run_attempts"`
 }
 
 type runtimeCoverageCategoryReport struct {
@@ -490,14 +499,24 @@ func validateRuntimeCoverageReport(report runtimeCoverageReport) error {
 	missingCoveragePrograms := 0
 	skippedPrograms := 0
 	expectedUnavailableCoveragePrograms := 0
+	unreportedPrograms := 0
 	var compileMilliseconds int64
 	var compilePeakRSSBytes uint64
 	var runMilliseconds int64
 	var runPeakRSSBytes uint64
 	runAttempts := 0
+	// A capability owns exactly one row. Counting rows alone would let a
+	// duplicated program hide a capability that never reported, because the two
+	// mistakes cancel out in the total.
+	reportedNames := make(map[string]bool, len(report.Programs))
 	for _, program := range report.Programs {
+		name := runtimeCoverageProgramName(program)
+		if reportedNames[name] {
+			return fmt.Errorf("program %s appears more than once", name)
+		}
+		reportedNames[name] = true
 		if err := validateRuntimeCoverageProgram(program); err != nil {
-			return fmt.Errorf("program %s: %w", runtimeCoverageProgramName(program), err)
+			return fmt.Errorf("program %s: %w", name, err)
 		}
 		if program.CoverageOutcome == runtimeCoverageOutcomeCollected {
 			coveredPrograms++
@@ -515,6 +534,9 @@ func validateRuntimeCoverageReport(report runtimeCoverageReport) error {
 		}
 		if program.CompileOutcome == runtimeCoverageOutcomeSkipped {
 			skippedPrograms++
+		}
+		if program.CompileOutcome == runtimeCoverageOutcomeUnreported {
+			unreportedPrograms++
 		}
 		if program.RunOutcome == runtimeCoverageOutcomeFailed {
 			runFailures++
@@ -570,6 +592,13 @@ func validateRuntimeCoverageReport(report runtimeCoverageReport) error {
 			"expected-unavailable coverage count is %d, but report contains %d such programs",
 			report.Summary.ExpectedUnavailableCoveragePrograms,
 			expectedUnavailableCoveragePrograms,
+		)
+	}
+	if report.Summary.UnreportedPrograms != unreportedPrograms {
+		return fmt.Errorf(
+			"unreported program count is %d, but report contains %d unreported programs",
+			report.Summary.UnreportedPrograms,
+			unreportedPrograms,
 		)
 	}
 	// MatrixCapabilities reconciles the corpus with the capability matrix. It is
@@ -705,6 +734,19 @@ func validateRuntimeCoverageProgram(program runtimeCoverageProgramReport) error 
 		if program.SkipReason == "" {
 			return errors.New("skipped capability has no recorded skip reason")
 		}
+	case runtimeCoverageOutcomeUnreported:
+		if program.RunOutcome != runtimeCoverageOutcomeUnreported {
+			return errors.New("an unreported capability must have an unreported execution outcome")
+		}
+		// The packet really is absent, so the coverage outcome stays "missing"
+		// and its reason carries the explanation. Only the compile and run
+		// stages are unreported, because the capability never reached them.
+		if program.CoverageOutcome != runtimeCoverageOutcomeMissing {
+			return errors.New("an unreported capability must have a missing coverage outcome")
+		}
+		if program.RunAttempts != 0 {
+			return errors.New("unreported capability has run attempts")
+		}
 	default:
 		return fmt.Errorf("invalid compile outcome %q", program.CompileOutcome)
 	}
@@ -713,7 +755,8 @@ func validateRuntimeCoverageProgram(program runtimeCoverageProgramReport) error 
 		runtimeCoverageOutcomeFailed,
 		runtimeCoverageOutcomeTimeout,
 		runtimeCoverageOutcomeNotRun,
-		runtimeCoverageOutcomeSkipped:
+		runtimeCoverageOutcomeSkipped,
+		runtimeCoverageOutcomeUnreported:
 	default:
 		return fmt.Errorf("invalid run outcome %q", program.RunOutcome)
 	}
@@ -1017,6 +1060,12 @@ func writeRuntimeCoverageDiff(output io.Writer, difference runtimeCoverageDiff) 
 		difference.Current.MissingCoveragePrograms,
 	)
 	writeRuntimeCoverageMetric(output, "skipped programs", difference.Baseline.SkippedPrograms, difference.Current.SkippedPrograms)
+	writeRuntimeCoverageMetric(
+		output,
+		"unreported programs",
+		difference.Baseline.UnreportedPrograms,
+		difference.Current.UnreportedPrograms,
+	)
 	writeRuntimeCoverageMetric(
 		output,
 		"expected-unavailable coverage",

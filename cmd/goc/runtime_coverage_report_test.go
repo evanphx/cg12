@@ -477,7 +477,33 @@ func TestCompareRuntimeCoverageReportsSeparatesProgramOutcomes(t *testing.T) {
 	require.True(t, runtimeCoverageRegressed(difference))
 }
 
-func TestRuntimeCoverageDiffCommandReportsEachCategorySeparately(t *testing.T) {
+// A program that still compiles and still returns a coverage packet but now
+// exits non-zero is a run failure and nothing else. It has to appear in its own
+// bucket, or the only signal left is a summary count nobody can act on.
+func TestCompareRuntimeCoverageReportsReportsANewRunFailureOnItsOwn(t *testing.T) {
+	baseline := runtimeCoverageTestReport()
+	current := runtimeCoverageTestReport()
+	current.Programs[0].RunOutcome = runtimeCoverageOutcomeFailed
+	current.Programs[0].Error = "exit status 1"
+	current.Summary.RunFailures = 1
+	current.Summary.UnexpectedFailures = 1
+
+	difference, err := compareRuntimeCoverageReports(baseline, current)
+	require.NoError(t, err)
+	require.Equal(t, []string{"scheduler/work-steal"}, difference.NewRunFailures)
+	require.Equal(t, []string{"scheduler/work-steal"}, difference.RegressedPrograms)
+	require.Empty(t, difference.NewCompileFailures)
+	require.Empty(t, difference.NewRunTimeouts)
+	require.Empty(t, difference.NewMissingCoveragePrograms)
+	require.Empty(t, difference.AddedPrograms)
+	require.Empty(t, difference.RemovedPrograms)
+	require.True(t, runtimeCoverageRegressed(difference))
+}
+
+// The diff command has to print each outcome the reviewer judges independently
+// on its own line, including compile and run peak memory, so a compiler OOM is
+// never read as a runtime OOM.
+func TestRuntimeCoverageDiffCommandReportsEachOutcomeSeparately(t *testing.T) {
 	directory := t.TempDir()
 	baselinePath := filepath.Join(directory, "baseline.json")
 	currentPath := filepath.Join(directory, "current.json")
@@ -508,6 +534,7 @@ func TestRuntimeCoverageDiffCommandReportsEachCategorySeparately(t *testing.T) {
 		"missing coverage packets: 0 -> 0 (+0)",
 		"skipped programs: 0 -> 0 (+0)",
 		"expected-unavailable coverage: 0 -> 0 (+0)",
+		"unreported programs: 0 -> 0 (+0)",
 		"compile peak RSS: 1024.0 MiB -> 2048.0 MiB (+1024.0 MiB)",
 		"run peak RSS: 32.0 MiB -> 64.0 MiB (+32.0 MiB)",
 		"gained functions: 0",
