@@ -4485,6 +4485,87 @@ func (g *gen) variableStorage(object types.Object, valueType types.Type) ir.Ref 
 	return storage
 }
 
+// perIterationVariable reports whether object, a variable declared by a `for`
+// init statement or by a `range` clause, needs its own storage in every
+// iteration.
+//
+// Go 1.22 made those variables per-iteration, so a closure created in one
+// iteration keeps observing that iteration's value. Reproducing that only
+// matters when the variable's storage can outlive the iteration, which is
+// exactly the condition variableStorage already tests: a variable captured by
+// an escaping closure, or whose address otherwise escapes, is heap-lifted, and
+// its cell is what a later observer reads. A variable that stays in a frame
+// slot cannot be observed after its iteration ends, so sharing one slot across
+// iterations is unobservable and keeps the common loop free of allocation.
+func (g *gen) perIterationVariable(object types.Object) bool {
+	return object != nil && g.runtimeAllocation && g.escapingCaptures[object]
+}
+
+// freshVariableStorage allocates one more instance of the storage
+// variableStorage builds for an escaping capture, with the same shape, so a
+// value can be moved between instances with the ordinary variable read and
+// assignment helpers.
+//
+// The allocation deliberately bypasses the heap-allocation candidate form that
+// opt.LowerHeapAllocations may promote to a frame slot. That pass reasons about
+// whether a pointer outlives the frame, not whether it outlives one iteration,
+// so promoting a per-iteration cell would silently collapse every iteration
+// back onto one slot -- the bug this storage exists to avoid.
+func (g *gen) freshVariableStorage(valueType types.Type) ir.Ref {
+	if isMemoryValue(valueType) {
+		backing := g.allocateEscapingTyped(valueType)
+		storageType := types.NewPointer(valueType)
+		storage := g.allocateEscapingTyped(storageType)
+		g.store(backing, storage, storageType)
+		return storage
+	}
+	return g.allocateEscapingTyped(valueType)
+}
+
+// variableValue reads object's current storage the way an identifier reference
+// would, so the value can be copied into a different instance of that same
+// variable's storage.
+func (g *gen) variableValue(object types.Object, valueType types.Type) ir.Ref {
+	slot := g.vars[object]
+	if g.directValues[object] {
+		return slot
+	}
+	return g.load(slot, valueType)
+}
+
+// startIterationVariable gives object fresh storage for the iteration that is
+// about to run and returns it. The caller stores the iteration's value into the
+// returned slot; a `range` clause always assigns its variables from the range
+// expression, so nothing needs to be carried in.
+func (g *gen) startIterationVariable(object types.Object, valueType types.Type) ir.Ref {
+	storage := g.freshVariableStorage(valueType)
+	g.vars[object] = storage
+	g.heapCaptures[object] = storage
+	return storage
+}
+
+// enterIterationVariable gives object fresh storage for the iteration that is
+// about to run and copies in the value the loop carries between iterations. A
+// three-clause `for` needs this: its init statement and its post statement act
+// on a value that flows from one iteration to the next.
+func (g *gen) enterIterationVariable(object types.Object, carrier ir.Ref, valueType types.Type) ir.Ref {
+	g.vars[object] = carrier
+	carried := g.variableValue(object, valueType)
+	storage := g.startIterationVariable(object, valueType)
+	g.assignLocal(carried, storage, valueType)
+	return storage
+}
+
+// leaveIterationVariable copies the value the finished iteration left in its own
+// storage back into the loop's carrier, so the next iteration and the post
+// statement see it.
+func (g *gen) leaveIterationVariable(object types.Object, storage, carrier ir.Ref, valueType types.Type) {
+	g.vars[object] = storage
+	value := g.variableValue(object, valueType)
+	g.vars[object] = carrier
+	g.assignLocal(value, carrier, valueType)
+}
+
 func (g *gen) resultStorage(object types.Object, valueType types.Type) ir.Ref {
 	if object != nil && g.runtimeAllocation && g.escapingCaptures[object] {
 		storage := g.allocateTyped(valueType)
@@ -7612,6 +7693,21 @@ func (g *gen) addDeferRecoveryEdges(recovery *ir.Block) {
 	}
 }
 
+// rangeVariableObject resolves one side of a `range` clause to the variable it
+// names, and reports whether the clause declares that variable. Only a declared
+// iteration variable is per-iteration under Go 1.22 semantics; `for k, v = range
+// x` assigns to variables that already exist and keeps their single storage.
+func (g *gen) rangeVariableObject(statement *ast.RangeStmt, expression ast.Expr) (types.Object, bool) {
+	identifier, ok := expression.(*ast.Ident)
+	if !ok || identifier.Name == "_" {
+		return nil, false
+	}
+	if declared := g.info.Defs[identifier]; declared != nil {
+		return declared, statement.Tok == token.DEFINE
+	}
+	return g.info.Uses[identifier], false
+}
+
 func (g *gen) rangeStmt(statement *ast.RangeStmt, label string) {
 	rangeType := g.typeAndValue(statement.X).Type
 	if mapType, ok := rangeType.Underlying().(*types.Map); ok {
@@ -7628,17 +7724,21 @@ func (g *gen) rangeStmt(statement *ast.RangeStmt, label string) {
 	}
 
 	indexType := types.Typ[types.Int]
-	var indexSlot ir.Ref
-	if key, ok := statement.Key.(*ast.Ident); ok && key.Name != "_" {
-		object := g.info.Defs[key]
-		if object == nil {
-			object = g.info.Uses[key]
-		}
-		indexSlot = g.variableStorage(object, indexType)
-	} else {
-		indexSlot = g.alloc(indexType)
-	}
+	// The loop counter is private storage. The key variable is assigned from it
+	// at the top of every iteration, exactly as the spec describes, so writing to
+	// the key inside the body cannot disturb the iteration and a per-iteration
+	// key can live in storage of its own.
+	indexSlot := g.alloc(indexType)
 	g.store(g.fn.Long(0), indexSlot, indexType)
+
+	keyObject, keyDeclared := g.rangeVariableObject(statement, statement.Key)
+	var keyType types.Type = indexType
+	var keySlot ir.Ref
+	if keyObject != nil {
+		keyType = g.objectType(keyObject)
+		keySlot = g.variableStorage(keyObject, keyType)
+	}
+	perIterationKey := keyDeclared && g.perIterationVariable(keyObject)
 
 	var upper ir.Ref
 	var rangeData ir.Ref
@@ -7668,16 +7768,14 @@ func (g *gen) rangeStmt(statement *ast.RangeStmt, label string) {
 		upper = g.convert(upper, rangeType, indexType)
 	}
 
+	valueObject, valueDeclared := g.rangeVariableObject(statement, statement.Value)
 	var valueSlot ir.Ref
 	var valueType types.Type
-	if value, ok := statement.Value.(*ast.Ident); ok && value.Name != "_" {
-		object := g.info.Defs[value]
-		if object == nil {
-			object = g.info.Uses[value]
-		}
-		valueType = g.objectType(object)
-		valueSlot = g.variableStorage(object, valueType)
+	if valueObject != nil {
+		valueType = g.objectType(valueObject)
+		valueSlot = g.variableStorage(valueObject, valueType)
 	}
+	perIterationValue := valueDeclared && g.perIterationVariable(valueObject)
 	var nextStringIndex ir.Ref
 	if stringRange {
 		nextStringIndex = g.alloc(indexType)
@@ -7698,6 +7796,15 @@ func (g *gen) rangeStmt(statement *ast.RangeStmt, label string) {
 	g.continues = append(g.continues, post)
 	g.setLabeledControl(label, done, post)
 	g.cur = body
+	if perIterationKey {
+		keySlot = g.startIterationVariable(keyObject, keyType)
+	}
+	if perIterationValue {
+		valueSlot = g.startIterationVariable(valueObject, valueType)
+	}
+	if keySlot != ir.R {
+		g.assignLocal(index, keySlot, keyType)
+	}
 	if stringRange {
 		byteAddress := g.cur.Add(ir.ClsP, rangeData, index)
 		firstByte := g.cur.LoadSub(ir.ClsW, ir.SubUB, byteAddress)
@@ -7786,14 +7893,12 @@ func (g *gen) channelRangeStmt(statement *ast.RangeStmt, label string, channelTy
 		g.markStackPointerWord(valueAddress, int(offset))
 	})
 
+	valueObject, valueDeclared := g.rangeVariableObject(statement, statement.Key)
 	var valueSlot ir.Ref
-	if key, ok := statement.Key.(*ast.Ident); ok && key.Name != "_" {
-		object := g.info.Defs[key]
-		if object == nil {
-			object = g.info.Uses[key]
-		}
-		valueSlot = g.variableStorage(object, elementType)
+	if valueObject != nil {
+		valueSlot = g.variableStorage(valueObject, elementType)
 	}
+	perIterationValue := valueDeclared && g.perIterationVariable(valueObject)
 
 	test := g.block("rangetest")
 	body := g.block("rangebody")
@@ -7810,6 +7915,9 @@ func (g *gen) channelRangeStmt(statement *ast.RangeStmt, label string, channelTy
 	g.setLabeledControl(label, done, post)
 
 	g.cur = body
+	if perIterationValue {
+		valueSlot = g.startIterationVariable(valueObject, elementType)
+	}
 	if valueSlot != ir.R {
 		value := g.channelReceiveValue(valueAddress, elementType)
 		g.assignLocal(value, valueSlot, elementType)
@@ -8016,29 +8124,28 @@ func (g *gen) iteratorRangeStmt(statement *ast.RangeStmt, label string, iterator
 func (g *gen) mapRangeStmt(statement *ast.RangeStmt, label string, mapType *types.Map) {
 	mapping := g.expr(statement.X)
 
-	rangeVariable := func(expression ast.Expr, valueType types.Type) ir.Ref {
-		identifier, ok := expression.(*ast.Ident)
-		if !ok || identifier.Name == "_" {
-			return ir.R
-		}
-
-		object := g.info.Defs[identifier]
+	rangeVariable := func(expression ast.Expr, valueType types.Type) (types.Object, ir.Ref) {
+		object, _ := g.rangeVariableObject(statement, expression)
 		if object == nil {
-			object = g.info.Uses[identifier]
+			return nil, ir.R
 		}
 		if statement.Tok != token.DEFINE {
 			if slot, exists := g.addr(object); exists {
-				return slot
+				return object, slot
 			}
 		}
 
-		return g.variableStorage(object, valueType)
+		return object, g.variableStorage(object, valueType)
 	}
 
-	keySlot := rangeVariable(statement.Key, mapType.Key())
-	valueSlot := rangeVariable(statement.Value, mapType.Elem())
+	keyObject, keySlot := rangeVariable(statement.Key, mapType.Key())
+	valueObject, valueSlot := rangeVariable(statement.Value, mapType.Elem())
+	variables := mapRangeVariables{key: keyObject, value: valueObject}
+	if statement.Tok != token.DEFINE {
+		variables = mapRangeVariables{}
+	}
 	if g.runtimeAllocation {
-		g.runtimeMapRangeStmt(statement, label, mapping, mapType, keySlot, valueSlot)
+		g.runtimeMapRangeStmt(statement, label, mapping, mapType, variables, keySlot, valueSlot)
 		return
 	}
 
@@ -8074,6 +8181,7 @@ func (g *gen) mapRangeStmt(statement *ast.RangeStmt, label string, mapType *type
 	g.continues = append(g.continues, post)
 	g.setLabeledControl(label, done, post)
 	g.cur = body
+	keySlot, valueSlot = g.startMapIterationVariables(variables, mapType, keySlot, valueSlot)
 	if keySlot != ir.R {
 		keyAddress := g.mapElementAddress(mapping, mapKeysOffset, index, mapType.Key())
 		key := g.mapElementValue(keyAddress, mapType.Key())
@@ -8100,7 +8208,39 @@ func (g *gen) mapRangeStmt(statement *ast.RangeStmt, label string, mapType *type
 	g.cur = done
 }
 
-func (g *gen) runtimeMapRangeStmt(statement *ast.RangeStmt, label string, mapping ir.Ref, mapType *types.Map, keySlot, valueSlot ir.Ref) {
+// mapRangeVariables names the variables a `for ... range aMap` clause declares.
+// Either field is nil when that side is absent, blank, or an existing variable
+// the clause merely assigns to.
+type mapRangeVariables struct {
+	key   types.Object
+	value types.Object
+}
+
+// startMapIterationVariables gives the declared map iteration variables their
+// own storage for the iteration that is about to run, and returns the slots the
+// caller must assign the key and element into.
+func (g *gen) startMapIterationVariables(
+	variables mapRangeVariables,
+	mapType *types.Map,
+	keySlot, valueSlot ir.Ref,
+) (ir.Ref, ir.Ref) {
+	if g.perIterationVariable(variables.key) {
+		keySlot = g.startIterationVariable(variables.key, mapType.Key())
+	}
+	if g.perIterationVariable(variables.value) {
+		valueSlot = g.startIterationVariable(variables.value, mapType.Elem())
+	}
+	return keySlot, valueSlot
+}
+
+func (g *gen) runtimeMapRangeStmt(
+	statement *ast.RangeStmt,
+	label string,
+	mapping ir.Ref,
+	mapType *types.Map,
+	variables mapRangeVariables,
+	keySlot, valueSlot ir.Ref,
+) {
 	pointerType := types.Typ[types.UnsafePointer]
 	iteratorFields := []*types.Var{
 		types.NewVar(token.NoPos, nil, "key", pointerType),
@@ -8128,6 +8268,7 @@ func (g *gen) runtimeMapRangeStmt(statement *ast.RangeStmt, label string, mappin
 	g.continues = append(g.continues, post)
 	g.setLabeledControl(label, done, post)
 	g.cur = body
+	keySlot, valueSlot = g.startMapIterationVariables(variables, mapType, keySlot, valueSlot)
 	if keySlot != ir.R {
 		key := g.mapElementValue(keyAddress, mapType.Key())
 		g.assignLocal(key, keySlot, mapType.Key())
@@ -8438,6 +8579,10 @@ func (g *gen) ifStmt(n *ast.IfStmt) {
 	}
 }
 func (g *gen) forStmt(n *ast.ForStmt, label string) {
+	if perIteration := g.perIterationForVariables(n); len(perIteration) != 0 {
+		g.perIterationForStmt(n, label, perIteration)
+		return
+	}
 	if n.Init != nil {
 		g.stmt(n.Init)
 	}
@@ -8447,7 +8592,8 @@ func (g *gen) forStmt(n *ast.ForStmt, label string) {
 	if n.Cond == nil {
 		g.cur.Goto(body)
 	} else {
-		g.cur.Jnz(g.expr(n.Cond), body, done)
+		condition := g.expr(n.Cond)
+		g.cur.Jnz(condition, body, done)
 	}
 	g.breaks = append(g.breaks, done)
 	g.continues = append(g.continues, post)
@@ -8468,22 +8614,137 @@ func (g *gen) forStmt(n *ast.ForStmt, label string) {
 	g.continues = g.continues[:len(g.continues)-1]
 	g.clearLabeledControl(label)
 	g.cur = done
-	if n.Cond == nil {
-		reachable := false
-		for _, block := range g.fn.Blocks {
-			if block == done {
-				continue
-			}
-			for _, successor := range block.Succs() {
-				if successor == done {
-					reachable = true
-				}
-			}
+	g.haltUnreachableForEnd(n, done)
+}
+
+// haltUnreachableForEnd terminates the exit block of a condition-less `for`
+// that nothing can branch to, so the block is still well formed.
+func (g *gen) haltUnreachableForEnd(n *ast.ForStmt, done *ir.Block) {
+	if n.Cond != nil {
+		return
+	}
+	for _, block := range g.fn.Blocks {
+		if block == done {
+			continue
 		}
-		if !reachable {
-			done.Hlt()
+		for _, successor := range block.Succs() {
+			if successor == done {
+				return
+			}
 		}
 	}
+	done.Hlt()
+}
+
+// perIterationForVariables returns the variables a three-clause `for` declares
+// in its init statement that need their own storage per iteration.
+func (g *gen) perIterationForVariables(n *ast.ForStmt) []types.Object {
+	assignment, ok := n.Init.(*ast.AssignStmt)
+	if !ok || assignment.Tok != token.DEFINE {
+		return nil
+	}
+	var variables []types.Object
+	for _, expression := range assignment.Lhs {
+		identifier, ok := expression.(*ast.Ident)
+		if !ok || identifier.Name == "_" {
+			continue
+		}
+		object := g.info.Defs[identifier]
+		if g.perIterationVariable(object) {
+			variables = append(variables, object)
+		}
+	}
+	return variables
+}
+
+// perIterationForStmt lowers a three-clause `for` whose declared variables are
+// per-iteration under Go 1.22 semantics.
+//
+// The init statement's storage becomes a carrier that holds the value between
+// iterations, and each iteration gets its own storage that is seeded from the
+// carrier and written back to it when the iteration finishes. The post
+// statement must act on the iteration's own storage -- `i++` has to increment
+// the variable the previous iteration's closures captured -- so it moves to the
+// top of the loop and is skipped on the first pass:
+//
+//	init'                       carrier := init value; first := true
+//	header: i := carrier        fresh storage per iteration
+//	        if first { first = false } else { post }
+//	        if !cond { goto done }
+//	body:   ...                 break -> done, continue -> post
+//	post:   carrier = i
+//	        goto header
+//
+// This is the same rewrite the standard compiler's loopvar pass performs.
+func (g *gen) perIterationForStmt(n *ast.ForStmt, label string, variables []types.Object) {
+	g.stmt(n.Init)
+	carriers := make([]ir.Ref, len(variables))
+	variableTypes := make([]types.Type, len(variables))
+	for index, variable := range variables {
+		carriers[index] = g.vars[variable]
+		variableTypes[index] = g.objectType(variable)
+	}
+
+	booleanType := types.Typ[types.Bool]
+	var firstSlot ir.Ref
+	if n.Post != nil {
+		firstSlot = g.alloc(booleanType)
+		g.store(g.fn.Word(1), firstSlot, booleanType)
+	}
+
+	header, body, post, done := g.block("forheader"), g.block("forbody"), g.block("forpost"), g.block("forend")
+	g.cur.Goto(header)
+
+	g.cur = header
+	storages := make([]ir.Ref, len(variables))
+	for index, variable := range variables {
+		storages[index] = g.enterIterationVariable(variable, carriers[index], variableTypes[index])
+	}
+	if n.Post != nil {
+		firstIteration, laterIteration, posted := g.block("forfirst"), g.block("forpostrun"), g.block("forposted")
+		isFirst := g.load(firstSlot, booleanType)
+		g.cur.Jnz(isFirst, firstIteration, laterIteration)
+
+		g.cur = firstIteration
+		g.store(g.fn.Word(0), firstSlot, booleanType)
+		g.cur.Goto(posted)
+
+		g.cur = laterIteration
+		g.stmt(n.Post)
+		if g.live() {
+			g.cur.Goto(posted)
+		}
+		g.cur = posted
+	}
+	if n.Cond == nil {
+		g.cur.Goto(body)
+	} else {
+		condition := g.expr(n.Cond)
+		g.cur.Jnz(condition, body, done)
+	}
+
+	g.breaks = append(g.breaks, done)
+	g.continues = append(g.continues, post)
+	g.setLabeledControl(label, done, post)
+	g.cur = body
+	g.stmts(n.Body.List)
+	if g.live() {
+		g.cur.Goto(post)
+	}
+	g.cur = post
+	for index, variable := range variables {
+		g.leaveIterationVariable(variable, storages[index], carriers[index], variableTypes[index])
+	}
+	g.cur.Goto(header)
+	g.breaks = g.breaks[:len(g.breaks)-1]
+	g.continues = g.continues[:len(g.continues)-1]
+	g.clearLabeledControl(label)
+	g.cur = done
+	for index, variable := range variables {
+		g.vars[variable] = carriers[index]
+		g.heapCaptures[variable] = carriers[index]
+	}
+	g.haltUnreachableForEnd(n, done)
 }
 
 func (g *gen) setLabeledControl(label string, breakTarget, continueTarget *ir.Block) {

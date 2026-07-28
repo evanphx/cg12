@@ -1663,6 +1663,42 @@ func runtimeCapabilities() []runtimeCapability {
 			requiresAFINET: true,
 		},
 		{
+			category:    "loop-variables",
+			name:        "three-clause",
+			source:      "runtime_loopvar_three_clause.go",
+			expectation: runtimeCapabilityMustPass,
+		},
+		{
+			category:    "loop-variables",
+			name:        "range-forms",
+			source:      "runtime_loopvar_range.go",
+			expectation: runtimeCapabilityMustPass,
+		},
+		{
+			category:    "loop-variables",
+			name:        "goroutine-and-defer",
+			source:      "runtime_loopvar_goroutine_defer.go",
+			expectation: runtimeCapabilityMustPass,
+		},
+		{
+			category:    "loop-variables",
+			name:        "address-gc",
+			source:      "runtime_loopvar_address_gc.go",
+			expectation: runtimeCapabilityMustPass,
+		},
+		{
+			category:    "loop-variables",
+			name:        "value-shapes",
+			source:      "runtime_loopvar_value_shapes.go",
+			expectation: runtimeCapabilityMustPass,
+		},
+		{
+			category:    "loop-variables",
+			name:        "shared-scope",
+			source:      "runtime_loopvar_shared_scope.go",
+			expectation: runtimeCapabilityMustPass,
+		},
+		{
 			category:        "defer-panic",
 			name:            "panic-string-output",
 			source:          "runtime_panic_print_string.go",
