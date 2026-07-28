@@ -29,6 +29,12 @@ type runtimeCapability struct {
 	// absence is a classified outcome instead of a collection failure.
 	termination     runtimeCapabilityTermination
 	terminationNote string
+	// env holds "NAME=value" entries added to the program's environment. It
+	// exists so a capability can run under a runtime diagnostic -- the
+	// write-barrier capabilities run under GODEBUG=cg12checkwb=2 -- without the
+	// program having to re-execute itself to set one. Entries are appended
+	// after the inherited environment, so they win over an inherited value.
+	env []string
 }
 
 type runtimeCapabilityExpectation int
@@ -2149,6 +2155,108 @@ func runtimeCapabilities() []runtimeCapability {
 			source:      "runtime_many_defers_stack.go",
 			expectation: runtimeCapabilityMustPass,
 		},
+		// Allocation families, RUNTIME_PLAN.md section 6. Each program reaches
+		// its families deliberately and proves it did with
+		// runtime.MemStats.BySize rather than inferring it from coverage.
+		{
+			category:    "alloc",
+			name:        "noscan-size-classes",
+			source:      "runtime_alloc_noscan_size_classes.go",
+			expectation: runtimeCapabilityMustPass,
+		},
+		{
+			category:    "alloc",
+			name:        "scan-size-classes",
+			source:      "runtime_alloc_scan_size_classes.go",
+			expectation: runtimeCapabilityMustPass,
+		},
+		{
+			category:    "alloc",
+			name:        "tiny-sizes",
+			source:      "runtime_alloc_tiny_sizes.go",
+			expectation: runtimeCapabilityMustPass,
+		},
+		{
+			category:    "alloc",
+			name:        "zero-sized",
+			source:      "runtime_alloc_zero_sized.go",
+			expectation: runtimeCapabilityMustPass,
+		},
+		{
+			category:    "alloc",
+			name:        "large-objects",
+			source:      "runtime_alloc_large_objects.go",
+			expectation: runtimeCapabilityMustPass,
+		},
+		{
+			category:    "alloc",
+			name:        "array-families",
+			source:      "runtime_alloc_array_families.go",
+			expectation: runtimeCapabilityMustPass,
+		},
+		{
+			category:    "alloc",
+			name:        "pointer-bitmaps",
+			source:      "runtime_alloc_pointer_bitmaps.go",
+			expectation: runtimeCapabilityMustPass,
+		},
+		{
+			category:    "gc",
+			name:        "field-address-escape",
+			source:      "runtime_field_address_escape.go",
+			expectation: runtimeCapabilityMustPass,
+		},
+		// Write-barrier shapes, RUNTIME_PLAN.md section 6. Each runs under
+		// GODEBUG=cg12checkwb=2, which validates every word a barrier buffers
+		// and rejects a goroutine stack address stored into data or bss.
+		{
+			category:    "write-barrier",
+			name:        "heap-and-stack",
+			source:      "runtime_barrier_heap_and_stack.go",
+			expectation: runtimeCapabilityMustPass,
+			env:         []string{"GODEBUG=cg12checkwb=2"},
+			timeout:     90 * time.Second,
+		},
+		{
+			category:    "write-barrier",
+			name:        "global-roots",
+			source:      "runtime_barrier_global_roots.go",
+			expectation: runtimeCapabilityMustPass,
+			env:         []string{"GODEBUG=cg12checkwb=2"},
+			timeout:     90 * time.Second,
+		},
+		{
+			category:    "write-barrier",
+			name:        "interface-closure",
+			source:      "runtime_barrier_interface_closure.go",
+			expectation: runtimeCapabilityMustPass,
+			env:         []string{"GODEBUG=cg12checkwb=2"},
+			timeout:     90 * time.Second,
+		},
+		{
+			category:    "write-barrier",
+			name:        "slice-operations",
+			source:      "runtime_barrier_slice_operations.go",
+			expectation: runtimeCapabilityMustPass,
+			env:         []string{"GODEBUG=cg12checkwb=2"},
+			timeout:     90 * time.Second,
+		},
+		{
+			category:    "write-barrier",
+			name:        "map-channel",
+			source:      "runtime_barrier_map_channel.go",
+			expectation: runtimeCapabilityMustPass,
+			env:         []string{"GODEBUG=cg12checkwb=2"},
+			timeout:     90 * time.Second,
+		},
+		{
+			category:    "write-barrier",
+			name:        "finalizer",
+			source:      "runtime_barrier_finalizer.go",
+			expectation: runtimeCapabilityMustPass,
+			env:         []string{"GODEBUG=cg12checkwb=2"},
+			timeout:     120 * time.Second,
+		},
 	}
 }
 
@@ -2422,7 +2530,7 @@ func runRuntimeCapabilityProgram(t *testing.T, compiler string, directory string
 		runAttempts++
 		ctx, cancel := context.WithTimeout(context.Background(), timeout)
 		run := exec.CommandContext(ctx, executable)
-		run.Env = runtimeCapabilityExecutionEnv()
+		run.Env = runtimeCapabilityExecutionEnv(capability)
 		runStarted := time.Now()
 		attemptOutput, attemptErr := run.CombinedOutput()
 		runDuration += time.Since(runStarted)
@@ -2536,9 +2644,9 @@ func runtimeCapabilityPeakRSS(command *exec.Cmd) uint64 {
 	return uint64(usage.Maxrss) * 1024
 }
 
-func runtimeCapabilityExecutionEnv() []string {
+func runtimeCapabilityExecutionEnv(capability runtimeCapability) []string {
 	environment := os.Environ()
-	filtered := make([]string, 0, len(environment)+1)
+	filtered := make([]string, 0, len(environment)+1+len(capability.env))
 
 	for _, entry := range environment {
 		if strings.HasPrefix(entry, "HTTP_PROXY=") ||
@@ -2555,5 +2663,6 @@ func runtimeCapabilityExecutionEnv() []string {
 	}
 
 	filtered = append(filtered, fmt.Sprintf("GOMAXPROCS=%d", *runtimeProcs))
+	filtered = append(filtered, capability.env...)
 	return filtered
 }

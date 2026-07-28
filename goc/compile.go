@@ -68,6 +68,24 @@ func CompileExecutableWithRuntimeCoverageFor(target Target, name string, src []b
 	return module, coverage, nil
 }
 
+// CompileWithWriteBarrierAuditFor lowers a main package for a named target and
+// returns every write-barrier decision the frontend made. It is the checkable
+// form of the GOC_DEBUG_WRITEBARRIER report: a test can assert that a store
+// shape reached a barrier, which is the only way to see a barrier that should
+// have been emitted and was not.
+func CompileWithWriteBarrierAuditFor(
+	target Target,
+	name string,
+	src []byte,
+) (*ir.Module, []WriteBarrierRecord, error) {
+	audit := &writeBarrierAudit{}
+	module, err := compile(name, src, compileOptions{target: target, writeBarrierAudit: audit})
+	if err != nil {
+		return nil, nil, err
+	}
+	return module, audit.records, nil
+}
+
 func reportNoSplitViolations(module *ir.Module) {
 	if os.Getenv("GOC_DEBUG_NOSPLIT") == "" {
 		return
@@ -96,9 +114,20 @@ type compileOptions struct {
 	testPackages         map[string]bool
 	externalTestPackages map[string]string
 	runtimeCoverage      *RuntimeCoverage
+	// writeBarrierAudit, when set, collects one record per pointer store. It is
+	// nil unless the caller asked for the audit, so an ordinary compilation
+	// neither allocates nor records anything.
+	writeBarrierAudit *writeBarrierAudit
 }
 
 func compile(name string, src []byte, options compileOptions) (*ir.Module, error) {
+	// The audit is opt-in and off by default. Turning it on from the
+	// environment lets the ordinary goc binary produce it, in the spirit of
+	// GOC_DEBUG_NOSPLIT; a caller that wants the records rather than the report
+	// sets the field itself.
+	if options.writeBarrierAudit == nil && WriteBarrierAuditEnabled() {
+		options.writeBarrierAudit = &writeBarrierAudit{}
+	}
 	target := options.target.resolve()
 	if err := checkTargetTypeSizes(target); err != nil {
 		return nil, err
@@ -261,6 +290,7 @@ func compile(name string, src []byte, options compileOptions) (*ir.Module, error
 		interfaceCallWrappers:   interfaceCallWrappers,
 		dynamicTypes:            dynamicTypes,
 		reachableGlobals:        reachableGlobals,
+		writeBarrierAudit:       options.writeBarrierAudit,
 	}
 	g.mod.File(name)
 	for _, d := range file.Decls {
@@ -388,6 +418,7 @@ func compile(name string, src []byte, options compileOptions) (*ir.Module, error
 		opt.InlineNoSplitCalls(mod)
 		reportNoSplitViolations(mod)
 	}
+	reportWriteBarrierAudit(options.writeBarrierAudit)
 	opt.InlineHeapAllocations(mod)
 	opt.LowerHeapAllocations(mod)
 	if compileRuntime {
@@ -1373,6 +1404,10 @@ type gen struct {
 	dynamicInitializers         map[types.Object]*globalInitializer
 	dynamicInitializerGuards    map[types.Object]string
 	dynamicInitializerFunctions map[types.Object]string
+	// writeBarrierAudit collects one record per pointer store, for the opt-in
+	// GOC_DEBUG_WRITEBARRIER mode. It is whole-compilation state so a derived
+	// generator records into the same audit.
+	writeBarrierAudit *writeBarrierAudit
 
 	// Source context. Reset by derive; set by callers that lower Go source.
 	file *ast.File
@@ -1380,14 +1415,28 @@ type gen struct {
 	pkg  *types.Package
 
 	// Per-function state. Reset by derive.
-	fn                            *ir.Func
-	cur                           *ir.Block
-	seq                           int
-	err                           error
-	functionName                  string
-	currentFunction               *types.Func
-	typeArguments                 []types.Type
-	noWriteBarrier                bool
+	fn              *ir.Func
+	cur             *ir.Block
+	seq             int
+	err             error
+	functionName    string
+	currentFunction *types.Func
+	typeArguments   []types.Type
+	// currentPos is the position of the statement being lowered, used to give
+	// the write-barrier audit a source location for stores that carry no AST
+	// node of their own.
+	currentPos     token.Pos
+	noWriteBarrier bool
+	// fieldAddressesEscape asks nonEscapingObjectUse to treat &v.f, the address
+	// of a field of v, as a use that can carry v out of the function. It is set
+	// only while deciding whether one fresh allocation may stay on the frame,
+	// because that is the only question the answer is right for: an escaping
+	// field address is an interior pointer into the allocation, so the
+	// allocation must be on the heap. The other caller of the same machinery,
+	// findEscapingCaptures, promotes the *variable's slot* rather than what it
+	// points at, and answering yes there makes runtime code allocate on paths
+	// where allocation is forbidden. See RUNTIME_PLAN.md section 6.
+	fieldAddressesEscape          bool
 	forceStackVariadic            bool
 	resultSlot                    ir.Ref
 	resultType                    types.Type
@@ -1452,7 +1501,9 @@ func (g *gen) derive() *gen {
 	derived.functionName = ""
 	derived.currentFunction = nil
 	derived.typeArguments = nil
+	derived.currentPos = token.NoPos
 	derived.noWriteBarrier = false
+	derived.fieldAddressesEscape = false
 	derived.forceStackVariadic = false
 
 	// Its result shape.
@@ -2064,6 +2115,19 @@ func (g *gen) nonEscapingAddress(address *ast.UnaryExpr) bool {
 	}
 }
 
+// nonEscapingAddressOfFreshAllocation answers nonEscapingAddress for the one
+// case where the answer decides whether a fresh allocation stays on the frame.
+// Only here does an escaping field address mean the allocation must move to the
+// heap, so only here is that use counted; see gen.fieldAddressesEscape.
+func (g *gen) nonEscapingAddressOfFreshAllocation(address *ast.UnaryExpr) bool {
+	saved := g.fieldAddressesEscape
+	g.fieldAddressesEscape = true
+	defer func() {
+		g.fieldAddressesEscape = saved
+	}()
+	return g.nonEscapingAddress(address)
+}
+
 // addressEscapesFunction reports address expressions that the frontend must
 // promote before emitting the function. The runtime package keeps its local
 // bootstrap storage because promoting it through runtime.newobject would make
@@ -2406,7 +2470,17 @@ func (g *gen) nonEscapingObjectUse(
 		}
 		selection := info.Selections[parent]
 		if selection == nil || selection.Kind() == types.FieldVal {
-			return true
+			if !g.fieldAddressesEscape {
+				return true
+			}
+			// Reading a field does not carry the object out of the function,
+			// but taking a field's address does: the resulting interior pointer
+			// keeps the whole object alive, so the object escapes exactly when
+			// that pointer does. This is the same question the index case above
+			// asks about &v[i]. Omitting it let a package-level slice hold the
+			// address of a field of a frame allocation.
+			address := addressedExpression(parent, parents)
+			return address == nil || !g.addressEscapesWithin(address, info, parents, body, checking)
 		}
 		call, calledImmediately := parents[parent].(*ast.CallExpr)
 		return calledImmediately && call.Fun == parent
@@ -3812,6 +3886,7 @@ func (g *gen) live() bool {
 	return g.cur != nil && g.cur.Jmp.Kind == ir.JmpNone
 }
 func (g *gen) at(n ast.Node) {
+	g.currentPos = n.Pos()
 	if g.cur == nil {
 		return
 	}
@@ -4365,7 +4440,19 @@ func (g *gen) store(v, addr ir.Ref, t types.Type) {
 	// funcval into a g the collector may already have blackened
 	// (RUNTIME_PLAN.md 5.12).
 	class, _ := scalar(t)
-	if g.runtimeAllocation && !g.noWriteBarrier && class == ir.ClsP && !g.isStackAddress(addr) && !isNotInHeapPointer(t) {
+	if class != ir.ClsP {
+		g.cur.Store(v, addr)
+		return
+	}
+	barriered := g.runtimeAllocation &&
+		!g.noWriteBarrier &&
+		!g.isStackAddress(addr) &&
+		!isNotInHeapPointer(t)
+	if g.writeBarrierAudit != nil {
+		decision, reason := g.pointerStoreDecision(addr, t)
+		g.recordWriteBarrier(g.currentPos, t.String(), decision, reason)
+	}
+	if barriered {
 		g.cur.CallVoid(g.fn.Sym("goc_storep", 0), addr, v)
 		return
 	}
@@ -4374,6 +4461,25 @@ func (g *gen) store(v, addr ir.Ref, t types.Type) {
 		return
 	}
 	g.cur.Store(v, addr)
+}
+
+// pointerStoreDecision names what gen.store does with one pointer-class store
+// and which rule decided it. The order matches the conditions in gen.store, so
+// the recorded reason is the branch that actually fired.
+func (g *gen) pointerStoreDecision(addr ir.Ref, t types.Type) (WriteBarrierDecision, string) {
+	if !g.runtimeAllocation {
+		return WriteBarrierElided, WriteBarrierReasonNoRuntimeHeap
+	}
+	if g.noWriteBarrier {
+		return WriteBarrierElided, WriteBarrierReasonNoWriteBarrier
+	}
+	if g.isStackAddress(addr) {
+		return WriteBarrierElided, WriteBarrierReasonStackDestination
+	}
+	if isNotInHeapPointer(t) {
+		return WriteBarrierElided, WriteBarrierReasonNotInHeap
+	}
+	return WriteBarrierEmitted, WriteBarrierReasonPointerStore
 }
 
 // assignLocal stores a Go value into a frontend variable slot. Struct and
@@ -4413,7 +4519,40 @@ func (g *gen) storeInlineValue(value, address ir.Ref, valueType types.Type) {
 		g.storePointerAwareInlineValue(value, address, valueType)
 		return
 	}
+	if g.writeBarrierAudit != nil && len(pointerWordIndices(valueType)) != 0 {
+		decision, reason := g.aggregateStoreDecision(valueType)
+		g.recordWriteBarrier(g.currentPos, valueType.String(), decision, reason)
+	}
 	g.cur.Call(ir.ClsP, g.fn.Sym("goc_memcpy", 0), address, value, g.fn.Long(typeSize(valueType)))
+}
+
+// bulkOperationDecision names what a bulk slice operation over pointerful
+// elements does about barriers. The typed runtime helpers carry the barrier
+// themselves, so reaching one is the emitted case and falling through to
+// goc_memmove or goc_memset is the elided one.
+func (g *gen) bulkOperationDecision(helper string) (WriteBarrierDecision, string) {
+	if !g.runtimeAllocation {
+		return WriteBarrierElided, WriteBarrierReasonNoRuntimeHeap
+	}
+	if g.noWriteBarrier {
+		return WriteBarrierElided, WriteBarrierReasonNoWriteBarrier
+	}
+	return WriteBarrierEmitted, helper
+}
+
+// aggregateStoreDecision names why an aggregate with pointer words was copied
+// by memcpy rather than having its pointer words published individually.
+func (g *gen) aggregateStoreDecision(valueType types.Type) (WriteBarrierDecision, string) {
+	if !g.runtimeAllocation {
+		return WriteBarrierElided, WriteBarrierReasonNoRuntimeHeap
+	}
+	if g.noWriteBarrier {
+		return WriteBarrierElided, WriteBarrierReasonNoWriteBarrier
+	}
+	// storeInlineValue only reaches the memcpy with pointer words present when
+	// none of them are barriered, which happens exactly when every one points
+	// at a not-in-heap type.
+	return WriteBarrierElided, WriteBarrierReasonNotInHeap
 }
 
 // storePointerAwareInlineValue copies the scalar regions of an aggregate with
@@ -4428,6 +4567,13 @@ func (g *gen) storePointerAwareInlineValue(value, address ir.Ref, valueType type
 	valueSize := typeSize(valueType)
 	nextOffset := int64(0)
 	destinationIsStack := g.isStackAddress(address)
+	if g.writeBarrierAudit != nil {
+		if destinationIsStack {
+			g.recordWriteBarrier(g.currentPos, valueType.String(), WriteBarrierElided, WriteBarrierReasonStackDestination)
+		} else {
+			g.recordWriteBarrier(g.currentPos, valueType.String(), WriteBarrierEmitted, WriteBarrierReasonAggregateStore)
+		}
+	}
 
 	copyBytes := func(offset, size int64) {
 		if size == 0 {
@@ -9488,7 +9634,7 @@ func (g *gen) expr(e ast.Expr) (result ir.Ref) {
 		}
 		if n.Op == token.AND {
 			if literal, ok := n.X.(*ast.CompositeLit); ok {
-				heap := !g.nonEscapingAddress(n)
+				heap := !g.nonEscapingAddressOfFreshAllocation(n)
 				if g.noWriteBarrier {
 					heap = false
 				}
@@ -11815,6 +11961,10 @@ func (g *gen) builtinCall(call *ast.CallExpr, builtin *types.Builtin) ir.Ref {
 			length = g.cur.Load(ir.ClsL, g.offset(source, 8))
 		}
 		element := g.typeAndValue(call.Args[0]).Type.Underlying().(*types.Slice).Elem()
+		if g.writeBarrierAudit != nil && len(pointerWordIndices(element)) != 0 {
+			decision, reason := g.bulkOperationDecision(WriteBarrierReasonTypedSliceCopy)
+			g.recordWriteBarrier(call.Pos(), element.String(), decision, reason)
+		}
 		if g.runtimeAllocation && !g.noWriteBarrier && len(pointerWordIndices(element)) != 0 {
 			return g.cur.Call(
 				ir.ClsL,
@@ -11860,6 +12010,10 @@ func (g *gen) builtinCall(call *ast.CallExpr, builtin *types.Builtin) ir.Ref {
 		default:
 			g.fail(call, "unsupported clear operand %s", argumentType)
 			return ir.R
+		}
+		if g.writeBarrierAudit != nil && hasPointers {
+			decision, reason := g.bulkOperationDecision(WriteBarrierReasonTypedMemClear)
+			g.recordWriteBarrier(call.Pos(), argumentType.String(), decision, reason)
 		}
 		if g.runtimeAllocation && !g.noWriteBarrier && hasPointers {
 			g.cur.CallVoid(g.fn.Sym("runtime.memclrHasPointers", 0), data, size)
@@ -12179,6 +12333,10 @@ func (g *gen) appendCall(call *ast.CallExpr) ir.Ref {
 	}
 	writeAt := g.cur.Add(ir.ClsP, resultData, byteOffset)
 	if sourceData != ir.R {
+		if g.writeBarrierAudit != nil && len(pointerWordIndices(elementType)) != 0 {
+			decision, reason := g.bulkOperationDecision(WriteBarrierReasonTypedSliceCopy)
+			g.recordWriteBarrier(g.currentPos, elementType.String(), decision, reason)
+		}
 		if g.runtimeAllocation && !g.noWriteBarrier && len(pointerWordIndices(elementType)) != 0 {
 			g.cur.Call(
 				ir.ClsL,

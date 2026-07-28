@@ -49,6 +49,7 @@ var wholeCompilationGenFields = []string{
 	"dynamicInitializers",
 	"dynamicInitializerGuards",
 	"dynamicInitializerFunctions",
+	"writeBarrierAudit",
 }
 
 // fullyPopulatedGen returns a gen with every single field set to a distinct
@@ -86,6 +87,7 @@ func fullyPopulatedGen() *gen {
 		dynamicInitializers:         map[types.Object]*globalInitializer{},
 		dynamicInitializerGuards:    map[types.Object]string{},
 		dynamicInitializerFunctions: map[types.Object]string{},
+		writeBarrierAudit:           &writeBarrierAudit{},
 
 		// Source context.
 		file: &ast.File{},
@@ -100,7 +102,9 @@ func fullyPopulatedGen() *gen {
 		functionName:                  "sentinel",
 		currentFunction:               types.NewFunc(token.NoPos, nil, "f", types.NewSignatureType(nil, nil, nil, nil, nil, false)),
 		typeArguments:                 []types.Type{types.Typ[types.Int]},
+		currentPos:                    token.Pos(11),
 		noWriteBarrier:                true,
+		fieldAddressesEscape:          true,
 		forceStackVariadic:            true,
 		resultSlot:                    ir.Ref{Kind: ir.RefTemp, ID: 1},
 		resultType:                    types.Typ[types.Int],

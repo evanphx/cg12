@@ -588,3 +588,58 @@ func runtimeCoverageTestPacketFor(runtimeSourceID string) *runtimeCapabilityCove
 		hits: []bool{true},
 	}
 }
+
+// A capability may add environment entries so it runs under a runtime
+// diagnostic. The write-barrier capabilities depend on this: without
+// GODEBUG=cg12checkwb=2 they still assert their semantics, but they stop being
+// a check on what the barrier buffered. This test keeps the plumbing honest in
+// both directions -- the entries reach the program, and they win over an
+// inherited value of the same name.
+func TestRuntimeCapabilityEnvironmentReachesTheProgram(t *testing.T) {
+	t.Setenv("GODEBUG", "inherited=1")
+
+	plain := runtimeCapabilityExecutionEnv(runtimeCapability{category: "gc", name: "plain"})
+	require.Contains(t, plain, "GODEBUG=inherited=1")
+
+	diagnostic := runtimeCapability{
+		category: "write-barrier",
+		name:     "heap-and-stack",
+		env:      []string{"GODEBUG=cg12checkwb=2"},
+	}
+	withEnv := runtimeCapabilityExecutionEnv(diagnostic)
+	require.Contains(t, withEnv, "GODEBUG=cg12checkwb=2")
+
+	// exec resolves a duplicated name to the last entry, so the capability's
+	// value has to come after the inherited one.
+	inheritedIndex := -1
+	capabilityIndex := -1
+	for index, entry := range withEnv {
+		switch entry {
+		case "GODEBUG=inherited=1":
+			inheritedIndex = index
+		case "GODEBUG=cg12checkwb=2":
+			capabilityIndex = index
+		}
+	}
+	require.NotEqual(t, -1, inheritedIndex)
+	require.NotEqual(t, -1, capabilityIndex)
+	require.Greater(t, capabilityIndex, inheritedIndex,
+		"the capability's GODEBUG does not override the inherited one")
+}
+
+// Every capability that declares an environment entry must declare it in the
+// form exec expects, and a diagnostic that is silently misspelled would leave
+// the capability looking like a barrier check while checking nothing.
+func TestRuntimeCapabilityEnvironmentEntriesAreWellFormed(t *testing.T) {
+	for _, capability := range runtimeCapabilities() {
+		name := capability.category + "/" + capability.name
+		for _, entry := range capability.env {
+			require.Contains(t, entry, "=", "capability %q has a malformed environment entry %q", name, entry)
+			require.NotEqual(t, "=", entry[:1], "capability %q has an unnamed environment entry %q", name, entry)
+		}
+		if capability.category == "write-barrier" {
+			require.Contains(t, capability.env, "GODEBUG=cg12checkwb=2",
+				"capability %q is a write-barrier capability but does not run under the barrier check", name)
+		}
+	}
+}
