@@ -62,11 +62,11 @@ The two denominators are now reconciled. There is only one denominator: the
 capability matrix *is* the coverage corpus, and every capability reports one
 explicit compile/run/coverage outcome, including the ones this environment
 cannot run. The accepted baseline covers 294 programs while the matrix holds
-329, and that gap is baseline staleness rather than an exclusion set — each of
-the 35 capabilities was added after the 2026-07-22 run. They are listed with a
+331, and that gap is baseline staleness rather than an exclusion set — each of
+the 37 capabilities was added after the 2026-07-22 run. They are listed with a
 reason in `cmd/goc/testdata/runtime_coverage_baseline_pending.json`, and
 `TestCheckedRuntimeCoverageBaselineDenominator` reconciles matrix, baseline, and
-list in both directions: 294 + 35 = 329, no capability may appear in both, and
+list in both directions: 294 + 37 = 331, no capability may appear in both, and
 no baseline program may name a capability the matrix has dropped. Adding a
 capability therefore requires either accepting a new baseline or recording why
 the baseline does not cover it. The list empties when the pending full-corpus

@@ -64,6 +64,14 @@
       "reason": "added to the capability matrix after the accepted 2026-07-22 baseline run; it enters the baseline at the next full-corpus rerun"
     },
     {
+      "capability": "gc/span-metadata-barrier",
+      "reason": "added to the capability matrix after the accepted 2026-07-22 baseline run; it enters the baseline at the next full-corpus rerun"
+    },
+    {
+      "capability": "gc/stack-argument-roots",
+      "reason": "added to the capability matrix after the accepted 2026-07-22 baseline run; it enters the baseline at the next full-corpus rerun"
+    },
+    {
       "capability": "goroutine/select-global-locked-gc",
       "reason": "added to the capability matrix after the accepted 2026-07-22 baseline run; it enters the baseline at the next full-corpus rerun"
     },
