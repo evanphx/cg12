@@ -1100,12 +1100,12 @@ func TestGoStackMapsDropDeadPointerBearingLocal(t *testing.T) {
 	points := machine.m.goStackMapPoints()
 	require.Len(t, points, 2)
 	require.Len(t, machine.m.safepoints, 2)
-	assert.Equal(t, int(machine.m.safepoints[0].startPC), points[0].pc)
-	assert.Equal(t, int(machine.m.safepoints[1].startPC), points[1].pc)
+	assert.Equal(t, int(machine.m.safepoints[0].startPC), points[0].PC)
+	assert.Equal(t, int(machine.m.safepoints[1].startPC), points[1].PC)
 	localOffset := machine.m.stackAllocTmp[local.ID]
 	localWord := (localOffset - 16) / 8
-	assert.Contains(t, points[0].pointerWords, localWord)
-	assert.NotContains(t, points[1].pointerWords, localWord)
+	assert.Contains(t, points[0].PointerWords, localWord)
+	assert.NotContains(t, points[1].PointerWords, localWord)
 }
 
 func TestGoABIGroupedSliceValuesUseRegistersOrWholeStack(t *testing.T) {

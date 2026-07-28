@@ -25,9 +25,9 @@ func TestPrepareAssemblyCollectsCodeReferencesAndFunctions(t *testing.T) {
 	assert.Contains(t, bundle.source, ".global runtime_example")
 	assert.True(t, bundle.references["runtime_flag"])
 	require.Len(t, bundle.functions, 1)
-	assert.Equal(t, "runtime_example", bundle.functions[0].name)
-	assert.Equal(t, 8, bundle.functions[0].argumentSize)
-	assert.Equal(t, byte(goFuncFlagAsm), bundle.functions[0].funcFlag)
+	assert.Equal(t, "runtime_example", bundle.functions[0].Name)
+	assert.Equal(t, 8, bundle.functions[0].ArgumentSize)
+	assert.Equal(t, byte(goFuncFlagAsm), bundle.functions[0].FuncFlag)
 }
 
 func TestPrepareAssemblyCarriesNoLocalPointersMetadata(t *testing.T) {
@@ -44,7 +44,7 @@ func TestPrepareAssemblyCarriesNoLocalPointersMetadata(t *testing.T) {
 	bundle, err := prepareAssembly(module)
 	require.NoError(t, err)
 	require.Len(t, bundle.functions, 1)
-	assert.True(t, bundle.functions[0].noLocalPointers)
+	assert.True(t, bundle.functions[0].NoLocalPointers)
 }
 
 func TestAssemblyGlobalReplacesIRDataDefinition(t *testing.T) {
@@ -89,11 +89,11 @@ func TestPrepareAssemblyMarksAsyncPreemptForRuntimeStackScanning(t *testing.T) {
 	bundle, err := prepareAssembly(module)
 	require.NoError(t, err)
 	require.Len(t, bundle.functions, 1)
-	assert.Equal(t, "runtime_asyncPreempt", bundle.functions[0].name)
-	assert.Equal(t, 240, bundle.functions[0].frameSize)
-	assert.Equal(t, 8, bundle.functions[0].frameStart)
-	assert.Equal(t, byte(3), bundle.functions[0].funcID)
-	assert.Equal(t, byte(goFuncFlagAsm), bundle.functions[0].funcFlag)
+	assert.Equal(t, "runtime_asyncPreempt", bundle.functions[0].Name)
+	assert.Equal(t, 240, bundle.functions[0].FrameSize)
+	assert.Equal(t, 8, bundle.functions[0].FrameStart)
+	assert.Equal(t, byte(3), bundle.functions[0].FuncID)
+	assert.Equal(t, byte(goFuncFlagAsm), bundle.functions[0].FuncFlag)
 }
 
 func TestPrepareAssemblyMarksMorestackForRuntimeUnwinder(t *testing.T) {
@@ -117,17 +117,17 @@ TEXT runtime·morestack_noctxt(SB),NOSPLIT|NOFRAME,$0-0
 	require.NoError(t, err)
 	require.Len(t, bundle.functions, 3)
 
-	assert.Equal(t, "runtime_goexit", bundle.functions[0].name)
-	assert.Equal(t, byte(8), bundle.functions[0].funcID)
-	assert.Equal(t, byte(goFuncFlagAsm|goFuncFlagTopFrame), bundle.functions[0].funcFlag)
+	assert.Equal(t, "runtime_goexit", bundle.functions[0].Name)
+	assert.Equal(t, byte(8), bundle.functions[0].FuncID)
+	assert.Equal(t, byte(goFuncFlagAsm|goFuncFlagTopFrame), bundle.functions[0].FuncFlag)
 
-	assert.Equal(t, "runtime_morestack", bundle.functions[1].name)
-	assert.Equal(t, byte(13), bundle.functions[1].funcID)
-	assert.Equal(t, byte(goFuncFlagAsm), bundle.functions[1].funcFlag)
+	assert.Equal(t, "runtime_morestack", bundle.functions[1].Name)
+	assert.Equal(t, byte(13), bundle.functions[1].FuncID)
+	assert.Equal(t, byte(goFuncFlagAsm), bundle.functions[1].FuncFlag)
 
-	assert.Equal(t, "runtime_morestack_noctxt", bundle.functions[2].name)
-	assert.Equal(t, byte(13), bundle.functions[2].funcID)
-	assert.Equal(t, byte(goFuncFlagAsm|goFuncFlagSPWrite), bundle.functions[2].funcFlag)
+	assert.Equal(t, "runtime_morestack_noctxt", bundle.functions[2].Name)
+	assert.Equal(t, byte(13), bundle.functions[2].FuncID)
+	assert.Equal(t, byte(goFuncFlagAsm|goFuncFlagSPWrite), bundle.functions[2].FuncFlag)
 }
 
 func TestPrepareAssemblyBuildsGoABI0EntryWrapper(t *testing.T) {

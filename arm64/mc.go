@@ -10,6 +10,7 @@ import (
 	"strings"
 
 	"github.com/evanphx/cg12/arm64/a64"
+	"github.com/evanphx/cg12/internal/gometa"
 	"github.com/evanphx/cg12/ir"
 	"github.com/evanphx/cg12/obj"
 )
@@ -663,8 +664,8 @@ func addDataWithBSSAndFixups(o *obj.Object, d *ir.Data, allowBSS bool, fixups *[
 			*buf = append(*buf, []byte(it.Str)...)
 		case it.Sym != "" && it.RelativeTo != "":
 			if fixups == nil {
-				target, targetFound := objectSymbol(o, sanitize(it.Sym))
-				relativeTo, baseFound := objectSymbol(o, sanitize(it.RelativeTo))
+				target, targetFound := gometa.ObjectSymbol(o, sanitize(it.Sym))
+				relativeTo, baseFound := gometa.ObjectSymbol(o, sanitize(it.RelativeTo))
 				if !targetFound {
 					return fmt.Errorf("arm64: relative data reference %q is undefined", it.Sym)
 				}
@@ -736,11 +737,11 @@ func addDataWithBSSAndFixups(o *obj.Object, d *ir.Data, allowBSS bool, fixups *[
 
 func resolveRelativeDataFixups(o *obj.Object, fixups []relativeDataFixup) error {
 	for _, fixup := range fixups {
-		target, targetFound := objectSymbol(o, fixup.target)
+		target, targetFound := gometa.ObjectSymbol(o, fixup.target)
 		if !targetFound {
 			return fmt.Errorf("target %q is undefined", fixup.target)
 		}
-		relativeTo, baseFound := objectSymbol(o, fixup.relativeTo)
+		relativeTo, baseFound := gometa.ObjectSymbol(o, fixup.relativeTo)
 		if !baseFound {
 			return fmt.Errorf("base %q is undefined", fixup.relativeTo)
 		}
@@ -1562,8 +1563,8 @@ func (m *mc) goStackMapPoints() []goStackMapPoint {
 		}
 		sort.Ints(pointerWords)
 		points = append(points, goStackMapPoint{
-			pc:           int(safepoint.startPC),
-			pointerWords: pointerWords,
+			PC:           int(safepoint.startPC),
+			PointerWords: pointerWords,
 		})
 	}
 	return points
