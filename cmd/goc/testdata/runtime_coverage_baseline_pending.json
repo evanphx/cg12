@@ -76,6 +76,30 @@
       "reason": "added to the capability matrix after the accepted 2026-07-22 baseline run; it enters the baseline at the next full-corpus rerun"
     },
     {
+      "capability": "loop-variables/address-gc",
+      "reason": "added to the capability matrix after the accepted 2026-07-22 baseline run; it enters the baseline at the next full-corpus rerun"
+    },
+    {
+      "capability": "loop-variables/goroutine-and-defer",
+      "reason": "added to the capability matrix after the accepted 2026-07-22 baseline run; it enters the baseline at the next full-corpus rerun"
+    },
+    {
+      "capability": "loop-variables/range-forms",
+      "reason": "added to the capability matrix after the accepted 2026-07-22 baseline run; it enters the baseline at the next full-corpus rerun"
+    },
+    {
+      "capability": "loop-variables/shared-scope",
+      "reason": "added to the capability matrix after the accepted 2026-07-22 baseline run; it enters the baseline at the next full-corpus rerun"
+    },
+    {
+      "capability": "loop-variables/three-clause",
+      "reason": "added to the capability matrix after the accepted 2026-07-22 baseline run; it enters the baseline at the next full-corpus rerun"
+    },
+    {
+      "capability": "loop-variables/value-shapes",
+      "reason": "added to the capability matrix after the accepted 2026-07-22 baseline run; it enters the baseline at the next full-corpus rerun"
+    },
+    {
       "capability": "runtime-packages/reflect-call-aggregate-function",
       "reason": "added to the capability matrix after the accepted 2026-07-22 baseline run; it enters the baseline at the next full-corpus rerun"
     },

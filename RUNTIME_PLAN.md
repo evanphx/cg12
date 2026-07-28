@@ -1109,6 +1109,124 @@ Exit criterion: the two `cmd/goc` tests and the §5.3 cleanup trio pass at high
 remaining `goc_storep` imprecision above is either closed or shown to be
 unreachable.
 
+### 5.8 Fixed: loop variables were per-loop, not per-iteration (2026-07-28)
+
+Go 1.22 made the variables a three-clause `for` declares in its init statement,
+and the iteration variables a `range` clause declares, **per-iteration**. cg12
+gave each such variable one storage slot for the whole loop, so every closure
+created in the body observed the last iteration's value. That is a silent
+miscompile of very ordinary Go -- goroutines started in a loop, closures
+deferred in a loop, callbacks appended to a slice in a loop, `&loopvar` -- and
+it was not detected by anything in the matrix.
+
+Measured against the host toolchain before any change, cg12 was wrong for:
+
+- three-clause `for` with `i := 0` (host `0 1 2`, cg12 `3 3 3`);
+- `for i := range n`, `for k, v := range slice`, `for k, v := range array`,
+  `for i, r := range string`, `for k, v := range map`, `for v := range chan`;
+- every capture route: goroutine, `defer`, append-to-slice, and `&i`;
+- every value shape: scalar, string, interface, slice, struct, array.
+
+and already correct for:
+
+- range-over-function iterators. Their body is lowered into a yield function
+  that is entered afresh per element, so the iteration variables are function
+  parameters and are naturally per-iteration.
+
+A second, related defect fell out of the same reduction: for a slice, array,
+string, or integer `range`, the **key variable's own slot was the loop
+counter**. Assigning to the key inside the body therefore changed the
+iteration -- `for k := range []int{1,2,3} { if k == 0 { k = 5 } }` ran one
+iteration instead of three -- and after an assigning `for k = range x` the
+variable held `len(x)` rather than the last index.
+
+#### The fix
+
+`goc/compile.go` only lowers a variable per-iteration when the variable's
+storage can outlive the iteration, which is exactly the condition
+`variableStorage` already tests: `escapingCaptures`, i.e. captured by an
+escaping closure or address-taken into something that escapes. A variable that
+stays in a frame slot cannot be observed after its iteration ends, so sharing
+one slot is unobservable and the loop keeps allocating nothing. This is the
+same syntactic over-approximation the standard compiler's `loopvar` pass uses.
+
+- `perIterationForStmt` performs the standard compiler's three-clause rewrite:
+  the init statement's storage becomes a carrier, each iteration allocates its
+  own instance and copies the carrier in, the post statement moves to the top
+  of the loop and is skipped on the first pass, and the iteration's value is
+  copied back to the carrier at the `continue` target.
+- Every `range` form allocates the declared iteration variables' storage at the
+  top of the body, before the clause assigns them.
+- The indexed `range` forms now keep a private loop counter, so the key
+  variable is an ordinary assignment target.
+- The per-iteration cell is allocated with `allocateEscapingTyped`, not the
+  promotable `OHeapAlloc` candidate form. `opt.LowerHeapAllocations` decides
+  whether a pointer outlives the *frame*, not whether it outlives one
+  *iteration*, so promoting a per-iteration cell to a frame slot would silently
+  put every iteration back on one slot.
+
+This agrees with §5.2.1: a `defer` inside a loop already took the
+"registers more than once" path, so it already had a fresh heap descriptor and
+heap-lifted captures per registration; per-iteration scoping gives those
+captures the right *value*. A `defer` that registers at most once is not in a
+loop, so nothing about it changed, and
+`TestConditionallyDeferredFunctionLiteralDoesNotAllocateBeforeItsBranch` still
+holds `runtime.gcAssistAlloc` at zero allocations.
+
+#### Cost
+
+- **No runtime hot path allocates.** Instrumenting the compiler to log every
+  per-iteration variable found **zero** sites in `runtime` and in everything
+  reachable from `runtime_core_types.go`, `runtime_many_goroutines_gc.go`,
+  `runtime_scheduler_gc_churn.go`, `stdlib_netpoll_stress_pipe_close_churn.go`,
+  `reflect_makefunc.go`, `fmt_sprintf.go`, `context_cancel.go`, and
+  `stdlib_net_netip.go`. Across the largest programs that compile in reasonable
+  time (`stdlib_crypto_ecdsa.go`, `stdlib_encoding_gob_roundtrip.go`,
+  `stdlib_http_cookiejar.go`) exactly three stdlib sites qualify:
+  `crypto/tls/ech.go:153` and `crypto/tls/handshake_client.go:1269` (both
+  `return &loopvar`, where the standard compiler also allocates per iteration),
+  and `internal/poll/writev.go:42`, where cg12's escape analysis treats
+  `&chunk[0]` as taking the address of the slice header `chunk` rather than of
+  its backing array. That last one is pre-existing conservatism -- `chunk` was
+  already heap-lifted before this change -- but it now costs one cell per
+  iovec instead of one per `Writev` call. Narrowing `findEscapingCaptures` for
+  `&slice[i]` would remove it and is not attempted here.
+- A per-iteration variable also keeps the one cell `variableStorage` allocates
+  before the loop starts, which becomes the three-clause loop's carrier and is
+  dead immediately in the `range` forms. That is one allocation per loop
+  *execution*, not per iteration, and it keeps the per-iteration cell's
+  representation -- indirect for aggregates, inline header for strings and
+  interfaces -- identical to the one every other part of the frontend expects.
+- **Compile time and compiler memory are unchanged**: three interleaved runs of
+  each compiler on `stdlib_encoding_gob_roundtrip.go` gave 13.13/13.09/12.98 s
+  and 745/746/739 MB peak for the base compiler against 12.99/12.98/13.01 s and
+  739/738/751 MB after, on a box under other load.
+
+#### Checkpoint
+
+- [x] Reduce every loop form against the host toolchain and record which cg12
+  gets wrong; land the reducers as the `loop-variables` capability category
+  (`three-clause`, `range-forms`, `goroutine-and-defer`, `address-gc`,
+  `value-shapes`, `shared-scope`). All six fail on c87ec2d and pass after the
+  fix, normally and with `-O`.
+- [x] Keep the boundary from the other side: a variable declared outside the
+  loop, and an assigning `for k, v = range x`, keep one instance
+  (`loop-variables/shared-scope`, `TestAssigningRangeClauseKeepsOneInstance`).
+- [x] Prove the cost model in unit tests:
+  `TestUncapturedLoopVariableAllocatesNothing`,
+  `TestCapturedLoopVariableIsAllocatedInsideTheLoop`,
+  `TestOneCapturedScalarCostsOneAllocationPerIteration`, and
+  `TestPerIterationCellSurvivesHeapAllocationLowering`.
+- [x] Verified on 2026-07-28: `make test-unit`, `go test -timeout 40m ./goc/...`
+  (869.7 s), `make test-goc-cmd`, and the full 337-capability matrix at
+  `STATUS_SHARDS=4`, all green. The only non-passing capabilities remain the
+  pre-existing `runtime-packages/finalizer-resurrect` known gap and the
+  deliberate `defer-panic/panic-string-output` expected failure.
+
+Still open: `println` with several operands does not print the spaces the spec
+requires (`println("a", 1)` gives `a1`). Found while reducing this bug, unrelated
+to it, and not fixed here.
+
 ## 6. Phase 2: Memory safety, allocation, and accurate GC
 
 Exercise both semantic behavior and generated metadata.
