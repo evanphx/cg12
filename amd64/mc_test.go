@@ -1,90 +1,43 @@
 package amd64_test
 
 import (
-	"os"
-	"os/exec"
-	"path/filepath"
-	"runtime"
 	"testing"
 
 	"github.com/evanphx/cg12/amd64"
-	"github.com/evanphx/cg12/internal/testenv"
+	"github.com/evanphx/cg12/internal/backendtest"
 	"github.com/evanphx/cg12/ir"
 	"github.com/stretchr/testify/require"
 )
 
-// _start stub: call the exported entry `runtest`, then exit(status = its return
-// value). Freestanding — no libc — so the image needs nothing but the SYS_exit
-// syscall, whether the kernel running it is the host's or qemu's. The tested
-// backend output is linked alongside it.
-const startStub = `
-	.text
-	.globl _start
-_start:
-	call runtest
-	movl %eax, %edi
-	movl $60, %eax
-	syscall
-`
+// freestanding builds this package's execution tests into x86-64 images: the
+// backend's object plus a _start stub that calls the exported `runtest` and exits
+// with what it returned, linked static and without libc.
+//
+// It also decides how to execute them, and that decision is the harness's
+// reason for existing: an x86-64 image on an x86-64 host is a host binary and is
+// exec'd directly, while an emulator is reserved for reaching x86-64 from another
+// architecture -- and demanded, not silently skipped, once a host actually needs
+// one. See internal/backendtest for the whole rule.
+var freestanding = backendtest.X8664Freestanding()
 
-// runObj compiles m to an x86-64 object, links it (freestanding, static) with the
-// _start stub via lld, runs the result, and returns the exit code. The module
-// must export a function named "runtest" returning a word.
+// runObj compiles m to an x86-64 object, links and runs it, and returns the exit
+// code. The module must export a function named "runtest" returning a word.
 func runObj(t *testing.T, m *ir.Module) int {
+	t.Helper()
 	return runObjWith(t, m, amd64.Options{})
 }
 
 // runObjWith is runObj with explicit compilation options (e.g. a GC strategy).
 func runObjWith(t *testing.T, m *ir.Module, opts amd64.Options) int {
 	t.Helper()
-	clang := testenv.Tool(t, "clang")
-	testenv.Tool(t, "ld.lld")
-
-	// The image we build is x86-64, so on an x86-64 host it is simply a host
-	// binary: exec it. An emulator is what it takes to reach x86-64 from some
-	// other architecture -- the arm64 box this harness was written on, and the
-	// project's arm64 CI -- and only there. Demanding qemu-x86_64 regardless is
-	// how a native run came to skip every execution test in this package and
-	// still report ok.
-	//
-	// runner is the emulator to exec the image through, or empty to exec it
-	// directly. Resolving it only when it is needed keeps the skip honest: a
-	// cross-architecture host without qemu still skips (and still fails under
-	// CG12_REQUIRE_TOOLS), because there it really cannot run the image.
-	var runner string
-	if runtime.GOARCH != "amd64" {
-		runner = testenv.Tool(t, "qemu-x86_64")
-	}
+	// Settle whether this host can build and run an image before compiling one,
+	// so a partial toolchain skips rather than reporting whatever the backend
+	// happens to do with a module nothing was going to execute.
+	freestanding.Require(t)
 
 	code, err := amd64.CompileObjectWith(m, opts)
 	require.NoError(t, err)
-
-	dir := t.TempDir()
-	objPath := filepath.Join(dir, "test.o")
-	stubS := filepath.Join(dir, "start.s")
-	stubO := filepath.Join(dir, "start.o")
-	bin := filepath.Join(dir, "prog")
-	require.NoError(t, os.WriteFile(objPath, code, 0o644))
-	require.NoError(t, os.WriteFile(stubS, []byte(startStub), 0o644))
-
-	out, err := exec.Command(clang, "--target=x86_64-linux-gnu", "-c", stubS, "-o", stubO).CombinedOutput()
-	require.NoErrorf(t, err, "assemble stub: %s", out)
-
-	out, err = exec.Command("ld.lld", "-static", "-nostdlib", "-o", bin, stubO, objPath).CombinedOutput()
-	require.NoErrorf(t, err, "link: %s", out)
-
-	var cmd *exec.Cmd
-	if runner == "" {
-		cmd = exec.Command(bin)
-	} else {
-		cmd = exec.Command(runner, bin)
-	}
-	err = cmd.Run()
-	if ee, ok := err.(*exec.ExitError); ok {
-		return ee.ExitCode()
-	}
-	require.NoError(t, err)
-	return 0
+	return freestanding.Exit(t, backendtest.Object(code))
 }
 
 // entry starts a `runtest` function returning a word.
