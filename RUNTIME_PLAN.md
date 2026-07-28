@@ -471,6 +471,11 @@ Current checkpoint:
   contained in a live alloca are now expanded into that safepoint's map. The
   function-wide map is no longer unioned into each safepoint; only allocations
   whose address leaves the frame stay conservative.
+- [x] Write the argument pointer map at every stack-map index rather than only
+  at index 0, and keep body safepoints off the entry index, so a stack-passed
+  pointer argument is a root for the whole call and the register home slots are
+  named only in the prologue window that writes them. See "The argument
+  stack-map hole" below for what was and was not observable.
 - [ ] Pass synchronized finalizer resurrection after explicitly clearing the
   last local pointer in a still-running frame. Still failing
   (`runtime-packages/finalizer-resurrect`, `finalizer did not run`), now for the
@@ -609,6 +614,113 @@ unrelated value, so the allocation is classified as escaping and stays
 conservative. Closing this needs the frontend's escape result, or alloca
 lifetime markers, to reach the backend -- the backend cannot recover it
 syntactically. That is the next step for this section.
+
+#### The argument stack-map hole (2026-07-28)
+
+The previous agent flagged that `builder.stackMaps` writes the argument pointer
+map only at index 0 while safepoints select index >= 1, so stack-passed
+arguments are never scanned at a safepoint. That reading of the code is
+accurate, and the runtime does index both tables with one value -- `getStackMap`
+computes `pcdata` once and uses it for `FUNCDATA_LocalsPointerMaps` and
+`FUNCDATA_ArgsPointerMaps` alike (`stdlib/src/runtime/stkframe.go`). But index 0
+is not an arbitrary index. It is the entry window: `StackMapPCData` selects it
+over `[0, frameStart)`, which is exactly the stack-growth prologue and therefore
+the call to `morestack` -- the one point where the argument frame is the only
+home of the caller's stack-passed arguments, because the callee has not loaded
+them yet. Writing the argument map there is deliberate and necessary.
+
+Two real defects fall out of writing it *only* there.
+
+**Body safepoints read an all-zero argument map.** Nothing described the
+caller's stack-passed pointer arguments for the duration of the call. Today no
+object is lost to this, and the reason is worth recording because it is an
+accident of the frontend rather than a designed invariant: goc gives every
+parameter its own local variable slot and copies the incoming value into it in
+the entry block, before the first safepoint -- scalars through the `OPar` loads,
+by-value aggregates through a memcpy off the incoming argument address. The
+callee's own frame therefore roots every pointer argument, and cg12 never
+re-reads the argument frame afterwards (`OPar` is not rematerializable and a
+GCRef temp is never rematerialized). `GODEBUG=cg12scanroots=1` confirms this for
+pointer, string, interface, slice and by-value-struct arguments passed past the
+eight integer argument registers: before the fix nothing in `main_stacked`'s
+argument frame was reported and the callee's locals held every payload. So this
+half is a latent defect, not a live one -- but it is one line away from being
+live, and it is precisely the redundancy the section above is working to remove.
+
+**Rootless body safepoints read the *entry* map.** This one is live.
+`FunctionStackMaps` matched a safepoint with no live frame roots against
+`pointerMaps[0]`, which is empty, so such a safepoint resolved to index 0 --
+sharing the entry index, and with it the entry *argument* map. That map marks
+the register-argument home slots, and `goStackPrologue` writes those only on the
+path that falls through the stack-guard check to `morestack`. On every other
+path they are words of the caller's outgoing area that nobody wrote. The
+collector was therefore scanning uninitialised stack memory as roots at ordinary
+calls. It is not rare: a single `fmt.Sprintf` program has 1835 functions with at
+least one rootless safepoint and a non-empty argument pointer map, almost all of
+them the generated `_interfacecall_` and `_gointernal_funcvalue_` adapters,
+which forward their arguments and hold no frame root at the forwarding call.
+`time_Time_After_interfacecall` is representative: `argSize=16`,
+`argPtrWords=[1]`, `localPtrWords=[]`, one safepoint, and word 1 is the home
+slot for X1.
+
+The fix is at the metadata layer and has two halves:
+
+- `gometa.FunctionStackMaps` reserves index 0 for the entry window. A safepoint
+  never resolves to it, even when its locals map would be identical; a rootless
+  safepoint gets its own empty map instead.
+- `gometa.ArgumentStackMaps` writes one argument bitmap per locals map. Index 0
+  keeps the full argument map. Every body index gets the caller-initialised
+  subset: `arm64.goArgumentFrameFor` now returns the stack-passed argument words
+  separately from the words only the callee ever writes, so a stack-passed
+  pointer argument is a root for the whole call while a register home slot is
+  named only in the window where the prologue has just written it.
+
+Covered by `TestGoFunctionStackMapsKeepRootlessSafepointsOffTheEntryIndex`,
+`TestGoFunctionStackMapsShareTheBodyIndexWhenNoFrameRootExists`,
+`TestGoArgumentStackMapsCoverEveryStackMapIndex`,
+`TestGoArgumentStackMapsEmitOneBitmapPerLocalsMap`,
+`TestManagedAAPCS64SeparatesIncomingArgumentsFromRegisterHomes`,
+`TestManagedAAPCS64KeepsStackedAggregateWordsInBothArgumentMaps` and
+`TestManagedAAPCS64LeavesRegisterOnlyArgumentsOutOfTheBodyMap`, and by the
+`gc/stack-argument-roots` capability
+(`goc/testdata/runtime_stack_argument_roots.go`), which passes pointer, string,
+interface and slice arguments past the register budget and holds them live
+across `runtime.GC()` and a stack copy. Be honest about what that capability is:
+it passes 10/10 at `GOMAXPROCS=1` both before and after the fix, because of the
+frontend redundancy above. It pins the property; it is not a reducer for a
+failure. What it does change is where the roots come from --
+`GODEBUG=cg12scanroots=1` reports `main_stacked arg slot 0/1/4` only after the
+fix. (At the box's default `GOMAXPROCS=64` it fails 10/10 both before and after,
+in the pre-existing `sweep increased allocation count`; so does the existing
+`gc/cleanup-basic`, which is why the status harness runs these at
+`-runtime-procs=1`.)
+
+Two things this did not close, both stated so the next investigation does not
+have to rediscover them:
+
+- The entry map still marks the stack result area of a Go-ABIInternal aggregate
+  return. Those words are written by the callee just before it returns, so at
+  the `morestack` call they are uninitialised, exactly like the home slots on
+  the fast path. They are excluded from the body map by the fix but left in the
+  entry map, because changing what `morestack` scans is a separate change with
+  its own evidence to gather.
+- No runtime reducer was built for the rootless-safepoint garbage scan. It needs
+  a caller frame whose outgoing area holds a stale heap pointer at the word an
+  adapter's home slot lands on, which is as frame-layout sensitive as the
+  reducers above, and every shape that arranges it -- an interface method call
+  driven by a bounded `runtime.GC()` loop -- dies first in the pre-existing
+  `fatal error: sweep increased allocation count`, identically before and after
+  this fix. The evidence for it is therefore static: the emitted index points
+  and argument maps, reproduced from real compilations.
+
+  That failure is worth a second look from whoever picks up 5.2.1. Its printout
+  is `nelems=16 nalloc=17`, so the sweeper counted more mark bits than the span
+  has elements -- a mark bit set past the end of the span, which is what
+  `greyobject` does when handed a word that is not a real object pointer.
+  Scanning uninitialised stack memory as roots produces exactly that. This is a
+  lead, not a diagnosis: the fix above removes one source of such scans and the
+  failure still reproduces, so if the two are related there is at least one more
+  source.
 
 #### Fixed: runtime print routines allocated (2026-07-27)
 

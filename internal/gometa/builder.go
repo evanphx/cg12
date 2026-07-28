@@ -162,9 +162,7 @@ func (builder *Builder) Build(functions, translatedFunctions []FunctionInfo, mod
 		builder.align(4)
 		argumentOffsets[index] = uint32(builder.position() - builder.labels[".goc.go.gofunc"])
 		words := (function.ArgumentSize + 7) / 8
-		argumentMaps := make([][]int, stackMapEntryCounts[index])
-		argumentMaps[0] = function.ArgumentPointerWords
-		builder.stackMaps(words, argumentMaps...)
+		builder.stackMaps(words, ArgumentStackMaps(function, stackMapEntryCounts[index])...)
 	}
 	localOffsets := make([]uint32, len(functions))
 	for index, function := range functions {

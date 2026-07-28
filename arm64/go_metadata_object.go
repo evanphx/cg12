@@ -60,18 +60,19 @@ func goFunctionInfoFor(f *ir.Func, name string, mc *machineCode) (goFunctionInfo
 		argumentFrame = goArgumentFrameFor(f)
 	}
 	return goFunctionInfo{
-		Name:                 name,
-		FrameSize:            mc.m.frame,
-		FrameStart:           mc.m.frameStart,
-		ManagedFrame:         f.UsesManagedFrame(),
-		OutgoingSize:         mc.m.outgoing,
-		Size:                 uint64(len(mc.code)),
-		FuncID:               gometa.RuntimeFunctionID(name),
-		DeferReturn:          deferReturn,
-		LocalPointerWords:    mc.m.goLocalPointerWords(),
-		StackMapPoints:       mc.m.goStackMapPoints(),
-		ArgumentSize:         argumentFrame.size,
-		ArgumentPointerWords: argumentFrame.pointerWords,
+		Name:                          name,
+		FrameSize:                     mc.m.frame,
+		FrameStart:                    mc.m.frameStart,
+		ManagedFrame:                  f.UsesManagedFrame(),
+		OutgoingSize:                  mc.m.outgoing,
+		Size:                          uint64(len(mc.code)),
+		FuncID:                        gometa.RuntimeFunctionID(name),
+		DeferReturn:                   deferReturn,
+		LocalPointerWords:             mc.m.goLocalPointerWords(),
+		StackMapPoints:                mc.m.goStackMapPoints(),
+		ArgumentSize:                  argumentFrame.size,
+		ArgumentPointerWords:          argumentFrame.pointerWords,
+		SafepointArgumentPointerWords: argumentFrame.incomingPointerWords,
 	}, nil
 }
 

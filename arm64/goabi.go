@@ -26,10 +26,21 @@ type goRegisterSpillGroup struct {
 	pointer   bool
 }
 
+// goArgumentFrame describes the argument frame the caller reserves for a
+// function: its stack-passed arguments and stack results, then the home slots
+// the stack-growth prologue spills the register arguments into.
+//
+// The two pointer maps differ in when they are valid, which is why they are two
+// maps. pointerWords covers every pointer word the frame can hold and is only
+// correct in the entry window, where the prologue has just written the home
+// slots before calling morestack. incomingPointerWords covers just the words the
+// caller wrote before the call -- the stack-passed arguments -- and is therefore
+// the map that holds for the whole call, at every safepoint in the body.
 type goArgumentFrame struct {
-	spills       []goRegisterSpill
-	size         int
-	pointerWords []int
+	spills               []goRegisterSpill
+	size                 int
+	pointerWords         []int
+	incomingPointerWords []int
 }
 
 // goRegisterSpills returns the managed-frame entry spills used by the standard
@@ -44,13 +55,18 @@ func goArgumentFrameFor(function *ir.Func) goArgumentFrame {
 	goInternal := function.UsesGoInternalCallConvention()
 	assigner := newArgAssigner(goInternal)
 	groups := make([]goRegisterSpillGroup, 0, len(function.Params))
-	pointerOffsets := make(map[int]bool)
+	// incomingOffsets are the stack-passed argument words, written by the caller
+	// before the call and so valid for its whole duration. prologueOffsets are the
+	// words only the callee ever writes -- the stack result area and the register
+	// home slots -- which hold nothing meaningful outside the entry window.
+	incomingOffsets := make(map[int]bool)
+	prologueOffsets := make(map[int]bool)
 	for parameterIndex := 0; parameterIndex < len(function.Params); {
 		if group, ok := ir.ValueGroupAt(function.ParamGroups, parameterIndex); goInternal && ok {
 			parts, onStack, stackOffset := assignGoAggregate(&assigner, group.Type)
 			if onStack {
 				for _, offset := range ir.AggregatePointerOffsets(group.Type) {
-					pointerOffsets[stackOffset+offset] = true
+					incomingOffsets[stackOffset+offset] = true
 				}
 			} else {
 				size, alignment := group.Type.Layout()
@@ -68,7 +84,7 @@ func goArgumentFrameFor(function *ir.Func) goArgumentFrame {
 				parts, onStack, stackOffset := assignGoAggregate(&assigner, group.Type)
 				if onStack {
 					for _, offset := range ir.AggregatePointerOffsets(group.Type) {
-						pointerOffsets[stackOffset+offset] = true
+						incomingOffsets[stackOffset+offset] = true
 					}
 				} else {
 					size, alignment := group.Type.Layout()
@@ -91,7 +107,7 @@ func goArgumentFrameFor(function *ir.Func) goArgumentFrame {
 				pointer := parameter.GCRef || parts[partIndex].pointer
 				if location.onStack {
 					if pointer {
-						pointerOffsets[location.stacky] = true
+						incomingOffsets[location.stacky] = true
 					}
 					continue
 				}
@@ -113,7 +129,7 @@ func goArgumentFrameFor(function *ir.Func) goArgumentFrame {
 				aapcsGroups, stackPointers := aapcsAggregateSpillGroups(&assigner, parameter.Agg)
 				groups = append(groups, aapcsGroups...)
 				for _, offset := range stackPointers {
-					pointerOffsets[offset] = true
+					incomingOffsets[offset] = true
 				}
 				parameterIndex++
 				continue
@@ -121,7 +137,7 @@ func goArgumentFrameFor(function *ir.Func) goArgumentFrame {
 			parts, onStack, stackOffset := assignGoAggregate(&assigner, parameter.Agg)
 			if onStack {
 				for _, offset := range ir.AggregatePointerOffsets(parameter.Agg) {
-					pointerOffsets[stackOffset+offset] = true
+					incomingOffsets[stackOffset+offset] = true
 				}
 				parameterIndex++
 				continue
@@ -139,7 +155,7 @@ func goArgumentFrameFor(function *ir.Func) goArgumentFrame {
 		location := assigner.assign(parameter.Cls)
 		if location.onStack {
 			if parameter.GCRef {
-				pointerOffsets[location.stacky] = true
+				incomingOffsets[location.stacky] = true
 			}
 			parameterIndex++
 			continue
@@ -175,7 +191,7 @@ func goArgumentFrameFor(function *ir.Func) goArgumentFrame {
 		_, onStack, stackOffset := assignGoAggregate(&results, function.RetAgg)
 		if onStack {
 			for _, offset := range ir.AggregatePointerOffsets(function.RetAgg) {
-				pointerOffsets[stackOffset+offset] = true
+				prologueOffsets[stackOffset+offset] = true
 			}
 		}
 		resultEnd = results.nsaa
@@ -206,7 +222,7 @@ func goArgumentFrameFor(function *ir.Func) goArgumentFrame {
 			}
 			spills = append(spills, spill)
 			if spill.pointer {
-				pointerOffsets[cursor] = true
+				prologueOffsets[cursor] = true
 			}
 		} else {
 			for _, part := range group.parts {
@@ -219,21 +235,40 @@ func goArgumentFrameFor(function *ir.Func) goArgumentFrame {
 				}
 				spills = append(spills, spill)
 				if spill.pointer {
-					pointerOffsets[cursor+part.offset] = true
+					prologueOffsets[cursor+part.offset] = true
 				}
 			}
 		}
 		cursor += group.size
 	}
 	cursor = roundUp(cursor, 8)
-	pointerWords := make([]int, 0, len(pointerOffsets))
-	for offset := range pointerOffsets {
+	entryOffsets := make(map[int]bool, len(incomingOffsets)+len(prologueOffsets))
+	for offset := range incomingOffsets {
+		entryOffsets[offset] = true
+	}
+	for offset := range prologueOffsets {
+		entryOffsets[offset] = true
+	}
+	return goArgumentFrame{
+		spills:               spills,
+		size:                 cursor,
+		pointerWords:         argumentPointerWords(entryOffsets),
+		incomingPointerWords: argumentPointerWords(incomingOffsets),
+	}
+}
+
+// argumentPointerWords turns a set of argument-frame byte offsets into the
+// sorted word indexes a Go stack map is written from, dropping any offset that
+// is not word-aligned and so cannot name a pointer word.
+func argumentPointerWords(offsets map[int]bool) []int {
+	words := make([]int, 0, len(offsets))
+	for offset := range offsets {
 		if offset%8 == 0 {
-			pointerWords = append(pointerWords, offset/8)
+			words = append(words, offset/8)
 		}
 	}
-	sort.Ints(pointerWords)
-	return goArgumentFrame{spills: spills, size: cursor, pointerWords: pointerWords}
+	sort.Ints(words)
+	return words
 }
 
 func aapcsAggregateSpillGroups(assigner *argAssigner, aggregate *ir.AggType) ([]goRegisterSpillGroup, []int) {
