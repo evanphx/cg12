@@ -163,7 +163,21 @@ these first is what makes Phase 2 append-only.
 | 1e | Hoist the arch-neutral ~55-60% of `arm64/go_metadata_object.go` into a shared package, parameterized by `{pcQuantum, reloc32Type, reloc64Type, frameBaseBytes}` | new shared pkg, `arm64/go_metadata_object.go` | moduledata is byte-identical across arches (every field a uintptr or slice header; no arch discriminator). Stack maps carry no register numbers. Tests move verbatim. |
 | 1f | Relocate `inferStackPointerWords` and the aggregate pointer-word helpers into `ir`/`opt` (already pure IR-to-IR; GO_INTEGRATION_PLAN 2b flags this) | `ir/` or `opt/`, `arm64/mc.go`, `arm64/goabi.go` | ~270 lines that would otherwise be copied. Follow the `lower/alloca.go:18` precedent. |
 
+| 1g | Add a copy-based derivation helper (`g.derive()`) for `goc/compile.go`'s eleven `&gen{}` literals. The ten derived wrapper/child/adapter generators are currently built field-by-field from their parent, so any new whole-compilation field added to `gen` is silently zero in all ten unless every literal is updated by hand. This already bit 1d once (see §8 item 2a) and Phase 2 will add more such fields. | `goc/compile.go` | Small, and worth doing before Phase 2 rather than after. |
+
 1d, 1e, 1f are independent of each other and of 1a/1b — four concurrent lanes.
+1d is **done** (`goc.Target`, `-target` flag; cross-compilation now expressible —
+`-target arm64` on x86-64 emits a real AArch64 object where it previously died at
+`getg`).
+
+**Target vocabulary is now fragmented five ways** and wants consolidating:
+`cc.Target`, `goc.Target`, `ir.Func.MarkLowered(string)`, `cmd/cg12 -target`, and
+`cmd/cg12cc`'s `CG12_TARGET` env var. The valuable half is unifying `MarkLowered`
+onto a typed shared `Target` **and serializing it in the unit format** — today the
+marker is not serialized at all (`ir/binary.go`), so it vanishes on round-trip,
+which silently removes the tripwire that `ir/func.go:266-267` documents as
+catching a real bug (an arm64-lowered module later compiled for amd64). Own item,
+not urgent, but it is a real hole.
 
 ## 6. Phase 2 — fan-out
 
@@ -321,6 +335,15 @@ convention (B0 decides, B2/C2/C3 consume).
    a named `Fatal`, never a skip.
 2. Skip count zero or explicitly justified. A green run with 52 silent skips is
    the failure mode this plan exists to end.
+2a. **For behavior-preserving refactors, diffing failing test *names* is not
+   sufficient — diff the normalized full output.** Learned the hard way in 1d:
+   its first pass set the new target field on only the outermost of `compile.go`'s
+   eleven `&gen{}` literals, so the ten derived generators silently received a
+   zero value and every diagnostic lost its architecture name. The set of failing
+   tests was byte-identical; only the message text changed. Normalize run-to-run
+   timings and the pre-existing nondeterministic choice of reported `getg` site
+   (map iteration order — it varies on an unmodified tree too), then require an
+   empty diff.
 3. No regression in the C/Ruby path: `make test-ruby` must stay byte-identical
    to gcc on the miniruby differential (GO_INTEGRATION_PLAN's standing gate).
 4. arm64 must not regress. Locally its heavy tests skip for lack of a cross
