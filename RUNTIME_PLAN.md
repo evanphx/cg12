@@ -50,9 +50,19 @@ the first change that let the capability matrix run to completion. Commit
 were the net/http type-check gap and have since been repaired and restored to
 `mustPass`. Eight remain, and four of them contradict checkpoints in §5.2/§5.3
 that this document previously recorded as complete. Those sections have been
-corrected. Note also that the coverage baseline covers 294 programs while the
-matrix now holds 322 capabilities; the denominators must be reconciled before a
-new baseline is accepted.
+corrected.
+
+The two denominators are now reconciled. There is only one denominator: the
+capability matrix *is* the coverage corpus, and every capability reports one
+explicit compile/run/coverage outcome, including the ones this environment
+cannot run. The accepted baseline covers 294 programs while the matrix holds
+325, and that gap is baseline staleness rather than an exclusion set — each of
+the 31 capabilities was added after the 2026-07-22 run. They are listed with a
+reason in `cmd/goc/testdata/runtime_coverage_baseline_pending.json`, and
+`TestCheckedRuntimeCoverageBaselineDenominator` reconciles matrix, baseline, and
+list, so adding a capability now requires either accepting a new baseline or
+recording why the baseline does not cover it. The list empties when the pending
+full-corpus rerun is accepted.
 
 Control runs without coverage instrumentation reproduce the runtime failures
 and large-program compiler memory failures. They are not coverage-counter
@@ -139,20 +149,39 @@ Current M0 checkpoint:
 - [x] Merge repeated executions of each compiled program so scheduling noise is
   less likely to produce false coverage regressions.
 - [x] Produce and check in an accepted version-2 full-corpus baseline.
-- [ ] Reach 294/294 usable coverage outcomes by repairing the current failures.
+- [x] Make the capability matrix the single corpus denominator, recorded in each
+  report as `matrix_capabilities` and enforced by the collector: a capability
+  that reports no outcome is a collection failure, not a smaller corpus.
+- [x] Give every program an explicit named outcome. A capability the environment
+  cannot run is `skipped` with a recorded reason instead of being dropped; a
+  deliberate abnormal termination is classified `expected-unavailable`; every
+  other absent packet keeps a `missing` outcome and says how the process ended.
+- [x] Reconcile the accepted baseline with the matrix in
+  `testdata/runtime_coverage_baseline_pending.json`, checked by a test.
+- [x] Refuse a sharded coverage run, which would publish a fraction of the
+  corpus as a complete report, and refuse a coverage run on a host that cannot
+  execute the matrix rather than skipping silently.
+- [ ] Reach one usable coverage outcome per capability by repairing the current
+  failures. The remaining absences are the §5.2/§5.3 runtime failures and the
+  trace-buffer timeout, not collector gaps.
 
 ### 4.1 Make reports stable and comparable
 
-- Add a report-diff command keyed by function, file, line, and block index.
-- Store the accepted Linux/ARM64 baseline in the repository without generated
-  binaries or per-program counter blobs.
-- Report gained/lost functions and blocks, missing packets, compile failures,
-  runtime failures, timeouts, and peak compile/run memory separately.
-- Add per-category and per-subsystem summaries in addition to per-file totals.
-- Detect source drift so a report from a different copied Go runtime cannot be
-  compared silently.
-- Make coverage collection opt-in for normal tests and provide a documented,
-  resource-bounded command for the complete run.
+- [x] Add a report-diff command keyed by function, file, line, and block index.
+- [x] Store the accepted Linux/ARM64 baseline in the repository without
+  generated binaries or per-program counter blobs.
+- [x] Report gained/lost functions and blocks, missing packets, compile
+  failures, runtime failures, timeouts, and peak compile/run memory separately.
+  The diff also lists added and removed programs, so comparing against a stale
+  baseline announces the capabilities that baseline never ran instead of
+  ignoring them.
+- [x] Add per-category and per-subsystem summaries in addition to per-file
+  totals.
+- [x] Detect source drift so a report from a different copied Go runtime cannot
+  be compared silently.
+- [x] Make coverage collection opt-in for normal tests and provide a documented,
+  resource-bounded command for the complete run: `make test-goc-coverage`, then
+  `make runtime-cover-diff`.
 
 ### 4.2 Classify the denominator
 
@@ -183,9 +212,11 @@ functions remain visible but do not become artificial coverage targets.
 - Later add native cg12 assembly counters at safe basic-block boundaries. Do not
   insert calls or stack-using instrumentation into raw stack-switching code.
 
-Exit criterion: two consecutive full runs have the same denominator, all 294
-programs report an explicit compile/run/coverage outcome, and report diffs are
-usable in code review.
+Exit criterion: two consecutive full runs have the same denominator, every
+capability in the matrix reports an explicit compile/run/coverage outcome, and
+report diffs are usable in code review. The denominator and the explicit
+outcomes are now enforced by the collector and its tests; what remains is the
+runtime repair work that turns the classified failures into collected packets.
 
 ## 5. Phase 1: Repair current hard failures
 
@@ -476,7 +507,8 @@ Current checkpoint:
 
 Exit criterion: trace terminates and produces parseable output within its
 budget; all three HTTP programs compile below the agreed memory ceiling and
-return coverage packets. The corpus reaches 294/294 covered programs.
+return coverage packets. Every capability in the matrix returns a coverage
+packet.
 
 ## 6. Phase 2: Memory safety, allocation, and accurate GC
 
@@ -638,7 +670,7 @@ fix, compiler diagnostics where useful, status-suite registration, and updated
 coverage classification.
 
 1. **M0 — coverage is reproducible:** stable report/diff, checked baseline,
-   classifications, 294 explicit outcomes.
+   classifications, one explicit outcome per capability.
 2. **M1 — current failures are green:** defer/panic, signal, finalizer, gob,
    trace, HTTP compiler memory, and the existing ECDSA gap are resolved or
    correctly reassigned outside runtime scope.
@@ -674,7 +706,7 @@ Start with the following bounded sequence:
 7. Reduce the gob reflection failure.
 8. Separate and fix trace runtime growth from compiler memory growth.
 9. Profile and reduce the three HTTP compilation OOMs.
-10. Re-run all 294 programs, accept the first stable baseline, and begin the
+10. Re-run the complete capability matrix, accept the first stable baseline, and begin the
     allocation/GC phase.
 
 This order deliberately repairs the mechanisms used to diagnose later phases:

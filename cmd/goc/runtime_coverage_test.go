@@ -111,6 +111,8 @@ type runtimeCorpusCoverage struct {
 	coveredPrograms   int
 	runtimeSourceID   string
 	collectionErrors  []string
+	expectedPrograms  []string
+	recordedPrograms  map[string]bool
 	categories        map[string]*runtimeCoverageCategoryAccumulator
 	assemblyFiles     map[string]bool
 	programResults    []runtimeCoverageProgramReport
@@ -133,6 +135,7 @@ type runtimeCoverageCategoryAccumulator struct {
 
 func newRuntimeCorpusCoverage() *runtimeCorpusCoverage {
 	return &runtimeCorpusCoverage{
+		recordedPrograms:  make(map[string]bool),
 		categories:        make(map[string]*runtimeCoverageCategoryAccumulator),
 		assemblyFiles:     make(map[string]bool),
 		activeFunctions:   make(map[runtimeFunctionKey]goc.RuntimeCoverageFunction),
@@ -143,11 +146,32 @@ func newRuntimeCorpusCoverage() *runtimeCorpusCoverage {
 	}
 }
 
+// expect records the capability matrix this run is drawn from. The collector
+// then knows the complete denominator, so a capability that never reports an
+// outcome is a detectable hole rather than a corpus that quietly shrank.
+func (coverage *runtimeCorpusCoverage) expect(capabilities []runtimeCapability) {
+	if *runtimeCoverageProfile == "" {
+		return
+	}
+	coverage.expectedPrograms = coverage.expectedPrograms[:0]
+	for _, capability := range capabilities {
+		coverage.expectedPrograms = append(coverage.expectedPrograms, capability.category+"/"+capability.name)
+	}
+}
+
 func (coverage *runtimeCorpusCoverage) add(capability runtimeCapability, result runtimeCapabilityResult) {
 	if *runtimeCoverageProfile == "" {
 		return
 	}
 	coverage.programs++
+	name := capability.category + "/" + capability.name
+	if coverage.recordedPrograms[name] {
+		coverage.collectionErrors = append(
+			coverage.collectionErrors,
+			fmt.Sprintf("%s reported more than one coverage outcome", name),
+		)
+	}
+	coverage.recordedPrograms[name] = true
 	program := runtimeCoverageProgramReport{
 		Category:            capability.category,
 		Name:                capability.name,
@@ -156,6 +180,9 @@ func (coverage *runtimeCorpusCoverage) add(capability runtimeCapability, result 
 		CompileOutcome:      result.compileOutcome,
 		RunOutcome:          result.runOutcome,
 		CoverageOutcome:     result.coverageOutcome,
+		Termination:         runtimeCoverageTerminationName(capability.termination),
+		CoverageReason:      result.coverageReason,
+		SkipReason:          result.skipReason,
 		CompileMilliseconds: result.compileDuration.Milliseconds(),
 		CompilePeakRSSBytes: result.compilePeakRSS,
 		RunMilliseconds:     result.runDuration.Milliseconds(),
@@ -259,15 +286,16 @@ func (coverage *runtimeCorpusCoverage) report() runtimeCoverageReport {
 		Scope:           "build-selected runtime Go source functions and emitted cg12 basic blocks; selected Plan 9 assembly is listed separately",
 		Programs:        append([]runtimeCoverageProgramReport(nil), coverage.programResults...),
 		Summary: runtimeCoverageSummary{
-			Programs:          coverage.programs,
-			CoveredPrograms:   coverage.coveredPrograms,
-			ActiveFunctions:   len(coverage.activeFunctions),
-			CompiledFunctions: len(coverage.compiledFunctions),
-			ExecutedFunctions: len(coverage.executedFunctions),
-			FunctionCoverage:  coveragePercent(len(coverage.executedFunctions), len(coverage.activeFunctions)),
-			CompiledBlocks:    len(coverage.compiledBlocks),
-			ExecutedBlocks:    len(coverage.executedBlocks),
-			BlockCoverage:     coveragePercent(len(coverage.executedBlocks), len(coverage.compiledBlocks)),
+			Programs:           coverage.programs,
+			CoveredPrograms:    coverage.coveredPrograms,
+			MatrixCapabilities: len(coverage.expectedPrograms),
+			ActiveFunctions:    len(coverage.activeFunctions),
+			CompiledFunctions:  len(coverage.compiledFunctions),
+			ExecutedFunctions:  len(coverage.executedFunctions),
+			FunctionCoverage:   coveragePercent(len(coverage.executedFunctions), len(coverage.activeFunctions)),
+			CompiledBlocks:     len(coverage.compiledBlocks),
+			ExecutedBlocks:     len(coverage.executedBlocks),
+			BlockCoverage:      coveragePercent(len(coverage.executedBlocks), len(coverage.compiledBlocks)),
 		},
 	}
 	for assembly := range coverage.assemblyFiles {
@@ -388,17 +416,23 @@ func addRuntimeCoverageSummaryProgram(summary *runtimeCoverageSummary, program r
 	if runtimeCoverageProgramFailed(program) {
 		summary.UnexpectedFailures++
 	}
-	if program.CompileOutcome == "failed" {
+	if program.CompileOutcome == runtimeCoverageOutcomeFailed {
 		summary.CompileFailures++
 	}
-	if program.RunOutcome == "failed" {
+	if program.CompileOutcome == runtimeCoverageOutcomeSkipped {
+		summary.SkippedPrograms++
+	}
+	if program.RunOutcome == runtimeCoverageOutcomeFailed {
 		summary.RunFailures++
 	}
-	if program.RunOutcome == "timeout" {
+	if program.RunOutcome == runtimeCoverageOutcomeTimeout {
 		summary.RunTimeouts++
 	}
-	if program.CoverageOutcome != "collected" {
+	if program.CoverageOutcome != runtimeCoverageOutcomeCollected {
 		summary.MissingCoveragePrograms++
+	}
+	if program.CoverageOutcome == runtimeCoverageOutcomeExpectedUnavailable {
+		summary.ExpectedUnavailableCoveragePrograms++
 	}
 	summary.CompileMilliseconds += program.CompileMilliseconds
 	summary.CompilePeakRSSBytes = max(summary.CompilePeakRSSBytes, program.CompilePeakRSSBytes)
@@ -411,16 +445,19 @@ func addRuntimeCoverageCategoryProgram(category *runtimeCoverageCategoryReport, 
 	if runtimeCoverageProgramFailed(program) {
 		category.UnexpectedFailures++
 	}
-	if program.CompileOutcome == "failed" {
+	if program.CompileOutcome == runtimeCoverageOutcomeFailed {
 		category.CompileFailures++
 	}
-	if program.RunOutcome == "failed" {
+	if program.CompileOutcome == runtimeCoverageOutcomeSkipped {
+		category.SkippedPrograms++
+	}
+	if program.RunOutcome == runtimeCoverageOutcomeFailed {
 		category.RunFailures++
 	}
-	if program.RunOutcome == "timeout" {
+	if program.RunOutcome == runtimeCoverageOutcomeTimeout {
 		category.RunTimeouts++
 	}
-	if program.CoverageOutcome != "collected" {
+	if program.CoverageOutcome != runtimeCoverageOutcomeCollected {
 		category.MissingCoveragePrograms++
 	}
 	category.CompileMilliseconds += program.CompileMilliseconds
@@ -433,6 +470,12 @@ func addRuntimeCoverageCategoryProgram(category *runtimeCoverageCategoryReport, 
 func (coverage *runtimeCorpusCoverage) write(t *testing.T) {
 	if *runtimeCoverageProfile == "" {
 		return
+	}
+	for _, missing := range coverage.unreportedPrograms() {
+		coverage.collectionErrors = append(
+			coverage.collectionErrors,
+			fmt.Sprintf("%s ran without reporting a compile, run, or coverage outcome", missing),
+		)
 	}
 	if len(coverage.collectionErrors) > 0 {
 		for _, collectionError := range coverage.collectionErrors {
@@ -451,6 +494,12 @@ func (coverage *runtimeCorpusCoverage) write(t *testing.T) {
 	}
 	if err := applyRuntimeCoverageClassifications(&report, classifications); err != nil {
 		t.Fatal(err)
+	}
+	// The collector holds itself to the same contract a checked-in baseline
+	// must satisfy: one explicit outcome per capability, consistent summaries,
+	// and a recorded reason wherever a coverage packet is absent.
+	if err := validateRuntimeCoverageReport(report); err != nil {
+		t.Errorf("generated runtime coverage report is invalid: %v", err)
 	}
 	encoded, err := json.MarshalIndent(report, "", "  ")
 	if err != nil {
@@ -474,6 +523,19 @@ func (coverage *runtimeCorpusCoverage) write(t *testing.T) {
 	)
 }
 
+// unreportedPrograms lists the expected capabilities that produced no outcome
+// at all. Section 4 of RUNTIME_PLAN.md requires an explicit outcome per program,
+// so an absence here is a collection failure rather than a smaller corpus.
+func (coverage *runtimeCorpusCoverage) unreportedPrograms() []string {
+	var missing []string
+	for _, name := range coverage.expectedPrograms {
+		if !coverage.recordedPrograms[name] {
+			missing = append(missing, name)
+		}
+	}
+	return missing
+}
+
 func defaultRuntimeCoverageClassifications() string {
 	_, filename, _, ok := runtime.Caller(0)
 	if !ok {
@@ -487,6 +549,13 @@ func coveragePercent(covered, total int) float64 {
 		return 0
 	}
 	return float64(covered) * 100 / float64(total)
+}
+
+func runtimeCoverageTerminationName(termination runtimeCapabilityTermination) string {
+	if termination == runtimeCapabilityTerminatesAbnormally {
+		return runtimeCoverageTerminationAbnormal
+	}
+	return runtimeCoverageTerminationNormal
 }
 
 func runtimeCoverageExpectationName(expectation runtimeCapabilityExpectation) string {

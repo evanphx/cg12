@@ -11,6 +11,11 @@
 #                       and executed to chart runtime coverage. Long-running;
 #                       shardable across parallel jobs via STATUS_SHARDS/STATUS_SHARD
 #                       (needs `cc`).
+#   test-goc-coverage — the same matrix compiled with runtime coverage
+#                       instrumentation, producing a diffable JSON report.
+#                       Unsharded by construction; see COVERAGE_REPORT below.
+#   runtime-cover-diff— compare a generated report against the accepted
+#                       baseline and fail on a regression.
 #   test-ruby         — the Ruby/C compiler test: cg12's C frontend checked
 #                       differentially against gcc (Ruby is written in C), plus
 #                       regressions captured from compiling miniruby (needs gcc).
@@ -39,8 +44,21 @@ STATUS_SHARD    ?= 0
 STATUS_TIMEOUT  ?= 30m
 GOC_CMD_TIMEOUT ?= 15m
 
+# The runtime coverage collection. The report describes the whole corpus, so it
+# is deliberately unsharded: the test refuses -runtime-coverprofile together
+# with STATUS_SHARDS, because there is no way to merge partial reports and a
+# shard would publish a fraction of the corpus as though it were complete.
+# COVERAGE_RUNS repeats each compiled program and merges its hits, which damps
+# scheduling noise at a proportional cost in wall-clock time.
+COVERAGE_REPORT   ?= runtime_coverage_linux_arm64.json
+COVERAGE_RUNS     ?= 1
+COVERAGE_BASELINE := cmd/goc/testdata/runtime_coverage_linux_arm64.json
+# A full instrumented corpus is dominated by compilation: roughly 40 minutes of
+# compiler time per run at the current matrix size.
+COVERAGE_TIMEOUT  ?= 180m
+
 .PHONY: all build test test-unit test-goc-corpus test-goc-cmd test-goc-status \
-        test-ruby test-cruby fmt vet clean
+        test-goc-coverage runtime-cover-diff test-ruby test-cruby fmt vet clean
 
 # The default local check: build, then the whole suite.
 all: build test
@@ -70,6 +88,18 @@ test-goc-cmd:
 test-goc-status:
 	$(GO) test -timeout $(STATUS_TIMEOUT) -run '^$(STATUS_TEST)$$' $(GOC_CMD_PKGS) \
 		-args -runtime-status-shards=$(STATUS_SHARDS) -runtime-status-shard=$(STATUS_SHARD)
+
+# The complete runtime coverage run: every capability compiled with runtime
+# instrumentation, one explicit compile/run/coverage outcome per capability,
+# written to COVERAGE_REPORT as a diffable JSON report.
+test-goc-coverage:
+	$(GO) test -timeout $(COVERAGE_TIMEOUT) -run '^$(STATUS_TEST)$$' $(GOC_CMD_PKGS) \
+		-args -runtime-coverprofile=$(abspath $(COVERAGE_REPORT)) -runtime-coverruns=$(COVERAGE_RUNS)
+
+# Compare a generated report against the accepted baseline. Exits non-zero on a
+# coverage or program regression, so it is usable as a review gate.
+runtime-cover-diff:
+	$(GO) run ./cmd/goc runtime-cover-diff -fail-on-regression $(COVERAGE_BASELINE) $(COVERAGE_REPORT)
 
 # The Ruby/C compiler test: the cg12-vs-gcc differential and miniruby
 # regressions (arm64 Linux; needs gcc).

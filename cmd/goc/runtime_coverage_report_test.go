@@ -9,6 +9,8 @@ import (
 	"testing"
 	"time"
 
+	"github.com/stretchr/testify/require"
+
 	"github.com/evanphx/cg12/goc"
 )
 
@@ -330,6 +332,208 @@ func TestMergeRuntimeCapabilityCoverage(t *testing.T) {
 			t.Fatalf("merged hits = %v, want %v", merged.hits, want)
 		}
 	}
+}
+
+// A report diff has to be readable in code review: keyed precisely enough that
+// a moved function is not mistaken for the same function, and separating the
+// outcome categories a reviewer has to judge independently.
+
+func TestCompareRuntimeCoverageReportsKeysFunctionsAndBlocksPrecisely(t *testing.T) {
+	testCases := []struct {
+		name    string
+		mutate  func(report *runtimeCoverageReport)
+		gained  runtimeCoverageFunctionDiff
+		lost    runtimeCoverageFunctionDiff
+		gainedB runtimeCoverageBlockReport
+		lostB   runtimeCoverageBlockReport
+	}{
+		{
+			name: "a function that moved line is gained and lost",
+			mutate: func(report *runtimeCoverageReport) {
+				report.ExecutedFunctions[0].Line = 11
+				report.ExecutedBlocks[0].Line = 12
+			},
+			gained:  runtimeCoverageFunctionDiff{Name: "runtime.first", File: "runtime/a.go", Line: 11},
+			lost:    runtimeCoverageFunctionDiff{Name: "runtime.first", File: "runtime/a.go", Line: 10},
+			gainedB: runtimeCoverageBlockReport{Function: "runtime.first", File: "runtime/a.go", Line: 12, Block: 1},
+			lostB:   runtimeCoverageBlockReport{Function: "runtime.first", File: "runtime/a.go", Line: 11, Block: 1},
+		},
+		{
+			name: "a function that moved file is gained and lost",
+			mutate: func(report *runtimeCoverageReport) {
+				report.ExecutedFunctions[0].File = "runtime/moved.go"
+				report.ExecutedBlocks[0].File = "runtime/moved.go"
+			},
+			gained:  runtimeCoverageFunctionDiff{Name: "runtime.first", File: "runtime/moved.go", Line: 10},
+			lost:    runtimeCoverageFunctionDiff{Name: "runtime.first", File: "runtime/a.go", Line: 10},
+			gainedB: runtimeCoverageBlockReport{Function: "runtime.first", File: "runtime/moved.go", Line: 11, Block: 1},
+			lostB:   runtimeCoverageBlockReport{Function: "runtime.first", File: "runtime/a.go", Line: 11, Block: 1},
+		},
+		{
+			name: "a different block index in the same function is gained and lost",
+			mutate: func(report *runtimeCoverageReport) {
+				report.ExecutedBlocks[0].Block = 7
+			},
+			gainedB: runtimeCoverageBlockReport{Function: "runtime.first", File: "runtime/a.go", Line: 11, Block: 7},
+			lostB:   runtimeCoverageBlockReport{Function: "runtime.first", File: "runtime/a.go", Line: 11, Block: 1},
+		},
+	}
+
+	for _, testCase := range testCases {
+		t.Run(testCase.name, func(t *testing.T) {
+			baseline := runtimeCoverageTestReport()
+			current := runtimeCoverageTestReport()
+			testCase.mutate(&current)
+
+			difference, err := compareRuntimeCoverageReports(baseline, current)
+			require.NoError(t, err)
+			if testCase.gained.Name != "" {
+				require.Equal(t, []runtimeCoverageFunctionDiff{testCase.gained}, difference.GainedFunctions)
+				require.Equal(t, []runtimeCoverageFunctionDiff{testCase.lost}, difference.LostFunctions)
+			} else {
+				require.Empty(t, difference.GainedFunctions)
+				require.Empty(t, difference.LostFunctions)
+			}
+			require.Equal(t, []runtimeCoverageBlockReport{testCase.gainedB}, difference.GainedBlocks)
+			require.Equal(t, []runtimeCoverageBlockReport{testCase.lostB}, difference.LostBlocks)
+			require.True(t, runtimeCoverageRegressed(difference))
+		})
+	}
+}
+
+func TestCompareRuntimeCoverageReportsSeparatesProgramOutcomes(t *testing.T) {
+	baseline := runtimeCoverageTestReport()
+	baseline.Programs = append(baseline.Programs,
+		runtimeCoverageProgramReport{
+			Category:        "gc",
+			Name:            "retired",
+			Expectation:     "must-pass",
+			CompileOutcome:  runtimeCoverageOutcomePassed,
+			RunOutcome:      runtimeCoverageOutcomePassed,
+			CoverageOutcome: runtimeCoverageOutcomeCollected,
+			RunAttempts:     1,
+		},
+		runtimeCoverageProgramReport{
+			Category:        "gc",
+			Name:            "known-gap",
+			Expectation:     "known-gap",
+			CompileOutcome:  runtimeCoverageOutcomePassed,
+			RunOutcome:      runtimeCoverageOutcomePassed,
+			CoverageOutcome: runtimeCoverageOutcomeCollected,
+			RunAttempts:     1,
+		},
+	)
+	baseline.Summary.Programs = len(baseline.Programs)
+	baseline.Summary.CoveredPrograms = len(baseline.Programs)
+	baseline.Summary.RunAttempts = len(baseline.Programs)
+
+	current := runtimeCoverageTestReport()
+	current.Programs[0].CompileOutcome = runtimeCoverageOutcomeFailed
+	current.Programs[0].RunOutcome = runtimeCoverageOutcomeNotRun
+	current.Programs[0].CoverageOutcome = runtimeCoverageOutcomeNotRun
+	current.Programs[0].CoverageReason = "compilation failed, so the program was never executed"
+	current.Programs[0].Error = "compile failed: exit status 2"
+	current.Programs[0].RunAttempts = 0
+	current.Programs = append(current.Programs,
+		runtimeCoverageProgramReport{
+			Category:        "gc",
+			Name:            "known-gap",
+			Expectation:     "known-gap",
+			CompileOutcome:  runtimeCoverageOutcomePassed,
+			RunOutcome:      runtimeCoverageOutcomeTimeout,
+			CoverageOutcome: runtimeCoverageOutcomeMissing,
+			CoverageReason:  "the process was killed at its 30s timeout before the coverage packet was written",
+			RunAttempts:     1,
+		},
+		runtimeCoverageProgramReport{
+			Category:        "gc",
+			Name:            "brand-new",
+			Expectation:     "must-pass",
+			CompileOutcome:  runtimeCoverageOutcomePassed,
+			RunOutcome:      runtimeCoverageOutcomeFailed,
+			CoverageOutcome: runtimeCoverageOutcomeCollected,
+			Error:           "exit status 1",
+			RunAttempts:     1,
+		},
+	)
+	current.Summary.Programs = len(current.Programs)
+	current.Summary.CoveredPrograms = 1
+	current.Summary.RunAttempts = 2
+	current.Summary.UnexpectedFailures = 2
+	current.Summary.CompileFailures = 1
+	current.Summary.RunFailures = 1
+	current.Summary.RunTimeouts = 1
+	current.Summary.MissingCoveragePrograms = 2
+
+	difference, err := compareRuntimeCoverageReports(baseline, current)
+	require.NoError(t, err)
+	require.Equal(t, []string{"scheduler/work-steal"}, difference.NewCompileFailures)
+	require.Equal(t, []string{"scheduler/work-steal"}, difference.RegressedPrograms)
+	require.Equal(t, []string{"gc/known-gap", "scheduler/work-steal"}, difference.NewMissingCoveragePrograms)
+	require.Equal(t, []string{"gc/known-gap"}, difference.NewRunTimeouts)
+	require.Equal(t, []string{"gc/brand-new"}, difference.AddedPrograms)
+	require.Equal(t, []string{"gc/retired"}, difference.RemovedPrograms)
+	require.Empty(t, difference.NewRunFailures, "a program the baseline never ran is added, not newly failing")
+	require.True(t, runtimeCoverageRegressed(difference))
+}
+
+func TestRuntimeCoverageDiffCommandReportsEachCategorySeparately(t *testing.T) {
+	directory := t.TempDir()
+	baselinePath := filepath.Join(directory, "baseline.json")
+	currentPath := filepath.Join(directory, "current.json")
+	baseline := runtimeCoverageTestReport()
+	baseline.Programs[0].CompilePeakRSSBytes = 1 << 30
+	baseline.Programs[0].RunPeakRSSBytes = 32 << 20
+	baseline.Summary.CompilePeakRSSBytes = 1 << 30
+	baseline.Summary.RunPeakRSSBytes = 32 << 20
+	current := runtimeCoverageTestReport()
+	current.Programs[0].CompilePeakRSSBytes = 2 << 30
+	current.Programs[0].RunPeakRSSBytes = 64 << 20
+	current.Summary.CompilePeakRSSBytes = 2 << 30
+	current.Summary.RunPeakRSSBytes = 64 << 20
+	writeRuntimeCoverageTestReport(t, baselinePath, baseline)
+	writeRuntimeCoverageTestReport(t, currentPath, current)
+
+	var stdout bytes.Buffer
+	var stderr bytes.Buffer
+	exitCode := runtimeCoverageDiffCommand([]string{baselinePath, currentPath}, &stdout, &stderr)
+	require.Equal(t, 0, exitCode, stderr.String())
+
+	for _, line := range []string{
+		"programs: 1 -> 1 (+0)",
+		"covered programs: 1 -> 1 (+0)",
+		"compile failures: 0 -> 0 (+0)",
+		"run failures: 0 -> 0 (+0)",
+		"run timeouts: 0 -> 0 (+0)",
+		"missing coverage packets: 0 -> 0 (+0)",
+		"skipped programs: 0 -> 0 (+0)",
+		"expected-unavailable coverage: 0 -> 0 (+0)",
+		"compile peak RSS: 1024.0 MiB -> 2048.0 MiB (+1024.0 MiB)",
+		"run peak RSS: 32.0 MiB -> 64.0 MiB (+32.0 MiB)",
+		"gained functions: 0",
+		"lost blocks: 0",
+		"added programs: 0",
+		"removed programs: 0",
+	} {
+		require.Contains(t, stdout.String(), line)
+	}
+}
+
+func TestRuntimeCoverageDiffCommandRejectsSourceDrift(t *testing.T) {
+	directory := t.TempDir()
+	baselinePath := filepath.Join(directory, "baseline.json")
+	currentPath := filepath.Join(directory, "current.json")
+	current := runtimeCoverageTestReport()
+	current.RuntimeSourceID = "a-different-copy-of-the-go-runtime"
+	writeRuntimeCoverageTestReport(t, baselinePath, runtimeCoverageTestReport())
+	writeRuntimeCoverageTestReport(t, currentPath, current)
+
+	var stdout bytes.Buffer
+	var stderr bytes.Buffer
+	exitCode := runtimeCoverageDiffCommand([]string{baselinePath, currentPath}, &stdout, &stderr)
+	require.Equal(t, 1, exitCode)
+	require.Contains(t, stderr.String(), "runtime source differs")
+	require.Empty(t, stdout.String(), "a drifted report must not produce a comparison at all")
 }
 
 func runtimeCoverageTestReport() runtimeCoverageReport {

@@ -24,6 +24,11 @@ type runtimeCapability struct {
 	note           string
 	output         string
 	requiresAFINET bool
+	// termination records how the program is meant to end. A program that
+	// deliberately terminates abnormally may lose its coverage packet, and that
+	// absence is a classified outcome instead of a collection failure.
+	termination     runtimeCapabilityTermination
+	terminationNote string
 }
 
 type runtimeCapabilityExpectation int
@@ -34,37 +39,28 @@ const (
 	runtimeCapabilityExpectedFailure
 )
 
-func TestARM64RuntimeCapabilityStatus(t *testing.T) {
-	if runtime.GOARCH != "arm64" {
-		t.Skip("AArch64 Go runtime capability status")
-	}
-	if _, err := exec.LookPath("cc"); err != nil {
-		t.Skip("cc unavailable")
-	}
-	if *runtimeCoverageRuns < 1 {
-		t.Fatalf("-runtime-coverruns must be at least 1")
-	}
-	if *runtimeCoverageProfile == "" && *runtimeCoverageRuns != 1 {
-		t.Fatalf("-runtime-coverruns requires -runtime-coverprofile")
-	}
-	if *runtimeStatusRuns < 1 {
-		t.Fatalf("-runtime-status-runs must be at least 1")
-	}
-	if *runtimeProcs < 1 {
-		t.Fatalf("-runtime-procs must be at least 1")
-	}
-	if *runtimeStatusShards < 1 {
-		t.Fatalf("-runtime-status-shards must be at least 1")
-	}
-	if *runtimeStatusShard < 0 || *runtimeStatusShard >= *runtimeStatusShards {
-		t.Fatalf("-runtime-status-shard must be in [0, %d)", *runtimeStatusShards)
-	}
+// runtimeCapabilityTermination classifies how a capability program is expected
+// to leave the process, which decides whether a missing coverage packet is a
+// collection failure or an explicitly classified absence.
+type runtimeCapabilityTermination int
 
-	directory := t.TempDir()
-	compiler := buildGOCForRuntimeCapabilityStatus(t, directory)
-	afinetSocketAvailable, afinetSocketErr := runtimeCapabilityAFINETSocketAvailable()
+const (
+	// runtimeCapabilityTerminatesNormally is the default: the program returns
+	// from main, so its coverage packet must be present.
+	runtimeCapabilityTerminatesNormally runtimeCapabilityTermination = iota
+	// runtimeCapabilityTerminatesAbnormally marks a deliberate uncaught panic,
+	// throw, or fatal subprocess path. cg12 emits the coverage dump ahead of
+	// every runtime.exit call, so these programs usually still deliver a
+	// packet; the classification records that losing one is not a defect.
+	runtimeCapabilityTerminatesAbnormally
+)
 
-	capabilities := []runtimeCapability{
+// runtimeCapabilities returns the complete Linux/ARM64 runtime capability
+// matrix. It is the single denominator for both the capability status suite and
+// the runtime coverage corpus: a coverage run reports one explicit outcome per
+// entry returned here, so the two counts can never drift apart silently.
+func runtimeCapabilities() []runtimeCapability {
+	return []runtimeCapability{
 		{
 			category:    "core-types",
 			name:        "maps-slices-interfaces",
@@ -1624,11 +1620,13 @@ func TestARM64RuntimeCapabilityStatus(t *testing.T) {
 			requiresAFINET: true,
 		},
 		{
-			category:    "defer-panic",
-			name:        "panic-string-output",
-			source:      "runtime_panic_print_string.go",
-			expectation: runtimeCapabilityExpectedFailure,
-			output:      "panic: boom",
+			category:        "defer-panic",
+			name:            "panic-string-output",
+			source:          "runtime_panic_print_string.go",
+			expectation:     runtimeCapabilityExpectedFailure,
+			output:          "panic: boom",
+			termination:     runtimeCapabilityTerminatesAbnormally,
+			terminationNote: "the program deliberately panics without recovering, so the process dies on the unwind path",
 		},
 		{
 			category:    "defer-panic",
@@ -2040,6 +2038,57 @@ func TestARM64RuntimeCapabilityStatus(t *testing.T) {
 			expectation: runtimeCapabilityMustPass,
 		},
 	}
+}
+
+func TestARM64RuntimeCapabilityStatus(t *testing.T) {
+	if *runtimeCoverageRuns < 1 {
+		t.Fatalf("-runtime-coverruns must be at least 1")
+	}
+	if *runtimeCoverageProfile == "" && *runtimeCoverageRuns != 1 {
+		t.Fatalf("-runtime-coverruns requires -runtime-coverprofile")
+	}
+	if *runtimeStatusRuns < 1 {
+		t.Fatalf("-runtime-status-runs must be at least 1")
+	}
+	if *runtimeProcs < 1 {
+		t.Fatalf("-runtime-procs must be at least 1")
+	}
+	if *runtimeStatusShards < 1 {
+		t.Fatalf("-runtime-status-shards must be at least 1")
+	}
+	if *runtimeStatusShard < 0 || *runtimeStatusShard >= *runtimeStatusShards {
+		t.Fatalf("-runtime-status-shard must be in [0, %d)", *runtimeStatusShards)
+	}
+	// A coverage report describes the whole corpus: its summary, its
+	// classification denominator, and the baseline it is compared against are
+	// corpus-wide. A shard runs only part of the matrix and there is no report
+	// merge, so a sharded coverage run would publish a fraction of the corpus
+	// as though it were complete.
+	if *runtimeCoverageProfile != "" && *runtimeStatusShards != 1 {
+		t.Fatalf("-runtime-coverprofile requires an unsharded run, but -runtime-status-shards is %d", *runtimeStatusShards)
+	}
+	// A skipped matrix writes no report at all, which is indistinguishable from
+	// a report that lost every program. Asking for coverage in an environment
+	// that cannot run the corpus is an error rather than a skip.
+	if runtime.GOARCH != "arm64" {
+		if *runtimeCoverageProfile != "" {
+			t.Fatalf("-runtime-coverprofile requires arm64, but this host is %s", runtime.GOARCH)
+		}
+		t.Skip("AArch64 Go runtime capability status")
+	}
+	if _, err := exec.LookPath("cc"); err != nil {
+		if *runtimeCoverageProfile != "" {
+			t.Fatalf("-runtime-coverprofile requires a system cc: %v", err)
+		}
+		t.Skip("cc unavailable")
+	}
+
+	directory := t.TempDir()
+	compiler := buildGOCForRuntimeCapabilityStatus(t, directory)
+	afinetSocketAvailable, afinetSocketErr := runtimeCapabilityAFINETSocketAvailable()
+
+	capabilities := runtimeCapabilities()
+	runtimeCoverageCollector.expect(capabilities)
 
 	for index, capability := range capabilities {
 		capability := capability
@@ -2052,7 +2101,12 @@ func TestARM64RuntimeCapabilityStatus(t *testing.T) {
 		}
 		t.Run(capability.category+"/"+capability.name, func(t *testing.T) {
 			if capability.requiresAFINET && !afinetSocketAvailable {
-				t.Skipf("AF_INET sockets unavailable in this execution environment: %v", afinetSocketErr)
+				// A skipped capability still owns a row in the coverage report.
+				// Dropping it here would shrink the corpus denominator without
+				// anything recording that it had.
+				reason := fmt.Sprintf("AF_INET sockets unavailable in this execution environment: %v", afinetSocketErr)
+				runtimeCoverageCollector.add(capability, skippedRuntimeCapabilityResult(reason))
+				t.Skip(reason)
 			}
 			if *runtimeStatusProgress {
 				fmt.Fprintf(os.Stderr, "runtime-status: start %s/%s %s\n", capability.category, capability.name, capability.source)
@@ -2138,12 +2192,30 @@ type runtimeCapabilityResult struct {
 	compileOutcome  string
 	runOutcome      string
 	coverageOutcome string
+	// coverageReason names why no coverage packet was collected. Every outcome
+	// other than runtimeCoverageOutcomeCollected carries one, so an absent
+	// packet is always an explanation rather than an absence.
+	coverageReason  string
+	skipReason      string
 	coverageErr     error
 	compileDuration time.Duration
 	compilePeakRSS  uint64
 	runDuration     time.Duration
 	runPeakRSS      uint64
 	runAttempts     int
+}
+
+// skippedRuntimeCapabilityResult records a capability the environment could not
+// run. It keeps the program in the corpus denominator with an explicit,
+// self-describing outcome instead of removing it from the report.
+func skippedRuntimeCapabilityResult(reason string) runtimeCapabilityResult {
+	return runtimeCapabilityResult{
+		compileOutcome:  runtimeCoverageOutcomeSkipped,
+		runOutcome:      runtimeCoverageOutcomeSkipped,
+		coverageOutcome: runtimeCoverageOutcomeSkipped,
+		coverageReason:  reason,
+		skipReason:      reason,
+	}
 }
 
 func buildGOCForRuntimeCapabilityStatus(t *testing.T, directory string) string {
@@ -2191,9 +2263,10 @@ func runRuntimeCapabilityProgram(t *testing.T, compiler string, directory string
 		return runtimeCapabilityResult{
 			output:          string(compileOutput),
 			err:             errors.New("compile failed: " + compileErr.Error()),
-			compileOutcome:  "failed",
-			runOutcome:      "not-run",
-			coverageOutcome: "not-run",
+			compileOutcome:  runtimeCoverageOutcomeFailed,
+			runOutcome:      runtimeCoverageOutcomeNotRun,
+			coverageOutcome: runtimeCoverageOutcomeNotRun,
+			coverageReason:  "compilation failed, so the program was never executed",
 			compileDuration: compileDuration,
 			compilePeakRSS:  compilePeakRSS,
 		}
@@ -2212,8 +2285,9 @@ func runRuntimeCapabilityProgram(t *testing.T, compiler string, directory string
 	var err error
 	var coverageResult *runtimeCapabilityCoverageResult
 	var coverageErr error
-	coverageOutcome := "not-requested"
-	runOutcome := "passed"
+	coverageOutcome := runtimeCoverageOutcomeNotRequested
+	coverageReason := "the run did not request runtime coverage"
+	runOutcome := runtimeCoverageOutcomePassed
 	var runDuration time.Duration
 	var runPeakRSS uint64
 	runAttempts := 0
@@ -2228,29 +2302,26 @@ func runRuntimeCapabilityProgram(t *testing.T, compiler string, directory string
 		runPeakRSS = max(runPeakRSS, runtimeCapabilityPeakRSS(run))
 		if ctx.Err() != nil {
 			attemptErr = ctx.Err()
-			runOutcome = "timeout"
+			runOutcome = runtimeCoverageOutcomeTimeout
 		} else if attemptErr != nil {
-			runOutcome = "failed"
+			runOutcome = runtimeCoverageOutcomeFailed
 		}
 		cancel()
 
 		if metadata != "" {
 			var attemptCoverage *runtimeCapabilityCoverageResult
 			attemptCoverage, attemptOutput, coverageErr = readRuntimeCapabilityCoverage(metadata, attemptOutput)
+			if coverageErr == nil {
+				coverageErr = mergeRuntimeCapabilityCoverage(&coverageResult, attemptCoverage)
+			}
 			if coverageErr != nil {
-				coverageOutcome = "missing"
+				coverageOutcome, coverageReason = missingRuntimeCoverageOutcome(capability, runOutcome, timeout, coverageErr)
 				if attemptErr == nil {
 					attemptErr = coverageErr
 				}
 			} else {
-				coverageOutcome = "collected"
-				coverageErr = mergeRuntimeCapabilityCoverage(&coverageResult, attemptCoverage)
-				if coverageErr != nil {
-					coverageOutcome = "missing"
-					if attemptErr == nil {
-						attemptErr = coverageErr
-					}
-				}
+				coverageOutcome = runtimeCoverageOutcomeCollected
+				coverageReason = ""
 			}
 		}
 		output = attemptOutput
@@ -2264,9 +2335,10 @@ func runRuntimeCapabilityProgram(t *testing.T, compiler string, directory string
 		output:          string(bytes.TrimSpace(output)),
 		err:             err,
 		coverage:        coverageResult,
-		compileOutcome:  "passed",
+		compileOutcome:  runtimeCoverageOutcomePassed,
 		runOutcome:      runOutcome,
 		coverageOutcome: coverageOutcome,
+		coverageReason:  coverageReason,
 		coverageErr:     coverageErr,
 		compileDuration: compileDuration,
 		compilePeakRSS:  compilePeakRSS,
@@ -2274,6 +2346,32 @@ func runRuntimeCapabilityProgram(t *testing.T, compiler string, directory string
 		runPeakRSS:      runPeakRSS,
 		runAttempts:     runAttempts,
 	}
+}
+
+// missingRuntimeCoverageOutcome names the absent packet. A program that is
+// meant to terminate abnormally is classified rather than reported as a
+// collection failure, which is what RUNTIME_PLAN.md section 2 point 4 requires;
+// every other absence keeps the failing outcome and says how the process ended.
+func missingRuntimeCoverageOutcome(
+	capability runtimeCapability,
+	runOutcome string,
+	timeout time.Duration,
+	coverageErr error,
+) (string, string) {
+	if capability.termination == runtimeCapabilityTerminatesAbnormally {
+		reason := capability.terminationNote
+		if reason == "" {
+			reason = "the program is classified as terminating abnormally"
+		}
+		return runtimeCoverageOutcomeExpectedUnavailable, reason
+	}
+	if runOutcome == runtimeCoverageOutcomeTimeout {
+		return runtimeCoverageOutcomeMissing, fmt.Sprintf(
+			"the process was killed at its %s timeout before the coverage packet was written",
+			timeout,
+		)
+	}
+	return runtimeCoverageOutcomeMissing, coverageErr.Error()
 }
 
 func mergeRuntimeCapabilityCoverage(

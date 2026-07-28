@@ -19,6 +19,35 @@ const (
 	runtimeCoverageReportBaseline = "baseline"
 )
 
+// Compile, run, and coverage outcome names. Every corpus program reports one
+// name per stage, so a program that never produced coverage is always visible
+// as a named outcome rather than as a missing row.
+const (
+	runtimeCoverageOutcomePassed  = "passed"
+	runtimeCoverageOutcomeFailed  = "failed"
+	runtimeCoverageOutcomeTimeout = "timeout"
+	runtimeCoverageOutcomeNotRun  = "not-run"
+	// runtimeCoverageOutcomeSkipped marks a capability this execution
+	// environment could not run, such as a network test without AF_INET
+	// sockets. The program stays in the denominator with a recorded reason.
+	runtimeCoverageOutcomeSkipped = "skipped"
+
+	runtimeCoverageOutcomeCollected = "collected"
+	runtimeCoverageOutcomeMissing   = "missing"
+	// runtimeCoverageOutcomeExpectedUnavailable marks a program that the matrix
+	// classifies as terminating abnormally by design, so losing its coverage
+	// packet is a classified absence and not a collection failure.
+	runtimeCoverageOutcomeExpectedUnavailable = "expected-unavailable"
+	runtimeCoverageOutcomeNotRequested        = "not-requested"
+)
+
+// Program termination classifications. The empty string is the ordinary case of
+// a program that returns from main.
+const (
+	runtimeCoverageTerminationNormal   = ""
+	runtimeCoverageTerminationAbnormal = "abnormal"
+)
+
 type runtimeCoverageReport struct {
 	Version           int                              `json:"version"`
 	Kind              string                           `json:"kind"`
@@ -54,11 +83,22 @@ type runtimeCoverageSummary struct {
 	RunFailures                int     `json:"run_failures"`
 	RunTimeouts                int     `json:"run_timeouts"`
 	MissingCoveragePrograms    int     `json:"missing_coverage_programs"`
-	CompileMilliseconds        int64   `json:"compile_milliseconds"`
-	CompilePeakRSSBytes        uint64  `json:"compile_peak_rss_bytes"`
-	RunMilliseconds            int64   `json:"run_milliseconds"`
-	RunPeakRSSBytes            uint64  `json:"run_peak_rss_bytes"`
-	RunAttempts                int     `json:"run_attempts"`
+	// MatrixCapabilities is the size of the capability matrix the run was
+	// generated from. It reconciles the corpus denominator with the matrix: a
+	// full report must hold one program per capability. Reports produced before
+	// the denominators were reconciled leave it zero, and are validated under
+	// the earlier rules.
+	MatrixCapabilities int `json:"matrix_capabilities,omitempty"`
+	// SkippedPrograms counts capabilities this environment could not run.
+	SkippedPrograms int `json:"skipped_programs,omitempty"`
+	// ExpectedUnavailableCoveragePrograms counts programs whose missing packet
+	// is explained by a declared abnormal termination.
+	ExpectedUnavailableCoveragePrograms int    `json:"expected_unavailable_coverage_programs,omitempty"`
+	CompileMilliseconds                 int64  `json:"compile_milliseconds"`
+	CompilePeakRSSBytes                 uint64 `json:"compile_peak_rss_bytes"`
+	RunMilliseconds                     int64  `json:"run_milliseconds"`
+	RunPeakRSSBytes                     uint64 `json:"run_peak_rss_bytes"`
+	RunAttempts                         int    `json:"run_attempts"`
 }
 
 type runtimeCoverageCategoryReport struct {
@@ -77,6 +117,7 @@ type runtimeCoverageCategoryReport struct {
 	RunFailures             int     `json:"run_failures"`
 	RunTimeouts             int     `json:"run_timeouts"`
 	MissingCoveragePrograms int     `json:"missing_coverage_programs"`
+	SkippedPrograms         int     `json:"skipped_programs,omitempty"`
 	CompileMilliseconds     int64   `json:"compile_milliseconds"`
 	CompilePeakRSSBytes     uint64  `json:"compile_peak_rss_bytes"`
 	RunMilliseconds         int64   `json:"run_milliseconds"`
@@ -110,13 +151,20 @@ type runtimeCoverageBlockReport struct {
 }
 
 type runtimeCoverageProgramReport struct {
-	Category            string `json:"category"`
-	Name                string `json:"name"`
-	Source              string `json:"source"`
-	Expectation         string `json:"expectation"`
-	CompileOutcome      string `json:"compile_outcome"`
-	RunOutcome          string `json:"run_outcome"`
-	CoverageOutcome     string `json:"coverage_outcome"`
+	Category        string `json:"category"`
+	Name            string `json:"name"`
+	Source          string `json:"source"`
+	Expectation     string `json:"expectation"`
+	CompileOutcome  string `json:"compile_outcome"`
+	RunOutcome      string `json:"run_outcome"`
+	CoverageOutcome string `json:"coverage_outcome"`
+	// Termination is the matrix classification of how the program ends. It is
+	// empty for the ordinary case of returning from main.
+	Termination string `json:"termination,omitempty"`
+	// CoverageReason explains any coverage outcome other than "collected". The
+	// collector always fills it in, so an absent packet is never unexplained.
+	CoverageReason      string `json:"coverage_reason,omitempty"`
+	SkipReason          string `json:"skip_reason,omitempty"`
 	Error               string `json:"error,omitempty"`
 	CoverageError       string `json:"coverage_error,omitempty"`
 	Output              string `json:"output,omitempty"`
@@ -297,6 +345,14 @@ type runtimeCoverageDiff struct {
 	RecoveredPrograms          []string                      `json:"recovered_programs"`
 	RegressedPrograms          []string                      `json:"regressed_programs"`
 	NewMissingCoveragePrograms []string                      `json:"new_missing_coverage_programs"`
+	NewCompileFailures         []string                      `json:"new_compile_failures"`
+	NewRunFailures             []string                      `json:"new_run_failures"`
+	NewRunTimeouts             []string                      `json:"new_run_timeouts"`
+	// AddedPrograms and RemovedPrograms make a denominator change explicit.
+	// Without them a report compared against a stale baseline silently ignores
+	// every capability the baseline never ran.
+	AddedPrograms   []string `json:"added_programs"`
+	RemovedPrograms []string `json:"removed_programs"`
 }
 
 type runtimeCoverageFunctionDiff struct {
@@ -368,6 +424,7 @@ func compareRuntimeCoverageReports(baseline, current runtimeCoverageReport) (run
 	for name, currentProgram := range currentPrograms {
 		baselineProgram, found := baselinePrograms[name]
 		if !found {
+			difference.AddedPrograms = append(difference.AddedPrograms, name)
 			continue
 		}
 		baselineFailed := runtimeCoverageProgramFailed(baselineProgram)
@@ -378,8 +435,26 @@ func compareRuntimeCoverageReports(baseline, current runtimeCoverageReport) (run
 		if !baselineFailed && currentFailed {
 			difference.RegressedPrograms = append(difference.RegressedPrograms, name)
 		}
-		if baselineProgram.CoverageOutcome == "collected" && currentProgram.CoverageOutcome != "collected" {
+		if baselineProgram.CoverageOutcome == runtimeCoverageOutcomeCollected &&
+			currentProgram.CoverageOutcome != runtimeCoverageOutcomeCollected {
 			difference.NewMissingCoveragePrograms = append(difference.NewMissingCoveragePrograms, name)
+		}
+		if baselineProgram.CompileOutcome != runtimeCoverageOutcomeFailed &&
+			currentProgram.CompileOutcome == runtimeCoverageOutcomeFailed {
+			difference.NewCompileFailures = append(difference.NewCompileFailures, name)
+		}
+		if baselineProgram.RunOutcome != runtimeCoverageOutcomeFailed &&
+			currentProgram.RunOutcome == runtimeCoverageOutcomeFailed {
+			difference.NewRunFailures = append(difference.NewRunFailures, name)
+		}
+		if baselineProgram.RunOutcome != runtimeCoverageOutcomeTimeout &&
+			currentProgram.RunOutcome == runtimeCoverageOutcomeTimeout {
+			difference.NewRunTimeouts = append(difference.NewRunTimeouts, name)
+		}
+	}
+	for name := range baselinePrograms {
+		if _, found := currentPrograms[name]; !found {
+			difference.RemovedPrograms = append(difference.RemovedPrograms, name)
 		}
 	}
 
@@ -413,6 +488,8 @@ func validateRuntimeCoverageReport(report runtimeCoverageReport) error {
 	runFailures := 0
 	runTimeouts := 0
 	missingCoveragePrograms := 0
+	skippedPrograms := 0
+	expectedUnavailableCoveragePrograms := 0
 	var compileMilliseconds int64
 	var compilePeakRSSBytes uint64
 	var runMilliseconds int64
@@ -422,21 +499,27 @@ func validateRuntimeCoverageReport(report runtimeCoverageReport) error {
 		if err := validateRuntimeCoverageProgram(program); err != nil {
 			return fmt.Errorf("program %s: %w", runtimeCoverageProgramName(program), err)
 		}
-		if program.CoverageOutcome == "collected" {
+		if program.CoverageOutcome == runtimeCoverageOutcomeCollected {
 			coveredPrograms++
 		} else {
 			missingCoveragePrograms++
 		}
+		if program.CoverageOutcome == runtimeCoverageOutcomeExpectedUnavailable {
+			expectedUnavailableCoveragePrograms++
+		}
 		if runtimeCoverageProgramFailed(program) {
 			unexpectedFailures++
 		}
-		if program.CompileOutcome == "failed" {
+		if program.CompileOutcome == runtimeCoverageOutcomeFailed {
 			compileFailures++
 		}
-		if program.RunOutcome == "failed" {
+		if program.CompileOutcome == runtimeCoverageOutcomeSkipped {
+			skippedPrograms++
+		}
+		if program.RunOutcome == runtimeCoverageOutcomeFailed {
 			runFailures++
 		}
-		if program.RunOutcome == "timeout" {
+		if program.RunOutcome == runtimeCoverageOutcomeTimeout {
 			runTimeouts++
 		}
 		compileMilliseconds += program.CompileMilliseconds
@@ -474,6 +557,35 @@ func validateRuntimeCoverageReport(report runtimeCoverageReport) error {
 			report.Summary.MissingCoveragePrograms,
 			missingCoveragePrograms,
 		)
+	}
+	if report.Summary.SkippedPrograms != skippedPrograms {
+		return fmt.Errorf(
+			"skipped program count is %d, but report contains %d skipped programs",
+			report.Summary.SkippedPrograms,
+			skippedPrograms,
+		)
+	}
+	if report.Summary.ExpectedUnavailableCoveragePrograms != expectedUnavailableCoveragePrograms {
+		return fmt.Errorf(
+			"expected-unavailable coverage count is %d, but report contains %d such programs",
+			report.Summary.ExpectedUnavailableCoveragePrograms,
+			expectedUnavailableCoveragePrograms,
+		)
+	}
+	// MatrixCapabilities reconciles the corpus with the capability matrix. It is
+	// absent from reports generated before the reconciliation, which are still
+	// readable; when present, every capability must own exactly one program row.
+	if report.Summary.MatrixCapabilities != 0 {
+		if report.Summary.MatrixCapabilities != len(report.Programs) {
+			return fmt.Errorf(
+				"matrix holds %d capabilities, but report contains %d programs",
+				report.Summary.MatrixCapabilities,
+				len(report.Programs),
+			)
+		}
+		if err := validateRuntimeCoverageProgramReasons(report); err != nil {
+			return err
+		}
 	}
 	if report.Summary.CompileMilliseconds != compileMilliseconds || report.Summary.CompilePeakRSSBytes != compilePeakRSSBytes {
 		return errors.New("compile resource summary does not match program measurements")
@@ -569,32 +681,74 @@ func validateFullRuntimeCoverageInventory(report runtimeCoverageReport) error {
 
 func validateRuntimeCoverageProgram(program runtimeCoverageProgramReport) error {
 	switch program.CompileOutcome {
-	case "passed":
-		if program.RunOutcome == "not-run" {
+	case runtimeCoverageOutcomePassed:
+		if program.RunOutcome == runtimeCoverageOutcomeNotRun {
 			return errors.New("successful compilation has a not-run execution outcome")
 		}
 		if program.RunAttempts < 1 {
 			return errors.New("successful compilation has no run attempts")
 		}
-	case "failed":
-		if program.RunOutcome != "not-run" || program.CoverageOutcome != "not-run" {
+	case runtimeCoverageOutcomeFailed:
+		if program.RunOutcome != runtimeCoverageOutcomeNotRun || program.CoverageOutcome != runtimeCoverageOutcomeNotRun {
 			return errors.New("failed compilation must have not-run execution and coverage outcomes")
 		}
 		if program.RunAttempts != 0 {
 			return errors.New("failed compilation has run attempts")
 		}
+	case runtimeCoverageOutcomeSkipped:
+		if program.RunOutcome != runtimeCoverageOutcomeSkipped || program.CoverageOutcome != runtimeCoverageOutcomeSkipped {
+			return errors.New("a skipped capability must have skipped execution and coverage outcomes")
+		}
+		if program.RunAttempts != 0 {
+			return errors.New("skipped capability has run attempts")
+		}
+		if program.SkipReason == "" {
+			return errors.New("skipped capability has no recorded skip reason")
+		}
 	default:
 		return fmt.Errorf("invalid compile outcome %q", program.CompileOutcome)
 	}
 	switch program.RunOutcome {
-	case "passed", "failed", "timeout", "not-run":
+	case runtimeCoverageOutcomePassed,
+		runtimeCoverageOutcomeFailed,
+		runtimeCoverageOutcomeTimeout,
+		runtimeCoverageOutcomeNotRun,
+		runtimeCoverageOutcomeSkipped:
 	default:
 		return fmt.Errorf("invalid run outcome %q", program.RunOutcome)
 	}
 	switch program.CoverageOutcome {
-	case "collected", "missing", "not-run":
+	case runtimeCoverageOutcomeCollected,
+		runtimeCoverageOutcomeMissing,
+		runtimeCoverageOutcomeExpectedUnavailable,
+		runtimeCoverageOutcomeNotRun,
+		runtimeCoverageOutcomeSkipped:
 	default:
 		return fmt.Errorf("invalid coverage outcome %q", program.CoverageOutcome)
+	}
+	if program.CoverageOutcome == runtimeCoverageOutcomeExpectedUnavailable &&
+		program.Termination != runtimeCoverageTerminationAbnormal {
+		return errors.New("coverage is expected-unavailable without a declared abnormal termination")
+	}
+	return nil
+}
+
+// validateRuntimeCoverageProgramReasons enforces the rule that no program may
+// report a missing packet without saying why. It applies to reports produced
+// after the corpus denominator was reconciled; the accepted 2026-07-22 baseline
+// predates the reason field and is validated without it.
+func validateRuntimeCoverageProgramReasons(report runtimeCoverageReport) error {
+	for _, program := range report.Programs {
+		if program.CoverageOutcome == runtimeCoverageOutcomeCollected {
+			continue
+		}
+		if program.CoverageReason == "" {
+			return fmt.Errorf(
+				"program %s has coverage outcome %q without a recorded reason",
+				runtimeCoverageProgramName(program),
+				program.CoverageOutcome,
+			)
+		}
 	}
 	return nil
 }
@@ -647,6 +801,11 @@ func sortRuntimeCoverageDiff(difference *runtimeCoverageDiff) {
 	sort.Strings(difference.RecoveredPrograms)
 	sort.Strings(difference.RegressedPrograms)
 	sort.Strings(difference.NewMissingCoveragePrograms)
+	sort.Strings(difference.NewCompileFailures)
+	sort.Strings(difference.NewRunFailures)
+	sort.Strings(difference.NewRunTimeouts)
+	sort.Strings(difference.AddedPrograms)
+	sort.Strings(difference.RemovedPrograms)
 }
 
 func runtimeCoverageFunctionDiffLess(left, right runtimeCoverageFunctionDiff) bool {
@@ -762,6 +921,41 @@ func runtimeCoverageBaselineCommand(arguments []string, stderr io.Writer) int {
 	return 0
 }
 
+// runtimeCoverageBaselinePending records the capabilities the accepted baseline
+// does not cover. The capability matrix is the corpus denominator, so any
+// capability absent from the baseline needs a written reason; the reconciliation
+// test compares this file against the matrix and the baseline so the two
+// denominators cannot drift apart unnoticed.
+type runtimeCoverageBaselinePending struct {
+	Version      int                                   `json:"version"`
+	Baseline     string                                `json:"baseline"`
+	Note         string                                `json:"note"`
+	Capabilities []runtimeCoverageBaselinePendingEntry `json:"capabilities"`
+}
+
+type runtimeCoverageBaselinePendingEntry struct {
+	Capability string `json:"capability"`
+	Reason     string `json:"reason"`
+}
+
+func readRuntimeCoverageBaselinePending(filename string) (runtimeCoverageBaselinePending, error) {
+	content, err := os.ReadFile(filename)
+	if err != nil {
+		return runtimeCoverageBaselinePending{}, fmt.Errorf("read runtime coverage baseline reconciliation %s: %w", filename, err)
+	}
+	var pending runtimeCoverageBaselinePending
+	if err := json.Unmarshal(content, &pending); err != nil {
+		return runtimeCoverageBaselinePending{}, fmt.Errorf("decode runtime coverage baseline reconciliation %s: %w", filename, err)
+	}
+	if pending.Version != 1 {
+		return runtimeCoverageBaselinePending{}, fmt.Errorf(
+			"runtime coverage baseline reconciliation version is %d, want 1",
+			pending.Version,
+		)
+	}
+	return pending, nil
+}
+
 func readRuntimeCoverageReport(filename string) (runtimeCoverageReport, error) {
 	content, err := os.ReadFile(filename)
 	if err != nil {
@@ -808,10 +1002,27 @@ func writeRuntimeCoverageReport(filename string, report runtimeCoverageReport) e
 
 func writeRuntimeCoverageDiff(output io.Writer, difference runtimeCoverageDiff) {
 	fmt.Fprintf(output, "runtime coverage %s/%s source %s\n", difference.GOOS, difference.GOARCH, difference.RuntimeSourceID)
+	writeRuntimeCoverageMetric(output, "programs", difference.Baseline.Programs, difference.Current.Programs)
 	writeRuntimeCoverageMetric(output, "covered programs", difference.Baseline.CoveredPrograms, difference.Current.CoveredPrograms)
 	writeRuntimeCoverageMetric(output, "executed functions", difference.Baseline.ExecutedFunctions, difference.Current.ExecutedFunctions)
 	writeRuntimeCoverageMetric(output, "executed blocks", difference.Baseline.ExecutedBlocks, difference.Current.ExecutedBlocks)
 	writeRuntimeCoverageMetric(output, "unexpected failures", difference.Baseline.UnexpectedFailures, difference.Current.UnexpectedFailures)
+	writeRuntimeCoverageMetric(output, "compile failures", difference.Baseline.CompileFailures, difference.Current.CompileFailures)
+	writeRuntimeCoverageMetric(output, "run failures", difference.Baseline.RunFailures, difference.Current.RunFailures)
+	writeRuntimeCoverageMetric(output, "run timeouts", difference.Baseline.RunTimeouts, difference.Current.RunTimeouts)
+	writeRuntimeCoverageMetric(
+		output,
+		"missing coverage packets",
+		difference.Baseline.MissingCoveragePrograms,
+		difference.Current.MissingCoveragePrograms,
+	)
+	writeRuntimeCoverageMetric(output, "skipped programs", difference.Baseline.SkippedPrograms, difference.Current.SkippedPrograms)
+	writeRuntimeCoverageMetric(
+		output,
+		"expected-unavailable coverage",
+		difference.Baseline.ExpectedUnavailableCoveragePrograms,
+		difference.Current.ExpectedUnavailableCoveragePrograms,
+	)
 	writeRuntimeCoverageDuration(output, "compile milliseconds", difference.Baseline.CompileMilliseconds, difference.Current.CompileMilliseconds)
 	writeRuntimeCoverageBytes(output, "compile peak RSS", difference.Baseline.CompilePeakRSSBytes, difference.Current.CompilePeakRSSBytes)
 	writeRuntimeCoverageDuration(output, "run milliseconds", difference.Baseline.RunMilliseconds, difference.Current.RunMilliseconds)
@@ -823,11 +1034,26 @@ func writeRuntimeCoverageDiff(output io.Writer, difference runtimeCoverageDiff) 
 	fmt.Fprintf(output, "recovered programs: %d\n", len(difference.RecoveredPrograms))
 	fmt.Fprintf(output, "regressed programs: %d\n", len(difference.RegressedPrograms))
 	fmt.Fprintf(output, "new missing coverage programs: %d\n", len(difference.NewMissingCoveragePrograms))
-	for _, program := range difference.RegressedPrograms {
-		fmt.Fprintf(output, "  regressed: %s\n", program)
-	}
+	fmt.Fprintf(output, "new compile failures: %d\n", len(difference.NewCompileFailures))
+	fmt.Fprintf(output, "new run failures: %d\n", len(difference.NewRunFailures))
+	fmt.Fprintf(output, "new run timeouts: %d\n", len(difference.NewRunTimeouts))
+	fmt.Fprintf(output, "added programs: %d\n", len(difference.AddedPrograms))
+	fmt.Fprintf(output, "removed programs: %d\n", len(difference.RemovedPrograms))
+	writeRuntimeCoverageProgramList(output, "regressed", difference.RegressedPrograms)
+	writeRuntimeCoverageProgramList(output, "new missing coverage", difference.NewMissingCoveragePrograms)
+	writeRuntimeCoverageProgramList(output, "new compile failure", difference.NewCompileFailures)
+	writeRuntimeCoverageProgramList(output, "new run failure", difference.NewRunFailures)
+	writeRuntimeCoverageProgramList(output, "new run timeout", difference.NewRunTimeouts)
+	writeRuntimeCoverageProgramList(output, "added", difference.AddedPrograms)
+	writeRuntimeCoverageProgramList(output, "removed", difference.RemovedPrograms)
 	for _, function := range difference.LostFunctions {
 		fmt.Fprintf(output, "  lost function: %s (%s:%d)\n", function.Name, function.File, function.Line)
+	}
+}
+
+func writeRuntimeCoverageProgramList(output io.Writer, label string, programs []string) {
+	for _, program := range programs {
+		fmt.Fprintf(output, "  %s: %s\n", label, program)
 	}
 }
 
@@ -851,9 +1077,16 @@ func writeRuntimeCoverageBytes(output io.Writer, name string, baseline, current 
 	)
 }
 
+// runtimeCoverageRegressed reports whether the current run is worse than the
+// baseline. Losing a program outright is deliberately not a regression: a
+// capability can be renamed or retired on purpose, and the removed-program list
+// makes that visible to the reviewer instead.
 func runtimeCoverageRegressed(difference runtimeCoverageDiff) bool {
 	return len(difference.LostFunctions) > 0 ||
 		len(difference.LostBlocks) > 0 ||
 		len(difference.RegressedPrograms) > 0 ||
-		len(difference.NewMissingCoveragePrograms) > 0
+		len(difference.NewMissingCoveragePrograms) > 0 ||
+		len(difference.NewCompileFailures) > 0 ||
+		len(difference.NewRunFailures) > 0 ||
+		len(difference.NewRunTimeouts) > 0
 }
