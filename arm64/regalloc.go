@@ -109,6 +109,8 @@ func regAlloc(f *ir.Func) (*allocation, error) {
 // root.
 func computeSafepointRoots(f *ir.Func, cfg *analysis.CFG, liveness *analysis.Liveness) map[*ir.Instr][]int {
 	roots := map[*ir.Instr][]int{}
+	allocationOf, mergedAllocations := pointerAllocationSources(f)
+	escaping := frameEscapingAllocations(f, allocationOf, mergedAllocations)
 	for _, block := range cfg.RPO {
 		live := liveness.LiveOut(block).Copy()
 		live.AddRef(block.Jmp.Arg)
@@ -132,19 +134,21 @@ func computeSafepointRoots(f *ir.Func, cfg *analysis.CFG, liveness *analysis.Liv
 			}
 
 			if instruction.Op == ir.OCall || instruction.Op == ir.OSafepoint {
-				var managed []int
+				recorded := map[int]bool{}
+				for allocation := range escaping {
+					recorded[allocation] = true
+				}
 				for _, temporary := range live.Members() {
-					// A root is a live managed pointer, identified purely by value
-					// via GCRef -- the register allocator needs no knowledge of the
-					// calling convention. A copying-stack frontend (goc) marks every
-					// pointer that must survive stack growth; a fixed-stack C/Ruby
-					// frontend marks only its genuine heap references. A pointer that
-					// is instead rematerialized (a frame address recomputed from the
-					// runtime-updated frame pointer) is not live here and correctly
-					// contributes no root.
-					if f.Temps[temporary].GCRef {
-						managed = append(managed, temporary)
+					if isSafepointRoot(f, temporary) {
+						recorded[temporary] = true
 					}
+					if allocation, derived := allocationOf[temporary]; derived {
+						recorded[allocation] = true
+					}
+				}
+				managed := make([]int, 0, len(recorded))
+				for temporary := range recorded {
+					managed = append(managed, temporary)
 				}
 				sort.Ints(managed)
 				roots[instruction] = managed
@@ -159,6 +163,262 @@ func computeSafepointRoots(f *ir.Func, cfg *analysis.CFG, liveness *analysis.Liv
 		}
 	}
 	return roots
+}
+
+// isSafepointRoot reports whether a live temporary has to be described at a
+// safepoint.
+//
+// A root is a live managed pointer, identified purely by value via GCRef -- the
+// register allocator needs no knowledge of the calling convention. A
+// copying-stack frontend (goc) marks every pointer that must survive stack
+// growth; a fixed-stack C/Ruby frontend marks only its genuine heap references.
+// A pointer that is instead rematerialized (a frame address recomputed from the
+// runtime-updated frame pointer) is not live here and correctly contributes no
+// root.
+//
+// A managed frame adds a second class: any live pointer-class temporary, managed
+// or not. Its spill slot can hold an interior stack address -- the address of a
+// local -- and the runtime has to relocate that word when it copies the stack,
+// which it only does for words the frame's map marks at the safepoint the copy
+// unwinds through. Before per-safepoint maps became precise these words were
+// covered by the function-wide conservative map instead; describing them per
+// safepoint is what lets that map stop being unioned into every safepoint. A
+// fixed C/Ruby stack never moves, so there raw pointers stay out of the root set
+// and remain freely optimizable.
+func isSafepointRoot(f *ir.Func, temporary int) bool {
+	if f.Temps[temporary].GCRef {
+		return true
+	}
+	return f.UsesManagedFrame() && f.Temps[temporary].Cls == ir.ClsP
+}
+
+// pointerAllocationSources maps every temporary that is a constant offset from a
+// pointer-bearing stack allocation to that allocation's own temporary.
+//
+// cg12 has no notion of a source-level variable, so it approximates the liveness
+// of an address-taken local by the liveness of the temporary holding the
+// allocation's address. That is what lets a safepoint report only the locals
+// still in use. The approximation breaks when a derived address -- `&local.field`
+// computed once and then reused -- outlives the base temporary: the local's
+// pointer words would go unscanned while code can still reach them through the
+// derived address. Reporting the allocation wherever any address into it is live
+// restores the property the approximation needs.
+//
+// The result is always a subset of what the function-wide conservative map
+// described, so it can never introduce a word the collector should not read.
+// Only pointer-bearing allocations on a managed frame matter; elsewhere the map
+// is empty.
+func pointerAllocationSources(f *ir.Func) (map[int]int, map[int]bool) {
+	if !f.UsesManagedFrame() || len(f.StackPointerWords) == 0 {
+		return nil, nil
+	}
+
+	type derivation struct {
+		base   uint32
+		result uint32
+	}
+	allocations := make(map[uint32]bool)
+	var derivations []derivation
+
+	for _, block := range f.Blocks {
+		for index := range block.Instrs {
+			instruction := &block.Instrs[index]
+			if instruction.To.Kind != ir.RefTemp {
+				continue
+			}
+			if instruction.Op.IsAlloc() {
+				if len(f.StackPointerWords[instruction.To.ID]) > 0 {
+					allocations[instruction.To.ID] = true
+				}
+				continue
+			}
+			base, derived := constantOffsetBase(f, instruction)
+			if !derived {
+				continue
+			}
+			derivations = append(derivations, derivation{base: base, result: instruction.To.ID})
+		}
+	}
+
+	// SSA destruction turns a phi into one copy per edge, so a temporary with
+	// several definitions can name a different allocation on each. That is still
+	// trackable while every definition agrees; where they disagree the address
+	// has been merged beyond what a single mapping can express, and both
+	// allocations are reported as merged so the caller can fall back to
+	// conservative treatment.
+	dependents := make(map[uint32][]uint32)
+	for _, entry := range derivations {
+		dependents[entry.base] = append(dependents[entry.base], entry.result)
+	}
+
+	sources := make(map[int]int, len(allocations))
+	merged := make(map[int]bool)
+	pending := make([]uint32, 0, len(allocations))
+	for allocation := range allocations {
+		sources[int(allocation)] = int(allocation)
+		pending = append(pending, allocation)
+	}
+	for next := 0; next < len(pending); next++ {
+		base := pending[next]
+		for _, result := range dependents[base] {
+			source := sources[int(base)]
+			existing, known := sources[int(result)]
+			if known {
+				if existing != source {
+					merged[existing] = true
+					merged[source] = true
+				}
+				continue
+			}
+			sources[int(result)] = source
+			pending = append(pending, result)
+		}
+	}
+	return sources, merged
+}
+
+// frameEscapingAllocations returns the pointer-bearing stack allocations whose
+// address is used for anything beyond reading and writing the allocation itself.
+//
+// Per-safepoint liveness is only sound for a local while every use of its
+// address is visible in this frame. Once the address leaves -- passed to a call,
+// or written into memory, as runtime.gopanic does when it publishes &p through
+// g._panic, and as a caller does when it takes &pinner -- the frame can no
+// longer tell when the local stops being read, and neither the collector nor
+// stack copying may stop tracking it. Such an allocation is therefore reported
+// at every safepoint for the whole life of the frame, which is what the
+// function-wide conservative map used to do for every local.
+//
+// The test is deliberately syntactic and errs towards escaping: a use this
+// function does not recognize as an address operand makes the allocation
+// conservative, which is never wrong, only less precise.
+func frameEscapingAllocations(f *ir.Func, allocationOf map[int]int, merged map[int]bool) map[int]bool {
+	if len(allocationOf) == 0 {
+		return nil
+	}
+	escaping := make(map[int]bool, len(merged))
+	for allocation := range merged {
+		escaping[allocation] = true
+	}
+	note := func(use ir.Ref, addressOnly bool) {
+		if use.Kind != ir.RefTemp {
+			return
+		}
+		allocation, derived := allocationOf[int(use.ID)]
+		if !derived || addressOnly {
+			return
+		}
+		escaping[allocation] = true
+	}
+
+	for _, block := range f.Blocks {
+		for _, phi := range block.Phis {
+			for _, argument := range phi.Args {
+				note(argument, false)
+			}
+		}
+		for index := range block.Instrs {
+			instruction := &block.Instrs[index]
+			for argument, use := range instruction.Args {
+				note(use, addressOnlyOperand(f, instruction, allocationOf, argument))
+			}
+		}
+		note(block.Jmp.Arg, false)
+		for _, argument := range block.Jmp.Args {
+			note(argument, false)
+		}
+	}
+	return escaping
+}
+
+// addressOnlyOperand reports whether operand argument of instruction reads an
+// address purely to address the allocation it names.
+//
+// A load addresses through every operand it has; a store does so through every
+// operand but the value it writes. A lifetime marker only brackets the slot. A
+// copy or constant addition is an address derivation, but only when the result
+// was tracked back to the same allocation -- an untracked result (a destructed
+// phi, say) carries the address somewhere this analysis cannot follow, which is
+// an escape.
+func addressOnlyOperand(f *ir.Func, instruction *ir.Instr, allocationOf map[int]int, argument int) bool {
+	switch {
+	case instruction.Op.IsLoad():
+		return true
+	case instruction.Op.IsStore():
+		return argument != 0
+	case instruction.Op.IsLifetime():
+		return true
+	case instruction.Op == ir.OCopy || instruction.Op == ir.OAdd:
+		if instruction.To.Kind != ir.RefTemp {
+			return false
+		}
+		_, tracked := allocationOf[int(instruction.To.ID)]
+		return tracked
+	case instruction.Op == ir.OCall:
+		return memoryPrimitiveAddressOperand(f, instruction, argument)
+	default:
+		return false
+	}
+}
+
+// memoryPrimitiveAddressOperand reports whether an operand of a call is an
+// address handed to one of cg12's own memory primitives.
+//
+// goc lowers aggregate copies, zeroing and pointer stores to these three
+// helpers, so a local aggregate is addressed through a call far more often than
+// through a load or a store. Their semantics are fixed by the compiler that
+// emits them: each reads or writes the memory it is given and retains no
+// address, exactly like the load and store operands above. Treating them as
+// escapes would make every aggregate local conservative and leave the
+// over-retention of RUNTIME_PLAN.md 5.3 in place. Every other callee is an
+// escape, including any runtime function, because nothing here knows what it
+// does with the address.
+func memoryPrimitiveAddressOperand(f *ir.Func, instruction *ir.Instr, argument int) bool {
+	callee := instruction.Args[0]
+	if callee.Kind != ir.RefConst {
+		return false
+	}
+	constant := f.Consts[callee.ID]
+	if constant.Kind != ir.ConstSym {
+		return false
+	}
+	switch constant.Sym {
+	case "goc_memcpy":
+		// (destination, source, length)
+		return argument == 1 || argument == 2
+	case "goc_memset":
+		// (destination, value, length)
+		return argument == 1
+	case "goc_storep":
+		// (address, value): the value is a stored pointer, not an address.
+		return argument == 1
+	default:
+		return false
+	}
+}
+
+// constantOffsetBase returns the temporary an address is a fixed offset from,
+// following copies and additions of an integer constant.
+func constantOffsetBase(f *ir.Func, instruction *ir.Instr) (uint32, bool) {
+	switch instruction.Op {
+	case ir.OCopy:
+		if len(instruction.Args) != 1 || instruction.Args[0].Kind != ir.RefTemp {
+			return 0, false
+		}
+		return instruction.Args[0].ID, true
+
+	case ir.OAdd:
+		if len(instruction.Args) != 2 || instruction.Args[0].Kind != ir.RefTemp || instruction.Args[1].Kind != ir.RefConst {
+			return 0, false
+		}
+		if f.Consts[instruction.Args[1].ID].Kind != ir.ConstInt {
+			return 0, false
+		}
+		return instruction.Args[0].ID, true
+
+	default:
+		return 0, false
+	}
 }
 
 // numberInstrs lays instructions out in reachable RPO followed by any

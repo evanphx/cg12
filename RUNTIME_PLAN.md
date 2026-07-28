@@ -286,15 +286,21 @@ Current checkpoint:
 
 - [x] Emit safepoint-specific local stack maps instead of conservatively
   retaining every pointer-bearing local for the entire function. Pointer words
-  contained in a live alloca are now expanded into that safepoint's map.
+  contained in a live alloca are now expanded into that safepoint's map. The
+  function-wide map is no longer unioned into each safepoint; only allocations
+  whose address leaves the frame stay conservative.
 - [ ] Pass synchronized finalizer resurrection after explicitly clearing the
-  last local pointer in a still-running frame. **Regressed**
-  (`runtime-packages/finalizer-resurrect`, `finalizer did not run`).
+  last local pointer in a still-running frame. Still failing
+  (`runtime-packages/finalizer-resurrect`, `finalizer did not run`), now for the
+  understood reason recorded below: the `SetFinalizer` interface temporary's
+  address reaches a destructed phi, so its allocation stays conservative.
 - [x] Pass basic finalization, clearing, KeepAlive, pointerful stack growth,
   dependency ordering, tiny-object finalization, `Cleanup.Stop`, and
   finalizer-before-cleanup ordering.
-- [ ] Pass standalone cleanup callbacks. **Regressed** (`gc/cleanup-basic`,
-  `gc/cleanup-multiple`, `cleanup did not run`).
+- [x] Pass standalone cleanup callbacks (`gc/cleanup-basic`,
+  `gc/cleanup-multiple`) and the minimal reducer `gc/cleanup-frame-retention`,
+  three runs each, unoptimized and with `-runtime-opt`, at `GOMAXPROCS` 1, 2
+  and 4.
 - [ ] Pass the complete ten-program finalizer/cleanup batch ten times per
   program with optimization and `GOMAXPROCS=4`.
 - [x] Add multiple-cleanup and `Pinner` lifecycle/invalid-use cases.
@@ -312,58 +318,93 @@ Current checkpoint:
 - [ ] Pass the cleanup/finalizer/Pinner status subset three times per program
   with optimization and `GOMAXPROCS=2`.
 
-#### Root cause of the cleanup/finalizer regression (2026-07-27)
+#### Root cause of the cleanup/finalizer regression (2026-07-28)
 
-The three failures are one bug, and it is **not** in the cleanup or finalizer
-subsystem. Reduced to:
+The 2026-07-27 diagnosis in this section was wrong, and the correction matters
+because it was pointing the next investigation at the wrong subsystem. It read:
 
-```go
-func register(done chan struct{}) {
-	b := &box{value: 1}
-	runtime.AddCleanup(b, func(struct{}) { done <- struct{}{} }, struct{}{})
-}
+> The retaining reference is a stale pointer word in `register`'s *abandoned*
+> frame, below `main`'s SP. [...] cg12's goroutine stack scan is treating dead
+> stack below the live frames as live.
+
+It is not. `GODEBUG=cg12scanroots=1` (added for this, see below) names the
+retaining frame directly, and for `runtime_cleanup_frame_retention.go` it is
+`main.main` itself:
+
+```
+cg12scanroots: main_main local slot 7  at 0x...5ca8 retains 0x...998300 size 16 head 0x2a
+cg12scanroots: main_main local slot 9  at 0x...5cb8 retains 0x...998300 size 16 head 0x2a
+cg12scanroots: main_main local slot 28 at 0x...5d50 retains 0x...998300 size 16 head 0x2a
 ```
 
-`register` returns, `main` then loops on `runtime.GC()`, and the cleanup never
-runs. `GODEBUG=checkfinalizers=1` reports `queue: 0 finalizers + 0 cleanups` on
-every cycle, so the object is never queued: **it stays reachable**.
+`head 0x2a` is `retainedBox{value: 42}`. `registerRetainedCleanup` is **inlined
+into `main`** -- the out-of-line symbol still exists, but `main` calls
+`runtime.AddCleanup` directly -- so `box` never had a frame of its own to
+abandon. Its three words are `main`'s own locals: the spilled `newobject`
+result, a reload of it, and the variable's alloca cell. `main`'s frame lives for
+the whole `runtime.GC()` loop, so the object never dies.
 
-The retaining reference is a stale pointer word in `register`'s *abandoned*
-frame, below `main`'s SP. Proof: inserting a `scribble()` call that overwrites
-that dead stack region before the GC loop makes the object collectable and the
-cleanup fire (`queue: ... +1 cleanups`). Any perturbation of `register`'s frame
-layout — an extra allocation, a `runtime.KeepAlive`, an added `SetFinalizer`, a
-second cleanup, registering in a loop — also masks it, which is why neighbouring
-capabilities such as `finalizer-cleanup-order`, `cleanup-stop`, and
-`finalizer-tiny` pass. `setfinalizer-clear` passes vacuously: it asserts a
-cleared finalizer does *not* run, which over-retention satisfies trivially.
+Two further facts contradict the old reading. cg12's prologue already zeroes
+every conservatively marked pointer slot (`mc.zeroGoPointerSlots`), so no
+runtime frame can observe what a returned frame left in a slot it has not
+written. And `runtime_cleanup_frame_retention_scribble.go` passes with the
+`scribbleDeadStack` call removed: its helper is simply not inlined, so `box`
+never enters `main`'s frame. The scribble is not what releases the object and
+that file is not a positive proof of anything; the difference between the two
+programs is inlining.
 
-So cg12's goroutine stack scan is treating dead stack below the live frames as
-live. This is a general over-retention (leak-class) bug in GC reachability;
-finalizers and cleanups are merely the only way user code can observe it. The
-fix belongs in stack-map/frame-bound emission, not in `mcleanup.go`.
+The mechanism is in the metadata, not the scan. `gometa.FunctionStackMaps` built
+each safepoint's locals map as the union of that safepoint's live roots with the
+function-wide `LocalPointerWords` -- every pointer-bearing local word and every
+pointer spill slot the frame ever uses. Every call in a function therefore
+reported every pointer the frame ever held as a live root, for as long as the
+frame existed. That is a general leak: any dead pointer local in a long-lived
+frame is retained. Cleanups and finalizers are only how user code notices.
 
-The reduction is committed rather than left in a scratch directory, as three
-`gc` capabilities:
+#### The stack-scan diagnostic (2026-07-28)
 
-| Capability | Expectation | Role |
-| --- | --- | --- |
-| `cleanup-frame-retention` | `knownGap` | the minimal failure; flips to passing when this is fixed |
-| `cleanup-frame-retention-masked` | `mustPass` | the eliminated hypotheses — argument shape, allocation pressure, cleanup count, finalizers-work |
-| `cleanup-frame-retention-scribble` | `mustPass` | the positive proof: overwriting the abandoned frame releases the object |
+`GODEBUG=cg12scanroots=1` prints, for every frame the precise stack scan walks,
+each pointer word that retains a heap object: the function, whether the word is
+a local or an argument, the stack-map slot index, the word's address, and the
+object's base, size and first word. `cg12scanroots=2` adds each frame's
+sp/fp/varp/argp geometry. It examines exactly the words `scanblock` would
+process, so it follows no pointer the scan would not. It lives in
+`runtime.scanframeworker` (`stdlib/src/runtime/mgcmark.go`).
 
-All three are frame-layout sensitive, which is why they are three programs and
-not one. Folding the scribble proof in behind the other variants stops it
-reproducing, because the earlier calls change the stack it would need to
-overwrite. Do not consolidate them, and do not add statements to
-`runtime_cleanup_frame_retention.go` — either turns a real failure into a false
-pass. Each file records this in its own header.
+This is the tool that names a retaining frame, which is what the previous
+investigation was missing.
 
-Next: identify which live frame's stack map covers the abandoned region during
-`runtime.GC()` — the stale word sits inside the frames the GC call tree builds
-over `register`'s old frame. The leading hypothesis is a pointer slot that some
-runtime frame's safepoint map marks live but that is not zeroed on entry, so it
-observes whatever `register` left behind.
+#### Why per-safepoint precision is not sufficient on its own
+
+Emitting only each safepoint's own live roots fixes the reducer and
+`gc/cleanup-basic`, `gc/cleanup-multiple`, but on its own it broke three
+must-pass capabilities: `gc/pinner-lifecycle` (`found leaking pinned pointer`),
+`runtime-packages/timer-gc-channel` (segfault) and `stack/panic-stack-gc`
+(`missing panic`). All three are address-taken locals.
+
+cg12 has no notion of a source-level variable, so it approximates the liveness
+of an address-taken local by the liveness of the temporaries that hold its
+address. That is only sound while every use is visible in the frame. It is not
+when the address leaves: `runtime.gopanic` publishes `&p` through `g._panic`,
+and `main` hands `&pinner` to a callee that stores a heap pointer into it. The
+conservative map was covering those cases by accident.
+
+The compiler therefore keeps a boundary (`arm64.frameEscapingAllocations`):
+a pointer-bearing allocation whose address is used for anything beyond
+addressing itself is reported at every safepoint, exactly as before; everything
+else -- spill slots and frame-local allocations -- is per-safepoint precise.
+Loads, stores, lifetime markers, constant-offset derivations and cg12's own
+`goc_memcpy`/`goc_memset`/`goc_storep` primitives are address-only uses;
+every other use, including any other call, is an escape.
+
+`runtime-packages/finalizer-resurrect` is still failing because of that
+boundary, and stays `knownGap`. Its retaining word is the data word of the
+interface temporary built for `runtime.SetFinalizer`: the aggregate's address
+reaches a destructed phi (the interface nil check), which merges it with an
+unrelated value, so the allocation is classified as escaping and stays
+conservative. Closing this needs the frontend's escape result, or alloca
+lifetime markers, to reach the backend -- the backend cannot recover it
+syntactically. That is the next step for this section.
 
 #### Fixed: runtime print routines allocated (2026-07-27)
 

@@ -184,19 +184,41 @@ func TestGoStackMapPCDataCoalescesDuplicateFrameStartPoint(t *testing.T) {
 	)
 }
 
-func TestGoFunctionStackMapsIncludeLocalPointerWordsAtSafepoints(t *testing.T) {
+// A safepoint reports the roots live at that safepoint and nothing else. The
+// conservative body map stays available as map 1 for the prologue window, but
+// unioning it into a safepoint would report every pointer the frame ever held as
+// live for as long as the frame exists -- the over-retention bug of
+// RUNTIME_PLAN.md 5.3.
+func TestGoFunctionStackMapsUseOnlyTheRootsLiveAtEachSafepoint(t *testing.T) {
 	pointerMaps, indexPoints := FunctionStackMaps(FunctionInfo{
 		LocalPointerWords: []int{1},
 		StackMapPoints: []StackMapPoint{
 			{PC: 80, PointerWords: []int{4}},
 			{PC: 120, PointerWords: []int{1}},
+			{PC: 160, PointerWords: nil},
 		},
 	})
 
-	assert.Equal(t, [][]int{nil, {1}, {1, 4}}, pointerMaps)
+	assert.Equal(t, [][]int{nil, {1}, {4}}, pointerMaps)
 	assert.Equal(t, []StackMapIndexPoint{
 		{PC: 80, Index: 2},
 		{PC: 120, Index: 1},
+		{PC: 160, Index: 0},
+	}, indexPoints)
+}
+
+func TestGoFunctionStackMapsNormalizeSafepointPointerWords(t *testing.T) {
+	pointerMaps, indexPoints := FunctionStackMaps(FunctionInfo{
+		StackMapPoints: []StackMapPoint{
+			{PC: 80, PointerWords: []int{4, 1, 4}},
+			{PC: 120, PointerWords: []int{1, 4}},
+		},
+	})
+
+	assert.Equal(t, [][]int{nil, nil, {1, 4}}, pointerMaps)
+	assert.Equal(t, []StackMapIndexPoint{
+		{PC: 80, Index: 2},
+		{PC: 120, Index: 2},
 	}, indexPoints)
 }
 

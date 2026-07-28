@@ -333,8 +333,7 @@ func TestARM64RuntimeCapabilityStatus(t *testing.T) {
 			category:    "gc",
 			name:        "cleanup-basic",
 			source:      "runtime_cleanup_basic.go",
-			expectation: runtimeCapabilityKnownGap,
-			note:        "over-retention: a stale pointer in the registering function's abandoned frame keeps the object reachable, so it is never queued (see RUNTIME_PLAN.md 5.3)",
+			expectation: runtimeCapabilityMustPass,
 		},
 		{
 			category:    "gc",
@@ -346,15 +345,13 @@ func TestARM64RuntimeCapabilityStatus(t *testing.T) {
 			category:    "gc",
 			name:        "cleanup-multiple",
 			source:      "runtime_cleanup_multiple.go",
-			expectation: runtimeCapabilityKnownGap,
-			note:        "over-retention: a stale pointer in the registering function's abandoned frame keeps the object reachable, so it is never queued (see RUNTIME_PLAN.md 5.3)",
+			expectation: runtimeCapabilityMustPass,
 		},
 		{
 			category:    "gc",
 			name:        "cleanup-frame-retention",
 			source:      "runtime_cleanup_frame_retention.go",
-			expectation: runtimeCapabilityKnownGap,
-			note:        "minimal reducer for the 5.3 over-retention bug; flips to passing when the stale-frame retention is fixed",
+			expectation: runtimeCapabilityMustPass,
 		},
 		{
 			category:    "gc",
@@ -668,7 +665,7 @@ func TestARM64RuntimeCapabilityStatus(t *testing.T) {
 			name:        "gc-churn",
 			source:      "runtime_scheduler_gc_churn.go",
 			expectation: runtimeCapabilityKnownGap,
-			note:        "times out under sustained GC allocation pressure; root cause not yet separated from the 5.3 over-retention bug",
+			note:        "not the 5.3 bug: a worker goroutine's stack grows without bound and the program dies with \"goroutine stack exceeds 1000000000-byte limit\", identically before and after the 5.3 fix",
 		},
 		{
 			category:    "stdlib-io",
@@ -1983,7 +1980,7 @@ func TestARM64RuntimeCapabilityStatus(t *testing.T) {
 			name:        "finalizer-resurrect",
 			source:      "runtime_finalizer_resurrect.go",
 			expectation: runtimeCapabilityKnownGap,
-			note:        "over-retention: a stale pointer in the registering function's abandoned frame keeps the object reachable, so it is never queued (see RUNTIME_PLAN.md 5.3)",
+			note:        "the interface temporary built for SetFinalizer is a stack aggregate whose address reaches a destructed phi, so its safepoint maps stay conservative and its data word keeps the object reachable (see RUNTIME_PLAN.md 5.3)",
 		},
 		{
 			category:    "runtime-packages",
