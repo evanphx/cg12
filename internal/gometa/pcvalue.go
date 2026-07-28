@@ -96,17 +96,22 @@ func UnsafePointPCData() []byte {
 }
 
 // StackMapPCData encodes PCDATA_StackMapIndex: which of the function's pointer
-// maps is live at each PC. It selects the entry map while the function is in its
-// stack-growth prologue, then switches to the body map once the frame exists,
-// then follows the safepoints. Safepoints before frameStart are dropped, points
-// sharing a PC collapse to the last one, and runs of equal indexes collapse to
-// their first, since a pc-value table only records changes.
-func (arch Arch) StackMapPCData(frameStart int, indexPoints []StackMapIndexPoint) []byte {
+// maps is live at each PC. It selects the growth map while the function is in
+// its stack-growth prologue, then switches to the body map once the frame
+// exists, then follows the safepoints. Safepoints before frameStart are dropped,
+// points sharing a PC collapse to the last one, and runs of equal indexes
+// collapse to their first, since a pc-value table only records changes.
+//
+// The prologue range starts at PC 0, but the runtime never reads this table for
+// pc == entry: runtime.stkframe.getStackMap hardcodes EntryStackMapIndex there.
+// That is what lets the growth map describe the register home slots the prologue
+// spills while the entry map describes only what the caller wrote.
+func (arch Arch) StackMapPCData(frameStart int, growthIndex int, indexPoints []StackMapIndexPoint) []byte {
 	points := make([]StackMapIndexPoint, 0, len(indexPoints)+2)
 	if frameStart > 0 {
-		points = append(points, StackMapIndexPoint{PC: 0, Index: 0})
+		points = append(points, StackMapIndexPoint{PC: 0, Index: growthIndex})
 	}
-	points = append(points, StackMapIndexPoint{PC: frameStart, Index: 1})
+	points = append(points, StackMapIndexPoint{PC: frameStart, Index: BodyStackMapIndex})
 	for _, point := range indexPoints {
 		if point.PC >= frameStart {
 			points = append(points, point)
