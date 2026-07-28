@@ -113,16 +113,21 @@ became `mustPass` on 2026-07-28 with the merged-address fix in §5.3, so the
 matrix now holds no `knownGap` at all; `defer-panic/panic-string-output` is the
 one deliberate `expectedFailure`.
 
-The two denominators are now reconciled, and as of 2026-07-28 they are equal.
-There is only one denominator: the capability matrix *is* the coverage corpus,
-and every capability reports one explicit compile/run/coverage outcome. The
-accepted baseline covers all 338 matrix capabilities, so
-`cmd/goc/testdata/runtime_coverage_baseline_pending.json` is now empty and
-`TestCheckedRuntimeCoverageBaselineDenominator` reconciles baseline to matrix
-directly: 338 + 0 = 338, no capability may appear in both, and no baseline
-program may name a capability the matrix has dropped. Adding a capability still
-requires either accepting a new baseline or recording in that file why the
-baseline does not cover it.
+The two denominators are now reconciled. There is only one denominator: the
+capability matrix *is* the coverage corpus, and every capability reports one
+explicit compile/run/coverage outcome. The 2026-07-28 collection covered all
+338 capabilities that existed when it ran, which is what closed M0. The same
+wave then added 18 more, so
+`cmd/goc/testdata/runtime_coverage_baseline_pending.json` holds those 18 and
+`TestCheckedRuntimeCoverageBaselineDenominator` reconciles in both directions:
+338 + 18 = 356, no capability may appear in both, and no baseline program may
+name a capability the matrix has dropped. Adding a capability still requires
+either accepting a new baseline or recording in that file why the baseline does
+not cover it.
+
+That the list refilled immediately is the mechanism working as designed, not
+drift: a baseline is a measurement taken at an instant, and every capability
+added afterwards is recorded rather than silently absorbed.
 
 Control runs without coverage instrumentation reproduce the runtime failures
 and large-program compiler memory failures. They are not coverage-counter
@@ -1422,11 +1427,18 @@ as a wrong answer rather than a fault. The residual-fault rate is unchanged; see
 below.
 
 Independent verification on 2026-07-28 reran this at 24000 runs on each side and
-reproduced the headline result exactly — 472 against **0** — but did not
-reproduce the last row: it saw `marked free object in span` zero times in about
-600000 executions, and the fault that actually survives at this scale is
-`found pointer to free object` (11 of 24000 before, 4 of 24000 after). Read the
-last row as misattributed rather than as a second measurement.
+reproduced the headline result exactly — 472 against **0**.
+
+A note on the last row, because the record was briefly corrupted here. That
+verification saw `marked free object in span` zero times in about 600000
+executions while seeing `found pointer to free object` at a comparable rate, and
+the coordinator concluded the row was misattributed and annotated it as such.
+That conclusion was wrong. §5.11's investigation established that the two are
+**the same report**: `mspan.reportZombies` prints `marked free object in span`
+and then throws `found pointer to free object`. Counting either message alone
+understates the rate, which is what made the two campaigns look inconsistent.
+The row is a valid measurement; the annotation was the error, and it has been
+removed.
 
 The deterministic guard is
 `TestKeepAliveStoresIntoAFrameSlotRatherThanAGlobal` in `goc/escape_test.go`,
