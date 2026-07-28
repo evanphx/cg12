@@ -392,6 +392,15 @@ func TestARM64RuntimeCapabilityStatus(t *testing.T) {
 			expectation: runtimeCapabilityMustPass,
 		},
 		{
+			category: "gc",
+			name:     "span-metadata-barrier",
+			source:   "runtime_span_metadata_barrier.go",
+			// The only capability that raises GOMAXPROCS itself. Its failure
+			// mode needs spans grown during marking from the initial thread's
+			// g0 stack, which -runtime-procs=1..4 never produces. See 5.2.2.
+			expectation: runtimeCapabilityMustPass,
+		},
+		{
 			category:    "gc",
 			name:        "finalizer-cleanup-order",
 			source:      "runtime_finalizer_cleanup_order.go",

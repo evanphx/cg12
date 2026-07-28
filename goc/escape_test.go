@@ -658,3 +658,84 @@ func countCallsSymbol(function *ir.Func, symbol string) int {
 	}
 	return count
 }
+
+func TestNotInHeapPointerStoreSkipsWriteBarrier(t *testing.T) {
+	module, err := goc.CompileExecutable("not_in_heap_store.go", []byte(`
+package main
+
+import (
+	"internal/runtime/sys"
+	"runtime"
+)
+
+type metadata struct {
+	_    sys.NotInHeap
+	word uintptr
+}
+
+type item struct {
+	value int
+}
+
+type mixedHolder struct {
+	meta  *metadata
+	thing *item
+}
+
+type plainHolder struct {
+	other *item
+	thing *item
+}
+
+func storeMetadata(destination *mixedHolder, source *metadata) {
+	destination.meta = source
+}
+
+func storeItem(destination *mixedHolder, source *item) {
+	destination.thing = source
+}
+
+func storeMixed(destination *mixedHolder, source mixedHolder) {
+	*destination = source
+}
+
+func storePlain(destination *plainHolder, source plainHolder) {
+	*destination = source
+}
+
+func Test() {
+	runtime.GC()
+	storeMetadata(new(mixedHolder), nil)
+	storeItem(new(mixedHolder), nil)
+	storeMixed(new(mixedHolder), mixedHolder{})
+	storePlain(new(plainHolder), plainHolder{})
+}
+
+func main() {
+	Test()
+}
+`))
+	require.NoError(t, err)
+
+	// internal/runtime/sys.NotInHeap promises that a pointer to the type never
+	// refers to a collected object, so storing one must not reach the write
+	// barrier. cg12's barrier records the destination slot's previous contents
+	// as a deleted pointer, so barriering these stores publishes addresses the
+	// marker cannot interpret -- the failure behind RUNTIME_PLAN.md 5.7.
+	storeMetadata := functionWithSuffix(t, module, "main.storeMetadata")
+	assert.Equal(t, 0, countCallsSymbol(storeMetadata, "goc_storep"), "not-in-heap pointer store went through the write barrier")
+
+	storeItem := functionWithSuffix(t, module, "main.storeItem")
+	assert.GreaterOrEqual(t, countCallsSymbol(storeItem, "goc_storep"), 1, "ordinary pointer store lost its write barrier")
+
+	// The two holders have the same shape and are copied the same number of
+	// times, so the only difference is that one of mixedHolder's two pointer
+	// words is not-in-heap. Comparing the counts states that exactly that word
+	// dropped out of the barrier, without depending on how many intermediate
+	// copies cg12 emits for an aggregate assignment.
+	storeMixed := functionWithSuffix(t, module, "main.storeMixed")
+	storePlain := functionWithSuffix(t, module, "main.storePlain")
+	plainBarriers := countCallsSymbol(storePlain, "goc_storep")
+	assert.NotZero(t, plainBarriers, "aggregate store of ordinary pointers lost its write barriers")
+	assert.Equal(t, plainBarriers, 2*countCallsSymbol(storeMixed, "goc_storep"), "aggregate store barriered the not-in-heap pointer word")
+}

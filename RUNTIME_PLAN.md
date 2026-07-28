@@ -52,7 +52,7 @@ were the net/http type-check gap and have since been repaired and restored to
 `mustPass`. Eight remain, and four of them contradict checkpoints in §5.2/§5.3
 that this document previously recorded as complete. Those sections have been
 corrected. Note also that the coverage baseline covers 294 programs while the
-matrix now holds 322 capabilities; the denominators must be reconciled before a
+matrix now holds 330 capabilities; the denominators must be reconciled before a
 new baseline is accepted.
 
 Control runs without coverage instrumentation reproduce the runtime failures
@@ -418,7 +418,9 @@ Current checkpoint:
 - [x] Pass standalone cleanup callbacks (`gc/cleanup-basic`,
   `gc/cleanup-multiple`) and the minimal reducer `gc/cleanup-frame-retention`,
   three runs each, unoptimized and with `-runtime-opt`, at `GOMAXPROCS` 1, 2
-  and 4.
+  and 4. The three `cleanup-frame-retention` reducers additionally pass six of
+  six runs at `GOMAXPROCS=64`, where they failed six of six before the §5.7
+  write barrier fix. That failure was §5.7's, not this section's.
 - [ ] Pass the complete ten-program finalizer/cleanup batch ten times per
   program with optimization and `GOMAXPROCS=4`.
 - [x] Add multiple-cleanup and `Pinner` lifecycle/invalid-use cases.
@@ -704,6 +706,142 @@ Covered by `core-types/type-param-method-dispatch` and
 Exit criterion: met. `stdlib-crypto/rsa` was already `mustPass` and was not
 affected.
 
+### 5.7 Write barriers on not-in-heap pointers (the sweep-count gap)
+
+Current checkpoint:
+
+- [x] Reduce `fatal error: sweep increased allocation count` to a single
+  compiler defect: cg12 emitted a write barrier for a store of a pointer to a
+  not-in-heap type.
+- [x] Omit the write barrier for pointers to types marked with
+  `internal/runtime/sys.NotInHeap`, in both the scalar store path and the
+  pointer-aware aggregate store path.
+- [x] Pass `cmd/goc`'s `TestARM64GoRuntimeGarbageCollectorExecutes` and
+  `TestARM64StandardLibraryIOAndFmtExecute/runtime_Linux_assembly`, which both
+  failed on `origin/main`.
+- [x] Pass `gc/cleanup-frame-retention`, `-masked` and `-scribble` at
+  `GOMAXPROCS=64`. All three failed 6 of 6 runs there before the fix; the §5.3
+  reducers were only ever exercised at `GOMAXPROCS` 1, 2 and 4.
+- [ ] Close the general hole this exposed in `goc_storep`; see "What is still
+  open" below.
+
+#### Root cause (2026-07-28)
+
+The failing throw is upstream's, and it is correct to fail:
+
+```
+runtime: nelems=16 nalloc=16 previous allocCount=15 nfreed=65535
+fatal error: sweep increased allocation count
+```
+
+`nfreed=65535` is `^uint16(0)`, so the count did not increase -- `nalloc`, the
+population count of `gcmarkBits`, exceeded `allocCount` by exactly one. Dumping
+the span at the throw gives the same picture every time:
+
+```
+elemsize=480 spc=50 freeindex=15 inline=true
+markwords=0x17fff  premove=0x0  imbmarks=0x17fff
+base=...a8000 limit=...a9e00 (7680 bytes of objects)
+```
+
+`0x17fff` is bits 0-14, the fifteen live objects, plus **bit 16**. `nelems` is
+16, so object index 16 does not exist, and the bit arrived in the Green Tea
+inline mark bits (`imbmarks`) rather than in `gcmarkBits` (`premove=0x0`).
+Object index 16 sits at `base+7680`; the pointer that produced it was
+`base+7936`, which is `spanHeapBitsRange`'s base -- the span's own heap-bits
+bitmap, in the 256-byte tail the span reserves for the pointer/scan bitmap and
+the inline mark bits.
+
+A check in `runtime.atomicwb` naming the frame that queued that address gives
+the whole chain:
+
+```
+runtime_heapBitsSlice <- runtime_mspan_heapBits <- runtime_mspan_initHeapBits
+  <- runtime_mcentral_grow <- runtime_mcentral_cacheSpan <- runtime_mcache_refill
+  <- runtime_mcache_nextFree <- runtime_mallocgcSmallScanNoHeader
+  <- runtime_newobject <- runtime_malg <- runtime_allocm <- runtime_newm
+```
+
+`runtime.heapBitsSlice` builds the span's bitmap slice by hand:
+
+```go
+var sl notInHeapSlice
+sl = notInHeapSlice{(*notInHeap)(unsafe.Pointer(base)), elems, elems}
+return *(*[]uintptr)(unsafe.Pointer(&sl))
+```
+
+`notInHeapSlice.array` is a `*notInHeap`. `internal/runtime/sys.NotInHeap`
+states that write barriers on pointers to not-in-heap types may be omitted, and
+the standard compiler implements that by reporting zero pointer-data bytes for
+such a pointer, so upstream emits no barrier here at all. cg12 emitted one.
+That barrier is not merely redundant, it is unsound: `goc_storep` forwards to
+`runtime.atomicstorep`, whose `atomicwb` records both the stored value and the
+destination slot's previous contents in the P's write barrier buffer. The
+buffer outlives the store, so at `gcMarkDone` the address reached
+`wbBufFlush1` -> `tryDeferToSpanScan`, which divides the offset by the size
+class without bounding the result against `nelems` and set inline mark bit 16.
+Sweep then counted 16 marked objects in a span whose `allocCount` was 15.
+
+Two conditions gate it, and together they explain why only high `GOMAXPROCS`
+showed the failure. First, `goc_storep` stores directly when the destination is
+inside a heap span or a runtime-managed stack span, so the barrier is only
+reached when `sl` lives on a stack the runtime did not allocate -- in practice
+the initial thread's `g0` stack, which is the process stack. Second, the span
+has to be grown while the mark phase is running. `newm`/`allocm`/`malg` on the
+initial thread satisfies both, and how often that happens scales with the
+number of Ps: `goc/testdata/gc_struct.go` passed 3 of 3 runs at `GOMAXPROCS` 1,
+2, 4, 8 and 16 and failed 3 of 3 at 64. The capability matrix runs at 1-4,
+which is why it never saw this.
+
+The fix is in `goc/compile.go`: `isNotInHeapPointer` gates the scalar pointer
+store, and `barrieredPointerWordIndices` drops not-in-heap pointer words from
+the aggregate store path so they are copied by the surrounding `goc_memcpy`
+instead of republished through `goc_storep`. Pointer maps, stack maps and
+emitted type descriptors are unchanged: `pointerWordIndices` and
+`visitPointerWords` still report every pointer word.
+
+Covered by `TestNotInHeapPointerStoreSkipsWriteBarrier` in `goc/escape_test.go`,
+which fails on the pre-fix compiler, and by the capability
+`gc/span-metadata-barrier` (`runtime_span_metadata_barrier.go`). That reducer is
+the one program in the matrix that raises `GOMAXPROCS` itself, because the
+matrix's `-runtime-procs` only reaches 4. It is *not* deterministic: measured
+against the pre-fix compiler it failed 22 of 30 runs, and against the fixed
+compiler it passed 30 of 30. Treat the compiler test as the exact guard and the
+capability as the end-to-end one.
+
+#### What is still open
+
+- `goc_storep` barriers every pointer store whose destination is neither a heap
+  span nor a runtime-managed stack span. That set includes globals, which is
+  intended, but it also includes any non-Go-managed stack, which is not. The
+  deletion half of the barrier reads the destination slot's previous contents,
+  so an uninitialized slot on such a stack publishes whatever bytes were there
+  as a pointer. Honouring `NotInHeap` removes the instance found here; the
+  general hole is untouched. Making it precise needs either a data-section range
+  test in `goc_storep` or keeping frame-local aggregate destinations
+  syntactically recognisable -- `assignLocal` currently loses the alloca
+  identity by loading the indirect slot, which is why a plain frame local
+  reaches the dynamic classifier at all.
+- cg12's pointer maps still include not-in-heap pointer words, where upstream's
+  `PtrDataSize` reports zero. That was left alone deliberately: it is a metadata
+  change with a much wider blast radius than the barrier fix, and it is not
+  required for this failure. It costs the collector wasted `findObject` calls
+  into `fixalloc`/`persistentalloc` memory, and it leaves the same
+  "address inside a span but not an object" hazard reachable from a stack map --
+  gated, as upstream is, by the allocator paths being non-preemptible.
+- Found while trying to build a deterministic reducer, not investigated and
+  **not** caused by this bug: a program that creates goroutines in bulk while a
+  concurrent `runtime.GC()` runs dies with `runtime: pointer 0x... to
+  unallocated span ... found in object at ...` where the containing object is an
+  `mSpanManual` span, i.e. a goroutine stack. It reproduces identically before
+  and after this change. Two candidate reducers had to be abandoned because of
+  it.
+
+Exit criterion: the two `cmd/goc` tests and the §5.3 cleanup trio pass at high
+`GOMAXPROCS`, no store of a not-in-heap pointer reaches `goc_storep`, and the
+remaining `goc_storep` imprecision above is either closed or shown to be
+unreachable.
+
 ## 6. Phase 2: Memory safety, allocation, and accurate GC
 
 Exercise both semantic behavior and generated metadata.
@@ -869,8 +1007,10 @@ coverage classification.
    trace, HTTP compiler memory, and the existing ECDSA gap are resolved or
    correctly reassigned outside runtime scope. The ECDSA gap is closed: it was
    a generic method-dispatch bug in the compiler, not runtime scope at all
-   (§5.6). Signal delivery during GC (§5.2) and the cleanup/finalizer
-   over-retention (§5.3) are still open.
+   (§5.6). The `sweep increased allocation count` failure is closed: it was a
+   missing `NotInHeap` write-barrier exemption in the compiler (§5.7). Signal
+   delivery during GC (§5.2) and the cleanup/finalizer over-retention (§5.3)
+   are still open.
 3. **M2 — memory foundation is trusted:** allocation families, barriers, stack
    maps, stack copying, and GC stress pass with emitted validators.
 4. **M3 — concurrency is trusted:** multi-P scheduling, preemption, stacks,

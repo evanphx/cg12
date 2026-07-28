@@ -4361,7 +4361,7 @@ func (g *gen) store(v, addr ir.Ref, t types.Type) {
 		return
 	}
 	class, _ := scalar(t)
-	if g.runtimeAllocation && !g.noWriteBarrier && class == ir.ClsP && !g.isStackAddress(addr) {
+	if g.runtimeAllocation && !g.noWriteBarrier && class == ir.ClsP && !g.isStackAddress(addr) && !isNotInHeapPointer(t) {
 		g.cur.CallVoid(g.fn.Sym("goc_storep", 0), addr, v)
 		return
 	}
@@ -4401,7 +4401,7 @@ func (g *gen) storeInlineValue(value, address ir.Ref, valueType types.Type) {
 	if isInterfaceValue(valueType) {
 		value = g.materializeNilInterface(value)
 	}
-	if g.runtimeAllocation && !g.noWriteBarrier && len(pointerWordIndices(valueType)) != 0 {
+	if g.runtimeAllocation && !g.noWriteBarrier && len(barrieredPointerWordIndices(valueType)) != 0 {
 		g.storePointerAwareInlineValue(value, address, valueType)
 		return
 	}
@@ -4409,12 +4409,14 @@ func (g *gen) storeInlineValue(value, address ir.Ref, valueType types.Type) {
 }
 
 // storePointerAwareInlineValue copies the scalar regions of an aggregate with
-// memcpy and publishes each pointer word through the normal pointer-store
-// path. The latter dynamically distinguishes heap and global destinations
-// from any goroutine stack, so aggregate assignment preserves Go's write
-// barrier semantics without changing the in-memory layout of the value.
+// memcpy and publishes each barriered pointer word through the normal
+// pointer-store path. The latter dynamically distinguishes heap and global
+// destinations from any goroutine stack, so aggregate assignment preserves Go's
+// write barrier semantics without changing the in-memory layout of the value.
+// Words holding a pointer to a not-in-heap type are not barriered and travel
+// with the surrounding memcpy instead; see barrieredPointerWordIndices.
 func (g *gen) storePointerAwareInlineValue(value, address ir.Ref, valueType types.Type) {
-	pointerWords := pointerWordIndices(valueType)
+	pointerWords := barrieredPointerWordIndices(valueType)
 	valueSize := typeSize(valueType)
 	nextOffset := int64(0)
 	destinationIsStack := g.isStackAddress(address)
@@ -6295,6 +6297,25 @@ func isDirectInterfaceType(valueType types.Type) bool {
 
 func isNotInHeapPointerType(pointer *types.Pointer) bool {
 	return typeEmbedsNotInHeap(pointer.Elem(), make(map[types.Type]bool))
+}
+
+// isNotInHeapPointer reports whether valueType is a pointer to a not-in-heap
+// type. internal/runtime/sys.NotInHeap documents that such a pointer never
+// refers to a garbage-collected object, and that write barriers on it may
+// therefore be omitted; the standard compiler implements that by reporting zero
+// pointer-data bytes for the type. cg12 must omit them too, and not merely as
+// an optimization: its write barrier reads the destination slot's previous
+// contents to record the deleted pointer, so barriering a store of a
+// not-in-heap pointer publishes an address that is not an object base -- for
+// example runtime.heapBitsSlice's pointer into a span's own metadata tail --
+// into the write barrier buffer, where the marker later mistakes it for a heap
+// object.
+func isNotInHeapPointer(valueType types.Type) bool {
+	pointer, ok := valueType.Underlying().(*types.Pointer)
+	if !ok {
+		return false
+	}
+	return isNotInHeapPointerType(pointer)
 }
 
 func typeEmbedsNotInHeap(valueType types.Type, seen map[types.Type]bool) bool {
@@ -11858,8 +11879,23 @@ func (g *gen) markDataPointerWords(name string, valueType types.Type) {
 }
 
 func pointerWordIndices(valueType types.Type) []int {
+	return collectPointerWordIndices(valueType, false)
+}
+
+// barrieredPointerWordIndices returns the words of valueType whose stores need a
+// write barrier. It is pointerWordIndices minus the words whose static type is a
+// pointer to a not-in-heap type; see isNotInHeapPointer for why those must not
+// go through the barrier. Pointer maps and GC metadata keep using
+// pointerWordIndices, so neither the in-memory layout nor the emitted type
+// descriptors change: a word dropped here is copied by the surrounding memcpy
+// instead of being republished through goc_storep.
+func barrieredPointerWordIndices(valueType types.Type) []int {
+	return collectPointerWordIndices(valueType, true)
+}
+
+func collectPointerWordIndices(valueType types.Type, skipNotInHeap bool) []int {
 	seen := make(map[int]bool)
-	visitPointerWords(valueType, 0, func(offset int64) {
+	walkPointerWords(valueType, 0, skipNotInHeap, func(offset int64) {
 		seen[int(offset/8)] = true
 	})
 	words := make([]int, 0, len(seen))
@@ -11880,7 +11916,15 @@ func markPointerWords(valueType types.Type, base int64, mask []int64, lastPointe
 	})
 }
 
+// visitPointerWords reports every pointer-sized word of valueType that the
+// garbage collector must treat as a pointer. It is the metadata view: pointer
+// masks, stack maps and static data descriptors all use it, and it includes
+// pointers to not-in-heap types.
 func visitPointerWords(valueType types.Type, base int64, visit func(int64)) {
+	walkPointerWords(valueType, base, false, visit)
+}
+
+func walkPointerWords(valueType types.Type, base int64, skipNotInHeap bool, visit func(int64)) {
 	valueType = representativeType(valueType)
 	if _, sharedTypeParameter := valueType.(*types.TypeParam); sharedTypeParameter {
 		// Shared generic values use one pointer-sized word, regardless of the
@@ -11891,7 +11935,12 @@ func visitPointerWords(valueType types.Type, base int64, visit func(int64)) {
 		return
 	}
 	switch value := valueType.Underlying().(type) {
-	case *types.Pointer, *types.Map, *types.Chan, *types.Signature:
+	case *types.Pointer:
+		if skipNotInHeap && isNotInHeapPointerType(value) {
+			return
+		}
+		visit(base)
+	case *types.Map, *types.Chan, *types.Signature:
 		visit(base)
 	case *types.Slice:
 		visit(base)
@@ -11901,13 +11950,13 @@ func visitPointerWords(valueType types.Type, base int64, visit func(int64)) {
 	case *types.Array:
 		elementSize := typeSize(value.Elem())
 		for index := int64(0); index < value.Len(); index++ {
-			visitPointerWords(value.Elem(), base+index*elementSize, visit)
+			walkPointerWords(value.Elem(), base+index*elementSize, skipNotInHeap, visit)
 		}
 	case *types.Struct:
 		fields := structFields(value)
 		offsets := structOffsets(fields)
 		for index, field := range fields {
-			visitPointerWords(field.Type(), base+offsets[index], visit)
+			walkPointerWords(field.Type(), base+offsets[index], skipNotInHeap, visit)
 		}
 	case *types.Basic:
 		if value.Kind() == types.UnsafePointer || value.Kind() == types.String {
