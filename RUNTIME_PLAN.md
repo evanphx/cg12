@@ -42,7 +42,8 @@ that must not be hidden by adding more tests:
 - the runtime trace program runs out of memory or times out;
 - the accepted baseline still needs a rerun after recent trace and large HTTP
   fixes;
-- the existing ECDSA case remains a known compiler/stdlib gap.
+- the ECDSA case was a compiler gap in generic method dispatch. It is fixed and
+  `stdlib-crypto/ecdsa` is `mustPass` as of 2026-07-28; see §5.6.
 
 The 2026-07-22 baseline predates the sysmon segfault fix (`54e7c7e`), which was
 the first change that let the capability matrix run to completion. Commit
@@ -293,17 +294,134 @@ Current checkpoint:
 - [x] Keep the temporary slice headers captured by `runtime.selectgo`'s
   synchronous unlock closure on the stack, while still promoting slice backing
   storage assigned to globals.
-- [ ] Pass delivery during GC. **Regressed.** `stdlib-signals/during-gc` fails
-  with `timed out waiting for signal during GC`; it is currently marked
-  `knownGap`. It is one of four capabilities that only became visible once the
-  sysmon segfault fix (`54e7c7e`) let the matrix run to completion, so it was
-  masked rather than newly broken.
+- [ ] Pass delivery during GC. **Regressed**, but not a signal bug.
+  `stdlib-signals/during-gc` fails with `timed out waiting for signal during
+  GC`; it is currently marked `knownGap`. Every signal is in fact delivered;
+  the receiving goroutine is simply stalled past the program's own 2 s deadline
+  by the GC-assist allocation recursion described in 5.2.1. It is one of four
+  capabilities that only became visible once the sysmon segfault fix
+  (`54e7c7e`) let the matrix run to completion, so it was masked rather than
+  newly broken.
 - [ ] Pass the locked-global-select case and the full signal category ten
   executions per program with optimization and `GOMAXPROCS=1`, `2`, and `4`.
   Blocked on `during-gc` above; the rest of the category passes.
 
 Exit criterion: signal tests pass under `GOMAXPROCS=1`, `2`, and `4`, including
 race-like stress, without deadlock or runtime lock corruption.
+
+#### 5.2.1 Root cause of the four GC-pressure failures (2026-07-28)
+
+`goroutine/many-goroutines-gc`, `scheduler-stress/gc-churn`,
+`stdlib-bytes/grow-allocs`, and `stdlib-signals/during-gc` were all recorded as
+"times out under sustained GC allocation pressure; root cause not yet separated
+from the 5.3 over-retention bug". They are one bug, and it is **not** the 5.3
+over-retention bug. It is:
+
+**`runtime.gcAssistAlloc` allocates, so the GC assist path recurses without
+bound during marking.**
+
+`mgcmark.go` opens `gcAssistAlloc` with the synctest block
+
+```go
+if gp := getg(); gp.bubble != nil {
+	bubble := gp.bubble
+	gp.bubble = nil
+	defer func() { gp.bubble = bubble }()
+}
+```
+
+cg12 heap-lifts `gp` because a deferred function literal captures it, and it
+emits that `runtime.newobject` call *before* the `gp.bubble != nil` test, so the
+allocation happens on every call even though the branch is never taken outside
+synctest. `mallocgc` calls `deductAssistCredit` whenever `gcBlackenEnabled != 0`,
+and `deductAssistCredit` calls `gcAssistAlloc` when the goroutine is in debt, so
+during the mark phase the cycle
+
+```
+mallocgc -> deductAssistCredit -> gcAssistAlloc -> newobject -> mallocgc
+```
+
+repeats. It is unbounded: the allocation sits above `gcAssistAlloc`'s `retry`
+label and above the `systemstack(gcAssistAlloc1)` call, so every level takes on
+fresh assist debt *before* any level performs scan work. `debug.SetMaxStack(1 <<
+20)` on eight goroutines calling `runtime.GC()` concurrently produces `fatal
+error: stack overflow` with 3,100+ frames of exactly that four-function cycle.
+
+Ordinarily the recursion unwinds when the background mark worker finishes and
+clears `gcBlackenEnabled`, so the depth is set by how long the mark phase lasts.
+That closes a positive feedback loop: deeper recursion means larger goroutine
+stacks, larger stacks mean a longer stack scan, a longer mark phase means deeper
+recursion on the next cycle. `shrinkstack` can only halve a stack per cycle and
+loses the race. Measured with eight goroutines calling `runtime.GC()`,
+`GOMAXPROCS=1`:
+
+| | host Go | cg12 |
+| --- | ---: | ---: |
+| `StackInuse` after cycle 1 | 288 KiB | 8.6 MiB |
+| after cycle 3 | 288 KiB | 53 MiB |
+| after cycle 5 | 288 KiB | 1.01 GiB |
+
+`GODEBUG=gctrace=1` on the failing capabilities shows the same shape from the
+other side: the heap is flat (`0->0->0 MB`) while the stack-scan volume and the
+mark phase quadruple per cycle — `many-goroutines-gc` reports 11 MB / 1842 ms,
+then 22 MB / 3856 ms, then 89 MB / 15030 ms. **Unbounded stack, flat live heap**
+is the opposite of the over-retention signature, which is why the 5.3 hypothesis
+is wrong.
+
+Classification of the four, all confirmed against the host toolchain, which runs
+each program in 0.00-0.04 s:
+
+| Capability | Verdict |
+| --- | --- |
+| `goroutine/many-goroutines-gc` | performance shortfall, not a hang; instrumented, 3 of its 48 workers finish their `runtime.GC()` in the first 60 s and only 5 in 400 s, because each cycle costs more than the last |
+| `scheduler-stress/gc-churn` | same |
+| `stdlib-bytes/grow-allocs` | same; it reaches the final case and stalls there. Its spurious `AllocsPerRun` counts are the recursive assist allocations, not a `bytes.Buffer` bug |
+| `stdlib-signals/during-gc` | performance shortfall, **not** a delivery gap. Instrumented delivery latencies were 150 ms, 437 ms, 1749 ms, 8657 ms, 2 ms, ..., 33441 ms, 25203 ms, 36106 ms. Every signal arrives; the program's own 2 s deadline is what fails |
+
+Proof of causality: rewriting the synctest block so the captured variable is
+declared inside the taken branch removes the hot-path allocation without
+changing semantics. With that one change all four capabilities pass, unoptimized
+and with `-O`, at `GOMAXPROCS=1`, `2`, and `4`, in 0.03-0.35 s. The experiment
+was reverted; the vendored stdlib is unmodified. `gc/cleanup-frame-retention`
+still fails with the experiment applied, which confirms 5.2.1 and 5.3 are
+independent bugs.
+
+The fix belongs in cg12's escape analysis, not in the runtime. Two reductions
+are committed:
+
+| Capability | Expectation | Role |
+| --- | --- | --- |
+| `gc/assist-alloc-recursion` | `knownGap` | the runtime-level failure: concurrent `runtime.GC()` drives `StackInuse` past 4 MiB in one cycle |
+| `gc/defer-capture-allocs` | `knownGap` | the compiler-level failure, with its controls |
+
+`gc/defer-capture-allocs` reports four allocation counts, all of which are 0 on
+the host toolchain:
+
+| Shape | cg12 |
+| --- | ---: |
+| variable captured by a deferred literal on an **untaken** branch | 1 |
+| variable captured by an unconditional deferred literal | 2 |
+| variable captured by an immediately invoked literal | 0 |
+| deferred literal with no capture | 0 |
+
+So the trigger is specifically `defer` plus capture. The narrow fix is to sink
+the heap lift into the branch that actually constructs the closure, which is
+enough for `gcAssistAlloc`. The general fix is to stop heap-lifting variables
+captured by deferred literals that do not outlive the frame; note that the
+current behaviour is the deliberate heap lift recorded in 5.1, so changing it
+needs the defer/panic batch rerun. Either way, this is the second instance of
+the same class as the print-routine allocation fixed in 5.3 — cg12 introducing a
+heap allocation into a runtime path that must not allocate — and an audit for
+further instances is worth doing.
+
+Incidental, found while probing and not investigated further:
+`runtime.NumGoroutine()` returns 5 in a cg12 program where the host toolchain
+returns 1. `isSystemGoroutine` classifies by `HasPrefix(funcname(f),
+"runtime.")`, and cg12's names appear as `runtime_bgsweep` rather than
+`runtime.bgsweep`, so `sched.ngsys` is never incremented and the runtime's own
+helper goroutines are counted as user goroutines. This is consistent with the
+observed counts but was not proven; anything else keyed on runtime function
+names deserves the same check.
 
 ### 5.3 Finalizer resurrection and cleanup
 
@@ -317,15 +435,21 @@ Current checkpoint:
 
 - [x] Emit safepoint-specific local stack maps instead of conservatively
   retaining every pointer-bearing local for the entire function. Pointer words
-  contained in a live alloca are now expanded into that safepoint's map.
+  contained in a live alloca are now expanded into that safepoint's map. The
+  function-wide map is no longer unioned into each safepoint; only allocations
+  whose address leaves the frame stay conservative.
 - [ ] Pass synchronized finalizer resurrection after explicitly clearing the
-  last local pointer in a still-running frame. **Regressed**
-  (`runtime-packages/finalizer-resurrect`, `finalizer did not run`).
+  last local pointer in a still-running frame. Still failing
+  (`runtime-packages/finalizer-resurrect`, `finalizer did not run`), now for the
+  understood reason recorded below: the `SetFinalizer` interface temporary's
+  address reaches a destructed phi, so its allocation stays conservative.
 - [x] Pass basic finalization, clearing, KeepAlive, pointerful stack growth,
   dependency ordering, tiny-object finalization, `Cleanup.Stop`, and
   finalizer-before-cleanup ordering.
-- [ ] Pass standalone cleanup callbacks. **Regressed** (`gc/cleanup-basic`,
-  `gc/cleanup-multiple`, `cleanup did not run`).
+- [x] Pass standalone cleanup callbacks (`gc/cleanup-basic`,
+  `gc/cleanup-multiple`) and the minimal reducer `gc/cleanup-frame-retention`,
+  three runs each, unoptimized and with `-runtime-opt`, at `GOMAXPROCS` 1, 2
+  and 4.
 - [ ] Pass the complete ten-program finalizer/cleanup batch ten times per
   program with optimization and `GOMAXPROCS=4`.
 - [x] Add multiple-cleanup and `Pinner` lifecycle/invalid-use cases.
@@ -343,58 +467,113 @@ Current checkpoint:
 - [ ] Pass the cleanup/finalizer/Pinner status subset three times per program
   with optimization and `GOMAXPROCS=2`.
 
-#### Root cause of the cleanup/finalizer regression (2026-07-27)
+#### Root cause of the cleanup/finalizer regression (2026-07-28)
 
-The three failures are one bug, and it is **not** in the cleanup or finalizer
-subsystem. Reduced to:
+The 2026-07-27 diagnosis in this section was wrong, and the correction matters
+because it was pointing the next investigation at the wrong subsystem. It read:
 
-```go
-func register(done chan struct{}) {
-	b := &box{value: 1}
-	runtime.AddCleanup(b, func(struct{}) { done <- struct{}{} }, struct{}{})
-}
+> The retaining reference is a stale pointer word in `register`'s *abandoned*
+> frame, below `main`'s SP. [...] cg12's goroutine stack scan is treating dead
+> stack below the live frames as live.
+
+It is not. `GODEBUG=cg12scanroots=1` (added for this, see below) names the
+retaining frame directly, and for `runtime_cleanup_frame_retention.go` it is
+`main.main` itself:
+
+```
+cg12scanroots: main_main local slot 7  at 0x...5ca8 retains 0x...998300 size 16 head 0x2a
+cg12scanroots: main_main local slot 9  at 0x...5cb8 retains 0x...998300 size 16 head 0x2a
+cg12scanroots: main_main local slot 28 at 0x...5d50 retains 0x...998300 size 16 head 0x2a
 ```
 
-`register` returns, `main` then loops on `runtime.GC()`, and the cleanup never
-runs. `GODEBUG=checkfinalizers=1` reports `queue: 0 finalizers + 0 cleanups` on
-every cycle, so the object is never queued: **it stays reachable**.
+`head 0x2a` is `retainedBox{value: 42}`. `registerRetainedCleanup` is **inlined
+into `main`** -- the out-of-line symbol still exists, but `main` calls
+`runtime.AddCleanup` directly -- so `box` never had a frame of its own to
+abandon. Its three words are `main`'s own locals: the spilled `newobject`
+result, a reload of it, and the variable's alloca cell. `main`'s frame lives for
+the whole `runtime.GC()` loop, so the object never dies.
 
-The retaining reference is a stale pointer word in `register`'s *abandoned*
-frame, below `main`'s SP. Proof: inserting a `scribble()` call that overwrites
-that dead stack region before the GC loop makes the object collectable and the
-cleanup fire (`queue: ... +1 cleanups`). Any perturbation of `register`'s frame
-layout — an extra allocation, a `runtime.KeepAlive`, an added `SetFinalizer`, a
-second cleanup, registering in a loop — also masks it, which is why neighbouring
-capabilities such as `finalizer-cleanup-order`, `cleanup-stop`, and
-`finalizer-tiny` pass. `setfinalizer-clear` passes vacuously: it asserts a
-cleared finalizer does *not* run, which over-retention satisfies trivially.
+Two further facts contradict the old reading. cg12's prologue already zeroes
+every conservatively marked pointer slot (`mc.zeroGoPointerSlots`), so no
+runtime frame can observe what a returned frame left in a slot it has not
+written. And `runtime_cleanup_frame_retention_scribble.go` passes with the
+`scribbleDeadStack` call removed: its helper is simply not inlined, so `box`
+never enters `main`'s frame. The scribble is not what releases the object and
+that file is not a positive proof of anything; the difference between the two
+programs is inlining.
 
-So cg12's goroutine stack scan is treating dead stack below the live frames as
-live. This is a general over-retention (leak-class) bug in GC reachability;
-finalizers and cleanups are merely the only way user code can observe it. The
-fix belongs in stack-map/frame-bound emission, not in `mcleanup.go`.
+The mechanism is in the metadata, not the scan. `gometa.FunctionStackMaps` built
+each safepoint's locals map as the union of that safepoint's live roots with the
+function-wide `LocalPointerWords` -- every pointer-bearing local word and every
+pointer spill slot the frame ever uses. Every call in a function therefore
+reported every pointer the frame ever held as a live root, for as long as the
+frame existed. That is a general leak: any dead pointer local in a long-lived
+frame is retained. Cleanups and finalizers are only how user code notices.
+
+This bug's blast radius is narrower than it looked. The four GC-pressure
+capabilities that were provisionally attributed to it are a separate bug with a
+separate fix; see 5.2.1.
 
 The reduction is committed rather than left in a scratch directory, as three
 `gc` capabilities:
 
 | Capability | Expectation | Role |
 | --- | --- | --- |
-| `cleanup-frame-retention` | `knownGap` | the minimal failure; flips to passing when this is fixed |
+| `cleanup-frame-retention` | `mustPass` | the minimal failure; now passing |
 | `cleanup-frame-retention-masked` | `mustPass` | the eliminated hypotheses — argument shape, allocation pressure, cleanup count, finalizers-work |
-| `cleanup-frame-retention-scribble` | `mustPass` | the positive proof: overwriting the abandoned frame releases the object |
+| `cleanup-frame-retention-scribble` | `mustPass` | kept as a regression test — but *not* the positive proof it was taken for; see below |
 
 All three are frame-layout sensitive, which is why they are three programs and
-not one. Folding the scribble proof in behind the other variants stops it
-reproducing, because the earlier calls change the stack it would need to
-overwrite. Do not consolidate them, and do not add statements to
+not one. Do not consolidate them, and do not add statements to
 `runtime_cleanup_frame_retention.go` — either turns a real failure into a false
-pass. Each file records this in its own header.
+pass. Each file records this in its own header. Note that those headers still
+describe the scribble as demonstrating the mechanism, which the diagnostic below
+disproved; the headers need correcting.
 
-Next: identify which live frame's stack map covers the abandoned region during
-`runtime.GC()` — the stale word sits inside the frames the GC call tree builds
-over `register`'s old frame. The leading hypothesis is a pointer slot that some
-runtime frame's safepoint map marks live but that is not zeroed on entry, so it
-observes whatever `register` left behind.
+#### The stack-scan diagnostic (2026-07-28)
+
+`GODEBUG=cg12scanroots=1` prints, for every frame the precise stack scan walks,
+each pointer word that retains a heap object: the function, whether the word is
+a local or an argument, the stack-map slot index, the word's address, and the
+object's base, size and first word. `cg12scanroots=2` adds each frame's
+sp/fp/varp/argp geometry. It examines exactly the words `scanblock` would
+process, so it follows no pointer the scan would not. It lives in
+`runtime.scanframeworker` (`stdlib/src/runtime/mgcmark.go`).
+
+This is the tool that names a retaining frame, which is what the previous
+investigation was missing.
+
+#### Why per-safepoint precision is not sufficient on its own
+
+Emitting only each safepoint's own live roots fixes the reducer and
+`gc/cleanup-basic`, `gc/cleanup-multiple`, but on its own it broke three
+must-pass capabilities: `gc/pinner-lifecycle` (`found leaking pinned pointer`),
+`runtime-packages/timer-gc-channel` (segfault) and `stack/panic-stack-gc`
+(`missing panic`). All three are address-taken locals.
+
+cg12 has no notion of a source-level variable, so it approximates the liveness
+of an address-taken local by the liveness of the temporaries that hold its
+address. That is only sound while every use is visible in the frame. It is not
+when the address leaves: `runtime.gopanic` publishes `&p` through `g._panic`,
+and `main` hands `&pinner` to a callee that stores a heap pointer into it. The
+conservative map was covering those cases by accident.
+
+The compiler therefore keeps a boundary (`arm64.frameEscapingAllocations`):
+a pointer-bearing allocation whose address is used for anything beyond
+addressing itself is reported at every safepoint, exactly as before; everything
+else -- spill slots and frame-local allocations -- is per-safepoint precise.
+Loads, stores, lifetime markers, constant-offset derivations and cg12's own
+`goc_memcpy`/`goc_memset`/`goc_storep` primitives are address-only uses;
+every other use, including any other call, is an escape.
+
+`runtime-packages/finalizer-resurrect` is still failing because of that
+boundary, and stays `knownGap`. Its retaining word is the data word of the
+interface temporary built for `runtime.SetFinalizer`: the aggregate's address
+reaches a destructed phi (the interface nil check), which merges it with an
+unrelated value, so the allocation is classified as escaping and stays
+conservative. Closing this needs the frontend's escape result, or alloca
+lifetime markers, to reach the backend -- the backend cannot recover it
+syntactically. That is the next step for this section.
 
 #### Fixed: runtime print routines allocated (2026-07-27)
 
@@ -509,6 +688,53 @@ Exit criterion: trace terminates and produces parseable output within its
 budget; all three HTTP programs compile below the agreed memory ceiling and
 return coverage packets. Every capability in the matrix returns a coverage
 packet.
+
+### 5.6 Generic method dispatch (the ECDSA gap)
+
+Current checkpoint:
+
+- [x] Reduce `stdlib-crypto/ecdsa` to a standalone program: a constraint whose
+  type set is a union of pointer types and whose methods are written in terms
+  of the type parameter, a carrier struct holding a `func() P` constructor, and
+  one generic body instantiated for two concrete types.
+- [x] Resolve a method selected on a type-parameter-typed value against the
+  type argument bound by the enclosing instantiation, instead of leaving it on
+  the constraint interface's method.
+- [x] Carry the concrete selection, not just the concrete method, so a type
+  argument that satisfies its constraint through an embedded field has its
+  receiver advanced to that field.
+- [x] Make the resolved method reachable, including the correct instantiation
+  when the type argument is itself a generic type.
+- [x] Pass `stdlib-crypto/ecdsa` three times per program in normal and
+  `-runtime-opt` configurations.
+
+The failure was not in the runtime and not in stdlib. go/types reports the
+object selected by `p.M()`, where `p` has type-parameter type `P`, as the
+method declared by `P`'s *constraint interface*. goc took that object at face
+value: `methodHasInterfaceReceiver` saw an interface receiver, the call was
+routed to the synthesized interface-dispatch wrapper
+(`crypto/internal/fips140/ecdsa.Point.ScalarBaseMult`), and that wrapper
+decoded its receiver as a two-word interface descriptor even though the caller
+had passed a bare `*nistec.P256Point`. The wrapper also had no candidates,
+because `types.Implements` is false between a concrete type and an
+uninstantiated constraint whose method signatures still mention `P`. So the
+concrete type never reached dispatch from either side, and the program
+segfaulted in the wrapper's type-word load.
+
+The fix is at the selection layer, in `goc/compile.go` and `goc/reach.go`: in
+an instantiated body the type argument is statically known, so the call is an
+ordinary direct call on that type's method, and the shared interface-dispatch
+machinery is not involved at all. A body with no bound type argument keeps its
+previous lowering. Nothing in the change names a package, type, or method.
+
+Covered by `core-types/type-param-method-dispatch` and
+`core-types/type-param-method-shapes`, and by
+`TestTypeParameterMethodSelection`,
+`TestTypeParameterMethodCallsLowerToTheConcreteMethod`, and
+`TestOrdinaryInterfaceDispatchIsUnchanged` in `goc/`.
+
+Exit criterion: met. `stdlib-crypto/rsa` was already `mustPass` and was not
+affected.
 
 ## 6. Phase 2: Memory safety, allocation, and accurate GC
 
@@ -673,7 +899,10 @@ coverage classification.
    classifications, one explicit outcome per capability.
 2. **M1 — current failures are green:** defer/panic, signal, finalizer, gob,
    trace, HTTP compiler memory, and the existing ECDSA gap are resolved or
-   correctly reassigned outside runtime scope.
+   correctly reassigned outside runtime scope. The ECDSA gap is closed: it was
+   a generic method-dispatch bug in the compiler, not runtime scope at all
+   (§5.6). Signal delivery during GC (§5.2) and the cleanup/finalizer
+   over-retention (§5.3) are still open.
 3. **M2 — memory foundation is trusted:** allocation families, barriers, stack
    maps, stack copying, and GC stress pass with emitted validators.
 4. **M3 — concurrency is trusted:** multi-P scheduling, preemption, stacks,

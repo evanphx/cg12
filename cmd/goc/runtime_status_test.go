@@ -177,6 +177,18 @@ func runtimeCapabilities() []runtimeCapability {
 		},
 		{
 			category:    "core-types",
+			name:        "type-param-method-dispatch",
+			source:      "runtime_type_param_method_dispatch.go",
+			expectation: runtimeCapabilityMustPass,
+		},
+		{
+			category:    "core-types",
+			name:        "type-param-method-shapes",
+			source:      "runtime_type_param_method_shapes.go",
+			expectation: runtimeCapabilityMustPass,
+		},
+		{
+			category:    "core-types",
 			name:        "append-self-overlap",
 			source:      "runtime_append_self_overlap.go",
 			expectation: runtimeCapabilityMustPass,
@@ -329,8 +341,7 @@ func runtimeCapabilities() []runtimeCapability {
 			category:    "gc",
 			name:        "cleanup-basic",
 			source:      "runtime_cleanup_basic.go",
-			expectation: runtimeCapabilityKnownGap,
-			note:        "over-retention: a stale pointer in the registering function's abandoned frame keeps the object reachable, so it is never queued (see RUNTIME_PLAN.md 5.3)",
+			expectation: runtimeCapabilityMustPass,
 		},
 		{
 			category:    "gc",
@@ -342,15 +353,27 @@ func runtimeCapabilities() []runtimeCapability {
 			category:    "gc",
 			name:        "cleanup-multiple",
 			source:      "runtime_cleanup_multiple.go",
-			expectation: runtimeCapabilityKnownGap,
-			note:        "over-retention: a stale pointer in the registering function's abandoned frame keeps the object reachable, so it is never queued (see RUNTIME_PLAN.md 5.3)",
+			expectation: runtimeCapabilityMustPass,
 		},
 		{
 			category:    "gc",
 			name:        "cleanup-frame-retention",
 			source:      "runtime_cleanup_frame_retention.go",
+			expectation: runtimeCapabilityMustPass,
+		},
+		{
+			category:    "gc",
+			name:        "assist-alloc-recursion",
+			source:      "runtime_gc_assist_stack_growth.go",
 			expectation: runtimeCapabilityKnownGap,
-			note:        "minimal reducer for the 5.3 over-retention bug; flips to passing when the stale-frame retention is fixed",
+			note:        "minimal reducer for the 5.2.1 GC-assist allocation recursion; concurrent runtime.GC() drives goroutine stacks past 4 MiB within one cycle (see RUNTIME_PLAN.md 5.2.1)",
+		},
+		{
+			category:    "gc",
+			name:        "defer-capture-allocs",
+			source:      "runtime_defer_capture_allocs.go",
+			expectation: runtimeCapabilityKnownGap,
+			note:        "compiler-level reducer for 5.2.1: a variable captured by a deferred literal on an untaken branch is still heap-lifted, so runtime.gcAssistAlloc allocates",
 		},
 		{
 			category:    "gc",
@@ -513,7 +536,7 @@ func runtimeCapabilities() []runtimeCapability {
 			name:        "many-goroutines-gc",
 			source:      "runtime_many_goroutines_gc.go",
 			expectation: runtimeCapabilityKnownGap,
-			note:        "times out under sustained GC allocation pressure; root cause not yet separated from the 5.3 over-retention bug",
+			note:        "performance shortfall from the 5.2.1 GC-assist allocation recursion, not the 5.3 over-retention bug; the live heap stays flat while goroutine stacks and mark time grow superlinearly",
 		},
 		{
 			category:    "goroutine",
@@ -664,7 +687,7 @@ func runtimeCapabilities() []runtimeCapability {
 			name:        "gc-churn",
 			source:      "runtime_scheduler_gc_churn.go",
 			expectation: runtimeCapabilityKnownGap,
-			note:        "times out under sustained GC allocation pressure; root cause not yet separated from the 5.3 over-retention bug",
+			note:        "performance shortfall from the 5.2.1 GC-assist allocation recursion, not the 5.3 over-retention bug: the live heap stays flat while goroutine stacks and mark time grow superlinearly, and the program dies with \"goroutine stack exceeds 1000000000-byte limit\" identically before and after the 5.3 fix",
 		},
 		{
 			category:    "stdlib-io",
@@ -970,8 +993,7 @@ func runtimeCapabilities() []runtimeCapability {
 			category:    "stdlib-crypto",
 			name:        "ecdsa",
 			source:      "stdlib_crypto_ecdsa.go",
-			expectation: runtimeCapabilityKnownGap,
-			note:        "the shared generic P-256 point body does not contribute its concrete type to Point method dispatch",
+			expectation: runtimeCapabilityMustPass,
 		},
 		{
 			category:    "stdlib-crypto",
@@ -1098,7 +1120,7 @@ func runtimeCapabilities() []runtimeCapability {
 			name:        "grow-allocs",
 			source:      "bytes_grow_allocs.go",
 			expectation: runtimeCapabilityKnownGap,
-			note:        "times out under sustained GC allocation pressure; root cause not yet separated from the 5.3 over-retention bug",
+			note:        "performance shortfall from the 5.2.1 GC-assist allocation recursion, not the 5.3 over-retention bug; the recursive assist allocations are also what AllocsPerRun reports as spurious Buffer.Grow allocations",
 		},
 		{
 			category:    "stdlib-bytes",
@@ -1315,7 +1337,7 @@ func runtimeCapabilities() []runtimeCapability {
 			name:        "during-gc",
 			source:      "stdlib_signal_during_gc.go",
 			expectation: runtimeCapabilityKnownGap,
-			note:        "signal delivery during GC does not complete in time",
+			note:        "not a signal-delivery gap: every signal is delivered, but the 5.2.1 GC-assist allocation recursion stalls the receiving goroutine for up to 36s, past the program's own 2s deadline",
 		},
 		{
 			category:       "stdlib-signals",
@@ -1981,7 +2003,7 @@ func runtimeCapabilities() []runtimeCapability {
 			name:        "finalizer-resurrect",
 			source:      "runtime_finalizer_resurrect.go",
 			expectation: runtimeCapabilityKnownGap,
-			note:        "over-retention: a stale pointer in the registering function's abandoned frame keeps the object reachable, so it is never queued (see RUNTIME_PLAN.md 5.3)",
+			note:        "the interface temporary built for SetFinalizer is a stack aggregate whose address reaches a destructed phi, so its safepoint maps stay conservative and its data word keeps the object reachable (see RUNTIME_PLAN.md 5.3)",
 		},
 		{
 			category:    "runtime-packages",
