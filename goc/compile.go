@@ -2386,11 +2386,20 @@ func (g *gen) nonEscapingObjectUse(
 		return address == nil || !g.addressEscapesWithin(address, info, parents, body, checking)
 	case *ast.SliceExpr:
 		// A slice can carry the referenced storage into a result, interface, or
-		// longer-lived aggregate. Treat slicing a parameter as escaping unless a
-		// later flow-sensitive analysis proves otherwise. In particular, helpers
-		// such as func bytes(out *[32]byte) []byte { return out[:] } must force a
-		// caller's local array onto the heap.
-		return false
+		// longer-lived aggregate, so the storage escapes exactly when the
+		// resulting slice value does. Ask the same flow-sensitive question used
+		// for other derived values rather than assuming the worst: helpers such
+		// as func bytes(out *[32]byte) []byte { return out[:] } still force a
+		// caller's local array onto the heap, because the returned slice escapes,
+		// while runtime routines that slice a local scratch array only to pass it
+		// to a non-retaining callee -- printuint's var buf [20]byte feeding
+		// gwrite(buf[i:]) -- stay on the stack. Those routines must not allocate:
+		// they run during mark termination and on fatal paths where mallocgc is
+		// forbidden.
+		if parent.X != identifier {
+			return false
+		}
+		return g.valueDoesNotEscapeWithin(parent, info, parents, body, checking)
 	case *ast.SelectorExpr:
 		if parent.X != identifier {
 			return false
@@ -12435,6 +12444,8 @@ func (g *gen) builtinRuntimePrint(call *ast.CallExpr, newline bool) {
 			g.callRuntimePrint(call, "printfloat64", argumentValue)
 		case isRuntimePrintPointer(argumentType):
 			g.callRuntimePrint(call, "printhex", g.cur.Copy(ir.ClsL, argumentValue))
+		case isRuntimeHexType(argumentType):
+			g.callRuntimePrint(call, "printhex", g.cur.Copy(ir.ClsL, argumentValue))
 		case isBasic && basic.Info()&types.IsUnsigned != 0:
 			if class == ir.ClsW {
 				argumentValue = g.cur.Extuw(ir.ClsL, argumentValue)
@@ -12465,6 +12476,24 @@ func (g *gen) callRuntimePrint(node ast.Node, name string, arguments ...ir.Ref) 
 		return
 	}
 	g.fail(node, "runtime print function %s is unavailable", name)
+}
+
+// isRuntimeHexType reports the runtime's own `type hex uint64`, which the
+// runtime uses purely to select hexadecimal formatting for addresses. Its
+// underlying type is an ordinary unsigned integer, so without this the print
+// builtin would route it to printuint and every address in a runtime
+// diagnostic would come out in decimal. The standard compiler special-cases
+// the same named type.
+func isRuntimeHexType(valueType types.Type) bool {
+	named, ok := valueType.(*types.Named)
+	if !ok {
+		return false
+	}
+	object := named.Obj()
+	if object == nil || object.Name() != "hex" || object.Pkg() == nil {
+		return false
+	}
+	return object.Pkg().Path() == "runtime"
 }
 
 func isRuntimePrintPointer(valueType types.Type) bool {

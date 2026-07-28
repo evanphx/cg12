@@ -44,6 +44,16 @@ that must not be hidden by adding more tests:
   fixes;
 - the existing ECDSA case remains a known compiler/stdlib gap.
 
+The 2026-07-22 baseline predates the sysmon segfault fix (`54e7c7e`), which was
+the first change that let the capability matrix run to completion. Commit
+`52757f9` then reclassified 13 always-failing capabilities as `knownGap`; six
+were the net/http type-check gap and have since been repaired and restored to
+`mustPass`. Eight remain, and four of them contradict checkpoints in §5.2/§5.3
+that this document previously recorded as complete. Those sections have been
+corrected. Note also that the coverage baseline covers 294 programs while the
+matrix now holds 322 capabilities; the denominators must be reconciled before a
+new baseline is accepted.
+
 Control runs without coverage instrumentation reproduce the runtime failures
 and large-program compiler memory failures. They are not coverage-counter
 artifacts.
@@ -247,13 +257,19 @@ unsupported fatal-signal behavior in subprocess tests.
 
 Current checkpoint:
 
-- [x] Pass notification context, repeated stop/reset, delivery during GC,
-  delivery during netpoll, and concurrent atomic contention.
+- [x] Pass notification context, repeated stop/reset, delivery during netpoll,
+  and concurrent atomic contention.
 - [x] Keep the temporary slice headers captured by `runtime.selectgo`'s
   synchronous unlock closure on the stack, while still promoting slice backing
   storage assigned to globals.
-- [x] Pass the locked-global-select case and the full signal category ten
+- [ ] Pass delivery during GC. **Regressed.** `stdlib-signals/during-gc` fails
+  with `timed out waiting for signal during GC`; it is currently marked
+  `knownGap`. It is one of four capabilities that only became visible once the
+  sysmon segfault fix (`54e7c7e`) let the matrix run to completion, so it was
+  masked rather than newly broken.
+- [ ] Pass the locked-global-select case and the full signal category ten
   executions per program with optimization and `GOMAXPROCS=1`, `2`, and `4`.
+  Blocked on `during-gc` above; the rest of the category passes.
 
 Exit criterion: signal tests pass under `GOMAXPROCS=1`, `2`, and `4`, including
 race-like stress, without deadlock or runtime lock corruption.
@@ -271,12 +287,15 @@ Current checkpoint:
 - [x] Emit safepoint-specific local stack maps instead of conservatively
   retaining every pointer-bearing local for the entire function. Pointer words
   contained in a live alloca are now expanded into that safepoint's map.
-- [x] Pass synchronized finalizer resurrection after explicitly clearing the
-  last local pointer in a still-running frame.
+- [ ] Pass synchronized finalizer resurrection after explicitly clearing the
+  last local pointer in a still-running frame. **Regressed**
+  (`runtime-packages/finalizer-resurrect`, `finalizer did not run`).
 - [x] Pass basic finalization, clearing, KeepAlive, pointerful stack growth,
-  dependency ordering, tiny-object finalization, cleanup callbacks,
-  `Cleanup.Stop`, and finalizer-before-cleanup ordering.
-- [x] Pass the complete ten-program finalizer/cleanup batch ten times per
+  dependency ordering, tiny-object finalization, `Cleanup.Stop`, and
+  finalizer-before-cleanup ordering.
+- [ ] Pass standalone cleanup callbacks. **Regressed** (`gc/cleanup-basic`,
+  `gc/cleanup-multiple`, `cleanup did not run`).
+- [ ] Pass the complete ten-program finalizer/cleanup batch ten times per
   program with optimization and `GOMAXPROCS=4`.
 - [x] Add multiple-cleanup and `Pinner` lifecycle/invalid-use cases.
 - [x] Add `GODEBUG=cg12checkstackcopy=1` runtime validation that detects stale
@@ -290,8 +309,79 @@ Current checkpoint:
   relocation.
 - [x] Pass `runtime_finalizer_tiny.go` 500 direct optimized executions with
   `GOMAXPROCS=2`, `GOGC=10`, and `GOMEMLIMIT=768MiB`.
-- [x] Pass the cleanup/finalizer/Pinner status subset three times per program
+- [ ] Pass the cleanup/finalizer/Pinner status subset three times per program
   with optimization and `GOMAXPROCS=2`.
+
+#### Root cause of the cleanup/finalizer regression (2026-07-27)
+
+The three failures are one bug, and it is **not** in the cleanup or finalizer
+subsystem. Reduced to:
+
+```go
+func register(done chan struct{}) {
+	b := &box{value: 1}
+	runtime.AddCleanup(b, func(struct{}) { done <- struct{}{} }, struct{}{})
+}
+```
+
+`register` returns, `main` then loops on `runtime.GC()`, and the cleanup never
+runs. `GODEBUG=checkfinalizers=1` reports `queue: 0 finalizers + 0 cleanups` on
+every cycle, so the object is never queued: **it stays reachable**.
+
+The retaining reference is a stale pointer word in `register`'s *abandoned*
+frame, below `main`'s SP. Proof: inserting a `scribble()` call that overwrites
+that dead stack region before the GC loop makes the object collectable and the
+cleanup fire (`queue: ... +1 cleanups`). Any perturbation of `register`'s frame
+layout — an extra allocation, a `runtime.KeepAlive`, an added `SetFinalizer`, a
+second cleanup, registering in a loop — also masks it, which is why neighbouring
+capabilities such as `finalizer-cleanup-order`, `cleanup-stop`, and
+`finalizer-tiny` pass. `setfinalizer-clear` passes vacuously: it asserts a
+cleared finalizer does *not* run, which over-retention satisfies trivially.
+
+So cg12's goroutine stack scan is treating dead stack below the live frames as
+live. This is a general over-retention (leak-class) bug in GC reachability;
+finalizers and cleanups are merely the only way user code can observe it. The
+fix belongs in stack-map/frame-bound emission, not in `mcleanup.go`.
+
+Next: identify which live frame's stack map covers the abandoned region during
+`runtime.GC()` — the stale word sits inside the frames the GC call tree builds
+over `register`'s old frame. The leading hypothesis is a pointer slot that some
+runtime frame's safepoint map marks live but that is not zeroed on entry, so it
+observes whatever `register` left behind.
+
+#### Fixed: runtime print routines allocated (2026-07-27)
+
+`GODEBUG=checkfinalizers=2` — the mode that prints the retention path — used to
+die with `fatal error: mallocgc called with gcphase == _GCmarktermination`. The
+cause was not in the checkmark code: **`runtime.printuint`, `printint`, and
+`printhexopts` each heap-allocated.** Every integer printed by the runtime went
+through `runtime.newobject`, so any runtime diagnostic allocated, which is fatal
+during mark termination and unsound on nosplit and fatal paths generally. The
+scope was much wider than the diagnostic that exposed it.
+
+Root cause: `nonEscapingObjectUse` treated *any* slice expression over a local
+or parameter as escaping. That forced `var buf [20]byte; gwrite(buf[i:])` onto
+the heap. The rule now asks whether the resulting slice value escapes, using the
+same flow-sensitive walk applied to other derived values, so a scratch array
+passed to a non-retaining callee stays on the stack while `return buf[:]` still
+promotes. Covered by `TestLocalArraySlicedIntoNonRetainingCalleeStaysOnStack`
+and `TestLocalArraySlicedIntoReturnedSliceEscapes` in `goc/escape_test.go`.
+
+Also fixed alongside it: cg12 routed the runtime's `type hex uint64` to
+`printuint`, so every address in every runtime diagnostic printed in decimal.
+The print builtin now special-cases the named `runtime.hex` type to `printhex`,
+matching the standard compiler.
+
+Known remaining conservatism, not required here: ranging over a slice parameter
+(`for _, v := range text`) still forces the caller's backing array to the heap.
+The runtime's own print path uses len/index/copy and is unaffected.
+
+With the diagnostic working, `checkfinalizers=2` shows no `WARNING: LIKELY
+CLEANUP/FINALIZER ISSUES` for the reducer — the object is *not* reachable from
+the cleanup or its argument. That independently confirms the retention is
+external to the cleanup, consistent with the stale-frame finding above, but it
+does not by itself name the retaining frame. Naming that frame is the next step
+and still needs a stack-scan-side diagnostic.
 
 Exit criterion: finalizer and cleanup tests pass deterministically using bounded
 GC/yield loops, and pinner/finalizer/cleanup coverage has deliberate tests for
