@@ -14,6 +14,12 @@ import (
 // emission; nil leaves safepoints as code-free stack-map markers.
 type Options struct {
 	GC GCStrategy
+
+	// TLSModel selects how a thread-local's address is computed. The zero value is
+	// local-exec, the only model amd64 emitted before there was a choice, so a
+	// caller that does not set this gets byte-identical code. See tls.go for what
+	// each model assumes and costs.
+	TLSModel TLSModel
 }
 
 // CompileObject compiles a module straight to ELF x86-64 relocatable-object
@@ -139,7 +145,7 @@ func CompileToObjectWith(m *ir.Module, opts Options) (*obj.Object, error) {
 		if err != nil {
 			return nil, fmt.Errorf("function %s: %w", f.Name, err)
 		}
-		mc, err := emitMachine(f, alloc, opts.GC)
+		mc, err := emitMachine(f, alloc, opts.GC, opts.TLSModel)
 		if err != nil {
 			return nil, fmt.Errorf("function %s: %w", f.Name, err)
 		}
@@ -449,6 +455,8 @@ type mc struct {
 
 	gc GCStrategy // pluggable GC strategy, or nil
 
+	tlsModel TLSModel // how a thread-local's address is reached (see tls.go)
+
 	blockDone bool      // a tail call already emitted the block's exit; skip the terminator
 	nextBlock *ir.Block // block laid out after the current one, for fall-through elision
 	useCount  []int     // per-temp use count, for the fused compare-branch
@@ -517,8 +525,8 @@ type blockSym struct {
 	off  int
 }
 
-func emitMachine(f *ir.Func, alloc *allocation, gc GCStrategy) (*machineCode, error) {
-	m := &mc{f: f, alloc: alloc, gc: gc, prog: x64.NewProgram(), instrPC: map[*ir.Instr][2]uint64{}}
+func emitMachine(f *ir.Func, alloc *allocation, gc GCStrategy, tlsModel TLSModel) (*machineCode, error) {
+	m := &mc{f: f, alloc: alloc, gc: gc, tlsModel: tlsModel, prog: x64.NewProgram(), instrPC: map[*ir.Instr][2]uint64{}}
 	m.planFrame()
 	m.useCount = countTempUses(f)
 	m.prologue()
@@ -862,13 +870,11 @@ func (m *mc) materializeFloat(d Reg, bits int64, size int) {
 }
 
 // materializeSym loads a symbol address into a register. An ordinary symbol uses
-// a RIP-relative LEA + PC32 relocation; a thread-local symbol uses the local-exec
-// model: load the thread pointer from %fs:0, then add its TP-relative offset.
+// a RIP-relative LEA + PC32 relocation; a thread-local symbol goes through the
+// TLS model the options selected, whose sequences live in tls.go.
 func (m *mc) materializeSym(d Reg, sym string, off int64, tls bool) {
 	if tls {
-		m.emit(x64.MovFSZero(d.mreg()))         // d = thread pointer
-		m.emit(x64.AddImm32(true, d.mreg(), 0)) // d += tpoff(sym) + off
-		m.recordReloc(m.prog.Len()-4, sym, obj.R_X86_64_TPOFF32, off)
+		m.materializeThreadSym(d, sym, off)
 		return
 	}
 	m.emit(x64.Lea(true, d.mreg(), x64.RIPRel(0)))
