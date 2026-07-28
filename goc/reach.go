@@ -726,6 +726,18 @@ func reachableFunctions(roots []*ast.FuncDecl, rootFiles []*ast.File, rootInfo *
 				if !ok {
 					return true
 				}
+				// A method selected on a value whose static type is a type
+				// parameter resolves to the constraint interface's method,
+				// which has no body. Inside an instantiated body the call
+				// really targets the type argument's method, so that is the
+				// method whose body has to be reachable.
+				if selector, ok := parents[identifier].(*ast.SelectorExpr); ok && selector.Sel == identifier {
+					selection := current.info.Selections[selector]
+					substitutions := functionTypeSubstitutions(current)
+					if concreteSelection, resolved := typeParameterMethodSelection(selection, object, substitutions); resolved {
+						object = concreteSelection.Obj().(*types.Func)
+					}
+				}
 				if instance, ok := current.info.Instances[identifier]; ok {
 					origin := object.Origin()
 					signature := origin.Type().(*types.Signature)

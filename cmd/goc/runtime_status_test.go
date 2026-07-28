@@ -181,6 +181,18 @@ func TestARM64RuntimeCapabilityStatus(t *testing.T) {
 		},
 		{
 			category:    "core-types",
+			name:        "type-param-method-dispatch",
+			source:      "runtime_type_param_method_dispatch.go",
+			expectation: runtimeCapabilityMustPass,
+		},
+		{
+			category:    "core-types",
+			name:        "type-param-method-shapes",
+			source:      "runtime_type_param_method_shapes.go",
+			expectation: runtimeCapabilityMustPass,
+		},
+		{
+			category:    "core-types",
 			name:        "append-self-overlap",
 			source:      "runtime_append_self_overlap.go",
 			expectation: runtimeCapabilityMustPass,
@@ -988,8 +1000,7 @@ func TestARM64RuntimeCapabilityStatus(t *testing.T) {
 			category:    "stdlib-crypto",
 			name:        "ecdsa",
 			source:      "stdlib_crypto_ecdsa.go",
-			expectation: runtimeCapabilityKnownGap,
-			note:        "the shared generic P-256 point body does not contribute its concrete type to Point method dispatch",
+			expectation: runtimeCapabilityMustPass,
 		},
 		{
 			category:    "stdlib-crypto",
