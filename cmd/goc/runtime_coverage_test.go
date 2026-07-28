@@ -61,6 +61,12 @@ var runtimeStatusShards = flag.Int(
 	"partition the runtime capability matrix into this many shards (for parallel CI jobs)",
 )
 
+var runtimeStatusCompileWorkers = flag.Int(
+	"runtime-status-compile-workers",
+	0,
+	"compile this many capability programs concurrently (0 picks a memory-aware default)",
+)
+
 var runtimeStatusShard = flag.Int(
 	"runtime-status-shard",
 	0,

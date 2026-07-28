@@ -4,12 +4,16 @@ import (
 	"bytes"
 	"context"
 	"errors"
+	"flag"
 	"fmt"
 	"os"
 	"os/exec"
 	"path/filepath"
+	"regexp"
 	"runtime"
+	"strconv"
 	"strings"
+	"sync"
 	"syscall"
 	"testing"
 	"time"
@@ -2202,6 +2206,29 @@ func TestARM64RuntimeCapabilityStatus(t *testing.T) {
 	capabilities := runtimeCapabilities()
 	runtimeCoverageCollector.expect(capabilities)
 
+	// Compile this shard's programs up front and in parallel. Compilation is
+	// 98% of this suite's wall clock, so overlapping it is the difference
+	// between tens of minutes and about one; the runs that follow stay
+	// sequential because several of them assert timing and GC behaviour.
+	shard := make([]runtimeCapability, 0, len(capabilities))
+	for index, capability := range capabilities {
+		if index%*runtimeStatusShards != *runtimeStatusShard {
+			continue
+		}
+		if !runtimeCapabilitySelected(capability) {
+			continue
+		}
+		shard = append(shard, capability)
+	}
+	compileQueue := startRuntimeCapabilityCompiles(compiler, directory, shard)
+	if *runtimeStatusProgress {
+		fmt.Fprintf(
+			os.Stderr,
+			"runtime-status: compiling %d programs, %d at a time\n",
+			len(shard), compileRuntimeCapabilityWorkers(),
+		)
+	}
+
 	for index, capability := range capabilities {
 		capability := capability
 		// Shard the matrix across parallel CI jobs: each shard owns the
@@ -2223,7 +2250,8 @@ func TestARM64RuntimeCapabilityStatus(t *testing.T) {
 			if *runtimeStatusProgress {
 				fmt.Fprintf(os.Stderr, "runtime-status: start %s/%s %s\n", capability.category, capability.name, capability.source)
 			}
-			result := runRuntimeCapabilityProgram(t, compiler, directory, capability)
+			result := runRuntimeCapabilityProgram(t, compileQueue.await(capability), capability)
+			compileQueue.release()
 			if *runtimeStatusProgress {
 				status := "pass"
 				if result.err != nil {
@@ -2345,30 +2373,204 @@ func unreportedRuntimeCapabilityResult() runtimeCapabilityResult {
 	}
 }
 
+// The capability matrix compiles one goc and reuses it for every program in the
+// process. Building it is not free, and it used to happen with GOCACHE pointed
+// at a fresh temporary directory, which forced a cold rebuild of the whole
+// compiler on every invocation. The ambient build cache is correct here: `go
+// build` already keys its cache on the source, so a stale binary is not a
+// hazard it can produce.
+var (
+	runtimeCapabilityCompilerOnce sync.Once
+	runtimeCapabilityCompilerPath string
+	runtimeCapabilityCompilerErr  error
+)
+
 func buildGOCForRuntimeCapabilityStatus(t *testing.T, directory string) string {
 	t.Helper()
 
-	compiler := filepath.Join(directory, "goc")
-	build := exec.Command("go", "build", "-o", compiler, ".")
-	build.Env = append(os.Environ(), "GOCACHE="+filepath.Join(directory, "cache"))
-	if output, err := build.CombinedOutput(); err != nil {
-		t.Fatalf("build compiler: %v\n%s", err, output)
+	runtimeCapabilityCompilerOnce.Do(func() {
+		compiler := filepath.Join(directory, "goc")
+		build := exec.Command("go", "build", "-o", compiler, ".")
+		if output, err := build.CombinedOutput(); err != nil {
+			runtimeCapabilityCompilerErr = fmt.Errorf("build compiler: %w\n%s", err, output)
+			return
+		}
+		runtimeCapabilityCompilerPath = compiler
+	})
+	if runtimeCapabilityCompilerErr != nil {
+		t.Fatal(runtimeCapabilityCompilerErr)
 	}
 
-	return compiler
+	return runtimeCapabilityCompilerPath
 }
 
-func runRuntimeCapabilityProgram(t *testing.T, compiler string, directory string, capability runtimeCapability) runtimeCapabilityResult {
-	t.Helper()
+// runtimeCapabilityCompilation is one program's compile result, produced ahead
+// of the run phase so the compiles can overlap.
+type runtimeCapabilityCompilation struct {
+	executable string
+	metadata   string
+	output     string
+	err        error
+	duration   time.Duration
+	peakRSS    uint64
+}
 
-	sourceName := capability.source
-	source := filepath.Join("..", "..", "goc", "testdata", sourceName)
-	executable := filepath.Join(directory, strings.TrimSuffix(sourceName, ".go")+".bin")
-	defer func() {
-		if err := os.Remove(executable); err != nil && !errors.Is(err, os.ErrNotExist) {
-			t.Logf("remove runtime capability executable: %v", err)
+// compileRuntimeCapabilityWorkers is how many programs to compile at once.
+//
+// Compilation is 98% of this suite's wall clock and the programs are
+// independent, so this is the difference between forty minutes and about one.
+// It is bounded by memory rather than by cores: a single compile peaks around
+// 1.6 GiB on the largest net/http programs, so an unbounded fan-out on a small
+// machine would swap or OOM where a bounded one merely takes longer.
+func compileRuntimeCapabilityWorkers() int {
+	if *runtimeStatusCompileWorkers > 0 {
+		return *runtimeStatusCompileWorkers
+	}
+	workers := runtime.NumCPU()
+	if available := availableMemoryBytes(); available > 0 {
+		byMemory := int(available / (2 << 30))
+		if byMemory < workers {
+			workers = byMemory
+		}
+	}
+	return max(workers, 1)
+}
+
+// availableMemoryBytes reports MemAvailable, or 0 when it cannot be read. It is
+// deliberately MemAvailable rather than MemFree: page cache is reclaimable, and
+// treating it as unavailable would serialize the suite on any machine that has
+// been doing I/O.
+func availableMemoryBytes() uint64 {
+	meminfo, err := os.ReadFile("/proc/meminfo")
+	if err != nil {
+		return 0
+	}
+	for _, line := range strings.Split(string(meminfo), "\n") {
+		fields := strings.Fields(line)
+		if len(fields) < 2 || fields[0] != "MemAvailable:" {
+			continue
+		}
+		kilobytes, err := strconv.ParseUint(fields[1], 10, 64)
+		if err != nil {
+			return 0
+		}
+		return kilobytes * 1024
+	}
+	return 0
+}
+
+// runtimeCapabilityCompileQueue compiles programs ahead of the sequential run
+// phase, bounded in two independent ways.
+//
+// Concurrency is bounded by compileRuntimeCapabilityWorkers, which is about CPU
+// and memory. Look-ahead is bounded separately, because every compiled program
+// occupies disk until its run deletes it: compiling all 356 up front peaks at
+// well over a gigabyte, which is fine on a build host and fatal on a laptop
+// whose /tmp is a tmpfs. Bounding the number of compiled-but-not-yet-run
+// programs keeps the workers saturated -- the run phase is 1.8% of wall clock,
+// so it never starves them -- while capping disk at the window rather than the
+// corpus.
+type runtimeCapabilityCompileQueue struct {
+	entries   map[string]*runtimeCapabilityCompileEntry
+	lookahead chan struct{}
+}
+
+type runtimeCapabilityCompileEntry struct {
+	done   chan struct{}
+	result runtimeCapabilityCompilation
+}
+
+func startRuntimeCapabilityCompiles(
+	compiler string,
+	directory string,
+	capabilities []runtimeCapability,
+) *runtimeCapabilityCompileQueue {
+	workers := compileRuntimeCapabilityWorkers()
+	queue := &runtimeCapabilityCompileQueue{
+		entries:   make(map[string]*runtimeCapabilityCompileEntry, len(capabilities)),
+		lookahead: make(chan struct{}, 4*workers),
+	}
+	for _, capability := range capabilities {
+		queue.entries[capability.category+"/"+capability.name] = &runtimeCapabilityCompileEntry{
+			done: make(chan struct{}),
+		}
+	}
+
+	slots := make(chan struct{}, workers)
+	go func() {
+		for _, capability := range capabilities {
+			// Both budgets are taken before the compile starts and the
+			// look-ahead one is only returned once the program has run, so a
+			// slow run phase stalls compilation instead of filling the disk.
+			queue.lookahead <- struct{}{}
+			slots <- struct{}{}
+			go func(capability runtimeCapability) {
+				defer func() { <-slots }()
+				entry := queue.entries[capability.category+"/"+capability.name]
+				entry.result = compileRuntimeCapability(compiler, directory, capability)
+				close(entry.done)
+			}(capability)
 		}
 	}()
+
+	return queue
+}
+
+// await blocks until the capability's program has been compiled.
+func (queue *runtimeCapabilityCompileQueue) await(capability runtimeCapability) runtimeCapabilityCompilation {
+	entry := queue.entries[capability.category+"/"+capability.name]
+	<-entry.done
+	return entry.result
+}
+
+// release returns the look-ahead budget a finished run was holding.
+func (queue *runtimeCapabilityCompileQueue) release() {
+	<-queue.lookahead
+}
+
+// runtimeCapabilitySelected reports whether -test.run would run this
+// capability's subtest, so a targeted run compiles only what it will execute.
+// Go matches each slash-separated element of the pattern against the
+// corresponding element of the test name, unanchored, so this mirrors that.
+// An unparseable pattern selects everything: over-compiling is slow, but
+// skipping a capability the suite is about to run would report a phantom pass.
+func runtimeCapabilitySelected(capability runtimeCapability) bool {
+	pattern := ""
+	if run := flag.Lookup("test.run"); run != nil {
+		pattern = run.Value.String()
+	}
+	if pattern == "" {
+		return true
+	}
+
+	elements := strings.Split(pattern, "/")
+	name := []string{"TestARM64RuntimeCapabilityStatus", capability.category, capability.name}
+	for index, element := range elements {
+		if index >= len(name) {
+			break
+		}
+		matched, err := regexp.MatchString(element, name[index])
+		if err != nil {
+			return true
+		}
+		if !matched {
+			return false
+		}
+	}
+
+	return true
+}
+
+// compileRuntimeCapability compiles one program. It takes no *testing.T because
+// it runs on its own goroutine, and most of testing.T is not safe to call from
+// one that does not own the subtest.
+func compileRuntimeCapability(
+	compiler string,
+	directory string,
+	capability runtimeCapability,
+) runtimeCapabilityCompilation {
+	source := filepath.Join("..", "..", "goc", "testdata", capability.source)
+	executable := filepath.Join(directory, strings.TrimSuffix(capability.source, ".go")+".bin")
 
 	compileArguments := []string{"-o", executable}
 	if *runtimeOptimize {
@@ -2377,19 +2579,48 @@ func runRuntimeCapabilityProgram(t *testing.T, compiler string, directory string
 	metadata := ""
 	if *runtimeCoverageProfile != "" {
 		metadata = executable + ".runtime-cover.json"
-		defer os.Remove(metadata)
 		compileArguments = append(compileArguments, "-runtime-covermeta", metadata)
 	}
 	compileArguments = append(compileArguments, source)
+
 	compile := exec.Command(compiler, compileArguments...)
-	compileStarted := time.Now()
-	compileOutput, compileErr := compile.CombinedOutput()
-	compileDuration := time.Since(compileStarted)
-	compilePeakRSS := runtimeCapabilityPeakRSS(compile)
-	if compileErr != nil {
+	started := time.Now()
+	output, err := compile.CombinedOutput()
+
+	return runtimeCapabilityCompilation{
+		executable: executable,
+		metadata:   metadata,
+		output:     string(output),
+		err:        err,
+		duration:   time.Since(started),
+		peakRSS:    runtimeCapabilityPeakRSS(compile),
+	}
+}
+
+func runRuntimeCapabilityProgram(
+	t *testing.T,
+	compilation runtimeCapabilityCompilation,
+	capability runtimeCapability,
+) runtimeCapabilityResult {
+	t.Helper()
+
+	executable := compilation.executable
+	metadata := compilation.metadata
+	compileDuration := compilation.duration
+	compilePeakRSS := compilation.peakRSS
+	defer func() {
+		if err := os.Remove(executable); err != nil && !errors.Is(err, os.ErrNotExist) {
+			t.Logf("remove runtime capability executable: %v", err)
+		}
+		if metadata != "" {
+			os.Remove(metadata)
+		}
+	}()
+
+	if compilation.err != nil {
 		return runtimeCapabilityResult{
-			output:          string(compileOutput),
-			err:             errors.New("compile failed: " + compileErr.Error()),
+			output:          compilation.output,
+			err:             errors.New("compile failed: " + compilation.err.Error()),
 			compileOutcome:  runtimeCoverageOutcomeFailed,
 			runOutcome:      runtimeCoverageOutcomeNotRun,
 			coverageOutcome: runtimeCoverageOutcomeNotRun,
