@@ -31,22 +31,41 @@ baseline is `cmd/goc/testdata/runtime_coverage_linux_arm64.json`.
 | Compiled-block coverage | 30.6% |
 
 The baseline already exercises useful portions of allocation, marking,
-sweeping, stack growth, channels, timers, and netpoll. It also exposes failures
-that must not be hidden by adding more tests:
+sweeping, stack growth, channels, timers, and netpoll.
 
-- defer/recover programs fail with `no deferreturn`;
-- panic-time GC can report an address that is not a stack address;
-- signal notification can crash in `internal/runtime/atomic.Xchg8` or runtime
-  locking;
-- finalizer resurrection did not run correctly. It is fixed and
-  `runtime-packages/finalizer-resurrect` is `mustPass` as of 2026-07-28;
-  see §5.3;
-- the runtime trace program runs out of memory or times out;
-- the accepted baseline still needs a rerun after recent trace and large HTTP
-  fixes, and the runtime source fingerprint has since moved, so a diff against
-  it is now refused rather than silently misleading;
-- the ECDSA case was a compiler gap in generic method dispatch. It is fixed and
-  `stdlib-crypto/ecdsa` is `mustPass` as of 2026-07-28; see §5.6.
+Every capability failure this baseline exposed has since been closed. They are
+listed here with their resolution because each one turned out to be a compiler
+defect rather than a runtime defect, which is the single most useful pattern in
+this document:
+
+| Baseline failure | Resolution |
+| --- | --- |
+| defer/recover programs fail with `no deferreturn` | §5.1 |
+| panic-time GC reports a non-stack address | §5.1 |
+| signal notification crashes in atomics or runtime locking | §5.2 |
+| signal delivery during GC times out | one bug with three other timeouts: §5.2.1 |
+| finalizer resurrection does not run | §5.3 |
+| cleanup callbacks never run | §5.3 |
+| the runtime trace program OOMs or times out | §5.5 |
+| the ECDSA case | generic method dispatch, §5.6 |
+
+The accepted baseline still needs a rerun. It is now stale in two ways: it
+covers 294 of the matrix's 338 capabilities, and the runtime source fingerprint
+has moved, so a diff against it is refused rather than silently misleading.
+
+### Current state (2026-07-28)
+
+The capability matrix holds **338 capabilities and no `knownGap` at all**. The
+only declared exception is `defer-panic/panic-string-output`, a deliberate
+`expectedFailure`. Phase 1 (§5) is complete; §5.10 records what remains open,
+none of which is a failing capability.
+
+That is a statement about the matrix, not about the runtime. Per §2, executing a
+line is not evidence that stack maps, write barriers, unwinding, or scheduler
+state are correct, and the reviewed function inventory — not the matrix — is the
+completion gate. Several of the bugs closed in §5.7 through §5.9 were invisible
+to a green matrix and were found only by statistical repetition, by comparing
+against the host toolchain, or by a diagnostic built for the purpose.
 
 The 2026-07-22 baseline predates the sysmon segfault fix (`54e7c7e`), which was
 the first change that let the capability matrix run to completion. Commit
@@ -184,13 +203,18 @@ Current M0 checkpoint:
 - [x] Refuse a sharded coverage run, which would publish a fraction of the
   corpus as a complete report, and refuse a coverage run on a host that cannot
   execute the matrix rather than skipping silently.
-- [ ] Reach one usable coverage outcome per capability by repairing the current
-  failures. The 2026-07-28 verification run reached 326 of 329: every capability
-  compiled and ran, none was skipped or unreported, and the three absences are
-  `goroutine/many-goroutines-gc`, `scheduler-stress/gc-churn`, and
-  `stdlib-bytes/grow-allocs`, each killed at its 30s timeout with that recorded
-  as its reason. All three are the §5.2.1 GC-assist failure, not a collector
-  gap, so this box stays open until that runtime work lands.
+- [ ] Reach one usable coverage outcome per capability. The last collection run
+  reached 326 of 329: every capability compiled and ran, none was skipped or
+  unreported, and the three absences — `goroutine/many-goroutines-gc`,
+  `scheduler-stress/gc-churn` and `stdlib-bytes/grow-allocs` — were each killed
+  at its 30s timeout with that recorded as its reason.
+
+  **The blocking reason has changed.** All three absences were the §5.2.1
+  GC-assist failure, and that is fixed: all three are `mustPass` and passing.
+  Nothing is known to prevent a full 338-of-338 collection. What is missing is
+  the run itself. This box needs a fresh collection over the current tree, not
+  more runtime work, and it is the last thing standing between the project and
+  M0.
 
 ### 4.1 Make reports stable and comparable
 
@@ -1525,7 +1549,83 @@ holds `runtime.gcAssistAlloc` at zero allocations.
 
 Still open: `println` with several operands does not print the spaces the spec
 requires (`println("a", 1)` gives `a1`). Found while reducing this bug, unrelated
-to it, and not fixed here.
+to it, and not fixed here. Carried in §5.10 with the rest of Phase 1's open
+items, together with the two further loop-related defects this work exposed: the
+non-identifier range key and the `runtimeAllocation` gating.
+
+### 5.10 Open items carried out of Phase 1 (2026-07-28)
+
+Phase 1 closed every failing capability, but the work surfaced defects and gaps
+that no capability covers. They are recorded here because a green matrix will not
+find them again, and because three of them were nearly lost: they existed only in
+the reports of the jobs that found them.
+
+#### Known miscompiles, not covered by any capability
+
+- **`for x.f = range s` silently drops the key assignment.** A range key that is
+  not a plain identifier — a struct field, an index expression — is discarded, so
+  the assignment never happens. This is the same class as the per-iteration bug
+  fixed in §5.9 and was found while reducing it. Pre-existing, unfixed, and
+  untested: nothing in the matrix uses a non-identifier range key. This is the
+  highest-value item in this section, because it is a wrong-answer bug in valid
+  Go that the suite cannot see.
+
+- **`println` with several operands omits the spaces the spec requires.**
+  `println("a", 1, true)` prints `a1true` where the host toolchain prints
+  `a 1 true`. Found while reducing §5.9. Affects the runtime's own diagnostics.
+
+- **Per-iteration loop lowering is gated on `g.runtimeAllocation`.** With that
+  mode off, escaping captures are not heap-lifted at all, so loops keep the
+  pre-§5.9 shared-slot behaviour — that is, the miscompile returns. `goc` always
+  compiles with it on, so this is latent rather than live, but it is an
+  undocumented correctness cliff: any future caller that turns the mode off
+  silently loses Go 1.22 loop semantics.
+
+#### Residual runtime faults
+
+- **`fatal error: found pointer to free object`** survives at roughly 20 in
+  160000 runs, established as pre-existing by matched controls compiled from
+  sha256-identical sources (§5.8). Two orders of magnitude rarer than the
+  `runtime.KeepAlive` fault it was hiding behind. Not reduced; it needs a
+  reducer of its own before it is worth measuring.
+
+- **Rare hangs.** The §5.8 verification saw runs exceed a 60s timeout on both
+  the base and the fixed compiler, at a low rate, unexplained and unattributed.
+  Any harness that measures fault rates on `many-goroutines-gc` must impose a
+  per-run timeout or it will stall instead of reporting.
+
+#### Compiler bloat and conservatism
+
+- **`materializeNilInterface` is emitted for every interface argument at every
+  call site** — a compare, two extra blocks, a phi, and a zeroed 16-byte alloca.
+  The nil check is provably dead whenever the operand is an alloca address, which
+  is the common case. This is real bloat throughout the runtime and the standard
+  library, and removing it is a frontend change with a large blast radius, so it
+  was deliberately not bundled into §5.3's fix.
+
+- **`internal/poll/writev.go`'s `&chunk[0]`** is treated as addressing the slice
+  header, so `chunk` is heap-lifted. Pre-existing conservatism, but since §5.9 it
+  costs one cell per iovec rather than one per `Writev`. Narrowing
+  `findEscapingCaptures` for `&slice[i]` would remove it.
+
+- The §5.3 escape boundary's `OSel` derivation path is covered by unit test only;
+  no capability's `-O` build keeps the diamond rather than if-converting it.
+
+#### Unmeasured
+
+- The compile-time cost of §5.3's allocation-set fixpoint was never measured. The
+  box it ran on was shared, so no timing measurement taken there would have been
+  trustworthy.
+
+- The stdlib per-iteration sites in §5.9 come from a sample of large programs,
+  not the whole corpus; `stdlib_http_tls_client_server.go` exceeded the
+  instrumented compile budget. There may be more.
+
+- The matrix runs at `GOMAXPROCS` 1 through 4. Both §5.7 and §5.8 were invisible
+  below `GOMAXPROCS=4`, and §5.7's was found only at 64. Raising the matrix
+  ceiling was considered and rejected as a flakiness risk; the reducers instead
+  set their own `GOMAXPROCS`. That keeps the coverage but leaves the general
+  question open: defects that need many Ps are still structurally hard to see.
 
 ## 6. Phase 2: Memory safety, allocation, and accurate GC
 
@@ -1688,14 +1788,18 @@ coverage classification.
 
 1. **M0 — coverage is reproducible:** stable report/diff, checked baseline,
    classifications, one explicit outcome per capability.
-2. **M1 — current failures are green:** defer/panic, signal, finalizer, gob,
-   trace, HTTP compiler memory, and the existing ECDSA gap are resolved or
-   correctly reassigned outside runtime scope. The ECDSA gap is closed: it was
-   a generic method-dispatch bug in the compiler, not runtime scope at all
-   (§5.6). The `sweep increased allocation count` failure is closed: it was a
-   missing `NotInHeap` write-barrier exemption in the compiler (§5.7). Signal
-   delivery during GC (§5.2) and the cleanup/finalizer over-retention (§5.3)
-   are still open.
+2. **M1 — current failures are green: COMPLETE (2026-07-28).** Every failure
+   this milestone named is closed, and each turned out to be a compiler defect:
+   defer/panic (§5.1), signal delivery during GC (§5.2.1), cleanup and finalizer
+   over-retention (§5.3), gob (§5.4), trace and HTTP compiler memory (§5.5),
+   ECDSA generic method dispatch (§5.6), and `sweep increased allocation count`
+   (§5.7). The matrix carries no `knownGap`. Three further defects were found
+   while closing these and are also fixed: the argument stack-map hole, where
+   rootless safepoints resolved to the entry map and the collector scanned
+   uninitialised stack as roots (§5.3, "The argument stack-map hole"); the
+   `runtime.KeepAlive` global root (§5.8); and per-iteration loop variables
+   (§5.9). §5.10 lists what is
+   open; none of it is a failing capability.
 3. **M2 — memory foundation is trusted:** allocation families, barriers, stack
    maps, stack copying, and GC stress pass with emitted validators.
 4. **M3 — concurrency is trusted:** multi-P scheduling, preemption, stacks,
@@ -1716,21 +1820,66 @@ limit, and commit only when the milestone's stated invariants are true.
 
 ## 13. Immediate next batch
 
-Start with the following bounded sequence:
+The original batch here is complete: every item from the stable report-diff
+through the HTTP compilation OOMs is closed, and each is recorded in its own §5
+subsection. What follows replaces it.
 
-1. Add the stable report-diff and uncovered-function classification format.
-2. Reduce the smallest `no deferreturn` failure and add defer/frame/stack-map
-   validation around it.
-3. Fix the panic/defer unwind path, then run every existing defer/panic case.
-4. Fix panic-time GC stack scanning using the same frame validation.
-5. Reduce and fix the signal/atomic crash.
-6. Fix finalizer resurrection and cleanup liveness.
-7. Reduce the gob reflection failure.
-8. Separate and fix trace runtime growth from compiler memory growth.
-9. Profile and reduce the three HTTP compilation OOMs.
-10. Re-run the complete capability matrix, accept the first stable baseline, and
-    begin the allocation/GC phase.
+1. **Accept the first stable baseline.** Run a full coverage collection over the
+   current tree and accept it. This is the last open M0 checkbox (§4) and it is
+   no longer blocked on runtime work — the three capabilities that used to time
+   out now pass. Expect the source-drift check to refuse a diff against the
+   2026-07-22 baseline; that is correct behaviour, not a failure. On acceptance
+   `runtime_coverage_baseline_pending.json` empties and the denominator test
+   reconciles baseline to matrix directly.
 
-This order deliberately repairs the mechanisms used to diagnose later phases:
-unwinding, stack metadata, GC pointer accuracy, atomics, and coverage reporting
-must be trustworthy before scheduler and stress results can be interpreted.
+2. **Fix `for x.f = range s`** (§5.10). A wrong-answer bug in valid Go that no
+   capability covers. Land a reducer first — its absence is why the bug survived
+   §5.9.
+
+3. **Reduce `found pointer to free object`** (§5.10). It needs a reducer with a
+   usable failure rate before it can be attributed, in the way §5.8's
+   `gc/keepalive-stack-root` made its predecessor measurable.
+
+4. **Begin Phase 2 (§6).** The allocation-family, write-barrier and stack-map
+   work is now on a foundation that has been independently exercised, and §6's
+   compiler-emitted checks should be built on the diagnostics Phase 1 produced
+   rather than new ones: `cg12scanroots`, `cg12checkwb` and `cg12checkstackcopy`
+   already cover root reporting, barrier validation and stack-copy staleness.
+
+The original order was chosen so that the mechanisms used to diagnose later
+phases — unwinding, stack metadata, GC pointer accuracy, atomics, coverage
+reporting — were trustworthy before scheduler and stress results could be
+interpreted. That reasoning held, and it is worth restating as a lesson rather
+than an instruction: three of the four defects found in §5.7 through §5.9 were
+caught by tools built during earlier sections, and none of them would have been
+visible in a pass/fail suite.
+
+## 14. What Phase 1 established about method
+
+Recorded because the same mistakes are cheap to repeat.
+
+- **Every Phase 1 failure was a compiler defect, not a runtime defect.** The
+  runtime is vendored upstream source and was almost never wrong. When a runtime
+  symptom appears, the prior should be that cg12 generated bad code or bad
+  metadata for it.
+
+- **A green suite is weak evidence for a codegen change.** The candidate fix for
+  §5.2.1 passed the entire suite while silently miscompiling `defer` inside a
+  loop; it was caught only by diffing against the host toolchain. §5.9's bug had
+  been live indefinitely for the same reason. Compare against host Go per §3
+  step 2 — that step is the one that actually finds things.
+
+- **Rate bugs need rate measurements.** §5.8 moved a fault from 472 in 24000 runs
+  to 0 in 24000. A single run, or a handful, would have shown nothing either way.
+  Matched controls compiled from identical sources are what separate "fixed" from
+  "made rarer".
+
+- **A reduction is a claim and can be wrong.** `cleanup-frame-retention-scribble`
+  was committed as the positive proof of a stale-frame theory. The theory was
+  wrong and the file proved nothing: it passes with the scribble removed, and the
+  real difference was inlining. A reducer earns its status by being re-tested
+  against the mechanism it supposedly demonstrates, not by having reproduced once.
+
+- **Build the diagnostic before the fix.** `cg12scanroots` named the retaining
+  frame in minutes after an earlier investigation had failed to find it at all.
+  §3 step 5 asks for this; it repaid the cost every time it was followed.
