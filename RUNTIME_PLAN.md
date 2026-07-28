@@ -1579,8 +1579,9 @@ holds `runtime.gcAssistAlloc` at zero allocations.
 Still open: `println` with several operands does not print the spaces the spec
 requires (`println("a", 1)` gives `a1`). Found while reducing this bug, unrelated
 to it, and not fixed here. Carried in §5.10 with the rest of Phase 1's open
-items, together with the two further loop-related defects this work exposed: the
-non-identifier range key and the `runtimeAllocation` gating.
+items, together with one of the two further loop-related defects this work
+exposed, the `runtimeAllocation` gating. The other, the non-identifier range
+key, is fixed in §5.11.
 
 ### 5.10 Open items carried out of Phase 1 (2026-07-28)
 
@@ -1591,13 +1592,38 @@ the reports of the jobs that found them.
 
 #### Known miscompiles, not covered by any capability
 
-- **`for x.f = range s` silently drops the key assignment.** A range key that is
-  not a plain identifier — a struct field, an index expression — is discarded, so
-  the assignment never happens. This is the same class as the per-iteration bug
-  fixed in §5.9 and was found while reducing it. Pre-existing, unfixed, and
-  untested: nothing in the matrix uses a non-identifier range key. This is the
-  highest-value item in this section, because it is a wrong-answer bug in valid
-  Go that the suite cannot see.
+- **A closure that assigns a computed string to a captured string variable
+  leaves it pointing at the closure's dead frame.**
+
+  ```go
+  log := "a"
+  f := func(s string) {
+      log = log + s
+      fmt.Println("inside", log) // az, correct
+  }
+  f("z")
+  fmt.Println("outside", log) // cg12 prints nothing; the host prints az
+  ```
+
+  A local string variable's frame slot holds the address of a 16-byte header,
+  and assigning a computed string copies that header into an alloca in the
+  *assigning* function's frame. When the assigning function is a closure that
+  captured the variable by reference — a non-escaping function literal, or the
+  yield function a range-over-function body is lowered into — the alloca belongs
+  to the closure's frame and the caller's variable dangles once it returns.
+  `log += s` in the same position produced `fatal error: runtime: out of
+  memory`. The escaping-closure path is unaffected, because `variableStorage`
+  heap-lifts the variable and makes its storage the header itself, so a
+  goroutine closure over the same variable is correct.
+
+  Found while establishing the scope of §5.11 and deliberately left out of it:
+  it needs no `range` statement and no non-identifier destination — a plain
+  `for i := range seq { log += fmt.Sprint(i) }` over a function iterator
+  reproduces it — so it belongs to closure capture, not to assignment
+  destinations. It is the reason three range-over-function cases in §5.11's
+  differential corpus still differ from the host; they were rewritten to
+  accumulate into a slice, which is unaffected, and the underlying defect is
+  recorded here rather than worked around.
 
 - **`println` with several operands omits the spaces the spec requires.**
   `println("a", 1, true)` prints `a1true` where the host toolchain prints
@@ -1906,6 +1932,133 @@ Under `GODEBUG=gccheckmark=1`, the §5.11-only compiler threw
 `main_gowrap_35_6` code pointer — the goroutine closure — as the lost object.
 That is the observation the reduction was built from.
 
+### 5.13 Fixed: assignment destinations that were not identifiers (2026-07-28)
+
+A `range` clause that assigns with `=`, and every other statement that stores a
+value it did not compute from an expression, resolved its destination with its
+own private rules. Each of those rules understood a local identifier and little
+else, so a destination that was anything more interesting was mishandled -- in
+the `range` case, dropped in silence.
+
+#### What was wrong
+
+Measured against the host toolchain across 86 differential programs covering the
+cross product of range subject (slice, array, pointer-to-array, string, map,
+channel, integer, range-over-function) against destination form (struct field,
+nested field, slice index, array index, map index, pointer indirection,
+package-level variable, blank, and the mixed cases where one side is an
+identifier and the other is not), cg12 was wrong for:
+
+- **every non-identifier destination in every range form.** `rangeVariableObject`
+  returned nil for anything that was not an `*ast.Ident`, the caller then left
+  the destination slot empty, and the clause stored nothing. The loop iterated
+  the right number of times and the target was never written.
+- **every package-level destination except in the map form.** The indexed and
+  channel forms called `variableStorage` unconditionally, which does not consult
+  `g.globals`, so the global was given a *fresh frame slot*; the
+  range-over-function form gave it a local in the yield function instead. This
+  is the reading a same-function check cannot make: `for gi = range s` followed
+  by `fmt.Println(gi)` prints the right answer, because the read resolves to the
+  same frame slot the write went to. Only a second function reading the global
+  shows that the symbol was never written. The map form was already correct; it
+  consulted `g.addr` first.
+- **a `range` element destination whose type differs from the element type.**
+  `for _, x = range []int{1,2,3}` with `x` an interface used the *destination's*
+  type to compute the element's size and representation, so it read 16 bytes of
+  an 8-byte element and never boxed the value. It crashed in `reflect`.
+- **an element variable of string type**, which was made to point *into* the
+  range expression's backing array rather than hold a copy: after
+  `for i, s := range strs { strs[i] = "z"; use(s) }` cg12 saw `zzz` where the
+  host sees `abc`. This one needs no non-identifier destination at all.
+- **the two-phase assignment order.** `for k, m[k] = range "abc"` must index m
+  with the key the clause is about to overwrite, and `k, a[k] = 3, 4` must do the
+  same. cg12 evaluated each destination immediately before storing into it, so
+  the second destination saw the first destination's new value -- in the ordinary
+  tuple assignment that wrote past the end of a two-element slice.
+- **the order of the left operands against the right-hand expressions.** Go
+  evaluates a statement's left index expressions and pointer indirections first;
+  cg12 ran the right-hand side first. `a[f(0)], a[f(1)] = g(5), g(6)` traced
+  `[g5 g6 f0 f1]` where the host traces `[f0 f1 g5 g6]`, and the two-result call
+  form traced the call before either index.
+- **a map element as a destination of a tuple assignment.** `x.f, m[k] = a, b`
+  went through `lvalue`, which computed the address as though the map header were
+  a slice base, and stored through it. That is memory corruption, and it faulted.
+- **`m[k] += v`**, which was routed to a map-assign helper that ignored the
+  operator: `m["k"] += 5` on an entry holding 10 produced 5.
+- **`v, ok = m[k]` with a non-identifier destination**, which was a hard compile
+  error: `map lookup result target must be an identifier`.
+- **a package-level string assigned by a two-result receive or by a `select`
+  receive.** `assignResult` and `assignSelectValue` were missing the step that
+  dereferences a descriptor symbol before copying into it, so the symbol's
+  header pointer was overwritten with the address of another header and the next
+  read of the variable panicked inside `fmt`. The same statement with a global
+  slice, struct or interface destination was already correct, which is what made
+  the divergence between these helpers and ordinary assignment easy to miss.
+
+Already correct, and left alone: the blank identifier; a `select` receive into a
+struct field or slice element; ordinary tuple assignment into a struct field or
+slice element; `v, ok` from a channel receive or a type assertion into struct
+fields; and a `range` element variable of struct type, which was already copied.
+
+#### The fix
+
+There is now one assignment destination in `goc/compile.go` --
+`assignmentTarget`, with `prepareAssignmentTarget` and
+`storeAssignmentTarget` -- and every statement that assigns a value it did not
+compute from an expression uses it: the four range lowerings, ordinary tuple
+assignment, multi-value call assignment, the two-result map lookup, channel
+receive, type assertion, and `select` receive.
+
+- It classifies a destination as discarded, a variable, a plain address, or a
+  map element, and the map element is written through `mapAssignValue` rather
+  than through an address.
+- Preparing a destination evaluates the operands its address depends on and
+  stores nothing. Every caller prepares all of its destinations before storing
+  into any of them, which is what Go's two-phase assignment order requires.
+- The store discipline is the one ordinary assignment already used, including
+  the dereference of a package-level descriptor symbol, so the paths that had
+  drifted are now the same code.
+- `storeAssignmentTarget` converts the value to the destination's type, which
+  boxes a concrete value assigned to an interface destination. Shared generic
+  code is exempt because an unconstrained type parameter is already one
+  pointer-sized value there.
+- `declareRangeVariable` replaces `rangeVariableObject`. It allocates storage
+  only when the clause really declares a variable, or when an assigned variable
+  has none yet, so a package-level destination keeps its symbol.
+- The `:=` path is untouched. `rangeTargets` still calls
+  `startIterationVariable` for a declared variable that `perIterationVariable`
+  reports, before preparing the destinations, so §5.9's per-iteration semantics
+  and its cost model are unchanged.
+- Where a key destination writes memory, the indexed range forms read the
+  element before storing the key, because both may address the range expression
+  (`for a[0], a[1] = range a`). That check costs nothing in the ordinary case,
+  where the key destination is a variable or blank.
+
+#### Checkpoint
+
+- [x] Reduce the cross product of range subject against destination form against
+  the host toolchain and record which cases cg12 gets wrong before changing
+  anything; land the reducers as the `assignment-targets` capability category
+  (`range-target-forms`, `range-target-order`, `multi-assignment-forms`). All
+  three fail on `ff6ef9e` and pass after the fix, with and without `-O`.
+- [x] Pin the mechanism in unit tests, not just the answer:
+  `TestRangeClauseWritesAPackageLevelTarget` (every range form stores the
+  symbol), `TestRangeTargetOperandsAreEvaluatedEveryIteration`, and
+  `TestMapElementDestinationsUseTheMapRuntime`. All fail on `ff6ef9e`.
+- [x] Keep §5.9 intact: `loop-variables/*` and
+  `TestAssigningRangeClauseKeepsOneInstance` still pass, and the per-iteration
+  allocation-cost tests are unchanged.
+
+#### The coverage lesson
+
+Nothing in the 338-capability matrix used a non-identifier range destination,
+which is exactly why a wrong-answer bug in ordinary Go survived §5.9's
+reduction of the same statement. The matrix covers *subjects* well and
+*destinations* hardly at all, and the same asymmetry is what let the
+package-level case hide: the obvious reducer reads the global back in the
+function that wrote it, and that reads the frame slot the bug created. A
+destination-shaped reducer has to read its result through a second function.
+
 ## 6. Phase 2: Memory safety, allocation, and accurate GC
 
 Exercise both semantic behavior and generated metadata.
@@ -2115,9 +2268,13 @@ subsection. What follows replaces it.
    `runtime_coverage_baseline_pending.json` is now empty and the denominator
    test reconciles baseline to matrix directly. §1 records the new figures.
 
-2. **Fix `for x.f = range s`** (§5.10). A wrong-answer bug in valid Go that no
-   capability covers. Land a reducer first — its absence is why the bug survived
-   §5.9.
+2. **Fix `for x.f = range s`: done (§5.11).** It was one instance of a wider
+   defect — every statement that assigns a value it did not compute from an
+   expression had its own destination rules — and the reduction found eight more
+   wrong answers, including memory corruption from `x.f, m[k] = a, b` and a
+   dropped operator in `m[k] += v`. What replaces it in this list is the defect
+   that reduction exposed and did not fix: a closure that assigns a computed
+   string to a captured string variable leaves it dangling (§5.10).
 
 3. ~~**Reduce `found pointer to free object`**~~ — done, and it was two defects:
    §5.11 (the entry stack map described a never-started goroutine's argument
