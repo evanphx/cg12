@@ -23,10 +23,11 @@ type PackageTest struct {
 }
 
 // CompileTestExecutable compiles a package's internal and external tests into a
-// normal Go executable linked against the cg12-compiled runtime. Test selection
-// remains a runtime concern handled by the copied testing and regexp packages.
+// normal Go executable linked against the cg12-compiled runtime, for the host
+// target. Test selection remains a runtime concern handled by the copied testing
+// and regexp packages.
 func CompileTestExecutable(packagePath string) (*ir.Module, []PackageTest, error) {
-	return compileTestExecutable(packagePath, "")
+	return compileTestExecutable(HostTarget(), packagePath, "")
 }
 
 // CompileTestExecutableMatching compiles a test executable whose generated
@@ -34,11 +35,17 @@ func CompileTestExecutable(packagePath string) (*ir.Module, []PackageTest, error
 // files are still parsed and type-checked before unreachable test bodies are
 // omitted from code generation.
 func CompileTestExecutableMatching(packagePath, runPattern string) (*ir.Module, []PackageTest, error) {
-	return compileTestExecutable(packagePath, runPattern)
+	return compileTestExecutable(HostTarget(), packagePath, runPattern)
 }
 
-func compileTestExecutable(packagePath, runPattern string) (*ir.Module, []PackageTest, error) {
-	tests, hasExternalTests, err := discoverPackageTests(packagePath)
+// CompileTestExecutableMatchingFor compiles a selected test executable for a
+// named target.
+func CompileTestExecutableMatchingFor(target Target, packagePath, runPattern string) (*ir.Module, []PackageTest, error) {
+	return compileTestExecutable(target, packagePath, runPattern)
+}
+
+func compileTestExecutable(target Target, packagePath, runPattern string) (*ir.Module, []PackageTest, error) {
+	tests, hasExternalTests, err := discoverPackageTests(target, packagePath)
 	if err != nil {
 		return nil, nil, err
 	}
@@ -52,6 +59,7 @@ func compileTestExecutable(packagePath, runPattern string) (*ir.Module, []Packag
 	externalPackagePath := packagePath + "_test"
 	source := testMainSource(packagePath, externalPackagePath, tests)
 	options := compileOptions{
+		target:       target,
 		executable:   true,
 		testPackages: map[string]bool{packagePath: true},
 	}
@@ -84,9 +92,12 @@ func matchingPackageTests(tests []PackageTest, runPattern string) ([]PackageTest
 	return selected, nil
 }
 
-func discoverPackageTests(packagePath string) ([]PackageTest, bool, error) {
+// discoverPackageTests lists the package's Test functions. It takes the target
+// because test discovery is build-tag sensitive: which _test.go files exist at
+// all depends on the architecture being compiled for.
+func discoverPackageTests(target Target, packagePath string) ([]PackageTest, bool, error) {
 	fset := token.NewFileSet()
-	loader := newSourceLoader(fset)
+	loader := newSourceLoader(fset, target)
 	loader.testPackages[packagePath] = true
 	if _, err := loader.Import(packagePath); err != nil {
 		return nil, false, fmt.Errorf("goc test: load %s: %w", packagePath, err)

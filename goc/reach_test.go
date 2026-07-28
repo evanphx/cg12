@@ -15,7 +15,7 @@ import (
 
 func TestRuntimeInitDeclarationsHaveUniqueOrderedSymbols(t *testing.T) {
 	fset := token.NewFileSet()
-	loader := newSourceLoader(fset)
+	loader := newSourceLoader(fset, HostTarget())
 	if _, err := loader.Import("runtime"); err != nil {
 		t.Fatal(err)
 	}
@@ -48,7 +48,7 @@ func TestRuntimeInitDeclarationsHaveUniqueOrderedSymbols(t *testing.T) {
 
 func TestRuntimeInitTaskContainsEveryPackageInitializer(t *testing.T) {
 	fset := token.NewFileSet()
-	loader := newSourceLoader(fset)
+	loader := newSourceLoader(fset, HostTarget())
 	if _, err := loader.Import("runtime"); err != nil {
 		t.Fatal(err)
 	}
@@ -93,7 +93,7 @@ func Test() byte { return sha256.Sum256(nil)[0] }
 	if err != nil {
 		t.Fatal(err)
 	}
-	loader := newSourceLoader(fset)
+	loader := newSourceLoader(fset, HostTarget())
 	info := &types.Info{
 		Types:      make(map[ast.Expr]types.TypeAndValue),
 		Defs:       make(map[*ast.Ident]types.Object),
@@ -139,7 +139,7 @@ func Test() string {
 	if err != nil {
 		t.Fatal(err)
 	}
-	loader := newSourceLoader(fset)
+	loader := newSourceLoader(fset, HostTarget())
 	info := &types.Info{
 		Types:      make(map[ast.Expr]types.TypeAndValue),
 		Defs:       make(map[*ast.Ident]types.Object),

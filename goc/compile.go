@@ -23,23 +23,42 @@ import (
 	"github.com/evanphx/cg12/plan9asm"
 )
 
-// Compile parses and type-checks one Go source file and lowers it to cg12 IR.
+// Compile parses and type-checks one Go source file and lowers it to cg12 IR
+// for the host target.
 func Compile(name string, src []byte) (*ir.Module, error) {
-	return compile(name, src, compileOptions{})
+	return CompileFor(HostTarget(), name, src)
+}
+
+// CompileFor lowers one Go source file for a named target.
+func CompileFor(target Target, name string, src []byte) (*ir.Module, error) {
+	return compile(name, src, compileOptions{target: target})
 }
 
 // CompileExecutable lowers a main package together with the Go runtime needed
-// to start and run it as a normal Go executable.
+// to start and run it as a normal Go executable, for the host target.
 func CompileExecutable(name string, src []byte) (*ir.Module, error) {
-	return compile(name, src, compileOptions{executable: true})
+	return CompileExecutableFor(HostTarget(), name, src)
 }
 
-// CompileExecutableWithRuntimeCoverage lowers an executable and instruments
-// the build-selected runtime package. The returned metadata maps the binary
-// coverage bitmap back to runtime source files and basic blocks.
+// CompileExecutableFor lowers a main package and the Go runtime for a named
+// target.
+func CompileExecutableFor(target Target, name string, src []byte) (*ir.Module, error) {
+	return compile(name, src, compileOptions{target: target, executable: true})
+}
+
+// CompileExecutableWithRuntimeCoverage lowers an executable for the host target
+// and instruments the build-selected runtime package. The returned metadata maps
+// the binary coverage bitmap back to runtime source files and basic blocks.
 func CompileExecutableWithRuntimeCoverage(name string, src []byte) (*ir.Module, *RuntimeCoverage, error) {
+	return CompileExecutableWithRuntimeCoverageFor(HostTarget(), name, src)
+}
+
+// CompileExecutableWithRuntimeCoverageFor lowers an instrumented executable for
+// a named target.
+func CompileExecutableWithRuntimeCoverageFor(target Target, name string, src []byte) (*ir.Module, *RuntimeCoverage, error) {
 	coverage := &RuntimeCoverage{}
 	module, err := compile(name, src, compileOptions{
+		target:          target,
 		executable:      true,
 		runtimeCoverage: coverage,
 	})
@@ -69,6 +88,10 @@ func reportNoSplitViolations(module *ir.Module) {
 }
 
 type compileOptions struct {
+	// target is the machine being compiled for. The zero value means the host,
+	// so an option struct built without thinking about the target behaves the
+	// way goc did before the target existed.
+	target               Target
 	executable           bool
 	testPackages         map[string]bool
 	externalTestPackages map[string]string
@@ -76,6 +99,10 @@ type compileOptions struct {
 }
 
 func compile(name string, src []byte, options compileOptions) (*ir.Module, error) {
+	target := options.target.resolve()
+	if err := checkTargetTypeSizes(target); err != nil {
+		return nil, err
+	}
 	executable := options.executable
 	fset := token.NewFileSet()
 	file, err := parser.ParseFile(fset, name, src, parser.AllErrors|parser.ParseComments)
@@ -90,7 +117,7 @@ func compile(name string, src []byte, options compileOptions) (*ir.Module, error
 		Implicits:  make(map[ast.Node]types.Object),
 		Instances:  make(map[*ast.Ident]types.Instance),
 	}
-	loader := newSourceLoader(fset)
+	loader := newSourceLoader(fset, target)
 	loader.forcePureGo = !executable
 	for path := range options.testPackages {
 		loader.testPackages[path] = true
@@ -158,7 +185,7 @@ func compile(name string, src []byte, options compileOptions) (*ir.Module, error
 	}
 	assemblyReferences := make(map[string]bool)
 	if compileRuntime {
-		assemblyReferences, err = sourceAssemblyReferences(loader.units)
+		assemblyReferences, err = sourceAssemblyReferences(target, loader.units)
 		if err != nil {
 			return nil, err
 		}
@@ -195,9 +222,9 @@ func compile(name string, src []byte, options compileOptions) (*ir.Module, error
 	sort.Strings(assemblyPackages)
 	for _, path := range assemblyPackages {
 		unit := loader.units[path]
-		defines := assemblyPackageDefines(unit.pkg)
-		floatInputs, floatOutputs := assemblyPackageFloatSlots(unit)
-		signatures := assemblyPackageSignatures(unit)
+		defines := assemblyPackageDefines(target, unit.pkg)
+		floatInputs, floatOutputs := assemblyPackageFloatSlots(target, unit)
+		signatures := assemblyPackageSignatures(target, unit)
 		for _, assembly := range unit.assembly {
 			mod.Assembly = append(mod.Assembly, ir.AssemblyFile{
 				PackagePath:  path,
@@ -217,6 +244,7 @@ func compile(name string, src []byte, options compileOptions) (*ir.Module, error
 		info:                    info,
 		pkg:                     pkg,
 		mod:                     mod,
+		target:                  target,
 		globals:                 map[types.Object]string{},
 		globalLinkNames:         globalLinkNames,
 		emitRuntimeTables:       emitRuntimeTables,
@@ -252,6 +280,7 @@ func compile(name string, src []byte, options compileOptions) (*ir.Module, error
 			info:                    unit.info,
 			pkg:                     unit.pkg,
 			mod:                     mod,
+			target:                  target,
 			globals:                 globals,
 			globalLinkNames:         globalLinkNames,
 			emitRuntimeTables:       emitRuntimeTables,
@@ -326,6 +355,7 @@ func compile(name string, src []byte, options compileOptions) (*ir.Module, error
 				info:                        function.info,
 				pkg:                         function.pkg,
 				mod:                         mod,
+				target:                      target,
 				globals:                     allGlobals,
 				methodTargets:               methodTargets,
 				emitRuntimeTables:           emitRuntimeTables,
@@ -401,7 +431,7 @@ func compile(name string, src []byte, options compileOptions) (*ir.Module, error
 		return nil, err
 	}
 	if options.runtimeCoverage != nil {
-		if err := instrumentRuntimeCoverage(mod, loader.units["runtime"], options.runtimeCoverage, linkNames, initSymbols); err != nil {
+		if err := instrumentRuntimeCoverage(mod, target, loader.units["runtime"], options.runtimeCoverage, linkNames, initSymbols); err != nil {
 			return nil, err
 		}
 	}
@@ -435,9 +465,9 @@ func setAAPCS64CallConvention(module *ir.Module) {
 	}
 }
 
-func assemblyPackageDefines(pkg *types.Package) map[string]int64 {
+func assemblyPackageDefines(target Target, pkg *types.Package) map[string]int64 {
 	defines := make(map[string]int64)
-	sizes := types.SizesFor("gc", runtime.GOARCH)
+	sizes := target.sizes()
 	for _, name := range pkg.Scope().Names() {
 		object := pkg.Scope().Lookup(name)
 		switch object := object.(type) {
@@ -477,10 +507,10 @@ func assemblyPackageDefines(pkg *types.Package) map[string]int64 {
 	return defines
 }
 
-func assemblyPackageFloatSlots(unit *sourceUnit) (map[string][]int, map[string][]int) {
+func assemblyPackageFloatSlots(target Target, unit *sourceUnit) (map[string][]int, map[string][]int) {
 	inputs := make(map[string][]int)
 	outputs := make(map[string][]int)
-	sizes := types.SizesFor("gc", runtime.GOARCH)
+	sizes := target.sizes()
 	if sizes == nil {
 		return inputs, outputs
 	}
@@ -537,9 +567,9 @@ func isAssemblyFloatType(typ types.Type) bool {
 	return basic.Kind() == types.Float32 || basic.Kind() == types.Float64
 }
 
-func assemblyPackageSignatures(unit *sourceUnit) map[string]ir.AsmSignature {
+func assemblyPackageSignatures(target Target, unit *sourceUnit) map[string]ir.AsmSignature {
 	signatures := make(map[string]ir.AsmSignature)
-	sizes := types.SizesFor("gc", runtime.GOARCH)
+	sizes := target.sizes()
 	if sizes == nil {
 		return signatures
 	}
@@ -698,7 +728,7 @@ func assemblySemanticSymbol(packagePath, name string) string {
 	return symbol.String()
 }
 
-func sourceAssemblyReferences(units map[string]*sourceUnit) (map[string]bool, error) {
+func sourceAssemblyReferences(target Target, units map[string]*sourceUnit) (map[string]bool, error) {
 	references := make(map[string]bool)
 	paths := make([]string, 0, len(units))
 	for path := range units {
@@ -708,13 +738,16 @@ func sourceAssemblyReferences(units map[string]*sourceUnit) (map[string]bool, er
 
 	for _, path := range paths {
 		unit := units[path]
-		defines := assemblyPackageDefines(unit.pkg)
-		floatInputs, floatOutputs := assemblyPackageFloatSlots(unit)
+		defines := assemblyPackageDefines(target, unit.pkg)
+		floatInputs, floatOutputs := assemblyPackageFloatSlots(target, unit)
 		for _, assembly := range unit.assembly {
 			file, err := plan9asm.ParseWithOptions(strings.NewReader(assembly.source), plan9asm.ParseOptions{
+				// GOARCH_* selects the architecture's arms of Go's runtime
+				// assembly, so it must name the target. GOOS_* stays the host's:
+				// Target carries no OS axis (see its doc comment).
 				Defines: map[string]string{
-					"GOARCH_" + runtime.GOARCH: "1",
-					"GOOS_" + runtime.GOOS:     "1",
+					"GOARCH_" + target.GOARCH(): "1",
+					"GOOS_" + runtime.GOOS:      "1",
 				},
 				Includes: assembly.includes,
 			})
@@ -873,6 +906,7 @@ func addInterfaceMethodWrappers(g *gen, reachable []functionDecl) {
 			fn:                    function,
 			cur:                   function.Entry(),
 			mod:                   g.mod,
+			target:                g.target,
 			typeTags:              g.typeTags,
 			runtimeTypes:          g.runtimeTypes,
 			goABITypes:            g.goABITypes,
@@ -1321,12 +1355,20 @@ func addLegacyCryptoRuntimeStubs(mod *ir.Module) {
 	unreachable.Entry().RetVoid()
 }
 
+// gen lowers one function body. The wrapper, child and adapter generators built
+// from a parent gen are constructed field by field rather than copied, so every
+// field that describes the whole compilation -- target most of all -- has to be
+// listed in all eleven &gen literals below. A missed target silently becomes the
+// zero Target, and the code generated through that generator is then built for no
+// target at all; that is how the first version of this refactor produced
+// "unsupported on " with an empty architecture name.
 type gen struct {
 	fset                          *token.FileSet
 	file                          *ast.File
 	info                          *types.Info
 	pkg                           *types.Package
 	mod                           *ir.Module
+	target                        Target
 	fn                            *ir.Func
 	cur                           *ir.Block
 	vars                          map[types.Object]ir.Ref
@@ -4769,6 +4811,7 @@ func (g *gen) ensureInterfaceCallWrapperFor(sourceType types.Type, method *types
 		fn:                    function,
 		cur:                   function.Entry(),
 		mod:                   g.mod,
+		target:                g.target,
 		runtimeAllocation:     g.runtimeAllocation,
 		typeTags:              g.typeTags,
 		runtimeTypes:          g.runtimeTypes,
@@ -4862,6 +4905,7 @@ func (g *gen) ensureInterfaceCallWrapper(method *types.Func) string {
 		fn:                    function,
 		cur:                   function.Entry(),
 		mod:                   g.mod,
+		target:                g.target,
 		runtimeAllocation:     g.runtimeAllocation,
 		typeTags:              g.typeTags,
 		runtimeTypes:          g.runtimeTypes,
@@ -7352,6 +7396,7 @@ func (g *gen) callClosure(call *ast.CallExpr, wrapperPrefix string) ir.Ref {
 	wrapper := &gen{
 		fn:                    g.mod.NewFuncVoid(wrapperName),
 		mod:                   g.mod,
+		target:                g.target,
 		runtimeAllocation:     g.runtimeAllocation,
 		typeTags:              g.typeTags,
 		runtimeTypes:          g.runtimeTypes,
@@ -7784,6 +7829,7 @@ func (g *gen) iteratorRangeStmt(statement *ast.RangeStmt, label string, iterator
 		info:                        g.info,
 		pkg:                         g.pkg,
 		mod:                         g.mod,
+		target:                      g.target,
 		globals:                     g.globals,
 		methodTargets:               g.methodTargets,
 		emitRuntimeTables:           g.emitRuntimeTables,
@@ -9246,8 +9292,13 @@ func (g *gen) expr(e ast.Expr) (result ir.Ref) {
 				return descriptor
 			}
 			if obj.Pkg() != nil && obj.Pkg().Path() == "runtime" && obj.Name() == "getg" && len(n.Args) == 0 {
-				if runtime.GOARCH != "arm64" {
-					g.fail(n, "runtime.getg intrinsic is unsupported on %s", runtime.GOARCH)
+				// getg reads whichever register the target's Go ABI reserves for
+				// the current goroutine. arm64 uses X28; no register has been
+				// chosen for amd64 yet, where the choice is constrained enough to
+				// be a design decision of its own (see AMD64_PARITY_PLAN 3.2), so
+				// the target is still refused rather than guessed at.
+				if g.target != TargetARM64 {
+					g.fail(n, "runtime.getg intrinsic is unsupported on %s", g.target)
 					return ir.R
 				}
 				const arm64GRegister = 28
@@ -9783,6 +9834,7 @@ func (g *gen) methodValue(expression *ast.SelectorExpr, selection *types.Selecti
 		fn:                    function,
 		cur:                   function.Entry(),
 		mod:                   g.mod,
+		target:                g.target,
 		runtimeAllocation:     g.runtimeAllocation,
 		typeTags:              g.typeTags,
 		runtimeTypes:          g.runtimeTypes,
@@ -10074,6 +10126,7 @@ func (g *gen) functionLiteral(literal *ast.FuncLit) ir.Ref {
 		info:                        g.info,
 		pkg:                         g.pkg,
 		mod:                         g.mod,
+		target:                      g.target,
 		globals:                     g.globals,
 		methodTargets:               g.methodTargets,
 		emitRuntimeTables:           g.emitRuntimeTables,
@@ -10642,6 +10695,7 @@ func (g *gen) goInternalCallAdapter(
 		fn:                function,
 		cur:               function.Entry(),
 		mod:               g.mod,
+		target:            g.target,
 		runtimeAllocation: g.runtimeAllocation,
 		typeTags:          g.typeTags,
 		runtimeTypes:      g.runtimeTypes,
@@ -10702,10 +10756,15 @@ func (g *gen) staticFunctionDescriptor(symbol string) string {
 }
 
 func (g *gen) closureRegister() int {
-	if runtime.GOARCH == "arm64" {
+	if g.target == TargetARM64 {
 		// Go's ARM64 ABIInternal reserves X26 for the closure context.
 		return 26
 	}
+	// RDX on amd64, which is what Go's ABIInternal uses. This arm has never been
+	// exercised -- nothing reaches it today, because getg refuses the target long
+	// before a closure is built -- so treat it as a placeholder, not as validated:
+	// amd64 also reserves RDX for div/rem and as vaArg scratch, which is part of
+	// the register decision AMD64_PARITY_PLAN 3.2 leaves open.
 	return 2
 }
 
@@ -11109,7 +11168,7 @@ func (g *gen) builtinCall(call *ast.CallExpr, builtin *types.Builtin) ir.Ref {
 		return g.cur.Add(ir.ClsP, pointer, offset)
 	case "Sizeof":
 		argumentType := g.typeAndValue(call.Args[0]).Type
-		pointerSize := int64(types.SizesFor("gc", runtime.GOARCH).Sizeof(types.Typ[types.Uintptr]))
+		pointerSize := int64(g.target.sizes().Sizeof(types.Typ[types.Uintptr]))
 		if _, isTypeParameter := argumentType.(*types.TypeParam); isTypeParameter {
 			return g.fn.Long(pointerSize)
 		}
@@ -12502,6 +12561,9 @@ func (g *gen) selectValue(condition, ifTrue, ifFalse ir.Ref, class ir.Cls) ir.Re
 	)
 }
 
+// typeSize is the size goc lays t out at. It, and the other helpers below that
+// reach goTypeSizes, take no target on purpose -- see goTypeSizes for why, and
+// for the check that keeps the omission honest.
 func typeSize(t types.Type) int64 {
 	t = representativeType(t)
 	if _, parameter := t.(*types.TypeParam); parameter {
@@ -12522,7 +12584,7 @@ func typeSize(t types.Type) int64 {
 		}
 		return alignTo(size, typeAlign(t))
 	}
-	sizes := types.SizesFor("gc", runtime.GOARCH)
+	sizes := goTypeSizes()
 	return sizes.Sizeof(t)
 }
 
@@ -12543,7 +12605,7 @@ func typeAlign(t types.Type) int64 {
 		}
 		return alignment
 	}
-	return int64(types.SizesFor("gc", runtime.GOARCH).Alignof(t))
+	return int64(goTypeSizes().Alignof(t))
 }
 
 func structOffsets(fields []*types.Var) []int64 {
@@ -12562,7 +12624,7 @@ func alignTo(value, alignment int64) int64 {
 }
 
 func pointerSize() int64 {
-	return int64(types.SizesFor("gc", runtime.GOARCH).Sizeof(types.Typ[types.Uintptr]))
+	return int64(goTypeSizes().Sizeof(types.Typ[types.Uintptr]))
 }
 
 func representativeType(valueType types.Type) types.Type {
@@ -12576,7 +12638,7 @@ func representativeType(valueType types.Type) types.Type {
 	}
 
 	representative := terms[0]
-	sizes := types.SizesFor("gc", runtime.GOARCH)
+	sizes := goTypeSizes()
 	for _, term := range terms[1:] {
 		if sizes.Sizeof(term) > sizes.Sizeof(representative) {
 			representative = term
@@ -12621,7 +12683,7 @@ func fieldOffset(selection *types.Selection) int64 {
 	var offset int64
 	for _, index := range selection.Index() {
 		structure := t.Underlying().(*types.Struct)
-		sizes := types.SizesFor("gc", runtime.GOARCH)
+		sizes := goTypeSizes()
 		offsets := sizes.Offsetsof(structFields(structure))
 		offset += offsets[index]
 		t = structure.Field(index).Type()
