@@ -39,9 +39,15 @@ func foldAddressing(f *ir.Func) {
 				continue
 			}
 			if in.Op == ir.OLoads || in.Op == ir.OLoadd ||
-				in.Op == ir.OStores || in.Op == ir.OStored ||
-				in.Op == ir.OLoadq || in.Op == ir.OStoreq {
-				continue // FP and 128-bit go through a different value path
+				in.Op == ir.OStores || in.Op == ir.OStored {
+				// The scalar FP path resolves its address with memAddr, which reads
+				// only the address operand -- it never looks at Aux or Amode. Folding
+				// into those fields would therefore be silently dropped and the access
+				// would go to the unfolded base. The 128-bit ops used to be excluded
+				// here for the same reason; they now go through memFor (see
+				// xasm_wide.go), which consumes both fields, so they fold like the
+				// integer ops do.
+				continue
 			}
 			addr := in.Args[ai]
 			if in.Amode != 0 || !single(addr) {
