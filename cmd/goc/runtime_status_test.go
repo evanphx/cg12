@@ -334,7 +334,7 @@ func TestARM64RuntimeCapabilityStatus(t *testing.T) {
 			name:        "cleanup-basic",
 			source:      "runtime_cleanup_basic.go",
 			expectation: runtimeCapabilityKnownGap,
-			note:        "goc's GC does not yet run finalizers or runtime.AddCleanup callbacks",
+			note:        "over-retention: a stale pointer in the registering function's abandoned frame keeps the object reachable, so it is never queued (see RUNTIME_PLAN.md 5.3)",
 		},
 		{
 			category:    "gc",
@@ -347,7 +347,7 @@ func TestARM64RuntimeCapabilityStatus(t *testing.T) {
 			name:        "cleanup-multiple",
 			source:      "runtime_cleanup_multiple.go",
 			expectation: runtimeCapabilityKnownGap,
-			note:        "goc's GC does not yet run finalizers or runtime.AddCleanup callbacks",
+			note:        "over-retention: a stale pointer in the registering function's abandoned frame keeps the object reachable, so it is never queued (see RUNTIME_PLAN.md 5.3)",
 		},
 		{
 			category:    "gc",
@@ -498,7 +498,7 @@ func TestARM64RuntimeCapabilityStatus(t *testing.T) {
 			name:        "many-goroutines-gc",
 			source:      "runtime_many_goroutines_gc.go",
 			expectation: runtimeCapabilityKnownGap,
-			note:        "times out under sustained GC allocation pressure",
+			note:        "times out under sustained GC allocation pressure; root cause not yet separated from the 5.3 over-retention bug",
 		},
 		{
 			category:    "goroutine",
@@ -649,7 +649,7 @@ func TestARM64RuntimeCapabilityStatus(t *testing.T) {
 			name:        "gc-churn",
 			source:      "runtime_scheduler_gc_churn.go",
 			expectation: runtimeCapabilityKnownGap,
-			note:        "times out under sustained GC allocation pressure",
+			note:        "times out under sustained GC allocation pressure; root cause not yet separated from the 5.3 over-retention bug",
 		},
 		{
 			category:    "stdlib-io",
@@ -1083,7 +1083,7 @@ func TestARM64RuntimeCapabilityStatus(t *testing.T) {
 			name:        "grow-allocs",
 			source:      "bytes_grow_allocs.go",
 			expectation: runtimeCapabilityKnownGap,
-			note:        "times out under sustained GC allocation pressure",
+			note:        "times out under sustained GC allocation pressure; root cause not yet separated from the 5.3 over-retention bug",
 		},
 		{
 			category:    "stdlib-bytes",
@@ -1964,7 +1964,7 @@ func TestARM64RuntimeCapabilityStatus(t *testing.T) {
 			name:        "finalizer-resurrect",
 			source:      "runtime_finalizer_resurrect.go",
 			expectation: runtimeCapabilityKnownGap,
-			note:        "goc's GC does not yet run finalizers or runtime.AddCleanup callbacks",
+			note:        "over-retention: a stale pointer in the registering function's abandoned frame keeps the object reachable, so it is never queued (see RUNTIME_PLAN.md 5.3)",
 		},
 		{
 			category:    "runtime-packages",
