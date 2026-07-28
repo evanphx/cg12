@@ -7,14 +7,23 @@ import "github.com/evanphx/cg12/ir"
 // x86 addresses [base + index*scale + disp] in one instruction, so an array access
 // need not compute its address in a register first.
 //
-// Two shapes are folded, chosen so the emitter never needs more scratch registers
-// than exist:
+// Two shapes are folded:
 //
-//   - [base + disp]: base + a constant, for any base. One address register at most.
-//   - [alloca + index*scale (+ disp)]: an alloca base (which resolves to rbp+off,
-//     needing no register) plus a scaled index. A general (non-alloca) base with an
-//     index is left alone, since base and index together could exhaust the scratch
-//     registers a spilled value also needs.
+//   - [base + disp]: base + a constant, for any base.
+//   - [alloca + index*scale (+ disp)]: an alloca base plus a scaled index. A
+//     general (non-alloca) base with an index is left alone; widening that is a
+//     codegen change, not something the emitter needs.
+//
+// Note what this pass cannot know, and therefore what memFor must not assume. It
+// runs on the IR, before register allocation (see lower), so at fold time a base has
+// no home yet: whether an alloca ends up rematerialised to rbp+off, in a register,
+// or in a spill slot is decided later, and a spilled one does need a register in the
+// operand after all. A restriction phrased in terms of a base "needing no register"
+// is therefore not expressible here at all. memFor instead encodes whatever pair it
+// is handed out of the one scratch register it has, so what is folded here is a
+// codegen choice rather than a correctness constraint on the emitter (the one pair
+// it cannot encode -- an immediate or symbol base carrying an index, which this pass
+// never produces -- it refuses outright rather than mis-encoding).
 //
 // The result rides on the load/store: Args carry base and (when scaled) index after
 // the stored value, Aux is the displacement, and Amode is the scale (0 = no index).
@@ -39,9 +48,15 @@ func foldAddressing(f *ir.Func) {
 				continue
 			}
 			if in.Op == ir.OLoads || in.Op == ir.OLoadd ||
-				in.Op == ir.OStores || in.Op == ir.OStored ||
-				in.Op == ir.OLoadq || in.Op == ir.OStoreq {
-				continue // FP and 128-bit go through a different value path
+				in.Op == ir.OStores || in.Op == ir.OStored {
+				// The scalar FP path resolves its address with memAddr, which reads
+				// only the address operand -- it never looks at Aux or Amode. Folding
+				// into those fields would therefore be silently dropped and the access
+				// would go to the unfolded base. The 128-bit ops used to be excluded
+				// here for the same reason; they now go through memFor (see
+				// xasm_wide.go), which consumes both fields, so they fold like the
+				// integer ops do.
+				continue
 			}
 			addr := in.Args[ai]
 			if in.Amode != 0 || !single(addr) {
