@@ -271,3 +271,177 @@ func wbBufFlush1(pp *p) {
 
 	pp.wbBuf.reset()
 }
+
+// cg12WriteBarrierValueIsBad reports whether value is a word that
+// wbBufFlush1's findObject call would reject: a pointer into a span that
+// exists but is neither an in-use heap span nor a manually managed span.
+// It follows exactly findObject's acceptance rule, so the diagnostic below
+// fires on the same words the collector would later fault on.
+//
+//go:nosplit
+func cg12WriteBarrierValueIsBad(value uintptr) bool {
+	if value < minLegalPointer {
+		return false
+	}
+	span := spanOf(value)
+	if span == nil {
+		return false
+	}
+	state := span.state.get()
+	if state == mSpanInUse && value >= span.base() && value < span.limit {
+		return false
+	}
+	if state == mSpanManual {
+		return false
+	}
+	return true
+}
+
+// cg12AddressIsGoroutineStack reports whether address falls inside a span the
+// stack allocator owns, which is how a live goroutine stack looks to spanOf.
+//
+//go:nosplit
+func cg12AddressIsGoroutineStack(address uintptr) bool {
+	if address < minLegalPointer {
+		return false
+	}
+	span := spanOf(address)
+	if span == nil {
+		return false
+	}
+	if span.state.get() != mSpanManual {
+		return false
+	}
+	return address >= span.base() && address < span.limit
+}
+
+// cg12AddressIsGlobal reports whether address falls inside a module's static
+// data or bss. Go's memory model forbids such a word from ever holding a
+// goroutine stack address, because nothing relocates it when the stack moves.
+//
+//go:nosplit
+func cg12AddressIsGlobal(address uintptr) bool {
+	for module := &firstmoduledata; module != nil; module = module.next {
+		if address >= module.data && address < module.edata {
+			return true
+		}
+		if address >= module.bss && address < module.ebss {
+			return true
+		}
+		if address >= module.noptrdata && address < module.enoptrdata {
+			return true
+		}
+		if address >= module.noptrbss && address < module.enoptrbss {
+			return true
+		}
+	}
+	return false
+}
+
+// cg12BadWriteBarrierWord records the write that cg12CheckWriteBarrierPair
+// rejected, so the report can run on the system stack where there is room to
+// print. Only one write is ever recorded, because the report throws.
+var cg12BadWriteBarrierWord struct {
+	slot     uintptr
+	old      uintptr
+	new      uintptr
+	oldBad   bool
+	newBad   bool
+	stackNew bool
+}
+
+// cg12CheckWriteBarrierPair validates the old and new words a pointer write
+// barrier is about to buffer and reports the storing site when one of them
+// would later make wbBufFlush1 throw "found bad pointer in Go heap". Throwing
+// at the store rather than at the flush makes the traceback name the function
+// that performed the write instead of the background marker that happened to
+// drain the buffer. GODEBUG=cg12checkwb=1 enables it.
+//
+// cg12checkwb=2 additionally rejects a global data or bss word that receives a
+// goroutine stack address. Nothing relocates a global when a stack moves, so
+// such a word is the stale root that later fails the check above; catching the
+// store makes the defect deterministic instead of racy.
+//
+// The frame must stay small: every caller is on a nosplit path.
+//
+//go:nosplit
+func cg12CheckWriteBarrierPair(slot uintptr, old uintptr, new uintptr) {
+	oldBad := cg12WriteBarrierValueIsBad(old)
+	newBad := cg12WriteBarrierValueIsBad(new)
+	stackNew := false
+	if debug.cg12checkwb > 1 && cg12AddressIsGoroutineStack(new) && cg12AddressIsGlobal(slot) {
+		stackNew = true
+	}
+	if !oldBad && !newBad && !stackNew {
+		return
+	}
+	cg12BadWriteBarrierWord.slot = slot
+	cg12BadWriteBarrierWord.old = old
+	cg12BadWriteBarrierWord.new = new
+	cg12BadWriteBarrierWord.oldBad = oldBad
+	cg12BadWriteBarrierWord.newBad = newBad
+	cg12BadWriteBarrierWord.stackNew = stackNew
+	systemstack(cg12ReportBadWriteBarrierWord)
+}
+
+// cg12ReportBadWriteBarrierWord prints the recorded bad write and throws. It
+// runs on the system stack so the printing does not need the nosplit reserve
+// of the goroutine that performed the store.
+func cg12ReportBadWriteBarrierWord() {
+	record := &cg12BadWriteBarrierWord
+	printlock()
+	if record.stackNew {
+		print("cg12checkwb: pointer write barrier stored a goroutine stack address into a global\n")
+	} else {
+		print("cg12checkwb: pointer write barrier buffered a word the collector will reject\n")
+	}
+	print("cg12checkwb: slot=", hex(record.slot), " old=", hex(record.old), " new=", hex(record.new))
+	if record.oldBad {
+		print(" bad=old")
+	}
+	if record.newBad {
+		print(" bad=new")
+	}
+	if record.stackNew {
+		print(" bad=new-is-stack")
+	}
+	print("\n")
+	cg12DescribeWriteBarrierAddress("slot", record.slot)
+	if record.oldBad {
+		cg12DescribeWriteBarrierAddress("old", record.old)
+	}
+	if record.newBad || record.stackNew {
+		cg12DescribeWriteBarrierAddress("new", record.new)
+	}
+	printunlock()
+	getg().m.traceback = 2
+	if record.stackNew {
+		throw("cg12checkwb: global data word holds a goroutine stack address")
+	}
+	throw("cg12checkwb: pointer write barrier buffered a bad pointer")
+}
+
+// cg12DescribeWriteBarrierAddress prints what the runtime knows about one
+// address: its span, that span's state, and, when the address is a live heap
+// object, the object it falls inside.
+func cg12DescribeWriteBarrierAddress(label string, address uintptr) {
+	span := spanOf(address)
+	if span == nil {
+		print("cg12checkwb: ", label, " ", hex(address), " is in no span (global, off-heap or never mapped)\n")
+		return
+	}
+	state := span.state.get()
+	print("cg12checkwb: ", label, " ", hex(address),
+		" span base=", hex(span.base()),
+		" limit=", hex(span.limit),
+		" state=", state,
+		" elemsize=", span.elemsize,
+		" offset=", hex(address-span.base()), "\n")
+	if state != mSpanInUse || address < span.base() || address >= span.limit {
+		return
+	}
+	base := span.base() + span.elemsize*((address-span.base())/span.elemsize)
+	print("cg12checkwb: ", label, " object base=", hex(base),
+		" size=", span.elemsize,
+		" head=", hex(*(*uintptr)(unsafe.Pointer(base))), "\n")
+}

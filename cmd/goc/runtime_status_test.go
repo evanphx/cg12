@@ -401,6 +401,18 @@ func runtimeCapabilities() []runtimeCapability {
 			expectation: runtimeCapabilityMustPass,
 		},
 		{
+			category: "gc",
+			name:     "keepalive-stack-root",
+			source:   "runtime_keepalive_stack_root.go",
+			// The reducer for "found bad pointer in Go heap". Like
+			// span-metadata-barrier it raises GOMAXPROCS itself, because the
+			// failure needs several goroutine stacks to move per collection and
+			// -runtime-procs only goes up to 4. Probabilistic: about one run in
+			// three before the fix at every -runtime-procs setting, none after.
+			// See RUNTIME_PLAN.md 5.8.
+			expectation: runtimeCapabilityMustPass,
+		},
+		{
 			category:    "gc",
 			name:        "finalizer-cleanup-order",
 			source:      "runtime_finalizer_cleanup_order.go",

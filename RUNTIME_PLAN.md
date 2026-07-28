@@ -372,12 +372,15 @@ Current checkpoint:
   Four of the five signal programs are clean over 10 optimized runs at all three
   `GOMAXPROCS` values. `during-gc` is clean at `GOMAXPROCS=1` and `2` and fails
   3 of 60 optimized runs at `GOMAXPROCS=4` with `fatal error: found bad pointer
-  in Go heap`. **This is not a signal or a 5.2.1 problem**: the same fatal error
-  reproduces on the pre-5.2.1 tree, 8 of 60 runs at `GOMAXPROCS=4`, in
-  `goroutine/worker-fanin-gc`, which is `mustPass` and clean at the matrix's
-  `GOMAXPROCS=1`. The bad pointer is reported with no containing object, so the
-  reference is a root — a stale stack address surviving into a scan. It needs
-  its own reduction; it blocks this box and the §5.2 exit criterion.
+  in Go heap`. **This is not a signal or a 5.2.1 problem**: the bad pointer is
+  reported with no containing object, so the reference is a root — a stale stack
+  address surviving into a scan. Reduced and fixed on 2026-07-28; the root was
+  `runtime.KeepAlive`'s global slot, which `stdlib_signal_during_gc.go` uses.
+  See §5.8 for the reduction, the fix and the before/after rates. The claim in
+  this bullet's earlier text that the same fault reproduced in
+  `goroutine/worker-fanin-gc` was measured on 381f67c and no longer holds: that
+  program contains no `runtime.KeepAlive` and now runs 4000 of 4000 clean at
+  `GOMAXPROCS=4` both before and after the §5.8 fix.
 
 Exit criterion: signal tests pass under `GOMAXPROCS=1`, `2`, and `4`, including
 race-like stress, without deadlock or runtime lock corruption.
@@ -521,7 +524,8 @@ same range the runtime-source experiment produced. `GOMAXPROCS=4` is clean too
 except for rare hits of the *separate, pre-existing* `found bad pointer in Go
 heap` fault recorded in the §5.2 checkpoint above (measured 1 of 60 for
 `many-goroutines-gc`, 3 of 60 for `during-gc`, against 8 of 60 for
-`worker-fanin-gc` on the pre-5.2.1 tree). The whole `defer-panic` category (21
+`worker-fanin-gc` on the pre-5.2.1 tree) — reduced and fixed in §5.8 on
+2026-07-28. The whole `defer-panic` category (21
 must-pass plus the deliberate uncaught-panic subprocess) passes unoptimized and,
 at three executions per program, with `-O` at `GOMAXPROCS=1`, `2`, and `4`; the
 three panic/stack GC cases ran 100 times each, optimized, with `GOGC=1`, at
@@ -1108,6 +1112,176 @@ Exit criterion: the two `cmd/goc` tests and the §5.3 cleanup trio pass at high
 `GOMAXPROCS`, no store of a not-in-heap pointer reaches `goc_storep`, and the
 remaining `goc_storep` imprecision above is either closed or shown to be
 unreachable.
+
+### 5.8 The `runtime.KeepAlive` global root (the "found bad pointer" gap)
+
+Current checkpoint:
+
+- [x] Reduce `fatal error: found bad pointer in Go heap` to a single compiler
+  defect: cg12 rooted every `runtime.KeepAlive` value in a process-global
+  pointer word, so a kept-alive object that escape analysis left on the stack
+  published a goroutine stack address to a permanent GC root.
+- [x] Move the keep-alive slot from a `.goc.keepalive.N` data symbol to a
+  pointer-marked frame allocation, one per kept-alive variable, created in the
+  entry block in source order and zeroed there.
+- [x] Add `GODEBUG=cg12checkwb` write-barrier validation, which turns the
+  invariant violation into a throw at the store that commits it.
+- [x] Land the reducer as the `gc/keepalive-stack-root` capability. The matrix
+  is 330 of 332 at `STATUS_SHARDS=4` with the same two declared exceptions as
+  before: `runtime-packages/finalizer-resurrect` (`knownGap`) and
+  `defer-panic/panic-string-output` (deliberate `expectedFailure`).
+- [ ] Explain the residual `fatal error: marked free object in span` recorded
+  below. It is a different fault with a different traceback and is roughly two
+  orders of magnitude rarer; it is not this section's bug and is not known to be
+  fixed.
+
+#### Root cause (2026-07-28)
+
+cg12 has no source-level notion of a variable, so it cannot end a value's
+liveness at a `runtime.KeepAlive` call by liveness analysis alone. It kept the
+value alive by storing it somewhere the collector scans: `keepAliveSlot` created
+a module data symbol
+
+```go
+&ir.Data{Name: ".goc.keepalive.N", Align: 8, Items: ..., PointerWords: []int{0}}
+```
+
+wrote the value into it through `goc_storep` at every assignment to the
+variable, and wrote nil into it after the `runtime.KeepAlive` call.
+
+`PointerWords: []int{0}` makes that word a GC root for the whole process. Two
+independent defects follow, and both are visible in a single program:
+
+- **The slot is shared.** One global per (function, variable) is shared by every
+  goroutine executing the function, so concurrent calls overwrite each other's
+  value. `runtime.KeepAlive` in a function running on several goroutines
+  therefore did not reliably keep anything alive.
+- **The slot can hold a stack address.** Escape analysis leaves a kept-alive
+  object on the stack -- that is the normal case, since `runtime.KeepAlive` is
+  cg12's only reason to think the value outlives its last ordinary use. Storing
+  its address into a global breaks Go's invariant that no global holds a stack
+  pointer: nothing relocates the word when `copystack` moves the frame and
+  nothing clears it when the goroutine exits. The word is stale from the first
+  stack growth onwards, and the collector faults as soon as the old stack's span
+  has been returned from the stack pool to the heap, where its state becomes
+  `mSpanDead`.
+
+Both crash sites in the field reports are the same stale word seen from
+different directions. `runtime.wbBufFlush1` throws when the nil-store's deletion
+barrier buffers the stale *old* value; the root scan throws when a collection
+reaches the global first. That is why the pointer was always "reported with no
+containing object": `wbBufFlush1` calls `findObject(ptr, 0, 0)` with no
+referent, and a global root has none either.
+
+The address shape in every captured failure confirms it. The reported pointer is
+always 0xb8 below an 8 KiB stack boundary, in a span with `state=0` and
+`elemsize` 4096 or 8192 -- a released goroutine stack, at the frame offset a
+top-level goroutine function's local lands on.
+
+#### The fix
+
+`gen.keepAliveSlots` now maps each kept-alive variable to an `ir.Ref` frame
+allocation instead of a symbol name. `declareKeepAliveSlots` reserves them in
+the entry block, in the source order `findKeepAliveObjects` now returns, and
+zeroes each one; `trackKeepAliveAssignment` and `keepAlive` store through
+`gen.store`, which takes the direct-store path because the destination is a
+known stack address.
+
+Three properties fall out. The slot is per-goroutine, so the sharing defect is
+gone. It is a frame word the stack maps describe, so `copystack` relocates it
+along with everything else in the frame. And it needs no write barrier at all,
+so no keep-alive store can put anything into the write barrier buffer.
+
+The slot is a per-safepoint precise root -- `addressOnlyOperand` already treats
+a `goc_storep`/store destination as an address-only use, so the allocation is
+not forced conservative by §5.3's `frameEscapingAllocations`. Its live range
+runs from the entry-block allocation to the nil store after the
+`runtime.KeepAlive` call, which is exactly the interval the value must survive.
+Zeroing at entry matters for the same reason: the slot is reported as a root
+from the allocation onward, which precedes the first real store to it.
+
+#### The write-barrier diagnostic (2026-07-28)
+
+`GODEBUG=cg12checkwb=1` validates both words a pointer write barrier is about to
+buffer -- the slot's previous contents and the value being stored -- against
+exactly `findObject`'s acceptance rule, and throws at the store rather than at
+the flush, so the traceback names the function that performed the write instead
+of the background marker that happened to drain the buffer. It lives in
+`runtime.atomicwb` (`stdlib/src/runtime/atomic_pointer.go`), with the checking
+and reporting in `stdlib/src/runtime/mwbbuf.go`.
+
+`cg12checkwb=2` additionally rejects a store of a goroutine stack address into a
+module's data or bss. That converts this section's race into a deterministic
+failure: the reducer below throws on every run at `=2` and roughly one run in
+three without it.
+
+Both report on the system stack, because every caller is on a nosplit path and
+the goroutine's nosplit reserve is not large enough to print from. An earlier
+version printed in place and corrupted the stack it was reporting on.
+
+#### Verification
+
+The reducer is `goc/testdata/runtime_keepalive_stack_root.go`, landed as the
+`gc/keepalive-stack-root` capability. Its header records why each ingredient is
+needed. Failures before the fix, against the same binary after it, all with
+`GOGC` and `GOMAXPROCS` set by the program itself:
+
+| Configuration | Before | After |
+| --- | --- | --- |
+| `-O`, `-runtime-procs=1` | 129 / 400 | 0 / 3000 |
+| `-O`, `-runtime-procs=4` | 127 / 400 | 0 / 3000 |
+| unoptimized, `-runtime-procs=1` | 106 / 400 | 0 / 3000 |
+
+And on the capability this was found in, `goroutine/many-goroutines-gc`, `-O` at
+`GOMAXPROCS=4` with `GOGC=10`, 16000 runs before against 24000 after:
+
+| Outcome | Before (16000 runs) | After (24000 runs) |
+| --- | --- | --- |
+| `found bad pointer in Go heap` | 449 | **0** |
+| `panic: many goroutines GC result mismatch` | 2 | 0 |
+| SIGSEGV | 1 | 0 |
+| `marked free object in span` | 2 | 3 |
+
+The two wrong-result panics are the sharing half of the defect showing through
+as a wrong answer rather than a fault. The zombie-span rate is unchanged
+(0.013% against 0.013%); see below.
+
+The deterministic guard is
+`TestKeepAliveStoresIntoAFrameSlotRatherThanAGlobal` in `goc/escape_test.go`,
+which asserts that no `.goc.keepalive.` data symbol is emitted and that the
+kept-alive value is stored into a frame allocation carrying a pointer word. It
+fails on the pre-fix tree with the symbol name in the message.
+
+For the general property rather than this one instance: all 352 programs in
+`goc/testdata` were compiled with `-O` and run once under
+`GODEBUG=cg12checkwb=2` at `GOMAXPROCS=4`, and none stored a goroutine stack
+address into a global. That is a single run per program, so it is a sweep for
+other instances of the same class, not a proof that none exists.
+
+#### What is still open
+
+- `goroutine/worker-fanin-gc`, the capability the §5.2 checkpoint names as the
+  original sighting, **no longer reproduces at all on this tree**: 0 of 4000
+  runs, `-O` at `GOMAXPROCS=4` with `GOGC=10`, both before and after this
+  change. It contains no `runtime.KeepAlive`, so this section's defect cannot
+  have been its cause. Its 7-of-60 failure was measured on 381f67c and was
+  presumably closed by §5.2.1 or §5.7. The §5.2 checkpoint text still describes
+  it as live and should be read with that in mind.
+- A different fault survives, and it is **pre-existing and unaffected by this
+  change**: `fatal error: marked free object in span ... elemsize=32
+  freeindex=0`, thrown by `mspan.reportZombies` from `bgsweep`. Measured on
+  `many-goroutines-gc` at `GOMAXPROCS=4`, `-O`, `GOGC=10`: 2 of 16000 runs
+  before and 3 of 24000 after, the same rate within noise. It is a marked object
+  on a span's free list, not a pointer into a dead span, and its traceback
+  shares nothing with this section's. It has not been reduced. It is the next
+  thing to chase in this area and it is about two hundred times rarer than the
+  fault this section closes, so it needs a reducer of its own before it is
+  worth measuring.
+
+Exit criterion: no global data word ever receives a goroutine stack address
+(checkable with `GODEBUG=cg12checkwb=2` over the corpus), `gc/keepalive-stack-root`
+passes at every `-runtime-procs` setting optimized and unoptimized, and the
+`marked free object in span` fault above is reduced and attributed.
 
 ## 6. Phase 2: Memory safety, allocation, and accurate GC
 

@@ -56,6 +56,10 @@
       "reason": "added to the capability matrix after the accepted 2026-07-22 baseline run; it enters the baseline at the next full-corpus rerun"
     },
     {
+      "capability": "gc/keepalive-stack-root",
+      "reason": "added to the capability matrix after the accepted 2026-07-22 baseline run; it enters the baseline at the next full-corpus rerun"
+    },
+    {
       "capability": "gc/pinner-invalid",
       "reason": "added to the capability matrix after the accepted 2026-07-22 baseline run; it enters the baseline at the next full-corpus rerun"
     },

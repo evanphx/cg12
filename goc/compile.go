@@ -1403,7 +1403,7 @@ type gen struct {
 	objectEscapeChecks            map[types.Object]bool
 	keepAliveObjects              map[types.Object]bool
 	keepAliveValues               map[types.Object]ir.Ref
-	keepAliveSlots                map[types.Object]string
+	keepAliveSlots                map[types.Object]ir.Ref
 	transientInterfaceDescriptors map[uint32]bool
 	initializingGlobals           map[types.Object]bool
 	parents                       map[ast.Node]ast.Node
@@ -4523,8 +4523,13 @@ func (g *gen) resultStorage(object types.Object, valueType types.Type) ir.Ref {
 	return storage
 }
 
-func (g *gen) findKeepAliveObjects(body *ast.BlockStmt) map[types.Object]bool {
+// findKeepAliveObjects returns the local variables this function body names in
+// a runtime.KeepAlive call, both as a set and in source order. The order is
+// what fixes the frame layout of their keep-alive slots, so it must not come
+// from ranging over the set.
+func (g *gen) findKeepAliveObjects(body *ast.BlockStmt) (map[types.Object]bool, []types.Object) {
 	objects := make(map[types.Object]bool)
+	var ordered []types.Object
 	ast.Inspect(body, func(node ast.Node) bool {
 		if node == nil {
 			return true
@@ -4549,12 +4554,13 @@ func (g *gen) findKeepAliveObjects(body *ast.BlockStmt) map[types.Object]bool {
 			return true
 		}
 		object := g.info.Uses[identifier]
-		if object != nil {
+		if object != nil && !objects[object] {
 			objects[object] = true
+			ordered = append(ordered, object)
 		}
 		return true
 	})
-	return objects
+	return objects, ordered
 }
 
 func (g *gen) trackKeepAliveAssignment(object types.Object, value ir.Ref, valueType types.Type) {
@@ -4569,23 +4575,33 @@ func (g *gen) trackKeepAliveAssignment(object types.Object, value ir.Ref, valueT
 	}
 	g.keepAliveValues[object] = g.fn.MarkGCRef(value)
 	if scalarClass, ok := scalar(valueType); ok && scalarClass == ir.ClsP {
-		g.cur.CallVoid(g.fn.Sym("goc_storep", 0), g.fn.Sym(g.keepAliveSlot(object), 0), value)
+		if slot, ok := g.keepAliveSlots[object]; ok {
+			g.store(value, slot, types.Typ[types.UnsafePointer])
+		}
 	}
 }
 
-func (g *gen) keepAliveSlot(object types.Object) string {
-	if slot := g.keepAliveSlots[object]; slot != "" {
-		return slot
+// declareKeepAliveSlots reserves one pointer-sized frame slot per variable the
+// function keeps alive, in the entry block and in source order, and zeroes it.
+//
+// The slot is what makes the value a stack root for the collector between the
+// assignment that produces it and the runtime.KeepAlive call that releases it;
+// cg12 has no source-level notion of a variable, so without it the value's
+// liveness ends at its last ordinary use.
+//
+// It has to be a frame slot rather than a global. A global is shared by every
+// goroutine running the function, so concurrent calls overwrite each other's
+// value, and -- because escape analysis may leave the kept-alive object on the
+// stack -- a global would publish a goroutine stack address to a permanent GC
+// root that no stack copy relocates and no goroutine exit clears. Zeroing at
+// entry matters because the slot is a per-safepoint precise root from the
+// moment the allocation is defined, which is before the first store to it.
+func (g *gen) declareKeepAliveSlots(objects []types.Object) {
+	for _, object := range objects {
+		slot := g.alloc(types.Typ[types.UnsafePointer])
+		g.store(g.fn.ConstInt(ir.ClsP, 0), slot, types.Typ[types.UnsafePointer])
+		g.keepAliveSlots[object] = slot
 	}
-	slot := fmt.Sprintf(".goc.keepalive.%d", len(g.mod.Data))
-	g.keepAliveSlots[object] = slot
-	g.mod.Data = append(g.mod.Data, &ir.Data{
-		Name:         slot,
-		Align:        8,
-		Items:        []ir.DataItem{{Sub: ir.SubL, Ints: []int64{0}}},
-		PointerWords: []int{0},
-	})
-	return slot
 }
 
 func (g *gen) localAllocTyped(valueType types.Type) ir.Ref {
@@ -6435,13 +6451,15 @@ func (g *gen) funcDecl(fd *ast.FuncDecl) {
 	g.currentBody = fd.Body
 	predeclaredVariables := signatureVariables(originalSignature)
 	g.escapingCaptures = g.findEscapingCaptures(fd.Body, predeclaredVariables...)
-	g.keepAliveObjects = g.findKeepAliveObjects(fd.Body)
+	keepAliveObjects, orderedKeepAliveObjects := g.findKeepAliveObjects(fd.Body)
+	g.keepAliveObjects = keepAliveObjects
 	g.keepAliveValues = make(map[types.Object]ir.Ref)
-	g.keepAliveSlots = make(map[types.Object]string)
+	g.keepAliveSlots = make(map[types.Object]ir.Ref)
 	g.transientInterfaceDescriptors = make(map[uint32]bool)
 	g.seq = 0
 	g.cur = g.fn.Entry()
 	g.at(fd)
+	g.declareKeepAliveSlots(orderedKeepAliveObjects)
 	ast.Inspect(fd.Body, func(node ast.Node) bool {
 		if _, nestedFunction := node.(*ast.FuncLit); nestedFunction {
 			return false
@@ -10248,9 +10266,11 @@ func (g *gen) functionLiteral(literal *ast.FuncLit) ir.Ref {
 	predeclaredVariables := append([]types.Object(nil), parameterObjects...)
 	predeclaredVariables = append(predeclaredVariables, resultObjects...)
 	child.escapingCaptures = child.findEscapingCaptures(literal.Body, predeclaredVariables...)
-	child.keepAliveObjects = child.findKeepAliveObjects(literal.Body)
+	keepAliveObjects, orderedKeepAliveObjects := child.findKeepAliveObjects(literal.Body)
+	child.keepAliveObjects = keepAliveObjects
 	child.keepAliveValues = make(map[types.Object]ir.Ref)
-	child.keepAliveSlots = make(map[types.Object]string)
+	child.keepAliveSlots = make(map[types.Object]ir.Ref)
+	child.declareKeepAliveSlots(orderedKeepAliveObjects)
 	child.transientInterfaceDescriptors = make(map[uint32]bool)
 	ast.Inspect(literal.Body, func(node ast.Node) bool {
 		if _, nestedFunction := node.(*ast.FuncLit); nestedFunction {
@@ -11744,20 +11764,20 @@ func (g *gen) keepAlive(function *types.Func, argument ast.Expr) {
 	anyType := types.NewInterfaceType(nil, nil)
 	anyType.Complete()
 	value := g.assignmentValue(argument, anyType)
-	var keepAliveSlot string
+	keepAliveSlot := ir.R
 	if identifier, ok := argument.(*ast.Ident); ok {
 		object := g.info.Uses[identifier]
 		if tracked := g.keepAliveValues[object]; tracked != ir.R {
 			value = g.adaptValueToInterface(tracked, g.typeAndValue(argument).Type, anyType, ir.R, argument)
 		}
-		if g.keepAliveObjects[object] {
-			keepAliveSlot = g.keepAliveSlot(object)
+		if slot, ok := g.keepAliveSlots[object]; ok {
+			keepAliveSlot = slot
 		}
 	}
 	signature := function.Type().(*types.Signature)
 	g.callVoidWithSignature(g.fn.Sym(g.functionSymbol(function), 0), []ir.Ref{value}, signature, nil)
-	if keepAliveSlot != "" {
-		g.cur.CallVoid(g.fn.Sym("goc_storep", 0), g.fn.Sym(keepAliveSlot, 0), g.fn.ConstInt(ir.ClsP, 0))
+	if keepAliveSlot != ir.R {
+		g.store(g.fn.ConstInt(ir.ClsP, 0), keepAliveSlot, types.Typ[types.UnsafePointer])
 	}
 }
 

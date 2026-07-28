@@ -31,6 +31,9 @@ import (
 //go:nosplit
 func atomicwb(ptr *unsafe.Pointer, new unsafe.Pointer) {
 	slot := (*uintptr)(unsafe.Pointer(ptr))
+	if debug.cg12checkwb != 0 {
+		cg12CheckWriteBarrierPair(uintptr(unsafe.Pointer(slot)), *slot, uintptr(new))
+	}
 	buf := getg().m.p.ptr().wbBuf.get2()
 	buf[0] = *slot
 	buf[1] = uintptr(new)
