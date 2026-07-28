@@ -109,8 +109,8 @@ func regAlloc(f *ir.Func) (*allocation, error) {
 // root.
 func computeSafepointRoots(f *ir.Func, cfg *analysis.CFG, liveness *analysis.Liveness) map[*ir.Instr][]int {
 	roots := map[*ir.Instr][]int{}
-	allocationOf, mergedAllocations := pointerAllocationSources(f)
-	escaping := frameEscapingAllocations(f, allocationOf, mergedAllocations)
+	allocationsOf := pointerAllocationSources(f)
+	escaping := frameEscapingAllocations(f, allocationsOf)
 	for _, block := range cfg.RPO {
 		live := liveness.LiveOut(block).Copy()
 		live.AddRef(block.Jmp.Arg)
@@ -142,7 +142,7 @@ func computeSafepointRoots(f *ir.Func, cfg *analysis.CFG, liveness *analysis.Liv
 					if isSafepointRoot(f, temporary) {
 						recorded[temporary] = true
 					}
-					if allocation, derived := allocationOf[temporary]; derived {
+					for _, allocation := range allocationsOf[temporary] {
 						recorded[allocation] = true
 					}
 				}
@@ -192,8 +192,12 @@ func isSafepointRoot(f *ir.Func, temporary int) bool {
 	return f.UsesManagedFrame() && f.Temps[temporary].Cls == ir.ClsP
 }
 
-// pointerAllocationSources maps every temporary that is a constant offset from a
-// pointer-bearing stack allocation to that allocation's own temporary.
+// allocationAddresses maps a temporary to every pointer-bearing stack
+// allocation it may hold an address into, in ascending temporary order.
+type allocationAddresses map[int][]int
+
+// pointerAllocationSources maps every temporary that may be a constant offset
+// from a pointer-bearing stack allocation to those allocations' own temporaries.
 //
 // cg12 has no notion of a source-level variable, so it approximates the liveness
 // of an address-taken local by the liveness of the temporary holding the
@@ -204,23 +208,41 @@ func isSafepointRoot(f *ir.Func, temporary int) bool {
 // derived address. Reporting the allocation wherever any address into it is live
 // restores the property the approximation needs.
 //
+// A temporary maps to a set rather than to one allocation because control flow
+// merges addresses: `p := &a; if c { p = &b }`, and every interface argument goc
+// builds, whose nil check selects between the value's descriptor and a zeroed
+// one. A single mapping cannot express the merge, so such an allocation used to
+// fall back to whole-frame conservatism. Reporting every allocation the merged
+// temporary may address keeps the invariant with none of that loss.
+//
 // The result is always a subset of what the function-wide conservative map
 // described, so it can never introduce a word the collector should not read.
 // Only pointer-bearing allocations on a managed frame matter; elsewhere the map
 // is empty.
-func pointerAllocationSources(f *ir.Func) (map[int]int, map[int]bool) {
+func pointerAllocationSources(f *ir.Func) allocationAddresses {
 	if !f.UsesManagedFrame() || len(f.StackPointerWords) == 0 {
-		return nil, nil
+		return nil
 	}
 
-	type derivation struct {
-		base   uint32
-		result uint32
-	}
 	allocations := make(map[uint32]bool)
-	var derivations []derivation
+	// dependents[base] lists the temporaries that carry base's addresses onward.
+	dependents := make(map[uint32][]uint32)
+	carry := func(base ir.Ref, result ir.Ref) {
+		if base.Kind != ir.RefTemp || result.Kind != ir.RefTemp {
+			return
+		}
+		dependents[base.ID] = append(dependents[base.ID], result.ID)
+	}
 
 	for _, block := range f.Blocks {
+		// Phis are destructed into copies before register allocation, so this loop
+		// is normally empty. Following them anyway keeps the analysis independent
+		// of where in the pipeline it runs.
+		for _, phi := range block.Phis {
+			for _, argument := range phi.Args {
+				carry(argument, phi.To)
+			}
+		}
 		for index := range block.Instrs {
 			instruction := &block.Instrs[index]
 			if instruction.To.Kind != ir.RefTemp {
@@ -232,49 +254,75 @@ func pointerAllocationSources(f *ir.Func) (map[int]int, map[int]bool) {
 				}
 				continue
 			}
-			base, derived := constantOffsetBase(f, instruction)
-			if !derived {
-				continue
+			for _, base := range addressDerivationBases(f, instruction) {
+				carry(base, instruction.To)
 			}
-			derivations = append(derivations, derivation{base: base, result: instruction.To.ID})
 		}
 	}
 
-	// SSA destruction turns a phi into one copy per edge, so a temporary with
-	// several definitions can name a different allocation on each. That is still
-	// trackable while every definition agrees; where they disagree the address
-	// has been merged beyond what a single mapping can express, and both
-	// allocations are reported as merged so the caller can fall back to
-	// conservative treatment.
-	dependents := make(map[uint32][]uint32)
-	for _, entry := range derivations {
-		dependents[entry.base] = append(dependents[entry.base], entry.result)
-	}
-
-	sources := make(map[int]int, len(allocations))
-	merged := make(map[int]bool)
+	reaching := make(map[uint32]map[uint32]bool, len(allocations))
 	pending := make([]uint32, 0, len(allocations))
 	for allocation := range allocations {
-		sources[int(allocation)] = int(allocation)
+		reaching[allocation] = map[uint32]bool{allocation: true}
 		pending = append(pending, allocation)
 	}
+	// Each visit can only add allocations to a temporary's set, and both sets are
+	// finite, so the worklist drains.
 	for next := 0; next < len(pending); next++ {
 		base := pending[next]
 		for _, result := range dependents[base] {
-			source := sources[int(base)]
-			existing, known := sources[int(result)]
-			if known {
-				if existing != source {
-					merged[existing] = true
-					merged[source] = true
-				}
-				continue
+			target, known := reaching[result]
+			if !known {
+				target = map[uint32]bool{}
+				reaching[result] = target
 			}
-			sources[int(result)] = source
-			pending = append(pending, result)
+			grew := false
+			for allocation := range reaching[base] {
+				if !target[allocation] {
+					target[allocation] = true
+					grew = true
+				}
+			}
+			if grew {
+				pending = append(pending, result)
+			}
 		}
 	}
-	return sources, merged
+
+	sources := make(allocationAddresses, len(reaching))
+	for temporary, set := range reaching {
+		addressed := make([]int, 0, len(set))
+		for allocation := range set {
+			addressed = append(addressed, int(allocation))
+		}
+		sort.Ints(addressed)
+		sources[int(temporary)] = addressed
+	}
+	return sources
+}
+
+// addressDerivationBases returns the operands whose addresses instruction's
+// result may still name: a copy or constant-offset addition passes its base
+// through, and a conditional select passes both of its value operands through.
+// Anything else either produces a value that is not an address into the operand
+// (a comparison result) or one this analysis cannot follow, and contributes no
+// derivation.
+func addressDerivationBases(f *ir.Func, instruction *ir.Instr) []ir.Ref {
+	switch instruction.Op {
+	case ir.OCopy, ir.OAdd:
+		base, derived := constantOffsetBase(f, instruction)
+		if !derived {
+			return nil
+		}
+		return []ir.Ref{{Kind: ir.RefTemp, ID: base}}
+	case ir.OSel:
+		if len(instruction.Args) != 3 {
+			return nil
+		}
+		return instruction.Args[1:3]
+	default:
+		return nil
+	}
 }
 
 // frameEscapingAllocations returns the pointer-bearing stack allocations whose
@@ -290,40 +338,35 @@ func pointerAllocationSources(f *ir.Func) (map[int]int, map[int]bool) {
 // function-wide conservative map used to do for every local.
 //
 // The test is deliberately syntactic and errs towards escaping: a use this
-// function does not recognize as an address operand makes the allocation
-// conservative, which is never wrong, only less precise.
-func frameEscapingAllocations(f *ir.Func, allocationOf map[int]int, merged map[int]bool) map[int]bool {
-	if len(allocationOf) == 0 {
+// function does not recognize as an address operand makes every allocation the
+// operand may address conservative, which is never wrong, only less precise.
+func frameEscapingAllocations(f *ir.Func, allocationsOf allocationAddresses) map[int]bool {
+	if len(allocationsOf) == 0 {
 		return nil
 	}
-	escaping := make(map[int]bool, len(merged))
-	for allocation := range merged {
-		escaping[allocation] = true
-	}
+	escaping := make(map[int]bool)
 	note := func(use ir.Ref, addressOnly bool) {
-		if use.Kind != ir.RefTemp {
+		if use.Kind != ir.RefTemp || addressOnly {
 			return
 		}
-		allocation, derived := allocationOf[int(use.ID)]
-		if !derived || addressOnly {
-			return
+		for _, allocation := range allocationsOf[int(use.ID)] {
+			escaping[allocation] = true
 		}
-		escaping[allocation] = true
 	}
 
+	// A phi's arguments need no test: pointerAllocationSources carries each one
+	// into the phi's result, so the address is still tracked on the other side.
 	for _, block := range f.Blocks {
-		for _, phi := range block.Phis {
-			for _, argument := range phi.Args {
-				note(argument, false)
-			}
-		}
 		for index := range block.Instrs {
 			instruction := &block.Instrs[index]
 			for argument, use := range instruction.Args {
-				note(use, addressOnlyOperand(f, instruction, allocationOf, argument))
+				note(use, addressOnlyOperand(f, instruction, argument))
 			}
+			// A closure environment is read outside Args, and handing one to a
+			// callee publishes it exactly as an ordinary operand would.
+			note(instruction.ClosureContext, false)
 		}
-		note(block.Jmp.Arg, false)
+		note(block.Jmp.Arg, addressOnlyTerminatorOperand(block.Jmp.Kind))
 		for _, argument := range block.Jmp.Args {
 			note(argument, false)
 		}
@@ -331,16 +374,27 @@ func frameEscapingAllocations(f *ir.Func, allocationOf map[int]int, merged map[i
 	return escaping
 }
 
+// addressOnlyTerminatorOperand reports whether a terminator consumes its operand
+// without letting it out of the frame. A conditional branch and a switch test
+// their operand and produce no value; a return hands it to the caller, and a
+// computed goto jumps to it, so both are escapes.
+func addressOnlyTerminatorOperand(kind ir.JmpKind) bool {
+	return kind == ir.JmpJnz || kind == ir.JmpSwitch
+}
+
 // addressOnlyOperand reports whether operand argument of instruction reads an
 // address purely to address the allocation it names.
 //
 // A load addresses through every operand it has; a store does so through every
-// operand but the value it writes. A lifetime marker only brackets the slot. A
-// copy or constant addition is an address derivation, but only when the result
-// was tracked back to the same allocation -- an untracked result (a destructed
-// phi, say) carries the address somewhere this analysis cannot follow, which is
-// an escape.
-func addressOnlyOperand(f *ir.Func, instruction *ir.Instr, allocationOf map[int]int, argument int) bool {
+// operand but the value it writes; a block copy addresses through both of its
+// operands. A lifetime marker only brackets the slot. A comparison yields a
+// boolean, so no address leaves through it -- which is what an interface
+// argument's nil check does with the descriptor it is about to pass. A copy, a
+// constant addition and a conditional select derive a new address, tracked
+// alongside the operand by pointerAllocationSources; an addition by a value that
+// is not a constant is not, because its result need not stay inside the
+// allocation.
+func addressOnlyOperand(f *ir.Func, instruction *ir.Instr, argument int) bool {
 	switch {
 	case instruction.Op.IsLoad():
 		return true
@@ -348,12 +402,18 @@ func addressOnlyOperand(f *ir.Func, instruction *ir.Instr, allocationOf map[int]
 		return argument != 0
 	case instruction.Op.IsLifetime():
 		return true
+	case instruction.Op == ir.OBlit:
+		return true
+	case instruction.Op == ir.OCmp || instruction.Op == ir.OCCmp:
+		return true
 	case instruction.Op == ir.OCopy || instruction.Op == ir.OAdd:
 		if instruction.To.Kind != ir.RefTemp {
 			return false
 		}
-		_, tracked := allocationOf[int(instruction.To.ID)]
-		return tracked
+		_, derived := constantOffsetBase(f, instruction)
+		return derived
+	case instruction.Op == ir.OSel:
+		return instruction.To.Kind == ir.RefTemp && len(instruction.Args) == 3
 	case instruction.Op == ir.OCall:
 		return memoryPrimitiveAddressOperand(f, instruction, argument)
 	default:

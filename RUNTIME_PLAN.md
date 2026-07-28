@@ -38,7 +38,9 @@ that must not be hidden by adding more tests:
 - panic-time GC can report an address that is not a stack address;
 - signal notification can crash in `internal/runtime/atomic.Xchg8` or runtime
   locking;
-- finalizer resurrection does not run correctly;
+- finalizer resurrection did not run correctly. It is fixed and
+  `runtime-packages/finalizer-resurrect` is `mustPass` as of 2026-07-28;
+  see §5.3;
 - the runtime trace program runs out of memory or times out;
 - the accepted baseline still needs a rerun after recent trace and large HTTP
   fixes, and the runtime source fingerprint has since moved, so a diff against
@@ -54,9 +56,10 @@ were the net/http type-check gap and have since been repaired and restored to
 `scheduler-stress/gc-churn`, `stdlib-bytes/grow-allocs` and
 `stdlib-signals/during-gc` — were one bug, the §5.2.1 GC-assist allocation
 recursion, and became `mustPass` on 2026-07-28 together with that section's two
-reducers. `runtime-packages/finalizer-resurrect` is now the matrix's only
-remaining `knownGap` (§5.3); `defer-panic/panic-string-output` is the one
-deliberate `expectedFailure`.
+reducers. `runtime-packages/finalizer-resurrect`, the last remaining `knownGap`,
+became `mustPass` on 2026-07-28 with the merged-address fix in §5.3, so the
+matrix now holds no `knownGap` at all; `defer-panic/panic-string-output` is the
+one deliberate `expectedFailure`.
 
 The two denominators are now reconciled. There is only one denominator: the
 capability matrix *is* the coverage corpus, and every capability reports one
@@ -566,11 +569,12 @@ Current checkpoint:
   pointer argument is a root for the whole call and the register home slots are
   named only in the prologue window that writes them. See "The argument
   stack-map hole" below for what was and was not observable.
-- [ ] Pass synchronized finalizer resurrection after explicitly clearing the
-  last local pointer in a still-running frame. Still failing
-  (`runtime-packages/finalizer-resurrect`, `finalizer did not run`), now for the
-  understood reason recorded below: the `SetFinalizer` interface temporary's
-  address reaches a destructed phi, so its allocation stays conservative.
+- [x] Pass synchronized finalizer resurrection after explicitly clearing the
+  last local pointer in a still-running frame
+  (`runtime-packages/finalizer-resurrect`, now `mustPass`). The `SetFinalizer`
+  interface temporary's address reaches a destructed phi; the derivation map is
+  now set-valued, so the merge is tracked instead of forcing the allocation
+  conservative. See "Closing the merged-address boundary" below.
 - [x] Pass basic finalization, clearing, KeepAlive, pointerful stack growth,
   dependency ordering, tiny-object finalization, `Cleanup.Stop`, and
   finalizer-before-cleanup ordering.
@@ -580,8 +584,14 @@ Current checkpoint:
   and 4. The three `cleanup-frame-retention` reducers additionally pass six of
   six runs at `GOMAXPROCS=64`, where they failed six of six before the §5.7
   write barrier fix. That failure was §5.7's, not this section's.
-- [ ] Pass the complete ten-program finalizer/cleanup batch ten times per
-  program with optimization and `GOMAXPROCS=4`.
+- [x] Pass the complete finalizer/cleanup batch ten times per program with
+  optimization and `GOMAXPROCS=4`. Verified 2026-07-28 over the sixteen
+  programs the batch has grown to: `gc/keepalive-finalizer`,
+  `finalizer-stack-growth`, `setfinalizer-clear`, `cleanup-basic`,
+  `cleanup-stop`, `cleanup-multiple`, the three `cleanup-frame-retention`
+  reducers, `finalizer-cleanup-order`, `finalizer-dependency-order`,
+  `finalizer-tiny`, `pinner-lifecycle`, `pinner-invalid`, plus
+  `runtime-packages/finalizer-basic` and `runtime-packages/finalizer-resurrect`.
 - [x] Add multiple-cleanup and `Pinner` lifecycle/invalid-use cases.
 - [x] Add `GODEBUG=cg12checkstackcopy=1` runtime validation that detects stale
   old-stack pointers at stack-copy boundaries and finalizer queue corruption
@@ -594,8 +604,9 @@ Current checkpoint:
   relocation.
 - [x] Pass `runtime_finalizer_tiny.go` 500 direct optimized executions with
   `GOMAXPROCS=2`, `GOGC=10`, and `GOMEMLIMIT=768MiB`.
-- [ ] Pass the cleanup/finalizer/Pinner status subset three times per program
-  with optimization and `GOMAXPROCS=2`.
+- [x] Pass the cleanup/finalizer/Pinner status subset three times per program
+  with optimization and `GOMAXPROCS=2`. Verified 2026-07-28 over the same
+  sixteen programs as the box above.
 
 #### Root cause of the cleanup/finalizer regression (2026-07-28)
 
@@ -696,14 +707,115 @@ Loads, stores, lifetime markers, constant-offset derivations and cg12's own
 `goc_memcpy`/`goc_memset`/`goc_storep` primitives are address-only uses;
 every other use, including any other call, is an escape.
 
-`runtime-packages/finalizer-resurrect` is still failing because of that
-boundary, and stays `knownGap`. Its retaining word is the data word of the
-interface temporary built for `runtime.SetFinalizer`: the aggregate's address
-reaches a destructed phi (the interface nil check), which merges it with an
-unrelated value, so the allocation is classified as escaping and stays
-conservative. Closing this needs the frontend's escape result, or alloca
-lifetime markers, to reach the backend -- the backend cannot recover it
-syntactically. That is the next step for this section.
+#### Closing the merged-address boundary (2026-07-28)
+
+`runtime-packages/finalizer-resurrect` was the last capability left behind by
+that boundary, and it is now `mustPass`. The diagnosis above was right about the
+retaining word and wrong about what it would take to fix.
+
+`GODEBUG=cg12scanroots=1` on the unoptimized binary named the two words
+directly:
+
+```
+cg12scanroots: main_main local slot 29 at 0x...5bc98 retains 0x...dfe2f0 size 16 head 0x29
+cg12scanroots: main_main local slot 31 at 0x...5bca8 retains 0x...dfe310 size 16 head 0x59dae4
+```
+
+`head 0x29` is 41, the `resurrectedObject`. The two slots are 16 bytes apart:
+they are the data words of the two 16-byte interface descriptors
+`normalizeCallInterfaces` builds for `runtime.SetFinalizer`'s two arguments. The
+emitted IR shows why both were conservative:
+
+```
+%t12 =p alloc8 16          ; the object's interface descriptor
+storel $.goc.type.692, %t12
+%t13 =p add %t12, 8
+storel %t11, %t13          ; ... its data word is the object
+%t18 =p alloc8 16          ; a zeroed descriptor
+%t20 =p ceqp %t12, 0       ; goc's interface nil check
+jnz %t20, @callinterfacezero1, @callinterfacevalue2
+@callinterfaceend3
+%t21 =p phi @callinterfacezero1 %t18, @callinterfacevalue2 %t12
+```
+
+Two separate rules fired on this shape. `pointerAllocationSources` mapped each
+temporary to *one* allocation, so the destructed phi -- whose two copies name
+`%t18` on one edge and `%t12` on the other -- was a conflict it recorded as
+`merged`, and `frameEscapingAllocations` seeded its escape set from `merged`.
+Independently, the `ceqp` that compares the descriptor's address against nil was
+not a recognized address operand, which escapes the allocation on its own.
+
+So the backend *could* recover this syntactically; what it lacked was a
+representation for an address that may name more than one allocation. Neither
+the frontend escape result nor lifetime markers were needed, and both would have
+been larger changes for a narrower result -- goc's escape analysis answers "does
+this value outlive the frame", not "which frame slots may this temporary
+address", and lifetime markers say when a slot is dead, not where its address
+went. The fix is in `arm64/regalloc.go`:
+
+- `pointerAllocationSources` returns `allocationAddresses`, a temporary to the
+  *set* of allocations it may address, computed as a worklist fixpoint over
+  address derivations. Copies, constant-offset additions, conditional selects
+  (`OSel`) and phis all carry a base's set into the result.
+- `frameEscapingAllocations` escapes every allocation a non-address-only operand
+  may address, rather than the single one it was mapped to.
+- `addressOnlyOperand` additionally recognizes comparisons (`OCmp`, `OCCmp`),
+  block copies (`OBlit`) and conditional selects: all consume an address without
+  letting it out of the frame. `addressOnlyTerminatorOperand` does the same for a
+  conditional branch and a switch, which test their operand and produce no value;
+  a return and a computed goto stay escapes.
+
+Both halves of that last rule are load-bearing, one per optimization level.
+Unoptimized, the nil check is the `ceqp` above and the compare rule covers it.
+With `-O` the compare is folded into the branch -- the lowered body reads
+`jnz %t12, @callinterfacevalue2, @callinterfacezero1`, testing the alloca
+address directly -- and only the terminator rule covers that. The `OSel` case is
+not reached by this program; a select is what if-conversion produces from the
+same diamond in other shapes, and it is covered by unit test rather than by a
+capability.
+
+`frameEscapingAllocations` also now reads `Instr.ClosureContext`, which is a
+value operand carried outside `Instr.Args` (see `Instr.Uses`). The operand walk
+had never visited it, so a frame address handed to a callee as a closure
+environment would have escaped unnoticed. No program is known to have hit it;
+it is closed because the walk claims to be exhaustive.
+
+The escape boundary itself is unchanged in kind -- an address passed to any
+other call, stored into memory, returned, or added to a runtime value is still
+conservative for the life of the frame. What changed is that merging two frame
+addresses, and testing one, are no longer escapes.
+
+This is a general shrink, not a one-program fix. Counting over a whole
+`finalizer-resurrect` build -- 4229 functions, 14047 pointer-bearing stack
+allocations -- the conservative set drops from 6335 allocations to 5543, 12.5%
+fewer.
+
+`runtime.gopanic` is the case worth checking by hand, because it is one of the
+three the boundary exists for. It goes from 23 of its 37 allocations
+conservative to 11, and the twelve that stop escaping all have one or two
+pointer words: they are the 16-byte interface descriptors built for its
+`print` and `throw` calls. The allocation with nine pointer words -- `_panic`
+itself, whose nine are `arg`'s two, `link`, `startSP`, `sp`, `fp`,
+`deferBitsPtr`, `slotsPtr` and `gopanicFP` -- is escaping before and after,
+because `&p` reaches `p.start`, `p.nextDefer`, `preprintpanics` and
+`fatalpanic` as an ordinary call operand. Nothing moved in the other direction:
+no allocation became escaping that was not before.
+
+Covered by `TestGoStackMapsDropMergedInterfaceDescriptorsAfterTheirCall`,
+`TestFrameEscapingAllocationsKeepPublishedAddressesConservative` and
+`TestPointerAllocationSourcesTrackEveryMergedAllocation` in
+`arm64/unit_test.go`.
+
+The three capabilities that broke the last time this boundary moved --
+`gc/pinner-lifecycle`, `runtime-packages/timer-gc-channel` and
+`stack/panic-stack-gc` -- were run 15 times each as direct executions,
+unoptimized and with `-O`, at `GOMAXPROCS` 1, 2 and 4: 270 runs, no failures.
+They then passed 10 harness runs each with `-runtime-opt -runtime-procs=4`,
+which also checks their expected output.
+
+`GODEBUG=cg12scanroots=1` on the fixed `finalizer-resurrect` binary reports one
+`main_main` root, the `done` channel's box. The two descriptor data words that
+kept the object alive are gone.
 
 #### The argument stack-map hole (2026-07-28)
 

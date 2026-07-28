@@ -1222,6 +1222,194 @@ func TestGoStackMapsRetainLocalReachedThroughDerivedAddress(t *testing.T) {
 	assert.Contains(t, points[0].PointerWords, fieldWord)
 }
 
+// goc builds an interface argument as a stack descriptor and then nil-checks it
+// against a zeroed one, so a destructed phi merges two allocation addresses. A
+// single-valued derivation map could not express that merge and fell back to
+// making both allocations conservative for the life of the frame -- which is
+// what kept runtime.SetFinalizer's argument, and the object it names, reachable
+// forever (RUNTIME_PLAN.md 5.3). The merged temporary now tracks both, so each
+// allocation is a root exactly where an address into it is live.
+func TestGoStackMapsDropMergedInterfaceDescriptorsAfterTheirCall(t *testing.T) {
+	function := ir.NewModule().NewFuncVoid("merged_interface_descriptor")
+	function.CallConv = ir.CallConvGoInternal
+	function.ManagedFrame = true
+	object := function.ParamRef("object")
+	entry := function.Entry()
+	descriptor := entry.Alloc(8, 16)
+	zeroed := entry.Alloc(8, 16)
+	function.MarkGCRef(descriptor)
+	function.MarkGCRef(zeroed)
+	function.StackPointerWords = map[uint32]map[int]bool{
+		descriptor.ID: {8: true},
+		zeroed.ID:     {8: true},
+	}
+	entry.Store(object, entry.Add(ir.ClsP, descriptor, function.Long(8)))
+	entry.Store(function.ConstInt(ir.ClsP, 0), entry.Add(ir.ClsP, zeroed, function.Long(8)))
+
+	useZero := function.NewBlock("callinterfacezero")
+	useValue := function.NewBlock("callinterfacevalue")
+	done := function.NewBlock("callinterfaceend")
+	isNil := entry.Cmp(ir.CmpEq, ir.ClsW, descriptor, function.ConstInt(ir.ClsP, 0))
+	entry.Jnz(isNil, useZero, useValue)
+	useZero.Goto(done)
+	useValue.Goto(done)
+	selected := done.Phi(ir.ClsP,
+		ir.PhiEdge{From: useZero, Val: zeroed},
+		ir.PhiEdge{From: useValue, Val: descriptor},
+	)
+
+	// The first call still has the merged address live, so both descriptors are
+	// roots there. The second consumes their words the way an ABIInternal
+	// interface argument does, after which nothing addresses either allocation.
+	done.CallVoid(function.Sym("between", 0))
+	typeWord := done.Load(ir.ClsP, selected)
+	dataWord := done.Load(ir.ClsP, done.Add(ir.ClsP, selected, function.Long(8)))
+	done.CallVoid(function.Sym("consume", 0), typeWord, dataWord)
+	done.CallVoid(function.Sym("collect", 0))
+	done.RetVoid()
+
+	machine := compileGoFunctionForStackMaps(t, function)
+	points := machine.m.goStackMapPoints()
+	require.Len(t, points, 3)
+
+	descriptorData := (machine.m.stackAllocTmp[descriptor.ID] + 8 - 16) / 8
+	zeroedData := (machine.m.stackAllocTmp[zeroed.ID] + 8 - 16) / 8
+	assert.Contains(t, points[0].PointerWords, descriptorData)
+	assert.Contains(t, points[0].PointerWords, zeroedData)
+	assert.NotContains(t, points[1].PointerWords, descriptorData)
+	assert.NotContains(t, points[1].PointerWords, zeroedData)
+	assert.NotContains(t, points[2].PointerWords, descriptorData)
+	assert.NotContains(t, points[2].PointerWords, zeroedData)
+}
+
+// The escape boundary is what keeps the three capabilities named in
+// RUNTIME_PLAN.md 5.3 correct, so the cases that must stay conservative are
+// asserted directly rather than only through the programs that notice them.
+func TestFrameEscapingAllocationsKeepPublishedAddressesConservative(t *testing.T) {
+	tests := []struct {
+		name     string
+		publish  func(function *ir.Func, entry *ir.Block, local ir.Ref)
+		escaping bool
+	}{
+		{
+			name: "passed to a call",
+			publish: func(function *ir.Func, entry *ir.Block, local ir.Ref) {
+				entry.CallVoid(function.Sym("observe", 0), local)
+			},
+			escaping: true,
+		},
+		{
+			name: "stored into memory",
+			publish: func(function *ir.Func, entry *ir.Block, local ir.Ref) {
+				entry.Store(local, function.Sym("sink", 0))
+			},
+			escaping: true,
+		},
+		{
+			name: "returned",
+			publish: func(function *ir.Func, entry *ir.Block, local ir.Ref) {
+				entry.Ret(local)
+			},
+			escaping: true,
+		},
+		{
+			name: "added to a runtime value",
+			publish: func(function *ir.Func, entry *ir.Block, local ir.Ref) {
+				offset := entry.Load(ir.ClsL, function.Sym("offset", 0))
+				entry.Store(entry.Add(ir.ClsP, local, offset), function.Sym("sink", 0))
+			},
+			escaping: true,
+		},
+		{
+			// A closure environment is carried outside Instr.Args, so the operand
+			// walk has to read it explicitly or the address leaves unnoticed.
+			name: "handed to a callee as a closure environment",
+			publish: func(function *ir.Func, entry *ir.Block, local ir.Ref) {
+				entry.CallVoid(function.Sym("invoke", 0))
+				call := &entry.Instrs[len(entry.Instrs)-1]
+				call.ClosureCall = true
+				call.ClosureContext = local
+			},
+			escaping: true,
+		},
+		{
+			name: "compared against nil",
+			publish: func(function *ir.Func, entry *ir.Block, local ir.Ref) {
+				isNil := entry.Cmp(ir.CmpEq, ir.ClsW, local, function.ConstInt(ir.ClsP, 0))
+				entry.Store(isNil, function.Sym("sink", 0))
+			},
+			escaping: false,
+		},
+		{
+			name: "selected between",
+			publish: func(function *ir.Func, entry *ir.Block, local ir.Ref) {
+				condition := entry.Load(ir.ClsW, function.Sym("condition", 0))
+				chosen := entry.Select(ir.ClsP, condition, local, function.ConstInt(ir.ClsP, 0))
+				entry.Store(entry.Load(ir.ClsP, chosen), function.Sym("sink", 0))
+			},
+			escaping: false,
+		},
+	}
+
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			function := ir.NewModule().NewFunc("published_local", ir.ClsP)
+			function.CallConv = ir.CallConvGoInternal
+			function.ManagedFrame = true
+			entry := function.Entry()
+			local := entry.Alloc(8, 8)
+			function.StackPointerWords = map[uint32]map[int]bool{
+				local.ID: {0: true},
+			}
+			test.publish(function, entry, local)
+			if entry.Jmp.Kind == ir.JmpNone {
+				entry.Ret(function.ConstInt(ir.ClsP, 0))
+			}
+
+			allocationsOf := pointerAllocationSources(function)
+			require.Contains(t, allocationsOf, int(local.ID))
+			escaping := frameEscapingAllocations(function, allocationsOf)
+			assert.Equal(t, test.escaping, escaping[int(local.ID)])
+		})
+	}
+}
+
+// A temporary that may address either of two allocations has to name both, or
+// the one it does not name goes unscanned on the path that reaches it.
+func TestPointerAllocationSourcesTrackEveryMergedAllocation(t *testing.T) {
+	function := ir.NewModule().NewFuncVoid("merged_allocations")
+	function.CallConv = ir.CallConvGoInternal
+	function.ManagedFrame = true
+	entry := function.Entry()
+	first := entry.Alloc(8, 8)
+	second := entry.Alloc(8, 8)
+	function.StackPointerWords = map[uint32]map[int]bool{
+		first.ID:  {0: true},
+		second.ID: {0: true},
+	}
+
+	useFirst := function.NewBlock("first")
+	useSecond := function.NewBlock("second")
+	done := function.NewBlock("done")
+	condition := entry.Load(ir.ClsW, function.Sym("condition", 0))
+	entry.Jnz(condition, useFirst, useSecond)
+	useFirst.Goto(done)
+	useSecond.Goto(done)
+	selected := done.Phi(ir.ClsP,
+		ir.PhiEdge{From: useFirst, Val: first},
+		ir.PhiEdge{From: useSecond, Val: second},
+	)
+	// A derived address keeps the merge alive past the phi's own temporary.
+	field := done.Add(ir.ClsP, selected, function.Long(0))
+	done.Store(done.Load(ir.ClsP, field), function.Sym("sink", 0))
+	done.RetVoid()
+
+	allocationsOf := pointerAllocationSources(function)
+	assert.Equal(t, []int{int(first.ID), int(second.ID)}, allocationsOf[int(selected.ID)])
+	assert.Equal(t, []int{int(first.ID), int(second.ID)}, allocationsOf[int(field.ID)])
+	assert.Empty(t, frameEscapingAllocations(function, allocationsOf))
+}
+
 func compileGoFunctionForStackMaps(t *testing.T, function *ir.Func) *machineCode {
 	t.Helper()
 
