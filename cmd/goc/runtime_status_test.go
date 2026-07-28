@@ -2023,8 +2023,7 @@ func runtimeCapabilities() []runtimeCapability {
 			category:    "runtime-packages",
 			name:        "finalizer-resurrect",
 			source:      "runtime_finalizer_resurrect.go",
-			expectation: runtimeCapabilityKnownGap,
-			note:        "the interface temporary built for SetFinalizer is a stack aggregate whose address reaches a destructed phi, so its safepoint maps stay conservative and its data word keeps the object reachable (see RUNTIME_PLAN.md 5.3)",
+			expectation: runtimeCapabilityMustPass,
 		},
 		{
 			category:    "runtime-packages",
