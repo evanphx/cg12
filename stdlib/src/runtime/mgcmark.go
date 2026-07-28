@@ -1117,6 +1117,10 @@ func scanframeworker(frame *stkframe, state *stackScanState, gcw *gcWork) {
 
 	locals, args, objs := frame.getStackMap(false)
 
+	if debug.cg12scanroots != 0 {
+		cg12reportScannedRoots(frame, &locals, &args)
+	}
+
 	// Scan local variables if stack frame has been allocated.
 	if locals.n > 0 {
 		size := uintptr(locals.n) * goarch.PtrSize
@@ -1150,6 +1154,56 @@ func scanframeworker(frame *stkframe, state *stackScanState, gcw *gcWork) {
 			}
 			state.addObject(ptr, obj)
 		}
+	}
+}
+
+// cg12reportScannedRoots prints every heap object this frame's stack maps cause
+// the precise scan to retain, naming the function, whether the word is a local
+// or an argument, and the stack-map slot it came from.
+//
+// It exists because an object that stays reachable while no live reference to it
+// remains is retained by exactly one such (frame, slot) pair, and nothing else
+// the runtime prints names that pair. GODEBUG=cg12scanroots=1 prints the
+// retaining slots; cg12scanroots=2 additionally prints each frame's stack
+// geometry, which is what identifies a slot as sitting in stack an
+// already-returned function abandoned.
+//
+// The words examined are exactly the words scanblock would process below, so
+// this reports no pointer the scan would not itself have followed.
+//
+//go:nowritebarrier
+func cg12reportScannedRoots(frame *stkframe, locals, args *bitvector) {
+	if debug.cg12scanroots > 1 {
+		print("cg12scanroots: frame ", funcname(frame.fn),
+			" sp=", hex(frame.sp), " fp=", hex(frame.fp),
+			" varp=", hex(frame.varp), " argp=", hex(frame.argp),
+			" locals=", locals.n, " args=", args.n, "\n")
+	}
+	if locals.n > 0 {
+		localsBase := frame.varp - uintptr(locals.n)*goarch.PtrSize
+		cg12reportScannedWords(frame, "local", localsBase, locals)
+	}
+	if args.n > 0 {
+		cg12reportScannedWords(frame, "arg", frame.argp, args)
+	}
+}
+
+//go:nowritebarrier
+func cg12reportScannedWords(frame *stkframe, kind string, base uintptr, bv *bitvector) {
+	for slot := int32(0); slot < bv.n; slot++ {
+		if bv.ptrbit(uintptr(slot)) == 0 {
+			continue
+		}
+		address := base + uintptr(slot)*goarch.PtrSize
+		value := *(*uintptr)(unsafe.Pointer(address))
+		objectBase, span, _ := findObject(value, address, 0)
+		if objectBase == 0 {
+			continue
+		}
+		firstWord := *(*uintptr)(unsafe.Pointer(objectBase))
+		print("cg12scanroots: ", funcname(frame.fn), " ", kind, " slot ", slot,
+			" at ", hex(address), " retains ", hex(objectBase),
+			" size ", span.elemsize, " head ", hex(firstWord), "\n")
 	}
 }
 

@@ -306,6 +306,7 @@ type dbgVar struct {
 var debug struct {
 	cgocheck                 int32
 	cg12checkstackcopy       int32
+	cg12scanroots            int32
 	clobberfree              int32
 	containermaxprocs        int32
 	decoratemappings         int32
@@ -372,6 +373,7 @@ var dbgvars = []*dbgVar{
 	{name: "asyncpreemptoff", value: &debug.asyncpreemptoff},
 	{name: "asynctimerchan", atomic: &debug.asynctimerchan},
 	{name: "cg12checkstackcopy", value: &debug.cg12checkstackcopy},
+	{name: "cg12scanroots", value: &debug.cg12scanroots},
 	{name: "cgocheck", value: &debug.cgocheck},
 	{name: "clobberfree", value: &debug.clobberfree},
 	{name: "containermaxprocs", value: &debug.containermaxprocs, def: 1},

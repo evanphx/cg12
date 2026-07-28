@@ -8,6 +8,7 @@ import (
 
 	"github.com/evanphx/cg12/analysis"
 	"github.com/evanphx/cg12/arm64/a64"
+	"github.com/evanphx/cg12/internal/gometa"
 	"github.com/evanphx/cg12/ir"
 	"github.com/evanphx/cg12/obj"
 	"github.com/stretchr/testify/assert"
@@ -1093,6 +1094,86 @@ func TestGoStackMapsDropDeadPointerBearingLocal(t *testing.T) {
 	localWord := (localOffset - 16) / 8
 	assert.Contains(t, points[0].PointerWords, localWord)
 	assert.NotContains(t, points[1].PointerWords, localWord)
+}
+
+// The emitted map, not just the safepoint root set, has to drop the dead local.
+// The conservative function-wide map used to be unioned into every safepoint,
+// which put the word back and kept whatever the slot last held reachable for the
+// life of the frame -- the over-retention bug of RUNTIME_PLAN.md 5.3.
+func TestGoEmittedStackMapDropsDeadPointerBearingLocal(t *testing.T) {
+	function := ir.NewModule().NewFuncVoid("dead_pointer_local_emitted")
+	function.CallConv = ir.CallConvGoInternal
+	function.ManagedFrame = true
+	input := function.ParamRef("input")
+	entry := function.Entry()
+	local := entry.Alloc(8, 8)
+	function.MarkGCRef(local)
+	function.StackPointerWords = map[uint32]map[int]bool{
+		local.ID: {0: true},
+	}
+	entry.Store(input, local)
+	// The local is read after the first call and never again, so it is live at
+	// the first safepoint and dead at the second.
+	entry.CallVoid(function.Sym("first", 0))
+	entry.Store(entry.Load(ir.ClsP, local), function.Sym("sink", 0))
+	entry.CallVoid(function.Sym("second", 0))
+	entry.RetVoid()
+
+	machine := compileGoFunctionForStackMaps(t, function)
+	information, err := goFunctionInfoFor(function, "dead_pointer_local_emitted", machine)
+	require.NoError(t, err)
+
+	localWord := (machine.m.stackAllocTmp[local.ID] - 16) / 8
+	assert.Contains(t, information.LocalPointerWords, localWord)
+
+	pointerMaps, indexPoints := gometa.FunctionStackMaps(information)
+	require.Len(t, indexPoints, 2)
+	assert.Contains(t, pointerMaps[indexPoints[0].Index], localWord)
+	assert.NotContains(t, pointerMaps[indexPoints[1].Index], localWord)
+}
+
+// A local reached only through a derived interior address stays scanned. cg12
+// approximates a local's liveness by the liveness of the temporary holding its
+// address, so a derived address that outlives that temporary would otherwise
+// leave the local's pointer words unscanned while code can still read them.
+func TestGoStackMapsRetainLocalReachedThroughDerivedAddress(t *testing.T) {
+	function := ir.NewModule().NewFuncVoid("derived_address_local")
+	function.CallConv = ir.CallConvGoInternal
+	function.ManagedFrame = true
+	input := function.ParamRef("input")
+	entry := function.Entry()
+	local := entry.Alloc(8, 16)
+	function.MarkGCRef(local)
+	function.StackPointerWords = map[uint32]map[int]bool{
+		local.ID: {8: true},
+	}
+	// After this addition nothing uses the allocation's own temporary again, so
+	// only the derived address keeps the local reachable.
+	field := entry.Add(ir.ClsP, local, function.Long(8))
+	entry.Store(input, field)
+	entry.CallVoid(function.Sym("between", 0))
+	entry.Store(entry.Load(ir.ClsP, field), function.Sym("sink", 0))
+	entry.RetVoid()
+
+	machine := compileGoFunctionForStackMaps(t, function)
+	points := machine.m.goStackMapPoints()
+	require.Len(t, points, 1)
+
+	fieldWord := (machine.m.stackAllocTmp[local.ID] + 8 - 16) / 8
+	assert.Contains(t, points[0].PointerWords, fieldWord)
+}
+
+func compileGoFunctionForStackMaps(t *testing.T, function *ir.Func) *machineCode {
+	t.Helper()
+
+	prepareGoABI(function)
+	ir.LowerPointers(function, ptrCls)
+	require.NoError(t, lower(function, TLSLocalExec))
+	allocation, err := regAlloc(function)
+	require.NoError(t, err)
+	machine, err := emitMachine(function, allocation, nil, TLSLocalExec)
+	require.NoError(t, err)
+	return machine
 }
 
 func TestGoABIGroupedSliceValuesUseRegistersOrWholeStack(t *testing.T) {

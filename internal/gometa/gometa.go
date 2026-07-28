@@ -292,20 +292,30 @@ func GCProgram(dataStart, dataEnd uint64, pointerOffsets []uint64) ([]byte, erro
 // FunctionStackMaps builds a function's deduplicated pointer maps and the
 // per-safepoint indexes into them.
 //
-// Map 0 is empty and map 1 is the body's own roots: the function selects map 0
-// while it is still in its stack-growth prologue and map 1 once the frame
-// exists, because the temporary spills morestack uses at entry are not valid
-// roots during ordinary execution. Each safepoint then gets the union of the
-// body roots and its own live roots, deduplicated so identical maps share an
-// index.
+// Map 0 is empty and map 1 is the function's conservative body map: every
+// pointer-bearing word the frame ever uses, which is also the set the prologue
+// zeroes. The function selects map 0 while it is still in its stack-growth
+// prologue and map 1 once the frame exists, because the temporary spills
+// morestack uses at entry are not valid roots during ordinary execution. No
+// safepoint falls between the frame being built and the first call, so map 1
+// describes a window a scan cannot observe; it is kept conservative rather than
+// empty so that window stays safe if one ever appears.
+//
+// Every safepoint then gets exactly the roots live there, deduplicated so
+// identical maps share an index. It must NOT be the union with map 1: a local
+// whose last use has passed is not a root, and unioning the body map in would
+// report every pointer the frame ever held as live at every call for as long as
+// the frame exists. That is an unbounded leak in any long-running frame, and it
+// is what kept an object registered by an inlined helper alive forever so its
+// cleanup and finalizer never ran (RUNTIME_PLAN.md 5.3).
 //
 // This is pure set algebra over word indexes -- see the package comment on why
 // no register numbers ever appear here.
 func FunctionStackMaps(function FunctionInfo) ([][]int, []StackMapIndexPoint) {
-	pointerMaps := [][]int{nil, append([]int(nil), function.LocalPointerWords...)}
+	pointerMaps := [][]int{nil, normalizePointerWords(function.LocalPointerWords)}
 	indexPoints := make([]StackMapIndexPoint, 0, len(function.StackMapPoints))
 	for _, point := range function.StackMapPoints {
-		pointerWords := unionPointerWords(function.LocalPointerWords, point.PointerWords)
+		pointerWords := normalizePointerWords(point.PointerWords)
 		index := pointerMapIndex(pointerMaps, pointerWords)
 		if index < 0 {
 			index = len(pointerMaps)
@@ -316,26 +326,22 @@ func FunctionStackMaps(function FunctionInfo) ([][]int, []StackMapIndexPoint) {
 	return pointerMaps, indexPoints
 }
 
-func unionPointerWords(left, right []int) []int {
-	if len(left) == 0 {
-		return append([]int(nil), right...)
+// normalizePointerWords returns a sorted, duplicate-free copy, which is the form
+// pointerMapIndex compares against.
+func normalizePointerWords(words []int) []int {
+	if len(words) == 0 {
+		return nil
 	}
-	if len(right) == 0 {
-		return append([]int(nil), left...)
-	}
-	seen := make(map[int]bool, len(left)+len(right))
-	for _, word := range left {
+	seen := make(map[int]bool, len(words))
+	for _, word := range words {
 		seen[word] = true
 	}
-	for _, word := range right {
-		seen[word] = true
-	}
-	words := make([]int, 0, len(seen))
+	normalized := make([]int, 0, len(seen))
 	for word := range seen {
-		words = append(words, word)
+		normalized = append(normalized, word)
 	}
-	sort.Ints(words)
-	return words
+	sort.Ints(normalized)
+	return normalized
 }
 
 func pointerMapIndex(pointerMaps [][]int, candidate []int) int {
