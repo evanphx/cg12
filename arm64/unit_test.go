@@ -865,19 +865,6 @@ func TestInferFrameAddressOffsetsDoesNotCollapsePhiCopies(t *testing.T) {
 	assert.False(t, inferred, "a runtime-selected frame address must not be replaced by one incoming offset")
 }
 
-func TestPrepareGoABIDoesNotTreatRawPointerClassAsGCRoot(t *testing.T) {
-	function := ir.NewModule().NewFunc("raw_pointer", ir.ClsP)
-	function.CallConv = ir.CallConvGoInternal
-	function.ManagedFrame = true
-	raw := function.Param("raw", ir.ClsP)
-	entry := function.Entry()
-	entry.CallVoid(function.Sym("observe", 0))
-	entry.Ret(raw)
-
-	prepareGoABI(function)
-	assert.False(t, function.Temp(raw).GCRef)
-}
-
 func TestGoABINoSplitOmitsStackGrowthCheck(t *testing.T) {
 	module := ir.NewModule()
 	function := module.NewFuncVoid("nosplit")

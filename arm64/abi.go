@@ -212,7 +212,7 @@ func lowerAggResult(f *ir.Func, dst ir.Ref, agg *ir.AggType, a *argAssigner, out
 	cls := classifyAgg(agg)
 	if cls.kind == aggMemory {
 		// Allocate a buffer and hand its address to the callee in x8.
-		buf := aggregateAlloc(f, agg, out)
+		buf := f.AllocAggregate(agg, out)
 		pinX8 := newPinned(f, X8, ir.ClsL)
 		argSetup = append(argSetup, ir.Instr{Op: ir.OArg, Cls: ir.ClsL, To: pinX8, Args: []ir.Ref{buf}})
 		pins = append(pins, pinX8)
@@ -226,7 +226,7 @@ func lowerAggResult(f *ir.Func, dst ir.Ref, agg *ir.AggType, a *argAssigner, out
 	if cls.kind == aggHFA {
 		base, elemCls, elemSize = V0, cls.elem, cls.elem.Size()
 	}
-	slot := aggregateAlloc(f, agg, out)
+	slot := f.AllocAggregate(agg, out)
 
 	var defRefs []ir.Ref
 	for i := 0; i < cls.nregs; i++ {
