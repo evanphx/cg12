@@ -886,3 +886,83 @@ func main() {
 	assert.NotZero(t, plainBarriers, "aggregate store of ordinary pointers lost its write barriers")
 	assert.Equal(t, plainBarriers, 2*countCallsSymbol(storeMixed, "goc_storep"), "aggregate store barriered the not-in-heap pointer word")
 }
+
+func TestKeepAliveStoresIntoAFrameSlotRatherThanAGlobal(t *testing.T) {
+	module, err := goc.CompileExecutable("keepalive_slot.go", []byte(`
+package main
+
+import "runtime"
+
+type keptItem struct {
+	index int
+	next  *keptItem
+}
+
+func keepStackItem(index int) int {
+	root := &keptItem{
+		index: index,
+		next:  &keptItem{index: index + 1},
+	}
+	runtime.GC()
+	total := root.index + root.next.index
+	runtime.KeepAlive(root)
+	return total
+}
+
+func main() {
+	if keepStackItem(1) != 3 {
+		panic("keepalive total mismatch")
+	}
+}
+`))
+	require.NoError(t, err)
+
+	// cg12 roots a kept-alive value in a slot of its own, because the value's
+	// last ordinary use can precede the runtime.KeepAlive call. That slot must
+	// live in the frame. A global would be shared by every goroutine running
+	// the function, and -- since escape analysis leaves root on the stack --
+	// would publish a goroutine stack address to a permanent GC root that no
+	// stack copy relocates and no goroutine exit clears. That is the stale root
+	// behind "found bad pointer in Go heap"; see RUNTIME_PLAN.md 5.8.
+	for _, data := range module.Data {
+		assert.False(t, strings.HasPrefix(data.Name, ".goc.keepalive."),
+			"runtime.KeepAlive still uses a global slot: %s", data.Name)
+	}
+
+	keepStackItem := functionWithSuffix(t, module, "main.keepStackItem")
+	assert.True(t, keepAliveSlotIsAFramePointerWord(keepStackItem),
+		"runtime.KeepAlive did not root its value in a frame pointer word")
+}
+
+// keepAliveSlotIsAFramePointerWord reports whether the function allocates a
+// stack slot that is registered as holding a pointer word and is written by a
+// plain store. That is the shape of a keep-alive slot: a frame allocation the
+// stack maps describe, so the collector scans it and stack copying relocates
+// it, and a direct store rather than a write barrier, because the destination
+// is on the stack.
+func keepAliveSlotIsAFramePointerWord(function *ir.Func) bool {
+	pointerAllocations := make(map[uint32]bool)
+	for _, block := range function.Blocks {
+		for _, instruction := range block.Instrs {
+			if !instruction.Op.IsAlloc() || instruction.To.Kind != ir.RefTemp {
+				continue
+			}
+			if function.StackPointerWords[instruction.To.ID][0] {
+				pointerAllocations[instruction.To.ID] = true
+			}
+		}
+	}
+
+	for _, block := range function.Blocks {
+		for _, instruction := range block.Instrs {
+			if !instruction.Op.IsStore() || len(instruction.Args) < 2 {
+				continue
+			}
+			destination := instruction.Args[1]
+			if destination.Kind == ir.RefTemp && pointerAllocations[destination.ID] {
+				return true
+			}
+		}
+	}
+	return false
+}

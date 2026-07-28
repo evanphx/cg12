@@ -116,7 +116,7 @@ func fullyPopulatedGen() *gen {
 		objectEscapeChecks:            map[types.Object]bool{},
 		keepAliveObjects:              map[types.Object]bool{},
 		keepAliveValues:               map[types.Object]ir.Ref{},
-		keepAliveSlots:                map[types.Object]string{},
+		keepAliveSlots:                map[types.Object]ir.Ref{},
 		transientInterfaceDescriptors: map[uint32]bool{},
 		initializingGlobals:           map[types.Object]bool{},
 		parents:                       map[ast.Node]ast.Node{},
