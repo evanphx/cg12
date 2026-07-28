@@ -46,10 +46,10 @@ func goArgumentFrameFor(function *ir.Func) goArgumentFrame {
 	groups := make([]goRegisterSpillGroup, 0, len(function.Params))
 	pointerOffsets := make(map[int]bool)
 	for parameterIndex := 0; parameterIndex < len(function.Params); {
-		if group, ok := valueGroupAt(function.ParamGroups, parameterIndex); goInternal && ok {
+		if group, ok := ir.ValueGroupAt(function.ParamGroups, parameterIndex); goInternal && ok {
 			parts, onStack, stackOffset := assignGoAggregate(&assigner, group.Type)
 			if onStack {
-				for _, offset := range goAggregatePointerOffsets(group.Type) {
+				for _, offset := range ir.AggregatePointerOffsets(group.Type) {
 					pointerOffsets[stackOffset+offset] = true
 				}
 			} else {
@@ -63,11 +63,11 @@ func goArgumentFrameFor(function *ir.Func) goArgumentFrame {
 			parameterIndex += group.Count
 			continue
 		}
-		if group, ok := valueGroupAt(function.ParamGroups, parameterIndex); !goInternal && ok {
+		if group, ok := ir.ValueGroupAt(function.ParamGroups, parameterIndex); !goInternal && ok {
 			if classifyAgg(group.Type).kind != aggMemory {
 				parts, onStack, stackOffset := assignGoAggregate(&assigner, group.Type)
 				if onStack {
-					for _, offset := range goAggregatePointerOffsets(group.Type) {
+					for _, offset := range ir.AggregatePointerOffsets(group.Type) {
 						pointerOffsets[stackOffset+offset] = true
 					}
 				} else {
@@ -120,7 +120,7 @@ func goArgumentFrameFor(function *ir.Func) goArgumentFrame {
 			}
 			parts, onStack, stackOffset := assignGoAggregate(&assigner, parameter.Agg)
 			if onStack {
-				for _, offset := range goAggregatePointerOffsets(parameter.Agg) {
+				for _, offset := range ir.AggregatePointerOffsets(parameter.Agg) {
 					pointerOffsets[stackOffset+offset] = true
 				}
 				parameterIndex++
@@ -174,7 +174,7 @@ func goArgumentFrameFor(function *ir.Func) goArgumentFrame {
 		results.nsaa = resultEnd
 		_, onStack, stackOffset := assignGoAggregate(&results, function.RetAgg)
 		if onStack {
-			for _, offset := range goAggregatePointerOffsets(function.RetAgg) {
+			for _, offset := range ir.AggregatePointerOffsets(function.RetAgg) {
 				pointerOffsets[stackOffset+offset] = true
 			}
 		}
@@ -241,7 +241,7 @@ func aapcsAggregateSpillGroups(assigner *argAssigner, aggregate *ir.AggType) ([]
 	if classification.size == 0 {
 		return nil, nil
 	}
-	pointerOffsets := goAggregatePointerOffsets(aggregate)
+	pointerOffsets := ir.AggregatePointerOffsets(aggregate)
 	pointerAt := make(map[int]bool, len(pointerOffsets))
 	for _, offset := range pointerOffsets {
 		pointerAt[offset] = true
@@ -317,45 +317,6 @@ func semanticSubClass(class ir.Cls) ir.SubCls {
 	}
 }
 
-func valueGroupAt(groups []ir.ValueGroup, index int) (ir.ValueGroup, bool) {
-	for _, group := range groups {
-		if group.Index == index {
-			return group, true
-		}
-	}
-	return ir.ValueGroup{}, false
-}
-
-func goAggregatePointerOffsets(aggregate *ir.AggType) []int {
-	var offsets []int
-	var walk func(*ir.AggType, int)
-	walk = func(current *ir.AggType, base int) {
-		if current == nil || current.Opaque || current.Union {
-			return
-		}
-		offset := 0
-		for _, field := range current.Fields {
-			size, alignment := goFieldSizeAlign(field)
-			offset = roundUp(offset, alignment)
-			count := field.Count
-			if count <= 0 {
-				count = 1
-			}
-			for index := 0; index < count; index++ {
-				fieldOffset := base + offset + index*size
-				if field.Type != nil {
-					walk(field.Type, fieldOffset)
-				} else if field.Pointer {
-					offsets = append(offsets, fieldOffset)
-				}
-			}
-			offset += size * count
-		}
-	}
-	walk(aggregate, 0)
-	return offsets
-}
-
 func maxOutgoingCallSize(function *ir.Func) int {
 	maximum := 0
 	for _, block := range function.Blocks {
@@ -373,8 +334,8 @@ func maxOutgoingCallSize(function *ir.Func) int {
 	return maximum
 }
 
-// goABIPart is one recursively flattened base value of a Go aggregate. Go's
-// ABIInternal assigns each part to its own integer or floating-point register.
+// goABIPart is one flattened part of a Go aggregate (ir.AggPart) together with
+// the register AAPCS64 or ABIInternal assigned it.
 type goABIPart struct {
 	sub     ir.SubCls
 	offset  int
@@ -382,55 +343,22 @@ type goABIPart struct {
 	reg     Reg
 }
 
+// flattenAggregate is ir.FlattenAggregate with an arm64 register slot added to
+// each part. The flattening itself is neutral; only the assignment of a part to
+// a register is architectural, so only that lives here.
 func flattenAggregate(aggregate *ir.AggType) ([]goABIPart, bool) {
-	if aggregate == nil || aggregate.Opaque || aggregate.Union {
+	neutral, flattenable := ir.FlattenAggregate(aggregate)
+	if !flattenable {
 		return nil, false
 	}
-
-	var parts []goABIPart
-	var walk func(*ir.AggType, int) bool
-	walk = func(current *ir.AggType, base int) bool {
-		offset := 0
-		for _, field := range current.Fields {
-			size, alignment := goFieldSizeAlign(field)
-			offset = roundUp(offset, alignment)
-			count := field.Count
-			if count <= 0 {
-				count = 1
-			}
-			if count > 1 {
-				// ABIInternal never register-assigns a non-trivial array, even
-				// when all of its elements would otherwise fit.
-				return false
-			}
-			if field.Type != nil {
-				if !walk(field.Type, base+offset) {
-					return false
-				}
-			} else {
-				parts = append(parts, goABIPart{
-					sub:     field.Sub,
-					offset:  base + offset,
-					pointer: field.Pointer,
-				})
-			}
-			offset += size
-		}
-		return true
+	if len(neutral) == 0 {
+		return nil, true
 	}
-
-	if !walk(aggregate, 0) {
-		return nil, false
+	parts := make([]goABIPart, len(neutral))
+	for index, part := range neutral {
+		parts[index] = goABIPart{sub: part.Sub, offset: part.Offset, pointer: part.Pointer}
 	}
 	return parts, true
-}
-
-func goFieldSizeAlign(field ir.Field) (int, int) {
-	if field.Type != nil {
-		return field.Type.Layout()
-	}
-	size := field.Sub.Size()
-	return size, size
 }
 
 // assignGoAggregate assigns one complete flattened Go value. If any of its
@@ -486,98 +414,6 @@ func (a *argAssigner) assignStack(size, alignment int) int {
 	return offset
 }
 
-func aggregateAlloc(f *ir.Func, aggregate *ir.AggType, out *[]ir.Instr) ir.Ref {
-	size, alignment := aggregate.Layout()
-	if size == 0 {
-		size = 1
-	}
-	var operation ir.Op
-	switch {
-	case alignment > 8:
-		operation = ir.OAlloc16
-	case alignment > 4:
-		operation = ir.OAlloc8
-	default:
-		operation = ir.OAlloc4
-	}
-	slot := f.NewTemp("", ir.ClsL)
-	*out = append(*out, ir.Instr{Op: operation, Cls: ir.ClsL, To: slot, Args: []ir.Ref{f.Long(int64(size))}})
-	// The aggregate is addressed through this temporary after nested calls. Under a
-	// managed (copied) stack that interior pointer must be relocated and its
-	// pointer words scanned, so the collector tracks it. A fixed C/Ruby stack does
-	// not move, so the slot is an ordinary local needing no GC metadata.
-	if f.UsesManagedFrame() {
-		f.MarkGCRef(slot)
-		markAggregatePointerWords(f, slot, aggregate)
-	}
-	return slot
-}
-
-func markAggregatePointerWords(f *ir.Func, slot ir.Ref, aggregate *ir.AggType) {
-	parts, ok := flattenAggregate(aggregate)
-	if !ok {
-		return
-	}
-	if f.StackPointerWords == nil {
-		f.StackPointerWords = make(map[uint32]map[int]bool)
-	}
-	for _, part := range parts {
-		if !part.pointer || part.offset%8 != 0 {
-			continue
-		}
-		if f.StackPointerWords[slot.ID] == nil {
-			f.StackPointerWords[slot.ID] = make(map[int]bool)
-		}
-		f.StackPointerWords[slot.ID][part.offset] = true
-	}
-}
-
-func loadOpForSub(sub ir.SubCls) ir.Op {
-	switch sub {
-	case ir.SubB:
-		return ir.OLoadsb
-	case ir.SubUB:
-		return ir.OLoadub
-	case ir.SubH:
-		return ir.OLoadsh
-	case ir.SubUH:
-		return ir.OLoaduh
-	case ir.SubW:
-		return ir.OLoadsw
-	case ir.SubL:
-		return ir.OLoadl
-	case ir.SubS:
-		return ir.OLoads
-	case ir.SubD:
-		return ir.OLoadd
-	case ir.SubQ:
-		return ir.OLoadq
-	default:
-		panic("arm64: unsupported Go ABI aggregate field")
-	}
-}
-
-func storeOpForSub(sub ir.SubCls) ir.Op {
-	switch sub {
-	case ir.SubB, ir.SubUB:
-		return ir.OStoreb
-	case ir.SubH, ir.SubUH:
-		return ir.OStoreh
-	case ir.SubW:
-		return ir.OStorew
-	case ir.SubL:
-		return ir.OStorel
-	case ir.SubS:
-		return ir.OStores
-	case ir.SubD:
-		return ir.OStored
-	case ir.SubQ:
-		return ir.OStoreq
-	default:
-		panic("arm64: unsupported Go ABI aggregate field")
-	}
-}
-
 func lowerGoAggregateParam(f *ir.Func, parameter *ir.Temp, assigner *argAssigner) (parameters, reconstruction []ir.Instr, err error) {
 	parts, onStack, stackOffset := assignGoAggregate(assigner, parameter.Agg)
 	if onStack {
@@ -590,7 +426,7 @@ func lowerGoAggregateParam(f *ir.Func, parameter *ir.Temp, assigner *argAssigner
 		}}, nil, nil
 	}
 
-	slot := aggregateAlloc(f, parameter.Agg, &reconstruction)
+	slot := f.AllocAggregate(parameter.Agg, &reconstruction)
 	for _, part := range parts {
 		pin := newPinned(f, part.reg, part.sub.Cls())
 		if part.pointer {
@@ -598,7 +434,7 @@ func lowerGoAggregateParam(f *ir.Func, parameter *ir.Temp, assigner *argAssigner
 		}
 		address := offsetAddr(f, slot, part.offset, &reconstruction)
 		reconstruction = append(reconstruction, ir.Instr{
-			Op:   storeOpForSub(part.sub),
+			Op:   ir.StoreOpForSub(part.sub),
 			Cls:  part.sub.Cls(),
 			Args: []ir.Ref{pin, address},
 		})
@@ -670,7 +506,7 @@ func lowerGoAggregateArg(f *ir.Func, argument ir.Ref, aggregate *ir.AggType, ass
 		address := offsetAddr(f, argument, part.offset, out)
 		value := f.NewTemp("", part.sub.Cls())
 		*out = append(*out, ir.Instr{
-			Op:   loadOpForSub(part.sub),
+			Op:   ir.LoadOpForSub(part.sub),
 			Cls:  part.sub.Cls(),
 			To:   value,
 			Args: []ir.Ref{address},
@@ -736,12 +572,12 @@ func lowerGoAggregateResult(f *ir.Func, destination ir.Ref, aggregate *ir.AggTyp
 	resultAssigner.nsaa = stackBase
 	parts, onStack, resultOffset := assignGoAggregate(&resultAssigner, aggregate)
 	if onStack {
-		slot := aggregateAlloc(f, aggregate, out)
+		slot := f.AllocAggregate(aggregate, out)
 		post = append(post, ir.Instr{Op: ir.OCopy, Cls: ir.ClsL, To: destination, Args: []ir.Ref{slot}})
 		return ir.R, 0, nil, setup, pins, post, slot, resultOffset, resultAssigner.nsaa, nil
 	}
 
-	slot := aggregateAlloc(f, aggregate, out)
+	slot := f.AllocAggregate(aggregate, out)
 	for index, part := range parts {
 		pin := newPinned(f, part.reg, part.sub.Cls())
 		if part.pointer {
@@ -755,7 +591,7 @@ func lowerGoAggregateResult(f *ir.Func, destination ir.Ref, aggregate *ir.AggTyp
 		}
 		address := offsetAddr(f, slot, part.offset, &post)
 		post = append(post, ir.Instr{
-			Op:   storeOpForSub(part.sub),
+			Op:   ir.StoreOpForSub(part.sub),
 			Cls:  part.sub.Cls(),
 			Args: []ir.Ref{pin, address},
 		})
@@ -777,7 +613,7 @@ func lowerGoValueResult(f *ir.Func, destinations []ir.Ref, aggregate *ir.AggType
 	}
 
 	if onStack {
-		slot := aggregateAlloc(f, aggregate, out)
+		slot := f.AllocAggregate(aggregate, out)
 		for index, part := range parts {
 			destination := destinations[index]
 			if f.ClassOf(destination) != part.sub.Cls() {
@@ -786,7 +622,7 @@ func lowerGoValueResult(f *ir.Func, destinations []ir.Ref, aggregate *ir.AggType
 			}
 			address := offsetAddr(f, slot, part.offset, &post)
 			post = append(post, ir.Instr{
-				Op:   loadOpForSub(part.sub),
+				Op:   ir.LoadOpForSub(part.sub),
 				Cls:  part.sub.Cls(),
 				To:   destination,
 				Args: []ir.Ref{address},
@@ -843,7 +679,7 @@ func lowerGoAggregateReturn(f *ir.Func, block *ir.Block, resultBuffer ir.Ref) er
 			f.Temp(pin).GCRef = true
 		}
 		block.Instrs = append(block.Instrs, ir.Instr{
-			Op:   loadOpForSub(part.sub),
+			Op:   ir.LoadOpForSub(part.sub),
 			Cls:  part.sub.Cls(),
 			To:   pin,
 			Args: []ir.Ref{address},
@@ -894,7 +730,7 @@ func lowerGoValueReturn(f *ir.Func, block *ir.Block, resultBuffer ir.Ref) error 
 			}
 			address := offsetAddr(f, resultBuffer, part.offset, &block.Instrs)
 			block.Instrs = append(block.Instrs, ir.Instr{
-				Op:   storeOpForSub(part.sub),
+				Op:   ir.StoreOpForSub(part.sub),
 				Cls:  part.sub.Cls(),
 				Args: []ir.Ref{value, address},
 			})
@@ -936,7 +772,7 @@ func goCallStackBytes(f *ir.Func, call *ir.Instr, resultEnd int) int {
 	var spills []goABISpill
 	arguments := call.Args[1:]
 	for argumentIndex := 0; argumentIndex < len(arguments); {
-		if group, ok := valueGroupAt(call.ArgGroups, argumentIndex); ok {
+		if group, ok := ir.ValueGroupAt(call.ArgGroups, argumentIndex); ok {
 			_, onStack, _ := assignGoAggregate(&assigner, group.Type)
 			if !onStack {
 				size, alignment := group.Type.Layout()
@@ -991,7 +827,7 @@ func aapcsCallStackBytes(f *ir.Func, call *ir.Instr) int {
 	var homes []goABISpill
 	arguments := call.Args[1:]
 	for argumentIndex := 0; argumentIndex < len(arguments); {
-		if group, ok := valueGroupAt(call.ArgGroups, argumentIndex); ok {
+		if group, ok := ir.ValueGroupAt(call.ArgGroups, argumentIndex); ok {
 			for partIndex := 0; partIndex < group.Count; partIndex++ {
 				class := f.ClassOf(arguments[argumentIndex+partIndex])
 				location := assigner.assign(class)

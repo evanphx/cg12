@@ -3,7 +3,6 @@ package amd64
 import (
 	"fmt"
 	"math"
-	"sort"
 
 	"github.com/evanphx/cg12/amd64/x64"
 	"github.com/evanphx/cg12/ir"
@@ -63,7 +62,66 @@ func addAliases(o *obj.Object, aliases []*ir.Alias) error {
 	return nil
 }
 
+// goABIUnsupported names the Go-ABI feature f asks for that this backend cannot
+// provide, or returns nil when f is compilable. amd64 has no runtime-managed frame
+// at all: no morestack prologue, no g-relative stack-guard check, no Go stack-map
+// metadata. It nevertheless used to accept the annotation and emit an ordinary
+// System V frame anyway, so a function whose stack the Go runtime is supposed to
+// grow got one that simply overruns it -- a silent miscompile with err == nil.
+// ManagedFrame is the flag that gates that machinery (arm64 keys both its
+// morestack prologue and its Go stack maps on UsesManagedFrame), so it is the
+// tripwire worth having, and it is the one rejected here.
+//
+// The Go internal calling convention is deliberately NOT rejected, even though
+// amd64 does not implement ABIInternal's register assignment either. CallConv is
+// not currently a trustworthy signal that a function needs Go's ABI: goc applies
+// CallConvGoInternal unconditionally to closure-shaped functions -- function
+// literals (goc/compile.go:10119), method-value wrappers (:9781) and funcvalue
+// adapters (:10638) -- which then pass their environment through an ordinary
+// fixed-register temporary (rdx via goc's closureRegister) rather than through the
+// convention's register assignment. Those bodies are self-consistent System V code
+// and are correct today; rejecting them catches no latent miscompile and instead
+// breaks working code (measured: 14 goc corpus subtests that build natively on
+// amd64). Check whether those frontend sites still over-apply the annotation
+// before tightening this.
+//
+// NoSplit and SystemStack are likewise not rejected. Neither describes the frame
+// on its own: they only tune the managed frame's stack-growth check (arm64 reads
+// NoSplit only inside its UsesManagedFrame prologue branch, and SystemStack only
+// within that check, to pick g.stackguard1 and runtime_morestackc). A platform-ABI,
+// unmanaged function emits no such check, so the flags have nothing to change --
+// and the C path already sets NoSplit benignly on plain platform-ABI functions
+// (goc's runtime coverage dump, semantic assembly's NOSPLIT flag), which compile
+// correctly today. Rejecting them would break working code without catching any
+// wrong code.
+func goABIUnsupported(f *ir.Func) error {
+	if f.UsesManagedFrame() {
+		return fmt.Errorf("amd64: unsupported managed frame")
+	}
+	return nil
+}
+
+// rejectGoABI fails the whole module before any of it is compiled. It runs up
+// front rather than per function inside the emit loop because lowering rewrites
+// each function in place: bailing out midway would leave the caller's module
+// partly lowered.
+func rejectGoABI(m *ir.Module) error {
+	for _, f := range m.Funcs {
+		if err := goABIUnsupported(f); err != nil {
+			return fmt.Errorf("function %s: %w", f.Name, err)
+		}
+	}
+	return nil
+}
+
 func CompileToObjectWith(m *ir.Module, opts Options) (*obj.Object, error) {
+	// Every exported entry point (CompileObject, CompileObjectWith,
+	// CompileToObject) and Backend.CompileModule funnels through here, so this is
+	// the one place codegen can be reached from and the one place the guard needs
+	// to sit.
+	if err := rejectGoABI(m); err != nil {
+		return nil, err
+	}
 	o := &obj.Object{Machine: obj.EM_X86_64}
 	var smFuncs []stackMapFunc
 	var rows []obj.LineRow
@@ -379,78 +437,6 @@ func setStackMap(o *obj.Object, funcs []stackMapFunc) {
 	})
 }
 
-// frameLayout is the stack-frame plan for one function: the prologue, the
-// epilogue, and every frame access read their offsets from here, so they cannot
-// disagree about where a spill slot went. All offsets are relative to RBP (which
-// points at the saved RBP).
-type frameLayout struct {
-	calleeSaved []Reg             // callee-saved registers to preserve, in save order
-	spillBase   int               // bytes below RBP where spill slots begin
-	allocOff    map[*ir.Instr]int // each stack allocation's distance below RBP
-	frame       int               // bytes subtracted from RSP (16-aligned)
-	regSaveDist int               // variadic register save area, at [rbp - regSaveDist]
-}
-
-// computeFrame lays out a function's stack frame from its allocation.
-func computeFrame(f *ir.Func, alloc *allocation) frameLayout {
-	var lay frameLayout
-	lay.allocOff = map[*ir.Instr]int{}
-
-	// Collect the callee-saved registers the allocator actually used.
-	used := map[Reg]bool{}
-	for _, t := range f.Temps {
-		if t.Reg != ir.NoReg && calleeSavedReg(Reg(t.Reg)) {
-			used[Reg(t.Reg)] = true
-		}
-	}
-	// An inline asm that declares it writes a callee-saved register makes this
-	// function responsible for it, exactly as using it would: the ABI promise is
-	// to the caller, and it does not care whether the write came from the
-	// allocator or from a template. Keeping the allocator out of those registers
-	// is a different job and does not discharge this one -- which is why the
-	// cpuid idiom (: "rbx") needs both.
-	for _, b := range f.Blocks {
-		for i := range b.Instrs {
-			for _, r := range asmClobberRegs(&b.Instrs[i]) {
-				if calleeSavedReg(r) {
-					used[r] = true
-				}
-			}
-		}
-	}
-	for r := range used {
-		lay.calleeSaved = append(lay.calleeSaved, r)
-	}
-	sort.Slice(lay.calleeSaved, func(i, j int) bool { return lay.calleeSaved[i] < lay.calleeSaved[j] })
-
-	calleeArea := 8 * len(lay.calleeSaved)
-	lay.spillBase = calleeArea
-	acc := calleeArea + alloc.spillBytes
-
-	// Place each stack allocation below the spills.
-	maxCall := 0
-	for _, b := range f.Blocks {
-		for k := range b.Instrs {
-			in := &b.Instrs[k]
-			if in.Op.IsAlloc() {
-				align, size := allocShape(f, in)
-				acc += size
-				acc = roundUp(acc, align)
-				lay.allocOff[in] = acc
-			}
-			if in.Op == ir.OCall && int(in.Aux) > maxCall {
-				maxCall = int(in.Aux)
-			}
-		}
-	}
-	if f.Variadic {
-		acc += vaRegSaveSz
-		lay.regSaveDist = acc
-	}
-	lay.frame = roundUp(acc+maxCall, 16)
-	return lay
-}
-
 // mc holds the state of emitting one function to machine code.
 type mc struct {
 	f      *ir.Func
@@ -621,33 +607,7 @@ func (m *mc) recordReloc(off int, sym string, typ uint32, addend int64) {
 	m.relocs = append(m.relocs, obj.Reloc{Offset: uint64(off), Sym: sanitize(sym), Type: typ, Addend: addend})
 }
 
-// --- frame layout ----------------------------------------------------------
-
-func allocShape(f *ir.Func, in *ir.Instr) (align, size int) {
-	switch in.Op {
-	case ir.OAlloc4:
-		align = 4
-	case ir.OAlloc8:
-		align = 8
-	default:
-		align = 16
-	}
-	size = align
-	if a := in.Arg(0); a.Kind == ir.RefConst {
-		if c := f.Consts[a.ID]; c.Kind == ir.ConstInt && c.Int > 0 {
-			size = int(c.Int)
-		}
-	}
-	return align, roundUp(size, align)
-}
-
-func (m *mc) planFrame() { m.frameLayout = computeFrame(m.f, m.alloc) }
-
-// slotAddr returns the RBP-relative address of spill slot s.
-func (l *frameLayout) slotAddr(s int) int32 { return int32(-(l.spillBase + 8 + s)) }
-
-// savedAddr returns the RBP-relative address of the k-th saved callee register.
-func (l *frameLayout) savedAddr(k int) int32 { return int32(-8 * (k + 1)) }
+// --- prologue / epilogue ---------------------------------------------------
 
 func (m *mc) prologue() {
 	// A strategy may emit a stack-growth guard before the frame is set up; its slow

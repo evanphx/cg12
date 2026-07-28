@@ -10,6 +10,7 @@ import (
 	"strings"
 
 	"github.com/evanphx/cg12/arm64/a64"
+	"github.com/evanphx/cg12/internal/gometa"
 	"github.com/evanphx/cg12/ir"
 	"github.com/evanphx/cg12/obj"
 )
@@ -663,8 +664,8 @@ func addDataWithBSSAndFixups(o *obj.Object, d *ir.Data, allowBSS bool, fixups *[
 			*buf = append(*buf, []byte(it.Str)...)
 		case it.Sym != "" && it.RelativeTo != "":
 			if fixups == nil {
-				target, targetFound := objectSymbol(o, sanitize(it.Sym))
-				relativeTo, baseFound := objectSymbol(o, sanitize(it.RelativeTo))
+				target, targetFound := gometa.ObjectSymbol(o, sanitize(it.Sym))
+				relativeTo, baseFound := gometa.ObjectSymbol(o, sanitize(it.RelativeTo))
 				if !targetFound {
 					return fmt.Errorf("arm64: relative data reference %q is undefined", it.Sym)
 				}
@@ -736,11 +737,11 @@ func addDataWithBSSAndFixups(o *obj.Object, d *ir.Data, allowBSS bool, fixups *[
 
 func resolveRelativeDataFixups(o *obj.Object, fixups []relativeDataFixup) error {
 	for _, fixup := range fixups {
-		target, targetFound := objectSymbol(o, fixup.target)
+		target, targetFound := gometa.ObjectSymbol(o, fixup.target)
 		if !targetFound {
 			return fmt.Errorf("target %q is undefined", fixup.target)
 		}
-		relativeTo, baseFound := objectSymbol(o, fixup.relativeTo)
+		relativeTo, baseFound := gometa.ObjectSymbol(o, fixup.relativeTo)
 		if !baseFound {
 			return fmt.Errorf("base %q is undefined", fixup.relativeTo)
 		}
@@ -878,75 +879,11 @@ type blockSym struct {
 	off  int
 }
 
+// prepareGoABI runs the architecture-neutral IR annotations a managed function
+// needs before lowering. The pass itself lives in ir (both backends need it and
+// neither owns it); this is the arm64 hook that names which of them run.
 func prepareGoABI(function *ir.Func) {
-	inferStackPointerWords(function)
-}
-
-func inferStackPointerWords(function *ir.Func) {
-	definitions := make(map[uint32]*ir.Instr)
-	for _, block := range function.Blocks {
-		for index := range block.Instrs {
-			instruction := &block.Instrs[index]
-			if instruction.To.Kind == ir.RefTemp {
-				definitions[instruction.To.ID] = instruction
-			}
-		}
-	}
-
-	var resolveAddress func(ir.Ref) (uint32, int, bool)
-	resolveAddress = func(reference ir.Ref) (uint32, int, bool) {
-		if reference.Kind != ir.RefTemp {
-			return 0, 0, false
-		}
-		instruction := definitions[reference.ID]
-		if instruction == nil {
-			return 0, 0, false
-		}
-		if instruction.Op.IsAlloc() {
-			return reference.ID, 0, true
-		}
-		if instruction.Op != ir.OAdd || len(instruction.Args) != 2 {
-			return 0, 0, false
-		}
-		base, offset, ok := resolveAddress(instruction.Args[0])
-		if !ok || instruction.Args[1].Kind != ir.RefConst {
-			return 0, 0, false
-		}
-		constant := function.Consts[instruction.Args[1].ID]
-		if constant.Kind != ir.ConstInt {
-			return 0, 0, false
-		}
-		return base, offset + int(constant.Int), true
-	}
-
-	if function.StackPointerWords == nil {
-		function.StackPointerWords = make(map[uint32]map[int]bool)
-	}
-	for _, block := range function.Blocks {
-		for index := range block.Instrs {
-			instruction := &block.Instrs[index]
-			if !instruction.Op.IsStore() || len(instruction.Args) < 2 {
-				continue
-			}
-			value := instruction.Args[0]
-			if value.Kind != ir.RefTemp {
-				continue
-			}
-			definition := definitions[value.ID]
-			managed := function.Temp(value).GCRef || definition != nil && definition.Op.IsAlloc()
-			if !managed {
-				continue
-			}
-			allocation, offset, ok := resolveAddress(instruction.Args[1])
-			if !ok || offset%8 != 0 {
-				continue
-			}
-			if function.StackPointerWords[allocation] == nil {
-				function.StackPointerWords[allocation] = make(map[int]bool)
-			}
-			function.StackPointerWords[allocation][offset] = true
-		}
-	}
+	ir.InferStackPointerWords(function)
 }
 
 // goRegisterPointerMask reports which x0-x15 argument registers contain
@@ -1562,8 +1499,8 @@ func (m *mc) goStackMapPoints() []goStackMapPoint {
 		}
 		sort.Ints(pointerWords)
 		points = append(points, goStackMapPoint{
-			pc:           int(safepoint.startPC),
-			pointerWords: pointerWords,
+			PC:           int(safepoint.startPC),
+			PointerWords: pointerWords,
 		})
 	}
 	return points

@@ -55,14 +55,21 @@ type sourceLoader struct {
 	externalTestPackages map[string]string
 	base                 types.Importer
 	root                 string
+	target               Target
 	forcePureGo          bool
 	overlay              *stdlibOverlay
 	overlayErr           error
 }
 
-func newSourceLoader(fset *token.FileSet) *sourceLoader {
+// newSourceLoader builds a loader that selects standard library sources for the
+// named target. The target is a constructor argument rather than a settable
+// field because it decides which files exist at all -- every build tag, every
+// per-architecture assembly file, every overlay entry -- so there is no correct
+// moment to change it after the first import.
+func newSourceLoader(fset *token.FileSet, target Target) *sourceLoader {
 	loader := &sourceLoader{
 		fset:                 fset,
+		target:               target.resolve(),
 		units:                make(map[string]*sourceUnit),
 		loading:              make(map[string]bool),
 		testPackages:         make(map[string]bool),
@@ -310,7 +317,7 @@ func newSourceLoader(fset *token.FileSet) *sourceLoader {
 		base: importer.Default(),
 		root: repositoryStdlibRoot(),
 	}
-	loader.overlay, loader.overlayErr = loadStdlibOverlay(loader.root)
+	loader.overlay, loader.overlayErr = loadStdlibOverlay(loader.root, loader.target)
 	return loader
 }
 
@@ -346,7 +353,15 @@ func (l *sourceLoader) Import(path string) (*types.Package, error) {
 	ctx := build.Default
 	ctx.BuildTags = append([]string{}, ctx.BuildTags...)
 	ctx.CgoEnabled = false
-	useAssembly := !externalTestPackage && !l.forcePureGo && runtime.GOARCH == "arm64" && plan9asm.SupportsARM64Package(path)
+	// build.Default takes GOARCH from the environment or the host, so leaving it
+	// alone made per-architecture standard library file selection host-locked --
+	// the one place where a wrong target silently produces a plausible-looking
+	// package built out of the other machine's files.
+	ctx.GOARCH = l.target.GOARCH()
+	// Assembly is only translatable for arm64: plan9asm has an AArch64 translator
+	// and nothing else. Off that target the purego tag is added below and the
+	// package is built from its portable Go files.
+	useAssembly := !externalTestPackage && !l.forcePureGo && l.target == TargetARM64 && plan9asm.SupportsARM64Package(path)
 	if !useAssembly {
 		ctx.BuildTags = append(ctx.BuildTags, "purego")
 	}

@@ -973,7 +973,7 @@ func lowerParams(f *ir.Func, retBuf ir.Ref) error {
 		pars = append(pars, ir.Instr{Op: ir.OPar, Cls: ir.ClsL, To: retBuf, Args: []ir.Ref{pin}})
 	}
 	for parameterIndex := 0; parameterIndex < len(f.Params); {
-		if group, ok := valueGroupAt(f.ParamGroups, parameterIndex); f.UsesGoInternalCallConvention() && ok {
+		if group, ok := ir.ValueGroupAt(f.ParamGroups, parameterIndex); f.UsesGoInternalCallConvention() && ok {
 			end := parameterIndex + group.Count
 			if end > len(f.Params) {
 				return fmt.Errorf("arm64: aggregate parameter group extends beyond parameter list")
@@ -986,7 +986,7 @@ func lowerParams(f *ir.Func, retBuf ir.Ref) error {
 			parameterIndex = end
 			continue
 		}
-		if group, ok := valueGroupAt(f.ParamGroups, parameterIndex); !f.UsesGoInternalCallConvention() && ok {
+		if group, ok := ir.ValueGroupAt(f.ParamGroups, parameterIndex); !f.UsesGoInternalCallConvention() && ok {
 			classification := classifyAgg(group.Type)
 			if classification.kind != aggMemory {
 				end := parameterIndex + group.Count
@@ -1095,9 +1095,9 @@ func lowerAggParam(f *ir.Func, p *ir.Temp, a *argAssigner) (pars, recon []ir.Ins
 
 	// Reconstruct: allocate a slot, store each incoming register into it, and
 	// make the parameter point at the slot.
-	slot := aggregateAlloc(f, p.Agg, &recon)
+	slot := f.AllocAggregate(p.Agg, &recon)
 	pointerAt := make(map[int]bool)
-	for _, offset := range goAggregatePointerOffsets(p.Agg) {
+	for _, offset := range ir.AggregatePointerOffsets(p.Agg) {
 		pointerAt[offset] = true
 	}
 	for i, r := range regs {
@@ -1198,7 +1198,7 @@ func lowerCalls(f *ir.Func) error {
 			var argSetup []ir.Instr // the OArg run, emitted after value computation
 			a := newArgAssigner(goInternal)
 			for argumentIndex := 0; argumentIndex < len(callArgs); {
-				if group, ok := valueGroupAt(in.ArgGroups, argumentIndex); goInternal && ok {
+				if group, ok := ir.ValueGroupAt(in.ArgGroups, argumentIndex); goInternal && ok {
 					end := argumentIndex + group.Count
 					if end > len(callArgs) {
 						return fmt.Errorf("arm64: aggregate argument group extends beyond call argument list")
@@ -1358,7 +1358,7 @@ func lowerAAPCSValueResult(
 	for index, part := range parts {
 		address := offsetAddr(function, resultPointer, part.offset, &post)
 		post = append(post, ir.Instr{
-			Op:   loadOpForSub(part.sub),
+			Op:   ir.LoadOpForSub(part.sub),
 			Cls:  part.sub.Cls(),
 			To:   destinations[index],
 			Args: []ir.Ref{address},
@@ -1374,7 +1374,7 @@ func lowerAAPCSValueReturn(function *ir.Func, block *ir.Block, resultBuffer ir.R
 		return fmt.Errorf("arm64: AAPCS aggregate return has %d SSA parts, want %d", len(values), len(parts))
 	}
 
-	resultPointer := aggregateAlloc(function, function.RetAgg, &block.Instrs)
+	resultPointer := function.AllocAggregate(function.RetAgg, &block.Instrs)
 	for index, part := range parts {
 		value := values[index]
 		class := function.ClassOf(value)
@@ -1383,7 +1383,7 @@ func lowerAAPCSValueReturn(function *ir.Func, block *ir.Block, resultBuffer ir.R
 		}
 		address := offsetAddr(function, resultPointer, part.offset, &block.Instrs)
 		block.Instrs = append(block.Instrs, ir.Instr{
-			Op:   storeOpForSub(part.sub),
+			Op:   ir.StoreOpForSub(part.sub),
 			Cls:  part.sub.Cls(),
 			Args: []ir.Ref{value, address},
 		})

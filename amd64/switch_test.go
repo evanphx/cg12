@@ -8,10 +8,16 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
-// runC compiles a C program whose runtest() returns a word and runs it under
-// qemu-x86_64, returning the exit code (0 = success).
+// runC compiles a C program whose runtest() returns a word and runs it,
+// returning the exit code (0 = success). Building and running the image is
+// runObj's job -- including whether an emulator is involved, which on an x86-64
+// host it is not.
 func runC(t *testing.T, src string) int {
 	t.Helper()
+	// Ahead of the frontend, which probes the host's C compiler itself and fails
+	// rather than skipping when there is none to probe.
+	freestanding.Require(t)
+
 	m, err := cc.CompileFor(cc.TargetAMD64, "x.c", src)
 	require.NoError(t, err)
 	return runObj(t, m)
@@ -21,6 +27,8 @@ func runC(t *testing.T, src string) int {
 // optimized code path (mem2reg promotion, phi coalescing, and the like).
 func runCOpt(t *testing.T, src string) int {
 	t.Helper()
+	freestanding.Require(t)
+
 	m, err := cc.CompileFor(cc.TargetAMD64, "x.c", src)
 	require.NoError(t, err)
 	opt.Run(m, opt.DefaultPipeline())

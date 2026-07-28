@@ -1,57 +1,34 @@
 package amd64_test
 
 import (
-	"os"
-	"os/exec"
-	"path/filepath"
 	"testing"
 
 	"github.com/evanphx/cg12/amd64"
 	"github.com/evanphx/cg12/cc"
-	"github.com/evanphx/cg12/internal/testenv"
 	"github.com/evanphx/cg12/opt"
 	"github.com/stretchr/testify/require"
 )
 
 // runAsmSrc compiles C containing inline asm to an x86-64 object, links it
-// freestanding with the _start stub, and runs it under qemu-x86_64, returning
-// runtest's exit code. The template is assembled by x64.Assemble, so this is
-// also what proves that path encodes what the template asked for.
+// freestanding with the _start stub, and runs it, returning runtest's exit code.
+// The template is assembled by x64.Assemble, so this is also what proves that
+// path encodes what the template asked for.
+//
+// Building and running the image is runObj's job, and this used to repeat all of
+// it -- the stub, the linker flags, the native-or-emulator choice -- so that the
+// two copies could drift on which of them a native host was able to run at all.
 func runAsmSrc(t *testing.T, src string, optimize bool) int {
 	t.Helper()
-	clang := testenv.Tool(t, "clang")
-	testenv.Tool(t, "ld.lld")
-	qemu := testenv.Tool(t, "qemu-x86_64")
+	// Ahead of the frontend, which probes the host's C compiler itself and fails
+	// rather than skipping when there is none to probe.
+	freestanding.Require(t)
 
 	m, err := cc.CompileFor(cc.TargetAMD64, "asm.c", src)
 	require.NoError(t, err)
 	if optimize {
 		opt.OptimizeModule(m)
 	}
-	code, err := amd64.CompileObject(m)
-	require.NoError(t, err)
-
-	dir := t.TempDir()
-	objPath := filepath.Join(dir, "test.o")
-	stubS := filepath.Join(dir, "start.s")
-	stubO := filepath.Join(dir, "start.o")
-	bin := filepath.Join(dir, "prog")
-	require.NoError(t, os.WriteFile(objPath, code, 0o644))
-	require.NoError(t, os.WriteFile(stubS, []byte(startStub), 0o644))
-
-	out, err := exec.Command(clang, "--target=x86_64-linux-gnu", "-c", stubS, "-o", stubO).CombinedOutput()
-	require.NoErrorf(t, err, "assemble stub: %s", out)
-	out, err = exec.Command("ld.lld", "-static", "-nostdlib", "-o", bin, stubO, objPath).CombinedOutput()
-	require.NoErrorf(t, err, "link: %s", out)
-
-	cmd := exec.Command(qemu, bin)
-	if err := cmd.Run(); err != nil {
-		if ee, ok := err.(*exec.ExitError); ok {
-			return ee.ExitCode()
-		}
-		t.Fatalf("run: %v", err)
-	}
-	return 0
+	return runObj(t, m)
 }
 
 // TestInlineAsmPassthrough compiles C with GNU inline asm to x86-64 assembly and

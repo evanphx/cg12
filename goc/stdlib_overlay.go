@@ -50,7 +50,10 @@ type sourceOverlayUse struct {
 	RemoveWhen string
 }
 
-func loadStdlibOverlay(root string) (*stdlibOverlay, error) {
+// loadStdlibOverlay reads the overlay manifest and keeps the entries that apply
+// to target. Entries are architecture-scoped, so the target decides which of them
+// exist; a host-scoped selection would apply arm64 replacements to an amd64 build.
+func loadStdlibOverlay(root string, target Target) (*stdlibOverlay, error) {
 	selection := strings.TrimSpace(os.Getenv(stdlibOverlayEnvironment))
 	if selection == "off" || selection == "none" || selection == "0" {
 		return nil, nil
@@ -85,7 +88,7 @@ func loadStdlibOverlay(root string) (*stdlibOverlay, error) {
 	manifestDirectory := filepath.Dir(manifestPath)
 	for index := range manifest.Files {
 		entry := manifest.Files[index]
-		if !overlayTargetMatches(entry.GOOS, runtime.GOOS) || !overlayTargetMatches(entry.GOARCH, runtime.GOARCH) {
+		if !overlayTargetMatches(entry.GOOS, runtime.GOOS) || !overlayTargetMatches(entry.GOARCH, target.GOARCH()) {
 			continue
 		}
 		entry.Path = filepath.ToSlash(filepath.Clean(filepath.FromSlash(entry.Path)))

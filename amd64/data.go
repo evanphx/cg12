@@ -4,7 +4,6 @@ import (
 	"encoding/binary"
 	"fmt"
 	"math"
-	"strings"
 
 	"github.com/evanphx/cg12/ir"
 	"github.com/evanphx/cg12/obj"
@@ -125,21 +124,9 @@ func floatBitsOf(sub ir.SubCls, v float64) int64 {
 	return int64(math.Float64bits(v))
 }
 
-// sanitize turns an IR name into a valid symbol-name component.
-func sanitize(name string) string {
-	var sb strings.Builder
-	for _, r := range name {
-		if r == '_' || (r >= 'a' && r <= 'z') || (r >= 'A' && r <= 'Z') || (r >= '0' && r <= '9') {
-			sb.WriteRune(r)
-		} else {
-			sb.WriteByte('_')
-		}
-	}
-	if sb.Len() == 0 {
-		return "anon"
-	}
-	return sb.String()
-}
+// sanitize spells a symbol name for the object; it is the canonical linker
+// mangling shared with the frontend-agnostic passes (see ir.LinkerSymbol).
+func sanitize(name string) string { return ir.LinkerSymbol(name) }
 
 // allZero reports whether a data definition is nothing but zero fill, in which
 // case it needs no bytes in the file at all -- the loader supplies the zeroes.

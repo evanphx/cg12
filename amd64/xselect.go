@@ -68,10 +68,28 @@ func (s *xsel) gpDst(ref ir.Ref) (Reg, func()) {
 	return gpScratch0, func() { s.b.spillStore(gpScratch0, slot, size) }
 }
 
-// selectInt handles the two-operand integer arithmetic instructions
-// (add/sub/mul/and/or/xor) through the builder. It reports whether it handled the
-// instruction; everything else falls back to the emitter's own logic.
+// selectInt selects one instruction through the builder, reporting whether it
+// handled it; everything it does not claim falls back to the emitter's own logic.
+//
+// It is a probe chain rather than one switch: each operation family registered in
+// xselect_registry.go gets a look first, in order, and selectCore -- the ops the
+// backend started with -- runs last. First match wins, so adding a family cannot
+// change what is emitted for an op that family does not claim.
 func (s *xsel) selectInt(in *ir.Instr) bool {
+	for _, try := range selectors {
+		if try(s, in) {
+			return true
+		}
+	}
+	return s.selectCore(in)
+}
+
+// selectCore is the original selection switch: the two-operand integer and float
+// arithmetic, shifts, divides, compares, extensions, conversions, loads and
+// stores, VLA allocation, the intrinsics, and the fixed-register and block-address
+// ops. It is the chain's fallback, so it stays the one place an op with no family
+// of its own belongs.
+func (s *xsel) selectCore(in *ir.Instr) bool {
 	switch in.Op {
 	case ir.OAdd, ir.OSub, ir.OMul, ir.OAnd, ir.OOr, ir.OXor:
 		if in.Cls.IsFloat() {
@@ -339,19 +357,54 @@ func (s *xsel) convert(in *ir.Instr) {
 		d, commit := s.fpDst(in.To)
 		s.b.cvtSD2SS(d, rs)
 		commit()
-	case ir.OStosi, ir.OStoui:
+	case ir.OStosi:
 		srcD := s.f.ClassOf(in.Arg(0)) == ir.ClsD
 		w := in.Cls == ir.ClsL
 		rs := s.fpValue(in.Arg(0), fpScratch1)
 		d, commit := s.gpDst(in.To)
 		s.b.cvtF2SI(w, srcD, d, rs)
 		commit()
-	case ir.OSltof, ir.OUltof:
+	case ir.OStoui:
+		// Unsigned truncation is not the signed instruction with a different name:
+		// x86-64 has no unsigned form at all (arm64 has fcvtzu), so this splits by
+		// result width. A u32 result rides on the *64-bit* signed truncation --
+		// every u32 is a valid int64, so its low 32 bits are already the answer,
+		// where the 32-bit signed truncation would return the indefinite value for
+		// anything at or above 2^31. Only a u64 result needs the compare-and-bias
+		// sequence, so the 32-bit case is not pessimized by it.
+		srcD := s.f.ClassOf(in.Arg(0)) == ir.ClsD
+		rs := s.fpValue(in.Arg(0), fpScratch1)
+		d, commit := s.gpDst(in.To)
+		if in.Cls == ir.ClsL {
+			s.b.cvtF2UI64(srcD, d, rs)
+		} else {
+			s.b.cvtF2SI(true, srcD, d, rs)
+		}
+		commit()
+	case ir.OSltof:
 		dstD := in.Cls == ir.ClsD
 		w := s.f.ClassOf(in.Arg(0)) == ir.ClsL
 		rs := s.gpValue(in.Arg(0), gpScratch1)
 		d, commit := s.fpDst(in.To)
 		s.b.cvtSI2F(w, dstD, d, rs)
+		commit()
+	case ir.OUltof:
+		// The mirror of OStoui: cvtsi2s{s,d} is signed, so it reads a u32 source as
+		// a negative int32 and a u64 source with its top bit set as a negative
+		// int64. Loading the source into a scratch register through a move of its
+		// own width zero-extends a 32-bit one for free, after which the 64-bit
+		// signed conversion is exact -- no bias sequence for the 32-bit case. A
+		// 64-bit source has nothing wider to hide in and needs cvtUI642F, which
+		// rewrites the scratch copy in place.
+		dstD := in.Cls == ir.ClsD
+		srcL := s.f.ClassOf(in.Arg(0)) == ir.ClsL
+		s.gpInto(gpScratch1, in.Arg(0))
+		d, commit := s.fpDst(in.To)
+		if srcL {
+			s.b.cvtUI642F(dstD, d, gpScratch1)
+		} else {
+			s.b.cvtSI2F(true, dstD, d, gpScratch1)
+		}
 		commit()
 	case ir.OCast:
 		if in.Cls.IsFloat() {

@@ -865,19 +865,6 @@ func TestInferFrameAddressOffsetsDoesNotCollapsePhiCopies(t *testing.T) {
 	assert.False(t, inferred, "a runtime-selected frame address must not be replaced by one incoming offset")
 }
 
-func TestPrepareGoABIDoesNotTreatRawPointerClassAsGCRoot(t *testing.T) {
-	function := ir.NewModule().NewFunc("raw_pointer", ir.ClsP)
-	function.CallConv = ir.CallConvGoInternal
-	function.ManagedFrame = true
-	raw := function.Param("raw", ir.ClsP)
-	entry := function.Entry()
-	entry.CallVoid(function.Sym("observe", 0))
-	entry.Ret(raw)
-
-	prepareGoABI(function)
-	assert.False(t, function.Temp(raw).GCRef)
-}
-
 func TestGoABINoSplitOmitsStackGrowthCheck(t *testing.T) {
 	module := ir.NewModule()
 	function := module.NewFuncVoid("nosplit")
@@ -1100,12 +1087,12 @@ func TestGoStackMapsDropDeadPointerBearingLocal(t *testing.T) {
 	points := machine.m.goStackMapPoints()
 	require.Len(t, points, 2)
 	require.Len(t, machine.m.safepoints, 2)
-	assert.Equal(t, int(machine.m.safepoints[0].startPC), points[0].pc)
-	assert.Equal(t, int(machine.m.safepoints[1].startPC), points[1].pc)
+	assert.Equal(t, int(machine.m.safepoints[0].startPC), points[0].PC)
+	assert.Equal(t, int(machine.m.safepoints[1].startPC), points[1].PC)
 	localOffset := machine.m.stackAllocTmp[local.ID]
 	localWord := (localOffset - 16) / 8
-	assert.Contains(t, points[0].pointerWords, localWord)
-	assert.NotContains(t, points[1].pointerWords, localWord)
+	assert.Contains(t, points[0].PointerWords, localWord)
+	assert.NotContains(t, points[1].PointerWords, localWord)
 }
 
 func TestGoABIGroupedSliceValuesUseRegistersOrWholeStack(t *testing.T) {

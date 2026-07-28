@@ -11,7 +11,7 @@ import (
 )
 
 func TestLoadExactStandardSHA256Source(t *testing.T) {
-	loader := newSourceLoader(token.NewFileSet())
+	loader := newSourceLoader(token.NewFileSet(), HostTarget())
 	pkg, err := loader.Import("crypto/sha256")
 	if err != nil {
 		t.Fatal(err)
@@ -55,7 +55,7 @@ func TestLoadExactStandardSHA256Source(t *testing.T) {
 func TestLoadExactStandardRuntimeSource(t *testing.T) {
 	t.Setenv(stdlibOverlayEnvironment, "off")
 
-	loader := newSourceLoader(token.NewFileSet())
+	loader := newSourceLoader(token.NewFileSet(), HostTarget())
 	pkg, err := loader.Import("runtime")
 	if err != nil {
 		t.Fatal(err)
@@ -132,7 +132,7 @@ func TestLoadStandardRuntimeOverlay(t *testing.T) {
 		t.Skip("the initial runtime overlay targets linux/arm64")
 	}
 
-	loader := newSourceLoader(token.NewFileSet())
+	loader := newSourceLoader(token.NewFileSet(), HostTarget())
 	pkg, err := loader.Import("runtime")
 	if err != nil {
 		t.Fatal(err)
@@ -174,7 +174,7 @@ func TestLoadStandardRuntimeOverlay(t *testing.T) {
 }
 
 func TestLoadExactStandardTestingSource(t *testing.T) {
-	loader := newSourceLoader(token.NewFileSet())
+	loader := newSourceLoader(token.NewFileSet(), HostTarget())
 	pkg, err := loader.Import("testing")
 	if err != nil {
 		t.Fatal(err)
@@ -212,7 +212,7 @@ func TestLoadExactStandardTestingSource(t *testing.T) {
 }
 
 func TestLoadVendoredDNSMessageSource(t *testing.T) {
-	loader := newSourceLoader(token.NewFileSet())
+	loader := newSourceLoader(token.NewFileSet(), HostTarget())
 	const packagePath = "golang.org/x/net/dns/dnsmessage"
 	loaded, err := loader.Import(packagePath)
 	if err != nil {
@@ -235,7 +235,7 @@ func TestLoadVendoredDNSMessageSource(t *testing.T) {
 }
 
 func TestLoadStandardNetWithoutCgo(t *testing.T) {
-	loader := newSourceLoader(token.NewFileSet())
+	loader := newSourceLoader(token.NewFileSet(), HostTarget())
 	if _, err := loader.Import("net"); err != nil {
 		t.Fatal(err)
 	}
@@ -259,7 +259,7 @@ func TestLoadStandardNetWithoutCgo(t *testing.T) {
 }
 
 func TestLoadExactStandardBytealgAssembly(t *testing.T) {
-	loader := newSourceLoader(token.NewFileSet())
+	loader := newSourceLoader(token.NewFileSet(), HostTarget())
 	_, err := loader.Import("internal/bytealg")
 	if err != nil {
 		t.Fatal(err)
@@ -300,7 +300,7 @@ func TestLoadExactStandardBytealgAssembly(t *testing.T) {
 }
 
 func TestLoadExactAdditionalStandardAssembly(t *testing.T) {
-	loader := newSourceLoader(token.NewFileSet())
+	loader := newSourceLoader(token.NewFileSet(), HostTarget())
 	tests := []struct {
 		path string
 		file string
@@ -355,7 +355,7 @@ func TestLoadExactAdditionalStandardAssembly(t *testing.T) {
 }
 
 func TestRepositoryStandardLibraryInventory(t *testing.T) {
-	loader := newSourceLoader(token.NewFileSet())
+	loader := newSourceLoader(token.NewFileSet(), HostTarget())
 	packages := []string{
 		"internal/byteorder",
 		"math/bits",

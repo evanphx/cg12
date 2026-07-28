@@ -146,10 +146,10 @@ func emitGoABI0AssemblyWrapper(name string, function *ir.Func) (string, goFuncti
 	fmt.Fprintf(&output, ".size %s, .-%s\n", wrapperName, wrapperName)
 
 	return output.String(), goFunctionInfo{
-		name:       wrapperName,
-		frameSize:  frameSize,
-		frameStart: 4,
-		funcFlag:   goFuncFlagAsm,
+		Name:       wrapperName,
+		FrameSize:  frameSize,
+		FrameStart: 4,
+		FuncFlag:   goFuncFlagAsm,
 	}, nil
 }
 

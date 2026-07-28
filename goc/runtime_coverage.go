@@ -105,13 +105,14 @@ func ExtractRuntimeCoverage(output []byte, coverage *RuntimeCoverage) (RuntimeCo
 
 func instrumentRuntimeCoverage(
 	module *ir.Module,
+	target Target,
 	unit *sourceUnit,
 	coverage *RuntimeCoverage,
 	linkNames map[*types.Func]string,
 	initSymbols map[*types.Func]string,
 ) error {
-	if runtime.GOOS != "linux" || runtime.GOARCH != "arm64" {
-		return fmt.Errorf("goc: runtime coverage currently supports linux/arm64")
+	if runtime.GOOS != "linux" || target != TargetARM64 {
+		return fmt.Errorf("goc: runtime coverage currently supports linux/arm64, not %s/%s", runtime.GOOS, target)
 	}
 	if unit == nil {
 		return fmt.Errorf("goc: runtime coverage requested without a runtime source unit")
@@ -119,7 +120,8 @@ func instrumentRuntimeCoverage(
 
 	coverage.Version = runtimeCoverageVersion
 	coverage.GOOS = runtime.GOOS
-	coverage.GOARCH = runtime.GOARCH
+	// The recorded GOARCH describes the instrumented binary, so it is the target.
+	coverage.GOARCH = target.GOARCH()
 	runtimeSourceID, err := activeRuntimeSourceID(unit)
 	if err != nil {
 		return err

@@ -217,8 +217,8 @@ func (f Field) count() int {
 	return 1
 }
 
-// sizeAlign returns the size and alignment of a single field element.
-func (f Field) sizeAlign() (size, align int) {
+// SizeAlign returns the size and alignment of a single field element.
+func (f Field) SizeAlign() (size, align int) {
 	if f.Type != nil {
 		return f.Type.Layout()
 	}
@@ -311,7 +311,7 @@ func walkFieldsSimple(fields []Field, base int, emit func(Leaf), simple *bool, p
 	align = 1
 	off := 0
 	for _, f := range fields {
-		fs, fa := f.sizeAlign()
+		fs, fa := f.SizeAlign()
 		if !packed {
 			if fa > align {
 				align = fa

@@ -8,7 +8,6 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
-	"runtime"
 	"strings"
 
 	"github.com/evanphx/cg12/amd64"
@@ -36,10 +35,18 @@ func main() {
 	optimize := flag.Bool("O", false, "optimize cg12 IR")
 	run := flag.Bool("run", false, "link and run the program")
 	runtimeCoverMeta := flag.String("runtime-covermeta", "", "instrument runtime and write coverage metadata")
+	targetName := flag.String("target", defaultTargetName(), "arm64 | amd64")
 	flag.Parse()
 	if flag.NArg() != 1 {
-		fmt.Fprintln(os.Stderr, "usage: goc [-O] [-o out] [-c|-S|-emit-ir|-run] file.go")
+		fmt.Fprintln(os.Stderr, "usage: goc [-O] [-target arch] [-o out] [-c|-S|-emit-ir|-run] file.go")
 		os.Exit(2)
+	}
+	// ParseTarget's message already names the command, so it is printed as-is
+	// rather than through check, which would prefix "goc: " a second time.
+	target, err := goc.ParseTarget(*targetName)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "%v\n", err)
+		os.Exit(1)
 	}
 	input := flag.Arg(0)
 	src, err := os.ReadFile(input)
@@ -54,11 +61,13 @@ func main() {
 		if *obj || *asm {
 			check(fmt.Errorf("-runtime-covermeta requires an executable build"))
 		}
-		m, runtimeCoverage, err = goc.CompileExecutableWithRuntimeCoverage(filepath.Base(input), src)
-	} else if buildExecutable && runtime.GOARCH == "arm64" {
-		m, err = goc.CompileExecutable(filepath.Base(input), src)
+		m, runtimeCoverage, err = goc.CompileExecutableWithRuntimeCoverageFor(target, filepath.Base(input), src)
+	} else if buildExecutable && target == goc.TargetARM64 {
+		// Only arm64 can be given the full Go runtime today; other targets get
+		// the freestanding subset, which compiles a single file with no runtime.
+		m, err = goc.CompileExecutableFor(target, filepath.Base(input), src)
 	} else {
-		m, err = goc.Compile(filepath.Base(input), src)
+		m, err = goc.CompileFor(target, filepath.Base(input), src)
 	}
 	check(err)
 	if *optimize {
@@ -68,11 +77,11 @@ func main() {
 	case *emitIR:
 		fmt.Print(m)
 	case *asm:
-		s, err := compileAsm(m)
+		s, err := compileAsm(target, m)
 		check(err)
 		write(path(*out, input, ".s"), []byte(s))
 	case *obj:
-		b, err := compileObject(m)
+		b, err := compileObject(target, m)
 		check(err)
 		write(path(*out, input, ".o"), b)
 	default:
@@ -80,7 +89,7 @@ func main() {
 		if exe == "" {
 			exe = goc.OutputName(input)
 		}
-		link(m, exe)
+		link(target, m, exe)
 		if runtimeCoverage != nil {
 			metadata, marshalErr := json.MarshalIndent(runtimeCoverage, "", "  ")
 			check(marshalErr)
@@ -100,20 +109,27 @@ func testCommand(arguments []string) int {
 	verbose := flags.Bool("v", false, "print each test as it runs")
 	optimize := flags.Bool("O", false, "optimize cg12 IR")
 	output := flags.String("o", "", "write the test executable to this file")
+	targetName := flags.String("target", defaultTargetName(), "arm64 | amd64")
 	if err := flags.Parse(arguments); err != nil {
 		return 2
 	}
 	if flags.NArg() != 1 {
-		fmt.Fprintln(os.Stderr, "usage: goc test [-O] [-v] [-run regexp] [-o testbinary] package")
+		fmt.Fprintln(os.Stderr, "usage: goc test [-O] [-v] [-target arch] [-run regexp] [-o testbinary] package")
 		return 2
 	}
-	if runtime.GOARCH != "arm64" {
-		fmt.Fprintf(os.Stderr, "goc: test executables are not supported on %s\n", runtime.GOARCH)
+	target, err := goc.ParseTarget(*targetName)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "%v\n", err)
+		return 1
+	}
+	// A test executable needs the whole Go runtime, which only arm64 can compile.
+	if target != goc.TargetARM64 {
+		fmt.Fprintf(os.Stderr, "goc: test executables are not supported for %s\n", target)
 		return 1
 	}
 
 	packagePath := flags.Arg(0)
-	module, _, err := goc.CompileTestExecutableMatching(packagePath, *runPattern)
+	module, _, err := goc.CompileTestExecutableMatchingFor(target, packagePath, *runPattern)
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "goc: %v\n", err)
 		return 1
@@ -133,7 +149,7 @@ func testCommand(arguments []string) int {
 		defer os.RemoveAll(temporaryDirectory)
 		executable = filepath.Join(temporaryDirectory, "testbinary")
 	}
-	link(module, executable)
+	link(target, module, executable)
 
 	programArguments := make([]string, 0, 2)
 	if *verbose {
@@ -145,27 +161,41 @@ func testCommand(arguments []string) int {
 	return runProgram(executable, programArguments...)
 }
 
-func compileAsm(m *ir.Module) (string, error) {
-	switch runtime.GOARCH {
-	case "amd64":
+// defaultTargetName is the -target default: the host, unless GOARCH names
+// something else.
+//
+// Honoring GOARCH keeps `GOARCH=arm64 goc ...` doing what a Go programmer
+// expects, and matches how the toolchain this frontend imitates picks its target.
+// The flag still wins, so the env var is only ever a default. GOOS is not
+// consulted, because goc.Target has no OS axis.
+func defaultTargetName() string {
+	if arch := os.Getenv("GOARCH"); arch != "" {
+		return arch
+	}
+	return string(goc.HostTarget())
+}
+
+func compileAsm(target goc.Target, m *ir.Module) (string, error) {
+	switch target {
+	case goc.TargetAMD64:
 		return "", fmt.Errorf("assembly display is not available for the object-only amd64 backend")
-	case "arm64":
+	case goc.TargetARM64:
 		object, err := arm64.CompileToObject(m)
 		if err != nil {
 			return "", err
 		}
 		return arm64.Disassemble(object), nil
 	}
-	return "", fmt.Errorf("unsupported host architecture %s", runtime.GOARCH)
+	return "", fmt.Errorf("unsupported target %s", target)
 }
-func compileObject(m *ir.Module) ([]byte, error) {
-	switch runtime.GOARCH {
-	case "amd64":
+func compileObject(target goc.Target, m *ir.Module) ([]byte, error) {
+	switch target {
+	case goc.TargetAMD64:
 		return amd64.CompileObject(m)
-	case "arm64":
+	case goc.TargetARM64:
 		return arm64.CompileObject(m)
 	}
-	return nil, fmt.Errorf("unsupported host architecture %s", runtime.GOARCH)
+	return nil, fmt.Errorf("unsupported target %s", target)
 }
 func path(out, input, ext string) string {
 	if out != "" {
@@ -177,17 +207,20 @@ func write(name string, b []byte) {
 	check(os.WriteFile(name, b, 0o644))
 }
 
-func link(m *ir.Module, exe string) {
+func link(target goc.Target, m *ir.Module, exe string) {
 	var translatedAssembly string
 	f, err := os.CreateTemp("", "cg12-goc-*.o")
 	check(err)
 	defer os.Remove(f.Name())
 
-	if runtime.GOARCH == "arm64" {
+	// arm64 is the only backend with the assembly sidecar the Go runtime needs:
+	// it emits the object plus translated Plan 9 assembly, which is then compiled
+	// into a second object and linked alongside.
+	if target == goc.TargetARM64 {
 		translatedAssembly, err = arm64.WriteObjectAndAssembly(f, m)
 	} else {
 		var objectBytes []byte
-		objectBytes, err = compileObject(m)
+		objectBytes, err = compileObject(target, m)
 		if err == nil {
 			_, err = f.Write(objectBytes)
 		}
@@ -197,7 +230,7 @@ func link(m *ir.Module, exe string) {
 	cc, err := exec.LookPath("cc")
 	check(err)
 	inputs := []string{f.Name()}
-	if runtime.GOARCH == "arm64" {
+	if target == goc.TargetARM64 {
 		support, cleanup := compileRuntimeSupport(cc, translatedAssembly)
 		defer cleanup()
 		inputs = append(inputs, support)

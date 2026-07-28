@@ -647,7 +647,7 @@ type outer struct {
 		t.Fatal(err)
 	}
 
-	defines := assemblyPackageDefines(pkg)
+	defines := assemblyPackageDefines(HostTarget(), pkg)
 	outer := pkg.Scope().Lookup("outer").Type().Underlying().(*types.Struct)
 	fields := make([]*types.Var, outer.NumFields())
 	for index := range fields {

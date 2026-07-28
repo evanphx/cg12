@@ -38,7 +38,7 @@ func TestStdlibOverlayRejectsAssemblyReplacement(t *testing.T) {
 	}
 	t.Setenv(stdlibOverlayEnvironment, manifestPath)
 
-	_, err = loadStdlibOverlay(repositoryStdlibRoot())
+	_, err = loadStdlibOverlay(repositoryStdlibRoot(), HostTarget())
 	if err == nil {
 		t.Fatal("assembly replacement was accepted")
 	}
@@ -76,7 +76,7 @@ func TestStdlibOverlayRejectsReplacementWithoutUpstreamHash(t *testing.T) {
 	}
 	t.Setenv(stdlibOverlayEnvironment, manifestPath)
 
-	_, err = loadStdlibOverlay(repositoryStdlibRoot())
+	_, err = loadStdlibOverlay(repositoryStdlibRoot(), HostTarget())
 	if err == nil {
 		t.Fatal("replacement without an upstream hash was accepted")
 	}

@@ -110,13 +110,13 @@ func prepareAssembly(module *ir.Module) (assemblyBundle, error) {
 			}
 			flags |= assemblyFunctionFlags(function.Name)
 			bundle.functions = append(bundle.functions, goFunctionInfo{
-				name:            function.Name,
-				frameSize:       function.Frame,
-				frameStart:      function.FrameStart,
-				argumentSize:    function.Args,
-				funcID:          assemblyFunctionID(function.Name),
-				funcFlag:        flags,
-				noLocalPointers: function.NoLocalPointers,
+				Name:            function.Name,
+				FrameSize:       function.Frame,
+				FrameStart:      function.FrameStart,
+				ArgumentSize:    function.Args,
+				FuncID:          assemblyFunctionID(function.Name),
+				FuncFlag:        flags,
+				NoLocalPointers: function.NoLocalPointers,
 			})
 		}
 	}

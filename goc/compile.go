@@ -23,23 +23,42 @@ import (
 	"github.com/evanphx/cg12/plan9asm"
 )
 
-// Compile parses and type-checks one Go source file and lowers it to cg12 IR.
+// Compile parses and type-checks one Go source file and lowers it to cg12 IR
+// for the host target.
 func Compile(name string, src []byte) (*ir.Module, error) {
-	return compile(name, src, compileOptions{})
+	return CompileFor(HostTarget(), name, src)
+}
+
+// CompileFor lowers one Go source file for a named target.
+func CompileFor(target Target, name string, src []byte) (*ir.Module, error) {
+	return compile(name, src, compileOptions{target: target})
 }
 
 // CompileExecutable lowers a main package together with the Go runtime needed
-// to start and run it as a normal Go executable.
+// to start and run it as a normal Go executable, for the host target.
 func CompileExecutable(name string, src []byte) (*ir.Module, error) {
-	return compile(name, src, compileOptions{executable: true})
+	return CompileExecutableFor(HostTarget(), name, src)
 }
 
-// CompileExecutableWithRuntimeCoverage lowers an executable and instruments
-// the build-selected runtime package. The returned metadata maps the binary
-// coverage bitmap back to runtime source files and basic blocks.
+// CompileExecutableFor lowers a main package and the Go runtime for a named
+// target.
+func CompileExecutableFor(target Target, name string, src []byte) (*ir.Module, error) {
+	return compile(name, src, compileOptions{target: target, executable: true})
+}
+
+// CompileExecutableWithRuntimeCoverage lowers an executable for the host target
+// and instruments the build-selected runtime package. The returned metadata maps
+// the binary coverage bitmap back to runtime source files and basic blocks.
 func CompileExecutableWithRuntimeCoverage(name string, src []byte) (*ir.Module, *RuntimeCoverage, error) {
+	return CompileExecutableWithRuntimeCoverageFor(HostTarget(), name, src)
+}
+
+// CompileExecutableWithRuntimeCoverageFor lowers an instrumented executable for
+// a named target.
+func CompileExecutableWithRuntimeCoverageFor(target Target, name string, src []byte) (*ir.Module, *RuntimeCoverage, error) {
 	coverage := &RuntimeCoverage{}
 	module, err := compile(name, src, compileOptions{
+		target:          target,
 		executable:      true,
 		runtimeCoverage: coverage,
 	})
@@ -69,6 +88,10 @@ func reportNoSplitViolations(module *ir.Module) {
 }
 
 type compileOptions struct {
+	// target is the machine being compiled for. The zero value means the host,
+	// so an option struct built without thinking about the target behaves the
+	// way goc did before the target existed.
+	target               Target
 	executable           bool
 	testPackages         map[string]bool
 	externalTestPackages map[string]string
@@ -76,6 +99,10 @@ type compileOptions struct {
 }
 
 func compile(name string, src []byte, options compileOptions) (*ir.Module, error) {
+	target := options.target.resolve()
+	if err := checkTargetTypeSizes(target); err != nil {
+		return nil, err
+	}
 	executable := options.executable
 	fset := token.NewFileSet()
 	file, err := parser.ParseFile(fset, name, src, parser.AllErrors|parser.ParseComments)
@@ -90,7 +117,7 @@ func compile(name string, src []byte, options compileOptions) (*ir.Module, error
 		Implicits:  make(map[ast.Node]types.Object),
 		Instances:  make(map[*ast.Ident]types.Instance),
 	}
-	loader := newSourceLoader(fset)
+	loader := newSourceLoader(fset, target)
 	loader.forcePureGo = !executable
 	for path := range options.testPackages {
 		loader.testPackages[path] = true
@@ -158,7 +185,7 @@ func compile(name string, src []byte, options compileOptions) (*ir.Module, error
 	}
 	assemblyReferences := make(map[string]bool)
 	if compileRuntime {
-		assemblyReferences, err = sourceAssemblyReferences(loader.units)
+		assemblyReferences, err = sourceAssemblyReferences(target, loader.units)
 		if err != nil {
 			return nil, err
 		}
@@ -195,9 +222,9 @@ func compile(name string, src []byte, options compileOptions) (*ir.Module, error
 	sort.Strings(assemblyPackages)
 	for _, path := range assemblyPackages {
 		unit := loader.units[path]
-		defines := assemblyPackageDefines(unit.pkg)
-		floatInputs, floatOutputs := assemblyPackageFloatSlots(unit)
-		signatures := assemblyPackageSignatures(unit)
+		defines := assemblyPackageDefines(target, unit.pkg)
+		floatInputs, floatOutputs := assemblyPackageFloatSlots(target, unit)
+		signatures := assemblyPackageSignatures(target, unit)
 		for _, assembly := range unit.assembly {
 			mod.Assembly = append(mod.Assembly, ir.AssemblyFile{
 				PackagePath:  path,
@@ -217,6 +244,7 @@ func compile(name string, src []byte, options compileOptions) (*ir.Module, error
 		info:                    info,
 		pkg:                     pkg,
 		mod:                     mod,
+		target:                  target,
 		globals:                 map[types.Object]string{},
 		globalLinkNames:         globalLinkNames,
 		emitRuntimeTables:       emitRuntimeTables,
@@ -247,28 +275,15 @@ func compile(name string, src []byte, options compileOptions) (*ir.Module, error
 		if !globalPackages[path] {
 			continue
 		}
-		generator := &gen{
-			fset:                    fset,
-			info:                    unit.info,
-			pkg:                     unit.pkg,
-			mod:                     mod,
-			globals:                 globals,
-			globalLinkNames:         globalLinkNames,
-			emitRuntimeTables:       emitRuntimeTables,
-			runtimeAllocation:       compileRuntime,
-			typeTags:                typeTags,
-			runtimeTypes:            runtimeTypes,
-			goABITypes:              goABITypes,
-			linkNames:               linkNames,
-			initSymbols:             initSymbols,
-			functionDecls:           functionDecls,
-			noWriteBarrierFunctions: noWriteBarriers,
-			interfaceMethods:        interfaceMethods,
-			interfaceItabs:          interfaceItabs,
-			interfaceCallWrappers:   interfaceCallWrappers,
-			reachableGlobals:        reachableGlobals,
-			filterGlobals:           !compileRuntime,
-		}
+		generator := g.derive()
+		generator.info = unit.info
+		generator.pkg = unit.pkg
+		// Each imported unit collects its globals into its own map; they are
+		// merged into allGlobals below, once every unit has been walked.
+		generator.globals = globals
+		// Outside a runtime build only the globals the reachability pass kept are
+		// emitted for imported packages.
+		generator.filterGlobals = !compileRuntime
 		for _, sourceFile := range unit.files {
 			for _, declaration := range sourceFile.Decls {
 				global, ok := declaration.(*ast.GenDecl)
@@ -321,30 +336,11 @@ func compile(name string, src []byte, options compileOptions) (*ir.Module, error
 		function := functions[i]
 		generator := g
 		if function.pkg != pkg {
-			generator = &gen{
-				fset:                        fset,
-				info:                        function.info,
-				pkg:                         function.pkg,
-				mod:                         mod,
-				globals:                     allGlobals,
-				methodTargets:               methodTargets,
-				emitRuntimeTables:           emitRuntimeTables,
-				runtimeAllocation:           compileRuntime,
-				typeTags:                    typeTags,
-				runtimeTypes:                runtimeTypes,
-				goABITypes:                  goABITypes,
-				linkNames:                   linkNames,
-				initSymbols:                 initSymbols,
-				functionDecls:               functionDecls,
-				noWriteBarrierFunctions:     noWriteBarriers,
-				interfaceMethods:            interfaceMethods,
-				interfaceItabs:              interfaceItabs,
-				interfaceCallWrappers:       interfaceCallWrappers,
-				dynamicInitializers:         dynamicInitializers,
-				dynamicInitializerGuards:    dynamicInitializerGuards,
-				dynamicInitializerFunctions: dynamicInitializerFunctions,
-				initializingGlobals:         make(map[types.Object]bool),
-			}
+			// g.globals is allGlobals by now, so the derived generator resolves
+			// globals across every package, as an imported function needs to.
+			generator = g.derive()
+			generator.info = function.info
+			generator.pkg = function.pkg
 		}
 		generator.typeArguments = function.typeArguments
 		generator.functionName = function.symbol
@@ -401,7 +397,7 @@ func compile(name string, src []byte, options compileOptions) (*ir.Module, error
 		return nil, err
 	}
 	if options.runtimeCoverage != nil {
-		if err := instrumentRuntimeCoverage(mod, loader.units["runtime"], options.runtimeCoverage, linkNames, initSymbols); err != nil {
+		if err := instrumentRuntimeCoverage(mod, target, loader.units["runtime"], options.runtimeCoverage, linkNames, initSymbols); err != nil {
 			return nil, err
 		}
 	}
@@ -435,9 +431,9 @@ func setAAPCS64CallConvention(module *ir.Module) {
 	}
 }
 
-func assemblyPackageDefines(pkg *types.Package) map[string]int64 {
+func assemblyPackageDefines(target Target, pkg *types.Package) map[string]int64 {
 	defines := make(map[string]int64)
-	sizes := types.SizesFor("gc", runtime.GOARCH)
+	sizes := target.sizes()
 	for _, name := range pkg.Scope().Names() {
 		object := pkg.Scope().Lookup(name)
 		switch object := object.(type) {
@@ -477,10 +473,10 @@ func assemblyPackageDefines(pkg *types.Package) map[string]int64 {
 	return defines
 }
 
-func assemblyPackageFloatSlots(unit *sourceUnit) (map[string][]int, map[string][]int) {
+func assemblyPackageFloatSlots(target Target, unit *sourceUnit) (map[string][]int, map[string][]int) {
 	inputs := make(map[string][]int)
 	outputs := make(map[string][]int)
-	sizes := types.SizesFor("gc", runtime.GOARCH)
+	sizes := target.sizes()
 	if sizes == nil {
 		return inputs, outputs
 	}
@@ -537,9 +533,9 @@ func isAssemblyFloatType(typ types.Type) bool {
 	return basic.Kind() == types.Float32 || basic.Kind() == types.Float64
 }
 
-func assemblyPackageSignatures(unit *sourceUnit) map[string]ir.AsmSignature {
+func assemblyPackageSignatures(target Target, unit *sourceUnit) map[string]ir.AsmSignature {
 	signatures := make(map[string]ir.AsmSignature)
-	sizes := types.SizesFor("gc", runtime.GOARCH)
+	sizes := target.sizes()
 	if sizes == nil {
 		return signatures
 	}
@@ -698,7 +694,7 @@ func assemblySemanticSymbol(packagePath, name string) string {
 	return symbol.String()
 }
 
-func sourceAssemblyReferences(units map[string]*sourceUnit) (map[string]bool, error) {
+func sourceAssemblyReferences(target Target, units map[string]*sourceUnit) (map[string]bool, error) {
 	references := make(map[string]bool)
 	paths := make([]string, 0, len(units))
 	for path := range units {
@@ -708,13 +704,16 @@ func sourceAssemblyReferences(units map[string]*sourceUnit) (map[string]bool, er
 
 	for _, path := range paths {
 		unit := units[path]
-		defines := assemblyPackageDefines(unit.pkg)
-		floatInputs, floatOutputs := assemblyPackageFloatSlots(unit)
+		defines := assemblyPackageDefines(target, unit.pkg)
+		floatInputs, floatOutputs := assemblyPackageFloatSlots(target, unit)
 		for _, assembly := range unit.assembly {
 			file, err := plan9asm.ParseWithOptions(strings.NewReader(assembly.source), plan9asm.ParseOptions{
+				// GOARCH_* selects the architecture's arms of Go's runtime
+				// assembly, so it must name the target. GOOS_* stays the host's:
+				// Target carries no OS axis (see its doc comment).
 				Defines: map[string]string{
-					"GOARCH_" + runtime.GOARCH: "1",
-					"GOOS_" + runtime.GOOS:     "1",
+					"GOARCH_" + target.GOARCH(): "1",
+					"GOOS_" + runtime.GOOS:      "1",
 				},
 				Includes: assembly.includes,
 			})
@@ -869,19 +868,9 @@ func addInterfaceMethodWrappers(g *gen, reachable []functionDecl) {
 			}
 			function = g.mod.NewFunc(name, resultClass)
 		}
-		wrapper := &gen{
-			fn:                    function,
-			cur:                   function.Entry(),
-			mod:                   g.mod,
-			typeTags:              g.typeTags,
-			runtimeTypes:          g.runtimeTypes,
-			goABITypes:            g.goABITypes,
-			linkNames:             g.linkNames,
-			initSymbols:           g.initSymbols,
-			interfaceItabs:        g.interfaceItabs,
-			interfaceCallWrappers: g.interfaceCallWrappers,
-			runtimeAllocation:     g.runtimeAllocation,
-		}
+		wrapper := g.derive()
+		wrapper.fn = function
+		wrapper.cur = function.Entry()
 		if signature.Results().Len() > 0 {
 			resultType := signature.Results().At(0).Type()
 			function.RetAgg = wrapper.goABIAggregate(resultType)
@@ -1321,27 +1310,105 @@ func addLegacyCryptoRuntimeStubs(mod *ir.Module) {
 	unreachable.Entry().RetVoid()
 }
 
+// gen lowers one function body. Its fields fall into three groups, and keeping
+// them straight is the whole reason derive exists:
+//
+//   - Whole-compilation state describes the compilation, not the function: the
+//     target, the module under construction, the FileSet, and the module-level
+//     tables every function shares. A derived generator must always see exactly
+//     what its parent sees, so derive copies this group wholesale.
+//
+//   - Source context names which package's syntax and type information the
+//     generator is reading. It is not inherited: a derived generator either
+//     moves to another package (see compile) or synthesizes a body that has no
+//     Go source at all, in which case it stays nil.
+//
+//   - Per-function state is everything about the one function being built --
+//     its ir.Func, its current block, its locals, labels, defers, result shape.
+//     derive resets all of it, so a derived generator can never see the
+//     half-built function its parent is in the middle of.
+//
+// The invariant for whoever adds the next field: a new whole-compilation field
+// needs nothing beyond being set on the outermost gen in compile, because
+// derive carries it into all ten derived generators for free. A new source
+// context or per-function field must be added to derive's reset list, or a
+// wrapper will silently inherit its parent's.
+//
+// Reading the first group as inherited is a deliberate widening. The wrapper and
+// adapter literals derive replaced listed only the tables they happened to need,
+// so a synthesized wrapper used to see, say, no functionDecls and no linkNames
+// while the function that created it saw both. That made a wrapper's lowering
+// depend on which generator built it, which is the same class of bug as the
+// missing target; the emitted IR is unchanged across goc/testdata either way.
+//
+// Both directions of that mistake are quiet. When target was first threaded
+// through here the ten derived generators were still hand-written field by
+// field, and only the outermost literal got the new field; the others received
+// the zero Target and every diagnostic that names the architecture printed
+// "unsupported on " instead of "unsupported on amd64". Not one test changed
+// from pass to fail -- only the text of the failures did.
 type gen struct {
-	fset                          *token.FileSet
-	file                          *ast.File
-	info                          *types.Info
-	pkg                           *types.Package
-	mod                           *ir.Module
+	// Whole-compilation state. Inherited by derive.
+	mod                         *ir.Module
+	target                      Target
+	fset                        *token.FileSet
+	globals                     map[types.Object]string
+	globalLinkNames             map[types.Object]string
+	methodTargets               map[string]*types.Func
+	functionDecls               map[*types.Func]functionDecl
+	noWriteBarrierFunctions     map[*types.Func]bool
+	interfaceMethods            map[*types.Func]bool
+	interfaceItabs              map[string]string
+	interfaceCallWrappers       map[string]string
+	dynamicTypes                []types.Type
+	reachableGlobals            map[types.Object]bool
+	filterGlobals               bool
+	emitRuntimeTables           bool
+	runtimeAllocation           bool
+	typeTags                    map[string]string
+	runtimeTypes                map[string]types.Type
+	goABITypes                  map[string]*ir.AggType
+	linkNames                   map[*types.Func]string
+	initSymbols                 map[*types.Func]string
+	dynamicInitializers         map[types.Object]*globalInitializer
+	dynamicInitializerGuards    map[types.Object]string
+	dynamicInitializerFunctions map[types.Object]string
+
+	// Source context. Reset by derive; set by callers that lower Go source.
+	file *ast.File
+	info *types.Info
+	pkg  *types.Package
+
+	// Per-function state. Reset by derive.
 	fn                            *ir.Func
 	cur                           *ir.Block
-	vars                          map[types.Object]ir.Ref
-	globals                       map[types.Object]string
-	globalLinkNames               map[types.Object]string
-	breaks, continues             []*ir.Block
 	seq                           int
 	err                           error
-	methodTargets                 map[string]*types.Func
+	functionName                  string
+	currentFunction               *types.Func
+	typeArguments                 []types.Type
+	noWriteBarrier                bool
+	forceStackVariadic            bool
 	resultSlot                    ir.Ref
 	resultType                    types.Type
 	resultObjects                 map[types.Object]bool
 	aggregateResult               ir.Ref
 	extraResultSlots              []ir.Ref
 	extraResultTypes              []types.Type
+	vars                          map[types.Object]ir.Ref
+	directValues                  map[types.Object]bool
+	stackAddresses                map[uint32]bool
+	heapCaptures                  map[types.Object]ir.Ref
+	escapingCaptures              map[types.Object]bool
+	objectEscapeChecks            map[types.Object]bool
+	keepAliveObjects              map[types.Object]bool
+	keepAliveValues               map[types.Object]ir.Ref
+	keepAliveSlots                map[types.Object]string
+	transientInterfaceDescriptors map[uint32]bool
+	initializingGlobals           map[types.Object]bool
+	parents                       map[ast.Node]ast.Node
+	currentBody                   *ast.BlockStmt
+	breaks, continues             []*ir.Block
 	labels                        map[string]*ir.Block
 	labeledBreaks                 map[string]*ir.Block
 	labeledContinues              map[string]*ir.Block
@@ -1351,43 +1418,90 @@ type gen struct {
 	deferActions                  []*ast.DeferStmt
 	deferBlocks                   []*ir.Block
 	runningDefers                 bool
-	parents                       map[ast.Node]ast.Node
-	currentBody                   *ast.BlockStmt
-	functionDecls                 map[*types.Func]functionDecl
-	noWriteBarrierFunctions       map[*types.Func]bool
-	interfaceMethods              map[*types.Func]bool
-	interfaceItabs                map[string]string
-	interfaceCallWrappers         map[string]string
-	dynamicTypes                  []types.Type
-	reachableGlobals              map[types.Object]bool
-	filterGlobals                 bool
-	directValues                  map[types.Object]bool
-	emitRuntimeTables             bool
-	runtimeAllocation             bool
-	typeTags                      map[string]string
-	runtimeTypes                  map[string]types.Type
-	goABITypes                    map[string]*ir.AggType
-	linkNames                     map[*types.Func]string
-	initSymbols                   map[*types.Func]string
-	stackAddresses                map[uint32]bool
-	heapCaptures                  map[types.Object]ir.Ref
-	escapingCaptures              map[types.Object]bool
-	objectEscapeChecks            map[types.Object]bool
-	keepAliveObjects              map[types.Object]bool
-	keepAliveValues               map[types.Object]ir.Ref
-	keepAliveSlots                map[types.Object]string
-	transientInterfaceDescriptors map[uint32]bool
-	noWriteBarrier                bool
-	dynamicInitializers           map[types.Object]*globalInitializer
-	dynamicInitializerGuards      map[types.Object]string
-	dynamicInitializerFunctions   map[types.Object]string
-	initializingGlobals           map[types.Object]bool
-	typeArguments                 []types.Type
-	functionName                  string
-	currentFunction               *types.Func
 	nextCallUsesClosure           bool
 	nextCallClosure               ir.Ref
-	forceStackVariadic            bool
+}
+
+// derive returns a generator for another function in the same compilation: a
+// wrapper, an adapter, a closure or rangefunc body, or a function from another
+// package. Whole-compilation state is copied, source context and per-function
+// state are reset. See the gen doc comment for the invariant this maintains.
+//
+// The caller installs the new function (fn, cur), the source context when there
+// is any, and whatever per-function state that source implies -- typically
+// functionName, currentFunction, typeArguments, noWriteBarrier and the result
+// shape, all of which a nested body inherits from its enclosing function rather
+// than from the compilation.
+//
+// TestDeriveClassifiesEveryGenField enforces the split one field at a time, so a
+// gen field added without being classified fails rather than being silently
+// carried or silently dropped.
+func (g *gen) derive() *gen {
+	derived := *g
+
+	// Source context.
+	derived.file = nil
+	derived.info = nil
+	derived.pkg = nil
+
+	// The function being built, and the flags scoped to it.
+	derived.fn = nil
+	derived.cur = nil
+	derived.seq = 0
+	derived.err = nil
+	derived.functionName = ""
+	derived.currentFunction = nil
+	derived.typeArguments = nil
+	derived.noWriteBarrier = false
+	derived.forceStackVariadic = false
+
+	// Its result shape.
+	derived.resultSlot = ir.R
+	derived.resultType = nil
+	derived.resultObjects = nil
+	derived.aggregateResult = ir.R
+	derived.extraResultSlots = nil
+	derived.extraResultTypes = nil
+
+	// Its locals. The maps that lowering writes into unconditionally are
+	// allocated here; the ones lowering either creates lazily or assigns
+	// wholesale (findEscapingCaptures, findKeepAliveObjects) are left nil.
+	derived.vars = make(map[types.Object]ir.Ref)
+	derived.directValues = make(map[types.Object]bool)
+	derived.stackAddresses = make(map[uint32]bool)
+	derived.heapCaptures = make(map[types.Object]ir.Ref)
+	derived.initializingGlobals = make(map[types.Object]bool)
+	derived.escapingCaptures = nil
+	derived.objectEscapeChecks = nil
+	derived.keepAliveObjects = nil
+	derived.keepAliveValues = nil
+	derived.keepAliveSlots = nil
+	derived.transientInterfaceDescriptors = nil
+
+	// The syntax the function is being lowered from.
+	derived.parents = nil
+	derived.currentBody = nil
+
+	// Its control flow.
+	derived.breaks = nil
+	derived.continues = nil
+	derived.labels = make(map[string]*ir.Block)
+	derived.labeledBreaks = make(map[string]*ir.Block)
+	derived.labeledContinues = make(map[string]*ir.Block)
+
+	// Its defers.
+	derived.deferSlots = make(map[*ast.DeferStmt]ir.Ref)
+	derived.deferFunctions = make(map[*ast.DeferStmt]ir.Ref)
+	derived.deferOrder = nil
+	derived.deferActions = nil
+	derived.deferBlocks = nil
+	derived.runningDefers = false
+
+	// The one-shot closure hand-off between closureCall and the next call.
+	derived.nextCallUsesClosure = false
+	derived.nextCallClosure = ir.R
+
+	return &derived
 }
 
 type atomicCallResult uint8
@@ -1761,35 +1875,15 @@ func generateDynamicInitializerFunctions(base *gen, initializers map[types.Objec
 
 	for _, initializer := range groups {
 		object := initializer.objects[0]
-		generator := *base
+		generator := base.derive()
 		generator.info = initializer.info
 		generator.pkg = initializer.pkg
-		generator.globals = base.globals
 		generator.fn = base.mod.NewFuncVoid(base.dynamicInitializerFunctions[object])
 		generator.cur = generator.fn.Entry()
-		generator.vars = make(map[types.Object]ir.Ref)
-		generator.directValues = make(map[types.Object]bool)
-		generator.stackAddresses = make(map[uint32]bool)
-		generator.heapCaptures = make(map[types.Object]ir.Ref)
-		generator.escapingCaptures = make(map[types.Object]bool)
-		generator.labels = make(map[string]*ir.Block)
-		generator.labeledBreaks = make(map[string]*ir.Block)
-		generator.labeledContinues = make(map[string]*ir.Block)
-		generator.deferSlots = make(map[*ast.DeferStmt]ir.Ref)
-		generator.deferFunctions = make(map[*ast.DeferStmt]ir.Ref)
-		generator.deferOrder = nil
-		generator.deferActions = nil
-		generator.breaks = nil
-		generator.continues = nil
-		generator.resultSlot = ir.R
-		generator.aggregateResult = ir.R
-		generator.extraResultSlots = nil
-		generator.extraResultTypes = nil
+		// The initializer expression is a bare expression rather than a body, so
+		// only its parent links are needed.
 		generator.parents = astParents(initializer.expression)
-		generator.currentBody = nil
-		generator.initializingGlobals = make(map[types.Object]bool)
 		generator.functionName = base.dynamicInitializerFunctions[object]
-		generator.currentFunction = nil
 
 		generator.emitDynamicGlobalInitializer(initializer)
 		if generator.err != nil {
@@ -4765,19 +4859,9 @@ func (g *gen) ensureInterfaceCallWrapperFor(sourceType types.Type, method *types
 		function = g.mod.NewFunc(wrapperSymbol, resultClass)
 	}
 
-	wrapper := &gen{
-		fn:                    function,
-		cur:                   function.Entry(),
-		mod:                   g.mod,
-		runtimeAllocation:     g.runtimeAllocation,
-		typeTags:              g.typeTags,
-		runtimeTypes:          g.runtimeTypes,
-		goABITypes:            g.goABITypes,
-		linkNames:             g.linkNames,
-		initSymbols:           g.initSymbols,
-		interfaceItabs:        g.interfaceItabs,
-		interfaceCallWrappers: g.interfaceCallWrappers,
-	}
+	wrapper := g.derive()
+	wrapper.fn = function
+	wrapper.cur = function.Entry()
 	if signature.Results().Len() > 0 {
 		resultType := signature.Results().At(0).Type()
 		function.RetAgg = wrapper.goABIAggregate(resultType)
@@ -4858,19 +4942,9 @@ func (g *gen) ensureInterfaceCallWrapper(method *types.Func) string {
 		function = g.mod.NewFunc(wrapperSymbol, resultClass)
 	}
 
-	wrapper := &gen{
-		fn:                    function,
-		cur:                   function.Entry(),
-		mod:                   g.mod,
-		runtimeAllocation:     g.runtimeAllocation,
-		typeTags:              g.typeTags,
-		runtimeTypes:          g.runtimeTypes,
-		goABITypes:            g.goABITypes,
-		linkNames:             g.linkNames,
-		initSymbols:           g.initSymbols,
-		interfaceItabs:        g.interfaceItabs,
-		interfaceCallWrappers: g.interfaceCallWrappers,
-	}
+	wrapper := g.derive()
+	wrapper.fn = function
+	wrapper.cur = function.Entry()
 	if signature.Results().Len() > 0 {
 		resultType := signature.Results().At(0).Type()
 		function.RetAgg = wrapper.goABIAggregate(resultType)
@@ -7349,18 +7423,8 @@ func (g *gen) callClosure(call *ast.CallExpr, wrapperPrefix string) ir.Ref {
 	closureType := types.NewStruct(closureFields, nil)
 	closureOffsets := structOffsets(closureFields)
 
-	wrapper := &gen{
-		fn:                    g.mod.NewFuncVoid(wrapperName),
-		mod:                   g.mod,
-		runtimeAllocation:     g.runtimeAllocation,
-		typeTags:              g.typeTags,
-		runtimeTypes:          g.runtimeTypes,
-		goABITypes:            g.goABITypes,
-		linkNames:             g.linkNames,
-		initSymbols:           g.initSymbols,
-		interfaceItabs:        g.interfaceItabs,
-		interfaceCallWrappers: g.interfaceCallWrappers,
-	}
+	wrapper := g.derive()
+	wrapper.fn = g.mod.NewFuncVoid(wrapperName)
 	wrapper.cur = wrapper.fn.Entry()
 	context := wrapper.closureContext()
 	var callee ir.Ref
@@ -7779,44 +7843,18 @@ func (g *gen) iteratorRangeStmt(statement *ast.RangeStmt, label string, iterator
 	if g.functionName == "" {
 		symbol = fmt.Sprintf("%s.rangefunc.%d.%d", g.pkg.Path(), position.Line, position.Column)
 	}
-	child := &gen{
-		fset:                        g.fset,
-		info:                        g.info,
-		pkg:                         g.pkg,
-		mod:                         g.mod,
-		globals:                     g.globals,
-		methodTargets:               g.methodTargets,
-		emitRuntimeTables:           g.emitRuntimeTables,
-		runtimeAllocation:           g.runtimeAllocation,
-		typeTags:                    g.typeTags,
-		runtimeTypes:                g.runtimeTypes,
-		goABITypes:                  g.goABITypes,
-		linkNames:                   g.linkNames,
-		vars:                        make(map[types.Object]ir.Ref),
-		labels:                      make(map[string]*ir.Block),
-		labeledBreaks:               make(map[string]*ir.Block),
-		labeledContinues:            make(map[string]*ir.Block),
-		deferSlots:                  make(map[*ast.DeferStmt]ir.Ref),
-		deferFunctions:              make(map[*ast.DeferStmt]ir.Ref),
-		functionDecls:               g.functionDecls,
-		initSymbols:                 g.initSymbols,
-		noWriteBarrierFunctions:     g.noWriteBarrierFunctions,
-		interfaceMethods:            g.interfaceMethods,
-		interfaceItabs:              g.interfaceItabs,
-		interfaceCallWrappers:       g.interfaceCallWrappers,
-		dynamicInitializers:         g.dynamicInitializers,
-		dynamicInitializerGuards:    g.dynamicInitializerGuards,
-		dynamicInitializerFunctions: g.dynamicInitializerFunctions,
-		initializingGlobals:         make(map[types.Object]bool),
-		stackAddresses:              make(map[uint32]bool),
-		heapCaptures:                make(map[types.Object]ir.Ref),
-		noWriteBarrier:              g.noWriteBarrier,
-		directValues:                make(map[types.Object]bool),
-		typeArguments:               g.typeArguments,
-		functionName:                g.functionName,
-		currentFunction:             g.currentFunction,
-		resultType:                  types.Typ[types.Bool],
-	}
+	// The yield function is lowered from the range body, which lives in the
+	// enclosing function's package and inherits its generic instantiation, its
+	// name prefix and its write barrier setting.
+	child := g.derive()
+	child.info = g.info
+	child.pkg = g.pkg
+	child.typeArguments = g.typeArguments
+	child.functionName = g.functionName
+	child.currentFunction = g.currentFunction
+	child.noWriteBarrier = g.noWriteBarrier
+	// A yield function returns the bool that tells the iterator to keep going.
+	child.resultType = types.Typ[types.Bool]
 	child.fn = g.mod.NewFunc(symbol, ir.ClsW)
 	child.cur = child.fn.Entry()
 	child.parents = astParents(statement.Body)
@@ -9246,8 +9284,13 @@ func (g *gen) expr(e ast.Expr) (result ir.Ref) {
 				return descriptor
 			}
 			if obj.Pkg() != nil && obj.Pkg().Path() == "runtime" && obj.Name() == "getg" && len(n.Args) == 0 {
-				if runtime.GOARCH != "arm64" {
-					g.fail(n, "runtime.getg intrinsic is unsupported on %s", runtime.GOARCH)
+				// getg reads whichever register the target's Go ABI reserves for
+				// the current goroutine. arm64 uses X28; no register has been
+				// chosen for amd64 yet, where the choice is constrained enough to
+				// be a design decision of its own (see AMD64_PARITY_PLAN 3.2), so
+				// the target is still refused rather than guessed at.
+				if g.target != TargetARM64 {
+					g.fail(n, "runtime.getg intrinsic is unsupported on %s", g.target)
 					return ir.R
 				}
 				const arm64GRegister = 28
@@ -9779,19 +9822,9 @@ func (g *gen) methodValue(expression *ast.SelectorExpr, selection *types.Selecti
 		function = g.mod.NewFunc(wrapperName, resultClass)
 	}
 	function.CallConv = ir.CallConvGoInternal
-	wrapper := &gen{
-		fn:                    function,
-		cur:                   function.Entry(),
-		mod:                   g.mod,
-		runtimeAllocation:     g.runtimeAllocation,
-		typeTags:              g.typeTags,
-		runtimeTypes:          g.runtimeTypes,
-		goABITypes:            g.goABITypes,
-		linkNames:             g.linkNames,
-		initSymbols:           g.initSymbols,
-		interfaceItabs:        g.interfaceItabs,
-		interfaceCallWrappers: g.interfaceCallWrappers,
-	}
+	wrapper := g.derive()
+	wrapper.fn = function
+	wrapper.cur = function.Entry()
 	if signature.Results().Len() > 0 {
 		resultType := signature.Results().At(0).Type()
 		function.RetAgg = wrapper.goABIAggregate(resultType)
@@ -10069,43 +10102,16 @@ func (g *gen) functionLiteral(literal *ast.FuncLit) ir.Ref {
 		return true
 	})
 
-	child := &gen{
-		fset:                        g.fset,
-		info:                        g.info,
-		pkg:                         g.pkg,
-		mod:                         g.mod,
-		globals:                     g.globals,
-		methodTargets:               g.methodTargets,
-		emitRuntimeTables:           g.emitRuntimeTables,
-		runtimeAllocation:           g.runtimeAllocation,
-		typeTags:                    g.typeTags,
-		runtimeTypes:                g.runtimeTypes,
-		goABITypes:                  g.goABITypes,
-		vars:                        make(map[types.Object]ir.Ref),
-		labels:                      make(map[string]*ir.Block),
-		labeledBreaks:               make(map[string]*ir.Block),
-		labeledContinues:            make(map[string]*ir.Block),
-		deferSlots:                  make(map[*ast.DeferStmt]ir.Ref),
-		deferFunctions:              make(map[*ast.DeferStmt]ir.Ref),
-		functionDecls:               g.functionDecls,
-		initSymbols:                 g.initSymbols,
-		noWriteBarrierFunctions:     g.noWriteBarrierFunctions,
-		interfaceMethods:            g.interfaceMethods,
-		interfaceItabs:              g.interfaceItabs,
-		interfaceCallWrappers:       g.interfaceCallWrappers,
-		dynamicInitializers:         g.dynamicInitializers,
-		dynamicInitializerGuards:    g.dynamicInitializerGuards,
-		dynamicInitializerFunctions: g.dynamicInitializerFunctions,
-		initializingGlobals:         make(map[types.Object]bool),
-		noWriteBarrier:              g.noWriteBarrier,
-		stackAddresses:              make(map[uint32]bool),
-		heapCaptures:                make(map[types.Object]ir.Ref),
-		directValues:                make(map[types.Object]bool),
-		resultObjects:               resultObjectSet(signature),
-		typeArguments:               g.typeArguments,
-		functionName:                g.functionName,
-		currentFunction:             g.currentFunction,
-	}
+	// The literal's body lives in the enclosing function's package and inherits
+	// its generic instantiation, its name prefix and its write barrier setting.
+	child := g.derive()
+	child.info = g.info
+	child.pkg = g.pkg
+	child.typeArguments = g.typeArguments
+	child.functionName = g.functionName
+	child.currentFunction = g.currentFunction
+	child.noWriteBarrier = g.noWriteBarrier
+	child.resultObjects = resultObjectSet(signature)
 	if signature.Results().Len() == 0 {
 		child.fn = g.mod.NewFuncVoid(symbol)
 	} else {
@@ -10638,17 +10644,9 @@ func (g *gen) goInternalCallAdapter(
 	function.CallConv = ir.CallConvGoInternal
 	function.ManagedFrame = g.runtimeAllocation
 
-	adapter := &gen{
-		fn:                function,
-		cur:               function.Entry(),
-		mod:               g.mod,
-		runtimeAllocation: g.runtimeAllocation,
-		typeTags:          g.typeTags,
-		runtimeTypes:      g.runtimeTypes,
-		goABITypes:        g.goABITypes,
-		linkNames:         g.linkNames,
-		initSymbols:       g.initSymbols,
-	}
+	adapter := g.derive()
+	adapter.fn = function
+	adapter.cur = function.Entry()
 	if entrySignature.Results().Len() > 0 {
 		resultType := entrySignature.Results().At(0).Type()
 		function.RetAgg = adapter.goABIAggregate(resultType)
@@ -10702,10 +10700,15 @@ func (g *gen) staticFunctionDescriptor(symbol string) string {
 }
 
 func (g *gen) closureRegister() int {
-	if runtime.GOARCH == "arm64" {
+	if g.target == TargetARM64 {
 		// Go's ARM64 ABIInternal reserves X26 for the closure context.
 		return 26
 	}
+	// RDX on amd64, which is what Go's ABIInternal uses. This arm has never been
+	// exercised -- nothing reaches it today, because getg refuses the target long
+	// before a closure is built -- so treat it as a placeholder, not as validated:
+	// amd64 also reserves RDX for div/rem and as vaArg scratch, which is part of
+	// the register decision AMD64_PARITY_PLAN 3.2 leaves open.
 	return 2
 }
 
@@ -11109,7 +11112,7 @@ func (g *gen) builtinCall(call *ast.CallExpr, builtin *types.Builtin) ir.Ref {
 		return g.cur.Add(ir.ClsP, pointer, offset)
 	case "Sizeof":
 		argumentType := g.typeAndValue(call.Args[0]).Type
-		pointerSize := int64(types.SizesFor("gc", runtime.GOARCH).Sizeof(types.Typ[types.Uintptr]))
+		pointerSize := int64(g.target.sizes().Sizeof(types.Typ[types.Uintptr]))
 		if _, isTypeParameter := argumentType.(*types.TypeParam); isTypeParameter {
 			return g.fn.Long(pointerSize)
 		}
@@ -12502,6 +12505,9 @@ func (g *gen) selectValue(condition, ifTrue, ifFalse ir.Ref, class ir.Cls) ir.Re
 	)
 }
 
+// typeSize is the size goc lays t out at. It, and the other helpers below that
+// reach goTypeSizes, take no target on purpose -- see goTypeSizes for why, and
+// for the check that keeps the omission honest.
 func typeSize(t types.Type) int64 {
 	t = representativeType(t)
 	if _, parameter := t.(*types.TypeParam); parameter {
@@ -12522,7 +12528,7 @@ func typeSize(t types.Type) int64 {
 		}
 		return alignTo(size, typeAlign(t))
 	}
-	sizes := types.SizesFor("gc", runtime.GOARCH)
+	sizes := goTypeSizes()
 	return sizes.Sizeof(t)
 }
 
@@ -12543,7 +12549,7 @@ func typeAlign(t types.Type) int64 {
 		}
 		return alignment
 	}
-	return int64(types.SizesFor("gc", runtime.GOARCH).Alignof(t))
+	return int64(goTypeSizes().Alignof(t))
 }
 
 func structOffsets(fields []*types.Var) []int64 {
@@ -12562,7 +12568,7 @@ func alignTo(value, alignment int64) int64 {
 }
 
 func pointerSize() int64 {
-	return int64(types.SizesFor("gc", runtime.GOARCH).Sizeof(types.Typ[types.Uintptr]))
+	return int64(goTypeSizes().Sizeof(types.Typ[types.Uintptr]))
 }
 
 func representativeType(valueType types.Type) types.Type {
@@ -12576,7 +12582,7 @@ func representativeType(valueType types.Type) types.Type {
 	}
 
 	representative := terms[0]
-	sizes := types.SizesFor("gc", runtime.GOARCH)
+	sizes := goTypeSizes()
 	for _, term := range terms[1:] {
 		if sizes.Sizeof(term) > sizes.Sizeof(representative) {
 			representative = term
@@ -12621,7 +12627,7 @@ func fieldOffset(selection *types.Selection) int64 {
 	var offset int64
 	for _, index := range selection.Index() {
 		structure := t.Underlying().(*types.Struct)
-		sizes := types.SizesFor("gc", runtime.GOARCH)
+		sizes := goTypeSizes()
 		offsets := sizes.Offsetsof(structFields(structure))
 		offset += offsets[index]
 		t = structure.Field(index).Type()

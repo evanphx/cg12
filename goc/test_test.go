@@ -7,7 +7,7 @@ import (
 )
 
 func TestDiscoverPackageTests(t *testing.T) {
-	tests, _, err := discoverPackageTests("container/list")
+	tests, _, err := discoverPackageTests(HostTarget(), "container/list")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -25,7 +25,7 @@ func TestDiscoverPackageTests(t *testing.T) {
 }
 
 func TestDiscoverExternalPackageTests(t *testing.T) {
-	tests, hasExternalTests, err := discoverPackageTests("sort")
+	tests, hasExternalTests, err := discoverPackageTests(HostTarget(), "sort")
 	if err != nil {
 		t.Fatal(err)
 	}
