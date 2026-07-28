@@ -112,16 +112,21 @@ became `mustPass` on 2026-07-28 with the merged-address fix in §5.3, so the
 matrix now holds no `knownGap` at all; `defer-panic/panic-string-output` is the
 one deliberate `expectedFailure`.
 
-The two denominators are now reconciled, and as of 2026-07-28 they are equal.
-There is only one denominator: the capability matrix *is* the coverage corpus,
-and every capability reports one explicit compile/run/coverage outcome. The
-accepted baseline covers all 338 matrix capabilities, so
-`cmd/goc/testdata/runtime_coverage_baseline_pending.json` is now empty and
-`TestCheckedRuntimeCoverageBaselineDenominator` reconciles baseline to matrix
-directly: 338 + 0 = 338, no capability may appear in both, and no baseline
-program may name a capability the matrix has dropped. Adding a capability still
-requires either accepting a new baseline or recording in that file why the
-baseline does not cover it.
+The two denominators are now reconciled. There is only one denominator: the
+capability matrix *is* the coverage corpus, and every capability reports one
+explicit compile/run/coverage outcome. The 2026-07-28 collection covered all
+338 capabilities that existed when it ran, which is what closed M0. The same
+wave then added 4 more, so
+`cmd/goc/testdata/runtime_coverage_baseline_pending.json` holds those 4 and
+`TestCheckedRuntimeCoverageBaselineDenominator` reconciles in both directions:
+338 + 4 = 342, no capability may appear in both, and no baseline program may
+name a capability the matrix has dropped. Adding a capability still requires
+either accepting a new baseline or recording in that file why the baseline does
+not cover it.
+
+That the list refilled immediately is the mechanism working as designed, not
+drift: a baseline is a measurement taken at an instant, and every capability
+added afterwards is recorded rather than silently absorbed.
 
 Control runs without coverage instrumentation reproduce the runtime failures
 and large-program compiler memory failures. They are not coverage-counter
@@ -1653,6 +1658,54 @@ the reports of the jobs that found them.
   ceiling was considered and rejected as a flakiness risk; the reducers instead
   set their own `GOMAXPROCS`. That keeps the coverage but leaves the general
   question open: defects that need many Ps are still structurally hard to see.
+
+### 5.14 Held back: the Phase 2 escape change interacts with the goroutine entry fix
+
+`ccwork/phase2-alloc` is **not merged.** It is correct in isolation and it was
+held back because of an interaction, which is worth recording in full because no
+per-change verification could have caught it.
+
+That branch fixes `nonEscapingObjectUse`, which returned "does not escape" for
+every field selection, so `&v.payload` kept its object on the frame and a
+package-level slice could hold a goroutine stack address — the §5.8 invariant
+reached by a new route. The fix is real and its own reducer proves it.
+
+But merged together with §5.11 and §5.12, `gc/cleanup-basic` dies with
+`fatal error: span has no free objects`. Bisected:
+
+| Tree | `gc/cleanup-basic` |
+| --- | --- |
+| `origin/main` | passes |
+| `ccwork/freeobject` alone | passes |
+| `ccwork/phase2-alloc` alone | passes |
+| `ccwork/rangekey-b` alone | passes |
+| `freeobject` + `phase2-alloc` | **fails** |
+
+So two independently correct changes compose into a broken compiler. Both move
+objects between the frame and the heap, and both change what the collector is
+told about them: §5.12 makes `unsafe.Pointer` stores emit a write barrier that
+was previously skipped, and the escape fix changes which allocations are heap
+allocations in the first place. `span has no free objects` is an allocator
+invariant failure, which is consistent with the allocator being reentered or
+with an accounting disagreement, but the mechanism is not yet established and
+should not be guessed at.
+
+Two things follow for method, beyond this particular bug:
+
+- **Per-branch verification is not sufficient when changes touch the same
+  invariant.** Every one of these branches passed its own full matrix. The
+  failure exists only in the combination, so the integration run is the gate
+  that matters, not the branch runs.
+- **The order of merging is not neutral.** Had `phase2-alloc` merged first and
+  `freeobject` second, the same failure would have been attributed to
+  `freeobject`, which is the change with the stronger evidence behind it.
+
+Next: reduce the interaction to the smallest program that needs both changes,
+determine whether the escape fix exposes a latent defect in the barrier or the
+barrier exposes one in the escape fix, and fix whichever is actually wrong. The
+branch is preserved at `ccwork/phase2-alloc` with its capabilities and its
+allocation-family classification intact; none of that work is lost, and §6's
+`malloc_generated.go` finding below stands independently of the escape change.
 
 ## 6. Phase 2: Memory safety, allocation, and accurate GC
 
