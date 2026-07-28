@@ -658,6 +658,58 @@ func Test() int {
 `, 21303)
 }
 
+// A defer that runs at most once per frame keeps its closure on the frame
+// (RUNTIME_PLAN.md 5.2.1), but a defer that can run again must not: each
+// registration needs its own closure and its own captured cells. Both shapes
+// that can repeat are covered -- a loop body and a backward goto -- because a
+// shared frame descriptor would leave every deferred call observing the last
+// registration's capture.
+func TestRuntimeRepeatedDeferCapturesEachRegistration(t *testing.T) {
+	runExecutableCase(t, `package main
+
+var loopOrder []int
+
+func deferInLoop() {
+	for index := 0; index < 3; index++ {
+		value := index * 10
+		defer func() {
+			loopOrder = append(loopOrder, value)
+		}()
+	}
+}
+
+var gotoOrder []int
+
+func deferBehindBackwardGoto() {
+	index := 0
+retry:
+	value := index * 10
+	defer func() {
+		gotoOrder = append(gotoOrder, value)
+	}()
+	index++
+	if index < 3 {
+		goto retry
+	}
+}
+
+func Test() int {
+	deferInLoop()
+	deferBehindBackwardGoto()
+
+	// Defers run last-registered first, so both orders must be 20, 10, 0.
+	digits := 0
+	for _, value := range loopOrder {
+		digits = digits*10 + value/10
+	}
+	for _, value := range gotoOrder {
+		digits = digits*10 + value/10
+	}
+	return digits // 210210
+}
+`, 210210)
+}
+
 func TestStandardLibrarySHA256(t *testing.T) {
 	runCase(t, `package main
 

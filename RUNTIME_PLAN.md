@@ -49,11 +49,17 @@ The 2026-07-22 baseline predates the sysmon segfault fix (`54e7c7e`), which was
 the first change that let the capability matrix run to completion. Commit
 `52757f9` then reclassified 13 always-failing capabilities as `knownGap`; six
 were the net/http type-check gap and have since been repaired and restored to
-`mustPass`. Eight remain, and four of them contradict checkpoints in §5.2/§5.3
-that this document previously recorded as complete. Those sections have been
-corrected. Note also that the coverage baseline covers 294 programs while the
-matrix now holds 330 capabilities; the denominators must be reconciled before a
-new baseline is accepted.
+`mustPass`. Four more — `goroutine/many-goroutines-gc`,
+`scheduler-stress/gc-churn`, `stdlib-bytes/grow-allocs` and
+`stdlib-signals/during-gc` — were one bug, the §5.2.1 GC-assist allocation
+recursion, and became `mustPass` on 2026-07-28 together with that section's two
+reducers. `runtime-packages/finalizer-resurrect` is now the matrix's only
+remaining `knownGap` (§5.3); `defer-panic/panic-string-output` is the one
+deliberate `expectedFailure`.
+
+Note also that the coverage baseline covers 294 programs while the matrix now
+holds 329 capabilities; the denominators must be reconciled before a new
+baseline is accepted.
 
 Control runs without coverage instrumentation reproduce the runtime failures
 and large-program compiler memory failures. They are not coverage-counter
@@ -201,9 +207,13 @@ Current checkpoint:
 - [x] Model the standard compiler's synthetic edge from each defer registration
   to the shared recovery exit so recovery-result liveness and register
   allocation remain valid on metadata-entered paths.
-- [x] Heap-lift direct deferred function literals in runtime builds, and keep
-  named result slots on the same heap cell when an escaping deferred closure
-  captures the result.
+- [x] Heap-lift direct deferred function literals in runtime builds when the
+  same `defer` statement can register more than once — inside a loop, or below a
+  label a `goto` can jump back to — and keep named result slots on the same heap
+  cell when such an escaping deferred closure captures the result. A `defer`
+  that registers at most once per frame keeps its closure descriptor in a frame
+  slot and captures by reference; heap-lifting those too was the §5.2.1 bug and
+  was corrected on 2026-07-28.
 - [x] Keep the runtime's `_panic` record stack-resident through
   `unsafe.Pointer` conversions passed to `runtime.noescape`; both panic-time GC
   cases now pass with `GOGC=1`.
@@ -263,22 +273,26 @@ Current checkpoint:
 - [x] Keep the temporary slice headers captured by `runtime.selectgo`'s
   synchronous unlock closure on the stack, while still promoting slice backing
   storage assigned to globals.
-- [ ] Pass delivery during GC. **Regressed**, but not a signal bug.
-  `stdlib-signals/during-gc` fails with `timed out waiting for signal during
-  GC`; it is currently marked `knownGap`. Every signal is in fact delivered;
-  the receiving goroutine is simply stalled past the program's own 2 s deadline
-  by the GC-assist allocation recursion described in 5.2.1. It is one of four
-  capabilities that only became visible once the sysmon segfault fix
-  (`54e7c7e`) let the matrix run to completion, so it was masked rather than
-  newly broken.
+- [x] Pass delivery during GC. It was never a signal bug: every signal was
+  delivered, but the receiving goroutine was stalled past the program's own 2 s
+  deadline by the GC-assist allocation recursion. Fixed with 5.2.1 on
+  2026-07-28; `stdlib-signals/during-gc` is `mustPass` again and runs in 0.03 s.
 - [ ] Pass the locked-global-select case and the full signal category ten
   executions per program with optimization and `GOMAXPROCS=1`, `2`, and `4`.
-  Blocked on `during-gc` above; the rest of the category passes.
+  Four of the five signal programs are clean over 10 optimized runs at all three
+  `GOMAXPROCS` values. `during-gc` is clean at `GOMAXPROCS=1` and `2` and fails
+  3 of 60 optimized runs at `GOMAXPROCS=4` with `fatal error: found bad pointer
+  in Go heap`. **This is not a signal or a 5.2.1 problem**: the same fatal error
+  reproduces on the pre-5.2.1 tree, 8 of 60 runs at `GOMAXPROCS=4`, in
+  `goroutine/worker-fanin-gc`, which is `mustPass` and clean at the matrix's
+  `GOMAXPROCS=1`. The bad pointer is reported with no containing object, so the
+  reference is a root — a stale stack address surviving into a scan. It needs
+  its own reduction; it blocks this box and the §5.2 exit criterion.
 
 Exit criterion: signal tests pass under `GOMAXPROCS=1`, `2`, and `4`, including
 race-like stress, without deadlock or runtime lock corruption.
 
-#### 5.2.1 Root cause of the four GC-pressure failures (2026-07-28)
+#### 5.2.1 Fixed: `runtime.gcAssistAlloc` allocated (2026-07-28)
 
 `goroutine/many-goroutines-gc`, `scheduler-stress/gc-churn`,
 `stdlib-bytes/grow-allocs`, and `stdlib-signals/during-gc` were all recorded as
@@ -360,28 +374,78 @@ are committed:
 
 | Capability | Expectation | Role |
 | --- | --- | --- |
-| `gc/assist-alloc-recursion` | `knownGap` | the runtime-level failure: concurrent `runtime.GC()` drives `StackInuse` past 4 MiB in one cycle |
-| `gc/defer-capture-allocs` | `knownGap` | the compiler-level failure, with its controls |
+| `gc/assist-alloc-recursion` | `mustPass` | the runtime-level failure: concurrent `runtime.GC()` drives `StackInuse` past 4 MiB in one cycle |
+| `gc/defer-capture-allocs` | `mustPass` | the compiler-level failure, with its controls |
 
 `gc/defer-capture-allocs` reports four allocation counts, all of which are 0 on
 the host toolchain:
 
-| Shape | cg12 |
-| --- | ---: |
-| variable captured by a deferred literal on an **untaken** branch | 1 |
-| variable captured by an unconditional deferred literal | 2 |
-| variable captured by an immediately invoked literal | 0 |
-| deferred literal with no capture | 0 |
+| Shape | cg12 before | cg12 after |
+| --- | ---: | ---: |
+| variable captured by a deferred literal on an **untaken** branch | 1 | 0 |
+| variable captured by an unconditional deferred literal | 2 | 0 |
+| variable captured by an immediately invoked literal | 0 | 0 |
+| deferred literal with no capture | 0 | 0 |
 
-So the trigger is specifically `defer` plus capture. The narrow fix is to sink
-the heap lift into the branch that actually constructs the closure, which is
-enough for `gcAssistAlloc`. The general fix is to stop heap-lifting variables
-captured by deferred literals that do not outlive the frame; note that the
-current behaviour is the deliberate heap lift recorded in 5.1, so changing it
-needs the defer/panic batch rerun. Either way, this is the second instance of
-the same class as the print-routine allocation fixed in 5.3 — cg12 introducing a
-heap allocation into a runtime path that must not allocate — and an audit for
-further instances is worth doing.
+##### The fix
+
+The trigger was specifically `defer` plus capture, and the reason was the
+blanket heap lift recorded in 5.1: `goc.functionLiteralEscapesWithin` treated
+*every* directly-deferred function literal in a runtime build as escaping.
+
+That premise is wrong. `deferreturn` and `gopanic` run a deferred closure inside
+the frame that registered it, so a directly-deferred literal does not outlive
+its frame: its descriptor belongs in a frame slot and it can capture the
+enclosing variables by reference. All three relocation paths for a frame-resident
+descriptor already existed — `markStackPointerWord` puts the descriptor's capture
+words in the frame pointer map (which `3f11295` unions into every safepoint map),
+`runtime.adjustdefers` relocates `_defer.fn`, and `goRegisterSpills` spills the
+closure-context register as a pointer root at the `morestack` safepoint so
+`adjustctxt` relocates it. `runtime.popDefer` even documents `d.fn` as something
+that "can in theory point to the stack". Range-over-func lowering already builds
+its yield closure exactly this way.
+
+The premise only fails when the same `defer` statement can register more than
+once. The frame holds one descriptor slot per `defer` statement, so a second
+registration would overwrite the first, and every `_defer` record would end up
+pointing at one descriptor holding the last registration's captures. Those defers
+keep the heap descriptor and the heap-lifted captures.
+
+`goc.deferStatementRepeats` therefore decides the escape, and a defer repeats
+when either:
+
+- it is lexically inside a `for` or `range` statement; or
+- some `goto L` in the same function body targets a label declared at or before
+  it, so control can jump back to it. Labels declared *after* the defer cannot
+  re-reach it — which is what keeps `gcAssistAlloc` on the non-repeating path,
+  since its synctest defer sits above its own `retry:` label.
+
+An ancestor `*ast.FuncLit` ends the walk: the defer then belongs to that
+literal's frame, which is entered afresh on every call.
+
+Verified: `gc/defer-capture-allocs` reports 0/0/0/0, matching the host
+toolchain; `gc/assist-alloc-recursion` passes; and all four attributed
+capabilities, plus both reducers, run clean for 10 executions each unoptimized
+and with `-O` at `GOMAXPROCS=1` and `2`, in 0.03-0.37 s at `GOMAXPROCS=1` — the
+same range the runtime-source experiment produced. `GOMAXPROCS=4` is clean too
+except for rare hits of the *separate, pre-existing* `found bad pointer in Go
+heap` fault recorded in the §5.2 checkpoint above (measured 1 of 60 for
+`many-goroutines-gc`, 3 of 60 for `during-gc`, against 8 of 60 for
+`worker-fanin-gc` on the pre-5.2.1 tree). The whole `defer-panic` category (21
+must-pass plus the deliberate uncaught-panic subprocess) passes unoptimized and,
+at three executions per program, with `-O` at `GOMAXPROCS=1`, `2`, and `4`; the
+three panic/stack GC cases ran 100 times each, optimized, with `GOGC=1`, at
+`GOMAXPROCS=1`, `2`, and `4` without a failure, compiled under a 3 GiB address
+space limit.
+
+`goc/escape_test.go` pins both directions of the rule and
+`goc/corpus_test.go`'s `TestRuntimeRepeatedDeferCapturesEachRegistration`
+executes the loop and backward-goto shapes to prove each registration still
+captures its own value.
+
+This was the second instance of the same class as the print-routine allocation
+fixed in 5.3 — cg12 introducing a heap allocation into a runtime path that must
+not allocate — and an audit for further instances is still worth doing.
 
 Incidental, found while probing and not investigated further:
 `runtime.NumGoroutine()` returns 5 in a cg12 program where the host toolchain

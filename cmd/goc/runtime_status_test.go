@@ -369,15 +369,13 @@ func TestARM64RuntimeCapabilityStatus(t *testing.T) {
 			category:    "gc",
 			name:        "assist-alloc-recursion",
 			source:      "runtime_gc_assist_stack_growth.go",
-			expectation: runtimeCapabilityKnownGap,
-			note:        "minimal reducer for the 5.2.1 GC-assist allocation recursion; concurrent runtime.GC() drives goroutine stacks past 4 MiB within one cycle (see RUNTIME_PLAN.md 5.2.1)",
+			expectation: runtimeCapabilityMustPass,
 		},
 		{
 			category:    "gc",
 			name:        "defer-capture-allocs",
 			source:      "runtime_defer_capture_allocs.go",
-			expectation: runtimeCapabilityKnownGap,
-			note:        "compiler-level reducer for 5.2.1: a variable captured by a deferred literal on an untaken branch is still heap-lifted, so runtime.gcAssistAlloc allocates",
+			expectation: runtimeCapabilityMustPass,
 		},
 		{
 			category:    "gc",
@@ -548,8 +546,7 @@ func TestARM64RuntimeCapabilityStatus(t *testing.T) {
 			category:    "goroutine",
 			name:        "many-goroutines-gc",
 			source:      "runtime_many_goroutines_gc.go",
-			expectation: runtimeCapabilityKnownGap,
-			note:        "performance shortfall from the 5.2.1 GC-assist allocation recursion, not the 5.3 over-retention bug; the live heap stays flat while goroutine stacks and mark time grow superlinearly",
+			expectation: runtimeCapabilityMustPass,
 		},
 		{
 			category:    "goroutine",
@@ -699,8 +696,7 @@ func TestARM64RuntimeCapabilityStatus(t *testing.T) {
 			category:    "scheduler-stress",
 			name:        "gc-churn",
 			source:      "runtime_scheduler_gc_churn.go",
-			expectation: runtimeCapabilityKnownGap,
-			note:        "performance shortfall from the 5.2.1 GC-assist allocation recursion, not the 5.3 over-retention bug: the live heap stays flat while goroutine stacks and mark time grow superlinearly, and the program dies with \"goroutine stack exceeds 1000000000-byte limit\" identically before and after the 5.3 fix",
+			expectation: runtimeCapabilityMustPass,
 		},
 		{
 			category:    "stdlib-io",
@@ -1132,8 +1128,7 @@ func TestARM64RuntimeCapabilityStatus(t *testing.T) {
 			category:    "stdlib-bytes",
 			name:        "grow-allocs",
 			source:      "bytes_grow_allocs.go",
-			expectation: runtimeCapabilityKnownGap,
-			note:        "performance shortfall from the 5.2.1 GC-assist allocation recursion, not the 5.3 over-retention bug; the recursive assist allocations are also what AllocsPerRun reports as spurious Buffer.Grow allocations",
+			expectation: runtimeCapabilityMustPass,
 		},
 		{
 			category:    "stdlib-bytes",
@@ -1349,8 +1344,7 @@ func TestARM64RuntimeCapabilityStatus(t *testing.T) {
 			category:    "stdlib-signals",
 			name:        "during-gc",
 			source:      "stdlib_signal_during_gc.go",
-			expectation: runtimeCapabilityKnownGap,
-			note:        "not a signal-delivery gap: every signal is delivered, but the 5.2.1 GC-assist allocation recursion stalls the receiving goroutine for up to 36s, past the program's own 2s deadline",
+			expectation: runtimeCapabilityMustPass,
 		},
 		{
 			category:       "stdlib-signals",
