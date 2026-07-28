@@ -1185,10 +1185,49 @@ func TestGoEmittedStackMapDropsDeadPointerBearingLocal(t *testing.T) {
 	localWord := (machine.m.stackAllocTmp[local.ID] - 16) / 8
 	assert.Contains(t, information.LocalPointerWords, localWord)
 
-	pointerMaps, indexPoints := gometa.FunctionStackMaps(information)
+	pointerMaps, indexPoints, _ := gometa.FunctionStackMaps(information)
 	require.Len(t, indexPoints, 2)
 	assert.Contains(t, pointerMaps[indexPoints[0].Index], localWord)
 	assert.NotContains(t, pointerMaps[indexPoints[1].Index], localWord)
+}
+
+// The closure context's home slot is a word only the stack-growth prologue ever
+// writes, so it must not appear in the argument map at gometa.EntryStackMapIndex.
+// That is the map runtime.stkframe.getStackMap hardcodes for a frame stopped at
+// pc == entry, which is the state of every goroutine runtime.newproc has created
+// and not yet scheduled: its argument frame still holds whatever the previous
+// user of that recycled stack left there, and every goroutine cg12 starts runs
+// through a closure wrapper. RUNTIME_PLAN.md 5.11.
+func TestGoEntryArgumentMapOmitsTheClosureHomeSlot(t *testing.T) {
+	function := ir.NewModule().NewFuncVoid("goroutine_entry_wrapper")
+	function.CallConv = ir.CallConvGoInternal
+	function.ManagedFrame = true
+	function.HasClosureContext = true
+	closure := function.NewTemp("closure", ir.ClsP)
+	closureTemporary := function.Temp(closure)
+	closureTemporary.GCRef = true
+	closureTemporary.Fixed = true
+	closureTemporary.Reg = 26
+	closureTemporary.ClosureContext = true
+	entry := function.Entry()
+	entry.CallVoid(function.Sym("target", 0), entry.Load(ir.ClsP, closure))
+	entry.RetVoid()
+
+	machine := compileGoFunctionForStackMaps(t, function)
+	information, err := goFunctionInfoFor(function, "goroutine_entry_wrapper", machine)
+	require.NoError(t, err)
+
+	// The home slot is word 0 of the argument frame, and it is the only word the
+	// wrapper's argument frame has.
+	assert.Equal(t, []int{0}, information.ArgumentPointerWords)
+	assert.Empty(t, information.SafepointArgumentPointerWords)
+
+	pointerMaps, _, growthIndex := gometa.FunctionStackMaps(information)
+	require.NotEqual(t, gometa.EntryStackMapIndex, growthIndex)
+
+	argumentMaps := gometa.ArgumentStackMaps(information, len(pointerMaps), growthIndex)
+	assert.NotContains(t, argumentMaps[gometa.EntryStackMapIndex], 0)
+	assert.Contains(t, argumentMaps[growthIndex], 0)
 }
 
 // A local reached only through a derived interior address stays scanned. cg12
