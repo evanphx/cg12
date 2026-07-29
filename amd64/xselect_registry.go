@@ -17,11 +17,13 @@ type xselector func(s *xsel, in *ir.Instr) bool
 // chain order would be the order the Go toolchain happens to initialize files in
 // -- unwritten anywhere, invisible at the call site, and silently reordered by
 // renaming a file. Order is load-bearing as soon as two families can claim the
-// same op: the immediates work (Track A, agent A3) intercepts ir.OAdd and ir.OCmp
-// with a constant operand that selectCore would otherwise handle generically, so
-// it must probe first. A selection-order bug is among the least pleasant kinds to
-// debug -- the code emitted is valid, just not the code intended -- so the order
-// is spelled out here where it can be read and reviewed.
+// same op: selectImm intercepts ir.OAdd and the rest of the integer arithmetic
+// when an operand is a constant selectCore would otherwise materialize into a
+// register, so it must probe first. (ir.OCmp is the one immediate form it does
+// *not* claim; see xselect_imm.go for why that fold lives in cmpFlags instead.)
+// A selection-order bug is among the least pleasant kinds to debug -- the code
+// emitted is valid, just not the code intended -- so the order is spelled out
+// here where it can be read and reviewed.
 //
 // Two rules for anything added here:
 //
@@ -31,6 +33,7 @@ type xselector func(s *xsel, in *ir.Instr) bool
 //   - first match wins, so families claiming disjoint ops may go in any order.
 //     Place an overriding family above the entries it must beat.
 var selectors = []xselector{
+	selectImm, // first: the only family here that overrides selectCore's own ops
 	selectAtomic,
 	selectBits,
 	selectWide,
