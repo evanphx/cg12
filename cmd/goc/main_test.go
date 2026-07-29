@@ -1,11 +1,13 @@
 package main
 
 import (
+	"fmt"
 	"os"
 	"os/exec"
 	"path/filepath"
 	"runtime"
 	"strings"
+	"sync"
 	"testing"
 
 	"github.com/evanphx/cg12/arm64"
@@ -158,12 +160,7 @@ func TestDriverIRAndRun(t *testing.T) {
 		t.Skip("cc unavailable")
 	}
 	d := t.TempDir()
-	bin := filepath.Join(d, "goc")
-	cmd := exec.Command("go", "build", "-o", bin, ".")
-	cmd.Env = append(os.Environ(), "GOCACHE="+filepath.Join(d, "cache"))
-	if out, err := cmd.CombinedOutput(); err != nil {
-		t.Fatalf("build: %v\n%s", err, out)
-	}
+	bin := sharedGOCBinary(t)
 	src := filepath.Join(d, "main.go")
 	program := `package main
 
@@ -198,12 +195,7 @@ func TestDriverRunsStandardLibraryTest(t *testing.T) {
 	}
 
 	directory := t.TempDir()
-	compiler := filepath.Join(directory, "goc")
-	build := exec.Command("go", "build", "-o", compiler, ".")
-	build.Env = append(os.Environ(), "GOCACHE="+filepath.Join(directory, "cache"))
-	if output, err := build.CombinedOutput(); err != nil {
-		t.Fatalf("build compiler: %v\n%s", err, output)
-	}
+	compiler := sharedGOCBinary(t)
 
 	testBinary := filepath.Join(directory, "container-list.test")
 	command := exec.Command(compiler, "test", "-o", testBinary, "-v", "-run", "^TestRemove$", "container/list")
@@ -307,12 +299,7 @@ func TestARM64GoRuntimeGarbageCollectorExecutes(t *testing.T) {
 	}
 
 	directory := t.TempDir()
-	compiler := filepath.Join(directory, "goc")
-	build := exec.Command("go", "build", "-o", compiler, ".")
-	build.Env = append(os.Environ(), "GOCACHE="+filepath.Join(directory, "cache"))
-	if output, err := build.CombinedOutput(); err != nil {
-		t.Fatalf("build compiler: %v\n%s", err, output)
-	}
+	compiler := sharedGOCBinary(t)
 
 	program := filepath.Join("..", "..", "goc", "testdata", "gc_struct.go")
 	executable := filepath.Join(directory, "gc-struct")
@@ -334,12 +321,7 @@ func TestARM64StandardLibraryIOAndFmtExecute(t *testing.T) {
 	}
 
 	directory := t.TempDir()
-	compiler := filepath.Join(directory, "goc")
-	build := exec.Command("go", "build", "-o", compiler, ".")
-	build.Env = append(os.Environ(), "GOCACHE="+filepath.Join(directory, "cache"))
-	if output, err := build.CombinedOutput(); err != nil {
-		t.Fatalf("build compiler: %v\n%s", err, output)
-	}
+	compiler := sharedGOCBinary(t)
 
 	tests := []struct {
 		name   string
@@ -392,12 +374,7 @@ func TestARM64PlainMainBootsGoRuntimeAndRunsInit(t *testing.T) {
 	}
 
 	directory := t.TempDir()
-	compiler := filepath.Join(directory, "goc")
-	build := exec.Command("go", "build", "-o", compiler, ".")
-	build.Env = append(os.Environ(), "GOCACHE="+filepath.Join(directory, "cache"))
-	if output, err := build.CombinedOutput(); err != nil {
-		t.Fatalf("build compiler: %v\n%s", err, output)
-	}
+	compiler := sharedGOCBinary(t)
 
 	source := filepath.Join(directory, "main.go")
 	program := `package main
@@ -430,4 +407,44 @@ func main() {
 	if string(output) != "hello from cg12 Go\n" {
 		t.Fatalf("plain Go output = %q, want %q", output, "hello from cg12 Go\n")
 	}
+}
+
+// sharedGOCBinary builds the goc compiler once for the whole test binary.
+//
+// Each caller used to build its own into a fresh t.TempDir() with GOCACHE
+// pointed at an empty directory, which forced a cold rebuild of the Go standard
+// library and every cg12 package -- five times per run, for five byte-identical
+// compilers. The ambient build cache is correct here: go build keys its cache on
+// the source, so it cannot hand back a stale binary.
+//
+// The binary lives in its own directory rather than any one test's TempDir, so
+// it outlives the test that happened to ask for it first.
+var (
+	sharedGOCOnce sync.Once
+	sharedGOCPath string
+	sharedGOCErr  error
+)
+
+func sharedGOCBinary(t *testing.T) string {
+	t.Helper()
+
+	sharedGOCOnce.Do(func() {
+		directory, err := os.MkdirTemp("", "cg12-goc-test")
+		if err != nil {
+			sharedGOCErr = err
+			return
+		}
+		compiler := filepath.Join(directory, "goc")
+		build := exec.Command("go", "build", "-o", compiler, ".")
+		if output, err := build.CombinedOutput(); err != nil {
+			sharedGOCErr = fmt.Errorf("build compiler: %w\n%s", err, output)
+			return
+		}
+		sharedGOCPath = compiler
+	})
+	if sharedGOCErr != nil {
+		t.Fatal(sharedGOCErr)
+	}
+
+	return sharedGOCPath
 }
