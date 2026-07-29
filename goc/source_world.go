@@ -34,6 +34,11 @@ type sourceWorld struct {
 // sourceWorldKey identifies a world by everything that decides which files a
 // package is built from, or how they type-check.
 //
+// forcePureGo is retained even though only executables share a world today, and
+// executables never set it: the field is what makes the key describe the build
+// rather than the caller, and dropping it would leave nothing to stop a future
+// caller with a different file selection from reusing this one.
+//
 // Getting this wrong is the one way a cache like this can be worse than no
 // cache at all: a world reused across a boundary it should not cross would
 // serve a package built from the wrong files, and the compile would succeed

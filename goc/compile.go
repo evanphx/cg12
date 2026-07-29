@@ -110,11 +110,17 @@ func compile(name string, src []byte, options compileOptions) (*ir.Module, error
 	// that same set, so the world is chosen before anything is parsed rather
 	// than after.
 	//
-	// Loaders configured with test packages select extra files and so never
-	// share a world; asking for one would be a cache key that lies.
+	// Only executables share a world, and the reason is not performance.
+	// A non-executable compile never imports the runtime -- see the guarded
+	// Import below -- so its unit map is empty and nothing runtime-shaped is
+	// ever generated for it. Handing it a world would put the runtime in that
+	// map and the compile would then try to generate code for a package it was
+	// never meant to see. Loaders configured with test packages select extra
+	// files, so they do not share a world either; a key that ignored that would
+	// be a key that lies.
 	var world *sourceWorld
-	if len(options.testPackages) == 0 && len(options.externalTestPackages) == 0 {
-		world = sharedSourceWorld(target, !executable)
+	if executable && len(options.testPackages) == 0 && len(options.externalTestPackages) == 0 {
+		world = sharedSourceWorld(target, false)
 	}
 	fset := token.NewFileSet()
 	if world != nil {
@@ -270,6 +276,7 @@ func compile(name string, src []byte, options compileOptions) (*ir.Module, error
 		typeTags:                typeTags,
 		functionDescriptors:     make(map[string]string),
 		literalData:             make(map[string]string),
+		contentSymbols:          make(map[string]string),
 		runtimeTypes:            runtimeTypes,
 		goABITypes:              goABITypes,
 		linkNames:               linkNames,
@@ -1394,7 +1401,11 @@ type gen struct {
 	// literalData interns byte-valued data symbols by their contents, so a
 	// literal appearing twice is emitted once and is named the same way in
 	// every module that contains it.
-	literalData                 map[string]string
+	literalData map[string]string
+	// contentSymbols interns symbols whose name is derived from what they
+	// describe, so a second request for the same content reuses the first
+	// symbol instead of colliding with it.
+	contentSymbols              map[string]string
 	runtimeTypes                map[string]types.Type
 	goABITypes                  map[string]*ir.AggType
 	linkNames                   map[*types.Func]string
@@ -11131,7 +11142,15 @@ func (g *gen) goInternalCallAdapter(
 	calleeSignature *types.Signature,
 	receiverType types.Type,
 ) string {
-	adapterName := fmt.Sprintf("%s.gointernal.funcvalue.%d", symbol, len(g.mod.Funcs))
+	adapterKey := symbol + "|" + types.TypeString(entrySignature, nil) +
+		"|" + types.TypeString(calleeSignature, nil)
+	if receiverType != nil {
+		adapterKey += "|" + types.TypeString(receiverType, nil)
+	}
+	adapterName, fresh := g.internSymbol(symbol+".gointernal.funcvalue", adapterKey)
+	if !fresh {
+		return adapterName
+	}
 	resultClass := ir.ClsW
 	if entrySignature.Results().Len() > 0 {
 		resultClass, _ = scalar(entrySignature.Results().At(0).Type())
@@ -12201,7 +12220,10 @@ func (g *gen) appendCall(call *ast.CallExpr) ir.Ref {
 
 func (g *gen) channelType(channel *types.Chan) ir.Ref {
 	element := channel.Elem()
-	elementName := fmt.Sprintf(".goc.channel.element.%d", len(g.mod.Data))
+	elementName, fresh := g.internSymbol(".goc.channel.element", goTypeKey(element))
+	if !fresh {
+		return g.fn.Sym(elementName+".channel", 0)
+	}
 	elementBytes := make([]int64, 48)
 	size := typeSize(element)
 	for i := 0; i < 8; i++ {
@@ -12224,7 +12246,10 @@ func (g *gen) channelType(channel *types.Chan) ir.Ref {
 }
 
 func (g *gen) runtimeType(valueType types.Type) ir.Ref {
-	name := fmt.Sprintf(".goc.runtime.type.%d", len(g.mod.Data))
+	name, fresh := g.internSymbol(".goc.runtime.type", goTypeKey(valueType))
+	if !fresh {
+		return g.fn.Sym(name, 0)
+	}
 	maskName := name + ".gcdata"
 	size := typeSize(valueType)
 	mask := make([]int64, (size+63)/64)
@@ -14077,4 +14102,18 @@ func (g *gen) literalDataSymbol(prefix string, align int, values []int64) string
 		Items: []ir.DataItem{{Sub: ir.SubUB, Ints: values}},
 	})
 	return name
+}
+
+// internSymbol returns the content-derived name for a symbol, and whether the
+// caller still has to emit it. A counter-named symbol was unique by
+// construction; a content-named one is only unique if the second request for
+// the same content reuses the first symbol.
+func (g *gen) internSymbol(prefix, key string) (string, bool) {
+	full := prefix + ":" + key
+	if name := g.contentSymbols[full]; name != "" {
+		return name, false
+	}
+	name := contentSymbolName(prefix, key)
+	g.contentSymbols[full] = name
+	return name, true
 }

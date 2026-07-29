@@ -42,6 +42,13 @@ var wholeCompilationGenFields = []string{
 	"emitRuntimeTables",
 	"runtimeAllocation",
 	"typeTags",
+	// The interning maps below are whole-compilation state for the same reason
+	// typeTags is: they decide a symbol's name from its content, so a derived
+	// generator that started with an empty one would mint a second symbol for
+	// something the parent had already emitted.
+	"contentSymbols",
+	"functionDescriptors",
+	"literalData",
 	"runtimeTypes",
 	"goABITypes",
 	"linkNames",
@@ -79,6 +86,9 @@ func fullyPopulatedGen() *gen {
 		emitRuntimeTables:           true,
 		runtimeAllocation:           true,
 		typeTags:                    map[string]string{},
+		contentSymbols:              map[string]string{},
+		functionDescriptors:         map[string]string{},
+		literalData:                 map[string]string{},
 		runtimeTypes:                map[string]types.Type{},
 		goABITypes:                  map[string]*ir.AggType{},
 		linkNames:                   map[*types.Func]string{},
