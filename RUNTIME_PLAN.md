@@ -1840,7 +1840,16 @@ subsection. What follows replaces it.
    usable failure rate before it can be attributed, in the way §5.8's
    `gc/keepalive-stack-root` made its predecessor measurable.
 
-4. **Begin Phase 2 (§6).** The allocation-family, write-barrier and stack-map
+4. **Split the driver (`goc build-runtime`).** §14 landed the mechanism that made
+   this possible: a goc image can now carry more than one Go module, verified on
+   real output. What remains is compiling the runtime once into an object with a
+   moduledata of its own, exporting the type and name symbols so a program can
+   point at the runtime's descriptors rather than duplicating them, and giving
+   descriptors a content-derived `abi.Type.Hash` so `typelinksinit` does not scan
+   linearly. The prize is the capability matrix at about one minute rather than
+   about twelve and a half.
+
+5. **Begin Phase 2 (§6).** The allocation-family, write-barrier and stack-map
    work is now on a foundation that has been independently exercised, and §6's
    compiler-emitted checks should be built on the diagnostics Phase 1 produced
    rather than new ones: `cg12scanroots`, `cg12checkwb` and `cg12checkstackcopy`
@@ -1854,7 +1863,112 @@ than an instruction: three of the four defects found in §5.7 through §5.9 were
 caught by tools built during earlier sections, and none of them would have been
 visible in a pass/fail suite.
 
-## 14. What Phase 1 established about method
+## 14. Per-module type regions: a goc image can carry more than one Go module (2026-07-29)
+
+Recorded here rather than in §5 because it is not a Phase 1 failure repair: it is
+new capability, and it is the prerequisite for compiling the runtime once and
+linking it into many programs. Two spikes established the design and measured the
+prize (`ccwork/typeoff-alternatives`, `ccwork/sepcompile-spike`): 99.3% of a
+program's `.text` bytes are byte-identical across 28 different programs, so a
+prebuilt runtime would take the capability matrix from about 12.5 minutes to
+about one.
+
+The obstacle was that `abi.Type` addresses its name and its methods by 32-bit
+offsets relative to the module's type region, and `arm64.resolveRelativeDataFixups`
+bakes `value(target) - value(datastart)` into the data with no relocation left
+behind. A second object's offsets are therefore all wrong by however many bytes
+precede it.
+
+**The answer is Go's own: per-module type regions.** It needs no change to how an
+offset is computed, because `RelativeTo` is already resolved against a symbol in
+the same object, which is already correct for a per-module base. The vendored
+runtime already implements the other half — `modulesinit`, `moduledataverify`,
+`typelinksinit` and `itabsinit` are all called from `schedinit`, and
+`resolveNameOff`/`resolveTypeOff` already walk the chain picking the module that
+contains the *referring* type. The chain simply had length one.
+
+What changed, and why each piece was necessary:
+
+- **`internal/gometa`'s text-end symbol is per module.** It was the constant
+  `runtime_gocTextEnd`, defined once for the whole image by the Plan 9 sidecar,
+  so a second module would take the first module's text end as its own `maxpc`
+  and `findmoduledatap` would never select it. `gometa.TextEndSymbol` derives the
+  name from the module's moduledata name. The sidecar emits it when the sidecar
+  carries the module's last text; otherwise the object defines its own bound, so
+  an object-only Go module needs no hand-added symbol (the spike's prototype
+  needed one).
+- **The moduledata symbol name is a parameter.** `runtime.firstmoduledata` is
+  global and belongs to the module carrying the runtime's own state; a second
+  module declares its own through `ir.Module.GoModuleData`. A Go module that
+  defines `runtime.firstmoduledata` without naming it is now an error rather than
+  a silently metadata-less object.
+- **`moduledata.typelinks` is populated.** This was the one genuinely new piece.
+  A second module re-emits a descriptor for any signature or pointer type it
+  shares with the first, and two descriptors for one Go type means
+  `reflect.TypeOf(x) == reflect.TypeOf(y)` can disagree. `typelinksinit` builds
+  the `typemap` that canonicalises them, but only from `typelinks`, which cg12
+  left empty. The frontend marks its complete descriptors (`ir.Data.GoTypeLink`)
+  and the backend lists them as module-relative `int32` offsets. Only complete
+  descriptors qualify: `runtime.typesEqual` reads a type's kind-specific tail, so
+  a bare 48-byte header with a kind byte would send it past the end of the symbol.
+- **`moduledata.hasmain` is set** on the module that defines `main`; gometa
+  zeroed the whole tail of the record.
+- **`gometa.ChainModule`** records the one `R_AARCH64_ABS64` relocation into
+  `moduledata.next` (offset 584) that joins a module to the chain.
+
+Also fixed, deliberately and with its own test: **the first function of every goc
+module was nameless.** `internal/gometa` laid the first name at offset 0 of
+`.goc.go.funcnames`, and `runtime.moduledata.funcName` reads a name offset of 0 as
+the empty string, so the function at text offset 0 of any module had no name in
+any traceback, `runtime.Caller` or `runtime.FuncForPC` result. Upstream reserves
+the slot; so does cg12 now. One byte.
+
+### How it is verified
+
+Per §15's rule that a green matrix is weak evidence, the demonstration is an
+end-to-end two-module image, not a suite result. `cmd/goc`'s
+`TestGoImageCarriesASecondModule` links a real goc-compiled program with a second
+Go module built by `internal/permodule` — an ordinary relocatable object whose
+data lands 4.1 MB from where it was compiled — and runs it:
+
+- `reflect` reads the second module's type name and kind through its own
+  `NameOff`;
+- `reflect.PointerTo` on the second module's `int` comes back as the **program
+  module's** `*int`, because `PtrToThis` is a `TypeOff` answered from the
+  `typemap` `typelinksinit` built — one Go type, one identity, two modules;
+- `runtime.FuncForPC` names the second module's function at text offset 0;
+- `runtime.Callers` walks a frame only the second module's pcsp table describes;
+- a GC stack scan over that frame is the **only** thing retaining its payload:
+  `GODEBUG=cg12scanroots=1` filtered for the payload shows exactly one retaining
+  (frame, slot) pair, `_goc_probe_hold local slot 0`, in both GC cycles.
+
+The last two are what the spike explicitly could not verify: its second module's
+function was a leaf, so the pcsp and stack-map halves of a second module's
+pclntab were generated but never exercised. They are exercised now.
+
+Three controls each fail, so no part of the mechanism is decorative: one flat
+type region spanning both objects (`nameOff out of range`), a shared text-end
+symbol (`minpc or maxpc invalid`, caught by `moduledataverify1`), and no
+`typelinks` (`ptr-identity: different` — the same Go type with two identities).
+
+### What is not done
+
+- **The driver is not split.** There is no `goc build-runtime`, and no goc program
+  has been compiled against a prebuilt runtime object. That is the next piece and
+  it depends on this one.
+- **Type and name symbols are still module-local** (`Linkage.Export` unset), so a
+  program object cannot yet point at a prebuilt runtime's descriptors by pointer
+  and must duplicate them. Pointers cross modules freely — only NameOff/TypeOff
+  must stay within one — so exporting them is what will let the program reference
+  the runtime's `type:int` directly. It only matters once the driver is split.
+- **`abi.Type.Hash` is zero for every cg12 type.** `typelinksinit` buckets its
+  candidate list by it, so with two large modules the match becomes a linear scan
+  over the first module's whole typelinks list per entry. Correctness is
+  unaffected — `typesEqual` is the actual test — but a real runtime split should
+  give descriptors a content-derived hash first. (It would also spread
+  `runtime.itabTable`, which buckets on the same field.)
+
+## 15. What Phase 1 established about method
 
 Recorded because the same mistakes are cheap to repeat.
 

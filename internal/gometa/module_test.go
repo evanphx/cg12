@@ -241,3 +241,9 @@ func TestChainModuleWritesTheNextField(t *testing.T) {
 	assert.Error(t, ChainModule(object, "missing", "second", obj.R_AARCH64_ABS64))
 	assert.Error(t, ChainModule(object, "first", "missing", obj.R_AARCH64_ABS64))
 }
+
+// DefaultModuleDataSymbol is spelled out so it can be a constant. This keeps it
+// honest against the name the frontend actually emits.
+func TestDefaultModuleDataSymbolMatchesTheRuntimeName(t *testing.T) {
+	assert.Equal(t, ir.LinkerSymbol("runtime.firstmoduledata"), DefaultModuleDataSymbol)
+}

@@ -34,8 +34,10 @@ const (
 const DefaultTextEndSymbol = "runtime_gocTextEnd"
 
 // DefaultModuleDataSymbol is the linker name of the runtime's own moduledata
-// record, the head of the module chain.
-var DefaultModuleDataSymbol = ir.LinkerSymbol("runtime.firstmoduledata")
+// record, the head of the module chain. It is ir.LinkerSymbol applied to
+// runtime.firstmoduledata, spelled out so it stays a constant;
+// TestDefaultModuleDataSymbolMatchesTheRuntimeName keeps the two in step.
+const DefaultModuleDataSymbol = "runtime_firstmoduledata"
 
 // TextEndSymbol is the text-end symbol of the module whose moduledata record is
 // named dataSymbol.
