@@ -33,7 +33,7 @@ type frameLayout struct {
 // record begins at x29, followed by callee saves, spills, allocas, and the
 // variadic save area. Keeping outgoing arguments below the frame record lets SP
 // remain stable across calls without allowing a stack argument to overwrite LR.
-func computeFrame(f *ir.Func, alloc *allocation) frameLayout {
+func computeFrame(f *ir.Func, alloc *allocation, conventions calleeConventions) frameLayout {
 	lay := frameLayout{allocOff: map[*ir.Instr]int{}}
 
 	used := map[Reg]bool{}
@@ -73,7 +73,7 @@ func computeFrame(f *ir.Func, alloc *allocation) frameLayout {
 	}
 
 	if f.UsesManagedFrame() {
-		lay.outgoing = maxOutgoingCallSize(f)
+		lay.outgoing = maxOutgoingCallSize(f, conventions)
 	}
 	off := 16 + 8*len(lay.calleeSaved) // x29/x30 occupy [0,16)
 	lay.spillBase = off

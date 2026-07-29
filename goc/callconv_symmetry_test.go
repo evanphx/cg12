@@ -23,19 +23,20 @@ import (
 //     CallConvPlatform functions, and those call instructions carry no explicit
 //     convention at all.
 //
-// The second property is what makes arm64's resolution rule -- take the call's
-// convention when set, otherwise inherit the *enclosing function's*
-// (callUsesGoInternal in arm64/lower.go) -- unsafe to copy. Under that rule the
-// unmarked call inside a wrapper inherits ABIInternal and is lowered against a
-// callee that is plain platform ABI.
+// The second property is what made arm64's original resolution rule -- take the
+// call's convention when set, otherwise inherit the *enclosing function's* --
+// unsafe. Under that rule the unmarked call inside a wrapper inherited
+// ABIInternal and was lowered against a callee that is plain platform ABI.
 //
-// arm64 gets away with it: both of its conventions assign integer arguments
-// starting at X0 (its assigner computes Reg(int(X0) + ngrn) for either), so for
-// a small argument count the two lowerings pick the same registers and the
-// mismatch is invisible. amd64 has no such overlap -- System V begins at RDI,
-// ABIInternal at RAX -- so the same rule would miscompile the first method value
-// it met. B0 therefore specifies resolution from the *callee*, not the enclosing
-// function; see calleeConventions in amd64/convention.go.
+// arm64 hid it for a long time: both of its conventions assign integer arguments
+// starting at X0, so for a small argument count the two lowerings pick the same
+// registers and the mismatch is invisible. It was reproduced at nine integer
+// arguments, where AAPCS64 puts the ninth on the stack and ABIInternal puts it in
+// x8. amd64 has no overlap at all -- System V begins at RDI, ABIInternal at RAX
+// -- so the same rule would have miscompiled the first method value it met.
+//
+// Both backends now resolve from the *callee*: see calleeConventions in
+// amd64/convention.go and arm64/convention.go, which carry the identical rule.
 func TestGoInternalFunctionsMakeUnmarkedPlatformCalls(t *testing.T) {
 	const src = `package main
 

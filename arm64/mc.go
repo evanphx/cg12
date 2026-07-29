@@ -180,6 +180,13 @@ func compileToObjectWithBundle(m *ir.Module, opts Options, bundle assemblyBundle
 	functions := make([]*ir.Func, 0, len(m.Funcs)+len(bundle.lowered))
 	functions = append(functions, m.Funcs...)
 	functions = append(functions, bundle.lowered...)
+	// Every call is lowered and emitted against its *callee's* convention, so the
+	// index of what this object defines is built once, before the first function
+	// is touched, and handed to both the lowering and the emitter. Building it per
+	// function would be quadratic, and letting the two passes each decide would
+	// let them disagree about a single call -- a worse failure than getting the
+	// convention wrong, because half the sequence would use each ABI.
+	conventions := newCalleeConventions(functions)
 	// Annotate managed functions with their stack pointer-word maps first. This is
 	// a pure IR-to-IR pass -- it reads only frontend IR and writes
 	// f.StackPointerWords, with no dependency on code emission or on anything the
@@ -195,14 +202,14 @@ func compileToObjectWithBundle(m *ir.Module, opts Options, bundle assemblyBundle
 		params := dwarfParams(f)
 		paramTemps := paramTempIDs(f)
 		ir.LowerPointers(f, ptrCls)
-		if err := lower(f, opts.TLSModel); err != nil {
+		if err := lower(f, conventions, opts.TLSModel); err != nil {
 			return nil, fmt.Errorf("function %s: %w", f.Name, err)
 		}
 		alloc, err := regAlloc(f)
 		if err != nil {
 			return nil, fmt.Errorf("function %s: %w", f.Name, err)
 		}
-		mc, err := emitMachine(f, alloc, opts.GC, opts.TLSModel)
+		mc, err := emitMachine(f, alloc, conventions, opts.GC, opts.TLSModel)
 		if err != nil {
 			return nil, fmt.Errorf("function %s: %w", f.Name, err)
 		}
@@ -810,13 +817,18 @@ type safepoint struct {
 
 // mc emits AArch64 machine code for one function.
 type mc struct {
-	f        *ir.Func
-	alloc    *allocation
-	gc       GCStrategy
-	tlsModel TLSModel
-	prog     *a64.Program
-	relocs   []obj.Reloc
-	allocTmp map[uint32]int // fixed stack allocation temporary -> frame offset
+	f *ir.Func
+	// conventions is the object-wide callee-convention index. The emitter must
+	// resolve a call's ABI exactly as the lowering did -- the stack-argument
+	// offsets, the stack link, and whether SP moves around the call all depend on
+	// it -- so both read the same map rather than each deciding for itself.
+	conventions calleeConventions
+	alloc       *allocation
+	gc          GCStrategy
+	tlsModel    TLSModel
+	prog        *a64.Program
+	relocs      []obj.Reloc
+	allocTmp    map[uint32]int // fixed stack allocation temporary -> frame offset
 	// stackAllocTmp includes pointer-bearing allocas as well as ordinary fixed
 	// allocas. It is used to turn a live alloca address into the pointer words
 	// contained by that alloca at each GC safepoint.
@@ -931,10 +943,10 @@ func goRegisterPointerMask(function *ir.Func) uint16 {
 	return mask
 }
 
-func newEmitter(f *ir.Func, alloc *allocation, gc GCStrategy, tlsModel TLSModel) *mc {
-	frameLayout := computeFrame(f, alloc)
+func newEmitter(f *ir.Func, alloc *allocation, conventions calleeConventions, gc GCStrategy, tlsModel TLSModel) *mc {
+	frameLayout := computeFrame(f, alloc, conventions)
 	m := &mc{
-		f: f, alloc: alloc, gc: gc, tlsModel: tlsModel,
+		f: f, conventions: conventions, alloc: alloc, gc: gc, tlsModel: tlsModel,
 		prog: a64.NewProgram(), instrPC: map[*ir.Instr]uint64{},
 		frameLayout:   frameLayout,
 		allocTmp:      make(map[uint32]int),
@@ -974,10 +986,10 @@ func (m *mc) emitBody() error {
 	return m.err
 }
 
-func emitMachine(f *ir.Func, alloc *allocation, gc GCStrategy, tlsModel TLSModel) (*machineCode, error) {
+func emitMachine(f *ir.Func, alloc *allocation, conventions calleeConventions, gc GCStrategy, tlsModel TLSModel) (*machineCode, error) {
 	// Pass 1: tbz disabled (refTermPC nil), to measure real block/terminator
 	// offsets. See the refBlockPC/refTermPC comment for why these are an upper bound.
-	m1 := newEmitter(f, alloc, gc, tlsModel)
+	m1 := newEmitter(f, alloc, conventions, gc, tlsModel)
 	m1.gotTermPC = map[*ir.Block]int{}
 	if err := m1.emitBody(); err != nil {
 		return nil, err
@@ -990,7 +1002,7 @@ func emitMachine(f *ir.Func, alloc *allocation, gc GCStrategy, tlsModel TLSModel
 	}
 
 	// Pass 2: tbz enabled, each fusion decided from the pass-1 distance.
-	m := newEmitter(f, alloc, gc, tlsModel)
+	m := newEmitter(f, alloc, conventions, gc, tlsModel)
 	m.refBlockPC, m.refTermPC = blockPC, m1.gotTermPC
 	if err := m.emitBody(); err != nil {
 		return nil, err
@@ -1002,7 +1014,7 @@ func emitMachine(f *ir.Func, alloc *allocation, gc GCStrategy, tlsModel TLSModel
 		}
 		// A fused tbz slipped out of range despite the upper-bound argument (should
 		// not happen). Re-emit with tbz disabled -- correctness over the fusion.
-		m = newEmitter(f, alloc, gc, tlsModel)
+		m = newEmitter(f, alloc, conventions, gc, tlsModel)
 		if err := m.emitBody(); err != nil {
 			return nil, err
 		}
@@ -2635,7 +2647,7 @@ func (m *mc) callSequence(b *ir.Block, i int) int {
 		i++
 	}
 	call := &b.Instrs[i]
-	goInternal := callUsesGoInternal(m.f, call)
+	goInternal := m.conventions.goInternalCall(m.f, call)
 	m.instrPC[call] = uint64(m.prog.Len() * 4)
 	m.recordLoc(call.Pos) // the OArg run carries no position; the call does
 	m.recordInline(call.Inl)
