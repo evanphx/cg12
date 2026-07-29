@@ -269,6 +269,7 @@ func compile(name string, src []byte, options compileOptions) (*ir.Module, error
 		runtimeAllocation:       compileRuntime,
 		typeTags:                typeTags,
 		functionDescriptors:     make(map[string]string),
+		literalData:             make(map[string]string),
 		runtimeTypes:            runtimeTypes,
 		goABITypes:              goABITypes,
 		linkNames:               linkNames,
@@ -1389,7 +1390,11 @@ type gen struct {
 	// functionDescriptors dedupes static function descriptors by the symbol
 	// they point at, which is also what names them. Shared with derived
 	// generators, since derive copies the struct and so the map header.
-	functionDescriptors         map[string]string
+	functionDescriptors map[string]string
+	// literalData interns byte-valued data symbols by their contents, so a
+	// literal appearing twice is emitted once and is named the same way in
+	// every module that contains it.
+	literalData                 map[string]string
 	runtimeTypes                map[string]types.Type
 	goABITypes                  map[string]*ir.AggType
 	linkNames                   map[*types.Func]string
@@ -11265,12 +11270,7 @@ func (g *gen) stringSlice(expression ast.Expr, targetType types.Type) ir.Ref {
 			if len(values) == 0 {
 				values = append(values, 0)
 			}
-			name := fmt.Sprintf(".goc.bytes.%d", len(g.mod.Data))
-			g.mod.Data = append(g.mod.Data, &ir.Data{
-				Name:  name,
-				Align: 1,
-				Items: []ir.DataItem{{Sub: ir.SubUB, Ints: values}},
-			})
+			name := g.literalDataSymbol(".goc.bytes", 1, values)
 			length := g.fn.Long(int64(len(contents)))
 			return g.sliceDescriptor(g.fn.Sym(name, 0), length, length)
 		}
@@ -11447,12 +11447,7 @@ func (g *gen) stringConstant(contents string) ir.Ref {
 	for i, value := range bytes {
 		values[i] = int64(value)
 	}
-	name := fmt.Sprintf(".goc.string.%d", len(g.mod.Data))
-	g.mod.Data = append(g.mod.Data, &ir.Data{
-		Name:  name,
-		Align: 1,
-		Items: []ir.DataItem{{Sub: ir.SubUB, Ints: values}},
-	})
+	name := g.literalDataSymbol(".goc.string", 1, values)
 	descriptor := g.localAlloc(8, 16)
 	g.markStackPointerWord(descriptor, 0)
 	g.cur.Store(g.fn.Sym(name, 0), descriptor)
@@ -13036,12 +13031,7 @@ func (g *gen) cString(contents string) ir.Ref {
 	for i, value := range bytes {
 		values[i] = int64(value)
 	}
-	name := fmt.Sprintf(".goc.cstring.%d", len(g.mod.Data))
-	g.mod.Data = append(g.mod.Data, &ir.Data{
-		Name:  name,
-		Align: 1,
-		Items: []ir.DataItem{{Sub: ir.SubUB, Ints: values}},
-	})
+	name := g.literalDataSymbol(".goc.cstring", 1, values)
 	return g.fn.Sym(name, 0)
 }
 
@@ -14022,6 +14012,26 @@ func OutputName(name string) string {
 // original key is appended: the readable part is for humans reading a
 // disassembly, the digest is what actually distinguishes the symbols.
 func runtimeTypeSymbolName(key string) string {
+	return contentSymbolName(".goc.type", key)
+}
+
+// contentSymbolName builds a symbol name from what the symbol contains rather
+// than from how many symbols came before it.
+//
+// A name derived from a running count encodes the order the module was built
+// in. That made the compiler non-deterministic until the traversals were
+// ordered, and it leaves the property conditional: any new unordered walk
+// reintroduces it. More importantly, a counter cannot survive separate
+// compilation, where a prebuilt runtime and a program each start counting at
+// zero and collide, and where adding one datum to the program renumbers every
+// symbol in the runtime.
+//
+// The key is arbitrary text -- a Go type string, a string literal, a symbol --
+// so it carries characters a symbol name cannot. Sanitizing alone would
+// collide, since "[]int" and "[ ]int" sanitize alike, so a digest of the
+// original key decides identity and the readable prefix is only there for
+// whoever is reading a disassembly.
+func contentSymbolName(prefix, key string) string {
 	var readable strings.Builder
 	for _, r := range key {
 		switch {
@@ -14037,7 +14047,34 @@ func runtimeTypeSymbolName(key string) string {
 	}
 	digest := sha256.Sum256([]byte(key))
 	if trimmed == "" {
-		return fmt.Sprintf(".goc.type.%x", digest[:8])
+		return fmt.Sprintf("%s.%x", prefix, digest[:8])
 	}
-	return fmt.Sprintf(".goc.type.%s.%x", trimmed, digest[:8])
+	return fmt.Sprintf("%s.%s.%x", prefix, trimmed, digest[:8])
+}
+
+// literalDataSymbol interns a byte-valued data symbol under a name derived from
+// its contents.
+//
+// Naming these by a running count of the module's data made the name depend on
+// how much had been emitted first, which is why the same literal was called
+// .goc.string.412 in one build and .goc.string.418 in the next. Interning also
+// means a literal that appears twice is emitted once, which the counter form
+// could not do.
+func (g *gen) literalDataSymbol(prefix string, align int, values []int64) string {
+	contents := make([]byte, len(values))
+	for index, value := range values {
+		contents[index] = byte(value)
+	}
+	key := prefix + ":" + string(contents)
+	if name := g.literalData[key]; name != "" {
+		return name
+	}
+	name := contentSymbolName(prefix, string(contents))
+	g.literalData[key] = name
+	g.mod.Data = append(g.mod.Data, &ir.Data{
+		Name:  name,
+		Align: align,
+		Items: []ir.DataItem{{Sub: ir.SubUB, Ints: values}},
+	})
+	return name
 }
