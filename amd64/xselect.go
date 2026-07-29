@@ -460,6 +460,17 @@ func (s *xsel) shift(in *ir.Instr) {
 func (s *xsel) cmpFlags(in *ir.Instr) {
 	argW := s.f.ClassOf(in.Arg(0)) == ir.ClsL
 	ra := s.gpValue(in.Arg(0), gpScratch0)
+	// A constant second operand becomes CMP's own immediate field (see imm.go for
+	// when it fits). The fold lives here, rather than in the selectImm family that
+	// owns the rest of the immediate forms, because this is the one place both
+	// kinds of compare pass through: a compare feeding its block's branch is
+	// emitted flags-only from mc.block and never reaches selectInt at all.
+	if c := intConstAMD(s.f, in.Arg(1)); c != nil {
+		if imm, ok := immFitsALU(c.Int, argW); ok {
+			s.b.cmpImmGP(argW, ra, imm)
+			return
+		}
+	}
 	if lb := s.b.refLoc(in.Arg(1)); lb.kind == locMem {
 		s.b.cmpGPMem(argW, ra, lb.base, lb.off)
 		return

@@ -133,11 +133,17 @@ func requireTLSTyped(t *testing.T, o *obj.Object, sym string) {
 // amd64 caller gets today, and Options.TLSModel defaults to it, so the one
 // regression this work could cause is a changed local-exec sequence -- which would
 // not fail any test that only checked for "a TPOFF32 relocation somewhere". The
-// two accesses show as two `mov %fs:0` + `add $imm32` pairs at 0x04 and 0x20, with
-// the relocated immediates at 0x10 and 0x2c.
+// two accesses show as two `mov %fs:0` + `add $imm32` pairs at 0x04 and 0x1a, with
+// the relocated immediates at 0x10 and 0x26.
+//
+// The `+ 1` between them was `mov $1,%r11d; add %r11d,%esi` when this constant was
+// first captured, and is now the one-instruction `add $1,%esi`: immediate folding
+// (imm.go) reached it. Both TLS sequences themselves are byte-identical to the
+// capture, which is what this constant is here to protect; only the arithmetic
+// around them got shorter, which moved the second relocation from 0x2c to 0x26.
 const localExecBump = "554889e5" + // push %rbp; mov %rsp,%rbp
 	"644c8b1c2500000000" + "4981c300000000" + // mov %fs:0,%r11; add $tpoff,%r11
-	"418b33" + "41bb01000000" + "4401de" + // mov (%r11),%esi; mov $1,%r11d; add %r11d,%esi
+	"418b33" + "83c601" + // mov (%r11),%esi; add $1,%esi
 	"644c8b1c2500000000" + "4981c300000000" + // mov %fs:0,%r11; add $tpoff,%r11
 	"418933" + "89f0" + // mov %esi,(%r11); mov %esi,%eax
 	"4889ec5dc3" // mov %rbp,%rsp; pop %rbp; ret
@@ -162,7 +168,7 @@ func TestTLSLocalExecUnchanged(t *testing.T) {
 		require.Zero(t, r.Addend, "local-exec patches an immediate in place, so no PC correction")
 	}
 	require.Equal(t, uint64(0x10), relocs[0].Offset)
-	require.Equal(t, uint64(0x2c), relocs[1].Offset)
+	require.Equal(t, uint64(0x26), relocs[1].Offset)
 	requireTLSTyped(t, o, "tls_counter")
 }
 

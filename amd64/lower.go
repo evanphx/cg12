@@ -21,7 +21,7 @@ func lower(f *ir.Func) error {
 	}
 	lowerpass.JumpTables(f) // dense switches -> indexed branch (JmpTable)
 	lowerpass.Switches(f)   // remaining multiway branches -> conditional branches
-	lowerpass.Selects(f)    // conditional selects -> control-flow diamonds (no cmov path)
+	lowerSelects(f)         // conditional selects -> CMOVcc, or diamonds where there is none
 	lowerpass.HoistAllocas(f)
 	foldAddressing(f) // array/alloca address computations -> [base+index*scale+disp]
 	lowerpass.SplitCriticalEdges(f)
