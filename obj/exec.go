@@ -187,12 +187,20 @@ func resolveRelocs(machine uint16, sec []byte, secVaddr uint64, relocs []Reloc, 
 	return nil
 }
 
-// resolveAArch64 applies one AArch64 relocation: absolute (ABS64), PC-relative
-// branch (CALL26/JUMP26), or symbol-address (ADRP page + ADD low-12).
+// resolveAArch64 applies one AArch64 relocation: absolute (ABS64/ABS32),
+// PC-relative branch (CALL26/JUMP26), or symbol-address (ADRP page + ADD low-12).
 func resolveAArch64(sec []byte, r Reloc, target, place int64) error {
 	switch r.Type {
 	case R_AARCH64_ABS64:
 		binary.LittleEndian.PutUint64(sec[r.Offset:], uint64(target))
+	case R_AARCH64_ABS32:
+		// A 32-bit absolute address. The image is a fixed-base ET_EXEC below 4 GiB,
+		// so the truncation is exact; goc emits thousands of these into the Go
+		// metadata tables, and without this case a static link of goc output fails.
+		if target < 0 || target > math.MaxUint32 {
+			return fmt.Errorf("obj: address of %q does not fit in 32 bits (%#x)", r.Sym, target)
+		}
+		binary.LittleEndian.PutUint32(sec[r.Offset:], uint32(target))
 	case R_AARCH64_CALL26, R_AARCH64_JUMP26:
 		disp := target - place
 		if disp%4 != 0 || disp < -(1<<27) || disp >= (1<<27) {
