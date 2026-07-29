@@ -431,3 +431,62 @@ whole-program metadata has to move — every program still builds its own. It do
 first compile after a compiler change, which is the case the task says matters, so it is a
 worse fit for this specific problem; it is a better fit if step 3 turns out to be too
 expensive.
+
+---
+
+## 7. A confirmed miscompile found by this spike (not a spike deliverable)
+
+Looking for name collisions — because separate compilation depends on names meaning one thing
+— turned up one that is already live.
+
+**Three distinct functions share one symbol name, and the ELF writer keeps only the last.**
+
+`goc/compile.go:10510` names a function literal `<package>.func.<line>.<column>`, falling back
+to `<enclosing symbol>.func.<line>.<column>` only when `g.functionName != ""`. That is set from
+`functionDecl.symbol`, which `goc/reach.go` assigns **only for generic instantiations**
+(lines 415, 760, 777). Every closure inside an ordinary function is therefore named by package,
+line and column alone.
+
+`crypto/internal/fips140/nistec` is generated code: `p224.go`, `p384.go` and `p521.go` are the
+same file with the curve name substituted. So all three of their
+`<curve>GeneratorTableOnce.Do(func(){…})` literals sit at line 393, column 28, and all three of
+their `<curve>BOnce.Do(func(){…})` literals at line 114, column 16.
+
+Measured on `goc/testdata/stdlib_crypto_ecdsa.go` (`seplink -mode=dupsyms`):
+
+```
+crypto_internal_fips140_nistec_func_114_16   3 definitions, 3 distinct sizes [552 792 1000],
+                                             3 distinct bodies, 7 relocations name it
+crypto_internal_fips140_nistec_func_393_28   3 definitions, 1 distinct size [948],
+                                             3 distinct bodies, 7 relocations name it
+```
+
+`obj.prepareELF` builds `symIndex[s.Name] = i` (`obj/elf.go:398`), so a name with three
+definitions resolves every reference to whichever was written last. Two of the three generator
+tables are never built and stay nil.
+
+**Verified against the host toolchain** (`analysis/testdata/nistec_closure_name_collision.go`),
+per RUNTIME_PLAN §3 step 2. Host Go prints eight `true` lines. Under `goc`:
+
+```
+unexpected fault address 0x19c8
+fatal error: fault
+crypto_internal_fips140_nistec_p224Table_Select()   +0x290
+crypto_internal_fips140_nistec_P224Point_ScalarBaseMult()
+… crypto_ecdsa_GenerateKey() … main_exercise()
+```
+
+**Mechanism proven by a control.** Patching the naming site to include the file base name and
+nothing else, then rebuilding `goc`: `P224 verify: true` — the P-224 path now completes
+`GenerateKey`, `SignASN1` and `VerifyASN1`. The patch was reverted; this branch does not change
+compiler behaviour.
+
+The matrix cannot see this. `stdlib_crypto_ecdsa.go` uses only P-256, which takes the assembly
+path in `p256_asm.go` and never reaches the colliding closures.
+
+**Second, distinct failure exposed by the same reducer, not explained here.** With the naming
+collision patched out, the program then dies at
+`crypto/elliptic.nistPoint.SetBytes` with `cg12: interface dispatch failed for dynamic type
+0x0`, reached from `elliptic.Curve.IsOnCurve`. That is a separate defect of the §5.6 generic
+method-dispatch family and was not investigated. It is recorded so the reducer is not mistaken
+for a one-bug program.

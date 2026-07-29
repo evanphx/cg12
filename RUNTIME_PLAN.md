@@ -1562,6 +1562,30 @@ the reports of the jobs that found them.
 
 #### Known miscompiles, not covered by any capability
 
+- **Two closures in one package at the same line and column get one symbol, and
+  the last one wins.** `goc/compile.go:10510` names a function literal
+  `<package>.func.<line>.<column>`, using the enclosing function's symbol only
+  when `g.functionName != ""` — and `goc/reach.go` sets `functionDecl.symbol`
+  only for generic instantiations (lines 415, 760, 777), so every closure inside
+  an ordinary function is named by package, line and column alone.
+  `crypto/internal/fips140/nistec` is generated code, so `p224.go`, `p384.go` and
+  `p521.go` each hold a `<curve>GeneratorTableOnce.Do(func(){…})` at line 393
+  column 28 and a `<curve>BOnce.Do(func(){…})` at line 114 column 16. Each name
+  therefore has three distinct definitions and seven relocations, and
+  `obj.prepareELF`'s `symIndex[s.Name] = i` (`obj/elf.go:398`) resolves them all
+  to whichever was written last. Two of the three generator tables are never
+  built and stay nil.
+  `analysis/testdata/nistec_closure_name_collision.go` reduces it: the host
+  toolchain signs and verifies over all four NIST curves, `goc` faults at a small
+  address inside `nistec.p224Table.Select` on the first one. Disambiguating the
+  name by file makes the P-224 path complete, which proves the mechanism; the
+  reducer then hits a second, unrelated §5.6-family interface-dispatch failure in
+  `crypto/elliptic.nistPoint.SetBytes`, which is not diagnosed. Found by the
+  separate-compilation spike (2026-07-29) while auditing symbol naming; not
+  fixed, because the fix renames symbols throughout and needs its own validation.
+  The matrix cannot see it: `stdlib_crypto_ecdsa.go` uses only P-256, whose
+  assembly path in `p256_asm.go` never reaches the colliding closures.
+
 - **`for x.f = range s` silently drops the key assignment.** A range key that is
   not a plain identifier — a struct field, an index expression — is discarded, so
   the assignment never happens. This is the same class as the per-iteration bug

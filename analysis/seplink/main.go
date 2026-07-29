@@ -18,6 +18,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"sort"
 
 	"github.com/evanphx/cg12/arm64"
 	"github.com/evanphx/cg12/goc"
@@ -52,6 +53,8 @@ func main() {
 		check(linkSplit(objectBytes))
 	case "pins":
 		check(reportPins(objectBytes))
+	case "dupsyms":
+		check(reportDuplicateSymbols(objectBytes))
 	default:
 		check(fmt.Errorf("unknown mode %q", *mode))
 	}
@@ -200,6 +203,64 @@ func linkSplit(objectBytes []byte) error {
 	fmt.Println("seplink: split-and-relinked .text is byte-identical to the control")
 	if len(merged.Relocs) != len(controlMerged.Relocs) {
 		fmt.Printf("seplink: but the leftover relocation counts differ: %d vs %d\n", len(merged.Relocs), len(controlMerged.Relocs))
+	}
+	return nil
+}
+
+// reportDuplicateSymbols finds names that more than one definition in the same
+// object claims. An ELF relocation names its target, and obj's writer maps a name
+// to exactly one symbol-table index, so a name with two definitions silently
+// resolves every reference to whichever one was written last.
+func reportDuplicateSymbols(objectBytes []byte) error {
+	whole, err := obj.ReadELF(objectBytes)
+	if err != nil {
+		return err
+	}
+	byName := map[string][]obj.Sym{}
+	for _, s := range whole.Syms {
+		byName[s.Name] = append(byName[s.Name], s)
+	}
+	references := map[string]int{}
+	for _, list := range [][]obj.Reloc{whole.Relocs, whole.DataRelocs, whole.RodataRelocs, whole.RelroRelocs} {
+		for _, r := range list {
+			references[r.Sym]++
+		}
+	}
+	names := make([]string, 0, len(byName))
+	for name, list := range byName {
+		if len(list) > 1 {
+			names = append(names, name)
+		}
+	}
+	sort.Strings(names)
+	fmt.Printf("seplink: %d defined symbols, %d names with more than one definition\n", len(whole.Syms), len(names))
+	for _, name := range names {
+		list := byName[name]
+		sizes := map[uint64]bool{}
+		bodies := map[string]bool{}
+		for _, s := range list {
+			sizes[s.Size] = true
+			body := sectionOf(whole, s.Section)
+			if body != nil && s.Size > 0 && s.Value+s.Size <= uint64(len(body)) {
+				bodies[fmt.Sprintf("%x", body[s.Value:s.Value+s.Size])] = true
+			}
+		}
+		fmt.Printf("  %-64s %d definitions, %d distinct sizes %v, %d distinct bodies, %d relocations name it\n",
+			name, len(list), len(sizes), sizes, len(bodies), references[name])
+	}
+	return nil
+}
+
+func sectionOf(o *obj.Object, kind obj.SecKind) []byte {
+	switch kind {
+	case obj.SecText:
+		return o.Text
+	case obj.SecData:
+		return o.Data
+	case obj.SecRodata:
+		return o.Rodata
+	case obj.SecRelro:
+		return o.Relro
 	}
 	return nil
 }
