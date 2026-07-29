@@ -37,9 +37,19 @@ func buildTwoModuleImage(t *testing.T, options permodule.ImageOptions) string {
 		t.Skip("cc is required to assemble the Go runtime's Plan 9 sidecar")
 	}
 	options.SourcePath = permoduleProbe
-	options.Report = func(line string) { t.Log("permodule:", line) }
+	var reported []string
+	options.Report = func(line string) {
+		t.Log("permodule:", line)
+		reported = append(reported, line)
+	}
 	image, err := permodule.BuildImage(options)
 	require.NoError(t, err)
+
+	// moduledata.hasmain, read out of the linked image. runtime.modulesinit uses
+	// it to put the module defining main at the head of activeModules, which is
+	// the order runtime.typelinksinit resolves duplicate descriptors in. gometa
+	// used to zero the record's whole tail, so both modules would have claimed 0.
+	assert.Contains(t, reported, "hasmain: program module 1, second module 0")
 
 	path := filepath.Join(t.TempDir(), "two-module")
 	require.NoError(t, os.WriteFile(path, image, 0o755))

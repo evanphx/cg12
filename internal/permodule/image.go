@@ -132,7 +132,7 @@ func BuildImage(options ImageOptions) ([]byte, error) {
 	if err := reportShift(report, merged, secondIndex); err != nil {
 		return nil, err
 	}
-	if err := wire(merged, options.Mode, secondIndex); err != nil {
+	if err := wire(merged, options.Mode, secondIndex, report); err != nil {
 		return nil, err
 	}
 	image, err := merged.WriteExecutable("_gocstart")
@@ -145,9 +145,10 @@ func BuildImage(options ImageOptions) ([]byte, error) {
 // moduledata field offsets the link step edits. Verified with unsafe.Offsetof
 // against the host toolchain rather than counted by eye.
 const (
-	moduledataMaxPC  = 168
-	moduledataEtext  = 184
-	moduledataEtypes = 304
+	moduledataMaxPC   = 168
+	moduledataEtext   = 184
+	moduledataEtypes  = 304
+	moduledataHasMain = 536
 )
 
 // wire performs the link-step edits, all of them ordinary R_AARCH64_ABS64 data
@@ -159,7 +160,7 @@ const (
 //     modules freely, and only NameOff/TypeOff must stay within one.
 //   - The second module is joined to the image by one write to
 //     runtime.firstmoduledata.next. That is the whole of the join.
-func wire(merged *obj.Object, mode Mode, secondIndex int) error {
+func wire(merged *obj.Object, mode Mode, secondIndex int, report func(string)) error {
 	for _, slot := range []struct{ program, foreign string }{
 		{"main_probeSlot", WidgetType},
 		{"main_probeIntSlot", IntType},
@@ -191,6 +192,10 @@ func wire(merged *obj.Object, mode Mode, secondIndex int) error {
 	if err != nil {
 		return err
 	}
+	report(fmt.Sprintf("hasmain: program module %d, second module %d",
+		merged.Data[firstModule.Value+moduledataHasMain],
+		merged.Data[secondModule.Value+moduledataHasMain]))
+
 	switch mode {
 	case ModePerModule:
 		return gometa.ChainModule(merged, firstModule.Name, secondModule.Name, obj.R_AARCH64_ABS64)

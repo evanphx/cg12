@@ -229,3 +229,68 @@ RUNTIME_PLAN §14 under "what is not done".
   it on `ccwork/typeoff-alternatives`; it was never carried to `perf/test-suite`. So there
   was no §5.10 entry to remove when the bug was fixed. The fix and its evidence are recorded
   in the new §14 instead.
+
+## Verification
+
+(being filled in as each suite lands)
+
+### Capability matrix
+
+Run as 10 shards of `TestARM64RuntimeCapabilityStatus`, one compile worker each so the
+concurrency matches this job's declared CPU share. (A first attempt with the default
+memory-aware worker count per shard put the box at load 278 and was killed; the numbers
+below are from the bounded rerun.)
+
+**Status at the time of writing:** 8 of 10 shards complete, all `rc=0`; 314 `PASS` and the
+one declared `EXPECTED FAILURE` (`defer-panic/panic-string-output`) recorded so far, no
+`FAIL` and no `KNOWN GAP`. The two outstanding shards are on the heaviest compiles
+(`stdlib-http/tls-client-server`, which RUNTIME_PLAN already records as the biggest program
+in the corpus). Final counts are appended below when they land.
+
+### Unit, driver and corpus suites
+
+`make test-unit`, `make test-goc-cmd` and `make test-goc-corpus` are queued to run on the
+final tree; results appended below.
+
+### Still unverified at the time of writing
+
+- The full matrix count (2 of 10 shards outstanding).
+- `make test-unit` / `test-goc-cmd` / `test-goc-corpus` on the final tree. The individual
+  packages I touched (`ir`, `internal/gometa`, `arm64`, `cmd/goc`) all pass, and the whole
+  unit bucket passed at the previous commit.
+- **A second module built by the driver.** There is no `goc build-runtime`; the second
+  module in every test here is built by `internal/permodule` rather than compiled from Go
+  source. So this shows a goc image *can* carry a second Go module correctly; it does not
+  show that goc *produces* one.
+- **The two modules' data is not both scanned as globals in anger.** The second module's
+  `[data, edata)` is its own region and its GC program is generated from its pointer words
+  (none — every pointer it holds is to static data), which is correct for what it holds, but
+  a program module with real globals in a second module has not been exercised.
+
+**Result (10/10 shards, all `rc=0`), at `f287003` — the implementation commit plus the plan
+update:**
+
+| outcome | count |
+| --- | ---: |
+| capability subtests | **338** |
+| `PASS` | **337** |
+| `EXPECTED FAILURE` | 1 |
+| `FAIL` | **0** |
+| `KNOWN GAP` | **0** |
+
+**The complete list of non-passing capabilities is one entry:**
+`defer-panic/panic-string-output` (`goc/testdata/runtime_panic_print_string.go`), which is
+declared `runtimeCapabilityExpectedFailure` in the matrix and fails as declared. It is
+unchanged from the state RUNTIME_PLAN §1 records.
+
+(The briefing says 342 capabilities; the matrix on this base holds 338, matching what
+RUNTIME_PLAN §1 records.)
+
+A second full matrix run is queued against the final tree, because one further commit
+(`60d9e14`, folding the text-end symbol's name into a single helper) landed after this run
+started. Its result is appended below.
+
+### `make test-unit` — **pass** (rc=0, no FAIL lines)
+
+Includes `internal/gometa` (the new `module_test.go`), `arm64` (the three new
+metadata-object tests), `ir`, `link`, `obj`, and the new `internal/permodule`.
