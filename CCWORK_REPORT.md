@@ -1,7 +1,7 @@
 # Making type-descriptor offsets survive separate compilation — design spike
 
 Branch: `ccwork/typeoff-alternatives`, based on `perf/test-suite` (`a8d8d51`).
-Status: **in progress — findings written as they land.**
+Status: **complete.** Recommendation, prototype and full verification below.
 
 ## Recommendation in one paragraph
 
@@ -354,7 +354,8 @@ typeoff: exit status 0
 ```
 
 Identical output at `-pad=0`, `-pad=8`, `-pad=4096` and `-pad=100001` (shift 4,397,856 /
-4,397,864 / 4,401,952 / 4,497,864 bytes). The offsets do not depend on where the module lands
+4,397,864 / 4,401,952 / 4,497,864 bytes), and again with `-functions` at `-pad=0/4096/100001`
+(shift 4,398,200 / 4,402,296 / 4,498,208). The offsets do not depend on where the module lands
 — which is the property the whole spike is about.
 
 Because `firstmoduledata.next` is non-nil, this run also exercises `moduledataverify` over two
@@ -387,6 +388,10 @@ correct, and only the offset-addressed fields are wrong. Two of them are wrong *
 `name` and `pkgpath` return garbage rather than throwing, because `md.types + off` happens to
 land inside the region. That is the failure mode option 1 would leave latent, and it is why
 "the matrix is green" would not be evidence here.
+
+`-mode=flat -functions` fails the same way and more loudly: `pkgpath` comes back as several
+kilobytes of the *program's* own data (the runtime's kind-name table, then the GODEBUG
+setting table), before the same `fatal error: runtime: name offset out of range`.
 
 ### A defect this spike turned up: the first function of every goc module is nameless
 
@@ -457,10 +462,18 @@ entirely.
 | --- | --- |
 | `go build ./...`, `go vet ./...` | **clean** |
 | `make test-unit` | **pass** |
-| `make test-goc-corpus` | pending |
+| `make test-goc-corpus` | 3 failures, **all pre-existing** — reproduced identically on the base commit `a8d8d51` in a clean worktree: `TestCompilePreservesSyncAtomicPointerWriteBarrierCalls` and `TestCompileEmptySelect` (both `unknown variable mallocNoScanTable` in `stdlib/src/runtime/malloc.go:1133`) and `TestDeriveClassifiesEveryGenField` |
 | `make test-goc-cmd` | **pass** |
-| capability matrix | pending |
+| capability matrix | **clean** — 8 shards, all `rc=0`; 338 capability subtests, 337 `PASS`, 0 `KNOWN GAP`, 1 `EXPECTED FAILURE` (see below) |
 | goc compilation determinism unchanged | **pass** — two separate processes produce byte-identical images (no compiler code was changed) |
+
+---
+
+### The one non-passing capability
+
+`defer-panic/panic-string-output` (`goc/testdata/runtime_panic_print_string.go`) is declared
+`runtimeCapabilityExpectedFailure` in the matrix and fails as declared. Nothing else in the
+338 is anything but `PASS`: there are zero `KNOWN GAP` entries, failing or otherwise.
 
 ---
 
