@@ -1,7 +1,7 @@
 # Per-module type regions: making a goc image carry more than one Go module
 
 Branch: `ccwork/permodule-impl`, based on `perf/test-suite` (`8b3b5ca`).
-Status: **in progress — findings are written here as they land.**
+Status: **implemented and verified; suite results appended as they land.**
 
 ## What this is
 
@@ -14,9 +14,23 @@ scope.
 Sections below are filled in as each piece is verified. Anything not verified is stated as
 such.
 
-## Verification status
+## Summary
 
-(filled in as it lands)
+A goc image can now carry more than one Go module, demonstrated end to end on real goc
+output. The three things that made a second module impossible — an image-wide text-end
+symbol, an image-wide moduledata name, and an empty `moduledata.typelinks` — are fixed;
+`hasmain` is written; and joining a module to the chain is one exported call. Each is
+covered by a test that fails without it, including three image-level controls that each
+reproduce the pre-change state and each fail at run time.
+
+Also fixed, with its own test: the first function of every goc module was nameless in every
+traceback.
+
+Not done, deliberately: exporting type and name symbols (task item 4), which only matters
+once the driver is split.
+
+The 338-capability matrix is green (337 `PASS`, the one declared `EXPECTED FAILURE`, no
+`FAIL`, no `KNOWN GAP`), and compilation determinism is unchanged at 4 of 5 sample programs.
 
 ## Determinism baseline, before any change (reproduced, not assumed)
 
@@ -294,3 +308,63 @@ started. Its result is appended below.
 
 Includes `internal/gometa` (the new `module_test.go`), `arm64` (the three new
 metadata-object tests), `ir`, `link`, `obj`, and the new `internal/permodule`.
+
+### `make test-goc-cmd` — **pass** (rc=0)
+
+Includes the new `cmd/goc/permodule_test.go`. Re-run separately on the final tree after the
+`hasmain` image-level assertion landed:
+
+```
+--- PASS: TestGoImageCarriesASecondModule (6.78s)
+--- PASS: TestSecondModuleOffsetsAreIndependentOfItsPlacement (25.09s)
+--- PASS: TestSecondModuleFrameIsTheOnlyGCRootOfItsPayload (6.21s)
+--- PASS: TestFlatTypeRegionFailsOnASecondModule (6.23s)
+--- PASS: TestSharedTextEndSymbolFailsOnASecondModule (7.42s)
+--- PASS: TestWithoutTypelinksTheSameGoTypeHasTwoIdentities (6.28s)
+```
+
+## Which test fails without which change
+
+| change | test that fails without it | how it fails |
+| --- | --- | --- |
+| per-module text-end symbol | `cmd/goc` `TestSharedTextEndSymbolFailsOnASecondModule` | `fatal error: minpc or maxpc invalid` from `moduledataverify1` |
+| | `internal/gometa` `TestTextEndSymbolIsPerModule` | maxpc/etext/functab-sentinel relocations name the wrong symbol |
+| per-module type region (the whole point) | `cmd/goc` `TestFlatTypeRegionFailsOnASecondModule` | `fatal error: runtime: name offset out of range` |
+| `moduledata.typelinks` | `cmd/goc` `TestWithoutTypelinksTheSameGoTypeHasTwoIdentities` | `reflect.PointerTo(foreign int) != reflect.TypeOf(&localInt)` |
+| | `internal/gometa` `TestModuledataTypelinksAreOffsetsFromTheModuleBase` | slice header and entries |
+| | `arm64` `TestGoModuleTypeLinksAreEmittedForMarkedDescriptors` | only marked descriptors are listed |
+| moduledata name a parameter | `internal/gometa` `TestModuledataIsEmittedUnderTheGivenName` | symbol emitted under the default name, or defined twice |
+| | `arm64` `TestGoModuleDataNameMustBeDeclared` | an undeclared moduledata is silently ignored |
+| | `arm64` `TestSecondGoModuleBoundsItselfWithoutASidecar` | second module has no text-end symbol of its own |
+| `hasmain` | `internal/gometa` `TestModuledataRecordsHasMain` | byte 536 |
+| | `cmd/goc` `buildTwoModuleImage` | `hasmain: program module 1, second module 0` read from the linked image |
+| chaining | `internal/gometa` `TestChainModuleWritesTheNextField` | relocation offset/target/type |
+| funcname sentinel | `internal/gometa` `TestFunctionNameTableReservesOffsetZero` | first name offset is 0 |
+| | `cmd/goc` `TestGoImageCarriesASecondModule` | `first-func:` comes back empty |
+| the second module is not a leaf | `cmd/goc` `TestSecondModuleFrameIsTheOnlyGCRootOfItsPayload` | no frame retains the payload |
+
+## Hazards checked while doing this, recorded so nobody re-checks them
+
+- **`typesEqual` on a descriptor with no package path does not crash.**
+  `runtime.typesEqual`'s interface and struct branches call `it.PkgPath.Name()`, and goc
+  writes a zero word there for a type with no package path. That is safe because
+  `abi.InterfaceType.PkgPath` and `abi.StructType.PkgPath` are `Name` *values*, not `*Name`
+  — a zero word is `Name{Bytes: nil}` and `Name.Name()` returns `""` for it. If those fields
+  were pointers this would be a nil dereference at startup on any two-module image.
+- **`typesEqual` reads past a bare 48-byte descriptor.** It switches on kind and reads the
+  kind-specific tail unconditionally, so goc's minimal descriptor family
+  (`goc/compile.go`'s `runtimeType`, which writes a kind byte, a zero `Str` and no tail)
+  must never reach `typelinks`. That is why `GoTypeLink` is set only in `ensureTypeTag` and
+  only when the runtime tables are on.
+- **`reflect.TypeOf` does not consult the typemap.** It reads the eface type word directly,
+  so it returns whichever module's descriptor the value carries. The canonicalisation shows
+  up on the `resolveTypeOff` paths — `PtrToThis`, method `Mtyp`, interface method `Typ` —
+  which is why the test asserts through `reflect.PointerTo` rather than `reflect.TypeOf`.
+- **`abi.Type.Hash` is 0 for every cg12 type**, so `typelinksinit`'s `typehash` bucketing
+  degenerates to one bucket. Correctness is unaffected (`typesEqual` is the real test); the
+  cost is a linear scan of the earlier module's typelinks per entry. Fine at this scale
+  (499 × 7 comparisons in the test); it should be fixed before the runtime split makes both
+  modules large. Recorded in RUNTIME_PLAN §14.
+- **The `go test -run` three-element gotcha** was avoided: every matrix run used `-v`, and
+  the 338 subtest lines and per-shard elapsed times (239–654 s) were checked rather than
+  trusting `ok`.
