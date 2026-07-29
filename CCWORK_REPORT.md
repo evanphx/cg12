@@ -334,8 +334,9 @@ timings for `hello.go` on this box (64-core arm64), taken with temporary instrum
 `goc/compile.go` and `arm64/mc.go` that has since been reverted:
 
 ```
-front end  1.93s   parse + type-check  0.489s   (already shared across compiles in a process
-                                                 by goc/source_world.go; ~0 for later ones)
+front end  1.93s   parse + type-check  0.489s   (cold; goc/source_world.go shares the runtime
+                                                 closure across compiles in a process, and a
+                                                 second compile's front end is 1.424s)
                    reachability        0.444s
                    package globals     0.063s
                    IR generation       0.767s   3694 functions
@@ -349,14 +350,19 @@ back end   2.70s   per-function lower + regalloc + emit   2.402s
 peak RSS). The box is slower than the one the task's 2.096s figure came from; the *shape* is
 the same and is what matters.
 
-**What a prebuilt runtime removes:** reachability (0.44s), IR generation (0.77s) and the
-per-function back end (2.40s) — 3.61s of 4.63s, 78% — minus whatever the ~9 program-specific
-functions cost, which is negligible. **What it cannot remove:** the metadata blob (0.21s,
-and it would grow with the superset), the finish passes (0.17s), globals (0.06s), and
-type-checking the user program.
+The parse+type-check line is already amortized within a process by `source_world.go`: two
+compiles of `hello.go` in one process take 1.907s and 1.424s of front end, so the *warm* cost
+is 4.06s, not 4.63s. That is the number a prebuilt runtime has to beat, since the matrix
+compiles in-process.
 
-So the achievable floor is roughly **0.5–1.0s per program instead of 4.6s**. Over the
-342-capability matrix that is ~26 minutes of compilation today against ~5 minutes plus one
+**What a prebuilt runtime removes:** reachability (0.44s), IR generation (0.77s) and the
+per-function back end (2.40s) — 3.61s of the warm 4.06s, **89%** — minus whatever the eleven
+program-specific functions cost, which is negligible. **What it cannot remove:** the metadata
+blob (0.21s, and it would grow with the superset), the finish passes (0.17s), globals (0.06s),
+and type-checking the user program.
+
+So the achievable floor is roughly **0.5–1.0s per program instead of 4.1s**. Over the
+342-capability matrix that is ~23 minutes of compilation today against ~5 minutes plus one
 runtime build, on this box. The ratio matches the task's estimate; the absolute numbers are
 larger because the box is.
 
