@@ -50,14 +50,16 @@ const (
 	moduledataEtypes    = 304
 )
 
-// Symbol names this module defines. The three that the link step has to reach
-// are exported; everything else stays local, so it cannot collide with the goc
-// object's own `.goc.runtime.datastart` and friends.
+// Symbol names this module defines. Only the ones the link step has to reach
+// are exported; everything else stays local, which is what lets the module
+// reuse goc's own `.goc.runtime.datastart` spelling in `-functions` mode --
+// link.merge namespaces every local symbol by its object, so the two bases
+// cannot collide.
 const (
-	probeDataStart  = ".goc.probe.datastart"
-	probeDataEnd    = ".goc.probe.dataend"
-	probeModuleData = ".goc.probe.moduledata"
 	probeWidgetType = ".goc.probe.type.Widget"
+	probeEntryFunc  = ".goc.probe.entry"
+	probeFillerFunc = ".goc.probe.filler"
+	probeEntryValue = ".goc.probe.entry.funcvalue"
 )
 
 // probeTextSymbol is a text symbol the probe module's method entries point at.
@@ -65,17 +67,72 @@ const (
 // method's Tfn through reflect but never calls it.
 const probeTextSymbol = "abort"
 
+// probeLayout names the symbols a built probe module defines, since two of them
+// differ between the two shapes the module can take.
+type probeLayout struct {
+	module     *ir.Module
+	dataStart  string
+	dataEnd    string
+	moduleData string
+	// withFunctions is set when the module carries real code and lets
+	// internal/gometa build its pclntab and moduledata, rather than carrying a
+	// hand-written function-less moduledata.
+	withFunctions bool
+}
+
 // buildProbeModule returns the IR for the second module.
 //
 // Runtime is set so the backend takes goc's data path: it keeps all-zero data
 // in .data rather than moving it to .bss (the type region has to be addressable
 // bytes), and it resolves the RelativeTo items after the whole module is laid
 // out, which is what lets a descriptor reference a symbol emitted after it.
-// The module defines no `runtime.firstmoduledata`, so no pclntab is generated
-// for it -- this module's moduledata is written out below as plain data.
-func buildProbeModule() *ir.Module {
-	module := ir.NewModule()
+//
+// With withFunctions false the module defines no functions, and its moduledata
+// is the hand-written record in probeModuleDataItems. With it true the module
+// defines a function and names its moduledata `runtime.firstmoduledata`, which
+// is what makes `arm64.finishGoModule` hand it to `internal/gometa` -- so the
+// module gets a real, generated pclntab of its own. That is the shape a
+// prebuilt-runtime split would actually produce.
+func buildProbeModule(withFunctions bool) probeLayout {
+	layout := probeLayout{
+		module:        ir.NewModule(),
+		dataStart:     ".goc.probe.datastart",
+		dataEnd:       ".goc.probe.dataend",
+		moduleData:    ".goc.probe.moduledata",
+		withFunctions: withFunctions,
+	}
+	if withFunctions {
+		// gometa looks these two up by their exact goc names, and emits the
+		// moduledata for the definition named `runtime.firstmoduledata`. All
+		// three are local symbols, so the linker namespaces them per object and
+		// the goc module's own copies are untouched.
+		layout.dataStart = ".goc.runtime.datastart"
+		layout.dataEnd = ".goc.runtime.dataend"
+		layout.moduleData = "runtime.firstmoduledata"
+	}
+	probeDataStart := layout.dataStart
+	module := layout.module
 	module.Runtime = true
+
+	if withFunctions {
+		// One real function, so internal/gometa builds this module a genuine
+		// pcHeader/funcnames/pctab/pclntable/functab and a moduledata that
+		// bounds this module's own text. It is exported so the link step can
+		// point the program at it, and it does nothing: the point is that the
+		// runtime can find it and name it through *this* module's tables.
+		// Two functions, not one. `runtime.moduledata.funcName` treats a name
+		// offset of 0 as the empty string, and internal/gometa lays the first
+		// function's name at offset 0 of `.goc.go.funcnames` with no leading
+		// sentinel byte -- so the first function of any goc module is nameless
+		// to the runtime (see the report's "a defect this spike turned up").
+		// The probe uses the second function so the prototype measures the
+		// module split rather than that bug.
+		filler := module.NewFunc(probeFillerFunc, ir.ClsW).Export()
+		filler.Entry().Ret(filler.Word(0))
+		function := module.NewFunc(probeEntryFunc, ir.ClsW).Export()
+		entry := function.Entry()
+		entry.Ret(function.Word(7))
+	}
 
 	// The module base. Every offset below is measured from here, and it is the
 	// first datum emitted, so its value within this object is zero -- exactly
@@ -99,13 +156,13 @@ func buildProbeModule() *ir.Module {
 	// type int64 -- the type of Widget's one field, reached by pointer rather
 	// than by offset, so it is here to show that the pointer half keeps working.
 	appendData(module, ".goc.probe.type.int64", 8,
-		typeHeader(8, 0, 0x1064, tflagNamed|tflagRegularMemory, 8, kindInt64,
+		typeHeader(probeDataStart, 8, 0, 0x1064, tflagNamed|tflagRegularMemory, 8, kindInt64,
 			".goc.probe.name.int64", "")...)
 
 	// func() -- the signature type a method entry names by TypeOff.
 	appendData(module, ".goc.probe.type.func", 8,
 		append(
-			typeHeader(8, 8, 0x1019, tflagDirectIface, 8, kindFunc, ".goc.probe.name.func", ""),
+			typeHeader(probeDataStart, 8, 8, 0x1019, tflagDirectIface, 8, kindFunc, ".goc.probe.name.func", ""),
 			// FuncType's tail: InCount, OutCount, then padding to 8.
 			ir.DataItem{Sub: ir.SubUH, Ints: []int64{0, 0}},
 			ir.DataItem{Zero: 4},
@@ -119,7 +176,7 @@ func buildProbeModule() *ir.Module {
 		ir.DataItem{Sub: ir.SubL, Ints: []int64{0}},
 	)
 
-	widget := typeHeader(8, 0, 0x1025, tflagUncommon|tflagNamed|tflagRegularMemory, 8, kindStruct,
+	widget := typeHeader(probeDataStart, 8, 0, 0x1025, tflagUncommon|tflagNamed|tflagRegularMemory, 8, kindStruct,
 		".goc.probe.name.Widget", ".goc.probe.type.ptrWidget")
 	widget = append(widget,
 		// StructType's tail: PkgPath *Name, Fields []StructField.
@@ -144,13 +201,29 @@ func buildProbeModule() *ir.Module {
 	// field the prototype uses to prove TypeOff resolution.
 	appendData(module, ".goc.probe.type.ptrWidget", 8,
 		append(
-			typeHeader(8, 8, 0x1022, tflagDirectIface, 8, kindPtr, ".goc.probe.name.ptrWidget", ""),
+			typeHeader(probeDataStart, 8, 8, 0x1022, tflagDirectIface, 8, kindPtr, ".goc.probe.name.ptrWidget", ""),
 			ir.DataItem{Sub: ir.SubL, Sym: probeWidgetType},
 		)...)
 
-	// The minimum pclntab this module needs to pass runtime.moduledataverify1:
-	// a well-formed pcHeader and a one-entry functab. The module defines no
-	// functions, so minpc == maxpc == 0 and runtime.findfunc never selects it.
+	if withFunctions {
+		// A word holding the probe function's address: dereferencing it as a Go
+		// func value is how the program calls into the second module.
+		appendExportedData(module, probeEntryValue, 8, ir.DataItem{Sub: ir.SubL, Sym: probeEntryFunc})
+		// The end of this module's data. It has to be the last datum, because
+		// gometa reads it as the module's edata/etypes/end.
+		appendData(module, layout.dataEnd, 8, byteItem(0))
+		// Named `runtime.firstmoduledata` so arm64.finishGoModule hands the
+		// module to internal/gometa, which replaces these placeholder items with
+		// a real 592-byte record and generates the pclntab that describes it.
+		// The symbol stays local, so the linker namespaces it away from the
+		// program's own.
+		appendData(module, layout.moduleData, 8, ir.DataItem{Zero: moduledataSize})
+		return layout
+	}
+
+	// The minimum pclntab a function-less module needs to pass
+	// runtime.moduledataverify1: a well-formed pcHeader and a one-entry functab.
+	// minpc == maxpc == 0, so runtime.findfunc never selects it.
 	appendData(module, ".goc.probe.pcheader", 8,
 		ir.DataItem{Sub: ir.SubW, Ints: []int64{0xfffffff1}},
 		ir.DataItem{Sub: ir.SubUB, Ints: []int64{0, 0, 4, 8}}, // pad1, pad2, minLC, ptrSize
@@ -160,12 +233,12 @@ func buildProbeModule() *ir.Module {
 	appendData(module, ".goc.probe.functab", 8, ir.DataItem{Zero: 8})
 	appendData(module, ".goc.probe.findfunctab", 8, ir.DataItem{Zero: 20})
 
-	appendExportedData(module, probeModuleData, 8, probeModuleDataItems()...)
+	appendExportedData(module, layout.moduleData, 8, probeModuleDataItems(layout.dataStart, layout.dataEnd)...)
 
 	// The end of this module's type region. Exported so the flat-scheme control
 	// can point the goc module's `etypes` at it.
-	appendExportedData(module, probeDataEnd, 8, byteItem(0))
-	return module
+	appendExportedData(module, layout.dataEnd, 8, byteItem(0))
+	return layout
 }
 
 // probeModuleDataItems writes the 592-byte runtime.moduledata record.
@@ -180,7 +253,7 @@ func buildProbeModule() *ir.Module {
 // runtime.modulesinit happy for a module with no functions and no globals to
 // scan: an empty [data, edata) range, and a pre-set (empty, non-zero)
 // gcdatamask so modulesinit does not try to run a GC program over it.
-func probeModuleDataItems() []ir.DataItem {
+func probeModuleDataItems(probeDataStart, probeDataEnd string) []ir.DataItem {
 	zero := func(n int) ir.DataItem { return ir.DataItem{Sub: ir.SubL, Ints: make([]int64, n)} }
 	pointer := func(name string) ir.DataItem { return ir.DataItem{Sub: ir.SubL, Sym: name} }
 	emptySlice := func() []ir.DataItem { return []ir.DataItem{zero(3)} }
@@ -245,10 +318,10 @@ func probeModuleDataItems() []ir.DataItem {
 
 // typeHeader writes the 48-byte internal/abi.Type common prefix, in goc's own
 // field order (goc/compile.go:5617).
-func typeHeader(size, ptrBytes, hash, tflag, align int64, kind int64, nameSymbol, ptrToThisSymbol string) []ir.DataItem {
+func typeHeader(base string, size, ptrBytes, hash, tflag, align int64, kind int64, nameSymbol, ptrToThisSymbol string) []ir.DataItem {
 	pointerToThis := ir.DataItem{Sub: ir.SubW, Ints: []int64{0}}
 	if ptrToThisSymbol != "" {
-		pointerToThis = ir.DataItem{Sub: ir.SubW, Sym: ptrToThisSymbol, RelativeTo: probeDataStart}
+		pointerToThis = ir.DataItem{Sub: ir.SubW, Sym: ptrToThisSymbol, RelativeTo: base}
 	}
 	return []ir.DataItem{
 		{Sub: ir.SubL, Ints: []int64{size, ptrBytes}},
@@ -256,7 +329,7 @@ func typeHeader(size, ptrBytes, hash, tflag, align int64, kind int64, nameSymbol
 		{Sub: ir.SubUB, Ints: []int64{tflag, align, align, kind}},
 		{Sub: ir.SubL, Ints: []int64{0}}, // Equal: nil, nothing here is compared
 		{Sub: ir.SubL, Sym: ".goc.probe.gcprog"},
-		{Sub: ir.SubW, Sym: nameSymbol, RelativeTo: probeDataStart},
+		{Sub: ir.SubW, Sym: nameSymbol, RelativeTo: base},
 		pointerToThis,
 	}
 }

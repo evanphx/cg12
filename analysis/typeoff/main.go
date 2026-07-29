@@ -42,20 +42,21 @@ import (
 func main() {
 	mode := flag.String("mode", "permodule", "permodule | flat")
 	pad := flag.Int("pad", 0, "bytes of foreign data to insert before the second module")
+	functions := flag.Bool("functions", false, "give the second module real code and a gometa-generated pclntab")
 	out := flag.String("o", "", "output executable")
 	run := flag.Bool("run", true, "run the resulting executable")
 	flag.Parse()
 	if flag.NArg() != 1 {
-		fmt.Fprintln(os.Stderr, "usage: typeoff [-mode permodule|flat] [-pad N] [-o exe] file.go")
+		fmt.Fprintln(os.Stderr, "usage: typeoff [-mode permodule|flat] [-pad N] [-functions] [-o exe] file.go")
 		os.Exit(2)
 	}
-	if err := buildAndRun(flag.Arg(0), *mode, *pad, *out, *run); err != nil {
+	if err := buildAndRun(flag.Arg(0), *mode, *pad, *functions, *out, *run); err != nil {
 		fmt.Fprintf(os.Stderr, "typeoff: %v\n", err)
 		os.Exit(1)
 	}
 }
 
-func buildAndRun(input, mode string, pad int, out string, run bool) error {
+func buildAndRun(input, mode string, pad int, withFunctions bool, out string, run bool) error {
 	if mode != "permodule" && mode != "flat" {
 		return fmt.Errorf("unknown mode %q", mode)
 	}
@@ -70,6 +71,10 @@ func buildAndRun(input, mode string, pad int, out string, run bool) error {
 	programObject, assembly, err := arm64.CompileObjectAndAssembly(module)
 	if err != nil {
 		return fmt.Errorf("arm64: %w", err)
+	}
+
+	if err := reportFirstFunction(programObject); err != nil {
+		return err
 	}
 
 	work, err := os.MkdirTemp("", "typeoff")
@@ -87,11 +92,23 @@ func buildAndRun(input, mode string, pad int, out string, run bool) error {
 		return err
 	}
 
-	probe, err := arm64.CompileToObject(buildProbeModule())
+	layout := buildProbeModule(withFunctions)
+	probe, err := arm64.CompileToObject(layout.module)
 	if err != nil {
 		return fmt.Errorf("probe module: %w", err)
 	}
-	reportProbeOffsets(probe)
+	if withFunctions {
+		// internal/gometa bounds a module's text with the symbol
+		// `runtime.gocTextEnd`, which the Plan 9 sidecar defines once for the
+		// whole image. A second module needs its own, or its maxpc would be the
+		// first module's text end and runtime.findfunc would never select it.
+		// Defining it here as a *local* symbol makes link.merge rewrite this
+		// object's references to it -- and only this object's.
+		probe.Syms = append(probe.Syms, obj.Sym{
+			Name: linkerName("runtime.gocTextEnd"), Section: obj.SecText, Value: uint64(len(probe.Text)),
+		})
+	}
+	reportProbeOffsets(probe, layout)
 
 	linker := link.New()
 	if err := linker.AddObjectFile(programObject); err != nil {
@@ -103,10 +120,12 @@ func buildAndRun(input, mode string, pad int, out string, run bool) error {
 	if err := linker.AddObjectFile(stubs); err != nil {
 		return fmt.Errorf("add stubs: %w", err)
 	}
+	probeIndex := 3
 	if pad > 0 {
 		linker.AddObject(&obj.Object{
 			Machine: obj.EM_AARCH64, Data: make([]byte, pad), DataAlign: 8,
 		})
+		probeIndex = 4
 	}
 	linker.AddObject(probe)
 
@@ -114,10 +133,10 @@ func buildAndRun(input, mode string, pad int, out string, run bool) error {
 	if err != nil {
 		return fmt.Errorf("link: %w", err)
 	}
-	if err := reportShift(merged); err != nil {
+	if err := reportShift(merged, layout, probeIndex); err != nil {
 		return err
 	}
-	if err := wire(merged, mode); err != nil {
+	if err := wire(merged, mode, layout, probeIndex); err != nil {
 		return err
 	}
 	image, err := merged.WriteExecutable("_gocstart")
@@ -149,50 +168,95 @@ func buildAndRun(input, mode string, pad int, out string, run bool) error {
 //     it up. In flat mode that link is left nil and the program's own `etypes` is
 //     stretched to cover the second module instead, which is exactly what today's
 //     single flat type region does -- and is the control that must fail.
-func wire(merged *obj.Object, mode string) error {
-	slot, err := findSymbol(merged, "main_probeSlot")
-	if err != nil {
+func wire(merged *obj.Object, mode string, layout probeLayout, probeIndex int) error {
+	patch := func(name string, index int, field uint64, target string) error {
+		symbol, err := findSymbol(merged, name, index)
+		if err != nil {
+			return err
+		}
+		if symbol.Section != obj.SecData {
+			return fmt.Errorf("%s is in section %d, not .data", name, symbol.Section)
+		}
+		merged.DataRelocs = append(merged.DataRelocs, obj.Reloc{
+			Offset: symbol.Value + field, Sym: target, Type: obj.R_AARCH64_ABS64,
+		})
+		return nil
+	}
+
+	if err := patch("main_probeSlot", 0, 0, linkerName(probeWidgetType)); err != nil {
 		return err
 	}
-	if slot.Section != obj.SecData {
-		return fmt.Errorf("probeSlot is in section %d, not .data", slot.Section)
+	if layout.withFunctions {
+		// The program's two extra slots: the address of a word holding the probe
+		// function's entry (which is what a Go func value points at), and the
+		// entry address itself, so the program can ask runtime.FuncForPC about
+		// a PC that only the *second* module's pclntab describes.
+		if err := patch("main_probeFuncSlot", 0, 0, linkerName(probeEntryValue)); err != nil {
+			return err
+		}
+		if err := patch("main_probeCodeSlot", 0, 0, linkerName(probeEntryFunc)); err != nil {
+			return err
+		}
 	}
-	merged.DataRelocs = append(merged.DataRelocs, obj.Reloc{
-		Offset: slot.Value, Sym: linkerName(probeWidgetType), Type: obj.R_AARCH64_ABS64,
-	})
 
-	moduledata, err := findSymbol(merged, "runtime_firstmoduledata")
+	moduledata, err := findSymbol(merged, "runtime_firstmoduledata", 0)
 	if err != nil {
 		return err
 	}
 	if mode == "permodule" {
+		probeModule, err := findSymbol(merged, linkerName(layout.moduleData), probeIndex)
+		if err != nil {
+			return err
+		}
 		merged.DataRelocs = append(merged.DataRelocs, obj.Reloc{
 			Offset: moduledata.Value + moduledataNextField,
-			Sym:    linkerName(probeModuleData), Type: obj.R_AARCH64_ABS64,
+			Sym:    probeModule.Name, Type: obj.R_AARCH64_ABS64,
 		})
 		return nil
 	}
 	// flat: one module, one type region, stretched over both objects.
+	probeEnd, err := findSymbol(merged, linkerName(layout.dataEnd), probeIndex)
+	if err != nil {
+		return err
+	}
 	target := moduledata.Value + moduledataEtypes
 	for index := range merged.DataRelocs {
 		if merged.DataRelocs[index].Offset == target {
-			merged.DataRelocs[index].Sym = linkerName(probeDataEnd)
+			merged.DataRelocs[index].Sym = probeEnd.Name
 			return nil
 		}
 	}
 	return fmt.Errorf("no relocation found at moduledata.etypes (offset %d)", target)
 }
 
+// reportFirstFunction names the goc module's function at text offset 0.
+// internal/gometa lays that function's name at offset 0 of `.goc.go.funcnames`,
+// and runtime.moduledata.funcName treats a name offset of 0 as the empty
+// string, so this function is nameless in every traceback.
+func reportFirstFunction(programObject []byte) error {
+	object, err := obj.ReadELF(programObject)
+	if err != nil {
+		return err
+	}
+	for _, symbol := range object.Syms {
+		if symbol.Section == obj.SecText && symbol.Func && symbol.Value == 0 {
+			fmt.Printf("typeoff: the goc module's function at text offset 0 is %q (its pclntab name offset is 0, which the runtime reads as \"\")\n", symbol.Name)
+			return nil
+		}
+	}
+	return nil
+}
+
 // reportShift prints how far the second module's data moved between the object
 // it was compiled into (where its base is offset 0) and the merged image. That
 // distance is the amount by which every one of its baked offsets would be wrong
 // if they were read against the program's type base instead of its own.
-func reportShift(merged *obj.Object) error {
-	programBase, err := findSymbol(merged, linkerName(".goc.runtime.datastart"))
+func reportShift(merged *obj.Object, layout probeLayout, probeIndex int) error {
+	programBase, err := findSymbol(merged, linkerName(".goc.runtime.datastart"), 0)
 	if err != nil {
 		return err
 	}
-	probeBase, err := findSymbol(merged, linkerName(probeDataStart))
+	probeBase, err := findSymbol(merged, linkerName(layout.dataStart), probeIndex)
 	if err != nil {
 		return err
 	}
@@ -204,20 +268,14 @@ func reportShift(merged *obj.Object) error {
 // findSymbol resolves a name the linker may have namespaced. link.merge renames
 // every local symbol to "<name>.<object index>" so one object's statics cannot
 // capture another's references, so a local is found under a suffix.
-func findSymbol(o *obj.Object, name string) (obj.Sym, error) {
-	var matches []obj.Sym
+func findSymbol(o *obj.Object, name string, objectIndex int) (obj.Sym, error) {
+	namespaced := fmt.Sprintf("%s.%d", name, objectIndex)
 	for _, symbol := range o.Syms {
-		if symbol.Name == name || strings.HasPrefix(symbol.Name, name+".") {
-			matches = append(matches, symbol)
+		if symbol.Name == name || symbol.Name == namespaced {
+			return symbol, nil
 		}
 	}
-	if len(matches) == 0 {
-		return obj.Sym{}, fmt.Errorf("symbol %q is not defined in the merged object", name)
-	}
-	if len(matches) > 1 {
-		return obj.Sym{}, fmt.Errorf("symbol %q is ambiguous (%d definitions)", name, len(matches))
-	}
-	return matches[0], nil
+	return obj.Sym{}, fmt.Errorf("symbol %q (or %q) is not defined in the merged object", name, namespaced)
 }
 
 func linkerName(name string) string {
@@ -235,16 +293,16 @@ func linkerName(name string) string {
 // reportProbeOffsets prints the offsets the back end baked into the second
 // module, so the run can be read against them. These are the numbers that are
 // wrong under a single flat type region and right under a per-module one.
-func reportProbeOffsets(probe *obj.Object) {
-	base, ok := symbolValue(probe, probeDataStart)
+func reportProbeOffsets(probe *obj.Object, layout probeLayout) {
+	base, ok := symbolValue(probe, layout.dataStart)
 	if !ok {
 		fmt.Println("typeoff: probe module has no datastart")
 		return
 	}
 	widget, _ := symbolValue(probe, probeWidgetType)
-	end, _ := symbolValue(probe, probeDataEnd)
-	fmt.Printf("typeoff: probe module: %d bytes of .data, datastart at %d, Widget at +%d\n",
-		len(probe.Data), base, widget-base)
+	end, _ := symbolValue(probe, layout.dataEnd)
+	fmt.Printf("typeoff: probe module: %d bytes of .text, %d bytes of .data, datastart at %d, Widget at +%d\n",
+		len(probe.Text), len(probe.Data), base, widget-base)
 	fmt.Printf("typeoff: probe module type region spans [+0, +%d)\n", end-base)
 }
 

@@ -18,12 +18,21 @@ package main
 
 import (
 	"reflect"
+	"runtime"
 	"unsafe"
 )
 
 // probeSlot holds the address of the foreign module's type descriptor. It is
 // zero as compiled; the prototype writes a relocation over it at link time.
 var probeSlot uintptr
+
+// probeFuncSlot and probeCodeSlot are patched only when the second module was
+// built with real code (`-functions`): the first with the address of a word
+// holding that module's function entry, which is what a Go func value points
+// at, and the second with the entry address itself. They are how the program
+// reaches a PC that only the *second* module's pclntab describes.
+var probeFuncSlot uintptr
+var probeCodeSlot uintptr
 
 // emptyInterface is the layout of an interface value with no methods: a type
 // descriptor and a data word.
@@ -67,6 +76,24 @@ func main() {
 	println("methods:", foreign.NumMethod())
 	method := foreign.Method(0)
 	println("method:", method.Name, int(method.Type.Kind()), method.Type.NumIn(), method.Type.NumOut())
+
+	// The second module's own pclntab: a PC that only its tables describe.
+	// runtime.FuncForPC walks the module list to find the owning module and then
+	// reads that module's funcnametab, so a correct name here means the second
+	// module's generated metadata is being used, not the program's.
+	if probeCodeSlot != 0 {
+		function := runtime.FuncForPC(probeCodeSlot)
+		if function == nil {
+			println("foreign-func: unresolved")
+		} else {
+			println("foreign-func:", function.Name())
+		}
+	}
+	if probeFuncSlot != 0 {
+		value := probeFuncSlot
+		call := *(*func() int32)(unsafe.Pointer(&value))
+		println("foreign-call:", call())
+	}
 
 	println("probe: done")
 }
