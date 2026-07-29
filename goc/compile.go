@@ -5,6 +5,7 @@
 package goc
 
 import (
+	"crypto/sha256"
 	"fmt"
 	"go/ast"
 	"go/constant"
@@ -182,7 +183,7 @@ func compile(name string, src []byte, options compileOptions) (*ir.Module, error
 	interfaceCallWrappers := make(map[string]string)
 	collectLinkNames([]*ast.File{file}, info, linkNames)
 	collectGlobalLinkNames([]*ast.File{file}, pkg, globalLinkNames)
-	for _, unit := range loader.units {
+	for _, unit := range orderedUnits(loader.units) {
 		collectLinkNames(unit.files, unit.info, linkNames)
 		collectGlobalLinkNames(unit.files, unit.pkg, globalLinkNames)
 	}
@@ -267,6 +268,7 @@ func compile(name string, src []byte, options compileOptions) (*ir.Module, error
 		emitRuntimeTables:       emitRuntimeTables,
 		runtimeAllocation:       compileRuntime,
 		typeTags:                typeTags,
+		functionDescriptors:     make(map[string]string),
 		runtimeTypes:            runtimeTypes,
 		goABITypes:              goABITypes,
 		linkNames:               linkNames,
@@ -286,7 +288,8 @@ func compile(name string, src []byte, options compileOptions) (*ir.Module, error
 		}
 	}
 	packageGlobals := map[string]map[types.Object]string{pkg.Path(): g.globals}
-	for path, unit := range loader.units {
+	for _, unit := range orderedUnits(loader.units) {
+		path := unit.path
 		globals := make(map[types.Object]string)
 		packageGlobals[path] = globals
 		if !globalPackages[path] {
@@ -1366,23 +1369,27 @@ func addLegacyCryptoRuntimeStubs(mod *ir.Module) {
 // from pass to fail -- only the text of the failures did.
 type gen struct {
 	// Whole-compilation state. Inherited by derive.
-	mod                         *ir.Module
-	target                      Target
-	fset                        *token.FileSet
-	globals                     map[types.Object]string
-	globalLinkNames             map[types.Object]string
-	methodTargets               map[string]*types.Func
-	functionDecls               map[*types.Func]functionDecl
-	noWriteBarrierFunctions     map[*types.Func]bool
-	interfaceMethods            map[*types.Func]bool
-	interfaceItabs              map[string]string
-	interfaceCallWrappers       map[string]string
-	dynamicTypes                []types.Type
-	reachableGlobals            map[types.Object]bool
-	filterGlobals               bool
-	emitRuntimeTables           bool
-	runtimeAllocation           bool
-	typeTags                    map[string]string
+	mod                     *ir.Module
+	target                  Target
+	fset                    *token.FileSet
+	globals                 map[types.Object]string
+	globalLinkNames         map[types.Object]string
+	methodTargets           map[string]*types.Func
+	functionDecls           map[*types.Func]functionDecl
+	noWriteBarrierFunctions map[*types.Func]bool
+	interfaceMethods        map[*types.Func]bool
+	interfaceItabs          map[string]string
+	interfaceCallWrappers   map[string]string
+	dynamicTypes            []types.Type
+	reachableGlobals        map[types.Object]bool
+	filterGlobals           bool
+	emitRuntimeTables       bool
+	runtimeAllocation       bool
+	typeTags                map[string]string
+	// functionDescriptors dedupes static function descriptors by the symbol
+	// they point at, which is also what names them. Shared with derived
+	// generators, since derive copies the struct and so the map header.
+	functionDescriptors         map[string]string
 	runtimeTypes                map[string]types.Type
 	goABITypes                  map[string]*ir.AggType
 	linkNames                   map[*types.Func]string
@@ -1763,7 +1770,7 @@ func collectFunctionDeclarations(rootInfo *types.Info, rootPkg *types.Package, r
 		}
 	}
 	collect(rootFiles, rootInfo, rootPkg)
-	for _, unit := range units {
+	for _, unit := range orderedUnits(units) {
 		collect(unit.files, unit.info, unit.pkg)
 	}
 	return declarations
@@ -1828,7 +1835,7 @@ func collectDynamicInitializers(
 		}
 	}
 	collect(rootFiles, rootInfo, rootPackage)
-	for _, unit := range units {
+	for _, unit := range orderedUnits(units) {
 		collect(unit.files, unit.info, unit.pkg)
 	}
 	return initializers
@@ -1837,7 +1844,11 @@ func collectDynamicInitializers(
 func dynamicInitializerFunctionSymbols(initializers map[types.Object]*globalInitializer) map[types.Object]string {
 	groups := make([]*globalInitializer, 0, len(initializers))
 	seen := make(map[*globalInitializer]bool)
-	for _, initializer := range initializers {
+	// Ordered by the objects being initialized, because these groups are
+	// numbered in the order they are walked and that number becomes a symbol
+	// name. Ranging the map directly numbered them differently on every build.
+	for _, object := range sortedGlobalValues(initializers) {
+		initializer := initializers[object]
 		if seen[initializer] {
 			continue
 		}
@@ -1879,7 +1890,11 @@ func dynamicInitializerFunctionSymbols(initializers map[types.Object]*globalInit
 func generateDynamicInitializerFunctions(base *gen, initializers map[types.Object]*globalInitializer) error {
 	groups := make([]*globalInitializer, 0, len(initializers))
 	seen := make(map[*globalInitializer]bool)
-	for _, initializer := range initializers {
+	// Ordered by the objects being initialized, because these groups are
+	// numbered in the order they are walked and that number becomes a symbol
+	// name. Ranging the map directly numbered them differently on every build.
+	for _, object := range sortedGlobalValues(initializers) {
+		initializer := initializers[object]
 		if seen[initializer] {
 			continue
 		}
@@ -5564,7 +5579,11 @@ func (g *gen) ensureTypeTag(valueType types.Type) string {
 	}
 	name := g.typeTags[key]
 	if name == "" {
-		name = fmt.Sprintf(".goc.type.%d", len(g.typeTags))
+		// Named from the type rather than from a count of the types seen so
+		// far. The counter recorded the order types were discovered in, which
+		// came from map traversal, so the same source produced differently
+		// named symbols on every build.
+		name = runtimeTypeSymbolName(key)
 		g.typeTags[key] = name
 		gcDataName := name + ".gcdata"
 		mask := pointerMask(valueType)
@@ -11168,7 +11187,16 @@ func (g *gen) staticNamedFunctionDescriptor(function *types.Func) string {
 }
 
 func (g *gen) staticFunctionDescriptor(symbol string) string {
-	name := fmt.Sprintf(".goc.funcval.%d", len(g.mod.Data))
+	// Named from the symbol it describes rather than from a count of the data
+	// emitted so far. A counter encodes the order code was generated in, and
+	// that order came from map traversal, so the same source produced a
+	// different binary on every build. Deriving the name from the content also
+	// means one descriptor per function instead of one per reference.
+	if name := g.functionDescriptors[symbol]; name != "" {
+		return name
+	}
+	name := ".goc.funcval." + symbol
+	g.functionDescriptors[symbol] = name
 	g.mod.Data = append(g.mod.Data, &ir.Data{
 		Name:  name,
 		Align: 8,
@@ -13984,4 +14012,32 @@ func OutputName(name string) string {
 	ext := filepath.Ext(name)
 	stem := name[:len(name)-len(ext)]
 	return filepath.Base(stem)
+}
+
+// runtimeTypeSymbolName turns a type key into a stable symbol name.
+//
+// The key is a Go type string, so it carries characters a symbol cannot -- the
+// stars, brackets, braces and spaces of `*[]struct{ x int }`. Sanitizing alone
+// would collide (`[]int` and `[ ]int` sanitize alike), so a digest of the
+// original key is appended: the readable part is for humans reading a
+// disassembly, the digest is what actually distinguishes the symbols.
+func runtimeTypeSymbolName(key string) string {
+	var readable strings.Builder
+	for _, r := range key {
+		switch {
+		case r >= 'a' && r <= 'z', r >= 'A' && r <= 'Z', r >= '0' && r <= '9':
+			readable.WriteRune(r)
+		default:
+			readable.WriteByte('_')
+		}
+	}
+	trimmed := strings.Trim(readable.String(), "_")
+	if len(trimmed) > 48 {
+		trimmed = trimmed[:48]
+	}
+	digest := sha256.Sum256([]byte(key))
+	if trimmed == "" {
+		return fmt.Sprintf(".goc.type.%x", digest[:8])
+	}
+	return fmt.Sprintf(".goc.type.%s.%x", trimmed, digest[:8])
 }

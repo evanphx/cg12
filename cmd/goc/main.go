@@ -209,9 +209,15 @@ func write(name string, b []byte) {
 
 func link(target goc.Target, m *ir.Module, exe string) {
 	var translatedAssembly string
-	f, err := os.CreateTemp("", "cg12-goc-*.o")
+	// A temporary *directory* with fixed names inside, rather than temporary
+	// files with random ones. cc records the object's filename in the linked
+	// binary, so random names made two builds of the same source differ in
+	// their symbol tables and defeated any comparison of the output.
+	work, err := os.MkdirTemp("", "cg12-goc")
 	check(err)
-	defer os.Remove(f.Name())
+	defer os.RemoveAll(work)
+	f, err := os.Create(filepath.Join(work, "goc.o"))
+	check(err)
 
 	// arm64 is the only backend with the assembly sidecar the Go runtime needs:
 	// it emits the object plus translated Plan 9 assembly, which is then compiled
@@ -231,9 +237,7 @@ func link(target goc.Target, m *ir.Module, exe string) {
 	check(err)
 	inputs := []string{f.Name()}
 	if target == goc.TargetARM64 {
-		support, cleanup := compileRuntimeSupport(cc, translatedAssembly)
-		defer cleanup()
-		inputs = append(inputs, support)
+		inputs = append(inputs, compileRuntimeSupport(cc, work, translatedAssembly))
 	}
 	args := append([]string{"-no-pie", "-o", exe}, inputs...)
 	cmd := exec.Command(cc, args...)
@@ -241,29 +245,14 @@ func link(target goc.Target, m *ir.Module, exe string) {
 	check(cmd.Run())
 }
 
-func compileRuntimeSupport(cc, assembly string) (string, func()) {
-	source, err := os.CreateTemp("", "cg12-goc-runtime-*.S")
-	check(err)
-	object := strings.TrimSuffix(source.Name(), ".S") + ".o"
-	cleanup := func() {
-		os.Remove(source.Name())
-		os.Remove(object)
-	}
-	_, err = source.WriteString(assembly)
-	if err == nil {
-		err = source.Close()
-	}
-	if err != nil {
-		cleanup()
-		check(err)
-	}
-	cmd := exec.Command(cc, "-c", "-o", object, source.Name())
+func compileRuntimeSupport(cc, work, assembly string) string {
+	source := filepath.Join(work, "goc-runtime.S")
+	object := filepath.Join(work, "goc-runtime.o")
+	check(os.WriteFile(source, []byte(assembly), 0o644))
+	cmd := exec.Command(cc, "-c", "-o", object, source)
 	cmd.Stderr = os.Stderr
-	if err := cmd.Run(); err != nil {
-		cleanup()
-		check(err)
-	}
-	return object, cleanup
+	check(cmd.Run())
+	return object
 }
 
 func runProgram(name string, arguments ...string) int {

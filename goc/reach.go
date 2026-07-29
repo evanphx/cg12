@@ -100,7 +100,7 @@ func reachableFunctions(roots []*ast.FuncDecl, rootFiles []*ast.File, rootInfo *
 			declarations[object] = functionDecl{decl: declaration, info: rootInfo, pkg: rootPkg}
 		}
 	}
-	for _, unit := range units {
+	for _, unit := range orderedUnits(units) {
 		for _, file := range unit.files {
 			for _, declaration := range file.Decls {
 				function, ok := declaration.(*ast.FuncDecl)
@@ -158,7 +158,7 @@ func reachableFunctions(roots []*ast.FuncDecl, rootFiles []*ast.File, rootInfo *
 		}
 	}
 	collectGlobalValues(rootFiles, rootInfo)
-	for _, unit := range units {
+	for _, unit := range orderedUnits(units) {
 		collectGlobalValues(unit.files, unit.info)
 	}
 	var assertedInterfaces []*types.Interface
@@ -209,7 +209,7 @@ func reachableFunctions(roots []*ast.FuncDecl, rootFiles []*ast.File, rootInfo *
 		}
 	}
 	collectAssertedInterfaces(rootFiles, rootInfo)
-	for _, unit := range units {
+	for _, unit := range orderedUnits(units) {
 		collectAssertedInterfaces(unit.files, unit.info)
 	}
 	dynamicInterfaceTypes := make(map[string]types.Type)
@@ -424,16 +424,22 @@ func reachableFunctions(roots []*ast.FuncDecl, rootFiles []*ast.File, rootInfo *
 		}
 	}
 	if runtimeAllocation {
-		for object := range globalValues {
+		// Sorted, because this queue decides the order functions are generated
+		// in, and that order reaches the output: generated symbols are named
+		// from a running count of emitted data items, so a different traversal
+		// order renames them. Go randomizes map iteration, so ranging these
+		// maps directly made every build of the same source produce a different
+		// binary.
+		for _, object := range sortedGlobalValues(globalValues) {
 			enqueueGlobal(object)
 		}
 	}
 	for _, root := range roots {
 		queue = append(queue, functionDecl{decl: root, info: rootInfo, pkg: rootPkg})
 	}
-	for symbol, declaration := range linkedDeclarations {
+	for _, symbol := range sortedKeys(linkedDeclarations) {
 		if assemblyReferences[assemblySymbolName(symbol)] {
-			queue = append(queue, declaration)
+			queue = append(queue, linkedDeclarations[symbol])
 		}
 	}
 	if runtimeAllocation {
@@ -461,7 +467,8 @@ func reachableFunctions(roots []*ast.FuncDecl, rootFiles []*ast.File, rootInfo *
 				queue = append(queue, declaration)
 			}
 		}
-		for name, declaration := range runtimeFunctions {
+		for _, name := range sortedKeys(runtimeFunctions) {
+			declaration := runtimeFunctions[name]
 			if name == "mallocPanic" || strings.HasPrefix(name, "mallocgcSmall") || strings.HasPrefix(name, "mallocgcTiny") || hasRuntimeMapsLinkName(declaration.decl) {
 				queue = append(queue, declaration)
 			}
@@ -782,7 +789,10 @@ func reachableFunctions(roots []*ast.FuncDecl, rootFiles []*ast.File, rootInfo *
 	for {
 		processQueue()
 		added := false
-		for key, dynamicType := range dynamicInterfaceTypes {
+		// Sorted: this decides the order implementations enter the queue, and
+		// so the order they are generated in, which the output records.
+		for _, key := range sortedKeys(dynamicInterfaceTypes) {
+			dynamicType := dynamicInterfaceTypes[key]
 			if checkedDynamicTypes[key] {
 				continue
 			}
@@ -847,7 +857,7 @@ func collectDynamicTypes(rootInfo *types.Info, units map[string]*sourceUnit) []t
 		}
 	}
 	collect(rootInfo)
-	for _, unit := range units {
+	for _, unit := range orderedUnits(units) {
 		collect(unit.info)
 	}
 
@@ -906,4 +916,72 @@ func hasRuntimeMapsLinkName(function *ast.FuncDecl) bool {
 		}
 	}
 	return false
+}
+
+// sortedKeys returns a map's keys in a stable order.
+//
+// Reachability seeds its worklist from maps, and that worklist decides the
+// order functions are generated in. Generated symbols are named from a running
+// count of emitted items, so traversal order reaches the output: ranging a map
+// directly made every build of the same source produce a different binary.
+func sortedKeys[V any](m map[string]V) []string {
+	keys := make([]string, 0, len(m))
+	for key := range m {
+		keys = append(keys, key)
+	}
+	sort.Strings(keys)
+	return keys
+}
+
+// sortedGlobalValues orders package-level objects stably.
+//
+// A name alone is not a key: two packages can each declare `buf`, and the
+// standard library does. Position is what separates them, and it is stable for
+// a given set of sources because it is derived from the file and offset the
+// declaration was parsed from.
+func sortedGlobalValues[V any](values map[types.Object]V) []types.Object {
+	objects := make([]types.Object, 0, len(values))
+	for object := range values {
+		objects = append(objects, object)
+	}
+	sort.Slice(objects, func(i, j int) bool {
+		left, right := objects[i], objects[j]
+		if leftPkg, rightPkg := objectPackagePath(left), objectPackagePath(right); leftPkg != rightPkg {
+			return leftPkg < rightPkg
+		}
+		if left.Name() != right.Name() {
+			return left.Name() < right.Name()
+		}
+		return left.Pos() < right.Pos()
+	})
+	return objects
+}
+
+// objectPackagePath is the import path an object was declared in, or "" for the
+// predeclared ones that have no package.
+func objectPackagePath(object types.Object) string {
+	if pkg := object.Pkg(); pkg != nil {
+		return pkg.Path()
+	}
+	return ""
+}
+
+// orderedUnits returns the loaded packages in import-path order.
+//
+// Several passes build slices while walking this map -- asserted interfaces,
+// generic runtime methods, dynamic types -- and those slices seed the
+// reachability worklist, which fixes the order functions are generated in.
+// Generated symbols are named from a running count of emitted items, so map
+// order reached the binary. Walk it in a fixed order instead.
+func orderedUnits(units map[string]*sourceUnit) []*sourceUnit {
+	paths := make([]string, 0, len(units))
+	for path := range units {
+		paths = append(paths, path)
+	}
+	sort.Strings(paths)
+	ordered := make([]*sourceUnit, 0, len(paths))
+	for _, path := range paths {
+		ordered = append(ordered, units[path])
+	}
+	return ordered
 }
