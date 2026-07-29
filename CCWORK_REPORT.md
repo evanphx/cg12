@@ -189,8 +189,8 @@ Per-module regions remove the premise:
   at `goc build-runtime` time, and ship it. A program object builds its own from its own
   handful of functions.
 * The runtime looks a PC up per module: `findmoduledatap` walks the chain testing
-  `datap.minpc <= pc && pc < datap.maxpc` (`symtab.go:362`), and `moduledataverify` verifies
-  each module independently (`symtab.go:606`).
+  `datap.minpc <= pc && pc < datap.maxpc` (`symtab.go:865-872`), and `moduledataverify`
+  verifies each module independently (`symtab.go:606`).
 * `runtime.main` runs init tasks per module (`proc.go:258`, `doInit(m.inittasks)`), and
   `itabsinit` adds itabs per module (`iface.go:259`).
 * `moduledata.text` is already 0 in cg12 ("text base: function entry offsets contain absolute
@@ -248,7 +248,9 @@ symbol, so if the type region were its own section the existing vocabulary would
   upstream Go cannot express this in ELF* — it resolves it internally, because its linker owns
   the layout. That is the honest reading of the rejected design: it is not an invention, it is
   what Go does, and the reason cg12 cannot copy it is that cg12 resolves the value in the back
-  end and keeps no record.
+  end and keeps no record. (**Caveat:** this tree vendors `stdlib/src/runtime` but not
+  `stdlib/src/cmd`, so this paragraph is from knowledge of upstream Go's linker, not read out
+  of this repository. The AArch64 relocation vocabulary claim above is independent of it.)
 * **The one thing standard AArch64 ELF does offer is `R_AARCH64_PREL32` (261): `S + A − P`.**
   That is genuinely expressible and genuinely useful — but it computes *target minus the
   address of the patched word*, not *target minus a module base*. To recover today's
