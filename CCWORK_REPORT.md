@@ -215,3 +215,17 @@ RUNTIME_PLAN §14 under "what is not done".
 | `analysis/typeoff/` | the spike's prototype, re-pointed at the landed mechanism (its `probe.go` moved into `internal/permodule` so the tool and the test share one implementation) |
 | `analysis/sepcompile/`, `analysis/seplink/`, `analysis/testdata/nistec_closure_name_collision.go`, `analysis/testdata/typeoff_probe.go` | cherry-picked verbatim from the spike branches |
 | `RUNTIME_PLAN.md` | new §14; old §14 renumbered to §15; §13 gains the driver split as the next batch item |
+
+## Two notes on the briefing
+
+- **`RUNTIME_PLAN.md` §5.14 does not exist on this base.** The briefing points at it for a
+  live interaction bug. `perf/test-suite` (this branch's base, `8b3b5ca`) ends §5 at §5.10;
+  §5.14 exists only on `origin/integration/wave4a`, where it records that
+  `ccwork/phase2-alloc`'s escape fix and `ccwork/freeobject`'s write barrier compose into
+  `span has no free objects`. That is escape analysis and allocation, disjoint from this
+  change (module metadata), so nothing here interacts with it — but the branch it lives on
+  is not the one I was told to base on, and I did not merge it.
+- **§5.10's nameless-first-function item is likewise not on this base.** The spike recorded
+  it on `ccwork/typeoff-alternatives`; it was never carried to `perf/test-suite`. So there
+  was no §5.10 entry to remove when the bug was fixed. The fix and its evidence are recorded
+  in the new §14 instead.

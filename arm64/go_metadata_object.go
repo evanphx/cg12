@@ -94,7 +94,7 @@ func finishGoModule(o *obj.Object, m *ir.Module, goFunctions []goFunctionInfo, d
 			Value:   0,
 		})
 	}
-	textEndSymbol := gometa.TextEndSymbol(moduleDataSymbol)
+	textEndSymbol := goTextEndSymbol(m)
 	if len(goFunctions) > 0 && len(bundle.functions) == 0 {
 		// The module's text ends where its last text is emitted. That is normally
 		// the translated Plan 9 sidecar, which defines the symbol itself; a module
@@ -149,6 +149,16 @@ func finishGoModule(o *obj.Object, m *ir.Module, goFunctions []goFunctionInfo, d
 		ItabLinkCount:   gometa.ModuleItabLinkCount(m),
 	}
 	return addGoRuntimeObjectMetadata(o, goFunctions, bundle.functions, moduledata, module, dataPointerOffsets)
+}
+
+// goTextEndSymbol is the symbol that bounds this module's text. A Go module that
+// declares no moduledata emits no metadata either and so nothing references the
+// symbol; it keeps the default name rather than one derived from an empty one.
+func goTextEndSymbol(m *ir.Module) string {
+	if m.GoModuleData == "" {
+		return gometa.DefaultTextEndSymbol
+	}
+	return gometa.TextEndSymbol(sanitize(m.GoModuleData))
 }
 
 // goModuleDataSymbol is the linker name of the module's runtime.moduledata

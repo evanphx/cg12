@@ -5,7 +5,6 @@ import (
 	"runtime"
 	"strings"
 
-	"github.com/evanphx/cg12/internal/gometa"
 	"github.com/evanphx/cg12/ir"
 	"github.com/evanphx/cg12/plan9asm"
 	plan9sem "github.com/evanphx/cg12/plan9asm/sem"
@@ -141,7 +140,7 @@ func prepareAssembly(module *ir.Module) (assemblyBundle, error) {
 	// carries no functions has no tail here, and the object defines its own bound
 	// instead (see arm64.finishGoModule).
 	if moduleUsesGoRuntime(module) && len(bundle.functions) > 0 {
-		textEnd := gometa.TextEndSymbol(sanitize(module.GoModuleData))
+		textEnd := goTextEndSymbol(module)
 		fmt.Fprintf(&output, "\n\t.text\n\t.global %s\n\t.type %s, %%function\n%s:\n", textEnd, textEnd, textEnd)
 	}
 	bundle.source = output.String()
