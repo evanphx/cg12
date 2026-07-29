@@ -2184,6 +2184,12 @@ func TestARM64RuntimeCapabilityStatus(t *testing.T) {
 		if !runtimeCapabilitySelected(capability) {
 			continue
 		}
+		// A capability the environment cannot run is never compiled. Its
+		// subtest skips before it would await a compilation, so queuing it
+		// would occupy a look-ahead slot that nothing ever returns.
+		if capability.requiresAFINET && !afinetSocketAvailable {
+			continue
+		}
 		shard = append(shard, capability)
 	}
 	compileQueue := startRuntimeCapabilityCompiles(compiler, directory, shard)
@@ -2216,8 +2222,18 @@ func TestARM64RuntimeCapabilityStatus(t *testing.T) {
 			if *runtimeStatusProgress {
 				fmt.Fprintf(os.Stderr, "runtime-status: start %s/%s %s\n", capability.category, capability.name, capability.source)
 			}
-			result := runRuntimeCapabilityProgram(t, compileQueue.await(capability), capability)
-			compileQueue.release()
+			compilation, queued := compileQueue.await(capability)
+			if !queued {
+				// -test.run and runtimeCapabilitySelected can disagree about
+				// which subtests run, so a capability can reach here without
+				// having been queued. Compile it here rather than assuming.
+				compilation = compileRuntimeCapability(compiler, directory, capability)
+			} else {
+				// The look-ahead budget must come back even if the run panics
+				// or fails an assertion, or the dispatcher stalls behind it.
+				defer compileQueue.release()
+			}
+			result := runRuntimeCapabilityProgram(t, compilation, capability)
 			if *runtimeStatusProgress {
 				status := "pass"
 				if result.err != nil {
@@ -2482,11 +2498,16 @@ func startRuntimeCapabilityCompiles(
 	return queue
 }
 
-// await blocks until the capability's program has been compiled.
-func (queue *runtimeCapabilityCompileQueue) await(capability runtimeCapability) runtimeCapabilityCompilation {
-	entry := queue.entries[capability.category+"/"+capability.name]
+// await blocks until the capability's program has been compiled. It reports
+// false when the capability was never queued, which the caller must handle
+// rather than blocking forever on a channel nothing will close.
+func (queue *runtimeCapabilityCompileQueue) await(capability runtimeCapability) (runtimeCapabilityCompilation, bool) {
+	entry, queued := queue.entries[capability.category+"/"+capability.name]
+	if !queued {
+		return runtimeCapabilityCompilation{}, false
+	}
 	<-entry.done
-	return entry.result
+	return entry.result, true
 }
 
 // release returns the look-ahead budget a finished run was holding.
