@@ -78,18 +78,21 @@ func addAliases(o *obj.Object, aliases []*ir.Alias) error {
 // morestack prologue and its Go stack maps on UsesManagedFrame), so it is the
 // tripwire worth having, and it is the one rejected here.
 //
-// The Go internal calling convention is deliberately NOT rejected, even though
-// amd64 does not implement ABIInternal's register assignment either. CallConv is
-// not currently a trustworthy signal that a function needs Go's ABI: goc applies
-// CallConvGoInternal unconditionally to closure-shaped functions -- function
-// literals (goc/compile.go:10119), method-value wrappers (:9781) and funcvalue
-// adapters (:10638) -- which then pass their environment through an ordinary
-// fixed-register temporary (rdx via goc's closureRegister) rather than through the
-// convention's register assignment. Those bodies are self-consistent System V code
-// and are correct today; rejecting them catches no latent miscompile and instead
-// breaks working code (measured: 14 goc corpus subtests that build natively on
-// amd64). Check whether those frontend sites still over-apply the annotation
-// before tightening this.
+// The Go internal calling convention is not rejected, and as of B1 that is
+// because amd64 now implements it: emissionConvention returns f.CallConv, and
+// lowerParams/lowerCalls/lowerReturns place arguments and results by that
+// convention's tables. goc applies CallConvGoInternal unconditionally to
+// closure-shaped functions -- function literals (goc/compile.go:10119),
+// method-value wrappers (:9781) and funcvalue adapters (:10638) -- and those
+// bodies are now genuinely ABIInternal rather than self-consistent System V, with
+// both sides of every closure call flipping together. That is a real codegen
+// change on code that executes, so it is held by execution tests (the goc corpus
+// subtests that build natively on amd64), not by inspection.
+//
+// The frame axis is separate and stays rejected. ABIInternal says where the
+// arguments are; ManagedFrame says who owns the stack, and only the second needs
+// the morestack prologue, the argument home slots and the Go stack maps that this
+// backend still lacks.
 //
 // NoSplit and SystemStack are likewise not rejected. Neither describes the frame
 // on its own: they only tune the managed frame's stack-growth check (arm64 reads
@@ -128,6 +131,11 @@ func CompileToObjectWith(m *ir.Module, opts Options) (*obj.Object, error) {
 	if err := rejectGoABI(m); err != nil {
 		return nil, err
 	}
+	// A direct call names its callee by symbol, and which ABI that call must be
+	// lowered against is a property of the callee, not of the function making the
+	// call. lower() therefore needs the whole module, which is why the index is
+	// built once here and threaded down rather than derived per function.
+	conventions := newCalleeConventions(m)
 	o := &obj.Object{Machine: obj.EM_X86_64}
 	var smFuncs []stackMapFunc
 	var rows []obj.LineRow
@@ -138,7 +146,7 @@ func CompileToObjectWith(m *ir.Module, opts Options) (*obj.Object, error) {
 		params := dwarfParams(f) // captured before lowering rewrites the params
 		paramTemps := paramTempIDs(f)
 		ir.LowerPointers(f, ir.ClsL)
-		if err := lower(f); err != nil {
+		if err := lower(f, conventions); err != nil {
 			return nil, fmt.Errorf("function %s: %w", f.Name, err)
 		}
 		alloc, err := regAlloc(f)
@@ -1061,9 +1069,17 @@ func (m *mc) block(b *ir.Block) {
 		case ir.OCall:
 			m.emitArgs(argPending)
 			// System V requires AL = number of vector registers used, for variadic
-			// callees. Setting it before every call is harmless (rax is not an
-			// argument register) and lets us call variadic functions without knowing
-			// the callee's prototype.
+			// callees. Setting it before every System V call is harmless -- rax is
+			// not one of that convention's argument registers -- and lets us call
+			// variadic functions without knowing the callee's prototype.
+			//
+			// It is emphatically not harmless before a Go ABIInternal call, where RAX
+			// is argument register 0: the write would destroy the first argument
+			// between placing it and making the call. ABIInternal has no C-style
+			// varargs and no such hidden count, so the write is skipped there.
+			// lowerCalls records each call's own convention on the instruction, which
+			// is what lets this be decided per call: a System V body calling a closure
+			// is the ordinary shape in goc output.
 			nfloat := 0
 			for _, ai := range argPending {
 				if !ai.To.IsNone() && ai.Cls.IsFloat() {
@@ -1071,7 +1087,9 @@ func (m *mc) block(b *ir.Block) {
 				}
 			}
 			argPending = nil
-			m.emit(x64.MovImm32(false, RAX.mreg(), int32(nfloat)))
+			if !callIsGoInternal(in) {
+				m.emit(x64.MovImm32(false, RAX.mreg(), int32(nfloat)))
+			}
 			if in.Tail {
 				m.emitTailCall(in)
 				m.blockDone = true

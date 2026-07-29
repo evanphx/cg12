@@ -36,34 +36,54 @@ func allocatableRegs() []Reg {
 // The switch itself
 // ---------------------------------------------------------------------------
 
-// TestEmissionConventionIsPlatformUntilLoweringAgrees is the guard on the whole
-// change. amd64 lowering still builds newArgAssigner(false) for every function,
-// so a function goc marked CallConvGoInternal receives its parameters in the
-// System V registers; returning its own convention here would give it an
-// ABIInternal register file underneath System V argument assignment -- the
-// allocator handing out R10/R11 while parameters live there, and scratch moving
-// to R12/R13 with no prologue saving them.
+// TestEmissionConventionIsTheFunctionsOwn is the guard on the whole change,
+// rewritten by B1 when the flip landed. It used to assert the opposite -- that
+// this returned the platform ABI for every function -- because before the
+// matching lowering existed a per-function ABIInternal register file would have
+// sat underneath System V argument assignment and miscompiled every closure.
 //
-// If this test fails because emissionConvention now reads f.CallConv, that is
-// only correct if lowerParams and lowerCalls were changed in the same commit to
-// build their assigners from the function's convention. Check that first; then
-// this test is the one to rewrite, not to delete.
-func TestEmissionConventionIsPlatformUntilLoweringAgrees(t *testing.T) {
+// Now lowerParams, lowerReturns and lowerCalls read this same switch, so a
+// function goc marked CallConvGoInternal really is emitted ABIInternal end to
+// end. If this test fails because emissionConvention returns the platform ABI
+// again, the lowering must have been reverted with it: the two are one change.
+func TestEmissionConventionIsTheFunctionsOwn(t *testing.T) {
 	cases := []struct {
 		name string
 		f    *ir.Func
+		want ir.CallConvention
 	}{
-		{"unannotated", &ir.Func{}},
-		{"platform", &ir.Func{CallConv: ir.CallConvPlatform}},
-		{"goc-marked closure", &ir.Func{CallConv: ir.CallConvGoInternal}},
+		{"unannotated", &ir.Func{}, ir.CallConvPlatform},
+		{"platform", &ir.Func{CallConv: ir.CallConvPlatform}, ir.CallConvPlatform},
+		{"goc-marked closure", &ir.Func{CallConv: ir.CallConvGoInternal}, ir.CallConvGoInternal},
 	}
 	for _, c := range cases {
-		if got := emissionConvention(c.f); got != ir.CallConvPlatform {
-			t.Errorf("emissionConvention(%s) = %d, want %d (the platform ABI); "+
-				"amd64 lowering still assigns System V registers unconditionally, so a "+
-				"per-function ABIInternal register file here miscompiles every closure",
-				c.name, got, ir.CallConvPlatform)
+		if got := emissionConvention(c.f); got != c.want {
+			t.Errorf("emissionConvention(%s) = %d, want %d", c.name, got, c.want)
 		}
+	}
+}
+
+// TestEmissionConventionDoesNotDecideCallConventions separates the two questions
+// that used to have the same answer. A body's register file comes from
+// emissionConvention; a call's argument placement comes from its callee. A
+// platform-ABI function calling a closure -- the ordinary shape in goc output --
+// must get System V for its own frame and ABIInternal for that call, and the two
+// conventions share no integer argument register at all, so conflating them
+// misplaces every argument.
+func TestEmissionConventionDoesNotDecideCallConventions(t *testing.T) {
+	caller := &ir.Func{Name: "caller", CallConv: ir.CallConvPlatform}
+	closure := ir.Instr{Op: ir.OCall, CallConv: ir.CallConvGoInternal, CallConvSet: true}
+	conventions := calleeConventions{}
+
+	if got := emissionConvention(caller); got != ir.CallConvPlatform {
+		t.Fatalf("caller body convention = %d, want platform", got)
+	}
+	if got := conventions.forCall(caller, &closure); got != ir.CallConvGoInternal {
+		t.Errorf("closure call resolved to %d, want Go ABIInternal", got)
+	}
+	if conventionABI(ir.CallConvPlatform).intArgRegs[0] == conventionABI(ir.CallConvGoInternal).intArgRegs[0] {
+		t.Error("the two conventions share their first integer argument register; " +
+			"the distinction this test guards would be unobservable")
 	}
 }
 
@@ -341,12 +361,15 @@ func TestPlatformConsumersUnchanged(t *testing.T) {
 		if got := scratchRegsFor(cc); got != want {
 			t.Errorf("scratchRegsFor(platform) = %+v, want %+v", got, want)
 		}
-		// And the bundle the emitter really carries, for a function goc marked
-		// ABIInternal -- which is the case that must keep compiling as System V.
-		f := &ir.Func{CallConv: ir.CallConvGoInternal}
+		// And the bundle the emitter really carries, for a function with no Go
+		// annotation -- the whole C path, which must be byte-identical to what it
+		// was before there was a choice of convention. (A goc-marked closure now
+		// gets the ABIInternal pair instead; that is B1's flip, covered by
+		// TestGoABIScratchPairIsUsableByTheEmitter.)
+		f := &ir.Func{}
 		m := &mc{f: f, scratchRegs: scratchRegsFor(emissionConvention(f))}
 		if m.scratchRegs != want {
-			t.Errorf("a goc-marked closure is emitted with scratch %+v, want the System V pair %+v",
+			t.Errorf("a platform-ABI function is emitted with scratch %+v, want the System V pair %+v",
 				m.scratchRegs, want)
 		}
 	})

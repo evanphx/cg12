@@ -39,6 +39,15 @@ type abiConvention struct {
 	// order. Integer and float arguments consume the two banks independently.
 	intArgRegs   []Reg
 	floatArgRegs []Reg
+	// retIntRegs and retFloatRegs are the *result* registers, in assignment
+	// order. They are a separate table rather than a reuse of the argument one
+	// because the two conventions disagree about whether results and arguments
+	// share a sequence: System V returns in RAX/RDX and XMM0/XMM1, which are not
+	// its first argument registers, while Go's ABIInternal returns in the
+	// argument registers themselves with the banks restarted from zero
+	// (RAX, RBX, RCX, ... / X0, X1, ...).
+	retIntRegs   []Reg
+	retFloatRegs []Reg
 	// packsStackArgs tightly packs stacked arguments by their natural size (Go
 	// ABIInternal); otherwise each scalar occupies one 8-byte slot (System V).
 	packsStackArgs bool
@@ -59,6 +68,8 @@ var abiConventions = [...]abiConvention{
 	ir.CallConvPlatform: {
 		intArgRegs:      argGP,
 		floatArgRegs:    argFP,
+		retIntRegs:      retIntRegs,
+		retFloatRegs:    retSSERegs,
 		packsStackArgs:  false,
 		savesCalleeRegs: true,
 		stackLinkBytes:  0,
@@ -66,6 +77,8 @@ var abiConventions = [...]abiConvention{
 	ir.CallConvGoInternal: {
 		intArgRegs:      goArgGP,
 		floatArgRegs:    goArgFP,
+		retIntRegs:      goArgGP,
+		retFloatRegs:    goArgFP,
 		packsStackArgs:  true,
 		savesCalleeRegs: false,
 		stackLinkBytes:  0,
@@ -87,32 +100,25 @@ func conventionABI(cc ir.CallConvention) abiConvention { return abiConventions[c
 //   - mc.go: the emitter's scratch pair (scratchRegsFor), because ABIInternal
 //     passes arguments in R10/R11 -- the System V scratch registers.
 //
-// It returns the platform ABI unconditionally today, so this whole wiring is a
-// refactor with no codegen difference. That is not an oversight, and in
-// particular it deliberately does NOT read f.CallConv:
+// It now returns the function's own convention: B1 landed the matching lowering,
+// so lowerParams and lowerReturns build their assigners from this same switch and
+// a CallConvGoInternal function really does receive its parameters in
+// RAX/RBX/RCX/RDI/... and return in the argument registers. Before that lowering
+// existed this returned the platform ABI unconditionally, because an ABIInternal
+// register file underneath System V argument assignment would have miscompiled
+// every closure goc emits -- the allocator handing out R10/R11 while parameters
+// lived there, and the scratch pair moving to R12/R13 with no prologue saving
+// them. The flip and the lowering are one change for that reason and must never
+// be separated again.
 //
-// amd64 lowering still assigns System V registers to every function. lowerParams
-// and lowerCalls build newArgAssigner(false) unconditionally, so a function goc
-// marked CallConvGoInternal -- goc applies that to every function literal,
-// method-value wrapper and funcvalue adapter -- receives its parameters in
-// RDI/RSI/... and passes its own arguments the same way. Such a body is
-// self-consistent System V code and is correct as emitted; 14 goc corpus subtests
-// build and run natively on exactly that basis (see goABIUnsupported in mc.go).
-// Keying this off f.CallConv before the matching lowering lands would give those
-// functions an ABIInternal register file underneath System V argument
-// assignment: the allocator would hand out R10/R11 while the parameters live
-// there, and the scratch pair would move to R12/R13 without the prologue saving
-// them. Every closure in the corpus would be miscompiled.
-//
-// The B1 flip is therefore one line here -- `return f.CallConv` -- landed in the
-// same change that makes lowerParams/lowerCalls build their assigners from the
-// function's convention. Flipping this alone, or wiring one consumer directly to
-// f.CallConv instead of coming through here, reintroduces exactly the four-way
-// disagreement this function exists to prevent.
-func emissionConvention(f *ir.Func) ir.CallConvention {
-	_ = f // see above: intentionally not f.CallConv until lowering agrees.
-	return ir.CallConvPlatform
-}
+// Note what this switch is NOT. It answers "what does *this body* look like from
+// the inside", which is a property of one function. It is not the answer for a
+// call *out* of that function: a call's convention is a property of its callee
+// and is resolved by calleeConventions.forCall. A platform-ABI function calling
+// an ABIInternal closure -- the ordinary shape in goc output -- must lower that
+// call ABIInternal while its own body stays System V, and lowerCalls keeps the
+// two apart for exactly that reason.
+func emissionConvention(f *ir.Func) ir.CallConvention { return f.CallConv }
 
 // goInternalConvention maps the backend's resolved "is this call Go-internal"
 // boolean back to the convention it denotes, so sites that carry the per-call
@@ -175,6 +181,17 @@ func (c calleeConventions) forCall(f *ir.Func, call *ir.Instr) ir.CallConvention
 	return ir.CallConvPlatform
 }
 
+// callIsGoInternal reports whether a *lowered* call is a Go ABIInternal one.
+//
+// It reads the convention lowerCalls recorded on the instruction rather than
+// resolving it again, because by emission time the callee resolution is done and
+// the instruction is the record of it. Every call lowerCalls emits sets
+// CallConvSet, so an unset one is an unlowered call and answers the platform ABI,
+// which is what it would have been lowered as.
+func callIsGoInternal(call *ir.Instr) bool {
+	return call.CallConvSet && call.CallConv == ir.CallConvGoInternal
+}
+
 // calleeSymbolOf returns the symbol a direct call targets. An indirect call
 // resolves its callee through a temporary and returns false; such a call carries
 // its convention on the instruction instead.
@@ -219,6 +236,12 @@ func newArgAssigner(goABI bool) argAssigner {
 	return argAssigner{intRegs: c.intArgRegs, floatRegs: c.floatArgRegs, goABI: c.packsStackArgs}
 }
 
+// newArgAssignerFor is newArgAssigner keyed by the convention itself, for the
+// lowering sites that carry an ir.CallConvention rather than the older boolean.
+func newArgAssignerFor(cc ir.CallConvention) argAssigner {
+	return newArgAssigner(cc == ir.CallConvGoInternal)
+}
+
 func (a *argAssigner) assign(cls ir.Cls) argLoc {
 	if cls.IsFloat() {
 		if a.nsrn < len(a.floatRegs) {
@@ -255,17 +278,62 @@ func (a *argAssigner) assignStack(size, alignment int) int {
 // stackBytes returns the 16-aligned size of the stacked-argument area.
 func (a *argAssigner) stackBytes() int { return roundUp(a.nsaa, 16) }
 
-// retReg returns the register a value of the given class is returned in.
-func retReg(cls ir.Cls) Reg {
+// retRegFor returns the register a scalar value of the given class is returned
+// in under convention cc.
+//
+// The two conventions happen to agree for a single scalar -- System V's RAX/XMM0
+// are also ABIInternal's first argument registers -- and that coincidence is why
+// this is written as a table lookup rather than as the constants it resolves to
+// today. They part company at the second result register (RDX vs RBX), which is
+// where an aggregate return goes, so hard-coding the scalar answer would leave
+// the two halves of the same rule in different places.
+func retRegFor(cc ir.CallConvention, cls ir.Cls) Reg {
+	c := conventionABI(cc)
 	if cls.IsFloat() {
-		return XMM0
+		return c.retFloatRegs[0]
 	}
-	return RAX
+	return c.retIntRegs[0]
 }
 
-// retIntRegs / retSSERegs are the aggregate-return register sequences.
+// retIntRegs / retSSERegs are the System V aggregate-return register sequences,
+// reached through conventionABI(...).retIntRegs / .retFloatRegs.
 var retIntRegs = []Reg{RAX, RDX}
 var retSSERegs = []Reg{XMM0, XMM(1)}
+
+// crossConventionClobbers returns the registers a call made under convention
+// callee destroys that a body emitted under convention caller believes are
+// preserved for it.
+//
+// It exists because the two questions amd64 has to answer about one call site
+// come from different conventions. What the *body* may keep in a register across
+// the call is decided by the caller's convention (callersave.go and gcalloc.go
+// both read emissionConvention); what the *callee* actually preserves is decided
+// by the callee's. Those agreed as long as every function was System V. They do
+// not agree now: an ABIInternal callee preserves nothing at all, so a System V
+// caller that parked a value in RBX or R12..R15 across a closure call would find
+// it destroyed.
+//
+// The difference is expressed back into the IR as extra Defs on the lowered call
+// (lowerCalls), which is the only vocabulary the allocator and the caller-save
+// pass share for "this instruction destroys these registers" -- and it is the
+// accurate statement, not a workaround: an ABIInternal call really does define
+// those registers as far as the surrounding System V body is concerned.
+//
+// The reverse direction needs nothing. An ABIInternal *caller* already treats
+// every register as clobbered by every call, which covers a platform-ABI callee
+// as a special case.
+func crossConventionClobbers(caller, callee ir.CallConvention) []Reg {
+	if !conventionABI(caller).savesCalleeRegs || conventionABI(callee).savesCalleeRegs {
+		return nil
+	}
+	var regs []Reg
+	for r := RAX; r <= R15; r++ {
+		if calleeSavedFor(caller, r) && !calleeSavedFor(callee, r) {
+			regs = append(regs, r)
+		}
+	}
+	return regs
+}
 
 // newPinned creates a fresh temporary hard-bound to physical register r.
 func newPinned(f *ir.Func, r Reg, cls ir.Cls) ir.Ref {
