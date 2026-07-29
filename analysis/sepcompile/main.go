@@ -38,9 +38,11 @@ import (
 	"regexp"
 	"sort"
 	"strings"
+	"time"
 
 	"github.com/evanphx/cg12/arm64"
 	"github.com/evanphx/cg12/goc"
+	"github.com/evanphx/cg12/ir"
 	"github.com/evanphx/cg12/obj"
 )
 
@@ -476,9 +478,44 @@ func dumpSymbols(program string, o *obj.Object, want map[string]bool) {
 	}
 }
 
+// censusModule reports the IR the back end has to chew through and the data
+// items whose value is a whole-module layout delta rather than a relocation.
+func censusModule(program string, module *ir.Module) {
+	blocks, instructions := 0, 0
+	for _, function := range module.Funcs {
+		if function == nil {
+			continue
+		}
+		for _, block := range function.Blocks {
+			blocks++
+			instructions += len(block.Instrs)
+		}
+	}
+	relative := 0
+	relativeBases := map[string]int{}
+	owners := 0
+	for _, data := range module.Data {
+		owns := false
+		for _, item := range data.Items {
+			if item.Sym != "" && item.RelativeTo != "" {
+				relative++
+				relativeBases[item.RelativeTo]++
+				owns = true
+			}
+		}
+		if owns {
+			owners++
+		}
+	}
+	fmt.Printf("%s: funcs=%d blocks=%d instrs=%d data=%d relative-items=%d in %d data symbols; bases=%v\n",
+		program, len(module.Funcs), blocks, instructions, len(module.Data), relative, owners, relativeBases)
+}
+
 func main() {
 	outDir := flag.String("out", "", "directory to write per-program JSON records into")
 	dump := flag.String("dump", "", "comma-separated symbol names to dump instead of summarizing")
+	fixups := flag.Bool("fixups", false, "census the module's relative data references and IR sizes instead of compiling an object")
+	timing := flag.Bool("timing", false, "report front-end and back-end wall clock")
 	flag.Parse()
 	if flag.NArg() == 0 {
 		fmt.Fprintln(os.Stderr, "usage: sepcompile [-out dir] file.go...")
@@ -490,12 +527,24 @@ func main() {
 			fmt.Fprintf(os.Stderr, "sepcompile: %v\n", err)
 			os.Exit(1)
 		}
+		frontEndStart := time.Now()
 		module, err := goc.CompileExecutableFor(goc.TargetARM64, filepath.Base(input), src)
 		if err != nil {
 			fmt.Fprintf(os.Stderr, "sepcompile: %s: compile: %v\n", input, err)
 			continue
 		}
+		frontEnd := time.Since(frontEndStart)
+		if *fixups {
+			censusModule(filepath.Base(input), module)
+			continue
+		}
+		backEndStart := time.Now()
 		object, err := arm64.CompileToObject(module)
+		backEnd := time.Since(backEndStart)
+		if *timing {
+			fmt.Printf("%s: frontend=%.3fs backend=%.3fs total=%.3fs\n",
+				filepath.Base(input), frontEnd.Seconds(), backEnd.Seconds(), (frontEnd + backEnd).Seconds())
+		}
 		if err != nil {
 			fmt.Fprintf(os.Stderr, "sepcompile: %s: object: %v\n", input, err)
 			continue

@@ -50,6 +50,8 @@ func main() {
 		check(linkNative(work, objectBytes, assembly, *out))
 	case "split":
 		check(linkSplit(objectBytes))
+	case "pins":
+		check(reportPins(objectBytes))
 	default:
 		check(fmt.Errorf("unknown mode %q", *mode))
 	}
@@ -199,6 +201,53 @@ func linkSplit(objectBytes []byte) error {
 	if len(merged.Relocs) != len(controlMerged.Relocs) {
 		fmt.Printf("seplink: but the leftover relocation counts differ: %d vs %d\n", len(merged.Relocs), len(controlMerged.Relocs))
 	}
+	return nil
+}
+
+// reportPins answers whether a linker could drop unreferenced functions from a
+// prebuilt runtime. It walks the reference graph from the entry symbol twice:
+// once over every relocation, and once ignoring the relocations that originate
+// inside the whole-program Go metadata blob. The gap between the two is what
+// linker-level dead stripping could recover only if the metadata were rebuilt
+// after stripping rather than taken from the prebuilt object.
+func reportPins(objectBytes []byte) error {
+	whole, err := obj.ReadELF(objectBytes)
+	if err != nil {
+		return err
+	}
+	metadataStart := uint64(len(whole.Data))
+	for _, s := range whole.Syms {
+		if s.Section == obj.SecData && s.Name == ".goc.go.gcbss" {
+			metadataStart = s.Value
+		}
+	}
+	textSymbols := map[string]obj.Sym{}
+	for _, s := range whole.Syms {
+		if s.Section == obj.SecText && s.Func {
+			textSymbols[s.Name] = s
+		}
+	}
+	pinnedByMetadata := map[string]bool{}
+	for _, r := range whole.DataRelocs {
+		if r.Offset >= metadataStart && textSymbols[r.Sym].Name != "" {
+			pinnedByMetadata[r.Sym] = true
+		}
+	}
+	total := 0
+	for _, s := range textSymbols {
+		total += int(s.Size)
+	}
+	pinnedBytes := 0
+	for name := range pinnedByMetadata {
+		pinnedBytes += int(textSymbols[name].Size)
+	}
+	fmt.Printf("seplink: .data is %d bytes; the Go metadata blob starts at %d (%d bytes, %.1f%%)\n",
+		len(whole.Data), metadataStart, len(whole.Data)-int(metadataStart),
+		100*float64(len(whole.Data)-int(metadataStart))/float64(len(whole.Data)))
+	fmt.Printf("seplink: %d function symbols, %d bytes\n", len(textSymbols), total)
+	fmt.Printf("seplink: %d of them (%.1f%%), %d bytes (%.1f%%), are referenced by a relocation inside that blob\n",
+		len(pinnedByMetadata), 100*float64(len(pinnedByMetadata))/float64(len(textSymbols)),
+		pinnedBytes, 100*float64(pinnedBytes)/float64(total))
 	return nil
 }
 
