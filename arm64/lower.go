@@ -15,7 +15,12 @@ import (
 //
 // Only the integer subset (classes w and l) is handled; anything outside it
 // returns an explicit error rather than emitting silently wrong code.
-func lower(f *ir.Func, tlsModel TLSModel) error {
+//
+// conventions is the object-wide callee-convention index (see convention.go); it
+// decides which ABI each call site is lowered against. A nil map is legal and
+// means "this object defines no functions I can resolve against", under which
+// every unmarked direct call is platform ABI.
+func lower(f *ir.Func, conventions calleeConventions, tlsModel TLSModel) error {
 	if err := f.MarkLowered("arm64"); err != nil {
 		return err
 	}
@@ -43,7 +48,7 @@ func lower(f *ir.Func, tlsModel TLSModel) error {
 	if err := validateComparisonPredicates(f); err != nil {
 		return fmt.Errorf("after SSA destruction: %w", err)
 	}
-	if err := lowerABI(f); err != nil {
+	if err := lowerABI(f, conventions); err != nil {
 		return err
 	}
 	stabilizeClosureContext(f)
@@ -905,7 +910,7 @@ func newPinned(f *ir.Func, r Reg, cls ir.Cls) ir.Ref {
 // lowerABI makes the calling convention explicit: parameters are copied out of
 // their incoming registers, return values into x0, and call arguments/results
 // through the argument/result registers.
-func lowerABI(f *ir.Func) error {
+func lowerABI(f *ir.Func, conventions calleeConventions) error {
 	if err := lowerTailCalls(f); err != nil {
 		return err
 	}
@@ -934,7 +939,7 @@ func lowerABI(f *ir.Func) error {
 	if err := lowerParams(f, retBuf); err != nil {
 		return err
 	}
-	if err := lowerCalls(f); err != nil {
+	if err := lowerCalls(f, conventions); err != nil {
 		return err
 	}
 	return lowerReturns(f, retBuf)
@@ -1182,7 +1187,7 @@ func lowerAggReturn(f *ir.Func, b *ir.Block, retBuf ir.Ref) {
 	b.Jmp.Args = pins[1:]
 }
 
-func lowerCalls(f *ir.Func) error {
+func lowerCalls(f *ir.Func, conventions calleeConventions) error {
 	for _, b := range f.Blocks {
 		var out []ir.Instr
 		for i := range b.Instrs {
@@ -1193,7 +1198,7 @@ func lowerCalls(f *ir.Func) error {
 			}
 			callee := in.Args[0]
 			callArgs := in.Args[1:]
-			goInternal := callUsesGoInternal(f, &in)
+			goInternal := conventions.goInternalCall(f, &in)
 			pins := make([]ir.Ref, 0, len(callArgs))
 			var argSetup []ir.Instr // the OArg run, emitted after value computation
 			a := newArgAssigner(goInternal)
@@ -1392,13 +1397,6 @@ func lowerAAPCSValueReturn(function *ir.Func, block *ir.Block, resultBuffer ir.R
 	block.Jmp.Args = nil
 	lowerAggReturn(function, block, resultBuffer)
 	return nil
-}
-
-func callUsesGoInternal(function *ir.Func, call *ir.Instr) bool {
-	if call.CallConvSet {
-		return call.CallConv == ir.CallConvGoInternal
-	}
-	return function.UsesGoInternalCallConvention()
 }
 
 // lowerTLS rewrites references to thread-local variables into instructions the

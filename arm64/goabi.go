@@ -352,7 +352,15 @@ func semanticSubClass(class ir.Cls) ir.SubCls {
 	}
 }
 
-func maxOutgoingCallSize(function *ir.Func) int {
+// maxOutgoingCallSize returns the stacked-argument area the frame must reserve
+// below x29 for the calls that write into a fixed outgoing area. A managed frame
+// keeps SP stable across every call, so all of its calls count; an unmanaged
+// frame moves SP around each AAPCS64 call instead (see dynamicAAPCSFrame in
+// callSequence), so only its ABIInternal calls -- which always use a fixed area
+// so the runtime can walk the frame -- need room reserved here. Resolving that
+// per call must agree with the lowering and the emitter, so it uses the same
+// object-wide convention index they do.
+func maxOutgoingCallSize(function *ir.Func, conventions calleeConventions) int {
 	maximum := 0
 	for _, block := range function.Blocks {
 		for index := range block.Instrs {
@@ -360,7 +368,7 @@ func maxOutgoingCallSize(function *ir.Func) int {
 			if instruction.Op != ir.OCall || instruction.Tail {
 				continue
 			}
-			if !function.UsesManagedFrame() && !callUsesGoInternal(function, instruction) {
+			if !function.UsesManagedFrame() && !conventions.goInternalCall(function, instruction) {
 				continue
 			}
 			maximum = max(maximum, int(instruction.Aux))

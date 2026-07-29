@@ -202,7 +202,7 @@ func TestLowerAcceptsFloat(t *testing.T) {
 	f := ir.NewModule().NewFunc("f", ir.ClsD)
 	x := f.Param("x", ir.ClsD)
 	f.Entry().Ret(x)
-	require.NoError(t, lower(f, TLSLocalExec))
+	require.NoError(t, lower(f, moduleConventions(f), TLSLocalExec))
 }
 
 func TestLowerManyParamsUseStack(t *testing.T) {
@@ -211,7 +211,7 @@ func TestLowerManyParamsUseStack(t *testing.T) {
 		f.Param("p", ir.ClsW)
 	}
 	f.Entry().RetVoid()
-	require.NoError(t, lower(f, TLSLocalExec))
+	require.NoError(t, lower(f, moduleConventions(f), TLSLocalExec))
 	stacked := 0
 	for _, in := range f.Start.Instrs {
 		if in.Op == ir.OPar && len(in.Args) == 0 {
@@ -227,7 +227,7 @@ func TestLowerManyFloatParamsUseStack(t *testing.T) {
 		f.Param("d", ir.ClsD)
 	}
 	f.Entry().RetVoid()
-	require.NoError(t, lower(f, TLSLocalExec))
+	require.NoError(t, lower(f, moduleConventions(f), TLSLocalExec))
 	stacked := 0
 	for _, in := range f.Start.Instrs {
 		if in.Op == ir.OPar && len(in.Args) == 0 {
@@ -247,7 +247,7 @@ func TestLowerFloatParamsUseSeparateBank(t *testing.T) {
 		f.Param("d", ir.ClsD)
 	}
 	f.Entry().RetVoid()
-	require.NoError(t, lower(f, TLSLocalExec), "6 int + 6 float args fit in x0..x5 and v0..v5")
+	require.NoError(t, lower(f, moduleConventions(f), TLSLocalExec), "6 int + 6 float args fit in x0..x5 and v0..v5")
 }
 
 func TestLowerManyCallArgsUseStack(t *testing.T) {
@@ -259,7 +259,7 @@ func TestLowerManyCallArgsUseStack(t *testing.T) {
 	}
 	e.CallVoid(f.Sym("g", 0), args...)
 	e.RetVoid()
-	require.NoError(t, lower(f, TLSLocalExec))
+	require.NoError(t, lower(f, moduleConventions(f), TLSLocalExec))
 	// The call records a 16-aligned outgoing stack area for the two extra args.
 	var call *ir.Instr
 	for k := range f.Start.Instrs {
@@ -538,7 +538,7 @@ func TestManagedFrameKeepsAAPCS64ParameterAssignment(t *testing.T) {
 
 	prepareGoABI(function)
 	ir.LowerPointers(function, ptrCls)
-	require.NoError(t, lower(function, TLSLocalExec))
+	require.NoError(t, lower(function, moduleConventions(function), TLSLocalExec))
 
 	stackParameterFound := false
 	for index := range function.Start.Instrs {
@@ -565,7 +565,7 @@ func TestAAPCS64FunctionCanCallGoInternalContract(t *testing.T) {
 
 	prepareGoABI(function)
 	ir.LowerPointers(function, ptrCls)
-	require.NoError(t, lower(function, TLSLocalExec))
+	require.NoError(t, lower(function, moduleConventions(function), TLSLocalExec))
 
 	var loweredCall *ir.Instr
 	goInternalNinthRegister := false
@@ -629,7 +629,7 @@ func TestAAPCS64IndirectResultBufferIsStackCopyRoot(t *testing.T) {
 		function.Long(1),
 	)
 
-	require.NoError(t, lower(function, TLSLocalExec))
+	require.NoError(t, lower(function, moduleConventions(function), TLSLocalExec))
 
 	var resultBuffer *ir.Temp
 	for _, temporary := range function.Temps {
@@ -654,7 +654,7 @@ func TestAAPCS64AggregateParameterPointersAreStackCopyRoots(t *testing.T) {
 	function.Entry().CallVoid(function.Sym("observe", 0))
 	function.Entry().RetVoid()
 
-	require.NoError(t, lower(function, TLSLocalExec))
+	require.NoError(t, lower(function, moduleConventions(function), TLSLocalExec))
 	assert.True(t, function.Temp(parameter).GCRef)
 
 	pointerRegisters := make(map[int]bool)
@@ -717,7 +717,7 @@ func TestManagedAAPCS64DoesNotSplitGroupedInterfaceAcrossRegisterBoundary(t *tes
 		require.NotEqual(t, X7, spill.reg, "the complete interface must move to the stack")
 	}
 
-	require.NoError(t, lower(function, TLSLocalExec))
+	require.NoError(t, lower(function, moduleConventions(function), TLSLocalExec))
 	interfaceParameters := function.Params[7:]
 	require.Len(t, interfaceParameters, 2)
 	for index, parameter := range interfaceParameters {
@@ -962,10 +962,10 @@ func TestManagedFrameMetadataStartsAfterFrameAllocation(t *testing.T) {
 	entry.Store(function.ConstInt(ir.ClsL, 1), slot)
 	entry.RetVoid()
 
-	require.NoError(t, lower(function, TLSLocalExec))
+	require.NoError(t, lower(function, moduleConventions(function), TLSLocalExec))
 	allocation, err := regAlloc(function)
 	require.NoError(t, err)
-	machine, err := emitMachine(function, allocation, nil, TLSLocalExec)
+	machine, err := emitMachine(function, allocation, moduleConventions(function), nil, TLSLocalExec)
 	require.NoError(t, err)
 
 	assert.GreaterOrEqual(t, machine.m.frameStart, 44)
@@ -1138,10 +1138,10 @@ func TestGoStackMapsDropDeadPointerBearingLocal(t *testing.T) {
 
 	prepareGoABI(function)
 	ir.LowerPointers(function, ptrCls)
-	require.NoError(t, lower(function, TLSLocalExec))
+	require.NoError(t, lower(function, moduleConventions(function), TLSLocalExec))
 	allocation, err := regAlloc(function)
 	require.NoError(t, err)
-	machine, err := emitMachine(function, allocation, nil, TLSLocalExec)
+	machine, err := emitMachine(function, allocation, moduleConventions(function), nil, TLSLocalExec)
 	require.NoError(t, err)
 
 	points := machine.m.goStackMapPoints()
@@ -1415,10 +1415,10 @@ func compileGoFunctionForStackMaps(t *testing.T, function *ir.Func) *machineCode
 
 	prepareGoABI(function)
 	ir.LowerPointers(function, ptrCls)
-	require.NoError(t, lower(function, TLSLocalExec))
+	require.NoError(t, lower(function, moduleConventions(function), TLSLocalExec))
 	allocation, err := regAlloc(function)
 	require.NoError(t, err)
-	machine, err := emitMachine(function, allocation, nil, TLSLocalExec)
+	machine, err := emitMachine(function, allocation, moduleConventions(function), nil, TLSLocalExec)
 	require.NoError(t, err)
 	return machine
 }
@@ -1611,7 +1611,7 @@ func TestGoABIClosureCallReservesContextSpillWord(t *testing.T) {
 	function.Entry().RetVoid()
 
 	prepareGoABI(function)
-	require.NoError(t, lower(function, TLSLocalExec))
+	require.NoError(t, lower(function, moduleConventions(function), TLSLocalExec))
 	var loweredCall *ir.Instr
 	for index := range function.Entry().Instrs {
 		instruction := &function.Entry().Instrs[index]
@@ -1637,10 +1637,10 @@ func TestGoABIReportsPointerResultSlotLiveAcrossCall(t *testing.T) {
 
 	prepareGoABI(function)
 	ir.LowerPointers(function, ptrCls)
-	require.NoError(t, lower(function, TLSLocalExec))
+	require.NoError(t, lower(function, moduleConventions(function), TLSLocalExec))
 	allocation, err := regAlloc(function)
 	require.NoError(t, err)
-	frame := computeFrame(function, allocation)
+	frame := computeFrame(function, allocation, moduleConventions(function))
 	words := goPointerWordIndexes(function, frame.allocOff, frame.spillBase)
 	assert.Contains(t, words, 0)
 }

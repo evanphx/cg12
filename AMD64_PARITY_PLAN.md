@@ -196,8 +196,22 @@ argument counts pick the same registers. amd64 has no overlap — System V start
 at RDI, ABIInternal at RAX — so copying the rule would miscompile the first
 method value it met. `calleeConventions.forCall` resolves instead from the call's
 explicit convention, then the callee's own, then platform ABI for symbols outside
-the module. **arm64 is worth a follow-up audit** for the >8-argument and
-stack-argument cases the coincidence does not cover.
+the module.
+
+**arm64 carried the same bug and is now fixed.** The follow-up audit this section
+originally called for found it reproducible: a nine-integer-argument unmarked
+direct call to a platform-ABI callee lowers to x0..x7 plus a stack slot from a
+platform caller, but to x0..x8 from an ABIInternal caller — the ninth argument
+lands in x8 where the callee reads the stack. `arm64/convention.go` now carries
+the identical `calleeConventions` rule, resolved once per object and threaded to
+lowering, frame layout, and the emitter so they cannot disagree. Two notes for
+whoever meets it next: `applyAssemblyCallConventions` already stamps
+`CallConvSet` on direct calls to symbols the object defines, so in the real
+driver the unsound fallback only reached calls to *external* symbols and unmarked
+indirect calls; and the pre-existing "cannot tail-call across calling
+conventions" guard is now reachable where it was structurally dead before, so an
+ABIInternal function tail-calling an external symbol is a hard error rather than
+a silent mismatch.
 
 Also settled, for the contracts §7 says must be fixed in writing before fan-out:
 `stackLinkBytes = 0` under both conventions (the call instruction pushes the
