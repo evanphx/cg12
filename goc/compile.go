@@ -9598,10 +9598,17 @@ func (g *gen) expr(e ast.Expr) (result ir.Ref) {
 			}
 			if obj.Pkg() != nil && obj.Pkg().Path() == "runtime" && obj.Name() == "getg" && len(n.Args) == 0 {
 				// getg reads whichever register the target's Go ABI reserves for
-				// the current goroutine. arm64 uses X28; no register has been
-				// chosen for amd64 yet, where the choice is constrained enough to
-				// be a design decision of its own (see AMD64_PARITY_PLAN 3.2), so
-				// the target is still refused rather than guessed at.
+				// the current goroutine. arm64 uses X28; amd64's is R14, settled
+				// in AMD64_PARITY_PLAN B0 and recorded as regClosure's neighbour
+				// regG in amd64/reg.go.
+				//
+				// amd64 is still refused here, and the gate outlives the decision
+				// on purpose: knowing which register holds g is not the same as
+				// being able to compile a function that uses it. The amd64 backend
+				// does not yet reserve R14, lower ABIInternal arguments, or emit a
+				// managed-frame prologue (Track B). Letting getg through before
+				// then would trade this one accurate diagnostic for a scatter of
+				// failures much further downstream.
 				if g.target != TargetARM64 {
 					g.fail(n, "runtime.getg intrinsic is unsupported on %s", g.target)
 					return ir.R
@@ -11165,11 +11172,16 @@ func (g *gen) closureRegister() int {
 		// Go's ARM64 ABIInternal reserves X26 for the closure context.
 		return 26
 	}
-	// RDX on amd64, which is what Go's ABIInternal uses. This arm has never been
-	// exercised -- nothing reaches it today, because getg refuses the target long
-	// before a closure is built -- so treat it as a placeholder, not as validated:
-	// amd64 also reserves RDX for div/rem and as vaArg scratch, which is part of
-	// the register decision AMD64_PARITY_PLAN 3.2 leaves open.
+	// RDX on amd64, which is what Go's ABIInternal uses -- "set RDX to point to
+	// the closure (if a closure call)", stdlib/src/runtime/asm_amd64.s:2003.
+	//
+	// This is now the settled choice rather than a placeholder (AMD64_PARITY_PLAN
+	// B0, recorded as regClosure in amd64/reg.go). RDX is also the high half of
+	// amd64's div/rem and widening multiply, and mc_va.go's vararg scratch; the
+	// collision is resolved by the backend copying the incoming context to an
+	// allocatable register at entry, before any of those uses can run, which is
+	// the same stabilization arm64 already performs for X26. The arm still goes
+	// unexercised until B1 lowers ABIInternal, because getg refuses amd64 first.
 	return 2
 }
 

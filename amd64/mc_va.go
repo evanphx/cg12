@@ -11,7 +11,7 @@ import (
 // how many arrived in GP and SSE registers and the byte size of the named stack
 // arguments — the starting state for a va_list.
 func namedCounts(f *ir.Func) (ngp, nfp, stackBytes int) {
-	var a argAssigner
+	a := newArgAssigner(false)
 	for _, p := range f.Params {
 		if p.Agg != nil {
 			a.assignAgg(classifyAgg(p.Agg))
