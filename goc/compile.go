@@ -3979,7 +3979,7 @@ func (g *gen) goABIAggregate(valueType types.Type) *ir.AggType {
 	}
 
 	aggregate := &ir.AggType{
-		Name:   fmt.Sprintf(".goc.goabi.%d", len(g.mod.Types)),
+		Name:   contentSymbolName(".goc.goabi", cacheKey),
 		Align:  int(typeAlign(valueType)),
 		Fields: fields,
 	}
@@ -4948,7 +4948,7 @@ func (g *gen) ensureInterfaceItab(sourceType, targetType types.Type) string {
 		return symbol
 	}
 
-	symbol := fmt.Sprintf(".goc.itab.%d", len(g.interfaceItabs))
+	symbol := contentSymbolName(".goc.itab", key)
 	g.interfaceItabs[key] = symbol
 	interfaceType := targetType.Underlying().(*types.Interface)
 	sourceTypeTag := g.ensureTypeTag(sourceType)
@@ -5507,7 +5507,10 @@ func (g *gen) emitDynamicGlobalInitializer(initializer *globalInitializer) {
 	object := initializer.objects[0]
 	guardName := g.dynamicInitializerGuards[object]
 	if guardName == "" {
-		guardName = fmt.Sprintf(".goc.global.init.%d", len(g.dynamicInitializerGuards))
+		// Position, not just the name: a package may declare several blank
+		// globals with initializers, and every one of them is called "_".
+		guardName = contentSymbolName(".goc.global.init",
+			objectPackagePath(object)+"."+object.Name()+"@"+g.fset.Position(object.Pos()).String())
 		for _, groupObject := range initializer.objects {
 			g.dynamicInitializerGuards[groupObject] = guardName
 		}
