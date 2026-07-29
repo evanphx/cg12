@@ -88,7 +88,7 @@ func moduleInitDeclarations(rootFiles []*ast.File, rootInfo *types.Info, rootPkg
 // reachableFunctions follows statically named function calls across source
 // units. Calls through interfaces are recorded by their interface method and
 // resolved later by interface lowering.
-func reachableFunctions(roots []*ast.FuncDecl, rootFiles []*ast.File, rootInfo *types.Info, rootPkg *types.Package, units map[string]*sourceUnit, dynamicTypes []types.Type, runtimeAllocation bool, initializers []functionDecl, linkNames map[*types.Func]string, assemblyReferences map[string]bool) ([]functionDecl, map[types.Object]bool) {
+func reachableFunctions(fset *token.FileSet, roots []*ast.FuncDecl, rootFiles []*ast.File, rootInfo *types.Info, rootPkg *types.Package, units map[string]*sourceUnit, dynamicTypes []types.Type, runtimeAllocation bool, initializers []functionDecl, linkNames map[*types.Func]string, assemblyReferences map[string]bool) ([]functionDecl, map[types.Object]bool) {
 	declarations := make(map[*types.Func]functionDecl)
 	linkedDeclarations := make(map[string]functionDecl)
 	methods := make(map[string][]functionDecl)
@@ -219,7 +219,7 @@ func reachableFunctions(roots []*ast.FuncDecl, rootFiles []*ast.File, rootInfo *
 			return
 		}
 		valueType = canonicalAliasType(valueType)
-		key := goTypeKey(valueType)
+		key := goTypeKey(fset, valueType)
 		if dynamicInterfaceTypes[key] != nil {
 			return
 		}
@@ -828,19 +828,19 @@ func isMapRangeType(valueType types.Type) bool {
 	return false
 }
 
-func collectDynamicTypes(rootInfo *types.Info, units map[string]*sourceUnit) []types.Type {
+func collectDynamicTypes(fset *token.FileSet, rootInfo *types.Info, units map[string]*sourceUnit) []types.Type {
 	byKey := make(map[string]types.Type)
 	add := func(valueType types.Type) {
 		if valueType == nil {
 			return
 		}
-		key := goTypeKey(valueType)
+		key := goTypeKey(fset, valueType)
 		if _, exists := byKey[key]; !exists {
 			byKey[key] = valueType
 		}
 		if named, ok := types.Unalias(valueType).(*types.Named); ok {
 			pointer := types.NewPointer(named)
-			pointerKey := goTypeKey(pointer)
+			pointerKey := goTypeKey(fset, pointer)
 			if _, exists := byKey[pointerKey]; !exists {
 				byKey[pointerKey] = pointer
 			}

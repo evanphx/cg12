@@ -105,8 +105,8 @@ func Test() byte { return sha256.Sum256(nil)[0] }
 		t.Fatal(err)
 	}
 	root := file.Decls[1].(*ast.FuncDecl)
-	dynamicTypes := collectDynamicTypes(info, loader.units)
-	reachable, _ := reachableFunctions([]*ast.FuncDecl{root}, []*ast.File{file}, info, pkg, loader.units, dynamicTypes, false, nil, nil, nil)
+	dynamicTypes := collectDynamicTypes(fset, info, loader.units)
+	reachable, _ := reachableFunctions(fset, []*ast.FuncDecl{root}, []*ast.File{file}, info, pkg, loader.units, dynamicTypes, false, nil, nil, nil)
 	names := make(map[string]bool)
 	for _, function := range reachable {
 		names[function.pkg.Path()+"."+function.decl.Name.Name] = true
@@ -152,8 +152,9 @@ func Test() string {
 		t.Fatal(err)
 	}
 	root := file.Decls[1].(*ast.FuncDecl)
-	dynamicTypes := collectDynamicTypes(info, loader.units)
+	dynamicTypes := collectDynamicTypes(fset, info, loader.units)
 	reachable, _ := reachableFunctions(
+		fset,
 		[]*ast.FuncDecl{root},
 		[]*ast.File{file},
 		info,

@@ -532,6 +532,9 @@ func main() {
 }
 
 func TestRuntimeTypeKeyCanonicalizesAliasesInGenericArguments(t *testing.T) {
+	// Every type here is synthesized at token.NoPos, so the set is only needed
+	// to satisfy the signature; no position is ever rendered from it.
+	fset := token.NewFileSet()
 	netipPackage := types.NewPackage("net/netip", "netip")
 	addressDetailName := types.NewTypeName(token.NoPos, netipPackage, "addrDetail", nil)
 	addressDetail := types.NewNamed(addressDetailName, types.NewStruct(nil, nil), nil)
@@ -556,7 +559,7 @@ func TestRuntimeTypeKeyCanonicalizesAliasesInGenericArguments(t *testing.T) {
 
 	aliasPointer := types.NewPointer(aliasInstance)
 	concretePointer := types.NewPointer(concreteInstance)
-	if got, want := runtimeTypeKey(aliasPointer), runtimeTypeKey(concretePointer); got != want {
+	if got, want := runtimeTypeKey(fset, aliasPointer), runtimeTypeKey(fset, concretePointer); got != want {
 		t.Fatalf("runtime type keys differ: %q != %q", got, want)
 	}
 }
@@ -611,12 +614,12 @@ func second() {
 	}
 
 	keys := map[string]bool{
-		runtimeTypeKey(types.NewPointer(packageType)): true,
-		goTypeKey(types.NewSlice(packageType)):        true,
+		runtimeTypeKey(fset, types.NewPointer(packageType)): true,
+		goTypeKey(fset, types.NewSlice(packageType)):        true,
 	}
 	for _, localType := range localTypes {
-		keys[runtimeTypeKey(types.NewPointer(localType))] = true
-		keys[goTypeKey(types.NewSlice(localType))] = true
+		keys[runtimeTypeKey(fset, types.NewPointer(localType))] = true
+		keys[goTypeKey(fset, types.NewSlice(localType))] = true
 	}
 	if len(keys) != 6 {
 		t.Fatalf("type keys collapsed distinct local declarations: %#v", keys)
@@ -1293,12 +1296,21 @@ func main() {
 	var initTask, initTasks *ir.Data
 	var arm64UseAlignedLoads *ir.Data
 	var cgoCallers *ir.Data
+	// The per-package init task is found through the list that references it
+	// rather than by name. Its name is derived from the package it initializes,
+	// so pinning the spelling here would be testing the naming scheme instead of
+	// the thing that matters: that the module's task list points at main's task.
+	dataByName := make(map[string]*ir.Data, len(module.Data))
+	for _, data := range module.Data {
+		dataByName[data.Name] = data
+	}
 	for _, data := range module.Data {
 		switch data.Name {
-		case ".goc.module.inittask.0":
-			initTask = data
 		case ".goc.module.inittasks":
 			initTasks = data
+			if len(data.Items) == 1 {
+				initTask = dataByName[data.Items[0].Sym]
+			}
 		case "runtime.arm64UseAlignedLoads":
 			arm64UseAlignedLoads = data
 		case "_cgo_callers":
@@ -1314,8 +1326,10 @@ func main() {
 	if initTask == nil || len(initTask.Items) != 2 || initTask.Items[1].Sym != "main.init.0" {
 		t.Errorf("main init task = %#v", initTask)
 	}
-	if initTasks == nil || len(initTasks.Items) != 1 || initTasks.Items[0].Sym != ".goc.module.inittask.0" {
+	if initTasks == nil || len(initTasks.Items) != 1 {
 		t.Errorf("module init tasks = %#v", initTasks)
+	} else if !strings.HasPrefix(initTasks.Items[0].Sym, ".goc.module.inittask.") {
+		t.Errorf("module init task list references %q, want a .goc.module.inittask. symbol", initTasks.Items[0].Sym)
 	}
 }
 

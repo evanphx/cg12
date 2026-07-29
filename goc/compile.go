@@ -214,8 +214,8 @@ func compile(name string, src []byte, options compileOptions) (*ir.Module, error
 			return nil, err
 		}
 	}
-	dynamicTypes := collectDynamicTypes(info, loader.units)
-	functions, reachableGlobals := reachableFunctions(roots, []*ast.File{file}, info, pkg, loader.units, dynamicTypes, compileRuntime, moduleInitFunctions, linkNames, assemblyReferences)
+	dynamicTypes := collectDynamicTypes(fset, info, loader.units)
+	functions, reachableGlobals := reachableFunctions(fset, roots, []*ast.File{file}, info, pkg, loader.units, dynamicTypes, compileRuntime, moduleInitFunctions, linkNames, assemblyReferences)
 	globalPackages := map[string]bool{pkg.Path(): true}
 	if compileRuntime {
 		for path := range loader.units {
@@ -380,7 +380,7 @@ func compile(name string, src []byte, options compileOptions) (*ir.Module, error
 	addInterfaceMethodWrappers(g, functions)
 	redirectUnavailableInterfaceCallWrappers(mod)
 	if compileRuntime {
-		populateRuntimePointerTypes(mod, typeTags, runtimeTypes)
+		populateRuntimePointerTypes(fset, mod, typeTags, runtimeTypes)
 		clearUnavailableRuntimeMethodOffsets(mod)
 	}
 	if loader.units["crypto/internal/fips140"] != nil && !compileRuntime {
@@ -776,7 +776,7 @@ func addModuleInitTasks(
 ) error {
 	var backingItems []ir.DataItem
 	var pointerWords []int
-	for packageIndex, packageInitializer := range packages {
+	for _, packageInitializer := range packages {
 		dynamicSymbols := packageDynamicInitializerSymbols(
 			packageInitializer.info,
 			dynamicInitializers,
@@ -786,7 +786,9 @@ func addModuleInitTasks(
 		if functionCount == 0 {
 			continue
 		}
-		taskName := fmt.Sprintf(".goc.module.inittask.%d", packageIndex)
+		// Named for the package, not its index in this module's walk. Two
+		// separately compiled modules each start that index at zero.
+		taskName := contentSymbolName(".goc.module.inittask", packageInitializer.path)
 		taskItems := []ir.DataItem{{Sub: ir.SubW, Ints: []int64{0, int64(functionCount)}}}
 		for _, symbol := range dynamicSymbols {
 			taskItems = append(taskItems, ir.DataItem{Sub: ir.SubL, Sym: symbol})
@@ -928,7 +930,7 @@ func addInterfaceMethodWrappers(g *gen, reachable []functionDecl) {
 		for index, candidate := range candidates {
 			candidateSignature := candidate.function.Type().(*types.Signature)
 			receiverType := candidateSignature.Recv().Type()
-			tagName := g.typeTags[goTypeKey(candidate.dynamicType)]
+			tagName := g.typeTags[goTypeKey(g.fset, candidate.dynamicType)]
 			if tagName == "" {
 				continue
 			}
@@ -990,7 +992,7 @@ func interfaceMethodCandidates(g *gen, reachable []functionDecl, method *types.F
 	}
 	var candidates []interfaceMethodCandidate
 	add := func(function *types.Func, dynamicType types.Type, interfacePath []int) {
-		key := g.functionSymbol(function) + "|" + goTypeKey(dynamicType)
+		key := g.functionSymbol(function) + "|" + goTypeKey(g.fset, dynamicType)
 		if seen[key] {
 			return
 		}
@@ -1049,21 +1051,21 @@ func interfaceMethodCandidates(g *gen, reachable []functionDecl, method *types.F
 		}
 	}
 	sort.Slice(candidates, func(i, j int) bool {
-		left := g.functionSymbol(candidates[i].function) + "|" + goTypeKey(candidates[i].dynamicType)
-		right := g.functionSymbol(candidates[j].function) + "|" + goTypeKey(candidates[j].dynamicType)
+		left := g.functionSymbol(candidates[i].function) + "|" + goTypeKey(g.fset, candidates[i].dynamicType)
+		right := g.functionSymbol(candidates[j].function) + "|" + goTypeKey(g.fset, candidates[j].dynamicType)
 		return left < right
 	})
 	return candidates
 }
 
-func goTypeKey(valueType types.Type) string {
+func goTypeKey(fset *token.FileSet, valueType types.Type) string {
 	key := types.TypeString(valueType, func(pkg *types.Package) string {
 		return pkg.Path()
 	})
-	return appendLocalTypeIdentities(key, valueType)
+	return appendLocalTypeIdentities(fset, key, valueType)
 }
 
-func appendLocalTypeIdentities(key string, valueType types.Type) string {
+func appendLocalTypeIdentities(fset *token.FileSet, key string, valueType types.Type) string {
 	var identities strings.Builder
 	active := make(map[types.Type]bool)
 	var visit func(types.Type, string)
@@ -1112,12 +1114,12 @@ func appendLocalTypeIdentities(key string, valueType types.Type) string {
 				visit(current.Term(index).Type(), fmt.Sprintf("%s.term%d", path, index))
 			}
 		case *types.Named:
-			appendLocalTypeIdentity(&identities, path, current.Obj())
+			appendLocalTypeIdentity(fset, &identities, path, current.Obj())
 			for index := 0; index < current.TypeArgs().Len(); index++ {
 				visit(current.TypeArgs().At(index), fmt.Sprintf("%s.argument%d", path, index))
 			}
 		case *types.TypeParam:
-			appendLocalTypeIdentity(&identities, path, current.Obj())
+			appendLocalTypeIdentity(fset, &identities, path, current.Obj())
 		}
 	}
 
@@ -1128,14 +1130,20 @@ func appendLocalTypeIdentities(key string, valueType types.Type) string {
 	return key + identities.String()
 }
 
-func appendLocalTypeIdentity(builder *strings.Builder, path string, object *types.TypeName) {
+func appendLocalTypeIdentity(fset *token.FileSet, builder *strings.Builder, path string, object *types.TypeName) {
 	if object == nil || object.Pkg() == nil || object.Parent() == object.Pkg().Scope() {
 		return
 	}
 	if object.Pos() == token.NoPos {
 		return
 	}
-	fmt.Fprintf(builder, "|%s=%s.%s@%d", path, object.Pkg().Path(), object.Name(), object.Pos())
+	// fset.Position, not the raw token.Pos: a Pos is an offset into the whole
+	// FileSet, so the same declaration has a different one depending on which
+	// files were parsed before it. That made the key -- and every symbol named
+	// from it -- differ between a compile that shared a preparsed standard
+	// library and one that did not.
+	fmt.Fprintf(builder, "|%s=%s.%s@%s", path, object.Pkg().Path(), object.Name(),
+		fset.Position(object.Pos()))
 }
 
 func addRuntimeInitTask(mod *ir.Module, declarations []functionDecl, initSymbols map[*types.Func]string) error {
@@ -3508,7 +3516,17 @@ func (g *gen) staticSliceHeaderItems(name string, sliceType *types.Slice, litera
 }
 
 func (g *gen) staticFunctionLiteral(literal *ast.FuncLit) string {
-	temporaryName := fmt.Sprintf(".goc.global.literal.%d", len(g.mod.Funcs))
+	// The full position, not line and column: nistec's p224/p384/p521 are one
+	// generated file three times over, so their literals share a line and a
+	// column and differ only in the file. Naming by position alone already
+	// miscompiles elsewhere in the tree for exactly that reason. The enclosing
+	// function is included too, since a generic body is compiled once per
+	// instantiation from the same source position.
+	literalKey := g.fset.Position(literal.Pos()).String()
+	if g.functionName != "" {
+		literalKey = g.functionName + "@" + literalKey
+	}
+	temporaryName, _ := g.internSymbol(".goc.global.literal", literalKey)
 	temporary := g.mod.NewFuncVoid(temporaryName)
 
 	savedFunction := g.fn
@@ -3933,7 +3951,7 @@ func (g *gen) goABIAggregate(valueType types.Type) *ir.AggType {
 		// instantiated caller, not to the generic function's ABI.
 		return nil
 	}
-	cacheKey := goABIAggregateKey(valueType)
+	cacheKey := goABIAggregateKey(g.fset, valueType)
 	if aggregate := g.goABITypes[cacheKey]; aggregate != nil {
 		return aggregate
 	}
@@ -3991,7 +4009,7 @@ func (g *gen) goABIAggregate(valueType types.Type) *ir.AggType {
 	return aggregate
 }
 
-func goABIAggregateKey(valueType types.Type) string {
+func goABIAggregateKey(fset *token.FileSet, valueType types.Type) string {
 	switch value := valueType.Underlying().(type) {
 	case *types.Slice:
 		return "descriptor:slice"
@@ -4002,7 +4020,7 @@ func goABIAggregateKey(valueType types.Type) string {
 			return "descriptor:string"
 		}
 	}
-	return "aggregate:" + goTypeKey(valueType)
+	return "aggregate:" + goTypeKey(fset, valueType)
 }
 
 func (g *gen) goABIField(valueType types.Type) (ir.Field, bool) {
@@ -4943,7 +4961,7 @@ func (g *gen) staticInterfaceTypeWord(sourceType, targetType types.Type) ir.Data
 }
 
 func (g *gen) ensureInterfaceItab(sourceType, targetType types.Type) string {
-	key := runtimeTypeKey(sourceType) + "->" + runtimeTypeKey(targetType)
+	key := runtimeTypeKey(g.fset, sourceType) + "->" + runtimeTypeKey(g.fset, targetType)
 	if symbol := g.interfaceItabs[key]; symbol != "" {
 		return symbol
 	}
@@ -4986,7 +5004,7 @@ func (g *gen) ensureInterfaceCallWrapperFor(sourceType types.Type, method *types
 	}
 
 	methodSymbol := g.functionSymbol(method)
-	key := runtimeTypeKey(sourceType) + "|" + methodSymbol + "|" + indexPathKey(indexes)
+	key := runtimeTypeKey(g.fset, sourceType) + "|" + methodSymbol + "|" + indexPathKey(indexes)
 	if symbol := g.interfaceCallWrappers[key]; symbol != "" {
 		return symbol
 	}
@@ -5592,7 +5610,7 @@ func (g *gen) typeTag(valueType types.Type) ir.Ref {
 
 func (g *gen) ensureTypeTag(valueType types.Type) string {
 	valueType = canonicalAliasType(valueType)
-	key := runtimeTypeKey(valueType)
+	key := runtimeTypeKey(g.fset, valueType)
 	if g.runtimeTypes != nil {
 		g.runtimeTypes[key] = valueType
 	}
@@ -5806,14 +5824,14 @@ func (g *gen) ensureTypeTag(valueType types.Type) string {
 	return name
 }
 
-func populateRuntimePointerTypes(module *ir.Module, typeTags map[string]string, runtimeTypes map[string]types.Type) {
+func populateRuntimePointerTypes(fset *token.FileSet, module *ir.Module, typeTags map[string]string, runtimeTypes map[string]types.Type) {
 	dataByName := make(map[string]*ir.Data, len(module.Data))
 	for _, data := range module.Data {
 		dataByName[data.Name] = data
 	}
 	for key, valueType := range runtimeTypes {
 		typeSymbol := typeTags[key]
-		pointerSymbol := typeTags[runtimeTypeKey(types.NewPointer(valueType))]
+		pointerSymbol := typeTags[runtimeTypeKey(fset, types.NewPointer(valueType))]
 		if typeSymbol == "" || pointerSymbol == "" {
 			continue
 		}
@@ -5997,7 +6015,7 @@ func runtimeTypeIsNamed(valueType types.Type) bool {
 	return named
 }
 
-func runtimeTypeKey(valueType types.Type) string {
+func runtimeTypeKey(fset *token.FileSet, valueType types.Type) string {
 	valueType = canonicalAliasType(valueType)
 	if signature, ok := valueType.(*types.Signature); ok {
 		parameters := runtimeAnonymousTuple(signature.Params())
@@ -6007,7 +6025,7 @@ func runtimeTypeKey(valueType types.Type) string {
 	key := types.TypeString(valueType, func(pkg *types.Package) string {
 		return pkg.Path()
 	})
-	return appendLocalTypeIdentities(key, valueType)
+	return appendLocalTypeIdentities(fset, key, valueType)
 }
 
 func runtimeAnonymousTuple(tuple *types.Tuple) *types.Tuple {
@@ -12223,7 +12241,7 @@ func (g *gen) appendCall(call *ast.CallExpr) ir.Ref {
 
 func (g *gen) channelType(channel *types.Chan) ir.Ref {
 	element := channel.Elem()
-	elementName, fresh := g.internSymbol(".goc.channel.element", goTypeKey(element))
+	elementName, fresh := g.internSymbol(".goc.channel.element", goTypeKey(g.fset, element))
 	if !fresh {
 		return g.fn.Sym(elementName+".channel", 0)
 	}
@@ -12249,7 +12267,7 @@ func (g *gen) channelType(channel *types.Chan) ir.Ref {
 }
 
 func (g *gen) runtimeType(valueType types.Type) ir.Ref {
-	name, fresh := g.internSymbol(".goc.runtime.type", goTypeKey(valueType))
+	name, fresh := g.internSymbol(".goc.runtime.type", goTypeKey(g.fset, valueType))
 	if !fresh {
 		return g.fn.Sym(name, 0)
 	}
