@@ -5,8 +5,8 @@ Status: **in progress — findings written as they land.**
 
 ## Answer so far (one paragraph)
 
-Yes, with one specific blocker that has to be fixed first. Measured over 12 capability
-programs, **99.5% of a program's compiled `.text` bytes and 3742 of its 3751 functions are
+Yes, with one specific blocker that has to be fixed first. Measured over 28 capability
+programs, **99.3% of a program's compiled `.text` bytes and 3740 of its 3751 functions are
 byte-identical across every program**, once you account for the fact that cg12 names a large
 family of emitted symbols by a running counter rather than by their content. Between two
 small programs (`hello.go` and `panic_recover.go`) **not one runtime function differs**. The
@@ -46,40 +46,50 @@ renumbering as a difference; Colour does not.
 Determinism was checked first: two separate processes compiling `hello.go` produce
 byte-identical records.
 
-### Programs measured (12)
+### Programs measured (28)
 
-`hello.go`, `fmt_sprintf.go`, `stdlib_http_parse_roundtrip.go`, `panic_recover.go`,
-`nested_defer.go`, `interface_slice_equality.go`, `reflect_methods.go`,
+The 12 the task asked for — `hello.go`, `fmt_sprintf.go`, `stdlib_http_parse_roundtrip.go`,
+`panic_recover.go`, `nested_defer.go`, `interface_slice_equality.go`, `reflect_methods.go`,
 `runtime_atomic_counter.go`, `runtime_buffered_channel_fifo.go`, `runtime_cleanup_basic.go`,
-`runtime_closure_captures_roots_gc.go`, `runtime_array_map_key.go`.
+`runtime_closure_captures_roots_gc.go`, `runtime_array_map_key.go` — plus 16 more:
+`runtime_accurate_gc_scalars`, `runtime_append_growth_pointer_elements`, `runtime_callers_stack`,
+`runtime_channel_interface_close_gc`, `runtime_complex_arithmetic`,
+`runtime_copy_interface_slice_gc`, `runtime_atomic_value`, `runtime_assembly`, `gc_struct`,
+`global_struct_slice`, `sort_find_exhaustive`, `gomaxprocs_memstats`, `interface_new_slice`,
+`fmt_println`, `context_cancel`, `append_make`.
 
-### Result: symbols shared by all 12 programs
+`hello.go` imports nothing, so its whole object is the runtime closure; it is the reference
+program throughout.
+
+### Result: symbols shared by all 28 programs
 
 `.text` (functions):
 
 | identity | of hello's 3751 funcs | of hello's 1,709,132 `.text` bytes |
 | --- | ---: | ---: |
-| same name **and** same content (Hash) | 3017 (80.4%) | 766,512 (44.8%) |
-| same content, counter-named symbols renumbered (Colour) | **3742 (99.8%)** | **1,700,152 (99.5%)** |
+| same name **and** same content (Hash) | 3016 (80.4%) | 766,440 (44.8%) |
+| same content, counter-named symbols renumbered (Colour) | **3740 (99.7%)** | **1,697,776 (99.3%)** |
 
 `.data` (sized symbols only — see §1.1 for the unsymbolised metadata blob):
 
 | identity | of hello's 8936 data syms | of hello's 497,088 symbol-covered `.data` bytes |
 | --- | ---: | ---: |
-| Hash | 6803 (76.1%) | 409,908 (82.5%) |
-| Colour | 8415 (94.2%) | 451,564 (90.8%) |
+| Hash | 6802 (76.1%) | 409,907 (82.5%) |
+| Colour | 8412 (94.1%) | 451,507 (90.8%) |
 
 The same invariant core is 61.1% of `fmt_sprintf.go`'s functions and 24.8% of
 `stdlib_http_parse_roundtrip.go`'s — those programs are bigger because they pull in more
 *stdlib*, not because the runtime changed.
 
-### The nine functions that are not invariant across all 12
+### The eleven functions that are not invariant across all 28
 
 Complete list, from `hello.go`:
 
 ```
 main_main                                    380 B   the user's program
 main_init_0                                   84 B   the user's package init
+main_main_gointernal_funcvalue_3580           72 B   the funcval wrapper for main.main
+runtime_main                                2304 B   calls main.main and main.init
 error_Error                                 1896 B   interface-method dispatch wrapper
 runtime_stringer_String                     1000 B   interface-method dispatch wrapper
 internal_abi_Type_GcSlice_interfacecall_14   248 B   interface-call wrapper (counter-named)
@@ -490,3 +500,39 @@ collision patched out, the program then dies at
 0x0`, reached from `elliptic.Curve.IsOnCurve`. That is a separate defect of the §5.6 generic
 method-dispatch family and was not investigated. It is recorded so the reducer is not mistaken
 for a one-bug program.
+
+---
+
+## 8. What is committed on this branch
+
+| path | what it is |
+| --- | --- |
+| `analysis/sepcompile/` | compiles a program the way `cmd/goc` does and records per-symbol identity (`-out`), dumps a symbol's masked bytes and relocations (`-dump`), censuses relative data references and IR size (`-fixups`), or splits front-end from back-end wall clock (`-timing`). Changes no compiler behaviour. |
+| `analysis/seplink/` | `-mode=split` cuts a real goc object in half and relinks it; `-mode=native` links a goc program with cg12's own linker and no `cc`; `-mode=pins` measures how many functions the Go metadata blob references; `-mode=dupsyms` reports names with more than one definition. |
+| `analysis/testdata/nistec_closure_name_collision.go` | the §7 reducer, with the mechanism written at the top. Under `analysis/testdata/` so the go tool does not build it. |
+| `obj/exec.go` | **the one production change**: `R_AARCH64_ABS32` added to the static relocation resolver. |
+| `link/abs32_test.go` | covers it; fails with `cannot statically resolve aarch64 relocation type 258` without the change. |
+| `RUNTIME_PLAN.md` §5.10 | the §7 miscompile, recorded as a known miscompile not covered by any capability. |
+
+Temporary instrumentation used and then reverted, so nothing in this branch alters compilation:
+phase timers in `goc/compile.go` and `arm64/mc.go` (§5), and a closure-naming patch in
+`goc/compile.go` used to prove §7's mechanism.
+
+## 9. What I did not verify
+
+* **The 28-program sample is not the 342-capability matrix.** The invariance figures are stable
+  across every program measured, but the §4 superset figure (+67%) is explicitly a lower bound
+  and the growth curve was still rising.
+* **No prebuilt runtime was actually built.** This is a feasibility spike; §2's obstacles are
+  read out of the code and confirmed by measurement, not by attempting the split. In particular
+  I did not attempt to link one program's runtime against another program's residue.
+* **The `seplink -mode=native` result is 8 programs, not the corpus.** They all produce
+  identical stdout and exit status to the `cc`-linked binary, but the cg12 linker path is not
+  otherwise validated, and it needs two stubs (`abort`, a process entry point) that a real
+  driver would have to provide properly.
+* **The `.goc.go.findfunctab` size** (2.6 MB for a 1.7 MB `.text`) looks disproportionate
+  against upstream Go's bucket sizing. Noticed, not investigated, no bug claimed.
+* **§7's second failure** (`crypto/elliptic.nistPoint.SetBytes`, interface dispatch on a nil
+  dynamic type) is reported as observed, not diagnosed.
+* **Timings are from this box under this job's 8-slot share**, so absolute seconds are not
+  comparable to the task's 2.096s figure. The phase *shares* are what the argument rests on.
