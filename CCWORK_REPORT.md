@@ -171,9 +171,9 @@ The cost of the rule is that a program module re-emits a descriptor for any *sig
 or *pointer* type it shares with the runtime module. Two descriptors for one Go type means
 `reflect.TypeOf(x) == reflect.TypeOf(y)` can disagree. Go's own fix for that is
 `moduledata.typelinks` + `typelinksinit`'s `typemap`, which the vendored runtime has and cg12
-currently leaves as `builder.emptySlice()` (`internal/gometa/builder.go`, the `// typelinks`
-line). **Populating `typelinks` is the one genuinely new piece of work this option adds**, and
-it is bounded: a `[]int32` of module-relative offsets, one per named type.
+currently leaves as `builder.emptySlice()` (`internal/gometa/builder.go:254`).
+**Populating `typelinks` is the one genuinely new piece of work this option adds**, and it is
+bounded: a `[]int32` of module-relative offsets, one per named type.
 
 #### Does it dissolve Obstacle 2 (the whole-program pclntab)? Substantially, yes.
 
@@ -194,7 +194,7 @@ Per-module regions remove the premise:
 * `runtime.main` runs init tasks per module (`proc.go:258`, `doInit(m.inittasks)`), and
   `itabsinit` adds itabs per module (`iface.go:259`).
 * `moduledata.text` is already 0 in cg12 ("text base: function entry offsets contain absolute
-  addresses", `internal/gometa/builder.go:236`), so a second module's text needs no rebasing.
+  addresses", `internal/gometa/builder.go:233`), so a second module's text needs no rebasing.
 
 So metadata generation does **not** have to move into the linker. It keeps running where it
 has the laid-out object in hand, which is where the previous spike said the risk was
@@ -269,7 +269,7 @@ does not remove the dependency it is supposed to remove.**
 ### 3.4 A fifth option the code suggests: absolute-in-32-bits
 
 cg12 already does this for `TextOff`. `moduledata.text` is written as literal `0`
-(`internal/gometa/builder.go:236`, "text base: function entry offsets contain absolute
+(`internal/gometa/builder.go:233`, "text base: function entry offsets contain absolute
 addresses"), and the method entries at `compile.go:5779-5780` are emitted as
 `{Sub: ir.SubW, Sym: X}` with no `RelativeTo` — i.e. an ordinary `R_AARCH64_ABS32` relocation
 whose resolved value is the low 32 bits of the target's address. The runtime's
@@ -414,6 +414,16 @@ Severity is low (one nameless frame per module, in diagnostics only) and it is u
 this spike's question, so I did not change `internal/gometa` for it — a codegen change on a
 spike branch is exactly what RUNTIME_PLAN §14 warns about. It is recorded in RUNTIME_PLAN
 §5.10.
+
+### What is committed here
+
+| path | what it is |
+| --- | --- |
+| `analysis/typeoff/` | this spike's prototype: builds the second module, links it, patches the two pointers, runs it |
+| `analysis/testdata/typeoff_probe.go` | the goc-compiled program the prototype drives |
+| `analysis/sepcompile/`, `analysis/seplink/`, `analysis/testdata/nistec_closure_name_collision.go` | the **previous** spike's tools, cherry-picked verbatim from `ccwork/sepcompile-spike` because this one builds on `seplink -mode=native`. Unchanged. |
+| `obj/exec.go`, `link/abs32_test.go` | the previous spike's one production change: `R_AARCH64_ABS32` in the static image writer, without which no goc output links without `cc` |
+| `RUNTIME_PLAN.md` §5.10 | the nameless-first-function defect above |
 
 ### Reproducing
 
