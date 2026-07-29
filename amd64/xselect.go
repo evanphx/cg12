@@ -7,8 +7,15 @@ import "github.com/evanphx/cg12/ir"
 // which instruction to emit stays separate from encoding it (mirroring arm64's
 // sel).
 type xsel struct {
-	f    *ir.Func
-	b    xasm
+	f *ir.Func
+	b xasm
+
+	// The scratch registers of the function being emitted, copied from its mc.
+	// xsel reaches its emitter only through the xasm interface, so it carries its
+	// own copy rather than asking the builder; mc.sel is the one constructor, so
+	// the two cannot drift.
+	scratchRegs
+
 	next *ir.Block // block laid out next, for fall-through elision
 }
 
@@ -41,7 +48,7 @@ func (s *xsel) fpDst(ref ir.Ref) (Reg, func()) {
 	}
 	size := t.Cls.Size()
 	slot := t.Slot
-	return fpScratch0, func() { s.b.spillStoreFP(fpScratch0, slot, size) }
+	return s.fpScratch0, func() { s.b.spillStoreFP(s.fpScratch0, slot, size) }
 }
 
 // gpInto places ref's value into GPR d.
@@ -65,7 +72,7 @@ func (s *xsel) gpDst(ref ir.Ref) (Reg, func()) {
 	}
 	size := t.Cls.Size()
 	slot := t.Slot
-	return gpScratch0, func() { s.b.spillStore(gpScratch0, slot, size) }
+	return s.gpScratch0, func() { s.b.spillStore(s.gpScratch0, slot, size) }
 }
 
 // selectInt selects one instruction through the builder, reporting whether it
@@ -126,8 +133,8 @@ func (s *xsel) selectCore(in *ir.Instr) bool {
 	case ir.OCmp:
 		if in.Cmp.IsFloat() {
 			dbl := s.f.ClassOf(in.Arg(0)) == ir.ClsD
-			a := s.fpValue(in.Arg(0), fpScratch0)
-			bb := s.fpValue(in.Arg(1), fpScratch1)
+			a := s.fpValue(in.Arg(0), s.fpScratch0)
+			bb := s.fpValue(in.Arg(1), s.fpScratch1)
 			d, commit := s.gpDst(in.To)
 			s.b.fcmpSet(in.Cmp, dbl, d, a, bb)
 			commit()
@@ -136,7 +143,7 @@ func (s *xsel) selectCore(in *ir.Instr) bool {
 		}
 	case ir.OExtsb, ir.OExtub, ir.OExtsh, ir.OExtuh, ir.OExtsw, ir.OExtuw:
 		w := in.Cls == ir.ClsL
-		rs := s.gpValue(in.Arg(0), gpScratch1)
+		rs := s.gpValue(in.Arg(0), s.gpScratch1)
 		d, commit := s.gpDst(in.To)
 		s.b.extGP(in.Op, w, d, rs)
 		commit()
@@ -149,7 +156,7 @@ func (s *xsel) selectCore(in *ir.Instr) bool {
 	case ir.OStoreb, ir.OStoreh, ir.OStorew, ir.OStorel, ir.OStores, ir.OStored:
 		s.store(in)
 	case ir.OAllocN:
-		size := s.gpValue(in.Args[0], gpScratch0)
+		size := s.gpValue(in.Args[0], s.gpScratch0)
 		d, commit := s.gpDst(in.To)
 		s.b.allocNSP(d, size)
 		commit()
@@ -160,7 +167,7 @@ func (s *xsel) selectCore(in *ir.Instr) bool {
 			s.b.movFromSP(d)
 			commit()
 		case "stackrestore":
-			s.b.movToSP(s.gpValue(in.Args[0], gpScratch0))
+			s.b.movToSP(s.gpValue(in.Args[0], s.gpScratch0))
 		case "constant_p":
 			// An unresolved __builtin_constant_p (normally settled by opt): 0 is sound.
 			s.b.move(s.b.refLoc(in.To), s.b.refLoc(s.f.ConstInt(in.Cls, 0)))
@@ -182,8 +189,8 @@ func (s *xsel) selectCore(in *ir.Instr) bool {
 		dst := regLoc(Reg(in.Arg(1).ID), in.Cls.Size(), in.Cls.IsFloat())
 		s.b.move(dst, s.b.refLoc(in.Arg(0)))
 	case ir.OBlockAddr:
-		s.b.blockAddrLea(gpScratch0, in.Blk)
-		s.b.move(s.b.refLoc(in.To), regLoc(gpScratch0, 8, false))
+		s.b.blockAddrLea(s.gpScratch0, in.Blk)
+		s.b.move(s.b.refLoc(in.To), regLoc(s.gpScratch0, 8, false))
 	default:
 		return false
 	}
@@ -208,13 +215,13 @@ func (s *xsel) term(b *ir.Block) bool {
 		}
 	case ir.JmpJnz:
 		w := s.f.ClassOf(b.Jmp.Arg) == ir.ClsL
-		s.b.jnz(s.gpValue(b.Jmp.Arg, gpScratch0), w, b.Jmp.To, b.Jmp.To2)
+		s.b.jnz(s.gpValue(b.Jmp.Arg, s.gpScratch0), w, b.Jmp.To, b.Jmp.To2)
 	case ir.JmpHlt:
 		s.b.hlt()
 	case ir.JmpBr:
-		s.b.jmpReg(s.gpValue(b.Jmp.Arg, gpScratch0))
+		s.b.jmpReg(s.gpValue(b.Jmp.Arg, s.gpScratch0))
 	case ir.JmpTable:
-		s.b.jmpTable(s.gpValue(b.Jmp.Arg, gpScratch1), b, b.Jmp.Targets)
+		s.b.jmpTable(s.gpValue(b.Jmp.Arg, s.gpScratch1), b, b.Jmp.Targets)
 	default:
 		return false
 	}
@@ -264,9 +271,9 @@ func (s *xsel) parallelMove(pairs []locPair) {
 			return
 		}
 		saved := work[ci].dst
-		rescue := gpScratch0
+		rescue := s.gpScratch0
 		if saved.float {
-			rescue = fpScratch0
+			rescue = s.fpScratch0
 		}
 		tmp := regLoc(rescue, saved.size, saved.float)
 		s.b.move(tmp, saved)
@@ -305,7 +312,7 @@ func (s *xsel) call(in *ir.Instr) {
 			return
 		}
 	}
-	s.b.callReg(s.gpValue(callee, gpScratch0))
+	s.b.callReg(s.gpValue(callee, s.gpScratch0))
 }
 
 // load emits a load, choosing a GP or XMM destination by the op.
@@ -324,20 +331,20 @@ func (s *xsel) load(in *ir.Instr) {
 // store emits a store; Args[0] is the value, Args[1] the address.
 func (s *xsel) store(in *ir.Instr) {
 	if in.Op == ir.OStores || in.Op == ir.OStored {
-		s.b.storeFP(in.Op, s.fpValue(in.Arg(0), fpScratch0), in.Arg(1))
+		s.b.storeFP(in.Op, s.fpValue(in.Arg(0), s.fpScratch0), in.Arg(1))
 		return
 	}
-	s.b.storeGP(in, s.gpValue(in.Arg(0), gpScratch0))
+	s.b.storeGP(in, s.gpValue(in.Arg(0), s.gpScratch0))
 }
 
 // binFP computes dst = arg0 OP arg1 in x86's two-operand form for floats.
 func (s *xsel) binFP(in *ir.Instr) {
 	dbl := in.Cls == ir.ClsD
 	d, commit := s.fpDst(in.To)
-	rb := s.fpValue(in.Arg(1), fpScratch1)
+	rb := s.fpValue(in.Arg(1), s.fpScratch1)
 	if rb == d {
-		s.b.movFP(dbl, fpScratch1, rb)
-		rb = fpScratch1
+		s.b.movFP(dbl, s.fpScratch1, rb)
+		rb = s.fpScratch1
 	}
 	s.fpInto(d, in.Arg(0))
 	s.b.binFP(in.Op, dbl, d, rb)
@@ -348,19 +355,19 @@ func (s *xsel) binFP(in *ir.Instr) {
 func (s *xsel) convert(in *ir.Instr) {
 	switch in.Op {
 	case ir.OExts:
-		rs := s.fpValue(in.Arg(0), fpScratch1)
+		rs := s.fpValue(in.Arg(0), s.fpScratch1)
 		d, commit := s.fpDst(in.To)
 		s.b.cvtSS2SD(d, rs)
 		commit()
 	case ir.OTruncd:
-		rs := s.fpValue(in.Arg(0), fpScratch1)
+		rs := s.fpValue(in.Arg(0), s.fpScratch1)
 		d, commit := s.fpDst(in.To)
 		s.b.cvtSD2SS(d, rs)
 		commit()
 	case ir.OStosi:
 		srcD := s.f.ClassOf(in.Arg(0)) == ir.ClsD
 		w := in.Cls == ir.ClsL
-		rs := s.fpValue(in.Arg(0), fpScratch1)
+		rs := s.fpValue(in.Arg(0), s.fpScratch1)
 		d, commit := s.gpDst(in.To)
 		s.b.cvtF2SI(w, srcD, d, rs)
 		commit()
@@ -373,7 +380,7 @@ func (s *xsel) convert(in *ir.Instr) {
 		// anything at or above 2^31. Only a u64 result needs the compare-and-bias
 		// sequence, so the 32-bit case is not pessimized by it.
 		srcD := s.f.ClassOf(in.Arg(0)) == ir.ClsD
-		rs := s.fpValue(in.Arg(0), fpScratch1)
+		rs := s.fpValue(in.Arg(0), s.fpScratch1)
 		d, commit := s.gpDst(in.To)
 		if in.Cls == ir.ClsL {
 			s.b.cvtF2UI64(srcD, d, rs)
@@ -384,7 +391,7 @@ func (s *xsel) convert(in *ir.Instr) {
 	case ir.OSltof:
 		dstD := in.Cls == ir.ClsD
 		w := s.f.ClassOf(in.Arg(0)) == ir.ClsL
-		rs := s.gpValue(in.Arg(0), gpScratch1)
+		rs := s.gpValue(in.Arg(0), s.gpScratch1)
 		d, commit := s.fpDst(in.To)
 		s.b.cvtSI2F(w, dstD, d, rs)
 		commit()
@@ -398,22 +405,22 @@ func (s *xsel) convert(in *ir.Instr) {
 		// rewrites the scratch copy in place.
 		dstD := in.Cls == ir.ClsD
 		srcL := s.f.ClassOf(in.Arg(0)) == ir.ClsL
-		s.gpInto(gpScratch1, in.Arg(0))
+		s.gpInto(s.gpScratch1, in.Arg(0))
 		d, commit := s.fpDst(in.To)
 		if srcL {
-			s.b.cvtUI642F(dstD, d, gpScratch1)
+			s.b.cvtUI642F(dstD, d, s.gpScratch1)
 		} else {
-			s.b.cvtSI2F(true, dstD, d, gpScratch1)
+			s.b.cvtSI2F(true, dstD, d, s.gpScratch1)
 		}
 		commit()
 	case ir.OCast:
 		if in.Cls.IsFloat() {
-			rs := s.gpValue(in.Arg(0), gpScratch1)
+			rs := s.gpValue(in.Arg(0), s.gpScratch1)
 			d, commit := s.fpDst(in.To)
 			s.b.castG2F(in.Cls == ir.ClsD, d, rs)
 			commit()
 		} else {
-			rs := s.fpValue(in.Arg(0), fpScratch1)
+			rs := s.fpValue(in.Arg(0), s.fpScratch1)
 			d, commit := s.gpDst(in.To)
 			s.b.castF2G(in.Cls == ir.ClsL, d, rs)
 			commit()
@@ -425,7 +432,7 @@ func (s *xsel) convert(in *ir.Instr) {
 // move the quotient (RAX) or remainder (RDX) to the destination.
 func (s *xsel) div(in *ir.Instr, signed, rem bool) {
 	w := in.Cls == ir.ClsL
-	rb := s.gpValue(in.Arg(1), gpScratch1)
+	rb := s.gpValue(in.Arg(1), s.gpScratch1)
 	s.gpInto(RAX, in.Arg(0))
 	s.b.divGP(w, signed, rb)
 	d, commit := s.gpDst(in.To)
@@ -459,7 +466,7 @@ func (s *xsel) shift(in *ir.Instr) {
 // mc.block). It handles the integer forms; a float compare is not fused.
 func (s *xsel) cmpFlags(in *ir.Instr) {
 	argW := s.f.ClassOf(in.Arg(0)) == ir.ClsL
-	ra := s.gpValue(in.Arg(0), gpScratch0)
+	ra := s.gpValue(in.Arg(0), s.gpScratch0)
 	// A constant second operand becomes CMP's own immediate field (see imm.go for
 	// when it fits). The fold lives here, rather than in the selectImm family that
 	// owns the rest of the immediate forms, because this is the one place both
@@ -475,7 +482,7 @@ func (s *xsel) cmpFlags(in *ir.Instr) {
 		s.b.cmpGPMem(argW, ra, lb.base, lb.off)
 		return
 	}
-	rb := s.gpValue(in.Arg(1), gpScratch1)
+	rb := s.gpValue(in.Arg(1), s.gpScratch1)
 	s.b.cmpGP(argW, ra, rb)
 }
 
@@ -511,10 +518,10 @@ func (s *xsel) binInt(in *ir.Instr) {
 		commit()
 		return
 	}
-	rb := s.gpValue(in.Arg(1), gpScratch1)
+	rb := s.gpValue(in.Arg(1), s.gpScratch1)
 	if rb == d {
-		s.b.movReg(w, gpScratch1, rb)
-		rb = gpScratch1
+		s.b.movReg(w, s.gpScratch1, rb)
+		rb = s.gpScratch1
 	}
 	s.gpInto(d, in.Arg(0))
 	s.b.binGP(in.Op, w, d, rb)

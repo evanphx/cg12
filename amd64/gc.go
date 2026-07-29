@@ -46,8 +46,12 @@ type GCContext struct {
 // Emit appends raw x86-64 instruction bytes (build them with the x64 package).
 func (c *GCContext) Emit(b []byte) { c.mc.emit(b) }
 
-// Scratch returns two caller-clobberable registers (r10/r11) free at a safepoint.
-func (c *GCContext) Scratch() (Reg, Reg) { return gpScratch0, gpScratch1 }
+// Scratch returns two registers free at a safepoint. They are this function's
+// emitter scratch pair, not a fixed pair of register numbers: r10/r11 under the
+// platform ABI, r12/r13 under Go's ABIInternal, which passes arguments in r10 and
+// r11. A strategy must therefore use the returned registers rather than naming
+// r10/r11 in a template of its own.
+func (c *GCContext) Scratch() (Reg, Reg) { return c.mc.gpScratch0, c.mc.gpScratch1 }
 
 // Sym / TLSym materialize a (thread-local) symbol address into reg.
 func (c *GCContext) Sym(reg Reg, name string)   { c.mc.materializeSym(reg, sanitize(name), 0, false) }
@@ -99,7 +103,7 @@ type PrologueContext struct {
 
 func (c *PrologueContext) FrameSize() int              { return c.mc.frame }
 func (c *PrologueContext) Emit(b []byte)               { c.mc.emit(b) }
-func (c *PrologueContext) Scratch() (Reg, Reg)         { return gpScratch0, gpScratch1 }
+func (c *PrologueContext) Scratch() (Reg, Reg)         { return c.mc.gpScratch0, c.mc.gpScratch1 }
 func (c *PrologueContext) MovImm(reg Reg, v int64)     { c.mc.movImm(reg, v, true) }
 func (c *PrologueContext) Label(name string)           { c.mc.prog.Label(name) }
 func (c *PrologueContext) Jmp(label string)            { c.mc.prog.Jmp(label) }
@@ -237,13 +241,13 @@ type PollStrategy struct {
 }
 
 func (p PollStrategy) EmitSafepoint(cx *GCContext) {
-	s, _ := cx.Scratch() // r10
+	s, _ := cx.Scratch() // the function's first scratch register
 	if p.ThreadLocal {
 		cx.TLSym(s, p.FlagSym)
 	} else {
 		cx.Sym(s, p.FlagSym)
 	}
-	cx.Emit(x64.MovzxLoadByte(false, s.mreg(), x64.At(s.mreg(), 0))) // r10d = flag byte
+	cx.Emit(x64.MovzxLoadByte(false, s.mreg(), x64.At(s.mreg(), 0))) // scratch32 = flag byte
 	cx.Emit(x64.TestReg(false, s.mreg(), s.mreg()))
 	skip := cx.Label()
 	cx.Jcc(x64.E, skip) // clear: skip the call
@@ -266,7 +270,7 @@ type StackGrowth struct {
 func (s StackGrowth) EmitSafepoint(*GCContext) {}
 
 func (s StackGrowth) EmitPrologue(cx *PrologueContext) {
-	limit, cur := cx.Scratch() // r10, r11
+	limit, cur := cx.Scratch() // the function's scratch pair
 	if s.ThreadLocal {
 		cx.TLSym(limit, s.LimitSym)
 	} else {

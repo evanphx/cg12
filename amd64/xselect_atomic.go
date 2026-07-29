@@ -40,8 +40,8 @@ func selectAtomic(s *xsel, in *ir.Instr) bool {
 		// The value is staged in scratch rather than used where the allocator put it:
 		// atomicStore is an XCHG, which writes its register operand with the value it
 		// displaced, and that register may still hold a live temp.
-		s.gpInto(gpScratch0, in.Arg(1))
-		s.b.atomicStore(in.Arg(0), bytes, gpScratch0)
+		s.gpInto(s.gpScratch0, in.Arg(1))
+		s.b.atomicStore(in.Arg(0), bytes, s.gpScratch0)
 		return true
 
 	case "cas":
@@ -66,7 +66,7 @@ func selectAtomic(s *xsel, in *ir.Instr) bool {
 // exactly what the intrinsic yields: no branch, no second read, and the failure
 // path falls out of the success path rather than being a case of its own.
 func (s *xsel) atomicCAS(in *ir.Instr, bytes int) {
-	replacement := s.gpValue(in.Arg(2), gpScratch0)
+	replacement := s.gpValue(in.Arg(2), s.gpScratch0)
 	s.gpInto(RAX, in.Arg(1))
 	s.b.atomicCAS(in.Arg(0), bytes, replacement)
 	s.atomicPrevious(in, bytes, RAX)
@@ -93,11 +93,11 @@ func (s *xsel) atomicRMW(in *ir.Instr, op string, bytes int) {
 	if in.To.Kind != ir.RefTemp {
 		if op == "xchg" {
 			// A void exchange is a store: the displaced value is simply dropped.
-			s.gpInto(gpScratch0, in.Arg(1))
-			s.b.atomicXchg(in.Arg(0), bytes, gpScratch0)
+			s.gpInto(s.gpScratch0, in.Arg(1))
+			s.b.atomicXchg(in.Arg(0), bytes, s.gpScratch0)
 			return
 		}
-		value := s.gpValue(in.Arg(1), gpScratch0)
+		value := s.gpValue(in.Arg(1), s.gpScratch0)
 		s.b.atomicALU(op, in.Arg(0), bytes, value)
 		return
 	}
@@ -107,7 +107,7 @@ func (s *xsel) atomicRMW(in *ir.Instr, op string, bytes int) {
 		// The operand is only read here, so it can stay where the allocator put it.
 		// The loop's own registers are RAX and RCX, neither of which the allocator
 		// hands out, so they cannot collide with it.
-		value := s.gpValue(in.Arg(1), gpScratch0)
+		value := s.gpValue(in.Arg(1), s.gpScratch0)
 		s.b.atomicFetchALU(op, in.Arg(0), bytes, value)
 		s.atomicPrevious(in, bytes, RAX)
 		return
@@ -117,16 +117,16 @@ func (s *xsel) atomicRMW(in *ir.Instr, op string, bytes int) {
 	// copied into scratch first: writing the previous value over the allocator's
 	// register for the operand would corrupt a temp that is still live. Negating for
 	// sub then costs nothing, since the copy is already private.
-	s.gpInto(gpScratch0, in.Arg(1))
+	s.gpInto(s.gpScratch0, in.Arg(1))
 	if op == "sub" {
-		s.b.negGP(bytes == 8, gpScratch0)
+		s.b.negGP(bytes == 8, s.gpScratch0)
 	}
 	if op == "xchg" {
-		s.b.atomicXchg(in.Arg(0), bytes, gpScratch0)
+		s.b.atomicXchg(in.Arg(0), bytes, s.gpScratch0)
 	} else {
-		s.b.atomicXadd(in.Arg(0), bytes, gpScratch0)
+		s.b.atomicXadd(in.Arg(0), bytes, s.gpScratch0)
 	}
-	s.atomicPrevious(in, bytes, gpScratch0)
+	s.atomicPrevious(in, bytes, s.gpScratch0)
 }
 
 // atomicPrevious commits an atomic's previous-value result, held in `from`, to the

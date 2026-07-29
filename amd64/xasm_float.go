@@ -69,13 +69,13 @@ func (b *mcXasm) movFP(dbl bool, dst, src Reg) {
 }
 func (b *mcXasm) fnegFP(dbl bool, dst Reg) {
 	if dbl {
-		b.m.movImm(gpScratch0, int64(-9223372036854775808), true) // 0x8000000000000000
-		b.m.emit(x64.MovqToXmm(true, fpScratch1.mreg(), gpScratch0.mreg()))
-		b.m.emit(x64.Xorpd(dst.mreg(), fpScratch1.mreg()))
+		b.m.movImm(b.m.gpScratch0, int64(-9223372036854775808), true) // 0x8000000000000000
+		b.m.emit(x64.MovqToXmm(true, b.m.fpScratch1.mreg(), b.m.gpScratch0.mreg()))
+		b.m.emit(x64.Xorpd(dst.mreg(), b.m.fpScratch1.mreg()))
 	} else {
-		b.m.movImm(gpScratch0, 0x80000000, false)
-		b.m.emit(x64.MovqToXmm(false, fpScratch1.mreg(), gpScratch0.mreg()))
-		b.m.emit(x64.Xorps(dst.mreg(), fpScratch1.mreg()))
+		b.m.movImm(b.m.gpScratch0, 0x80000000, false)
+		b.m.emit(x64.MovqToXmm(false, b.m.fpScratch1.mreg(), b.m.gpScratch0.mreg()))
+		b.m.emit(x64.Xorps(dst.mreg(), b.m.fpScratch1.mreg()))
 	}
 }
 func (b *mcXasm) fcmpSet(cmp ir.Cmp, dbl bool, dst, a, bb Reg) {
@@ -108,14 +108,14 @@ func (b *mcXasm) fcmpSet(cmp ir.Cmp, dbl bool, dst, a, bb Reg) {
 		b.m.emit(x64.Setcc(x64.P, dm))
 	case ir.CmpFeq:
 		ucomi(a, bb)
-		b.m.emit(x64.Setcc(x64.NP, gpScratch0.mreg()))
+		b.m.emit(x64.Setcc(x64.NP, b.m.gpScratch0.mreg()))
 		b.m.emit(x64.Setcc(x64.E, dm))
-		b.m.emit(x64.AndReg(false, dm, gpScratch0.mreg()))
+		b.m.emit(x64.AndReg(false, dm, b.m.gpScratch0.mreg()))
 	case ir.CmpFne:
 		ucomi(a, bb)
-		b.m.emit(x64.Setcc(x64.P, gpScratch0.mreg()))
+		b.m.emit(x64.Setcc(x64.P, b.m.gpScratch0.mreg()))
 		b.m.emit(x64.Setcc(x64.NE, dm))
-		b.m.emit(x64.OrReg(false, dm, gpScratch0.mreg()))
+		b.m.emit(x64.OrReg(false, dm, b.m.gpScratch0.mreg()))
 	default:
 		b.fail("amd64: unsupported float compare %v", cmp)
 	}
@@ -173,9 +173,10 @@ const (
 //	cvtts{s,d}2si dst, src
 //	done:
 //
-// This clobbers R11 and both XMM scratch registers. dst is never R11 -- gpDst
-// hands out either an allocated register or R10 -- so parking the two constants
-// there cannot collide with the result being built.
+// This clobbers the second GP scratch register and both XMM scratch registers.
+// dst is never the second scratch -- gpDst hands out either an allocated register
+// or the first scratch -- so parking the two constants there cannot collide with
+// the result being built.
 func (b *mcXasm) cvtF2UI64(srcD bool, dst, src Reg) {
 	direct, done := b.seqLabels(".f2u64")
 
@@ -183,26 +184,26 @@ func (b *mcXasm) cvtF2UI64(srcD bool, dst, src Reg) {
 	if srcD {
 		bias = biasF64Bits
 	}
-	b.m.movImm(gpScratch1, bias, srcD)
-	b.m.emit(x64.MovqToXmm(srcD, fpScratch0.mreg(), gpScratch1.mreg()))
+	b.m.movImm(b.m.gpScratch1, bias, srcD)
+	b.m.emit(x64.MovqToXmm(srcD, b.m.fpScratch0.mreg(), b.m.gpScratch1.mreg()))
 	if srcD {
-		b.m.emit(x64.Ucomisd(src.mreg(), fpScratch0.mreg()))
+		b.m.emit(x64.Ucomisd(src.mreg(), b.m.fpScratch0.mreg()))
 	} else {
-		b.m.emit(x64.Ucomiss(src.mreg(), fpScratch0.mreg()))
+		b.m.emit(x64.Ucomiss(src.mreg(), b.m.fpScratch0.mreg()))
 	}
 	b.m.prog.Jcc(x64.B, direct)
 
-	if src != fpScratch1 {
-		b.movFP(srcD, fpScratch1, src)
+	if src != b.m.fpScratch1 {
+		b.movFP(srcD, b.m.fpScratch1, src)
 	}
 	if srcD {
-		b.m.emit(x64.Subsd(fpScratch1.mreg(), fpScratch0.mreg()))
+		b.m.emit(x64.Subsd(b.m.fpScratch1.mreg(), b.m.fpScratch0.mreg()))
 	} else {
-		b.m.emit(x64.Subss(fpScratch1.mreg(), fpScratch0.mreg()))
+		b.m.emit(x64.Subss(b.m.fpScratch1.mreg(), b.m.fpScratch0.mreg()))
 	}
-	b.cvtF2SI(true, srcD, dst, fpScratch1)
-	b.m.movImm(gpScratch1, math.MinInt64, true) // 1<<63, the bias as an integer
-	b.m.emit(x64.AddReg(true, dst.mreg(), gpScratch1.mreg()))
+	b.cvtF2SI(true, srcD, dst, b.m.fpScratch1)
+	b.m.movImm(b.m.gpScratch1, math.MinInt64, true) // 1<<63, the bias as an integer
+	b.m.emit(x64.AddReg(true, dst.mreg(), b.m.gpScratch1.mreg()))
 	b.m.prog.Jmp(done)
 
 	b.m.prog.Label(direct)
@@ -240,17 +241,17 @@ func (b *mcXasm) cvtF2UI64(srcD bool, dst, src Reg) {
 // 9223372036854777856.
 //
 // src must be a scratch register, because the halving rewrites it in place. This
-// also clobbers R10.
+// also clobbers the first GP scratch register.
 func (b *mcXasm) cvtUI642F(dstD bool, dst, src Reg) {
 	direct, done := b.seqLabels(".u642f")
 
 	b.m.emit(x64.TestReg(true, src.mreg(), src.mreg()))
 	b.m.prog.Jcc(x64.NS, direct)
 
-	b.m.emit(x64.MovReg(true, gpScratch0.mreg(), src.mreg()))
-	b.m.emit(x64.AndImm(true, gpScratch0.mreg(), 1))
+	b.m.emit(x64.MovReg(true, b.m.gpScratch0.mreg(), src.mreg()))
+	b.m.emit(x64.AndImm(true, b.m.gpScratch0.mreg(), 1))
 	b.m.emit(x64.ShrImm(true, src.mreg(), 1))
-	b.m.emit(x64.OrReg(true, src.mreg(), gpScratch0.mreg()))
+	b.m.emit(x64.OrReg(true, src.mreg(), b.m.gpScratch0.mreg()))
 	b.cvtSI2F(true, dstD, dst, src)
 	if dstD {
 		b.m.emit(x64.Addsd(dst.mreg(), dst.mreg()))

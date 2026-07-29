@@ -75,6 +75,45 @@ var abiConventions = [...]abiConvention{
 // conventionABI returns the descriptor for a calling convention.
 func conventionABI(cc ir.CallConvention) abiConvention { return abiConventions[cc] }
 
+// emissionConvention returns the calling convention one function's *body* is
+// emitted against, and is the single place that decision is made. Four consumers
+// have to agree per function or an ABIInternal function is miscompiled, and each
+// reads its table through this:
+//
+//   - gcalloc.go: the allocation order and the callee-saved preference
+//     (intAllocOrderFor / floatAllocOrderFor / calleeSavedFor).
+//   - frame.go: which used registers the prologue must save (calleeSavedFor).
+//   - callersave.go: which registers a call destroys (callerClobberedForConv).
+//   - mc.go: the emitter's scratch pair (scratchRegsFor), because ABIInternal
+//     passes arguments in R10/R11 -- the System V scratch registers.
+//
+// It returns the platform ABI unconditionally today, so this whole wiring is a
+// refactor with no codegen difference. That is not an oversight, and in
+// particular it deliberately does NOT read f.CallConv:
+//
+// amd64 lowering still assigns System V registers to every function. lowerParams
+// and lowerCalls build newArgAssigner(false) unconditionally, so a function goc
+// marked CallConvGoInternal -- goc applies that to every function literal,
+// method-value wrapper and funcvalue adapter -- receives its parameters in
+// RDI/RSI/... and passes its own arguments the same way. Such a body is
+// self-consistent System V code and is correct as emitted; 14 goc corpus subtests
+// build and run natively on exactly that basis (see goABIUnsupported in mc.go).
+// Keying this off f.CallConv before the matching lowering lands would give those
+// functions an ABIInternal register file underneath System V argument
+// assignment: the allocator would hand out R10/R11 while the parameters live
+// there, and the scratch pair would move to R12/R13 without the prologue saving
+// them. Every closure in the corpus would be miscompiled.
+//
+// The B1 flip is therefore one line here -- `return f.CallConv` -- landed in the
+// same change that makes lowerParams/lowerCalls build their assigners from the
+// function's convention. Flipping this alone, or wiring one consumer directly to
+// f.CallConv instead of coming through here, reintroduces exactly the four-way
+// disagreement this function exists to prevent.
+func emissionConvention(f *ir.Func) ir.CallConvention {
+	_ = f // see above: intentionally not f.CallConv until lowering agrees.
+	return ir.CallConvPlatform
+}
+
 // goInternalConvention maps the backend's resolved "is this call Go-internal"
 // boolean back to the convention it denotes, so sites that carry the per-call
 // boolean can still look the descriptor up.

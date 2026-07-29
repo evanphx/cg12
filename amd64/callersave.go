@@ -17,6 +17,12 @@ import (
 // crossing several calls shares one slot; slots extend the allocation's spill area,
 // so the frame layout needs no change.
 func insertCallerSaves(f *ir.Func, cfg *analysis.CFG, live *analysis.Liveness, alloc *allocation) error {
+	// What a call destroys follows from the convention this body is emitted
+	// against, the same one colouring weighed its callee-saved preference against.
+	// Under Go ABIInternal nothing survives a call, so every register-resident
+	// value live across one is wrapped.
+	cc := emissionConvention(f)
+
 	// Pass 1: for each (non-tail) call, the caller-saved-register values live across
 	// it -- live afterward and not defined by the call.
 	saves := map[*ir.Instr][]int{}
@@ -46,7 +52,7 @@ func insertCallerSaves(f *ir.Func, cfg *analysis.CFG, live *analysis.Liveness, a
 						continue
 					}
 					r := f.Temps[t].Reg
-					if r == ir.NoReg || !callerClobbered(Reg(r)) {
+					if r == ir.NoReg || !callerClobberedForConv(cc, Reg(r)) {
 						continue
 					}
 					// A GC ref live across a safepoint is pre-spilled whole-life

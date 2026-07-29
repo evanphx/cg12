@@ -23,10 +23,16 @@ func computeFrame(f *ir.Func, alloc *allocation) frameLayout {
 	var lay frameLayout
 	lay.allocOff = map[*ir.Instr]int{}
 
+	// Which registers this function owes its caller is a property of the
+	// convention its body is emitted against, and must be the same answer the
+	// allocator used when it chose them (gcalloc's colorGraph.cc). Under Go
+	// ABIInternal the set is empty and no register is saved at all.
+	cc := emissionConvention(f)
+
 	// Collect the callee-saved registers the allocator actually used.
 	used := map[Reg]bool{}
 	for _, t := range f.Temps {
-		if t.Reg != ir.NoReg && calleeSavedReg(Reg(t.Reg)) {
+		if t.Reg != ir.NoReg && calleeSavedFor(cc, Reg(t.Reg)) {
 			used[Reg(t.Reg)] = true
 		}
 	}
@@ -39,7 +45,7 @@ func computeFrame(f *ir.Func, alloc *allocation) frameLayout {
 	for _, b := range f.Blocks {
 		for i := range b.Instrs {
 			for _, r := range asmClobberRegs(&b.Instrs[i]) {
-				if calleeSavedReg(r) {
+				if calleeSavedFor(cc, r) {
 					used[r] = true
 				}
 			}

@@ -453,6 +453,14 @@ type mc struct {
 
 	frameLayout // the shared stack-frame plan
 
+	// The emitter's scratch registers for this function, resolved once from
+	// emissionConvention(f). They are per-function state rather than package
+	// constants because Go's ABIInternal passes arguments in R10/R11, the System V
+	// scratch pair: emitting a constant through a bare gpScratch0 inside an
+	// ABIInternal body would destroy argument 8. Every site that needs scratch
+	// spells m.gpScratch0 (or, from xsel, s.gpScratch0).
+	scratchRegs
+
 	gc GCStrategy // pluggable GC strategy, or nil
 
 	tlsModel TLSModel // how a thread-local's address is reached (see tls.go)
@@ -526,7 +534,11 @@ type blockSym struct {
 }
 
 func emitMachine(f *ir.Func, alloc *allocation, gc GCStrategy, tlsModel TLSModel) (*machineCode, error) {
-	m := &mc{f: f, alloc: alloc, gc: gc, tlsModel: tlsModel, prog: x64.NewProgram(), instrPC: map[*ir.Instr][2]uint64{}}
+	m := &mc{
+		f: f, alloc: alloc, gc: gc, tlsModel: tlsModel,
+		scratchRegs: scratchRegsFor(emissionConvention(f)),
+		prog:        x64.NewProgram(), instrPC: map[*ir.Instr][2]uint64{},
+	}
 	m.planFrame()
 	m.useCount = countTempUses(f)
 	m.prologue()
@@ -650,15 +662,23 @@ func (m *mc) saveVarargRegs() {
 	}
 }
 
+// sel builds an instruction selector over this function. It is the only place an
+// xsel is constructed, so the selector's scratch registers are always this
+// function's -- an xsel assembled by hand would silently get the zero Reg (RAX)
+// as its scratch pair.
+func (m *mc) sel() *xsel {
+	return &xsel{f: m.f, b: &mcXasm{m: m}, scratchRegs: m.scratchRegs}
+}
+
 // teardown restores callee-saved registers and unwinds the frame (mov rsp,rbp;
 // pop rbp), leaving rsp at the return address without returning. It is shared by
 // the return epilogue and the tail-call branch, and selected once through xsel.
 func (m *mc) teardown() {
-	(&xsel{f: m.f, b: &mcXasm{m: m}}).teardown(&m.frameLayout)
+	m.sel().teardown(&m.frameLayout)
 }
 
 func (m *mc) epilogue() {
-	(&xsel{f: m.f, b: &mcXasm{m: m}}).epilogue(&m.frameLayout)
+	m.sel().epilogue(&m.frameLayout)
 }
 
 // --- location abstraction --------------------------------------------------
@@ -825,23 +845,23 @@ func (m *mc) moveToMem(dst, src loc) {
 			m.emit(x64.Store(dst.size*8, src.reg.mreg(), mem))
 		}
 	case locMem:
-		scratch := gpScratch0
+		scratch := m.gpScratch0
 		m.moveToReg(regLoc(scratch, src.size, src.float), src)
 		m.moveToMem(dst, regLoc(scratch, dst.size, dst.float))
 	case locImm:
 		if dst.float {
-			m.materializeFloat(fpScratch0, src.val, src.size)
-			m.moveToMem(dst, regLoc(fpScratch0, dst.size, true))
+			m.materializeFloat(m.fpScratch0, src.val, src.size)
+			m.moveToMem(dst, regLoc(m.fpScratch0, dst.size, true))
 		} else {
-			m.movImm(gpScratch0, src.val, w64(dst.size))
-			m.emit(x64.Store(dst.size*8, gpScratch0.mreg(), mem))
+			m.movImm(m.gpScratch0, src.val, w64(dst.size))
+			m.emit(x64.Store(dst.size*8, m.gpScratch0.mreg(), mem))
 		}
 	case locSym:
-		m.materializeSym(gpScratch0, src.sym, src.symoff, src.tls)
-		m.emit(x64.Store(64, gpScratch0.mreg(), mem))
+		m.materializeSym(m.gpScratch0, src.sym, src.symoff, src.tls)
+		m.emit(x64.Store(64, m.gpScratch0.mreg(), mem))
 	case locFrameAddr:
-		m.emit(x64.Lea(true, gpScratch0.mreg(), x64.At(src.base.mreg(), src.off)))
-		m.emit(x64.Store(64, gpScratch0.mreg(), mem))
+		m.emit(x64.Lea(true, m.gpScratch0.mreg(), x64.At(src.base.mreg(), src.off)))
+		m.emit(x64.Store(64, m.gpScratch0.mreg(), mem))
 	}
 }
 
@@ -861,11 +881,11 @@ func (m *mc) movImm(d Reg, val int64, w bool) {
 // materializeFloat loads a float constant (given by its bit pattern) into an XMM.
 func (m *mc) materializeFloat(d Reg, bits int64, size int) {
 	if size == 8 {
-		m.movImm(gpScratch0, bits, true)
-		m.emit(x64.MovqToXmm(true, d.mreg(), gpScratch0.mreg()))
+		m.movImm(m.gpScratch0, bits, true)
+		m.emit(x64.MovqToXmm(true, d.mreg(), m.gpScratch0.mreg()))
 	} else {
-		m.movImm(gpScratch0, bits, false)
-		m.emit(x64.MovqToXmm(false, d.mreg(), gpScratch0.mreg()))
+		m.movImm(m.gpScratch0, bits, false)
+		m.emit(x64.MovqToXmm(false, d.mreg(), m.gpScratch0.mreg()))
 	}
 }
 
@@ -923,8 +943,8 @@ func (m *mc) gpDst(ref ir.Ref) (Reg, func()) {
 		return Reg(t.Reg), func() {}
 	}
 	size := t.Cls.Size()
-	return gpScratch0, func() {
-		m.emit(x64.Store(size*8, gpScratch0.mreg(), x64.At(RBP.mreg(), m.slotAddr(t.Slot))))
+	return m.gpScratch0, func() {
+		m.emit(x64.Store(size*8, m.gpScratch0.mreg(), x64.At(RBP.mreg(), m.slotAddr(t.Slot))))
 	}
 }
 
@@ -935,12 +955,12 @@ func (m *mc) fpDst(ref ir.Ref) (Reg, func()) {
 		return Reg(t.Reg), func() {}
 	}
 	size := t.Cls.Size()
-	return fpScratch0, func() {
+	return m.fpScratch0, func() {
 		mem := x64.At(RBP.mreg(), m.slotAddr(t.Slot))
 		if size == 8 {
-			m.emit(x64.MovsdStore(fpScratch0.mreg(), mem))
+			m.emit(x64.MovsdStore(m.fpScratch0.mreg(), mem))
 		} else {
-			m.emit(x64.MovssStore(fpScratch0.mreg(), mem))
+			m.emit(x64.MovssStore(m.fpScratch0.mreg(), mem))
 		}
 	}
 }
@@ -981,7 +1001,7 @@ func srcReadsDst(src, dst loc) bool {
 // parallelMove performs a set of simultaneous moves, selected once through the
 // shared xsel, which owns the ordering logic.
 func (m *mc) parallelMove(pairs []locPair) {
-	(&xsel{f: m.f, b: &mcXasm{m: m}}).parallelMove(pairs)
+	m.sel().parallelMove(pairs)
 }
 
 // --- block emission --------------------------------------------------------
@@ -1026,7 +1046,7 @@ func (m *mc) block(b *ir.Block) {
 		m.recordInline(in.Inl)
 		if in == fuseCmp {
 			// Emit the comparison as flags only (no setcc); term() branches on them.
-			(&xsel{f: m.f, b: &mcXasm{m: m}}).cmpFlags(in)
+			m.sel().cmpFlags(in)
 			m.instrPC[in] = [2]uint64{start, uint64(m.prog.Len())}
 			continue
 		}
@@ -1075,8 +1095,8 @@ func (m *mc) leaStackParam(to ir.Ref, off int32) {
 		m.emit(x64.Lea(true, dst.reg.mreg(), x64.At(RBP.mreg(), off)))
 		return
 	}
-	m.emit(x64.Lea(true, gpScratch0.mreg(), x64.At(RBP.mreg(), off)))
-	m.emit(x64.Store(64, gpScratch0.mreg(), x64.At(RBP.mreg(), dst.off)))
+	m.emit(x64.Lea(true, m.gpScratch0.mreg(), x64.At(RBP.mreg(), off)))
+	m.emit(x64.Store(64, m.gpScratch0.mreg(), x64.At(RBP.mreg(), dst.off)))
 }
 
 func (m *mc) emitArgs(args []*ir.Instr) {
@@ -1105,23 +1125,24 @@ func (m *mc) emitTailCall(in *ir.Instr) {
 		m.recordReloc(m.prog.Len()-4, c.Sym, obj.R_X86_64_PLT32, c.Int-4)
 		return
 	}
-	r := m.gpValue(callee, gpScratch1)
-	if r != gpScratch1 {
-		m.emit(x64.MovReg(true, gpScratch1.mreg(), r.mreg()))
+	r := m.gpValue(callee, m.gpScratch1)
+	if r != m.gpScratch1 {
+		m.emit(x64.MovReg(true, m.gpScratch1.mreg(), r.mreg()))
 	}
 	m.teardown()
-	m.emit(x64.JmpReg(gpScratch1.mreg()))
+	m.emit(x64.JmpReg(m.gpScratch1.mreg()))
 }
 
 func (m *mc) emitCall(in *ir.Instr) {
-	(&xsel{f: m.f, b: &mcXasm{m: m}}).call(in)
+	m.sel().call(in)
 }
 
 func (m *mc) term(b *ir.Block) {
 	if m.blockDone {
 		return // a tail call already emitted this block's exit
 	}
-	x := &xsel{f: m.f, b: &mcXasm{m: m}, next: m.nextBlock}
+	x := m.sel()
+	x.next = m.nextBlock
 	if fuse := m.fusableCmp(b); fuse != nil {
 		x.fusedBranch(b, fuse)
 		return
@@ -1195,7 +1216,7 @@ func countTempUses(f *ir.Func) []int {
 
 func (m *mc) instr(in *ir.Instr) {
 	// Two-operand integer arithmetic is selected once, through the shared builder.
-	if (&xsel{f: m.f, b: &mcXasm{m: m}}).selectInt(in) {
+	if m.sel().selectInt(in) {
 		return
 	}
 	switch in.Op {
@@ -1307,7 +1328,7 @@ func (m *mc) memFor(in *ir.Instr, ai int) (x64.Mem, func()) {
 		case locReg:
 			mem.Base = baseLoc.reg.mreg()
 		default:
-			mem.Base = m.gpValue(base, gpScratch1).mreg()
+			mem.Base = m.gpValue(base, m.gpScratch1).mreg()
 		}
 		return mem, func() {}
 	}
@@ -1318,7 +1339,7 @@ func (m *mc) memFor(in *ir.Instr, ai int) (x64.Mem, func()) {
 	// A pre-coloured temp could name gpScratch1 itself, in which case loading the
 	// base there would clobber it, so "the index has a register" means a register
 	// that is not the one the base would take.
-	indexHasReg := indexLoc.kind == locReg && indexLoc.reg != gpScratch1
+	indexHasReg := indexLoc.kind == locReg && indexLoc.reg != m.gpScratch1
 	switch {
 	case baseLoc.kind == locFrameAddr:
 		mem.Base, mem.Disp = baseLoc.base.mreg(), mem.Disp+baseLoc.off
@@ -1326,13 +1347,13 @@ func (m *mc) memFor(in *ir.Instr, ai int) (x64.Mem, func()) {
 		mem.Base = baseLoc.reg.mreg()
 	case indexHasReg:
 		// Only the base needs the scratch; loading it cannot disturb the index.
-		mem.Base = m.gpValue(base, gpScratch1).mreg()
+		mem.Base = m.gpValue(base, m.gpScratch1).mreg()
 	default:
 		m.addrIntoScratch(baseLoc, index, scale)
-		mem.Base = gpScratch1.mreg()
+		mem.Base = m.gpScratch1.mreg()
 		return mem, func() {}
 	}
-	mem.Index = m.gpValue(index, gpScratch1).mreg()
+	mem.Index = m.gpValue(index, m.gpScratch1).mreg()
 	mem.Scale = scale
 	mem.HasIndex = true
 	return mem, func() {}
@@ -1358,14 +1379,14 @@ func (m *mc) addrIntoScratch(baseLoc loc, index ir.Ref, scale byte) {
 		return
 	}
 	indexLoc := m.refLoc(index)
-	m.moveToReg(regLoc(gpScratch1, indexLoc.size, false), indexLoc)
+	m.moveToReg(regLoc(m.gpScratch1, indexLoc.size, false), indexLoc)
 	// The scale multiplies the whole 64-bit register, exactly as the SIB byte's
 	// scale would, so the shift is 64-bit even for a 32-bit index -- whose load
 	// zero-extended it, so the high half is the zero the SIB form would have seen.
 	if shift := scaleShift(scale); shift != 0 {
-		m.emit(x64.ShlImm(true, gpScratch1.mreg(), shift))
+		m.emit(x64.ShlImm(true, m.gpScratch1.mreg(), shift))
 	}
-	m.emit(x64.AddMem(true, gpScratch1.mreg(), x64.At(baseLoc.base.mreg(), baseLoc.off)))
+	m.emit(x64.AddMem(true, m.gpScratch1.mreg(), x64.At(baseLoc.base.mreg(), baseLoc.off)))
 }
 
 // scaleShift is the shift amount an index scale of 1, 2, 4 or 8 stands for, the
@@ -1420,14 +1441,14 @@ func (m *mc) emitAsm(in *ir.Instr) {
 	// lives in: a double in a GP register is not a double. They are counted
 	// separately so a template using both does not exhaust one by spending the
 	// other's budget.
-	gp := [...]Reg{gpScratch0, gpScratch1}
-	fp := [...]Reg{fpScratch0, fpScratch1}
+	gp := [...]Reg{m.gpScratch0, m.gpScratch1}
+	fp := [...]Reg{m.fpScratch0, m.fpScratch1}
 	gpN, fpN := 0, 0
 	next := func(float bool) Reg {
 		if float {
 			if fpN >= len(fp) {
 				m.fail(fmt.Errorf("amd64: inline asm needs more XMM scratch registers than are available"))
-				return fpScratch0
+				return m.fpScratch0
 			}
 			r := fp[fpN]
 			fpN++
@@ -1435,7 +1456,7 @@ func (m *mc) emitAsm(in *ir.Instr) {
 		}
 		if gpN >= len(gp) {
 			m.fail(fmt.Errorf("amd64: inline asm needs more scratch registers than are available"))
-			return gpScratch0
+			return m.gpScratch0
 		}
 		r := gp[gpN]
 		gpN++
@@ -1555,5 +1576,5 @@ func (m *mc) asmInputReg(ref ir.Ref, next func(float bool) Reg) (Reg, int) {
 		return r, 8
 	}
 	m.fail(fmt.Errorf("amd64: unsupported inline-asm operand %v", ref))
-	return gpScratch0, 8
+	return m.gpScratch0, 8
 }
