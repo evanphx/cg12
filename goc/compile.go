@@ -104,7 +104,21 @@ func compile(name string, src []byte, options compileOptions) (*ir.Module, error
 		return nil, err
 	}
 	executable := options.executable
+	// A shared world carries its own FileSet, because the positions in its
+	// already-parsed packages belong to it. The program has to be parsed into
+	// that same set, so the world is chosen before anything is parsed rather
+	// than after.
+	//
+	// Loaders configured with test packages select extra files and so never
+	// share a world; asking for one would be a cache key that lies.
+	var world *sourceWorld
+	if len(options.testPackages) == 0 && len(options.externalTestPackages) == 0 {
+		world = sharedSourceWorld(target, !executable)
+	}
 	fset := token.NewFileSet()
+	if world != nil {
+		fset = world.fset
+	}
 	file, err := parser.ParseFile(fset, name, src, parser.AllErrors|parser.ParseComments)
 	if err != nil {
 		return nil, err
@@ -119,6 +133,9 @@ func compile(name string, src []byte, options compileOptions) (*ir.Module, error
 	}
 	loader := newSourceLoader(fset, target)
 	loader.forcePureGo = !executable
+	if world != nil {
+		world.adopt(loader)
+	}
 	for path := range options.testPackages {
 		loader.testPackages[path] = true
 	}
