@@ -201,17 +201,35 @@ has the laid-out object in hand, which is where the previous spike said the risk
 concentrated. **This makes option 2 worth materially more than the offset fix alone** — it
 removes the step the previous spike called both the largest and the most dangerous.
 
-Two caveats I am not glossing over:
+**This is not argued from the source alone — the prototype runs it.** With `-functions`, the
+second module carries real code and names its moduledata `runtime.firstmoduledata`, which is
+what makes `arm64.finishGoModule` hand it to `internal/gometa`; the module then gets a
+generated `pcHeader`/`funcnames`/`pctab`/`pclntable`/`functab` of its own. The program calls
+into it through a Go func value and asks `runtime.FuncForPC` about a PC that only the second
+module's tables describe:
 
-* The prototype's second module deliberately has **no functions** (`minpc == maxpc == 0`), so
-  it exercises the module list, `moduledataverify1`, `modulesinit`, `typelinksinit` and
-  `itabsinit`, but **not** `findfunc`/traceback/GC-stack-scan across two modules with real
-  code. That is read from the source above, not run. It is the main unverified claim in this
-  report; see §7.
-* The pclntab is still per-program-*module* rather than per-program, so the previous spike's
-  §4 dead-strip argument ("100.0% of functions are pinned by the metadata blob") still applies
-  *within* the prebuilt runtime module. Per-module regions make the metadata affordable; they
-  do not by themselves let the linker drop unreferenced runtime functions.
+```
+foreign-func:_goc_probe_entry     <- runtime.FuncForPC -> findfunc -> the second module's pclntab
+foreign-call:7                    <- the call actually ran the second module's code
+```
+
+So `moduledataverify1`, `modulesinit` and `findfunc` all accept a second module with real
+functions and a real generated pclntab, in a cg12 image.
+
+Two things this turned up that a real implementation will hit, both small and both concrete:
+
+* **`internal/gometa`'s text-end symbol is a global constant.** `textEndSymbol =
+  "runtime_gocTextEnd"` (`internal/gometa/builder.go:20`) bounds `maxpc`/`etext` and is the
+  `functab` sentinel. The Plan 9 sidecar defines it once for the whole image, so a second
+  module would take the *first* module's text end as its `maxpc` and `findfunc` would never
+  select it. It has to become per-module. (The prototype works around it by defining a local
+  `runtime.gocTextEnd` in the second object, which `link.merge` namespaces and rewrites that
+  object's references to.)
+* **A per-module dead-strip is still out of reach.** The pclntab is per-*module*, not
+  per-program, so the previous spike's §4 argument ("100.0% of functions are pinned by the
+  metadata blob") still applies *within* the prebuilt runtime module. Per-module regions make
+  the metadata affordable; they do not by themselves let the linker drop unreferenced runtime
+  functions.
 
 ### 3.3 Option 3 — section-relative addressing
 
@@ -370,12 +388,35 @@ correct, and only the offset-addressed fields are wrong. Two of them are wrong *
 land inside the region. That is the failure mode option 1 would leave latent, and it is why
 "the matrix is green" would not be evidence here.
 
+### A defect this spike turned up: the first function of every goc module is nameless
+
+Building the second module with exactly one function printed `foreign-func:` with an empty
+name. The mechanism is exact:
+
+* `internal/gometa` lays the first function's name at offset **0** of `.goc.go.funcnames`
+  (`builder.go:120-124`), with no leading sentinel byte.
+* `runtime.moduledata.funcName` returns `""` for a name offset of 0
+  (`stdlib/src/runtime/symtab.go:758-763`), and `funcname` goes straight through it
+  (`symtab.go:1146`). Upstream Go's linker reserves offset 0 for exactly this reason.
+
+So **the function at text offset 0 of any goc module has no name in any traceback,
+`runtime.Caller`, or `runtime.FuncForPC` result.** For `analysis/testdata/typeoff_probe.go`
+that function is `internal_runtime_cgroup_stringError_Error_interfacecall_0`; the tool prints
+it. Confirmed both ways: with one function the name came back empty, and adding a filler
+function ahead of it made the probe function's name resolve.
+
+Severity is low (one nameless frame per module, in diagnostics only) and it is unrelated to
+this spike's question, so I did not change `internal/gometa` for it — a codegen change on a
+spike branch is exactly what RUNTIME_PLAN §14 warns about. It is recorded in RUNTIME_PLAN
+§5.10.
+
 ### Reproducing
 
 ```
 go build -o /tmp/typeoff ./analysis/typeoff
-/tmp/typeoff -mode=permodule -pad=100001 analysis/testdata/typeoff_probe.go
-/tmp/typeoff -mode=flat      -pad=0      analysis/testdata/typeoff_probe.go
+/tmp/typeoff -mode=permodule -pad=100001            analysis/testdata/typeoff_probe.go
+/tmp/typeoff -mode=permodule -functions             analysis/testdata/typeoff_probe.go
+/tmp/typeoff -mode=flat      -pad=0                 analysis/testdata/typeoff_probe.go
 ```
 
 ---
@@ -414,21 +455,22 @@ entirely.
 
 | check | result |
 | --- | --- |
-| `go build ./...`, `go vet ./...` | pending |
+| `go build ./...`, `go vet ./...` | **clean** |
 | `make test-unit` | **pass** |
 | `make test-goc-corpus` | pending |
-| `make test-goc-cmd` | pending |
+| `make test-goc-cmd` | **pass** |
 | capability matrix | pending |
-| goc compilation determinism unchanged | pending |
+| goc compilation determinism unchanged | **pass** — two separate processes produce byte-identical images (no compiler code was changed) |
 
 ---
 
 ## 7. What I did not verify
 
-* **A second module containing real functions.** The prototype's second module has no
-  functions, so `findfunc`, traceback, and GC stack scanning across two modules with code in
-  both are argued from the runtime source (§3.2) and not run. This is the load-bearing
-  unverified claim behind "Obstacle 2 dissolves"; the *offset* claim does not depend on it.
+* **Unwinding *through* a second module's frame.** `-functions` proves `findfunc` and
+  `funcname` work across modules for a PC in the second module, and that its code runs, but
+  the probe function is a leaf that returns immediately: no traceback walks its frame and no
+  GC scans its stack. The pcsp/stack-map half of a second module's pclntab is therefore
+  generated but not exercised.
 * **`typelinks`/`typemap` doing real dedup work.** The prototype's second module has empty
   `typelinks`, so `typelinksinit` runs its full body but finds nothing to canonicalise. The
   duplicate-descriptor identity problem is identified and its fix named; it is not exercised.

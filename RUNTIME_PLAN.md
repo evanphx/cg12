@@ -1574,6 +1574,22 @@ the reports of the jobs that found them.
   `println("a", 1, true)` prints `a1true` where the host toolchain prints
   `a 1 true`. Found while reducing §5.9. Affects the runtime's own diagnostics.
 
+- **The first function of every goc module is nameless in every traceback.**
+  `internal/gometa` lays the first function's name at offset 0 of
+  `.goc.go.funcnames` (`internal/gometa/builder.go:120-124`) with no leading
+  sentinel byte, and `runtime.moduledata.funcName` returns `""` for a name offset
+  of 0 (`stdlib/src/runtime/symtab.go:758-763`) — upstream Go's linker reserves
+  offset 0 for exactly that reason. So whichever function lands at text offset 0
+  has no name in a traceback, `runtime.Caller`, or `runtime.FuncForPC`. For
+  `analysis/testdata/typeoff_probe.go` that is
+  `internal_runtime_cgroup_stringError_Error_interfacecall_0`. Found by
+  `analysis/typeoff` (2026-07-29) while building a second module: with one
+  function the module's only name came back empty, and adding a filler function
+  ahead of it made the name resolve. Severity is low — one nameless frame per
+  module, diagnostics only — and the fix is one sentinel byte, but it was not
+  bundled into a spike branch. No capability covers it: the matrix never asserts
+  on a frame name.
+
 - **Per-iteration loop lowering is gated on `g.runtimeAllocation`.** With that
   mode off, escaping captures are not heap-lifted at all, so loops keep the
   pre-§5.9 shared-slot behaviour — that is, the miscompile returns. `goc` always
