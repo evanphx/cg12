@@ -177,6 +177,28 @@ const (
 const ModuleInitTasksName = ".goc.module.inittasks"
 const ModuleItabLinksName = ".goc.module.itablinks"
 
+// ChainModule records the relocation that links the moduledata named parent onto
+// the one named child, so runtime.modulesinit walks both.
+//
+// That is the whole of what joining a second module to an image takes: one
+// absolute 64-bit data relocation into moduledata.next. Everything else the
+// second module needs -- its own type region, its own pclntab, its own text
+// bounds -- travels inside the module's own object, which is the point of
+// per-module regions.
+func ChainModule(object *obj.Object, parent, child string, reloc64 uint32) error {
+	symbol, found := DataSymbol(object, parent)
+	if !found {
+		return fmt.Errorf("chain Go module: %s is not a data symbol of this object", parent)
+	}
+	if _, found := ObjectSymbol(object, child); !found {
+		return fmt.Errorf("chain Go module: %s is not defined in this object", child)
+	}
+	object.DataRelocs = append(object.DataRelocs, obj.Reloc{
+		Offset: symbol.Value + ModuleNextOffset, Sym: child, Type: reloc64,
+	})
+	return nil
+}
+
 func ModuleInitTaskCount(module *ir.Module) int {
 	for _, data := range module.Data {
 		if data.Name == ModuleInitTasksName {

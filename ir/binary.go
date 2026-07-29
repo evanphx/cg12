@@ -19,7 +19,7 @@ import (
 // references. Value references (ir.Ref) already index Temps/Consts by ID.
 const (
 	binMagic   = "cg12"
-	binVersion = 18
+	binVersion = 19
 )
 
 // MarshalBinary encodes the module to cg12's binary unit format.
@@ -29,6 +29,8 @@ func (m *Module) MarshalBinary() ([]byte, error) {
 	e.buf = append(e.buf, binMagic...)
 	e.u8(binVersion)
 	e.boolean(m.Runtime)
+	e.str(m.GoModuleData)
+	e.boolean(m.GoHasMain)
 
 	// The full type table (for reference resolution), then which of them are the
 	// module's declared types.
@@ -88,6 +90,8 @@ func DecodeModule(data []byte) (*Module, error) {
 
 	m := NewModule()
 	m.Runtime = d.boolean()
+	m.GoModuleData = d.str()
+	m.GoHasMain = d.boolean()
 	nt := int(d.uv())
 	types := make([]*AggType, nt)
 	for i := range types {
@@ -285,6 +289,7 @@ func (e *enc) encData(d *Data) {
 	e.str(d.Name)
 	e.linkage(d.Linkage)
 	e.iv(int64(d.Align))
+	e.boolean(d.GoTypeLink)
 	e.uv(uint64(len(d.PointerWords)))
 	for _, word := range d.PointerWords {
 		e.iv(int64(word))
@@ -638,6 +643,7 @@ func (d *dec) decField() Field {
 
 func (d *dec) decData() *Data {
 	dt := &Data{Name: d.str(), Linkage: d.linkage(), Align: int(d.iv())}
+	dt.GoTypeLink = d.boolean()
 	dt.PointerWords = make([]int, int(d.uv()))
 	for i := range dt.PointerWords {
 		dt.PointerWords[i] = int(d.iv())

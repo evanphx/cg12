@@ -83,6 +83,10 @@ func goFunctionInfoFor(f *ir.Func, name string, mc *machineCode) (goFunctionInfo
 // It is the Go-specific counterpart to addNeutralData, kept out of the neutral
 // object driver.
 func finishGoModule(o *obj.Object, m *ir.Module, goFunctions []goFunctionInfo, dataDefinitions []*ir.Data, bundle assemblyBundle) error {
+	moduleDataSymbol, err := goModuleDataSymbol(m, dataDefinitions)
+	if err != nil {
+		return err
+	}
 	if len(goFunctions) > 0 {
 		o.Syms = append(o.Syms, obj.Sym{
 			Name:    sanitize(".goc.runtime.text"),
@@ -90,11 +94,24 @@ func finishGoModule(o *obj.Object, m *ir.Module, goFunctions []goFunctionInfo, d
 			Value:   0,
 		})
 	}
+	textEndSymbol := gometa.TextEndSymbol(moduleDataSymbol)
+	if len(goFunctions) > 0 && len(bundle.functions) == 0 {
+		// The module's text ends where its last text is emitted. That is normally
+		// the translated Plan 9 sidecar, which defines the symbol itself; a module
+		// with no assembly functions has no sidecar text, so the object is the end
+		// of the module and defines the bound here. Without this an object-only Go
+		// module would reference a text-end symbol nobody defines -- or, worse,
+		// pick up another module's.
+		o.Syms = append(o.Syms, obj.Sym{
+			Name: textEndSymbol, Section: obj.SecText, Value: uint64(len(o.Text)), Func: true,
+		})
+	}
 	var moduledata *ir.Data
 	var dataPointerOffsets []uint64
+	var typeDescriptorOffsets []uint64
 	var relativeDataFixups []relativeDataFixup
 	for _, d := range dataDefinitions {
-		if d.Name == "runtime.firstmoduledata" {
+		if moduleDataSymbol != "" && sanitize(d.Name) == moduleDataSymbol {
 			moduledata = d
 			continue
 		}
@@ -110,14 +127,48 @@ func finishGoModule(o *obj.Object, m *ir.Module, goFunctions []goFunctionInfo, d
 			return fmt.Errorf("data %s: %w", d.Name, err)
 		}
 		dataPointerOffsets = append(dataPointerOffsets, offsets...)
+		if d.GoTypeLink {
+			typeDescriptorOffsets = append(typeDescriptorOffsets, symbol.Value)
+		}
 	}
 	if err := resolveRelativeDataFixups(o, relativeDataFixups); err != nil {
 		return fmt.Errorf("relative data reference: %w", err)
 	}
-	if moduledata != nil {
-		return addGoRuntimeObjectMetadata(o, goFunctions, bundle.functions, moduledata, dataPointerOffsets, gometa.ModuleInitTaskCount(m), gometa.ModuleItabLinkCount(m))
+	if moduledata == nil {
+		return nil
 	}
-	return nil
+	module := gometa.Module{
+		DataSymbol:      moduleDataSymbol,
+		DataExport:      moduledata.Linkage.Export,
+		DataStartSymbol: sanitize(".goc.runtime.datastart"),
+		DataEndSymbol:   sanitize(".goc.runtime.dataend"),
+		TextEndSymbol:   textEndSymbol,
+		HasMain:         m.GoHasMain,
+		TypeDescriptors: typeDescriptorOffsets,
+		InitTaskCount:   gometa.ModuleInitTaskCount(m),
+		ItabLinkCount:   gometa.ModuleItabLinkCount(m),
+	}
+	return addGoRuntimeObjectMetadata(o, goFunctions, bundle.functions, moduledata, module, dataPointerOffsets)
+}
+
+// goModuleDataSymbol is the linker name of the module's runtime.moduledata
+// record, as the frontend declared it.
+//
+// An image may carry more than one Go module, so the record's name is a property
+// of the module rather than a constant this backend matches. A module that
+// defines the runtime's own firstmoduledata without saying so is refused: the
+// alternative is silently emitting no metadata at all for it, which produces an
+// image that links and then cannot start.
+func goModuleDataSymbol(m *ir.Module, dataDefinitions []*ir.Data) (string, error) {
+	if m.GoModuleData != "" {
+		return sanitize(m.GoModuleData), nil
+	}
+	for _, d := range dataDefinitions {
+		if sanitize(d.Name) == gometa.DefaultModuleDataSymbol {
+			return "", fmt.Errorf("module defines %s but does not name it in ir.Module.GoModuleData", d.Name)
+		}
+	}
+	return "", nil
 }
 
 func moduleUsesGoRuntime(module *ir.Module) bool {
@@ -127,11 +178,11 @@ func moduleUsesGoRuntime(module *ir.Module) bool {
 // addGoRuntimeObjectMetadata hands the module to the shared emitter, except for
 // a module with no functions at all: it needs no pclntab, and its moduledata is
 // emitted as plain data through this backend's own data path.
-func addGoRuntimeObjectMetadata(object *obj.Object, functions, translatedFunctions []goFunctionInfo, moduledata *ir.Data, pointerOffsets []uint64, moduleInitTaskCount, moduleItabLinkCount int) error {
+func addGoRuntimeObjectMetadata(object *obj.Object, functions, translatedFunctions []goFunctionInfo, moduledata *ir.Data, module gometa.Module, pointerOffsets []uint64) error {
 	if len(functions) == 0 && len(translatedFunctions) == 0 {
 		return addData(object, moduledata)
 	}
-	return gometa.AddObjectMetadata(goMetadataArch, goMetadataOptions(), object, functions, translatedFunctions, moduledata, pointerOffsets, moduleInitTaskCount, moduleItabLinkCount)
+	return gometa.AddObjectMetadata(goMetadataArch, goMetadataOptions(), object, functions, translatedFunctions, module, pointerOffsets)
 }
 
 // goAAPCSFrameSlotPCData adapts goAAPCSFramePCData to the shared emitter's

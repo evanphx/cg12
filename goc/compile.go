@@ -404,6 +404,9 @@ func compile(name string, src []byte, options compileOptions) (*ir.Module, error
 	}
 	addMemoryHelpers(mod, compileRuntime)
 	mod.Runtime = compileRuntime
+	// The module compiled as the program is the one that defines main, which
+	// runtime.modulesinit puts at the head of activeModules.
+	mod.GoHasMain = executable
 	registerSymAttrs(mod)
 	if compileRuntime {
 		exportAssemblyReferencedFunctions(mod, assemblyReferences)
@@ -3620,6 +3623,10 @@ func (g *gen) globalStruct(id *ast.Ident, object types.Object, spec *ast.ValueSp
 	if g.runtimeAllocation && g.pkg.Path() == "runtime" && id.Name == "firstmoduledata" {
 		headerName := ".goc.runtime.pcheader"
 		functionTableName := ".goc.runtime.functab"
+		// This module carries the runtime's own moduledata, so it is the head of
+		// the module chain. Naming it here rather than letting the backend match
+		// the spelling is what lets a second module carry a moduledata of its own.
+		g.mod.GoModuleData = g.pkg.Path() + "." + id.Name
 		g.mod.Data = append(g.mod.Data,
 			&ir.Data{Name: headerName, Align: 8, Items: []ir.DataItem{
 				{Sub: ir.SubW, Ints: []int64{0xfffffff1}},
@@ -5819,7 +5826,14 @@ func (g *gen) ensureTypeTag(valueType types.Type) string {
 		}
 		g.mod.Data = append(g.mod.Data, &ir.Data{
 			Name: gcDataName, Align: 1, Items: []ir.DataItem{{Sub: ir.SubUB, Ints: mask}},
-		}, &ir.Data{Name: name, Align: 8, Items: items})
+		}, &ir.Data{
+			Name: name, Align: 8, Items: items,
+			// The descriptor belongs in moduledata.typelinks only when it is
+			// complete: runtime.typesEqual reads the type's name and its
+			// kind-specific tail, and without the runtime tables there is no name
+			// to read. See ir.Data.GoTypeLink.
+			GoTypeLink: g.emitRuntimeTables,
+		})
 	}
 	return name
 }

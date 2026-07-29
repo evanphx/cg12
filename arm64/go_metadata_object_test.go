@@ -19,6 +19,7 @@ import (
 func TestGoRuntimeModuledataReferencesModuleInitTasks(t *testing.T) {
 	module := ir.NewModule()
 	module.Runtime = true
+	module.GoModuleData = "runtime.firstmoduledata"
 	schedinit := module.NewFuncVoid("runtime.schedinit")
 	schedinit.CallConv = ir.CallConvGoInternal
 	schedinit.ManagedFrame = true
@@ -46,6 +47,7 @@ func TestGoRuntimeModuledataReferencesModuleInitTasks(t *testing.T) {
 func TestGoRuntimeModuledataReferencesInterfaceTables(t *testing.T) {
 	module := ir.NewModule()
 	module.Runtime = true
+	module.GoModuleData = "runtime.firstmoduledata"
 	schedinit := module.NewFuncVoid("runtime.schedinit")
 	schedinit.CallConv = ir.CallConvGoInternal
 	schedinit.ManagedFrame = true
@@ -76,6 +78,7 @@ func TestGoRuntimeModuledataReferencesInterfaceTables(t *testing.T) {
 func TestGoRuntimeMetadataIncludesTranslatedAssemblyFunctions(t *testing.T) {
 	module := ir.NewModule()
 	module.Runtime = true
+	module.GoModuleData = "runtime.firstmoduledata"
 	schedinit := module.NewFuncVoid("runtime.schedinit")
 	schedinit.CallConv = ir.CallConvGoInternal
 	schedinit.ManagedFrame = true
@@ -125,6 +128,7 @@ func TestGoAAPCSFrameSlotDistinguishesManagedFrames(t *testing.T) {
 func TestGoRuntimeModuledataDescribesScannedGlobals(t *testing.T) {
 	module := ir.NewModule()
 	module.Runtime = true
+	module.GoModuleData = "runtime.firstmoduledata"
 	schedinit := module.NewFuncVoid("runtime.schedinit")
 	schedinit.CallConv = ir.CallConvGoInternal
 	schedinit.ManagedFrame = true
@@ -169,4 +173,101 @@ func TestGoRuntimeModuledataDescribesScannedGlobals(t *testing.T) {
 	assert.Equal(t, sanitize("runtime.methodValueCallFrameObjs"), relocations[moduledata.Value+240].Sym)
 	assert.Equal(t, int64(16), relocations[moduledata.Value+248].Addend)
 	assert.Greater(t, moduledata.Value, dataEnd)
+}
+
+// A Go module that defines the runtime's own moduledata without naming it is
+// refused. The alternative is emitting no metadata at all for it, which produces
+// an object that links and then cannot start -- the failure mode a per-module
+// name has to avoid introducing.
+func TestGoModuleDataNameMustBeDeclared(t *testing.T) {
+	module := ir.NewModule()
+	module.Runtime = true
+	schedinit := module.NewFuncVoid("runtime.schedinit")
+	schedinit.CallConv = ir.CallConvGoInternal
+	schedinit.ManagedFrame = true
+	schedinit.Entry().RetVoid()
+	module.Data = append(module.Data,
+		&ir.Data{Name: ".goc.runtime.datastart", Align: 8, Items: []ir.DataItem{{Sub: ir.SubUB, Ints: []int64{0}}}},
+		&ir.Data{Name: ".goc.runtime.dataend", Align: 8, Items: []ir.DataItem{{Sub: ir.SubUB, Ints: []int64{0}}}},
+		&ir.Data{Name: "runtime.firstmoduledata", Align: 8},
+	)
+
+	_, err := CompileToObject(module)
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "GoModuleData")
+}
+
+// A second Go module gets its moduledata, and everything that bounds it, under
+// names of its own. The text-end symbol is defined in the object itself, because
+// a module with no translated assembly has no sidecar to define it -- without
+// that the module would reference a symbol nobody defines, or silently pick up
+// another module's text end.
+func TestSecondGoModuleBoundsItselfWithoutASidecar(t *testing.T) {
+	const secondModuleData = ".goc.second.moduledata"
+	module := ir.NewModule()
+	module.Runtime = true
+	module.GoModuleData = secondModuleData
+	module.GoHasMain = false
+	only := module.NewFuncVoid("second.only")
+	only.CallConv = ir.CallConvGoInternal
+	only.ManagedFrame = true
+	only.Entry().RetVoid()
+	module.Data = append(module.Data,
+		&ir.Data{Name: ".goc.runtime.datastart", Align: 8, Items: []ir.DataItem{{Sub: ir.SubUB, Ints: []int64{0}}}},
+		&ir.Data{Name: ".goc.runtime.dataend", Align: 8, Items: []ir.DataItem{{Sub: ir.SubUB, Ints: []int64{0}}}},
+		&ir.Data{Name: secondModuleData, Align: 8},
+	)
+
+	object, err := CompileToObject(module)
+	require.NoError(t, err)
+
+	moduledata, ok := gometa.DataSymbol(object, sanitize(secondModuleData))
+	require.True(t, ok)
+	assert.Equal(t, uint64(592), moduledata.Size)
+	_, ok = gometa.DataSymbol(object, gometa.DefaultModuleDataSymbol)
+	assert.False(t, ok, "a second module must not define the runtime's own moduledata symbol")
+
+	textEnd := gometa.TextEndSymbol(sanitize(secondModuleData))
+	assert.NotEqual(t, gometa.DefaultTextEndSymbol, textEnd)
+	defined, ok := gometa.ObjectSymbol(object, textEnd)
+	require.True(t, ok, "the object must define the text-end symbol its own metadata names")
+	assert.Equal(t, obj.SecText, defined.Section)
+	assert.Equal(t, uint64(len(object.Text)), defined.Value)
+
+	// hasmain is 0 for a module that does not define main.
+	assert.Equal(t, byte(0), object.Data[moduledata.Value+536])
+}
+
+// The frontend marks its complete type descriptors, and they become
+// moduledata.typelinks as offsets from the module's own type base.
+func TestGoModuleTypeLinksAreEmittedForMarkedDescriptors(t *testing.T) {
+	module := ir.NewModule()
+	module.Runtime = true
+	module.GoModuleData = "runtime.firstmoduledata"
+	schedinit := module.NewFuncVoid("runtime.schedinit")
+	schedinit.CallConv = ir.CallConvGoInternal
+	schedinit.ManagedFrame = true
+	schedinit.Entry().RetVoid()
+	module.Data = append(module.Data,
+		&ir.Data{Name: ".goc.runtime.datastart", Align: 8, Items: []ir.DataItem{{Sub: ir.SubUB, Ints: []int64{0}}}},
+		&ir.Data{Name: "runtime.notAType", Align: 8, Items: []ir.DataItem{{Sub: ir.SubL, Ints: []int64{0}}}},
+		&ir.Data{Name: "runtime.aType", Align: 8, Items: []ir.DataItem{{Sub: ir.SubL, Ints: []int64{0, 0}}}, GoTypeLink: true},
+		&ir.Data{Name: ".goc.runtime.dataend", Align: 8, Items: []ir.DataItem{{Sub: ir.SubUB, Ints: []int64{0}}}},
+		&ir.Data{Name: "runtime.firstmoduledata", Align: 8},
+	)
+
+	object, err := CompileToObject(module)
+	require.NoError(t, err)
+
+	descriptor, ok := gometa.DataSymbolValue(object, sanitize("runtime.aType"))
+	require.True(t, ok)
+	dataStart, ok := gometa.DataSymbolValue(object, sanitize(".goc.runtime.datastart"))
+	require.True(t, ok)
+	typelinks, ok := gometa.DataSymbolValue(object, ".goc.go.typelinks")
+	require.True(t, ok)
+	typelinksEnd, ok := gometa.DataSymbolValue(object, ".goc.go.typelinks.end")
+	require.True(t, ok)
+
+	require.Equal(t, uint64(4), typelinksEnd-typelinks, "only the marked descriptor belongs in typelinks")
+	assert.Equal(t, uint32(descriptor-dataStart), binary.LittleEndian.Uint32(object.Data[typelinks:]))
 }

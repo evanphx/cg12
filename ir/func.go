@@ -319,6 +319,19 @@ type Module struct {
 	// runtime.schedinit symbol.
 	Runtime bool
 
+	// GoModuleData names the Data definition the backend fills in as this
+	// module's runtime.moduledata record. An image may hold more than one Go
+	// module -- each resolving its own type offsets against its own type region
+	// -- and only the one carrying the runtime's own state may be called
+	// runtime.firstmoduledata, so the name is a property of the module rather
+	// than a constant the backend matches.
+	GoModuleData string
+
+	// GoHasMain marks the module that defines the program's main. It becomes
+	// moduledata.hasmain, which runtime.modulesinit uses to put that module at
+	// the head of activeModules.
+	GoHasMain bool
+
 	// SymAlign records the guaranteed alignment (bytes) of a data symbol, keyed by
 	// its unmangled name -- from a definition or from the type of a reference. A
 	// backend folding a symbol's low bits into a scaled load/store offset consults
@@ -427,6 +440,16 @@ type Data struct {
 	Align        int
 	Items        []DataItem
 	PointerWords []int // pointer-bearing word indices relative to this datum
+
+	// GoTypeLink marks a complete Go type descriptor -- an internal/abi.Type with
+	// its name, its uncommon data and its kind-specific tail all present. The
+	// backend lists these in moduledata.typelinks, which is how
+	// runtime.typelinksinit gives one Go type one identity across modules.
+	//
+	// Only complete descriptors qualify: runtime.typesEqual reads the
+	// kind-specific tail, so a bare 48-byte header with a kind byte would send it
+	// past the end of the symbol.
+	GoTypeLink bool
 }
 
 // HoldsAddress reports whether any of the definition's items is the address of a

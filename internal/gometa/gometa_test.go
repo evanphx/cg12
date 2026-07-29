@@ -19,6 +19,18 @@ var testArch = Arch{
 	FrameBaseBytes: 16,
 }
 
+// testModule is the single-module shape every goc image had before a second
+// module was possible: the runtime's own moduledata, bounded by goc's data and
+// text symbols.
+func testModule() Module {
+	return Module{
+		DataSymbol:      DefaultModuleDataSymbol,
+		DataStartSymbol: ir.LinkerSymbol(".goc.runtime.datastart"),
+		DataEndSymbol:   ir.LinkerSymbol(".goc.runtime.dataend"),
+		TextEndSymbol:   DefaultTextEndSymbol,
+	}
+}
+
 func TestGoGCProgramEncodesExactPointerWords(t *testing.T) {
 	program, err := GCProgram(8, 32, []uint64{8, 24})
 	require.NoError(t, err)
@@ -49,11 +61,10 @@ func TestGoFunctionMetadataSortsTranslatedAssemblyWithGeneratedFunctions(t *test
 	builder.Build(
 		[]FunctionInfo{{Name: "generated_later", Size: 4}},
 		[]FunctionInfo{{Name: "translated_earlier", Size: 4}},
-		&ir.Data{Name: "runtime.firstmoduledata"},
+		testModule(),
+		nil,
 		[]byte{0},
 		".goc.runtime.dataend",
-		0,
-		0,
 		0,
 	)
 
@@ -97,7 +108,7 @@ func TestGoFunctionMetadataPreservesRuntimeFunctionID(t *testing.T) {
 		},
 	}
 
-	builder.Build(functions, nil, &ir.Data{Name: "runtime.firstmoduledata"}, []byte{0}, ".goc.runtime.dataend", 0, 0, 0)
+	builder.Build(functions, nil, testModule(), nil, []byte{0}, ".goc.runtime.dataend", 0)
 	pclntableOffset := builder.labels[".goc.go.pclntable"] - builder.base
 	const funcIDOffset = 40
 
@@ -116,7 +127,7 @@ func TestExtraPCDataAddsOneSlotToFunctionRecords(t *testing.T) {
 		}}
 		builder := NewBuilder(testArch, options, object, nil)
 		builder.Build([]FunctionInfo{{Name: "only", Size: 4}}, nil,
-			&ir.Data{Name: "runtime.firstmoduledata"}, []byte{0}, ".goc.runtime.dataend", 0, 0, 0)
+			testModule(), nil, []byte{0}, ".goc.runtime.dataend", 0)
 		return builder
 	}
 
