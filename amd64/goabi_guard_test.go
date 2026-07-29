@@ -1,6 +1,7 @@
 package amd64_test
 
 import (
+	"strings"
 	"testing"
 
 	"github.com/evanphx/cg12/amd64"
@@ -179,4 +180,50 @@ func TestGoABIGuardCoversLaterFunctionsInTheModule(t *testing.T) {
 	require.Error(t, err)
 	require.Contains(t, err.Error(), "managed")
 	require.Contains(t, err.Error(), "unsupported managed frame")
+}
+
+// TestGoABIWithPrologueStrategyIsRefused pins the one gap the ABIInternal flip
+// left behind.
+//
+// PrologueContext.liveArgGP/liveArgFP tell a prologue-emitting GC strategy which
+// argument registers hold live incoming values, so PushCallerState can preserve
+// them across a runtime call made before the frame exists. Both still read the
+// System V tables. Under ABIInternal the arguments are in RAX/RBX/RCX..., so the
+// prologue would save and restore RDI/RSI/RDX and leave the real arguments to be
+// destroyed by the very call it was protecting them from -- silently, since
+// every instruction involved is individually valid.
+//
+// The managed-frame rejection does not cover this: EmitPrologue keys off a GC
+// strategy being configured, not off UsesManagedFrame. Teaching the two
+// accessors about the convention is B2's, which owns the prologue and has to
+// describe the same registers to morestack's copy and to the retry path.
+func TestGoABIWithPrologueStrategyIsRefused(t *testing.T) {
+	build := func(cc ir.CallConvention) *ir.Module {
+		m := ir.NewModule()
+		f := m.NewFunc("f", ir.ClsL)
+		f.CallConv = cc
+		p := f.Param("a", ir.ClsL)
+		f.Entry().Ret(p)
+		return m
+	}
+	withPrologue := amd64.Options{GC: amd64.StackGrowth{LimitSym: "g_limit", MorestackSym: "cg12_morestack"}}
+
+	_, err := amd64.CompileObjectWith(build(ir.CallConvGoInternal), withPrologue)
+	if err == nil {
+		t.Fatal("an ABIInternal function compiled with a prologue-emitting GC strategy was accepted; " +
+			"its prologue would preserve the System V argument registers while the arguments live in goArgGP")
+	}
+	if !strings.Contains(err.Error(), "prologue-emitting GC strategy") {
+		t.Errorf("refusal does not name the cause: %v", err)
+	}
+
+	// The platform path must be untouched -- this is the combination that
+	// compiles and runs today, and the guard must not narrow it.
+	if _, err := amd64.CompileObjectWith(build(ir.CallConvPlatform), withPrologue); err != nil {
+		t.Errorf("platform-ABI function with a prologue-emitting GC strategy was refused: %v", err)
+	}
+	// And an ABIInternal function without such a strategy is still fine.
+	if _, err := amd64.CompileObjectWith(build(ir.CallConvGoInternal), amd64.Options{}); err != nil {
+		t.Errorf("ABIInternal function without a prologue strategy was refused: %v", err)
+	}
 }

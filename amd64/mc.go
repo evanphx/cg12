@@ -110,14 +110,46 @@ func goABIUnsupported(f *ir.Func) error {
 	return nil
 }
 
+// goABIPrologueUnsupported rejects the one combination the ABIInternal flip left
+// behind: a Go-ABI function whose emission runs a prologue-emitting GC strategy.
+//
+// PrologueContext.liveArgGP/liveArgFP name the argument registers holding live
+// incoming values, so that PushCallerState can preserve them across a runtime
+// call made before the frame exists. Both read the *System V* tables, and the
+// count comes from namedCounts, which replays assignment with a platform
+// assigner. Under ABIInternal the arguments are in goArgGP -- RAX, RBX, RCX
+// first -- so the prologue would push and pop RDI, RSI, RDX and leave the real
+// arguments to be destroyed by the call it was protecting them from.
+//
+// This is not gated by goABIUnsupported: EmitPrologue keys off a GC strategy
+// being configured, not off UsesManagedFrame, so the managed-frame rejection
+// does not cover it. Making the two accessors convention-aware is genuinely
+// B2's -- it owns the prologue and the stack-growth strategy, and the same
+// registers have to be described to morestack's copy and to the retry path that
+// reloads them -- so this refuses by name until then rather than emitting a
+// prologue that silently protects the wrong registers.
+func goABIPrologueUnsupported(f *ir.Func, gc GCStrategy) error {
+	if emissionConvention(f) != ir.CallConvGoInternal {
+		return nil
+	}
+	if _, ok := gc.(PrologueEmitter); !ok {
+		return nil
+	}
+	return fmt.Errorf("amd64: function %q uses the Go internal calling convention with a "+
+		"prologue-emitting GC strategy, whose live-argument registers are still System V's", f.Name)
+}
+
 // rejectGoABI fails the whole module before any of it is compiled. It runs up
 // front rather than per function inside the emit loop because lowering rewrites
 // each function in place: bailing out midway would leave the caller's module
 // partly lowered.
-func rejectGoABI(m *ir.Module) error {
+func rejectGoABI(m *ir.Module, gc GCStrategy) error {
 	for _, f := range m.Funcs {
 		if err := goABIUnsupported(f); err != nil {
 			return fmt.Errorf("function %s: %w", f.Name, err)
+		}
+		if err := goABIPrologueUnsupported(f, gc); err != nil {
+			return err
 		}
 	}
 	return nil
@@ -128,7 +160,7 @@ func CompileToObjectWith(m *ir.Module, opts Options) (*obj.Object, error) {
 	// CompileToObject) and Backend.CompileModule funnels through here, so this is
 	// the one place codegen can be reached from and the one place the guard needs
 	// to sit.
-	if err := rejectGoABI(m); err != nil {
+	if err := rejectGoABI(m, opts.GC); err != nil {
 		return nil, err
 	}
 	// A direct call names its callee by symbol, and which ABI that call must be
