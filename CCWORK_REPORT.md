@@ -280,3 +280,53 @@ goc binary, so **every commit and every transition between a clean and a dirty t
 invalidates the whole cache**. That is correct — a different compiler must not reuse a pack —
 but it means the cache pays off across repeated runs and shards of one revision, not across a
 development loop. It cost me two full matrix runs to notice, which is why it is written down.
+
+## Verification
+
+Everything below was run on this tree at the tip of `ccwork/pack-stdlib`.
+
+| check | result |
+| --- | --- |
+| `go build ./...`, `go vet ./...` | clean |
+| `make test-unit` | ok, every package |
+| `make test-goc-corpus` | ok, 860.3 s |
+| `make test-goc-cmd` (`-count=1`, matrix skipped) | ok, 234.8 s |
+| full capability matrix, warm packs | **338 subtests, 338 pass, 0 fail, 0 skip; 337 declared PASS, 1 EXPECTED FAILURE, 0 KNOWN GAP** |
+| full capability matrix, cold packs | same census |
+| full capability matrix, matched control (one pack) | same census |
+
+**The complete list of non-passing capabilities is one entry**, and it is the declared
+expected failure the matrix has always carried; there are no FAILs and no KNOWN GAPs. The
+census is taken from a `-v` log by counting `--- PASS:` / `--- FAIL:` subtest lines and the
+per-capability `PASS` / `EXPECTED FAILURE` / `KNOWN GAP` verdicts, not from `ok`.
+
+### Determinism
+
+`scripts/determinism-check.sh`, cold (`CG12_NOCACHE=1`) against warm, twice per program:
+
+| program | before this branch | monolithic, this tree | against the seven packs |
+| --- | --- | --- | --- |
+| `hello.go` | identical | identical | identical |
+| `fmt_sprintf.go` | identical | identical | identical |
+| `gc_struct.go` | identical | identical | identical |
+| `runtime_cleanup_frame_retention.go` | identical | identical | identical |
+| `runtime_defer_capture_allocs.go` | known backend residue | DIFFERENT | DIFFERENT |
+
+Unchanged: 4 of 5 byte-identical on both compile paths, with the one known residue
+(RUNTIME_PLAN 5.10) still differing. No regression.
+
+### Differential against the host toolchain
+
+Every program that takes a rich pack, run against `go run` of the same source, comparing exit
+status and full combined output:
+
+    stdlib_http_client_server      MATCHES HOST      stdlib_crypto_x509_ed25519  MATCHES HOST
+    stdlib_http_cookiejar          MATCHES HOST      stdlib_crypto_ecdsa         MATCHES HOST
+    stdlib_http_multipart_form     MATCHES HOST      stdlib_crypto_ecdh_x25519   MATCHES HOST
+    stdlib_http_parse_roundtrip    MATCHES HOST      stdlib_crypto_hpke          MATCHES HOST
+    stdlib_http_redirect_keepalive MATCHES HOST      stdlib_smtp_session         MATCHES HOST
+    stdlib_http_tls_client_server  MATCHES HOST      stdlib_encoding_xml         MATCHES HOST
+    hello                          MATCHES HOST      fmt_sprintf                 MATCHES HOST
+
+`stdlib_http_client_server` is the one that used to abort; it now exits 0 with output
+identical to the host toolchain's, 5 runs out of 5.
