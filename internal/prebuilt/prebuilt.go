@@ -29,7 +29,18 @@ import (
 // refused rather than linked against a runtime that was compiled differently.
 type Options struct {
 	Optimize bool
+
+	// Packages are the standard library packages the pack carries beyond the Go
+	// runtime itself, as import paths. Empty means the runtime alone.
+	Packages []string
 }
+
+// DefaultPackages are the standard library packages a pack carries when the
+// caller does not say otherwise.
+//
+// The list is empty for now and the choice is made by measurement rather than by
+// taste; see RUNTIME_PLAN section 18.
+var DefaultPackages []string
 
 // BuildRuntime compiles the fixed runtime root as a prebuilt Go module and
 // returns the pack: the module's object, its assembled sidecar, and the manifest
@@ -38,7 +49,7 @@ func BuildRuntime(target goc.Target, options Options) (*runtimepack.Pack, error)
 	if target != goc.TargetARM64 {
 		return nil, fmt.Errorf("goc: a prebuilt runtime is only available for arm64, not %s", target)
 	}
-	runtimeModule, err := goc.CompileRuntimeModuleFor(target)
+	runtimeModule, err := goc.CompileRuntimeModuleFor(target, options.Packages)
 	if err != nil {
 		return nil, err
 	}

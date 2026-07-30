@@ -145,18 +145,22 @@ type ProgramModule struct {
 	SubtractedData      int
 }
 
-// CompileRuntimeModuleFor lowers the fixed runtime root program for a target as
-// a prebuilt Go module.
+// CompileRuntimeModuleFor lowers a prebuilt runtime module for a target: the Go
+// runtime, plus the closure of the standard library packages named in packages.
 //
-// The root program is fixed and lives in this package rather than being supplied
-// by the caller, because the whole point is that the result does not depend on
-// any particular user program. What the root reaches is a superset, not an exact
-// fit: a program needing more compiles the difference itself, which is what makes
-// the subtraction degrade gracefully rather than requiring the prebuilt module to
-// anticipate every program.
-func CompileRuntimeModuleFor(target Target) (*RuntimeModule, error) {
+// The root program is generated here rather than supplied by the caller as
+// source, because the whole point is that the result does not depend on any
+// particular user program -- only on a list of packages. What the root reaches is
+// a superset, not an exact fit: a program needing more compiles the difference
+// itself, which is what makes the subtraction degrade gracefully rather than
+// requiring the prebuilt module to anticipate every program.
+func CompileRuntimeModuleFor(target Target, packages []string) (*RuntimeModule, error) {
+	source, err := runtimeRootSourceFor(packages)
+	if err != nil {
+		return nil, err
+	}
 	split := &runtimeSplit{mode: runtimeSplitBuildRuntime, dataDigests: map[string]string{}}
-	module, err := compile(runtimeRootName, []byte(runtimeRootSource), compileOptions{
+	module, err := compile(runtimeRootName, []byte(source), compileOptions{
 		target:       target,
 		executable:   true,
 		runtimeSplit: split,

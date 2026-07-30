@@ -7,6 +7,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strings"
 
 	"github.com/evanphx/cg12/goc"
 	"github.com/evanphx/cg12/internal/prebuilt"
@@ -27,11 +28,13 @@ func buildRuntimeCommand(arguments []string, errorOutput io.Writer) int {
 	output := flags.String("o", "", "write the prebuilt runtime here")
 	optimize := flags.Bool("O", false, "optimize cg12 IR")
 	targetName := flags.String("target", defaultTargetName(), "arm64")
+	packages := flags.String("packages", strings.Join(prebuilt.DefaultPackages, ","),
+		"comma-separated standard library packages the pack carries beyond the runtime; \"\" for the runtime alone")
 	if err := flags.Parse(arguments); err != nil {
 		return 2
 	}
 	if flags.NArg() != 0 || *output == "" {
-		fmt.Fprintln(errorOutput, "usage: goc build-runtime [-O] [-target arch] -o runtime.gocrt")
+		fmt.Fprintln(errorOutput, "usage: goc build-runtime [-O] [-target arch] [-packages list] -o runtime.gocrt")
 		return 2
 	}
 	target, err := goc.ParseTarget(*targetName)
@@ -39,7 +42,10 @@ func buildRuntimeCommand(arguments []string, errorOutput io.Writer) int {
 		fmt.Fprintf(errorOutput, "%v\n", err)
 		return 1
 	}
-	pack, err := prebuilt.BuildRuntime(target, prebuilt.Options{Optimize: *optimize})
+	pack, err := prebuilt.BuildRuntime(target, prebuilt.Options{
+		Optimize: *optimize,
+		Packages: splitPackageList(*packages),
+	})
 	if err != nil {
 		fmt.Fprintf(errorOutput, "goc: %v\n", err)
 		return 1
@@ -49,6 +55,21 @@ func buildRuntimeCommand(arguments []string, errorOutput io.Writer) int {
 		return 1
 	}
 	return 0
+}
+
+// splitPackageList parses the -packages flag. An empty or whitespace-only entry
+// is dropped rather than passed through, so `-packages ""` and `-packages " "`
+// both mean "the runtime alone".
+func splitPackageList(value string) []string {
+	var packages []string
+	for _, field := range strings.Split(value, ",") {
+		path := strings.TrimSpace(field)
+		if path == "" {
+			continue
+		}
+		packages = append(packages, path)
+	}
+	return packages
 }
 
 // linkAgainstPrebuiltRuntime compiles one program as a second Go module and links

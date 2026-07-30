@@ -456,6 +456,9 @@ func compile(name string, src []byte, options compileOptions) (*ir.Module, error
 			return nil, err
 		}
 	}
+	if err := checkUniqueFunctionSymbols(mod); err != nil {
+		return nil, err
+	}
 	// The split is applied last, on the finished whole-program module. Every
 	// symbol it keeps is therefore exactly what a monolithic build would have
 	// emitted; only the set of definitions changes.
@@ -481,6 +484,42 @@ func compile(name string, src []byte, options compileOptions) (*ir.Module, error
 		}
 	}
 	return g.mod, nil
+}
+
+// checkUniqueFunctionSymbols refuses a module in which two functions would land
+// on one linker symbol.
+//
+// obj.prepareELF indexes symbols by name and keeps the last, so a collision is
+// not a link error but a silent rebinding: every reference to the name resolves
+// to whichever definition was emitted last, and the other function becomes
+// unreachable code that some caller thought it was calling. Local symbols make
+// it invisible to the system linker too, so nothing downstream would report it.
+//
+// The comparison is on the mangled spelling rather than the Go-level name,
+// because the mangling is where distinct names can converge: ir.LinkerSymbol
+// maps every character outside [A-Za-z0-9_] to '_'.
+func checkUniqueFunctionSymbols(mod *ir.Module) error {
+	byLinkerSymbol := make(map[string]string, len(mod.Funcs))
+	var collisions []string
+	for _, function := range mod.Funcs {
+		symbol := ir.LinkerSymbol(function.Name)
+		previous, seen := byLinkerSymbol[symbol]
+		if !seen {
+			byLinkerSymbol[symbol] = function.Name
+			continue
+		}
+		collisions = append(collisions, fmt.Sprintf("%s and %s both compile to %s", previous, function.Name, symbol))
+	}
+	if len(collisions) == 0 {
+		return nil
+	}
+	sort.Strings(collisions)
+	shown := collisions
+	if len(shown) > 8 {
+		shown = shown[:8]
+	}
+	return fmt.Errorf("goc: %d function symbol collisions, so a call would bind to the wrong definition: %s",
+		len(collisions), strings.Join(shown, "; "))
 }
 
 // dropPackageInit removes one package's initializer set from the module's init
@@ -6283,8 +6322,22 @@ func interfaceCallWrapperMethodSymbol(symbol string) (string, bool) {
 	return "", false
 }
 
+// emitRuntimeTypeHasher gives a type its runtime.typehash trampoline, which a
+// map descriptor's Hasher field points at.
+//
+// The symbol is derived from the key type's tag, so every map type with the same
+// key wants the same trampoline. net/http alone has three map types keyed by
+// connectMethodKey, and without this guard the module carried three identical
+// definitions of one symbol -- harmless while it was local, a duplicate-symbol
+// error the moment a prebuilt runtime pack exports it. The guard matches
+// ensureRuntimeTypeEqual's, which has always had one.
 func (g *gen) emitRuntimeTypeHasher(valueType types.Type, typeTag string) string {
 	symbol := typeTag + ".hash"
+	for _, existing := range g.mod.Funcs {
+		if existing.Name == symbol {
+			return symbol
+		}
+	}
 	function := g.mod.NewFunc(symbol, ir.ClsL)
 	value := function.Param("value", ir.ClsP)
 	seed := function.Param("seed", ir.ClsL)
@@ -8223,10 +8276,7 @@ func (g *gen) iteratorRangeStmt(statement *ast.RangeStmt, label string, iterator
 	}
 
 	position := g.fset.Position(statement.Pos())
-	symbol := fmt.Sprintf("%s.rangefunc.%d.%d", g.functionName, position.Line, position.Column)
-	if g.functionName == "" {
-		symbol = fmt.Sprintf("%s.rangefunc.%d.%d", g.pkg.Path(), position.Line, position.Column)
-	}
+	symbol := fmt.Sprintf("%s.rangefunc.%d.%d", g.enclosingFunctionName(), position.Line, position.Column)
 	// The yield function is lowered from the range body, which lives in the
 	// enclosing function's package and inherits its generic instantiation, its
 	// name prefix and its write barrier setting.
@@ -10684,6 +10734,37 @@ func (g *gen) isResultParamSlot(slot ir.Ref) bool {
 	return false
 }
 
+// enclosingFunctionName is the symbol a function literal's own symbol is built
+// on: the name of the declared function the literal is written inside.
+//
+// A literal used to be named after its *package* whenever the generator had no
+// explicit name for the enclosing function -- which is the ordinary case, since
+// functionName is set only for a generic instantiation or a package
+// initializer. Position alone does not identify a literal within a package: two
+// files generated from one template have their literals at the same line and
+// column, and `crypto/internal/fips140/nistec`'s p224.go, p384.go and p521.go
+// are exactly that. Three different closures came out of the compiler under the
+// name `crypto/internal/fips140/nistec.func.114.16`, and obj's symbol index is
+// keyed by name, so every reference to any of them resolved to whichever was
+// emitted last: p224B would have run p521B's initializer. It was invisible only
+// because those symbols were local, so the system linker never had to choose --
+// exporting them for a prebuilt runtime pack turns it into a duplicate-symbol
+// error, which is how it was found.
+//
+// Naming a literal after the function it is written in is what Go itself does
+// (`pkg.Func.func1`) and it makes the symbol unique: a package cannot declare
+// two functions with the same symbol, and a function cannot hold two literals at
+// one position.
+func (g *gen) enclosingFunctionName() string {
+	if g.functionName != "" {
+		return g.functionName
+	}
+	if g.currentFunction != nil {
+		return g.functionSymbol(g.currentFunction)
+	}
+	return g.pkg.Path()
+}
+
 func (g *gen) functionLiteral(literal *ast.FuncLit) ir.Ref {
 	originalSignature := g.typeAndValue(literal.Type).Type.(*types.Signature)
 	signature := g.concreteType(originalSignature).(*types.Signature)
@@ -10696,10 +10777,7 @@ func (g *gen) functionLiteral(literal *ast.FuncLit) ir.Ref {
 	parameterObjects := g.fieldListObjects(literal.Type.Params)
 	resultObjects := g.fieldListObjects(literal.Type.Results)
 	position := g.fset.Position(literal.Pos())
-	symbol := fmt.Sprintf("%s.func.%d.%d", g.pkg.Path(), position.Line, position.Column)
-	if g.functionName != "" {
-		symbol = fmt.Sprintf("%s.func.%d.%d", g.functionName, position.Line, position.Column)
-	}
+	symbol := fmt.Sprintf("%s.func.%d.%d", g.enclosingFunctionName(), position.Line, position.Column)
 	var captures []types.Object
 	seenCapture := make(map[types.Object]bool)
 	ast.Inspect(literal.Body, func(node ast.Node) bool {

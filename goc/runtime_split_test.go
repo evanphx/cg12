@@ -67,7 +67,7 @@ func manifestFor(t *testing.T, runtimeModule *RuntimeModule) *runtimepack.Manife
 func buildSplit(t *testing.T) (*RuntimeModule, *runtimepack.Manifest, *ProgramModule) {
 	t.Helper()
 
-	runtimeModule, err := CompileRuntimeModuleFor(TargetARM64)
+	runtimeModule, err := CompileRuntimeModuleFor(TargetARM64, nil)
 	require.NoError(t, err)
 	manifest := manifestFor(t, runtimeModule)
 	program, err := CompileExecutableAgainstRuntimeFor(TargetARM64, "split.go", []byte(splitTestProgram), manifest)
