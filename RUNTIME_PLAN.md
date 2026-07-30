@@ -2384,6 +2384,21 @@ and cannot show work being removed):
 happening. The within-mode spread was 1.6 s of wall and 19 s of CPU. All four runs:
 338 subtests, 337 `PASS`, 1 `EXPECTED FAILURE`, 0 `FAIL`, 0 `KNOWN GAP`.
 
+Six A/B pairs were taken in all, at 8, 16, 24 and 64 workers. CPU favours batching in
+every one of the six, by 2.5% to 13.4%; wall clock favours it in three of six, and the
+three disagreements are load, not the change -- one 24-worker pair started its two runs
+at load 26.7 and load 161.5. Two contention-free measurements bound the same quantity
+from the other side: the isolated per-compile bench extrapolates to ~354 CPU-s, and
+`analysis/batchdiff` over the whole corpus measures 196.8 s (5.8%) of summed per-program
+compile wall. **The defensible claim is 5% to 12% of what the matrix costs**, and this box
+could not narrow it. Fifteen full unsharded matrix runs, every one 338/338 with the single
+declared `EXPECTED FAILURE`.
+
+Both compile paths were checked. The monolithic path (`-runtime-status-prebuilt-runtime=false`,
+where the worker compiles the runtime into each program) is a separate branch of
+`compileBatchProgram`; over 20 programs with no pack it also shows 0 leaks, identical
+behaviour, and a 6.0% saving.
+
 The bounding term is unchanged: **the slowest single compile**. At 16 workers on a
 contended box the `compile CPU / workers` term is comparable to it, which is why
 the wall clock moved at all; on an idle box at 24+ workers it would move much less.

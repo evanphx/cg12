@@ -237,6 +237,22 @@ the other 38, with a per-compile probability low enough that eight solitary samp
 **Conclusion: 0 leaks in 358 programs, across two different worker groupings, with identical
 behaviour from every build.**
 
+### 3.4 The other compile path
+
+Everything above is the prebuilt-runtime path, which is what the matrix uses by default. The
+monolithic path — `-runtime-status-prebuilt-runtime=false`, where the worker compiles the
+runtime into each program instead of linking a pack — is a separate branch of
+`compileBatchProgram` and was checked separately, both through the matrix harness (one
+capability, `gc/stack-argument-roots`, compiled and ran and passed) and through `batchdiff` over
+20 programs with no pack:
+
+    identical=16 differing=4
+    leaks=0 nondeterministic-alone=4
+    behaviour: identical=20 differing=0
+    summed per-program compile wall: one-shot=140.1s batch=131.7s (8.4s saved, 6.0%)
+
+Same verdict, and the same ~6% saving.
+
 ## 4. A finding outside this lever: compile nondeterminism is 11% of the corpus, not one program
 
 The branch's determinism gate samples five programs and records one known exception
