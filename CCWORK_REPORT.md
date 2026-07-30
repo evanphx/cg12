@@ -19,7 +19,7 @@ Status: **in progress.** Updated as each result lands; the unverified list is at
 3. **The per-function back end is now compiled concurrently**, merged strictly in function
    order. That took it to **29.4 s**. Together **182.8 s → 29.4 s, 6.2x**, and the
    `build-runtime` step from 8.1 s to 2.8 s.
-4. **Three real determinism bugs found and fixed** in the code the briefing pointed at, all
+4. **Four real determinism bugs found and fixed** in the code the briefing pointed at, all
    letting Go's map iteration order into generated code. But they are **not** the residue: I
    instrumented every function's IR at back-end entry across two compiles and the remaining
    divergence is entirely in goc's **front end**, not the back end. Details in §5 — this
@@ -109,7 +109,7 @@ compiler measured under the same conditions.
 - Peak memory did not regress (2.68 → 2.28 GB), because the results held between a worker and
   the merge are bounded and the IR is now actually released.
 
-## 5. Determinism: three bugs fixed, and where the residue actually is
+## 5. Determinism: four bugs fixed, and where the residue actually is
 
 Fixed (all let map iteration order into generated code):
 

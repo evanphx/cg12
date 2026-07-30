@@ -1621,6 +1621,35 @@ the reports of the jobs that found them.
 - The §5.3 escape boundary's `OSel` derivation path is covered by unit test only;
   no capability's `-O` build keeps the diamond rather than if-converting it.
 
+#### Compiling the same program twice does not give the same binary
+
+goc's output is not reproducible, and §18 establishes that what remains of it is
+entirely in the **front end**. `goc/testdata/runtime_defer_capture_allocs.go`
+gives 25 distinct executables in 30 compiles at a single back-end worker; 39 of
+the 358 corpus programs vary at all, the other 319 are byte-identical across
+repeated compiles and every back-end worker count. Two causes, both located:
+
+- **441 interface-call wrapper functions land in the module in a different
+  order** on each compile. Same functions, same code, different addresses. The
+  order is the order `ensureInterfaceCallWrapper` (`goc/compile.go:5198`) is
+  first reached while runtime type descriptors are emitted, and that walk is
+  driven from a map.
+
+- **A handful of functions' IR already differs before the back end sees it.**
+  Four in that program (`testing.prettyPrint`, `testing.common.Attr`,
+  `testing.common.makeArtifactDir`, `testing.outputWriter.writeLine`); diffing
+  `testing.prettyPrint` shows two address computations emitted in swapped order.
+
+Four back-end and analysis causes were found and fixed in §18 and are no longer
+among these. Fixing the front-end ones changes the layout of every program goc
+compiles, so it wants its own validation cycle rather than being folded into
+another change.
+
+Also unfixed, `-O` only: `opt/inline.go:184` sorts cost-inline candidates with an
+unstable `sort.Slice` over a slice built from map iteration, so which callees are
+inlined when the budget runs out is not reproducible. The matrix runs `-O` under
+`-runtime-opt`.
+
 #### Unmeasured
 
 - The compile-time cost of §5.3's allocation-set fixpoint was never measured. The
@@ -2305,3 +2334,101 @@ short of the whole corpus fails by construction.
 Five identical runs bound the per-run failure probability only at roughly 45% with
 95% confidence. The exclusive classification's real defence is
 `TestRuntimeCapabilityExclusiveClassification`, not the repeat count.
+
+## 18. The matrix's floor was one function, not one thread (2026-07-30)
+
+§17 measured the capability matrix at 203 s and identified its bound as one
+program: `stdlib_http_tls_client_server.go`, which compiled in 157.6 s at
+`cpu=115%`. The reading was that goc's compile is single-threaded and the floor
+therefore needs parallelism. The first half is true. The second was wrong about
+where the time went, and finding that out is the useful part.
+
+### Profile the program that bounds you
+
+`goc` gained `-cpuprofile`. Profiling the floor program rather than `hello.go`:
+
+| node | cum | share |
+| --- | ---: | ---: |
+| `arm64.CompileToObjectAndAssembly` | 162.3 s | 82.2% |
+| ` ├ arm64.regAlloc` | 149.0 s | 75.5% |
+| ` │  └ arm64.coalesceSpillSlots → slotGroups` | **131.2 s** | **66.4%** |
+| ` └ arm64.emitMachine` | 4.4 s | 2.2% |
+| `goc.compile` (front end) | 15.7 s | 7.9% |
+
+The 61%/39% back-end/front-end split §17 worked from comes from `hello.go`. At
+standard-library scale the front end is 8%, and two thirds of the whole compile
+is one function: `slotGroups` marked every pair of simultaneously-live spilled
+temps into a `map[int]map[int]bool` at *every instruction*, so almost every map
+write re-added an edge that was already there.
+
+### What changed
+
+1. **`slotGroups` computes the same relation differently.** Members are numbered
+   densely and interference is a bit matrix over that numbering; an edge is
+   recorded only where a member *becomes* live, against the set live there, with
+   a block's live-out set marked in full; and the greedy assignment carries each
+   group's union so a conflict test is one bit instead of a scan. The relation and
+   the assignment are unchanged, and the prebuilt runtime pack -- the largest
+   module goc compiles -- is byte-identical before and after.
+
+2. **The per-function back end is compiled concurrently** (`arm64/parallel.go`).
+   Lowering, allocation and emission read one function plus read-only module
+   facts and produce a result whose offsets are all relative to that function's
+   own start, so functions compile in parallel and merge strictly in function
+   order. Every address, symbol, relocation and DWARF row comes from the merge
+   order, never from which worker finished first. Worker count is `GOMAXPROCS`,
+   overridable with `GOC_BACKEND_WORKERS`; the output does not depend on it, and
+   `TestParallelBackendIsByteIdenticalToSerial` checks that from 1 to 256 workers.
+   The first error *in function order* is reported, so a failing compile says the
+   same thing a serial one would.
+
+3. **Four determinism bugs fixed**, all letting map iteration order into generated
+   code: the cyclic probability in `analysis.Frequency` and the mesh total in
+   `redistributeMesh` both summed floats over a map (float addition is not
+   associative, so the loop multiplier and every spill decision derived from it
+   varied per run); `LoopForest` built its loop list from a map, and the parent
+   and innermost-loop choices break ties by position in it; and `allocaGroups`
+   took its stack-colouring candidates from a map, so which allocations shared a
+   slot varied.
+
+### What it measures
+
+`stdlib_http_tls_client_server.go`, against the pack, on a **shared** box (two
+sibling jobs compiling throughout), each pair taken back to back:
+
+| | wall | cpu | maxrss |
+| --- | ---: | ---: | ---: |
+| branch point | 182.8 s | 110% | 2.68 GB |
+| + `slotGroups` rewrite | 48.6 s | 141% | 2.83 GB |
+| + concurrent back end, 1 worker | 53.5 s | 126% | 2.31 GB |
+| + concurrent back end, 64 workers | **29.4 s** | 252% | 2.28 GB |
+
+**6.2x on the program that bounds the matrix**, of which 3.8x is the rewrite and
+1.8x the concurrency. `goc build-runtime` went 8.1 s to 2.8 s.
+
+Full unsharded matrix, same box, same day, every run 338 subtests / 337 declared
+PASS / 1 EXPECTED FAILURE / 0 FAIL / 0 SKIP / 0 KNOWN GAP:
+
+| | wall | slowest compile |
+| --- | ---: | ---: |
+| branch point | 303.9 s, 212.9 s | 278.7 s, 199.2 s |
+| this work | 116.0 s, 107.1 s, **67.8 s** | 99.0 s, 90.8 s, **55.9 s** |
+
+The spread is sibling load, which fell over the afternoon; the last pair is the
+least contended. Against §17's exclusive-box 203.2 s, the best run here is 3.0x.
+
+**The bound has not changed in kind.** It is still
+`max(slowest single compile, compile CPU / workers) + run phase + setup`, and it
+is still the slowest single compile: 55.9 s of a 67.8 s run. What changed is how
+big that term is.
+
+### What would move it further
+
+`cpu=252%` is the new ceiling, not 115%. With the back end no longer dominated by
+one function, the single-threaded front end (8% of the old compile, a much larger
+share of the new one) and the serial merge bound the speedup. Going further means
+the front end -- a whole-program parse, type-check and reachability walk -- which
+is a much harder target than per-function work and was deliberately not attempted
+here. The other two levers on `perf/test-suite` (letting the pack carry the
+standard library, and batching programs into one process) reduce *total* compile
+CPU, which this work does not; they compose with it rather than competing.
