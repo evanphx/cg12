@@ -319,7 +319,7 @@ Three levers, in the order I would take them:
 
 ## 5. Correctness: what was checked
 
-Every full-matrix run reported in this document — 11 of them — was checked for
+Every full-matrix run reported in this document — 17 of them — was checked for
 `subtests=338 pass=338 fail=0 skip=0 declaredPASS=337 expectedFAILURE=1 knownGAP=0`, and
 every one satisfied it. The single declared exception is `defer-panic/panic-string-output`.
 
@@ -376,6 +376,19 @@ The change **touches no non-test Go file**: `git diff --name-only` over this job
 five `_test.go` files under `cmd/goc`, two Markdown files, and two scripts. So the compiler and
 runtime are bit-identical to the branch point, which is why determinism could not have moved —
 and it did not.
+
+## Notes on the briefing
+
+- **`RUNTIME_PLAN.md` has no §5.14 in this tree.** The briefing pointed at it for "a live
+  interaction bug" and "two independently-correct changes that compose into a broken compiler";
+  grepping for `5.14`, `compose` and `independently-correct` finds nothing. The plan's last
+  numbered subsection is §5.10, and §14/§15/§16 are top-level sections about per-module type
+  regions, method, and the driver split. So there was nothing to close there, and nothing was
+  removed from §5.10 either — none of its open items is about the matrix's speed.
+- **The briefing's estimate of "~20" timing-sensitive capabilities was low.** A mechanical scan
+  finds 60 of 338. Most of the excess is `time.Sleep` in the finalizer and cleanup programs,
+  which the briefing's criteria ("measures elapsed time") do not obviously cover but which are
+  waiting on the collector by wall clock and so belong in the same class.
 
 ## Still unverified
 
