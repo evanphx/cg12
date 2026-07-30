@@ -88,8 +88,17 @@ func (c *CFG) Frequency(dom *DomTree) *Freq {
 		// mesh, which continues by branching to any handler (never back to a single
 		// header), is recognized as the hot loop it is instead of a run-once region.
 		// For an ordinary single-exit loop this equals the old header-return sum.
+		//
+		// Summed in reverse postorder rather than over local's map iteration:
+		// floating-point addition is not associative, so a map order would give a
+		// different cyclic probability -- and thus a different multiplier, block
+		// frequency and spill choice -- on each run of the same compiler.
 		exit := 0.0
-		for b, lb := range local {
+		for _, b := range c.RPO {
+			lb, inLoop := local[b]
+			if !inLoop {
+				continue
+			}
 			for i, s := range b.Succs() {
 				if s != nil && !l.Body[s] {
 					exit += lb * fr.Edge[b][i]
@@ -207,9 +216,11 @@ func redistributeMesh(c *CFG, fr *Freq, probEdge func(p, b *ir.Block) float64) {
 			}
 			flow = next
 		}
+		// Over the component, not over the flow map: as with the cyclic probability
+		// above, summing floats in map order makes the scale differ between runs.
 		total := 0.0
-		for _, v := range flow {
-			total += v
+		for _, b := range comp {
+			total += flow[b]
 		}
 		if total <= 0 {
 			continue

@@ -46,12 +46,20 @@ func allocaGroups(f *ir.Func, cfg *analysis.CFG) map[*ir.Instr]*ir.Instr {
 	}
 
 	var ids []uint32
-	idx := map[uint32]int{}
 	for id := range allocaInstr {
 		if hasStart[id] && hasEnd[id] {
-			idx[id] = len(ids)
 			ids = append(ids, id)
 		}
+	}
+	// In allocation order, not the grouping map's iteration order. The greedy
+	// colouring below is stable-sorted by size and so breaks ties by position in
+	// this list; taken from a map, that position varies between runs, and with it
+	// which allocations share a slot -- so the frame layout, and the code that
+	// addresses it, would differ between two compiles of the same program.
+	sort.Slice(ids, func(a, b int) bool { return ids[a] < ids[b] })
+	idx := make(map[uint32]int, len(ids))
+	for position, id := range ids {
+		idx[id] = position
 	}
 	if len(ids) < 2 {
 		return nil // nothing can share

@@ -41,8 +41,16 @@ func (c *CFG) LoopForest(dom *DomTree) *LoopForest {
 		}
 	}
 
+	// In reverse postorder, not the grouping map's iteration order: the ties below
+	// -- the smallest containing body, the deepest containing loop -- are resolved
+	// by position in this list, so a map order would make the forest, and every
+	// frequency and spill decision derived from it, differ between runs.
 	lf := &LoopForest{ByHeader: map[*ir.Block]*Loop{}, In: map[*ir.Block]*Loop{}}
-	for header, ls := range latches {
+	for _, header := range c.RPO {
+		ls, ok := latches[header]
+		if !ok {
+			continue
+		}
 		l := &Loop{Header: header, Latches: ls, Body: naturalLoop(header, ls)}
 		lf.Loops = append(lf.Loops, l)
 		lf.ByHeader[header] = l
