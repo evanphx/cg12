@@ -235,95 +235,105 @@ holds.
 
 ## 5. What it measures
 
-### 5.1 The box was not mine
+### 5.1 The box was not mine, and that decides which metric is usable
 
-Every number in this section was taken while **two sibling jobs were compiling on the same
-machine**. Load average during the runs ranged from 20 to 161. That makes absolute wall clock
-incomparable with the 203 s baseline, which was measured on an exclusive box, so every
-measurement below is an **A/B taken back to back**, and the A/B is repeated in both orders.
+Every number here was taken while **at least one sibling job was compiling on the same
+machine**. Load average during the runs moved between 14 and 161, sometimes inside a single
+pair. Absolute wall clock is therefore not comparable with the 203 s baseline, which was
+measured on an exclusive box.
 
-It also changes which metric is meaningful. `scripts/matrix-timing.sh` reports "compile CPU" as
-the *sum of per-compile wall clock*. On a saturated machine that quantity is not work: each
-compile's wall clock is set by its CPU share, so the sum converges on `workers × elapsed`
-whatever the compiler does — which is exactly what the first A/B pair showed (3534 s vs 3541 s,
-a 0.2% difference, on a change that demonstrably removes work). So the matrix was re-measured
+It also rules out the harness's own metric. `scripts/matrix-timing.sh` reports "compile CPU" as
+the **sum of per-compile wall clock**. On a saturated machine that is not work: each compile's
+wall clock is set by its CPU share, so the sum converges on `workers x elapsed` whatever the
+compiler does. The first A/B pair showed exactly that — 3534 s against 3541 s, a 0.2%
+difference, on a change that demonstrably removes work. So every run below is also measured
 under `/usr/bin/time`, which reports the CPU actually consumed by the run and all its children.
 
-### 5.2 The A/B, at 16 compile workers, run in both orders
+### 5.2 Six A/B pairs, every run 338/338
 
-| run | mode | wall | user | sys | user+sys | subtests |
-| ---: | --- | ---: | ---: | ---: | ---: | --- |
-| 1 | batch | 221.2 s | 3857.7 s | 115.1 s | **3972.8 s** | 338/338 |
-| 2 | one-shot | 249.3 s | 4284.9 s | 171.5 s | **4456.4 s** | 338/338 |
-| 3 | one-shot | 249.9 s | 4301.8 s | 172.1 s | **4473.9 s** | 338/338 |
-| 4 | batch | 219.6 s | 3835.6 s | 118.0 s | **3953.6 s** | 338/338 |
+Each pair is back to back, same tree, one flag apart. `load` is the 1-minute average when the
+run started.
 
-    batch    mean: wall 220.4 s, CPU 3963.2 s
-    one-shot mean: wall 249.6 s, CPU 4465.2 s
-    saving:        wall  29.2 s (11.7%), CPU 502.0 s (11.2%)
+| workers | mode | wall | user+sys CPU | load | CPU saved by batch |
+| ---: | --- | ---: | ---: | ---: | ---: |
+| 8 | batch | 438.1 s | 4048.1 s | 23.6 | |
+| 8 | one-shot | 403.5 s | 4150.0 s | 47.6 | 101.9 s (2.5%) |
+| 16 | batch | 221.2 s | 3972.8 s | 20.5 | |
+| 16 | one-shot | 249.3 s | 4456.4 s | 30.1 | 483.6 s (10.9%) |
+| 16 | one-shot | 249.9 s | 4473.9 s | 55.0 | |
+| 16 | batch | 219.6 s | 3953.6 s | 38.9 | 520.3 s (11.6%) |
+| 24 | batch | 358.6 s | 4334.7 s | 26.7 | |
+| 24 | one-shot | 258.3 s | 4449.3 s | 161.5 | 114.6 s (2.6%) |
+| 24 | batch | 262.9 s | 4211.7 s | 33.3 | |
+| 24 | one-shot | 233.6 s | 4458.9 s | 63.4 | 247.2 s (5.5%) |
+| 64 (default) | batch | 208.4 s | 3918.7 s | 16.8 | |
+| 64 (default) | one-shot | 273.5 s | 4522.5 s | 13.9 | 603.8 s (13.4%) |
 
-The spread within each mode is 1.6 s of wall and 19 s of CPU, against a 29 s / 502 s effect, so
-the two modes do not overlap. **The matrix costs 11.2% less CPU with batch compilation**, of
-which 56 s is system time — the process creations that no longer happen.
+Plus a final run on the exact committed tree at 16 workers: `wall=213.9 user=3803.1 sys=117.2`.
 
-Every one of the four runs: `subtests=338 pass=338 fail=0 skip=0 declaredPASS=337
-expectedFAILURE=1 knownGAP=0`.
+**Fifteen full unsharded matrix runs in total. Every one of them:**
 
-### 5.3 Why the saving is larger than §1 predicted
+    subtests=338 pass=338 fail=0 skip=0 declaredPASS=337 expectedFAILURE=1 knownGAP=0
 
-§1 measures the world build at 0.73 s of CPU, which over 322 amortized compiles is ~235 s. The
-matrix saves 502 s. The rest is the part of a *process* that is not the world:
+### 5.3 What the six pairs actually support
 
-    one-shot `goc` on hello.go, whole process   user 3.67 s
-    first compile in a batch worker             user ~3.33 s   (world + program)
-    later compiles in the same worker           user  2.57 s
+**CPU favours batch in all six pairs, by 2.5% to 13.4%. Wall clock favours it in three of
+six.** The wall-clock disagreements are not subtle and they are not about the change: the
+24-worker pair where one-shot "won" by 100 s began its two runs at load 26.7 and load 161.5.
 
-so the amortizable cost is **1.10 s of CPU per compile**, not 0.73 s: the world, plus process
-start, plus the Go runtime collecting a fresh 300 MB heap in every one of 338 processes instead
-of reusing a live one. 322 × 1.10 = 354 s on `hello.go`'s shape; the corpus average is larger
-because the larger programs have more garbage to collect against the same retained world.
+The tightest measurement is the 16-worker quadruple, taken in both orders inside a
+twenty-minute window: within-mode spread of 1.6 s of wall and 19 s of CPU, against a 29 s /
+502 s effect. It says 11%.
+
+Two contention-free measurements bound it from the other side:
+
+| method | work removed |
+| --- | ---: |
+| isolated per-compile bench (§1), 1.10 s of CPU x 322 amortized compiles | ~354 CPU-s |
+| `batchdiff` over the 358-program corpus, summed per-program compile wall | 196.8 s (5.8%) |
+| the 16-worker matrix quadruple | 502 CPU-s (11.2%) |
+
+**The honest statement: batch compilation removes real work, somewhere between about 5% and
+12% of what the matrix costs, and this box could not narrow it further.** The three methods
+disagree because CPU time is itself inflated by contention — a run that overlaps a busy sibling
+burns more CPU for the same work — and the two arms of a pair never see identical load.
 
 ### 5.4 Which term bounds the matrix afterwards
 
-Unchanged: **the slowest single compile.** `stdlib-http/tls-client-server` took 199 s in the
-batch runs and 217 s in the one-shot runs — the difference is not the compile getting faster,
-it is 11% more of a saturated box being available to it. On an idle machine that compile is
-157.6 s and no amount of this lever touches it.
+Unchanged: **the slowest single compile.** `stdlib-http/tls-client-server` is 157.6 s alone on
+an idle box, and no part of this lever touches it — the world it skips is 0.53 s of that.
 
-    wall ≈ max( slowest compile , compile CPU / workers ) + run phase + setup
-             199 s                  3963/16 = 248 s ... at 16 workers on a *contended* box the
-                                    second term still binds, which is why the wall clock moved
-                                    at all.
+    wall ~ max( slowest compile , compile CPU / workers ) + run phase + setup
 
-At 16 workers on this box the two terms are comparable, so removing CPU shows up in the wall
-clock. On the exclusive box at 24+ workers the first term dominates and the same 502 s of CPU
-would buy close to nothing — which is what §1 said up front. **This lever's value is that it
-makes the wall clock less sensitive to how much of the machine the suite actually gets, and
-that it takes 11% off the total cost of running the suite anywhere.**
+What moves is the second term. That is why the wall-clock win is largest exactly where the
+second term binds — at 64 workers on a contended box (-23.8%) and at 16 (-11.7%) — and why on
+an exclusive box at 24+ workers, where the first term dominates, the same saving would buy
+close to nothing. §1 said this before any of it was measured and the measurements did not
+change it.
 
-### 5.5 The worker-count table could not be honestly re-measured
+**So the value of this lever is not the matrix's best case. It is that the suite costs about a
+tenth less to run anywhere, and that the cost is less sensitive to how much of the machine the
+suite actually gets** — which is the situation that produced the 406.5 s figure §17 was written
+about.
 
-The briefing asks for it, because a batch worker is a different thing from a compile slot. Two
-things can be said, and a third cannot.
+### 5.5 The worker-count table: what can and cannot be said
 
-**Said, from the data:** the memory bound per worker is unchanged. Peak RSS over all 338
-compiles was **2635.0 MiB batched against 2637.4 MiB one-shot** — a worker's peak is still the
-largest program it compiles, not the sum, so `compileRuntimeCapabilityPeakBytes = 3 GiB`
-remains the right divisor. What batching adds is a retained world per *idle* worker, which
-raises the median observed peak (388 MiB → 1206 MiB) but not the maximum, and the maximum is
-what the bound is for.
+The briefing asks for it, because a batch worker is a different thing from a compile slot.
 
-**Said, from the data:** at 16 workers the default is not the optimum on a shared box. The
-default picks 64 here (`MemAvailable` is 232 GiB, so memory never binds), and 24 workers
-measured 358.6 s batched against 220 s at 16 — because the machine already had two other jobs
-on it.
+**The memory bound per worker is unchanged, and that is measured.** Peak RSS over all 338
+compiles was **2635.0 MiB batched against 2637.4 MiB one-shot**. A worker's peak is still the
+largest program it compiles, not the sum — batching does not accumulate. What it adds is a
+retained world per idle worker, which raises the *median* observed peak from 388 MiB to
+1206 MiB but not the maximum, and the maximum is what the bound is for. So
+`compileRuntimeCapabilityPeakBytes = 3 GiB` and the divisor built on it stand.
 
-**Cannot be said:** the shape of the wall-clock-versus-workers curve. A run at 24 workers took
-358.6 s and its sibling one-shot run took 258.3 s, in the opposite direction to every other
-measurement here, because the load average went from 26 to 161 between them. Numbers like that
-are about the box, not about the change, and reporting a table built from them would be worse
-than reporting none. **The worker-count default should be re-derived on an exclusive box before
-this branch is merged; this job could not do it and did not fake it.**
+**The shape of the wall-clock-versus-workers curve cannot be said.** Two of the six pairs
+inverted under load swings of 2x to 6x within the pair. A table built from those numbers would
+describe the sibling jobs, not the change. **The default worker count should be re-derived on an
+exclusive box before this branch merges; this job could not do it and did not fake it.** The
+one thing worth carrying forward is that at the default (64) the batch run was the fastest
+configuration measured here, 208.4 s, and its one-shot control was the slowest at that worker
+count, 273.5 s.
 
 ## 6. A trap for whoever verifies this next
 
@@ -360,6 +370,59 @@ this job changes are `cmd/goc/main.go`, `cmd/goc/prebuilt.go`, `cmd/goc/batch.go
 is touched, so no compilation this branch performs can differ from one the branch point would
 have performed.
 
-## 8. Still unverified
+## 8. Suites
 
-This section is updated as results land.
+| suite | result |
+| --- | --- |
+| `go build ./...`, `go vet ./...` | clean |
+| `make test-unit` | clean |
+| `make test-goc-corpus` | `ok github.com/evanphx/cg12/goc 893.407s` |
+| `make test-goc-cmd` | `ok github.com/evanphx/cg12/cmd/goc 232.685s` |
+| full capability matrix | 15 unsharded runs, every one 338/338 |
+| `analysis/batchdiff`, whole corpus, three ways | 0 leaks, 358/358 identical behaviour |
+| `scripts/determinism-check.sh` | 4 of 5 identical, before and after (§7) |
+
+### The complete list of non-passing capabilities
+
+One, and it is declared: **`defer-panic/panic-string-output`**, an `expectedFailure`, appearing
+as `EXPECTED FAILURE runtime_panic_print_string.go`. Across all fifteen full runs: `FAIL=0`,
+`KNOWN GAP=0`, `SKIP=0`.
+
+## 9. Still unverified
+
+- **The worker-count curve.** §5.5. Needs an exclusive box. The memory bound *was* measured and
+  is unchanged.
+- **The wall clock on an idle machine.** Every wall-clock number here has a sibling job in it.
+  The CPU numbers are the ones to trust, and even they carry contention inflation.
+- **The coverage path (`make test-goc-coverage`) was not run, and does not use batch mode.**
+  `newRuntimeCapabilityBatchPoolFor` returns nil whenever `-runtime-coverprofile` is set, so
+  that path is byte-for-byte the one that was there before; but the suite itself was not run,
+  for the reason §17 already records — a targeted coverage run fails by construction, and the
+  whole corpus under instrumentation did not fit in this job.
+- **Interaction with the two sibling branches.** This branch was measured alone. `pack-stdlib`
+  changes what the pack contains and `goc-parallel` changes what one compile does inside; both
+  interact with a long-lived worker in ways nothing here exercises. Two notes for that
+  integration:
+  - a batch worker retains its source world for the life of the process, so if `pack-stdlib`
+    makes the pack carry the standard library, the world a worker builds may become *larger*
+    (more packages seeded) or unnecessary (subtracted earlier). The 3 GiB per-worker bound
+    should be re-measured, not assumed, after that merge.
+  - `goc compile-batch` compiles one program at a time per process. If `goc-parallel` makes a
+    single compile use N cores, then a pool of W workers becomes W x N and the worker count has
+    to be divided, not kept.
+- **Whether batching changes the *rate* of the §4 nondeterminism.** All 39 differing programs
+  are explained by pre-existing nondeterminism and every build behaved identically, but a
+  different heap shape could plausibly change how often the coin lands the other way. Nothing
+  here measures that, and behaviour equality is unaffected either way.
+
+## 10. One thing found that is not mine to fix
+
+The largest remaining item in a small program's compile is **not** the per-process cost this
+job removed. Compiling `hello.go` against the prebuilt pack still costs 1.52 s of wall and
+2.57 s of CPU with the world already built, and most of that is `compile()` generating IR for
+the whole runtime closure and *then* subtracting the functions the pack already defines. That
+work is repeated for all 338 programs and is nearly identical every time.
+
+It is adjacent to `pack-stdlib`'s area rather than mine, so it is reported rather than touched:
+if the split could subtract before generating rather than after, the floor for a small program
+would fall from ~2.1 s to something near the link time.
