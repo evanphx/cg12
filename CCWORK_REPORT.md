@@ -227,6 +227,41 @@ later determinism fixes deliberately change generated code (they replace an arbi
 map-order result with a fixed one), so byte-identity against the branch point does not hold
 past that commit and is not claimed.
 
+### The race detector over real compiles, and what it found
+
+`go test -race ./arm64/` on the synthetic module was clean, and that was not enough.
+`go test -race ./goc/` — the corpus, real Go programs through the real front end — reported
+**20 data races**, all on `ir.Block.Preds`, between two goroutines compiling *different*
+functions.
+
+The cause is a front-end defect, not a back-end one, and it is pre-existing.
+`gen.funcDecl` resets the generator's per-function defer state — the slots, the functions, the
+order, the actions — but not `deferBlocks`, which `derive()` *does* reset for a closure.
+`addDeferRecoveryEdges` wires every block in that list to the function's `deferreturn` block,
+so the list surviving into the next function gave the **previous** function a synthetic
+control-flow edge into the **next** one's blocks. Dominance, liveness and frequency, all built
+from that graph, then spanned two functions at once.
+
+It was invisible while the back end compiled one function at a time, because the predecessor
+lists those analyses rebuild live on the blocks themselves, so each function overwrote the
+previous one's damage on its way past. Concurrency turned a silently-wrong graph into a data
+race, which is the only reason it was found.
+
+Fixed at the cause (`goc/compile.go`, one line in the reset block it was missing from).
+`TestEachFunctionsControlFlowStaysInsideThatFunction` fails on the unfixed compiler with
+exactly that edge —
+
+    main.updateForwardedResults: block start has a successor deferreturn1
+    owned by main.updateFloatResult
+
+— and passes with it. The race re-run over eight corpus tests is clean.
+
+**This is the result I would keep if I could keep only one.** A green suite and a green
+synthetic byte-identity test both said the concurrency was fine. The thing that disagreed was
+running the race detector over real programs, and what it found was a defect that predates
+this branch.
+
+
 ### `analysis/splitdiff`: every corpus program built both ways and run
 
 Every program compiled monolithically and against the prebuilt runtime, both linked and run,
