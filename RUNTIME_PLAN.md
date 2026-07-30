@@ -1599,6 +1599,19 @@ the reports of the jobs that found them.
   `runtime.KeepAlive` fault it was hiding behind. Not reduced; it needs a
   reducer of its own before it is worth measuring.
 
+- **Compilation is not deterministic for about one program in nine.** Measured by
+  `analysis/batchdiff` over the whole corpus (§18): **39 of 358 programs compiled
+  to different bytes** within a single sweep, and `runtime_assembly.go` shows the
+  per-compile probability can be low enough to survive eight samples, so 39 is a
+  floor. Pre-existing and independent of the driver: `goc` built from `0f4ee02`
+  compiles `goc/testdata/allocs_per_run.go` to three different binaries in three
+  runs. The differences are small and confined to `.text` -- 106 bytes of 14.7 MB
+  for that program, 20 of them the build-id note that differs *because* the text
+  does -- and single bytes inside 4-byte instructions is the shape of a register
+  allocation that came out differently. Not reduced. Two consequences: the
+  five-program determinism check understates this by an order of magnitude, and
+  byte-identical output cannot serve as a merge gate for the corpus.
+
 - **Rare hangs.** The §5.8 verification saw runs exceed a 60s timeout on both
   the base and the fixed compiler, at a low rate, unexplained and unattributed.
   Any harness that measures fault rates on `many-goroutines-gc` must impose a
@@ -2284,9 +2297,10 @@ Three levers, in the order worth taking them:
 2. **Cut the per-process fixed cost.** `hello.go` against the pack costs
    `wall=2.11s user=3.86s`, and all 338 compiles pay it -- mostly loading and
    type-checking the runtime's closure, which `sharedSourceWorld` caches per goc
-   *process* while the matrix runs 338 of them. That is roughly **700 s, 23% of the
-   compile CPU**. A goc mode that compiles several programs in one process shares
-   the world and recovers most of it.
+   *process* while the matrix runs 338 of them. Estimated here at roughly **700 s,
+   23% of the compile CPU**. **Done in §18, and the estimate was about three times
+   too large**: the amortizable part is 1.10 s of CPU per compile, and the measured
+   saving is 11.2% of the whole matrix's CPU.
 
 3. **Parallelise inside goc.** The only one of the three that moves the floor rather
    than the total, and the largest piece of work.
@@ -2305,3 +2319,151 @@ short of the whole corpus fails by construction.
 Five identical runs bound the per-run failure probability only at roughly 45% with
 95% confidence. The exclusive classification's real defence is
 `TestRuntimeCapabilityExclusiveClassification`, not the repeat count.
+
+## 18. One goc process compiles many programs (2026-07-30)
+
+§17 left three levers and named this one second: the matrix runs 338 `goc`
+processes and every one of them begins by parsing and type-checking the Go
+runtime's source closure, which `goc/source_world.go` caches per *process*.
+
+`goc compile-batch` is that lever. It reads one JSON request per line of stdin --
+`{"source": ..., "output": ...}` -- compiles each program, and replies with one
+JSON object per line carrying the error, the compile's wall clock and the worker's
+peak RSS. The matrix harness holds a pool of these and hands each free worker the
+next program.
+
+### It is a request stream, not a manifest
+
+A manifest partitions the work statically, and §17's schedule is dynamic on
+purpose: longest-first through a shared pool, with a look-ahead bound so
+compiled-but-not-yet-run executables cannot fill a small `/tmp`. Both are
+properties of a queue that a static partition destroys -- one worker handed three
+of the eleven expensive programs is still compiling when the machine has gone
+idle. A request stream changes only what a worker *is*: a process that outlives
+its programs rather than one that exits after each.
+
+Target, `-runtime` and `-O` are command-line flags rather than per-request fields.
+They are exactly the axes of the source-world key, so a worker that accepted them
+per request would silently build a second world -- and double its memory -- on the
+first request that differed. As flags, a worker is one build configuration by
+construction.
+
+The coverage run keeps the one-shot path, because `-runtime-covermeta` instruments
+the runtime per program, which is the opposite of one configuration per process.
+`newRuntimeCapabilityBatchPoolFor` returns nil whenever `-runtime-coverprofile` is
+set.
+
+### The size of the lever, measured
+
+§17 estimated 700 s of the ~3030 s of compile CPU, from `hello.go` costing
+`wall=2.11s` against the pack. That estimate was too large by about a factor of
+three, because most of those 2.11 s is not amortizable. Measured in one process,
+against a pack read from disk:
+
+| | wall | CPU |
+| --- | ---: | ---: |
+| build the shared source world (once per process) | 0.53 s | 0.73 s |
+| compile `hello.go` with the world already built | 1.52 s | 2.57 s |
+| the whole one-shot `goc` process on `hello.go` | 2.16 s | 3.67 s |
+
+So the amortizable cost is **1.10 s of CPU per compile** -- the world, plus process
+start, plus a fresh 300 MB heap collected from scratch in every process -- and the
+per-compile *wall* saving is about 0.6 s.
+
+Measured end to end, one A/B in each order, 16 compile workers, on a box shared
+with two other jobs (which is why CPU rather than the harness's sum-of-per-compile-wall
+is the metric: on a saturated machine that sum converges on `workers × elapsed`
+and cannot show work being removed):
+
+| mode | wall | user+sys CPU |
+| --- | ---: | ---: |
+| batch (mean of 2) | 220.4 s | **3963.2 s** |
+| one-shot (mean of 2) | 249.6 s | **4465.2 s** |
+
+**11.2% less CPU**, 56 s of it system time that is process creation no longer
+happening. The within-mode spread was 1.6 s of wall and 19 s of CPU. All four runs:
+338 subtests, 337 `PASS`, 1 `EXPECTED FAILURE`, 0 `FAIL`, 0 `KNOWN GAP`.
+
+The bounding term is unchanged: **the slowest single compile**. At 16 workers on a
+contended box the `compile CPU / workers` term is comparable to it, which is why
+the wall clock moved at all; on an idle box at 24+ workers it would move much less.
+The value of this lever is that it takes 11% off the cost of running the suite
+anywhere, and makes the wall clock less sensitive to how much of the machine the
+suite gets.
+
+### The risk, and what was done about it
+
+The hazard is state leaking between compiles in one process, because a program
+miscompiled according to what its worker saw earlier is the worst failure this
+repository can produce: nothing about the program's own source explains it.
+
+`analysis/batchdiff` compiles every program in `goc/testdata` three ways -- one
+`goc` process per program, a pool of 16 batch workers, and the same pool fed the
+programs in the opposite order -- and compares the executables byte for byte. All
+358 programs, at 16 workers:
+
+    identical=319 differing=39
+    leaks=5 nondeterministic-alone=34
+    behaviour: identical=358 differing=0
+
+The five it could not classify were each recompiled alone eight more times. Four
+produced two or more distinct binaries on their own. The fifth,
+`runtime_assembly.go`, produced one -- so it was compiled eight times *in a single
+worker*, and six of the eight reproduced the one-shot bytes exactly while two
+produced the same two variants `batchdiff` had seen. A leak is a function of
+history; identical requests in one worker would not scatter like that, and the
+majority value would not be the solitary value. **0 leaks in 358 programs, across
+two worker groupings, with identical behaviour from every build.**
+
+`cmd/goc/batch_test.go` keeps that property: four small programs compiled alone
+twice, in a batch and in a reversed batch, with the batch builds required to be the
+same bytes as the solitary one; a program that does not type-check reported against
+its own request while the next program in the same worker still compiles and runs;
+and the second and third compiles in a worker required to be faster than the first,
+which is the direct evidence that the world is being shared at all.
+
+One bad program costs one program: a compile error is a response rather than an
+exit, a panic in the compiler is recovered per request and reported with its stack
+as that program's error, and a worker that fails at the protocol level is stopped
+rather than reused.
+
+### What this found on the way past
+
+**Compile nondeterminism is far more widespread than the five-program sample
+suggests.** 39 of 358 corpus programs (10.9%) compiled to different bytes within
+one sweep, and `runtime_assembly.go` shows the per-compile probability can be low
+enough to survive eight samples -- so 39 is a floor, not the count. It is
+pre-existing: `goc` built from `perf/test-suite` (`0f4ee02`) compiles
+`goc/testdata/allocs_per_run.go` to three different binaries in three runs. The
+differences are small and in `.text` -- 106 bytes of 14.7 MB for that program, 20 of
+them the linker's build-id note -- and their shape, single bytes inside 4-byte
+instructions, is a register allocation that came out differently. Recorded as an
+open item in §5.10.
+
+The consequence for this branch is that **"byte-identical output" cannot be the
+merge gate for the corpus, because it is not true of the corpus today**: for one
+program in nine the gate fires on the compiler's own coin flip. Behaviour equality
+is the property that holds, and `analysis/batchdiff` checks it.
+
+### A trap for the next verification
+
+`goc` finds the vendored standard library through `runtime.Caller(0)`
+(`goc/source_import.go:325`), so a `goc` built in a git worktree at another path
+resolves -- and embeds -- that path in every binary it produces. Comparing a build
+made by a `goc` built in one worktree against one made by a `goc` built in another
+shows a 4096-byte size difference and a million differing bytes, none of it a code
+difference. Determinism comparisons across revisions have to hold the build
+directory fixed.
+
+### What was not done
+
+- **The worker-count table was not re-measured.** Two sibling jobs were compiling
+  on the same machine throughout, with the load average moving between 20 and 161
+  inside a twenty-minute window; a 24-worker pair came out 358.6 s batched against
+  258.3 s one-shot, in the opposite direction to every other measurement, purely
+  because of what else was running. What can be said from the data is that the
+  memory bound per worker is unchanged -- peak RSS over all 338 compiles was
+  2635.0 MiB batched against 2637.4 MiB one-shot, because a worker's peak is still
+  the largest program it compiles and not the sum, so the 3 GiB divisor stands. The
+  wall-clock-versus-workers curve needs an exclusive box.
+- **The coverage path is unbatched and untested here**, deliberately: see above.
