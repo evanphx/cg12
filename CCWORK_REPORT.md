@@ -314,17 +314,17 @@ non-passing capabilities is one entry:
 
 Wall clock, one unsharded `go test`, `-runtime-status-compile-workers=10`:
 
-| build | matrix wall clock |
-| --- | ---: |
-| monolithic (the pre-change baseline) | **478.7 s** |
-| split, runtime built once per run | **406.5 s** |
+| build | matrix wall clock | result |
+| --- | ---: | --- |
+| monolithic, pre-change baseline (no `-v`) | 478.7 s | rc=0 |
+| monolithic, matched control (`-runtime-status-prebuilt-runtime=false`, same `-v`) | **478.4 s** | 338 subtests, 337 PASS, rc=0 |
+| **split**, runtime built once per run | **406.5 s** | 338 subtests, 337 PASS, rc=0 |
+
+The matched control lands within 0.3 s of the original baseline, so `-v` is not a
+confound and the comparison is clean.
 
 **A 1.18× speedup, not the ~12× the briefing projected.** That is the honest number and
 it needs explaining, because the per-program compile really did get 2.7× faster.
-
-(A matched control — the same command with `-runtime-status-prebuilt-runtime=false`, so
-`-v` and everything else is identical — is running; its result replaces the 478.7 s figure
-above if it differs materially.)
 
 ### Why the matrix gains 1.18× when compilation gains 2.7×
 
@@ -357,3 +357,28 @@ Three reasons, all measured:
 So: the split does what it says — the runtime is compiled once — and the compile itself is
 2.7× faster on the programs the runtime dominates. The matrix does not see 12× because the
 matrix's cost has moved.
+
+### `make test-goc-cmd` — **pass** (rc=0, 206 s)
+
+Includes the new `cmd/goc/prebuilt_test.go`, which builds a real pack, links a two-module
+image and reads the chain, `hasmain` and the typelinks counts out of it, and the existing
+`permodule` two-module tests.
+
+## Determinism: unchanged
+
+`CG12_NOCACHE=1` build vs. warm build, sha256 of the linked image, two rounds each, on
+this tree:
+
+| program | monolithic | split |
+| --- | --- | --- |
+| `hello.go` | identical, same hash both rounds | identical, same hash both rounds |
+| `fmt_sprintf.go` | identical, same hash both rounds | identical, same hash both rounds |
+| `gc_struct.go` | identical, same hash both rounds | identical, same hash both rounds |
+| `runtime_cleanup_frame_retention.go` | identical, same hash both rounds | identical, same hash both rounds |
+| `runtime_defer_capture_allocs.go` | **different**, and the hash varies round to round | **different** in 1 of 2 rounds, hash varies |
+
+**4 of 5 both before and after**, and the one exception is the backend residue
+RUNTIME_PLAN already records. The split neither fixes nor worsens it.
+
+The pack itself is deterministic: three `goc build-runtime` runs (two warm, one with
+`CG12_NOCACHE=1`) produced byte-identical files.

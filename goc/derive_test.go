@@ -36,6 +36,10 @@ var wholeCompilationGenFields = []string{
 	"interfaceMethods",
 	"interfaceItabs",
 	"interfaceCallWrappers",
+	// The generated interface-method dispatchers, and the tail of the module
+	// chain: both are properties of the whole compilation, not of one generator.
+	"interfaceDispatchers",
+	"lastModuleSymbol",
 	"dynamicTypes",
 	"reachableGlobals",
 	"filterGlobals",
@@ -80,6 +84,8 @@ func fullyPopulatedGen() *gen {
 		interfaceMethods:            map[*types.Func]bool{},
 		interfaceItabs:              map[string]string{},
 		interfaceCallWrappers:       map[string]string{},
+		interfaceDispatchers:        map[string]bool{},
+		lastModuleSymbol:            "runtime.firstmoduledata",
 		dynamicTypes:                []types.Type{types.Typ[types.Int]},
 		reachableGlobals:            map[types.Object]bool{},
 		filterGlobals:               true,
