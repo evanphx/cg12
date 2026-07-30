@@ -1570,6 +1570,16 @@ the reports of the jobs that found them.
   highest-value item in this section, because it is a wrong-answer bug in valid
   Go that the suite cannot see.
 
+- **A few package globals are emitted twice.** `runtime.divideError`,
+  `runtime.overflowError` and `internal/runtime/maps.errNilAssign` each get a
+  zeroed placeholder datum and then a second datum, under the same name, holding
+  the itab and value. `obj.prepareELF` keys its symbol index by name and keeps the
+  last, so every reference resolves to the real one and the placeholder is dead
+  bytes -- but the object genuinely defines one name twice, which the system
+  linker rejects outright the moment such a symbol is global. Found by §16, which
+  works around it rather than fixing the emission. The cause is in `globalDecl`'s
+  interface path and has not been traced.
+
 - **`println` with several operands omits the spaces the spec requires.**
   `println("a", 1, true)` prints `a1true` where the host toolchain prints
   `a 1 true`. Found while reducing §5.9. Affects the runtime's own diagnostics.
@@ -1840,14 +1850,14 @@ subsection. What follows replaces it.
    usable failure rate before it can be attributed, in the way §5.8's
    `gc/keepalive-stack-root` made its predecessor measurable.
 
-4. **Split the driver (`goc build-runtime`).** §14 landed the mechanism that made
-   this possible: a goc image can now carry more than one Go module, verified on
-   real output. What remains is compiling the runtime once into an object with a
-   moduledata of its own, exporting the type and name symbols so a program can
-   point at the runtime's descriptors rather than duplicating them, and giving
-   descriptors a content-derived `abi.Type.Hash` so `typelinksinit` does not scan
-   linearly. The prize is the capability matrix at about one minute rather than
-   about twelve and a half.
+4. **Done: the driver is split** (§16). `goc build-runtime` compiles the Go
+   runtime once as a Go module of its own and `goc -runtime` compiles a program
+   as a second module holding only the difference. Two of this item's three parts
+   turned out not to be wanted: the type region belongs to the *program* module,
+   not the prebuilt one, because a descriptor's contents depend on what the
+   program reaches; and with no duplicate descriptors in the image,
+   `typelinksinit` has nothing to canonicalise, so `abi.Type.Hash` never becomes
+   the bottleneck it was expected to. §16 records what the split actually buys.
 
 5. **Begin Phase 2 (§6).** The allocation-family, write-barrier and stack-map
    work is now on a foundation that has been independently exercised, and §6's
@@ -1953,20 +1963,22 @@ symbol (`minpc or maxpc invalid`, caught by `moduledataverify1`), and no
 
 ### What is not done
 
-- **The driver is not split.** There is no `goc build-runtime`, and no goc program
-  has been compiled against a prebuilt runtime object. That is the next piece and
-  it depends on this one.
-- **Type and name symbols are still module-local** (`Linkage.Export` unset), so a
-  program object cannot yet point at a prebuilt runtime's descriptors by pointer
-  and must duplicate them. Pointers cross modules freely — only NameOff/TypeOff
-  must stay within one — so exporting them is what will let the program reference
-  the runtime's `type:int` directly. It only matters once the driver is split.
-- **`abi.Type.Hash` is zero for every cg12 type.** `typelinksinit` buckets its
-  candidate list by it, so with two large modules the match becomes a linear scan
-  over the first module's whole typelinks list per entry. Correctness is
-  unaffected — `typesEqual` is the actual test — but a real runtime split should
-  give descriptors a content-derived hash first. (It would also spread
-  `runtime.itabTable`, which buckets on the same field.)
+All three items recorded here on 2026-07-29 are resolved by §16, two of them by
+being answered differently than expected:
+
+- **The driver is not split.** Done: §16.
+- **Type and name symbols are still module-local.** Deliberately still local, and
+  §16 explains why exporting the *runtime's* descriptors would have been wrong: a
+  descriptor's method entries and `PtrToThis` depend on what the program reaches,
+  so the prebuilt module's copy is strictly poorer, and cg12 compares descriptors
+  by pointer so two copies break dispatch. The program module owns the whole type
+  region instead.
+- **`abi.Type.Hash` is zero for every cg12 type.** Still zero, and it no longer
+  matters in this topology: the split leaves the image with exactly one type
+  region, so `typelinksinit` has no duplicate descriptors to canonicalise and
+  never calls `typesEqual` at all. It would matter again for an image that did
+  carry two type regions, and for `runtime.itabTable`, which buckets on the same
+  field.
 
 ## 15. What Phase 1 established about method
 
@@ -1997,3 +2009,119 @@ Recorded because the same mistakes are cheap to repeat.
 - **Build the diagnostic before the fix.** `cg12scanroots` named the retaining
   frame in minutes after an earlier investigation had failed to find it at all.
   §3 step 5 asks for this; it repaid the cost every time it was followed.
+
+## 16. The driver is split: the runtime is compiled once, not once per program (2026-07-30)
+
+§14 made a goc image able to carry more than one Go module. This section is the
+payoff: `goc build-runtime` compiles the Go runtime once as a module of its own,
+and `goc -runtime <pack> prog.go` compiles a program as a second module holding
+only the difference and links the two. The capability matrix builds the runtime
+once per run.
+
+### The shape of it
+
+`goc build-runtime -o runtime.gocrt` compiles a fixed root program
+(`package main; func main() {}`) through the ordinary executable pipeline and then
+keeps everything except the parts that are program-built. The output is one
+container file holding three members -- the module's ELF relocatable, its
+assembled Plan 9 sidecar, and a manifest of what the two define. One file, so the
+manifest cannot drift from the objects it describes, and a version stamp so a
+stale pack is refused rather than mislinked.
+
+The manifest carries a **symbol list, not `[]gometa.FunctionInfo`**. The
+sepcompile spike said the prebuilt object would have to ship its per-function
+metadata, because that spike assumed one merged pclntab per image. §14's design is
+the other one the spike named: each module carries its own complete pclntab, so
+the program side never needs the runtime's function facts. What it needs is the
+set of symbols it may leave out.
+
+`goc -runtime` runs the same whole-program front end and applies the subtraction
+to the **finished** module, after IR generation and every module-level pass. A
+symbol the program module keeps is therefore bit-for-bit what a monolithic build
+would have emitted, which is what makes comparing the two images mean anything.
+`goc.TestKeptSymbolsMatchAMonolithicBuild` asserts it.
+
+### Three things cannot be subtracted
+
+- **The interface-method dispatchers.** They switch over the concrete types the
+  *program* contains and fall through to `runtime_gocInterfaceDispatchFailure`,
+  which throws; there is no `getitab` fallback to absorb a miss. The prebuilt
+  module leaves them undefined and names them in the manifest, and the program
+  build refuses to proceed if the program does not define one -- so a boundary
+  mistake is a build error naming the symbol, not a silent miss.
+
+- **The whole Go type region, which belongs to the program module.** §14's "what
+  is not done" expected the opposite: export the runtime's descriptors so the
+  program can point at them. That is backwards. A descriptor's contents depend on
+  the program: `clearUnavailableRuntimeMethodOffsets` writes
+  `runtime.unreachableMethod` into a method entry whose function is not in the
+  image, and `populateRuntimePointerTypes` fills `PtrToThis` only when the pointer
+  type is also described. The runtime root reaches fewer methods than a program
+  that imports more, so the prebuilt module's descriptor is not merely different,
+  it is **strictly poorer** -- freezing it in would silently disable reflect
+  method calls. Two copies is not an option either: cg12 compares descriptors by
+  pointer (the inline itab match in `interfaceTypeWord`, every candidate test in a
+  dispatcher), so a value tagged by one module would not match the other and the
+  dispatcher would throw. One descriptor per type, in the module that knows the
+  most about it.
+
+- **Package assembly the prebuilt module never loaded.** A program reaching
+  `reflect.methodValueCall` or a crypto block function needs that package's Plan 9
+  assembly, so the pack records which files it assembled and the program
+  translates the rest into a sidecar of its own.
+
+### Four defects found by doing it
+
+- **`runtime.lastmoduledatap` was hardcoded to `&runtime.firstmoduledata`**
+  (`goc/compile.go`'s `globalDecl`). `runtime.main` runs each module's init tasks
+  by walking the chain and stopping at the tail, so with two modules the program's
+  own package init never ran: `hello.go` died with `panic: init did not run`, which
+  looks like a miscompiled program rather than a linking mistake.
+
+- **Two symbol families were still named by a running counter**
+  (`%s.interfacecall.%d` and `%s.interfacecall.promoted.%d`). An itab's method
+  entries name those wrappers, so one itab had two contents in two compilations of
+  the same program. Now content-named like every other family.
+
+- **goc emits a few package globals twice** -- `runtime.divideError`,
+  `runtime.overflowError`, `internal/runtime/maps.errNilAssign`: a zeroed
+  placeholder, then the record holding the itab. `obj.prepareELF`'s symbol index
+  keeps the last, so the placeholder is dead bytes nothing references. Invisible
+  while those symbols were local; `multiple definition of runtime_divideError`
+  from `ld` the moment they went global. The split drops the shadowed copy. **The
+  duplicate emission itself is not fixed** and is recorded in §5.10.
+
+- **A type descriptor's name kept parameter names while its key stripped them.**
+  `runtimeTypeKey` anonymizes a signature's tuples; `runtimeTypeName` did not, so
+  one descriptor identity had two possible texts and `reflect.TypeOf(f).String()`
+  returned `func(v uint64)` where Go's spec and the host toolchain say
+  `func(uint64)` -- with *which* parameter name appearing depending on which
+  declaration the compiler described first. Fixed by canonicalizing the name the
+  same way as the key.
+
+- **`findfunctab` was a flat 2.6 MB in every module.** `findFuncBucketCount` falls
+  back to a 512 MB-covering floor when the module's text span is unknown -- which
+  it always was, because the sidecar carries the module's end -- and the floor then
+  beat the real count unconditionally. A module bounded entirely by its own object
+  knows its span and now sizes the table to it. Without this the split added 2.6 MB
+  of zeroes to every image, for a table cg12 never populates (every bucket is zero
+  and `findfunc` linearly scans functab from index 0).
+
+### What this does *not* buy, and why
+
+The split removes the back end, not the front end: about 60% of a compile rather
+than the sepcompile spike's projected 89%. The reason is the same fact that makes
+it correct. The program module must own the type region, and cg12 discovers which
+descriptors a program needs *by generating its IR* -- `ensureTypeTag` is called
+from the lowering of a conversion, an interface assignment, a `new`. So the
+program build cannot skip generating IR for functions the pack already has: that
+would drop descriptors, and a missing descriptor is not a link error but a
+dispatcher that quietly stops matching. Getting past it needs the pack to carry
+enough about its functions' type requirements to reconstruct them without
+lowering. That is a redesign, and it is written down rather than attempted.
+
+`moduledata.hasmain` is written correctly (0 on the prebuilt module, 1 on the
+program module, asserted on the linked image) but **still has no observable
+effect**, for a different reason than in §14: the split leaves the image with
+exactly one type region, so `runtime.typelinksinit` -- the only consumer of the
+ordering `hasmain` controls -- has no duplicate descriptors to canonicalise.

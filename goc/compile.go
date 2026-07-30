@@ -6160,7 +6160,24 @@ func runtimeAnonymousTuple(tuple *types.Tuple) *types.Tuple {
 	return types.NewTuple(variables...)
 }
 
+// runtimeTypeName is a type descriptor's Str -- what reflect.Type.String()
+// returns.
+//
+// It has to canonicalize a signature the same way runtimeTypeKey does, and for
+// two reasons. Go's spec spells a function type without parameter names, so
+// `func(uint64)` is the answer reflect must give; and the key is what decides the
+// descriptor's identity, so a name derived differently from the key means one
+// descriptor whose text depends on which declaration the compiler happened to
+// describe first. Two compilations of the same program could then disagree about
+// what reflect prints -- which is how this was found, when a separately compiled
+// runtime and program produced `func(v uint64)` and `func(x uint64)` for one type.
 func runtimeTypeName(valueType types.Type) string {
+	if signature, ok := canonicalAliasType(valueType).(*types.Signature); ok {
+		valueType = types.NewSignatureType(nil, nil, nil,
+			runtimeAnonymousTuple(signature.Params()),
+			runtimeAnonymousTuple(signature.Results()),
+			signature.Variadic())
+	}
 	return types.TypeString(valueType, func(pkg *types.Package) string {
 		return pkg.Name()
 	})
