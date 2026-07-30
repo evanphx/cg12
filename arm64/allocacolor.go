@@ -45,10 +45,27 @@ func allocaGroups(f *ir.Func, cfg *analysis.CFG) map[*ir.Instr]*ir.Instr {
 		}
 	}
 
+	// Index the colorable allocations in program order, not in map order. The
+	// greedy coloring below sorts by size with sort.SliceStable, so equal-size
+	// allocations -- the common case, and the whole point of sharing slots -- keep
+	// whatever order they were indexed in, and that order decides which group each
+	// one joins. Ranging allocaInstr made that Go's per-range map seed, so two runs
+	// of the compiler on identical input could emit different frame offsets.
 	var ids []uint32
 	idx := map[uint32]int{}
-	for id := range allocaInstr {
-		if hasStart[id] && hasEnd[id] {
+	for _, b := range f.Blocks {
+		for k := range b.Instrs {
+			in := &b.Instrs[k]
+			if !in.Op.IsAlloc() || in.To.Kind != ir.RefTemp {
+				continue
+			}
+			id := in.To.ID
+			if _, indexed := idx[id]; indexed {
+				continue
+			}
+			if !hasStart[id] || !hasEnd[id] {
+				continue
+			}
 			idx[id] = len(ids)
 			ids = append(ids, id)
 		}
