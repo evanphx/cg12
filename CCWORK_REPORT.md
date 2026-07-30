@@ -304,8 +304,9 @@ Everything below was run on this tree at the tip of `ccwork/pack-stdlib`.
 | full capability matrix, cold packs | same census |
 | full capability matrix, matched control (one pack) | same census |
 
-**The complete list of non-passing capabilities is one entry**, and it is the declared
-expected failure the matrix has always carried; there are no FAILs and no KNOWN GAPs. The
+**The complete list of non-passing capabilities is one entry:**
+`runtime-panic/print-string` (`runtime_panic_print_string.go`), the declared EXPECTED FAILURE
+the matrix has always carried. There are no FAILs, no SKIPs and no KNOWN GAPs. The
 census is taken from a `-v` log by counting `--- PASS:` / `--- FAIL:` subtest lines and the
 per-capability `PASS` / `EXPECTED FAILURE` / `KNOWN GAP` verdicts, not from `ok`.
 
@@ -432,3 +433,21 @@ about them:
 
 Neither is a workaround: both fix a defect that makes the compiler emit the wrong code, and
 both are covered by tests that fail without them.
+
+## What changed
+
+| file | why |
+| --- | --- |
+| `goc/compile.go` | name a function literal after the function it is written in; refuse a module whose functions collide on a linker symbol; guard the type hasher against re-emission; answer an interface type test with `runtime.getitab` when the inline chain misses; read the package closure once, where the loader is complete |
+| `goc/runtime_root.go` | generate the pack's root from a package list instead of a fixed empty `main` |
+| `goc/runtime_split.go` | carry several candidate manifests and choose among them by closure containment |
+| `goc/source_import.go` | export `StdlibRoot`, which the cache key hashes |
+| `internal/runtimepack/runtimepack.go` | manifest version 2: `Packages`, `Closure`, `UsableBy`, and a manifest-only read |
+| `internal/prebuilt/prebuilt.go` | build a pack for a package list; compile against a set of manifests and report the choice |
+| `cmd/goc/prebuilt.go`, `cmd/goc/main.go` | `-packages` on `build-runtime`, a comma-separated `-runtime` |
+| `cmd/goc/packcache.go` | the content-addressed pack cache |
+| `cmd/goc/runtime_status_test.go`, `cmd/goc/runtime_coverage_test.go` | build the seven packs concurrently; `-runtime-status-stdlib-packs=false` control; `-buildvcs=false` for the matrix compiler |
+| `cmd/goc/packstdlib_test.go` | the selection, fallback, refusal, manifest and cache-key tests |
+| `goc/function_literal_symbol_test.go` | the nistec regression test and the collision message |
+| `analysis/splitdiff/main.go` | differential across a set of packs |
+| `RUNTIME_PLAN.md` | section 18 |
