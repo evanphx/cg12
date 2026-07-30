@@ -2107,6 +2107,24 @@ would have emitted, which is what makes comparing the two images mean anything.
   of zeroes to every image, for a table cg12 never populates (every bucket is zero
   and `findfunc` linearly scans functab from index 0).
 
+### What it measures
+
+| | |
+| --- | ---: |
+| capability matrix, monolithic (matched control) | 478.4 s |
+| capability matrix, split | **406.5 s** |
+| per-program compile, a program the runtime dominates | 4.0 s -> 1.5 s (**2.7x**) |
+| compile+link CPU over all 358 corpus programs | 4152 s -> 3158 s (1.31x) |
+| linked image size over all 358 | +11.6% |
+
+**1.18x on the matrix, not the 12x the prize was stated as.** The matrix is no longer
+compile-bound -- the look-ahead compile queue overlaps ten compiles against a sequential
+run phase -- and eight standard-library programs at 140-185 s each dominate what remains
+and gain nothing, because the pack holds only the runtime. Letting the pack carry the
+common standard library is where the rest is, and it needs a stub dispatcher for any
+program symbol a program does not generate plus moving the image's package-init list to
+the program module. Neither was attempted.
+
 ### What this does *not* buy, and why
 
 The split removes the back end, not the front end: about 60% of a compile rather
