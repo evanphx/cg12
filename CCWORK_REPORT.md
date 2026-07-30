@@ -84,6 +84,97 @@ but they are three definitions of one global symbol, which the system linker ref
 linker symbol, comparing the *mangled* spelling because that is where distinct Go names can
 converge. A collision is a build error naming both functions rather than a silent rebinding.
 
+## Finding 3: a *fixed superset* pack is not reachable from here, and the reason is bigger than the briefing's two items
+
+With `net/http` in the pack, `stdlib_http_tls_client_server.go`:
+
+| | |
+| --- | ---: |
+| compile against the runtime-only pack | 158.0 s |
+| compile against the `net/http` pack | **23.7 s** (6.7x) |
+| runs, exit status | 0 |
+| output vs the runtime-only-pack build | byte-identical |
+| output vs the host Go toolchain | byte-identical |
+
+`hello.go` against that same pack is refused, and not by the linker: `checkProgramSymbols`
+rejects it because the pack leaves **18,309 program symbols** undefined and `hello.go` defines
+almost none of them. The briefing named two blockers -- interface dispatchers and the
+package-init list. The list is far longer than that, and the extra entries are not
+stubbable:
+
+- **The whole Go type region** belongs to the program module by construction (RUNTIME_PLAN
+  section 16: a descriptor's contents depend on what the program reaches, and cg12 compares
+  descriptors by pointer). Every descriptor of every `net/http` type is a symbol the pack
+  references and `hello.go` never generates.
+- **Every static itab the pack degraded.** These are not unreachable: `runtime.itabsinit`
+  walks each module's `itablinks` at startup, so a stubbed itab would be *read* on the way up,
+  by every program, before `main`.
+
+A stub is only safe where the thing it stands in for is unreachable. That is true of an
+interface dispatcher and false of an itab the runtime enumerates at startup, so "stub
+whatever the program did not supply" does not close this gap. Making a fixed superset pack
+work needs the redesign section 16 already named -- the pack carrying enough about its types
+to let a program reconstruct descriptors without lowering -- and that is not this job.
+
+**What is reachable is a pack the program is allowed to be a superset of.** A program whose
+import closure contains the pack's closure generates every symbol the pack left for it, which
+is exactly the condition the existing `checkProgramSymbols` already enforces. So the pack
+stops being one fixed artifact and becomes a set of candidates, each program taking the
+richest one it is a superset of, and falling back to the runtime-only pack otherwise.
+
+## Finding 4: the split's subtraction is unsound for any function containing an interface-to-interface type test
+
+`stdlib_http_client_server.go` compiled against a `net/http` pack links and then aborts
+deterministically (5/5 runs, exit 2), inside a goroutine `net/http.(*Transport).dialConn`
+started. The same program against the runtime-only pack passes 3/3. `GOGC=off`,
+`gcshrinkstackoff`, `GOMAXPROCS=1`, `asyncpreemptoff` and `gccheckmark` change nothing, so it
+is not a GC or scheduling race. The signal is `SIGABRT` with `sigcode = -6` (SI_TKILL) and the
+PC is in libc, i.e. a call to libc `abort()` — and goc emits exactly one thing that calls
+`abort()` on a path a working program can reach: **a failed single-value type assertion**
+(`goc/compile.go`'s `*ast.TypeAssertExpr` lowering).
+
+The mechanism is `interfaceTypeMatch`. An assertion to an interface type is lowered to an
+*inline chain of descriptor-pointer comparisons*, one per type that implements the interface,
+and the candidate list comes from `g.functionDecls` — every method declared **anywhere in the
+whole program**. That makes an ordinary function's body depend on the whole program's declared
+method set.
+
+RUNTIME_PLAN section 16 says a symbol the program module *keeps* is bit-for-bit what a
+monolithic build would have emitted. That is true, and it is not the property that matters
+here: a *subtracted* function is taken from the pack, and the pack compiled it against the
+pack's method set. A program whose closure is strictly larger has more implementations, so a
+pack function's chain is missing candidates — and the assertion fails on a type the program
+introduced.
+
+This is a pre-existing hole in the driver split, not something the standard-library pack
+creates; carrying `net/http` is only what made it reachable. The runtime-only pack has the
+same hole, and it has not bitten only because runtime code rarely asserts to a non-empty
+interface.
+
+**The fix is already sitting next to it.** `interfaceTypeWord` — the conversion path — emits
+the same inline chain and then falls back to `runtime.getitab(inter, typ, canfail)`, which is
+Go's own answer and depends on nothing but the two descriptors. `interfaceTypeMatch` has no
+fallback: a miss is simply "no". Giving it the same fallback makes the test program-independent
+and, as a side effect, fixes a second latent gap — today a type whose method set comes only
+from an embedded field is in no `functionDecls` entry at all, so asserting it to an interface
+it genuinely implements fails.
+
+### The mechanism, measured directly
+
+An instrumented compiler that prints each interface test's candidate count, run over the pack's
+root (`package main; import _ "net/http"; func main() {}`) and over
+`stdlib_http_client_server.go`, monolithically:
+
+| interface | candidates when the pack compiled it | candidates the program would have used |
+| --- | ---: | ---: |
+| `interface{String() string}` | 184 | **198** |
+| `interface{Read([]byte) (int, error)}` | 98 | **99** |
+| `interface{Write([]byte) (int, error)}` | 76 | **77** |
+| `interface{WriteString(string) (int, error)}` | 15 | **16** |
+
+58 distinct interfaces are tested in the pack's compilation, 65 in the program's. Every
+function the program subtracts and takes from the pack is testing against the left-hand column.
+
 ---
 
 _This report is updated as results land._

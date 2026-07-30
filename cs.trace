@@ -1,0 +1,2 @@
+/bin/bash: line 1: ./goc-trace.bin: No such file or directory
+exit=127

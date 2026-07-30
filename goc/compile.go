@@ -7183,8 +7183,8 @@ func (g *gen) typeAssertion(assertion *ast.TypeAssertExpr) (ir.Ref, ir.Ref) {
 	sourceType := g.typeAndValue(assertion.X).Type
 	dynamicTag := g.interfaceDynamicType(descriptor, sourceType)
 	var match ir.Ref
-	if targetInterface, ok := targetType.Underlying().(*types.Interface); ok {
-		match = g.interfaceTypeMatch(dynamicTag, targetInterface)
+	if _, ok := targetType.Underlying().(*types.Interface); ok {
+		match = g.interfaceTypeMatch(dynamicTag, targetType)
 	} else {
 		match = g.cur.Cmp(ir.CmpEq, ir.ClsP, dynamicTag, g.typeTag(targetType))
 	}
@@ -7233,16 +7233,79 @@ func (g *gen) typeAssertion(assertion *ast.TypeAssertExpr) (ir.Ref, ir.Ref) {
 	return value, asserted
 }
 
-func (g *gen) interfaceTypeMatch(dynamicTag ir.Ref, target *types.Interface) ir.Ref {
-	if target.NumMethods() == 0 {
+// interfaceTypeMatch answers, as a word, whether the dynamic type dynamicTag
+// implements the interface targetType -- the test behind `x.(I)`, `x.(I)` with
+// comma-ok, and an interface case of a type switch.
+//
+// The list of types that implement an interface is built from every method
+// declared anywhere in the program, so an inline chain of comparisons against it
+// makes an ordinary function's body depend on the whole program. That is fine
+// for a monolithic build and wrong for a split one: a function the program
+// module subtracts was compiled into the pack against the *pack's* method set,
+// which is a subset of the program's, so the chain is missing the very
+// candidates the program added. `stdlib_http_client_server.go` against a
+// net/http pack asserted a type the pack had never seen, fell off the end of the
+// chain and aborted.
+//
+// So the chain is a fast path and runtime.getitab is the answer. getitab
+// consults the itab table and, failing that, walks the concrete type's method
+// set; with canfail it returns nil rather than panicking. It depends on nothing
+// but the two descriptors, which both modules agree on because the program owns
+// the whole type region. interfaceTypeWord -- the conversion path, immediately
+// above -- has always ended this way; only the test did not.
+//
+// It closes a second gap as well. interfaceImplementations enumerates method
+// *receivers*, so a type whose method set comes entirely from an embedded field
+// appears in no entry, and asserting it to an interface it genuinely implements
+// used to answer no.
+func (g *gen) interfaceTypeMatch(dynamicTag ir.Ref, targetType types.Type) ir.Ref {
+	target, isInterface := targetType.Underlying().(*types.Interface)
+	if !isInterface || target.NumMethods() == 0 {
 		return g.fn.Word(1)
 	}
-	match := g.fn.Word(0)
-	for _, implementation := range g.interfaceImplementations(target) {
-		matchesImplementation := g.cur.Cmp(ir.CmpEq, ir.ClsP, dynamicTag, g.typeTag(implementation))
-		match = g.cur.Or(ir.ClsW, match, matchesImplementation)
+	implementations := g.interfaceImplementations(target)
+	if !g.runtimeAllocation {
+		// The freestanding subset has no Go runtime to ask, so the chain is all
+		// there is. It is also not split, so the chain is complete.
+		match := g.fn.Word(0)
+		for _, implementation := range implementations {
+			matchesImplementation := g.cur.Cmp(ir.CmpEq, ir.ClsP, dynamicTag, g.typeTag(implementation))
+			match = g.cur.Or(ir.ClsW, match, matchesImplementation)
+		}
+		return match
 	}
-	return match
+
+	done := g.block("ifacematchdone")
+	fallback := g.block("ifacematchfallback")
+	edges := make([]ir.PhiEdge, 0, len(implementations)+1)
+	for index, implementation := range implementations {
+		matched := g.block(fmt.Sprintf("ifacematchhit%d_", index))
+		next := g.block(fmt.Sprintf("ifacematchnext%d_", index))
+		matchesImplementation := g.cur.Cmp(ir.CmpEq, ir.ClsP, dynamicTag, g.typeTag(implementation))
+		g.cur.Jnz(matchesImplementation, matched, next)
+
+		g.cur = matched
+		g.cur.Goto(done)
+		edges = append(edges, ir.PhiEdge{From: matched, Val: g.fn.Word(1)})
+
+		g.cur = next
+	}
+	g.cur.Goto(fallback)
+
+	g.cur = fallback
+	itab := g.cur.Call(
+		ir.ClsP,
+		g.fn.Sym("runtime.getitab", 0),
+		g.typeTag(targetType),
+		dynamicTag,
+		g.fn.Word(1),
+	)
+	implemented := g.cur.Cmp(ir.CmpNe, ir.ClsP, itab, g.fn.ConstInt(ir.ClsP, 0))
+	g.cur.Goto(done)
+	edges = append(edges, ir.PhiEdge{From: fallback, Val: implemented})
+
+	g.cur = done
+	return done.Phi(ir.ClsW, edges...)
 }
 
 func (g *gen) interfaceImplementations(target *types.Interface) []types.Type {
@@ -9168,8 +9231,8 @@ func (g *gen) typeSwitchStmt(statement *ast.TypeSwitchStmt, label string) {
 				dynamicTag := g.interfaceDynamicType(interfaceValue, sourceType)
 				caseType := g.typeAndValue(caseExpression).Type
 				var matches ir.Ref
-				if caseInterface, ok := caseType.Underlying().(*types.Interface); ok {
-					matches = g.interfaceTypeMatch(dynamicTag, caseInterface)
+				if _, ok := caseType.Underlying().(*types.Interface); ok {
+					matches = g.interfaceTypeMatch(dynamicTag, caseType)
 				} else {
 					matches = g.cur.Cmp(ir.CmpEq, ir.ClsP, dynamicTag, g.typeTag(caseType))
 				}
@@ -10073,10 +10136,10 @@ func (g *gen) expr(e ast.Expr) (result ir.Ref) {
 		targetType := g.typeAndValue(n).Type
 		sourceType := g.typeAndValue(n.X).Type
 		dynamicTag := g.interfaceDynamicType(interfaceValue, sourceType)
-		targetInterface, targetIsInterface := targetType.Underlying().(*types.Interface)
+		_, targetIsInterface := targetType.Underlying().(*types.Interface)
 		var matches ir.Ref
 		if targetIsInterface {
-			matches = g.interfaceTypeMatch(dynamicTag, targetInterface)
+			matches = g.interfaceTypeMatch(dynamicTag, targetType)
 		} else {
 			matches = g.cur.Cmp(ir.CmpEq, ir.ClsP, dynamicTag, g.typeTag(targetType))
 		}
