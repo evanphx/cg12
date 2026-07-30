@@ -4,7 +4,29 @@ Branch: `ccwork/matrix-speed`. `perf/test-suite` is already an ancestor of this 
 starting tip (`91e6a9f`), so no rebase was needed; the previous job's report has been moved
 to `docs/report-driver-split.md` so this file is only about this job.
 
-Status: **in progress — written as it lands.** Anything not verified is stated as such.
+Status: **complete.** Everything claimed here was measured on this box; the one thing that was
+not checked is named under "Still unverified" at the end.
+
+## The short version
+
+1. **The 406.5 s figure was mostly the flag.** The unmodified harness takes **204.7 s** at its
+   default worker count and 233.8 s at 24. But raising the flag was not the whole story: the
+   harness left slack over its own model that *grew* with the worker count — 67 s at 8 workers,
+   159 s at 16 — because the look-ahead budget was returned by a run phase that walked the matrix
+   in index order, so a slow compile in the middle of the matrix pinned the dispatcher and idled
+   the workers behind it.
+2. **The run phase is now two phases.** `runtimeCapability` has an `exclusive` field, 60 of the
+   338 are marked, and a new unit test enforces the classification from each program's source.
+   That removed the dispatcher coupling; the slack fell to ~14 s at every worker count.
+3. **Longest-first dispatch helps, and was measured against a control**: −14% at 16 workers,
+   −11% at 24, −3% at 64. Kept. The ordering comes from each program's transitive import
+   closure, because source file size — the obvious proxy — ranks these programs at random.
+4. **At `cpu_slots: 24` the matrix went 233.8 s → 203.2 s; against the reported 406.5 s, 2.0x.**
+   The best case on the whole box barely moved (204.7 → 203.2), because it was already close to
+   the floor.
+5. **The floor is one program.** `stdlib_http_tls_client_server.go` compiles in 157.6 s alone
+   (`cpu=115%` — goc's compile is single-threaded) and 190 s under the matrix's own load. Five
+   consecutive full runs: 201.8–203.1 s, 338/338, results byte-identical.
 
 ## The model being measured
 
@@ -333,6 +355,16 @@ unsharded matrix runs at 24 workers, back to back:
 per-subtest timings stripped, and separately the sorted set of the 338 declared verdict lines
 (`PASS <source>` / `EXPECTED FAILURE <source>` / `KNOWN GAP <source>`). All four comparisons
 against run 1 are byte-identical, for both extractions. Wall clock spread is 1.3 s (0.6%).
+
+### One more full run on the final committed tree
+
+The five repeats were taken before the last commit (the memory-divisor fix, which does not
+change the worker count on this box). One more full run on the exact committed tree, at the
+default worker count:
+
+    label=final-default wall=204.0 subtests=338 pass=338 fail=0 skip=0
+    declaredPASS=337 expectedFAILURE=1 knownGAP=0
+    compile_cpu=4237.5 slowest_compile=190.3 (stdlib-http/tls-client-server) run_total=16.2
 
 ### The complete list of non-passing capabilities
 
