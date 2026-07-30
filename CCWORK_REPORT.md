@@ -382,3 +382,32 @@ RUNTIME_PLAN already records. The split neither fixes nor worsens it.
 
 The pack itself is deterministic: three `goc build-runtime` runs (two warm, one with
 `CG12_NOCACHE=1`) produced byte-identical files.
+
+### `make test-goc-corpus`
+
+First run **failed on one unit test, not on any corpus program**: the repo's
+`TestDeriveClassifiesEveryGenField` guard requires every field of `goc`'s `gen` struct to
+be explicitly classified as whole-compilation state or per-generator state, and the split
+added two (`interfaceDispatchers`, `lastModuleSymbol`). Both are whole-compilation; they
+are now classified and the guard passes. Every corpus program in that run compiled and ran
+(the run took 821 s and produced exactly one `FAIL` line, the guard).
+
+Re-run on the corrected tree: **pass** (`ok github.com/evanphx/cg12/goc 820.922s`, rc=0).
+
+## Everything verified, in one place
+
+| check | result |
+| --- | --- |
+| `go build ./...`, `go vet ./...` | clean |
+| `make test-unit` | **pass**, rc=0, 24 packages |
+| `make test-goc-cmd` | **pass**, rc=0, 206 s |
+| `make test-goc-corpus` | **pass**, rc=0, 821 s (first run caught one unclassified `gen` field; fixed) |
+| full capability matrix, split build | **338 subtests, 337 PASS, 1 EXPECTED FAILURE, 0 FAIL, 0 KNOWN GAP**, rc=0, 406.5 s |
+| full capability matrix, matched monolithic control | 338 subtests, 337 PASS, rc=0, 478.4 s |
+| 358-program differential (compile both ways, run both, compare output) | 353 identical, 3 fixed, 2 explained |
+| determinism, `CG12_NOCACHE=1` vs warm | 4 of 5 before **and** after; same documented exception |
+| `goc build-runtime` reproducibility | byte-identical across three runs |
+
+**Complete list of non-passing capabilities: one.** `defer-panic/panic-string-output`
+(`goc/testdata/runtime_panic_print_string.go`), the declared `expectedFailure`, failing as
+declared. No `FAIL`, no `KNOWN GAP`.
