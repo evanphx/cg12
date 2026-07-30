@@ -2394,6 +2394,9 @@ compile wall. **The defensible claim is 5% to 12% of what the matrix costs**, an
 could not narrow it. Fifteen full unsharded matrix runs, every one 338/338 with the single
 declared `EXPECTED FAILURE`.
 
+Sharding is unaffected: `STATUS_SHARDS=4` gives 85+85+84+84 = 338 subtests, 0 failures,
+with the single declared `EXPECTED FAILURE` in shard 1.
+
 Both compile paths were checked. The monolithic path (`-runtime-status-prebuilt-runtime=false`,
 where the worker compiles the runtime into each program) is a separate branch of
 `compileBatchProgram`; over 20 programs with no pack it also shows 0 leaks, identical

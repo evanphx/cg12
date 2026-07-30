@@ -427,6 +427,7 @@ have performed.
 | `make test-goc-corpus` | `ok github.com/evanphx/cg12/goc 893.407s` |
 | `make test-goc-cmd` | `ok github.com/evanphx/cg12/cmd/goc 232.685s` |
 | full capability matrix | 15 unsharded runs, every one 338/338 |
+| sharded matrix, `STATUS_SHARDS=4` | 85+85+84+84 = 338 subtests, 0 fail, the one `EXPECTED FAILURE` in shard 1 |
 | `analysis/batchdiff`, whole corpus, three ways | 0 leaks, 358/358 identical behaviour |
 | `scripts/determinism-check.sh` | 4 of 5 identical, before and after (§7) |
 
