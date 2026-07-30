@@ -1,9 +1,11 @@
 package main
 
 import (
+	"encoding/json"
 	"fmt"
 	"os"
 	"path/filepath"
+	"sync"
 	"testing"
 	"time"
 
@@ -587,4 +589,60 @@ func runtimeCoverageTestPacketFor(runtimeSourceID string) *runtimeCapabilityCove
 		},
 		hits: []bool{true},
 	}
+}
+
+// TestRuntimeCorpusCoverageRecordsConcurrentOutcomesDeterministically covers the
+// collector's new obligation. The capability matrix's run phase records outcomes
+// from several goroutines at once, so add has to be safe to call concurrently --
+// and the report must not depend on the order they arrived in. A coverage report
+// is a diffable artifact; rows that moved between runs would make every diff
+// unreadable, so this asserts the encoded report is byte-identical across two
+// independently scheduled recordings.
+func TestRuntimeCorpusCoverageRecordsConcurrentOutcomesDeterministically(t *testing.T) {
+	withRuntimeCoverageProfile(t)
+
+	capabilities := make([]runtimeCapability, 0, 200)
+	for index := 0; index < 200; index++ {
+		capabilities = append(capabilities, runtimeCapability{
+			category: fmt.Sprintf("category-%d", index%7),
+			name:     fmt.Sprintf("capability-%03d", index),
+			source:   fmt.Sprintf("program_%03d.go", index),
+		})
+	}
+
+	record := func() string {
+		coverage := newRuntimeCorpusCoverage()
+		coverage.expect(capabilities)
+
+		var recorded sync.WaitGroup
+		for _, capability := range capabilities {
+			capability := capability
+			recorded.Add(1)
+			go func() {
+				defer recorded.Done()
+				coverage.add(capability, runtimeCapabilityResult{
+					compileOutcome:  runtimeCoverageOutcomePassed,
+					runOutcome:      runtimeCoverageOutcomePassed,
+					coverageOutcome: runtimeCoverageOutcomeCollected,
+					runAttempts:     1,
+					coverage:        runtimeCoverageTestPacket(),
+				})
+			}()
+		}
+		recorded.Wait()
+
+		require.Empty(t, coverage.unreportedPrograms())
+		require.Empty(t, coverage.collectionErrors)
+
+		report := coverage.report()
+		require.Len(t, report.Programs, len(capabilities))
+		require.Equal(t, len(capabilities), report.Summary.CoveredPrograms)
+		require.NoError(t, validateRuntimeCoverageReport(report))
+
+		encoded, err := json.MarshalIndent(report, "", "  ")
+		require.NoError(t, err)
+		return string(encoded)
+	}
+
+	require.Equal(t, record(), record())
 }
