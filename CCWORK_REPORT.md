@@ -157,17 +157,82 @@ callees get inlined when the budget runs out is not reproducible. The matrix run
 ## 6. Verification
 
 - `go build ./...`, `go vet ./...`: clean.
-- `make test-unit`: pass.
+- `make test-unit`: **pass**.
+- `make test-goc-corpus`: **pass**, 606 s (`ok github.com/evanphx/cg12/goc 606.369s`).
+- `make test-goc-cmd`: **pass**, 150 s.
 - `go test -race ./arm64/ -run TestParallelBackend`: clean.
-- [running] Corpus differential: all 358 `goc/testdata` programs compiled three times with the
-  final compiler — twice at 8 back-end workers, once at 1 — classifying each as identical,
-  worker-dependent (a bug in this change) or inherently nondeterministic (pre-existing).
-- [running] `make test-goc-corpus`.
-- [todo] `make test-goc-cmd`.
-- [todo] Full capability matrix with `scripts/matrix-timing.sh`, against the 203 s baseline,
-  and the complete list of non-passing capabilities.
-- [todo] `analysis/splitdiff` over the corpus.
+
+### The full capability matrix
+
+`scripts/matrix-timing.sh`, full unsharded matrix, `-count=1 -v -runtime-status-progress`.
+**The box is shared with two sibling jobs throughout**, so the branch point was re-measured
+here rather than compared against the 203.2 s figure recorded on an exclusive box.
+
+| | wall | slowest compile | run phase | census |
+| --- | ---: | ---: | ---: | --- |
+| branch point, same box, same day | 303.9 s | 278.7 s (`stdlib-http/tls-client-server`) | 19.0 s | 338/338 |
+| **this branch** | **116.0 s** | **99.0 s** (same program) | 24.3 s | 338/338 |
+| branch point on an exclusive box (recorded, §17) | 203.2 s | 189.5 s | 14.6 s | 338/338 |
+
+**2.6x against the branch point measured under the same load; 1.75x against the exclusive-box
+figure while contended.** The bounding term is unchanged in kind — it is still
+`max(slowest single compile, compile CPU / workers)`, and it is still the slowest single
+compile (99.0 s against 338 programs' worth of work spread over 61 compile workers). The floor
+moved; it did not stop being the floor.
+
+Census, every run: **338 subtests, 338 `--- PASS`, 0 `--- FAIL`, 0 `--- SKIP`; 337 declared
+PASS, 1 EXPECTED FAILURE, 0 KNOWN GAP.** The single non-passing capability is the declared one:
+
+    runtime_status_test.go:2431: EXPECTED FAILURE runtime_panic_print_string.go
+
+**There are no other non-passing capabilities.**
+
+### The corpus differential: is the output worker-independent?
+
+Every one of the 358 `goc/testdata` programs compiled three times with the final compiler —
+twice at 8 back-end workers, once at 1:
+
+| | count |
+| --- | ---: |
+| all three byte-identical | **319** |
+| the two 8-worker runs already disagreed (nondeterministic program) | 34 |
+| 8-worker runs agreed, 1-worker run differed | 5 |
+| compile failed | **0** |
+
+The five in the third row are the ones that matter, so each was compiled **30 times at 1 worker
+and 30 times at 8**:
+
+| program | at 1 worker | at 8 workers |
+| --- | --- | --- |
+| `runtime_loopvar_range` | 29 x A, 1 x B | 24 x A, 6 x B |
+| `stdlib_log_buffer` | 27 x A, 3 x B | 23 x A, 7 x B |
+| `stdlib_encoding_csv` | 6 distinct | 5 distinct, all also seen at 1 worker |
+| `stdlib_encoding_gob_struct_int` | 25 distinct | 26 distinct |
+| `stdlib_runtime_trace_buffer` | 27 x A, 3 x B | (1-worker leg alone settles it) |
+
+Every one of them produces more than one output **at a single back-end worker**, where the
+concurrent driver dispatches one function at a time. The three-compile classifier simply could
+not distinguish a rare variant from a worker-dependent one. Controls: `runtime_defer_capture_allocs`
+gives 25 distinct outputs in 30 single-worker compiles, and `hello` gives 1 in 30.
+
+**No program produced an output at 8 workers that it never produced at 1.** Together with the
+unit test (byte-identical objects from 1 to 256 workers) and the `-race` run, that is the case
+that the concurrency does not affect the compiler's output.
+
+### Determinism against the branch point
+
+The prebuilt runtime pack — the whole Go runtime, the largest module goc compiles — is
+byte-identical between the branch point and the `slotGroups` rewrite, as is `hello.go`. The
+later determinism fixes deliberately change generated code (they replace an arbitrary
+map-order result with a fixed one), so byte-identity against the branch point does not hold
+past that commit and is not claimed.
 
 ## Still unverified
 
-Everything marked running or todo in §6.
+- `analysis/splitdiff` over the corpus (running).
+- `go test -race` over real Go compiles rather than the synthetic module (running).
+- Whether the 39 nondeterministic corpus programs were *already* nondeterministic at the
+  branch point. Each variant reproduces at one back-end worker, and the concurrency is
+  proven not to introduce one, so this is a completeness gap rather than a live suspicion.
+- No idle-box measurement exists for anything here; two sibling jobs were compiling
+  throughout.
