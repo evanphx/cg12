@@ -97,6 +97,10 @@ type compileOptions struct {
 	testPackages         map[string]bool
 	externalTestPackages map[string]string
 	runtimeCoverage      *RuntimeCoverage
+	// runtimeSplit, when set, makes this compilation one half of a driver split:
+	// either the prebuilt runtime module or a program module compiled against
+	// one. See runtime_split.go.
+	runtimeSplit *runtimeSplit
 }
 
 func compile(name string, src []byte, options compileOptions) (*ir.Module, error) {
@@ -196,6 +200,12 @@ func compile(name string, src []byte, options compileOptions) (*ir.Module, error
 	functionDecls := collectFunctionDeclarations(info, pkg, []*ast.File{file}, loader.units)
 	runtimeInits, initSymbols := runtimeInitDeclarations(loader.units)
 	moduleInits := moduleInitDeclarations([]*ast.File{file}, info, pkg, loader.units, initSymbols)
+	if options.runtimeSplit.buildsRuntime() {
+		// The prebuilt module carries no part of any program, so it does not run
+		// the root program's package init either. Listing it would leave the
+		// module's inittasks pointing at a function the module does not define.
+		moduleInits = dropPackageInit(moduleInits, pkg.Path())
+	}
 	var moduleInitFunctions []functionDecl
 	for _, packageInitializer := range moduleInits {
 		moduleInitFunctions = append(moduleInitFunctions, packageInitializer.declarations...)
@@ -286,6 +296,8 @@ func compile(name string, src []byte, options compileOptions) (*ir.Module, error
 		interfaceMethods:        interfaceMethods,
 		interfaceItabs:          interfaceItabs,
 		interfaceCallWrappers:   interfaceCallWrappers,
+		interfaceDispatchers:    make(map[string]bool),
+		lastModuleSymbol:        lastModuleSymbolFor(options.runtimeSplit),
 		dynamicTypes:            dynamicTypes,
 		reachableGlobals:        reachableGlobals,
 	}
@@ -360,6 +372,12 @@ func compile(name string, src []byte, options compileOptions) (*ir.Module, error
 	if err := generateDynamicInitializerFunctions(g, dynamicInitializers); err != nil {
 		return nil, err
 	}
+	// rootPackageFunctions are the functions a prebuilt runtime module must leave
+	// undefined because they belong to whatever program is linked against it. The
+	// attribution is by which declaration was being generated, not by the symbol's
+	// spelling: a wrapper created while lowering the program's own code belongs to
+	// the program even when its name says otherwise.
+	var rootPackageFunctions []string
 	for i := len(functions) - 1; i >= 0; i-- {
 		function := functions[i]
 		generator := g
@@ -372,9 +390,15 @@ func compile(name string, src []byte, options compileOptions) (*ir.Module, error
 		}
 		generator.typeArguments = function.typeArguments
 		generator.functionName = function.symbol
+		emitted := len(mod.Funcs)
 		generator.funcDecl(function.decl)
 		if generator.err != nil {
 			return nil, generator.err
+		}
+		if options.runtimeSplit.buildsRuntime() && function.pkg == pkg {
+			for _, added := range mod.Funcs[emitted:] {
+				rootPackageFunctions = append(rootPackageFunctions, added.Name)
+			}
 		}
 	}
 	addInterfaceMethodWrappers(g, functions)
@@ -393,11 +417,11 @@ func compile(name string, src []byte, options compileOptions) (*ir.Module, error
 		return nil, g.err
 	}
 	if compileRuntime {
-		addInterfaceItabLinks(mod, interfaceItabs)
+		addInterfaceItabLinks(mod, splitItabLinks(interfaceItabs, options.runtimeSplit))
 		if err := addRuntimeInitTask(mod, runtimeInits, initSymbols); err != nil {
 			return nil, err
 		}
-		if err := addModuleInitTasks(mod, moduleInits, initSymbols, dynamicInitializers, dynamicInitializerFunctions); err != nil {
+		if err := addModuleInitTasks(mod, moduleInits, initSymbols, dynamicInitializers, dynamicInitializerFunctions, options.runtimeSplit); err != nil {
 			return nil, err
 		}
 		mod.Data = append(mod.Data, &ir.Data{Name: ".goc.runtime.dataend", Align: 8, Items: []ir.DataItem{{Sub: ir.SubUB, Ints: []int64{0}}}})
@@ -432,7 +456,63 @@ func compile(name string, src []byte, options compileOptions) (*ir.Module, error
 			return nil, err
 		}
 	}
+	// The split is applied last, on the finished whole-program module. Every
+	// symbol it keeps is therefore exactly what a monolithic build would have
+	// emitted; only the set of definitions changes.
+	switch {
+	case options.runtimeSplit.buildsRuntime():
+		fingerprint, err := activeRuntimeSourceID(loader.units["runtime"])
+		if err != nil {
+			return nil, err
+		}
+		options.runtimeSplit.fingerprint = fingerprint
+		rootPackageData := make([]string, 0, len(packageGlobals[pkg.Path()]))
+		for _, symbol := range packageGlobals[pkg.Path()] {
+			rootPackageData = append(rootPackageData, symbol)
+		}
+		for name := range g.interfaceDispatchers {
+			rootPackageFunctions = append(rootPackageFunctions, name)
+		}
+		if err := finishRuntimeModule(mod, options.runtimeSplit, rootPackageFunctions, rootPackageData); err != nil {
+			return nil, err
+		}
+	case options.runtimeSplit.againstRuntime():
+		if err := finishProgramModule(mod, options.runtimeSplit); err != nil {
+			return nil, err
+		}
+	}
 	return g.mod, nil
+}
+
+// dropPackageInit removes one package's initializer set from the module's init
+// task list.
+func dropPackageInit(packages []packageInit, path string) []packageInit {
+	kept := make([]packageInit, 0, len(packages))
+	for _, packageInitializer := range packages {
+		if packageInitializer.path == path {
+			continue
+		}
+		kept = append(kept, packageInitializer)
+	}
+	return kept
+}
+
+// splitItabLinks drops the static itabs a prebuilt runtime module already
+// registers. runtime.itabsinit walks every module's itablinks, so an itab listed
+// by both modules would be added to runtime.itabTable twice.
+func splitItabLinks(itabs map[string]string, split *runtimeSplit) map[string]string {
+	if !split.againstRuntime() {
+		return itabs
+	}
+	defined := split.manifest.DefinedSet()
+	kept := make(map[string]string, len(itabs))
+	for key, symbol := range itabs {
+		if defined[ir.LinkerSymbol(symbol)] {
+			continue
+		}
+		kept[key] = symbol
+	}
+	return kept
 }
 
 // exportAssemblyReferencedFunctions keeps Go functions named by a separately
@@ -776,9 +856,20 @@ func addModuleInitTasks(
 	initSymbols map[*types.Func]string,
 	dynamicInitializers map[types.Object]*globalInitializer,
 	dynamicInitializerFunctions map[types.Object]string,
+	split *runtimeSplit,
 ) error {
 	var backingItems []ir.DataItem
 	var pointerWords []int
+	// A package whose init task the prebuilt runtime module already carries is
+	// initialized by that module: runtime.main walks the module chain in order and
+	// the prebuilt module comes first, so its packages are initialized before this
+	// one's. Listing the task again here would either point across modules or --
+	// worse, if the task were re-emitted -- give one package two initTask records
+	// and run its init twice, since doInit's guard is the record's own state.
+	alreadyInitialized := map[string]bool{}
+	if split.againstRuntime() {
+		alreadyInitialized = split.manifest.DefinedSet()
+	}
 	for _, packageInitializer := range packages {
 		dynamicSymbols := packageDynamicInitializerSymbols(
 			packageInitializer.info,
@@ -792,6 +883,9 @@ func addModuleInitTasks(
 		// Named for the package, not its index in this module's walk. Two
 		// separately compiled modules each start that index at zero.
 		taskName := contentSymbolName(".goc.module.inittask", packageInitializer.path)
+		if alreadyInitialized[ir.LinkerSymbol(taskName)] {
+			continue
+		}
 		taskItems := []ir.DataItem{{Sub: ir.SubW, Ints: []int64{0, int64(functionCount)}}}
 		for _, symbol := range dynamicSymbols {
 			taskItems = append(taskItems, ir.DataItem{Sub: ir.SubL, Sym: symbol})
@@ -890,6 +984,7 @@ func addInterfaceMethodWrappers(g *gen, reachable []functionDecl) {
 			continue
 		}
 		generated[name] = true
+		g.interfaceDispatchers[name] = true
 		var function *ir.Func
 		if signature.Results().Len() == 0 {
 			function = g.mod.NewFuncVoid(name)
@@ -1399,12 +1494,22 @@ type gen struct {
 	interfaceMethods        map[*types.Func]bool
 	interfaceItabs          map[string]string
 	interfaceCallWrappers   map[string]string
-	dynamicTypes            []types.Type
-	reachableGlobals        map[types.Object]bool
-	filterGlobals           bool
-	emitRuntimeTables       bool
-	runtimeAllocation       bool
-	typeTags                map[string]string
+	// interfaceDispatchers names the generated interface-method dispatchers.
+	// They switch over the concrete types the whole program contains, so a
+	// prebuilt runtime module must leave them for the program module to define.
+	interfaceDispatchers map[string]bool
+	// lastModuleSymbol is the moduledata runtime.lastmoduledatap points at: the
+	// tail of the module chain. Ordinarily an image is one module, so the tail is
+	// also runtime.firstmoduledata. A prebuilt runtime module is followed by the
+	// program module, and runtime.main stops its per-module init loop at the tail,
+	// so getting this wrong means the program's package init never runs.
+	lastModuleSymbol  string
+	dynamicTypes      []types.Type
+	reachableGlobals  map[types.Object]bool
+	filterGlobals     bool
+	emitRuntimeTables bool
+	runtimeAllocation bool
+	typeTags          map[string]string
 	// functionDescriptors dedupes static function descriptors by the symbol
 	// they point at, which is also what names them. Shared with derived
 	// generators, since derive copies the struct and so the map header.
@@ -2664,7 +2769,7 @@ func (g *gen) globalDecl(gd *ast.GenDecl) {
 				g.mod.Data = append(g.mod.Data, &ir.Data{
 					Name:         name,
 					Align:        8,
-					Items:        []ir.DataItem{{Sub: ir.SubL, Sym: "runtime.firstmoduledata"}},
+					Items:        []ir.DataItem{{Sub: ir.SubL, Sym: g.lastModuleSymbol}},
 					PointerWords: []int{0},
 				})
 				g.globals[obj] = name
@@ -5016,7 +5121,7 @@ func (g *gen) ensureInterfaceCallWrapperFor(sourceType types.Type, method *types
 		return symbol
 	}
 
-	wrapperSymbol := fmt.Sprintf("%s.interfacecall.promoted.%d", methodSymbol, len(g.interfaceCallWrappers))
+	wrapperSymbol := contentSymbolName(methodSymbol+".interfacecall.promoted", key)
 	g.interfaceCallWrappers[key] = wrapperSymbol
 
 	signature := method.Type().(*types.Signature)
@@ -5108,7 +5213,12 @@ func (g *gen) ensureInterfaceCallWrapper(method *types.Func) string {
 	if receiver == nil {
 		return methodSymbol
 	}
-	wrapperSymbol := fmt.Sprintf("%s.interfacecall.%d", methodSymbol, len(g.interfaceCallWrappers))
+	// Named from the signature it wraps, not from how many wrappers came first.
+	// An itab's method entries name these wrappers, so a counter here gives the
+	// same itab two different contents in two compilations of the same program --
+	// which is invisible in a monolithic build and fatal to a separately compiled
+	// one, where the two copies must be interchangeable.
+	wrapperSymbol := contentSymbolName(methodSymbol+".interfacecall", signatureKey)
 	g.interfaceCallWrappers[signatureKey] = wrapperSymbol
 
 	var function *ir.Func

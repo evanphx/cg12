@@ -89,6 +89,21 @@ func TestGoFindFuncBucketCountCoversLargeTextRanges(t *testing.T) {
 	assert.Greater(t, buckets, 4096)
 }
 
+// A module bounded entirely by its own object knows its text span, so it sizes
+// the table to the span rather than to the fallback. That is what keeps a program
+// module compiled against a prebuilt runtime from carrying 2.6 MB of zeroes it can
+// never index into.
+func TestGoFindFuncBucketCountSizesToAKnownTextSpan(t *testing.T) {
+	object := &obj.Object{Syms: []obj.Sym{
+		{Name: "first", Section: obj.SecText, Value: 0, Func: true},
+		{Name: "goc_programmoduledata_gocTextEnd", Section: obj.SecText, Value: 0xd20, Func: true},
+	}}
+	functions := []FunctionInfo{{Name: "first"}}
+
+	buckets := findFuncBucketCount(object, functions, "goc_programmoduledata_gocTextEnd")
+	assert.Equal(t, 1, buckets)
+}
+
 func TestGoFindFuncBucketCountUsesConservativeFallbackWhenTextEndIsExternal(t *testing.T) {
 	object := &obj.Object{Syms: []obj.Sym{
 		{Name: "first", Section: obj.SecText, Value: 0x400580, Func: true},

@@ -87,6 +87,25 @@ func CompileObjectAndAssembly(m *ir.Module) ([]byte, string, error) {
 	return data, bundle.source, nil
 }
 
+// CompileToObjectAndAssembly builds the in-memory relocatable object for m and
+// returns the GNU assembly translated from its Plan 9 sources alongside it.
+//
+// It is CompileObjectAndAssembly for a caller that has to edit the object before
+// it is serialized -- the driver split writes the prebuilt runtime module's
+// moduledata.next, which names a symbol the program module has not been compiled
+// yet to define.
+func CompileToObjectAndAssembly(m *ir.Module) (*obj.Object, string, error) {
+	bundle, err := prepareAssembly(m)
+	if err != nil {
+		return nil, "", err
+	}
+	object, err := compileToObjectWithBundle(m, Options{}, bundle)
+	if err != nil {
+		return nil, "", err
+	}
+	return object, bundle.source, nil
+}
+
 // WriteObjectAndAssembly emits the cg12 ELF object directly to w and returns
 // the GNU assembly translated from the module's Plan 9 sources. Streaming the
 // ELF object avoids allocating another complete copy of large program images.

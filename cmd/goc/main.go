@@ -27,6 +27,9 @@ func main() {
 	if len(os.Args) > 1 && os.Args[1] == "runtime-cover-baseline" {
 		os.Exit(runtimeCoverageBaselineCommand(os.Args[2:], os.Stderr))
 	}
+	if len(os.Args) > 1 && os.Args[1] == "build-runtime" {
+		os.Exit(buildRuntimeCommand(os.Args[2:], os.Stderr))
+	}
 
 	out := flag.String("o", "", "output file")
 	obj := flag.Bool("c", false, "emit a relocatable object")
@@ -35,10 +38,11 @@ func main() {
 	optimize := flag.Bool("O", false, "optimize cg12 IR")
 	run := flag.Bool("run", false, "link and run the program")
 	runtimeCoverMeta := flag.String("runtime-covermeta", "", "instrument runtime and write coverage metadata")
+	prebuiltRuntime := flag.String("runtime", "", "link against the prebuilt runtime written by `goc build-runtime`")
 	targetName := flag.String("target", defaultTargetName(), "arm64 | amd64")
 	flag.Parse()
 	if flag.NArg() != 1 {
-		fmt.Fprintln(os.Stderr, "usage: goc [-O] [-target arch] [-o out] [-c|-S|-emit-ir|-run] file.go")
+		fmt.Fprintln(os.Stderr, "usage: goc [-O] [-target arch] [-o out] [-runtime runtime.gocrt] [-c|-S|-emit-ir|-run] file.go")
 		os.Exit(2)
 	}
 	// ParseTarget's message already names the command, so it is printed as-is
@@ -52,6 +56,20 @@ func main() {
 	src, err := os.ReadFile(input)
 	check(err)
 	buildExecutable := !*obj && !*asm
+	if *prebuiltRuntime != "" {
+		if !buildExecutable || *emitIR || *runtimeCoverMeta != "" {
+			check(fmt.Errorf("-runtime builds an executable, so it cannot be combined with -c, -S, -emit-ir or -runtime-covermeta"))
+		}
+		exe := *out
+		if exe == "" {
+			exe = goc.OutputName(input)
+		}
+		check(linkAgainstPrebuiltRuntime(target, *prebuiltRuntime, input, src, exe, *optimize))
+		if *run {
+			os.Exit(runProgram(exe))
+		}
+		return
+	}
 	var m *ir.Module
 	var runtimeCoverage *goc.RuntimeCoverage
 	if *runtimeCoverMeta != "" {

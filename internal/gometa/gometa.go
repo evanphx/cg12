@@ -186,12 +186,25 @@ const ModuleItabLinksName = ".goc.module.itablinks"
 // bounds -- travels inside the module's own object, which is the point of
 // per-module regions.
 func ChainModule(object *obj.Object, parent, child string, reloc64 uint32) error {
+	if _, found := ObjectSymbol(object, child); !found {
+		return fmt.Errorf("chain Go module: %s is not defined in this object", child)
+	}
+	return ChainModuleToExternal(object, parent, child, reloc64)
+}
+
+// ChainModuleToExternal is ChainModule for a child module that lives in a
+// different object, which is the shape the driver split produces: the prebuilt
+// runtime object is written before the program that will be linked against it
+// even exists, so it names its successor rather than pointing at it.
+//
+// The relocation is the ordinary absolute one either way. All that changes is
+// who resolves it: the system linker rather than this object's own writer. The
+// child's name is therefore a contract between the two compilations, and the
+// link fails loudly if the program does not define it.
+func ChainModuleToExternal(object *obj.Object, parent, child string, reloc64 uint32) error {
 	symbol, found := DataSymbol(object, parent)
 	if !found {
 		return fmt.Errorf("chain Go module: %s is not a data symbol of this object", parent)
-	}
-	if _, found := ObjectSymbol(object, child); !found {
-		return fmt.Errorf("chain Go module: %s is not defined in this object", child)
 	}
 	object.DataRelocs = append(object.DataRelocs, obj.Reloc{
 		Offset: symbol.Value + ModuleNextOffset, Sym: child, Type: reloc64,
@@ -268,6 +281,21 @@ func sortFunctionsByTextOffset(object *obj.Object, functions []FunctionInfo) []F
 	return sorted
 }
 
+// findFuncBucketCount sizes moduledata.findfunctab.
+//
+// runtime.findfunc indexes it with the PC's offset from the module's minpc,
+// divided by the bucket size, and runtime.findmoduledatap has already confirmed
+// the PC is inside [minpc, maxpc). So (maxpc-minpc)/bucket + 1 entries is exactly
+// enough -- when the module's span is known here.
+//
+// It usually is not. A module whose last text is the translated Plan 9 sidecar
+// ends in a *different* object, so this one cannot see where; the 512 MB-covering
+// floor is the safety net for that. But a module bounded entirely by its own
+// object -- which is what a program module compiled against a prebuilt runtime is
+// -- knows its span exactly, and paying the floor there costs 2.6 MB of zeroes in
+// every image. cg12 never populates the table (every bucket is zero and findfunc
+// falls back to a linear scan of functab from index 0), so its only requirement
+// is to be long enough to index.
 func findFuncBucketCount(object *obj.Object, functions []FunctionInfo, endSymbol string) int {
 	if len(functions) == 0 {
 		return minimumFindFuncBucketCap
@@ -283,11 +311,7 @@ func findFuncBucketCount(object *obj.Object, functions []FunctionInfo, endSymbol
 	if !minFound || !endFound || endPC <= minPC {
 		return minimumFindFuncBucketCap
 	}
-	buckets := int((endPC-minPC)/funcTabBucketSize) + 1
-	if buckets < minimumFindFuncBucketCap {
-		return minimumFindFuncBucketCap
-	}
-	return buckets
+	return int((endPC-minPC)/funcTabBucketSize) + 1
 }
 
 // GCProgram encodes the pointer bitmap of the [dataStart, dataEnd) range as a

@@ -1,370 +1,54 @@
-# Per-module type regions: making a goc image carry more than one Go module
+# Splitting the goc driver: compile the Go runtime once, not once per program
 
-Branch: `ccwork/permodule-impl`, based on `perf/test-suite` (`8b3b5ca`).
-Status: **implemented and verified; suite results appended as they land.**
+Branch: `ccwork/driver-split`, based on `perf/test-suite` (`b3720bf`, which is also
+`origin/ccwork/permodule-impl`).
 
-## What this is
+Status: **in progress — written as it lands.** Anything not verified is stated as such.
 
-Landing the mechanism the two prior spikes identified (`ccwork/typeoff-alternatives`,
-`ccwork/sepcompile-spike`): give each separately compiled object its own `moduledata`, so
-its `NameOff`/`TypeOff` values stay relative to its own type region. Scope is items 1, 2, 3,
-5 and 6 of the task list; the driver split (`goc build-runtime`) is explicitly *not* in
-scope.
+## The design decision, up front
 
-Sections below are filled in as each piece is verified. Anything not verified is stated as
-such.
+### The premise the briefing carried forward has changed
 
-## Summary
+The briefing (from the `sepcompile` spike) says the prebuilt runtime object must ship its
+per-function metadata (`[]gometa.FunctionInfo`) alongside the ELF, "because the program side
+has to be able to chain modules". That was true of the spike's design, which assumed **one
+merged pclntab per image** (spike Obstacle 2): the linker would have to regenerate the whole
+blob from the union of both sides' functions, so it needed the runtime's per-function facts.
 
-A goc image can now carry more than one Go module, demonstrated end to end on real goc
-output. The three things that made a second module impossible — an image-wide text-end
-symbol, an image-wide moduledata name, and an empty `moduledata.typelinks` — are fixed;
-`hasmain` is written; and joining a module to the chain is one exported call. Each is
-covered by a test that fails without it, including three image-level controls that each
-reproduce the pre-change state and each fail at run time.
+The mechanism that actually landed (`RUNTIME_PLAN.md` §14) is the *other* design the spike
+named: **per-module moduledata**. Each object carries its own complete pclntab, its own type
+region and its own text bounds, and joining them is one `R_AARCH64_ABS64` write into
+`moduledata.next`. So the program side never needs the runtime's `FunctionInfo` — the runtime
+object already describes itself.
 
-Also fixed, with its own test: the first function of every goc module was nameless in every
-traceback.
+What the program side *does* need is the **set of symbols the prebuilt object defines**, so it
+can compile only the difference and reference the rest. That is the sidecar this step ships.
 
-Not done, deliberately: exporting type and name symbols (task item 4), which only matters
-once the driver is split.
+### Container format
 
-The 338-capability matrix is green (337 `PASS`, the one declared `EXPECTED FAILURE`, no
-`FAIL`, no `KNOWN GAP`), and compilation determinism is unchanged at 4 of 5 sample programs.
+`goc build-runtime -o <file>` writes one file holding three members: the runtime module's ELF
+relocatable, the assembled Plan 9 sidecar ELF, and a JSON manifest. Justification for a
+purpose-built container over the alternatives:
 
-## Determinism baseline, before any change (reproduced, not assumed)
+- **`ar` archive** — standard and `cc`-consumable, but `cc` pulls archive members only to
+  resolve an undefined symbol, so a member the image needs but nothing references yet is
+  silently dropped; and it has nowhere to put the manifest.
+- **A non-alloc ELF section inside a single merged object** — elegant, but merging the Go
+  object and the assembled sidecar into one `ET_REL` is a code path nothing else in the tree
+  uses, on the critical path of every build.
+- **A tiny purpose-built container** (chosen) — magic + version + JSON index + concatenated
+  members. One artifact, so the manifest cannot drift from the objects it describes; a version
+  stamp so a stale pack is refused rather than mislinked; ~60 lines with a unit test.
 
-`CG12_NOCACHE=1` build vs. warm build, sha256 of the linked image:
+(Full design and measurements below, filled in as they land.)
 
-| program | result |
-| --- | --- |
-| `hello.go` | identical |
-| `fmt_sprintf.go` | identical |
-| `gc_struct.go` | identical |
-| `runtime_cleanup_frame_retention.go` | identical |
-| `runtime_defer_capture_allocs.go` | **different** (the documented backend residue) |
+## Baseline measurement (monolithic, before any change)
 
-4 of 5, exactly as RUNTIME_PLAN records. This is the number the post-change run has to match.
-
-## moduledata field offsets, verified against the host toolchain
-
-Not counted by eye and not taken from the spike: the vendored `runtime.moduledata`
-(`stdlib/src/runtime/symtab.go:402`) was transcribed into a standalone program and compiled
-with the host Go 1.26.1, printing `unsafe.Offsetof`:
+Full 338-capability matrix, one unsharded `go test` process with
+`-runtime-status-compile-workers=10` (this job's declared CPU share), on the 64-core box:
 
 ```
-sizeof=592  types=296  etypes=304  typelinks=360  inittasks=472
-modulename=496  modulehashes=512  hasmain=536  bad=537
-gcdatamask=544  gcbssmask=560  typemap=576  next=584
+ok  github.com/evanphx/cg12/cmd/goc  478.700s      (wall 7:59.53, peak RSS 2.87 GB, rc=0)
 ```
 
-## The mechanism, running on a real goc image (2026-07-29)
-
-`analysis/typeoff` (the spike's prototype, re-pointed at the landed mechanism) builds a
-two-module image: a real goc-compiled program plus a separately compiled object built by the
-new `internal/permodule`. The second module needs **no hand-added symbols** — the spike's
-`runtime.gocTextEnd` workaround is gone.
-
-`go run ./analysis/typeoff -o out cmd/goc/testdata/permodule_probe.go`:
-
-```
-typeoff: merged .data is 6772736 bytes; program base at 0,
-         second module's base at 4149736 (shifted 4149736 bytes from where it was compiled)
-foreign-int:int
-foreign-int-kind:2
-foreign-ptr:*int
-ptr-identity: same          <- typelinks/typemap: one Go type, one identity, across modules
-first-func:_goc_probe_entry <- the module's function at text offset 0 now has a name
-first-call:7                <- its code ran
-frames:6
-frame:main_probeCallback
-frame:_goc_probe_hold       <- the traceback walked a second-module frame
-frame:main_main
-...
-payload: intact
-probe: done
-```
-
-### The GC stack scan over the second module's frame
-
-The spike explicitly did not verify this. `GODEBUG=cg12scanroots=2`, `GOMAXPROCS=1`:
-
-```
-cg12scanroots: frame _goc_probe_hold sp=0x30ad252f8e0 fp=0x30ad252f900
-               varp=0x30ad252f900 argp=0x30ad252f900 locals=2 args=1
-cg12scanroots: _goc_probe_hold local slot 0 at 0x30ad252f8f0
-               retains 0x30ad24dc0e0 size 32 head 0x5ea1ed
-```
-
-`0x5ea1ed` is the program's `payloadMagic`. Filtering the whole scan for that object:
-
-```
-      2 cg12scanroots: _goc_probe_hold local slot 0 ... retains ... head 0x5ea1ed
-```
-
-**Exactly one frame retains it, and it is the second module's.** Both GC cycles. So the
-object's survival is not incidental: it is held by the second module's locals stack map,
-read out of the second module's `gofunc` region, for a frame located by the second module's
-pcsp table and `_func` record. That is the pcsp and stack-map halves of a second module's
-pclntab, exercised.
-
-## Determinism, after the change
-
-Same script, four runs. The other four programs produce the *same* hash on every run, which
-is a stronger check than cold-vs-warm.
-
-| program | result |
-| --- | --- |
-| `hello.go` | identical, and the same hash across all 4 runs |
-| `fmt_sprintf.go` | identical, and the same hash across all 4 runs |
-| `gc_struct.go` | identical, and the same hash across all 4 runs |
-| `runtime_cleanup_frame_retention.go` | identical, and the same hash across all 4 runs |
-| `runtime_defer_capture_allocs.go` | **different** in 3 of 4 runs; its hash also varies run to run |
-
-Unchanged: 4 of 5, and the one exception is the documented backend residue. (It matched by
-chance on the first post-change run; repeating three more times showed it varying freely,
-so the honest reading is "still non-deterministic", not "fixed".)
-
-## What landed
-
-All of items 1, 2, 3, 5 and 6. Item 4 is **not** done and is explained below.
-
-### 1. The text-end symbol is per module
-
-`internal/gometa`'s `textEndSymbol = "runtime_gocTextEnd"` was one constant for the whole
-image. It bounds `moduledata.maxpc`/`etext` and is the `functab` sentinel, and the Plan 9
-sidecar defines it once, so a second module took the *first* module's text end as its own
-`maxpc` and `runtime.findmoduledatap` could never select it.
-
-`gometa.TextEndSymbol(dataSymbol)` now derives the name from the module's moduledata name;
-the runtime's own module keeps `runtime_gocTextEnd`, so nothing about a single-module image
-changes. Who *defines* it follows the same rule as who emits the module's last text: the
-Plan 9 sidecar when the sidecar carries functions, otherwise the object itself
-(`arm64.finishGoModule`). The spike's prototype had to hand-add a local
-`runtime.gocTextEnd` to its second object; it no longer does.
-
-### 2. `moduledata.typelinks` is populated
-
-This was the one genuinely new piece. `builder.emptySlice() // typelinks` is now a real
-`[]int32` of module-relative offsets, built from the descriptors the frontend marks with the
-new `ir.Data.GoTypeLink`.
-
-Two decisions worth checking rather than trusting:
-
-- **Which descriptors qualify.** Only the *complete* ones — `goc`'s `ensureTypeTag` output
-  when `emitRuntimeTables` is on. `runtime.typesEqual` reads a type's kind-specific tail
-  (`StructType.Fields`, `FuncType`'s in/out slices, `PtrType.Elem`), so listing goc's other,
-  bare 48-byte descriptor family (`runtimeType`, `.goc.runtime.type:*`, which carries a kind
-  byte and no tail and whose `Str` is 0) would send `typesEqual` past the end of the symbol.
-- **All complete descriptors, not only named ones.** The task described it as "one per named
-  type", but the duplicates a module split actually creates are *unnamed*: the spike's own
-  §3.2 says a program module re-emits a descriptor for any **signature** or **pointer** type
-  it shares with the runtime. Upstream does the same thing under `-buildmode=shared`
-  (`Flag_dynlink` forces every type into typelinks) for exactly this reason. `hello.go`
-  yields 499 entries — under 2 KB.
-
-`typelinksinit` returns immediately when `firstmoduledata.next == nil`, so a single-module
-image pays the table's bytes and no startup time at all.
-
-### 3. The moduledata symbol name is a parameter
-
-`ir.Module.GoModuleData` carries it, `gometa.Module.DataSymbol` consumes it, and
-`builder.label`'s literal `if name != ir.LinkerSymbol("runtime.firstmoduledata")` special
-case is gone (replaced by a `labelOnly` for the one label whose symbol the caller emits
-itself — under the old code any *other* moduledata name was defined twice).
-
-A Go module that defines `runtime.firstmoduledata` without declaring it is now an error.
-The alternative — silently emitting no metadata for it — produces an object that links and
-then cannot start, which is the failure mode a per-module name must not introduce.
-
-### 5. `hasmain`
-
-`moduledata.hasmain` (offset 536) is set from `ir.Module.GoHasMain`, which `goc` sets when
-compiling an executable. gometa used to zero the record's whole tail.
-
-**Honest limit:** in the topology cg12 can currently produce, `hasmain` has no *observable*
-effect. `runtime.modulesinit` uses it to move the main module to `modules[0]`, and
-`firstmoduledata` — which is the module with `main` — is already `modules[0]`. So this piece
-has a byte-level test and an integration assertion (1 on the program module, 0 on the second
-module), not a behavioural one. It becomes load-bearing when the runtime is the first module
-and the program is the second, which is what the driver split will produce.
-
-### 6. Chaining
-
-`gometa.ChainModule(object, parent, child, reloc)` records the one `R_AARCH64_ABS64` data
-relocation into `moduledata.next` (offset 584, `gometa.ModuleNextOffset`). That is the whole
-of joining a module to the image.
-
-### Also fixed: the first function of every goc module was nameless
-
-RUNTIME_PLAN §5.10 records this on the spike branch (it was never carried to
-`perf/test-suite`, so there was no entry to remove here). `internal/gometa` laid the first
-name at offset 0 of `.goc.go.funcnames`, and `runtime.moduledata.funcName` reads a name
-offset of 0 as the empty string. One reserved sentinel byte fixes it; upstream's linker
-reserves the same slot. It has its own unit test, and the two-module image demonstrates it
-on real output: `first-func:_goc_probe_entry`, where the spike printed `foreign-func:` with
-an empty name.
-
-### Item 4 (exporting type and name symbols): NOT done
-
-It does not fall out naturally and I left it. It only matters once the driver is split — its
-purpose is to let a program object point at a *prebuilt runtime's* `type:int` by pointer
-instead of duplicating it — and doing it now would make ~500–3000 previously-local symbols
-per image global, with no consumer to justify the collision surface. It is recorded in
-RUNTIME_PLAN §14 under "what is not done".
-
-## Where things live
-
-| path | what changed |
-| --- | --- |
-| `internal/gometa/builder.go` | `Module` (the per-module input), `TextEndSymbol`, typelinks table, `hasmain`, the funcname sentinel, `labelOnly` |
-| `internal/gometa/gometa.go` | `ChainModule` |
-| `internal/gometa/module_test.go` | new: one test per piece, plus the two refusal paths |
-| `arm64/go_metadata_object.go` | builds the `gometa.Module`, collects type-descriptor offsets, defines the module's text end when the sidecar has no text, refuses an undeclared moduledata |
-| `arm64/assembly.go` | the sidecar emits a per-module text-end label, and only when it carries functions |
-| `ir/func.go`, `ir/binary.go` | `Module.GoModuleData`, `Module.GoHasMain`, `Data.GoTypeLink`; unit format bumped to v19 and carrying all three |
-| `goc/compile.go` | names the moduledata, sets `GoHasMain`, marks complete type descriptors |
-| `internal/permodule/` | new: builds a second Go module, and links a two-module image |
-| `cmd/goc/permodule_test.go`, `cmd/goc/testdata/permodule_probe.go` | new: the end-to-end test and its program |
-| `analysis/typeoff/` | the spike's prototype, re-pointed at the landed mechanism (its `probe.go` moved into `internal/permodule` so the tool and the test share one implementation) |
-| `analysis/sepcompile/`, `analysis/seplink/`, `analysis/testdata/nistec_closure_name_collision.go`, `analysis/testdata/typeoff_probe.go` | cherry-picked verbatim from the spike branches |
-| `RUNTIME_PLAN.md` | new §14; old §14 renumbered to §15; §13 gains the driver split as the next batch item |
-
-## Two notes on the briefing
-
-- **`RUNTIME_PLAN.md` §5.14 does not exist on this base.** The briefing points at it for a
-  live interaction bug. `perf/test-suite` (this branch's base, `8b3b5ca`) ends §5 at §5.10;
-  §5.14 exists only on `origin/integration/wave4a`, where it records that
-  `ccwork/phase2-alloc`'s escape fix and `ccwork/freeobject`'s write barrier compose into
-  `span has no free objects`. That is escape analysis and allocation, disjoint from this
-  change (module metadata), so nothing here interacts with it — but the branch it lives on
-  is not the one I was told to base on, and I did not merge it.
-- **§5.10's nameless-first-function item is likewise not on this base.** The spike recorded
-  it on `ccwork/typeoff-alternatives`; it was never carried to `perf/test-suite`. So there
-  was no §5.10 entry to remove when the bug was fixed. The fix and its evidence are recorded
-  in the new §14 instead.
-
-## Verification
-
-(being filled in as each suite lands)
-
-### Capability matrix
-
-Run as 10 shards of `TestARM64RuntimeCapabilityStatus`, one compile worker each so the
-concurrency matches this job's declared CPU share. (A first attempt with the default
-memory-aware worker count per shard put the box at load 278 and was killed; the numbers
-below are from the bounded rerun.)
-
-**Status at the time of writing:** 8 of 10 shards complete, all `rc=0`; 314 `PASS` and the
-one declared `EXPECTED FAILURE` (`defer-panic/panic-string-output`) recorded so far, no
-`FAIL` and no `KNOWN GAP`. The two outstanding shards are on the heaviest compiles
-(`stdlib-http/tls-client-server`, which RUNTIME_PLAN already records as the biggest program
-in the corpus). Final counts are appended below when they land.
-
-### Unit, driver and corpus suites
-
-`make test-unit`, `make test-goc-cmd` and `make test-goc-corpus` are queued to run on the
-final tree; results appended below.
-
-### Still unverified at the time of writing
-
-- The full matrix count (2 of 10 shards outstanding).
-- `make test-unit` / `test-goc-cmd` / `test-goc-corpus` on the final tree. The individual
-  packages I touched (`ir`, `internal/gometa`, `arm64`, `cmd/goc`) all pass, and the whole
-  unit bucket passed at the previous commit.
-- **A second module built by the driver.** There is no `goc build-runtime`; the second
-  module in every test here is built by `internal/permodule` rather than compiled from Go
-  source. So this shows a goc image *can* carry a second Go module correctly; it does not
-  show that goc *produces* one.
-- **The two modules' data is not both scanned as globals in anger.** The second module's
-  `[data, edata)` is its own region and its GC program is generated from its pointer words
-  (none — every pointer it holds is to static data), which is correct for what it holds, but
-  a program module with real globals in a second module has not been exercised.
-
-**Result (10/10 shards, all `rc=0`), at `f287003` — the implementation commit plus the plan
-update:**
-
-| outcome | count |
-| --- | ---: |
-| capability subtests | **338** |
-| `PASS` | **337** |
-| `EXPECTED FAILURE` | 1 |
-| `FAIL` | **0** |
-| `KNOWN GAP` | **0** |
-
-**The complete list of non-passing capabilities is one entry:**
-`defer-panic/panic-string-output` (`goc/testdata/runtime_panic_print_string.go`), which is
-declared `runtimeCapabilityExpectedFailure` in the matrix and fails as declared. It is
-unchanged from the state RUNTIME_PLAN §1 records.
-
-(The briefing says 342 capabilities; the matrix on this base holds 338, matching what
-RUNTIME_PLAN §1 records.)
-
-A second full matrix run is queued against the final tree, because one further commit
-(`60d9e14`, folding the text-end symbol's name into a single helper) landed after this run
-started. Its result is appended below.
-
-### `make test-unit` — **pass** (rc=0, no FAIL lines)
-
-Includes `internal/gometa` (the new `module_test.go`), `arm64` (the three new
-metadata-object tests), `ir`, `link`, `obj`, and the new `internal/permodule`.
-
-### `make test-goc-cmd` — **pass** (rc=0)
-
-Includes the new `cmd/goc/permodule_test.go`. Re-run separately on the final tree after the
-`hasmain` image-level assertion landed:
-
-```
---- PASS: TestGoImageCarriesASecondModule (6.78s)
---- PASS: TestSecondModuleOffsetsAreIndependentOfItsPlacement (25.09s)
---- PASS: TestSecondModuleFrameIsTheOnlyGCRootOfItsPayload (6.21s)
---- PASS: TestFlatTypeRegionFailsOnASecondModule (6.23s)
---- PASS: TestSharedTextEndSymbolFailsOnASecondModule (7.42s)
---- PASS: TestWithoutTypelinksTheSameGoTypeHasTwoIdentities (6.28s)
-```
-
-## Which test fails without which change
-
-| change | test that fails without it | how it fails |
-| --- | --- | --- |
-| per-module text-end symbol | `cmd/goc` `TestSharedTextEndSymbolFailsOnASecondModule` | `fatal error: minpc or maxpc invalid` from `moduledataverify1` |
-| | `internal/gometa` `TestTextEndSymbolIsPerModule` | maxpc/etext/functab-sentinel relocations name the wrong symbol |
-| per-module type region (the whole point) | `cmd/goc` `TestFlatTypeRegionFailsOnASecondModule` | `fatal error: runtime: name offset out of range` |
-| `moduledata.typelinks` | `cmd/goc` `TestWithoutTypelinksTheSameGoTypeHasTwoIdentities` | `reflect.PointerTo(foreign int) != reflect.TypeOf(&localInt)` |
-| | `internal/gometa` `TestModuledataTypelinksAreOffsetsFromTheModuleBase` | slice header and entries |
-| | `arm64` `TestGoModuleTypeLinksAreEmittedForMarkedDescriptors` | only marked descriptors are listed |
-| moduledata name a parameter | `internal/gometa` `TestModuledataIsEmittedUnderTheGivenName` | symbol emitted under the default name, or defined twice |
-| | `arm64` `TestGoModuleDataNameMustBeDeclared` | an undeclared moduledata is silently ignored |
-| | `arm64` `TestSecondGoModuleBoundsItselfWithoutASidecar` | second module has no text-end symbol of its own |
-| `hasmain` | `internal/gometa` `TestModuledataRecordsHasMain` | byte 536 |
-| | `cmd/goc` `buildTwoModuleImage` | `hasmain: program module 1, second module 0` read from the linked image |
-| chaining | `internal/gometa` `TestChainModuleWritesTheNextField` | relocation offset/target/type |
-| funcname sentinel | `internal/gometa` `TestFunctionNameTableReservesOffsetZero` | first name offset is 0 |
-| | `cmd/goc` `TestGoImageCarriesASecondModule` | `first-func:` comes back empty |
-| the second module is not a leaf | `cmd/goc` `TestSecondModuleFrameIsTheOnlyGCRootOfItsPayload` | no frame retains the payload |
-
-## Hazards checked while doing this, recorded so nobody re-checks them
-
-- **`typesEqual` on a descriptor with no package path does not crash.**
-  `runtime.typesEqual`'s interface and struct branches call `it.PkgPath.Name()`, and goc
-  writes a zero word there for a type with no package path. That is safe because
-  `abi.InterfaceType.PkgPath` and `abi.StructType.PkgPath` are `Name` *values*, not `*Name`
-  — a zero word is `Name{Bytes: nil}` and `Name.Name()` returns `""` for it. If those fields
-  were pointers this would be a nil dereference at startup on any two-module image.
-- **`typesEqual` reads past a bare 48-byte descriptor.** It switches on kind and reads the
-  kind-specific tail unconditionally, so goc's minimal descriptor family
-  (`goc/compile.go`'s `runtimeType`, which writes a kind byte, a zero `Str` and no tail)
-  must never reach `typelinks`. That is why `GoTypeLink` is set only in `ensureTypeTag` and
-  only when the runtime tables are on.
-- **`reflect.TypeOf` does not consult the typemap.** It reads the eface type word directly,
-  so it returns whichever module's descriptor the value carries. The canonicalisation shows
-  up on the `resolveTypeOff` paths — `PtrToThis`, method `Mtyp`, interface method `Typ` —
-  which is why the test asserts through `reflect.PointerTo` rather than `reflect.TypeOf`.
-- **`abi.Type.Hash` is 0 for every cg12 type**, so `typelinksinit`'s `typehash` bucketing
-  degenerates to one bucket. Correctness is unaffected (`typesEqual` is the real test); the
-  cost is a linear scan of the earlier module's typelinks per entry. Fine at this scale
-  (499 × 7 comparisons in the test); it should be fixed before the runtime split makes both
-  modules large. Recorded in RUNTIME_PLAN §14.
-- **The `go test -run` three-element gotcha** was avoided: every matrix run used `-v`, and
-  the 338 subtest lines and per-shard elapsed times (239–654 s) were checked rather than
-  trusting `ok`.
+**479 s** is the number the split has to beat.
