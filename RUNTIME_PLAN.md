@@ -2143,3 +2143,74 @@ program module, asserted on the linked image) but **still has no observable
 effect**, for a different reason than in §14: the split leaves the image with
 exactly one type region, so `runtime.typelinksinit` -- the only consumer of the
 ordering `hasmain` controls -- has no duplicate descriptors to canonicalise.
+
+## 17. The capability matrix's real bound (2026-07-30)
+
+§16 measured the matrix at 406.5 s and called it "no longer compile-bound". Both
+halves of that were wrong, and finding out why is the useful part.
+
+The 406.5 s was taken with `-runtime-status-compile-workers=10`, so it was partly
+an artifact of the flag. But raising the flag does not explain the rest. The
+matrix's wall clock is
+
+    max( slowest single compile , total compile CPU / workers ) + the run phase
+
+and measured against that model on 64 exclusive cores, the unmodified harness left
+slack that **grew** with the worker count:
+
+| workers | wall | compile CPU | CPU/workers | slowest compile | bounding term | slack |
+| ---: | ---: | ---: | ---: | ---: | --- | ---: |
+| 8 | 442.8 s | 3010 s | 376 s | 167.0 s | CPU/workers | 67 s |
+| 16 | 351.9 s | 3085 s | 193 s | 168.3 s | scheduling | 159 s |
+| 24 | 233.8 s | 3280 s | 137 s | 177.1 s | slowest compile | 57 s |
+| 64 (default) | 204.7 s | 4143 s | 65 s | 179.6 s | slowest compile | 25 s |
+
+Slack that grows with workers is the signature of idle workers, not of a floor.
+
+### The coupling that caused it
+
+The compile queue takes two budgets per program: a worker slot, returned when the
+compile finishes, and a look-ahead token, **returned only when that program's run
+finishes**. The run phase was strictly sequential in matrix order, so the
+dispatcher could never get more than `4*workers` indices ahead of the run frontier.
+
+Compile cost is sharply bimodal: eleven net/http, net/smtp and crypto programs
+cost 125-167 s each and are 54% of all compile CPU, while the other 327 average
+4.2 s. Those eleven sit at matrix indices 155-223 of 338. So when the run frontier
+reached one of them it blocked for minutes, no token came back, and the workers had
+only the programs inside a fixed window to chew on -- a window they emptied in
+seconds. Adding workers widened the window but added more idle workers to the
+stall, which is why 16 workers were *worse* against the model than 8.
+
+### What changed
+
+`runtimeCapability` gained an `exclusive` field, and the run phase became two
+phases: 278 capabilities run concurrently as their programs become available, and
+the 60 whose outcome depends on how much of the machine they have run one at a
+time afterwards, with the compile queue drained -- which is more isolation than the
+old sequential phase gave them, because that one ran them alongside a saturated
+compile queue.
+
+The classification is enforced as a floor by
+`TestRuntimeCapabilityExclusiveClassification`, which reads each capability's
+source: measuring or waiting on wall clock, bounding an operation by wall clock,
+setting `GOMAXPROCS`, asserting an allocation or GC statistic, changing a
+process-wide runtime limit, asserting a goroutine count, yielding to the scheduler
+and then asserting what happened, or being in a stress category all require the
+mark. Extra marks are allowed; a missing one fails a 70 ms unit test instead of one
+matrix run in twenty. Three of the 60 are marked despite my judging them robust,
+because a mechanical rule that over-includes is worth more than a judgement call
+repeated 278 times.
+
+The look-ahead window became `4*workers + exclusive`. That term is not an
+optimisation: an exclusive program holds its token until the final phase, so at 60
+exclusive capabilities any worker count below 15 lets them alone exhaust a
+`4*workers` window and the dispatcher deadlocks.
+
+The queue also dispatches longest-first, ordered by the total size of the Go and
+assembly sources in each program's transitive import closure, resolved against the
+vendored standard library. Source file size -- the obvious proxy -- is not one: the
+capability sources cluster around 575 bytes and the matrix's most expensive program
+is 1303 bytes against a 6553-byte maximum. The closure measure's eleven largest
+estimates are exactly the eleven measured 125-167 s programs.
+
