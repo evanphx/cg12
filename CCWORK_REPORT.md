@@ -144,6 +144,95 @@ be asked; the test says how many programs it was able to ask it of and fails if 
 below two, so it cannot quietly become vacuous. All three tests pass; the third logged
 `2.14s 1.60s 1.62s`.
 
-## 4. Still unverified
+### 3.2 The whole corpus, three ways: `analysis/batchdiff`
 
-Everything below §3. This section is updated as results land.
+`analysis/batchdiff` compiles every program in `goc/testdata` three ways and compares the
+executables byte for byte:
+
+- **one-shot** — one `goc` process per program, which is what the matrix did before;
+- **batch** — a pool of 16 `goc compile-batch` workers, dispatched dynamically, so the grouping
+  is whatever the schedule produces;
+- **batch-reversed** — the same pool fed the same programs in the opposite order, so every
+  worker sees a different history.
+
+All 358 programs, 16 workers:
+
+    one-shot         358 programs in 303.4s, 0 failed
+    batch            358 programs in 265.6s, 0 failed
+    batch-reversed   358 programs in 221.2s, 0 failed
+    summed per-program compile wall: one-shot=3386.3s batch=3189.5s (196.8s saved, 5.8%)
+
+    identical=319 differing=39
+    leaks=5 nondeterministic-alone=34
+    behaviour: identical=358 differing=0
+
+**The 5.8% is the lever, measured end to end on the real corpus,** and it lands within a
+percent of the 6% §1 predicted from a single program.
+
+**All 358 programs produce identical exit status and output from all three builds.** That is
+the differential check the rules ask for, and it is clean.
+
+### 3.3 The 39 that differ, and why none of them is a leak
+
+`batchdiff` classifies a differing program as a leak only if compiling it alone a second time
+reproduced the first solitary build exactly. 34 of the 39 failed that immediately — they are
+not deterministic on their own, so byte equality is not a question that can be asked of them.
+
+The remaining 5 were each compiled alone 8 more times (4 for the 136 s `smtp_session`):
+
+| program | distinct binaries from repeated one-shot compiles |
+| --- | --- |
+| `fmt_println.go` | 2 of 8 |
+| `runtime_loopvar_shared_scope.go` | 2 of 8 |
+| `stdlib_runtime_trace_start_stop.go` | 2 of 8 |
+| `stdlib_smtp_session.go` | 4 of 4 |
+| `runtime_assembly.go` | **1 of 8** |
+
+Four are settled: they vary between solitary compiles, so the two-sample check simply got two
+matching samples. `runtime_assembly.go` needed one more experiment — eight compiles of *the
+same program, back to back, in one worker*:
+
+    b6b2ec323982   <- compile 1
+    bb4bbccd20db   <- compiles 2, 4, 5, 6, 7, 8  (and every one-shot compile)
+    cc51d6241aa3   <- compile 3
+
+Six of the eight reproduce the one-shot bytes exactly, and the two outliers are the same two
+variants `batchdiff` saw. A leak is a function of history: identical requests in one worker
+would give a consistent — or at least monotone — answer, and the batch value would not be the
+one-shot value. A coin flip gives exactly this. `runtime_assembly.go` is nondeterministic like
+the other 38, with a per-compile probability low enough that eight solitary samples missed it.
+
+**Conclusion: 0 leaks in 358 programs, across two different worker groupings, with identical
+behaviour from every build.**
+
+## 4. A finding outside this lever: compile nondeterminism is 11% of the corpus, not one program
+
+The branch's determinism gate samples five programs and records one known exception
+(`runtime_defer_capture_allocs.go`, "a known backend residue"). The sweep above says the
+sample understates it by an order of magnitude:
+
+- **39 of 358 corpus programs (10.9%) compiled to different bytes** within this run, and
+- `runtime_assembly.go` shows the per-compile probability can be low enough to survive eight
+  samples, **so 39 is a floor, not the count.**
+
+It is **pre-existing and nothing to do with this job.** Verified directly: `goc` built from the
+branch point `perf/test-suite` (`0f4ee02`), compiling `goc/testdata/allocs_per_run.go` three
+times, produces three different binaries:
+
+    abb87d396d8b...  121659db3d3d...  7f4717224648...
+
+The differences are small and in `.text`: `allocs_per_run.go` differs in 106 bytes of 14.7 MB,
+20 of which are the linker's build-id note (which differs *because* the text does). The
+scattered single-byte differences inside 4-byte instructions are the shape of a register
+allocation that came out differently — which matches §5.10 and the sibling `goc-parallel`
+briefing's note that register allocation is the leading suspect.
+
+This matters to the branch beyond my lever: **"output is byte-identical" cannot be the merge
+gate for the whole corpus, because it is not true of the corpus today.** For eleven percent of
+programs the gate would fire on the compiler's own coin flip. Behaviour equality — which
+`batchdiff` now also checks, and which was clean for all 358 — is the property that actually
+holds.
+
+## 5. Still unverified
+
+Everything below §4. This section is updated as results land.
