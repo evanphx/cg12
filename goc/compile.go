@@ -166,12 +166,21 @@ func compile(name string, src []byte, options compileOptions) (*ir.Module, error
 			return nil, fmt.Errorf("load runtime: %w", err)
 		}
 	}
-	// Every package this program will compile is loaded by now, so this is the
-	// first point at which the richest usable pack can be named -- and the last
-	// point before anything consults the manifest.
-	if options.runtimeSplit.againstRuntime() {
-		if err := options.runtimeSplit.chooseManifest(loadedPackagePaths(loader, pkg)); err != nil {
-			return nil, err
+	// Every package this compilation will use is loaded by now: the type checker
+	// pulled the root's imports transitively and the runtime import pulled the
+	// rest, and nothing below asks the loader for more.
+	//
+	// Both halves of a split read the closure here, at the same point, so a pack's
+	// recorded closure and a program's measured one mean the same thing. It is the
+	// first point at which the richest usable pack can be named, and the last point
+	// before anything consults a manifest.
+	if options.runtimeSplit.buildsRuntime() || options.runtimeSplit.againstRuntime() {
+		closure := loadedPackagePaths(loader, pkg)
+		options.runtimeSplit.closure = closure
+		if options.runtimeSplit.againstRuntime() {
+			if err := options.runtimeSplit.chooseManifest(closure); err != nil {
+				return nil, err
+			}
 		}
 	}
 	mod := ir.NewModule()
@@ -477,7 +486,6 @@ func compile(name string, src []byte, options compileOptions) (*ir.Module, error
 			return nil, err
 		}
 		options.runtimeSplit.fingerprint = fingerprint
-		options.runtimeSplit.closure = loadedPackagePaths(loader, pkg)
 		rootPackageData := make([]string, 0, len(packageGlobals[pkg.Path()]))
 		for _, symbol := range packageGlobals[pkg.Path()] {
 			rootPackageData = append(rootPackageData, symbol)

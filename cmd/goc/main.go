@@ -64,7 +64,7 @@ func main() {
 		if exe == "" {
 			exe = goc.OutputName(input)
 		}
-		check(linkAgainstPrebuiltRuntime(target, strings.Split(*prebuiltRuntime, ","), input, src, exe, *optimize))
+		check(linkAgainstPrebuiltRuntime(target, splitCommaList(*prebuiltRuntime), input, src, exe, *optimize))
 		if *run {
 			os.Exit(runProgram(exe))
 		}

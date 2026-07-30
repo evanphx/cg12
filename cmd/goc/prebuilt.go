@@ -42,7 +42,7 @@ func buildRuntimeCommand(arguments []string, errorOutput io.Writer) int {
 		fmt.Fprintf(errorOutput, "%v\n", err)
 		return 1
 	}
-	carried := splitPackageList(*packages)
+	carried := splitCommaList(*packages)
 	cache := packCacheDirectory()
 	key, err := packCacheKey(runtimepack.Version, string(target), *optimize, carried, goc.StdlibRoot())
 	if err != nil {
@@ -75,19 +75,20 @@ func buildRuntimeCommand(arguments []string, errorOutput io.Writer) int {
 	return 0
 }
 
-// splitPackageList parses the -packages flag. An empty or whitespace-only entry
-// is dropped rather than passed through, so `-packages ""` and `-packages " "`
-// both mean "the runtime alone".
-func splitPackageList(value string) []string {
-	var packages []string
+// splitCommaList parses a comma-separated flag value. An empty or whitespace-only
+// entry is dropped rather than passed through, so `-packages ""` and
+// `-packages " "` both mean "the runtime alone" and a trailing comma in
+// `-runtime` is not a path.
+func splitCommaList(value string) []string {
+	var entries []string
 	for _, field := range strings.Split(value, ",") {
-		path := strings.TrimSpace(field)
-		if path == "" {
+		entry := strings.TrimSpace(field)
+		if entry == "" {
 			continue
 		}
-		packages = append(packages, path)
+		entries = append(entries, entry)
 	}
-	return packages
+	return entries
 }
 
 // linkAgainstPrebuiltRuntime compiles one program as a second Go module and links
@@ -103,6 +104,9 @@ func splitPackageList(value string) []string {
 // has to be contiguous: the prebuilt object and the sidecar that ends its text
 // come first and adjacent, and the program's text follows.
 func linkAgainstPrebuiltRuntime(target goc.Target, packPaths []string, name string, source []byte, executable string, optimize bool) error {
+	if len(packPaths) == 0 {
+		return fmt.Errorf("goc: -runtime needs at least one prebuilt runtime")
+	}
 	manifests := make([]*runtimepack.Manifest, 0, len(packPaths))
 	for _, path := range packPaths {
 		manifest, err := runtimepack.ReadManifest(path)
