@@ -188,12 +188,21 @@ cpu slots. Every row is a full unsharded matrix run through `scripts/matrix-timi
 
 | run | wall | compile CPU | slowest single compile | run phase | bounding term |
 | --- | ---: | ---: | ---: | ---: | --- |
+| **quiet box** | | | | | |
 | control: runtime-only pack, same tree (`-runtime-status-stdlib-packs=false`) | 201.2 s | 4392.7 s | 191.8 s | 14.6 s | slowest single compile |
 | seven packs, **cold** cache | 210.3 s | 2783.6 s | 46.6 s | 15.1 s | building the packs (154 s) |
 | seven packs, **warm** cache | **56.4 s** | 2801.4 s | 46.9 s | 15.3 s | slowest single compile |
+| **loaded box (load average 168, siblings running)** | | | | | |
+| control, runtime-only pack | 275.0 s | 6177.5 s | 264.4 s | 16.2 s | slowest single compile |
+| seven packs, cold cache | 308.2 s | 5891.2 s | 97.6 s | 22.3 s | building the packs |
+| seven packs, warm cache | 66.9 s | 3250.3 s | 56.4 s | 17.3 s | slowest single compile |
+| seven packs, warm cache (repeat) | 99.4 s | 5360.6 s | 89.9 s | 27.7 s | slowest single compile |
 
-The control reproduces the 203.2 s the previous job reported at `cpu_slots: 24`, so the two
-measurements are comparable even though the boxes' loads are not identical.
+Six full matrix runs, every one of them 338/338 with the right census. The box is shared with
+two sibling jobs and their load moved during the day, so the honest statement is the *ratio*
+against a control taken under the same conditions: **3.6x on the quiet box (201.2 -> 56.4 s)
+and 2.8-4.1x under load (275.0 -> 66.9-99.4 s)**. The quiet-box control reproduces the 203.2 s
+the previous job reported at `cpu_slots: 24`, which is what makes the two comparable at all.
 
 **Afterwards the matrix is bounded by the slowest single compile again** — 46.9 s for
 `stdlib-http/tls-client-server`, against `compile CPU / 64 = 43.8 s`, which is very nearly the
@@ -330,3 +339,96 @@ status and full combined output:
 
 `stdlib_http_client_server` is the one that used to abort; it now exits 0 with output
 identical to the host toolchain's, 5 runs out of 5.
+
+### The corpus differential
+
+`analysis/splitdiff` was extended to build a *set* of packs, let goc choose per program, link
+with the objects of the pack it chose, and report which one that was. Over all 358 corpus
+programs, compiled monolithically and against the pack set, run, and compared on exit status
+and full output:
+
+    programs=358  problems=2
+    total CPU compile+link: split=1738.5s mono=4923.5s  ratio=2.83x
+    total image bytes: split=4373055352 mono=3940369200  (11.0%)
+
+    stdlib_http_client_server.go     split= 29.74s mono=217.20s pack=net/http
+    stdlib_http_cookiejar.go         split= 24.77s mono=214.03s pack=net/http
+    stdlib_http_redirect_keepalive.go split=30.40s mono=213.54s pack=net/http
+    stdlib_http_multipart_form.go    split= 24.03s mono=213.10s pack=net/http
+    stdlib_http_tls_client_server.go split= 33.58s mono=212.44s pack=net/http
+    stdlib_http_parse_roundtrip.go   split= 23.57s mono=210.97s pack=net/http
+    stdlib_smtp_session.go           split= 13.06s mono=204.15s pack=net/smtp
+    stdlib_crypto_x509_ed25519.go    split= 15.39s mono=202.29s pack=crypto/x509
+    stdlib_crypto_ecdsa.go           split= 10.76s mono=197.93s pack=crypto/ecdsa
+    stdlib_crypto_hpke.go            split=  7.86s mono=196.70s pack=crypto/hpke
+
+**The two differences are the two the driver-split job already recorded, with the same
+numbers**: `gomaxprocs_memstats.go` prints `mallocs 105` monolithic against `120` split, and
+`bytes_grow_stats.go` prints `16718922` against `18220422`. Both print absolute allocation
+counters, which two different images are not obliged to agree on. Re-running splitdiff on
+those two with **only the runtime-only pack** — the configuration section 16 shipped —
+reproduces both deltas exactly, so they predate the standard-library packs and this branch
+adds no new difference to the 358.
+
+The pack closures, for the record:
+
+| pack | packages loaded | object | globals defined |
+| --- | ---: | ---: | ---: |
+| runtime only | 29 | 7.8 MB | 7,732 |
+| `crypto/ecdh` | 93 | 46.7 MB | 14,261 |
+| `crypto/hpke` | 110 | 48.9 MB | 16,601 |
+| `crypto/ecdsa` | 113 | 49.5 MB | 17,548 |
+| `crypto/x509` | 140 | 51.1 MB | 20,355 |
+| `net/smtp` | 161 | 53.5 MB | 23,124 |
+| `net/http` | 181 | 68.1 MB | 36,547 |
+
+## Still unverified
+
+- **`make test-goc-coverage`** was not run, for the same reason the previous job gave: the
+  coverage path compiles the runtime per program and so takes the monolithic path, and
+  anything short of the whole corpus fails by construction. Nothing in this branch touches
+  that path except the two codegen fixes, which the corpus and the matrix both cover.
+- **The `getitab` fallback's cost was not measured.** It is on the cold path of an
+  interface-to-interface type test — the inline chain still answers first — and the corpus and
+  matrix run phases did not move outside their usual spread, but no benchmark was taken.
+- **amd64 is untouched and unexercised.** `prebuilt.BuildRuntime` still refuses any target but
+  arm64. The two codegen fixes are target-independent and covered by `make test-unit`.
+- **Concurrent `goc build-runtime` for one key duplicates work.** Two shards starting at the
+  same moment both miss, both build, and both write; the write is atomic so the result is
+  correct, but the work is done twice. Not a lock, on purpose — a lock that outlives a killed
+  build is worse than a duplicated build.
+- **The pack cache is never evicted.** Seven packs are 345 MB and every distinct compiler
+  binary gets its own set. Nothing prunes them.
+
+## Notes on the briefing
+
+- **The briefing's two named blockers were not the whole list**, and one of them turned out
+  not to be a blocker at all. Stub dispatchers do not close the gap, because the pack also
+  leaves behind its entire type region and its degraded itabs, and an itab is read by
+  `runtime.itabsinit` before `main` — see Finding 3. Package init needed no work at all under
+  the containment rule: `addModuleInitTasks` already skips a task the pack defines, and a pack
+  package's dependencies are all in the pack, so the chain order is dependency order.
+- **`RUNTIME_PLAN.md` still has no section 5.14** and no note about two independently-correct
+  changes composing into a broken compiler; the previous job recorded the same gap. The plan's
+  numbered subsections stop at 5.10. The advice was followed anyway — every claim here is
+  differential against the host toolchain or against a matched control, not against a green
+  suite.
+- **`println` with several operands still omits the spaces the spec requires** (RUNTIME_PLAN
+  5.10). It cost a test iteration; the test now prints one operand per call, as the existing
+  split tests already did.
+
+## For the integration of the three branches
+
+Two things in here are not confined to the pack lever and the other two branches should know
+about them:
+
+1. **`interfaceTypeMatch` now calls `runtime.getitab`.** That is a codegen change on every
+   interface-to-interface type assertion and interface case of a type switch. It is on the
+   cold path, but it is new IR in a lot of functions.
+2. **Function literals are named after the function they are written in.** Every closure's
+   symbol changed, which changes every image's symbol table and the content hashes of the
+   `.interfacecall` wrappers that name them. Anything comparing symbol names across the
+   branches will see it. Two tests in `goc/compile_test.go` matched the old spelling.
+
+Neither is a workaround: both fix a defect that makes the compiler emit the wrong code, and
+both are covered by tests that fail without them.
