@@ -216,16 +216,122 @@ six land at indices 218–223, and the test fails instead of the matrix silently
 
 ## 3. What it measures
 
-(filled in as each point lands)
+Same harness, same box, same census check on every row.
+
+| workers | baseline | concurrent run phase only | + longest-first (final) | final vs baseline |
+| ---: | ---: | ---: | ---: | ---: |
+| 8 | 442.8 s | — | **394.4 s** | −11% |
+| 16 | 351.9 s | 257.9 s | **221.2 s** | −37% |
+| 24 (`cpu_slots`) | 233.8 s | 229.5 s | **203.2 s** | −13% |
+| default (64) | 204.7 s | 210.5 s | **204.4 s** | −0.1% |
+
+The middle column is a control: the same tree with `runtimeCapabilitiesByDescendingCompileCost`
+replaced by matrix order, so the two changes can be told apart.
+
+**Longest-first earns its keep**: −36.7 s at 16 workers (−14%), −26.3 s at 24 (−11%), −6.1 s
+at 64 (−3%). It is kept.
+
+**The honest headline is smaller than it looks.** The best wall clock available on this box
+barely moved: 204.7 s before (at the default 64 workers) against 203.2 s after (at 24). What
+changed is everything *except* the best case — the matrix is no longer sensitive to the worker
+count. At 16 workers it went from 352 s to 221 s. That matters for exactly the situation that
+produced the 406.5 s figure in the first place: a job told to use its declared CPU share rather
+than the whole box. **At `cpu_slots: 24` the matrix went from 233.8 s to 203.2 s, and against
+the previously reported 406.5 s it is 2.0x.**
+
+### Where the remaining slack went
+
+At 24 workers the model now says `max(189.5, 3428/24 = 142.8) = 189.5 s` and the wall clock is
+203.2 s: **13.7 s of slack**, against 57 s before. That 13.7 s is the fixed setup — the `goc`
+build (cached), the test binary, and the 4.6 s prebuilt-runtime build — plus the 7.2 s
+exclusive run phase at the end. There is no idle-worker term left to remove.
+
+### One cost the change does incur
+
+Longest-first makes the critical-path compile *slower*, because it now starts all eleven
+expensive compiles at t=0 and they contend with each other:
+
+| | slowest single compile |
+| --- | ---: |
+| alone on an idle box | 157.6 s |
+| baseline, 24 workers (started late, mostly alone) | 177.1 s |
+| final, 24 workers (started first, with ten peers) | 189.5 s |
+| final, 64 workers | 190.8 s |
+
+Starting it early wins more than the contention costs, but the two partly cancel, and that is
+the main reason the 64-worker column is a wash.
+
+## 4. What bounds the matrix now, and the next lever
+
+**The floor is one program: `stdlib_http_tls_client_server.go`.** Measured alone on the idle
+box, against the prebuilt runtime pack:
+
+    wall=157.61s user=179.02s sys=3.01s cpu=115% maxrss=2.97 GB
+
+`cpu=115%` is the whole story. **goc's compile is single-threaded** — there is no `go func`,
+`sync.WaitGroup` or `errgroup` anywhere in `goc/compile.go` or its neighbours; the 15% above
+one core is the Go runtime's own background mark. So for 158 of the matrix's 203 seconds, 63 of
+64 cores have nothing to do with that program, and no amount of worker tuning changes it.
+
+Three levers, in the order I would take them:
+
+1. **Make the pack carry the standard library** (§16 already names this). The six `stdlib-http`
+   programs have import closures that differ by less than 1% — 11.49, 11.47, 11.47, 11.42,
+   11.40, 11.40 MB — and each costs ~157 s, so **~940 s of the ~3030 s of compile CPU is the
+   same net/http closure compiled six times.** Collapsing it needs a stub dispatcher for
+   program symbols the pack does not generate, plus moving the image's package-init list to the
+   program module. Note this does *not* by itself move the floor: building such a pack costs one
+   net/http compile. It moves the floor only if the pack is built once and cached across runs.
+
+2. **Cut the per-process fixed cost.** `hello.go` against the pack costs `wall=2.11s
+   user=3.86s`, and every one of the 338 compiles pays that — mostly loading and type-checking
+   the runtime's source closure, which `sharedSourceWorld` caches *per goc process* and the
+   matrix runs 338 separate processes. That is roughly **700 s of the 3030 s**, or 23%. A goc
+   mode that compiles several programs in one process would share the world and recover most of
+   it. It would not move the floor either, but it is the largest remaining chunk of compile CPU
+   after (1).
+
+3. **Parallelise inside goc.** This is the only one of the three that moves the *floor* rather
+   than the total, because the floor is one single-threaded process. It is also the largest
+   piece of work.
+
+## 5. Correctness: what was checked
+
+Every full-matrix run reported in this document — 11 of them — was checked for
+`subtests=338 pass=338 fail=0 skip=0 declaredPASS=337 expectedFAILURE=1 knownGAP=0`, and
+every one satisfied it. The single declared exception is `defer-panic/panic-string-output`.
+
+| check | result |
+| --- | --- |
+| `make test-unit` | clean |
+| `make test-goc-cmd` | `ok github.com/evanphx/cg12/cmd/goc 205.959s` |
+| `make test-goc-corpus` | (running) |
+| full matrix × 5, identical results | (running) |
+| both compile paths | prebuilt (default) and `-runtime-status-prebuilt-runtime=false` both pass |
+| sharding | `STATUS_SHARDS=4`, all four shards: 22+22+23+23 = 90 subtests, exactly the unsharded selection, 0 fail |
+| the look-ahead `+exclusive` term | the 8-worker run (`4*8+60 = 92` tokens) completes; without the term it would have had 32 tokens for 60 unreclaimable holds |
+| collector under concurrency | new `TestRuntimeCorpusCoverageRecordsConcurrentOutcomesDeterministically` passes, including under `-race` |
+| determinism, no pack | 4 of 5 identical over two rounds; `runtime_defer_capture_allocs.go` differs — the §5.10 backend residue |
+| determinism, with the pack | 4 of 5 identical over two rounds; same single exception |
+| the pack itself | three `goc build-runtime` runs (two warm, one `CG12_NOCACHE=1`) byte-identical |
+
+The change **touches no non-test Go file**: `git diff --name-only` over this job's commits is
+five `_test.go` files under `cmd/goc`, two Markdown files, and two scripts. So the compiler and
+runtime are bit-identical to the branch point, which is why determinism could not have moved —
+and it did not.
 
 ## Still unverified as of this line
 
 Everything below this heading is *not yet done*. If the job ended here, treat it as open.
 
-- the after-change worker-count table (running)
-- five repeated full matrix runs, to show the concurrent run phase is not flaky
-- `make test-unit`, `make test-goc-corpus`, `make test-goc-cmd`
-- the `-runtime-status-prebuilt-runtime=false` path
-- a sharded run (`STATUS_SHARDS`/`STATUS_SHARD`), which the look-ahead sizing now depends on
-- `CG12_NOCACHE=1` vs warm determinism, before and after
-- what bounds the matrix afterwards, and the next lever
+- five repeated full matrix runs, to show the concurrent run phase is not flaky (running)
+- `make test-goc-corpus` (running)
+- **A full instrumented coverage run (`make test-goc-coverage`) was not made.** That path shares
+  the collector I put a mutex on and the report I now sort, and both are covered by the new unit
+  test above (200 capabilities recorded concurrently, encoded report byte-identical across two
+  runs, clean under `-race`), but the end-to-end path is not exercised here. A targeted coverage
+  run cannot substitute: `-runtime-coverprofile` refuses a sharded run and flags every capability
+  that reported nothing, so anything short of the whole corpus fails by construction.
+- **Flakiness beyond five runs.** Five identical runs bound the per-run failure probability at
+  roughly 45% with 95% confidence, which is weak. The classification's real defence is
+  `TestRuntimeCapabilityExclusiveClassification`, not the repeat count.
