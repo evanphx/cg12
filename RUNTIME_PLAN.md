@@ -2117,9 +2117,11 @@ would have emitted, which is what makes comparing the two images mean anything.
 | compile+link CPU over all 358 corpus programs | 4152 s -> 3158 s (1.31x) |
 | linked image size over all 358 | +11.6% |
 
-**1.18x on the matrix, not the 12x the prize was stated as.** The matrix is no longer
-compile-bound -- the look-ahead compile queue overlaps ten compiles against a sequential
-run phase -- and eight standard-library programs at 140-185 s each dominate what remains
+**1.18x on the matrix, not the 12x the prize was stated as.** Both matrix figures here
+were taken at `-runtime-status-compile-workers=10` and are therefore not the harness's
+capability; §17 re-measures them and shows the matrix *was* still compile-bound, with the
+sequential run phase pinning the compile dispatcher rather than starving it. Eight
+standard-library programs at 140-185 s each dominate what remains
 and gain nothing, because the pack holds only the runtime. Letting the pack carry the
 common standard library is where the rest is, and it needs a stub dispatcher for any
 program symbol a program does not generate plus moving the image's package-init list to
@@ -2214,3 +2216,92 @@ capability sources cluster around 575 bytes and the matrix's most expensive prog
 is 1303 bytes against a 6553-byte maximum. The closure measure's eleven largest
 estimates are exactly the eleven measured 125-167 s programs.
 
+### What it measures
+
+| workers | before | concurrent run phase only | + longest-first |
+| ---: | ---: | ---: | ---: |
+| 8 | 442.8 s | -- | **394.4 s** |
+| 16 | 351.9 s | 257.9 s | **221.2 s** |
+| 24 | 233.8 s | 229.5 s | **203.2 s** |
+| 64 (default) | 204.7 s | 210.5 s | **204.4 s** |
+
+The middle column is a control taken with the cost model replaced by matrix order,
+so the two changes can be told apart. Longest-first is worth -14% at 16 workers,
+-11% at 24 and -3% at 64, so it stays.
+
+The best wall clock on this box barely moved -- 204.7 s to 203.2 s -- because at 64
+workers the old harness was already within 25 s of the floor. What moved is the
+matrix's *sensitivity to the worker count*, and that is the number that produced
+§16's 406.5 s: a job using its declared CPU share rather than the whole box now
+gets 203 s instead of 234 s, and 2.0x against the reported 406.5 s.
+
+At 24 workers the model now says `max(189.5, 3428/24) = 189.5 s` against a 203.2 s
+wall clock. The 13.7 s that remains is fixed setup plus the 7.2 s exclusive phase.
+There is no idle-worker term left.
+
+One cost the change incurs: longest-first starts all eleven expensive compiles at
+once, so the critical-path compile runs under maximum contention and gets slower --
+157.6 s alone, 177.1 s in the old schedule, 189.5 s in the new one. Starting it
+early wins more than the contention costs, but the two partly cancel, which is why
+the 64-worker column is a wash.
+
+### Verification
+
+Five consecutive full unsharded runs at 24 workers, 201.8-203.1 s, and the results
+are identical in more than the counts: the sorted set of per-subtest
+`--- PASS/FAIL/SKIP` lines and the sorted set of the 338 declared verdict lines are
+both byte-identical across all five. 338 subtests, 337 `PASS`, one
+`EXPECTED FAILURE` (`defer-panic/panic-string-output`), no `FAIL`, no `KNOWN GAP`,
+no skips.
+
+Also: `make test-unit`, `make test-goc-cmd`, `make test-goc-corpus`; both compile
+paths (prebuilt and `-runtime-status-prebuilt-runtime=false`); four-way sharding
+summing to exactly the unsharded selection; `CG12_NOCACHE=1` versus warm at 4 of 5
+with and without the pack, the exception being §5.10's known residue; and the pack
+byte-identical across three builds. The change touches no non-test Go file, so the
+compiler is bit-identical to the branch point.
+
+### The floor, and what would move it
+
+The bound is now **one program**. `stdlib_http_tls_client_server.go`, compiled alone
+on the idle box against the pack:
+
+    wall=157.61s user=179.02s sys=3.01s cpu=115% maxrss=2.97 GB
+
+`cpu=115%` is the finding: goc's compile is single-threaded, and the 15% is the Go
+runtime's own background mark. For 158 of the matrix's 203 seconds, 63 of 64 cores
+have nothing to do with that program.
+
+Three levers, in the order worth taking them:
+
+1. **Let the pack carry the standard library** (§16 names this). The six
+   `stdlib-http` programs' import closures differ by under 1% -- 11.49, 11.47,
+   11.47, 11.42, 11.40, 11.40 MB -- and each costs ~157 s, so about **940 s of the
+   ~3030 s of compile CPU is the same net/http closure compiled six times**. Note
+   it does not move the *floor* unless the pack is built once and cached across
+   runs, because building it costs one net/http compile.
+
+2. **Cut the per-process fixed cost.** `hello.go` against the pack costs
+   `wall=2.11s user=3.86s`, and all 338 compiles pay it -- mostly loading and
+   type-checking the runtime's closure, which `sharedSourceWorld` caches per goc
+   *process* while the matrix runs 338 of them. That is roughly **700 s, 23% of the
+   compile CPU**. A goc mode that compiles several programs in one process shares
+   the world and recovers most of it.
+
+3. **Parallelise inside goc.** The only one of the three that moves the floor rather
+   than the total, and the largest piece of work.
+
+### What was not done
+
+A full instrumented coverage run (`make test-goc-coverage`) was not made. That path
+shares the collector this section put a mutex on and the report it now sorts; both
+are covered by `TestRuntimeCorpusCoverageRecordsConcurrentOutcomesDeterministically`
+(200 capabilities recorded concurrently, encoded report byte-identical across two
+independently scheduled recordings, clean under `-race`), but the end-to-end path is
+unexercised. A targeted coverage run cannot substitute, because
+`-runtime-coverprofile` flags every capability that reported nothing, so anything
+short of the whole corpus fails by construction.
+
+Five identical runs bound the per-run failure probability only at roughly 45% with
+95% confidence. The exclusive classification's real defence is
+`TestRuntimeCapabilityExclusiveClassification`, not the repeat count.

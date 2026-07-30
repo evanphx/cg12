@@ -306,7 +306,7 @@ every one satisfied it. The single declared exception is `defer-panic/panic-stri
 | `make test-unit` | clean |
 | `make test-goc-cmd` | `ok github.com/evanphx/cg12/cmd/goc 205.959s` |
 | `make test-goc-corpus` | (running) |
-| full matrix × 5, identical results | (running) |
+| full matrix × 5, identical results | **yes — all five identical, see below** |
 | both compile paths | prebuilt (default) and `-runtime-status-prebuilt-runtime=false` both pass |
 | sharding | `STATUS_SHARDS=4`, all four shards: 22+22+23+23 = 90 subtests, exactly the unsharded selection, 0 fail |
 | the look-ahead `+exclusive` term | the 8-worker run (`4*8+60 = 92` tokens) completes; without the term it would have had 32 tokens for 60 unreclaimable holds |
@@ -314,6 +314,31 @@ every one satisfied it. The single declared exception is `defer-panic/panic-stri
 | determinism, no pack | 4 of 5 identical over two rounds; `runtime_defer_capture_allocs.go` differs — the §5.10 backend residue |
 | determinism, with the pack | 4 of 5 identical over two rounds; same single exception |
 | the pack itself | three `goc build-runtime` runs (two warm, one `CG12_NOCACHE=1`) byte-identical |
+
+### The five repeated runs
+
+The concurrent run phase is the change that could produce a flaky suite, so five full
+unsharded matrix runs at 24 workers, back to back:
+
+| run | wall | compile CPU | slowest compile | subtests | pass | fail |
+| --- | ---: | ---: | ---: | ---: | ---: | ---: |
+| 1 | 202.6 s | 3421.7 s | 188.9 s | 338 | 338 | 0 |
+| 2 | 201.8 s | 3425.1 s | 187.9 s | 338 | 338 | 0 |
+| 3 | 201.8 s | 3410.1 s | 188.1 s | 338 | 338 | 0 |
+| 4 | 203.1 s | 3416.3 s | 189.5 s | 338 | 338 | 0 |
+| 5 | 203.1 s | 3422.2 s | 189.6 s | 338 | 338 | 0 |
+
+**Identical, and not just in the counts.** For each run I extracted the sorted set of
+`--- PASS/FAIL/SKIP: TestARM64RuntimeCapabilityStatus/<category>/<name>` lines with the
+per-subtest timings stripped, and separately the sorted set of the 338 declared verdict lines
+(`PASS <source>` / `EXPECTED FAILURE <source>` / `KNOWN GAP <source>`). All four comparisons
+against run 1 are byte-identical, for both extractions. Wall clock spread is 1.3 s (0.6%).
+
+### The complete list of non-passing capabilities
+
+One, and it is declared: **`defer-panic/panic-string-output`**, an `expectedFailure`. It appears
+as `EXPECTED FAILURE runtime_panic_print_string.go` in every run. Across all five runs:
+`FAIL=0 KNOWN GAP=0 SKIP=0`.
 
 The change **touches no non-test Go file**: `git diff --name-only` over this job's commits is
 five `_test.go` files under `cmd/goc`, two Markdown files, and two scripts. So the compiler and
