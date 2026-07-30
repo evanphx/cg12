@@ -227,9 +227,25 @@ later determinism fixes deliberately change generated code (they replace an arbi
 map-order result with a fixed one), so byte-identity against the branch point does not hold
 past that commit and is not claimed.
 
+### `analysis/splitdiff`: every corpus program built both ways and run
+
+Every program compiled monolithically and against the prebuilt runtime, both linked and run,
+comparing exit status and **full combined output**:
+
+    programs=358  problems=2
+    total CPU compile+link: split=1922.3s mono=2396.0s  ratio=1.25x
+
+**356 identical; 2 differences, both the ones the previous job's final tree already reported**
+(`bytes_grow_stats.go`, `gomaxprocs_memstats.go`), both printing an allocation count that
+differs because the two images differ in size, both exiting 0. No compile failure, no link
+failure, no exit-status difference. **No regression against the branch point's result.**
+
+Wall clock 4 m 27 s for the whole differential; the slowest monolithic compile in it is
+`stdlib_http_tls_client_server.go` at 43.2 s.
+
+
 ## Still unverified
 
-- `analysis/splitdiff` over the corpus (running).
 - `go test -race` over real Go compiles rather than the synthetic module (running).
 - Whether the 39 nondeterministic corpus programs were *already* nondeterministic at the
   branch point. Each variant reproduces at one back-end worker, and the concurrency is
