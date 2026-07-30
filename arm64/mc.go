@@ -208,74 +208,53 @@ func compileToObjectWithBundle(m *ir.Module, opts Options, bundle assemblyBundle
 			prepareGoABI(f)
 		}
 	}
-	for functionIndex, f := range functions {
-		applyAssemblyCallConventions(f, bundle.callConventions)
-		name := sanitize(f.Name)
-		params := dwarfParams(f)
-		paramTemps := paramTempIDs(f)
-		ir.LowerPointers(f, ptrCls)
-		if err := lower(f, opts.TLSModel); err != nil {
-			return nil, fmt.Errorf("function %s: %w", f.Name, err)
-		}
-		alloc, err := regAlloc(f)
-		if err != nil {
-			return nil, fmt.Errorf("function %s: %w", f.Name, err)
-		}
-		mc, err := emitMachine(f, alloc, opts.GC, opts.TLSModel)
-		if err != nil {
-			return nil, fmt.Errorf("function %s: %w", f.Name, err)
-		}
-		goFunction, err := goFunctionInfoFor(f, name, mc)
-		if err != nil {
-			return nil, fmt.Errorf("function %s: %w", f.Name, err)
-		}
+	// Lowering, allocating and emitting one function reads only that function and
+	// read-only module facts, so the functions are compiled concurrently. Merging
+	// them into the object stays strictly in emission order, which is what keeps the
+	// output byte-identical regardless of the worker count: every address, symbol and
+	// relocation below is derived from the merge order, never from the order the
+	// workers happen to finish in.
+	err := compileFunctionsInOrder(functions, opts, bundle, goRuntime, func(functionIndex int, code *functionCode) {
 		base := uint64(len(o.Text))
 		if anchor == "" {
-			anchor = name
+			anchor = code.name
 		}
-		o.Text = append(o.Text, mc.code...)
-		goFunctions = append(goFunctions, goFunction)
+		o.Text = append(o.Text, code.code...)
+		goFunctions = append(goFunctions, code.goFunction)
 		o.Syms = append(o.Syms, obj.Sym{
-			Name: name, Section: obj.SecText, Value: base,
-			Size: uint64(len(mc.code)), Global: f.Linkage.Export || assemblyReferences[name], Func: true,
+			Name: code.name, Section: obj.SecText, Value: base,
+			Size: uint64(len(code.code)), Global: code.export || assemblyReferences[code.name], Func: true,
 		})
 		// Local symbols at address-taken blocks (&&label used in static data).
-		for _, bs := range mc.blockSyms {
+		for _, bs := range code.blockSyms {
 			o.Syms = append(o.Syms, obj.Sym{
 				Name: bs.name, Section: obj.SecText, Value: base + uint64(bs.off),
 			})
 		}
-		for _, rl := range mc.relocs {
+		for _, rl := range code.relocs {
 			rl.Offset += base
 			o.Relocs = append(o.Relocs, rl)
 		}
-		// Attach each parameter's DWARF location, computed from its binding.
-		for i := range params {
-			params[i].Loc = mc.m.varLoc(paramTemps[i])
-		}
-		df := obj.DwarfFunc{
-			Name: name, Sym: name, Size: uint64(len(mc.code)),
-			HasRet: f.HasRet, RetType: dwarfRetType(f), Params: params, External: f.Linkage.Export,
-			Inlines: buildInlineTree(mc.inl, uint64(len(mc.code))),
-		}
-		if len(mc.rows) > 0 {
-			df.DeclFile, df.DeclLine = mc.rows[0].File, mc.rows[0].Line
-		}
-		dfuncs = append(dfuncs, df)
-		for _, r := range mc.rows {
+		dfuncs = append(dfuncs, code.dwarf)
+		for _, r := range code.rows {
 			r.TextOff += base
 			rows = append(rows, r)
 		}
-		if !goRuntime && safepointsHaveRoots(mc.safepoints) {
-			smFuncs = append(smFuncs, stackMapFunc{sym: name, points: mc.safepoints})
+		if code.stackMap != nil {
+			smFuncs = append(smFuncs, *code.stackMap)
 		}
 		if releaseFunctionIR && functionIndex < len(m.Funcs) {
 			// Large source-compiled standard-library modules are one-shot inputs.
 			// Every object, debug, and runtime-metadata detail for this function has
 			// been copied above, so retaining its lowered IR only inflates the peak
-			// while stack maps are encoded.
+			// while stack maps are encoded. Both slices have to let go: functions
+			// holds the same pointers m.Funcs does.
 			m.Funcs[functionIndex] = nil
+			functions[functionIndex] = nil
 		}
+	})
+	if err != nil {
+		return nil, err
 	}
 	if releaseFunctionIR {
 		m.Funcs = nil

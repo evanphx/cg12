@@ -39,11 +39,16 @@ func main() {
 	run := flag.Bool("run", false, "link and run the program")
 	runtimeCoverMeta := flag.String("runtime-covermeta", "", "instrument runtime and write coverage metadata")
 	prebuiltRuntime := flag.String("runtime", "", "link against the prebuilt runtime written by `goc build-runtime`")
+	cpuProfile := flag.String("cpuprofile", "", "write a CPU profile of the compile to this file")
 	targetName := flag.String("target", defaultTargetName(), "arm64 | amd64")
 	flag.Parse()
 	if flag.NArg() != 1 {
-		fmt.Fprintln(os.Stderr, "usage: goc [-O] [-target arch] [-o out] [-runtime runtime.gocrt] [-c|-S|-emit-ir|-run] file.go")
+		fmt.Fprintln(os.Stderr, "usage: goc [-O] [-target arch] [-o out] [-runtime runtime.gocrt] [-cpuprofile prof] [-c|-S|-emit-ir|-run] file.go")
 		os.Exit(2)
+	}
+	if *cpuProfile != "" {
+		check(startCPUProfile(*cpuProfile))
+		defer stopCPUProfile()
 	}
 	// ParseTarget's message already names the command, so it is printed as-is
 	// rather than through check, which would prefix "goc: " a second time.
@@ -66,6 +71,9 @@ func main() {
 		}
 		check(linkAgainstPrebuiltRuntime(target, *prebuiltRuntime, input, src, exe, *optimize))
 		if *run {
+			// The profile covers the compile, not the compiled program, and
+			// os.Exit does not run deferred functions.
+			stopCPUProfile()
 			os.Exit(runProgram(exe))
 		}
 		return
@@ -115,6 +123,7 @@ func main() {
 			check(os.WriteFile(*runtimeCoverMeta, metadata, 0o644))
 		}
 		if *run {
+			stopCPUProfile()
 			os.Exit(runProgram(exe))
 		}
 	}
