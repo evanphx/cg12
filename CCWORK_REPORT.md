@@ -98,6 +98,8 @@ compiler measured under the same conditions.
 | + `slotGroups` rewrite | 48.57 s | 65.99 s | 141% | 2.83 GB |
 | + concurrent back end, 1 worker | 53.45 s | 64.99 s | 126% | 2.31 GB |
 | + concurrent back end, 64 workers | **29.43 s** | 71.27 s | 252% | 2.28 GB |
+| final tree, 1 worker | 48.73 s | 65.87 s | 140% | 2.30 GB |
+| final tree, 64 workers | **30.75 s** | 70.98 s | 241% | 2.30 GB |
 
 - The rewrite is **3.76x** on its own; the concurrent back end is a further **1.82x**
   (53.45 → 29.43 measured against its own 1-worker leg, which is the honest comparison).
@@ -158,30 +160,43 @@ callees get inlined when the budget runs out is not reproducible. The matrix run
 
 - `go build ./...`, `go vet ./...`: clean.
 - `make test-unit`: **pass**.
-- `make test-goc-corpus`: **pass**, 606 s (`ok github.com/evanphx/cg12/goc 606.369s`).
-- `make test-goc-cmd`: **pass**, 150 s.
-- `go test -race ./arm64/ -run TestParallelBackend`: clean.
+- `make test-goc-corpus`: **pass**, 567 s on the final tree (606 s before the front-end fix).
+- `make test-goc-cmd`: **pass**, 150 s on the final tree.
+- `go test -race ./goc/` over eight corpus tests, and `go test -race ./arm64/`: clean on the
+  final tree. See below for what the first of those found before it was.
 
 ### The full capability matrix
 
 `scripts/matrix-timing.sh`, full unsharded matrix, `-count=1 -v -runtime-status-progress`.
-**The box is shared with two sibling jobs throughout**, so the branch point was re-measured
-here rather than compared against the 203.2 s figure recorded on an exclusive box.
+**The box is shared with two sibling jobs**, whose load fell over the afternoon, so the branch
+point was re-measured here three times rather than compared against the 203.2 s recorded on an
+exclusive box. Runs are listed in the order taken; `final-1`, `baseline-3` and `final-2` are
+consecutive and are the fairest triple.
 
-| | wall | slowest compile | run phase | census |
+| run | wall | slowest compile | run phase | census |
 | --- | ---: | ---: | ---: | --- |
-| branch point, same box, same day | 303.9 s | 278.7 s (`stdlib-http/tls-client-server`) | 19.0 s | 338/338 |
-| **this branch** | **116.0 s** | **99.0 s** (same program) | 24.3 s | 338/338 |
-| branch point on an exclusive box (recorded, §17) | 203.2 s | 189.5 s | 14.6 s | 338/338 |
+| branch point | 303.9 s | 278.7 s | 19.0 s | 338/338 |
+| this branch | 116.0 s | 99.0 s | 24.3 s | 338/338 |
+| this branch | 107.1 s | 90.8 s | 24.9 s | 338/338 |
+| branch point | 212.9 s | 199.2 s | 15.2 s | 338/338 |
+| this branch | 67.8 s | 55.9 s | 16.9 s | 338/338 |
+| **this branch (after the front-end fix)** | **71.4 s** | **59.5 s** | 17.3 s | 338/338 |
+| **branch point (consecutive)** | **225.8 s** | **211.7 s** | 17.4 s | 338/338 |
+| **this branch (consecutive)** | **81.5 s** | **69.0 s** | 18.8 s | 338/338 |
 
-**2.6x against the branch point measured under the same load; 1.75x against the exclusive-box
-figure while contended.** The bounding term is unchanged in kind — it is still
-`max(slowest single compile, compile CPU / workers)`, and it is still the slowest single
-compile (99.0 s against 338 programs' worth of work spread over 61 compile workers). The floor
-moved; it did not stop being the floor.
+- **3.2x against the branch point measured immediately before it** (225.8 → 71.4), 2.8x
+  against the one measured immediately after (225.8 → 81.5).
+- **3.0x against §17's exclusive-box 203.2 s**, while contended.
+- The slowest single compile fell from ~212 s to ~60 s in the same runs.
 
-Census, every run: **338 subtests, 338 `--- PASS`, 0 `--- FAIL`, 0 `--- SKIP`; 337 declared
-PASS, 1 EXPECTED FAILURE, 0 KNOWN GAP.** The single non-passing capability is the declared one:
+The bounding term is unchanged in kind — still
+`max(slowest single compile, compile CPU / workers) + run phase + setup` — and still the
+slowest single compile: 59.5 s of a 71.4 s run, against 17.3 s of run phase and ~7 s of setup.
+The floor moved; it did not stop being the floor.
+
+Census, every one of the eight runs above: **338 subtests, 338 `--- PASS`, 0 `--- FAIL`,
+0 `--- SKIP`; 337 declared PASS, 1 EXPECTED FAILURE, 0 KNOWN GAP.** The single non-passing
+capability is the declared one:
 
     runtime_status_test.go:2431: EXPECTED FAILURE runtime_panic_print_string.go
 
@@ -268,15 +283,16 @@ Every program compiled monolithically and against the prebuilt runtime, both lin
 comparing exit status and **full combined output**:
 
     programs=358  problems=2
-    total CPU compile+link: split=1922.3s mono=2396.0s  ratio=1.25x
+    total CPU compile+link: split=2350.9s mono=3085.7s  ratio=1.31x
 
 **356 identical; 2 differences, both the ones the previous job's final tree already reported**
 (`bytes_grow_stats.go`, `gomaxprocs_memstats.go`), both printing an allocation count that
 differs because the two images differ in size, both exiting 0. No compile failure, no link
 failure, no exit-status difference. **No regression against the branch point's result.**
 
-Wall clock 4 m 27 s for the whole differential; the slowest monolithic compile in it is
-`stdlib_http_tls_client_server.go` at 43.2 s.
+Wall clock 4 m 46 s for the whole differential; the slowest monolithic compile in it is
+`stdlib_http_tls_client_server.go` at 43.2 s. Run twice — once before the front-end fix in
+the race section above and once after — with the same two, and only the same two, differences.
 
 
 ## Still unverified
