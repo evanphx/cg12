@@ -2421,6 +2421,26 @@ against `compile CPU / 64 = 43.8 s`, so both terms would have to move to go much
 below 50 s. Cold, the packs buy nothing: their 154 s replaces the 192 s compile
 almost exactly. The whole gain is the cache, as §17's lever 1 predicted.
 
+Those three rows were taken on a quiet box. Repeated later with two sibling jobs
+loading it (load average 168) the same three are 275.0 s, 308.2 s and 66.9-99.4 s,
+so the ratio holds at 2.8-4.1x while the absolute numbers do not. Six full matrix
+runs in all, every one of them 338 subtests / 338 pass / 337 declared PASS /
+1 EXPECTED FAILURE / 0 KNOWN GAP.
+
+`analysis/splitdiff` over all 358 corpus programs, each compiled monolithically and
+against the pack set, run, and compared on exit status and full output: 2
+differences, and they are the two §16 already recorded, with the same numbers
+(`gomaxprocs_memstats.go` prints 105 mallocs monolithic against 120 split;
+`bytes_grow_stats.go` 16718922 against 18220422). Re-running those two against the
+runtime-only pack alone reproduces both, so they predate the standard-library packs.
+Compile+link CPU over the 358 is 4923.5 s monolithic against 1738.5 s split, 2.83x;
+image bytes +11.0%.
+
+Determinism is unchanged on both compile paths: `CG12_NOCACHE=1` against warm is
+byte-identical for `hello.go`, `fmt_sprintf.go`, `gc_struct.go` and
+`runtime_cleanup_frame_retention.go`, with `runtime_defer_capture_allocs.go` still
+the known residue of §5.10.
+
 `goc build-runtime` caches a pack under `$XDG_CACHE_HOME/cg12/runtime-pack`, keyed
 on the pack format version, target, `-O`, the package list, the goc binary's own
 bytes, the *contents* of the whole vendored `stdlib/` tree, and `cc --version`.
