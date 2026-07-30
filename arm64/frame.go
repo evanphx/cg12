@@ -1,6 +1,8 @@
 package arm64
 
 import (
+	"sort"
+
 	"github.com/evanphx/cg12/analysis"
 	"github.com/evanphx/cg12/ir"
 )
@@ -58,15 +60,9 @@ func computeFrame(f *ir.Func, alloc *allocation, conventions calleeConventions) 
 			}
 		}
 	}
-	// Walk the allocation orders rather than the map, so the save order is stable
-	// and every register the allocator could hand out (including a platform-ABI
-	// function's X26/X28) is a candidate for saving.
-	for _, r := range intAllocOrderFor(f) {
-		if used[r] {
-			lay.calleeSaved = append(lay.calleeSaved, r)
-		}
-	}
-	for _, r := range floatAllocOrder {
+	// Filter a total order rather than the used map, so the save list depends only
+	// on *which* registers are used, never on how they were discovered.
+	for _, r := range calleeSaveOrder(f) {
 		if used[r] {
 			lay.calleeSaved = append(lay.calleeSaved, r)
 		}
@@ -124,6 +120,57 @@ func computeFrame(f *ir.Func, alloc *allocation, conventions calleeConventions) 
 
 	lay.frame = roundUp(lay.outgoing+off, 16)
 	return lay
+}
+
+// calleeSaveOrder returns the order f's prologue saves callee-saved registers in.
+//
+// It is a *total* order over every register f could ever be obliged to preserve,
+// so filtering it by a used set yields a save list that depends only on which
+// registers are used. Under Go ABIInternal calleeSavedFor is false for every
+// register, so the order is empty: such a function preserves nothing.
+//
+// The trailing sweep is the point. This list used to be built by walking the
+// allocation orders and keeping what it found there, which silently *dropped* any
+// callee-saved register reachable another way -- and one always was.
+// asmClobberRegs answers for a hand-written inline-asm template, not for the
+// allocator, so a template may name a callee-saved register the allocation order
+// deliberately excludes: X27, which is reserved as a scratch register, and (for a
+// function whose convention reserves the Go runtime's registers) X26 and X28. The
+// prologue then did not save it while the epilogue's offsets still assumed the
+// shorter list, so the register came back to the caller corrupted, with no
+// diagnostic. Appending the leftovers in register order makes the list total by
+// construction; TestCalleeSaveOrderIsTotal pins that it stays total if either
+// allocation order is narrowed again.
+func calleeSaveOrder(f *ir.Func) []Reg {
+	goInternal := f.UsesGoInternalCallConvention()
+	var order []Reg
+	seen := map[Reg]bool{}
+	add := func(r Reg) {
+		if !calleeSavedFor(goInternal, r) || seen[r] {
+			return
+		}
+		seen[r] = true
+		order = append(order, r)
+	}
+	for _, r := range intAllocOrderFor(f) {
+		add(r)
+	}
+	for _, r := range floatAllocOrder {
+		add(r)
+	}
+	var rest []Reg
+	sweep := func(bank map[Reg]bool) {
+		for r := range bank {
+			if calleeSavedFor(goInternal, r) && !seen[r] {
+				seen[r] = true
+				rest = append(rest, r)
+			}
+		}
+	}
+	sweep(calleeSaved)
+	sweep(calleeSavedFloat)
+	sort.Slice(rest, func(i, j int) bool { return rest[i] < rest[j] })
+	return append(order, rest...)
 }
 
 // allocShape returns the alignment and byte size of a stack allocation.
