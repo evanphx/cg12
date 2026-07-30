@@ -6752,6 +6752,13 @@ func (g *gen) funcDecl(fd *ast.FuncDecl) {
 	g.deferFunctions = make(map[*ast.DeferStmt]ir.Ref)
 	g.deferOrder = nil
 	g.deferActions = nil
+	// Kept out of the next function, like the rest of this block and like
+	// derive() already does for a closure. addDeferRecoveryEdges wires every
+	// block in here to the recovery block, so carrying the previous function's
+	// blocks over gives the *previous* function a synthetic control-flow edge
+	// into *this* function's blocks -- one function's dominance and liveness
+	// then span another's.
+	g.deferBlocks = nil
 	g.runningDefers = false
 	g.parents = astParents(fd.Body)
 	g.currentBody = fd.Body
