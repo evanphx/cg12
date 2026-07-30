@@ -47,7 +47,7 @@ func insertCallerSaves(f *ir.Func, cfg *analysis.CFG, live *analysis.Liveness, a
 						continue
 					}
 					r := f.Temps[t].Reg
-					if r == ir.NoReg || !callerClobbered(f, f.Temps[t].Cls, Reg(r)) {
+					if r == ir.NoReg || !callerClobbered(f, in, f.Temps[t].Cls, Reg(r)) {
 						continue
 					}
 					// A GC ref live across a safepoint is pre-spilled whole-life
@@ -63,6 +63,16 @@ func insertCallerSaves(f *ir.Func, cfg *analysis.CFG, live *analysis.Liveness, a
 				}
 				if len(sv) > 0 {
 					sort.Ints(sv) // deterministic order
+					// A managed or Go-internal *body* is not supposed to reach here at
+					// all: colouring keeps every call-crossing value of such a function
+					// in a stack slot (gcalloc's assign), so there is nothing to wrap.
+					// This stays a hard error because a save/restore pair there would
+					// have to survive the runtime relocating the frame.
+					//
+					// It is deliberately not extended to "the callee is Go-internal".
+					// An AAPCS64 body calling an ABIInternal callee is the ordinary goc
+					// shape -- a function literal or method value -- and wrapping the
+					// crossing values is exactly the right answer for it.
 					if f.UsesManagedFrame() || f.UsesGoInternalCallConvention() {
 						names := make([]string, 0, len(sv))
 						for _, t := range sv {
@@ -171,12 +181,24 @@ func insertCallerSaves(f *ir.Func, cfg *analysis.CFG, live *analysis.Liveness, a
 	return nil
 }
 
-// callerClobbered reports whether a call clobbers register r when it holds a value of
-// class cls: any caller-saved X register; any V register whose relevant bits a call
-// does not preserve -- the low 64 bits of V8..V15 are callee-saved, but a 128-bit
-// value has no surviving register at all (AAPCS64 preserves only the low half).
-func callerClobbered(function *ir.Func, cls ir.Cls, r Reg) bool {
-	if function.UsesManagedFrame() || function.UsesGoInternalCallConvention() {
+// callerClobbered reports whether the call destroys register r while it holds a
+// value of class cls: any caller-saved X register; any V register whose relevant
+// bits a call does not preserve -- the low 64 bits of V8..V15 are callee-saved,
+// but a 128-bit value has no surviving register at all (AAPCS64 preserves only
+// the low half).
+//
+// The clobber set is a property of the CALLEE, resolved per call, not of the
+// function the call sits in. It used to be read off the enclosing function, and
+// that is unsound in the direction that matters: an AAPCS64 body calling a Go
+// ABIInternal callee. Colouring prefers X19-X28 for a value live across a call
+// because AAPCS64 says the callee preserves them; an ABIInternal callee preserves
+// nothing, so the value sat in X19 across a call that destroyed it, with every
+// instruction individually valid and no diagnostic anywhere. goc marks every
+// function literal, method-value wrapper and funcvalue adapter
+// CallConvGoInternal, and ordinary platform-ABI functions call them, so this is
+// reachable from real input rather than only in principle.
+func callerClobbered(function *ir.Func, call *ir.Instr, cls ir.Cls, r Reg) bool {
+	if !callPreservesCalleeSavedRegs(function, call) {
 		return r >= X0 && r <= vLast
 	}
 	if cls.IsFloat() {
@@ -189,4 +211,27 @@ func callerClobbered(function *ir.Func, cls ir.Cls, r Reg) bool {
 		return !calleeSavedFloat[r]
 	}
 	return isCallerSaved(r)
+}
+
+// callPreservesCalleeSavedRegs reports whether the AAPCS64 callee-saved promise
+// (X19-X28, and the low 64 bits of V8-V15) actually holds across one call.
+//
+// Two independent things can break it, which is why it is not simply
+// "conventionABI(callee).savesCalleeRegs":
+//
+//   - the callee's convention. Go ABIInternal preserves nothing, so no register
+//     survives such a call.
+//   - the caller's frame. A managed function can enter the runtime's raw
+//     stack-growth path, which follows Go's volatile-register contract even when
+//     the function's ordinary calls are AAPCS64 (see
+//     registerSurvivesManagedCalls).
+//
+// The enclosing function's own *call convention* is deliberately not consulted:
+// what a callee preserves for us has nothing to do with what we preserve for our
+// caller. A Go ABIInternal body calling a C helper really does get X19 back.
+func callPreservesCalleeSavedRegs(function *ir.Func, call *ir.Instr) bool {
+	if function.UsesManagedFrame() {
+		return false
+	}
+	return conventionABI(loweredCallConvention(call)).savesCalleeRegs
 }

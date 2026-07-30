@@ -132,6 +132,23 @@ func (c calleeConventions) goInternalCall(f *ir.Func, call *ir.Instr) bool {
 	return c.forCall(f, call) == ir.CallConvGoInternal
 }
 
+// loweredCallConvention returns the convention one already-lowered call was
+// lowered against.
+//
+// lowerCalls stamps CallConv/CallConvSet on every OCall it rewrites, so after
+// lowering the instruction is self-describing and the post-lowering passes --
+// register allocation and the caller-save pass -- need no convention index to ask
+// what a call does. It agrees with calleeConventions.forCall by construction,
+// because forCall prefers exactly this field when it is set. An unstamped call
+// has not been through lowering; the platform ABI is the same answer forCall
+// gives such a call.
+func loweredCallConvention(call *ir.Instr) ir.CallConvention {
+	if call.CallConvSet {
+		return call.CallConv
+	}
+	return ir.CallConvPlatform
+}
+
 // calleeSymbolOf returns the symbol a direct call targets. An indirect call
 // resolves its callee through a temporary and returns false; such a call carries
 // its convention on the instruction instead.
