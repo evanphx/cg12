@@ -3,8 +3,11 @@
 Branch: `ccwork/pack-stdlib`, off `perf/test-suite`. The previous job's report has been moved
 to `docs/report-matrix-speed.md` so this file is only about this job.
 
-Status: **in progress.** Everything below was measured or reproduced on this box. Anything
-not yet verified is named as such.
+Status: **the lever works.** The full capability matrix goes **201.2 s -> 56.4 s (3.6x)**
+against a matched control on this same tree, at 338 subtests / 337 PASS / 1 EXPECTED FAILURE
+/ 0 FAIL / 0 KNOWN GAP. Getting there turned up three defects in goc, two of them live
+miscompiles that had nothing to do with packs. Everything below was measured or reproduced on
+this box; anything not verified is named as such at the end.
 
 ## Baseline measured here, before any change
 
@@ -175,6 +178,105 @@ root (`package main; import _ "net/http"; func main() {}`) and over
 58 distinct interfaces are tested in the pack's compilation, 65 in the program's. Every
 function the program subtracts and takes from the pack is testing against the left-hand column.
 
----
+## What it measures
 
-_This report is updated as results land._
+Box: linux/arm64, 64 cores, ~240 GB RAM, shared with two sibling jobs; this job declared 14
+cpu slots. Every row is a full unsharded matrix run through `scripts/matrix-timing.sh`, with
+`-v -count=1 -runtime-status-progress`, and every row is checked for
+`subtests=338 pass=338 fail=0 declaredPASS=337 expectedFAILURE=1 knownGAP=0` rather than for
+`ok`.
+
+| run | wall | compile CPU | slowest single compile | run phase | bounding term |
+| --- | ---: | ---: | ---: | ---: | --- |
+| control: runtime-only pack, same tree (`-runtime-status-stdlib-packs=false`) | 201.2 s | 4392.7 s | 191.8 s | 14.6 s | slowest single compile |
+| seven packs, **cold** cache | 210.3 s | 2783.6 s | 46.6 s | 15.1 s | building the packs (154 s) |
+| seven packs, **warm** cache | **56.4 s** | 2801.4 s | 46.9 s | 15.3 s | slowest single compile |
+
+The control reproduces the 203.2 s the previous job reported at `cpu_slots: 24`, so the two
+measurements are comparable even though the boxes' loads are not identical.
+
+**Afterwards the matrix is bounded by the slowest single compile again** — 46.9 s for
+`stdlib-http/tls-client-server`, against `compile CPU / 64 = 43.8 s`, which is very nearly the
+same number. Both terms would have to move to go much below 50 s; the pack lever has taken
+this one about as far as it goes on its own.
+
+**Cold, the packs cost exactly what the briefing predicted and buy nothing.** 210.3 s against
+the control's 201.2 s: the 154 s of pack building replaces the 192 s slowest compile almost
+one for one. The whole gain is in the cache.
+
+### Per-program compiles
+
+Standalone, no matrix load, against the seven packs:
+
+| program | before | after |
+| --- | ---: | ---: |
+| `stdlib_http_tls_client_server.go` | 158.0 s | 27.9 s |
+| `stdlib_http_redirect_keepalive.go` | 164.0 s | 25.3 s |
+| `stdlib_http_client_server.go` | 163.9 s | 25.1 s |
+| `stdlib_http_cookiejar.go` | 161.5 s | 20.9 s |
+| `stdlib_http_multipart_form.go` | 161.1 s | 20.7 s |
+| `stdlib_http_parse_roundtrip.go` | 161.3 s | 20.2 s |
+| `stdlib_smtp_session.go` | 136.5 s | 12.3 s |
+| `stdlib_crypto_x509_ed25519.go` | 133.4 s | 14.2 s |
+| `stdlib_crypto_ecdsa.go` | 128.1 s | 10.4 s |
+| `stdlib_crypto_ecdh_x25519.go` | 126.0 s | 9.4 s |
+| `stdlib_crypto_hpke.go` | 125.3 s | 8.3 s |
+| `stdlib_encoding_xml.go` (no usable pack) | 11.7 s | 12.3 s |
+| `hello.go` (no usable pack) | 2.1 s | 2.4 s |
+
+The last two are the cost side. A program with no usable pack pays 0.22 s to read the other
+six packs' manifests and decide it cannot use them. Over 338 programs that is 74 s of CPU and
+about 1 s of the matrix's wall clock; it is not free and it is not close to mattering. It
+would go away if the manifest's selection fields were a separate, small blob in the container
+— worth doing if the pack set grows much beyond seven.
+
+## The design that survived
+
+`-runtime` takes a comma-separated list of packs. goc runs the front end, and the moment it
+knows which packages the program loaded it picks the pack carrying the most of those whose
+closure the program's closure **contains**, then subtracts against that one. A runtime-only
+pack carries nothing beyond the runtime, and every executable compiles the whole runtime
+closure, so it is usable by every program and the list degrades to it rather than failing.
+
+The seven roots the matrix builds are the largest package each of the eleven expensive
+programs imports: nothing, `net/http`, `net/smtp`, `crypto/x509`, `crypto/ecdsa`,
+`crypto/ecdh`, `crypto/hpke`. They share no common ancestor small enough to serve all of them
+— `crypto/ecdh`'s closure is not a superset of `crypto/ecdsa`'s program's, and neither is
+usable by an `encoding/xml` program — so it is one pack per shape rather than one pack.
+
+| pack | build (cold) | size |
+| --- | ---: | ---: |
+| runtime only | 5.1 s | 8.8 MB |
+| `crypto/ecdh` | 132.0 s | 48.5 MB |
+| `crypto/hpke` | 134.2 s | 51.2 MB |
+| `crypto/ecdsa` | 135.6 s | 51.9 MB |
+| `crypto/x509` | 138.1 s | 54.1 MB |
+| `net/smtp` | 141.5 s | 57.0 MB |
+| `net/http` | 157.0 s | 73.7 MB |
+| all seven, built concurrently | **157.0 s** | 345 MB |
+| all seven, warm cache | **0.41 s** | |
+
+### What a rich pack costs an image in bytes
+
+Nothing, because no program carries a pack it cannot use. `hello.go` takes the runtime-only
+pack and its image is byte-for-byte what it was. The question the briefing asked — what a
+*fixed superset* costs a `hello.go` image — has no answer to measure, because `hello.go`
+cannot be built against a `net/http` pack at all (Finding 3). For the programs that do take a
+rich pack the image gets *smaller*: `stdlib_http_tls_client_server.go` is 69.71 MB against the
+runtime-only pack and 67.32 MB against the `net/http` pack.
+
+### The cache
+
+`goc build-runtime` keeps its result under `$XDG_CACHE_HOME/cg12/runtime-pack`
+(`CG12_PACK_CACHE` overrides, `CG12_NOCACHE=1` disables), keyed on a SHA-256 of: the pack
+format version, the target, `-O`, the sorted package list, **the goc binary's own bytes**, the
+**contents** of every file in the vendored `stdlib/` tree, and `cc --version`. A stale hit
+would be a wrong image rather than a slow build, so the key is deliberately over-broad.
+Hashing the tree by content rather than by mtime costs 0.19 s warm and means a checkout or a
+worktree copy still hits.
+
+One consequence worth knowing: `go build` stamps `vcs.revision` and `vcs.modified` into the
+goc binary, so **every commit and every transition between a clean and a dirty tree
+invalidates the whole cache**. That is correct — a different compiler must not reuse a pack —
+but it means the cache pays off across repeated runs and shards of one revision, not across a
+development loop. It cost me two full matrix runs to notice, which is why it is written down.
