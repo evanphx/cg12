@@ -64,6 +64,86 @@ then subtracts the functions the pack already defines. That is per-program work 
 times. It is the largest single remaining item in a small program's compile and it is noted here
 for whoever integrates the three branches; it is not touched by this job.
 
-## 2. Still unverified
+## 2. What was built
 
-Everything below §1. This section is updated as results land.
+### 2.1 `goc compile-batch`: a request stream, not a manifest
+
+    goc compile-batch [-O] [-target arch] [-runtime runtime.gocrt] < requests.jsonl
+
+One JSON object per line of stdin — `{"source": "prog.go", "output": "prog.bin"}` — and one
+JSON object per line of stdout in reply, carrying the error (if any), the compile's wall clock
+and the worker's peak RSS. EOF on stdin ends the process.
+
+**Why a stream and not a manifest.** A manifest — hand a process a fixed list of programs —
+is simpler, and it partitions the work statically. The matrix's compile schedule is dynamic on
+purpose: §17 of RUNTIME_PLAN dispatches longest-first through a shared pool so the eleven
+125–167 s programs start at t=0, and bounds how far compilation may run ahead of the run phase
+so compiled-but-not-yet-run executables cannot fill a small `/tmp`. Both are properties of a
+*queue*. A static partition destroys them — one worker handed three expensive programs is still
+compiling when the machine has gone idle. A request stream keeps the queue exactly as it was
+and changes only what a worker is: a process that outlives its programs instead of one that
+exits after each.
+
+**Why the configuration is process-wide and not per request.** Target, prebuilt runtime and
+`-O` are exactly the axes of goc's source-world key: they decide which files a package is built
+from and how it type-checks. A worker that accepted them per request would silently build a
+second world on the first request that differed, and double its memory where nobody could see
+it. Making them command-line flags makes a worker one build configuration by construction.
+
+**What a batch worker does not do:** `-runtime-covermeta`. Runtime coverage instruments the
+runtime per program, which is the opposite of one build configuration per process, so the
+coverage run keeps the one-shot path it already had (`newRuntimeCapabilityBatchPoolFor` returns
+nil whenever `-runtime-coverprofile` is set). That is a deliberate boundary, not an omission:
+adding a mode this job cannot verify end to end would be worse than not adding it.
+
+### 2.2 One bad program costs one program
+
+A one-shot `goc` that rejects a program exits and the next program gets a fresh process. A
+worker has no fresh process to offer, so it has to keep going. Three things make that safe:
+
+- a compile error is a response, not an exit;
+- a **panic inside the compiler is recovered per request** and reported, with its stack, as
+  that program's error — so a compiler bug costs one program instead of every program still
+  queued behind that worker;
+- the pool never reuses a worker whose request failed at the protocol level (died, or replied
+  out of step). It stops it and the next acquire starts a replacement, so a worker that is
+  killed — by the OOM killer, say — costs one capability, which is exactly what a one-shot
+  compile killed the same way would have cost.
+
+Diagnostics are never written to a worker's own stderr: that stream is shared by every program
+it compiles and could not be attributed afterwards. `cc`'s output is captured per program and
+folded into that program's error.
+
+### 2.3 The matrix harness
+
+`cmd/goc/runtime_status_batch_test.go` adds a pool of workers, and the compile queue dispatches
+through it. Everything else about the schedule is untouched — same `compileRuntimeCapabilityWorkers()`
+count, same longest-first order, same look-ahead bound. The pool shuts down inside
+`drainCompiles`, so the exclusive run phase — the programs whose outcome depends on how much of
+the machine they have — starts with no compilers on the box at all, rather than with W idle
+workers each holding a parsed standard library.
+
+`-runtime-status-batch-compile=false` restores the old one-process-per-program path. It exists
+so the A/B below is a measurement rather than a comparison against a different tree.
+
+## 3. Correctness: is anything leaking between compiles?
+
+This is the whole risk, so it is checked three ways.
+
+### 3.1 Unit tests (`cmd/goc/batch_test.go`)
+
+| test | what it pins |
+| --- | --- |
+| `TestBatchCompilesMatchOneShotCompiles` | four small programs, each compiled alone twice, in a batch, and in a batch that sees them in the opposite order; the batch builds must be the same bytes as the solitary one |
+| `TestBatchCompilerSurvivesAProgramItCannotCompile` | a program that does not type-check is reported against *its own* request, and the next program in the same worker still compiles and runs |
+| `TestBatchCompilerSharesItsWorldAcrossPrograms` | the second and third compiles of the same program in one worker are faster than the first — the direct evidence that the world is actually shared |
+
+The first test compiles alone *twice* on purpose. Some programs in this corpus do not compile
+deterministically even alone (see §4), and for those, byte equality is not a question that can
+be asked; the test says how many programs it was able to ask it of and fails if that falls
+below two, so it cannot quietly become vacuous. All three tests pass; the third logged
+`2.14s 1.60s 1.62s`.
+
+## 4. Still unverified
+
+Everything below §3. This section is updated as results land.
