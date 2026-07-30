@@ -2560,7 +2560,13 @@ func buildGOCForRuntimeCapabilityStatus(t *testing.T, directory string) string {
 
 	runtimeCapabilityCompilerOnce.Do(func() {
 		compiler := filepath.Join(directory, "goc")
-		build := exec.Command("go", "build", "-o", compiler, ".")
+		// -buildvcs=false because the prebuilt runtime packs are cached against
+		// this binary's bytes, and the stamp `go build` embeds by default carries
+		// the commit and a clean/dirty bit. With it, every commit -- a report, a
+		// comment -- rebuilds 157 s of packs that the compiler's own code did not
+		// invalidate. Without it the binary is identified by what it compiles,
+		// which is what the cache key means to say.
+		build := exec.Command("go", "build", "-buildvcs=false", "-o", compiler, ".")
 		if output, err := build.CombinedOutput(); err != nil {
 			runtimeCapabilityCompilerErr = fmt.Errorf("build compiler: %w\n%s", err, output)
 			return
