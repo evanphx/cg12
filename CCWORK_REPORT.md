@@ -4,32 +4,59 @@ Branch: `ccwork/goc-batch-b`, off `perf/test-suite` (`0f4ee02`). The previous jo
 been moved to `docs/report-matrix-speed.md`, following the precedent that job set, so this file
 is only about this job.
 
-Status: **in progress.** Everything stated below was measured on this box. Anything not
-measured is named as such.
+Status: **complete.** Everything stated below was measured on this box, while at least one
+sibling job was compiling on it — which is a real limit on the timing numbers and is stated
+wherever it bites. Anything not measured is named as such, in §9.
 
-## Headline, up front: the lever is real but it is a sixth of its estimate
+## Headline
 
-The briefing sizes this lever at **~700 s of the ~3030 s of compile CPU (23%)**, on the
-reasoning that `hello.go` costs `wall=2.11s` against the pack and "most of it is loading and
-type-checking the runtime's source closure", which `goc/source_world.go` caches per process.
+`goc compile-batch` compiles many programs in one process, sharing the parsed and type-checked
+runtime, and the matrix harness now dispatches through a pool of these. It is wired in by
+default and `-runtime-status-batch-compile=false` turns it off.
 
-**Measured, the amortizable part is ~0.53 s of that 2.16 s, not ~2 s.** The rest is per-program
-work that a shared world does not touch. See §1 for the measurement. That puts the lever at
-roughly **180 s of the ~3030 s (6%)**, and — at the matrix's current floor — approximately
-**zero wall clock**, because the matrix is bounded by one 190 s single-threaded compile and not
-by compile CPU / workers.
+**It is safe.** Every one of the 358 corpus programs was compiled three ways — one process per
+program, a batch, and a batch fed the programs in reverse — and compared byte for byte and by
+behaviour. **0 leaks; all 358 behave identically.** The 39 programs whose bytes differ are all
+explained by pre-existing nondeterminism in the compiler, each one demonstrated individually
+(§3.3). Fifteen full matrix runs, all 338/338.
 
-That does not make the work pointless: it makes it a *precondition*. The moment the sibling
-`pack-stdlib` lever removes the six 160 s `net/http` compiles, the floor drops and
-`compile CPU / workers` becomes the bounding term — and then 180 s off the numerator is a real
-6% off the wall clock. It is reported here honestly rather than claimed at the briefing's size.
+**It is smaller than the briefing estimated, and larger than my own first estimate.** The
+briefing sized it at ~700 s of the ~3030 s of compile CPU (23%) on the reasoning that most of
+`hello.go`'s 2.11 s is the runtime's source closure. Measured, the *world* is only 0.53 s of
+wall and 0.73 s of CPU per compile — but the full amortizable per-process cost, including
+process start and a fresh 300 MB heap collected from scratch in every one of 338 processes, is
+**1.10 s of CPU per compile**. Three independent measurements put the saving at:
+
+| method | saving |
+| --- | ---: |
+| isolated per-compile bench, extrapolated | ~354 CPU-s |
+| whole-corpus sweep, summed per-program compile wall | 196.8 s (5.8%) |
+| matrix A/B, 16 workers, both orders | 502 CPU-s (11.2%) |
+
+**Somewhere between about 5% and 12% of what the matrix costs to run, and this box could not
+narrow it further** (§5.3).
+
+**It does not move the floor**, and was never going to: the matrix is bounded by
+`max(slowest compile, compile CPU / workers)`, and the first term is one 157.6 s single-threaded
+compile. This lever moves the second term. That is why the wall clock did move here — on a
+shared box the second term binds — and why on an exclusive box at 24+ workers it would move much
+less. Its real value is that the suite costs a tenth less to run *anywhere*, and is less
+sensitive to how much of the machine it gets.
+
+Two things found on the way that are not this lever and matter more than it does:
+
+- **Compile nondeterminism is at least 39 of 358 corpus programs (10.9%), not the one the
+  five-program determinism check knows about** (§4). Pre-existing, verified at the branch point.
+  It means byte-identical output cannot be this branch's merge gate.
+- **The largest remaining cost in a small compile is the runtime IR that gets generated and then
+  subtracted** — 1.5 s of `hello.go`'s 2.1 s (§10).
 
 ## 1. How big the per-process fixed cost actually is
 
 The world is built by the first compile in a process and reused by every later one, so the
 amortizable cost is exactly `first compile − later compile` in one process. Measured with a
-scratch main (`analysis/worldbench`) that reads a prebuilt pack from disk and compiles the same
-program N times through `prebuilt.CompileProgram`, the same call `goc -runtime` makes:
+scratch main that reads a prebuilt pack from disk and compiles the same program N times through
+`prebuilt.CompileProgram`, the same call `goc -runtime` makes:
 
     pack read: 0.021s
     goc/testdata/hello.go  iter=0  2.055s   <- includes building the shared source world
@@ -53,10 +80,15 @@ For reference the whole `goc` process on the same program is `wall=2.16 user=3.6
 2.16/2.15/2.17), so the ~0.1 s of wall unaccounted for above is process start plus the `cc`
 link.
 
-**What this means for the matrix.** The saving is a constant ~0.53 s per compile, independent of
-the program, because the world is only the runtime's closure — everything a program imports
-beyond that is loaded privately either way. Over 338 programs that is ~180 s of the ~3030 s of
-compile CPU the matrix spends, i.e. **6%**, not 23%.
+**The world is not the whole amortizable cost.** A one-shot `goc` process on the same program
+costs 3.67 s of CPU, against 2.57 s for a compile in a worker that already has a world — so the
+per-compile saving is **1.10 s of CPU**, not 0.73 s. The extra 0.37 s is process start, the pack
+read, and the Go runtime collecting a fresh ~300 MB heap in every process rather than reusing a
+live one. Over 322 amortized compiles that is ~354 CPU-s.
+
+The saving is roughly constant per compile and independent of the program, because the world is
+only the runtime's closure — everything a program imports beyond that is loaded privately either
+way. It is emphatically **not** the ~700 s the briefing estimated.
 
 **Where the other 1.5 s of `hello.go` goes** is not the world and is therefore not this lever:
 against a prebuilt pack, `compile()` still generates IR for the whole runtime closure and only
