@@ -6,6 +6,7 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
+	"github.com/evanphx/cg12/internal/gometa"
 	"github.com/evanphx/cg12/internal/runtimepack"
 	"github.com/evanphx/cg12/ir"
 )
@@ -192,8 +193,8 @@ func TestProgramModuleSubtractsTheRuntime(t *testing.T) {
 	_, _, program := buildSplit(t)
 
 	assert.Greater(t, program.SubtractedFunctions, 2000)
-	assert.Less(t, program.KeptFunctions, 50,
-		"the program module should hold its own code and the dispatchers, and little else")
+	assert.Less(t, program.KeptFunctions, 200,
+		"the program module should hold its own code, the dispatchers and the degraded interface-call wrappers, and little else")
 	assert.Greater(t, program.SubtractedData, 1000)
 }
 
@@ -217,4 +218,36 @@ func TestDriftedDataIsRefused(t *testing.T) {
 
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "differ from the prebuilt runtime's definitions")
+}
+
+// The itablinks name is duplicated so goc does not depend on the backend's
+// metadata emitter. Keep the two in step.
+func TestModuleItabLinksNameMatchesGometa(t *testing.T) {
+	assert.Equal(t, gometa.ModuleItabLinksName, gometaModuleItabLinksName)
+}
+
+// A prebuilt module writes runtime.unreachableMethod into a method entry whose
+// function it does not compile, and it compiles less than any program linked
+// against it. Such a datum is strictly poorer than the program's own, so it goes
+// to the program module -- the same reason the whole type region does.
+func TestDegradedItabsGoToTheProgram(t *testing.T) {
+	runtimeModule, _, program := buildSplit(t)
+
+	for _, data := range runtimeModule.Module.Data {
+		for _, item := range data.Items {
+			assert.NotEqual(t, "runtime.unreachableMethod", item.Sym,
+				"the prebuilt runtime module kept %s, whose method entry it degraded", data.Name)
+		}
+	}
+
+	degraded := 0
+	for _, data := range program.Module.Data {
+		for _, item := range data.Items {
+			if item.Sym == "runtime.unreachableMethod" {
+				degraded++
+				break
+			}
+		}
+	}
+	assert.Greater(t, degraded, 0, "the program module carries the data whose methods are genuinely absent")
 }

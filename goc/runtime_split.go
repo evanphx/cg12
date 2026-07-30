@@ -199,7 +199,7 @@ func CompileExecutableAgainstRuntimeFor(target Target, name string, src []byte, 
 // finishRuntimeModule turns a finished whole-program module into the prebuilt
 // runtime half: it drops the program-built definitions and exports what is left,
 // so a separately compiled program module can reference all of it.
-func finishRuntimeModule(module *ir.Module, split *runtimeSplit, programFunctions, programData []string) error {
+func finishRuntimeModule(module *ir.Module, split *runtimeSplit, programFunctions, programData []string) {
 	module.Data = dropShadowedDefinitions(module.Data)
 	programSymbols := make(map[string]bool, len(programFunctions)+len(programData))
 	for _, name := range programFunctions {
@@ -211,6 +211,10 @@ func finishRuntimeModule(module *ir.Module, split *runtimeSplit, programFunction
 	for name := range typeRegionSymbols(module.Data) {
 		programSymbols[name] = true
 	}
+	for name := range degradedSymbols(module.Data) {
+		programSymbols[name] = true
+	}
+	dropItabLinks(module.Data, programSymbols)
 
 	keptFunctions := module.Funcs[:0]
 	for _, function := range module.Funcs {
@@ -241,14 +245,13 @@ func finishRuntimeModule(module *ir.Module, split *runtimeSplit, programFunction
 	module.Data = keptData
 
 	// The prebuilt module is the head of the chain and does not define main, so
-	// runtime.modulesinit will move the program module -- not this one -- to the
-	// front of activeModules. That ordering is what makes typelinksinit resolve
-	// duplicate descriptors in favour of the program's, and it is the first
-	// topology in which moduledata.hasmain has any observable effect.
+	// runtime.modulesinit moves the program module -- not this one -- to the front
+	// of activeModules. That ordering only matters to typelinksinit, which has
+	// nothing to do here: the program module owns the whole type region, so the
+	// image has no duplicate descriptors to canonicalise.
 	module.GoHasMain = false
 
 	split.programSymbols = sortedUnique(programSymbols)
-	return nil
 }
 
 // finishProgramModule turns a finished whole-program module into the program
@@ -446,6 +449,63 @@ func typeRegionSymbols(definitions []*ir.Data) map[string]bool {
 	}
 	return region
 }
+
+// unreachableMethodSymbol is what goc writes into a method entry whose function
+// this module does not compile.
+const unreachableMethodSymbol = "runtime.unreachableMethod"
+
+// degradedSymbols is the set of data symbols the prebuilt runtime module has
+// written a "this method is not in the image" placeholder into.
+//
+// `clearUnavailableRuntimeMethodOffsets` replaces a method entry --  in a type
+// descriptor or in a static itab -- with `runtime.unreachableMethod` when the
+// method's function is not compiled into the module. That test is "is it in *this*
+// module", and the prebuilt module's reachable set is a subset of every program's,
+// so wherever it wrote the placeholder a program may well have the real method.
+// Its copy of that datum is therefore strictly poorer, exactly as with a type
+// descriptor's contents, and belongs to the program module.
+//
+// Detecting it by the placeholder rather than by a name prefix is deliberate: it
+// is the degradation that matters, not which family the datum is in, and a datum
+// the prebuilt module got right stays in the pack where it saves work.
+func degradedSymbols(definitions []*ir.Data) map[string]bool {
+	degraded := map[string]bool{}
+	for _, data := range definitions {
+		for _, item := range data.Items {
+			if item.Sym == unreachableMethodSymbol {
+				degraded[ir.LinkerSymbol(data.Name)] = true
+				break
+			}
+		}
+	}
+	return degraded
+}
+
+// dropItabLinks removes the static itabs the prebuilt module is no longer going to
+// define from its own itablinks list, which runtime.itabsinit walks. The list is
+// built before the split runs, so an itab handed to the program module would
+// otherwise be left in it as a dangling reference.
+func dropItabLinks(definitions []*ir.Data, programSymbols map[string]bool) {
+	for _, data := range definitions {
+		if data.Name != gometaModuleItabLinksName {
+			continue
+		}
+		kept := data.Items[:0]
+		for _, item := range data.Items {
+			if programSymbols[ir.LinkerSymbol(item.Sym)] {
+				continue
+			}
+			kept = append(kept, item)
+		}
+		data.Items = kept
+		data.PointerWords = data.PointerWords[:len(kept)]
+	}
+}
+
+// gometaModuleItabLinksName is internal/gometa's ModuleItabLinksName, spelled here
+// so this package does not depend on the backend's metadata emitter.
+// TestModuleItabLinksNameMatchesGometa keeps the two in step.
+const gometaModuleItabLinksName = ".goc.module.itablinks"
 
 // dropShadowedDefinitions removes every data definition another definition of
 // the same name shadows, keeping the last.

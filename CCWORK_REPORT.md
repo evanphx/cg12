@@ -159,3 +159,27 @@ descriptor is not a link error — it is a dispatcher that quietly stops matchin
 Getting past this needs the prebuilt pack to carry enough about its functions' type
 requirements to reconstruct them without lowering, which is a redesign, not a tuning
 knob. It is written down here rather than attempted.
+
+## Verification status (updated as each result lands)
+
+### Landed
+
+- `internal/runtimepack`, `internal/gometa`, `goc` and `cmd/goc` unit/e2e tests for the
+  split all pass. The `cmd/goc` ones link a real two-module image and read the chain,
+  `hasmain` and the typelinks counts back out of it.
+- 30-program differential (compile both ways, run both, compare exit status **and full
+  output**): 28 identical, 2 differing only in a printed allocation count (both exit 0).
+
+### Outstanding at the time of writing
+
+- The full 358-program corpus differential (running).
+- The full 338-capability matrix built the new way, and its wall clock against the 479 s
+  baseline.
+- `make test-unit`, `make test-goc-corpus`, `make test-goc-cmd`.
+- Determinism (`CG12_NOCACHE=1` vs warm) before and after.
+- Startup cost of a two-module image.
+
+### `make test-unit` — **pass** (rc=0)
+
+24 packages, no `FAIL`. Includes the new `internal/runtimepack`, the `internal/gometa`
+findfunctab and `ChainModuleToExternal` tests, and `arm64`.

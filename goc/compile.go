@@ -402,7 +402,7 @@ func compile(name string, src []byte, options compileOptions) (*ir.Module, error
 		}
 	}
 	addInterfaceMethodWrappers(g, functions)
-	redirectUnavailableInterfaceCallWrappers(mod)
+	redirectedCallWrappers := redirectUnavailableInterfaceCallWrappers(mod)
 	if compileRuntime {
 		populateRuntimePointerTypes(fset, mod, typeTags, runtimeTypes)
 		clearUnavailableRuntimeMethodOffsets(mod)
@@ -473,9 +473,8 @@ func compile(name string, src []byte, options compileOptions) (*ir.Module, error
 		for name := range g.interfaceDispatchers {
 			rootPackageFunctions = append(rootPackageFunctions, name)
 		}
-		if err := finishRuntimeModule(mod, options.runtimeSplit, rootPackageFunctions, rootPackageData); err != nil {
-			return nil, err
-		}
+		rootPackageFunctions = append(rootPackageFunctions, redirectedCallWrappers...)
+		finishRuntimeModule(mod, options.runtimeSplit, rootPackageFunctions, rootPackageData)
 	case options.runtimeSplit.againstRuntime():
 		if err := finishProgramModule(mod, options.runtimeSplit); err != nil {
 			return nil, err
@@ -6229,7 +6228,17 @@ func clearUnavailableRuntimeMethodOffsets(module *ir.Module) {
 	}
 }
 
-func redirectUnavailableInterfaceCallWrappers(module *ir.Module) {
+// redirectUnavailableInterfaceCallWrappers points an interface-call wrapper whose
+// method is not compiled into this module at runtime.unreachableMethod, and
+// returns the wrappers it redirected.
+//
+// The returned names matter to the driver split: a redirected wrapper is a
+// function whose body depends on what the module reached, and a prebuilt runtime
+// module reaches less than any program linked against it. Leaving one in the pack
+// would give the program a wrapper that throws where its own compilation would
+// have called the real method.
+func redirectUnavailableInterfaceCallWrappers(module *ir.Module) []string {
+	var redirected []string
 	functions := make(map[string]bool, len(module.Funcs))
 	for _, function := range module.Funcs {
 		functions[function.Name] = true
@@ -6239,6 +6248,7 @@ func redirectUnavailableInterfaceCallWrappers(module *ir.Module) {
 		if !ok || functions[methodSymbol] {
 			continue
 		}
+		redirected = append(redirected, function.Name)
 		unreachable := function.Sym("runtime.unreachableMethod", 0)
 		for _, block := range function.Blocks {
 			for instructionIndex := range block.Instrs {
@@ -6249,6 +6259,7 @@ func redirectUnavailableInterfaceCallWrappers(module *ir.Module) {
 			}
 		}
 	}
+	return redirected
 }
 
 func interfaceCallWrapperTargetUnavailable(symbol string, functions map[string]bool) bool {
