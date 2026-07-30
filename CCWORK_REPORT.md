@@ -190,7 +190,13 @@ findfunctab and `ChainModuleToExternal` tests, and `arm64`.
 links and runs both, and compares **exit status and full combined output** — which is
 stricter than the capability matrix, whose gate is the exit status.
 
-**All 358 `goc/testdata` programs. 353 identical; 5 differences, all understood:**
+Run twice: once mid-way, which is what found the defects below, and once on the **final
+tree**, which is the result that stands.
+
+**Final tree, all 358 `goc/testdata` programs: 356 identical, 2 differences, both
+explained.** No compile failure, no link failure, no exit-status difference.
+
+The mid-way run is what earned its keep — **353 identical, 5 differences:**
 
 | what | count | resolution |
 | --- | ---: | --- |
@@ -404,10 +410,61 @@ Re-run on the corrected tree: **pass** (`ok github.com/evanphx/cg12/goc 820.922s
 | `make test-goc-corpus` | **pass**, rc=0, 821 s (first run caught one unclassified `gen` field; fixed) |
 | full capability matrix, split build | **338 subtests, 337 PASS, 1 EXPECTED FAILURE, 0 FAIL, 0 KNOWN GAP**, rc=0, 406.5 s |
 | full capability matrix, matched monolithic control | 338 subtests, 337 PASS, rc=0, 478.4 s |
-| 358-program differential (compile both ways, run both, compare output) | 353 identical, 3 fixed, 2 explained |
+| 358-program differential on the final tree (compile both ways, run both, compare output) | **356 identical, 2 explained**, 0 failures |
 | determinism, `CG12_NOCACHE=1` vs warm | 4 of 5 before **and** after; same documented exception |
 | `goc build-runtime` reproducibility | byte-identical across three runs |
 
 **Complete list of non-passing capabilities: one.** `defer-panic/panic-string-output`
 (`goc/testdata/runtime_panic_print_string.go`), the declared `expectedFailure`, failing as
 declared. No `FAIL`, no `KNOWN GAP`.
+
+## Final differential, on the tree as committed
+
+```
+programs=358  problems=2
+total CPU compile+link: split=3158.3s mono=4152.4s  ratio=1.31x
+total image bytes: split=4392270104 mono=3937149848  (+11.6%)
+```
+
+The two "problems" are the allocation counts explained above; both programs exit 0 and
+print `ok`. Nothing failed to compile, nothing failed to link, and no program's exit status
+differs.
+
+(The 1.31× here against the 1.37× measured earlier is box load: this run overlapped the
+tail of another job. Both runs agree that the eight ~180 s standard-library compiles get
+essentially nothing and everything else gets ~2.7×.)
+
+## Still unverified, and what I would do next
+
+**Not verified:**
+
+- The pack is built for arm64 only; `goc build-runtime -target amd64` is refused with a
+  message rather than attempted.
+- `goc test` still uses the monolithic path. Nothing about the split is wrong for it; it
+  simply was not wired.
+- The runtime **coverage** run (`make test-goc-coverage`) deliberately keeps the
+  monolithic path and was not re-run. Instrumenting the runtime per program is exactly
+  what a shared prebuilt module cannot do, so there is nothing there to share.
+- `-O`: the split honours it and refuses a mismatch, but neither half of the matrix was
+  run with `-runtime-opt` under this change.
+- The startup cost was measured as a fixed +15 allocations. The *wall-clock* startup delta
+  of a two-module image was not measured separately; the matrix's 338 program runs are the
+  aggregate evidence that it is not material.
+- cg12's own linker was not used for the split (reasoning under "Using it"). The spike's
+  8-program `-mode=native` result is the only evidence that path works, and it predates
+  this change.
+
+**Next, in the order I would do them:**
+
+1. **Let the pack carry the common standard library.** That is where the remaining time
+   is: the eight ~180 s compiles are stdlib, not runtime. It needs two things, both
+   tractable: a stub dispatcher for any `ProgramSymbol` the program does not generate (safe
+   because such a dispatcher is unreachable — the program cannot reach code it never
+   compiled — and its body is a fatal throw, so a mistake is loud), and moving the whole
+   image's package-init list to the program module so a program does not run the init of
+   packages it never uses.
+2. **Fix the duplicate global emission** rather than working around it
+   (RUNTIME_PLAN §5.10). It is a latent `multiple definition` waiting for the next symbol
+   that goes global.
+3. **Skip IR generation for pack-defined functions.** Blocked today by the type region —
+   see "Where the time goes". Worth ~0.8 s of the remaining 1.4 s per program.
