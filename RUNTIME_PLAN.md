@@ -2411,16 +2411,39 @@ PASS / 1 EXPECTED FAILURE / 0 FAIL / 0 SKIP / 0 KNOWN GAP:
 
 | | wall | slowest compile |
 | --- | ---: | ---: |
-| branch point | 303.9 s, 212.9 s | 278.7 s, 199.2 s |
-| this work | 116.0 s, 107.1 s, **67.8 s** | 99.0 s, 90.8 s, **55.9 s** |
+| branch point | 303.9 s, 212.9 s, 225.8 s | 278.7 s, 199.2 s, 211.7 s |
+| this work | 116.0 s, 107.1 s, 67.8 s, **71.4 s**, 81.5 s | 99.0 s, 90.8 s, 55.9 s, **59.5 s**, 69.0 s |
 
-The spread is sibling load, which fell over the afternoon; the last pair is the
-least contended. Against §17's exclusive-box 203.2 s, the best run here is 3.0x.
+The spread is sibling load, which fell over the afternoon. The fairest reading is
+the three consecutive runs 71.4 s (this work), 225.8 s (branch point), 81.5 s
+(this work): **3.2x**. Against §17's exclusive-box 203.2 s, 3.0x.
 
 **The bound has not changed in kind.** It is still
 `max(slowest single compile, compile CPU / workers) + run phase + setup`, and it
 is still the slowest single compile: 55.9 s of a 67.8 s run. What changed is how
 big that term is.
+
+### The defect the concurrency exposed
+
+`go test -race` over the *corpus* -- real programs through the real front end, not
+the synthetic module the back-end unit test builds -- reported 20 data races on
+`ir.Block.Preds` between goroutines compiling different functions. The cause is in
+the front end and predates this work: `gen.funcDecl` resets the generator's
+per-function defer state but not `deferBlocks`, which `derive()` does reset for a
+closure, and `addDeferRecoveryEdges` wires every block in that list to the
+function's `deferreturn` block. The previous function therefore gained a synthetic
+control-flow edge into the next function's blocks, and dominance, liveness and
+frequency all spanned two functions.
+
+It was invisible while the back end compiled one function at a time: the
+predecessor lists those analyses rebuild live on the blocks, so each function
+overwrote the previous one's damage on its way past. Fixed at the cause;
+`TestEachFunctionsControlFlowStaysInsideThatFunction` fails on the unfixed
+compiler with exactly that edge.
+
+The general lesson is the same one §14 records. A green suite and a green
+synthetic byte-identity test both said the concurrency was fine. The run that
+disagreed was the race detector over real programs.
 
 ### What would move it further
 
