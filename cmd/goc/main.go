@@ -38,7 +38,7 @@ func main() {
 	optimize := flag.Bool("O", false, "optimize cg12 IR")
 	run := flag.Bool("run", false, "link and run the program")
 	runtimeCoverMeta := flag.String("runtime-covermeta", "", "instrument runtime and write coverage metadata")
-	prebuiltRuntime := flag.String("runtime", "", "link against the prebuilt runtime written by `goc build-runtime`")
+	prebuiltRuntime := flag.String("runtime", "", "link against the prebuilt runtimes written by `goc build-runtime`, comma-separated; the richest usable one is chosen")
 	targetName := flag.String("target", defaultTargetName(), "arm64 | amd64")
 	flag.Parse()
 	if flag.NArg() != 1 {
@@ -64,7 +64,7 @@ func main() {
 		if exe == "" {
 			exe = goc.OutputName(input)
 		}
-		check(linkAgainstPrebuiltRuntime(target, *prebuiltRuntime, input, src, exe, *optimize))
+		check(linkAgainstPrebuiltRuntime(target, strings.Split(*prebuiltRuntime, ","), input, src, exe, *optimize))
 		if *run {
 			os.Exit(runProgram(exe))
 		}

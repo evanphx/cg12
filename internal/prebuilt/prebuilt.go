@@ -35,13 +35,6 @@ type Options struct {
 	Packages []string
 }
 
-// DefaultPackages are the standard library packages a pack carries when the
-// caller does not say otherwise.
-//
-// The list is empty for now and the choice is made by measurement rather than by
-// taste; see RUNTIME_PLAN section 18.
-var DefaultPackages []string
-
 // BuildRuntime compiles the fixed runtime root as a prebuilt Go module and
 // returns the pack: the module's object, its assembled sidecar, and the manifest
 // describing what the two define.
@@ -95,6 +88,8 @@ func BuildRuntime(target goc.Target, options Options) (*runtimepack.Pack, error)
 			Target:              string(target),
 			Fingerprint:         runtimeModule.Fingerprint,
 			Optimize:            options.Optimize,
+			Packages:            append([]string(nil), options.Packages...),
+			Closure:             runtimeModule.Closure,
 			ModuleDataSymbol:    gometa.DefaultModuleDataSymbol,
 			ProgramModuleSymbol: ir.LinkerSymbol(goc.ProgramModuleDataSymbol),
 			Defined:             definedGlobals(object, sidecarObject),
@@ -115,18 +110,31 @@ type Program struct {
 	// Sidecar is empty when the program reaches no package the prebuilt module
 	// had not already assembled, which is the common case.
 	Sidecar []byte
+
+	// Manifest is the pack this module was compiled against, chosen from the ones
+	// the caller offered. It is what the caller must link with.
+	Manifest *runtimepack.Manifest
 }
 
-// CompileProgram lowers a program as a module to be linked against pack.
-func CompileProgram(target goc.Target, name string, source []byte, pack *runtimepack.Pack, options Options) (*Program, error) {
-	if string(target) != pack.Manifest.Target {
-		return nil, fmt.Errorf("goc: the prebuilt runtime is for %s, not %s", pack.Manifest.Target, target)
+// CompileProgram lowers a program as a module to be linked against whichever of
+// manifests it can use most of. It returns the choice, so the caller can pair the
+// module with that pack's objects.
+func CompileProgram(target goc.Target, name string, source []byte, manifests []*runtimepack.Manifest, options Options) (*Program, error) {
+	for _, manifest := range manifests {
+		if string(target) != manifest.Target {
+			return nil, fmt.Errorf("goc: the prebuilt runtime is for %s, not %s", manifest.Target, target)
+		}
+		if manifest.Optimize != options.Optimize {
+			return nil, fmt.Errorf("the prebuilt runtime was built with -O=%v, but this program is being compiled with -O=%v",
+				manifest.Optimize, options.Optimize)
+		}
 	}
-	program, err := goc.CompileExecutableAgainstRuntimeFor(target, name, source, &pack.Manifest)
+	program, err := goc.CompileExecutableAgainstRuntimeFor(target, name, source, manifests...)
 	if err != nil {
 		return nil, err
 	}
-	if err := checkProgramSymbols(program.Module, &pack.Manifest); err != nil {
+	chosen := manifests[program.Chosen]
+	if err := checkProgramSymbols(program.Module, chosen); err != nil {
 		return nil, err
 	}
 	if options.Optimize {
@@ -140,7 +148,7 @@ func CompileProgram(target goc.Target, name string, source []byte, pack *runtime
 	if err != nil {
 		return nil, err
 	}
-	compiled := &Program{Object: objectBytes}
+	compiled := &Program{Object: objectBytes, Manifest: chosen}
 	if len(program.Module.Assembly) > 0 {
 		compiled.Sidecar, err = assemble(assembly)
 		if err != nil {

@@ -100,7 +100,7 @@ func one(work, path string, pack *runtimepack.Pack, runtimeObject, sidecarObject
 		return r
 	}
 	t0 := time.Now()
-	object, err := prebuilt.CompileProgram(goc.TargetARM64, name, src, pack, prebuilt.Options{})
+	object, err := prebuilt.CompileProgram(goc.TargetARM64, name, src, []*runtimepack.Manifest{&pack.Manifest}, prebuilt.Options{})
 	r.splitCompile = time.Since(t0)
 	if err != nil {
 		r.status = "SPLIT COMPILE: " + err.Error()

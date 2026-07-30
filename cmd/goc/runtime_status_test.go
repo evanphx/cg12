@@ -2263,7 +2263,7 @@ func TestARM64RuntimeCapabilityStatus(t *testing.T) {
 		}
 		shard = append(shard, capability)
 	}
-	prebuiltRuntime := buildPrebuiltRuntimeForCapabilityStatus(t, compiler, directory)
+	prebuiltRuntime := buildPrebuiltRuntimesForCapabilityStatus(t, compiler, directory)
 	compileQueue := startRuntimeCapabilityCompiles(compiler, directory, prebuiltRuntime, shard)
 	runner := &runtimeCapabilityRunner{
 		compiler:              compiler,
@@ -2665,10 +2665,38 @@ type runtimeCapabilityCompileEntry struct {
 	result runtimeCapabilityCompilation
 }
 
-// buildPrebuiltRuntimeForCapabilityStatus compiles the Go runtime once for the
-// whole run and returns the pack, or "" when this run must compile it per
-// program.
-func buildPrebuiltRuntimeForCapabilityStatus(t *testing.T, compiler, directory string) string {
+// runtimeCapabilityPackRoots are the package sets the matrix prebuilds, one pack
+// each. goc picks, per program, the richest pack whose closure that program
+// contains; the first entry carries nothing beyond the runtime and is therefore
+// usable by every program, so the list degrades rather than failing.
+//
+// The choice is a measurement, not a taste. Compile cost across the matrix is
+// sharply bimodal: eleven programs cost 125-167 s each and account for 54% of all
+// compile CPU, while the other 327 average 4.2 s. These six roots are the largest
+// package each of those eleven imports -- six net/http programs, one net/smtp, and
+// four crypto programs that share no common ancestor small enough to be usable by
+// all of them. Adding a root that no expensive program can use costs a pack build
+// and saves nothing.
+var runtimeCapabilityPackRoots = [][]string{
+	nil,
+	{"net/http"},
+	{"net/smtp"},
+	{"crypto/x509"},
+	{"crypto/ecdsa"},
+	{"crypto/ecdh"},
+	{"crypto/hpke"},
+}
+
+// buildPrebuiltRuntimesForCapabilityStatus compiles the prebuilt runtime packs
+// once for the whole run and returns them as goc's -runtime takes them, or ""
+// when this run must compile the runtime per program.
+//
+// The packs are built concurrently because they are independent and each is a
+// single-threaded goc process; a cold build of the whole set costs one net/http
+// compile in wall clock rather than six. `goc build-runtime` caches its result on
+// disk keyed on the compiler and the standard library, so past the first run of a
+// given tree the whole step is a file copy.
+func buildPrebuiltRuntimesForCapabilityStatus(t *testing.T, compiler, directory string) string {
 	t.Helper()
 
 	if !*runtimeStatusPrebuiltRuntime {
@@ -2679,20 +2707,36 @@ func buildPrebuiltRuntimeForCapabilityStatus(t *testing.T, compiler, directory s
 		// nothing shared to prebuild.
 		return ""
 	}
-	pack := filepath.Join(directory, "runtime.gocrt")
-	arguments := []string{"build-runtime", "-o", pack}
-	if *runtimeOptimize {
-		arguments = append(arguments, "-O")
-	}
 	started := time.Now()
-	build := exec.Command(compiler, arguments...)
-	if output, err := build.CombinedOutput(); err != nil {
-		t.Fatalf("build the prebuilt runtime: %v\n%s", err, output)
+	packs := make([]string, len(runtimeCapabilityPackRoots))
+	failures := make([]error, len(runtimeCapabilityPackRoots))
+	var building sync.WaitGroup
+	for index, root := range runtimeCapabilityPackRoots {
+		packs[index] = filepath.Join(directory, fmt.Sprintf("runtime%d.gocrt", index))
+		building.Add(1)
+		go func(index int, root []string, output string) {
+			defer building.Done()
+			arguments := []string{"build-runtime", "-o", output, "-packages", strings.Join(root, ",")}
+			if *runtimeOptimize {
+				arguments = append(arguments, "-O")
+			}
+			build := exec.Command(compiler, arguments...)
+			if output, err := build.CombinedOutput(); err != nil {
+				failures[index] = fmt.Errorf("build the prebuilt runtime for %v: %w\n%s", root, err, output)
+			}
+		}(index, root, packs[index])
+	}
+	building.Wait()
+	for _, err := range failures {
+		if err != nil {
+			t.Fatal(err)
+		}
 	}
 	if *runtimeStatusProgress {
-		fmt.Fprintf(os.Stderr, "runtime-status: built the prebuilt runtime in %s\n", time.Since(started).Round(time.Millisecond))
+		fmt.Fprintf(os.Stderr, "runtime-status: built %d prebuilt runtimes in %s\n",
+			len(packs), time.Since(started).Round(time.Millisecond))
 	}
-	return pack
+	return strings.Join(packs, ",")
 }
 
 func startRuntimeCapabilityCompiles(

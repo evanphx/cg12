@@ -166,6 +166,14 @@ func compile(name string, src []byte, options compileOptions) (*ir.Module, error
 			return nil, fmt.Errorf("load runtime: %w", err)
 		}
 	}
+	// Every package this program will compile is loaded by now, so this is the
+	// first point at which the richest usable pack can be named -- and the last
+	// point before anything consults the manifest.
+	if options.runtimeSplit.againstRuntime() {
+		if err := options.runtimeSplit.chooseManifest(loadedPackagePaths(loader, pkg)); err != nil {
+			return nil, err
+		}
+	}
 	mod := ir.NewModule()
 	emitRuntimeTables := executable
 	if !emitRuntimeTables {
@@ -469,6 +477,7 @@ func compile(name string, src []byte, options compileOptions) (*ir.Module, error
 			return nil, err
 		}
 		options.runtimeSplit.fingerprint = fingerprint
+		options.runtimeSplit.closure = loadedPackagePaths(loader, pkg)
 		rootPackageData := make([]string, 0, len(packageGlobals[pkg.Path()]))
 		for _, symbol := range packageGlobals[pkg.Path()] {
 			rootPackageData = append(rootPackageData, symbol)
