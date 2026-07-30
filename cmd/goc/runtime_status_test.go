@@ -2192,7 +2192,8 @@ func TestARM64RuntimeCapabilityStatus(t *testing.T) {
 		}
 		shard = append(shard, capability)
 	}
-	compileQueue := startRuntimeCapabilityCompiles(compiler, directory, shard)
+	prebuiltRuntime := buildPrebuiltRuntimeForCapabilityStatus(t, compiler, directory)
+	compileQueue := startRuntimeCapabilityCompiles(compiler, directory, prebuiltRuntime, shard)
 	if *runtimeStatusProgress {
 		fmt.Fprintf(
 			os.Stderr,
@@ -2227,7 +2228,7 @@ func TestARM64RuntimeCapabilityStatus(t *testing.T) {
 				// -test.run and runtimeCapabilitySelected can disagree about
 				// which subtests run, so a capability can reach here without
 				// having been queued. Compile it here rather than assuming.
-				compilation = compileRuntimeCapability(compiler, directory, capability)
+				compilation = compileRuntimeCapabilityWith(compiler, directory, prebuiltRuntime, capability)
 			} else {
 				// The look-ahead budget must come back even if the run panics
 				// or fails an assertion, or the dispatcher stalls behind it.
@@ -2462,9 +2463,40 @@ type runtimeCapabilityCompileEntry struct {
 	result runtimeCapabilityCompilation
 }
 
+// buildPrebuiltRuntimeForCapabilityStatus compiles the Go runtime once for the
+// whole run and returns the pack, or "" when this run must compile it per
+// program.
+func buildPrebuiltRuntimeForCapabilityStatus(t *testing.T, compiler, directory string) string {
+	t.Helper()
+
+	if !*runtimeStatusPrebuiltRuntime {
+		return ""
+	}
+	if *runtimeCoverageProfile != "" {
+		// Runtime coverage instruments the runtime per program, so there is
+		// nothing shared to prebuild.
+		return ""
+	}
+	pack := filepath.Join(directory, "runtime.gocrt")
+	arguments := []string{"build-runtime", "-o", pack}
+	if *runtimeOptimize {
+		arguments = append(arguments, "-O")
+	}
+	started := time.Now()
+	build := exec.Command(compiler, arguments...)
+	if output, err := build.CombinedOutput(); err != nil {
+		t.Fatalf("build the prebuilt runtime: %v\n%s", err, output)
+	}
+	if *runtimeStatusProgress {
+		fmt.Fprintf(os.Stderr, "runtime-status: built the prebuilt runtime in %s\n", time.Since(started).Round(time.Millisecond))
+	}
+	return pack
+}
+
 func startRuntimeCapabilityCompiles(
 	compiler string,
 	directory string,
+	prebuiltRuntime string,
 	capabilities []runtimeCapability,
 ) *runtimeCapabilityCompileQueue {
 	workers := compileRuntimeCapabilityWorkers()
@@ -2489,7 +2521,7 @@ func startRuntimeCapabilityCompiles(
 			go func(capability runtimeCapability) {
 				defer func() { <-slots }()
 				entry := queue.entries[capability.category+"/"+capability.name]
-				entry.result = compileRuntimeCapability(compiler, directory, capability)
+				entry.result = compileRuntimeCapabilityWith(compiler, directory, prebuiltRuntime, capability)
 				close(entry.done)
 			}(capability)
 		}
@@ -2556,12 +2588,31 @@ func compileRuntimeCapability(
 	directory string,
 	capability runtimeCapability,
 ) runtimeCapabilityCompilation {
+	return compileRuntimeCapabilityWith(compiler, directory, "", capability)
+}
+
+// compileRuntimeCapabilityWith compiles one capability program, against a
+// prebuilt runtime when the run has one.
+//
+// The prebuilt runtime is the whole point of the split: the matrix compiles the
+// Go runtime once per run instead of once per program. Only the coverage run
+// keeps the monolithic path, because instrumenting the runtime is precisely the
+// thing a shared prebuilt module cannot do.
+func compileRuntimeCapabilityWith(
+	compiler string,
+	directory string,
+	prebuiltRuntime string,
+	capability runtimeCapability,
+) runtimeCapabilityCompilation {
 	source := filepath.Join("..", "..", "goc", "testdata", capability.source)
 	executable := filepath.Join(directory, strings.TrimSuffix(capability.source, ".go")+".bin")
 
 	compileArguments := []string{"-o", executable}
 	if *runtimeOptimize {
 		compileArguments = append(compileArguments, "-O")
+	}
+	if prebuiltRuntime != "" {
+		compileArguments = append(compileArguments, "-runtime", prebuiltRuntime)
 	}
 	metadata := ""
 	if *runtimeCoverageProfile != "" {

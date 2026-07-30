@@ -67,6 +67,12 @@ var runtimeStatusCompileWorkers = flag.Int(
 	"compile this many capability programs concurrently (0 picks a memory-aware default)",
 )
 
+var runtimeStatusPrebuiltRuntime = flag.Bool(
+	"runtime-status-prebuilt-runtime",
+	true,
+	"compile the Go runtime once for the whole run and link every capability program against it",
+)
+
 var runtimeStatusShard = flag.Int(
 	"runtime-status-shard",
 	0,

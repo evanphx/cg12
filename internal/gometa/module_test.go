@@ -242,6 +242,29 @@ func TestChainModuleWritesTheNextField(t *testing.T) {
 	assert.Error(t, ChainModule(object, "first", "missing", obj.R_AARCH64_ABS64))
 }
 
+// The driver split writes a prebuilt runtime object before the program module it
+// will be chained to has been compiled, so the child is named rather than
+// pointed at and the system linker resolves it.
+func TestChainModuleToExternalNamesAModuleThisObjectDoesNotDefine(t *testing.T) {
+	object := &obj.Object{
+		Machine: obj.EM_AARCH64,
+		Data:    make([]byte, moduledataSize),
+		Syms: []obj.Sym{
+			{Name: "first", Section: obj.SecData, Value: 0, Size: moduledataSize},
+		},
+	}
+
+	require.Error(t, ChainModule(object, "first", "goc_programmoduledata", obj.R_AARCH64_ABS64),
+		"ChainModule still requires a child this object defines")
+	require.NoError(t, ChainModuleToExternal(object, "first", "goc_programmoduledata", obj.R_AARCH64_ABS64))
+
+	require.Len(t, object.DataRelocs, 1)
+	assert.Equal(t, uint64(ModuleNextOffset), object.DataRelocs[0].Offset)
+	assert.Equal(t, "goc_programmoduledata", object.DataRelocs[0].Sym)
+
+	assert.Error(t, ChainModuleToExternal(object, "missing", "goc_programmoduledata", obj.R_AARCH64_ABS64))
+}
+
 // DefaultModuleDataSymbol is spelled out so it can be a constant. This keeps it
 // honest against the name the frontend actually emits.
 func TestDefaultModuleDataSymbolMatchesTheRuntimeName(t *testing.T) {
