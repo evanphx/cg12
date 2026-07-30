@@ -305,7 +305,7 @@ every one satisfied it. The single declared exception is `defer-panic/panic-stri
 | --- | --- |
 | `make test-unit` | clean |
 | `make test-goc-cmd` | `ok github.com/evanphx/cg12/cmd/goc 205.959s` |
-| `make test-goc-corpus` | (running) |
+| `make test-goc-corpus` | `ok github.com/evanphx/cg12/goc 819.623s` |
 | full matrix × 5, identical results | **yes — all five identical, see below** |
 | both compile paths | prebuilt (default) and `-runtime-status-prebuilt-runtime=false` both pass |
 | sharding | `STATUS_SHARDS=4`, all four shards: 22+22+23+23 = 90 subtests, exactly the unsharded selection, 0 fail |
@@ -345,12 +345,8 @@ five `_test.go` files under `cmd/goc`, two Markdown files, and two scripts. So t
 runtime are bit-identical to the branch point, which is why determinism could not have moved —
 and it did not.
 
-## Still unverified as of this line
+## Still unverified
 
-Everything below this heading is *not yet done*. If the job ended here, treat it as open.
-
-- five repeated full matrix runs, to show the concurrent run phase is not flaky (running)
-- `make test-goc-corpus` (running)
 - **A full instrumented coverage run (`make test-goc-coverage`) was not made.** That path shares
   the collector I put a mutex on and the report I now sort, and both are covered by the new unit
   test above (200 capabilities recorded concurrently, encoded report byte-identical across two

@@ -2585,20 +2585,35 @@ type runtimeCapabilityCompilation struct {
 	peakRSS    uint64
 }
 
+// compileRuntimeCapabilityPeakBytes is what one compile is assumed to need.
+//
+// It is measured rather than guessed: the largest net/http program peaks at
+// 2.65 GiB inside the matrix and 2.97 GiB compiled on its own, so the 2 GiB this
+// used to assume was under-provisioned by a third. Under-provisioning here is not
+// a slowdown -- the bound exists so an unbounded fan-out cannot swap or OOM a
+// small machine, and a divisor below the real peak lets it do exactly that.
+const compileRuntimeCapabilityPeakBytes = 3 << 30
+
 // compileRuntimeCapabilityWorkers is how many programs to compile at once.
 //
-// Compilation is 98% of this suite's wall clock and the programs are
-// independent, so this is the difference between forty minutes and about one.
-// It is bounded by memory rather than by cores: a single compile peaks around
-// 1.6 GiB on the largest net/http programs, so an unbounded fan-out on a small
-// machine would swap or OOM where a bounded one merely takes longer.
+// Compilation is 99.5% of this suite's compute and the programs are independent,
+// so this is the difference between forty minutes and a few. It is bounded by
+// memory as well as by cores, because a fan-out wide enough to use every core on
+// a large machine needs tens of gigabytes to do it.
+//
+// More is not always faster. At 24 workers the matrix takes 203.2 s and spends
+// 3428 s of compile CPU; at 64 it takes 204.4 s and spends 4228 s. The extra 40
+// workers buy nothing, because the wall clock is bounded by one single-threaded
+// 190 s compile, and they burn 23% more CPU on contention. The default stays at
+// NumCPU because it has to be right on an eight-core machine too, but a caller
+// with a CPU share to respect loses nothing by passing it.
 func compileRuntimeCapabilityWorkers() int {
 	if *runtimeStatusCompileWorkers > 0 {
 		return *runtimeStatusCompileWorkers
 	}
 	workers := runtime.NumCPU()
 	if available := availableMemoryBytes(); available > 0 {
-		byMemory := int(available / (2 << 30))
+		byMemory := int(available / compileRuntimeCapabilityPeakBytes)
 		if byMemory < workers {
 			workers = byMemory
 		}
