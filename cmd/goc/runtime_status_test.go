@@ -2707,11 +2707,15 @@ func buildPrebuiltRuntimesForCapabilityStatus(t *testing.T, compiler, directory 
 		// nothing shared to prebuild.
 		return ""
 	}
+	roots := runtimeCapabilityPackRoots
+	if !*runtimeStatusStdlibPacks {
+		roots = roots[:1]
+	}
 	started := time.Now()
-	packs := make([]string, len(runtimeCapabilityPackRoots))
-	failures := make([]error, len(runtimeCapabilityPackRoots))
+	packs := make([]string, len(roots))
+	failures := make([]error, len(roots))
 	var building sync.WaitGroup
-	for index, root := range runtimeCapabilityPackRoots {
+	for index, root := range roots {
 		packs[index] = filepath.Join(directory, fmt.Sprintf("runtime%d.gocrt", index))
 		building.Add(1)
 		go func(index int, root []string, output string) {

@@ -80,6 +80,12 @@ var runtimeStatusPrebuiltRuntime = flag.Bool(
 	"compile the Go runtime once for the whole run and link every capability program against it",
 )
 
+var runtimeStatusStdlibPacks = flag.Bool(
+	"runtime-status-stdlib-packs",
+	true,
+	"prebuild a pack per expensive import closure as well as the runtime-only pack; false is the matched control for measuring what they buy",
+)
+
 var runtimeStatusShard = flag.Int(
 	"runtime-status-shard",
 	0,
