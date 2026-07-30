@@ -5,6 +5,7 @@ package main
 // stdout or stderr. It is throwaway measurement, not a shipped tool.
 
 import (
+	"context"
 	"flag"
 	"fmt"
 	"os"
@@ -169,8 +170,16 @@ func one(work, path string, pack *runtimepack.Pack, runtimeObject, sidecarObject
 	return r
 }
 
+// run executes one build of a program under a deadline.
+//
+// The timeout is not optional. RUNTIME_PLAN 5.10 records rare unexplained hangs on
+// both the base and the fixed compiler, so a harness that runs the corpus without
+// one stalls rather than reporting -- and a stall is indistinguishable from slow
+// progress on the programs that legitimately take minutes.
 func run(path string) (string, int) {
-	command := exec.Command(path)
+	ctx, cancel := context.WithTimeout(context.Background(), runTimeout)
+	defer cancel()
+	command := exec.CommandContext(ctx, path)
 	command.Env = append(os.Environ(), "GOMAXPROCS=2")
 	output, err := command.CombinedOutput()
 	code := 0
@@ -179,8 +188,13 @@ func run(path string) (string, int) {
 	} else if err != nil {
 		code = -1
 	}
+	if ctx.Err() != nil {
+		return string(output) + "\n[timed out]", -2
+	}
 	return string(output), code
 }
+
+const runTimeout = 120 * time.Second
 
 func trim(s string) string {
 	s = strings.TrimSpace(s)
