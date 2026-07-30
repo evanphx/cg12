@@ -87,7 +87,7 @@ func main() {
 func linkAgainstPack(t *testing.T, pack *runtimepack.Pack, source string) string {
 	t.Helper()
 	work := t.TempDir()
-	program, err := prebuilt.CompileProgram(goc.TargetARM64, "split.go", []byte(source), pack, prebuilt.Options{})
+	program, err := prebuilt.CompileProgram(goc.TargetARM64, "split.go", []byte(source), []*runtimepack.Manifest{&pack.Manifest}, prebuilt.Options{})
 	require.NoError(t, err)
 
 	runtimeObject := filepath.Join(work, "runtime.o")
@@ -211,7 +211,7 @@ func TestTheDriverRefusesAnOptimizationMismatch(t *testing.T) {
 	source := filepath.Join(work, "split.go")
 	require.NoError(t, os.WriteFile(source, []byte(prebuiltSplitProgram), 0o644))
 
-	err := linkAgainstPrebuiltRuntime(goc.TargetARM64, path, source, []byte(prebuiltSplitProgram),
+	err := linkAgainstPrebuiltRuntime(goc.TargetARM64, []string{path}, source, []byte(prebuiltSplitProgram),
 		filepath.Join(work, "split"), true)
 
 	require.Error(t, err)

@@ -166,6 +166,23 @@ func compile(name string, src []byte, options compileOptions) (*ir.Module, error
 			return nil, fmt.Errorf("load runtime: %w", err)
 		}
 	}
+	// Every package this compilation will use is loaded by now: the type checker
+	// pulled the root's imports transitively and the runtime import pulled the
+	// rest, and nothing below asks the loader for more.
+	//
+	// Both halves of a split read the closure here, at the same point, so a pack's
+	// recorded closure and a program's measured one mean the same thing. It is the
+	// first point at which the richest usable pack can be named, and the last point
+	// before anything consults a manifest.
+	if options.runtimeSplit.buildsRuntime() || options.runtimeSplit.againstRuntime() {
+		closure := loadedPackagePaths(loader, pkg)
+		options.runtimeSplit.closure = closure
+		if options.runtimeSplit.againstRuntime() {
+			if err := options.runtimeSplit.chooseManifest(closure); err != nil {
+				return nil, err
+			}
+		}
+	}
 	mod := ir.NewModule()
 	emitRuntimeTables := executable
 	if !emitRuntimeTables {
@@ -456,6 +473,9 @@ func compile(name string, src []byte, options compileOptions) (*ir.Module, error
 			return nil, err
 		}
 	}
+	if err := checkUniqueFunctionSymbols(mod); err != nil {
+		return nil, err
+	}
 	// The split is applied last, on the finished whole-program module. Every
 	// symbol it keeps is therefore exactly what a monolithic build would have
 	// emitted; only the set of definitions changes.
@@ -481,6 +501,42 @@ func compile(name string, src []byte, options compileOptions) (*ir.Module, error
 		}
 	}
 	return g.mod, nil
+}
+
+// checkUniqueFunctionSymbols refuses a module in which two functions would land
+// on one linker symbol.
+//
+// obj.prepareELF indexes symbols by name and keeps the last, so a collision is
+// not a link error but a silent rebinding: every reference to the name resolves
+// to whichever definition was emitted last, and the other function becomes
+// unreachable code that some caller thought it was calling. Local symbols make
+// it invisible to the system linker too, so nothing downstream would report it.
+//
+// The comparison is on the mangled spelling rather than the Go-level name,
+// because the mangling is where distinct names can converge: ir.LinkerSymbol
+// maps every character outside [A-Za-z0-9_] to '_'.
+func checkUniqueFunctionSymbols(mod *ir.Module) error {
+	byLinkerSymbol := make(map[string]string, len(mod.Funcs))
+	var collisions []string
+	for _, function := range mod.Funcs {
+		symbol := ir.LinkerSymbol(function.Name)
+		previous, seen := byLinkerSymbol[symbol]
+		if !seen {
+			byLinkerSymbol[symbol] = function.Name
+			continue
+		}
+		collisions = append(collisions, fmt.Sprintf("%s and %s both compile to %s", previous, function.Name, symbol))
+	}
+	if len(collisions) == 0 {
+		return nil
+	}
+	sort.Strings(collisions)
+	shown := collisions
+	if len(shown) > 8 {
+		shown = shown[:8]
+	}
+	return fmt.Errorf("goc: %d function symbol collisions, so a call would bind to the wrong definition: %s",
+		len(collisions), strings.Join(shown, "; "))
 }
 
 // dropPackageInit removes one package's initializer set from the module's init
@@ -6283,8 +6339,22 @@ func interfaceCallWrapperMethodSymbol(symbol string) (string, bool) {
 	return "", false
 }
 
+// emitRuntimeTypeHasher gives a type its runtime.typehash trampoline, which a
+// map descriptor's Hasher field points at.
+//
+// The symbol is derived from the key type's tag, so every map type with the same
+// key wants the same trampoline. net/http alone has three map types keyed by
+// connectMethodKey, and without this guard the module carried three identical
+// definitions of one symbol -- harmless while it was local, a duplicate-symbol
+// error the moment a prebuilt runtime pack exports it. The guard matches
+// ensureRuntimeTypeEqual's, which has always had one.
 func (g *gen) emitRuntimeTypeHasher(valueType types.Type, typeTag string) string {
 	symbol := typeTag + ".hash"
+	for _, existing := range g.mod.Funcs {
+		if existing.Name == symbol {
+			return symbol
+		}
+	}
 	function := g.mod.NewFunc(symbol, ir.ClsL)
 	value := function.Param("value", ir.ClsP)
 	seed := function.Param("seed", ir.ClsL)
@@ -7137,8 +7207,8 @@ func (g *gen) typeAssertion(assertion *ast.TypeAssertExpr) (ir.Ref, ir.Ref) {
 	sourceType := g.typeAndValue(assertion.X).Type
 	dynamicTag := g.interfaceDynamicType(descriptor, sourceType)
 	var match ir.Ref
-	if targetInterface, ok := targetType.Underlying().(*types.Interface); ok {
-		match = g.interfaceTypeMatch(dynamicTag, targetInterface)
+	if _, ok := targetType.Underlying().(*types.Interface); ok {
+		match = g.interfaceTypeMatch(dynamicTag, targetType)
 	} else {
 		match = g.cur.Cmp(ir.CmpEq, ir.ClsP, dynamicTag, g.typeTag(targetType))
 	}
@@ -7187,16 +7257,79 @@ func (g *gen) typeAssertion(assertion *ast.TypeAssertExpr) (ir.Ref, ir.Ref) {
 	return value, asserted
 }
 
-func (g *gen) interfaceTypeMatch(dynamicTag ir.Ref, target *types.Interface) ir.Ref {
-	if target.NumMethods() == 0 {
+// interfaceTypeMatch answers, as a word, whether the dynamic type dynamicTag
+// implements the interface targetType -- the test behind `x.(I)`, `x.(I)` with
+// comma-ok, and an interface case of a type switch.
+//
+// The list of types that implement an interface is built from every method
+// declared anywhere in the program, so an inline chain of comparisons against it
+// makes an ordinary function's body depend on the whole program. That is fine
+// for a monolithic build and wrong for a split one: a function the program
+// module subtracts was compiled into the pack against the *pack's* method set,
+// which is a subset of the program's, so the chain is missing the very
+// candidates the program added. `stdlib_http_client_server.go` against a
+// net/http pack asserted a type the pack had never seen, fell off the end of the
+// chain and aborted.
+//
+// So the chain is a fast path and runtime.getitab is the answer. getitab
+// consults the itab table and, failing that, walks the concrete type's method
+// set; with canfail it returns nil rather than panicking. It depends on nothing
+// but the two descriptors, which both modules agree on because the program owns
+// the whole type region. interfaceTypeWord -- the conversion path, immediately
+// above -- has always ended this way; only the test did not.
+//
+// It closes a second gap as well. interfaceImplementations enumerates method
+// *receivers*, so a type whose method set comes entirely from an embedded field
+// appears in no entry, and asserting it to an interface it genuinely implements
+// used to answer no.
+func (g *gen) interfaceTypeMatch(dynamicTag ir.Ref, targetType types.Type) ir.Ref {
+	target, isInterface := targetType.Underlying().(*types.Interface)
+	if !isInterface || target.NumMethods() == 0 {
 		return g.fn.Word(1)
 	}
-	match := g.fn.Word(0)
-	for _, implementation := range g.interfaceImplementations(target) {
-		matchesImplementation := g.cur.Cmp(ir.CmpEq, ir.ClsP, dynamicTag, g.typeTag(implementation))
-		match = g.cur.Or(ir.ClsW, match, matchesImplementation)
+	implementations := g.interfaceImplementations(target)
+	if !g.runtimeAllocation {
+		// The freestanding subset has no Go runtime to ask, so the chain is all
+		// there is. It is also not split, so the chain is complete.
+		match := g.fn.Word(0)
+		for _, implementation := range implementations {
+			matchesImplementation := g.cur.Cmp(ir.CmpEq, ir.ClsP, dynamicTag, g.typeTag(implementation))
+			match = g.cur.Or(ir.ClsW, match, matchesImplementation)
+		}
+		return match
 	}
-	return match
+
+	done := g.block("ifacematchdone")
+	fallback := g.block("ifacematchfallback")
+	edges := make([]ir.PhiEdge, 0, len(implementations)+1)
+	for index, implementation := range implementations {
+		matched := g.block(fmt.Sprintf("ifacematchhit%d_", index))
+		next := g.block(fmt.Sprintf("ifacematchnext%d_", index))
+		matchesImplementation := g.cur.Cmp(ir.CmpEq, ir.ClsP, dynamicTag, g.typeTag(implementation))
+		g.cur.Jnz(matchesImplementation, matched, next)
+
+		g.cur = matched
+		g.cur.Goto(done)
+		edges = append(edges, ir.PhiEdge{From: matched, Val: g.fn.Word(1)})
+
+		g.cur = next
+	}
+	g.cur.Goto(fallback)
+
+	g.cur = fallback
+	itab := g.cur.Call(
+		ir.ClsP,
+		g.fn.Sym("runtime.getitab", 0),
+		g.typeTag(targetType),
+		dynamicTag,
+		g.fn.Word(1),
+	)
+	implemented := g.cur.Cmp(ir.CmpNe, ir.ClsP, itab, g.fn.ConstInt(ir.ClsP, 0))
+	g.cur.Goto(done)
+	edges = append(edges, ir.PhiEdge{From: fallback, Val: implemented})
+
+	g.cur = done
+	return done.Phi(ir.ClsW, edges...)
 }
 
 func (g *gen) interfaceImplementations(target *types.Interface) []types.Type {
@@ -8230,10 +8363,7 @@ func (g *gen) iteratorRangeStmt(statement *ast.RangeStmt, label string, iterator
 	}
 
 	position := g.fset.Position(statement.Pos())
-	symbol := fmt.Sprintf("%s.rangefunc.%d.%d", g.functionName, position.Line, position.Column)
-	if g.functionName == "" {
-		symbol = fmt.Sprintf("%s.rangefunc.%d.%d", g.pkg.Path(), position.Line, position.Column)
-	}
+	symbol := fmt.Sprintf("%s.rangefunc.%d.%d", g.enclosingFunctionName(), position.Line, position.Column)
 	// The yield function is lowered from the range body, which lives in the
 	// enclosing function's package and inherits its generic instantiation, its
 	// name prefix and its write barrier setting.
@@ -9125,8 +9255,8 @@ func (g *gen) typeSwitchStmt(statement *ast.TypeSwitchStmt, label string) {
 				dynamicTag := g.interfaceDynamicType(interfaceValue, sourceType)
 				caseType := g.typeAndValue(caseExpression).Type
 				var matches ir.Ref
-				if caseInterface, ok := caseType.Underlying().(*types.Interface); ok {
-					matches = g.interfaceTypeMatch(dynamicTag, caseInterface)
+				if _, ok := caseType.Underlying().(*types.Interface); ok {
+					matches = g.interfaceTypeMatch(dynamicTag, caseType)
 				} else {
 					matches = g.cur.Cmp(ir.CmpEq, ir.ClsP, dynamicTag, g.typeTag(caseType))
 				}
@@ -10030,10 +10160,10 @@ func (g *gen) expr(e ast.Expr) (result ir.Ref) {
 		targetType := g.typeAndValue(n).Type
 		sourceType := g.typeAndValue(n.X).Type
 		dynamicTag := g.interfaceDynamicType(interfaceValue, sourceType)
-		targetInterface, targetIsInterface := targetType.Underlying().(*types.Interface)
+		_, targetIsInterface := targetType.Underlying().(*types.Interface)
 		var matches ir.Ref
 		if targetIsInterface {
-			matches = g.interfaceTypeMatch(dynamicTag, targetInterface)
+			matches = g.interfaceTypeMatch(dynamicTag, targetType)
 		} else {
 			matches = g.cur.Cmp(ir.CmpEq, ir.ClsP, dynamicTag, g.typeTag(targetType))
 		}
@@ -10691,6 +10821,37 @@ func (g *gen) isResultParamSlot(slot ir.Ref) bool {
 	return false
 }
 
+// enclosingFunctionName is the symbol a function literal's own symbol is built
+// on: the name of the declared function the literal is written inside.
+//
+// A literal used to be named after its *package* whenever the generator had no
+// explicit name for the enclosing function -- which is the ordinary case, since
+// functionName is set only for a generic instantiation or a package
+// initializer. Position alone does not identify a literal within a package: two
+// files generated from one template have their literals at the same line and
+// column, and `crypto/internal/fips140/nistec`'s p224.go, p384.go and p521.go
+// are exactly that. Three different closures came out of the compiler under the
+// name `crypto/internal/fips140/nistec.func.114.16`, and obj's symbol index is
+// keyed by name, so every reference to any of them resolved to whichever was
+// emitted last: p224B would have run p521B's initializer. It was invisible only
+// because those symbols were local, so the system linker never had to choose --
+// exporting them for a prebuilt runtime pack turns it into a duplicate-symbol
+// error, which is how it was found.
+//
+// Naming a literal after the function it is written in is what Go itself does
+// (`pkg.Func.func1`) and it makes the symbol unique: a package cannot declare
+// two functions with the same symbol, and a function cannot hold two literals at
+// one position.
+func (g *gen) enclosingFunctionName() string {
+	if g.functionName != "" {
+		return g.functionName
+	}
+	if g.currentFunction != nil {
+		return g.functionSymbol(g.currentFunction)
+	}
+	return g.pkg.Path()
+}
+
 func (g *gen) functionLiteral(literal *ast.FuncLit) ir.Ref {
 	originalSignature := g.typeAndValue(literal.Type).Type.(*types.Signature)
 	signature := g.concreteType(originalSignature).(*types.Signature)
@@ -10703,10 +10864,7 @@ func (g *gen) functionLiteral(literal *ast.FuncLit) ir.Ref {
 	parameterObjects := g.fieldListObjects(literal.Type.Params)
 	resultObjects := g.fieldListObjects(literal.Type.Results)
 	position := g.fset.Position(literal.Pos())
-	symbol := fmt.Sprintf("%s.func.%d.%d", g.pkg.Path(), position.Line, position.Column)
-	if g.functionName != "" {
-		symbol = fmt.Sprintf("%s.func.%d.%d", g.functionName, position.Line, position.Column)
-	}
+	symbol := fmt.Sprintf("%s.func.%d.%d", g.enclosingFunctionName(), position.Line, position.Column)
 	var captures []types.Object
 	seenCapture := make(map[types.Object]bool)
 	ast.Inspect(literal.Body, func(node ast.Node) bool {

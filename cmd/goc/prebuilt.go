@@ -7,6 +7,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strings"
 
 	"github.com/evanphx/cg12/goc"
 	"github.com/evanphx/cg12/internal/prebuilt"
@@ -27,11 +28,13 @@ func buildRuntimeCommand(arguments []string, errorOutput io.Writer) int {
 	output := flags.String("o", "", "write the prebuilt runtime here")
 	optimize := flags.Bool("O", false, "optimize cg12 IR")
 	targetName := flags.String("target", defaultTargetName(), "arm64")
+	packages := flags.String("packages", "",
+		"comma-separated standard library packages the pack carries beyond the runtime; empty for the runtime alone")
 	if err := flags.Parse(arguments); err != nil {
 		return 2
 	}
 	if flags.NArg() != 0 || *output == "" {
-		fmt.Fprintln(errorOutput, "usage: goc build-runtime [-O] [-target arch] -o runtime.gocrt")
+		fmt.Fprintln(errorOutput, "usage: goc build-runtime [-O] [-target arch] [-packages list] -o runtime.gocrt")
 		return 2
 	}
 	target, err := goc.ParseTarget(*targetName)
@@ -39,35 +42,90 @@ func buildRuntimeCommand(arguments []string, errorOutput io.Writer) int {
 		fmt.Fprintf(errorOutput, "%v\n", err)
 		return 1
 	}
-	pack, err := prebuilt.BuildRuntime(target, prebuilt.Options{Optimize: *optimize})
+	carried := splitCommaList(*packages)
+	cache := packCacheDirectory()
+	key, err := packCacheKey(runtimepack.Version, string(target), *optimize, carried, goc.StdlibRoot())
+	if err != nil {
+		// A key that cannot be computed means no caching, not a failed build.
+		cache = ""
+	}
+	if readCachedPack(cache, key, *output) {
+		return 0
+	}
+	pack, err := prebuilt.BuildRuntime(target, prebuilt.Options{
+		Optimize: *optimize,
+		Packages: carried,
+	})
 	if err != nil {
 		fmt.Fprintf(errorOutput, "goc: %v\n", err)
 		return 1
 	}
-	if err := pack.Write(*output); err != nil {
+	encoded, err := pack.Marshal()
+	if err != nil {
 		fmt.Fprintf(errorOutput, "goc: %v\n", err)
 		return 1
+	}
+	if err := writeFileAtomically(*output, encoded); err != nil {
+		fmt.Fprintf(errorOutput, "goc: %v\n", err)
+		return 1
+	}
+	if err := writeCachedPack(cache, key, encoded); err != nil {
+		fmt.Fprintf(errorOutput, "goc: could not cache the prebuilt runtime: %v\n", err)
 	}
 	return 0
 }
 
+// splitCommaList parses a comma-separated flag value. An empty or whitespace-only
+// entry is dropped rather than passed through, so `-packages ""` and
+// `-packages " "` both mean "the runtime alone" and a trailing comma in
+// `-runtime` is not a path.
+func splitCommaList(value string) []string {
+	var entries []string
+	for _, field := range strings.Split(value, ",") {
+		entry := strings.TrimSpace(field)
+		if entry == "" {
+			continue
+		}
+		entries = append(entries, entry)
+	}
+	return entries
+}
+
 // linkAgainstPrebuiltRuntime compiles one program as a second Go module and links
-// it with the prebuilt runtime.
+// it with the prebuilt runtime it can use most of.
+//
+// Several packs may be offered, because a pack carrying part of the standard
+// library is only usable by a program that loads all of that library. Only the
+// manifests are read up front -- a pack carrying net/http is tens of megabytes,
+// and only the chosen one's objects are ever needed.
 //
 // The object order is load-bearing. Each module's moduledata records a [minpc,
 // maxpc) that runtime.findmoduledatap resolves a PC against, so a module's text
 // has to be contiguous: the prebuilt object and the sidecar that ends its text
 // come first and adjacent, and the program's text follows.
-func linkAgainstPrebuiltRuntime(target goc.Target, packPath, name string, source []byte, executable string, optimize bool) error {
-	pack, err := runtimepack.Read(packPath)
+func linkAgainstPrebuiltRuntime(target goc.Target, packPaths []string, name string, source []byte, executable string, optimize bool) error {
+	if len(packPaths) == 0 {
+		return fmt.Errorf("goc: -runtime needs at least one prebuilt runtime")
+	}
+	manifests := make([]*runtimepack.Manifest, 0, len(packPaths))
+	for _, path := range packPaths {
+		manifest, err := runtimepack.ReadManifest(path)
+		if err != nil {
+			return err
+		}
+		manifests = append(manifests, manifest)
+	}
+	program, err := prebuilt.CompileProgram(target, filepath.Base(name), source, manifests, prebuilt.Options{Optimize: optimize})
 	if err != nil {
 		return err
 	}
-	if pack.Manifest.Optimize != optimize {
-		return fmt.Errorf("the prebuilt runtime was built with -O=%v, but this program is being compiled with -O=%v",
-			pack.Manifest.Optimize, optimize)
+	chosen := packPaths[0]
+	for index, manifest := range manifests {
+		if manifest == program.Manifest {
+			chosen = packPaths[index]
+		}
 	}
-	program, err := prebuilt.CompileProgram(target, filepath.Base(name), source, pack, prebuilt.Options{Optimize: optimize})
+	pack, err := runtimepack.Read(chosen)
 	if err != nil {
 		return err
 	}

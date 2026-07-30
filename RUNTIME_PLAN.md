@@ -2455,3 +2455,163 @@ is a much harder target than per-function work and was deliberately not attempte
 here. The other two levers on `perf/test-suite` (letting the pack carry the
 standard library, and batching programs into one process) reduce *total* compile
 CPU, which this work does not; they compose with it rather than competing.
+
+
+## 19. The pack carries the standard library, and each program takes the richest it can (2026-07-30)
+
+§17 left the matrix bounded by one program: `stdlib_http_tls_client_server.go`,
+158 s single-threaded, with 63 of 64 cores idle. §16 and §17 both named the same
+next move -- let the prebuilt pack carry the standard library, so the six
+`stdlib-http` programs stop compiling the same `net/http` closure six times.
+
+They also both assumed one pack. That is the part that is wrong.
+
+### One pack cannot serve every program
+
+A pack built from a root that imports `net/http` compiles
+`stdlib_http_tls_client_server.go` in 23.7 s instead of 158 s, and the image runs
+with output identical to the host toolchain's. `hello.go` against that same pack is
+refused before the linker sees it: `checkProgramSymbols` reports **18,309 program
+symbols** the pack left undefined and `hello.go` does not define.
+
+§16 named two blockers -- the interface dispatchers and the package-init list --
+and proposed a stub dispatcher for the first. The list is much longer than two, and
+the rest is not stubbable:
+
+- **The whole Go type region belongs to the program module**, by §16's own
+  argument: a descriptor's contents depend on what the program reaches, and cg12
+  compares descriptors by pointer. Every descriptor of every `net/http` type is a
+  symbol the pack references and `hello.go` never generates.
+- **Every static itab the pack degraded.** A stub is safe only where the thing it
+  replaces is unreachable. `runtime.itabsinit` walks every module's `itablinks` at
+  startup, before `main`, so a stubbed itab is *read* by every program that links
+  the pack.
+
+So a fixed superset pack still needs the redesign §16 wrote down. What does not is
+a pack a program is allowed to be a **superset of**.
+
+### Containment, and why it is the whole safety argument
+
+A pack records the closure it was compiled from. A program may use it only if the
+program's own loaded closure contains all of it. The pack leaves its type region,
+its dispatchers and its degraded itabs for the program module; a program that
+loaded everything the pack loaded generates a superset of them, and `checkProgramSymbols`
+already enforces exactly that condition. A program that loaded less falls back.
+
+`-runtime` therefore takes a list. goc runs the front end and, the moment it knows
+what the program loaded -- before anything consults a manifest -- picks the pack
+carrying the most of those it can use. The runtime-only pack carries nothing beyond
+the runtime and every executable compiles the whole runtime closure, so it is
+usable by every program and the list degrades rather than failing.
+
+Package init needs no special handling under that rule, which is the second thing
+§16 expected to have to build. A pack package's dependencies are all in the pack, a
+program-only package can never be one of them, and `runtime.main` walks the module
+chain pack-first -- so the pack's inits run before the program's extras, in
+dependency order, and `addModuleInitTasks` already skips a task the pack defines,
+so each package has exactly one `initTask` record and `doInit`'s guard does the
+rest.
+
+### Three defects found by doing it, two of them live miscompiles
+
+- **Two distinct closures could compile to one symbol.** A function literal was
+  named `<pkgpath>.func.<line>.<column>` whenever the generator had no explicit
+  name for the enclosing function -- the ordinary case, since `functionName` is set
+  only for a generic instantiation or a package initializer. Position does not
+  identify a literal within a package:
+  `crypto/internal/fips140/nistec`'s `p224.go`, `p384.go` and `p521.go` are
+  generated from one template, so their `sync.Once.Do` literals sit at identical
+  line and column, and three different closures came out of the compiler as
+  `crypto/internal/fips140/nistec.func.114.16` (sizes 0x228, 0x3e8, 0x318).
+  `obj.prepareELF` keys its symbol index by name and keeps the last, so **every
+  reference resolved to whichever was emitted last**: `p224B` would have run
+  `p521B`'s initializer. Local symbols kept the system linker from ever having to
+  choose, which is why nothing saw it; exporting them for a pack made it loud.
+  Literals are now named after the declared function they are written in, as Go
+  itself does, and `checkUniqueFunctionSymbols` refuses any module whose functions
+  do not have distinct linker symbols.
+
+- **An interface type test was built from a list the whole program decides.**
+  `x.(I)` was lowered to an inline chain of descriptor comparisons over every type
+  that implements `I` *anywhere in the program*. That makes an ordinary function's
+  body depend on the whole program's declared method set -- fine monolithically,
+  wrong for a split, because a function the program module subtracts was compiled
+  into the pack against the pack's method set. Measured: the pack builds
+  `interface{String() string}` with 184 candidates where
+  `stdlib_http_client_server.go` would use 198, `io.Reader` with 98 against 99,
+  `io.Writer` with 76 against 77. The program linked and aborted in a goroutine
+  `net/http.(*Transport).dialConn` started, on an assertion that fell off the end
+  of the pack's chain. The chain is now a fast path and `runtime.getitab` is the
+  answer -- which is what `interfaceTypeWord`, the conversion path directly above
+  it, has always done. **This was a pre-existing hole in the driver split**, not
+  something the standard-library pack created; the runtime-only pack has it too and
+  has escaped only because runtime code rarely asserts to a non-empty interface. It
+  also closes a second gap: `interfaceImplementations` enumerates method
+  *receivers*, so a type whose method set comes entirely from an embedded field
+  appeared in no entry and used to answer no to an interface it implements.
+
+- **One runtime type hasher emitted three times.** `emitRuntimeTypeHasher` had no
+  already-emitted guard where its sibling `ensureRuntimeTypeEqual` has always had
+  one, and `net/http` has three map types keyed by `connectMethodKey`. The three
+  definitions are byte-identical, so nothing was miscompiled -- but they are three
+  definitions of one symbol, which the system linker refuses once it is global.
+
+### What it measures
+
+Full unsharded matrix, `-v -count=1`, every row checked for `subtests=338
+pass=338 fail=0 declaredPASS=337 expectedFAILURE=1 knownGAP=0`:
+
+| run | wall | compile CPU | slowest single compile | bounding term |
+| --- | ---: | ---: | ---: | --- |
+| control: runtime-only pack, same tree | 201.2 s | 4392.7 s | 191.8 s | slowest single compile |
+| seven packs, cold cache | 210.3 s | 2783.6 s | 46.6 s | building the packs (154 s) |
+| seven packs, warm cache | **56.4 s** | 2801.4 s | 46.9 s | slowest single compile |
+
+**3.6x**, and the matrix is bounded by the slowest single compile again -- 46.9 s
+against `compile CPU / 64 = 43.8 s`, so both terms would have to move to go much
+below 50 s. Cold, the packs buy nothing: their 154 s replaces the 192 s compile
+almost exactly. The whole gain is the cache, as §17's lever 1 predicted.
+
+Those three rows were taken on a quiet box. Repeated later with two sibling jobs
+loading it (load average 168) the same three are 275.0 s, 308.2 s and 66.9-99.4 s,
+so the ratio holds at 2.8-4.1x while the absolute numbers do not. Six full matrix
+runs in all, every one of them 338 subtests / 338 pass / 337 declared PASS /
+1 EXPECTED FAILURE / 0 KNOWN GAP.
+
+`analysis/splitdiff` over all 358 corpus programs, each compiled monolithically and
+against the pack set, run, and compared on exit status and full output: 2
+differences, and they are the two §16 already recorded, with the same numbers
+(`gomaxprocs_memstats.go` prints 105 mallocs monolithic against 120 split;
+`bytes_grow_stats.go` 16718922 against 18220422). Re-running those two against the
+runtime-only pack alone reproduces both, so they predate the standard-library packs.
+Compile+link CPU over the 358 is 4923.5 s monolithic against 1738.5 s split, 2.83x;
+image bytes +11.0%.
+
+Determinism is unchanged on both compile paths: `CG12_NOCACHE=1` against warm is
+byte-identical for `hello.go`, `fmt_sprintf.go`, `gc_struct.go` and
+`runtime_cleanup_frame_retention.go`, with `runtime_defer_capture_allocs.go` still
+the known residue of §5.10.
+
+`goc build-runtime` caches a pack under `$XDG_CACHE_HOME/cg12/runtime-pack`, keyed
+on the pack format version, target, `-O`, the package list, the goc binary's own
+bytes, the *contents* of the whole vendored `stdlib/` tree, and `cc --version`.
+`CG12_NOCACHE=1` disables it. Note that `go build` stamps the commit and a
+clean/dirty bit into a binary by default, so the matrix builds its compiler with
+`-buildvcs=false` -- otherwise a comment-only commit invalidates 157 s of packs the
+compiler's code did not change.
+
+The seven roots are the largest package each of §17's eleven expensive programs
+imports: nothing, `net/http`, `net/smtp`, `crypto/x509`, `crypto/ecdsa`,
+`crypto/ecdh`, `crypto/hpke`. They share no ancestor small enough to serve all of
+them, so it is one pack per closure shape. Built concurrently they cost 157 s of
+wall clock -- one `net/http` compile -- and 345 MB; warm, 0.41 s.
+
+### What is not done
+
+The manifest's selection fields sit in the same JSON blob as its 36,755-entry
+`Defined` list, so a program pays 0.22 s parsing packs it will not use. Over the
+matrix that is 74 s of CPU and about 1 s of wall clock. Splitting a small selection
+header out of the container would remove it; worth doing if the pack set grows.
+
+The floor is still one program and it is still single-threaded, so §17's levers 2
+and 3 are unchanged in kind, only smaller in absolute terms.

@@ -24,6 +24,7 @@ import (
 
 type result struct {
 	name                      string
+	pack                      string
 	splitCompile, monoCompile time.Duration
 	splitLink, monoLink       time.Duration
 	splitSize, monoSize       int64
@@ -34,20 +35,23 @@ func main() {
 	work := flag.String("work", "", "scratch directory")
 	workers := flag.Int("j", 8, "workers")
 	runIt := flag.Bool("run", true, "run both binaries and compare")
+	packRoots := flag.String("packs", "",
+		"comma-separated packages to build one extra pack for each of, beyond the runtime-only pack")
 	flag.Parse()
 	programs := flag.Args()
 
 	start := time.Now()
-	pack, err := prebuilt.BuildRuntime(goc.TargetARM64, prebuilt.Options{})
-	if err != nil {
-		panic(err)
+	packs := buildPacks(*work, *packRoots)
+	fmt.Printf("build-runtime: %.2fs for %d packs\n", time.Since(start).Seconds(), len(packs))
+	for _, built := range packs {
+		fmt.Printf("  pack %-20s object=%d sidecar=%d defined=%d closure=%d\n",
+			strings.Join(built.pack.Manifest.Packages, "+"), len(built.pack.Object), len(built.pack.Sidecar),
+			len(built.pack.Manifest.Defined), len(built.pack.Manifest.Closure))
 	}
-	fmt.Printf("build-runtime: %.2fs object=%d sidecar=%d defined=%d\n",
-		time.Since(start).Seconds(), len(pack.Object), len(pack.Sidecar), len(pack.Manifest.Defined))
-	runtimeObject := filepath.Join(*work, "rt.o")
-	sidecarObject := filepath.Join(*work, "rtasm.o")
-	os.WriteFile(runtimeObject, pack.Object, 0o644)
-	os.WriteFile(sidecarObject, pack.Sidecar, 0o644)
+	manifests := make([]*runtimepack.Manifest, len(packs))
+	for index, built := range packs {
+		manifests[index] = &built.pack.Manifest
+	}
 
 	results := make([]result, len(programs))
 	var wg sync.WaitGroup
@@ -58,7 +62,7 @@ func main() {
 			defer wg.Done()
 			slots <- struct{}{}
 			defer func() { <-slots }()
-			results[index] = one(*work, path, pack, runtimeObject, sidecarObject, *runIt)
+			results[index] = one(*work, path, packs, manifests, *runIt)
 		}(index, path)
 	}
 	wg.Wait()
@@ -82,7 +86,8 @@ func main() {
 		if i >= 10 {
 			break
 		}
-		fmt.Printf("%-44s split=%6.2fs mono=%6.2fs\n", r.name, (r.splitCompile + r.splitLink).Seconds(), (r.monoCompile + r.monoLink).Seconds())
+		fmt.Printf("%-44s split=%6.2fs mono=%6.2fs pack=%s\n",
+			r.name, (r.splitCompile + r.splitLink).Seconds(), (r.monoCompile + r.monoLink).Seconds(), r.pack)
 	}
 	fmt.Printf("programs=%d  problems=%d\n", len(results), bad)
 	fmt.Printf("total CPU compile+link: split=%.1fs mono=%.1fs  ratio=%.2fx\n",
@@ -91,7 +96,45 @@ func main() {
 		splitBytes, monoBytes, 100*float64(splitBytes-monoBytes)/float64(monoBytes))
 }
 
-func one(work, path string, pack *runtimepack.Pack, runtimeObject, sidecarObject string, runIt bool) result {
+// builtPack is one pack and the two object files it links from.
+type builtPack struct {
+	pack            *runtimepack.Pack
+	object, sidecar string
+}
+
+// buildPacks builds the runtime-only pack plus one pack per named root, in
+// parallel because they are independent and each is single-threaded.
+func buildPacks(work, roots string) []builtPack {
+	sets := [][]string{nil}
+	for _, root := range strings.Split(roots, ",") {
+		root = strings.TrimSpace(root)
+		if root == "" {
+			continue
+		}
+		sets = append(sets, []string{root})
+	}
+	packs := make([]builtPack, len(sets))
+	var building sync.WaitGroup
+	for index, set := range sets {
+		building.Add(1)
+		go func(index int, set []string) {
+			defer building.Done()
+			pack, err := prebuilt.BuildRuntime(goc.TargetARM64, prebuilt.Options{Packages: set})
+			if err != nil {
+				panic(err)
+			}
+			object := filepath.Join(work, fmt.Sprintf("rt%d.o", index))
+			sidecar := filepath.Join(work, fmt.Sprintf("rt%d.asm.o", index))
+			os.WriteFile(object, pack.Object, 0o644)
+			os.WriteFile(sidecar, pack.Sidecar, 0o644)
+			packs[index] = builtPack{pack: pack, object: object, sidecar: sidecar}
+		}(index, set)
+	}
+	building.Wait()
+	return packs
+}
+
+func one(work, path string, packs []builtPack, manifests []*runtimepack.Manifest, runIt bool) result {
 	name := filepath.Base(path)
 	r := result{name: name, status: "OK"}
 	src, err := os.ReadFile(path)
@@ -100,12 +143,21 @@ func one(work, path string, pack *runtimepack.Pack, runtimeObject, sidecarObject
 		return r
 	}
 	t0 := time.Now()
-	object, err := prebuilt.CompileProgram(goc.TargetARM64, name, src, pack, prebuilt.Options{})
+	object, err := prebuilt.CompileProgram(goc.TargetARM64, name, src, manifests, prebuilt.Options{})
 	r.splitCompile = time.Since(t0)
 	if err != nil {
 		r.status = "SPLIT COMPILE: " + err.Error()
 		return r
 	}
+	// The pack goc chose, and therefore the objects this program links with.
+	chosen := packs[0]
+	for _, built := range packs {
+		if &built.pack.Manifest == object.Manifest {
+			chosen = built
+		}
+	}
+	r.pack = strings.Join(chosen.pack.Manifest.Packages, "+")
+	runtimeObject, sidecarObject := chosen.object, chosen.sidecar
 	programObject := filepath.Join(work, name+".o")
 	os.WriteFile(programObject, object.Object, 0o644)
 	linkInputs := []string{"-no-pie", "-o", filepath.Join(work, name+".split"), runtimeObject, sidecarObject, programObject}

@@ -291,7 +291,9 @@ func main() {
 
 	var closure *ir.Func
 	for _, function := range module.Funcs {
-		if strings.HasPrefix(function.Name, "main.func.") {
+		// A literal is named after the declared function it is written in, so
+		// main's goroutine literal is main.main.func.<line>.<column>.
+		if strings.HasPrefix(function.Name, "main.main.func.") {
 			closure = function
 			break
 		}
@@ -1104,7 +1106,7 @@ func refill() {
 
 	found := false
 	for _, function := range module.Funcs {
-		if !strings.Contains(function.Name, "runtime.func.") {
+		if !strings.Contains(function.Name, "runtime.refill.func.") {
 			continue
 		}
 		found = true

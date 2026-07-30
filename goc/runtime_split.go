@@ -4,6 +4,7 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"fmt"
+	"go/types"
 	"sort"
 	"strconv"
 
@@ -89,8 +90,15 @@ const (
 
 // runtimeSplit carries the split's inputs into compile and its findings back out.
 type runtimeSplit struct {
-	mode     runtimeSplitMode
-	manifest *runtimepack.Manifest
+	mode runtimeSplitMode
+
+	// candidates are the packs the caller offered a program build. compile picks
+	// one as soon as it knows what the program loads; manifest is that choice.
+	candidates []*runtimepack.Manifest
+	manifest   *runtimepack.Manifest
+
+	// chosen indexes candidates, so the caller knows which pack's objects to link.
+	chosen int
 
 	// programSymbols is filled by a runtime build: the symbols it deliberately
 	// left undefined for the program module to supply.
@@ -104,6 +112,10 @@ type runtimeSplit struct {
 	// fingerprint identifies the runtime source the prebuilt module was compiled
 	// from, so a caller can tell a current pack from a stale one.
 	fingerprint string
+
+	// closure is filled by a runtime build: every package path its compilation
+	// loaded. A program may only use the pack if it loads all of them.
+	closure []string
 
 	// The counts a caller reports.
 	keptFunctions       int
@@ -120,6 +132,42 @@ func (split *runtimeSplit) againstRuntime() bool {
 	return split != nil && split.mode == runtimeSplitAgainstRuntime
 }
 
+// chooseManifest picks the pack this program will be compiled against: the one
+// carrying the most, of those whose closure the program's closure contains.
+//
+// Containment is the condition, not equality, and it is what the whole
+// arrangement rests on. The pack leaves its Go type region, its interface
+// dispatchers and its degraded itabs for the program module, and a program only
+// generates those for packages it loaded. Load everything the pack loaded and the
+// program generates a superset; load less and the link fails naming symbols
+// nobody defines.
+//
+// A runtime-only pack has an empty carried set and is therefore usable by every
+// executable, since goc compiles the whole runtime closure into any of them. So
+// offering a rich pack alongside a plain one degrades to the plain one rather
+// than to an error.
+func (split *runtimeSplit) chooseManifest(closure []string) error {
+	loaded := make(map[string]bool, len(closure))
+	for _, path := range closure {
+		loaded[path] = true
+	}
+	best := -1
+	for index, candidate := range split.candidates {
+		if !candidate.UsableBy(loaded) {
+			continue
+		}
+		if best < 0 || len(candidate.Closure) > len(split.candidates[best].Closure) {
+			best = index
+		}
+	}
+	if best < 0 {
+		return fmt.Errorf("goc: none of the %d prebuilt runtimes offered is usable by this program", len(split.candidates))
+	}
+	split.chosen = best
+	split.manifest = split.candidates[best]
+	return nil
+}
+
 // RuntimeModule is the result of compiling the prebuilt runtime module.
 type RuntimeModule struct {
 	Module *ir.Module
@@ -133,11 +181,18 @@ type RuntimeModule struct {
 
 	// Fingerprint identifies the runtime source the module was compiled from.
 	Fingerprint string
+
+	// Closure is every package path the module's compilation loaded, sorted.
+	Closure []string
 }
 
 // ProgramModule is the result of compiling a program against a prebuilt runtime.
 type ProgramModule struct {
 	Module *ir.Module
+
+	// Chosen indexes the manifests the caller offered: the pack this module was
+	// actually compiled against, and therefore the one to link it with.
+	Chosen int
 
 	KeptFunctions       int
 	KeptData            int
@@ -145,18 +200,22 @@ type ProgramModule struct {
 	SubtractedData      int
 }
 
-// CompileRuntimeModuleFor lowers the fixed runtime root program for a target as
-// a prebuilt Go module.
+// CompileRuntimeModuleFor lowers a prebuilt runtime module for a target: the Go
+// runtime, plus the closure of the standard library packages named in packages.
 //
-// The root program is fixed and lives in this package rather than being supplied
-// by the caller, because the whole point is that the result does not depend on
-// any particular user program. What the root reaches is a superset, not an exact
-// fit: a program needing more compiles the difference itself, which is what makes
-// the subtraction degrade gracefully rather than requiring the prebuilt module to
-// anticipate every program.
-func CompileRuntimeModuleFor(target Target) (*RuntimeModule, error) {
+// The root program is generated here rather than supplied by the caller as
+// source, because the whole point is that the result does not depend on any
+// particular user program -- only on a list of packages. What the root reaches is
+// a superset, not an exact fit: a program needing more compiles the difference
+// itself, which is what makes the subtraction degrade gracefully rather than
+// requiring the prebuilt module to anticipate every program.
+func CompileRuntimeModuleFor(target Target, packages []string) (*RuntimeModule, error) {
+	source, err := runtimeRootSourceFor(packages)
+	if err != nil {
+		return nil, err
+	}
 	split := &runtimeSplit{mode: runtimeSplitBuildRuntime, dataDigests: map[string]string{}}
-	module, err := compile(runtimeRootName, []byte(runtimeRootSource), compileOptions{
+	module, err := compile(runtimeRootName, []byte(source), compileOptions{
 		target:       target,
 		executable:   true,
 		runtimeSplit: split,
@@ -169,16 +228,27 @@ func CompileRuntimeModuleFor(target Target) (*RuntimeModule, error) {
 		ProgramSymbols: split.programSymbols,
 		DataDigests:    split.dataDigests,
 		Fingerprint:    split.fingerprint,
+		Closure:        split.closure,
 	}, nil
 }
 
 // CompileExecutableAgainstRuntimeFor lowers a main package as a program module to
-// be linked against a prebuilt runtime described by manifest.
-func CompileExecutableAgainstRuntimeFor(target Target, name string, src []byte, manifest *runtimepack.Manifest) (*ProgramModule, error) {
-	if manifest == nil {
+// be linked against one of the prebuilt runtimes described by manifests.
+//
+// More than one is allowed because a pack carrying part of the standard library
+// is only usable by a program that loads all of it. Offering a rich pack and a
+// plain one lets each program take the richest it can and the rest fall back,
+// instead of forcing one pack to fit every program.
+func CompileExecutableAgainstRuntimeFor(target Target, name string, src []byte, manifests ...*runtimepack.Manifest) (*ProgramModule, error) {
+	if len(manifests) == 0 {
 		return nil, fmt.Errorf("goc: compiling against a prebuilt runtime needs its manifest")
 	}
-	split := &runtimeSplit{mode: runtimeSplitAgainstRuntime, manifest: manifest}
+	for _, manifest := range manifests {
+		if manifest == nil {
+			return nil, fmt.Errorf("goc: compiling against a prebuilt runtime needs its manifest")
+		}
+	}
+	split := &runtimeSplit{mode: runtimeSplitAgainstRuntime, candidates: manifests}
 	module, err := compile(name, src, compileOptions{
 		target:       target,
 		executable:   true,
@@ -189,11 +259,30 @@ func CompileExecutableAgainstRuntimeFor(target Target, name string, src []byte, 
 	}
 	return &ProgramModule{
 		Module:              module,
+		Chosen:              split.chosen,
 		KeptFunctions:       split.keptFunctions,
 		KeptData:            split.keptData,
 		SubtractedFunctions: split.subtractedFunctions,
 		SubtractedData:      split.subtractedData,
 	}, nil
+}
+
+// loadedPackagePaths is every standard library package a compilation loaded,
+// sorted.
+//
+// The compiled program's own package is left out: it is `main` in both halves of
+// a split, so counting it would make every pack look usable by every program for
+// the wrong reason.
+func loadedPackagePaths(loader *sourceLoader, own *types.Package) []string {
+	paths := make([]string, 0, len(loader.units))
+	for path := range loader.units {
+		if own != nil && path == own.Path() {
+			continue
+		}
+		paths = append(paths, path)
+	}
+	sort.Strings(paths)
+	return paths
 }
 
 // finishRuntimeModule turns a finished whole-program module into the prebuilt

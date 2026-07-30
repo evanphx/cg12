@@ -24,6 +24,7 @@ import (
 	"encoding/binary"
 	"encoding/json"
 	"fmt"
+	"io"
 	"os"
 )
 
@@ -35,7 +36,10 @@ const magic = "cg12gorp"
 // Version is the container and manifest version. It is checked on read, so a
 // pack written by an older compiler is refused rather than mislinked. Bump it
 // whenever the manifest's meaning changes.
-const Version = 1
+//
+// Version 2 added Packages and Closure, which is what lets a build hold several
+// packs and give each program the richest one it can use.
+const Version = 2
 
 // Manifest describes the prebuilt runtime module.
 type Manifest struct {
@@ -54,6 +58,19 @@ type Manifest struct {
 	// halves have to agree: they are one image, and half an image optimized is a
 	// combination nothing has ever been tested in.
 	Optimize bool `json:"optimize"`
+
+	// Packages are the standard library packages the pack's root asked for,
+	// beyond the Go runtime itself. Empty means the runtime alone. It is what a
+	// human reads and what a cache key is built from; Closure is what an
+	// applicability test uses.
+	Packages []string `json:"packages,omitempty"`
+
+	// Closure is every package path the pack's compilation loaded, sorted. A
+	// program may use this pack only if its own closure contains all of it: the
+	// pack leaves its type region, its dispatchers and its degraded itabs for the
+	// program module, and a program that never loaded one of these packages
+	// cannot generate them.
+	Closure []string `json:"closure,omitempty"`
 
 	// ModuleDataSymbol is the runtime module's moduledata record.
 	ModuleDataSymbol string `json:"moduleDataSymbol"`
@@ -176,6 +193,66 @@ func Read(path string) (*Pack, error) {
 		return nil, err
 	}
 	return Unmarshal(encoded)
+}
+
+// ReadManifest decodes only a pack's manifest, without its members.
+//
+// Choosing between several packs needs each one's closure and nothing else, and
+// a pack carrying the standard library is tens of megabytes. Reading the header
+// alone keeps the choice proportional to the number of candidates rather than to
+// their size.
+func ReadManifest(path string) (*Manifest, error) {
+	file, err := os.Open(path)
+	if err != nil {
+		return nil, err
+	}
+	defer file.Close()
+
+	prologue := make([]byte, len(magic)+12)
+	if _, err := io.ReadFull(file, prologue); err != nil {
+		return nil, fmt.Errorf("runtimepack: not a prebuilt goc runtime: %s", path)
+	}
+	if string(prologue[:len(magic)]) != magic {
+		return nil, fmt.Errorf("runtimepack: not a prebuilt goc runtime: %s", path)
+	}
+	version := binary.LittleEndian.Uint32(prologue[len(magic):])
+	if version != Version {
+		return nil, fmt.Errorf("runtimepack: %s is version %d, but this goc writes version %d; rebuild it", path, version, Version)
+	}
+	headerSize := binary.LittleEndian.Uint64(prologue[len(magic)+4:])
+	header := make([]byte, headerSize)
+	if _, err := io.ReadFull(file, header); err != nil {
+		return nil, fmt.Errorf("runtimepack: truncated header in %s", path)
+	}
+	var decoded index
+	if err := json.Unmarshal(header, &decoded); err != nil {
+		return nil, fmt.Errorf("runtimepack: %w", err)
+	}
+	if decoded.Manifest.Version != Version {
+		return nil, fmt.Errorf("runtimepack: %s has manifest version %d, but this goc writes version %d; rebuild it",
+			path, decoded.Manifest.Version, Version)
+	}
+	return &decoded.Manifest, nil
+}
+
+// UsableBy reports whether a program whose loaded package closure is closure may
+// be compiled against this pack.
+//
+// The condition is containment, and it is the whole of the safety argument for
+// carrying the standard library in a pack. The pack leaves its Go type region,
+// its interface dispatchers and its degraded itabs for the program module to
+// define -- and a program only generates those for packages it loaded. A program
+// that loaded everything the pack did generates a superset of them, so the
+// subtraction still closes; a program that loaded less does not, and the build
+// has to fall back to a smaller pack rather than produce an image missing type
+// descriptors.
+func (manifest *Manifest) UsableBy(closure map[string]bool) bool {
+	for _, path := range manifest.Closure {
+		if !closure[path] {
+			return false
+		}
+	}
+	return true
 }
 
 // DefinedSet is the manifest's Defined list as a set, which is the form the

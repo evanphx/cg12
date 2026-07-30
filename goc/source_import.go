@@ -321,6 +321,15 @@ func newSourceLoader(fset *token.FileSet, target Target) *sourceLoader {
 	return loader
 }
 
+// StdlibRoot is the vendored standard library tree goc compiles against.
+//
+// It is exported for the pack cache, whose key has to cover every source the
+// compiler reads: a pack carrying net/http is 154 s of compiling, and a hit on a
+// stale key would be a wrong image rather than a slow build.
+func StdlibRoot() string {
+	return repositoryStdlibRoot()
+}
+
 func repositoryStdlibRoot() string {
 	_, filename, _, ok := runtime.Caller(0)
 	if !ok {
