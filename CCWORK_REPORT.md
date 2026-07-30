@@ -290,7 +290,7 @@ the concurrent driver dispatches one function at a time:
 | `stdlib_encoding_gob_struct_int` | 25 distinct | 26 distinct |
 | `stdlib_encoding_json_roundtrip` | 27 x A, 3 x B | 24 x A, 6 x B |
 | `stdlib_flag_parse` | 10 distinct | 11 distinct, 9 shared with the 1-worker set |
-| `stdlib_image_png_roundtrip` | 26 x A, 4 x B | — |
+| `stdlib_image_png_roundtrip` | 26 x A, 4 x B | 24 x A, 6 x B |
 
 The three-compile classifier cannot distinguish a rare variant from a worker-dependent one —
 which is also why the flagged set changed completely between the two runs
@@ -300,8 +300,9 @@ which is also why the flagged set changed completely between the two runs
 same programs twice. For the same reason the ~37 nondeterministic programs are a *lower bound*:
 30 members are shared between the two sets and the rest drift, so a 3-compile sample undercounts.
 
-A dash means the 8-worker leg was not needed: the 1-worker leg alone shows the program varies
-without any concurrency at all. Controls: `runtime_defer_capture_allocs` gives 25 distinct
+The one dash is a leg that was not needed: that program's 1-worker column alone shows it varies
+without any concurrency at all. Every other row has both legs, and in each the two columns are
+the same set of outputs in different proportions. Controls: `runtime_defer_capture_allocs` gives 25 distinct
 outputs in 30 single-worker compiles; `hello` gives 1 in 30.
 
 **No program produced an output at 8 workers that it never produced at 1.** With the unit test
