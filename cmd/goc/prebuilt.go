@@ -63,6 +63,27 @@ func linkAgainstPrebuiltRuntime(target goc.Target, packPath, name string, source
 	if err != nil {
 		return err
 	}
+	return linkAgainstReadPrebuiltRuntime(target, pack, name, source, executable, optimize, os.Stderr)
+}
+
+// linkAgainstReadPrebuiltRuntime is linkAgainstPrebuiltRuntime with the pack
+// already read.
+//
+// The split exists for the batch compiler, which reads one pack and then
+// compiles many programs against it; reading the 8.8 MB pack per program is only
+// 21 ms, but the interesting property is that every program in a batch then
+// links against the identical in-memory manifest rather than one re-parsed each
+// time. errorOutput is a parameter for the same reason: many programs share the
+// process, so each one's linker output has to be attributable to it.
+func linkAgainstReadPrebuiltRuntime(
+	target goc.Target,
+	pack *runtimepack.Pack,
+	name string,
+	source []byte,
+	executable string,
+	optimize bool,
+	errorOutput io.Writer,
+) error {
 	if pack.Manifest.Optimize != optimize {
 		return fmt.Errorf("the prebuilt runtime was built with -O=%v, but this program is being compiled with -O=%v",
 			pack.Manifest.Optimize, optimize)
@@ -103,6 +124,6 @@ func linkAgainstPrebuiltRuntime(target goc.Target, packPath, name string, source
 		return err
 	}
 	command := exec.Command(cc, append([]string{"-no-pie", "-o", executable}, linkInputs...)...)
-	command.Stderr = os.Stderr
+	command.Stderr = errorOutput
 	return command.Run()
 }

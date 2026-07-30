@@ -2658,6 +2658,9 @@ func availableMemoryBytes() uint64 {
 type runtimeCapabilityCompileQueue struct {
 	entries   map[string]*runtimeCapabilityCompileEntry
 	lookahead chan struct{}
+	// batch is the pool of long-lived compilers, or nil when every program is
+	// compiled by a `goc` process of its own.
+	batch *runtimeCapabilityBatchPool
 }
 
 type runtimeCapabilityCompileEntry struct {
@@ -2715,6 +2718,7 @@ func startRuntimeCapabilityCompiles(
 	queue := &runtimeCapabilityCompileQueue{
 		entries:   make(map[string]*runtimeCapabilityCompileEntry, len(capabilities)),
 		lookahead: make(chan struct{}, 4*workers+exclusive),
+		batch:     newRuntimeCapabilityBatchPoolFor(compiler, prebuiltRuntime, workers),
 	}
 	for _, capability := range capabilities {
 		queue.entries[capability.category+"/"+capability.name] = &runtimeCapabilityCompileEntry{
@@ -2740,7 +2744,12 @@ func startRuntimeCapabilityCompiles(
 			go func(capability runtimeCapability) {
 				defer func() { <-slots }()
 				entry := queue.entries[capability.category+"/"+capability.name]
-				entry.result = compileRuntimeCapabilityWith(compiler, directory, prebuiltRuntime, capability)
+				if queue.batch != nil {
+					source, executable := runtimeCapabilityCompilePaths(directory, capability)
+					entry.result = queue.batch.compile(source, executable)
+				} else {
+					entry.result = compileRuntimeCapabilityWith(compiler, directory, prebuiltRuntime, capability)
+				}
 				close(entry.done)
 			}(capability)
 		}
@@ -2772,6 +2781,14 @@ func (queue *runtimeCapabilityCompileQueue) release() {
 func (queue *runtimeCapabilityCompileQueue) drainCompiles() {
 	for _, entry := range queue.entries {
 		<-entry.done
+	}
+	if queue.batch != nil {
+		// Every compile has finished, so the workers are idle and holding a
+		// parsed standard library each. Shutting them down here rather than at
+		// the end of the run gives the exclusive programs -- which run next, and
+		// are exclusive because their outcome depends on how much of the machine
+		// they have -- a machine with no compilers on it at all.
+		queue.batch.stop()
 	}
 }
 
@@ -2808,6 +2825,34 @@ func runtimeCapabilitySelected(capability runtimeCapability) bool {
 	return true
 }
 
+// runtimeCapabilityCompilePaths is where a capability's source is read from and
+// where its executable is written. Both compile paths use it, so a batch build
+// and a one-shot build cannot drift into compiling different files.
+func runtimeCapabilityCompilePaths(directory string, capability runtimeCapability) (source, executable string) {
+	source = filepath.Join("..", "..", "goc", "testdata", capability.source)
+	executable = filepath.Join(directory, strings.TrimSuffix(capability.source, ".go")+".bin")
+	return source, executable
+}
+
+// newRuntimeCapabilityBatchPoolFor returns the pool of long-lived compilers this
+// run should use, or nil when it must compile one program per process.
+//
+// The coverage run is the one that must not batch. It instruments the runtime
+// per program through -runtime-covermeta, which `goc compile-batch` does not
+// accept: a batch worker is one build configuration by construction, and
+// per-program instrumentation is the opposite of that. Rather than teach the
+// batch compiler a mode nothing here can verify end to end, the coverage run
+// keeps the one-shot path it already had.
+func newRuntimeCapabilityBatchPoolFor(compiler, prebuiltRuntime string, workers int) *runtimeCapabilityBatchPool {
+	if !*runtimeStatusBatchCompile {
+		return nil
+	}
+	if *runtimeCoverageProfile != "" {
+		return nil
+	}
+	return newRuntimeCapabilityBatchPool(compiler, prebuiltRuntime, *runtimeOptimize, workers)
+}
+
 // compileRuntimeCapability compiles one program. It takes no *testing.T because
 // it runs on its own goroutine, and most of testing.T is not safe to call from
 // one that does not own the subtest.
@@ -2832,8 +2877,7 @@ func compileRuntimeCapabilityWith(
 	prebuiltRuntime string,
 	capability runtimeCapability,
 ) runtimeCapabilityCompilation {
-	source := filepath.Join("..", "..", "goc", "testdata", capability.source)
-	executable := filepath.Join(directory, strings.TrimSuffix(capability.source, ".go")+".bin")
+	source, executable := runtimeCapabilityCompilePaths(directory, capability)
 
 	compileArguments := []string{"-o", executable}
 	if *runtimeOptimize {
