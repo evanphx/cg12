@@ -8,6 +8,7 @@ import (
 	"path/filepath"
 	"runtime"
 	"sort"
+	"sync"
 	"testing"
 
 	"github.com/evanphx/cg12/goc"
@@ -67,6 +68,12 @@ var runtimeStatusCompileWorkers = flag.Int(
 	"compile this many capability programs concurrently (0 picks a memory-aware default)",
 )
 
+var runtimeStatusRunWorkers = flag.Int(
+	"runtime-status-run-workers",
+	0,
+	"execute this many non-exclusive capability programs concurrently (0 picks a default)",
+)
+
 var runtimeStatusPrebuiltRuntime = flag.Bool(
 	"runtime-status-prebuilt-runtime",
 	true,
@@ -119,6 +126,11 @@ type runtimeBlockKey struct {
 }
 
 type runtimeCorpusCoverage struct {
+	// mutex guards everything below it, because the matrix's run phase records
+	// outcomes from several goroutines at once. expect and write are called only
+	// from the parent test goroutine, before the first add and after the last,
+	// so they do not take it.
+	mutex             sync.Mutex
 	programs          int
 	coveredPrograms   int
 	runtimeSourceID   string
@@ -172,6 +184,9 @@ func (coverage *runtimeCorpusCoverage) add(capability runtimeCapability, result 
 	if *runtimeCoverageProfile == "" {
 		return
 	}
+	coverage.mutex.Lock()
+	defer coverage.mutex.Unlock()
+
 	coverage.programs++
 	name := capability.category + "/" + capability.name
 	if coverage.recordedPrograms[name] {
@@ -502,6 +517,9 @@ func (coverage *runtimeCorpusCoverage) write(t *testing.T) {
 		return
 	}
 	coverage.recordUnreportedCapabilities()
+	// Outcomes are recorded concurrently, so the order they arrived in is not
+	// meaningful. Sorting keeps a failing run's diagnosis reproducible.
+	sort.Strings(coverage.collectionErrors)
 	for _, collectionError := range coverage.collectionErrors {
 		t.Errorf("runtime coverage collection: %s", collectionError)
 	}

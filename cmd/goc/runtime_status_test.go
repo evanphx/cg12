@@ -28,6 +28,17 @@ type runtimeCapability struct {
 	note           string
 	output         string
 	requiresAFINET bool
+	// exclusive marks a capability that must run with nothing else running.
+	//
+	// The run phase runs everything else concurrently, so a program whose
+	// outcome depends on how much of the machine it has -- it measures or waits
+	// on wall clock, sets an I/O deadline, asserts an allocation or GC
+	// statistic, sets its own GOMAXPROCS, or deliberately saturates the
+	// scheduler -- has to be marked or it becomes flaky, and a flaky suite is
+	// worse than a slow one. TestRuntimeCapabilityExclusiveClassification
+	// enforces that floor mechanically from the program's source; the field also
+	// carries markings made for reasons no pattern finds.
+	exclusive bool
 	// termination records how the program is meant to end. A program that
 	// deliberately terminates abnormally may lose its coverage packet, and that
 	// absence is a classified outcome instead of a collection failure.
@@ -316,6 +327,7 @@ func runtimeCapabilities() []runtimeCapability {
 			name:        "keepalive-finalizer",
 			source:      "runtime_keepalive_finalizer.go",
 			expectation: runtimeCapabilityMustPass,
+			exclusive:   true,
 		},
 		{
 			category:    "gc",
@@ -328,6 +340,7 @@ func runtimeCapabilities() []runtimeCapability {
 			name:        "finalizer-stack-growth",
 			source:      "runtime_finalizer_stack_growth.go",
 			expectation: runtimeCapabilityMustPass,
+			exclusive:   true,
 		},
 		{
 			category:    "gc",
@@ -340,54 +353,63 @@ func runtimeCapabilities() []runtimeCapability {
 			name:        "setfinalizer-clear",
 			source:      "runtime_setfinalizer_nil.go",
 			expectation: runtimeCapabilityMustPass,
+			exclusive:   true,
 		},
 		{
 			category:    "gc",
 			name:        "cleanup-basic",
 			source:      "runtime_cleanup_basic.go",
 			expectation: runtimeCapabilityMustPass,
+			exclusive:   true,
 		},
 		{
 			category:    "gc",
 			name:        "cleanup-stop",
 			source:      "runtime_cleanup_stop.go",
 			expectation: runtimeCapabilityMustPass,
+			exclusive:   true,
 		},
 		{
 			category:    "gc",
 			name:        "cleanup-multiple",
 			source:      "runtime_cleanup_multiple.go",
 			expectation: runtimeCapabilityMustPass,
+			exclusive:   true,
 		},
 		{
 			category:    "gc",
 			name:        "cleanup-frame-retention",
 			source:      "runtime_cleanup_frame_retention.go",
 			expectation: runtimeCapabilityMustPass,
+			exclusive:   true,
 		},
 		{
 			category:    "gc",
 			name:        "assist-alloc-recursion",
 			source:      "runtime_gc_assist_stack_growth.go",
 			expectation: runtimeCapabilityMustPass,
+			exclusive:   true,
 		},
 		{
 			category:    "gc",
 			name:        "defer-capture-allocs",
 			source:      "runtime_defer_capture_allocs.go",
 			expectation: runtimeCapabilityMustPass,
+			exclusive:   true,
 		},
 		{
 			category:    "gc",
 			name:        "cleanup-frame-retention-masked",
 			source:      "runtime_cleanup_frame_retention_masked.go",
 			expectation: runtimeCapabilityMustPass,
+			exclusive:   true,
 		},
 		{
 			category:    "gc",
 			name:        "cleanup-frame-retention-scribble",
 			source:      "runtime_cleanup_frame_retention_scribble.go",
 			expectation: runtimeCapabilityMustPass,
+			exclusive:   true,
 		},
 		{
 			category: "gc",
@@ -397,12 +419,14 @@ func runtimeCapabilities() []runtimeCapability {
 			// mode needs spans grown during marking from the initial thread's
 			// g0 stack, which -runtime-procs=1..4 never produces. See 5.2.2.
 			expectation: runtimeCapabilityMustPass,
+			exclusive:   true,
 		},
 		{
 			category:    "gc",
 			name:        "stack-argument-roots",
 			source:      "runtime_stack_argument_roots.go",
 			expectation: runtimeCapabilityMustPass,
+			exclusive:   true,
 		},
 		{
 			category: "gc",
@@ -415,30 +439,35 @@ func runtimeCapabilities() []runtimeCapability {
 			// three before the fix at every -runtime-procs setting, none after.
 			// See RUNTIME_PLAN.md 5.8.
 			expectation: runtimeCapabilityMustPass,
+			exclusive:   true,
 		},
 		{
 			category:    "gc",
 			name:        "finalizer-cleanup-order",
 			source:      "runtime_finalizer_cleanup_order.go",
 			expectation: runtimeCapabilityMustPass,
+			exclusive:   true,
 		},
 		{
 			category:    "gc",
 			name:        "finalizer-dependency-order",
 			source:      "runtime_finalizer_dependency_order.go",
 			expectation: runtimeCapabilityMustPass,
+			exclusive:   true,
 		},
 		{
 			category:    "gc",
 			name:        "finalizer-tiny",
 			source:      "runtime_finalizer_tiny.go",
 			expectation: runtimeCapabilityMustPass,
+			exclusive:   true,
 		},
 		{
 			category:    "gc",
 			name:        "pinner-lifecycle",
 			source:      "runtime_pinner_lifecycle.go",
 			expectation: runtimeCapabilityMustPass,
+			exclusive:   true,
 		},
 		{
 			category:    "gc",
@@ -655,6 +684,7 @@ func runtimeCapabilities() []runtimeCapability {
 			name:        "gosched-progress",
 			source:      "runtime_gosched_progress.go",
 			expectation: runtimeCapabilityMustPass,
+			exclusive:   true,
 		},
 		{
 			category:    "goroutine",
@@ -703,18 +733,21 @@ func runtimeCapabilities() []runtimeCapability {
 			name:        "ring-handoff",
 			source:      "runtime_scheduler_ring_handoff.go",
 			expectation: runtimeCapabilityMustPass,
+			exclusive:   true,
 		},
 		{
 			category:    "scheduler-stress",
 			name:        "timer-select-churn",
 			source:      "runtime_timer_select_churn.go",
 			expectation: runtimeCapabilityMustPass,
+			exclusive:   true,
 		},
 		{
 			category:    "scheduler-stress",
 			name:        "gc-churn",
 			source:      "runtime_scheduler_gc_churn.go",
 			expectation: runtimeCapabilityMustPass,
+			exclusive:   true,
 		},
 		{
 			category:    "stdlib-io",
@@ -1135,24 +1168,28 @@ func runtimeCapabilities() []runtimeCapability {
 			name:        "grow-compare",
 			source:      "bytes_grow_compare.go",
 			expectation: runtimeCapabilityMustPass,
+			exclusive:   true,
 		},
 		{
 			category:    "stdlib-bytes",
 			name:        "grow-stats",
 			source:      "bytes_grow_stats.go",
 			expectation: runtimeCapabilityMustPass,
+			exclusive:   true,
 		},
 		{
 			category:    "stdlib-bytes",
 			name:        "grow-allocs",
 			source:      "bytes_grow_allocs.go",
 			expectation: runtimeCapabilityMustPass,
+			exclusive:   true,
 		},
 		{
 			category:    "stdlib-bytes",
 			name:        "replace-allocs",
 			source:      "bytes_replace_allocs.go",
 			expectation: runtimeCapabilityMustPass,
+			exclusive:   true,
 		},
 		{
 			category:    "stdlib-bytes",
@@ -1351,24 +1388,28 @@ func runtimeCapabilities() []runtimeCapability {
 			name:        "notify-context",
 			source:      "stdlib_signal_notify_context.go",
 			expectation: runtimeCapabilityMustPass,
+			exclusive:   true,
 		},
 		{
 			category:    "stdlib-signals",
 			name:        "repeated-stop-reset",
 			source:      "stdlib_signal_repeated_stop_reset.go",
 			expectation: runtimeCapabilityMustPass,
+			exclusive:   true,
 		},
 		{
 			category:    "stdlib-signals",
 			name:        "during-gc",
 			source:      "stdlib_signal_during_gc.go",
 			expectation: runtimeCapabilityMustPass,
+			exclusive:   true,
 		},
 		{
 			category:       "stdlib-signals",
 			name:           "during-netpoll",
 			source:         "stdlib_signal_during_netpoll.go",
 			expectation:    runtimeCapabilityMustPass,
+			exclusive:      true,
 			requiresAFINET: true,
 		},
 		{
@@ -1376,6 +1417,7 @@ func runtimeCapabilities() []runtimeCapability {
 			name:        "atomic-contention",
 			source:      "stdlib_signal_atomic_contention.go",
 			expectation: runtimeCapabilityMustPass,
+			exclusive:   true,
 		},
 		{
 			category:       "stdlib-http",
@@ -1505,6 +1547,7 @@ func runtimeCapabilities() []runtimeCapability {
 			name:        "debug-stack-gc",
 			source:      "stdlib_runtime_debug_stack_gc.go",
 			expectation: runtimeCapabilityMustPass,
+			exclusive:   true,
 		},
 		{
 			category:    "stdlib-runtime-diagnostics",
@@ -1547,6 +1590,7 @@ func runtimeCapabilities() []runtimeCapability {
 			name:        "allocs-per-run",
 			source:      "allocs_per_run.go",
 			expectation: runtimeCapabilityMustPass,
+			exclusive:   true,
 		},
 		{
 			category:    "stdlib-os-process",
@@ -1559,24 +1603,28 @@ func runtimeCapabilities() []runtimeCapability {
 			name:        "pipe-past-deadline",
 			source:      "stdlib_netpoll_pipe_past_deadline.go",
 			expectation: runtimeCapabilityMustPass,
+			exclusive:   true,
 		},
 		{
 			category:    "stdlib-netpoll",
 			name:        "pipe-deadline",
 			source:      "stdlib_netpoll_pipe_deadline.go",
 			expectation: runtimeCapabilityMustPass,
+			exclusive:   true,
 		},
 		{
 			category:    "stdlib-netpoll",
 			name:        "pipe-close-unblocks-read",
 			source:      "stdlib_netpoll_pipe_close_unblocks_read.go",
 			expectation: runtimeCapabilityMustPass,
+			exclusive:   true,
 		},
 		{
 			category:    "stdlib-netpoll",
 			name:        "pipe-afterfunc-close",
 			source:      "stdlib_netpoll_pipe_afterfunc_close.go",
 			expectation: runtimeCapabilityMustPass,
+			exclusive:   true,
 		},
 		{
 			category:    "stdlib-netpoll",
@@ -1589,18 +1637,21 @@ func runtimeCapabilities() []runtimeCapability {
 			name:        "pipe-deadline-reset",
 			source:      "stdlib_netpoll_stress_pipe_deadline_reset.go",
 			expectation: runtimeCapabilityMustPass,
+			exclusive:   true,
 		},
 		{
 			category:    "stdlib-netpoll-stress",
 			name:        "pipe-close-churn",
 			source:      "stdlib_netpoll_stress_pipe_close_churn.go",
 			expectation: runtimeCapabilityMustPass,
+			exclusive:   true,
 		},
 		{
 			category:       "stdlib-netpoll-stress",
 			name:           "tcp-churn",
 			source:         "stdlib_netpoll_stress_tcp_churn.go",
 			expectation:    runtimeCapabilityMustPass,
+			exclusive:      true,
 			requiresAFINET: true,
 		},
 		{
@@ -1608,6 +1659,7 @@ func runtimeCapabilities() []runtimeCapability {
 			name:           "udp-burst",
 			source:         "stdlib_netpoll_stress_udp_burst.go",
 			expectation:    runtimeCapabilityMustPass,
+			exclusive:      true,
 			requiresAFINET: true,
 		},
 		{
@@ -1622,6 +1674,7 @@ func runtimeCapabilities() []runtimeCapability {
 			name:           "tcp-echo",
 			source:         "stdlib_netpoll_tcp_echo.go",
 			expectation:    runtimeCapabilityMustPass,
+			exclusive:      true,
 			requiresAFINET: true,
 		},
 		{
@@ -1629,6 +1682,7 @@ func runtimeCapabilities() []runtimeCapability {
 			name:           "tcp-read-deadline",
 			source:         "stdlib_netpoll_tcp_read_deadline.go",
 			expectation:    runtimeCapabilityMustPass,
+			exclusive:      true,
 			requiresAFINET: true,
 		},
 		{
@@ -1636,6 +1690,7 @@ func runtimeCapabilities() []runtimeCapability {
 			name:           "tcp-accept-deadline",
 			source:         "stdlib_netpoll_tcp_accept_deadline.go",
 			expectation:    runtimeCapabilityMustPass,
+			exclusive:      true,
 			requiresAFINET: true,
 		},
 		{
@@ -1643,6 +1698,7 @@ func runtimeCapabilities() []runtimeCapability {
 			name:           "tcp-concurrent-clients",
 			source:         "stdlib_netpoll_tcp_concurrent_clients.go",
 			expectation:    runtimeCapabilityMustPass,
+			exclusive:      true,
 			requiresAFINET: true,
 		},
 		{
@@ -1657,6 +1713,7 @@ func runtimeCapabilities() []runtimeCapability {
 			name:           "udp-deadline",
 			source:         "stdlib_netpoll_udp_deadline.go",
 			expectation:    runtimeCapabilityMustPass,
+			exclusive:      true,
 			requiresAFINET: true,
 		},
 		{
@@ -1664,6 +1721,7 @@ func runtimeCapabilities() []runtimeCapability {
 			name:           "close-unblocks-read",
 			source:         "stdlib_netpoll_close_unblocks_read.go",
 			expectation:    runtimeCapabilityMustPass,
+			exclusive:      true,
 			requiresAFINET: true,
 		},
 		{
@@ -1878,30 +1936,35 @@ func runtimeCapabilities() []runtimeCapability {
 			name:        "time-timers",
 			source:      "runtime_timer_sleep.go",
 			expectation: runtimeCapabilityMustPass,
+			exclusive:   true,
 		},
 		{
 			category:    "runtime-packages",
 			name:        "gomaxprocs-memstats",
 			source:      "gomaxprocs_memstats.go",
 			expectation: runtimeCapabilityMustPass,
+			exclusive:   true,
 		},
 		{
 			category:    "runtime-packages",
 			name:        "time-reset-stop",
 			source:      "runtime_timer_reset_stop.go",
 			expectation: runtimeCapabilityMustPass,
+			exclusive:   true,
 		},
 		{
 			category:    "runtime-packages",
 			name:        "ticker-stop",
 			source:      "runtime_ticker_stop.go",
 			expectation: runtimeCapabilityMustPass,
+			exclusive:   true,
 		},
 		{
 			category:    "runtime-packages",
 			name:        "select-timeout",
 			source:      "runtime_select_timeout.go",
 			expectation: runtimeCapabilityMustPass,
+			exclusive:   true,
 		},
 		{
 			category:    "runtime-packages",
@@ -1914,6 +1977,7 @@ func runtimeCapabilities() []runtimeCapability {
 			name:        "debug-gc-controls",
 			source:      "runtime_debug_gc_controls.go",
 			expectation: runtimeCapabilityMustPass,
+			exclusive:   true,
 		},
 		{
 			category:    "runtime-packages",
@@ -2034,12 +2098,14 @@ func runtimeCapabilities() []runtimeCapability {
 			name:        "finalizer-basic",
 			source:      "runtime_finalizer_basic.go",
 			expectation: runtimeCapabilityMustPass,
+			exclusive:   true,
 		},
 		{
 			category:    "runtime-packages",
 			name:        "time-afterfunc",
 			source:      "runtime_time_afterfunc.go",
 			expectation: runtimeCapabilityMustPass,
+			exclusive:   true,
 		},
 		{
 			category:    "runtime-packages",
@@ -2052,6 +2118,7 @@ func runtimeCapabilities() []runtimeCapability {
 			name:        "time-after",
 			source:      "runtime_time_after.go",
 			expectation: runtimeCapabilityMustPass,
+			exclusive:   true,
 		},
 		{
 			category:    "runtime-packages",
@@ -2064,6 +2131,7 @@ func runtimeCapabilities() []runtimeCapability {
 			name:        "finalizer-resurrect",
 			source:      "runtime_finalizer_resurrect.go",
 			expectation: runtimeCapabilityMustPass,
+			exclusive:   true,
 		},
 		{
 			category:    "runtime-packages",
@@ -2076,6 +2144,7 @@ func runtimeCapabilities() []runtimeCapability {
 			name:        "timer-gc-channel",
 			source:      "runtime_timer_gc_channel.go",
 			expectation: runtimeCapabilityMustPass,
+			exclusive:   true,
 		},
 		{
 			category:    "runtime-packages",
@@ -2088,6 +2157,7 @@ func runtimeCapabilities() []runtimeCapability {
 			name:        "ticker-multi-tick",
 			source:      "runtime_ticker_multi_tick.go",
 			expectation: runtimeCapabilityMustPass,
+			exclusive:   true,
 		},
 		{
 			category:    "runtime-packages",
@@ -2106,6 +2176,7 @@ func runtimeCapabilities() []runtimeCapability {
 			name:        "timer-reset-after-drain",
 			source:      "runtime_timer_reset_after_drain.go",
 			expectation: runtimeCapabilityMustPass,
+			exclusive:   true,
 		},
 		{
 			category:    "stack",
@@ -2173,9 +2244,9 @@ func TestARM64RuntimeCapabilityStatus(t *testing.T) {
 	runtimeCoverageCollector.expect(capabilities)
 
 	// Compile this shard's programs up front and in parallel. Compilation is
-	// 98% of this suite's wall clock, so overlapping it is the difference
-	// between tens of minutes and about one; the runs that follow stay
-	// sequential because several of them assert timing and GC behaviour.
+	// 99.5% of this suite's compute -- roughly 3000 s of compiler time against a
+	// 14 s run phase -- so overlapping it is the difference between tens of
+	// minutes and a few.
 	shard := make([]runtimeCapability, 0, len(capabilities))
 	for index, capability := range capabilities {
 		if index%*runtimeStatusShards != *runtimeStatusShard {
@@ -2194,14 +2265,36 @@ func TestARM64RuntimeCapabilityStatus(t *testing.T) {
 	}
 	prebuiltRuntime := buildPrebuiltRuntimeForCapabilityStatus(t, compiler, directory)
 	compileQueue := startRuntimeCapabilityCompiles(compiler, directory, prebuiltRuntime, shard)
+	runner := &runtimeCapabilityRunner{
+		compiler:              compiler,
+		directory:             directory,
+		prebuiltRuntime:       prebuiltRuntime,
+		queue:                 compileQueue,
+		slots:                 make(chan struct{}, runtimeCapabilityRunWorkers()),
+		afinetSocketAvailable: afinetSocketAvailable,
+		afinetSocketErr:       afinetSocketErr,
+	}
 	if *runtimeStatusProgress {
 		fmt.Fprintf(
 			os.Stderr,
-			"runtime-status: compiling %d programs, %d at a time\n",
-			len(shard), compileRuntimeCapabilityWorkers(),
+			"runtime-status: compiling %d programs %d at a time; running %d concurrently, then %d exclusively\n",
+			len(shard),
+			compileRuntimeCapabilityWorkers(),
+			runtimeCapabilityRunWorkers(),
+			countExclusiveRuntimeCapabilities(shard),
 		)
 	}
 
+	// The run phase has two halves that together cover the shard exactly once,
+	// so the matrix still reports one subtest per capability.
+	//
+	// Running the non-exclusive half concurrently is worth about 7 s of run time
+	// directly. It is worth far more indirectly: the look-ahead budget is
+	// returned when a program *runs*, so a run phase that walked the matrix in
+	// index order pinned the compile dispatcher to the run frontier, and a slow
+	// compile in the middle of the matrix idled the workers behind it. See
+	// RUNTIME_PLAN.md section 17.
+	var concurrentRuns sync.WaitGroup
 	for index, capability := range capabilities {
 		capability := capability
 		// Shard the matrix across parallel CI jobs: each shard owns the
@@ -2211,82 +2304,176 @@ func TestARM64RuntimeCapabilityStatus(t *testing.T) {
 		if index%*runtimeStatusShards != *runtimeStatusShard {
 			continue
 		}
-		t.Run(capability.category+"/"+capability.name, func(t *testing.T) {
-			if capability.requiresAFINET && !afinetSocketAvailable {
-				// A skipped capability still owns a row in the coverage report.
-				// Dropping it here would shrink the corpus denominator without
-				// anything recording that it had.
-				reason := fmt.Sprintf("AF_INET sockets unavailable in this execution environment: %v", afinetSocketErr)
-				runtimeCoverageCollector.add(capability, skippedRuntimeCapabilityResult(reason))
-				t.Skip(reason)
-			}
-			if *runtimeStatusProgress {
-				fmt.Fprintf(os.Stderr, "runtime-status: start %s/%s %s\n", capability.category, capability.name, capability.source)
-			}
-			compilation, queued := compileQueue.await(capability)
-			if !queued {
-				// -test.run and runtimeCapabilitySelected can disagree about
-				// which subtests run, so a capability can reach here without
-				// having been queued. Compile it here rather than assuming.
-				compilation = compileRuntimeCapabilityWith(compiler, directory, prebuiltRuntime, capability)
-			} else {
-				// The look-ahead budget must come back even if the run panics
-				// or fails an assertion, or the dispatcher stalls behind it.
-				defer compileQueue.release()
-			}
-			result := runRuntimeCapabilityProgram(t, compilation, capability)
-			if *runtimeStatusProgress {
-				status := "pass"
-				if result.err != nil {
-					status = "fail"
-				}
-				fmt.Fprintf(
-					os.Stderr,
-					"runtime-status: %s %s/%s compile=%s %s peak=%.1fMiB run=%s %s peak=%.1fMiB coverage=%s\n",
-					status,
-					capability.category,
-					capability.name,
-					result.compileOutcome,
-					result.compileDuration.Round(time.Millisecond),
-					float64(result.compilePeakRSS)/(1024*1024),
-					result.runOutcome,
-					result.runDuration.Round(time.Millisecond),
-					float64(result.runPeakRSS)/(1024*1024),
-					result.coverageOutcome,
-				)
-			}
-			runtimeCoverageCollector.add(capability, result)
-			if capability.expectation == runtimeCapabilityMustPass && result.err != nil {
-				t.Fatalf("%s should pass: %v\n%s", capability.source, result.err, result.output)
-			}
-			if capability.expectation == runtimeCapabilityKnownGap && result.err != nil {
-				t.Logf(
-					"KNOWN GAP %s: %s\n%v\n%s",
-					capability.source,
-					capability.note,
-					result.err,
-					truncateRuntimeCapabilityOutput(result.output),
-				)
-				return
-			}
-			if capability.expectation == runtimeCapabilityKnownGap && result.err == nil {
-				t.Logf("KNOWN GAP NOW PASSES %s: %s", capability.source, capability.note)
-				return
-			}
-			if capability.expectation == runtimeCapabilityExpectedFailure {
-				if result.err == nil {
-					t.Fatalf("%s should fail", capability.source)
-				}
-				if capability.output != "" && !strings.Contains(result.output, capability.output) {
-					t.Fatalf("%s failed without expected output %q:\n%s", capability.source, capability.output, result.output)
-				}
-				t.Logf("EXPECTED FAILURE %s", capability.source)
-				return
-			}
-			t.Logf("PASS %s", capability.source)
-		})
+		if capability.exclusive {
+			continue
+		}
+		concurrentRuns.Add(1)
+		go func() {
+			defer concurrentRuns.Done()
+			runner.run(t, capability)
+		}()
 	}
+	concurrentRuns.Wait()
+
+	// The exclusive programs run last, one at a time, with the compile queue
+	// drained. Only their own compiles can still be outstanding at this point --
+	// every other program has already run -- so waiting costs nothing and buys
+	// them a machine with no compiler on it, which is more isolation than the
+	// old sequential phase gave them.
+	compileQueue.drainCompiles()
+	for index, capability := range capabilities {
+		capability := capability
+		if index%*runtimeStatusShards != *runtimeStatusShard {
+			continue
+		}
+		if !capability.exclusive {
+			continue
+		}
+		runner.run(t, capability)
+	}
+
 	runtimeCoverageCollector.write(t)
+}
+
+// runtimeCapabilityRunner holds everything a capability subtest needs that does
+// not vary between capabilities, so the concurrent half of the run phase and the
+// exclusive half can share one body.
+type runtimeCapabilityRunner struct {
+	compiler              string
+	directory             string
+	prebuiltRuntime       string
+	queue                 *runtimeCapabilityCompileQueue
+	slots                 chan struct{}
+	afinetSocketAvailable bool
+	afinetSocketErr       error
+}
+
+// run executes one capability as a subtest. It is safe to call from several
+// goroutines at once: testing.T.Run may be called concurrently as long as every
+// call returns before the parent test function does, which both halves of the run
+// phase guarantee.
+func (runner *runtimeCapabilityRunner) run(t *testing.T, capability runtimeCapability) {
+	t.Run(capability.category+"/"+capability.name, func(t *testing.T) {
+		if capability.requiresAFINET && !runner.afinetSocketAvailable {
+			// A skipped capability still owns a row in the coverage report.
+			// Dropping it here would shrink the corpus denominator without
+			// anything recording that it had.
+			reason := fmt.Sprintf("AF_INET sockets unavailable in this execution environment: %v", runner.afinetSocketErr)
+			runtimeCoverageCollector.add(capability, skippedRuntimeCapabilityResult(reason))
+			t.Skip(reason)
+		}
+		if *runtimeStatusProgress {
+			fmt.Fprintf(os.Stderr, "runtime-status: start %s/%s %s\n", capability.category, capability.name, capability.source)
+		}
+		compilation, queued := runner.queue.await(capability)
+		if !queued {
+			// -test.run and runtimeCapabilitySelected can disagree about
+			// which subtests run, so a capability can reach here without
+			// having been queued. Compile it here rather than assuming.
+			compilation = compileRuntimeCapabilityWith(runner.compiler, runner.directory, runner.prebuiltRuntime, capability)
+		} else {
+			// The look-ahead budget must come back even if the run panics
+			// or fails an assertion, or the dispatcher stalls behind it.
+			defer runner.queue.release()
+		}
+		// The run slot is taken after the compilation is in hand. A subtest
+		// waiting for its compile is not using the machine, and holding a slot
+		// while it waits would cap how many programs can be waiting at once,
+		// which is the coupling this phase exists to remove.
+		releaseRunSlot := runner.acquireRunSlot(capability)
+		defer releaseRunSlot()
+		result := runRuntimeCapabilityProgram(t, compilation, capability)
+		if *runtimeStatusProgress {
+			status := "pass"
+			if result.err != nil {
+				status = "fail"
+			}
+			fmt.Fprintf(
+				os.Stderr,
+				"runtime-status: %s %s/%s compile=%s %s peak=%.1fMiB run=%s %s peak=%.1fMiB coverage=%s\n",
+				status,
+				capability.category,
+				capability.name,
+				result.compileOutcome,
+				result.compileDuration.Round(time.Millisecond),
+				float64(result.compilePeakRSS)/(1024*1024),
+				result.runOutcome,
+				result.runDuration.Round(time.Millisecond),
+				float64(result.runPeakRSS)/(1024*1024),
+				result.coverageOutcome,
+			)
+		}
+		runtimeCoverageCollector.add(capability, result)
+		if capability.expectation == runtimeCapabilityMustPass && result.err != nil {
+			t.Fatalf("%s should pass: %v\n%s", capability.source, result.err, result.output)
+		}
+		if capability.expectation == runtimeCapabilityKnownGap && result.err != nil {
+			t.Logf(
+				"KNOWN GAP %s: %s\n%v\n%s",
+				capability.source,
+				capability.note,
+				result.err,
+				truncateRuntimeCapabilityOutput(result.output),
+			)
+			return
+		}
+		if capability.expectation == runtimeCapabilityKnownGap && result.err == nil {
+			t.Logf("KNOWN GAP NOW PASSES %s: %s", capability.source, capability.note)
+			return
+		}
+		if capability.expectation == runtimeCapabilityExpectedFailure {
+			if result.err == nil {
+				t.Fatalf("%s should fail", capability.source)
+			}
+			if capability.output != "" && !strings.Contains(result.output, capability.output) {
+				t.Fatalf("%s failed without expected output %q:\n%s", capability.source, capability.output, result.output)
+			}
+			t.Logf("EXPECTED FAILURE %s", capability.source)
+			return
+		}
+		t.Logf("PASS %s", capability.source)
+	})
+}
+
+// acquireRunSlot bounds how many capability programs execute at once, and
+// returns the function that gives the slot back.
+//
+// An exclusive capability takes no slot. The half of the run phase that executes
+// it is already serial, and the half that would contend with it has finished, so
+// a slot would only be a second name for the same guarantee.
+func (runner *runtimeCapabilityRunner) acquireRunSlot(capability runtimeCapability) func() {
+	if capability.exclusive {
+		return func() {}
+	}
+	runner.slots <- struct{}{}
+	return func() {
+		<-runner.slots
+	}
+}
+
+// runtimeCapabilityRunWorkers is how many capability programs execute at once.
+//
+// This is deliberately not a lever. The whole run phase is about 14 s against
+// roughly 3000 s of compile CPU, so a small number hides it completely, and the
+// non-exclusive programs execute alongside a saturated compile queue -- keeping
+// their number low is the other half of what the exclusive classification is
+// protecting. Peak RSS over all 338 runs is 78 MiB, so memory is not the bound
+// here the way it is for compilation.
+func runtimeCapabilityRunWorkers() int {
+	if *runtimeStatusRunWorkers > 0 {
+		return *runtimeStatusRunWorkers
+	}
+	return 4
+}
+
+func countExclusiveRuntimeCapabilities(capabilities []runtimeCapability) int {
+	exclusive := 0
+	for _, capability := range capabilities {
+		if capability.exclusive {
+			exclusive++
+		}
+	}
+	return exclusive
 }
 
 func truncateRuntimeCapabilityOutput(output string) string {
@@ -2447,12 +2634,12 @@ func availableMemoryBytes() uint64 {
 //
 // Concurrency is bounded by compileRuntimeCapabilityWorkers, which is about CPU
 // and memory. Look-ahead is bounded separately, because every compiled program
-// occupies disk until its run deletes it: compiling all 356 up front peaks at
+// occupies disk until its run deletes it: compiling all 338 up front peaks at
 // well over a gigabyte, which is fine on a build host and fatal on a laptop
 // whose /tmp is a tmpfs. Bounding the number of compiled-but-not-yet-run
-// programs keeps the workers saturated -- the run phase is 1.8% of wall clock,
-// so it never starves them -- while capping disk at the window rather than the
-// corpus.
+// programs keeps the workers saturated -- the run phase is 0.5% of the suite's
+// compute, so it never starves them -- while capping disk at the window rather
+// than the corpus.
 type runtimeCapabilityCompileQueue struct {
 	entries   map[string]*runtimeCapabilityCompileEntry
 	lookahead chan struct{}
@@ -2500,9 +2687,19 @@ func startRuntimeCapabilityCompiles(
 	capabilities []runtimeCapability,
 ) *runtimeCapabilityCompileQueue {
 	workers := compileRuntimeCapabilityWorkers()
+
+	// An exclusive capability holds its look-ahead budget from the moment it
+	// compiles until the exclusive half of the run phase, at the very end, so
+	// that budget is not reclaimable during the run. The window therefore has to
+	// be the concurrent budget *plus* the exclusive count. Without that term this
+	// is a deadlock rather than a slowdown: at 55 exclusive capabilities, any
+	// worker count below 14 lets them alone exhaust a 4*workers window while the
+	// dispatcher waits for a token only the final phase can return.
+	exclusive := countExclusiveRuntimeCapabilities(capabilities)
+
 	queue := &runtimeCapabilityCompileQueue{
 		entries:   make(map[string]*runtimeCapabilityCompileEntry, len(capabilities)),
-		lookahead: make(chan struct{}, 4*workers),
+		lookahead: make(chan struct{}, 4*workers+exclusive),
 	}
 	for _, capability := range capabilities {
 		queue.entries[capability.category+"/"+capability.name] = &runtimeCapabilityCompileEntry{
@@ -2510,9 +2707,16 @@ func startRuntimeCapabilityCompiles(
 		}
 	}
 
+	// Dispatch the expensive programs first. Matrix order put eleven compiles of
+	// 125-167 s each at indices 155-223 of 338, so they started late and left
+	// workers idle behind them while the queue drained; a greedy list schedule
+	// costs at most one job's length above the ideal, and this makes that job the
+	// one that is going to bound the run anyway.
+	ordered := runtimeCapabilitiesByDescendingCompileCost(capabilities)
+
 	slots := make(chan struct{}, workers)
 	go func() {
-		for _, capability := range capabilities {
+		for _, capability := range ordered {
 			// Both budgets are taken before the compile starts and the
 			// look-ahead one is only returned once the program has run, so a
 			// slow run phase stalls compilation instead of filling the disk.
@@ -2545,6 +2749,15 @@ func (queue *runtimeCapabilityCompileQueue) await(capability runtimeCapability) 
 // release returns the look-ahead budget a finished run was holding.
 func (queue *runtimeCapabilityCompileQueue) release() {
 	<-queue.lookahead
+}
+
+// drainCompiles waits for every queued compile to finish. The entry map is
+// written once, before any compile starts, so reading it here needs no
+// synchronization of its own.
+func (queue *runtimeCapabilityCompileQueue) drainCompiles() {
+	for _, entry := range queue.entries {
+		<-entry.done
+	}
 }
 
 // runtimeCapabilitySelected reports whether -test.run would run this
