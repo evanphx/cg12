@@ -1659,6 +1659,15 @@ image size. All 33 were identical under that comparison, since what varies is
 where the functions went and not what is in them. `analysis/batchdiff` triages
 this way.
 
+Comparing two builds by what they *print* has its own trap, found the same day.
+`goc/testdata/bytes_grow_compare.go` and `goc/testdata/bytes_grow_stats.go` print
+allocation and GC statistics that move with scheduling: one single executable of
+the first gave three distinct outputs in 21 runs at 7-way concurrency and the
+second two in 21, while both gave one output in 12 serial runs on an idle box.
+`bytes_grow_stats.go` showed this across three builds that were the same file
+byte for byte, which is what makes it conclusive. A behaviour comparison has to
+run a disagreement again before believing it; `analysis/batchdiff` now does.
+
 Also unfixed, `-O` only: `opt/inline.go:184` sorts cost-inline candidates with an
 unstable `sort.Slice` over a slice built from map iteration, so which callees are
 inlined when the budget runs out is not reproducible. The matrix runs `-O` under
@@ -2755,6 +2764,10 @@ alphabetically they cluster and a shared queue would hand them out at once.
     one-shot 358 in 217.2s, 0 failed | batch 358 in 183.6s, 0 failed
     batch-reversed 358 in 170.5s, 0 failed | identical=325 differing=33
     behaviour: identical=358 differing=0
+
+The whole check was then run a second time, from scratch, as an independent
+draw: `identical=324 differing=34`, a partly different set of programs differing,
+and again **0 leaks** with all 34 identical in content.
 
 **Zero leaks.** No program built one way and failed another. Every one of the 33
 whose bytes differ is nondeterministic without any batch process in the picture:
