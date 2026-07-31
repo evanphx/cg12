@@ -1,14 +1,38 @@
-# VERDICT: PENDING — verification of `ccwork/batch-reconcile` in progress
+# VERDICT: PASS — `ccwork/batch-reconcile` can be merged
 
-This file is written as results land, not at the end. The verdict line above is `PENDING`
-until every check below has run and been read; if this job is cut short while it still says
-`PENDING`, treat that as **FAIL** — the checks that were not completed are listed under
-"Not yet run".
+Every check the briefing asked for has been run here and read. The reasoning, in one place:
+
+- **There is no leak.** All 358 corpus programs, compiled three ways against the full
+  seven-pack set — one process each, one batch, and a batch in reverse — produce identical
+  behaviour (358/358) and identical *content* (358/358: same symbols, same sizes, same image
+  size). 325 are byte-identical outright. The 33 that are not differ only in where functions
+  were placed, and every one of them is demonstrably nondeterministic with no batch process
+  anywhere in the picture: recompiled alone, they produce the batch's exact bytes. §5.10
+  already records this residue and says 39 of the 358 vary at all.
+- **The new case is covered.** A single worker compiled 33 programs ordered so that programs
+  choosing `net/http`, four different crypto packs, `net/smtp` and the runtime-only fallback
+  were interleaved throughout, so that one process read all seven packs and kept each while
+  compiling programs that chose the others. 0 leaks, behaviour identical for all 33.
+- **Nothing regressed.** `make test-unit`, `make test-goc-cmd`, `make test-goc-corpus` pass.
+  The full matrix passes 338/338 with 337 `PASS`, 1 `EXPECTED FAILURE`, 0 `KNOWN GAP`, 0
+  `FAIL` — in all four arms tried, including the two paths the branch never exercised.
+- **The claim reproduces.** Compile CPU falls 22.1% against `main` and 22.2% against a
+  one-flag-apart control on this tree; the control lands 0.14% from `main`. The wall-clock
+  figure is smaller than the branch's −22.2% because the branch measured at 4 workers and this
+  at 8, which is exactly what §20's own bound predicts.
+
+Two things are flagged rather than fixed, neither of them caused by this branch and neither
+blocking: the checked-in runtime coverage baseline is stale on `main` (§5c below), and the
+compiler's front-end nondeterminism is unchanged (§5.10).
+
+One defect *was* found and fixed here, in the measurement tool rather than the compiler:
+`analysis/batchdiff` triaged a differing program with a single solitary recompile, which
+against a compiler that yields five distinct images in five compiles reports leaks that are
+not there — it called three in this job's own runs. Commit `1b3b2aa`.
 
 Branch: `ccwork/verify-batch-reconcile`, off `ccwork/batch-reconcile` (`76030b4`).
 That branch's own report is preserved verbatim at `docs/report-batch-reconcile.md`, following
-the precedent those jobs set. No source change is proposed by this job unless a check finds a
-defect.
+the precedent those jobs set. No change to any compiler source file is proposed by this job.
 
 ## What is being verified
 
@@ -392,11 +416,46 @@ Peak RSS is unchanged across the three arms (2620 / 2619 / 2631 MB), which confi
 worker retaining every pack it has read does not move the maximum, and that
 `compileRuntimeCapabilityPeakBytes = 3 GiB` still stands.
 
-## Not yet run
+## The one defect found, and it is in the measurement tool
 
-1. Leak check — corpus-wide, and the curated interleaved single-worker case.
-2. `scripts/determinism-check.sh`, with the seven packs and with no pack.
-3. `make test-unit`, `make test-goc-cmd`, `make test-goc-corpus`.
-4. The full 338-capability matrix with a subtest census.
-5. The monolithic batch path and `make test-goc-coverage`.
-6. The matrix A/B against `main`.
+`analysis/batchdiff` decided whether a differing program was a leak by recompiling it alone
+**once** and calling it a leak if that repeat matched the first build. That is not a test
+against this compiler. In the curated single-worker run it declared three leaks
+(`bytes_replace_allocs.go`, `stdlib_crypto_ecdsa.go`, `stdlib_smtp_session.go`) that were
+nothing of the kind, and a six-program smoke run declared three out of three. Left alone it
+would cost the next reader an hour, or worse, be believed.
+
+Fixed in `1b3b2aa`, and the fix is not "repeat more times" — that was tried first and is also
+wrong, because a program with seventeen-out-of-seventeen distinct images will never reproduce a
+specific one, so set membership reports a leak for everything. What works is asking *what
+moved*: `contentDigestOf` hashes every defined symbol's name, size, kind and section, sorted,
+plus the image size, using `debug/elf`. Two images that differ only in layout hash the same;
+one that gained, lost or resized a symbol does not.
+
+Triage is now three-way:
+
+- `LAYOUT ONLY` — content digests match across all three builds. The §5.10 residue.
+- `NONDETERMINISTIC ALONE` — content differs, but `-repeats` solitary compiles produce the
+  same content the batch did.
+- `LEAK` — content differs and no solitary compile reproduces it.
+
+Validated both ways. On the six-program set that produced three false leaks: `leaks=0
+explained=3`, all `LAYOUT ONLY`. And the digest is not vacuously constant — a copy of
+`hello.go` with one extra function added hashes differently from the original (`e4b63ffa` vs
+`f1204948`), while two byte-different builds of `bytes_replace_allocs.go` hash the same
+(`6500d80c`). Necessary, not sufficient: two functions of equal size can hold different
+instructions, so the tool reports "layout only", not "identical", and the behaviour comparison
+still runs on every program.
+
+## What was not done
+
+- **The runtime coverage baseline is stale and was left stale.** `runtime-cover-diff` refuses
+  to compare because `RuntimeSourceID` differs. That is true on `main` as well, for the reason
+  given in §5c. Refreshing it is a separate change with its own review.
+- **The compiler's front-end nondeterminism is untouched**, as §5.10 intends — it changes the
+  layout of every program goc compiles and wants its own validation cycle.
+- **The A/B was measured on a shared box**, not a quiet one. Load average ran between 8 and 22
+  for the whole job. The CPU columns are per-compile measurements taken inside the harness and
+  are robust to that; the wall-clock column is not, and is labelled as such.
+- **The `-O` configuration was not swept.** Every run here is the default non-`-O` matrix, which
+  is what the briefing asked for; `-runtime-opt` was not exercised.
