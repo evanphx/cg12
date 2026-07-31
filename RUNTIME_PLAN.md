@@ -1552,7 +1552,7 @@ requires (`println("a", 1)` gives `a1`). Found while reducing this bug, unrelate
 to it, and not fixed here. Carried in §5.10 with the rest of Phase 1's open
 items, together with one of the two further loop-related defects this work
 exposed, the `runtimeAllocation` gating. The other, the non-identifier range
-key, is fixed in §5.11.
+key, is fixed in §5.13.
 
 ### 5.10 Open items carried out of Phase 1 (2026-07-28)
 
@@ -1587,11 +1587,11 @@ the reports of the jobs that found them.
   heap-lifts the variable and makes its storage the header itself, so a
   goroutine closure over the same variable is correct.
 
-  Found while establishing the scope of §5.11 and deliberately left out of it:
+  Found while establishing the scope of §5.13 and deliberately left out of it:
   it needs no `range` statement and no non-identifier destination — a plain
   `for i := range seq { log += fmt.Sprint(i) }` over a function iterator
   reproduces it — so it belongs to closure capture, not to assignment
-  destinations. It is the reason three range-over-function cases in §5.11's
+  destinations. It is the reason three range-over-function cases in §5.13's
   differential corpus still differ from the host; they were rewritten to
   accumulate into a slice, which is unaffected, and the underlying defect is
   recorded here rather than worked around.
@@ -1715,7 +1715,249 @@ inlined when the budget runs out is not reproducible. The matrix runs `-O` under
   set their own `GOMAXPROCS`. That keeps the coverage but leaves the general
   question open: defects that need many Ps are still structurally hard to see.
 
-### 5.11 Fixed: assignment destinations that were not identifiers (2026-07-28)
+### 5.11 Fixed: the entry stack map described a never-started goroutine's argument frame (2026-07-28)
+
+Current checkpoint:
+
+- [x] Build a fault-rate harness with a hard per-run timeout and parallel
+  execution, and establish that `runtime: marked free object in span` and
+  `fatal error: found pointer to free object` are **the same report**, not two
+  faults: `mspan.reportZombies` prints the first line and then throws the second.
+  §5.8's correction to itself was therefore a correction in the wrong direction.
+- [x] Reduce the fault from an intermittent capability failure to
+  `gc/goroutine-entry-stack-map`, which fails on about 92 runs in 100.
+- [x] Name the first bad state: a goroutine `runtime.newproc` has created and not
+  yet scheduled, whose closure wrapper frame is scanned precisely at
+  `pc == entry` with an argument map that marks a word nothing has written.
+- [x] Fix the metadata layer and prove it statistically over matched
+  160000-run controls.
+
+#### Root cause
+
+cg12 starts every goroutine through a generated closure wrapper
+(`gen.callClosure`, spelled `<pkg>_gowrap_<line>_<col>`). The wrapper takes no
+Go parameters, but ABIInternal supplies its closure environment in X26, and
+`goArgumentFrameFor` gives that register a home slot at argument-frame offset 0
+so the stack-growth prologue can spill it around `morestack`. That slot is a
+`prologueOffset`: only the callee writes it, and only on the path that grows the
+stack.
+
+`gometa.ArgumentStackMaps` put the prologue's map — home slots included — at
+stack-map index 0, because `StackMapPCData` selects index 0 for the whole
+prologue range. The comment on `FunctionStackMaps` already recorded the hazard
+and guarded the one case it saw: a *body* safepoint must never resolve to index
+0, because it would inherit those never-written words.
+
+The case it did not see is that the runtime reaches index 0 by a second route.
+`runtime.stkframe.getStackMap` short-circuits the PCDATA lookup when a frame's pc
+is exactly the function entry and hardcodes index 0 — "we want to use the entry
+map (-1), even if the first instruction of the function changes the stack map".
+A goroutine created by `newproc` and not yet scheduled is in exactly that state:
+`gostartcall` leaves `sched.pc` at the wrapper's entry and `sched.sp` at
+`stack.hi-48`, and `newproc1` initialises only the two words at and below `sp`.
+The home slot sits at `sp+8`, which is `frame.argp+0` once `gentraceback`
+computes `fp = sp` and `argp = fp + MinFrameSize`. Nothing has ever written it,
+so the precise scan read whatever the previous user of that recycled stack left
+there and marked it.
+
+Upstream Go is safe here by construction rather than by care: the function a Go
+goroutine starts at has an argument frame of size zero, and the closure is kept
+alive through `gp.sched.ctxt`, which `scanstack` scans separately.
+
+What the stale word addressed decided which fatal message appeared, which is why
+these must be counted together:
+
+- a released goroutine stack or an unallocated span →
+  `fatal error: found bad pointer in Go heap`, thrown at the scan;
+- a free object in a live span → the mark bit is set on a free object, and one
+  sweep later `mspan.reportZombies` throws
+  `fatal error: found pointer to free object`;
+- a free object whose span the sweeper then counts as allocated → the object is
+  handed out twice and the program returns a wrong answer with no fault at all.
+
+#### The fix
+
+`gometa.FunctionStackMaps` now appends a *growth* pointer map, distinct from the
+entry map, whenever a function's entry and safepoint argument maps differ — that
+is, whenever it has register home slots. `StackMapPCData` selects that index for
+the prologue range, `ArgumentStackMaps` gives it the full argument map, and every
+other index, index 0 included, gets the caller-initialised subset.
+
+This works because the runtime never consults the PCDATA table at `pc == entry`;
+it hardcodes index 0 there. So index 0 can mean what upstream means by "the entry
+map" — the argument frame as the caller left it — while the prologue window keeps
+its own map for `morestack`. The growth map's locals are empty, which is correct:
+`funcspdelta` is 0 throughout the prologue, so the frame does not exist yet and
+`getStackMap` scans no locals there.
+
+The deterministic guard is `TestGoEntryArgumentMapOmitsTheClosureHomeSlot` in
+`arm64/unit_test.go`, with `TestGoArgumentStackMapsKeepPrologueOnlyWordsOffTheEntryIndex`
+and `TestGoStackMapPCDataSelectsTheGrowthIndexInThePrologue` in
+`internal/gometa/gometa_test.go` covering the two halves separately.
+
+#### Verification
+
+The reducer is `goc/testdata/runtime_goroutine_entry_stack_map.go`, landed as
+`gc/goroutine-entry-stack-map`. Its header records why each ingredient is needed.
+400 runs per cell, same source file, merge-base compiler against fixed compiler.
+The middle column is this section's fix alone, which is what shows that the
+unoptimized build still had §5.12 underneath it:
+
+| Configuration | merge base | §5.11 only | §5.11 + §5.12 |
+| --- | --- | --- | --- |
+| `-O` | 369 / 400 | 0 / 400 | **0 / 400** |
+| unoptimized | 372 / 400 | 2 / 400 | **0 / 400** |
+
+The two unoptimized survivors were `panic: sync: negative WaitGroup counter`,
+which is the same lost-closure corruption §5.12 describes seen through a
+different field of the reused object.
+
+On a 200-round loop of the KeepAlive-free `many-goroutines-gc` variant §5.8 used
+as its control, 2000 runs per column at `-O`:
+
+| Outcome | merge base | §5.11 only | §5.11 + §5.12 |
+| --- | --- | --- | --- |
+| `found bad pointer in Go heap` | 1870 | 0 | 0 |
+| `found pointer to free object` | 74 | 2 | 0 |
+| wrong-answer panic | 1 | 0 | 0 |
+| timeout (>120s) | 2 | 0 | 0 |
+| clean | 53 | 1998 | **2000** |
+
+The two survivors in the middle column were not individually attributed --
+`reportZombies` cannot name its zombie, see below -- but they are gone once
+§5.12 lands, and their rate matches §5.12 rather than this section. Two in 2000
+processes over 200 rounds each is one fault in 200000 rounds, while the same
+defect measured on the single round of §5.12's table is one in 800 *processes*:
+§5.12's fault is per-process, not per-round, because it needs goroutines created
+while a collection is running and one round creates them once. That is also why
+§5.11's fix alone does not move the single-round control at all.
+
+#### What this section could not determine
+
+`mspan.reportZombies` cannot name the zombie object on any span the Green Tea
+collector gives inline mark bits, which is every span with `elemsize` between 16
+and 512 — including the 32-byte spans this fault lands on. `sweepLocked.sweep`
+calls `s.moveInlineMarks(s.gcmarkBits)`, which copies the inline marks out and
+then resets them, and checks for zombies against `gcmarkBits`; `reportZombies`
+then reads the marks back through `markBitsForBase`, which returns the *inline*
+bits for such a span. They have just been cleared, so the report prints every
+object as unmarked, never prints the `zombie` line, and never hexdumps the
+object. That is an upstream diagnostic defect in vendored code, it was not
+touched here, and it is the reason the residual had to be attributed with
+`GODEBUG=gccheckmark=1` instead.
+
+### 5.12 Fixed: unsafe.Pointer stores lost their write barrier (2026-07-28)
+
+Current checkpoint:
+
+- [x] Attribute the residual §5.11 left behind, using `GODEBUG=gccheckmark=1` to
+  turn a lost object into a throw naming the reference that reached it.
+- [x] Reduce it deterministically at the compiler, to two functions differing
+  only in a field's type, one of which loses its barrier.
+- [x] Fix the frontend and prove it statistically over matched 160000-run
+  controls.
+- [ ] There is **no runtime capability for this defect on its own**. Its rate is
+  about one process in 800 even on the program built to provoke it, which is far
+  too rare for the matrix; `gc/goroutine-entry-stack-map` catches it only
+  incidentally, at 2 runs in 400 unoptimized. What guards it is the compile-time
+  test below. A runtime reducer that concentrates `newproc` calls into the mark
+  phase would be worth building and was not attempted here.
+
+#### Root cause
+
+`gen.store` chose the store *width* before it chose the *barrier*:
+
+```go
+if sub, ok := subOf(t); ok {
+    g.cur.StoreSub(sub, v, addr)
+    return                       // barrier check never reached
+}
+class, _ := scalar(t)
+if g.runtimeAllocation && !g.noWriteBarrier && class == ir.ClsP && ... {
+    g.cur.CallVoid(g.fn.Sym("goc_storep", 0), addr, v)
+```
+
+`subOf` reports a width for the integer kinds *and* for `types.UnsafePointer`,
+and `unsafe.Pointer` is the only type it accepts that `scalar` classifies as
+`ir.ClsP`. So exactly one type slipped through: every store of an
+`unsafe.Pointer` into the heap was emitted as a plain store with no write
+barrier. Two functions differing only in a field's type make it visible —
+`h.ordinary = p` for a `*cell` emits `goc_storep`, `h.opaque = p` for an
+`unsafe.Pointer` emitted `storel`.
+
+The consequence in the runtime is `runtime.gostartcall`:
+
+```go
+buf.ctxt = ctxt
+```
+
+`gobuf.ctxt` is declared `unsafe.Pointer` precisely so that writes from Go get
+write barriers — its own comment in `runtime2.go` says so, because the assembly
+that also touches it cannot. `newproc1` reaches it through `gostartcallfn` and
+publishes the new goroutine's funcval, which cg12 allocates immediately before
+with `runtime.newobject`, into a `g` the collector may already have blackened.
+White into black with no barrier is a lost object: the funcval is freed while
+`sched.ctxt` still names it, so the goroutine starts with its closure register
+pointing at freed memory. That yields wrong arguments (the wrong-answer panics),
+and the freed object being marked again later yields
+`fatal error: found pointer to free object`.
+
+This is the direction §6 asks about and §5.7 and §5.8 did not cover: those two
+were cg12 emitting a barrier where upstream omits one. This is cg12 omitting one
+upstream emits, which is strictly worse.
+
+#### The fix
+
+The barrier decision now precedes the sub-width store in `gen.store`. Nothing
+else changes: `unsafe.Pointer` is the only type whose lowering moves, and
+`isNotInHeapPointer` still keeps §5.7's not-in-heap pointers out of the barrier.
+
+The deterministic guard is `TestUnsafePointerStoreKeepsWriteBarrier` in
+`goc/escape_test.go`, which asserts the barrier on an `unsafe.Pointer` field, the
+barrier on an ordinary pointer field, and no barrier on a `uintptr` field, so it
+fails on the pre-fix tree and would also fail if the fix over-reached.
+
+Aggregate stores were already correct and are unchanged: `walkPointerWords`
+already treats an `unsafe.Pointer` field as a pointer word, so a struct copy
+barriered it and the emitted pointer maps and type descriptors always described
+it. Only the scalar store path was wrong.
+
+The added barriers were checked for the opposite failure -- §5.7's, a barrier on
+a pointer the marker cannot interpret -- by running the 49 `gc`, `finalizer` and
+`cleanup` capability programs at `-O` under `GODEBUG=cg12checkwb=2` at
+`GOMAXPROCS=4`. None fired. That is one run per program, so it is a sweep rather
+than a proof.
+
+#### Verification
+
+Matched 160000-run campaigns on the KeepAlive-free `many-goroutines-gc` variant
+-- `goc/testdata/runtime_many_goroutines_gc.go` with its one
+`runtime.KeepAlive(root)` line deleted, which is the control §5.8 used and is not
+itself a capability -- at `-O`, `GOMAXPROCS=4`, `GOGC=10`, from one source file
+compiled by each compiler, with a 60s per-run timeout:
+
+| Outcome | merge base | §5.11 only | §5.11 + §5.12 |
+| --- | --- | --- | --- |
+| `found pointer to free object` | 101 | 126 | **0** |
+| wrong-answer panic | 47 | 73 | **0** |
+| `found bad pointer in Go heap` | 5 | 4 | **0** |
+| `all goroutines are asleep - deadlock!` | 7 | 3 | **0** |
+| timeout (>60s) | 1 | 0 | **0** |
+
+The middle column is what makes the attribution: §5.11's fix does not move this
+program at all, because one round of it creates its goroutines once and the
+§5.11 fault needs recycled goroutine stacks. The 126-against-101 and 73-against-47
+differences are in the same direction and larger than one would like; they are
+not explained here, the box was shared and loaded for both campaigns, and no
+timing-derived claim is made from them.
+
+Under `GODEBUG=gccheckmark=1`, the §5.11-only compiler threw
+`fatal error: checkmark found unmarked object` on 3 of 8000 runs, naming
+`gp.sched.ctxt` as the reference and a 32-byte object whose first word was the
+`main_gowrap_35_6` code pointer — the goroutine closure — as the lost object.
+That is the observation the reduction was built from.
+
+### 5.13 Fixed: assignment destinations that were not identifiers (2026-07-28)
 
 A `range` clause that assigns with `=`, and every other statement that stores a
 value it did not compute from an expression, resolved its destination with its
@@ -2047,7 +2289,7 @@ subsection. What follows replaces it.
    `runtime_coverage_baseline_pending.json` empties and the denominator test
    reconciles baseline to matrix directly.
 
-2. **Fix `for x.f = range s`: done (§5.11).** It was one instance of a wider
+2. **Fix `for x.f = range s`: done (§5.13).** It was one instance of a wider
    defect — every statement that assigns a value it did not compute from an
    expression had its own destination rules — and the reduction found eight more
    wrong answers, including memory corruption from `x.f, m[k] = a, b` and a

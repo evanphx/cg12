@@ -806,6 +806,69 @@ func countCallsSymbol(function *ir.Func, symbol string) int {
 	return count
 }
 
+// unsafe.Pointer is a pointer to the collector, so storing one into the heap
+// needs a write barrier exactly as an ordinary pointer does. cg12 chose the
+// store width before it chose the barrier, and its width table accepts
+// unsafe.Pointer alongside the integer kinds, so every unsafe.Pointer store took
+// the width path and lost its barrier. runtime.gostartcall's `buf.ctxt = ctxt`
+// is one of them: it publishes a goroutine's funcval into a g the collector may
+// already have blackened. RUNTIME_PLAN.md 5.12.
+func TestUnsafePointerStoreKeepsWriteBarrier(t *testing.T) {
+	module, err := goc.CompileExecutable("unsafe_pointer_store.go", []byte(`
+package main
+
+import (
+	"runtime"
+	"unsafe"
+)
+
+type cell struct {
+	value int
+}
+
+type holder struct {
+	word     uintptr
+	opaque   unsafe.Pointer
+	ordinary *cell
+}
+
+func storeOpaque(destination *holder, source unsafe.Pointer) {
+	destination.opaque = source
+}
+
+func storeOrdinary(destination *holder, source *cell) {
+	destination.ordinary = source
+}
+
+func storeWord(destination *holder, source uintptr) {
+	destination.word = source
+}
+
+func Test() {
+	runtime.GC()
+	storeOpaque(new(holder), nil)
+	storeOrdinary(new(holder), nil)
+	storeWord(new(holder), 0)
+}
+
+func main() {
+	Test()
+}
+`))
+	require.NoError(t, err)
+
+	storeOpaque := functionWithSuffix(t, module, "main.storeOpaque")
+	assert.GreaterOrEqual(t, countCallsSymbol(storeOpaque, "goc_storep"), 1, "unsafe.Pointer store lost its write barrier")
+
+	storeOrdinary := functionWithSuffix(t, module, "main.storeOrdinary")
+	assert.GreaterOrEqual(t, countCallsSymbol(storeOrdinary, "goc_storep"), 1, "ordinary pointer store lost its write barrier")
+
+	// A uintptr field holds no pointer, so it must stay barrier-free: the fix is
+	// about which types the collector tracks, not about barriering every word.
+	storeWord := functionWithSuffix(t, module, "main.storeWord")
+	assert.Equal(t, 0, countCallsSymbol(storeWord, "goc_storep"), "uintptr store went through the write barrier")
+}
+
 func TestNotInHeapPointerStoreSkipsWriteBarrier(t *testing.T) {
 	module, err := goc.CompileExecutable("not_in_heap_store.go", []byte(`
 package main

@@ -189,24 +189,34 @@ func TestGoUnsafePointPCDataDisablesAsyncPreemption(t *testing.T) {
 }
 
 func TestGoStackMapPCDataSwitchesAfterPrologue(t *testing.T) {
-	assert.Equal(t, []byte{4, 0xff, 0xff, 0xff, 0xff, 0x0f, 0}, testArch.StackMapPCData(0, nil))
-	assert.Equal(t, []byte{2, 9, 2, 0xff, 0xff, 0xff, 0xff, 0x0f, 0}, testArch.StackMapPCData(36, nil))
+	assert.Equal(t, []byte{4, 0xff, 0xff, 0xff, 0xff, 0x0f, 0}, testArch.StackMapPCData(0, 0, nil))
+	assert.Equal(t, []byte{2, 9, 2, 0xff, 0xff, 0xff, 0xff, 0x0f, 0}, testArch.StackMapPCData(36, 0, nil))
 	assert.Equal(t, []byte{
 		2, 9,
 		2, 11,
 		2, 10,
 		1, 0xff, 0xff, 0xff, 0xff, 0x0f,
 		0,
-	}, testArch.StackMapPCData(36, []StackMapIndexPoint{
+	}, testArch.StackMapPCData(36, 0, []StackMapIndexPoint{
 		{PC: 80, Index: 2},
 		{PC: 120, Index: 1},
 	}))
 }
 
+// A function whose prologue spills register arguments to home slots gets a
+// growth index of its own for the prologue range, so the entry index the runtime
+// hardcodes at pc == entry no longer describes those never-written words.
+func TestGoStackMapPCDataSelectsTheGrowthIndexInThePrologue(t *testing.T) {
+	assert.Equal(t,
+		[]byte{8, 9, 3, 0xff, 0xff, 0xff, 0xff, 0x0f, 0},
+		testArch.StackMapPCData(36, 3, nil),
+	)
+}
+
 func TestGoStackMapPCDataCoalescesDuplicateFrameStartPoint(t *testing.T) {
 	assert.Equal(t,
 		[]byte{2, 0xff, 0xff, 0xff, 0xff, 0x0f, 0},
-		testArch.StackMapPCData(52, []StackMapIndexPoint{{PC: 52, Index: 0}}),
+		testArch.StackMapPCData(52, 0, []StackMapIndexPoint{{PC: 52, Index: 0}}),
 	)
 }
 
@@ -216,7 +226,7 @@ func TestGoStackMapPCDataCoalescesDuplicateFrameStartPoint(t *testing.T) {
 // live for as long as the frame exists -- the over-retention bug of
 // RUNTIME_PLAN.md 5.3.
 func TestGoFunctionStackMapsUseOnlyTheRootsLiveAtEachSafepoint(t *testing.T) {
-	pointerMaps, indexPoints := FunctionStackMaps(FunctionInfo{
+	pointerMaps, indexPoints, growthIndex := FunctionStackMaps(FunctionInfo{
 		LocalPointerWords: []int{1},
 		StackMapPoints: []StackMapPoint{
 			{PC: 80, PointerWords: []int{4}},
@@ -224,6 +234,8 @@ func TestGoFunctionStackMapsUseOnlyTheRootsLiveAtEachSafepoint(t *testing.T) {
 			{PC: 160, PointerWords: nil},
 		},
 	})
+
+	assert.Equal(t, EntryStackMapIndex, growthIndex)
 
 	assert.Equal(t, [][]int{nil, {1}, {4}, nil}, pointerMaps)
 	assert.Equal(t, []StackMapIndexPoint{
@@ -240,7 +252,7 @@ func TestGoFunctionStackMapsUseOnlyTheRootsLiveAtEachSafepoint(t *testing.T) {
 // morestack; sharing the index would point the collector at those never-written
 // words at an ordinary call.
 func TestGoFunctionStackMapsKeepRootlessSafepointsOffTheEntryIndex(t *testing.T) {
-	_, indexPoints := FunctionStackMaps(FunctionInfo{
+	_, indexPoints, _ := FunctionStackMaps(FunctionInfo{
 		LocalPointerWords: []int{1},
 		StackMapPoints: []StackMapPoint{
 			{PC: 80, PointerWords: nil},
@@ -258,7 +270,7 @@ func TestGoFunctionStackMapsKeepRootlessSafepointsOffTheEntryIndex(t *testing.T)
 // rootless safepoints share index 1 -- which is still not the entry index, so
 // the argument map they select is the body one.
 func TestGoFunctionStackMapsShareTheBodyIndexWhenNoFrameRootExists(t *testing.T) {
-	pointerMaps, indexPoints := FunctionStackMaps(FunctionInfo{
+	pointerMaps, indexPoints, _ := FunctionStackMaps(FunctionInfo{
 		StackMapPoints: []StackMapPoint{{PC: 80, PointerWords: nil}},
 	})
 
@@ -266,24 +278,56 @@ func TestGoFunctionStackMapsShareTheBodyIndexWhenNoFrameRootExists(t *testing.T)
 	assert.Equal(t, []StackMapIndexPoint{{PC: 80, Index: 1}}, indexPoints)
 }
 
-// The argument map is written at every stack-map index, not only at index 0. The
-// entry index describes the whole argument frame, because the prologue has just
-// spilled the register arguments to their home slots before calling morestack;
-// every body index describes only what the caller wrote, so a stack-passed
-// pointer argument stays a root for the whole call while the home slots -- which
-// hold nothing on the path that does not call morestack -- do not.
+// The argument map is written at every stack-map index, not only at one of them.
+// The growth index describes the whole argument frame, because the prologue has
+// just spilled the register arguments to their home slots before calling
+// morestack; every other index -- the entry index included -- describes only what
+// the caller wrote, so a stack-passed pointer argument stays a root for the whole
+// call while the home slots, which nothing has written outside the prologue, do
+// not.
 func TestGoArgumentStackMapsCoverEveryStackMapIndex(t *testing.T) {
 	function := FunctionInfo{
 		ArgumentPointerWords:          []int{0, 3},
 		SafepointArgumentPointerWords: []int{0},
 	}
 
-	assert.Equal(t, [][]int{{0, 3}, {0}, {0}, {0}}, ArgumentStackMaps(function, 4))
+	assert.Equal(t, [][]int{{0}, {0}, {0}, {0, 3}}, ArgumentStackMaps(function, 4, 3))
 }
 
-// The emitted bytes: four argument maps for four locals maps, so one
-// PCDATA_StackMapIndex value indexes both tables, and only the first carries the
-// register home slot at word 3.
+// The register home slot at word 3 never appears at EntryStackMapIndex, which is
+// the map the runtime hardcodes for a frame stopped at pc == entry -- the state
+// of a goroutine runtime.newproc has created but not yet scheduled, whose
+// argument frame still holds whatever the previous user of that recycled stack
+// left there. RUNTIME_PLAN.md 5.11.
+func TestGoArgumentStackMapsKeepPrologueOnlyWordsOffTheEntryIndex(t *testing.T) {
+	function := FunctionInfo{
+		ArgumentPointerWords:          []int{0, 3},
+		SafepointArgumentPointerWords: []int{0},
+	}
+	pointerMaps, _, growthIndex := FunctionStackMaps(function)
+
+	assert.NotEqual(t, EntryStackMapIndex, growthIndex)
+	argumentMaps := ArgumentStackMaps(function, len(pointerMaps), growthIndex)
+	assert.Equal(t, []int{0}, argumentMaps[EntryStackMapIndex])
+	assert.Equal(t, []int{0, 3}, argumentMaps[growthIndex])
+}
+
+// A function whose argument frame holds no prologue-only word needs no growth
+// index at all: the entry map already describes exactly what the caller wrote.
+func TestGoFunctionStackMapsAddNoGrowthIndexWithoutHomeSlots(t *testing.T) {
+	pointerMaps, _, growthIndex := FunctionStackMaps(FunctionInfo{
+		ArgumentPointerWords:          []int{0},
+		SafepointArgumentPointerWords: []int{0},
+		LocalPointerWords:             []int{1},
+	})
+
+	assert.Equal(t, EntryStackMapIndex, growthIndex)
+	assert.Equal(t, [][]int{nil, {1}}, pointerMaps)
+}
+
+// The emitted bytes: three argument maps for three locals maps, so one
+// PCDATA_StackMapIndex value indexes both tables, and only the growth map carries
+// the register home slot at word 3.
 func TestGoArgumentStackMapsEmitOneBitmapPerLocalsMap(t *testing.T) {
 	function := FunctionInfo{
 		ArgumentSize:                  32,
@@ -292,19 +336,19 @@ func TestGoArgumentStackMapsEmitOneBitmapPerLocalsMap(t *testing.T) {
 	}
 
 	builder := NewBuilder(testArch, Options{}, nil, nil)
-	builder.stackMaps(4, ArgumentStackMaps(function, 3)...)
+	builder.stackMaps(4, ArgumentStackMaps(function, 3, 2)...)
 
 	assert.Equal(t, []byte{
 		3, 0, 0, 0,
 		4, 0, 0, 0,
+		0b00000001,
+		0b00000001,
 		0b00001001,
-		0b00000001,
-		0b00000001,
 	}, builder.data)
 }
 
 func TestGoFunctionStackMapsNormalizeSafepointPointerWords(t *testing.T) {
-	pointerMaps, indexPoints := FunctionStackMaps(FunctionInfo{
+	pointerMaps, indexPoints, _ := FunctionStackMaps(FunctionInfo{
 		StackMapPoints: []StackMapPoint{
 			{PC: 80, PointerWords: []int{4, 1, 4}},
 			{PC: 120, PointerWords: []int{1, 4}},
@@ -337,7 +381,7 @@ func TestNoLocalPointersAssemblyUsesZeroBitStackMap(t *testing.T) {
 	assert.Equal(t, 0, testArch.LocalStackMapWords(function))
 
 	builder := NewBuilder(testArch, Options{}, nil, nil)
-	pointerMaps, _ := FunctionStackMaps(function)
+	pointerMaps, _, _ := FunctionStackMaps(function)
 	builder.stackMaps(testArch.LocalStackMapWords(function), pointerMaps...)
 	assert.Equal(t, []byte{
 		2, 0, 0, 0,
