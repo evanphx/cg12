@@ -242,6 +242,56 @@ matches what §19's own report recorded for this check.
 `internal/runtimepack`, `internal/testenv`, `interp`, `ir`, `lift`, `link`, `lower`, `obj`,
 `opt`, `parse`, `pe`, `plan9asm`, `plan9asm/sem`, `wasm`, and the `analysis`/`cc` packages).
 
+`make test-goc-cmd`: **PASS** — `ok github.com/evanphx/cg12/cmd/goc 213.765s`.
+`make test-goc-corpus`: **PASS** — `ok github.com/evanphx/cg12/goc 528.370s`.
+
+### 4. The full capability matrix on this branch
+
+Full unsharded run, `-count=1 -v`, 8 compile workers (this job's declared share), batch on and
+the seven packs on — the default configuration:
+
+    label=branch-batch-on wall=174.4 exit=0 subtests=338 pass=338 fail=0 skip=0
+      declaredPASS=337 expectedFAILURE=1 knownGAP=0
+    programs=338 compile_cpu=1095.9 slowest_compile=24.0 (stdlib-http/tls-client-server)
+    run_total=13.9 slowest_run=5.1 (stdlib-signals/atomic-contention)
+
+Census taken from the verbose log rather than from `ok`:
+
+| counted from the log | value |
+| --- | ---: |
+| `=== RUN TestARM64RuntimeCapabilityStatus/<cat>/<name>` lines | 338 |
+| distinct subtest names | 338 |
+| `--- PASS:` subtests | 338 |
+| `--- FAIL:` / `--- SKIP:` subtests | 0 / 0 |
+| declared `PASS` | 337 |
+| declared `EXPECTED FAILURE` | 1 |
+| declared `KNOWN GAP` | 0 |
+
+**The complete list of non-passing capabilities is one entry:**
+
+    defer-panic/panic-string-output   runtime_panic_print_string.go   EXPECTED FAILURE
+      (compile=passed 1.521s, run=failed 10ms)
+
+That is the single pre-existing expected failure §1 records; it is not new here. Wall clock is
+174.4 s against the branch report's 273.6 s only because that was measured at 4 workers and
+this is at 8 — see the A/B below, where both arms are at 8.
+
+### 5b. The coverage run does bypass batch mode — by reading the code
+
+Two independent gates, both in `cmd/goc/runtime_status_test.go`:
+
+- `newRuntimeCapabilityBatchPoolFor` returns `nil` when `*runtimeCoverageProfile != ""`, so
+  `startRuntimeCapabilityCompiles` leaves `queue.batch` nil and every capability takes the
+  `compileRuntimeCapabilityWith` branch — one `goc` process per program, exactly as before this
+  branch.
+- `buildPrebuiltRuntimesForCapabilityStatus` returns `""` for the same condition, so a coverage
+  run has no pack set at all and compiles the runtime into each program.
+
+The reason is structural rather than incidental: coverage passes `-runtime-covermeta` per
+program, `goc compile-batch` does not accept that flag, and a worker is one build configuration
+by construction. So on a coverage run the code this branch changed is not reached: the pack set
+is never built and the batch pool is never created. The run itself is reported below.
+
 ## Not yet run
 
 1. Leak check — corpus-wide, and the curated interleaved single-worker case.
