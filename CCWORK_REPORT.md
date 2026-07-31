@@ -366,3 +366,58 @@ plan named as skewed.
 
 This matters more than any single program does: the pack is the largest module goc
 compiles, and every program built against it inherits its bytes.
+
+## The pack-linked compile path, 6 rounds
+
+The matrix and most real builds link against a prebuilt pack rather than compiling
+the runtime into every program, so that path was swept too — the same 365 programs
+against the runtime-only pack, **6 compiles each**, 2,190 compiles:
+
+```
+programs=365 rounds=6 workers=8 optimize=false pack="…/rt.1.gocrt"
+round 0 … round 5: 365 programs in ~167s each, 0 failed
+
+failed to compile: 0
+content varies between rounds: 0
+image varies, content identical (layout only): 0
+
+reproducible=365 varying=0 failed=0 of 365 over 6 rounds
+```
+
+`-O` + pack is deliberately **not** measured here: that is the 16-capability link
+failure `ccwork/opt-pack-link` owns, and running it would only reproduce their
+failures.
+
+## An extra fix outside goc: `opt`'s phi numbering
+
+The static audit found two sites in the same class as the inherited
+`opt/inline.go` fix, and they are fixed here (`4795470`) rather than left, on the
+same reasoning the predecessor used for `inline.go`: they cannot reach goc, but
+`cg12cc` is real.
+
+`opt/mem2reg.go` and `opt/jumpthread.go`'s `reconstructThreaded` both placed phis
+by ranging `analysis.IteratedFrontier`'s result — a `map[*ir.Block]bool` — and
+placing a phi calls `f.NewTemp`. So which phi got which temporary id was decided by
+map iteration order, and temporary ids reach register allocation and slot
+assignment. Both now walk `cfg.RPO` filtered by frontier membership, which is safe
+because `DominanceFrontier` only ever adds blocks drawn from `cfg.RPO`, so the
+iterated frontier is a subset of it. Phi *placement* is identical either way — one
+per (variable, block) — so this is a numbering defect, not a placement one.
+
+`opt/determinism_test.go`'s `TestMem2RegPlacesPhisInTheSameOrderEveryTime`
+promotes the same two-diamond function 20 times in one process. It **fails 5 times
+out of 5** on the unfixed pass, at the first attempt each time, with a diff like
+`-%t8 =w add %t1.1, %t2` / `+%t8 =w add %t1, %t2`, and passes with the fix.
+
+`make test-ruby` — the cg12-vs-gcc differential, which is the right gate for a
+change to the C compilation path — is green with it:
+`ok …/difftest 42.175s`, `ok …/cc 15.251s`.
+
+**Honest limit on this one.** I could not build a C program in which the defect
+reaches the *emitted assembly*. `difftest/testdata/comp.c`,
+`cc/testdata/rubric/int128.c`, `vla.c`, `cmd/viz/testdata/collatz.c` and a
+purpose-built four-diamond function with two promotable locals each give **1
+distinct `-O -S` output in 8–10 compiles on the pre-fix compiler**. So the defect
+is demonstrated at the IR level and its practical blast radius on cg12cc assembly
+is unmeasured and may be nil at the program sizes this repository tests. It is
+fixed because the numbering is wrong, not because a symptom was observed.

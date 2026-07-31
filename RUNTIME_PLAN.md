@@ -1769,33 +1769,12 @@ report it separately from the image digest.
   is a checker: assert that no `ClsP`-classed value is live across a call
   instruction unless it is a GC reference, and see what the corpus reports.
 
-#### The optimizer's and the legacy stack map's own reproducibility, `cg12cc` only (2026-07-31)
+#### The legacy stack map's root order is not reproducible, `cg12cc` only (2026-07-31)
 
 Located by §22's static audit of every range-over-map in the tree, unfixed, and
-each one provably unable to reach `goc`.
-
-- **`opt/mem2reg.go:109` and `opt/jumpthread.go:431` number phi temporaries in map
-  order.** Both do `for b := range analysis.IteratedFrontier(df, defs)`, and
-  `IteratedFrontier` returns `analysis.BlockSet`, i.e. `map[*ir.Block]bool`. The
-  body calls `f.NewTemp`, so which phi gets which temporary id is decided by map
-  iteration order, and temporary ids reach register allocation and slot
-  assignment. Phi *placement* is unaffected -- one phi per (variable, block) either
-  way -- so this is a numbering defect, not a correctness one.
-
-  It cannot reach `goc`. `opt.OptimizeModule` sends any module over
-  `moduleOptimizationFunctionBudget` (2048 functions) to `BoundedPipeline`, which
-  is `fold`/`copy`/`dce` only: no `mem2reg`, no `jumpthread`, no `inline`, no
-  `gcm`. The smallest program in the goc corpus, `goc/testdata/hello.go`, emits
-  **2,739** functions, because every goc program links the runtime. So no goc
-  module has ever run `DefaultPipeline`, which is also the real reason
-  `opt/inline.go`'s tie-break never mattered to the matrix.
-
-  The fix is to walk `cfg.RPO` filtered by frontier membership instead of the map
-  -- one line per site. It renumbers temporaries and therefore changes generated
-  code for every C program cg12 compiles, so its validation gate is `make
-  test-ruby` (the cg12-vs-gcc differential) and `scripts/cruby-diff.sh`, not the
-  goc suites. It wants that cycle rather than being folded into a goc change,
-  which is why §22 left it here.
+provably unable to reach `goc`. (`opt/mem2reg.go` and `opt/jumpthread.go`, found by
+the same audit and in the same class, *are* fixed --- §22 records them and their
+limits.)
 
 - **`arm64/mc.go:2786` orders a safepoint's frame roots in map order.** `gcRoots`
   ranges `m.f.StackPointerWords[id]`, a `map[int]bool`, so an allocation with two
@@ -3617,8 +3596,12 @@ gave **25 distinct executables in 30 compiles**. That is closed. Every one of th
 `-O`.
 
 This section is `ccwork/frontend-determinism` and `ccwork/frontend-determinism-2`
-together: the first located and fixed the causes, the second verified them, and
-retired two claims this plan was carrying that turned out not to be true.
+together. The first located and fixed causes 1 to 3; the second verified them
+against the whole corpus, found cause 4 by auditing the class rather than the
+instance, and retired two claims this plan was carrying that turned out not to be
+true. **Only cause 1 was ever live for `goc`** --- which is the useful shape of the
+result, because it means one map walk whose body emitted an instruction accounted
+for every irreproducible goc build.
 
 ### Cause 1: variadic interface payload addresses were emitted in map order
 
@@ -3673,6 +3656,34 @@ tree is runtime's, so one package contributes and the walk has nothing to disagr
 about -- and is fixed with `orderedUnits` because the next overlay would
 reintroduce the whole class silently.
 
+### Cause 4: `opt` numbered phi temporaries in dominance-frontier map order
+
+Found by the audit below rather than by a failing compile, and in the same class as
+cause 2. `opt/mem2reg.go` and `opt/jumpthread.go`'s `reconstructThreaded` both
+placed phis by ranging `analysis.IteratedFrontier`'s result, which is a
+`map[*ir.Block]bool`, and placing a phi calls `f.NewTemp`. So which phi got which
+temporary id was decided by map iteration order, and temporary ids reach register
+allocation and slot assignment. Both now walk `cfg.RPO` filtered by frontier
+membership, which is sound because `DominanceFrontier` only ever adds blocks drawn
+from `cfg.RPO`. Phi *placement* is identical either way --- one per (variable,
+block) --- so this was a numbering defect and not a placement one.
+
+Like cause 2 it cannot reach `goc`, and it is fixed for the same reason: `cg12cc`
+is real. `opt/determinism_test.go`'s
+`TestMem2RegPlacesPhisInTheSameOrderEveryTime` promotes one two-diamond function
+twenty times in a single process and **fails 5 times out of 5** on the unfixed
+pass, at the first attempt each time. `make test-ruby` --- the cg12-vs-gcc
+differential, which is the gate for a change to the C path --- is green with it.
+
+**What is not established about it.** No C program in this repository is large
+enough for the defect to reach the *emitted assembly*: `difftest/testdata/comp.c`,
+`cc/testdata/rubric/int128.c`, `vla.c`, `cmd/viz/testdata/collatz.c` and a
+purpose-built four-diamond function with two promotable locals each give one
+distinct `-O -S` output in 8 to 10 compiles on the **pre-fix** compiler. So the
+defect is demonstrated at the IR level only, and its practical blast radius on
+cg12cc's output is unmeasured and may be nil at these program sizes. It is fixed
+because the numbering is wrong, not because a symptom was observed.
+
 ### The measurement
 
 Every figure below is on `ccwork/frontend-determinism-2`, one tree, one path, on a
@@ -3686,10 +3697,18 @@ box shared with one sibling job.
 | whole corpus, 365 programs x 4 compiles | 39 of 358 varied (§18) | **365 of 365 identical** |
 | whole corpus with `-O`, 365 x 4 | not measured before | **365 of 365 identical** |
 | 45-program sample x 12 compiles, including every program §5.10 named as skewed | -- | **45 of 45 identical** |
+| whole corpus linked against the prebuilt pack, 365 x 6 | not measured before | **365 of 365 identical** |
 
-2,920 corpus compiles across the two sweeps plus 540 in the deep repeat, 0
-varying, 0 failed to compile. `scripts/determinism-check.sh` gained a `-corpus`
-mode so the sweep is a command rather than a one-off.
+2,920 corpus compiles across the two monolithic sweeps, 2,190 against the pack and
+540 in the deep repeat: **5,650 compiles, 0 varying, 0 failed**.
+`scripts/determinism-check.sh` gained a `-corpus` mode so the sweep is a command
+rather than a one-off, and `goc build-runtime` is byte-identical across three cold
+builds with `-O` and without --- which matters more than any single program, since
+the pack is the largest module goc compiles and every program built against it
+inherits its bytes.
+
+`-O` against the pack is deliberately not measured: that is the 16-capability link
+failure §5.10 records under `-runtime-opt`, and `ccwork/opt-pack-link` owns it.
 
 ### The two claims that were wrong
 
@@ -3770,3 +3789,41 @@ changes composing into a broken compiler.
   rather than the printed text, because the text form omits a datum's relocation
   base, pointer words and typelink flag, and those reach the image too. It lives in
   `./goc/...`, so it runs under `make test-goc-corpus`.
+
+### Suites
+
+On `ccwork/frontend-determinism-2`, after all four causes:
+
+| | result |
+| --- | --- |
+| `go build ./...`, `go vet ./...` | clean |
+| `make test-unit` | pass, exit 0, 0 FAIL |
+| `make test-goc-corpus` | `ok github.com/evanphx/cg12/goc 549.755s` |
+| `make test-goc-cmd` | `ok github.com/evanphx/cg12/cmd/goc 219.657s` |
+| `make test-ruby` | `ok …/difftest 42.175s`, `ok …/cc 15.251s` |
+| full unsharded capability matrix, `-v` | 345 subtests, **344 PASS, 1 EXPECTED FAILURE, 0 FAIL, 0 SKIP, 0 KNOWN GAP**, `ok … 183.013s` |
+
+The matrix census is taken from the `-v` output --- `=== RUN` lines, `--- PASS`
+lines, and the harness's own logged `PASS <program>.go` / `EXPECTED FAILURE` /
+`KNOWN GAP` lines --- not from `ok`. The one expected failure is
+`defer-panic/panic-string-output` (`runtime_panic_print_string.go`), which exits 2
+by design. **No capability is non-passing.**
+
+### What this does not establish
+
+- **A reproducible compile is not a correct compile.** The corpus sweeps compare a
+  program against itself, so they cannot see a systematic miscompile; that is what
+  the suites, the matrix and the host-toolchain differential are for, and all of
+  them were run.
+
+- **The sample depth is finite.** Four to twelve draws per program cannot rule out a
+  branch taken 1 time in 100; §5.10's `stdlib_net_mail_textproto.go` was 3 in 53,
+  and a 5.7% minority survives 12 draws about half the time. The deep repeat aims
+  at exactly the programs this plan named as skewed, and the class audit is what
+  covers the rest, but neither is a campaign.
+
+- **`cg12cc`'s reproducibility is not measured, only reasoned about.** Cause 4's
+  fix is validated at the IR level and by the gcc differential; no C program here
+  is large enough for it to have reached emitted assembly either way. The
+  `arm64/mc.go:2786` stack-map root order recorded in §5.10 is still open and is
+  `cg12cc`-only for a reason that is measured, not assumed.
