@@ -1,7 +1,20 @@
 # `-O` plus the prebuilt runtime pack does not link
 
-**Status: root cause found and explained. Fix in progress; verification below is updated as
-it lands.**
+**Fixed, and the whole `-runtime-opt` matrix now passes for the first time: 345 subtests,
+344 PASS, 1 declared expected failure, 0 FAIL, 0 KNOWN GAP.** The complete list of
+non-passing capabilities under `-runtime-opt` is empty. The default arm is unchanged at the
+same numbers, and `make test-unit`, `make test-goc-cmd` and `make test-goc-corpus` pass.
+
+One line was wrong. `finishProgramModule` assigned the manifest's export answer over the
+export bit, and that bit is the only thing keeping `opt.DeadFuncElim` from deleting a Go
+function whose sole caller is Plan 9 assembly. Five commits on `ccwork/opt-pack-link`:
+
+| | |
+| --- | --- |
+| `ea04425` | the fix, plus `TestAnOptimizedProgramKeepsTheFunctionsOnlyAssemblyCalls` |
+| `6283e4b` | `make test-goc-status-opt` and a `runtime-status-opt` CI job |
+| `ee44c61` | RUNTIME_PLAN §22, and §5.10's open item removed |
+| `e1902fe`, `14662d7` | this report |
 
 ## The defect
 
