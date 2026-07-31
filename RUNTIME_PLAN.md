@@ -50,12 +50,12 @@ this document:
 | the ECDSA case | generic method dispatch, §5.6 |
 
 The accepted baseline still needs a rerun. It is now stale in two ways: it
-covers 294 of the matrix's 341 capabilities, and the runtime source fingerprint
+covers 294 of the matrix's 342 capabilities, and the runtime source fingerprint
 has moved, so a diff against it is refused rather than silently misleading.
 
 ### Current state (2026-07-28)
 
-The capability matrix holds **341 capabilities and no `knownGap` at all**. The
+The capability matrix holds **342 capabilities and no `knownGap` at all**. The
 only declared exception is `defer-panic/panic-string-output`, a deliberate
 `expectedFailure`. Phase 1 (§5) is complete; §5.10 records what remains open,
 none of which is a failing capability.
@@ -84,11 +84,11 @@ The two denominators are now reconciled. There is only one denominator: the
 capability matrix *is* the coverage corpus, and every capability reports one
 explicit compile/run/coverage outcome, including the ones this environment
 cannot run. The accepted baseline covers 294 programs while the matrix holds
-341, and that gap is baseline staleness rather than an exclusion set — each of
-the 47 capabilities was added after the 2026-07-22 run. They are listed with a
+342, and that gap is baseline staleness rather than an exclusion set — each of
+the 48 capabilities was added after the 2026-07-22 run. They are listed with a
 reason in `cmd/goc/testdata/runtime_coverage_baseline_pending.json`, and
 `TestCheckedRuntimeCoverageBaselineDenominator` reconciles matrix, baseline, and
-list in both directions: 294 + 47 = 341, no capability may appear in both, and
+list in both directions: 294 + 48 = 342, no capability may appear in both, and
 no baseline program may name a capability the matrix has dropped. Adding a
 capability therefore requires either accepting a new baseline or recording why
 the baseline does not cover it. The list empties when the pending full-corpus
@@ -211,7 +211,7 @@ Current M0 checkpoint:
 
   **The blocking reason has changed.** All three absences were the §5.2.1
   GC-assist failure, and that is fixed: all three are `mustPass` and passing.
-  Nothing is known to prevent a full 341-of-341 collection. What is missing is
+  Nothing is known to prevent a full 342-of-342 collection. What is missing is
   the run itself. This box needs a fresh collection over the current tree, not
   more runtime work, and it is the last thing standing between the project and
   M0.
@@ -1266,10 +1266,13 @@ Current checkpoint:
   wave 3 merged the matrix is 338 of 338 at `STATUS_SHARDS=8`, with
   `defer-panic/panic-string-output` (deliberate `expectedFailure`) as the only
   declared exception and no `knownGap` remaining.
-- [ ] Explain the residual `fatal error: found pointer to free object` recorded
-  below. It is a different fault with a different traceback and is roughly two
-  orders of magnitude rarer; it is not this section's bug and is not known to be
-  fixed.
+- [x] Explain the residual `fatal error: found pointer to free object` recorded
+  below. It was two unrelated compiler defects, not one, and neither is this
+  section's bug: see §5.11 and §5.12. The description below of it as "a
+  different fault with a different traceback" is right; the description of it as
+  two orders of magnitude rarer is not, because it and
+  `found bad pointer in Go heap` are the same two mechanisms seen through
+  different stale words.
 
 #### Root cause (2026-07-28)
 
@@ -1410,25 +1413,24 @@ other instances of the same class, not a proof that none exists.
   have been its cause. Its 7-of-60 failure was measured on 381f67c and was
   presumably closed by §5.2.1 or §5.7. The §5.2 checkpoint text still describes
   it as live and should be read with that in mind.
-- A different fault survives, and it is **pre-existing and unaffected by this
-  change**: `fatal error: found pointer to free object`. This section originally
-  named it `marked free object in span` (from `mspan.reportZombies`); the
-  independent verification of 2026-07-28 saw that string zero times in roughly
-  600000 executions and identified the surviving fault as the one named above.
-  Measured with matched 160000-run controls on a KeepAlive-free variant of the
-  reducer, compiled by the merge-base and by the fixed compiler from
-  sha256-identical sources: 19 versus 20 occurrences, plus a residual
-  `found bad pointer in Go heap` at 4 versus 4 and rare hangs. Indistinguishable,
-  which is what establishes it as pre-existing rather than introduced here. On
-  `many-goroutines-gc` itself it ran 11 of 24000 on the merge base and 4 of 24000
-  on the fix. It has not been reduced, it is about two orders of magnitude rarer
-  than the fault this section closes, and it needs a reducer of its own before it
-  is worth measuring.
+- A different fault survived, **pre-existing and unaffected by this change**:
+  `fatal error: found pointer to free object`. It is now closed by §5.11 and
+  §5.12, and two things this section said about it were wrong. First, the
+  correction above — that `marked free object in span` was a misattribution and
+  the real string is `found pointer to free object` — was a correction in the
+  wrong direction: `mspan.reportZombies` *prints* the first line and then
+  *throws* the second, so they are one report and either name is the same fault.
+  A verification that greps for one and not the other will see zeroes on one
+  side, which is what happened. Second, "two orders of magnitude rarer" counted
+  only one of the two messages the same defects produce; measured together
+  (§5.12's table) the merge base loses 161 runs in 160000 on the KeepAlive-free
+  control, not 20.
 
 Exit criterion: no global data word ever receives a goroutine stack address
 (checkable with `GODEBUG=cg12checkwb=2` over the corpus), `gc/keepalive-stack-root`
 passes at every `-runtime-procs` setting optimized and unoptimized, and the
-`found pointer to free object` fault above is reduced and attributed.
+`found pointer to free object` fault above is reduced and attributed. All three
+now hold; the last one is §5.11 and §5.12.
 
 ### 5.9 Fixed: loop variables were per-loop, not per-iteration (2026-07-28)
 
@@ -1619,15 +1621,23 @@ the reports of the jobs that found them.
 
 #### Residual runtime faults
 
-- **`fatal error: found pointer to free object`** survives at roughly 20 in
-  160000 runs, established as pre-existing by matched controls compiled from
-  sha256-identical sources (§5.8). Two orders of magnitude rarer than the
-  `runtime.KeepAlive` fault it was hiding behind. Not reduced; it needs a
-  reducer of its own before it is worth measuring.
+- **`fatal error: found pointer to free object`** is closed. It was two
+  independent compiler defects, reduced and fixed in §5.11 and §5.12. Read the
+  measurement in §5.12 before trusting any earlier rate quoted for it: this
+  fault and `found bad pointer in Go heap` share both mechanisms and differ only
+  in what the stale word happened to address, so counting either one alone
+  understates the rate.
 
-- **Rare hangs.** The §5.8 verification saw runs exceed a 60s timeout on both
-  the base and the fixed compiler, at a low rate, unexplained and unattributed.
-  Any harness that measures fault rates on `many-goroutines-gc` must impose a
+- **Rare hangs and deadlocks.** The §5.8 verification saw runs exceed a 60s
+  timeout on both the base and the fixed compiler, at a low rate, unexplained
+  and unattributed. §5.11's and §5.12's campaigns reproduce this — 1 timeout in
+  160000 and 2 in 2000 on the base compiler — and also saw
+  `fatal error: all goroutines are asleep - deadlock!` at 7 in 160000 on the
+  base compiler and 3 in 160000 after §5.11 alone. Both are absent from every
+  post-§5.12 campaign (160000 + 2000 + 800 runs), which is consistent with a
+  lost closure hanging or deadlocking the program rather than faulting it, but a
+  zero at that scale is not an attribution and neither has a reducer. Any
+  harness that measures fault rates on `many-goroutines-gc` must still impose a
   per-run timeout or it will stall instead of reporting.
 
 #### Compiler bloat and conservatism
@@ -1698,6 +1708,24 @@ Also unfixed, `-O` only: `opt/inline.go:184` sorts cost-inline candidates with a
 unstable `sort.Slice` over a slice built from map iteration, so which callees are
 inlined when the budget runs out is not reproducible. The matrix runs `-O` under
 `-runtime-opt`.
+
+- **An interior address is not a managed pointer, so it is invisible to the
+  stack map (2026-07-31).** `ir.Block.Add(ir.ClsP, ...)` -- every field, index
+  and indirection address -- produces a pointer-width value that is not a GC
+  reference, while `Block.Load(ClsP, ...)` marks its result. Such an address
+  live across a call is not adjusted by `copystack` and not seen by the
+  collector. §5.13 hit this and fixes it where the assignment machinery
+  deliberately holds an address across the right-hand side, but the rule is
+  general: **nothing prevents another interior address from being held across a
+  safepoint.**
+
+  Not fixed generally here. Marking every `ClsP` result managed would change the
+  GC root set of the whole compiler -- `arm64/regalloc.go` forces a GCRef
+  temporary live across a safepoint to spill whole-life -- so it is a codegen
+  and frame-size change that needs its own measurement, and a one-past-the-end
+  address in a pointer slot would newly reach `findObject`. A cheaper first step
+  is a checker: assert that no `ClsP`-classed value is live across a call
+  instruction unless it is a GC reference, and see what the corpus reports.
 
 #### Unmeasured
 
@@ -2074,6 +2102,53 @@ receive, type assertion, and `select` receive.
   `TestAssigningRangeClauseKeepsOneInstance` still pass, and the per-iteration
   allocation-cost tests are unchanged.
 
+#### What it also broke, and the lower layer that was actually wrong (2026-07-31)
+
+Resolving a destination before the right-hand side is what the specification
+requires, and cg12 could not hold the address that produces. On the branch as
+written, six capabilities regressed 20/20 to 0/20 --
+`stdlib-encoding/gob-{int,struct-int,struct-mixed,roundtrip}`,
+`runtime-packages/reflect-call-aggregate-probe`, and worst,
+`stdlib-http/tls-client-server`, which corrupted the stream and reported
+`tls: bad record MAC` rather than crashing.
+
+`ir.Block.Add(ir.ClsP, ...)` -- how every field, index and indirection address
+is built -- yields a pointer-*width* value, not a *managed* one. `ir/pointer.go`
+draws that line deliberately: `ClsM`, or an explicit `MarkGCRef`, is what puts a
+value in the frame's stack map, and `Block.Load(ClsP, ...)` marks its result
+while `Block.Add` does not. A value the stack map omits is not adjusted by
+`copystack`, so a right-hand side that grew the goroutine stack left the
+prepared destination addressing the abandoned old stack. **The store then landed
+in freed memory and the assignment was lost with no fault, no bounds error and
+no write-barrier complaint.**
+
+The first statement that hits is `reflect/abi.go:127`,
+`a.valueStart = append(a.valueStart, pStart)`, with `a` addressing
+`newAbiDesc`'s `var in abiSeq` -- a stack local, which is why this destination
+and not another. `len(a.valueStart)` reads 0 immediately after the append.
+
+Located by gating *which* destinations are prepared early on source position and
+narrowing package, then file, then line; the bisect is in the table below. The
+old code was never safe by rule, only by accident: it computed the address after
+the right-hand side, so the window was always empty.
+
+| variant | `reflect-call-aggregate-probe` |
+| --- | --- |
+| the branch as written | FAIL |
+| destinations prepared *after* the right-hand side | PASS |
+| only *identifier* destinations prepared early | PASS |
+| only *non-identifier* destinations prepared early | FAIL |
+| the branch + the prepared address marked managed | PASS |
+
+`prepareAssignmentTarget` now marks the prepared address, the map header and a
+pointer-classed map key managed. A scalar map key is deliberately left alone:
+telling the collector an integer is a pointer is the opposite mistake. With
+that, all six regressed capabilities pass, on this tree and on the branch's own
+base.
+
+The wider hazard -- *any* interior address held across a safepoint, not just an
+assignment destination -- is carried in §5.10 rather than fixed here.
+
 #### The coverage lesson
 
 Nothing in the 338-capability matrix used a non-identifier range destination,
@@ -2083,6 +2158,62 @@ reduction of the same statement. The matrix covers *subjects* well and
 package-level case hide: the obvious reducer reads the global back in the
 function that wrote it, and that reads the frame slot the bug created. A
 destination-shaped reducer has to read its result through a second function.
+
+### 5.14 Held back: the Phase 2 escape change interacts with the goroutine entry fix
+
+`ccwork/phase2-alloc` is **not merged.** It is correct in isolation and it is
+held back because of an interaction, which is worth recording in full because no
+per-change verification could have caught it.
+
+That branch fixes `nonEscapingObjectUse`, which returned "does not escape" for
+every field selection, so `&v.payload` kept its object on the frame and a
+package-level slice could hold a goroutine stack address — the §5.8 invariant
+reached by a new route. The fix is real and its own reducer proves it.
+
+But merged together with §5.11 and §5.12, `gc/cleanup-basic` dies with
+`fatal error: span has no free objects`.
+
+**Re-measured against current `main` on 2026-07-31**, because `main` had moved a
+long way since the original bisect and the interaction could have gone away.
+`runtime_cleanup_basic.go`, 40 runs per tree:
+
+| Tree | `gc/cleanup-basic` |
+| --- | --- |
+| `main` (`61b96da`) | passes |
+| `main` + `phase2-alloc` alone | 0/40 failed |
+| `main` + §5.13 (with its fix) + `phase2-alloc` | 0/40 failed |
+| `main` + §5.11/§5.12 + `phase2-alloc` | **40/40 failed** |
+| `main` + §5.13 + §5.11/§5.12 + `phase2-alloc` | **40/40 failed** |
+| `main` + §5.13 + §5.11/§5.12, no `phase2-alloc` | passes, in the full matrix |
+
+So it is still there, it is still `freeobject` × `phase2-alloc`, and §5.13 is not
+involved on either side. One run segfaulted rather than reporting the allocator
+error.
+
+Both changes move objects between the frame and the heap and both change what
+the collector is told about them: §5.12 makes `unsafe.Pointer` stores emit a
+write barrier that was previously skipped, and the escape fix changes which
+allocations are heap allocations in the first place. `span has no free objects`
+is an allocator invariant failure, which is consistent with the allocator being
+reentered or with an accounting disagreement, but the mechanism is still not
+established and is not guessed at here.
+
+Two things follow for method, beyond this particular bug:
+
+- **Per-branch verification is not sufficient when changes touch the same
+  invariant.** Every one of these branches passed its own full matrix. The
+  failure exists only in the combination, so the integration run is the gate
+  that matters, not the branch runs.
+- **The order of merging is not neutral.** Had `phase2-alloc` merged first and
+  `freeobject` second, the same failure would have been attributed to
+  `freeobject`, which is the change with the stronger evidence behind it.
+
+Next: reduce the interaction to the smallest program that needs both changes,
+determine whether the escape fix exposes a latent defect in the barrier or the
+barrier exposes one in the escape fix, and fix whichever is actually wrong. The
+branch is preserved at `ccwork/phase2-alloc` with its capabilities and its
+allocation-family classification intact; none of that work is lost, and §6's
+`malloc_generated.go` finding below stands independently of the escape change.
 
 ## 6. Phase 2: Memory safety, allocation, and accurate GC
 
@@ -2297,9 +2428,14 @@ subsection. What follows replaces it.
    that reduction exposed and did not fix: a closure that assigns a computed
    string to a captured string variable leaves it dangling (§5.10).
 
-3. **Reduce `found pointer to free object`** (§5.10). It needs a reducer with a
-   usable failure rate before it can be attributed, in the way §5.8's
-   `gc/keepalive-stack-root` made its predecessor measurable.
+3. ~~**Reduce `found pointer to free object`**~~ — done, and it was two defects:
+   §5.11 (the entry stack map described a never-started goroutine's argument
+   frame) and §5.12 (`unsafe.Pointer` stores lost their write barrier). The
+   reducer is `gc/goroutine-entry-stack-map`. What is left from that
+   investigation is the rare hang and the rare deadlock recorded in §5.10, and
+   the `mspan.reportZombies` blind spot recorded at the end of §5.11 — the next
+   fault in this family will be much harder to attribute until that diagnostic
+   can name its zombie.
 
 4. **Done: the driver is split** (§16). `goc build-runtime` compiles the Go
    runtime once as a Go module of its own and `goc -runtime` compiles a program
