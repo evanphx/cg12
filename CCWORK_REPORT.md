@@ -8,6 +8,21 @@ only about this job.
 yet verified is listed under "Still unverified" at the bottom and moved out of it only when a
 command has actually been run and its output read.
 
+## Headline so far
+
+The two designs reconcile without giving anything up, and **the lever is much larger on top of
+the standard-library packs than it was measured to be beneath them**: the full matrix goes from
+**351.8 s to 273.6 s (-22.2%)** and from **2758.7 s to 1930.5 s of CPU (-30.0%)**, against a
+matched control on this same box, every run 338 subtests / 338 pass / 337 declared PASS /
+1 EXPECTED FAILURE / 0 KNOWN GAP / 0 FAIL.
+
+`ccwork/goc-batch-b` measured the same lever at 5-12% of the matrix. It is bigger now for a
+reason that is a consequence of §19 rather than of anything this job did: the packs cut the
+*variable* cost of a compile by more than half, and the batch removes *fixed* cost, so the same
+number of seconds is now a much larger fraction. §19's own open item -- every program parsing
+seven manifests to choose between them, "74 s of CPU over the matrix" -- is also amortized by a
+worker, for free.
+
 ## The collision, in one paragraph
 
 `ccwork/goc-batch-b` hoists `runtimepack.Read(packPath)` out of the per-program loop so a batch
@@ -18,26 +33,106 @@ only the manifests up front and reads the chosen pack's objects afterwards.
 
 ## The reconciliation, as implemented
 
-A **`packSet`**: every pack's manifest read once at startup, and each full pack read lazily the
-first time some program selects it and then retained. One-shot `goc` and `goc compile-batch`
-both go through it, so they are the same code path with a different lifetime.
+A **`packSet`** (`cmd/goc/prebuilt.go`): every pack's manifest read once when the set is built,
+and each full pack read lazily the first time some program selects it and retained afterwards.
+One-shot `goc` and `goc compile-batch` both go through it, so they are the same code path with
+a different lifetime.
 
-- Selection is unchanged: `prebuilt.CompileProgram` still receives every manifest and still
-  returns the one it chose, and the fallback to the runtime-only pack is untouched.
-- A batch worker that compiles ten `net/http` programs reads the `net/http` pack once.
-- A batch worker that compiles programs choosing different packs reads each of those once.
-- A one-shot `goc` behaves exactly as it did: it reads the manifests, compiles, reads one pack.
+- Selection is unchanged. `prebuilt.CompileProgram` still receives every manifest and still
+  returns the one it chose; nothing about `Manifest.UsableBy` or the fallback to the
+  runtime-only pack is touched.
+- A worker that compiles ten `net/http` programs reads the `net/http` pack once.
+- A worker that compiles programs choosing different packs reads each of those once.
+- A one-shot `goc` does exactly what it did before: read the manifests, compile, read one pack.
 
-Deviation from the briefing's sketch: none in shape. Details and their costs are in the
-sections below.
+Two deviations from the briefing's sketch, both small:
+
+- **The pack a compile chose is matched back to its file by pointer identity, and a mismatch is
+  an error rather than a fallback.** `main` had `chosen := packPaths[0]` as the default if the
+  returned manifest matched none of the offered ones. That cannot happen today --
+  `CompileProgram` returns `manifests[program.Chosen]` -- but if it ever did, the build would
+  silently link one pack's objects against another pack's subtraction. It now says so instead.
+- **`compile-batch` keeps `-runtime` as the same comma-separated set the one-shot flag takes**,
+  rather than growing a new spelling. A worker is offered the whole set and each of its programs
+  still takes the richest its own closure allows.
+
+## What it measures
+
+Box: linux/arm64, 64 cores, ~240 GB RAM, load average 2.9 at the start of the sequence, no
+sibling job visibly running. Every run is a full unsharded matrix through
+`scripts/matrix-timing.sh`, `-count=1 -v`, at **4 compile workers** -- this job's declared CPU
+share (`CCWORK_CPU_SLOTS=4`) -- with the pack cache warm in every measured run. `main` was
+measured by checking `main` out **in this same working directory**, so both compilers were
+built from the same absolute path (§6 of the batch report: a `git worktree` at a different path
+is not a valid reference build).
+
+| run | wall | CPU (user+sys) | sum of per-compile wall | slowest single compile | max RSS |
+| --- | ---: | ---: | ---: | ---: | ---: |
+| `main` (a639ec9), warm packs | 351.8 s | 2758.7 s | 1365.5 s | 23.1 s | 2622 MB |
+| this branch, `-runtime-status-batch-compile=false` | 351.3 s | 2755.6 s | 1363.9 s | 23.0 s | 2633 MB |
+| this branch, batch on | **273.6 s** | **1930.5 s** | 1050.8 s | 22.7 s | 2624 MB |
+| this branch, batch on (repeat) | **273.2 s** | **1926.8 s** | 1049.8 s | 23.0 s | 2725 MB |
+
+Against `main`: **wall -78.2 s (-22.2%), CPU -828.2 s (-30.0%)**. The one-flag-apart control on
+this tree lands within 0.15% of `main` on all three columns, which is what says the flag is the
+only difference. The two batch runs land within 0.4 s of each other.
+
+Five full matrix runs in this sequence. Every one:
+
+    subtests=338 pass=338 fail=0 skip=0 declaredPASS=337 expectedFAILURE=1 knownGAP=0
+
+### Which term bounds the matrix afterwards
+
+    wall ~ max( slowest compile , compile CPU / workers ) + run phase + setup
+
+At **4 workers** the second term binds and binds by an order of magnitude: 1050.8 / 4 = 262.7 s
+against a slowest single compile of 23.0 s. Adding the 14.9 s run phase gives 277.6 s against
+273.2 s observed, so the model accounts for the whole run. That is why the wall clock moved 22%
+here.
+
+At the **default 64 workers** the terms swap. 1050.8 / 64 = 16.4 s is below the 23.0 s slowest
+compile, so the first term binds and it is the same 23.0 s compile in both arms: the predicted
+wall clock is ~38 s either way and this lever would buy close to nothing. That is the honest
+expectation the briefing asked for, and it is unchanged from what §17 and the batch report both
+said -- the floor is one single-threaded compile of `stdlib_http_tls_client_server.go`, and
+nothing here touches it.
+
+**So the value is the 30% of CPU, not the wall clock.** The suite costs a third less to run,
+and the cost is much less sensitive to how much of the machine it gets -- which is exactly the
+situation this job ran in.
+
+### Why the lever grew
+
+`ccwork/goc-batch-b` measured 5-12% against a runtime-only pack, where the matrix spent about
+4400 s of CPU. On top of §19's pack set the matrix spends 2759 s, because the packs removed
+compile work, not process work. The per-process cost the batch removes -- building the source
+world, starting the process, collecting a fresh ~300 MB heap, and now also parsing seven
+manifests -- is roughly the same number of seconds as before, against a smaller total. The two
+levers multiply rather than overlap.
+
+### Memory
+
+Peak RSS over the whole run is **unchanged**: 2622 MB on `main`, 2624 MB and 2725 MB batched.
+A worker's peak is still the largest program it compiles, and retaining packs it has already
+read does not move the maximum. `compileRuntimeCapabilityPeakBytes = 3 GiB` and the divisor
+built on it stand.
 
 ## Progress log
 
 - Read `RUNTIME_PLAN.md` §1/§3/§5.10/§14/§17/§18/§19 and the `goc-batch-b` report; confirmed
   the collision is exactly `cmd/goc/prebuilt.go`'s `linkAgainstPrebuiltRuntime` and
   `cmd/goc/batch.go`'s hoisted `runtimepack.Read`.
-- Implementation in progress.
+- Implemented `packSet`; `go build`, `go vet`, `gofmt` clean. Committed as `b0decae`.
+- New tests pass (`TestAPackSetReadsOnlyTheChosenPackAndReadsItOnce`,
+  `TestBatchCompilesAgainstDifferentPacksMatchOneShotCompiles`), as do the three the batch
+  branch wrote and the five pack tests §19 wrote.
+- Matrix A/B complete: the table above.
 
 ## Still unverified
 
-Everything. Nothing in this report has been measured yet.
+- The corpus-wide leak check (`analysis/batchdiff`, all 358 programs, three ways, with the
+  seven-pack set) has not been run yet. **This is the safety property and it is the next thing
+  to land.**
+- `make test-unit`, `make test-goc-corpus`, `make test-goc-cmd` have not been run on this tree.
+- `scripts/determinism-check.sh` has not been run on this tree.
+- `RUNTIME_PLAN.md` has not been updated yet.
