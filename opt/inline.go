@@ -158,6 +158,11 @@ func selectCostInline(m *ir.Module, cg *callGraph, scc *sccInfo) {
 		sites  int
 	}
 	byCaller := map[*ir.Func]map[*ir.Func]int{}
+	// Callers in module order, so the loop below -- and the dump it can print --
+	// does not run in map order. The selection itself is per caller and marking a
+	// callee is idempotent, so this is for reproducible diagnostics rather than
+	// for the result.
+	var callers []*ir.Func
 	for _, f := range m.Funcs {
 		if f.Start == nil || !dispatch(f) {
 			continue
@@ -170,18 +175,30 @@ func selectCostInline(m *ir.Module, cg *callGraph, scc *sccInfo) {
 				if c := directCallee(f, &b.Instrs[i], cg.byName); c != nil && candidate(c) {
 					if byCaller[f] == nil {
 						byCaller[f] = map[*ir.Func]int{}
+						callers = append(callers, f)
 					}
 					byCaller[f][c]++
 				}
 			}
 		}
 	}
-	for caller, callees := range byCaller {
+	for _, caller := range callers {
+		callees := byCaller[caller]
 		cands := make([]cand, 0, len(callees))
 		for c, n := range callees {
 			cands = append(cands, cand{c, n})
 		}
-		sort.Slice(cands, func(i, j int) bool { return funcSize(cands[i].callee) < funcSize(cands[j].callee) })
+		// Ties break on name. The slice above comes out of a map, and a sort that
+		// leaves equal-sized candidates in input order therefore ranks them
+		// differently on every compile -- which decides who gets inlined when the
+		// budget runs out, and so which code the program ends up holding.
+		sort.Slice(cands, func(i, j int) bool {
+			leftSize, rightSize := funcSize(cands[i].callee), funcSize(cands[j].callee)
+			if leftSize != rightSize {
+				return leftSize < rightSize
+			}
+			return cands[i].callee.Name < cands[j].callee.Name
+		})
 		budget := funcSize(caller) * costInlineGrowthPct / 100
 		for _, cd := range cands {
 			grow := funcSize(cd.callee) * cd.sites // rough per-caller body growth
