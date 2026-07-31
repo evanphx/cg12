@@ -490,6 +490,7 @@ Plus 6 cold `goc build-runtime` builds (3 with `-O`, 3 without), 2 hashes, and 6
 | `90f6e9e` | plan, batchdiff: compiling the same program twice gives the same program |
 | `4795470` | opt: walk the iterated dominance frontier in reverse post-order |
 | `814c381` | plan: cause 4, the pack path, the suites, and what none of it establishes |
+| `b40eb65` | plan, report: the re-run with the finished compiler |
 
 ## Still unverified, and other jobs' business
 
