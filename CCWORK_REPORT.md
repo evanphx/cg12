@@ -118,11 +118,29 @@ New test: `cmd/goc/prebuilt_test.go`. It builds an optimized pack, compiles a
 checks the output. Its output (`doubled 42`, `plus 17`) matches `go run` on the host
 toolchain. It costs about 8 s: an optimized pack build is ~3.5 s cold.
 
+### The full capability matrix, both arms
+
+Both run as one process at `-runtime-status-compile-workers=8` with a cold, per-run
+`CG12_PACK_CACHE` (see the caveat below), on a box shared with one sibling job.
+
+| arm | subtests | PASS | EXPECTED FAILURE | FAIL | KNOWN GAP | wall clock |
+| --- | ---: | ---: | ---: | ---: | ---: | ---: |
+| `-runtime-opt` | **345** | **344** | 1 | **0** | **0** | 222.3 s |
+| default | **345** | **344** | 1 | **0** | **0** | 203.3 s |
+
+Census taken from `-v` output: 345 distinct `--- PASS: .../<category>/<name>` lines, zero
+`--- FAIL`, zero `--- SKIP`, one `EXPECTED FAILURE runtime_panic_print_string.go`, no
+`KNOWN GAP` line. **The complete list of non-passing capabilities under `-runtime-opt` is
+empty**, other than the one declared expected failure, which is the same one the default
+arm declares.
+
+The optimized arm costs **9.4% more wall clock** than the default arm. That is the
+optimizer running over both modules; it compiles and runs the same programs.
+
 ### Still unverified at the time of writing
 
-- The full matrix under `-runtime-opt` (running).
-- The full matrix on the default arm, `make test-unit`, `make test-goc-corpus`,
-  `make test-goc-cmd`.
+- `make test-goc-corpus` and `make test-goc-cmd` (running; `go vet`, `gofmt -l` and
+  `make test-unit` are clean).
 
 ## Keeping it fixed
 
@@ -133,5 +151,46 @@ The reason this shipped broken is that nothing ran it. Added:
 - a `runtime-status-opt` CI job, 4 shards, alongside the existing `runtime-status`.
 
 It runs *alongside* the default arm rather than replacing it: the two differ in what they
-eliminate, so neither covers the other. Wall-clock cost is recorded below once measured.
+eliminate, so neither covers the other.
+
+**What it costs.** In CI it is four more `ubuntu-24.04-arm` jobs running in parallel with
+the four existing `runtime-status` shards, so it adds no critical-path wall clock — the
+whole matrix is already the longest job and the two arms run concurrently. It roughly
+doubles the matrix's CI *machine* time. Measured locally, one full arm is 222.3 s against
+the default arm's 203.3 s at eight compile workers, so a shard's job timeout is set to 25
+minutes against the default arm's 20.
+
+There is also a cheap guard that does not need the matrix at all:
+`TestAnOptimizedProgramKeepsTheFunctionsOnlyAssemblyCalls` in `make test-goc-cmd`, ~8 s.
+That is the one that actually fails fast; the matrix arm is what catches the next defect
+that is specific to `-O` and is not about reflect.
+
+## Defects found on the way, not fixed here
+
+- **A runtime pack is cached and fingerprinted without regard to the compiler that built
+  it.** `packCacheKey` hashes the pack-format version, the target, `-O`, the carried
+  package list and the *stdlib source*; `Manifest.Fingerprint` is `activeRuntimeSourceID`,
+  the runtime source identity. Neither depends on the goc binary. So changing the compiler
+  and rebuilding a pack silently reuses the pack the old compiler wrote, and the staleness
+  check that exists (`Fingerprint`) will not catch it. It did not affect this fix, which
+  only changes the program half, but it is a trap for the next change that touches
+  `finishRuntimeModule` — and it makes any measurement taken without clearing
+  `CG12_PACK_CACHE` untrustworthy. Every measurement above used a fresh per-run cache
+  directory. Recorded in RUNTIME_PLAN §22 "What is not done".
+
+- **`opt.DeadFuncElim` does nothing on the pack side.** `finishRuntimeModule` exports every
+  function it keeps, so the optimized pack is not smaller than the unoptimized one by a
+  single function. This is *correct* — the program module has to be able to reference any
+  of them — but it is undocumented, and it means "the pack is built with `-O`" buys less
+  than it sounds like.
+
+- **The conflation itself is unfixed.** `ir.Func.Linkage.Export` still means both "global
+  in the object" and "a root for dead-function elimination", and the split now has to know
+  about Plan 9 assembly in order to keep the two apart. A separate `ir.Func` flag for
+  "reachable from outside the IR" would let the split answer only the binding question,
+  which is the one it is qualified to answer. Not attempted: it touches every producer and
+  consumer of the flag, which is a change with its own validation cycle.
+
+Nothing was found in the sibling job's area (`ccwork/frontend-determinism-2`, the front
+end's emission order).
 
