@@ -276,6 +276,30 @@ That is the single pre-existing expected failure §1 records; it is not new here
 174.4 s against the branch report's 273.6 s only because that was measured at 4 workers and
 this is at 8 — see the A/B below, where both arms are at 8.
 
+### 5a. The monolithic batch path
+
+`-runtime-status-prebuilt-runtime=false` with batch compilation left on is the path the branch
+never exercised: the pack set is nil, so a worker compiles the whole Go runtime into every
+program instead of linking a pack. Full unsharded matrix, 8 workers:
+
+    label=branch-monolithic-batch wall=191.8 exit=0 subtests=338 pass=338 fail=0 skip=0
+      declaredPASS=337 expectedFAILURE=1 knownGAP=0
+    programs=338 compile_cpu=1452.9 slowest_compile=33.1 (stdlib-http/tls-client-server)
+    user+sys=4352.9s  max RSS=2264 MB
+
+Same census as every other arm, same single expected failure. The path is visibly the
+monolithic one: process CPU is 4352.9 s against 2217.3 s for the pack path, and the slowest
+single compile is 33.1 s against 24.0 s, because each program now compiles the runtime itself.
+
+That it really is the *batch* monolithic path and not a silent fall back to one-shot compiles
+was confirmed directly rather than inferred, by sampling `ps` while a targeted capability ran
+under the same flag:
+
+    /.../TestARM64RuntimeCapabilityStatus1142616190/001/goc compile-batch
+
+— a live `goc compile-batch` worker, with **no `-runtime` argument**, which is exactly the
+`packs == nil` branch of `compileBatchProgram`.
+
 ### 5b. The coverage run does bypass batch mode — by reading the code
 
 Two independent gates, both in `cmd/goc/runtime_status_test.go`:
