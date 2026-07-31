@@ -364,13 +364,19 @@ func compileEachAlone(compiler, pack, work, suffix string, optimize bool, worker
 // put it: every defined symbol's name, size, kind and section, sorted, plus the
 // image's total size.
 //
-// It exists because raw bytes cannot triage this compiler. goc's output is not
-// reproducible (RUNTIME_PLAN.md section 5.10) and the cause that remains is
-// ordering: 441 interface-call wrapper functions land in the module in a
-// different order on each compile, so the same functions with the same code get
-// different addresses. Two images that differ only that way have the same content
-// digest. An image that gained, lost or resized a symbol does not, and that is
-// what a compile contaminated by a previous compile would look like.
+// It exists because raw bytes could not triage this compiler: goc's output was
+// not reproducible, and what varied was where functions went rather than what was
+// in them, so two builds of one program differed for a reason that had nothing to
+// do with what batchdiff is looking for. Compiling the same program twice now
+// gives the same image (RUNTIME_PLAN.md section 22), so this digest is no longer
+// load-bearing for that -- it stays because it still separates the two failure
+// modes: an image that gained, lost or resized a symbol is what a compile
+// contaminated by a previous compile looks like, and one that only moved things is
+// not.
+//
+// The claim this comment used to carry, that 441 interface-call wrappers landed in
+// a different order on each compile, was wrong; section 22 records the measurement
+// that retired it.
 //
 // This is necessary rather than sufficient -- two functions of equal size can
 // hold different instructions -- so a matching content digest is reported as

@@ -1721,57 +1721,35 @@ that `reflect`'s assembly stubs call are not in the split runtime object when
 determinism note above records that the matrix is supposed to run `-O` under
 this flag.
 
-#### Compiling the same program twice does not give the same binary
+#### Compiling the same program twice gives the same binary (closed)
 
-goc's output is not reproducible, and §18 establishes that what remains of it is
-entirely in the **front end**. `goc/testdata/runtime_defer_capture_allocs.go`
-gives 25 distinct executables in 30 compiles at a single back-end worker; 39 of
-the 358 corpus programs vary at all, the other 319 are byte-identical across
-repeated compiles and every back-end worker count. Two causes, both located:
+Closed. §22 records the three causes, the measurement that closed it, and the two
+claims this subsection used to carry that turned out to be wrong -- including its
+first bullet, that 441 interface-call wrapper functions land in the module in a
+different order on each compile, which does not happen and, on the compiler that
+*was* irreproducible, did not happen either. `opt/inline.go:184`'s unstable
+cost-inline tie-break is fixed there too; the sentence that said the matrix's `-O`
+runs made it matter was wrong for a structural reason §22 measures. The matrix does
+run `-O` under `-runtime-opt`; that part stands.
 
-- **441 interface-call wrapper functions land in the module in a different
-  order** on each compile. Same functions, same code, different addresses. The
-  order is the order `ensureInterfaceCallWrapper` (`goc/compile.go:5198`) is
-  first reached while runtime type descriptors are emitted, and that walk is
-  driven from a map.
+Two pieces of method are worth keeping here, because both of them cost a job a day.
 
-- **A handful of functions' IR already differs before the back end sees it.**
-  Four in that program (`testing.prettyPrint`, `testing.common.Attr`,
-  `testing.common.makeArtifactDir`, `testing.outputWriter.writeLine`); diffing
-  `testing.prettyPrint` shows two address computations emitted in swapped order.
-
-Four back-end and analysis causes were found and fixed in §18 and are no longer
-among these. Fixing the front-end ones changes the layout of every program goc
-compiles, so it wants its own validation cycle rather than being folded into
-another change.
-
-**This is why comparing two builds by their bytes cannot conclude anything on its
-own, and why one repeat cannot triage it.** Measured 2026-07-31 while verifying
-§20: of the 33 programs whose three builds differed in one three-way sampling,
-seventeen produced a different image on every one of five solitary compiles, so a
-repeat that matches means two draws collided and a repeat that differs means
-nothing at all. The distribution is also skewed --
-`goc/testdata/stdlib_net_mail_textproto.go` takes its minority branch 3 times in
-53 compiles -- so a program can look stable for a dozen compiles and still be the
-reason a build differed. What does discriminate is comparing *content* rather
-than image: every defined symbol's name, size, kind and section, sorted, plus the
-image size. All 33 were identical under that comparison, since what varies is
-where the functions went and not what is in them. `analysis/batchdiff` triages
-this way.
-
-Comparing two builds by what they *print* has its own trap, found the same day.
+**A behaviour comparison has to run a disagreement again before believing it.**
 `goc/testdata/bytes_grow_compare.go` and `goc/testdata/bytes_grow_stats.go` print
 allocation and GC statistics that move with scheduling: one single executable of
 the first gave three distinct outputs in 21 runs at 7-way concurrency and the
 second two in 21, while both gave one output in 12 serial runs on an idle box.
-`bytes_grow_stats.go` showed this across three builds that were the same file
-byte for byte, which is what makes it conclusive. A behaviour comparison has to
-run a disagreement again before believing it; `analysis/batchdiff` now does.
+`bytes_grow_stats.go` showed this across three builds that were the same file byte
+for byte, which is what makes it conclusive. `analysis/batchdiff` now re-runs a
+disagreement before reporting it.
 
-Also unfixed, `-O` only: `opt/inline.go:184` sorts cost-inline candidates with an
-unstable `sort.Slice` over a slice built from map iteration, so which callees are
-inlined when the budget runs out is not reproducible. The matrix runs `-O` under
-`-runtime-opt`.
+**Comparing two images by *content* rather than by bytes is still the right triage
+for a contaminated compile**, now that bytes agree rather than because they do not.
+Every defined symbol's name, size, kind and section, sorted, plus the image size:
+a compile that gained, lost or resized a symbol is a different failure from one
+that only moved something, and only the first is what a compile contaminated by a
+previous compile looks like. `analysis/batchdiff` and `analysis/determinism` both
+report it separately from the image digest.
 
 - **An interior address is not a managed pointer, so it is invisible to the
   stack map (2026-07-31).** `ir.Block.Add(ir.ClsP, ...)` -- every field, index
@@ -1790,6 +1768,47 @@ inlined when the budget runs out is not reproducible. The matrix runs `-O` under
   address in a pointer slot would newly reach `findObject`. A cheaper first step
   is a checker: assert that no `ClsP`-classed value is live across a call
   instruction unless it is a GC reference, and see what the corpus reports.
+
+#### The optimizer's and the legacy stack map's own reproducibility, `cg12cc` only (2026-07-31)
+
+Located by §22's static audit of every range-over-map in the tree, unfixed, and
+each one provably unable to reach `goc`.
+
+- **`opt/mem2reg.go:109` and `opt/jumpthread.go:431` number phi temporaries in map
+  order.** Both do `for b := range analysis.IteratedFrontier(df, defs)`, and
+  `IteratedFrontier` returns `analysis.BlockSet`, i.e. `map[*ir.Block]bool`. The
+  body calls `f.NewTemp`, so which phi gets which temporary id is decided by map
+  iteration order, and temporary ids reach register allocation and slot
+  assignment. Phi *placement* is unaffected -- one phi per (variable, block) either
+  way -- so this is a numbering defect, not a correctness one.
+
+  It cannot reach `goc`. `opt.OptimizeModule` sends any module over
+  `moduleOptimizationFunctionBudget` (2048 functions) to `BoundedPipeline`, which
+  is `fold`/`copy`/`dce` only: no `mem2reg`, no `jumpthread`, no `inline`, no
+  `gcm`. The smallest program in the goc corpus, `goc/testdata/hello.go`, emits
+  **2,739** functions, because every goc program links the runtime. So no goc
+  module has ever run `DefaultPipeline`, which is also the real reason
+  `opt/inline.go`'s tie-break never mattered to the matrix.
+
+  The fix is to walk `cfg.RPO` filtered by frontier membership instead of the map
+  -- one line per site. It renumbers temporaries and therefore changes generated
+  code for every C program cg12 compiles, so its validation gate is `make
+  test-ruby` (the cg12-vs-gcc differential) and `scripts/cruby-diff.sh`, not the
+  goc suites. It wants that cycle rather than being folded into a goc change,
+  which is why §22 left it here.
+
+- **`arm64/mc.go:2786` orders a safepoint's frame roots in map order.** `gcRoots`
+  ranges `m.f.StackPointerWords[id]`, a `map[int]bool`, so an allocation with two
+  or more pointer words contributes its `rootFrame` entries in map order --- and
+  `setStackMap` (`arm64/mc.go:458`) writes `sp.roots` to the `__cg12_stackmaps`
+  section in slice order. A root set is a set, so this is a reproducibility defect
+  and not a collector defect.
+
+  It cannot reach `goc` either: `arm64/parallel.go:91` keeps a function's
+  safepoints for that section only when `!goRuntime`, and a goc image confirms it
+  --- `readelf -S` shows no stack-map section and `nm` no `__cg12_stackmaps`
+  symbol. The Go-format stack maps goc does emit go through `goStackMapPoints`,
+  which collects into a set and sorts.
 
 #### Unmeasured
 
@@ -3586,3 +3605,168 @@ Per §15, a green matrix is weak evidence, so the evidence is the host compariso
   operand sequence and therefore the same separators, but goc always compiles
   with `runtimeAllocation` on, so nothing in this repository's test suites
   executes it. Only its construction is shared, not its verification.
+
+
+## 22. Compiling the same program twice gives the same program (2026-07-31)
+
+§18 fixed four back-end and analysis causes of goc's irreproducibility and left
+the rest, correctly, in the front end. §5.10 recorded what remained: 39 of 358
+corpus programs varied at all, and `goc/testdata/runtime_defer_capture_allocs.go`
+gave **25 distinct executables in 30 compiles**. That is closed. Every one of the
+365 corpus programs now compiles to the same bytes every time, with and without
+`-O`.
+
+This section is `ccwork/frontend-determinism` and `ccwork/frontend-determinism-2`
+together: the first located and fixed the causes, the second verified them, and
+retired two claims this plan was carrying that turned out not to be true.
+
+### Cause 1: variadic interface payload addresses were emitted in map order
+
+`goc/compile.go`, the `...any` path of `callArguments`. When a call passes several
+non-direct-interface values to a `...any` parameter and the backing array is
+heap-allocated, goc allocates one combined object -- the element array plus one
+boxed `payloadN` field per argument that needs one -- and then computes one
+address per payload. It recorded those in a `map[int]int` from argument index to
+field index, and:
+
+```go
+for argumentIndex, fieldIndex := range payloadFields {
+        interfacePayloads[argumentIndex] = g.offset(backing, offsets[fieldIndex])
+}
+```
+
+**`g.offset` emits an `add`.** So the address computations were emitted in map
+iteration order, and each `add` takes the next temporary number, so a swap
+renumbers every temporary after it in the function. Fixed by recording the pairs
+in a slice, which they are already appended to in argument order.
+
+That is the whole of the front-end residue. The diff between two emissions of
+`runtime_defer_capture_allocs.go` on the unfixed compiler is **110 lines in three
+functions** -- `testing.common.makeTempDir`, `testing.common.checkFuzzFn`,
+`testing.common.Attr`, every one a `...any` caller -- and it reads:
+
+```
+< 	%t323 =p add %t322, 48        > 	%t323 =p add %t322, 64
+< 	%t324 =p add %t322, 64        > 	%t324 =p add %t322, 68
+< 	%t325 =p add %t322, 68        > 	%t325 =p add %t322, 48
+```
+
+with every later use following the renumbering.
+
+### Cause 2: `opt/inline.go`'s cost-inline tie-break was unstable
+
+`selectCostInline` built its candidate slice by ranging a map and sorted it with
+`sort.Slice` on size alone. `sort.Slice` is not stable, so two callees of the same
+size came out in whatever order the map put them, and that decides which one is
+inlined when the per-caller growth budget runs out. Ties now break on name. The
+caller loop walks `m.Funcs` order for the same reason, which only affects
+`CG12_DUMP_COSTINLINE`'s output since each caller's budget is independent and
+marking a callee is idempotent.
+
+### Cause 3: native standard-library overlays were applied in map order
+
+`applyNativeStdlibOverlays` ranged `loader.units`, a `map[string]*sourceUnit`, and
+appended each overlay's functions and data straight to the module. With two
+overlay-carrying packages the module's tail, and every address in it, would come
+out in map order. It does not bite today -- the only native `.ssa` overlay in the
+tree is runtime's, so one package contributes and the walk has nothing to disagree
+about -- and is fixed with `orderedUnits` because the next overlay would
+reintroduce the whole class silently.
+
+### The measurement
+
+Every figure below is on `ccwork/frontend-determinism-2`, one tree, one path, on a
+box shared with one sibling job.
+
+| measurement | before | after |
+| --- | --- | --- |
+| `runtime_defer_capture_allocs.go`, `goc -emit-ir`, 3 emissions | 3 distinct module texts | 1 |
+| the five `scripts/determinism-check.sh` samples, cold and warm, twice | 4 of 5 | **5 of 5** |
+| the same with `-O` | not measured before | **5 of 5** |
+| whole corpus, 365 programs x 4 compiles | 39 of 358 varied (§18) | **365 of 365 identical** |
+| whole corpus with `-O`, 365 x 4 | not measured before | **365 of 365 identical** |
+| 45-program sample x 12 compiles, including every program §5.10 named as skewed | -- | **45 of 45 identical** |
+
+2,920 corpus compiles across the two sweeps plus 540 in the deep repeat, 0
+varying, 0 failed to compile. `scripts/determinism-check.sh` gained a `-corpus`
+mode so the sweep is a command rather than a one-off.
+
+### The two claims that were wrong
+
+**§5.10's "441 interface-call wrapper functions land in the module in a different
+order on each compile" does not happen.** It was tested where it counts, on the
+compiler that *is* irreproducible: `git checkout main -- goc/compile.go` puts the
+pre-fix front end back, and three `CG12_NOCACHE=1 goc -emit-ir` emissions of
+`runtime_defer_capture_allocs.go` give three distinct module texts -- and the
+ordinal position of every one of the 5,942 `function` headers, and of all 1,318
+`*.interfacecall.*` wrappers among them, is **identical in all three**. Nothing
+moves. The count is not reproducible either; that program has 1,318 wrappers
+today, not 441. The likeliest reading of the original observation is that it was
+taken at the linked-image level, where a renumbered temporary changes a frame size
+and moves every later function's address -- so hundreds of wrappers appear to be
+"at different positions" when three function bodies upstream of them changed
+length.
+
+**§5.10's "the matrix runs `-O` under `-runtime-opt`, so this matters" was wrong
+about cause 2's blast radius, for a reason worth writing down.**
+`opt.OptimizeModule` sends any module over `moduleOptimizationFunctionBudget`
+(2048 functions) to `BoundedPipeline`, which is `fold`/`copy`/`dce` only. The
+smallest program in the goc corpus, `hello.go`, emits **2,739** functions, because
+every goc program links the runtime. **No goc module has ever run
+`DefaultPipeline`**, so `inline`, `mem2reg`, `jumpthread`, `ifconvert` and `gcm`
+are all `cg12cc` paths in practice. Cause 2 is fixed rather than deleted because
+`cg12cc` is real; it was never part of `runtime_defer_capture_allocs.go`'s
+residue. §5.10 records two more sites in the same class, found by the audit below
+and left for the Ruby/C validation cycle they belong to.
+
+### The audit, so this is a class and not an instance
+
+Empirical sweeps only find what the corpus exercises. `golang.org/x/tools/go/packages`
+is in the module cache, so a throwaway analyzer type-checked `.`, `./goc/...`,
+`./obj/...`, `./internal/gometa/...`, `./ir/...`, `./arm64/...`, `./opt/...` and
+`./cmd/goc/...` and printed every `for … range m` whose ranged expression's
+underlying type is a map: **108 statements outside tests, 56 of which append**.
+All 108 were read.
+
+Everything in the front end and in serialization is safe, and it is worth knowing
+*why*, because the safe shapes are the ones to copy: sort the keys before use
+(`compile.go:268/866/1000/1023/7353`, `reach.go:867/931/946/980`,
+`ir/binary.go:61`, `ir/asm_binary.go:24/34/84/101`,
+`internal/gometa/gometa.go:479`); collect into a set that something else sorts
+(`compile.go:12786`, `runtime_split.go:300/303`); fill a map rather than a slice
+(`compile.go:150/153/360/361/564`); or drain a worklist to a fixpoint, where the
+order cannot change the answer (`compile.go:2203`). The one shape that is not safe
+is the one cause 1 had: **a map walk whose body emits.**
+
+Note that cause 1's body was an assignment, not an append, so an
+`x = append(x, …)` heuristic would have missed it. The signal is not the append,
+it is the side effect.
+
+### Validated as a codegen change, not by a green suite
+
+Per §3 step 2 and §14, and re-run on this base rather than inherited, since
+`main` moved between the two jobs and §5.14 records two independently-correct
+changes composing into a broken compiler.
+
+- A differential program driving the changed path -- an eight-argument `Println`
+  and matching `Printf` mixing a `String()`-bearing struct, a plain struct, an
+  array, a string, an int, a pointer-derived bool and a nil `error`; the same
+  arguments in three orders; a nested `fmt.Sprint`; three `...any` arguments with
+  observable side effects, to pin evaluation order; a spread `values...` taking
+  the `hasEllipsis` branch instead -- is **byte-identical to `go run`** under
+  `goc` and under `goc -O`.
+
+- The **pre-fix** compiler produces a program with the same output, byte for byte.
+  The change reorders two `add` instructions with identical operands; it does not
+  change what is computed.
+
+- `goc/determinism_test.go`'s `TestCompilingTheSameSourceTwiceGivesTheSameModule`
+  compiles one source twice in one process and compares the serialized modules. It
+  works because Go randomizes each `range` over a map independently, so two
+  in-process compiles draw different traversal orders exactly as two processes do
+  -- no repeated linking, no corpus. It **fails 3 times out of 3** with cause 1
+  reverted, naming `main.nested` or `main.mixed` (the program's two `...any`
+  callers), and **passes 5 times out of 5** with it. It compares `MarshalBinary`
+  rather than the printed text, because the text form omits a datum's relocation
+  base, pointer words and typelink flag, and those reach the image too. It lives in
+  `./goc/...`, so it runs under `make test-goc-corpus`.
