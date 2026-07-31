@@ -8,8 +8,15 @@ package main
 // program, once through a pool of `goc compile-batch` workers that each compile
 // many -- and compares the two executables byte for byte. Anything that differs
 // is either a leak between compiles in one process or a program whose compile is
-// not deterministic to begin with, and the two are told apart by recompiling the
-// differing program alone a second time.
+// not deterministic to begin with.
+//
+// Telling those apart takes two steps, because bytes alone cannot do it: this
+// compiler lays the same functions out at different addresses on each compile
+// (RUNTIME_PLAN.md section 5.10), and on this corpus seventeen programs give a
+// different image on every one of five compiles. So a differing program is asked
+// first what actually moved -- see contentDigestOf -- and only if its *content*
+// differs is it recompiled alone -repeats more times to see whether a solitary
+// compile ever produces that content too.
 //
 // A third pass hands the same programs to the workers in the opposite order.
 // Byte-identical output under two different groupings is much stronger evidence
@@ -28,6 +35,7 @@ import (
 	"bufio"
 	"context"
 	"crypto/sha256"
+	"debug/elf"
 	"encoding/hex"
 	"encoding/json"
 	"flag"
@@ -35,6 +43,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"sort"
 	"strings"
 	"sync"
 	"time"
@@ -53,10 +62,11 @@ func main() {
 	work := flag.String("work", "", "scratch directory")
 	workers := flag.Int("j", 16, "concurrent compiles, and batch workers")
 	optimize := flag.Bool("O", false, "compile with -O")
+	repeats := flag.Int("repeats", 8, "solo recompiles of each differing program, used to tell a leak from a nondeterministic compile")
 	flag.Parse()
 	programs := flag.Args()
-	if *compiler == "" || *work == "" || len(programs) == 0 {
-		fmt.Fprintln(os.Stderr, "usage: batchdiff -goc goc -work dir [-runtime pack] [-O] [-j n] program.go...")
+	if *compiler == "" || *work == "" || len(programs) == 0 || *repeats < 1 {
+		fmt.Fprintln(os.Stderr, "usage: batchdiff -goc goc -work dir [-runtime packs] [-O] [-j n] [-repeats n] program.go...")
 		os.Exit(2)
 	}
 
@@ -98,19 +108,32 @@ func main() {
 
 	leaks := 0
 	if len(differing) > 0 {
-		fmt.Printf("\nrecompiling each differing program alone a second time, to tell a leak from a compile that is not deterministic to begin with\n")
-		second := compileEachAlone(*compiler, *pack, *work, ".alone2", *optimize, *workers, differing)
+		fmt.Printf("\ntriaging the %d differing programs: what moved, and whether a solitary compile reproduces it\n", len(differing))
+		solo := soloContentDigests(*compiler, *pack, *work, *optimize, *workers, *repeats, differing)
 		for _, program := range differing {
 			name := filepath.Base(program)
-			if second[name].digest != alone[name].digest {
-				fmt.Printf("NONDETERMINISTIC ALONE %-46s %s vs %s\n", name, short(alone[name].digest), short(second[name].digest))
+			aloneContent := contentDigestOf(filepath.Join(*work, name+".alone"))
+			batchContent := contentDigestOf(filepath.Join(*work, name+".batch"))
+			reversedContent := contentDigestOf(filepath.Join(*work, name+".reversed"))
+			if aloneContent == batchContent && aloneContent == reversedContent {
+				fmt.Printf("LAYOUT ONLY            %-46s same symbols, same sizes, same image size; only addresses moved\n", name)
+				continue
+			}
+			seen := solo[name]
+			seen[aloneContent] = true
+			batchExplained := seen[batchContent]
+			reversedExplained := seen[reversedContent]
+			if batchExplained && reversedExplained {
+				fmt.Printf("NONDETERMINISTIC ALONE %-46s content differs, but %d solitary compiles produce both batch results\n",
+					name, *repeats+1)
 				continue
 			}
 			leaks++
-			fmt.Printf("LEAK                   %-46s alone=%s batch=%s reversed=%s\n",
-				name, short(alone[name].digest), short(batched[name].digest), short(reversed[name].digest))
+			fmt.Printf("LEAK                   %-46s alone=%s batch=%s reversed=%s; content differs and %s is not among the %d distinct contents %d solitary compiles produced\n",
+				name, short(alone[name].digest), short(batched[name].digest), short(reversed[name].digest),
+				unexplainedLabel(batchExplained, reversedExplained), len(seen), *repeats+1)
 		}
-		fmt.Printf("\nleaks=%d nondeterministic-alone=%d\n", leaks, len(differing)-leaks)
+		fmt.Printf("\nleaks=%d explained=%d\n", leaks, len(differing)-leaks)
 	}
 
 	// Bytes are the strong check but they cannot speak for a program whose
@@ -280,6 +303,99 @@ func compileEachAlone(compiler, pack, work, suffix string, optimize bool, worker
 	}
 	group.Wait()
 	return results
+}
+
+// contentDigestOf identifies what an executable contains rather than where it
+// put it: every defined symbol's name, size, kind and section, sorted, plus the
+// image's total size.
+//
+// It exists because raw bytes cannot triage this compiler. goc's output is not
+// reproducible (RUNTIME_PLAN.md section 5.10) and the cause that remains is
+// ordering: 441 interface-call wrapper functions land in the module in a
+// different order on each compile, so the same functions with the same code get
+// different addresses. Two images that differ only that way have the same content
+// digest. An image that gained, lost or resized a symbol does not, and that is
+// what a compile contaminated by a previous compile would look like.
+//
+// This is necessary rather than sufficient -- two functions of equal size can
+// hold different instructions -- so a matching content digest is reported as
+// "layout only" and not as proof of equality.
+func contentDigestOf(path string) string {
+	file, err := elf.Open(path)
+	if err != nil {
+		return "unreadable: " + err.Error()
+	}
+	defer file.Close()
+	symbols, err := file.Symbols()
+	if err != nil {
+		return "no symbol table: " + err.Error()
+	}
+	described := make([]string, 0, len(symbols))
+	for _, symbol := range symbols {
+		if symbol.Section == elf.SHN_UNDEF {
+			continue
+		}
+		described = append(described, fmt.Sprintf("%s %d %d %d", symbol.Name, symbol.Size, symbol.Info, symbol.Section))
+	}
+	sort.Strings(described)
+
+	information, err := os.Stat(path)
+	if err != nil {
+		return "unstattable: " + err.Error()
+	}
+	digest := sha256.New()
+	fmt.Fprintf(digest, "size=%d symbols=%d\n", information.Size(), len(described))
+	for _, description := range described {
+		fmt.Fprintln(digest, description)
+	}
+	return hex.EncodeToString(digest.Sum(nil))
+}
+
+// soloContentDigests compiles each program alone several times and returns the
+// set of distinct contents each one produced.
+//
+// One repeat is not enough and reporting a leak on the strength of one is worse
+// than reporting nothing. Measured on this corpus, seventeen of the programs that
+// vary give a different *image* on every one of five compiles, so a repeat that
+// happens to match proves only that two draws collided -- and a repeat that does
+// not match proves nothing either. Comparing contents rather than images is what
+// makes the question answerable at all: the ordering noise cancels, and what is
+// left is whether a solitary compile ever produces what the batch produced.
+func soloContentDigests(
+	compiler, pack, work string,
+	optimize bool,
+	workers int,
+	repeats int,
+	programs []string,
+) map[string]map[string]bool {
+	digests := make(map[string]map[string]bool, len(programs))
+	for _, program := range programs {
+		digests[filepath.Base(program)] = map[string]bool{}
+	}
+	for repeat := 0; repeat < repeats; repeat++ {
+		suffix := fmt.Sprintf(".solo%d", repeat)
+		round := compileEachAlone(compiler, pack, work, suffix, optimize, workers, programs)
+		for name, result := range round {
+			if result.err != "" {
+				continue
+			}
+			digests[name][contentDigestOf(filepath.Join(work, name+suffix))] = true
+		}
+	}
+	return digests
+}
+
+// unexplainedLabel names which of the two batch groupings produced an executable
+// no solitary compile did, which is the part of a leak report worth reading.
+func unexplainedLabel(batchExplained, reversedExplained bool) string {
+	switch {
+	case !batchExplained && !reversedExplained:
+		return "neither batch nor reversed"
+	case !batchExplained:
+		return "batch"
+	default:
+		return "reversed"
+	}
 }
 
 // compileThroughBatch dispatches the programs across a pool of long-lived
