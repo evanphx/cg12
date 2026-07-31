@@ -453,6 +453,7 @@ func runtimeCapabilities() []runtimeCapability {
 			// See RUNTIME_PLAN.md 5.11.
 			timeout:     90 * time.Second,
 			expectation: runtimeCapabilityMustPass,
+			exclusive:   true,
 		},
 		{
 			category:    "gc",
