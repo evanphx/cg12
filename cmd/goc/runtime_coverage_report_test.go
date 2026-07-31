@@ -238,8 +238,8 @@ func TestCheckedRuntimeCoverageBaseline(t *testing.T) {
 	if baseline.GOOS != "linux" || baseline.GOARCH != "arm64" {
 		t.Fatalf("checked runtime coverage target = %s/%s", baseline.GOOS, baseline.GOARCH)
 	}
-	if baseline.Summary.Programs != 294 {
-		t.Fatalf("checked runtime coverage programs = %d, want 294", baseline.Summary.Programs)
+	if baseline.Summary.Programs != 338 {
+		t.Fatalf("checked runtime coverage programs = %d, want 338", baseline.Summary.Programs)
 	}
 }
 

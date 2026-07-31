@@ -14,21 +14,35 @@ assembly is tracked separately until it can be instrumented meaningfully.
 
 ## 1. Baseline
 
-The accepted 2026-07-22 coverage run compiled and ran the 294-program runtime
-capability corpus, executing each successful binary three times. Its canonical
-baseline is `cmd/goc/testdata/runtime_coverage_linux_arm64.json`.
+The accepted 2026-07-31 coverage run compiled and ran the whole 338-capability
+matrix, executing each successful binary three times and merging its hits. Its
+canonical baseline is `cmd/goc/testdata/runtime_coverage_linux_arm64.json`,
+built from runtime source `06e314f8a5a729394207296e943ea075e51dbd39355c3389ca7ac65a52cb8f55`.
 
-| Measurement | Baseline |
-| --- | ---: |
-| Programs | 294 |
-| Programs returning coverage | 291 |
-| Active Linux/ARM64 runtime Go functions | 2,561 |
-| Compiled runtime functions | 2,050 |
-| Executed runtime functions | 1,269 |
-| Active-function coverage | 49.6% |
-| Compiled runtime blocks | 25,929 |
-| Executed runtime blocks | 7,936 |
-| Compiled-block coverage | 30.6% |
+| Measurement | Baseline (2026-07-31) | Previous (2026-07-22) |
+| --- | ---: | ---: |
+| Programs | 338 | 294 |
+| Programs returning coverage | 338 | 291 |
+| Active Linux/ARM64 runtime Go functions | 2,574 | 2,561 |
+| Compiled runtime functions | 2,087 | 2,050 |
+| Executed runtime functions | 1,400 | 1,269 |
+| Active-function coverage | 54.4% | 49.6% |
+| Compiled runtime blocks | 27,780 | 25,929 |
+| Executed runtime blocks | 9,182 | 7,936 |
+| Compiled-block coverage | 33.1% | 30.6% |
+
+The corpus denominator and the baseline are now the same set: 338 program rows
+for 338 capabilities, every one `compile_outcome: passed` and
+`coverage_outcome: collected`, with no `skipped`, `unreported`, `missing` or
+`expected-unavailable` row anywhere. The single non-`passed` run outcome is
+`defer-panic/panic-string-output`, the declared `expectedFailure`, which exits 2
+by design and still returns its packet — §4.3's guard did not have to fire. The
+run recorded 0 unexpected failures, 0 compile failures and 0 timeouts, against
+the previous baseline's 19, 2 and 1.
+
+Both figures remain short of §2's guideposts of 65% active-function and 45%
+compiled-block coverage. They improved by 4.8 and 2.4 points over a corpus 15%
+larger, which is progress and not arrival; the guideposts stay open.
 
 The baseline already exercises useful portions of allocation, marking,
 sweeping, stack growth, channels, timers, and netpoll.
@@ -49,9 +63,12 @@ this document:
 | the runtime trace program OOMs or times out | §5.5 |
 | the ECDSA case | generic method dispatch, §5.6 |
 
-The accepted baseline still needs a rerun. It is now stale in two ways: it
-covers 294 of the matrix's 338 capabilities, and the runtime source fingerprint
-has moved, so a diff against it is refused rather than silently misleading.
+The rerun this section used to ask for has happened. Before it, the accepted
+baseline covered 294 of the matrix's 338 capabilities and had been built from a
+runtime source fingerprint that had since moved, so `make runtime-cover-diff`
+refused the comparison outright — the drift guard working rather than a failure.
+The 2026-07-31 baseline replaces it, and a diff against it now runs and reports
+zero deltas.
 
 ### Current state (2026-07-28)
 
@@ -80,19 +97,17 @@ became `mustPass` on 2026-07-28 with the merged-address fix in §5.3, so the
 matrix now holds no `knownGap` at all; `defer-panic/panic-string-output` is the
 one deliberate `expectedFailure`.
 
-The two denominators are now reconciled. There is only one denominator: the
-capability matrix *is* the coverage corpus, and every capability reports one
-explicit compile/run/coverage outcome, including the ones this environment
-cannot run. The accepted baseline covers 294 programs while the matrix holds
-338, and that gap is baseline staleness rather than an exclusion set — each of
-the 44 capabilities was added after the 2026-07-22 run. They are listed with a
-reason in `cmd/goc/testdata/runtime_coverage_baseline_pending.json`, and
-`TestCheckedRuntimeCoverageBaselineDenominator` reconciles matrix, baseline, and
-list in both directions: 294 + 44 = 338, no capability may appear in both, and
-no baseline program may name a capability the matrix has dropped. Adding a
-capability therefore requires either accepting a new baseline or recording why
-the baseline does not cover it. The list empties when the pending full-corpus
-rerun is accepted.
+The two denominators are now reconciled, and since 2026-07-31 they are equal.
+There is only one denominator: the capability matrix *is* the coverage corpus,
+and every capability reports one explicit compile/run/coverage outcome,
+including the ones this environment cannot run. The accepted baseline covers all
+338, so `cmd/goc/testdata/runtime_coverage_baseline_pending.json` is empty and
+`TestCheckedRuntimeCoverageBaselineDenominator` reconciles baseline to matrix
+directly: 338 + 0 = 338, no capability may appear in both, and no baseline
+program may name a capability the matrix has dropped. Adding a capability still
+requires either accepting a new baseline or recording in that file why the
+baseline does not cover it, so the list is a mechanism that is currently unused
+rather than one that has been retired.
 
 Control runs without coverage instrumentation reproduce the runtime failures
 and large-program compiler memory failures. They are not coverage-counter
@@ -203,18 +218,18 @@ Current M0 checkpoint:
 - [x] Refuse a sharded coverage run, which would publish a fraction of the
   corpus as a complete report, and refuse a coverage run on a host that cannot
   execute the matrix rather than skipping silently.
-- [ ] Reach one usable coverage outcome per capability. The last collection run
-  reached 326 of 329: every capability compiled and ran, none was skipped or
-  unreported, and the three absences — `goroutine/many-goroutines-gc`,
-  `scheduler-stress/gc-churn` and `stdlib-bytes/grow-allocs` — were each killed
-  at its 30s timeout with that recorded as its reason.
+- [x] Reach one usable coverage outcome per capability. The 2026-07-31
+  collection reached **338 of 338**: every capability compiled, ran, and returned
+  a usable coverage packet, with no `skipped`, `unreported`, `missing` or
+  `expected-unavailable` row. The three absences the previous run carried —
+  `goroutine/many-goroutines-gc`, `scheduler-stress/gc-churn` and
+  `stdlib-bytes/grow-allocs`, each killed at its 30s timeout — were one bug, the
+  §5.2.1 GC-assist allocation recursion, and all three now collect.
 
-  **The blocking reason has changed.** All three absences were the §5.2.1
-  GC-assist failure, and that is fixed: all three are `mustPass` and passing.
-  Nothing is known to prevent a full 338-of-338 collection. What is missing is
-  the run itself. This box needs a fresh collection over the current tree, not
-  more runtime work, and it is the last thing standing between the project and
-  M0.
+  The one non-`passed` run outcome is `defer-panic/panic-string-output`, the
+  matrix's declared `expectedFailure`. It exits 2 without recovering and its
+  packet still arrives, because `insertRuntimeCoverageDumpCalls` emits the dump
+  ahead of every `runtime.exit` and `fatalpanic` reaches `exit(2)`.
 
 ### 4.1 Make reports stable and comparable
 
@@ -275,7 +290,10 @@ functions remain visible but do not become artificial coverage targets.
   the corpus currently produces: `insertRuntimeCoverageDumpCalls` emits the dump
   ahead of every call to `runtime.exit`, and Go's `fatalpanic` and `fatalthrow`
   both reach `exit(2)`. In the 2026-07-28 run the deliberate uncaught panic and
-  all six programs that exited non-zero still returned their packets, so the
+  all six programs that exited non-zero still returned their packets, and the
+  accepted 2026-07-31 baseline repeats the result with nothing left to excuse:
+  its only non-zero exit is `defer-panic/panic-string-output`, whose packet is
+  `collected`, and the report carries zero `expected-unavailable` rows. So the
   `expected-unavailable` classification is a guard that did not have to fire
   rather than an active exclusion. It stays in place because terminations that
   bypass `runtime.exit` — `runtime.abort`, `dieFromSignal` re-raising a fatal
@@ -298,18 +316,19 @@ row is rejected by report validation, and a sharded coverage run is refused
 outright. Two runs cannot disagree about the denominator without one of them
 failing.
 
-The explicit outcomes hold as well. The 2026-07-28 verification run over all
-329 capabilities produced 329 compile outcomes, 329 run outcomes, and 329
-coverage outcomes, with a recorded reason on every outcome other than
-`collected` and no silent absences. What remains is the runtime repair work that
-turns the three classified timeouts into collected packets.
+The explicit outcomes hold as well. The 2026-07-31 collection over all 338
+capabilities produced 338 compile outcomes, 338 run outcomes, and 338 coverage
+outcomes, every one of the last `collected`, with no silent absences. The three
+classified timeouts the 2026-07-28 run carried are gone.
 
-One consequence is worth stating plainly: the runtime source fingerprint has
-moved since the accepted 2026-07-22 baseline, so `make runtime-cover-diff`
-against that baseline now correctly refuses to compare rather than producing a
-misleading delta. Diffing is usable between reports built from the same runtime
-source; comparing against the accepted baseline again requires accepting a new
-one, which needs the open runtime failures resolved first.
+The drift guard did its job on the way here. Between the 2026-07-22 baseline and
+this run the runtime source fingerprint moved from
+`10a75b3cbbd95507daf7cd4ac1b4aa3b6ddcab338ea0d00e8a79c52bdbb9bb06` to
+`06e314f8a5a729394207296e943ea075e51dbd39355c3389ca7ac65a52cb8f55`, and
+`make runtime-cover-diff` refused to compare across that boundary rather than
+producing a misleading delta. Accepting the 2026-07-31 run is what restored the
+comparison: diffing the accepted baseline against the report it was built from
+runs to completion and reports zero deltas in every bucket.
 
 ## 5. Phase 1: Repair current hard failures
 
@@ -1848,8 +1867,14 @@ Work in reviewable vertical slices. Each slice contains the reproducer, the
 fix, compiler diagnostics where useful, status-suite registration, and updated
 coverage classification.
 
-1. **M0 — coverage is reproducible:** stable report/diff, checked baseline,
-   classifications, one explicit outcome per capability.
+1. **M0 — coverage is reproducible: COMPLETE (2026-07-31).** Stable report/diff,
+   checked baseline, classifications, and one explicit outcome per capability.
+   The last open box was a full-corpus collection over the current tree; the
+   2026-07-31 run collected a usable packet from all 338 capabilities and was
+   accepted as the baseline, which also emptied
+   `runtime_coverage_baseline_pending.json`. M0 says coverage is *measurable and
+   diffable*, not that it is high: §1 records 54.4% active-function and 33.1%
+   compiled-block, both short of §2's guideposts.
 2. **M1 — current failures are green: COMPLETE (2026-07-28).** Every failure
    this milestone named is closed, and each turned out to be a compiler defect:
    defer/panic (§5.1), signal delivery during GC (§5.2.1), cleanup and finalizer
@@ -1886,13 +1911,14 @@ The original batch here is complete: every item from the stable report-diff
 through the HTTP compilation OOMs is closed, and each is recorded in its own §5
 subsection. What follows replaces it.
 
-1. **Accept the first stable baseline.** Run a full coverage collection over the
-   current tree and accept it. This is the last open M0 checkbox (§4) and it is
-   no longer blocked on runtime work — the three capabilities that used to time
-   out now pass. Expect the source-drift check to refuse a diff against the
-   2026-07-22 baseline; that is correct behaviour, not a failure. On acceptance
-   `runtime_coverage_baseline_pending.json` empties and the denominator test
-   reconciles baseline to matrix directly.
+1. **Done: the first stable baseline is accepted (2026-07-31).** The full
+   collection ran over all 338 capabilities and every one of them returned a
+   usable packet, so the run was accepted, `runtime_coverage_baseline_pending.json`
+   is empty, and the denominator test reconciles baseline to matrix directly.
+   The source-drift check did refuse a diff against the 2026-07-22 baseline
+   first, as expected. This closed the last M0 checkbox (§4). What it did *not*
+   do is move coverage to where §2 wants it: 54.4% active-function and 33.1%
+   compiled-block against guideposts of 65% and 45%.
 
 2. **Fix `for x.f = range s`** (§5.10). A wrong-answer bug in valid Go that no
    capability covers. Land a reducer first — its absence is why the bug survived
