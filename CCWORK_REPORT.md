@@ -117,6 +117,24 @@ A worker's peak is still the largest program it compiles, and retaining packs it
 read does not move the maximum. `compileRuntimeCapabilityPeakBytes = 3 GiB` and the divisor
 built on it stand.
 
+## The compiler is bit-identical to `main` by construction
+
+`git diff --name-only main...HEAD` over `goc/ ir/ opt/ arm64/ amd64/ link/ obj/ lower/ parse/
+internal/` is **empty**. The ten files this branch changes are all under `cmd/goc/` and
+`analysis/batchdiff/`, plus this report and `RUNTIME_PLAN.md`. No code that decides what a
+compile emits is touched, so no compilation this branch performs can differ from one `main`
+would have performed. What can differ is *when* things are read and *what a process carries
+between programs*, which is exactly what the corpus-wide leak check below is for.
+
+## A defect found while reconciling
+
+The batch pool returned a worker to the free list **before** reading the stderr that worker
+had accumulated, so the next program could start writing to the same buffer while this one was
+still being attributed. It only ever affected diagnostics text on a failing compile -- a
+worker writes a program's own errors into that program's response, never to its stderr -- but
+"a linker complaint attributed to whichever program won the race" is the kind of thing that
+would cost an hour to understand once. Fixed in `149d402`: the diagnostics are taken first.
+
 ## Progress log
 
 - Read `RUNTIME_PLAN.md` §1/§3/§5.10/§14/§17/§18/§19 and the `goc-batch-b` report; confirmed

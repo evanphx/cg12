@@ -2612,6 +2612,117 @@ The manifest's selection fields sit in the same JSON blob as its 36,755-entry
 `Defined` list, so a program pays 0.22 s parsing packs it will not use. Over the
 matrix that is 74 s of CPU and about 1 s of wall clock. Splitting a small selection
 header out of the container would remove it; worth doing if the pack set grows.
+§20 reduces it rather than removing it -- a batch worker parses the set once for
+every program it compiles -- so the cost is still there for any one-shot build.
 
 The floor is still one program and it is still single-threaded, so §17's levers 2
 and 3 are unchanged in kind, only smaller in absolute terms.
+
+## 20. One process compiles many programs, and they share a pack set (2026-07-31)
+
+§16 and §17 both left the same residue: the matrix runs one `goc` process per
+program, and every one of those processes rebuilds the parsed and type-checked
+closure of the Go runtime before it looks at the program. `goc/source_world.go`
+caches that per *process*, so 338 processes build it 338 times.
+
+`goc compile-batch` reads one JSON request per line of stdin -- `{"source":
+"prog.go", "output": "prog.bin"}` -- and writes one response per line of stdout.
+A worker outlives its programs, so the world is built once per worker instead of
+once per program. The matrix dispatches through a pool of these, and
+`-runtime-status-batch-compile=false` restores the old path so the A/B below is a
+measurement rather than a comparison against a different tree.
+
+### Why the request stream, and why the configuration is not per request
+
+A static list handed to a process at startup is simpler and it partitions the
+work statically, which destroys §17's schedule: longest-first dispatch through a
+shared queue, and a bound on how far compilation may run ahead of the run phase.
+Both are properties of a queue. A request stream keeps the queue and changes only
+what a worker is.
+
+Target, `-runtime` and `-O` are exactly the axes of goc's source-world key, so
+they are command-line flags rather than request fields: a worker that accepted
+them per request would silently build a second world on the first request that
+differed. `-runtime-covermeta` is not offered at all, and the coverage run keeps
+the one-shot path, because instrumenting the runtime per program is the opposite
+of one build configuration per process.
+
+### The pack set is the part §19 constrains
+
+The obvious way to make a batch share the packs is to read them at startup and
+hoist the read out of the per-program loop. §19 forbids that: `-runtime` is a
+set, and which pack a program gets depends on that program's own loaded closure,
+which is not known until the front end has run.
+
+`packSet` (`cmd/goc/prebuilt.go`) holds both halves at their natural lifetimes.
+Every candidate's **manifest** is read when the set is built, because choosing
+needs the closures and nothing else. Each pack's **objects** are read the first
+time some program selects that pack, and kept. Programs in one worker that choose
+the same pack share one read; programs that choose different ones each pay once.
+One-shot `goc` and `goc compile-batch` use the same code path with different
+lifetimes, so a batch build and a solitary build are the same compile.
+
+This is strictly better than either half alone. A batch that hoisted the read
+would have to re-read per program the moment two programs disagreed, and a
+one-shot process re-parses all seven manifests every time -- which is §19's own
+open item, 74 s of CPU across the matrix, and a worker amortizes it for free.
+
+The pack a compile chose is matched back to its file by pointer identity, and a
+manifest that is not one the set offered is an error rather than a fallback to
+the first pack. It cannot happen today, but an image built from one pack's
+objects and another pack's subtraction is precisely the mislink the manifest
+exists to prevent.
+
+### One bad program costs one program
+
+A one-shot `goc` that rejects a program exits and the next program gets a fresh
+process; a worker has no fresh process to offer. Three things make that safe: a
+compile error is a response rather than an exit; **a panic inside the compiler is
+recovered per request** and reported with its stack as that program's error, so a
+compiler bug costs one program instead of every program queued behind that
+worker; and the pool never reuses a worker whose request failed at the protocol
+level, so a worker killed by the OOM killer costs one capability. Diagnostics are
+never written to a worker's own stderr, which is shared and could not be
+attributed; `cc`'s output is captured per program and folded into that program's
+error.
+
+### What it measures
+
+Full unsharded matrix, `scripts/matrix-timing.sh`, `-count=1 -v`, **4 compile
+workers**, warm pack cache, on a quiet box. `main` was measured by checking it out
+in the same working directory, because a `goc` built from a tree at a different
+absolute path embeds different strings and is not a valid control.
+
+| run | wall | CPU | sum of per-compile wall | slowest single compile |
+| --- | ---: | ---: | ---: | ---: |
+| `main` (a639ec9) | 351.8 s | 2758.7 s | 1365.5 s | 23.1 s |
+| this tree, `-runtime-status-batch-compile=false` | 351.3 s | 2755.6 s | 1363.9 s | 23.0 s |
+| this tree, batch on | **273.6 s** | **1930.5 s** | 1050.8 s | 22.7 s |
+| this tree, batch on (repeat) | **273.2 s** | **1926.8 s** | 1049.8 s | 23.0 s |
+
+**Wall -22.2%, CPU -30.0%.** The one-flag-apart control lands within 0.15% of
+`main` on every column, which is what says the flag is the only difference.
+
+`ccwork/goc-batch-b` measured this same lever at 5-12% beneath the packs. It is
+larger on top of them, and the reason is §19 rather than anything in this
+section: the packs removed compile work, not process work, so the per-process
+cost the batch removes is roughly the same number of seconds against a total that
+is 40% smaller. The two levers multiply.
+
+Peak RSS is unchanged: 2622 MB on `main` against 2624 and 2725 MB batched. A
+worker's peak is still the largest program it compiles, and retaining packs it
+has already read does not move the maximum, so
+`compileRuntimeCapabilityPeakBytes = 3 GiB` and the divisor built on it stand.
+
+### Which term bounds the matrix afterwards
+
+    wall ~ max( slowest compile , compile CPU / workers ) + run phase + setup
+
+At 4 workers the second term binds by an order of magnitude -- 1050.8 / 4 =
+262.7 s against a 23.0 s slowest compile -- and 262.7 + 14.9 s of run phase
+accounts for the 273.2 s observed. At the default 64 workers the terms swap:
+1050.8 / 64 = 16.4 s is below the slowest compile, so the bound is the same
+23.0 s program in both arms and the wall clock would barely move. **The value of
+this lever is the CPU, not the floor**, and the floor is still one
+single-threaded compile of `stdlib_http_tls_client_server.go`.
+
