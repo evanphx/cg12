@@ -4,8 +4,9 @@
 #
 # Usage: scripts/determinism-check.sh [-runtime <pack>]
 #
-# runtime_defer_capture_allocs.go is a known backend residue (RUNTIME_PLAN.md
-# section 5.10): it is expected to differ. Everything else must match.
+# All five must match. runtime_defer_capture_allocs.go used to be the exception
+# -- 25 distinct executables in 30 compiles -- and RUNTIME_PLAN.md section 5.10
+# records what it turned out to be.
 set -u
 
 extra=("$@")
