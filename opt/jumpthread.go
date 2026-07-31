@@ -426,9 +426,20 @@ func reconstructThreaded(f *ir.Func, b, bp *ir.Block, vars []reconVar) {
 	live := tempLiveIn(f, cfg, vars)
 
 	frontier := analysis.IteratedFrontier(df, analysis.BlockSet{b: true, bp: true})
+	// The frontier in reverse post-order rather than in its own iteration order: it
+	// is a map keyed by block pointer, and the loop below calls f.NewTemp, so
+	// ranging it would number the phi temporaries differently on every compile.
+	// Which block gets a phi is the same either way. Mem2Reg does the same thing
+	// for the same reason.
+	orderedFrontier := make([]*ir.Block, 0, len(frontier))
+	for _, block := range cfg.RPO {
+		if frontier[block] {
+			orderedFrontier = append(orderedFrontier, block)
+		}
+	}
 	phiOf := map[*ir.Block]map[int]*ir.Phi{}
 	for vi := range vars {
-		for x := range frontier {
+		for _, x := range orderedFrontier {
 			if !live[x][vi] {
 				continue // dead here; a phi would only make a spurious live range
 			}

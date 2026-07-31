@@ -106,7 +106,16 @@ func Mem2Reg(f *ir.Func) bool {
 				}
 			}
 		}
-		for b := range analysis.IteratedFrontier(df, defs) {
+		// In reverse post-order, not in the frontier set's iteration order. The
+		// frontier is a map keyed by block pointer, and the body below calls
+		// f.NewTemp, so ranging it would number the phi temporaries differently on
+		// every compile -- and temporary ids reach register allocation and slot
+		// assignment. Which block gets a phi is unaffected either way.
+		frontier := analysis.IteratedFrontier(df, defs)
+		for _, b := range cfg.RPO {
+			if !frontier[b] {
+				continue
+			}
 			if !liveIn[b][vi] {
 				continue // dead here; a phi would only create a spurious live range
 			}

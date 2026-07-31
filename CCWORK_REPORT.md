@@ -325,3 +325,44 @@ plan named as skewed.
 
 - `make test-unit`: **pass**, exit 0, 0 FAIL. (Includes `./opt/...`, `./ir/...`,
   `./arm64/...`, `./obj/...`, `./internal/gometa/...`.)
+- `make test-goc-corpus`: **`ok github.com/evanphx/cg12/goc 549.755s`**, 0 FAIL.
+  This is the non-executable compile path as well as the executable one, and it is
+  where `TestCompilingTheSameSourceTwiceGivesTheSameModule` runs.
+- `make test-goc-cmd`: **`ok github.com/evanphx/cg12/cmd/goc 219.657s`**, 0 FAIL.
+- **The full capability matrix, unsharded, with `-v`**:
+  `go test -timeout 30m -run '^TestARM64RuntimeCapabilityStatus$' ./cmd/goc/... -v
+  -args -runtime-status-shards=1 -runtime-status-shard=0
+  -runtime-status-compile-workers=8` →
+  **`PASS` / `ok github.com/evanphx/cg12/cmd/goc 183.013s`**.
+
+  Census taken from the `-v` output rather than from `ok`:
+
+  | | count |
+  | --- | ---: |
+  | `=== RUN   …CapabilityStatus/<category>/<name>` | **345** |
+  | `--- PASS` | **345** |
+  | `--- FAIL` | **0** |
+  | `--- SKIP` | **0** |
+  | logged `PASS <program>.go` | **344** |
+  | logged `EXPECTED FAILURE` | **1** (`runtime_panic_print_string.go`) |
+  | logged `KNOWN GAP` | **0** |
+
+  **345 subtests, 344 PASS, 1 declared EXPECTED FAILURE, 0 FAIL, 0 KNOWN GAP** —
+  the required census exactly. 183 s is a plausible unsharded wall clock for this
+  box at 8 compile workers (§18 measured 67–116 s at 64).
+
+  **Complete list of non-passing capabilities: none.** The only non-`PASS` run
+  outcome is `defer-panic/panic-string-output`, the declared expected failure,
+  which exits 2 by design.
+
+## The runtime pack
+
+`goc build-runtime -packages "" -o …` under `CG12_NOCACHE=1`, three times each:
+
+| | digest (first 20 hex) |
+| --- | --- |
+| no `-O` | `2e2802389ffca38581e5` × 3 |
+| `-O` | `5f8943e5c780e4bf50b1` × 3 |
+
+This matters more than any single program does: the pack is the largest module goc
+compiles, and every program built against it inherits its bytes.
