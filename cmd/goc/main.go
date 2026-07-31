@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"flag"
 	"fmt"
+	"io"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -29,6 +30,9 @@ func main() {
 	}
 	if len(os.Args) > 1 && os.Args[1] == "build-runtime" {
 		os.Exit(buildRuntimeCommand(os.Args[2:], os.Stderr))
+	}
+	if len(os.Args) > 1 && os.Args[1] == "compile-batch" {
+		os.Exit(compileBatchCommand(os.Args[2:], os.Stdin, os.Stdout, os.Stderr))
 	}
 
 	out := flag.String("o", "", "output file")
@@ -69,7 +73,9 @@ func main() {
 		if exe == "" {
 			exe = goc.OutputName(input)
 		}
-		check(linkAgainstPrebuiltRuntime(target, splitCommaList(*prebuiltRuntime), input, src, exe, *optimize))
+		packs, err := readPackSet(splitCommaList(*prebuiltRuntime))
+		check(err)
+		check(linkAgainstPrebuiltRuntime(target, packs, input, src, exe, *optimize, os.Stderr))
 		if *run {
 			// The profile covers the compile, not the compiled program, and
 			// os.Exit does not run deferred functions.
@@ -235,16 +241,31 @@ func write(name string, b []byte) {
 }
 
 func link(target goc.Target, m *ir.Module, exe string) {
+	check(linkModule(target, m, exe, os.Stderr))
+}
+
+// linkModule emits a finished module and links it into an executable, sending
+// everything the C toolchain says to errorOutput.
+//
+// It takes the writer rather than using os.Stderr because the batch compiler
+// runs many of these in one process and has to attribute each linker complaint
+// to the program that caused it; the command-line path passes os.Stderr and is
+// unchanged.
+func linkModule(target goc.Target, m *ir.Module, exe string, errorOutput io.Writer) error {
 	var translatedAssembly string
 	// A temporary *directory* with fixed names inside, rather than temporary
 	// files with random ones. cc records the object's filename in the linked
 	// binary, so random names made two builds of the same source differ in
 	// their symbol tables and defeated any comparison of the output.
 	work, err := os.MkdirTemp("", "cg12-goc")
-	check(err)
+	if err != nil {
+		return err
+	}
 	defer os.RemoveAll(work)
 	f, err := os.Create(filepath.Join(work, "goc.o"))
-	check(err)
+	if err != nil {
+		return err
+	}
 
 	// arm64 is the only backend with the assembly sidecar the Go runtime needs:
 	// it emits the object plus translated Plan 9 assembly, which is then compiled
@@ -258,28 +279,43 @@ func link(target goc.Target, m *ir.Module, exe string) {
 			_, err = f.Write(objectBytes)
 		}
 	}
-	check(err)
-	check(f.Close())
+	if err != nil {
+		f.Close()
+		return err
+	}
+	if err := f.Close(); err != nil {
+		return err
+	}
 	cc, err := exec.LookPath("cc")
-	check(err)
+	if err != nil {
+		return err
+	}
 	inputs := []string{f.Name()}
 	if target == goc.TargetARM64 {
-		inputs = append(inputs, compileRuntimeSupport(cc, work, translatedAssembly))
+		supportObject, err := compileRuntimeSupport(cc, work, translatedAssembly, errorOutput)
+		if err != nil {
+			return err
+		}
+		inputs = append(inputs, supportObject)
 	}
 	args := append([]string{"-no-pie", "-o", exe}, inputs...)
 	cmd := exec.Command(cc, args...)
-	cmd.Stderr = os.Stderr
-	check(cmd.Run())
+	cmd.Stderr = errorOutput
+	return cmd.Run()
 }
 
-func compileRuntimeSupport(cc, work, assembly string) string {
+func compileRuntimeSupport(cc, work, assembly string, errorOutput io.Writer) (string, error) {
 	source := filepath.Join(work, "goc-runtime.S")
 	object := filepath.Join(work, "goc-runtime.o")
-	check(os.WriteFile(source, []byte(assembly), 0o644))
+	if err := os.WriteFile(source, []byte(assembly), 0o644); err != nil {
+		return "", err
+	}
 	cmd := exec.Command(cc, "-c", "-o", object, source)
-	cmd.Stderr = os.Stderr
-	check(cmd.Run())
-	return object
+	cmd.Stderr = errorOutput
+	if err := cmd.Run(); err != nil {
+		return "", err
+	}
+	return object, nil
 }
 
 func runProgram(name string, arguments ...string) int {

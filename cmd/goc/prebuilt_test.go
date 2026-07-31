@@ -211,7 +211,7 @@ func TestTheDriverRefusesAnOptimizationMismatch(t *testing.T) {
 	source := filepath.Join(work, "split.go")
 	require.NoError(t, os.WriteFile(source, []byte(prebuiltSplitProgram), 0o644))
 
-	err := linkAgainstPrebuiltRuntime(goc.TargetARM64, []string{path}, source, []byte(prebuiltSplitProgram),
+	err := linkAgainstPacksForTest(t, []string{path}, source, []byte(prebuiltSplitProgram),
 		filepath.Join(work, "split"), true)
 
 	require.Error(t, err)

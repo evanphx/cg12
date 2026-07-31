@@ -60,6 +60,15 @@ func writePacks(t *testing.T, directory string, packs ...*runtimepack.Pack) []st
 	return paths
 }
 
+// linkAgainstPacksForTest reads the pack set from paths and compiles one program
+// against it, which is exactly what the command line does.
+func linkAgainstPacksForTest(t *testing.T, paths []string, source string, contents []byte, executable string, optimize bool) error {
+	t.Helper()
+	packs, err := readPackSet(paths)
+	require.NoError(t, err)
+	return linkAgainstPrebuiltRuntime(goc.TargetARM64, packs, source, contents, executable, optimize, os.Stderr)
+}
+
 // buildAndRunAgainstPacks compiles source against the packs, links it and runs
 // it, returning its combined output.
 func buildAndRunAgainstPacks(t *testing.T, source string, packs ...*runtimepack.Pack) string {
@@ -70,8 +79,7 @@ func buildAndRunAgainstPacks(t *testing.T, source string, packs ...*runtimepack.
 	require.NoError(t, os.WriteFile(program, []byte(source), 0o644))
 	executable := filepath.Join(work, "program")
 
-	require.NoError(t, linkAgainstPrebuiltRuntime(
-		goc.TargetARM64, paths, program, []byte(source), executable, false))
+	require.NoError(t, linkAgainstPacksForTest(t, paths, program, []byte(source), executable, false))
 
 	output, err := exec.Command(executable).CombinedOutput()
 	require.NoError(t, err, "%s", output)
@@ -154,8 +162,7 @@ func TestOnlyTheRichPackLeavesAProgramWithNothingToFallBackOn(t *testing.T) {
 	program := filepath.Join(work, "program.go")
 	require.NoError(t, os.WriteFile(program, []byte(packRuntimeOnlyProgram), 0o644))
 
-	err := linkAgainstPrebuiltRuntime(
-		goc.TargetARM64, paths, program, []byte(packRuntimeOnlyProgram), filepath.Join(work, "program"), false)
+	err := linkAgainstPacksForTest(t, paths, program, []byte(packRuntimeOnlyProgram), filepath.Join(work, "program"), false)
 
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "usable")

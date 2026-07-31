@@ -8,6 +8,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"strings"
+	"sync"
 
 	"github.com/evanphx/cg12/goc"
 	"github.com/evanphx/cg12/internal/prebuilt"
@@ -91,41 +92,121 @@ func splitCommaList(value string) []string {
 	return entries
 }
 
+// packSet is the set of prebuilt runtimes one build may choose between: every
+// pack's manifest, read up front, and each pack's objects read the first time
+// some program picks that pack and kept afterwards.
+//
+// The two halves are read at different times because the choice depends on the
+// program. A pack carrying part of the standard library is usable only by a
+// program whose own loaded closure contains the pack's whole closure (§19), so
+// the pack a program gets is not known until the front end has run. Choosing
+// needs the manifests and nothing else, and a pack carrying net/http is tens of
+// megabytes, so the manifests are read eagerly and the members lazily.
+//
+// Keeping what was read is what lets `goc compile-batch` amortize the read
+// across a batch without giving up the selection: programs in one worker that
+// pick the same pack share one read, and programs that pick different ones each
+// pay for theirs once. A one-shot goc builds a set, uses it once and exits,
+// which is exactly the work it did before.
+type packSet struct {
+	paths     []string
+	manifests []*runtimepack.Manifest
+
+	// mutex guards packs. A batch worker compiles one program at a time, so
+	// nothing contends for it today; it is here because a packSet is state
+	// shared by every compile in a process, and a caller that compiled two
+	// programs at once would otherwise race on the map with nothing in this
+	// tree to reproduce it.
+	mutex sync.Mutex
+	packs map[string]*runtimepack.Pack
+}
+
+// readPackSet reads every candidate pack's manifest.
+func readPackSet(paths []string) (*packSet, error) {
+	if len(paths) == 0 {
+		return nil, fmt.Errorf("goc: -runtime needs at least one prebuilt runtime")
+	}
+	set := &packSet{
+		paths:     append([]string(nil), paths...),
+		manifests: make([]*runtimepack.Manifest, 0, len(paths)),
+		packs:     map[string]*runtimepack.Pack{},
+	}
+	for _, path := range paths {
+		manifest, err := runtimepack.ReadManifest(path)
+		if err != nil {
+			return nil, err
+		}
+		set.manifests = append(set.manifests, manifest)
+	}
+	return set, nil
+}
+
+// packFor returns the objects belonging to a manifest this set offered, reading
+// them on first use.
+//
+// The manifest is matched by identity, not by content: it is one of the pointers
+// this set handed to the compiler, and the compiler hands the same pointer back
+// to say which one it used. A manifest from anywhere else is a programming
+// error, and it is reported as one rather than silently linking against
+// whichever pack happened to be first -- an image built from one pack's objects
+// and another pack's subtraction would fail at the linker in the best case and
+// run with two copies of a package global in the worst.
+func (set *packSet) packFor(manifest *runtimepack.Manifest) (*runtimepack.Pack, error) {
+	path := ""
+	for index, candidate := range set.manifests {
+		if candidate == manifest {
+			path = set.paths[index]
+			break
+		}
+	}
+	if path == "" {
+		return nil, fmt.Errorf("goc: the compiler chose a prebuilt runtime that is not one of %v", set.paths)
+	}
+
+	set.mutex.Lock()
+	defer set.mutex.Unlock()
+	if pack := set.packs[path]; pack != nil {
+		return pack, nil
+	}
+	pack, err := runtimepack.Read(path)
+	if err != nil {
+		return nil, err
+	}
+	set.packs[path] = pack
+	return pack, nil
+}
+
 // linkAgainstPrebuiltRuntime compiles one program as a second Go module and links
 // it with the prebuilt runtime it can use most of.
 //
 // Several packs may be offered, because a pack carrying part of the standard
 // library is only usable by a program that loads all of that library. Only the
-// manifests are read up front -- a pack carrying net/http is tens of megabytes,
-// and only the chosen one's objects are ever needed.
+// manifests are consulted to choose, and only the chosen pack's objects are ever
+// read -- see packSet.
+//
+// errorOutput takes whatever the C toolchain says. It is a parameter because the
+// batch compiler runs many of these in one process and has to attribute each
+// linker complaint to the program that caused it; the command-line path passes
+// os.Stderr and is unchanged.
 //
 // The object order is load-bearing. Each module's moduledata records a [minpc,
 // maxpc) that runtime.findmoduledatap resolves a PC against, so a module's text
 // has to be contiguous: the prebuilt object and the sidecar that ends its text
 // come first and adjacent, and the program's text follows.
-func linkAgainstPrebuiltRuntime(target goc.Target, packPaths []string, name string, source []byte, executable string, optimize bool) error {
-	if len(packPaths) == 0 {
-		return fmt.Errorf("goc: -runtime needs at least one prebuilt runtime")
-	}
-	manifests := make([]*runtimepack.Manifest, 0, len(packPaths))
-	for _, path := range packPaths {
-		manifest, err := runtimepack.ReadManifest(path)
-		if err != nil {
-			return err
-		}
-		manifests = append(manifests, manifest)
-	}
-	program, err := prebuilt.CompileProgram(target, filepath.Base(name), source, manifests, prebuilt.Options{Optimize: optimize})
+func linkAgainstPrebuiltRuntime(
+	target goc.Target,
+	packs *packSet,
+	name string,
+	source []byte,
+	executable string,
+	optimize bool,
+	errorOutput io.Writer,
+) error {
+	program, err := prebuilt.CompileProgram(target, filepath.Base(name), source, packs.manifests, prebuilt.Options{Optimize: optimize})
 	if err != nil {
 		return err
 	}
-	chosen := packPaths[0]
-	for index, manifest := range manifests {
-		if manifest == program.Manifest {
-			chosen = packPaths[index]
-		}
-	}
-	pack, err := runtimepack.Read(chosen)
+	pack, err := packs.packFor(program.Manifest)
 	if err != nil {
 		return err
 	}
@@ -161,6 +242,6 @@ func linkAgainstPrebuiltRuntime(target goc.Target, packPaths []string, name stri
 		return err
 	}
 	command := exec.Command(cc, append([]string{"-no-pie", "-o", executable}, linkInputs...)...)
-	command.Stderr = os.Stderr
+	command.Stderr = errorOutput
 	return command.Run()
 }
