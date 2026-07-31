@@ -79,7 +79,7 @@ func TestGoImageCarriesASecondModule(t *testing.T) {
 
 	// The second module's own type descriptors, read through NameOff.
 	assert.Contains(t, output, "foreign-int:int")
-	assert.Contains(t, output, "foreign-int-kind:2")
+	assert.Contains(t, output, "foreign-int-kind: 2")
 
 	// moduledata.typelinks: PtrToThis is a TypeOff into the second module, and
 	// the typemap runtime.typelinksinit built turns it into the *program*
@@ -91,7 +91,7 @@ func TestGoImageCarriesASecondModule(t *testing.T) {
 	// named the function. That function is at text offset 0 of its module, the
 	// slot whose name the runtime used to read as the empty string.
 	assert.Contains(t, output, "first-func:_goc_probe_entry")
-	assert.Contains(t, output, "first-call:7")
+	assert.Contains(t, output, "first-call: 7")
 
 	// A traceback that walks a frame only the second module's pcsp table
 	// describes.
