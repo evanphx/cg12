@@ -112,11 +112,12 @@ type packSet struct {
 	paths     []string
 	manifests []*runtimepack.Manifest
 
-	// mutex guards packs. A batch worker compiles one program at a time, so
-	// nothing contends for it today; it is here because a packSet is state
-	// shared by every compile in a process, and a caller that compiled two
-	// programs at once would otherwise race on the map with nothing in this
-	// tree to reproduce it.
+	// mutex guards packs, and is held across the read rather than only across
+	// the map write, so two callers wanting the same pack cannot both read it.
+	// A batch worker compiles one program at a time, so nothing contends for it
+	// today; it is here because a packSet is state shared by every compile in a
+	// process, and a caller that compiled two programs at once would otherwise
+	// race on the map with nothing in this tree to reproduce it.
 	mutex sync.Mutex
 	packs map[string]*runtimepack.Pack
 }

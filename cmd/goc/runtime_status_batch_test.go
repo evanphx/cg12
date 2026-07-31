@@ -115,8 +115,6 @@ func (pool *runtimeCapabilityBatchPool) compile(source, executable string) runti
 			duration:   time.Since(started),
 		}
 	}
-	pool.free <- worker
-
 	compilation := runtimeCapabilityCompilation{
 		executable: executable,
 		duration:   time.Duration(response.Seconds * float64(time.Second)),
@@ -126,6 +124,11 @@ func (pool *runtimeCapabilityBatchPool) compile(source, executable string) runti
 		compilation.output = response.Error + worker.takeDiagnostics()
 		compilation.err = fmt.Errorf("compile failed")
 	}
+	// The worker goes back to the pool only after its diagnostics have been
+	// taken. Returning it first would let the next program start writing to the
+	// same stderr buffer before this one had read it, and a linker complaint
+	// would be attributed to whichever program happened to win the race.
+	pool.free <- worker
 	return compilation
 }
 
