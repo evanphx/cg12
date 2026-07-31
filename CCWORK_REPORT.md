@@ -15,7 +15,7 @@ Marking the prepared address managed fixes all six. The rest of the branch — n
 wrong answer in assignment destinations, verified 9/9 against the host toolchain — lands
 unchanged.
 
-**What is on `ccwork/wave4-rescue`, six commits on `61b96da`:**
+**What is on `ccwork/wave4-rescue`, six commits on `61b96da` besides this report:**
 
 | | |
 | --- | --- |
@@ -293,9 +293,11 @@ here.
 
 ## 7. Final verification, on the branch as it stands
 
-`ccwork/wave4-rescue`, four commits on `61b96da`:
+`ccwork/wave4-rescue`, on `61b96da`:
 
 ```
+0f86181 plan: say which of the recovered section's claims was re-measured
+8b46ae3 goc status: run the goroutine-entry reducer alone, as its own text requires
 a8c9ade plan: what the assignment work actually broke, and what still cannot be merged
 c83be4f Fix two GC defects behind `found pointer to free object`      (ccwork/freeobject)
 702a4e9 goc: keep a prepared assignment destination in the stack map  (this job's fix)
