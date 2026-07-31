@@ -311,6 +311,12 @@ func runtimeCapabilities() []runtimeCapability {
 			expectation: runtimeCapabilityMustPass,
 		},
 		{
+			category:    "core-types",
+			name:        "complex64-parts",
+			source:      "runtime_complex64_parts.go",
+			expectation: runtimeCapabilityMustPass,
+		},
+		{
 			category:    "gc",
 			name:        "heap-struct-graph",
 			source:      "gc_struct.go",
@@ -1759,6 +1765,19 @@ func runtimeCapabilities() []runtimeCapability {
 			name:        "shared-scope",
 			source:      "runtime_loopvar_shared_scope.go",
 			expectation: runtimeCapabilityMustPass,
+		},
+		{
+			category:    "print-builtin",
+			name:        "operand-separation",
+			source:      "runtime_println_operand_separation.go",
+			expectation: runtimeCapabilityMustPass,
+		},
+		{
+			category:    "print-builtin",
+			name:        "statement-atomicity",
+			source:      "runtime_println_statement_atomicity.go",
+			expectation: runtimeCapabilityMustPass,
+			exclusive:   true,
 		},
 		{
 			category:        "defer-panic",

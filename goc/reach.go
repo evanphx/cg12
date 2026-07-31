@@ -455,8 +455,10 @@ func reachableFunctions(fset *token.FileSet, roots []*ast.FuncDecl, rootFiles []
 			"memequal0", "memequal8", "memequal16", "memequal32", "memequal64", "memequal128",
 			"memhash0", "memhash8", "memhash16", "memhash128", "mstart0",
 			"morestackc", "newobject", "newstack", "nilinterequal", "nilinterhash", "osinit", "persistentalloc", "unreachableMethod",
-			"printbool", "printfloat32", "printfloat64", "printhex", "printint", "printnl",
-			"printstring", "printuint", "schedinit", "strequal", "typehash", "typedslicecopy",
+			"printbool", "printcomplex64", "printcomplex128", "printeface", "printfloat32", "printfloat64",
+			"printhex", "printiface", "printint", "printlock", "printnl", "printquoted", "printslice",
+			"printsp", "printstring", "printuint", "printunlock",
+			"schedinit", "strequal", "typehash", "typedslicecopy",
 		} {
 			if declaration, exists := runtimeFunctions[name]; exists {
 				queue = append(queue, declaration)

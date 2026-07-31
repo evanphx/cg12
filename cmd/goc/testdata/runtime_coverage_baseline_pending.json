@@ -2,5 +2,18 @@
   "version": 1,
   "baseline": "runtime_coverage_linux_arm64.json",
   "note": "Capabilities the accepted baseline does not cover. TestCheckedRuntimeCoverageBaselineDenominator reconciles the capability matrix, the accepted baseline, and this list, so the corpus denominator cannot drift silently. Adding a capability requires either a baseline rerun or an entry here. The list is empty: the accepted 2026-07-31 baseline covers every capability in the matrix, so the reconciliation is baseline-to-matrix directly.",
-  "capabilities": []
+  "capabilities": [
+    {
+      "capability": "core-types/complex64-parts",
+      "reason": "added to the capability matrix after the accepted baseline run; it enters the baseline at the next full-corpus rerun"
+    },
+    {
+      "capability": "print-builtin/operand-separation",
+      "reason": "added to the capability matrix after the accepted baseline run; it enters the baseline at the next full-corpus rerun"
+    },
+    {
+      "capability": "print-builtin/statement-atomicity",
+      "reason": "added to the capability matrix after the accepted baseline run; it enters the baseline at the next full-corpus rerun"
+    }
+  ]
 }

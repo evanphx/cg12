@@ -70,12 +70,17 @@ refused the comparison outright — the drift guard working rather than a failur
 The 2026-07-31 baseline replaces it, and a diff against it now runs and reports
 zero deltas.
 
-### Current state (2026-07-28)
+### Current state (2026-07-31)
 
-The capability matrix holds **338 capabilities and no `knownGap` at all**. The
+The capability matrix holds **341 capabilities and no `knownGap` at all**. The
 only declared exception is `defer-panic/panic-string-output`, a deliberate
 `expectedFailure`. Phase 1 (§5) is complete; §5.10 records what remains open,
 none of which is a failing capability.
+
+The count was 338 until §21 added three: `print-builtin/operand-separation`,
+`print-builtin/statement-atomicity` and `core-types/complex64-parts`. Passages
+below that quote 338 are records of runs made before that, and are left as they
+were measured.
 
 That is a statement about the matrix, not about the runtime. Per §2, executing a
 line is not evidence that stack maps, write barriers, unwinding, or scheduler
@@ -101,9 +106,10 @@ The two denominators are now reconciled, and since 2026-07-31 they are equal.
 There is only one denominator: the capability matrix *is* the coverage corpus,
 and every capability reports one explicit compile/run/coverage outcome,
 including the ones this environment cannot run. The accepted baseline covers all
-338, so `cmd/goc/testdata/runtime_coverage_baseline_pending.json` is empty and
-`TestCheckedRuntimeCoverageBaselineDenominator` reconciles baseline to matrix
-directly: 338 + 0 = 338, no capability may appear in both, and no baseline
+338 that existed when it ran. Three capabilities were added after it, so
+`cmd/goc/testdata/runtime_coverage_baseline_pending.json` holds those three and
+`TestCheckedRuntimeCoverageBaselineDenominator` reconciles in both directions:
+338 + 3 = 341, no capability may appear in both, and no baseline
 program may name a capability the matrix has dropped. Adding a capability still
 requires either accepting a new baseline or recording in that file why the
 baseline does not cover it, so the list is a mechanism that is currently unused
@@ -1567,11 +1573,11 @@ holds `runtime.gcAssistAlloc` at zero allocations.
   optimization/GOMAXPROCS configurations, where the pre-fix compiler differs on
   nine of ten lines.
 
-Still open: `println` with several operands does not print the spaces the spec
-requires (`println("a", 1)` gives `a1`). Found while reducing this bug, unrelated
-to it, and not fixed here. Carried in §5.10 with the rest of Phase 1's open
-items, together with the two further loop-related defects this work exposed: the
-non-identifier range key and the `runtimeAllocation` gating.
+`println` with several operands not printing the spaces the spec requires
+(`println("a", 1)` gave `a1`) was found while reducing this bug and is unrelated
+to it; it is fixed in §21. Two further loop-related defects this work exposed --
+the non-identifier range key and the `runtimeAllocation` gating -- are carried in
+§5.10 with the rest of Phase 1's open items.
 
 ### 5.10 Open items carried out of Phase 1 (2026-07-28)
 
@@ -1599,10 +1605,6 @@ the reports of the jobs that found them.
   linker rejects outright the moment such a symbol is global. Found by §16, which
   works around it rather than fixing the emission. The cause is in `globalDecl`'s
   interface path and has not been traced.
-
-- **`println` with several operands omits the spaces the spec requires.**
-  `println("a", 1, true)` prints `a1true` where the host toolchain prints
-  `a 1 true`. Found while reducing §5.9. Affects the runtime's own diagnostics.
 
 - **Per-iteration loop lowering is gated on `g.runtimeAllocation`.** With that
   mode off, escaping captures are not heap-lifted at all, so loops keep the
@@ -1640,6 +1642,49 @@ the reports of the jobs that found them.
 
 - The §5.3 escape boundary's `OSel` derivation path is covered by unit test only;
   no capability's `-O` build keeps the diamond rather than if-converting it.
+
+- **`runtime.printfloat32`, `printfloat64`, `printcomplex64` and
+  `printcomplex128` still heap-allocate their scratch array**, which is exactly
+  the §5.3 defect for the four print routines §5.3 did not reach. They differ
+  from `printuint` in shape: `gwrite(strconv.AppendFloat(buf[:0], v, 'g', -1,
+  64))` passes the derived slice to a callee that *returns* a slice derived from
+  it, and cg12 has no rule for a parameter that leaks only to its result, so the
+  call site assumes the worst and `buf` is lifted. The host toolchain's
+  `-gcflags='runtime=-m -m'` reports nothing in `runtime/print.go` escaping at
+  all. Reduced without any runtime source:
+
+  ```go
+  func passthrough(dst []byte) []byte { return dst }
+  func viaReturn() { var buf [20]byte; consume(passthrough(buf[:0])) }
+  ```
+
+  `viaReturn` calls `runtime.newobject`; the same function with
+  `consume(buf[:0])` does not. Found by §21, which routes complex operands to
+  these routines; it is pre-existing for the two float ones. Closing it means
+  giving the escape walk a "leaks only to result" summary and continuing the
+  walk from the call expression, which is a frontend change with a large blast
+  radius — a wrong summary stores a stack pointer into the heap — so it wants
+  its own validation cycle rather than being folded into §21.
+
+#### The `-runtime-opt` arm of the matrix does not link
+
+Measured 2026-07-31 on `main` (`61b96da`) and on `ccwork/println-spacing`, four
+shards each, failure sets byte-identical: 322 pass and **16 fail** under
+`-runtime-opt`, every one of them the same link error.
+
+```
+goc-program-runtime.o: in function `reflect_makeFuncStub_abi0':
+undefined reference to `reflect_moveMakeFuncArgPtrs'
+undefined reference to `reflect_callReflect_abi0'
+undefined reference to `reflect_callMethod_abi0'
+```
+
+Thirteen `runtime-packages/reflect-*`, `stdlib-crypto/ecdh-x25519`,
+`stdlib-encoding/binary` and `stdlib-encoding/binary-varint`. The Go functions
+that `reflect`'s assembly stubs call are not in the split runtime object when
+`-O` is on. Unattributed and unfixed: it is not caused by §21, and the
+determinism note above records that the matrix is supposed to run `-O` under
+this flag.
 
 #### Compiling the same program twice does not give the same binary
 
@@ -2849,3 +2894,151 @@ compare against the checked-in baseline -- `RuntimeSourceID` differs -- and that
 is pre-existing: the baseline commit `750c9c2` is an ancestor of `b5537b5`, the
 last commit to touch `stdlib/`, and `git diff main...HEAD -- stdlib/ goc/` is
 empty. The baseline needs refreshing; that is not this change's to make.
+
+## 21. The print built-in: separators, dispatch, and the print lock (2026-07-31)
+
+`println("a", 1, true)` printed `a1true`. The Go specification's table for the
+two print built-ins says `println` is "like `print` but prints spaces between
+arguments and a newline at the end", so the separators and the trailing newline
+are required; only the rendering of an individual operand is left
+implementation-specific. cg12 walked `call.Args`, emitted one runtime print call
+per operand and a single `printnl`, and never emitted the separators at all.
+
+The host toolchain implements the rule in `cmd/compile/internal/walk.walkPrint`
+by rewriting the operand list before it lowers anything: insert a `" "` string
+between operands, append a `"\n"`, then collapse runs of adjacent constant
+strings into one. cg12 now builds the same sequence, so `println("x", "y", "z")`
+is a single `printstring("x y z\n")` here as it is there.
+
+### The spacing was one of five
+
+Auditing the whole of `walkPrint` against cg12's dispatch — the step §3 calls
+comparing against the host toolchain — found four more differences, all
+wrong-answer bugs in valid Go and all fixed together:
+
+| Operand | cg12 printed | host prints |
+| --- | --- | --- |
+| `[]byte{1,2,3}` | `54422416784368` | `[3/3]0x...` |
+| `any(nil)` | `0` | `(0x0,0x0)` |
+| `any(42)` | `54422416784416` | `(0x963e0,0xacbf8)` |
+| `complex(1,2)` | `54422416784632` | `(1+2i)` |
+| `complex64` | `4647714816524288000` | `(3.5+4.5i)` |
+
+and the fifth, which is not about an operand at all:
+
+**A print statement took no lock.** `runtime/print.go` states the requirement
+outright — *"The compiler emits calls to printlock and printunlock around the
+multiple calls that implement a single Go print or println statement"* — and
+`runtime.minhexdigits` is documented as protected by it. cg12 emitted neither,
+so one statement was a run of unsynchronized `write(2, …)` calls. Eight
+goroutines at `GOMAXPROCS=4` printing a thirteen-operand line corrupted
+**3092, 3035 and 3002 of 3200 lines** in three runs; the host corrupts none.
+Every runtime diagnostic goes through these same routines, so every traceback
+and every `GODEBUG` line was exposed to it.
+
+Two smaller items came with them. **Operands are now evaluated before the lock**,
+as the host does, so an operand whose evaluation prints no longer interleaves
+into the middle of the statement printing it. And **`runtime.quoted`**
+(`type quoted string`) routes to `printquoted`: `traceback.go:1294` prints
+goroutine labels through it, and before this a label containing a quote or a
+newline went out raw. `runtime_goroutineheader` calls `printstring` 21 times and
+`printquoted` never on `main`; it calls `printquoted` twice here.
+
+Pointer-shaped operands keep going to `printhex` rather than the host's
+`printpointer`/`printuintptr`, which is not a difference: both of those are
+one-line wrappers that call `printhex` with the same value.
+
+### Two complex64 defects it exposed
+
+Routing a `complex64` operand to `runtime.printcomplex64` segfaulted, because
+that routine converts to `complex128` internally. Both causes were pre-existing
+and independent of print; both are fixed here, because otherwise this change
+would have turned a silently-wrong `println(c64)` into a crash.
+
+- **`real()` and `imag()` of a `complex64` returned garbage, the same garbage for
+  both halves.** A `complex64` is two `float32` halves packed into one 64-bit
+  integer, so reading a half is a bitwise reinterpretation between a
+  general-purpose and a floating-point register — `ir.OCast`, which lowers to
+  `fmov`. cg12 used `ir.OCopy`, which re-types only within one register file.
+  `var b complex64 = complex(3.5, 4.5); println(real(b), imag(b))` gave
+  `-2.8673504e+25 -2.8673504e+25`. Every `complex64` arithmetic operation was
+  wrong with it, since they all go through `complex64Parts`/`packComplex64`.
+
+- **`gen.convert` had no complex case at all**, so `complex128(b)` `Copy`d the
+  packed pair into a pointer and the program took SIGSEGV at
+  `0x4090000040600000` — the packed `(4.5, 3.5)` bit pattern used as an address.
+
+### What it is verified against
+
+Per §15, a green matrix is weak evidence, so the evidence is the host comparison.
+
+- **43 of 46 corpus programs that print now produce byte-identical output to the
+  host Go toolchain, against 34 on `main`.** Six programs
+  (`allocs_per_run.go`, `bytes_grow_allocs.go`, `bytes_grow_capacity.go`,
+  `bytes_replace_allocs.go`, `reflect_methods.go`,
+  `runtime_defer_capture_allocs.go`) differed from the host only by the missing
+  separator and now match. The three that still differ are
+  `bytes_grow_compare.go`, `bytes_grow_stats.go` and `gomaxprocs_memstats.go`,
+  which print allocation and GC statistics — §5.10 already records the first two
+  as varying with scheduling.
+
+- **Three reducers, each passing under the host toolchain, passing here, and
+  failing on `main`.** `print-builtin/operand-separation` asserts the separator
+  rule and the whole operand table byte for byte, plus the address-shaped
+  operands by shape, the nil interface, `print` versus `println`, the degenerate
+  operand counts, and the evaluation-order rule; on `main` it fails with
+  `println wrote "a1true\n", want "a 1 true\n"`.
+  `print-builtin/statement-atomicity` is the concurrency check.
+  `core-types/complex64-parts` pins `real`/`imag`, arithmetic, comparison and
+  both conversions, with `complex128` as the control.
+
+- **A control build fails the atomicity reducer for the right reason.** With the
+  separators kept and only the `printlock`/`printunlock` emission removed, it
+  fails with `two print statements interleaved inside one line: worker 0 round 3
+  tail 1 2 worker 37  round 40  tail 51  62  73  84`. The check is not
+  decorative.
+
+- **Nothing the print path emits allocates, except what already did.**
+  Disassembling a linked image and looking for `runtime.newobject` inside every
+  print routine: `printlock`, `printunlock`, `printsp`, `printnl`, `printbool`,
+  `printint`, `printuint`, `printhex`, `printhexopts`, `printstring`,
+  `printslice`, `printeface`, `printiface`, `printquoted` and `printpointer` are
+  all allocation-free. `printfloat32`, `printfloat64`, `printcomplex64` and
+  `printcomplex128` are not, which is the §5.10 item above and pre-existing for
+  the two float ones. `printquoted`'s `[]byte("\"")` conversions stay on the
+  stack: cg12 passes a real stack `tmpBuf` to `stringtoslicebyte`, so
+  `rawbyteslice` is not reached.
+
+- **The nosplit audit moved 287 → 359 direct split callees, and every added edge
+  is `printlock` (27), `printunlock` (27) or `printnl` (18).** No edge was
+  removed and nothing unrelated appeared. Upstream has the same shape: its
+  `printlock` is not `nosplit` either, and every `nosplit` function that prints
+  calls it.
+
+- `cg12checkwb=1`, `cg12checkwb=2`, `GOC_DEBUG_WRITEBARRIER=1`,
+  `gccheckmark=1,invalidptr=1,clobberfree=1`, `gcshrinkstackoff=1`,
+  `checkfinalizers=1` and `gctrace=1` are all clean on a print-heavy
+  allocate-and-collect program and on both new reducers.
+
+- A panic traceback reads exactly as it did before, frame for frame.
+
+- Determinism is unchanged: `scripts/determinism-check.sh` gives 4 of 5 sample
+  programs byte-identical cold against warm, twice, with
+  `runtime_defer_capture_allocs.go` the known §5.10 residue.
+
+### What is not done
+
+- The four allocating print routines are recorded in §5.10 rather than fixed;
+  the fix is an escape-analysis feature, not a print-lowering change.
+
+- `printquoted` is exercised through a `//go:linkname` probe, which produces
+  `"with \"quote\"\nand\ttab and é and \U0001f600"`, and by the disassembly
+  showing `goroutineheader` calling it. It is *not* exercised through a real
+  traceback carrying goroutine labels, because `runtime/pprof.Do` does not
+  type-check under goc — `context.Context does not implement context.Context` —
+  which is a pre-existing, unrelated defect this did not chase.
+
+- The non-`runtimeAllocation` `printf` path in `builtinPrint` gets the same
+  operand sequence and therefore the same separators, but goc always compiles
+  with `runtimeAllocation` on, so nothing in this repository's test suites
+  executes it. Only its construction is shared, not its verification.

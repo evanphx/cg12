@@ -5013,6 +5013,13 @@ func (g *gen) convert(v ir.Ref, from, to types.Type) ir.Ref {
 		}
 	}
 
+	if isComplexType(from) && isComplexType(to) {
+		if from.Underlying().(*types.Basic).Kind() == to.Underlying().(*types.Basic).Kind() {
+			return v
+		}
+		return g.complexConversion(v, from, to)
+	}
+
 	fc, _ := scalar(from)
 	tc, _ := scalar(to)
 	switch {
@@ -12271,10 +12278,11 @@ func (g *gen) complexComponent(call *ast.CallExpr, imaginary bool) ir.Ref {
 	value := g.expr(call.Args[0])
 	switch argumentType.Kind() {
 	case types.Complex64:
+		realPart, imaginaryPart := g.complex64Parts(value)
 		if imaginary {
-			value = g.cur.Shr(ir.ClsL, value, g.fn.Long(32))
+			return imaginaryPart
 		}
-		return g.cur.Copy(ir.ClsS, g.cur.Copy(ir.ClsW, value))
+		return realPart
 	case types.Complex128:
 		if imaginary {
 			value = g.offset(value, 8)
@@ -12325,16 +12333,45 @@ func (g *gen) complexBinary(op token.Token, left, right ir.Ref, valueType types.
 	}
 }
 
+// A complex64 is represented as its two float32 halves packed into one 64-bit
+// integer, so moving a half between the two forms is a bitwise reinterpretation
+// between a general-purpose and a floating-point register. That is OCast; OCopy
+// is a plain register move and re-types only between classes of the same file,
+// so using it here left the float half reading whatever the integer register
+// happened to alias.
 func (g *gen) complex64Parts(value ir.Ref) (realPart, imaginaryPart ir.Ref) {
-	realPart = g.cur.Copy(ir.ClsS, g.cur.Copy(ir.ClsW, value))
-	imaginaryPart = g.cur.Copy(ir.ClsS, g.cur.Copy(ir.ClsW, g.cur.Shr(ir.ClsL, value, g.fn.Long(32))))
+	realPart = g.cur.Cast(ir.ClsS, g.cur.Copy(ir.ClsW, value))
+	imaginaryPart = g.cur.Cast(ir.ClsS, g.cur.Copy(ir.ClsW, g.cur.Shr(ir.ClsL, value, g.fn.Long(32))))
 	return realPart, imaginaryPart
 }
 
 func (g *gen) packComplex64(realPart, imaginaryPart ir.Ref) ir.Ref {
-	realBits := g.cur.Extuw(ir.ClsL, g.cur.Copy(ir.ClsW, realPart))
-	imaginaryBits := g.cur.Shl(ir.ClsL, g.cur.Extuw(ir.ClsL, g.cur.Copy(ir.ClsW, imaginaryPart)), g.fn.Long(32))
+	realBits := g.cur.Extuw(ir.ClsL, g.cur.Cast(ir.ClsW, realPart))
+	imaginaryBits := g.cur.Shl(ir.ClsL, g.cur.Extuw(ir.ClsL, g.cur.Cast(ir.ClsW, imaginaryPart)), g.fn.Long(32))
 	return g.cur.Or(ir.ClsL, realBits, imaginaryBits)
+}
+
+// complexConversion converts between complex64 and complex128. The two have
+// different representations -- packed halves against a 16-byte value addressed
+// by a pointer -- so the generic scalar path in convert would reinterpret one
+// as the other.
+func (g *gen) complexConversion(value ir.Ref, from, to types.Type) ir.Ref {
+	fromBasic, _ := from.Underlying().(*types.Basic)
+	if fromBasic.Kind() == types.Complex64 {
+		realPart, imaginaryPart := g.complex64Parts(value)
+		result := g.localAllocTyped(to)
+		g.cur.StoreSub(ir.SubD, g.cur.Exts(realPart), result)
+		g.cur.StoreSub(ir.SubD, g.cur.Exts(imaginaryPart), g.offset(result, 8))
+		return result
+	}
+	realPart := g.cur.Truncd(g.cur.Load(ir.ClsD, value))
+	imaginaryPart := g.cur.Truncd(g.cur.Load(ir.ClsD, g.offset(value, 8)))
+	return g.packComplex64(realPart, imaginaryPart)
+}
+
+func isComplexType(valueType types.Type) bool {
+	basic, ok := valueType.Underlying().(*types.Basic)
+	return ok && basic.Info()&types.IsComplex != 0
 }
 
 func (g *gen) complex64Binary(op token.Token, left, right ir.Ref, node ast.Node) ir.Ref {
@@ -13261,16 +13298,14 @@ func (g *gen) builtinPrint(call *ast.CallExpr, newline bool) {
 	}
 
 	printf := g.fn.Sym("printf", 0)
-	for _, argument := range call.Args {
-		value := g.info.Types[argument]
-		if value.Value != nil && value.Value.Kind() == constant.String {
-			format := g.cString("%s")
-			text := g.cString(constant.StringVal(value.Value))
-			g.cur.Call(ir.ClsW, printf, format, text)
+	for _, operand := range g.printOperands(call, newline) {
+		if operand.literal {
+			g.cur.Call(ir.ClsW, printf, g.cString("%s"), g.cString(operand.text))
 			continue
 		}
 
-		argumentType := value.Type
+		argument := operand.expr
+		argumentType := g.info.Types[argument].Type
 		if basic, ok := argumentType.Underlying().(*types.Basic); ok && basic.Kind() == types.String {
 			descriptor := g.expr(argument)
 			data := g.cur.Load(ir.ClsP, descriptor)
@@ -13295,66 +13330,159 @@ func (g *gen) builtinPrint(call *ast.CallExpr, newline bool) {
 		}
 		g.cur.Call(ir.ClsW, printf, g.cString(formatText), argumentValue)
 	}
-	if newline {
-		g.cur.Call(ir.ClsW, printf, g.cString("\n"))
+}
+
+// printOperand is one element of the sequence a print or println statement
+// writes. The Go specification requires println to separate its operands with
+// spaces and to end with a newline, and the host toolchain implements that by
+// rewriting the operand list: a " " string is inserted between operands, a
+// "\n" string is appended, and runs of adjacent constant strings are then
+// collapsed into a single one. cg12 builds the same sequence so that both
+// toolchains write the same bytes with the same number of runtime calls.
+type printOperand struct {
+	// literal reports that this operand is a constant string whose text is
+	// known here, either from the source or synthesized as a separator.
+	literal bool
+	text    string
+	expr    ast.Expr
+}
+
+func (g *gen) printOperands(call *ast.CallExpr, newline bool) []printOperand {
+	sequence := make([]printOperand, 0, 2*len(call.Args)+1)
+	for index, argument := range call.Args {
+		if newline && index > 0 {
+			sequence = append(sequence, printOperand{literal: true, text: " "})
+		}
+		value := g.info.Types[argument]
+		isConstantString := value.Value != nil && value.Value.Kind() == constant.String
+		if isConstantString && !isRuntimeQuotedType(value.Type) {
+			sequence = append(sequence, printOperand{literal: true, text: constant.StringVal(value.Value)})
+			continue
+		}
+		sequence = append(sequence, printOperand{expr: argument})
 	}
+	if newline {
+		sequence = append(sequence, printOperand{literal: true, text: "\n"})
+	}
+	return collapsePrintLiterals(sequence)
+}
+
+// collapsePrintLiterals joins runs of adjacent constant strings, matching the
+// host toolchain's walkPrint. It is what turns println("x", "y") into a single
+// printstring("x y\n") rather than five separate runtime calls.
+func collapsePrintLiterals(sequence []printOperand) []printOperand {
+	collapsed := make([]printOperand, 0, len(sequence))
+	for _, operand := range sequence {
+		last := len(collapsed) - 1
+		if operand.literal && last >= 0 && collapsed[last].literal {
+			collapsed[last].text += operand.text
+			continue
+		}
+		collapsed = append(collapsed, operand)
+	}
+	return collapsed
+}
+
+// printStep is one runtime print call with its operand already evaluated.
+type printStep struct {
+	function  string
+	arguments []ir.Ref
 }
 
 func (g *gen) builtinRuntimePrint(call *ast.CallExpr, newline bool) {
-	for _, argument := range call.Args {
-		value := g.info.Types[argument]
-		if value.Value != nil && value.Value.Kind() == constant.String {
-			contents := constant.StringVal(value.Value)
-			g.callRuntimePrint(call, "printstring", g.stringConstant(contents))
-			continue
-		}
-
-		argumentType := value.Type
-		if basic, ok := argumentType.Underlying().(*types.Basic); ok && basic.Kind() == types.String {
-			g.callRuntimePrint(call, "printstring", g.expr(argument))
-			continue
-		}
-		if isSliceType(argumentType) {
-			// The runtime's diagnostic print builtin accepts otherwise unsupported
-			// values as an address-shaped operand. Materialize a real header here;
-			// ordinary slice calls continue to pass the three value components.
-			header := g.materializeSlice(g.expr(argument))
-			g.callRuntimePrint(call, "printint", header)
-			continue
-		}
-
-		class, ok := scalar(argumentType)
+	// Every operand is evaluated before the print lock is taken, as the host
+	// toolchain does: an operand whose own evaluation prints something must
+	// not interleave with the output of the statement printing it.
+	operands := g.printOperands(call, newline)
+	steps := make([]printStep, 0, len(operands))
+	for _, operand := range operands {
+		step, ok := g.printStep(operand)
 		if !ok {
-			g.fail(argument, "unsupported print operand %s", argumentType)
 			return
 		}
-		argumentValue := g.expr(argument)
-		basic, isBasic := argumentType.Underlying().(*types.Basic)
-		switch {
-		case isBasic && basic.Kind() == types.Bool:
-			g.callRuntimePrint(call, "printbool", argumentValue)
-		case class == ir.ClsS:
-			g.callRuntimePrint(call, "printfloat32", argumentValue)
-		case class == ir.ClsD:
-			g.callRuntimePrint(call, "printfloat64", argumentValue)
-		case isRuntimePrintPointer(argumentType):
-			g.callRuntimePrint(call, "printhex", g.cur.Copy(ir.ClsL, argumentValue))
-		case isRuntimeHexType(argumentType):
-			g.callRuntimePrint(call, "printhex", g.cur.Copy(ir.ClsL, argumentValue))
-		case isBasic && basic.Info()&types.IsUnsigned != 0:
-			if class == ir.ClsW {
-				argumentValue = g.cur.Extuw(ir.ClsL, argumentValue)
-			}
-			g.callRuntimePrint(call, "printuint", argumentValue)
-		default:
-			if class == ir.ClsW {
-				argumentValue = g.cur.Extsw(ir.ClsL, argumentValue)
-			}
-			g.callRuntimePrint(call, "printint", argumentValue)
-		}
+		steps = append(steps, step)
 	}
-	if newline {
-		g.callRuntimePrint(call, "printnl")
+
+	// printlock and printunlock make the whole statement atomic against other
+	// threads. runtime/print.go states outright that the compiler is required
+	// to emit them around the calls implementing one print statement, and
+	// runtime.minhexdigits is documented as protected by that lock.
+	g.callRuntimePrint(call, "printlock")
+	for _, step := range steps {
+		g.callRuntimePrint(call, step.function, step.arguments...)
+	}
+	g.callRuntimePrint(call, "printunlock")
+}
+
+// printStep selects the runtime print routine for one operand and evaluates
+// it, mirroring the host toolchain's walkPrint dispatch.
+func (g *gen) printStep(operand printOperand) (printStep, bool) {
+	if operand.literal {
+		switch operand.text {
+		case " ":
+			return printStep{function: "printsp"}, true
+		case "\n":
+			return printStep{function: "printnl"}, true
+		}
+		return printStep{function: "printstring", arguments: []ir.Ref{g.stringConstant(operand.text)}}, true
+	}
+
+	argument := operand.expr
+	argumentType := g.info.Types[argument].Type
+	if isInterfaceValue(argumentType) {
+		interfaceType, _ := argumentType.Underlying().(*types.Interface)
+		function := "printiface"
+		if interfaceType.NumMethods() == 0 {
+			function = "printeface"
+		}
+		// runtime.printeface and printiface take the two-word pair by value, so
+		// the operand has to be a real descriptor rather than the nil pointer a
+		// nil interface is represented by.
+		descriptor := g.materializeNilInterface(g.expr(argument))
+		return printStep{function: function, arguments: []ir.Ref{descriptor}}, true
+	}
+	if isRuntimeQuotedType(argumentType) {
+		return printStep{function: "printquoted", arguments: []ir.Ref{g.expr(argument)}}, true
+	}
+	if isStringType(argumentType) {
+		return printStep{function: "printstring", arguments: []ir.Ref{g.expr(argument)}}, true
+	}
+	if isSliceType(argumentType) {
+		return printStep{function: "printslice", arguments: []ir.Ref{g.expr(argument)}}, true
+	}
+
+	class, ok := scalar(argumentType)
+	if !ok {
+		g.fail(argument, "unsupported print operand %s", argumentType)
+		return printStep{}, false
+	}
+	argumentValue := g.expr(argument)
+	basic, isBasic := argumentType.Underlying().(*types.Basic)
+	switch {
+	case isBasic && basic.Kind() == types.Bool:
+		return printStep{function: "printbool", arguments: []ir.Ref{argumentValue}}, true
+	case isBasic && basic.Kind() == types.Complex64:
+		return printStep{function: "printcomplex64", arguments: []ir.Ref{argumentValue}}, true
+	case isBasic && basic.Kind() == types.Complex128:
+		return printStep{function: "printcomplex128", arguments: []ir.Ref{argumentValue}}, true
+	case class == ir.ClsS:
+		return printStep{function: "printfloat32", arguments: []ir.Ref{argumentValue}}, true
+	case class == ir.ClsD:
+		return printStep{function: "printfloat64", arguments: []ir.Ref{argumentValue}}, true
+	case isRuntimePrintPointer(argumentType):
+		return printStep{function: "printhex", arguments: []ir.Ref{g.cur.Copy(ir.ClsL, argumentValue)}}, true
+	case isRuntimeHexType(argumentType):
+		return printStep{function: "printhex", arguments: []ir.Ref{g.cur.Copy(ir.ClsL, argumentValue)}}, true
+	case isBasic && basic.Info()&types.IsUnsigned != 0:
+		if class == ir.ClsW {
+			argumentValue = g.cur.Extuw(ir.ClsL, argumentValue)
+		}
+		return printStep{function: "printuint", arguments: []ir.Ref{argumentValue}}, true
+	default:
+		if class == ir.ClsW {
+			argumentValue = g.cur.Extsw(ir.ClsL, argumentValue)
+		}
+		return printStep{function: "printint", arguments: []ir.Ref{argumentValue}}, true
 	}
 }
 
@@ -13380,12 +13508,24 @@ func (g *gen) callRuntimePrint(node ast.Node, name string, arguments ...ir.Ref) 
 // diagnostic would come out in decimal. The standard compiler special-cases
 // the same named type.
 func isRuntimeHexType(valueType types.Type) bool {
+	return isRuntimeNamedType(valueType, "hex")
+}
+
+// isRuntimeQuotedType reports the runtime's own `type quoted string`, which
+// selects the quoted, escaped rendering the standard compiler gives it. The
+// runtime prints goroutine labels through it in tracebacks, so without this a
+// label containing a quote or a newline would corrupt the traceback.
+func isRuntimeQuotedType(valueType types.Type) bool {
+	return isRuntimeNamedType(valueType, "quoted")
+}
+
+func isRuntimeNamedType(valueType types.Type, name string) bool {
 	named, ok := valueType.(*types.Named)
 	if !ok {
 		return false
 	}
 	object := named.Obj()
-	if object == nil || object.Name() != "hex" || object.Pkg() == nil {
+	if object == nil || object.Name() != name || object.Pkg() == nil {
 		return false
 	}
 	return object.Pkg().Path() == "runtime"
