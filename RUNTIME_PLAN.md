@@ -1745,6 +1745,16 @@ inlined when the budget runs out is not reproducible. The matrix runs `-O` under
 
 ### 5.11 Fixed: the entry stack map described a never-started goroutine's argument frame (2026-07-28)
 
+Recovered on 2026-07-31. This section and §5.12 are `ccwork/freeobject`'s, and
+the `integration/wave4a` merges dropped them; the code they describe never
+reached `main` either, so both were cherry-picked back rather than restored as
+prose alone. One claim was re-measured here on current `main` rather than taken
+on trust: `runtime_goroutine_entry_stack_map.go` at `-O`, 100 runs against the
+compiler immediately before the fix and 100 against the compiler after it, gives
+92/100 failures before and 0/100 after — the rate this section states. The
+multi-thousand-run campaigns below were **not** re-run; they remain that
+branch's own evidence.
+
 Current checkpoint:
 
 - [x] Build a fault-rate harness with a hard per-run timeout and parallel
