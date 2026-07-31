@@ -7400,8 +7400,8 @@ func (g *gen) prepareAssignmentTarget(destination ast.Expr, declare bool) assign
 				kind:      assignmentTargetMapElement,
 				valueType: mapType.Elem(),
 				source:    destination,
-				mapping:   g.expr(index.X),
-				mapKey:    g.assignmentValue(index.Index, mapType.Key()),
+				mapping:   g.retainedAddress(g.expr(index.X)),
+				mapKey:    g.retainedAddress(g.assignmentValue(index.Index, mapType.Key())),
 				mapType:   mapType,
 			}
 		}
@@ -7412,7 +7412,7 @@ func (g *gen) prepareAssignmentTarget(destination ast.Expr, declare bool) assign
 			kind:      assignmentTargetAddress,
 			valueType: g.typeAndValue(destination).Type,
 			source:    destination,
-			slot:      g.lvalue(destination),
+			slot:      g.retainedAddress(g.lvalue(destination)),
 			inline:    true,
 		}
 	}
@@ -7445,6 +7445,24 @@ func (g *gen) prepareAssignmentTarget(destination ast.Expr, declare bool) assign
 		target.slot = g.cur.Load(ir.ClsP, target.slot)
 	}
 	return target
+}
+
+// retainedAddress marks a pointer a prepared destination has to survive with
+// until the statement stores through it.
+//
+// Preparing a destination happens before the right-hand side runs, so the
+// address outlives every call the right-hand side makes. Pointer arithmetic --
+// how a field, index or indirection address is built -- yields a pointer-width
+// value that is not a managed reference, so without this the frame's stack map
+// omits it, copystack leaves it addressing the abandoned old stack, and the
+// statement's store lands in freed memory with no fault of any kind. Only a
+// pointer-classed temporary is marked; a scalar map key is left alone, because
+// telling the collector an integer is a pointer is the opposite mistake.
+func (g *gen) retainedAddress(reference ir.Ref) ir.Ref {
+	if reference.Kind != ir.RefTemp || !g.fn.ClassOf(reference).IsPtr() {
+		return reference
+	}
+	return g.fn.MarkGCRef(reference)
 }
 
 // assignmentTargetValue reads a prepared destination, which an assignment
