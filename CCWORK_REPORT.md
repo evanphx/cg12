@@ -1,295 +1,433 @@
-# `println` dropped the spaces the spec requires — and four other print defects
+# VERDICT: the assignment work is recoverable, and one line of it was the problem
 
-Branch: `ccwork/println-spacing`, off `main` (`61b96da`). Four commits.
+`ccwork/rangekey-b` is right about Go's assignment order and wrong about what cg12 can
+hold. It resolves every destination before the right-hand side, as the specification
+requires, and that makes a **raw address live across every call the right-hand side
+makes**. `ir.Block.Add(ir.ClsP, ...)` — how every field, index and indirection address is
+built — produces a pointer-width value that is *not* a managed reference, so the frame's
+stack map omits it, `copystack` does not adjust it, and a right-hand side that grew the
+goroutine stack left the destination pointing into the abandoned old stack. **The store
+landed in freed memory and the assignment vanished with no fault of any kind.** That is why
+the failures were four `encoding/gob` crashes, a `reflect` segfault, and a TLS stream that
+corrupted itself rather than crashing.
 
-**Verdict: the reported defect is fixed, four more in the same lowering were
-found and fixed, and two pre-existing `complex64` defects had to be fixed for
-the complex operand not to crash. Everything below has been run here. Two things
-are reported rather than fixed and are listed under "Not fixed" at the end.**
+Marking the prepared address managed fixes all six. The rest of the branch — nine classes of
+wrong answer in assignment destinations, verified 9/9 against the host toolchain — lands
+unchanged.
 
-## The reported defect
+**What is on `ccwork/wave4-rescue`, six commits on `61b96da` besides this report:**
 
-`println("a", 1, true)` printed `a1true`; the host Go toolchain prints `a 1 true`.
-
-The Go specification's table for the two print built-ins reads:
-
-> `println`  like `print` but prints spaces between arguments and a newline at the end
-
-so the separators and the trailing newline are required, not implementation-
-defined; only the *rendering of an individual operand* is left open. cg12's
-`builtinRuntimePrint` walked `call.Args`, emitted one runtime print call per
-operand and a single `printnl`, and never emitted the separators at all.
-
-The host implements the rule in `cmd/compile/internal/walk.walkPrint` by
-rewriting the operand list before lowering: insert a `" "` string between
-operands, append a `"\n"`, then collapse runs of adjacent constant strings into
-one. cg12 now builds the same sequence (`goc/compile.go`, `printOperands` /
-`collapsePrintLiterals`), so `println("x", "y", "z")` is a single
-`printstring("x y z\n")` here as it is there, and `println("a", 1, true)` is
-`printstring("a ") printint(1) printsp() printbool(true) printnl()`.
-
-## The spacing was one of five
-
-The task asked for the whole of `print`/`println` to be checked against the host
-rather than just the spacing. Auditing cg12's dispatch against `walkPrint` found
-four more, all wrong-answer bugs in valid Go:
-
-| Operand | cg12 printed | host prints |
-| --- | --- | --- |
-| `[]byte{1,2,3}` | `54422416784368` | `[3/3]0x...` |
-| `any(nil)` | `0` | `(0x0,0x0)` |
-| `any(42)` | `54422416784416` | `(0x963e0,0xacbf8)` |
-| `complex(1,2)` | `54422416784632` | `(1+2i)` |
-| `complex64` | `4647714816524288000` | `(3.5+4.5i)` |
-
-Slices now go to `runtime.printslice`, interfaces to `printeface`/`printiface`,
-complex to `printcomplex128`/`printcomplex64`.
-
-And the fifth, which is not about an operand at all:
-
-**A print statement took no lock.** `runtime/print.go` states the requirement
-outright — *"The compiler emits calls to printlock and printunlock around the
-multiple calls that implement a single Go print or println statement"* — and
-`runtime.minhexdigits` is documented as protected by it. cg12 emitted neither,
-so one statement was a run of unsynchronized `write(2, …)` calls. Eight
-goroutines at `GOMAXPROCS=4` printing a thirteen-operand line corrupted **3092,
-3035 and 3002 of 3200 lines** across three runs on `main`; the host corrupts
-none, and this branch corrupts none. Every runtime diagnostic goes through these
-same routines, so every traceback and every `GODEBUG` line was exposed to it.
-
-Two smaller items came with them:
-
-- **Operands are now evaluated before the lock**, as the host does. Before,
-  `println("A", f(), "B", g())` where `f` and `g` print interleaved their output
-  into the middle of the statement printing them.
-- **`runtime.quoted`** (`type quoted string`) routes to `printquoted`.
-  `traceback.go:1294` prints goroutine labels through it, so a label containing a
-  quote or a newline previously went out raw. Confirmed in the disassembly:
-  `runtime_goroutineheader` calls `printstring` 21 times and `printquoted` never
-  on `main`; here it calls `printquoted` twice.
-
-Pointer-shaped operands keep going to `printhex` rather than the host's
-`printpointer`/`printuintptr`. That is not a difference — both of those are
-one-line wrappers around `printhex` with the same value — and it keeps two
-routines out of the runtime pack.
-
-## Two `complex64` defects the complex operand exposed
-
-Routing a `complex64` to `runtime.printcomplex64` **segfaulted**, because that
-routine does `strconv.AppendComplex(buf[:0], complex128(c), …)`. Both causes are
-pre-existing and independent of print; both are fixed here, because otherwise
-this change would have turned a silently-wrong `println(c64)` into a crash.
-
-- **`real()` and `imag()` of a `complex64` returned garbage, the same garbage for
-  both halves.** A `complex64` is two `float32` halves packed into one 64-bit
-  integer, so reading a half is a bitwise reinterpretation between a
-  general-purpose and a floating-point register — `ir.OCast`, which lowers to
-  `fmov`. cg12 used `ir.OCopy`, which re-types only within one register file.
-  `var b complex64 = complex(3.5, 4.5); println(real(b), imag(b))` gave
-  `-2.8673504e+25 -2.8673504e+25` where the host gives `3.5 4.5`. Addition,
-  subtraction, multiplication and conversion were all wrong with it, since they
-  all go through `complex64Parts`/`packComplex64`.
-
-- **`gen.convert` had no complex case at all**, so `complex128(b)` `Copy`d the
-  packed pair into a pointer: **SIGSEGV at `0x4090000040600000`**, which is the
-  packed `(4.5, 3.5)` bit pattern used as an address.
-
-## Verification
-
-Per RUNTIME_PLAN §15 a green matrix is weak evidence, so the load-bearing
-evidence is the host comparison.
-
-### Against the host toolchain (§3 step 2)
-
-**43 of the 46 corpus programs that use `print`/`println` now produce
-byte-identical output to the host Go toolchain, against 34 on `main`.** Every
-program was run under `go run` and under a goc-built binary, stdout and stderr
-merged, exit status compared. Six programs — `allocs_per_run.go`,
-`bytes_grow_allocs.go`, `bytes_grow_capacity.go`, `bytes_replace_allocs.go`,
-`reflect_methods.go`, `runtime_defer_capture_allocs.go` — differed from the host
-only by the missing separator and now match exactly.
-
-The three that still differ are `bytes_grow_compare.go`, `bytes_grow_stats.go`
-and `gomaxprocs_memstats.go`. All three print allocation and GC statistics, which
-are not expected to match a different compiler's allocator, and §5.10 already
-records the first two as varying with scheduling even between identical builds.
-
-Separately, every operand type was compared against the host one at a time:
-string constant and variable, `int8/16/32/64`, `uint8/64` at their extremes, rune
-constant, `bool`, `float32`, `float64`, `complex64`, `complex128`, pointer,
-`unsafe.Pointer`, `uintptr`, channel, map, func, slice, empty slice, nil
-interface, nil error, non-nil interface, empty call, single operand, `print`
-versus `println`, and `println("")`.
-
-### Reducers landed as capabilities
-
-Three, each of which **passes under the host Go toolchain, passes here, and fails
-on `main`**:
-
-- `print-builtin/operand-separation` — the spec rule and the whole operand table,
-  byte for byte, with the address-shaped operands checked by shape, plus the
-  degenerate operand counts and the evaluation-order rule. On `main`:
-  `panic: println wrote "a1true\n", want "a 1 true\n"`.
-- `print-builtin/statement-atomicity` — 8 goroutines × 300 rounds at
-  `GOMAXPROCS=4`, no two statements may interleave inside a line. Marked
-  `exclusive` per `TestRuntimeCapabilityExclusiveClassification`.
-- `core-types/complex64-parts` — `real`/`imag`, arithmetic, comparison, both
-  conversions, and the packed bit layout, with `complex128` as the control.
-
-**A control build fails the atomicity reducer for the right reason.** Rebuilding
-with the separators kept and *only* the `printlock`/`printunlock` emission
-removed fails it with `two print statements interleaved inside one line: worker 0
-round 3 tail 1 2 worker 37  round 40  tail 51  62  73  84`, three runs out of
-three. The check is not decorative.
-
-### Allocation, per the task's §5.3 requirement
-
-Disassembled a linked image and looked for `runtime.newobject` inside every print
-routine.
-
-Allocation-free: `printlock`, `printunlock`, `printsp`, `printnl`, `printbool`,
-`printint`, `printuint`, `printhex`, `printhexopts`, `printstring`, `printslice`,
-`printeface`, `printiface`, `printquoted`, `printpointer`. `printquoted`'s
-`[]byte("\"")` conversions stay on the stack — cg12 passes a real stack `tmpBuf`
-to `stringtoslicebyte`, so `rawbyteslice` is never reached.
-
-**Not allocation-free: `printfloat32`, `printfloat64`, `printcomplex64`,
-`printcomplex128`.** See "Not fixed" below. This is pre-existing for the two
-float routines, which were already wired before this change.
-
-`GOC_DEBUG_NOSPLIT=1`, full lists compared (the built-in report truncates at 200
-lines, so both sides were regenerated through `opt.AuditNoSplitCalls` directly):
-**287 → 359 direct split callees, and every added edge is `printlock` (27),
-`printunlock` (27) or `printnl` (18).** No edge removed, nothing unrelated
-appeared. Upstream has the same shape — its `printlock` is not `nosplit` either,
-and every `nosplit` function that prints calls it.
-
-`cg12checkwb=1`, `cg12checkwb=2`, `GOC_DEBUG_WRITEBARRIER=1`,
-`gccheckmark=1,invalidptr=1,clobberfree=1`, `gcshrinkstackoff=1`,
-`checkfinalizers=1`, `checkfinalizers=2` and `gctrace=1` are all clean on a
-print-heavy allocate-and-collect program and on both new reducers.
-
-### Tracebacks
-
-A three-deep panic traceback reads frame for frame identically to the one `main`
-produces, and the frame list matches the host's. `checkfinalizers=2` still prints
-its retention path on `runtime_cleanup_frame_retention.go`.
-
-### Suites
-
-| Suite | Result |
+| | |
 | --- | --- |
-| `go build ./...`, `go vet ./...` | clean |
-| `make test-unit` | pass |
-| `make test-goc-corpus` | pass, 560.9 s |
-| `make test-goc-cmd` | pass, 221.2 s (after the fix below) |
-| Capability matrix, 4 shards, `-v` | **341 subtests, 340 PASS, 1 EXPECTED FAILURE, 0 FAIL, 0 KNOWN GAP, 0 SKIP** |
-| Capability matrix, `-runtime-opt` | 325 PASS, 16 FAIL — **identical failure set to `main`**, see below |
-| `scripts/determinism-check.sh` | 4 of 5 byte-identical cold vs warm, twice; `runtime_defer_capture_allocs.go` is the known §5.10 residue |
+| `040fcbd` | `ccwork/rangekey-b` (`1218627`), cherry-picked verbatim — it applies to current `main` with **zero conflicts** |
+| `702a4e9` | the fix: keep a prepared assignment destination in the stack map |
+| `c83be4f` | `ccwork/freeobject` (`b46b82c`), which §5.11 and §5.12 describe and which never reached `main` either |
+| `a8c9ade` | `RUNTIME_PLAN` §5.13's real story, §5.10's general form of the hazard, §5.14 restored and re-measured |
+| `8b46ae3` | a real defect the cherry-pick surfaced: `gc/goroutine-entry-stack-map` was not marked `exclusive` |
+| `0f86181` | plan: which recovered claim was re-measured here and which was not |
 
-The matrix census is 338 + 3: every one of the original 338 still reports the
-same verdict, and the three added capabilities pass. Counted from
-`--- PASS/FAIL/SKIP` subtest lines and cross-checked against the declared
-`PASS`/`EXPECTED FAILURE` verdict lines; 341 unique subtest names.
+**Headline numbers.** Matrix **342 subtests, 342 PASS, 341 declared PASS, 1 EXPECTED
+FAILURE, 0 KNOWN GAP, 0 FAIL** (338 → 342 by addition only, four new capabilities, nothing
+removed). `make test-unit`, `make test-goc-corpus` pass. Determinism unchanged. All 362
+corpus programs compiled by `main` and by this branch and run: **355 identical, and all 7
+differences accounted for**. `phase2-alloc` still cannot merge, re-measured rather than
+assumed.
 
-`make test-goc-cmd` initially failed. `TestGoImageCarriesASecondModule` asserted
-`"foreign-int-kind:2"` and `"first-call:7"` against a probe that prints them with
-`println("foreign-int-kind:", kind)` — the two expectations encoded the
-spec-violating bytes. Corrected to `"foreign-int-kind: 2"` and `"first-call: 7"`;
-the neighbouring assertions in the same test already carry the space because
-their probe lines are single string literals. No test was weakened, skipped or
-deleted.
+## Status
 
-## Not fixed — reported instead
+- [x] The six regressions reproduce, and they are caused by `1218627` alone.
+- [x] Root cause identified, and confirmed by a positive experiment.
+- [x] The correct part of the work landed on current `main`, with the defect fixed.
+- [x] §5.11, §5.12 and §5.13 recovered — with `ccwork/freeobject`'s code, because two of
+      the three describe it and it was not on `main`.
+- [x] `phase2-alloc` × `freeobject` interaction re-checked against current `main`: it is
+      still there, 40/40.
+- [x] Full suite and matrix, on the branch as it stands.
 
-### 1. Four print routines heap-allocate their scratch array
+### Not verified here — read §8 before relying on any of it
 
-`runtime.printfloat32`, `printfloat64`, `printcomplex64` and `printcomplex128`
-each call `runtime.newobject`. This is exactly the §5.3 defect, for the four
-routines §5.3 did not reach. Under the host, `go build -gcflags='runtime=-m -m'`
-reports **nothing at all** in `runtime/print.go` escaping.
+- `ccwork/freeobject`'s multi-thousand-run statistical campaigns (160 000 and 8 000 runs).
+  Its reducer's rate was re-measured; its tables were not.
+- The `phase2-alloc` × `freeobject` mechanism. It is re-measured as still present and is
+  **not** explained; no guess is offered.
+- `ccwork/baseline-accept` (`4e14a8f`), the fourth branch in `integration/wave4a`. It is
+  `ccwork/coverage-baseline`'s area, so it is left alone.
 
-The mechanism: they differ in shape from `printuint`. Where `printuint` does
-`gwrite(buf[i:])` — a slice into a callee that does not retain it, which §5.3
-taught the escape walk to allow — these do
-`gwrite(strconv.AppendFloat(buf[:0], v, 'g', -1, 64))`, passing the derived slice
-to a callee that *returns* a slice derived from it. cg12 has no rule for a
-parameter that leaks only to its result, so the call site assumes the worst.
-Reduced with no runtime source involved:
+## 1. Reproduction (done)
+
+Two detached worktrees off this repo, `1218627` (`ccwork/rangekey-b`) and its parent
+`ff6ef9e`, targeted capability run, three runs each:
+
+```
+go test -timeout 40m -v \
+  -run 'TestARM64RuntimeCapabilityStatus/(stdlib-encoding|runtime-packages|stdlib-http)/(gob-int|gob-struct-int|gob-struct-mixed|gob-roundtrip|reflect-call-aggregate-probe|tls-client-server)$' \
+  ./cmd/goc/... -args -runtime-status-runs=3
+```
+
+| capability | `ff6ef9e` (parent) | `1218627` (rangekey-b) |
+| --- | --- | --- |
+| `stdlib-encoding/gob-int` | PASS | FAIL |
+| `stdlib-encoding/gob-struct-int` | PASS | FAIL |
+| `stdlib-encoding/gob-struct-mixed` | PASS | FAIL |
+| `stdlib-encoding/gob-roundtrip` | PASS | FAIL |
+| `stdlib-http/tls-client-server` | PASS | FAIL |
+| `runtime-packages/reflect-call-aggregate-probe` | PASS | FAIL |
+
+Elapsed 255s (parent, all pass) and 248s (rangekey-b, all fail), so both runs really ran.
+The verification verdict's claim is confirmed: `1218627` alone, not a merge interaction.
+
+Failure shapes:
+
+- `reflect-call-aggregate-probe`: `SIGSEGV addr=0x0` in
+  `reflect.abiSeq.stepsForValue` ← `reflect.newAbiDesc` ← `reflect.funcLayout` ←
+  `reflect.Value.call`.
+- `stdlib-http/tls-client-server`: `local error: tls: bad record MAC` — silent stream
+  corruption, no crash.
+
+## 2. Root cause (found, and confirmed by a positive experiment)
+
+**`ccwork/rangekey-b` is right about Go's assignment order, and cg12 cannot yet hold the
+address it computes.**
+
+### What the branch changed that matters
+
+Go evaluates a statement's *operands* — index expressions and pointer indirections on the
+left — before the right-hand side, and only then stores. `1218627` implements that: every
+destination is resolved by `prepareAssignmentTarget` before any value is produced. For a
+destination that is not a plain identifier, resolving means calling `g.lvalue`, which
+computes a **raw address**, and that address is then live across the whole right-hand side —
+including any call in it.
+
+### The defect that exposes
+
+`ir.Block.Add(ir.ClsP, …)` — how every field, index and indirection address is built —
+produces a pointer-*width* value, not a *managed* one. `ir/pointer.go` documents the split:
+`ClsM` (or an explicit `MarkGCRef`) is what makes a value a GC root and puts it in the
+frame's stack map; plain `ClsP` does not. `Block.Load(ClsP, …)` marks its result, `Block.Add`
+does not.
+
+A value that is not in the stack map is not adjusted by `copystack`. So when the right-hand
+side grows the goroutine stack, the prepared destination address keeps pointing into the
+abandoned old stack, and the assignment's store lands in freed memory. The assignment is
+**silently lost** — no fault, no bounds error, no barrier complaint.
+
+Before this branch the window was always empty, because the destination address was computed
+*after* the right-hand side. That was never a stated invariant; it was an accident of the old
+code, and the branch's spec-correct reordering removes it.
+
+### The exact statement, located
+
+Bisected with a position filter on which destinations get prepared early
+(`GOC_EXP_ONLY=<file:line>`), narrowing package → file → line:
+
+```
+reflect/abi.go:127:   a.valueStart = append(a.valueStart, pStart)
+```
+
+Preparing *only* that one destination early reproduces the crash; preparing every other
+destination in the program early does not. Instrumenting `addArg` to print
+`len(a.valueStart)` immediately after the statement shows **0** — the append ran, the store
+vanished. `newAbiDesc` then indexes a zero-length `valueStart`, reads through its nil data
+pointer, and takes `SIGSEGV addr=0x0` inside `stepsForValue`. `a` points at `newAbiDesc`'s
+`var in abiSeq`, a *stack* local, which is why this destination and not another.
+
+Corroborating: `GODEBUG=cg12checkstackcopy=1` makes the program pass deterministically
+(3/3) while `madvdontneed`, `asyncpreemptoff`, `cg12checkwb=1`, `GOGC=off` and
+`gcshrinkstackoff=1` all still fail — only the stack-copy knob perturbs it away.
+
+### Confirmation
+
+Marking the prepared address managed —
 
 ```go
-func passthrough(dst []byte) []byte { return dst }
-func viaReturn()  { var buf [20]byte; consume(passthrough(buf[:0])) }  // newobject
-func viaDirect()  { var buf [20]byte; consume(buf[:0]) }               // no allocation
+slot: g.fn.MarkGCRef(g.lvalue(destination)),
 ```
 
-Not fixed here because closing it means giving the escape walk a "leaks only to
-result" summary and continuing the walk from the call expression — an
-escape-analysis feature whose blast radius is every function in the tree, and
-where a wrong summary stores a stack pointer into the heap. That is the highest-
-risk change class in this project and it wants its own validation cycle. It is
-recorded in RUNTIME_PLAN §5.10 with the reducer.
+— in `prepareAssignmentTarget`'s non-identifier case, changing nothing else, makes
+`reflect-call-aggregate-probe` and `gob-int` pass. That is the positive test of the
+mechanism: the address was invisible to the stack map, and making it visible fixes it.
 
-I could not produce a *fatal* consequence for it. `GODEBUG=gcpacertrace=1`, which
-is the diagnostic that prints floats closest to mark termination, runs clean:
-`gcController.endCycle` is called after `setGCPhase(_GCoff)`, so `mallocgc` does
-not throw there. The defect stands as unsoundness on `nosplit` and fatal paths
-plus unconditional bloat, not as a reproduced crash.
+### Bisect record
 
-### 2. The `-runtime-opt` arm of the matrix does not link — on `main` too
+| variant | reflect probe |
+| --- | --- |
+| `1218627` as committed | FAIL |
+| destinations prepared *after* the right-hand side | PASS |
+| only *identifier* destinations prepared early | PASS |
+| only *non-identifier* destinations prepared early | FAIL |
+| as committed + `MarkGCRef` on the prepared address | PASS |
 
-16 capabilities fail under `-runtime-opt`, every one with the same link error:
+## 3. Landing strategy: cherry-pick, not redo
+
+`git cherry-pick -n 1218627` onto current `main` applies with **zero conflicts** — `goc/compile.go`,
+`cmd/goc/runtime_status_test.go` and `RUNTIME_PLAN.md` all auto-merge — and the result builds
+and vets clean. `main`'s content-addressing and closure-naming work does not overlap the
+assignment machinery. Re-doing 723 lines by hand against a reference would cost far more and
+risk transcription errors, so the branch is cherry-picked and the defect fixed on top.
+
+## 4. What landed, and what it was verified against
+
+Branch `ccwork/wave4-rescue`, two commits on `61b96da` (current `main`):
+
+- `040fcbd` — `ccwork/rangekey-b` (`1218627`) cherry-picked verbatim. Kept separate and
+  deliberately still broken, so the defect and its fix are both visible in the history.
+- `702a4e9` — `goc: keep a prepared assignment destination in the stack map`. Marks the
+  prepared address, the map header and a pointer-classed map key managed in
+  `prepareAssignmentTarget`. A scalar map key is left alone on purpose.
+
+### Results
+
+| check | result |
+| --- | --- |
+| `go build ./...`, `go vet ./...` | clean |
+| `make test-unit` | pass, no failures |
+| `make test-goc-corpus` | `ok github.com/evanphx/cg12/goc 540.6s` |
+| the six regressions + the three new capabilities, 3 runs each | 9/9 PASS |
+| full capability matrix | **341 subtests, 341 PASS, 1 declared EXPECTED FAILURE, 0 FAIL, 0 KNOWN GAP**, 309.8s |
+
+**The matrix count moves 338 → 341, by addition only.** `ccwork/rangekey-b` adds a new
+`assignment-targets` category with three capabilities — `range-target-forms`,
+`range-target-order`, `multi-assignment-forms`. The diff to `cmd/goc/runtime_status_test.go`
+against `main` is +21 lines and removes nothing, so all 338 pre-existing subtests are still
+present and still pass. The one expected failure is unchanged:
+`EXPECTED FAILURE runtime_panic_print_string.go`.
+
+The fix was also verified on the branch's own base: applied to `1218627` in its own worktree,
+all six regressed capabilities pass 3/3 there too (245.7s). So it holds on both trees, not
+just the port.
+
+### `make test-goc-cmd`: two pre-existing flakes, neither caused by this work
+
+`make test-goc-cmd` failed twice here, on two different tests, and both reproduce on
+`main` without any of this branch's changes:
+
+- `TestBatchCompilerSharesItsWorldAcrossPrograms` (`cmd/goc/batch_test.go:182`) asserts the
+  third compile in a worker is faster than the first. It failed at 8.69s against 2.29s while
+  the box carried a load average of 118 from sibling jobs; re-run on an idle box it reports
+  `2.12s 1.57s 1.59s` and passes. It is a wall-clock assertion with no load guard.
+- `TestBatchCompilesAgainstDifferentPacksMatchOneShotCompiles` asserts a batch-compiled
+  program is byte-identical to the same program compiled alone. **On pristine `main`
+  (`61b96da`) it fails 2 runs in 3.** On this branch it passed 3 runs in 3. This is §5.10's
+  front-end nondeterminism reaching a byte-identity assertion; the differing bytes are
+  addresses in the same symbols, which is exactly the residue §5.10 describes.
+
+  This is in `ccwork/batch-reconcile`'s area, already on `main`, so it is reported rather
+  than fixed here.
+
+With those two skipped, the rest of `./cmd/goc/...` passes: `ok ... 173.6s`.
+
+### Host-toolchain differential (RUNTIME_PLAN §3 step 2) and determinism
+
+The three new programs, run under the host Go 1.26.1 toolchain and under `goc`:
+
+| program | `goc` vs host | `-O` vs no `-O` |
+| --- | --- | --- |
+| `runtime_range_target_forms.go` | identical | identical |
+| `runtime_range_target_order.go` | identical | identical |
+| `runtime_assign_target_forms.go` | identical | identical |
+
+`scripts/determinism-check.sh` is unchanged from the documented baseline — 4 of 5 sample
+programs byte-identical cold against warm across two rounds, with
+`runtime_defer_capture_allocs.go` the known §5.10 residue:
 
 ```
-goc-program-runtime.o: in function `reflect_makeFuncStub_abi0':
-undefined reference to `reflect_moveMakeFuncArgPtrs'
-undefined reference to `reflect_callReflect_abi0'
-undefined reference to `reflect_callMethod_abi0'
+hello.go                            round1:identical  round2:identical
+fmt_sprintf.go                      round1:identical  round2:identical
+gc_struct.go                        round1:identical  round2:identical
+runtime_cleanup_frame_retention.go  round1:identical  round2:identical
+runtime_defer_capture_allocs.go     round1:DIFFERENT  round2:DIFFERENT
 ```
 
-Thirteen `runtime-packages/reflect-*`, `stdlib-crypto/ecdh-x25519`,
-`stdlib-encoding/binary`, `stdlib-encoding/binary-varint`. **Measured on `main`
-as well, four shards each: the failure sets are byte-identical** (`main` 322 pass
-/ 16 fail; this branch 325 pass / 16 fail, the extra three being the new
-capabilities, which pass under `-O` too). Not caused by this work, not fixed
-here, recorded in §5.10. Possibly a sibling branch's area.
+## 5. `ccwork/freeobject` recovered too, because §5.11 and §5.12 are its sections
 
-### 3. `printquoted` is not exercised through a real labelled traceback
+The task asks for `RUNTIME_PLAN.md` §5.11, §5.12 and §5.13 back. Checking
+`origin/integration/wave4`, which carries the reconciled numbering the wave4a merges
+dropped, those are:
 
-It is exercised through a `//go:linkname` probe, which produces
-`"with \"quote\"\nand\ttab and é and \U0001f600"` — the exact upstream escaping —
-and through the disassembly showing `goroutineheader` calling it. It is not
-exercised through a traceback carrying real goroutine labels, because
-`runtime/pprof.Do` does not type-check under goc:
-`context.Context does not implement context.Context (wrong type for method
-Deadline)`. That reproduces identically on `main`, is unrelated, and was not
-chased.
+| section | branch | on `main`? |
+| --- | --- | --- |
+| §5.11 the entry stack map described a never-started goroutine's argument frame | `ccwork/freeobject` | **no** |
+| §5.12 `unsafe.Pointer` stores lost their write barrier | `ccwork/freeobject` | **no** |
+| §5.13 assignment destinations that were not identifiers | `ccwork/rangekey-b` | **no** |
 
-### 4. The `printf` path in `builtinPrint` is constructed but not executed
+So two of the three document code that is not on `main` at all — `b46b82c` never landed.
+Restoring the prose alone would have described a compiler that does not exist, so
+`ccwork/freeobject` is cherry-picked as well (`c83be4f`). Only `RUNTIME_PLAN.md`
+conflicted; every code file auto-merged onto current `main` *and* onto the
+assignment-destination work.
 
-`builtinPrint`'s non-`runtimeAllocation` branch gets the same operand sequence
-and therefore the same separators, but goc always compiles with
-`runtimeAllocation` on, so nothing in this repository's suites runs it. Only its
-construction is shared with the verified path, not its verification.
+**Its central claim was re-verified here, not taken on trust.** `runtime_goroutine_entry_stack_map.go`
+compiled at `-O` by the compiler immediately before that commit and by the compiler after
+it, 100 runs each:
 
-## Files changed
+```
+before: 92/100 failed
+after:   0/100 failed
+```
 
-- `goc/compile.go` — `printOperand`, `printOperands`, `collapsePrintLiterals`,
-  `printStep`, rewritten `builtinRuntimePrint` and `builtinPrint`,
-  `isRuntimeQuotedType`/`isRuntimeNamedType`; `complex64Parts`, `packComplex64`,
-  `complexComponent`, `complexConversion`, `isComplexType`, `convert`.
-- `goc/reach.go` — roots the runtime print routines the new lowering can call:
-  `printcomplex64`, `printcomplex128`, `printeface`, `printiface`, `printlock`,
-  `printquoted`, `printslice`, `printsp`, `printunlock`.
-- `goc/testdata/runtime_println_operand_separation.go`,
-  `runtime_println_statement_atomicity.go`, `runtime_complex64_parts.go` — new.
-- `cmd/goc/runtime_status_test.go` — the three capabilities.
-- `cmd/goc/testdata/runtime_coverage_baseline_pending.json` — the three
-  capabilities, with the standard "added after the accepted 2026-07-22 baseline
-  run" reason. **This file is also `ccwork/coverage-baseline`'s area**; the
-  denominator test requires the entries, so they are here, but that job's
-  version should win if the two conflict.
-- `cmd/goc/permodule_test.go` — two expectations that encoded the missing
-  separator.
-- `RUNTIME_PLAN.md` — §21; §5.10 loses the `println` item and gains the two
-  above; §1's matrix count 338 → 341.
+which is exactly the rate `b46b82c` reports. The full matrix on that tree is **342
+subtests, 342 PASS, 0 FAIL** — the branch adds `gc/goroutine-entry-stack-map`.
+
+What was *not* re-verified here: that branch's 160 000-run and 8 000-run statistical tables
+for the `many-goroutines-gc` variant and the `checkmark` residual. Those are its own
+measurements and stand or fall on its evidence, not on anything measured in this job.
+
+## 6. `ccwork/phase2-alloc` × `ccwork/freeobject`: the interaction is still there
+
+Re-checked against current `main` rather than assumed. `runtime_cleanup_basic.go`
+(`gc/cleanup-basic`), 40 runs per tree:
+
+| tree | `gc/cleanup-basic` |
+| --- | --- |
+| `main` + `phase2-alloc` alone | 0/40 failed |
+| `main` + rangekey (fixed) + `phase2-alloc` | 0/40 failed |
+| `main` + `freeobject` + `phase2-alloc` | **40/40 failed** |
+| `main` + rangekey (fixed) + `freeobject` + `phase2-alloc` | **40/40 failed** |
+| this branch (rangekey fixed + `freeobject`, no `phase2-alloc`) | passes, in the full matrix |
+
+`fatal error: span has no free objects`, and one run segfaulted instead. So §5.14's finding
+holds on current `main`, it is **`freeobject` × `phase2-alloc`**, and the assignment work is
+not involved in it either way. `ccwork/phase2-alloc` stays out, for the same reason and now
+with the reason re-measured. The mechanism is still not established and is not guessed at
+here.
+
+## 7. Final verification, on the branch as it stands
+
+`ccwork/wave4-rescue`, on `61b96da`:
+
+```
+0f86181 plan: say which of the recovered section's claims was re-measured
+8b46ae3 goc status: run the goroutine-entry reducer alone, as its own text requires
+a8c9ade plan: what the assignment work actually broke, and what still cannot be merged
+c83be4f Fix two GC defects behind `found pointer to free object`      (ccwork/freeobject)
+702a4e9 goc: keep a prepared assignment destination in the stack map  (this job's fix)
+040fcbd goc: resolve every assignment destination before the right-hand side (ccwork/rangekey-b)
+```
+
+| check | result |
+| --- | --- |
+| `go build ./...` | clean |
+| `go vet ./...` | clean |
+| `gofmt -l` over every changed non-vendored Go file | clean |
+| `make test-unit` | pass |
+| `make test-goc-corpus` | `ok github.com/evanphx/cg12/goc 538.5s` |
+| full capability matrix | see census below |
+| `scripts/determinism-check.sh` | unchanged: 4 of 5 identical, `runtime_defer_capture_allocs.go` the known §5.10 residue |
+
+### The matrix census, counted rather than trusted
+
+Counted from a `-v -count=1` run of `^TestARM64RuntimeCapabilityStatus$`, 220.8s:
+
+```
+subtests:        342
+--- PASS:        342
+--- FAIL:          0
+--- SKIP:          0
+declared PASS:   341
+EXPECTED FAILURE:  1
+KNOWN GAP:         0
+```
+
+**The complete list of non-passing capabilities is: none.** The single declared exception is
+`defer-panic/panic-string-output` (`EXPECTED FAILURE runtime_panic_print_string.go`), which
+is the one `main` already carried.
+
+The count is 342, not 338, and the difference is four additions with no removals:
+
+| added capability | from |
+| --- | --- |
+| `assignment-targets/range-target-forms` | `ccwork/rangekey-b` |
+| `assignment-targets/range-target-order` | `ccwork/rangekey-b` |
+| `assignment-targets/multi-assignment-forms` | `ccwork/rangekey-b` |
+| `gc/goroutine-entry-stack-map` | `ccwork/freeobject` |
+
+`cmd/goc/testdata/runtime_coverage_baseline_pending.json` moves 44 → 48 entries and
+`TestCheckedRuntimeCoverageBaselineDenominator` passes, so 294 + 48 = 342 reconciles.
+`RUNTIME_PLAN.md` §1 is updated to match.
+
+### The A/B behaviour differential over the whole corpus
+
+A green matrix does not validate a codegen change, so every one of the 362 programs in
+`goc/testdata` was compiled by `main`'s compiler and by this branch's, both were run, and
+exit status, stdout and stderr compared. A disagreement is re-run three more times before it
+is believed, because several corpus programs print scheduling-dependent statistics.
+
+**355 of 362 identical. All 7 remaining are accounted for:**
+
+| program | difference | why |
+| --- | --- | --- |
+| `runtime_range_target_forms` | 2 → 0 | the fix: `main` cannot compile a non-identifier range destination correctly |
+| `runtime_range_target_order` | 2 → 0 | the fix |
+| `runtime_assign_target_forms` | `main` fails to compile | `main` rejects `v, ok = m[k]` with a non-identifier destination outright |
+| `runtime_goroutine_entry_stack_map` | 2 → 0 | §5.11's fix; `main` fails ~92 runs in 100 |
+| `runtime_panic_print_string` | 2 → 2 | traceback offset only: `runtime_gopanic +0xc0c` against `+0xc10`, a 4-byte code-layout shift |
+| `bytes_grow_stats` | printed statistics | not a compiler difference: **one executable gives 7 distinct outputs in 8 runs**, on both compilers, and the two compilers' output sets overlap. §5.10 names this program |
+| `bytes_grow_compare` | printed statistics | same class; agreed with `main` in 2 of 3 reruns |
+
+### One real defect the cherry-pick surfaced, and fixed
+
+`TestRuntimeCapabilityExclusiveClassification` failed:
+`gc/goroutine-entry-stack-map` sets its own `GOMAXPROCS` and `GOGC` — its own comment says
+so — but was not marked `exclusive`. That test arrived with `main`'s concurrent run phase
+and did not exist when `ccwork/freeobject` was written, which is exactly what a cherry-pick
+across 82 commits should turn up. Fixed in `8b46ae3`; its sibling reducer
+`gc/keepalive-stack-root` was already marked for the same reason.
+
+With the matrix and the known-flaky `TestBatchCompilesAgainstDifferentPacksMatchOneShotCompiles`
+skipped, `./cmd/goc/...` is `ok ... 173.1s`.
+
+The final matrix, run again after `8b46ae3` changed how one capability is scheduled:
+
+```
+subtests:        342
+--- PASS:        342
+--- FAIL:          0
+--- SKIP:          0
+declared PASS:   341
+EXPECTED FAILURE:  1
+KNOWN GAP:         0
+ok  github.com/evanphx/cg12/cmd/goc  193.8s
+```
+
+## 8. What is not verified, and what is left for someone else
+
+### Not verified here
+
+- **`ccwork/freeobject`'s statistical tables.** Its 160 000-run `many-goroutines-gc` campaign
+  and its 8 000-run `checkmark` residual are that branch's own measurements, reproduced in
+  `RUNTIME_PLAN` §5.11 and §5.12 as its evidence. What *was* re-measured here is its reducer:
+  92/100 before, 0/100 after, on current `main`. §5.11 now says which is which.
+- **The `phase2-alloc` × `freeobject` mechanism.** Re-measured as still present (40/40) and
+  deliberately not explained. `span has no free objects` is an allocator invariant failure
+  consistent with either reentry or an accounting disagreement, and guessing between them
+  would be worse than saying so.
+- **`ccwork/baseline-accept` (`4e14a8f`).** The fourth branch in `integration/wave4a`, and
+  the one thing from that integration this job did not touch: it is
+  `ccwork/coverage-baseline`'s area. `runtime_coverage_baseline_pending.json` here grows by
+  the four capabilities this branch adds and nothing else.
+- **The general interior-address hazard.** §5.10 now records it. The fix here covers the
+  place the assignment machinery deliberately holds an address across a call; nothing
+  prevents another interior address being held across a safepoint elsewhere in the front
+  end. A cheap first step is named there: assert that no `ClsP`-classed value is live across
+  a call instruction unless it is a GC reference, and see what the corpus reports.
+
+### Defects found in other people's areas, reported rather than fixed
+
+1. **`TestBatchCompilesAgainstDifferentPacksMatchOneShotCompiles` is flaky on `main`.**
+   2 failures in 3 runs on pristine `61b96da`. It asserts byte-identity between a
+   batch-compiled program and the same program compiled alone, which §5.10's front-end
+   nondeterminism can break on its own. `ccwork/batch-reconcile`'s area.
+2. **`TestBatchCompilerSharesItsWorldAcrossPrograms` has a bare wall-clock assertion.**
+   It fails under load (8.69s against 2.29s at load average 118) and passes idle
+   (`2.12s 1.57s 1.59s`). Same area. On a shared box this will keep firing.
+3. **`println` with several operands prints no spaces**, which is visible in
+   `bytes_grow_stats`'s output above (`mallocs246548302`). Already recorded in §5.10 and
+   already `ccwork/println-spacing`'s job; noted only because it is what makes that
+   program's output hard to read while diffing it.
+
+### What the next job should pick up
+
+- The interior-address checker described in §5.10. It is the cheapest way to find out
+  whether §5.13 was the only place this bites.
+- The `freeobject` × `phase2-alloc` reduction (§5.14). Both branches are preserved and
+  both are individually verified; only the composition is broken.

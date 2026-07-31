@@ -14,35 +14,21 @@ assembly is tracked separately until it can be instrumented meaningfully.
 
 ## 1. Baseline
 
-The accepted 2026-07-31 coverage run compiled and ran the whole 338-capability
-matrix, executing each successful binary three times and merging its hits. Its
-canonical baseline is `cmd/goc/testdata/runtime_coverage_linux_arm64.json`,
-built from runtime source `06e314f8a5a729394207296e943ea075e51dbd39355c3389ca7ac65a52cb8f55`.
+The accepted 2026-07-22 coverage run compiled and ran the 294-program runtime
+capability corpus, executing each successful binary three times. Its canonical
+baseline is `cmd/goc/testdata/runtime_coverage_linux_arm64.json`.
 
-| Measurement | Baseline (2026-07-31) | Previous (2026-07-22) |
-| --- | ---: | ---: |
-| Programs | 338 | 294 |
-| Programs returning coverage | 338 | 291 |
-| Active Linux/ARM64 runtime Go functions | 2,574 | 2,561 |
-| Compiled runtime functions | 2,087 | 2,050 |
-| Executed runtime functions | 1,400 | 1,269 |
-| Active-function coverage | 54.4% | 49.6% |
-| Compiled runtime blocks | 27,780 | 25,929 |
-| Executed runtime blocks | 9,182 | 7,936 |
-| Compiled-block coverage | 33.1% | 30.6% |
-
-The corpus denominator and the baseline are now the same set: 338 program rows
-for 338 capabilities, every one `compile_outcome: passed` and
-`coverage_outcome: collected`, with no `skipped`, `unreported`, `missing` or
-`expected-unavailable` row anywhere. The single non-`passed` run outcome is
-`defer-panic/panic-string-output`, the declared `expectedFailure`, which exits 2
-by design and still returns its packet — §4.3's guard did not have to fire. The
-run recorded 0 unexpected failures, 0 compile failures and 0 timeouts, against
-the previous baseline's 19, 2 and 1.
-
-Both figures remain short of §2's guideposts of 65% active-function and 45%
-compiled-block coverage. They improved by 4.8 and 2.4 points over a corpus 15%
-larger, which is progress and not arrival; the guideposts stay open.
+| Measurement | Baseline |
+| --- | ---: |
+| Programs | 294 |
+| Programs returning coverage | 291 |
+| Active Linux/ARM64 runtime Go functions | 2,561 |
+| Compiled runtime functions | 2,050 |
+| Executed runtime functions | 1,269 |
+| Active-function coverage | 49.6% |
+| Compiled runtime blocks | 25,929 |
+| Executed runtime blocks | 7,936 |
+| Compiled-block coverage | 30.6% |
 
 The baseline already exercises useful portions of allocation, marking,
 sweeping, stack growth, channels, timers, and netpoll.
@@ -63,24 +49,16 @@ this document:
 | the runtime trace program OOMs or times out | §5.5 |
 | the ECDSA case | generic method dispatch, §5.6 |
 
-The rerun this section used to ask for has happened. Before it, the accepted
-baseline covered 294 of the matrix's 338 capabilities and had been built from a
-runtime source fingerprint that had since moved, so `make runtime-cover-diff`
-refused the comparison outright — the drift guard working rather than a failure.
-The 2026-07-31 baseline replaces it, and a diff against it now runs and reports
-zero deltas.
+The accepted baseline still needs a rerun. It is now stale in two ways: it
+covers 294 of the matrix's 342 capabilities, and the runtime source fingerprint
+has moved, so a diff against it is refused rather than silently misleading.
 
-### Current state (2026-07-31)
+### Current state (2026-07-28)
 
-The capability matrix holds **341 capabilities and no `knownGap` at all**. The
+The capability matrix holds **342 capabilities and no `knownGap` at all**. The
 only declared exception is `defer-panic/panic-string-output`, a deliberate
 `expectedFailure`. Phase 1 (§5) is complete; §5.10 records what remains open,
 none of which is a failing capability.
-
-The count was 338 until §21 added three: `print-builtin/operand-separation`,
-`print-builtin/statement-atomicity` and `core-types/complex64-parts`. Passages
-below that quote 338 are records of runs made before that, and are left as they
-were measured.
 
 That is a statement about the matrix, not about the runtime. Per §2, executing a
 line is not evidence that stack maps, write barriers, unwinding, or scheduler
@@ -102,18 +80,19 @@ became `mustPass` on 2026-07-28 with the merged-address fix in §5.3, so the
 matrix now holds no `knownGap` at all; `defer-panic/panic-string-output` is the
 one deliberate `expectedFailure`.
 
-The two denominators are now reconciled, and since 2026-07-31 they are equal.
-There is only one denominator: the capability matrix *is* the coverage corpus,
-and every capability reports one explicit compile/run/coverage outcome,
-including the ones this environment cannot run. The accepted baseline covers all
-338 that existed when it ran. Seven capabilities were added after it, so
-`cmd/goc/testdata/runtime_coverage_baseline_pending.json` holds those seven and
-`TestCheckedRuntimeCoverageBaselineDenominator` reconciles in both directions:
-338 + 7 = 345, no capability may appear in both, and no baseline
-program may name a capability the matrix has dropped. Adding a capability still
-requires either accepting a new baseline or recording in that file why the
-baseline does not cover it, so the list is a mechanism that is currently unused
-rather than one that has been retired.
+The two denominators are now reconciled. There is only one denominator: the
+capability matrix *is* the coverage corpus, and every capability reports one
+explicit compile/run/coverage outcome, including the ones this environment
+cannot run. The accepted baseline covers 294 programs while the matrix holds
+342, and that gap is baseline staleness rather than an exclusion set — each of
+the 48 capabilities was added after the 2026-07-22 run. They are listed with a
+reason in `cmd/goc/testdata/runtime_coverage_baseline_pending.json`, and
+`TestCheckedRuntimeCoverageBaselineDenominator` reconciles matrix, baseline, and
+list in both directions: 294 + 48 = 342, no capability may appear in both, and
+no baseline program may name a capability the matrix has dropped. Adding a
+capability therefore requires either accepting a new baseline or recording why
+the baseline does not cover it. The list empties when the pending full-corpus
+rerun is accepted.
 
 Control runs without coverage instrumentation reproduce the runtime failures
 and large-program compiler memory failures. They are not coverage-counter
@@ -224,18 +203,18 @@ Current M0 checkpoint:
 - [x] Refuse a sharded coverage run, which would publish a fraction of the
   corpus as a complete report, and refuse a coverage run on a host that cannot
   execute the matrix rather than skipping silently.
-- [x] Reach one usable coverage outcome per capability. The 2026-07-31
-  collection reached **338 of 338**: every capability compiled, ran, and returned
-  a usable coverage packet, with no `skipped`, `unreported`, `missing` or
-  `expected-unavailable` row. The three absences the previous run carried —
-  `goroutine/many-goroutines-gc`, `scheduler-stress/gc-churn` and
-  `stdlib-bytes/grow-allocs`, each killed at its 30s timeout — were one bug, the
-  §5.2.1 GC-assist allocation recursion, and all three now collect.
+- [ ] Reach one usable coverage outcome per capability. The last collection run
+  reached 326 of 329: every capability compiled and ran, none was skipped or
+  unreported, and the three absences — `goroutine/many-goroutines-gc`,
+  `scheduler-stress/gc-churn` and `stdlib-bytes/grow-allocs` — were each killed
+  at its 30s timeout with that recorded as its reason.
 
-  The one non-`passed` run outcome is `defer-panic/panic-string-output`, the
-  matrix's declared `expectedFailure`. It exits 2 without recovering and its
-  packet still arrives, because `insertRuntimeCoverageDumpCalls` emits the dump
-  ahead of every `runtime.exit` and `fatalpanic` reaches `exit(2)`.
+  **The blocking reason has changed.** All three absences were the §5.2.1
+  GC-assist failure, and that is fixed: all three are `mustPass` and passing.
+  Nothing is known to prevent a full 342-of-342 collection. What is missing is
+  the run itself. This box needs a fresh collection over the current tree, not
+  more runtime work, and it is the last thing standing between the project and
+  M0.
 
 ### 4.1 Make reports stable and comparable
 
@@ -296,10 +275,7 @@ functions remain visible but do not become artificial coverage targets.
   the corpus currently produces: `insertRuntimeCoverageDumpCalls` emits the dump
   ahead of every call to `runtime.exit`, and Go's `fatalpanic` and `fatalthrow`
   both reach `exit(2)`. In the 2026-07-28 run the deliberate uncaught panic and
-  all six programs that exited non-zero still returned their packets, and the
-  accepted 2026-07-31 baseline repeats the result with nothing left to excuse:
-  its only non-zero exit is `defer-panic/panic-string-output`, whose packet is
-  `collected`, and the report carries zero `expected-unavailable` rows. So the
+  all six programs that exited non-zero still returned their packets, so the
   `expected-unavailable` classification is a guard that did not have to fire
   rather than an active exclusion. It stays in place because terminations that
   bypass `runtime.exit` — `runtime.abort`, `dieFromSignal` re-raising a fatal
@@ -322,19 +298,18 @@ row is rejected by report validation, and a sharded coverage run is refused
 outright. Two runs cannot disagree about the denominator without one of them
 failing.
 
-The explicit outcomes hold as well. The 2026-07-31 collection over all 338
-capabilities produced 338 compile outcomes, 338 run outcomes, and 338 coverage
-outcomes, every one of the last `collected`, with no silent absences. The three
-classified timeouts the 2026-07-28 run carried are gone.
+The explicit outcomes hold as well. The 2026-07-28 verification run over all
+329 capabilities produced 329 compile outcomes, 329 run outcomes, and 329
+coverage outcomes, with a recorded reason on every outcome other than
+`collected` and no silent absences. What remains is the runtime repair work that
+turns the three classified timeouts into collected packets.
 
-The drift guard did its job on the way here. Between the 2026-07-22 baseline and
-this run the runtime source fingerprint moved from
-`10a75b3cbbd95507daf7cd4ac1b4aa3b6ddcab338ea0d00e8a79c52bdbb9bb06` to
-`06e314f8a5a729394207296e943ea075e51dbd39355c3389ca7ac65a52cb8f55`, and
-`make runtime-cover-diff` refused to compare across that boundary rather than
-producing a misleading delta. Accepting the 2026-07-31 run is what restored the
-comparison: diffing the accepted baseline against the report it was built from
-runs to completion and reports zero deltas in every bucket.
+One consequence is worth stating plainly: the runtime source fingerprint has
+moved since the accepted 2026-07-22 baseline, so `make runtime-cover-diff`
+against that baseline now correctly refuses to compare rather than producing a
+misleading delta. Diffing is usable between reports built from the same runtime
+source; comparing against the accepted baseline again requires accepting a new
+one, which needs the open runtime failures resolved first.
 
 ## 5. Phase 1: Repair current hard failures
 
@@ -1075,8 +1050,7 @@ Current checkpoint:
 - [x] Re-check the stale large-program failures from the accepted baseline:
   optimized `stdlib-http/redirect-keepalive`, `stdlib-http/tls-client-server`,
   and `stdlib-crypto/ecdsa` now pass individually under the 3 GiB process
-  limit. The full corpus rerun this asked for happened on 2026-07-31 and all
-  three collect coverage in the accepted baseline.
+  limit. A full corpus rerun is still required before accepting a new baseline.
 - [x] Remove the duplicate legacy `.cg12_stackmaps` section from Go-runtime
   binaries; the native Go `moduledata`/pclntab stack maps are the authoritative
   metadata there. This fixed the unoptimized `stdlib-http/parse-roundtrip`
@@ -1292,13 +1266,10 @@ Current checkpoint:
   wave 3 merged the matrix is 338 of 338 at `STATUS_SHARDS=8`, with
   `defer-panic/panic-string-output` (deliberate `expectedFailure`) as the only
   declared exception and no `knownGap` remaining.
-- [x] Explain the residual `fatal error: found pointer to free object` recorded
-  below. It was two unrelated compiler defects, not one, and neither is this
-  section's bug: see §5.11 and §5.12. The description below of it as "a
-  different fault with a different traceback" is right; the description of it as
-  two orders of magnitude rarer is not, because it and
-  `found bad pointer in Go heap` are the same two mechanisms seen through
-  different stale words.
+- [ ] Explain the residual `fatal error: found pointer to free object` recorded
+  below. It is a different fault with a different traceback and is roughly two
+  orders of magnitude rarer; it is not this section's bug and is not known to be
+  fixed.
 
 #### Root cause (2026-07-28)
 
@@ -1439,24 +1410,25 @@ other instances of the same class, not a proof that none exists.
   have been its cause. Its 7-of-60 failure was measured on 381f67c and was
   presumably closed by §5.2.1 or §5.7. The §5.2 checkpoint text still describes
   it as live and should be read with that in mind.
-- A different fault survived, **pre-existing and unaffected by this change**:
-  `fatal error: found pointer to free object`. It is now closed by §5.11 and
-  §5.12, and two things this section said about it were wrong. First, the
-  correction above — that `marked free object in span` was a misattribution and
-  the real string is `found pointer to free object` — was a correction in the
-  wrong direction: `mspan.reportZombies` *prints* the first line and then
-  *throws* the second, so they are one report and either name is the same fault.
-  A verification that greps for one and not the other will see zeroes on one
-  side, which is what happened. Second, "two orders of magnitude rarer" counted
-  only one of the two messages the same defects produce; measured together
-  (§5.12's table) the merge base loses 161 runs in 160000 on the KeepAlive-free
-  control, not 20.
+- A different fault survives, and it is **pre-existing and unaffected by this
+  change**: `fatal error: found pointer to free object`. This section originally
+  named it `marked free object in span` (from `mspan.reportZombies`); the
+  independent verification of 2026-07-28 saw that string zero times in roughly
+  600000 executions and identified the surviving fault as the one named above.
+  Measured with matched 160000-run controls on a KeepAlive-free variant of the
+  reducer, compiled by the merge-base and by the fixed compiler from
+  sha256-identical sources: 19 versus 20 occurrences, plus a residual
+  `found bad pointer in Go heap` at 4 versus 4 and rare hangs. Indistinguishable,
+  which is what establishes it as pre-existing rather than introduced here. On
+  `many-goroutines-gc` itself it ran 11 of 24000 on the merge base and 4 of 24000
+  on the fix. It has not been reduced, it is about two orders of magnitude rarer
+  than the fault this section closes, and it needs a reducer of its own before it
+  is worth measuring.
 
 Exit criterion: no global data word ever receives a goroutine stack address
 (checkable with `GODEBUG=cg12checkwb=2` over the corpus), `gc/keepalive-stack-root`
 passes at every `-runtime-procs` setting optimized and unoptimized, and the
-`found pointer to free object` fault above is reduced and attributed. All three
-now hold; the last one is §5.11 and §5.12.
+`found pointer to free object` fault above is reduced and attributed.
 
 ### 5.9 Fixed: loop variables were per-loop, not per-iteration (2026-07-28)
 
@@ -1575,11 +1547,12 @@ holds `runtime.gcAssistAlloc` at zero allocations.
   optimization/GOMAXPROCS configurations, where the pre-fix compiler differs on
   nine of ten lines.
 
-`println` with several operands not printing the spaces the spec requires
-(`println("a", 1)` gave `a1`) was found while reducing this bug and is unrelated
-to it; it is fixed in §21. Two further loop-related defects this work exposed --
-the non-identifier range key and the `runtimeAllocation` gating -- are carried in
-§5.10 with the rest of Phase 1's open items.
+Still open: `println` with several operands does not print the spaces the spec
+requires (`println("a", 1)` gives `a1`). Found while reducing this bug, unrelated
+to it, and not fixed here. Carried in §5.10 with the rest of Phase 1's open
+items, together with one of the two further loop-related defects this work
+exposed, the `runtimeAllocation` gating. The other, the non-identifier range
+key, is fixed in §5.13.
 
 ### 5.10 Open items carried out of Phase 1 (2026-07-28)
 
@@ -1633,6 +1606,10 @@ the reports of the jobs that found them.
   works around it rather than fixing the emission. The cause is in `globalDecl`'s
   interface path and has not been traced.
 
+- **`println` with several operands omits the spaces the spec requires.**
+  `println("a", 1, true)` prints `a1true` where the host toolchain prints
+  `a 1 true`. Found while reducing §5.9. Affects the runtime's own diagnostics.
+
 - **Per-iteration loop lowering is gated on `g.runtimeAllocation`.** With that
   mode off, escaping captures are not heap-lifted at all, so loops keep the
   pre-§5.9 shared-slot behaviour — that is, the miscompile returns. `goc` always
@@ -1642,23 +1619,15 @@ the reports of the jobs that found them.
 
 #### Residual runtime faults
 
-- **`fatal error: found pointer to free object`** is closed. It was two
-  independent compiler defects, reduced and fixed in §5.11 and §5.12. Read the
-  measurement in §5.12 before trusting any earlier rate quoted for it: this
-  fault and `found bad pointer in Go heap` share both mechanisms and differ only
-  in what the stale word happened to address, so counting either one alone
-  understates the rate.
+- **`fatal error: found pointer to free object`** survives at roughly 20 in
+  160000 runs, established as pre-existing by matched controls compiled from
+  sha256-identical sources (§5.8). Two orders of magnitude rarer than the
+  `runtime.KeepAlive` fault it was hiding behind. Not reduced; it needs a
+  reducer of its own before it is worth measuring.
 
-- **Rare hangs and deadlocks.** The §5.8 verification saw runs exceed a 60s
-  timeout on both the base and the fixed compiler, at a low rate, unexplained
-  and unattributed. §5.11's and §5.12's campaigns reproduce this — 1 timeout in
-  160000 and 2 in 2000 on the base compiler — and also saw
-  `fatal error: all goroutines are asleep - deadlock!` at 7 in 160000 on the
-  base compiler and 3 in 160000 after §5.11 alone. Both are absent from every
-  post-§5.12 campaign (160000 + 2000 + 800 runs), which is consistent with a
-  lost closure hanging or deadlocking the program rather than faulting it, but a
-  zero at that scale is not an attribution and neither has a reducer. Any
-  harness that measures fault rates on `many-goroutines-gc` must still impose a
+- **Rare hangs.** The §5.8 verification saw runs exceed a 60s timeout on both
+  the base and the fixed compiler, at a low rate, unexplained and unattributed.
+  Any harness that measures fault rates on `many-goroutines-gc` must impose a
   per-run timeout or it will stall instead of reporting.
 
 #### Compiler bloat and conservatism
@@ -1677,49 +1646,6 @@ the reports of the jobs that found them.
 
 - The §5.3 escape boundary's `OSel` derivation path is covered by unit test only;
   no capability's `-O` build keeps the diamond rather than if-converting it.
-
-- **`runtime.printfloat32`, `printfloat64`, `printcomplex64` and
-  `printcomplex128` still heap-allocate their scratch array**, which is exactly
-  the §5.3 defect for the four print routines §5.3 did not reach. They differ
-  from `printuint` in shape: `gwrite(strconv.AppendFloat(buf[:0], v, 'g', -1,
-  64))` passes the derived slice to a callee that *returns* a slice derived from
-  it, and cg12 has no rule for a parameter that leaks only to its result, so the
-  call site assumes the worst and `buf` is lifted. The host toolchain's
-  `-gcflags='runtime=-m -m'` reports nothing in `runtime/print.go` escaping at
-  all. Reduced without any runtime source:
-
-  ```go
-  func passthrough(dst []byte) []byte { return dst }
-  func viaReturn() { var buf [20]byte; consume(passthrough(buf[:0])) }
-  ```
-
-  `viaReturn` calls `runtime.newobject`; the same function with
-  `consume(buf[:0])` does not. Found by §21, which routes complex operands to
-  these routines; it is pre-existing for the two float ones. Closing it means
-  giving the escape walk a "leaks only to result" summary and continuing the
-  walk from the call expression, which is a frontend change with a large blast
-  radius — a wrong summary stores a stack pointer into the heap — so it wants
-  its own validation cycle rather than being folded into §21.
-
-#### The `-runtime-opt` arm of the matrix does not link
-
-Measured 2026-07-31 on `main` (`61b96da`) and on `ccwork/println-spacing`, four
-shards each, failure sets byte-identical: 322 pass and **16 fail** under
-`-runtime-opt`, every one of them the same link error.
-
-```
-goc-program-runtime.o: in function `reflect_makeFuncStub_abi0':
-undefined reference to `reflect_moveMakeFuncArgPtrs'
-undefined reference to `reflect_callReflect_abi0'
-undefined reference to `reflect_callMethod_abi0'
-```
-
-Thirteen `runtime-packages/reflect-*`, `stdlib-crypto/ecdh-x25519`,
-`stdlib-encoding/binary` and `stdlib-encoding/binary-varint`. The Go functions
-that `reflect`'s assembly stubs call are not in the split runtime object when
-`-O` is on. Unattributed and unfixed: it is not caused by §21, and the
-determinism note above records that the matrix is supposed to run `-O` under
-this flag.
 
 #### Compiling the same program twice does not give the same binary
 
@@ -1808,16 +1734,6 @@ inlined when the budget runs out is not reproducible. The matrix runs `-O` under
   question open: defects that need many Ps are still structurally hard to see.
 
 ### 5.11 Fixed: the entry stack map described a never-started goroutine's argument frame (2026-07-28)
-
-Recovered on 2026-07-31. This section and §5.12 are `ccwork/freeobject`'s, and
-the `integration/wave4a` merges dropped them; the code they describe never
-reached `main` either, so both were cherry-picked back rather than restored as
-prose alone. One claim was re-measured here on current `main` rather than taken
-on trust: `runtime_goroutine_entry_stack_map.go` at `-O`, 100 runs against the
-compiler immediately before the fix and 100 against the compiler after it, gives
-92/100 failures before and 0/100 after — the rate this section states. The
-multi-thousand-run campaigns below were **not** re-run; they remain that
-branch's own evidence.
 
 Current checkpoint:
 
@@ -2448,14 +2364,8 @@ Work in reviewable vertical slices. Each slice contains the reproducer, the
 fix, compiler diagnostics where useful, status-suite registration, and updated
 coverage classification.
 
-1. **M0 — coverage is reproducible: COMPLETE (2026-07-31).** Stable report/diff,
-   checked baseline, classifications, and one explicit outcome per capability.
-   The last open box was a full-corpus collection over the current tree; the
-   2026-07-31 run collected a usable packet from all 338 capabilities and was
-   accepted as the baseline, which also emptied
-   `runtime_coverage_baseline_pending.json`. M0 says coverage is *measurable and
-   diffable*, not that it is high: §1 records 54.4% active-function and 33.1%
-   compiled-block, both short of §2's guideposts.
+1. **M0 — coverage is reproducible:** stable report/diff, checked baseline,
+   classifications, one explicit outcome per capability.
 2. **M1 — current failures are green: COMPLETE (2026-07-28).** Every failure
    this milestone named is closed, and each turned out to be a compiler defect:
    defer/panic (§5.1), signal delivery during GC (§5.2.1), cleanup and finalizer
@@ -2492,14 +2402,13 @@ The original batch here is complete: every item from the stable report-diff
 through the HTTP compilation OOMs is closed, and each is recorded in its own §5
 subsection. What follows replaces it.
 
-1. **Done: the first stable baseline is accepted (2026-07-31).** The full
-   collection ran over all 338 capabilities and every one of them returned a
-   usable packet, so the run was accepted, `runtime_coverage_baseline_pending.json`
-   is empty, and the denominator test reconciles baseline to matrix directly.
-   The source-drift check did refuse a diff against the 2026-07-22 baseline
-   first, as expected. This closed the last M0 checkbox (§4). What it did *not*
-   do is move coverage to where §2 wants it: 54.4% active-function and 33.1%
-   compiled-block against guideposts of 65% and 45%.
+1. **Accept the first stable baseline.** Run a full coverage collection over the
+   current tree and accept it. This is the last open M0 checkbox (§4) and it is
+   no longer blocked on runtime work — the three capabilities that used to time
+   out now pass. Expect the source-drift check to refuse a diff against the
+   2026-07-22 baseline; that is correct behaviour, not a failure. On acceptance
+   `runtime_coverage_baseline_pending.json` empties and the denominator test
+   reconciles baseline to matrix directly.
 
 2. **Fix `for x.f = range s`: done (§5.13).** It was one instance of a wider
    defect — every statement that assigns a value it did not compute from an
@@ -2509,14 +2418,9 @@ subsection. What follows replaces it.
    that reduction exposed and did not fix: a closure that assigns a computed
    string to a captured string variable leaves it dangling (§5.10).
 
-3. ~~**Reduce `found pointer to free object`**~~ — done, and it was two defects:
-   §5.11 (the entry stack map described a never-started goroutine's argument
-   frame) and §5.12 (`unsafe.Pointer` stores lost their write barrier). The
-   reducer is `gc/goroutine-entry-stack-map`. What is left from that
-   investigation is the rare hang and the rare deadlock recorded in §5.10, and
-   the `mspan.reportZombies` blind spot recorded at the end of §5.11 — the next
-   fault in this family will be much harder to attribute until that diagnostic
-   can name its zombie.
+3. **Reduce `found pointer to free object`** (§5.10). It needs a reducer with a
+   usable failure rate before it can be attributed, in the way §5.8's
+   `gc/keepalive-stack-root` made its predecessor measurable.
 
 4. **Done: the driver is split** (§16). `goc build-runtime` compiles the Go
    runtime once as a Go module of its own and `goc -runtime` compiles a program
@@ -3438,151 +3342,3 @@ compare against the checked-in baseline -- `RuntimeSourceID` differs -- and that
 is pre-existing: the baseline commit `750c9c2` is an ancestor of `b5537b5`, the
 last commit to touch `stdlib/`, and `git diff main...HEAD -- stdlib/ goc/` is
 empty. The baseline needs refreshing; that is not this change's to make.
-
-## 21. The print built-in: separators, dispatch, and the print lock (2026-07-31)
-
-`println("a", 1, true)` printed `a1true`. The Go specification's table for the
-two print built-ins says `println` is "like `print` but prints spaces between
-arguments and a newline at the end", so the separators and the trailing newline
-are required; only the rendering of an individual operand is left
-implementation-specific. cg12 walked `call.Args`, emitted one runtime print call
-per operand and a single `printnl`, and never emitted the separators at all.
-
-The host toolchain implements the rule in `cmd/compile/internal/walk.walkPrint`
-by rewriting the operand list before it lowers anything: insert a `" "` string
-between operands, append a `"\n"`, then collapse runs of adjacent constant
-strings into one. cg12 now builds the same sequence, so `println("x", "y", "z")`
-is a single `printstring("x y z\n")` here as it is there.
-
-### The spacing was one of five
-
-Auditing the whole of `walkPrint` against cg12's dispatch — the step §3 calls
-comparing against the host toolchain — found four more differences, all
-wrong-answer bugs in valid Go and all fixed together:
-
-| Operand | cg12 printed | host prints |
-| --- | --- | --- |
-| `[]byte{1,2,3}` | `54422416784368` | `[3/3]0x...` |
-| `any(nil)` | `0` | `(0x0,0x0)` |
-| `any(42)` | `54422416784416` | `(0x963e0,0xacbf8)` |
-| `complex(1,2)` | `54422416784632` | `(1+2i)` |
-| `complex64` | `4647714816524288000` | `(3.5+4.5i)` |
-
-and the fifth, which is not about an operand at all:
-
-**A print statement took no lock.** `runtime/print.go` states the requirement
-outright — *"The compiler emits calls to printlock and printunlock around the
-multiple calls that implement a single Go print or println statement"* — and
-`runtime.minhexdigits` is documented as protected by it. cg12 emitted neither,
-so one statement was a run of unsynchronized `write(2, …)` calls. Eight
-goroutines at `GOMAXPROCS=4` printing a thirteen-operand line corrupted
-**3092, 3035 and 3002 of 3200 lines** in three runs; the host corrupts none.
-Every runtime diagnostic goes through these same routines, so every traceback
-and every `GODEBUG` line was exposed to it.
-
-Two smaller items came with them. **Operands are now evaluated before the lock**,
-as the host does, so an operand whose evaluation prints no longer interleaves
-into the middle of the statement printing it. And **`runtime.quoted`**
-(`type quoted string`) routes to `printquoted`: `traceback.go:1294` prints
-goroutine labels through it, and before this a label containing a quote or a
-newline went out raw. `runtime_goroutineheader` calls `printstring` 21 times and
-`printquoted` never on `main`; it calls `printquoted` twice here.
-
-Pointer-shaped operands keep going to `printhex` rather than the host's
-`printpointer`/`printuintptr`, which is not a difference: both of those are
-one-line wrappers that call `printhex` with the same value.
-
-### Two complex64 defects it exposed
-
-Routing a `complex64` operand to `runtime.printcomplex64` segfaulted, because
-that routine converts to `complex128` internally. Both causes were pre-existing
-and independent of print; both are fixed here, because otherwise this change
-would have turned a silently-wrong `println(c64)` into a crash.
-
-- **`real()` and `imag()` of a `complex64` returned garbage, the same garbage for
-  both halves.** A `complex64` is two `float32` halves packed into one 64-bit
-  integer, so reading a half is a bitwise reinterpretation between a
-  general-purpose and a floating-point register — `ir.OCast`, which lowers to
-  `fmov`. cg12 used `ir.OCopy`, which re-types only within one register file.
-  `var b complex64 = complex(3.5, 4.5); println(real(b), imag(b))` gave
-  `-2.8673504e+25 -2.8673504e+25`. Every `complex64` arithmetic operation was
-  wrong with it, since they all go through `complex64Parts`/`packComplex64`.
-
-- **`gen.convert` had no complex case at all**, so `complex128(b)` `Copy`d the
-  packed pair into a pointer and the program took SIGSEGV at
-  `0x4090000040600000` — the packed `(4.5, 3.5)` bit pattern used as an address.
-
-### What it is verified against
-
-Per §15, a green matrix is weak evidence, so the evidence is the host comparison.
-
-- **43 of 46 corpus programs that print now produce byte-identical output to the
-  host Go toolchain, against 34 on `main`.** Six programs
-  (`allocs_per_run.go`, `bytes_grow_allocs.go`, `bytes_grow_capacity.go`,
-  `bytes_replace_allocs.go`, `reflect_methods.go`,
-  `runtime_defer_capture_allocs.go`) differed from the host only by the missing
-  separator and now match. The three that still differ are
-  `bytes_grow_compare.go`, `bytes_grow_stats.go` and `gomaxprocs_memstats.go`,
-  which print allocation and GC statistics — §5.10 already records the first two
-  as varying with scheduling.
-
-- **Three reducers, each passing under the host toolchain, passing here, and
-  failing on `main`.** `print-builtin/operand-separation` asserts the separator
-  rule and the whole operand table byte for byte, plus the address-shaped
-  operands by shape, the nil interface, `print` versus `println`, the degenerate
-  operand counts, and the evaluation-order rule; on `main` it fails with
-  `println wrote "a1true\n", want "a 1 true\n"`.
-  `print-builtin/statement-atomicity` is the concurrency check.
-  `core-types/complex64-parts` pins `real`/`imag`, arithmetic, comparison and
-  both conversions, with `complex128` as the control.
-
-- **A control build fails the atomicity reducer for the right reason.** With the
-  separators kept and only the `printlock`/`printunlock` emission removed, it
-  fails with `two print statements interleaved inside one line: worker 0 round 3
-  tail 1 2 worker 37  round 40  tail 51  62  73  84`. The check is not
-  decorative.
-
-- **Nothing the print path emits allocates, except what already did.**
-  Disassembling a linked image and looking for `runtime.newobject` inside every
-  print routine: `printlock`, `printunlock`, `printsp`, `printnl`, `printbool`,
-  `printint`, `printuint`, `printhex`, `printhexopts`, `printstring`,
-  `printslice`, `printeface`, `printiface`, `printquoted` and `printpointer` are
-  all allocation-free. `printfloat32`, `printfloat64`, `printcomplex64` and
-  `printcomplex128` are not, which is the §5.10 item above and pre-existing for
-  the two float ones. `printquoted`'s `[]byte("\"")` conversions stay on the
-  stack: cg12 passes a real stack `tmpBuf` to `stringtoslicebyte`, so
-  `rawbyteslice` is not reached.
-
-- **The nosplit audit moved 287 → 359 direct split callees, and every added edge
-  is `printlock` (27), `printunlock` (27) or `printnl` (18).** No edge was
-  removed and nothing unrelated appeared. Upstream has the same shape: its
-  `printlock` is not `nosplit` either, and every `nosplit` function that prints
-  calls it.
-
-- `cg12checkwb=1`, `cg12checkwb=2`, `GOC_DEBUG_WRITEBARRIER=1`,
-  `gccheckmark=1,invalidptr=1,clobberfree=1`, `gcshrinkstackoff=1`,
-  `checkfinalizers=1` and `gctrace=1` are all clean on a print-heavy
-  allocate-and-collect program and on both new reducers.
-
-- A panic traceback reads exactly as it did before, frame for frame.
-
-- Determinism is unchanged: `scripts/determinism-check.sh` gives 4 of 5 sample
-  programs byte-identical cold against warm, twice, with
-  `runtime_defer_capture_allocs.go` the known §5.10 residue.
-
-### What is not done
-
-- The four allocating print routines are recorded in §5.10 rather than fixed;
-  the fix is an escape-analysis feature, not a print-lowering change.
-
-- `printquoted` is exercised through a `//go:linkname` probe, which produces
-  `"with \"quote\"\nand\ttab and é and \U0001f600"`, and by the disassembly
-  showing `goroutineheader` calling it. It is *not* exercised through a real
-  traceback carrying goroutine labels, because `runtime/pprof.Do` does not
-  type-check under goc — `context.Context does not implement context.Context` —
-  which is a pre-existing, unrelated defect this did not chase.
-
-- The non-`runtimeAllocation` `printf` path in `builtinPrint` gets the same
-  operand sequence and therefore the same separators, but goc always compiles
-  with `runtimeAllocation` on, so nothing in this repository's test suites
-  executes it. Only its construction is shared, not its verification.

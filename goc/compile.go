@@ -4589,13 +4589,21 @@ func (g *gen) store(v, addr ir.Ref, t types.Type) {
 			return
 		}
 	}
-	if sub, ok := subOf(t); ok {
-		g.cur.StoreSub(sub, v, addr)
-		return
-	}
+	// The barrier decision comes before the sub-width store, not after it.
+	// subOf reports a width for unsafe.Pointer as well as for the integer
+	// kinds, and unsafe.Pointer is the one type it accepts that scalar
+	// classifies as a pointer, so taking the sub-store path first silently
+	// dropped the write barrier from every unsafe.Pointer store -- including
+	// runtime.gostartcall's `buf.ctxt = ctxt`, which publishes a goroutine's
+	// funcval into a g the collector may already have blackened
+	// (RUNTIME_PLAN.md 5.12).
 	class, _ := scalar(t)
 	if g.runtimeAllocation && !g.noWriteBarrier && class == ir.ClsP && !g.isStackAddress(addr) && !isNotInHeapPointer(t) {
 		g.cur.CallVoid(g.fn.Sym("goc_storep", 0), addr, v)
+		return
+	}
+	if sub, ok := subOf(t); ok {
+		g.cur.StoreSub(sub, v, addr)
 		return
 	}
 	g.cur.Store(v, addr)
@@ -7093,6 +7101,15 @@ func (g *gen) multiValueAssignment(statement *ast.AssignStmt, call *ast.CallExpr
 		return
 	}
 
+	// The destinations are resolved before the call's arguments, so the
+	// statement follows Go's assignment order and so a map element on the left
+	// is written through the map runtime rather than as though it were an index
+	// into a slice.
+	targets := make([]assignmentTarget, len(statement.Lhs))
+	for i, lhs := range statement.Lhs {
+		targets[i] = g.prepareAssignmentTarget(lhs, statement.Tok == token.DEFINE)
+	}
+
 	arguments := make([]ir.Ref, 0, len(call.Args)+signature.Results().Len())
 	if receiver != ir.R {
 		arguments = append(arguments, receiver)
@@ -7127,8 +7144,8 @@ func (g *gen) multiValueAssignment(statement *ast.AssignStmt, call *ast.CallExpr
 	}
 	values[0] = g.callWithSignature(resultClass, callee, arguments, callSignature, receiverType)
 
-	for i, lhs := range statement.Lhs {
-		if identifier, ok := lhs.(*ast.Ident); ok && identifier.Name == "_" {
+	for i, target := range targets {
+		if target.kind == assignmentTargetDiscarded {
 			continue
 		}
 		resultType := signature.Results().At(i).Type()
@@ -7136,48 +7153,7 @@ func (g *gen) multiValueAssignment(statement *ast.AssignStmt, call *ast.CallExpr
 		if i > 0 && (!isInlineAggregate(resultType) || (g.runtimeAllocation && isSliceType(resultType))) {
 			value = g.load(value, resultType)
 		}
-
-		var slot ir.Ref
-		targetType := g.typeAndValue(lhs).Type
-		localIdentifier := false
-		if identifier, ok := lhs.(*ast.Ident); ok {
-			variable := g.info.Uses[identifier]
-			if statement.Tok == token.DEFINE && variable == nil {
-				variable = g.info.Defs[identifier]
-			}
-			if variable != nil {
-				targetType = g.objectType(variable)
-			}
-			var exists bool
-			slot, exists = g.addr(variable)
-			if !exists {
-				slot = g.variableStorage(variable, targetType)
-			}
-			_, global := g.globals[variable]
-			localIdentifier = !global && !g.directValues[variable]
-		} else {
-			slot = g.lvalue(lhs)
-		}
-		if targetType == nil {
-			targetType = resultType
-		}
-		if isInterfaceValue(targetType) && !types.Identical(resultType, targetType) {
-			value = g.adaptValueToInterface(value, resultType, targetType, ir.R, call)
-		}
-		value = g.coerce(value, targetType)
-		if localIdentifier && isMemoryValue(targetType) {
-			g.assignLocal(value, slot, targetType)
-		} else if localIdentifier && isInterfaceValue(targetType) {
-			g.store(value, slot, targetType)
-		} else if localIdentifier && isDescriptorValue(targetType) {
-			g.store(value, slot, targetType)
-		} else if g.runtimeAllocation && isSliceType(targetType) {
-			g.store(value, slot, targetType)
-		} else if isInlineAggregate(targetType) || isInterfaceValue(targetType) {
-			g.storeInlineValue(value, slot, targetType)
-		} else {
-			g.store(value, slot, targetType)
-		}
+		g.storeAssignmentTarget(target, value, resultType)
 	}
 }
 
@@ -7373,46 +7349,198 @@ func (g *gen) interfaceImplementations(target *types.Interface) []types.Type {
 	return result
 }
 
-func (g *gen) assignResult(lhs ast.Expr, assignmentToken token.Token, value ir.Ref, valueType types.Type) {
-	if identifier, ok := lhs.(*ast.Ident); ok && identifier.Name == "_" {
+// assignmentTargetKind classifies where an assignment stores its value.
+type assignmentTargetKind int
+
+const (
+	// assignmentTargetDiscarded is the blank identifier: the value is produced
+	// and thrown away.
+	assignmentTargetDiscarded assignmentTargetKind = iota
+	// assignmentTargetVariable names a variable this function holds storage for,
+	// which includes the package-level variables it can reach by symbol.
+	assignmentTargetVariable
+	// assignmentTargetAddress is any other assignable operand -- a struct field,
+	// an index into an array, slice or pointer, or a pointer indirection --
+	// whose storage holds the value itself.
+	assignmentTargetAddress
+	// assignmentTargetMapElement is an index into a map, which is written
+	// through the map runtime rather than by storing to an address.
+	assignmentTargetMapElement
+)
+
+// assignmentTarget is one prepared destination of an assignment. Preparing a
+// target evaluates the operands its address depends on without storing
+// anything, because Go assigns in two phases: every left operand's index
+// expressions and pointer indirections are evaluated first, and only then are
+// the values stored, left to right. `k, a[k] = 1, 2` therefore indexes a with
+// the old k, and so does `for k, m[k] = range s` on every iteration.
+type assignmentTarget struct {
+	kind      assignmentTargetKind
+	object    types.Object
+	valueType types.Type
+	source    ast.Expr
+
+	// slot addresses the destination of every kind except a map element.
+	slot ir.Ref
+	// local marks an ordinary frame slot, which is one level indirect for the
+	// aggregate and descriptor variables the frontend stores by reference.
+	local bool
+	// inline marks storage that holds an aggregate or interface value itself
+	// rather than a pointer to it.
+	inline bool
+
+	mapping ir.Ref
+	mapKey  ir.Ref
+	mapType *types.Map
+}
+
+// prepareAssignmentTarget resolves one assignment destination and evaluates the
+// operands its address depends on. declare reports whether the enclosing
+// statement is a short variable declaration, whose left operands may name
+// variables that statement itself defines.
+func (g *gen) prepareAssignmentTarget(destination ast.Expr, declare bool) assignmentTarget {
+	for {
+		parenthesized, ok := destination.(*ast.ParenExpr)
+		if !ok {
+			break
+		}
+		destination = parenthesized.X
+	}
+	if identifier, ok := destination.(*ast.Ident); ok && identifier.Name == "_" {
+		return assignmentTarget{kind: assignmentTargetDiscarded, source: destination}
+	}
+	if index, ok := destination.(*ast.IndexExpr); ok {
+		if mapType, isMap := g.typeAndValue(index.X).Type.Underlying().(*types.Map); isMap {
+			return assignmentTarget{
+				kind:      assignmentTargetMapElement,
+				valueType: mapType.Elem(),
+				source:    destination,
+				mapping:   g.retainedAddress(g.expr(index.X)),
+				mapKey:    g.retainedAddress(g.assignmentValue(index.Index, mapType.Key())),
+				mapType:   mapType,
+			}
+		}
+	}
+	identifier, isIdentifier := destination.(*ast.Ident)
+	if !isIdentifier {
+		return assignmentTarget{
+			kind:      assignmentTargetAddress,
+			valueType: g.typeAndValue(destination).Type,
+			source:    destination,
+			slot:      g.retainedAddress(g.lvalue(destination)),
+			inline:    true,
+		}
+	}
+
+	object := g.info.Uses[identifier]
+	if declare && object == nil {
+		object = g.info.Defs[identifier]
+	}
+	valueType := g.objectType(object)
+	slot, exists := g.addr(object)
+	if !exists {
+		slot = g.variableStorage(object, valueType)
+	}
+	_, global := g.globals[object]
+	target := assignmentTarget{
+		kind:      assignmentTargetVariable,
+		object:    object,
+		valueType: valueType,
+		source:    destination,
+		slot:      slot,
+		local:     !global && !g.directValues[object],
+	}
+	target.inline = global && (isMemoryValue(valueType) || isDescriptorValue(valueType) || isInterfaceValue(valueType))
+	if g.directValues[object] && (isInlineAggregate(valueType) || isInterfaceValue(valueType)) {
+		target.inline = true
+	}
+	// A package-level string or slice symbol holds the address of its header, so
+	// the assignment updates the header the symbol already points at.
+	if global && isDescriptorValue(valueType) && !(g.runtimeAllocation && isSliceType(valueType)) {
+		target.slot = g.cur.Load(ir.ClsP, target.slot)
+	}
+	return target
+}
+
+// retainedAddress marks a pointer a prepared destination has to survive with
+// until the statement stores through it.
+//
+// Preparing a destination happens before the right-hand side runs, so the
+// address outlives every call the right-hand side makes. Pointer arithmetic --
+// how a field, index or indirection address is built -- yields a pointer-width
+// value that is not a managed reference, so without this the frame's stack map
+// omits it, copystack leaves it addressing the abandoned old stack, and the
+// statement's store lands in freed memory with no fault of any kind. Only a
+// pointer-classed temporary is marked; a scalar map key is left alone, because
+// telling the collector an integer is a pointer is the opposite mistake.
+func (g *gen) retainedAddress(reference ir.Ref) ir.Ref {
+	if reference.Kind != ir.RefTemp || !g.fn.ClassOf(reference).IsPtr() {
+		return reference
+	}
+	return g.fn.MarkGCRef(reference)
+}
+
+// assignmentTargetValue reads a prepared destination, which an assignment
+// operator such as `+=` needs before it can store the combined value.
+func (g *gen) assignmentTargetValue(target assignmentTarget) ir.Ref {
+	if target.kind == assignmentTargetMapElement {
+		value, _ := g.mapLookupValue(target.mapping, target.mapKey, target.mapType, target.source)
+		return value
+	}
+	if target.inline && (isInlineAggregate(target.valueType) || isInterfaceValue(target.valueType)) &&
+		!(g.runtimeAllocation && isSliceType(target.valueType)) {
+		return target.slot
+	}
+	return g.load(target.slot, target.valueType)
+}
+
+// storeAssignmentTarget performs one assignment into a prepared destination.
+// sourceType is the type of value as it was computed, or nil when the caller
+// has already produced it in the destination's representation.
+func (g *gen) storeAssignmentTarget(target assignmentTarget, value ir.Ref, sourceType types.Type) {
+	if target.kind == assignmentTargetDiscarded {
 		return
 	}
-	var slot ir.Ref
-	localIdentifier := false
-	if identifier, ok := lhs.(*ast.Ident); ok {
-		variable := g.info.Uses[identifier]
-		if assignmentToken == token.DEFINE && variable == nil {
-			variable = g.info.Defs[identifier]
-		}
-		var exists bool
-		slot, exists = g.addr(variable)
-		if !exists {
-			slot = g.variableStorage(variable, valueType)
-		}
-		_, global := g.globals[variable]
-		localIdentifier = !global && !g.directValues[variable]
+	value = g.adaptAssignedValue(value, sourceType, target.valueType, target.source)
+	if target.kind == assignmentTargetMapElement {
+		g.mapAssignValue(target.mapping, target.mapKey, value, target.mapType, target.source)
+		return
+	}
+	if target.local && isDescriptorValue(target.valueType) {
+		value = g.copyInlineValue(value, target.valueType)
+	}
+	if target.local && isMemoryValue(target.valueType) {
+		g.assignLocal(value, target.slot, target.valueType)
+		g.trackKeepAliveAssignment(target.object, value, target.valueType)
+		return
+	}
+	if target.inline && (isInlineAggregate(target.valueType) || isInterfaceValue(target.valueType)) {
+		g.storeInlineValue(value, target.slot, target.valueType)
 	} else {
-		slot = g.lvalue(lhs)
+		g.store(value, target.slot, target.valueType)
 	}
-	value = g.coerce(value, valueType)
-	if localIdentifier && isMemoryValue(valueType) {
-		g.assignLocal(value, slot, valueType)
-	} else if localIdentifier && isInterfaceValue(valueType) {
-		g.store(value, slot, valueType)
-	} else if localIdentifier && isDescriptorValue(valueType) {
-		g.store(value, slot, valueType)
-	} else if isInlineAggregate(valueType) || isInterfaceValue(valueType) {
-		g.storeInlineValue(value, slot, valueType)
-	} else {
-		g.store(value, slot, valueType)
+	g.trackKeepAliveAssignment(target.object, value, target.valueType)
+}
+
+// adaptAssignedValue converts a computed value into the representation its
+// destination expects. Assigning a concrete value to an interface destination
+// boxes it; everything else needs at most the narrow-integer coercion an
+// ordinary assignment performs. Shared generic code is left alone because an
+// unconstrained type parameter is already one pointer-sized value there.
+func (g *gen) adaptAssignedValue(value ir.Ref, sourceType, targetType types.Type, source ast.Expr) ir.Ref {
+	if targetType == nil {
+		return value
 	}
-	if identifier, ok := lhs.(*ast.Ident); ok {
-		variable := g.info.Uses[identifier]
-		if assignmentToken == token.DEFINE && variable == nil {
-			variable = g.info.Defs[identifier]
-		}
-		g.trackKeepAliveAssignment(variable, value, valueType)
+	if sourceType != nil && !types.Identical(sourceType, targetType) &&
+		isInterfaceValue(targetType) && !isSharedTypeParameter(sourceType) {
+		return g.adaptValueToInterface(value, sourceType, targetType, ir.R, source)
 	}
+	return g.coerce(value, targetType)
+}
+
+func (g *gen) assignResult(lhs ast.Expr, assignmentToken token.Token, value ir.Ref, valueType types.Type) {
+	target := g.prepareAssignmentTarget(lhs, assignmentToken == token.DEFINE)
+	g.storeAssignmentTarget(target, value, valueType)
 }
 
 func (g *gen) stmt(s ast.Stmt) {
@@ -7459,14 +7587,6 @@ func (g *gen) stmt(s ast.Stmt) {
 			}
 		}
 	case *ast.AssignStmt:
-		if len(n.Lhs) == 1 && len(n.Rhs) == 1 {
-			if index, ok := n.Lhs[0].(*ast.IndexExpr); ok {
-				if _, isMap := g.typeAndValue(index.X).Type.Underlying().(*types.Map); isMap {
-					g.mapAssign(index, n.Rhs[0])
-					return
-				}
-			}
-		}
 		if len(n.Rhs) == 1 && len(n.Lhs) > 1 {
 			if receive, ok := n.Rhs[0].(*ast.UnaryExpr); ok && receive.Op == token.ARROW {
 				g.channelReceiveAssignment(n, receive)
@@ -7490,19 +7610,18 @@ func (g *gen) stmt(s ast.Stmt) {
 			g.multiValueAssignment(n, call)
 			return
 		}
+		// Every destination is resolved before any value is produced or stored, so
+		// the statement follows Go's two-phase assignment order: `k, a[k] = 1, 2`
+		// indexes a with the k the statement is about to overwrite.
+		targets := make([]assignmentTarget, len(n.Lhs))
+		for i, lhs := range n.Lhs {
+			targets[i] = g.prepareAssignmentTarget(lhs, n.Tok == token.DEFINE)
+		}
 		vals := make([]ir.Ref, len(n.Rhs))
 		for i, e := range n.Rhs {
-			targetType := g.typeAndValue(n.Lhs[i]).Type
+			targetType := targets[i].valueType
 			if targetType == nil {
-				if identifier, ok := n.Lhs[i].(*ast.Ident); ok {
-					object := g.info.Uses[identifier]
-					if object == nil {
-						object = g.info.Defs[identifier]
-					}
-					if object != nil {
-						targetType = g.objectType(object)
-					}
-				}
+				targetType = g.typeAndValue(n.Lhs[i]).Type
 			}
 			if targetType == nil {
 				targetType = g.typeAndValue(e).Type
@@ -7512,63 +7631,16 @@ func (g *gen) stmt(s ast.Stmt) {
 				vals[i] = g.snapshotAssignmentValue(vals[i], targetType)
 			}
 		}
-		for i, lhs := range n.Lhs {
-			if id, ok := lhs.(*ast.Ident); ok && id.Name == "_" {
+		for i, target := range targets {
+			if target.kind == assignmentTargetDiscarded {
 				continue
 			}
-			var slot ir.Ref
-			var typ types.Type
-			var obj types.Object
-			destinationIsInline := false
-			localIdentifier := false
-			if id, ok := lhs.(*ast.Ident); ok {
-				obj = g.info.Uses[id]
-				if n.Tok == token.DEFINE && obj == nil {
-					obj = g.info.Defs[id]
-				}
-				typ = g.objectType(obj)
-				var exists bool
-				slot, exists = g.addr(obj)
-				if !exists {
-					slot = g.variableStorage(obj, typ)
-				}
-				_, global := g.globals[obj]
-				destinationIsInline = global && (isMemoryValue(typ) || isDescriptorValue(typ) || isInterfaceValue(typ))
-				if g.directValues[obj] && (isInlineAggregate(typ) || isInterfaceValue(typ)) {
-					destinationIsInline = true
-				}
-				if global && isDescriptorValue(typ) && !(g.runtimeAllocation && isSliceType(typ)) {
-					slot = g.cur.Load(ir.ClsP, slot)
-				}
-				localIdentifier = !global && !g.directValues[obj]
-			} else {
-				typ = g.typeAndValue(lhs).Type
-				slot = g.lvalue(lhs)
-				destinationIsInline = true
-			}
-			v := vals[i]
+			value := vals[i]
 			if n.Tok != token.ASSIGN && n.Tok != token.DEFINE {
-				old := g.load(slot, typ)
-				if destinationIsInline && (isInlineAggregate(typ) || isInterfaceValue(typ)) && !(g.runtimeAllocation && isSliceType(typ)) {
-					old = slot
-				}
-				v = g.binary(n.Tok-token.ADD_ASSIGN+token.ADD, old, v, typ, n)
+				old := g.assignmentTargetValue(target)
+				value = g.binary(n.Tok-token.ADD_ASSIGN+token.ADD, old, value, target.valueType, n)
 			}
-			v = g.coerce(v, typ)
-			if localIdentifier && isDescriptorValue(typ) {
-				v = g.copyInlineValue(v, typ)
-			}
-			if localIdentifier && isMemoryValue(typ) {
-				g.assignLocal(v, slot, typ)
-				g.trackKeepAliveAssignment(obj, v, typ)
-				continue
-			}
-			if destinationIsInline && (isInlineAggregate(typ) || isInterfaceValue(typ)) {
-				g.storeInlineValue(v, slot, typ)
-			} else {
-				g.store(v, slot, typ)
-			}
-			g.trackKeepAliveAssignment(obj, v, typ)
+			g.storeAssignmentTarget(target, value, nil)
 		}
 	case *ast.IncDecStmt:
 		targetType := g.typeAndValue(n.X).Type
@@ -8065,19 +8137,77 @@ func (g *gen) addDeferRecoveryEdges(recovery *ir.Block) {
 	}
 }
 
-// rangeVariableObject resolves one side of a `range` clause to the variable it
-// names, and reports whether the clause declares that variable. Only a declared
-// iteration variable is per-iteration under Go 1.22 semantics; `for k, v = range
-// x` assigns to variables that already exist and keeps their single storage.
-func (g *gen) rangeVariableObject(statement *ast.RangeStmt, expression ast.Expr) (types.Object, bool) {
+// declareRangeVariable gives one side of a `range` clause its storage before
+// the loop starts and reports the variable it names, together with whether the
+// clause declares that variable.
+//
+// Only a declared iteration variable is per-iteration under Go 1.22 semantics;
+// `for k, v = range x` assigns to operands that already exist and keeps their
+// single storage. Such an operand need not be an identifier at all -- Go allows
+// any assignable expression there -- and even when it is one it may name a
+// package-level variable, which already has storage. Handing either of those to
+// variableStorage would give it a fresh frame slot and silently discard every
+// iteration's assignment, so nothing is allocated unless the clause really does
+// declare a new variable or the variable has no storage yet.
+func (g *gen) declareRangeVariable(statement *ast.RangeStmt, expression ast.Expr) (types.Object, bool) {
 	identifier, ok := expression.(*ast.Ident)
 	if !ok || identifier.Name == "_" {
 		return nil, false
 	}
 	if declared := g.info.Defs[identifier]; declared != nil {
+		g.variableStorage(declared, g.objectType(declared))
 		return declared, statement.Tok == token.DEFINE
 	}
-	return g.info.Uses[identifier], false
+	object := g.info.Uses[identifier]
+	if object == nil {
+		return nil, false
+	}
+	if _, exists := g.addr(object); !exists {
+		g.variableStorage(object, g.objectType(object))
+	}
+	return object, false
+}
+
+// rangeTargets prepares the clause's key and element destinations for the
+// iteration that is about to run. A declared variable that must be
+// per-iteration gets its own storage first; every other form has its address
+// operands evaluated here, before either value is stored, which is the order Go
+// requires and what makes `for k, m[k] = range s` index m with the previous
+// iteration's key.
+func (g *gen) rangeTargets(statement *ast.RangeStmt, key, value types.Object) (assignmentTarget, assignmentTarget) {
+	declare := statement.Tok == token.DEFINE
+	if declare && g.perIterationVariable(key) {
+		g.startIterationVariable(key, g.objectType(key))
+	}
+	if declare && g.perIterationVariable(value) {
+		g.startIterationVariable(value, g.objectType(value))
+	}
+	var keyTarget, valueTarget assignmentTarget
+	if statement.Key != nil {
+		keyTarget = g.prepareAssignmentTarget(statement.Key, declare)
+	}
+	if statement.Value != nil {
+		valueTarget = g.prepareAssignmentTarget(statement.Value, declare)
+	}
+	return keyTarget, valueTarget
+}
+
+// integerRangeKeyType is the type of the values `for i = range n` produces. The
+// specification gives them the type of the range expression; an untyped
+// constant contributes its default type instead.
+func integerRangeKeyType(rangeType types.Type) types.Type {
+	if basic, ok := rangeType.Underlying().(*types.Basic); ok && basic.Info()&types.IsUntyped != 0 {
+		return types.Typ[types.Int]
+	}
+	return rangeType
+}
+
+// rangeTargetWritesMemory reports whether storing into target can change memory
+// the clause has not read yet. When the key destination is one of those, the
+// element has to be read before the key is stored, because both may address the
+// range expression itself.
+func rangeTargetWritesMemory(target assignmentTarget) bool {
+	return target.kind == assignmentTargetAddress || target.kind == assignmentTargetMapElement
 }
 
 func (g *gen) rangeStmt(statement *ast.RangeStmt, label string) {
@@ -8103,51 +8233,50 @@ func (g *gen) rangeStmt(statement *ast.RangeStmt, label string) {
 	indexSlot := g.alloc(indexType)
 	g.store(g.fn.Long(0), indexSlot, indexType)
 
-	keyObject, keyDeclared := g.rangeVariableObject(statement, statement.Key)
-	var keyType types.Type = indexType
-	var keySlot ir.Ref
-	if keyObject != nil {
-		keyType = g.objectType(keyObject)
-		keySlot = g.variableStorage(keyObject, keyType)
-	}
-	perIterationKey := keyDeclared && g.perIterationVariable(keyObject)
+	keyObject, _ := g.declareRangeVariable(statement, statement.Key)
 
+	// keyValueType and elementType describe the values the clause produces, which
+	// are properties of the range expression rather than of the destinations. A
+	// destination may have a different type -- `for _, x = range []int{1}` with x
+	// an interface is ordinary Go -- and the element's size and representation
+	// still have to come from the range expression.
+	var keyValueType types.Type = indexType
+	var elementType types.Type
 	var upper ir.Ref
 	var rangeData ir.Ref
 	var stringDescriptor ir.Ref
 	stringRange := false
-	if _, ok := rangeType.Underlying().(*types.Slice); ok {
+	if slice, ok := rangeType.Underlying().(*types.Slice); ok {
 		sliceValue := g.expr(statement.X)
 		rangeData, upper, _ = g.sliceParts(sliceValue)
+		elementType = slice.Elem()
 	} else if array, ok := rangeType.Underlying().(*types.Array); ok {
 		rangeData = g.expr(statement.X)
 		upper = g.fn.Long(array.Len())
+		elementType = array.Elem()
 	} else if pointer, ok := rangeType.Underlying().(*types.Pointer); ok {
 		if array, ok := pointer.Elem().Underlying().(*types.Array); ok {
 			rangeData = g.expr(statement.X)
 			upper = g.fn.Long(array.Len())
+			elementType = array.Elem()
 		} else {
 			upper = g.expr(statement.X)
 			upper = g.convert(upper, rangeType, indexType)
+			keyValueType = integerRangeKeyType(rangeType)
 		}
 	} else if basic, ok := rangeType.Underlying().(*types.Basic); ok && (basic.Kind() == types.String || basic.Kind() == types.UntypedString) {
 		stringRange = true
 		stringDescriptor = g.expr(statement.X)
 		rangeData = g.cur.Load(ir.ClsP, stringDescriptor)
 		upper = g.cur.Load(ir.ClsL, g.offset(stringDescriptor, 8))
+		elementType = types.Typ[types.Rune]
 	} else {
 		upper = g.expr(statement.X)
 		upper = g.convert(upper, rangeType, indexType)
+		keyValueType = integerRangeKeyType(rangeType)
 	}
 
-	valueObject, valueDeclared := g.rangeVariableObject(statement, statement.Value)
-	var valueSlot ir.Ref
-	var valueType types.Type
-	if valueObject != nil {
-		valueType = g.objectType(valueObject)
-		valueSlot = g.variableStorage(valueObject, valueType)
-	}
-	perIterationValue := valueDeclared && g.perIterationVariable(valueObject)
+	valueObject, _ := g.declareRangeVariable(statement, statement.Value)
 	var nextStringIndex ir.Ref
 	if stringRange {
 		nextStringIndex = g.alloc(indexType)
@@ -8168,16 +8297,9 @@ func (g *gen) rangeStmt(statement *ast.RangeStmt, label string) {
 	g.continues = append(g.continues, post)
 	g.setLabeledControl(label, done, post)
 	g.cur = body
-	if perIterationKey {
-		keySlot = g.startIterationVariable(keyObject, keyType)
-	}
-	if perIterationValue {
-		valueSlot = g.startIterationVariable(valueObject, valueType)
-	}
-	if keySlot != ir.R {
-		g.assignLocal(index, keySlot, keyType)
-	}
+	keyTarget, valueTarget := g.rangeTargets(statement, keyObject, valueObject)
 	if stringRange {
+		g.storeAssignmentTarget(keyTarget, index, keyValueType)
 		byteAddress := g.cur.Add(ir.ClsP, rangeData, index)
 		firstByte := g.cur.LoadSub(ir.ClsW, ir.SubUB, byteAddress)
 		ascii := g.block("rangeascii")
@@ -8217,20 +8339,30 @@ func (g *gen) rangeStmt(statement *ast.RangeStmt, label string) {
 			ir.PhiEdge{From: decode, Val: decodedNext},
 		)
 		g.store(nextIndex, nextStringIndex, indexType)
-		if valueSlot != ir.R {
-			g.assignLocal(runeValue, valueSlot, valueType)
+		g.storeAssignmentTarget(valueTarget, runeValue, elementType)
+	} else {
+		var element ir.Ref
+		assignsElement := valueTarget.kind != assignmentTargetDiscarded
+		if assignsElement {
+			elementOffset := index
+			if size := typeSize(elementType); size != 1 {
+				elementOffset = g.cur.Mul(ir.ClsL, index, g.fn.Long(size))
+			}
+			address := g.cur.Add(ir.ClsP, rangeData, elementOffset)
+			element = address
+			if (!isInlineAggregate(elementType) && !isInterfaceValue(elementType)) || (g.runtimeAllocation && isSliceType(elementType)) {
+				element = g.load(address, elementType)
+			}
+			if rangeTargetWritesMemory(keyTarget) {
+				// The key destination may address the range expression itself, so
+				// the element is read before the key store can change it.
+				element = g.snapshotAssignmentValue(element, elementType)
+			}
 		}
-	} else if valueSlot != ir.R {
-		elementOffset := index
-		if size := typeSize(valueType); size != 1 {
-			elementOffset = g.cur.Mul(ir.ClsL, index, g.fn.Long(size))
+		g.storeAssignmentTarget(keyTarget, index, keyValueType)
+		if assignsElement {
+			g.storeAssignmentTarget(valueTarget, element, elementType)
 		}
-		address := g.cur.Add(ir.ClsP, rangeData, elementOffset)
-		value := address
-		if (!isInlineAggregate(valueType) && !isInterfaceValue(valueType)) || (g.runtimeAllocation && isSliceType(valueType)) {
-			value = g.load(address, valueType)
-		}
-		g.assignLocal(value, valueSlot, valueType)
 	}
 	g.stmts(statement.Body.List)
 	if g.live() {
@@ -8265,12 +8397,7 @@ func (g *gen) channelRangeStmt(statement *ast.RangeStmt, label string, channelTy
 		g.markStackPointerWord(valueAddress, int(offset))
 	})
 
-	valueObject, valueDeclared := g.rangeVariableObject(statement, statement.Key)
-	var valueSlot ir.Ref
-	if valueObject != nil {
-		valueSlot = g.variableStorage(valueObject, elementType)
-	}
-	perIterationValue := valueDeclared && g.perIterationVariable(valueObject)
+	valueObject, _ := g.declareRangeVariable(statement, statement.Key)
 
 	test := g.block("rangetest")
 	body := g.block("rangebody")
@@ -8287,12 +8414,10 @@ func (g *gen) channelRangeStmt(statement *ast.RangeStmt, label string, channelTy
 	g.setLabeledControl(label, done, post)
 
 	g.cur = body
-	if perIterationValue {
-		valueSlot = g.startIterationVariable(valueObject, elementType)
-	}
-	if valueSlot != ir.R {
+	valueTarget, _ := g.rangeTargets(statement, valueObject, nil)
+	if valueTarget.kind != assignmentTargetDiscarded {
 		value := g.channelReceiveValue(valueAddress, elementType)
-		g.assignLocal(value, valueSlot, elementType)
+		g.storeAssignmentTarget(valueTarget, value, elementType)
 	}
 	g.stmts(statement.Body.List)
 	if g.live() {
@@ -8361,11 +8486,22 @@ func (g *gen) iteratorRangeStmt(statement *ast.RangeStmt, label string, iterator
 		return true
 	})
 	if statement.Tok == token.ASSIGN {
-		if identifier, ok := statement.Key.(*ast.Ident); ok {
-			addCapture(g.info.Uses[identifier])
+		// An assigning clause writes into the enclosing frame from inside the
+		// yield function, and its destinations are not restricted to identifiers:
+		// `for b.i, dst[j] = range seq` has to reach b, dst and j as well.
+		captureTargetIdentifiers := func(destination ast.Expr) {
+			ast.Inspect(destination, func(node ast.Node) bool {
+				if identifier, ok := node.(*ast.Ident); ok {
+					addCapture(g.info.Uses[identifier])
+				}
+				return true
+			})
 		}
-		if identifier, ok := statement.Value.(*ast.Ident); ok {
-			addCapture(g.info.Uses[identifier])
+		if statement.Key != nil {
+			captureTargetIdentifiers(statement.Key)
+		}
+		if statement.Value != nil {
+			captureTargetIdentifiers(statement.Value)
 		}
 	}
 
@@ -8433,28 +8569,25 @@ func (g *gen) iteratorRangeStmt(statement *ast.RangeStmt, label string, iterator
 		captureAddress := child.cur.Load(ir.ClsP, child.offset(environment, int64(8*(index+1))))
 		child.fn.MarkGCRef(captureAddress)
 		child.vars[capture] = captureAddress
+		if g.directValues[capture] {
+			child.directValues[capture] = true
+		}
 	}
-	bindVariable := func(expression ast.Expr, value ir.Ref, valueType types.Type) {
-		identifier, ok := expression.(*ast.Ident)
-		if !ok || identifier.Name == "_" {
-			return
-		}
-		object := g.info.Uses[identifier]
-		if statement.Tok == token.DEFINE && object == nil {
-			object = g.info.Defs[identifier]
-		}
-		slot, exists := child.vars[object]
-		if !exists {
-			slot = child.allocLocal(valueType)
-			child.vars[object] = slot
-		}
-		child.assignLocal(value, slot, valueType)
-	}
+	// The destinations are prepared before either value is stored, exactly as in
+	// the other range forms, so `for k, m[k] = range seq` indexes m with the key
+	// the previous element left behind.
+	var keyTarget, valueTarget assignmentTarget
 	if statement.Key != nil {
-		bindVariable(statement.Key, parameterValues[0], yieldSignature.Params().At(0).Type())
+		keyTarget = child.prepareAssignmentTarget(statement.Key, statement.Tok == token.DEFINE)
 	}
 	if statement.Value != nil && len(parameterValues) == 2 {
-		bindVariable(statement.Value, parameterValues[1], yieldSignature.Params().At(1).Type())
+		valueTarget = child.prepareAssignmentTarget(statement.Value, statement.Tok == token.DEFINE)
+	}
+	if statement.Key != nil {
+		child.storeAssignmentTarget(keyTarget, parameterValues[0], yieldSignature.Params().At(0).Type())
+	}
+	if statement.Value != nil && len(parameterValues) == 2 {
+		child.storeAssignmentTarget(valueTarget, parameterValues[1], yieldSignature.Params().At(1).Type())
 	}
 
 	continueBlock := child.block("rangecontinue")
@@ -8493,28 +8626,11 @@ func (g *gen) iteratorRangeStmt(statement *ast.RangeStmt, label string, iterator
 func (g *gen) mapRangeStmt(statement *ast.RangeStmt, label string, mapType *types.Map) {
 	mapping := g.expr(statement.X)
 
-	rangeVariable := func(expression ast.Expr, valueType types.Type) (types.Object, ir.Ref) {
-		object, _ := g.rangeVariableObject(statement, expression)
-		if object == nil {
-			return nil, ir.R
-		}
-		if statement.Tok != token.DEFINE {
-			if slot, exists := g.addr(object); exists {
-				return object, slot
-			}
-		}
-
-		return object, g.variableStorage(object, valueType)
-	}
-
-	keyObject, keySlot := rangeVariable(statement.Key, mapType.Key())
-	valueObject, valueSlot := rangeVariable(statement.Value, mapType.Elem())
+	keyObject, _ := g.declareRangeVariable(statement, statement.Key)
+	valueObject, _ := g.declareRangeVariable(statement, statement.Value)
 	variables := mapRangeVariables{key: keyObject, value: valueObject}
-	if statement.Tok != token.DEFINE {
-		variables = mapRangeVariables{}
-	}
 	if g.runtimeAllocation {
-		g.runtimeMapRangeStmt(statement, label, mapping, mapType, variables, keySlot, valueSlot)
+		g.runtimeMapRangeStmt(statement, label, mapping, mapType, variables)
 		return
 	}
 
@@ -8550,16 +8666,21 @@ func (g *gen) mapRangeStmt(statement *ast.RangeStmt, label string, mapType *type
 	g.continues = append(g.continues, post)
 	g.setLabeledControl(label, done, post)
 	g.cur = body
-	keySlot, valueSlot = g.startMapIterationVariables(variables, mapType, keySlot, valueSlot)
-	if keySlot != ir.R {
+	keyTarget, valueTarget := g.rangeTargets(statement, variables.key, variables.value)
+	var key, value ir.Ref
+	if keyTarget.kind != assignmentTargetDiscarded {
 		keyAddress := g.mapElementAddress(mapping, mapKeysOffset, index, mapType.Key())
-		key := g.mapElementValue(keyAddress, mapType.Key())
-		g.assignLocal(key, keySlot, mapType.Key())
+		key = g.mapElementValue(keyAddress, mapType.Key())
 	}
-	if valueSlot != ir.R {
+	if valueTarget.kind != assignmentTargetDiscarded {
 		valueAddress := g.mapElementAddress(mapping, mapValuesOffset, index, mapType.Elem())
-		value := g.mapElementValue(valueAddress, mapType.Elem())
-		g.assignLocal(value, valueSlot, mapType.Elem())
+		value = g.mapElementValue(valueAddress, mapType.Elem())
+	}
+	if keyTarget.kind != assignmentTargetDiscarded {
+		g.storeAssignmentTarget(keyTarget, key, mapType.Key())
+	}
+	if valueTarget.kind != assignmentTargetDiscarded {
+		g.storeAssignmentTarget(valueTarget, value, mapType.Elem())
 	}
 	g.stmts(statement.Body.List)
 	if g.live() {
@@ -8577,29 +8698,12 @@ func (g *gen) mapRangeStmt(statement *ast.RangeStmt, label string, mapType *type
 	g.cur = done
 }
 
-// mapRangeVariables names the variables a `for ... range aMap` clause declares.
-// Either field is nil when that side is absent, blank, or an existing variable
-// the clause merely assigns to.
+// mapRangeVariables names the variables a `for ... range aMap` clause targets.
+// Either field is nil when that side is absent, blank, or not an identifier at
+// all; only a field the clause declares can be per-iteration.
 type mapRangeVariables struct {
 	key   types.Object
 	value types.Object
-}
-
-// startMapIterationVariables gives the declared map iteration variables their
-// own storage for the iteration that is about to run, and returns the slots the
-// caller must assign the key and element into.
-func (g *gen) startMapIterationVariables(
-	variables mapRangeVariables,
-	mapType *types.Map,
-	keySlot, valueSlot ir.Ref,
-) (ir.Ref, ir.Ref) {
-	if g.perIterationVariable(variables.key) {
-		keySlot = g.startIterationVariable(variables.key, mapType.Key())
-	}
-	if g.perIterationVariable(variables.value) {
-		valueSlot = g.startIterationVariable(variables.value, mapType.Elem())
-	}
-	return keySlot, valueSlot
 }
 
 func (g *gen) runtimeMapRangeStmt(
@@ -8608,7 +8712,6 @@ func (g *gen) runtimeMapRangeStmt(
 	mapping ir.Ref,
 	mapType *types.Map,
 	variables mapRangeVariables,
-	keySlot, valueSlot ir.Ref,
 ) {
 	pointerType := types.Typ[types.UnsafePointer]
 	iteratorFields := []*types.Var{
@@ -8637,15 +8740,20 @@ func (g *gen) runtimeMapRangeStmt(
 	g.continues = append(g.continues, post)
 	g.setLabeledControl(label, done, post)
 	g.cur = body
-	keySlot, valueSlot = g.startMapIterationVariables(variables, mapType, keySlot, valueSlot)
-	if keySlot != ir.R {
-		key := g.mapElementValue(keyAddress, mapType.Key())
-		g.assignLocal(key, keySlot, mapType.Key())
+	keyTarget, valueTarget := g.rangeTargets(statement, variables.key, variables.value)
+	var key, value ir.Ref
+	if keyTarget.kind != assignmentTargetDiscarded {
+		key = g.mapElementValue(keyAddress, mapType.Key())
 	}
-	if valueSlot != ir.R {
+	if valueTarget.kind != assignmentTargetDiscarded {
 		valueAddress := g.cur.Load(ir.ClsP, g.offset(iterator, 8))
-		value := g.mapElementValue(valueAddress, mapType.Elem())
-		g.assignLocal(value, valueSlot, mapType.Elem())
+		value = g.mapElementValue(valueAddress, mapType.Elem())
+	}
+	if keyTarget.kind != assignmentTargetDiscarded {
+		g.storeAssignmentTarget(keyTarget, key, mapType.Key())
+	}
+	if valueTarget.kind != assignmentTargetDiscarded {
+		g.storeAssignmentTarget(valueTarget, value, mapType.Elem())
 	}
 	g.stmts(statement.Body.List)
 	if g.live() {
@@ -9674,48 +9782,8 @@ func (g *gen) channelReceiveAssignment(statement *ast.AssignStmt, receive *ast.U
 }
 
 func (g *gen) assignSelectValue(destination ast.Expr, assignment token.Token, value ir.Ref, valueType types.Type) {
-	if identifier, ok := destination.(*ast.Ident); ok && identifier.Name == "_" {
-		return
-	}
-
-	var slot ir.Ref
-	localIdentifier := false
-	destinationIsInline := false
-	if identifier, ok := destination.(*ast.Ident); ok {
-		object := g.info.Uses[identifier]
-		if assignment == token.DEFINE && object == nil {
-			object = g.info.Defs[identifier]
-		}
-		var exists bool
-		slot, exists = g.addr(object)
-		if !exists {
-			slot = g.variableStorage(object, valueType)
-		}
-		_, global := g.globals[object]
-		localIdentifier = !global && !g.directValues[object]
-		destinationIsInline = global && (isMemoryValue(valueType) || isDescriptorValue(valueType) || isInterfaceValue(valueType))
-		if g.directValues[object] && (isInlineAggregate(valueType) || isInterfaceValue(valueType)) {
-			destinationIsInline = true
-		}
-	} else {
-		slot = g.lvalue(destination)
-		destinationIsInline = true
-	}
-
-	value = g.coerce(value, valueType)
-	if localIdentifier && isMemoryValue(valueType) {
-		g.assignLocal(value, slot, valueType)
-		return
-	}
-	if localIdentifier && isDescriptorValue(valueType) {
-		g.store(value, slot, valueType)
-		return
-	}
-	if destinationIsInline && (isInlineAggregate(valueType) || isInterfaceValue(valueType)) {
-		g.storeInlineValue(value, slot, valueType)
-		return
-	}
-	g.store(value, slot, valueType)
+	target := g.prepareAssignmentTarget(destination, assignment == token.DEFINE)
+	g.storeAssignmentTarget(target, value, valueType)
 }
 
 func (g *gen) expr(e ast.Expr) (result ir.Ref) {
@@ -13000,14 +13068,6 @@ func (g *gen) mapLookupValue(mapping, key ir.Ref, mapType *types.Map, expression
 	return g.load(valueSlot, mapType.Elem()), g.load(foundSlot, types.Typ[types.Bool])
 }
 
-func (g *gen) mapAssign(index *ast.IndexExpr, valueExpression ast.Expr) {
-	mapType := g.typeAndValue(index.X).Type.Underlying().(*types.Map)
-	mapping := g.expr(index.X)
-	key := g.assignmentValue(index.Index, mapType.Key())
-	value := g.assignmentValue(valueExpression, mapType.Elem())
-	g.mapAssignValue(mapping, key, value, mapType, index)
-}
-
 func (g *gen) mapAssignValue(mapping, key, value ir.Ref, mapType *types.Map, expression ast.Expr) {
 	if g.runtimeAllocation {
 		g.runtimeMapAssign(mapping, key, value, mapType)
@@ -13160,9 +13220,10 @@ func (g *gen) zero(address ir.Ref, valueType types.Type) {
 }
 
 func (g *gen) mapLookupAssignment(statement *ast.AssignStmt, index *ast.IndexExpr) {
+	mapType := g.typeAndValue(index.X).Type.Underlying().(*types.Map)
 	value, found := g.mapLookup(index)
-	g.assignMapResult(statement, 0, value)
-	g.assignMapResult(statement, 1, found)
+	g.assignMapResult(statement, 0, value, mapType.Elem())
+	g.assignMapResult(statement, 1, found, types.Typ[types.Bool])
 }
 
 func (g *gen) mapLength(expression ast.Expr) ir.Ref {
@@ -13180,27 +13241,9 @@ func (g *gen) mapLength(expression ast.Expr) ir.Ref {
 	return g.load(result, types.Typ[types.Int])
 }
 
-func (g *gen) assignMapResult(statement *ast.AssignStmt, resultIndex int, value ir.Ref) {
-	lhs := statement.Lhs[resultIndex]
-	identifier, ok := lhs.(*ast.Ident)
-	if !ok {
-		g.fail(lhs, "map lookup result target must be an identifier")
-		return
-	}
-	if identifier.Name == "_" {
-		return
-	}
-	object := g.info.Uses[identifier]
-	if statement.Tok == token.DEFINE && object == nil {
-		object = g.info.Defs[identifier]
-	}
-	slot, exists := g.addr(object)
-	if !exists {
-		objectType := g.objectType(object)
-		slot = g.variableStorage(object, objectType)
-	}
-	objectType := g.objectType(object)
-	g.store(g.coerce(value, objectType), slot, objectType)
+func (g *gen) assignMapResult(statement *ast.AssignStmt, resultIndex int, value ir.Ref, valueType types.Type) {
+	target := g.prepareAssignmentTarget(statement.Lhs[resultIndex], statement.Tok == token.DEFINE)
+	g.storeAssignmentTarget(target, value, valueType)
 }
 
 func (g *gen) mapDelete(mapExpression, keyExpression ast.Expr) {

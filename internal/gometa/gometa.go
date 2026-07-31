@@ -352,17 +352,30 @@ func GCProgram(dataStart, dataEnd uint64, pointerOffsets []uint64) ([]byte, erro
 	return program, nil
 }
 
-// FunctionStackMaps builds a function's deduplicated pointer maps and the
-// per-safepoint indexes into them.
+// EntryStackMapIndex is the map the runtime uses when a frame's pc is exactly
+// the function's entry: runtime.stkframe.getStackMap short-circuits the
+// PCDATA_StackMapIndex lookup there and hardcodes index 0. Nothing in the
+// function has executed at that pc, so this map may describe only the words the
+// *caller* wrote -- the stack-passed arguments -- and never a callee-written
+// word such as a register home slot. See BodyStackMapIndex and
+// FunctionStackMaps for the other reserved indexes.
+const EntryStackMapIndex = 0
+
+// BodyStackMapIndex is the conservative whole-frame map selected once the frame
+// exists and before the first safepoint.
+const BodyStackMapIndex = 1
+
+// FunctionStackMaps builds a function's deduplicated pointer maps, the
+// per-safepoint indexes into them, and the index that describes the
+// stack-growth prologue window.
 //
 // Map 0 is empty and map 1 is the function's conservative body map: every
 // pointer-bearing word the frame ever uses, which is also the set the prologue
-// zeroes. The function selects map 0 while it is still in its stack-growth
-// prologue and map 1 once the frame exists, because the temporary spills
-// morestack uses at entry are not valid roots during ordinary execution. No
-// safepoint falls between the frame being built and the first call, so map 1
-// describes a window a scan cannot observe; it is kept conservative rather than
-// empty so that window stays safe if one ever appears.
+// zeroes. The function selects map 1 once the frame exists, because the
+// temporary spills morestack uses at entry are not valid roots during ordinary
+// execution. No safepoint falls between the frame being built and the first
+// call, so map 1 describes a window a scan cannot observe; it is kept
+// conservative rather than empty so that window stays safe if one ever appears.
 //
 // Every safepoint then gets exactly the roots live there, deduplicated so
 // identical maps share an index. It must NOT be the union with map 1: a local
@@ -375,15 +388,23 @@ func GCProgram(dataStart, dataEnd uint64, pointerOffsets []uint64) ([]byte, erro
 // Index 0 is reserved for the entry window and a safepoint never resolves to it,
 // even when the safepoint holds no roots at all and its locals map would be
 // identical. The runtime reads one PCDATA_StackMapIndex value for both the
-// locals and the argument maps (runtime.stkframe.getStackMap), and the argument
-// map at index 0 is the entry map: it marks the register home slots, which the
-// prologue writes only on the path that calls morestack. Letting a body
-// safepoint share index 0 would point the collector at those never-written
-// words. A rootless safepoint therefore gets its own empty map instead.
+// locals and the argument maps (runtime.stkframe.getStackMap), so a body
+// safepoint sharing index 0 would inherit the entry window's argument map. A
+// rootless safepoint therefore gets its own empty map instead.
+//
+// The growth index is the last map, appended only when the entry and safepoint
+// argument maps differ -- that is, when the function has register home slots
+// that only the stack-growth prologue writes. Those slots are valid roots for
+// exactly the window between the prologue's spill and its reload around
+// morestack, and that window has to be a *different* index from the one the
+// runtime uses at pc == entry, because a goroutine created by runtime.newproc
+// and not yet scheduled is stopped at pc == entry with the whole argument frame
+// still holding whatever the previous user of that recycled stack left there
+// (RUNTIME_PLAN.md 5.11).
 //
 // This is pure set algebra over word indexes -- see the package comment on why
 // no register numbers ever appear here.
-func FunctionStackMaps(function FunctionInfo) ([][]int, []StackMapIndexPoint) {
+func FunctionStackMaps(function FunctionInfo) ([][]int, []StackMapIndexPoint, int) {
 	pointerMaps := [][]int{nil, normalizePointerWords(function.LocalPointerWords)}
 	indexPoints := make([]StackMapIndexPoint, 0, len(function.StackMapPoints))
 	for _, point := range function.StackMapPoints {
@@ -397,28 +418,51 @@ func FunctionStackMaps(function FunctionInfo) ([][]int, []StackMapIndexPoint) {
 		}
 		indexPoints = append(indexPoints, StackMapIndexPoint{PC: point.PC, Index: index})
 	}
-	return pointerMaps, indexPoints
+
+	growthIndex := EntryStackMapIndex
+	if !samePointerWords(function.ArgumentPointerWords, function.SafepointArgumentPointerWords) {
+		// The prologue window has no frame yet, so it holds no locals; only its
+		// argument map differs from the entry window's.
+		growthIndex = len(pointerMaps)
+		pointerMaps = append(pointerMaps, nil)
+	}
+	return pointerMaps, indexPoints, growthIndex
 }
 
 // ArgumentStackMaps returns one argument pointer map per locals stack-map entry,
 // which is what keeps the two tables indexable by the same
 // PCDATA_StackMapIndex value.
 //
-// Index 0 is the entry window, so it gets the full argument map. Every other
-// index is a body safepoint and gets the caller-initialised subset. Writing the
-// argument map at index 0 alone -- which left every body safepoint with an
-// all-zero argument bitmap -- hid the caller's stack-passed pointer arguments
-// from the collector for the whole call.
-func ArgumentStackMaps(function FunctionInfo, entries int) [][]int {
+// The growth index gets the full argument map, because the stack-growth prologue
+// has just spilled the register arguments into their home slots there. Every
+// other index -- including the entry index the runtime hardcodes at pc == entry
+// -- gets the caller-initialised subset. Writing the argument map at one index
+// alone, which left every other index with an all-zero argument bitmap, hid the
+// caller's stack-passed pointer arguments from the collector for the whole call.
+func ArgumentStackMaps(function FunctionInfo, entries int, growthIndex int) [][]int {
 	argumentMaps := make([][]int, entries)
 	for index := range argumentMaps {
-		if index == 0 {
+		if index == growthIndex {
 			argumentMaps[index] = function.ArgumentPointerWords
 			continue
 		}
 		argumentMaps[index] = function.SafepointArgumentPointerWords
 	}
 	return argumentMaps
+}
+
+// samePointerWords reports whether two already-sorted word lists describe the
+// same set. Both argument maps come from argumentPointerWords, which sorts.
+func samePointerWords(left, right []int) bool {
+	if len(left) != len(right) {
+		return false
+	}
+	for index := range left {
+		if left[index] != right[index] {
+			return false
+		}
+	}
+	return true
 }
 
 // normalizePointerWords returns a sorted, duplicate-free copy, which is the form
