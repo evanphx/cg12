@@ -4,11 +4,12 @@ Every check the briefing asked for has been run here and read. The reasoning, in
 
 - **There is no leak.** All 358 corpus programs, compiled three ways against the full
   seven-pack set — one process each, one batch, and a batch in reverse — produce identical
-  behaviour (358/358) and identical *content* (358/358: same symbols, same sizes, same image
-  size). 325 are byte-identical outright. The 33 that are not differ only in where functions
-  were placed, and every one of them is demonstrably nondeterministic with no batch process
-  anywhere in the picture: recompiled alone, they produce the batch's exact bytes. §5.10
-  already records this residue and says 39 of the 358 vary at all.
+  behaviour and identical *content* (same symbols, same sizes, same image size). This was done
+  **twice**, as two independent draws: 325 of 358 byte-identical the first time, 324 the
+  second, with a partly different set differing each time. Every differing program is
+  demonstrably nondeterministic with no batch process anywhere in the picture: recompiled
+  alone, they produce the batch's exact bytes. §5.10 already records this residue and says 39
+  of the 358 vary at all.
 - **The new case is covered.** A single worker compiled 33 programs ordered so that programs
   choosing `net/http`, four different crypto packs, `net/smtp` and the runtime-only fallback
   were interleaved throughout, so that one process read all seven packs and kept each while
@@ -25,10 +26,16 @@ Two things are flagged rather than fixed, neither of them caused by this branch 
 blocking: the checked-in runtime coverage baseline is stale on `main` (§5c below), and the
 compiler's front-end nondeterminism is unchanged (§5.10).
 
-One defect *was* found and fixed here, in the measurement tool rather than the compiler:
-`analysis/batchdiff` triaged a differing program with a single solitary recompile, which
-against a compiler that yields five distinct images in five compiles reports leaks that are
-not there — it called three in this job's own runs. Commit `1b3b2aa`.
+Two defects *were* found and fixed here, both in the measurement tool and neither in the
+compiler: `analysis/batchdiff` triaged a differing program with a single solitary recompile
+(commit `1b3b2aa`), and declared a behaviour difference on the first disagreement (commit
+`57e8ec0`). Against a compiler that yields five distinct images in five compiles, and two
+corpus programs whose printed GC statistics move with scheduling, both report differences that
+are not there — five of them across this job's own runs.
+
+Nothing under `goc/ ir/ opt/ arm64/ amd64/ link/ obj/ lower/ parse/ internal/ stdlib/` is
+touched by this job either, and `analysis/batchdiff` has no importers, so the suite results
+below still describe the tree as tested.
 
 Branch: `ccwork/verify-batch-reconcile`, off `ccwork/batch-reconcile` (`76030b4`).
 That branch's own report is preserved verbatim at `docs/report-batch-reconcile.md`, following
@@ -235,6 +242,52 @@ rather than of a leak. All 33 curated programs behave identically across the thr
 **There is no leak.** No program's bytes differ between a batch and a solitary compile for any
 reason that a solitary compile does not reproduce on its own, no program's symbol content
 differs, and no program behaves differently.
+
+### 1f. The whole leak check again, with the corrected tool
+
+Everything in 1a–1e was reached with the tool as the branch left it, plus manual analysis
+outside it. After fixing `analysis/batchdiff` (see "The one defect found" below) the entire
+corpus check was run again from scratch — a second independent draw of all three passes:
+
+    one-shot         358 programs in 223.0s, 0 failed
+    batch            358 programs in 178.7s, 0 failed
+    batch-reversed   358 programs in 167.6s, 0 failed
+    summed per-program compile wall: one-shot=1465.7s batch=1145.0s (320.7s saved, 21.9%)
+
+    identical=324 differing=34
+    ... 34 × LAYOUT ONLY (same symbols, same sizes, same image size; only addresses moved)
+    leaks=0 explained=34
+
+**34 differing this time rather than 33, and a partly different set** — `runtime_assembly.go`,
+`stdlib_math_big_rat_int.go`, `stdlib_runtime_trace_start_only.go` and
+`stdlib_url_resolve_query.go` appear here and did not before; `stdlib_crypto_ed25519.go`,
+`stdlib_net_mail_textproto.go` and `stdlib_image_png_roundtrip.go` were there and are not here.
+That is the point: which programs draw a different layout is itself a coin flip, and it is
+independent of batch mode. Both draws agree on the thing that matters — **0 leaks**, and every
+differing program identical in content.
+
+This run also surfaced a second false alarm, and resolving it is worth recording:
+
+    BEHAVIOUR DIFFERS  bytes_grow_compare.go   alone rc=0 batch rc=0 reversed rc=0
+    BEHAVIOUR DIFFERS  bytes_grow_stats.go     alone rc=0 batch rc=0 reversed rc=0
+
+Neither is a compile difference. `bytes_grow_stats.go`'s three builds are **the same file**:
+
+    sha256(alone) = sha256(batch) = sha256(reversed) = 8426bf9e923c3afd
+
+One binary cannot be miscompiled relative to itself. Both programs print allocation and GC
+statistics, and those move with scheduling. Running **one** executable repeatedly, at the
+7-way concurrency the comparison itself uses:
+
+| program | runs of one binary | distinct outputs |
+| --- | ---: | ---: |
+| `bytes_grow_compare.go` | 21 | 3 |
+| `bytes_grow_stats.go` | 21 | 2 |
+| either, run serially on an idle box | 12 | 1 |
+
+So the behaviour comparison had a false-positive mode of its own, load-dependent, which is why
+the first behaviour pass over the same 358 programs reported 358/358 identical and this one did
+not. Fixed in `57e8ec0`; see below.
 
 ### 2. `scripts/determinism-check.sh`
 
@@ -446,6 +499,20 @@ explained=3`, all `LAYOUT ONLY`. And the digest is not vacuously constant — a 
 (`6500d80c`). Necessary, not sufficient: two functions of equal size can hold different
 instructions, so the tool reports "layout only", not "identical", and the behaviour comparison
 still runs on every program.
+
+**The same defect, in the behaviour comparison.** It declared a difference on the first
+disagreement, and two corpus programs print allocation and GC statistics that move with
+scheduling — measured above, one binary giving three distinct outputs in 21 concurrent runs.
+Fixed in `57e8ec0`: a program whose three builds disagree is now run five more times per build
+and reported only if some build's set of behaviours never overlaps another's. That is the
+same shape of test as the byte triage, and it keeps the strong signal: a genuinely
+miscompiled program's outputs would not overlap a correct one's.
+
+Honest limit on that second fix: it was validated end-to-end on a seven-program set including
+both flaky programs (`behaviour: identical=7 differing=0`, where the unfixed tool had reported
+two differences over the corpus), but I could not force the repeat-triage branch to fire on
+demand during validation, so I did not observe it rejecting a disagreement in that run. The
+evidence that it would is the 21-run measurement above; the logic it rests on is six lines.
 
 ## What was not done
 
