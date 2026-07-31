@@ -104,18 +104,25 @@ type aggReg struct {
 // assignAgg assigns each eightbyte of a register-class aggregate to a GP or SSE
 // argument register, or places the whole aggregate on the stack when the needed
 // registers are unavailable.
+//
+// This is System V's eightbyte classification specifically -- Go ABIInternal
+// decomposes an aggregate by field rather than into eightbytes, and needs its own
+// walk (arm64's assignGoAggregate is the shape). It reads the assigner's tables
+// rather than the package-level ones so that an ABIInternal assigner reaching
+// here produces a visibly wrong assignment in a test rather than a plausible one
+// built from System V registers.
 func (a *argAssigner) assignAgg(cls aggClass) (regs []aggReg, onStack bool, off int) {
-	if cls.memory || a.ngrn+cls.nGP() > len(argGP) || a.nsrn+cls.nSSE() > len(argFP) {
+	if cls.memory || a.ngrn+cls.nGP() > len(a.intRegs) || a.nsrn+cls.nSSE() > len(a.floatRegs) {
 		off = a.nsaa
 		a.nsaa += roundUp(cls.size, 8)
 		return nil, true, off
 	}
 	for _, p := range cls.parts {
 		if p == ebInteger {
-			regs = append(regs, aggReg{reg: argGP[a.ngrn]})
+			regs = append(regs, aggReg{reg: a.intRegs[a.ngrn]})
 			a.ngrn++
 		} else {
-			regs = append(regs, aggReg{reg: argFP[a.nsrn], float: true})
+			regs = append(regs, aggReg{reg: a.floatRegs[a.nsrn], float: true})
 			a.nsrn++
 		}
 	}

@@ -42,20 +42,20 @@ type functionCode struct {
 // compileFunction lowers, allocates and emits one function. Every offset it
 // records is relative to the function's own start, so the caller can place the
 // function anywhere in the module's text.
-func compileFunction(f *ir.Func, opts Options, bundle assemblyBundle, goRuntime bool) (*functionCode, error) {
+func compileFunction(f *ir.Func, opts Options, conventions calleeConventions, bundle assemblyBundle, goRuntime bool) (*functionCode, error) {
 	applyAssemblyCallConventions(f, bundle.callConventions)
 	name := sanitize(f.Name)
 	params := dwarfParams(f)
 	paramTemps := paramTempIDs(f)
 	ir.LowerPointers(f, ptrCls)
-	if err := lower(f, opts.TLSModel); err != nil {
+	if err := lower(f, conventions, opts.TLSModel); err != nil {
 		return nil, fmt.Errorf("function %s: %w", f.Name, err)
 	}
 	alloc, err := regAlloc(f)
 	if err != nil {
 		return nil, fmt.Errorf("function %s: %w", f.Name, err)
 	}
-	mc, err := emitMachine(f, alloc, opts.GC, opts.TLSModel)
+	mc, err := emitMachine(f, alloc, conventions, opts.GC, opts.TLSModel)
 	if err != nil {
 		return nil, fmt.Errorf("function %s: %w", f.Name, err)
 	}
@@ -101,6 +101,7 @@ func compileFunction(f *ir.Func, opts Options, bundle assemblyBundle, goRuntime 
 func compileFunctionsInOrder(
 	functions []*ir.Func,
 	opts Options,
+	conventions calleeConventions,
 	bundle assemblyBundle,
 	goRuntime bool,
 	merge func(index int, code *functionCode),
@@ -130,7 +131,7 @@ func compileFunctionsInOrder(
 				<-slots
 				close(job.done)
 			}()
-			job.code, job.err = compileFunction(function, opts, bundle, goRuntime)
+			job.code, job.err = compileFunction(function, opts, conventions, bundle, goRuntime)
 		}()
 	}
 

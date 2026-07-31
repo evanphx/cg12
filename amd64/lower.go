@@ -21,7 +21,7 @@ func lower(f *ir.Func) error {
 	}
 	lowerpass.JumpTables(f) // dense switches -> indexed branch (JmpTable)
 	lowerpass.Switches(f)   // remaining multiway branches -> conditional branches
-	lowerpass.Selects(f)    // conditional selects -> control-flow diamonds (no cmov path)
+	lowerSelects(f)         // conditional selects -> CMOVcc, or diamonds where there is none
 	lowerpass.HoistAllocas(f)
 	foldAddressing(f) // array/alloca address computations -> [base+index*scale+disp]
 	lowerpass.SplitCriticalEdges(f)
@@ -77,7 +77,7 @@ func lowerTailCalls(f *ir.Func) error {
 }
 
 func lowerParams(f *ir.Func, retBuf ir.Ref) error {
-	var a argAssigner
+	a := newArgAssigner(false)
 	// Register/stack parameter moves (OPar) must precede aggregate reconstruction,
 	// so the emitter can treat the OPar run as one parallel move.
 	var pars, recon []ir.Instr
@@ -209,7 +209,7 @@ func lowerCalls(f *ir.Func) error {
 			var callTo ir.Ref
 			var callCls ir.Cls
 			var callDefs []ir.Ref
-			var a argAssigner
+			a := newArgAssigner(false)
 
 			// A MEMORY-class result reserves rdi for the sret buffer pointer, ahead of
 			// the arguments.

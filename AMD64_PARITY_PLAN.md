@@ -117,7 +117,8 @@ layout (`goc/compile.go:602-608`) are already arch-neutral. Only the translator
 is arm64.
 
 **3.2 amd64 register pressure is a genuine design problem with no arm64
-precedent.** arm64 reserved X28 for `g` out of 31 registers — trivial. On amd64:
+precedent. SETTLED — see §3.3.** arm64 reserved X28 for `g` out of 31 registers —
+trivial. On amd64:
 
 - Go ABIInternal passes args in `RAX, RBX, RCX, RDI, RSI, R8, R9, R10, R11`, but
   amd64 reserves R10/R11 as its *only* scratch pair and holds RAX/RCX/RDX out of
@@ -133,6 +134,101 @@ the convention descriptor is not a straight copy.
 
 **This must be settled before ABI work fans out.** It is one agent's decision,
 recorded as a written contract, then consumed by everyone else.
+
+### 3.3 The register decision (B0) — settled
+
+Recorded in `amd64/reg.go` and `amd64/convention.go`, enforced by
+`amd64/convention_test.go`. Zero behavior change: the System V tables are
+byte-identical to what they were, nothing yet asks for the ABIInternal ones, and
+the full suite is unchanged.
+
+Most of it is not a choice. Go's amd64 ABIInternal fixes the argument registers
+(`RAX, RBX, RCX, RDI, RSI, R8, R9, R10, R11`, `IntArgRegs = 9` —
+`stdlib/src/internal/abi/abi_amd64.go:10`), `g` in **R14** (`MOVQ DX, R14 // set
+the g register`, `asm_amd64.s:444`), the closure pointer in **RDX**
+(`asm_amd64.s:2003`), and **X15 as a zero register** (`asm_amd64.s:1089`). The
+runtime reads all four by name, so they are transcribed, not decided.
+
+Four things did have to be decided, and three of them contradict this plan's own
+assumptions:
+
+**(a) There is no scratch pair that works under both conventions.** §3.2 framed
+R10/R11 as "amd64's only scratch pair" without noticing they are also
+ABIInternal's argument registers 8 and 9. System V's only caller-saved
+non-argument registers are RAX, R10, R11; ABIInternal, after its nine argument
+registers plus RDX/R14/RSP/RBP, leaves exactly R12 and R13 — which is why Go's
+own compiler keeps that pair free. So `scratchGPFor` is per-convention: R10/R11
+under System V, R12/R13 under ABIInternal. Sharing one pair was rejected because
+R12/R13 are callee-saved under System V, which would cost every C-path function
+two pushes and two pops to protect a caller's live value.
+
+**(b) The float scratch pair collides with the zero register.** cg12's emitter
+needs two float scratch registers (they are used together in `xasm_float.go`'s
+unsigned-conversion bias). Go passes float arguments in X0–X14 and requires X15
+to be zero, which leaves nothing to improvise with. `goArgFP` is therefore capped
+at X0–X12, deviating from Go's `FloatArgRegs = 15`. A signature wanting a 14th
+float register argument must be **refused by name** (`goFloatArgRegSpill`), not
+quietly passed on the stack: cg12-compiled code would agree with itself, but the
+runtime's `abi.RegArgs` is sized by Go's 15 and a reflect-mediated call would
+read a register cg12 never wrote.
+
+**(c) RAX/RCX/RDX stay out of allocation**, as today. They are ABIInternal
+argument registers 1–3, but that is not a conflict: an argument arrives in a
+Fixed temp pinned to its register, which is independent of whether the allocator
+may hand that register out. Keeping them reserved preserves the property
+`xselect_bits.go:52` and `xselect_atomic.go:61` state their correctness in terms
+of. Cost is a copy out at entry — the copy arm64 already pays for X26.
+
+**(d) The `CallConv` overload resolves in favour of the callee, and arm64's rule
+must not be copied.** §Track B asked whether to narrow goc's marking or add a
+distinct signal. Neither: the marking stays, and resolution changes. Measured
+from real IR (`TestGoInternalFunctionsMakeUnmarkedPlatformCalls`), a
+`CallConvGoInternal` function is **never** the target of a direct call — it is
+reached only through a func value, whose call site carries an explicit
+`CallConvSet`. But such a function **does** make unmarked direct calls to
+ordinary platform-ABI functions. arm64's `callUsesGoInternal` inherits the
+enclosing function's convention for exactly those calls, which lowers them as
+ABIInternal against a System V callee.
+
+That is latently wrong on arm64 too; it is invisible there only because both
+AAPCS64 and ABIInternal assign integer arguments from X0 upward, so small
+argument counts pick the same registers. amd64 has no overlap — System V starts
+at RDI, ABIInternal at RAX — so copying the rule would miscompile the first
+method value it met. `calleeConventions.forCall` resolves instead from the call's
+explicit convention, then the callee's own, then platform ABI for symbols outside
+the module.
+
+**arm64 carried the same bug and is now fixed.** The follow-up audit this section
+originally called for found it reproducible: a nine-integer-argument unmarked
+direct call to a platform-ABI callee lowers to x0..x7 plus a stack slot from a
+platform caller, but to x0..x8 from an ABIInternal caller — the ninth argument
+lands in x8 where the callee reads the stack. `arm64/convention.go` now carries
+the identical `calleeConventions` rule, resolved once per object and threaded to
+lowering, frame layout, and the emitter so they cannot disagree. Two notes for
+whoever meets it next: `applyAssemblyCallConventions` already stamps
+`CallConvSet` on direct calls to symbols the object defines, so in the real
+driver the unsound fallback only reached calls to *external* symbols and unmarked
+indirect calls; and the pre-existing "cannot tail-call across calling
+conventions" guard is now reachable where it was structurally dead before, so an
+ABIInternal function tail-calling an external symbol is a hard error rather than
+a silent mismatch.
+
+Also settled, for the contracts §7 says must be fixed in writing before fan-out:
+`stackLinkBytes = 0` under both conventions (the call instruction pushes the
+return address, so arm64's hand-reserved `goStackLinkSize` link already exists);
+and `reservesRuntimeRegs` keys off **frame or convention**, not convention alone,
+because goc emits managed-frame platform-ABI helpers whose prologues still read g
+out of R14.
+
+**What B0 does not do.** The emitter still spells `gpScratch0`/`gpScratch1`
+directly at ~150 sites and so implements only the System V row. That is correct
+today — `lowerParams`/`lowerCalls` build platform assigners unconditionally, so a
+`CallConvGoInternal` function is emitted as self-consistent System V code, which
+is what the 14 corpus subtests depend on. Adopting `scratchGPFor` in the emitter
+is B2's, and `TestGoABIScratchDoesNotAliasArgumentRegisters` pins why it cannot
+be skipped. The `getg` gate at `goc/compile.go` also stays: knowing R14 holds g
+is not the same as being able to compile a function that uses it, and trading one
+accurate diagnostic for downstream scatter helps nobody until Track B lands.
 
 ## 4. Phase 0 — make failure loud (4 agents, fully parallel)
 
@@ -208,25 +304,33 @@ it has only `reg ← reg OP mem`. Required for every locked RMW. Assign to A1.
 
 ### Track B · ABI and frame (1 serial + 5 parallel)
 
-**B0 (serial, blocks the track):** the §3.2 register decision, plus per-convention
-`argGP []Reg`/`argFP []Reg` tables, R14=`g` reservation, RDX closure register,
-`calleeSavedFor`/`reservesRuntimeRegs`/`intAllocOrderFor`, and
+**B0 (serial, blocks the track): DONE — see §3.3.** The §3.2 register decision,
+plus per-convention `argGP []Reg`/`argFP []Reg` tables, R14=`g` reservation, RDX
+closure register, `calleeSavedFor`/`reservesRuntimeRegs`/`intAllocOrderFor`, and
 `argAssigner{intRegs, floatRegs, goABI}` + `assignStack`. Owns
 `amd64/convention.go`, `amd64/reg.go`.
 
 > **B0 must not key the convention table on `CallConv` alone without first
 > resolving this.** Found while building the Phase 0b tripwire: goc marks every
-> function literal (`goc/compile.go:10119`), method-value wrapper (`:9781`), and
-> funcvalue adapter (`:10638`) `CallConvGoInternal` *unconditionally*, while
-> actually passing the closure environment through a fixed-register temp rather
-> than through the convention's register assignment. Because amd64 ignores
-> `CallConv` today, those bodies come out as self-consistent System V code and
-> run correctly — 14 corpus subtests depend on it. So `CallConvGoInternal`
-> currently means "closure-shaped" as often as it means "Go's ABIInternal", and
-> lowering that keys off it will mis-lower those functions the moment amd64 starts
-> honouring the flag. Either narrow the frontend's marking, or introduce a
-> distinct signal for a genuine ABIInternal call. Decide this in B0 and record it;
-> B1 cannot be written safely against the current semantics.
+> function literal, method-value wrapper, and funcvalue adapter
+> `CallConvGoInternal` *unconditionally*, while actually passing the closure
+> environment through a fixed-register temp rather than through the convention's
+> register assignment. Because amd64 ignores `CallConv` today, those bodies come
+> out as self-consistent System V code and run correctly — 14 corpus subtests
+> depend on it.
+>
+> **Resolved in §3.3(d):** neither of the two options this plan offered. The
+> marking stays as it is and *resolution* moves to the callee —
+> `calleeConventions.forCall`. Measurement showed the hazard is not the one
+> anticipated: an ABIInternal function is never the target of a direct call, so
+> the marking cannot mis-lower a call *into* it. The real exposure is the
+> unmarked calls such a function makes *out* to platform-ABI functions, where
+> arm64's enclosing-function fallback would pick the wrong convention.
+
+**Contract for B1: `lower` needs the module.** `amd64/lower.go`'s `lower(f
+*ir.Func)` cannot resolve a direct callee's convention from a function alone.
+B1 threads `calleeConventions` (built once per module in `CompileObjectWith`)
+through to the call-lowering sites.
 
 Then, disjoint ownership:
 

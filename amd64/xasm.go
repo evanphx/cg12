@@ -19,6 +19,7 @@ package amd64
 type xasm interface {
 	xasmCore  // operand locations, moves, spill stores, failure
 	xasmInt   // integer arithmetic, shifts, compares, extensions, divide
+	xasmImm   // the same arithmetic and compares with a constant operand; CMOVcc
 	xasmFloat // SSE arithmetic and compares, float/int conversions, bitcasts
 	xasmMem   // loads and stores
 	xasmFlow  // branches, the jump table, calls, ret
