@@ -1,16 +1,57 @@
-# wave4-rescue: recovering `ccwork/rangekey-b`
+# VERDICT: the assignment work is recoverable, and one line of it was the problem
 
-*This file is written incrementally as results land. Anything not yet verified is
-marked so explicitly.*
+`ccwork/rangekey-b` is right about Go's assignment order and wrong about what cg12 can
+hold. It resolves every destination before the right-hand side, as the specification
+requires, and that makes a **raw address live across every call the right-hand side
+makes**. `ir.Block.Add(ir.ClsP, ...)` — how every field, index and indirection address is
+built — produces a pointer-width value that is *not* a managed reference, so the frame's
+stack map omits it, `copystack` does not adjust it, and a right-hand side that grew the
+goroutine stack left the destination pointing into the abandoned old stack. **The store
+landed in freed memory and the assignment vanished with no fault of any kind.** That is why
+the failures were four `encoding/gob` crashes, a `reflect` segfault, and a TLS stream that
+corrupted itself rather than crashing.
+
+Marking the prepared address managed fixes all six. The rest of the branch — nine classes of
+wrong answer in assignment destinations, verified 9/9 against the host toolchain — lands
+unchanged.
+
+**What is on `ccwork/wave4-rescue`, six commits on `61b96da`:**
+
+| | |
+| --- | --- |
+| `040fcbd` | `ccwork/rangekey-b` (`1218627`), cherry-picked verbatim — it applies to current `main` with **zero conflicts** |
+| `702a4e9` | the fix: keep a prepared assignment destination in the stack map |
+| `c83be4f` | `ccwork/freeobject` (`b46b82c`), which §5.11 and §5.12 describe and which never reached `main` either |
+| `a8c9ade` | `RUNTIME_PLAN` §5.13's real story, §5.10's general form of the hazard, §5.14 restored and re-measured |
+| `8b46ae3` | a real defect the cherry-pick surfaced: `gc/goroutine-entry-stack-map` was not marked `exclusive` |
+| `0f86181` | plan: which recovered claim was re-measured here and which was not |
+
+**Headline numbers.** Matrix **342 subtests, 342 PASS, 341 declared PASS, 1 EXPECTED
+FAILURE, 0 KNOWN GAP, 0 FAIL** (338 → 342 by addition only, four new capabilities, nothing
+removed). `make test-unit`, `make test-goc-corpus` pass. Determinism unchanged. All 362
+corpus programs compiled by `main` and by this branch and run: **355 identical, and all 7
+differences accounted for**. `phase2-alloc` still cannot merge, re-measured rather than
+assumed.
 
 ## Status
 
 - [x] The six regressions reproduce, and they are caused by `1218627` alone.
-- [ ] Root cause identified.
-- [ ] Correct part of the work landed on current `main`.
-- [ ] §5.11/§5.12/§5.13 recovered.
-- [ ] `phase2-alloc` × `freeobject` interaction rechecked against current `main`.
-- [ ] Full suite + matrix.
+- [x] Root cause identified, and confirmed by a positive experiment.
+- [x] The correct part of the work landed on current `main`, with the defect fixed.
+- [x] §5.11, §5.12 and §5.13 recovered — with `ccwork/freeobject`'s code, because two of
+      the three describe it and it was not on `main`.
+- [x] `phase2-alloc` × `freeobject` interaction re-checked against current `main`: it is
+      still there, 40/40.
+- [x] Full suite and matrix, on the branch as it stands.
+
+### Not verified here — read §8 before relying on any of it
+
+- `ccwork/freeobject`'s multi-thousand-run statistical campaigns (160 000 and 8 000 runs).
+  Its reducer's rate was re-measured; its tables were not.
+- The `phase2-alloc` × `freeobject` mechanism. It is re-measured as still present and is
+  **not** explained; no guess is offered.
+- `ccwork/baseline-accept` (`4e14a8f`), the fourth branch in `integration/wave4a`. It is
+  `ccwork/coverage-baseline`'s area, so it is left alone.
 
 ## 1. Reproduction (done)
 
@@ -249,3 +290,142 @@ holds on current `main`, it is **`freeobject` × `phase2-alloc`**, and the assig
 not involved in it either way. `ccwork/phase2-alloc` stays out, for the same reason and now
 with the reason re-measured. The mechanism is still not established and is not guessed at
 here.
+
+## 7. Final verification, on the branch as it stands
+
+`ccwork/wave4-rescue`, four commits on `61b96da`:
+
+```
+a8c9ade plan: what the assignment work actually broke, and what still cannot be merged
+c83be4f Fix two GC defects behind `found pointer to free object`      (ccwork/freeobject)
+702a4e9 goc: keep a prepared assignment destination in the stack map  (this job's fix)
+040fcbd goc: resolve every assignment destination before the right-hand side (ccwork/rangekey-b)
+```
+
+| check | result |
+| --- | --- |
+| `go build ./...` | clean |
+| `go vet ./...` | clean |
+| `gofmt -l` over every changed non-vendored Go file | clean |
+| `make test-unit` | pass |
+| `make test-goc-corpus` | `ok github.com/evanphx/cg12/goc 538.5s` |
+| full capability matrix | see census below |
+| `scripts/determinism-check.sh` | unchanged: 4 of 5 identical, `runtime_defer_capture_allocs.go` the known §5.10 residue |
+
+### The matrix census, counted rather than trusted
+
+Counted from a `-v -count=1` run of `^TestARM64RuntimeCapabilityStatus$`, 220.8s:
+
+```
+subtests:        342
+--- PASS:        342
+--- FAIL:          0
+--- SKIP:          0
+declared PASS:   341
+EXPECTED FAILURE:  1
+KNOWN GAP:         0
+```
+
+**The complete list of non-passing capabilities is: none.** The single declared exception is
+`defer-panic/panic-string-output` (`EXPECTED FAILURE runtime_panic_print_string.go`), which
+is the one `main` already carried.
+
+The count is 342, not 338, and the difference is four additions with no removals:
+
+| added capability | from |
+| --- | --- |
+| `assignment-targets/range-target-forms` | `ccwork/rangekey-b` |
+| `assignment-targets/range-target-order` | `ccwork/rangekey-b` |
+| `assignment-targets/multi-assignment-forms` | `ccwork/rangekey-b` |
+| `gc/goroutine-entry-stack-map` | `ccwork/freeobject` |
+
+`cmd/goc/testdata/runtime_coverage_baseline_pending.json` moves 44 → 48 entries and
+`TestCheckedRuntimeCoverageBaselineDenominator` passes, so 294 + 48 = 342 reconciles.
+`RUNTIME_PLAN.md` §1 is updated to match.
+
+### The A/B behaviour differential over the whole corpus
+
+A green matrix does not validate a codegen change, so every one of the 362 programs in
+`goc/testdata` was compiled by `main`'s compiler and by this branch's, both were run, and
+exit status, stdout and stderr compared. A disagreement is re-run three more times before it
+is believed, because several corpus programs print scheduling-dependent statistics.
+
+**355 of 362 identical. All 7 remaining are accounted for:**
+
+| program | difference | why |
+| --- | --- | --- |
+| `runtime_range_target_forms` | 2 → 0 | the fix: `main` cannot compile a non-identifier range destination correctly |
+| `runtime_range_target_order` | 2 → 0 | the fix |
+| `runtime_assign_target_forms` | `main` fails to compile | `main` rejects `v, ok = m[k]` with a non-identifier destination outright |
+| `runtime_goroutine_entry_stack_map` | 2 → 0 | §5.11's fix; `main` fails ~92 runs in 100 |
+| `runtime_panic_print_string` | 2 → 2 | traceback offset only: `runtime_gopanic +0xc0c` against `+0xc10`, a 4-byte code-layout shift |
+| `bytes_grow_stats` | printed statistics | not a compiler difference: **one executable gives 7 distinct outputs in 8 runs**, on both compilers, and the two compilers' output sets overlap. §5.10 names this program |
+| `bytes_grow_compare` | printed statistics | same class; agreed with `main` in 2 of 3 reruns |
+
+### One real defect the cherry-pick surfaced, and fixed
+
+`TestRuntimeCapabilityExclusiveClassification` failed:
+`gc/goroutine-entry-stack-map` sets its own `GOMAXPROCS` and `GOGC` — its own comment says
+so — but was not marked `exclusive`. That test arrived with `main`'s concurrent run phase
+and did not exist when `ccwork/freeobject` was written, which is exactly what a cherry-pick
+across 82 commits should turn up. Fixed in `8b46ae3`; its sibling reducer
+`gc/keepalive-stack-root` was already marked for the same reason.
+
+With the matrix and the known-flaky `TestBatchCompilesAgainstDifferentPacksMatchOneShotCompiles`
+skipped, `./cmd/goc/...` is `ok ... 173.1s`.
+
+The final matrix, run again after `8b46ae3` changed how one capability is scheduled:
+
+```
+subtests:        342
+--- PASS:        342
+--- FAIL:          0
+--- SKIP:          0
+declared PASS:   341
+EXPECTED FAILURE:  1
+KNOWN GAP:         0
+ok  github.com/evanphx/cg12/cmd/goc  193.8s
+```
+
+## 8. What is not verified, and what is left for someone else
+
+### Not verified here
+
+- **`ccwork/freeobject`'s statistical tables.** Its 160 000-run `many-goroutines-gc` campaign
+  and its 8 000-run `checkmark` residual are that branch's own measurements, reproduced in
+  `RUNTIME_PLAN` §5.11 and §5.12 as its evidence. What *was* re-measured here is its reducer:
+  92/100 before, 0/100 after, on current `main`. §5.11 now says which is which.
+- **The `phase2-alloc` × `freeobject` mechanism.** Re-measured as still present (40/40) and
+  deliberately not explained. `span has no free objects` is an allocator invariant failure
+  consistent with either reentry or an accounting disagreement, and guessing between them
+  would be worse than saying so.
+- **`ccwork/baseline-accept` (`4e14a8f`).** The fourth branch in `integration/wave4a`, and
+  the one thing from that integration this job did not touch: it is
+  `ccwork/coverage-baseline`'s area. `runtime_coverage_baseline_pending.json` here grows by
+  the four capabilities this branch adds and nothing else.
+- **The general interior-address hazard.** §5.10 now records it. The fix here covers the
+  place the assignment machinery deliberately holds an address across a call; nothing
+  prevents another interior address being held across a safepoint elsewhere in the front
+  end. A cheap first step is named there: assert that no `ClsP`-classed value is live across
+  a call instruction unless it is a GC reference, and see what the corpus reports.
+
+### Defects found in other people's areas, reported rather than fixed
+
+1. **`TestBatchCompilesAgainstDifferentPacksMatchOneShotCompiles` is flaky on `main`.**
+   2 failures in 3 runs on pristine `61b96da`. It asserts byte-identity between a
+   batch-compiled program and the same program compiled alone, which §5.10's front-end
+   nondeterminism can break on its own. `ccwork/batch-reconcile`'s area.
+2. **`TestBatchCompilerSharesItsWorldAcrossPrograms` has a bare wall-clock assertion.**
+   It fails under load (8.69s against 2.29s at load average 118) and passes idle
+   (`2.12s 1.57s 1.59s`). Same area. On a shared box this will keep firing.
+3. **`println` with several operands prints no spaces**, which is visible in
+   `bytes_grow_stats`'s output above (`mallocs246548302`). Already recorded in §5.10 and
+   already `ccwork/println-spacing`'s job; noted only because it is what makes that
+   program's output hard to read while diffing it.
+
+### What the next job should pick up
+
+- The interior-address checker described in §5.10. It is the cheapest way to find out
+  whether §5.13 was the only place this bites.
+- The `freeobject` × `phase2-alloc` reduction (§5.14). Both branches are preserved and
+  both are individually verified; only the composition is broken.
