@@ -148,9 +148,22 @@ would cost an hour to understand once. Fixed in `149d402`: the diagnostics are t
 
 ## Still unverified
 
-- The corpus-wide leak check (`analysis/batchdiff`, all 358 programs, three ways, with the
-  seven-pack set) has not been run yet. **This is the safety property and it is the next thing
-  to land.**
-- `make test-unit`, `make test-goc-corpus`, `make test-goc-cmd` have not been run on this tree.
-- `scripts/determinism-check.sh` has not been run on this tree.
-- `RUNTIME_PLAN.md` has not been updated yet.
+Running now, in this order, each chained behind the last so nothing competes for the box:
+
+- The corpus-wide leak check (`analysis/batchdiff`, all 358 programs, three ways, against the
+  seven-pack set, 4 workers). **This is the safety property.**
+- `scripts/determinism-check.sh -runtime <the seven packs>`.
+- `make test-unit`, `make test-goc-cmd`, `make test-goc-corpus`.
+
+Not yet started:
+
+- The monolithic batch path (`-runtime-status-prebuilt-runtime=false`, where a worker compiles
+  the runtime into each program instead of linking a pack). `main`'s coverage run uses the
+  one-shot path by construction, so this is the only caller of that branch.
+- `make test-goc-coverage`. It does not use batch mode -- `newRuntimeCapabilityBatchPoolFor`
+  returns nil whenever `-runtime-coverprofile` is set -- so that path is byte-for-byte what was
+  there before, but the suite itself has not been run here either.
+
+One note on the briefing: it points at `RUNTIME_PLAN.md` §5.14 for a live interaction bug.
+**There is no §5.14 in `main`'s plan** -- §5.10 is the last subsection of §5, and the string
+"5.14" does not occur in the file. Nothing was closed there because there was nothing to close.
