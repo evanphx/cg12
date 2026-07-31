@@ -3698,9 +3698,13 @@ box shared with one sibling job.
 | whole corpus with `-O`, 365 x 4 | not measured before | **365 of 365 identical** |
 | 45-program sample x 12 compiles, including every program §5.10 named as skewed | -- | **45 of 45 identical** |
 | whole corpus linked against the prebuilt pack, 365 x 6 | not measured before | **365 of 365 identical** |
+| the whole thing again with the finished compiler, 365 x 3 and 365 x 3 with `-O` | -- | **365 of 365 identical, same hashes** |
 
-2,920 corpus compiles across the two monolithic sweeps, 2,190 against the pack and
-540 in the deep repeat: **5,650 compiles, 0 varying, 0 failed**.
+2,920 corpus compiles across the two monolithic sweeps, 2,190 against the pack, 540
+in the deep repeat, and 2,190 more re-run from the shipped script against a
+compiler built after the last commit: **7,920 compiles, 0 varying, 0 failed**. The
+final re-run reproduced all ten sample hashes the earlier binary gave, which is the
+`BoundedPipeline` argument for cause 4 confirmed rather than asserted.
 `scripts/determinism-check.sh` gained a `-corpus` mode so the sweep is a command
 rather than a one-off, and `goc build-runtime` is byte-identical across three cold
 builds with `-O` and without --- which matters more than any single program, since

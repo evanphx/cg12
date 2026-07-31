@@ -2,7 +2,19 @@
 
 Branch `ccwork/frontend-determinism-2`, off `main` (`9cd2621`).
 
-**Status: in progress.** This file is updated as each result lands.
+**Verdict: done.** Every one of the 365 corpus programs compiles to the same bytes
+every time --- with `-O`, without it, and linked against the prebuilt pack ---
+including `runtime_defer_capture_allocs.go`, which was 25 distinct executables in
+30 compiles. 5,650 corpus compiles, 0 varying, 0 failed. The full matrix is 345
+subtests / 344 PASS / 1 declared EXPECTED FAILURE / 0 FAIL / 0 KNOWN GAP, and
+`test-unit`, `test-goc-corpus`, `test-goc-cmd` and `test-ruby` are all green.
+
+Two claims RUNTIME_PLAN was carrying are retired with measurements, not with
+shrugs, and one new cause was found by auditing the class instead of the instance.
+What is *not* established is listed at the end of this file and in §22.
+
+This file was updated as each result landed; the sections are in the order they
+were measured.
 
 ## What was inherited
 
@@ -421,3 +433,92 @@ distinct `-O -S` output in 8–10 compiles on the pre-fix compiler**. So the def
 is demonstrated at the IR level and its practical blast radius on cg12cc assembly
 is unmeasured and may be nil at the program sizes this repository tests. It is
 fixed because the numbering is wrong, not because a symptom was observed.
+
+## Final re-verification with the finished compiler
+
+Every sweep above used a `goc` built before the `opt` commit. That commit cannot
+affect goc (§22's `BoundedPipeline` argument), but "cannot" is worth checking, so
+the whole thing was run again from the shipped script against a freshly built
+compiler:
+
+```
+=== five samples, default (cold vs warm, twice) ===
+hello.go                            round1:identical(f33cde66558593bb)  round2:identical(f33cde66558593bb)
+fmt_sprintf.go                      round1:identical(ff5fe3cc4d5adc50)  round2:identical(ff5fe3cc4d5adc50)
+gc_struct.go                        round1:identical(98f8743b7ca01b39)  round2:identical(98f8743b7ca01b39)
+runtime_cleanup_frame_retention.go  round1:identical(fab20a7b9da650eb)  round2:identical(fab20a7b9da650eb)
+runtime_defer_capture_allocs.go     round1:identical(ce93869726ee1cc2)  round2:identical(ce93869726ee1cc2)
+=== five samples, -O ===
+hello.go                            round1:identical(0f73f40d0a8a9e6b)  round2:identical(0f73f40d0a8a9e6b)
+fmt_sprintf.go                      round1:identical(5e540b1d6e57e997)  round2:identical(5e540b1d6e57e997)
+gc_struct.go                        round1:identical(a42792e250b6d7fb)  round2:identical(a42792e250b6d7fb)
+runtime_cleanup_frame_retention.go  round1:identical(ac36ecba2a28e504)  round2:identical(ac36ecba2a28e504)
+runtime_defer_capture_allocs.go     round1:identical(f9d6b14468b04966)  round2:identical(f9d6b14468b04966)
+=== corpus, 3 rounds ===       reproducible=365 varying=0 failed=0 of 365   exit=0
+=== corpus, 3 rounds, -O ===   reproducible=365 varying=0 failed=0 of 365   exit=0
+```
+
+**All ten sample hashes are the same values the pre-`opt`-commit binary produced.**
+That is the `BoundedPipeline` argument confirmed rather than asserted: the `opt`
+change is a byte-level no-op for goc.
+
+## Compile census
+
+| sweep | programs × compiles | varying |
+| --- | ---: | ---: |
+| monolithic, no `-O` | 365 × 4 = 1,460 | 0 |
+| monolithic, `-O` | 365 × 4 = 1,460 | 0 |
+| deep repeat on the skewed programs | 45 × 12 = 540 | 0 |
+| linked against the prebuilt pack | 365 × 6 = 2,190 | 0 |
+| final, no `-O` | 365 × 3 = 1,095 | 0 |
+| final, `-O` | 365 × 3 = 1,095 | 0 |
+| five-program cold/warm samples | 4 × 20 = 80 | 0 |
+| **total** | **7,920** | **0** |
+
+Plus 6 cold `goc build-runtime` builds (3 with `-O`, 3 without), 2 hashes, and 6
+`goc -emit-ir` emissions of `runtime_defer_capture_allocs.go` (3 pre-fix, 3 post).
+
+## Commits on this branch
+
+| | |
+| --- | --- |
+| `6de2c27` | goc: emit variadic interface payload addresses in argument order *(cherry-picked)* |
+| `53c1fd4` | opt: break cost-inline size ties on name, walk callers in module order *(cherry-picked)* |
+| `30e0d82` | goc: apply native stdlib overlays in import-path order *(cherry-picked)* |
+| `d848440` | goc: a test that two compiles of the same source give the same module *(cherry-picked)* |
+| `c192f14` | scripts: give determinism-check a corpus mode |
+| `90f6e9e` | plan, batchdiff: compiling the same program twice gives the same program |
+| `4795470` | opt: walk the iterated dominance frontier in reverse post-order |
+| `814c381` | plan: cause 4, the pack path, the suites, and what none of it establishes |
+
+## Still unverified, and other jobs' business
+
+**Not established by anything here:**
+
+- **A reproducible compile is not a correct compile.** The sweeps compare a program
+  against itself, so they are structurally blind to a systematic miscompile. The
+  suites, the matrix and the host-toolchain differential are what cover that, and
+  all of them ran; but if the variadic change were wrong in the same way in every
+  compile, no determinism measurement would see it. That is why §3 step 2 was
+  re-run on this base rather than inherited.
+- **Sample depth.** 3 to 12 draws per program cannot rule out a branch taken 1 time
+  in 100. The deep repeat targets the programs §5.10 named as skewed and the static
+  audit covers the class, but neither is a campaign.
+- **`cg12cc`'s reproducibility.** Cause 4 is fixed and validated at the IR level and
+  through the gcc differential, but no C program in this repository is large enough
+  for it to reach emitted assembly, so its blast radius there is unmeasured.
+- **`arm64/mc.go:2786`** (safepoint frame roots in `map[int]bool` order, reaching
+  `__cg12_stackmaps` in slice order) is located, recorded in §5.10, and **not
+  fixed**. It cannot reach goc — that part is measured, via `readelf`/`nm` on a goc
+  image and `arm64/parallel.go:91`'s `!goRuntime` gate.
+- **`-O` against the prebuilt pack** was not swept, on purpose.
+
+**For the sibling job (`ccwork/opt-pack-link`), not fixed here:** nothing new. The
+16-capability `-runtime-opt` link failure was not touched, and `-O` + pack was left
+unmeasured precisely so as not to trip over it. One datum that may help them
+though: **`opt.OptimizeModule` sends every goc module to `BoundedPipeline`**
+(`fold`/`copy`/`dce`) because every goc module exceeds the 2048-function budget —
+`hello.go` alone emits 2,739 functions. So whatever `-O` does to break the pack
+link, it is not `inline`, `mem2reg`, `jumpthread`, `ifconvert` or `gcm`; those
+never run on a goc module. That narrows their search to `fold`, `copy`, `dce` and
+the split itself.
