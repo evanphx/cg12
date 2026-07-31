@@ -1,7 +1,9 @@
 # Accept a fresh runtime coverage baseline — `ccwork/coverage-baseline`
 
-**Status: IN PROGRESS.** This file is updated as each result lands. Anything not marked
-verified below has not been verified.
+**Status: DONE. The collection was clean at 338/338 and the baseline is accepted.**
+Commits `aefb7ff` (baseline) and `91ef9c7` (plan). One suite failure was found and traced to
+a pre-existing flake in a sibling branch's test; it is diagnosed below and left unfixed on
+purpose. What was not verified is listed at the end under "Still unverified / not done".
 
 ## What the task is
 
