@@ -11,6 +11,9 @@
 #                       and executed to chart runtime coverage. Long-running;
 #                       shardable across parallel jobs via STATUS_SHARDS/STATUS_SHARD
 #                       (needs `cc`).
+#   test-goc-status-opt— the same matrix with goc optimization on. A separate
+#                       target because it is a separate configuration, not a
+#                       faster one; see below.
 #   test-goc-coverage — the same matrix compiled with runtime coverage
 #                       instrumentation, producing a diffable JSON report.
 #                       Unsharded by construction; see COVERAGE_REPORT below.
@@ -61,7 +64,8 @@ COVERAGE_BASELINE := cmd/goc/testdata/runtime_coverage_linux_arm64.json
 COVERAGE_TIMEOUT  ?= 180m
 
 .PHONY: all build test test-unit test-goc-corpus test-goc-cmd test-goc-status \
-        test-goc-coverage runtime-cover-diff test-ruby test-cruby fmt vet clean
+        test-goc-status-opt test-goc-coverage runtime-cover-diff test-ruby \
+        test-cruby fmt vet clean
 
 # The default local check: build, then the whole suite.
 all: build test
@@ -91,6 +95,19 @@ test-goc-cmd:
 test-goc-status:
 	$(GO) test -timeout $(STATUS_TIMEOUT) -run '^$(STATUS_TEST)$$' $(GOC_CMD_PKGS) \
 		-args -runtime-status-shards=$(STATUS_SHARDS) -runtime-status-shard=$(STATUS_SHARD)
+
+# The same matrix with `goc -O`, which is a different configuration and not
+# merely a faster one: the pack every program links against is built with -O
+# too, and both halves of the split are optimized after the split has run.
+#
+# It exists because nothing ran it. `-O` plus a prebuilt pack failed to link
+# sixteen capabilities for as long as the split has existed, and no job or CI
+# run noticed, because every one of them exercised the default arm. A
+# configuration that ships and is never run is a configuration whose state
+# nobody knows.
+test-goc-status-opt:
+	$(GO) test -timeout $(STATUS_TIMEOUT) -run '^$(STATUS_TEST)$$' $(GOC_CMD_PKGS) \
+		-args -runtime-opt -runtime-status-shards=$(STATUS_SHARDS) -runtime-status-shard=$(STATUS_SHARD)
 
 # The complete runtime coverage run: every capability compiled with runtime
 # instrumentation, one explicit compile/run/coverage outcome per capability,

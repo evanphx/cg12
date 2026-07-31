@@ -1701,26 +1701,6 @@ the reports of the jobs that found them.
   radius — a wrong summary stores a stack pointer into the heap — so it wants
   its own validation cycle rather than being folded into §21.
 
-#### The `-runtime-opt` arm of the matrix does not link
-
-Measured 2026-07-31 on `main` (`61b96da`) and on `ccwork/println-spacing`, four
-shards each, failure sets byte-identical: 322 pass and **16 fail** under
-`-runtime-opt`, every one of them the same link error.
-
-```
-goc-program-runtime.o: in function `reflect_makeFuncStub_abi0':
-undefined reference to `reflect_moveMakeFuncArgPtrs'
-undefined reference to `reflect_callReflect_abi0'
-undefined reference to `reflect_callMethod_abi0'
-```
-
-Thirteen `runtime-packages/reflect-*`, `stdlib-crypto/ecdh-x25519`,
-`stdlib-encoding/binary` and `stdlib-encoding/binary-varint`. The Go functions
-that `reflect`'s assembly stubs call are not in the split runtime object when
-`-O` is on. Unattributed and unfixed: it is not caused by §21, and the
-determinism note above records that the matrix is supposed to run `-O` under
-this flag.
-
 #### Compiling the same program twice does not give the same binary
 
 goc's output is not reproducible, and §18 establishes that what remains of it is

@@ -77,4 +77,61 @@ names, in both configurations. The loss happens after the split, in the optimize
 
 ## Fix
 
-See the commit on this branch. Verification results are appended below as they land.
+`ea04425` — `goc/runtime_split.go`, one line, plus the parameter that feeds it:
+
+```go
+-		function.Linkage.Export = programSymbols[name]
++		function.Linkage.Export = programSymbols[name] || assemblyReferences[assemblySymbolName(function.Name)]
+```
+
+Exporting is additive for the functions this compilation's Plan 9 assembly names.
+`finishProgramModule` takes `assemblyReferences` — the same map `compile` already
+computes and already hands to `exportAssemblyReferencedFunctions`.
+
+Why this and not something else:
+
+- **Not `reach.go`.** The functions *are* in the module the front end produces, in both
+  configurations, with the right names. Reachability seeding is fine.
+- **Not "preserve every pre-existing export".** That would also preserve the export bit
+  `ast.IsExported` gives every capitalized Go function, so `DeadFuncElim` would stop
+  eliminating anything in a split build and images would grow for no reason. The bit that
+  carries information the split cannot reconstruct is the assembly one.
+- **Not a change to `DeadFuncElim`.** It cannot see Plan 9 assembly; the module does not
+  carry the translated references, only the source files. The existing design is
+  "assembly-referenced ⇒ exported ⇒ a DCE root", and the defect was that the split broke it.
+- Making these symbols global costs nothing at link: the backend already forces a symbol
+  global when the module's own assembly names it, so in the non-`-O` path this changes no
+  emitted byte.
+
+## Verification
+
+| check | result |
+| --- | --- |
+| `goc build-runtime -O` + `goc -O -runtime` on `reflect_makefunc.go` | links, runs, exit 0; output identical to `go run` |
+| the 19 `runtime-packages/reflect-*` capabilities under `-runtime-opt` | **19/19 PASS** (49.4 s) |
+| `stdlib-crypto/ecdh-x25519`, `stdlib-encoding/binary`, `stdlib-encoding/binary-varint` under `-runtime-opt` | **3/3 PASS** (11.9 s) |
+| the same 22, with the fix reverted (`git stash`), as a control | fail with the reported link error |
+| `TestAnOptimizedProgramKeepsTheFunctionsOnlyAssemblyCalls` | PASS with the fix, FAILs with the same three undefined symbols without it |
+
+New test: `cmd/goc/prebuilt_test.go`. It builds an optimized pack, compiles a
+`reflect.MakeFunc` plus method-value program against it with `-O`, links and runs it, and
+checks the output. Its output (`doubled 42`, `plus 17`) matches `go run` on the host
+toolchain. It costs about 8 s: an optimized pack build is ~3.5 s cold.
+
+### Still unverified at the time of writing
+
+- The full matrix under `-runtime-opt` (running).
+- The full matrix on the default arm, `make test-unit`, `make test-goc-corpus`,
+  `make test-goc-cmd`.
+
+## Keeping it fixed
+
+The reason this shipped broken is that nothing ran it. Added:
+
+- `make test-goc-status-opt` — the matrix with `-runtime-opt`, sharded the same way as
+  `test-goc-status`.
+- a `runtime-status-opt` CI job, 4 shards, alongside the existing `runtime-status`.
+
+It runs *alongside* the default arm rather than replacing it: the two differ in what they
+eliminate, so neither covers the other. Wall-clock cost is recorded below once measured.
+

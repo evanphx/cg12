@@ -83,3 +83,31 @@ jobs:
       - name: make test-goc-status (shard ${{ matrix.shard }})
         run: make test-goc-status STATUS_SHARDS=4 STATUS_SHARD=${{ matrix.shard }}
         timeout-minutes: 20
+
+  # The same matrix with goc optimization on, which is a distinct configuration:
+  # the prebuilt runtime pack is built with -O as well, and both halves of the
+  # split are optimized after the subtraction has run.
+  #
+  # It is here because it was not. `goc -O -runtime pack.gocrt` failed to link
+  # sixteen capabilities for as long as the split has existed and no CI run
+  # noticed, because every job validated the default arm only. It runs
+  # alongside the default arm rather than replacing it: the two differ in what
+  # they eliminate, so neither covers the other.
+  runtime-status-opt:
+    needs: build
+    runs-on: ubuntu-24.04-arm
+    strategy:
+      fail-fast: false
+      matrix:
+        shard: [0, 1, 2, 3]
+    name: runtime-status -O (${{ matrix.shard }}/4)
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+      - name: Install C toolchain (cc for goc linking)
+        run: sudo apt-get update && sudo apt-get install -y build-essential
+      - name: make test-goc-status-opt (shard ${{ matrix.shard }})
+        run: make test-goc-status-opt STATUS_SHARDS=4 STATUS_SHARD=${{ matrix.shard }}
+        timeout-minutes: 25
