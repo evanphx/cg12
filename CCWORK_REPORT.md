@@ -314,7 +314,38 @@ Two independent gates, both in `cmd/goc/runtime_status_test.go`:
 The reason is structural rather than incidental: coverage passes `-runtime-covermeta` per
 program, `goc compile-batch` does not accept that flag, and a worker is one build configuration
 by construction. So on a coverage run the code this branch changed is not reached: the pack set
-is never built and the batch pool is never created. The run itself is reported below.
+is never built and the batch pool is never created.
+
+Confirmed at runtime as well as on the page — `ps` sampled every 2 s through a coverage run
+saw **no `goc compile-batch` process at all**, where the same sampling through a monolithic
+non-coverage run saw one immediately.
+
+### 5c. The coverage run itself
+
+Two full runs, the second with `-v` for a census, both at 8 compile workers (this job's share;
+the bare `make test-goc-coverage` would take the default `NumCPU` and the box is shared):
+
+    go test -count=1 -v -timeout 180m -run '^TestARM64RuntimeCapabilityStatus$' ./cmd/goc \
+      -args -runtime-coverprofile=<out>.json -runtime-coverruns=1 -runtime-status-compile-workers=8
+
+    ok github.com/evanphx/cg12/cmd/goc 227.746s
+    RUN 338   distinct subtests 338   --- PASS 338   --- FAIL 0   --- SKIP 0
+    declared: 337 PASS, 1 EXPECTED FAILURE, 0 KNOWN GAP
+
+Same census as every other arm, and a 4.5 MB coverage report written.
+
+`runtime-cover-diff` against the checked-in baseline does **not** run, and that is pre-existing
+rather than something this branch caused:
+
+    goc: compare runtime coverage: runtime source differs:
+      baseline 10a75b3c..., current 06e314f8...
+
+`RuntimeSourceID` is a hash of the runtime's own source files. `git diff --name-only
+main...HEAD -- stdlib/ goc/` is empty, so the current ID is identical on `main`; and the
+baseline commit (`750c9c2`, "goc: establish runtime coverage baseline") is an ancestor of
+`b5537b5`, the last commit to touch `stdlib/`. The baseline was stale before this branch
+existed. **Flagged, not fixed** — refreshing a coverage baseline is not this job's change to
+make.
 
 ### 6. The matrix A/B, re-measured here
 
