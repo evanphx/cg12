@@ -136,3 +136,74 @@ that the corpus has grown and the percentages have improved, and the guideposts 
 
 That is the guard working, exactly as §4 and §13 said it would. Accepting this run is what
 clears it.
+
+### The rest of the verification
+
+- **`make test-goc-cmd` re-run: PASS**, `ok github.com/evanphx/cg12/cmd/goc 217.612s`, 0
+  failing tests. So the flake above was the only failure in that suite.
+- **Full capability matrix, ordinary (non-instrumented) path** — `go test -v -run
+  '^TestARM64RuntimeCapabilityStatus$' ./cmd/goc/`, `ok ... 311.667s`:
+
+  | | |
+  | --- | ---: |
+  | `--- PASS` subtests | 338 |
+  | `--- FAIL` subtests | 0 |
+  | `--- SKIP` subtests | 0 |
+  | distinct subtest names | 338 |
+  | verdict `PASS` | 337 |
+  | verdict `EXPECTED FAILURE` | 1 (`runtime_panic_print_string.go`) |
+  | verdict `KNOWN GAP` | 0 |
+  | verdict `FAIL` | 0 |
+
+  **Complete list of non-passing capabilities: `defer-panic/panic-string-output`, the
+  declared `expectedFailure`. Nothing else.**
+
+  The instrumented coverage run gives the same census independently — 337 `PASS` + 1
+  `EXPECTED FAILURE`, 338 distinct subtest names — so both compile paths were counted, not
+  just one.
+
+- **Determinism did not regress.** `scripts/determinism-check.sh`:
+
+      hello.go                            round1:identical  round2:identical
+      fmt_sprintf.go                      round1:identical  round2:identical
+      gc_struct.go                        round1:identical  round2:identical
+      runtime_cleanup_frame_retention.go  round1:identical  round2:identical
+      runtime_defer_capture_allocs.go     round1:DIFFERENT  round2:identical
+
+  4 of 5 byte-identical, with `runtime_defer_capture_allocs.go` the documented §5.10 residue
+  the script itself calls out as expected. Unchanged from the recorded state.
+
+## RUNTIME_PLAN.md updates (only what was reproduced here)
+
+- **§1** — the baseline table now carries the 2026-07-31 figures beside the old ones, the
+  source fingerprint, the 338/338 outcome statement, and an explicit sentence that both
+  percentages remain short of §2's guideposts.
+- **§4 M0** — the last checkbox, "Reach one usable coverage outcome per capability", is
+  ticked at 338 of 338, and its text now records that the three former timeouts collect.
+- **§4** — the drift paragraph records both fingerprints and that accepting the run restored
+  the comparison; §4.3 records that the accepted baseline has zero `expected-unavailable`
+  rows.
+- **§5.2.1 checklist** — "A full corpus rerun is still required before accepting a new
+  baseline" is replaced by the fact: `stdlib-http/redirect-keepalive`,
+  `stdlib-http/tls-client-server` and `stdlib-crypto/ecdsa` are each `passed`/`passed`/
+  `collected` in the accepted baseline (checked row by row, not assumed).
+- **§12** — M0 marked COMPLETE (2026-07-31), with the caveat that M0 means coverage is
+  measurable and diffable, not high.
+- **§13 item 1** — rewritten as done, carrying the shortfall against §2 rather than dropping
+  it.
+
+Nothing was ticked that was not reproduced in this job. Nothing was closed in §5.10.
+
+## Still unverified / not done
+
+- **Coverage percentages are not at §2's guideposts.** 54.39% vs 65% active-function, 33.05%
+  vs 45% compiled-block. This job did not attempt to raise them; it accepted a measurement.
+- **The 922 `unknown` missing functions** (down from 975) are still an open triage state that
+  §4.2 says must trend to zero. Untouched here.
+- **`TestBatchCompilesAgainstDifferentPacksMatchOneShotCompiles` remains flaky on `main`.**
+  Diagnosed and measured above, deliberately not fixed — it belongs to a sibling branch.
+- **One collection run, not two.** §4's exit criterion wants two consecutive full runs with
+  the same denominator. This job produced one. The denominator is now structurally enforced
+  (`matrix_capabilities` is `len(runtimeCapabilities())` and a missing row is a collection
+  error), so a second run cannot disagree without failing, but the second run was not made.
+- `make test-ruby` and `make test-cruby` were not run; they are outside this task's area.

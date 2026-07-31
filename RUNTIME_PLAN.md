@@ -1069,7 +1069,8 @@ Current checkpoint:
 - [x] Re-check the stale large-program failures from the accepted baseline:
   optimized `stdlib-http/redirect-keepalive`, `stdlib-http/tls-client-server`,
   and `stdlib-crypto/ecdsa` now pass individually under the 3 GiB process
-  limit. A full corpus rerun is still required before accepting a new baseline.
+  limit. The full corpus rerun this asked for happened on 2026-07-31 and all
+  three collect coverage in the accepted baseline.
 - [x] Remove the duplicate legacy `.cg12_stackmaps` section from Go-runtime
   binaries; the native Go `moduledata`/pclntab stack maps are the authoritative
   metadata there. This fixed the unoptimized `stdlib-http/parse-roundtrip`
