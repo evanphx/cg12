@@ -163,3 +163,21 @@ branch instead:
 including `evaluation order: [one two three]`.
 
 `make test-unit`: pass, 0 FAIL.
+
+## A test that would have caught it
+
+`goc/determinism_test.go`, `TestCompilingTheSameSourceTwiceGivesTheSameModule`:
+compile one source twice **in one process** and compare the serialized modules.
+It works because Go randomizes each `range` over a map independently, so two
+in-process compiles draw different traversal orders exactly as two processes do
+— no repeated linking, no corpus, 4.4 s.
+
+It earns its place the way §14 asks: it **fails 3 times out of 3** on the
+compiler with the variadic fix reverted, naming `main.nested` and `main.mixed`
+(the two `...any` callers in its program), and **passes 5 times out of 5** with
+it. It compares `MarshalBinary` rather than the printed text, because the text
+form omits a datum's relocation base, pointer words and typelink flag, and those
+reach the image too.
+
+It lives in `./goc/...`, which is `make test-goc-corpus`, not the fast unit
+bucket: it needs a whole runtime compile.
