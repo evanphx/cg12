@@ -17,7 +17,13 @@ func applyNativeStdlibOverlays(module *ir.Module, units map[string]*sourceUnit) 
 		dataNames[data.Name] = true
 	}
 
-	for packagePath, unit := range units {
+	// Import-path order, not map order: each overlay appends its functions and
+	// data to the module, so the walk decides where every one of them lands and
+	// therefore what address it gets. Only one package carries a native overlay
+	// today, which is the only reason ranging the map had nothing to disagree
+	// about; a second one would have made the compile irreproducible.
+	for _, unit := range orderedUnits(units) {
+		packagePath := unit.path
 		for _, native := range unit.native {
 			overlayModule, err := cg12parse.Parse(native.source)
 			if err != nil {
