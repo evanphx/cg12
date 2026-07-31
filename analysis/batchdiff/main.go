@@ -155,7 +155,19 @@ func main() {
 
 // compareBehaviour runs the three builds of every program and reports how many
 // disagree on exit status or output.
+//
+// A first disagreement is not the answer. A handful of corpus programs print
+// allocation and GC statistics, and those move with scheduling rather than with
+// what compiled the program: measured 2026-07-31, one single executable of
+// `bytes_grow_compare.go` produced three distinct outputs in 21 runs under the
+// concurrency this function uses, and `bytes_grow_stats.go` two in 21 -- and the
+// three builds of the latter were the same file, byte for byte. So a program
+// whose three builds disagree is run repeatedly and reported only if some build's
+// set of outputs never overlaps another's, which is what a program that was
+// actually compiled differently would look like.
 func compareBehaviour(work string, programs []string, workers int) int {
+	const disagreementRepeats = 5
+
 	type behaviour struct {
 		name     string
 		differed bool
@@ -172,19 +184,35 @@ func compareBehaviour(work string, programs []string, workers int) int {
 			defer func() { <-slots }()
 
 			name := filepath.Base(program)
-			aloneOutput, aloneCode := runBuild(filepath.Join(work, name+".alone"))
-			batchOutput, batchCode := runBuild(filepath.Join(work, name+".batch"))
-			reversedOutput, reversedCode := runBuild(filepath.Join(work, name+".reversed"))
+			alone := filepath.Join(work, name+".alone")
+			batch := filepath.Join(work, name+".batch")
+			reversed := filepath.Join(work, name+".reversed")
+			aloneOutput, aloneCode := runBuild(alone)
+			batchOutput, batchCode := runBuild(batch)
+			reversedOutput, reversedCode := runBuild(reversed)
 			if aloneCode == batchCode && aloneCode == reversedCode &&
 				aloneOutput == batchOutput && aloneOutput == reversedOutput {
+				results[index] = behaviour{name: name}
+				return
+			}
+
+			aloneBehaviours := repeatedBehaviours(alone, disagreementRepeats)
+			batchBehaviours := repeatedBehaviours(batch, disagreementRepeats)
+			reversedBehaviours := repeatedBehaviours(reversed, disagreementRepeats)
+			aloneBehaviours[behaviourKey(aloneOutput, aloneCode)] = true
+			batchBehaviours[behaviourKey(batchOutput, batchCode)] = true
+			reversedBehaviours[behaviourKey(reversedOutput, reversedCode)] = true
+			if overlaps(aloneBehaviours, batchBehaviours) && overlaps(aloneBehaviours, reversedBehaviours) {
 				results[index] = behaviour{name: name}
 				return
 			}
 			results[index] = behaviour{
 				name:     name,
 				differed: true,
-				detail: fmt.Sprintf("alone rc=%d batch rc=%d reversed rc=%d\n  alone   : %s\n  batch   : %s\n  reversed: %s",
-					aloneCode, batchCode, reversedCode, trim(aloneOutput), trim(batchOutput), trim(reversedOutput)),
+				detail: fmt.Sprintf("alone rc=%d batch rc=%d reversed rc=%d; %d/%d/%d distinct behaviours in %d runs each, and they do not overlap\n  alone   : %s\n  batch   : %s\n  reversed: %s",
+					aloneCode, batchCode, reversedCode,
+					len(aloneBehaviours), len(batchBehaviours), len(reversedBehaviours), disagreementRepeats+1,
+					trim(aloneOutput), trim(batchOutput), trim(reversedOutput)),
 			}
 		}(index, program)
 	}
@@ -199,6 +227,33 @@ func compareBehaviour(work string, programs []string, workers int) int {
 		fmt.Printf("BEHAVIOUR DIFFERS      %-46s %s\n", result.name, result.detail)
 	}
 	return differing
+}
+
+// behaviourKey is one observation of what running a build does: its exit status
+// and everything it printed.
+func behaviourKey(output string, code int) string {
+	return fmt.Sprintf("rc=%d\n%s", code, output)
+}
+
+// repeatedBehaviours runs one build several times and returns the distinct
+// behaviours it showed.
+func repeatedBehaviours(path string, repeats int) map[string]bool {
+	behaviours := make(map[string]bool, repeats)
+	for repeat := 0; repeat < repeats; repeat++ {
+		output, code := runBuild(path)
+		behaviours[behaviourKey(output, code)] = true
+	}
+	return behaviours
+}
+
+// overlaps reports whether two builds ever behaved the same way.
+func overlaps(left, right map[string]bool) bool {
+	for behaviour := range left {
+		if right[behaviour] {
+			return true
+		}
+	}
+	return false
 }
 
 // runBuild executes one build under a deadline, because RUNTIME_PLAN 5.10
