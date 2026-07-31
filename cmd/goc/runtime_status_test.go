@@ -1761,6 +1761,27 @@ func runtimeCapabilities() []runtimeCapability {
 			expectation: runtimeCapabilityMustPass,
 		},
 		{
+			category:    "assignment-targets",
+			name:        "range-target-forms",
+			source:      "runtime_range_target_forms.go",
+			expectation: runtimeCapabilityMustPass,
+			output:      "range target forms ok",
+		},
+		{
+			category:    "assignment-targets",
+			name:        "range-target-order",
+			source:      "runtime_range_target_order.go",
+			expectation: runtimeCapabilityMustPass,
+			output:      "range target order ok",
+		},
+		{
+			category:    "assignment-targets",
+			name:        "multi-assignment-forms",
+			source:      "runtime_assign_target_forms.go",
+			expectation: runtimeCapabilityMustPass,
+			output:      "assign target forms ok",
+		},
+		{
 			category:        "defer-panic",
 			name:            "panic-string-output",
 			source:          "runtime_panic_print_string.go",

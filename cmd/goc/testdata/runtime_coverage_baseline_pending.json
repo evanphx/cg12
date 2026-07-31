@@ -4,6 +4,18 @@
   "note": "Capabilities the accepted baseline does not cover. TestCheckedRuntimeCoverageBaselineDenominator reconciles the capability matrix, the accepted baseline, and this list, so the corpus denominator cannot drift silently. Adding a capability requires either a baseline rerun or an entry here.",
   "capabilities": [
     {
+      "capability": "assignment-targets/multi-assignment-forms",
+      "reason": "added to the capability matrix after the accepted 2026-07-22 baseline run; it enters the baseline at the next full-corpus rerun"
+    },
+    {
+      "capability": "assignment-targets/range-target-forms",
+      "reason": "added to the capability matrix after the accepted 2026-07-22 baseline run; it enters the baseline at the next full-corpus rerun"
+    },
+    {
+      "capability": "assignment-targets/range-target-order",
+      "reason": "added to the capability matrix after the accepted 2026-07-22 baseline run; it enters the baseline at the next full-corpus rerun"
+    },
+    {
       "capability": "core-types/type-param-method-dispatch",
       "reason": "added to the capability matrix after the accepted 2026-07-22 baseline run; it enters the baseline at the next full-corpus rerun"
     },
