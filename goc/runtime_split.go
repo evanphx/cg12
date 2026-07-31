@@ -347,7 +347,11 @@ func finishRuntimeModule(module *ir.Module, split *runtimeSplit, programFunction
 // half: it drops every definition the prebuilt object already has, exports the
 // ones the prebuilt object left for it, and gives the module a moduledata of its
 // own.
-func finishProgramModule(module *ir.Module, split *runtimeSplit) error {
+//
+// assemblyReferences is the set of symbols this compilation's Plan 9 assembly
+// names, in assembly spelling. The export decision below needs it; see the
+// comment there.
+func finishProgramModule(module *ir.Module, split *runtimeSplit, assemblyReferences map[string]bool) error {
 	module.Data = dropShadowedDefinitions(module.Data)
 	manifest := split.manifest
 	defined := manifest.DefinedSet()
@@ -437,7 +441,16 @@ func finishProgramModule(module *ir.Module, split *runtimeSplit) error {
 			split.subtractedFunctions++
 			continue
 		}
-		function.Linkage.Export = programSymbols[name]
+		// Two reasons to export, and the second one is not about linking at all.
+		// A function only Plan 9 assembly calls -- reflect.callReflect,
+		// reflect.moveMakeFuncArgPtrs -- has no caller in the IR, and the export
+		// bit exportAssemblyReferencedFunctions gave it is the only thing keeping
+		// opt.DeadFuncElim from deleting it, because the optimizer runs after the
+		// split and cannot see assembly. Assigning the manifest's answer over that
+		// bit deleted those functions from every optimized program module, and
+		// with them the ABI0 wrappers arm64 emits only for functions the module
+		// still has -- so the sidecar referenced three symbols nothing defined.
+		function.Linkage.Export = programSymbols[name] || assemblyReferences[assemblySymbolName(function.Name)]
 		keptFunctions = append(keptFunctions, function)
 		split.keptFunctions++
 	}

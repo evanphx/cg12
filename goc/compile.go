@@ -496,7 +496,7 @@ func compile(name string, src []byte, options compileOptions) (*ir.Module, error
 		rootPackageFunctions = append(rootPackageFunctions, redirectedCallWrappers...)
 		finishRuntimeModule(mod, options.runtimeSplit, rootPackageFunctions, rootPackageData)
 	case options.runtimeSplit.againstRuntime():
-		if err := finishProgramModule(mod, options.runtimeSplit); err != nil {
+		if err := finishProgramModule(mod, options.runtimeSplit, assemblyReferences); err != nil {
 			return nil, err
 		}
 	}

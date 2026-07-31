@@ -86,8 +86,16 @@ func main() {
 // linkAgainstPack compiles source as a program module and links it with the pack.
 func linkAgainstPack(t *testing.T, pack *runtimepack.Pack, source string) string {
 	t.Helper()
+	return linkAgainstPackWith(t, pack, source, prebuilt.Options{})
+}
+
+// linkAgainstPackWith is linkAgainstPack for a pack that was not built with the
+// default options. Both halves of a split have to agree on them, so the caller
+// passes the same options it built the pack with.
+func linkAgainstPackWith(t *testing.T, pack *runtimepack.Pack, source string, options prebuilt.Options) string {
+	t.Helper()
 	work := t.TempDir()
-	program, err := prebuilt.CompileProgram(goc.TargetARM64, "split.go", []byte(source), []*runtimepack.Manifest{&pack.Manifest}, prebuilt.Options{})
+	program, err := prebuilt.CompileProgram(goc.TargetARM64, "split.go", []byte(source), []*runtimepack.Manifest{&pack.Manifest}, options)
 	require.NoError(t, err)
 
 	runtimeObject := filepath.Join(work, "runtime.o")
@@ -199,6 +207,86 @@ func TestThePrebuiltRuntimeLeavesTheProgramsSymbolsUndefined(t *testing.T) {
 	}
 	assert.Contains(t, pack.Manifest.ProgramSymbols, "error_Error")
 	assert.Contains(t, pack.Manifest.ProgramSymbols, "main_main")
+}
+
+var (
+	optimizedPackOnce sync.Once
+	optimizedPackData *runtimepack.Pack
+	optimizedPackErr  error
+)
+
+// sharedOptimizedPrebuiltRuntime builds the -O pack once for the package's tests.
+//
+// It is a second pack rather than a flag on the first because a pack records the
+// options it was built with and CompileProgram refuses a program compiled with
+// different ones: -O plus a pack is its own configuration, and it is the one
+// nothing was covering.
+func sharedOptimizedPrebuiltRuntime(t *testing.T) *runtimepack.Pack {
+	t.Helper()
+	if runtime.GOARCH != "arm64" {
+		t.Skip("linux/arm64 Go runtime image")
+	}
+	if _, err := exec.LookPath("cc"); err != nil {
+		t.Skip("cc is required to assemble the Go runtime's Plan 9 sidecar")
+	}
+	optimizedPackOnce.Do(func() {
+		optimizedPackData, optimizedPackErr = prebuilt.BuildRuntime(goc.TargetARM64, prebuilt.Options{Optimize: true})
+	})
+	require.NoError(t, optimizedPackErr)
+	return optimizedPackData
+}
+
+// prebuiltReflectProgram reaches reflect's Plan 9 assembly stubs, which is the
+// only way to reach the Go functions nothing in Go calls.
+//
+// reflect.MakeFunc's returned closure enters reflect_makeFuncStub, and a method
+// value's enters reflect_methodValueCall. Both are assembly, and both call
+// reflect.moveMakeFuncArgPtrs and then reflect.callReflect or
+// reflect.callMethod -- Go functions with no Go caller anywhere in the image.
+const prebuiltReflectProgram = `package main
+
+import "reflect"
+
+type counter struct{ base int }
+
+func (c counter) Plus(delta int) int { return c.base + delta }
+
+func main() {
+	doubled := reflect.MakeFunc(
+		reflect.TypeOf(func(int) int { return 0 }),
+		func(arguments []reflect.Value) []reflect.Value {
+			return []reflect.Value{reflect.ValueOf(int(arguments[0].Int() * 2))}
+		},
+	).Interface().(func(int) int)
+	println("doubled")
+	println(doubled(21))
+
+	plus := reflect.ValueOf(counter{base: 10}).MethodByName("Plus").Interface().(func(int) int)
+	println("plus")
+	println(plus(7))
+}
+`
+
+// The configuration this test covers is -O *and* a pack, because neither alone
+// reproduced the defect it is here for.
+//
+// A Go function only Plan 9 assembly calls has no caller in the IR, so the
+// export bit exportAssemblyReferencedFunctions gives it is the only thing
+// keeping opt.DeadFuncElim -- which runs after the split and cannot see
+// assembly -- from deleting it. finishProgramModule used to assign the
+// manifest's answer over that bit, so every optimized program module lost
+// reflect.callReflect, reflect.callMethod and reflect.moveMakeFuncArgPtrs, and
+// with them the ABI0 wrappers arm64 emits only for functions the module still
+// has. The link failed naming three symbols nothing defined.
+func TestAnOptimizedProgramKeepsTheFunctionsOnlyAssemblyCalls(t *testing.T) {
+	pack := sharedOptimizedPrebuiltRuntime(t)
+
+	executable := linkAgainstPackWith(t, pack, prebuiltReflectProgram, prebuilt.Options{Optimize: true})
+	output, status := runImage(t, executable)
+
+	assert.Equal(t, 0, status, output)
+	assert.Contains(t, output, "doubled\n42\n")
+	assert.Contains(t, output, "plus\n17\n")
 }
 
 // A pack and a program that disagree about the compiler options are one image
