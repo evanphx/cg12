@@ -1,528 +1,109 @@
-# VERDICT: PASS — `ccwork/batch-reconcile` can be merged
-
-Every check the briefing asked for has been run here and read. The reasoning, in one place:
-
-- **There is no leak.** All 358 corpus programs, compiled three ways against the full
-  seven-pack set — one process each, one batch, and a batch in reverse — produce identical
-  behaviour and identical *content* (same symbols, same sizes, same image size). This was done
-  **twice**, as two independent draws: 325 of 358 byte-identical the first time, 324 the
-  second, with a partly different set differing each time. Every differing program is
-  demonstrably nondeterministic with no batch process anywhere in the picture: recompiled
-  alone, they produce the batch's exact bytes. §5.10 already records this residue and says 39
-  of the 358 vary at all.
-- **The new case is covered.** A single worker compiled 33 programs ordered so that programs
-  choosing `net/http`, four different crypto packs, `net/smtp` and the runtime-only fallback
-  were interleaved throughout, so that one process read all seven packs and kept each while
-  compiling programs that chose the others. 0 leaks, behaviour identical for all 33.
-- **Nothing regressed.** `make test-unit`, `make test-goc-cmd`, `make test-goc-corpus` pass.
-  The full matrix passes 338/338 with 337 `PASS`, 1 `EXPECTED FAILURE`, 0 `KNOWN GAP`, 0
-  `FAIL` — in all four arms tried, including the two paths the branch never exercised.
-- **The claim reproduces.** Compile CPU falls 22.1% against `main` and 22.2% against a
-  one-flag-apart control on this tree; the control lands 0.14% from `main`. The wall-clock
-  figure is smaller than the branch's −22.2% because the branch measured at 4 workers and this
-  at 8, which is exactly what §20's own bound predicts.
-
-Two things are flagged rather than fixed, neither of them caused by this branch and neither
-blocking: the checked-in runtime coverage baseline is stale on `main` (§5c below), and the
-compiler's front-end nondeterminism is unchanged (§5.10).
-
-Two defects *were* found and fixed here, both in the measurement tool and neither in the
-compiler: `analysis/batchdiff` triaged a differing program with a single solitary recompile
-(commit `1b3b2aa`), and declared a behaviour difference on the first disagreement (commit
-`57e8ec0`). Against a compiler that yields five distinct images in five compiles, and two
-corpus programs whose printed GC statistics move with scheduling, both report differences that
-are not there — five of them across this job's own runs.
-
-Nothing under `goc/ ir/ opt/ arm64/ amd64/ link/ obj/ lower/ parse/ internal/ stdlib/` is
-touched by this job either, and `analysis/batchdiff` has no importers, so the suite results
-below still describe the tree as tested.
-
-Branch: `ccwork/verify-batch-reconcile`, off `ccwork/batch-reconcile` (`76030b4`).
-That branch's own report is preserved verbatim at `docs/report-batch-reconcile.md`, following
-the precedent those jobs set. No change to any compiler source file is proposed by this job.
-
-## What is being verified
-
-`ccwork/batch-reconcile` reconciles `goc compile-batch` with §19's multi-pack selection by
-introducing a `packSet` that reads every candidate pack's manifest up front and each pack's
-objects lazily, retaining them for the life of the process. Its own report left its central
-safety property unverified: **a program compiled in a process that has already compiled other
-programs must produce the same executable as a program compiled alone.**
-
-`git diff --name-only main...HEAD` over `goc/ ir/ opt/ arm64/ amd64/ link/ obj/ lower/ parse/
-internal/` is empty — confirmed again here. Only `cmd/goc/` and `analysis/batchdiff/` change.
-So no compile *can* emit different code for a reason this branch introduced; what can differ is
-when state is read and what a worker carries between programs.
-
-## Environment
-
-- linux/arm64, 64 cores, ~240 GB RAM, gcc 13.3, Go 1.26.1.
-- `CCWORK_CPU_SLOTS=8`; this job uses 8 compile workers unless a step says otherwise.
-- The box is **shared**. Load average at the start of this job was 8.28 / 11.42 / 10.55, so
-  another job was resident throughout. Every wall-clock number below is reported with the load
-  it was taken under, and the A/B is run back-to-back so both arms see the same neighbours.
-- Scratch under `$TMPDIR` on `/dev/md0` (659 GB free), not tmpfs.
-
-## The pack set, and which program picks which pack
-
-The matrix's seven roots (`runtimeCapabilityPackRoots`) were built here and their manifests
-read directly:
-
-| pack | root | closure |
-| --- | --- | ---: |
-| 0 | (runtime only) | 29 |
-| 1 | `net/http` | 181 |
-| 2 | `net/smtp` | 161 |
-| 3 | `crypto/x509` | 140 |
-| 4 | `crypto/ecdsa` | 113 |
-| 6 | `crypto/hpke` | 110 |
-| 5 | `crypto/ecdh` | 93 |
-
-`chooseManifest` takes the usable candidate with the largest closure. Usability was measured,
-not guessed: every corpus program that imports anything under `net/` or `crypto/` (28 of them)
-was compiled against each rich pack offered alone, and the pack was recorded as usable exactly
-when the compile succeeded rather than failing with "none of the N prebuilt runtimes offered is
-usable by this program". No probe failed for any other reason.
-
-The resulting selection over the 358-program corpus:
-
-| pack | programs |
-| --- | --- |
-| 1 (`net/http`) | `stdlib_http_parse_roundtrip`, `stdlib_http_cookiejar`, `stdlib_http_multipart_form`, `stdlib_http_client_server`, `stdlib_http_redirect_keepalive`, `stdlib_http_tls_client_server` |
-| 2 (`net/smtp`) | `stdlib_smtp_session` |
-| 3 (`crypto/x509`) | `stdlib_crypto_x509_ed25519` |
-| 4 (`crypto/ecdsa`) | `stdlib_crypto_ecdsa` |
-| 6 (`crypto/hpke`) | `stdlib_crypto_hpke` |
-| 5 (`crypto/ecdh`) | `stdlib_crypto_ecdh_x25519` |
-| 0 (fallback) | the other 347 |
-
-All seven packs are therefore live, and the interleaved-batch case the briefing asks for is
-constructible from this corpus.
-
-## Results
-
-### 1a. Corpus-wide leak check — 358 programs, three ways, seven packs
-
-    batchdiff -goc goc -runtime <all seven packs> -j 7 <358 programs, rich programs interleaved>
-
-The program order was constructed rather than taken from the glob: alphabetically the eleven
-programs that select a rich pack sit next to each other, so a shared queue would hand them out
-at the same moment and each worker would meet at most one. They were spread evenly through the
-347 fallback programs instead, cycling `net/http`, `crypto/x509`, `net/http`, `crypto/ecdsa`,
-`net/http`, `crypto/hpke`, `net/http`, `crypto/ecdh`, `net/http`, `net/smtp`, `net/http`.
-
-    one-shot         358 programs in 217.2s, 0 failed
-    batch            358 programs in 183.6s, 0 failed
-    batch-reversed   358 programs in 170.5s, 0 failed
-    summed per-program compile wall: one-shot=1499.8s batch=1178.5s (321.3s saved, 21.4%)
-
-    identical=325 differing=33
-
-**No program built one way and failed another** — `0 failed` in all three passes, and no
-`BUILD DISAGREES` line. 325 of 358 are byte-identical alone, in a batch, and in a reversed
-batch.
-
-The 33 that differ are being resolved individually below; the plan already states
-(§5.10, "Compiling the same program twice does not give the same binary") that **39 of the 358
-corpus programs vary at all** across repeated one-shot compiles, so a set of 33 is the
-expected size for the pre-existing front-end nondeterminism rather than for a leak. The
-pattern in the digests already points that way — several programs have `alone == reversed`
-but `batch` different, and three have `alone == batch` but `reversed` different, which is what
-three independent draws from a nondeterministic compiler look like and not what a
-batch-versus-alone leak looks like. That is an argument, not a proof, so each of the 33 was
-recompiled alone five times to show the same variation without batch mode at all.
-
-### 1b. Every one of the 33 differs without batch mode too
-
-Each of the 33 was compiled five more times by a plain one-shot `goc` — the identical command
-line the `.alone` pass used, `goc -runtime <seven packs> -o out prog.go` — and the distinct
-executables counted. **29 of the 33 produced between 2 and 5 distinct executables in 5
-one-shot compiles**, which settles them: they are nondeterministic with no batch process
-anywhere in the picture.
-
-| distinct executables in 5 solo compiles | programs |
-| ---: | ---: |
-| 5 (the sampler saturates) | 17 |
-| 4 | 5 |
-| 3 | 4 |
-| 2 | 3 |
-| 1 | 4 |
-
-Seventeen programs gave a different image on every one of five compiles, so those counts are
-lower bounds on the entropy rather than measurements of it.
-
-The four that looked stable in five compiles were given 20 to 60 more, all written to a single
-fixed output path so nothing about the destination could be the variable. **All four are
-nondeterministic too, and in each case a plain one-shot `goc` reproduces the exact digest the
-batch produced:**
-
-| program | solo compiles | distinct images | digests seen | corpus run |
-| --- | ---: | ---: | --- | --- |
-| `stdlib_encoding_json_roundtrip.go` | 25 | 2 | `b3b06ea8`, `0cc28f52` | alone=`b3b06ea8` batch=rev=`0cc28f52` |
-| `stdlib_net_mail_textproto.go` | 53 | 2 | `e7353aad` (3×), `7f118fb9` (50×) | alone=`e7353aad` batch=rev=`7f118fb9` |
-| `stdlib_runtime_trace_start_probe.go` | 25 | 2 | `727b0ea9`, `455da42f` | alone=batch=`727b0ea9` rev=`455da42f` |
-| `stdlib_testing_quick.go` | 25 | 5 | incl. `41e747d9`, `1e9c3aa8`, `e3a72d74` | alone=`41e747d9` batch=`1e9c3aa8` rev=`e3a72d74` |
-
-Every digest the three passes produced for these four is reproducible by a one-shot compile,
-including all three of `stdlib_testing_quick.go`'s. `stdlib_net_mail_textproto.go` is the
-skewed one — 3 of 53 compiles take the other branch — which is why five repeats had missed it.
-
-The output path is not what varies either: `.alone`, `.batch` and `.reversed` are three
-different output paths for every one of the 358 programs, and 325 of them are byte-identical
-across all three.
-
-None of this is new. §5.10 already records that goc's output is not reproducible, that the
-remaining causes are in the front end, and that **39 of the 358 corpus programs vary at all**.
-The 33 found here are a subset of that population, and the whole set of 39 is unrelated to
-this branch: no file that decides what a compile emits differs from `main`.
-
-### 1c. Behaviour — 358/358 identical
-
-The bytes cannot speak for a program whose compile is already nondeterministic, so all three
-builds of all 358 programs were run and their exit status and combined output compared. The
-binaries from the run above were reused, so this is the same three builds, not a fourth:
-
-    SAME 358    DIFFERS 0
-
-Every corpus program behaves identically whether it was compiled alone, in a batch, or in a
-reversed batch — including all 33 whose bytes differ.
-
-### 1d. What actually differs in the 33 is addresses, not content
-
-Bytes are a blunt instrument against a compiler whose function layout is not reproducible, so
-the 33 were compared structurally as well: `nm --defined-only -S`, reduced to (type, size,
-name) and sorted, plus the file size.
-
-    33 of 33: symbol set identical alone/batch, identical alone/reversed, file size identical
-
-Same symbols, same sizes, same number of them (36148 for `stdlib_smtp_session.go`, 25846 for
-`stdlib_crypto_ecdsa.go`, 22866 for `bytes_replace_allocs.go`), same total image size — only
-the addresses move. That is exactly the residue §5.10 names: "441 interface-call wrapper
-functions land in the module in a different order on each compile. Same functions, same code,
-different addresses."
-
-### 1e. The new case — one worker, seven packs, interleaved
-
-The corpus run's shared queue cannot guarantee that any single worker meets programs choosing
-*different* packs: only eleven of 358 programs choose a rich pack. So a second run pinned the
-grouping. **One** batch worker (`-j 1`), 33 programs, ordered so that a rich-pack program sits
-between fallback programs throughout:
-
-    plain, net/http, plain, plain, crypto/x509, plain, plain, net/http, plain, plain,
-    crypto/ecdsa, plain, plain, net/http, plain, plain, crypto/hpke, plain, plain, net/http,
-    plain, plain, crypto/ecdh, plain, plain, net/http, plain, plain, net/smtp, plain, plain,
-    net/http, plain
-
-That single process therefore read all seven packs, each on the first program that selected
-it, and kept them while compiling programs that selected the others. Result:
-
-    one-shot         33 programs in 252.0s, 0 failed
-    batch            33 programs in 218.7s, 0 failed
-    batch-reversed   33 programs in 213.9s, 0 failed
-    identical=23 differing=10
-    behaviour: identical=33 differing=0
-
-`batchdiff`'s own triage called 3 of the 10 leaks — `bytes_replace_allocs.go`,
-`stdlib_crypto_ecdsa.go`, `stdlib_smtp_session.go` — but its triage recompiles a differing
-program alone exactly **once** and calls it a leak if that one repeat matches. Against a
-compiler that yields up to five distinct images in five compiles, one repeat decides nothing.
-All three were resolved by repeating properly, and in each case a plain one-shot `goc`
-reproduces the digest that had been attributed to the batch:
-
-| program | digest `batchdiff` called batch-only | reproduced by a one-shot compile | distinct images in 12 solo compiles |
-| --- | --- | --- | ---: |
-| `bytes_replace_allocs.go` | `1da4fe4787d7` (and 4 others seen) | yes — 10 distinct values | 10 |
-| `stdlib_crypto_ecdsa.go` | `f71870049f71` | yes | 2 |
-| `stdlib_smtp_session.go` | `0954b405b6a7` | yes | 2 |
-
-`stdlib_crypto_ecdsa.go` and `stdlib_smtp_session.go` were byte-identical all three ways in
-the 358-program run and differed only here, which is itself the behaviour of a coin flip
-rather than of a leak. All 33 curated programs behave identically across the three builds.
-
-**There is no leak.** No program's bytes differ between a batch and a solitary compile for any
-reason that a solitary compile does not reproduce on its own, no program's symbol content
-differs, and no program behaves differently.
-
-### 1f. The whole leak check again, with the corrected tool
-
-Everything in 1a–1e was reached with the tool as the branch left it, plus manual analysis
-outside it. After fixing `analysis/batchdiff` (see "The one defect found" below) the entire
-corpus check was run again from scratch — a second independent draw of all three passes:
-
-    one-shot         358 programs in 223.0s, 0 failed
-    batch            358 programs in 178.7s, 0 failed
-    batch-reversed   358 programs in 167.6s, 0 failed
-    summed per-program compile wall: one-shot=1465.7s batch=1145.0s (320.7s saved, 21.9%)
-
-    identical=324 differing=34
-    ... 34 × LAYOUT ONLY (same symbols, same sizes, same image size; only addresses moved)
-    leaks=0 explained=34
-
-**34 differing this time rather than 33, and a partly different set** — `runtime_assembly.go`,
-`stdlib_math_big_rat_int.go`, `stdlib_runtime_trace_start_only.go` and
-`stdlib_url_resolve_query.go` appear here and did not before; `stdlib_crypto_ed25519.go`,
-`stdlib_net_mail_textproto.go` and `stdlib_image_png_roundtrip.go` were there and are not here.
-That is the point: which programs draw a different layout is itself a coin flip, and it is
-independent of batch mode. Both draws agree on the thing that matters — **0 leaks**, and every
-differing program identical in content.
-
-This run also surfaced a second false alarm, and resolving it is worth recording:
-
-    BEHAVIOUR DIFFERS  bytes_grow_compare.go   alone rc=0 batch rc=0 reversed rc=0
-    BEHAVIOUR DIFFERS  bytes_grow_stats.go     alone rc=0 batch rc=0 reversed rc=0
-
-Neither is a compile difference. `bytes_grow_stats.go`'s three builds are **the same file**:
-
-    sha256(alone) = sha256(batch) = sha256(reversed) = 8426bf9e923c3afd
-
-One binary cannot be miscompiled relative to itself. Both programs print allocation and GC
-statistics, and those move with scheduling. Running **one** executable repeatedly, at the
-7-way concurrency the comparison itself uses:
-
-| program | runs of one binary | distinct outputs |
-| --- | ---: | ---: |
-| `bytes_grow_compare.go` | 21 | 3 |
-| `bytes_grow_stats.go` | 21 | 2 |
-| either, run serially on an idle box | 12 | 1 |
-
-So the behaviour comparison had a false-positive mode of its own, load-dependent, which is why
-the first behaviour pass over the same 358 programs reported 358/358 identical and this one did
-not. Fixed in `57e8ec0`; see below.
-
-### 2. `scripts/determinism-check.sh`
-
-With the seven packs:
-
-    hello.go                            round1:identical(942b6223782f883a)  round2:identical(942b6223782f883a)
-    fmt_sprintf.go                      round1:identical(18bb962e04c87aee)  round2:identical(18bb962e04c87aee)
-    gc_struct.go                        round1:identical(78f936781428f778)  round2:identical(78f936781428f778)
-    runtime_cleanup_frame_retention.go  round1:identical(1223fe641a7fe742)  round2:identical(1223fe641a7fe742)
-    runtime_defer_capture_allocs.go     round1:DIFFERENT  round2:DIFFERENT
-
-With no pack at all (the monolithic compile path):
-
-    hello.go                            round1:identical(cf3c0fbdf176bf8f)  round2:identical(cf3c0fbdf176bf8f)
-    fmt_sprintf.go                      round1:identical(1a2ec8b6bd5d8fc3)  round2:identical(1a2ec8b6bd5d8fc3)
-    gc_struct.go                        round1:identical(7a91825db343e217)  round2:identical(7a91825db343e217)
-    runtime_cleanup_frame_retention.go  round1:identical(c09f3902a7c430dd)  round2:identical(c09f3902a7c430dd)
-    runtime_defer_capture_allocs.go     round1:DIFFERENT  round2:DIFFERENT
-
-4 of 5 byte-identical cold (`CG12_NOCACHE=1`) against warm on both compile paths, in both
-rounds, and stable across rounds; `runtime_defer_capture_allocs.go` is the known §5.10
-front-end residue and is the only program that differs, on either path. **PASS**, and it
-matches what §19's own report recorded for this check.
-
-### 3. The test suites
-
-`go build ./...` and `go vet ./...` clean. `make test-unit`: **PASS**, every package `ok`
-(`arm64`, `arm64/a64`, `bpf`, `cmd/cc`, `cmd/cg12`, `internal/backendtest`, `internal/gometa`,
-`internal/runtimepack`, `internal/testenv`, `interp`, `ir`, `lift`, `link`, `lower`, `obj`,
-`opt`, `parse`, `pe`, `plan9asm`, `plan9asm/sem`, `wasm`, and the `analysis`/`cc` packages).
-
-`make test-goc-cmd`: **PASS** — `ok github.com/evanphx/cg12/cmd/goc 213.765s`.
-`make test-goc-corpus`: **PASS** — `ok github.com/evanphx/cg12/goc 528.370s`.
-
-### 4. The full capability matrix on this branch
-
-Full unsharded run, `-count=1 -v`, 8 compile workers (this job's declared share), batch on and
-the seven packs on — the default configuration:
-
-    label=branch-batch-on wall=174.4 exit=0 subtests=338 pass=338 fail=0 skip=0
-      declaredPASS=337 expectedFAILURE=1 knownGAP=0
-    programs=338 compile_cpu=1095.9 slowest_compile=24.0 (stdlib-http/tls-client-server)
-    run_total=13.9 slowest_run=5.1 (stdlib-signals/atomic-contention)
-
-Census taken from the verbose log rather than from `ok`:
-
-| counted from the log | value |
-| --- | ---: |
-| `=== RUN TestARM64RuntimeCapabilityStatus/<cat>/<name>` lines | 338 |
-| distinct subtest names | 338 |
-| `--- PASS:` subtests | 338 |
-| `--- FAIL:` / `--- SKIP:` subtests | 0 / 0 |
-| declared `PASS` | 337 |
-| declared `EXPECTED FAILURE` | 1 |
-| declared `KNOWN GAP` | 0 |
-
-**The complete list of non-passing capabilities is one entry:**
-
-    defer-panic/panic-string-output   runtime_panic_print_string.go   EXPECTED FAILURE
-      (compile=passed 1.521s, run=failed 10ms)
-
-That is the single pre-existing expected failure §1 records; it is not new here. Wall clock is
-174.4 s against the branch report's 273.6 s only because that was measured at 4 workers and
-this is at 8 — see the A/B below, where both arms are at 8.
-
-### 5a. The monolithic batch path
-
-`-runtime-status-prebuilt-runtime=false` with batch compilation left on is the path the branch
-never exercised: the pack set is nil, so a worker compiles the whole Go runtime into every
-program instead of linking a pack. Full unsharded matrix, 8 workers:
-
-    label=branch-monolithic-batch wall=191.8 exit=0 subtests=338 pass=338 fail=0 skip=0
-      declaredPASS=337 expectedFAILURE=1 knownGAP=0
-    programs=338 compile_cpu=1452.9 slowest_compile=33.1 (stdlib-http/tls-client-server)
-    user+sys=4352.9s  max RSS=2264 MB
-
-Same census as every other arm, same single expected failure. The path is visibly the
-monolithic one: process CPU is 4352.9 s against 2217.3 s for the pack path, and the slowest
-single compile is 33.1 s against 24.0 s, because each program now compiles the runtime itself.
-
-That it really is the *batch* monolithic path and not a silent fall back to one-shot compiles
-was confirmed directly rather than inferred, by sampling `ps` while a targeted capability ran
-under the same flag:
-
-    /.../TestARM64RuntimeCapabilityStatus1142616190/001/goc compile-batch
-
-— a live `goc compile-batch` worker, with **no `-runtime` argument**, which is exactly the
-`packs == nil` branch of `compileBatchProgram`.
-
-### 5b. The coverage run does bypass batch mode — by reading the code
-
-Two independent gates, both in `cmd/goc/runtime_status_test.go`:
-
-- `newRuntimeCapabilityBatchPoolFor` returns `nil` when `*runtimeCoverageProfile != ""`, so
-  `startRuntimeCapabilityCompiles` leaves `queue.batch` nil and every capability takes the
-  `compileRuntimeCapabilityWith` branch — one `goc` process per program, exactly as before this
-  branch.
-- `buildPrebuiltRuntimesForCapabilityStatus` returns `""` for the same condition, so a coverage
-  run has no pack set at all and compiles the runtime into each program.
-
-The reason is structural rather than incidental: coverage passes `-runtime-covermeta` per
-program, `goc compile-batch` does not accept that flag, and a worker is one build configuration
-by construction. So on a coverage run the code this branch changed is not reached: the pack set
-is never built and the batch pool is never created.
-
-Confirmed at runtime as well as on the page — `ps` sampled every 2 s through a coverage run
-saw **no `goc compile-batch` process at all**, where the same sampling through a monolithic
-non-coverage run saw one immediately.
-
-### 5c. The coverage run itself
-
-Two full runs, the second with `-v` for a census, both at 8 compile workers (this job's share;
-the bare `make test-goc-coverage` would take the default `NumCPU` and the box is shared):
-
-    go test -count=1 -v -timeout 180m -run '^TestARM64RuntimeCapabilityStatus$' ./cmd/goc \
-      -args -runtime-coverprofile=<out>.json -runtime-coverruns=1 -runtime-status-compile-workers=8
-
-    ok github.com/evanphx/cg12/cmd/goc 227.746s
-    RUN 338   distinct subtests 338   --- PASS 338   --- FAIL 0   --- SKIP 0
-    declared: 337 PASS, 1 EXPECTED FAILURE, 0 KNOWN GAP
-
-Same census as every other arm, and a 4.5 MB coverage report written.
-
-`runtime-cover-diff` against the checked-in baseline does **not** run, and that is pre-existing
-rather than something this branch caused:
-
-    goc: compare runtime coverage: runtime source differs:
-      baseline 10a75b3c..., current 06e314f8...
-
-`RuntimeSourceID` is a hash of the runtime's own source files. `git diff --name-only
-main...HEAD -- stdlib/ goc/` is empty, so the current ID is identical on `main`; and the
-baseline commit (`750c9c2`, "goc: establish runtime coverage baseline") is an ancestor of
-`b5537b5`, the last commit to touch `stdlib/`. The baseline was stale before this branch
-existed. **Flagged, not fixed** — refreshing a coverage baseline is not this job's change to
-make.
-
-### 6. The matrix A/B, re-measured here
-
-Three full unsharded runs, all at **8 compile workers**, all in this same working directory so
-both compilers were built from the same absolute path, all with a warm pack cache — `main`'s
-seven packs were built explicitly first, because the pack cache key hashes the `goc` binary and
-`main`'s binary is not this branch's.
-
-| run | wall | compile CPU (Σ per-program compile wall) | process CPU (user+sys) | slowest compile | max RSS |
-| --- | ---: | ---: | ---: | ---: | ---: |
-| `main` (`a639ec9`) | 212.4 s | 1407.3 s | 2916.8 s | 24.2 s | 2620 MB |
-| this branch, `-runtime-status-batch-compile=false` | 186.1 s | 1409.3 s | 2691.4 s | 24.3 s | 2619 MB |
-| this branch, batch on (default) | **174.4 s** | **1095.9 s** | **2217.3 s** | 24.0 s | 2631 MB |
-
-All three: `subtests=338 pass=338 fail=0 skip=0 declaredPASS=337 expectedFAILURE=1 knownGAP=0`.
-
-**Against `main`: compile CPU −22.1%, process CPU −24.0%, wall −17.9%.**
-**Against the one-flag-apart control on this same tree: compile CPU −22.2%, process CPU −17.6%.**
-
-The control is what makes this a measurement: with batch off, this tree spends 1409.3 s of
-compile CPU against `main`'s 1407.3 s — 0.14% apart — so the flag is the only thing that
-differs.
-
-**Read the wall-clock column with care on this box.** It was shared for the whole job; load
-average was 8.3 at the start, peaked around 20 while two of my own suites overlapped, and sat
-between 9.8 and 14.4 across the A/B. `main` and the batch-on run each paid for a `go test`
-build of the test binary inside their measured wall clock and the batch-off control did not,
-which is why the honest wall-clock pair is `main` 212.4 s against batch-on 174.4 s. The two CPU
-columns are measured per-compile inside the harness and are far less sensitive to a neighbour;
-they agree with each other and with the branch's own claim.
-
-At 8 workers the bound is still `compile CPU / workers`: 1095.9 / 8 = 137.0 s plus 13.9 s of
-run phase is 150.9 s against 174.4 s observed, with the remainder being setup and the test
-binary build. The slowest single compile is 24.0 s and identical in all three arms, so §20's
-statement that this lever buys the CPU rather than the floor holds here too.
-
-The branch reported −22.2% wall and −30.0% CPU at **4** workers. That is not what I measured,
-and it should not be: at 4 workers `compile CPU / workers` is twice as large a share of the
-wall clock, so the same CPU saving converts into a bigger wall-clock saving. The saving itself
-— **−22.1% of compile CPU** — reproduces almost exactly (the branch measured
-1365.5 s → 1050.8 s, −23.0%; I measure 1407.3 s → 1095.9 s, −22.1%).
-
-Peak RSS is unchanged across the three arms (2620 / 2619 / 2631 MB), which confirms that a
-worker retaining every pack it has read does not move the maximum, and that
-`compileRuntimeCapabilityPeakBytes = 3 GiB` still stands.
-
-## The one defect found, and it is in the measurement tool
-
-`analysis/batchdiff` decided whether a differing program was a leak by recompiling it alone
-**once** and calling it a leak if that repeat matched the first build. That is not a test
-against this compiler. In the curated single-worker run it declared three leaks
-(`bytes_replace_allocs.go`, `stdlib_crypto_ecdsa.go`, `stdlib_smtp_session.go`) that were
-nothing of the kind, and a six-program smoke run declared three out of three. Left alone it
-would cost the next reader an hour, or worse, be believed.
-
-Fixed in `1b3b2aa`, and the fix is not "repeat more times" — that was tried first and is also
-wrong, because a program with seventeen-out-of-seventeen distinct images will never reproduce a
-specific one, so set membership reports a leak for everything. What works is asking *what
-moved*: `contentDigestOf` hashes every defined symbol's name, size, kind and section, sorted,
-plus the image size, using `debug/elf`. Two images that differ only in layout hash the same;
-one that gained, lost or resized a symbol does not.
-
-Triage is now three-way:
-
-- `LAYOUT ONLY` — content digests match across all three builds. The §5.10 residue.
-- `NONDETERMINISTIC ALONE` — content differs, but `-repeats` solitary compiles produce the
-  same content the batch did.
-- `LEAK` — content differs and no solitary compile reproduces it.
-
-Validated both ways. On the six-program set that produced three false leaks: `leaks=0
-explained=3`, all `LAYOUT ONLY`. And the digest is not vacuously constant — a copy of
-`hello.go` with one extra function added hashes differently from the original (`e4b63ffa` vs
-`f1204948`), while two byte-different builds of `bytes_replace_allocs.go` hash the same
-(`6500d80c`). Necessary, not sufficient: two functions of equal size can hold different
-instructions, so the tool reports "layout only", not "identical", and the behaviour comparison
-still runs on every program.
-
-**The same defect, in the behaviour comparison.** It declared a difference on the first
-disagreement, and two corpus programs print allocation and GC statistics that move with
-scheduling — measured above, one binary giving three distinct outputs in 21 concurrent runs.
-Fixed in `57e8ec0`: a program whose three builds disagree is now run five more times per build
-and reported only if some build's set of behaviours never overlaps another's. That is the
-same shape of test as the byte triage, and it keeps the strong signal: a genuinely
-miscompiled program's outputs would not overlap a correct one's.
-
-Honest limit on that second fix: it was validated end-to-end on a seven-program set including
-both flaky programs (`behaviour: identical=7 differing=0`, where the unfixed tool had reported
-two differences over the corpus), but I could not force the repeat-triage branch to fire on
-demand during validation, so I did not observe it rejecting a disagreement in that run. The
-evidence that it would is the 21-run measurement above; the logic it rests on is six lines.
-
-## What was not done
-
-- **The runtime coverage baseline is stale and was left stale.** `runtime-cover-diff` refuses
-  to compare because `RuntimeSourceID` differs. That is true on `main` as well, for the reason
-  given in §5c. Refreshing it is a separate change with its own review.
-- **The compiler's front-end nondeterminism is untouched**, as §5.10 intends — it changes the
-  layout of every program goc compiles and wants its own validation cycle.
-- **The A/B was measured on a shared box**, not a quiet one. Load average ran between 8 and 22
-  for the whole job. The CPU columns are per-compile measurements taken inside the harness and
-  are robust to that; the wall-clock column is not, and is labelled as such.
-- **The `-O` configuration was not swept.** Every run here is the default non-`-O` matrix, which
-  is what the briefing asked for; `-runtime-opt` was not exercised.
+# `println` dropped the spaces the spec requires — and four other print defects
+
+Branch: `ccwork/println-spacing`, off `main` (`61b96da`).
+
+**Status: implementation complete; verification in progress. Sections marked
+UNVERIFIED have not been re-run yet.**
+
+## The reported defect
+
+`println("a", 1, true)` printed `a1true`; the host Go toolchain prints `a 1 true`.
+
+The Go specification's own table for the two built-ins reads:
+
+> `println`  like `print` but prints spaces between arguments and a newline at the end
+
+so the separators and the trailing newline are required, not implementation-defined.
+(Only the *formatting of each operand* is implementation-specific.) cg12's
+`builtinRuntimePrint` walked `call.Args` and emitted one runtime print call per
+operand, then a single `printnl` — the separators were simply never emitted.
+
+The host toolchain implements the rule in `cmd/compile/internal/walk.walkPrint`
+by rewriting the operand list before lowering: a `" "` string is inserted
+between operands, a `"\n"` string is appended, and runs of adjacent constant
+strings are then collapsed into one. cg12 now builds the same sequence
+(`goc/compile.go`, `printOperands` / `collapsePrintLiterals`), so `println("x",
+"y", "z")` becomes a single `printstring("x y z\n")` exactly as it does under the
+host compiler, and `println("a", 1, true)` becomes
+`printstring("a ") printint(1) printsp() printbool(true) printnl()`.
+
+## Four further defects the audit against the host found
+
+The task asked for the whole of `print`/`println` semantics to be checked
+against the host toolchain rather than just the spacing. Four more differences
+came out of that, all of them wrong-answer bugs in valid Go:
+
+1. **A slice operand printed the address of its header as a decimal integer.**
+   The host prints `[len/cap]0xaddr` via `runtime.printslice`. cg12 materialized
+   a header and passed it to `printint`.
+
+2. **An interface operand printed one decimal number.** The host prints
+   `(0xtype,0xdata)` via `runtime.printeface` / `runtime.printiface`. cg12 fell
+   through to `printint` on the interface's descriptor pointer, so a nil
+   interface printed `0` where the host prints `(0x0,0x0)`.
+
+3. **A complex operand printed a decimal integer.** The host prints `(1+2i)` via
+   `runtime.printcomplex128` / `printcomplex64`.
+
+4. **The statement was not atomic.** `runtime/print.go` states outright that
+   *"the compiler emits calls to printlock and printunlock around the multiple
+   calls that implement a single Go print or println statement"*, and
+   `runtime.minhexdigits` is documented as protected by that lock. cg12 emitted
+   neither, so two threads printing concurrently interleaved mid-operand, and
+   every runtime diagnostic — every traceback, every `GODEBUG` message — was
+   exposed to the same interleaving.
+
+Also matched to the host, in the same pass:
+
+- **Operands are evaluated before the lock is taken.** cg12 evaluated and
+  printed each operand in turn, so `println("A", f(), "B", g())` where `f` and
+  `g` print produced output interleaved into the middle of the statement; the
+  host evaluates every operand first and then prints `A 1 B 2` as one run.
+- **`runtime.quoted`** (`type quoted string`) now routes to `printquoted`. The
+  runtime prints goroutine labels through it in `traceback.go:1294`, so without
+  it a label containing a quote or a newline corrupted the traceback.
+
+`print` versus `println` is unchanged in kind: only `println` gets separators and
+the trailing newline, and both take the print lock.
+
+## A fifth defect, outside print, that print exposed
+
+Routing a `complex64` operand to `runtime.printcomplex64` **segfaulted**, because
+that routine does `strconv.AppendComplex(buf[:0], complex128(c), ...)` and cg12's
+`complex64` handling was broken in two independent ways. Both are pre-existing
+and neither is reachable from the spacing bug; they are fixed here because
+otherwise this change would have turned a silently-wrong `println(c64)` into a
+crash.
+
+- **`real()` and `imag()` of a `complex64` returned garbage, and the same garbage
+  for both halves.** A `complex64` is represented as its two `float32` halves
+  packed into one 64-bit integer, so extracting a half is a bitwise
+  reinterpretation between a general-purpose and a floating-point register —
+  `ir.OCast` (`fmov`). cg12 used `ir.OCopy`, a plain register move that re-types
+  only within a register file, so the float half read whatever the integer
+  register aliased. Reduced to: `var b complex64 = complex(3.5, 4.5);
+  println(real(b), imag(b))` → host `3.5 4.5`, cg12 `-2.8673504e+25
+  -2.8673504e+25`. Addition, subtraction, multiplication and conversion of
+  `complex64` were all wrong for the same reason.
+
+- **Converting between `complex64` and `complex128` reinterpreted one
+  representation as the other.** `complex128` is a 16-byte value addressed by a
+  pointer and `complex64` is a packed scalar, and `gen.convert` had no complex
+  case at all, so `complex128(b)` `Copy`d the packed bits into a pointer.
+  Reduced to: `var b complex64 = complex(3.5, 4.5); var w complex128 =
+  complex128(b)` → **SIGSEGV at `0x4090000040600000`**, which is the packed
+  `(4.5, 3.5)` bit pattern used as an address.
+
+## Files changed
+
+- `goc/compile.go` — `printOperands`, `collapsePrintLiterals`, `printStep`,
+  rewritten `builtinRuntimePrint` and `builtinPrint`; `isRuntimeQuotedType`;
+  `complex64Parts`, `packComplex64`, `complexComponent`, `complexConversion`,
+  `convert`.
+- `goc/reach.go` — the runtime print routines the new lowering can call are
+  rooted: `printcomplex64`, `printcomplex128`, `printeface`, `printiface`,
+  `printlock`, `printquoted`, `printslice`, `printsp`, `printunlock`.
+
+## Verification
+
+(filled in as it lands)
