@@ -3642,8 +3642,15 @@ assembly** would mean giving `opt` a dependency on `plan9asm`; the established
 design is "assembly-referenced implies exported implies a DCE root", and the
 defect was the split breaking it, not the design.
 
-In the unoptimized path this changes no emitted byte: the backend already made
-those symbols global.
+On the unoptimized path nothing linkage-visible changes, because the backend
+already made those symbols global. Measured with two goc binaries built from the
+same tree path, each compiling `reflect_makefunc.go` against a non-optimized pack
+three times: the pack is byte-identical between them, each compiler's three
+images are byte-identical to each other, and the pre-fix and post-fix images
+differ in **23 bytes of 11178048** — three `DW_AT_external` flags in
+`.debug_info` going 0 to 1 (`obj/dwarf.go:343`), one per affected function, plus
+the 20-byte `.note.gnu.build-id` derived from them. The ELF symbol table's names,
+values, sizes, types, bindings, section indices and order are identical.
 
 ### What it measures
 

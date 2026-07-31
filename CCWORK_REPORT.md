@@ -100,8 +100,23 @@ Why this and not something else:
   carry the translated references, only the source files. The existing design is
   "assembly-referenced ⇒ exported ⇒ a DCE root", and the defect was that the split broke it.
 - Making these symbols global costs nothing at link: the backend already forces a symbol
-  global when the module's own assembly names it, so in the non-`-O` path this changes no
-  emitted byte.
+  global when the module's own assembly names it. Measured rather than asserted — two goc
+  binaries built from the same tree path, one at `9cd2621` and one with the fix, each
+  compiling `reflect_makefunc.go` against a non-optimized pack three times:
+
+  | | |
+  | --- | --- |
+  | the pack itself | **byte-identical** between the two compilers |
+  | each compiler's three images | byte-identical to each other (so the diff below is real, not §5.10 nondeterminism) |
+  | pre-fix vs post-fix image | **23 bytes differ out of 11178048**, same size, same sections |
+  | ELF symbol table — name, value, size, type, binding, section index, *and order* | **identical** |
+
+  The 23 bytes are three `DW_AT_external` flags in `.debug_info` going 0 → 1
+  (`obj/dwarf.go:343`), one each immediately before `reflect_moveMakeFuncArgPtrs`,
+  `reflect_callReflect` and `reflect_callMethod`, plus the 20-byte
+  `.note.gnu.build-id` the linker derives from the image. So nothing linkage-visible
+  changes on the unoptimized path; the debugger now agrees the three functions are
+  external, which they are.
 
 ## Verification
 
@@ -110,7 +125,7 @@ Why this and not something else:
 | `goc build-runtime -O` + `goc -O -runtime` on `reflect_makefunc.go` | links, runs, exit 0; output identical to `go run` |
 | the 19 `runtime-packages/reflect-*` capabilities under `-runtime-opt` | **19/19 PASS** (49.4 s) |
 | `stdlib-crypto/ecdh-x25519`, `stdlib-encoding/binary`, `stdlib-encoding/binary-varint` under `-runtime-opt` | **3/3 PASS** (11.9 s) |
-| the same 22, with the fix reverted (`git stash`), as a control | fail with the reported link error |
+| the same 22 with the fix reverted to `9cd2621`, as a control | **6 PASS, 16 FAIL**, all with the reported link error |
 | `TestAnOptimizedProgramKeepsTheFunctionsOnlyAssemblyCalls` | PASS with the fix, FAILs with the same three undefined symbols without it |
 
 New test: `cmd/goc/prebuilt_test.go`. It builds an optimized pack, compiles a
@@ -137,10 +152,47 @@ arm declares.
 The optimized arm costs **9.4% more wall clock** than the default arm. That is the
 optimizer running over both modules; it compiles and runs the same programs.
 
-### Still unverified at the time of writing
+### The sixteen, named
 
-- `make test-goc-corpus` and `make test-goc-cmd` (running; `go vet`, `gofmt -l` and
-  `make test-unit` are clean).
+The pre-fix control at `9cd2621`, `-runtime-opt`, over the three affected categories: 22
+subtests, 6 PASS, **16 FAIL**, every one the same link error. Exactly the set §5.10
+recorded.
+
+```
+runtime-packages/reflect-call-aggregate            stdlib-crypto/ecdh-x25519
+runtime-packages/reflect-call-aggregate-function   stdlib-encoding/binary
+runtime-packages/reflect-deep-equal                stdlib-encoding/binary-varint
+runtime-packages/reflect-interface-extract
+runtime-packages/reflect-interface-method
+runtime-packages/reflect-make-values
+runtime-packages/reflect-map-slice
+runtime-packages/reflect-method-metadata
+runtime-packages/reflect-select
+runtime-packages/reflect-set-fields
+runtime-packages/reflect-type-assert
+runtime-packages/reflect-type-metadata
+runtime-packages/reflect-value-call
+```
+
+All 16 pass with the fix, as does the rest of the matrix.
+
+### The rest of the suite
+
+| | |
+| --- | --- |
+| `go build ./...`, `go vet ./...` | clean |
+| `gofmt -l` over every non-`stdlib/` Go file | clean |
+| `make test-unit` | PASS |
+| `make test-goc-cmd` | PASS, 248.3 s |
+| `make test-goc-corpus` (the non-executable compile path) | PASS, 598.0 s |
+
+### Still unverified
+
+- Nothing in this change's scope. Everything claimed above was run on this branch.
+- Not attempted, and stated so it is not mistaken for coverage: no measurement of what the
+  `-O` split now costs in image size, and no differential run of the corpus under `-O`
+  against the host toolchain. The corpus's own `-O` coverage is whatever
+  `make test-goc-corpus` already does.
 
 ## Keeping it fixed
 
