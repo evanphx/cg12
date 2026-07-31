@@ -1645,6 +1645,20 @@ among these. Fixing the front-end ones changes the layout of every program goc
 compiles, so it wants its own validation cycle rather than being folded into
 another change.
 
+**This is why comparing two builds by their bytes cannot conclude anything on its
+own, and why one repeat cannot triage it.** Measured 2026-07-31 while verifying
+§20: of the 33 programs whose three builds differed in one three-way sampling,
+seventeen produced a different image on every one of five solitary compiles, so a
+repeat that matches means two draws collided and a repeat that differs means
+nothing at all. The distribution is also skewed --
+`goc/testdata/stdlib_net_mail_textproto.go` takes its minority branch 3 times in
+53 compiles -- so a program can look stable for a dozen compiles and still be the
+reason a build differed. What does discriminate is comparing *content* rather
+than image: every defined symbol's name, size, kind and section, sorted, plus the
+image size. All 33 were identical under that comparison, since what varies is
+where the functions went and not what is in them. `analysis/batchdiff` triages
+this way.
+
 Also unfixed, `-O` only: `opt/inline.go:184` sorts cost-inline candidates with an
 unstable `sort.Slice` over a slice built from map iteration, so which callees are
 inlined when the budget runs out is not reproducible. The matrix runs `-O` under
@@ -2726,3 +2740,72 @@ accounts for the 273.2 s observed. At the default 64 workers the terms swap:
 this lever is the CPU, not the floor**, and the floor is still one
 single-threaded compile of `stdlib_http_tls_client_server.go`.
 
+
+### Verification (2026-07-31)
+
+§20 was measured and committed before its safety property had been checked. This
+is that check, run on `ccwork/verify-batch-reconcile` off the same tree.
+
+**The corpus-wide leak check.** All 358 corpus programs, compiled three ways
+against the full seven-pack set -- one `goc` process per program, one batch, and
+a batch fed the same programs in reverse -- with the eleven programs that select
+a rich pack spread evenly through the 347 that take the fallback, because
+alphabetically they cluster and a shared queue would hand them out at once.
+
+    one-shot 358 in 217.2s, 0 failed | batch 358 in 183.6s, 0 failed
+    batch-reversed 358 in 170.5s, 0 failed | identical=325 differing=33
+    behaviour: identical=358 differing=0
+
+**Zero leaks.** No program built one way and failed another. Every one of the 33
+whose bytes differ is nondeterministic without any batch process in the picture:
+recompiled alone, 29 gave 2-5 distinct images in 5 solo compiles, and the other
+four gave the batch's exact bytes from a solitary compile within 20-60 repeats
+(`stdlib_net_mail_textproto.go` takes its minority branch 3 times in 53). All 33
+are also structurally identical across the three builds -- same symbols, same
+sizes, same image size, only addresses moved -- which is the §5.10 residue and
+not a difference in content.
+
+**The interleaved case**, which neither `goc-batch-b` nor §20 had: one worker,
+33 programs ordered so a rich-pack program sits between fallback programs
+throughout, so that single process read all seven packs and kept each while
+compiling programs that chose the others. 0 leaks, and behaviour identical for
+all 33.
+
+**Everything else.** `scripts/determinism-check.sh` gives 4 of 5 byte-identical
+cold against warm on both the seven-pack and the no-pack path, with
+`runtime_defer_capture_allocs.go` the only difference, in both rounds.
+`make test-unit`, `make test-goc-cmd` (213.8 s) and `make test-goc-corpus`
+(528.4 s) all pass.
+
+**The matrix, four arms, all at 8 compile workers, all 338 subtests / 337 `PASS`
+/ 1 `EXPECTED FAILURE` / 0 `KNOWN GAP` / 0 `FAIL`:**
+
+| arm | wall | compile CPU | process CPU | slowest compile | max RSS |
+| --- | ---: | ---: | ---: | ---: | ---: |
+| `main` (a639ec9) | 212.4 s | 1407.3 s | 2916.8 s | 24.2 s | 2620 MB |
+| this tree, `-runtime-status-batch-compile=false` | 186.1 s | 1409.3 s | 2691.4 s | 24.3 s | 2619 MB |
+| this tree, default | 174.4 s | 1095.9 s | 2217.3 s | 24.0 s | 2631 MB |
+| this tree, `-runtime-status-prebuilt-runtime=false` | 191.8 s | 1452.9 s | 4352.9 s | 33.1 s | 2264 MB |
+
+Compile CPU **-22.1%** against `main` and **-22.2%** against the one-flag control
+on this tree, which reproduces §20's claim; the control lands 0.14% from `main`,
+which is what says the flag is the only difference. Wall clock moved -17.9%
+rather than §20's -22.2% because that was measured at 4 workers and this at 8 --
+`compile CPU / workers` is a smaller share of the wall clock here. The box was
+shared throughout (load average 8-22), so the wall-clock column is the least
+trustworthy of the three.
+
+The **monolithic batch path** -- a worker compiling the runtime into each program
+rather than linking a pack, which §20 never exercised -- passes with the same
+census. `ps` sampled during it shows a live `goc compile-batch` worker with no
+`-runtime` argument, so it really is that branch of `compileBatchProgram`.
+
+**`make test-goc-coverage`** passes, 338/338 with the same census, and it does
+bypass batch mode: `newRuntimeCapabilityBatchPoolFor` and
+`buildPrebuiltRuntimesForCapabilityStatus` both return nothing when
+`-runtime-coverprofile` is set, and `ps` sampled during a coverage run sees no
+`goc compile-batch` process at all. Separately, `runtime-cover-diff` cannot
+compare against the checked-in baseline -- `RuntimeSourceID` differs -- and that
+is pre-existing: the baseline commit `750c9c2` is an ancestor of `b5537b5`, the
+last commit to touch `stdlib/`, and `git diff main...HEAD -- stdlib/ goc/` is
+empty. The baseline needs refreshing; that is not this change's to make.
