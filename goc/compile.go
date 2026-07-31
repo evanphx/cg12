@@ -5555,13 +5555,17 @@ func (g *gen) callArguments(arguments []ast.Expr, hasEllipsis bool, signature *t
 		fields := []*types.Var{
 			types.NewVar(token.NoPos, nil, "values", arrayType),
 		}
-		payloadFields := make(map[int]int)
+		// Recorded in argument order rather than in a map: each entry emits an
+		// address computation below, so a map would let iteration order pick the
+		// order those instructions -- and therefore every temporary numbered
+		// after them -- appear in.
+		var payloadFields []variadicPayloadField
 		if isInterfaceValue(elementType) {
 			for index, argument := range variadicArguments {
 				if !g.interfaceAssignmentNeedsPayload(argument) {
 					continue
 				}
-				payloadFields[index] = len(fields)
+				payloadFields = append(payloadFields, variadicPayloadField{argument: index, field: len(fields)})
 				fieldName := fmt.Sprintf("payload%d", index)
 				fieldType := g.typeAndValue(argument).Type
 				fields = append(fields, types.NewVar(token.NoPos, nil, fieldName, fieldType))
@@ -5572,8 +5576,8 @@ func (g *gen) callArguments(arguments []ast.Expr, hasEllipsis bool, signature *t
 			allocationType = combinedType
 			offsets := structOffsets(fields)
 			backing = g.allocateTyped(allocationType)
-			for argumentIndex, fieldIndex := range payloadFields {
-				interfacePayloads[argumentIndex] = g.offset(backing, offsets[fieldIndex])
+			for _, payloadField := range payloadFields {
+				interfacePayloads[payloadField.argument] = g.offset(backing, offsets[payloadField.field])
 			}
 		} else {
 			backing = g.allocateTyped(allocationType)
@@ -5596,6 +5600,14 @@ func (g *gen) callArguments(arguments []ast.Expr, hasEllipsis bool, signature *t
 	}
 	values = append(values, g.sliceDescriptor(backing, g.fn.Long(length), g.fn.Long(length)))
 	return values
+}
+
+// variadicPayloadField names the boxed interface payload for one variadic
+// argument: which argument it belongs to, and which field of the combined
+// allocation holds it.
+type variadicPayloadField struct {
+	argument int
+	field    int
 }
 
 func (g *gen) interfaceAssignmentNeedsPayload(expression ast.Expr) bool {
