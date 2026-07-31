@@ -292,6 +292,51 @@ program, `goc compile-batch` does not accept that flag, and a worker is one buil
 by construction. So on a coverage run the code this branch changed is not reached: the pack set
 is never built and the batch pool is never created. The run itself is reported below.
 
+### 6. The matrix A/B, re-measured here
+
+Three full unsharded runs, all at **8 compile workers**, all in this same working directory so
+both compilers were built from the same absolute path, all with a warm pack cache — `main`'s
+seven packs were built explicitly first, because the pack cache key hashes the `goc` binary and
+`main`'s binary is not this branch's.
+
+| run | wall | compile CPU (Σ per-program compile wall) | process CPU (user+sys) | slowest compile | max RSS |
+| --- | ---: | ---: | ---: | ---: | ---: |
+| `main` (`a639ec9`) | 212.4 s | 1407.3 s | 2916.8 s | 24.2 s | 2620 MB |
+| this branch, `-runtime-status-batch-compile=false` | 186.1 s | 1409.3 s | 2691.4 s | 24.3 s | 2619 MB |
+| this branch, batch on (default) | **174.4 s** | **1095.9 s** | **2217.3 s** | 24.0 s | 2631 MB |
+
+All three: `subtests=338 pass=338 fail=0 skip=0 declaredPASS=337 expectedFAILURE=1 knownGAP=0`.
+
+**Against `main`: compile CPU −22.1%, process CPU −24.0%, wall −17.9%.**
+**Against the one-flag-apart control on this same tree: compile CPU −22.2%, process CPU −17.6%.**
+
+The control is what makes this a measurement: with batch off, this tree spends 1409.3 s of
+compile CPU against `main`'s 1407.3 s — 0.14% apart — so the flag is the only thing that
+differs.
+
+**Read the wall-clock column with care on this box.** It was shared for the whole job; load
+average was 8.3 at the start, peaked around 20 while two of my own suites overlapped, and sat
+between 9.8 and 14.4 across the A/B. `main` and the batch-on run each paid for a `go test`
+build of the test binary inside their measured wall clock and the batch-off control did not,
+which is why the honest wall-clock pair is `main` 212.4 s against batch-on 174.4 s. The two CPU
+columns are measured per-compile inside the harness and are far less sensitive to a neighbour;
+they agree with each other and with the branch's own claim.
+
+At 8 workers the bound is still `compile CPU / workers`: 1095.9 / 8 = 137.0 s plus 13.9 s of
+run phase is 150.9 s against 174.4 s observed, with the remainder being setup and the test
+binary build. The slowest single compile is 24.0 s and identical in all three arms, so §20's
+statement that this lever buys the CPU rather than the floor holds here too.
+
+The branch reported −22.2% wall and −30.0% CPU at **4** workers. That is not what I measured,
+and it should not be: at 4 workers `compile CPU / workers` is twice as large a share of the
+wall clock, so the same CPU saving converts into a bigger wall-clock saving. The saving itself
+— **−22.1% of compile CPU** — reproduces almost exactly (the branch measured
+1365.5 s → 1050.8 s, −23.0%; I measure 1407.3 s → 1095.9 s, −22.1%).
+
+Peak RSS is unchanged across the three arms (2620 / 2619 / 2631 MB), which confirms that a
+worker retaining every pack it has read does not move the maximum, and that
+`compileRuntimeCapabilityPeakBytes = 3 GiB` still stands.
+
 ## Not yet run
 
 1. Leak check — corpus-wide, and the curated interleaved single-worker case.
