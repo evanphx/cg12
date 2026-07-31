@@ -3566,3 +3566,148 @@ Per §15, a green matrix is weak evidence, so the evidence is the host compariso
   operand sequence and therefore the same separators, but goc always compiles
   with `runtimeAllocation` on, so nothing in this repository's test suites
   executes it. Only its construction is shared, not its verification.
+
+## 22. The export bit meant two things, and the split kept only one (2026-07-31)
+
+`goc -O -runtime pack.gocrt prog.go` did not link, for as long as the split in
+§16 has existed. It failed at the system linker naming three symbols:
+
+```
+goc-program-runtime.o: in function `reflect_makeFuncStub_abi0':
+undefined reference to `reflect_moveMakeFuncArgPtrs'
+undefined reference to `reflect_callReflect_abi0'
+undefined reference to `reflect_callMethod_abi0'
+```
+
+Sixteen capabilities failed this way under `-runtime-opt` — thirteen
+`runtime-packages/reflect-*`, `stdlib-crypto/ecdh-x25519`,
+`stdlib-encoding/binary` and `stdlib-encoding/binary-varint` — and §5.10 carried
+it as unattributed. Neither `-O` alone nor a pack alone reproduces it.
+
+### The two meanings
+
+`ir.Func.Linkage.Export` is read in two places that want different things.
+
+The backend reads it as ELF binding, and for the case that matters here it does
+not even need it: `compileToObjectWithBundle` sets a symbol global on its own
+when the module's assembly names it (`Global: code.export ||
+assemblyReferences[code.name]`, plus a sweep over every symbol at the end). So
+the bit is redundant for binding.
+
+`opt.DeadFuncElim` reads it as a keep-alive root: it keeps a function iff the
+function is exported or some symbol operand in the module names it. That is the
+meaning that carries information, because **a Go function whose only caller is
+Plan 9 assembly has no caller in the IR at all.** `reflect.callReflect` is
+entered only from `reflect_makeFuncStub`; nothing in Go calls it, and the
+optimizer cannot see assembly — the module carries the assembly *files*, not
+their translated references. `exportAssemblyReferencedFunctions` is what marks
+those functions, and the export bit is the only channel it has.
+
+`finishProgramModule` then wrote
+
+```go
+function.Linkage.Export = programSymbols[name]
+```
+
+— an assignment. It is answering the question "which symbols did the pack leave
+for this module to export", which is a binding question, and the answer
+overwrote the keep-alive marker. `opt.OptimizeModule` runs *after* the split, in
+`internal/prebuilt.CompileProgram`, so `DeadFuncElim` saw a function with no
+export bit and no IR reference and deleted it.
+
+The second-order effect is what produced the actual error text.
+`arm64.emitGoABI0AssemblyWrappers` emits the ABI0-to-Go-internal bridge only for
+names still in `module.Funcs`, so deleting the Go function also deleted
+`reflect_callReflect_abi0`. The sidecar therefore lost the definition and kept
+the reference, and the object the linker complained about was the program's own
+sidecar. `reflect.moveMakeFuncArgPtrs` is a `PreferDirectABI0` symbol, so the
+assembly names it directly and it went undefined by the same route with no
+wrapper involved.
+
+### The fix
+
+Exporting is additive for the functions this compilation's assembly names:
+
+```go
+function.Linkage.Export = programSymbols[name] || assemblyReferences[assemblySymbolName(function.Name)]
+```
+
+Three alternatives were considered and rejected. **`goc/reach.go`'s seeding from
+`assemblyReferences`** is not implicated: the functions are present in the module
+the front end produces, in both configurations, with the right names — measured,
+not assumed. **Preserving every pre-existing export** would also preserve the bit
+`ast.IsExported` gives every capitalized Go function, so `DeadFuncElim` would
+stop eliminating anything in a split build. **Teaching `DeadFuncElim` about
+assembly** would mean giving `opt` a dependency on `plan9asm`; the established
+design is "assembly-referenced implies exported implies a DCE root", and the
+defect was the split breaking it, not the design.
+
+In the unoptimized path this changes no emitted byte: the backend already made
+those symbols global.
+
+### What it measures
+
+| | |
+| --- | ---: |
+| capability matrix, `-runtime-opt`, after | **345 subtests, 344 pass, 1 expected failure, 0 fail, 0 known gap** |
+| the same matrix, default arm, matched control | 345 subtests, 344 pass, 1 expected failure, 0 fail |
+| wall clock, `-runtime-opt` | 222.3 s |
+| wall clock, default arm | 203.3 s |
+| the 22 capabilities in the affected categories, `-runtime-opt`, before | 6 pass, **16 fail** |
+| the same 22, after | **22 pass** |
+
+The "before" row is a targeted re-run of the three affected categories on this
+branch with the fix reverted, not a full matrix. The full pre-fix figure is
+§5.10's, taken when the matrix held 338 capabilities: 322 pass, 16 fail. The
+failing set is the same sixteen in both.
+
+Both matrix figures are one process at `-runtime-status-compile-workers=8` with
+a cold pack cache, on a box shared with another job, so they are comparable to
+each other and not to §16's or §18's absolute numbers. The optimized arm costs
+**9.4% more wall clock** than the default one — the extra is the optimizer
+running over both modules, not extra programs.
+
+### Why nobody had seen it
+
+Every CI job and every agent job has run the matrix's default arm. The optimized
+arm has never been run to completion by anything. A configuration that ships and
+is never run is a configuration whose state nobody knows, which is the general
+form of this defect rather than an incidental fact about it.
+
+So the arm is now wired into things that run:
+
+- `make test-goc-status-opt`, sharded by `STATUS_SHARDS`/`STATUS_SHARD` exactly
+  like `test-goc-status`.
+- a `runtime-status-opt` CI job, four shards, alongside `runtime-status` rather
+  than replacing it. The two arms differ in what they eliminate, so neither
+  covers the other.
+
+`cmd/goc.TestAnOptimizedProgramKeepsTheFunctionsOnlyAssemblyCalls` is the cheap
+guard that does not need the matrix: it builds an optimized pack, compiles a
+`reflect.MakeFunc` and method-value program against it with `-O`, links it, runs
+it, and checks the output against what the host toolchain prints. It costs about
+8 s, and it fails with exactly the three undefined symbols above when the fix is
+reverted.
+
+### What is not done
+
+- **A pack is cached without regard to the compiler that built it.**
+  `packCacheKey` hashes the runtime-pack version, the target, `-O`, the carried
+  package list and the *stdlib source*, and `Manifest.Fingerprint` is the runtime
+  source identity. Neither depends on the goc binary, so changing the compiler
+  and rebuilding a pack silently reuses the pack the old compiler wrote. It did
+  not affect this fix, which only changes the program half, but it will mislead
+  the next change that touches `finishRuntimeModule`. Every measurement in this
+  section was taken with a per-run `CG12_PACK_CACHE` directory for that reason.
+
+- `DeadFuncElim` does nothing at all on the pack side, because
+  `finishRuntimeModule` exports every function it keeps. That is correct — the
+  program module must be able to reference any of them — but it means the
+  optimized pack is not smaller than the unoptimized one by a single function,
+  and nothing records that as a decision.
+
+- The conflation itself is unfixed. `Linkage.Export` still means both "global in
+  the object" and "a root for dead-function elimination", and the split now has
+  to know about assembly to keep the two apart. A distinct `ir.Func` flag for
+  "reachable from outside the IR" would let the split answer only the binding
+  question, which is the one it is actually qualified to answer.
