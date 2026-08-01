@@ -82,6 +82,15 @@ The count was 338 until §21 added three: `print-builtin/operand-separation`,
 below that quote 338 are records of runs made before that, and are left as they
 were measured.
 
+**Re-censused 2026-08-01 (§26), unsharded and with `-v`.** The count in this
+paragraph is stale: `main` (`ad4e9b2`) runs **363** subtests, 363 PASS in the
+default arm. §26 adds `gc-invariants/type-mask-padding`, so this tree runs 364.
+The same census found that the **`-runtime-opt` arm is not clean on `main`**:
+362 PASS and **1 FAIL**, `stack-scan/loop-safepoints`, with
+`panic: a stack slot live across a loop back edge was not a GC root`, reproduced
+3/3 individually on `ad4e9b2`. It is `-O`-only, it is not §5.10's link failure,
+and it is unattributed.
+
 That is a statement about the matrix, not about the runtime. Per §2, executing a
 line is not evidence that stack maps, write barriers, unwinding, or scheduler
 state are correct, and the reviewed function inventory — not the matrix — is the
@@ -4882,3 +4891,25 @@ the same `merged+fix` binary is 0/50 on an idle box and 100/100 with four
 concurrent measurement loops. It is the same open item §5.10 records under
 "Residual runtime faults"; this section narrows it to a frame and a slot and
 nothing further.
+
+### §26 suites
+
+- `make test-unit`: green.
+- `make test-goc-corpus`: green, 604 s.
+- `make test-goc-cmd`: green, 292 s.
+- Capability matrix, unsharded, `-v`, subtest census, with matched controls on
+  plain `main` (`ad4e9b2`):
+
+  | tree | arm | subtests | PASS | FAIL |
+  | --- | --- | ---: | ---: | ---: |
+  | this tree | default | 364 | 364 | 0 |
+  | `main` | default | 363 | 363 | 0 |
+  | this tree | `-runtime-opt` | 364 | 363 | 1 |
+  | `main` | `-runtime-opt` | 363 | 362 | 1 |
+
+  The one failure is `stack-scan/loop-safepoints` under `-O`, in both trees. See
+  the re-census note in §1.
+- The reducer under the host toolchain and under goc print the same line.
+- A unit test, `goc.TestTypeGCMasksArePaddedToAPointerWord`, asserts every
+  emitted `*.gcdata` datum is a whole number of pointer words and
+  pointer-aligned. Verified to fail without the padding.
