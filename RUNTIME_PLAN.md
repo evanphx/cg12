@@ -4694,3 +4694,51 @@ but the honest result is that **it could not have caught `2724ac7`**:
 collecting, channel-blocking programs and runs each under `cg12checkwb=1` and
 `cg12checkwb=3`, so the modes are exercised by `make test-goc-cmd` rather than
 only by whoever next needs them.
+
+The answer to the duty cycle is a compiler-emitted check outside the barrier:
+`gen.store` emitting `runtime.cg12CheckStackPublication(address, value)` next to
+`goc_storep`, under a compile-time flag, for packages other than `runtime` --
+the runtime's own legitimate stack publications, `sudog.elem` above all, are all
+inside it and are maintained by hand in `copystack`. That is designed here and
+deliberately not built: it is codegen, and codegen landed without a full
+validation pass is what §15 warns about. `opt.FrameEscapes` covers the same
+ground without touching the emitted code.
+
+### Verification
+
+Both matrix arms were censused with `-v` and a per-subtest count, at
+`-runtime-status-compile-workers=8`. The default arm is 363 subtests / 363 PASS /
+0 FAIL / 1 declared EXPECTED FAILURE / 0 KNOWN GAP. The optimized arm is 363 / 362
+PASS / **1 FAIL** — `stack-scan/loop-safepoints`, which is §6.1's open `-O`
+loop-carried-root defect and which a clean worktree at `origin/main` (`ad4e9b2`)
+fails identically on the same box. Nothing on this branch changes it in either
+direction. `make test-unit`, `make test-goc-cmd` and `make test-goc-corpus` all
+pass. Compiling all 384 corpus programs twice each gives 384 identical pairs, 0
+varying; that is 2 rounds rather than §23's depth, which is proportionate only
+because nothing on the default compile path changed — `reportFrameEscapes`
+returns immediately without `GOC_DEBUG_ESCAPECHECK`, and `opt.FrameEscapes` has
+no other in-compiler call site.
+
+### Which half of the split carries `2724ac7`'s fault
+
+Recorded here because it cost time to find and narrows the next investigation.
+`gc-invariants/mark-workers` fails only in the split build: monolithically the
+same tree passes 20/20, and with a pack it fails 10/10. Cross-linking the halves
+(both packs share a stdlib fingerprint, so either compiler's program module links
+against either pack) gives:
+
+| program module from | pack from | runs |
+| --- | --- | ---: |
+| `main` | `main` | 0/6 failed |
+| `main` | `main` + `2724ac7` | 0/6 failed |
+| `main` + `2724ac7` | `main` | **6/6 failed** |
+| `main` + `2724ac7` | `main` + `2724ac7` | **6/6 failed** |
+
+The defect travels with the program module. That module is not a different
+compilation from the monolithic one — `goc -runtime` runs the same whole-program
+`compile()` and applies the subtraction last, which is why the escape audit
+reports the same two findings for that program in both configurations — so the
+program's own code is identical in the two builds and only the *linked* runtime
+differs: the pack's is compiled by a separate `build-runtime` process from a
+generated root, the monolithic one alongside `main`. The mechanism is not
+established and is not guessed at here.

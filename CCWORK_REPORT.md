@@ -288,8 +288,70 @@ next change to either is visible.
 | --- | --- |
 | `go build ./...`, `go vet ./...` | clean |
 | `make test-unit` | PASS |
-| `make test-goc-cmd` | PASS, 293.7s (includes the new `TestARM64WriteBarrierAuditRunsClean`) |
-| `make test-goc-corpus` | PASS, 713.1s (includes the new `TestFrameEscapeAudit`) |
-| `make test-goc-status` | (running) |
-| `make test-goc-status-opt` | (running) |
-| compilation determinism | (running) |
+| `make test-goc-cmd` | PASS, 293.7s — includes the new `TestARM64WriteBarrierAuditRunsClean` |
+| `make test-goc-corpus` | PASS, 713.1s — includes the new `TestFrameEscapeAudit` |
+| `make test-goc-status` | **363 subtests / 363 PASS / 0 FAIL / 0 SKIP / 1 declared EXPECTED FAILURE / 0 KNOWN GAP**, 212.9s |
+| `make test-goc-status-opt` | **363 subtests / 362 PASS / 1 FAIL / 0 SKIP / 1 declared EXPECTED FAILURE / 0 KNOWN GAP**, 239.4s |
+| compilation determinism | 384 corpus programs, 2 compiles each, **384 SAME / 0 DIFFER** |
+
+Censused with `-v` and a per-subtest count, not `ok`. Both arms ran with
+`-runtime-status-compile-workers=8`, this job's declared share.
+
+### The one non-passing capability, and it is not this branch's
+
+    --- FAIL: TestARM64RuntimeCapabilityStatus/stack-scan/loop-safepoints   (-runtime-opt only)
+    panic: a stack slot live across a loop back edge was not a GC root
+
+**This is pre-existing.** Measured, not assumed: a clean worktree at `origin/main`
+(`ad4e9b2`), same box, same targeted run with `-runtime-opt`, fails identically. It is the
+open item `RUNTIME_PLAN.md` §6.1 records under "Open: with `-O`, a loop-carried local is
+not a GC root", with its own reducer at `goc/testdata/runtime_opt_loop_carried_root.go`,
+and §6.1 already reports it failing 10/10 at `main` (`0505d90`). The brief's
+non-negotiable states `main` is clean in both arms; for the optimized arm that is not the
+case, and this branch does not change it either way. That is the complete list of
+non-passing capabilities: one, in one arm, pre-existing.
+
+The determinism sweep is 2 rounds, not §23's depth: 768 compiles, 0 varying. What makes
+that proportionate is that nothing on the default compile path changed —
+`reportFrameEscapes` returns before doing anything without `GOC_DEBUG_ESCAPECHECK`, and
+`opt.FrameEscapes` has no other in-compiler call site — not that 2 rounds would be enough
+for a compiler change. `TestCompilingTheSameSourceTwiceGivesTheSameModule` and
+`TestParallelBackendIsByteIdenticalToSerial` also ran, inside `make test-goc-corpus`.
+
+## 9. What changed
+
+| File | What |
+| --- | --- |
+| `opt/framecheck.go` | `opt.FrameEscapes`, the audit |
+| `opt/framecheck_test.go` | 12 unit tests: each finding shape, each thing that must stay silent, and key stability under renumbering |
+| `goc/framecheck_test.go` | `TestFrameEscapeAudit`, the corpus run and the baseline comparison |
+| `goc/testdata/frame_escape_baseline.txt` | the 196 accepted publications, with a header saying what the file is and is not |
+| `goc/compile.go` | `reportFrameEscapes`, gated on `GOC_DEBUG_ESCAPECHECK` |
+| `stdlib/src/runtime/mwbbuf.go` | `cg12checkwb=3` |
+| `stdlib/src/runtime/mbitmap.go` | the same validation in `bulkBarrierPreWrite` and `bulkBarrierPreWriteSrcOnly` |
+| `cmd/goc/main_test.go` | `TestARM64WriteBarrierAuditRunsClean`, so the modes are exercised |
+| `RUNTIME_PLAN.md` | §25; §6's compiler-emitted-check list; §13 item 5's correction; two additions to §5.10 |
+
+## 10. Still unverified, and what I would do next
+
+- **`gc-invariants/mark-workers`'s own mechanism is not established.** The audit does not
+  fire on it, the cross-link measurement says the program module carries it, and that is
+  where I stopped: `ccwork/escape-gc-fix` owns the fix, and further reduction is its work,
+  not this branch's. Section 5 lists the analysis gaps that could account for it.
+- **The 196 baseline entries are classified into shapes, not individually reviewed.** Two
+  were read in full (section 6) and both are real hazards. The other 194 are recorded as
+  what the compiler does. Anyone treating the file as an approval list is misreading it;
+  the header says so.
+- **A compiler-emitted store check was designed but not built.** Section 2's second
+  reason — a barrier-based check only runs during a mark phase — has an obvious answer:
+  have `gen.store` emit `runtime.cg12CheckStackPublication(address, value)` alongside
+  `goc_storep`, under a compile-time flag, for packages other than `runtime` (the
+  runtime's own legitimate stack publications, `sudog.elem` above all, are all inside it
+  and are maintained by hand in `copystack`). That would validate every pointer store,
+  not the ones that happen during a mark phase. It is not built here: it is codegen, and
+  codegen shipped without a full validation pass is exactly what this project's §14 warns
+  about. The static audit covers the same ground without touching the emitted code.
+- **The audit does not look at the `-O` configuration.** `TestFrameEscapeAudit` compiles
+  without optimization. Since the one non-passing capability in the whole matrix is an
+  `-O`-only stack-map defect, an `-O` arm of the audit is the obvious next thing to add,
+  with its own baseline. Not done here.
