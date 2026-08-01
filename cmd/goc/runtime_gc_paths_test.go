@@ -103,32 +103,56 @@ func requireARM64WithCC(t *testing.T) {
 	}
 }
 
-// The conservative scan is the path a precise stack map cannot describe: a frame
-// interrupted between calls has no stack-map index, so scanframe scans the
-// asyncPreempt frame and its parent word by word. gc/conservative-preempt is
-// written to be interrupted there -- its loops contain no calls at all, so the
-// preemption signal is the only thing that can stop them -- but a program cannot
-// tell whether it was in fact interrupted, and one that is never preempted still
-// exits 0.
-func TestConservativePreemptCapabilityReachesTheConservativeScan(t *testing.T) {
+// Asynchronous preemption, and with it the conservative stack scan, is
+// unreachable from cg12-compiled Go. This is the §4.2 classification for §6's
+// "conservative scan boundaries", and it is a boundary proof rather than a
+// coverage gap: the runtime tries, the signal is delivered, and the injection is
+// refused at a named place for a recorded reason.
+//
+// internal/gometa.UnsafePointPCData emits a PCDATA_UnsafePoint table that covers
+// a generated function end to end with abi.UnsafePointUnsafe, because cg12 keeps
+// managed references in registers between calls while its stack maps describe
+// the spill state at call safepoints. isAsyncSafePoint reads that table and
+// returns false, so doSigPreempt never injects runtime.asyncPreempt, no frame is
+// ever marked conservative, and scanframe's conservative branch -- the only
+// caller of runtime.scanConservative -- is dead.
+//
+// The whole chain is asserted, not just the endpoint: preemptM is called, the
+// signal arrives at doSigPreempt, isAsyncSafePoint runs, and asyncPreempt2 does
+// not. A future change that enables asynchronous preemption turns this test red,
+// which is the point -- the conservative scan would then need real coverage.
+func TestAsynchronousPreemptionIsRefusedForGeneratedCode(t *testing.T) {
 	requireARM64WithCC(t)
 
 	executed := runtimeFunctionExecution(
 		t,
-		"runtime_gc_conservative_preempt.go",
+		"runtime_stack_scan_callfree_loop.go",
 		[]string{"GOMAXPROCS=4"},
-		120*time.Second,
-		"runtime.scanConservative",
-		"runtime.asyncPreempt2",
+		180*time.Second,
 		"runtime.suspendG",
+		"runtime.preemptM",
+		"runtime.doSigPreempt",
+		"runtime.isAsyncSafePoint",
+		"runtime.asyncPreempt2",
+		"runtime.scanConservative",
 	)
 
-	require.True(t, executed["runtime.asyncPreempt2"],
-		"no goroutine was asynchronously preempted, so the call-free loops were never interrupted")
-	require.True(t, executed["runtime.scanConservative"],
-		"a frame was never scanned conservatively, so this capability is not reaching the path it is named after")
 	require.True(t, executed["runtime.suspendG"],
-		"no goroutine's stack was scanned by suspendG")
+		"no goroutine's stack was scanned by suspendG, so this program is not reaching the preemption path at all")
+	require.True(t, executed["runtime.preemptM"],
+		"the runtime never asked for an asynchronous preemption")
+	require.True(t, executed["runtime.doSigPreempt"],
+		"the preemption signal was never delivered")
+	require.True(t, executed["runtime.isAsyncSafePoint"],
+		"the signal handler never got as far as deciding whether the PC was safe")
+
+	require.Falsef(t, executed["runtime.asyncPreempt2"],
+		"asynchronous preemption now completes; internal/gometa.UnsafePointPCData no longer marks generated"+
+			" code unsafe end to end, so runtime.scanConservative needs real coverage and RUNTIME_PLAN"+
+			" section 6.1's classification is stale")
+	require.Falsef(t, executed["runtime.scanConservative"],
+		"a frame was scanned conservatively, which cg12 has no route to; see"+
+			" internal/gometa.UnsafePointPCData")
 }
 
 // Mark worker modes. The controller hands a P a dedicated worker while

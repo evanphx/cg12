@@ -642,3 +642,91 @@ Two consequences follow from the one defect:
    `bulkBarrierPreWriteSrcOnly`, both of which are no-ops when `PtrBytes == 0`.
    So copying a pointer element into or out of a channel skips its write
    barrier as well.
+
+## Zombie detection, proved by a controlled negative subprocess
+
+`cmd/goc/runtime_zombie_detection_test.go`. §6 asks for zombie detection "in a
+controlled negative subprocess"; a check that has only ever fired by accident is
+not known to work. The subprocess launders a pointer through a `uintptr` --
+`reportZombies`' own case 1 -- collects until the object is swept, then publishes
+the integer back as a pointer where the collector follows it. The next cycle
+marks a free slot and the sweep after it throws.
+
+It passes: `runtime: marked free object in span` and `found pointer to free
+object`, exit non-zero. The control, the same program with the resurrection
+removed, exits 0 and prints `no zombie was reported`, so the test is not merely
+detecting a crash.
+
+**Confirmed independently: `reportZombies`' dump is blind on Green Tea spans.**
+Its per-object loop printed every object `alloc unmarked` and named no zombie at
+all, both here and in the original fault. The mechanism, read off the vendored
+source: `sweepLocked.sweep` calls `s.moveInlineMarks(s.gcmarkBits)`, which copies
+the inline mark bits into `gcmarkBits` and then **resets** them; the detection
+reads `gcmarkBits` and is correct, but `reportZombies` reads
+`s.markBitsForBase()`, which for `gcUsesSpanInlineMarkBits(s.elemsize)` returns
+`&s.inlineMarkBits().marks[0]` -- the bits that were just reset. So detection
+works and attribution does not.
+
+`ccwork/reportzombies` owns that fix and it is not touched here. The test logs
+the gap rather than asserting it in either direction: asserting the dump is blind
+would write the defect into the suite, and asserting it names the zombie would
+fail until the sibling lands.
+
+## Classified unreachable: the conservative stack scan (§6, §4.2)
+
+§6 asks for "conservative scan boundaries". **They cannot be reached from
+cg12-compiled Go, by design**, and the design is recorded in the compiler:
+
+```go
+// internal/gometa/pcvalue.go
+// UnsafePointPCData marks the complete generated function as unsafe for
+// asynchronous preemption. cg12 keeps managed references in registers between
+// calls, while its Go stack maps describe the spill state at call safepoints.
+// Cooperative preemption at calls remains available.
+func UnsafePointPCData() []byte { return []byte{1, 0xff, 0xff, 0xff, 0xff, 0x0f, 0} }
+```
+
+Decoded the way `runtime.pcvalue` decodes it, that is one entry, value
+`abi.UnsafePointUnsafe` (-2), spanning `0xffffffff` PCs. `isAsyncSafePoint` reads
+it and returns false, so `doSigPreempt` never injects `runtime.asyncPreempt`, no
+frame is ever marked conservative, and all three calls to
+`runtime.scanConservative` -- the stack-object one and the two in `scanframe` --
+are dead.
+
+Measured, not inferred. A long call-free spin loop compiled with runtime coverage
+and run alongside forced collections gives:
+
+| runtime function | executed |
+| --- | --- |
+| `runtime.suspendG` | yes |
+| `runtime.preemptM` | yes |
+| `runtime.doSigPreempt` | yes |
+| `runtime.isAsyncSafePoint` | yes |
+| `runtime.asyncPreempt2` | **no** |
+| `runtime.scanConservative` | **no** |
+
+and a per-block reading of `isAsyncSafePoint`'s coverage shows the executed exit
+is `preempt.go:448` -- the `return false, 0` under
+`if up == abi.UnsafePointUnsafe`. The runtime asks, the signal arrives, and the
+injection is refused at exactly the documented place.
+
+Two tests hold the classification:
+
+- `internal/gometa.TestUnsafePointPCDataMarksTheWholeFunctionUnsafe` decodes the
+  table at the source of truth.
+- `cmd/goc.TestAsynchronousPreemptionIsRefusedForGeneratedCode` asserts the whole
+  chain above, and fails if `asyncPreempt2` ever starts running -- at which point
+  the conservative scan needs real coverage and this classification is stale.
+
+The capability that was written for the conservative scan is kept as
+`stack-scan/callfree-loop-roots`: a long call-free loop holding its only
+references in an accumulator, an interior pointer and an `unsafe.Pointer` round
+trip, checked after collections run alongside it. That is the property cg12's
+choice actually rests on.
+
+**This has a consequence outside §6 that Phase 3 (§7) owns**: §7 asks for
+"cooperative and asynchronous preemption in compute loops". The asynchronous half
+does not exist in cg12 today. A truly non-terminating call-free loop has no
+preemption point at all, so `stopTheWorld` would wait for it indefinitely. Every
+loop tried here terminates, so this is stated as a consequence of the mechanism
+rather than as a reproduced hang.

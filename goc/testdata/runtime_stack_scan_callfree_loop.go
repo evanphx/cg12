@@ -1,28 +1,28 @@
-// A goroutine stopped by an asynchronous preemption is scanned conservatively.
+// A long compute loop with no calls in it, and the roots it holds across a
+// collection.
 //
-// A loop with no calls in it has no cooperative preemption point, so the only
-// way to stop it is the preemption signal. The handler injects a call to
-// runtime.asyncPreempt, which spills every register into its own frame; the
-// collector then cannot trust a stack map for the interrupted frame, because the
-// interrupt happened at an arbitrary instruction rather than at a call. scanframe
-// handles that by scanning the asyncPreempt frame and its parent word by word
-// with scanConservative, treating anything that looks like a heap pointer as one.
+// Go's usual answer for a call-free loop is asynchronous preemption: the
+// preemption signal injects a call to runtime.asyncPreempt, which spills every
+// register, and the collector then scans that frame and its parent
+// conservatively because no stack map describes an arbitrary instruction
+// boundary. **cg12 does not take that route.** internal/gometa.UnsafePointPCData
+// marks every generated function unsafe for asynchronous preemption end to end,
+// because cg12 keeps managed references in registers between calls while its
+// stack maps describe the spill state at call safepoints. isAsyncSafePoint
+// therefore refuses every injection attempt, and runtime.scanConservative is
+// unreachable from cg12-compiled Go. TestAsynchronousPreemptionIsRefusedForGeneratedCode
+// proves that boundary; RUNTIME_PLAN.md section 6.1 records the classification.
 //
-// Two properties have to hold together. A heap object whose only reference is in
-// a register or a spill slot of an asynchronously preempted frame must survive,
-// because the conservative scan finds it; and a word that merely looks like a
-// pointer must not corrupt anything, because scanConservative is allowed to
-// retain garbage but never to follow it into a non-object.
+// What is left is the property this program actually checks, and it is the one
+// that matters for cg12's design: a loop that runs for a long time between calls
+// must not lose the objects it is holding, and the collection that eventually
+// preempts it at the next call must find them. The loops below hold their only
+// reference in an accumulator, in an interior pointer into a heap object, and
+// through an unsafe.Pointer round trip, and every object is checked afterwards.
 //
-// The loops below are deliberately call-free and long enough that a collection
-// running concurrently has to interrupt one. They hold their objects in ways
-// that a precise stack map would describe differently from a conservative scan:
-// only in the accumulator, only in an interior pointer, and only through an
-// unsafe.Pointer round trip that is valid Go.
-//
-// This is a fatal-path test in the sense that a wrong answer here is a
-// collected-while-live object; the program checks the object contents after each
-// loop, so the failure is observed rather than inferred.
+// It is also the program that would notice if asynchronous preemption were ever
+// turned on: with the conservative scan live, these are exactly the frames it
+// would have to get right.
 package main
 
 import (

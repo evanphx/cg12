@@ -76,7 +76,7 @@
       "reason": "added to the capability matrix after the accepted baseline run; it enters the baseline at the next full-corpus rerun"
     },
     {
-      "capability": "stack-scan/conservative-preempt",
+      "capability": "stack-scan/callfree-loop-roots",
       "reason": "added to the capability matrix after the accepted baseline run; it enters the baseline at the next full-corpus rerun"
     },
     {

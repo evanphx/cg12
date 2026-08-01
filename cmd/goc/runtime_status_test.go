@@ -2307,8 +2307,8 @@ func runtimeCapabilities() []runtimeCapability {
 		},
 		{
 			category:    "stack-scan",
-			name:        "conservative-preempt",
-			source:      "runtime_gc_conservative_preempt.go",
+			name:        "callfree-loop-roots",
+			source:      "runtime_stack_scan_callfree_loop.go",
 			expectation: runtimeCapabilityMustPass,
 			env:         []string{"GOMAXPROCS=4"},
 			timeout:     180 * time.Second,
