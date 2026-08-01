@@ -380,11 +380,18 @@ vanished. Every other test in `./goc/...` passes.
 
 ## 10. Gate item 6 — `TestFrameEscapeAudit` — **FAIL**, and it is the merge that causes it
 
-Item 6 is the same failure as §9's; run on its own it fails the same way:
+Item 6 is the same failure as §9's. §9's number (`--- FAIL: TestFrameEscapeAudit
+(143.54s)`) came from the whole-corpus run; run on its own afterwards, with
+`-count=1` so no cached result could be served, it fails identically:
 
 ```
-go test -run '^TestFrameEscapeAudit$' -v ./goc      →  --- FAIL (143.54s)
+go test -timeout 20m -count=1 -v -run '^TestFrameEscapeAudit$' ./goc
+--- FAIL: TestFrameEscapeAudit (143.88s)
+FAIL	github.com/evanphx/cg12/goc	144.405s
 ```
+
+The same three findings, in the same order, and the "no longer makes" half of the
+ratchet is silent — nothing in the baseline vanished, three things were added.
 
 ### It is not pre-existing on either parent
 
