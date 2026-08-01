@@ -360,7 +360,7 @@ line with the ~600 s `escape-gc-fix` recorded for `make test-goc-corpus`, plus t
 143 s `TestFrameEscapeAudit` that `escape-checker` added; the suite really ran.
 
 The single failure is `TestFrameEscapeAudit` — which is also gate item 6, so items 1
-and 6 fail together and for the same reason. It is analysed in §14.
+and 6 fail together and for the same reason. It is analysed in §10.
 
 ```
 --- FAIL: TestFrameEscapeAudit (143.54s)
@@ -377,3 +377,85 @@ and 6 fail together and for the same reason. It is analysed in §14.
 
 Three publications appeared that the accepted baseline does not list; nothing
 vanished. Every other test in `./goc/...` passes.
+
+## 10. Gate item 6 — `TestFrameEscapeAudit` — **FAIL**, and it is the merge that causes it
+
+Item 6 is the same failure as §9's; run on its own it fails the same way:
+
+```
+go test -run '^TestFrameEscapeAudit$' -v ./goc      →  --- FAIL (143.54s)
+```
+
+### It is not pre-existing on either parent
+
+The merge-base of the two parents is `ad4e9b2` = `main`, where this test does not
+exist — `escape-checker` is what adds it. So the meaningful control is the checker
+parent itself, which is `main` plus the test and nothing else:
+
+| tree | what it is | `TestFrameEscapeAudit` |
+| --- | --- | --- |
+| `origin/ccwork/escape-checker` `f09d58d` | merge-base `ad4e9b2` + the audit + the baseline | **PASS** (138.36 s) |
+| `7854888` on `escape-gc-fix` | merge-base + `ccwork/escape-analysis`, audit files copied in | **FAIL**, the same 3 findings |
+| `61ba39d` (this merge) | both parents + `b2e96c5` | **FAIL**, the same 3 findings |
+
+`opt/framecheck.go`, `goc/framecheck_test.go` and `goc/testdata/frame_escape_baseline.txt`
+are byte-identical between `escape-checker` and the merge, and both corpus programs
+named in the findings are byte-identical too, so the whole difference is on the
+compiler side.
+
+The `7854888` row localises it further. That commit is `escape-gc-fix` at the moment
+it merged `ccwork/escape-analysis`, i.e. **before** `9c7a209` (the GC-mask padding
+fix), before `2bd5089`/`536125f` (the reducer and its unit test), and before
+`b2e96c5`. Reproducing it there was done by copying only the four audit files onto
+that commit and leaving `goc/compile.go` alone — an earlier attempt that also took
+`compile.go` from the checker branch was discarded, because that file is where
+`escape-analysis` lives and taking it would have reverted the very change under test.
+
+**Conclusion: the three publications come from `ccwork/escape-analysis` (`2724ac7`
++ `9f76498`), which arrived through the `escape-gc-fix` parent. Neither the GC mask
+padding fix this merge exists to deliver, nor `b2e96c5`, is implicated.** The merge is
+the first tree in which that compiler change and the checker that verifies it are in
+the same place, so this is a defect the merge *reveals* rather than one it creates —
+but it is a defect, and it fails the gate on this commit.
+
+### What the three findings are
+
+All three have the same shape: `barrier … into memory reached through a call result
+$runtime.newobject` — an allocation left in the frame whose address is then written,
+through the write-barrier helper, into a heap object. Dumping the IR for
+`runtime_slice_pointer_append_gc.go` (line 25 is `runtime.KeepAlive(values)`):
+
+```
+loc 10 31
+  %t4  =p alloc8 32                      ; make([]*record, 0, 4) backing array — IN THE FRAME
+  %t5  =p call $goc_memset(p %t4, w 0, l 32)
+  storel %t4, %t2                        ; …its address into the frame slice header
+...
+loc 25 20
+  %t75 =p loadl %t2                      ; values.ptr  (may be %t4)
+  %t80 =p call $runtime.newobject(...)   ; the heap box for the interface conversion
+  call $goc_storep(p %t80, p %t75)       ; BARRIER: a frame address into a heap object
+```
+
+`runtime.KeepAlive(values)` takes an `interface{}`, so the slice header is boxed into
+a fresh `runtime.newobject` and the data pointer is stored into it with a write
+barrier. `escape-analysis` decided the backing array may stay in the frame; the boxing
+then publishes its address into the heap. A heap object holding a goroutine-stack
+pointer is exactly the "bad pointer in the heap" fault the audit was written to catch,
+and exactly the class of `2724ac7`.
+
+`FrameEscapes` is a may-analysis, so it is worth being precise about how much of a
+hazard each site is. In these two corpus programs the loop appends 128 elements into a
+cap-4 slice, so `runtime.growslice` has certainly replaced the data pointer with a heap
+one before line 25 is reached, and the box receives a heap address at run time. That is
+consistent with both programs passing the capability matrix and the corpus. It is not,
+however, a reason to dismiss the finding: the store is emitted unconditionally, and the
+same code shape with an append count inside the initial capacity would put a live stack
+address into a heap object. The third finding, `bigmod.Nat.Mul` at `nat.go:951:28`
+(`return x.Mod(&Nat{limbs: T}, m)`), is on the crypto path reached by
+`stdlib_crypto_ecdsa.go`.
+
+Deciding whether each is a live fault or a conservative report is fix work, not gate
+work, and it is not done here. The gate's finding is narrower and firm: **a test that
+this merge brings in fails on this commit, it fails because of code the other parent
+brings in, and it passes on both the merge-base and the parent that owns the test.**
