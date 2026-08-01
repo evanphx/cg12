@@ -481,3 +481,47 @@ Run with `GOFLAGS=-v` so the run could be censused; the target is otherwise unmo
 `TestTranslatedAssemblyPrecedesRuntimeTextEnd`, both skipping in 0.00 s.
 301 s against the ~292 s / ~282 s `escape-gc-fix` recorded for the same target: the
 suite really ran.
+
+## 12. Gate item 3 — `make test-goc-status`, the full capability matrix — **PASS**
+
+```
+go test -timeout 30m -run '^TestARM64RuntimeCapabilityStatus$' ./cmd/goc/... \
+	-args -runtime-status-shards=1 -runtime-status-shard=0
+ok  	github.com/evanphx/cg12/cmd/goc	103.572s
+```
+
+Unsharded, `GOFLAGS=-v` for the census, target otherwise unmodified.
+
+**PASS/FAIL set: 364 capabilities PASS, FAIL set is empty.** `=== RUN` lines: 365 =
+364 capability subtests + the parent. `--- PASS`: 365 (364 subtests + parent).
+`--- FAIL`: 0. No subtest ran in 0.00 s. The 364 matches the default-arm census
+`escape-gc-fix` recorded exactly (363 on `main` + `gc-invariants/type-mask-padding`),
+so the merge neither gained nor lost a capability.
+
+One of the 364 passes is the declared `expectedFailure`
+`defer-panic/panic-string-output` (`runtime_status_test.go:2687: EXPECTED FAILURE
+runtime_panic_print_string.go`), exactly as on both parents.
+
+The 364 by category:
+
+```
+runtime-packages 45  core-types 40  goroutine 30  gc 30  defer-panic 22
+stdlib-io 17  stdlib-encoding 15  stdlib-netpoll 13  stdlib-os 12  stdlib-crypto 12
+stdlib-text 10  stdlib-runtime-diagnostics 8  stack 8  stdlib-math 6  stdlib-http 6
+stdlib-generics 6  stdlib-bytes 6  stack-scan 6  loop-variables 6  gc-stress 6
+stdlib-signals 5  stdlib-netpoll-stress 4  gc-invariants 4  stdlib-sync 3
+stdlib-net-values 3  stdlib-image 3  stdlib-compress 3  scheduler-stress 3
+assignment-targets 3  stdlib-url 2  stdlib-runtime-values 2  stdlib-log 2
+stdlib-hash 2  stdlib-fmt 2  stdlib-containers 2  stdlib-archive 2
+print-builtin 2  closure-capture 2  stdlib-unicode 1  stdlib-time 1  stdlib-testing 1
+stdlib-runtime 1  stdlib-path 1  stdlib-os-process 1  stdlib-mime 1  stdlib-fs 1
+stdlib-flag 1  stdlib-errors 1  stdlib-context 1
+```
+49 categories, 364 capabilities.
+
+**On the 103 s wall clock.** That is much shorter than the "many minutes" the Makefile
+warns about, so it was checked rather than accepted. The subtests are parallel: their
+self-reported durations sum to 9383 s (mean 25.8 s each), which is real work
+overlapped across the box's 64 cores, and the pack cache was warm from §9 and §11.
+Nothing was skipped — 365 `=== RUN` lines, 364 capability results, no zero-duration
+subtest, and the run-cold repeat in §14 does the same 364 with the cache bypassed.
