@@ -1723,6 +1723,14 @@ that `reflect`'s assembly stubs call are not in the split runtime object when
 determinism note above records that the matrix is supposed to run `-O` under
 this flag.
 
+**No longer reproducible as of 2026-08-01.** §24's job ran the full unsharded
+`-runtime-opt` arm on `ccwork/reportzombies` (off current `main`) and got 345
+subtests, 344 PASS, 1 EXPECTED FAILURE, 0 FAIL, 0 KNOWN GAP --- including all
+thirteen `runtime-packages/reflect-*`, `stdlib-crypto/ecdh-x25519`,
+`stdlib-encoding/binary` and `stdlib-encoding/binary-varint`. That job did not
+fix it and did not attribute the change, so this stays recorded rather than
+deleted: whoever fixed it should replace this paragraph with the cause.
+
 #### Compiling the same program twice gives the same binary (closed)
 
 Closed. §22 records the three causes, the measurement that closed it, and the two
