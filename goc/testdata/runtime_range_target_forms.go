@@ -347,37 +347,46 @@ func doubles(yield func(int) bool) {
 	}
 }
 
+// iteratorTargets accumulates into a string, exactly as every other subject
+// above does. It used to accumulate into a slice instead: the yield function a
+// range-over-function body is lowered into is a closure, and `observed += ...`
+// from inside a closure left the enclosing frame's variable addressing the
+// yield function's dead frame (RUNTIME_PLAN.md 5.10). Four cases here were
+// rewritten around that, which made this the one subject in the file that did
+// not assert what it meant to. The lowered assignment is fixed, so they assert
+// it again -- and the string accumulator is now itself a captured-variable
+// case, which is why it is the form worth keeping.
 func iteratorTargets() {
 	var box outer
-	var observed []string
+	observed := ""
 	for box.index, box.text = range pairs {
-		observed = append(observed, fmt.Sprintf("%d%s", box.index, box.text))
+		observed += fmt.Sprintf("%d%s", box.index, box.text)
 	}
-	expect("iterator key and element into struct fields", fmt.Sprint(observed), "[0a 1b 2c]")
+	expect("iterator key and element into struct fields", observed, "0a1b2c")
 	expect("iterator key and element into struct fields, after the loop",
 		fmt.Sprintf("%d%s", box.index, box.text), "2c")
 
 	pointer := new(string)
-	observed = nil
+	observed = ""
 	for _, *pointer = range pairs {
-		observed = append(observed, *pointer)
+		observed += *pointer
 	}
-	expect("iterator element through a pointer", fmt.Sprint(observed), "[a b c]")
+	expect("iterator element through a pointer", observed, "abc")
 
-	observed = nil
+	observed = ""
 	for globalIndex = range doubles {
-		observed = append(observed, fmt.Sprintf("%d", globalIndex))
+		observed += fmt.Sprintf("%d", globalIndex)
 	}
-	expect("iterator key into a package-level variable", fmt.Sprint(observed), "[0 2 4]")
+	expect("iterator key into a package-level variable", observed, "024")
 	expect("iterator key into a package-level variable, read elsewhere",
 		fmt.Sprintf("%d", readGlobalIndex()), "4")
 
 	destination := make([]int, 1)
-	observed = nil
+	observed = ""
 	for destination[0] = range doubles {
-		observed = append(observed, fmt.Sprintf("%d", destination[0]))
+		observed += fmt.Sprintf("%d", destination[0])
 	}
-	expect("iterator key into a slice element", fmt.Sprint(observed), "[0 2 4]")
+	expect("iterator key into a slice element", observed, "024")
 }
 
 func readGlobalIndex() int {
