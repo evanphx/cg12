@@ -326,3 +326,54 @@ Note what this suite is worth **after** the fix compared with before: on the as-
 tree its `cg12checkwb=3` arm could not have rejected anything a `typedmemmove`,
 `growslice` or `typedslicecopy` buffered, because the gate returned first (§1, §4). It
 now covers those words, and still passes. The rest of `make test-goc-cmd` is §10.
+
+---
+
+# PART TWO — the heavy suites, run in the foreground at `61ba39d`
+
+The previous job ended its session with these suites still running under background
+monitors and was never re-invoked; the processes were killed and the results never
+existed. Everything below was run in the foreground of a single session and waited
+on to completion. Where a suite did not complete, it is marked UNVERIFIED rather
+than assumed.
+
+Tree under test: `ccwork/merge-gate-escape` = `61ba39d`, working tree clean.
+Box: 64 cores, 250 GiB.
+
+## 9. Gate item 1 — the corpus, `go test ./goc/... -parallel 10` — **FAIL**
+
+```
+go test -timeout 40m -parallel 10 -v ./goc/...
+FAIL	github.com/evanphx/cg12/goc	741.464s
+```
+
+Census of the `-v` log (`=== RUN` lines: 598):
+
+| outcome | count |
+| --- | ---: |
+| `--- PASS` | 597 |
+| `--- FAIL` | 1 |
+| `--- SKIP` | 0 |
+
+597 + 1 = 598 = the `=== RUN` count, so nothing was skipped or swallowed. 741 s is in
+line with the ~600 s `escape-gc-fix` recorded for `make test-goc-corpus`, plus the
+143 s `TestFrameEscapeAudit` that `escape-checker` added; the suite really ran.
+
+The single failure is `TestFrameEscapeAudit` — which is also gate item 6, so items 1
+and 6 fail together and for the same reason. It is analysed in §14.
+
+```
+--- FAIL: TestFrameEscapeAudit (143.54s)
+    framecheck_test.go:77:
+        a frame address is published past its frame in a place
+        testdata/frame_escape_baseline.txt does not list.
+          stdlib/src/crypto/internal/fips140/bigmod/nat.go:951:28	crypto/internal/fips140/bigmod.Nat.Mul	barrier	memory reached through a call result $runtime.newobject
+              first seen compiling: stdlib_crypto_ecdsa.go
+          testdata/runtime_debug_gc_controls.go:32:20	main.main	barrier	memory reached through a call result $runtime.newobject
+              first seen compiling: runtime_debug_gc_controls.go
+          testdata/runtime_slice_pointer_append_gc.go:25:20	main.main	barrier	memory reached through a call result $runtime.newobject
+              first seen compiling: runtime_slice_pointer_append_gc.go
+```
+
+Three publications appeared that the accepted baseline does not list; nothing
+vanished. Every other test in `./goc/...` passes.
