@@ -891,8 +891,15 @@ Run on this branch with the fix and the new capabilities in place.
 | `internal/gometa` unsafe-point boundary test | pass |
 | `cmd/goc` matrix bookkeeping (denominator, exclusive classification, cost model) | pass |
 | `cmd/goc` runtime-path proofs + zombie negative subprocess | pass |
-| full matrix, both arms | see below |
-| determinism, both arms | see below |
+| full matrix, plain arm | **361 subtests, 361 PASS, 0 FAIL, 0 KNOWN GAP, 1 declared EXPECTED FAILURE** |
+| full matrix, `-O` arm | **360 PASS, 1 FAIL** — `stack-scan/loop-safepoints`, the pre-existing `-O` defect below |
+| `make test-goc-corpus` rerun (after all testdata was added) | see "Final suite results" at the end |
+| `make test-goc-cmd` | see "Final suite results" at the end |
+| determinism, both arms | see "Final suite results" at the end |
+
+The first `test-unit` and `test-goc-corpus` rows above were measured with the
+channel fix in place but before the last of the capability programs landed; they
+are re-run at the end and reported there.
 
 
 ## For whoever integrates this
@@ -1140,3 +1147,12 @@ Explicitly, so nothing here reads as stronger than it is.
 
 27 files, +4542/-18. One file in `goc/` changed (`compile.go`, 22 lines of code);
 everything else is tests, capability programs, and documentation.
+
+## Final suite results
+
+Measured last, on the finished tree, while the box was shared with three sibling
+jobs (load average ~100 on 64 cores), so wall-clock numbers are not comparable
+with the earlier ones.
+
+*This section is filled in as each result lands. Anything still blank was still
+running.*
