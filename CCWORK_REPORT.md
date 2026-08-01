@@ -1015,26 +1015,44 @@ With `-O` the frame reports **no `*node` root at all**. The pointer is in the
 frame — the emitted code stores it at `[x29,#40]` and reaches it through an
 address parked at `[x29,#16]` — but the stack map does not describe it.
 
-### Hypothesis, stated as one
+### Where the root is lost, narrowed with a throwaway diagnostic
 
-`arm64.pointerAllocationSources` reports an allocation at a safepoint when the
-allocation temporary, or a temporary derived from it by `addressDerivationBases`,
-is live there. Its own comment says it exists precisely because "a derived
-address ... computed once and then reused" can outlive the base temporary. In the
-`-O` build the allocation's address round-trips **through memory** — stored to a
-frame slot at entry, reloaded inside the loop — and a store/reload is not an
-address derivation the pass can follow, so the chain from the live reloaded
-address back to the allocation is broken and the allocation is reported nowhere.
-Without `-O` the allocation temporary stays live across the calls and the
-question never arises.
+A scratch build of goc with a print in `arm64.(*mc).recordSafepoint` (not
+committed) dumps, per safepoint, the roots the backend is about to record. For
+`main.carried` at the collection inside the loop, compiled serially so the output
+does not interleave:
 
-That is a hypothesis from reading the pass and the emitted code, **not a verified
-mechanism**, and it is not fixed here. The obvious candidate fix — report every
-pointer-bearing allocation at every safepoint in the function, which is sound
-because the slot exists for the frame's lifetime and `zeroGoPointerSlots`
-initialises it — changes root reporting for every function in both arms. Landing
-that on the strength of a hypothesis, at the end of a run, is exactly the failure
-mode RUNTIME_PLAN §5.14 records. It is written down instead.
+```
+-O    : roots 5  stackPointerWords 9  stackAllocTmp 6
+        root temp 4,6,22,30,89 -- every one isStackAlloc=true, gcref=true
+no -O : roots 8  stackPointerWords 9  stackAllocTmp 13
+        root temp 3,4,6,20,22,30,43,84 -- every one isStackAlloc=true, gcref=true
+```
+
+Two things follow.
+
+- `-O` promotes four of the pointer-bearing allocations out of the frame
+  (`stackAllocTmp` 13 -> 6) while `StackPointerWords` still lists nine. So the
+  loop-carried pointer is no longer a frame allocation at all; it is an SSA value.
+- **No promoted value is reported at that safepoint**: all five roots are
+  allocation temporaries. `arm64.isSafepointRoot` would accept a promoted
+  temporary — it returns true for `Cls == ir.ClsP` on a managed frame, and
+  `opt.Mem2Reg` deliberately keeps the pointer class for exactly this reason — so
+  the value is being lost *before* that test, by not being live in
+  `analysis.Liveness` at the call or by no longer being a temporary there.
+
+### The obvious candidate fix does not work — measured, not assumed
+
+A scratch build that reports **every** pointer-bearing frame allocation at
+**every** safepoint (the conservative map the current scheme replaced) still
+fails the reducer 10/10 with `-O`. That is consistent with the narrowing above:
+under `-O` the allocations that matter are not frame allocations any more, so a
+fix that iterates frame allocations cannot reach them. Recording it so the next
+job does not spend the experiment again.
+
+The remaining suspects are `opt.Mem2Reg`'s promoted values and how they reach
+`computeSafepointRoots`. That is a change to `opt`/`arm64` register-level root
+reporting; it is not attempted here.
 
 ### And a second, cleanly-attributed defect found while narrowing it: `//go:noinline` does nothing
 
