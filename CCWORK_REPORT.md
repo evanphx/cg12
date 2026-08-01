@@ -1176,8 +1176,20 @@ Measured last, on the finished tree, while the box was shared with three sibling
 jobs (load average ~100 on 64 cores), so wall-clock numbers are not comparable
 with the earlier ones.
 
-*This section is filled in as each result lands. Anything still blank was still
-running.*
+*This section is filled in as each result lands. If a row below still says
+"pending", that suite had not finished when this job ended and is genuinely
+unverified — treat it as unverified, not as passing.*
+
+| suite | status |
+| --- | --- |
+| determinism, no `-O`, 2 rounds over 382 programs | pending |
+| determinism, `-O`, 2 rounds over 382 programs | pending |
+| `make test-goc-cmd` | pending |
+| `make test-goc-corpus` (re-run on the finished tree) | pending |
+
+Already measured and reported above, on the tree with the channel fix:
+`make test-unit` (pass), `make test-goc-corpus` (pass, 578.5s), both matrix arms,
+and a 4-round determinism run over 381 programs with 0 varying.
 
 ### Determinism, first measurement (with the channel fix, before the last testdata landed)
 
