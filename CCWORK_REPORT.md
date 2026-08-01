@@ -525,3 +525,49 @@ self-reported durations sum to 9383 s (mean 25.8 s each), which is real work
 overlapped across the box's 64 cores, and the pack cache was warm from §9 and §11.
 Nothing was skipped — 365 `=== RUN` lines, 364 capability results, no zero-duration
 subtest, and the run-cold repeat in §14 does the same 364 with the cache bypassed.
+
+## 13. Gate item 4 — `make test-goc-status-opt`, the `-O` arm — **FAIL, pre-existing**
+
+```
+go test -timeout 30m -run '^TestARM64RuntimeCapabilityStatus$' ./cmd/goc/... \
+	-args -runtime-opt -runtime-status-shards=1 -runtime-status-shard=0
+FAIL	github.com/evanphx/cg12/cmd/goc	111.232s
+```
+
+**PASS/FAIL set: 363 capabilities PASS; the FAIL set is exactly one —
+`stack-scan/loop-safepoints`.** `=== RUN`: 365 (364 subtests + parent).
+`--- PASS`: 363. `--- FAIL`: 2 (the subtest and the parent it fails). 363 + 1 = 364,
+the same 364 as the default arm, so the `-O` arm ran the whole matrix too.
+
+```
+--- FAIL: TestARM64RuntimeCapabilityStatus/stack-scan/loop-safepoints (0.02s)
+    runtime_status_test.go:2664: runtime_stack_scan_loop_safepoints.go should pass: exit status 2
+        cg12scanroots: main_carried local slot 27 at 0x219ce97bda58 retains 0x219ce976e0d0 size 16 ...
+        collected while live: carried-0 at carried before rewrite
+        panic: a stack slot live across a loop back edge was not a GC root
+        main_drain() <- main_carried() <- main_main()
+```
+
+### Checked against the merge-base directly, not assumed
+
+The merge-base of the two parents is `ad4e9b2` = `main`. Run there, in its own
+worktree, same command restricted to the one capability:
+
+```
+(worktree at ad4e9b2)
+go test -run '^TestARM64RuntimeCapabilityStatus$/^stack-scan$/^loop-safepoints$' \
+    ./cmd/goc -args -runtime-opt
+--- FAIL: TestARM64RuntimeCapabilityStatus/stack-scan/loop-safepoints (0.02s)
+        collected while live: carried-0 at carried before rewrite
+        panic: a stack slot live across a loop back edge was not a GC root
+FAIL	github.com/evanphx/cg12/cmd/goc	32.205s
+```
+
+Same capability, same assertion, same message, on the merge-base. **This failure is
+pre-existing and is not caused by the merge.** It is an `-O`-only stack-map defect,
+independent of the GC mask padding; `escape-gc-fix` reached the same conclusion from
+its own measurements (its §10: `main` fails it 3/3 individually and 1/363 in the full
+`-runtime-opt` arm), and this run confirms it on the merge-base from this gate.
+
+It does not block the merge on its own. It does mean the `-O` arm is not green on
+`main` either, which is worth stating plainly rather than filing under "matrix passes".
