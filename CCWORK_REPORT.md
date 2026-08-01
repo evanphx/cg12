@@ -895,7 +895,7 @@ Run on this branch with the fix and the new capabilities in place.
 | `internal/gometa` unsafe-point boundary test | pass |
 | `cmd/goc` matrix bookkeeping (denominator, exclusive classification, cost model) | pass |
 | `cmd/goc` runtime-path proofs + zombie negative subprocess | pass |
-| full matrix, plain arm | **361 subtests, 361 PASS, 0 FAIL, 0 KNOWN GAP, 1 declared EXPECTED FAILURE** |
+| full matrix, plain arm | **361 subtests, 361 subtest PASS (one is the declared EXPECTED FAILURE), 0 FAIL, 0 KNOWN GAP** |
 | full matrix, `-O` arm | **360 PASS, 1 FAIL** — `stack-scan/loop-safepoints`, the pre-existing `-O` defect below |
 | `make test-goc-corpus` rerun (after all testdata was added) | see "Final suite results" at the end |
 | `make test-goc-cmd` | see "Final suite results" at the end |
@@ -909,9 +909,12 @@ are re-run at the end and reported there.
 ## For whoever integrates this
 
 - **The matrix goes from 345 to 361 capabilities**, all `mustPass`, with the one
-  declared `expectedFailure` (`defer-panic/panic-string-output`) unchanged. So
-  the shape the non-negotiables ask for is 361 subtests / 360 PASS / 1 EXPECTED
-  FAILURE / 0 FAIL / 0 KNOWN GAP, in both arms.
+  declared `expectedFailure` (`defer-panic/panic-string-output`) unchanged. The
+  plain arm is 361 subtests / 361 subtest PASS (one of which is the declared
+  EXPECTED FAILURE, whose subtest passes by failing as declared) / 0 FAIL /
+  0 KNOWN GAP. The `-O` arm is the same except for one genuine FAIL,
+  `stack-scan/loop-safepoints`, which is the pre-existing `-O` defect this branch
+  found and did not fix.
 - **`runtimeCapability.env` is added here and also by `ccwork/phase2-alloc`.**
   Same field name, same semantics (appended after the inherited environment so it
   wins), same comment shape. The two should merge cleanly; if they conflict, keep
@@ -934,8 +937,9 @@ are re-run at the end and reported there.
 ## Matrix arm 1 (no `-O`): green
 
 ```
-361 subtests, 361 PASS, 0 FAIL, 0 SKIP, 0 KNOWN GAP,
-1 declared EXPECTED FAILURE (defer-panic/panic-string-output)
+361 subtests, 361 subtest PASS, 0 FAIL, 0 SKIP, 0 KNOWN GAP.
+One of the 361 is the declared EXPECTED FAILURE, defer-panic/panic-string-output,
+whose subtest passes by failing exactly as declared.
 ok  github.com/evanphx/cg12/cmd/goc  336.670s
 ```
 
