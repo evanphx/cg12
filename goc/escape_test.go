@@ -1029,3 +1029,321 @@ func keepAliveSlotIsAFramePointerWord(function *ir.Func) bool {
 	}
 	return false
 }
+
+// A parameter whose only escaping use is the function's own result does not
+// force its caller's storage onto the heap; the caller's storage escapes
+// exactly when the call's result does. Without that summary the four float and
+// complex print routines heap-allocated their scratch arrays, which is the
+// RUNTIME_PLAN.md 5.3 defect on paths where allocation is forbidden --
+// gwrite(strconv.AppendFloat(buf[:0], ...)) passes a derived slice to a callee
+// that returns a slice derived from it.
+func TestParameterLeakingOnlyToResultDoesNotEscapeItsCaller(t *testing.T) {
+	module, err := goc.Compile("leak_to_result.go", []byte(`
+package main
+
+import "runtime"
+
+var sink []byte
+var pointerSink *int
+var slicePointerSink []*int
+
+func passthrough(dst []byte) []byte { return dst }
+
+func retain(dst []byte) []byte {
+	sink = dst
+	return dst
+}
+
+func namedRetain(dst []byte) (out []byte) {
+	out = dst
+	sink = dst
+	return
+}
+
+func identity(value *int) *int { return value }
+
+func consume(b []byte) {}
+
+func resultConsumedLocally() {
+	var buf [20]byte
+	consume(passthrough(buf[:0]))
+}
+
+func resultStoredGlobally() {
+	var buf [20]byte
+	sink = passthrough(buf[:0])
+}
+
+func calleeRetainsTheParameter() {
+	var buf [20]byte
+	consume(retain(buf[:0]))
+}
+
+func calleeRetainsThroughANamedResult() {
+	var buf [20]byte
+	consume(namedRetain(buf[:0]))
+}
+
+func appendDestinationConsumedLocally() {
+	var buf [20]byte
+	consume(append(buf[:0], 'x'))
+}
+
+func appendDestinationStoredGlobally() {
+	var buf [20]byte
+	sink = append(buf[:0], 'x')
+}
+
+func appendedElementStoredGlobally() {
+	value := 7
+	slicePointerSink = append(slicePointerSink, &value)
+}
+
+func pointerResultStoredGlobally() {
+	value := 3
+	pointerSink = identity(&value)
+}
+
+func pointerResultDereferencedLocally() int {
+	value := 3
+	return *identity(&value)
+}
+
+func main() {
+	runtime.GC()
+	resultConsumedLocally()
+	resultStoredGlobally()
+	calleeRetainsTheParameter()
+	calleeRetainsThroughANamedResult()
+	appendDestinationConsumedLocally()
+	appendDestinationStoredGlobally()
+	appendedElementStoredGlobally()
+	pointerResultStoredGlobally()
+	println(pointerResultDereferencedLocally())
+}
+`))
+	require.NoError(t, err)
+
+	staysOnTheFrame := []string{
+		"resultConsumedLocally",
+		"appendDestinationConsumedLocally",
+		"pointerResultDereferencedLocally",
+	}
+	for _, name := range staysOnTheFrame {
+		function := functionWithSuffix(t, module, "main."+name)
+		assert.False(t, callsSymbol(function, "runtime.newobject"),
+			"%s: storage consumed within the function was promoted to the heap", name)
+	}
+
+	mustReachTheHeap := []string{
+		"resultStoredGlobally",
+		"calleeRetainsTheParameter",
+		"calleeRetainsThroughANamedResult",
+		"appendDestinationStoredGlobally",
+		"appendedElementStoredGlobally",
+		"pointerResultStoredGlobally",
+	}
+	for _, name := range mustReachTheHeap {
+		function := functionWithSuffix(t, module, "main."+name)
+		assert.True(t, callsSymbol(function, "runtime.newobject"),
+			"%s: a package global can now hold a frame address", name)
+	}
+}
+
+// A callee that assigns its parameter to its own named result and returns bare
+// used to be reported as not letting the parameter escape, because the walk
+// consulted the *lowered* function's named results while enumerating the
+// callee's body. A package-level variable then held a frame address, which is
+// the invariant RUNTIME_PLAN.md 5.8 protects.
+func TestParameterAssignedToACalleeNamedResultEscapes(t *testing.T) {
+	module, err := goc.Compile("named_result.go", []byte(`
+package main
+
+import "runtime"
+
+var pointerSink *int
+
+func namedLeak(value *int) (out *int) {
+	out = value
+	return
+}
+
+func leakViaNamedResult() {
+	value := 3
+	pointerSink = namedLeak(&value)
+}
+
+func main() {
+	runtime.GC()
+	leakViaNamedResult()
+}
+`))
+	require.NoError(t, err)
+
+	leak := functionWithSuffix(t, module, "main.leakViaNamedResult")
+	assert.True(t, callsSymbol(leak, "runtime.newobject"),
+		"a callee's named result carried a frame address into a package global")
+}
+
+// Taking the address of a field of a local object and letting that address
+// escape has to promote the object, because an interior pointer keeps the whole
+// object alive. cg12 treated every field selection as a non-escaping use, so
+// the object stayed on the frame and a package-level slice held a goroutine
+// stack address. Longer chains -- &v.a.b and &v[i].f -- count for the same
+// reason, and a chain that steps through a pointer does not, because it names
+// storage in some other object.
+func TestFieldAddressThatEscapesPromotesItsObject(t *testing.T) {
+	module, err := goc.Compile("field_address.go", []byte(`
+package main
+
+import "runtime"
+
+type payload struct {
+	bytes [64]byte
+}
+
+type record struct {
+	first payload
+	tag   int64
+}
+
+type link struct {
+	next  *link
+	value int64
+}
+
+var fieldSink []*payload
+var scalarSink []*int64
+var elementSink []*record
+var nestedSink []*[64]byte
+var linkSink []*int64
+
+func leakFieldAddress() {
+	object := &record{}
+	fieldSink = append(fieldSink, &object.first)
+}
+
+func leakScalarFieldAddress() {
+	object := &record{}
+	scalarSink = append(scalarSink, &object.tag)
+}
+
+func leakElementAddress() {
+	objects := &[2]record{}
+	elementSink = append(elementSink, &objects[1])
+}
+
+func leakNestedFieldAddress() {
+	object := &record{}
+	nestedSink = append(nestedSink, &object.first.bytes)
+}
+
+func leakElementFieldAddress() {
+	objects := &[2]record{}
+	scalarSink = append(scalarSink, &objects[1].tag)
+}
+
+func keepFieldAddressLocal() int64 {
+	object := &record{}
+	pointer := &object.tag
+	*pointer = 7
+	return object.tag
+}
+
+func addressThroughAPointerFieldIsAnotherObject() int64 {
+	head := &link{next: &link{value: 9}}
+	linkSink = append(linkSink, &head.next.value)
+	return head.value
+}
+
+func main() {
+	runtime.GC()
+	leakFieldAddress()
+	leakScalarFieldAddress()
+	leakElementAddress()
+	leakNestedFieldAddress()
+	leakElementFieldAddress()
+	if keepFieldAddressLocal() != 7 {
+		panic("local field address mismatch")
+	}
+	println(addressThroughAPointerFieldIsAnotherObject())
+}
+`))
+	require.NoError(t, err)
+
+	mustReachTheHeap := []string{
+		"leakFieldAddress",
+		"leakScalarFieldAddress",
+		"leakElementAddress",
+		"leakNestedFieldAddress",
+		"leakElementFieldAddress",
+	}
+	for _, name := range mustReachTheHeap {
+		function := functionWithSuffix(t, module, "main."+name)
+		assert.True(t, callsSymbol(function, "runtime.newobject"),
+			"%s: an escaping field address left its object on the frame", name)
+	}
+
+	// The counterpart: a field address confined to its function must not force
+	// the object onto the heap. Without this the fix would heap-allocate every
+	// addressed local, which is the conservatism that makes runtime code
+	// allocate on paths where allocation is forbidden.
+	keepLocal := functionWithSuffix(t, module, "main.keepFieldAddressLocal")
+	assert.False(t, callsSymbol(keepLocal, "runtime.newobject"),
+		"a field address confined to its function promoted the object to the heap")
+}
+
+// A closure stored in a struct that stays on the frame does not escape, and
+// neither do the variables it captures. Treating every use other than a direct
+// call as an escape made runtime.hexdumpWords lift its captures, which promoted
+// the unwinder values in copystack and scanstack -- functions that must not
+// allocate.
+func TestClosureStoredInAFrameStructDoesNotEscape(t *testing.T) {
+	module, err := goc.Compile("closure_in_struct.go", []byte(`
+package main
+
+import "runtime"
+
+type dumper struct {
+	mark func(uintptr)
+}
+
+func (d *dumper) run(value uintptr) {
+	if d.mark != nil {
+		d.mark(value)
+	}
+}
+
+var markSink func(uintptr)
+
+func closureStaysOnTheFrame(base uintptr) {
+	annotate := func(value uintptr) {
+		println(value + base)
+	}
+	holder := dumper{mark: annotate}
+	holder.run(1)
+}
+
+func closureReachesAGlobal(base uintptr) {
+	annotate := func(value uintptr) {
+		println(value + base)
+	}
+	markSink = annotate
+}
+
+func main() {
+	runtime.GC()
+	closureStaysOnTheFrame(1)
+	closureReachesAGlobal(2)
+}
+`))
+	require.NoError(t, err)
+
+	frameLocal := functionWithSuffix(t, module, "main.closureStaysOnTheFrame")
+	assert.False(t, callsSymbol(frameLocal, "runtime.newobject"),
+		"a closure held only by a frame-local struct was promoted to the heap")
+
+	global := functionWithSuffix(t, module, "main.closureReachesAGlobal")
+	assert.True(t, callsSymbol(global, "runtime.newobject"),
+		"a closure stored in a package global stayed on the frame")
+}

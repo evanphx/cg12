@@ -17,6 +17,7 @@ import (
 	"path/filepath"
 	"runtime"
 	"sort"
+	"strconv"
 	"strings"
 
 	"github.com/evanphx/cg12/ir"
@@ -1613,6 +1614,8 @@ type gen struct {
 	escapingCaptures              map[types.Object]bool
 	referenceCaptures             map[types.Object]bool
 	objectEscapeChecks            map[types.Object]bool
+	resultLeakBody                *ast.BlockStmt
+	escapeWalkOuterObjects        []types.Object
 	keepAliveObjects              map[types.Object]bool
 	keepAliveValues               map[types.Object]ir.Ref
 	keepAliveSlots                map[types.Object]ir.Ref
@@ -1686,6 +1689,8 @@ func (g *gen) derive() *gen {
 	derived.escapingCaptures = nil
 	derived.referenceCaptures = nil
 	derived.objectEscapeChecks = nil
+	derived.resultLeakBody = nil
+	derived.escapeWalkOuterObjects = nil
 	derived.keepAliveObjects = nil
 	derived.keepAliveValues = nil
 	derived.keepAliveSlots = nil
@@ -2342,10 +2347,19 @@ func (g *gen) addressEscapesWithin(
 				return false
 			}
 			function := calledFunction(parent.Fun, info)
-			if function != nil && g.parameterDoesNotEscape(function, argumentIndex, checking) {
+			if function == nil {
+				return true
+			}
+			if g.parameterDoesNotEscape(function, argumentIndex, checking) {
 				return false
 			}
-			return true
+			if !g.parameterLeaksOnlyToResult(function, argumentIndex, checking) {
+				return true
+			}
+			if !singleResultFunction(function) {
+				return !g.leakedCallResultDoesNotEscape(parent, info, parents, body, checking)
+			}
+			current = parent
 		case *ast.AssignStmt:
 			return !g.assignedNodeDoesNotEscapeWithin(current, info, parents, body, checking)
 		case *ast.ValueSpec:
@@ -2365,7 +2379,7 @@ func (g *gen) addressEscapesWithin(
 			}
 			return !g.objectDoesNotEscape(object, info, parents, body, checking)
 		case *ast.ReturnStmt:
-			return true
+			return !g.resultLeakIsAllowed(parent, parents)
 		default:
 			return false
 		}
@@ -2417,19 +2431,52 @@ func (g *gen) assignedNodeDoesNotEscapeWithin(
 	if !ok {
 		return false
 	}
-	index := -1
-	for candidate, rightHandSide := range assignment.Rhs {
-		if rightHandSide == expression {
-			index = candidate
-			break
-		}
-	}
-	if index < 0 || index >= len(assignment.Lhs) {
-		return false
-	}
-	identifier, ok := assignment.Lhs[index].(*ast.Ident)
+	destinations, ok := assignmentDestinations(assignment, expression)
 	if !ok {
 		return false
+	}
+	for _, destination := range destinations {
+		if !g.destinationDoesNotEscape(destination, info, parents, body, checking) {
+			return false
+		}
+	}
+	return true
+}
+
+// assignmentDestinations names the left-hand sides one right-hand side value
+// can reach. A positional assignment gives one; a single right-hand side spread
+// across several left-hand sides -- d, s := formatBits(...) -- gives all of
+// them, because the walk cannot tell which result carried the storage.
+func assignmentDestinations(assignment *ast.AssignStmt, expression ast.Node) ([]ast.Expr, bool) {
+	if len(assignment.Rhs) == 1 && assignment.Rhs[0] == expression {
+		return assignment.Lhs, true
+	}
+	for index, rightHandSide := range assignment.Rhs {
+		if rightHandSide != expression {
+			continue
+		}
+		if index >= len(assignment.Lhs) {
+			return nil, false
+		}
+		return assignment.Lhs[index : index+1], true
+	}
+	return nil, false
+}
+
+func (g *gen) destinationDoesNotEscape(
+	destination ast.Expr,
+	info *types.Info,
+	parents map[ast.Node]ast.Node,
+	body *ast.BlockStmt,
+	checking map[parameterKey]bool,
+) bool {
+	identifier, ok := destination.(*ast.Ident)
+	if !ok {
+		return false
+	}
+	if identifier.Name == "_" {
+		// The blank identifier discards the value, so nothing reaches it.
+		return true
 	}
 	object := info.Defs[identifier]
 	if object == nil {
@@ -2443,6 +2490,15 @@ func (g *gen) assignedNodeDoesNotEscapeWithin(
 	}
 	if g.resultObjects[object] {
 		return false
+	}
+	if g.objectEscapeChecks[object] {
+		// The destination is the variable whose uses this walk is already
+		// enumerating, as in dst = append(dst, b). Assigning a value derived
+		// from it back into it opens no route the running enumeration will not
+		// see, so answering "does not escape" here does not weaken the answer
+		// that walk will give. Answering "escapes" instead would make every
+		// accumulate-into-your-own-parameter loop opaque.
+		return true
 	}
 	return g.objectDoesNotEscape(object, info, parents, body, checking)
 }
@@ -2489,6 +2545,17 @@ func (g *gen) valueDoesNotEscapeWithin(
 			if parent.Op != token.AND || parent.X != current {
 				return false
 			}
+			if g.resultLeakBody != nil {
+				// Taking an address makes fresh storage, and returning that
+				// address puts the storage in the heap. A value placed inside
+				// it therefore does not merely leak to the result -- it is in
+				// the heap the moment the function returns, and it cannot live
+				// in the caller's frame. slog.NewTextHandler's
+				// &TextHandler{&commonHandler{w: w}} is that shape, and letting
+				// the result rule apply through it left a caller's bytes.Buffer
+				// on the frame with a heap handler pointing at it.
+				return false
+			}
 			current = parent
 		case *ast.SliceExpr:
 			if parent.X != current {
@@ -2497,6 +2564,8 @@ func (g *gen) valueDoesNotEscapeWithin(
 			current = parent
 		case *ast.RangeStmt:
 			return parent.X == current
+		case *ast.ReturnStmt:
+			return g.resultLeakIsAllowed(parent, parents)
 		case *ast.CallExpr:
 			argumentIndex := -1
 			for index, argument := range parent.Args {
@@ -2516,12 +2585,28 @@ func (g *gen) valueDoesNotEscapeWithin(
 					}
 				}
 			}
+			if appendDestination(parent, current, info) {
+				current = parent
+				continue
+			}
 			if info.Types[parent.Fun].IsType() {
 				current = parent
 				continue
 			}
 			function := calledFunction(parent.Fun, info)
-			return function != nil && g.parameterDoesNotEscape(function, argumentIndex, checking)
+			if function == nil {
+				return false
+			}
+			if g.parameterDoesNotEscape(function, argumentIndex, checking) {
+				return true
+			}
+			if !g.parameterLeaksOnlyToResult(function, argumentIndex, checking) {
+				return false
+			}
+			if !singleResultFunction(function) {
+				return g.leakedCallResultDoesNotEscape(parent, info, parents, body, checking)
+			}
+			current = parent
 		default:
 			return false
 		}
@@ -2531,9 +2616,111 @@ func (g *gen) valueDoesNotEscapeWithin(
 type parameterKey struct {
 	function *types.Func
 	index    int
+	// summary distinguishes the two questions asked about the same parameter:
+	// "does it escape at all" and "does it escape anywhere but the function's
+	// own result". They recurse into each other, so they must not share a
+	// cycle-breaking entry.
+	summary bool
+}
+
+// resultLeakIsAllowed reports whether a return statement the escape walk has
+// reached returns from the function whose "leaks only to result" summary is
+// being computed. A return inside a nested function literal returns from the
+// literal, so it is not that function's result and is not allowed.
+func (g *gen) resultLeakIsAllowed(returnStatement *ast.ReturnStmt, parents map[ast.Node]ast.Node) bool {
+	if g.resultLeakBody == nil {
+		return false
+	}
+	var current ast.Node = returnStatement
+	for {
+		if block, isBlock := current.(*ast.BlockStmt); isBlock && block == g.resultLeakBody {
+			return true
+		}
+		if _, insideLiteral := current.(*ast.FuncLit); insideLiteral {
+			return false
+		}
+		parent, ok := parents[current]
+		if !ok || parent == nil {
+			return false
+		}
+		current = parent
+	}
+}
+
+// leakedCallResultDoesNotEscape decides an argument that leaked only into the
+// results of a call with more than one result. The walk cannot continue from
+// such a call the way it continues from a single-valued one, because the call
+// expression does not stand for one value; the only shape it accepts is the
+// call being the whole right-hand side of an assignment, where every left-hand
+// side is a destination it can check.
+func (g *gen) leakedCallResultDoesNotEscape(
+	call *ast.CallExpr,
+	info *types.Info,
+	parents map[ast.Node]ast.Node,
+	body *ast.BlockStmt,
+	checking map[parameterKey]bool,
+) bool {
+	assignment, ok := parents[call].(*ast.AssignStmt)
+	if !ok || len(assignment.Rhs) != 1 || assignment.Rhs[0] != call {
+		return false
+	}
+	return g.assignedNodeDoesNotEscapeWithin(call, info, parents, body, checking)
+}
+
+func singleResultFunction(function *types.Func) bool {
+	return function.Type().(*types.Signature).Results().Len() == 1
+}
+
+// appendDestination reports that expression is the destination slice of an
+// append, whose backing storage the result may alias. Only argument zero
+// qualifies: append copies the destination's *contents* into the result and
+// never publishes the destination's address, so the destination's storage
+// escapes exactly when the result does. The appended elements are the opposite
+// case -- they are stored into storage that may already be reachable from the
+// heap -- so they keep the conservative answer.
+func appendDestination(call *ast.CallExpr, expression ast.Node, info *types.Info) bool {
+	identifier, ok := call.Fun.(*ast.Ident)
+	if !ok {
+		return false
+	}
+	builtin, ok := info.Uses[identifier].(*types.Builtin)
+	if !ok || builtin.Name() != "append" {
+		return false
+	}
+	return len(call.Args) != 0 && call.Args[0] == expression
+}
+
+// escapeWalkSeesEveryUse reports whether every use of an object is inside the
+// body the walk enumerates. The walk is a scan of one body, so a variable
+// declared outside it -- one the function literal being lowered captured, or
+// the enclosing function's own -- has uses the walk cannot see, and finding
+// nothing wrong inside the body is not evidence that it does not escape.
+// regexp.(*Regexp).FindAllStringIndex assigns result = append(result, ...)
+// inside a closure and returns result from the enclosing function; walking only
+// the closure left the backing array on the closure's frame.
+//
+// The exception is the analysed function's own receiver, parameters and named
+// results. They are declared in the signature rather than the body, and they
+// are exactly what the walk is asked about.
+func (g *gen) escapeWalkSeesEveryUse(object types.Object, body *ast.BlockStmt) bool {
+	if body == nil {
+		return false
+	}
+	if object.Pos() >= body.Pos() && object.Pos() < body.End() {
+		return true
+	}
+	for _, outer := range g.escapeWalkOuterObjects {
+		if outer == object {
+			return true
+		}
+	}
+	return false
 }
 
 func (g *gen) objectDoesNotEscape(object types.Object, info *types.Info, parents map[ast.Node]ast.Node, body *ast.BlockStmt, checking map[parameterKey]bool) bool {
+	if !g.escapeWalkSeesEveryUse(object, body) {
+		return false
+	}
 	if g.objectEscapeChecks == nil {
 		g.objectEscapeChecks = make(map[types.Object]bool)
 	}
@@ -2554,6 +2741,7 @@ func (g *gen) objectDoesNotEscape(object types.Object, info *types.Info, parents
 				identifier, ok := literalNode.(*ast.Ident)
 				if ok && info.Uses[identifier] == object {
 					escaped = true
+					g.reportEscapingUse(object, identifier)
 					return false
 				}
 				return !escaped
@@ -2568,25 +2756,107 @@ func (g *gen) objectDoesNotEscape(object types.Object, info *types.Info, parents
 		}
 		if !g.nonEscapingObjectUse(identifier, info, parents, body, checking) {
 			escaped = true
+			g.reportEscapingUse(object, identifier)
 		}
 		return true
 	})
 	return !escaped
 }
 
-func addressedExpression(expression ast.Node, parents map[ast.Node]ast.Node) *ast.UnaryExpr {
+// addressedExpression finds the address expression, if any, that an expression
+// is the operand of. It climbs field selections and array indexes on the way,
+// because &v.a.b and &v[i].f are addresses *of storage inside v* just as much
+// as &v.a and &v[i] are: an interior pointer keeps the whole object alive, so
+// the object escapes exactly when the pointer does. Only chains that stay
+// within one object are climbed; a step through a pointer, a slice or a map
+// lands in some other object and says nothing about this one.
+func addressedExpression(expression ast.Node, parents map[ast.Node]ast.Node, info *types.Info) *ast.UnaryExpr {
 	current := expression
 	for {
 		parent := parents[current]
-		if parenthesized, ok := parent.(*ast.ParenExpr); ok && parenthesized.X == current {
-			current = parenthesized
-			continue
-		}
-		address, ok := parent.(*ast.UnaryExpr)
-		if !ok || address.Op != token.AND || address.X != current {
+		switch parent := parent.(type) {
+		case *ast.ParenExpr:
+			if parent.X != current {
+				return nil
+			}
+			current = parent
+		case *ast.SelectorExpr:
+			if parent.X != current || !selectsWithinSameObject(parent, info) {
+				return nil
+			}
+			current = parent
+		case *ast.IndexExpr:
+			if parent.X != current || !indexesWithinSameObject(parent, info) {
+				return nil
+			}
+			current = parent
+		case *ast.UnaryExpr:
+			if parent.Op != token.AND || parent.X != current {
+				return nil
+			}
+			return parent
+		default:
 			return nil
 		}
-		return address
+	}
+}
+
+// selectsWithinSameObject reports that x.f names storage inside x rather than
+// inside something x points at. i.s.next, where s is a pointer field, is a
+// field of the *special* the iterator refers to and says nothing about the
+// iterator; v.a.b, where a is a struct field, is storage inside v.
+func selectsWithinSameObject(selector *ast.SelectorExpr, info *types.Info) bool {
+	selection := info.Selections[selector]
+	return selection != nil && selection.Kind() == types.FieldVal && !selection.Indirect()
+}
+
+// indexesWithinSameObject reports that x[i] names storage inside x. Only an
+// array is stored inline; a slice and a pointer to an array both refer to
+// storage held somewhere else.
+func indexesWithinSameObject(index *ast.IndexExpr, info *types.Info) bool {
+	baseType := info.TypeOf(index.X)
+	if baseType == nil {
+		return false
+	}
+	_, isArray := baseType.Underlying().(*types.Array)
+	return isArray
+}
+
+// addressedVariableIdentifier names the variable whose *own storage* an address
+// expression refers to, or reports that the address names storage somewhere
+// else. &v.f and &v[i] are addresses inside v's slot; &p.f, &s[i] and &(*p).f
+// are addresses inside whatever p or s points at, and say nothing about whether
+// p's or s's slot has to outlive the function.
+//
+// findEscapingCaptures promotes the named variable's slot, so this is the
+// question it has to ask. Promoting p because &p.f escaped moves the pointer,
+// not the pointee, leaves the pointee exactly where it was, and made runtime
+// code allocate on paths where allocation is forbidden.
+func addressedVariableIdentifier(expression ast.Expr, info *types.Info) (*ast.Ident, bool) {
+	for {
+		switch value := expression.(type) {
+		case *ast.Ident:
+			return value, true
+		case *ast.ParenExpr:
+			expression = value.X
+		case *ast.SelectorExpr:
+			selection := info.Selections[value]
+			if selection == nil || selection.Kind() != types.FieldVal || selection.Indirect() {
+				return nil, false
+			}
+			expression = value.X
+		case *ast.IndexExpr:
+			baseType := info.TypeOf(value.X)
+			if baseType == nil {
+				return nil, false
+			}
+			if _, isArray := baseType.Underlying().(*types.Array); !isArray {
+				return nil, false
+			}
+			expression = value.X
+		default:
+			return nil, false
+		}
 	}
 }
 
@@ -2603,7 +2873,7 @@ func (g *gen) nonEscapingObjectUse(
 		if parent.X != identifier {
 			return false
 		}
-		address := addressedExpression(parent, parents)
+		address := addressedExpression(parent, parents, info)
 		return address == nil || !g.addressEscapesWithin(address, info, parents, body, checking)
 	case *ast.SliceExpr:
 		// A slice can carry the referenced storage into a result, interface, or
@@ -2621,13 +2891,31 @@ func (g *gen) nonEscapingObjectUse(
 			return false
 		}
 		return g.valueDoesNotEscapeWithin(parent, info, parents, body, checking)
+	case *ast.KeyValueExpr:
+		if parent.Value != identifier {
+			return false
+		}
+		literal, inLiteral := parents[parent].(*ast.CompositeLit)
+		return inLiteral && g.compositeElementDoesNotEscape(literal, info, parents, body, checking)
+	case *ast.CompositeLit:
+		return g.compositeElementDoesNotEscape(parent, info, parents, body, checking)
 	case *ast.SelectorExpr:
 		if parent.X != identifier {
 			return false
 		}
 		selection := info.Selections[parent]
-		if selection == nil || selection.Kind() == types.FieldVal {
+		if selection == nil {
 			return true
+		}
+		if selection.Kind() == types.FieldVal {
+			// Reading a field does not carry the object out of the function,
+			// but taking a field's address does: the resulting interior pointer
+			// keeps the whole object alive, so the object escapes exactly when
+			// that pointer does. This is the same question the index case above
+			// asks about &v[i]. Omitting it let a package-level slice hold the
+			// address of a field of a frame allocation.
+			address := addressedExpression(parent, parents, info)
+			return address == nil || !g.addressEscapesWithin(address, info, parents, body, checking)
 		}
 		call, calledImmediately := parents[parent].(*ast.CallExpr)
 		return calledImmediately && call.Fun == parent
@@ -2714,6 +3002,9 @@ func (g *gen) nonEscapingObjectUse(
 				}
 			}
 		}
+		if appendDestination(parent, identifier, info) {
+			return g.valueDoesNotEscapeWithin(parent, info, parents, body, checking)
+		}
 		if info.Types[parent.Fun].IsType() {
 			convertedType := info.Types[parent].Type
 			basic, ok := convertedType.Underlying().(*types.Basic)
@@ -2723,7 +3014,51 @@ func (g *gen) nonEscapingObjectUse(
 			return g.valueDoesNotEscapeWithin(parent, info, parents, body, checking)
 		}
 		function := calledFunction(parent.Fun, info)
-		return function != nil && g.parameterDoesNotEscape(function, argumentIndex, checking)
+		if function == nil {
+			return false
+		}
+		if g.parameterDoesNotEscape(function, argumentIndex, checking) {
+			return true
+		}
+		if !g.parameterLeaksOnlyToResult(function, argumentIndex, checking) {
+			return false
+		}
+		if !singleResultFunction(function) {
+			return g.leakedCallResultDoesNotEscape(parent, info, parents, body, checking)
+		}
+		return g.valueDoesNotEscapeWithin(parent, info, parents, body, checking)
+	case *ast.ReturnStmt:
+		return g.resultLeakIsAllowed(parent, parents)
+	default:
+		return false
+	}
+}
+
+// compositeElementDoesNotEscape answers a use of a value as an element of a
+// composite literal: the element escapes exactly when the composite value does.
+// That is only true when the composite value *is* the storage, which is to say
+// for struct and array literals. A slice or map literal has backing storage of
+// its own that the literal expression only refers to, so an element placed in
+// one is not bounded by where the literal is used and keeps the conservative
+// answer.
+//
+// Without this, every value put in a struct literal escaped, which is how
+// runtime.hexdumpWords' h := hexdumper{mark: symMark} made its callers'
+// unwinder values heap-allocate.
+func (g *gen) compositeElementDoesNotEscape(
+	literal *ast.CompositeLit,
+	info *types.Info,
+	parents map[ast.Node]ast.Node,
+	body *ast.BlockStmt,
+	checking map[parameterKey]bool,
+) bool {
+	literalType := info.TypeOf(literal)
+	if literalType == nil {
+		return false
+	}
+	switch literalType.Underlying().(type) {
+	case *types.Struct, *types.Array:
+		return g.valueDoesNotEscapeWithin(literal, info, parents, body, checking)
 	default:
 		return false
 	}
@@ -2754,6 +3089,35 @@ func calledFunction(expression ast.Expr, info *types.Info) *types.Func {
 	}
 }
 
+// enterCalleeBody makes the escape walk describe the function whose body it is
+// about to enumerate rather than the function being lowered. Two pieces of
+// per-function state are consulted from inside the walk and would otherwise
+// still name the caller: resultLeakBody, which says whose result a return
+// statement may leak to, and resultObjects, which makes an assignment to a
+// named result count as an escape. Leaving the caller's named results in place
+// meant a callee that assigned a parameter to its own named result and returned
+// bare was reported as not letting the parameter escape.
+func (g *gen) enterCalleeBody(signature *types.Signature, resultLeakBody *ast.BlockStmt) func() {
+	savedLeakBody := g.resultLeakBody
+	savedResults := g.resultObjects
+	savedOuter := g.escapeWalkOuterObjects
+	g.escapeWalkOuterObjects = signatureVariables(signature)
+	g.resultLeakBody = resultLeakBody
+	if resultLeakBody != nil {
+		// A summary walk is allowed to reach the result, so a named result is
+		// an ordinary local: its own uses decide whether the parameter goes
+		// anywhere else.
+		g.resultObjects = nil
+	} else {
+		g.resultObjects = resultObjectSet(signature)
+	}
+	return func() {
+		g.resultLeakBody = savedLeakBody
+		g.resultObjects = savedResults
+		g.escapeWalkOuterObjects = savedOuter
+	}
+}
+
 func (g *gen) parameterDoesNotEscape(function *types.Func, index int, checking map[parameterKey]bool) bool {
 	declaration, ok := g.functionDecls[function]
 	if !ok {
@@ -2772,8 +3136,83 @@ func (g *gen) parameterDoesNotEscape(function *types.Func, index int, checking m
 	}
 	checking[key] = true
 	defer delete(checking, key)
+	restore := g.enterCalleeBody(signature, nil)
+	defer restore()
 	parents := astParents(declaration.decl.Body)
 	return g.objectDoesNotEscape(signature.Params().At(index), declaration.info, parents, declaration.decl.Body, checking)
+}
+
+// parameterLeaksOnlyToResult reports that a parameter's storage cannot outlive
+// the call except through the call's own result. It asks exactly the question
+// parameterDoesNotEscape asks, with one difference: returning the parameter, or
+// anything derived from it, from the summarised function is not an escape. A
+// caller that gets this answer must therefore continue its walk from the call
+// expression -- the storage escapes exactly when the result does.
+//
+// The summary does not describe a variadic parameter, whose argument is an
+// element of a slice the callee builds rather than the parameter itself. A
+// caller that gets the answer for a function with more than one result cannot
+// simply continue from the call expression, because that expression does not
+// stand for one value; see leakedCallResultDoesNotEscape.
+func (g *gen) parameterLeaksOnlyToResult(function *types.Func, index int, checking map[parameterKey]bool) bool {
+	declaration, ok := g.functionDecls[function]
+	if !ok || declaration.decl.Body == nil {
+		return false
+	}
+	signature := function.Type().(*types.Signature)
+	if signature.Results().Len() == 0 {
+		return false
+	}
+	if index < 0 || index >= signature.Params().Len() {
+		return false
+	}
+	if signature.Variadic() && index == signature.Params().Len()-1 {
+		return false
+	}
+	key := parameterKey{function: function, index: index, summary: true}
+	if checking[key] {
+		return false
+	}
+	checking[key] = true
+	defer delete(checking, key)
+	restore := g.enterCalleeBody(signature, declaration.decl.Body)
+	defer restore()
+	parents := astParents(declaration.decl.Body)
+	answer := g.objectDoesNotEscape(signature.Params().At(index), declaration.info, parents, declaration.decl.Body, checking)
+	reportResultLeakSummary(function, index, answer)
+	return answer
+}
+
+// escapeDebugLevel reads GOC_DEBUG_ESCAPE. Level 1 traces every "leaks only to
+// result" answer; level 2 also names the use that decided an object escapes.
+// Both are off by default. They exist because neither fact is visible in the
+// generated code: a local array stays on its frame only if every function in
+// the chain below it answers yes, and when one does not, the useful questions
+// are which one and which use.
+func escapeDebugLevel() int {
+	setting := os.Getenv("GOC_DEBUG_ESCAPE")
+	if setting == "" {
+		return 0
+	}
+	level, err := strconv.Atoi(setting)
+	if err != nil {
+		return 1
+	}
+	return level
+}
+
+func reportResultLeakSummary(function *types.Func, index int, leaksOnlyToResult bool) {
+	if escapeDebugLevel() < 1 {
+		return
+	}
+	fmt.Fprintf(os.Stderr, "escape summary: %s parameter %d leaks only to result: %v\n", function.FullName(), index, leaksOnlyToResult)
+}
+
+func (g *gen) reportEscapingUse(object types.Object, use ast.Node) {
+	if escapeDebugLevel() < 2 {
+		return
+	}
+	fmt.Fprintf(os.Stderr, "escape use: %s escapes at %s\n", object.Name(), g.fset.Position(use.Pos()))
 }
 
 func (g *gen) receiverDoesNotEscape(function *types.Func, checking map[parameterKey]bool) bool {
@@ -2794,6 +3233,8 @@ func (g *gen) receiverDoesNotEscape(function *types.Func, checking map[parameter
 	}
 	checking[key] = true
 	defer delete(checking, key)
+	restore := g.enterCalleeBody(signature, nil)
+	defer restore()
 	parents := astParents(declaration.decl.Body)
 	return g.objectDoesNotEscape(signature.Recv(), declaration.info, parents, declaration.decl.Body, checking)
 }
@@ -6898,6 +7339,7 @@ func (g *gen) funcDecl(fd *ast.FuncDecl) {
 	g.parents = astParents(fd.Body)
 	g.currentBody = fd.Body
 	predeclaredVariables := signatureVariables(originalSignature)
+	g.escapeWalkOuterObjects = predeclaredVariables
 	g.escapingCaptures = g.findEscapingCaptures(fd.Body, predeclaredVariables...)
 	g.referenceCaptures = g.findReferenceCaptures(fd.Body, predeclaredVariables...)
 	keepAliveObjects, orderedKeepAliveObjects := g.findKeepAliveObjects(fd.Body)
@@ -8604,6 +9046,7 @@ func (g *gen) iteratorRangeStmt(statement *ast.RangeStmt, label string, iterator
 			rangeVariables = append(rangeVariables, g.info.Defs[identifier])
 		}
 	}
+	child.escapeWalkOuterObjects = rangeVariables
 	child.escapingCaptures = child.findEscapingCaptures(statement.Body, rangeVariables...)
 	child.referenceCaptures = child.findReferenceCaptures(statement.Body, rangeVariables...)
 	ast.Inspect(statement.Body, func(node ast.Node) bool {
@@ -11085,6 +11528,7 @@ func (g *gen) functionLiteral(literal *ast.FuncLit) ir.Ref {
 	child.currentBody = literal.Body
 	predeclaredVariables := append([]types.Object(nil), parameterObjects...)
 	predeclaredVariables = append(predeclaredVariables, resultObjects...)
+	child.escapeWalkOuterObjects = predeclaredVariables
 	child.escapingCaptures = child.findEscapingCaptures(literal.Body, predeclaredVariables...)
 	child.referenceCaptures = child.findReferenceCaptures(literal.Body, predeclaredVariables...)
 	keepAliveObjects, orderedKeepAliveObjects := child.findKeepAliveObjects(literal.Body)
@@ -11389,8 +11833,15 @@ func (g *gen) functionLiteralEscapesWithin(
 			if !ok || info.Uses[use] != object {
 				return true
 			}
-			call, ok := parents[use].(*ast.CallExpr)
-			if !ok || call.Fun != use {
+			if call, isCall := parents[use].(*ast.CallExpr); isCall && call.Fun == use {
+				return true
+			}
+			// Anything other than calling the closure gets the same question
+			// asked about every other value. Treating every such use as an
+			// escape made a closure stored in a frame-local struct --
+			// runtime.hexdumpWords' h := hexdumper{mark: symMark} -- lift its
+			// captures, which reached copystack and scanstack.
+			if !g.nonEscapingObjectUse(use, info, parents, body, checking) {
 				escapes = true
 			}
 			return true
@@ -11604,7 +12055,7 @@ func (g *gen) findEscapingCaptures(body *ast.BlockStmt, predeclared ...types.Obj
 					_, wantsPointer := signature.Recv().Type().Underlying().(*types.Pointer)
 					_, hasPointer := g.typeAndValue(selector.X).Type.Underlying().(*types.Pointer)
 					if wantsPointer && !hasPointer && !g.receiverDoesNotEscape(method, make(map[parameterKey]bool)) {
-						identifier, found := addressBaseIdentifier(selector.X)
+						identifier, found := addressedVariableIdentifier(selector.X, g.info)
 						if found {
 							object := g.info.Uses[identifier]
 							if object == nil {
@@ -11645,7 +12096,7 @@ func (g *gen) findEscapingCaptures(body *ast.BlockStmt, predeclared ...types.Obj
 
 		address, isAddress := node.(*ast.UnaryExpr)
 		if isAddress && address.Op == token.AND && g.addressEscapesFunction(address) {
-			identifier, ok := addressBaseIdentifier(address.X)
+			identifier, ok := addressedVariableIdentifier(address.X, g.info)
 			if ok {
 				object := g.info.Uses[identifier]
 				if object == nil {
@@ -11675,25 +12126,6 @@ func (g *gen) findEscapingCaptures(body *ast.BlockStmt, predeclared ...types.Obj
 		return true
 	})
 	return captures
-}
-
-func addressBaseIdentifier(expression ast.Expr) (*ast.Ident, bool) {
-	for {
-		switch value := expression.(type) {
-		case *ast.Ident:
-			return value, true
-		case *ast.ParenExpr:
-			expression = value.X
-		case *ast.SelectorExpr:
-			expression = value.X
-		case *ast.IndexExpr:
-			expression = value.X
-		case *ast.StarExpr:
-			expression = value.X
-		default:
-			return nil, false
-		}
-	}
 }
 
 func (g *gen) functionValue(function *types.Func) ir.Ref {
@@ -12778,7 +13210,18 @@ func (g *gen) appendCall(call *ast.CallExpr) ir.Ref {
 		if elementSize != 1 {
 			bytes = g.cur.Mul(ir.ClsL, newCapacity, g.fn.Long(elementSize))
 		}
-		data := g.cur.Call(ir.ClsP, g.fn.Sym("realloc", 0), oldData, bytes)
+		// A growing append gives Go a *new* backing array and leaves the old
+		// one intact, because other slices may still refer to it. Growing in
+		// place with realloc broke that, and it also assumed the old array came
+		// from the allocator: a backing array the escape walk left on the frame
+		// -- values := []int{7} whose slice never leaves the function -- was
+		// handed to realloc and the program faulted.
+		data := g.allocateZeroed(bytes)
+		copiedBytes := oldLength
+		if elementSize != 1 {
+			copiedBytes = g.cur.Mul(ir.ClsL, oldLength, g.fn.Long(elementSize))
+		}
+		g.cur.Call(ir.ClsP, g.fn.Sym("goc_memcpy", 0), data, oldData, copiedBytes)
 		grown = g.sliceDescriptor(data, newLength, newCapacity)
 	}
 	grownData, grownLength, grownCapacity := g.sliceParts(grown)
