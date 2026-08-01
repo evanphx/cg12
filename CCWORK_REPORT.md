@@ -730,3 +730,74 @@ does not exist in cg12 today. A truly non-terminating call-free loop has no
 preemption point at all, so `stopTheWorld` would wait for it indefinitely. Every
 loop tried here terminates, so this is stated as a consequence of the mechanism
 rather than as a reproduced hang.
+
+## What Phase 2's stack-scanning and GC-stress half now covers
+
+16 new capabilities, every one compared against the host Go toolchain per §3
+step 2 (same source, `go build` vs `goc`, identical output and exit status), and
+each verified to fail for the right reason before it was accepted.
+
+### Stack scanning (`stack-scan`, 6 capabilities)
+
+| capability | what it pins | runs under |
+| --- | --- | --- |
+| `loop-safepoints` | a pointer live across a loop back edge is a root at every safepoint in the body: carried accumulator, growing slice, blocking channel send, nested loops. Has a positive control that drops an object and requires its cleanup to fire, so the detector is not vacuous | `cg12scanroots=1` |
+| `blocked-goroutines` | a parked goroutine's frame is scanned at the PC that parked it: `chanrecv`, `chansend` unbuffered and full-buffered, `selectgo`, `semacquire` via Mutex and WaitGroup, `notifyListWait` via Cond | `cg12scanroots=1` |
+| `syscall-transitions` | `scanstack` through `gp.syscallsp` for a goroutine blocked in `syscall.Read` on a raw pipe, and through netpoll for one blocked in `os.File.Read` | `cg12scanroots=1` |
+| `panic-unwind` | frames under an in-flight panic still describe their roots: a deep tower with a GC in the deferred function, a defer that replaces the panic, a panic value that is itself a pointer, and a recover that resumes | `cg12scanroots=1` |
+| `stack-copy-roots` | growth and shrink with pointerful frames, an interior pointer into the frame itself, defer records across the copy, and a goroutine parked on a channel while another grows | `cg12checkstackcopy=1` (119,696 pointer records checked in one run) |
+| `callfree-loop-roots` | roots held only in an accumulator, an interior pointer and an `unsafe.Pointer` round trip across a long call-free loop | — |
+
+### GC stress (`gc-stress`, 6 capabilities)
+
+`concurrent-mark` (mutators moving the only reference to a subtree from an
+unscanned location into a scanned one, through pointer field / slice / map /
+interface / channel, under `cg12checkwb=2`), `assist-credit`, `sweep-pacing`,
+`scavenge-release`, `heap-growth-shrink`, `memory-limit`. All exclusive.
+
+Each asserts that the path it is named after was actually taken rather than
+assuming it: assist CPU non-zero from `runtime/metrics`, `HeapReleased` growing
+across `debug.FreeOSMemory`, more GC cycles under a memory limit than without,
+and `HeapObjects == Mallocs - Frees`, `HeapInuse + HeapIdle == HeapSys`,
+`HeapReleased <= HeapIdle` after every phase.
+
+### Rare invariant paths (`gc-invariants`, 3 capabilities) and `gc/channel-buffer-roots`
+
+`checkmark` runs a pointer-dense, concurrently-mutated heap under
+`GODEBUG=gccheckmark=1`, so the whole heap is re-marked with the world stopped
+and compared. `mark-workers` and `metadata-hugepages` reach paths a Go program
+cannot see from inside itself. `gc/channel-buffer-roots` is the capability the
+channel defect came from, kept under `clobberfree=1`.
+
+### Named-path proofs (`cmd/goc/runtime_gc_paths_test.go`)
+
+For the paths with no in-program observable, one instrumented compile per program
+answers "did this named runtime function execute". All confirmed executed:
+
+- `runtime.mheap.enableMetadataHugePages`, `runtime.pageAlloc.enableChunkHugePages`
+- `runtime.gcAssistAlloc`, `runtime.gcAssistAlloc1`, `runtime.gcFlushBgCredit`
+- `runtime.deductSweepCredit`, `runtime.sweepone`, `runtime.sweepLocked.sweep`
+- `runtime.pageAlloc.scavenge`, `runtime.scavengerState.run`, `runtime.sysUnusedOS`
+- `runtime.gcBgMarkStartWorkers`, `runtime.gcControllerState.findRunnableGCWorker`,
+  `runtime.gcBgMarkWorker`, `runtime.gcDrain`
+
+with a negative control (`runtime.badmorestackgsignal`, reachable only from a
+corrupted signal stack) that correctly reports false, so the mechanism is not
+reading an all-ones bitmap.
+
+### Open question found while doing this, not resolved
+
+The three per-mode drain wrappers -- `gcDrainMarkWorkerDedicated`,
+`...Fractional`, `...Idle` -- report **unexecuted** in the coverage bitmap at
+GOMAXPROCS 1, 2, 3, 4 and 8, on runs where `gcBgMarkWorker` demonstrably gets
+past its `mode not set` throw (block hit) and `gcDrain` demonstrably executes.
+`gcDrain`'s only callers are those three wrappers and `mcheckmark.go`. So either
+the modes are never handed out and something else reached `gcDrain`, or the
+instrumentation is missing these functions' counters -- and if it is the latter,
+the §1 coverage percentages understate coverage by however many functions share
+whatever property these have.
+
+It is left as an open question rather than guessed at, and the mark-worker test
+asserts only what is measurable. Separating dedicated from fractional was §6's
+ask and is **not** delivered: `cpuStats.accumulate` folds fractional time into
+`GCDedicatedTime`, so `runtime/metrics` cannot do it either.
