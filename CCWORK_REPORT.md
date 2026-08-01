@@ -1174,3 +1174,27 @@ with the earlier ones.
 
 *This section is filled in as each result lands. Anything still blank was still
 running.*
+
+### Determinism, first measurement (with the channel fix, before the last testdata landed)
+
+`scripts/determinism-check.sh -corpus -rounds 4`, no `-O`, on the tree with the
+channel fix:
+
+```
+programs=381 rounds=4 workers=8 optimize=false
+round 0: 381 programs in 257.2s, 0 failed
+round 1: 381 programs in 266.7s, 0 failed
+round 2: 381 programs in 299.7s, 0 failed
+round 3: 381 programs in 326.0s, 1 failed
+content varies between rounds: 0
+image varies, content identical (layout only): 0
+reproducible=380 varying=0 failed=1 of 381 over 4 rounds
+```
+
+**0 varying.** The single failure is an artifact of this job, not of the
+compiler: `runtime_gc_conservative_preempt.go` was renamed to
+`runtime_stack_scan_callfree_loop.go` between round 2 and round 3, so round 3
+could not open a file the round-0 program list still named. Rounds 0-2 compiled
+it four times each with no variation.
+
+A clean re-run on the finished tree is reported below.
