@@ -4913,3 +4913,9 @@ nothing further.
 - A unit test, `goc.TestTypeGCMasksArePaddedToAPointerWord`, asserts every
   emitted `*.gcdata` datum is a whole number of pointer words and
   pointer-aligned. Verified to fail without the padding.
+- Repetition: `gc`, `gc-stress`, `gc-invariants` and `stack-scan` with
+  `-runtime-status-runs=5`, 46/46 PASS in the default arm; the `gc*` categories
+  also 5x under `-runtime-opt`.
+- Determinism (§23) unchanged: `scripts/determinism-check.sh -corpus`,
+  385/385 reproducible over 3 rounds without `-O` and 2 rounds with `-O`,
+  0 varying, 0 failed, and 0 content-varies and 0 layout-only in both.

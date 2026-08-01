@@ -318,6 +318,7 @@ does not touch the mask padding.
 - `scripts/determinism-check.sh -corpus -rounds 3 -j 8`: **385/385 reproducible, 0 varying,
   0 failed**, three rounds, ~219 s each. Content varies between rounds: 0. Image varies with
   identical content: 0.
+- The same with `-O -rounds 2`: **385/385 reproducible, 0 varying, 0 failed**.
 - The reducer prints the same line under the host toolchain and under goc.
 
 ## 11. A hypothesis about §9's residual, stated as a hypothesis
