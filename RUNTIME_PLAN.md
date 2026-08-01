@@ -4118,6 +4118,33 @@ programs.
 Stability, all naming the zombie with the right payload: 60/60 at goc default,
 30/30 at `goc -O`, 10/10 at each of `GOMAXPROCS` 1, 2, 4, 8 and 64.
 
+### Suites
+
+On `ccwork/reportzombies`:
+
+| | result |
+| --- | --- |
+| `go build ./...`, `go vet ./...` | clean |
+| `make test-unit` | pass, 0 FAIL |
+| `make test-goc-corpus` | `ok github.com/evanphx/cg12/goc 721.570s` |
+| `make test-goc-cmd` | `ok github.com/evanphx/cg12/cmd/goc 292.389s`, including the new guard |
+| full unsharded matrix, default arm, `-v` | **345 subtests, 344 PASS, 1 EXPECTED FAILURE, 0 FAIL, 0 SKIP, 0 KNOWN GAP**, `ok … 369.507s` |
+| full unsharded matrix, `-runtime-opt` arm, `-v` | **345 subtests, 344 PASS, 1 EXPECTED FAILURE, 0 FAIL, 0 SKIP, 0 KNOWN GAP**, `ok … 445.036s` |
+
+The census is taken from the `-v` output --- three-part `=== RUN` lines,
+`--- PASS` lines, and the harness's own `PASS <program>.go` /
+`EXPECTED FAILURE` / `KNOWN GAP` lines --- not from `ok`. The one expected
+failure is `defer-panic/panic-string-output`. No capability is non-passing in
+either arm.
+
+Determinism, measured on both sides of the change in the same working tree at the
+same filesystem path (§23's rule: a worktree at a different path is not a valid
+reference build). `scripts/determinism-check.sh` reports every one of the five
+sample programs `identical` across all four compiles, before the fix and after it,
+with and without `-O`; the digests differ between the two sides because the
+runtime source differs. `-corpus -rounds 2 -j 4` on the fixed tree:
+`reproducible=365 varying=0 failed=0 of 365 over 2 rounds`, 730 compiles.
+
 ### What this does not establish
 
 - **It is a diagnostic, not a collector fix.** No program's behaviour changes

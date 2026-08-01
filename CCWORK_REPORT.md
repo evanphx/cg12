@@ -664,3 +664,102 @@ Stability of the probe, all runs naming the zombie with the right payload:
 60/60 at goc default, 30/30 at `goc -O`, and 10/10 at each of
 `GOMAXPROCS` 1, 2, 4, 8, 64.
 
+## The audit, so this is a class and not an instance
+
+Every reader of a span's mark bits, checked against the `moveInlineMarks`
+boundary in `sweep`:
+
+| site | when | bitmap it reads | verdict |
+| --- | --- | --- | --- |
+| `mgcsweep.go:559` specials loop | before the move | inline (`markBitsForIndex`) | correct |
+| `mgcsweep.go:620` trace/clobberfree/sanitizer | before the move | inline (`markBitsForBase`) | correct |
+| `mgcsweep.go:667,672` zombie check | after | `gcmarkBits` | correct |
+| `mbitmap.go:1507` `countAlloc` | after | `gcmarkBits` | correct |
+| `mgcsweep.go:862` `reportZombies` | after | **inline, just cleared** | **the bug** |
+| `mgcmark.go:1698` `greyobject`, `:1813` `gcmarknewobject`, `mwbbuf.go:249`, `mbitmap.go:1276` | mark phase | inline | correct |
+
+`reportZombies` was the only post-move reader still going through
+`markBitsForBase`; there is no second instance. `gcmarknewobject` marking through
+`markBitsForIndex` also settles the ordering question: nothing writes `gcmarkBits`
+by another route on such a span, so after the move it is the complete record.
+
+`mgcsweep.go:620` was worth checking rather than assuming: if it were on the wrong
+side of the boundary, `GODEBUG=clobberfree=1` would be scribbling over live
+objects. It is not.
+
+## Suites on this branch
+
+| | result |
+| --- | --- |
+| `go build ./...`, `go vet ./...` | clean |
+| `make test-unit` | pass, 0 FAIL |
+| `make test-goc-corpus` | `ok github.com/evanphx/cg12/goc 721.570s` |
+| `make test-goc-cmd` | `ok github.com/evanphx/cg12/cmd/goc 292.389s` (includes the new guard) |
+| full unsharded matrix, default arm, `-v` | **345 subtests, 344 PASS, 1 EXPECTED FAILURE, 0 FAIL, 0 SKIP, 0 KNOWN GAP**, `ok … 369.507s` |
+
+Census taken from the `-v` output: 345 three-part `=== RUN` lines, 345 `--- PASS`
+lines, 344 harness `PASS <program>.go` lines, one `EXPECTED FAILURE
+runtime_panic_print_string.go`, zero `FAIL`, zero `SKIP`, zero `KNOWN GAP`.
+**No capability is non-passing.**
+
+| full unsharded matrix, **`-runtime-opt` arm**, `-v` | **345 subtests, 344 PASS, 1 EXPECTED FAILURE, 0 FAIL, 0 SKIP, 0 KNOWN GAP**, `ok … 445.036s` |
+
+Both arms, same census method, same numbers. **The complete list of non-passing
+capabilities is empty in both arms**; the single declared exception is
+`defer-panic/panic-string-output` (`runtime_panic_print_string.go`), which is an
+`expectedFailure` by design and unrelated to this work.
+
+## Determinism, measured before and after
+
+`scripts/determinism-check.sh` on this tree — five programs, four compiles each
+(2 cold with `CG12_NOCACHE=1`, 2 warm), one hash per program:
+
+```
+after the fix, default:
+hello.go                            round1:identical(1849f132ac7e2a19)  round2:identical(1849f132ac7e2a19)
+fmt_sprintf.go                      round1:identical(70abdf422a1d655c)  round2:identical(70abdf422a1d655c)
+gc_struct.go                        round1:identical(d0432862dd169ab6)  round2:identical(d0432862dd169ab6)
+runtime_cleanup_frame_retention.go  round1:identical(6679afc39c6ed814)  round2:identical(6679afc39c6ed814)
+runtime_defer_capture_allocs.go     round1:identical(a8a21559e46176c6)  round2:identical(a8a21559e46176c6)
+
+after the fix, -O:
+hello.go                            round1:identical(0d9a8de6aea30832)  round2:identical(0d9a8de6aea30832)
+fmt_sprintf.go                      round1:identical(d49eed212fd50f5a)  round2:identical(d49eed212fd50f5a)
+gc_struct.go                        round1:identical(9ad945d8804b9565)  round2:identical(9ad945d8804b9565)
+runtime_cleanup_frame_retention.go  round1:identical(526cf79535de4b94)  round2:identical(526cf79535de4b94)
+runtime_defer_capture_allocs.go     round1:identical(827f563d1e1431ad)  round2:identical(827f563d1e1431ad)
+
+before the fix (same tree, same path, only reportZombies reverted), default:
+hello.go                            round1:identical(b53aadefd9385c97)  round2:identical(b53aadefd9385c97)
+fmt_sprintf.go                      round1:identical(7c4cc8393cbbde0e)  round2:identical(7c4cc8393cbbde0e)
+gc_struct.go                        round1:identical(8ffce275c5592c9e)  round2:identical(8ffce275c5592c9e)
+runtime_cleanup_frame_retention.go  round1:identical(16298d5490a9c2b5)  round2:identical(16298d5490a9c2b5)
+runtime_defer_capture_allocs.go     round1:identical(bee60a6b3b9babfd)  round2:identical(bee60a6b3b9babfd)
+```
+
+The "before" column was measured by reverting only the one statement in the same
+working tree at the same filesystem path, per §23's rule that a worktree at a
+different path is not a valid reference build. Every program is `identical` in
+every configuration on both sides. The digests differ between the two sides
+because the runtime source differs — that is the change landing, not a
+regression.
+
+Full corpus sweep on this tree, `scripts/determinism-check.sh -corpus -rounds 2 -j 4`:
+
+```
+programs=365 rounds=2 workers=4 optimize=false pack=""
+round 0: 365 programs in 618.7s, 0 failed
+round 1: 365 programs in 512.3s, 0 failed
+failed to compile: 0
+content varies between rounds: 0
+image varies, content identical (layout only): 0
+reproducible=365 varying=0 failed=0 of 365 over 2 rounds
+```
+
+730 compiles, 0 varying. Two rounds is a weaker sample than §23's, which is
+stated rather than glossed: §5.10 records a program that took its minority branch
+3 times in 53 compiles, so two draws cannot rule out a rare branch. What it does
+establish is that nothing in this branch turned a reproducible compile into an
+irreproducible one, and the change is not in the compiler at all — it is one
+statement of vendored runtime source.
+
