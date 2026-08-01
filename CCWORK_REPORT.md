@@ -35,6 +35,28 @@ pack.gocrt -packages ""` then `goc -runtime pack.gocrt -o out prog.go` — it fa
 Anyone reducing this bug with a plain `goc prog.go` will conclude it is fixed when it is
 not. Worth knowing before the next bisect.
 
+Cross-linking the two halves says which one carries it. Both packs have the same stdlib
+fingerprint, so either compiler's program module links against either pack:
+
+| program module compiled by | linked against pack from | runs |
+| --- | --- | ---: |
+| `main` | `main` | 0/6 failed |
+| `main` | `main + 2724ac7` | 0/6 failed |
+| `main + 2724ac7` | `main` | **6/6 failed** |
+| `main + 2724ac7` | `main + 2724ac7` | **6/6 failed** |
+
+**The defect travels with the program module, not with the pack.** And that program
+module is not a different compilation from the monolithic one: `goc -runtime` runs the
+same whole-program `compile()` and applies the subtraction last, which is why the escape
+audit reports exactly the same two findings for `runtime_gc_mark_workers.go` in both
+configurations (`runtime.recovery` and `runtime.cgocallbackg1`, on both trees). So the
+program's own code is identical in the two builds and only the *linked* runtime differs:
+the pack's runtime is compiled by a separate `build-runtime` process from a generated
+root, the monolithic one is compiled alongside `main`. Which of those two runtimes is
+linked decides whether a program module carrying this defect faults. The mechanism is not
+established here and is `ccwork/escape-gc-fix`'s to find; the measurements above are, and
+they narrow it a long way.
+
 ## 2. Does `cg12checkwb=2` already catch this? No, and the reason generalises
 
 The brief asks this first, so it is answered first, with measurements rather than
@@ -262,4 +284,12 @@ next change to either is visible.
 
 ## 8. Suites
 
-(filled in as they land)
+| Suite | Result |
+| --- | --- |
+| `go build ./...`, `go vet ./...` | clean |
+| `make test-unit` | PASS |
+| `make test-goc-cmd` | PASS, 293.7s (includes the new `TestARM64WriteBarrierAuditRunsClean`) |
+| `make test-goc-corpus` | PASS, 713.1s (includes the new `TestFrameEscapeAudit`) |
+| `make test-goc-status` | (running) |
+| `make test-goc-status-opt` | (running) |
+| compilation determinism | (running) |
