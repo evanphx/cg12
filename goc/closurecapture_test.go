@@ -60,24 +60,29 @@ func TestClosureWritesIntoACapturedVariablesStorage(t *testing.T) {
 			module := compileCapturedVariableProgram(t, shape.declaration, shape.assignment, shape.observation)
 
 			closure := functionContaining(t, module, "install.func")
-			assert.False(t, storesAnOwnAllocation(closure),
-				"the closure stored one of its own frame allocations "+
-					"into the captured variable's storage")
+			assert.False(t, publishesAnOwnAllocation(closure),
+				"the closure published one of its own frame allocations "+
+					"through the captured variable's storage")
 		})
 	}
 }
 
-// The enclosing function keeps the value in the slot the closure environment
-// carries, rather than a pointer to it, so the closure's write lands in this
-// frame. Sixteen bytes is the width of all three of these values.
+// The storage the enclosing function hands to the closure environment is the
+// value, not a pointer to it. Sixteen bytes is the width of all three of these
+// values; eight is the pointer slot the defect handed over instead.
 func TestCapturedVariableStorageHoldsTheValue(t *testing.T) {
 	for name, shape := range capturedHeaderTypes {
 		t.Run(name, func(t *testing.T) {
 			module := compileCapturedVariableProgram(t, shape.declaration, shape.assignment, shape.observation)
 
 			install := functionContaining(t, module, "main.install")
-			assert.True(t, allocatesWidth(install, 16),
-				"the captured variable was not given storage of its own value's width")
+			widths := capturedStorageWidths(install)
+			require.NotEmpty(t, widths, "nothing was written into a closure environment")
+			for _, width := range widths {
+				assert.Equal(t, int64(16), width,
+					"the closure environment was handed a pointer to the value "+
+						"rather than the value's own storage")
+			}
 		})
 	}
 }
@@ -86,8 +91,13 @@ func TestCapturedVariableStorageHoldsTheValue(t *testing.T) {
 // changes its representation, not where it lives, so it must not start
 // allocating: RUNTIME_PLAN.md 5.9's cost model depends on an ordinary closure
 // being allocation-free.
+//
+// The interface shape is not here because assigning a concrete value to an
+// interface boxes it, which allocates for a reason that has nothing to do with
+// capture, and the assertion could not tell the two apart.
 func TestNonEscapingCaptureStaysOffTheHeap(t *testing.T) {
-	for name, shape := range capturedHeaderTypes {
+	for _, name := range []string{"string", "complex128"} {
+		shape := capturedHeaderTypes[name]
 		t.Run(name, func(t *testing.T) {
 			module := compileCapturedVariableProgram(t, shape.declaration, shape.assignment, shape.observation)
 
@@ -128,9 +138,9 @@ func main() {
 	require.NoError(t, err)
 
 	yield := functionContaining(t, module, "rangefunc")
-	assert.False(t, storesAnOwnAllocation(yield),
-		"the yield function stored one of its own frame allocations "+
-			"into the captured variable's storage")
+	assert.False(t, publishesAnOwnAllocation(yield),
+		"the yield function published one of its own frame allocations "+
+			"through the captured variable's storage")
 }
 
 func compileCapturedVariableProgram(t *testing.T, declaration, assignment, observation string) *ir.Module {
@@ -156,43 +166,113 @@ func main() {
 	return module
 }
 
-// storesAnOwnAllocation reports whether function stores the address of one of
-// its own stack allocations through a pointer it did not allocate -- which, in
-// a closure whose only such pointer is the captured variable's storage, is
-// exactly the defect: the callee's frame is published to its caller.
-func storesAnOwnAllocation(function *ir.Func) bool {
-	allocations := make(map[uint32]bool)
-	for _, block := range function.Blocks {
-		for _, instruction := range block.Instrs {
-			if instruction.Op.IsAlloc() && instruction.To.Kind == ir.RefTemp {
-				allocations[instruction.To.ID] = true
-			}
+// publishesAnOwnAllocation reports whether function writes the address of one
+// of its own stack allocations through a pointer it did not allocate. In a
+// closure, the only such pointer is the captured variable's storage, so this is
+// exactly the defect: the callee hands its own frame to its caller.
+//
+// Both forms of write count. A pointer store lowers to a goc_storep call
+// whenever the destination is not a known stack address, and the captured
+// pointer never is -- checking only ir.Instr.Op.IsStore() made this test pass
+// against the compiler it was written to catch.
+func publishesAnOwnAllocation(function *ir.Func) bool {
+	allocations := ownAllocationSizes(function)
+	published := func(value, destination ir.Ref) bool {
+		if value.Kind != ir.RefTemp {
+			return false
 		}
+		if _, allocated := allocations[value.ID]; !allocated {
+			return false
+		}
+		if destination.Kind != ir.RefTemp {
+			return true
+		}
+		_, destinationAllocated := allocations[destination.ID]
+		return !destinationAllocated
 	}
 	return containsInstruction(function, func(instruction ir.Instr) bool {
-		if !instruction.Op.IsStore() || len(instruction.Args) < 2 {
-			return false
+		if instruction.Op.IsStore() && len(instruction.Args) >= 2 {
+			return published(instruction.Args[0], instruction.Args[1])
 		}
-		value, destination := instruction.Args[0], instruction.Args[1]
-		if value.Kind != ir.RefTemp || !allocations[value.ID] {
-			return false
+		if instruction.Op == ir.OCall && len(instruction.Args) == 3 &&
+			symbolName(function, instruction.Args[0]) == "goc_storep" {
+			return published(instruction.Args[2], instruction.Args[1])
 		}
-		return destination.Kind == ir.RefTemp && !allocations[destination.ID]
+		return false
 	})
 }
 
-func allocatesWidth(function *ir.Func, width int64) bool {
-	return containsInstruction(function, func(instruction ir.Instr) bool {
-		if !instruction.Op.IsAlloc() || len(instruction.Args) != 1 {
-			return false
+// capturedStorageWidths reports the sizes of the allocations whose addresses
+// the function writes into a closure environment -- the stores into a
+// descriptor's capture words, which are offsets from the descriptor's own
+// allocation.
+func capturedStorageWidths(function *ir.Func) []int64 {
+	allocations := ownAllocationSizes(function)
+	offsets := make(map[uint32]bool)
+	for _, block := range function.Blocks {
+		for _, instruction := range block.Instrs {
+			if instruction.Op != ir.OAdd || len(instruction.Args) != 2 {
+				continue
+			}
+			base := instruction.Args[0]
+			if base.Kind != ir.RefTemp {
+				continue
+			}
+			if _, allocated := allocations[base.ID]; allocated {
+				offsets[instruction.To.ID] = true
+			}
 		}
-		size := instruction.Args[0]
-		if size.Kind != ir.RefConst {
-			return false
+	}
+	var widths []int64
+	for _, block := range function.Blocks {
+		for _, instruction := range block.Instrs {
+			if !instruction.Op.IsStore() || len(instruction.Args) < 2 {
+				continue
+			}
+			value, destination := instruction.Args[0], instruction.Args[1]
+			if value.Kind != ir.RefTemp || destination.Kind != ir.RefTemp {
+				continue
+			}
+			if !offsets[destination.ID] {
+				continue
+			}
+			if size, allocated := allocations[value.ID]; allocated {
+				widths = append(widths, size)
+			}
 		}
-		constant := function.Consts[size.ID]
-		return constant.Kind == ir.ConstInt && constant.Int == width
-	})
+	}
+	return widths
+}
+
+func ownAllocationSizes(function *ir.Func) map[uint32]int64 {
+	allocations := make(map[uint32]int64)
+	for _, block := range function.Blocks {
+		for _, instruction := range block.Instrs {
+			if !instruction.Op.IsAlloc() || instruction.To.Kind != ir.RefTemp {
+				continue
+			}
+			if len(instruction.Args) != 1 || instruction.Args[0].Kind != ir.RefConst {
+				continue
+			}
+			constant := function.Consts[instruction.Args[0].ID]
+			if constant.Kind != ir.ConstInt {
+				continue
+			}
+			allocations[instruction.To.ID] = constant.Int
+		}
+	}
+	return allocations
+}
+
+func symbolName(function *ir.Func, reference ir.Ref) string {
+	if reference.Kind != ir.RefConst {
+		return ""
+	}
+	constant := function.Consts[reference.ID]
+	if constant.Kind != ir.ConstSym {
+		return ""
+	}
+	return constant.Sym
 }
 
 func functionContaining(t *testing.T, module *ir.Module, fragment string) *ir.Func {
