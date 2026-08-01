@@ -571,3 +571,38 @@ its own measurements (its §10: `main` fails it 3/3 individually and 1/363 in th
 
 It does not block the merge on its own. It does mean the `-O` arm is not green on
 `main` either, which is worth stating plainly rather than filing under "matrix passes".
+
+## 14. Gate item 5 — the matrix run cold, `CG12_NOCACHE=1` — **PASS**
+
+```
+CG12_NOCACHE=1 GOFLAGS=-v make test-goc-status
+ok  	github.com/evanphx/cg12/cmd/goc	104.970s
+```
+
+**PASS/FAIL set: the same 364 capabilities PASS, FAIL set is empty.** `=== RUN`: 365.
+`--- PASS`: 365 (364 + parent). `--- FAIL`: 0. Identical set to the warm §12 run,
+per-subtest durations differing as expected between runs (e.g.
+`gc-invariants/type-mask-padding` 0.68 s warm, 0.31 s cold).
+
+### The cold run took the same wall clock as the warm one, so that was checked too
+
+104.97 s cold against 103.57 s warm looks like `CG12_NOCACHE=1` did nothing. It is not
+what happened. The status test spawns `goc build-runtime` children, and those consult
+the on-disk pack cache at `~/.cache/cg12/runtime-pack`, so the switch is observable as
+writes into that directory. Counting files by mtime window:
+
+| window | suite | pack files written |
+| --- | --- | ---: |
+| 19:05–19:33 | §9 corpus, §11 `test-goc-cmd` | 0 |
+| 19:33–19:36 | §12 matrix, default arm | **8** |
+| 19:36–19:39 | §13 matrix, `-O` arm (+ the `ad4e9b2` control) | 13 |
+| 19:39–19:42 | §14 matrix, `CG12_NOCACHE=1` | **0** |
+
+Two things follow. First, `CG12_NOCACHE=1` really reached the `goc build-runtime`
+children: the run wrote nothing to the cache, where every other matrix run wrote its
+packs. (It also disables `goc`'s in-process source-world sharing, the other reader of
+that variable.) Second, §12 was itself a cache **miss** — it wrote 8 packs, taking
+about 24 s at 19:33:12–19:33:36 before the capabilities started — because the cache key
+hashes the `goc` binary and the stdlib tree, and this tree had never been built on this
+box. So the warm and cold runs cost the same because both built their packs from
+scratch; the equality is an explanation, not a missing step.
