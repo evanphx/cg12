@@ -2376,7 +2376,9 @@ panic-unwind, stack-copy-roots, callfree-loop-roots}`,
 sweep-pacing, scavenge-release, heap-growth-shrink, memory-limit}`, and
 `gc-invariants/{checkmark, mark-workers, metadata-hugepages}`. The matrix goes
 from 345 to 361 capabilities, all `mustPass`, with the single declared
-`expectedFailure` unchanged.
+`expectedFailure` unchanged. The plain arm is 361 PASS / 0 FAIL / 0 KNOWN GAP;
+the optimized arm is 360 PASS / 1 FAIL, and that one failure is the pre-existing
+`-O` defect recorded below rather than anything this branch introduced.
 
 Every one runs under a diagnostic where one applies: the five stack-scanning
 programs under `cg12scanroots=1`, `stack-copy-roots` under
@@ -2429,6 +2431,48 @@ reads `gcmarkBits` and is right, but `reportZombies` reads `markBitsForBase`,
 which on such a span returns those same reset bits. Detection works, attribution
 does not. `ccwork/reportzombies` owns the fix and nothing here touches it; the
 test logs the gap rather than asserting it in either direction.
+
+#### Open: with `-O`, a loop-carried local is not a GC root
+
+`stack-scan/loop-safepoints` passes in the plain arm and **fails in the optimized
+arm**, and the defect predates this branch: a goc built from `main` (`0505d90`)
+in the same tree fails the reducer identically, 10/10.
+
+The reducer is `goc/testdata/runtime_opt_loop_carried_root.go` — 60 lines, no
+cleanups, no channels, no `unsafe`. A chain whose head is a loop-carried local is
+reclaimed while the local still points at it; under
+`GODEBUG=clobberfree=1` the walk afterwards faults on `0xdeadbeefdeadbeef`. The
+same shape with the loop removed passes with `-O`, and the host toolchain passes
+either way.
+
+| build | reducer |
+| --- | ---: |
+| goc, no `-O` | 0/10 fail |
+| goc, `-O` | 10/10 fail |
+| goc from `main` (`0505d90`), `-O` | 10/10 fail |
+| host Go 1.26.1 | passes |
+
+`cg12scanroots` shows the frame reporting no `*node` root at all in the optimized
+build, while the unoptimized build reports two 32-byte objects from the same
+source. The pointer is in the frame — the emitted code stores it at `[x29,#40]`
+and reaches it through an address parked at `[x29,#16]` — and the stack map does
+not describe it.
+
+The hypothesis, which is a hypothesis and not a verified mechanism:
+`arm64.pointerAllocationSources` reports an allocation at a safepoint when the
+allocation temporary or a temporary derived from it is live there, and its own
+comment says it exists because a derived address computed once and reused can
+outlive the base. In the optimized build the address round-trips **through
+memory**, which `addressDerivationBases` cannot follow, so nothing connects the
+live reloaded address back to the allocation. The candidate fix — report every
+pointer-bearing allocation at every safepoint, sound because the slot exists for
+the frame's lifetime and `zeroGoPointerSlots` initialises it — changes root
+reporting for every function in both arms, and landing that on a hypothesis is
+what §5.14 is a record of. It is written down instead of guessed at.
+
+`stack-scan/loop-safepoints` is deliberately left `mustPass` and left failing
+rather than reclassified as a `knownGap`: reclassifying would restore the
+"0 KNOWN GAP" headline while hiding a live, reproducible miscompile.
 
 #### What is not done
 

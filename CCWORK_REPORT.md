@@ -801,3 +801,171 @@ It is left as an open question rather than guessed at, and the mark-worker test
 asserts only what is measurable. Separating dedicated from fractional was §6's
 ask and is **not** delivered: `cpuStats.accumulate` folds fractional time into
 `GCDedicatedTime`, so `runtime/metrics` cannot do it either.
+
+## Suites
+
+Run on this branch with the fix and the new capabilities in place.
+
+| suite | result |
+| --- | --- |
+| `go build ./...`, `go vet ./...` | clean |
+| `gofmt -l` over every non-vendored Go file | clean |
+| `make test-unit` | pass (24 packages) |
+| `make test-goc-corpus` | pass (`ok github.com/evanphx/cg12/goc 578.5s`) |
+| `goc/channel_type_test.go` | passes here, fails on the pre-fix compiler |
+| `internal/gometa` unsafe-point boundary test | pass |
+| `cmd/goc` matrix bookkeeping (denominator, exclusive classification, cost model) | pass |
+| `cmd/goc` runtime-path proofs + zombie negative subprocess | pass |
+| full matrix, both arms | see below |
+| determinism, both arms | see below |
+
+
+## For whoever integrates this
+
+- **The matrix goes from 345 to 361 capabilities**, all `mustPass`, with the one
+  declared `expectedFailure` (`defer-panic/panic-string-output`) unchanged. So
+  the shape the non-negotiables ask for is 361 subtests / 360 PASS / 1 EXPECTED
+  FAILURE / 0 FAIL / 0 KNOWN GAP, in both arms.
+- **`runtimeCapability.env` is added here and also by `ccwork/phase2-alloc`.**
+  Same field name, same semantics (appended after the inherited environment so it
+  wins), same comment shape. The two should merge cleanly; if they conflict, keep
+  one copy of the field and both sets of entries.
+- **The channel fix changes allocation and barrier behaviour, so it is exactly
+  the kind of change §5.14 warns about composing.** A buffered channel with
+  pointer elements now takes a second, scannable heap allocation instead of
+  sharing the `hchan`'s no-scan one, and `typedmemmove` on a channel element now
+  runs `bulkBarrierPreWrite` where it previously did not. Any branch that also
+  moves objects between the frame and the heap or changes which stores emit
+  barriers -- `ccwork/escape-analysis`, `ccwork/phase2-alloc` -- should re-run
+  `gc/cleanup-basic` and `gc/channel-buffer-roots` *in combination* with this,
+  not just on its own branch.
+- `analysis/sepcompile/main.go` still lists `_goc_channel_element_\d+` among the
+  counter-named symbol families. That family no longer exists after this change.
+  It is a heuristic in an analysis tool, not a test, and removing it would change
+  how the tool reads previously-built objects, so it was left alone rather than
+  churned from outside its area.
+
+## Matrix arm 1 (no `-O`): green
+
+```
+361 subtests, 361 PASS, 0 FAIL, 0 SKIP, 0 KNOWN GAP,
+1 declared EXPECTED FAILURE (defer-panic/panic-string-output)
+ok  github.com/evanphx/cg12/cmd/goc  336.670s
+```
+
+## Found by the optimized arm: `stack-scan/loop-safepoints` fails with `-O`
+
+The same program that found the channel defect fails **only** with `-O`:
+
+```
+cg12scanroots: main_carried local slot 27 ... retains 0x...e4080 size 16 head 0x7272616300000062
+cg12scanroots: main_carried local slot 41 ... retains 0x...e4080 size 16 head 0x7272616300000062
+collected while live: carried-0 at carried before rewrite
+panic: a stack slot live across a loop back edge was not a GC root
+```
+
+`carried-0` is the head of a chain that is reachable from the loop's `current`
+variable through `next.next = current`, so it is live for the whole loop. With
+`-O` it is collected mid-loop. Every other new capability passes with `-O`.
+Reduction below.
+
+## Matrix arm 2 (`-O`): 360 PASS, 1 FAIL — and the failure is a pre-existing defect
+
+```
+--- FAIL: TestARM64RuntimeCapabilityStatus/stack-scan/loop-safepoints
+360 PASS, 1 FAIL   MATRIX-OPT EXIT=1
+```
+
+Every other capability passes with `-O`, including the other 15 new ones. The one
+failure is `stack-scan/loop-safepoints`, and it is **not caused by anything on
+this branch**: the same reducer fails identically when compiled by a goc built
+from `main` (`0505d90`) in this same tree, 10/10.
+
+### The defect: with `-O`, a heap pointer held in a loop-carried local is not a GC root
+
+60 lines, no cleanups, no channels, no `unsafe`:
+
+```go
+type node struct { value int; next *node }
+
+//go:noinline
+func newNode(value int, next *node) *node { return &node{value: value, next: next} }
+
+//go:noinline
+func loop(rounds int) int {
+	current := newNode(0, nil)
+	for round := 1; round <= rounds; round++ {
+		runtime.GC()
+		churn()                       // allocates and drops 20000 nodes
+		current = newNode(round, current)
+	}
+	runtime.GC(); churn(); runtime.GC()
+	depth, sum := 0, 0
+	for walk := current; walk != nil; walk = walk.next { depth++; sum += walk.value }
+	return depth*1000 + sum
+}
+```
+
+| build | result |
+| --- | ---: |
+| goc, no `-O` | 0/10 fail |
+| goc, `-O` | 10/10 fail |
+| goc built from `main` (`0505d90`), `-O` | 10/10 fail |
+| host Go 1.26.1 | passes |
+
+Under `GODEBUG=clobberfree=1` it is `unexpected fault address 0xdeadbeefdeadbeef`
+— the chain was reclaimed while `current` still pointed at it. The same function
+with the loop removed (`simple()`: allocate, `runtime.GC()`, churn,
+`runtime.GC()`, use) passes with `-O`, so it is the loop-carried case.
+
+### Direct evidence, from `cg12scanroots`
+
+Same program, same source, the two builds:
+
+```
+no -O:  main_carried local slot 11 ... retains 0x...  size 32   <- the *node
+        main_carried local slot 17 ... retains 0x...  size 32
+        main_carried local slot 20/26 ... size 16              <- the string data
+   -O:  main_carried local slot 16/20 ... size 16              <- the string data only
+```
+
+With `-O` the frame reports **no `*node` root at all**. The pointer is in the
+frame — the emitted code stores it at `[x29,#40]` and reaches it through an
+address parked at `[x29,#16]` — but the stack map does not describe it.
+
+### Hypothesis, stated as one
+
+`arm64.pointerAllocationSources` reports an allocation at a safepoint when the
+allocation temporary, or a temporary derived from it by `addressDerivationBases`,
+is live there. Its own comment says it exists precisely because "a derived
+address ... computed once and then reused" can outlive the base temporary. In the
+`-O` build the allocation's address round-trips **through memory** — stored to a
+frame slot at entry, reloaded inside the loop — and a store/reload is not an
+address derivation the pass can follow, so the chain from the live reloaded
+address back to the allocation is broken and the allocation is reported nowhere.
+Without `-O` the allocation temporary stays live across the calls and the
+question never arises.
+
+That is a hypothesis from reading the pass and the emitted code, **not a verified
+mechanism**, and it is not fixed here. The obvious candidate fix — report every
+pointer-bearing allocation at every safepoint in the function, which is sound
+because the slot exists for the frame's lifetime and `zeroGoPointerSlots`
+initialises it — changes root reporting for every function in both arms. Landing
+that on the strength of a hypothesis, at the end of a run, is exactly the failure
+mode RUNTIME_PLAN §5.14 records. It is written down instead.
+
+### What this means for the matrix's headline numbers
+
+- Arm 1 (no `-O`): **361 subtests, 361 PASS, 0 FAIL, 0 KNOWN GAP, 1 declared EXPECTED FAILURE.**
+- Arm 2 (`-O`): **361 subtests, 360 PASS, 1 FAIL, 0 KNOWN GAP, 1 declared EXPECTED FAILURE.**
+
+`stack-scan/loop-safepoints` was deliberately **left as `mustPass` and left
+failing** rather than reclassified as a `knownGap`. Reclassifying it would restore
+the "0 KNOWN GAP" headline while hiding a live, reproducible miscompile that
+predates this branch; the reducer above is worth more than the green tick. If the
+integrator prefers the green arm, the change is one field, and this section is the
+reason it should not be made silently.
+
+The reducer is committed as `goc/testdata/runtime_opt_loop_carried_root.go`,
+deliberately not registered as a capability (a second failing capability would add
+noise without information), so it outlives this job.
