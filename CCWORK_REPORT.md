@@ -786,3 +786,56 @@ reported as a zero: below `maxTinySize` a pointer-free allocation goes through
 the tiny allocator and is not its own heap object, so the probe never creates a
 zombie and no report is printed on either side.
 
+## Separate finding: §5.10's hang and deadlock are NOT attributed, and this diagnostic cannot attribute them
+
+This is the "real prize" the brief named, and the honest answer is that it is out
+of reach for this tool, for a structural reason rather than a budget one.
+
+`reportZombies` runs only after the sweeper has already found a marked free
+object on a span. A hang prints nothing and reaches no sweeper check; a
+`all goroutines are asleep - deadlock!` prints a goroutine dump and never enters
+`mspan.sweep`. There is no configuration in which a better `reportZombies` says
+anything about either. What the fix buys is attribution for the *next*
+`found pointer to free object` — which is the fault family §5.11 and §5.12 closed
+— and nothing else.
+
+A measurement was taken rather than only an argument. The KeepAlive-free
+`many-goroutines-gc` control that §5.8 and §5.11 used, compiled at `-O` on this
+branch, 200 rounds per process, 400 processes, 4 concurrent, `GOMAXPROCS=4`, a
+120s per-run kill:
+
+```
+--- outcomes over 400 runs
+    400 clean
+```
+
+80,000 rounds, zero zombies, zero `found bad pointer in Go heap`, zero
+deadlocks, zero timeouts. **This does not close anything.** §5.11 measured the
+same control at 2000 runs post-§5.12 and also got 2000 clean, and §5.10's rates
+for the open faults are 1 timeout in 160000 and 7 deadlocks in 160000 *on the
+base compiler*, both already 0 after §5.12. 400 runs is a fifth of the campaign
+that already returned clean and two orders of magnitude below the rate that would
+need to be resolved. It is reported as a datum, not as evidence.
+
+Both items stay open in §5.10 with no reducer, exactly as they were.
+
+## Still unverified / not done
+
+- **The two survivors in §5.11's middle column remain unattributed.** Re-running
+  them with the working diagnostic would need a 2000-process campaign against a
+  compiler that no longer exists on `main`.
+- **No upstream report was filed.** This environment has no network. The change is
+  written the way a CL would be and §24 records everything a report would need,
+  but somebody has to send it.
+- **The determinism corpus sweep here is 2 rounds, not §23's depth.** 730 compiles,
+  0 varying. §5.10 records a program that took a minority branch 3 times in 53
+  compiles, so 2 draws cannot rule out a rare one. The change is not in the
+  compiler, which is the reason this was judged proportionate rather than the
+  claim that 2 rounds is enough.
+- **`make test-ruby` and `make test-cruby` were not run.** Neither touches the Go
+  runtime; the change cannot reach them.
+- **8-byte objects were not measured**, for the reason given above (tiny
+  allocator), so the table's lower bound is 16 rather than "everything below 16".
+- **Sibling-area defects: none found.** Nothing in this work touched escape
+  analysis, closure capture or Phase 2 stack scanning, and nothing turned up in
+  them incidentally.

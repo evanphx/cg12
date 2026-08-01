@@ -4172,11 +4172,26 @@ runtime source differs. `-corpus -rounds 2 -j 4` on the fixed tree:
   the next fault in this family, nothing more.
 
 - **§5.10's rare hang and rare deadlock are not attributed by it, and structurally
-  cannot be.** A hang prints nothing; `reportZombies` only runs on a span that has
-  already been found to hold a marked free object. The prize named in this job's
-  brief is out of reach for this diagnostic, and pretending otherwise would be the
-  overclaim §14 warns about. Both remain open in §5.10 with no reducer.
+  cannot be.** A hang prints nothing, and `all goroutines are asleep - deadlock!`
+  never enters `mspan.sweep`; `reportZombies` runs only on a span already found to
+  hold a marked free object. A measurement was taken rather than only an argument:
+  the KeepAlive-free `many-goroutines-gc` control at `-O`, 200 rounds per process,
+  400 processes at `GOMAXPROCS=4` with a 120s kill, gave **400 clean out of 400**
+  --- 80000 rounds, no zombie, no bad pointer, no deadlock, no timeout. That closes
+  nothing. §5.11 already had 2000 clean on the same control post-§5.12, and
+  §5.10's rates are 1 timeout and 7 deadlocks in 160000 *on the base compiler*.
+  400 runs is well below the scale that would resolve either. Both remain open in
+  §5.10 with no reducer.
 
 - **The two unattributed survivors in §5.11's middle column stay unattributed.**
   They were not re-run with the working diagnostic; that would be a 2000-process
   campaign against a compiler that no longer exists on `main`.
+
+- **No upstream report was filed.** This environment has no network. The change is
+  written the way a CL would be and this section records everything a report would
+  need, but somebody has to send it.
+
+- **The corpus determinism sweep here is 2 rounds, not §23's depth.** 730 compiles,
+  0 varying. §5.10 records a program that took a minority branch 3 times in 53
+  compiles, so 2 draws cannot rule out a rare one. What makes that proportionate is
+  that the change is not in the compiler, not that 2 rounds is enough.
