@@ -3133,7 +3133,6 @@ func (g *gen) enterCalleeBody(signature *types.Signature, resultLeakBody *ast.Bl
 	}
 }
 
-
 // escapeRuleDisabled is a temporary bisection knob (GOC_ESCAPE_DISABLE=a,b,...).
 func escapeRuleDisabled(name string) bool {
 	setting := os.Getenv("GOC_ESCAPE_DISABLE")
@@ -6353,10 +6352,7 @@ func (g *gen) ensureTypeTag(valueType types.Type) string {
 		name = runtimeTypeSymbolName(key)
 		g.typeTags[key] = name
 		gcDataName := name + ".gcdata"
-		mask := pointerMask(valueType)
-		if len(mask) == 0 {
-			mask = []int64{0}
-		}
+		mask := paddedPointerMask(pointerMask(valueType))
 		alignment := typeAlign(valueType)
 		tflag := int64(0)
 		var methods []runtimeMethod
@@ -6548,7 +6544,7 @@ func (g *gen) ensureTypeTag(valueType types.Type) string {
 			)
 		}
 		g.mod.Data = append(g.mod.Data, &ir.Data{
-			Name: gcDataName, Align: 1, Items: []ir.DataItem{{Sub: ir.SubUB, Ints: mask}},
+			Name: gcDataName, Align: int(pointerSize()), Items: []ir.DataItem{{Sub: ir.SubUB, Ints: mask}},
 		}, &ir.Data{
 			Name: name, Align: 8, Items: items,
 			// The descriptor belongs in moduledata.typelinks only when it is
@@ -7311,6 +7307,35 @@ func pointerMask(valueType types.Type) []int64 {
 		mask[word/8] |= 1 << (word % 8)
 	}
 	return mask
+}
+
+// paddedPointerMask returns a type's pointer bitmap padded with zero bytes to a
+// whole number of pointer-sized words, which is the length the runtime requires.
+//
+// The runtime never reads an abi.Type's GCData a byte at a time. Every reader
+// goes through runtime.readUintptr, which loads a whole uintptr:
+// typePointersOfType takes the first word as its mask, and typePointers.next and
+// fastForward take later words at eight-byte offsets. A mask emitted at its
+// exact significant length therefore has the *next symbol* read as part of it,
+// and every 1 bit in those bytes becomes a phantom pointer word at an offset far
+// outside the object -- which bulkBarrierPreWrite and the scan then dereference.
+//
+// The host toolchain does the same rounding for the same reason; see
+// cmd/compile/internal/reflectdata/reflect.go's dgcptrmask, "Runtime wants
+// ptrmasks padded to a multiple of uintptr in size".
+func paddedPointerMask(mask []int64) []int64 {
+	width := int(pointerSize())
+	length := len(mask)
+	if length == 0 {
+		length = 1
+	}
+	padded := (length + width - 1) / width * width
+	if padded == len(mask) {
+		return mask
+	}
+	result := make([]int64, padded)
+	copy(result, mask)
+	return result
 }
 
 func runtimePointerBytes(valueType types.Type) int64 {
@@ -13376,12 +13401,10 @@ func (g *gen) runtimeTypeSymbol(valueType types.Type) string {
 	mask := make([]int64, (size+63)/64)
 	lastPointer := int64(0)
 	markPointerWords(valueType, 0, mask, &lastPointer)
-	if len(mask) == 0 {
-		mask = []int64{0}
-	}
+	mask = paddedPointerMask(mask)
 	alignment := typeAlign(valueType)
 	g.mod.Data = append(g.mod.Data,
-		&ir.Data{Name: maskName, Align: 1, Items: []ir.DataItem{{Sub: ir.SubUB, Ints: mask}}},
+		&ir.Data{Name: maskName, Align: int(pointerSize()), Items: []ir.DataItem{{Sub: ir.SubUB, Ints: mask}}},
 		&ir.Data{Name: name, Align: 8, Items: []ir.DataItem{
 			{Sub: ir.SubL, Ints: []int64{size, lastPointer}},
 			{Sub: ir.SubW, Ints: []int64{0}},
