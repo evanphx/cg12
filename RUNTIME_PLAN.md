@@ -1936,17 +1936,16 @@ while a collection is running and one round creates them once. That is also why
 
 #### What this section could not determine
 
-`mspan.reportZombies` cannot name the zombie object on any span the Green Tea
+`mspan.reportZombies` could not name the zombie object on any span the Green Tea
 collector gives inline mark bits, which is every span with `elemsize` between 16
-and 512 — including the 32-byte spans this fault lands on. `sweepLocked.sweep`
-calls `s.moveInlineMarks(s.gcmarkBits)`, which copies the inline marks out and
-then resets them, and checks for zombies against `gcmarkBits`; `reportZombies`
-then reads the marks back through `markBitsForBase`, which returns the *inline*
-bits for such a span. They have just been cleared, so the report prints every
-object as unmarked, never prints the `zombie` line, and never hexdumps the
-object. That is an upstream diagnostic defect in vendored code, it was not
-touched here, and it is the reason the residual had to be attributed with
-`GODEBUG=gccheckmark=1` instead.
+and 512 — including the 32-byte spans this fault lands on. That is why the
+residual above had to be attributed with `GODEBUG=gccheckmark=1` instead.
+
+**Fixed on 2026-08-01; see §24.** It was an upstream defect, in upstream's own
+code on upstream's own default configuration, and it reproduces on the host
+`go1.26.1` toolchain with no cg12 involved. The two runs this section reports as
+"not individually attributed" were not re-run, so they stay unattributed; what
+changed is that the next one need not be.
 
 ### 5.12 Fixed: unsafe.Pointer stores lost their write barrier (2026-07-28)
 
@@ -3986,3 +3985,151 @@ by design. **No capability is non-passing.**
   is large enough for it to have reached emitted assembly either way. The
   `arm64/mc.go:2786` stack-map root order recorded in §5.10 is still open and is
   `cg12cc`-only for a reason that is measured, not assumed.
+
+## 24. `reportZombies` read a bitmap the sweeper had just cleared (2026-08-01)
+
+`mspan.reportZombies` is what the runtime prints when the sweeper finds an object
+marked in this cycle that was free at the end of the last one. §5.11 recorded
+that it was blind on every span the Green Tea collector gives inline mark bits —
+`gcUsesSpanInlineMarkBits` is `heapBitsInSpan(size) && size >= 16`, so `elemsize`
+16 through 512, which is most of the heap and is exactly where §5.11's and
+§5.12's faults landed. It printed every object as `unmarked`, never printed the
+`zombie` line and never hexdumped the object, while still throwing
+`found pointer to free object`.
+
+### The defect
+
+`sweepLocked.sweep` (`stdlib/src/runtime/mgcsweep.go`) does three things in order:
+
+1. line 655 — `if gcUsesSpanInlineMarkBits(s.elemsize) { s.moveInlineMarks(s.gcmarkBits) }`.
+   `moveInlineMarks` ORs the span's inline mark bits into `gcmarkBits` and then
+   **clears them** (`imb.init(s.spanclass, true)`, `mgcmark_greenteagc.go:215`).
+2. lines 660-676 — the zombie *check*, which reads `s.gcmarkBits` directly.
+3. line 668/673 — `s.reportZombies()`, which read the marks back through
+   `s.markBitsForBase()`. On such a span that returns
+   `&s.inlineMarkBits().marks[0]` (`mgcmark_greenteagc.go:239`): the bits step 1
+   had just zeroed.
+
+So the check and the report consulted two different bitmaps, and after step 1 one
+of them is all zeros. Both `reportZombies` call sites are after the move, so
+there is no path on which the inline bits are still live when it runs.
+
+### It is an upstream bug, not a cg12 artifact
+
+`mgcsweep.go`, `mgcmark_greenteagc.go` and `mgcmark_nogreenteagc.go` are
+byte-identical to `go1.26.1`'s (`diff` against `$(go env GOROOT)/src/runtime` is
+empty), and `goexperiment.greenteagc` is on by default in Go 1.26 —
+`build.Default.ToolTags` carries it, which is also why goc selects the same file.
+The probe below reproduces it under plain `go build`, with no cg12 anywhere:
+
+| build | `zombie` lines | `marked` | `unmarked` | hexdump |
+| --- | --- | --- | --- | --- |
+| `go build` (Green Tea, the default) | **0** | 0 | 252 | none |
+| `GOEXPERIMENT=nogreenteagc go build` | 1 | 64 | 191 | yes |
+
+The fix is therefore written the way upstream would take it, and the maintenance
+cost against a future vendored-tree update is one statement in one function.
+
+### The audit, so this is a class and not an instance
+
+Every reader of a span's mark bits was checked against the `moveInlineMarks`
+boundary:
+
+- `mgcsweep.go:559` (specials) and `mgcsweep.go:620` (the
+  `traceAllocFree`/`clobberfree`/sanitizer loop) run **before** the move and use
+  `markBitsForIndex`/`markBitsForBase`, so they read the inline bits while those
+  are still the live ones. Correct — and load-bearing, because a wrong answer at
+  :620 would have `clobberfree` scribbling on live objects.
+- `mbitmap.go:1495` `countAlloc`, and the zombie check itself, run after the move
+  and already read `gcmarkBits`.
+- `mgcmark.go:1698` (`greyobject`), `mgcmark.go:1813` (`gcmarknewobject`),
+  `mwbbuf.go:249` and `mbitmap.go:1276` all run during the mark phase, where the
+  inline bits are the live ones.
+
+`reportZombies` was the only post-move reader still going through
+`markBitsForBase`. There is no second instance.
+
+`gcmarknewobject` marking through `markBitsForIndex` also settles the ordering
+question: on such a span nothing writes `gcmarkBits` by another route, so
+`gcmarkBits` after the move is the complete and only record of the cycle's marks.
+
+### The fix
+
+```go
+	// Read the marks out of gcmarkBits rather than through markBitsForBase.
+	// On a span with inline mark bits, sweep has already merged them into
+	// gcmarkBits and cleared them, so markBitsForBase would return the cleared
+	// inline bits: every object would print as unmarked and the zombie the
+	// caller detected would never be named or dumped. gcmarkBits is also the
+	// bitmap the caller's zombie check consulted.
+	mbits := markBits{&s.gcmarkBits.x, uint8(1), 0}
+```
+
+replacing `mbits := s.markBitsForBase()`, plus a line on the doc comment saying
+`reportZombies` must be called after inline marks have been moved. On a
+non-Green-Tea span the expression is exactly what `markBitsForBase` returned, so
+that configuration is unchanged by construction.
+
+### Proved on a real fault
+
+A diagnostic that is not exercised on a failure is not fixed.
+`cmd/goc/testdata/zombie_report_probe.go` builds a genuine zombie — case 1 of
+`reportZombies`' own list — by allocating 64 pointer-free 32-byte objects,
+keeping 63 alive in a global, hiding the 64th in a `uintptr` across a collection,
+and resurrecting it into a global root before the next. The surviving 63 keep the
+span in use; being pointer-free routes the mark through
+`tryDeferToSpanScan`'s noscan fast path, so the collector never reads the dead
+object and the run fails as a zombie report rather than as
+`found bad pointer in Go heap`; and the payload word `0x7a6f6d6269650000 + i`
+identifies which object the report named.
+
+Same program, compiled by goc, before and after the fix:
+
+| goc build | `zombie` lines | `marked` | `unmarked` |
+| --- | --- | --- | --- |
+| before | **0** | 0 | 252 |
+| after | **1** | 64 | 188 |
+
+```
+0x727a33d024e0 alloc marked
+0x727a33d02500 free  marked   zombie
+                   7 6 5 4  3 2 1 0   f e d c  b a 9 8  0123456789abcdef
+0000727a33d02500: 7a6f6d62 69650028  11111111 11111111  (.eibmoz........
+0000727a33d02510: 22222222 22222222  33333333 33333333  """"""""33333333
+0x727a33d02520 alloc marked
+```
+
+`0x…0028` is index 40, the object the probe hid — the same object, the same
+payload and the same shape the `nogreenteagc` reference build printed.
+
+### The guard
+
+`cmd/goc/zombie_report_test.go` compiles the probe with goc, runs it, and
+requires a `zombie` line, at least one `marked` object, and the hexdump carrying
+the probe's payload word. Checked in both directions: it passes with the fix, and
+with `markBitsForBase()` put back and nothing else changed it fails with
+`"0" is not greater than "0" / every object printed as unmarked`, which is the
+defect's exact signature. A revert cannot pass it.
+
+The fixture is in `cmd/goc/testdata`, not `goc/testdata`, deliberately: the
+capability matrix stays at 345 subtests and §23's determinism corpus stays at 365
+programs.
+
+Stability, all naming the zombie with the right payload: 60/60 at goc default,
+30/30 at `goc -O`, 10/10 at each of `GOMAXPROCS` 1, 2, 4, 8 and 64.
+
+### What this does not establish
+
+- **It is a diagnostic, not a collector fix.** No program's behaviour changes
+  except the text printed on a fault that already threw. It buys attribution for
+  the next fault in this family, nothing more.
+
+- **§5.10's rare hang and rare deadlock are not attributed by it, and structurally
+  cannot be.** A hang prints nothing; `reportZombies` only runs on a span that has
+  already been found to hold a marked free object. The prize named in this job's
+  brief is out of reach for this diagnostic, and pretending otherwise would be the
+  overclaim §14 warns about. Both remain open in §5.10 with no reducer.
+
+- **The two unattributed survivors in §5.11's middle column stay unattributed.**
+  They were not re-run with the working diagnostic; that would be a 2000-process
+  campaign against a compiler that no longer exists on `main`.
