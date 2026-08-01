@@ -1619,6 +1619,17 @@ the reports of the jobs that found them.
   in what the stale word happened to address, so counting either one alone
   understates the rate.
 
+- **`found bad pointer in Go heap` at low `GOGC` is two defects, one of them
+  closed.** §26 closes the larger one: types' GC pointer masks were emitted
+  unpadded and the runtime reads them a `uintptr` at a time, so the next symbol's
+  bytes became phantom pointer words. That one faulted 30/30 on `main` at the
+  default `GOGC` with the §26 reducer. **What remains is a distinct defect on the
+  precise stack scan** — 3-15% at `GOGC=10` on both `main` and `main` + escape
+  after §26 — narrowed there to `main.buildGraph` locals slot 65, the pointer
+  word of a string-header alloca that the prologue zeroes and the stack map
+  claims correctly. No mechanism, no smaller reducer. Any rate quoted for this
+  fault before 2026-08-01 mixes the two.
+
 - **Rare hangs and deadlocks.** The §5.8 verification saw runs exceed a 60s
   timeout on both the base and the fixed compiler, at a low rate, unexplained
   and unattributed. §5.11's and §5.12's campaigns reproduce this — 1 timeout in
@@ -4524,6 +4535,12 @@ runtime source differs. `-corpus -rounds 2 -j 4` on the fixed tree:
 
 Three items closed in goc's escape walk, plus two miscompiles the work exposed
 and two it introduced and the matrix caught.
+
+**Merged 2026-08-01.** This branch was held back because merging it killed
+`gc-invariants/mark-workers`. §26 establishes that it was not the cause: the
+defect is goc's unpadded type GC masks, whose consequence is a pure function of
+`.data` layout, and what this branch changed was which type descriptors get
+emitted. With §26 applied the capability passes in both arms.
 
 ### The summary §5.10 asked for
 
