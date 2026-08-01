@@ -2490,7 +2490,9 @@ and that frame is the one whose stack map loses the pointer -- though the two
 could not be separated, because `CG12_NO_COSTINLINE` and `CG12_NO_AGGINLINE` do
 not disable the ordinary size-budget inliner. And it silently weakens every test
 in this repository that uses `//go:noinline` to keep a frame distinct so a stack
-map can be reasoned about, which is a large share of `goc/testdata`. §15 already
+map can be reasoned about --- 25 of the 382 programs in `goc/testdata`, including
+`gc/stack-argument-roots`, `gc/goroutine-entry-stack-map` and five of the six new
+`stack-scan` programs. §15 already
 records one investigation where "the real difference was inlining"; this is the
 mechanism that makes that failure mode easy to hit.
 

@@ -546,14 +546,41 @@ stack-scanning and GC-stress half of §6. The allocation/write-barrier half is
 
 **This file is written as results land. Anything not yet measured says so.**
 
-## Status: complete, with two defects reported and one fixed
+## Status: complete --- three defects found, one fixed
 
 - **Fixed:** a buffered channel's elements were not GC roots (`goc/compile.go`).
 - **Reported, not fixed:** with `-O`, a loop-carried local is not a GC root.
   Pre-existing on `main`; reducer committed.
+- **Reported, not fixed:** `//go:noinline` is parsed by nothing, so `-O` inlines
+  through it.
 - **Classified unreachable, with the boundary proved:** the conservative stack scan.
-- 16 new capabilities; matrix 345 -> 361.
+- 16 new capabilities; matrix 345 -> 361. Plain arm green; optimized arm has one
+  failure, and it is the pre-existing `-O` defect above.
 
+
+## Found: `runtime: marked free object in span` — a zombie, 30/30 at GOMAXPROCS=1
+
+The very first stack-scanning capability program
+(`goc/testdata/runtime_stack_scan_loop_safepoints.go`) fails on the cg12 build
+and passes on the host toolchain:
+
+```
+runtime: marked free object in span 0xf80b870e9ba0, elemsize=16 freeindex=0
+0x406c05f56000 alloc unmarked
+...
+```
+
+That is `mspan.reportZombies` firing: an object that the sweeper found free but
+marked. Measured on `main` (`0505d90`) with the same source compiled both ways:
+
+| build | GOMAXPROCS | failures |
+| --- | ---: | ---: |
+| host Go 1.26.1 | 4 | 0 / 100 |
+| goc | 1 | 30 / 30 |
+| goc | 2 | 13 / 30 |
+| goc | 4 | 60 / 100 |
+
+Reduction in progress; details below as they land.
 
 ### Reduced: **a buffered channel's elements are not GC roots**
 
@@ -660,6 +687,36 @@ Two consequences follow from the one defect:
    `bulkBarrierPreWriteSrcOnly`, both of which are no-ops when `PtrBytes == 0`.
    So copying a pointer element into or out of a channel skips its write
    barrier as well.
+
+
+### The fix
+
+`goc/compile.go`: `channelType` now points the `abi.ChanType`'s `Elem` at the
+same complete descriptor `runtimeType` emits for every other allocation site.
+`runtimeType` is split into `runtimeTypeSymbol` (emit, return the data symbol
+name) and `runtimeType` (the `ir.Ref` wrapper) so one datum can reference
+another; nothing else changes.
+
+Measured on the same three reducers, same tree, before and after:
+
+| program | before | after |
+| --- | ---: | ---: |
+| `chan1` (30-line reducer, `clobberfree=1`) | 12/12 fail | 0/12 fail |
+| `min2` (zombie reproducer, `clobberfree=1`) | 12/12 fail | 0/40 fail |
+| `runtime_stack_scan_loop_safepoints.go`, GOMAXPROCS=1 | 30/30 fail | 0/40 fail |
+| `runtime_stack_scan_loop_safepoints.go`, GOMAXPROCS=2 | 13/30 fail | 0/40 fail |
+| `runtime_stack_scan_loop_safepoints.go`, GOMAXPROCS=4 | 60/100 fail | 0/40 fail |
+
+and the two structural probes now agree with the host: `hchan.elemtype.PtrBytes`
+is 8, and a `chan *box` buffer is a separate scannable allocation while a
+`chan int` buffer stays inline in the no-scan `hchan`.
+
+One thing the probe still reports differently from the host: the descriptor the
+runtime holds in `hchan.elemtype` is not pointer-identical to the one `reflect`
+reports for the same element type. goc emits more than one descriptor family for
+a type; that is pre-existing and independent of this defect, and GC correctness
+does not depend on the identity, only on the contents. It is recorded as an open
+observation, not fixed here.
 
 ## Zombie detection, proved by a controlled negative subprocess
 
@@ -971,6 +1028,48 @@ because the slot exists for the frame's lifetime and `zeroGoPointerSlots`
 initialises it — changes root reporting for every function in both arms. Landing
 that on the strength of a hypothesis, at the end of a run, is exactly the failure
 mode RUNTIME_PLAN §5.14 records. It is written down instead.
+
+### And a second, cleanly-attributed defect found while narrowing it: `//go:noinline` does nothing
+
+`goc/compile.go` parses exactly one compiler directive:
+
+```go
+g.fn.NoSplit = hasCompilerDirective(fd, "go:nosplit")
+```
+
+There is no `go:noinline` handling anywhere in `goc/`, `opt/` or `ir/` — `grep`
+finds the string only inside `goc/testdata`. So the directive is silently
+ignored, and `-O` inlines functions that ask not to be inlined. Proved by the
+symbol table of the `-O` build of the reducer:
+
+```
+$ nm oroot_loop.bin | grep main_
+main_churn          <- survived (too big)
+main_main
+(no main_loop, no main_simple, no main_newNode)
+```
+
+All three `//go:noinline` functions were folded into `main_main`.
+
+Two consequences:
+
+1. **It is a plausible proximate cause of the root loss above.** After inlining,
+   the allocation helper, the loop and the collection all live in one frame, and
+   that is the frame whose stack map loses the loop-carried pointer. Plausible,
+   not established: `CG12_NO_COSTINLINE` and `CG12_NO_AGGINLINE` do not turn off
+   the ordinary size-budget inliner, so the two could not be separated with the
+   knobs that exist.
+2. **It weakens every test in this repository that relies on `//go:noinline`.**
+   25 of the 382 programs in `goc/testdata` use it, including capabilities
+   written specifically to keep a frame distinct so a stack map can be reasoned
+   about --- `gc/stack-argument-roots`, `gc/goroutine-entry-stack-map` and five
+   of the six new `stack-scan` programs among them. Under `-O` that guarantee does not hold, and neither the
+   corpus nor the matrix would notice. RUNTIME_PLAN §15 already records one
+   investigation where "the real difference was inlining"; this is the mechanism
+   that makes that failure mode easy to hit.
+
+No test is added for this, because a test asserting the directive is honoured
+would be red on arrival. It is reported.
 
 ### What this means for the matrix's headline numbers
 
