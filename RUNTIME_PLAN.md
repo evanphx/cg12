@@ -2359,9 +2359,12 @@ Three things about method, since §15 collects them:
   `cg12scanroots` prints that word as `head` next to the frame and stack-map slot
   retaining it. Grepping one run's output for `head 0xdeadbeef` named the frame
   holding a freed object directly. Neither diagnostic alone would have.
-- **No capability in the 345-entry matrix caught this.** The existing
-  `goroutine/channel-*-gc` capabilities send one element and collect once, which
-  is not enough for the sweeper to reach the buffer. `gc/channel-buffer-roots`
+- **No capability in the 345-entry matrix caught this**, measured rather than
+  inferred: compiled by the pre-fix compiler and run under
+  `GODEBUG=clobberfree=1`, `goroutine/channel-of-slices-gc`,
+  `interface-channel-gc`, `channel-struct-pointer-gc` and `buffered-channel-fifo`
+  all pass 6/6. They send one element and collect once, which is not enough for
+  the sweeper to reach the buffer and hand the memory out again. `gc/channel-buffer-roots`
   now fills a buffer, churns, collects repeatedly, and then drains, across six
   element types.
 - **`reportZombies` could not name the object**, exactly as the end of §5.11

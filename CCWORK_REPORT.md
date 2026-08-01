@@ -632,9 +632,13 @@ The element type descriptors are correct: a `reflect`+`unsafe` probe reads
 and gets 8 on both toolchains, so `makechan`'s `elem.Pointers()` test has the
 right input. Mechanism still being narrowed.
 
-**No capability in the 345-entry matrix catches this.** The existing
-`goroutine/channel-*-gc` capabilities send one element and collect once, which is
-not enough for the sweeper to reach the buffer.
+**No capability in the 345-entry matrix catches this**, and that is measured, not
+inferred: compiled by the pre-fix compiler and run under
+`GODEBUG=clobberfree=1`, `goroutine/channel-of-slices-gc`,
+`goroutine/interface-channel-gc`, `goroutine/channel-struct-pointer-gc` and
+`goroutine/buffered-channel-fifo` all pass 6/6. They send one element and collect
+once, which is not enough for the sweeper to reach the buffer and hand the memory
+out again.
 
 ### Root cause: `goc/compile.go`'s `channelType` emits a stub element descriptor
 
