@@ -763,3 +763,26 @@ establish is that nothing in this branch turned a reproducible compile into an
 irreproducible one, and the change is not in the compiler at all — it is one
 statement of vendored runtime source.
 
+## The blindness covers exactly the inline-mark-bit range
+
+The probe parameterised by object size, compiled by the same goc binary against
+the reverted and the fixed runtime tree (the runtime is compiled from
+`stdlib/src` at goc-compile time, so the tree is what defines before and after —
+two goc binaries built at different times do **not**):
+
+| object | span `elemsize` | inline mark bits? | before | after |
+| --- | --- | --- | --- | --- |
+| `[2]int64` | 16 | yes (low bound) | fault, **0 zombie**, 0 marked, 504 unmarked | fault, 1 zombie + dump, 74 marked |
+| `[4]int64` | 32 | yes | fault, **0 zombie**, 0 marked, 252 unmarked | fault, 1 zombie + dump, 64 marked |
+| `[64]int64` | 512 | yes (high bound) | fault, **0 zombie**, 0 marked, 15 unmarked | fault, 1 zombie + dump, 15 marked |
+| `[128]int64` | 1024 | no | fault, 1 zombie + dump, 8 marked | **identical** |
+
+Both directions in one table: the report was blind across the whole
+`gcUsesSpanInlineMarkBits` range and only there, and the fix leaves the
+already-working large-span path byte-for-byte unchanged.
+
+`[1]int64` (8 bytes) is not measurable this way and is left out rather than
+reported as a zero: below `maxTinySize` a pointer-free allocation goes through
+the tiny allocator and is not its own heap object, so the probe never creates a
+zombie and no report is printed on either side.
+
