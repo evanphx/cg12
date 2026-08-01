@@ -1,3 +1,15 @@
+> **This file holds two reports.** The one for *this* job --- `ccwork/phase2-gc`,
+> the stack-scanning and GC-stress half of RUNTIME_PLAN Phase 2 --- starts at
+> "Phase 2, half two" below. Everything above it is the inherited report from
+> `ccwork/frontend-determinism-2`, kept because it is the record for the
+> determinism work this branch is built on.
+>
+> Short version of this job: one GC defect found and fixed (a buffered channel's
+> elements were not GC roots), one found and reported but not fixed (with `-O`, a
+> loop-carried local is not a GC root --- pre-existing on `main`), one path
+> classified unreachable with the boundary proved (the conservative stack scan),
+> and 16 new capabilities taking the matrix from 345 to 361.
+
 # Front-end determinism — finishing `ccwork/frontend-determinism`
 
 Branch `ccwork/frontend-determinism-2`, off `main` (`9cd2621`).
@@ -534,7 +546,13 @@ stack-scanning and GC-stress half of §6. The allocation/write-barrier half is
 
 **This file is written as results land. Anything not yet measured says so.**
 
-## Status: in progress
+## Status: complete, with two defects reported and one fixed
+
+- **Fixed:** a buffered channel's elements were not GC roots (`goc/compile.go`).
+- **Reported, not fixed:** with `-O`, a loop-carried local is not a GC root.
+  Pre-existing on `main`; reducer committed.
+- **Classified unreachable, with the boundary proved:** the conservative stack scan.
+- 16 new capabilities; matrix 345 -> 361.
 
 
 ### Reduced: **a buffered channel's elements are not GC roots**
@@ -969,3 +987,57 @@ reason it should not be made silently.
 The reducer is committed as `goc/testdata/runtime_opt_loop_carried_root.go`,
 deliberately not registered as a capability (a second failing capability would add
 noise without information), so it outlives this job.
+
+## Still unverified, and other jobs' business
+
+Explicitly, so nothing here reads as stronger than it is.
+
+**Unverified by this branch:**
+
+- The `-O` root-loss mechanism is a **hypothesis** (`pointerAllocationSources`
+  losing an allocation whose address round-trips through memory). The
+  measurements are solid; the attribution is not. No fix attempted.
+- Whether the three `gcDrainMarkWorker*` wrappers genuinely never run or the
+  coverage instrumentation is missing their counters. Either answer has
+  consequences — the second would mean §1's percentages understate coverage —
+  and neither is established.
+- Whether the kernel actually backs GC metadata with huge pages after the
+  transition. The transition is proved to execute; `madvise` is advisory.
+- Dedicated versus fractional mark workers are **not** separated, so that part of
+  §6's "dedicated/fractional/idle mark workers" is not delivered.
+- The rate of the channel defect *before* the fix on the pack-linked and batch
+  compile paths specifically: the A/B was measured on the `-runtime <pack>` path
+  (which the matrix uses) and on the monolithic path (coverage builds), not on
+  `compile-batch` separately.
+- No new coverage baseline was accepted. The 16 new capabilities are recorded in
+  `runtime_coverage_baseline_pending.json` with reasons, and
+  `TestCheckedRuntimeCoverageBaselineDenominator` reconciles 345 + 16 = 361.
+
+**Other jobs' business, found here but not touched:**
+
+- `mspan.reportZombies` is blind on Green Tea spans. Independently reproduced
+  with a deliberate zombie, and the mechanism pinned (`moveInlineMarks` resets the
+  inline bits that `markBitsForBase` then reads). Owned by `ccwork/reportzombies`.
+- goc emits more than one `abi.Type` descriptor family per type: after the fix,
+  `hchan.elemtype` has correct contents but is still not pointer-identical to the
+  descriptor `reflect` reports. Pre-existing, untraced, not a GC-correctness
+  issue by itself.
+- cg12 has no asynchronous preemption at all, so a non-terminating call-free loop
+  has no preemption point. That is §7's (Phase 3's) problem; §6 only needed the
+  classification.
+
+## Commits on this branch
+
+| commit | what |
+| --- | --- |
+| `d4f8f8f` | goc: give a channel's element type its real pointer metadata (the fix) |
+| `3ecd3fb` | the stack-scanning and GC-stress capability programs |
+| `63bcef9` | register them; `runtimeCapability.env`; the compiler test for the channel defect |
+| `b780655` | classify the conservative stack scan unreachable, with the boundary proved |
+| `652b788` | correct the coverage path assertions to measurable claims |
+| `dc04f41` | report: the Phase 2 inventory |
+| `25cbefe` | RUNTIME_PLAN §6.1 |
+| `f14d0c6` | record the `-O` loop-carried root loss, with its reducer |
+
+27 files, +4542/-18. One file in `goc/` changed (`compile.go`, 22 lines of code);
+everything else is tests, capability programs, and documentation.
