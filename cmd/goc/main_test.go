@@ -312,6 +312,67 @@ func TestARM64GoRuntimeGarbageCollectorExecutes(t *testing.T) {
 	}
 }
 
+// TestARM64WriteBarrierAuditRunsClean exercises the write-barrier validation
+// modes on programs that are known to work, so the modes themselves stay
+// working.
+//
+// GODEBUG=cg12checkwb=1 rejects a word the collector would later refuse;
+// cg12checkwb=3 additionally rejects a goroutine stack address stored into
+// anything that outlives the frame. Both now run on the bulk barriers as well
+// as on atomicwb, which is what typedmemmove, growslice and typedslicecopy go
+// through -- a store this test would not otherwise reach.
+//
+// A validation mode nobody runs is a mode whose state nobody knows: the
+// optimized arm of the capability matrix failed to link for sixteen
+// capabilities for as long as it existed because every job exercised the
+// default arm (RUNTIME_PLAN.md section 5.10). These programs allocate, collect,
+// block on channels and copy pointer-bearing aggregates, so a false positive in
+// the check shows up here rather than in whichever investigation next tries to
+// use it.
+func TestARM64WriteBarrierAuditRunsClean(t *testing.T) {
+	if runtime.GOARCH != "arm64" {
+		t.Skip("AArch64 Go runtime bootstrap")
+	}
+	if _, err := exec.LookPath("cc"); err != nil {
+		t.Skip("cc unavailable")
+	}
+
+	directory := t.TempDir()
+	compiler := sharedGOCBinary(t)
+
+	sources := []string{
+		"gc_struct.go",
+		"runtime_goroutine_channel.go",
+		"runtime_select_channels.go",
+		"runtime_channel_struct_pointer_gc.go",
+		"runtime_goroutine_closure_gc.go",
+		"runtime_slice_pointer_append_gc.go",
+	}
+	modes := []string{"cg12checkwb=1", "cg12checkwb=3"}
+
+	for _, source := range sources {
+		t.Run(source, func(t *testing.T) {
+			program := filepath.Join("..", "..", "goc", "testdata", source)
+			executable := filepath.Join(directory, source+".wb")
+			compile := exec.Command(compiler, "-o", executable, program)
+			if output, err := compile.CombinedOutput(); err != nil {
+				t.Fatalf("compile %s: %v\n%s", source, err, output)
+			}
+			for _, mode := range modes {
+				run := exec.Command(executable)
+				run.Env = append(os.Environ(), "GODEBUG="+mode)
+				output, err := run.CombinedOutput()
+				if err != nil {
+					t.Fatalf("execute %s under GODEBUG=%s: %v\n%s", source, mode, err, output)
+				}
+				if strings.Contains(string(output), "cg12checkwb:") {
+					t.Fatalf("%s under GODEBUG=%s reported a bad write:\n%s", source, mode, output)
+				}
+			}
+		})
+	}
+}
+
 func TestARM64StandardLibraryIOAndFmtExecute(t *testing.T) {
 	if runtime.GOARCH != "arm64" {
 		t.Skip("AArch64 Go runtime bootstrap")
