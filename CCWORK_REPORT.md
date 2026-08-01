@@ -343,3 +343,12 @@ at a later safepoint, the scan then finds a pointer into a reclaimed span, which
 `stack-scan/loop-safepoints` under `-runtime-opt` is a *deterministic* handle on a defect that
 otherwise only shows as a 3–15% rate at `GOGC=10`, and that is the difference between a day
 and an hour. The next job on this should start there rather than from the rate.
+
+## 12. One correction
+
+`GOC_ESCAPE_DISABLE`, the scratch knob used for §4's bisect, was committed by accident with an
+earlier report commit and has been removed. It is inert with the variable unset, and the
+cleaned compiler produces **byte-identical** images for the reducer,
+`runtime_gc_mark_workers.go` and `runtime_gc_type_mask_padding.go`, so every measurement above
+stands. Both matrix arms were re-censused after the removal and are unchanged: 364/364 default,
+363 PASS + the one pre-existing `-runtime-opt` failure.
