@@ -523,3 +523,122 @@ though: **`opt.OptimizeModule` sends every goc module to `BoundedPipeline`**
 link, it is not `inline`, `mem2reg`, `jumpthread`, `ifconvert` or `gcm`; those
 never run on a goc module. That narrows their search to `fold`, `copy`, `dce` and
 the split itself.
+
+---
+
+# Phase 2, half two: stack scanning and GC stress (`ccwork/phase2-gc`)
+
+Branch `ccwork/phase2-gc`, off `main` (`0505d90`). RUNTIME_PLAN §13 item 5, the
+stack-scanning and GC-stress half of §6. The allocation/write-barrier half is
+`ccwork/phase2-alloc` (unmerged) and is not duplicated here.
+
+**This file is written as results land. Anything not yet measured says so.**
+
+## Status: in progress
+
+
+### Reduced: **a buffered channel's elements are not GC roots**
+
+The zombie was a string that a `chan string` buffer was the only holder of.
+`GODEBUG=clobberfree=1,cg12scanroots=2` named the retaining frame and showed the
+retained object's first word as the clobber pattern, i.e. already freed.
+
+Reducer, 30 lines, no `unsafe`, no cleanups, no goroutines:
+
+```go
+var collected = make(chan string, 64)
+
+func fill(n int) {
+	for i := 0; i < n; i++ {
+		collected <- "carried-" + string(rune('a'+i))
+	}
+}
+
+func main() {
+	fill(6)
+	runtime.GC()
+	runtime.GC()
+	runtime.GC()
+	for i := 0; i < 6; i++ {
+		got := <-collected
+		want := "carried-" + string(rune('a'+i))
+		if got != want { panic("a buffered channel lost a string") }
+	}
+}
+```
+
+goc: 12/12 failures. Host Go 1.26.1: 0/12.
+
+It is not specific to strings. With `GODEBUG=clobberfree=1`, **every**
+pointer-containing element type loses every buffered element:
+
+| `make(chan T, 8)` | result on goc |
+| --- | --- |
+| `string` | every element clobbered |
+| `*box` | every element clobbered |
+| `[]byte` | every element clobbered |
+| `any` | every element clobbered |
+| `struct{name string; box *box}` | every element clobbered |
+
+The host build of the same source prints `ok`.
+
+The element type descriptors are correct: a `reflect`+`unsafe` probe reads
+`PtrBytes` from the `abi.Type` behind `reflect.TypeOf(make(chan string)).Elem()`
+and gets 8 on both toolchains, so `makechan`'s `elem.Pointers()` test has the
+right input. Mechanism still being narrowed.
+
+**No capability in the 345-entry matrix catches this.** The existing
+`goroutine/channel-*-gc` capabilities send one element and collect once, which is
+not enough for the sweeper to reach the buffer.
+
+### Root cause: `goc/compile.go`'s `channelType` emits a stub element descriptor
+
+`(*gen).channelType` hand-rolls the `abi.ChanType` it passes to
+`runtime.makechan`. Its embedded element `abi.Type` is 48 zero bytes with only
+four fields filled in:
+
+```go
+elementBytes := make([]int64, 48)
+size := typeSize(element)
+for i := 0; i < 8; i++ { elementBytes[i] = (size >> (8 * i)) & 0xff }  // Size_
+elementBytes[21] = alignment                                          // Align_
+elementBytes[22] = alignment                                          // FieldAlign_
+elementBytes[23] = int64(runtimeKind(element))                        // Kind_
+```
+
+`PtrBytes` (bytes 8..15) and `GCData` (offset 32) are left zero. Every other
+allocation site in goc uses `(*gen).runtimeType`, which writes both.
+
+Proved in the running program rather than inferred. Reading `hchan.elemtype` at
+offset 40 and comparing it against the descriptor `reflect` reports for the same
+element type:
+
+```
+--- goc ---                          --- host ---
+runtime elemtype size 8 ptrbytes 0   runtime elemtype size 8 ptrbytes 8
+reflect elemtype size 8 ptrbytes 8   reflect elemtype size 8 ptrbytes 8
+same descriptor: false               same descriptor: true
+```
+
+and, one level up, which branch `makechan` takes. `makechan` allocates the buffer
+inside the `hchan` object only when `!elem.Pointers()`; the offset from `hchan` to
+`buf` says which branch ran:
+
+```
+--- goc ---                    --- host ---
+chan *box  delta 112           chan *box  delta -8272   (separate scan allocation)
+chan int   delta 112           chan int   delta 112     (inline, noscan)
+```
+
+goc puts a `chan *box` buffer in the same no-scan allocation as the `hchan`, so
+the collector never scans it.
+
+Two consequences follow from the one defect:
+
+1. `makechan` allocates the buffer with `mallocgc(hchanSize+mem, nil, true)` --
+   no type, no pointer bitmap -- so buffered elements are invisible to the mark
+   phase. This is the fault above.
+2. `chansend`/`chanrecv`/`sendDirect` pass `c.elemtype` to `typedmemmove` and
+   `bulkBarrierPreWriteSrcOnly`, both of which are no-ops when `PtrBytes == 0`.
+   So copying a pointer element into or out of a channel skips its write
+   barrier as well.
