@@ -613,3 +613,75 @@ about 24 s at 19:33:12–19:33:36 before the capabilities started — because th
 hashes the `goc` binary and the stdlib tree, and this tree had never been built on this
 box. So the warm and cold runs cost the same because both built their packs from
 scratch; the equality is an explanation, not a missing step.
+
+## 15. The six gate items, and the verdict
+
+Every suite below was run in the foreground of one session and waited on to
+completion; every number is from a process that was observed to exit. Nothing is
+carried over from a monitor, and nothing in this part is inferred from a run that did
+not finish.
+
+| # | suite | result | evidence it really ran |
+| --- | --- | --- | --- |
+| 1 | `go test -timeout 40m -parallel 10 -v ./goc/...` | **FAIL** | 741 s; 598 `=== RUN`, 597 PASS + 1 FAIL |
+| 2 | `make test-goc-cmd` | **PASS** | 301 s vs ~292 s on the parent; 107 `=== RUN`, 105 PASS + 2 SKIP |
+| 3 | `make test-goc-status` | **PASS** | 364/364, FAIL set empty; 365 `=== RUN`, no 0.00 s subtest |
+| 4 | `make test-goc-status-opt` | **FAIL — pre-existing** | 364 subtests, 363 PASS, FAIL set = `stack-scan/loop-safepoints`; same failure on merge-base `ad4e9b2` |
+| 5 | `CG12_NOCACHE=1 make test-goc-status` | **PASS** | 364/364, FAIL set empty; zero pack-cache writes proves the bypass |
+| 6 | `TestFrameEscapeAudit` | **FAIL** | 144 s standalone `-count=1`; 3 findings, 0 vanished |
+
+Plus the controls run to attribute the two failures:
+
+| control | result |
+| --- | --- |
+| `TestFrameEscapeAudit` on `origin/ccwork/escape-checker` `f09d58d` (merge-base + the audit) | **PASS**, 138 s |
+| `TestFrameEscapeAudit` on `7854888` (merge-base + `escape-analysis`, audit files copied in) | **FAIL**, the same 3 findings |
+| `stack-scan/loop-safepoints` under `-runtime-opt` on merge-base `ad4e9b2` | **FAIL**, same panic |
+
+Sections 1–8 already established, on this same commit and not re-litigated here:
+gofmt/build/vet clean, `make test-unit` 1556 passing / 0 failing, the
+`runtime_gc_type_mask_padding` reducer 0/20 (20/20 before the fix), determinism 8/8
+byte-identical pairs and cold == warm, the A/B proving the `mbitmap.go` repair, the
+mechanical audit of every file both parents touched, and
+`TestARM64WriteBarrierAuditRunsClean`.
+
+### What blocks and what does not
+
+**`stack-scan/loop-safepoints` (§13) does not block.** It fails identically on the
+merge-base, so merging changes nothing about it. It does mean the `-O` arm is not green
+on `main` today, which should be said out loud rather than rounded off.
+
+**`TestFrameEscapeAudit` (§9, §10) blocks.** The merge brings in a test, and on the
+merge commit that test fails. It is not flaky — three runs, three identical results —
+and it is not a baseline that merely went stale in a cosmetic way: each added line is
+an allocation the compiler chose to keep in a frame whose address it then writes into a
+`runtime.newobject` heap object through the write barrier, which is the fault class the
+audit exists to catch and the class of the defect (`2724ac7`) it was written for.
+
+The cause is on the `escape-gc-fix` side and specifically in the `ccwork/escape-analysis`
+work it carries — not in the GC-mask padding fix this merge exists to deliver, and not
+in `b2e96c5`. Both parents are individually green: `escape-analysis` shipped before the
+verifier existed, and the verifier was accepted against a tree that did not have
+`escape-analysis`. The merge is simply the first place the two meet, and the answer it
+gives is that they disagree.
+
+Merging as it stands puts a red test on `main`. There are three honest ways forward and
+none of them is this commit as it is:
+
+1. Fix the escape decision so the three publications stop being emitted, and re-run the
+   audit. This is the outcome the audit is asking for.
+2. Establish, per finding, that the publication cannot put a live stack address in a
+   heap object, and re-baseline with `-update-frame-escape-baseline` and that reasoning
+   written down beside the diff. §10 shows the analysis is a may-analysis and that in
+   the two corpus programs `growslice` has replaced the pointer before the store is
+   reached — that is a start on this argument, but it is not the argument, and it says
+   nothing about `bigmod.Nat.Mul`.
+3. Merge the GC-mask padding fix without `escape-analysis`, which is the part of this
+   merge that is verified and valuable.
+
+**VERDICT: NOT SAFE TO MERGE TO MAIN.** `TestFrameEscapeAudit`, a test this merge
+itself introduces, fails on `61ba39d` with three unlisted frame-address publications.
+It passes on the merge-base and on the parent that owns it, and it fails on the other
+parent's `escape-analysis` change, so the merge is what puts a failing test on `main`.
+The five other gate items are accounted for: items 2, 3 and 5 pass in full, and item
+4's single failure is confirmed pre-existing on the merge-base and does not block.
