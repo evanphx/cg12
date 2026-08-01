@@ -459,3 +459,25 @@ Deciding whether each is a live fault or a conservative report is fix work, not 
 work, and it is not done here. The gate's finding is narrower and firm: **a test that
 this merge brings in fails on this commit, it fails because of code the other parent
 brings in, and it passes on both the merge-base and the parent that owns the test.**
+
+## 11. Gate item 2 — `make test-goc-cmd` — **PASS**
+
+```
+go test -timeout 15m -skip 'TestARM64RuntimeCapabilityStatus' ./cmd/goc/...
+ok  	github.com/evanphx/cg12/cmd/goc	301.490s
+```
+
+Run with `GOFLAGS=-v` so the run could be censused; the target is otherwise unmodified.
+
+| outcome | count |
+| --- | ---: |
+| `--- PASS` | 105 |
+| `--- FAIL` | 0 |
+| `--- SKIP` | 2 |
+| `=== RUN` | 107 |
+
+105 + 2 = 107, so nothing vanished. The two skips are the pre-existing
+`TestStandardLibraryRuntimeAssemblyIsTranslated` and
+`TestTranslatedAssemblyPrecedesRuntimeTextEnd`, both skipping in 0.00 s.
+301 s against the ~292 s / ~282 s `escape-gc-fix` recorded for the same target: the
+suite really ran.
