@@ -81,10 +81,12 @@ Whether these are one defect that the escape change amplifies from 14% to 100%, 
 narrowing the escape summary would only push the rate back down to `main`'s and would be a
 symptom fix, which this project's rules forbid.
 
-## 3. Not yet established
+## 3. Both questions §2 left open, answered
 
-- The mechanism. Nothing below is a conclusion yet.
-- Whether `main`'s 14% and the merged tree's 100% are the same defect.
+This report was written as the investigation ran, so §1-§6 are in the order things were
+learned rather than the order they make sense in. §2 left two open, and §7 settles both: the
+mechanism is an unpadded GC mask, and `main`'s 14% and the merged tree's 100% are the **same
+defect**, differing only in where the linker put the bytes after each mask.
 
 ## 4. The bisect said `appendDestination`, and the bisect was wrong
 
