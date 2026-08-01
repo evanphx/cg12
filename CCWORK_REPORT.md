@@ -123,3 +123,72 @@ goroutine N: bulkBarrierPreWriteSrcOnly <- runtime_growslice <- main_buildGraph
 through a pointer store at all — it enters through `growslice`'s
 `bulkBarrierPreWriteSrcOnly`, which reads the **old backing array** it is about to copy. So
 the bad pointer is *already in a live `[]*vertex` backing array* before any barrier runs.
+
+## 7. ROOT CAUSE: goc's type GC masks are not padded to a `uintptr`, and the runtime reads them a `uintptr` at a time
+
+`goc` emits each `abi.Type`'s pointer bitmap as exactly `ceil(sizeInWords/8)` bytes
+(`goc/compile.go`, `ensureTypeTag` and `runtimeTypeSymbol`, both `Align: 1`). For a type with
+one pointer word — `*main.vertex` — that is **one byte**.
+
+The Go runtime never reads that bitmap a byte at a time. `mbitmap.go`:
+
+```go
+func (span *mspan) typePointersOfType(typ *abi.Type, addr uintptr) typePointers {
+	gcmask := getGCMask(typ)
+	return typePointers{elem: addr, addr: addr, mask: readUintptr(gcmask), typ: typ}
+}
+```
+
+`readUintptr` loads **eight bytes**. The seven bytes past a one-byte mask are whatever symbol
+the linker put next, and every 1 bit in them is a phantom pointer word.
+
+Measured in the failing image:
+
+```
+_goc_runtime_type_main_vertex_86131734c57ebf15_gcdata  size=1
+  readUintptr -> 0x0800000000000001   bits 0 and 59  ->  word offsets 0 and 472
+```
+
+Bit 59 is the low byte of the *next* symbol, the type descriptor itself, whose first field is
+`Size_`. And 472 = `0x1d8` is exactly the displacement the diagnostic reported, in every run:
+
+```
+run 1: dst=0x1ebea22e1880 size=64  slot=0x1ebea22e1a58   slot-dst = 0x1d8
+run 2: dst=0x91956f345e0  size=16  slot=0x91956f347b8    slot-dst = 0x1d8
+run 3: dst=0x12e81f270120 size=8   slot=0x12e81f2702f8   slot-dst = 0x1d8
+```
+
+`typePointers.next` takes the fast path while `mask != 0` and `nextFast` does **not** consult
+`limit`, so `growslice`'s `bulkBarrierPreWriteSrcOnly(newArray, oldArray, 8, *vertex)` faithfully
+reads word 59 of the old array — 464 bytes past its end — and buffers whatever is there as a
+pointer. The collector then either throws `found bad pointer in Go heap`, or, worse, *marks*
+that word's target and drags a dead object back into the live set.
+
+**The host toolchain states the requirement in its own words.** `cmd/compile/internal/reflectdata/reflect.go:1261`:
+
+```go
+func dgcptrmask(t *types.Type, write bool) *obj.LSym {
+	// Bytes we need for the ptrmask.
+	n := (types.PtrDataSize(t)/int64(types.PtrSize) + 7) / 8
+	// Runtime wants ptrmasks padded to a multiple of uintptr in size.
+	n = (n + int64(types.PtrSize) - 1) &^ (int64(types.PtrSize) - 1)
+```
+
+goc omits that line. This is a cg12 defect, not a runtime defect, which is the pattern §15
+of the plan records for every Phase 1 failure.
+
+### Why it explains everything that looked inconsistent
+
+- **Why it is layout-sensitive.** Whether a mask is followed by nonzero bytes, and which bit
+  positions those set, is decided by symbol placement. That is why adding 168 bytes of *dead*
+  `.data` flipped the reducer from 100% failing to 0% (§4), and why `appendDestination`
+  looked like the culprit when it changes no code at all.
+- **Why the escape change amplified it.** It changes which types get emitted and therefore
+  which bytes follow each mask. It never was the cause.
+- **Why `"node-" + string(rune(x))` is needed and a constant label is not.** The concat is
+  what makes `vertex` big enough and the churn heavy enough that `next` grows through
+  `growslice` while a mark phase is running, which is the one path that calls
+  `bulkBarrierPreWriteSrcOnly` with a small `size` and a short mask.
+- **Why `main` fails only at low `GOGC`.** The phantom bit is read on every bulk barrier, but
+  it only produces a *rejected* word when the phantom target happens to be a stale pointer
+  and a mark phase is running.

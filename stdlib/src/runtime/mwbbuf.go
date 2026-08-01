@@ -350,6 +350,16 @@ var cg12BadWriteBarrierWord struct {
 	stackNew bool
 }
 
+// cg12BulkBarrierRange records the destination, source and size of the bulk
+// copy a barrier is running for, so a rejected word can be reported with the
+// range it came from. Only the bulk paths in mbitmap.go set it.
+var cg12BulkBarrierRange struct {
+	dst   uintptr
+	src   uintptr
+	size  uintptr
+	valid bool
+}
+
 // cg12CheckWriteBarrierPair validates the old and new words a pointer write
 // barrier is about to buffer and reports the storing site when one of them
 // would later make wbBufFlush1 throw "found bad pointer in Go heap". Throwing
@@ -406,6 +416,21 @@ func cg12ReportBadWriteBarrierWord() {
 		print(" bad=new-is-stack")
 	}
 	print("\n")
+	if cg12BulkBarrierRange.valid {
+		print("cg12checkwb: bulk copy dst=", hex(cg12BulkBarrierRange.dst),
+			" src=", hex(cg12BulkBarrierRange.src),
+			" size=", cg12BulkBarrierRange.size, "\n")
+		cg12DescribeWriteBarrierAddress("bulk-dst", cg12BulkBarrierRange.dst)
+		cg12DescribeWriteBarrierAddress("bulk-src", cg12BulkBarrierRange.src)
+		for offset := uintptr(0); offset < cg12BulkBarrierRange.size && offset < 256; offset += goarch.PtrSize {
+			word := *(*uintptr)(unsafe.Pointer(cg12BulkBarrierRange.src + offset))
+			print("cg12checkwb: src[", offset/goarch.PtrSize, "] = ", hex(word))
+			if cg12WriteBarrierValueIsBad(word) {
+				print("  <== bad")
+			}
+			print("\n")
+		}
+	}
 	cg12DescribeWriteBarrierAddress("slot", record.slot)
 	if record.oldBad {
 		cg12DescribeWriteBarrierAddress("old", record.old)
@@ -419,6 +444,23 @@ func cg12ReportBadWriteBarrierWord() {
 		throw("cg12checkwb: global data word holds a goroutine stack address")
 	}
 	throw("cg12checkwb: pointer write barrier buffered a bad pointer")
+}
+
+// cg12CheckBulkBarrierWord is cg12CheckWriteBarrierPair for the bulk barrier
+// paths, which copy a whole range rather than storing one word. It records the
+// range with the rejected word so the report can show which element of the
+// source is bad and what the rest of the source looks like.
+//
+//go:nosplit
+func cg12CheckBulkBarrierWord(slot, old, new, dst, src, size uintptr) {
+	if !cg12WriteBarrierValueIsBad(old) && !cg12WriteBarrierValueIsBad(new) {
+		return
+	}
+	cg12BulkBarrierRange.dst = dst
+	cg12BulkBarrierRange.src = src
+	cg12BulkBarrierRange.size = size
+	cg12BulkBarrierRange.valid = true
+	cg12CheckWriteBarrierPair(slot, old, new)
 }
 
 // cg12DescribeWriteBarrierAddress prints what the runtime knows about one
