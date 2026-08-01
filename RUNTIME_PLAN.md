@@ -2458,17 +2458,31 @@ source. The pointer is in the frame — the emitted code stores it at `[x29,#40]
 and reaches it through an address parked at `[x29,#16]` — and the stack map does
 not describe it.
 
-The hypothesis, which is a hypothesis and not a verified mechanism:
-`arm64.pointerAllocationSources` reports an allocation at a safepoint when the
-allocation temporary or a temporary derived from it is live there, and its own
-comment says it exists because a derived address computed once and reused can
-outlive the base. In the optimized build the address round-trips **through
-memory**, which `addressDerivationBases` cannot follow, so nothing connects the
-live reloaded address back to the allocation. The candidate fix — report every
-pointer-bearing allocation at every safepoint, sound because the slot exists for
-the frame's lifetime and `zeroGoPointerSlots` initialises it — changes root
-reporting for every function in both arms, and landing that on a hypothesis is
-what §5.14 is a record of. It is written down instead of guessed at.
+Narrowed with a throwaway print in `arm64.(*mc).recordSafepoint` (not committed),
+run with the compiler serialised so the output does not interleave. At the
+collection inside the loop, `main.carried` reports:
+
+```
+-O    : roots 5  stackPointerWords 9  stackAllocTmp 6   -- all five are alloc temps
+no -O : roots 8  stackPointerWords 9  stackAllocTmp 13  -- all eight are alloc temps
+```
+
+`-O` promotes four pointer-bearing allocations out of the frame while
+`StackPointerWords` still lists nine, so the loop-carried pointer is an SSA value
+rather than a frame allocation --- and **no promoted value is reported at that
+safepoint at all**. `arm64.isSafepointRoot` would accept one (it returns true for
+`Cls == ir.ClsP` on a managed frame, and `opt.Mem2Reg` keeps the pointer class for
+exactly that reason), so the value is lost before that test: either it is not live
+in `analysis.Liveness` at the call, or it is no longer a temporary there.
+
+The obvious candidate fix was tried and **does not work**: a scratch build that
+reports every pointer-bearing frame allocation at every safepoint still fails the
+reducer 10/10 with `-O`, which is consistent with the narrowing --- under `-O` the
+allocations that matter are not frame allocations any more. Recorded so the next
+attempt does not spend that experiment again. What is left is `opt.Mem2Reg`'s
+promoted values and how they reach `computeSafepointRoots`; changing that is
+register-level root reporting for every function in both arms, and it is not
+attempted here.
 
 `stack-scan/loop-safepoints` is deliberately left `mustPass` and left failing
 rather than reclassified as a `knownGap`: reclassifying would restore the
