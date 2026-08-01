@@ -342,12 +342,13 @@ func cg12AddressIsGlobal(address uintptr) bool {
 // rejected, so the report can run on the system stack where there is room to
 // print. Only one write is ever recorded, because the report throws.
 var cg12BadWriteBarrierWord struct {
-	slot     uintptr
-	old      uintptr
-	new      uintptr
-	oldBad   bool
-	newBad   bool
-	stackNew bool
+	slot      uintptr
+	old       uintptr
+	new       uintptr
+	oldBad    bool
+	newBad    bool
+	stackNew  bool
+	published bool
 }
 
 // cg12CheckWriteBarrierPair validates the old and new words a pointer write
@@ -362,6 +363,17 @@ var cg12BadWriteBarrierWord struct {
 // such a word is the stale root that later fails the check above; catching the
 // store makes the defect deterministic instead of racy.
 //
+// cg12checkwb=3 widens that from globals to every destination that outlives the
+// storing frame: a heap object, a global, or off-heap runtime memory. It is the
+// escape decision's run-time counterpart. A frame-resident allocation whose
+// address reaches such a word is a wrong "does not escape", and the fault it
+// produces -- "found bad pointer in Go heap" -- surfaces only once the frame is
+// gone, in whichever goroutine next touches the word. Rejecting the store makes
+// the traceback name the function that made the wrong decision's consequence.
+// The runtime's own hand-maintained exceptions are excluded by the compiler,
+// which only emits the check for stores outside package runtime; see
+// cg12StackPublicationChecked.
+//
 // The frame must stay small: every caller is on a nosplit path.
 //
 //go:nosplit
@@ -372,7 +384,11 @@ func cg12CheckWriteBarrierPair(slot uintptr, old uintptr, new uintptr) {
 	if debug.cg12checkwb > 1 && cg12AddressIsGoroutineStack(new) && cg12AddressIsGlobal(slot) {
 		stackNew = true
 	}
-	if !oldBad && !newBad && !stackNew {
+	published := false
+	if debug.cg12checkwb > 2 && !stackNew && cg12AddressIsGoroutineStack(new) && !cg12AddressIsGoroutineStack(slot) {
+		published = true
+	}
+	if !oldBad && !newBad && !stackNew && !published {
 		return
 	}
 	cg12BadWriteBarrierWord.slot = slot
@@ -381,6 +397,7 @@ func cg12CheckWriteBarrierPair(slot uintptr, old uintptr, new uintptr) {
 	cg12BadWriteBarrierWord.oldBad = oldBad
 	cg12BadWriteBarrierWord.newBad = newBad
 	cg12BadWriteBarrierWord.stackNew = stackNew
+	cg12BadWriteBarrierWord.published = published
 	systemstack(cg12ReportBadWriteBarrierWord)
 }
 
@@ -390,9 +407,12 @@ func cg12CheckWriteBarrierPair(slot uintptr, old uintptr, new uintptr) {
 func cg12ReportBadWriteBarrierWord() {
 	record := &cg12BadWriteBarrierWord
 	printlock()
-	if record.stackNew {
+	switch {
+	case record.stackNew:
 		print("cg12checkwb: pointer write barrier stored a goroutine stack address into a global\n")
-	} else {
+	case record.published:
+		print("cg12checkwb: pointer write barrier published a goroutine stack address into storage that outlives the frame\n")
+	default:
 		print("cg12checkwb: pointer write barrier buffered a word the collector will reject\n")
 	}
 	print("cg12checkwb: slot=", hex(record.slot), " old=", hex(record.old), " new=", hex(record.new))
@@ -402,7 +422,7 @@ func cg12ReportBadWriteBarrierWord() {
 	if record.newBad {
 		print(" bad=new")
 	}
-	if record.stackNew {
+	if record.stackNew || record.published {
 		print(" bad=new-is-stack")
 	}
 	print("\n")
@@ -410,13 +430,16 @@ func cg12ReportBadWriteBarrierWord() {
 	if record.oldBad {
 		cg12DescribeWriteBarrierAddress("old", record.old)
 	}
-	if record.newBad || record.stackNew {
+	if record.newBad || record.stackNew || record.published {
 		cg12DescribeWriteBarrierAddress("new", record.new)
 	}
 	printunlock()
 	getg().m.traceback = 2
 	if record.stackNew {
 		throw("cg12checkwb: global data word holds a goroutine stack address")
+	}
+	if record.published {
+		throw("cg12checkwb: a frame address was stored into storage that outlives the frame")
 	}
 	throw("cg12checkwb: pointer write barrier buffered a bad pointer")
 }
