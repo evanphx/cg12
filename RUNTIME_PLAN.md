@@ -1670,36 +1670,19 @@ the reports of the jobs that found them.
   library, and removing it is a frontend change with a large blast radius, so it
   was deliberately not bundled into §5.3's fix.
 
-- **`internal/poll/writev.go`'s `&chunk[0]`** is treated as addressing the slice
-  header, so `chunk` is heap-lifted. Pre-existing conservatism, but since §5.9 it
-  costs one cell per iovec rather than one per `Writev`. Narrowing
-  `findEscapingCaptures` for `&slice[i]` would remove it.
+- **`internal/poll/writev.go`'s `&chunk[0]`** was treated as addressing the slice
+  header, so `chunk` was heap-lifted. §24 narrows `findEscapingCaptures` exactly
+  as this asked: `&s[i]` on a slice addresses the backing array, not `s`'s slot,
+  so it no longer promotes `s`.
 
 - The §5.3 escape boundary's `OSel` derivation path is covered by unit test only;
   no capability's `-O` build keeps the diamond rather than if-converting it.
 
 - **`runtime.printfloat32`, `printfloat64`, `printcomplex64` and
-  `printcomplex128` still heap-allocate their scratch array**, which is exactly
-  the §5.3 defect for the four print routines §5.3 did not reach. They differ
-  from `printuint` in shape: `gwrite(strconv.AppendFloat(buf[:0], v, 'g', -1,
-  64))` passes the derived slice to a callee that *returns* a slice derived from
-  it, and cg12 has no rule for a parameter that leaks only to its result, so the
-  call site assumes the worst and `buf` is lifted. The host toolchain's
-  `-gcflags='runtime=-m -m'` reports nothing in `runtime/print.go` escaping at
-  all. Reduced without any runtime source:
-
-  ```go
-  func passthrough(dst []byte) []byte { return dst }
-  func viaReturn() { var buf [20]byte; consume(passthrough(buf[:0])) }
-  ```
-
-  `viaReturn` calls `runtime.newobject`; the same function with
-  `consume(buf[:0])` does not. Found by §21, which routes complex operands to
-  these routines; it is pre-existing for the two float ones. Closing it means
-  giving the escape walk a "leaks only to result" summary and continuing the
-  walk from the call expression, which is a frontend change with a large blast
-  radius — a wrong summary stores a stack pointer into the heap — so it wants
-  its own validation cycle rather than being folded into §21.
+  `printcomplex128` heap-allocated their scratch array.** Closed by §24, which
+  gives the escape walk the "leaks only to result" summary this subsection asked
+  for. `net/netip.Addr.v6u16` is the one function that newly allocates as a
+  result and is recorded there.
 
 #### Compiling the same program twice does not give the same binary
 
@@ -2233,61 +2216,75 @@ package-level case hide: the obvious reducer reads the global back in the
 function that wrote it, and that reads the frame slot the bug created. A
 destination-shaped reducer has to read its result through a second function.
 
-### 5.14 Held back: the Phase 2 escape change interacts with the goroutine entry fix
+### 5.14 Explained: `ccwork/phase2-alloc` × §5.12 was a merge that lost a line (2026-08-01)
 
-`ccwork/phase2-alloc` is **not merged.** It is correct in isolation and it is
-held back because of an interaction, which is worth recording in full because no
-per-change verification could have caught it.
+This subsection used to record an unexplained interaction: `ccwork/phase2-alloc`
+merged with §5.11/§5.12 made `gc/cleanup-basic` die with
+`fatal error: span has no free objects`, 40 runs out of 40, and deliberately
+offered no mechanism. The mechanism is now established, and **it has nothing to
+do with escape analysis, the allocator or the write barrier.**
 
-That branch fixes `nonEscapingObjectUse`, which returned "does not escape" for
-every field selection, so `&v.payload` kept its object on the frame and a
-package-level slice could hold a goroutine stack address — the §5.8 invariant
-reached by a new route. The fix is real and its own reducer proves it.
+Reproduced on current `main` (`0505d90`) with `phase2-alloc` cherry-picked onto
+it, built in one tree at one path and linked against a pack built by the same
+compiler:
 
-But merged together with §5.11 and §5.12, `gc/cleanup-basic` dies with
-`fatal error: span has no free objects`.
-
-**Re-measured against current `main` on 2026-07-31**, because `main` had moved a
-long way since the original bisect and the interaction could have gone away.
-`runtime_cleanup_basic.go`, 40 runs per tree:
-
-| Tree | `gc/cleanup-basic` |
+| tree | `runtime_cleanup_basic.go`, 40 runs at `GOMAXPROCS=4` |
 | --- | --- |
-| `main` (`61b96da`) | passes |
-| `main` + `phase2-alloc` alone | 0/40 failed |
-| `main` + §5.13 (with its fix) + `phase2-alloc` | 0/40 failed |
-| `main` + §5.11/§5.12 + `phase2-alloc` | **40/40 failed** |
-| `main` + §5.13 + §5.11/§5.12 + `phase2-alloc` | **40/40 failed** |
-| `main` + §5.13 + §5.11/§5.12, no `phase2-alloc` | passes, in the full matrix |
+| `main` | 0/40 failed |
+| `main` + `phase2-alloc` | **40/40 failed** |
+| `main` + `phase2-alloc`, one line restored (below) | 0/40 failed |
 
-So it is still there, it is still `freeobject` × `phase2-alloc`, and §5.13 is not
-involved on either side. One run segfaulted rather than reporting the allocator
-error.
+`phase2-alloc` rewrote `gen.store`, against a tree that predates §5.12. §5.12
+then moved the barrier decision *ahead* of the sub-width store, so `subOf` sits
+below it. The two edits do not overlap textually, and `git` merges both:
 
-Both changes move objects between the frame and the heap and both change what
-the collector is told about them: §5.12 makes `unsafe.Pointer` stores emit a
-write barrier that was previously skipped, and the escape fix changes which
-allocations are heap allocations in the first place. `span has no free objects`
-is an allocator invariant failure, which is consistent with the allocator being
-reentered or with an accounting disagreement, but the mechanism is still not
-established and is not guessed at here.
+```go
+	class, _ := scalar(t)
+	if class != ir.ClsP {
+		g.cur.Store(v, addr)     // phase2-alloc's early return
+		return
+	}
+	...
+	if sub, ok := subOf(t); ok { // §5.12's sub-width path, now unreachable
+		g.cur.StoreSub(sub, v, addr)
+		return
+	}
+```
 
-Two things follow for method, beyond this particular bug:
+The early return shadows `subOf` for every type that is not a pointer, so
+**every `byte`, `bool`, `uint8`, `uint16` and `uint32` store becomes a full-width
+store** and writes over the bytes next to it. Counted in the IR of
+`runtime_cleanup_basic.go`: `main` emits 1,858 `storeb`; the merge emits **4**;
+restoring the path emits 1,858 again, and the whole program's IR becomes
+byte-identical to `main`'s -- 0 of 4,111 functions differ. `mspan`, `mheap` and
+`mcache` are full of byte-wide fields, so the allocator's bookkeeping stops
+agreeing with itself and `mcentral.cacheSpan` throws.
+
+The control that rules the escape change out independently: at `61b96da` -- the
+tree this subsection named, which does **not** contain §5.11/§5.12 -- the whole
+`phase2-alloc` commit produces a **byte-identical** prebuilt runtime pack and a
+byte-identical `runtime_cleanup_basic` executable. Nothing changed there, which
+is why that row passed; the escape fix by itself does not alter this program at
+all.
+
+The two method conclusions this subsection drew survive and are sharper than
+before:
 
 - **Per-branch verification is not sufficient when changes touch the same
-  invariant.** Every one of these branches passed its own full matrix. The
-  failure exists only in the combination, so the integration run is the gate
-  that matters, not the branch runs.
-- **The order of merging is not neutral.** Had `phase2-alloc` merged first and
-  `freeobject` second, the same failure would have been attributed to
-  `freeobject`, which is the change with the stronger evidence behind it.
+  code.** Every branch passed its own matrix. The failure exists only in the
+  merge.
+- **The order of merging is not neutral.** Had `phase2-alloc` merged first, the
+  same failure would have been blamed on `freeobject`.
 
-Next: reduce the interaction to the smallest program that needs both changes,
-determine whether the escape fix exposes a latent defect in the barrier or the
-barrier exposes one in the escape fix, and fix whichever is actually wrong. The
-branch is preserved at `ccwork/phase2-alloc` with its capabilities and its
-allocation-family classification intact; none of that work is lost, and §6's
-`malloc_generated.go` finding below stands independently of the escape change.
+To which this adds a third: **a clean three-way merge can silently delete a
+branch of a function.** The diagnostic that catches it is the one §23
+established -- compare the two images by content -- not a green suite. 1,854
+`storeb` instructions disappearing is not subtle once the question is asked.
+
+`ccwork/phase2-alloc` is still unmerged. Whoever lands it must rebase rather than
+merge, and must diff the resulting IR against `main`. Its escape fix itself is
+superseded: §24 closes the same defect ungated, together with the `&v.a.b` and
+`&v[i].f` chain that branch recorded as a remaining hole.
 
 ## 6. Phase 2: Memory safety, allocation, and accurate GC
 
@@ -3986,3 +3983,193 @@ by design. **No capability is non-passing.**
   is large enough for it to have reached emitted assembly either way. The
   `arm64/mc.go:2786` stack-map root order recorded in §5.10 is still open and is
   `cg12cc`-only for a reason that is measured, not assumed.
+
+## 24. A parameter can leak only to a result, and a field address is a use (2026-08-01)
+
+Three items closed in goc's escape walk, plus two miscompiles the work exposed
+and two it introduced and the matrix caught.
+
+### The summary §5.10 asked for
+
+`runtime.printfloat32`, `printfloat64`, `printcomplex64` and `printcomplex128`
+each called `runtime.newobject` for their scratch array. The shape is
+`gwrite(strconv.AppendFloat(buf[:0], v, 'g', -1, 64))`: a derived slice passed to
+a callee that *returns* a slice derived from it. The walk asked
+`parameterDoesNotEscape`, which found `return dst`, and `nonEscapingObjectUse`
+had no `*ast.ReturnStmt` case, so it fell to `default: return false`.
+
+`gen.parameterLeaksOnlyToResult` asks exactly the question
+`parameterDoesNotEscape` asks -- the same use enumeration, the same recursion --
+with one difference: a `return` from the summarised function is not an escape. A
+caller that gets "yes" continues its walk from the call expression, so the
+caller's storage escapes exactly when the call's result does.
+
+The restrictions are the fix, because a wrong summary stores a stack pointer into
+the heap:
+
+- returns count only for the body being summarised, matched by node identity
+  (`gen.resultLeakBody`), and a return inside a nested `*ast.FuncLit` returns
+  from the literal, not from that function;
+- `parameterDoesNotEscape` and `receiverDoesNotEscape` clear that state around
+  their own walks, so a recursive strict query cannot inherit it;
+- a variadic parameter gets no summary -- the argument is an element of a slice
+  the callee builds, not the parameter;
+- a summary for a function with more than one result is usable only where the
+  call is the whole right-hand side of an assignment, because the call
+  expression does not stand for one value;
+- **the walk does not climb through an address-of while summarising.** Taking an
+  address makes fresh storage, and returning that address puts the storage in the
+  heap, so a value inside it does not merely leak to the result.
+
+Three supporting rules make the chain through `internal/strconv` reach:
+`append`'s *destination* is carried by its result (argument 0 only -- an appended
+element goes into storage that may already be reachable from the heap); a
+self-assignment `dst = append(dst, b)` opens no route the running enumeration
+does not already see; and one right-hand side spread across several left-hand
+sides reaches all of them, which is what `formatBits`' `d, _ = ...` needs and
+which was a latent hole -- `assignedNodeDoesNotEscapeWithin` checked only the
+first destination.
+
+Measured on `println(1.5); println(complex(1.5, 2.5))`, both compilers built from
+this tree at this path: all four routines go from `call $runtime.newobject` to
+`alloc8`, the `goc_storep` barrier goes with them, and exactly five functions
+differ in the whole 2,737-function image (the fifth is
+`runtime.printDebugLogImpl`). Every summary the chain needs answers yes:
+`AppendFloat`, `AppendComplex`, `AppendInt`, `AppendUint`, `formatBits`,
+`genericFtoa`, `bigFtoa`, `formatDigits`, `fmtB`, `fmtE`, `fmtF`, `fmtX`.
+
+This is unsoundness on nosplit and fatal paths plus unconditional bloat. No fatal
+consequence was produced, and §5.10's note on why -- `gcController.endCycle` runs
+after `setGCPhase(_GCoff)` -- still stands.
+
+### The field-address hole, ungated
+
+`ccwork/phase2-alloc` found that `nonEscapingObjectUse` returned "does not
+escape" for every field selection, so `&v.payload` kept its object on the frame
+and a package-level slice could hold a goroutine stack address. It **gated** the
+fix to the fresh-allocation question, because ungating it made `copystack`,
+`scanstack` and `sweepLocked.sweep` allocate.
+
+The gate leaves a real hole -- `func store(p *record) { sink = append(sink,
+&p.tag) }` called as `var v record; store(&v)` keeps `v` on the frame -- so it is
+closed here without one. Three things had to be right first:
+
+1. **`findEscapingCaptures` was asking the wrong question.** It promoted the
+   variable an address expression was *rooted at*. `&p.f` on a pointer-typed `p`
+   addresses the pointee; promoting `p` moves the pointer and leaves the pointee
+   where it was. `addressedVariableIdentifier` names the variable whose own slot
+   the address refers to, stopping at any step through a pointer, a slice or a
+   map. This is the fix `phase2-alloc`'s report says was not attempted.
+2. **A value placed in a composite literal always escaped.**
+   `nonEscapingObjectUse` had no `*ast.CompositeLit` or `*ast.KeyValueExpr` case,
+   so `h := hexdumper{mark: symMark}` in `runtime.hexdumpWords` made `symMark`
+   escape, which made `mark` escape, which made `tracebackHexdump`'s `frame`
+   escape, which made `&u.frame` escape in `(*unwinder).next`, which made
+   `copystack`'s and `scanstack`'s `var u unwinder` heap-allocate. An element
+   escapes exactly when the composite does -- for struct and array literals only,
+   because a slice or map literal has backing storage of its own.
+3. **A closure escaped on any use but a direct call.**
+   `functionLiteralEscapesWithin` now asks `nonEscapingObjectUse`, the predicate
+   every other value gets.
+
+And the chain walk is restricted: `&v.a.b` and `&v[i].f` are addresses inside
+`v`, but `&i.s.next` -- where `s` is a pointer field -- is a field of the
+`special` the iterator refers to, not of the iterator. `addressedExpression`
+climbs only steps that stay within one object (`selection.Indirect()` false, index
+base an array). Without that, `(*specialsIter).next` reported its receiver as
+escaping and `runtime.sweepLocked.sweep` allocated; the sweeper runs on g0.
+
+Measured on `goc/testdata/stdlib_http_tls_client_server.go`, 14,871 functions:
+
+| | `main` | this change |
+| --- | ---: | ---: |
+| functions calling `runtime.newobject` | 4,130 | 4,112 |
+| `runtime.newobject` call sites | 15,284 | 15,225 |
+
+Nineteen functions stop allocating, including `runtime.hexdumpWords`,
+`runtime.tracebackHexdump` and `runtime.traceback2`, and
+`internal/poll.(*FD).Writev` loses one per-iteration allocation and its barrier
+-- the `&chunk[0]` conservatism §5.9 and §5.10 both recorded.
+`copystack`, `scanstack`, `sweepLocked.sweep` and `cg12ReportStaleStackWord` do
+**not** allocate.
+
+**One function newly allocates and is not fixed here.** `net/netip.Addr.v6u16`:
+`(*uint128).halves` returns `[2]*uint64{&u.hi, &u.lo}`, the host reports
+`leaking param: u to result ~r0 level=0` and keeps the caller's value on the
+frame because the array is indexed and dereferenced immediately. cg12 has the
+summary for parameters but not for receivers, and `valueDoesNotEscapeWithin` has
+no `*ast.IndexExpr` or `*ast.StarExpr` case, so the result cannot be walked
+through. It is bloat on a non-fatal path; closing it means a
+`receiverLeaksOnlyToResult` summary plus two more walk cases.
+
+### Two live miscompiles this exposed
+
+- **A callee's named result was invisible.** `parameterDoesNotEscape` consulted
+  `g.resultObjects` -- the named results of the function *being lowered* -- while
+  walking a callee's body, so `func namedLeak(p *int) (out *int) { out = p;
+  return }` was reported as not letting `p` escape and
+  `pointerSink = namedLeak(&value)` left a frame address in a package global on
+  `main`. `gen.enterCalleeBody` installs the analysed function's named results.
+  This is the §5.8 invariant by a third route.
+
+- **A growing `append` grew in place.** The non-runtime path called
+  `realloc(oldData, bytes)`, which assumes the backing array came from the
+  allocator and breaks Go's rule that a growing append leaves the old array
+  intact for any other slice that refers to it. It allocates and copies now.
+  Exposed by `TestAdvancedExecutionCorpus/append_slice_ellipsis` segfaulting once
+  a slice literal legitimately stayed on the frame.
+
+### Two miscompiles this introduced, and what found them
+
+Both were in the summary machinery; both were found by the **capability matrix**
+and by nothing else -- `test-unit`, `test-goc-corpus` and `test-goc-cmd` were all
+green with them in.
+
+- `stdlib-log/slog-structured` logged into an empty buffer. `var out
+  bytes.Buffer` stayed on `main`'s frame while
+  `&TextHandler{&commonHandler{w: w}}` put its address in a heap object. That is
+  the address-of restriction above.
+- `stdlib-text/regexp-find-replace` faulted in `(*Regexp).Split`. Inside
+  `FindAllStringIndex`' closure, `result = append(result, match[0:2])` assigns to
+  a variable the *enclosing* function returns, and the walk was enumerating only
+  the closure's body. `objectDoesNotEscape` now refuses any object whose
+  declaration lies outside the body it is scanning, with the analysed function's
+  own receiver, parameters and named results as the one exception. **That hole
+  predates this change** -- a closure that assigns a `make` to a captured
+  variable reaches it on `main` too; `append`'s conservatism hid the route this
+  program takes.
+
+### Verification
+
+- Both matrix arms: **345 subtests, 344 PASS, 1 declared EXPECTED FAILURE, 0
+  FAIL, 0 KNOWN GAP**, censused from `-v` output rather than from `ok`.
+- Both matrix arms again under `GODEBUG=cg12checkwb=2`: 345/345, zero
+  `cg12checkwb:` reports. The check is meaningful here because a positive control
+  -- a laundered frame address stored into a package global while a concurrent
+  mark is running -- does throw. It covers a stack address reaching data or bss;
+  it does **not** cover a stack address reaching a heap object, which is the
+  class the `slog` bug belonged to and which the matrix, not the diagnostic,
+  caught.
+- The matrix under `GODEBUG=gccheckmark=1,invalidptr=1`: 345/345.
+- The `gc` category under `GODEBUG=cg12scanroots=1`: all pass. It is a reporting
+  diagnostic rather than a checker, so this is evidence the precise scan runs
+  clean on the GC capabilities, not a proof over the corpus.
+- `make test-unit`, `make test-goc-corpus`, `make test-goc-cmd`: green.
+- Determinism (§23) unchanged: `scripts/determinism-check.sh -corpus`,
+  365/365 reproducible over 3 rounds without `-O` and 2 rounds with `-O`,
+  0 varying, 0 failed.
+
+### What is not done
+
+- `net/netip.Addr.v6u16`, above.
+- `addressEscapesWithin` has no `*ast.UnaryExpr` case, so an address nested
+  inside `&T{...}` -- `return &holder{p: &local}` -- reports "does not escape".
+  Pre-existing, not touched here, and not measured for consequences.
+- The `escapeWalkSeesEveryUse` check makes the walk refuse any object declared
+  outside the body being scanned. That is sound but blunt: a captured variable
+  can never be shown not to escape, whatever it does. A walk that followed a
+  capture to its declaring function would be more precise.
+- `GOC_DEBUG_ESCAPE` traces the walk -- 1 for every leaks-only-to-result answer,
+  2 for the use that decided an object escapes. It is a trace, not a checker;
+  it found the `internal/strconv.formatBits` link and the `hexdumpWords` chain,
+  and it will not detect anything on its own.

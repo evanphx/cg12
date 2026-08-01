@@ -238,6 +238,61 @@ change class in the repo in one round.
 
 ---
 
+## Two miscompiles this branch introduced, found by the matrix and fixed
+
+Both were in the new "leaks only to result" machinery, both reduced before being
+fixed, and both are recorded here because they are the failure mode the task
+warned about: a wrong summary that leaves a stack address reachable from the
+heap.
+
+### `stdlib-log/slog-structured` — fresh storage is not a result
+
+```go
+var out bytes.Buffer
+logger := slog.New(slog.NewTextHandler(&out, nil))
+logger.Info("hello", "k", 1)
+// out.Len() == 0 under goc; 55 under the host
+```
+
+`out` stayed on `main`'s frame while `slog.NewTextHandler`'s
+`&TextHandler{&commonHandler{w: w}}` put its address in a heap object. The walk
+climbed `w` into the composite, through the address-of, to the return, and the
+result rule said "leaks only to result".
+
+It does not. Taking an address makes *fresh storage*, and returning that address
+puts the storage in the heap, so a value placed inside it is in the heap the
+moment the function returns — the caller's frame cannot hold it. The summary
+walk no longer climbs through an address-of. Outside a summary walk nothing
+changes, because a return was already an escape there.
+
+### `stdlib-text/regexp-find-replace` — the walk must see every use
+
+`(*Regexp).Split` faulted on a nil pointer. In `FindAllStringIndex`:
+
+```go
+re.allMatches(s, nil, n, func(match []int) {
+	if result == nil {
+		result = make([][]int, 0, startSize)
+	}
+	result = append(result, match[0:2])
+})
+return result
+```
+
+The walk was enumerating the **closure's** body while deciding whether
+`result`'s backing array escapes. Every use it could see was benign, so the
+array went on the closure's frame — and the enclosing function returns it.
+
+`objectDoesNotEscape` now refuses any object whose declaration is outside the
+body it is scanning, with the analysed function's own receiver, parameters and
+named results as the one exception: they are declared in the signature and are
+exactly what the walk is asked about. **This hole predates this branch** — a
+closure that assigns a `make` to a captured variable reaches it on `main` too;
+`append`'s conservatism was hiding the route this program takes.
+
+Neither was visible in `test-unit`, `test-goc-corpus` or `test-goc-cmd`. The
+matrix found both.
+
 ## Item 3 — `fatal error: span has no free objects`. Explained, and it is not the escape change.
 
 ### Reproduced first
@@ -355,12 +410,117 @@ is asked.
 **This does not need fixing here**: `phase2-alloc` is unmerged, and whoever lands
 it must rebase rather than merge, and must diff the resulting IR against `main`.
 
-## Still unverified
+## Verification
 
-Everything below this line is not yet measured on this branch:
+Everything below was measured on the final tree (`HEAD` of
+`ccwork/escape-analysis`), in this directory, with both compilers built from this
+tree at this path.
 
-- `make test-goc-corpus`, `make test-goc-cmd`, `make test-unit` on the final tree.
-- The capability matrix, both arms.
-- `GODEBUG=cg12checkwb=2` and `cg12scanroots` over the corpus.
-- Determinism (`scripts/determinism-check.sh`).
-- Item 3: the `span has no free objects` interaction.
+### The capability matrix, both arms
+
+| arm | subtests | PASS | EXPECTED FAILURE | FAIL | KNOWN GAP |
+| --- | ---: | ---: | ---: | ---: | ---: |
+| `make test-goc-status` | 345 | 344 | 1 (`defer-panic/panic-string-output`) | 0 | 0 |
+| `make test-goc-status-opt` | 345 | 344 | 1 | 0 | 0 |
+
+Censused from `-v` output: `=== RUN` lines counted (345 each), `--- PASS`/`--- FAIL`
+tallied, and the expected failure confirmed by its
+`EXPECTED FAILURE runtime_panic_print_string.go` line. The complete list of
+non-passing capabilities is **empty** in both arms.
+
+### The same matrix under the write-barrier checker
+
+`GODEBUG=cg12checkwb=2`, both arms: 345/345, **zero** `cg12checkwb:` reports.
+
+That is meaningful only because a positive control fires. A laundered frame
+address stored into a package global while a concurrent mark runs:
+
+```
+cg12checkwb: pointer write barrier stored a goroutine stack address into a global
+cg12checkwb: slot=0x5a0030 old=0x6ed0f2527ca8 new=0x6ed0f2527ca8 bad=new-is-stack
+fatal error: cg12checkwb: global data word holds a goroutine stack address
+```
+
+**Its limit, stated plainly.** `cg12checkwb=2` flags a stack address reaching
+*data or bss*. It does not flag a stack address reaching a *heap object*:
+`cg12WriteBarrierValueIsBad` returns false for `mSpanManual` addresses, and the
+`stackNew` rule requires `cg12AddressIsGlobal(slot)`. The `slog` bug was exactly
+that class, and the matrix caught it, not the diagnostic. Widening the check is
+not free — `sudog.elem` and other runtime structures legitimately hold stack
+addresses in heap objects — so it was not attempted.
+
+### Other diagnostics
+
+- `GODEBUG=gccheckmark=1,invalidptr=1`, full matrix: 345/345.
+- `GODEBUG=cg12scanroots=1`, the whole `gc` category: all pass. It reports rather
+  than checks, so this says the precise scan runs clean there; it is not a
+  corpus-wide proof.
+
+### Suites
+
+- `make test-unit` — green.
+- `make test-goc-corpus` (`./goc/...`, the non-executable path) — green, 580s.
+- `make test-goc-cmd` — green, 272s.
+
+### Determinism (§23), measured before and after
+
+`scripts/determinism-check.sh -corpus`:
+
+| configuration | rounds | reproducible | varying | failed |
+| --- | ---: | ---: | ---: | ---: |
+| default | 3 | 365 | 0 | 0 |
+| `-O` | 2 | 365 | 0 | 0 |
+
+No layout-only residue in either.
+
+### Host-toolchain comparison (§3 step 2)
+
+- `go build -gcflags='runtime=-m -m'` confirms the host moves **no** `unwinder`
+  to the heap in `copystack`, `scanstack` or `(*unwinder).next`, and allocates
+  nothing in `sweepLocked.sweep` — which is what made the ungated field-address
+  rule's first two attempts identifiable as cg12 conservatism rather than
+  correct answers.
+- `go build -gcflags='net/netip=-m -m'` gives
+  `uint128.go:67:7: leaking param: u to result ~r0 level=0`, which is the summary
+  cg12 lacks for receivers, and is why `Addr.v6u16` newly allocates.
+- The two miscompiles this branch introduced were both found by running the same
+  program under both toolchains: `out.Len()` is 55 on the host and was 0 under
+  goc; `re.Split` returns three parts on the host and faulted under goc.
+
+## Still unverified, and what is deliberately not done
+
+- **`net/netip.Addr.v6u16` newly heap-allocates.** Bloat on a non-fatal path,
+  measured and explained above, not fixed. Closing it needs a
+  `receiverLeaksOnlyToResult` summary plus `*ast.IndexExpr` and `*ast.StarExpr`
+  cases in `valueDoesNotEscapeWithin`.
+- **`addressEscapesWithin` has no `*ast.UnaryExpr` case**, so an address nested
+  inside `&T{...}` — `return &holder{p: &local}` — reports "does not escape".
+  Pre-existing, untouched, and **not measured for consequences**. It is the
+  nearest neighbour of what this branch fixed and is the first thing the next
+  job in this area should look at.
+- **`escapeWalkSeesEveryUse` is blunt.** A captured variable can never be shown
+  not to escape now, whatever it does. Sound, but it gives up precision that a
+  walk following the capture to its declaring function would keep.
+- **No fatal consequence was produced for item 1.** As §5.10 recorded, the
+  diagnostic printing floats closest to mark termination runs clean because
+  `gcController.endCycle` is called after `setGCPhase(_GCoff)`.
+- **The `phase2-alloc` branch is not landed here.** Its escape fix is superseded
+  by this branch's; its fourteen allocation/write-barrier capabilities and its
+  `GOC_DEBUG_WRITEBARRIER` audit are not, and landing them would move the matrix
+  from 345 capabilities, which this round's constraints pin. Whoever lands it
+  must rebase rather than merge and diff the resulting IR against `main` — see
+  §5.14.
+- **Rate.** The matrix was run once per arm per configuration, not repeatedly.
+  `gc/cleanup-basic` specifically was run 40 times on this branch (0/40 failed)
+  because that is the capability §5.14 concerns. Nothing here is a rate
+  measurement in the §5.8 sense.
+- The `ccwork/closure-string` defect (§5.10's first bullet) is untouched; it is
+  a sibling job's area and this branch does not affect it either way.
+
+## Commits
+
+| commit | what |
+| --- | --- |
+| `2724ac7` | the leaks-only-to-result summary, the named-result fix, the field-address hole ungated, the `append` growth fix, `GOC_DEBUG_ESCAPE` |
+| `9f76498` | the two miscompiles the matrix found: fresh storage is not a result, and the walk must see every use |
+| (plan) | RUNTIME_PLAN §5.10 bullets closed, §5.14 rewritten with the mechanism, §24 added |
