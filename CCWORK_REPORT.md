@@ -310,3 +310,35 @@ arms"; the default-arm half of that is right and the `-runtime-opt` half is not,
 note that the `-runtime-opt` arm's sixteen link failures are "no longer reproducible" is
 about a different failure. Not investigated here — it is an `-O`-only stack-map defect and
 does not touch the mask padding.
+
+### Repetition and determinism
+
+- `gc`, `gc-stress`, `gc-invariants` and `stack-scan` with `-runtime-status-runs=5`:
+  46/46 subtests PASS, default arm. The `gc*` categories also 5× in the `-runtime-opt` arm.
+- `scripts/determinism-check.sh -corpus -rounds 3 -j 8`: **385/385 reproducible, 0 varying,
+  0 failed**, three rounds, ~219 s each. Content varies between rounds: 0. Image varies with
+  identical content: 0.
+- The reducer prints the same line under the host toolchain and under goc.
+
+## 11. A hypothesis about §9's residual, stated as a hypothesis
+
+`stack-scan/loop-safepoints` is a purpose-built program that asserts its own invariant, and
+under `-O` on `main` it says:
+
+```
+collected while live: carried-0 at carried before rewrite
+panic: a stack slot live across a loop back edge was not a GC root
+```
+
+That is a stack slot the map does **not** claim while it holds a live object. §9's residual is
+a stack slot the map **does** claim while it holds a dead one. Those are the two directions of
+one thing — a slot whose live range in goc's per-safepoint stack maps does not match the
+value's actual lifetime in the frame — and they compose: a value dropped from the live set at
+the safepoint the collector happens to scan is freed, and if the slot is back in the live set
+at a later safepoint, the scan then finds a pointer into a reclaimed span, which is exactly
+§9's signature.
+
+**This is not established.** What makes it worth writing down is that if it is right, then
+`stack-scan/loop-safepoints` under `-runtime-opt` is a *deterministic* handle on a defect that
+otherwise only shows as a 3–15% rate at `GOGC=10`, and that is the difference between a day
+and an hour. The next job on this should start there rather than from the rate.
