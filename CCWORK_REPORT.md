@@ -528,7 +528,17 @@ the split itself.
 
 # `mspan.reportZombies` is blind on Green Tea spans — `ccwork/reportzombies`
 
-**Status: investigation in progress; this file is updated as each result lands.**
+**Verdict: fixed, and it is an upstream Go bug.** `reportZombies` read the marks
+back through `markBitsForBase` after `sweep` had already merged the span's inline
+mark bits into `gcmarkBits` and cleared them, so on every span with `elemsize`
+16..512 it printed every object `unmarked` and never named or dumped the zombie.
+It reproduces on the host `go1.26.1` toolchain with no cg12 involved and is fixed
+by one statement. Proven on a real zombie in both directions and at both bounds of
+the affected range; guarded by a test that fails with the fix reverted. All suites
+green, both matrix arms at 345/344 PASS/1 EXPECTED FAILURE/0 FAIL/0 KNOWN GAP,
+determinism measured on both sides. §5.10's hang and deadlock are **not**
+attributed — see the separate finding at the end for why this diagnostic
+structurally cannot.
 
 ## The defect, read out of the source
 
