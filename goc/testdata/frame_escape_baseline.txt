@@ -1,0 +1,212 @@
+# Frame addresses this tree publishes past their frame, one per line, as
+# opt.FrameEscapes reports them: source position, function, how the address
+# left the frame, and what received it. Temporary numbers are deliberately not
+# part of a line, so an unrelated change that emits one more instruction does
+# not rewrite the file.
+#
+# This is a record of what the compiler does, not a list of things that are
+# correct. TestFrameEscapeAudit fails on any publication not listed here and on
+# any listed publication that has gone away, so the file tracks the compiler
+# rather than drifting from it. Regenerate with
+#
+#     go test ./goc -run TestFrameEscapeAudit -update-frame-escape-baseline
+#
+# and read the diff: every added line is an allocation the compiler decided
+# does not escape, whose address it then stored somewhere that outlives the
+# frame.
+?	archive/zip.checksumReader.Read	barrier	the caller's result area
+?	bufio.Reader.ReadSlice	barrier	the caller's result area
+?	bufio.Reader.collectFragments	barrier	the caller's result area
+?	bufio.Writer.ReadFrom	barrier	the caller's result area
+?	bufio.Writer.WriteRune	barrier	the caller's result area
+?	bytes.Buffer.readSlice	barrier	the caller's result area
+?	bytes.Reader.ReadAt	barrier	the caller's result area
+?	bytes.Reader.WriteTo	barrier	the caller's result area
+?	compress/bzip2.reader.Read	barrier	the caller's result area
+?	crypto/elliptic.nistCurve.pointFromAffine[Point]	return	the caller
+?	crypto/rsa.decryptPKCS1v15	barrier	the caller's result area
+?	crypto/tls.parseECHExt	barrier	the caller's result area
+?	crypto/x509.Certificate.buildChains.func.729.23	barrier	memory reached through a loaded pointer
+?	crypto/x509.parseSANExtension	barrier	the caller's result area
+?	encoding/asn1.parseField	barrier	the caller's result area
+?	encoding/asn1.parseGeneralizedTime	barrier	the caller's result area
+?	encoding/asn1.parseInt64	barrier	the caller's result area
+?	encoding/asn1.parseTagAndLength	barrier	the caller's result area
+?	encoding/asn1.parseUTCTime	barrier	the caller's result area
+?	encoding/gob.decodeUintReader	barrier	the caller's result area
+?	flag.isZeroValue.func.552.8	barrier	memory reached through a loaded pointer
+?	fmt.ss.ReadRune	barrier	the caller's result area
+?	fmt.ss.Token.func.248.8	barrier	memory reached through a loaded pointer
+?	fmt.ss.scanComplex	return	the caller
+?	fmt.stringReader.Read	barrier	the caller's result area
+?	golang.org/x/net/http2/hpack.Decoder.Write	barrier	the caller's result area
+?	golang.org/x/text/transform.nop.Transform	barrier	the caller's result area
+?	image/jpeg.decoder.readByte	barrier	the caller's result area
+?	internal/poll.sendFile	barrier	the caller's result area
+?	io.CopyN	barrier	the caller's result area
+?	io.ReadAtLeast	barrier	the caller's result area
+?	io.SectionReader.ReadAt	barrier	the caller's result area
+?	io.copyBuffer	barrier	the caller's result area
+?	io.multiWriter.Write	barrier	the caller's result area
+?	io.multiWriter.WriteString	barrier	the caller's result area
+?	main.derive	barrier	memory reached through a call result $runtime.newobject
+?	math/big.Float.scan	barrier	the caller's result area
+?	math/big.nat.scan	barrier	the caller's result area
+?	math/big.scanExponent	barrier	the caller's result area
+?	math/cmplx.Sqrt	return	the caller
+?	mime.ParseMediaType	barrier	the caller's result area
+?	mime/multipart.Reader.readForm.func.62.8	barrier	memory reached through a loaded pointer
+?	net.Buffers.Read	barrier	the caller's result area
+?	net.Resolver.goLookupIPCNAMEOrder	barrier	memory reached through an opaque pointer
+?	net.netFD.accept	barrier	the caller's result area
+?	net.netFD.connect.func.95.9	barrier	memory reached through a loaded pointer
+?	net.parseCriteria	barrier	the caller's result area
+?	net.sendFile	barrier	the caller's result area
+?	net.socket	barrier	the caller's result area
+?	net/http.Transport.customDialTLS	barrier	the caller's result area
+?	net/http.body.readLocked	barrier	the caller's result area
+?	net/http.bodyEOFSignal.Read	barrier	the caller's result area
+?	net/http.bufioFlushWriter.Write	barrier	the caller's result area
+?	net/http.finishAsyncByteRead.Read	barrier	the caller's result area
+?	net/http.http2chunkWriter.Write	barrier	the caller's result area
+?	net/http.http2parseUintBytes	barrier	the caller's result area
+?	net/http.http2responseWriterState.writeChunk	barrier	the caller's result area
+?	net/http.http2serverConn.startPush.func.7180.24	barrier	memory reached through a call result $runtime.newobject
+?	net/http.http2serverConn.upgradeRequest	barrier	memory reached through a call result $runtime.newobject
+?	net/http.http2transportResponseBody.Read	barrier	the caller's result area
+?	net/http.parsePostForm	barrier	the caller's result area
+?	net/http.readRequest	barrier	the caller's result area
+?	net/http.readRequest.func.1090.8	barrier	memory reached through a loaded pointer
+?	net/http.send	barrier	the caller's result area
+?	net/http.socksDialer.connect	barrier	the caller's result area
+?	net/http.socksDialer.connect.func.39.9	barrier	memory reached through a loaded pointer
+?	net/http/internal.chunkedWriter.Write	barrier	the caller's result area
+?	net/mail.addrParser.consumeAddrSpec	barrier	the caller's result area
+?	net/netip.parseIPv4	barrier	the caller's result area
+?	net/textproto.Conn.Cmd	barrier	the caller's result area
+?	net/textproto.dotReader.Read	barrier	the caller's result area
+?	net/textproto.dotWriter.Write	barrier	the caller's result area
+?	os.File.ReadAt	barrier	the caller's result area
+?	os.File.Write	barrier	the caller's result area
+?	os.File.writeTo	barrier	memory reached through a call result $runtime.newobject
+?	os.hostname	barrier	the caller's result area
+?	path.getEsc	barrier	the caller's result area
+?	path/filepath.getEsc	barrier	the caller's result area
+?	reflect.Value.Complex	return	the caller
+?	regexp/syntax.parse	barrier	the caller's result area
+?	regexp/syntax.parser.parsePerlFlags	barrier	the caller's result area
+?	regexp/syntax.parser.parseUnicodeClass	barrier	the caller's result area
+?	strconv.UnquoteChar	barrier	the caller's result area
+?	strings.Reader.ReadAt	barrier	the caller's result area
+?	strings.Reader.WriteTo	barrier	the caller's result area
+?	syscall.Dup	barrier	the caller's result area
+?	syscall.Getcwd	barrier	the caller's result area
+?	syscall.Getdents	barrier	the caller's result area
+?	syscall.Getpeername	barrier	the caller's result area
+?	syscall.Getsockname	barrier	the caller's result area
+?	syscall.GetsockoptInt	barrier	the caller's result area
+?	syscall.Seek	barrier	the caller's result area
+?	syscall.Splice	barrier	the caller's result area
+?	syscall.Write	barrier	the caller's result area
+?	syscall.accept4	barrier	the caller's result area
+?	syscall.fcntl	barrier	the caller's result area
+?	syscall.forkExec	barrier	the caller's result area
+?	syscall.getgroups	barrier	the caller's result area
+?	syscall.mmap	barrier	the caller's result area
+?	syscall.openat	barrier	the caller's result area
+?	syscall.pread	barrier	the caller's result area
+?	syscall.read	barrier	the caller's result area
+?	syscall.readlen	barrier	the caller's result area
+?	syscall.readlinkat	barrier	the caller's result area
+?	syscall.recvfrom	barrier	the caller's result area
+?	syscall.sendfile	barrier	the caller's result area
+?	syscall.socket	barrier	the caller's result area
+?	syscall.wait4	barrier	the caller's result area
+?	syscall.write	barrier	the caller's result area
+?	testing/quick.functionAndType	barrier	the caller's result area
+?	text/template.safeCall.func.357.8	barrier	memory reached through a loaded pointer
+?	time.loadLocation	barrier	the caller's result area
+?	time.parseNanoseconds[[]byte]	barrier	the caller's result area
+?	time.parseNanoseconds[string]	barrier	the caller's result area
+stdlib/src/archive/tar/common.go:527:72	archive/tar.Header.allowedFormats	barrier	the caller's result area
+stdlib/src/archive/tar/common.go:529:56	archive/tar.Header.allowedFormats	barrier	the caller's result area
+stdlib/src/archive/tar/common.go:531:56	archive/tar.Header.allowedFormats	barrier	the caller's result area
+stdlib/src/archive/tar/common.go:533:66	archive/tar.Header.allowedFormats	barrier	the caller's result area
+stdlib/src/crypto/tls/handshake_server_tls13.go:217:17	crypto/tls.serverHandshakeStateTLS13.processClientHello	barrier	memory reached through a call result $runtime.newobject
+stdlib/src/crypto/x509/verify.go:1070:69	crypto/x509.newPolicyGraph	barrier	memory reached through a call result $runtime.mapassign
+stdlib/src/crypto/x509/verify.go:791:43	crypto/x509.Certificate.buildChains	barrier	the caller's result area
+stdlib/src/encoding/asn1/asn1.go:1025:22	encoding/asn1.parseField	barrier	the caller's result area
+stdlib/src/encoding/asn1/asn1.go:103:25	encoding/asn1.parseInt64	barrier	the caller's result area
+stdlib/src/encoding/asn1/asn1.go:199:21	encoding/asn1.parseBitString	barrier	the caller's result area
+stdlib/src/encoding/asn1/asn1.go:206:21	encoding/asn1.parseBitString	barrier	the caller's result area
+stdlib/src/encoding/asn1/asn1.go:252:21	encoding/asn1.parseObjectIdentifier	barrier	the caller's result area
+stdlib/src/encoding/asn1/asn1.go:307:26	encoding/asn1.parseBase128Int	barrier	the caller's result area
+stdlib/src/encoding/asn1/asn1.go:315:22	encoding/asn1.parseBase128Int	barrier	the caller's result area
+stdlib/src/encoding/asn1/asn1.go:324:27	encoding/asn1.parseBase128Int	barrier	the caller's result area
+stdlib/src/encoding/asn1/asn1.go:329:20	encoding/asn1.parseBase128Int	barrier	the caller's result area
+stdlib/src/encoding/asn1/asn1.go:404:22	encoding/asn1.parsePrintableString	barrier	the caller's result area
+stdlib/src/encoding/asn1/asn1.go:454:22	encoding/asn1.parseIA5String	barrier	the caller's result area
+stdlib/src/encoding/asn1/asn1.go:577:22	encoding/asn1.parseTagAndLength	barrier	the caller's result area
+stdlib/src/encoding/asn1/asn1.go:582:21	encoding/asn1.parseTagAndLength	barrier	the caller's result area
+stdlib/src/encoding/asn1/asn1.go:58:21	encoding/asn1.parseBool	barrier	the caller's result area
+stdlib/src/encoding/asn1/asn1.go:594:22	encoding/asn1.parseTagAndLength	barrier	the caller's result area
+stdlib/src/encoding/asn1/asn1.go:600:23	encoding/asn1.parseTagAndLength	barrier	the caller's result area
+stdlib/src/encoding/asn1/asn1.go:608:27	encoding/asn1.parseTagAndLength	barrier	the caller's result area
+stdlib/src/encoding/asn1/asn1.go:615:27	encoding/asn1.parseTagAndLength	barrier	the caller's result area
+stdlib/src/encoding/asn1/asn1.go:621:26	encoding/asn1.parseTagAndLength	barrier	the caller's result area
+stdlib/src/encoding/asn1/asn1.go:635:25	encoding/asn1.parseSequenceOf	barrier	the caller's result area
+stdlib/src/encoding/asn1/asn1.go:660:26	encoding/asn1.parseSequenceOf	barrier	the caller's result area
+stdlib/src/encoding/asn1/asn1.go:664:22	encoding/asn1.parseSequenceOf	barrier	the caller's result area
+stdlib/src/encoding/asn1/asn1.go:673:21	encoding/asn1.parseSequenceOf	barrier	the caller's result area
+stdlib/src/encoding/asn1/asn1.go:716:22	encoding/asn1.parseField	barrier	the caller's result area
+stdlib/src/encoding/asn1/asn1.go:71:21	encoding/asn1.parseBool	barrier	the caller's result area
+stdlib/src/encoding/asn1/asn1.go:729:22	encoding/asn1.parseField	barrier	the caller's result area
+stdlib/src/encoding/asn1/asn1.go:786:26	encoding/asn1.parseField	barrier	the caller's result area
+stdlib/src/encoding/asn1/asn1.go:799:28	encoding/asn1.parseField	barrier	the caller's result area
+stdlib/src/encoding/asn1/asn1.go:811:27	encoding/asn1.parseField	barrier	the caller's result area
+stdlib/src/encoding/asn1/asn1.go:819:25	encoding/asn1.parseField	barrier	the caller's result area
+stdlib/src/encoding/asn1/asn1.go:887:26	encoding/asn1.parseField	barrier	the caller's result area
+stdlib/src/encoding/asn1/asn1.go:892:21	encoding/asn1.parseField	barrier	the caller's result area
+stdlib/src/encoding/asn1/asn1.go:963:27	encoding/asn1.parseField	barrier	the caller's result area
+stdlib/src/encoding/base64/base64.go:378:28	encoding/base64.Encoding.decodeQuantum	barrier	the caller's result area
+stdlib/src/encoding/gob/dec_helpers.go:132:28	encoding/gob.decComplex128Slice	barrier	memory reached through an opaque pointer
+stdlib/src/internal/strconv/atof.go:609:9	internal/strconv.atof32	barrier	the caller's result area
+stdlib/src/internal/strconv/atof.go:660:9	internal/strconv.atof64	barrier	the caller's result area
+stdlib/src/internal/syscall/unix/copy_file_range_unix.go:25:9	internal/syscall/unix.CopyFileRange	barrier	the caller's result area
+stdlib/src/log/slog/handler.go:120:8	log/slog.defaultHandler.Handle	barrier	memory reached through a call result $runtime.newobject
+stdlib/src/log/slog/handler.go:239:8	log/slog.commonHandler.withAttrs	barrier	memory reached through a call result $runtime.newobject
+stdlib/src/log/slog/handler.go:272:8	log/slog.commonHandler.handle	barrier	memory reached through a call result $runtime.newobject
+stdlib/src/net/dial.go:691:5	net.sysDialer.dialParallel	barrier	memory reached through a call result $runtime.newobject
+stdlib/src/net/dial.go:702:7	net.sysDialer.dialParallel	barrier	memory reached through a call result $runtime.newobject
+stdlib/src/net/http/client.go:384:14	net/http.setRequestCancel	barrier	memory reached through a call result $runtime.newobject
+stdlib/src/net/http/client.go:994:37	net/http.cancelTimerBody.Read	barrier	the caller's result area
+stdlib/src/net/http/h2_bundle.go:4287:18	net/http.http2ConfigureServer	barrier	memory reached through a call result $runtime.newobject
+stdlib/src/net/http/h2_bundle.go:7545:15	net/http.http2configureTransports	barrier	memory reached through a call result $runtime.newobject
+stdlib/src/net/http/h2_bundle.go:9418:8	net/http.http2ClientConn.readLoop	barrier	memory reached through a call result $runtime.newobject
+stdlib/src/net/http/socks_bundle.go:417:10	net/http.socksDialer.pathAddrs	barrier	the caller's result area
+stdlib/src/net/textproto/reader.go:218:44	net/textproto.parseCodeLine	barrier	the caller's result area
+stdlib/src/net/textproto/reader.go:224:51	net/textproto.parseCodeLine	barrier	the caller's result area
+stdlib/src/net/textproto/reader.go:231:22	net/textproto.parseCodeLine	barrier	the caller's result area
+stdlib/src/net/textproto/reader.go:313:22	net/textproto.Reader.ReadResponse	barrier	the caller's result area
+stdlib/src/reflect/value.go:1824:27	reflect.Value.SetZero	barrier	memory reached through a loaded pointer
+stdlib/src/regexp/syntax/parse.go:899:39	regexp/syntax.parse.func.892.8	barrier	memory reached through a loaded pointer
+stdlib/src/regexp/syntax/parse.go:901:46	regexp/syntax.parse.func.892.8	barrier	memory reached through a loaded pointer
+stdlib/src/runtime/cgocall.go:440:16	runtime.cgocallbackg1	barrier	memory reached through a call result $runtime.newobject
+stdlib/src/runtime/panic.go:1372:52	runtime.recovery	barrier	memory reached through a loaded pointer
+stdlib/src/syscall/exec_unix.go:228:16	syscall.forkExec	barrier	the caller's result area
+stdlib/src/syscall/exec_unix.go:231:10	syscall.forkExec	barrier	the caller's result area
+stdlib/src/text/template/exec.go:211:20	text/template.Template.execute	barrier	memory reached through a call result $runtime.newobject
+stdlib/src/text/template/parse/node.go:665:30	text/template/parse.Tree.newNumber	barrier	memory reached through a loaded pointer
+stdlib/src/vendor/golang.org/x/net/idna/idna10.0.0.go:492:11	golang.org/x/net/idna.validateAndMap	barrier	the caller's result area
+stdlib/src/vendor/golang.org/x/net/idna/idna10.0.0.go:507:21	golang.org/x/net/idna.validateAndMap	barrier	the caller's result area
+testdata/runtime_core_types.go:24:21	main.main	barrier	memory reached through a call result $runtime.newobject
+testdata/runtime_core_types.go:28:18	main.main	barrier	memory reached through a call result $runtime.newobject
+testdata/runtime_defer_argument_evaluation.go:10:20	main.collect	barrier	memory reached through a call result $runtime.newobject
+testdata/runtime_defer_argument_evaluation.go:12:20	main.collect	barrier	memory reached through a call result $runtime.newobject
+testdata/runtime_goroutine_closure_gc.go:12:9	main.main	barrier	memory reached through a call result $runtime.newobject
+testdata/runtime_goroutine_closure_gc.go:12:9	main.start	barrier	memory reached through a call result $runtime.newobject
+testdata/runtime_map_struct_value_replace.go:12:21	main.main	barrier	memory reached through a call result $runtime.mapassign
+testdata/runtime_panic_error_recover.go:15:24	main.errorRecoverParser.parse	barrier	memory reached through a call result $runtime.newobject
+testdata/runtime_range_target_order.go:147:34	main.targetAliasingTheRangeExpression	barrier	memory reached through a call result $runtime.newobject
+testdata/runtime_range_target_order.go:155:34	main.targetAliasingTheRangeExpression	barrier	memory reached through a call result $runtime.newobject
+testdata/stdlib_signal_during_gc.go:29:23	main.main.func.17.5	barrier	memory reached through a call result $runtime.newobject

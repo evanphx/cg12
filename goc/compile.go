@@ -89,6 +89,28 @@ func reportNoSplitViolations(module *ir.Module) {
 	}
 }
 
+// reportFrameEscapes audits the finished escape decision: every allocation the
+// front end or opt.LowerHeapAllocations left in a frame, checked against the
+// stores the compiler actually emitted. GOC_DEBUG_ESCAPECHECK=1 enables it.
+//
+// It exists because a wrong "does not escape" is silent at compile time and
+// arrives as a collector fault minutes later in an unrelated goroutine. The
+// audit names the storing function and source line instead.
+func reportFrameEscapes(module *ir.Module) {
+	if os.Getenv("GOC_DEBUG_ESCAPECHECK") == "" {
+		return
+	}
+	escapes := opt.FrameEscapes(module)
+	if len(escapes) == 0 {
+		fmt.Fprintln(os.Stderr, "goc: escape audit: no frame address is published past its frame")
+		return
+	}
+	fmt.Fprintf(os.Stderr, "goc: escape audit: %d frame addresses published past their frame\n", len(escapes))
+	for _, escape := range escapes {
+		fmt.Fprintf(os.Stderr, "goc: escape audit: %s\n", escape)
+	}
+}
+
 type compileOptions struct {
 	// target is the machine being compiled for. The zero value means the host,
 	// so an option struct built without thinking about the target behaves the
@@ -463,6 +485,7 @@ func compile(name string, src []byte, options compileOptions) (*ir.Module, error
 	}
 	opt.InlineHeapAllocations(mod)
 	opt.LowerHeapAllocations(mod)
+	reportFrameEscapes(mod)
 	if compileRuntime {
 		setAAPCS64CallConvention(mod)
 	}

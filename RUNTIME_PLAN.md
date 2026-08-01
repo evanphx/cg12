@@ -1602,6 +1602,34 @@ the reports of the jobs that found them.
 - **A closure that assigns to a captured string variable leaves it pointing at
   the closure's dead frame.** Fixed 2026-08-01, §5.15.
 
+- **A closure passed to a `go` statement keeps its funcval in the caller's
+  frame.** Found 2026-08-01 by §25's audit, on `main`, not previously recorded.
+  `go run(func() int { return value + 2 }, done)` in
+  `goc/testdata/runtime_goroutine_closure_gc.go` lowers to `%t5 = alloc8 16` for
+  the funcval — a frame allocation — whose address is then stored into the
+  goroutine's heap argument struct through `goc_storep` and handed to
+  `runtime.newproc`. The captured `value`'s cell is a frame slot too, and is the
+  funcval's environment word. The program passes because `start` blocks on
+  `<-done` until the goroutine has finished, so its frame is alive throughout; a
+  stack copy of `start` while the goroutine is live would leave the heap word
+  addressing the old stack, which is §5.8's invariant reached by a third route.
+  No reducer beyond the corpus program, and no fix.
+
+- **A `string`, interface, `error` or `complex128` result is returned as the
+  address of a frame slot.** Found 2026-08-01 by §25's audit; 149 of the 196
+  publications it records on `main` are this one shape. `syscall.read` is the
+  clearest: `%t39 = alloc8 16` holds the error header in `read`'s own frame and
+  `goc_storep(%result1, %t39)` hands the caller a pointer to it, which the caller
+  reads after that frame is gone. Callers copy the two words immediately, which
+  is why nothing has failed; a stack copy between the return and the copy would
+  not adjust the held pointer, and a collector scanning the caller at that moment
+  would not trace what the interface addresses. This is §5.15's residual —
+  the same "a sixteen-byte value lives behind a pointer to a frame slot" defect,
+  through function results rather than through a closure assignment — and it is
+  much wider than §5.15 records. Four more are the `return` form of it:
+  `math/cmplx.Sqrt`, `reflect.Value.Complex`, `fmt.ss.scanComplex` and
+  `crypto/elliptic.nistCurve.pointFromAffine` return a frame address outright.
+
 - **A few package globals are emitted twice.** `runtime.divideError`,
   `runtime.overflowError` and `internal/runtime/maps.errNilAssign` each get a
   zeroed placeholder datum and then a second datum, under the same name, holding
@@ -2440,6 +2468,12 @@ Exercise both semantic behavior and generated metadata.
 
 ### Compiler-emitted checks
 
+- **Done (2026-08-01, §25): validate the escape decision against the emitted
+  IR.** `opt.FrameEscapes` reports every frame allocation whose address is stored
+  somewhere that outlives the frame, and `TestFrameEscapeAudit` runs it over the
+  whole corpus against an accepted baseline. It fails on `ccwork/escape-analysis`'s
+  `2724ac7` and passes on `main`. §25 also records what it cannot see, and why
+  extending `cg12checkwb` was not sufficient on its own.
 - Validate every pointer-marked stack slot against the current stack and known
   heap spans at GC-safe points.
 - Poison dead pointer slots in a debug mode and verify stack maps do not retain
@@ -2875,6 +2909,17 @@ subsection. What follows replaces it.
    compiler-emitted checks should be built on the diagnostics Phase 1 produced
    rather than new ones: `cg12scanroots`, `cg12checkwb` and `cg12checkstackcopy`
    already cover root reporting, barrier validation and stack-copy staleness.
+
+   That instruction was followed for the escape decision and it was only half
+   right (§25). Extending `cg12checkwb` was worth doing — it was hooked on
+   `atomicwb` alone and missed every bulk barrier, which is what `typedmemmove`,
+   `growslice` and `typedslicecopy` use — but it could not have caught
+   `2724ac7`, because a check inside a write barrier only runs while
+   `writeBarrier.enabled` is true and a wrong escape decision publishes a frame
+   address whenever the program runs. The check that catches it is static:
+   `opt.FrameEscapes`, over the finished IR, run over the corpus by a test. The
+   lesson to carry into the rest of §6 is that an existing diagnostic's *duty
+   cycle* is part of what it can see, not just its hook point.
 
 The original order was chosen so that the mechanisms used to diagnose later
 phases — unwinding, stack metadata, GC pointer accuracy, atomics, coverage
@@ -4919,3 +4964,179 @@ nothing further.
 - Determinism (§23) unchanged: `scripts/determinism-check.sh -corpus`,
   385/385 reproducible over 3 rounds without `-O` and 2 rounds with `-O`,
   0 varying, 0 failed, and 0 content-varies and 0 layout-only in both.
+
+
+## 27. The escape decision is now checked against the code it produced (2026-08-01)
+
+Every wrong "does not escape" this project has hit arrives the same way: a frame
+address ends up in a heap object or a global, nothing notices, and minutes later
+the collector throws `found bad pointer in Go heap` in an unrelated goroutine.
+§5.8 was that. `ccwork/escape-analysis`'s `2724ac7` is that. §5.14's interaction
+is a neighbour of it. The decision itself was never checked: the front end
+decides per Go expression whether an allocation may stay in a frame,
+`opt.LowerHeapAllocations` decides it again for the candidates the front end
+leaves open, and neither is compared against the code that is finally emitted.
+
+`opt.FrameEscapes` (`opt/framecheck.go`) is that comparison. It runs over the
+finished IR and asks, per function: does any pointer derived from one of this
+function's own frame allocations get stored somewhere that is not part of the
+same frame?
+
+It is a may-analysis. A value is frame-derived when it is an `OAlloc*`/`OAllocN`
+result or reaches one through copies, casts, pointer arithmetic, phis, the memory
+helpers that return their destination, or a load from a frame slot a frame
+address was stored into. A finding is a `store` (a plain `OStore*`), a `barrier`
+(the same through `goc_storep`, which is what a pointer field of a heap object
+receives), or a `return`. Destinations are classified into categories -- a
+global, the caller's result area, memory reached through a parameter, a call
+result with the callee named, a loaded pointer -- rather than named by
+temporary, so a finding's identity survives the renumbering any unrelated change
+causes.
+
+A frame address that merely *reaches a call* is deliberately not reported.
+`&local` passed to a callee is how Go is written, and whether the callee retains
+it is the interprocedural question the front end already answers; what is
+reported is the store the callee actually makes.
+
+### What runs it
+
+`TestFrameEscapeAudit` (`goc/framecheck_test.go`) compiles all 384 corpus
+programs, collects the findings, and compares them against
+`goc/testdata/frame_escape_baseline.txt`. It fails on a publication the baseline
+does not list *and* on a listed publication that has gone away, so the file
+tracks the compiler rather than drifting from it. It is in package `goc`, so
+`make test-goc-corpus` runs it — deliberately not a new target, because §5.10's
+`-O` arm records what happens to a configuration nothing exercises.
+`GOC_DEBUG_ESCAPECHECK=1` prints the same findings from any `goc` compilation.
+
+Cost: 2m20s wall, 24 CPU-minutes at 8 workers, essentially all of it compiling
+the corpus. The analysis is linear in instruction count and does not register.
+`opt.FrameEscapes` is not called during a normal compilation.
+
+### What it catches
+
+| Tree | `TestFrameEscapeAudit` | new findings |
+| --- | --- | ---: |
+| `main` (`ad4e9b2`) | PASS | — |
+| `main` + `2724ac7` | **FAIL** | 4 |
+| `main` + `2724ac7` + `9f76498` | **FAIL** | 3 |
+
+The four are `crypto/internal/fips140/bigmod.Nat.Mul`, a `regexp` closure, and
+`main.main` in `runtime_slice_pointer_append_gc.go` and
+`runtime_debug_gc_controls.go`. The last two are the defect in four lines:
+`values := make([]*record, 0, 4)` puts the backing array in the frame under
+`2724ac7`, and `runtime.KeepAlive(values)` boxes the slice into a
+`runtime.newobject` and stores the header, data pointer included, into it.
+Neither program *fails* at run time — by that line the slice has grown past
+capacity 4 — which is the point: the check reports the wrong decision whether or
+not this run's data triggers it.
+
+`9f76498` removes the `regexp` finding and leaves the other three. It does not
+fix `gc-invariants/mark-workers`, which still fails on `main + 2724ac7 +
+9f76498`, with `SIGSEGV` in `runtime.getGCMask` / `mspan.typePointersOfUnchecked`
+instead of `found bad pointer in Go heap`.
+
+### What it does not catch
+
+`gc-invariants/mark-workers` itself produces no new finding. `buildGraph` does
+put `frontier`'s one-element backing array in the frame under `2724ac7` — `alloc8
+8` where `main` emits `runtime.newobject` — but that array is only ever stored
+into another frame slot, so the rule does not fire. Whatever carries it out of
+the frame is not a store this analysis can see. Three known gaps, in order of how
+likely they are to matter:
+
+- **`OBlit` and `goc_memcpy` of an aggregate.** A byte copy of a struct holding a
+  frame pointer word is invisible: the analysis has no types and cannot say which
+  words of the region are pointers. Barriered pointer words of an aggregate go
+  through `goc_storep` (`storePointerAwareInlineValue`) and are covered; a word
+  the compiler decided needed no barrier travels with the memcpy and is not.
+- **Slot tracking is per-slot, not per-path.** A frame slot that has received a
+  frame address is treated as holding one from then on, and a slot written
+  through a non-constant offset is not tracked at all.
+- **Calls are not reported**, by design, so a frame address handed several frames
+  down and stored there is only caught if that callee is in the same module.
+
+### What it found on a green tree
+
+The baseline is 196 publications on `main`. It is a description of what the
+compiler does, not a certificate that any of it is safe. 149 are `barrier` into
+the caller's result area, 26 into a `runtime.newobject` result, 13 into a loaded
+pointer, 4 `return` to the caller, 2 into a `runtime.mapassign` result, 2 into an
+opaque pointer. Two were read in full and are recorded in §5.10.
+
+### The runtime counterpart, and why it was not enough
+
+`cg12checkwb` was extended in the same branch and the extension is worth having,
+but the honest result is that **it could not have caught `2724ac7`**:
+
+- The hook was on `runtime.atomicwb` only. Every barriered pointer store goc
+  emits reaches it (`goc_storep → atomicstorep → atomicwb`), but the *bulk*
+  barriers do not: `bulkBarrierPreWrite` and `bulkBarrierPreWriteSrcOnly` push
+  words straight into the buffer, and they are what `typedmemmove`, `growslice`
+  and `typedslicecopy` use. Both now validate what they buffer, which moves the
+  mark-workers fault from the background marker to `main.buildGraph`'s own
+  `growslice`.
+- `cg12checkwb=3` widens `=2`'s rule from "a stack address into a global" to "a
+  stack address into anything that outlives the frame".
+- **Neither catches it, because a barrier-based check only runs while
+  `writeBarrier.enabled` is true.** A wrong escape decision publishes a frame
+  address whenever the program runs. Measured: `runtime_slice_pointer_append_gc`
+  and `runtime_debug_gc_controls` both publish one on `2724ac7` and both run
+  clean under `cg12checkwb=3`.
+- And by the time anything looks, the value is often not a stack address. The
+  word the mark-workers fault rejects is past the last object of a live 16-byte
+  span — a pointer to a freed object whose span was recycled into another size
+  class, not a live goroutine stack.
+
+`TestARM64WriteBarrierAuditRunsClean` (`cmd/goc`) compiles six allocating,
+collecting, channel-blocking programs and runs each under `cg12checkwb=1` and
+`cg12checkwb=3`, so the modes are exercised by `make test-goc-cmd` rather than
+only by whoever next needs them.
+
+The answer to the duty cycle is a compiler-emitted check outside the barrier:
+`gen.store` emitting `runtime.cg12CheckStackPublication(address, value)` next to
+`goc_storep`, under a compile-time flag, for packages other than `runtime` --
+the runtime's own legitimate stack publications, `sudog.elem` above all, are all
+inside it and are maintained by hand in `copystack`. That is designed here and
+deliberately not built: it is codegen, and codegen landed without a full
+validation pass is what §15 warns about. `opt.FrameEscapes` covers the same
+ground without touching the emitted code.
+
+### Verification
+
+Both matrix arms were censused with `-v` and a per-subtest count, at
+`-runtime-status-compile-workers=8`. The default arm is 363 subtests / 363 PASS /
+0 FAIL / 1 declared EXPECTED FAILURE / 0 KNOWN GAP. The optimized arm is 363 / 362
+PASS / **1 FAIL** — `stack-scan/loop-safepoints`, which is §6.1's open `-O`
+loop-carried-root defect and which a clean worktree at `origin/main` (`ad4e9b2`)
+fails identically on the same box. Nothing on this branch changes it in either
+direction. `make test-unit`, `make test-goc-cmd` and `make test-goc-corpus` all
+pass. Compiling all 384 corpus programs twice each gives 384 identical pairs, 0
+varying; that is 2 rounds rather than §23's depth, which is proportionate only
+because nothing on the default compile path changed — `reportFrameEscapes`
+returns immediately without `GOC_DEBUG_ESCAPECHECK`, and `opt.FrameEscapes` has
+no other in-compiler call site.
+
+### Which half of the split carries `2724ac7`'s fault
+
+Recorded here because it cost time to find and narrows the next investigation.
+`gc-invariants/mark-workers` fails only in the split build: monolithically the
+same tree passes 20/20, and with a pack it fails 10/10. Cross-linking the halves
+(both packs share a stdlib fingerprint, so either compiler's program module links
+against either pack) gives:
+
+| program module from | pack from | runs |
+| --- | --- | ---: |
+| `main` | `main` | 0/6 failed |
+| `main` | `main` + `2724ac7` | 0/6 failed |
+| `main` + `2724ac7` | `main` | **6/6 failed** |
+| `main` + `2724ac7` | `main` + `2724ac7` | **6/6 failed** |
+
+The defect travels with the program module. That module is not a different
+compilation from the monolithic one — `goc -runtime` runs the same whole-program
+`compile()` and applies the subtraction last, which is why the escape audit
+reports the same two findings for that program in both configurations — so the
+program's own code is identical in the two builds and only the *linked* runtime
+differs: the pack's is compiled by a separate `build-runtime` process from a
+generated root, the monolithic one alongside `main`. The mechanism is not
+established and is not guessed at here.
