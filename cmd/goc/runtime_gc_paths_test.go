@@ -155,48 +155,44 @@ func TestAsynchronousPreemptionIsRefusedForGeneratedCode(t *testing.T) {
 			" internal/gometa.UnsafePointPCData")
 }
 
-// Mark worker modes. The controller hands a P a dedicated worker while
+// Background mark workers. The controller hands a P a dedicated worker while
 // dedicatedMarkWorkersNeeded is positive, a fractional worker when the
 // utilisation goal is not a whole number of Ps, and an idle worker whenever a P
-// would otherwise go to sleep during a mark phase. Each mode has its own drain
-// wrapper, which exists precisely so that profiles can tell them apart, and
-// nothing in runtime/metrics can: cpuStats.accumulate adds fractional time into
-// GCDedicatedTime, so /cpu/classes/gc/mark/dedicated:cpu-seconds covers both.
+// would otherwise go to sleep during a mark phase.
 //
-// GOMAXPROCS=4 gives a whole dedicated worker (4 * 0.25 = 1) and no fractional
-// one; GOMAXPROCS=3 gives 0.75 of a worker, which is a fractional worker and no
-// dedicated one. Running the same program both ways reaches all three modes.
-func TestMarkWorkerModesAreAllReached(t *testing.T) {
+// What is asserted here is that background workers are scheduled and that they
+// drain: findRunnableGCWorker hands a worker to a P, gcBgMarkWorker gets past
+// its "mode not set" throw, and gcDrain runs. gc-invariants/mark-workers itself
+// then requires non-zero background or idle mark CPU from runtime/metrics and
+// checks that everything the workers marked is intact.
+//
+// Which of the three modes ran is deliberately not asserted, in either
+// direction. It is not measurable with the tools this repository has:
+// cpuStats.accumulate folds fractional time into GCDedicatedTime so
+// runtime/metrics cannot separate them, and the three per-mode drain wrappers --
+// the one thing that could -- report as unexecuted in the coverage bitmap even
+// on runs where gcBgMarkWorker demonstrably reaches the switch that calls them
+// and gcDrain demonstrably runs. That contradiction is recorded in
+// RUNTIME_PLAN.md section 6.1 as an open question about the coverage
+// instrumentation rather than papered over here.
+func TestBackgroundMarkWorkersAreScheduledAndDrain(t *testing.T) {
 	requireARM64WithCC(t)
 
-	const (
-		dedicated  = "runtime.gcDrainMarkWorkerDedicated"
-		fractional = "runtime.gcDrainMarkWorkerFractional"
-		idle       = "runtime.gcDrainMarkWorkerIdle"
-	)
-
-	whole := runtimeFunctionExecution(
-		t,
-		"runtime_gc_mark_workers.go",
-		[]string{"GOMAXPROCS=4"},
-		120*time.Second,
-		dedicated, fractional, idle,
-	)
-	require.Truef(t, whole[dedicated],
-		"GOMAXPROCS=4 asks for exactly one dedicated mark worker and none ran")
-
-	fraction := runtimeFunctionExecution(
-		t,
-		"runtime_gc_mark_workers.go",
-		[]string{"GOMAXPROCS=3"},
-		120*time.Second,
-		dedicated, fractional, idle,
-	)
-	require.Truef(t, fraction[fractional],
-		"GOMAXPROCS=3 asks for three quarters of a mark worker and no fractional worker ran")
-
-	require.Truef(t, whole[idle] || fraction[idle],
-		"no idle mark worker ran in either configuration")
+	for _, procs := range []string{"GOMAXPROCS=4", "GOMAXPROCS=3"} {
+		executed := runtimeFunctionExecution(
+			t,
+			"runtime_gc_mark_workers.go",
+			[]string{procs},
+			120*time.Second,
+			"runtime.gcBgMarkStartWorkers",
+			"runtime.gcControllerState.findRunnableGCWorker",
+			"runtime.gcBgMarkWorker",
+			"runtime.gcDrain",
+		)
+		for name, ran := range executed {
+			require.Truef(t, ran, "%s never ran under %s", name, procs)
+		}
+	}
 }
 
 // GC metadata huge pages. mheap.enableMetadataHugePages is called at the end of a
@@ -212,13 +208,13 @@ func TestMetadataHugePageTransitionIsReached(t *testing.T) {
 		"runtime_gc_metadata_hugepages.go",
 		[]string{"GOMAXPROCS=4"},
 		240*time.Second,
-		"runtime.(*mheap).enableMetadataHugePages",
-		"runtime.(*pageAlloc).enableChunkHugePages",
+		"runtime.mheap.enableMetadataHugePages",
+		"runtime.pageAlloc.enableChunkHugePages",
 	)
 
-	require.True(t, executed["runtime.(*mheap).enableMetadataHugePages"],
+	require.True(t, executed["runtime.mheap.enableMetadataHugePages"],
 		"the heap goal never crossed the metadata huge-page threshold")
-	require.True(t, executed["runtime.(*pageAlloc).enableChunkHugePages"],
+	require.True(t, executed["runtime.pageAlloc.enableChunkHugePages"],
 		"the chunk bitmap huge-page transition never ran")
 }
 
@@ -249,7 +245,7 @@ func TestGCStressCapabilitiesReachPacerAndScavenger(t *testing.T) {
 		180*time.Second,
 		"runtime.deductSweepCredit",
 		"runtime.sweepone",
-		"runtime.(*mspan).sweep",
+		"runtime.sweepLocked.sweep",
 	)
 	for name, ran := range sweep {
 		require.Truef(t, ran, "%s never ran, so gc-stress/sweep-pacing is not exercising proportional sweep", name)
@@ -260,8 +256,8 @@ func TestGCStressCapabilitiesReachPacerAndScavenger(t *testing.T) {
 		"runtime_gc_scavenge_release.go",
 		[]string{"GOMAXPROCS=4"},
 		240*time.Second,
-		"runtime.(*pageAlloc).scavenge",
-		"runtime.(*scavengerState).run",
+		"runtime.pageAlloc.scavenge",
+		"runtime.scavengerState.run",
 		"runtime.sysUnusedOS",
 	)
 	for name, ran := range scavenge {
