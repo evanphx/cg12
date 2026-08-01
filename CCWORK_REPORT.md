@@ -1091,8 +1091,8 @@ Two consequences:
 2. **It weakens every test in this repository that relies on `//go:noinline`.**
    25 of the 382 programs in `goc/testdata` use it, including capabilities
    written specifically to keep a frame distinct so a stack map can be reasoned
-   about --- `gc/stack-argument-roots`, `gc/goroutine-entry-stack-map` and five
-   of the six new `stack-scan` programs among them. Under `-O` that guarantee does not hold, and neither the
+   about --- `gc/stack-argument-roots`, `gc/goroutine-entry-stack-map` and all six new
+   `stack-scan` programs among them. Under `-O` that guarantee does not hold, and neither the
    corpus nor the matrix would notice. RUNTIME_PLAN §15 already records one
    investigation where "the real difference was inlining"; this is the mechanism
    that makes that failure mode easy to hit.
