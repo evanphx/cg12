@@ -2474,6 +2474,29 @@ what §5.14 is a record of. It is written down instead of guessed at.
 rather than reclassified as a `knownGap`: reclassifying would restore the
 "0 KNOWN GAP" headline while hiding a live, reproducible miscompile.
 
+#### Open: `//go:noinline` does nothing, and `-O` inlines through it
+
+Found while narrowing the defect above. `goc/compile.go` parses exactly one
+directive -- `g.fn.NoSplit = hasCompilerDirective(fd, "go:nosplit")` -- and there
+is no `go:noinline` handling anywhere in `goc/`, `opt/` or `ir/`; grep finds the
+string only inside `goc/testdata`. The `-O` build of
+`runtime_opt_loop_carried_root.go` has no `main_loop`, `main_simple` or
+`main_newNode` symbol at all: all three `//go:noinline` functions were folded
+into `main_main`.
+
+This matters twice. It is a plausible proximate cause of the root loss above --
+after inlining, the allocation helper, the loop and the collection are one frame,
+and that frame is the one whose stack map loses the pointer -- though the two
+could not be separated, because `CG12_NO_COSTINLINE` and `CG12_NO_AGGINLINE` do
+not disable the ordinary size-budget inliner. And it silently weakens every test
+in this repository that uses `//go:noinline` to keep a frame distinct so a stack
+map can be reasoned about, which is a large share of `goc/testdata`. §15 already
+records one investigation where "the real difference was inlining"; this is the
+mechanism that makes that failure mode easy to hit.
+
+No test is added, because a test asserting the directive is honoured would be red
+on arrival.
+
 #### What is not done
 
 - **Dedicated versus fractional mark workers cannot be told apart**, so §6's
