@@ -95,3 +95,31 @@ pre-existing defect from a few percent to certainty. Chasing the escape rules fu
 have been chasing a rate, which §15 of the plan warns about in exactly these words.
 
 The hunt is now for the defect itself.
+
+## 6. A reducer that fails 30/30 on plain `main`
+
+`$TMPDIR/red1.go` — `runtime_gc_mark_workers.go` with the metrics, the `sync.WaitGroup` and
+the sum-check removed, keeping only `buildGraph` + `churn` + eight goroutines + six
+`runtime.GC()`s. It is committed as `goc/testdata/runtime_gc_graph_churn.go`.
+
+| compiler | configuration | failures |
+| --- | --- | ---: |
+| `main` `ad4e9b2` | prebuilt runtime pack | **30/30** |
+| `main` `ad4e9b2` | runtime compiled inline | **20/20** |
+| merged | prebuilt runtime pack | 20/20 |
+
+At the **default `GOGC`**, on `main`, both compile paths. The escape change is not involved.
+
+The fault is always the same word:
+
+```
+runtime_badPointer <- runtime_findObject <- runtime_wbBufFlush1
+goroutine N: bulkBarrierPreWriteSrcOnly <- runtime_growslice <- main_buildGraph
+```
+
+`cg12checkwb` was extended (`stdlib/src/runtime/mbitmap.go`) to validate the words the four
+*bulk* barrier paths buffer, not just `atomicwb`'s. That is what named the writer:
+`atomicwb`'s existing check never fired, because the bad word does not enter the buffer
+through a pointer store at all — it enters through `growslice`'s
+`bulkBarrierPreWriteSrcOnly`, which reads the **old backing array** it is about to copy. So
+the bad pointer is *already in a live `[]*vertex` backing array* before any barrier runs.

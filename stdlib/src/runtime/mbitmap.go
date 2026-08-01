@@ -439,6 +439,9 @@ func bulkBarrierPreWrite(dst, src, size uintptr, typ *abi.Type) {
 				break
 			}
 			dstx := (*uintptr)(unsafe.Pointer(addr))
+			if debug.cg12checkwb != 0 {
+				cg12CheckWriteBarrierPair(addr, *dstx, 0)
+			}
 			p := buf.get1()
 			p[0] = *dstx
 		}
@@ -450,6 +453,9 @@ func bulkBarrierPreWrite(dst, src, size uintptr, typ *abi.Type) {
 			}
 			dstx := (*uintptr)(unsafe.Pointer(addr))
 			srcx := (*uintptr)(unsafe.Pointer(src + (addr - dst)))
+			if debug.cg12checkwb != 0 {
+				cg12CheckWriteBarrierPair(addr, *dstx, *srcx)
+			}
 			p := buf.get2()
 			p[0] = *dstx
 			p[1] = *srcx
@@ -499,6 +505,9 @@ func bulkBarrierPreWriteSrcOnly(dst, src, size uintptr, typ *abi.Type) {
 			break
 		}
 		srcx := (*uintptr)(unsafe.Pointer(addr - dst + src))
+		if debug.cg12checkwb != 0 {
+			cg12CheckWriteBarrierPair(addr, 0, *srcx)
+		}
 		p := buf.get1()
 		p[0] = *srcx
 	}
@@ -1432,10 +1441,16 @@ func bulkBarrierBitmap(dst, src, size, maskOffset uintptr, bits *uint8) {
 		if *bits&mask != 0 {
 			dstx := (*uintptr)(unsafe.Pointer(dst + i))
 			if src == 0 {
+				if debug.cg12checkwb != 0 {
+					cg12CheckWriteBarrierPair(dst+i, *dstx, 0)
+				}
 				p := buf.get1()
 				p[0] = *dstx
 			} else {
 				srcx := (*uintptr)(unsafe.Pointer(src + i))
+				if debug.cg12checkwb != 0 {
+					cg12CheckWriteBarrierPair(dst+i, *dstx, *srcx)
+				}
 				p := buf.get2()
 				p[0] = *dstx
 				p[1] = *srcx
@@ -1483,6 +1498,9 @@ func typeBitsBulkBarrier(typ *_type, dst, src, size uintptr) {
 		if bits&1 != 0 {
 			dstx := (*uintptr)(unsafe.Pointer(dst + i))
 			srcx := (*uintptr)(unsafe.Pointer(src + i))
+			if debug.cg12checkwb != 0 {
+				cg12CheckWriteBarrierPair(dst+i, *dstx, *srcx)
+			}
 			p := buf.get2()
 			p[0] = *dstx
 			p[1] = *srcx
