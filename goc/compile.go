@@ -2449,6 +2449,9 @@ func (g *gen) assignedNodeDoesNotEscapeWithin(
 // them, because the walk cannot tell which result carried the storage.
 func assignmentDestinations(assignment *ast.AssignStmt, expression ast.Node) ([]ast.Expr, bool) {
 	if len(assignment.Rhs) == 1 && assignment.Rhs[0] == expression {
+		if escapeRuleDisabled("spread") && len(assignment.Lhs) != 1 {
+			return nil, false
+		}
 		return assignment.Lhs, true
 	}
 	for index, rightHandSide := range assignment.Rhs {
@@ -2679,6 +2682,9 @@ func singleResultFunction(function *types.Func) bool {
 // case -- they are stored into storage that may already be reachable from the
 // heap -- so they keep the conservative answer.
 func appendDestination(call *ast.CallExpr, expression ast.Node, info *types.Info) bool {
+	if escapeRuleDisabled("appenddest") {
+		return false
+	}
 	identifier, ok := call.Fun.(*ast.Ident)
 	if !ok {
 		return false
@@ -2833,6 +2839,9 @@ func indexesWithinSameObject(index *ast.IndexExpr, info *types.Info) bool {
 // not the pointee, leaves the pointee exactly where it was, and made runtime
 // code allocate on paths where allocation is forbidden.
 func addressedVariableIdentifier(expression ast.Expr, info *types.Info) (*ast.Ident, bool) {
+	if escapeRuleDisabled("slotaddr") {
+		return addressBaseIdentifierOld(expression)
+	}
 	for {
 		switch value := expression.(type) {
 		case *ast.Ident:
@@ -2914,6 +2923,9 @@ func (g *gen) nonEscapingObjectUse(
 			// that pointer does. This is the same question the index case above
 			// asks about &v[i]. Omitting it let a package-level slice hold the
 			// address of a field of a frame allocation.
+			if escapeRuleDisabled("fieldaddr") {
+				return true
+			}
 			address := addressedExpression(parent, parents, info)
 			return address == nil || !g.addressEscapesWithin(address, info, parents, body, checking)
 		}
@@ -3056,6 +3068,9 @@ func (g *gen) compositeElementDoesNotEscape(
 	if literalType == nil {
 		return false
 	}
+	if escapeRuleDisabled("complit") {
+		return false
+	}
 	switch literalType.Underlying().(type) {
 	case *types.Struct, *types.Array:
 		return g.valueDoesNotEscapeWithin(literal, info, parents, body, checking)
@@ -3118,6 +3133,40 @@ func (g *gen) enterCalleeBody(signature *types.Signature, resultLeakBody *ast.Bl
 	}
 }
 
+
+// escapeRuleDisabled is a temporary bisection knob (GOC_ESCAPE_DISABLE=a,b,...).
+func escapeRuleDisabled(name string) bool {
+	setting := os.Getenv("GOC_ESCAPE_DISABLE")
+	if setting == "" {
+		return false
+	}
+	for _, part := range strings.Split(setting, ",") {
+		if part == name {
+			return true
+		}
+	}
+	return false
+}
+
+func addressBaseIdentifierOld(expression ast.Expr) (*ast.Ident, bool) {
+	for {
+		switch value := expression.(type) {
+		case *ast.Ident:
+			return value, true
+		case *ast.ParenExpr:
+			expression = value.X
+		case *ast.SelectorExpr:
+			expression = value.X
+		case *ast.IndexExpr:
+			expression = value.X
+		case *ast.StarExpr:
+			expression = value.X
+		default:
+			return nil, false
+		}
+	}
+}
+
 func (g *gen) parameterDoesNotEscape(function *types.Func, index int, checking map[parameterKey]bool) bool {
 	declaration, ok := g.functionDecls[function]
 	if !ok {
@@ -3155,6 +3204,9 @@ func (g *gen) parameterDoesNotEscape(function *types.Func, index int, checking m
 // simply continue from the call expression, because that expression does not
 // stand for one value; see leakedCallResultDoesNotEscape.
 func (g *gen) parameterLeaksOnlyToResult(function *types.Func, index int, checking map[parameterKey]bool) bool {
+	if escapeRuleDisabled("leaksresult") {
+		return false
+	}
 	declaration, ok := g.functionDecls[function]
 	if !ok || declaration.decl.Body == nil {
 		return false
@@ -11841,6 +11893,10 @@ func (g *gen) functionLiteralEscapesWithin(
 			// escape made a closure stored in a frame-local struct --
 			// runtime.hexdumpWords' h := hexdumper{mark: symMark} -- lift its
 			// captures, which reached copystack and scanstack.
+			if escapeRuleDisabled("closure") {
+				escapes = true
+				return true
+			}
 			if !g.nonEscapingObjectUse(use, info, parents, body, checking) {
 				escapes = true
 			}

@@ -62,3 +62,36 @@ symptom fix, which this project's rules forbid.
 
 - The mechanism. Nothing below is a conclusion yet.
 - Whether `main`'s 14% and the merged tree's 100% are the same defect.
+
+## 4. The bisect said `appendDestination`, and the bisect was wrong
+
+A temporary `GOC_ESCAPE_DISABLE=<rule>` knob was added to `goc/compile.go` to turn each of
+`2724ac7`'s rules off one at a time. At the default `GOGC`, disabling `appenddest` alone
+took the reproducer from 10/10 failing to 0/10.
+
+It is an artifact, and it is worth recording because it would have been an easy wrong answer:
+
+- The two binaries have **byte-identical code**. A symbol-resolving disassembly diff over
+  every function in both images reports four differences, all of them a `.data` displacement
+  in `runtime_load_g`, `runtime_save_g`, `runtime_memclrNoHeapPointers` and
+  `__do_global_dtors_aux`.
+- The whole difference is **168 bytes of dead `.data`**: the passing image carries three
+  extra type descriptors (`[16]*main.vertex` and two `[44]byte`) that nothing references —
+  verified by scanning every 8-byte word of every PT_LOAD segment for their addresses; the
+  only references are each descriptor's own `gcdata`.
+- Re-measured at `GOGC=10`, the "fix" evaporates: `appenddest`-disabled fails **16/50**, and
+  all-seven-rules-disabled fails **7/50**.
+
+`goc build-runtime` caches its pack keyed on the compiler binary and the standard library,
+not on the environment, so every bisect arm linked the *same* runtime pack — the knob only
+varied the program's own module. That does not change the conclusion, it sharpens it: the
+program module's code was identical and the outcome still flipped 100% -> 0%.
+
+## 5. Therefore: one defect, on `main`, that the escape change exposes far more often
+
+Every arm fails at `GOGC=10`, including `main` itself (3/50 in this batch, 14/100 in the
+earlier one). Nothing in `2724ac7` is the cause; what it does is raise the exposure of a
+pre-existing defect from a few percent to certainty. Chasing the escape rules further would
+have been chasing a rate, which §15 of the plan warns about in exactly these words.
+
+The hunt is now for the defect itself.
