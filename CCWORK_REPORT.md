@@ -523,3 +523,124 @@ though: **`opt.OptimizeModule` sends every goc module to `BoundedPipeline`**
 link, it is not `inline`, `mem2reg`, `jumpthread`, `ifconvert` or `gcm`; those
 never run on a goc module. That narrows their search to `fold`, `copy`, `dce` and
 the split itself.
+
+---
+
+# `mspan.reportZombies` is blind on Green Tea spans — `ccwork/reportzombies`
+
+**Status: investigation in progress; this file is updated as each result lands.**
+
+## The defect, read out of the source
+
+`stdlib/src/runtime/mgcsweep.go` `sweepLocked.sweep`:
+
+- line 655: `if gcUsesSpanInlineMarkBits(s.elemsize) { s.moveInlineMarks(s.gcmarkBits) }`
+  — merges the span's inline mark bits into `s.gcmarkBits` **and clears them**
+  (`imb.init(s.spanclass, true)` at `mgcmark_greenteagc.go:215`).
+- lines 660-676: the zombie *check* reads `s.gcmarkBits` directly. Correct.
+- line 862, inside `reportZombies`: `mbits := s.markBitsForBase()`, which on a
+  Green Tea span returns `&s.inlineMarkBits().marks[0]`
+  (`mgcmark_greenteagc.go:239`) — the bits `moveInlineMarks` just zeroed.
+
+So on every span with `16 <= elemsize <= 512` (`gcUsesSpanInlineMarkBits` =
+`heapBitsInSpan(size) && size >= 16`), the report prints every object `unmarked`,
+never prints the `zombie` line, and never hexdumps the object — while still
+throwing `found pointer to free object`.
+
+Both `reportZombies` call sites (mgcsweep.go:668 and :673) are after the
+`moveInlineMarks`, so there is no call path on which the inline bits are still
+live.
+
+## It is a genuine upstream Go bug, not a cg12 artifact
+
+The three files involved — `mgcsweep.go`, `mgcmark_greenteagc.go`,
+`mgcmark_nogreenteagc.go` — are **byte-identical** to `go1.26.1`'s
+(`diff -u $(go env GOROOT)/src/runtime/... stdlib/src/runtime/...` is empty), and
+`goexperiment.greenteagc` is on by default in Go 1.26, so the host toolchain
+compiles the same code path goc does (`build.Default.ToolTags` contains
+`goexperiment.greenteagc`).
+
+It reproduces on the **host toolchain with no cg12 involved at all**.
+`$TMPDIR/zomb/zombie.go` (kept as `cmd/goc/testdata/zombie_report_probe.go`)
+builds a genuine zombie the way `reportZombies`' own comment describes as case 1:
+allocate 64 32-byte pointer-free objects, keep 63 alive in a global, hide the
+64th as a `uintptr`, let one collection free it, resurrect it through the
+`uintptr` into a global, and collect again.
+
+| build | zombie lines | `marked` | `unmarked` | hexdump |
+| --- | --- | --- | --- | --- |
+| `go build` (Green Tea, default) | **0** | 0 | 252 | none |
+| `GOEXPERIMENT=nogreenteagc go build` | 1 | 64 | 191 | yes |
+
+Green Tea, exactly as §5.11 predicted:
+
+```
+runtime: marked free object in span 0xfb1799233e08, elemsize=32 freeindex=0 (...)
+0x2f2767122000 alloc unmarked
+... 252 lines, every one "unmarked", no "zombie" line ...
+fatal error: found pointer to free object
+```
+
+`nogreenteagc`, the same program and the same fault:
+
+```
+0x3af6b140e500 free  marked   zombie
+                   7 6 5 4  3 2 1 0   f e d c  b a 9 8  0123456789abcdef
+00003af6b140e500: 7a6f6d62 69650028  11111111 11111111  (.eibmoz........
+00003af6b140e510: 22222222 22222222  33333333 33333333  """"""""33333333
+```
+
+`0x7a6f6d6269650028` is the payload the program wrote into object index 40 —
+the report names the right object and dumps its contents.
+
+**Verdict: upstream bug, in upstream's own code, on upstream's own default
+configuration.** `reportZombies` was simply not updated when Green Tea moved
+small-span marks into the span. Everything else in `sweep` that reads marks after
+`moveInlineMarks` already reads `gcmarkBits`: the zombie check itself
+(mgcsweep.go:667,672) and `countAlloc` (mbitmap.go:1507). `reportZombies` is the
+one straggler. The pre-move `traceAllocFree`/`clobberfree` loop at mgcsweep.go:620
+*does* correctly use `markBitsForBase`, because at that point the inline bits are
+still the live ones — checked, because if it were wrong `clobberfree` would be
+scribbling on live objects. It is not wrong.
+
+`gcmarknewobject` (mgcmark.go:1813) also marks through `markBitsForIndex`, which
+routes to the inline bits on such a span, so there is no mark that reaches
+`gcmarkBits` by another route and no ordering hazard in reading it.
+
+## The fix
+
+`stdlib/src/runtime/mgcsweep.go`, one statement plus comments, written the way a
+CL would be:
+
+```go
+	mbits := markBits{&s.gcmarkBits.x, uint8(1), 0}
+```
+
+in place of `mbits := s.markBitsForBase()`, with a comment on the function saying
+it must be called after inline marks have been moved. Both call sites (:668, :673)
+are already after `moveInlineMarks`, so there is no path this breaks; on a
+non-Green-Tea span the expression is exactly what `markBitsForBase` returned.
+
+### Proved on the fault, through goc
+
+Same program, compiled by goc, before and after:
+
+| goc build | zombie lines | `marked` | `unmarked` |
+| --- | --- | --- | --- |
+| before the fix | **0** | 0 | 252 |
+| after the fix | **1** | 64 | 188 |
+
+After:
+
+```
+0x727a33d024e0 alloc marked
+0x727a33d02500 free  marked   zombie
+                   7 6 5 4  3 2 1 0   f e d c  b a 9 8  0123456789abcdef
+0000727a33d02500: 7a6f6d62 69650028  11111111 11111111  (.eibmoz........
+0000727a33d02510: 22222222 22222222  33333333 33333333  """"""""33333333
+0x727a33d02520 alloc marked
+```
+
+Same object index (40), same payload, same shape as the `nogreenteagc` reference
+above. `fatal error: found pointer to free object` still follows, as it must.
+

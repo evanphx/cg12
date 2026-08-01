@@ -856,10 +856,19 @@ func (sl *sweepLocked) sweep(preserve bool) bool {
 // 3. The GC two cycles ago missed a pointer and freed a live object,
 // but it was still live in the last cycle, so this GC cycle found a
 // pointer to that object and marked it.
+//
+// reportZombies must be called from the sweeper, after any inline mark bits
+// have been moved into s.gcmarkBits, because that is the bitmap it reads.
 func (s *mspan) reportZombies() {
 	printlock()
 	print("runtime: marked free object in span ", s, ", elemsize=", s.elemsize, " freeindex=", s.freeindex, " (bad use of unsafe.Pointer or having race conditions? try -d=checkptr or -race)\n")
-	mbits := s.markBitsForBase()
+	// Read the marks out of gcmarkBits rather than through markBitsForBase.
+	// On a span with inline mark bits, sweep has already merged them into
+	// gcmarkBits and cleared them, so markBitsForBase would return the cleared
+	// inline bits: every object would print as unmarked and the zombie the
+	// caller detected would never be named or dumped. gcmarkBits is also the
+	// bitmap the caller's zombie check consulted.
+	mbits := markBits{&s.gcmarkBits.x, uint8(1), 0}
 	abits := s.allocBitsForIndex(0)
 	for i := uintptr(0); i < uintptr(s.nelems); i++ {
 		addr := s.base() + i*s.elemsize
