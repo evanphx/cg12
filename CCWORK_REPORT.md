@@ -1,357 +1,328 @@
-# A checker that says "this escape decision disagrees with the emitted code"
-
-Branch `ccwork/escape-checker`, off `main` (`ad4e9b2`). The task: build the check that
-would have caught `ccwork/escape-analysis`'s `2724ac7` before it merged, rather than
-letting it arrive as `fatal error: found bad pointer in Go heap` in the collector,
-minutes later, in an unrelated goroutine. **Not** to fix the bug — `ccwork/escape-gc-fix`
-owns that.
-
-**Result: `opt.FrameEscapes` plus `TestFrameEscapeAudit`.** The test compiles all 384
-corpus programs, audits the finished IR, and compares against an accepted baseline. It
-passes on `main` and fails on `main + 2724ac7`, naming four publications the compiler
-made that it did not make before, two of them in corpus programs and one of them in
-`crypto/internal/fips140`. It also fails on `main + 2724ac7 + 9f76498` with three of
-those four, which is how the second commit's effect was established.
-
-The runtime counterpart (`cg12checkwb`) was widened too, and the honest headline about it
-is in section 2: **it could not have caught this bug, and the reason is structural.**
-
-This file was written as each result landed; sections are in the order they were
-measured.
-
-## 1. Reproduced, and the reproduction is configuration-dependent
-
-`main` + `2724ac7` (cherry-picked; only `CCWORK_REPORT.md` conflicted, `goc/compile.go`
-merged clean and the applied diff is the same 488 insertions as the original commit).
-
-    go test ./cmd/goc -run TestARM64RuntimeCapabilityStatus/gc-invariants/mark-workers
-    runtime: pointer 0x4167d380fd40 to unallocated span span.base()=0x4167d380e000
-    fatal error: found bad pointer in Go heap (incorrect use of unsafe or cgo?)
-    --- FAIL (32s)
-
-**The failure needs the split build.** Built monolithically (`goc -o out prog.go`) the
-same tree passes 20/20 runs. Built the way the matrix does it — `goc build-runtime -o
-pack.gocrt -packages ""` then `goc -runtime pack.gocrt -o out prog.go` — it fails 10/10.
-Anyone reducing this bug with a plain `goc prog.go` will conclude it is fixed when it is
-not. Worth knowing before the next bisect.
-
-Cross-linking the two halves says which one carries it. Both packs have the same stdlib
-fingerprint, so either compiler's program module links against either pack:
-
-| program module compiled by | linked against pack from | runs |
-| --- | --- | ---: |
-| `main` | `main` | 0/6 failed |
-| `main` | `main + 2724ac7` | 0/6 failed |
-| `main + 2724ac7` | `main` | **6/6 failed** |
-| `main + 2724ac7` | `main + 2724ac7` | **6/6 failed** |
-
-**The defect travels with the program module, not with the pack.** And that program
-module is not a different compilation from the monolithic one: `goc -runtime` runs the
-same whole-program `compile()` and applies the subtraction last, which is why the escape
-audit reports exactly the same two findings for `runtime_gc_mark_workers.go` in both
-configurations (`runtime.recovery` and `runtime.cgocallbackg1`, on both trees). So the
-program's own code is identical in the two builds and only the *linked* runtime differs:
-the pack's runtime is compiled by a separate `build-runtime` process from a generated
-root, the monolithic one is compiled alongside `main`. Which of those two runtimes is
-linked decides whether a program module carrying this defect faults. The mechanism is not
-established here and is `ccwork/escape-gc-fix`'s to find; the measurements above are, and
-they narrow it a long way.
-
-## 2. Does `cg12checkwb=2` already catch this? No, and the reason generalises
-
-The brief asks this first, so it is answered first, with measurements rather than
-reading.
-
-**No.** Neither `cg12checkwb=2` as it stood, nor a `=3` that widens the rule from "a
-stack address into a global" to "a stack address into anything that outlives the frame",
-catches `2724ac7`. Both were built and run against the failing tree; the collector throws
-later exactly as it did without them.
-
-Three separate reasons, each of which matters for anything built on that diagnostic:
-
-1. **The hook was on one function, and it missed the bulk barriers.**
-   `cg12CheckWriteBarrierPair` was called only from `runtime.atomicwb`. That is less
-   narrow than it sounds — every barriered pointer store goc emits goes `goc_storep →
-   runtime.atomicstorep → atomicwb`, so ordinary Go stores were covered. But
-   `bulkBarrierPreWrite` and `bulkBarrierPreWriteSrcOnly` push words straight into the
-   write-barrier buffer, and those are the paths `typedmemmove`, `growslice` and
-   `typedslicecopy` take. This branch adds the same validation to both
-   (`stdlib/src/runtime/mbitmap.go`). With it, the mark-workers fault moves from "the
-   background marker that happened to drain the buffer" to `main.buildGraph`'s own
-   `growslice`, in the goroutine that owns the bad word — a real improvement, and how
-   the shape of the corruption below was measured.
-
-2. **A barrier-based check has a duty cycle: it only runs during a mark phase.** A wrong
-   escape decision publishes a frame address *whenever the program runs*.
-   Measured: on the failing tree, `runtime_slice_pointer_append_gc.go` and
-   `runtime_debug_gc_controls.go` each store a frame-resident backing array into a fresh
-   heap object, and both run clean under `cg12checkwb=3`, because the store happens with
-   `writeBarrier.enabled` false and nothing looks at it. This is the structural reason,
-   and it applies to any check placed inside a write barrier.
-
-3. **By the time anything looks, the value is often not a stack address.** In the
-   mark-workers fault the rejected word is `0x…79f20`, in a span with `state=1`,
-   `elemsize=16`, `limit=0x…79f00` — i.e. *past the last object* of a live 16-byte span.
-   That is a pointer to an object that was freed and whose span was recycled into a
-   different size class, not a live goroutine stack. A rule phrased as "reject a
-   goroutine stack address" cannot see it.
-
-`cg12checkwb=3` is still worth having, and is in this branch: it is the tightest
-statement of the invariant available at a barrier, and it is now exercised by
-`TestARM64WriteBarrierAuditRunsClean` in `make test-goc-cmd` so it does not become
-another mode nobody runs. But it is not the answer to this class of bug.
-
-## 3. The compile-time check: `opt.FrameEscapes`
-
-`opt/framecheck.go`. It runs over the finished IR, after `opt.LowerHeapAllocations`, and
-answers one question per function: *does any pointer derived from one of this function's
-own frame allocations get stored somewhere that is not part of the same frame?*
-
-That is the verifier for a decision nothing checked. The front end decides, per Go
-expression, whether an allocation may stay in a frame; `opt.LowerHeapAllocations` decides
-the same thing again for the candidates the front end leaves open. Neither decision is
-compared against the code that is finally emitted.
-
-It is a may-analysis over one function at a time. A value is frame-derived when it is an
-`OAlloc*`/`OAllocN` result, or reaches one through copies, casts, pointer arithmetic,
-phis, the memory helpers that return their destination, or a load from a frame slot a
-frame address was stored into. A finding is one of:
-
-- `store` — a plain `OStore*` of a frame-derived value to a destination that is not a
-  frame allocation of this function;
-- `barrier` — the same through `goc_storep`, which is what a pointer field of a heap
-  object receives;
-- `return` — a function returning the address of its own frame.
-
-Destinations are classified into categories rather than temporaries — a global, the
-caller's result area, memory reached through a parameter, through a call result (with the
-callee named), through a loaded pointer — so a finding's identity survives the
-renumbering that any unrelated change causes. That is what makes a baseline possible.
-
-Values that merely *reach a call* are deliberately not reported: `&local` passed to a
-callee is how Go is written, and whether the callee retains it is the interprocedural
-question the front end already answers. What is reported is the store the callee
-actually performs.
-
-`GOC_DEBUG_ESCAPECHECK=1` prints the findings from any `goc` compilation, next to the
-existing `GOC_DEBUG_NOSPLIT` audit.
-
-## 4. It finds the bug, and that is checked by a test that runs
-
-`TestFrameEscapeAudit` (`goc/framecheck_test.go`) compiles every `goc/testdata/*.go`
-— all 384 — collects the findings, and compares them against
-`goc/testdata/frame_escape_baseline.txt`. It fails on a publication the baseline does not
-list **and** on a listed publication that has gone away, so the file tracks the compiler
-instead of drifting from it. It lives in package `goc`, so `make test-goc-corpus` runs
-it; no new target and no new configuration that nobody exercises.
-
-| Tree | `TestFrameEscapeAudit` | new findings |
-| --- | --- | --- |
-| `main` (`ad4e9b2`) | **PASS** | — |
-| `main` + `2724ac7` | **FAIL** | 4 |
-| `main` + `2724ac7` + `9f76498` | **FAIL** | 3 |
-
-The four on `2724ac7`:
-
-    stdlib/src/crypto/internal/fips140/bigmod/nat.go:951:28  bigmod.Nat.Mul
-        barrier into memory reached through a call result $runtime.newobject
-    stdlib/src/regexp/regexp.go:1118:30  regexp.Regexp.FindAllStringIndex.func.1116.27
-        barrier into memory reached through a loaded pointer
-    testdata/runtime_debug_gc_controls.go:32:20        main.main
-        barrier into memory reached through a call result $runtime.newobject
-    testdata/runtime_slice_pointer_append_gc.go:25:20  main.main
-        barrier into memory reached through a call result $runtime.newobject
-
-The two corpus ones are the same shape and are worth reading, because they are the defect
-in four lines of Go:
-
-```go
-values := make([]*record, 0, 4)      // 2724ac7: alloc8 32 — the backing array is in the frame
-for index := 0; index < 128; index++ {
-        values = append(values, &record{value: index})
-}
-runtime.KeepAlive(values)            // boxes the slice into runtime.newobject and stores
-                                     // the header, data pointer included, into it
-```
-
-On `main` that array is a `runtime.newobject` and there is no finding. Neither program
-*fails* at run time, because by line 25 the slice has grown past capacity 4 and the data
-pointer is heap again. That is the whole point of a static check: it reports the wrong
-decision whether or not this run's data happens to trigger it, and it reports it at
-compile time in the function that made it.
-
-`9f76498` removes the `regexp` one and leaves the other three. It does **not** fix
-`gc-invariants/mark-workers`: that capability still fails on `main + 2724ac7 + 9f76498`,
-with a different signature — `SIGSEGV` in `runtime.getGCMask` /
-`mspan.typePointersOfUnchecked` rather than `found bad pointer in Go heap`. So the second
-commit changes the failure without removing it. (Measured on a clean cherry-pick: only
-`CCWORK_REPORT.md` conflicted; `goc/compile.go` applied without conflict, +49 lines,
-matching the original commit.)
-
-## 5. What it does not catch, stated plainly
-
-`gc-invariants/mark-workers` itself produces **no** new finding. Its `buildGraph` does
-put `frontier`'s one-element backing array in the frame under `2724ac7` — `%t16 = alloc8
-8` where `main` emits `runtime.newobject` — but that array is only ever stored into
-another frame slot, so the rule does not fire. Whatever carries it out of the frame is
-not a store this analysis can see.
-
-The gaps this analysis has, in order of how likely they are to matter:
-
-- **`OBlit` and `goc_memcpy` of an aggregate.** A byte-copy of a struct that contains a
-  frame pointer word is invisible: the analysis has no types, so it cannot say which
-  words of the copied region are pointers. The compiler routes *barriered* pointer words
-  of an aggregate through `goc_storep` (`storePointerAwareInlineValue`), which is
-  covered; a word the compiler decided did not need a barrier travels with the memcpy
-  and is not.
-- **Slot tracking is per-slot, not per-path.** A frame slot that receives a frame address
-  is treated as holding one from then on, which over-reports on paths where it was
-  overwritten, and a slot written through a non-constant offset is not tracked at all,
-  which under-reports.
-- **Calls are not reported.** By design (above), but it means a frame address handed to a
-  callee that stores it somewhere this analysis then cannot attribute — for instance into
-  memory reached through a parameter three frames down — is only caught if that callee is
-  in the same module.
-
-## 6. What it found on `main`, which is not nothing
-
-The baseline is 196 publications on a green tree. It is a record of what the compiler
-does, not a certificate that any of it is safe. By category:
-
-| Count | Shape |
-| ---: | --- |
-| 149 | `barrier` into **the caller's result area** |
-| 26 | `barrier` into a **`runtime.newobject`** result |
-| 13 | `barrier` into a **loaded pointer** |
-| 4 | `return` **to the caller** |
-| 2 | `barrier` into a **`runtime.mapassign`** result |
-| 2 | `barrier` into an **opaque pointer** |
-
-Two of these were read in full.
-
-**The 149 are one convention.** cg12 represents a `string`, an interface, an `error` or a
-`complex128` as a pointer to a sixteen-byte value, and returns one by storing the address
-of a *frame slot* into the caller's result area. `syscall.read` is the clearest:
-
-    %t39 =p alloc8 16                       ← the error header, in read's own frame
-    ...
-    call $goc_storep(p %result1, p %t39)    ← the caller gets a pointer to it
-    ret
-
-The caller then holds a pointer into a frame that no longer exists. In practice the
-caller copies the two words immediately, which is why nothing has failed; a stack copy
-between the return and the copy would not adjust it, and a collector scanning the caller
-at that moment would not trace whatever the interface points at. This is
-`RUNTIME_PLAN.md` §5.15's residual — the same "a sixteen-byte value lives behind a
-pointer to a frame slot" defect, reached through function results rather than through a
-closure assignment — and it is much wider than §5.15 records.
-
-**`runtime_goroutine_closure_gc.go:12:9` is a live one, on `main`.**
-
-```go
-go run(func() int { return value + 2 }, done)
-```
-
-lowers to
-
-    %t4 = call $runtime.newobject(...)   ← the goroutine's argument struct, on the heap
-    %t5 =p alloc8 16                     ← the closure funcval, in start's FRAME
-    storel $main.start.func.12.9, %t5
-    storel %t1, %t5+8                    ← env = &value, also a frame slot
-    call $goc_storep(p %t4+8, p %t5)     ← the frame funcval address, into the heap struct
-    call $runtime.newproc(p %t4)
-
-`start` then blocks on `<-done`, so its frame is still alive while the goroutine runs,
-which is why the program passes. But a stack copy of `start` while the goroutine is live
-would leave the heap word pointing at the old stack, which is §5.8's invariant reached by
-a third route. This is not recorded anywhere in `RUNTIME_PLAN.md` and was found by
-running the checker over a green tree.
-
-Neither was fixed here; fixing them is not this job. They are listed in the baseline so
-that the file is honest about being a description rather than an approval, and so the
-next change to either is visible.
-
-## 7. Cost
-
-- `TestFrameEscapeAudit`: **2m20s wall, 24 CPU-minutes**, 8 workers, on a tree with a
-  warm build cache. Essentially all of it is compiling 384 programs; the analysis itself
-  is linear in instruction count and does not register on a profile. It is bounded to 8
-  workers so a corpus-wide run does not multiply goc's ~380 MiB peak by the core count.
-- `opt.FrameEscapes` is not called during a normal compilation. `GOC_DEBUG_ESCAPECHECK`
-  gates the only in-compiler call site, so the default path is unchanged.
-- The runtime check adds one `debug.cg12checkwb != 0` test per pointer word in the bulk
-  barriers and is off by default.
-
-## 8. Suites
-
-| Suite | Result |
-| --- | --- |
-| `go build ./...`, `go vet ./...` | clean |
-| `make test-unit` | PASS |
-| `make test-goc-cmd` | PASS, 293.7s — includes the new `TestARM64WriteBarrierAuditRunsClean` |
-| `make test-goc-corpus` | PASS, 713.1s — includes the new `TestFrameEscapeAudit` |
-| `make test-goc-status` | **363 subtests / 363 PASS / 0 FAIL / 0 SKIP / 1 declared EXPECTED FAILURE / 0 KNOWN GAP**, 212.9s |
-| `make test-goc-status-opt` | **363 subtests / 362 PASS / 1 FAIL / 0 SKIP / 1 declared EXPECTED FAILURE / 0 KNOWN GAP**, 239.4s |
-| compilation determinism | 384 corpus programs, 2 compiles each, **384 SAME / 0 DIFFER** |
-
-Censused with `-v` and a per-subtest count, not `ok`. Both arms ran with
-`-runtime-status-compile-workers=8`, this job's declared share.
-
-### The one non-passing capability, and it is not this branch's
-
-    --- FAIL: TestARM64RuntimeCapabilityStatus/stack-scan/loop-safepoints   (-runtime-opt only)
-    panic: a stack slot live across a loop back edge was not a GC root
-
-**This is pre-existing.** Measured, not assumed: a clean worktree at `origin/main`
-(`ad4e9b2`), same box, same targeted run with `-runtime-opt`, fails identically. It is the
-open item `RUNTIME_PLAN.md` §6.1 records under "Open: with `-O`, a loop-carried local is
-not a GC root", with its own reducer at `goc/testdata/runtime_opt_loop_carried_root.go`,
-and §6.1 already reports it failing 10/10 at `main` (`0505d90`). The brief's
-non-negotiable states `main` is clean in both arms; for the optimized arm that is not the
-case, and this branch does not change it either way. That is the complete list of
-non-passing capabilities: one, in one arm, pre-existing.
-
-The determinism sweep is 2 rounds, not §23's depth: 768 compiles, 0 varying. What makes
-that proportionate is that nothing on the default compile path changed —
-`reportFrameEscapes` returns before doing anything without `GOC_DEBUG_ESCAPECHECK`, and
-`opt.FrameEscapes` has no other in-compiler call site — not that 2 rounds would be enough
-for a compiler change. `TestCompilingTheSameSourceTwiceGivesTheSameModule` and
-`TestParallelBackendIsByteIdenticalToSerial` also ran, inside `make test-goc-corpus`.
-
-## 9. What changed
-
-| File | What |
-| --- | --- |
-| `opt/framecheck.go` | `opt.FrameEscapes`, the audit |
-| `opt/framecheck_test.go` | 12 unit tests: each finding shape, each thing that must stay silent, and key stability under renumbering |
-| `goc/framecheck_test.go` | `TestFrameEscapeAudit`, the corpus run and the baseline comparison |
-| `goc/testdata/frame_escape_baseline.txt` | the 196 accepted publications, with a header saying what the file is and is not |
-| `goc/compile.go` | `reportFrameEscapes`, gated on `GOC_DEBUG_ESCAPECHECK` |
-| `stdlib/src/runtime/mwbbuf.go` | `cg12checkwb=3` |
-| `stdlib/src/runtime/mbitmap.go` | the same validation in `bulkBarrierPreWrite` and `bulkBarrierPreWriteSrcOnly` |
-| `cmd/goc/main_test.go` | `TestARM64WriteBarrierAuditRunsClean`, so the modes are exercised |
-| `RUNTIME_PLAN.md` | §25; §6's compiler-emitted-check list; §13 item 5's correction; two additions to §5.10 |
-
-## 10. Still unverified, and what I would do next
-
-- **`gc-invariants/mark-workers`'s own mechanism is not established.** The audit does not
-  fire on it, the cross-link measurement says the program module carries it, and that is
-  where I stopped: `ccwork/escape-gc-fix` owns the fix, and further reduction is its work,
-  not this branch's. Section 5 lists the analysis gaps that could account for it.
-- **The 196 baseline entries are classified into shapes, not individually reviewed.** Two
-  were read in full (section 6) and both are real hazards. The other 194 are recorded as
-  what the compiler does. Anyone treating the file as an approval list is misreading it;
-  the header says so.
-- **A compiler-emitted store check was designed but not built.** Section 2's second
-  reason — a barrier-based check only runs during a mark phase — has an obvious answer:
-  have `gen.store` emit `runtime.cg12CheckStackPublication(address, value)` alongside
-  `goc_storep`, under a compile-time flag, for packages other than `runtime` (the
-  runtime's own legitimate stack publications, `sudog.elem` above all, are all inside it
-  and are maintained by hand in `copystack`). That would validate every pointer store,
-  not the ones that happen during a mark phase. It is not built here: it is codegen, and
-  codegen shipped without a full validation pass is exactly what this project's §14 warns
-  about. The static audit covers the same ground without touching the emitted code.
-- **The audit does not look at the `-O` configuration.** `TestFrameEscapeAudit` compiles
-  without optimization. Since the one non-passing capability in the whole matrix is an
-  `-O`-only stack-map defect, an `-O` arm of the audit is the obvious next thing to add,
-  with its own baseline. Not done here.
+# Merge gate: `ccwork/merge-verify` (8f29b3f)
+
+`main` (`ad4e9b2`) + `ccwork/escape-gc-fix` + `ccwork/escape-checker`.
+This file is written as each result lands; sections are in the order they were measured.
+(The previous contents of this file were `ccwork/escape-checker`'s report; it is
+unchanged on that branch and in history at `8f29b3f:CCWORK_REPORT.md`.)
+
+---
+
+## 1. THE CONFLICT RESOLUTION IN `stdlib/src/runtime/mbitmap.go` — **NOT CORRECT AS
+   RESOLVED. It lost checking power. Fixed on this branch.**
+
+### What the two sides did
+
+Both branches instrumented the *same three* sites in `mbitmap.go`
+(`bulkBarrierPreWrite`'s two arms and `bulkBarrierPreWriteSrcOnly`):
+
+    escape-checker:  cg12CheckWriteBarrierPair(addr, *dstx, *srcx)
+    escape-gc-fix:   cg12CheckBulkBarrierWord(addr, *dstx, *srcx, dst, src, size)
+
+`escape-gc-fix` additionally instrumented two sites `escape-checker` did not
+(`bulkBarrierBitmap` and `typeBitsBulkBarrier`, mbitmap.go:1441 and :1498) — so on
+*sites* the resolution is a strict superset (5 vs 3). Verified by diffing each branch's
+`mbitmap.go` against `main`; the merged file is byte-identical to `escape-gc-fix`'s.
+
+### The loss
+
+The two functions are **not** in a superset relation, because of the fast-path gate in
+the bulk wrapper (`stdlib/src/runtime/mwbbuf.go`):
+
+    func cg12CheckBulkBarrierWord(slot, old, new, dst, src, size uintptr) {
+        if !cg12WriteBarrierValueIsBad(old) && !cg12WriteBarrierValueIsBad(new) {
+            return                      // <-- only mode 1's rule
+        }
+        ...record range...
+        cg12CheckWriteBarrierPair(slot, old, new)
+    }
+
+`cg12CheckWriteBarrierPair` enforces **three** rules, not one:
+
+| mode | rule | in the bulk gate? |
+|---|---|---|
+| `cg12checkwb=1` | `old`/`new` is a word `findObject` would reject | yes |
+| `cg12checkwb=2` | `new` is a goroutine stack address and `slot` is a global (`stackNew`) | **no** |
+| `cg12checkwb=3` | `new` is a goroutine stack address and `slot` is not on any stack (`published`) | **no** |
+
+So a bulk copy that publishes a goroutine stack address — a `typedmemmove`,
+`growslice`, or `typedslicecopy` of a struct or slice element holding a frame address
+into a heap object or a global — returns from `cg12CheckBulkBarrierWord` at the first
+`if` and is never seen at modes 2 and 3. On `escape-checker`, those same three sites
+called `cg12CheckWriteBarrierPair` directly and *did* see it.
+
+This is not the loss of a mode nobody runs: mode 3 is the escape checker's whole
+runtime counterpart, and `TestARM64WriteBarrierAuditRunsClean` (`cmd/goc`, part of
+`make test-goc-cmd`) runs six programs under `cg12checkwb=1` **and** `cg12checkwb=3`.
+With the resolution as written, that suite's mode-3 arm no longer examines any word
+that reaches the buffer through a bulk barrier.
+
+Note the asymmetry that made this easy to miss: it is a *merge-induced* regression, not
+a defect on either parent. On `escape-gc-fix` alone, `cg12CheckWriteBarrierPair` had no
+`published` rule at all (mode 3 arrived with `escape-checker`), and its mode-2 rule
+requires a *global* slot, which a bulk `dst` rarely is — so there the narrow gate cost
+almost nothing. The merged `mwbbuf.go` took `escape-checker`'s three-rule
+`cg12CheckWriteBarrierPair` and `escape-gc-fix`'s one-rule gate: a combination that
+existed on neither parent.
+
+### The fix (committed on this branch)
+
+`cg12WriteBarrierWordIsRejected(slot, old, new)` is factored out as the single gate, and
+both `cg12CheckWriteBarrierPair` and `cg12CheckBulkBarrierWord` use it. The bulk path
+now enforces exactly the same rule set as the single-word path at every mode, and the
+two cannot drift apart again.
+
+Two properties were deliberately preserved rather than "cleaned up":
+
+- The gate still runs *before* `cg12BulkBarrierRange` is written, so that range global
+  is still only written on the path that immediately throws. RUNTIME_PLAN.md records
+  that an always-written range global raced between two goroutines in
+  `bulkBarrierPreWriteSrcOnly` and reported a range from the wrong call. Making the
+  wrapper unconditionally record and delegate would have reintroduced exactly that.
+- Everything stays `//go:nosplit`, and the fast path's call depth is unchanged
+  (`bulk -> gate -> valueIsBad`, as before).
+
+Calling both functions at the three sites — the other repair the brief allowed — was
+rejected: it double-scans every barriered word and emits two reports for one bad write.
+
+`cg12CheckWriteBarrierPair` remains live from `atomic_pointer.go:35` and from the bulk
+wrapper; nothing became dead. Confirmed by grep.
+
+### One unrelated nit, pre-existing on `escape-checker`, not fixed
+
+`mwbbuf.go`'s doc comment ends "see `cg12StackPublicationChecked`". No such symbol
+exists in the tree, on either parent, or on `main`; it names a compiler-side check
+RUNTIME_PLAN.md explicitly says was *designed but not built*. A dangling comment
+reference, not a behaviour defect. Left alone: it is not the merge's doing.
+
+---
+
+*(gate results follow as they land)*
+
+## 2. Gate item 1 — gofmt / build / vet
+
+    $ gofmt -l .
+    stdlib/src/net/http/pprof/testdata/delta_mutex.go
+    stdlib/src/runtime/testdata/testgoroutineleakprofile/goker/cockroach10214.go
+    stdlib/src/runtime/testdata/testgoroutineleakprofile/goker/cockroach10790.go
+    stdlib/src/runtime/testdata/testgoroutineleakprofile/goker/cockroach1462.go
+    stdlib/src/runtime/testdata/testgoroutineleakprofile/goker/cockroach16167.go
+    stdlib/src/runtime/testdata/testgoroutineleakprofile/goker/cockroach2448.go
+    stdlib/src/runtime/testdata/testgoroutineleakprofile/goker/hugo3251.go
+    stdlib/src/runtime/testdata/testgoroutineleakprofile/goker/syncthing4829.go
+    stdlib/src/runtime/testdata/testprog/gomaxprocs.go
+    stdlib/src/runtime/testdata/testprog/gomaxprocs_windows.go
+    stdlib/src/runtime/testdata/testprog/stw_mexit.go
+    stdlib/src/runtime/testdata/testprog/stw_trace.go
+    stdlib/src/runtime/testdata/testprognet/waiters.go
+
+**PASS, with a stated qualification.** Not literally empty, but **pre-existing on
+`main` and untouched by the merge**: all thirteen are vendored upstream Go testdata,
+and none of them appears in `git diff --name-only ad4e9b2 HEAD`, whose sixteen entries
+are the whole merge (listed in §9). Same list, same reason, on `main`. Every file the
+merge does touch is gofmt-clean, including the fix in §1.
+
+    $ go build ./...      -> exit 0, no output          PASS
+    $ go vet ./...        -> exit 0, no output          PASS
+
+(Both fast, ~2.5 s, because the build cache on this box is warm from the parent jobs;
+`go build` on a cold cache is checked in §9's cold run.)
+
+## 3. Gate item 2 — `make test-unit` — **PASS**
+
+    $ make test-unit
+    ok  github.com/evanphx/cg12/amd64            0.639s
+    ok  github.com/evanphx/cg12/amd64/x64        0.038s
+    ok  github.com/evanphx/cg12/analysis         0.039s
+    ok  github.com/evanphx/cg12/arm64            7.289s
+    ok  github.com/evanphx/cg12/arm64/a64        0.073s
+    ok  github.com/evanphx/cg12/bpf              0.690s
+    ok  github.com/evanphx/cg12/cmd/cc           0.787s
+    ok  github.com/evanphx/cg12/cmd/cg12         0.038s
+    ok  github.com/evanphx/cg12/internal/backendtest  0.135s
+    ok  github.com/evanphx/cg12/internal/gometa  0.056s
+    ok  github.com/evanphx/cg12/internal/runtimepack 0.038s
+    ok  github.com/evanphx/cg12/internal/testenv 0.024s
+    ok  github.com/evanphx/cg12/interp           0.042s
+    ok  github.com/evanphx/cg12/ir               0.042s
+    ok  github.com/evanphx/cg12/lift             0.967s
+    ok  github.com/evanphx/cg12/link             1.970s
+    ok  github.com/evanphx/cg12/lower            0.039s
+    ok  github.com/evanphx/cg12/obj              0.311s
+    ok  github.com/evanphx/cg12/opt              0.944s
+    ok  github.com/evanphx/cg12/parse            0.672s
+    ok  github.com/evanphx/cg12/pe               1.267s
+    ok  github.com/evanphx/cg12/plan9asm          0.267s
+    ok  github.com/evanphx/cg12/plan9asm/sem     0.040s
+    ok  github.com/evanphx/cg12/wasm             0.043s
+    real 0m8.814s   EXIT 0
+
+24 packages `ok`, 10 `[no test files]`, none cached (`go test` printed real per-package
+times, not `(cached)`).
+
+**Counted, not assumed.** Re-run with `-count=1 -v` over the identical package list:
+
+    --- PASS (top level)   1073
+    --- PASS (incl. subtests) 1556
+    --- FAIL                  0
+    --- SKIP                339
+
+The 339 skips are all missing-external-tool guards, not merge-related: `ld.lld not
+available` (×~70), `llvm-mc not available` (×~35), `wasmtime not available` (×~25), `no
+privilege to load eBPF`, and the x86 host guards. `opt` — the package `escape-checker`
+adds `framecheck.go` to — is in the list and passes.
+
+## 4. The A/B that proves §1 — and that `cg12checkwb` fires at those three sites
+
+Two ~50-line control programs, compiled with the merged `goc` (sources kept at
+`$TMPDIR/wb_bulk_publish.go` and `wb_store_publish.go`; both reproduced verbatim at the
+end of this file). Each publishes a laundered goroutine-stack address into a heap
+object while a second goroutine keeps a mark phase running, one through
+`copy()`/`typedslicecopy` (the **bulk** path), one through a plain pointer store (the
+`atomicwb` path the merge did not touch).
+
+    GODEBUG=cg12checkwb=3
+
+| runtime | bulk-copy control | single-store control |
+|---|---|---|
+| **as merged** (8f29b3f, `mwbbuf.go` checked out at that commit) | `bulk publish control finished without a report`, exit 0 | throws, exit 2 |
+| **with the §1 fix** (b2e96c5) | **throws, exit 2** | throws, exit 2 |
+
+The store arm is the control on the control: it fires in both, which proves the address
+really is a frame address and the mode really is on — so the bulk arm's silence on the
+as-merged runtime is the gate, not the program. Verbatim, on the fixed runtime:
+
+    cg12checkwb: pointer write barrier published a goroutine stack address into storage that outlives the frame
+    cg12checkwb: slot=0x3a37b0474200 old=0x3a37b05a3c28 new=0x3a37b05a3c28 bad=new-is-stack
+    cg12checkwb: bulk copy dst=0x3a37b0474200 src=0x3a37b05a3c88 size=16
+    cg12checkwb: bulk-dst 0x3a37b0474200 span base=0x3a37b0474000 limit=0x3a37b0475e00 state=1 elemsize=512 offset=0x200
+    cg12checkwb: bulk-dst object base=0x3a37b0474200 size=512 head=0x3a37b05a3c28
+    cg12checkwb: bulk-src 0x3a37b05a3c88 span base=0x3a37b05a0000 limit=0x3a37b05a8000 state=2 elemsize=16384 offset=0x3c88
+    cg12checkwb: src[0] = 0x3a37b05a3c28
+    cg12checkwb: src[1] = 0x3a37b05a3c28
+    fatal error: cg12checkwb: a frame address was stored into storage that outlives the frame
+
+and on the as-merged runtime, same binary source, same environment:
+
+    bulk publish control finished without a report
+
+That answers the brief's second question at the same time: **the sites do still fire.**
+The `bulk copy dst=/src=/size=` lines are printed only when `cg12BulkBarrierRange.valid`
+is set, and only `cg12CheckBulkBarrierWord` sets it — so the report above *is* one of
+the three resolved `mbitmap.go` sites executing.
+
+**Mode 1 fires there too**, shown with the real defect rather than a synthetic one.
+`goc` built at `ad40d76` (the commit before the type-mask padding fix) with the merged
+tree's `mwbbuf.go` dropped in — pre-fix codegen, merged+fixed barrier code — compiling
+`goc/testdata/runtime_gc_type_mask_padding.go`, run 12× at `GOGC=10`,
+`GODEBUG=cg12checkwb=1`: **7/12 runs throw at a bulk site**, e.g.
+
+    cg12checkwb: pointer write barrier buffered a word the collector will reject
+    cg12checkwb: slot=0x36a793e10b58 old=0x0 new=0x36a793922000 bad=new
+    cg12checkwb: bulk copy dst=0x36a793e10980 src=0x36a7935af6d0 size=16
+    cg12checkwb: bulk-src object base=0x36a7935af6d0 size=16 head=0x36a793917350
+    cg12checkwb: src[0] = 0x36a793917350
+    cg12checkwb: src[1] = 0x36a7939173b0
+
+(the other 5/12 die first in the scan, as "marked free object in span" — the barrier
+check races the collector, which is the known duty-cycle limitation RUNTIME_PLAN.md
+records, not a gap in the instrumentation.)
+
+That same `ad40d76` build also gives an **independent confirmation of gate item 7's
+"before"**: the reducer fails **20/20** at `GOGC=10` on the pre-fix compiler.
+
+## 5. Gate item 7 — the `runtime_gc_type_mask_padding` reducer — **PASS (0/20)**
+
+Compiled with the merged tree's `goc`, run 20× at `GOGC=10`:
+
+    $ for i in $(seq 1 20); do GOGC=10 ./reducer_merged; done
+    type mask padding ok        (×20)
+    MERGED+FIXED reducer: 0/20 failed
+
+Independently measured "before", so the 0/20 means something: `goc` built at
+`ad40d76` — the commit immediately before `9c7a209` "pad every type's GC pointer mask
+to a whole uintptr" — compiling the same source, run 20× at `GOGC=10`:
+
+    pre-fix goc reducer: 20/20 failed
+    runtime: marked free object in span 0xf102a5df1ea8, elemsize=16 freeindex=11 ...
+
+20/20 before, 0/20 after, on this box, this hour. Matches the figure the brief cites.
+
+A note for whoever tries to reproduce the "before" by hand-reverting the fix rather
+than checking out the parent commit: `paddedPointerMask` has **two** call sites in
+`goc/compile.go` (6327, in `ensureTypeTag`, and 13372). Reverting only the first — the
+one the fix commit's diff shows — leaves the reducer passing 20/20 and looks like the
+bug was never there.
+
+## 6. Gate item 9 — determinism — **PASS (8/8 pairs byte-identical, plus cold==warm)**
+
+Four capability programs, compiled twice each on both arms with the merged tree's
+`goc`, `sha256sum` over the linked executables:
+
+    default arm                                        -O arm
+    f3af45e2…  gc_struct.1                             5a0b168d…  gc_struct.O1
+    f3af45e2…  gc_struct.2                             5a0b168d…  gc_struct.O2
+    d50e370b…  runtime_gc_mark_workers.1               5fd16d2e…  runtime_gc_mark_workers.O1
+    d50e370b…  runtime_gc_mark_workers.2               5fd16d2e…  runtime_gc_mark_workers.O2
+    7b266155…  runtime_goroutine_channel.1             218bd0e8…  runtime_goroutine_channel.O1
+    7b266155…  runtime_goroutine_channel.2             218bd0e8…  runtime_goroutine_channel.O2
+    83f01158…  runtime_slice_pointer_append_gc.1       f9afb92d…  runtime_slice_pointer_append_gc.O1
+    83f01158…  runtime_slice_pointer_append_gc.2       f9afb92d…  runtime_slice_pointer_append_gc.O2
+
+8 pairs, 8 matches, 0 differences.
+
+Additionally, **cold equals warm**: recompiling with `CG12_NOCACHE=1` reproduces the
+cached image bit for bit (`d50e370b…` and `f3af45e2…` again), so the compile cache is
+not hiding a nondeterministic path — the thing §9's cold matrix run is really testing.
+
+## 7. Was anything else dropped? A mechanical audit of the whole merge
+
+Being adversarial about §1 raises the obvious follow-up: *is `mbitmap.go` the only place a
+side went missing?* Answered mechanically rather than by reading. Five files are touched
+by **both** parents (`git diff --name-only ad4e9b2 <parent>`, intersected):
+
+    CCWORK_REPORT.md   RUNTIME_PLAN.md   goc/compile.go
+    stdlib/src/runtime/mbitmap.go   stdlib/src/runtime/mwbbuf.go
+
+The other eleven are touched by exactly one parent and the merge kept that parent's
+version byte for byte (checked with `git rev-parse <commit>:<path>`).
+
+For each shared file: take `main`'s version, apply `diff(main → escape-gc-fix)`, then
+apply `diff(main → escape-checker)`, and compare with `8f29b3f`'s version.
+
+| file | both patches apply? | merged == union? |
+|---|---|---|
+| `goc/compile.go` | yes | **yes** — no hunk lost |
+| `stdlib/src/runtime/mwbbuf.go` | yes | **yes** — no hunk lost |
+| `stdlib/src/runtime/mbitmap.go` | **no**, 3/3 of escape-checker's hunks reject | merged == the escape-gc-fix side alone |
+| `RUNTIME_PLAN.md` | 3/4 | superset of the union (the resolver hand-merged the prose); nothing dropped |
+| `CCWORK_REPORT.md` | no | merged == escape-checker's report; `escape-gc-fix`'s 340-line report is **not** in the merge |
+
+So `mbitmap.go` is the *only* code file where a side was dropped, and that is exactly
+§1. `goc/compile.go` — the other file both branches edited, and the one that would have
+been far worse to get wrong — is a clean union. That is a real result, not an
+assumption: it is the check that would have caught a second §1 if there were one.
+
+The `CCWORK_REPORT.md` row is a documentation loss, not a code one: each branch's report
+survives on its own branch and in history (`git show 13c94be:CCWORK_REPORT.md`). Worth
+knowing before anyone looks for the GC fix's write-up on `main` and does not find it.
+
+## 8. The §1 fix does not create false positives
+
+The widened gate makes the bulk barrier paths enforce two rules they were not enforcing,
+so the first question about it is whether anything legitimate now trips.
+`TestARM64WriteBarrierAuditRunsClean` is exactly that control — six allocating,
+collecting, channel-blocking programs run under `cg12checkwb=1` **and** `cg12checkwb=3`
+— and on the fixed tree it passes with all six subtests:
+
+    --- PASS: TestARM64WriteBarrierAuditRunsClean (18.11s)
+        --- PASS: .../gc_struct.go (3.02s)
+        --- PASS: .../runtime_goroutine_channel.go (2.92s)
+        --- PASS: .../runtime_select_channels.go (2.91s)
+        --- PASS: .../runtime_channel_struct_pointer_gc.go (2.92s)
+        --- PASS: .../runtime_goroutine_closure_gc.go (3.41s)
+        --- PASS: .../runtime_slice_pointer_append_gc.go (2.93s)
+
+Note what this suite is worth **after** the fix compared with before: on the as-merged
+tree its `cg12checkwb=3` arm could not have rejected anything a `typedmemmove`,
+`growslice` or `typedslicecopy` buffered, because the gate returned first (§1, §4). It
+now covers those words, and still passes. The rest of `make test-goc-cmd` is §10.
