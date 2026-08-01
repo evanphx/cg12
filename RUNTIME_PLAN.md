@@ -4709,3 +4709,159 @@ green with them in.
   2 for the use that decided an object escapes. It is a trace, not a checker;
   it found the `internal/strconv.formatBits` link and the `hexdumpWords` chain,
   and it will not detect anything on its own.
+
+## 26. A type's GC mask is read a `uintptr` at a time, and goc's were not padded (2026-08-01)
+
+`ccwork/escape-analysis` was held back because, merged with `main`, it killed
+`gc-invariants/mark-workers` with `found bad pointer in Go heap` on every run.
+The escape work is not the cause. The cause is a defect in goc's type metadata
+that has been live for as long as goc has emitted `abi.Type` descriptors, and
+`main` carries it today.
+
+### The defect
+
+`goc` emitted each type's pointer bitmap at its exact significant length --
+`ceil(sizeInWords/8)` bytes, `Align: 1`, in both `ensureTypeTag` and
+`runtimeTypeSymbol`. For a one-pointer type such as `*T` that is **one byte**.
+
+The runtime never reads that bitmap a byte at a time. Every reader of an
+`abi.Type`'s `GCData` goes through `runtime.readUintptr`, which loads **eight**
+bytes: `typePointersOfType` takes the first word as its mask,
+`typePointers.next` and `fastForward` take later words at eight-byte offsets,
+and `heapSetType` reads it to write a new object's heap bitmap. The seven bytes
+past a one-byte mask are whatever symbol the linker placed next, and every 1 bit
+in them is a **phantom pointer word** at an offset outside the object.
+
+Measured in a faulting image, for `*main.vertex`:
+
+```
+_goc_runtime_type_main_vertex_86131734c57ebf15_gcdata   size = 1
+readUintptr -> 0x0800000000000001    bits 0 and 59 -> word offsets 0 and 472
+```
+
+Bit 59 is the low byte of the *next* symbol, the type descriptor itself, whose
+first field is `Size_ = 8`. `typePointers.next` takes its fast path while
+`mask != 0`, and `nextFast` does not consult `limit`, so
+`growslice`'s `bulkBarrierPreWriteSrcOnly(newArray, oldArray, 8, *vertex)`
+faithfully read word 59 of an eight-byte source array -- 464 bytes past its end
+-- and buffered whatever was there as a pointer. The displacement was `0x1d8` in
+every run, on both trees.
+
+The host toolchain states the requirement in its own words,
+`cmd/compile/internal/reflectdata/reflect.go`'s `dgcptrmask`:
+
+```go
+	// Bytes we need for the ptrmask.
+	n := (types.PtrDataSize(t)/int64(types.PtrSize) + 7) / 8
+	// Runtime wants ptrmasks padded to a multiple of uintptr in size.
+	n = (n + int64(types.PtrSize) - 1) &^ (int64(types.PtrSize) - 1)
+```
+
+goc omitted that line. `paddedPointerMask` supplies it, and both emission sites
+now align the datum to `pointerSize()` so the load is aligned as well.
+
+### Why it looked like an escape-analysis bug, and why that was a trap
+
+The consequence of a phantom bit depends entirely on **which bytes the linker
+put after the mask**, so the fault is a pure function of data layout:
+
+- Turning off `2724ac7`'s `appendDestination` rule took the reducer from 10/10
+  failing to 0/10 -- with **byte-identical code**. A symbol-resolving
+  disassembly diff over every function in both images found four differences,
+  all `.data` displacements in `runtime_load_g`, `runtime_save_g`,
+  `runtime_memclrNoHeapPointers` and `__do_global_dtors_aux`. The entire
+  difference was **168 bytes of dead `.data`**: three type descriptors nothing
+  references, confirmed by scanning every eight-byte word of every PT_LOAD
+  segment for their addresses.
+- Re-measured at `GOGC=10` the "fix" evaporated: `appenddest`-disabled failed
+  16/50 and all-seven-rules-disabled 7/50.
+
+Two pieces of method, both of which §15 already asks for and both of which cost
+this investigation time:
+
+- **A bisect over compiler behaviour has to check that the arms differ in
+  code.** They did not here. `goc build-runtime` also caches its pack on the
+  compiler binary and the standard library, not on the environment, so an
+  environment-variable knob varies only the program's own module -- which made
+  the arms *more* identical, not less.
+- **A rate has to be re-measured at the stress setting before it is called a
+  fix.** Every arm that "passed" at the default `GOGC` failed at `GOGC=10`.
+
+### What is measured
+
+`goc/testdata/runtime_gc_type_mask_padding.go`, the reducer, registered as
+`gc-invariants/type-mask-padding`. It needs three things at once: a heap object
+with pointers, an allocating expression stored into it so a mark phase is
+running while the graph grows, and an `append` that has to call `growslice`.
+
+All sequential on an idle box, `GOMAXPROCS=3`. `main+fix` is `main` (`ad4e9b2`)
+with only the `goc/compile.go` change, so it differs from `merged+fix` by
+exactly the escape merge.
+
+| tree | program | default `GOGC` | `GOGC=10` |
+| --- | --- | ---: | ---: |
+| `main` `ad4e9b2` | `mark-workers` | 0/100 | 14/100 |
+| `main` `ad4e9b2` | reducer | **30/30** | 100/100 |
+| `main` + escape, no fix | `mark-workers` | **100/100** | -- |
+| `main` + escape, no fix | reducer | **20/20** | -- |
+| `main` + fix | `mark-workers` | 0/40 | 5/40 |
+| `main` + fix | reducer | 0/40 | 3/40 |
+| `main` + escape + fix | `mark-workers` | 0/40 | 6/40 |
+| `main` + escape + fix | reducer | 0/40 | 1/40 |
+
+### The diagnostic that found it
+
+`cg12checkwb` now also validates the words the four **bulk** barrier paths in
+`stdlib/src/runtime/mbitmap.go` buffer -- `bulkBarrierPreWrite`,
+`bulkBarrierPreWriteSrcOnly`, `bulkBarrierBitmap` and `typeBitsBulkBarrier` --
+and reports the copy's `dst`, `src` and `size` alongside the rejected word,
+dumping the source range.
+
+That extension is what named the writer. `atomicwb`'s existing check never
+fired, because the bad word never went through a pointer store at all: it
+entered the buffer through `growslice`'s bulk barrier, reading the *source* of a
+copy. Printing `dst` and `size` with the rejected slot is what made
+`slot - dst = 0x1d8` visible, and 0x1d8 is what identified the mask bit.
+
+A caution for whoever uses it next: the first version of the range record was a
+single global, and two goroutines in `bulkBarrierPreWriteSrcOnly` at once made
+it report a range from the wrong call, which looked like an iterator overrun.
+The range is now passed per call.
+
+### Audited for the same class
+
+- `.goc.go.gcdata` (`internal/gometa/builder.go`) is the module's data-section
+  **GC program**, read a byte at a time by `progToPointerMask`, and it is
+  already followed by `align(8)`.
+- Stack maps and stack-object records are read by `scanblock`, a byte at a time.
+- `abi.Type` masks were the only bitmaps the runtime reads a `uintptr` at a
+  time. Every `*_gcdata` symbol in a built image is now a multiple of eight
+  bytes; the only remaining non-multiples are `.goc.go.gcdata` (a GC program)
+  and `runtime_stackObjectRecord_gcdata`, a function.
+
+### What this does not fix
+
+**A second, independent defect remains, and it is on `main` as well.** At
+`GOGC=10` both trees still fail the reducer and `mark-workers` at 3-15%, and
+`main`'s rate at that `GOGC` before this fix was 14/100, so the mask padding did
+not move it. It is a different route:
+
+```
+runtime_badPointer <- runtime_findObject <- runtime_scanblock
+  <- runtime_scanframeworker <- runtime_scanstack <- markroot
+```
+
+The precise **stack** scan, not a bulk barrier. `cg12scanroots=1|2` localises it
+exactly: the frame is `main.buildGraph`, the word is **locals slot 65**, and
+with `varp=fp` and `locals=76` that slot is `x29+0x218`, which is the pointer
+word of a sixteen-byte string-header alloca. The prologue *does* zero it, and the
+stack map claims exactly that one word of that alloca, so this is neither an
+unzeroed slot nor a scalar marked as a pointer. The value it holds is a heap
+address whose page has been returned to the page allocator.
+
+Nothing below that is established. It has no reducer smaller than the one above
+and no mechanism, and the rate moves with machine load as well as with `GOGC` --
+the same `merged+fix` binary is 0/50 on an idle box and 100/100 with four
+concurrent measurement loops. It is the same open item §5.10 records under
+"Residual runtime faults"; this section narrows it to a frame and a slot and
+nothing further.
