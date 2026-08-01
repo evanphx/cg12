@@ -7,7 +7,30 @@ merged. Basing on the merge rather than on the branch, because `main` has moved 
 `goc/compile.go` merged without conflict. The escape branch's plan section was renumbered
 24 -> 25, `main`'s 24 being `reportZombies`.
 
-## Status: IN PROGRESS — root cause not yet established
+## Summary
+
+**The escape branch was not the cause.** `gc-invariants/mark-workers` died because `goc`
+emits each `abi.Type`'s GC pointer bitmap at its exact significant length, and the Go runtime
+reads that bitmap a whole `uintptr` at a time. A one-byte mask is read together with the next
+symbol's seven bytes, and every 1 bit in them is a phantom pointer word at an offset outside
+the object. `growslice`'s bulk barrier then read 464 bytes past the end of an eight-byte array
+and buffered what it found as a pointer.
+
+The consequence of a phantom bit is a pure function of `.data` layout, which is why merging
+`ccwork/escape-analysis` — which changes only *which* type descriptors get emitted — turned a
+14%-at-`GOGC=10` fault into a 100%-at-default-`GOGC` one, and why the obvious bisect over the
+escape rules produced a confident wrong answer (§4).
+
+Fixed in `goc/compile.go` by padding every mask to a whole `uintptr`, which is what the host
+toolchain does and says it does. The branch is merged. Both matrix arms are censused against
+matched controls on plain `main` in §10, and the one non-passing capability is one `main`
+fails too.
+
+**Two things are not fixed and are stated as such**: a distinct stack-scan defect that
+`GOGC=10` exposes at 3–15% on `main` and on this tree alike (§9), and `stack-scan/loop-safepoints`
+under `-runtime-opt`, which `main` fails 3/3 (§10).
+
+## Status: COMPLETE
 
 ## 1. Reproduced, in six seconds
 
