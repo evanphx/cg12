@@ -16,6 +16,14 @@
       "reason": "added to the capability matrix after the accepted baseline run; it enters the baseline at the next full-corpus rerun"
     },
     {
+      "capability": "closure-capture/assigned-header-values",
+      "reason": "added to the capability matrix after the accepted baseline run; it enters the baseline at the next full-corpus rerun"
+    },
+    {
+      "capability": "closure-capture/assigned-string",
+      "reason": "added to the capability matrix after the accepted baseline run; it enters the baseline at the next full-corpus rerun"
+    },
+    {
       "capability": "core-types/complex64-parts",
       "reason": "added to the capability matrix after the accepted baseline run; it enters the baseline at the next full-corpus rerun"
     },

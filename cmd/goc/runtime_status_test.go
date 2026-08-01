@@ -1823,6 +1823,20 @@ func runtimeCapabilities() []runtimeCapability {
 			output:      "assign target forms ok",
 		},
 		{
+			category:    "closure-capture",
+			name:        "assigned-string",
+			source:      "runtime_closure_captured_string.go",
+			expectation: runtimeCapabilityMustPass,
+			output:      "closure captured string ok",
+		},
+		{
+			category:    "closure-capture",
+			name:        "assigned-header-values",
+			source:      "runtime_closure_captured_header_values.go",
+			expectation: runtimeCapabilityMustPass,
+			output:      "closure captured header values ok",
+		},
+		{
 			category:        "defer-panic",
 			name:            "panic-string-output",
 			source:          "runtime_panic_print_string.go",

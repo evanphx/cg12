@@ -1611,6 +1611,7 @@ type gen struct {
 	stackAddresses                map[uint32]bool
 	heapCaptures                  map[types.Object]ir.Ref
 	escapingCaptures              map[types.Object]bool
+	referenceCaptures             map[types.Object]bool
 	objectEscapeChecks            map[types.Object]bool
 	keepAliveObjects              map[types.Object]bool
 	keepAliveValues               map[types.Object]ir.Ref
@@ -1683,6 +1684,7 @@ func (g *gen) derive() *gen {
 	derived.heapCaptures = make(map[types.Object]ir.Ref)
 	derived.initializingGlobals = make(map[types.Object]bool)
 	derived.escapingCaptures = nil
+	derived.referenceCaptures = nil
 	derived.objectEscapeChecks = nil
 	derived.keepAliveObjects = nil
 	derived.keepAliveValues = nil
@@ -3699,6 +3701,7 @@ func (g *gen) staticFunctionLiteral(literal *ast.FuncLit) string {
 	savedStackAddresses := g.stackAddresses
 	savedHeapCaptures := g.heapCaptures
 	savedEscapingCaptures := g.escapingCaptures
+	savedReferenceCaptures := g.referenceCaptures
 	savedParents := g.parents
 	savedBody := g.currentBody
 	savedSequence := g.seq
@@ -3710,6 +3713,7 @@ func (g *gen) staticFunctionLiteral(literal *ast.FuncLit) string {
 	g.stackAddresses = make(map[uint32]bool)
 	g.heapCaptures = make(map[types.Object]ir.Ref)
 	g.escapingCaptures = make(map[types.Object]bool)
+	g.referenceCaptures = make(map[types.Object]bool)
 	g.parents = make(map[ast.Node]ast.Node)
 	g.currentBody = literal.Body
 	g.seq = 0
@@ -3728,6 +3732,7 @@ func (g *gen) staticFunctionLiteral(literal *ast.FuncLit) string {
 	g.stackAddresses = savedStackAddresses
 	g.heapCaptures = savedHeapCaptures
 	g.escapingCaptures = savedEscapingCaptures
+	g.referenceCaptures = savedReferenceCaptures
 	g.parents = savedParents
 	g.currentBody = savedBody
 	g.seq = savedSequence
@@ -4708,10 +4713,10 @@ func (g *gen) variableStorage(object types.Object, valueType types.Type) ir.Ref 
 			storageType := types.NewPointer(valueType)
 			storage = g.allocateTyped(storageType)
 			g.store(backing, storage, storageType)
-		} else if isStringType(valueType) || isInterfaceValue(valueType) {
-			// Strings and interfaces are normally represented by a local slot
-			// containing a pointer to their inline header. Once the variable's
-			// address escapes, the heap allocation is the header itself.
+		} else if isIndirectVariableValue(valueType) {
+			// Strings, interfaces and complex128s are normally represented by a
+			// local slot containing a pointer to their inline value. Once the
+			// variable's address escapes, the heap allocation is the value itself.
 			storage = g.allocateTyped(valueType)
 			g.directValues[object] = true
 		} else {
@@ -4721,9 +4726,46 @@ func (g *gen) variableStorage(object types.Object, valueType types.Type) ir.Ref 
 		g.heapCaptures[object] = storage
 		return storage
 	}
+	if g.referenceCaptures[object] && isIndirectVariableValue(valueType) {
+		// A nested function body -- a function literal, or the yield function a
+		// range-over-function body is lowered into -- reaches this variable
+		// through the closure environment, which carries the address of this
+		// slot. The slot therefore belongs to a frame the nested body does not
+		// own.
+		//
+		// Keeping the value behind a pointer makes that fatal: assigning to the
+		// variable copies the new value into an alloca of the *assigning*
+		// function and then stores that address into the shared slot, so the
+		// enclosing frame is left addressing the closure's dead frame. Give the
+		// variable the same representation the escaping-capture arm above gives
+		// it -- the storage is the value -- so an assignment copies the value's
+		// bytes into storage that outlives the nested call. Unlike that arm this
+		// costs no allocation: the value lives in the declaring frame.
+		storage := g.localAllocTyped(valueType)
+		g.zero(storage, valueType)
+		g.vars[object] = storage
+		g.directValues[object] = true
+		return storage
+	}
 	storage := g.allocLocal(valueType)
 	g.vars[object] = storage
 	return storage
+}
+
+// isIndirectVariableValue reports whether a local variable of this type would
+// otherwise be represented by a frame slot holding the address of a separate
+// value, so that assigning to it replaces the address rather than the value.
+//
+// Structs and arrays are excluded because allocLocal already gives them stable
+// backing storage and assignLocal copies into it, and slices because a slice
+// local is stored inline. What is left is the three values that are wider than
+// a register and carry no backing of their own: a string, an interface, and a
+// complex128.
+func isIndirectVariableValue(valueType types.Type) bool {
+	if isMemoryValue(valueType) || isSliceType(valueType) {
+		return false
+	}
+	return isInlineValue(valueType)
 }
 
 // perIterationVariable reports whether object, a variable declared by a `for`
@@ -5475,11 +5517,7 @@ func (g *gen) adaptInterfaceToInterface(value ir.Ref, sourceType, targetType typ
 }
 
 func isAddressRepresentedInterfacePayload(valueType types.Type) bool {
-	if isInlineAggregate(valueType) {
-		return true
-	}
-	basic, ok := valueType.Underlying().(*types.Basic)
-	return ok && basic.Kind() == types.Complex128
+	return isInlineAggregate(valueType) || isComplex128Type(valueType)
 }
 
 func (g *gen) callArguments(arguments []ast.Expr, hasEllipsis bool, signature *types.Signature) []ir.Ref {
@@ -6861,6 +6899,7 @@ func (g *gen) funcDecl(fd *ast.FuncDecl) {
 	g.currentBody = fd.Body
 	predeclaredVariables := signatureVariables(originalSignature)
 	g.escapingCaptures = g.findEscapingCaptures(fd.Body, predeclaredVariables...)
+	g.referenceCaptures = g.findReferenceCaptures(fd.Body, predeclaredVariables...)
 	keepAliveObjects, orderedKeepAliveObjects := g.findKeepAliveObjects(fd.Body)
 	g.keepAliveObjects = keepAliveObjects
 	g.keepAliveValues = make(map[types.Object]ir.Ref)
@@ -7401,6 +7440,11 @@ type assignmentTarget struct {
 	// rather than a pointer to it.
 	inline bool
 
+	// directVariable marks a variable whose own storage is its value -- what
+	// variableStorage records in directValues -- so an assignment copies the
+	// value's bytes into that storage instead of replacing a pointer to it.
+	directVariable bool
+
 	mapping ir.Ref
 	mapKey  ir.Ref
 	mapType *types.Map
@@ -7463,8 +7507,9 @@ func (g *gen) prepareAssignmentTarget(destination ast.Expr, declare bool) assign
 		local:     !global && !g.directValues[object],
 	}
 	target.inline = global && (isMemoryValue(valueType) || isDescriptorValue(valueType) || isInterfaceValue(valueType))
-	if g.directValues[object] && (isInlineAggregate(valueType) || isInterfaceValue(valueType)) {
+	if g.directValues[object] && isInlineValue(valueType) {
 		target.inline = true
+		target.directVariable = true
 	}
 	// A package-level string or slice symbol holds the address of its header, so
 	// the assignment updates the header the symbol already points at.
@@ -7492,6 +7537,21 @@ func (g *gen) retainedAddress(reference ir.Ref) ir.Ref {
 	return g.fn.MarkGCRef(reference)
 }
 
+// assignmentTargetStoresInline reports whether reaching this destination means
+// copying the value's bytes rather than storing one word.
+//
+// A direct variable qualifies whatever its type, because its storage is its
+// value. Every other inline destination is an address, and there the question
+// is only whether the type is one cg12 carries as an address: a complex128 in
+// memory is not, so an address destination of that type keeps the word store it
+// has always had.
+func (g *gen) assignmentTargetStoresInline(target assignmentTarget) bool {
+	if target.directVariable {
+		return true
+	}
+	return target.inline && (isInlineAggregate(target.valueType) || isInterfaceValue(target.valueType))
+}
+
 // assignmentTargetValue reads a prepared destination, which an assignment
 // operator such as `+=` needs before it can store the combined value.
 func (g *gen) assignmentTargetValue(target assignmentTarget) ir.Ref {
@@ -7499,7 +7559,7 @@ func (g *gen) assignmentTargetValue(target assignmentTarget) ir.Ref {
 		value, _ := g.mapLookupValue(target.mapping, target.mapKey, target.mapType, target.source)
 		return value
 	}
-	if target.inline && (isInlineAggregate(target.valueType) || isInterfaceValue(target.valueType)) &&
+	if g.assignmentTargetStoresInline(target) &&
 		!(g.runtimeAllocation && isSliceType(target.valueType)) {
 		return target.slot
 	}
@@ -7526,7 +7586,7 @@ func (g *gen) storeAssignmentTarget(target assignmentTarget, value ir.Ref, sourc
 		g.trackKeepAliveAssignment(target.object, value, target.valueType)
 		return
 	}
-	if target.inline && (isInlineAggregate(target.valueType) || isInterfaceValue(target.valueType)) {
+	if g.assignmentTargetStoresInline(target) {
 		g.storeInlineValue(value, target.slot, target.valueType)
 	} else {
 		g.store(value, target.slot, target.valueType)
@@ -8545,6 +8605,7 @@ func (g *gen) iteratorRangeStmt(statement *ast.RangeStmt, label string, iterator
 		}
 	}
 	child.escapingCaptures = child.findEscapingCaptures(statement.Body, rangeVariables...)
+	child.referenceCaptures = child.findReferenceCaptures(statement.Body, rangeVariables...)
 	ast.Inspect(statement.Body, func(node ast.Node) bool {
 		if _, nestedFunction := node.(*ast.FuncLit); nestedFunction {
 			return false
@@ -8802,6 +8863,20 @@ func isInlineAggregate(t types.Type) bool {
 		return value.Kind() == types.String
 	}
 	return false
+}
+
+// isInlineValue reports whether a value of this type is carried in cg12 IR as
+// the address of its storage rather than in a register, so copying one means
+// copying its bytes. It is isInlineAggregate plus the two forms that are not
+// aggregates and are still wider than a register: an interface value and a
+// complex128.
+func isInlineValue(t types.Type) bool {
+	return isInlineAggregate(t) || isInterfaceValue(t) || isComplex128Type(t)
+}
+
+func isComplex128Type(t types.Type) bool {
+	basic, ok := representativeType(t).Underlying().(*types.Basic)
+	return ok && basic.Kind() == types.Complex128
 }
 
 func isInterfaceValue(t types.Type) bool {
@@ -11011,6 +11086,7 @@ func (g *gen) functionLiteral(literal *ast.FuncLit) ir.Ref {
 	predeclaredVariables := append([]types.Object(nil), parameterObjects...)
 	predeclaredVariables = append(predeclaredVariables, resultObjects...)
 	child.escapingCaptures = child.findEscapingCaptures(literal.Body, predeclaredVariables...)
+	child.referenceCaptures = child.findReferenceCaptures(literal.Body, predeclaredVariables...)
 	keepAliveObjects, orderedKeepAliveObjects := child.findKeepAliveObjects(literal.Body)
 	child.keepAliveObjects = keepAliveObjects
 	child.keepAliveValues = make(map[types.Object]ir.Ref)
@@ -11201,7 +11277,11 @@ func (g *gen) functionLiteral(literal *ast.FuncLit) ir.Ref {
 				cell = g.allocateTyped(captureType)
 				source := g.load(originalSlot, captureType)
 				g.storeInlineValue(source, cell, captureType)
-			} else if isInterfaceValue(captureType) && g.directValues[capture] {
+			} else if g.directValues[capture] && isInlineValue(captureType) {
+				// The variable's storage already is its value, so the snapshot is
+				// a copy of those bytes. Loading through the slot first, as the
+				// aggregate arm below does, would read the value's first word as
+				// the address of the value.
 				cell = g.allocateTyped(captureType)
 				g.storeInlineValue(originalSlot, cell, captureType)
 				if g.resultSlot == originalSlot {
@@ -11422,7 +11502,70 @@ func resultObjectSet(signature *types.Signature) map[types.Object]bool {
 	return results
 }
 
-func (g *gen) findEscapingCaptures(body *ast.BlockStmt, predeclared ...types.Object) map[types.Object]bool {
+// findReferenceCaptures returns the local variables of body that a nested
+// function body refers to. A nested body is a function literal, or the body of
+// a `range` over a function, which is lowered into a yield function; either one
+// runs in a frame of its own and reaches the variable through the closure
+// environment, which carries the address of the variable's slot.
+//
+// findEscapingCaptures answers the narrower question of which of those
+// variables must be heap-lifted, because the nested function can outlive the
+// frame. A non-escaping literal needs no heap cell, but it still assigns
+// through a slot that belongs to the enclosing frame, and that is what makes
+// this set matter to variableStorage.
+func (g *gen) findReferenceCaptures(body *ast.BlockStmt, predeclared ...types.Object) map[types.Object]bool {
+	locals := g.bodyLocals(body, predeclared...)
+	captures := make(map[types.Object]bool)
+	recordReferences := func(nested ast.Node) {
+		if nested == nil {
+			return
+		}
+		ast.Inspect(nested, func(node ast.Node) bool {
+			identifier, ok := node.(*ast.Ident)
+			if !ok {
+				return true
+			}
+			if object := g.info.Uses[identifier]; locals[object] {
+				captures[object] = true
+			}
+			return true
+		})
+	}
+	ast.Inspect(body, func(node ast.Node) bool {
+		if literal, ok := node.(*ast.FuncLit); ok {
+			recordReferences(literal.Body)
+			return false
+		}
+		if statement, ok := node.(*ast.RangeStmt); ok && g.rangesOverFunction(statement) {
+			// The clause's own destinations are assigned from inside the yield
+			// function too, so `for k, dst[i] = range seq` shares k, dst and i.
+			recordReferences(statement.Body)
+			recordReferences(statement.Key)
+			recordReferences(statement.Value)
+		}
+		return true
+	})
+	return captures
+}
+
+// rangesOverFunction reports whether this `range` clause iterates a function,
+// which is the form lowered into a separate yield function.
+func (g *gen) rangesOverFunction(statement *ast.RangeStmt) bool {
+	if statement.X == nil {
+		return false
+	}
+	rangeType := g.info.Types[statement.X].Type
+	if rangeType == nil {
+		return false
+	}
+	_, ok := rangeType.Underlying().(*types.Signature)
+	return ok
+}
+
+// bodyLocals returns the variables body declares itself, together with the
+// predeclared ones the caller names, and stops at a nested function literal so
+// that a literal's own locals are not mistaken for this body's.
+func (g *gen) bodyLocals(body *ast.BlockStmt, predeclared ...types.Object) map[types.Object]bool {
 	locals := make(map[types.Object]bool)
 	for _, object := range predeclared {
 		if object != nil {
@@ -11442,6 +11585,11 @@ func (g *gen) findEscapingCaptures(body *ast.BlockStmt, predeclared ...types.Obj
 		}
 		return true
 	})
+	return locals
+}
+
+func (g *gen) findEscapingCaptures(body *ast.BlockStmt, predeclared ...types.Object) map[types.Object]bool {
+	locals := g.bodyLocals(body, predeclared...)
 
 	captures := make(map[types.Object]bool)
 	ast.Inspect(body, func(node ast.Node) bool {

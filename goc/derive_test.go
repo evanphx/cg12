@@ -129,6 +129,7 @@ func fullyPopulatedGen() *gen {
 		stackAddresses:                map[uint32]bool{},
 		heapCaptures:                  map[types.Object]ir.Ref{},
 		escapingCaptures:              map[types.Object]bool{},
+		referenceCaptures:             map[types.Object]bool{},
 		objectEscapeChecks:            map[types.Object]bool{},
 		keepAliveObjects:              map[types.Object]bool{},
 		keepAliveValues:               map[types.Object]ir.Ref{},
