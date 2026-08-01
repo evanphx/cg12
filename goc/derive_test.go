@@ -131,6 +131,7 @@ func fullyPopulatedGen() *gen {
 		escapingCaptures:              map[types.Object]bool{},
 		objectEscapeChecks:            map[types.Object]bool{},
 		resultLeakBody:                &ast.BlockStmt{},
+		escapeWalkOuterObjects:        []types.Object{types.NewVar(token.NoPos, nil, "v", types.Typ[types.Int])},
 		keepAliveObjects:              map[types.Object]bool{},
 		keepAliveValues:               map[types.Object]ir.Ref{},
 		keepAliveSlots:                map[types.Object]ir.Ref{},

@@ -1614,6 +1614,7 @@ type gen struct {
 	escapingCaptures              map[types.Object]bool
 	objectEscapeChecks            map[types.Object]bool
 	resultLeakBody                *ast.BlockStmt
+	escapeWalkOuterObjects        []types.Object
 	keepAliveObjects              map[types.Object]bool
 	keepAliveValues               map[types.Object]ir.Ref
 	keepAliveSlots                map[types.Object]ir.Ref
@@ -1687,6 +1688,7 @@ func (g *gen) derive() *gen {
 	derived.escapingCaptures = nil
 	derived.objectEscapeChecks = nil
 	derived.resultLeakBody = nil
+	derived.escapeWalkOuterObjects = nil
 	derived.keepAliveObjects = nil
 	derived.keepAliveValues = nil
 	derived.keepAliveSlots = nil
@@ -2541,6 +2543,17 @@ func (g *gen) valueDoesNotEscapeWithin(
 			if parent.Op != token.AND || parent.X != current {
 				return false
 			}
+			if g.resultLeakBody != nil {
+				// Taking an address makes fresh storage, and returning that
+				// address puts the storage in the heap. A value placed inside
+				// it therefore does not merely leak to the result -- it is in
+				// the heap the moment the function returns, and it cannot live
+				// in the caller's frame. slog.NewTextHandler's
+				// &TextHandler{&commonHandler{w: w}} is that shape, and letting
+				// the result rule apply through it left a caller's bytes.Buffer
+				// on the frame with a heap handler pointing at it.
+				return false
+			}
 			current = parent
 		case *ast.SliceExpr:
 			if parent.X != current {
@@ -2675,7 +2688,37 @@ func appendDestination(call *ast.CallExpr, expression ast.Node, info *types.Info
 	return len(call.Args) != 0 && call.Args[0] == expression
 }
 
+// escapeWalkSeesEveryUse reports whether every use of an object is inside the
+// body the walk enumerates. The walk is a scan of one body, so a variable
+// declared outside it -- one the function literal being lowered captured, or
+// the enclosing function's own -- has uses the walk cannot see, and finding
+// nothing wrong inside the body is not evidence that it does not escape.
+// regexp.(*Regexp).FindAllStringIndex assigns result = append(result, ...)
+// inside a closure and returns result from the enclosing function; walking only
+// the closure left the backing array on the closure's frame.
+//
+// The exception is the analysed function's own receiver, parameters and named
+// results. They are declared in the signature rather than the body, and they
+// are exactly what the walk is asked about.
+func (g *gen) escapeWalkSeesEveryUse(object types.Object, body *ast.BlockStmt) bool {
+	if body == nil {
+		return false
+	}
+	if object.Pos() >= body.Pos() && object.Pos() < body.End() {
+		return true
+	}
+	for _, outer := range g.escapeWalkOuterObjects {
+		if outer == object {
+			return true
+		}
+	}
+	return false
+}
+
 func (g *gen) objectDoesNotEscape(object types.Object, info *types.Info, parents map[ast.Node]ast.Node, body *ast.BlockStmt, checking map[parameterKey]bool) bool {
+	if !g.escapeWalkSeesEveryUse(object, body) {
+		return false
+	}
 	if g.objectEscapeChecks == nil {
 		g.objectEscapeChecks = make(map[types.Object]bool)
 	}
@@ -3055,6 +3098,8 @@ func calledFunction(expression ast.Expr, info *types.Info) *types.Func {
 func (g *gen) enterCalleeBody(signature *types.Signature, resultLeakBody *ast.BlockStmt) func() {
 	savedLeakBody := g.resultLeakBody
 	savedResults := g.resultObjects
+	savedOuter := g.escapeWalkOuterObjects
+	g.escapeWalkOuterObjects = signatureVariables(signature)
 	g.resultLeakBody = resultLeakBody
 	if resultLeakBody != nil {
 		// A summary walk is allowed to reach the result, so a named result is
@@ -3067,6 +3112,7 @@ func (g *gen) enterCalleeBody(signature *types.Signature, resultLeakBody *ast.Bl
 	return func() {
 		g.resultLeakBody = savedLeakBody
 		g.resultObjects = savedResults
+		g.escapeWalkOuterObjects = savedOuter
 	}
 }
 
@@ -7255,6 +7301,7 @@ func (g *gen) funcDecl(fd *ast.FuncDecl) {
 	g.parents = astParents(fd.Body)
 	g.currentBody = fd.Body
 	predeclaredVariables := signatureVariables(originalSignature)
+	g.escapeWalkOuterObjects = predeclaredVariables
 	g.escapingCaptures = g.findEscapingCaptures(fd.Body, predeclaredVariables...)
 	keepAliveObjects, orderedKeepAliveObjects := g.findKeepAliveObjects(fd.Body)
 	g.keepAliveObjects = keepAliveObjects
@@ -8939,6 +8986,7 @@ func (g *gen) iteratorRangeStmt(statement *ast.RangeStmt, label string, iterator
 			rangeVariables = append(rangeVariables, g.info.Defs[identifier])
 		}
 	}
+	child.escapeWalkOuterObjects = rangeVariables
 	child.escapingCaptures = child.findEscapingCaptures(statement.Body, rangeVariables...)
 	ast.Inspect(statement.Body, func(node ast.Node) bool {
 		if _, nestedFunction := node.(*ast.FuncLit); nestedFunction {
@@ -11405,6 +11453,7 @@ func (g *gen) functionLiteral(literal *ast.FuncLit) ir.Ref {
 	child.currentBody = literal.Body
 	predeclaredVariables := append([]types.Object(nil), parameterObjects...)
 	predeclaredVariables = append(predeclaredVariables, resultObjects...)
+	child.escapeWalkOuterObjects = predeclaredVariables
 	child.escapingCaptures = child.findEscapingCaptures(literal.Body, predeclaredVariables...)
 	keepAliveObjects, orderedKeepAliveObjects := child.findKeepAliveObjects(literal.Body)
 	child.keepAliveObjects = keepAliveObjects
