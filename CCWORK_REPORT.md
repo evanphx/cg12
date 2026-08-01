@@ -192,3 +192,57 @@ of the plan records for every Phase 1 failure.
 - **Why `main` fails only at low `GOGC`.** The phantom bit is read on every bulk barrier, but
   it only produces a *rejected* word when the phantom target happens to be a stale pointer
   and a mark phase is running.
+
+## 8. The fix
+
+`goc/compile.go`: `paddedPointerMask` rounds every emitted `abi.Type` GC bitmap up to a whole
+`uintptr` of zero bytes, and both emission sites (`ensureTypeTag`, `runtimeTypeSymbol`) now
+align the datum to `pointerSize()` as well, so the runtime's `readUintptr` load is aligned and
+lands entirely inside the mask.
+
+Audited for the same class: `.goc.go.gcdata` (`internal/gometa/builder.go`) is the module's
+*data-section GC program*, read a byte at a time by `progToPointerMask`, and it is already
+`align(8)`-terminated. Stack maps and stack-object records go through `scanblock`, which reads
+bytes. The `abi.Type` masks were the only bitmaps the runtime reads a `uintptr` at a time.
+
+`cg12checkwb` was extended in the same change, and is what found this: it now validates the
+words the four bulk-barrier paths in `stdlib/src/runtime/mbitmap.go` buffer — not just
+`atomicwb`'s — and reports the copy's `dst`/`src`/`size` together with the rejected word, which
+is what made `slot - dst = 0x1d8` visible.
+
+### Measured, `goc/testdata/runtime_gc_mark_workers.go` and the reducer, `GOMAXPROCS=3`
+
+All runs sequential on an otherwise idle box; `main+fix` is `main` `ad4e9b2` with only the
+`goc/compile.go` change applied, so the two rows differ by exactly the escape merge.
+
+| tree | program | default `GOGC` | `GOGC=10` |
+| --- | --- | ---: | ---: |
+| `main` | mark-workers | 0/100 | 14/100 |
+| `main` | reducer | **30/30** | 100/100 |
+| merged (no fix) | mark-workers | **100/100** | — |
+| merged (no fix) | reducer | **20/20** | — |
+| `main` + fix | mark-workers | 0/40 | 5/40 |
+| `main` + fix | reducer | 0/40 | 3/40 |
+| merged + fix | mark-workers | 0/40 | 6/40 |
+| merged + fix | reducer | 0/40 | 1/40 |
+
+So the fix closes the capability — and closes the reducer, which `main` failed 30/30 — at the
+`GOGC` the matrix runs at.
+
+## 9. STILL BROKEN: a second, independent defect that `GOGC=10` exposes
+
+**This is not fixed and it is not the one above.** At `GOGC=10` both trees still fail at
+roughly 3–15%, and `main`'s original rate at that `GOGC` was 14/100, so the mask fix did not
+move it. It is a pre-existing defect, present on `main` today, and it is what §5.10's
+"residual runtime faults" subsection is about.
+
+What is known about it:
+
+- Same class of symptom, different route: the bad word is found by the **precise stack scan**,
+  in a frame — `runtime: found in object at *(0x…+0x208)` with `s.state=mSpanManual`,
+  `s.elemsize=8192`, which is a goroutine stack — rather than by a bulk barrier over a heap
+  array.
+- It is rate-sensitive to machine load as well as to `GOGC`: the same `merged+fix` reducer
+  binary is 0/50 on an idle box and 100/100 with four concurrent measurement loops running.
+- No reducer, no mechanism. Nothing below the symptom is established. Do not read the
+  numbers above as an attribution.
