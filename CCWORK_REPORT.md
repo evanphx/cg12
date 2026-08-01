@@ -132,27 +132,53 @@ storage the header itself and routes the assignment through `storeInlineValue`.
 a non-escaping literal**, which costs no allocation: the header lives in the
 declaring frame instead of behind a pointer.
 
-## 3. Two neighbouring defects found while measuring (not the closure bug)
+## 3. A neighbouring defect found while measuring: `complex128` in memory
 
-Both are in the assignment machinery §5.13 closed, not in a sibling job's area.
+`complex128` shares the affected representation, so it came along with the
+measurement. The *variable* half of it is the same defect and is fixed below
+(c54, c56). The *memory* half is a different defect, is **not fixed**, and is
+recorded here with its reducers.
 
-- **`*p = complex(3, 4)` through a `*complex128` corrupts the destination** (c59).
-  Host prints `3 4`; goc prints
-  `5.1494056002632e-310 5.14940560026203e-310`. `storeAssignmentTarget`'s
-  `assignmentTargetAddress` arm stores inline only when
-  `isInlineAggregate(valueType) || isInterfaceValue(valueType)`, and `complex128`
-  is neither, so it falls to `g.store`, which writes the 8-byte *address* of the
-  value into the 16-byte destination. Needs no closure at all.
+**A `complex128` written through an address destination stores the address of a
+frame allocation into the destination, not the value.** `h.c = complex(3.0, 4.0)`
+with `h` a `*holder`:
 
-- **An escaping closure that assigns a `complex128` reads back half garbage**
-  (c56). `go func() { c = complex(3, 4) }()` prints `3.6611173e-317 4` where the
-  host prints `3 4`. `variableStorage`'s heap-lift arm marks only strings and
-  interfaces `directValues`, so a heap-lifted `complex128` cell holds an address
-  where the reader expects the value.
+```
+%t3 =p alloc8 16
+stored d_3, %t3
+%t4 =p add %t3, 8
+stored d_4, %t4
+call $goc_storep(p %t2, p %t3)      <-- the field gets %t3, the frame address
+```
 
-Both are the same missing type case — `complex128` is a value represented by an
-address, exactly like a string or an interface, and three separate predicates
-disagree about that.
+`storeAssignmentTarget`'s `assignmentTargetAddress` arm stores inline only when
+`isInlineAggregate(valueType) || isInterfaceValue(valueType)`, and `complex128`
+is neither, so it falls to `g.store`, which is a one-word store for an
+`ir.ClsP`-classed type. Reads are consistent with it — `g.load` returns the word
+and `real`/`imag` dereference it — which is why it looks correct until the frame
+that produced the value dies. Three reducers:
+
+| program | host | goc |
+| --- | --- | --- |
+| `*p = complex(3, 4)` through a `*complex128` (c59) | `3 4` | `3.8004551335784e-310 3.8004551335772e-310` |
+| write `h.c` in one function, read it in another (d01) | `3 4 7` | `3.499451e-317 5.29561993437e-310 7` |
+| return a struct holding a `complex128` by value (d07) | `{(3+4i) 7}` | `{(0+0i) 7}` |
+
+It also hands `goc_storep` a goroutine-stack address as the value being
+published into a heap object, which is the §5.8 invariant reached by a fourth
+route.
+
+**Why it is not fixed here.** Widening the store arm alone is wrong and was
+measured to be wrong: doing it turned d02 (`fmt.Println(h)` on a struct with a
+`complex128` field, which reads the real sixteen bytes through reflect) and c58
+from passing to faulting, because the *read* side still loads one word. Making
+`complex128` a value carried as an address consistently means putting it into
+`isInlineAggregate`, which is consulted in dozens of places across the frontend
+— a change with its own blast radius and its own validation cycle, of exactly
+the shape RUNTIME_PLAN §5.14 records going wrong when bundled. The narrow rule
+this branch does adopt (`assignmentTargetStoresInline`) deliberately leaves the
+address path exactly as it was, so nothing here regresses and nothing here
+papers over it.
 
 ## 4. The fix
 
@@ -232,6 +258,90 @@ shapes, both range-over-function forms, and the `complex128` cases from section
   `observed += ...` like the rest of the file, which makes them captured-variable
   cases in their own right.
 
-## 6. Still unverified
+## 6. Suites
 
-The suites and the matrix. Section 7 will record them as they land.
+Run on this tree, in this order, at `0116f09`.
+
+| suite | result |
+| --- | --- |
+| `go build ./...`, `go vet ./...` | clean |
+| `gofmt -l goc/ cmd/goc/` | clean |
+| `make test-unit` | ok, every package |
+| `make test-goc-corpus` | `ok github.com/evanphx/cg12/goc 576.362s` |
+| `make test-goc-cmd` | `ok github.com/evanphx/cg12/cmd/goc 248.264s` |
+| capability matrix, default arm | **347 subtests, 346 PASS, 1 EXPECTED FAILURE, 0 FAIL, 0 KNOWN GAP** |
+| capability matrix, `-runtime-opt` arm | **347 subtests, 346 PASS, 1 EXPECTED FAILURE, 0 FAIL, 0 KNOWN GAP** |
+
+347 rather than 345 because this branch adds two capabilities. The verdict census
+is from the per-capability `PASS` / `EXPECTED FAILURE` log lines, not from `ok`;
+the one expected failure is `defer-panic/panic-string-output`, as declared. Four
+shards per arm, `-runtime-status-shards=4`, ~95s per shard.
+
+## 7. The reducers fail on the compiler they describe
+
+A reducer that has only ever reproduced once is a claim (RUNTIME_PLAN §15). Each
+one was re-run against a compiler built at **this same path** from `HEAD~2`'s
+`goc/compile.go` — the tree's own commit reverted, not a worktree, so the
+path-dependence §23 records does not enter.
+
+| program | base compiler | this branch |
+| --- | --- | --- |
+| `runtime_closure_captured_string.go` | `SIGSEGV`, nil pointer dereference | `closure captured string ok` |
+| `runtime_closure_captured_header_values.go` | `unexpected fault address 0x6e6f2d64616572` | `closure captured header values ok` |
+| `runtime_range_target_forms.go` (restored) | `SIGSEGV`, nil pointer dereference | passes |
+
+`0x6e6f2d64616572` is `"read-non"` little-endian: the fault address is the
+program's own text, read out of the frame the closure abandoned.
+
+**The first two mechanism unit tests were wrong and had to be rewritten.** As
+first written they passed against the base compiler, which makes them worthless.
+Two reasons, both worth recording:
+
+- A pointer store lowers to a **`goc_storep` call**, not an `ir` store
+  instruction, whenever the destination is not a known stack address — and a
+  captured pointer never is. A check that looked only at `Op.IsStore()` could not
+  see the store the defect consists of.
+- "the enclosing function allocates 16 bytes somewhere" was true on both
+  compilers. What separates them is the width of the allocation whose address
+  goes *into the closure environment*: sixteen for the value, eight for a pointer
+  to it.
+
+Rewritten (`6878d1a`), all three defect tests fail on the base compiler across
+all three types — 7 failing subtests — and pass here.
+`TestNonEscapingCaptureStaysOffTheHeap` passes on both by design: it is a guard
+on §5.9's cost model, not a defect test.
+
+## 8. Determinism (§23) is not regressed
+
+`analysis/determinism` over all 367 `goc/testdata` programs, 4 rounds each, 16
+workers, in three configurations:
+
+| configuration | result |
+| --- | --- |
+| no `-O` | `reproducible=367 varying=0 failed=0 of 367 over 4 rounds` |
+| `-O` | `reproducible=367 varying=0 failed=0 of 367 over 4 rounds` |
+| against a prebuilt pack (`goc build-runtime`) | `reproducible=367 varying=0 failed=0 of 367 over 4 rounds` |
+
+`content varies between rounds: 0` and `image varies, content identical (layout
+only): 0` in each. `scripts/determinism-check.sh`'s five-program sample agrees,
+cold and warm, two rounds.
+
+The fix cannot introduce nondeterminism by construction — `findReferenceCaptures`
+returns a map that is only ever *looked up* in, never iterated — but §23's rule
+is to measure rather than argue, so it is measured.
+
+## 9. What is left open
+
+- **`complex128` in memory** — section 3. Three reducers, an IR excerpt, and a
+  measurement showing why the one-line widening is wrong. Not fixed; recorded in
+  RUNTIME_PLAN §5.15 under "Residual".
+- **A `slice` local under `!runtimeAllocation`** has the same indirect
+  representation as a string and would have the same defect. It is excluded from
+  `isIndirectVariableValue` deliberately: `!runtimeAllocation` is the `goc -c`
+  path, which compiles to objects and never executes, so the change could not be
+  validated. Stated rather than made silently.
+- **`c++` on a `complex128`** goes through `IncDecStmt`'s word load and is
+  nonsense on both compilers. Untouched and unmeasured beyond that reading.
+- **§5.14's `span has no free objects` interaction** is untouched by this branch,
+  which changes no escape decision: `findEscapingCaptures` is unmodified and
+  `variableStorage`'s heap-lift arm still fires on exactly the same set.

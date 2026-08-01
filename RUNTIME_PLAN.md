@@ -1590,38 +1590,8 @@ the reports of the jobs that found them.
 
 #### Known miscompiles, not covered by any capability
 
-- **A closure that assigns a computed string to a captured string variable
-  leaves it pointing at the closure's dead frame.**
-
-  ```go
-  log := "a"
-  f := func(s string) {
-      log = log + s
-      fmt.Println("inside", log) // az, correct
-  }
-  f("z")
-  fmt.Println("outside", log) // cg12 prints nothing; the host prints az
-  ```
-
-  A local string variable's frame slot holds the address of a 16-byte header,
-  and assigning a computed string copies that header into an alloca in the
-  *assigning* function's frame. When the assigning function is a closure that
-  captured the variable by reference — a non-escaping function literal, or the
-  yield function a range-over-function body is lowered into — the alloca belongs
-  to the closure's frame and the caller's variable dangles once it returns.
-  `log += s` in the same position produced `fatal error: runtime: out of
-  memory`. The escaping-closure path is unaffected, because `variableStorage`
-  heap-lifts the variable and makes its storage the header itself, so a
-  goroutine closure over the same variable is correct.
-
-  Found while establishing the scope of §5.13 and deliberately left out of it:
-  it needs no `range` statement and no non-identifier destination — a plain
-  `for i := range seq { log += fmt.Sprint(i) }` over a function iterator
-  reproduces it — so it belongs to closure capture, not to assignment
-  destinations. It is the reason three range-over-function cases in §5.13's
-  differential corpus still differ from the host; they were rewritten to
-  accumulate into a slice, which is unaffected, and the underlying defect is
-  recorded here rather than worked around.
+- **A closure that assigns to a captured string variable leaves it pointing at
+  the closure's dead frame.** Fixed 2026-08-01, §5.15.
 
 - **A few package globals are emitted twice.** `runtime.divideError`,
   `runtime.overflowError` and `internal/runtime/maps.errNilAssign` each get a
@@ -2288,6 +2258,140 @@ barrier exposes one in the escape fix, and fix whichever is actually wrong. The
 branch is preserved at `ccwork/phase2-alloc` with its capabilities and its
 allocation-family classification intact; none of that work is lost, and §6's
 `malloc_generated.go` finding below stands independently of the escape change.
+
+### 5.15 Fixed: a closure assigning to a captured variable wrote into its own frame (2026-08-01)
+
+§5.10's first known miscompile. A local `string` variable's frame slot held the
+address of a sixteen-byte header, and assigning to it copied the new header into
+an alloca of the function *doing the assigning*, then stored that alloca's
+address into the slot. The slot belongs to whichever frame declared the
+variable, so when the assigning function was a closure that had captured the
+variable by reference, the assignment published the closure's frame to its
+caller and the variable dangled the moment the closure returned.
+
+#### The shape, measured against the host toolchain
+
+70 differential programs, each run with `go run` and with `goc`; **27 differed**.
+The discriminator is not the operator, the right-hand side, or the presence of a
+`range` statement. It is the *representation of the variable's type*: the three
+types cg12 keeps in a frame slot as a pointer to a separate sixteen-byte value.
+
+| affected | not affected |
+| --- | --- |
+| `string`, and a named type whose underlying type is `string` | `slice` — stored inline, three words in the slot |
+| interface (`any`, `error`, …), whatever the payload | struct, array — `allocLocal` gives them stable backing and `assignLocal` copies into it |
+| `complex128` | `int`, `bool`, pointer, map, chan, func, `complex64` — one word |
+
+Every assignment form was wrong, including `x = "literal"` and `x = parameter`,
+which need no computation at all: `=`, `+=`, a call result, a `string([]byte)`
+conversion, tuple assignment and a swap. Every route to a closure was wrong: a
+named function-literal variable, an immediately-invoked literal, a literal
+nested in a literal, a literal passed to a generic function, a deferred literal
+inside a non-escaping literal, and `for i := range seq` over a function iterator,
+which has no function literal in the source at all. The variable being a
+parameter of the enclosing function did not help.
+
+What was already correct, and stayed correct: a read-only capture; an *escaping*
+closure, because `variableStorage` heap-lifts and marks the variable a direct
+value; a named result, for the same reason via `resultStorage`; `&v` where the
+address escapes; a write through a pointer parameter or a pointer receiver; an
+assignment to a *field or element* of a captured variable, which goes through the
+address path; and a `defer` in a loop, which §5.1 heap-lifts.
+
+**Six symptoms, one bug.** §5.10 recorded two. Which one a program shows is
+decided by what the dead frame happens to hold when it is read back: a silently
+empty string, garbage bytes printed as the string, `fatal error: runtime: out of
+memory` from a huge length word, `SIGSEGV` in `runtime_concatstrings` or
+`goc_memmove`, `unexpected fault address 0x3fffff`, and — for the interface
+cases — `<invalid reflect.Value>` or `panic: can't call pointer on a non-pointer
+Value` inside `reflect`.
+
+#### The fix
+
+`variableStorage` already had the right representation; it is what the escaping
+arm uses. This extends it to non-escaping captures, where it costs *nothing*: no
+heap cell, the value simply lives in the declaring frame's slot instead of behind
+a pointer to another sixteen bytes.
+
+- `findReferenceCaptures` returns the locals a nested function body refers to. A
+  nested body is a function literal **or** the body of a `range` over a
+  function, which is lowered into a yield function; both reach the variable
+  through the closure environment, which carries the address of its slot.
+  `findEscapingCaptures` answers the narrower question — which of those must be
+  heap-lifted because the nested function can outlive the frame — and the two now
+  share a `bodyLocals` helper so they agree on what a local is.
+- `variableStorage` gives such a variable `localAllocTyped` storage, zeroed, with
+  `directValues[object] = true`. `localAllocTyped` marks the value's pointer
+  words in the frame's stack map, so the string's data word and the interface's
+  two words remain GC roots.
+- `isIndirectVariableValue` names the type set; `isInlineValue` is the
+  "carried as an address" predicate, and `isAddressRepresentedInterfacePayload`
+  is now expressed in terms of it.
+- `assignmentTarget.directVariable` and `assignmentTargetStoresInline` separate
+  "this destination's storage *is* the value" from "this destination is an
+  address". They are deliberately not the same question — see the residual below.
+
+#### Checkpoint
+
+- [x] Reduce the full cross product against the host toolchain and record which
+  cases are wrong *before* changing anything. 27 of 70 differed; 26 are fixed and
+  the 27th is the separate defect below.
+- [x] Land the reducers as capabilities: `closure-capture/assigned-string` and
+  `closure-capture/assigned-header-values`. Both fail on the base compiler
+  (SIGSEGV and `unexpected fault address`) and pass after the fix, in both matrix
+  arms.
+- [x] Pin the mechanism, not the answer:
+  `TestClosureWritesIntoACapturedVariablesStorage`,
+  `TestCapturedVariableStorageHoldsTheValue` and
+  `TestRangeOverFunctionBodyWritesIntoACapturedVariablesStorage` fail on the base
+  compiler across all three types; `TestNonEscapingCaptureStaysOffTheHeap` guards
+  §5.9's cost model and passes on both.
+- [x] Restore §5.13's three rewritten range-over-function cases.
+  `runtime_range_target_forms.go`'s `iteratorTargets` accumulated into a slice
+  while every other subject in the file accumulated into a string, because this
+  defect made the string form fail. All four cases now use `observed += ...` like
+  the rest of the file, and the file itself fails on the base compiler.
+- [x] Both matrix arms: 347 subtests, 346 PASS, 1 declared EXPECTED FAILURE,
+  0 FAIL, 0 KNOWN GAP. 347 rather than 345 because of the two new capabilities.
+- [x] §23 unaffected: 367/367 corpus programs reproducible over 4 rounds without
+  `-O`, with `-O`, and against a prebuilt pack.
+
+**A reducer for this bug is worthless unless it clobbers the frame.** Two
+programs in the differential corpus matched the host on the first pass and
+differed once a recursive call was inserted between the closure's write and the
+read — the value simply had not been overwritten yet. Every case in both new
+capabilities calls a `clobber` helper in that gap for exactly this reason, and it
+is why a 345-capability matrix never saw a wrong-answer bug in ordinary Go.
+
+#### Residual: `complex128` in memory, not fixed
+
+Found by the same measurement and left open, with reducers. A `complex128`
+written through an *address* destination stores the address of a frame
+allocation into the destination rather than the value:
+
+```
+%t3 =p alloc8 16
+stored d_3, %t3
+%t4 =p add %t3, 8
+stored d_4, %t4
+call $goc_storep(p %t2, p %t3)      // the field gets %t3, a frame address
+```
+
+`storeAssignmentTarget`'s address arm copies bytes only for
+`isInlineAggregate || isInterfaceValue`, and `complex128` is neither, so it takes
+the one-word store its `ir.ClsP` class implies. Reads are consistent with that,
+so it looks right until the producing frame dies: `*p = complex(3, 4)` through a
+`*complex128`, a field written in one function and read in another, and returning
+a struct holding a `complex128` by value all disagree with the host. It also
+hands `goc_storep` a goroutine-stack address as the value being published into a
+heap object, which is §5.8's invariant reached by a fourth route.
+
+Widening that arm was tried and is wrong on its own: it turns a passing
+`complex128` struct-field case into a fault, because the read side still loads
+one word. Making `complex128` consistently a value carried as an address means
+putting it into `isInlineAggregate`, which is consulted throughout the frontend —
+its own change with its own validation cycle, which is why §5.15 keeps the two
+questions apart rather than bundling them.
 
 ## 6. Phase 2: Memory safety, allocation, and accurate GC
 
