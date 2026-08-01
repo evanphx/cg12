@@ -361,6 +361,34 @@ var cg12BulkBarrierRange struct {
 	valid bool
 }
 
+// cg12WriteBarrierWordIsRejected reports whether the words a pointer write
+// barrier is about to buffer violate any rule the current cg12checkwb mode
+// enforces. It is the single gate every caller uses -- the single-word check
+// below and the bulk wrapper both -- so the bulk barrier paths cannot enforce a
+// narrower rule than the single-word path. They did diverge once: the wrapper
+// tested only the mode 1 rule, which silently dropped modes 2 and 3 for every
+// word a typedmemmove, growslice or typedslicecopy buffers.
+//
+// The rules it gates are described on cg12CheckWriteBarrierPair, which recomputes
+// them individually once a word is rejected, to say which one rejected it. The
+// mode 3 clause here omits that function's !stackNew guard, which only chooses
+// between two reports for a word both rules reject; the set of rejected words is
+// the same.
+//
+//go:nosplit
+func cg12WriteBarrierWordIsRejected(slot uintptr, old uintptr, new uintptr) bool {
+	if cg12WriteBarrierValueIsBad(old) || cg12WriteBarrierValueIsBad(new) {
+		return true
+	}
+	if debug.cg12checkwb > 1 && cg12AddressIsGoroutineStack(new) && cg12AddressIsGlobal(slot) {
+		return true
+	}
+	if debug.cg12checkwb > 2 && cg12AddressIsGoroutineStack(new) && !cg12AddressIsGoroutineStack(slot) {
+		return true
+	}
+	return false
+}
+
 // cg12CheckWriteBarrierPair validates the old and new words a pointer write
 // barrier is about to buffer and reports the storing site when one of them
 // would later make wbBufFlush1 throw "found bad pointer in Go heap". Throwing
@@ -388,6 +416,9 @@ var cg12BulkBarrierRange struct {
 //
 //go:nosplit
 func cg12CheckWriteBarrierPair(slot uintptr, old uintptr, new uintptr) {
+	if !cg12WriteBarrierWordIsRejected(slot, old, new) {
+		return
+	}
 	oldBad := cg12WriteBarrierValueIsBad(old)
 	newBad := cg12WriteBarrierValueIsBad(new)
 	stackNew := false
@@ -397,9 +428,6 @@ func cg12CheckWriteBarrierPair(slot uintptr, old uintptr, new uintptr) {
 	published := false
 	if debug.cg12checkwb > 2 && !stackNew && cg12AddressIsGoroutineStack(new) && !cg12AddressIsGoroutineStack(slot) {
 		published = true
-	}
-	if !oldBad && !newBad && !stackNew && !published {
-		return
 	}
 	cg12BadWriteBarrierWord.slot = slot
 	cg12BadWriteBarrierWord.old = old
@@ -472,11 +500,13 @@ func cg12ReportBadWriteBarrierWord() {
 // cg12CheckBulkBarrierWord is cg12CheckWriteBarrierPair for the bulk barrier
 // paths, which copy a whole range rather than storing one word. It records the
 // range with the rejected word so the report can show which element of the
-// source is bad and what the rest of the source looks like.
+// source is bad and what the rest of the source looks like. It rejects exactly
+// the words the single-word path rejects: both gate on
+// cg12WriteBarrierWordIsRejected.
 //
 //go:nosplit
 func cg12CheckBulkBarrierWord(slot, old, new, dst, src, size uintptr) {
-	if !cg12WriteBarrierValueIsBad(old) && !cg12WriteBarrierValueIsBad(new) {
+	if !cg12WriteBarrierWordIsRejected(slot, old, new) {
 		return
 	}
 	cg12BulkBarrierRange.dst = dst
