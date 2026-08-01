@@ -4,6 +4,7 @@ import (
 	"os"
 	"path/filepath"
 	"regexp"
+	"strings"
 	"testing"
 
 	"github.com/stretchr/testify/assert"
@@ -79,6 +80,24 @@ func runtimeCapabilitySensitivityReasons(capability runtimeCapability, source st
 	for reason, pattern := range runtimeCapabilitySensitivityPatterns {
 		if pattern.MatchString(source) {
 			reasons = append(reasons, reason)
+		}
+	}
+	// The env field is the other way a capability's configuration stops being
+	// the run phase's. Pinning GOMAXPROCS makes the program's share of the
+	// machine its own business, and a GODEBUG diagnostic that walks stacks or
+	// validates every buffered write barrier changes how long the program takes
+	// by enough that its neighbours notice. Neither is visible in the source, so
+	// the source patterns above cannot find them.
+	for _, entry := range capability.env {
+		name, _, found := strings.Cut(entry, "=")
+		if !found {
+			continue
+		}
+		switch name {
+		case "GOMAXPROCS":
+			reasons = append(reasons, "pins GOMAXPROCS through its env field")
+		case "GODEBUG":
+			reasons = append(reasons, "runs under a GODEBUG diagnostic set by its env field")
 		}
 	}
 	return reasons

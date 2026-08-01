@@ -2333,6 +2333,221 @@ passes with low `GOGC`, forced collection, stack movement, and concurrent
 mutation; no compiler validation fires; and core allocation/GC uncovered paths
 are either tested or classified.
 
+### 6.1 Stack scanning and GC stress: done (2026-08-01)
+
+The stack-scanning, GC-stress and rare-invariant halves of the list above are
+closed by `ccwork/phase2-gc`. The allocation-family and write-barrier halves
+remain with `ccwork/phase2-alloc`, which is still held back by §5.14.
+
+**It found a live GC defect on its first program, and the defect was in the
+compiler.** A buffered channel's elements were not GC roots.
+`(*gen).channelType` hand-rolled the `abi.ChanType` handed to `runtime.makechan`
+and filled in only `Size_`, `Align_`, `FieldAlign_` and `Kind_`, leaving
+`PtrBytes` zero and `GCData` nil. `makechan` reads `elem.Pointers()` to choose
+between a separate scannable buffer and one carved out of the no-scan `hchan`
+allocation, so every buffered element of every pointer-containing type -- string,
+pointer, slice, interface, struct -- sat where the mark phase never looked. The
+same descriptor reaches `typedmemmove` and `bulkBarrierPreWriteSrcOnly` from
+`chansend`, `chanrecv` and `sendDirect`, so the element copy lost its write
+barrier too.
+
+The symptom was `runtime: marked free object in span`, at 30/30 with
+`GOMAXPROCS=1` and 60/100 at 4, against 0/100 on the host toolchain. The reducer
+is 30 lines with no `unsafe`, no cleanups and no goroutines: fill a
+`chan string` of capacity 64, collect three times, receive. `channelType` now
+uses the descriptor `runtimeType` already emits for every other allocation site;
+`goc/channel_type_test.go` reads the emitted datum and requires `PtrBytes` and
+`GCData`, and fails on the pre-fix compiler.
+
+Three things about method, since §15 collects them:
+
+- **`GODEBUG=clobberfree=1` plus `cg12scanroots=2` is a decisive pair.**
+  clobberfree makes a reclaimed object's first word `0xdeadbeefdeadbeef`, and
+  `cg12scanroots` prints that word as `head` next to the frame and stack-map slot
+  retaining it. Grepping one run's output for `head 0xdeadbeef` named the frame
+  holding a freed object directly. Neither diagnostic alone would have.
+- **No capability in the 345-entry matrix caught this**, measured rather than
+  inferred: compiled by the pre-fix compiler and run under
+  `GODEBUG=clobberfree=1`, `goroutine/channel-of-slices-gc`,
+  `interface-channel-gc`, `channel-struct-pointer-gc` and `buffered-channel-fifo`
+  all pass 6/6. They send one element and collect once, which is not enough for
+  the sweeper to reach the buffer and hand the memory out again. `gc/channel-buffer-roots`
+  now fills a buffer, churns, collects repeatedly, and then drains, across six
+  element types.
+- **`reportZombies` could not name the object**, exactly as the end of §5.11
+  predicted. The dump printed every object `alloc unmarked` and named no zombie
+  at all. Attribution came from `cg12scanroots` instead.
+
+#### Capabilities added
+
+`stack-scan/{loop-safepoints, blocked-goroutines, syscall-transitions,
+panic-unwind, stack-copy-roots, callfree-loop-roots}`,
+`gc/channel-buffer-roots`, `gc-stress/{concurrent-mark, assist-credit,
+sweep-pacing, scavenge-release, heap-growth-shrink, memory-limit}`, and
+`gc-invariants/{checkmark, mark-workers, metadata-hugepages}`. The matrix goes
+from 345 to 361 capabilities, all `mustPass`, with the single declared
+`expectedFailure` unchanged. The plain arm is 361 PASS / 0 FAIL / 0 KNOWN GAP;
+the optimized arm is 360 PASS / 1 FAIL, and that one failure is the pre-existing
+`-O` defect recorded below rather than anything this branch introduced.
+
+Every one runs under a diagnostic where one applies: the five stack-scanning
+programs under `cg12scanroots=1`, `stack-copy-roots` under
+`cg12checkstackcopy=1`, `gc-stress/concurrent-mark` under `cg12checkwb=2`,
+`gc-invariants/checkmark` under `gccheckmark=1`, and `gc/channel-buffer-roots`
+under `clobberfree=1`. `runtimeCapability` grew an `env` field for that, matching
+the one `ccwork/phase2-alloc` adds, and
+`TestRuntimeCapabilityExclusiveClassification` now reads it: pinning `GOMAXPROCS`
+or turning on a stack-walking `GODEBUG` is invisible in the program source, so
+the source-pattern floor could not see it.
+
+#### Classified unreachable: the conservative stack scan
+
+`internal/gometa.UnsafePointPCData` marks every generated function
+`abi.UnsafePointUnsafe` from entry to `0xffffffff`, deliberately: cg12 keeps
+managed references in registers between calls while its stack maps describe the
+spill state at call safepoints. `isAsyncSafePoint` reads that table and refuses,
+so `runtime.asyncPreempt` is never injected, no frame is ever marked
+conservative, and all three calls to `runtime.scanConservative` are dead.
+
+Measured rather than argued. A long call-free loop compiled with runtime coverage
+executes `suspendG`, `preemptM`, `doSigPreempt` and `isAsyncSafePoint` and does
+not execute `asyncPreempt2` or `scanConservative`; a per-block reading of
+`isAsyncSafePoint` shows the taken exit is `preempt.go:448`, the
+`up == abi.UnsafePointUnsafe` one. `internal/gometa`'s
+`TestUnsafePointPCDataMarksTheWholeFunctionUnsafe` decodes the table the way
+`runtime.pcvalue` does, and `cmd/goc`'s
+`TestAsynchronousPreemptionIsRefusedForGeneratedCode` asserts the whole chain and
+goes red if asynchronous preemption is ever enabled.
+
+**This is Phase 3's problem, not Phase 2's.** §7 asks for asynchronous preemption
+in compute loops; cg12 has none, so a non-terminating call-free loop has no
+preemption point and `stopTheWorld` would wait for it indefinitely. Every loop
+tried here terminates, so that is a consequence of the mechanism rather than a
+reproduced hang.
+
+#### Zombie detection, in a controlled negative subprocess
+
+`cmd/goc/runtime_zombie_detection_test.go` makes the sweeper's zombie check fire
+on purpose: the subprocess launders a pointer through a `uintptr`, collects until
+the object is swept, then publishes the integer back as a pointer where the
+collector follows it. It dies with `runtime: marked free object in span` and
+`found pointer to free object`; the control, the same program without the
+resurrection, exits 0. So the detector is known to work rather than assumed to.
+
+The same test confirms the §5.11 blind spot independently, and pins the
+mechanism: `sweepLocked.sweep` calls `moveInlineMarks`, which copies a Green Tea
+span's inline marks into `gcmarkBits` and then **resets** them; the detection
+reads `gcmarkBits` and is right, but `reportZombies` reads `markBitsForBase`,
+which on such a span returns those same reset bits. Detection works, attribution
+does not. `ccwork/reportzombies` owns the fix and nothing here touches it; the
+test logs the gap rather than asserting it in either direction.
+
+#### Open: with `-O`, a loop-carried local is not a GC root
+
+`stack-scan/loop-safepoints` passes in the plain arm and **fails in the optimized
+arm**, and the defect predates this branch: a goc built from `main` (`0505d90`)
+in the same tree fails the reducer identically, 10/10.
+
+The reducer is `goc/testdata/runtime_opt_loop_carried_root.go` — 60 lines, no
+cleanups, no channels, no `unsafe`. A chain whose head is a loop-carried local is
+reclaimed while the local still points at it; under
+`GODEBUG=clobberfree=1` the walk afterwards faults on `0xdeadbeefdeadbeef`. The
+same shape with the loop removed passes with `-O`, and the host toolchain passes
+either way.
+
+| build | reducer |
+| --- | ---: |
+| goc, no `-O` | 0/10 fail |
+| goc, `-O` | 10/10 fail |
+| goc from `main` (`0505d90`), `-O` | 10/10 fail |
+| host Go 1.26.1 | passes |
+
+`cg12scanroots` shows the frame reporting no `*node` root at all in the optimized
+build, while the unoptimized build reports two 32-byte objects from the same
+source. The pointer is in the frame — the emitted code stores it at `[x29,#40]`
+and reaches it through an address parked at `[x29,#16]` — and the stack map does
+not describe it.
+
+Narrowed with a throwaway print in `arm64.(*mc).recordSafepoint` (not committed),
+run with the compiler serialised so the output does not interleave. At the
+collection inside the loop, `main.carried` reports:
+
+```
+-O    : roots 5  stackPointerWords 9  stackAllocTmp 6   -- all five are alloc temps
+no -O : roots 8  stackPointerWords 9  stackAllocTmp 13  -- all eight are alloc temps
+```
+
+`-O` promotes four pointer-bearing allocations out of the frame while
+`StackPointerWords` still lists nine, so the loop-carried pointer is an SSA value
+rather than a frame allocation --- and **no promoted value is reported at that
+safepoint at all**. `arm64.isSafepointRoot` would accept one (it returns true for
+`Cls == ir.ClsP` on a managed frame, and `opt.Mem2Reg` keeps the pointer class for
+exactly that reason), so the value is lost before that test: either it is not live
+in `analysis.Liveness` at the call, or it is no longer a temporary there.
+
+The obvious candidate fix was tried and **does not work**: a scratch build that
+reports every pointer-bearing frame allocation at every safepoint still fails the
+reducer 10/10 with `-O`, which is consistent with the narrowing --- under `-O` the
+allocations that matter are not frame allocations any more. Recorded so the next
+attempt does not spend that experiment again. What is left is `opt.Mem2Reg`'s
+promoted values and how they reach `computeSafepointRoots`; changing that is
+register-level root reporting for every function in both arms, and it is not
+attempted here.
+
+`stack-scan/loop-safepoints` is deliberately left `mustPass` and left failing
+rather than reclassified as a `knownGap`: reclassifying would restore the
+"0 KNOWN GAP" headline while hiding a live, reproducible miscompile.
+
+#### Open: `//go:noinline` does nothing, and `-O` inlines through it
+
+Found while narrowing the defect above. `goc/compile.go` parses exactly one
+directive -- `g.fn.NoSplit = hasCompilerDirective(fd, "go:nosplit")` -- and there
+is no `go:noinline` handling anywhere in `goc/`, `opt/` or `ir/`; grep finds the
+string only inside `goc/testdata`. The `-O` build of
+`runtime_opt_loop_carried_root.go` has no `main_loop`, `main_simple` or
+`main_newNode` symbol at all: all three `//go:noinline` functions were folded
+into `main_main`.
+
+This matters twice. It is a plausible proximate cause of the root loss above --
+after inlining, the allocation helper, the loop and the collection are one frame,
+and that frame is the one whose stack map loses the pointer -- though the two
+could not be separated, because `CG12_NO_COSTINLINE` and `CG12_NO_AGGINLINE` do
+not disable the ordinary size-budget inliner. And it silently weakens every test
+in this repository that uses `//go:noinline` to keep a frame distinct so a stack
+map can be reasoned about --- 25 of the 382 programs in `goc/testdata`, including
+`gc/stack-argument-roots`, `gc/goroutine-entry-stack-map` and all six new
+`stack-scan` programs. §15 already
+records one investigation where "the real difference was inlining"; this is the
+mechanism that makes that failure mode easy to hit.
+
+No test is added, because a test asserting the directive is honoured would be red
+on arrival.
+
+#### What is not done
+
+- **Dedicated versus fractional mark workers cannot be told apart**, so §6's
+  "dedicated/fractional/idle mark workers" is only partly delivered.
+  `cpuStats.accumulate` adds fractional time into `GCDedicatedTime`, so
+  `runtime/metrics` folds the two together, and the three per-mode drain
+  wrappers -- the only other discriminator -- report **unexecuted** in the
+  coverage bitmap at GOMAXPROCS 1, 2, 3, 4 and 8, on runs where
+  `gcBgMarkWorker` gets past its `mode not set` throw and `gcDrain` executes.
+  `gcDrain`'s only callers are those three wrappers and `mcheckmark.go`, so
+  either the modes are never handed out or the instrumentation is missing these
+  functions' counters. **If it is the latter, §1's coverage percentages
+  understate coverage.** Unresolved; `TestBackgroundMarkWorkersAreScheduledAndDrain`
+  asserts only what is measurable.
+- The huge-page transition is proved to *run* (`mheap.enableMetadataHugePages`
+  and `pageAlloc.enableChunkHugePages` both execute once the heap goal crosses
+  1 GiB) and the heap is proved intact across it. Whether the kernel honours the
+  `madvise` is not asserted; it is advisory and host-dependent.
+- The channel element descriptor is now correct but is still not the *same*
+  datum `reflect` reports for that type. goc emits more than one descriptor
+  family per type. Pre-existing, independent of this defect, and untraced.
+- §6's compiler-emitted checks list is untouched by this branch: no new
+  validation mode was added, per §13 item 5, and the existing three were used
+  instead.
+
 ## 7. Phase 3: Scheduler, goroutines, synchronization, and stacks
 
 Remove the corpus-wide assumption that one P is sufficient.

@@ -44,6 +44,14 @@ type runtimeCapability struct {
 	// absence is a classified outcome instead of a collection failure.
 	termination     runtimeCapabilityTermination
 	terminationNote string
+	// env holds "NAME=value" entries added to the program's environment. It
+	// exists so a capability can run under a runtime diagnostic -- the stack
+	// scanning capabilities run under GODEBUG=cg12scanroots or
+	// cg12checkstackcopy, and gc-invariants/checkmark under gccheckmark --
+	// without the program having to re-execute itself to set one. Entries are
+	// appended after the inherited environment, so they win over an inherited
+	// value, including the GOMAXPROCS the run phase sets.
+	env []string
 }
 
 type runtimeCapabilityExpectation int
@@ -2244,6 +2252,171 @@ func runtimeCapabilities() []runtimeCapability {
 			source:      "runtime_many_defers_stack.go",
 			expectation: runtimeCapabilityMustPass,
 		},
+
+		// Stack scanning, RUNTIME_PLAN.md section 6. Each program keeps its
+		// objects reachable only through the frame under test and observes a
+		// premature collection rather than inferring one. The diagnostics they
+		// run under are the ones Phase 1 built: cg12scanroots names the frame
+		// and stack-map slot that retains each object, and cg12checkstackcopy
+		// throws at a stale old-stack pointer instead of leaving it to be found
+		// later.
+		{
+			category:    "stack-scan",
+			name:        "loop-safepoints",
+			source:      "runtime_stack_scan_loop_safepoints.go",
+			expectation: runtimeCapabilityMustPass,
+			env:         []string{"GODEBUG=cg12scanroots=1"},
+			timeout:     120 * time.Second,
+			exclusive:   true,
+		},
+		{
+			category:    "stack-scan",
+			name:        "blocked-goroutines",
+			source:      "runtime_stack_scan_blocked_goroutines.go",
+			expectation: runtimeCapabilityMustPass,
+			env:         []string{"GODEBUG=cg12scanroots=1"},
+			timeout:     120 * time.Second,
+			exclusive:   true,
+		},
+		{
+			category:    "stack-scan",
+			name:        "syscall-transitions",
+			source:      "runtime_stack_scan_syscall.go",
+			expectation: runtimeCapabilityMustPass,
+			env:         []string{"GODEBUG=cg12scanroots=1"},
+			timeout:     120 * time.Second,
+			exclusive:   true,
+		},
+		{
+			category:    "stack-scan",
+			name:        "panic-unwind",
+			source:      "runtime_stack_scan_panic_unwind.go",
+			expectation: runtimeCapabilityMustPass,
+			env:         []string{"GODEBUG=cg12scanroots=1"},
+			timeout:     120 * time.Second,
+			exclusive:   true,
+		},
+		{
+			category:    "stack-scan",
+			name:        "stack-copy-roots",
+			source:      "runtime_stack_copy_roots.go",
+			expectation: runtimeCapabilityMustPass,
+			env:         []string{"GODEBUG=cg12checkstackcopy=1"},
+			timeout:     180 * time.Second,
+			exclusive:   true,
+		},
+		{
+			category:    "stack-scan",
+			name:        "callfree-loop-roots",
+			source:      "runtime_stack_scan_callfree_loop.go",
+			expectation: runtimeCapabilityMustPass,
+			env:         []string{"GOMAXPROCS=4"},
+			timeout:     180 * time.Second,
+			exclusive:   true,
+		},
+
+		// The channel buffer is a GC root. This is the capability that found the
+		// defect in goc's channel element descriptor: makechan reads the
+		// element's PtrBytes to decide whether the buffer needs to be a
+		// scannable allocation at all, so a stub descriptor put every buffered
+		// element somewhere the mark phase never looked.
+		{
+			category:    "gc",
+			name:        "channel-buffer-roots",
+			source:      "runtime_channel_buffer_roots.go",
+			expectation: runtimeCapabilityMustPass,
+			env:         []string{"GODEBUG=clobberfree=1"},
+			timeout:     120 * time.Second,
+			exclusive:   true,
+		},
+
+		// GC stress, RUNTIME_PLAN.md section 6: concurrent allocation during
+		// marking, assist work, sweep pacing, scavenging, growth and shrink
+		// cycles, and low-memory pressure. All exclusive: every one of them
+		// asserts an allocation or GC statistic, changes a process-wide runtime
+		// limit, or deliberately saturates the allocator.
+		{
+			category:    "gc-stress",
+			name:        "concurrent-mark",
+			source:      "runtime_gc_concurrent_mark.go",
+			expectation: runtimeCapabilityMustPass,
+			env:         []string{"GODEBUG=cg12checkwb=2"},
+			timeout:     240 * time.Second,
+			exclusive:   true,
+		},
+		{
+			category:    "gc-stress",
+			name:        "assist-credit",
+			source:      "runtime_gc_assist_credit.go",
+			expectation: runtimeCapabilityMustPass,
+			timeout:     240 * time.Second,
+			exclusive:   true,
+		},
+		{
+			category:    "gc-stress",
+			name:        "sweep-pacing",
+			source:      "runtime_gc_sweep_pacing.go",
+			expectation: runtimeCapabilityMustPass,
+			timeout:     240 * time.Second,
+			exclusive:   true,
+		},
+		{
+			category:    "gc-stress",
+			name:        "scavenge-release",
+			source:      "runtime_gc_scavenge_release.go",
+			expectation: runtimeCapabilityMustPass,
+			timeout:     240 * time.Second,
+			exclusive:   true,
+		},
+		{
+			category:    "gc-stress",
+			name:        "heap-growth-shrink",
+			source:      "runtime_gc_heap_growth_shrink.go",
+			expectation: runtimeCapabilityMustPass,
+			timeout:     240 * time.Second,
+			exclusive:   true,
+		},
+		{
+			category:    "gc-stress",
+			name:        "memory-limit",
+			source:      "runtime_gc_memory_limit.go",
+			expectation: runtimeCapabilityMustPass,
+			timeout:     240 * time.Second,
+			exclusive:   true,
+		},
+
+		// Rare invariant paths, RUNTIME_PLAN.md section 6. checkmark re-marks
+		// the whole heap with the world stopped and throws at any object the
+		// concurrent phase missed; the mark-worker and huge-page programs reach
+		// paths no Go program can observe from inside itself, and what they
+		// reached is asserted separately against the runtime coverage bitmap by
+		// cmd/goc/runtime_gc_paths_test.go.
+		{
+			category:    "gc-invariants",
+			name:        "checkmark",
+			source:      "runtime_gc_checkmark.go",
+			expectation: runtimeCapabilityMustPass,
+			env:         []string{"GODEBUG=gccheckmark=1"},
+			timeout:     240 * time.Second,
+			exclusive:   true,
+		},
+		{
+			category:    "gc-invariants",
+			name:        "mark-workers",
+			source:      "runtime_gc_mark_workers.go",
+			expectation: runtimeCapabilityMustPass,
+			env:         []string{"GOMAXPROCS=3"},
+			timeout:     180 * time.Second,
+			exclusive:   true,
+		},
+		{
+			category:    "gc-invariants",
+			name:        "metadata-hugepages",
+			source:      "runtime_gc_metadata_hugepages.go",
+			expectation: runtimeCapabilityMustPass,
+			timeout:     240 * time.Second,
+			exclusive:   true,
+		},
 	}
 }
 
@@ -3072,7 +3245,7 @@ func runRuntimeCapabilityProgram(
 		runAttempts++
 		ctx, cancel := context.WithTimeout(context.Background(), timeout)
 		run := exec.CommandContext(ctx, executable)
-		run.Env = runtimeCapabilityExecutionEnv()
+		run.Env = append(runtimeCapabilityExecutionEnv(), capability.env...)
 		runStarted := time.Now()
 		attemptOutput, attemptErr := run.CombinedOutput()
 		runDuration += time.Since(runStarted)

@@ -12685,24 +12685,23 @@ func (g *gen) appendCall(call *ast.CallExpr) ir.Ref {
 	return g.sliceDescriptor(resultData, resultLength, resultCapacity)
 }
 
+// channelType emits the abi.ChanType that runtime.makechan is called with.
+//
+// Its element field must be the same complete descriptor every other allocation
+// site uses. makechan reads Elem.PtrBytes to decide whether the buffer holds
+// pointers at all -- a zero sends it down the branch that allocates the buffer
+// inside the no-scan hchan object, where the collector never sees the elements --
+// and chansend, chanrecv and sendDirect hand Elem to typedmemmove and
+// bulkBarrierPreWriteSrcOnly, both of which skip the barrier when PtrBytes is
+// zero. A stub carrying only size, alignment and kind is therefore not enough.
 func (g *gen) channelType(channel *types.Chan) ir.Ref {
 	element := channel.Elem()
-	elementName, fresh := g.internSymbol(".goc.channel.element", goTypeKey(g.fset, element))
+	elementName := g.runtimeTypeSymbol(element)
+	channelName, fresh := g.internSymbol(".goc.channel.type", goTypeKey(g.fset, element))
 	if !fresh {
-		return g.fn.Sym(elementName+".channel", 0)
+		return g.fn.Sym(channelName, 0)
 	}
-	elementBytes := make([]int64, 48)
-	size := typeSize(element)
-	for i := 0; i < 8; i++ {
-		elementBytes[i] = (size >> (8 * i)) & 0xff
-	}
-	alignment := typeAlign(element)
-	elementBytes[21] = alignment
-	elementBytes[22] = alignment
-	elementBytes[23] = int64(runtimeKind(element))
-	channelName := elementName + ".channel"
 	g.mod.Data = append(g.mod.Data,
-		&ir.Data{Name: elementName, Align: 8, Items: []ir.DataItem{{Sub: ir.SubUB, Ints: elementBytes}}},
 		&ir.Data{Name: channelName, Align: 8, Items: []ir.DataItem{
 			{Zero: 48},
 			{Sub: ir.SubL, Sym: elementName},
@@ -12713,9 +12712,17 @@ func (g *gen) channelType(channel *types.Chan) ir.Ref {
 }
 
 func (g *gen) runtimeType(valueType types.Type) ir.Ref {
+	return g.fn.Sym(g.runtimeTypeSymbol(valueType), 0)
+}
+
+// runtimeTypeSymbol emits the complete abi.Type descriptor for valueType, if it
+// has not already been emitted, and returns the name of its data symbol. It is
+// separate from runtimeType so that a descriptor can be referenced from another
+// datum rather than only loaded as an address.
+func (g *gen) runtimeTypeSymbol(valueType types.Type) string {
 	name, fresh := g.internSymbol(".goc.runtime.type", goTypeKey(g.fset, valueType))
 	if !fresh {
-		return g.fn.Sym(name, 0)
+		return name
 	}
 	maskName := name + ".gcdata"
 	size := typeSize(valueType)
@@ -12737,7 +12744,7 @@ func (g *gen) runtimeType(valueType types.Type) ir.Ref {
 			{Sub: ir.SubW, Ints: []int64{0, 0}},
 		}},
 	)
-	return g.fn.Sym(name, 0)
+	return name
 }
 
 func (g *gen) markDataPointerCell(name string) {

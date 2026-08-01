@@ -1,7 +1,7 @@
 {
   "version": 1,
   "baseline": "runtime_coverage_linux_arm64.json",
-  "note": "Capabilities the accepted baseline does not cover. TestCheckedRuntimeCoverageBaselineDenominator reconciles the capability matrix, the accepted baseline, and this list, so the corpus denominator cannot drift silently. Adding a capability requires either a baseline rerun or an entry here. The list is empty: the accepted 2026-07-31 baseline covers every capability in the matrix, so the reconciliation is baseline-to-matrix directly.",
+  "note": "Capabilities the accepted baseline does not cover. TestCheckedRuntimeCoverageBaselineDenominator reconciles the capability matrix, the accepted baseline, and this list, so the corpus denominator cannot drift silently. Adding a capability requires either a baseline rerun or an entry here.",
   "capabilities": [
     {
       "capability": "assignment-targets/multi-assignment-forms",
@@ -20,6 +20,46 @@
       "reason": "added to the capability matrix after the accepted baseline run; it enters the baseline at the next full-corpus rerun"
     },
     {
+      "capability": "gc-invariants/checkmark",
+      "reason": "added to the capability matrix after the accepted baseline run; it enters the baseline at the next full-corpus rerun"
+    },
+    {
+      "capability": "gc-invariants/mark-workers",
+      "reason": "added to the capability matrix after the accepted baseline run; it enters the baseline at the next full-corpus rerun"
+    },
+    {
+      "capability": "gc-invariants/metadata-hugepages",
+      "reason": "added to the capability matrix after the accepted baseline run; it enters the baseline at the next full-corpus rerun"
+    },
+    {
+      "capability": "gc-stress/assist-credit",
+      "reason": "added to the capability matrix after the accepted baseline run; it enters the baseline at the next full-corpus rerun"
+    },
+    {
+      "capability": "gc-stress/concurrent-mark",
+      "reason": "added to the capability matrix after the accepted baseline run; it enters the baseline at the next full-corpus rerun"
+    },
+    {
+      "capability": "gc-stress/heap-growth-shrink",
+      "reason": "added to the capability matrix after the accepted baseline run; it enters the baseline at the next full-corpus rerun"
+    },
+    {
+      "capability": "gc-stress/memory-limit",
+      "reason": "added to the capability matrix after the accepted baseline run; it enters the baseline at the next full-corpus rerun"
+    },
+    {
+      "capability": "gc-stress/scavenge-release",
+      "reason": "added to the capability matrix after the accepted baseline run; it enters the baseline at the next full-corpus rerun"
+    },
+    {
+      "capability": "gc-stress/sweep-pacing",
+      "reason": "added to the capability matrix after the accepted baseline run; it enters the baseline at the next full-corpus rerun"
+    },
+    {
+      "capability": "gc/channel-buffer-roots",
+      "reason": "added to the capability matrix after the accepted baseline run; it enters the baseline at the next full-corpus rerun"
+    },
+    {
       "capability": "gc/goroutine-entry-stack-map",
       "reason": "added to the capability matrix after the accepted baseline run; it enters the baseline at the next full-corpus rerun"
     },
@@ -29,6 +69,30 @@
     },
     {
       "capability": "print-builtin/statement-atomicity",
+      "reason": "added to the capability matrix after the accepted baseline run; it enters the baseline at the next full-corpus rerun"
+    },
+    {
+      "capability": "stack-scan/blocked-goroutines",
+      "reason": "added to the capability matrix after the accepted baseline run; it enters the baseline at the next full-corpus rerun"
+    },
+    {
+      "capability": "stack-scan/callfree-loop-roots",
+      "reason": "added to the capability matrix after the accepted baseline run; it enters the baseline at the next full-corpus rerun"
+    },
+    {
+      "capability": "stack-scan/loop-safepoints",
+      "reason": "added to the capability matrix after the accepted baseline run; it enters the baseline at the next full-corpus rerun"
+    },
+    {
+      "capability": "stack-scan/panic-unwind",
+      "reason": "added to the capability matrix after the accepted baseline run; it enters the baseline at the next full-corpus rerun"
+    },
+    {
+      "capability": "stack-scan/stack-copy-roots",
+      "reason": "added to the capability matrix after the accepted baseline run; it enters the baseline at the next full-corpus rerun"
+    },
+    {
+      "capability": "stack-scan/syscall-transitions",
       "reason": "added to the capability matrix after the accepted baseline run; it enters the baseline at the next full-corpus rerun"
     }
   ]
