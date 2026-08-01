@@ -3,8 +3,21 @@
 Branch `ccwork/closure-string`, off `main` (`0505d90`). RUNTIME_PLAN.md §5.10, first
 bullet under "Known miscompiles, not covered by any capability".
 
-This file is written incrementally as results land. Sections are in the order they
-were measured. **Status: shape established, fix in progress.**
+**Verdict: fixed, and it was three type classes rather than one.** The defect is
+not about strings and not about `range`; it is about every local variable cg12
+keeps in a frame slot as a pointer to a separate sixteen-byte value — a string,
+an interface, or a `complex128` — assigned from inside a closure that captured it
+by reference. 27 of 70 differential programs disagreed with the host toolchain;
+26 agree now, and the 27th is a different defect this branch measures and
+deliberately does not fix (section 3).
+
+Both matrix arms are 347 subtests / 346 PASS / 1 declared EXPECTED FAILURE /
+0 FAIL / 0 KNOWN GAP, all 367 corpus programs are still byte-reproducible in all
+three configurations, and §5.13's three range-over-function cases assert what
+they originally wanted to. What is *not* established is section 9.
+
+This file was written as each result landed; the sections are in the order they
+were measured.
 
 ## 1. Reproduced
 
@@ -260,22 +273,29 @@ shapes, both range-over-function forms, and the `complex128` cases from section
 
 ## 6. Suites
 
-Run on this tree, in this order, at `0116f09`.
+Every one of these was re-run at the tip commit `7182ddf`, after the plan and
+report edits, not only at the commit that introduced the fix.
 
 | suite | result |
 | --- | --- |
 | `go build ./...`, `go vet ./...` | clean |
 | `gofmt -l goc/ cmd/goc/` | clean |
 | `make test-unit` | ok, every package |
-| `make test-goc-corpus` | `ok github.com/evanphx/cg12/goc 576.362s` |
-| `make test-goc-cmd` | `ok github.com/evanphx/cg12/cmd/goc 248.264s` |
+| `make test-goc-corpus` | `ok github.com/evanphx/cg12/goc 567.755s` |
+| `make test-goc-cmd` | `ok github.com/evanphx/cg12/cmd/goc 229.315s` |
 | capability matrix, default arm | **347 subtests, 346 PASS, 1 EXPECTED FAILURE, 0 FAIL, 0 KNOWN GAP** |
 | capability matrix, `-runtime-opt` arm | **347 subtests, 346 PASS, 1 EXPECTED FAILURE, 0 FAIL, 0 KNOWN GAP** |
 
-347 rather than 345 because this branch adds two capabilities. The verdict census
-is from the per-capability `PASS` / `EXPECTED FAILURE` log lines, not from `ok`;
-the one expected failure is `defer-panic/panic-string-output`, as declared. Four
-shards per arm, `-runtime-status-shards=4`, ~95s per shard.
+**The complete list of non-passing capabilities, both arms: none.** The only
+non-`PASS` verdict in either arm is `defer-panic/panic-string-output`, the
+declared `expectedFailure`. `--- FAIL:` and `--- SKIP:` appear zero times in
+either arm.
+
+347 rather than 345 because this branch adds two capabilities. The census is from
+the per-capability `PASS` / `EXPECTED FAILURE` / `KNOWN GAP` log lines and a
+count of `--- PASS:`/`--- FAIL:`/`--- SKIP:` subtest lines, not from `ok`. Four
+shards per arm, `-runtime-status-shards=4 -runtime-status-compile-workers=16`,
+47-54s per shard.
 
 ## 7. The reducers fail on the compiler they describe
 
