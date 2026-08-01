@@ -246,3 +246,44 @@ What is known about it:
   binary is 0/50 on an idle box and 100/100 with four concurrent measurement loops running.
 - No reducer, no mechanism. Nothing below the symptom is established. Do not read the
   numbers above as an attribution.
+
+## 10. Verification
+
+All on `ccwork/escape-gc-fix` = `main` (`ad4e9b2`) + `origin/ccwork/escape-analysis` + the fix.
+
+- `go build ./...`, `go vet ./...`, `gofmt`: clean.
+- `make test-unit`: **PASS**, 24 packages.
+- `make test-goc-corpus`: **PASS**, 604 s.
+- `make test-goc-cmd`: **PASS**, 292 s.
+
+### The capability matrix, both arms, with matched controls on plain `main`
+
+Every run unsharded, `-v`, censused by counting `--- PASS` / `--- FAIL` subtest lines.
+
+| tree | arm | subtests | PASS | FAIL | KNOWN GAP |
+| --- | --- | ---: | ---: | ---: | ---: |
+| this branch | default | **364** | **364** | 0 | 0 |
+| `main` `ad4e9b2` | default | 363 | 363 | 0 | 0 |
+| this branch | `-runtime-opt` | 364 | 363 | **1** | 0 |
+| `main` `ad4e9b2` | `-runtime-opt` | 363 | 362 | **1** | 0 |
+
+364 = 363 + `gc-invariants/type-mask-padding`, the reducer added here. One of the passing
+subtests in every run is `defer-panic/panic-string-output`, the declared `expectedFailure`
+(`runtime_status_test.go:2687: EXPECTED FAILURE runtime_panic_print_string.go`).
+
+**The complete list of non-passing capabilities is one, in the `-runtime-opt` arm only:**
+
+```
+stack-scan/loop-safepoints
+  collected while live: carried-0 at carried before rewrite
+  panic: a stack slot live across a loop back edge was not a GC root
+  main_drain <- main_carried <- main_main
+```
+
+**It is pre-existing and not caused by anything here.** Plain `main` at `ad4e9b2`, same
+command, fails it 3/3 individually and 1/363 in the full `-runtime-opt` arm. The default arm
+is clean on both trees. This contradicts the brief's stated baseline of "0 FAIL in both
+arms"; the default-arm half of that is right and the `-runtime-opt` half is not, and §5.10's
+note that the `-runtime-opt` arm's sixteen link failures are "no longer reproducible" is
+about a different failure. Not investigated here — it is an `-O`-only stack-map defect and
+does not touch the mask padding.
