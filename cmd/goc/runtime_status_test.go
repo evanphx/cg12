@@ -2431,6 +2431,21 @@ func runtimeCapabilities() []runtimeCapability {
 			timeout:     240 * time.Second,
 			exclusive:   true,
 		},
+		// The reducer for RUNTIME_PLAN.md section 26: a type's GC pointer mask
+		// is read a uintptr at a time, so an unpadded mask makes the bytes of
+		// the next symbol phantom pointer words. It faulted on every run of the
+		// compiler that emitted unpadded masks, and it is here rather than only
+		// in the report because no other capability reached that path
+		// deterministically -- mark-workers did so only below the default GOGC.
+		{
+			category:    "gc-invariants",
+			name:        "type-mask-padding",
+			source:      "runtime_gc_type_mask_padding.go",
+			expectation: runtimeCapabilityMustPass,
+			env:         []string{"GOMAXPROCS=3"},
+			timeout:     180 * time.Second,
+			exclusive:   true,
+		},
 	}
 }
 

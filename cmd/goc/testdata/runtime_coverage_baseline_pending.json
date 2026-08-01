@@ -40,6 +40,10 @@
       "reason": "added to the capability matrix after the accepted baseline run; it enters the baseline at the next full-corpus rerun"
     },
     {
+      "capability": "gc-invariants/type-mask-padding",
+      "reason": "added to the capability matrix after the accepted baseline run; it enters the baseline at the next full-corpus rerun"
+    },
+    {
       "capability": "gc-stress/assist-credit",
       "reason": "added to the capability matrix after the accepted baseline run; it enters the baseline at the next full-corpus rerun"
     },
