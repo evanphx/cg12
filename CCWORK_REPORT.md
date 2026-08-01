@@ -644,3 +644,23 @@ After:
 Same object index (40), same payload, same shape as the `nogreenteagc` reference
 above. `fatal error: found pointer to free object` still follows, as it must.
 
+## The regression guard
+
+`cmd/goc/zombie_report_test.go` +
+`cmd/goc/testdata/zombie_report_probe.go`: compiles the probe with goc, runs it,
+and requires the report to name and dump the zombie. It is in `cmd/goc`, so
+`make test-goc-cmd` runs it; the fixture is in `cmd/goc/testdata` rather than
+`goc/testdata` deliberately, so the capability matrix stays at 345 subtests and
+the determinism corpus stays at 365 programs.
+
+Checked in both directions, which is the only thing that makes it a guard:
+
+- with the fix: PASS (3.4s).
+- with `mbits := s.markBitsForBase()` put back and nothing else changed:
+  `FAIL ... "0" is not greater than "0" / every object printed as unmarked`.
+  That is the defect's exact signature, so a revert cannot pass this test.
+
+Stability of the probe, all runs naming the zombie with the right payload:
+60/60 at goc default, 30/30 at `goc -O`, and 10/10 at each of
+`GOMAXPROCS` 1, 2, 4, 8, 64.
+
