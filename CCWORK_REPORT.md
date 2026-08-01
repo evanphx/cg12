@@ -278,8 +278,8 @@ All on `ccwork/escape-gc-fix` = `main` (`ad4e9b2`) + `origin/ccwork/escape-analy
 
 - `go build ./...`, `go vet ./...`, `gofmt`: clean.
 - `make test-unit`: **PASS**, 24 packages.
-- `make test-goc-corpus`: **PASS**, 604 s.
-- `make test-goc-cmd`: **PASS**, 292 s.
+- `make test-goc-corpus`: **PASS**, 604 s; re-run after §12's removal, **PASS**, 596 s.
+- `make test-goc-cmd`: **PASS**, 292 s; re-run after §12's removal, **PASS**, 282 s.
 
 ### The capability matrix, both arms, with matched controls on plain `main`
 
