@@ -12,14 +12,18 @@ type localSlot struct {
 }
 
 // EscapeSummaries turns on the cross-function fact table inside
-// LowerHeapAllocations. It defaults to GOC_ESCAPE_SUMMARIES=1 and is off
-// otherwise, so nothing about the compiler's output changes unless it is asked
-// for.
+// LowerHeapAllocations. It is on, and GOC_ESCAPE_SUMMARIES=0 turns it off.
 //
-// With it off, LowerHeapAllocations is handed a nil table and every call falls
-// into the same assume-the-worst arm it has always fallen into; the pass cannot
-// tell it is running under a build that has summaries at all.
-var EscapeSummaries = os.Getenv("GOC_ESCAPE_SUMMARIES") == "1"
+// The knob is kept for bisection, which is the only thing it is for. With it off
+// LowerHeapAllocations is handed a nil table and every call falls into the same
+// assume-the-worst arm it fell into before summaries existed: the pass cannot
+// tell it is running under a build that has them. So a placement that looks
+// wrong can be attributed to the table or cleared of it in one run, without
+// rebuilding the compiler.
+//
+// It does not turn off the loop rule, which is a safety property of promotion
+// rather than part of the table -- see promotionsBlockedByALoop.
+var EscapeSummaries = os.Getenv("GOC_ESCAPE_SUMMARIES") != "0"
 
 // HeapAllocLowering counts what LowerHeapAllocations did with the candidates it
 // saw, which is the number that says whether the pass got smarter or just got
@@ -27,6 +31,11 @@ var EscapeSummaries = os.Getenv("GOC_ESCAPE_SUMMARIES") == "1"
 type HeapAllocLowering struct {
 	Promoted int // candidates that became frame slots
 	Lowered  int // candidates that became allocator calls
+	// LoopBlocked counts the candidates inside Lowered that the escape analysis
+	// was willing to promote and the loop rule sent to the allocator anyway. It
+	// is the price of promotionsBlockedByALoop, and the only number that says
+	// whether the rule is doing anything.
+	LoopBlocked int
 }
 
 // Rate is the share of candidates promoted to a frame slot.
@@ -46,8 +55,11 @@ func HeapAllocLoweringStats(module *ir.Module) HeapAllocLowering {
 	for _, decision := range module.AllocDecisions {
 		if decision.Placement == ir.AllocInFrame {
 			stats.Promoted++
-		} else {
-			stats.Lowered++
+			continue
+		}
+		stats.Lowered++
+		if decision.BlockedByLoop {
+			stats.LoopBlocked++
 		}
 	}
 	return stats
@@ -144,9 +156,48 @@ func lowerFunctionHeapAllocations(function *ir.Func, byName map[string]*ir.Func,
 	if len(seeds) == 0 {
 		return false
 	}
-	analysis := analyzeCandidateEscapes(function, byName, facts, seeds, false)
-	rewriteHeapAllocations(function, analysis, decisions)
+	escapes := analyzeCandidateEscapes(function, byName, facts, seeds, false)
+	rewriteHeapAllocations(function, escapes, promotionsBlockedByALoop(function, seeds, escapes), decisions)
 	return true
+}
+
+// promotionsBlockedByALoop escapes every candidate the analysis was willing to
+// promote that sits inside a natural loop, and reports which ones it blocked.
+//
+// Neither this analysis nor goc's AST walk has a notion of iteration. Both
+// answer "does a pointer outlive the frame", and an allocation in a loop body
+// can be entirely frame-local by that test and still need one object per
+// iteration. Promoting it puts every iteration on one slot, so two objects the
+// source says are distinct become the same object: goc prints `2 2` where Go
+// prints `1 2`. RUNTIME_PLAN.md section 5.9 is what freshVariableStorage exists
+// for on the front end's side of the same problem.
+//
+// opt.FrameEscapes is structurally blind to this. It asks whether a frame
+// address was published past its frame, and in the aliasing case none is -- both
+// pointers stay inside the frame and are simply the same pointer. A clean audit
+// says nothing about it, which is why the rule is here rather than left to be
+// caught downstream.
+//
+// It applies whether or not the summaries are on. The rule is about the loop,
+// not about how the analysis came to be willing to promote; every promotion is a
+// placement change and every placement change in a loop body is this hazard.
+func promotionsBlockedByALoop(function *ir.Func, seeds []uint32, escapes *candidateEscapes) map[uint32]bool {
+	promotable := make(map[uint32]bool, len(seeds))
+	for _, seed := range seeds {
+		if !escapes.escapes(seed) {
+			promotable[seed] = true
+		}
+	}
+	if len(promotable) == 0 {
+		// Nothing was going to be promoted, so there is no CFG to build. This is
+		// the common case: most candidates reach something that escapes them.
+		return nil
+	}
+	blocked := allocationsInLoops(function, promotable)
+	for id := range blocked {
+		escapes.escaped[id] = true
+	}
+	return blocked
 }
 
 // analyzeCandidateEscapes runs the may-analysis over one function for the
@@ -176,7 +227,21 @@ func analyzeCandidateEscapes(function *ir.Func, byName map[string]*ir.Func, fact
 	for updated := true; updated; {
 		updated = false
 		for id, instruction := range definitions {
-			if _, known := bases[id]; known {
+			if known, tracked := bases[id]; tracked {
+				// A call result can gain a second tracked argument after the
+				// round that first named it -- an argument whose own base
+				// arrives through a slot load, say, which the loop below
+				// resolves. Two allocations reaching one result is a conflict
+				// whenever it becomes visible, not only when it is visible
+				// first: leaving the result bound to whichever one was resolved
+				// earliest escapes that one and silently promotes the other,
+				// which the call may equally well have returned.
+				if facts != nil {
+					if base, ok := leakedCallResultBase(function, byName, facts, instruction, bases, escaped); ok && base != known {
+						escaped[base] = true
+						escaped[known] = true
+					}
+				}
 				continue
 			}
 			base, ok := derivedHeapBase(instruction, bases)
@@ -375,7 +440,7 @@ func analyzeCandidateEscapes(function *ir.Func, byName map[string]*ir.Func, fact
 // analysis: promoted candidates become frame allocations with the zeroing the
 // allocator used to do, and the rest become the allocator call the instruction
 // was already shaped like.
-func rewriteHeapAllocations(function *ir.Func, analysis *candidateEscapes, decisions *[]ir.AllocDecision) {
+func rewriteHeapAllocations(function *ir.Func, analysis *candidateEscapes, loopBlocked map[uint32]bool, decisions *[]ir.AllocDecision) {
 	escaped := analysis.escaped
 	for _, block := range function.Blocks {
 		lowered := make([]ir.Instr, 0, len(block.Instrs))
@@ -386,14 +451,14 @@ func rewriteHeapAllocations(function *ir.Func, analysis *candidateEscapes, decis
 				continue
 			}
 			if escaped[instruction.To.ID] {
-				recordAllocDecision(decisions, function, original, ir.AllocOnHeap)
+				recordAllocDecision(decisions, function, original, ir.AllocOnHeap, loopBlocked[instruction.To.ID])
 				instruction.Op = ir.OCall
 				instruction.Args = instruction.Args[:2]
 				instruction.Aux = 0
 				lowered = append(lowered, instruction)
 				continue
 			}
-			recordAllocDecision(decisions, function, original, ir.AllocInFrame)
+			recordAllocDecision(decisions, function, original, ir.AllocInFrame, false)
 
 			size := instruction.Args[2]
 			switch instruction.Aux {
@@ -423,16 +488,17 @@ func rewriteHeapAllocations(function *ir.Func, analysis *candidateEscapes, decis
 // recordAllocDecision notes where one heap-allocation candidate landed.
 // candidate must still be the unrewritten OHeapAlloc, whose first two arguments
 // are the allocator and the type descriptor.
-func recordAllocDecision(decisions *[]ir.AllocDecision, function *ir.Func, candidate ir.Instr, placement ir.AllocPlacement) {
+func recordAllocDecision(decisions *[]ir.AllocDecision, function *ir.Func, candidate ir.Instr, placement ir.AllocPlacement, blockedByLoop bool) {
 	if decisions == nil {
 		return
 	}
 	*decisions = append(*decisions, ir.AllocDecision{
-		Func:      function.Name,
-		Pos:       candidate.Pos,
-		Allocator: constSymbolName(function, candidate.Args[0]),
-		Type:      constSymbolName(function, candidate.Args[1]),
-		Placement: placement,
+		Func:          function.Name,
+		Pos:           candidate.Pos,
+		Allocator:     constSymbolName(function, candidate.Args[0]),
+		Type:          constSymbolName(function, candidate.Args[1]),
+		Placement:     placement,
+		BlockedByLoop: blockedByLoop,
 	})
 }
 

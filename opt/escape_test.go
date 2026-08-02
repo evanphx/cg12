@@ -364,3 +364,104 @@ func TestLowerHeapAllocationsAllowsAWriteBarrieredLocalSlot(t *testing.T) {
 	require.True(t, LowerHeapAllocations(module))
 	assert.Equal(t, ir.OAlloc8, block.Instrs[0].Op)
 }
+
+// An allocation in a loop body is never promoted, however local it is.
+//
+// One frame slot cannot hold one object per iteration. The analysis cannot see
+// that: it answers "does a pointer outlive the frame", and here none does --
+// each object is written and read inside the iteration that made it. Promoting
+// it makes two objects the source says are distinct into one, which is an
+// aliasing miscompile no publication analysis, including opt.FrameEscapes, can
+// see. See promotionsBlockedByALoop.
+func TestLowerHeapAllocationsRefusesToPromoteInsideALoop(t *testing.T) {
+	module := ir.NewModule()
+	function := module.NewFunc("perIteration", ir.ClsL)
+	counter := function.Param("counter", ir.ClsW)
+	entry := function.Entry()
+	header := function.NewBlock("header")
+	body := function.NewBlock("body")
+	exit := function.NewBlock("exit")
+
+	entry.Goto(header)
+	header.Jnz(counter, body, exit)
+	object := body.HeapAlloc(function.Sym("runtime.newobject", 0), function.Sym("type.int", 0), 8, 8)
+	body.Store(function.Long(42), object)
+	body.Goto(header)
+	exit.Ret(function.Long(0))
+
+	require.True(t, LowerHeapAllocations(module))
+	assert.Equal(t, ir.OCall, body.Instrs[0].Op,
+		"an object allocated once per iteration cannot share one frame slot with the next iteration's")
+
+	require.Len(t, module.AllocDecisions, 1)
+	assert.Equal(t, ir.AllocOnHeap, module.AllocDecisions[0].Placement)
+	assert.True(t, module.AllocDecisions[0].BlockedByLoop,
+		"the record has to say the loop rule made this call, not the escape analysis")
+	assert.Equal(t, 1, HeapAllocLoweringStats(module).LoopBlocked)
+}
+
+// The control: the same allocation, the same uses, outside the loop. The rule is
+// about the loop body and must not spread to the whole function.
+func TestLowerHeapAllocationsPromotesBesideALoop(t *testing.T) {
+	module := ir.NewModule()
+	function := module.NewFunc("besideALoop", ir.ClsL)
+	counter := function.Param("counter", ir.ClsW)
+	entry := function.Entry()
+	header := function.NewBlock("header")
+	body := function.NewBlock("body")
+	exit := function.NewBlock("exit")
+
+	object := entry.HeapAlloc(function.Sym("runtime.newobject", 0), function.Sym("type.int", 0), 8, 8)
+	entry.Store(function.Long(42), object)
+	entry.Goto(header)
+	header.Jnz(counter, body, exit)
+	body.Goto(header)
+	exit.Ret(exit.Load(ir.ClsL, object))
+
+	require.True(t, LowerHeapAllocations(module))
+	assert.Equal(t, ir.OAlloc8, entry.Instrs[0].Op)
+	require.Len(t, module.AllocDecisions, 1)
+	assert.False(t, module.AllocDecisions[0].BlockedByLoop)
+}
+
+// Two candidates reaching one call result is a conflict whenever it becomes
+// visible, not only on the round that first named the result.
+//
+// pick returns one of its two arguments, so both leak to result 0 and the caller
+// keeps asking about the result instead of escaping either. Here one argument's
+// base is immediate and the other's arrives through a frame slot, which the
+// propagation resolves a round later. Binding the result to whichever was
+// resolved first escapes that one and leaves the other promoted -- and pick may
+// have returned the other. It is also order-dependent, which is how it would
+// have shown up: a compile that is not reproducible.
+func TestLowerHeapAllocationsEscapesBothCandidatesReachingOneResult(t *testing.T) {
+	module := ir.NewModule()
+
+	pick := module.NewFunc("pick", ir.ClsP)
+	left := pick.Param("left", ir.ClsP)
+	right := pick.Param("right", ir.ClsP)
+	pickEntry := pick.Entry()
+	takeLeft := pick.NewBlock("takeLeft")
+	takeRight := pick.NewBlock("takeRight")
+	pickEntry.Jnz(pickEntry.Load(ir.ClsW, left), takeLeft, takeRight)
+	takeLeft.Ret(left)
+	takeRight.Ret(right)
+
+	function := module.NewFuncVoid("caller")
+	block := function.Entry()
+	first := block.HeapAlloc(function.Sym("runtime.newobject", 0), function.Sym("type.int", 0), 8, 8)
+	second := block.HeapAlloc(function.Sym("runtime.newobject", 0), function.Sym("type.int", 0), 8, 8)
+	slot := block.Alloc(8, 8)
+	block.Store(second, slot)
+	chosen := block.Call(ir.ClsP, function.Sym("pick", 0), first, block.Load(ir.ClsP, slot))
+	block.Store(chosen, function.Sym("global", 0))
+	block.RetVoid()
+
+	facts := ComputeEscapeFacts(module)
+	require.Equal(t, ParamLeaksToResult, facts.Param("pick", 0).Escape)
+	require.Equal(t, ParamLeaksToResult, facts.Param("pick", 1).Escape)
+
+	require.True(t, LowerHeapAllocationsWithFacts(module, facts))
+	assert.Equal(t, ir.OCall, block.Instrs[0].Op, "pick may return the first argument, which is then published")
+	assert.Equal(t, ir.OCall, block.Instrs[1].Op, "pick may return the second argument, which is then published")
+}

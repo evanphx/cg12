@@ -275,25 +275,41 @@ func compareFactTables(module *ir.Module, fixedPoint, broken *opt.EscapeFacts) (
 // The IR table answers each question once, by construction: it is a map keyed by
 // symbol, filled by one bottom-up pass over the call graph. There is nothing to
 // memoize because nothing is asked twice.
+// It also prices what enabling the table costs a whole compile, which is the
+// number that matters now that it is on by default: the table itself, plus the
+// larger analysis the pass then runs, plus the loop forests promotionsBlockedByALoop
+// builds for functions that have something to promote.
 func TestEscapeSummaryCost(t *testing.T) {
 	source, err := os.ReadFile(*escapeSummaryProgram)
 	require.NoError(t, err)
 
 	const rounds = 3
-	var compile, table time.Duration
-	var module *ir.Module
+	compileWith := func(summaries bool) (time.Duration, *ir.Module) {
+		previous := opt.EscapeSummaries
+		opt.EscapeSummaries = summaries
+		defer func() { opt.EscapeSummaries = previous }()
+
+		var total time.Duration
+		var module *ir.Module
+		for round := 0; round < rounds; round++ {
+			start := time.Now()
+			compiled, err := goc.CompileExecutable(*escapeSummaryProgram, source)
+			require.NoError(t, err)
+			total += time.Since(start)
+			module = compiled
+		}
+		return total / rounds, module
+	}
+
+	off, _ := compileWith(false)
+	on, module := compileWith(true)
+
+	var table time.Duration
 	for round := 0; round < rounds; round++ {
 		start := time.Now()
-		compiled, err := goc.CompileExecutable(*escapeSummaryProgram, source)
-		require.NoError(t, err)
-		compile += time.Since(start)
-		module = compiled
-
-		start = time.Now()
 		opt.ComputeEscapeFacts(module)
 		table += time.Since(start)
 	}
-	compile /= rounds
 	table /= rounds
 
 	functions := 0
@@ -302,10 +318,15 @@ func TestEscapeSummaryCost(t *testing.T) {
 			functions++
 		}
 	}
+	stats := opt.HeapAllocLoweringStats(module)
 	t.Logf("program %s: %d functions with a body", *escapeSummaryProgram, functions)
-	t.Logf("compile (knob off, mean of %d): %.3f s", rounds, compile.Seconds())
-	t.Logf("ComputeEscapeFacts (mean of %d): %.3f s = %.2f%% of the compile",
-		rounds, table.Seconds(), 100*table.Seconds()/compile.Seconds())
+	t.Logf("compile, summaries off (mean of %d): %.3f s", rounds, off.Seconds())
+	t.Logf("compile, summaries on  (mean of %d): %.3f s = %+.2f%%",
+		rounds, on.Seconds(), 100*(on.Seconds()-off.Seconds())/off.Seconds())
+	t.Logf("ComputeEscapeFacts (mean of %d): %.3f s = %.2f%% of the summaries-off compile",
+		rounds, table.Seconds(), 100*table.Seconds()/off.Seconds())
+	t.Logf("this program: promoted %d, lowered %d (%d of them blocked by the loop rule)",
+		stats.Promoted, stats.Lowered, stats.LoopBlocked)
 }
 
 // TestEscapeSummaryPromotionRate compiles the whole corpus with the summary
@@ -336,8 +357,10 @@ func TestEscapeSummaryPromotionRate(t *testing.T) {
 	off := compileCorpusForLoweringStats(t, programs, false)
 	on := compileCorpusForLoweringStats(t, programs, true)
 
-	t.Logf("knob off: promoted %d, lowered %d, rate %.2f%%", off.Promoted, off.Lowered, 100*off.Rate())
-	t.Logf("knob on:  promoted %d, lowered %d, rate %.2f%%", on.Promoted, on.Lowered, 100*on.Rate())
+	t.Logf("knob off: promoted %d, lowered %d, rate %.2f%%, blocked by the loop rule %d",
+		off.Promoted, off.Lowered, 100*off.Rate(), off.LoopBlocked)
+	t.Logf("knob on:  promoted %d, lowered %d, rate %.2f%%, blocked by the loop rule %d",
+		on.Promoted, on.Lowered, 100*on.Rate(), on.LoopBlocked)
 	require.Equal(t, off.Promoted+off.Lowered, on.Promoted+on.Lowered,
 		"the two runs must see the same candidates, or they are not comparable")
 	assert.Greater(t, on.Promoted, off.Promoted, "the fact table must promote more than no table at all")

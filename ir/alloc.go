@@ -43,6 +43,12 @@ type AllocDecision struct {
 	Type string
 	// Placement is where it landed.
 	Placement AllocPlacement
+	// BlockedByLoop marks a heap placement the escape analysis was willing to
+	// promote and the loop rule sent to the allocator anyway, because the
+	// allocation is inside a loop body and one frame slot cannot hold one object
+	// per iteration. It is the only case where Placement is not what the escape
+	// analysis decided, so it is recorded rather than inferred.
+	BlockedByLoop bool
 }
 
 // PlacedAlloc records one allocation the *front end* placed itself, without

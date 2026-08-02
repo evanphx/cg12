@@ -662,3 +662,64 @@ closed at its source.
 And on `runtime_loopvar_value_shapes.go`, the §3.5 row is gone: the program's
 only remaining permissive disagreement is `splice_linux.go:198:15`, which §3.3(b)
 adjudicated safe against gc.
+
+## 7. Enabling it, and a third hole found on the way
+
+### 7.1 The knob is flipped, not removed
+
+`opt.EscapeSummaries` now defaults to on; `GOC_ESCAPE_SUMMARIES=0` turns it off.
+The off path is byte-for-byte the pass as it was before summaries existed --
+`facts == nil`, no `byName` index, the summary arm of `analyzeCandidateEscapes`
+unreachable -- which is what makes it usable for bisection: a placement that
+looks wrong can be attributed to the table or cleared of it in one run.
+
+The knob does **not** turn off the loop rule. That is a safety property of
+promotion, not part of the table.
+
+### 7.2 The loop rule now applies to promotions
+
+`promotionsBlockedByALoop` escapes every candidate the analysis was willing to
+promote whose defining block is inside a natural loop. It shares
+`allocationsInLoops` with shadow mode, deliberately: shadow mode reports the loop
+column as the thing that decides whether a permissive disagreement is safe, and
+the pass now acts on the same answer. A rule reported one way and enforced
+another is worse than no rule.
+
+It applies with the knob in either position. Every promotion is a placement
+change and every placement change in a loop body is the same hazard -- one frame
+slot cannot hold one object per iteration, so two objects the source says are
+distinct become one, and `opt.FrameEscapes` cannot see it because no address was
+published. The CFG is only built for functions that have something to promote,
+which is the minority.
+
+`ir.AllocDecision.BlockedByLoop` records the case, because it is the one place
+`Placement` is not what the escape analysis decided.
+`HeapAllocLowering.LoopBlocked` counts it, so the rule's cost is a number rather
+than an assertion.
+
+### 7.3 A third hole: two candidates reaching one call result
+
+Found by asking whether enabling the table makes the compile order-dependent. It
+does, and the order-dependence is also unsound.
+
+`leakedCallResultBase` is how a `ParamLeaksToResult` summary becomes usable: the
+caller stops asking about the argument and starts asking about the result. Two
+tracked allocations reaching one result is a conflict and both must escape, and
+it checked for that -- but only on the round that first named the result. The
+propagation loop skipped anything already in `bases`, so an argument whose own
+base arrives later (through a frame slot, which a later loop in the same round
+resolves) was never compared against the one already recorded.
+
+The result stays bound to whichever allocation was resolved first. That one
+escapes when the result is published; **the other is promoted, and the call may
+equally well have returned it.** Which one wins depends on the order a Go map was
+walked in, so the same source could compile two ways.
+
+Fixed by re-checking call results that already have a base, and escaping both
+when they disagree.
+`TestLowerHeapAllocationsEscapesBothCandidatesReachingOneResult` fails without
+the re-check (the second candidate is promoted to `OAlloc8`) and passes with it.
+
+This one is summary-dependent -- `leakedCallResultBase` is called only under
+`facts != nil` -- so it was latent for exactly as long as the knob was off, and
+would have gone live with it.

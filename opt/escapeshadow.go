@@ -125,8 +125,12 @@ func ShadowPlacement(module *ir.Module, facts *EscapeFacts) ([]PlacementDisagree
 		}
 		sort.Slice(seeds, func(i, j int) bool { return seeds[i] < seeds[j] })
 
+		placed := make(map[uint32]bool, len(function.PlacedAllocs))
+		for id := range function.PlacedAllocs {
+			placed[id] = true
+		}
 		definitions := allocationDefinitions(function, function.PlacedAllocs)
-		loops := allocationsInLoops(function, function.PlacedAllocs)
+		loops := allocationsInLoops(function, placed)
 		escapes := analyzeCandidateEscapes(function, byName, facts, seeds, true)
 		for _, id := range seeds {
 			placed := function.PlacedAllocs[id]
@@ -199,9 +203,15 @@ func FrontEndPlacementSites(module *ir.Module) []string {
 	return sites
 }
 
-// allocationsInLoops reports which placed allocations sit inside a natural
-// loop. See PlacementDisagreement.InLoop for why that matters.
-func allocationsInLoops(function *ir.Func, placed map[uint32]ir.PlacedAlloc) map[uint32]bool {
+// allocationsInLoops reports which of the given allocations sit inside a natural
+// loop.
+//
+// It answers for both users of the fact, which have to agree: shadow mode
+// reports it as the column that decides whether a permissive disagreement would
+// be safe (see PlacementDisagreement.InLoop), and LowerHeapAllocations acts on
+// it (see promotionsBlockedByALoop). A rule reported one way and enforced
+// another is worse than no rule.
+func allocationsInLoops(function *ir.Func, allocations map[uint32]bool) map[uint32]bool {
 	cfg := analysis.BuildCFG(function)
 	if len(cfg.RPO) == 0 {
 		return nil
@@ -216,7 +226,7 @@ func allocationsInLoops(function *ir.Func, placed map[uint32]ir.PlacedAlloc) map
 			if instruction.To.Kind != ir.RefTemp {
 				continue
 			}
-			if _, tracked := placed[instruction.To.ID]; tracked {
+			if allocations[instruction.To.ID] {
 				inLoop[instruction.To.ID] = true
 			}
 		}

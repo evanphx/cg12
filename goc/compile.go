@@ -1396,9 +1396,11 @@ func registerSymAttrs(mod *ir.Module) {
 // code, so without this an IR-level summary would have to assume the worst
 // about every one of the 619 functions in stdlib/src that carry it.
 //
-// The attribute is analysis input only: nothing in the compiler's output
-// depends on it, ir.Module.SymAttrs is not serialised, and the two attributes
-// that are read (SymAtomicPointerStore, SymFrameScoped) are tested by bit.
+// The attribute is read by the summary table, which LowerHeapAllocations now
+// consumes by default, so it does affect placement: a //go:noescape argument is
+// one the pass will not escape a candidate for. ir.Module.SymAttrs is not
+// serialised, which loses the directive rather than inventing one, so a module
+// that arrives without it is answered more conservatively and never less.
 func registerNoEscapeDirectives(g *gen) {
 	if g.mod.SymAttrs == nil {
 		g.mod.SymAttrs = map[string]ir.SymAttr{}

@@ -128,9 +128,11 @@ func compileCorpusForAudits(programs []string) *corpusAudit {
 				escapes := opt.FrameEscapes(module)
 				census := opt.AllocationCensus(module)
 				// Shadow mode reads the finished module and changes nothing in
-				// it: the compile above ran with the knob off, so what is being
-				// compared is the code the compiler actually emitted against
-				// what the summary-fed IR analysis would have chosen.
+				// it. The compile above is the shipping configuration --
+				// summaries on -- so what is being compared is the code the
+				// compiler actually emitted against what the same summary-fed
+				// analysis would have chosen for the placements the front end
+				// kept for itself.
 				disagreements, counts := opt.ShadowPlacement(module, opt.ComputeEscapeFacts(module))
 				name := filepath.Base(program)
 				mutex.Lock()
