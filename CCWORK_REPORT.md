@@ -604,3 +604,61 @@ Verified by reverting `opt/escape.go`, `opt/escapegraph.go` and
 `opt/escapesummary.go` to `41af1be` with the tests in place: exactly the two
 regression tests fail, exactly the two controls pass. `go test ./opt` is green
 with the fixes in.
+
+### 6.4 The same two reductions through the front end, and the corpus chain
+
+`goc/escapesummary_reduction_test.go` compiles both reductions from Go. Both use
+`CompileExecutable`, not `Compile`: the aggregate calling convention and the
+write barrier are what the defects are about, and a package compiled on its own
+gets neither -- `goc.Compile` emits `calloc` and plain stores, and the §2.2
+reduction does not reproduce under it at all.
+
+| reduction | unfixed | fixed |
+|---|---|---|
+| §2.2, `hold`/`publish`/`stash` | `main.hold: 0:noescape`, and `red3.go:13:21 main.stash composite-literal heap -> frame` | `main.hold: 0:escapes`, zero permissive rows |
+| §3.5, reduced to ten lines from the corpus row | `barrierescape.go:7:17 main.Test slice-literal-backing heap -> frame` | zero permissive rows |
+
+Both assert the same end property -- `opt.ShadowPlacement` reports no
+`heap -> frame` row anywhere in the reduction -- which is the direction 2724ac7
+got wrong, and both name the mechanism as well (the summary; the barrier count),
+so neither can pass by compiling to something that no longer contains the case.
+
+§3.5's reduction is ten lines rather than the corpus program:
+
+```go
+var captured []func() int
+func Test() int {
+	for numbers := []int{0}; len(numbers) < 4; numbers = append(numbers, len(numbers)) {
+		captured = append(captured, func() int { return len(numbers) })
+	}
+	return len(captured)
+}
+```
+
+The allocation is in the for-init, so it runs once and the loop rule has nothing
+to say about it. The header is an `alloc8 24` the front end addresses directly,
+which is what makes it the barrier case: goc double-indirects a *named* local, so
+a load of the pointer-to-storage slot already defeats `locOf` and the object
+escapes by a blunter route. That is why the first draft of this reduction, an
+ordinary struct local, passed on the unfixed tree.
+
+### 6.5 The corpus chain of §2.1, before and after
+
+`go test ./goc -run TestEscapeSummaryFacts -escape-summary-program
+testdata/stdlib_http_client_server.go -escape-summary-symbol http2serverConn.write`:
+
+| symbol | §2.1, before | now |
+|---|---|---|
+| `$net/http.http2serverConn.writeFrameFromHandler` | `0:noescape 1:noescape` | `0:noescape 1:noescape` |
+| `$net/http.http2serverConn.writeHeaders` | `0:noescape 1:noescape 2:noescape` | **`0:noescape 1:escapes 2:escapes`** |
+
+`writeFrameFromHandler`'s answer is unchanged and still correct: it does not
+retain the frame-slot address it was handed. What changed is that its *caller*
+now models what it does with the contents, so `headerData` -- parameter 2, an
+ordinary pointer -- comes out `escapes`, and `writeChunk` keeps
+`&http2writeResHeaders{}` on the heap. That is the three-frame chain of §2.1
+closed at its source.
+
+And on `runtime_loopvar_value_shapes.go`, the §3.5 row is gone: the program's
+only remaining permissive disagreement is `splice_linux.go:198:15`, which §3.3(b)
+adjudicated safe against gc.
