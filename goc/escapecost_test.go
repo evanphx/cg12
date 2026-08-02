@@ -10,6 +10,7 @@ import (
 
 	"github.com/evanphx/cg12/goc"
 	"github.com/evanphx/cg12/ir"
+	"github.com/evanphx/cg12/opt"
 	"github.com/stretchr/testify/require"
 )
 
@@ -34,8 +35,17 @@ func TestEscapeWalkCost(t *testing.T) {
 	stats := goc.StopEscapeCostRecording()
 	require.NoError(t, err)
 
+	// The closest available proxy for what an IR-level replacement would cost:
+	// one whole-module, per-function pointer dataflow analysis over the same
+	// program, run to a fixed point.
+	checkStart := time.Now()
+	findings := opt.FrameEscapes(module)
+	checkElapsed := time.Since(checkStart)
+
 	report := map[string]any{
 		"program":              *escapeCostProgram,
+		"frameEscapesSeconds":  checkElapsed.Seconds(),
+		"frameEscapesFindings": len(findings),
 		"compileSeconds":       elapsed.Seconds(),
 		"functionsEmitted":     countFunctions(module),
 		"summaryCalls":         stats.Calls[goc.EscapeCostSummary],

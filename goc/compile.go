@@ -12737,8 +12737,9 @@ func (g *gen) stringSlice(expression ast.Expr, targetType types.Type) ir.Ref {
 		buffer := g.fn.ConstInt(ir.ClsP, 0)
 		if conversion, ok := g.parents[expression].(*ast.CallExpr); ok {
 			_, isRange := g.parents[conversion].(*ast.RangeStmt)
-			recordPlacement("string-conversion-buffer", !(isRange || g.valueDoesNotEscape(conversion)))
-			if isRange || g.valueDoesNotEscape(conversion) {
+			bufferInFrame := isRange || g.valueDoesNotEscape(conversion)
+			recordPlacement("string-conversion-buffer", !bufferInFrame)
+			if bufferInFrame {
 				bufferSize := int64(32)
 				if element.Kind() == types.Int32 {
 					bufferSize *= typeSize(types.Typ[types.Int32])
@@ -13074,10 +13075,11 @@ func (g *gen) builtinCall(call *ast.CallExpr, builtin *types.Builtin) ir.Ref {
 			}
 			fixedCapacity, hasFixedCapacity := g.fixedSliceCapacity(call)
 			var data ir.Ref
+			makeBackingInFrame := hasFixedCapacity && fixedCapacity > 0 && g.makeResultDoesNotEscape(call)
 			if hasFixedCapacity && fixedCapacity > 0 {
-				recordPlacement("make-fixed-capacity-backing", !g.makeResultDoesNotEscape(call))
+				recordPlacement("make-fixed-capacity-backing", !makeBackingInFrame)
 			}
-			if hasFixedCapacity && fixedCapacity > 0 && g.makeResultDoesNotEscape(call) {
+			if makeBackingInFrame {
 				elementSize := typeSize(sliceType.Elem())
 				alignment := int(typeAlign(sliceType.Elem()))
 				if alignment < 4 {
