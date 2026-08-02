@@ -59,24 +59,29 @@ var gocAllocationCounts = []struct {
 	host int
 	why  string
 }{
-	// The headline. gc keeps the `...` array in the frame and boxes 42 into
-	// runtime.staticuint64s; goc keeps the array *and* the box in one frame
-	// object. Both then pay for the result string, and that is the 1.
-	{"sprintf_int", 100, 100, "the result string, and nothing else"},
-	// goc pays less than gc here: gc's `...` array is in a frame but the string
-	// still boxes onto the heap, where goc's front end packs the box into the
-	// same frame object as the array.
-	{"sprintf_string", 100, 200, "the result string; the box rides in the frame"},
-	{"sprintf_struct", 100, 200, "the result string; the box rides in the frame"},
+	// The headline. Both compilers keep the `...` array off the heap and both
+	// pay for the result string. The remaining difference is the boxed
+	// argument: fmt's doPrintf assigns each element to p.arg, a field of a
+	// heap-allocated printer, so the box has to be on the heap under goc --
+	// see needsDeepSummary. gc pays nothing for this particular one because 42
+	// is small enough to box into runtime.staticuint64s, which goc has no
+	// equivalent of; with a value of 300 instead, gc pays for it too.
+	{"sprintf_int", 200, 100, "the result string, and the boxed int fmt retains"},
+	// Parity: the result string plus one box each, for the same reason.
+	{"sprintf_string", 200, 200, "the result string, and the boxed string fmt retains"},
+	{"sprintf_struct", 200, 200, "the result string, and the boxed struct fmt retains"},
 	// No variadic arguments at all. This row is what proved the third
 	// allocation had nothing to do with the `...`: it was the interface
 	// sync.Pool.Get returns from newPrinter.
 	{"sprintf_no_args", 100, 100, "the result string"},
+	// The variadic call to a callee that keeps nothing, which is what the `...`
+	// backing array question was really about. Both are now free.
 	{"variadic_ints", 0, 0, "the `...` backing array is a frame slot"},
 	{"variadic_any", 0, 0, "backing array and boxed payloads, one frame object"},
 	// goc has no convT64/staticuint64s fast path: every interface conversion of
-	// a non-pointer value is a runtime.newobject. gc returns a pointer into a
-	// static table for a small integer and allocates nothing.
+	// a non-pointer value that has to be on the heap is a runtime.newobject.
+	// gc returns a pointer into a static table for a small integer and
+	// allocates nothing. This is the whole of the remaining sprintf_int gap.
 	{"box_small_int", 100, 0, "no staticuint64s fast path in goc"},
 	{"box_pointer", 0, 0, "a pointer is its own interface payload"},
 	{"return_any_from_int", 100, 0, "the box; the descriptor is a frame slot"},

@@ -27,6 +27,8 @@ func markSummarisedCall(
 	byName map[string]*ir.Func,
 	facts *EscapeFacts,
 	instruction ir.Instr,
+	bases map[uint32]uint32,
+	selfReferential map[uint32]bool,
 	mark func(ir.Ref, string),
 ) {
 	mark(instruction.Arg(0), "callee of an indirect call")
@@ -44,6 +46,14 @@ func markSummarisedCall(
 	}
 	for index, argument := range arguments {
 		fact := facts.Param(callee, index)
+		if needsDeepSummary(argument, bases, selfReferential) && !fact.Deep {
+			// The allocation holds a pointer into itself, so "the callee does
+			// not retain the pointer it was handed" is not enough: retaining
+			// anything reachable through it retains the object. Only the deep
+			// claim answers the question that is actually being asked.
+			mark(argument, fmt.Sprintf("argument %d of $%s may retain something inside a self-referential object", index, callee))
+			continue
+		}
 		switch fact.Escape {
 		case ParamNoEscape:
 			// The callee cannot make the argument outlive the call.
@@ -131,6 +141,22 @@ func calleeRetainsNothing(function *ir.Func, callee string) bool {
 		return false
 	}
 	return module.SymAttrOf(callee).Has(ir.SymNoEscape)
+}
+
+// needsDeepSummary reports that an argument names a tracked allocation that
+// contains a pointer into itself, so a depth-0 summary about it is not the
+// question the caller needs answered.
+//
+// storesIntoItself is right that such a store publishes nothing on its own. The
+// consequence it carries, though, is that the object's own contents are no
+// longer a separate allocation with an escape decision of their own: goc packs a
+// variadic `...any` call's backing array and the boxed payloads its elements
+// point at into one object, so a callee that retains an *element* -- `sink =
+// args[0]` -- retains the whole object. ParamNoEscape says only that the
+// pointer handed over is not kept; ParamFact.Deep is the claim that covers this.
+func needsDeepSummary(argument ir.Ref, bases map[uint32]uint32, selfReferential map[uint32]bool) bool {
+	base, tracked := heapBase(argument, bases)
+	return tracked && selfReferential[base]
 }
 
 // summarisedCallee resolves a call to the module function it names together

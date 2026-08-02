@@ -604,13 +604,25 @@ func (graph *escapeGraph) summary() []ParamFact {
 				leaked = result
 			}
 		}
+		// Deep is the same question one dereference further out: is anything
+		// reachable through the parameter retained, rather than the pointer
+		// itself. heapLeak is the smallest depth at which the heap reaches the
+		// parameter, so "greater than one" is "not even the pointee", and the
+		// result leaks have to clear the same bar.
+		deep := graph.heapLeak[index] > 1
+		for _, distance := range graph.resultLeak[index] {
+			if distance <= 1 {
+				deep = false
+				break
+			}
+		}
 		switch {
 		case multiple:
 			facts[index] = ParamFact{Escape: ParamEscapes}
 		case leaked >= 0:
 			facts[index] = ParamFact{Escape: ParamLeaksToResult, Result: leaked}
 		default:
-			facts[index] = ParamFact{Escape: ParamNoEscape}
+			facts[index] = ParamFact{Escape: ParamNoEscape, Deep: deep}
 		}
 	}
 	return facts

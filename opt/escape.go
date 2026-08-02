@@ -367,6 +367,27 @@ func analyzeCandidateEscapes(function *ir.Func, byName map[string]*ir.Func, fact
 		}
 	}
 
+	// Which tracked allocations hold a pointer into themselves. Collected in its
+	// own pass rather than as the mark loop meets them, because a call can
+	// precede in program order the store that makes its argument
+	// self-referential, and the answer has to be the same either way.
+	selfReferential := make(map[uint32]bool)
+	noteSelfReference := func(value, destination ir.Ref) {
+		if base, tracked := heapBase(value, bases); tracked && storesIntoItself(value, destination, bases) {
+			selfReferential[base] = true
+		}
+	}
+	for _, block := range function.Blocks {
+		for _, instruction := range block.Instrs {
+			switch {
+			case isAtomicPointerStore(function, instruction):
+				noteSelfReference(instruction.Arg(2), instruction.Arg(1))
+			case instruction.Op.IsStore():
+				noteSelfReference(instruction.Arg(0), instruction.Arg(1))
+			}
+		}
+	}
+
 	mark := func(reference ir.Ref, why string) {
 		if reference.Kind == ir.RefTemp {
 			if base, ok := bases[reference.ID]; ok {
@@ -408,7 +429,7 @@ func analyzeCandidateEscapes(function *ir.Func, byName map[string]*ir.Func, fact
 				// a publication when the callee's summary says the callee can retain
 				// it. This is the entire behavioural difference the fact table makes,
 				// and with facts nil the case cannot be reached.
-				markSummarisedCall(function, byName, facts, instruction, mark)
+				markSummarisedCall(function, byName, facts, instruction, bases, selfReferential, mark)
 			case isTrackedHeapDerivation(instruction, bases):
 				// Copies, casts, and constant pointer offsets preserve locality.
 			case isAtomicPointerStore(function, instruction):
