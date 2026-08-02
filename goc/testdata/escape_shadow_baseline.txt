@@ -9,6 +9,12 @@
 # empty when the IR analysis kept the object in a frame -- there is no single use
 # to name for that -- and otherwise names the use that escaped it.
 #
+# The AST walk stays the placer: this file is not a migration plan. It is kept
+# because LowerHeapAllocations consumes the same summaries by default, and these
+# are 189,094 decision points the pass itself never sees -- a summary defect that
+# does not happen to reach a live candidate shows up here first. Both defects
+# fixed in CCWORK_REPORT.md section 6 were found that way.
+#
 # The "in a loop?" column is the one that matters on a heap -> frame line.
 # Neither analysis knows what an iteration is: both answer "does a pointer
 # outlive the frame", and an allocation in a loop body can be entirely
@@ -19,12 +25,14 @@
 #
 #   frame -> heap  the IR analysis is more conservative. Each line is an
 #                  allocation that would appear if that site were routed through
-#                  the neutral op, so the count is the price of the migration.
+#                  the neutral op, which nothing does today. Watched because a
+#                  line leaving this direction is a permissive line arriving.
 #
 #   heap -> frame  the IR analysis is more permissive. Each line is either a
 #                  pessimisation in the AST walk or a hole in the new analysis,
 #                  and until it is known which, it is a potential miscompile of
-#                  exactly the shape 2724ac7 and 9f76498 were.
+#                  exactly the shape 2724ac7 and 9f76498 were. Every line
+#                  currently here is adjudicated in CCWORK_REPORT.md section 3.
 #
 # Regenerate with
 #
@@ -238,10 +246,7 @@ stdlib/src/net/http/h2_bundle.go:10988:49	net/http.http2writeResHeaders.writeFra
 stdlib/src/net/http/h2_bundle.go:11037:49	net/http.http2writePushPromise.writeFrame	method-value-descriptor	frame -> heap		call to $net/http.http2splitHeaderBlock, whose argument list does not match its parameters
 stdlib/src/net/http/h2_bundle.go:4404:10	net/http.http2Server.ServeConn	composite-literal	frame -> heap		call to $net/http.http2Server.serveConn, whose argument list does not match its parameters
 stdlib/src/net/http/h2_bundle.go:6128:28	net/http.http2serverConn.upgradeRequest	method-value-descriptor	frame -> heap		write barrier into non-local storage
-stdlib/src/net/http/h2_bundle.go:6705:43	net/http.http2responseWriterState.writeChunk	composite-literal	heap -> frame		
-stdlib/src/net/http/h2_bundle.go:6740:43	net/http.http2responseWriterState.writeChunk	composite-literal	heap -> frame		
 stdlib/src/net/http/h2_bundle.go:6878:12	net/http.http2responseWriter.FlushError	composite-literal	frame -> heap		call to $net/http.http2chunkWriter.Write with scalarised aggregate arguments
-stdlib/src/net/http/h2_bundle.go:6966:37	net/http.http2responseWriterState.writeHeader	composite-literal	heap -> frame		
 stdlib/src/net/http/h2_bundle.go:7223:29	net/http.http2serverConn.startPush.func.7180.24	method-value-descriptor	frame -> heap		write barrier into non-local storage
 stdlib/src/net/http/h2_bundle.go:8143:21	net/http.http2Transport.newClientConn	slice-literal-backing	frame -> heap		call to $net/http.http2Framer.WriteSettings with scalarised aggregate arguments
 stdlib/src/net/http/h2_bundle.go:9417:8	net/http.http2ClientConn.readLoop	composite-literal	frame -> heap		write barrier into a candidate
@@ -319,7 +324,6 @@ testdata/runtime_core_types.go:28:12	main.main	slice-literal-backing	frame -> he
 testdata/runtime_defer_closure_stack_gc.go:11:11	main.recurse	composite-literal	frame -> heap		store into non-local storage
 testdata/runtime_defer_method_value_order.go:13:12	main.main	method-value-descriptor	frame -> heap		store into non-local storage
 testdata/runtime_keepalive_stack_root.go:59:10	main.keepStackItem	composite-literal	frame -> heap		store into non-local storage
-testdata/runtime_loopvar_value_shapes.go:33:17	main.main	slice-literal-backing	heap -> frame		
 testdata/runtime_loopvar_value_shapes.go:73:34	main.main	slice-literal-backing	frame -> heap		store into non-local storage
 testdata/runtime_loopvar_value_shapes.go:73:39	main.main	slice-literal-backing	frame -> heap		store into non-local storage
 testdata/runtime_many_goroutines_gc.go:16:10	main.worker	composite-literal	frame -> heap		store into non-local storage

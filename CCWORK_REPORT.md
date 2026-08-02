@@ -748,41 +748,69 @@ the invariant, because it is load-bearing and invisible.
 ### 8.1 The promotion rate, whole corpus, 385 programs
 
 `go test ./goc -run TestEscapeSummaryPromotionRate -escape-promotion-rate`
-(288.8 s, the corpus compiled twice):
+(297.9 s, the corpus compiled twice):
 
 | | promoted | lowered | rate | blocked by the loop rule |
 |---|---:|---:|---:|---:|
-| **§5.1's numbers**, before the safety fixes | | | | |
+| **§5.1's numbers**, before the safety fixes and the loop rule | | | | |
 | knob off | 14 433 | 453 319 | 3.09% | (rule did not exist) |
 | knob on | 17 414 | 450 338 | 3.72% | (rule did not exist) |
 | **this tree** | | | | |
-| knob off | 13 986 | 453 766 | **2.99%** | **0** |
-| knob on | 16 933 | 450 819 | **3.62%** | **0** |
+| knob off | 13 986 | 453 766 | **2.99%** | **407** |
+| knob on | 16 933 | 450 819 | **3.62%** | **441** |
 
 Same 467 752 candidates in every row.
 
 **The summaries are worth +2 947 objects, +21.1% relative, +0.63 points
 absolute** -- within noise of §5.1's +2 981/+20.7%/+0.63, which is what should
-happen: the safety fixes took a similar toll from both sides.
+happen: the safety work took the same toll from both sides.
 
-**The safety fixes cost 447 promotions with the knob off** (14 433 -> 13 986) and
-481 with it on. The knob-off figure is hole two alone, since it is the only fix
-that runs with `facts == nil`: 447 objects that were being promoted into frames
-while a live heap object could hold their address. That is the size of the defect,
-not a regression.
+That toll is 447 promotions with the knob off and 481 with it on, and it splits
+cleanly, because `LoopBlocked` counts exactly "the analysis said promote and the
+rule said no":
 
-### 8.2 The loop rule blocks nothing, in either configuration
+| | knob off | knob on |
+|---|---:|---:|
+| §5.1 | 14 433 | 17 414 |
+| would be promoted on this tree without the loop rule | 13 986 + 407 = **14 393** | 16 933 + 441 = **17 374** |
+| **cost of the analysis fixes** | **40** | **40** |
+| **cost of the loop rule** | **407** | **441** |
 
-`LoopBlocked` is **0** with the knob off and **0** with it on, over all 385
-programs and all 467 752 candidates. **No promotion in the corpus lands in a loop
-body.**
+The 40 with the knob off is hole two alone, since it is the only analysis fix
+that runs with `facts == nil`. The 40 with it on is the same figure, and it is
+worth saying what that means: **holes one and three cost zero promotions.** Hole
+one's fix moves summaries, not candidates -- the chain it closes is over
+front-end placements the pass never decides (§9.2) -- and hole three's re-check
+did not fire once on this corpus. The two runs before and after hole three's fix
+report byte-identical promoted and lowered counts.
+
+### 8.2 The loop rule blocks 441 promotions, and it is not decoration
+
+`LoopBlocked` is **407** with the knob off and **441** with it on. Those are 441
+allocations the escape analysis was willing to put in a frame slot that a loop
+body allocates once per iteration.
 
 That is the answer to "confirm no promotion lands in a loop body, or that the
-rule blocks it": the first, measured rather than argued. The rule costs nothing
-today and is there because the corpus is not the world -- §3.4 found 4 front-end
-placements where the same rule is the only thing standing in front of the
-`freshVariableStorage` case, and a candidate population that grows by 21% is a
-population whose loop-body membership should not be re-derived by hand each time.
+rule blocks it": **the rule blocks them, and without it they would land.** 407 of
+them land in the configuration `main` ships today, so this is not a hazard the
+summaries introduced -- it is one they would have widened.
+
+An early draft of this section reported zero, from
+`compileCorpusForLoweringStats`, which summed `Promoted` and `Lowered` and
+silently dropped the third field it was printing. A twelve-line program with one
+`new` in a `for` loop reported three, which is what caught it. The harness is
+fixed; the number is 441.
+
+### 8.3 What the loop rule does not cover
+
+`analysis.CFG.LoopForest` finds **natural** loops: a back edge `b -> h` where `h`
+dominates `b`. An irreducible loop -- reachable in Go only through `goto` into a
+loop body -- has no such header and is not found, so a promotion inside one would
+not be blocked. This is stated rather than fixed: it is the same limit shadow
+mode's `InLoop` column has always had, and the two now share
+`allocationsInLoops`, so what is reported and what is enforced agree. Making them
+disagree would be worse than the gap.
+
 
 ## 9. The three corpus audits
 
@@ -831,6 +859,68 @@ The permissive direction is now 441 per-compile instances over **70 distinct
 baseline rows: the 60 §3.3 adjudicated safe on their merits and the 10 §3.4
 found the loop rule blocking**, against 74 rows before. Every row that remains
 has an argument behind it.
+
+## 10. The census delta, reviewed rather than accepted
+
+`goc/testdata/alloc_census_baseline.txt` regenerated. **18 244 sites before,
+18 244 after; nothing appeared and nothing vanished**, so every line of the diff
+is a site that moved and there is no "did the code go away" question to answer.
+
+| | sites |
+|---|---:|
+| heap -> frame | **211** |
+| frame -> heap | **20** |
+| appeared | 0 |
+| vanished | 0 |
+
+Site counts, not object counts: a stdlib function compiled into 385 programs is
+one site. §8.1's +2 947 objects and this 211 are the same movement counted two
+ways.
+
+### 10.1 The 211 that moved into a frame
+
+All 211 are clean `heap -> frame`; none is a split site, so no copy of any of
+them is still on the heap. They concentrate exactly where §3.3(a) said the AST
+walk was pessimistic:
+
+| | sites |
+|---:|---|
+| 32 | `crypto/internal/fips140/nistec.P256Point` methods |
+| 29 | `crypto/internal/fips140/nistec` (package-level) |
+| 22 each | `P224Point`, `P384Point`, `P521Point` methods |
+| 26 | `nistec/fiat.P{224,256,384,521}Element` |
+| 16 | `edwards25519` and its `field.Element` |
+| 8 | `crypto/ecdsa.privateKeyToFIPS[...]` |
+| 7 | corpus `main` |
+| ~20 | `math/big.Float`, `reflect`, and singles elsewhere |
+
+That is the elliptic-curve arithmetic: `return &T{...}` constructors that the IR
+inlines into their caller, which `nonEscapingAddressWithin`'s parent walk cannot
+place because it has no `*ast.ReturnStmt` case. gc frames all of them (§3.3(a),
+checked at 16/1/5/1/1/1/1/1 sites in `bigmod` alone, 0 escaping).
+
+**The site worth stopping on** is the one that is not that shape:
+
+```
+stdlib/src/crypto/ecdsa/ecdsa.go:595:35   crypto/ecdsa.privateKeyToFIPS[...]
+runtime.newobject   struct_code_uintptr__capture0_unsafe_Pointer__ca
+```
+
+That is a **closure environment** moving into a frame -- the correctness-critical
+direction at its most alarming. It is correct. The source is
+
+```go
+return privateKeyCache.Get(priv, func() (*ecdsa.PrivateKey, error) {...},
+                                 func(k *ecdsa.PrivateKey) bool {...})
+```
+
+and `fips140cache.Cache.Get` (`crypto/internal/fips140cache/cache.go`) calls
+`check(v)` and `new()` and stores neither: what it puts in the cache map is `v`,
+the value the closure returned, not the closure. Both environments die with the
+call. This is precisely the promotion the summaries exist to make -- an
+intraprocedural pass has to assume `Get` retains everything it is handed -- and
+it is exactly the kind that has to be read rather than accepted.
+
 
 ## 11. The migration machinery stays, with a different job
 
