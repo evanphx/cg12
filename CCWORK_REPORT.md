@@ -664,3 +664,35 @@ decision.
 **8b. `nonEscapingAddress` remains cruder than the walk.** Section 5.1. The two
 now agree by construction, which is what the correctness argument needs; they
 agree at the conservative end.
+
+## 9. Reduced tests, and the proof they discriminate
+
+`goc/escape_publication_test.go`, three tests, one per shape. A regression test
+that passes on the broken tree is decoration, so each was run against
+`61ba39d`'s `goc/compile.go` with the rest of the tree unchanged:
+
+| test | on 61ba39d | on the fix |
+|---|---|---|
+| `TestValueBoxedIntoAnInterfaceEscapes` | FAIL — `interface_box.go:17:10: main.boxed: barrier %t3 into memory reached through a call result $runtime.newobject` | PASS |
+| `TestCompositeLiteralAddressCarriesItsElementsToTheHeap` | FAIL — `literal_address.go:19:27: main.passedToACall: barrier %t3 into ... $runtime.newobject` | PASS |
+| `TestParameterLeakingToAnInterfaceResultEscapes` | FAIL | PASS |
+
+The third also fails on `6245dbb`, the revision *after* the main fix and
+*before* section 7's hardening, which is the regression it exists to guard.
+
+Each test carries a control that a fix which simply made every slice escape
+would break:
+
+* a slice never converted to an interface keeps its frame backing array and
+  calls no allocator;
+* a literal address `nonEscapingAddress` keeps in the frame -- `(&box{limbs:
+  limbs}).limbs` -- does not drag its element to the heap;
+* leaking only to a *slice*-typed result copies no storage, so the backing array
+  stays in the frame.
+
+The third test asserts on where the allocation landed rather than on
+`opt.FrameEscapes`, and the reason is worth recording: the publishing store is
+inside the callee, where the address arrives as a *parameter* rather than as one
+of that function's own frame allocations. `FrameEscapes` is a per-function
+may-analysis over `OAlloc`-derived values, so it structurally cannot report that
+shape. The corpus audit passing was never evidence about it.
