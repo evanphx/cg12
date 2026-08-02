@@ -465,3 +465,40 @@ func TestLowerHeapAllocationsEscapesBothCandidatesReachingOneResult(t *testing.T
 	assert.Equal(t, ir.OCall, block.Instrs[0].Op, "pick may return the first argument, which is then published")
 	assert.Equal(t, ir.OCall, block.Instrs[1].Op, "pick may return the second argument, which is then published")
 }
+
+// A candidate in a frame slot whose address is handed to a callee escapes, even
+// when the callee's summary says it retains nothing.
+//
+// This is the invariant that makes ParamNoEscape safe to consume here at all.
+// The summary is a claim about the pointer value -- peek does not retain the
+// slot address -- and says nothing about what peek loads through it. What covers
+// the difference on this side of the analysis is aliasInfo: an allocation whose
+// address is an argument of any call is cEscaped, not cLocal, so a candidate
+// stored into it is escaped at the store, before the call is ever consulted.
+//
+// escapeGraph.call cannot lean on that, because it is reasoning about parameters
+// rather than about allocations in the frame it is looking at, which is why the
+// depth-one publication belongs there and not here.
+func TestLowerHeapAllocationsEscapesACandidateInASlotHandedToANoescapeCallee(t *testing.T) {
+	module := ir.NewModule()
+
+	peek := module.NewFunc("peek", ir.ClsL)
+	parameter := peek.Param("p", ir.ClsP)
+	peekEntry := peek.Entry()
+	peekEntry.Ret(peekEntry.Load(ir.ClsL, peekEntry.Load(ir.ClsP, parameter)))
+
+	function := module.NewFunc("caller", ir.ClsL)
+	block := function.Entry()
+	object := block.HeapAlloc(function.Sym("runtime.newobject", 0), function.Sym("type.int", 0), 8, 8)
+	slot := block.Alloc(8, 8)
+	block.Store(object, slot)
+	block.Ret(block.Call(ir.ClsL, function.Sym("peek", 0), slot))
+
+	facts := ComputeEscapeFacts(module)
+	require.Equal(t, ParamNoEscape, facts.Param("peek", 0).Escape,
+		"peek keeps neither the address it is handed nor what it loads through it")
+
+	require.True(t, LowerHeapAllocationsWithFacts(module, facts))
+	assert.Equal(t, ir.OCall, block.Instrs[0].Op,
+		"peek may retain what it loads out of the slot, which is this object")
+}

@@ -723,3 +723,63 @@ the re-check (the second candidate is promoted to `OAlloc8`) and passes with it.
 This one is summary-dependent -- `leakedCallResultBase` is called only under
 `facts != nil` -- so it was latent for exactly as long as the knob was off, and
 would have gone live with it.
+
+### 7.4 The consumer side did not need the same fix, and here is why
+
+`markSummarisedCall`, the other consumer, reads `ParamNoEscape` as "do not escape
+this candidate" and that is correct -- because something else already covers the
+pointee. `aliasInfo.computeEscape` marks an allocation `cEscaped` whenever a
+pointer derived from it is an argument of any call, and a candidate stored into
+non-`cLocal` storage is escaped at the store, before the call is consulted at
+all. So a candidate sitting in a frame slot whose address is handed to a callee
+is escaped whatever the callee's summary says.
+
+`escapeGraph.call` cannot lean on that: it reasons about *parameters* of the
+function it is summarising, not about allocations in the frame in front of it,
+and a parameter written into a frame aggregate is not an allocation `aliasInfo`
+has anything to say about. That is why the depth-one publication belongs in the
+producer's consumer and not in this one.
+
+`TestLowerHeapAllocationsEscapesACandidateInASlotHandedToANoescapeCallee` pins
+the invariant, because it is load-bearing and invisible.
+
+## 8. What enabling it costs and buys, measured
+
+### 8.1 The promotion rate, whole corpus, 385 programs
+
+`go test ./goc -run TestEscapeSummaryPromotionRate -escape-promotion-rate`
+(288.8 s, the corpus compiled twice):
+
+| | promoted | lowered | rate | blocked by the loop rule |
+|---|---:|---:|---:|---:|
+| **§5.1's numbers**, before the safety fixes | | | | |
+| knob off | 14 433 | 453 319 | 3.09% | (rule did not exist) |
+| knob on | 17 414 | 450 338 | 3.72% | (rule did not exist) |
+| **this tree** | | | | |
+| knob off | 13 986 | 453 766 | **2.99%** | **0** |
+| knob on | 16 933 | 450 819 | **3.62%** | **0** |
+
+Same 467 752 candidates in every row.
+
+**The summaries are worth +2 947 objects, +21.1% relative, +0.63 points
+absolute** -- within noise of §5.1's +2 981/+20.7%/+0.63, which is what should
+happen: the safety fixes took a similar toll from both sides.
+
+**The safety fixes cost 447 promotions with the knob off** (14 433 -> 13 986) and
+481 with it on. The knob-off figure is hole two alone, since it is the only fix
+that runs with `facts == nil`: 447 objects that were being promoted into frames
+while a live heap object could hold their address. That is the size of the defect,
+not a regression.
+
+### 8.2 The loop rule blocks nothing, in either configuration
+
+`LoopBlocked` is **0** with the knob off and **0** with it on, over all 385
+programs and all 467 752 candidates. **No promotion in the corpus lands in a loop
+body.**
+
+That is the answer to "confirm no promotion lands in a loop body, or that the
+rule blocks it": the first, measured rather than argued. The rule costs nothing
+today and is there because the corpus is not the world -- §3.4 found 4 front-end
+placements where the same rule is the only thing standing in front of the
+`freshVariableStorage` case, and a candidate population that grows by 21% is a
+population whose loop-body membership should not be re-derived by hand each time.
