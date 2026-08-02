@@ -350,6 +350,13 @@ type Module struct {
 	// carried here under a reserved key (see EncodeAssembly); a frontend may add
 	// its own keys. Nil when there is nothing to attach.
 	Attachments map[string][]byte
+
+	// AllocDecisions records, in pass order, every typed allocation candidate an
+	// optimization pass placed and where it put it. It is diagnostic only: no
+	// pass reads it, nothing in the binary format carries it, and a module with
+	// it empty compiles to the same code. See AllocDecision for why the record
+	// has to be made rather than recovered.
+	AllocDecisions []AllocDecision
 }
 
 // SymAttr is a bitset of semantic attributes a frontend declares about a symbol
