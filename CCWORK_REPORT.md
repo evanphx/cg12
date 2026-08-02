@@ -316,3 +316,42 @@ the program that should break it, proved the precondition it needs (a real stack
 copy) is met, and it did not break. What would settle it is an answer to why
 goc's stack copier leaves a heap-held pointer into a moved frame valid — a
 question for whoever owns that code, not something this harness can answer.
+
+## 7. PESSIMISTIC — 585 lines goc heaps and gc does not
+
+The performance direction. 585 of 3 029 joined lines — **19.3%** of every line
+either compiler decides — cost an allocation, a zeroing and the collector's
+attention that the reference implementation does not pay. Ranked:
+
+| lines | class |
+|---|---|
+| **146** | **variadic call**: goc packs the `...` slice *and* the interface boxes into one heap struct; gc stack-allocates the `...` array and heaps only the boxes it must |
+| **146** | other single objects: `new(T)` gc frames, ints and interfaces goc boxes on the heap |
+| **136** | **closures**: `go f(x)`, `defer x.Done()`, `defer runtime.GOMAXPROCS(…)` — goc heaps the closure/goroutine argument struct where gc frames it |
+| **92** | fixed-size backing stores: `[]int{1, 2, 3, 4}` and friends, which goc heaps as `N_int` / `N_byte` objects |
+| **39** | maps goc heaps and gc frames (`map[string]int{}`, `map[[3]int]string{…}`) |
+| **19** | strings boxed into an interface that gc keeps in a frame |
+| **5** | slices: `make([]byte, n)` gc frames |
+| **2** | strings boxed, gc reports nothing on the line |
+
+Two of these are worth more than their line counts.
+
+**Variadic calls (146 lines) are the largest single class and sit on the hottest
+shared path in the tree.** Every `fmt.Sprintf`, `fmt.Println` and `fmt.Sprint`
+in the corpus is one. gc's shape is: the `...` backing array on the stack
+(`... argument does not escape`), one heap box per argument that needs one.
+goc's shape is: one `struct_values__N_any__payload…` on the heap carrying the
+slice *and* the payloads. goc pays one allocation where gc pays zero-to-N
+smaller ones, and pays it even when every argument is a constant.
+
+**Closures (136 lines) are `go` and `defer`.** `defer wait.Done()` and
+`go worker(done)` allocate a closure object on the heap in goc; gc frames the
+argument struct because a `defer`'s closure provably dies with the frame and a
+`go` statement's argument struct is copied by the runtime. 136 lines of
+`go`/`defer` in a corpus this size means the pattern is everywhere, and every
+one of them is an allocation on a control-flow construct that should cost none.
+
+Nothing here is a correctness question, and none of it is a bug this branch
+should fix. It is the ranked list of where goc's escape analysis costs
+something measurable against the reference, and the first two entries are worth
+more than the remaining six put together.
