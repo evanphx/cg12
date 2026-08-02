@@ -38,10 +38,9 @@ type AllocDecision struct {
 	// Allocator names the allocator the candidate would have called, which is
 	// what a heap placement does call.
 	Allocator string
-	// Type is the type-descriptor symbol of the allocated object.
+	// Type is the type-descriptor symbol of the allocated object. For a type
+	// with no name of its own the symbol carries the size, as in "24_byte".
 	Type string
-	// Size is the object's size in bytes.
-	Size int64
 	// Placement is where it landed.
 	Placement AllocPlacement
 }
