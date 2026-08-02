@@ -334,6 +334,12 @@ outermost escape query, and keys every summary question so repeats are visible.
 `pprof` on the ECDSA compile agrees independently: `goc.astParents` is 4.21% of samples,
 6.7% of `CompileExecutable` cumulative.
 
+And it says where the cost is. `astParents` is 0.42 s of the 0.46 s the timer attributes
+to the walk; 67% of the nodes it visits are visited for summary queries, so about **0.28 s
+of the 0.46 s — 60% — is rebuilding parent maps rather than walking them**. The expensive
+thing is not the analysis. It is answering 1 485 questions 8.5 times each and rebuilding a
+map for every answer.
+
 For scale on the other side: **`opt.FrameEscapes` — one whole-module, per-function,
 fixed-point pointer dataflow analysis over the same 6 965 functions — takes 0.182 s.**
 An IR-level analysis of this shape is not a compile-time problem; the AST walk is.

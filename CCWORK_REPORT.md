@@ -78,6 +78,21 @@ The point is not that 6.8% is intolerable. It is that ~90% of it is recomputatio
 answers already computed, and that the fix for *that* (memoize `(function, index)`) is
 independent of moving to the IR and much cheaper. See `ESCAPE_IR_PLAN.md` §4.
 
+### 2.1 Where the 6.8% actually goes
+
+`pprof` puts `goc.astParents` at 0.42 s of the ECDSA compile (4.21% of all samples, 6.7%
+of `CompileExecutable`'s cumulative time). The depth-guarded timer puts the *whole* walk
+at 0.46 s. Of the 2.57 M AST nodes `astParents` visits in that compile, 1.71 M (67%) are
+visited on behalf of summary queries, so roughly **0.28 s of the 0.46 s walk — about
+60% — is rebuilding parent maps**, not walking them.
+
+That is the shape of the cost, and it is what makes stage 3 the right first move on this
+side: the expensive thing is not the analysis, it is answering the same 1 485 questions
+8.5 times each and rebuilding a parent map for every one.
+
+(The timer's own `defer` is inside the 0.46 s. The `astParents` figure is from a profile
+taken before the timers were added, so it is not.)
+
 ## 3. How much of the placement decision is already on the IR (sample; §6 is the full run)
 
 `goc/placementcensus_test.go` records, per front-end decision site, how each allocation
@@ -148,6 +163,30 @@ gc calls loop depth.
 
 This is new information: `RUNTIME_PLAN.md` records the hazard for per-iteration loop
 variables and nothing else, and no capability or corpus program exercises the shape.
+
+### 4.1 The fix, built and run
+
+`opt/escapeloop.go` on this branch is the rule, 90 lines over `analysis/loopforest.go`
+and `analysis/live.go`, hooked into `lowerFunctionHeapAllocations` and gated on
+`GOC_ESCAPE_LOOP=1` so it changes nothing by default:
+
+> A candidate allocated inside a loop is not promoted if a temporary holding it is live
+> out of a latch, or if it is stored into a frame slot whose own allocation is outside
+> the loop.
+
+    $ GOC_ESCAPE_LOOP=1 go run ./cmd/goc -run goc/testdata/spike/loop_alias_forms.go
+
+| form | how it is placed | knob off | **knob on** | host |
+|---|---|---|---|---|
+| `new(int)` | `allocateTyped` → **candidate** | `2 2` | **`1 2`** | `1 2` |
+| `make([]int, 0, 4)` | falls to **candidate** | `2 2` | **`1 2`** | `1 2` |
+| `var a [2]int; &a` | `allocLocal`, committed frame | `2 2` | `2 2` | `1 2` |
+| `&cell{v: i}` | `nonEscapingAddress`, committed frame | `2 2` | `2 2` | `1 2` |
+
+**Two of four fixed; the other two cannot be, because their allocations never reach the
+IR as candidates.** That is the whole argument for moving placement, in four lines of
+output: how much of the loop miscompile the IR rule fixes is a direct function of how
+much of placement has moved.
 
 **This is the strongest single argument for the IR side of the proposal.** Loop structure
 is not recoverable from an upward AST walk, is trivially present in the CFG
