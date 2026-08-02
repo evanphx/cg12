@@ -188,6 +188,85 @@ The census logic itself is separately covered by 10 unit tests in
 `goc/alloccensus_test.go` (10 ms), so a fast tier can check that the instrument
 works even where it cannot afford to run it over the corpus.
 
-## 6. Verification
+## 6. The instrument was checked by making it fire
 
-(Appended as each run exits.)
+A test that has never failed has not been shown to work. So I perturbed
+`LowerHeapAllocations` -- forcing every candidate in `archive/zip.*` to the heap
+and every candidate in `archive/tar.*` into a frame -- ran the census over the
+real corpus, and read what it said. The perturbation was then reverted
+(`git checkout opt/escape.go`, verified against the index) and is not on this
+branch.
+
+`TestAllocationCensus` failed as intended, naming sites and directions:
+
+    an allocation moved from the heap into a frame. This is the correctness-critical
+    direction: ...
+      ?	archive/tar.Reader.Next	runtime.newobject	error
+            heap -> frame, seen compiling stdlib_archive_tar_roundtrip.go
+      ...
+
+    an allocation moved from a frame onto the heap. This is a possible performance
+    regression: ...
+      stdlib/src/archive/zip/reader.go:340:2	archive/zip.File.findBodyOffset	runtime.newobject	30_byte
+            frame+heap -> heap, seen compiling stdlib_archive_zip_roundtrip.go
+      ...
+
+### It also found a real bug in the reporting, which is now fixed
+
+`stdlib/src/archive/tar/common.go:426:2` came out as `frame+heap -> frame` and was
+filed under **moved to the heap**. It is the opposite: that site lost a heap
+allocation.
+
+The cause is the split sites of section 4. The reporter compared the two
+placement *strings*, so anything other than exactly `heap`->`frame` or
+`frame`->`heap` fell through to a default arm that assumed the heap direction. A
+site that dropped its heap copy therefore landed in the bucket whose advice is
+about performance instead of the bucket that asks what proves the object cannot
+outlive the frame -- which is the whole point of separating them. 439 corpus
+sites are split, so this was not a corner case.
+
+Fixed in `231d671`: the direction is now which placement the site *gained or
+lost*, not which of two values it changed to. Covered by a five-case subtest
+(`TestCompareAllocationCensusReportsASplitSite`) over gain-frame, gain-heap,
+lose-frame, lose-heap and unchanged.
+
+This is worth stating plainly: the only reason that bug is not in the committed
+instrument is that the instrument was deliberately made to fail once.
+
+## 7. Verification
+
+Every run below was waited on to exit; nothing was left running.
+
+| what | result |
+|---|---|
+| `go test ./goc -run TestAllocationCensus` (final tree, run 1) | **PASS** 148.24 s |
+| `go test ./goc -run TestAllocationCensus` (final tree, run 2) | **PASS** 148.37 s |
+| `go test ./opt/ ./ir/` | **PASS** (opt 0.94 s, ir 0.01 s) |
+| `go test ./goc/...` (before the split-site fix) | **PASS** `ok ... 770.363s`, exit 0 |
+| `go test ./goc/...` (final tree) | (below) |
+
+**Stability.** Two separate `go test` processes -- each a fresh compile of all 385
+programs, each re-deriving the census from scratch -- both reproduced the
+committed baseline exactly. The test asserts set equality in both directions
+(nothing found that is not accepted, nothing accepted that is not found), and
+`writeBaseline` emits the accepted set sorted, so reproducing the set is
+reproducing the file byte for byte. The census is **stable across repeated runs**.
+
+The one thing in the harness that is *not* reproducible is the "seen compiling
+X" hint in a failure message: which program is named, when several produce the
+same finding, depends on which of the eight workers finished first. It is a hint
+in a diagnostic and appears in no baseline. The comment in
+`goc/corpusaudit_test.go` says so.
+
+### Test counts (actual, from `-v` output)
+
+* `opt`: 10 tests for the census -- `TestAllocationCensus{ReportsAPromotedCandidateAsFrame,
+  ReportsAnEscapingCandidateAsHeap, ReportsAFrontEndAllocatorCall, ReportsMakeAllocators,
+  IgnoresGrowslice, IgnoresOrdinaryFrameSlots, IsSortedAndDeduplicated,
+  KeepsPositionlessSites}`, `TestAllocationSiteExcludesPlacement`,
+  `TestAllocationTypeNameStripsPrefixAndDigest`. No subtests. 8 ms.
+* `goc`: `TestAllocationCensus` (1 test, no subtests, ~148 s);
+  `TestCompareAllocationCensusNamesTheDirection` (1 test, no subtests);
+  `TestCompareAllocationCensusReportsASplitSite` (1 test, **5 subtests**: frame
+  gains a heap copy, heap gains a frame copy, split loses its heap copy, split
+  loses its frame copy, split is unchanged). The three fast ones total 18 ms.
