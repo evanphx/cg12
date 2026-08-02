@@ -639,3 +639,28 @@ it is closed because the fix claims to model interface boxing, and a claim with
 a known hole in it is worse than no claim. The corpus allocation census is
 **byte-identical** to the revision before it -- 385 programs, frame 9 735 471,
 heap 509 920, and a per-site diff of zero -- so it costs nothing.
+
+## 8. Two residuals this change deliberately does not close
+
+Stated so nobody reads section 3 as "interface publication is now fully
+modelled". Neither is one of the three findings, and neither produces a finding
+on today's corpus.
+
+**8a. A pointer-shaped value in a heap variadic backing array.**
+`isDirectInterfaceType` values -- pointers, maps, channels, funcs -- are stored
+straight into the two-word interface descriptor, which is a frame allocation, so
+`boxedIntoInterface` correctly reports no box. But `buildVariadicSlice`
+allocates the `[]any` backing array with `allocateTyped` unless the caller is
+`NoSplit` or non-allocating, and copies the descriptor's two words into it. So
+`f(&local)` for a variadic `f(...any)` can put a frame address in the heap
+without any boxing having happened. What stops it today is the callee summary:
+`fmt.Println`'s parameter escapes, so the walk answers "escapes" for the whole
+argument. A variadic callee that provably retains nothing would not be stopped.
+Closing this properly means modelling the variadic backing array as a
+publication, which would make every `&local` passed to any non-retaining
+variadic function escape -- a much larger cost than this change, and a separate
+decision.
+
+**8b. `nonEscapingAddress` remains cruder than the walk.** Section 5.1. The two
+now agree by construction, which is what the correctness argument needs; they
+agree at the conservative end.
