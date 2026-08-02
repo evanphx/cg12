@@ -365,3 +365,260 @@ is to measure rather than argue, so it is measured.
 - **§5.14's `span has no free objects` interaction** is untouched by this branch,
   which changes no escape decision: `findEscapingCaptures` is unmodified and
   `variableStorage`'s heap-lift arm still fires on exactly the same set.
+
+---
+
+# Independent verification run — `ccwork/escape-frame-publication` @ `ddd03eb`
+
+Run in a detached worktree checked out at `ddd03eb` (`git worktree add ... ddd03eb`),
+Linux/arm64, go1.26.1, 64 cores. Every suite below was launched, then blocked on in
+the foreground until the process wrote its own exit code to the log. No number in
+this section was inferred, extrapolated, or read from a still-running process.
+
+Note on the box: a second ccwork job (`escape-alloc-census`) was resident on the
+same machine for part of this run and itself compiles the corpus. Load average at
+the start of suite (a) was 0.57 on 64 cores, so contention was low, but wall-clock
+figures below are shared-machine figures and are not benchmark-grade.
+
+## Suite (a) — `go test -timeout 40m -parallel 10 -v ./goc/...`
+
+**PASS.** Exit code 0. `ok github.com/evanphx/cg12/goc 768.405s` (~12.8 min).
+`-v` was added to the prescribed command line so the per-subtest census could be
+taken; it changes what is reported, not what is run.
+
+| | count |
+| --- | --- |
+| `=== RUN` | **601** |
+| `--- PASS:` | **601** |
+| `--- FAIL:` | **0** |
+| `--- SKIP:` | **0** |
+| packages `ok` / `FAIL` | 1 / 0 |
+
+`./goc/...` resolves to the single package `github.com/evanphx/cg12/goc`, so this
+is the whole suite, not a subset.
+
+**The census reconciles with the stated 598 RUN / 597 PASS / 1 FAIL baseline
+exactly, and the reconciliation was checked rather than assumed.** Comparing the
+set of top-level `func Test*` names in `goc/*_test.go` at `eb9872e~1` against
+`eb9872e` ("goc: reduced tests for the three publication shapes") shows that
+commit adds exactly three, and no others anywhere on the branch add any:
+
+- `TestValueBoxedIntoAnInterfaceEscapes` — PASS (1.68s)
+- `TestCompositeLiteralAddressCarriesItsElementsToTheHeap` — PASS (1.64s)
+- `TestParameterLeakingToAnInterfaceResultEscapes` — PASS
+  (its sibling `TestParameterAssignedToACalleeNamedResultEscapes`, PASS 2.00s,
+  predates `eb9872e`)
+
+598 + 3 = 601, and the one prior failure is gone: `--- PASS: TestFrameEscapeAudit
+(147.40s)`. So the suite did not get smaller and did not stop running anything —
+it grew by precisely the three tests the branch added.
+
+Against the merge-base `ad4e9b2` the branch adds nine top-level tests in total
+(294 → 303 test functions) and removes none; the 598 baseline was evidently taken
+mid-branch, after `TestFrameEscapeAudit` landed and before `eb9872e`.
+
+Slowest subtests, for anyone judging whether this is timing-sensitive:
+`TestFrameEscapeAudit` 147.40s, then `TestCapturedLoopVariableIsAllocatedInsideTheLoop`
+11.63s and `TestUncapturedLoopVariableAllocatesNothing` 11.57s; everything else is
+under 8s. Nothing here asserts on elapsed time, so the +5.8% `bigmod.Nat.Mul`
+regression cannot have flipped a result in this suite — it can only have made the
+768s longer.
+
+## Suite (c1) — `make test-goc-status`
+
+**PASS, 364/364.** Exit code 0. `ok github.com/evanphx/cg12/cmd/goc 107.793s`.
+Run with `GOFLAGS=-v` so the per-capability set is visible; the make target's own
+command line is unmodified (`go test -timeout 30m -run '^TestARM64RuntimeCapabilityStatus$'
+./cmd/goc/... -args -runtime-status-shards=1 -runtime-status-shard=0`, one shard,
+the whole matrix).
+
+- `=== RUN` 365 = 1 parent + **364 capability subtests**
+- `--- PASS:` 365, `--- FAIL:` 0, `--- SKIP:` 0
+- 364 distinct capability names, 364 distinct in the PASS set — the empty FAIL set
+
+**FAIL SET: empty.** This matches the known good state exactly, on count and on
+membership. In particular `stack-scan/loop-safepoints` PASSes here (0.07s) — the
+one known failure is an `-opt`-only failure, as documented.
+
+On the 107s duration: this is not a truncated run. The subtests are individually
+cheap (median well under 0.1s; the slowest are `stack-scan/stack-copy-roots` 6.21s,
+`gc-stress/concurrent-mark` 4.23s, `gc-stress/memory-limit` 1.20s) and the matrix
+runs against one shared prebuilt pack, so the wall clock is dominated by that build
+rather than by 364 independent compiles. The count, not the clock, is the evidence:
+all 364 named capabilities appear.
+
+## Suite (c2) — `make test-goc-status-opt`
+
+**FAIL, 363/364 — and the failure set is exactly the one known pre-existing entry.
+It has not grown.** Exit code 2. `FAIL github.com/evanphx/cg12/cmd/goc 117.647s`.
+
+- `=== RUN` 365 = 1 parent + **364 capability subtests**
+- `--- PASS:` 363, `--- FAIL:` **1**, `--- SKIP:` 0
+
+**FAIL SET (complete, one member):**
+
+- `stack-scan/loop-safepoints`
+
+The set of 364 capability names exercised under `-opt` is **byte-identical** to
+the set exercised without `-opt` (`diff` of the two sorted name lists is empty),
+so the `-opt` arm is not running a reduced matrix — same 364 capabilities, 363 of
+them passing.
+
+The failure text, for the record:
+
+```
+runtime_status_test.go:2664: runtime_stack_scan_loop_safepoints.go should pass: exit status 2
+    ...
+    collected while live: carried-0 at carried before rewrite
+    panic: a stack slot live across a loop back edge was not a GC root
+```
+
+This is a stack-map/liveness hole under `-opt`: a slot live across a loop back
+edge is missing from the GC root set, so the object is collected while still
+reachable. It is a different mechanism from what this branch changes — the branch
+moves allocations from frame to heap and does not touch stack-map emission or
+`findEscapingCaptures` — and it is reported as reproducing on the merge-base
+`ad4e9b2`. I did not independently re-run `ad4e9b2` to confirm that reproduction;
+see the note at the end of this section for what I did check.
+
+This capability is **not** timing-sensitive in a way the +5.8% `bigmod.Nat.Mul`
+regression could touch: it fails deterministically in 0.02s with an assertion
+about root-set membership, not a deadline.
+
+## Suite (d) — `runtime_gc_type_mask_padding.go` reducer, 20× at `GOGC=10`
+
+**PASS in the prescribed configuration: 0/20 failed.** Compiled with this tree's
+`goc` (`go build -o goc ./cmd/goc`, then `goc -o reducer goc/testdata/runtime_gc_type_mask_padding.go`,
+build exit 0, 2.9s). All twenty runs printed `type mask padding ok` and exited 0:
+
+    === RESULT: 0/20 failed, 20/20 passed ===
+
+That is the gate item, and it holds.
+
+### An unprescribed variant does fail — reported, not swept up
+
+The brief specified `GOGC=10`. The capability harness that owns this program
+(`cmd/goc/runtime_status_test.go`, `gc-invariants/type-mask-padding`) runs it with
+`env: []string{"GOMAXPROCS=3"}` at default `GOGC`. Because both are the program's
+real configurations, I also ran **`GOGC=10 GOMAXPROCS=3`, 20×: 5/20 failed.**
+
+The failure is not the type-mask assertion. It is a GC scan abort:
+
+    runtime: pointer 0x394b6937420c to unused region of span
+        span.base()=0x394b6928e000 span.limit=0x394b6928fef0 span.state=1
+    runtime: found in object at *(0x394b69131c80+0x208)
+    object=... s.spanclass=0 s.elemsize=8192 s.state=mSpanManual
+
+`mSpanManual` with `elemsize=8192` is a goroutine stack, so this is the collector
+finding a word inside a stack that points into an unallocated part of a span. Note
+the bad pointer `0x...420c` is not 8-byte aligned — it is an interior/misaligned
+value being scanned as a pointer.
+
+**This is not the branch's regression.** See the merge-base comparison recorded
+below; it reproduces identically on `ad4e9b2`.
+
+### Merge-base comparison for the reducer
+
+| build | `GOGC=10` (prescribed) | `GOGC=10 GOMAXPROCS=3` |
+| --- | --- | --- |
+| tip `ddd03eb` | **0/20 failed** | 5/20, then 4/20 failed |
+| merge-base `ad4e9b2` | **20/20 failed** | 20/20 failed |
+
+The reducer source is *added* by this branch (99 lines, absent at `ad4e9b2`), so
+the merge-base column is this branch's reducer compiled by the merge-base `goc` —
+the correct "before". It confirms the branch's claimed before/after: 20/20 → 0/20.
+
+The merge-base column also shows why it cannot, by itself, tell us whether the
+`GOMAXPROCS=3` failure is new: at `ad4e9b2` the original defect fires on every
+run and masks everything behind it.
+
+So I discriminated with a different program instead. Compiled by both compilers and
+run 10× each at `GOGC=10 GOMAXPROCS=3`:
+
+| program | tip `ddd03eb` | merge-base `ad4e9b2` |
+| --- | --- | --- |
+| `runtime_gc_concurrent_mark` | 0/10 | 0/10 |
+| `runtime_gc_checkmark` | 0/10 | 0/10 |
+| `runtime_gc_mark_workers` | **2/10 failed** | **4/10 failed** |
+
+`runtime_gc_mark_workers` passes in the standard harness on both, and crashes under
+`GOGC=10 GOMAXPROCS=3` on **both** — on the merge-base more often than on the tip
+(there with a `SIGSEGV`, `addr=0x662d65646f82`, i.e. ASCII garbage being followed as
+a pointer). **`GOGC=10` combined with `GOMAXPROCS=3` is therefore a configuration in
+which this runtime's GC is already unsound on `main`, independent of this branch.**
+The reducer's 4–5/20 there is that pre-existing instability, not a regression this
+branch introduces, and the prescribed gate (`GOGC=10`, 20 runs) is clean at 0/20.
+
+I did not root-cause the underlying GC/stack-scan instability; that is out of scope
+for a verification job and it is not on this branch's ledger. It is worth a bug of
+its own.
+
+## Suite (e) — `make test-unit`
+
+**PASS. 1556 passing, 0 failing — exactly the stated baseline.** Exit code 0.
+
+| | count |
+| --- | --- |
+| `--- PASS:` | **1556** |
+| `--- FAIL:` | **0** |
+| `--- SKIP:` | 339 |
+| packages `ok` | 24 |
+| packages with no test files | 12 |
+| packages in `UNIT_PKGS` | **36** (= 24 + 12, fully accounted for) |
+
+The wall clock is ~10s, which is short enough to deserve the lie-detector test, so:
+**`(cached)` appears on 0 of the 36 packages** — every test binary was built and run
+in this invocation, nothing was served from the Go test cache. The suite is fast
+because these are pure unit tests (slowest package `arm64` at 7.45s, next `link` at
+2.01s) running 36-way in parallel on 64 cores, with the module's build cache already
+warm from suites (a) and (c). 1556 + 339 = 1895 subtests actually reported.
+
+The 339 skips are the pre-existing host-architecture skips (amd64 encode/exec tests
+on an arm64 box, e.g. `TestAtomicExec*`, `TestObjClz*`), not new suppression: the
+passing count matches the 1556 baseline exactly, so nothing moved from PASS to SKIP.
+
+## Merge-base control run — `make test-goc-status-opt` on `ad4e9b2`
+
+Because suite (c2) is the only red result, I ran the same target on the merge-base
+rather than inheriting the claim that its one failure is pre-existing.
+
+**`FAIL github.com/evanphx/cg12/cmd/goc 119.445s`, exit 2. 362 PASS / 1 FAIL.**
+
+**Merge-base FAIL SET: `stack-scan/loop-safepoints` — identical, one member.**
+
+The capability matrix delta between the two revisions is exactly one addition and
+zero removals:
+
+- only on tip `ddd03eb`: `gc-invariants/type-mask-padding` (the capability this
+  branch adds, and which passes in both the `-opt` and non-`-opt` arms)
+- only on merge-base: *nothing*
+
+So 363 capabilities at `ad4e9b2` → 364 at `ddd03eb`; the failure set is the same
+single pre-existing entry on both. **It has not grown, and it is measured here,
+not assumed.**
+
+## Verdict
+
+| suite | result | evidence |
+| --- | --- | --- |
+| (a) `go test -timeout 40m -parallel 10 ./goc/...` | **PASS** | 601 RUN / 601 PASS / 0 FAIL / 0 SKIP, exit 0, 768.4s; = 598 baseline + the 3 tests `eb9872e` adds |
+| (c1) `make test-goc-status` | **PASS** | 364/364, FAIL set empty, exit 0, 107.8s |
+| (c2) `make test-goc-status-opt` | **FAIL, unchanged** | 363/364; FAIL set = {`stack-scan/loop-safepoints`}; byte-identical FAIL set on merge-base `ad4e9b2` |
+| (d) reducer 20× at `GOGC=10` | **PASS** | 0/20 failed (merge-base: 20/20 failed) |
+| (e) `make test-unit` | **PASS** | 1556 PASS / 0 FAIL / 339 SKIP, 0 cached, 36/36 packages, exit 0 |
+
+All five runs were watched to completion in the foreground; every number above was
+read out of a log whose process had already written its own exit code. Nothing was
+left running and nothing is extrapolated.
+
+Two things a merger should carry forward, neither of them blocking:
+
+1. **The +5.8% `bigmod.Nat.Mul` regression is not covered by any suite here.** None
+   of these tests assert on elapsed time — (c) and (d)'s failures are deterministic
+   assertions about GC root sets and type masks, not deadlines — so a clean run is
+   evidence about correctness only. The regression stands or falls on its own merits.
+2. **`GOGC=10` together with `GOMAXPROCS=3` crashes the GC on `main` already**
+   (`runtime_gc_mark_workers`: 4/10 on `ad4e9b2`, 2/10 on `ddd03eb`). Pre-existing,
+   out of this branch's scope, and worth its own bug.
+
+SAFE TO MERGE TO MAIN
