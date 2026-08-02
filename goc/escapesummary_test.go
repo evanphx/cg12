@@ -112,16 +112,22 @@ func classifyShadowDisagreements(shadow map[string]string) []string {
 	classes := make(map[string]int)
 	for key := range shadow {
 		fields := strings.Split(key, "\t")
-		if len(fields) < 5 {
+		if len(fields) < 6 {
 			continue
 		}
-		if fields[4] == "" {
+		loop := ""
+		if fields[4] != "" {
+			loop = ", " + fields[4]
+		}
+		if fields[5] == "" {
 			// The permissive direction has no single use to name, so it is
-			// classified by the front-end decision site instead.
-			classes[fields[3]+"\tat "+fields[2]]++
+			// classified by the front-end decision site instead -- and by whether
+			// the allocation is in a loop, which is what says whether promoting it
+			// would be safe.
+			classes[fields[3]+"\tat "+fields[2]+loop]++
 			continue
 		}
-		classes[fields[3]+"\t"+fields[4]]++
+		classes[fields[3]+"\t"+fields[5]+loop]++
 	}
 	names := make([]string, 0, len(classes))
 	for name := range classes {
@@ -143,13 +149,19 @@ func classifyShadowDisagreements(shadow map[string]string) []string {
 const escapeShadowBaselineHeader = `# Every allocation goc's AST escape walk and the summary-fed IR escape analysis
 # place differently, over the whole corpus, one per line:
 #
-#     source position <TAB> function <TAB> decision site <TAB> front end -> IR <TAB> reason
+#     source position <TAB> function <TAB> decision site <TAB> front end -> IR <TAB> in a loop? <TAB> reason
 #
 # Nothing here changes what the compiler emits. The corpus is compiled exactly as
 # it ships and opt.ShadowPlacement then asks the IR analysis what it would have
 # decided about each allocation the front end placed itself. The reason field is
 # empty when the IR analysis kept the object in a frame -- there is no single use
 # to name for that -- and otherwise names the use that escaped it.
+#
+# The "in a loop?" column is the one that matters on a heap -> frame line.
+# Neither analysis knows what an iteration is: both answer "does a pointer
+# outlive the frame", and an allocation in a loop body can be entirely
+# frame-local by that test and still need one object per iteration. Promoting it
+# puts every iteration on one slot. See ESCAPE_IR_PLAN.md section 5.
 #
 # The two directions are not the same kind of news:
 #

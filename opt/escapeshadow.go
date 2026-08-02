@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"sort"
 
+	"github.com/evanphx/cg12/analysis"
 	"github.com/evanphx/cg12/ir"
 )
 
@@ -46,14 +47,30 @@ type PlacementDisagreement struct {
 	// use to name for that -- and is the classification key for the other
 	// direction.
 	Reason string
+	// InLoop reports that the allocation is inside a natural loop.
+	//
+	// It is only interesting on a permissive disagreement, and there it is the
+	// bit that decides whether the disagreement is safe. Neither analysis has a
+	// notion of iteration: both answer "does a pointer outlive the frame", and an
+	// allocation in a loop body can be entirely frame-local by that test and
+	// still need one object per iteration. Promoting it puts every iteration on
+	// one slot, which is an aliasing defect no publication analysis can see --
+	// including opt.FrameEscapes, which is why a clean audit does not clear it.
+	// ESCAPE_IR_PLAN.md section 5 documents the miscompile, and section 5.1 the
+	// loop rule that fixes it.
+	InLoop bool
 }
 
 // Key is the disagreement's stable identity: position, function, site and the
 // two verdicts, with no IR temporary names in it.
 func (disagreement PlacementDisagreement) Key() string {
-	return fmt.Sprintf("%s\t%s\t%s\t%s -> %s\t%s",
+	where := ""
+	if disagreement.InLoop {
+		where = "in a loop"
+	}
+	return fmt.Sprintf("%s\t%s\t%s\t%s -> %s\t%s\t%s",
 		disagreement.location(), disagreement.Func, disagreement.Site,
-		disagreement.FrontEnd, disagreement.IR, disagreement.Reason)
+		disagreement.FrontEnd, disagreement.IR, where, disagreement.Reason)
 }
 
 // Class is the direction plus the reason, which is what a reviewer sorts by.
@@ -109,7 +126,8 @@ func ShadowPlacement(module *ir.Module, facts *EscapeFacts) ([]PlacementDisagree
 		sort.Slice(seeds, func(i, j int) bool { return seeds[i] < seeds[j] })
 
 		definitions := allocationDefinitions(function, function.PlacedAllocs)
-		analysis := analyzeCandidateEscapes(function, byName, facts, seeds, true)
+		loops := allocationsInLoops(function, function.PlacedAllocs)
+		escapes := analyzeCandidateEscapes(function, byName, facts, seeds, true)
 		for _, id := range seeds {
 			placed := function.PlacedAllocs[id]
 			counts.Placements++
@@ -119,7 +137,7 @@ func ShadowPlacement(module *ir.Module, facts *EscapeFacts) ([]PlacementDisagree
 				counts.FrontHeap++
 			}
 			verdict := ir.AllocInFrame
-			if analysis.escapes(id) {
+			if escapes.escapes(id) {
 				verdict = ir.AllocOnHeap
 			}
 			if verdict == placed.Placement {
@@ -139,7 +157,8 @@ func ShadowPlacement(module *ir.Module, facts *EscapeFacts) ([]PlacementDisagree
 				Site:     placed.Site,
 				FrontEnd: placed.Placement,
 				IR:       verdict,
-				Reason:   analysis.reason(id),
+				Reason:   escapes.reason(id),
+				InLoop:   loops[id],
 			})
 		}
 	}
@@ -178,6 +197,31 @@ func FrontEndPlacementSites(module *ir.Module) []string {
 	}
 	sort.Strings(sites)
 	return sites
+}
+
+// allocationsInLoops reports which placed allocations sit inside a natural
+// loop. See PlacementDisagreement.InLoop for why that matters.
+func allocationsInLoops(function *ir.Func, placed map[uint32]ir.PlacedAlloc) map[uint32]bool {
+	cfg := analysis.BuildCFG(function)
+	if len(cfg.RPO) == 0 {
+		return nil
+	}
+	forest := cfg.LoopForest(cfg.Dominators())
+	inLoop := make(map[uint32]bool)
+	for _, block := range function.Blocks {
+		if forest.In[block] == nil {
+			continue
+		}
+		for _, instruction := range block.Instrs {
+			if instruction.To.Kind != ir.RefTemp {
+				continue
+			}
+			if _, tracked := placed[instruction.To.ID]; tracked {
+				inLoop[instruction.To.ID] = true
+			}
+		}
+	}
+	return inLoop
 }
 
 // allocationDefinitions finds the source position of each placed allocation, by
