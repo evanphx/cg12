@@ -330,4 +330,37 @@ See `ESCAPE_IR_PLAN.md` §8.
 
 ## 9. Recommendation
 
-RECOMMEND HYBRID. Stated in full at the end of `ESCAPE_IR_PLAN.md`.
+Stated in full in `ESCAPE_IR_PLAN.md` §9; here it is standalone.
+
+**(a) Fix the IR pass where it is already wrong, now.** The loop rule (§4) fixes a live
+miscompile in four allocation forms at both `-O` settings that no analysis in the tree can
+see, and it costs **nothing measurable** on the corpus (§4.2). `opt/framecheck.go`'s
+blindness to a phi'd slot base (§5's variadic case) is why residual 8a's reproduction
+passes the audit; that is a checker fix, also standalone. Neither needs a rearchitecture
+and neither should wait for one.
+
+**(b) Move placement — and only placement — onto the IR, after the fact table.** The
+neutral op exists, the legaliser exists and runs in the right place, and 91.6% of
+heap-capable allocations already go through both. Finishing it is five call sites in one
+file. But the legaliser promotes 3.1% of what it sees, so it must get callee summaries
+*first*, or the five sites' 11 255 frame placements become heap allocations — a 2.2% rise
+against the 22 sites that cost 5.8% on `bigmod.Nat.Mul`. What the move buys is what the
+brief claims: interface boxing, variadic backing arrays and composite-literal storage stop
+being things a syntactic walk has to be taught about and become instructions.
+
+**(c) Do not move the interprocedural layer, and do not move variable representation.**
+Their answers are consumed *before any IR for the function exists* — `variableStorage`
+picks a different memory representation and `perIterationVariable` a different loop shape,
+on the first materialisation of a variable. That is a second circularity, and unlike the
+placement one the neutral op does not reach it. Make that layer good where it is instead:
+memoize it (recovers most of a measured 7.1% of compile time, with no answer change), then
+give it a real SCC fixed point, which cg12 can make *more* precise than gc's because
+whole-program-from-source means the summary table needs no export data, no tags and no
+versioning.
+
+The disagreement with the brief, stated plainly: the diagnosis is right and the remedy is
+right for placement, but the circularity the brief names is not the one that blocks a full
+move. The blocking one is representation, not placement, and it is better solved by
+leaving it where it is.
+
+RECOMMEND HYBRID

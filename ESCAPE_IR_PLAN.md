@@ -3,8 +3,8 @@
 A design spike, not an implementation. Written against `ccwork/escape-frame-publication`
 (`ddd03eb`). Every number in it was measured on this tree; the harnesses are committed
 alongside (`goc/escapecost.go`, `goc/escapecost_test.go`, `goc/placementcensus_test.go`,
-`goc/spike_evidence_test.go`, `opt/escapeloop.go`, `opt.HeapAllocLoweringStats`) and the measurement log is
-`CCWORK_REPORT.md`.
+`goc/spike_evidence_test.go`, `opt/escapeloop.go`, `opt.HeapAllocLoweringStats`,
+`opt.LoopRuleEscapes`) and the measurement log is `CCWORK_REPORT.md`.
 
 **Recommendation: RECOMMEND HYBRID.** Stated in full in §9.
 
