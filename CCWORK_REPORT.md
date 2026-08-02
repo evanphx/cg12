@@ -54,10 +54,12 @@ visible.
     $ go test ./goc -run TestEscapeWalkCost -count=1 -v \
         -escape-cost-program=testdata/stdlib_crypto_ecdsa.go
 
+(Timings are from an uncontended re-run; the counts were identical on every run.)
+
 | | `runtime_slice_pointer_append_gc.go` | `stdlib_encoding_json_roundtrip.go` | `stdlib_crypto_ecdsa.go` |
 |---|---|---|---|
 | functions emitted | 2 743 | 5 680 | 6 965 |
-| compile | 2.23 s | 4.74 s | 6.79 s |
+| compile | 2.23 s | 4.74 s | 6.47 s |
 | **`astParents` calls, summary** | **5 269** | **9 542** | **12 612** |
 | **AST nodes rebuilt, summary** | **688 401** | **1 176 254** | **1 713 256** |
 | AST nodes, all lowering | 207 579 | 315 421 | 438 174 |
@@ -66,31 +68,31 @@ visible.
 | summary queries | 5 269 | 9 557 | 12 635 |
 | **distinct questions** | **530** | **1 033** | **1 485** |
 | **queries per distinct question** | **9.94** | **9.25** | **8.51** |
-| escape walk, wall clock | — | — | **0.460 s (6.8% of the compile)** |
+| escape walk, wall clock | — | — | **0.456 s (7.1% of the compile)** |
 | outermost escape queries | — | — | 7 495 |
 
 Read the two bold rows together. On the ECDSA program the walk rebuilds parent maps over
 **3.91× the entire program's AST** to answer **1 485 distinct questions**, asking each one
 **8.5 times**. A `pprof` run agrees: `goc.astParents` is 4.21% of all samples and 6.7% of
-`CompileExecutable`'s cumulative time, and the timer says the whole walk is 6.8%.
+`CompileExecutable`'s cumulative time, and the timer says the whole walk is 7.1%.
 
-The point is not that 6.8% is intolerable. It is that ~90% of it is recomputation of
+The point is not that 7.1% is intolerable. It is that ~90% of it is recomputation of
 answers already computed, and that the fix for *that* (memoize `(function, index)`) is
 independent of moving to the IR and much cheaper. See `ESCAPE_IR_PLAN.md` §4.
 
-### 2.1 Where the 6.8% actually goes
+### 2.1 Where the 7.1% actually goes
 
 `pprof` puts `goc.astParents` at 0.42 s of the ECDSA compile (4.21% of all samples, 6.7%
 of `CompileExecutable`'s cumulative time). The depth-guarded timer puts the *whole* walk
-at 0.46 s. Of the 2.57 M AST nodes `astParents` visits in that compile, 1.71 M (67%) are
-visited on behalf of summary queries, so roughly **0.28 s of the 0.46 s walk — about
+at 0.456 s. Of the 2.57 M AST nodes `astParents` visits in that compile, 1.71 M (67%) are
+visited on behalf of summary queries, so roughly **0.28 s of the 0.456 s walk — about
 60% — is rebuilding parent maps**, not walking them.
 
 That is the shape of the cost, and it is what makes stage 3 the right first move on this
 side: the expensive thing is not the analysis, it is answering the same 1 485 questions
 8.5 times each and rebuilding a parent map for every one.
 
-(The timer's own `defer` is inside the 0.46 s. The `astParents` figure is from a profile
+(The timer's own `defer` is inside the 0.456 s. The `astParents` figure is from a profile
 taken before the timers were added, so it is not.)
 
 ## 3. How much of the placement decision is already on the IR (sample; §6 is the full run)
@@ -319,7 +321,7 @@ was checked rather than asserted:
 `go test ./opt ./ir ./analysis ./lift ./lower` passes.
 
 One caveat, stated because it is inside a number I quote: the walk timer's own `defer` is
-counted in the 0.460 s it reports. The `astParents` figure (0.42 s) comes from a profile
+counted in the 0.456 s it reports. The `astParents` figure (0.42 s) comes from a profile
 taken before the timers were added and is not.
 
 ## 8. Acceptance criteria

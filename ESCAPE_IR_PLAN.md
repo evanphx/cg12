@@ -322,26 +322,26 @@ outermost escape query, and keys every summary question so repeats are visible.
 | | `runtime_slice_pointer_append_gc.go` | `stdlib_encoding_json_roundtrip.go` | `stdlib_crypto_ecdsa.go` |
 |---|---|---|---|
 | functions emitted | 2 743 | 5 680 | 6 965 |
-| compile | 2.23 s | 4.74 s | 6.79 s |
+| compile | 2.23 s | 4.74 s | 6.47 s |
 | `astParents` rebuilds for summaries | 5 269 | 9 542 | 12 612 |
 | AST nodes rebuilt for summaries | 688 401 | 1 176 254 | 1 713 256 |
 | AST nodes for all of lowering | 207 579 | 315 421 | 438 174 |
 | **rebuild traffic ÷ whole program** | **3.32×** | **3.73×** | **3.91×** |
 | distinct `(function, index, summary)` questions | 530 | 1 033 | **1 485** |
 | **questions asked per distinct question** | **9.94** | **9.25** | **8.51** |
-| escape walk, wall clock | — | — | **0.460 s = 6.8% of the compile** |
+| escape walk, wall clock | — | — | **0.456 s = 7.1% of the compile** |
 
 `pprof` on the ECDSA compile agrees independently: `goc.astParents` is 4.21% of samples,
 6.7% of `CompileExecutable` cumulative.
 
-And it says where the cost is. `astParents` is 0.42 s of the 0.46 s the timer attributes
+And it says where the cost is. `astParents` is 0.42 s of the 0.456 s the timer attributes
 to the walk; 67% of the nodes it visits are visited for summary queries, so about **0.28 s
-of the 0.46 s — 60% — is rebuilding parent maps rather than walking them**. The expensive
+of the 0.456 s — 60% — is rebuilding parent maps rather than walking them**. The expensive
 thing is not the analysis. It is answering 1 485 questions 8.5 times each and rebuilding a
 map for every answer.
 
 For scale on the other side: **`opt.FrameEscapes` — one whole-module, per-function,
-fixed-point pointer dataflow analysis over the same 6 965 functions — takes 0.182 s.**
+fixed-point pointer dataflow analysis over the same 6 965 functions — takes 0.134 s.**
 An IR-level analysis of this shape is not a compile-time problem; the AST walk is.
 
 ### 4.2 The fixed point, and why it is not what is there now
@@ -429,7 +429,7 @@ Before any of the above, one cheap, strictly answer-preserving stage:
 For a function outside every recursive SCC, no `checking` entry can be hit while
 computing it, so its answer is context-independent and caching it changes nothing. For a
 function inside one, nothing is cached and behaviour is exactly as today. Given 8.5
-queries per distinct question, this is most of the 6.8%, for a change with no answer
+queries per distinct question, this is most of the 7.1%, for a change with no answer
 delta at all — which means it can land, and be reverted, without touching the corpus
 baseline.
 
@@ -724,7 +724,7 @@ pass lands, and nothing in the two residuals or in the loop-aliasing defect argu
 | `bigmod.Nat.Mul`, 200 P-256 sign+verify, `goc -O`, native arm64 | **2.844 s** mean of 8 (the pre-fix 2.689 s is what a *successful* rearchitecture beats) |
 | capability matrix, both arms | 347 subtests / 346 PASS / 1 EXPECTED FAILURE / 0 FAIL |
 | determinism | all 385 corpus programs byte-reproducible in all three configurations |
-| compile time, `stdlib_crypto_ecdsa.go` | 6.79 s, of which the escape walk is 0.460 s |
+| compile time, `stdlib_crypto_ecdsa.go` | 6.47 s, of which the escape walk is 0.456 s |
 
 ### 8.2 Reject outright — no benchmark can buy these back
 
@@ -761,7 +761,7 @@ pass lands, and nothing in the two residuals or in the loop-aliasing defect argu
   `stdlib_encoding_gob_roundtrip`, and one GC-heavy program
   (`runtime_slice_pointer_append_gc`).
 * **Compile time: not more than 2% slower** on `stdlib_crypto_ecdsa.go`. Stage 3 alone
-  should make it *faster*; if the finished thing is slower than `ddd03eb`, the 0.182 s
+  should make it *faster*; if the finished thing is slower than `ddd03eb`, the 0.134 s
   `FrameEscapes` figure says the IR analysis is not the reason and something else needs
   looking at.
 
@@ -814,7 +814,7 @@ picks a different memory representation and `perIterationVariable` picks a diffe
 shape, both on the first materialisation of a variable. The neutral-op trick does not
 reach that, and making it reach that is a larger change than the entire rest of this plan.
 Instead, make that layer good where it is: memoize it (stage 3, provably answer-preserving,
-recovers most of a measured 6.8% of compile time), then give it a real SCC fixed point
+recovers most of a measured 7.1% of compile time), then give it a real SCC fixed point
 (stage 4) that is *more* precise than gc's — which cg12 can afford, because compiling
 whole-program from source means the summary table is an in-memory map with no export data,
 no tags, and no versioning.
