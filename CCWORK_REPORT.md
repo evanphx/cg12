@@ -188,6 +188,33 @@ IR as candidates.** That is the whole argument for moving placement, in four lin
 output: how much of the loop miscompile the IR rule fixes is a direct function of how
 much of placement has moved.
 
+### 4.2 And it costs nothing measurable
+
+The full 385-program census re-run with `GOC_ESCAPE_LOOP=1` is **byte-identical** to the
+run without it:
+
+    knob off   frame 9 735 471   heap 509 920   promoted 14 433   lowered 453 319
+    knob on    frame 9 735 471   heap 509 920   promoted 14 433   lowered 453 319
+
+Since a fire escapes a candidate that would otherwise have been promoted, identical
+`promoted` counts mean the rule fired **zero times across the whole corpus**.
+
+That is only worth anything with a control, because a rule that is not wired up produces
+the same zero. `TestSpikeLoopRuleFires` is the control:
+
+    SPIKE loop rule loop_alias_composite.go: on=true escaped=0
+    SPIKE loop rule loop_alias_forms.go:     on=true escaped=2
+    SPIKE loop rule variadic_backing.go:     on=true escaped=0
+
+Two fires, exactly the two candidates that were miscompiled, in a compile that links the
+same stdlib as every corpus program.
+
+**Stage 1 is free.** It fixes a live miscompile at zero measured allocation cost. Why the
+corpus is untouched is not mysterious: the rule can only bite a candidate that would
+otherwise be *promoted*, and only 14 433 of 467 752 are, and an allocation inside a loop
+whose address reaches a slot outside it has almost always already been escaped by the
+pass's existing conservatism.
+
 **This is the strongest single argument for the IR side of the proposal.** Loop structure
 is not recoverable from an upward AST walk, is trivially present in the CFG
 (`opt/cfg.go`, and `opt/liferegions.go` already computes loop regions), and the rule is

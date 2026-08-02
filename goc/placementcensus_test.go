@@ -41,6 +41,7 @@ func TestAllocationPlacementCensus(t *testing.T) {
 	programs = programs[:limit]
 
 	opt.ResetHeapAllocLoweringStats()
+	opt.ResetLoopRuleEscapes()
 	goc.StartPlacementRecording()
 	compiled := 0
 	irFrame, irHeap := 0, 0
@@ -67,6 +68,8 @@ func TestAllocationPlacementCensus(t *testing.T) {
 		"programs":               compiled,
 		"emittedFrameAllocs":     irFrame,
 		"emittedAllocatorCal":    irHeap,
+		"loopRuleEscapes":        opt.LoopRuleEscapes(),
+		"loopRuleOn":             opt.LoopCarriedCandidatesEscape,
 		"neutralPromotedToFrame": promoted,
 		"neutralLoweredToHeap":   lowered,
 		"sites":                  map[string]any{},

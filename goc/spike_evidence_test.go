@@ -45,3 +45,26 @@ func TestSpikeReductionsFrameEscapes(t *testing.T) {
 		}
 	}
 }
+
+// TestSpikeLoopRuleFires reports how many candidates ESCAPE_IR_PLAN.md stage 1's
+// loop rule refuses to promote in each reduction. It is the control on the
+// corpus measurement: the rule changes nothing across all 385 corpus programs,
+// and a rule that never fires anywhere would be indistinguishable from a rule
+// that is not wired up.
+//
+//	$ GOC_ESCAPE_LOOP=1 go test ./goc -run TestSpikeLoopRuleFires -count=1 -v
+func TestSpikeLoopRuleFires(t *testing.T) {
+	programs, err := filepath.Glob("testdata/spike/*.go")
+	require.NoError(t, err)
+	require.NotEmpty(t, programs)
+
+	for _, program := range programs {
+		source, err := os.ReadFile(program)
+		require.NoError(t, err)
+		opt.ResetLoopRuleEscapes()
+		_, err = goc.CompileExecutable(program, source)
+		require.NoError(t, err, program)
+		fmt.Printf("SPIKE loop rule %s: on=%v escaped=%d\n",
+			filepath.Base(program), opt.LoopCarriedCandidatesEscape, opt.LoopRuleEscapes())
+	}
+}

@@ -2,6 +2,7 @@ package opt
 
 import (
 	"os"
+	"sync/atomic"
 
 	"github.com/evanphx/cg12/analysis"
 	"github.com/evanphx/cg12/ir"
@@ -23,6 +24,18 @@ import (
 // GOC_ESCAPE_LOOP once, at first use. A knob like this must not survive into a
 // landed change: f397b28 removed the last one for exactly that reason.
 var LoopCarriedCandidatesEscape = os.Getenv("GOC_ESCAPE_LOOP") == "1"
+
+// loopRuleEscapes counts candidates the loop rule refused to promote. It is how
+// the rule's cost is priced: a rule that never fires costs nothing and proves
+// nothing, so the number has to be visible either way.
+var loopRuleEscapes atomic.Int64
+
+// LoopRuleEscapes reports how many candidates escapeLoopCarriedCandidates has
+// escaped since the last ResetLoopRuleEscapes.
+func LoopRuleEscapes() int64 { return loopRuleEscapes.Load() }
+
+// ResetLoopRuleEscapes zeroes the counter LoopRuleEscapes reads.
+func ResetLoopRuleEscapes() { loopRuleEscapes.Store(0) }
 
 // escapeLoopCarriedCandidates escapes every candidate in bases that a value can
 // carry out of the iteration it was allocated in.
@@ -80,6 +93,7 @@ func escapeLoopCarriedCandidates(
 			out := liveness.Out[latch]
 			if out != nil && out.Has(int(temp)) {
 				escaped[base] = true
+				loopRuleEscapes.Add(1)
 				break
 			}
 		}
@@ -94,6 +108,7 @@ func escapeLoopCarriedCandidates(
 		// allocation temp the key names.
 		if destination, ok := slotAllocLoop(slot, allocLoop); !ok || !loopContains(loop, destination) {
 			escaped[base] = true
+			loopRuleEscapes.Add(1)
 		}
 	}
 }

@@ -508,6 +508,21 @@ their allocations never reach the IR as candidates.** That is the plan's central
 reduced to four lines of output: the loop fix is only *complete* once placement is on the
 IR, and until then it covers whatever fraction of allocations happens to be neutral.
 
+### 5.2 Priced across the corpus: it is free
+
+The 385-program census re-run with `GOC_ESCAPE_LOOP=1` is byte-identical to the run
+without it — frame 9 735 471, heap 509 920, promoted 14 433, lowered 453 319 — so the rule
+**fires zero times across the whole corpus**. With the control that makes that meaningful
+(`TestSpikeLoopRuleFires`: 2 fires on `loop_alias_forms.go`, 0 on the other two), the
+conclusion is that stage 1 fixes a live miscompile at **no measured allocation cost**.
+
+The reason is structural, not luck: the rule can only bite a candidate that would
+otherwise be promoted, only 3.1% are, and an allocation inside a loop whose address
+reaches a slot outside it has usually been escaped already by the pass's existing
+conservatism. Expect that to change as stages 4 and 6 raise the promotion rate — **re-price
+the loop rule after every stage that promotes more**, because its cost is a function of
+how much the pass promotes, not of the rule.
+
 `new(int)` is `g.allocateTyped(pointer.Elem())` (`goc/compile.go:13172`), so it is a
 candidate. `make([]int, 0, 4)` in this program takes the
 `else if g.runtimeAllocation && hasFixedCapacity` arm and is also a candidate. The array
