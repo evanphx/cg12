@@ -17,15 +17,22 @@ has not committed to frame or heap; `opt.LowerHeapAllocations` (`opt/escape.go:1
 its legaliser; `goc/compile.go:487` runs that legaliser on the finished whole-program
 module before any other pass. `ir/build.go:505` documents it in exactly those terms.
 
-**91.4% of cg12's heap-capable allocations already flow through it.** Measured, §2.
+**91.6% of cg12's heap-capable allocations already flow through it** — and the pass that
+decides them promotes only **3.1%** to frame slots, because it has no callee summaries.
+Both measured, §2.
 
 So the brief's circularity is not a wall the idea has to get past. It is a migration that
-someone started, got most of the way through, and did not finish — and the *unfinished*
-part is not where the interesting decisions are. What is genuinely undone, and what this
-plan is about, is that the analysis deciding those candidates
-(`lowerFunctionHeapAllocations`) is intraprocedural, flow-insensitive about loops, and
-has no summaries, while the analysis that *is* precise (`goc/compile.go`'s walk) is on
-the AST and answers a different question a step earlier.
+someone started, got most of the way through, and did not finish. But the second number
+says the unfinished part is not the interesting one either: what is actually missing is
+that the analysis deciding those candidates (`lowerFunctionHeapAllocations`) is
+intraprocedural, has no loop concept, and has no summaries — so it says "escapes" to
+almost everything — while the analysis that *is* precise (`goc/compile.go`'s walk) is on
+the AST, answers a different question a step earlier, and is the only reason 11 255
+allocations stay in frames at all.
+
+**Finish the neutral-op migration without first giving the IR pass summaries and you move
+those 11 255 allocations to the heap.** That is the single most important constraint in
+this plan and it is why the stages are ordered the way they are.
 
 ---
 
@@ -86,8 +93,8 @@ passes either a frame buffer pointer or **the constant 0** to
 `runtime.stringtoslicebyte`, and 0 means "allocate for me". A neutral form has to pass a
 candidate pointer and let legalisation rewrite the escaped case back to 0 — a rewrite the
 pass does not have. Either teach `LowerHeapAllocations` a "candidate that legalises to a
-null argument" form, or leave this site on the AST. It is 550 decisions per 40-program
-census against 28 831 neutral ones; leaving it is the right call for the first pass.
+null argument" form, or leave this site on the AST. It is 5 840 decisions across the
+corpus against 456 631 neutral ones; leaving it is the right call for the first pass.
 
 ### 1.3 When legalisation runs, relative to the opt passes
 
@@ -139,28 +146,58 @@ recognises the call and `heapBase` already resolves the destination.
 
 ---
 
-## 2. What the placement census says: the migration is five call sites
+## 2. What the placement census says: five call sites, and one ordering constraint
 
-`goc/placementcensus_test.go`, 40 corpus programs, whole-program compiles:
+`goc/placementcensus_test.go`, **all 385 corpus programs**, whole-program compiles,
+1 123 s:
 
 | decision site | frame | heap |
 |---|---|---|
-| `allocateTyped` → **`OHeapAlloc`, neutral** | **28 831** | 0 |
-| `allocateEscapingTyped` → committed heap | — | 1 711 |
-| `&CompositeLit` | 160 | 1 050 |
-| `make([]T,·,k)` backing | 48 | 290 |
-| method-value descriptor | 56 | 466 |
-| slice-literal backing | 387 | 195 |
-| `string`→`[]byte` buffer | 339 | 211 |
-| local variable heap-lifted | 441 777 | 1 349 |
+| `allocateTyped` → **`OHeapAlloc`, neutral** | **456 631** | 0 |
+| `allocateEscapingTyped` → committed heap | — | 30 810 |
+| `&CompositeLit` | 2 062 | 19 034 |
+| `make([]T,·,k)` backing | 720 | 4 341 |
+| method-value descriptor | 867 | 7 792 |
+| slice-literal backing | 4 226 | 3 913 |
+| `string`→`[]byte` buffer | 3 380 | 2 460 |
+| local variable heap-lifted | 4 685 295 | 19 091 |
+| **emitted frame allocations** | **9 735 471** | |
+| **emitted allocator calls** | | **509 920** |
 
-Heap-lifted locals allocate *through* `allocateTyped`, so they are inside the 28 831 and
-are not counted twice. The AST-committed placements are `1 711 + 990 = 2 701` against
-`28 831` neutral: **91.4% already neutral.**
+The last two rows are exactly the reference figures the escape-frame-publication report
+recorded for `ddd03eb`, computed by a different tool: the instrument agrees with the one
+it replaces.
 
-The 441 777 frame locals are ordinary variable slots, not candidates; they are in the
-table to show the scale difference. Whatever a new analysis does, it must not turn a
-measurable fraction of *those* into allocations.
+Heap-lifted locals allocate *through* `allocateTyped`, so they are inside the 456 631 and
+are not counted twice. AST-committed placements are `30 810 + 11 255 = 42 065` against
+`456 631` neutral: **91.6% already neutral.**
+
+### 2.1 The number that constrains the staging
+
+`opt.HeapAllocLoweringStats`, same run:
+
+    promoted to a frame slot    14 433
+    lowered to an allocator    453 319
+
+**`LowerHeapAllocations` promotes 3.1% of the candidates it sees.** It is intraprocedural
+and has no callee summaries, so `opt/escape.go:216`'s `default` arm escapes every
+candidate reaching a call it does not recognise — and most allocations reach a call.
+
+The AST walk's **11 255 committed-frame** placements are exactly the ones it proved using
+summaries the IR pass does not have. Routing those five sites through the neutral op
+*before* the IR pass has a fact table would send most of them to the heap: **+11 255
+allocator calls on a base of 509 920, a 2.2% rise.** For scale: this branch moved *22*
+sites frame→heap and paid 5.8% on `bigmod.Nat.Mul`.
+
+**Stage 6 must not precede stage 4.** §7 states it as a constraint, not a preference.
+
+Read the other way, 3.1% is the opportunity. An IR pass *with* summaries has a great deal
+of headroom above that rate, and it is the only route by which this rearchitecture ends up
+allocating less than today rather than more.
+
+The 4 685 295 frame locals are ordinary variable slots, not candidates; they are in the
+table for scale. Whatever a new analysis does, it must not turn a measurable fraction of
+*those* into allocations.
 
 ---
 
@@ -531,6 +568,12 @@ placement it genuinely is.
 Every stage builds, keeps the corpus green, and can be reverted alone. Stages 1–3 are
 worth doing even if the rest is abandoned.
 
+**One hard ordering constraint, from §2.1:** stage 6 (route the committed sites through
+the neutral op) must come after stage 4 (give the IR pass a fact table). Today's IR pass
+promotes 3.1% of the candidates it sees, so moving the five sites first would send most of
+their 11 255 frame placements to the heap — a 2.2% rise in allocator calls, against the
+22 sites that cost 5.8% on `bigmod.Nat.Mul`. Every other stage is independent.
+
 ### Stage 1 — the loop rule in `LowerHeapAllocations` *(correctness, standalone)*
 
 * **Already written on this branch**, as `opt/escapeloop.go`, behind `GOC_ESCAPE_LOOP=1`.
@@ -576,6 +619,11 @@ worth doing even if the rest is abandoned.
 * This stage makes the IR pass **more permissive** — the direction 2724ac7 and 9f76498 got
   wrong — so it is where the acceptance criteria in §8 bite hardest, and it should land
   behind the shadow mode of stage 5 rather than in front of it.
+* **It is also the stage that unblocks stage 6.** The measurable success condition is
+  `opt.HeapAllocLoweringStats`'s promotion rate: 3.1% today (14 433 of 467 752). Stage 6
+  is safe to start when the rate is high enough that the five sites' 11 255 frame
+  placements survive the move — which is checkable directly, per site, with the shadow
+  diff of stage 5 before a single line of stage 6 is written.
 
 ### Stage 5 — shadow mode *(no behaviour change; the whole point of the exercise)*
 
@@ -601,14 +649,20 @@ Two directions of disagreement, and they are not symmetric:
 
 ### Stage 6 — switch the five committed sites, one at a time
 
-In increasing order of blast radius, from the census:
+**Not before stage 4.** In increasing order of how many frame placements are at risk,
+from the full-corpus census:
 
-1. `make([]T,·,k)` backing (338 decisions)
-2. method-value descriptor (522)
-3. slice-literal backing (582)
-4. `&CompositeLit` (1 210) — the big one, and the one `bigmod.Nat.Mul` rides on
-5. `string`→`[]byte` buffer (550) — needs the "legalises to a null argument" form (§1.2),
-   or is left on the AST
+| order | site | frame placements at risk | total decisions |
+|---|---|---|---|
+| 1 | `make([]T,·,k)` backing | 720 | 5 061 |
+| 2 | method-value descriptor | 867 | 8 659 |
+| 3 | `&CompositeLit` | 2 062 | 21 096 |
+| 4 | `string`→`[]byte` buffer | 3 380 | 5 840 |
+| 5 | slice-literal backing | 4 226 | 8 139 |
+
+`&CompositeLit` is third by count but is the one `bigmod.Nat.Mul` rides on, so it wants
+the benchmark run whatever its rank. The string buffer additionally needs the "legalises
+to a null argument" form (§1.2), or is left on the AST.
 
 Each is one commit: delete the `heap`/`!heap` branch, call `allocateTyped`, run the
 corpus census and the audit, land or revert. The barrier retirement of §1.4 lands with
@@ -698,9 +752,11 @@ forms. Stage 2 (the checker's phi blindness) is why residual 8a's reproduction p
 audit. Neither needs a rearchitecture and neither should wait for one.
 
 **(b) Move placement — and only placement — onto the IR.** The neutral op exists, the
-legaliser exists and already runs in the right place, and 91.4% of heap-capable
+legaliser exists and already runs in the right place, and 91.6% of heap-capable
 allocations already go through both. Finishing it is five call sites in one file, staged
-one at a time behind a shadow-mode diff. What it buys is exactly what the brief claims:
+one at a time behind a shadow-mode diff — but **only after** the IR pass has a fact table,
+because the pass as it stands promotes 3.1% of what it sees and the 11 255 frame
+placements those five sites make today are exactly the ones it would get wrong (§2.1). What it buys is exactly what the brief claims:
 interface boxing, variadic backing arrays and composite-literal storage stop being things
 a syntactic walk has to be taught about and become instructions, and the two-walks-
 disagreeing shape of `bigmod.Nat.Mul` stops being expressible. §6.1 shows a live residual

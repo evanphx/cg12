@@ -7,13 +7,16 @@ report; it is unchanged on that branch and in history at `ddd03eb:CCWORK_REPORT.
 
 **Verdict: RECOMMEND HYBRID.** The full statement is at the end of this file and in
 `ESCAPE_IR_PLAN.md`. In one paragraph: the two-phase shape the brief guesses at is not
-speculative — it already exists and already carries 91% of the traffic. `ir.OHeapAlloc`
+speculative — it already exists and already carries 91.6% of the traffic. `ir.OHeapAlloc`
 *is* the neutral op, `opt.LowerHeapAllocations` *is* the legaliser, and it already runs
-at `goc/compile.go:487` before any other pass. What does not exist is a reason to move
-the *interprocedural* part of the analysis, which is where all of this branch's bugs
-were and where the IR is strictly worse off than the typed AST. So: move placement to
-the IR (finishing a migration that is 91% done), keep the summary computation on the
-typed AST, and connect them through a fact table.
+at `goc/compile.go:487` before any other pass. But that pass promotes only **3.1%** of the
+candidates it sees, because it has no callee summaries — so finishing the migration
+without first giving it a fact table would move 11 255 frame placements to the heap
+(§6). And the decision that genuinely *cannot* move — variable representation, which
+`variableStorage` and `perIterationVariable` fix before any IR for the function exists —
+is a different circularity from the one the brief names, and the neutral op does not
+reach it. So: move placement to the IR, keep the summary computation on the typed AST,
+connect them through a fact table, and do the fact table *first*.
 
 ---
 
@@ -75,7 +78,7 @@ The point is not that 6.8% is intolerable. It is that ~90% of it is recomputatio
 answers already computed, and that the fix for *that* (memoize `(function, index)`) is
 independent of moving to the IR and much cheaper. See `ESCAPE_IR_PLAN.md` §4.
 
-## 3. How much of the placement decision is already on the IR: 91%
+## 3. How much of the placement decision is already on the IR (sample; §6 is the full run)
 
 `goc/placementcensus_test.go` records, per front-end decision site, how each allocation
 was placed, and counts what `LowerHeapAllocations` then did with the neutral candidates
@@ -99,10 +102,9 @@ The heap-lifted locals allocate *through* `allocateTyped`, so they are already i
     1 711 committed heap  +  990 committed frame  =  2 701
 
 against **28 831** already neutral. **91.4% of heap-capable allocations already reach the
-IR undecided.** The remaining migration is five call sites in one file, not a rewrite.
-
-(Full-corpus numbers land in §6 when the 385-program run finishes; the 40-program sample
-is what the ratios above are computed from.)
+IR undecided** on this sample; the full 385-program run in §6 says 91.6%. The remaining
+migration is five call sites in one file, not a rewrite — but §6 also says why it cannot
+be done first.
 
 ## 4. Loop depth: confirmed absent, and it is a live miscompile
 
@@ -175,9 +177,58 @@ The same IR shows a second, smaller cost that already exists: `%t8 =p alloc8 16`
 `$main.build` is dead — the frame storage emitted before the heap decision was taken —
 and survives at `-O0`.
 
-## 6. Full-corpus placement census
+## 6. Full-corpus placement census — and the number that changes the staging
 
-(pending — the 385-program run is in progress)
+    $ go test ./goc -run TestAllocationPlacementCensus -count=1 -v -timeout 50m
+    --- PASS (1123.79s), 385 programs
+
+| decision site | frame | heap |
+|---|---|---|
+| `allocateTyped` → **`OHeapAlloc`, neutral** | **456 631** | 0 |
+| `allocateEscapingTyped` → committed heap | — | 30 810 |
+| `&CompositeLit` | 2 062 | 19 034 |
+| `make([]T,·,k)` backing | 720 | 4 341 |
+| method-value descriptor | 867 | 7 792 |
+| slice-literal backing | 4 226 | 3 913 |
+| `string`→`[]byte` buffer | 3 380 | 2 460 |
+| local variable heap-lifted | 4 685 295 | 19 091 |
+
+    emitted frame allocations   9 735 471
+    emitted allocator calls       509 920
+
+Those last two are **exactly** the reference figures section 5 of the
+escape-frame-publication report recorded for `ddd03eb` (frame 9 735 471, heap 509 920),
+computed here by a different tool on a different day. The census instrument agrees with
+the one it is replacing.
+
+The neutral share holds at full scale: committed placements are
+`30 810 + (2 062+720+867+4 226+3 380) = 42 065` against `456 631` neutral, so **91.6%**
+(the 40-program sample said 91.4%).
+
+**And then the number I did not have from the sample:**
+
+    opt.HeapAllocLoweringStats:  promoted to a frame slot   14 433
+                                 lowered to an allocator   453 319
+
+`LowerHeapAllocations` promotes **3.1%** of the candidates it sees. It lowers the other
+96.9% to `runtime.newobject`. That is what an intraprocedural analysis with no callee
+summaries can do: `opt/escape.go:216`'s `default` arm escapes every candidate that
+reaches any call it does not recognise, and most allocations reach a call.
+
+This reframes the migration and I am revising the plan's staging because of it. The AST
+walk's **11 255 committed-frame** placements are precisely the ones it proved with
+interprocedural summaries the IR pass does not have. Moving those five sites to the
+neutral op *before* giving the IR pass a fact table would push most of them to the heap:
++11 255 allocator calls, a 2.2% rise on 509 920. For scale, this branch moved **22** sites
+frame→heap and paid 5.8% on `bigmod.Nat.Mul`.
+
+**So stage 6 must not precede stage 4.** That is now an ordering constraint in
+`ESCAPE_IR_PLAN.md` §7, not a preference.
+
+The same number read the other way is the opportunity: a 3.1% promotion rate has a great
+deal of headroom, and an IR pass with summaries should promote far more than that — which
+is the only route by which this rearchitecture ends up with *fewer* allocations than
+today rather than more.
 
 ## 7. Acceptance criteria
 
