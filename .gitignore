@@ -28,3 +28,6 @@ core.*
 
 # build artifacts from analysis tools
 /splitdiff
+
+# Build artifacts left by corpus runs
+runtime_closure_captured_string
