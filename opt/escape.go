@@ -398,7 +398,8 @@ func analyzeCandidateEscapes(function *ir.Func, byName map[string]*ir.Func, fact
 				// Frontend variables live in ordinary stack allocations. Saving a
 				// candidate in a non-escaping local slot does not make the pointed-to
 				// object escape; storing it anywhere externally reachable does.
-				if aliases.locOf(instruction.Arg(1), 1).class != cLocal {
+				if aliases.locOf(instruction.Arg(1), 1).class != cLocal &&
+					!storesIntoItself(instruction.Arg(0), instruction.Arg(1), bases) {
 					mark(instruction.Arg(0), "store into non-local storage")
 				}
 			case facts != nil && instruction.Op == ir.OCall &&
@@ -416,7 +417,9 @@ func analyzeCandidateEscapes(function *ir.Func, byName map[string]*ir.Func, fact
 				// escape lowering knows whether the enclosing object is stack-local.
 				destination := instruction.Arg(1)
 				if _, localCandidate := heapBase(destination, bases); localCandidate {
-					mark(instruction.Arg(2), "write barrier into a candidate")
+					if !storesIntoItself(instruction.Arg(2), destination, bases) {
+						mark(instruction.Arg(2), "write barrier into a candidate")
+					}
 				} else if aliases.locOf(destination, 1).class != cLocal {
 					mark(instruction.Arg(2), "write barrier into non-local storage")
 				}
@@ -483,6 +486,23 @@ func rewriteHeapAllocations(function *ir.Func, analysis *candidateEscapes, loopB
 		}
 		block.Instrs = lowered
 	}
+}
+
+// storesIntoItself reports a store whose value and whose destination are both
+// derived from the same tracked allocation: the object is being made to point
+// at part of itself.
+//
+// Nothing outside can reach the object any more easily for it, so the store
+// says nothing about whether the object escapes -- "it escapes if it escapes"
+// is all it means. Marking it a publication instead is what kept a variadic
+// `...any` call's backing object on the heap: the front end packs the `[]any`
+// array and the boxed payloads it points at into one allocation, so writing
+// each element's data word writes a pointer into that object, into that same
+// object.
+func storesIntoItself(value, destination ir.Ref, bases map[uint32]uint32) bool {
+	valueBase, valueTracked := heapBase(value, bases)
+	destinationBase, destinationTracked := heapBase(destination, bases)
+	return valueTracked && destinationTracked && valueBase == destinationBase
 }
 
 // recordAllocDecision notes where one heap-allocation candidate landed.
