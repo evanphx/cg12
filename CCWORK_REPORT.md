@@ -195,8 +195,8 @@ and by reading the emitted decisions where it does not.
 | class | lines | verdict |
 |---|---|---|
 | `var x T` where goc records **both** a frame and a heap row at the same position | 50 | **not a hole** |
-| loop variable whose address escapes (`for index := …; { … &index … }`) | 6 | **not a hole** — the join artefact |
-| aggregate/range loop variable, mixed with other allocations on the line | 3 | same |
+| loop header whose variable's address escapes (`for index := …; { … &index … }`) | 8 | **not a hole** — a join artefact |
+| a pair of closures returned together (`runtime_closure_captured_string.go:296`) | 1 | **not a hole** — goc frames one copy and heaps the other |
 
 **The `var x T` class (50 lines).** `var buffer bytes.Buffer` and its
 relatives — `strings.Builder`, `sync.WaitGroup`, `atomic.Value`, `debug.GCStats`.
@@ -209,7 +209,7 @@ frames a second temporary of the same type at the same position, and
 the heap. The line-level join cannot separate the two, which is a limit of the
 join, not a defect in goc.
 
-**The loop-variable class (6 lines, and the calibration case).** The harness
+**The loop-variable class (8 lines, and the calibration case).** The harness
 flagged `runtime_loopvar_address_gc.go:18`, `:36`, `:48`,
 `runtime_loopvar_three_clause.go:38`, `:85` and
 `runtime_loopvar_value_shapes.go:25` — the family the brief named as the live
@@ -452,7 +452,7 @@ at all. Every one was triaged, and none is a confirmed hole.**
 - 50 of the 59 are `var x bytes.Buffer`-shaped, where goc records a heap
   allocation *and* a frame temporary at the same position; the escaping object
   is on the heap and the line-level join cannot separate the two.
-- 9 of the 59 are loop variables, including the calibration case the brief
+- 8 of the 59 are loop headers, including the calibration case the brief
   named — and the harness flagging them is a sign it works, but they are a join
   artefact: goc records a frame decision at the loop header and a
   **positionless** heap allocation for the per-iteration copy, which cannot
