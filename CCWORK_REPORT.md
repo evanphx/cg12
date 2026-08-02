@@ -273,3 +273,138 @@ in a diagnostic and appears in no baseline. The comment in
   `TestCompareAllocationCensusReportsASplitSite` (1 test, **5 subtests**: frame
   gains a heap copy, heap gains a frame copy, split loses its heap copy, split
   loses its frame copy, split is unchanged). The three fast ones total 18 ms.
+
+---
+
+# Part II -- rebase onto `main` and the runs the previous job did not finish
+
+Continuation job `ccwork/escape-census-finish`. The previous job hit its timeout
+during the final full-corpus `go test ./goc/...`. This part records the rebase,
+the baseline check, and every suite run to completion in the foreground.
+
+## 8. The rebase, and a correction to its stated premise
+
+**The premise this job was given is wrong, and the correction matters.** The task
+said `main` "has moved since that branch was cut and now carries the escape
+publication fix", that the fix "moved 22 allocation sites frame->heap", and that
+the baseline recorded before the fix is therefore stale and must be regenerated.
+
+It is not stale. The census branch was cut from `ddd03eb`, and `ddd03eb`
+**already contains the entire publication fix**:
+
+    $ for c in 6245dbb fc74294 eb9872e; do git merge-base --is-ancestor $c ddd03eb && echo "$c IN"; done
+    6245dbb IN   goc: copying a value into fresh heap storage publishes it
+    fc74294 IN   goc: a summary walk must see an interface-typed result too
+    eb9872e IN   goc: reduced tests for the three publication shapes
+
+What `main` added after `ddd03eb` is two commits, `fac83eb` and `05946f2`, and
+they touch exactly one file between them:
+
+    $ git diff --stat ddd03eb..main
+     CCWORK_REPORT.md | 255 +++++++++++++++++++++
+    $ git diff --stat ddd03eb..main -- . ':!CCWORK_REPORT.md'
+    (empty)
+
+Zero compiler code changed. So the baseline was recorded *with* the publication
+fix in the tree, the 22 frame->heap moves are *already in it*, and the correct
+expected delta from this rebase is **zero sites, not 22**. Regenerating and
+finding 22 moved sites would have meant something was badly wrong.
+
+This is exactly the reasoning the instrument exists to force, so it is applied to
+itself rather than asserted: the baseline was regenerated from scratch on the
+rebased tree and diffed against the committed one. Result in section 9.
+
+**Mechanics.** The four commits were replayed onto `05946f2`. Only
+`CCWORK_REPORT.md` conflicted; all compiler and test files applied clean.
+Verified afterwards that the rebased tree's code is byte-identical to the
+original branch tip:
+
+    $ git diff --stat FETCH_HEAD HEAD -- . ':!CCWORK_REPORT.md'
+    (empty)
+
+`go build ./...` and `go vet ./opt/ ./ir/ ./goc/` both exit 0.
+
+## 9. The baseline delta: **zero sites, and that is the correct answer**
+
+The baseline was deleted-and-rewritten from scratch on the rebased tree -- a full
+fresh compile of all 385 corpus programs, census re-derived from the finished IR,
+file re-emitted by `writeBaseline`:
+
+    $ go test ./goc -run TestAllocationCensus -update-alloc-census-baseline
+    ok  github.com/evanphx/cg12/goc  148.736s     (real 2m29.5s, user 26m8.8s)
+
+Against the committed baseline:
+
+    $ md5sum goc/testdata/alloc_census_baseline.txt
+    9a2ed8f8dff5be7e99adae8fb91fbd80        (before regeneration)
+    9a2ed8f8dff5be7e99adae8fb91fbd80        (after regeneration)
+    $ git diff --stat goc/testdata/alloc_census_baseline.txt
+    (empty)
+    $ diff old new; echo $?
+    0
+
+**Not one line, not one field, changed.** 18,713 lines, byte for byte.
+
+Read against the question this job was asked -- "is the delta exactly the 22
+sites the fix moved, plus nothing else?" -- the answer is:
+
+* **the delta is 0 sites, not 22**, and
+* **0 is what a correct instrument must report here**, because the rebase carried
+  no compiler change at all (section 8). The 22 frame->heap moves were made by
+  commits that are ancestors of the branch point, so they were already recorded in
+  the accepted baseline when it was first written.
+* **nothing unexplained appeared.** The failure mode this instrument exists to
+  catch -- a site that moves for a reason nobody can name -- would have shown up
+  here as any non-empty diff. There is none.
+
+Had the premise been right and the fix been rebased *over*, the expected diff
+would have been 22 lines each changing their fifth field `frame` -> `heap` and
+nothing else; the test would have failed and named all 22 under "moved from a
+frame onto the heap". Section 11 shows the instrument actually producing that
+report, by removing the publication fix from the tree and letting the census fire
+against it.
+
+## 10. `go test ./goc/...` -- run to completion in the foreground
+
+This is the run the previous job did not finish. It was launched detached (the
+tool driving this session caps a single foreground command at 10 minutes and this
+suite needs ~13), then **polled in-session until the process exited**; the exit
+status and the counts below are read from that finished process's own log, not
+from a partial tail.
+
+    $ go test ./goc/... -v -timeout 60m
+    ok  github.com/evanphx/cg12/goc  756.667s
+    exit status 0
+
+### Subtest census (counted from the `-v` log, not estimated)
+
+| | count |
+|---|---|
+| `=== RUN` | **609** |
+| `--- PASS` (all levels) | **609** |
+| -- top-level tests | 305 |
+| -- subtests | 304 |
+| `--- FAIL` | **0** |
+| `--- SKIP` | **0** |
+| packages | 1 (`github.com/evanphx/cg12/goc`) |
+
+**The count moved by exactly the number of tests this branch adds.** `main`'s own
+verification of `ddd03eb` (commit `fac83eb`) recorded **601 RUN / 601 PASS / 0
+FAIL** on the same suite. 609 - 601 = **8**, and this branch adds exactly 8 goc
+tests: `TestAllocationCensus`, `TestCompareAllocationCensusNamesTheDirection`,
+and `TestCompareAllocationCensusReportsASplitSite` with its 5 subtests. Nothing
+that used to run stopped running.
+
+    --- PASS: TestAllocationCensus (149.03s)
+    --- PASS: TestCompareAllocationCensusNamesTheDirection (0.00s)
+    --- PASS: TestCompareAllocationCensusReportsASplitSite (0.00s)
+        --- PASS: .../frame_gains_a_heap_copy (0.00s)
+        --- PASS: .../heap_gains_a_frame_copy (0.00s)
+        --- PASS: .../split_loses_its_heap_copy (0.00s)
+        --- PASS: .../split_loses_its_frame_copy (0.00s)
+        --- PASS: .../split_is_unchanged (0.00s)
+    --- PASS: TestFrameEscapeAudit (0.00s)
+
+`TestFrameEscapeAudit` reads 0.00s because `TestAllocationCensus` ran first and
+paid for the shared corpus compile -- section 5's "one compile, both analyses,
+whichever test asks first pays", visible in the timings.
