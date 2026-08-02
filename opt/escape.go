@@ -279,22 +279,17 @@ func lowerFunctionHeapAllocations(function *ir.Func, decisions *[]ir.AllocDecisi
 }
 
 // recordAllocDecision notes where one heap-allocation candidate landed.
-// candidate must still be the unrewritten OHeapAlloc, whose arguments are the
-// allocator, the type descriptor and the constant byte size.
+// candidate must still be the unrewritten OHeapAlloc, whose first two arguments
+// are the allocator and the type descriptor.
 func recordAllocDecision(decisions *[]ir.AllocDecision, function *ir.Func, candidate ir.Instr, placement ir.AllocPlacement) {
 	if decisions == nil {
 		return
-	}
-	size, sized := constInt(function, candidate.Args[2])
-	if !sized {
-		size = -1
 	}
 	*decisions = append(*decisions, ir.AllocDecision{
 		Func:      function.Name,
 		Pos:       candidate.Pos,
 		Allocator: constSymbolName(function, candidate.Args[0]),
 		Type:      constSymbolName(function, candidate.Args[1]),
-		Size:      size,
 		Placement: placement,
 	})
 }
