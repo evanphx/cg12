@@ -15,18 +15,41 @@ import (
 // Nothing here changes what the compiler emits. It reads a finished module,
 // finds the allocations the front end placed itself (ir.Func.PlacedAllocs), and
 // asks the same analysis LowerHeapAllocations runs what it would have done with
-// each of them. The point is to know, before any placement moves onto the IR,
-// which way each of those decisions would go.
+// each of them.
+//
+// # What it is for now
+//
+// It was built to decide whether placement should move off the AST walk and onto
+// the IR. That question is answered and the answer is no: over 189 094 front-end
+// placements the walk frames 83.4% and the summary-fed IR analysis 79.4%, and
+// fixing every conservative disagreement would reach 83.6%. The AST walk stays
+// the placer.
+//
+// What is left is the reason to keep running it. LowerHeapAllocations now
+// consumes the summaries by default, so a wrong summary is a frame address
+// escaping rather than a missed optimisation -- and the pass itself only decides
+// about the candidates the front end declined to place, promoting some seventeen
+// thousand of them. This runs the same analysis over 189 094 decision points the
+// pass never sees. A summary defect that does not happen to reach a live
+// candidate still shows up here, which is not a hypothetical: both defects fixed
+// in this file's tree were found exactly that way, with no live candidate
+// involved in either.
+//
+// So it is a standing regression detector for the permissive direction, over a
+// sample ten times the size of what the pass decides, riding on a compile the
+// corpus audit was doing anyway.
 //
 // The two directions are not symmetric and must not be totted up together:
 //
 //   - front end heap, IR frame. Permissive. Every one of these is either a
 //     latent pessimisation in the AST walk or a hole in the IR analysis, and
-//     which it is has to be argued per class before anything switches. This is
-//     the direction ccwork/escape-analysis's 2724ac7 got wrong.
-//   - front end frame, IR heap. Conservative. Each one costs an allocation if
-//     the site moves onto the neutral op. These are the 11 255 placements the
-//     plan says a summary-less IR pass would get wrong.
+//     which it is has to be argued per row. This is the direction
+//     ccwork/escape-analysis's 2724ac7 got wrong, and it is the one the baseline
+//     exists to ratchet.
+//   - front end frame, IR heap. Conservative. Each one would cost an allocation
+//     if that site were ever routed through the neutral op. With the migration
+//     dropped it costs nothing today, and it is kept because a row that moves
+//     from conservative to permissive is a permissive row arriving.
 
 // PlacementDisagreement is one allocation the two analyses place differently.
 type PlacementDisagreement struct {

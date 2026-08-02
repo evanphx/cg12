@@ -783,3 +783,89 @@ today and is there because the corpus is not the world -- §3.4 found 4 front-en
 placements where the same rule is the only thing standing in front of the
 `freshVariableStorage` case, and a candidate population that grows by 21% is a
 population whose loop-body membership should not be re-derived by hand each time.
+
+## 9. The three corpus audits
+
+One pass over all 385 programs, compiled in the shipping configuration
+(summaries on), 170.6 s.
+
+### 9.1 `TestFrameEscapeAudit`: clean
+
+**PASS.** No publication appeared and none vanished: the tree publishes exactly
+the frame addresses `goc/testdata/frame_escape_baseline.txt` already lists, no
+more and no fewer, with 2 947 more objects in frames than before. That was the
+hard requirement.
+
+It is necessary and not sufficient, for the two reasons already on record: it is
+a same-function publication checker, so §2's three-frame chain was invisible to
+it (§2.3), and it cannot see the loop-aliasing case at all because nothing is
+published. Both of those are now handled where they can be -- in the summary and
+in the loop rule -- rather than left to this audit.
+
+### 9.2 The shadow diff lost exactly the four rows the adjudication called unsafe
+
+|  | §5.2 / the committed baseline | this tree |
+|---|---:|---:|
+| front-end placements evaluated | 189 094 | 189 094 |
+| agree | 180 626 | **180 645** |
+| front frame -> IR heap (conservative) | 8 008 | **8 008** |
+| front heap -> IR frame (permissive) | 460 | **441** |
+| distinct disagreement sites | 341 | **337** |
+
+The four sites that stopped disagreeing are, in full:
+
+```
+stdlib/src/net/http/h2_bundle.go:6705:43  http2responseWriterState.writeChunk   composite-literal
+stdlib/src/net/http/h2_bundle.go:6740:43  http2responseWriterState.writeChunk   composite-literal
+stdlib/src/net/http/h2_bundle.go:6966:37  http2responseWriterState.writeHeader  composite-literal
+testdata/runtime_loopvar_value_shapes.go:33:17  main.main             slice-literal-backing
+```
+
+That is **exactly** §3.2's list of 4 unsafe rows -- §2's three and §3.5's one --
+and nothing else. No new disagreement appeared in either direction, no safe row
+was lost, and the conservative direction did not move by one. The 60 rows §3.3
+adjudicated as the AST walk's pessimism are all still there, which is the right
+answer: they were never the analysis's fault to fix.
+
+The permissive direction is now 441 per-compile instances over **70 distinct
+baseline rows: the 60 §3.3 adjudicated safe on their merits and the 10 §3.4
+found the loop rule blocking**, against 74 rows before. Every row that remains
+has an argument behind it.
+
+## 11. The migration machinery stays, with a different job
+
+`opt/escapeshadow.go` (243 lines) and `goc/testdata/escape_shadow_baseline.txt`
+(374 rows) are **kept**, and their doc comments rewritten to say what they are
+for now. The baseline is regenerated and green.
+
+The question they were built to answer is answered and closed: placement does not
+move onto the IR. What keeps them is the other thing they measure.
+
+**The coverage argument.** `LowerHeapAllocations` decides about 467 752
+candidates and promotes 16 933 of them. Shadow mode runs the same analysis, with
+the same summaries, over **189 094 decision points the pass never sees**. Since
+the summaries now feed real promotions, a defect in one is a frame address
+escaping -- and a defect that does not happen to reach a live candidate today is
+invisible to every other instrument in the tree. That is not hypothetical: **both
+defects fixed in §6 were found here, and §2.3 established that neither had a
+live candidate.** `TestFrameEscapeAudit` could not see either one, the corpus ran
+green with both present, and the census could not see them because the front end
+owned those placements.
+
+**The cost argument.** It rides on the corpus audit's existing single compile --
+`compileCorpusForAudits` already builds each module for the frame-escape and
+census audits, and shadow mode reads it. There is no second compile, no separate
+CI step, and the baseline is a fifth the size of the census's.
+
+**The ratchet argument.** The baseline fails on any new permissive row, which is
+the 2724ac7 signal, and it fails on a row that goes away, which is how §6's fixes
+had to be accounted for one by one rather than waved through.
+
+What would have been lost by deleting them: the only measurement of the escape
+summaries that is not confined to the candidates the front end already declined
+to place -- and, concretely, the harness both §6 regression tests assert against.
+
+`ComputeEscapeFactsBreakingCycles` stays too, for a smaller reason:
+`TestEscapeSummaryFacts` uses it to assert that the fixed point is never less
+precise than breaking every cycle at "escapes", which is a monotonicity check on
+the transfer function and not a migration measurement.

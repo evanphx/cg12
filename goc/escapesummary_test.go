@@ -36,25 +36,31 @@ const escapeShadowBaselinePath = "testdata/escape_shadow_baseline.txt"
 // TestEscapeShadowPlacement records every allocation goc's AST walk and the
 // summary-fed IR analysis place differently, over the whole corpus.
 //
-// This is the artifact that decides whether placement can move onto the IR. The
-// compiler is not changed by it: the corpus is compiled exactly as it ships,
+// It was the artifact that decided whether placement could move onto the IR. It
+// decided: no. What keeps it running is the other thing it measures -- whether
+// the IR analysis is ever more permissive than the front end -- which became
+// load-bearing when LowerHeapAllocations started consuming the summaries by
+// default. See opt.ShadowPlacement's doc comment.
+//
+// The compiler is not changed by it: the corpus is compiled exactly as it ships,
 // and opt.ShadowPlacement then asks the IR analysis what it would have done
 // with each allocation the front end placed itself.
 //
 // The two directions of disagreement are different kinds of news and are
 // counted separately:
 //
-//   - front end frame -> IR heap is the conservative direction. Each one is an
-//     allocation that appears if that decision site is routed through the
-//     neutral op, so the total is the price of the migration. Its Reason field
+//   - front end frame -> IR heap is the conservative direction. Its Reason field
 //     names the use that escaped it, which is what says whether the IR analysis
-//     is missing a fact or the allocation genuinely has to be on the heap.
+//     is missing a fact or the allocation genuinely has to be on the heap. It
+//     costs nothing today; it is watched because a row moving out of it is a
+//     permissive row arriving.
 //   - front end heap -> IR frame is the permissive direction, and it is the
 //     dangerous one. Each is either a latent pessimisation in the AST walk or a
-//     hole in the IR analysis, and nothing may switch until every class has been
-//     argued. ccwork/escape-analysis's 2724ac7 is what a wrong answer here costs:
-//     a dead frame address inside a live heap object, found minutes later by an
-//     unrelated goroutine's collector.
+//     hole in the IR analysis, and each row needs an argument.
+//     ccwork/escape-analysis's 2724ac7 is what a wrong answer here costs: a dead
+//     frame address inside a live heap object, found minutes later by an
+//     unrelated goroutine's collector. CCWORK_REPORT.md section 3 adjudicates
+//     every row currently in the baseline.
 func TestEscapeShadowPlacement(t *testing.T) {
 	audit := auditCorpus(t)
 
@@ -157,6 +163,12 @@ const escapeShadowBaselineHeader = `# Every allocation goc's AST escape walk and
 # empty when the IR analysis kept the object in a frame -- there is no single use
 # to name for that -- and otherwise names the use that escaped it.
 #
+# The AST walk stays the placer: this file is not a migration plan. It is kept
+# because LowerHeapAllocations consumes the same summaries by default, and these
+# are 189,094 decision points the pass itself never sees -- a summary defect that
+# does not happen to reach a live candidate shows up here first. Both defects
+# fixed in CCWORK_REPORT.md section 6 were found that way.
+#
 # The "in a loop?" column is the one that matters on a heap -> frame line.
 # Neither analysis knows what an iteration is: both answer "does a pointer
 # outlive the frame", and an allocation in a loop body can be entirely
@@ -167,12 +179,14 @@ const escapeShadowBaselineHeader = `# Every allocation goc's AST escape walk and
 #
 #   frame -> heap  the IR analysis is more conservative. Each line is an
 #                  allocation that would appear if that site were routed through
-#                  the neutral op, so the count is the price of the migration.
+#                  the neutral op, which nothing does today. Watched because a
+#                  line leaving this direction is a permissive line arriving.
 #
 #   heap -> frame  the IR analysis is more permissive. Each line is either a
 #                  pessimisation in the AST walk or a hole in the new analysis,
 #                  and until it is known which, it is a potential miscompile of
-#                  exactly the shape 2724ac7 and 9f76498 were.
+#                  exactly the shape 2724ac7 and 9f76498 were. Every line
+#                  currently here is adjudicated in CCWORK_REPORT.md section 3.
 #
 # Regenerate with
 #
@@ -400,6 +414,7 @@ func compileCorpusForLoweringStats(t *testing.T, programs []string, summaries bo
 						mutex.Lock()
 						total.Promoted += stats.Promoted
 						total.Lowered += stats.Lowered
+						total.LoopBlocked += stats.LoopBlocked
 						mutex.Unlock()
 						continue
 					}
