@@ -1,0 +1,1379 @@
+=== RUN   TestCompileLowersSyncAtomicCallsToIntrinsics
+--- PASS: TestCompileLowersSyncAtomicCallsToIntrinsics (0.02s)
+=== RUN   TestCompileLowersConstantTimeBoolConversion
+--- PASS: TestCompileLowersConstantTimeBoolConversion (0.80s)
+=== RUN   TestCompilePreservesIdenticalInterfaceHeader
+--- PASS: TestCompilePreservesIdenticalInterfaceHeader (2.12s)
+=== RUN   TestCompileExecutableSchedulesImportedPackageInitializers
+--- PASS: TestCompileExecutableSchedulesImportedPackageInitializers (3.61s)
+=== RUN   TestCompilePreservesSyncAtomicPointerWriteBarrierCalls
+--- PASS: TestCompilePreservesSyncAtomicPointerWriteBarrierCalls (0.01s)
+=== RUN   TestCompileExecutableKeepsClosureCapturesLiveAtSafepoints
+--- PASS: TestCompileExecutableKeepsClosureCapturesLiveAtSafepoints (1.64s)
+=== RUN   TestCompileExecutablePreservesDeferReturnRecoveryEntry
+--- PASS: TestCompileExecutablePreservesDeferReturnRecoveryEntry (1.70s)
+=== RUN   TestCompileExecutableKeepsRuntimePanicRecordOnStack
+--- PASS: TestCompileExecutableKeepsRuntimePanicRecordOnStack (1.69s)
+=== RUN   TestCompileExecutableKeepsRuntimeSelectgoStackSliceHeadersOnStack
+--- PASS: TestCompileExecutableKeepsRuntimeSelectgoStackSliceHeadersOnStack (1.71s)
+=== RUN   TestCompileExecutablePromotesFinalizedPointerGraph
+--- PASS: TestCompileExecutablePromotesFinalizedPointerGraph (1.68s)
+=== RUN   TestRuntimeTypeKeyCanonicalizesAliasesInGenericArguments
+--- PASS: TestRuntimeTypeKeyCanonicalizesAliasesInGenericArguments (0.00s)
+=== RUN   TestTypeKeysDistinguishLocalNamedTypes
+--- PASS: TestTypeKeysDistinguishLocalNamedTypes (0.00s)
+=== RUN   TestAssemblyPackageDefinesIncludeConstantsAndStructLayouts
+--- PASS: TestAssemblyPackageDefinesIncludeConstantsAndStructLayouts (0.00s)
+=== RUN   TestAssemblyABI0OffsetsAlignResultArea
+--- PASS: TestAssemblyABI0OffsetsAlignResultArea (0.00s)
+=== RUN   TestAssemblyABI0OffsetsPackNarrowParameters
+--- PASS: TestAssemblyABI0OffsetsPackNarrowParameters (0.00s)
+=== RUN   TestCompileCoreGo
+--- PASS: TestCompileCoreGo (0.00s)
+=== RUN   TestCompileWidensArrayIndexBeforePointerOffset
+--- PASS: TestCompileWidensArrayIndexBeforePointerOffset (0.00s)
+=== RUN   TestCompileWidensSliceBoundsBeforeDescriptorMath
+--- PASS: TestCompileWidensSliceBoundsBeforeDescriptorMath (0.00s)
+=== RUN   TestCompileGeneratesWrapperForPromotedInterfaceMultiResultMethod
+--- PASS: TestCompileGeneratesWrapperForPromotedInterfaceMultiResultMethod (0.00s)
+=== RUN   TestCompileGeneratesWrapperForInterfaceMethodExpression
+--- PASS: TestCompileGeneratesWrapperForInterfaceMethodExpression (0.00s)
+=== RUN   TestMethodValueWrapperNamesDoNotCollideAtSameSourcePosition
+--- PASS: TestMethodValueWrapperNamesDoNotCollideAtSameSourcePosition (0.00s)
+=== RUN   TestStaticInitializerIgnoresKeyedStructFieldNames
+--- PASS: TestStaticInitializerIgnoresKeyedStructFieldNames (0.00s)
+=== RUN   TestStaticInitializerRejectsMapLiteral
+--- PASS: TestStaticInitializerRejectsMapLiteral (0.00s)
+=== RUN   TestStaticNonEmptyInterfaceKeepsImplementationMethodReachable
+--- PASS: TestStaticNonEmptyInterfaceKeepsImplementationMethodReachable (1.69s)
+=== RUN   TestCompileAllowsExternalLinknameDeclaration
+--- PASS: TestCompileAllowsExternalLinknameDeclaration (0.00s)
+=== RUN   TestCompileAppliesLinknameToInterfaceGlobal
+--- PASS: TestCompileAppliesLinknameToInterfaceGlobal (0.00s)
+=== RUN   TestCompilePreservesNoSplitDirective
+--- PASS: TestCompilePreservesNoSplitDirective (0.00s)
+=== RUN   TestCompilePreservesSystemStackDirective
+--- PASS: TestCompilePreservesSystemStackDirective (0.00s)
+=== RUN   TestCompileMarksRuntimeNextFreeFastNoSplit
+--- PASS: TestCompileMarksRuntimeNextFreeFastNoSplit (0.00s)
+=== RUN   TestCompileMarksSystemStackFunctionLiteralNoSplit
+--- PASS: TestCompileMarksSystemStackFunctionLiteralNoSplit (0.00s)
+=== RUN   TestCompileExecutableStackAllocatesNoSplitVariadicBacking
+--- PASS: TestCompileExecutableStackAllocatesNoSplitVariadicBacking (1.68s)
+=== RUN   TestCompileExecutableStackAllocatesTraceEventVariadicBacking
+--- PASS: TestCompileExecutableStackAllocatesTraceEventVariadicBacking (3.71s)
+=== RUN   TestCompileKeepsAssignedNonEscapingAddressOnStack
+--- PASS: TestCompileKeepsAssignedNonEscapingAddressOnStack (0.00s)
+=== RUN   TestCompileExecutableIncludesRuntimeAndMainInitTask
+--- PASS: TestCompileExecutableIncludesRuntimeAndMainInitTask (1.68s)
+=== RUN   TestCompileExecutableIncludesNativeRuntimeOverlay
+--- PASS: TestCompileExecutableIncludesNativeRuntimeOverlay (1.69s)
+=== RUN   TestCompileExecutableUsesExactRuntimeFIPSIndicator
+--- PASS: TestCompileExecutableUsesExactRuntimeFIPSIndicator (3.62s)
+=== RUN   TestCompileExecutableIncludesReachableSyscallAssembly
+--- PASS: TestCompileExecutableIncludesReachableSyscallAssembly (1.95s)
+=== RUN   TestExportAssemblyReferencedFunctions
+--- PASS: TestExportAssemblyReferencedFunctions (0.00s)
+=== RUN   TestCompileExecutableExportsSingleArgumentLinkname
+--- PASS: TestCompileExecutableExportsSingleArgumentLinkname (1.68s)
+=== RUN   TestCompileExecutableUsesAggregateABIForInterfaceResults
+--- PASS: TestCompileExecutableUsesAggregateABIForInterfaceResults (1.77s)
+=== RUN   TestCompileExecutableBridgesInstantiatedFunctionValuesToGoInternal
+--- PASS: TestCompileExecutableBridgesInstantiatedFunctionValuesToGoInternal (1.67s)
+=== RUN   TestCompileBareFunctionValueAdapterDoesNotUseManagedFrame
+--- PASS: TestCompileBareFunctionValueAdapterDoesNotUseManagedFrame (0.00s)
+=== RUN   TestCompileStaticFunctionValueUsesGoInternalAdapter
+--- PASS: TestCompileStaticFunctionValueUsesGoInternalAdapter (1.64s)
+=== RUN   TestCompileExecutableUsesAggregateABIForInterfaceMethodWrapperParameters
+--- PASS: TestCompileExecutableUsesAggregateABIForInterfaceMethodWrapperParameters (1.67s)
+=== RUN   TestCompileExecutableInterfaceDispatchFallbackUsesRuntimeDiagnostic
+--- PASS: TestCompileExecutableInterfaceDispatchFallbackUsesRuntimeDiagnostic (1.69s)
+=== RUN   TestCompileExecutableRepresentsSlicesAsGroupedScalarValues
+--- PASS: TestCompileExecutableRepresentsSlicesAsGroupedScalarValues (1.68s)
+=== RUN   TestCompileExecutableStoresGlobalSliceHeaderInline
+--- PASS: TestCompileExecutableStoresGlobalSliceHeaderInline (1.66s)
+=== RUN   TestCompileExecutablePreservesKeyedGlobalSliceIndices
+--- PASS: TestCompileExecutablePreservesKeyedGlobalSliceIndices (1.69s)
+=== RUN   TestCompileExecutableInitializesNestedGlobalArrays
+--- PASS: TestCompileExecutableInitializesNestedGlobalArrays (1.69s)
+=== RUN   TestCompileExecutableDynamicallyInitializesNestedByteSlice
+--- PASS: TestCompileExecutableDynamicallyInitializesNestedByteSlice (1.66s)
+=== RUN   TestCompileExecutableKeepsInlinedFloatComparisonsTyped
+--- PASS: TestCompileExecutableKeepsInlinedFloatComparisonsTyped (3.57s)
+=== RUN   TestCompileRecordsExactGlobalPointerWords
+--- PASS: TestCompileRecordsExactGlobalPointerWords (0.00s)
+=== RUN   TestCompilePromotedInterfaceMethodWrappersExtractEmbeddedReceiver
+--- PASS: TestCompilePromotedInterfaceMethodWrappersExtractEmbeddedReceiver (1.81s)
+=== RUN   TestCompileInterfaceMethodWrappersDistinguishSignatures
+--- PASS: TestCompileInterfaceMethodWrappersDistinguishSignatures (1.69s)
+=== RUN   TestCompileErrorsUnwrapWrappersHaveUniqueObjectSymbols
+--- PASS: TestCompileErrorsUnwrapWrappersHaveUniqueObjectSymbols (1.72s)
+=== RUN   TestCompilePromotedInterfaceMethodWrappersLoadScalarReceiver
+--- PASS: TestCompilePromotedInterfaceMethodWrappersLoadScalarReceiver (1.68s)
+=== RUN   TestSharedTypeParameterUsesOnePointerWord
+--- PASS: TestSharedTypeParameterUsesOnePointerWord (0.00s)
+=== RUN   TestCompileEmptySelect
+--- PASS: TestCompileEmptySelect (0.00s)
+=== RUN   TestDeriveClassifiesEveryGenField
+--- PASS: TestDeriveClassifiesEveryGenField (0.00s)
+=== RUN   TestDeriveKeepsTarget
+--- PASS: TestDeriveKeepsTarget (0.00s)
+=== RUN   TestCompilingTheSameSourceTwiceGivesTheSameModule
+--- PASS: TestCompilingTheSameSourceTwiceGivesTheSameModule (3.85s)
+=== RUN   TestGeneratedPackageLiteralsGetDistinctSymbols
+--- PASS: TestGeneratedPackageLiteralsGetDistinctSymbols (2.90s)
+=== RUN   TestCheckUniqueFunctionSymbolsNamesBothFunctions
+--- PASS: TestCheckUniqueFunctionSymbolsNamesBothFunctions (0.00s)
+=== RUN   TestTypeParameterMethodSelection
+=== RUN   TestTypeParameterMethodSelection/type_parameter_bound_to_the_first_union_term
+=== RUN   TestTypeParameterMethodSelection/type_parameter_bound_to_a_later_union_term
+=== RUN   TestTypeParameterMethodSelection/value_receiver_reached_through_a_pointer_type_argument
+=== RUN   TestTypeParameterMethodSelection/method_promoted_from_an_embedded_field
+=== RUN   TestTypeParameterMethodSelection/unbound_type_parameter_keeps_the_shared_generic_lowering
+=== RUN   TestTypeParameterMethodSelection/ordinary_interface_receiver_is_untouched
+=== RUN   TestTypeParameterMethodSelection/concrete_receiver_is_untouched
+--- PASS: TestTypeParameterMethodSelection (0.00s)
+    --- PASS: TestTypeParameterMethodSelection/type_parameter_bound_to_the_first_union_term (0.00s)
+    --- PASS: TestTypeParameterMethodSelection/type_parameter_bound_to_a_later_union_term (0.00s)
+    --- PASS: TestTypeParameterMethodSelection/value_receiver_reached_through_a_pointer_type_argument (0.00s)
+    --- PASS: TestTypeParameterMethodSelection/method_promoted_from_an_embedded_field (0.00s)
+    --- PASS: TestTypeParameterMethodSelection/unbound_type_parameter_keeps_the_shared_generic_lowering (0.00s)
+    --- PASS: TestTypeParameterMethodSelection/ordinary_interface_receiver_is_untouched (0.00s)
+    --- PASS: TestTypeParameterMethodSelection/concrete_receiver_is_untouched (0.00s)
+=== RUN   TestTypeParameterMethodSelectionIgnoresNonMethodSelections
+--- PASS: TestTypeParameterMethodSelectionIgnoresNonMethodSelections (0.00s)
+=== RUN   TestApplyNativeStdlibOverlay
+--- PASS: TestApplyNativeStdlibOverlay (0.00s)
+=== RUN   TestRuntimeInitDeclarationsHaveUniqueOrderedSymbols
+    reach_test.go:45: runtime.init.0 = arena.go:205
+    reach_test.go:45: runtime.init.1 = cpuflags_arm64.go:13
+    reach_test.go:45: runtime.init.2 = mgcstack.go:137
+    reach_test.go:45: runtime.init.3 = mgcwork.go:28
+    reach_test.go:45: runtime.init.4 = mstats.go:337
+    reach_test.go:45: runtime.init.5 = preempt.go:350
+    reach_test.go:45: runtime.init.6 = proc.go:351
+    reach_test.go:45: runtime.init.7 = proc.go:362
+    reach_test.go:45: runtime.init.8 = signal_unix.go:99
+--- PASS: TestRuntimeInitDeclarationsHaveUniqueOrderedSymbols (0.45s)
+=== RUN   TestRuntimeInitTaskContainsEveryPackageInitializer
+--- PASS: TestRuntimeInitTaskContainsEveryPackageInitializer (0.43s)
+=== RUN   TestSHA256ReachabilityUsesExactSource
+--- PASS: TestSHA256ReachabilityUsesExactSource (1.21s)
+=== RUN   TestTypeSwitchInterfaceCaseMakesConcreteMethodsReachable
+--- PASS: TestTypeSwitchInterfaceCaseMakesConcreteMethodsReachable (1.34s)
+=== RUN   TestRuntimeAssemblyOffsetsMatchStandardLibraryTypes
+=== RUN   TestRuntimeAssemblyOffsetsMatchStandardLibraryTypes/stack
+=== RUN   TestRuntimeAssemblyOffsetsMatchStandardLibraryTypes/gobuf
+=== RUN   TestRuntimeAssemblyOffsetsMatchStandardLibraryTypes/g
+=== RUN   TestRuntimeAssemblyOffsetsMatchStandardLibraryTypes/m
+=== RUN   TestRuntimeAssemblyOffsetsMatchStandardLibraryTypes/moduledata
+--- PASS: TestRuntimeAssemblyOffsetsMatchStandardLibraryTypes (0.43s)
+    --- PASS: TestRuntimeAssemblyOffsetsMatchStandardLibraryTypes/stack (0.00s)
+    --- PASS: TestRuntimeAssemblyOffsetsMatchStandardLibraryTypes/gobuf (0.00s)
+    --- PASS: TestRuntimeAssemblyOffsetsMatchStandardLibraryTypes/g (0.00s)
+    --- PASS: TestRuntimeAssemblyOffsetsMatchStandardLibraryTypes/m (0.00s)
+    --- PASS: TestRuntimeAssemblyOffsetsMatchStandardLibraryTypes/moduledata (0.00s)
+=== RUN   TestInternalABIArrayTypeOffsetsMatchRuntime
+--- PASS: TestInternalABIArrayTypeOffsetsMatchRuntime (0.01s)
+=== RUN   TestExtractRuntimeCoverage
+--- PASS: TestExtractRuntimeCoverage (0.00s)
+=== RUN   TestRuntimeCoverageUsesSelectedRuntimeFilesAndChunkedCounters
+--- PASS: TestRuntimeCoverageUsesSelectedRuntimeFilesAndChunkedCounters (1.78s)
+=== RUN   TestPrebuiltRuntimeLeavesTheInterfaceDispatchersToTheProgram
+--- PASS: TestPrebuiltRuntimeLeavesTheInterfaceDispatchersToTheProgram (3.47s)
+=== RUN   TestPrebuiltRuntimeLeavesTheTypeRegionToTheProgram
+--- PASS: TestPrebuiltRuntimeLeavesTheTypeRegionToTheProgram (3.43s)
+=== RUN   TestProgramModuleKeepsWhatItsRelativeOffsetsAddress
+--- PASS: TestProgramModuleKeepsWhatItsRelativeOffsetsAddress (3.45s)
+=== RUN   TestKeptSymbolsMatchAMonolithicBuild
+--- PASS: TestKeptSymbolsMatchAMonolithicBuild (5.15s)
+=== RUN   TestProgramModuleSubtractsTheRuntime
+--- PASS: TestProgramModuleSubtractsTheRuntime (3.54s)
+=== RUN   TestDriftedDataIsRefused
+--- PASS: TestDriftedDataIsRefused (6.34s)
+=== RUN   TestModuleItabLinksNameMatchesGometa
+--- PASS: TestModuleItabLinksNameMatchesGometa (0.00s)
+=== RUN   TestDegradedItabsGoToTheProgram
+--- PASS: TestDegradedItabsGoToTheProgram (4.15s)
+=== RUN   TestLoadExactStandardSHA256Source
+--- PASS: TestLoadExactStandardSHA256Source (0.86s)
+=== RUN   TestLoadExactStandardRuntimeSource
+--- PASS: TestLoadExactStandardRuntimeSource (0.48s)
+=== RUN   TestLoadStandardRuntimeOverlay
+--- PASS: TestLoadStandardRuntimeOverlay (0.53s)
+=== RUN   TestLoadExactStandardTestingSource
+--- PASS: TestLoadExactStandardTestingSource (0.93s)
+=== RUN   TestLoadVendoredDNSMessageSource
+--- PASS: TestLoadVendoredDNSMessageSource (0.60s)
+=== RUN   TestLoadStandardNetWithoutCgo
+--- PASS: TestLoadStandardNetWithoutCgo (0.91s)
+=== RUN   TestLoadExactStandardBytealgAssembly
+--- PASS: TestLoadExactStandardBytealgAssembly (0.01s)
+=== RUN   TestLoadExactAdditionalStandardAssembly
+=== RUN   TestLoadExactAdditionalStandardAssembly/internal/cpu
+=== RUN   TestLoadExactAdditionalStandardAssembly/internal/cpu#01
+=== RUN   TestLoadExactAdditionalStandardAssembly/internal/abi
+=== RUN   TestLoadExactAdditionalStandardAssembly/internal/abi#01
+=== RUN   TestLoadExactAdditionalStandardAssembly/internal/chacha8rand
+=== RUN   TestLoadExactAdditionalStandardAssembly/internal/reflectlite
+=== RUN   TestLoadExactAdditionalStandardAssembly/internal/runtime/sys
+=== RUN   TestLoadExactAdditionalStandardAssembly/internal/runtime/sys#01
+=== RUN   TestLoadExactAdditionalStandardAssembly/internal/runtime/syscall/linux
+=== RUN   TestLoadExactAdditionalStandardAssembly/internal/runtime/atomic
+=== RUN   TestLoadExactAdditionalStandardAssembly/crypto/internal/fips140/sha256
+=== RUN   TestLoadExactAdditionalStandardAssembly/syscall
+=== RUN   TestLoadExactAdditionalStandardAssembly/sync/atomic
+--- PASS: TestLoadExactAdditionalStandardAssembly (0.78s)
+    --- PASS: TestLoadExactAdditionalStandardAssembly/internal/cpu (0.00s)
+    --- PASS: TestLoadExactAdditionalStandardAssembly/internal/cpu#01 (0.00s)
+    --- PASS: TestLoadExactAdditionalStandardAssembly/internal/abi (0.01s)
+    --- PASS: TestLoadExactAdditionalStandardAssembly/internal/abi#01 (0.00s)
+    --- PASS: TestLoadExactAdditionalStandardAssembly/internal/chacha8rand (0.00s)
+    --- PASS: TestLoadExactAdditionalStandardAssembly/internal/reflectlite (0.54s)
+    --- PASS: TestLoadExactAdditionalStandardAssembly/internal/runtime/sys (0.00s)
+    --- PASS: TestLoadExactAdditionalStandardAssembly/internal/runtime/sys#01 (0.00s)
+    --- PASS: TestLoadExactAdditionalStandardAssembly/internal/runtime/syscall/linux (0.00s)
+    --- PASS: TestLoadExactAdditionalStandardAssembly/internal/runtime/atomic (0.00s)
+    --- PASS: TestLoadExactAdditionalStandardAssembly/crypto/internal/fips140/sha256 (0.14s)
+    --- PASS: TestLoadExactAdditionalStandardAssembly/syscall (0.08s)
+    --- PASS: TestLoadExactAdditionalStandardAssembly/sync/atomic (0.00s)
+=== RUN   TestRepositoryStandardLibraryInventory
+--- PASS: TestRepositoryStandardLibraryInventory (0.00s)
+=== RUN   TestStdlibOverlayRejectsAssemblyReplacement
+--- PASS: TestStdlibOverlayRejectsAssemblyReplacement (0.00s)
+=== RUN   TestStdlibOverlayRejectsReplacementWithoutUpstreamHash
+--- PASS: TestStdlibOverlayRejectsReplacementWithoutUpstreamHash (0.00s)
+=== RUN   TestParseTarget
+--- PASS: TestParseTarget (0.00s)
+=== RUN   TestUnsetTargetIsTheHost
+--- PASS: TestUnsetTargetIsTheHost (0.00s)
+=== RUN   TestTargetTypeGeometryIsShared
+--- PASS: TestTargetTypeGeometryIsShared (0.00s)
+=== RUN   TestSourceLoaderSelectsTargetArchitectureFiles
+--- PASS: TestSourceLoaderSelectsTargetArchitectureFiles (0.00s)
+=== RUN   TestDiscoverPackageTests
+--- PASS: TestDiscoverPackageTests (1.09s)
+=== RUN   TestDiscoverExternalPackageTests
+--- PASS: TestDiscoverExternalPackageTests (1.03s)
+=== RUN   TestCompilePackageTests
+--- PASS: TestCompilePackageTests (7.21s)
+=== RUN   TestMatchingPackageTestsSelectsTopLevelRunPattern
+--- PASS: TestMatchingPackageTestsSelectsTopLevelRunPattern (0.00s)
+=== RUN   TestMatchingPackageTestsRejectsInvalidPattern
+--- PASS: TestMatchingPackageTestsRejectsInvalidPattern (0.00s)
+=== RUN   TestCompileUTF8TestsKeepsFunctionSizeBounded
+--- PASS: TestCompileUTF8TestsKeepsFunctionSizeBounded (6.70s)
+=== RUN   TestAllocationCensus
+--- PASS: TestAllocationCensus (302.01s)
+=== RUN   TestCompareAllocationCensusNamesTheDirection
+--- PASS: TestCompareAllocationCensusNamesTheDirection (0.00s)
+=== RUN   TestCompareAllocationCensusReportsASplitSite
+=== RUN   TestCompareAllocationCensusReportsASplitSite/frame_gains_a_heap_copy
+=== RUN   TestCompareAllocationCensusReportsASplitSite/heap_gains_a_frame_copy
+=== RUN   TestCompareAllocationCensusReportsASplitSite/split_loses_its_heap_copy
+=== RUN   TestCompareAllocationCensusReportsASplitSite/split_loses_its_frame_copy
+=== RUN   TestCompareAllocationCensusReportsASplitSite/split_is_unchanged
+--- PASS: TestCompareAllocationCensusReportsASplitSite (0.00s)
+    --- PASS: TestCompareAllocationCensusReportsASplitSite/frame_gains_a_heap_copy (0.00s)
+    --- PASS: TestCompareAllocationCensusReportsASplitSite/heap_gains_a_frame_copy (0.00s)
+    --- PASS: TestCompareAllocationCensusReportsASplitSite/split_loses_its_heap_copy (0.00s)
+    --- PASS: TestCompareAllocationCensusReportsASplitSite/split_loses_its_frame_copy (0.00s)
+    --- PASS: TestCompareAllocationCensusReportsASplitSite/split_is_unchanged (0.00s)
+=== RUN   TestGoInternalFunctionsMakeUnmarkedPlatformCalls
+--- PASS: TestGoInternalFunctionsMakeUnmarkedPlatformCalls (0.00s)
+=== RUN   TestChannelElementDescriptorCarriesPointerMetadata
+--- PASS: TestChannelElementDescriptorCarriesPointerMetadata (0.00s)
+=== RUN   TestChannelElementDescriptorIsTheSharedRuntimeTypeDescriptor
+--- PASS: TestChannelElementDescriptorIsTheSharedRuntimeTypeDescriptor (0.00s)
+=== RUN   TestClosureWritesIntoACapturedVariablesStorage
+=== RUN   TestClosureWritesIntoACapturedVariablesStorage/complex128
+=== RUN   TestClosureWritesIntoACapturedVariablesStorage/string
+=== RUN   TestClosureWritesIntoACapturedVariablesStorage/interface
+--- PASS: TestClosureWritesIntoACapturedVariablesStorage (5.16s)
+    --- PASS: TestClosureWritesIntoACapturedVariablesStorage/complex128 (1.76s)
+    --- PASS: TestClosureWritesIntoACapturedVariablesStorage/string (1.68s)
+    --- PASS: TestClosureWritesIntoACapturedVariablesStorage/interface (1.72s)
+=== RUN   TestCapturedVariableStorageHoldsTheValue
+=== RUN   TestCapturedVariableStorageHoldsTheValue/string
+=== RUN   TestCapturedVariableStorageHoldsTheValue/interface
+=== RUN   TestCapturedVariableStorageHoldsTheValue/complex128
+--- PASS: TestCapturedVariableStorageHoldsTheValue (5.03s)
+    --- PASS: TestCapturedVariableStorageHoldsTheValue/string (1.70s)
+    --- PASS: TestCapturedVariableStorageHoldsTheValue/interface (1.66s)
+    --- PASS: TestCapturedVariableStorageHoldsTheValue/complex128 (1.67s)
+=== RUN   TestNonEscapingCaptureStaysOffTheHeap
+=== RUN   TestNonEscapingCaptureStaysOffTheHeap/string
+=== RUN   TestNonEscapingCaptureStaysOffTheHeap/complex128
+--- PASS: TestNonEscapingCaptureStaysOffTheHeap (3.34s)
+    --- PASS: TestNonEscapingCaptureStaysOffTheHeap/string (1.67s)
+    --- PASS: TestNonEscapingCaptureStaysOffTheHeap/complex128 (1.67s)
+=== RUN   TestRangeOverFunctionBodyWritesIntoACapturedVariablesStorage
+--- PASS: TestRangeOverFunctionBodyWritesIntoACapturedVariablesStorage (1.65s)
+=== RUN   TestExecutionCorpus
+=== RUN   TestExecutionCorpus/constants
+=== RUN   TestExecutionCorpus/constants/unoptimized
+=== RUN   TestExecutionCorpus/constants/optimized
+=== RUN   TestExecutionCorpus/arithmetic_precedence
+=== RUN   TestExecutionCorpus/arithmetic_precedence/unoptimized
+=== RUN   TestExecutionCorpus/arithmetic_precedence/optimized
+=== RUN   TestExecutionCorpus/signed_division_and_remainder
+=== RUN   TestExecutionCorpus/signed_division_and_remainder/unoptimized
+=== RUN   TestExecutionCorpus/signed_division_and_remainder/optimized
+=== RUN   TestExecutionCorpus/unsigned_arithmetic
+=== RUN   TestExecutionCorpus/unsigned_arithmetic/unoptimized
+=== RUN   TestExecutionCorpus/unsigned_arithmetic/optimized
+=== RUN   TestExecutionCorpus/bitwise
+=== RUN   TestExecutionCorpus/bitwise/unoptimized
+=== RUN   TestExecutionCorpus/bitwise/optimized
+=== RUN   TestExecutionCorpus/variable_shift_at_word_width
+=== RUN   TestExecutionCorpus/variable_shift_at_word_width/unoptimized
+=== RUN   TestExecutionCorpus/variable_shift_at_word_width/optimized
+=== RUN   TestExecutionCorpus/variable_signed_shift_at_word_width
+=== RUN   TestExecutionCorpus/variable_signed_shift_at_word_width/unoptimized
+=== RUN   TestExecutionCorpus/variable_signed_shift_at_word_width/optimized
+=== RUN   TestExecutionCorpus/variable_shift_beyond_word_width
+=== RUN   TestExecutionCorpus/variable_shift_beyond_word_width/unoptimized
+=== RUN   TestExecutionCorpus/variable_shift_beyond_word_width/optimized
+=== RUN   TestExecutionCorpus/variable_32-bit_shift_at_width
+=== RUN   TestExecutionCorpus/variable_32-bit_shift_at_width/unoptimized
+=== RUN   TestExecutionCorpus/variable_32-bit_shift_at_width/optimized
+=== RUN   TestExecutionCorpus/stdlib_64-bit_population_count
+=== RUN   TestExecutionCorpus/stdlib_64-bit_population_count/unoptimized
+=== RUN   TestExecutionCorpus/stdlib_64-bit_population_count/optimized
+=== RUN   TestExecutionCorpus/stdlib_bit_length_table
+=== RUN   TestExecutionCorpus/stdlib_bit_length_table/unoptimized
+=== RUN   TestExecutionCorpus/stdlib_bit_length_table/optimized
+=== RUN   TestExecutionCorpus/runtime_bit_range_search
+=== RUN   TestExecutionCorpus/runtime_bit_range_search/unoptimized
+=== RUN   TestExecutionCorpus/runtime_bit_range_search/optimized
+=== RUN   TestExecutionCorpus/runtime_page_bitmap_ranges
+=== RUN   TestExecutionCorpus/runtime_page_bitmap_ranges/unoptimized
+=== RUN   TestExecutionCorpus/runtime_page_bitmap_ranges/optimized
+=== RUN   TestExecutionCorpus/runtime_nested_scavenged_bitmap
+=== RUN   TestExecutionCorpus/runtime_nested_scavenged_bitmap/unoptimized
+=== RUN   TestExecutionCorpus/runtime_nested_scavenged_bitmap/optimized
+=== RUN   TestExecutionCorpus/runtime_page_bitmap_population_range
+=== RUN   TestExecutionCorpus/runtime_page_bitmap_population_range/unoptimized
+=== RUN   TestExecutionCorpus/runtime_page_bitmap_population_range/optimized
+=== RUN   TestExecutionCorpus/returned_three-word_runtime_cache
+=== RUN   TestExecutionCorpus/returned_three-word_runtime_cache/unoptimized
+=== RUN   TestExecutionCorpus/returned_three-word_runtime_cache/optimized
+=== RUN   TestExecutionCorpus/runtime_page_cache_scavenged_result
+=== RUN   TestExecutionCorpus/runtime_page_cache_scavenged_result/unoptimized
+=== RUN   TestExecutionCorpus/runtime_page_cache_scavenged_result/optimized
+=== RUN   TestExecutionCorpus/clear_pointer_array_subslice
+=== RUN   TestExecutionCorpus/clear_pointer_array_subslice/unoptimized
+=== RUN   TestExecutionCorpus/clear_pointer_array_subslice/optimized
+=== RUN   TestExecutionCorpus/signed_byte_overflow
+=== RUN   TestExecutionCorpus/signed_byte_overflow/unoptimized
+=== RUN   TestExecutionCorpus/signed_byte_overflow/optimized
+=== RUN   TestExecutionCorpus/unsigned_byte_overflow
+=== RUN   TestExecutionCorpus/unsigned_byte_overflow/unoptimized
+=== RUN   TestExecutionCorpus/unsigned_byte_overflow/optimized
+=== RUN   TestExecutionCorpus/word_overflow
+=== RUN   TestExecutionCorpus/word_overflow/unoptimized
+=== RUN   TestExecutionCorpus/word_overflow/optimized
+=== RUN   TestExecutionCorpus/comparisons
+=== RUN   TestExecutionCorpus/comparisons/unoptimized
+=== RUN   TestExecutionCorpus/comparisons/optimized
+=== RUN   TestExecutionCorpus/string_value_equality
+=== RUN   TestExecutionCorpus/string_value_equality/unoptimized
+=== RUN   TestExecutionCorpus/string_value_equality/optimized
+=== RUN   TestExecutionCorpus/string_lexical_ordering
+=== RUN   TestExecutionCorpus/string_lexical_ordering/unoptimized
+=== RUN   TestExecutionCorpus/string_lexical_ordering/optimized
+=== RUN   TestExecutionCorpus/float_comparisons
+=== RUN   TestExecutionCorpus/float_comparisons/unoptimized
+=== RUN   TestExecutionCorpus/float_comparisons/optimized
+=== RUN   TestExecutionCorpus/locals_and_compound_assignment
+=== RUN   TestExecutionCorpus/locals_and_compound_assignment/unoptimized
+=== RUN   TestExecutionCorpus/locals_and_compound_assignment/optimized
+=== RUN   TestExecutionCorpus/parallel_assignment
+=== RUN   TestExecutionCorpus/parallel_assignment/unoptimized
+=== RUN   TestExecutionCorpus/parallel_assignment/optimized
+=== RUN   TestExecutionCorpus/lexical_shadowing
+=== RUN   TestExecutionCorpus/lexical_shadowing/unoptimized
+=== RUN   TestExecutionCorpus/lexical_shadowing/optimized
+=== RUN   TestExecutionCorpus/if_init_and_else
+=== RUN   TestExecutionCorpus/if_init_and_else/unoptimized
+=== RUN   TestExecutionCorpus/if_init_and_else/optimized
+=== RUN   TestExecutionCorpus/for_loop
+=== RUN   TestExecutionCorpus/for_loop/unoptimized
+=== RUN   TestExecutionCorpus/for_loop/optimized
+=== RUN   TestExecutionCorpus/break_and_continue
+=== RUN   TestExecutionCorpus/break_and_continue/unoptimized
+=== RUN   TestExecutionCorpus/break_and_continue/optimized
+=== RUN   TestExecutionCorpus/labeled_continue
+=== RUN   TestExecutionCorpus/labeled_continue/unoptimized
+=== RUN   TestExecutionCorpus/labeled_continue/optimized
+=== RUN   TestExecutionCorpus/labeled_break
+=== RUN   TestExecutionCorpus/labeled_break/unoptimized
+=== RUN   TestExecutionCorpus/labeled_break/optimized
+=== RUN   TestExecutionCorpus/function_call
+=== RUN   TestExecutionCorpus/function_call/unoptimized
+=== RUN   TestExecutionCorpus/function_call/optimized
+=== RUN   TestExecutionCorpus/recursion
+=== RUN   TestExecutionCorpus/recursion/unoptimized
+=== RUN   TestExecutionCorpus/recursion/optimized
+=== RUN   TestExecutionCorpus/range_array
+=== RUN   TestExecutionCorpus/range_array/unoptimized
+=== RUN   TestExecutionCorpus/range_array/optimized
+=== RUN   TestExecutionCorpus/range_pointer_to_array
+=== RUN   TestExecutionCorpus/range_pointer_to_array/unoptimized
+=== RUN   TestExecutionCorpus/range_pointer_to_array/optimized
+=== RUN   TestExecutionCorpus/slice_pointer_to_array
+=== RUN   TestExecutionCorpus/slice_pointer_to_array/unoptimized
+=== RUN   TestExecutionCorpus/slice_pointer_to_array/optimized
+=== RUN   TestExecutionCorpus/pointer_to_slice_descriptor
+=== RUN   TestExecutionCorpus/pointer_to_slice_descriptor/unoptimized
+=== RUN   TestExecutionCorpus/pointer_to_slice_descriptor/optimized
+=== RUN   TestExecutionCorpus/reslice_preserves_capacity
+=== RUN   TestExecutionCorpus/reslice_preserves_capacity/unoptimized
+=== RUN   TestExecutionCorpus/reslice_preserves_capacity/optimized
+=== RUN   TestExecutionCorpus/slice_assignment_copies_header
+=== RUN   TestExecutionCorpus/slice_assignment_copies_header/unoptimized
+=== RUN   TestExecutionCorpus/slice_assignment_copies_header/optimized
+=== RUN   TestExecutionCorpus/assign_nil_slice
+=== RUN   TestExecutionCorpus/assign_nil_slice/unoptimized
+=== RUN   TestExecutionCorpus/assign_nil_slice/optimized
+=== RUN   TestExecutionCorpus/compare_nil_slice
+=== RUN   TestExecutionCorpus/compare_nil_slice/unoptimized
+=== RUN   TestExecutionCorpus/compare_nil_slice/optimized
+=== RUN   TestExecutionCorpus/compare_nil_slice_struct_field
+=== RUN   TestExecutionCorpus/compare_nil_slice_struct_field/unoptimized
+=== RUN   TestExecutionCorpus/compare_nil_slice_struct_field/optimized
+=== RUN   TestExecutionCorpus/pointer_array_struct_field
+=== RUN   TestExecutionCorpus/pointer_array_struct_field/unoptimized
+=== RUN   TestExecutionCorpus/pointer_array_struct_field/optimized
+=== RUN   TestExecutionCorpus/struct_assignment_copies_value_and_preserves_address
+=== RUN   TestExecutionCorpus/struct_assignment_copies_value_and_preserves_address/unoptimized
+=== RUN   TestExecutionCorpus/struct_assignment_copies_value_and_preserves_address/optimized
+=== RUN   TestExecutionCorpus/parallel_struct_assignment_snapshots_values
+=== RUN   TestExecutionCorpus/parallel_struct_assignment_snapshots_values/unoptimized
+=== RUN   TestExecutionCorpus/parallel_struct_assignment_snapshots_values/optimized
+=== RUN   TestExecutionCorpus/struct_equality_compares_fields
+=== RUN   TestExecutionCorpus/struct_equality_compares_fields/unoptimized
+=== RUN   TestExecutionCorpus/struct_equality_compares_fields/optimized
+=== RUN   TestExecutionCorpus/range_array_of_structs
+=== RUN   TestExecutionCorpus/range_array_of_structs/unoptimized
+=== RUN   TestExecutionCorpus/range_array_of_structs/optimized
+=== RUN   TestExecutionCorpus/returned_array_survives_callee_frame
+=== RUN   TestExecutionCorpus/returned_array_survives_callee_frame/unoptimized
+=== RUN   TestExecutionCorpus/returned_array_survives_callee_frame/optimized
+=== RUN   TestExecutionCorpus/returned_struct_survives_callee_frame
+=== RUN   TestExecutionCorpus/returned_struct_survives_callee_frame/unoptimized
+=== RUN   TestExecutionCorpus/returned_struct_survives_callee_frame/optimized
+=== RUN   TestExecutionCorpus/returned_string_survives_callee_frame
+=== RUN   TestExecutionCorpus/returned_string_survives_callee_frame/unoptimized
+=== RUN   TestExecutionCorpus/returned_string_survives_callee_frame/optimized
+=== RUN   TestExecutionCorpus/zero_and_copied_strings
+=== RUN   TestExecutionCorpus/zero_and_copied_strings/unoptimized
+=== RUN   TestExecutionCorpus/zero_and_copied_strings/optimized
+--- PASS: TestExecutionCorpus (6.10s)
+    --- PASS: TestExecutionCorpus/constants (0.11s)
+        --- PASS: TestExecutionCorpus/constants/unoptimized (0.06s)
+        --- PASS: TestExecutionCorpus/constants/optimized (0.05s)
+    --- PASS: TestExecutionCorpus/arithmetic_precedence (0.12s)
+        --- PASS: TestExecutionCorpus/arithmetic_precedence/unoptimized (0.06s)
+        --- PASS: TestExecutionCorpus/arithmetic_precedence/optimized (0.06s)
+    --- PASS: TestExecutionCorpus/signed_division_and_remainder (0.12s)
+        --- PASS: TestExecutionCorpus/signed_division_and_remainder/unoptimized (0.06s)
+        --- PASS: TestExecutionCorpus/signed_division_and_remainder/optimized (0.06s)
+    --- PASS: TestExecutionCorpus/unsigned_arithmetic (0.12s)
+        --- PASS: TestExecutionCorpus/unsigned_arithmetic/unoptimized (0.06s)
+        --- PASS: TestExecutionCorpus/unsigned_arithmetic/optimized (0.06s)
+    --- PASS: TestExecutionCorpus/bitwise (0.12s)
+        --- PASS: TestExecutionCorpus/bitwise/unoptimized (0.06s)
+        --- PASS: TestExecutionCorpus/bitwise/optimized (0.06s)
+    --- PASS: TestExecutionCorpus/variable_shift_at_word_width (0.12s)
+        --- PASS: TestExecutionCorpus/variable_shift_at_word_width/unoptimized (0.06s)
+        --- PASS: TestExecutionCorpus/variable_shift_at_word_width/optimized (0.06s)
+    --- PASS: TestExecutionCorpus/variable_signed_shift_at_word_width (0.12s)
+        --- PASS: TestExecutionCorpus/variable_signed_shift_at_word_width/unoptimized (0.06s)
+        --- PASS: TestExecutionCorpus/variable_signed_shift_at_word_width/optimized (0.06s)
+    --- PASS: TestExecutionCorpus/variable_shift_beyond_word_width (0.11s)
+        --- PASS: TestExecutionCorpus/variable_shift_beyond_word_width/unoptimized (0.06s)
+        --- PASS: TestExecutionCorpus/variable_shift_beyond_word_width/optimized (0.06s)
+    --- PASS: TestExecutionCorpus/variable_32-bit_shift_at_width (0.11s)
+        --- PASS: TestExecutionCorpus/variable_32-bit_shift_at_width/unoptimized (0.06s)
+        --- PASS: TestExecutionCorpus/variable_32-bit_shift_at_width/optimized (0.06s)
+    --- PASS: TestExecutionCorpus/stdlib_64-bit_population_count (0.12s)
+        --- PASS: TestExecutionCorpus/stdlib_64-bit_population_count/unoptimized (0.06s)
+        --- PASS: TestExecutionCorpus/stdlib_64-bit_population_count/optimized (0.06s)
+    --- PASS: TestExecutionCorpus/stdlib_bit_length_table (0.11s)
+        --- PASS: TestExecutionCorpus/stdlib_bit_length_table/unoptimized (0.06s)
+        --- PASS: TestExecutionCorpus/stdlib_bit_length_table/optimized (0.06s)
+    --- PASS: TestExecutionCorpus/runtime_bit_range_search (0.12s)
+        --- PASS: TestExecutionCorpus/runtime_bit_range_search/unoptimized (0.06s)
+        --- PASS: TestExecutionCorpus/runtime_bit_range_search/optimized (0.06s)
+    --- PASS: TestExecutionCorpus/runtime_page_bitmap_ranges (0.12s)
+        --- PASS: TestExecutionCorpus/runtime_page_bitmap_ranges/unoptimized (0.06s)
+        --- PASS: TestExecutionCorpus/runtime_page_bitmap_ranges/optimized (0.06s)
+    --- PASS: TestExecutionCorpus/runtime_nested_scavenged_bitmap (0.12s)
+        --- PASS: TestExecutionCorpus/runtime_nested_scavenged_bitmap/unoptimized (0.06s)
+        --- PASS: TestExecutionCorpus/runtime_nested_scavenged_bitmap/optimized (0.06s)
+    --- PASS: TestExecutionCorpus/runtime_page_bitmap_population_range (0.12s)
+        --- PASS: TestExecutionCorpus/runtime_page_bitmap_population_range/unoptimized (0.06s)
+        --- PASS: TestExecutionCorpus/runtime_page_bitmap_population_range/optimized (0.06s)
+    --- PASS: TestExecutionCorpus/returned_three-word_runtime_cache (0.12s)
+        --- PASS: TestExecutionCorpus/returned_three-word_runtime_cache/unoptimized (0.06s)
+        --- PASS: TestExecutionCorpus/returned_three-word_runtime_cache/optimized (0.06s)
+    --- PASS: TestExecutionCorpus/runtime_page_cache_scavenged_result (0.12s)
+        --- PASS: TestExecutionCorpus/runtime_page_cache_scavenged_result/unoptimized (0.06s)
+        --- PASS: TestExecutionCorpus/runtime_page_cache_scavenged_result/optimized (0.06s)
+    --- PASS: TestExecutionCorpus/clear_pointer_array_subslice (0.11s)
+        --- PASS: TestExecutionCorpus/clear_pointer_array_subslice/unoptimized (0.06s)
+        --- PASS: TestExecutionCorpus/clear_pointer_array_subslice/optimized (0.05s)
+    --- PASS: TestExecutionCorpus/signed_byte_overflow (0.11s)
+        --- PASS: TestExecutionCorpus/signed_byte_overflow/unoptimized (0.05s)
+        --- PASS: TestExecutionCorpus/signed_byte_overflow/optimized (0.06s)
+    --- PASS: TestExecutionCorpus/unsigned_byte_overflow (0.12s)
+        --- PASS: TestExecutionCorpus/unsigned_byte_overflow/unoptimized (0.06s)
+        --- PASS: TestExecutionCorpus/unsigned_byte_overflow/optimized (0.06s)
+    --- PASS: TestExecutionCorpus/word_overflow (0.11s)
+        --- PASS: TestExecutionCorpus/word_overflow/unoptimized (0.05s)
+        --- PASS: TestExecutionCorpus/word_overflow/optimized (0.05s)
+    --- PASS: TestExecutionCorpus/comparisons (0.11s)
+        --- PASS: TestExecutionCorpus/comparisons/unoptimized (0.05s)
+        --- PASS: TestExecutionCorpus/comparisons/optimized (0.06s)
+    --- PASS: TestExecutionCorpus/string_value_equality (0.12s)
+        --- PASS: TestExecutionCorpus/string_value_equality/unoptimized (0.06s)
+        --- PASS: TestExecutionCorpus/string_value_equality/optimized (0.06s)
+    --- PASS: TestExecutionCorpus/string_lexical_ordering (0.12s)
+        --- PASS: TestExecutionCorpus/string_lexical_ordering/unoptimized (0.05s)
+        --- PASS: TestExecutionCorpus/string_lexical_ordering/optimized (0.06s)
+    --- PASS: TestExecutionCorpus/float_comparisons (0.11s)
+        --- PASS: TestExecutionCorpus/float_comparisons/unoptimized (0.05s)
+        --- PASS: TestExecutionCorpus/float_comparisons/optimized (0.06s)
+    --- PASS: TestExecutionCorpus/locals_and_compound_assignment (0.11s)
+        --- PASS: TestExecutionCorpus/locals_and_compound_assignment/unoptimized (0.06s)
+        --- PASS: TestExecutionCorpus/locals_and_compound_assignment/optimized (0.06s)
+    --- PASS: TestExecutionCorpus/parallel_assignment (0.11s)
+        --- PASS: TestExecutionCorpus/parallel_assignment/unoptimized (0.05s)
+        --- PASS: TestExecutionCorpus/parallel_assignment/optimized (0.06s)
+    --- PASS: TestExecutionCorpus/lexical_shadowing (0.11s)
+        --- PASS: TestExecutionCorpus/lexical_shadowing/unoptimized (0.05s)
+        --- PASS: TestExecutionCorpus/lexical_shadowing/optimized (0.06s)
+    --- PASS: TestExecutionCorpus/if_init_and_else (0.11s)
+        --- PASS: TestExecutionCorpus/if_init_and_else/unoptimized (0.06s)
+        --- PASS: TestExecutionCorpus/if_init_and_else/optimized (0.05s)
+    --- PASS: TestExecutionCorpus/for_loop (0.11s)
+        --- PASS: TestExecutionCorpus/for_loop/unoptimized (0.05s)
+        --- PASS: TestExecutionCorpus/for_loop/optimized (0.05s)
+    --- PASS: TestExecutionCorpus/break_and_continue (0.11s)
+        --- PASS: TestExecutionCorpus/break_and_continue/unoptimized (0.05s)
+        --- PASS: TestExecutionCorpus/break_and_continue/optimized (0.06s)
+    --- PASS: TestExecutionCorpus/labeled_continue (0.11s)
+        --- PASS: TestExecutionCorpus/labeled_continue/unoptimized (0.06s)
+        --- PASS: TestExecutionCorpus/labeled_continue/optimized (0.06s)
+    --- PASS: TestExecutionCorpus/labeled_break (0.11s)
+        --- PASS: TestExecutionCorpus/labeled_break/unoptimized (0.06s)
+        --- PASS: TestExecutionCorpus/labeled_break/optimized (0.06s)
+    --- PASS: TestExecutionCorpus/function_call (0.11s)
+        --- PASS: TestExecutionCorpus/function_call/unoptimized (0.06s)
+        --- PASS: TestExecutionCorpus/function_call/optimized (0.06s)
+    --- PASS: TestExecutionCorpus/recursion (0.11s)
+        --- PASS: TestExecutionCorpus/recursion/unoptimized (0.06s)
+        --- PASS: TestExecutionCorpus/recursion/optimized (0.06s)
+    --- PASS: TestExecutionCorpus/range_array (0.11s)
+        --- PASS: TestExecutionCorpus/range_array/unoptimized (0.06s)
+        --- PASS: TestExecutionCorpus/range_array/optimized (0.06s)
+    --- PASS: TestExecutionCorpus/range_pointer_to_array (0.13s)
+        --- PASS: TestExecutionCorpus/range_pointer_to_array/unoptimized (0.07s)
+        --- PASS: TestExecutionCorpus/range_pointer_to_array/optimized (0.06s)
+    --- PASS: TestExecutionCorpus/slice_pointer_to_array (0.12s)
+        --- PASS: TestExecutionCorpus/slice_pointer_to_array/unoptimized (0.05s)
+        --- PASS: TestExecutionCorpus/slice_pointer_to_array/optimized (0.06s)
+    --- PASS: TestExecutionCorpus/pointer_to_slice_descriptor (0.12s)
+        --- PASS: TestExecutionCorpus/pointer_to_slice_descriptor/unoptimized (0.05s)
+        --- PASS: TestExecutionCorpus/pointer_to_slice_descriptor/optimized (0.06s)
+    --- PASS: TestExecutionCorpus/reslice_preserves_capacity (0.12s)
+        --- PASS: TestExecutionCorpus/reslice_preserves_capacity/unoptimized (0.06s)
+        --- PASS: TestExecutionCorpus/reslice_preserves_capacity/optimized (0.06s)
+    --- PASS: TestExecutionCorpus/slice_assignment_copies_header (0.11s)
+        --- PASS: TestExecutionCorpus/slice_assignment_copies_header/unoptimized (0.06s)
+        --- PASS: TestExecutionCorpus/slice_assignment_copies_header/optimized (0.06s)
+    --- PASS: TestExecutionCorpus/assign_nil_slice (0.12s)
+        --- PASS: TestExecutionCorpus/assign_nil_slice/unoptimized (0.06s)
+        --- PASS: TestExecutionCorpus/assign_nil_slice/optimized (0.06s)
+    --- PASS: TestExecutionCorpus/compare_nil_slice (0.11s)
+        --- PASS: TestExecutionCorpus/compare_nil_slice/unoptimized (0.05s)
+        --- PASS: TestExecutionCorpus/compare_nil_slice/optimized (0.06s)
+    --- PASS: TestExecutionCorpus/compare_nil_slice_struct_field (0.11s)
+        --- PASS: TestExecutionCorpus/compare_nil_slice_struct_field/unoptimized (0.05s)
+        --- PASS: TestExecutionCorpus/compare_nil_slice_struct_field/optimized (0.06s)
+    --- PASS: TestExecutionCorpus/pointer_array_struct_field (0.12s)
+        --- PASS: TestExecutionCorpus/pointer_array_struct_field/unoptimized (0.06s)
+        --- PASS: TestExecutionCorpus/pointer_array_struct_field/optimized (0.06s)
+    --- PASS: TestExecutionCorpus/struct_assignment_copies_value_and_preserves_address (0.12s)
+        --- PASS: TestExecutionCorpus/struct_assignment_copies_value_and_preserves_address/unoptimized (0.05s)
+        --- PASS: TestExecutionCorpus/struct_assignment_copies_value_and_preserves_address/optimized (0.06s)
+    --- PASS: TestExecutionCorpus/parallel_struct_assignment_snapshots_values (0.12s)
+        --- PASS: TestExecutionCorpus/parallel_struct_assignment_snapshots_values/unoptimized (0.06s)
+        --- PASS: TestExecutionCorpus/parallel_struct_assignment_snapshots_values/optimized (0.06s)
+    --- PASS: TestExecutionCorpus/struct_equality_compares_fields (0.12s)
+        --- PASS: TestExecutionCorpus/struct_equality_compares_fields/unoptimized (0.06s)
+        --- PASS: TestExecutionCorpus/struct_equality_compares_fields/optimized (0.06s)
+    --- PASS: TestExecutionCorpus/range_array_of_structs (0.12s)
+        --- PASS: TestExecutionCorpus/range_array_of_structs/unoptimized (0.06s)
+        --- PASS: TestExecutionCorpus/range_array_of_structs/optimized (0.06s)
+    --- PASS: TestExecutionCorpus/returned_array_survives_callee_frame (0.12s)
+        --- PASS: TestExecutionCorpus/returned_array_survives_callee_frame/unoptimized (0.06s)
+        --- PASS: TestExecutionCorpus/returned_array_survives_callee_frame/optimized (0.06s)
+    --- PASS: TestExecutionCorpus/returned_struct_survives_callee_frame (0.11s)
+        --- PASS: TestExecutionCorpus/returned_struct_survives_callee_frame/unoptimized (0.06s)
+        --- PASS: TestExecutionCorpus/returned_struct_survives_callee_frame/optimized (0.06s)
+    --- PASS: TestExecutionCorpus/returned_string_survives_callee_frame (0.11s)
+        --- PASS: TestExecutionCorpus/returned_string_survives_callee_frame/unoptimized (0.05s)
+        --- PASS: TestExecutionCorpus/returned_string_survives_callee_frame/optimized (0.06s)
+    --- PASS: TestExecutionCorpus/zero_and_copied_strings (0.11s)
+        --- PASS: TestExecutionCorpus/zero_and_copied_strings/unoptimized (0.05s)
+        --- PASS: TestExecutionCorpus/zero_and_copied_strings/optimized (0.06s)
+=== RUN   TestAdvancedExecutionCorpus
+=== RUN   TestAdvancedExecutionCorpus/short_circuit_and
+=== RUN   TestAdvancedExecutionCorpus/short_circuit_or
+=== RUN   TestAdvancedExecutionCorpus/label_in_eliminated_constant_branch
+=== RUN   TestAdvancedExecutionCorpus/switch
+=== RUN   TestAdvancedExecutionCorpus/switch_fallthrough
+=== RUN   TestAdvancedExecutionCorpus/string_switch_compares_contents
+=== RUN   TestAdvancedExecutionCorpus/package_constants
+=== RUN   TestAdvancedExecutionCorpus/dynamic_numeric_conversions
+=== RUN   TestAdvancedExecutionCorpus/mutable_globals
+=== RUN   TestAdvancedExecutionCorpus/global_zero_and_constant_strings
+=== RUN   TestAdvancedExecutionCorpus/constant_struct_global
+=== RUN   TestAdvancedExecutionCorpus/global_float32_preserves_following_string_alignment
+=== RUN   TestAdvancedExecutionCorpus/global_slice_assignment
+=== RUN   TestAdvancedExecutionCorpus/static_numeric_global_slice
+=== RUN   TestAdvancedExecutionCorpus/dynamic_fields_in_global_composite
+=== RUN   TestAdvancedExecutionCorpus/global_composite_references_variables_and_function
+=== RUN   TestAdvancedExecutionCorpus/escaping_aggregate_closure_capture
+=== RUN   TestAdvancedExecutionCorpus/interface_string_extraction_preserves_descriptor
+=== RUN   TestAdvancedExecutionCorpus/dynamic_global_slice_descriptor_survives_initializer_frame
+=== RUN   TestAdvancedExecutionCorpus/global_zero_slice
+=== RUN   TestAdvancedExecutionCorpus/global_slice_backing_survives_callee
+=== RUN   TestAdvancedExecutionCorpus/slice_literal_copies_struct_elements
+=== RUN   TestAdvancedExecutionCorpus/map_literal_copies_string_keys_and_struct_values
+=== RUN   TestAdvancedExecutionCorpus/map_growth_marks_inserted_slot_occupied
+=== RUN   TestAdvancedExecutionCorpus/forward_multiple_results
+=== RUN   TestAdvancedExecutionCorpus/multiple_aggregate_results
+=== RUN   TestAdvancedExecutionCorpus/nil_interface_after_aggregate_result
+=== RUN   TestAdvancedExecutionCorpus/generic_globals_function_values_and_forwarded_results
+=== RUN   TestAdvancedExecutionCorpus/named_aggregate_results
+=== RUN   TestAdvancedExecutionCorpus/slice_first_multi_result
+=== RUN   TestAdvancedExecutionCorpus/slice_base_evaluated_once
+=== RUN   TestAdvancedExecutionCorpus/slice_multi_result_loop
+=== RUN   TestAdvancedExecutionCorpus/nil_aggregate_result
+=== RUN   TestAdvancedExecutionCorpus/named_interface_result_assignment
+=== RUN   TestAdvancedExecutionCorpus/implicit_pointer_method_receiver
+=== RUN   TestAdvancedExecutionCorpus/implicit_dereference_for_value_method_receiver
+=== RUN   TestAdvancedExecutionCorpus/promoted_embedded_method_receiver
+=== RUN   TestAdvancedExecutionCorpus/promoted_embedded_scalar_value_receiver
+=== RUN   TestAdvancedExecutionCorpus/promoted_embedded_interface_method
+=== RUN   TestAdvancedExecutionCorpus/promoted_embedded_interface_multi-result_method
+=== RUN   TestAdvancedExecutionCorpus/promoted_field_through_embedded_pointer
+=== RUN   TestAdvancedExecutionCorpus/global_elided_pointer_struct_slice
+=== RUN   TestAdvancedExecutionCorpus/global_concrete_error_interface
+=== RUN   TestAdvancedExecutionCorpus/global_composite_interface_initializer
+=== RUN   TestAdvancedExecutionCorpus/global_string_slice_inline_headers
+=== RUN   TestAdvancedExecutionCorpus/global_float_slice_data
+=== RUN   TestAdvancedExecutionCorpus/global_struct_nil_interface_field
+=== RUN   TestAdvancedExecutionCorpus/global_static_scalar_interface_payloads
+=== RUN   TestAdvancedExecutionCorpus/map-containing_global_composite_initializes_dynamically
+=== RUN   TestAdvancedExecutionCorpus/global_static_struct_interface_field
+=== RUN   TestAdvancedExecutionCorpus/type_switch_interface_case
+=== RUN   TestAdvancedExecutionCorpus/concrete_interface_assertion
+=== RUN   TestAdvancedExecutionCorpus/direct_interface_assertion
+=== RUN   TestAdvancedExecutionCorpus/pointer_to_slice_local_through_interface
+=== RUN   TestAdvancedExecutionCorpus/interface_struct_field_assignment
+=== RUN   TestAdvancedExecutionCorpus/multi_result_interface_struct_field_assignment
+=== RUN   TestAdvancedExecutionCorpus/interface_struct_field_composite
+=== RUN   TestAdvancedExecutionCorpus/interface_method_in_composite_field
+=== RUN   TestAdvancedExecutionCorpus/named_function_interface_receiver
+=== RUN   TestAdvancedExecutionCorpus/method_value_forwards_multiple_results
+=== RUN   TestAdvancedExecutionCorpus/nil_interface_struct_field
+=== RUN   TestAdvancedExecutionCorpus/aggregate_interface_payload_survives_callee
+=== RUN   TestAdvancedExecutionCorpus/returned_interface_survives_callee_frame
+=== RUN   TestAdvancedExecutionCorpus/secondary_interface_result_survives_callee_frame
+=== RUN   TestAdvancedExecutionCorpus/function_field_nonempty_interface_result_survives_storage
+=== RUN   TestAdvancedExecutionCorpus/global_function_field_nonempty_interface_result_survives_storage
+=== RUN   TestAdvancedExecutionCorpus/forwarded_multi_result_converts_concrete_value_to_interface
+=== RUN   TestAdvancedExecutionCorpus/global_struct_slice_contains_string_slice
+=== RUN   TestAdvancedExecutionCorpus/global_array_of_structs
+=== RUN   TestAdvancedExecutionCorpus/global_struct_slice_with_array_field
+=== RUN   TestAdvancedExecutionCorpus/local_aggregate_zero_initialization
+=== RUN   TestAdvancedExecutionCorpus/range_over_temporary_slice_literal
+=== RUN   TestAdvancedExecutionCorpus/implicit_pointer_composite_literal
+=== RUN   TestAdvancedExecutionCorpus/deferred_function_call
+=== RUN   TestAdvancedExecutionCorpus/return_expression_is_evaluated_before_defer
+=== RUN   TestAdvancedExecutionCorpus/defer_updates_explicit_named_result
+=== RUN   TestAdvancedExecutionCorpus/defer_updates_named_result_from_captured_pointer
+=== RUN   TestAdvancedExecutionCorpus/recover_outside_panic
+=== RUN   TestAdvancedExecutionCorpus/append_scalar_growth
+=== RUN   TestAdvancedExecutionCorpus/append_slice_ellipsis
+--- PASS: TestAdvancedExecutionCorpus (4.49s)
+    --- PASS: TestAdvancedExecutionCorpus/short_circuit_and (0.06s)
+    --- PASS: TestAdvancedExecutionCorpus/short_circuit_or (0.06s)
+    --- PASS: TestAdvancedExecutionCorpus/label_in_eliminated_constant_branch (0.05s)
+    --- PASS: TestAdvancedExecutionCorpus/switch (0.06s)
+    --- PASS: TestAdvancedExecutionCorpus/switch_fallthrough (0.06s)
+    --- PASS: TestAdvancedExecutionCorpus/string_switch_compares_contents (0.06s)
+    --- PASS: TestAdvancedExecutionCorpus/package_constants (0.05s)
+    --- PASS: TestAdvancedExecutionCorpus/dynamic_numeric_conversions (0.05s)
+    --- PASS: TestAdvancedExecutionCorpus/mutable_globals (0.05s)
+    --- PASS: TestAdvancedExecutionCorpus/global_zero_and_constant_strings (0.06s)
+    --- PASS: TestAdvancedExecutionCorpus/constant_struct_global (0.06s)
+    --- PASS: TestAdvancedExecutionCorpus/global_float32_preserves_following_string_alignment (0.05s)
+    --- PASS: TestAdvancedExecutionCorpus/global_slice_assignment (0.06s)
+    --- PASS: TestAdvancedExecutionCorpus/static_numeric_global_slice (0.06s)
+    --- PASS: TestAdvancedExecutionCorpus/dynamic_fields_in_global_composite (0.06s)
+    --- PASS: TestAdvancedExecutionCorpus/global_composite_references_variables_and_function (0.06s)
+    --- PASS: TestAdvancedExecutionCorpus/escaping_aggregate_closure_capture (0.05s)
+    --- PASS: TestAdvancedExecutionCorpus/interface_string_extraction_preserves_descriptor (0.06s)
+    --- PASS: TestAdvancedExecutionCorpus/dynamic_global_slice_descriptor_survives_initializer_frame (0.06s)
+    --- PASS: TestAdvancedExecutionCorpus/global_zero_slice (0.05s)
+    --- PASS: TestAdvancedExecutionCorpus/global_slice_backing_survives_callee (0.05s)
+    --- PASS: TestAdvancedExecutionCorpus/slice_literal_copies_struct_elements (0.06s)
+    --- PASS: TestAdvancedExecutionCorpus/map_literal_copies_string_keys_and_struct_values (0.06s)
+    --- PASS: TestAdvancedExecutionCorpus/map_growth_marks_inserted_slot_occupied (0.06s)
+    --- PASS: TestAdvancedExecutionCorpus/forward_multiple_results (0.06s)
+    --- PASS: TestAdvancedExecutionCorpus/multiple_aggregate_results (0.06s)
+    --- PASS: TestAdvancedExecutionCorpus/nil_interface_after_aggregate_result (0.06s)
+    --- PASS: TestAdvancedExecutionCorpus/generic_globals_function_values_and_forwarded_results (0.06s)
+    --- PASS: TestAdvancedExecutionCorpus/named_aggregate_results (0.06s)
+    --- PASS: TestAdvancedExecutionCorpus/slice_first_multi_result (0.06s)
+    --- PASS: TestAdvancedExecutionCorpus/slice_base_evaluated_once (0.06s)
+    --- PASS: TestAdvancedExecutionCorpus/slice_multi_result_loop (0.06s)
+    --- PASS: TestAdvancedExecutionCorpus/nil_aggregate_result (0.05s)
+    --- PASS: TestAdvancedExecutionCorpus/named_interface_result_assignment (0.05s)
+    --- PASS: TestAdvancedExecutionCorpus/implicit_pointer_method_receiver (0.05s)
+    --- PASS: TestAdvancedExecutionCorpus/implicit_dereference_for_value_method_receiver (0.06s)
+    --- PASS: TestAdvancedExecutionCorpus/promoted_embedded_method_receiver (0.06s)
+    --- PASS: TestAdvancedExecutionCorpus/promoted_embedded_scalar_value_receiver (0.06s)
+    --- PASS: TestAdvancedExecutionCorpus/promoted_embedded_interface_method (0.06s)
+    --- PASS: TestAdvancedExecutionCorpus/promoted_embedded_interface_multi-result_method (0.06s)
+    --- PASS: TestAdvancedExecutionCorpus/promoted_field_through_embedded_pointer (0.05s)
+    --- PASS: TestAdvancedExecutionCorpus/global_elided_pointer_struct_slice (0.06s)
+    --- PASS: TestAdvancedExecutionCorpus/global_concrete_error_interface (0.05s)
+    --- PASS: TestAdvancedExecutionCorpus/global_composite_interface_initializer (0.06s)
+    --- PASS: TestAdvancedExecutionCorpus/global_string_slice_inline_headers (0.06s)
+    --- PASS: TestAdvancedExecutionCorpus/global_float_slice_data (0.06s)
+    --- PASS: TestAdvancedExecutionCorpus/global_struct_nil_interface_field (0.05s)
+    --- PASS: TestAdvancedExecutionCorpus/global_static_scalar_interface_payloads (0.06s)
+    --- PASS: TestAdvancedExecutionCorpus/map-containing_global_composite_initializes_dynamically (0.06s)
+    --- PASS: TestAdvancedExecutionCorpus/global_static_struct_interface_field (0.06s)
+    --- PASS: TestAdvancedExecutionCorpus/type_switch_interface_case (0.06s)
+    --- PASS: TestAdvancedExecutionCorpus/concrete_interface_assertion (0.06s)
+    --- PASS: TestAdvancedExecutionCorpus/direct_interface_assertion (0.06s)
+    --- PASS: TestAdvancedExecutionCorpus/pointer_to_slice_local_through_interface (0.06s)
+    --- PASS: TestAdvancedExecutionCorpus/interface_struct_field_assignment (0.05s)
+    --- PASS: TestAdvancedExecutionCorpus/multi_result_interface_struct_field_assignment (0.06s)
+    --- PASS: TestAdvancedExecutionCorpus/interface_struct_field_composite (0.06s)
+    --- PASS: TestAdvancedExecutionCorpus/interface_method_in_composite_field (0.06s)
+    --- PASS: TestAdvancedExecutionCorpus/named_function_interface_receiver (0.06s)
+    --- PASS: TestAdvancedExecutionCorpus/method_value_forwards_multiple_results (0.05s)
+    --- PASS: TestAdvancedExecutionCorpus/nil_interface_struct_field (0.06s)
+    --- PASS: TestAdvancedExecutionCorpus/aggregate_interface_payload_survives_callee (0.06s)
+    --- PASS: TestAdvancedExecutionCorpus/returned_interface_survives_callee_frame (0.06s)
+    --- PASS: TestAdvancedExecutionCorpus/secondary_interface_result_survives_callee_frame (0.06s)
+    --- PASS: TestAdvancedExecutionCorpus/function_field_nonempty_interface_result_survives_storage (0.06s)
+    --- PASS: TestAdvancedExecutionCorpus/global_function_field_nonempty_interface_result_survives_storage (0.06s)
+    --- PASS: TestAdvancedExecutionCorpus/forwarded_multi_result_converts_concrete_value_to_interface (0.06s)
+    --- PASS: TestAdvancedExecutionCorpus/global_struct_slice_contains_string_slice (0.06s)
+    --- PASS: TestAdvancedExecutionCorpus/global_array_of_structs (0.05s)
+    --- PASS: TestAdvancedExecutionCorpus/global_struct_slice_with_array_field (0.05s)
+    --- PASS: TestAdvancedExecutionCorpus/local_aggregate_zero_initialization (0.05s)
+    --- PASS: TestAdvancedExecutionCorpus/range_over_temporary_slice_literal (0.05s)
+    --- PASS: TestAdvancedExecutionCorpus/implicit_pointer_composite_literal (0.06s)
+    --- PASS: TestAdvancedExecutionCorpus/deferred_function_call (0.05s)
+    --- PASS: TestAdvancedExecutionCorpus/return_expression_is_evaluated_before_defer (0.05s)
+    --- PASS: TestAdvancedExecutionCorpus/defer_updates_explicit_named_result (0.06s)
+    --- PASS: TestAdvancedExecutionCorpus/defer_updates_named_result_from_captured_pointer (0.06s)
+    --- PASS: TestAdvancedExecutionCorpus/recover_outside_panic (0.06s)
+    --- PASS: TestAdvancedExecutionCorpus/append_scalar_growth (0.05s)
+    --- PASS: TestAdvancedExecutionCorpus/append_slice_ellipsis (0.06s)
+=== RUN   TestRuntimePanicRecover
+--- PASS: TestRuntimePanicRecover (2.39s)
+=== RUN   TestRuntimeDeferReturnValues
+--- PASS: TestRuntimeDeferReturnValues (2.41s)
+=== RUN   TestRuntimeDeferModifiesLaterNamedResults
+--- PASS: TestRuntimeDeferModifiesLaterNamedResults (2.47s)
+=== RUN   TestRuntimeRepeatedDeferCapturesEachRegistration
+--- PASS: TestRuntimeRepeatedDeferCapturesEachRegistration (2.44s)
+=== RUN   TestStandardLibrarySHA256
+--- PASS: TestStandardLibrarySHA256 (1.32s)
+=== RUN   TestRepositoryStandardLibraryUTF8
+--- PASS: TestRepositoryStandardLibraryUTF8 (0.07s)
+=== RUN   TestUnsafeSliceHeaderDereference
+--- PASS: TestUnsafeSliceHeaderDereference (0.06s)
+=== RUN   TestRepositoryStandardLibraryUTF16
+--- PASS: TestRepositoryStandardLibraryUTF16 (0.06s)
+=== RUN   TestRepositoryStandardLibraryUTF16DecodeAllocations
+--- PASS: TestRepositoryStandardLibraryUTF16DecodeAllocations (6.85s)
+=== RUN   TestRuntimeDynamicGlobalInitializerUsesImportedGlobal
+--- PASS: TestRuntimeDynamicGlobalInitializerUsesImportedGlobal (2.57s)
+=== RUN   TestRuntimeMultiResultGlobalInitializers
+--- PASS: TestRuntimeMultiResultGlobalInitializers (2.43s)
+=== RUN   TestRuntimePackageInitializersRunInDeclarationOrder
+--- PASS: TestRuntimePackageInitializersRunInDeclarationOrder (2.43s)
+=== RUN   TestRuntimeCallArgumentsSurviveInterfaceNormalization
+--- PASS: TestRuntimeCallArgumentsSurviveInterfaceNormalization (2.44s)
+=== RUN   TestRuntimeKeyedGlobalSliceLiteral
+--- PASS: TestRuntimeKeyedGlobalSliceLiteral (2.93s)
+=== RUN   TestRuntimeNestedGlobalArrayLiteral
+--- PASS: TestRuntimeNestedGlobalArrayLiteral (3.25s)
+=== RUN   TestRuntimeReturnedSlicePromotesCallerArray
+--- PASS: TestRuntimeReturnedSlicePromotesCallerArray (3.54s)
+=== RUN   TestRepositoryStandardLibraryHex
+--- PASS: TestRepositoryStandardLibraryHex (1.72s)
+=== RUN   TestRepositoryStandardLibraryAdler32
+--- PASS: TestRepositoryStandardLibraryAdler32 (0.97s)
+=== RUN   TestRepositoryStandardLibraryAdler32WriteString
+--- PASS: TestRepositoryStandardLibraryAdler32WriteString (3.69s)
+=== RUN   TestRepositoryStandardLibraryBinary
+--- PASS: TestRepositoryStandardLibraryBinary (1.53s)
+=== RUN   TestRepositoryStandardLibraryMD5
+--- PASS: TestRepositoryStandardLibraryMD5 (7.57s)
+=== RUN   TestRepositoryStandardLibrarySHA1
+--- PASS: TestRepositoryStandardLibrarySHA1 (7.77s)
+=== RUN   TestRepositoryStandardLibraryFNVConstructor
+--- PASS: TestRepositoryStandardLibraryFNVConstructor (1.01s)
+=== RUN   TestRuntimeSliceValueSemanticsAcrossABI
+--- PASS: TestRuntimeSliceValueSemanticsAcrossABI (3.15s)
+=== RUN   TestRuntimeSliceValuesThroughInterfaceMethod
+--- PASS: TestRuntimeSliceValuesThroughInterfaceMethod (3.38s)
+=== RUN   TestRuntimeSliceValuesThroughMethodValue
+--- PASS: TestRuntimeSliceValuesThroughMethodValue (3.48s)
+=== RUN   TestRuntimeEscapingMethodValuePreservesReceiver
+--- PASS: TestRuntimeEscapingMethodValuePreservesReceiver (3.46s)
+=== RUN   TestRuntimeOnceValueReturningFunction
+--- PASS: TestRuntimeOnceValueReturningFunction (3.37s)
+=== RUN   TestRuntimeReflectRecognizesConcreteInterfaceMethods
+--- PASS: TestRuntimeReflectRecognizesConcreteInterfaceMethods (5.57s)
+=== RUN   TestRuntimeReflectNewUsesCanonicalPointerType
+--- PASS: TestRuntimeReflectNewUsesCanonicalPointerType (5.60s)
+=== RUN   TestRuntimeReflectDistinguishesLocalNamedTypes
+--- PASS: TestRuntimeReflectDistinguishesLocalNamedTypes (5.25s)
+=== RUN   TestRuntimeReflectiveInterfaceAssertionKeepsMethodReachable
+--- PASS: TestRuntimeReflectiveInterfaceAssertionKeepsMethodReachable (5.26s)
+=== RUN   TestRuntimePointerReflectsValueReceiverMethod
+--- PASS: TestRuntimePointerReflectsValueReceiverMethod (5.54s)
+=== RUN   TestRuntimeReflectTypeAssertSupportsDirectInterfaceValue
+--- PASS: TestRuntimeReflectTypeAssertSupportsDirectInterfaceValue (5.26s)
+=== RUN   TestRuntimeErrorStoredThroughInterfaceParameter
+--- PASS: TestRuntimeErrorStoredThroughInterfaceParameter (3.54s)
+=== RUN   TestRuntimeReflectSetZeroClearsPointerField
+--- PASS: TestRuntimeReflectSetZeroClearsPointerField (5.29s)
+=== RUN   TestRuntimeReflectCallPassesStructWithStringAndSliceFields
+--- PASS: TestRuntimeReflectCallPassesStructWithStringAndSliceFields (5.38s)
+=== RUN   TestRuntimeDispatchesMethodPromotedFromEmbeddedInterface
+--- PASS: TestRuntimeDispatchesMethodPromotedFromEmbeddedInterface (3.54s)
+=== RUN   TestRuntimeMethodExpressionFunctionValuePreservesReceiver
+--- PASS: TestRuntimeMethodExpressionFunctionValuePreservesReceiver (3.05s)
+=== RUN   TestRuntimePromotesImplicitPointerReceiverWhenReceiverEscapes
+--- PASS: TestRuntimePromotesImplicitPointerReceiverWhenReceiverEscapes (3.16s)
+=== RUN   TestRuntimeGenericReceiverMethodValueUsesInstantiatedSymbol
+--- PASS: TestRuntimeGenericReceiverMethodValueUsesInstantiatedSymbol (3.19s)
+=== RUN   TestRuntimeInterfaceMethodReturningStringSurvivesStackGrowth
+--- PASS: TestRuntimeInterfaceMethodReturningStringSurvivesStackGrowth (3.05s)
+=== RUN   TestRuntimeFunctionFieldReturnsNonEmptyInterface
+--- PASS: TestRuntimeFunctionFieldReturnsNonEmptyInterface (3.24s)
+=== RUN   TestRuntimeForwardedMultiResultConvertsConcreteToInterface
+--- PASS: TestRuntimeForwardedMultiResultConvertsConcreteToInterface (3.44s)
+=== RUN   TestRuntimeStackArgumentsPreserveInterfaceDataWord
+--- PASS: TestRuntimeStackArgumentsPreserveInterfaceDataWord (3.35s)
+=== RUN   TestRuntimeDeferredPointerMethodOnStructFieldUsesFieldAddress
+--- PASS: TestRuntimeDeferredPointerMethodOnStructFieldUsesFieldAddress (3.22s)
+=== RUN   TestRuntimeDeferredRWMutexLockTransition
+--- PASS: TestRuntimeDeferredRWMutexLockTransition (3.26s)
+=== RUN   TestRuntimeInterfaceReadReturnsMultipleValuesAcrossStackGrowth
+--- PASS: TestRuntimeInterfaceReadReturnsMultipleValuesAcrossStackGrowth (3.00s)
+=== RUN   TestRuntimePointerInInterfaceSurvivesStackGrowth
+--- PASS: TestRuntimePointerInInterfaceSurvivesStackGrowth (3.26s)
+=== RUN   TestRuntimeReflectUpdatesConcretePointerStoredInInterface
+--- PASS: TestRuntimeReflectUpdatesConcretePointerStoredInInterface (4.93s)
+=== RUN   TestRuntimeReflectValueEqualDistinguishesDifferentPointers
+--- PASS: TestRuntimeReflectValueEqualDistinguishesDifferentPointers (5.34s)
+=== RUN   TestRuntimeReflectWalksPointerStoredInInterface
+--- PASS: TestRuntimeReflectWalksPointerStoredInInterface (5.69s)
+=== RUN   TestRuntimeJSONUpdatesConcretePointerStoredInInterface
+--- PASS: TestRuntimeJSONUpdatesConcretePointerStoredInInterface (10.15s)
+=== RUN   TestRuntimeGlobalNamedIntegerErrorInterface
+--- PASS: TestRuntimeGlobalNamedIntegerErrorInterface (3.16s)
+=== RUN   TestRuntimeEnvironmentUpdateAndLookup
+--- PASS: TestRuntimeEnvironmentUpdateAndLookup (5.71s)
+=== RUN   TestRuntimeReturnedStringsInStructLiteral
+--- PASS: TestRuntimeReturnedStringsInStructLiteral (3.14s)
+=== RUN   TestRuntimeAddressesOfSliceAndMapLiterals
+--- PASS: TestRuntimeAddressesOfSliceAndMapLiterals (3.68s)
+=== RUN   TestRuntimeNestedGlobalStructLiteral
+--- PASS: TestRuntimeNestedGlobalStructLiteral (3.25s)
+=== RUN   TestRuntimeGlobalByteSliceFromConstantString
+--- PASS: TestRuntimeGlobalByteSliceFromConstantString (3.34s)
+=== RUN   TestRuntimeMapGrowthKeepsDirectoryBackingAlive
+--- PASS: TestRuntimeMapGrowthKeepsDirectoryBackingAlive (3.17s)
+=== RUN   TestRuntimeMapCompositeKeyUsesGeneratedEquality
+--- PASS: TestRuntimeMapCompositeKeyUsesGeneratedEquality (3.12s)
+=== RUN   TestRuntimeIncrementInterfaceKeyedMapElement
+--- PASS: TestRuntimeIncrementInterfaceKeyedMapElement (2.78s)
+=== RUN   TestRuntimeGenericMapRangeUsesRuntimeIterator
+--- PASS: TestRuntimeGenericMapRangeUsesRuntimeIterator (2.86s)
+=== RUN   TestRuntimeNestedSlicePointerSurvivesEscapingRangeValue
+--- PASS: TestRuntimeNestedSlicePointerSurvivesEscapingRangeValue (3.36s)
+=== RUN   TestRuntimeEscapingSlicePointerKeepsBackingAlive
+--- PASS: TestRuntimeEscapingSlicePointerKeepsBackingAlive (3.22s)
+=== RUN   TestRuntimeInterfaceSliceStoresUseWriteBarriers
+--- PASS: TestRuntimeInterfaceSliceStoresUseWriteBarriers (3.39s)
+=== RUN   TestRuntimeSliceValuePassedToGoroutine
+--- PASS: TestRuntimeSliceValuePassedToGoroutine (3.40s)
+=== RUN   TestRuntimeClosurePassedToGoroutine
+--- PASS: TestRuntimeClosurePassedToGoroutine (3.25s)
+=== RUN   TestRuntimeClosureWithArgumentsPassedToGoroutine
+--- PASS: TestRuntimeClosureWithArgumentsPassedToGoroutine (2.91s)
+=== RUN   TestRuntimeGoroutineClosureSurvivesGarbageCollection
+--- PASS: TestRuntimeGoroutineClosureSurvivesGarbageCollection (3.18s)
+=== RUN   TestRuntimeNestedDeferInDeferredClosure
+--- PASS: TestRuntimeNestedDeferInDeferredClosure (3.06s)
+=== RUN   TestRepositoryStandardLibraryOnceFuncSharesCapture
+--- PASS: TestRepositoryStandardLibraryOnceFuncSharesCapture (3.32s)
+=== RUN   TestRuntimeSelectSendDefault
+--- PASS: TestRuntimeSelectSendDefault (2.95s)
+=== RUN   TestRuntimeSelectChoosesDefault
+--- PASS: TestRuntimeSelectChoosesDefault (2.97s)
+=== RUN   TestRuntimeSelectReceiveDefault
+--- PASS: TestRuntimeSelectReceiveDefault (3.11s)
+=== RUN   TestRuntimeSelectReceiveChoosesDefault
+--- PASS: TestRuntimeSelectReceiveChoosesDefault (3.30s)
+=== RUN   TestRuntimeSelectMultipleChannels
+--- PASS: TestRuntimeSelectMultipleChannels (3.25s)
+=== RUN   TestRuntimeSelectWithoutCommunicationCases
+--- PASS: TestRuntimeSelectWithoutCommunicationCases (3.17s)
+=== RUN   TestRuntimeSliceToArrayConversionCopiesValue
+--- PASS: TestRuntimeSliceToArrayConversionCopiesValue (3.27s)
+=== RUN   TestRuntimeSliceToArrayPointerConversionBoxesPointer
+--- PASS: TestRuntimeSliceToArrayPointerConversionBoxesPointer (3.10s)
+=== RUN   TestRuntimeIntegerToStringConversion
+--- PASS: TestRuntimeIntegerToStringConversion (3.14s)
+=== RUN   TestRuntimeAppendStringEllipsis
+--- PASS: TestRuntimeAppendStringEllipsis (3.05s)
+=== RUN   TestRuntimeAppendMakeToNilSlice
+--- PASS: TestRuntimeAppendMakeToNilSlice (3.15s)
+=== RUN   TestRuntimeMakeEmptySliceIsNonNil
+--- PASS: TestRuntimeMakeEmptySliceIsNonNil (2.99s)
+=== RUN   TestRuntimeReflectMakeEmptySliceIsNonNil
+--- PASS: TestRuntimeReflectMakeEmptySliceIsNonNil (4.92s)
+=== RUN   TestRuntimeLengthOfSliceFieldInRangedStruct
+--- PASS: TestRuntimeLengthOfSliceFieldInRangedStruct (3.03s)
+=== RUN   TestRuntimeAppendInterfaceValuesCopiesHeaders
+--- PASS: TestRuntimeAppendInterfaceValuesCopiesHeaders (3.10s)
+=== RUN   TestRuntimeAppendNonEmptyInterfaceAcrossStackGrowth
+--- PASS: TestRuntimeAppendNonEmptyInterfaceAcrossStackGrowth (3.00s)
+=== RUN   TestMultiValueAssignmentConvertsConcreteResultToInterface
+--- PASS: TestMultiValueAssignmentConvertsConcreteResultToInterface (3.04s)
+=== RUN   TestRuntimeReturnedStringStoredInSlice
+--- PASS: TestRuntimeReturnedStringStoredInSlice (4.44s)
+=== RUN   TestRuntimeStaticGlobalSpecialFloatArray
+--- PASS: TestRuntimeStaticGlobalSpecialFloatArray (3.15s)
+=== RUN   TestRuntimeMathARM64Assembly
+--- PASS: TestRuntimeMathARM64Assembly (3.00s)
+=== RUN   TestRepositoryStandardLibraryRegexpMatchString
+--- PASS: TestRepositoryStandardLibraryRegexpMatchString (4.28s)
+=== RUN   TestRepositoryStandardLibraryRegexpErrorMethod
+--- PASS: TestRepositoryStandardLibraryRegexpErrorMethod (8.08s)
+=== RUN   TestRuntimeMultiValueCallExpandsAsArguments
+--- PASS: TestRuntimeMultiValueCallExpandsAsArguments (2.92s)
+=== RUN   TestRuntimeInterfaceToInterfaceAssertionPreservesDescriptor
+--- PASS: TestRuntimeInterfaceToInterfaceAssertionPreservesDescriptor (3.19s)
+=== RUN   TestRuntimeRangeOverFunction
+--- PASS: TestRuntimeRangeOverFunction (2.96s)
+=== RUN   TestRuntimeNamedInterfaceResultAddress
+--- PASS: TestRuntimeNamedInterfaceResultAddress (2.78s)
+=== RUN   TestRuntimeAtomicValueChannelRoundTrip
+--- PASS: TestRuntimeAtomicValueChannelRoundTrip (2.97s)
+=== RUN   TestRuntimeContextCancelDone
+--- PASS: TestRuntimeContextCancelDone (3.90s)
+=== RUN   TestRuntimeStringSliceConversionsCopy
+--- PASS: TestRuntimeStringSliceConversionsCopy (2.87s)
+=== RUN   TestRuntimeRangeOverUntypedStringConstant
+--- PASS: TestRuntimeRangeOverUntypedStringConstant (2.84s)
+=== RUN   TestRepositoryStandardLibraryFileModeString
+--- PASS: TestRepositoryStandardLibraryFileModeString (4.11s)
+=== RUN   TestRuntimeStackPassedSliceSurvivesGarbageCollection
+--- PASS: TestRuntimeStackPassedSliceSurvivesGarbageCollection (3.28s)
+=== RUN   TestRuntimePointerSliceBackingScansElements
+--- PASS: TestRuntimePointerSliceBackingScansElements (3.29s)
+=== RUN   TestRuntimePointerToSliceLocalEscapes
+--- PASS: TestRuntimePointerToSliceLocalEscapes (3.29s)
+=== RUN   TestRuntimeClosureSurvivesGarbageCollectionInCallee
+--- PASS: TestRuntimeClosureSurvivesGarbageCollectionInCallee (3.10s)
+=== RUN   TestRuntimeConditionalEscapingClosureCapturesParameter
+--- PASS: TestRuntimeConditionalEscapingClosureCapturesParameter (2.92s)
+=== RUN   TestRuntimeClosurePassedToEscapingParameter
+--- PASS: TestRuntimeClosurePassedToEscapingParameter (2.92s)
+=== RUN   TestRuntimeInterfaceSwitchBoxesTypedScalarCases
+--- PASS: TestRuntimeInterfaceSwitchBoxesTypedScalarCases (3.10s)
+=== RUN   TestRepositoryStandardLibraryContainerList
+--- PASS: TestRepositoryStandardLibraryContainerList (3.01s)
+=== RUN   TestRepositoryStandardLibraryContainerRing
+--- PASS: TestRepositoryStandardLibraryContainerRing (2.78s)
+=== RUN   TestRepositoryStandardLibrarySort
+--- PASS: TestRepositoryStandardLibrarySort (3.39s)
+=== RUN   TestRepositoryStandardLibrarySortFindExhaustive
+--- PASS: TestRepositoryStandardLibrarySortFindExhaustive (3.13s)
+=== RUN   TestRepositoryStandardLibraryContainerHeap
+--- PASS: TestRepositoryStandardLibraryContainerHeap (3.07s)
+=== RUN   TestRepositoryStandardLibraryMaps
+--- PASS: TestRepositoryStandardLibraryMaps (2.96s)
+=== RUN   TestRepositoryStandardLibraryMapsCloneGlobal
+--- PASS: TestRepositoryStandardLibraryMapsCloneGlobal (2.99s)
+=== RUN   TestRepositoryStandardLibraryBufio
+--- PASS: TestRepositoryStandardLibraryBufio (3.36s)
+=== RUN   TestRepositoryStandardLibraryBufioLinesAfterRead
+--- PASS: TestRepositoryStandardLibraryBufioLinesAfterRead (3.35s)
+=== RUN   TestRepositoryStandardLibraryASCII85
+--- PASS: TestRepositoryStandardLibraryASCII85 (2.87s)
+=== RUN   TestRepositoryStandardLibraryBase32
+--- PASS: TestRepositoryStandardLibraryBase32 (2.92s)
+=== RUN   TestRepositoryStandardLibraryBase64
+--- PASS: TestRepositoryStandardLibraryBase64 (2.90s)
+=== RUN   TestRepositoryStandardLibraryCSV
+--- PASS: TestRepositoryStandardLibraryCSV (6.43s)
+=== RUN   TestRepositoryStandardLibraryIOCopyN
+--- PASS: TestRepositoryStandardLibraryIOCopyN (3.16s)
+=== RUN   TestRuntimeGlobalStructSliceInitializer
+--- PASS: TestRuntimeGlobalStructSliceInitializer (2.54s)
+=== RUN   TestRuntimeNestedGlobalSliceInitializer
+--- PASS: TestRuntimeNestedGlobalSliceInitializer (2.62s)
+=== RUN   TestRuntimeStringStructFieldCompoundAssignment
+--- PASS: TestRuntimeStringStructFieldCompoundAssignment (2.55s)
+=== RUN   TestRuntimeInterfaceChannelRoundTrip
+--- PASS: TestRuntimeInterfaceChannelRoundTrip (2.50s)
+=== RUN   TestRuntimeAddressRetainedThroughInterface
+--- PASS: TestRuntimeAddressRetainedThroughInterface (2.45s)
+=== RUN   TestRuntimeAddressOfStringParameterEscapes
+--- PASS: TestRuntimeAddressOfStringParameterEscapes (2.48s)
+=== RUN   TestRuntimeZeroSizeConcreteInterfaceEquality
+--- PASS: TestRuntimeZeroSizeConcreteInterfaceEquality (2.46s)
+=== RUN   TestRuntimeEscapingSliceOfLocalArray
+--- PASS: TestRuntimeEscapingSliceOfLocalArray (2.50s)
+=== RUN   TestRuntimeGoCallWithBlankParameters
+--- PASS: TestRuntimeGoCallWithBlankParameters (2.46s)
+=== RUN   TestRuntimeDeferredDelete
+--- PASS: TestRuntimeDeferredDelete (2.46s)
+=== RUN   TestRuntimeDeferredAndAsynchronousClose
+--- PASS: TestRuntimeDeferredAndAsynchronousClose (2.46s)
+=== RUN   TestRuntimeChannelReceiveCommaOKAssignment
+--- PASS: TestRuntimeChannelReceiveCommaOKAssignment (2.46s)
+=== RUN   TestMixedInterfaceConcreteEqualityExecution
+--- PASS: TestMixedInterfaceConcreteEqualityExecution (2.47s)
+=== RUN   TestInterfaceSliceElementConcreteEqualityExecution
+--- PASS: TestInterfaceSliceElementConcreteEqualityExecution (2.48s)
+=== RUN   TestRepositoryStandardLibraryRuntimeNumCPU
+--- PASS: TestRepositoryStandardLibraryRuntimeNumCPU (0.79s)
+=== RUN   TestMapExecution
+--- PASS: TestMapExecution (0.07s)
+=== RUN   TestTypeSwitchExecution
+--- PASS: TestTypeSwitchExecution (0.06s)
+=== RUN   TestCapturedClosureExecution
+--- PASS: TestCapturedClosureExecution (0.06s)
+=== RUN   TestGenericFunctionLiteralParameterExecution
+--- PASS: TestGenericFunctionLiteralParameterExecution (0.06s)
+=== RUN   TestRuntimeGenericInterfaceFieldPreservesDescriptor
+--- PASS: TestRuntimeGenericInterfaceFieldPreservesDescriptor (2.48s)
+=== RUN   TestRuntimeNamedSliceCommaOKTypeAssertion
+--- PASS: TestRuntimeNamedSliceCommaOKTypeAssertion (2.49s)
+=== RUN   TestRuntimeMultiValueReturnBoxesConcreteSliceAsInterface
+--- PASS: TestRuntimeMultiValueReturnBoxesConcreteSliceAsInterface (2.44s)
+=== RUN   TestRuntimeStackGrowthRelocatesInteriorPointers
+--- PASS: TestRuntimeStackGrowthRelocatesInteriorPointers (3.00s)
+=== RUN   TestEachFunctionsControlFlowStaysInsideThatFunction
+--- PASS: TestEachFunctionsControlFlowStaysInsideThatFunction (1.70s)
+=== RUN   TestValueBoxedIntoAnInterfaceEscapes
+--- PASS: TestValueBoxedIntoAnInterfaceEscapes (1.69s)
+=== RUN   TestCompositeLiteralAddressCarriesItsElementsToTheHeap
+--- PASS: TestCompositeLiteralAddressCarriesItsElementsToTheHeap (1.72s)
+=== RUN   TestParameterLeakingToAnInterfaceResultEscapes
+--- PASS: TestParameterLeakingToAnInterfaceResultEscapes (1.61s)
+=== RUN   TestRuntimeAllocationEscapeLowering
+--- PASS: TestRuntimeAllocationEscapeLowering (2.00s)
+=== RUN   TestAddressNestedInReturnedCompositeEscapes
+--- PASS: TestAddressNestedInReturnedCompositeEscapes (2.00s)
+=== RUN   TestUnsafePointerConvertedToUintptrDoesNotEscapeLocalArray
+--- PASS: TestUnsafePointerConvertedToUintptrDoesNotEscapeLocalArray (1.97s)
+=== RUN   TestPointerConversionPassedToNoEscapeFunctionStaysLocal
+--- PASS: TestPointerConversionPassedToNoEscapeFunctionStaysLocal (2.00s)
+=== RUN   TestRuntimeAggregateStorePublishesEveryPointerWord
+--- PASS: TestRuntimeAggregateStorePublishesEveryPointerWord (1.65s)
+=== RUN   TestRuntimeSliceBulkOperationsUseWriteBarriers
+--- PASS: TestRuntimeSliceBulkOperationsUseWriteBarriers (1.97s)
+=== RUN   TestHiddenResultPointersAreManagedStackReferences
+--- PASS: TestHiddenResultPointersAreManagedStackReferences (1.96s)
+=== RUN   TestFunctionLiteralForwardedToGoroutineEscapes
+--- PASS: TestFunctionLiteralForwardedToGoroutineEscapes (2.01s)
+=== RUN   TestSingleDirectDeferredFunctionLiteralStaysOnTheFrame
+--- PASS: TestSingleDirectDeferredFunctionLiteralStaysOnTheFrame (1.97s)
+=== RUN   TestDeferredClosureCapturedNamedResultStaysOnTheFrame
+--- PASS: TestDeferredClosureCapturedNamedResultStaysOnTheFrame (1.97s)
+=== RUN   TestConditionallyDeferredFunctionLiteralDoesNotAllocateBeforeItsBranch
+--- PASS: TestConditionallyDeferredFunctionLiteralDoesNotAllocateBeforeItsBranch (1.97s)
+=== RUN   TestRepeatedDeferredFunctionLiteralEscapes
+=== RUN   TestRepeatedDeferredFunctionLiteralEscapes/loop_body
+=== RUN   TestRepeatedDeferredFunctionLiteralEscapes/backward_goto
+--- PASS: TestRepeatedDeferredFunctionLiteralEscapes (3.99s)
+    --- PASS: TestRepeatedDeferredFunctionLiteralEscapes/loop_body (2.00s)
+    --- PASS: TestRepeatedDeferredFunctionLiteralEscapes/backward_goto (1.99s)
+=== RUN   TestDeferredFunctionLiteralAboveAForwardGotoStaysOnTheFrame
+--- PASS: TestDeferredFunctionLiteralAboveAForwardGotoStaysOnTheFrame (2.03s)
+=== RUN   TestFunctionLiteralPassedToEscapingParameterEscapes
+--- PASS: TestFunctionLiteralPassedToEscapingParameterEscapes (1.99s)
+=== RUN   TestSynchronousFunctionLiteralCaptureDoesNotPromoteStackSliceHeader
+--- PASS: TestSynchronousFunctionLiteralCaptureDoesNotPromoteStackSliceHeader (1.95s)
+=== RUN   TestRuntimeSelectShapedSynchronousCaptureDoesNotPromoteStackSliceHeaders
+--- PASS: TestRuntimeSelectShapedSynchronousCaptureDoesNotPromoteStackSliceHeaders (1.97s)
+=== RUN   TestFunctionAssignedGlobalSliceLiteralUsesEscapingBacking
+--- PASS: TestFunctionAssignedGlobalSliceLiteralUsesEscapingBacking (1.97s)
+=== RUN   TestLocalArraySlicedIntoNonRetainingCalleeStaysOnStack
+--- PASS: TestLocalArraySlicedIntoNonRetainingCalleeStaysOnStack (1.99s)
+=== RUN   TestLocalArraySlicedIntoReturnedSliceEscapes
+--- PASS: TestLocalArraySlicedIntoReturnedSliceEscapes (1.99s)
+=== RUN   TestZeroCaptureFunctionLiteralUsesStaticDescriptor
+--- PASS: TestZeroCaptureFunctionLiteralUsesStaticDescriptor (0.00s)
+=== RUN   TestUnsafePointerStoreKeepsWriteBarrier
+--- PASS: TestUnsafePointerStoreKeepsWriteBarrier (1.61s)
+=== RUN   TestNotInHeapPointerStoreSkipsWriteBarrier
+--- PASS: TestNotInHeapPointerStoreSkipsWriteBarrier (1.63s)
+=== RUN   TestKeepAliveStoresIntoAFrameSlotRatherThanAGlobal
+--- PASS: TestKeepAliveStoresIntoAFrameSlotRatherThanAGlobal (1.65s)
+=== RUN   TestParameterLeakingOnlyToResultDoesNotEscapeItsCaller
+--- PASS: TestParameterLeakingOnlyToResultDoesNotEscapeItsCaller (2.01s)
+=== RUN   TestParameterAssignedToACalleeNamedResultEscapes
+--- PASS: TestParameterAssignedToACalleeNamedResultEscapes (1.99s)
+=== RUN   TestFieldAddressThatEscapesPromotesItsObject
+--- PASS: TestFieldAddressThatEscapesPromotesItsObject (1.99s)
+=== RUN   TestClosureStoredInAFrameStructDoesNotEscape
+--- PASS: TestClosureStoredInAFrameStructDoesNotEscape (1.97s)
+=== RUN   TestEscapeSummaryPointerPassedInsideAStructEscapes
+--- PASS: TestEscapeSummaryPointerPassedInsideAStructEscapes (1.75s)
+=== RUN   TestEscapeSummarySliceBackingBarrieredIntoItsHeaderIsStillTracked
+--- PASS: TestEscapeSummarySliceBackingBarrieredIntoItsHeaderIsStillTracked (1.75s)
+=== RUN   TestEscapeShadowPlacement
+    escapesummary_test.go:68: front-end placements evaluated: 189094 (frame 157641, heap 31453)
+    escapesummary_test.go:70: agree 180645; front frame -> IR heap 8008; front heap -> IR frame 441
+    escapesummary_test.go:80: distinct front-end placement sites: 5469 (frame 2986, heap 2483)
+    escapesummary_test.go:81: distinct disagreement sites: 337
+    escapesummary_test.go:83:       55  frame -> heap  store into non-local storage
+    escapesummary_test.go:83:       48  frame -> heap  argument 0 of $runtime.stringtoslicebyte escapes
+    escapesummary_test.go:83:       48  heap -> frame  at composite-literal
+    escapesummary_test.go:83:       12  heap -> frame  at slice-literal-backing
+    escapesummary_test.go:83:       10  frame -> heap  call to $bytes.Repeat with scalarised aggregate arguments
+    escapesummary_test.go:83:        8  frame -> heap  call to $crypto/internal/fips140/edwards25519.Point.SetBytes with scalarised aggregate arguments
+    escapesummary_test.go:83:        7  frame -> heap  write barrier into non-local storage
+    escapesummary_test.go:83:        6  frame -> heap  call to $crypto/internal/fips140/bigmod.Nat.SetBytes with scalarised aggregate arguments
+    escapesummary_test.go:83:        6  frame -> heap  call to $crypto/internal/fips140/tls13.ExpandLabel[hash.Hash] with scalarised aggregate arguments
+    escapesummary_test.go:83:        5  frame -> heap  call to $crypto/internal/fips140/rsa.signPKCS1v15 with scalarised aggregate arguments
+    escapesummary_test.go:83:        5  heap -> frame  at composite-literal, in a loop
+    escapesummary_test.go:83:        4  frame -> heap  argument 0 of $crypto/internal/fips140/ed25519.precomputePrivateKey escapes
+    escapesummary_test.go:83:        4  frame -> heap  argument 0 of $crypto/internal/fips140/mlkem.kemKeyGen escapes
+    escapesummary_test.go:83:        4  frame -> heap  argument 0 of $runtime.stringtoslicebyte escapes, in a loop
+    escapesummary_test.go:83:        4  frame -> heap  call to $crypto/internal/fips140/edwards25519/field.Element.SetBytes with scalarised aggregate arguments
+    escapesummary_test.go:83:        4  frame -> heap  call to $crypto/internal/fips140/sha512.Digest.Write with scalarised aggregate arguments
+    escapesummary_test.go:83:        4  frame -> heap  call to $crypto/internal/fips140/subtle.ConstantTimeCompare with scalarised aggregate arguments
+    escapesummary_test.go:83:        4  heap -> frame  at escaping-typed, in a loop
+    escapesummary_test.go:83:        3  frame -> heap  call to $crypto/internal/fips140/aes.New with scalarised aggregate arguments
+    escapesummary_test.go:83:        3  frame -> heap  call to $crypto/internal/fips140/bigmod.NewModulus with scalarised aggregate arguments
+    escapesummary_test.go:83:        3  frame -> heap  call to $crypto/internal/fips140/nistec/fiat.P224Element.SetBytes with scalarised aggregate arguments
+    escapesummary_test.go:83:        3  frame -> heap  call to $crypto/internal/fips140/nistec/fiat.P384Element.SetBytes with scalarised aggregate arguments
+    escapesummary_test.go:83:        3  frame -> heap  call to $crypto/internal/fips140/nistec/fiat.P521Element.SetBytes with scalarised aggregate arguments
+    escapesummary_test.go:83:        3  frame -> heap  call to $crypto/internal/fips140/sha512.Digest.Sum with scalarised aggregate arguments
+    escapesummary_test.go:83:        3  frame -> heap  call to $crypto/tls.selectCipherSuite with scalarised aggregate arguments
+    escapesummary_test.go:83:        3  frame -> heap  call to $slices.Equal[[]int,int] with scalarised aggregate arguments
+    escapesummary_test.go:83:        2  frame -> heap  argument 0 of $image/png.decoder.checkHeader escapes
+    escapesummary_test.go:83:        2  frame -> heap  call to $bytes.Buffer.Read with scalarised aggregate arguments
+    escapesummary_test.go:83:        2  frame -> heap  call to $crypto/internal/fips140/sha256.Digest.Write with scalarised aggregate arguments
+    escapesummary_test.go:83:        2  frame -> heap  call to $crypto/internal/fips140deps/byteorder.BEUint64 with scalarised aggregate arguments
+    escapesummary_test.go:83:        2  frame -> heap  call to $crypto/internal/fips140deps/byteorder.LEUint64 with scalarised aggregate arguments
+    escapesummary_test.go:83:        2  frame -> heap  call to $crypto/tls.computeAndUpdatePSK, whose argument list does not match its parameters
+    escapesummary_test.go:83:        2  frame -> heap  call to $net.UDPConn.ReadFromUDP with scalarised aggregate arguments
+    escapesummary_test.go:83:        2  frame -> heap  call to $net/http.http2splitHeaderBlock, whose argument list does not match its parameters
+    escapesummary_test.go:83:        2  frame -> heap  call to $reflect.StructOf with scalarised aggregate arguments
+    escapesummary_test.go:83:        2  frame -> heap  call to $runtime.gwrite with scalarised aggregate arguments, in a loop
+    escapesummary_test.go:83:        1  frame -> heap  argument 0 of $crypto/tls.clientHandshakeState.handshake escapes
+    escapesummary_test.go:83:        1  frame -> heap  argument 0 of $crypto/tls.clientHandshakeStateTLS13.handshake escapes
+    escapesummary_test.go:83:        1  frame -> heap  argument 0 of $crypto/tls.keyUpdateMsg.marshal escapes
+    escapesummary_test.go:83:        1  frame -> heap  argument 0 of $encoding/binary.decoder.value escapes
+    escapesummary_test.go:83:        1  frame -> heap  argument 0 of $encoding/binary.encoder.value escapes
+    escapesummary_test.go:83:        1  frame -> heap  argument 0 of $encoding/pem.EncodeToMemory escapes
+    escapesummary_test.go:83:        1  frame -> heap  argument 0 of $runtime.noescape escapes
+    escapesummary_test.go:83:        1  frame -> heap  argument 1 of $main.grow escapes
+    escapesummary_test.go:83:        1  frame -> heap  argument 1 of $net/http.foreachHeaderElement escapes, in a loop
+    escapesummary_test.go:83:        1  frame -> heap  argument 1 of $net/http.http2ConfigureServer escapes
+    escapesummary_test.go:83:        1  frame -> heap  argument 1 of $runtime.typedslicecopy escapes
+    escapesummary_test.go:83:        1  frame -> heap  argument 3 of $runtime.typedslicecopy escapes
+    escapesummary_test.go:83:        1  frame -> heap  call to $archive/tar.zeroWriter.Write with scalarised aggregate arguments, in a loop
+    escapesummary_test.go:83:        1  frame -> heap  call to $crypto/internal/fips140/aes.CTR.XORKeyStream with scalarised aggregate arguments
+    escapesummary_test.go:83:        1  frame -> heap  call to $crypto/internal/fips140/aes.NewCTR with scalarised aggregate arguments
+    escapesummary_test.go:83:        1  frame -> heap  call to $crypto/internal/fips140/aes.newCTR with scalarised aggregate arguments
+    escapesummary_test.go:83:        1  frame -> heap  call to $crypto/internal/fips140/bigmod.addMulVVW with scalarised aggregate arguments
+    escapesummary_test.go:83:        1  frame -> heap  call to $crypto/internal/fips140/nistec/fiat.P224Element.SetBytes with scalarised aggregate arguments, in a loop
+    escapesummary_test.go:83:        1  frame -> heap  call to $crypto/internal/fips140/nistec/fiat.P256Element.SetBytes with scalarised aggregate arguments
+    escapesummary_test.go:83:        1  frame -> heap  call to $crypto/internal/fips140/sha3.SHAKE.Read with scalarised aggregate arguments
+    escapesummary_test.go:83:        1  frame -> heap  call to $crypto/internal/fips140/tls12.MasterSecret[*crypto/internal/fips140/sha256.Digest] with scalarised aggregate arguments
+    escapesummary_test.go:83:        1  frame -> heap  call to $crypto/internal/fips140/tls12.MasterSecret[hash.Hash] with scalarised aggregate arguments
+    escapesummary_test.go:83:        1  frame -> heap  call to $crypto/rsa.VerifyPSS with scalarised aggregate arguments
+    escapesummary_test.go:83:        1  frame -> heap  call to $crypto/tls.Config.mutualVersion with scalarised aggregate arguments
+    escapesummary_test.go:83:        1  frame -> heap  call to $crypto/tls.Dialer.DialContext, whose argument list does not match its parameters
+    escapesummary_test.go:83:        1  frame -> heap  call to $encoding/base64.Encoding.EncodeToString with scalarised aggregate arguments
+    escapesummary_test.go:83:        1  frame -> heap  call to $image/gif.EncodeAll, whose argument list does not match its parameters
+    escapesummary_test.go:83:        1  frame -> heap  call to $internal/byteorder.BEPutUint64 with scalarised aggregate arguments, in a loop
+    escapesummary_test.go:83:        1  frame -> heap  call to $log/slog.NewJSONHandler, whose argument list does not match its parameters
+    escapesummary_test.go:83:        1  frame -> heap  call to $main.growBytes with scalarised aggregate arguments
+    escapesummary_test.go:83:        1  frame -> heap  call to $main.stacked, whose argument list does not match its parameters
+    escapesummary_test.go:83:        1  frame -> heap  call to $net.UDPConn.WriteToUDP with scalarised aggregate arguments, in a loop
+    escapesummary_test.go:83:        1  frame -> heap  call to $net.sysDialer.dialParallel, whose argument list does not match its parameters
+    escapesummary_test.go:83:        1  frame -> heap  call to $net.sysDialer.dialUDP, whose argument list does not match its parameters
+    escapesummary_test.go:83:        1  frame -> heap  call to $net.sysListener.listenMPTCP, whose argument list does not match its parameters
+    escapesummary_test.go:83:        1  frame -> heap  call to $net.sysListener.listenUDP, whose argument list does not match its parameters
+    escapesummary_test.go:83:        1  frame -> heap  call to $net/http.Response.Write, whose argument list does not match its parameters
+    escapesummary_test.go:83:        1  frame -> heap  call to $net/http.http2Framer.WriteSettings with scalarised aggregate arguments
+    escapesummary_test.go:83:        1  frame -> heap  call to $net/http.http2Server.serveConn, whose argument list does not match its parameters
+    escapesummary_test.go:83:        1  frame -> heap  call to $net/http.http2chunkWriter.Write with scalarised aggregate arguments
+    escapesummary_test.go:83:        1  frame -> heap  call to $net/http.serverHandler.ServeHTTP, whose argument list does not match its parameters, in a loop
+    escapesummary_test.go:83:        1  frame -> heap  call to $net/http/cookiejar.Jar.SetCookies with scalarised aggregate arguments
+    escapesummary_test.go:83:        1  frame -> heap  call to $net/textproto.dotReader.Read with scalarised aggregate arguments
+    escapesummary_test.go:83:        1  frame -> heap  call to $reflect.Select with scalarised aggregate arguments
+    escapesummary_test.go:83:        1  frame -> heap  call to $runtime.concatstrings with scalarised aggregate arguments
+    escapesummary_test.go:83:        1  frame -> heap  call to $runtime.cpuProfile.addNonGo with scalarised aggregate arguments
+    escapesummary_test.go:83:        1  frame -> heap  call to $runtime.gwrite with scalarised aggregate arguments
+    escapesummary_test.go:83:        1  frame -> heap  call to $runtime.traceStackTable.put with scalarised aggregate arguments
+    escapesummary_test.go:83:        1  frame -> heap  call to $slices.Equal[[]string,string] with scalarised aggregate arguments
+    escapesummary_test.go:83:        1  frame -> heap  call to $syscall.StartProcess with scalarised aggregate arguments
+    escapesummary_test.go:83:        1  frame -> heap  call to $testing/quick.Check, whose argument list does not match its parameters
+    escapesummary_test.go:83:        1  frame -> heap  call to $text/template.state.errorf with scalarised aggregate arguments
+    escapesummary_test.go:83:        1  frame -> heap  used by add
+    escapesummary_test.go:83:        1  frame -> heap  write barrier into a candidate
+    escapesummary_test.go:83:        1  heap -> frame  at slice-literal-backing, in a loop
+--- PASS: TestEscapeShadowPlacement (0.00s)
+=== RUN   TestEscapeSummaryFacts
+    escapesummary_test.go:209: program testdata/stdlib_crypto_ecdsa.go
+    escapesummary_test.go:210: functions 6965 (with a body 6965), parameters 14529
+    escapesummary_test.go:211: verdicts: noescape 5223, leaks-to-result 290, escapes 9016
+    escapesummary_test.go:213: call graph: 6398 components, 23 non-trivial (590 functions, largest 512), 33 self-recursive
+    escapesummary_test.go:216: fixed point: 108 rounds, 1155 re-analyses beyond the first, 0 bail-outs
+    escapesummary_test.go:218: //go:noescape: 158 declared symbols, 0 parameters answered from a bodiless ir.Func
+    escapesummary_test.go:239: shadow: 1049 front-end placements (frame 612, heap 437); agree 952; front frame -> IR heap 59; front heap -> IR frame 38
+    escapesummary_test.go:247:       32  heap -> frame  at composite-literal
+    escapesummary_test.go:247:        6  frame -> heap  argument 0 of $runtime.stringtoslicebyte escapes
+    escapesummary_test.go:247:        6  frame -> heap  store into non-local storage
+    escapesummary_test.go:247:        4  frame -> heap  call to $crypto/internal/fips140/bigmod.Nat.SetBytes with scalarised aggregate arguments
+    escapesummary_test.go:247:        4  frame -> heap  call to $crypto/internal/fips140/subtle.ConstantTimeCompare with scalarised aggregate arguments
+    escapesummary_test.go:247:        3  frame -> heap  argument 0 of $runtime.stringtoslicebyte escapes, in a loop
+    escapesummary_test.go:247:        3  frame -> heap  call to $crypto/internal/fips140/aes.New with scalarised aggregate arguments
+    escapesummary_test.go:247:        3  frame -> heap  call to $crypto/internal/fips140/nistec/fiat.P224Element.SetBytes with scalarised aggregate arguments
+    escapesummary_test.go:247:        3  frame -> heap  call to $crypto/internal/fips140/nistec/fiat.P384Element.SetBytes with scalarised aggregate arguments
+    escapesummary_test.go:247:        3  frame -> heap  call to $crypto/internal/fips140/nistec/fiat.P521Element.SetBytes with scalarised aggregate arguments
+    escapesummary_test.go:247:        2  frame -> heap  call to $bytes.Repeat with scalarised aggregate arguments
+    escapesummary_test.go:247:        2  frame -> heap  call to $crypto/internal/fips140deps/byteorder.BEUint64 with scalarised aggregate arguments
+    escapesummary_test.go:247:        2  frame -> heap  call to $crypto/internal/fips140deps/byteorder.LEUint64 with scalarised aggregate arguments
+    escapesummary_test.go:247:        2  frame -> heap  call to $reflect.StructOf with scalarised aggregate arguments
+    escapesummary_test.go:247:        2  frame -> heap  call to $runtime.gwrite with scalarised aggregate arguments, in a loop
+    escapesummary_test.go:247:        1  frame -> heap  argument 0 of $runtime.noescape escapes
+    escapesummary_test.go:247:        1  frame -> heap  call to $crypto/internal/fips140/aes.CTR.XORKeyStream with scalarised aggregate arguments
+    escapesummary_test.go:247:        1  frame -> heap  call to $crypto/internal/fips140/aes.newCTR with scalarised aggregate arguments
+    escapesummary_test.go:247:        1  frame -> heap  call to $crypto/internal/fips140/bigmod.addMulVVW with scalarised aggregate arguments
+    escapesummary_test.go:247:        1  frame -> heap  call to $crypto/internal/fips140/nistec/fiat.P224Element.SetBytes with scalarised aggregate arguments, in a loop
+    escapesummary_test.go:247:        1  frame -> heap  call to $crypto/internal/fips140/nistec/fiat.P256Element.SetBytes with scalarised aggregate arguments
+    escapesummary_test.go:247:        1  frame -> heap  call to $crypto/internal/fips140/sha256.Digest.Write with scalarised aggregate arguments
+    escapesummary_test.go:247:        1  frame -> heap  call to $crypto/internal/fips140/sha512.Digest.Write with scalarised aggregate arguments
+    escapesummary_test.go:247:        1  frame -> heap  call to $internal/byteorder.BEPutUint64 with scalarised aggregate arguments, in a loop
+    escapesummary_test.go:247:        1  frame -> heap  call to $runtime.concatstrings with scalarised aggregate arguments
+    escapesummary_test.go:247:        1  frame -> heap  call to $runtime.cpuProfile.addNonGo with scalarised aggregate arguments
+    escapesummary_test.go:247:        1  frame -> heap  call to $runtime.gwrite with scalarised aggregate arguments
+    escapesummary_test.go:247:        1  frame -> heap  call to $runtime.traceStackTable.put with scalarised aggregate arguments
+    escapesummary_test.go:247:        1  frame -> heap  write barrier into non-local storage
+    escapesummary_test.go:251: fixed point vs the AST walk's cycle break: 811 parameters improved, 0 worse
+--- PASS: TestEscapeSummaryFacts (6.64s)
+=== RUN   TestEscapeSummaryCost
+    escapesummary_test.go:336: program testdata/stdlib_crypto_ecdsa.go: 6965 functions with a body
+    escapesummary_test.go:337: compile, summaries off (mean of 3): 5.809 s
+    escapesummary_test.go:338: compile, summaries on  (mean of 3): 6.008 s = +3.43%
+    escapesummary_test.go:340: ComputeEscapeFacts (mean of 3): 0.246 s = 4.23% of the summaries-off compile
+    escapesummary_test.go:342: this program: promoted 319, lowered 3779 (5 of them blocked by the loop rule)
+--- PASS: TestEscapeSummaryCost (36.19s)
+=== RUN   TestEscapeSummaryPromotionRate
+    escapesummary_test.go:364: pass -escape-promotion-rate to compile the corpus twice and measure
+--- SKIP: TestEscapeSummaryPromotionRate (0.00s)
+=== RUN   TestFrameEscapeAudit
+--- PASS: TestFrameEscapeAudit (0.00s)
+=== RUN   TestTypeParameterMethodCallsLowerToTheConcreteMethod
+=== RUN   TestTypeParameterMethodCallsLowerToTheConcreteMethod/first_instantiation_calls_its_own_methods
+=== RUN   TestTypeParameterMethodCallsLowerToTheConcreteMethod/second_instantiation_calls_its_own_methods
+=== RUN   TestTypeParameterMethodCallsLowerToTheConcreteMethod/value_receiver_reached_through_a_pointer_type_argument
+=== RUN   TestTypeParameterMethodCallsLowerToTheConcreteMethod/generic_type_argument_keeps_its_own_instantiated_method
+=== RUN   TestTypeParameterMethodCallsLowerToTheConcreteMethod/second_generic_type_argument_keeps_its_own_instantiated_method
+=== RUN   TestTypeParameterMethodCallsLowerToTheConcreteMethod/method_promoted_from_an_embedded_field
+--- PASS: TestTypeParameterMethodCallsLowerToTheConcreteMethod (0.00s)
+    --- PASS: TestTypeParameterMethodCallsLowerToTheConcreteMethod/first_instantiation_calls_its_own_methods (0.00s)
+    --- PASS: TestTypeParameterMethodCallsLowerToTheConcreteMethod/second_instantiation_calls_its_own_methods (0.00s)
+    --- PASS: TestTypeParameterMethodCallsLowerToTheConcreteMethod/value_receiver_reached_through_a_pointer_type_argument (0.00s)
+    --- PASS: TestTypeParameterMethodCallsLowerToTheConcreteMethod/generic_type_argument_keeps_its_own_instantiated_method (0.00s)
+    --- PASS: TestTypeParameterMethodCallsLowerToTheConcreteMethod/second_generic_type_argument_keeps_its_own_instantiated_method (0.00s)
+    --- PASS: TestTypeParameterMethodCallsLowerToTheConcreteMethod/method_promoted_from_an_embedded_field (0.00s)
+=== RUN   TestOrdinaryInterfaceDispatchIsUnchanged
+--- PASS: TestOrdinaryInterfaceDispatchIsUnchanged (0.00s)
+=== RUN   TestCapturedLoopVariableIsAllocatedInsideTheLoop
+=== RUN   TestCapturedLoopVariableIsAllocatedInsideTheLoop/three-clause_for
+=== RUN   TestCapturedLoopVariableIsAllocatedInsideTheLoop/range_over_int
+=== RUN   TestCapturedLoopVariableIsAllocatedInsideTheLoop/range_over_slice
+=== RUN   TestCapturedLoopVariableIsAllocatedInsideTheLoop/range_over_map
+=== RUN   TestCapturedLoopVariableIsAllocatedInsideTheLoop/range_over_channel
+=== RUN   TestCapturedLoopVariableIsAllocatedInsideTheLoop/address_of_the_loop_variable
+--- PASS: TestCapturedLoopVariableIsAllocatedInsideTheLoop (11.96s)
+    --- PASS: TestCapturedLoopVariableIsAllocatedInsideTheLoop/three-clause_for (2.03s)
+    --- PASS: TestCapturedLoopVariableIsAllocatedInsideTheLoop/range_over_int (2.00s)
+    --- PASS: TestCapturedLoopVariableIsAllocatedInsideTheLoop/range_over_slice (1.97s)
+    --- PASS: TestCapturedLoopVariableIsAllocatedInsideTheLoop/range_over_map (1.99s)
+    --- PASS: TestCapturedLoopVariableIsAllocatedInsideTheLoop/range_over_channel (1.98s)
+    --- PASS: TestCapturedLoopVariableIsAllocatedInsideTheLoop/address_of_the_loop_variable (1.98s)
+=== RUN   TestUncapturedLoopVariableAllocatesNothing
+=== RUN   TestUncapturedLoopVariableAllocatesNothing/range_over_channel
+=== RUN   TestUncapturedLoopVariableAllocatesNothing/synchronously_called_literal
+=== RUN   TestUncapturedLoopVariableAllocatesNothing/address_that_does_not_escape
+=== RUN   TestUncapturedLoopVariableAllocatesNothing/three-clause_for
+=== RUN   TestUncapturedLoopVariableAllocatesNothing/range_over_slice
+=== RUN   TestUncapturedLoopVariableAllocatesNothing/range_over_map
+--- PASS: TestUncapturedLoopVariableAllocatesNothing (12.02s)
+    --- PASS: TestUncapturedLoopVariableAllocatesNothing/range_over_channel (2.03s)
+    --- PASS: TestUncapturedLoopVariableAllocatesNothing/synchronously_called_literal (2.03s)
+    --- PASS: TestUncapturedLoopVariableAllocatesNothing/address_that_does_not_escape (1.97s)
+    --- PASS: TestUncapturedLoopVariableAllocatesNothing/three-clause_for (1.99s)
+    --- PASS: TestUncapturedLoopVariableAllocatesNothing/range_over_slice (2.00s)
+    --- PASS: TestUncapturedLoopVariableAllocatesNothing/range_over_map (1.99s)
+=== RUN   TestAssigningRangeClauseKeepsOneInstance
+--- PASS: TestAssigningRangeClauseKeepsOneInstance (2.01s)
+=== RUN   TestPerIterationCellSurvivesHeapAllocationLowering
+--- PASS: TestPerIterationCellSurvivesHeapAllocationLowering (1.98s)
+=== RUN   TestOneCapturedScalarCostsOneAllocationPerIteration
+--- PASS: TestOneCapturedScalarCostsOneAllocationPerIteration (1.99s)
+=== RUN   TestRangeClauseWritesAPackageLevelTarget
+=== RUN   TestRangeClauseWritesAPackageLevelTarget/array
+=== RUN   TestRangeClauseWritesAPackageLevelTarget/string
+=== RUN   TestRangeClauseWritesAPackageLevelTarget/integer
+=== RUN   TestRangeClauseWritesAPackageLevelTarget/map
+=== RUN   TestRangeClauseWritesAPackageLevelTarget/channel
+=== RUN   TestRangeClauseWritesAPackageLevelTarget/iterator
+=== RUN   TestRangeClauseWritesAPackageLevelTarget/slice
+--- PASS: TestRangeClauseWritesAPackageLevelTarget (0.00s)
+    --- PASS: TestRangeClauseWritesAPackageLevelTarget/array (0.00s)
+    --- PASS: TestRangeClauseWritesAPackageLevelTarget/string (0.00s)
+    --- PASS: TestRangeClauseWritesAPackageLevelTarget/integer (0.00s)
+    --- PASS: TestRangeClauseWritesAPackageLevelTarget/map (0.00s)
+    --- PASS: TestRangeClauseWritesAPackageLevelTarget/channel (0.00s)
+    --- PASS: TestRangeClauseWritesAPackageLevelTarget/iterator (0.00s)
+    --- PASS: TestRangeClauseWritesAPackageLevelTarget/slice (0.00s)
+=== RUN   TestRangeTargetOperandsAreEvaluatedEveryIteration
+--- PASS: TestRangeTargetOperandsAreEvaluatedEveryIteration (0.00s)
+=== RUN   TestMapElementDestinationsUseTheMapRuntime
+--- PASS: TestMapElementDestinationsUseTheMapRuntime (1.62s)
+=== RUN   TestTypeGCMasksArePaddedToAPointerWord
+--- PASS: TestTypeGCMasksArePaddedToAPointerWord (1.64s)
+PASS
+ok  	github.com/evanphx/cg12/goc	1063.781s

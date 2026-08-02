@@ -1,0 +1,4 @@
+=== RUN   TestFrameEscapeAudit
+--- PASS: TestFrameEscapeAudit (213.24s)
+PASS
+ok  	github.com/evanphx/cg12/goc	213.691s

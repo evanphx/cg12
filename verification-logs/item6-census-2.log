@@ -1,0 +1,4 @@
+=== RUN   TestAllocationCensus
+--- PASS: TestAllocationCensus (194.19s)
+PASS
+ok  	github.com/evanphx/cg12/goc	194.635s

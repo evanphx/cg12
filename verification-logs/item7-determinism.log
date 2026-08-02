@@ -1,0 +1,11 @@
+programs=389 rounds=2 workers=12 optimize=false pack=""
+round 0: 389 programs in 195.7s, 0 failed
+round 1: 389 programs in 183.6s, 0 failed
+
+failed to compile: 0
+
+content varies between rounds: 0
+
+image varies, content identical (layout only): 0
+
+reproducible=389 varying=0 failed=0 of 389 over 2 rounds

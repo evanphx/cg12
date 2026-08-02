@@ -1,0 +1,1383 @@
+go test -timeout 30m -run '^TestARM64RuntimeCapabilityStatus$' ./cmd/goc/... \
+	-args -runtime-status-shards=1 -runtime-status-shard=0
+=== RUN   TestARM64RuntimeCapabilityStatus
+=== RUN   TestARM64RuntimeCapabilityStatus/core-types/map-delete-iterate-gc
+=== RUN   TestARM64RuntimeCapabilityStatus/core-types/array-map-key
+=== RUN   TestARM64RuntimeCapabilityStatus/core-types/type-assertions-switch
+=== RUN   TestARM64RuntimeCapabilityStatus/core-types/map-growth-gc
+=== RUN   TestARM64RuntimeCapabilityStatus/core-types/map-interface-keys-gc
+=== RUN   TestARM64RuntimeCapabilityStatus/core-types/slice-copy-overlap
+=== RUN   TestARM64RuntimeCapabilityStatus/core-types/string-rune-map
+=== RUN   TestARM64RuntimeCapabilityStatus/stack/interface-method-gc
+=== RUN   TestARM64RuntimeCapabilityStatus/gc/closure-captures-roots-gc
+=== RUN   TestARM64RuntimeCapabilityStatus/core-types/map-iter-delete-insert
+=== RUN   TestARM64RuntimeCapabilityStatus/core-types/maps-slices-interfaces
+=== RUN   TestARM64RuntimeCapabilityStatus/gc/map-pointer-values-gc
+=== RUN   TestARM64RuntimeCapabilityStatus/stack/interface-preserved-across-gc
+=== RUN   TestARM64RuntimeCapabilityStatus/goroutine/select-channels
+=== RUN   TestARM64RuntimeCapabilityStatus/core-types/string-slice-compare-swap
+=== RUN   TestARM64RuntimeCapabilityStatus/core-types/slice-pointer-append-gc
+=== RUN   TestARM64RuntimeCapabilityStatus/stdlib-runtime/context-cancel-channel
+=== RUN   TestARM64RuntimeCapabilityStatus/stdlib-encoding/gob-struct-mixed
+=== RUN   TestARM64RuntimeCapabilityStatus/stdlib-encoding/pem
+=== RUN   TestARM64RuntimeCapabilityStatus/stdlib-encoding/ascii85
+=== RUN   TestARM64RuntimeCapabilityStatus/stdlib-encoding/xml
+=== RUN   TestARM64RuntimeCapabilityStatus/core-types/interface-comparable-map
+=== RUN   TestARM64RuntimeCapabilityStatus/stdlib-encoding/json-roundtrip
+=== RUN   TestARM64RuntimeCapabilityStatus/core-types/method-expression
+=== RUN   TestARM64RuntimeCapabilityStatus/stdlib-os/user-lookup
+=== RUN   TestARM64RuntimeCapabilityStatus/stdlib-encoding/gob-int
+=== RUN   TestARM64RuntimeCapabilityStatus/gc/new-composite-gc
+=== RUN   TestARM64RuntimeCapabilityStatus/stdlib-io/strings-reader-seek
+=== RUN   TestARM64RuntimeCapabilityStatus/stdlib-encoding/csv
+=== RUN   TestARM64RuntimeCapabilityStatus/stdlib-os/pipe-returned-closure-close
+=== RUN   TestARM64RuntimeCapabilityStatus/gc/slice-struct-values-gc
+=== RUN   TestARM64RuntimeCapabilityStatus/stdlib-io/limited-reader
+=== RUN   TestARM64RuntimeCapabilityStatus/goroutine/channel-of-slices-gc
+=== RUN   TestARM64RuntimeCapabilityStatus/stack/growth-preserves-pointers
+=== RUN   TestARM64RuntimeCapabilityStatus/core-types/nil-interface-typed-pointer
+=== RUN   TestARM64RuntimeCapabilityStatus/core-types/interface-method-expression
+=== RUN   TestARM64RuntimeCapabilityStatus/stdlib-io/pipe-roundtrip
+=== RUN   TestARM64RuntimeCapabilityStatus/stdlib-io/bytes-buffer
+=== RUN   TestARM64RuntimeCapabilityStatus/core-types/map-clear
+=== RUN   TestARM64RuntimeCapabilityStatus/stdlib-os/pipe-goroutine-close
+=== RUN   TestARM64RuntimeCapabilityStatus/stdlib-encoding/base32
+=== RUN   TestARM64RuntimeCapabilityStatus/gc/pinner-invalid
+=== RUN   TestARM64RuntimeCapabilityStatus/goroutine/nil-channel-select
+=== RUN   TestARM64RuntimeCapabilityStatus/core-types/interface-nil-assertions
+=== RUN   TestARM64RuntimeCapabilityStatus/goroutine/closed-channel-send-panic
+=== RUN   TestARM64RuntimeCapabilityStatus/goroutine/many-goroutines-gc
+=== RUN   TestARM64RuntimeCapabilityStatus/stdlib-encoding/gob-struct-int
+=== RUN   TestARM64RuntimeCapabilityStatus/goroutine/buffered-channel-fifo
+=== RUN   TestARM64RuntimeCapabilityStatus/goroutine/channel-interface-close-gc
+=== RUN   TestARM64RuntimeCapabilityStatus/stdlib-fmt/sprintf
+=== RUN   TestARM64RuntimeCapabilityStatus/stdlib-io/section-reader
+=== RUN   TestARM64RuntimeCapabilityStatus/stdlib-encoding/gob-roundtrip
+=== RUN   TestARM64RuntimeCapabilityStatus/stdlib-io/write-string
+=== RUN   TestARM64RuntimeCapabilityStatus/core-types/append-self-overlap
+=== RUN   TestARM64RuntimeCapabilityStatus/stdlib-encoding/asn1-roundtrip
+=== RUN   TestARM64RuntimeCapabilityStatus/goroutine/channel-close-range
+=== RUN   TestARM64RuntimeCapabilityStatus/goroutine/select-global-locked-gc
+=== RUN   TestARM64RuntimeCapabilityStatus/stdlib-encoding/binary-varint
+=== RUN   TestARM64RuntimeCapabilityStatus/core-types/interface-pointer-equality-gc
+=== RUN   TestARM64RuntimeCapabilityStatus/stdlib-os/pipe-embedded-file-copy
+=== RUN   TestARM64RuntimeCapabilityStatus/goroutine/channel-pointer-zero-close
+=== RUN   TestARM64RuntimeCapabilityStatus/stdlib-netpoll/udp-loopback
+=== RUN   TestARM64RuntimeCapabilityStatus/runtime-packages/reflect-call-aggregate-probe
+=== RUN   TestARM64RuntimeCapabilityStatus/stdlib-io/discard-write
+=== RUN   TestARM64RuntimeCapabilityStatus/core-types/type-switch-pointer-values
+=== RUN   TestARM64RuntimeCapabilityStatus/stdlib-io/readall-limited-reader
+=== RUN   TestARM64RuntimeCapabilityStatus/stdlib-http/cookiejar
+=== RUN   TestARM64RuntimeCapabilityStatus/stdlib-http/multipart-form
+=== RUN   TestARM64RuntimeCapabilityStatus/stdlib-http/tls-client-server
+=== RUN   TestARM64RuntimeCapabilityStatus/goroutine/select-receive-default
+=== RUN   TestARM64RuntimeCapabilityStatus/goroutine/interface-channel-gc
+=== RUN   TestARM64RuntimeCapabilityStatus/runtime-packages/reflect-value-int
+=== RUN   TestARM64RuntimeCapabilityStatus/defer-panic/goroutine-panic-recover
+=== RUN   TestARM64RuntimeCapabilityStatus/stdlib-encoding/base64
+=== RUN   TestARM64RuntimeCapabilityStatus/gc/loop-closure-gc
+=== RUN   TestARM64RuntimeCapabilityStatus/core-types/string-byte-round-trip
+=== RUN   TestARM64RuntimeCapabilityStatus/core-types/map-interface-values-gc
+=== RUN   TestARM64RuntimeCapabilityStatus/goroutine/select-send-default
+=== RUN   TestARM64RuntimeCapabilityStatus/core-types/unsafe-struct-field
+=== RUN   TestARM64RuntimeCapabilityStatus/stdlib-sync/once-func
+=== RUN   TestARM64RuntimeCapabilityStatus/stdlib-text/regexp-find-replace
+=== RUN   TestARM64RuntimeCapabilityStatus/core-types/append-variadic-pointer-gc
+=== RUN   TestARM64RuntimeCapabilityStatus/loop-variables/address-gc
+=== RUN   TestARM64RuntimeCapabilityStatus/core-types/map-range-insert-growth
+=== RUN   TestARM64RuntimeCapabilityStatus/stack/defer-closure-stack-gc
+=== RUN   TestARM64RuntimeCapabilityStatus/core-types/complex64-parts
+=== RUN   TestARM64RuntimeCapabilityStatus/goroutine/closure-survives-gc
+=== RUN   TestARM64RuntimeCapabilityStatus/goroutine/select-nil-disable
+=== RUN   TestARM64RuntimeCapabilityStatus/stdlib-generics/iter-pull
+=== RUN   TestARM64RuntimeCapabilityStatus/core-types/nil-map-read-delete
+=== RUN   TestARM64RuntimeCapabilityStatus/core-types/map-range-delete-all
+=== RUN   TestARM64RuntimeCapabilityStatus/stdlib-io/multi-reader-writer
+=== RUN   TestARM64RuntimeCapabilityStatus/core-types/interface-method-value
+=== RUN   TestARM64RuntimeCapabilityStatus/stack/recursive-struct-chain-gc
+=== RUN   TestARM64RuntimeCapabilityStatus/core-types/map-struct-value-replace
+=== RUN   TestARM64RuntimeCapabilityStatus/goroutine/channel-nonblocking-receive
+=== RUN   TestARM64RuntimeCapabilityStatus/core-types/slice-three-index
+=== RUN   TestARM64RuntimeCapabilityStatus/core-types/complex-arithmetic
+=== RUN   TestARM64RuntimeCapabilityStatus/goroutine/double-close-panic
+=== RUN   TestARM64RuntimeCapabilityStatus/goroutine/channel-handoff
+=== RUN   TestARM64RuntimeCapabilityStatus/goroutine/channel-struct-zero-close
+=== RUN   TestARM64RuntimeCapabilityStatus/goroutine/lock-osthread
+=== RUN   TestARM64RuntimeCapabilityStatus/stdlib-io/copy-buffer
+=== RUN   TestARM64RuntimeCapabilityStatus/core-types/copy-interface-slice-gc
+=== RUN   TestARM64RuntimeCapabilityStatus/stdlib-io/bufio-scanner-words
+=== RUN   TestARM64RuntimeCapabilityStatus/core-types/type-param-method-shapes
+=== RUN   TestARM64RuntimeCapabilityStatus/goroutine/channel-direction
+=== RUN   TestARM64RuntimeCapabilityStatus/stdlib-os/filepath-glob-clean
+=== RUN   TestARM64RuntimeCapabilityStatus/stdlib-os/rename-stat
+=== RUN   TestARM64RuntimeCapabilityStatus/core-types/copy-string-to-bytes
+=== RUN   TestARM64RuntimeCapabilityStatus/core-types/interface-to-interface
+=== RUN   TestARM64RuntimeCapabilityStatus/gc/global-roots-gc
+=== RUN   TestARM64RuntimeCapabilityStatus/goroutine/channel-close-buffered-receive
+=== RUN   TestARM64RuntimeCapabilityStatus/stdlib-os/pipe-manual-copy-shape
+=== RUN   TestARM64RuntimeCapabilityStatus/stdlib-io/tee-reader
+=== RUN   TestARM64RuntimeCapabilityStatus/goroutine/select-buffered-send-receive
+=== RUN   TestARM64RuntimeCapabilityStatus/gc/heap-struct-graph
+=== RUN   TestARM64RuntimeCapabilityStatus/core-types/type-param-method-dispatch
+=== RUN   TestARM64RuntimeCapabilityStatus/gc/array-copy-pointer-gc
+=== RUN   TestARM64RuntimeCapabilityStatus/stdlib-os/pipe-interface-capture-close
+=== RUN   TestARM64RuntimeCapabilityStatus/stdlib-encoding/binary
+=== RUN   TestARM64RuntimeCapabilityStatus/goroutine/unbuffered-pingpong
+=== RUN   TestARM64RuntimeCapabilityStatus/goroutine/worker-fanin-gc
+=== RUN   TestARM64RuntimeCapabilityStatus/stdlib-io/copy-n-writer-only
+=== RUN   TestARM64RuntimeCapabilityStatus/stdlib-os/file-roundtrip
+=== RUN   TestARM64RuntimeCapabilityStatus/core-types/append-growth-pointer-elements
+=== RUN   TestARM64RuntimeCapabilityStatus/stdlib-crypto/hash-hmac
+=== RUN   TestARM64RuntimeCapabilityStatus/stdlib-crypto/ed25519
+=== RUN   TestARM64RuntimeCapabilityStatus/stdlib-generics/maps-keys
+=== RUN   TestARM64RuntimeCapabilityStatus/stdlib-math/bits-wide-arithmetic
+=== RUN   TestARM64RuntimeCapabilityStatus/stdlib-crypto/hkdf
+=== RUN   TestARM64RuntimeCapabilityStatus/stdlib-bytes/reader-unread
+=== RUN   TestARM64RuntimeCapabilityStatus/core-types/map-pointer-keys
+=== RUN   TestARM64RuntimeCapabilityStatus/stdlib-bytes/grow-capacity
+=== RUN   TestARM64RuntimeCapabilityStatus/stdlib-generics/maps-clone
+=== RUN   TestARM64RuntimeCapabilityStatus/stdlib-generics/slices-string-sort
+=== RUN   TestARM64RuntimeCapabilityStatus/goroutine/channel-struct-pointer-gc
+=== RUN   TestARM64RuntimeCapabilityStatus/stdlib-text/text-template-execute-parse-only
+=== RUN   TestARM64RuntimeCapabilityStatus/stdlib-os/filemode-string
+=== RUN   TestARM64RuntimeCapabilityStatus/stdlib-time/format-parse
+=== RUN   TestARM64RuntimeCapabilityStatus/stdlib-text/strconv-roundtrip
+=== RUN   TestARM64RuntimeCapabilityStatus/stdlib-os/exec-goroutine-shape
+=== RUN   TestARM64RuntimeCapabilityStatus/stdlib-compress/bzip2
+=== RUN   TestARM64RuntimeCapabilityStatus/stdlib-crypto/sha3-pbkdf2
+=== RUN   TestARM64RuntimeCapabilityStatus/stdlib-text/text-template-execute
+=== RUN   TestARM64RuntimeCapabilityStatus/stdlib-archive/zip-roundtrip
+=== RUN   TestARM64RuntimeCapabilityStatus/stdlib-crypto/x509-ed25519
+=== RUN   TestARM64RuntimeCapabilityStatus/stdlib-url/values-encode
+=== RUN   TestARM64RuntimeCapabilityStatus/stdlib-text/strings-transform
+=== RUN   TestARM64RuntimeCapabilityStatus/stdlib-archive/tar-roundtrip
+=== RUN   TestARM64RuntimeCapabilityStatus/goroutine/select-two-ready
+=== RUN   TestARM64RuntimeCapabilityStatus/stdlib-crypto/ecdsa
+=== RUN   TestARM64RuntimeCapabilityStatus/stdlib-io/bufio-reader-writer
+=== RUN   TestARM64RuntimeCapabilityStatus/stdlib-compress/zlib-lzw
+=== RUN   TestARM64RuntimeCapabilityStatus/stdlib-image/png-roundtrip
+=== RUN   TestARM64RuntimeCapabilityStatus/stdlib-text/text-template-parse
+=== RUN   TestARM64RuntimeCapabilityStatus/stdlib-crypto/hpke
+=== RUN   TestARM64RuntimeCapabilityStatus/core-types/slice-to-array-pointer
+=== RUN   TestARM64RuntimeCapabilityStatus/runtime-packages/sync-pool-interface-gc
+=== RUN   TestARM64RuntimeCapabilityStatus/runtime-packages/sync-cond-rwmutex
+=== RUN   TestARM64RuntimeCapabilityStatus/stdlib-log/buffer
+=== RUN   TestARM64RuntimeCapabilityStatus/stdlib-image/jpeg-roundtrip
+=== RUN   TestARM64RuntimeCapabilityStatus/stdlib-math/rand-shuffle-permutation
+=== RUN   TestARM64RuntimeCapabilityStatus/stdlib-text/strings-builder-cut
+=== RUN   TestARM64RuntimeCapabilityStatus/stdlib-encoding/hex
+=== RUN   TestARM64RuntimeCapabilityStatus/stdlib-http/client-server
+=== RUN   TestARM64RuntimeCapabilityStatus/runtime-packages/reflect-interface-extract
+=== RUN   TestARM64RuntimeCapabilityStatus/stdlib-net-values/netip
+=== RUN   TestARM64RuntimeCapabilityStatus/stdlib-math/rand-v2
+=== RUN   TestARM64RuntimeCapabilityStatus/runtime-packages/reflect-type-assert
+=== RUN   TestARM64RuntimeCapabilityStatus/defer-panic/recover-outside-panic
+=== RUN   TestARM64RuntimeCapabilityStatus/stdlib-math/big-rat-int
+=== RUN   TestARM64RuntimeCapabilityStatus/stdlib-text/sort-find-edges
+=== RUN   TestARM64RuntimeCapabilityStatus/runtime-packages/sync-once-concurrent
+=== RUN   TestARM64RuntimeCapabilityStatus/goroutine/closed-channel-receive
+=== RUN   TestARM64RuntimeCapabilityStatus/stdlib-io/bufio-lines-after-read
+=== RUN   TestARM64RuntimeCapabilityStatus/stdlib-crypto/aes-modes
+=== RUN   TestARM64RuntimeCapabilityStatus/runtime-packages/reflect-call-aggregate
+=== RUN   TestARM64RuntimeCapabilityStatus/stdlib-crypto/ecdh-x25519
+=== RUN   TestARM64RuntimeCapabilityStatus/stdlib-containers/heap
+=== RUN   TestARM64RuntimeCapabilityStatus/runtime-packages/reflect-value-call
+=== RUN   TestARM64RuntimeCapabilityStatus/stdlib-generics/maps-slices
+=== RUN   TestARM64RuntimeCapabilityStatus/stdlib-netpoll/pipe-roundtrip
+=== RUN   TestARM64RuntimeCapabilityStatus/stdlib-math/math-bits
+=== RUN   TestARM64RuntimeCapabilityStatus/stdlib-generics/cmp-order
+=== RUN   TestARM64RuntimeCapabilityStatus/defer-panic/nested-defer
+=== RUN   TestARM64RuntimeCapabilityStatus/stdlib-containers/list-ring
+=== RUN   TestARM64RuntimeCapabilityStatus/stdlib-unicode/utf8-decode
+=== RUN   TestARM64RuntimeCapabilityStatus/stdlib-url/resolve-query
+=== RUN   TestARM64RuntimeCapabilityStatus/stdlib-mime/quotedprintable
+=== RUN   TestARM64RuntimeCapabilityStatus/assignment-targets/range-target-order
+=== RUN   TestARM64RuntimeCapabilityStatus/stdlib-compress/gzip-roundtrip
+=== RUN   TestARM64RuntimeCapabilityStatus/stdlib-text/strconv-parse-edges
+=== RUN   TestARM64RuntimeCapabilityStatus/runtime-packages/atomic-value
+=== RUN   TestARM64RuntimeCapabilityStatus/stdlib-text/sort-search-slice
+=== RUN   TestARM64RuntimeCapabilityStatus/stdlib-crypto/rsa
+=== RUN   TestARM64RuntimeCapabilityStatus/stdlib-net-values/mail-textproto
+=== RUN   TestARM64RuntimeCapabilityStatus/defer-panic/panic-struct-recover
+=== RUN   TestARM64RuntimeCapabilityStatus/stdlib-os/readdir-walkdir
+=== RUN   TestARM64RuntimeCapabilityStatus/stdlib-context/cancel-value
+=== RUN   TestARM64RuntimeCapabilityStatus/runtime-packages/waitgroup-reuse
+=== RUN   TestARM64RuntimeCapabilityStatus/stdlib-log/slog-structured
+=== RUN   TestARM64RuntimeCapabilityStatus/runtime-packages/atomic-counter
+=== RUN   TestARM64RuntimeCapabilityStatus/stdlib-image/gif-animation
+=== RUN   TestARM64RuntimeCapabilityStatus/runtime-packages/sync-waitgroup-mutex-once
+=== RUN   TestARM64RuntimeCapabilityStatus/stdlib-net-values/smtp-session
+=== RUN   TestARM64RuntimeCapabilityStatus/stdlib-runtime-diagnostics/metrics-read
+=== RUN   TestARM64RuntimeCapabilityStatus/defer-panic/panic-alloc-recover-gc
+=== RUN   TestARM64RuntimeCapabilityStatus/stdlib-os-process/exec-echo
+=== RUN   TestARM64RuntimeCapabilityStatus/defer-panic/defer-replace-panic
+=== RUN   TestARM64RuntimeCapabilityStatus/runtime-packages/sync-map
+=== RUN   TestARM64RuntimeCapabilityStatus/stdlib-path/match-clean
+=== RUN   TestARM64RuntimeCapabilityStatus/stdlib-sync/once-map-cond
+=== RUN   TestARM64RuntimeCapabilityStatus/runtime-packages/reflect-interface-extract-probe
+=== RUN   TestARM64RuntimeCapabilityStatus/stdlib-io/copy-n
+=== RUN   TestARM64RuntimeCapabilityStatus/runtime-packages/reflect-value-instruction-op
+=== RUN   TestARM64RuntimeCapabilityStatus/runtime-packages/sync-mutex-defer
+=== RUN   TestARM64RuntimeCapabilityStatus/runtime-packages/sync-once-value
+=== RUN   TestARM64RuntimeCapabilityStatus/stdlib-flag/parse
+=== RUN   TestARM64RuntimeCapabilityStatus/stdlib-hash/crc32-fnv
+=== RUN   TestARM64RuntimeCapabilityStatus/stack/many-defers-stack
+=== RUN   TestARM64RuntimeCapabilityStatus/defer-panic/defer-argument-evaluation
+=== RUN   TestARM64RuntimeCapabilityStatus/runtime-packages/reflect-method-metadata
+=== RUN   TestARM64RuntimeCapabilityStatus/defer-panic/panic-stack-recover-gc
+=== RUN   TestARM64RuntimeCapabilityStatus/runtime-packages/reflect-make-values
+=== RUN   TestARM64RuntimeCapabilityStatus/stdlib-errors/join-is-as
+=== RUN   TestARM64RuntimeCapabilityStatus/runtime-packages/reflect-map-slice
+=== RUN   TestARM64RuntimeCapabilityStatus/stdlib-math/math-cmplx
+=== RUN   TestARM64RuntimeCapabilityStatus/print-builtin/operand-separation
+=== RUN   TestARM64RuntimeCapabilityStatus/stack/panic-stack-gc
+=== RUN   TestARM64RuntimeCapabilityStatus/defer-panic/error-recover
+=== RUN   TestARM64RuntimeCapabilityStatus/defer-panic/basic-recover
+=== RUN   TestARM64RuntimeCapabilityStatus/stdlib-runtime-diagnostics/trace-log
+=== RUN   TestARM64RuntimeCapabilityStatus/stdlib-fmt/println
+=== RUN   TestARM64RuntimeCapabilityStatus/runtime-packages/callers-stack
+=== RUN   TestARM64RuntimeCapabilityStatus/stdlib-runtime-diagnostics/trace-buffer
+=== RUN   TestARM64RuntimeCapabilityStatus/defer-panic/panic-deep-unwind
+=== RUN   TestARM64RuntimeCapabilityStatus/defer-panic/panic-nil-recover
+=== RUN   TestARM64RuntimeCapabilityStatus/stdlib-crypto/mlkem
+=== RUN   TestARM64RuntimeCapabilityStatus/defer-panic/defer-method-value-order
+=== RUN   TestARM64RuntimeCapabilityStatus/runtime-packages/timer-callback-shape
+=== RUN   TestARM64RuntimeCapabilityStatus/defer-panic/panic-recover-identity
+=== RUN   TestARM64RuntimeCapabilityStatus/runtime-packages/reflect-select
+=== RUN   TestARM64RuntimeCapabilityStatus/runtime-packages/reflect-interface-method
+=== RUN   TestARM64RuntimeCapabilityStatus/defer-panic/goexit-runs-defer
+=== RUN   TestARM64RuntimeCapabilityStatus/runtime-packages/reflect-deep-equal
+=== RUN   TestARM64RuntimeCapabilityStatus/defer-panic/defer-named-result-panic
+=== RUN   TestARM64RuntimeCapabilityStatus/loop-variables/range-forms
+=== RUN   TestARM64RuntimeCapabilityStatus/runtime-packages/reflect-type-metadata
+=== RUN   TestARM64RuntimeCapabilityStatus/stdlib-runtime-values/weak-pointer
+=== RUN   TestARM64RuntimeCapabilityStatus/stdlib-runtime-diagnostics/trace-start-only
+=== RUN   TestARM64RuntimeCapabilityStatus/stdlib-testing/quick-check
+=== RUN   TestARM64RuntimeCapabilityStatus/assignment-targets/multi-assignment-forms
+=== RUN   TestARM64RuntimeCapabilityStatus/defer-panic/defer-named-return
+=== RUN   TestARM64RuntimeCapabilityStatus/closure-capture/assigned-string
+=== RUN   TestARM64RuntimeCapabilityStatus/stdlib-sync/atomic-typed
+=== RUN   TestARM64RuntimeCapabilityStatus/closure-capture/assigned-header-values
+=== RUN   TestARM64RuntimeCapabilityStatus/defer-panic/sync-once-panic
+=== RUN   TestARM64RuntimeCapabilityStatus/stdlib-runtime-values/unique-handle
+=== RUN   TestARM64RuntimeCapabilityStatus/defer-panic/typed-recover
+=== RUN   TestARM64RuntimeCapabilityStatus/defer-panic/panic-repanic
+=== RUN   TestARM64RuntimeCapabilityStatus/runtime-packages/reflect-call-aggregate-function
+=== RUN   TestARM64RuntimeCapabilityStatus/loop-variables/three-clause
+=== RUN   TestARM64RuntimeCapabilityStatus/runtime-packages/reflect-set-fields
+=== RUN   TestARM64RuntimeCapabilityStatus/defer-panic/panic-string-output
+=== RUN   TestARM64RuntimeCapabilityStatus/runtime-packages/reflect-value-indirect-call
+=== RUN   TestARM64RuntimeCapabilityStatus/stdlib-http/parse-roundtrip
+=== RUN   TestARM64RuntimeCapabilityStatus/loop-variables/shared-scope
+=== RUN   TestARM64RuntimeCapabilityStatus/stdlib-hash/adler32-state
+=== RUN   TestARM64RuntimeCapabilityStatus/gc/scalar-stack-slots
+=== RUN   TestARM64RuntimeCapabilityStatus/defer-panic/defer-order-panic
+=== RUN   TestARM64RuntimeCapabilityStatus/runtime-packages/reflect-call-aggregate-matrix
+=== RUN   TestARM64RuntimeCapabilityStatus/stdlib-runtime-diagnostics/trace-start-stop
+=== RUN   TestARM64RuntimeCapabilityStatus/goroutine/select-closed-channel
+=== RUN   TestARM64RuntimeCapabilityStatus/stdlib-fs/mapfs-walk
+=== RUN   TestARM64RuntimeCapabilityStatus/stdlib-http/redirect-keepalive
+=== RUN   TestARM64RuntimeCapabilityStatus/stdlib-runtime-diagnostics/trace-start-probe
+=== RUN   TestARM64RuntimeCapabilityStatus/loop-variables/goroutine-and-defer
+=== RUN   TestARM64RuntimeCapabilityStatus/stack/method-value-gc
+=== RUN   TestARM64RuntimeCapabilityStatus/assignment-targets/range-target-forms
+=== RUN   TestARM64RuntimeCapabilityStatus/runtime-packages/sync-rwmutex-readers
+=== RUN   TestARM64RuntimeCapabilityStatus/loop-variables/value-shapes
+=== RUN   TestARM64RuntimeCapabilityStatus/stdlib-io/ioutil-tempfile
+=== RUN   TestARM64RuntimeCapabilityStatus/stdlib-crypto/des-rc4
+=== RUN   TestARM64RuntimeCapabilityStatus/stdlib-netpoll/syscall-socket-listen
+=== NAME  TestARM64RuntimeCapabilityStatus/stdlib-runtime-diagnostics/trace-buffer
+    runtime_status_test.go:2690: PASS stdlib_runtime_trace_buffer.go
+=== NAME  TestARM64RuntimeCapabilityStatus/stdlib-os/user-lookup
+    runtime_status_test.go:2690: PASS stdlib_os_user_lookup.go
+=== NAME  TestARM64RuntimeCapabilityStatus/stdlib-runtime-diagnostics/trace-start-stop
+    runtime_status_test.go:2690: PASS stdlib_runtime_trace_start_stop.go
+=== NAME  TestARM64RuntimeCapabilityStatus/stdlib-flag/parse
+    runtime_status_test.go:2690: PASS stdlib_flag_parse.go
+=== NAME  TestARM64RuntimeCapabilityStatus/stdlib-log/buffer
+    runtime_status_test.go:2690: PASS stdlib_log_buffer.go
+=== NAME  TestARM64RuntimeCapabilityStatus/stdlib-encoding/csv
+    runtime_status_test.go:2690: PASS stdlib_encoding_csv.go
+=== NAME  TestARM64RuntimeCapabilityStatus/stdlib-runtime-diagnostics/trace-start-only
+    runtime_status_test.go:2690: PASS stdlib_runtime_trace_start_only.go
+=== NAME  TestARM64RuntimeCapabilityStatus/stdlib-url/resolve-query
+    runtime_status_test.go:2690: PASS stdlib_url_resolve_query.go
+=== NAME  TestARM64RuntimeCapabilityStatus/stdlib-archive/tar-roundtrip
+    runtime_status_test.go:2690: PASS stdlib_archive_tar_roundtrip.go
+=== NAME  TestARM64RuntimeCapabilityStatus/stdlib-runtime-diagnostics/trace-start-probe
+    runtime_status_test.go:2690: PASS stdlib_runtime_trace_start_probe.go
+=== NAME  TestARM64RuntimeCapabilityStatus/stdlib-runtime-diagnostics/trace-log
+    runtime_status_test.go:2690: PASS stdlib_runtime_trace_log.go
+=== NAME  TestARM64RuntimeCapabilityStatus/stdlib-mime/quotedprintable
+    runtime_status_test.go:2690: PASS stdlib_mime_quotedprintable.go
+=== NAME  TestARM64RuntimeCapabilityStatus/stdlib-fs/mapfs-walk
+    runtime_status_test.go:2690: PASS stdlib_fstest_mapfs.go
+=== NAME  TestARM64RuntimeCapabilityStatus/stdlib-text/text-template-execute-parse-only
+    runtime_status_test.go:2690: PASS stdlib_text_template_execute_parse_only.go
+=== NAME  TestARM64RuntimeCapabilityStatus/stdlib-compress/zlib-lzw
+    runtime_status_test.go:2690: PASS stdlib_compress_zlib_lzw.go
+=== NAME  TestARM64RuntimeCapabilityStatus/stdlib-testing/quick-check
+    runtime_status_test.go:2690: PASS stdlib_testing_quick.go
+=== NAME  TestARM64RuntimeCapabilityStatus/stdlib-archive/zip-roundtrip
+    runtime_status_test.go:2690: PASS stdlib_archive_zip_roundtrip.go
+=== NAME  TestARM64RuntimeCapabilityStatus/stdlib-url/values-encode
+    runtime_status_test.go:2690: PASS stdlib_url_values_encode.go
+=== NAME  TestARM64RuntimeCapabilityStatus/stdlib-text/text-template-parse
+    runtime_status_test.go:2690: PASS stdlib_text_template_parse.go
+=== NAME  TestARM64RuntimeCapabilityStatus/stdlib-crypto/sha3-pbkdf2
+    runtime_status_test.go:2690: PASS stdlib_crypto_sha3_pbkdf2.go
+=== NAME  TestARM64RuntimeCapabilityStatus/stdlib-math/big-rat-int
+    runtime_status_test.go:2690: PASS stdlib_math_big_rat_int.go
+=== NAME  TestARM64RuntimeCapabilityStatus/stdlib-net-values/mail-textproto
+    runtime_status_test.go:2690: PASS stdlib_net_mail_textproto.go
+=== NAME  TestARM64RuntimeCapabilityStatus/stdlib-compress/gzip-roundtrip
+    runtime_status_test.go:2690: PASS stdlib_compress_gzip_roundtrip.go
+=== NAME  TestARM64RuntimeCapabilityStatus/stdlib-image/gif-animation
+    runtime_status_test.go:2690: PASS stdlib_image_gif_animation.go
+=== NAME  TestARM64RuntimeCapabilityStatus/stdlib-crypto/aes-modes
+    runtime_status_test.go:2690: PASS stdlib_crypto_aes_modes.go
+=== NAME  TestARM64RuntimeCapabilityStatus/stdlib-crypto/hkdf
+    runtime_status_test.go:2690: PASS stdlib_crypto_hkdf.go
+=== NAME  TestARM64RuntimeCapabilityStatus/stdlib-encoding/gob-struct-int
+    runtime_status_test.go:2690: PASS stdlib_encoding_gob_struct_int.go
+=== NAME  TestARM64RuntimeCapabilityStatus/stdlib-encoding/gob-struct-mixed
+    runtime_status_test.go:2690: PASS stdlib_encoding_gob_struct_mixed.go
+=== NAME  TestARM64RuntimeCapabilityStatus/stdlib-crypto/des-rc4
+    runtime_status_test.go:2690: PASS stdlib_crypto_des_rc4.go
+=== NAME  TestARM64RuntimeCapabilityStatus/stdlib-encoding/asn1-roundtrip
+    runtime_status_test.go:2690: PASS stdlib_encoding_asn1_roundtrip.go
+=== NAME  TestARM64RuntimeCapabilityStatus/stdlib-encoding/gob-roundtrip
+    runtime_status_test.go:2690: PASS stdlib_encoding_gob_roundtrip.go
+=== NAME  TestARM64RuntimeCapabilityStatus/stdlib-encoding/gob-int
+    runtime_status_test.go:2690: PASS stdlib_encoding_gob_int.go
+=== NAME  TestARM64RuntimeCapabilityStatus/stdlib-crypto/ecdh-x25519
+    runtime_status_test.go:2690: PASS stdlib_crypto_ecdh_x25519.go
+=== NAME  TestARM64RuntimeCapabilityStatus/stdlib-encoding/json-roundtrip
+    runtime_status_test.go:2690: PASS stdlib_encoding_json_roundtrip.go
+=== NAME  TestARM64RuntimeCapabilityStatus/stdlib-crypto/hash-hmac
+    runtime_status_test.go:2690: PASS stdlib_crypto_hash_hmac.go
+=== NAME  TestARM64RuntimeCapabilityStatus/stdlib-encoding/xml
+    runtime_status_test.go:2690: PASS stdlib_encoding_xml.go
+=== NAME  TestARM64RuntimeCapabilityStatus/stdlib-crypto/ecdsa
+    runtime_status_test.go:2690: PASS stdlib_crypto_ecdsa.go
+=== NAME  TestARM64RuntimeCapabilityStatus/stdlib-image/png-roundtrip
+    runtime_status_test.go:2690: PASS stdlib_image_png_roundtrip.go
+=== NAME  TestARM64RuntimeCapabilityStatus/stdlib-text/text-template-execute
+    runtime_status_test.go:2690: PASS stdlib_text_template_execute.go
+=== NAME  TestARM64RuntimeCapabilityStatus/stdlib-crypto/hpke
+    runtime_status_test.go:2690: PASS stdlib_crypto_hpke.go
+=== NAME  TestARM64RuntimeCapabilityStatus/stdlib-log/slog-structured
+    runtime_status_test.go:2690: PASS stdlib_slog_structured.go
+=== NAME  TestARM64RuntimeCapabilityStatus/stdlib-crypto/rsa
+    runtime_status_test.go:2690: PASS stdlib_crypto_rsa.go
+=== NAME  TestARM64RuntimeCapabilityStatus/stdlib-crypto/ed25519
+    runtime_status_test.go:2690: PASS stdlib_crypto_ed25519.go
+=== NAME  TestARM64RuntimeCapabilityStatus/loop-variables/range-forms
+    runtime_status_test.go:2690: PASS runtime_loopvar_range.go
+=== NAME  TestARM64RuntimeCapabilityStatus/assignment-targets/multi-assignment-forms
+    runtime_status_test.go:2690: PASS runtime_assign_target_forms.go
+=== NAME  TestARM64RuntimeCapabilityStatus/assignment-targets/range-target-order
+    runtime_status_test.go:2690: PASS runtime_range_target_order.go
+=== NAME  TestARM64RuntimeCapabilityStatus/runtime-packages/reflect-value-instruction-op
+    runtime_status_test.go:2690: PASS runtime_reflect_value_instruction_op.go
+=== NAME  TestARM64RuntimeCapabilityStatus/stdlib-os/pipe-manual-copy-shape
+    runtime_status_test.go:2690: PASS stdlib_os_pipe_manual_copy_shape.go
+=== NAME  TestARM64RuntimeCapabilityStatus/stdlib-encoding/binary
+    runtime_status_test.go:2690: PASS stdlib_encoding_binary.go
+=== NAME  TestARM64RuntimeCapabilityStatus/loop-variables/goroutine-and-defer
+    runtime_status_test.go:2690: PASS runtime_loopvar_goroutine_defer.go
+=== NAME  TestARM64RuntimeCapabilityStatus/closure-capture/assigned-header-values
+    runtime_status_test.go:2690: PASS runtime_closure_captured_header_values.go
+=== NAME  TestARM64RuntimeCapabilityStatus/stdlib-encoding/hex
+    runtime_status_test.go:2690: PASS stdlib_encoding_hex.go
+=== NAME  TestARM64RuntimeCapabilityStatus/assignment-targets/range-target-forms
+    runtime_status_test.go:2690: PASS runtime_range_target_forms.go
+=== NAME  TestARM64RuntimeCapabilityStatus/defer-panic/error-recover
+    runtime_status_test.go:2690: PASS runtime_panic_error_recover.go
+=== NAME  TestARM64RuntimeCapabilityStatus/print-builtin/operand-separation
+    runtime_status_test.go:2690: PASS runtime_println_operand_separation.go
+=== NAME  TestARM64RuntimeCapabilityStatus/stdlib-io/ioutil-tempfile
+    runtime_status_test.go:2690: PASS stdlib_ioutil_tempfile.go
+=== NAME  TestARM64RuntimeCapabilityStatus/stdlib-os/pipe-embedded-file-copy
+    runtime_status_test.go:2690: PASS stdlib_os_pipe_embedded_file_copy.go
+=== NAME  TestARM64RuntimeCapabilityStatus/loop-variables/three-clause
+    runtime_status_test.go:2690: PASS runtime_loopvar_three_clause.go
+=== NAME  TestARM64RuntimeCapabilityStatus/stdlib-os/file-roundtrip
+    runtime_status_test.go:2690: PASS stdlib_os_file_roundtrip.go
+=== NAME  TestARM64RuntimeCapabilityStatus/stdlib-fmt/sprintf
+    runtime_status_test.go:2690: PASS fmt_sprintf.go
+=== NAME  TestARM64RuntimeCapabilityStatus/stdlib-netpoll/pipe-roundtrip
+    runtime_status_test.go:2690: PASS stdlib_netpoll_pipe_roundtrip.go
+=== NAME  TestARM64RuntimeCapabilityStatus/closure-capture/assigned-string
+    runtime_status_test.go:2690: PASS runtime_closure_captured_string.go
+=== NAME  TestARM64RuntimeCapabilityStatus/stdlib-os-process/exec-echo
+    runtime_status_test.go:2690: PASS stdlib_os_exec_echo.go
+=== NAME  TestARM64RuntimeCapabilityStatus/runtime-packages/reflect-value-int
+    runtime_status_test.go:2690: PASS runtime_reflect_value_int.go
+=== NAME  TestARM64RuntimeCapabilityStatus/stdlib-encoding/binary-varint
+    runtime_status_test.go:2690: PASS stdlib_encoding_binary_varint.go
+=== NAME  TestARM64RuntimeCapabilityStatus/runtime-packages/reflect-call-aggregate-probe
+    runtime_status_test.go:2690: PASS runtime_reflect_call_aggregate_probe.go
+=== NAME  TestARM64RuntimeCapabilityStatus/loop-variables/address-gc
+    runtime_status_test.go:2690: PASS runtime_loopvar_address_gc.go
+=== NAME  TestARM64RuntimeCapabilityStatus/stdlib-os/filepath-glob-clean
+    runtime_status_test.go:2690: PASS stdlib_filepath_glob_clean.go
+=== NAME  TestARM64RuntimeCapabilityStatus/stdlib-os/readdir-walkdir
+    runtime_status_test.go:2690: PASS stdlib_os_readdir_walkdir.go
+=== NAME  TestARM64RuntimeCapabilityStatus/stdlib-os/pipe-interface-capture-close
+    runtime_status_test.go:2690: PASS stdlib_os_pipe_interface_capture_close.go
+=== NAME  TestARM64RuntimeCapabilityStatus/loop-variables/shared-scope
+    runtime_status_test.go:2690: PASS runtime_loopvar_shared_scope.go
+=== NAME  TestARM64RuntimeCapabilityStatus/stdlib-crypto/mlkem
+    runtime_status_test.go:2690: PASS stdlib_crypto_mlkem.go
+=== NAME  TestARM64RuntimeCapabilityStatus/stdlib-os/rename-stat
+    runtime_status_test.go:2690: PASS stdlib_os_rename_stat.go
+=== NAME  TestARM64RuntimeCapabilityStatus/loop-variables/value-shapes
+    runtime_status_test.go:2690: PASS runtime_loopvar_value_shapes.go
+=== NAME  TestARM64RuntimeCapabilityStatus/runtime-packages/reflect-value-indirect-call
+    runtime_status_test.go:2690: PASS runtime_reflect_value_indirect_call.go
+=== NAME  TestARM64RuntimeCapabilityStatus/stdlib-fmt/println
+    runtime_status_test.go:2690: PASS fmt_println.go
+=== NAME  TestARM64RuntimeCapabilityStatus/stdlib-crypto/x509-ed25519
+    runtime_status_test.go:2690: PASS stdlib_crypto_x509_ed25519.go
+=== NAME  TestARM64RuntimeCapabilityStatus/runtime-packages/reflect-interface-extract-probe
+    runtime_status_test.go:2690: PASS runtime_reflect_interface_extract_probe.go
+=== NAME  TestARM64RuntimeCapabilityStatus/runtime-packages/reflect-call-aggregate-matrix
+    runtime_status_test.go:2690: PASS runtime_reflect_call_aggregate_matrix.go
+=== NAME  TestARM64RuntimeCapabilityStatus/stdlib-os/exec-goroutine-shape
+    runtime_status_test.go:2690: PASS stdlib_os_exec_goroutine_shape.go
+=== NAME  TestARM64RuntimeCapabilityStatus/stdlib-netpoll/udp-loopback
+    runtime_status_test.go:2690: PASS stdlib_netpoll_udp_loopback.go
+=== NAME  TestARM64RuntimeCapabilityStatus/runtime-packages/reflect-type-assert
+    runtime_status_test.go:2690: PASS runtime_reflect_type_assert_probe.go
+=== NAME  TestARM64RuntimeCapabilityStatus/stdlib-net-values/smtp-session
+    runtime_status_test.go:2690: PASS stdlib_smtp_session.go
+=== NAME  TestARM64RuntimeCapabilityStatus/stdlib-os/pipe-goroutine-close
+    runtime_status_test.go:2690: PASS stdlib_os_pipe_goroutine_close.go
+=== NAME  TestARM64RuntimeCapabilityStatus/runtime-packages/reflect-call-aggregate-function
+    runtime_status_test.go:2690: PASS runtime_reflect_call_aggregate_function_probe.go
+=== NAME  TestARM64RuntimeCapabilityStatus/runtime-packages/reflect-type-metadata
+    runtime_status_test.go:2690: PASS runtime_reflect_type_metadata.go
+=== NAME  TestARM64RuntimeCapabilityStatus/stdlib-runtime/context-cancel-channel
+    runtime_status_test.go:2690: PASS context_cancel.go
+=== NAME  TestARM64RuntimeCapabilityStatus/runtime-packages/reflect-select
+    runtime_status_test.go:2690: PASS runtime_reflect_select.go
+=== NAME  TestARM64RuntimeCapabilityStatus/runtime-packages/reflect-make-values
+    runtime_status_test.go:2690: PASS runtime_reflect_make_values.go
+=== NAME  TestARM64RuntimeCapabilityStatus/stdlib-context/cancel-value
+    runtime_status_test.go:2690: PASS stdlib_context_cancel_value.go
+=== NAME  TestARM64RuntimeCapabilityStatus/runtime-packages/reflect-method-metadata
+    runtime_status_test.go:2690: PASS runtime_reflect_method_metadata.go
+=== NAME  TestARM64RuntimeCapabilityStatus/stdlib-text/regexp-find-replace
+    runtime_status_test.go:2690: PASS stdlib_regexp_find_replace.go
+=== NAME  TestARM64RuntimeCapabilityStatus/stdlib-time/format-parse
+    runtime_status_test.go:2690: PASS stdlib_time_format_parse.go
+=== NAME  TestARM64RuntimeCapabilityStatus/stdlib-io/bufio-reader-writer
+    runtime_status_test.go:2690: PASS stdlib_bufio_reader_writer.go
+=== NAME  TestARM64RuntimeCapabilityStatus/runtime-packages/reflect-deep-equal
+    runtime_status_test.go:2690: PASS runtime_reflect_deep_equal.go
+=== NAME  TestARM64RuntimeCapabilityStatus/runtime-packages/reflect-interface-method
+    runtime_status_test.go:2690: PASS runtime_reflect_interface_method.go
+=== NAME  TestARM64RuntimeCapabilityStatus/runtime-packages/reflect-interface-extract
+    runtime_status_test.go:2690: PASS runtime_reflect_interface_extract.go
+=== NAME  TestARM64RuntimeCapabilityStatus/stdlib-image/jpeg-roundtrip
+    runtime_status_test.go:2690: PASS stdlib_image_jpeg_roundtrip.go
+=== NAME  TestARM64RuntimeCapabilityStatus/stdlib-os/pipe-returned-closure-close
+    runtime_status_test.go:2690: PASS stdlib_os_pipe_returned_closure_close.go
+=== NAME  TestARM64RuntimeCapabilityStatus/stdlib-encoding/pem
+    runtime_status_test.go:2690: PASS stdlib_encoding_pem.go
+=== NAME  TestARM64RuntimeCapabilityStatus/runtime-packages/reflect-map-slice
+    runtime_status_test.go:2690: PASS runtime_reflect_map_slice.go
+=== NAME  TestARM64RuntimeCapabilityStatus/runtime-packages/reflect-value-call
+    runtime_status_test.go:2690: PASS runtime_reflect_value_call.go
+=== NAME  TestARM64RuntimeCapabilityStatus/stdlib-os/filemode-string
+    runtime_status_test.go:2690: PASS filemode_string.go
+=== NAME  TestARM64RuntimeCapabilityStatus/runtime-packages/reflect-set-fields
+    runtime_status_test.go:2690: PASS runtime_reflect_set_fields.go
+=== NAME  TestARM64RuntimeCapabilityStatus/runtime-packages/reflect-call-aggregate
+    runtime_status_test.go:2690: PASS runtime_reflect_call_aggregate.go
+=== NAME  TestARM64RuntimeCapabilityStatus/stdlib-compress/bzip2
+    runtime_status_test.go:2690: PASS stdlib_compress_bzip2.go
+=== NAME  TestARM64RuntimeCapabilityStatus/stdlib-io/bufio-scanner-words
+    runtime_status_test.go:2690: PASS stdlib_bufio_scanner_words.go
+=== NAME  TestARM64RuntimeCapabilityStatus/stdlib-io/strings-reader-seek
+    runtime_status_test.go:2690: PASS stdlib_strings_reader_seek.go
+=== NAME  TestARM64RuntimeCapabilityStatus/stdlib-text/sort-search-slice
+    runtime_status_test.go:2690: PASS stdlib_sort_search_slice.go
+=== NAME  TestARM64RuntimeCapabilityStatus/stdlib-io/bufio-lines-after-read
+    runtime_status_test.go:2690: PASS bufio_lines_after_read.go
+=== NAME  TestARM64RuntimeCapabilityStatus/stdlib-encoding/base64
+    runtime_status_test.go:2690: PASS stdlib_encoding_base64.go
+=== NAME  TestARM64RuntimeCapabilityStatus/stdlib-io/multi-reader-writer
+    runtime_status_test.go:2690: PASS stdlib_io_multi_reader_writer.go
+=== NAME  TestARM64RuntimeCapabilityStatus/stdlib-io/limited-reader
+    runtime_status_test.go:2690: PASS io_limited_reader.go
+=== NAME  TestARM64RuntimeCapabilityStatus/stdlib-io/section-reader
+    runtime_status_test.go:2690: PASS stdlib_io_section_reader.go
+=== NAME  TestARM64RuntimeCapabilityStatus/stdlib-io/copy-buffer
+    runtime_status_test.go:2690: PASS stdlib_io_copy_buffer.go
+=== NAME  TestARM64RuntimeCapabilityStatus/stdlib-runtime-values/unique-handle
+    runtime_status_test.go:2690: PASS stdlib_unique_handle.go
+=== NAME  TestARM64RuntimeCapabilityStatus/stdlib-io/tee-reader
+    runtime_status_test.go:2690: PASS stdlib_io_tee_reader.go
+=== NAME  TestARM64RuntimeCapabilityStatus/stdlib-math/rand-v2
+    runtime_status_test.go:2690: PASS stdlib_rand_v2.go
+=== NAME  TestARM64RuntimeCapabilityStatus/stdlib-hash/crc32-fnv
+    runtime_status_test.go:2690: PASS stdlib_hash_crc32_fnv.go
+=== NAME  TestARM64RuntimeCapabilityStatus/stdlib-encoding/ascii85
+    runtime_status_test.go:2690: PASS stdlib_encoding_ascii85.go
+=== NAME  TestARM64RuntimeCapabilityStatus/stdlib-io/discard-write
+    runtime_status_test.go:2690: PASS io_discard_write.go
+=== NAME  TestARM64RuntimeCapabilityStatus/stdlib-containers/heap
+    runtime_status_test.go:2690: PASS stdlib_container_heap.go
+=== NAME  TestARM64RuntimeCapabilityStatus/stdlib-bytes/grow-capacity
+    runtime_status_test.go:2690: PASS bytes_grow_capacity.go
+=== NAME  TestARM64RuntimeCapabilityStatus/stdlib-bytes/reader-unread
+    runtime_status_test.go:2690: PASS stdlib_bytes_reader_unread.go
+=== NAME  TestARM64RuntimeCapabilityStatus/stdlib-encoding/base32
+    runtime_status_test.go:2690: PASS stdlib_encoding_base32.go
+=== NAME  TestARM64RuntimeCapabilityStatus/stdlib-io/readall-limited-reader
+    runtime_status_test.go:2690: PASS stdlib_io_readall_limited_reader.go
+=== NAME  TestARM64RuntimeCapabilityStatus/stdlib-runtime-diagnostics/metrics-read
+    runtime_status_test.go:2690: PASS stdlib_runtime_metrics_read.go
+=== NAME  TestARM64RuntimeCapabilityStatus/runtime-packages/sync-waitgroup-mutex-once
+    runtime_status_test.go:2690: PASS runtime_sync_waitgroup_mutex.go
+=== NAME  TestARM64RuntimeCapabilityStatus/goroutine/many-goroutines-gc
+    runtime_status_test.go:2690: PASS runtime_many_goroutines_gc.go
+=== NAME  TestARM64RuntimeCapabilityStatus/stdlib-netpoll/syscall-socket-listen
+    runtime_status_test.go:2690: PASS stdlib_netpoll_syscall_socket_listen.go
+=== NAME  TestARM64RuntimeCapabilityStatus/stdlib-sync/once-map-cond
+    runtime_status_test.go:2690: PASS stdlib_sync_once_map_cond.go
+=== NAME  TestARM64RuntimeCapabilityStatus/stdlib-io/copy-n-writer-only
+    runtime_status_test.go:2690: PASS io_copy_n_writer_only.go
+=== NAME  TestARM64RuntimeCapabilityStatus/stdlib-text/sort-find-edges
+    runtime_status_test.go:2690: PASS stdlib_sort_find_edges.go
+=== NAME  TestARM64RuntimeCapabilityStatus/stdlib-text/strconv-parse-edges
+    runtime_status_test.go:2690: PASS stdlib_strconv_parse_edges.go
+=== NAME  TestARM64RuntimeCapabilityStatus/runtime-packages/sync-map
+    runtime_status_test.go:2690: PASS runtime_sync_map.go
+=== NAME  TestARM64RuntimeCapabilityStatus/runtime-packages/atomic-counter
+    runtime_status_test.go:2690: PASS runtime_atomic_counter.go
+=== NAME  TestARM64RuntimeCapabilityStatus/stdlib-net-values/netip
+    runtime_status_test.go:2690: PASS stdlib_net_netip.go
+=== NAME  TestARM64RuntimeCapabilityStatus/stdlib-text/strings-builder-cut
+    runtime_status_test.go:2690: PASS stdlib_strings_builder_cut.go
+=== NAME  TestARM64RuntimeCapabilityStatus/runtime-packages/sync-rwmutex-readers
+    runtime_status_test.go:2690: PASS runtime_sync_rwmutex_readers.go
+=== NAME  TestARM64RuntimeCapabilityStatus/stdlib-hash/adler32-state
+    runtime_status_test.go:2690: PASS adler32_marshal_loop.go
+=== NAME  TestARM64RuntimeCapabilityStatus/core-types/type-param-method-shapes
+    runtime_status_test.go:2690: PASS runtime_type_param_method_shapes.go
+=== NAME  TestARM64RuntimeCapabilityStatus/stdlib-io/copy-n
+    runtime_status_test.go:2690: PASS io_copy_n.go
+=== NAME  TestARM64RuntimeCapabilityStatus/stdlib-math/rand-shuffle-permutation
+    runtime_status_test.go:2690: PASS stdlib_rand_shuffle_permutation.go
+=== NAME  TestARM64RuntimeCapabilityStatus/runtime-packages/sync-mutex-defer
+    runtime_status_test.go:2690: PASS runtime_sync_mutex_defer.go
+=== NAME  TestARM64RuntimeCapabilityStatus/runtime-packages/sync-once-concurrent
+    runtime_status_test.go:2690: PASS runtime_sync_once_concurrent.go
+=== NAME  TestARM64RuntimeCapabilityStatus/stdlib-text/strings-transform
+    runtime_status_test.go:2690: PASS stdlib_strings_transform.go
+=== NAME  TestARM64RuntimeCapabilityStatus/runtime-packages/sync-cond-rwmutex
+    runtime_status_test.go:2690: PASS runtime_sync_cond_rwmutex.go
+=== NAME  TestARM64RuntimeCapabilityStatus/defer-panic/sync-once-panic
+    runtime_status_test.go:2690: PASS runtime_sync_once_panic.go
+=== NAME  TestARM64RuntimeCapabilityStatus/runtime-packages/sync-pool-interface-gc
+    runtime_status_test.go:2690: PASS sync_pool_interface.go
+=== NAME  TestARM64RuntimeCapabilityStatus/stdlib-io/bytes-buffer
+    runtime_status_test.go:2690: PASS stdlib_bytes_buffer.go
+=== NAME  TestARM64RuntimeCapabilityStatus/runtime-packages/sync-once-value
+    runtime_status_test.go:2690: PASS runtime_sync_once_value.go
+=== NAME  TestARM64RuntimeCapabilityStatus/stdlib-io/write-string
+    runtime_status_test.go:2690: PASS io_write_string.go
+=== NAME  TestARM64RuntimeCapabilityStatus/runtime-packages/waitgroup-reuse
+    runtime_status_test.go:2690: PASS runtime_waitgroup_reuse.go
+=== NAME  TestARM64RuntimeCapabilityStatus/stdlib-io/pipe-roundtrip
+    runtime_status_test.go:2690: PASS stdlib_io_pipe_roundtrip.go
+=== NAME  TestARM64RuntimeCapabilityStatus/stdlib-generics/maps-slices
+    runtime_status_test.go:2690: PASS stdlib_maps_slices.go
+=== NAME  TestARM64RuntimeCapabilityStatus/stdlib-text/strconv-roundtrip
+    runtime_status_test.go:2690: PASS stdlib_strconv_roundtrip.go
+=== NAME  TestARM64RuntimeCapabilityStatus/stdlib-path/match-clean
+    runtime_status_test.go:2690: PASS stdlib_path_match_clean.go
+=== NAME  TestARM64RuntimeCapabilityStatus/stdlib-generics/maps-keys
+    runtime_status_test.go:2690: PASS stdlib_maps_keys.go
+=== NAME  TestARM64RuntimeCapabilityStatus/stdlib-runtime-values/weak-pointer
+    runtime_status_test.go:2690: PASS stdlib_weak_pointer.go
+=== NAME  TestARM64RuntimeCapabilityStatus/stdlib-sync/once-func
+    runtime_status_test.go:2690: PASS runtime_sync_once_func.go
+=== NAME  TestARM64RuntimeCapabilityStatus/stdlib-generics/slices-string-sort
+    runtime_status_test.go:2690: PASS stdlib_slices_string_sort.go
+=== NAME  TestARM64RuntimeCapabilityStatus/stdlib-generics/iter-pull
+    runtime_status_test.go:2690: PASS stdlib_iter_pull.go
+=== NAME  TestARM64RuntimeCapabilityStatus/core-types/map-interface-values-gc
+    runtime_status_test.go:2690: PASS runtime_map_interface_values_gc.go
+=== NAME  TestARM64RuntimeCapabilityStatus/stdlib-generics/maps-clone
+    runtime_status_test.go:2690: PASS stdlib_maps_clone.go
+=== NAME  TestARM64RuntimeCapabilityStatus/gc/map-pointer-values-gc
+    runtime_status_test.go:2690: PASS runtime_map_pointer_values_gc.go
+=== NAME  TestARM64RuntimeCapabilityStatus/stdlib-errors/join-is-as
+    runtime_status_test.go:2690: PASS stdlib_errors_join_is_as.go
+=== NAME  TestARM64RuntimeCapabilityStatus/goroutine/channel-struct-pointer-gc
+    runtime_status_test.go:2690: PASS runtime_channel_struct_pointer_gc.go
+=== NAME  TestARM64RuntimeCapabilityStatus/gc/closure-captures-roots-gc
+    runtime_status_test.go:2690: PASS runtime_closure_captures_roots_gc.go
+=== NAME  TestARM64RuntimeCapabilityStatus/core-types/map-delete-iterate-gc
+    runtime_status_test.go:2690: PASS runtime_map_delete_iter_gc.go
+=== NAME  TestARM64RuntimeCapabilityStatus/core-types/interface-pointer-equality-gc
+    runtime_status_test.go:2690: PASS runtime_interface_pointer_equality_gc.go
+=== NAME  TestARM64RuntimeCapabilityStatus/core-types/type-switch-pointer-values
+    runtime_status_test.go:2690: PASS runtime_type_switch_pointer_values.go
+=== NAME  TestARM64RuntimeCapabilityStatus/core-types/append-variadic-pointer-gc
+    runtime_status_test.go:2690: PASS runtime_append_variadic_pointer_gc.go
+=== NAME  TestARM64RuntimeCapabilityStatus/gc/heap-struct-graph
+    runtime_status_test.go:2690: PASS gc_struct.go
+=== NAME  TestARM64RuntimeCapabilityStatus/core-types/copy-interface-slice-gc
+    runtime_status_test.go:2690: PASS runtime_copy_interface_slice_gc.go
+=== NAME  TestARM64RuntimeCapabilityStatus/defer-panic/panic-stack-recover-gc
+    runtime_status_test.go:2690: PASS runtime_panic_stack_recover_gc.go
+=== NAME  TestARM64RuntimeCapabilityStatus/gc/slice-struct-values-gc
+    runtime_status_test.go:2690: PASS runtime_slice_struct_values_gc.go
+=== NAME  TestARM64RuntimeCapabilityStatus/goroutine/worker-fanin-gc
+    runtime_status_test.go:2690: PASS runtime_worker_fanin_gc.go
+=== NAME  TestARM64RuntimeCapabilityStatus/goroutine/interface-channel-gc
+    runtime_status_test.go:2690: PASS runtime_interface_channel_gc.go
+=== NAME  TestARM64RuntimeCapabilityStatus/gc/new-composite-gc
+    runtime_status_test.go:2690: PASS runtime_new_composite_gc.go
+=== NAME  TestARM64RuntimeCapabilityStatus/core-types/append-growth-pointer-elements
+    runtime_status_test.go:2690: PASS runtime_append_growth_pointer_elements.go
+=== NAME  TestARM64RuntimeCapabilityStatus/defer-panic/panic-alloc-recover-gc
+    runtime_status_test.go:2690: PASS runtime_panic_alloc_recover_gc.go
+=== NAME  TestARM64RuntimeCapabilityStatus/core-types/slice-pointer-append-gc
+    runtime_status_test.go:2690: PASS runtime_slice_pointer_append_gc.go
+=== NAME  TestARM64RuntimeCapabilityStatus/stack/recursive-struct-chain-gc
+    runtime_status_test.go:2690: PASS runtime_recursive_struct_chain_gc.go
+=== NAME  TestARM64RuntimeCapabilityStatus/gc/global-roots-gc
+    runtime_status_test.go:2690: PASS runtime_global_roots_gc.go
+=== NAME  TestARM64RuntimeCapabilityStatus/stack/growth-preserves-pointers
+    runtime_status_test.go:2690: PASS runtime_stack_growth.go
+=== NAME  TestARM64RuntimeCapabilityStatus/goroutine/channel-interface-close-gc
+    runtime_status_test.go:2690: PASS runtime_channel_interface_close_gc.go
+=== NAME  TestARM64RuntimeCapabilityStatus/stack/panic-stack-gc
+    runtime_status_test.go:2690: PASS runtime_panic_stack_gc.go
+=== NAME  TestARM64RuntimeCapabilityStatus/stack/defer-closure-stack-gc
+    runtime_status_test.go:2690: PASS runtime_defer_closure_stack_gc.go
+=== NAME  TestARM64RuntimeCapabilityStatus/core-types/map-interface-keys-gc
+    runtime_status_test.go:2690: PASS runtime_map_interface_keys_gc.go
+=== NAME  TestARM64RuntimeCapabilityStatus/goroutine/channel-of-slices-gc
+    runtime_status_test.go:2690: PASS runtime_channel_of_slices_gc.go
+=== NAME  TestARM64RuntimeCapabilityStatus/goroutine/select-global-locked-gc
+    runtime_status_test.go:2690: PASS runtime_select_global_locked_gc.go
+=== NAME  TestARM64RuntimeCapabilityStatus/runtime-packages/callers-stack
+    runtime_status_test.go:2690: PASS runtime_callers_stack.go
+=== NAME  TestARM64RuntimeCapabilityStatus/stack/interface-preserved-across-gc
+    runtime_status_test.go:2690: PASS runtime_interface_stack_gc.go
+=== NAME  TestARM64RuntimeCapabilityStatus/gc/loop-closure-gc
+    runtime_status_test.go:2690: PASS runtime_loop_closure_gc.go
+=== NAME  TestARM64RuntimeCapabilityStatus/core-types/map-growth-gc
+    runtime_status_test.go:2690: PASS runtime_map_growth_gc.go
+=== NAME  TestARM64RuntimeCapabilityStatus/defer-panic/goexit-runs-defer
+    runtime_status_test.go:2690: PASS runtime_goexit_defer.go
+=== NAME  TestARM64RuntimeCapabilityStatus/runtime-packages/atomic-value
+    runtime_status_test.go:2690: PASS runtime_atomic_value.go
+=== NAME  TestARM64RuntimeCapabilityStatus/goroutine/closure-survives-gc
+    runtime_status_test.go:2690: PASS runtime_goroutine_closure_gc.go
+=== NAME  TestARM64RuntimeCapabilityStatus/gc/pinner-invalid
+    runtime_status_test.go:2690: PASS runtime_pinner_invalid.go
+=== NAME  TestARM64RuntimeCapabilityStatus/core-types/interface-to-interface
+    runtime_status_test.go:2690: PASS runtime_interface_to_interface.go
+=== NAME  TestARM64RuntimeCapabilityStatus/stdlib-math/math-cmplx
+    runtime_status_test.go:2690: PASS stdlib_math_cmplx.go
+=== NAME  TestARM64RuntimeCapabilityStatus/gc/array-copy-pointer-gc
+    runtime_status_test.go:2690: PASS runtime_array_copy_pointer_gc.go
+=== NAME  TestARM64RuntimeCapabilityStatus/stack/method-value-gc
+    runtime_status_test.go:2690: PASS runtime_method_value_gc.go
+=== NAME  TestARM64RuntimeCapabilityStatus/gc/scalar-stack-slots
+    runtime_status_test.go:2690: PASS runtime_accurate_gc_scalars.go
+=== NAME  TestARM64RuntimeCapabilityStatus/core-types/type-param-method-dispatch
+    runtime_status_test.go:2690: PASS runtime_type_param_method_dispatch.go
+=== NAME  TestARM64RuntimeCapabilityStatus/stack/interface-method-gc
+    runtime_status_test.go:2690: PASS runtime_interface_method_gc.go
+=== NAME  TestARM64RuntimeCapabilityStatus/core-types/map-pointer-keys
+    runtime_status_test.go:2690: PASS runtime_map_pointer_keys.go
+=== NAME  TestARM64RuntimeCapabilityStatus/stdlib-unicode/utf8-decode
+    runtime_status_test.go:2690: PASS stdlib_unicode_utf8_decode.go
+=== NAME  TestARM64RuntimeCapabilityStatus/core-types/map-struct-value-replace
+    runtime_status_test.go:2690: PASS runtime_map_struct_value_replace.go
+=== NAME  TestARM64RuntimeCapabilityStatus/core-types/type-assertions-switch
+    runtime_status_test.go:2690: PASS runtime_type_assertions_switch.go
+=== NAME  TestARM64RuntimeCapabilityStatus/stdlib-math/bits-wide-arithmetic
+    runtime_status_test.go:2690: PASS stdlib_math_bits_wide.go
+=== NAME  TestARM64RuntimeCapabilityStatus/stdlib-http/parse-roundtrip
+    runtime_status_test.go:2690: PASS stdlib_http_parse_roundtrip.go
+=== NAME  TestARM64RuntimeCapabilityStatus/stdlib-containers/list-ring
+    runtime_status_test.go:2690: PASS stdlib_container_list_ring.go
+=== NAME  TestARM64RuntimeCapabilityStatus/stdlib-sync/atomic-typed
+    runtime_status_test.go:2690: PASS stdlib_sync_atomic_typed.go
+=== NAME  TestARM64RuntimeCapabilityStatus/core-types/complex64-parts
+    runtime_status_test.go:2690: PASS runtime_complex64_parts.go
+=== NAME  TestARM64RuntimeCapabilityStatus/goroutine/lock-osthread
+    runtime_status_test.go:2690: PASS runtime_lock_osthread.go
+=== NAME  TestARM64RuntimeCapabilityStatus/core-types/method-expression
+    runtime_status_test.go:2690: PASS runtime_method_expression.go
+=== NAME  TestARM64RuntimeCapabilityStatus/defer-panic/panic-recover-identity
+    runtime_status_test.go:2690: PASS runtime_panic_recover_identity.go
+=== NAME  TestARM64RuntimeCapabilityStatus/core-types/interface-nil-assertions
+    runtime_status_test.go:2690: PASS runtime_interface_nil_assertions.go
+=== NAME  TestARM64RuntimeCapabilityStatus/goroutine/channel-struct-zero-close
+    runtime_status_test.go:2690: PASS runtime_channel_struct_zero_close.go
+=== NAME  TestARM64RuntimeCapabilityStatus/core-types/string-byte-round-trip
+    runtime_status_test.go:2690: PASS runtime_string_byte_round_trip.go
+=== NAME  TestARM64RuntimeCapabilityStatus/core-types/interface-comparable-map
+    runtime_status_test.go:2690: PASS runtime_interface_comparable_map.go
+=== NAME  TestARM64RuntimeCapabilityStatus/core-types/unsafe-struct-field
+    runtime_status_test.go:2690: PASS runtime_unsafe_struct_field.go
+=== NAME  TestARM64RuntimeCapabilityStatus/goroutine/channel-pointer-zero-close
+    runtime_status_test.go:2690: PASS runtime_channel_pointer_zero_close.go
+=== NAME  TestARM64RuntimeCapabilityStatus/stdlib-generics/cmp-order
+    runtime_status_test.go:2690: PASS stdlib_cmp_order.go
+=== NAME  TestARM64RuntimeCapabilityStatus/core-types/maps-slices-interfaces
+    runtime_status_test.go:2690: PASS runtime_core_types.go
+=== NAME  TestARM64RuntimeCapabilityStatus/defer-panic/defer-method-value-order
+    runtime_status_test.go:2690: PASS runtime_defer_method_value_order.go
+=== NAME  TestARM64RuntimeCapabilityStatus/stdlib-math/math-bits
+    runtime_status_test.go:2690: PASS stdlib_math_bits.go
+=== NAME  TestARM64RuntimeCapabilityStatus/core-types/interface-method-value
+    runtime_status_test.go:2690: PASS runtime_interface_method_value.go
+=== NAME  TestARM64RuntimeCapabilityStatus/goroutine/channel-direction
+    runtime_status_test.go:2690: PASS runtime_channel_direction.go
+=== NAME  TestARM64RuntimeCapabilityStatus/goroutine/select-nil-disable
+    runtime_status_test.go:2690: PASS runtime_select_nil_disable.go
+=== NAME  TestARM64RuntimeCapabilityStatus/defer-panic/defer-order-panic
+    runtime_status_test.go:2690: PASS runtime_defer_order_panic.go
+=== NAME  TestARM64RuntimeCapabilityStatus/runtime-packages/timer-callback-shape
+    runtime_status_test.go:2690: PASS runtime_timer_callback_shape.go
+=== NAME  TestARM64RuntimeCapabilityStatus/core-types/nil-map-read-delete
+    runtime_status_test.go:2690: PASS runtime_nil_map_read_delete.go
+=== NAME  TestARM64RuntimeCapabilityStatus/defer-panic/typed-recover
+    runtime_status_test.go:2690: PASS runtime_panic_typed_recover.go
+=== NAME  TestARM64RuntimeCapabilityStatus/core-types/slice-three-index
+    runtime_status_test.go:2690: PASS runtime_slice_three_index.go
+=== NAME  TestARM64RuntimeCapabilityStatus/goroutine/select-buffered-send-receive
+    runtime_status_test.go:2690: PASS runtime_select_buffered_send_receive.go
+=== NAME  TestARM64RuntimeCapabilityStatus/core-types/append-self-overlap
+    runtime_status_test.go:2690: PASS runtime_append_self_overlap.go
+=== NAME  TestARM64RuntimeCapabilityStatus/core-types/slice-copy-overlap
+    runtime_status_test.go:2690: PASS runtime_slice_copy_overlap.go
+=== NAME  TestARM64RuntimeCapabilityStatus/goroutine/select-receive-default
+    runtime_status_test.go:2690: PASS runtime_select_receive_default.go
+=== NAME  TestARM64RuntimeCapabilityStatus/goroutine/select-closed-channel
+    runtime_status_test.go:2690: PASS runtime_select_closed_channel.go
+=== NAME  TestARM64RuntimeCapabilityStatus/goroutine/channel-close-buffered-receive
+    runtime_status_test.go:2690: PASS runtime_channel_close_buffered_receive.go
+=== NAME  TestARM64RuntimeCapabilityStatus/defer-panic/defer-argument-evaluation
+    runtime_status_test.go:2690: PASS runtime_defer_argument_evaluation.go
+=== NAME  TestARM64RuntimeCapabilityStatus/core-types/map-iter-delete-insert
+    runtime_status_test.go:2690: PASS runtime_map_iter_delete_insert.go
+=== NAME  TestARM64RuntimeCapabilityStatus/defer-panic/panic-deep-unwind
+    runtime_status_test.go:2690: PASS runtime_panic_deep_unwind.go
+=== NAME  TestARM64RuntimeCapabilityStatus/goroutine/nil-channel-select
+    runtime_status_test.go:2690: PASS runtime_nil_channel_select.go
+=== NAME  TestARM64RuntimeCapabilityStatus/goroutine/select-two-ready
+    runtime_status_test.go:2690: PASS runtime_select_two_ready.go
+=== NAME  TestARM64RuntimeCapabilityStatus/core-types/interface-method-expression
+    runtime_status_test.go:2690: PASS runtime_interface_method_expression.go
+=== NAME  TestARM64RuntimeCapabilityStatus/goroutine/select-channels
+    runtime_status_test.go:2690: PASS runtime_select_channels.go
+=== NAME  TestARM64RuntimeCapabilityStatus/core-types/map-range-delete-all
+    runtime_status_test.go:2690: PASS runtime_map_range_delete_all.go
+=== NAME  TestARM64RuntimeCapabilityStatus/core-types/nil-interface-typed-pointer
+    runtime_status_test.go:2690: PASS runtime_nil_interface_typed_pointer.go
+=== NAME  TestARM64RuntimeCapabilityStatus/stack/many-defers-stack
+    runtime_status_test.go:2690: PASS runtime_many_defers_stack.go
+=== NAME  TestARM64RuntimeCapabilityStatus/goroutine/select-send-default
+    runtime_status_test.go:2690: PASS runtime_select_send_default.go
+=== NAME  TestARM64RuntimeCapabilityStatus/goroutine/unbuffered-pingpong
+    runtime_status_test.go:2690: PASS runtime_unbuffered_pingpong.go
+=== NAME  TestARM64RuntimeCapabilityStatus/goroutine/channel-nonblocking-receive
+    runtime_status_test.go:2690: PASS runtime_channel_nonblocking_receive.go
+=== NAME  TestARM64RuntimeCapabilityStatus/goroutine/buffered-channel-fifo
+    runtime_status_test.go:2690: PASS runtime_buffered_channel_fifo.go
+=== NAME  TestARM64RuntimeCapabilityStatus/core-types/slice-to-array-pointer
+    runtime_status_test.go:2690: PASS runtime_slice_to_array_pointer.go
+=== NAME  TestARM64RuntimeCapabilityStatus/core-types/complex-arithmetic
+    runtime_status_test.go:2690: PASS runtime_complex_arithmetic.go
+=== NAME  TestARM64RuntimeCapabilityStatus/core-types/map-range-insert-growth
+    runtime_status_test.go:2690: PASS runtime_map_range_insert_growth.go
+=== NAME  TestARM64RuntimeCapabilityStatus/goroutine/closed-channel-receive
+    runtime_status_test.go:2690: PASS runtime_closed_channel_receive.go
+=== NAME  TestARM64RuntimeCapabilityStatus/defer-panic/defer-replace-panic
+    runtime_status_test.go:2690: PASS runtime_defer_replace_panic.go
+=== NAME  TestARM64RuntimeCapabilityStatus/defer-panic/panic-struct-recover
+    runtime_status_test.go:2690: PASS runtime_panic_struct_recover.go
+=== NAME  TestARM64RuntimeCapabilityStatus/core-types/array-map-key
+    runtime_status_test.go:2690: PASS runtime_array_map_key.go
+=== NAME  TestARM64RuntimeCapabilityStatus/goroutine/channel-close-range
+    runtime_status_test.go:2690: PASS runtime_channel_close_range.go
+=== NAME  TestARM64RuntimeCapabilityStatus/core-types/string-rune-map
+    runtime_status_test.go:2690: PASS runtime_string_rune_map.go
+=== NAME  TestARM64RuntimeCapabilityStatus/defer-panic/defer-named-result-panic
+    runtime_status_test.go:2690: PASS runtime_defer_named_result_panic.go
+=== NAME  TestARM64RuntimeCapabilityStatus/core-types/string-slice-compare-swap
+    runtime_status_test.go:2690: PASS runtime_string_slice_compare_swap.go
+=== NAME  TestARM64RuntimeCapabilityStatus/defer-panic/goroutine-panic-recover
+    runtime_status_test.go:2690: PASS runtime_goroutine_panic_recover.go
+=== NAME  TestARM64RuntimeCapabilityStatus/defer-panic/panic-repanic
+    runtime_status_test.go:2690: PASS runtime_panic_repanic.go
+=== NAME  TestARM64RuntimeCapabilityStatus/defer-panic/panic-string-output
+    runtime_status_test.go:2687: EXPECTED FAILURE runtime_panic_print_string.go
+=== NAME  TestARM64RuntimeCapabilityStatus/core-types/copy-string-to-bytes
+    runtime_status_test.go:2690: PASS runtime_copy_string_to_bytes.go
+=== NAME  TestARM64RuntimeCapabilityStatus/core-types/map-clear
+    runtime_status_test.go:2690: PASS runtime_map_clear.go
+=== NAME  TestARM64RuntimeCapabilityStatus/defer-panic/nested-defer
+    runtime_status_test.go:2690: PASS nested_defer.go
+=== NAME  TestARM64RuntimeCapabilityStatus/defer-panic/basic-recover
+    runtime_status_test.go:2690: PASS panic_recover.go
+=== NAME  TestARM64RuntimeCapabilityStatus/goroutine/double-close-panic
+    runtime_status_test.go:2690: PASS runtime_double_close_panic.go
+=== NAME  TestARM64RuntimeCapabilityStatus/defer-panic/recover-outside-panic
+    runtime_status_test.go:2690: PASS runtime_recover_outside_panic.go
+=== NAME  TestARM64RuntimeCapabilityStatus/goroutine/closed-channel-send-panic
+    runtime_status_test.go:2690: PASS runtime_closed_channel_send_panic.go
+=== NAME  TestARM64RuntimeCapabilityStatus/defer-panic/panic-nil-recover
+    runtime_status_test.go:2690: PASS runtime_panic_nil_recover.go
+=== NAME  TestARM64RuntimeCapabilityStatus/goroutine/channel-handoff
+    runtime_status_test.go:2690: PASS runtime_goroutine_channel.go
+=== NAME  TestARM64RuntimeCapabilityStatus/defer-panic/defer-named-return
+    runtime_status_test.go:2690: PASS runtime_defer_named_return.go
+=== NAME  TestARM64RuntimeCapabilityStatus/stdlib-http/cookiejar
+    runtime_status_test.go:2690: PASS stdlib_http_cookiejar.go
+=== NAME  TestARM64RuntimeCapabilityStatus/stdlib-http/multipart-form
+    runtime_status_test.go:2690: PASS stdlib_http_multipart_form.go
+=== NAME  TestARM64RuntimeCapabilityStatus/stdlib-http/redirect-keepalive
+    runtime_status_test.go:2690: PASS stdlib_http_redirect_keepalive.go
+=== NAME  TestARM64RuntimeCapabilityStatus/stdlib-http/client-server
+    runtime_status_test.go:2690: PASS stdlib_http_client_server.go
+=== NAME  TestARM64RuntimeCapabilityStatus/stdlib-http/tls-client-server
+    runtime_status_test.go:2690: PASS stdlib_http_tls_client_server.go
+=== RUN   TestARM64RuntimeCapabilityStatus/gc/keepalive-finalizer
+    runtime_status_test.go:2690: PASS runtime_keepalive_finalizer.go
+=== RUN   TestARM64RuntimeCapabilityStatus/gc/finalizer-stack-growth
+    runtime_status_test.go:2690: PASS runtime_finalizer_stack_growth.go
+=== RUN   TestARM64RuntimeCapabilityStatus/gc/setfinalizer-clear
+    runtime_status_test.go:2690: PASS runtime_setfinalizer_nil.go
+=== RUN   TestARM64RuntimeCapabilityStatus/gc/cleanup-basic
+    runtime_status_test.go:2690: PASS runtime_cleanup_basic.go
+=== RUN   TestARM64RuntimeCapabilityStatus/gc/cleanup-stop
+    runtime_status_test.go:2690: PASS runtime_cleanup_stop.go
+=== RUN   TestARM64RuntimeCapabilityStatus/gc/cleanup-multiple
+    runtime_status_test.go:2690: PASS runtime_cleanup_multiple.go
+=== RUN   TestARM64RuntimeCapabilityStatus/gc/cleanup-frame-retention
+    runtime_status_test.go:2690: PASS runtime_cleanup_frame_retention.go
+=== RUN   TestARM64RuntimeCapabilityStatus/gc/assist-alloc-recursion
+    runtime_status_test.go:2690: PASS runtime_gc_assist_stack_growth.go
+=== RUN   TestARM64RuntimeCapabilityStatus/gc/defer-capture-allocs
+    runtime_status_test.go:2690: PASS runtime_defer_capture_allocs.go
+=== RUN   TestARM64RuntimeCapabilityStatus/gc/cleanup-frame-retention-masked
+    runtime_status_test.go:2690: PASS runtime_cleanup_frame_retention_masked.go
+=== RUN   TestARM64RuntimeCapabilityStatus/gc/cleanup-frame-retention-scribble
+    runtime_status_test.go:2690: PASS runtime_cleanup_frame_retention_scribble.go
+=== RUN   TestARM64RuntimeCapabilityStatus/gc/span-metadata-barrier
+    runtime_status_test.go:2690: PASS runtime_span_metadata_barrier.go
+=== RUN   TestARM64RuntimeCapabilityStatus/gc/stack-argument-roots
+    runtime_status_test.go:2690: PASS runtime_stack_argument_roots.go
+=== RUN   TestARM64RuntimeCapabilityStatus/gc/keepalive-stack-root
+    runtime_status_test.go:2690: PASS runtime_keepalive_stack_root.go
+=== RUN   TestARM64RuntimeCapabilityStatus/gc/goroutine-entry-stack-map
+    runtime_status_test.go:2690: PASS runtime_goroutine_entry_stack_map.go
+=== RUN   TestARM64RuntimeCapabilityStatus/gc/finalizer-cleanup-order
+    runtime_status_test.go:2690: PASS runtime_finalizer_cleanup_order.go
+=== RUN   TestARM64RuntimeCapabilityStatus/gc/finalizer-dependency-order
+    runtime_status_test.go:2690: PASS runtime_finalizer_dependency_order.go
+=== RUN   TestARM64RuntimeCapabilityStatus/gc/finalizer-tiny
+    runtime_status_test.go:2690: PASS runtime_finalizer_tiny.go
+=== RUN   TestARM64RuntimeCapabilityStatus/gc/pinner-lifecycle
+    runtime_status_test.go:2690: PASS runtime_pinner_lifecycle.go
+=== RUN   TestARM64RuntimeCapabilityStatus/goroutine/gosched-progress
+    runtime_status_test.go:2690: PASS runtime_gosched_progress.go
+=== RUN   TestARM64RuntimeCapabilityStatus/scheduler-stress/ring-handoff
+    runtime_status_test.go:2690: PASS runtime_scheduler_ring_handoff.go
+=== RUN   TestARM64RuntimeCapabilityStatus/scheduler-stress/timer-select-churn
+    runtime_status_test.go:2690: PASS runtime_timer_select_churn.go
+=== RUN   TestARM64RuntimeCapabilityStatus/scheduler-stress/gc-churn
+    runtime_status_test.go:2690: PASS runtime_scheduler_gc_churn.go
+=== RUN   TestARM64RuntimeCapabilityStatus/stdlib-bytes/grow-compare
+    runtime_status_test.go:2690: PASS bytes_grow_compare.go
+=== RUN   TestARM64RuntimeCapabilityStatus/stdlib-bytes/grow-stats
+    runtime_status_test.go:2690: PASS bytes_grow_stats.go
+=== RUN   TestARM64RuntimeCapabilityStatus/stdlib-bytes/grow-allocs
+    runtime_status_test.go:2690: PASS bytes_grow_allocs.go
+=== RUN   TestARM64RuntimeCapabilityStatus/stdlib-bytes/replace-allocs
+    runtime_status_test.go:2690: PASS bytes_replace_allocs.go
+=== RUN   TestARM64RuntimeCapabilityStatus/stdlib-signals/notify-context
+    runtime_status_test.go:2690: PASS stdlib_signal_notify_context.go
+=== RUN   TestARM64RuntimeCapabilityStatus/stdlib-signals/repeated-stop-reset
+    runtime_status_test.go:2690: PASS stdlib_signal_repeated_stop_reset.go
+=== RUN   TestARM64RuntimeCapabilityStatus/stdlib-signals/during-gc
+    runtime_status_test.go:2690: PASS stdlib_signal_during_gc.go
+=== RUN   TestARM64RuntimeCapabilityStatus/stdlib-signals/during-netpoll
+    runtime_status_test.go:2690: PASS stdlib_signal_during_netpoll.go
+=== RUN   TestARM64RuntimeCapabilityStatus/stdlib-signals/atomic-contention
+    runtime_status_test.go:2690: PASS stdlib_signal_atomic_contention.go
+=== RUN   TestARM64RuntimeCapabilityStatus/stdlib-runtime-diagnostics/debug-stack-gc
+    runtime_status_test.go:2690: PASS stdlib_runtime_debug_stack_gc.go
+=== RUN   TestARM64RuntimeCapabilityStatus/stdlib-runtime-diagnostics/allocs-per-run
+    runtime_status_test.go:2690: PASS allocs_per_run.go
+=== RUN   TestARM64RuntimeCapabilityStatus/stdlib-netpoll/pipe-past-deadline
+    runtime_status_test.go:2690: PASS stdlib_netpoll_pipe_past_deadline.go
+=== RUN   TestARM64RuntimeCapabilityStatus/stdlib-netpoll/pipe-deadline
+    runtime_status_test.go:2690: PASS stdlib_netpoll_pipe_deadline.go
+=== RUN   TestARM64RuntimeCapabilityStatus/stdlib-netpoll/pipe-close-unblocks-read
+    runtime_status_test.go:2690: PASS stdlib_netpoll_pipe_close_unblocks_read.go
+=== RUN   TestARM64RuntimeCapabilityStatus/stdlib-netpoll/pipe-afterfunc-close
+    runtime_status_test.go:2690: PASS stdlib_netpoll_pipe_afterfunc_close.go
+=== RUN   TestARM64RuntimeCapabilityStatus/stdlib-netpoll-stress/pipe-deadline-reset
+    runtime_status_test.go:2690: PASS stdlib_netpoll_stress_pipe_deadline_reset.go
+=== RUN   TestARM64RuntimeCapabilityStatus/stdlib-netpoll-stress/pipe-close-churn
+    runtime_status_test.go:2690: PASS stdlib_netpoll_stress_pipe_close_churn.go
+=== RUN   TestARM64RuntimeCapabilityStatus/stdlib-netpoll-stress/tcp-churn
+    runtime_status_test.go:2690: PASS stdlib_netpoll_stress_tcp_churn.go
+=== RUN   TestARM64RuntimeCapabilityStatus/stdlib-netpoll-stress/udp-burst
+    runtime_status_test.go:2690: PASS stdlib_netpoll_stress_udp_burst.go
+=== RUN   TestARM64RuntimeCapabilityStatus/stdlib-netpoll/tcp-echo
+    runtime_status_test.go:2690: PASS stdlib_netpoll_tcp_echo.go
+=== RUN   TestARM64RuntimeCapabilityStatus/stdlib-netpoll/tcp-read-deadline
+    runtime_status_test.go:2690: PASS stdlib_netpoll_tcp_read_deadline.go
+=== RUN   TestARM64RuntimeCapabilityStatus/stdlib-netpoll/tcp-accept-deadline
+    runtime_status_test.go:2690: PASS stdlib_netpoll_tcp_accept_deadline.go
+=== RUN   TestARM64RuntimeCapabilityStatus/stdlib-netpoll/tcp-concurrent-clients
+    runtime_status_test.go:2690: PASS stdlib_netpoll_tcp_concurrent_clients.go
+=== RUN   TestARM64RuntimeCapabilityStatus/stdlib-netpoll/udp-deadline
+    runtime_status_test.go:2690: PASS stdlib_netpoll_udp_deadline.go
+=== RUN   TestARM64RuntimeCapabilityStatus/stdlib-netpoll/close-unblocks-read
+    runtime_status_test.go:2690: PASS stdlib_netpoll_close_unblocks_read.go
+=== RUN   TestARM64RuntimeCapabilityStatus/print-builtin/statement-atomicity
+    runtime_status_test.go:2690: PASS runtime_println_statement_atomicity.go
+=== RUN   TestARM64RuntimeCapabilityStatus/runtime-packages/time-timers
+    runtime_status_test.go:2690: PASS runtime_timer_sleep.go
+=== RUN   TestARM64RuntimeCapabilityStatus/runtime-packages/gomaxprocs-memstats
+    runtime_status_test.go:2690: PASS gomaxprocs_memstats.go
+=== RUN   TestARM64RuntimeCapabilityStatus/runtime-packages/time-reset-stop
+    runtime_status_test.go:2690: PASS runtime_timer_reset_stop.go
+=== RUN   TestARM64RuntimeCapabilityStatus/runtime-packages/ticker-stop
+    runtime_status_test.go:2690: PASS runtime_ticker_stop.go
+=== RUN   TestARM64RuntimeCapabilityStatus/runtime-packages/select-timeout
+    runtime_status_test.go:2690: PASS runtime_select_timeout.go
+=== RUN   TestARM64RuntimeCapabilityStatus/runtime-packages/debug-gc-controls
+    runtime_status_test.go:2690: PASS runtime_debug_gc_controls.go
+=== RUN   TestARM64RuntimeCapabilityStatus/runtime-packages/finalizer-basic
+    runtime_status_test.go:2690: PASS runtime_finalizer_basic.go
+=== RUN   TestARM64RuntimeCapabilityStatus/runtime-packages/time-afterfunc
+    runtime_status_test.go:2690: PASS runtime_time_afterfunc.go
+=== RUN   TestARM64RuntimeCapabilityStatus/runtime-packages/time-after
+    runtime_status_test.go:2690: PASS runtime_time_after.go
+=== RUN   TestARM64RuntimeCapabilityStatus/runtime-packages/finalizer-resurrect
+    runtime_status_test.go:2690: PASS runtime_finalizer_resurrect.go
+=== RUN   TestARM64RuntimeCapabilityStatus/runtime-packages/timer-gc-channel
+    runtime_status_test.go:2690: PASS runtime_timer_gc_channel.go
+=== RUN   TestARM64RuntimeCapabilityStatus/runtime-packages/ticker-multi-tick
+    runtime_status_test.go:2690: PASS runtime_ticker_multi_tick.go
+=== RUN   TestARM64RuntimeCapabilityStatus/runtime-packages/timer-reset-after-drain
+    runtime_status_test.go:2690: PASS runtime_timer_reset_after_drain.go
+=== RUN   TestARM64RuntimeCapabilityStatus/stack-scan/loop-safepoints
+    runtime_status_test.go:2690: PASS runtime_stack_scan_loop_safepoints.go
+=== RUN   TestARM64RuntimeCapabilityStatus/stack-scan/blocked-goroutines
+    runtime_status_test.go:2690: PASS runtime_stack_scan_blocked_goroutines.go
+=== RUN   TestARM64RuntimeCapabilityStatus/stack-scan/syscall-transitions
+    runtime_status_test.go:2690: PASS runtime_stack_scan_syscall.go
+=== RUN   TestARM64RuntimeCapabilityStatus/stack-scan/panic-unwind
+    runtime_status_test.go:2690: PASS runtime_stack_scan_panic_unwind.go
+=== RUN   TestARM64RuntimeCapabilityStatus/stack-scan/stack-copy-roots
+    runtime_status_test.go:2690: PASS runtime_stack_copy_roots.go
+=== RUN   TestARM64RuntimeCapabilityStatus/stack-scan/callfree-loop-roots
+    runtime_status_test.go:2690: PASS runtime_stack_scan_callfree_loop.go
+=== RUN   TestARM64RuntimeCapabilityStatus/gc/channel-buffer-roots
+    runtime_status_test.go:2690: PASS runtime_channel_buffer_roots.go
+=== RUN   TestARM64RuntimeCapabilityStatus/gc-stress/concurrent-mark
+    runtime_status_test.go:2690: PASS runtime_gc_concurrent_mark.go
+=== RUN   TestARM64RuntimeCapabilityStatus/gc-stress/assist-credit
+    runtime_status_test.go:2690: PASS runtime_gc_assist_credit.go
+=== RUN   TestARM64RuntimeCapabilityStatus/gc-stress/sweep-pacing
+    runtime_status_test.go:2690: PASS runtime_gc_sweep_pacing.go
+=== RUN   TestARM64RuntimeCapabilityStatus/gc-stress/scavenge-release
+    runtime_status_test.go:2690: PASS runtime_gc_scavenge_release.go
+=== RUN   TestARM64RuntimeCapabilityStatus/gc-stress/heap-growth-shrink
+    runtime_status_test.go:2690: PASS runtime_gc_heap_growth_shrink.go
+=== RUN   TestARM64RuntimeCapabilityStatus/gc-stress/memory-limit
+    runtime_status_test.go:2690: PASS runtime_gc_memory_limit.go
+=== RUN   TestARM64RuntimeCapabilityStatus/gc-invariants/checkmark
+    runtime_status_test.go:2690: PASS runtime_gc_checkmark.go
+=== RUN   TestARM64RuntimeCapabilityStatus/gc-invariants/mark-workers
+    runtime_status_test.go:2690: PASS runtime_gc_mark_workers.go
+=== RUN   TestARM64RuntimeCapabilityStatus/gc-invariants/metadata-hugepages
+    runtime_status_test.go:2690: PASS runtime_gc_metadata_hugepages.go
+=== RUN   TestARM64RuntimeCapabilityStatus/gc-invariants/type-mask-padding
+    runtime_status_test.go:2690: PASS runtime_gc_type_mask_padding.go
+--- PASS: TestARM64RuntimeCapabilityStatus (216.65s)
+    --- PASS: TestARM64RuntimeCapabilityStatus/stdlib-runtime-diagnostics/trace-buffer (24.45s)
+    --- PASS: TestARM64RuntimeCapabilityStatus/stdlib-os/user-lookup (25.52s)
+    --- PASS: TestARM64RuntimeCapabilityStatus/stdlib-runtime-diagnostics/trace-start-stop (26.96s)
+    --- PASS: TestARM64RuntimeCapabilityStatus/stdlib-flag/parse (27.61s)
+    --- PASS: TestARM64RuntimeCapabilityStatus/stdlib-log/buffer (28.32s)
+    --- PASS: TestARM64RuntimeCapabilityStatus/stdlib-encoding/csv (28.50s)
+    --- PASS: TestARM64RuntimeCapabilityStatus/stdlib-runtime-diagnostics/trace-start-only (28.55s)
+    --- PASS: TestARM64RuntimeCapabilityStatus/stdlib-url/resolve-query (29.58s)
+    --- PASS: TestARM64RuntimeCapabilityStatus/stdlib-archive/tar-roundtrip (30.25s)
+    --- PASS: TestARM64RuntimeCapabilityStatus/stdlib-runtime-diagnostics/trace-start-probe (32.68s)
+    --- PASS: TestARM64RuntimeCapabilityStatus/stdlib-runtime-diagnostics/trace-log (32.72s)
+    --- PASS: TestARM64RuntimeCapabilityStatus/stdlib-mime/quotedprintable (34.36s)
+    --- PASS: TestARM64RuntimeCapabilityStatus/stdlib-fs/mapfs-walk (34.46s)
+    --- PASS: TestARM64RuntimeCapabilityStatus/stdlib-text/text-template-execute-parse-only (35.36s)
+    --- PASS: TestARM64RuntimeCapabilityStatus/stdlib-compress/zlib-lzw (36.55s)
+    --- PASS: TestARM64RuntimeCapabilityStatus/stdlib-testing/quick-check (36.57s)
+    --- PASS: TestARM64RuntimeCapabilityStatus/stdlib-archive/zip-roundtrip (37.33s)
+    --- PASS: TestARM64RuntimeCapabilityStatus/stdlib-url/values-encode (37.58s)
+    --- PASS: TestARM64RuntimeCapabilityStatus/stdlib-text/text-template-parse (37.76s)
+    --- PASS: TestARM64RuntimeCapabilityStatus/stdlib-crypto/sha3-pbkdf2 (38.15s)
+    --- PASS: TestARM64RuntimeCapabilityStatus/stdlib-math/big-rat-int (38.20s)
+    --- PASS: TestARM64RuntimeCapabilityStatus/stdlib-net-values/mail-textproto (40.14s)
+    --- PASS: TestARM64RuntimeCapabilityStatus/stdlib-compress/gzip-roundtrip (41.19s)
+    --- PASS: TestARM64RuntimeCapabilityStatus/stdlib-image/gif-animation (41.59s)
+    --- PASS: TestARM64RuntimeCapabilityStatus/stdlib-crypto/aes-modes (41.72s)
+    --- PASS: TestARM64RuntimeCapabilityStatus/stdlib-crypto/hkdf (42.28s)
+    --- PASS: TestARM64RuntimeCapabilityStatus/stdlib-encoding/gob-struct-int (42.85s)
+    --- PASS: TestARM64RuntimeCapabilityStatus/stdlib-encoding/gob-struct-mixed (43.55s)
+    --- PASS: TestARM64RuntimeCapabilityStatus/stdlib-crypto/des-rc4 (44.09s)
+    --- PASS: TestARM64RuntimeCapabilityStatus/stdlib-encoding/asn1-roundtrip (44.51s)
+    --- PASS: TestARM64RuntimeCapabilityStatus/stdlib-encoding/gob-roundtrip (45.33s)
+    --- PASS: TestARM64RuntimeCapabilityStatus/stdlib-encoding/gob-int (45.91s)
+    --- PASS: TestARM64RuntimeCapabilityStatus/stdlib-crypto/ecdh-x25519 (46.40s)
+    --- PASS: TestARM64RuntimeCapabilityStatus/stdlib-encoding/json-roundtrip (46.93s)
+    --- PASS: TestARM64RuntimeCapabilityStatus/stdlib-crypto/hash-hmac (47.67s)
+    --- PASS: TestARM64RuntimeCapabilityStatus/stdlib-encoding/xml (49.02s)
+    --- PASS: TestARM64RuntimeCapabilityStatus/stdlib-crypto/ecdsa (49.96s)
+    --- PASS: TestARM64RuntimeCapabilityStatus/stdlib-image/png-roundtrip (52.34s)
+    --- PASS: TestARM64RuntimeCapabilityStatus/stdlib-text/text-template-execute (52.38s)
+    --- PASS: TestARM64RuntimeCapabilityStatus/stdlib-crypto/hpke (52.64s)
+    --- PASS: TestARM64RuntimeCapabilityStatus/stdlib-log/slog-structured (54.55s)
+    --- PASS: TestARM64RuntimeCapabilityStatus/stdlib-crypto/rsa (55.04s)
+    --- PASS: TestARM64RuntimeCapabilityStatus/stdlib-crypto/ed25519 (56.93s)
+    --- PASS: TestARM64RuntimeCapabilityStatus/loop-variables/range-forms (65.72s)
+    --- PASS: TestARM64RuntimeCapabilityStatus/assignment-targets/multi-assignment-forms (67.33s)
+    --- PASS: TestARM64RuntimeCapabilityStatus/assignment-targets/range-target-order (67.63s)
+    --- PASS: TestARM64RuntimeCapabilityStatus/runtime-packages/reflect-value-instruction-op (67.94s)
+    --- PASS: TestARM64RuntimeCapabilityStatus/stdlib-os/pipe-manual-copy-shape (68.69s)
+    --- PASS: TestARM64RuntimeCapabilityStatus/stdlib-encoding/binary (69.07s)
+    --- PASS: TestARM64RuntimeCapabilityStatus/loop-variables/goroutine-and-defer (69.63s)
+    --- PASS: TestARM64RuntimeCapabilityStatus/closure-capture/assigned-header-values (69.67s)
+    --- PASS: TestARM64RuntimeCapabilityStatus/stdlib-encoding/hex (70.52s)
+    --- PASS: TestARM64RuntimeCapabilityStatus/assignment-targets/range-target-forms (70.59s)
+    --- PASS: TestARM64RuntimeCapabilityStatus/defer-panic/error-recover (70.78s)
+    --- PASS: TestARM64RuntimeCapabilityStatus/print-builtin/operand-separation (71.20s)
+    --- PASS: TestARM64RuntimeCapabilityStatus/stdlib-io/ioutil-tempfile (72.45s)
+    --- PASS: TestARM64RuntimeCapabilityStatus/stdlib-os/pipe-embedded-file-copy (73.15s)
+    --- PASS: TestARM64RuntimeCapabilityStatus/loop-variables/three-clause (73.34s)
+    --- PASS: TestARM64RuntimeCapabilityStatus/stdlib-os/file-roundtrip (73.39s)
+    --- PASS: TestARM64RuntimeCapabilityStatus/stdlib-fmt/sprintf (73.41s)
+    --- PASS: TestARM64RuntimeCapabilityStatus/stdlib-netpoll/pipe-roundtrip (73.84s)
+    --- PASS: TestARM64RuntimeCapabilityStatus/closure-capture/assigned-string (74.30s)
+    --- PASS: TestARM64RuntimeCapabilityStatus/stdlib-os-process/exec-echo (74.38s)
+    --- PASS: TestARM64RuntimeCapabilityStatus/runtime-packages/reflect-value-int (74.46s)
+    --- PASS: TestARM64RuntimeCapabilityStatus/stdlib-encoding/binary-varint (75.15s)
+    --- PASS: TestARM64RuntimeCapabilityStatus/runtime-packages/reflect-call-aggregate-probe (75.29s)
+    --- PASS: TestARM64RuntimeCapabilityStatus/loop-variables/address-gc (75.56s)
+    --- PASS: TestARM64RuntimeCapabilityStatus/stdlib-os/filepath-glob-clean (75.61s)
+    --- PASS: TestARM64RuntimeCapabilityStatus/stdlib-os/readdir-walkdir (75.61s)
+    --- PASS: TestARM64RuntimeCapabilityStatus/loop-variables/shared-scope (75.68s)
+    --- PASS: TestARM64RuntimeCapabilityStatus/stdlib-os/pipe-interface-capture-close (75.68s)
+    --- PASS: TestARM64RuntimeCapabilityStatus/stdlib-crypto/mlkem (75.72s)
+    --- PASS: TestARM64RuntimeCapabilityStatus/stdlib-os/rename-stat (76.17s)
+    --- PASS: TestARM64RuntimeCapabilityStatus/loop-variables/value-shapes (76.56s)
+    --- PASS: TestARM64RuntimeCapabilityStatus/runtime-packages/reflect-value-indirect-call (77.88s)
+    --- PASS: TestARM64RuntimeCapabilityStatus/stdlib-fmt/println (78.93s)
+    --- PASS: TestARM64RuntimeCapabilityStatus/stdlib-crypto/x509-ed25519 (79.19s)
+    --- PASS: TestARM64RuntimeCapabilityStatus/runtime-packages/reflect-interface-extract-probe (80.44s)
+    --- PASS: TestARM64RuntimeCapabilityStatus/runtime-packages/reflect-call-aggregate-matrix (80.74s)
+    --- PASS: TestARM64RuntimeCapabilityStatus/stdlib-os/exec-goroutine-shape (80.95s)
+    --- PASS: TestARM64RuntimeCapabilityStatus/stdlib-netpoll/udp-loopback (85.45s)
+    --- PASS: TestARM64RuntimeCapabilityStatus/runtime-packages/reflect-type-assert (88.88s)
+    --- PASS: TestARM64RuntimeCapabilityStatus/stdlib-net-values/smtp-session (89.05s)
+    --- PASS: TestARM64RuntimeCapabilityStatus/stdlib-os/pipe-goroutine-close (92.84s)
+    --- PASS: TestARM64RuntimeCapabilityStatus/runtime-packages/reflect-call-aggregate-function (93.18s)
+    --- PASS: TestARM64RuntimeCapabilityStatus/runtime-packages/reflect-type-metadata (93.45s)
+    --- PASS: TestARM64RuntimeCapabilityStatus/stdlib-runtime/context-cancel-channel (95.00s)
+    --- PASS: TestARM64RuntimeCapabilityStatus/runtime-packages/reflect-select (95.17s)
+    --- PASS: TestARM64RuntimeCapabilityStatus/runtime-packages/reflect-make-values (95.22s)
+    --- PASS: TestARM64RuntimeCapabilityStatus/stdlib-context/cancel-value (95.26s)
+    --- PASS: TestARM64RuntimeCapabilityStatus/runtime-packages/reflect-method-metadata (95.35s)
+    --- PASS: TestARM64RuntimeCapabilityStatus/stdlib-text/regexp-find-replace (95.43s)
+    --- PASS: TestARM64RuntimeCapabilityStatus/stdlib-time/format-parse (95.68s)
+    --- PASS: TestARM64RuntimeCapabilityStatus/stdlib-io/bufio-reader-writer (96.30s)
+    --- PASS: TestARM64RuntimeCapabilityStatus/runtime-packages/reflect-deep-equal (96.53s)
+    --- PASS: TestARM64RuntimeCapabilityStatus/runtime-packages/reflect-interface-method (96.58s)
+    --- PASS: TestARM64RuntimeCapabilityStatus/runtime-packages/reflect-interface-extract (97.06s)
+    --- PASS: TestARM64RuntimeCapabilityStatus/stdlib-image/jpeg-roundtrip (97.21s)
+    --- PASS: TestARM64RuntimeCapabilityStatus/stdlib-os/pipe-returned-closure-close (97.37s)
+    --- PASS: TestARM64RuntimeCapabilityStatus/stdlib-encoding/pem (97.49s)
+    --- PASS: TestARM64RuntimeCapabilityStatus/runtime-packages/reflect-map-slice (97.63s)
+    --- PASS: TestARM64RuntimeCapabilityStatus/runtime-packages/reflect-value-call (97.74s)
+    --- PASS: TestARM64RuntimeCapabilityStatus/stdlib-os/filemode-string (98.09s)
+    --- PASS: TestARM64RuntimeCapabilityStatus/runtime-packages/reflect-set-fields (98.20s)
+    --- PASS: TestARM64RuntimeCapabilityStatus/runtime-packages/reflect-call-aggregate (98.51s)
+    --- PASS: TestARM64RuntimeCapabilityStatus/stdlib-compress/bzip2 (100.96s)
+    --- PASS: TestARM64RuntimeCapabilityStatus/stdlib-io/bufio-scanner-words (101.00s)
+    --- PASS: TestARM64RuntimeCapabilityStatus/stdlib-io/strings-reader-seek (103.21s)
+    --- PASS: TestARM64RuntimeCapabilityStatus/stdlib-text/sort-search-slice (104.47s)
+    --- PASS: TestARM64RuntimeCapabilityStatus/stdlib-io/bufio-lines-after-read (105.26s)
+    --- PASS: TestARM64RuntimeCapabilityStatus/stdlib-encoding/base64 (105.66s)
+    --- PASS: TestARM64RuntimeCapabilityStatus/stdlib-io/multi-reader-writer (105.69s)
+    --- PASS: TestARM64RuntimeCapabilityStatus/stdlib-io/limited-reader (105.71s)
+    --- PASS: TestARM64RuntimeCapabilityStatus/stdlib-io/section-reader (105.72s)
+    --- PASS: TestARM64RuntimeCapabilityStatus/stdlib-io/copy-buffer (106.18s)
+    --- PASS: TestARM64RuntimeCapabilityStatus/stdlib-runtime-values/unique-handle (106.23s)
+    --- PASS: TestARM64RuntimeCapabilityStatus/stdlib-io/tee-reader (106.36s)
+    --- PASS: TestARM64RuntimeCapabilityStatus/stdlib-math/rand-v2 (106.70s)
+    --- PASS: TestARM64RuntimeCapabilityStatus/stdlib-hash/crc32-fnv (106.79s)
+    --- PASS: TestARM64RuntimeCapabilityStatus/stdlib-encoding/ascii85 (107.04s)
+    --- PASS: TestARM64RuntimeCapabilityStatus/stdlib-io/discard-write (107.48s)
+    --- PASS: TestARM64RuntimeCapabilityStatus/stdlib-containers/heap (107.76s)
+    --- PASS: TestARM64RuntimeCapabilityStatus/stdlib-bytes/grow-capacity (107.84s)
+    --- PASS: TestARM64RuntimeCapabilityStatus/stdlib-bytes/reader-unread (108.18s)
+    --- PASS: TestARM64RuntimeCapabilityStatus/stdlib-encoding/base32 (108.45s)
+    --- PASS: TestARM64RuntimeCapabilityStatus/stdlib-io/readall-limited-reader (108.68s)
+    --- PASS: TestARM64RuntimeCapabilityStatus/stdlib-runtime-diagnostics/metrics-read (108.73s)
+    --- PASS: TestARM64RuntimeCapabilityStatus/runtime-packages/sync-waitgroup-mutex-once (108.90s)
+    --- PASS: TestARM64RuntimeCapabilityStatus/goroutine/many-goroutines-gc (109.24s)
+    --- PASS: TestARM64RuntimeCapabilityStatus/stdlib-netpoll/syscall-socket-listen (109.28s)
+    --- PASS: TestARM64RuntimeCapabilityStatus/stdlib-sync/once-map-cond (109.50s)
+    --- PASS: TestARM64RuntimeCapabilityStatus/stdlib-io/copy-n-writer-only (109.51s)
+    --- PASS: TestARM64RuntimeCapabilityStatus/stdlib-text/sort-find-edges (109.51s)
+    --- PASS: TestARM64RuntimeCapabilityStatus/stdlib-text/strconv-parse-edges (109.78s)
+    --- PASS: TestARM64RuntimeCapabilityStatus/runtime-packages/sync-map (109.82s)
+    --- PASS: TestARM64RuntimeCapabilityStatus/runtime-packages/atomic-counter (110.38s)
+    --- PASS: TestARM64RuntimeCapabilityStatus/stdlib-net-values/netip (110.62s)
+    --- PASS: TestARM64RuntimeCapabilityStatus/stdlib-text/strings-builder-cut (110.80s)
+    --- PASS: TestARM64RuntimeCapabilityStatus/runtime-packages/sync-rwmutex-readers (111.14s)
+    --- PASS: TestARM64RuntimeCapabilityStatus/stdlib-hash/adler32-state (111.23s)
+    --- PASS: TestARM64RuntimeCapabilityStatus/core-types/type-param-method-shapes (111.25s)
+    --- PASS: TestARM64RuntimeCapabilityStatus/stdlib-io/copy-n (111.33s)
+    --- PASS: TestARM64RuntimeCapabilityStatus/stdlib-math/rand-shuffle-permutation (111.88s)
+    --- PASS: TestARM64RuntimeCapabilityStatus/runtime-packages/sync-mutex-defer (112.10s)
+    --- PASS: TestARM64RuntimeCapabilityStatus/runtime-packages/sync-once-concurrent (112.22s)
+    --- PASS: TestARM64RuntimeCapabilityStatus/stdlib-text/strings-transform (112.31s)
+    --- PASS: TestARM64RuntimeCapabilityStatus/runtime-packages/sync-cond-rwmutex (112.38s)
+    --- PASS: TestARM64RuntimeCapabilityStatus/defer-panic/sync-once-panic (112.70s)
+    --- PASS: TestARM64RuntimeCapabilityStatus/runtime-packages/sync-pool-interface-gc (112.86s)
+    --- PASS: TestARM64RuntimeCapabilityStatus/stdlib-io/bytes-buffer (113.56s)
+    --- PASS: TestARM64RuntimeCapabilityStatus/runtime-packages/sync-once-value (113.76s)
+    --- PASS: TestARM64RuntimeCapabilityStatus/stdlib-io/write-string (113.79s)
+    --- PASS: TestARM64RuntimeCapabilityStatus/runtime-packages/waitgroup-reuse (114.03s)
+    --- PASS: TestARM64RuntimeCapabilityStatus/stdlib-io/pipe-roundtrip (114.56s)
+    --- PASS: TestARM64RuntimeCapabilityStatus/stdlib-generics/maps-slices (114.70s)
+    --- PASS: TestARM64RuntimeCapabilityStatus/stdlib-text/strconv-roundtrip (114.85s)
+    --- PASS: TestARM64RuntimeCapabilityStatus/stdlib-path/match-clean (115.11s)
+    --- PASS: TestARM64RuntimeCapabilityStatus/stdlib-generics/maps-keys (115.13s)
+    --- PASS: TestARM64RuntimeCapabilityStatus/stdlib-runtime-values/weak-pointer (115.66s)
+    --- PASS: TestARM64RuntimeCapabilityStatus/stdlib-sync/once-func (115.66s)
+    --- PASS: TestARM64RuntimeCapabilityStatus/stdlib-generics/slices-string-sort (115.84s)
+    --- PASS: TestARM64RuntimeCapabilityStatus/stdlib-generics/iter-pull (116.42s)
+    --- PASS: TestARM64RuntimeCapabilityStatus/core-types/map-interface-values-gc (116.58s)
+    --- PASS: TestARM64RuntimeCapabilityStatus/stdlib-generics/maps-clone (117.27s)
+    --- PASS: TestARM64RuntimeCapabilityStatus/gc/map-pointer-values-gc (117.56s)
+    --- PASS: TestARM64RuntimeCapabilityStatus/stdlib-errors/join-is-as (117.57s)
+    --- PASS: TestARM64RuntimeCapabilityStatus/goroutine/channel-struct-pointer-gc (118.03s)
+    --- PASS: TestARM64RuntimeCapabilityStatus/gc/closure-captures-roots-gc (118.24s)
+    --- PASS: TestARM64RuntimeCapabilityStatus/core-types/map-delete-iterate-gc (118.38s)
+    --- PASS: TestARM64RuntimeCapabilityStatus/core-types/interface-pointer-equality-gc (118.34s)
+    --- PASS: TestARM64RuntimeCapabilityStatus/core-types/type-switch-pointer-values (118.47s)
+    --- PASS: TestARM64RuntimeCapabilityStatus/core-types/append-variadic-pointer-gc (118.55s)
+    --- PASS: TestARM64RuntimeCapabilityStatus/gc/heap-struct-graph (118.75s)
+    --- PASS: TestARM64RuntimeCapabilityStatus/core-types/copy-interface-slice-gc (119.08s)
+    --- PASS: TestARM64RuntimeCapabilityStatus/defer-panic/panic-stack-recover-gc (120.36s)
+    --- PASS: TestARM64RuntimeCapabilityStatus/gc/slice-struct-values-gc (120.42s)
+    --- PASS: TestARM64RuntimeCapabilityStatus/goroutine/worker-fanin-gc (120.47s)
+    --- PASS: TestARM64RuntimeCapabilityStatus/goroutine/interface-channel-gc (120.59s)
+    --- PASS: TestARM64RuntimeCapabilityStatus/gc/new-composite-gc (121.05s)
+    --- PASS: TestARM64RuntimeCapabilityStatus/core-types/append-growth-pointer-elements (121.06s)
+    --- PASS: TestARM64RuntimeCapabilityStatus/defer-panic/panic-alloc-recover-gc (121.17s)
+    --- PASS: TestARM64RuntimeCapabilityStatus/core-types/slice-pointer-append-gc (121.19s)
+    --- PASS: TestARM64RuntimeCapabilityStatus/stack/recursive-struct-chain-gc (121.23s)
+    --- PASS: TestARM64RuntimeCapabilityStatus/gc/global-roots-gc (121.66s)
+    --- PASS: TestARM64RuntimeCapabilityStatus/stack/growth-preserves-pointers (121.81s)
+    --- PASS: TestARM64RuntimeCapabilityStatus/goroutine/channel-interface-close-gc (121.88s)
+    --- PASS: TestARM64RuntimeCapabilityStatus/stack/panic-stack-gc (121.88s)
+    --- PASS: TestARM64RuntimeCapabilityStatus/stack/defer-closure-stack-gc (122.24s)
+    --- PASS: TestARM64RuntimeCapabilityStatus/core-types/map-interface-keys-gc (122.35s)
+    --- PASS: TestARM64RuntimeCapabilityStatus/goroutine/channel-of-slices-gc (122.33s)
+    --- PASS: TestARM64RuntimeCapabilityStatus/goroutine/select-global-locked-gc (122.45s)
+    --- PASS: TestARM64RuntimeCapabilityStatus/runtime-packages/callers-stack (123.06s)
+    --- PASS: TestARM64RuntimeCapabilityStatus/stack/interface-preserved-across-gc (123.43s)
+    --- PASS: TestARM64RuntimeCapabilityStatus/gc/loop-closure-gc (123.58s)
+    --- PASS: TestARM64RuntimeCapabilityStatus/core-types/map-growth-gc (124.26s)
+    --- PASS: TestARM64RuntimeCapabilityStatus/defer-panic/goexit-runs-defer (124.20s)
+    --- PASS: TestARM64RuntimeCapabilityStatus/runtime-packages/atomic-value (124.28s)
+    --- PASS: TestARM64RuntimeCapabilityStatus/goroutine/closure-survives-gc (124.44s)
+    --- PASS: TestARM64RuntimeCapabilityStatus/gc/pinner-invalid (124.70s)
+    --- PASS: TestARM64RuntimeCapabilityStatus/core-types/interface-to-interface (125.02s)
+    --- PASS: TestARM64RuntimeCapabilityStatus/stdlib-math/math-cmplx (125.05s)
+    --- PASS: TestARM64RuntimeCapabilityStatus/gc/array-copy-pointer-gc (125.24s)
+    --- PASS: TestARM64RuntimeCapabilityStatus/stack/method-value-gc (125.61s)
+    --- PASS: TestARM64RuntimeCapabilityStatus/gc/scalar-stack-slots (125.78s)
+    --- PASS: TestARM64RuntimeCapabilityStatus/core-types/type-param-method-dispatch (126.17s)
+    --- PASS: TestARM64RuntimeCapabilityStatus/stack/interface-method-gc (126.19s)
+    --- PASS: TestARM64RuntimeCapabilityStatus/core-types/map-pointer-keys (126.24s)
+    --- PASS: TestARM64RuntimeCapabilityStatus/stdlib-unicode/utf8-decode (126.82s)
+    --- PASS: TestARM64RuntimeCapabilityStatus/core-types/map-struct-value-replace (126.98s)
+    --- PASS: TestARM64RuntimeCapabilityStatus/core-types/type-assertions-switch (127.39s)
+    --- PASS: TestARM64RuntimeCapabilityStatus/stdlib-math/bits-wide-arithmetic (127.44s)
+    --- PASS: TestARM64RuntimeCapabilityStatus/stdlib-http/parse-roundtrip (127.52s)
+    --- PASS: TestARM64RuntimeCapabilityStatus/stdlib-containers/list-ring (127.81s)
+    --- PASS: TestARM64RuntimeCapabilityStatus/stdlib-sync/atomic-typed (128.08s)
+    --- PASS: TestARM64RuntimeCapabilityStatus/core-types/complex64-parts (128.33s)
+    --- PASS: TestARM64RuntimeCapabilityStatus/goroutine/lock-osthread (128.53s)
+    --- PASS: TestARM64RuntimeCapabilityStatus/core-types/method-expression (128.65s)
+    --- PASS: TestARM64RuntimeCapabilityStatus/defer-panic/panic-recover-identity (129.00s)
+    --- PASS: TestARM64RuntimeCapabilityStatus/core-types/interface-nil-assertions (129.35s)
+    --- PASS: TestARM64RuntimeCapabilityStatus/goroutine/channel-struct-zero-close (129.38s)
+    --- PASS: TestARM64RuntimeCapabilityStatus/core-types/string-byte-round-trip (129.41s)
+    --- PASS: TestARM64RuntimeCapabilityStatus/core-types/interface-comparable-map (129.46s)
+    --- PASS: TestARM64RuntimeCapabilityStatus/core-types/unsafe-struct-field (129.59s)
+    --- PASS: TestARM64RuntimeCapabilityStatus/goroutine/channel-pointer-zero-close (129.65s)
+    --- PASS: TestARM64RuntimeCapabilityStatus/stdlib-generics/cmp-order (129.77s)
+    --- PASS: TestARM64RuntimeCapabilityStatus/core-types/maps-slices-interfaces (129.80s)
+    --- PASS: TestARM64RuntimeCapabilityStatus/defer-panic/defer-method-value-order (130.18s)
+    --- PASS: TestARM64RuntimeCapabilityStatus/stdlib-math/math-bits (130.75s)
+    --- PASS: TestARM64RuntimeCapabilityStatus/core-types/interface-method-value (130.84s)
+    --- PASS: TestARM64RuntimeCapabilityStatus/goroutine/channel-direction (131.04s)
+    --- PASS: TestARM64RuntimeCapabilityStatus/goroutine/select-nil-disable (131.19s)
+    --- PASS: TestARM64RuntimeCapabilityStatus/defer-panic/defer-order-panic (131.20s)
+    --- PASS: TestARM64RuntimeCapabilityStatus/runtime-packages/timer-callback-shape (131.45s)
+    --- PASS: TestARM64RuntimeCapabilityStatus/core-types/nil-map-read-delete (131.47s)
+    --- PASS: TestARM64RuntimeCapabilityStatus/defer-panic/typed-recover (131.52s)
+    --- PASS: TestARM64RuntimeCapabilityStatus/core-types/slice-three-index (131.56s)
+    --- PASS: TestARM64RuntimeCapabilityStatus/goroutine/select-buffered-send-receive (131.58s)
+    --- PASS: TestARM64RuntimeCapabilityStatus/core-types/append-self-overlap (131.74s)
+    --- PASS: TestARM64RuntimeCapabilityStatus/core-types/slice-copy-overlap (131.82s)
+    --- PASS: TestARM64RuntimeCapabilityStatus/goroutine/select-receive-default (131.81s)
+    --- PASS: TestARM64RuntimeCapabilityStatus/goroutine/select-closed-channel (131.82s)
+    --- PASS: TestARM64RuntimeCapabilityStatus/goroutine/channel-close-buffered-receive (132.36s)
+    --- PASS: TestARM64RuntimeCapabilityStatus/defer-panic/defer-argument-evaluation (132.75s)
+    --- PASS: TestARM64RuntimeCapabilityStatus/core-types/map-iter-delete-insert (132.79s)
+    --- PASS: TestARM64RuntimeCapabilityStatus/defer-panic/panic-deep-unwind (132.84s)
+    --- PASS: TestARM64RuntimeCapabilityStatus/goroutine/nil-channel-select (133.03s)
+    --- PASS: TestARM64RuntimeCapabilityStatus/goroutine/select-two-ready (133.34s)
+    --- PASS: TestARM64RuntimeCapabilityStatus/core-types/interface-method-expression (133.41s)
+    --- PASS: TestARM64RuntimeCapabilityStatus/goroutine/select-channels (133.48s)
+    --- PASS: TestARM64RuntimeCapabilityStatus/core-types/map-range-delete-all (133.65s)
+    --- PASS: TestARM64RuntimeCapabilityStatus/core-types/nil-interface-typed-pointer (133.92s)
+    --- PASS: TestARM64RuntimeCapabilityStatus/stack/many-defers-stack (134.07s)
+    --- PASS: TestARM64RuntimeCapabilityStatus/goroutine/select-send-default (134.16s)
+    --- PASS: TestARM64RuntimeCapabilityStatus/goroutine/unbuffered-pingpong (134.44s)
+    --- PASS: TestARM64RuntimeCapabilityStatus/goroutine/channel-nonblocking-receive (134.61s)
+    --- PASS: TestARM64RuntimeCapabilityStatus/goroutine/buffered-channel-fifo (134.83s)
+    --- PASS: TestARM64RuntimeCapabilityStatus/core-types/slice-to-array-pointer (135.48s)
+    --- PASS: TestARM64RuntimeCapabilityStatus/core-types/complex-arithmetic (135.79s)
+    --- PASS: TestARM64RuntimeCapabilityStatus/core-types/map-range-insert-growth (135.79s)
+    --- PASS: TestARM64RuntimeCapabilityStatus/goroutine/closed-channel-receive (135.94s)
+    --- PASS: TestARM64RuntimeCapabilityStatus/defer-panic/defer-replace-panic (136.14s)
+    --- PASS: TestARM64RuntimeCapabilityStatus/defer-panic/panic-struct-recover (136.17s)
+    --- PASS: TestARM64RuntimeCapabilityStatus/core-types/array-map-key (136.31s)
+    --- PASS: TestARM64RuntimeCapabilityStatus/goroutine/channel-close-range (136.36s)
+    --- PASS: TestARM64RuntimeCapabilityStatus/core-types/string-rune-map (136.38s)
+    --- PASS: TestARM64RuntimeCapabilityStatus/defer-panic/defer-named-result-panic (136.42s)
+    --- PASS: TestARM64RuntimeCapabilityStatus/core-types/string-slice-compare-swap (136.80s)
+    --- PASS: TestARM64RuntimeCapabilityStatus/defer-panic/goroutine-panic-recover (136.81s)
+    --- PASS: TestARM64RuntimeCapabilityStatus/defer-panic/panic-repanic (137.36s)
+    --- PASS: TestARM64RuntimeCapabilityStatus/defer-panic/panic-string-output (137.41s)
+    --- PASS: TestARM64RuntimeCapabilityStatus/core-types/copy-string-to-bytes (137.44s)
+    --- PASS: TestARM64RuntimeCapabilityStatus/core-types/map-clear (137.51s)
+    --- PASS: TestARM64RuntimeCapabilityStatus/defer-panic/nested-defer (137.64s)
+    --- PASS: TestARM64RuntimeCapabilityStatus/defer-panic/basic-recover (137.66s)
+    --- PASS: TestARM64RuntimeCapabilityStatus/goroutine/double-close-panic (137.98s)
+    --- PASS: TestARM64RuntimeCapabilityStatus/defer-panic/recover-outside-panic (138.08s)
+    --- PASS: TestARM64RuntimeCapabilityStatus/goroutine/closed-channel-send-panic (138.76s)
+    --- PASS: TestARM64RuntimeCapabilityStatus/defer-panic/panic-nil-recover (138.77s)
+    --- PASS: TestARM64RuntimeCapabilityStatus/goroutine/channel-handoff (139.53s)
+    --- PASS: TestARM64RuntimeCapabilityStatus/defer-panic/defer-named-return (140.06s)
+    --- PASS: TestARM64RuntimeCapabilityStatus/stdlib-http/cookiejar (141.63s)
+    --- PASS: TestARM64RuntimeCapabilityStatus/stdlib-http/multipart-form (141.96s)
+    --- PASS: TestARM64RuntimeCapabilityStatus/stdlib-http/redirect-keepalive (150.27s)
+    --- PASS: TestARM64RuntimeCapabilityStatus/stdlib-http/client-server (152.25s)
+    --- PASS: TestARM64RuntimeCapabilityStatus/stdlib-http/tls-client-server (153.19s)
+    --- PASS: TestARM64RuntimeCapabilityStatus/gc/keepalive-finalizer (0.04s)
+    --- PASS: TestARM64RuntimeCapabilityStatus/gc/finalizer-stack-growth (0.02s)
+    --- PASS: TestARM64RuntimeCapabilityStatus/gc/setfinalizer-clear (0.21s)
+    --- PASS: TestARM64RuntimeCapabilityStatus/gc/cleanup-basic (0.02s)
+    --- PASS: TestARM64RuntimeCapabilityStatus/gc/cleanup-stop (0.04s)
+    --- PASS: TestARM64RuntimeCapabilityStatus/gc/cleanup-multiple (0.01s)
+    --- PASS: TestARM64RuntimeCapabilityStatus/gc/cleanup-frame-retention (0.02s)
+    --- PASS: TestARM64RuntimeCapabilityStatus/gc/assist-alloc-recursion (0.03s)
+    --- PASS: TestARM64RuntimeCapabilityStatus/gc/defer-capture-allocs (0.02s)
+    --- PASS: TestARM64RuntimeCapabilityStatus/gc/cleanup-frame-retention-masked (0.03s)
+    --- PASS: TestARM64RuntimeCapabilityStatus/gc/cleanup-frame-retention-scribble (0.02s)
+    --- PASS: TestARM64RuntimeCapabilityStatus/gc/span-metadata-barrier (0.05s)
+    --- PASS: TestARM64RuntimeCapabilityStatus/gc/stack-argument-roots (0.10s)
+    --- PASS: TestARM64RuntimeCapabilityStatus/gc/keepalive-stack-root (0.05s)
+    --- PASS: TestARM64RuntimeCapabilityStatus/gc/goroutine-entry-stack-map (1.21s)
+    --- PASS: TestARM64RuntimeCapabilityStatus/gc/finalizer-cleanup-order (0.02s)
+    --- PASS: TestARM64RuntimeCapabilityStatus/gc/finalizer-dependency-order (0.03s)
+    --- PASS: TestARM64RuntimeCapabilityStatus/gc/finalizer-tiny (0.08s)
+    --- PASS: TestARM64RuntimeCapabilityStatus/gc/pinner-lifecycle (0.10s)
+    --- PASS: TestARM64RuntimeCapabilityStatus/goroutine/gosched-progress (0.01s)
+    --- PASS: TestARM64RuntimeCapabilityStatus/scheduler-stress/ring-handoff (0.01s)
+    --- PASS: TestARM64RuntimeCapabilityStatus/scheduler-stress/timer-select-churn (0.06s)
+    --- PASS: TestARM64RuntimeCapabilityStatus/scheduler-stress/gc-churn (0.08s)
+    --- PASS: TestARM64RuntimeCapabilityStatus/stdlib-bytes/grow-compare (0.05s)
+    --- PASS: TestARM64RuntimeCapabilityStatus/stdlib-bytes/grow-stats (0.02s)
+    --- PASS: TestARM64RuntimeCapabilityStatus/stdlib-bytes/grow-allocs (0.35s)
+    --- PASS: TestARM64RuntimeCapabilityStatus/stdlib-bytes/replace-allocs (0.02s)
+    --- PASS: TestARM64RuntimeCapabilityStatus/stdlib-signals/notify-context (0.02s)
+    --- PASS: TestARM64RuntimeCapabilityStatus/stdlib-signals/repeated-stop-reset (0.04s)
+    --- PASS: TestARM64RuntimeCapabilityStatus/stdlib-signals/during-gc (0.03s)
+    --- PASS: TestARM64RuntimeCapabilityStatus/stdlib-signals/during-netpoll (0.02s)
+    --- PASS: TestARM64RuntimeCapabilityStatus/stdlib-signals/atomic-contention (5.11s)
+    --- PASS: TestARM64RuntimeCapabilityStatus/stdlib-runtime-diagnostics/debug-stack-gc (0.02s)
+    --- PASS: TestARM64RuntimeCapabilityStatus/stdlib-runtime-diagnostics/allocs-per-run (0.02s)
+    --- PASS: TestARM64RuntimeCapabilityStatus/stdlib-netpoll/pipe-past-deadline (0.02s)
+    --- PASS: TestARM64RuntimeCapabilityStatus/stdlib-netpoll/pipe-deadline (0.04s)
+    --- PASS: TestARM64RuntimeCapabilityStatus/stdlib-netpoll/pipe-close-unblocks-read (0.03s)
+    --- PASS: TestARM64RuntimeCapabilityStatus/stdlib-netpoll/pipe-afterfunc-close (0.03s)
+    --- PASS: TestARM64RuntimeCapabilityStatus/stdlib-netpoll-stress/pipe-deadline-reset (0.04s)
+    --- PASS: TestARM64RuntimeCapabilityStatus/stdlib-netpoll-stress/pipe-close-churn (0.05s)
+    --- PASS: TestARM64RuntimeCapabilityStatus/stdlib-netpoll-stress/tcp-churn (0.04s)
+    --- PASS: TestARM64RuntimeCapabilityStatus/stdlib-netpoll-stress/udp-burst (0.02s)
+    --- PASS: TestARM64RuntimeCapabilityStatus/stdlib-netpoll/tcp-echo (0.02s)
+    --- PASS: TestARM64RuntimeCapabilityStatus/stdlib-netpoll/tcp-read-deadline (0.04s)
+    --- PASS: TestARM64RuntimeCapabilityStatus/stdlib-netpoll/tcp-accept-deadline (0.04s)
+    --- PASS: TestARM64RuntimeCapabilityStatus/stdlib-netpoll/tcp-concurrent-clients (0.03s)
+    --- PASS: TestARM64RuntimeCapabilityStatus/stdlib-netpoll/udp-deadline (0.04s)
+    --- PASS: TestARM64RuntimeCapabilityStatus/stdlib-netpoll/close-unblocks-read (0.02s)
+    --- PASS: TestARM64RuntimeCapabilityStatus/print-builtin/statement-atomicity (0.08s)
+    --- PASS: TestARM64RuntimeCapabilityStatus/runtime-packages/time-timers (0.01s)
+    --- PASS: TestARM64RuntimeCapabilityStatus/runtime-packages/gomaxprocs-memstats (0.01s)
+    --- PASS: TestARM64RuntimeCapabilityStatus/runtime-packages/time-reset-stop (0.02s)
+    --- PASS: TestARM64RuntimeCapabilityStatus/runtime-packages/ticker-stop (0.01s)
+    --- PASS: TestARM64RuntimeCapabilityStatus/runtime-packages/select-timeout (0.01s)
+    --- PASS: TestARM64RuntimeCapabilityStatus/runtime-packages/debug-gc-controls (0.02s)
+    --- PASS: TestARM64RuntimeCapabilityStatus/runtime-packages/finalizer-basic (0.02s)
+    --- PASS: TestARM64RuntimeCapabilityStatus/runtime-packages/time-afterfunc (0.01s)
+    --- PASS: TestARM64RuntimeCapabilityStatus/runtime-packages/time-after (0.01s)
+    --- PASS: TestARM64RuntimeCapabilityStatus/runtime-packages/finalizer-resurrect (0.02s)
+    --- PASS: TestARM64RuntimeCapabilityStatus/runtime-packages/timer-gc-channel (0.03s)
+    --- PASS: TestARM64RuntimeCapabilityStatus/runtime-packages/ticker-multi-tick (0.02s)
+    --- PASS: TestARM64RuntimeCapabilityStatus/runtime-packages/timer-reset-after-drain (0.02s)
+    --- PASS: TestARM64RuntimeCapabilityStatus/stack-scan/loop-safepoints (0.06s)
+    --- PASS: TestARM64RuntimeCapabilityStatus/stack-scan/blocked-goroutines (0.04s)
+    --- PASS: TestARM64RuntimeCapabilityStatus/stack-scan/syscall-transitions (0.04s)
+    --- PASS: TestARM64RuntimeCapabilityStatus/stack-scan/panic-unwind (0.07s)
+    --- PASS: TestARM64RuntimeCapabilityStatus/stack-scan/stack-copy-roots (6.29s)
+    --- PASS: TestARM64RuntimeCapabilityStatus/stack-scan/callfree-loop-roots (0.30s)
+    --- PASS: TestARM64RuntimeCapabilityStatus/gc/channel-buffer-roots (0.10s)
+    --- PASS: TestARM64RuntimeCapabilityStatus/gc-stress/concurrent-mark (4.06s)
+    --- PASS: TestARM64RuntimeCapabilityStatus/gc-stress/assist-credit (0.70s)
+    --- PASS: TestARM64RuntimeCapabilityStatus/gc-stress/sweep-pacing (0.20s)
+    --- PASS: TestARM64RuntimeCapabilityStatus/gc-stress/scavenge-release (0.19s)
+    --- PASS: TestARM64RuntimeCapabilityStatus/gc-stress/heap-growth-shrink (0.65s)
+    --- PASS: TestARM64RuntimeCapabilityStatus/gc-stress/memory-limit (1.22s)
+    --- PASS: TestARM64RuntimeCapabilityStatus/gc-invariants/checkmark (0.17s)
+    --- PASS: TestARM64RuntimeCapabilityStatus/gc-invariants/mark-workers (0.37s)
+    --- PASS: TestARM64RuntimeCapabilityStatus/gc-invariants/metadata-hugepages (0.57s)
+    --- PASS: TestARM64RuntimeCapabilityStatus/gc-invariants/type-mask-padding (0.54s)
+PASS
+ok  	github.com/evanphx/cg12/cmd/goc	216.671s

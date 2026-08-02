@@ -1517,3 +1517,341 @@ identically on `main` @ `05946f2` — measured, not assumed. Every other result 
 green, and the two results that matter most for a branch that changes emission
 are unambiguous: **zero new frame-address publications** against an untouched
 baseline, and **385/385 byte-reproducible compiles**.
+
+---
+---
+
+# Independent verification of `ccwork/loop-aliasing-fix` (2abd8ab)
+
+Job: `loop-aliasing-verify`. Branch under test `origin/ccwork/loop-aliasing-fix`
+= `2abd8ab`, which is `main` (`efcd4d4`) + 6 commits. Control tree is `main` at
+`efcd4d4`, checked out in `.../loop-aliasing-verify/repo`; the branch is in a
+separate worktree `.../loop-aliasing-verify/fix`. Both run on the same 64-core
+box. Every control number below was produced by a process THIS job started and
+waited on to exit -- nothing is inherited from the branch's own report.
+
+Every `go test` invocation carries `-count=1`; logs are grepped for `(cached)`.
+
+**Status: IN PROGRESS -- suites launched, results appended below as each exits.**
+
+## 8. The three loop reductions vs. the host toolchain — **PASS (verified directly)**
+
+Not taken from the branch's own test. I ran `go run` on each program with the
+host toolchain (`go version go1.26.1 linux/arm64`) to get the language's answer,
+then compiled and ran each with a `goc` binary built from **each** tree
+(`go build ./cmd/goc`, then `goc [-O] -run`, `GOMAXPROCS=1`), and compared.
+All 16 compiles exited 0.
+
+Note on scope: `loop_alias_forms.go` contains **three** forms (`viaNew`,
+`viaMake`, `viaArray`), not four; the fourth form is `alternate` in
+`loop_alias_composite.go`. All four are below, plus the two other corpus
+programs the same placement code decides.
+
+| program | host `go run` | branch, plain | branch `-O` | `main`, plain | `main` `-O` |
+| --- | --- | --- | --- | --- | --- |
+| `loop_alias_forms.go` `new:` | `1 2` | `1 2` ✅ | `1 2` ✅ | `1 2` | `1 2` |
+| `loop_alias_forms.go` `make:` | `1 2` | `1 2` ✅ | `1 2` ✅ | `1 2` | `1 2` |
+| `loop_alias_forms.go` `array:` | `1 2` | `1 2` ✅ | `1 2` ✅ | **`2 2`** ❌ | **`2 2`** ❌ |
+| `loop_alias_composite.go` | `alternate: 1 2` / `distinct` | ✅ | ✅ | **`2 2` / `ALIASED`** ❌ | **`2 2` / `ALIASED`** ❌ |
+| `loop_alias_frame_local.go` | `18 / 12 / 18` | ✅ | ✅ | ✅ | ✅ |
+| `variadic_backing.go` | `1` | ✅ | ✅ | ✅ | ✅ |
+
+**The miscompile is real and this branch fixes it.** I reproduced it on `main`
+myself: `viaArray` (`var a [2]int; &a` in a loop body) and `alternate`
+(`&cell{v: i}`) both print `2 2` where Go prints `1 2`, in both configurations.
+On the branch both print `1 2`. The `new(int)` and `make([]int,...)` forms were
+already correct on `main` — those two go through `opt.LowerHeapAllocations`,
+which had already been fixed; the two the branch fixes are the front-end-placed
+ones, which matches what the commits say they do.
+
+`loop_alias_frame_local.go` still prints the host's answer on the branch, i.e.
+the new rule did not break the negative direction. (That program cannot detect
+*over*-heaping by its output; the allocation census in §6 is what covers that.)
+
+## 2. `make test-goc-status` — **PASS, full set**
+
+`GOFLAGS='-v -count=1' make test-goc-status` on the branch worktree. Exit 0,
+`ok github.com/evanphx/cg12/cmd/goc 216.671s`. No `(cached)` in the log.
+
+**PASS set = all 364 capability subtests. FAIL set = ∅. SKIP set = ∅.**
+That is the known-good 364/364 exactly.
+
+## 3. `make test-goc-status-opt` — **the one pre-existing failure, not grown**
+
+Run on the branch AND on `main` (`efcd4d4`) by this job, concurrently, same box.
+Neither number is inherited.
+
+| | branch `2abd8ab` | `main` `efcd4d4` (control I ran) |
+| --- | --- | --- |
+| exit | 2 | 2 |
+| PASS set size | 363 | 363 |
+| FAIL set | `{stack-scan/loop-safepoints}` | `{stack-scan/loop-safepoints}` |
+| wall clock | 220.7s | 219.7s |
+| `(cached)` | 0 | 0 |
+
+`diff` of the two sorted PASS name sets: **identical, zero lines.** The FAIL sets
+are the same one element. The `-O` arm's single failure is pre-existing and this
+branch neither adds to it nor fixes it. **Not grown.**
+
+## 4. `make test-unit` — **PASS, identical to `main`**
+
+`GOFLAGS='-v -count=1' make test-unit`, both trees, this job.
+
+| | branch | `main` (control) |
+| --- | --- | --- |
+| PASS | **1591** | 1591 |
+| FAIL | **0** | 0 |
+| SKIP | 339 | 339 |
+| exit | 0 | 0 |
+
+`diff` of the sorted PASS name sets: **identical, zero lines.** No test that ran
+on `main` stopped running or stopped passing.
+
+## 5. `TestFrameEscapeAudit -count=1` — **PASS, zero new publications**
+
+`go test -v -count=1 ./goc -run '^TestFrameEscapeAudit$'` on the branch.
+Exit 0, `--- PASS: TestFrameEscapeAudit (213.24s)`. 213s is a full corpus
+compile, not a cache hit; no `(cached)` in the log.
+
+The check is against `goc/testdata/frame_escape_baseline.txt`, which
+`cmp` says is **byte-identical to `main`'s** (`git diff main..HEAD` on that path
+is empty). So the audit passed against an unmodified baseline:
+**0 new publications, 0 vanished.** The hard requirement is met.
+
+## 6. Allocation census against the regenerated baseline, ×2 — **PASS, PASS**
+
+Two independent `go test -v -count=1 ./goc -run '^TestAllocationCensus$'` runs
+on the branch, sequential, both exit 0:
+
+| run | result | duration |
+| --- | --- | --- |
+| 1 | `--- PASS: TestAllocationCensus (213.73s)` | 213.7s |
+| 2 | `--- PASS: TestAllocationCensus (194.19s)` | 194.2s |
+
+Stable. Both durations are real corpus compiles.
+
+**What the regenerated baseline actually contains**, since a passing census only
+means "matches what was accepted" and the accepted file is part of the diff:
+
+`git diff main..HEAD -- goc/testdata/alloc_census_baseline.txt` is
+**+7 lines, −0 lines**. Zero removals and zero modifications: not one
+pre-existing program's census changed. Of the 7 additions, 5 are the new corpus
+programs' own sites (added by `a3efe11`, before the rule existed) and the rule
+commit `9aa5b18` itself adds exactly **two**:
+
+```
++testdata/loop_alias_composite.go:9:8  main.alternate  runtime.newobject  main_cell  heap
++testdata/loop_alias_forms.go:37:3     main.viaArray   runtime.newobject  2_int      heap
+```
+
+Those are precisely the two sites that were miscompiled (§8). **The new rule
+moved two allocations frame→heap across the entire 389-program corpus, and both
+of them had to move.** No `movedToFrame` (the correctness-critical direction) and
+no unexplained `movedToHeap`. `loop_alias_frame_local.go` — the program written
+to catch a "heap everything in a loop" over-reaction — contributes **no**
+`runtime.newobject` line at all, i.e. all three of its loop-body allocations
+stayed in frame slots, as they do under the host toolchain.
+
+## 7. Determinism, 2 compiles byte-compared — **PASS, 389/389 reproducible**
+
+`./scripts/determinism-check.sh -corpus -rounds 2 -j 12` on the branch. Exit 0.
+
+```
+programs=389 rounds=2 workers=12 optimize=false pack=""
+round 0: 389 programs in 195.7s, 0 failed
+round 1: 389 programs in 183.6s, 0 failed
+failed to compile: 0
+content varies between rounds: 0
+image varies, content identical (layout only): 0
+reproducible=389 varying=0 failed=0 of 389 over 2 rounds
+```
+
+**778 compiles, zero varying, zero layout-only residue, zero compile failures.**
+
+The program count is 389, not `main`'s 385. Reconciled: `git diff --name-status`
+shows the branch adds exactly four files under `goc/testdata/*.go`
+(`loop_alias_forms.go`, `loop_alias_composite.go`, `loop_alias_frame_local.go`,
+`variadic_backing.go`), and `ls goc/testdata/*.go | wc -l` is 385 on `main` and
+389 on the branch. 385 + 4 = 389. The emitted code differs from `main` by design;
+it is still a function of the input alone.
+
+## 1. `go test -timeout 40m -parallel 10 ./goc/...` — **FAIL: one test regressed**
+
+Run as `go test -v -count=1 -timeout 40m -parallel 10 ./goc/...` (`-v` for the
+census, `-count=1` to defeat the result cache) on both trees concurrently.
+
+| | branch `2abd8ab` | `main` `efcd4d4` (control I ran) |
+| --- | --- | --- |
+| exit status | **1** | 0 |
+| `=== RUN` | 629 | **615** |
+| `--- PASS` | 627 | **614** |
+| `--- FAIL` | **1** | **0** |
+| `--- SKIP` | 1 | **1** |
+| wall clock | `FAIL …/goc 1091.592s` | `ok …/goc` |
+| `(cached)` | 0 | 0 |
+
+`main` reproduces the prompt's reference (615/614/0/1) **exactly**.
+
+**The +14 reconciled by name, not accepted as a number.** `comm` on the sorted
+`=== RUN` name sets: **14 names new on the branch, 0 names lost.** All 14 are
+loop-alias tests, from `f343e38` (`goc/loopalias_test.go`, the corpus test) and
+`3fd5492` (the `loop_alias_frame_local.go` row):
+
+- `TestLoopBodyAllocationsAreDistinctPerIteration` + 8 subtests (4 programs ×
+  {plain, `-O`})
+- `TestLoopAliasExpectationsMatchTheHostToolchain` + 4 subtests (4 programs)
+
+All 14 pass. 615 + 14 = 629 RUN. ✅
+
+### The regression: `TestDeriveClassifiesEveryGenField`
+
+`comm` on the sorted `--- PASS` name sets gives exactly one name that passes on
+`main` and does not pass on the branch:
+
+```
+--- FAIL: TestDeriveClassifiesEveryGenField (0.00s)
+    derive_test.go:238: fullyPopulatedGen leaves [iterationCaptures] zero, so
+    derive's handling of those fields is untested; a new gen field has to be
+    given a non-zero value there and classified in wholeCompilationGenFields
+```
+
+**Diagnosis** (not repaired, per the brief). `goc/compile.go` adds a field
+`iterationCaptures map[types.Object]bool` to `struct gen` and resets it in
+`derive()` (`derived.iterationCaptures = nil`, alongside the existing
+`derived.escapingCaptures = nil`). `goc/derive_test.go` holds a reflective guard
+over `gen`: `fullyPopulatedGen()` must give **every** field a non-zero value, and
+each field must then be classified as inherited-by-`derive` or reset-by-`derive`
+via the `wholeCompilationGenFields` list. The branch added the field and did not
+touch either. `fullyPopulatedGen()` leaves it zero, the guard reports it, and the
+test fails.
+
+**Severity: low-risk in effect, but it is a red test and it is this branch's.**
+
+- It is a hygiene guard, not a behavioural assertion. It is failing on the
+  "unpopulated" arm — it never got as far as comparing parent to derived, so it
+  is not reporting that `derive` does the wrong thing with the field.
+- The chosen behaviour (reset to nil) is almost certainly right: it is
+  per-generator state, computed per function body, and it is nil'd on the same
+  line as `escapingCaptures` and `referenceCaptures`, which are the same kind of
+  state and are classified as reset. But **that is my reading, not a test
+  result** — the guard exists precisely so a human states it, and no test in the
+  tree currently covers `derive`'s handling of this field.
+- The fix is two lines in `goc/derive_test.go` (populate the field in
+  `fullyPopulatedGen`, leave it off `wholeCompilationGenFields`). I did not make
+  it.
+
+**Consequence for CI:** `go test ./goc/...` and therefore `make test` exit
+non-zero on this branch. `make test-goc-corpus` / `test-goc-cmd` / `test-unit`
+are unaffected, which is why the branch's other arms are all green.
+
+Note: the branch's own report is explicit that `go test ./goc/...` was **not**
+run there ("a dependent verification job does that"), so this is a genuinely
+unfound failure rather than a contradicted claim.
+
+## 9. `runtime_gc_type_mask_padding.go` reducer, 20× at `GOGC=10` — **PASS, 0/20**
+
+Built with a `goc` from each tree (`goc -o reducer goc/testdata/runtime_gc_type_mask_padding.go`)
+on an idle box (load avg 2.1 at start; every other suite had exited). The reducer
+source is byte-identical on both trees — `git diff main..HEAD` on that path is
+empty — so only the emitted image differs, which is the point.
+
+**The prescribed configuration:**
+
+| tree | `GOGC=10`, default `GOMAXPROCS` (64) |
+| --- | --- |
+| **branch** | **0/20 failed, 20/20 passed** ✅ |
+| `main` (control) | 0/20 failed, 20/20 passed |
+
+**0/20. The requirement is met**, and `main` is also 0/20, so nothing changed.
+
+**The `GOMAXPROCS=3` variant, attributed against `main` as the brief required.**
+Same box, same minute, sequential, 20 runs per cell:
+
+| tree | `GOGC=10 GOMAXPROCS=3` |
+| --- | --- |
+| branch | **4/20 failed** |
+| `main` (control) | **5/20 failed** |
+
+The pre-existing GC unsoundness at `GOMAXPROCS=3` reproduces on `main` at the
+rate the brief predicted (5/20), and the branch is not worse (4/20 — the
+difference is inside the noise of a 20-sample Bernoulli trial, not a measured
+improvement). Sample failure, from **`main`**:
+
+```
+runtime: pointer 0x7a4d625cae70 to unused region of span span.base()=0x7a4d62508000 …
+runtime: found in object at *(0x7a4d624ddc80+0x208)
+object=… s.spanclass=0 s.elemsize=8192 s.state=mSpanManual
+```
+
+`mSpanManual` = a stack span: this is the collector walking a stack and finding a
+word that is not a live pointer. It is the open GC unsoundness, **not attributable
+to this branch**, and it is unchanged by it.
+
+---
+
+## Summary — all 9 items run to completion, nothing UNVERIFIED
+
+| # | suite | result |
+| --- | --- | --- |
+| 1 | `go test -timeout 40m -parallel 10 ./goc/...` | **629 RUN / 627 PASS / 1 FAIL / 1 SKIP, exit 1.** `main` control = 615/614/0/1 (matches the reference exactly). +14 reconciled by name to `f343e38`+`3fd5492`, 0 lost. **1 regression: `TestDeriveClassifiesEveryGenField`.** |
+| 2 | `make test-goc-status` | **PASS set = all 364; FAIL set = ∅**, exit 0, 216.7s |
+| 3 | `make test-goc-status-opt` | **FAIL set = {`stack-scan/loop-safepoints`}**, 363 PASS. `main` control run by this job: byte-identical PASS set, identical one-element FAIL set. **Not grown.** |
+| 4 | `make test-unit` | **1591 PASS / 0 FAIL / 339 SKIP**, exit 0. `main` control identical; PASS name sets `diff` clean. |
+| 5 | `TestFrameEscapeAudit -count=1` | **PASS**, 213.2s, against a baseline byte-identical to `main`'s: **0 new publications, 0 vanished** |
+| 6 | allocation census ×2 | **PASS (213.7s), PASS (194.2s)**. Baseline delta vs `main` is +7/−0; the rule commit itself moved exactly **2** sites, both the miscompiled ones. |
+| 7 | determinism, 2 compiles, byte-compare | **reproducible=389 varying=0 failed=0**, 778 compiles. 389 = `main`'s 385 + the 4 new corpus programs. |
+| 8 | the loop reductions vs. host toolchain | **PASS, all 4 forms + 2 companions, plain and `-O`.** Verified directly against `go run`, not via the branch's test. `main` miscompiles `viaArray` and `alternate` as `2 2`; the branch prints Go's `1 2`. |
+| 9 | reducer 20× `GOGC=10` | **0/20 failed** (`main` control also 0/20). `GOMAXPROCS=3` extra: branch **4/20** vs `main` **5/20** — pre-existing, not worse. |
+
+Every number above was read out of a log written by a process this job started
+and waited on to exit. No suite was left running. No log contains `(cached)`;
+every `go test` carried `-count=1`. Durations are consistent with real work
+(`./goc/...` took 1091s on the branch, corpus compiles 194–214s each).
+
+### What the branch gets right
+
+The miscompilation is real and I reproduced it on `main` independently: with
+`main`'s `goc`, `var a [2]int; …; q = &a` in a loop body prints `2 2` and
+`c := &cell{v: i}` prints `2 2`, where the host toolchain prints `1 2`. The
+branch prints `1 2` for both, unoptimized and `-O`.
+
+The fix is also unusually well-bounded, which the census proves rather than
+asserts: across 389 corpus programs the new rule moved **two** allocation sites,
+and those two are exactly the two that were wrong. Zero pre-existing census lines
+changed, the frame-escape baseline is untouched and still passes, the 364-strong
+capability matrix is unchanged, the `-O` matrix's one failure did not grow, the
+unit PASS set is byte-identical to `main`'s, and 778 compiles are bit-reproducible.
+The negative-direction corpus program (`loop_alias_frame_local.go`) contributes no
+allocation site at all, so the rule is not "heap everything in a loop."
+
+### Why that is not enough to merge as-is
+
+`go test ./goc/...` — and therefore `make test` — **exits non-zero on this
+branch.** `struct gen` gained a field (`iterationCaptures`) and
+`goc/derive_test.go`'s reflective guard over that struct was not updated, so
+`TestDeriveClassifiesEveryGenField` regressed from PASS on `main` to FAIL. The
+guard's whole purpose is to stop a new `gen` field from going through `derive`
+unclassified, and that is exactly what happened.
+
+The effect is very likely benign — `derive()` nils the field on the same line it
+nils `escapingCaptures` and `referenceCaptures`, which are the same kind of
+per-generator state and are classified as reset — but **no test in the tree
+currently asserts that**, which is the condition the guard exists to prevent.
+The remedy is two lines in `goc/derive_test.go` (give the field a non-zero value
+in `fullyPopulatedGen`, leave it off `wholeCompilationGenFields`), then re-run
+`go test ./goc -run TestDerive`. Per the brief I diagnosed it and did not repair it.
+
+---
+
+# NOT SAFE TO MERGE TO MAIN
+
+**Reason:** `go test ./goc/...` fails on this branch — `TestDeriveClassifiesEveryGenField`
+passes on `main` (`efcd4d4`) and fails on `2abd8ab`, because `gen.iterationCaptures`
+was added without being registered in `goc/derive_test.go`'s `fullyPopulatedGen`.
+That is the single blocker and it is a two-line change in a test file.
+
+**Everything else clears.** The miscompilation fix itself is verified correct and
+tightly scoped: items 2–9 all pass, including the direct host-toolchain comparison
+(item 8) and the zero-new-publications hard requirement (item 5). With the
+`derive_test.go` guard updated and `./goc/...` re-run green, this branch is safe
+to merge on the evidence collected here.
