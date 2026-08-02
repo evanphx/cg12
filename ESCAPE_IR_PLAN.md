@@ -13,7 +13,7 @@ alongside (`goc/escapecost.go`, `goc/escapecost_test.go`, `goc/placementcensus_t
 ## 0. The two sentences that change the shape of the question
 
 **The neutral op already exists.** `ir.OHeapAlloc` is a typed allocation candidate that
-has not committed to frame or heap; `opt.LowerHeapAllocations` (`opt/escape.go:13`) is
+has not committed to frame or heap; `opt.LowerHeapAllocations` (`opt/escape.go:37`) is
 its legaliser; `goc/compile.go:487` runs that legaliser on the finished whole-program
 module before any other pass. `ir/build.go:505` documents it in exactly those terms.
 
@@ -46,7 +46,7 @@ this plan and it is why the stages are ordered the way they are.
 the alignment, `Cls` is `ClsP`, and the result is marked `GCRef`. `ir/build.go:508`'s
 `Block.HeapAlloc` is the only constructor.
 
-Legalisation, `opt/escape.go:227-265`:
+Legalisation, `opt/escape.go:255-292`:
 
 * **to the frame** — the op becomes `OAlloc4`/`OAlloc8`/`OAlloc16` on `Aux`, `Args`
   becomes `{size}`, and a `goc_memset(result, 0, size)` call is appended, because the
@@ -113,7 +113,7 @@ Three constraints pin it:
    that can keep it in a frame, and it is already SCC-ordered bottom-up
    (`opt/callgraph.go:67`). Legalising first would waste it.
 2. **Before `Mem2Reg`.** The analysis reasons about frontend variables as memory —
-   `slotBases`/`localSlot` in `opt/escape.go:99` and `opt/framecheck.go:157`. `Mem2Reg`
+   `slotBases`/`localSlot` in `opt/escape.go:66` and `opt/framecheck.go:157`. `Mem2Reg`
    promotes those slots to SSA temporaries and phis, and the slot-granular facts go with
    them. (This is not hypothetical: §5 shows `frameFacts` already losing a fact to a phi.)
 3. **Before the backend.** `OHeapAlloc` has no machine lowering; `opt/escape.go` is the
@@ -141,7 +141,7 @@ moving the remaining five sites.
 `lowerFunctionHeapAllocations` promotes a candidate, it already rewrites the instruction;
 it should also rewrite every `goc_storep(p, v)` whose destination `p` resolves (through
 the `aliases`/`bases` maps it has already built) to that promoted allocation into a plain
-`OStore`. It has the information — `isAtomicPointerStore` at `opt/escape.go:286` already
+`OStore`. It has the information — `isAtomicPointerStore` at `opt/escape.go:316` already
 recognises the call and `heapBase` already resolves the destination.
 
 ---
@@ -180,7 +180,7 @@ are not counted twice. AST-committed placements are `30 810 + 11 255 = 42 065` a
     lowered to an allocator    453 319
 
 **`LowerHeapAllocations` promotes 3.1% of the candidates it sees.** It is intraprocedural
-and has no callee summaries, so `opt/escape.go:216`'s `default` arm escapes every
+and has no callee summaries, so `opt/escape.go:243`'s `default` arm escapes every
 candidate reaching a call it does not recognise — and most allocations reach a call.
 
 The AST walk's **11 255 committed-frame** placements are exactly the ones it proved using
@@ -217,7 +217,7 @@ Each item: does the IR lose it, and if so how is it recovered.
 * The analysis does not want types anyway. `frameFacts` and `lowerFunctionHeapAllocations`
   are *provenance* analyses — a value is frame-derived because it descends from an
   `OAlloc`, not because of its type — and provenance is the sound formulation for a
-  may-analysis. `opt/escape.go:83` already handles a `memcpy` at word granularity using
+  may-analysis. `opt/escape.go:107` already handles a `memcpy` at word granularity using
   the constant size operand.
 
 Where the AST's types were load-bearing was `interfaceConversionAllocates` /
@@ -717,10 +717,19 @@ pass lands, and nothing in the two residuals or in the loop-aliasing defect argu
 
 ### 8.3 Accept
 
-* **Allocation count: net heap delta ≤ 0** over the 385-program census, with a per-source-site
-  breakdown for every site that moved in either direction. A rearchitecture that is
-  *better* should reduce it — §4.2's greatest-fixed-point solve and §4.3's summaries both
-  move allocations frame-ward.
+* **Allocation count: net heap delta ≤ 0** over the 385-program census — that is,
+  `emittedAllocatorCal` ≤ 509 920 — with a per-source-site breakdown for every site that
+  moved in either direction. A rearchitecture that is *better* should reduce it: §4.2's
+  greatest-fixed-point solve and §4.3's summaries both move allocations frame-ward, and
+  §2.1's 3.1% promotion rate is the headroom.
+* **Promotion rate: `opt.HeapAllocLoweringStats` must rise from 14 433 / 467 752.** It is
+  the single number that says whether the IR pass got smarter or just got more work. If it
+  is still near 3% after stage 4, stage 6 is not safe to start and the fact table is not
+  doing its job.
+* **Per stage, not just at the end.** Every one of stages 1, 4 and 6 changes placement, so
+  each gets its own census run and its own per-site table. The stages that change nothing
+  (2, 3, 5) must produce a census **byte-identical** to the stage before them; if they do
+  not, they are not the stages they claim to be.
 * **Benchmarks: no named benchmark more than 2% slower**, measured as the escape-frame-publication
   report measured `Nat.Mul` — 8 alternating runs, report the ranges, and only claim a
   difference when they do not overlap. Named set, at minimum:
@@ -762,7 +771,9 @@ legaliser exists and already runs in the right place, and 91.6% of heap-capable
 allocations already go through both. Finishing it is five call sites in one file, staged
 one at a time behind a shadow-mode diff — but **only after** the IR pass has a fact table,
 because the pass as it stands promotes 3.1% of what it sees and the 11 255 frame
-placements those five sites make today are exactly the ones it would get wrong (§2.1). What it buys is exactly what the brief claims:
+placements those five sites make today are exactly the ones it would get wrong (§2.1).
+
+What it buys is exactly what the brief claims:
 interface boxing, variadic backing arrays and composite-literal storage stop being things
 a syntactic walk has to be taught about and become instructions, and the two-walks-
 disagreeing shape of `bigmod.Nat.Mul` stops being expressible. §6.1 shows a live residual

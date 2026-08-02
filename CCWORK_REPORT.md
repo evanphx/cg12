@@ -36,7 +36,7 @@ be reading your own answer" — is true of *some* allocations and false of most 
 `ir.OHeapAlloc` is the neutral op the brief proposes inventing. `ir/build.go:505` even
 says so: *"emits a typed heap-allocation candidate. The optimizer promotes it to a stack
 allocation when its result cannot escape and otherwise lowers it to
-allocator(typeDescriptor)."* `opt.LowerHeapAllocations` (`opt/escape.go:13`) is the
+allocator(typeDescriptor)."* `opt.LowerHeapAllocations` (`opt/escape.go:37`) is the
 legalisation pass, and `goc/compile.go:487` runs it on the finished whole-program module
 **before** `OptimizeModule` and before any backend lowering.
 
@@ -251,7 +251,7 @@ The neutral share holds at full scale: committed placements are
 
 `LowerHeapAllocations` promotes **3.1%** of the candidates it sees. It lowers the other
 96.9% to `runtime.newobject`. That is what an intraprocedural analysis with no callee
-summaries can do: `opt/escape.go:216`'s `default` arm escapes every candidate that
+summaries can do: `opt/escape.go:243`'s `default` arm escapes every candidate that
 reaches any call it does not recognise, and most allocations reach a call.
 
 This reframes the migration and I am revising the plan's staging because of it. The AST
