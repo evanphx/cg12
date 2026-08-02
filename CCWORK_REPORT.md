@@ -616,3 +616,26 @@ The corpus allocation census in section 5 is the independent confirmation: those
 three functions are exactly `main.targetAliasingTheRangeExpression` (+2 heap) and
 `main.main.func.17.5` (frame 9 to 8, heap 2 to 3). The publications are gone
 because the storage moved, not because the code did.
+
+## 7. One more hole of the same class, found while re-reading the diff
+
+`parameterLeaksOnlyToResult` lets a parameter reach the summarised function's
+own result and tells the caller to continue its walk from the call expression.
+If that result is an **interface**, the value was boxed into fresh heap storage
+on the way out, and continuing is wrong for exactly the reason it is wrong at a
+call argument:
+
+    func toAny(b []byte) any { return b }   // b's backing array is in the heap here
+
+`boxedIntoInterface` could not see it. The escape walks' parent maps were built
+with `astParents(declaration.decl.Body)` -- rooted at the *body* -- so a return
+statement had no way to climb to the function it returns from and ask what the
+result's type is. The three call sites now root at `declaration.decl`. The
+`*ast.FuncDecl` is the only node the maps gain, and every walk that reaches it
+falls into the same `default` arm it reached with a nil parent before.
+
+This is not in the three findings and the audit does not currently exercise it;
+it is closed because the fix claims to model interface boxing, and a claim with
+a known hole in it is worse than no claim. The corpus allocation census is
+**byte-identical** to the revision before it -- 385 programs, frame 9 735 471,
+heap 509 920, and a per-site diff of zero -- so it costs nothing.
