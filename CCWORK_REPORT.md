@@ -1111,7 +1111,7 @@ the transfer function and not a migration measurement.
 | `opt/escapeshadow.go` | `allocationsInLoops` shared with the pass; the diff's purpose restated |
 | `ir/alloc.go` | `AllocDecision.BlockedByLoop` |
 | `goc/compile.go` | `registerNoEscapeDirectives`' comment, which said the attribute changed no output |
-| tests | 8 new, 5 of which fail on the analysis without the fix they test |
+| tests | **10 new**: 6 in `opt/escape_test.go`, 2 in `opt/escapefacts_test.go`, 2 in `goc/escapesummary_reduction_test.go`. 5 fail on the analysis without the fix they test, 1 asserts the loop rule, 3 are controls, 1 pins an invariant |
 | baselines | census and shadow regenerated; frame-escape untouched, and it passes |
 
 ### 12.2 The tests that would have caught each defect
