@@ -172,3 +172,147 @@ Read off the matrix:
 - **585 lines goc heaps and gc does not** — the pessimistic direction. §7.
 - **202 lines gc heaps and goc does not** — the permissive direction, and the
   answer to the question this job exists to ask. §6.
+
+## 6. PERMISSIVE — 202 lines gc heaps and goc does not
+
+This is the set the job exists to produce: every one is a candidate frame
+address outliving its frame. **202 source lines**, and they are not one thing.
+Split by what the census can actually see:
+
+| | lines |
+|---|---|
+| goc has a **frame** census row on the line | **59** |
+| goc has **no census row at all** on the line | **143** |
+
+The second group is not evidence of anything on its own — the census does not
+record ordinary front-end frame slots, and several constructs allocate through
+runtime helpers the census deliberately does not track. Both groups are
+triaged below; the classification is mechanical where the census supports it
+and by reading the emitted decisions where it does not.
+
+### 6.1 The 59 with a frame census row
+
+| class | lines | verdict |
+|---|---|---|
+| `var x T` where goc records **both** a frame and a heap row at the same position | 50 | **not a hole** |
+| loop variable whose address escapes (`for index := …; { … &index … }`) | 6 | **not a hole** — the join artefact |
+| aggregate/range loop variable, mixed with other allocations on the line | 3 | same |
+
+**The `var x T` class (50 lines).** `var buffer bytes.Buffer` and its
+relatives — `strings.Builder`, `sync.WaitGroup`, `atomic.Value`, `debug.GCStats`.
+`-m` says `moved to heap: buffer`. goc records **two** decisions at that one
+position in that one function, one heap and one frame, so the line folds to
+`mixed`. Ran the per-program tool on `stdlib_log_buffer.go` and
+`io_write_string.go`: goc heap-allocates the object whose address escapes and
+frames a second temporary of the same type at the same position, and
+`opt.FrameEscapes` reports nothing for either program. The escaping object is on
+the heap. The line-level join cannot separate the two, which is a limit of the
+join, not a defect in goc.
+
+**The loop-variable class (6 lines, and the calibration case).** The harness
+flagged `runtime_loopvar_address_gc.go:18`, `:36`, `:48`,
+`runtime_loopvar_three_clause.go:38`, `:85` and
+`runtime_loopvar_value_shapes.go:25` — the family the brief named as the live
+calibration example. Good: it means the join works. But the finding does not
+survive triage, and the reason is worth recording because it is the sharpest
+methodological trap in the whole job.
+
+Reduced `for index := 0; index < 4; index++ { pointers = append(pointers, &index) }`
+to `escape_gc_differential/loopaddr.go`. Both compilers print `DISTINCT` and
+`0 1 2 3`; goc allocates four cells. The per-program tool shows why the census
+disagrees:
+
+```
+== goc allocation decisions in loopaddr.go
+  5:6   frame  runtime.newobject  int  main.main
+== positionless census rows in this program's own functions
+  ?     main.main  runtime.newobject  int  heap
+```
+
+goc records a **frame** decision at the loop header and a **positionless heap
+allocation** for the per-iteration copy. The join is on position, the
+positionless row cannot join, and so the line reads as "goc frames what gc
+heaps" when goc heaps the thing that escapes. **88 positionless heap rows exist
+in corpus-program functions**, and that number is now in the coverage table as
+the bound on this effect.
+
+### 6.2 The 143 with no census row
+
+Classified by the construct `-m` named, which is the only description of the
+allocation gc gives:
+
+| class | lines | what goc does | verdict |
+|---|---|---|---|
+| string concatenation (`a + b`) | 49 | `runtime.concatstring2`, always with a nil buffer (`goc/compile.go`) — always heap | **agreement**, invisible to the census |
+| `append` | 25 | `runtime.growslice` — always heap, and explicitly excluded from the census by `opt/alloccensus.go` | **agreement**, invisible by design |
+| `[]byte(string)` / `[]rune(string)` | 33 | `runtime.stringtoslicebyte` with a **32-byte stack buffer** when goc's walk says the conversion does not escape | **candidate** — see below |
+| `string(byteslice)` | 6 | `runtime.slicebytetostring` | candidate, same reason |
+| slice literal `[]T{…}` | 12 | ordinary front-end slot | **candidate** |
+| composite literal `&T{…}` / `T{…}` | 11 | ordinary front-end slot | **candidate** |
+| `func literal` given to `runtime.AddCleanup` | 10 | goc has a frame path for closures (`gen.localAlloc`) | **candidate** |
+| `var x T` with no census row at all | 10 | ordinary front-end slot | candidate |
+| string literal boxed into an interface | 4 | | candidate |
+| `make(…)` | 2 | | candidate |
+
+Three of these classes are **not** census blind spots — they are constructs the
+census can see and simply has no row for, which means goc placed them as
+ordinary front-end frame slots that were never escape candidates. Those are the
+ones worth a discriminating program, and they are where the strongest signal in
+this whole job is.
+
+### 6.3 The strongest signal: the differential rediscovers goc's own findings
+
+`goc/testdata/frame_escape_baseline.txt` records **8 frame-address publications
+in corpus programs** that `opt.FrameEscapes` can prove. The differential, which
+knows nothing about that file and derives its answer from `cmd/compile`, flags
+**3 of the 8** in its permissive direction:
+
+```
+runtime_core_types.go:24              -> IN PERMISSIVE
+runtime_core_types.go:28              -> IN PERMISSIVE
+runtime_map_struct_value_replace.go:12 -> IN PERMISSIVE
+```
+
+Same class in all three: a `[]int{…}` composite-literal backing array left in
+the frame, whose address is stored through the write barrier into a heap object
+(`barrier / memory reached through a call result $runtime.newobject`). Two
+independent instruments, one of them a different compiler, pointing at the same
+lines.
+
+### 6.4 What the discriminating programs found
+
+Six reductions, committed under `goc/testdata/escape_gc_differential/` with a
+README recording both compilers' current answers. They are outside
+`testdata/*.go`, so the corpus glob, the census and every baseline are
+untouched.
+
+- **`mapliteral.go`** — `runtime_core_types.go`'s map moved into a callee that
+  returns, with the map escaping to a global. goc **heap-allocates both backing
+  arrays**, agreeing with `-m` completely. So goc's frame placement in the
+  corpus program happens only when the whole structure stays local to the frame:
+  goc is being *more precise* than gc, which heaps map-stored values
+  unconditionally.
+
+- **`stackmove_goroutine.go`** — the sharpest test I could construct. Same map
+  built on a **goroutine** stack, so the backing arrays are in a frame that is
+  not `main`'s. `opt.FrameEscapes` confirms both addresses are stored into heap
+  objects; `-m` heaps both. The goroutine then grows its stack by 400 frames of
+  `[512]int` and collects. A stack copy relocates pointers found *on* the stack;
+  nothing scans the heap for pointers *into* the stack, so this is where an
+  unsafe frame placement has to show. **It does not.** Both print `intact`.
+
+- **`stackmoved.go`** — the control, because the test above means nothing if the
+  stack did not move. Both compilers print `stack moved`, so the copy really
+  happened.
+
+- **`bytesconv.go`**, **`cleanupclosure.go`**, **`loopaddr.go`** — the
+  `[]byte(string)`-escapes, `AddCleanup`-closure and loop-variable classes. All
+  three agree with the host.
+
+**Verdict on the permissive set: 0 confirmed holes, and one class I could not
+clear.** The `[]int{…}`-inside-a-heap-object class is a confirmed *difference*
+that two independent instruments agree on, and an unconfirmed *hole*: I built
+the program that should break it, proved the precondition it needs (a real stack
+copy) is met, and it did not break. What would settle it is an answer to why
+goc's stack copier leaves a heap-held pointer into a moved frame valid — a
+question for whoever owns that code, not something this harness can answer.
