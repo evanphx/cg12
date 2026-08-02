@@ -5083,7 +5083,22 @@ func (g *gen) annotateABICall(instruction *ir.Instr, signature *types.Signature,
 	}
 }
 
+// materializeNilInterface gives an interface value a two-word descriptor to
+// copy out of. A nil interface is carried as a nil pointer rather than as the
+// address of a zeroed descriptor, so a copy has to branch on it.
+//
+// It does not have to branch on an address this frame allocated. Those are
+// never nil, and the branch costs more than the instructions in it: the phi
+// that merges the two arms is a use of the descriptor slot that opt's alias
+// analysis cannot see through, so the slot is classified cEscaped and every
+// candidate pointer stored into it is treated as published. That is what kept a
+// variadic `...any` call's backing object on the heap -- the boxed payload
+// lives inside that object, its address goes into the descriptor, and the
+// descriptor looked like it escaped.
 func (g *gen) materializeNilInterface(value ir.Ref) ir.Ref {
+	if g.isStackAddress(value) {
+		return value
+	}
 	zeroDescriptor := g.localAlloc(8, 16)
 	g.markStackPointerWord(zeroDescriptor, 0)
 	g.markStackPointerWord(zeroDescriptor, 8)
