@@ -1,0 +1,3459 @@
+# goc's allocation placement against cmd/compile's, per source line, over the
+# whole corpus. Regenerate with
+#
+#     go test ./goc -run TestEscapeDifferentialAgainstGC \
+#         -escape-gc-differential -update-escape-gc-differential
+#
+# and read the diff. The run needs a Go toolchain on PATH and takes a couple of
+# minutes; it compiles nothing with goc, reading goc's side out of the
+# already-committed alloc_census_baseline.txt instead, so it measures the census
+# as committed rather than a second census built alongside it.
+#
+# What is being compared, and what the join key is, is documented at length in
+# package internal/gcdiff. The short version: the key is (corpus file, source
+# line), because columns and containing functions do not survive the trip
+# between the two compilers and the source line does.
+#
+# -m's wording is not stable between Go releases, so this file records the host
+# toolchain it was produced against. A diff against a run on a different release
+# is not a change in goc.
+#
+host toolchain: go version go1.26.1 linux/arm64
+
+## coverage
+
+corpus programs                             385
+compared (host toolchain built them)        381
+not compared                                  4
+census rows joined                         2670
+census rows lost to an unbuilt program       37
+census rows with no source position        5863  (never joinable)
+  of those, in a corpus program's own code    89  (88 on the heap: the bound on how
+                                                  wrong the join can be about goc)
+census rows outside the corpus directory  10094  (vendored stdlib; never joinable)
+gc decisions joined                        3357
+  of which synthesized by the chan rule     136
+gc decisions at an inlining call site       834  (excluded; see package gcdiff)
+gc diagnostics outside the program         3489  (excluded; wrappers and instantiations)
+gc diagnostics the parser did not know        0  (must be 0)
+
+programs the host toolchain would not build, and the census rows each costs:
+
+  abi0_assembly.go                            8 rows  abi0_assembly.go:4:2: use of internal package internal/runtime/sys not allowed
+  bytealg_compare.go                          9 rows  bytealg_compare.go:4:2: use of internal package internal/bytealg not allowed
+  chacha8rand_assembly.go                     5 rows  chacha8rand_assembly.go:4:2: use of internal package internal/chacha8rand not allowed
+  runtime_atomic_assembly.go                 15 rows  runtime_atomic_assembly.go:4:2: use of internal package internal/cpu not allowed
+
+## confusion matrix, by source line
+
+rows are goc's verdict for the line, columns are gc's.
+"absent" is "this compiler reported no allocation here", which is not the
+same as "it put the object in a frame" -- see gcdiff.Absent.
+
+  goc\gc      frame     heap    mixed   absent    total
+  frame          15        3        2       17       37
+  heap          194     1762      194      186     2336
+  mixed           3       53        1        7       64
+  absent        449      119       24        0      592
+  total         661     1937      221      210     3029
+
+## PERMISSIVE: 202 lines
+
+every source line gc puts on the heap and goc does not. This is the
+correctness-critical direction: goc keeping in a frame something gc could not
+prove frame-safe is a candidate for a frame address outliving its frame. Lines
+where goc's census says nothing at all are included, because the census does
+not record ordinary front-end frame slots, so "no record" is consistent with
+"framed without ever being called a candidate".
+
+by construct (goc allocators on the line | gc constructs on the line):
+
+    108  - | object/heap
+     52  newobject/frame,newobject/heap | object/heap
+     22  - | object/frame,object/heap
+     10  - | slice/heap
+      3  newobject/frame | object/heap
+      1  - | object/heap,slice/frame
+      1  - | object/heap,slice/heap
+      1  - | slice/frame,slice/heap
+      1  newobject/frame | object/heap,slice/frame
+      1  newobject/frame | slice/frame,slice/heap
+      1  newobject/frame,newobject/heap | object/frame,object/heap
+      1  newobject/frame,newobject/heap | object/heap,slice/heap
+
+bufio_lines_after_read.go:10	absent -> heap
+	src  reader := bufio.NewReaderSize(bytes.NewReader([]byte("foo")), 16)
+	gc   col 55  heap  object  ([]byte)("foo")
+crc32_assembly.go:6	absent -> heap
+	src  input := []byte("123456789")
+	gc   col 18  heap  object  ([]byte)("123456789")
+io_copy_n.go:9	absent -> heap
+	src  reader := bytes.NewReader([]byte("abc"))
+	gc   col 35  heap  object  ([]byte)("abc")
+io_copy_n_writer_only.go:15	absent -> heap
+	src  reader := bytes.NewReader([]byte("abc"))
+	gc   col 35  heap  object  ([]byte)("abc")
+io_discard_write.go:6	absent -> heap
+	src  n, err := writer.Write([]byte("x"))
+	gc   col 32  heap  object  ([]byte)("x")
+io_discard_write.go:13	absent -> heap
+	src  n, err := io.Discard.Write([]byte("x"))
+	gc   col 36  heap  object  ([]byte)("x")
+io_limited_reader.go:9	absent -> heap
+	src  reader := bytes.NewReader([]byte("abc"))
+	gc   col 35  heap  object  ([]byte)("abc")
+io_write_string.go:19	mixed -> heap
+	src  var output buffer
+	goc  col 2  frame  runtime.newobject  main_buffer  [main.main]
+	goc  col 2  heap  runtime.newobject  main_buffer  [main.main]
+	gc   col 6  heap  object  output
+runtime_assign_target_forms.go:213	absent -> heap
+	src  trace = append(trace, "call")
+	gc   col 16  heap  object  append
+runtime_atomic_value.go:12	mixed -> heap
+	src  var value atomic.Value
+	goc  col 2  frame  runtime.newobject  sync_atomic_Value  [main.main]
+	goc  col 2  heap  runtime.newobject  sync_atomic_Value  [main.main]
+	gc   col 6  heap  object  value
+runtime_channel_buffer_roots.go:39	absent -> mixed
+	src  return "element-" + string(rune('a'+index))
+	gc   col 20  heap  object  "element-" + string(rune(97 + index))
+	gc   col 33  frame  object  string(rune(97 + index))
+runtime_cleanup_frame_retention_masked.go:70	absent -> heap
+	src  runtime.AddCleanup(second, func(struct{}) {}, struct{}{})
+	gc   col 29  heap  object  func literal
+runtime_cleanup_frame_retention_scribble.go:39	absent -> heap
+	src  runtime.AddCleanup(box, func(struct{}) {
+	gc   col 26  heap  object  func literal
+runtime_closure_captured_string.go:173	absent -> heap
+	src  deferred = deferred + "z"
+	gc   col 24  heap  object  deferred + "z"
+runtime_closure_captured_string.go:250	absent -> heap
+	src  escaping = escaping + suffix
+	gc   col 23  heap  object  escaping + suffix
+runtime_closure_captured_string.go:296	mixed -> mixed
+	src  return func(suffix string) { text = text + suffix }, func() string { return text }
+	goc  col 9  frame  runtime.newobject  struct_code_uintptr__capture0_unsafe_Pointer  [main.controls]
+	goc  col 9  heap  runtime.newobject  struct_code_uintptr__capture0_unsafe_Pointer  [main.stringPair]
+	goc  col 55  frame  runtime.newobject  struct_code_uintptr__capture0_unsafe_Pointer  [main.controls]
+	goc  col 55  heap  runtime.newobject  struct_code_uintptr__capture0_unsafe_Pointer  [main.stringPair]
+	gc   col 9  heap  object  func literal
+	gc   col 14  frame  object  suffix
+	gc   col 14  frame  object  suffix
+	gc   col 43  heap  object  text + suffix
+	gc   col 43  heap  object  text + suffix
+	gc   col 55  heap  object  func literal
+runtime_closure_captures_roots_gc.go:18	absent -> heap
+	src  values = append(values, node)
+	gc   col 18  heap  object  append
+runtime_core_types.go:24	absent -> heap
+	src  values: []int{7, 11},
+	gc   col 17  heap  slice  []int{...}
+runtime_core_types.go:28	absent -> heap
+	src  values: []int{13},
+	gc   col 17  heap  slice  []int{...}
+runtime_core_types.go:32	absent -> heap
+	src  buckets["right"].values = append(buckets["right"].values, 17)
+	gc   col 34  heap  object  append
+runtime_defer_argument_evaluation.go:4	absent -> heap
+	src  *target = append(*target, value)
+	gc   col 18  heap  object  append
+runtime_defer_method_value_order.go:8	absent -> heap
+	src  recorder.values = append(recorder.values, value)
+	gc   col 26  heap  object  append
+runtime_gc_assist_credit.go:49	absent -> mixed
+	src  label:  "assist-" + string(rune('a'+index%26)),
+	gc   col 22  heap  object  "assist-" + string(rune(97 + index % 26))
+	gc   col 35  frame  object  string(rune(97 + index % 26))
+runtime_gc_assist_stack_growth.go:53	mixed -> heap
+	src  var wait sync.WaitGroup
+	goc  col 2  frame  runtime.newobject  sync_WaitGroup  [main.main]
+	goc  col 2  heap  runtime.newobject  sync_WaitGroup  [main.main]
+	goc  col 2  frame  runtime.newobject  sync_WaitGroup  [main.main.gointernal.funcvalue.main_main_func___func.83860b9e97d614a8]
+	goc  col 2  heap  runtime.newobject  sync_WaitGroup  [main.main.gointernal.funcvalue.main_main_func___func.83860b9e97d614a8]
+	gc   col 6  heap  object  wait
+runtime_gc_checkmark.go:53	absent -> mixed
+	src  label: "knot-" + string(rune('a'+seed%26)),
+	gc   col 18  heap  object  "knot-" + string(rune(97 + seed % 26))
+	gc   col 31  frame  object  string(rune(97 + seed % 26))
+runtime_gc_concurrent_mark.go:59	absent -> mixed
+	src  label: "sub-" + string(rune('a'+seed%26)),
+	gc   col 17  heap  object  "sub-" + string(rune(97 + seed % 26))
+	gc   col 30  frame  object  string(rune(97 + seed % 26))
+runtime_gc_concurrent_mark.go:65	absent -> heap
+	src  node.children = append(node.children, buildSubtree(seed*fanout+child+1, depth-1))
+	gc   col 25  heap  object  append
+runtime_gc_concurrent_mark.go:113	absent -> heap
+	src  target.inSlice = append(target.inSlice, moved)
+	gc   col 25  heap  object  append
+runtime_gc_heap_growth_shrink.go:53	absent -> mixed
+	src  label: "resident-" + string(rune('a'+index%26)),
+	gc   col 23  heap  object  "resident-" + string(rune(97 + index % 26))
+	gc   col 36  frame  object  string(rune(97 + index % 26))
+runtime_gc_heap_growth_shrink.go:56	absent -> heap
+	src  out = append(out, node)
+	gc   col 15  heap  object  append
+runtime_gc_heap_growth_shrink.go:105	absent -> heap
+	src  small := make([]*resident, 0, 65536)
+	gc   col 15  heap  slice  make([]*resident, 0, 65536)
+runtime_gc_mark_workers.go:52	absent -> mixed
+	src  label: "node-" + string(rune('a'+(depth+child)%26)),
+	gc   col 21  heap  object  "node-" + string(rune(97 + (depth + child) % 26))
+	gc   col 34  frame  object  string(rune(97 + (depth + child) % 26))
+runtime_gc_mark_workers.go:54	absent -> heap
+	src  parent.edges = append(parent.edges, node)
+	gc   col 26  heap  object  append
+runtime_gc_memory_limit.go:49	absent -> mixed
+	src  label: "tenant-" + string(rune('a'+index%26)),
+	gc   col 21  heap  object  "tenant-" + string(rune(97 + index % 26))
+	gc   col 34  frame  object  string(rune(97 + index % 26))
+runtime_gc_memory_limit.go:54	absent -> heap
+	src  out = append(out, node)
+	gc   col 15  heap  object  append
+runtime_gc_metadata_hugepages.go:55	absent -> mixed
+	src  label: "record-" + string(rune('a'+index%26)),
+	gc   col 21  heap  object  "record-" + string(rune(97 + index % 26))
+	gc   col 34  frame  object  string(rune(97 + index % 26))
+runtime_gc_metadata_hugepages.go:60	absent -> heap
+	src  out = append(out, node)
+	gc   col 15  heap  object  append
+runtime_gc_scavenge_release.go:47	absent -> heap
+	src  out = append(out, node)
+	gc   col 15  heap  object  append
+runtime_gc_sweep_pacing.go:65	absent -> heap
+	src  out = append(out, node)
+	gc   col 15  heap  object  append
+runtime_gc_sweep_pacing.go:77	absent -> heap
+	src  out = append(out, node)
+	gc   col 15  heap  object  append
+runtime_gc_type_mask_padding.go:39	absent -> mixed
+	src  label: "node-" + string(rune('a'+(depth+child)%26)),
+	gc   col 21  heap  object  "node-" + string(rune(97 + (depth + child) % 26))
+	gc   col 34  frame  object  string(rune(97 + (depth + child) % 26))
+runtime_gc_type_mask_padding.go:41	absent -> heap
+	src  parent.edges = append(parent.edges, node)
+	gc   col 26  heap  object  append
+runtime_global_roots_gc.go:21	absent -> heap
+	src  globalRootSlice = append(globalRootSlice, node)
+	gc   col 27  heap  object  append
+runtime_loopvar_address_gc.go:18	frame -> heap
+	src  for index := 0; index < 4; index++ {
+	goc  col 6  frame  runtime.newobject  int  [main.main]
+	gc   col 6  heap  object  index
+runtime_loopvar_address_gc.go:36	frame -> mixed
+	src  for _, letter := range []string{"a", "b", "c"} {
+	goc  col 44  frame  runtime.newobject  string  [main.main]
+	gc   col 9  heap  object  letter
+	gc   col 33  frame  slice  []string{...}
+runtime_loopvar_address_gc.go:48	mixed -> heap
+	src  for item := (counter{value: 0, label: "zero"}); item.value < 3; item.value++ {
+	goc  col 6  frame  runtime.newobject  main_counter  [main.main]
+	goc  col 6  heap  runtime.newobject  main_counter  [main.main]
+	gc   col 6  heap  object  item
+runtime_loopvar_goroutine_defer.go:63	absent -> heap
+	src  order = append(order, index)
+	gc   col 18  heap  object  append
+runtime_loopvar_goroutine_defer.go:77	absent -> heap
+	src  order = append(order, letter)
+	gc   col 18  heap  object  append
+runtime_loopvar_goroutine_defer.go:88	absent -> heap
+	src  order = append(order, outer*10+inner)
+	gc   col 20  heap  object  append
+runtime_loopvar_three_clause.go:38	frame -> heap
+	src  for index := 0; index < 3; index++ {
+	goc  col 6  frame  runtime.newobject  int  [main.main]
+	gc   col 6  heap  object  index
+runtime_loopvar_three_clause.go:85	frame -> heap
+	src  for index := 0; index < 3; index++ {
+	goc  col 6  frame  runtime.newobject  int  [main.main]
+	gc   col 6  heap  object  index
+runtime_loopvar_value_shapes.go:25	mixed -> heap
+	src  for boxed := any(0); boxed.(int) < 3; boxed = boxed.(int) + 1 {
+	goc  col 6  frame  runtime.newobject  any  [main.main]
+	goc  col 19  heap  runtime.newobject  int  [main.main]
+	goc  col 62  heap  runtime.newobject  int  [main.main]
+	gc   col 19  heap  object  any(0)
+	gc   col 60  heap  object  boxed.(int) + 1
+runtime_loopvar_value_shapes.go:33	mixed -> heap
+	src  for numbers := []int{0}; len(numbers) < 4; numbers = append(numbers, len(numbers)) {
+	goc  col 6  frame  runtime.newobject  int  [main.main]
+	goc  col 17  heap  runtime.newobject  1_int  [main.main]
+	gc   col 22  heap  slice  []int{...}
+	gc   col 61  heap  object  append
+runtime_loopvar_value_shapes.go:73	frame -> mixed
+	src  for _, numbers := range [][]int{{1}, {2, 3}} {
+	goc  col 43  frame  runtime.newobject  int  [main.main]
+	gc   col 33  frame  slice  [][]int{...}
+	gc   col 34  heap  slice  []int{...}
+	gc   col 39  heap  slice  []int{...}
+runtime_many_goroutines_gc.go:28	mixed -> heap
+	src  var wait sync.WaitGroup
+	goc  col 2  frame  runtime.newobject  sync_WaitGroup  [main.main]
+	goc  col 2  heap  runtime.newobject  sync_WaitGroup  [main.main]
+	gc   col 6  heap  object  wait
+runtime_map_struct_value_replace.go:12	absent -> heap
+	src  values: []int{1, 2},
+	gc   col 17  heap  slice  []int{...}
+runtime_map_struct_value_replace.go:18	absent -> heap
+	src  item.values = append(item.values, 3, 4)
+	gc   col 22  heap  object  append
+runtime_new_composite_gc.go:14	absent -> heap
+	src  head.items = append(head.items, 3, 5, 7)
+	gc   col 21  heap  object  append
+runtime_println_operand_separation.go:173	absent -> heap
+	src  return string(buffer[:read])
+	gc   col 22  heap  object  string(buffer[:read])
+runtime_println_statement_atomicity.go:71	absent -> heap
+	src  lines := strings.Split(strings.TrimSuffix(string(written), "\n"), "\n")
+	gc   col 51  heap  object  string(written)
+runtime_println_statement_atomicity.go:104	absent -> heap
+	src  return string(digits[index:])
+	gc   col 22  heap  object  string(digits[index:])
+runtime_range_target_forms.go:149	absent -> mixed
+	src  groups := [][]int{{1}, {2, 3}, {4, 5, 6}}
+	gc   col 19  frame  slice  [][]int{...}
+	gc   col 20  heap  slice  []int{...}
+	gc   col 25  heap  slice  []int{...}
+	gc   col 33  heap  slice  []int{...}
+runtime_range_target_order.go:19	absent -> heap
+	src  trace = append(trace, event)
+	gc   col 16  heap  object  append
+runtime_reflect_call_aggregate_matrix.go:103	absent -> heap
+	src  reflectStringAggregate{
+	gc   col 25  heap  object  reflectStringAggregate{...}
+runtime_reflect_call_aggregate_matrix.go:110	absent -> heap
+	src  reflectSliceAggregate{
+	gc   col 24  heap  object  reflectSliceAggregate{...}
+runtime_reflect_call_aggregate_matrix.go:117	absent -> heap
+	src  reflectMixedAggregate{
+	gc   col 24  heap  object  reflectMixedAggregate{...}
+runtime_reflect_interface_method.go:14	absent -> heap
+	src  return value.prefix + name
+	gc   col 22  heap  object  value.prefix + name
+runtime_reflect_value_instruction_op.go:53	absent -> heap
+	src  instr: []reflectInstruction{
+	gc   col 30  heap  slice  []reflectInstruction{...}
+runtime_stack_argument_roots.go:41	absent -> heap
+	src  runtime.AddCleanup(object, func(label string) {
+	gc   col 29  heap  object  func literal
+runtime_stack_argument_roots.go:53	absent -> heap
+	src  text := string(buffer)
+	gc   col 17  heap  object  string(buffer)
+runtime_stack_argument_roots.go:54	absent -> heap
+	src  runtime.AddCleanup(unsafe.StringData(text), func(label string) {
+	gc   col 46  heap  object  func literal
+runtime_stack_argument_roots.go:66	absent -> heap
+	src  return string(buffer)
+	gc   col 16  heap  object  string(buffer)
+runtime_stack_copy_roots.go:147	mixed -> heap
+	src  var ready sync.WaitGroup
+	goc  col 2  frame  runtime.newobject  sync_WaitGroup  [main.main]
+	goc  col 2  heap  runtime.newobject  sync_WaitGroup  [main.main]
+	gc   col 6  heap  object  ready
+runtime_stack_copy_roots.go:148	mixed -> heap
+	src  var done sync.WaitGroup
+	goc  col 2  frame  runtime.newobject  sync_WaitGroup  [main.main]
+	goc  col 2  heap  runtime.newobject  sync_WaitGroup  [main.main]
+	gc   col 6  heap  object  done
+runtime_stack_scan_blocked_goroutines.go:37	absent -> mixed
+	src  name:  "held-" + string(rune('a'+seed%26)),
+	gc   col 18  heap  object  "held-" + string(rune(97 + seed % 26))
+	gc   col 31  frame  object  string(rune(97 + seed % 26))
+runtime_stack_scan_blocked_goroutines.go:44	absent -> mixed
+	src  return "held-" + string(rune('a'+seed%26))
+	gc   col 17  heap  object  "held-" + string(rune(97 + seed % 26))
+	gc   col 30  frame  object  string(rune(97 + seed % 26))
+runtime_stack_scan_callfree_loop.go:44	absent -> mixed
+	src  label: "cell-" + string(rune('a'+seed%26)),
+	gc   col 18  heap  object  "cell-" + string(rune(97 + seed % 26))
+	gc   col 31  frame  object  string(rune(97 + seed % 26))
+runtime_stack_scan_callfree_loop.go:143	mixed -> heap
+	src  var collecting sync.WaitGroup
+	goc  col 2  frame  runtime.newobject  sync_WaitGroup  [main.main]
+	goc  col 2  heap  runtime.newobject  sync_WaitGroup  [main.main]
+	gc   col 6  heap  object  collecting
+runtime_stack_scan_loop_safepoints.go:57	absent -> heap
+	src  runtime.AddCleanup(object, func(name string) {
+	gc   col 29  heap  object  func literal
+runtime_stack_scan_loop_safepoints.go:107	absent -> mixed
+	src  next := newNode(round, "carried-"+string(rune('a'+round)))
+	gc   col 36  heap  object  "carried-" + string(rune(97 + round))
+	gc   col 48  frame  object  string(rune(97 + round))
+runtime_stack_scan_loop_safepoints.go:130	absent -> mixed
+	src  items = append(items, newNode(round, "acc-"+string(rune('a'+round))))
+	gc   col 17  frame  object  append
+	gc   col 46  heap  object  "acc-" + string(rune(97 + round))
+	gc   col 58  frame  object  string(rune(97 + round))
+runtime_stack_scan_loop_safepoints.go:162	absent -> mixed
+	src  item := newNode(round, "blocked-"+string(rune('a'+round)))
+	gc   col 36  heap  object  "blocked-" + string(rune(97 + round))
+	gc   col 48  frame  object  string(rune(97 + round))
+runtime_stack_scan_loop_safepoints.go:187	absent -> mixed
+	src  outerNode := newNode(outerRound, "nested-outer-"+string(rune('a'+outerRound)))
+	gc   col 51  heap  object  "nested-outer-" + string(rune(97 + outerRound))
+	gc   col 63  frame  object  string(rune(97 + outerRound))
+runtime_stack_scan_loop_safepoints.go:189	absent -> mixed
+	src  innerLabel := "nested-inner-" + string(rune('a'+outerRound)) + string(rune('a'+innerRound))
+	gc   col 47  frame  object  string(rune(97 + outerRound))
+	gc   col 65  heap  object  "nested-inner-" + string(rune(97 + outerRound)) + string(rune(97 + innerRound))
+	gc   col 78  frame  object  string(rune(97 + innerRound))
+runtime_stack_scan_loop_safepoints.go:212	absent -> heap
+	src  runtime.AddCleanup(object, func(name string) {
+	gc   col 29  heap  object  func literal
+runtime_stack_scan_panic_unwind.go:33	absent -> mixed
+	src  label: "carried-" + string(rune('a'+seed%26)),
+	gc   col 21  heap  object  "carried-" + string(rune(97 + seed % 26))
+	gc   col 34  frame  object  string(rune(97 + seed % 26))
+runtime_stack_scan_syscall.go:42	absent -> mixed
+	src  label: "record-" + string(rune('a'+seed%26)),
+	gc   col 20  heap  object  "record-" + string(rune(97 + seed % 26))
+	gc   col 33  frame  object  string(rune(97 + seed % 26))
+runtime_sync_map.go:6	absent -> heap
+	src  var values sync.Map
+	gc   col 6  heap  object  values
+runtime_sync_mutex_defer.go:6	absent -> heap
+	src  var mutex sync.Mutex
+	gc   col 6  heap  object  mutex
+runtime_sync_once_panic.go:16	absent -> heap
+	src  var once sync.Once
+	gc   col 6  heap  object  once
+runtime_type_param_method_shapes.go:79	absent -> heap
+	src  return label + ":" + strconv.Itoa(count)
+	gc   col 21  heap  object  label + ":" + ~r0
+	gc   col 21  heap  object  label + ":" + ~r0
+runtime_type_param_method_shapes.go:243	absent -> heap
+	src  narrow := &narrowWrapper{lead: 1}
+	gc   col 12  heap  object  &narrowWrapper{...}
+runtime_type_param_method_shapes.go:248	absent -> heap
+	src  wide := &wideWrapper{}
+	gc   col 10  heap  object  &wideWrapper{}
+stdlib_archive_tar_roundtrip.go:26	mixed -> heap
+	src  var archive bytes.Buffer
+	goc  col 2  frame  runtime.newobject  bytes_Buffer  [main.main]
+	goc  col 2  heap  runtime.newobject  bytes_Buffer  [main.main]
+	gc   col 6  heap  object  archive
+stdlib_archive_zip_roundtrip.go:12	mixed -> heap
+	src  var archive bytes.Buffer
+	goc  col 2  frame  runtime.newobject  bytes_Buffer  [main.main]
+	goc  col 2  heap  runtime.newobject  bytes_Buffer  [main.main]
+	gc   col 6  heap  object  archive
+stdlib_bufio_reader_writer.go:9	mixed -> heap
+	src  var backing bytes.Buffer
+	goc  col 2  frame  runtime.newobject  bytes_Buffer  [main.main]
+	goc  col 2  heap  runtime.newobject  bytes_Buffer  [main.main]
+	gc   col 6  heap  object  backing
+stdlib_compress_gzip_roundtrip.go:10	absent -> heap
+	src  input := []byte("cg12 go compiler gzip roundtrip\ncg12 go compiler gzip roundtrip\n")
+	gc   col 18  heap  object  ([]byte)("cg12 go compiler gzip roundtrip\ncg12 go compiler gzip roundtrip\n")
+stdlib_compress_gzip_roundtrip.go:11	mixed -> heap
+	src  var compressed bytes.Buffer
+	goc  col 2  frame  runtime.newobject  bytes_Buffer  [main.main]
+	goc  col 2  heap  runtime.newobject  bytes_Buffer  [main.main]
+	gc   col 6  heap  object  compressed
+stdlib_compress_zlib_lzw.go:27	absent -> heap
+	src  input := []byte("cg12 compression status cg12 compression status")
+	gc   col 18  heap  object  ([]byte)("cg12 compression status cg12 compression status")
+stdlib_compress_zlib_lzw.go:29	mixed -> heap
+	src  var zlibBuffer bytes.Buffer
+	goc  col 2  frame  runtime.newobject  bytes_Buffer  [main.main]
+	goc  col 2  heap  runtime.newobject  bytes_Buffer  [main.main]
+	gc   col 6  heap  object  zlibBuffer
+stdlib_compress_zlib_lzw.go:52	mixed -> heap
+	src  var lzwBuffer bytes.Buffer
+	goc  col 2  frame  runtime.newobject  bytes_Buffer  [main.main]
+	goc  col 2  heap  runtime.newobject  bytes_Buffer  [main.main]
+	gc   col 6  heap  object  lzwBuffer
+stdlib_compress_zlib_lzw.go:73	mixed -> heap
+	src  var lowWidthBuffer bytes.Buffer
+	goc  col 2  frame  runtime.newobject  bytes_Buffer  [main.main]
+	goc  col 2  heap  runtime.newobject  bytes_Buffer  [main.main]
+	gc   col 6  heap  object  lowWidthBuffer
+stdlib_container_heap.go:20	absent -> heap
+	src  *h = append(*h, value.(int))
+	gc   col 13  heap  object  append
+stdlib_container_heap.go:31	absent -> heap
+	src  values := &intHeap{5, 1, 4}
+	gc   col 12  heap  object  &intHeap{...}
+	gc   col 20  heap  object  intHeap{...}
+stdlib_crypto_aes_modes.go:38	absent -> heap
+	src  cbcPlaintext := []byte("0123456789abcdefsecond AES block")
+	gc   col 25  heap  object  ([]byte)("0123456789abcdefsecond AES block")
+stdlib_crypto_aes_modes.go:47	absent -> heap
+	src  ctrPlaintext := []byte("CTR mode handles a final partial block")
+	gc   col 25  heap  object  ([]byte)("CTR mode handles a final partial block")
+stdlib_crypto_aes_modes.go:60	absent -> heap
+	src  nonce := make([]byte, aead.NonceSize())
+	gc   col 15  heap  slice  make([]byte, aead.NonceSize())
+stdlib_crypto_aes_modes.go:61	absent -> heap
+	src  additionalData := []byte("cg12 status")
+	gc   col 27  heap  object  ([]byte)("cg12 status")
+stdlib_crypto_hash_hmac.go:13	absent -> heap
+	src  if _, err := digest.Write([]byte(chunk)); err != nil {
+	gc   col 36  heap  object  ([]byte)(chunk)
+stdlib_crypto_hash_hmac.go:34	absent -> heap
+	src  messageAuthenticationCode := hmac.New(sha256.New, []byte("key"))
+	gc   col 59  heap  object  ([]byte)("key")
+stdlib_crypto_hash_hmac.go:35	absent -> heap
+	src  if _, err := messageAuthenticationCode.Write([]byte("The quick brown fox jumps over the lazy dog")); err != nil {
+	gc   col 54  heap  object  ([]byte)("The quick brown fox jumps over the lazy dog")
+stdlib_crypto_hash_hmac.go:40	absent -> heap
+	src  wrongCode := hmac.New(sha256.New, []byte("wrong key"))
+	gc   col 43  heap  object  ([]byte)("wrong key")
+stdlib_crypto_hash_hmac.go:41	absent -> heap
+	src  if _, err := wrongCode.Write([]byte("The quick brown fox jumps over the lazy dog")); err != nil {
+	gc   col 38  heap  object  ([]byte)("The quick brown fox jumps over the lazy dog")
+stdlib_crypto_hpke.go:19	absent -> heap
+	src  info := []byte("cg12 hpke status")
+	gc   col 17  heap  object  ([]byte)("cg12 hpke status")
+stdlib_crypto_hpke.go:20	absent -> heap
+	src  plaintext := []byte("authenticated plaintext")
+	gc   col 22  heap  object  ([]byte)("authenticated plaintext")
+stdlib_crypto_sha3_pbkdf2.go:32	absent -> heap
+	src  derived, err := pbkdf2.Key(sha256.New, "password", []byte("salt"), 1, 32)
+	gc   col 60  heap  object  ([]byte)("salt")
+stdlib_crypto_x509_ed25519.go:25	absent -> heap
+	src  panic("x509 public key marshal failed: " + err.Error())
+	gc   col 44  heap  object  "x509 public key marshal failed: " + err.Error()
+	gc   col 44  heap  object  "x509 public key marshal failed: " + err.Error()
+stdlib_crypto_x509_ed25519.go:29	absent -> heap
+	src  panic("x509 public key parse failed: " + err.Error())
+	gc   col 42  heap  object  "x509 public key parse failed: " + err.Error()
+	gc   col 42  heap  object  "x509 public key parse failed: " + err.Error()
+stdlib_crypto_x509_ed25519.go:38	absent -> heap
+	src  panic("x509 private key marshal failed: " + err.Error())
+	gc   col 45  heap  object  "x509 private key marshal failed: " + err.Error()
+	gc   col 45  heap  object  "x509 private key marshal failed: " + err.Error()
+stdlib_crypto_x509_ed25519.go:42	absent -> heap
+	src  panic("x509 private key parse failed: " + err.Error())
+	gc   col 43  heap  object  "x509 private key parse failed: " + err.Error()
+	gc   col 43  heap  object  "x509 private key parse failed: " + err.Error()
+stdlib_encoding_asn1_roundtrip.go:35	absent -> heap
+	src  panic("asn1 Marshal failed: " + err.Error())
+	gc   col 33  heap  object  "asn1 Marshal failed: " + err.Error()
+	gc   col 33  heap  object  "asn1 Marshal failed: " + err.Error()
+stdlib_encoding_asn1_roundtrip.go:38	mixed -> heap
+	src  var decoded asn1Status
+	goc  col 2  frame  runtime.newobject  main_asn1Status  [main.main]
+	goc  col 2  heap  runtime.newobject  main_asn1Status  [main.main]
+	gc   col 6  heap  object  decoded
+stdlib_encoding_asn1_roundtrip.go:41	absent -> heap
+	src  panic("asn1 Unmarshal failed: " + err.Error())
+	gc   col 35  heap  object  "asn1 Unmarshal failed: " + err.Error()
+	gc   col 35  heap  object  "asn1 Unmarshal failed: " + err.Error()
+stdlib_encoding_binary.go:21	absent -> heap
+	src  var buffer bytes.Buffer
+	gc   col 6  heap  object  buffer
+stdlib_encoding_csv.go:19	mixed -> heap
+	src  var builder strings.Builder
+	goc  col 2  frame  runtime.newobject  strings_Builder  [main.main]
+	goc  col 2  heap  runtime.newobject  strings_Builder  [main.main]
+	gc   col 6  heap  object  builder
+stdlib_encoding_gob_int.go:10	mixed -> heap
+	src  var encoded bytes.Buffer
+	goc  col 2  frame  runtime.newobject  bytes_Buffer  [main.main]
+	goc  col 2  heap  runtime.newobject  bytes_Buffer  [main.main]
+	gc   col 6  heap  object  encoded
+stdlib_encoding_gob_roundtrip.go:32	mixed -> heap
+	src  var encoded bytes.Buffer
+	goc  col 2  frame  runtime.newobject  bytes_Buffer  [main.main]
+	goc  col 2  heap  runtime.newobject  bytes_Buffer  [main.main]
+	gc   col 6  heap  object  encoded
+stdlib_encoding_gob_roundtrip.go:35	absent -> heap
+	src  panic("gob Encode failed: " + err.Error())
+	gc   col 31  heap  object  "gob Encode failed: " + err.Error()
+	gc   col 31  heap  object  "gob Encode failed: " + err.Error()
+stdlib_encoding_gob_roundtrip.go:38	mixed -> heap
+	src  var decoded gobRecord
+	goc  col 2  frame  runtime.newobject  main_gobRecord  [main.main]
+	goc  col 2  heap  runtime.newobject  main_gobRecord  [main.main]
+	gc   col 6  heap  object  decoded
+stdlib_encoding_gob_roundtrip.go:41	absent -> heap
+	src  panic("gob Decode failed: " + err.Error())
+	gc   col 31  heap  object  "gob Decode failed: " + err.Error()
+	gc   col 31  heap  object  "gob Decode failed: " + err.Error()
+stdlib_encoding_gob_struct_int.go:16	mixed -> heap
+	src  var encoded bytes.Buffer
+	goc  col 2  frame  runtime.newobject  bytes_Buffer  [main.main]
+	goc  col 2  heap  runtime.newobject  bytes_Buffer  [main.main]
+	gc   col 6  heap  object  encoded
+stdlib_encoding_gob_struct_int.go:23	mixed -> heap
+	src  var decoded gobStructInt
+	goc  col 2  frame  runtime.newobject  main_gobStructInt  [main.main]
+	goc  col 2  heap  runtime.newobject  main_gobStructInt  [main.main]
+	gc   col 6  heap  object  decoded
+stdlib_encoding_gob_struct_mixed.go:22	mixed -> heap
+	src  var encoded bytes.Buffer
+	goc  col 2  frame  runtime.newobject  bytes_Buffer  [main.main]
+	goc  col 2  heap  runtime.newobject  bytes_Buffer  [main.main]
+	gc   col 6  heap  object  encoded
+stdlib_encoding_gob_struct_mixed.go:29	mixed -> heap
+	src  var decoded gobStructMixed
+	goc  col 2  frame  runtime.newobject  main_gobStructMixed  [main.main]
+	goc  col 2  heap  runtime.newobject  main_gobStructMixed  [main.main]
+	gc   col 6  heap  object  decoded
+stdlib_encoding_json_roundtrip.go:26	absent -> heap
+	src  Payload: json.RawMessage(`{"ready":true,"count":2}`),
+	gc   col 28  heap  object  json.RawMessage("{\"ready\":true,\"count\":2}")
+stdlib_encoding_json_roundtrip.go:37	mixed -> heap
+	src  var decoded jsonStatus
+	goc  col 2  frame  runtime.newobject  main_jsonStatus  [main.main]
+	goc  col 2  heap  runtime.newobject  main_jsonStatus  [main.main]
+	gc   col 6  heap  object  decoded
+stdlib_encoding_json_roundtrip.go:51	absent -> heap
+	src  decoder := json.NewDecoder(bytes.NewReader([]byte(`{"number":9007199254740993,"text":"\u03bb"}`)))
+	gc   col 52  heap  object  ([]byte)("{\"number\":9007199254740993,\"text\":\"\\u03bb\"}")
+stdlib_encoding_xml.go:30	mixed -> heap
+	src  var decoded xmlStatus
+	goc  col 2  frame  runtime.newobject  main_xmlStatus  [main.main]
+	goc  col 2  heap  runtime.newobject  main_xmlStatus  [main.main]
+	gc   col 6  heap  object  decoded
+stdlib_fstest_mapfs.go:14	absent -> heap
+	src  Data:    []byte("target=arm64\n"),
+	gc   col 20  heap  object  ([]byte)("target=arm64\n")
+stdlib_fstest_mapfs.go:19	absent -> heap
+	src  Data:    []byte("cg12\n"),
+	gc   col 20  heap  object  ([]byte)("cg12\n")
+stdlib_fstest_mapfs.go:58	absent -> heap
+	src  visited = append(visited, path)
+	gc   col 19  heap  object  append
+stdlib_hash_crc32_fnv.go:9	absent -> heap
+	src  data := []byte("cg12 hash coverage")
+	gc   col 17  heap  object  ([]byte)("cg12 hash coverage")
+stdlib_http_client_server.go:33	absent -> heap
+	src  _, _ = response.Write([]byte("runtime response"))
+	gc   col 32  heap  object  ([]byte)("runtime response")
+stdlib_http_multipart_form.go:11	mixed -> heap
+	src  var encoded bytes.Buffer
+	goc  col 2  frame  runtime.newobject  bytes_Buffer  [main.main]
+	goc  col 2  heap  runtime.newobject  bytes_Buffer  [main.main]
+	gc   col 6  heap  object  encoded
+stdlib_http_multipart_form.go:23	absent -> heap
+	src  if _, err := file.Write([]byte("package main\nfunc main() {}\n")); err != nil {
+	gc   col 33  heap  object  ([]byte)("package main\nfunc main() {}\n")
+stdlib_http_parse_roundtrip.go:58	mixed -> heap
+	src  var encoded bytes.Buffer
+	goc  col 2  frame  runtime.newobject  bytes_Buffer  [main.main]
+	goc  col 2  heap  runtime.newobject  bytes_Buffer  [main.main]
+	gc   col 6  heap  object  encoded
+stdlib_http_redirect_keepalive.go:19	absent -> heap
+	src  remoteAddresses = append(remoteAddresses, request.RemoteAddr)
+	gc   col 27  heap  object  append
+stdlib_http_redirect_keepalive.go:45	absent -> heap
+	src  _, _ = response.Write([]byte("redirect complete"))
+	gc   col 33  heap  object  ([]byte)("redirect complete")
+stdlib_http_redirect_keepalive.go:58	absent -> heap
+	src  request, err := http.NewRequest(http.MethodGet, server.URL+"/start", nil)
+	gc   col 60  heap  object  server.URL + "/start"
+stdlib_http_tls_client_server.go:10	absent -> mixed
+	src  server := httptest.NewTLSServer(http.HandlerFunc(func(response http.ResponseWriter, request *http.Request) {
+	gc   col 51  heap  object  func literal
+	gc   col 86  frame  object  request
+stdlib_http_tls_client_server.go:24	absent -> heap
+	src  _, _ = response.Write([]byte("encrypted response"))
+	gc   col 32  heap  object  ([]byte)("encrypted response")
+stdlib_http_tls_client_server.go:27	absent -> heap
+	src  response, err := server.Client().Get(server.URL + "/secure")
+	gc   col 50  heap  object  server.URL + "/secure"
+stdlib_image_gif_animation.go:27	absent -> heap
+	src  Image:     []*image.Paletted{first, second},
+	gc   col 31  heap  slice  []*image.Paletted{...}
+stdlib_image_gif_animation.go:28	absent -> heap
+	src  Delay:     []int{5, 7},
+	gc   col 19  heap  slice  []int{...}
+stdlib_image_gif_animation.go:30	absent -> heap
+	src  Disposal:  []byte{gif.DisposalNone, gif.DisposalBackground},
+	gc   col 20  heap  slice  []byte{...}
+stdlib_image_gif_animation.go:32	mixed -> heap
+	src  var encoded bytes.Buffer
+	goc  col 2  frame  runtime.newobject  bytes_Buffer  [main.main]
+	goc  col 2  heap  runtime.newobject  bytes_Buffer  [main.main]
+	gc   col 6  heap  object  encoded
+stdlib_image_gif_animation.go:34	absent -> heap
+	src  panic("animated GIF encode failed: " + err.Error())
+	gc   col 40  heap  object  "animated GIF encode failed: " + err.Error()
+	gc   col 40  heap  object  "animated GIF encode failed: " + err.Error()
+stdlib_image_gif_animation.go:38	absent -> heap
+	src  panic("animated GIF config decode failed: " + err.Error())
+	gc   col 47  heap  object  "animated GIF config decode failed: " + err.Error()
+	gc   col 47  heap  object  "animated GIF config decode failed: " + err.Error()
+stdlib_image_gif_animation.go:46	absent -> heap
+	src  panic("animated GIF decode failed: " + err.Error())
+	gc   col 40  heap  object  "animated GIF decode failed: " + err.Error()
+	gc   col 40  heap  object  "animated GIF decode failed: " + err.Error()
+stdlib_image_jpeg_roundtrip.go:17	mixed -> heap
+	src  var encoded bytes.Buffer
+	goc  col 2  frame  runtime.newobject  bytes_Buffer  [main.main]
+	goc  col 2  heap  runtime.newobject  bytes_Buffer  [main.main]
+	gc   col 6  heap  object  encoded
+stdlib_image_png_roundtrip.go:24	mixed -> heap
+	src  var encoded bytes.Buffer
+	goc  col 2  frame  runtime.newobject  bytes_Buffer  [main.main]
+	goc  col 2  heap  runtime.newobject  bytes_Buffer  [main.main]
+	gc   col 6  heap  object  encoded
+stdlib_image_png_roundtrip.go:25	mixed -> heap
+	src  encoder := png.Encoder{CompressionLevel: png.BestCompression}
+	goc  col 2  frame  runtime.newobject  image_png_Encoder  [main.main]
+	goc  col 2  heap  runtime.newobject  image_png_Encoder  [main.main]
+	gc   col 2  heap  object  encoder
+stdlib_io_copy_buffer.go:10	mixed -> heap
+	src  var output bytes.Buffer
+	goc  col 2  frame  runtime.newobject  bytes_Buffer  [main.main]
+	goc  col 2  heap  runtime.newobject  bytes_Buffer  [main.main]
+	gc   col 6  heap  object  output
+stdlib_io_multi_reader_writer.go:15	mixed -> heap
+	src  var left bytes.Buffer
+	goc  col 2  frame  runtime.newobject  bytes_Buffer  [main.main]
+	goc  col 2  heap  runtime.newobject  bytes_Buffer  [main.main]
+	gc   col 6  heap  object  left
+stdlib_io_multi_reader_writer.go:16	mixed -> heap
+	src  var right bytes.Buffer
+	goc  col 2  frame  runtime.newobject  bytes_Buffer  [main.main]
+	goc  col 2  heap  runtime.newobject  bytes_Buffer  [main.main]
+	gc   col 6  heap  object  right
+stdlib_io_pipe_roundtrip.go:14	absent -> heap
+	src  done <- string(contents)
+	gc   col 18  heap  object  string(contents)
+stdlib_io_pipe_roundtrip.go:17	absent -> heap
+	src  written, err := writer.Write([]byte("pipe"))
+	gc   col 38  heap  object  ([]byte)("pipe")
+stdlib_io_readall_limited_reader.go:9	absent -> heap
+	src  reader := &io.LimitedReader{
+	gc   col 12  heap  object  &io.LimitedReader{...}
+stdlib_io_readall_limited_reader.go:10	absent -> heap
+	src  R: bytes.NewReader([]byte("abcdef")),
+	gc   col 29  heap  object  ([]byte)("abcdef")
+stdlib_io_tee_reader.go:10	mixed -> heap
+	src  var tapped bytes.Buffer
+	goc  col 2  frame  runtime.newobject  bytes_Buffer  [main.main]
+	goc  col 2  heap  runtime.newobject  bytes_Buffer  [main.main]
+	gc   col 6  heap  object  tapped
+stdlib_log_buffer.go:10	mixed -> heap
+	src  var buffer bytes.Buffer
+	goc  col 2  frame  runtime.newobject  bytes_Buffer  [main.main]
+	goc  col 2  heap  runtime.newobject  bytes_Buffer  [main.main]
+	gc   col 6  heap  object  buffer
+stdlib_mime_quotedprintable.go:10	mixed -> heap
+	src  var encoded bytes.Buffer
+	goc  col 2  frame  runtime.newobject  bytes_Buffer  [main.main]
+	goc  col 2  heap  runtime.newobject  bytes_Buffer  [main.main]
+	gc   col 6  heap  object  encoded
+stdlib_netpoll_syscall_socket_listen.go:19	absent -> heap
+	src  address := &syscall.SockaddrInet4{
+	gc   col 13  heap  object  &syscall.SockaddrInet4{...}
+stdlib_netpoll_tcp_echo.go:38	absent -> heap
+	src  if _, err := connection.Write([]byte("pong")); err != nil {
+	gc   col 40  heap  object  ([]byte)("pong")
+stdlib_netpoll_tcp_echo.go:54	absent -> heap
+	src  if _, err := client.Write([]byte("ping")); err != nil {
+	gc   col 35  heap  object  ([]byte)("ping")
+stdlib_os_exec_goroutine_shape.go:28	mixed -> heap
+	src  var builder strings.Builder
+	goc  col 2  frame  runtime.newobject  strings_Builder  [main.main]
+	goc  col 2  heap  runtime.newobject  strings_Builder  [main.main]
+	gc   col 6  heap  object  builder
+stdlib_os_pipe_embedded_file_copy.go:39	mixed -> heap
+	src  var builder strings.Builder
+	goc  col 2  frame  runtime.newobject  strings_Builder  [main.main]
+	goc  col 2  heap  runtime.newobject  strings_Builder  [main.main]
+	gc   col 6  heap  object  builder
+stdlib_os_pipe_interface_capture_close.go:16	absent -> heap
+	src  if _, err := writer.Write([]byte("captured")); err != nil {
+	gc   col 36  heap  object  ([]byte)("captured")
+stdlib_os_pipe_interface_capture_close.go:26	mixed -> heap
+	src  var builder strings.Builder
+	goc  col 2  frame  runtime.newobject  strings_Builder  [main.main]
+	goc  col 2  heap  runtime.newobject  strings_Builder  [main.main]
+	gc   col 6  heap  object  builder
+stdlib_os_pipe_manual_copy_shape.go:39	mixed -> heap
+	src  var builder strings.Builder
+	goc  col 2  frame  runtime.newobject  strings_Builder  [main.main]
+	goc  col 2  heap  runtime.newobject  strings_Builder  [main.main]
+	gc   col 6  heap  object  builder
+stdlib_runtime_debug_stack_gc.go:14	mixed -> heap
+	src  var stats debug.GCStats
+	goc  col 2  frame  runtime.newobject  runtime_debug_GCStats  [main.main]
+	goc  col 2  heap  runtime.newobject  runtime_debug_GCStats  [main.main]
+	gc   col 6  heap  object  stats
+stdlib_runtime_trace_buffer.go:10	mixed -> heap
+	src  var buffer bytes.Buffer
+	goc  col 2  frame  runtime.newobject  bytes_Buffer  [main.main]
+	goc  col 2  heap  runtime.newobject  bytes_Buffer  [main.main]
+	gc   col 6  heap  object  buffer
+stdlib_runtime_trace_log.go:10	mixed -> heap
+	src  var buffer bytes.Buffer
+	goc  col 2  frame  runtime.newobject  bytes_Buffer  [main.main]
+	goc  col 2  heap  runtime.newobject  bytes_Buffer  [main.main]
+	gc   col 6  heap  object  buffer
+stdlib_runtime_trace_start_only.go:9	mixed -> heap
+	src  var buffer bytes.Buffer
+	goc  col 2  frame  runtime.newobject  bytes_Buffer  [main.main]
+	goc  col 2  heap  runtime.newobject  bytes_Buffer  [main.main]
+	gc   col 6  heap  object  buffer
+stdlib_runtime_trace_start_probe.go:10	mixed -> heap
+	src  var buffer bytes.Buffer
+	goc  col 2  frame  runtime.newobject  bytes_Buffer  [main.main]
+	goc  col 2  heap  runtime.newobject  bytes_Buffer  [main.main]
+	gc   col 6  heap  object  buffer
+stdlib_runtime_trace_start_stop.go:9	mixed -> heap
+	src  var buffer bytes.Buffer
+	goc  col 2  frame  runtime.newobject  bytes_Buffer  [main.main]
+	goc  col 2  heap  runtime.newobject  bytes_Buffer  [main.main]
+	gc   col 6  heap  object  buffer
+stdlib_signal_notify_context.go:27	absent -> heap
+	src  ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGUSR2)
+	gc   col 35  heap  slice  ... argument
+	gc   col 65  heap  object  syscall.Signal(12)
+stdlib_slog_structured.go:23	mixed -> heap
+	src  var jsonOutput bytes.Buffer
+	goc  col 2  frame  runtime.newobject  bytes_Buffer  [main.main]
+	goc  col 2  heap  runtime.newobject  bytes_Buffer  [main.main]
+	gc   col 6  heap  object  jsonOutput
+stdlib_slog_structured.go:26	absent -> mixed
+	src  ReplaceAttr: func(groups []string, attribute slog.Attr) slog.Attr {
+	gc   col 16  heap  object  func literal
+	gc   col 21  frame  object  groups
+stdlib_slog_structured.go:33	absent -> mixed
+	src  logger := slog.New(slog.NewJSONHandler(&jsonOutput, options)).With("component", "cg12")
+	gc   col 68  frame  slice  ... argument
+	gc   col 69  heap  object  "component"
+	gc   col 82  heap  object  "cg12"
+stdlib_slog_structured.go:36	absent -> heap
+	src  "state", compilerState{packageName: "runtime", files: 42},
+	gc   col 3  heap  object  "state"
+	gc   col 25  heap  object  compilerState{...}
+stdlib_slog_structured.go:37	absent -> heap
+	src  "success", true,
+	gc   col 3  heap  object  "success"
+	gc   col 14  heap  object  true
+stdlib_slog_structured.go:58	mixed -> heap
+	src  var textOutput bytes.Buffer
+	goc  col 2  frame  runtime.newobject  bytes_Buffer  [main.main]
+	goc  col 2  heap  runtime.newobject  bytes_Buffer  [main.main]
+	gc   col 6  heap  object  textOutput
+stdlib_smtp_session.go:130	absent -> heap
+	src  return errors.New("SMTP command mismatch: got " + line + ", want " + expected)
+	gc   col 70  heap  object  "SMTP command mismatch: got " + line + ", want " + expected
+stdlib_sort_search_slice.go:22	absent -> heap
+	src  }{
+	gc   col 3  heap  slice  []struct { name string; score int }{...}
+stdlib_sync_atomic_typed.go:24	mixed -> heap
+	src  var pointer atomic.Pointer[atomicPayload]
+	goc  col 2  frame  runtime.newobject  sync_atomic_Pointer_main_atomicPayload  [main.main]
+	goc  col 2  heap  runtime.newobject  sync_atomic_Pointer_main_atomicPayload  [main.main]
+	gc   col 6  heap  object  pointer
+stdlib_sync_once_map_cond.go:6	absent -> heap
+	src  var once sync.Once
+	gc   col 6  heap  object  once
+stdlib_sync_once_map_cond.go:17	absent -> heap
+	src  var values sync.Map
+	gc   col 6  heap  object  values
+stdlib_testing_quick.go:24	absent -> mixed
+	src  property := func(input generatedInput) bool {
+	gc   col 14  heap  object  func literal
+	gc   col 19  frame  object  input
+stdlib_text_template_execute.go:24	absent -> heap
+	src  var output bytes.Buffer
+	gc   col 6  heap  object  output
+sync_pool_interface.go:30	absent -> heap
+	src  constructor := func() any {
+	gc   col 17  heap  object  func literal
+sync_pool_interface.go:43	absent -> heap
+	src  pool := sync.Pool{New: constructor}
+	gc   col 2  heap  object  pool
+
+## PESSIMISTIC: 585 lines
+
+every source line goc puts on the heap and gc does not. This is the
+performance direction and nothing worse: each line is an allocation, a zeroing
+and a collector's attention that the reference implementation does not pay.
+
+by construct (goc allocators on the line | gc constructs on the line):
+
+    186  newobject/heap | -
+    123  newobject/heap | object/heap,slice/frame
+     85  newobject/heap | object/frame
+     56  newobject/heap | slice/frame
+     53  newobject/heap | object/frame,object/heap
+     35  makemap/heap | map/frame
+     16  newobject/heap | object/frame,object/heap,slice/frame
+     10  newobject/heap | object/frame,slice/frame
+      7  newobject/frame,newobject/heap | -
+      5  makeslice/heap | slice/frame
+      2  makemap/heap | object/frame
+      2  newobject/frame,newobject/heap | slice/frame
+      1  makechan/heap | chan/heap,object/frame
+      1  makemap/heap | map/frame,object/frame
+      1  makemap/heap,newobject/frame | map/frame
+      1  makeslice/heap | object/heap,slice/frame
+      1  newobject/frame,newobject/heap | object/frame,object/heap
+
+adler32_marshal_loop.go:21	heap -> frame
+	src  appendedState, err := hash.(encoding.BinaryAppender).AppendBinary(make([]byte, 4, 32))
+	goc  col 85  heap  runtime.newobject  32_byte  [main.main]
+	gc   col 73  frame  slice  make([]byte, 4, 32)
+append_make.go:11	heap -> mixed
+	src  grown := append([]byte(nil), make([]byte, capacity)...)
+	goc  col 44  heap  runtime.makeslice  byte  [main.growBytes]
+	gc   col 17  heap  object  append
+	gc   col 35  frame  slice  make([]byte, capacity)
+bytes_grow_allocs.go:12	heap -> frame
+	src  startSizes := []int{0, 100, 1000, 10000, 100000}
+	goc  col 16  heap  runtime.newobject  5_int  [main.main]
+	gc   col 21  frame  slice  []int{...}
+bytes_grow_allocs.go:13	heap -> frame
+	src  growSizes := []int{10000, 100000}
+	goc  col 15  heap  runtime.newobject  2_int  [main.main]
+	gc   col 20  frame  slice  []int{...}
+bytes_grow_compare.go:10	heap -> absent
+	src  defer runtime.GOMAXPROCS(runtime.GOMAXPROCS(1))
+	goc  col 2  heap  runtime.newobject  struct_code_uintptr__function_func_n_int__int__a  [main.measuredAllocsPerRun]
+fmt_sprintf.go:6	heap -> mixed
+	src  formatted := fmt.Sprintf("value=%d", 42)
+	goc  col 27  heap  runtime.newobject  struct_values__1_any__payload0_int  [main.main]
+	gc   col 26  frame  slice  ... argument
+	gc   col 39  heap  object  42
+gc_struct.go:25	heap -> frame
+	src  root := new(record)
+	goc  col 10  heap  runtime.newobject  main_record  [main.Test]
+	gc   col 13  frame  object  new(record)
+interface_slice_equality.go:4	heap -> frame
+	src  values := []any{1}
+	goc  col 18  heap  runtime.newobject  int  [main.main]
+	gc   col 17  frame  slice  []any{...}
+	gc   col 18  frame  object  1
+interface_slice_equality.go:6	heap -> frame
+	src  if value != values[0] {
+	goc  col 5  heap  runtime.newobject  int  [main.main]
+	gc   col 5  frame  object  1
+interface_slice_equality.go:9	heap -> frame
+	src  if value == any(2) {
+	goc  col 5  heap  runtime.newobject  int  [main.main]
+	goc  col 18  heap  runtime.newobject  int  [main.main]
+	gc   col 5  frame  object  1
+	gc   col 18  frame  object  any(2)
+nested_defer.go:13	heap -> absent
+	src  go worker(done)
+	goc  col 2  heap  runtime.newobject  struct_code_uintptr__argument0_chan_int  [main.main]
+reflect_methods.go:10	heap -> frame
+	src  addressType := reflect.TypeOf(netip.Addr{})
+	goc  col 32  heap  runtime.newobject  net_netip_Addr  [main.main]
+	gc   col 42  frame  object  netip.Addr{}
+runtime_append_growth_pointer_elements.go:13	heap -> mixed
+	src  values = append(values, &appendGrowthNode{
+	goc  col 27  heap  runtime.newobject  main_appendGrowthNode  [main.main]
+	gc   col 18  frame  object  append
+	gc   col 27  heap  object  &appendGrowthNode{...}
+runtime_append_self_overlap.go:4	heap -> frame
+	src  values := []int{1, 2, 3, 4}
+	goc  col 12  heap  runtime.newobject  4_int  [main.main]
+	gc   col 17  frame  slice  []int{...}
+runtime_append_variadic_pointer_gc.go:11	heap -> frame
+	src  source := make([]*appendVariadicNode, 0, 80)
+	goc  col 43  heap  runtime.newobject  80__main_appendVariadicNode  [main.main]
+	gc   col 16  frame  slice  make([]*appendVariadicNode, 0, 80)
+runtime_append_variadic_pointer_gc.go:13	heap -> mixed
+	src  source = append(source, &appendVariadicNode{
+	goc  col 27  heap  runtime.newobject  main_appendVariadicNode  [main.main]
+	gc   col 18  frame  object  append
+	gc   col 27  heap  object  &appendVariadicNode{...}
+runtime_array_copy_pointer_gc.go:11	heap -> frame
+	src  {value: 3},
+	goc  col 3  heap  runtime.newobject  main_arrayCopyBox  [main.main]
+	gc   col 3  frame  object  &arrayCopyBox{...}
+runtime_array_copy_pointer_gc.go:12	heap -> frame
+	src  {value: 5},
+	goc  col 3  heap  runtime.newobject  main_arrayCopyBox  [main.main]
+	gc   col 3  frame  object  &arrayCopyBox{...}
+runtime_array_copy_pointer_gc.go:13	heap -> frame
+	src  {value: 7},
+	goc  col 3  heap  runtime.newobject  main_arrayCopyBox  [main.main]
+	gc   col 3  frame  object  &arrayCopyBox{...}
+runtime_array_copy_pointer_gc.go:14	heap -> frame
+	src  {value: 11},
+	goc  col 3  heap  runtime.newobject  main_arrayCopyBox  [main.main]
+	gc   col 3  frame  object  &arrayCopyBox{...}
+runtime_array_map_key.go:4	heap -> frame
+	src  table := map[[3]int]string{
+	goc  col 11  heap  runtime.makemap  map__3_int_string  [main.main]
+	gc   col 28  frame  map  map[[3]int]string{...}
+runtime_assign_target_forms.go:42	heap -> frame
+	src  counts := map[string]int{}
+	goc  col 12  heap  runtime.makemap  map_string_int  [main.tupleAssignmentTargets]
+	gc   col 26  frame  map  map[string]int{}
+runtime_assign_target_forms.go:45	heap -> mixed
+	src  fmt.Sprintf("%d/%d/%d", box.index, counts["k"], len(counts)), "4/5/1")
+	goc  col 15  heap  runtime.newobject  struct_values__3_any__payload0_int__payload1_int  [main.tupleAssignmentTargets]
+	gc   col 14  frame  slice  ... argument
+	gc   col 30  heap  object  box.index
+	gc   col 44  heap  object  counts["k"]
+	gc   col 54  heap  object  len(counts)
+runtime_assign_target_forms.go:47	heap -> frame
+	src  counts = map[string]int{}
+	goc  col 11  heap  runtime.makemap  map_string_int  [main.tupleAssignmentTargets]
+	gc   col 25  frame  map  map[string]int{}
+runtime_assign_target_forms.go:50	heap -> mixed
+	src  fmt.Sprintf("%d/%d/%d", box.index, counts["k"], len(counts)), "6/7/1")
+	goc  col 15  heap  runtime.newobject  struct_values__3_any__payload0_int__payload1_int  [main.tupleAssignmentTargets]
+	gc   col 14  frame  slice  ... argument
+	gc   col 30  heap  object  box.index
+	gc   col 44  heap  object  counts["k"]
+	gc   col 54  heap  object  len(counts)
+runtime_assign_target_forms.go:55	heap -> mixed
+	src  fmt.Sprintf("%d/%v", box.index, destination), "8/[0 9]")
+	goc  col 15  heap  runtime.newobject  struct_values__2_any__payload0_int__payload1___i  [main.tupleAssignmentTargets]
+	gc   col 14  frame  slice  ... argument
+	gc   col 27  heap  object  box.index
+	gc   col 35  heap  object  destination
+runtime_assign_target_forms.go:59	heap -> frame
+	src  counts := map[string]int{"k": 10}
+	goc  col 12  heap  runtime.makemap  map_string_int  [main.mapElementOperatorAssignment]
+	gc   col 26  frame  map  map[string]int{...}
+runtime_assign_target_forms.go:61	heap -> mixed
+	src  expect("an assignment operator on a map element", fmt.Sprintf("%d", counts["k"]), "15")
+	goc  col 64  heap  runtime.newobject  struct_values__1_any__payload0_int  [main.mapElementOperatorAssignment]
+	gc   col 63  frame  slice  ... argument
+	gc   col 76  heap  object  counts["k"]
+runtime_assign_target_forms.go:65	heap -> mixed
+	src  fmt.Sprintf("%d", counts["k"]), "30")
+	goc  col 15  heap  runtime.newobject  struct_values__1_any__payload0_int  [main.mapElementOperatorAssignment]
+	gc   col 14  frame  slice  ... argument
+	gc   col 27  heap  object  counts["k"]
+runtime_assign_target_forms.go:69	heap -> mixed
+	src  fmt.Sprintf("%d/%d", counts["fresh"], len(counts)), "3/2")
+	goc  col 15  heap  runtime.newobject  struct_values__2_any__payload0_int__payload1_int  [main.mapElementOperatorAssignment]
+	gc   col 14  frame  slice  ... argument
+	gc   col 30  heap  object  counts["fresh"]
+	gc   col 44  heap  object  len(counts)
+runtime_assign_target_forms.go:77	heap -> mixed
+	src  fmt.Sprintf("%d/%v", index, destination), "3/[4 0]")
+	goc  col 15  heap  runtime.newobject  struct_values__2_any__payload0_int__payload1___i  [main.tupleAssignmentEvaluationOrder]
+	gc   col 14  frame  slice  ... argument
+	gc   col 24  heap  object  index
+	gc   col 31  heap  object  destination
+runtime_assign_target_forms.go:86	heap -> mixed
+	src  fmt.Sprint(trace), "[index0 index1 value5 value6]")
+	goc  col 3  heap  runtime.newobject  struct_values__1_any__payload0___string  [main.tupleAssignmentEvaluationOrder]
+	gc   col 13  frame  slice  ... argument
+	gc   col 14  heap  object  trace
+runtime_assign_target_forms.go:91	heap -> mixed
+	src  fmt.Sprint(trace), "[index2 index3 call]")
+	goc  col 3  heap  runtime.newobject  struct_values__1_any__payload0___string  [main.tupleAssignmentEvaluationOrder]
+	gc   col 13  frame  slice  ... argument
+	gc   col 14  heap  object  trace
+runtime_assign_target_forms.go:92	heap -> mixed
+	src  expect("the two-result call reached its destinations", fmt.Sprint(slots), "[5 6 7 8]")
+	goc  col 57  heap  runtime.newobject  struct_values__1_any__payload0___int  [main.tupleAssignmentEvaluationOrder]
+	gc   col 67  frame  slice  ... argument
+	gc   col 68  heap  object  slots
+runtime_assign_target_forms.go:97	heap -> frame
+	src  counts := map[string]int{"a": 3}
+	goc  col 12  heap  runtime.makemap  map_string_int  [main.twoResultTargets]
+	gc   col 26  frame  map  map[string]int{...}
+runtime_assign_target_forms.go:100	heap -> mixed
+	src  fmt.Sprintf("%d/%v", box.index, box.found), "3/true")
+	goc  col 15  heap  runtime.newobject  struct_values__2_any__payload0_int__payload1_boo  [main.twoResultTargets]
+	gc   col 14  frame  slice  ... argument
+	gc   col 27  heap  object  box.index
+	gc   col 38  heap  object  box.found
+runtime_assign_target_forms.go:104	heap -> mixed
+	src  fmt.Sprintf("%d/%v", box.index, box.found), "0/false")
+	goc  col 15  heap  runtime.newobject  struct_values__2_any__payload0_int__payload1_boo  [main.twoResultTargets]
+	gc   col 14  frame  slice  ... argument
+	gc   col 27  heap  object  box.index
+	gc   col 38  heap  object  box.found
+runtime_assign_target_forms.go:110	heap -> mixed
+	src  fmt.Sprintf("%d/%v", box.index, box.found), "8/true")
+	goc  col 15  heap  runtime.newobject  struct_values__2_any__payload0_int__payload1_boo  [main.twoResultTargets]
+	gc   col 14  frame  slice  ... argument
+	gc   col 27  heap  object  box.index
+	gc   col 38  heap  object  box.found
+runtime_assign_target_forms.go:114	heap -> mixed
+	src  fmt.Sprintf("%d/%v", box.index, box.found), "0/false")
+	goc  col 15  heap  runtime.newobject  struct_values__2_any__payload0_int__payload1_boo  [main.twoResultTargets]
+	gc   col 14  frame  slice  ... argument
+	gc   col 27  heap  object  box.index
+	gc   col 38  heap  object  box.found
+runtime_assign_target_forms.go:116	heap -> frame
+	src  var boxed any = 11
+	goc  col 18  heap  runtime.newobject  int  [main.twoResultTargets]
+	gc   col 18  frame  object  11
+runtime_assign_target_forms.go:119	heap -> mixed
+	src  fmt.Sprintf("%d/%v", box.index, box.found), "11/true")
+	goc  col 15  heap  runtime.newobject  struct_values__2_any__payload0_int__payload1_boo  [main.twoResultTargets]
+	gc   col 14  frame  slice  ... argument
+	gc   col 27  heap  object  box.index
+	gc   col 38  heap  object  box.found
+runtime_assign_target_forms.go:120	heap -> frame
+	src  var other any = "s"
+	goc  col 18  heap  runtime.newobject  string  [main.twoResultTargets]
+	gc   col 18  frame  object  "s"
+runtime_assign_target_forms.go:123	heap -> mixed
+	src  fmt.Sprintf("%d/%v", box.index, box.found), "0/false")
+	goc  col 15  heap  runtime.newobject  struct_values__2_any__payload0_int__payload1_boo  [main.twoResultTargets]
+	gc   col 14  frame  slice  ... argument
+	gc   col 27  heap  object  box.index
+	gc   col 38  heap  object  box.found
+runtime_assign_target_forms.go:125	heap -> frame
+	src  texts := map[int]string{1: "one"}
+	goc  col 11  heap  runtime.makemap  map_int_string  [main.twoResultTargets]
+	gc   col 25  frame  map  map[int]string{...}
+runtime_assign_target_forms.go:129	heap -> mixed
+	src  fmt.Sprintf("%s/%v", destination[0], box.found), "one/true")
+	goc  col 15  heap  runtime.newobject  struct_values__2_any__payload0_string__payload1_  [main.twoResultTargets]
+	gc   col 14  frame  slice  ... argument
+	gc   col 35  heap  object  destination[0]
+	gc   col 43  heap  object  box.found
+runtime_assign_target_forms.go:139	heap -> mixed
+	src  expect("a select receive into a struct field", fmt.Sprintf("%d", box.index), "12")
+	goc  col 61  heap  runtime.newobject  struct_values__1_any__payload0_int  [main.selectTargets]
+	gc   col 60  frame  slice  ... argument
+	gc   col 70  heap  object  box.index
+runtime_assign_target_forms.go:146	heap -> mixed
+	src  fmt.Sprintf("%d/%v", box.index, box.found), "13/true")
+	goc  col 15  heap  runtime.newobject  struct_values__2_any__payload0_int__payload1_boo  [main.selectTargets]
+	gc   col 14  frame  slice  ... argument
+	gc   col 27  heap  object  box.index
+	gc   col 38  heap  object  box.found
+runtime_assign_target_forms.go:153	heap -> mixed
+	src  expect("a select receive into a slice element", fmt.Sprint(destination), "[21]")
+	goc  col 50  heap  runtime.newobject  struct_values__1_any__payload0___int  [main.selectTargets]
+	gc   col 60  frame  slice  ... argument
+	gc   col 61  heap  object  destination
+runtime_assign_target_forms.go:160	heap -> frame
+	src  expect("a select receive into an interface field", fmt.Sprintf("%v", box.value), "22")
+	goc  col 65  heap  runtime.newobject  1_any  [main.selectTargets]
+	gc   col 64  frame  slice  ... argument
+runtime_assign_target_forms.go:169	heap -> mixed
+	src  fmt.Sprintf("%s/%s/%v", globalText, readGlobalText(), received), "hi/hi/true")
+	goc  col 15  heap  runtime.newobject  struct_values__3_any__payload0_string__payload1_  [main.packageLevelTargets]
+	gc   col 14  frame  slice  ... argument
+	gc   col 27  heap  object  globalText
+	gc   col 57  heap  object  received
+runtime_assign_target_forms.go:176	heap -> mixed
+	src  fmt.Sprintf("%s/%s", globalText, readGlobalText()), "there/there")
+	goc  col 15  heap  runtime.newobject  struct_values__2_any__payload0_string__payload1_  [main.packageLevelTargets]
+	gc   col 14  frame  slice  ... argument
+	gc   col 24  heap  object  globalText
+runtime_assign_target_forms.go:182	heap -> mixed
+	src  fmt.Sprintf("%v/%v/%v", globalNumbers, readGlobalNumbers(), received), "[1 2]/[1 2]/true")
+	goc  col 15  heap  runtime.newobject  struct_values__3_any__payload0___int__payload1__  [main.packageLevelTargets]
+	gc   col 14  frame  slice  ... argument
+	gc   col 27  heap  object  globalNumbers
+	gc   col 63  heap  object  received
+runtime_assign_target_forms.go:189	heap -> mixed
+	src  fmt.Sprintf("%d%s/%d%s/%v", globalRecord.index, globalRecord.text, got.index, got.text, received),
+	goc  col 15  heap  runtime.newobject  struct_values__5_any__payload0_int__payload1_str  [main.packageLevelTargets]
+	gc   col 14  frame  slice  ... argument
+	gc   col 43  heap  object  globalRecord.index
+	gc   col 63  heap  object  globalRecord.text
+	gc   col 73  heap  object  got.index
+	gc   col 84  heap  object  got.text
+	gc   col 91  heap  object  received
+runtime_assign_target_forms.go:196	heap -> mixed
+	src  fmt.Sprintf("%v/%v/%v", globalValue, readGlobalValue(), received), "5/5/true")
+	goc  col 15  heap  runtime.newobject  struct_values__3_any__payload2_bool  [main.packageLevelTargets]
+	gc   col 14  frame  slice  ... argument
+	gc   col 59  heap  object  received
+runtime_assign_target_forms.go:208	heap -> mixed
+	src  trace = append(trace, fmt.Sprintf("%s%d", what, value))
+	goc  col 36  heap  runtime.newobject  struct_values__2_any__payload0_string__payload1_  [main.traced]
+	gc   col 16  heap  object  append
+	gc   col 35  frame  slice  ... argument
+	gc   col 44  heap  object  what
+	gc   col 50  heap  object  value
+runtime_atomic_counter.go:15	heap -> absent
+	src  defer wait.Done()
+	goc  col 10  heap  runtime.newobject  struct_code_uintptr__receiver__sync_WaitGroup  [main.main.func.14.6]
+runtime_channel_buffer_roots.go:57	heap -> mixed
+	src  sink = append(sink, &box{value: index})
+	goc  col 23  heap  runtime.newobject  main_box  [main.churn]
+	gc   col 16  frame  object  append
+	gc   col 23  heap  object  &box{...}
+runtime_channel_close_range.go:12	heap -> absent
+	src  go produce(values)
+	goc  col 2  heap  runtime.newobject  struct_code_uintptr__argument0_chan_int  [main.main]
+runtime_channel_direction.go:22	heap -> absent
+	src  go sendAll(channel, values)
+	goc  col 2  heap  runtime.newobject  struct_code_uintptr__argument0_chan___int__argum  [main.main]
+runtime_cleanup_basic.go:14	heap -> absent
+	src  func registerCleanup(done chan int) {
+	goc  col 1  heap  runtime.newobject  chan_int  [main.main]
+	goc  col 1  heap  runtime.newobject  chan_int  [main.registerCleanup]
+runtime_cleanup_frame_retention.go:37	heap -> absent
+	src  func registerRetainedCleanup(done chan struct{}) {
+	goc  col 1  heap  runtime.newobject  chan_struct  [main.main]
+	goc  col 1  heap  runtime.newobject  chan_struct  [main.registerRetainedCleanup]
+runtime_cleanup_frame_retention_masked.go:51	heap -> absent
+	src  func registerWithTrailingAllocation(done chan struct{}) {
+	goc  col 1  heap  runtime.newobject  chan_struct  [main.registerWithTrailingAllocation]
+runtime_cleanup_frame_retention_masked.go:58	heap -> absent
+	src  func registerWithKeepAlive(done chan struct{}) {
+	goc  col 1  heap  runtime.newobject  chan_struct  [main.registerWithKeepAlive]
+runtime_cleanup_frame_retention_masked.go:65	heap -> absent
+	src  func registerTwoObjects(done chan struct{}) {
+	goc  col 1  heap  runtime.newobject  chan_struct  [main.registerTwoObjects]
+runtime_cleanup_frame_retention_masked.go:74	heap -> absent
+	src  func registerFinalizerOnly(done chan struct{}) {
+	goc  col 1  heap  runtime.newobject  chan_struct  [main.registerFinalizerOnly]
+runtime_cleanup_multiple.go:14	heap -> absent
+	src  func registerMultipleCleanups(done chan int) {
+	goc  col 1  heap  runtime.newobject  chan_int  [main.main]
+	goc  col 1  heap  runtime.newobject  chan_int  [main.registerMultipleCleanups]
+runtime_cleanup_stop.go:14	heap -> absent
+	src  func registerStoppedCleanup(stopped chan struct{}, active chan struct{}) {
+	goc  col 1  heap  runtime.newobject  chan_struct  [main.registerStoppedCleanup]
+runtime_closure_captured_header_values.go:47	heap -> absent
+	src  scalar = value + 1
+	goc  col 20  heap  runtime.newobject  int  [main.interfaceValues.func.46.18]
+runtime_closure_captured_header_values.go:51	heap -> frame
+	src  expect("interface holding an int", fmt.Sprint(scalar), "42")
+	goc  col 37  heap  runtime.newobject  1_any  [main.interfaceValues]
+	gc   col 47  frame  slice  ... argument
+runtime_closure_captured_header_values.go:55	heap -> absent
+	src  text = "a" + suffix
+	goc  col 16  heap  runtime.newobject  string  [main.interfaceValues.func.54.16]
+runtime_closure_captured_header_values.go:59	heap -> frame
+	src  expect("interface holding a string", fmt.Sprint(text), "az")
+	goc  col 39  heap  runtime.newobject  1_any  [main.interfaceValues]
+	gc   col 49  frame  slice  ... argument
+runtime_closure_captured_header_values.go:63	heap -> absent
+	src  aggregate = pair{2, "a" + suffix}
+	goc  col 29  heap  runtime.newobject  main_pair  [main.interfaceValues.func.62.21]
+runtime_closure_captured_header_values.go:67	heap -> frame
+	src  expect("interface holding a struct", fmt.Sprint(aggregate), "{2 az}")
+	goc  col 39  heap  runtime.newobject  1_any  [main.interfaceValues]
+	gc   col 49  frame  slice  ... argument
+runtime_closure_captured_header_values.go:71	heap -> absent
+	src  failure = fmt.Errorf("boom%s", suffix)
+	goc  col 24  heap  runtime.newobject  struct_values__1_any__payload0_string  [main.interfaceValues.func.70.19]
+runtime_closure_captured_header_values.go:79	heap -> absent
+	src  counted = value
+	goc  col 13  heap  runtime.newobject  int  [main.interfaceValues.rangefunc.78.2]
+runtime_closure_captured_header_values.go:82	heap -> frame
+	src  expect("interface assigned by a range-over-function body", fmt.Sprint(counted), "2")
+	goc  col 61  heap  runtime.newobject  1_any  [main.interfaceValues]
+	gc   col 71  frame  slice  ... argument
+runtime_closure_captured_header_values.go:93	heap -> mixed
+	src  fmt.Sprintf("%g %g", real(value), imag(value)), "3 4")
+	goc  col 15  heap  runtime.newobject  struct_values__2_any__payload0_float64__payload1  [main.complexValues]
+	gc   col 14  frame  slice  ... argument
+	gc   col 28  heap  object  real(value)
+	gc   col 41  heap  object  imag(value)
+runtime_closure_captured_header_values.go:104	heap -> mixed
+	src  fmt.Sprintf("%g %g", real(escaping), imag(escaping)), "5 6")
+	goc  col 15  heap  runtime.newobject  struct_values__2_any__payload0_float64__payload1  [main.complexValues]
+	gc   col 14  frame  slice  ... argument
+	gc   col 28  heap  object  real(escaping)
+	gc   col 44  heap  object  imag(escaping)
+runtime_closure_captured_header_values.go:118	heap -> absent
+	src  return fmt.Sprint(readOnly)
+	goc  col 10  heap  runtime.newobject  1_any  [main.controls.func.117.13]
+runtime_closure_captured_header_values.go:122	heap -> frame
+	src  expect("read-only interface capture", observed+"/"+fmt.Sprint(readOnly), "42/42")
+	goc  col 53  heap  runtime.newobject  1_any  [main.controls]
+	gc   col 52  frame  object  observed + "/" + fmt.Sprint(... argument...)
+	gc   col 63  frame  slice  ... argument
+runtime_closure_captured_header_values.go:132	heap -> frame
+	src  expect("interface assigned by an escaping closure", fmt.Sprint(escaping), "42")
+	goc  col 54  heap  runtime.newobject  1_any  [main.controls]
+	gc   col 64  frame  slice  ... argument
+runtime_closure_captured_header_values.go:137	heap -> frame
+	src  expect("interface never captured", fmt.Sprint(uncaptured), "plain")
+	goc  col 37  heap  runtime.newobject  1_any  [main.controls]
+	gc   col 47  frame  slice  ... argument
+runtime_closure_captured_header_values.go:143	heap -> mixed
+	src  fmt.Sprintf("%g %g", real(plain), imag(plain)), "7 8")
+	goc  col 15  heap  runtime.newobject  struct_values__2_any__payload0_float64__payload1  [main.controls]
+	gc   col 14  frame  slice  ... argument
+	gc   col 28  heap  object  real(plain)
+	gc   col 41  heap  object  imag(plain)
+runtime_closure_captured_string.go:84	heap -> absent
+	src  fromCall = fmt.Sprint(value)
+	goc  col 14  heap  runtime.newobject  struct_values__1_any__payload0_int  [main.assignmentForms.func.83.16]
+runtime_closure_captured_string.go:94	heap -> frame
+	src  assignBytes([]byte{'a', 'z'})
+	goc  col 14  heap  runtime.newobject  2_byte  [main.assignmentForms]
+	gc   col 20  frame  slice  []byte{...}
+runtime_closure_captured_string.go:105	heap -> mixed
+	src  expect("tuple assignment", fmt.Sprintf("%d%s", tupleCount, tupleText), "1az")
+	goc  col 41  heap  runtime.newobject  struct_values__2_any__payload0_int__payload1_str  [main.assignmentForms]
+	gc   col 40  frame  slice  ... argument
+	gc   col 49  heap  object  tupleCount
+	gc   col 61  heap  object  tupleText
+runtime_closure_captured_string.go:126	heap -> absent
+	src  collected = collected + fmt.Sprint(value)
+	goc  col 27  heap  runtime.newobject  struct_values__1_any__payload0_int  [main.assignmentForms.func.125.13]
+runtime_closure_captured_string.go:222	heap -> absent
+	src  assigned = assigned + fmt.Sprint(value)
+	goc  col 25  heap  runtime.newobject  struct_values__1_any__payload0_int  [main.rangeOverFunction.rangefunc.221.2]
+runtime_closure_captured_string.go:229	heap -> absent
+	src  added += fmt.Sprint(value)
+	goc  col 12  heap  runtime.newobject  struct_values__1_any__payload0_int  [main.rangeOverFunction.rangefunc.228.2]
+runtime_closure_captured_string.go:245	heap -> mixed
+	src  expect("read-only capture", fmt.Sprintf("%d%s", length, readOnly), "1a")
+	goc  col 42  heap  runtime.newobject  struct_values__2_any__payload0_int__payload1_str  [main.controls]
+	gc   col 41  frame  slice  ... argument
+	gc   col 50  heap  object  length
+	gc   col 58  heap  object  "a"
+runtime_closure_captured_string.go:249	heap -> mixed
+	src  go func(suffix string) {
+	goc  col 2  heap  runtime.newobject  struct_code_uintptr__function_func_suffix_string  [main.controls]
+	goc  col 5  heap  runtime.newobject  struct_code_uintptr__capture0_unsafe_Pointer__ca  [main.controls]
+	gc   col 5  heap  object  func literal
+	gc   col 10  frame  object  suffix
+runtime_closure_captured_string.go:269	heap -> mixed
+	src  expect("captured slice", fmt.Sprint(texts), "[a z]")
+	goc  col 27  heap  runtime.newobject  struct_values__1_any__payload0___string  [main.controls]
+	gc   col 37  frame  slice  ... argument
+	gc   col 38  heap  object  texts
+runtime_closure_captured_string.go:283	heap -> mixed
+	src  expect("field of a captured struct", fmt.Sprintf("%s%d", state.text, state.count), "az1")
+	goc  col 51  heap  runtime.newobject  struct_values__2_any__payload0_string__payload1_  [main.controls]
+	gc   col 50  frame  slice  ... argument
+	gc   col 64  heap  object  state.text
+	gc   col 76  heap  object  state.count
+runtime_closure_captured_string.go:296	mixed -> mixed
+	src  return func(suffix string) { text = text + suffix }, func() string { return text }
+	goc  col 9  frame  runtime.newobject  struct_code_uintptr__capture0_unsafe_Pointer  [main.controls]
+	goc  col 9  heap  runtime.newobject  struct_code_uintptr__capture0_unsafe_Pointer  [main.stringPair]
+	goc  col 55  frame  runtime.newobject  struct_code_uintptr__capture0_unsafe_Pointer  [main.controls]
+	goc  col 55  heap  runtime.newobject  struct_code_uintptr__capture0_unsafe_Pointer  [main.stringPair]
+	gc   col 9  heap  object  func literal
+	gc   col 14  frame  object  suffix
+	gc   col 14  frame  object  suffix
+	gc   col 43  heap  object  text + suffix
+	gc   col 43  heap  object  text + suffix
+	gc   col 55  heap  object  func literal
+runtime_copy_interface_slice_gc.go:23	heap -> frame
+	src  destination := make([]interface{}, len(source))
+	goc  col 41  heap  runtime.makeslice  interface  [main.main]
+	gc   col 21  frame  slice  make([]interface {}, len(source))
+runtime_copy_string_to_bytes.go:4	heap -> frame
+	src  buffer := []byte{'x', 'x', 'x', 'x', 'x'}
+	goc  col 12  heap  runtime.newobject  5_byte  [main.main]
+	gc   col 18  frame  slice  []byte{...}
+runtime_core_types.go:21	heap -> frame
+	src  buckets := map[string]*bucket{
+	goc  col 13  heap  runtime.makemap  map_string__main_bucket  [main.main]
+	gc   col 31  frame  map  map[string]*bucket{...}
+runtime_debug_gc_controls.go:15	heap -> frame
+	src  values := make([]*int, 0, 128)
+	goc  col 28  heap  runtime.newobject  128__int  [main.main]
+	gc   col 16  frame  slice  make([]*int, 0, 128)
+runtime_debug_gc_controls.go:32	heap -> frame
+	src  runtime.KeepAlive(values)
+	goc  col 20  heap  runtime.newobject  int  [main.main]
+	gc   col 20  frame  object  values
+runtime_defer_argument_evaluation.go:10	heap -> absent
+	src  defer appendValue(&values, current)
+	goc  col 2  heap  runtime.newobject  struct_code_uintptr__argument0____int__argument1  [main.collect]
+runtime_defer_argument_evaluation.go:12	heap -> absent
+	src  defer appendValue(&values, current)
+	goc  col 2  heap  runtime.newobject  struct_code_uintptr__argument0____int__argument1  [main.collect]
+runtime_defer_method_value_order.go:12	heap -> frame
+	src  recorder := &deferMethodRecorder{}
+	goc  col 14  heap  runtime.newobject  main_deferMethodRecorder  [main.main]
+	gc   col 14  frame  object  &deferMethodRecorder{}
+runtime_defer_method_value_order.go:16	heap -> absent
+	src  defer record(1)
+	goc  col 3  heap  runtime.newobject  struct_code_uintptr__function_func_value_int___a  [main.main.func.15.2]
+runtime_defer_method_value_order.go:17	heap -> absent
+	src  defer recorder.Add(2)
+	goc  col 3  heap  runtime.newobject  struct_code_uintptr__function_func_value_int___a  [main.main.func.15.2]
+	goc  col 9  heap  runtime.newobject  struct_code_uintptr__receiver__main_deferMethodR  [main.main.func.15.2]
+runtime_defer_method_value_order.go:18	heap -> absent
+	src  defer record(3)
+	goc  col 3  heap  runtime.newobject  struct_code_uintptr__function_func_value_int___a  [main.main.func.15.2]
+runtime_defer_named_result_panic.go:5	heap -> frame
+	src  if recover() != "replace result" {
+	goc  col 19  heap  runtime.newobject  string  [main.computeNamedResult.func.4.8]
+	gc   col 19  frame  object  "replace result"
+runtime_defer_replace_panic.go:13	heap -> frame
+	src  if recovered != "replacement" {
+	goc  col 19  heap  runtime.newobject  string  [main.replacePanic.func.11.8]
+	gc   col 19  frame  object  "replacement"
+runtime_finalizer_basic.go:18	heap -> absent
+	src  value := &finalizable{
+	goc  col 12  heap  runtime.newobject  main_finalizable  [main.main.func.17.2]
+runtime_finalizer_basic.go:22	heap -> frame
+	src  runtime.SetFinalizer(value, func(item *finalizable) {
+	goc  col 31  heap  runtime.newobject  struct_code_uintptr__capture0_unsafe_Pointer  [main.main.func.17.2]
+	gc   col 36  frame  object  item
+runtime_finalizer_cleanup_order.go:14	heap -> absent
+	src  func registerFinalizerAndCleanup(events chan int) {
+	goc  col 1  heap  runtime.newobject  chan_int  [main.registerFinalizerAndCleanup]
+runtime_finalizer_cleanup_order.go:22	heap -> mixed
+	src  runtime.SetFinalizer(box, func(value *finalizerCleanupBox) {
+	goc  col 28  heap  runtime.newobject  struct_code_uintptr__capture0_unsafe_Pointer  [main.registerFinalizerAndCleanup]
+	gc   col 28  heap  object  func literal
+	gc   col 33  frame  object  value
+runtime_finalizer_dependency_order.go:13	heap -> absent
+	src  func registerDependentFinalizers(events chan int) {
+	goc  col 1  heap  runtime.newobject  chan_int  [main.registerDependentFinalizers]
+runtime_finalizer_dependency_order.go:19	heap -> mixed
+	src  runtime.SetFinalizer(child, func(value *finalizerDependencyNode) {
+	goc  col 30  heap  runtime.newobject  struct_code_uintptr__capture0_unsafe_Pointer  [main.registerDependentFinalizers]
+	gc   col 30  heap  object  func literal
+	gc   col 35  frame  object  value
+runtime_finalizer_dependency_order.go:22	heap -> mixed
+	src  runtime.SetFinalizer(parent, func(value *finalizerDependencyNode) {
+	goc  col 31  heap  runtime.newobject  struct_code_uintptr__capture0_unsafe_Pointer  [main.registerDependentFinalizers]
+	gc   col 31  heap  object  func literal
+	gc   col 36  frame  object  value
+runtime_finalizer_stack_growth.go:35	heap -> absent
+	src  func allocateFinalizerAfterStackGrowth(done chan int, depth int, chain *finalizerStackBox) {
+	goc  col 1  heap  runtime.newobject  chan_int  [main.allocateFinalizerAfterStackGrowth]
+runtime_finalizer_stack_growth.go:41	heap -> mixed
+	src  runtime.SetFinalizer(chain, func(item *finalizerStackBox) {
+	goc  col 31  heap  runtime.newobject  struct_code_uintptr__capture0_unsafe_Pointer  [main.allocateFinalizerAfterStackGrowth]
+	gc   col 31  heap  object  func literal
+	gc   col 36  frame  object  item
+runtime_gc_assist_credit.go:85	heap -> absent
+	src  defer debug.SetGCPercent(previous)
+	goc  col 2  heap  runtime.newobject  struct_code_uintptr__function_func_percent_int__  [main.main]
+runtime_gc_assist_credit.go:98	heap -> absent
+	src  defer running.Done()
+	goc  col 10  heap  runtime.newobject  struct_code_uintptr__receiver__sync_WaitGroup  [main.main.func.97.6]
+runtime_gc_assist_stack_growth.go:37	heap -> absent
+	src  defer wait.Done()
+	goc  col 8  heap  runtime.newobject  struct_code_uintptr__receiver__sync_WaitGroup  [main.assistWorker]
+runtime_gc_assist_stack_growth.go:56	heap -> absent
+	src  go assistWorker(&wait)
+	goc  col 3  heap  runtime.newobject  struct_code_uintptr__argument0__sync_WaitGroup  [main.main]
+	goc  col 3  heap  runtime.newobject  struct_code_uintptr__argument0__sync_WaitGroup  [main.main.gointernal.funcvalue.main_main_func___func.83860b9e97d614a8]
+runtime_gc_checkmark.go:111	heap -> absent
+	src  defer debug.SetGCPercent(previous)
+	goc  col 2  heap  runtime.newobject  struct_code_uintptr__function_func_percent_int__  [main.main]
+runtime_gc_checkmark.go:129	heap -> absent
+	src  defer running.Done()
+	goc  col 10  heap  runtime.newobject  struct_code_uintptr__receiver__sync_WaitGroup  [main.main.func.128.6]
+runtime_gc_checkmark.go:158	heap -> absent
+	src  defer collecting.Done()
+	goc  col 9  heap  runtime.newobject  struct_code_uintptr__receiver__sync_WaitGroup  [main.main.func.157.5]
+runtime_gc_concurrent_mark.go:156	heap -> absent
+	src  defer debug.SetGCPercent(previous)
+	goc  col 2  heap  runtime.newobject  struct_code_uintptr__function_func_percent_int__  [main.main]
+runtime_gc_concurrent_mark.go:178	heap -> absent
+	src  defer running.Done()
+	goc  col 10  heap  runtime.newobject  struct_code_uintptr__receiver__sync_WaitGroup  [main.main.func.177.6]
+runtime_gc_concurrent_mark.go:193	heap -> absent
+	src  defer collecting.Done()
+	goc  col 9  heap  runtime.newobject  struct_code_uintptr__receiver__sync_WaitGroup  [main.main.func.192.5]
+runtime_gc_heap_growth_shrink.go:107	heap -> mixed
+	src  small = append(small, &resident{value: index, label: "transient"})
+	goc  col 25  heap  runtime.newobject  main_resident  [main.grow]
+	gc   col 17  frame  object  append
+	gc   col 25  heap  object  &resident{...}
+runtime_gc_heap_growth_shrink.go:140	heap -> absent
+	src  defer debug.SetGCPercent(previous)
+	goc  col 2  heap  runtime.newobject  struct_code_uintptr__function_func_percent_int__  [main.main]
+runtime_gc_mark_workers.go:117	heap -> frame
+	src  expected := make([]int, len(retained))
+	goc  col 30  heap  runtime.makeslice  int  [main.main]
+	gc   col 18  frame  slice  make([]int, len(retained))
+runtime_gc_mark_workers.go:126	heap -> absent
+	src  defer running.Done()
+	goc  col 10  heap  runtime.newobject  struct_code_uintptr__receiver__sync_WaitGroup  [main.main.func.125.6]
+runtime_gc_metadata_hugepages.go:104	heap -> absent
+	src  defer debug.SetGCPercent(previous)
+	goc  col 2  heap  runtime.newobject  struct_code_uintptr__function_func_percent_int__  [main.main]
+runtime_gc_scavenge_release.go:92	heap -> absent
+	src  defer debug.SetGCPercent(previous)
+	goc  col 2  heap  runtime.newobject  struct_code_uintptr__function_func_percent_int__  [main.main]
+runtime_gc_sweep_pacing.go:62	heap -> mixed
+	src  node := &medium{value: index, label: "medium-" + string(rune('a'+index%26))}
+	goc  col 11  heap  runtime.newobject  main_medium  [main.allocateMedium]
+	gc   col 11  heap  object  &medium{...}
+	gc   col 50  heap  object  "medium-" + string(rune(97 + index % 26))
+	gc   col 63  frame  object  string(rune(97 + index % 26))
+runtime_gc_sweep_pacing.go:154	heap -> absent
+	src  defer debug.SetGCPercent(previous)
+	goc  col 2  heap  runtime.newobject  struct_code_uintptr__function_func_percent_int__  [main.main]
+runtime_goexit_defer.go:15	heap -> absent
+	src  go worker(done)
+	goc  col 2  heap  runtime.newobject  struct_code_uintptr__argument0_chan_int  [main.main]
+runtime_goroutine_channel.go:9	heap -> absent
+	src  go worker(40, done)
+	goc  col 2  heap  runtime.newobject  struct_code_uintptr__argument0_int__argument1_ch  [main.main]
+runtime_goroutine_entry_stack_map.go:75	heap -> absent
+	src  defer wait.Done()
+	goc  col 8  heap  runtime.newobject  struct_code_uintptr__receiver__sync_WaitGroup  [main.seasonWorker]
+runtime_goroutine_entry_stack_map.go:84	heap -> absent
+	src  defer wait.Done()
+	goc  col 8  heap  runtime.newobject  struct_code_uintptr__receiver__sync_WaitGroup  [main.carry]
+runtime_goroutine_entry_stack_map.go:88	heap -> frame
+	src  next:  &link{index: index + 1},
+	goc  col 10  heap  runtime.newobject  main_link  [main.carry]
+	gc   col 10  frame  object  &link{...}
+runtime_goroutine_entry_stack_map.go:104	heap -> absent
+	src  go seasonWorker(&seasoning)
+	goc  col 4  heap  runtime.newobject  struct_code_uintptr__argument0__sync_WaitGroup  [main.main]
+runtime_goroutine_entry_stack_map.go:112	heap -> absent
+	src  go carry(index, &wait, results)
+	goc  col 4  heap  runtime.newobject  struct_code_uintptr__argument0_int__argument1__s  [main.main]
+runtime_interface_channel_gc.go:22	heap -> absent
+	src  go send(values)
+	goc  col 2  heap  runtime.newobject  struct_code_uintptr__argument0_chan_any  [main.main]
+runtime_interface_comparable_map.go:9	heap -> frame
+	src  table := map[interface{}]int{
+	goc  col 11  heap  runtime.makemap  map_interface___int  [main.main]
+	gc   col 30  frame  map  map[interface {}]int{...}
+runtime_interface_comparable_map.go:15	heap -> frame
+	src  total := table[comparableKey{name: "left", index: 1}]
+	goc  col 52  heap  runtime.newobject  main_comparableKey  [main.main]
+	gc   col 30  frame  object  comparableKey{...}
+runtime_interface_comparable_map.go:16	heap -> frame
+	src  total += table[comparableKey{name: "right", index: 2}]
+	goc  col 53  heap  runtime.newobject  main_comparableKey  [main.main]
+	gc   col 30  frame  object  comparableKey{...}
+runtime_interface_comparable_map.go:17	heap -> frame
+	src  delete(table, "extra")
+	goc  col 16  heap  runtime.newobject  string  [main.main]
+	gc   col 16  frame  object  "extra"
+runtime_interface_method_gc.go:23	heap -> frame
+	src  value := scorer(&scoreBox{
+	goc  col 18  heap  runtime.newobject  main_scoreBox  [main.main]
+	gc   col 18  frame  object  &scoreBox{...}
+runtime_interface_method_gc.go:25	heap -> frame
+	src  next:  &scoreBox{value: 25},
+	goc  col 10  heap  runtime.newobject  main_scoreBox  [main.main]
+	gc   col 10  frame  object  &scoreBox{...}
+runtime_interface_pointer_equality_gc.go:10	heap -> frame
+	src  node := &interfacePointerEqualityNode{value: 42}
+	goc  col 10  heap  runtime.newobject  main_interfacePointerEqualityNode  [main.main]
+	gc   col 10  frame  object  &interfacePointerEqualityNode{...}
+runtime_interface_to_interface.go:29	heap -> frame
+	src  var combined interfaceReadCloser = &interfaceResource{base: 31}
+	goc  col 37  heap  runtime.newobject  main_interfaceResource  [main.main]
+	gc   col 37  frame  object  &interfaceResource{...}
+runtime_keepalive_finalizer.go:36	heap -> absent
+	src  func allocateAndKeep(done chan int) {
+	goc  col 1  heap  runtime.newobject  chan_int  [main.allocateAndKeep]
+runtime_keepalive_finalizer.go:38	heap -> mixed
+	src  runtime.SetFinalizer(box, func(item *keepAliveBox) {
+	goc  col 28  heap  runtime.newobject  struct_code_uintptr__capture0_unsafe_Pointer  [main.allocateAndKeep]
+	gc   col 28  heap  object  func literal
+	gc   col 33  frame  object  item
+runtime_keepalive_stack_root.go:61	heap -> frame
+	src  next:  &keptItem{index: index + 1},
+	goc  col 10  heap  runtime.newobject  main_keptItem  [main.keepStackItem]
+	gc   col 10  frame  object  &keptItem{...}
+runtime_keepalive_stack_root.go:78	heap -> absent
+	src  go keepStackItem(index, results)
+	goc  col 3  heap  runtime.newobject  struct_code_uintptr__argument0_int__argument1_ch  [main.main]
+runtime_loop_closure_gc.go:8	heap -> absent
+	src  value := index * index
+	goc  col 3  heap  runtime.newobject  int  [main.main]
+runtime_loop_closure_gc.go:9	heap -> mixed
+	src  functions = append(functions, func() int {
+	goc  col 33  heap  runtime.newobject  struct_code_uintptr__capture0_unsafe_Pointer  [main.main]
+	gc   col 21  frame  object  append
+	gc   col 33  heap  object  func literal
+runtime_loopvar_address_gc.go:26	heap -> mixed
+	src  panic(fmt.Sprint("loop variable address ", index, " observed ", *pointer))
+	goc  col 10  heap  runtime.newobject  string  [main.main]
+	goc  col 10  heap  runtime.newobject  struct_values__4_any__payload0_string__payload1_  [main.main]
+	gc   col 20  heap  object  fmt.Sprint(... argument...)
+	gc   col 20  frame  slice  ... argument
+	gc   col 21  heap  object  "loop variable address "
+	gc   col 47  heap  object  index
+	gc   col 54  heap  object  " observed "
+	gc   col 68  heap  object  *pointer
+runtime_loopvar_address_gc.go:49	heap -> mixed
+	src  item.label = fmt.Sprint("n", item.value)
+	goc  col 16  heap  runtime.newobject  struct_values__2_any__payload0_string__payload1_  [main.main]
+	gc   col 26  frame  slice  ... argument
+	gc   col 27  heap  object  "n"
+	gc   col 36  heap  object  item.value
+runtime_loopvar_address_gc.go:56	heap -> mixed
+	src  if item.value != index || item.label != fmt.Sprint("n", index) {
+	goc  col 43  heap  runtime.newobject  struct_values__2_any__payload0_string__payload1_  [main.main]
+	gc   col 53  frame  slice  ... argument
+	gc   col 54  heap  object  "n"
+	gc   col 59  heap  object  index
+runtime_loopvar_address_gc.go:57	heap -> mixed
+	src  panic(fmt.Sprint("aggregate loop variable ", index, " observed ", item.value, item.label))
+	goc  col 10  heap  runtime.newobject  string  [main.main]
+	goc  col 10  heap  runtime.newobject  struct_values__5_any__payload0_string__payload1_  [main.main]
+	gc   col 20  heap  object  fmt.Sprint(... argument...)
+	gc   col 20  frame  slice  ... argument
+	gc   col 21  heap  object  "aggregate loop variable "
+	gc   col 49  heap  object  index
+	gc   col 56  heap  object  " observed "
+	gc   col 74  heap  object  item.value
+	gc   col 86  heap  object  item.label
+runtime_loopvar_address_gc.go:65	heap -> mixed
+	src  text := fmt.Sprint("closure-", index)
+	goc  col 3  heap  runtime.newobject  string  [main.main]
+	goc  col 11  heap  runtime.newobject  struct_values__2_any__payload0_string__payload1_  [main.main]
+	gc   col 21  frame  slice  ... argument
+	gc   col 22  heap  object  "closure-"
+	gc   col 34  heap  object  index
+runtime_loopvar_address_gc.go:66	heap -> mixed
+	src  closures = append(closures, func() string { return text + "-" + fmt.Sprint(index) })
+	goc  col 31  heap  runtime.newobject  struct_code_uintptr__capture0_unsafe_Pointer__ca  [main.main]
+	goc  col 67  heap  runtime.newobject  struct_values__1_any__payload0_int  [main.main.func.66.31]
+	gc   col 20  frame  object  append
+	gc   col 31  heap  object  func literal
+	gc   col 65  heap  object  text + "-" + fmt.Sprint(... argument...)
+	gc   col 77  frame  slice  ... argument
+	gc   col 78  heap  object  index
+runtime_loopvar_address_gc.go:72	heap -> mixed
+	src  want := fmt.Sprint("closure-", index, "-", index)
+	goc  col 11  heap  runtime.newobject  struct_values__4_any__payload0_string__payload1_  [main.main]
+	gc   col 21  frame  slice  ... argument
+	gc   col 22  heap  object  "closure-"
+	gc   col 34  heap  object  index
+	gc   col 41  heap  object  "-"
+	gc   col 46  heap  object  index
+runtime_loopvar_goroutine_defer.go:26	heap -> absent
+	src  defer group.Done()
+	goc  col 10  heap  runtime.newobject  struct_code_uintptr__receiver__sync_WaitGroup  [main.goroutinesSeeTheirOwnIteration.func.25.6]
+runtime_loopvar_goroutine_defer.go:31	heap -> mixed
+	src  if fmt.Sprint(squares) != "[0 1 4 9]" {
+	goc  col 5  heap  runtime.newobject  struct_values__1_any__payload0___int  [main.goroutinesSeeTheirOwnIteration]
+	gc   col 15  frame  slice  ... argument
+	gc   col 16  heap  object  squares
+runtime_loopvar_goroutine_defer.go:32	heap -> mixed
+	src  panic("goroutines shared one loop variable: " + fmt.Sprint(squares))
+	goc  col 51  heap  runtime.newobject  string  [main.goroutinesSeeTheirOwnIteration]
+	goc  col 51  heap  runtime.newobject  struct_values__1_any__payload0___int  [main.goroutinesSeeTheirOwnIteration]
+	gc   col 49  heap  object  "goroutines shared one loop variable: " + fmt.Sprint(... argument...)
+	gc   col 49  heap  object  "goroutines shared one loop variable: " + fmt.Sprint(... argument...)
+	gc   col 61  frame  slice  ... argument
+	gc   col 62  heap  object  squares
+runtime_loopvar_goroutine_defer.go:38	mixed -> frame
+	src  for key, value := range map[string]int{"a": 1, "b": 2, "c": 3} {
+	goc  col 26  heap  runtime.makemap  map_string_int  [main.goroutinesSeeTheirOwnIteration]
+	goc  col 62  frame  runtime.newobject  int  [main.goroutinesSeeTheirOwnIteration]
+	goc  col 62  frame  runtime.newobject  string  [main.goroutinesSeeTheirOwnIteration]
+	gc   col 40  frame  map  map[string]int{...}
+runtime_loopvar_goroutine_defer.go:41	heap -> absent
+	src  defer group.Done()
+	goc  col 10  heap  runtime.newobject  struct_code_uintptr__receiver__sync_WaitGroup  [main.goroutinesSeeTheirOwnIteration.func.40.6]
+runtime_loopvar_goroutine_defer.go:43	heap -> mixed
+	src  seen = append(seen, key+fmt.Sprint(value))
+	goc  col 28  heap  runtime.newobject  struct_values__1_any__payload0_int  [main.goroutinesSeeTheirOwnIteration.func.40.6]
+	gc   col 17  heap  object  append
+	gc   col 27  heap  object  key + fmt.Sprint(... argument...)
+	gc   col 38  frame  slice  ... argument
+	gc   col 39  heap  object  value
+runtime_loopvar_goroutine_defer.go:49	heap -> mixed
+	src  if fmt.Sprint(seen) != "[a1 b2 c3]" {
+	goc  col 5  heap  runtime.newobject  struct_values__1_any__payload0___string  [main.goroutinesSeeTheirOwnIteration]
+	gc   col 15  frame  slice  ... argument
+	gc   col 16  heap  object  seen
+runtime_loopvar_goroutine_defer.go:50	heap -> mixed
+	src  panic("goroutines shared one map range variable: " + fmt.Sprint(seen))
+	goc  col 56  heap  runtime.newobject  string  [main.goroutinesSeeTheirOwnIteration]
+	goc  col 56  heap  runtime.newobject  struct_values__1_any__payload0___string  [main.goroutinesSeeTheirOwnIteration]
+	gc   col 54  heap  object  "goroutines shared one map range variable: " + fmt.Sprint(... argument...)
+	gc   col 54  heap  object  "goroutines shared one map range variable: " + fmt.Sprint(... argument...)
+	gc   col 66  frame  slice  ... argument
+	gc   col 67  heap  object  seen
+runtime_loopvar_goroutine_defer.go:57	heap -> mixed
+	src  if fmt.Sprint(order) != "[2 1 0]" {
+	goc  col 6  heap  runtime.newobject  struct_values__1_any__payload0___int  [main.deferredClosuresSeeTheirOwnIteration.func.56.8]
+	gc   col 16  frame  slice  ... argument
+	gc   col 17  heap  object  order
+runtime_loopvar_goroutine_defer.go:58	heap -> mixed
+	src  panic("deferred closures shared one loop variable: " + fmt.Sprint(order))
+	goc  col 59  heap  runtime.newobject  string  [main.deferredClosuresSeeTheirOwnIteration.func.56.8]
+	goc  col 59  heap  runtime.newobject  struct_values__1_any__payload0___int  [main.deferredClosuresSeeTheirOwnIteration.func.56.8]
+	gc   col 57  heap  object  "deferred closures shared one loop variable: " + fmt.Sprint(... argument...)
+	gc   col 57  heap  object  "deferred closures shared one loop variable: " + fmt.Sprint(... argument...)
+	gc   col 69  frame  slice  ... argument
+	gc   col 70  heap  object  order
+runtime_loopvar_goroutine_defer.go:71	heap -> mixed
+	src  if fmt.Sprint(order) != "[c b a]" {
+	goc  col 6  heap  runtime.newobject  struct_values__1_any__payload0___string  [main.deferredRangeClosuresSeeTheirOwnIteration.func.70.8]
+	gc   col 16  frame  slice  ... argument
+	gc   col 17  heap  object  order
+runtime_loopvar_goroutine_defer.go:72	heap -> mixed
+	src  panic("deferred closures shared one range variable: " + fmt.Sprint(order))
+	goc  col 60  heap  runtime.newobject  string  [main.deferredRangeClosuresSeeTheirOwnIteration.func.70.8]
+	goc  col 60  heap  runtime.newobject  struct_values__1_any__payload0___string  [main.deferredRangeClosuresSeeTheirOwnIteration.func.70.8]
+	gc   col 58  heap  object  "deferred closures shared one range variable: " + fmt.Sprint(... argument...)
+	gc   col 58  heap  object  "deferred closures shared one range variable: " + fmt.Sprint(... argument...)
+	gc   col 70  frame  slice  ... argument
+	gc   col 71  heap  object  order
+runtime_loopvar_goroutine_defer.go:93	heap -> mixed
+	src  if fmt.Sprint(order) != "[1 0 11 10]" {
+	goc  col 5  heap  runtime.newobject  struct_values__1_any__payload0___int  [main.nestedDefersSeeTheirOwnIteration]
+	gc   col 15  frame  slice  ... argument
+	gc   col 16  heap  object  order
+runtime_loopvar_goroutine_defer.go:94	heap -> mixed
+	src  panic("nested defers shared one loop variable: " + fmt.Sprint(order))
+	goc  col 54  heap  runtime.newobject  string  [main.nestedDefersSeeTheirOwnIteration]
+	goc  col 54  heap  runtime.newobject  struct_values__1_any__payload0___int  [main.nestedDefersSeeTheirOwnIteration]
+	gc   col 52  heap  object  "nested defers shared one loop variable: " + fmt.Sprint(... argument...)
+	gc   col 52  heap  object  "nested defers shared one loop variable: " + fmt.Sprint(... argument...)
+	gc   col 64  frame  slice  ... argument
+	gc   col 65  heap  object  order
+runtime_loopvar_range.go:15	heap -> mixed
+	src  captured = append(captured, func() string { return fmt.Sprint(index) })
+	goc  col 31  heap  runtime.newobject  struct_code_uintptr__capture0_unsafe_Pointer  [main.main]
+	goc  col 54  heap  runtime.newobject  struct_values__1_any__payload0_int  [main.main.func.15.31]
+	gc   col 20  frame  object  append
+	gc   col 31  heap  object  func literal
+	gc   col 64  frame  slice  ... argument
+	gc   col 65  heap  object  index
+runtime_loopvar_range.go:23	heap -> mixed
+	src  captured = append(captured, func() string { return fmt.Sprint(index) + letter })
+	goc  col 31  heap  runtime.newobject  struct_code_uintptr__capture0_unsafe_Pointer__ca  [main.main]
+	goc  col 54  heap  runtime.newobject  struct_values__1_any__payload0_int  [main.main.func.23.31]
+	gc   col 20  frame  object  append
+	gc   col 31  heap  object  func literal
+	gc   col 64  frame  slice  ... argument
+	gc   col 65  heap  object  index
+	gc   col 72  heap  object  fmt.Sprint(... argument...) + letter
+runtime_loopvar_range.go:31	heap -> mixed
+	src  captured = append(captured, func() string { return fmt.Sprint(index, value) })
+	goc  col 31  heap  runtime.newobject  struct_code_uintptr__capture0_unsafe_Pointer__ca  [main.main]
+	goc  col 54  heap  runtime.newobject  struct_values__2_any__payload0_int__payload1_int  [main.main.func.31.31]
+	gc   col 20  frame  object  append
+	gc   col 31  heap  object  func literal
+	gc   col 64  frame  slice  ... argument
+	gc   col 65  heap  object  index
+	gc   col 72  heap  object  value
+runtime_loopvar_range.go:39	heap -> mixed
+	src  captured = append(captured, func() string { return fmt.Sprint(offset) + string(letter) })
+	goc  col 31  heap  runtime.newobject  struct_code_uintptr__capture0_unsafe_Pointer__ca  [main.main]
+	goc  col 54  heap  runtime.newobject  struct_values__1_any__payload0_int  [main.main.func.39.31]
+	gc   col 20  frame  object  append
+	gc   col 31  heap  object  func literal
+	gc   col 64  frame  slice  ... argument
+	gc   col 65  heap  object  offset
+	gc   col 73  heap  object  fmt.Sprint(... argument...) + string(letter)
+	gc   col 82  frame  object  string(letter)
+runtime_loopvar_range.go:46	heap -> frame
+	src  counts := map[string]int{"a": 1, "b": 2, "c": 3}
+	goc  col 12  heap  runtime.makemap  map_string_int  [main.main]
+	gc   col 26  frame  map  map[string]int{...}
+runtime_loopvar_range.go:48	heap -> mixed
+	src  captured = append(captured, func() string { return key + fmt.Sprint(count) })
+	goc  col 31  heap  runtime.newobject  struct_code_uintptr__capture0_unsafe_Pointer__ca  [main.main]
+	goc  col 60  heap  runtime.newobject  struct_values__1_any__payload0_int  [main.main.func.48.31]
+	gc   col 20  frame  object  append
+	gc   col 31  heap  object  func literal
+	gc   col 58  heap  object  key + fmt.Sprint(... argument...)
+	gc   col 70  frame  slice  ... argument
+	gc   col 71  heap  object  count
+runtime_loopvar_range.go:61	heap -> mixed
+	src  captured = append(captured, func() string { return fmt.Sprint(value) })
+	goc  col 31  heap  runtime.newobject  struct_code_uintptr__capture0_unsafe_Pointer  [main.main]
+	goc  col 54  heap  runtime.newobject  struct_values__1_any__payload0_int  [main.main.func.61.31]
+	gc   col 20  frame  object  append
+	gc   col 31  heap  object  func literal
+	gc   col 64  frame  slice  ... argument
+	gc   col 65  heap  object  value
+runtime_loopvar_range.go:69	heap -> mixed
+	src  captured = append(captured, func() string { return fmt.Sprint(value) })
+	goc  col 31  heap  runtime.newobject  struct_code_uintptr__capture0_unsafe_Pointer  [main.main.rangefunc.68.2]
+	goc  col 54  heap  runtime.newobject  struct_values__1_any__payload0_int  [main.main.func.69.31]
+	gc   col 64  frame  slice  ... argument
+	gc   col 65  heap  object  value
+runtime_loopvar_range.go:77	heap -> mixed
+	src  captured = append(captured, func() string { return fmt.Sprint(index) + name })
+	goc  col 31  heap  runtime.newobject  struct_code_uintptr__capture0_unsafe_Pointer__ca  [main.main.rangefunc.76.2]
+	goc  col 54  heap  runtime.newobject  struct_values__1_any__payload0_int  [main.main.func.77.31]
+	gc   col 64  frame  slice  ... argument
+	gc   col 65  heap  object  index
+	gc   col 72  heap  object  fmt.Sprint(... argument...) + name
+runtime_loopvar_range.go:112	heap -> frame
+	src  values := make([]string, 0, len(closures))
+	goc  col 34  heap  runtime.makeslice  string  [main.sorted]
+	gc   col 16  frame  slice  make([]string, 0, len(closures))
+runtime_loopvar_shared_scope.go:15	heap -> mixed
+	src  captured = append(captured, func() int { return shared })
+	goc  col 31  heap  runtime.newobject  struct_code_uintptr__capture0_unsafe_Pointer  [main.main]
+	gc   col 20  frame  object  append
+	gc   col 31  heap  object  func literal
+runtime_loopvar_shared_scope.go:25	heap -> mixed
+	src  captured = append(captured, func() int { return index + len(letter) })
+	goc  col 31  heap  runtime.newobject  struct_code_uintptr__capture0_unsafe_Pointer__ca  [main.main]
+	gc   col 20  frame  object  append
+	gc   col 31  heap  object  func literal
+runtime_loopvar_shared_scope.go:31	heap -> mixed
+	src  panic("an assigning range clause left the wrong final values: " + fmt.Sprint(index, letter))
+	goc  col 69  heap  runtime.newobject  string  [main.main]
+	goc  col 69  heap  runtime.newobject  struct_values__2_any__payload0_int__payload1_str  [main.main]
+	gc   col 67  heap  object  "an assigning range clause left the wrong final values: " + fmt.Sprint(... argument...)
+	gc   col 67  heap  object  "an assigning range clause left the wrong final values: " + fmt.Sprint(... argument...)
+	gc   col 79  frame  slice  ... argument
+	gc   col 80  heap  object  index
+	gc   col 87  heap  object  letter
+runtime_loopvar_shared_scope.go:41	heap -> mixed
+	src  visited += fmt.Sprint(position)
+	goc  col 14  heap  runtime.newobject  struct_values__1_any__payload0_int  [main.main]
+	gc   col 24  frame  slice  ... argument
+	gc   col 25  heap  object  position
+runtime_loopvar_shared_scope.go:52	heap -> mixed
+	src  visited += fmt.Sprint(position)
+	goc  col 14  heap  runtime.newobject  struct_values__1_any__payload0_int  [main.main]
+	gc   col 24  frame  slice  ... argument
+	gc   col 25  heap  object  position
+runtime_loopvar_shared_scope.go:63	heap -> mixed
+	src  visited += fmt.Sprint(offset) + string(letter)
+	goc  col 14  heap  runtime.newobject  struct_values__1_any__payload0_int  [main.main]
+	gc   col 24  frame  slice  ... argument
+	gc   col 25  heap  object  offset
+	gc   col 33  heap  object  fmt.Sprint(... argument...) + string(letter)
+	gc   col 42  frame  object  string(letter)
+runtime_loopvar_shared_scope.go:76	heap -> mixed
+	src  text += fmt.Sprint(closure())
+	goc  col 11  heap  runtime.newobject  struct_values__1_any__payload0_int  [main.collect]
+	gc   col 21  frame  slice  ... argument
+	gc   col 29  heap  object  closure()
+runtime_loopvar_three_clause.go:11	heap -> mixed
+	src  captured = append(captured, func() int { return index })
+	goc  col 31  heap  runtime.newobject  struct_code_uintptr__capture0_unsafe_Pointer  [main.main]
+	gc   col 20  frame  object  append
+	gc   col 31  heap  object  func literal
+runtime_loopvar_three_clause.go:19	heap -> mixed
+	src  captured = append(captured, func() int { return first*100 + second })
+	goc  col 31  heap  runtime.newobject  struct_code_uintptr__capture0_unsafe_Pointer__ca  [main.main]
+	gc   col 20  frame  object  append
+	gc   col 31  heap  object  func literal
+runtime_loopvar_three_clause.go:30	heap -> mixed
+	src  captured = append(captured, func() int { return index })
+	goc  col 31  heap  runtime.newobject  struct_code_uintptr__capture0_unsafe_Pointer  [main.main]
+	gc   col 20  frame  object  append
+	gc   col 31  heap  object  func literal
+runtime_loopvar_three_clause.go:39	heap -> mixed
+	src  captured = append(captured, func() int { index++; return index })
+	goc  col 31  heap  runtime.newobject  struct_code_uintptr__capture0_unsafe_Pointer  [main.main]
+	gc   col 20  frame  object  append
+	gc   col 31  heap  object  func literal
+runtime_loopvar_three_clause.go:52	heap -> mixed
+	src  captured = append(captured, func() int { return index })
+	goc  col 31  heap  runtime.newobject  struct_code_uintptr__capture0_unsafe_Pointer  [main.main]
+	gc   col 20  frame  object  append
+	gc   col 31  heap  object  func literal
+runtime_loopvar_three_clause.go:64	heap -> mixed
+	src  captured = append(captured, func() int { return index })
+	goc  col 31  heap  runtime.newobject  struct_code_uintptr__capture0_unsafe_Pointer  [main.main]
+	gc   col 20  frame  object  append
+	gc   col 31  heap  object  func literal
+runtime_loopvar_three_clause.go:76	heap -> mixed
+	src  captured = append(captured, func() int { return index })
+	goc  col 31  heap  runtime.newobject  struct_code_uintptr__capture0_unsafe_Pointer  [main.main]
+	gc   col 20  frame  object  append
+	gc   col 31  heap  object  func literal
+runtime_loopvar_three_clause.go:86	heap -> absent
+	src  for inner := 0; inner < 3; inner++ {
+	goc  col 7  heap  runtime.newobject  int  [main.main]
+runtime_loopvar_three_clause.go:88	heap -> mixed
+	src  captured = append(captured, func() int { return index*10 + inner })
+	goc  col 33  heap  runtime.newobject  struct_code_uintptr__capture0_unsafe_Pointer__ca  [main.main]
+	gc   col 22  frame  object  append
+	gc   col 33  heap  object  func literal
+runtime_loopvar_three_clause.go:104	heap -> mixed
+	src  text += fmt.Sprint(closure())
+	goc  col 11  heap  runtime.newobject  struct_values__1_any__payload0_int  [main.collect]
+	gc   col 21  frame  slice  ... argument
+	gc   col 29  heap  object  closure()
+runtime_loopvar_value_shapes.go:18	heap -> mixed
+	src  captured = append(captured, func() string { return text })
+	goc  col 31  heap  runtime.newobject  struct_code_uintptr__capture0_unsafe_Pointer  [main.main]
+	gc   col 20  frame  object  append
+	gc   col 31  heap  object  func literal
+runtime_loopvar_value_shapes.go:26	heap -> mixed
+	src  captured = append(captured, func() string { return fmt.Sprint(boxed) })
+	goc  col 31  heap  runtime.newobject  struct_code_uintptr__capture0_unsafe_Pointer  [main.main]
+	goc  col 54  heap  runtime.newobject  1_any  [main.main.func.26.31]
+	gc   col 20  frame  object  append
+	gc   col 31  heap  object  func literal
+	gc   col 64  frame  slice  ... argument
+runtime_loopvar_value_shapes.go:34	heap -> mixed
+	src  captured = append(captured, func() string { return fmt.Sprint(numbers) })
+	goc  col 31  heap  runtime.newobject  struct_code_uintptr__capture0_unsafe_Pointer  [main.main]
+	goc  col 54  heap  runtime.newobject  struct_values__1_any__payload0___int  [main.main.func.34.31]
+	gc   col 20  frame  object  append
+	gc   col 31  heap  object  func literal
+	gc   col 64  frame  slice  ... argument
+	gc   col 65  heap  object  numbers
+runtime_loopvar_value_shapes.go:41	mixed -> absent
+	src  for point := (coordinate{x: 0, y: 9}); point.x < 3; point.x++ {
+	goc  col 6  frame  runtime.newobject  main_coordinate  [main.main]
+	goc  col 6  heap  runtime.newobject  main_coordinate  [main.main]
+runtime_loopvar_value_shapes.go:42	heap -> mixed
+	src  captured = append(captured, func() string { return fmt.Sprint(point.x, point.y) })
+	goc  col 31  heap  runtime.newobject  struct_code_uintptr__capture0_unsafe_Pointer  [main.main]
+	goc  col 54  heap  runtime.newobject  struct_values__2_any__payload0_int__payload1_int  [main.main.func.42.31]
+	gc   col 20  frame  object  append
+	gc   col 31  heap  object  func literal
+	gc   col 64  frame  slice  ... argument
+	gc   col 70  heap  object  point.x
+	gc   col 79  heap  object  point.y
+runtime_loopvar_value_shapes.go:49	mixed -> absent
+	src  for pair := ([2]int{0, 5}); pair[0] < 3; pair[0]++ {
+	goc  col 6  frame  runtime.newobject  2_int  [main.main]
+	goc  col 6  heap  runtime.newobject  2_int  [main.main]
+runtime_loopvar_value_shapes.go:50	heap -> mixed
+	src  captured = append(captured, func() string { return fmt.Sprint(pair[0], pair[1]) })
+	goc  col 31  heap  runtime.newobject  struct_code_uintptr__capture0_unsafe_Pointer  [main.main]
+	goc  col 54  heap  runtime.newobject  struct_values__2_any__payload0_int__payload1_int  [main.main.func.50.31]
+	gc   col 20  frame  object  append
+	gc   col 31  heap  object  func literal
+	gc   col 64  frame  slice  ... argument
+	gc   col 69  heap  object  pair[0]
+	gc   col 78  heap  object  pair[1]
+runtime_loopvar_value_shapes.go:57	mixed -> frame
+	src  for _, point := range []coordinate{{1, 2}, {3, 4}} {
+	goc  col 49  frame  runtime.newobject  main_coordinate  [main.main]
+	goc  col 49  heap  runtime.newobject  main_coordinate  [main.main]
+	gc   col 36  frame  slice  []coordinate{...}
+runtime_loopvar_value_shapes.go:58	heap -> mixed
+	src  captured = append(captured, func() string { return fmt.Sprint(point.x, point.y) })
+	goc  col 31  heap  runtime.newobject  struct_code_uintptr__capture0_unsafe_Pointer  [main.main]
+	goc  col 54  heap  runtime.newobject  struct_values__2_any__payload0_int__payload1_int  [main.main.func.58.31]
+	gc   col 20  frame  object  append
+	gc   col 31  heap  object  func literal
+	gc   col 64  frame  slice  ... argument
+	gc   col 70  heap  object  point.x
+	gc   col 79  heap  object  point.y
+runtime_loopvar_value_shapes.go:65	heap -> mixed
+	src  for _, boxed := range []any{1, "two", true} {
+	goc  col 30  heap  runtime.newobject  int  [main.main]
+	goc  col 33  heap  runtime.newobject  string  [main.main]
+	goc  col 40  heap  runtime.newobject  bool  [main.main]
+	gc   col 29  frame  slice  []any{...}
+	gc   col 30  heap  object  1
+	gc   col 33  heap  object  "two"
+	gc   col 40  heap  object  true
+runtime_loopvar_value_shapes.go:66	heap -> mixed
+	src  captured = append(captured, func() string { return fmt.Sprint(boxed) })
+	goc  col 31  heap  runtime.newobject  struct_code_uintptr__capture0_unsafe_Pointer  [main.main]
+	goc  col 54  heap  runtime.newobject  1_any  [main.main.func.66.31]
+	gc   col 20  frame  object  append
+	gc   col 31  heap  object  func literal
+	gc   col 64  frame  slice  ... argument
+runtime_loopvar_value_shapes.go:74	heap -> mixed
+	src  captured = append(captured, func() string { return fmt.Sprint(numbers) })
+	goc  col 31  heap  runtime.newobject  struct_code_uintptr__capture0_unsafe_Pointer  [main.main]
+	goc  col 54  heap  runtime.newobject  struct_values__1_any__payload0___int  [main.main.func.74.31]
+	gc   col 20  frame  object  append
+	gc   col 31  heap  object  func literal
+	gc   col 64  frame  slice  ... argument
+	gc   col 65  heap  object  numbers
+runtime_loopvar_value_shapes.go:81	mixed -> frame
+	src  for _, pair := range [][2]int{{1, 2}, {3, 4}} {
+	goc  col 44  frame  runtime.newobject  2_int  [main.main]
+	goc  col 44  heap  runtime.newobject  2_int  [main.main]
+	gc   col 31  frame  slice  [][2]int{...}
+runtime_loopvar_value_shapes.go:82	heap -> mixed
+	src  captured = append(captured, func() string { return fmt.Sprint(pair[0], pair[1]) })
+	goc  col 31  heap  runtime.newobject  struct_code_uintptr__capture0_unsafe_Pointer  [main.main]
+	goc  col 54  heap  runtime.newobject  struct_values__2_any__payload0_int__payload1_int  [main.main.func.82.31]
+	gc   col 20  frame  object  append
+	gc   col 31  heap  object  func literal
+	gc   col 64  frame  slice  ... argument
+	gc   col 69  heap  object  pair[0]
+	gc   col 78  heap  object  pair[1]
+runtime_many_defers_stack.go:18	heap -> absent
+	src  total := 0
+	goc  col 2  heap  runtime.newobject  int  [main.main]
+runtime_many_goroutines_gc.go:14	heap -> absent
+	src  defer wait.Done()
+	goc  col 8  heap  runtime.newobject  struct_code_uintptr__receiver__sync_WaitGroup  [main.worker]
+runtime_many_goroutines_gc.go:18	heap -> frame
+	src  next:  &item{index: index + 1},
+	goc  col 10  heap  runtime.newobject  main_item  [main.worker]
+	gc   col 10  frame  object  &item{...}
+runtime_many_goroutines_gc.go:33	heap -> absent
+	src  go worker(index, &wait, results)
+	goc  col 3  heap  runtime.newobject  struct_code_uintptr__argument0_int__argument1__s  [main.main]
+runtime_map_clear.go:4	heap -> frame
+	src  counts := map[string]int{
+	goc  col 12  heap  runtime.makemap  map_string_int  [main.main]
+	gc   col 26  frame  map  map[string]int{...}
+runtime_map_delete_iter_gc.go:11	heap -> frame
+	src  values := make(map[int]*payload)
+	goc  col 12  heap  runtime.makemap  map_int__main_payload  [main.main]
+	gc   col 16  frame  map  make(map[int]*payload)
+runtime_map_growth_gc.go:12	heap -> frame
+	src  values := make(map[int]*entry)
+	goc  col 12  heap  runtime.makemap  map_int__main_entry  [main.main]
+	gc   col 16  frame  map  make(map[int]*entry)
+runtime_map_interface_keys_gc.go:11	heap -> frame
+	src  values := make(map[any]int)
+	goc  col 12  heap  runtime.makemap  map_any_int  [main.main]
+	gc   col 16  frame  map  make(map[any]int)
+runtime_map_interface_keys_gc.go:20	heap -> frame
+	src  total += values[key{name: "key", id: index}]
+	goc  col 40  heap  runtime.newobject  main_key  [main.main]
+	gc   col 22  frame  object  key{...}
+runtime_map_interface_values_gc.go:11	heap -> frame
+	src  values := make(map[int]interface{})
+	goc  col 12  heap  runtime.makemap  map_int_interface  [main.main]
+	gc   col 16  frame  map  make(map[int]interface {})
+runtime_map_iter_delete_insert.go:4	heap -> frame
+	src  values := map[int]int{
+	goc  col 12  heap  runtime.makemap  map_int_int  [main.main]
+	gc   col 23  frame  map  map[int]int{...}
+runtime_map_pointer_keys.go:12	heap -> frame
+	src  values := map[*mapPointerKey]int{
+	goc  col 12  heap  runtime.makemap  map__main_mapPointerKey_int  [main.main]
+	gc   col 34  frame  map  map[*mapPointerKey]int{...}
+runtime_map_pointer_keys.go:27	heap -> frame
+	src  if values[&mapPointerKey{value: 17}] != 0 {
+	goc  col 12  heap  runtime.newobject  main_mapPointerKey  [main.main]
+	gc   col 12  frame  object  &mapPointerKey{...}
+runtime_map_pointer_values_gc.go:11	heap -> frame
+	src  values := make(map[int]*mapPointerBox)
+	goc  col 12  heap  runtime.makemap  map_int__main_mapPointerBox  [main.main]
+	gc   col 16  frame  map  make(map[int]*mapPointerBox)
+runtime_map_range_delete_all.go:4	heap -> frame
+	src  values := make(map[int]int)
+	goc  col 12  heap  runtime.makemap  map_int_int  [main.main]
+	gc   col 16  frame  map  make(map[int]int)
+runtime_map_range_insert_growth.go:4	heap -> frame
+	src  values := make(map[int]int)
+	goc  col 12  heap  runtime.makemap  map_int_int  [main.main]
+	gc   col 16  frame  map  make(map[int]int)
+runtime_map_struct_value_replace.go:9	heap -> frame
+	src  items := map[string]mapStructValue{
+	goc  col 11  heap  runtime.makemap  map_string_main_mapStructValue  [main.main]
+	gc   col 36  frame  map  map[string]mapStructValue{...}
+runtime_method_expression.go:20	mixed -> absent
+	src  counter := methodExpressionCounter{base: 30}
+	goc  col 2  frame  runtime.newobject  main_methodExpressionCounter  [main.main]
+	goc  col 2  heap  runtime.newobject  main_methodExpressionCounter  [main.main]
+runtime_method_value_gc.go:16	heap -> frame
+	src  counter := &methodValueCounter{value: 17}
+	goc  col 13  heap  runtime.newobject  main_methodValueCounter  [main.main]
+	gc   col 13  frame  object  &methodValueCounter{...}
+runtime_opt_loop_carried_root.go:45	heap -> mixed
+	src  sink = append(sink, &node{value: index})
+	goc  col 23  heap  runtime.newobject  main_node  [main.churn]
+	gc   col 16  frame  object  append
+	gc   col 23  heap  object  &node{...}
+runtime_panic_deep_unwind.go:18	heap -> frame
+	src  if value != "deep panic" {
+	goc  col 15  heap  runtime.newobject  string  [main.main.func.16.8]
+	gc   col 15  frame  object  "deep panic"
+runtime_panic_error_recover.go:15	heap -> absent
+	src  defer p.recoverError(&err)
+	goc  col 2  heap  runtime.newobject  struct_code_uintptr__function_func_errp__error__  [main.errorRecoverParser.parse]
+	goc  col 8  heap  runtime.newobject  struct_code_uintptr__receiver__main_errorRecover  [main.errorRecoverParser.parse]
+runtime_panic_repanic.go:5	heap -> frame
+	src  if recover() != "first" {
+	goc  col 19  heap  runtime.newobject  string  [main.inner.func.4.8]
+	gc   col 19  frame  object  "first"
+runtime_panic_repanic.go:15	heap -> frame
+	src  if recover() != "second" {
+	goc  col 19  heap  runtime.newobject  string  [main.main.func.14.8]
+	gc   col 19  frame  object  "second"
+runtime_panic_stack_gc.go:19	heap -> frame
+	src  runtime.KeepAlive(scratch)
+	goc  col 20  heap  runtime.newobject  96_uintptr  [main.trigger]
+	gc   col 20  frame  object  scratch
+runtime_panic_stack_gc.go:23	heap -> frame
+	src  retained := &marker{value: 42}
+	goc  col 14  heap  runtime.newobject  main_marker  [main.main]
+	gc   col 14  frame  object  &marker{...}
+runtime_panic_stack_recover_gc.go:19	heap -> frame
+	src  runtime.KeepAlive(scratch)
+	goc  col 20  heap  runtime.newobject  80_uintptr  [main.descend]
+	gc   col 20  frame  object  scratch
+runtime_pinner_lifecycle.go:13	heap -> absent
+	src  func pinBox(pinner *runtime.Pinner, done chan int, value int) {
+	goc  col 1  heap  runtime.newobject  chan_int  [main.pinBox]
+runtime_pinner_lifecycle.go:15	heap -> mixed
+	src  runtime.SetFinalizer(box, func(finalized *pinnedBox) {
+	goc  col 28  heap  runtime.newobject  struct_code_uintptr__capture0_unsafe_Pointer  [main.pinBox]
+	gc   col 28  heap  object  func literal
+	gc   col 33  frame  object  finalized
+runtime_println_operand_separation.go:81	heap -> frame
+	src  assertShape("slice", capture(func() { println(make([]byte, 3, 5)) }), "[3/5]0x", "\n")
+	goc  col 64  heap  runtime.newobject  5_byte  [main.main.func.81.31]
+	gc   col 31  frame  object  func literal
+	gc   col 52  frame  slice  make([]byte, 3, 5)
+runtime_println_operand_separation.go:82	heap -> frame
+	src  assertShape("empty slice", capture(func() { println([]int{}) }), "[0/0]0x", "\n")
+	goc  col 54  heap  runtime.newobject  0_int  [main.main.func.82.37]
+	gc   col 37  frame  object  func literal
+	gc   col 59  frame  slice  []int{}
+runtime_println_operand_separation.go:84	heap -> frame
+	src  pointer := new(int)
+	goc  col 13  heap  runtime.newobject  int  [main.main]
+	gc   col 16  frame  object  new(int)
+runtime_println_operand_separation.go:87	heap -> mixed
+	src  assertShape("channel", capture(func() { println(make(chan int, 1)) }), "0x", "\n")
+	goc  col 65  heap  runtime.makechan  .goc.channel.type.int  [main.main.func.87.33]
+	gc   col 0  heap  chan  make(chan ...)  (synthesized: channels are always heap-allocated by cmd/compile)
+	gc   col 33  frame  object  func literal
+runtime_println_operand_separation.go:88	heap -> frame
+	src  assertShape("map", capture(func() { println(map[int]int{}) }), "0x", "\n")
+	goc  col 46  heap  runtime.makemap  map_int_int  [main.main.func.88.29]
+	gc   col 29  frame  object  func literal
+	gc   col 57  frame  map  map[int]int{}
+runtime_println_operand_separation.go:96	heap -> frame
+	src  empty = 42
+	goc  col 10  heap  runtime.newobject  int  [main.main]
+	gc   col 10  frame  object  42
+runtime_println_operand_separation.go:147	heap -> absent
+	src  defer os.Remove(file.Name())
+	goc  col 2  heap  runtime.newobject  struct_code_uintptr__function_func_name_string__  [main.capture]
+runtime_println_operand_separation.go:148	heap -> absent
+	src  defer file.Close()
+	goc  col 8  heap  runtime.newobject  struct_code_uintptr__receiver__os_File  [main.capture]
+runtime_println_operand_separation.go:168	heap -> frame
+	src  buffer := make([]byte, 8192)
+	goc  col 25  heap  runtime.newobject  8192_byte  [main.capture]
+	gc   col 16  frame  slice  make([]byte, 8192)
+runtime_println_statement_atomicity.go:36	heap -> absent
+	src  defer os.Remove(file.Name())
+	goc  col 2  heap  runtime.newobject  struct_code_uintptr__function_func_name_string__  [main.main]
+runtime_println_statement_atomicity.go:50	heap -> absent
+	src  defer wait.Done()
+	goc  col 10  heap  runtime.newobject  struct_code_uintptr__receiver__sync_WaitGroup  [main.main.func.49.6]
+runtime_println_statement_atomicity.go:97	mixed -> absent
+	src  var digits [20]byte
+	goc  col 2  frame  runtime.newobject  20_byte  [main.itoa]
+	goc  col 2  heap  runtime.newobject  20_byte  [main.itoa]
+runtime_range_target_forms.go:46	heap -> frame
+	src  letters := []string{"a", "b", "c"}
+	goc  col 13  heap  runtime.newobject  3_string  [main.sliceTargets]
+	gc   col 21  frame  slice  []string{...}
+runtime_range_target_forms.go:51	heap -> mixed
+	src  observed += fmt.Sprintf("%d", box.index)
+	goc  col 27  heap  runtime.newobject  struct_values__1_any__payload0_int  [main.sliceTargets]
+	gc   col 26  frame  slice  ... argument
+	gc   col 36  heap  object  box.index
+runtime_range_target_forms.go:54	heap -> mixed
+	src  expect("slice key into a struct field, after the loop", fmt.Sprintf("%d", box.index), "2")
+	goc  col 70  heap  runtime.newobject  struct_values__1_any__payload0_int  [main.sliceTargets]
+	gc   col 69  frame  slice  ... argument
+	gc   col 79  heap  object  box.index
+runtime_range_target_forms.go:58	heap -> mixed
+	src  observed += fmt.Sprintf("%d", box.nested.index)
+	goc  col 27  heap  runtime.newobject  struct_values__1_any__payload0_int  [main.sliceTargets]
+	gc   col 26  frame  slice  ... argument
+	gc   col 43  heap  object  box.nested.index
+runtime_range_target_forms.go:65	heap -> mixed
+	src  observed += fmt.Sprintf("%d", destination[1])
+	goc  col 27  heap  runtime.newobject  struct_values__1_any__payload0_int  [main.sliceTargets]
+	gc   col 26  frame  slice  ... argument
+	gc   col 44  heap  object  destination[1]
+runtime_range_target_forms.go:68	heap -> mixed
+	src  expect("slice key into a slice element, after the loop", fmt.Sprint(destination), "[0 2]")
+	goc  col 59  heap  runtime.newobject  struct_values__1_any__payload0___int  [main.sliceTargets]
+	gc   col 69  frame  slice  ... argument
+	gc   col 70  heap  object  destination
+runtime_range_target_forms.go:73	heap -> mixed
+	src  observed += fmt.Sprintf("%d", array[1])
+	goc  col 27  heap  runtime.newobject  struct_values__1_any__payload0_int  [main.sliceTargets]
+	gc   col 26  frame  slice  ... argument
+	gc   col 38  heap  object  array[1]
+runtime_range_target_forms.go:76	heap -> mixed
+	src  expect("slice key into an array element, after the loop", fmt.Sprint(array), "[0 2]")
+	goc  col 60  heap  runtime.newobject  struct_values__1_any__payload0__2_int  [main.sliceTargets]
+	gc   col 70  frame  slice  ... argument
+	gc   col 71  heap  object  array
+runtime_range_target_forms.go:78	heap -> frame
+	src  counts := map[string]int{}
+	goc  col 12  heap  runtime.makemap  map_string_int  [main.sliceTargets]
+	gc   col 26  frame  map  map[string]int{}
+runtime_range_target_forms.go:81	heap -> mixed
+	src  observed += fmt.Sprintf("%d", counts["k"])
+	goc  col 27  heap  runtime.newobject  struct_values__1_any__payload0_int  [main.sliceTargets]
+	gc   col 26  frame  slice  ... argument
+	gc   col 39  heap  object  counts["k"]
+runtime_range_target_forms.go:84	heap -> mixed
+	src  expect("slice key into a map element, after the loop", fmt.Sprintf("%d/%d", counts["k"], len(counts)), "2/1")
+	goc  col 69  heap  runtime.newobject  struct_values__2_any__payload0_int__payload1_int  [main.sliceTargets]
+	gc   col 68  frame  slice  ... argument
+	gc   col 84  heap  object  counts["k"]
+	gc   col 94  heap  object  len(counts)
+runtime_range_target_forms.go:89	heap -> mixed
+	src  observed += fmt.Sprintf("%d", *pointer)
+	goc  col 27  heap  runtime.newobject  struct_values__1_any__payload0_int  [main.sliceTargets]
+	gc   col 26  frame  slice  ... argument
+	gc   col 33  heap  object  *pointer
+runtime_range_target_forms.go:95	heap -> mixed
+	src  observed += fmt.Sprintf("%d", globalIndex)
+	goc  col 27  heap  runtime.newobject  struct_values__1_any__payload0_int  [main.sliceTargets]
+	gc   col 26  frame  slice  ... argument
+	gc   col 33  heap  object  globalIndex
+runtime_range_target_forms.go:98	heap -> frame
+	src  expect("slice key into a package-level variable, read elsewhere", fmt.Sprintf("%d", readGlobalIndex()), "2")
+	goc  col 80  heap  runtime.newobject  struct_values__1_any__payload0_int  [main.sliceTargets]
+	gc   col 79  frame  slice  ... argument
+runtime_range_target_forms.go:102	heap -> mixed
+	src  observed += fmt.Sprintf("%d%s", box.index, box.text)
+	goc  col 27  heap  runtime.newobject  struct_values__2_any__payload0_int__payload1_str  [main.sliceTargets]
+	gc   col 26  frame  slice  ... argument
+	gc   col 38  heap  object  box.index
+	gc   col 49  heap  object  box.text
+runtime_range_target_forms.go:109	heap -> mixed
+	src  observed += fmt.Sprintf("%d%s", key, box.text)
+	goc  col 27  heap  runtime.newobject  struct_values__2_any__payload0_int__payload1_str  [main.sliceTargets]
+	gc   col 26  frame  slice  ... argument
+	gc   col 35  heap  object  key
+	gc   col 43  heap  object  box.text
+runtime_range_target_forms.go:116	heap -> mixed
+	src  observed += fmt.Sprintf("%d%s", box.index, element)
+	goc  col 27  heap  runtime.newobject  struct_values__2_any__payload0_int__payload1_str  [main.sliceTargets]
+	gc   col 26  frame  slice  ... argument
+	gc   col 38  heap  object  box.index
+	gc   col 46  heap  object  element
+runtime_range_target_forms.go:123	heap -> mixed
+	src  observed += fmt.Sprintf("%d%s", pointerToBox.index, pointerToBox.text)
+	goc  col 27  heap  runtime.newobject  struct_values__2_any__payload0_int__payload1_str  [main.sliceTargets]
+	gc   col 26  frame  slice  ... argument
+	gc   col 47  heap  object  pointerToBox.index
+	gc   col 67  heap  object  pointerToBox.text
+runtime_range_target_forms.go:130	heap -> mixed
+	src  observed += fmt.Sprintf("%d%s|", box.nested.index, box.nested.text)
+	goc  col 27  heap  runtime.newobject  struct_values__2_any__payload0_int__payload1_str  [main.sliceTargets]
+	gc   col 26  frame  slice  ... argument
+	gc   col 46  heap  object  box.nested.index
+	gc   col 64  heap  object  box.nested.text
+runtime_range_target_forms.go:134	heap -> mixed
+	src  boxed := []any{1, "x", true}
+	goc  col 17  heap  runtime.newobject  int  [main.sliceTargets]
+	goc  col 20  heap  runtime.newobject  string  [main.sliceTargets]
+	goc  col 25  heap  runtime.newobject  bool  [main.sliceTargets]
+	gc   col 16  frame  slice  []any{...}
+	gc   col 17  heap  object  1
+	gc   col 20  heap  object  "x"
+	gc   col 25  heap  object  true
+runtime_range_target_forms.go:137	heap -> frame
+	src  observed += fmt.Sprintf("%v|", box.value)
+	goc  col 27  heap  runtime.newobject  1_any  [main.sliceTargets]
+	gc   col 26  frame  slice  ... argument
+runtime_range_target_forms.go:143	heap -> absent
+	src  for _, box.value = range numbers {
+	goc  col 9  heap  runtime.newobject  int  [main.sliceTargets]
+runtime_range_target_forms.go:144	heap -> frame
+	src  observed += fmt.Sprintf("%v|", box.value)
+	goc  col 27  heap  runtime.newobject  1_any  [main.sliceTargets]
+	gc   col 26  frame  slice  ... argument
+runtime_range_target_forms.go:152	heap -> mixed
+	src  observed += fmt.Sprintf("%v|", holder.elements)
+	goc  col 27  heap  runtime.newobject  struct_values__1_any__payload0___int  [main.sliceTargets]
+	gc   col 26  frame  slice  ... argument
+	gc   col 40  heap  object  holder.elements
+runtime_range_target_forms.go:159	heap -> mixed
+	src  observed += fmt.Sprintf("%d", narrow.value)
+	goc  col 27  heap  runtime.newobject  struct_values__1_any__payload0_uint8  [main.sliceTargets]
+	gc   col 26  frame  slice  ... argument
+	gc   col 39  heap  object  narrow.value
+runtime_range_target_forms.go:170	heap -> mixed
+	src  observed += fmt.Sprintf("%d%s", box.index, box.text)
+	goc  col 27  heap  runtime.newobject  struct_values__2_any__payload0_int__payload1_str  [main.arrayTargets]
+	gc   col 26  frame  slice  ... argument
+	gc   col 38  heap  object  box.index
+	gc   col 49  heap  object  box.text
+runtime_range_target_forms.go:184	heap -> mixed
+	src  observed += fmt.Sprintf("%d%s", box.index, box.text)
+	goc  col 27  heap  runtime.newobject  struct_values__2_any__payload0_int__payload1_str  [main.arrayTargets]
+	gc   col 26  frame  slice  ... argument
+	gc   col 38  heap  object  box.index
+	gc   col 49  heap  object  box.text
+runtime_range_target_forms.go:190	heap -> mixed
+	src  observed += fmt.Sprintf("%d", globalIndex)
+	goc  col 27  heap  runtime.newobject  struct_values__1_any__payload0_int  [main.arrayTargets]
+	gc   col 26  frame  slice  ... argument
+	gc   col 33  heap  object  globalIndex
+runtime_range_target_forms.go:194	heap -> frame
+	src  fmt.Sprintf("%d", readGlobalIndex()), "2")
+	goc  col 15  heap  runtime.newobject  struct_values__1_any__payload0_int  [main.arrayTargets]
+	gc   col 14  frame  slice  ... argument
+runtime_range_target_forms.go:201	heap -> mixed
+	src  observed += fmt.Sprintf("%d", box.index)
+	goc  col 27  heap  runtime.newobject  struct_values__1_any__payload0_int  [main.stringTargets]
+	gc   col 26  frame  slice  ... argument
+	gc   col 36  heap  object  box.index
+runtime_range_target_forms.go:207	heap -> mixed
+	src  observed += fmt.Sprintf("%d:%d|", box.index, box.letter)
+	goc  col 27  heap  runtime.newobject  struct_values__2_any__payload0_int__payload1_run  [main.stringTargets]
+	gc   col 26  frame  slice  ... argument
+	gc   col 40  heap  object  box.index
+	gc   col 51  heap  object  box.letter
+runtime_range_target_forms.go:214	heap -> mixed
+	src  observed += fmt.Sprintf("%d|", *pointer)
+	goc  col 27  heap  runtime.newobject  struct_values__1_any__payload0_rune  [main.stringTargets]
+	gc   col 26  frame  slice  ... argument
+	gc   col 34  heap  object  *pointer
+runtime_range_target_forms.go:220	heap -> mixed
+	src  observed += fmt.Sprintf("%d", globalIndex)
+	goc  col 27  heap  runtime.newobject  struct_values__1_any__payload0_int  [main.stringTargets]
+	gc   col 26  frame  slice  ... argument
+	gc   col 33  heap  object  globalIndex
+runtime_range_target_forms.go:223	heap -> mixed
+	src  fmt.Sprintf("%s/%d", observed, readGlobalIndex()), "013/3")
+	goc  col 15  heap  runtime.newobject  struct_values__2_any__payload0_string__payload1_  [main.stringTargets]
+	gc   col 14  frame  slice  ... argument
+	gc   col 24  heap  object  observed
+runtime_range_target_forms.go:227	heap -> frame
+	src  single := map[int]string{7: "x"}
+	goc  col 12  heap  runtime.makemap  map_int_string  [main.mapTargets]
+	gc   col 26  frame  map  map[int]string{...}
+runtime_range_target_forms.go:232	heap -> mixed
+	src  observed += fmt.Sprintf("%d%s", box.index, box.text)
+	goc  col 27  heap  runtime.newobject  struct_values__2_any__payload0_int__payload1_str  [main.mapTargets]
+	gc   col 26  frame  slice  ... argument
+	gc   col 38  heap  object  box.index
+	gc   col 49  heap  object  box.text
+runtime_range_target_forms.go:236	heap -> frame
+	src  weights := map[int]int{1: 10, 2: 20, 3: 30}
+	goc  col 13  heap  runtime.makemap  map_int_int  [main.mapTargets]
+	gc   col 24  frame  map  map[int]int{...}
+runtime_range_target_forms.go:241	heap -> mixed
+	src  expect("map key and element into struct fields, summed", fmt.Sprintf("%d", total), "140")
+	goc  col 71  heap  runtime.newobject  struct_values__1_any__payload0_int  [main.mapTargets]
+	gc   col 70  frame  slice  ... argument
+	gc   col 77  heap  object  total
+runtime_range_target_forms.go:243	heap -> frame
+	src  source := map[int]int{7: 9}
+	goc  col 12  heap  runtime.makemap  map_int_int  [main.mapTargets]
+	gc   col 23  frame  map  map[int]int{...}
+runtime_range_target_forms.go:244	heap -> frame
+	src  destination := map[int]int{}
+	goc  col 17  heap  runtime.makemap  map_int_int  [main.mapTargets]
+	gc   col 28  frame  map  map[int]int{}
+runtime_range_target_forms.go:249	heap -> mixed
+	src  fmt.Sprintf("%d/%d/%d", destination[0], destination[1], len(destination)), "7/9/2")
+	goc  col 15  heap  runtime.newobject  struct_values__3_any__payload0_int__payload1_int  [main.mapTargets]
+	gc   col 14  frame  slice  ... argument
+	gc   col 38  heap  object  destination[0]
+	gc   col 54  heap  object  destination[1]
+	gc   col 62  heap  object  len(destination)
+runtime_range_target_forms.go:266	heap -> mixed
+	src  observed += fmt.Sprintf("%d", box.index)
+	goc  col 27  heap  runtime.newobject  struct_values__1_any__payload0_int  [main.channelTargets]
+	gc   col 26  frame  slice  ... argument
+	gc   col 36  heap  object  box.index
+runtime_range_target_forms.go:277	heap -> mixed
+	src  observed += fmt.Sprintf("%d", *pointer)
+	goc  col 27  heap  runtime.newobject  struct_values__1_any__payload0_int  [main.channelTargets]
+	gc   col 26  frame  slice  ... argument
+	gc   col 33  heap  object  *pointer
+runtime_range_target_forms.go:298	heap -> mixed
+	src  observed += fmt.Sprintf("%d", globalIndex)
+	goc  col 27  heap  runtime.newobject  struct_values__1_any__payload0_int  [main.channelTargets]
+	gc   col 26  frame  slice  ... argument
+	gc   col 33  heap  object  globalIndex
+runtime_range_target_forms.go:301	heap -> mixed
+	src  fmt.Sprintf("%s/%d", observed, readGlobalIndex()), "12/2")
+	goc  col 15  heap  runtime.newobject  struct_values__2_any__payload0_string__payload1_  [main.channelTargets]
+	gc   col 14  frame  slice  ... argument
+	gc   col 24  heap  object  observed
+runtime_range_target_forms.go:308	heap -> mixed
+	src  observed += fmt.Sprintf("%d", box.index)
+	goc  col 27  heap  runtime.newobject  struct_values__1_any__payload0_int  [main.integerTargets]
+	gc   col 26  frame  slice  ... argument
+	gc   col 36  heap  object  box.index
+runtime_range_target_forms.go:315	heap -> mixed
+	src  observed += fmt.Sprintf("%d", destination[0])
+	goc  col 27  heap  runtime.newobject  struct_values__1_any__payload0_int  [main.integerTargets]
+	gc   col 26  frame  slice  ... argument
+	gc   col 44  heap  object  destination[0]
+runtime_range_target_forms.go:321	heap -> mixed
+	src  observed += fmt.Sprintf("%d", globalIndex)
+	goc  col 27  heap  runtime.newobject  struct_values__1_any__payload0_int  [main.integerTargets]
+	gc   col 26  frame  slice  ... argument
+	gc   col 33  heap  object  globalIndex
+runtime_range_target_forms.go:324	heap -> mixed
+	src  fmt.Sprintf("%s/%d", observed, readGlobalIndex()), "012/2")
+	goc  col 15  heap  runtime.newobject  struct_values__2_any__payload0_string__payload1_  [main.integerTargets]
+	gc   col 14  frame  slice  ... argument
+	gc   col 24  heap  object  observed
+runtime_range_target_forms.go:331	heap -> mixed
+	src  fmt.Sprintf("%d", box.index), "42")
+	goc  col 15  heap  runtime.newobject  struct_values__1_any__payload0_int  [main.integerTargets]
+	gc   col 14  frame  slice  ... argument
+	gc   col 24  heap  object  box.index
+runtime_range_target_forms.go:363	heap -> absent
+	src  observed += fmt.Sprintf("%d%s", box.index, box.text)
+	goc  col 27  heap  runtime.newobject  struct_values__2_any__payload0_int__payload1_str  [main.iteratorTargets.rangefunc.362.2]
+runtime_range_target_forms.go:367	heap -> mixed
+	src  fmt.Sprintf("%d%s", box.index, box.text), "2c")
+	goc  col 15  heap  runtime.newobject  struct_values__2_any__payload0_int__payload1_str  [main.iteratorTargets]
+	gc   col 14  frame  slice  ... argument
+	gc   col 26  heap  object  box.index
+	gc   col 37  heap  object  box.text
+runtime_range_target_forms.go:369	heap -> frame
+	src  pointer := new(string)
+	goc  col 13  heap  runtime.newobject  string  [main.iteratorTargets]
+	gc   col 16  frame  object  new(string)
+runtime_range_target_forms.go:378	heap -> absent
+	src  observed += fmt.Sprintf("%d", globalIndex)
+	goc  col 27  heap  runtime.newobject  struct_values__1_any__payload0_int  [main.iteratorTargets.rangefunc.377.2]
+runtime_range_target_forms.go:382	heap -> frame
+	src  fmt.Sprintf("%d", readGlobalIndex()), "4")
+	goc  col 15  heap  runtime.newobject  struct_values__1_any__payload0_int  [main.iteratorTargets]
+	gc   col 14  frame  slice  ... argument
+runtime_range_target_forms.go:387	heap -> absent
+	src  observed += fmt.Sprintf("%d", destination[0])
+	goc  col 27  heap  runtime.newobject  struct_values__1_any__payload0_int  [main.iteratorTargets.rangefunc.386.2]
+runtime_range_target_order.go:29	heap -> mixed
+	src  return fmt.Sprintf("k%d", len(trace))
+	goc  col 21  heap  runtime.newobject  struct_values__1_any__payload0_int  [main.recordedKey]
+	gc   col 20  frame  slice  ... argument
+	gc   col 31  heap  object  len(trace)
+runtime_range_target_order.go:52	heap -> mixed
+	src  fmt.Sprint(trace), "[index body index body]")
+	goc  col 3  heap  runtime.newobject  struct_values__1_any__payload0___string  [main.indexOperandRunsEveryIteration]
+	gc   col 13  frame  slice  ... argument
+	gc   col 14  heap  object  trace
+runtime_range_target_order.go:53	heap -> mixed
+	src  expect("the index operand's target held the last key", fmt.Sprint(destination), "[1]")
+	goc  col 57  heap  runtime.newobject  struct_values__1_any__payload0___int  [main.indexOperandRunsEveryIteration]
+	gc   col 67  frame  slice  ... argument
+	gc   col 68  heap  object  destination
+runtime_range_target_order.go:64	heap -> mixed
+	src  fmt.Sprint(trace), "[]")
+	goc  col 3  heap  runtime.newobject  struct_values__1_any__payload0___string  [main.indexOperandNeverRunsWithoutIterations]
+	gc   col 13  frame  slice  ... argument
+	gc   col 14  heap  object  trace
+runtime_range_target_order.go:69	heap -> frame
+	src  counts := map[string]int{}
+	goc  col 12  heap  runtime.makemap  map_string_int  [main.mapKeyOperandRunsEveryIteration]
+	gc   col 26  frame  map  map[string]int{}
+runtime_range_target_order.go:74	heap -> mixed
+	src  fmt.Sprint(trace), "[key body key body]")
+	goc  col 3  heap  runtime.newobject  struct_values__1_any__payload0___string  [main.mapKeyOperandRunsEveryIteration]
+	gc   col 13  frame  slice  ... argument
+	gc   col 14  heap  object  trace
+runtime_range_target_order.go:76	heap -> mixed
+	src  fmt.Sprintf("%d/%d/%d", len(counts), counts["k1"], counts["k3"]), "2/0/1")
+	goc  col 15  heap  runtime.newobject  struct_values__3_any__payload0_int__payload1_int  [main.mapKeyOperandRunsEveryIteration]
+	gc   col 14  frame  slice  ... argument
+	gc   col 30  heap  object  len(counts)
+	gc   col 46  heap  object  counts["k1"]
+	gc   col 60  heap  object  counts["k3"]
+runtime_range_target_order.go:88	heap -> mixed
+	src  fmt.Sprintf("%d", len(counts)), "0")
+	goc  col 15  heap  runtime.newobject  struct_values__1_any__payload0_int  [main.nilMapTargetIsNotAssignedWithoutIterations]
+	gc   col 14  frame  slice  ... argument
+	gc   col 24  heap  object  len(counts)
+runtime_range_target_order.go:98	heap -> mixed
+	src  fmt.Sprintf("%d/%d", first, second), "0/1")
+	goc  col 15  heap  runtime.newobject  struct_values__2_any__payload0_int__payload1_int  [main.pointerTargetFollowsTheBody]
+	gc   col 14  frame  slice  ... argument
+	gc   col 24  heap  object  first
+	gc   col 31  heap  object  second
+runtime_range_target_order.go:102	heap -> frame
+	src  runes := map[int]rune{}
+	goc  col 11  heap  runtime.makemap  map_int_rune  [main.elementTargetSeesThePreviousKey]
+	gc   col 23  frame  map  map[int]rune{}
+runtime_range_target_order.go:108	heap -> mixed
+	src  fmt.Sprintf("%d/%d/%d/%d/%d", len(runes), key, runes[0], runes[1], runes[2]),
+	goc  col 15  heap  runtime.newobject  struct_values__5_any__payload0_int__payload1_int  [main.elementTargetSeesThePreviousKey]
+	gc   col 14  frame  slice  ... argument
+	gc   col 36  heap  object  len(runes)
+	gc   col 45  heap  object  key
+	gc   col 55  heap  object  runes[0]
+	gc   col 65  heap  object  runes[1]
+	gc   col 75  heap  object  runes[2]
+runtime_range_target_order.go:117	heap -> mixed
+	src  observed += fmt.Sprintf("%d", box.index)
+	goc  col 27  heap  runtime.newobject  struct_values__1_any__payload0_int  [main.targetIsAssignedBeforeTheBody]
+	gc   col 26  frame  slice  ... argument
+	gc   col 36  heap  object  box.index
+runtime_range_target_order.go:130	heap -> mixed
+	src  fmt.Sprintf("%d", box.index), "1")
+	goc  col 15  heap  runtime.newobject  struct_values__1_any__payload0_int  [main.breakAndContinueLeaveTheLastValue]
+	gc   col 14  frame  slice  ... argument
+	gc   col 24  heap  object  box.index
+runtime_range_target_order.go:137	heap -> mixed
+	src  observed += fmt.Sprintf("%d", box.index)
+	goc  col 27  heap  runtime.newobject  struct_values__1_any__payload0_int  [main.breakAndContinueLeaveTheLastValue]
+	gc   col 26  frame  slice  ... argument
+	gc   col 36  heap  object  box.index
+runtime_range_target_order.go:140	heap -> mixed
+	src  fmt.Sprintf("%s/%d", observed, box.index), "02/2")
+	goc  col 15  heap  runtime.newobject  struct_values__2_any__payload0_string__payload1_  [main.breakAndContinueLeaveTheLastValue]
+	gc   col 14  frame  slice  ... argument
+	gc   col 24  heap  object  observed
+	gc   col 37  heap  object  box.index
+runtime_range_target_order.go:147	heap -> mixed
+	src  observed += fmt.Sprintf("%v|", numbers)
+	goc  col 27  heap  runtime.newobject  struct_values__1_any__payload0___int  [main.targetAliasingTheRangeExpression]
+	gc   col 26  frame  slice  ... argument
+	gc   col 34  heap  object  numbers
+runtime_range_target_order.go:155	heap -> mixed
+	src  observed += fmt.Sprintf("%v|", numbers)
+	goc  col 27  heap  runtime.newobject  struct_values__1_any__payload0___int  [main.targetAliasingTheRangeExpression]
+	gc   col 26  frame  slice  ... argument
+	gc   col 34  heap  object  numbers
+runtime_range_target_order.go:160	heap -> frame
+	src  letters := []string{"a", "b", "c"}
+	goc  col 13  heap  runtime.newobject  3_string  [main.targetAliasingTheRangeExpression]
+	gc   col 21  frame  slice  []string{...}
+runtime_reflect_call_aggregate.go:31	heap -> mixed
+	src  results := function.Call([]reflect.Value{reflect.ValueOf(argument)})
+	goc  col 27  heap  runtime.newobject  1_reflect_Value  [main.main]
+	goc  col 59  heap  runtime.newobject  main_reflectAggregateInput  [main.main]
+	gc   col 42  frame  slice  []reflect.Value{...}
+	gc   col 59  heap  object  argument
+runtime_reflect_call_aggregate_function_probe.go:31	heap -> mixed
+	src  results := function.Call([]reflect.Value{reflect.ValueOf(argument)})
+	goc  col 27  heap  runtime.newobject  1_reflect_Value  [main.Test]
+	goc  col 59  heap  runtime.newobject  main_reflectAggregateFunctionInput  [main.Test]
+	gc   col 42  frame  slice  []reflect.Value{...}
+	gc   col 59  heap  object  argument
+runtime_reflect_call_aggregate_matrix.go:70	heap -> frame
+	src  results := reflect.ValueOf(function).Call([]reflect.Value{reflect.ValueOf(argument)})
+	goc  col 44  heap  runtime.newobject  1_reflect_Value  [main.callReflectAggregateMatrix]
+	gc   col 59  frame  slice  []reflect.Value{...}
+runtime_reflect_call_aggregate_matrix.go:85	heap -> mixed
+	src  results := function.Call([]reflect.Value{reflect.ValueOf(argument)})
+	goc  col 27  heap  runtime.newobject  1_reflect_Value  [main.callReflectMixedAggregateDirect]
+	goc  col 59  heap  runtime.newobject  main_reflectMixedAggregate  [main.callReflectMixedAggregateDirect]
+	gc   col 42  frame  slice  []reflect.Value{...}
+	gc   col 59  heap  object  argument
+runtime_reflect_call_aggregate_matrix.go:105	heap -> absent
+	src  text:  "runtime",
+	goc  col 11  heap  runtime.newobject  main_reflectStringAggregate  [main.main]
+runtime_reflect_call_aggregate_probe.go:50	heap -> mixed
+	src  results := function.Call([]reflect.Value{reflect.ValueOf(argument)})
+	goc  col 27  heap  runtime.newobject  1_reflect_Value  [main.main]
+	goc  col 59  heap  runtime.newobject  main_reflectAggregateProbeInput  [main.main]
+	gc   col 42  frame  slice  []reflect.Value{...}
+	gc   col 59  heap  object  argument
+runtime_reflect_interface_method.go:20	heap -> mixed
+	src  results := method.Call([]reflect.Value{reflect.ValueOf("runtime")})
+	goc  col 25  heap  runtime.newobject  1_reflect_Value  [main.main]
+	goc  col 57  heap  runtime.newobject  string  [main.main]
+	gc   col 40  frame  slice  []reflect.Value{...}
+	gc   col 57  heap  object  "runtime"
+runtime_reflect_make_values.go:6	heap -> frame
+	src  sliceType := reflect.TypeOf([]int{})
+	goc  col 30  heap  runtime.newobject  0_int  [main.main]
+	goc  col 30  heap  runtime.newobject  int  [main.main]
+	gc   col 35  frame  slice  []int{}
+	gc   col 35  frame  slice  []int{}
+runtime_reflect_make_values.go:8	heap -> mixed
+	src  slice = reflect.Append(slice, reflect.ValueOf(17))
+	goc  col 25  heap  runtime.newobject  1_reflect_Value  [main.main]
+	goc  col 48  heap  runtime.newobject  int  [main.main]
+	gc   col 24  frame  slice  ... argument
+	gc   col 48  heap  object  17
+runtime_reflect_make_values.go:9	heap -> mixed
+	src  slice = reflect.Append(slice, reflect.ValueOf(25))
+	goc  col 25  heap  runtime.newobject  1_reflect_Value  [main.main]
+	goc  col 48  heap  runtime.newobject  int  [main.main]
+	gc   col 24  frame  slice  ... argument
+	gc   col 48  heap  object  25
+runtime_reflect_make_values.go:11	heap -> frame
+	src  mapType := reflect.TypeOf(map[string]int{})
+	goc  col 28  heap  runtime.makemap  map_string_int  [main.main]
+	gc   col 42  frame  map  map[string]int{}
+runtime_reflect_map_slice.go:6	heap -> frame
+	src  mapType := reflect.TypeOf(map[string]int{})
+	goc  col 28  heap  runtime.makemap  map_string_int  [main.main]
+	gc   col 42  frame  map  map[string]int{}
+runtime_reflect_map_slice.go:19	heap -> frame
+	src  sliceType := reflect.TypeOf([]int{})
+	goc  col 30  heap  runtime.newobject  0_int  [main.main]
+	goc  col 30  heap  runtime.newobject  int  [main.main]
+	gc   col 35  frame  slice  []int{}
+	gc   col 35  frame  slice  []int{}
+runtime_reflect_map_slice.go:21	heap -> mixed
+	src  slice = reflect.Append(slice, reflect.ValueOf(19))
+	goc  col 25  heap  runtime.newobject  1_reflect_Value  [main.main]
+	goc  col 48  heap  runtime.newobject  int  [main.main]
+	gc   col 24  frame  slice  ... argument
+	gc   col 48  heap  object  19
+runtime_reflect_map_slice.go:22	heap -> mixed
+	src  slice = reflect.Append(slice, reflect.ValueOf(23))
+	goc  col 25  heap  runtime.newobject  1_reflect_Value  [main.main]
+	goc  col 48  heap  runtime.newobject  int  [main.main]
+	gc   col 24  frame  slice  ... argument
+	gc   col 48  heap  object  23
+runtime_reflect_method_metadata.go:14	heap -> frame
+	src  typ := reflect.TypeOf(reflectMethodWorker{})
+	goc  col 24  heap  runtime.newobject  main_reflectMethodWorker  [main.main]
+	gc   col 43  frame  object  reflectMethodWorker{}
+runtime_reflect_method_metadata.go:27	heap -> frame
+	src  results := method.Func.Call([]reflect.Value{
+	goc  col 30  heap  runtime.newobject  2_reflect_Value  [main.main]
+	gc   col 45  frame  slice  []reflect.Value{...}
+runtime_reflect_set_fields.go:11	heap -> frame
+	src  payload := &reflectSetPayload{}
+	goc  col 13  heap  runtime.newobject  main_reflectSetPayload  [main.main]
+	gc   col 13  frame  object  &reflectSetPayload{}
+runtime_reflect_type_metadata.go:11	heap -> frame
+	src  valueType := reflect.TypeOf(metadataPayload{})
+	goc  col 30  heap  runtime.newobject  main_metadataPayload  [main.main]
+	gc   col 45  frame  object  metadataPayload{}
+runtime_reflect_value_call.go:11	heap -> frame
+	src  arguments := []reflect.Value{
+	goc  col 15  heap  runtime.newobject  2_reflect_Value  [main.main]
+	gc   col 30  frame  slice  []reflect.Value{...}
+runtime_reflect_value_indirect_call.go:28	heap -> frame
+	src  instruction := &reflectValueInstruction{field: 5}
+	goc  col 17  heap  runtime.newobject  main_reflectValueInstruction  [main.main]
+	gc   col 17  frame  object  &reflectValueInstruction{...}
+runtime_reflect_value_indirect_call.go:29	heap -> frame
+	src  state := &reflectValueState{}
+	goc  col 11  heap  runtime.newobject  main_reflectValueState  [main.main]
+	gc   col 11  frame  object  &reflectValueState{}
+runtime_reflect_value_indirect_call.go:30	heap -> frame
+	src  value := reflect.ValueOf(42)
+	goc  col 27  heap  runtime.newobject  int  [main.main]
+	gc   col 27  frame  object  42
+runtime_reflect_value_int.go:9	heap -> frame
+	src  value := reflect.ValueOf(42)
+	goc  col 27  heap  runtime.newobject  int  [main.main]
+	gc   col 27  frame  object  42
+runtime_scheduler_gc_churn.go:22	heap -> absent
+	src  worker := worker
+	goc  col 3  heap  runtime.newobject  int  [main.main]
+runtime_scheduler_gc_churn.go:24	heap -> absent
+	src  defer wait.Done()
+	goc  col 10  heap  runtime.newobject  struct_code_uintptr__receiver__sync_WaitGroup  [main.main.func.23.6]
+runtime_scheduler_gc_churn.go:29	heap -> frame
+	src  next:  &schedulerGCNode{value: round},
+	goc  col 13  heap  runtime.newobject  main_schedulerGCNode  [main.main.func.23.6]
+	gc   col 13  frame  object  &schedulerGCNode{...}
+runtime_scheduler_ring_handoff.go:16	heap -> absent
+	src  go runRingWorker(input, output, done)
+	goc  col 3  heap  runtime.newobject  struct_code_uintptr__argument0___chan_int__argum  [main.main]
+runtime_select_channels.go:11	heap -> absent
+	src  go send(17, left)
+	goc  col 2  heap  runtime.newobject  struct_code_uintptr__argument0_int__argument1_ch  [main.main]
+runtime_select_channels.go:12	heap -> absent
+	src  go send(25, right)
+	goc  col 2  heap  runtime.newobject  struct_code_uintptr__argument0_int__argument1_ch  [main.main]
+runtime_select_global_locked_gc.go:29	heap -> absent
+	src  go signalMaskWorker(iterations)
+	goc  col 2  heap  runtime.newobject  struct_code_uintptr__argument0_int  [main.main]
+runtime_setfinalizer_nil.go:15	heap -> mixed
+	src  runtime.SetFinalizer(box, func(item *clearedFinalizerBox) {
+	goc  col 28  heap  runtime.newobject  struct_code_uintptr__capture0_unsafe_Pointer  [main.main]
+	gc   col 28  heap  object  func literal
+	gc   col 33  frame  object  item
+runtime_slice_copy_overlap.go:4	heap -> frame
+	src  values := []int{1, 2, 3, 4, 5, 6}
+	goc  col 12  heap  runtime.newobject  6_int  [main.main]
+	gc   col 17  frame  slice  []int{...}
+runtime_slice_pointer_append_gc.go:10	heap -> frame
+	src  values := make([]*record, 0, 4)
+	goc  col 31  heap  runtime.newobject  4__main_record  [main.main]
+	gc   col 16  frame  slice  make([]*record, 0, 4)
+runtime_slice_pointer_append_gc.go:12	heap -> mixed
+	src  values = append(values, &record{value: index})
+	goc  col 27  heap  runtime.newobject  main_record  [main.main]
+	gc   col 18  frame  object  append
+	gc   col 27  heap  object  &record{...}
+runtime_slice_pointer_append_gc.go:25	heap -> frame
+	src  runtime.KeepAlive(values)
+	goc  col 20  heap  runtime.newobject  main_record  [main.main]
+	gc   col 20  frame  object  values
+runtime_span_metadata_barrier.go:47	heap -> frame
+	src  root := new(spanRecord)
+	goc  col 10  heap  runtime.newobject  main_spanRecord  [main.main]
+	gc   col 13  frame  object  new(spanRecord)
+runtime_stack_copy_roots.go:34	heap -> mixed
+	src  return &link{value: seed, label: "link-" + string(rune('a'+seed%26)), next: next}
+	goc  col 9  heap  runtime.newobject  main_link  [main.makeLink]
+	gc   col 9  heap  object  &link{...}
+	gc   col 43  heap  object  "link-" + string(rune(97 + seed % 26))
+	gc   col 56  frame  object  string(rune(97 + seed % 26))
+runtime_stack_copy_roots.go:152	heap -> absent
+	src  go blockedWhileGrown(&ready, channel, &done)
+	goc  col 2  heap  runtime.newobject  struct_code_uintptr__argument0__sync_WaitGroup__  [main.main]
+runtime_stack_growth.go:24	heap -> frame
+	src  root := &payload{
+	goc  col 10  heap  runtime.newobject  main_payload  [main.main]
+	gc   col 10  frame  object  &payload{...}
+runtime_stack_growth.go:26	heap -> frame
+	src  next:  &payload{value: 25},
+	goc  col 10  heap  runtime.newobject  main_payload  [main.main]
+	gc   col 10  frame  object  &payload{...}
+runtime_stack_scan_blocked_goroutines.go:70	heap -> mixed
+	src  sink = append(sink, &held{value: index, name: "churn"})
+	goc  col 23  heap  runtime.newobject  main_held  [main.churn]
+	gc   col 16  frame  object  append
+	gc   col 23  heap  object  &held{...}
+runtime_stack_scan_blocked_goroutines.go:104	heap -> absent
+	src  condition := sync.NewCond(&condLock)
+	goc  col 2  heap  runtime.newobject  sync_Cond  [main.main]
+runtime_stack_scan_callfree_loop.go:107	heap -> mixed
+	src  sink = append(sink, &cell{value: index, label: "churn"})
+	goc  col 23  heap  runtime.newobject  main_cell  [main.churn]
+	gc   col 16  frame  object  append
+	gc   col 23  heap  object  &cell{...}
+runtime_stack_scan_callfree_loop.go:145	heap -> absent
+	src  go collector(stop, &collecting)
+	goc  col 2  heap  runtime.newobject  struct_code_uintptr__argument0___chan_struct____  [main.main]
+runtime_stack_scan_loop_safepoints.go:73	heap -> absent
+	src  defer live.Unlock()
+	goc  col 8  heap  runtime.newobject  struct_code_uintptr__receiver__sync_Mutex  [main.stillLive]
+runtime_stack_scan_panic_unwind.go:55	heap -> mixed
+	src  sink = append(sink, &carried{value: index, label: "churn"})
+	goc  col 23  heap  runtime.newobject  main_carried  [main.churn]
+	gc   col 16  frame  object  append
+	gc   col 23  heap  object  &carried{...}
+runtime_stack_scan_panic_unwind.go:113	heap -> frame
+	src  if recovered != "first" {
+	goc  col 19  heap  runtime.newobject  string  [main.deferPanics.func.110.8]
+	gc   col 19  frame  object  "first"
+runtime_stack_scan_syscall.go:64	heap -> mixed
+	src  sink = append(sink, &record{value: index, label: "churn"})
+	goc  col 23  heap  runtime.newobject  main_record  [main.churn]
+	gc   col 16  frame  object  append
+	gc   col 23  heap  object  &record{...}
+runtime_stack_scan_syscall.go:86	heap -> absent
+	src  polledReader, polledWriter, err := os.Pipe()
+	goc  col 2  heap  runtime.newobject  os_File  [main.main]
+runtime_stack_scan_syscall.go:101	heap -> frame
+	src  buffer := make([]byte, 4)
+	goc  col 26  heap  runtime.newobject  4_byte  [main.main.func.99.5]
+	gc   col 17  frame  slice  make([]byte, 4)
+runtime_stack_scan_syscall.go:115	heap -> frame
+	src  buffer := make([]byte, 4)
+	goc  col 26  heap  runtime.newobject  4_byte  [main.main.func.113.5]
+	gc   col 17  frame  slice  make([]byte, 4)
+runtime_string_rune_map.go:4	heap -> frame
+	src  counts := map[rune]int{}
+	goc  col 12  heap  runtime.makemap  map_rune_int  [main.main]
+	gc   col 24  frame  map  map[rune]int{}
+runtime_sync_cond_rwmutex.go:7	heap -> absent
+	src  condition := sync.NewCond(&lock)
+	goc  col 2  heap  runtime.newobject  sync_Cond  [main.main]
+runtime_sync_map.go:11	heap -> frame
+	src  values.Delete(3)
+	goc  col 16  heap  runtime.newobject  int  [main.main]
+	gc   col 16  frame  object  3
+runtime_sync_map.go:12	heap -> frame
+	src  values.Delete(9)
+	goc  col 16  heap  runtime.newobject  int  [main.main]
+	gc   col 16  frame  object  9
+runtime_sync_map.go:14	heap -> absent
+	src  total := 0
+	goc  col 2  heap  runtime.newobject  int  [main.main]
+runtime_sync_map.go:15	heap -> absent
+	src  count := 0
+	goc  col 2  heap  runtime.newobject  int  [main.main]
+runtime_sync_map.go:27	heap -> frame
+	src  value, ok := values.Load(11)
+	goc  col 27  heap  runtime.newobject  int  [main.main]
+	gc   col 27  frame  object  11
+runtime_sync_mutex_defer.go:12	heap -> absent
+	src  defer mutex.Unlock()
+	goc  col 10  heap  runtime.newobject  struct_code_uintptr__receiver__sync_Mutex  [main.main.func.10.3]
+runtime_sync_once_concurrent.go:13	heap -> absent
+	src  defer wait.Done()
+	goc  col 10  heap  runtime.newobject  struct_code_uintptr__receiver__sync_WaitGroup  [main.main.func.12.6]
+runtime_sync_rwmutex_readers.go:14	heap -> absent
+	src  defer wait.Done()
+	goc  col 10  heap  runtime.newobject  struct_code_uintptr__receiver__sync_WaitGroup  [main.main.func.13.6]
+runtime_sync_waitgroup_mutex.go:14	heap -> absent
+	src  index := index
+	goc  col 3  heap  runtime.newobject  int  [main.main]
+runtime_sync_waitgroup_mutex.go:17	heap -> absent
+	src  defer wait.Done()
+	goc  col 10  heap  runtime.newobject  struct_code_uintptr__receiver__sync_WaitGroup  [main.main.func.16.6]
+runtime_ticker_multi_tick.go:7	heap -> absent
+	src  defer ticker.Stop()
+	goc  col 8  heap  runtime.newobject  struct_code_uintptr__receiver__time_Ticker  [main.main]
+runtime_ticker_stop.go:7	heap -> absent
+	src  defer ticker.Stop()
+	goc  col 8  heap  runtime.newobject  struct_code_uintptr__receiver__time_Ticker  [main.main]
+runtime_time_afterfunc.go:10	heap -> absent
+	src  defer timer.Stop()
+	goc  col 8  heap  runtime.newobject  struct_code_uintptr__receiver__time_Timer  [main.main]
+runtime_timer_callback_shape.go:16	heap -> frame
+	src  box := &callbackBox{value: 10}
+	goc  col 9  heap  runtime.newobject  main_callbackBox  [main.main]
+	gc   col 9  frame  object  &callbackBox{...}
+runtime_type_param_method_shapes.go:185	heap -> mixed
+	src  if bumpTwice(func() *pointerCounterA { return &pointerCounterA{} }) != 2 {
+	goc  col 48  heap  runtime.newobject  main_pointerCounterA  [main.main.func.185.15]
+	gc   col 15  frame  object  func literal
+	gc   col 48  heap  object  &pointerCounterA{}
+runtime_type_param_method_shapes.go:188	heap -> mixed
+	src  if bumpTwice(func() *pointerCounterB { return &pointerCounterB{} }) != 20 {
+	goc  col 48  heap  runtime.newobject  main_pointerCounterB  [main.main.func.188.15]
+	gc   col 15  frame  object  func literal
+	gc   col 48  heap  object  &pointerCounterB{}
+runtime_type_param_method_shapes.go:192	heap -> mixed
+	src  countA, labelA := pairInReturn(func() *pointerCounterA { return &pointerCounterA{count: 3} })
+	goc  col 66  heap  runtime.newobject  main_pointerCounterA  [main.main.func.192.33]
+	gc   col 33  frame  object  func literal
+	gc   col 66  heap  object  &pointerCounterA{...}
+runtime_type_param_method_shapes.go:196	heap -> mixed
+	src  countB, labelB := pairInReturn(func() *pointerCounterB { return &pointerCounterB{count: 3} })
+	goc  col 66  heap  runtime.newobject  main_pointerCounterB  [main.main.func.196.33]
+	gc   col 33  frame  object  func literal
+	gc   col 66  heap  object  &pointerCounterB{...}
+runtime_type_param_method_shapes.go:201	heap -> mixed
+	src  if pairInAssignment(func() *pointerCounterA { return &pointerCounterA{count: 5} }) != "a:6" {
+	goc  col 55  heap  runtime.newobject  main_pointerCounterA  [main.main.func.201.22]
+	gc   col 22  frame  object  func literal
+	gc   col 55  heap  object  &pointerCounterA{...}
+runtime_type_param_method_shapes.go:204	heap -> mixed
+	src  if pairInAssignment(func() *pointerCounterB { return &pointerCounterB{count: 5} }) != "b:15" {
+	goc  col 55  heap  runtime.newobject  main_pointerCounterB  [main.main.func.204.22]
+	gc   col 22  frame  object  func literal
+	gc   col 55  heap  object  &pointerCounterB{...}
+runtime_type_param_method_shapes.go:208	heap -> mixed
+	src  if chained(func() *pointerCounterA { return &pointerCounterA{count: 1} }) != 3 {
+	goc  col 46  heap  runtime.newobject  main_pointerCounterA  [main.main.func.208.13]
+	gc   col 13  frame  object  func literal
+	gc   col 46  heap  object  &pointerCounterA{...}
+runtime_type_param_method_shapes.go:211	heap -> mixed
+	src  if chained(func() *pointerCounterB { return &pointerCounterB{count: 1} }) != 21 {
+	goc  col 46  heap  runtime.newobject  main_pointerCounterB  [main.main.func.211.13]
+	gc   col 13  frame  object  func literal
+	gc   col 46  heap  object  &pointerCounterB{...}
+runtime_type_param_method_shapes.go:215	heap -> mixed
+	src  if throughMethodValue(func() *pointerCounterA { return &pointerCounterA{count: 4} }) != 5 {
+	goc  col 57  heap  runtime.newobject  main_pointerCounterA  [main.main.func.215.24]
+	gc   col 24  frame  object  func literal
+	gc   col 57  heap  object  &pointerCounterA{...}
+runtime_type_param_method_shapes.go:218	heap -> mixed
+	src  if throughMethodValue(func() *pointerCounterB { return &pointerCounterB{count: 4} }) != 14 {
+	goc  col 57  heap  runtime.newobject  main_pointerCounterB  [main.main.func.218.24]
+	gc   col 24  frame  object  func literal
+	gc   col 57  heap  object  &pointerCounterB{...}
+runtime_type_switch_pointer_values.go:17	heap -> mixed
+	src  values = append(values, index)
+	goc  col 27  heap  runtime.newobject  int  [main.main]
+	gc   col 18  frame  object  append
+	gc   col 27  heap  object  index
+runtime_type_switch_pointer_values.go:18	heap -> mixed
+	src  values = append(values, &typeSwitchLeft{
+	goc  col 27  heap  runtime.newobject  main_typeSwitchLeft  [main.main]
+	gc   col 18  frame  object  append
+	gc   col 27  heap  object  &typeSwitchLeft{...}
+runtime_type_switch_pointer_values.go:22	heap -> mixed
+	src  values = append(values, &typeSwitchRight{value: index * 3})
+	goc  col 27  heap  runtime.newobject  main_typeSwitchRight  [main.main]
+	gc   col 18  frame  object  append
+	gc   col 27  heap  object  &typeSwitchRight{...}
+runtime_unbuffered_pingpong.go:13	heap -> absent
+	src  go pong(left, right)
+	goc  col 2  heap  runtime.newobject  struct_code_uintptr__argument0_chan_int__argumen  [main.main]
+runtime_unsafe_struct_field.go:15	heap -> frame
+	src  next:  &unsafeFieldNode{left: 13, right: 17},
+	goc  col 10  heap  runtime.newobject  main_unsafeFieldNode  [main.main]
+	gc   col 10  frame  object  &unsafeFieldNode{...}
+runtime_waitgroup_reuse.go:5	heap -> absent
+	src  func runWaitGroupRound(round int) int {
+	goc  col 1  heap  runtime.newobject  int  [main.runWaitGroupRound]
+runtime_waitgroup_reuse.go:11	heap -> absent
+	src  defer wait.Done()
+	goc  col 10  heap  runtime.newobject  struct_code_uintptr__receiver__sync_WaitGroup  [main.runWaitGroupRound.func.10.6]
+runtime_worker_fanin_gc.go:26	heap -> absent
+	src  go worker(input, output)
+	goc  col 3  heap  runtime.newobject  struct_code_uintptr__argument0___chan__main_fani  [main.main]
+stdlib_archive_zip_roundtrip.go:74	heap -> frame
+	src  if !bytes.Equal(raw, []byte{1, 3, 5, 7, 9}) {
+	goc  col 23  heap  runtime.newobject  5_byte  [main.main]
+	gc   col 29  frame  slice  []byte{...}
+stdlib_bytes_reader_unread.go:18	heap -> frame
+	src  buffer := make([]byte, 3)
+	goc  col 25  heap  runtime.newobject  3_byte  [main.main]
+	gc   col 16  frame  slice  make([]byte, 3)
+stdlib_cmp_order.go:12	heap -> absent
+	src  if cmp.Or("", "fallback", "ignored") != "fallback" {
+	goc  col 5  heap  runtime.newobject  3_string  [main.main]
+stdlib_compress_zlib_lzw.go:72	heap -> frame
+	src  lowWidthInput := []byte{0, 1, 2, 3, 0, 2, 1, 3, 3, 2, 1, 0}
+	goc  col 19  heap  runtime.newobject  12_byte  [main.main]
+	gc   col 25  frame  slice  []byte{...}
+stdlib_compress_zlib_lzw.go:75	heap -> absent
+	src  lowWidthWriter := lzw.NewWriter(lowWidthDestination, lzw.LSB, 2)
+	goc  col 34  heap  runtime.newobject  main_lzwByteWriter  [main.main]
+stdlib_crypto_des_rc4.go:42	heap -> frame
+	src  rc4Ciphertext := make([]byte, len("Plaintext"))
+	goc  col 32  heap  runtime.newobject  9_byte  [main.main]
+	gc   col 23  frame  slice  make([]byte, 9)
+stdlib_crypto_ecdsa.go:18	mixed -> absent
+	src  digest := sha256.Sum256(message)
+	goc  col 2  frame  runtime.newobject  32_byte  [main.main]
+	goc  col 2  heap  runtime.newobject  32_byte  [main.main]
+stdlib_crypto_mlkem.go:9	heap -> frame
+	src  seed := make([]byte, mlkem.SeedSize)
+	goc  col 23  heap  runtime.newobject  64_byte  [main.main]
+	gc   col 14  frame  slice  make([]byte, 64)
+stdlib_crypto_sha3_pbkdf2.go:20	mixed -> absent
+	src  sha3Digest := sha3.Sum256(nil)
+	goc  col 2  frame  runtime.newobject  32_byte  [main.main]
+	goc  col 2  heap  runtime.newobject  32_byte  [main.main]
+stdlib_encoding_ascii85.go:7	heap -> frame
+	src  encoded := make([]byte, ascii85.MaxEncodedLen(len(source)))
+	goc  col 26  heap  runtime.makeslice  byte  [main.main]
+	gc   col 17  frame  slice  make([]byte, ~r0)
+stdlib_encoding_ascii85.go:10	heap -> frame
+	src  decoded := make([]byte, len(source)+4)
+	goc  col 38  heap  runtime.makeslice  byte  [main.main]
+	gc   col 17  frame  slice  make([]byte, len(source) + 4)
+stdlib_encoding_binary.go:22	heap -> mixed
+	src  if err := binary.Write(&buffer, binary.LittleEndian, record); err != nil {
+	goc  col 34  heap  runtime.newobject  encoding_binary_littleEndian  [main.main]
+	goc  col 55  heap  runtime.newobject  main_binaryRecord  [main.main]
+	gc   col 40  heap  object  binary.LittleEndian
+	gc   col 55  frame  object  record
+stdlib_encoding_binary.go:26	mixed -> absent
+	src  var decoded binaryRecord
+	goc  col 2  frame  runtime.newobject  main_binaryRecord  [main.main]
+	goc  col 2  heap  runtime.newobject  main_binaryRecord  [main.main]
+stdlib_encoding_binary_varint.go:6	heap -> frame
+	src  buffer := make([]byte, binary.MaxVarintLen64)
+	goc  col 25  heap  runtime.newobject  10_byte  [main.main]
+	gc   col 16  frame  slice  make([]byte, 10)
+stdlib_encoding_gob_roundtrip.go:21	heap -> frame
+	src  gob.Register(gobPayload{})
+	goc  col 15  heap  runtime.newobject  main_gobPayload  [main.main]
+	gc   col 25  frame  object  gobPayload{}
+stdlib_encoding_hex.go:6	heap -> frame
+	src  source := []byte{0, 1, 2, 10, 15, 16, 255}
+	goc  col 12  heap  runtime.newobject  7_byte  [main.main]
+	gc   col 18  frame  slice  []byte{...}
+stdlib_encoding_pem.go:8	heap -> frame
+	src  Headers: map[string]string{
+	goc  col 12  heap  runtime.makemap  map_string_string  [main.main]
+	gc   col 29  frame  map  map[string]string{...}
+stdlib_filepath_glob_clean.go:13	heap -> absent
+	src  defer os.RemoveAll(directory)
+	goc  col 2  heap  runtime.newobject  struct_code_uintptr__function_func_path_string__  [main.main]
+stdlib_filepath_glob_clean.go:15	heap -> frame
+	src  if err := os.WriteFile(filepath.Join(directory, "alpha.txt"), []byte("a"), 0o644); err != nil {
+	goc  col 25  heap  runtime.newobject  2_string  [main.main]
+	gc   col 71  frame  object  ([]byte)("a")
+stdlib_filepath_glob_clean.go:18	heap -> frame
+	src  if err := os.WriteFile(filepath.Join(directory, "beta.log"), []byte("b"), 0o644); err != nil {
+	goc  col 25  heap  runtime.newobject  2_string  [main.main]
+	gc   col 70  frame  object  ([]byte)("b")
+stdlib_filepath_glob_clean.go:21	heap -> absent
+	src  if err := os.Mkdir(filepath.Join(directory, "nested"), 0o755); err != nil {
+	goc  col 21  heap  runtime.newobject  2_string  [main.main]
+stdlib_filepath_glob_clean.go:24	heap -> frame
+	src  if err := os.WriteFile(filepath.Join(directory, "nested", "gamma.txt"), []byte("g"), 0o644); err != nil {
+	goc  col 25  heap  runtime.newobject  3_string  [main.main]
+	gc   col 81  frame  object  ([]byte)("g")
+stdlib_filepath_glob_clean.go:28	heap -> absent
+	src  matches, err := filepath.Glob(filepath.Join(directory, "*.txt"))
+	goc  col 32  heap  runtime.newobject  2_string  [main.main]
+stdlib_filepath_glob_clean.go:36	heap -> absent
+	src  cleaned := filepath.Clean(filepath.Join(directory, "nested", "..", "nested", "gamma.txt"))
+	goc  col 28  heap  runtime.newobject  5_string  [main.main]
+stdlib_filepath_glob_clean.go:37	heap -> absent
+	src  if filepath.Base(cleaned) != "gamma.txt" || filepath.Dir(cleaned) != filepath.Join(directory, "nested") {
+	goc  col 71  heap  runtime.newobject  2_string  [main.main]
+stdlib_fstest_mapfs.go:24	heap -> frame
+	src  if err := fstest.TestFS(fileSystem, "config/settings.txt", "assets/logo.txt"); err != nil {
+	goc  col 26  heap  runtime.newobject  2_string  [main.main]
+	gc   col 25  frame  slice  ... argument
+stdlib_fstest_mapfs.go:53	heap -> absent
+	src  var visited []string
+	goc  col 2  heap  runtime.newobject  string  [main.main]
+stdlib_fstest_mapfs.go:54	heap -> frame
+	src  err = fs.WalkDir(fileSystem, ".", func(path string, entry fs.DirEntry, walkError error) error {
+	goc  col 36  heap  runtime.newobject  struct_code_uintptr__capture0_unsafe_Pointer  [main.main]
+	gc   col 36  frame  object  func literal
+	gc   col 54  frame  object  entry
+stdlib_http_cookiejar.go:17	heap -> frame
+	src  {Name: "host", Value: "api", Path: "/"},
+	goc  col 3  heap  runtime.newobject  net_http_Cookie  [main.main]
+	gc   col 3  frame  object  &http.Cookie{...}
+stdlib_http_cookiejar.go:18	heap -> frame
+	src  {Name: "account", Value: "private", Path: "/account"},
+	goc  col 3  heap  runtime.newobject  net_http_Cookie  [main.main]
+	gc   col 3  frame  object  &http.Cookie{...}
+stdlib_http_cookiejar.go:19	heap -> frame
+	src  {Name: "secure", Value: "yes", Path: "/", Secure: true},
+	goc  col 3  heap  runtime.newobject  net_http_Cookie  [main.main]
+	gc   col 3  frame  object  &http.Cookie{...}
+stdlib_http_cookiejar.go:20	heap -> frame
+	src  {Name: "expired", Value: "gone", Path: "/", Expires: time.Unix(1, 0)},
+	goc  col 3  heap  runtime.newobject  net_http_Cookie  [main.main]
+	gc   col 3  frame  object  &http.Cookie{...}
+stdlib_http_multipart_form.go:38	heap -> absent
+	src  defer request.MultipartForm.RemoveAll()
+	goc  col 8  heap  runtime.newobject  struct_code_uintptr__receiver__mime_multipart_Fo  [main.main]
+stdlib_http_multipart_form.go:47	heap -> absent
+	src  defer upload.Close()
+	goc  col 8  heap  runtime.newobject  struct_code_uintptr__receiver_io_Closer  [main.main]
+stdlib_http_redirect_keepalive.go:24	heap -> frame
+	src  http.SetCookie(response, &http.Cookie{
+	goc  col 29  heap  runtime.newobject  net_http_Cookie  [main.main.func.16.48]
+	gc   col 29  frame  object  &http.Cookie{...}
+stdlib_image_jpeg_roundtrip.go:18	heap -> frame
+	src  if err := jpeg.Encode(&encoded, source, &jpeg.Options{Quality: 95}); err != nil {
+	goc  col 42  heap  runtime.newobject  image_jpeg_Options  [main.main]
+	gc   col 42  frame  object  &jpeg.Options{...}
+stdlib_io_multi_reader_writer.go:10	heap -> absent
+	src  reader := io.MultiReader(
+	goc  col 12  heap  runtime.newobject  3_io_Reader  [main.main]
+stdlib_io_multi_reader_writer.go:17	heap -> absent
+	src  writer := io.MultiWriter(&left, &right)
+	goc  col 12  heap  runtime.newobject  2_io_Writer  [main.main]
+stdlib_io_pipe_roundtrip.go:6	heap -> absent
+	src  reader, writer := io.Pipe()
+	goc  col 2  heap  runtime.newobject  io_PipeReader  [main.main]
+stdlib_ioutil_tempfile.go:13	heap -> absent
+	src  defer os.RemoveAll(directory)
+	goc  col 2  heap  runtime.newobject  struct_code_uintptr__function_func_path_string__  [main.main]
+stdlib_iter_pull.go:5	heap -> absent
+	src  func count(limit int) iter.Seq[int] {
+	goc  col 1  heap  runtime.newobject  int  [main.count]
+	goc  col 1  heap  runtime.newobject  int  [main.main]
+stdlib_iter_pull.go:6	heap -> mixed
+	src  return func(yield func(int) bool) {
+	goc  col 9  heap  runtime.newobject  struct_code_uintptr__capture0_unsafe_Pointer  [main.count]
+	goc  col 9  heap  runtime.newobject  struct_code_uintptr__capture0_unsafe_Pointer  [main.main]
+	gc   col 9  heap  object  func literal
+	gc   col 14  frame  object  yield
+	gc   col 14  frame  object  yield
+stdlib_maps_keys.go:6	heap -> frame
+	src  scores := map[string]int{
+	goc  col 12  heap  runtime.makemap  map_string_int  [main.main]
+	gc   col 26  frame  map  map[string]int{...}
+stdlib_maps_keys.go:12	heap -> frame
+	src  seen := map[string]bool{}
+	goc  col 10  heap  runtime.makemap  map_string_bool  [main.main]
+	gc   col 25  frame  map  map[string]bool{}
+stdlib_maps_slices.go:9	heap -> frame
+	src  scores := map[string]int{
+	goc  col 12  heap  runtime.makemap  map_string_int  [main.main]
+	gc   col 26  frame  map  map[string]int{...}
+stdlib_maps_slices.go:14	heap -> frame
+	src  clone := map[string]int{}
+	goc  col 11  heap  runtime.makemap  map_string_int  [main.main]
+	gc   col 25  frame  map  map[string]int{}
+stdlib_maps_slices.go:25	heap -> frame
+	src  values := []int{5, 1, 3, 2, 4}
+	goc  col 12  heap  runtime.newobject  5_int  [main.main]
+	gc   col 17  frame  slice  []int{...}
+stdlib_maps_slices.go:31	heap -> frame
+	src  numbers := []int{1, 2, 3, 4}
+	goc  col 13  heap  runtime.newobject  4_int  [main.main]
+	gc   col 18  frame  slice  []int{...}
+stdlib_math_big_rat_int.go:15	heap -> frame
+	src  delta := new(big.Rat).Sub(denominator, numerator)
+	goc  col 11  heap  runtime.newobject  math_big_Rat  [main.main]
+	gc   col 14  frame  object  new(big.Rat)
+stdlib_net_mail_textproto.go:20	heap -> frame
+	src  header := textproto.MIMEHeader{}
+	goc  col 12  heap  runtime.makemap  map_string___string  [main.main]
+	gc   col 32  frame  object  textproto.MIMEHeader{}
+stdlib_netpoll_close_unblocks_read.go:10	heap -> absent
+	src  listener, err := net.Listen("tcp", "127.0.0.1:0")
+	goc  col 2  heap  runtime.newobject  net_Listener  [main.main]
+stdlib_netpoll_close_unblocks_read.go:14	heap -> absent
+	src  defer listener.Close()
+	goc  col 8  heap  runtime.newobject  struct_code_uintptr__receiver_net_Listener  [main.main]
+stdlib_netpoll_close_unblocks_read.go:25	heap -> absent
+	src  client, err := net.DialTimeout("tcp", listener.Addr().String(), time.Second)
+	goc  col 2  heap  runtime.newobject  net_Conn  [main.main]
+stdlib_netpoll_close_unblocks_read.go:30	heap -> absent
+	src  defer server.Close()
+	goc  col 8  heap  runtime.newobject  struct_code_uintptr__receiver_net_Conn  [main.main]
+stdlib_netpoll_pipe_afterfunc_close.go:9	heap -> absent
+	src  reader, writer, err := os.Pipe()
+	goc  col 2  heap  runtime.newobject  os_File  [main.main]
+stdlib_netpoll_pipe_afterfunc_close.go:13	heap -> absent
+	src  defer reader.Close()
+	goc  col 8  heap  runtime.newobject  struct_code_uintptr__receiver__os_File  [main.main]
+stdlib_netpoll_pipe_afterfunc_close.go:22	heap -> absent
+	src  defer timer.Stop()
+	goc  col 8  heap  runtime.newobject  struct_code_uintptr__receiver__time_Timer  [main.main]
+stdlib_netpoll_pipe_afterfunc_close.go:24	heap -> frame
+	src  buffer := make([]byte, 1)
+	goc  col 25  heap  runtime.newobject  1_byte  [main.main]
+	gc   col 16  frame  slice  make([]byte, 1)
+stdlib_netpoll_pipe_close_unblocks_read.go:9	heap -> absent
+	src  reader, writer, err := os.Pipe()
+	goc  col 2  heap  runtime.newobject  os_File  [main.main]
+stdlib_netpoll_pipe_close_unblocks_read.go:13	heap -> absent
+	src  defer reader.Close()
+	goc  col 8  heap  runtime.newobject  struct_code_uintptr__receiver__os_File  [main.main]
+stdlib_netpoll_pipe_close_unblocks_read.go:17	heap -> frame
+	src  buffer := make([]byte, 1)
+	goc  col 26  heap  runtime.newobject  1_byte  [main.main.func.16.5]
+	gc   col 17  frame  slice  make([]byte, 1)
+stdlib_netpoll_pipe_deadline.go:13	heap -> absent
+	src  defer reader.Close()
+	goc  col 8  heap  runtime.newobject  struct_code_uintptr__receiver__os_File  [main.main]
+stdlib_netpoll_pipe_deadline.go:14	heap -> absent
+	src  defer writer.Close()
+	goc  col 8  heap  runtime.newobject  struct_code_uintptr__receiver__os_File  [main.main]
+stdlib_netpoll_pipe_deadline.go:23	heap -> frame
+	src  buffer := make([]byte, 1)
+	goc  col 25  heap  runtime.newobject  1_byte  [main.main]
+	gc   col 16  frame  slice  make([]byte, 1)
+stdlib_netpoll_pipe_past_deadline.go:13	heap -> absent
+	src  defer reader.Close()
+	goc  col 8  heap  runtime.newobject  struct_code_uintptr__receiver__os_File  [main.main]
+stdlib_netpoll_pipe_past_deadline.go:14	heap -> absent
+	src  defer writer.Close()
+	goc  col 8  heap  runtime.newobject  struct_code_uintptr__receiver__os_File  [main.main]
+stdlib_netpoll_pipe_past_deadline.go:23	heap -> frame
+	src  buffer := make([]byte, 1)
+	goc  col 25  heap  runtime.newobject  1_byte  [main.main]
+	gc   col 16  frame  slice  make([]byte, 1)
+stdlib_netpoll_pipe_roundtrip.go:9	heap -> absent
+	src  reader, writer, err := os.Pipe()
+	goc  col 2  heap  runtime.newobject  os_File  [main.main]
+stdlib_netpoll_pipe_roundtrip.go:13	heap -> absent
+	src  defer reader.Close()
+	goc  col 8  heap  runtime.newobject  struct_code_uintptr__receiver__os_File  [main.main]
+stdlib_netpoll_pipe_roundtrip.go:14	heap -> absent
+	src  defer writer.Close()
+	goc  col 8  heap  runtime.newobject  struct_code_uintptr__receiver__os_File  [main.main]
+stdlib_netpoll_stress_pipe_close_churn.go:10	heap -> absent
+	src  reader, writer, err := os.Pipe()
+	goc  col 3  heap  runtime.newobject  os_File  [main.main]
+stdlib_netpoll_stress_pipe_close_churn.go:17	heap -> frame
+	src  buffer := make([]byte, 1)
+	goc  col 27  heap  runtime.newobject  1_byte  [main.main.func.16.6]
+	gc   col 18  frame  slice  make([]byte, 1)
+stdlib_netpoll_stress_pipe_deadline_reset.go:22	heap -> frame
+	src  buffer := make([]byte, 1)
+	goc  col 26  heap  runtime.newobject  1_byte  [main.main]
+	gc   col 17  frame  slice  make([]byte, 1)
+stdlib_netpoll_stress_tcp_churn.go:16	heap -> absent
+	src  defer listener.Close()
+	goc  col 8  heap  runtime.newobject  struct_code_uintptr__receiver_net_Listener  [main.main]
+stdlib_netpoll_stress_tcp_churn.go:21	heap -> absent
+	src  go serveTCPStressConnection(listener, byte(index), done)
+	goc  col 3  heap  runtime.newobject  struct_code_uintptr__argument0_net_Listener__arg  [main.main]
+stdlib_netpoll_stress_tcp_churn.go:65	heap -> absent
+	src  defer connection.Close()
+	goc  col 8  heap  runtime.newobject  struct_code_uintptr__receiver_net_Conn  [main.serveTCPStressConnection]
+stdlib_netpoll_stress_udp_burst.go:16	heap -> absent
+	src  defer connection.Close()
+	goc  col 8  heap  runtime.newobject  struct_code_uintptr__receiver__net_conn  [main.main]
+stdlib_netpoll_syscall_socket_listen.go:17	heap -> absent
+	src  defer syscall.Close(fileDescriptor)
+	goc  col 2  heap  runtime.newobject  struct_code_uintptr__function_func_fd_int___err_  [main.main]
+stdlib_netpoll_tcp_accept_deadline.go:13	heap -> absent
+	src  defer listener.Close()
+	goc  col 8  heap  runtime.newobject  struct_code_uintptr__receiver_net_Listener  [main.main]
+stdlib_netpoll_tcp_concurrent_clients.go:10	heap -> absent
+	src  listener, err := net.Listen("tcp", "127.0.0.1:0")
+	goc  col 2  heap  runtime.newobject  net_Listener  [main.main]
+stdlib_netpoll_tcp_concurrent_clients.go:14	heap -> absent
+	src  defer listener.Close()
+	goc  col 8  heap  runtime.newobject  struct_code_uintptr__receiver_net_Listener  [main.main]
+stdlib_netpoll_tcp_concurrent_clients.go:25	heap -> absent
+	src  defer connection.Close()
+	goc  col 11  heap  runtime.newobject  struct_code_uintptr__receiver_net_Conn  [main.main.func.24.7]
+stdlib_netpoll_tcp_concurrent_clients.go:43	heap -> absent
+	src  defer connection.Close()
+	goc  col 10  heap  runtime.newobject  struct_code_uintptr__receiver_net_Conn  [main.main.func.38.6]
+stdlib_netpoll_tcp_echo.go:10	heap -> absent
+	src  listener, err := net.Listen("tcp", "127.0.0.1:0")
+	goc  col 2  heap  runtime.newobject  net_Listener  [main.main]
+stdlib_netpoll_tcp_echo.go:16	heap -> absent
+	src  defer listener.Close()
+	goc  col 8  heap  runtime.newobject  struct_code_uintptr__receiver_net_Listener  [main.main]
+stdlib_netpoll_tcp_echo.go:26	heap -> absent
+	src  defer connection.Close()
+	goc  col 9  heap  runtime.newobject  struct_code_uintptr__receiver_net_Conn  [main.main.func.19.5]
+stdlib_netpoll_tcp_echo.go:52	heap -> absent
+	src  defer client.Close()
+	goc  col 8  heap  runtime.newobject  struct_code_uintptr__receiver_net_Conn  [main.main]
+stdlib_netpoll_tcp_read_deadline.go:9	heap -> absent
+	src  listener, err := net.Listen("tcp", "127.0.0.1:0")
+	goc  col 2  heap  runtime.newobject  net_Listener  [main.main]
+stdlib_netpoll_tcp_read_deadline.go:13	heap -> absent
+	src  defer listener.Close()
+	goc  col 8  heap  runtime.newobject  struct_code_uintptr__receiver_net_Listener  [main.main]
+stdlib_netpoll_tcp_read_deadline.go:28	heap -> absent
+	src  defer client.Close()
+	goc  col 8  heap  runtime.newobject  struct_code_uintptr__receiver_net_Conn  [main.main]
+stdlib_netpoll_tcp_read_deadline.go:31	heap -> absent
+	src  defer server.Close()
+	goc  col 8  heap  runtime.newobject  struct_code_uintptr__receiver_net_Conn  [main.main]
+stdlib_netpoll_udp_deadline.go:17	heap -> absent
+	src  defer connection.Close()
+	goc  col 8  heap  runtime.newobject  struct_code_uintptr__receiver__net_conn  [main.main]
+stdlib_netpoll_udp_loopback.go:14	heap -> absent
+	src  defer connection.Close()
+	goc  col 8  heap  runtime.newobject  struct_code_uintptr__receiver__net_conn  [main.main]
+stdlib_netpoll_udp_loopback.go:21	heap -> frame
+	src  buffer := make([]byte, 8)
+	goc  col 25  heap  runtime.newobject  8_byte  [main.main]
+	gc   col 16  frame  slice  make([]byte, 8)
+stdlib_os_exec_echo.go:9	heap -> frame
+	src  output, err := exec.Command("/bin/echo", "cg12 exec status").Output()
+	goc  col 30  heap  runtime.newobject  1_string  [main.main]
+	gc   col 29  frame  slice  ... argument
+stdlib_os_exec_goroutine_shape.go:9	heap -> absent
+	src  func writerDescriptor(writer io.Writer, goroutines []func() error) (*os.File, []func() error) {
+	goc  col 1  heap  runtime.newobject  io_Writer  [main.writerDescriptor]
+stdlib_os_exec_goroutine_shape.go:10	heap -> absent
+	src  reader, pipeWriter, err := os.Pipe()
+	goc  col 2  heap  runtime.newobject  os_File  [main.writerDescriptor]
+stdlib_os_exec_goroutine_shape.go:41	heap -> mixed
+	src  go func(fn func() error) {
+	goc  col 3  heap  runtime.newobject  struct_code_uintptr__function_func_fn_func___err  [main.main]
+	goc  col 6  heap  runtime.newobject  struct_code_uintptr__capture0_unsafe_Pointer  [main.main]
+	gc   col 6  heap  object  func literal
+	gc   col 11  frame  object  fn
+stdlib_os_file_roundtrip.go:13	heap -> absent
+	src  defer os.RemoveAll(directory)
+	goc  col 2  heap  runtime.newobject  struct_code_uintptr__function_func_path_string__  [main.main]
+stdlib_os_file_roundtrip.go:15	heap -> absent
+	src  path := filepath.Join(directory, "value.txt")
+	goc  col 10  heap  runtime.newobject  2_string  [main.main]
+stdlib_os_file_roundtrip.go:26	heap -> frame
+	src  buffer := make([]byte, 10)
+	goc  col 25  heap  runtime.newobject  10_byte  [main.main]
+	gc   col 16  frame  slice  make([]byte, 10)
+stdlib_os_pipe_embedded_file_copy.go:20	heap -> absent
+	src  func makeEmbeddedFileCopy(writer io.Writer, goroutines []func() error) (*os.File, []func() error) {
+	goc  col 1  heap  runtime.newobject  io_Writer  [main.makeEmbeddedFileCopy]
+stdlib_os_pipe_embedded_file_copy.go:21	heap -> absent
+	src  reader, pipeWriter, err := os.Pipe()
+	goc  col 2  heap  runtime.newobject  os_File  [main.makeEmbeddedFileCopy]
+stdlib_os_pipe_embedded_file_copy.go:27	heap -> absent
+	src  _, copyErr := io.Copy(writer, fileWithoutWriteTo{File: reader})
+	goc  col 58  heap  runtime.newobject  main_fileWithoutWriteTo  [main.makeEmbeddedFileCopy.func.26.34]
+stdlib_os_pipe_embedded_file_copy.go:52	heap -> mixed
+	src  go func(fn func() error) {
+	goc  col 3  heap  runtime.newobject  struct_code_uintptr__function_func_fn_func___err  [main.main]
+	goc  col 6  heap  runtime.newobject  struct_code_uintptr__capture0_unsafe_Pointer  [main.main]
+	gc   col 6  heap  object  func literal
+	gc   col 11  frame  object  fn
+stdlib_os_pipe_goroutine_close.go:19	heap -> absent
+	src  go closeFile(writer, done)
+	goc  col 2  heap  runtime.newobject  struct_code_uintptr__argument0__os_File__argumen  [main.main]
+stdlib_os_pipe_goroutine_close.go:24	heap -> frame
+	src  buffer := make([]byte, 8)
+	goc  col 25  heap  runtime.newobject  8_byte  [main.main]
+	gc   col 16  frame  slice  make([]byte, 8)
+stdlib_os_pipe_goroutine_close.go:33	heap -> absent
+	src  go closeFile(reader, done)
+	goc  col 2  heap  runtime.newobject  struct_code_uintptr__argument0__os_File__argumen  [main.main]
+stdlib_os_pipe_interface_capture_close.go:9	heap -> absent
+	src  func makeInterfaceCaptureCloser(writer io.Writer) (*os.File, func() error) {
+	goc  col 1  heap  runtime.newobject  io_Writer  [main.makeInterfaceCaptureCloser]
+stdlib_os_pipe_interface_capture_close.go:10	heap -> absent
+	src  reader, pipeWriter, err := os.Pipe()
+	goc  col 2  heap  runtime.newobject  os_File  [main.makeInterfaceCaptureCloser]
+stdlib_os_pipe_interface_capture_close.go:33	heap -> mixed
+	src  go func(fn func() error) {
+	goc  col 2  heap  runtime.newobject  struct_code_uintptr__function_func_fn_func___err  [main.main]
+	goc  col 5  heap  runtime.newobject  struct_code_uintptr__capture0_unsafe_Pointer  [main.main]
+	gc   col 5  heap  object  func literal
+	gc   col 10  frame  object  fn
+stdlib_os_pipe_manual_copy_shape.go:9	heap -> absent
+	src  func makeManualCopy(writer io.Writer, goroutines []func() error) (*os.File, []func() error) {
+	goc  col 1  heap  runtime.newobject  io_Writer  [main.makeManualCopy]
+stdlib_os_pipe_manual_copy_shape.go:10	heap -> absent
+	src  reader, pipeWriter, err := os.Pipe()
+	goc  col 2  heap  runtime.newobject  os_File  [main.makeManualCopy]
+stdlib_os_pipe_manual_copy_shape.go:52	heap -> mixed
+	src  go func(fn func() error) {
+	goc  col 3  heap  runtime.newobject  struct_code_uintptr__function_func_fn_func___err  [main.main]
+	goc  col 6  heap  runtime.newobject  struct_code_uintptr__capture0_unsafe_Pointer  [main.main]
+	gc   col 6  heap  object  func literal
+	gc   col 11  frame  object  fn
+stdlib_os_pipe_returned_closure_close.go:9	heap -> absent
+	src  reader, writer, err := os.Pipe()
+	goc  col 2  heap  runtime.newobject  os_File  [main.makeReaderCloser]
+stdlib_os_pipe_returned_closure_close.go:28	heap -> mixed
+	src  go func(fn func() error) {
+	goc  col 2  heap  runtime.newobject  struct_code_uintptr__function_func_fn_func___err  [main.main]
+	goc  col 5  heap  runtime.newobject  struct_code_uintptr__capture0_unsafe_Pointer  [main.main]
+	gc   col 5  heap  object  func literal
+	gc   col 10  frame  object  fn
+stdlib_os_readdir_walkdir.go:14	heap -> absent
+	src  defer os.RemoveAll(directory)
+	goc  col 2  heap  runtime.newobject  struct_code_uintptr__function_func_path_string__  [main.main]
+stdlib_os_readdir_walkdir.go:16	heap -> absent
+	src  subdirectory := filepath.Join(directory, "sub")
+	goc  col 18  heap  runtime.newobject  2_string  [main.main]
+stdlib_os_readdir_walkdir.go:20	heap -> frame
+	src  if err := os.WriteFile(filepath.Join(directory, "a.txt"), []byte("a"), 0o644); err != nil {
+	goc  col 25  heap  runtime.newobject  2_string  [main.main]
+	gc   col 67  frame  object  ([]byte)("a")
+stdlib_os_readdir_walkdir.go:23	heap -> frame
+	src  if err := os.WriteFile(filepath.Join(subdirectory, "b.txt"), []byte("b"), 0o644); err != nil {
+	goc  col 25  heap  runtime.newobject  2_string  [main.main]
+	gc   col 70  frame  object  ([]byte)("b")
+stdlib_os_readdir_walkdir.go:35	heap -> absent
+	src  files := 0
+	goc  col 2  heap  runtime.newobject  int  [main.main]
+stdlib_os_readdir_walkdir.go:36	heap -> absent
+	src  directories := 0
+	goc  col 2  heap  runtime.newobject  int  [main.main]
+stdlib_os_readdir_walkdir.go:37	heap -> frame
+	src  err = filepath.WalkDir(directory, func(path string, entry fs.DirEntry, walkErr error) error {
+	goc  col 36  heap  runtime.newobject  struct_code_uintptr__capture0_unsafe_Pointer__ca  [main.main]
+	gc   col 36  frame  object  func literal
+	gc   col 41  frame  object  path
+stdlib_os_rename_stat.go:13	heap -> absent
+	src  defer os.RemoveAll(directory)
+	goc  col 2  heap  runtime.newobject  struct_code_uintptr__function_func_path_string__  [main.main]
+stdlib_os_rename_stat.go:15	heap -> absent
+	src  source := filepath.Join(directory, "source.txt")
+	goc  col 12  heap  runtime.newobject  2_string  [main.main]
+stdlib_os_rename_stat.go:16	heap -> absent
+	src  destination := filepath.Join(directory, "destination.txt")
+	goc  col 17  heap  runtime.newobject  2_string  [main.main]
+stdlib_signal_atomic_contention.go:19	heap -> absent
+	src  defer workers.Done()
+	goc  col 10  heap  runtime.newobject  struct_code_uintptr__receiver__sync_WaitGroup  [main.main.func.18.6]
+stdlib_signal_atomic_contention.go:32	heap -> frame
+	src  signal.Notify(signals, syscall.SIGUSR1)
+	goc  col 16  heap  runtime.newobject  struct_values__1_os_Signal__payload0_syscall_Sig  [main.main]
+	gc   col 15  frame  slice  ... argument
+	gc   col 32  frame  object  syscall.Signal(10)
+stdlib_signal_atomic_contention.go:39	heap -> frame
+	src  if received != syscall.SIGUSR1 {
+	goc  col 19  heap  runtime.newobject  syscall_Signal  [main.main]
+	gc   col 26  frame  object  syscall.Signal(10)
+stdlib_signal_during_gc.go:13	heap -> frame
+	src  signal.Notify(signals, syscall.SIGUSR1)
+	goc  col 16  heap  runtime.newobject  struct_values__1_os_Signal__payload0_syscall_Sig  [main.main]
+	gc   col 15  frame  slice  ... argument
+	gc   col 32  frame  object  syscall.Signal(10)
+stdlib_signal_during_gc.go:14	heap -> absent
+	src  defer signal.Stop(signals)
+	goc  col 2  heap  runtime.newobject  struct_code_uintptr__function_func_c_chan___os_S  [main.main]
+stdlib_signal_during_gc.go:23	heap -> frame
+	src  values := make([]*int, 1024)
+	goc  col 28  heap  runtime.newobject  1024__int  [main.main.func.17.5]
+	gc   col 19  frame  slice  make([]*int, 1024)
+stdlib_signal_during_gc.go:29	heap -> frame
+	src  runtime.KeepAlive(values)
+	goc  col 23  heap  runtime.newobject  int  [main.main.func.17.5]
+	gc   col 23  frame  object  values
+stdlib_signal_during_gc.go:40	heap -> frame
+	src  if received != syscall.SIGUSR1 {
+	goc  col 19  heap  runtime.newobject  syscall_Signal  [main.main]
+	gc   col 26  frame  object  syscall.Signal(10)
+stdlib_signal_during_netpoll.go:16	heap -> absent
+	src  defer listener.Close()
+	goc  col 8  heap  runtime.newobject  struct_code_uintptr__receiver_net_Listener  [main.main]
+stdlib_signal_during_netpoll.go:22	heap -> absent
+	src  defer client.Close()
+	goc  col 8  heap  runtime.newobject  struct_code_uintptr__receiver_net_Conn  [main.main]
+stdlib_signal_during_netpoll.go:24	heap -> absent
+	src  server, err := listener.Accept()
+	goc  col 17  heap  runtime.newobject  net_Conn  [main.main]
+stdlib_signal_during_netpoll.go:28	heap -> absent
+	src  defer server.Close()
+	goc  col 8  heap  runtime.newobject  struct_code_uintptr__receiver_net_Conn  [main.main]
+stdlib_signal_during_netpoll.go:40	heap -> frame
+	src  signal.Notify(signals, syscall.SIGUSR1)
+	goc  col 16  heap  runtime.newobject  struct_values__1_os_Signal__payload0_syscall_Sig  [main.main]
+	gc   col 15  frame  slice  ... argument
+	gc   col 32  frame  object  syscall.Signal(10)
+stdlib_signal_during_netpoll.go:41	heap -> absent
+	src  defer signal.Stop(signals)
+	goc  col 2  heap  runtime.newobject  struct_code_uintptr__function_func_c_chan___os_S  [main.main]
+stdlib_signal_during_netpoll.go:47	heap -> frame
+	src  if received != syscall.SIGUSR1 {
+	goc  col 18  heap  runtime.newobject  syscall_Signal  [main.main]
+	gc   col 25  frame  object  syscall.Signal(10)
+stdlib_signal_notify_context.go:13	heap -> frame
+	src  signal.Notify(signals, syscall.SIGUSR1)
+	goc  col 16  heap  runtime.newobject  struct_values__1_os_Signal__payload0_syscall_Sig  [main.main]
+	gc   col 15  frame  slice  ... argument
+	gc   col 32  frame  object  syscall.Signal(10)
+stdlib_signal_notify_context.go:19	heap -> frame
+	src  if received != syscall.SIGUSR1 {
+	goc  col 18  heap  runtime.newobject  syscall_Signal  [main.main]
+	gc   col 25  frame  object  syscall.Signal(10)
+stdlib_signal_repeated_stop_reset.go:29	heap -> frame
+	src  signal.Notify(first, syscall.SIGUSR1)
+	goc  col 16  heap  runtime.newobject  struct_values__1_os_Signal__payload0_syscall_Sig  [main.main]
+	gc   col 15  frame  slice  ... argument
+	gc   col 30  frame  object  syscall.Signal(10)
+stdlib_signal_repeated_stop_reset.go:32	heap -> frame
+	src  waitForSignal(first, syscall.SIGUSR1)
+	goc  col 24  heap  runtime.newobject  syscall_Signal  [main.main]
+	gc   col 31  frame  object  syscall.Signal(10)
+stdlib_signal_repeated_stop_reset.go:36	heap -> frame
+	src  signal.Ignore(syscall.SIGUSR1)
+	goc  col 2  heap  runtime.newobject  struct_values__1_os_Signal__payload0_syscall_Sig  [main.main]
+	gc   col 23  frame  object  syscall.Signal(10)
+stdlib_signal_repeated_stop_reset.go:44	heap -> frame
+	src  signal.Reset(syscall.SIGUSR1)
+	goc  col 2  heap  runtime.newobject  struct_values__1_os_Signal__payload0_syscall_Sig  [main.main]
+	gc   col 22  frame  object  syscall.Signal(10)
+stdlib_signal_repeated_stop_reset.go:46	heap -> frame
+	src  signal.Notify(second, syscall.SIGUSR1)
+	goc  col 16  heap  runtime.newobject  struct_values__1_os_Signal__payload0_syscall_Sig  [main.main]
+	gc   col 15  frame  slice  ... argument
+	gc   col 31  frame  object  syscall.Signal(10)
+stdlib_signal_repeated_stop_reset.go:48	heap -> frame
+	src  waitForSignal(second, syscall.SIGUSR1)
+	goc  col 24  heap  runtime.newobject  syscall_Signal  [main.main]
+	gc   col 31  frame  object  syscall.Signal(10)
+stdlib_slices_string_sort.go:6	heap -> frame
+	src  keys := []string{"gamma", "alpha", "beta"}
+	goc  col 10  heap  runtime.newobject  3_string  [main.main]
+	gc   col 18  frame  slice  []string{...}
+stdlib_slog_structured.go:35	heap -> absent
+	src  "compiled",
+	goc  col 3  heap  runtime.newobject  struct_values__4_any__payload0_string__payload1_  [main.main]
+stdlib_slog_structured.go:44	heap -> frame
+	src  if record[slog.LevelKey] != "INFO" || record[slog.MessageKey] != "compiled" {
+	goc  col 30  heap  runtime.newobject  string  [main.main]
+	goc  col 67  heap  runtime.newobject  string  [main.main]
+	gc   col 30  frame  object  "INFO"
+	gc   col 67  frame  object  "compiled"
+stdlib_slog_structured.go:47	heap -> frame
+	src  if record["component"] != "cg12" || record["success"] != true {
+	goc  col 28  heap  runtime.newobject  string  [main.main]
+	goc  col 59  heap  runtime.newobject  bool  [main.main]
+	gc   col 28  frame  object  "cg12"
+	gc   col 59  frame  object  true
+stdlib_slog_structured.go:54	heap -> frame
+	src  if state["package"] != "runtime" || state["files"] != float64(42) {
+	goc  col 25  heap  runtime.newobject  string  [main.main]
+	goc  col 56  heap  runtime.newobject  float64  [main.main]
+	gc   col 25  frame  object  "runtime"
+	gc   col 63  frame  object  42
+stdlib_smtp_session.go:15	heap -> absent
+	src  go serveSMTP(serverConnection, serverResult)
+	goc  col 2  heap  runtime.newobject  struct_code_uintptr__argument0_net_Conn__argumen  [main.main]
+stdlib_smtp_session.go:50	heap -> absent
+	src  defer protocol.Close()
+	goc  col 8  heap  runtime.newobject  struct_code_uintptr__receiver__net_textproto_Con  [main.serveSMTP]
+stdlib_sort_search_slice.go:6	heap -> frame
+	src  values := []int{9, 1, 5, 3, 7}
+	goc  col 12  heap  runtime.newobject  5_int  [main.main]
+	gc   col 17  frame  slice  []int{...}
+stdlib_sort_search_slice.go:19	heap -> absent
+	src  records := []struct {
+	goc  col 2  heap  runtime.newobject  struct_name_string__score_int  [main.main]
+	goc  col 13  heap  runtime.newobject  2_struct_name_string__score_int  [main.main]
+stdlib_sort_search_slice.go:26	heap -> mixed
+	src  sort.Slice(records, func(left, right int) bool {
+	goc  col 13  heap  runtime.newobject  struct_name_string__score_int  [main.main]
+	goc  col 22  heap  runtime.newobject  struct_code_uintptr__capture0_unsafe_Pointer  [main.main]
+	gc   col 13  heap  object  records
+	gc   col 22  frame  object  func literal
+stdlib_strings_reader_seek.go:15	heap -> frame
+	src  buffer := make([]byte, 3)
+	goc  col 25  heap  runtime.newobject  3_byte  [main.main]
+	gc   col 16  frame  slice  make([]byte, 3)
+stdlib_strings_transform.go:16	heap -> absent
+	src  replacer := strings.NewReplacer("alpha", "A", "世界", "world")
+	goc  col 14  heap  runtime.newobject  4_string  [main.main]
+stdlib_sync_once_map_cond.go:20	heap -> frame
+	src  if value, ok := values.Load("alpha"); !ok || value.(int) != 17 {
+	goc  col 30  heap  runtime.newobject  string  [main.main]
+	gc   col 30  frame  object  "alpha"
+stdlib_sync_once_map_cond.go:23	heap -> frame
+	src  values.Delete("alpha")
+	goc  col 16  heap  runtime.newobject  string  [main.main]
+	gc   col 16  frame  object  "alpha"
+stdlib_sync_once_map_cond.go:24	heap -> frame
+	src  if _, ok := values.Load("alpha"); ok {
+	goc  col 26  heap  runtime.newobject  string  [main.main]
+	gc   col 26  frame  object  "alpha"
+stdlib_sync_once_map_cond.go:29	heap -> absent
+	src  condition := sync.NewCond(mutex)
+	goc  col 2  heap  runtime.newobject  sync_Cond  [main.main]
+stdlib_url_values_encode.go:6	heap -> frame
+	src  values := url.Values{}
+	goc  col 12  heap  runtime.makemap  map_string___string  [main.main]
+	gc   col 22  frame  object  url.Values{}
+
