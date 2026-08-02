@@ -1,6 +1,30 @@
 package opt
 
-import "github.com/evanphx/cg12/ir"
+import (
+	"sync/atomic"
+
+	"github.com/evanphx/cg12/ir"
+)
+
+// heapAllocPromoted and heapAllocLowered count what LowerHeapAllocations did
+// with the OHeapAlloc candidates it saw. They are measurement scaffolding for
+// ESCAPE_IR_PLAN.md: the proposal there is to route every allocation through
+// the neutral candidate op, so how well the existing IR pass places the ones
+// that already reach it is the evidence for or against.
+var heapAllocPromoted, heapAllocLowered atomic.Int64
+
+// HeapAllocLoweringStats reports how many OHeapAlloc candidates
+// LowerHeapAllocations has promoted to frame slots and how many it has lowered
+// to allocator calls since the last ResetHeapAllocLoweringStats.
+func HeapAllocLoweringStats() (promoted, lowered int64) {
+	return heapAllocPromoted.Load(), heapAllocLowered.Load()
+}
+
+// ResetHeapAllocLoweringStats zeroes the counters HeapAllocLoweringStats reads.
+func ResetHeapAllocLoweringStats() {
+	heapAllocPromoted.Store(0)
+	heapAllocLowered.Store(0)
+}
 
 type localSlot struct {
 	base   locKey
@@ -233,6 +257,7 @@ func lowerFunctionHeapAllocations(function *ir.Func) bool {
 				continue
 			}
 			if escaped[instruction.To.ID] {
+				heapAllocLowered.Add(1)
 				instruction.Op = ir.OCall
 				instruction.Args = instruction.Args[:2]
 				instruction.Aux = 0
@@ -240,6 +265,7 @@ func lowerFunctionHeapAllocations(function *ir.Func) bool {
 				continue
 			}
 
+			heapAllocPromoted.Add(1)
 			size := instruction.Args[2]
 			switch instruction.Aux {
 			case 4:

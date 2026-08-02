@@ -494,7 +494,7 @@ func reachableFunctions(fset *token.FileSet, roots []*ast.FuncDecl, rootFiles []
 
 			currentFunction, _ := current.info.Defs[current.decl.Name].(*types.Func)
 			currentSignature, _ := currentFunction.Type().(*types.Signature)
-			parents := astParents(current.decl.Body)
+			parents := astParentsFor(EscapeCostReach, current.decl.Body)
 			ast.Inspect(current.decl.Body, func(node ast.Node) bool {
 				switch statement := node.(type) {
 				case *ast.CompositeLit:

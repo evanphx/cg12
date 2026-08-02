@@ -2131,7 +2131,7 @@ func generateDynamicInitializerFunctions(base *gen, initializers map[types.Objec
 		generator.cur = generator.fn.Entry()
 		// The initializer expression is a bare expression rather than a body, so
 		// only its parent links are needed.
-		generator.parents = astParents(initializer.expression)
+		generator.parents = astParentsFor(EscapeCostLowering, initializer.expression)
 		generator.functionName = base.dynamicInitializerFunctions[object]
 
 		generator.emitDynamicGlobalInitializer(initializer)
@@ -2288,6 +2288,7 @@ func astParents(root ast.Node) map[ast.Node]ast.Node {
 // only as the storage for an immediately reinterpreted or selected value. The
 // heap-allocation IR pass handles the remaining, dataflow-dependent cases.
 func (g *gen) nonEscapingAddress(address *ast.UnaryExpr) bool {
+	defer enterEscapeWalk()()
 	return g.nonEscapingAddressWithin(
 		address,
 		g.info,
@@ -2341,6 +2342,7 @@ func (g *gen) nonEscapingAddressWithin(
 // bootstrap storage because promoting it through runtime.newobject would make
 // the allocator recursively depend on itself.
 func (g *gen) addressEscapesFunction(address *ast.UnaryExpr) bool {
+	defer enterEscapeWalk()()
 	return g.addressEscapesWithin(
 		address,
 		g.info,
@@ -2460,6 +2462,7 @@ func (g *gen) assignedResultDoesNotEscape(expression ast.Expr) bool {
 }
 
 func (g *gen) assignedNodeDoesNotEscape(expression ast.Node) bool {
+	defer enterEscapeWalk()()
 	return g.assignedNodeDoesNotEscapeWithin(
 		expression,
 		g.info,
@@ -2558,6 +2561,7 @@ func (g *gen) destinationDoesNotEscape(
 // are ordinary stack temporaries in Go, and allocating one on every range
 // iteration can make runtime code allocate while scanning the stack.
 func (g *gen) valueDoesNotEscape(expression ast.Expr) bool {
+	defer enterEscapeWalk()()
 	return g.valueDoesNotEscapeWithin(
 		expression,
 		g.info,
@@ -3461,6 +3465,7 @@ func (g *gen) enterCalleeBody(signature *types.Signature, resultLeakBody *ast.Bl
 }
 
 func (g *gen) parameterDoesNotEscape(function *types.Func, index int, checking map[parameterKey]bool) bool {
+	defer enterEscapeWalk()()
 	declaration, ok := g.functionDecls[function]
 	if !ok {
 		return false
@@ -3472,6 +3477,7 @@ func (g *gen) parameterDoesNotEscape(function *types.Func, index int, checking m
 	if declaration.decl.Body == nil {
 		return hasCompilerDirective(declaration.decl, "go:noescape")
 	}
+	recordSummaryQuery(function.FullName(), index, false)
 	key := parameterKey{function: function, index: index}
 	if checking[key] {
 		return false
@@ -3486,7 +3492,7 @@ func (g *gen) parameterDoesNotEscape(function *types.Func, index int, checking m
 	// reach the result, and a result of interface type boxes the value into
 	// fresh heap storage on the way out; boxedIntoInterface needs the
 	// signature to see that.
-	parents := astParents(declaration.decl)
+	parents := astParentsFor(EscapeCostSummary, declaration.decl)
 	return g.objectDoesNotEscape(signature.Params().At(index), declaration.info, parents, declaration.decl.Body, checking)
 }
 
@@ -3503,6 +3509,7 @@ func (g *gen) parameterDoesNotEscape(function *types.Func, index int, checking m
 // simply continue from the call expression, because that expression does not
 // stand for one value; see leakedCallResultDoesNotEscape.
 func (g *gen) parameterLeaksOnlyToResult(function *types.Func, index int, checking map[parameterKey]bool) bool {
+	defer enterEscapeWalk()()
 	declaration, ok := g.functionDecls[function]
 	if !ok || declaration.decl.Body == nil {
 		return false
@@ -3517,6 +3524,7 @@ func (g *gen) parameterLeaksOnlyToResult(function *types.Func, index int, checki
 	if signature.Variadic() && index == signature.Params().Len()-1 {
 		return false
 	}
+	recordSummaryQuery(function.FullName(), index, true)
 	key := parameterKey{function: function, index: index, summary: true}
 	if checking[key] {
 		return false
@@ -3531,7 +3539,7 @@ func (g *gen) parameterLeaksOnlyToResult(function *types.Func, index int, checki
 	// reach the result, and a result of interface type boxes the value into
 	// fresh heap storage on the way out; boxedIntoInterface needs the
 	// signature to see that.
-	parents := astParents(declaration.decl)
+	parents := astParentsFor(EscapeCostSummary, declaration.decl)
 	answer := g.objectDoesNotEscape(signature.Params().At(index), declaration.info, parents, declaration.decl.Body, checking)
 	reportResultLeakSummary(function, index, answer)
 	return answer
@@ -3570,6 +3578,7 @@ func (g *gen) reportEscapingUse(object types.Object, use ast.Node) {
 }
 
 func (g *gen) receiverDoesNotEscape(function *types.Func, checking map[parameterKey]bool) bool {
+	defer enterEscapeWalk()()
 	declaration, ok := g.functionDecls[function]
 	if !ok {
 		return false
@@ -3581,6 +3590,7 @@ func (g *gen) receiverDoesNotEscape(function *types.Func, checking map[parameter
 	if declaration.decl.Body == nil {
 		return hasCompilerDirective(declaration.decl, "go:noescape")
 	}
+	recordSummaryQuery(function.FullName(), -1, false)
 	key := parameterKey{function: function, index: -1}
 	if checking[key] {
 		return false
@@ -3595,7 +3605,7 @@ func (g *gen) receiverDoesNotEscape(function *types.Func, checking map[parameter
 	// reach the result, and a result of interface type boxes the value into
 	// fresh heap storage on the way out; boxedIntoInterface needs the
 	// signature to see that.
-	parents := astParents(declaration.decl)
+	parents := astParentsFor(EscapeCostSummary, declaration.decl)
 	return g.objectDoesNotEscape(signature.Recv(), declaration.info, parents, declaration.decl.Body, checking)
 }
 
@@ -5507,6 +5517,9 @@ func (g *gen) variableStorage(object types.Object, valueType types.Type) ir.Ref 
 	if storage, exists := g.vars[object]; exists {
 		return storage
 	}
+	if g.runtimeAllocation {
+		recordPlacement("local-variable-storage", g.escapingCaptures[object])
+	}
 	if g.runtimeAllocation && g.escapingCaptures[object] {
 		var storage ir.Ref
 		if isMemoryValue(valueType) {
@@ -6587,7 +6600,7 @@ func (g *gen) emitDynamicGlobalInitializer(initializer *globalInitializer) {
 	savedBody := g.currentBody
 	g.info = initializer.info
 	g.pkg = initializer.pkg
-	g.parents = astParents(initializer.expression)
+	g.parents = astParentsFor(EscapeCostLowering, initializer.expression)
 	g.currentBody = nil
 	for _, groupObject := range initializer.objects {
 		g.initializingGlobals[groupObject] = true
@@ -7722,7 +7735,7 @@ func (g *gen) funcDecl(fd *ast.FuncDecl) {
 	// then span another's.
 	g.deferBlocks = nil
 	g.runningDefers = false
-	g.parents = astParents(fd.Body)
+	g.parents = astParentsFor(EscapeCostLowering, fd.Body)
 	g.currentBody = fd.Body
 	predeclaredVariables := signatureVariables(originalSignature)
 	g.escapeWalkOuterObjects = predeclaredVariables
@@ -9421,7 +9434,7 @@ func (g *gen) iteratorRangeStmt(statement *ast.RangeStmt, label string, iterator
 	child.resultType = types.Typ[types.Bool]
 	child.fn = g.mod.NewFunc(symbol, ir.ClsW)
 	child.cur = child.fn.Entry()
-	child.parents = astParents(statement.Body)
+	child.parents = astParentsFor(EscapeCostLowering, statement.Body)
 	child.currentBody = statement.Body
 	var rangeVariables []types.Object
 	if statement.Tok == token.DEFINE {
@@ -10795,6 +10808,7 @@ func (g *gen) expr(e ast.Expr) (result ir.Ref) {
 				if g.noWriteBarrier {
 					heap = false
 				}
+				recordPlacement("composite-literal-address", heap)
 				literalType := g.typeAndValue(literal).Type
 				_, isMap := literalType.Underlying().(*types.Map)
 				if isSliceType(literalType) || isMap {
@@ -11613,7 +11627,9 @@ func (g *gen) methodValue(expression *ast.SelectorExpr, selection *types.Selecti
 		wrapper.returnValue(result, signature.Results().At(0).Type())
 	}
 	descriptor := g.localAllocTyped(descriptorType)
-	if !g.valueDoesNotEscape(expression) {
+	methodValueHeap := !g.valueDoesNotEscape(expression)
+	recordPlacement("method-value-descriptor", methodValueHeap)
+	if methodValueHeap {
 		descriptor = g.allocateEscapingTyped(descriptorType)
 	}
 	g.cur.Store(g.fn.Sym(wrapperName, 0), g.offset(descriptor, descriptorOffsets[0]))
@@ -11705,7 +11721,9 @@ func (g *gen) compositeLiteral(literal *ast.CompositeLit, heap bool) ir.Ref {
 		visitPointerWords(backingType, 0, func(offset int64) {
 			g.markStackPointerWord(backing, int(offset))
 		})
-		if heap || !g.valueDoesNotEscape(literal) {
+		sliceLiteralHeap := heap || !g.valueDoesNotEscape(literal)
+		recordPlacement("slice-literal-backing", sliceLiteralHeap)
+		if sliceLiteralHeap {
 			backing = g.allocateEscapingTyped(backingType)
 		}
 		g.zero(backing, types.NewArray(elementType, length))
@@ -11910,7 +11928,7 @@ func (g *gen) functionLiteral(literal *ast.FuncLit) ir.Ref {
 		child.fn.RetValues = child.runtimeAllocation && isSliceType(signature.Results().At(0).Type())
 	}
 	child.cur = child.fn.Entry()
-	child.parents = astParents(literal.Body)
+	child.parents = astParentsFor(EscapeCostLowering, literal.Body)
 	child.currentBody = literal.Body
 	predeclaredVariables := append([]types.Object(nil), parameterObjects...)
 	predeclaredVariables = append(predeclaredVariables, resultObjects...)
@@ -12160,6 +12178,7 @@ func (g *gen) fieldListObjects(fields *ast.FieldList) []types.Object {
 }
 
 func (g *gen) functionLiteralEscapes(literal *ast.FuncLit) bool {
+	defer enterEscapeWalk()()
 	return g.functionLiteralEscapesWithin(
 		literal,
 		g.info,
@@ -12718,6 +12737,7 @@ func (g *gen) stringSlice(expression ast.Expr, targetType types.Type) ir.Ref {
 		buffer := g.fn.ConstInt(ir.ClsP, 0)
 		if conversion, ok := g.parents[expression].(*ast.CallExpr); ok {
 			_, isRange := g.parents[conversion].(*ast.RangeStmt)
+			recordPlacement("string-conversion-buffer", !(isRange || g.valueDoesNotEscape(conversion)))
 			if isRange || g.valueDoesNotEscape(conversion) {
 				bufferSize := int64(32)
 				if element.Kind() == types.Int32 {
@@ -12966,6 +12986,7 @@ func (g *gen) descriptorLength(value ir.Ref) ir.Ref {
 }
 
 func (g *gen) allocateTyped(valueType types.Type) ir.Ref {
+	recordPlacement("allocateTyped-neutral-OHeapAlloc", false)
 	if g.runtimeAllocation {
 		allocation := g.cur.HeapAlloc(
 			g.fn.Sym("runtime.newobject", 0),
@@ -12982,6 +13003,7 @@ func (g *gen) allocateTyped(valueType types.Type) ir.Ref {
 }
 
 func (g *gen) allocateEscapingTyped(valueType types.Type) ir.Ref {
+	recordPlacement("allocateEscapingTyped-committed-heap", true)
 	if g.runtimeAllocation {
 		allocation := g.cur.Call(
 			ir.ClsP,
@@ -13052,6 +13074,9 @@ func (g *gen) builtinCall(call *ast.CallExpr, builtin *types.Builtin) ir.Ref {
 			}
 			fixedCapacity, hasFixedCapacity := g.fixedSliceCapacity(call)
 			var data ir.Ref
+			if hasFixedCapacity && fixedCapacity > 0 {
+				recordPlacement("make-fixed-capacity-backing", !g.makeResultDoesNotEscape(call))
+			}
 			if hasFixedCapacity && fixedCapacity > 0 && g.makeResultDoesNotEscape(call) {
 				elementSize := typeSize(sliceType.Elem())
 				alignment := int(typeAlign(sliceType.Elem()))
