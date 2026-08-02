@@ -376,10 +376,12 @@ the remaining five put together.
 
 ## 8. Proof that nothing in the compiler changed
 
-The brief says report bugs, do not fix them, and prove it. Every committed
-change is a new file except one line of `.gitignore`-free additions; nothing
-under `parse/`, `ir/`, `opt/`, `lower/`, `arm64/`, `amd64/` or `goc/compile.go`
-was touched. `git diff --stat main..HEAD` over compiler code is empty.
+The brief says report bugs, do not fix them, and prove it. Every file this
+branch changes is either this report or a new file: `git diff --stat main..HEAD`
+lists `CCWORK_REPORT.md` and thirteen additions, and nothing under `parse/`,
+`ir/`, `opt/`, `lower/`, `arm64/`, `amd64/` or `goc/compile.go` is among them.
+The corpus is still 385 programs — the discriminating reductions live in a
+subdirectory that `filepath.Glob("testdata/*.go")` does not match.
 
 The observable proof is that the baselines that record what the compiler does
 still reproduce, byte for byte, at this HEAD:
