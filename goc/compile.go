@@ -2905,7 +2905,12 @@ func callArgumentTarget(call *ast.CallExpr, argument ast.Expr, info *types.Info)
 	if identifier, ok := call.Fun.(*ast.Ident); ok {
 		if builtin, isBuiltin := info.Uses[identifier].(*types.Builtin); isBuiltin {
 			if builtin.Name() == "panic" {
-				return types.NewInterfaceType(nil, nil)
+				// panic's operand is an `any`, boxed exactly like any other
+				// interface argument. The rest of the builtins either do not
+				// take a value at all or take it without conversion.
+				anyType := types.NewInterfaceType(nil, nil)
+				anyType.Complete()
+				return anyType
 			}
 			return nil
 		}
@@ -3475,7 +3480,13 @@ func (g *gen) parameterDoesNotEscape(function *types.Func, index int, checking m
 	defer delete(checking, key)
 	restore := g.enterCalleeBody(signature, nil)
 	defer restore()
-	parents := astParents(declaration.decl.Body)
+	// Rooted at the declaration rather than at its body, so that a walk that
+	// reaches a return statement can climb to the function it returns from and
+	// ask what that result's type is. A summary walk allows a parameter to
+	// reach the result, and a result of interface type boxes the value into
+	// fresh heap storage on the way out; boxedIntoInterface needs the
+	// signature to see that.
+	parents := astParents(declaration.decl)
 	return g.objectDoesNotEscape(signature.Params().At(index), declaration.info, parents, declaration.decl.Body, checking)
 }
 
@@ -3514,7 +3525,13 @@ func (g *gen) parameterLeaksOnlyToResult(function *types.Func, index int, checki
 	defer delete(checking, key)
 	restore := g.enterCalleeBody(signature, declaration.decl.Body)
 	defer restore()
-	parents := astParents(declaration.decl.Body)
+	// Rooted at the declaration rather than at its body, so that a walk that
+	// reaches a return statement can climb to the function it returns from and
+	// ask what that result's type is. A summary walk allows a parameter to
+	// reach the result, and a result of interface type boxes the value into
+	// fresh heap storage on the way out; boxedIntoInterface needs the
+	// signature to see that.
+	parents := astParents(declaration.decl)
 	answer := g.objectDoesNotEscape(signature.Params().At(index), declaration.info, parents, declaration.decl.Body, checking)
 	reportResultLeakSummary(function, index, answer)
 	return answer
@@ -3572,7 +3589,13 @@ func (g *gen) receiverDoesNotEscape(function *types.Func, checking map[parameter
 	defer delete(checking, key)
 	restore := g.enterCalleeBody(signature, nil)
 	defer restore()
-	parents := astParents(declaration.decl.Body)
+	// Rooted at the declaration rather than at its body, so that a walk that
+	// reaches a return statement can climb to the function it returns from and
+	// ask what that result's type is. A summary walk allows a parameter to
+	// reach the result, and a result of interface type boxes the value into
+	// fresh heap storage on the way out; boxedIntoInterface needs the
+	// signature to see that.
+	parents := astParents(declaration.decl)
 	return g.objectDoesNotEscape(signature.Recv(), declaration.info, parents, declaration.decl.Body, checking)
 }
 
