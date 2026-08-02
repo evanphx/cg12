@@ -234,3 +234,162 @@ in `markSummarisedCall`/`escapeGraph.call` and costs precision only where the
 argument is an address of something that holds tracked pointers. Neither is
 attempted here: this job adjudicates, and the change wants its own shadow diff.
 
+## 3. All 74 permissive rows, adjudicated
+
+### 3.1 Method
+
+Three instruments, in decreasing order of authority:
+
+1. **`gc`'s own escape analysis on byte-identical source.** goc's vendored
+   `stdlib/src` is byte-identical to `go1.26.1`'s `GOROOT/src` for every file
+   involved here (checked with `diff` on `bigmod/nat.go`, `nistec/p224.go`,
+   `math/big/int.go`, `net/http/h2_bundle.go`). So
+   `go build -gcflags=-m <pkg>` is a sound, production-grade oracle at the exact
+   line and column. gc reports an *inlined* allocation at the **call site**, not
+   at the constructor -- verified on a 16-line reduction -- which is what makes
+   it comparable to a shadow row, whose caller function is post-inlining.
+2. **The IR's own per-copy verdicts**, counted from `opt.ShadowPlacement`'s
+   undeduplicated output (the committed baseline deduplicates by key; the tool
+   in `$TMPDIR/probe` does not). This resolves rows where one function holds
+   several copies of one constructor with mixed verdicts.
+3. **Reading the source**, where gc is knowably conservative -- generic method
+   calls through a `go.shape` dictionary are the case that arises here.
+
+### 3.2 The tally
+
+| | rows | |
+|---|---:|---|
+| **safe on their merits**, corroborated at the exact site | **60** | 3.3 |
+| **safe only because the loop rule blocks them** | **10** | 3.4 |
+| **NOT safe** -- the IR is wrong and would miscompile | **4** | 2, 3.5 |
+| unadjudicated | **0** | |
+
+The four are the three `h2_bundle.go` rows of section 2, plus
+`testdata/runtime_loopvar_value_shapes.go:33:17`, which is a **second and
+entirely independent hole** -- section 3.5. It is also not in a loop.
+
+### 3.3 The 60 that are the AST walk's pessimism
+
+**(a) `return &T{...}` from a constructor the IR then inlines -- 32 rows.**
+`nonEscapingAddressWithin`'s parent walk has no `*ast.ReturnStmt` case, so it
+falls to `default: return false`: **every `return &T{...}` in the tree is a heap
+allocation for goc, whatever the caller does.** The IR decides after
+`opt.InlineHeapAllocations`, in the caller, and `opt/inline.go`'s new
+`PlacedAllocs` propagation is what carries the question there. Upstream says so
+in as many words at `bigmod/nat.go:71`: *"NewNat inlines, so the allocation can
+live on the stack."*
+
+| goc caller (row) | gc at that function | verdict |
+|---|---|---|
+| `bigmod.Nat.{Exp, ExpShortVarTime, Mul, Sub, SubOne, maybeSubtractModulus, montgomeryReduction, shiftIn}` | 16/1/5/1/1/1/1/1 sites, **0 escaping** | safe |
+| `ecdsa.precomputeParams[P224/P256/P384/P521]` (4 rows) | 8 sites, 0 escaping | safe |
+| `rsa.{checkPrivateKey, decrypt, encrypt}` | 20/7/2 sites, 0 escaping | safe |
+| `nistec.{P224,P384,P521}Point.{SetBytes, ScalarMult, ScalarBaseMult}`, `{p224,p384,p521}Table.Select` (12 rows) | 1/17/2/1 sites each, 0 escaping | safe |
+| `bigmod.extendedGCD` | 6 sites: 4 safe, 2 escaping (`u`, `A` -- the *named results*) | safe: **the IR frames exactly 4** |
+| `nistec.PxxxPoint.generatorTable.func.393.28` (3 rows) | 3 sites: 1 safe (`base := NewP224Point()...`), 2 escaping (stored into the package-level table) | safe: **the IR frames exactly 1** (counted on p224; p384/p521 are the same source, generated from one template) |
+| `rsa.newPrivateKey` | 8 sites: 7 safe, 1 escaping | safe, by argument: the escaping copy is the one stored into the returned `&PrivateKey{...}`, and a store into a `runtime.newobject` result is not `cLocal`, which is the one rule `analyzeCandidateEscapes` applies most directly. **The IR frames 2 of the 7** -- less precise than gc, never more. |
+
+**(b) `&T{...}` passed straight to a call -- 12 rows (of 15; 3 are section 2).**
+`nonEscapingAddressWithin` accepts exactly four parents: `ParenExpr`, a
+*one-argument type conversion*, `StarExpr`, and a `FieldVal` `SelectorExpr`.
+There is **no call-argument case at all** -- it never asks
+`parameterDoesNotEscape`, which the sibling predicate `valueDoesNotEscapeWithin`
+*does* ask for ordinary values. goc's AST walk is internally inconsistent here,
+and that inconsistency is most of this class.
+
+| row | gc |
+|---|---|
+| `bigmod/nat.go:951,961,968,975` -- `x.Mod(&Nat{limbs: T}, m)` (4) | does not escape |
+| `x509/parser.go:1011` -- `parsePublicKey(&publicKeyInfo{...})` | does not escape |
+| `poll/splice_linux.go:198` -- `destroyPipe(&splicePipe{...})` | does not escape |
+| `math/big/int.go:920` -- `(&Int{abs: z}).ModInverse(&Int{abs: g}, &Int{abs: n})` (2) | does not escape (all three literals) |
+| `testdata/runtime_type_param_method_shapes.go:229,232,236,239` (4) | **escapes to heap** -- gc is conservative, see below |
+
+The four generic ones are the case where the oracle is wrong and the IR is
+right. `scorePointer[P pointerScorer](value P) int { return value.Score() }` and
+`countCell[P cellLike](c P) int { return c.Count() }` -- gc compiles these once
+per *shape* and dispatches `Score`/`Count` through the dictionary, so it cannot
+see the callee and assumes the receiver escapes. `scoreValueA.Score()` has a
+**value** receiver and reads one field; `(*cell[T]).Count()` reads one field.
+Neither can retain anything. goc monomorphises and the IR sees the real body.
+This is a proof from the source, not a vote.
+
+**(c) `var z = &[32]byte{...}` -- 4 rows.** `mlkem/cast.go:23:11`, one per
+`init` instantiation. gc: does not escape.
+
+**(d) slice literals -- 12 rows (of 13; 1 is section 3.5).**
+`crypto/tls/auth.go:259`, `x509/root_unix.go:37`,
+`httpcommon/httpcommon.go:79`, `net/http/servemux121.go:196`,
+`net/ipsock_posix.go:45`, `fstest/testfs.go:611`,
+`testdata/bytes_grow_allocs.go:12,13`,
+`testdata/runtime_append_self_overlap.go:4`,
+`testdata/runtime_range_target_forms.go:46`,
+`testdata/runtime_range_target_order.go:160`,
+`testdata/runtime_slice_copy_overlap.go:4`.
+gc: **does not escape at every one.** These go through `valueDoesNotEscape`,
+which *does* ask about callees, so they are the walk's ordinary conservatism
+(an `append` destination, a `range` subject, a `copy` operand) rather than a
+structural gap.
+
+### 3.4 The 10 the loop rule blocks -- 4 of them load-bearing, 6 of them cost
+
+| rows | what | is the loop rule doing work? |
+|---|---|---|
+| 4 | `escaping-typed`, position `?`, in `tls.Config.getCertificate`, `tls.Conn.getClientCertificate`, `tls.pickECHConfig`, `main.main` | **YES.** These are `freshVariableStorage` (`goc/compile.go:5626`) -- the per-iteration cells `perIterationVariable` demands for a capture that escapes. The IR says frame because nothing publishes them *within the frame*; promoting collapses every iteration onto one slot. This is the case `RUNTIME_PLAN.md` 5.9 exists for and the only thing standing in front of it is the loop column. |
+| 4 | `bigmod/nat.go:1158-1163` -- `A.Add(C, &Modulus{nat: m})` inside `for {}` | No. gc: **does not escape**. Nothing survives the iteration, so one slot for all iterations is unobservable. The loop rule rejects these as collateral. |
+| 1 | `xml/marshal.go:1118` -- `s.p.writeStart(&StartElement{...})` | No. gc: does not escape. Collateral. |
+| 1 | `strings/replace.go:86` -- the `[]byte{o}` backing of `string([]byte{o})` | No. gc: `[]byte{...} does not escape` (the *string* it builds escapes; the backing does not). Collateral. |
+
+So the loop rule is **necessary but blunt**: it earns its place on 4 rows and
+costs precision on 6. It cannot be relaxed on the evidence here -- distinguishing
+the two needs a notion of "does any observer of this object survive the
+iteration", which neither analysis has.
+
+### 3.5 The second hole: a candidate loses its identity across a write barrier
+
+`testdata/runtime_loopvar_value_shapes.go:33:17`, `main.main`,
+`slice-literal-backing`, **not in a loop** (the allocation is in the `for`-init,
+which runs once). gc: `[]int{...} escapes to heap`, and gc is right --
+
+```go
+for numbers := []int{0}; len(numbers) < 4; numbers = append(numbers, len(numbers)) {
+    captured = append(captured, func() string { return fmt.Sprint(numbers) })   // closure outlives
+}
+```
+
+The emitted IR, read at `loc 33 17`:
+
+```
+%t259 =p alloc8 24                          ; the slice header, a frame slot
+%t261 =p call $runtime.newobject(...)       ; <-- the candidate, the [1]int backing
+call $goc_storep(p %t259, p %t261)          ; backing pointer -> the header, THROUGH THE BARRIER
+@forheader85
+%t266 =p loadl %t259                        ; reload it
+%t271 =p call $runtime.newobject(...)       ; the per-iteration cell (heap, correctly)
+call $goc_storep(p %t271, p %t266)          ; <-- publication into the heap cell
+```
+
+The publication on the last line *is* reached: the `isAtomicPointerStore` arm of
+`analyzeCandidateEscapes` sees a barrier into non-`cLocal` storage and calls
+`mark(%t266)`. It does nothing, because **`%t266` has no base**. The
+base-propagation fixed point (`opt/escape.go:216-302`) recognises exactly two
+ways a candidate can enter a frame slot -- `instruction.Op.IsStore()` and
+`memoryCopyOperands` -- and a write barrier is **an `OCall`, so neither**.
+`slotBases[{%t259,0}]` is never written, the reload recovers nothing, and every
+later use of the reloaded pointer is invisible to the analysis.
+
+That is:
+
+> **A candidate stored into a local slot through `goc_storep` -- which is what
+> goc emits for every pointer field of every pointer-bearing local -- is
+> untracked from that point on. The marking switch models the barrier; the
+> base propagation does not. The two halves of the same analysis disagree about
+> what a barrier is.**
+
+This one is **not summary-dependent**. The same code runs with `facts == nil`,
+so the mechanism is present in the pass `main` ships today for `ir.OHeapAlloc`
+candidates. Whether any *current* neutral candidate is reachable this way I did
+not establish -- the corpus evidence here is about front-end-placed allocations,
+which the shipping pass never sees. **It needs its own check before the fix in
+section 2.4 is written, because a fix to the summary side would not touch it.**
+
