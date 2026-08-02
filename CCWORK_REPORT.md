@@ -571,3 +571,347 @@ is recorded as an open discrepancy for whoever produced the 22.
   601, which is exactly this branch's new tests.
 * The failure output names every moved site with position, function, allocator,
   type and direction. Verified by making it fire on the final tree.
+
+---
+
+# Part III -- reconciling "22 sites" with "9 sites"
+
+Section 11 left a discrepancy open: `ccwork/escape-frame-publication` reported
+that the publication fix moved **22 allocation sites frame->heap, none the other
+way**, and the census reported **9 heap records at 7 source positions**. It
+offered two candidate explanations and could not choose between them without
+re-running the earlier instrument.
+
+This part re-ran it. Both instruments were run over the *same* compiles of the
+*same* 385 programs, on the fixed tree and on a tree with the fix reverted, and
+the answer is now measured rather than argued.
+
+## 14. The reconstruction, and that it is faithful
+
+`goc/compile.go` was reverted to its pre-fix state in a throwaway worktree:
+
+    git worktree add $TMPDIR/nofix HEAD --detach
+    git revert --no-commit fc74294 && git revert --no-commit 6245dbb
+    git checkout HEAD -- CCWORK_REPORT.md
+    git diff 6245dbb~1 -- goc/compile.go     # empty: byte-identical to pre-fix
+
+Those are the only two commits that have ever touched `goc/compile.go` since the
+fix, so the reverted file is exactly the pre-fix file. No other code differs;
+`goc/testdata/frame_escape_baseline.txt` regains its three pre-fix lines, which
+is the fix's own recorded effect.
+
+A single harness then compiled all 385 programs in each tree and emitted, from
+one compile of each program, **both** measurements:
+
+* the ad-hoc one, verbatim from its own description -- per function, frame
+  allocations (`OAlloc*`, `OAllocN`) against allocator calls (`runtime.newobject`,
+  `newarray`, `makeslice`, `mallocgc`, `makemap`, `makechan`) plus any residual
+  `OHeapAlloc`; and
+* `opt.AllocationCensus`, per program, un-folded.
+
+**The reconstruction reproduces the ad-hoc report's corpus totals exactly:**
+
+    | corpus totals | frame | heap |
+    |---|---|---|
+    | before (measured here) | 9 735 484 | 509 897 |
+    | before (as published)  | 9 735 484 | 509 897 |
+    | after  (measured here) | 9 735 471 | 509 920 |
+    | after  (as published)  | 9 735 471 | 509 920 |
+
+Four numbers, four matches. The harness is measuring what the earlier instrument
+measured. And the census half of the same run reproduces the committed baseline
+byte for byte -- 18,683 records, `diff` exit 0 -- so both sides are trustworthy.
+
+## 15. Both numbers are right. They count different units.
+
+    (program, function) pairs whose alloc counts changed:  22
+    census records added:                                   9
+    distinct source positions:                              7
+
+Every one of the 22 pairs, printed:
+
+| source position | function | corpus programs | ad-hoc pairs | census records |
+|---|---|---|---|---|
+| `bigmod/nat.go:939:24` | `bigmod.Nat.Mul` | 10 | 10 | **1** |
+| `x509/verify.go:1059:39` | 3 distinct `initfunc` symbols | 8 | 8 | **3** |
+| `range_target_order.go:144:13` + `:152:12` | `main.targetAliasingTheRangeExpression` | 1 | 1 | **2** |
+| `debug_gc_controls.go:15:28` | `main.main` | 1 | 1 | **1** |
+| `slice_pointer_append_gc.go:10:31` | `main.main` | 1 | 1 | **1** |
+| `signal_during_gc.go:23:28` | `main.main.func.17.5` | 1 | 1 | **1** |
+| | | | **22** | **9** |
+
+Two independent factors separate them, pulling in opposite directions:
+
+1. **Corpus multiplicity.** The ad-hoc count counts a site once per corpus
+   program that contains it; the census deduplicates across the corpus.
+   `Nat.Mul` is linked into 10 programs and `x509.anyPolicyOID` into 8, so 18 of
+   the 22 pairs are 2 sites seen repeatedly. This is the whole of the gap
+   except for the next point.
+2. **Function versus site.** The ad-hoc unit is a *function*; the census unit is
+   a *site*. `targetAliasingTheRangeExpression` contains two moved literals and
+   counts once ad-hoc, twice in the census. Conversely the 8 x509 programs
+   inline the init into only 3 distinct symbol names, so 8 pairs fold to 3
+   records rather than 1.
+
+        22  -  9 (Nat.Mul: 10 programs -> 1 record)
+            -  5 (x509: 8 programs -> 3 records)
+            +  1 (range: 1 function -> 2 sites)
+        =   9
+
+Neither instrument is wrong and neither is measuring the other's quantity.
+
+## 16. All 22 are real moves -- and the ad-hoc frame counter under-reports by 10
+
+The published deltas do not obviously agree with "22 moved": the corpus frame
+total fell by **13**, not 22, and the heap total rose by **23**. Both anomalies
+resolve, and neither is a counting mistake in the published table.
+
+**+23 rather than +22** is the function-versus-site factor again:
+`targetAliasingTheRangeExpression` contributes one (program, function) pair and
+two allocations. 22 pairs contain 23 allocations. *22 was never an allocation
+count.*
+
+**-13 rather than -23** is an artifact of the ad-hoc instrument. Nine pairs gain
+a heap allocation without losing a frame one:
+
+    initfunc anyPolicyOID (x8 programs)      frame 2->2   heap 0->1
+    main.targetAliasingTheRangeExpression    frame 48->48 heap 3->5
+
+At first reading that looks like a heap allocation *added* beside a frame slot
+that stays. It is not. The frame slot stays in the IR but stops being used:
+
+    x509/verify.go:1059:39   before: OAlloc8 size=40  used by 7 instructions
+                             after:  OAlloc8 size=40  used by 0 instructions   + heap newobject
+
+    range_target_order.go:144:13   before: OAlloc8 size=24  used by 5   after: 0 uses + heap newobject
+    range_target_order.go:152:12   before: OAlloc8 size=24  used by 5   after: 0 uses + heap newobject
+
+`goc/compile.go:11703` emits the frame slot for a composite literal
+**unconditionally** and then, four lines later at 11708, overwrites the variable
+with a heap allocation if the object escapes:
+
+    backing := g.localAlloc(alignment, int(backingSize))
+    ...
+    if heap || !g.valueDoesNotEscape(literal) {
+        backing = g.allocateEscapingTyped(backingType)
+    }
+
+The orphaned `OAlloc` is still in the finished IR, so an instrument that counts
+`OAlloc` instructions counts it. (`goc/compile.go:11739`/`11743` is the same
+shape for array and struct literals.) The `make` path does not do this, which is
+why `Nat.Mul`, `debug_gc_controls`, `slice_pointer_append_gc` and
+`signal_during_gc` all show the frame slot genuinely gone:
+
+    nat.go:939:24              before: OAlloc8 size=512   after: absent, heap newobject
+    debug_gc_controls.go:15:28 before: OAlloc8 size=1024  after: absent, heap newobject
+    slice_pointer_append:10:31 before: OAlloc8 size=32    after: absent, heap newobject
+    signal_during_gc.go:23:28  before: OAlloc8 size=8192  after: absent, heap newobject
+
+Ten dead slots (8 x509 + 2 in `targetAliasing`) explain the gap exactly:
+**23 - 10 = 13**, the published frame delta, to the unit. That closure is what
+makes this a measurement rather than a story.
+
+**So the direction claim was right: all 22 pairs moved frame->heap, and none
+moved the other way.** What was wrong was calling them "22 allocation sites".
+They are 23 allocations at 9 sites at 7 source positions, seen 22 times.
+
+**Noted in passing, not fixed** (out of scope, and no correctness consequence):
+the front end leaves a dead `OAlloc` behind at every escaping composite literal.
+I checked only that it survives into the finished IR that both instruments read;
+I did **not** check whether frame layout still reserves the bytes, so this may
+cost nothing at all. Worth one look by whoever owns `compositeLiteral`.
+
+## 17. The census does have a blind spot -- but it is not what cost the count
+
+Explanation (b) from section 11 is **confirmed**. In the pre-fix tree the census
+holds **zero records at all 7 positions** -- not a `frame` record, not anything:
+
+    bigmod/nat.go:939                      before=0  after=1
+    x509/verify.go:1059                    before=0  after=3
+    runtime_debug_gc_controls.go:15        before=0  after=1
+    runtime_range_target_order.go:144      before=0  after=1
+    runtime_range_target_order.go:152      before=0  after=1
+    runtime_slice_pointer_append_gc.go:10  before=0  after=1
+    stdlib_signal_during_gc.go:23          before=0  after=1
+
+The cause is exact. `AllocationCensus` builds its `frame` half only from
+`module.AllocDecisions`, and only `opt.LowerHeapAllocations` writes that slice.
+All 7 positions were ordinary front-end frame slots (`OAlloc8`, from
+`gen.localAlloc`/`localAllocTyped`) that never became `OHeapAlloc` candidates,
+so the escape pass never saw them and never recorded a decision. Section 2
+excludes those by design.
+
+Three consequences, in increasing order of importance:
+
+1. **Detection is not blind, and this is the proof.** All 9 records changed and
+   `TestAllocationCensus` fails, naming every site with position, function,
+   allocator and type. Section 2's claim that the exclusion "does not create a
+   blind spot for the regression class this instrument exists to catch"
+   **holds** -- measured, against the largest real placement change in the
+   tree's history, not argued.
+2. **Direction labelling is blind.** All 9 land in `appeared`/`vanished`; the
+   `frame -> heap` bucket was **empty** for a change that moved 23 allocations
+   frame->heap. A reviewer reading the four buckets the way section 3 documents
+   them would conclude that nothing moved. That is the instrument saying
+   something false, not merely saying less.
+3. **It cannot tell a move from a new allocation.** A record appearing means
+   "this is now on the heap"; whether a frame slot went away with it, or the
+   allocation is net new on a path that had none, is not in the census. Section
+   16 needed a liveness pass over the IR to answer that -- for exactly the
+   allocations the census had just reported. Those two cases have opposite
+   costs. For an instrument whose job is to make allocation placement reviewable
+   during an escape-analysis rearchitecture, that is the gap worth closing.
+
+**The blind spot cost the label, not the count.** The 22-vs-9 gap is entirely
+explanation (a); explanation (b) is real but contributed nothing to it. Section
+11 could not separate them and was right to refuse to guess.
+
+## 18. Should the census record front-end frame slots? Measured: no.
+
+The brief allowed implementing this behind an option **if proven right**. It is
+not, and it is not close. Two independent reasons, both measured.
+
+**1. It would not produce the label it is wanted for.** A site's identity is
+`position + function + allocator + type` (`Allocation.Site()`,
+`opt/alloccensus.go:61`). An `OAlloc` carries an alignment and a byte size and
+nothing else -- no allocator, no type. So a front-end slot at
+`x509/verify.go:1059:39` would be recorded as
+
+    stdlib/src/crypto/x509/verify.go:1059:39  initfunc...  -  40  frame
+
+against the post-fix heap record
+
+    stdlib/src/crypto/x509/verify.go:1059:39  initfunc...  runtime.newobject  5_uint64  heap
+
+Different site keys. The diff would **still** read as one line vanishing and
+another appearing, exactly as it does today, plus 165,544 lines of noise. The
+only way out is to weaken the site key to `position + function`, which would
+merge distinct allocations that share a position -- and section 4's 439
+both-ways sites show that is not hypothetical.
+
+**2. The volume is prohibitive.** Measured over the same 385-program corpus:
+
+    | | count |
+    |---|---|
+    | front-end frame-slot instructions | 9,735,471 |
+    | deduplicated `(position, function, size)` | **165,544** |
+    | deduplicated `(position, function)` | 145,254 |
+    | of those, positionless (`?`) | 14,463 |
+    | census records today | 18,683 |
+
+A **8.9x** larger baseline: 2.0 MB becomes roughly **14 MB**, of which 12.3 MB
+is untyped slot records that no escape decision can ever move. The census is
+meant to be read as a diff by a person; 165k lines of `size=8` local slots is
+how an instrument stops being read.
+
+**What should be done instead.** The gap in section 17 is not "the census cannot
+see frame slots". It is that **`goc`'s front end makes placement decisions and
+does not record them**, while `opt.LowerHeapAllocations` makes the same kind of
+decision and does. `ir.AllocDecision` and `Module.AllocDecisions` already exist,
+are already diagnostic-only, and already carry exactly the right fields
+(position, function, allocator, type, placement). The front end has all four at
+the point of decision -- `compile.go:11708` knows `backingType` and knows which
+branch it is taking; so do the seven other `allocateEscapingTyped` call sites
+(`5600`, `5602`, `5606`, `10804`, `11617`, `11651`, `11709`, `11744`) and their
+`localAlloc*` frame counterparts.
+
+Recording an `AllocDecision` at each of those, with the type the front end
+already has, would:
+
+* keep the site key intact, so the x509 and `Nat.Mul` records would have read
+  `frame -> heap` rather than `appeared`;
+* distinguish a move from a new allocation, which is consequence 3 above;
+* add records only for objects whose placement was *decided* -- the same
+  population that already yields the 18,183 heap records -- not for the 9.7M
+  ordinary locals;
+* need no new mechanism and no behaviour change: it is the append that
+  `opt/escape.go` already does, at the other decision site.
+
+That is a change to `goc/compile.go`, so **this job did not make it** -- the
+brief says do not change compiler behaviour, and while an append to a
+diagnostic slice does not change behaviour, sizing and reviewing eight new
+decision points is a separate change with its own risk budget. It is written up
+here as the concrete proposal, with the call sites enumerated, so it can be
+picked up as one.
+
+## 19. Verification ledger for this job
+
+Every process was waited on to exit in the foreground and every number is read
+from its own output. **Nothing was left running.** No compiler or test file on
+this branch was changed; the only tracked edit is this report. The three
+measurement harnesses were scratch files in `$TMPDIR`, copied in, and deleted.
+
+| what | result |
+|---|---|
+| reverted worktree vs pre-fix commit (`git diff 6245dbb~1 -- goc/compile.go`) | **empty** -- the control is exactly the pre-fix compiler |
+| ad-hoc corpus totals, before | frame **9 735 484**, heap **509 897** -- matches published |
+| ad-hoc corpus totals, after | frame **9 735 471**, heap **509 920** -- matches published |
+| changed `(program, function)` pairs | **22** -- matches published |
+| census records added by the fix | **9**, at **7** source positions, 0 removed, 0 re-placed |
+| census run of this job's own harness vs committed baseline | **`diff` exit 0**, 18,683 records |
+| pre-fix census records at the 7 positions | **0** -- blind spot confirmed |
+| liveness of the 10 surviving frame slots, post-fix | **0 real uses** -- dead, so all 22 pairs are moves |
+| front-end frame slots, deduplicated | **165,544** records / 12.3 MB |
+| `go build ./...` | **exit 0** |
+| `go vet ./opt/ ./ir/ ./goc/` | **exit 0** |
+| `go test ./goc -run TestAllocationCensus` run 1 | **PASS**, 171.975s, baseline md5 unchanged |
+| `go test ./goc -run TestAllocationCensus` run 2 | **PASS**, 148.149s, baseline md5 unchanged |
+| `go test ./goc -run TestCompareAllocationCensus` | **PASS**, 0.011s |
+| `go test ./opt/ ./ir/` | **PASS** (0.975s / 0.013s) |
+| working tree | **clean** but for this report; baseline `9a2ed8f8dff5be7e99adae8fb91fbd80` |
+
+The full corpus suite was not run; another job covers it.
+
+Four independent full-corpus census passes now reproduce the accepted baseline:
+sections 12's three, plus this job's own harness, which derived it from a
+different program with a different code path into `opt.AllocationCensus`.
+
+## 20. Bottom line
+
+**How many sites did the publication fix move?** Under the definition that
+should be used going forward -- a **site** is one source position in one
+function after inlining, deduplicated across the corpus -- the answer is
+**9 sites, at 7 distinct source positions**. All 9 moved **frame -> heap**;
+none moved the other way.
+
+The other quantities, so nobody has to re-derive them:
+
+| quantity | value |
+|---|---|
+| **allocation sites moved (census scope)** | **9** |
+| distinct source positions | 7 |
+| `(program, function)` pairs affected | 22 |
+| allocation instructions moved to the heap | 23 |
+| frame allocations actually removed | 13 (10 more are left dead in the IR) |
+
+**Neither the 9 nor the 22 was wrong; the sentence around the 22 was.** "22
+allocation sites move from frame to heap" should have read "22 (program,
+function) pairs", which is 9 sites seen repeatedly -- `bigmod.Nat.Mul` is linked
+into 10 corpus programs and `x509.anyPolicyOID`'s init into 8. Repeating "22
+sites" as a site count in task records and status reports overstates the fix's
+footprint by 2.4x.
+
+**Use the census definition going forward.** It is deduplicated, so it does not
+scale with how many corpus programs happen to link a package; it is per site
+rather than per function, so two moved literals in one function are two facts;
+and it counts what changed rather than what an `OAlloc` instruction count says,
+which section 16 shows can be wrong by 10 out of 23. The other numbers are still
+worth quoting, but as what they are: 22 is corpus exposure, 23 is the runtime
+allocation cost.
+
+**Does the census have a blind spot? Yes, and it is a labelling one.**
+It records frame placements only when `opt.LowerHeapAllocations` made them, so
+every placement decided in `goc`'s front end is invisible on the frame side.
+Detection is unaffected -- all 9 changes failed the baseline, each named with
+position, function, allocator and type, which is the property section 2 claimed
+and this job measured. But the direction is not: the fix's 23 frame->heap moves
+were reported as `appeared`, and the `frame -> heap` bucket was empty. The
+census also cannot distinguish a move from a net-new allocation.
+
+**Recording front-end frame slots is not the fix** -- proven in section 18, not
+guessed: the records would be untyped and so would not even match the site key
+the label depends on, and there are 165,544 of them against 18,683 today. The
+fix is to have the front end write `ir.AllocDecision` at its eight placement
+decision points, which needs no new mechanism and no behaviour change. Written
+up in section 18 with the call sites enumerated; **not implemented here**,
+because it touches `goc/compile.go`.
