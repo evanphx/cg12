@@ -373,3 +373,102 @@ Nothing here is a correctness question, and none of it is a bug this branch
 should fix. It is the ranked list of where goc's escape analysis costs something
 measurable against the reference, and the first two entries are worth more than
 the remaining five put together.
+
+## 8. Proof that nothing in the compiler changed
+
+The brief says report bugs, do not fix them, and prove it. Every committed
+change is a new file except one line of `.gitignore`-free additions; nothing
+under `parse/`, `ir/`, `opt/`, `lower/`, `arm64/`, `amd64/` or `goc/compile.go`
+was touched. `git diff --stat main..HEAD` over compiler code is empty.
+
+The observable proof is that the baselines that record what the compiler does
+still reproduce, byte for byte, at this HEAD:
+
+```
+$ go test ./goc -run 'TestAllocationCensus|TestFrameEscapeAudit|TestEscapeShadowPlacement' -timeout 90m
+ok  github.com/evanphx/cg12/goc  165.943s
+```
+
+All three: the 18 664-row allocation census, the 193-line frame-escape audit,
+and the escape shadow-placement baseline. Plus `go test ./internal/gcdiff`
+(10 ms) and the differential re-deriving its own committed output without
+`-update`.
+
+## 9. What was committed
+
+| file | what |
+|---|---|
+| `internal/gcdiff/gcdiff.go` | `-m` parser and census reader, with the join documented at length |
+| `internal/gcdiff/join.go` | the join, the verdict folding, the two directions |
+| `internal/gcdiff/report.go` | the rendered, diffable output |
+| `internal/gcdiff/gcdiff_test.go` | unit tests pinning the go1.26.1 `-m` grammar; ordinary CI, 10 ms |
+| `goc/gcdiff_test.go` | the corpus driver and the per-program triage mode, both opt-in |
+| `goc/testdata/escape_gc_differential.txt` | the output, 4 100 lines, checked in |
+| `goc/testdata/escape_gc_differential/` | six discriminating programs and a README recording both compilers' answers |
+
+Two commands, both documented in the files themselves:
+
+```
+go test ./goc -run TestEscapeDifferentialAgainstGC \
+    -escape-gc-differential -update-escape-gc-differential          # 10 s
+
+go test ./goc -run TestEscapeDifferentialProgram \
+    -escape-gc-differential-program=testdata/<program>.go -v        # ~2 min
+```
+
+Neither runs in CI: both need a host Go toolchain, and pinning the build
+machine's go version into the contract is exactly what makes an
+externally-dependent test a liability. The output is committed so the numbers
+can be diffed instead of reconstructed, which is what the earlier ad-hoc
+measurement in this effort failed to do.
+
+## 10. The answer
+
+**381 of 385 corpus programs compared** (the 4 excluded are named, with the 37
+census rows they cost). **2 670 census rows and 3 357 gc decisions joined into
+3 029 source lines.**
+
+```
+  goc\gc      frame     heap    mixed   absent    total
+  frame          15        3        2       17       37
+  heap          194     1762      194      186     2336
+  mixed           3       53        1        7       64
+  absent        449      119       24        0      592
+  total         661     1937      221      210     3029
+```
+
+- **1 777 lines agree** (1 762 both heap, 15 both frame).
+- **585 lines goc heaps and gc does not** — pessimism. Largest class is the
+  variadic call, measured at **3.00 allocations per `fmt.Sprintf` against gc's
+  1.00**.
+- **202 lines gc heaps and goc does not** — the number this job exists to
+  produce.
+
+**Of those 202: 59 have a hard frame row in goc's census, 143 have no census row
+at all. Every one was triaged, and none is a confirmed hole.**
+
+- 50 of the 59 are `var x bytes.Buffer`-shaped, where goc records a heap
+  allocation *and* a frame temporary at the same position; the escaping object
+  is on the heap and the line-level join cannot separate the two.
+- 9 of the 59 are loop variables, including the calibration case the brief
+  named — and the harness flagging them is a sign it works, but they are a join
+  artefact: goc records a frame decision at the loop header and a
+  **positionless** heap allocation for the per-iteration copy, which cannot
+  join on position. 88 such positionless heap rows exist corpus-wide, and that
+  bound is now printed in the coverage table.
+- 74 of the 143 are string concatenation and `append`, which goc always heaps
+  through runtime helpers the census does not track: agreement the census
+  cannot see.
+- The remaining 69 are candidates, and the strongest of them —
+  `[]int{…}` left in a frame with its address stored into a heap object — is a
+  class the differential and goc's own `opt.FrameEscapes` audit **independently
+  agree on**, 3 lines of it. I built the program that should break it, proved
+  its precondition (a real goroutine stack copy) is met, and it did not break.
+
+So: **goc is not more dangerous than the reference on this corpus — it is
+different, and measurably more expensive.** The permissive direction has one
+open question, stated precisely and with a committed program that will answer it
+the day goc's stack copier stops covering for it. The pessimistic direction has
+a ranked, quantified list of where the 585 lines cost real allocations.
+
+The yardstick exists, it is one command, and its output is in the tree.
