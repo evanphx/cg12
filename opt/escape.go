@@ -191,6 +191,10 @@ func lowerFunctionHeapAllocations(function *ir.Func) bool {
 		}
 	}
 
+	if LoopCarriedCandidatesEscape {
+		escapeLoopCarriedCandidates(function, bases, slotBases, escaped)
+	}
+
 	mark := func(reference ir.Ref) {
 		if reference.Kind == ir.RefTemp {
 			if base, ok := bases[reference.ID]; ok {

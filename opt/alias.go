@@ -51,6 +51,17 @@ func (loc locInfo) key() locKey {
 	return locKey{kind: loc.keyKind, id: loc.keyID, sym: loc.keySym}
 }
 
+// allocTemp reports the temporary that allocated the storage this key names,
+// when the key names one of this function's own allocations. keyLocal and
+// keyEscaped both resolve to an alloc base; the others do not name storage this
+// function made.
+func (key locKey) allocTemp() (uint32, bool) {
+	if key.kind != keyLocal && key.kind != keyEscaped {
+		return 0, false
+	}
+	return uint32(key.id), true
+}
+
 func newAliasInfo(f *ir.Func) *aliasInfo {
 	ai := &aliasInfo{
 		f:             f,
