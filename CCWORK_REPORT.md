@@ -240,3 +240,21 @@ the corpus, a future change that heaps loop-body allocations without asking
 whether anything retains them adds three lines to
 `alloc_census_baseline.txt` -- which is the only way that direction gets
 noticed, since a frame slot that is *correct* is not a census line at all.
+
+## 6. How general the fix is: four more forms, probed against the host
+
+The two forms named in the brief are not the whole of what was broken. Because
+the rule is asked at the variable site rather than at one syntax, the same walk
+fixes shapes nobody had reduced:
+
+| shape | host | goc on main | goc fixed |
+|---|---|---|---|
+| `var b box; b.set(i); q = &b` (pointer method) | `1 2` | **`2 2`** | `1 2` |
+| the same inside `for _, v := range values` | `2 3` | **`3 3`** | `2 3` |
+| `s := []int{i, i*2}` kept across iterations | `1 2` | `1 2` | `1 2` |
+| `b := []byte("ab")` kept across iterations | `49 50` | `49 50` | `49 50` |
+
+The first two were live miscompiles on main, found by asking the fix what else
+it covered. The last two are the other frame-committing sites the spike's
+census names -- slice-literal backing and the `string`->`[]byte` buffer -- and
+they were already correct, so nothing was needed there.
