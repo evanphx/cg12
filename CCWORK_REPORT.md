@@ -196,7 +196,7 @@ and by reading the emitted decisions where it does not.
 |---|---|---|
 | `var x T` where goc records **both** a frame and a heap row at the same position | 50 | **not a hole** |
 | loop header whose variable's address escapes (`for index := …; { … &index … }`) | 8 | **not a hole** — a join artefact |
-| a pair of closures returned together (`runtime_closure_captured_string.go:296`) | 1 | **not a hole** — goc frames one copy and heaps the other |
+| a pair of closures returned together (`runtime_closure_captured_string.go:296`) | 1 | **not a hole** — see below |
 
 **The `var x T` class (50 lines).** `var buffer bytes.Buffer` and its
 relatives — `strings.Builder`, `sync.WaitGroup`, `atomic.Value`, `debug.GCStats`.
@@ -208,6 +208,14 @@ frames a second temporary of the same type at the same position, and
 `opt.FrameEscapes` reports nothing for either program. The escaping object is on
 the heap. The line-level join cannot separate the two, which is a limit of the
 join, not a defect in goc.
+
+**The closure-pair line (1 line).** `return func(suffix string) { … }, func() string { … }`
+returns two closures over a captured string. goc records four rows at that one
+line: both closures framed in `main.controls` and both heaped in
+`main.stringPair`, which is the same source line decided separately in two
+functions. The framing function is the one that does not return them past its
+own frame; `opt.FrameEscapes` reports no publication anywhere in the program,
+and the program runs correctly under goc (`closure captured string ok`).
 
 **The loop-variable class (8 lines, and the calibration case).** The harness
 flagged `runtime_loopvar_address_gc.go:18`, `:36`, `:48`,
