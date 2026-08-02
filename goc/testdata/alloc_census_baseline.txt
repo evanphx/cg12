@@ -16073,6 +16073,8 @@ testdata/io_write_string.go:19:2	main.main	runtime.newobject	main_buffer	frame
 testdata/io_write_string.go:19:2	main.main	runtime.newobject	main_buffer	heap
 testdata/io_write_string.go:22:9	main.main	runtime.newobject	string	heap
 testdata/io_write_string.go:25:9	main.main	runtime.newobject	string	heap
+testdata/loop_alias_forms.go:22:23	main.viaMake	runtime.newobject	4_int	heap
+testdata/loop_alias_forms.go:7:8	main.viaNew	runtime.newobject	int	heap
 testdata/md5_assembly.go:13:9	main.main	runtime.newobject	string	heap
 testdata/nested_defer.go:12:25	main.main	runtime.makechan	.goc.channel.type.int	heap
 testdata/nested_defer.go:13:2	main.main	runtime.newobject	struct_code_uintptr__argument0_chan_int	heap
@@ -18692,3 +18694,6 @@ testdata/sync_pool_interface.go:56:9	main.main	runtime.newobject	string	heap
 testdata/sync_pool_interface.go:59:9	main.main	runtime.newobject	string	heap
 testdata/sync_pool_interface.go:67:9	main.main	runtime.newobject	string	heap
 testdata/sync_pool_interface.go:70:9	main.main	runtime.newobject	string	heap
+testdata/variadic_backing.go:9:9	main.leaky	runtime.newobject	1_any	heap
+testdata/variadic_backing.go:9:9	main.main	runtime.newobject	1_any	heap
+testdata/variadic_backing.go:9:9	main.main.gointernal.funcvalue.main_main_func___func.83860b9e97d614a8	runtime.newobject	1_any	heap
