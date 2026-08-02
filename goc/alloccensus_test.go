@@ -150,18 +150,28 @@ func compareAllocationCensus(found map[string]string, accepted map[string]bool) 
 			seenIn = "several programs"
 		}
 		before, known := acceptedSites[site]
-		switch {
-		case !known:
+		if !known {
 			appeared = append(appeared, fmt.Sprintf("%s\n      now on the %s, seen compiling %s", site, now, seenIn))
-		case before == now:
-		case before == "heap" && now == "frame":
-			movedToFrame = append(movedToFrame, fmt.Sprintf("%s\n      heap -> frame, seen compiling %s", site, seenIn))
-		case before == "frame" && now == "heap":
-			movedToHeap = append(movedToHeap, fmt.Sprintf("%s\n      frame -> heap, seen compiling %s", site, seenIn))
-		default:
-			// One side is "frame+heap": the same site decided both ways. Report it
-			// with the heap direction, which is the one that always needs a reason.
-			movedToHeap = append(movedToHeap, fmt.Sprintf("%s\n      %s -> %s, seen compiling %s", site, before, now, seenIn))
+			continue
+		}
+		if before == now {
+			continue
+		}
+		// A site can hold both placements at once -- one source position inlined
+		// into one function twice, decided differently each time -- so the
+		// direction is which placement the site gained or lost, not which of two
+		// values it changed to. Gaining "frame" and losing "heap" are the same
+		// news: some copy of this allocation that used to be on the heap is now in
+		// a frame. Getting this wrong files a heap-to-frame move, the
+		// correctness-critical one, under performance.
+		line := fmt.Sprintf("%s\n      %s -> %s, seen compiling %s", site, before, now, seenIn)
+		beforeFrame, beforeHeap := placedIn(before, "frame"), placedIn(before, "heap")
+		nowFrame, nowHeap := placedIn(now, "frame"), placedIn(now, "heap")
+		if (nowFrame && !beforeFrame) || (beforeHeap && !nowHeap) {
+			movedToFrame = append(movedToFrame, line)
+		}
+		if (nowHeap && !beforeHeap) || (beforeFrame && !nowFrame) {
+			movedToHeap = append(movedToHeap, line)
 		}
 	}
 	for _, site := range sortedSiteNames(acceptedSites) {
@@ -203,6 +213,12 @@ func allocationSites(lines []string) map[string]string {
 		sites[site] = strings.Join(names, "+")
 	}
 	return sites
+}
+
+// placedIn reports whether a site's placement value -- "frame", "heap" or
+// "frame+heap" -- includes one placement.
+func placedIn(placement, one string) bool {
+	return placement == one || strings.HasPrefix(placement, one+"+") || strings.HasSuffix(placement, "+"+one)
 }
 
 func sortedSiteNames(sites map[string]string) []string {
@@ -291,15 +307,75 @@ func TestCompareAllocationCensusNamesTheDirection(t *testing.T) {
 // A site decided both ways -- one source position inlined into one function
 // twice, promoted in one copy and not the other -- must not read as either
 // placement on its own, or a later run would call it a move when nothing moved.
+// 439 of the corpus's 18,244 sites are like this.
+//
+// The direction of such a move is which placement the site gained or lost. A
+// site that was frame+heap and is now frame lost a heap allocation: some copy of
+// it moved into a frame, and that is the correctness-critical direction, however
+// little it looks like one.
 func TestCompareAllocationCensusReportsASplitSite(t *testing.T) {
 	const site = "a.go:1:1\tf\truntime.newobject\tT"
-	accepted := map[string]bool{site + "\tframe": true}
-	found := map[string]string{site + "\tframe": "one.go", site + "\theap": "one.go"}
+	both := map[string]string{site + "\tframe": "one.go", site + "\theap": "one.go"}
 
-	movedToFrame, movedToHeap, appeared, vanished := compareAllocationCensus(found, accepted)
+	for _, testCase := range []struct {
+		name            string
+		accepted        map[string]bool
+		found           map[string]string
+		toFrame, toHeap string
+		seenIn          string
+	}{
+		{
+			name:     "frame gains a heap copy",
+			accepted: map[string]bool{site + "\tframe": true},
+			found:    both,
+			toHeap:   "frame -> frame+heap",
+			seenIn:   "several programs",
+		},
+		{
+			name:     "heap gains a frame copy",
+			accepted: map[string]bool{site + "\theap": true},
+			found:    both,
+			toFrame:  "heap -> frame+heap",
+			seenIn:   "several programs",
+		},
+		{
+			name:     "split loses its heap copy",
+			accepted: map[string]bool{site + "\tframe": true, site + "\theap": true},
+			found:    map[string]string{site + "\tframe": "one.go"},
+			toFrame:  "frame+heap -> frame",
+			seenIn:   "one.go",
+		},
+		{
+			name:     "split loses its frame copy",
+			accepted: map[string]bool{site + "\tframe": true, site + "\theap": true},
+			found:    map[string]string{site + "\theap": "one.go"},
+			toHeap:   "frame+heap -> heap",
+			seenIn:   "one.go",
+		},
+		{
+			name:     "split is unchanged",
+			accepted: map[string]bool{site + "\tframe": true, site + "\theap": true},
+			found:    both,
+		},
+	} {
+		t.Run(testCase.name, func(t *testing.T) {
+			movedToFrame, movedToHeap, appeared, vanished := compareAllocationCensus(testCase.found, testCase.accepted)
 
-	assert.Empty(t, movedToFrame)
-	assert.Equal(t, []string{site + "\n      frame -> frame+heap, seen compiling several programs"}, movedToHeap)
-	assert.Empty(t, appeared)
-	assert.Empty(t, vanished)
+			assert.Equal(t, expectedMove(site, testCase.toFrame, testCase.seenIn), movedToFrame)
+			assert.Equal(t, expectedMove(site, testCase.toHeap, testCase.seenIn), movedToHeap)
+			assert.Empty(t, appeared)
+			assert.Empty(t, vanished)
+		})
+	}
+}
+
+// expectedMove builds the one reported line a move produces, or nil when the
+// case expects no move in that direction. seenIn is the program the reporter
+// names; it is "several programs" whenever the site's new placement is a split,
+// because no single census line carries a split placement to attribute it to.
+func expectedMove(site, direction, seenIn string) []string {
+	if direction == "" {
+		return nil
+	}
+	return []string{fmt.Sprintf("%s\n      %s, seen compiling %s", site, direction, seenIn)}
 }
