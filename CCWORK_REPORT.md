@@ -89,3 +89,17 @@ higher than the previous one, so the iteration is a descending chain whatever
 the transfer function does. `TestEscapeSummaryFacts` asserts `Bailouts == 0`
 (no component ever reaches the round cap) and that the fixed point is never
 *less* precise than breaking cycles.
+
+---
+
+# ADJUDICATION (job `escape-shadow-adjudicate`, continuing at `3b3c30b`)
+
+Sections 2 onward, written by the follow-on job. Sections 0 and 1 above are the
+previous job's and are not re-derived. Everything below is measured on this
+tree; anything not measured is marked so in place.
+
+The table under adjudication is `goc/testdata/escape_shadow_baseline.txt`:
+341 disagreements, **267 `frame -> heap`** (the IR analysis is more
+conservative than goc's AST walk) and **74 `heap -> frame`** (the IR analysis is
+more permissive). 22 rows are inside a loop -- 12 conservative, 10 permissive.
+
