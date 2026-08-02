@@ -2288,24 +2288,47 @@ func astParents(root ast.Node) map[ast.Node]ast.Node {
 // only as the storage for an immediately reinterpreted or selected value. The
 // heap-allocation IR pass handles the remaining, dataflow-dependent cases.
 func (g *gen) nonEscapingAddress(address *ast.UnaryExpr) bool {
-	if g.assignedResultDoesNotEscape(address) {
+	return g.nonEscapingAddressWithin(
+		address,
+		g.info,
+		g.parents,
+		g.currentBody,
+		make(map[parameterKey]bool),
+	)
+}
+
+// nonEscapingAddressWithin is nonEscapingAddress asked about a body other than
+// the one being lowered. The escape walk needs the same answer this gives,
+// because it is this predicate -- not the walk -- that decides whether &T{...}
+// is emitted as frame storage or as a runtime.newobject, and a value placed
+// inside the literal is in whichever of the two the emitter chose. Asking the
+// walk's own, more precise question there instead is what left
+// bigmod.Nat.Mul's T on the frame while its &Nat{limbs: T} went to the heap.
+func (g *gen) nonEscapingAddressWithin(
+	address *ast.UnaryExpr,
+	info *types.Info,
+	parents map[ast.Node]ast.Node,
+	body *ast.BlockStmt,
+	checking map[parameterKey]bool,
+) bool {
+	if g.assignedNodeDoesNotEscapeWithin(address, info, parents, body, checking) {
 		return true
 	}
 	var current ast.Node = address
 	for {
-		parent := g.parents[current]
+		parent := parents[current]
 		switch parent := parent.(type) {
 		case *ast.ParenExpr:
 			current = parent
 		case *ast.CallExpr:
-			if len(parent.Args) != 1 || parent.Args[0] != current || !g.info.Types[parent.Fun].IsType() {
+			if len(parent.Args) != 1 || parent.Args[0] != current || !info.Types[parent.Fun].IsType() {
 				return false
 			}
 			current = parent
 		case *ast.StarExpr:
 			return parent.X == current
 		case *ast.SelectorExpr:
-			selection := g.info.Selections[parent]
+			selection := info.Selections[parent]
 			return parent.X == current && selection != nil && selection.Kind() == types.FieldVal
 		default:
 			return false
@@ -2336,6 +2359,9 @@ func (g *gen) addressEscapesWithin(
 ) bool {
 	var current ast.Node = address
 	for {
+		if g.boxedIntoInterface(current, info, parents) {
+			return true
+		}
 		parent := parents[current]
 		switch parent := parent.(type) {
 		case *ast.ParenExpr:
@@ -2550,6 +2576,9 @@ func (g *gen) valueDoesNotEscapeWithin(
 ) bool {
 	var current ast.Node = expression
 	for {
+		if g.boxedIntoInterface(current, info, parents) {
+			return false
+		}
 		if g.assignedNodeDoesNotEscapeWithin(current, info, parents, body, checking) {
 			return true
 		}
@@ -2577,7 +2606,24 @@ func (g *gen) valueDoesNotEscapeWithin(
 				// &TextHandler{&commonHandler{w: w}} is that shape, and letting
 				// the result rule apply through it left a caller's bytes.Buffer
 				// on the frame with a heap handler pointing at it.
+				//
+				// This test comes first deliberately. The composite-literal
+				// rule below is allowed to answer "does not escape", and in a
+				// summary walk that answer would be reached through a local the
+				// callee returns -- which is the hole above, reopened.
 				return false
+			}
+			if _, isLiteral := parent.X.(*ast.CompositeLit); isLiteral {
+				// &T{v} makes storage of its own and copies v into it, so v is
+				// wherever that storage is. The emitter places it with
+				// nonEscapingAddress, so this walk has to ask that same
+				// question rather than continue climbing: continuing asked
+				// whether the *pointer* escapes, which for
+				// x.Mod(&Nat{limbs: T}, m) answered "no" while the emitter,
+				// whose walk accepts only a one-argument type conversion above
+				// an address, put the Nat in the heap and the barrier put T's
+				// frame backing array in it.
+				return g.nonEscapingAddressWithin(parent, info, parents, body, checking)
 			}
 			current = parent
 		case *ast.SliceExpr:
@@ -2711,6 +2757,271 @@ func appendDestination(call *ast.CallExpr, expression ast.Node, info *types.Info
 		return false
 	}
 	return len(call.Args) != 0 && call.Args[0] == expression
+}
+
+// boxedIntoInterface reports whether a value flowing out of expression is
+// converted to an interface type there, which copies it into freshly allocated
+// storage that is not part of this frame.
+//
+// This is a publication and the escape walk has to stop at it.
+// adaptValueToInterface allocates the interface payload with allocateTyped --
+// a runtime.newobject candidate -- for every source type that is not
+// pointer-shaped, and stores the value into it through the write barrier. Every
+// pointer inside the value, including a slice header's backing-array pointer,
+// is in the heap from that instruction on, whatever the receiving function does
+// with the interface afterwards.
+//
+// runtime.KeepAlive(values) is the shape that made this matter. The walk asked
+// only whether KeepAlive lets its parameter escape -- it does not -- and left
+// the backing array of make([]*record, 0, 4) on main's frame, while the caller
+// boxed the slice header into a runtime.newobject one instruction earlier.
+//
+// Pointer-shaped source types are excluded because isDirectInterfaceType makes
+// adaptValueToInterface store them straight into the two-word descriptor, which
+// is an ordinary frame allocation: no fresh storage is made, so the walk should
+// carry on through the conversion rather than stop.
+func (g *gen) boxedIntoInterface(node ast.Node, info *types.Info, parents map[ast.Node]ast.Node) bool {
+	expression, isExpression := node.(ast.Expr)
+	if !isExpression {
+		return false
+	}
+	sourceType := info.TypeOf(expression)
+	if sourceType == nil || !interfaceConversionAllocates(sourceType) {
+		return false
+	}
+	targetType := interfaceConversionTarget(expression, info, parents)
+	if targetType == nil {
+		return false
+	}
+	if isSharedTypeParameter(targetType) {
+		// Shared generic code represents an unconstrained type parameter as one
+		// pointer-sized value; the constraint interface is not its runtime
+		// representation, so nothing is boxed. assignmentValue agrees.
+		return false
+	}
+	_, isInterface := targetType.Underlying().(*types.Interface)
+	return isInterface
+}
+
+// interfaceConversionAllocates reports whether converting a value of this type
+// to an interface makes fresh storage for the payload.
+func interfaceConversionAllocates(sourceType types.Type) bool {
+	if _, alreadyInterface := sourceType.Underlying().(*types.Interface); alreadyInterface {
+		return false
+	}
+	if isSharedTypeParameter(sourceType) {
+		return false
+	}
+	if basic, ok := sourceType.Underlying().(*types.Basic); ok && basic.Kind() == types.UntypedNil {
+		return false
+	}
+	return !isDirectInterfaceType(sourceType)
+}
+
+// interfaceConversionTarget names the type an expression's value is converted
+// to by the context it sits in, for the contexts that perform an assignment
+// conversion. It returns nil where there is no conversion, or where the context
+// is one the escape walk already answers conservatively, so a nil answer never
+// weakens the walk.
+func interfaceConversionTarget(expression ast.Expr, info *types.Info, parents map[ast.Node]ast.Node) types.Type {
+	switch parent := parents[expression].(type) {
+	case *ast.CallExpr:
+		return callArgumentTarget(parent, expression, info)
+	case *ast.AssignStmt:
+		for index, rightHandSide := range parent.Rhs {
+			if rightHandSide != expression {
+				continue
+			}
+			if index >= len(parent.Lhs) {
+				return nil
+			}
+			return assignedTargetType(parent.Lhs[index], info)
+		}
+		return nil
+	case *ast.ValueSpec:
+		for index, value := range parent.Values {
+			if value != expression {
+				continue
+			}
+			if index >= len(parent.Names) {
+				return nil
+			}
+			return assignedTargetType(parent.Names[index], info)
+		}
+		return nil
+	case *ast.ReturnStmt:
+		return returnedResultType(parent, expression, info, parents)
+	case *ast.SendStmt:
+		if parent.Value != expression {
+			return nil
+		}
+		channelType, ok := info.TypeOf(parent.Chan).Underlying().(*types.Chan)
+		if !ok {
+			return nil
+		}
+		return channelType.Elem()
+	case *ast.KeyValueExpr:
+		literal, inLiteral := parents[parent].(*ast.CompositeLit)
+		if !inLiteral {
+			return nil
+		}
+		return compositeElementTarget(literal, parent, expression, info)
+	case *ast.CompositeLit:
+		return compositeElementTarget(parent, expression, expression, info)
+	}
+	return nil
+}
+
+// assignedTargetType is the type of an assignment's left-hand side, with the
+// blank identifier reported as no destination at all.
+func assignedTargetType(destination ast.Expr, info *types.Info) types.Type {
+	if identifier, ok := destination.(*ast.Ident); ok && identifier.Name == "_" {
+		return nil
+	}
+	return info.TypeOf(destination)
+}
+
+// callArgumentTarget names the type a call converts one argument to: the
+// converted-to type for a type conversion, and the parameter's type for a call.
+// Builtins are reported as no conversion except panic, which does box its
+// operand.
+func callArgumentTarget(call *ast.CallExpr, argument ast.Expr, info *types.Info) types.Type {
+	if info.Types[call.Fun].IsType() {
+		if len(call.Args) != 1 || call.Args[0] != argument {
+			return nil
+		}
+		return info.TypeOf(call)
+	}
+	index := -1
+	for position, other := range call.Args {
+		if other == argument {
+			index = position
+			break
+		}
+	}
+	if index < 0 {
+		return nil
+	}
+	if identifier, ok := call.Fun.(*ast.Ident); ok {
+		if builtin, isBuiltin := info.Uses[identifier].(*types.Builtin); isBuiltin {
+			if builtin.Name() == "panic" {
+				return types.NewInterfaceType(nil, nil)
+			}
+			return nil
+		}
+	}
+	functionType := info.TypeOf(call.Fun)
+	if functionType == nil {
+		return nil
+	}
+	signature, ok := functionType.Underlying().(*types.Signature)
+	if !ok {
+		return nil
+	}
+	parameters := signature.Params()
+	last := parameters.Len() - 1
+	if last < 0 {
+		return nil
+	}
+	if !signature.Variadic() || index < last {
+		if index >= parameters.Len() {
+			return nil
+		}
+		return parameters.At(index).Type()
+	}
+	if call.Ellipsis.IsValid() {
+		// f(values...) passes the slice itself; nothing is converted per element.
+		return nil
+	}
+	slice, isSlice := parameters.At(last).Type().Underlying().(*types.Slice)
+	if !isSlice {
+		return nil
+	}
+	return slice.Elem()
+}
+
+// compositeElementTarget names the type a composite literal converts one
+// element to. element is the whole element -- the key-value pair for a keyed
+// literal -- and value is the expression whose target is wanted.
+func compositeElementTarget(literal *ast.CompositeLit, element ast.Expr, value ast.Expr, info *types.Info) types.Type {
+	literalType := info.TypeOf(literal)
+	if literalType == nil {
+		return nil
+	}
+	switch underlying := literalType.Underlying().(type) {
+	case *types.Slice:
+		return underlying.Elem()
+	case *types.Array:
+		return underlying.Elem()
+	case *types.Map:
+		pair, keyed := element.(*ast.KeyValueExpr)
+		if keyed && pair.Key == value {
+			return underlying.Key()
+		}
+		return underlying.Elem()
+	case *types.Struct:
+		if pair, keyed := element.(*ast.KeyValueExpr); keyed {
+			name, ok := pair.Key.(*ast.Ident)
+			if !ok {
+				return nil
+			}
+			for index := 0; index < underlying.NumFields(); index++ {
+				if underlying.Field(index).Name() == name.Name {
+					return underlying.Field(index).Type()
+				}
+			}
+			return nil
+		}
+		for index, other := range literal.Elts {
+			if other == element && index < underlying.NumFields() {
+				return underlying.Field(index).Type()
+			}
+		}
+		return nil
+	}
+	return nil
+}
+
+// returnedResultType names the result a returned expression is assigned to. A
+// return whose expression count does not match the signature is returning a
+// multi-valued call, which stands for every result at once and is reported as
+// no conversion.
+func returnedResultType(statement *ast.ReturnStmt, expression ast.Expr, info *types.Info, parents map[ast.Node]ast.Node) types.Type {
+	index := -1
+	for position, result := range statement.Results {
+		if result == expression {
+			index = position
+			break
+		}
+	}
+	if index < 0 {
+		return nil
+	}
+	signature := enclosingSignature(statement, info, parents)
+	if signature == nil || signature.Results().Len() != len(statement.Results) {
+		return nil
+	}
+	return signature.Results().At(index).Type()
+}
+
+// enclosingSignature is the signature of the function whose body a node sits
+// in, which for a return statement is the function it returns from.
+func enclosingSignature(node ast.Node, info *types.Info, parents map[ast.Node]ast.Node) *types.Signature {
+	for current := ast.Node(node); current != nil; current = parents[current] {
+		switch declaration := current.(type) {
+		case *ast.FuncLit:
+			signature, _ := info.TypeOf(declaration).(*types.Signature)
+			return signature
+		case *ast.FuncDecl:
+			function, _ := info.Defs[declaration.Name].(*types.Func)
+			if function == nil {
+				return nil
+			}
+			signature, _ := function.Type().(*types.Signature)
+			return signature
+		}
+	}
+	return nil
 }
 
 // escapeWalkSeesEveryUse reports whether every use of an object is inside the
@@ -2890,6 +3201,9 @@ func (g *gen) nonEscapingObjectUse(
 	body *ast.BlockStmt,
 	checking map[parameterKey]bool,
 ) bool {
+	if g.boxedIntoInterface(identifier, info, parents) {
+		return false
+	}
 	parent := parents[identifier]
 	switch parent := parent.(type) {
 	case *ast.IndexExpr:
