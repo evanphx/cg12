@@ -10,17 +10,27 @@ type localSlot struct {
 // LowerHeapAllocations promotes typed heap-allocation candidates whose
 // pointers provably remain local to stack slots. Candidates that may escape
 // are lowered to ordinary allocator calls.
+//
+// Each decision is appended to module.AllocDecisions as it is made. That record
+// is diagnostic only -- nothing in the compiler reads it -- but it is the only
+// place the frame half of the decision survives: a promoted candidate becomes a
+// bare OAlloc carrying a byte size and nothing else, so after this pass runs
+// there is no way to ask the IR which frame slots used to be allocations, or of
+// what type. See AllocationCensus.
 func LowerHeapAllocations(module *ir.Module) bool {
 	changed := false
 	for _, function := range module.Funcs {
-		if function.Start != nil && lowerFunctionHeapAllocations(function) {
+		if function.Start == nil {
+			continue
+		}
+		if lowerFunctionHeapAllocations(function, &module.AllocDecisions) {
 			changed = true
 		}
 	}
 	return changed
 }
 
-func lowerFunctionHeapAllocations(function *ir.Func) bool {
+func lowerFunctionHeapAllocations(function *ir.Func, decisions *[]ir.AllocDecision) bool {
 	aliases := newAliasInfo(function)
 	definitions := make(map[uint32]ir.Instr)
 	bases := make(map[uint32]uint32)
@@ -233,12 +243,14 @@ func lowerFunctionHeapAllocations(function *ir.Func) bool {
 				continue
 			}
 			if escaped[instruction.To.ID] {
+				recordAllocDecision(decisions, function, original, ir.AllocOnHeap)
 				instruction.Op = ir.OCall
 				instruction.Args = instruction.Args[:2]
 				instruction.Aux = 0
 				lowered = append(lowered, instruction)
 				continue
 			}
+			recordAllocDecision(decisions, function, original, ir.AllocInFrame)
 
 			size := instruction.Args[2]
 			switch instruction.Aux {
@@ -264,6 +276,40 @@ func lowerFunctionHeapAllocations(function *ir.Func) bool {
 		block.Instrs = lowered
 	}
 	return true
+}
+
+// recordAllocDecision notes where one heap-allocation candidate landed.
+// candidate must still be the unrewritten OHeapAlloc, whose arguments are the
+// allocator, the type descriptor and the constant byte size.
+func recordAllocDecision(decisions *[]ir.AllocDecision, function *ir.Func, candidate ir.Instr, placement ir.AllocPlacement) {
+	if decisions == nil {
+		return
+	}
+	size, sized := constInt(function, candidate.Args[2])
+	if !sized {
+		size = -1
+	}
+	*decisions = append(*decisions, ir.AllocDecision{
+		Func:      function.Name,
+		Pos:       candidate.Pos,
+		Allocator: constSymbolName(function, candidate.Args[0]),
+		Type:      constSymbolName(function, candidate.Args[1]),
+		Size:      size,
+		Placement: placement,
+	})
+}
+
+// constSymbolName returns the symbol name a reference names, or "" if it is not
+// a symbol constant.
+func constSymbolName(function *ir.Func, reference ir.Ref) string {
+	if reference.Kind != ir.RefConst || int(reference.ID) >= len(function.Consts) {
+		return ""
+	}
+	constant := function.Consts[reference.ID]
+	if constant.Kind != ir.ConstSym {
+		return ""
+	}
+	return constant.Sym
 }
 
 func phiHeapBase(phi *ir.Phi, bases map[uint32]uint32) (uint32, bool, bool) {
