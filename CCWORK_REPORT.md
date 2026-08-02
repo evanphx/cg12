@@ -508,3 +508,66 @@ produced the 22, because the two instruments disagreeing about the size of a
 known change is exactly the kind of thing a census exists to surface. Nothing
 here suggests the compiler is wrong -- both runs of the corpus suite pass -- only
 that the two counts are not measuring the same set.
+
+## 12. Verification ledger for this job
+
+Every process below was waited on to exit and the numbers are read from its own
+output. **Nothing was left running at the end of this session.** The one command
+that could not fit the 10-minute foreground cap (`go test ./goc/...`, 12.6 min)
+was launched detached and then polled in-session until its exit file appeared;
+its exit status was read from that file, not inferred.
+
+| what | result |
+|---|---|
+| `go build ./...` (rebased tree) | **exit 0** |
+| `go vet ./opt/ ./ir/ ./goc/` | **exit 0** |
+| `git diff FETCH_HEAD HEAD -- . ':!CCWORK_REPORT.md'` | **empty** -- rebased code identical to branch tip |
+| baseline regenerated from scratch | **md5 unchanged**, `git diff` empty, `diff` exit 0 |
+| `go test ./goc/... -v` | **PASS, exit 0**, 756.667s, 609 RUN / 609 PASS / 0 FAIL / 0 SKIP |
+| `go test ./goc -run TestAllocationCensus` (final tree, run 1) | **PASS** 161.360s, baseline md5 unchanged |
+| `go test ./goc -run TestAllocationCensus` (final tree, run 2) | **PASS** 156.262s, baseline md5 unchanged |
+| `go test ./goc -run TestCompareAllocationCensus -v` | **PASS**, 1 test + 1 test with 5 subtests, 0.010s |
+| `go test ./opt/ ./ir/` | **PASS** (opt 0.967s, ir 0.014s) |
+| census with the publication fix reverted (control) | **FAIL as designed**, exit 1, 9 sites named |
+| working tree after all of it | **clean**, baseline `9a2ed8f8dff5be7e99adae8fb91fbd80` |
+
+**Stability across the rebase: confirmed.** Three independent full corpus passes
+on the final tree -- run 1, run 2, and the one inside `go test ./goc/...` -- each
+a fresh compile of all 385 programs re-deriving the census from scratch, all
+three reproducing the accepted baseline exactly.
+
+### Baseline contents, recounted independently
+
+Section 4's figures were not taken on trust; they were recounted from the
+committed file with `awk` on the final tree, and all of them hold:
+
+| | count |
+|---|---|
+| file lines / comment lines / **records** | 18,713 / 30 / **18,683** |
+| distinct sites (first four fields) | 18,244 |
+| placed `heap` / `frame` | 18,183 / 500 |
+| positionless (`?`) | 5,870 |
+| allocators | `newobject` 17,208, `makemap` 813, `makeslice` 437, `makechan` 223, `newarray` 2 |
+| corpus programs (`goc/testdata/*.go`) | 385 |
+
+### Nothing marked UNVERIFIED
+
+Every item this job was asked for was run to completion. The one number this job
+could **not** confirm is the premise's "22 sites", and section 11 says so
+explicitly rather than restating it: this instrument counts 9, and the difference
+is recorded as an open discrepancy for whoever produced the 22.
+
+## 13. Bottom line
+
+* The rebase onto `main` (`05946f2`) is clean; only `CCWORK_REPORT.md` conflicted
+  and no compiler or test file did.
+* **No compiler behaviour was changed by this job.** The only code on this branch
+  is the census instrument itself, which the previous job established is
+  diagnostic-only.
+* **Baseline delta: 0 sites.** The premise that it was stale is wrong -- the
+  branch point already carried the publication fix -- and the regenerated file is
+  byte-identical to the committed one. No unexplained site.
+* **`go test ./goc/...`: 609 RUN / 609 PASS / 0 FAIL, exit 0**, +8 over `main`'s
+  601, which is exactly this branch's new tests.
+* The failure output names every moved site with position, function, allocator,
+  type and direction. Verified by making it fire on the final tree.
