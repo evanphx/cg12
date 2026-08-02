@@ -258,3 +258,111 @@ The first two were live miscompiles on main, found by asking the fix what else
 it covered. The last two are the other frame-committing sites the spike's
 census names -- slice-literal backing and the `string`->`[]byte` buffer -- and
 they were already correct, so nothing was needed there.
+
+## 7. The existing loop rule is untouched, measured on the same corpus
+
+The brief's scale is "the existing loop rule fires 441 times corpus-wide".
+That number was measured on 385 programs; this branch has 389. So the fix was
+priced against **the pre-fix tree carrying the same four new programs**
+(`a3efe11` in a scratch worktree, `loop_alias_frame_local.go` copied in), which
+makes the difference the fix and nothing else:
+
+    $ go test ./goc -run TestEscapeSummaryPromotionRate -escape-promotion-rate
+
+| summaries on | pre-fix, 389 programs | fixed, 389 programs | delta |
+|---|---|---|---|
+| promoted to a frame slot | 17 005 | 17 005 | **0** |
+| lowered to an allocator | 452 128 | 452 130 | **+2** |
+| promotion rate | 3.62% | 3.62% | — |
+| blocked by the loop rule | 447 | 448 | **+1** |
+
+| summaries off | pre-fix | fixed | delta |
+|---|---|---|---|
+| promoted | 14 054 | 14 054 | **0** |
+| lowered | 455 079 | 455 081 | +2 |
+| blocked by the loop rule | 413 | 414 | +1 |
+
+**Not one candidate changed from promoted to lowered or back.** The existing
+rule decides exactly what it decided before; the corpus gains two allocations
+and one more loop-rule fire, which is the arithmetic of the two new heap
+objects: `alternate`'s `cell` becomes an `OHeapAlloc` candidate inside a loop
+and is blocked by the rule (+1), and `viaArray`'s `[2]int` is escaped by the
+analysis on its own before the rule is consulted.
+
+(441 -> 447 is the four added corpus programs, measured before the fix; the fix
+itself is 447 -> 448.)
+
+## 8. The committed tree, checked with no update flags
+
+    $ go test ./goc -run 'TestAllocationCensus$|TestEscapeShadowPlacement$|TestFrameEscapeAudit$'
+    --- PASS: TestAllocationCensus (175.20s)
+    --- PASS: TestEscapeShadowPlacement (0.00s)
+    --- PASS: TestFrameEscapeAudit (0.00s)
+    ok  175.531s
+
+    $ go test ./goc -run 'TestLoopBodyAllocationsAreDistinctPerIteration|TestLoopAliasExpectationsMatchTheHostToolchain'
+    ok  21.433s   (8 + 4 subtests, all pass)
+
+    $ go test ./goc -run TestCompilingTheSameSourceTwiceGivesTheSameModule
+    ok  4.657s
+
+Per the brief, `go test ./goc/...`, the capability matrix and `make test-unit`
+were **not** run here; a dependent verification job does that.
+
+## 9. What this does not cover
+
+Stated so nobody reads the four green rows as more than they are.
+
+1. **Loops are recognised syntactically** -- the bodies of `for` and `range`
+   statements. A loop built out of a backward `goto` is not one of those, and
+   the AST rule will not see it. The IR loop rule still covers any
+   `OHeapAlloc` candidate inside it.
+2. **Only the loop body.** Storage committed in a `for` clause's init runs once
+   and is right as it is; its condition and post statement are between
+   iterations rather than inside one and are not asked.
+3. **`//go:nowritebarrier` functions keep the defect at the `&T{...}` site.**
+   `heap = false` is forced there, before and after this change, because those
+   functions must not allocate. The variable site has no such gate -- the
+   escaping-capture arm it shares never had one -- so it *can* now heap-lift in
+   such a function. Across 389 programs it never did: the census gained no site
+   outside the two reduction programs.
+4. **Freestanding builds are unaffected**, like the rest of the escape
+   machinery, which is gated on `runtimeAllocation`.
+5. **The rule is as precise as the walk it reuses.** Where the walk cannot
+   prove containment it answers "escapes", which under a loop-body scope means
+   "outlives the iteration" and sends the object to the heap. That is the safe
+   direction, and §4 and §7 are what it costs: two allocations.
+
+---
+
+## Result
+
+**Approach taken: (a)** -- the per-iteration question is asked at the two
+committing sites in the AST front end. It was chosen over (b) on the spike's
+own census: (b) hands those sites to `promotionsBlockedByALoop`, which heaps
+*every* promotable candidate in a loop with no test of whether anything retains
+it, and `allocLocal` is 4 685 295 committed frame placements corpus-wide --
+every array and struct local in the runtime and standard library. That would
+have heaped every scratch buffer declared in every loop. Making the rule
+precise enough to avoid it means rewriting the rule the existing 441 fires
+depend on. (a) needed no new analysis: `objectDoesNotEscape` already refuses to
+answer for an object whose uses it cannot all see, so running the existing walk
+with the loop body as its scope asks the per-iteration question and inherits
+the walk's interprocedural parameter summaries. The brief's one point for (b)
+-- census visibility -- is answered anyway: what the rule moves becomes a heap
+allocation, and heap allocations are exactly what the census records.
+
+**All four forms now match the host toolchain**, at `-O0` and `-O`, and so do
+two further shapes that were also broken on main and that nobody had reduced (a
+struct local reached through a pointer method, and the same inside a `range`
+loop).
+
+**Census delta: 2 allocations, both in the reduction programs.** Zero sites
+moved frame->heap or heap->frame anywhere in the standard library or runtime
+across 389 programs; the promotion count is identical to the pre-fix tree
+(17 005), so the existing loop rule was not disturbed -- it gains exactly one
+fire, 447 -> 448. Compile time is unchanged within the run-to-run spread
+(12.01 s -> 12.05 s on `stdlib_crypto_ecdsa.go`).
+
+**`TestFrameEscapeAudit` is clean**: zero new frame-address publications, and
+none of the 209 already listed went away.
