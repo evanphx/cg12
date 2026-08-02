@@ -1,372 +1,701 @@
-# A closure leaves a captured string variable pointing at its dead frame
-
-Branch `ccwork/closure-string`, off `main` (`0505d90`). RUNTIME_PLAN.md §5.10, first
-bullet under "Known miscompiles, not covered by any capability".
-
-**Verdict: fixed, and it was three type classes rather than one.** The defect is
-not about strings and not about `range`; it is about every local variable cg12
-keeps in a frame slot as a pointer to a separate sixteen-byte value — a string,
-an interface, or a `complex128` — assigned from inside a closure that captured it
-by reference. 27 of 70 differential programs disagreed with the host toolchain;
-26 agree now, and the 27th is a different defect this branch measures and
-deliberately does not fix (section 3).
-
-Both matrix arms are 347 subtests / 346 PASS / 1 declared EXPECTED FAILURE /
-0 FAIL / 0 KNOWN GAP, all 367 corpus programs are still byte-reproducible in all
-three configurations, and §5.13's three range-over-function cases assert what
-they originally wanted to. What is *not* established is section 9.
-
-This file was written as each result landed; the sections are in the order they
-were measured.
-
-## 1. Reproduced
-
-`RUNTIME_PLAN.md` §5.10's program, verbatim, compiled with `goc` built from this
-tree:
-
-```
-inside az
-outside
-```
-
-The host toolchain prints `inside az` / `outside az`. Confirmed on `0505d90`.
-
-## 2. The full shape, measured against the host toolchain
-
-65 differential programs (§3 step 2: each run with `go run` and with `goc`, stdout
-and exit status compared). **27 differ.**
-
-### What is affected
-
-A **local variable whose cg12 representation is "the frame slot holds a pointer to
-an inline 16-byte value"**, assigned inside a **non-escaping function literal that
-captured it by reference**. That is three type classes:
-
-| type class | example | verdict |
-| --- | --- | --- |
-| `string` | `log = log + s` | **wrong** |
-| named type with underlying `string` | `type label string` | **wrong** |
-| interface (`any`, `error`, …) | `v = n`, `err = errors.New(...)` | **wrong** |
-| `complex128` | `c = complex(3, 4)` | **wrong** |
-
-Every assignment form is affected — the operator and the right-hand side are not
-the discriminator:
-
-| form | program | goc |
-| --- | --- | --- |
-| `log = log + s` (computed) | c01 | `fatal error: runtime: out of memory` |
-| `log = "az"` (**string literal**) | c02 | garbage bytes |
-| `log += s` | c03 | `fatal error: runtime: out of memory` |
-| `log = fmt.Sprint(n)` | c04 | OOM |
-| `log = s` (**plain parameter copy**) | c05 | OOM |
-| `log = string(b)` | c27 | OOM |
-| `n, log = 1, log+s` (tuple) | c25 | OOM |
-| `a, b = b, a` (swap) | c26 | OOM |
-
-and every way of reaching the closure:
-
-| shape | program | goc |
-| --- | --- | --- |
-| named function-literal variable, called | c01 | wrong |
-| immediately-invoked function literal | c28 | wrong |
-| function literal nested in a function literal | c21 | wrong |
-| function literal passed to a **generic** function | c62 | wrong |
-| `for i := range seq` over a function iterator | c19, c40 | wrong |
-| deferred literal inside a non-escaping literal | c17 | SIGSEGV |
-| the captured variable is a **parameter** of the enclosing function | c42 | wrong |
-
-### What is *not* affected, and why
-
-| shape | program | why it is correct |
-| --- | --- | --- |
-| read-only capture | c06, c44, c49 | nothing is assigned |
-| **slice** | c07, c08, c38, c47 | under `runtimeAllocation` a slice local is stored **inline** (3 words in the slot); `assignLocal` writes the three words, it does not rebind |
-| **struct / array** | c11, c12, c46, c63 | `isMemoryValue`: the slot holds a *stable backing address* and `assignLocal` copies into the backing |
-| `int`, `bool`, pointer, map, chan, func, `complex64` | c13, c15, c14, c53, c52 | one word in the slot |
-| **escaping** closure — goroutine | c16, c48 | `variableStorage` heap-lifts the variable and sets `directValues`, so the storage *is* the header |
-| **escaping** closure — returned | c34 | same |
-| named result written by a closure | c22, c43, c45 | `resultStorage` gives direct storage |
-| `&v` taken and escaping | c50 | heap-lifted for the same reason |
-| write through a pointer parameter | c20, c36 | the address path stores inline |
-| assignment to a **field or element** of a captured variable | c23, c24, c63 | goes through `assignmentTargetAddress`, which stores inline |
-| `defer` registered in a loop | c18 | §5.1 heap-lifts those captures |
-
-Two cases matched *by luck* on the first pass and differ once a call clobbers the
-dead frame — recorded because they are the reason a green matrix would not find
-this: `c37` (`if ok { log = log + s }` inside the closure) and `c39` (the captured
-variable is a parameter). Adding a recursive call between the write and the read
-turns both into `result ` — see `c41`, `c42`. **A "passing" observation of this bug
-is worth nothing unless the frame is clobbered between the write and the read.**
-
-### The symptoms, and why there are so many
-
-§5.10 recorded two observable shapes. There are at least six, and which one you get
-is decided by what the dead frame happens to hold when it is read back:
-
-- silently empty string (the §5.10 reducer)
-- garbage bytes printed as the string's content (c02, c33)
-- `fatal error: runtime: out of memory` — the length word is read as a huge number
-  (c01, c03, c05, …)
-- `SIGSEGV` in `runtime_concatstrings` / `goc_memmove` (c17, c19, c40)
-- `unexpected fault address 0x3fffff` (c29)
-- `panic: can't call pointer on a non-pointer Value` inside `reflect`, or
-  `<invalid reflect.Value>`, for the interface cases (c09, c10, c32)
-
-### The mechanism
-
-A local `string` (or interface, or `complex128`) variable's frame slot holds an
-*8-byte pointer* to a 16-byte header. `goc/compile.go`'s `storeAssignmentTarget`,
-for a destination classified `assignmentTargetVariable` with `local` true:
-
-```go
-if target.local && isDescriptorValue(target.valueType) {
-        value = g.copyInlineValue(value, target.valueType)   // fresh localAllocTyped in THIS frame
-}
-...
-g.store(value, target.slot, target.valueType)                // rebinds the slot to it
-```
-
-`copyInlineValue` calls `localAllocTyped`, an alloca **in the function doing the
-assigning**. The slot, however, belongs to whichever frame declared the variable.
-When the assigning function is a closure that captured the variable by reference —
-`funcLit` stores `g.vars[capture]`, the slot address, into the closure descriptor,
-and the child reads it back as `child.vars[capture]` — the store publishes a
-pointer to the *closure's* frame into the *parent's* slot. It dangles the moment
-the closure returns.
-
-`complex128` is worse: it is `ir.ClsP`-classed and 16 bytes, but
-`isDescriptorValue` is false for it, so it does not even get the `copyInlineValue`
-step; the slot is rebound to whatever address the right-hand side produced.
-
-The escaping-closure path is unaffected because `variableStorage`'s heap-lift arm
-sets `g.directValues[object] = true` for strings and interfaces, which makes the
-storage the header itself and routes the assignment through `storeInlineValue`.
-**The fix is to give the same representation to a variable captured by reference by
-a non-escaping literal**, which costs no allocation: the header lives in the
-declaring frame instead of behind a pointer.
-
-## 3. A neighbouring defect found while measuring: `complex128` in memory
-
-`complex128` shares the affected representation, so it came along with the
-measurement. The *variable* half of it is the same defect and is fixed below
-(c54, c56). The *memory* half is a different defect, is **not fixed**, and is
-recorded here with its reducers.
-
-**A `complex128` written through an address destination stores the address of a
-frame allocation into the destination, not the value.** `h.c = complex(3.0, 4.0)`
-with `h` a `*holder`:
-
-```
-%t3 =p alloc8 16
-stored d_3, %t3
-%t4 =p add %t3, 8
-stored d_4, %t4
-call $goc_storep(p %t2, p %t3)      <-- the field gets %t3, the frame address
-```
-
-`storeAssignmentTarget`'s `assignmentTargetAddress` arm stores inline only when
-`isInlineAggregate(valueType) || isInterfaceValue(valueType)`, and `complex128`
-is neither, so it falls to `g.store`, which is a one-word store for an
-`ir.ClsP`-classed type. Reads are consistent with it — `g.load` returns the word
-and `real`/`imag` dereference it — which is why it looks correct until the frame
-that produced the value dies. Three reducers:
-
-| program | host | goc |
-| --- | --- | --- |
-| `*p = complex(3, 4)` through a `*complex128` (c59) | `3 4` | `3.8004551335784e-310 3.8004551335772e-310` |
-| write `h.c` in one function, read it in another (d01) | `3 4 7` | `3.499451e-317 5.29561993437e-310 7` |
-| return a struct holding a `complex128` by value (d07) | `{(3+4i) 7}` | `{(0+0i) 7}` |
-
-It also hands `goc_storep` a goroutine-stack address as the value being
-published into a heap object, which is the §5.8 invariant reached by a fourth
-route.
-
-**Why it is not fixed here.** Widening the store arm alone is wrong and was
-measured to be wrong: doing it turned d02 (`fmt.Println(h)` on a struct with a
-`complex128` field, which reads the real sixteen bytes through reflect) and c58
-from passing to faulting, because the *read* side still loads one word. Making
-`complex128` a value carried as an address consistently means putting it into
-`isInlineAggregate`, which is consulted in dozens of places across the frontend
-— a change with its own blast radius and its own validation cycle, of exactly
-the shape RUNTIME_PLAN §5.14 records going wrong when bundled. The narrow rule
-this branch does adopt (`assignmentTargetStoresInline`) deliberately leaves the
-address path exactly as it was, so nothing here regresses and nothing here
-papers over it.
-
-## 4. The fix
-
-`variableStorage` already had the right representation for this — it is what the
-*escaping*-capture arm uses. The fix extends it to non-escaping captures, where
-it costs nothing at all: no heap cell, the value simply lives in the declaring
-frame's slot instead of behind a pointer to another sixteen bytes.
-
-- **`findReferenceCaptures`** (new, `goc/compile.go`) returns the local variables
-  a nested function body refers to. A nested body is a function literal *or* the
-  body of a `range` over a function, which is lowered into a yield function; both
-  reach the variable through the closure environment, which carries the address
-  of its slot. `findEscapingCaptures` answers the narrower question — which of
-  those must be heap-lifted because the nested function can outlive the frame —
-  and both now share a `bodyLocals` helper so they agree on what a local is.
-
-- **`variableStorage`** gives such a variable direct storage when its type would
-  otherwise be a pointer to a separate value: `localAllocTyped`, zeroed, with
-  `directValues[object] = true`. `localAllocTyped` marks the value's pointer
-  words in the frame's stack map, so the string's data word and the interface's
-  two words stay GC roots, which the old header alloca also was.
-
-- **`isIndirectVariableValue`** names the type set: not a struct or array
-  (`allocLocal` already gives those stable backing), not a slice (stored inline
-  under `runtimeAllocation`), leaving string, interface and `complex128`.
-
-- **`isInlineValue`** = `isInlineAggregate || isInterfaceValue || isComplex128Type`
-  is the "carried as an address" predicate the direct-value paths now use, and
-  `isAddressRepresentedInterfacePayload` is expressed in terms of it.
-
-- **`assignmentTarget.directVariable`** marks a destination whose own storage is
-  its value, and `assignmentTargetStoresInline` is what the read (`+=`) and the
-  store consult. It is deliberately *not* the same question as `target.inline`:
-  an address destination of type `complex128` keeps the word store it has always
-  had, because `complex128` is only carried as an address as a *value*, not in
-  memory. Widening that arm broke `c58` (a `complex128` struct field), which is
-  how the distinction was found; the narrower rule leaves `c58` passing.
-
-- The escaping-closure descriptor's snapshot arm (`cell == ir.R`) now copies a
-  direct value's bytes for any of the three types rather than only for an
-  interface. Reaching it needs a direct value that was never heap-lifted, which
-  no reducer produced; it is generalised because loading through the slot first,
-  as the aggregate arm below it does, would read the value's first word as the
-  address of the value.
-
-### Result
-
-**69 of the 70 differential programs now match the host**, up from 43. The one
-that still differs is `c59`, `*p = complex(3, 4)` through a `*complex128`, which
-is the pre-existing defect in section 3 and differed before this change too.
-
-Every affected case in section 2's tables is fixed, including all six symptom
-shapes, both range-over-function forms, and the `complex128` cases from section
-3's second bullet.
-
-## 5. What was landed with it
-
-- **`closure-capture/assigned-string`** and
-  **`closure-capture/assigned-header-values`**, two new capabilities
-  (`goc/testdata/runtime_closure_captured_{string,header_values}.go`). Every case
-  calls a recursive `clobber` between the closure's write and the read, because
-  two reducers found while measuring passed *without* that and failed *with* it.
-  Both carry their controls: read-only capture, escaping closure, returned
-  closure, captured slice, captured struct field, captured slice element.
-
-- **`goc/closurecapture_test.go`**, four mechanism tests over the three affected
-  types: the closure does not store one of its own frame allocations through the
-  captured pointer; the enclosing function allocates the value's full width for
-  it; a non-escaping capture does not start calling `runtime.newobject`
-  (§5.9's cost model); and the range-over-function yield function obeys the first
-  rule with no function literal in the source.
-
-- **§5.13's rewritten range-over-function cases are restored.**
-  `goc/testdata/runtime_range_target_forms.go`'s `iteratorTargets` accumulated
-  into a slice while every other subject in the file accumulated into a string;
-  §5.10 records that as a workaround for this defect. All four cases now use
-  `observed += ...` like the rest of the file, which makes them captured-variable
-  cases in their own right.
-
-## 6. Suites
-
-Every one of these was re-run at the tip commit `7182ddf`, after the plan and
-report edits, not only at the commit that introduced the fix.
-
-| suite | result |
-| --- | --- |
-| `go build ./...`, `go vet ./...` | clean |
-| `gofmt -l goc/ cmd/goc/` | clean |
-| `make test-unit` | ok, every package |
-| `make test-goc-corpus` | `ok github.com/evanphx/cg12/goc 567.755s` |
-| `make test-goc-cmd` | `ok github.com/evanphx/cg12/cmd/goc 229.315s` |
-| capability matrix, default arm | **347 subtests, 346 PASS, 1 EXPECTED FAILURE, 0 FAIL, 0 KNOWN GAP** |
-| capability matrix, `-runtime-opt` arm | **347 subtests, 346 PASS, 1 EXPECTED FAILURE, 0 FAIL, 0 KNOWN GAP** |
-
-**The complete list of non-passing capabilities, both arms: none.** The only
-non-`PASS` verdict in either arm is `defer-panic/panic-string-output`, the
-declared `expectedFailure`. `--- FAIL:` and `--- SKIP:` appear zero times in
-either arm.
-
-347 rather than 345 because this branch adds two capabilities. The census is from
-the per-capability `PASS` / `EXPECTED FAILURE` / `KNOWN GAP` log lines and a
-count of `--- PASS:`/`--- FAIL:`/`--- SKIP:` subtest lines, not from `ok`. Four
-shards per arm, `-runtime-status-shards=4 -runtime-status-compile-workers=16`,
-47-54s per shard.
-
-## 7. The reducers fail on the compiler they describe
-
-A reducer that has only ever reproduced once is a claim (RUNTIME_PLAN §15). Each
-one was re-run against a compiler built at **this same path** from `HEAD~2`'s
-`goc/compile.go` — the tree's own commit reverted, not a worktree, so the
-path-dependence §23 records does not enter.
-
-| program | base compiler | this branch |
-| --- | --- | --- |
-| `runtime_closure_captured_string.go` | `SIGSEGV`, nil pointer dereference | `closure captured string ok` |
-| `runtime_closure_captured_header_values.go` | `unexpected fault address 0x6e6f2d64616572` | `closure captured header values ok` |
-| `runtime_range_target_forms.go` (restored) | `SIGSEGV`, nil pointer dereference | passes |
-
-`0x6e6f2d64616572` is `"read-non"` little-endian: the fault address is the
-program's own text, read out of the frame the closure abandoned.
-
-**The first two mechanism unit tests were wrong and had to be rewritten.** As
-first written they passed against the base compiler, which makes them worthless.
-Two reasons, both worth recording:
-
-- A pointer store lowers to a **`goc_storep` call**, not an `ir` store
-  instruction, whenever the destination is not a known stack address — and a
-  captured pointer never is. A check that looked only at `Op.IsStore()` could not
-  see the store the defect consists of.
-- "the enclosing function allocates 16 bytes somewhere" was true on both
-  compilers. What separates them is the width of the allocation whose address
-  goes *into the closure environment*: sixteen for the value, eight for a pointer
-  to it.
-
-Rewritten (`6878d1a`), all three defect tests fail on the base compiler across
-all three types — 7 failing subtests — and pass here.
-`TestNonEscapingCaptureStaysOffTheHeap` passes on both by design: it is a guard
-on §5.9's cost model, not a defect test.
-
-## 8. Determinism (§23) is not regressed
-
-`analysis/determinism` over all 367 `goc/testdata` programs, 4 rounds each, 16
-workers, in three configurations:
-
-| configuration | result |
-| --- | --- |
-| no `-O` | `reproducible=367 varying=0 failed=0 of 367 over 4 rounds` |
-| `-O` | `reproducible=367 varying=0 failed=0 of 367 over 4 rounds` |
-| against a prebuilt pack (`goc build-runtime`) | `reproducible=367 varying=0 failed=0 of 367 over 4 rounds` |
-
-`content varies between rounds: 0` and `image varies, content identical (layout
-only): 0` in each. `scripts/determinism-check.sh`'s five-program sample agrees,
-cold and warm, two rounds.
-
-The fix cannot introduce nondeterminism by construction — `findReferenceCaptures`
-returns a map that is only ever *looked up* in, never iterated — but §23's rule
-is to measure rather than argue, so it is measured.
-
-## 9. What is left open
-
-- **`complex128` in memory** — section 3. Three reducers, an IR excerpt, and a
-  measurement showing why the one-line widening is wrong. Not fixed; recorded in
-  RUNTIME_PLAN §5.15 under "Residual".
-- **A `slice` local under `!runtimeAllocation`** has the same indirect
-  representation as a string and would have the same defect. It is excluded from
-  `isIndirectVariableValue` deliberately: `!runtimeAllocation` is the `goc -c`
-  path, which compiles to objects and never executes, so the change could not be
-  validated. Stated rather than made silently.
-- **`c++` on a `complex128`** goes through `IncDecStmt`'s word load and is
-  nonsense on both compilers. Untouched and unmeasured beyond that reading.
-- **§5.14's `span has no free objects` interaction** is untouched by this branch,
-  which changes no escape decision: `findEscapingCaptures` is unmodified and
-  `variableStorage`'s heap-lift arm still fires on exactly the same set.
+# Merge gate: `ccwork/merge-verify` (8f29b3f)
+
+`main` (`ad4e9b2`) + `ccwork/escape-gc-fix` + `ccwork/escape-checker`.
+This file is written as each result lands; sections are in the order they were measured.
+(The previous contents of this file were `ccwork/escape-checker`'s report; it is
+unchanged on that branch and in history at `8f29b3f:CCWORK_REPORT.md`.)
 
 ---
+
+## 1. THE CONFLICT RESOLUTION IN `stdlib/src/runtime/mbitmap.go` — **NOT CORRECT AS
+   RESOLVED. It lost checking power. Fixed on this branch.**
+
+### What the two sides did
+
+Both branches instrumented the *same three* sites in `mbitmap.go`
+(`bulkBarrierPreWrite`'s two arms and `bulkBarrierPreWriteSrcOnly`):
+
+    escape-checker:  cg12CheckWriteBarrierPair(addr, *dstx, *srcx)
+    escape-gc-fix:   cg12CheckBulkBarrierWord(addr, *dstx, *srcx, dst, src, size)
+
+`escape-gc-fix` additionally instrumented two sites `escape-checker` did not
+(`bulkBarrierBitmap` and `typeBitsBulkBarrier`, mbitmap.go:1441 and :1498) — so on
+*sites* the resolution is a strict superset (5 vs 3). Verified by diffing each branch's
+`mbitmap.go` against `main`; the merged file is byte-identical to `escape-gc-fix`'s.
+
+### The loss
+
+The two functions are **not** in a superset relation, because of the fast-path gate in
+the bulk wrapper (`stdlib/src/runtime/mwbbuf.go`):
+
+    func cg12CheckBulkBarrierWord(slot, old, new, dst, src, size uintptr) {
+        if !cg12WriteBarrierValueIsBad(old) && !cg12WriteBarrierValueIsBad(new) {
+            return                      // <-- only mode 1's rule
+        }
+        ...record range...
+        cg12CheckWriteBarrierPair(slot, old, new)
+    }
+
+`cg12CheckWriteBarrierPair` enforces **three** rules, not one:
+
+| mode | rule | in the bulk gate? |
+|---|---|---|
+| `cg12checkwb=1` | `old`/`new` is a word `findObject` would reject | yes |
+| `cg12checkwb=2` | `new` is a goroutine stack address and `slot` is a global (`stackNew`) | **no** |
+| `cg12checkwb=3` | `new` is a goroutine stack address and `slot` is not on any stack (`published`) | **no** |
+
+So a bulk copy that publishes a goroutine stack address — a `typedmemmove`,
+`growslice`, or `typedslicecopy` of a struct or slice element holding a frame address
+into a heap object or a global — returns from `cg12CheckBulkBarrierWord` at the first
+`if` and is never seen at modes 2 and 3. On `escape-checker`, those same three sites
+called `cg12CheckWriteBarrierPair` directly and *did* see it.
+
+This is not the loss of a mode nobody runs: mode 3 is the escape checker's whole
+runtime counterpart, and `TestARM64WriteBarrierAuditRunsClean` (`cmd/goc`, part of
+`make test-goc-cmd`) runs six programs under `cg12checkwb=1` **and** `cg12checkwb=3`.
+With the resolution as written, that suite's mode-3 arm no longer examines any word
+that reaches the buffer through a bulk barrier.
+
+Note the asymmetry that made this easy to miss: it is a *merge-induced* regression, not
+a defect on either parent. On `escape-gc-fix` alone, `cg12CheckWriteBarrierPair` had no
+`published` rule at all (mode 3 arrived with `escape-checker`), and its mode-2 rule
+requires a *global* slot, which a bulk `dst` rarely is — so there the narrow gate cost
+almost nothing. The merged `mwbbuf.go` took `escape-checker`'s three-rule
+`cg12CheckWriteBarrierPair` and `escape-gc-fix`'s one-rule gate: a combination that
+existed on neither parent.
+
+### The fix (committed on this branch)
+
+`cg12WriteBarrierWordIsRejected(slot, old, new)` is factored out as the single gate, and
+both `cg12CheckWriteBarrierPair` and `cg12CheckBulkBarrierWord` use it. The bulk path
+now enforces exactly the same rule set as the single-word path at every mode, and the
+two cannot drift apart again.
+
+Two properties were deliberately preserved rather than "cleaned up":
+
+- The gate still runs *before* `cg12BulkBarrierRange` is written, so that range global
+  is still only written on the path that immediately throws. RUNTIME_PLAN.md records
+  that an always-written range global raced between two goroutines in
+  `bulkBarrierPreWriteSrcOnly` and reported a range from the wrong call. Making the
+  wrapper unconditionally record and delegate would have reintroduced exactly that.
+- Everything stays `//go:nosplit`, and the fast path's call depth is unchanged
+  (`bulk -> gate -> valueIsBad`, as before).
+
+Calling both functions at the three sites — the other repair the brief allowed — was
+rejected: it double-scans every barriered word and emits two reports for one bad write.
+
+`cg12CheckWriteBarrierPair` remains live from `atomic_pointer.go:35` and from the bulk
+wrapper; nothing became dead. Confirmed by grep.
+
+### One unrelated nit, pre-existing on `escape-checker`, not fixed
+
+`mwbbuf.go`'s doc comment ends "see `cg12StackPublicationChecked`". No such symbol
+exists in the tree, on either parent, or on `main`; it names a compiler-side check
+RUNTIME_PLAN.md explicitly says was *designed but not built*. A dangling comment
+reference, not a behaviour defect. Left alone: it is not the merge's doing.
+
+---
+
+*(gate results follow as they land)*
+
+## 2. Gate item 1 — gofmt / build / vet
+
+    $ gofmt -l .
+    stdlib/src/net/http/pprof/testdata/delta_mutex.go
+    stdlib/src/runtime/testdata/testgoroutineleakprofile/goker/cockroach10214.go
+    stdlib/src/runtime/testdata/testgoroutineleakprofile/goker/cockroach10790.go
+    stdlib/src/runtime/testdata/testgoroutineleakprofile/goker/cockroach1462.go
+    stdlib/src/runtime/testdata/testgoroutineleakprofile/goker/cockroach16167.go
+    stdlib/src/runtime/testdata/testgoroutineleakprofile/goker/cockroach2448.go
+    stdlib/src/runtime/testdata/testgoroutineleakprofile/goker/hugo3251.go
+    stdlib/src/runtime/testdata/testgoroutineleakprofile/goker/syncthing4829.go
+    stdlib/src/runtime/testdata/testprog/gomaxprocs.go
+    stdlib/src/runtime/testdata/testprog/gomaxprocs_windows.go
+    stdlib/src/runtime/testdata/testprog/stw_mexit.go
+    stdlib/src/runtime/testdata/testprog/stw_trace.go
+    stdlib/src/runtime/testdata/testprognet/waiters.go
+
+**PASS, with a stated qualification.** Not literally empty, but **pre-existing on
+`main` and untouched by the merge**: all thirteen are vendored upstream Go testdata,
+and none of them appears in `git diff --name-only ad4e9b2 HEAD`, whose sixteen entries
+are the whole merge (listed in §9). Same list, same reason, on `main`. Every file the
+merge does touch is gofmt-clean, including the fix in §1.
+
+    $ go build ./...      -> exit 0, no output          PASS
+    $ go vet ./...        -> exit 0, no output          PASS
+
+(Both fast, ~2.5 s, because the build cache on this box is warm from the parent jobs;
+`go build` on a cold cache is checked in §9's cold run.)
+
+## 3. Gate item 2 — `make test-unit` — **PASS**
+
+    $ make test-unit
+    ok  github.com/evanphx/cg12/amd64            0.639s
+    ok  github.com/evanphx/cg12/amd64/x64        0.038s
+    ok  github.com/evanphx/cg12/analysis         0.039s
+    ok  github.com/evanphx/cg12/arm64            7.289s
+    ok  github.com/evanphx/cg12/arm64/a64        0.073s
+    ok  github.com/evanphx/cg12/bpf              0.690s
+    ok  github.com/evanphx/cg12/cmd/cc           0.787s
+    ok  github.com/evanphx/cg12/cmd/cg12         0.038s
+    ok  github.com/evanphx/cg12/internal/backendtest  0.135s
+    ok  github.com/evanphx/cg12/internal/gometa  0.056s
+    ok  github.com/evanphx/cg12/internal/runtimepack 0.038s
+    ok  github.com/evanphx/cg12/internal/testenv 0.024s
+    ok  github.com/evanphx/cg12/interp           0.042s
+    ok  github.com/evanphx/cg12/ir               0.042s
+    ok  github.com/evanphx/cg12/lift             0.967s
+    ok  github.com/evanphx/cg12/link             1.970s
+    ok  github.com/evanphx/cg12/lower            0.039s
+    ok  github.com/evanphx/cg12/obj              0.311s
+    ok  github.com/evanphx/cg12/opt              0.944s
+    ok  github.com/evanphx/cg12/parse            0.672s
+    ok  github.com/evanphx/cg12/pe               1.267s
+    ok  github.com/evanphx/cg12/plan9asm          0.267s
+    ok  github.com/evanphx/cg12/plan9asm/sem     0.040s
+    ok  github.com/evanphx/cg12/wasm             0.043s
+    real 0m8.814s   EXIT 0
+
+24 packages `ok`, 10 `[no test files]`, none cached (`go test` printed real per-package
+times, not `(cached)`).
+
+**Counted, not assumed.** Re-run with `-count=1 -v` over the identical package list:
+
+    --- PASS (top level)   1073
+    --- PASS (incl. subtests) 1556
+    --- FAIL                  0
+    --- SKIP                339
+
+The 339 skips are all missing-external-tool guards, not merge-related: `ld.lld not
+available` (×~70), `llvm-mc not available` (×~35), `wasmtime not available` (×~25), `no
+privilege to load eBPF`, and the x86 host guards. `opt` — the package `escape-checker`
+adds `framecheck.go` to — is in the list and passes.
+
+## 4. The A/B that proves §1 — and that `cg12checkwb` fires at those three sites
+
+Two ~50-line control programs, compiled with the merged `goc` (sources kept at
+`$TMPDIR/wb_bulk_publish.go` and `wb_store_publish.go`; both reproduced verbatim at the
+end of this file). Each publishes a laundered goroutine-stack address into a heap
+object while a second goroutine keeps a mark phase running, one through
+`copy()`/`typedslicecopy` (the **bulk** path), one through a plain pointer store (the
+`atomicwb` path the merge did not touch).
+
+    GODEBUG=cg12checkwb=3
+
+| runtime | bulk-copy control | single-store control |
+|---|---|---|
+| **as merged** (8f29b3f, `mwbbuf.go` checked out at that commit) | `bulk publish control finished without a report`, exit 0 | throws, exit 2 |
+| **with the §1 fix** (b2e96c5) | **throws, exit 2** | throws, exit 2 |
+
+The store arm is the control on the control: it fires in both, which proves the address
+really is a frame address and the mode really is on — so the bulk arm's silence on the
+as-merged runtime is the gate, not the program. Verbatim, on the fixed runtime:
+
+    cg12checkwb: pointer write barrier published a goroutine stack address into storage that outlives the frame
+    cg12checkwb: slot=0x3a37b0474200 old=0x3a37b05a3c28 new=0x3a37b05a3c28 bad=new-is-stack
+    cg12checkwb: bulk copy dst=0x3a37b0474200 src=0x3a37b05a3c88 size=16
+    cg12checkwb: bulk-dst 0x3a37b0474200 span base=0x3a37b0474000 limit=0x3a37b0475e00 state=1 elemsize=512 offset=0x200
+    cg12checkwb: bulk-dst object base=0x3a37b0474200 size=512 head=0x3a37b05a3c28
+    cg12checkwb: bulk-src 0x3a37b05a3c88 span base=0x3a37b05a0000 limit=0x3a37b05a8000 state=2 elemsize=16384 offset=0x3c88
+    cg12checkwb: src[0] = 0x3a37b05a3c28
+    cg12checkwb: src[1] = 0x3a37b05a3c28
+    fatal error: cg12checkwb: a frame address was stored into storage that outlives the frame
+
+and on the as-merged runtime, same binary source, same environment:
+
+    bulk publish control finished without a report
+
+That answers the brief's second question at the same time: **the sites do still fire.**
+The `bulk copy dst=/src=/size=` lines are printed only when `cg12BulkBarrierRange.valid`
+is set, and only `cg12CheckBulkBarrierWord` sets it — so the report above *is* one of
+the three resolved `mbitmap.go` sites executing.
+
+**Mode 1 fires there too**, shown with the real defect rather than a synthetic one.
+`goc` built at `ad40d76` (the commit before the type-mask padding fix) with the merged
+tree's `mwbbuf.go` dropped in — pre-fix codegen, merged+fixed barrier code — compiling
+`goc/testdata/runtime_gc_type_mask_padding.go`, run 12× at `GOGC=10`,
+`GODEBUG=cg12checkwb=1`: **7/12 runs throw at a bulk site**, e.g.
+
+    cg12checkwb: pointer write barrier buffered a word the collector will reject
+    cg12checkwb: slot=0x36a793e10b58 old=0x0 new=0x36a793922000 bad=new
+    cg12checkwb: bulk copy dst=0x36a793e10980 src=0x36a7935af6d0 size=16
+    cg12checkwb: bulk-src object base=0x36a7935af6d0 size=16 head=0x36a793917350
+    cg12checkwb: src[0] = 0x36a793917350
+    cg12checkwb: src[1] = 0x36a7939173b0
+
+(the other 5/12 die first in the scan, as "marked free object in span" — the barrier
+check races the collector, which is the known duty-cycle limitation RUNTIME_PLAN.md
+records, not a gap in the instrumentation.)
+
+That same `ad40d76` build also gives an **independent confirmation of gate item 7's
+"before"**: the reducer fails **20/20** at `GOGC=10` on the pre-fix compiler.
+
+## 5. Gate item 7 — the `runtime_gc_type_mask_padding` reducer — **PASS (0/20)**
+
+Compiled with the merged tree's `goc`, run 20× at `GOGC=10`:
+
+    $ for i in $(seq 1 20); do GOGC=10 ./reducer_merged; done
+    type mask padding ok        (×20)
+    MERGED+FIXED reducer: 0/20 failed
+
+Independently measured "before", so the 0/20 means something: `goc` built at
+`ad40d76` — the commit immediately before `9c7a209` "pad every type's GC pointer mask
+to a whole uintptr" — compiling the same source, run 20× at `GOGC=10`:
+
+    pre-fix goc reducer: 20/20 failed
+    runtime: marked free object in span 0xf102a5df1ea8, elemsize=16 freeindex=11 ...
+
+20/20 before, 0/20 after, on this box, this hour. Matches the figure the brief cites.
+
+A note for whoever tries to reproduce the "before" by hand-reverting the fix rather
+than checking out the parent commit: `paddedPointerMask` has **two** call sites in
+`goc/compile.go` (6327, in `ensureTypeTag`, and 13372). Reverting only the first — the
+one the fix commit's diff shows — leaves the reducer passing 20/20 and looks like the
+bug was never there.
+
+## 6. Gate item 9 — determinism — **PASS (8/8 pairs byte-identical, plus cold==warm)**
+
+Four capability programs, compiled twice each on both arms with the merged tree's
+`goc`, `sha256sum` over the linked executables:
+
+    default arm                                        -O arm
+    f3af45e2…  gc_struct.1                             5a0b168d…  gc_struct.O1
+    f3af45e2…  gc_struct.2                             5a0b168d…  gc_struct.O2
+    d50e370b…  runtime_gc_mark_workers.1               5fd16d2e…  runtime_gc_mark_workers.O1
+    d50e370b…  runtime_gc_mark_workers.2               5fd16d2e…  runtime_gc_mark_workers.O2
+    7b266155…  runtime_goroutine_channel.1             218bd0e8…  runtime_goroutine_channel.O1
+    7b266155…  runtime_goroutine_channel.2             218bd0e8…  runtime_goroutine_channel.O2
+    83f01158…  runtime_slice_pointer_append_gc.1       f9afb92d…  runtime_slice_pointer_append_gc.O1
+    83f01158…  runtime_slice_pointer_append_gc.2       f9afb92d…  runtime_slice_pointer_append_gc.O2
+
+8 pairs, 8 matches, 0 differences.
+
+Additionally, **cold equals warm**: recompiling with `CG12_NOCACHE=1` reproduces the
+cached image bit for bit (`d50e370b…` and `f3af45e2…` again), so the compile cache is
+not hiding a nondeterministic path — the thing §9's cold matrix run is really testing.
+
+## 7. Was anything else dropped? A mechanical audit of the whole merge
+
+Being adversarial about §1 raises the obvious follow-up: *is `mbitmap.go` the only place a
+side went missing?* Answered mechanically rather than by reading. Five files are touched
+by **both** parents (`git diff --name-only ad4e9b2 <parent>`, intersected):
+
+    CCWORK_REPORT.md   RUNTIME_PLAN.md   goc/compile.go
+    stdlib/src/runtime/mbitmap.go   stdlib/src/runtime/mwbbuf.go
+
+The other eleven are touched by exactly one parent and the merge kept that parent's
+version byte for byte (checked with `git rev-parse <commit>:<path>`).
+
+For each shared file: take `main`'s version, apply `diff(main → escape-gc-fix)`, then
+apply `diff(main → escape-checker)`, and compare with `8f29b3f`'s version.
+
+| file | both patches apply? | merged == union? |
+|---|---|---|
+| `goc/compile.go` | yes | **yes** — no hunk lost |
+| `stdlib/src/runtime/mwbbuf.go` | yes | **yes** — no hunk lost |
+| `stdlib/src/runtime/mbitmap.go` | **no**, 3/3 of escape-checker's hunks reject | merged == the escape-gc-fix side alone |
+| `RUNTIME_PLAN.md` | 3/4 | superset of the union (the resolver hand-merged the prose); nothing dropped |
+| `CCWORK_REPORT.md` | no | merged == escape-checker's report; `escape-gc-fix`'s 340-line report is **not** in the merge |
+
+So `mbitmap.go` is the *only* code file where a side was dropped, and that is exactly
+§1. `goc/compile.go` — the other file both branches edited, and the one that would have
+been far worse to get wrong — is a clean union. That is a real result, not an
+assumption: it is the check that would have caught a second §1 if there were one.
+
+The `CCWORK_REPORT.md` row is a documentation loss, not a code one: each branch's report
+survives on its own branch and in history (`git show 13c94be:CCWORK_REPORT.md`). Worth
+knowing before anyone looks for the GC fix's write-up on `main` and does not find it.
+
+## 8. The §1 fix does not create false positives
+
+The widened gate makes the bulk barrier paths enforce two rules they were not enforcing,
+so the first question about it is whether anything legitimate now trips.
+`TestARM64WriteBarrierAuditRunsClean` is exactly that control — six allocating,
+collecting, channel-blocking programs run under `cg12checkwb=1` **and** `cg12checkwb=3`
+— and on the fixed tree it passes with all six subtests:
+
+    --- PASS: TestARM64WriteBarrierAuditRunsClean (18.11s)
+        --- PASS: .../gc_struct.go (3.02s)
+        --- PASS: .../runtime_goroutine_channel.go (2.92s)
+        --- PASS: .../runtime_select_channels.go (2.91s)
+        --- PASS: .../runtime_channel_struct_pointer_gc.go (2.92s)
+        --- PASS: .../runtime_goroutine_closure_gc.go (3.41s)
+        --- PASS: .../runtime_slice_pointer_append_gc.go (2.93s)
+
+Note what this suite is worth **after** the fix compared with before: on the as-merged
+tree its `cg12checkwb=3` arm could not have rejected anything a `typedmemmove`,
+`growslice` or `typedslicecopy` buffered, because the gate returned first (§1, §4). It
+now covers those words, and still passes. The rest of `make test-goc-cmd` is §10.
+
+# The escape walk's two publication holes (ccwork/escape-frame-publication)
+
+Branch `ccwork/merge-gate-escape`, starting at 61ba39d. `TestFrameEscapeAudit`
+reproduces on that tip exactly as the gate reported, in 143s:
+
+    --- FAIL: TestFrameEscapeAudit (142.84s)
+      stdlib/src/crypto/internal/fips140/bigmod/nat.go:951:28  bigmod.Nat.Mul  barrier  memory reached through a call result $runtime.newobject
+      testdata/runtime_debug_gc_controls.go:32:20              main.main       barrier  memory reached through a call result $runtime.newobject
+      testdata/runtime_slice_pointer_append_gc.go:25:20        main.main       barrier  memory reached through a call result $runtime.newobject
+
+## 1. Two distinct holes, not one
+
+The three findings share a shape -- a frame address stored through the write
+barrier into a `runtime.newobject` result -- but they are two different missing
+edges in `goc/compile.go`'s escape walk. Both are instances of one rule the walk
+does not have: **copying a value into freshly allocated storage that may be in
+the heap is a publication of everything reachable from that value.**
+
+### 1a. Interface boxing is not modelled at all
+
+`runtime_slice_pointer_append_gc.go:25` and `runtime_debug_gc_controls.go:32`
+are both `runtime.KeepAlive(values)`. Verified IR (`goc -emit-ir`, `$main.main`,
+before the fix):
+
+    %t2  =p alloc8 24                     ; the `values` slice header, in the frame
+    %t4  =p alloc8 32                     ; make([]*record,0,4) backing array, IN THE FRAME
+    %t5  =p call $goc_memset(p %t4, w 0, l 32)
+    storel %t4, %t2
+    ...
+    loc "runtime_slice_pointer_append_gc.go" 25 20
+    %t75 =p loadl %t2                     ; values.ptr -- may be %t4
+    %t80 =p call $runtime.newobject(p $.goc.runtime.type.main_record.57cf6c680c1a8218)
+    call $goc_storep(p %t80, p %t75)      ; BARRIER: frame address into a heap object
+    %t81 =p add %t80, 8
+    storel %t77, %t81
+    %t82 =p add %t80, 16
+    storel %t79, %t82
+    %t83 =p alloc8 16                     ; the interface descriptor (frame)
+    storel $.goc.type.main_record.57cf6c680c1a8218, %t83
+    %t84 =p add %t83, 8
+    storel %t80, %t84
+    ...
+    call $runtime.KeepAlive(:...descriptor_interface... %t88)
+
+`adaptValueToInterface` (goc/compile.go:5597) allocates the interface payload
+with `allocateTyped` -- a `runtime.newobject` candidate -- for every source type
+that is not pointer-shaped (`isDirectInterfaceType`), and stores the value into
+it. A slice header is not pointer-shaped, so the backing-array pointer goes into
+the heap box.
+
+The walk never sees this. `nonEscapingObjectUse`'s `*ast.CallExpr` case asks
+only `parameterDoesNotEscape(runtime.KeepAlive, 0)`; `KeepAlive`'s body is
+`if cgoAlwaysFalse { println(x) }`, `println` is on the walk's benign-builtin
+list, so the answer is "does not escape" and `make([]*record,0,4)` stays in the
+frame. The boxing happens in the *caller*, before the callee is entered, so no
+answer about the callee can be right here. **The user's reading is confirmed:
+the walk models no interface conversion anywhere** -- not the call-argument one,
+not an explicit `any(x)`, not an assignment to an interface variable.
+
+Note the second half of the reading is *not* the defect: the walk does follow a
+slice header to its backing array, because it is the `make` call's own
+placement that is being decided, and `values`' every use is enumerated. What it
+does not do is recognise the use at line 25 as a publication.
+
+### 1b. `&T{v}` decides its own storage with a different, cruder walk
+
+`bigmod/nat.go:951:28` is `return x.Mod(&Nat{limbs: T}, m)`; column 28 is `T`.
+Verified IR (`$crypto/internal/fips140/bigmod.Nat.Mul`, before the fix):
+
+    %t62  =p alloc8 512                   ; T := make([]uint, 0, preallocLimbs*2), IN THE FRAME
+    %t63  =p call $goc_memset(p %t62, w 0, l 512)
+    storel %t62, %t60                     ; into T's frame header
+    ...
+    loc ".../nat.go" 951 16
+    %t138 =p call $runtime.newobject(p $...bigmod_Nat...)   ; &Nat{...} -- ON THE HEAP
+    loc 951 28
+    %t140 =p loadl %t60                   ; T.ptr -- may be %t62
+    call $goc_storep(p %t138, p %t140)    ; BARRIER: frame address into a heap object
+
+Here the walk *does* have a rule -- `compositeElementDoesNotEscape`: "the element
+escapes exactly when the composite value does" -- and the rule is right. The
+defect is that the two sides answer with different walks:
+
+* the element's side climbs through the `&` in `valueDoesNotEscapeWithin`'s
+  `*ast.UnaryExpr` case and asks `parameterDoesNotEscape(Nat.Mod, 0)`, which
+  says the parameter does not escape;
+* the literal's own storage is placed by `nonEscapingAddress`
+  (goc/compile.go:2290), a far cruder walk whose `*ast.CallExpr` case accepts
+  only a one-argument *type conversion* and returns "escapes" for every other
+  call. `x.Mod(&Nat{limbs: T}, m)` has two arguments, so the `Nat` is heap.
+
+So the literal is in the heap and its element is in the frame, from the same
+front end, in the same statement. 9f76498 already found one face of this (the
+`resultLeakBody != nil` guard in that same `*ast.UnaryExpr` case); the guard is
+too narrow, because `&` makes fresh storage on the ordinary path too.
+
+## 2. The fix
+
+One rule, applied at both holes: a value copied into freshly allocated storage
+that may be in the heap has escaped. Details and measurements below.
+
+## 3. What the fix is
+
+`goc/compile.go`, three additions. No finding was baselined; all three are fixed.
+
+**3a. `boxedIntoInterface`, consulted by all three escape walks.** A value
+converted to an interface type by the context it sits in has been copied into
+fresh, possibly-heap storage, so the walk stops there and answers "escapes".
+The predicate is `interfaceConversionAllocates(source)` -- not already an
+interface, not a shared type parameter, not `isDirectInterfaceType` -- against
+`interfaceConversionTarget(expression)`, which names the type the context
+converts to for the contexts that perform an assignment conversion: a call
+argument (variadic-aware), an explicit conversion, `panic`, an assignment, a
+`var` initialiser, a `return`, a channel send, and a composite-literal element.
+Contexts it does not name return nil, and every one of those is a context the
+walks already answer conservatively, so nil never weakens an answer.
+
+Hooked in at:
+
+* `nonEscapingObjectUse` -- head of the function, before the use is classified;
+* `valueDoesNotEscapeWithin` -- head of the climb loop, before the
+  assigned-destination shortcut, which would otherwise answer first;
+* `addressEscapesWithin` -- head of the climb loop, answering "escapes".
+
+Pointer-shaped sources are excluded because `adaptValueToInterface` stores them
+straight into the two-word descriptor, which is an ordinary frame allocation; no
+fresh storage is made, so the walk should keep climbing rather than stop.
+
+**3b. `nonEscapingAddressWithin`.** `nonEscapingAddress` is parameterised over
+the `types.Info`/parent map/body it walks, so the escape walk can ask it about a
+body other than the one being lowered. `nonEscapingAddress` is now a call to it
+with the lowered function's context; the logic is unchanged.
+
+**3c. `&T{v}` in `valueDoesNotEscapeWithin` stops climbing.** Where the operand
+of `&` is a composite literal, the answer is now
+`nonEscapingAddressWithin(&literal)` -- the emitter's own placement predicate --
+instead of continuing up as though the address were an alias of existing
+storage. Ordering matters and is deliberate: 9f76498's `resultLeakBody != nil`
+guard is tested **first**, because in a summary walk `nonEscapingAddressWithin`
+can answer "does not escape" through a local the callee returns, which is
+exactly the `slog.NewTextHandler` hole 9f76498 closed. I had the two the wrong
+way round in the first draft and the corpus measurement caught it: six functions
+(`log.Logger.output`, `log/slog.Record.Source`, `net/http.relevantCaller`,
+`reflect.valueMethodName`, `testing.common.frameSkip`, `testing.pcToName`) each
+*lost* a heap allocation, which is the signature of that hole reopening. With
+the order corrected, no allocation moves heap-to-frame anywhere in the corpus.
+
+## 4. IR before and after, `runtime_slice_pointer_append_gc.go`
+
+`$main.main`, `goc -emit-ir`. Before (61ba39d):
+
+    loc 10 31
+    %t4  =p alloc8 32                   ; make([]*record,0,4) backing array, IN THE FRAME
+    %t5  =p call $goc_memset(p %t4, w 0, l 32)
+    storel %t4, %t2
+    ...
+    loc 25 20
+    %t75 =p loadl %t2                   ; values.ptr -- may be %t4, a frame address
+    %t80 =p call $runtime.newobject(p $.goc.runtime.type.main_record.57cf6c680c1a8218)
+    call $goc_storep(p %t80, p %t75)    ; BARRIER: frame address into a heap object
+
+After:
+
+    loc 10 31
+    %t4  =p call $runtime.newobject(p $.goc.runtime.type.4__main_record.0e3226d0775457b5)
+    storel %t4, %t2
+    ...
+    loc 25 20
+    %t74 =p loadl %t2                   ; values.ptr -- now a heap address
+    %t79 =p call $runtime.newobject(p $.goc.runtime.type.main_record.57cf6c680c1a8218)
+    call $goc_storep(p %t79, p %t74)    ; heap into heap
+
+The `alloc8 32` is gone: the backing array is allocated by `runtime.newobject`
+at line 10, so the pointer the barrier at line 25 publishes into the box is a
+heap address. The interface box and the barrier are still emitted -- the fix is
+not about removing the store, it is about what the store can carry.
+
+`crypto/internal/fips140/bigmod.Nat.Mul` moves the same way. Before:
+
+    loc 939 24
+    %t62  =p alloc8 512                 ; T := make([]uint, 0, preallocLimbs*2), IN THE FRAME
+    ...
+    loc 951 28
+    call $goc_storep(p %t138, p %t140)  ; %t140 may be %t62
+
+After:
+
+    loc 939 24
+    %t62  =p call $runtime.newobject(p $.goc.runtime.type.64_uint.1a3f714551d6ea67)
+    ...
+    loc 951 28
+    call $goc_storep(p %t137, p %t139)  ; %t139 is a heap address
+
+## 5. Cost: what moved, and one hot path that regresses
+
+Measured by compiling all 385 corpus programs with each compiler and counting,
+per function, frame allocations (`OAlloc*`, `OAllocN`) against allocator calls
+(`runtime.newobject`, `newarray`, `makeslice`, `mallocgc`, `makemap`,
+`makechan`, and any residual `OHeapAlloc`).
+
+    corpus totals   before: frame 9 735 484   heap 509 897
+                    after:  frame 9 735 471   heap 509 920
+
+**22 (program, function) allocation sites move from frame to heap. None moves
+the other way.** They are six distinct source sites, in eight distinct
+functions:
+
+| source site | functions | corpus programs |
+|---|---|---|
+| `bigmod/nat.go:939` `T := make([]uint, 0, preallocLimbs*2)` | `bigmod.Nat.Mul` | 10 |
+| `x509/verify.go:1059` `[]uint64{2,5,29,32,0}` in `var anyPolicyOID = mustNewOIDFromInts(...)` | 3 `initfunc`s | 8 |
+| `runtime_slice_pointer_append_gc.go:10` `make([]*record,0,4)` | `main.main` | 1 |
+| `runtime_debug_gc_controls.go:15` `make([]*int,0,128)` | `main.main` | 1 |
+| `stdlib_signal_during_gc.go:23` `make([]*int,1024)` | `main.main.func.17.5` | 1 |
+| `runtime_range_target_order.go:144,152` two `[]int{...}` literals | `main.targetAliasingTheRangeExpression` | 1 |
+
+Five of the six are the defect sites themselves. The sixth, the x509 one, is a
+new-but-correct answer: `mustNewOIDFromInts` does
+`panic(fmt.Sprintf("OIDFromInts(%v) unexpected error: %v", ints, err))`, so its
+parameter is boxed into a `[]any` on the panic path and the walk is right to
+stop. It is a package `init`, run once.
+
+**One hot path regresses: `bigmod.Nat.Mul`'s `default` arm, and therefore
+ECDSA.** 200 P-256 sign+verify round trips, `goc -O`, native arm64, eight runs
+alternating:
+
+    before  2.74 2.68 2.63 2.65 2.71 2.66 2.69 2.75   mean 2.689 s
+    after   2.87 2.86 2.81 2.81 2.87 2.87 2.85 2.81   mean 2.844 s
+
+**+5.8%.** The ranges do not overlap. `Nat.Mul` is the only changed function
+this program reaches, so the cause is unambiguous: one 512-byte
+`runtime.newobject` per call into the `default` arm, which P-256's four-limb
+scalar arithmetic takes. RSA is not affected -- it uses the specialised
+1024/1536/2048-bit arms, which allocate `T` the same way before and after.
+
+That cost is real and I am not hiding it, but the store it removes is a
+goroutine-stack address in a heap object, so the trade is not close.
+
+### 5.1 Why I did not take the faster fix
+
+There is a fix that would make `Nat.Mul` *faster* than the baseline rather than
+slower: `&Nat{limbs: T}` does not actually escape -- `Nat.Mod` only reads its
+`x`, and `addressEscapesWithin`, the walk `findEscapingCaptures` already uses
+for `&localVar`, says so. Teaching `nonEscapingAddress` that same question would
+keep the `Nat` in the frame *and* keep `T` in the frame, removing one heap
+allocation rather than adding one.
+
+I did not do it. It changes where `&T{...}` is placed for every composite
+literal address in the tree, in the permissive direction -- the direction
+2724ac7 and 9f76498 both got wrong -- and validating it means the whole matrix
+plus a search for the cases where `parameterDoesNotEscape` is optimistic. That
+is a separate change with a separate risk budget, and pairing it with a GC
+correctness fix would make both harder to review and harder to revert. The
+conservative rule shipped here is consistent by construction: element placement
+and literal placement are now decided by the *same* function, so they cannot
+disagree again whichever way that function is later made more precise.
+
+## 6. Suite b: `TestFrameEscapeAudit` alone, `-count=1`
+
+    $ go test ./goc -run TestFrameEscapeAudit -count=1 -v
+    === RUN   TestFrameEscapeAudit
+    --- PASS: TestFrameEscapeAudit (146.70s)
+    ok  github.com/evanphx/cg12/goc  147.198s
+
+PASS, at the same 147s it took to fail on 61ba39d, so it compiled the same 385
+programs. **No baseline additions.** Three baseline lines were *removed* -- the
+test fails on a vanished publication as well as on a new one, and it reported
+these three when the fix landed:
+
+    testdata/runtime_range_target_order.go:147:34  main.targetAliasingTheRangeExpression  barrier  ... $runtime.newobject
+    testdata/runtime_range_target_order.go:155:34  main.targetAliasingTheRangeExpression  barrier  ... $runtime.newobject
+    testdata/stdlib_signal_during_gc.go:29:23      main.main.func.17.5                    barrier  ... $runtime.newobject
+
+Each is the same defect as the three the gate found, and each is genuinely
+fixed, not merely renumbered:
+
+* `runtime_range_target_order.go:147` and `:155` are
+  `fmt.Sprintf("%v|", numbers)`; column 34 is `numbers`, a `[]int` boxed into
+  `Sprintf`'s `...any`. The literal's backing array was on the frame. Hole 3a.
+* `stdlib_signal_during_gc.go:29` is `runtime.KeepAlive(values)`; column 23 is
+  `values`, `make([]*int, 1024)`. Hole 3a, byte-identical in shape to the two
+  findings the gate reported -- the same defect was *already in the baseline*
+  before this branch, which is why the baseline being a record and not a
+  certificate matters.
+
+The corpus allocation census in section 5 is the independent confirmation: those
+three functions are exactly `main.targetAliasingTheRangeExpression` (+2 heap) and
+`main.main.func.17.5` (frame 9 to 8, heap 2 to 3). The publications are gone
+because the storage moved, not because the code did.
+
+## 7. One more hole of the same class, found while re-reading the diff
+
+`parameterLeaksOnlyToResult` lets a parameter reach the summarised function's
+own result and tells the caller to continue its walk from the call expression.
+If that result is an **interface**, the value was boxed into fresh heap storage
+on the way out, and continuing is wrong for exactly the reason it is wrong at a
+call argument:
+
+    func toAny(b []byte) any { return b }   // b's backing array is in the heap here
+
+`boxedIntoInterface` could not see it. The escape walks' parent maps were built
+with `astParents(declaration.decl.Body)` -- rooted at the *body* -- so a return
+statement had no way to climb to the function it returns from and ask what the
+result's type is. The three call sites now root at `declaration.decl`. The
+`*ast.FuncDecl` is the only node the maps gain, and every walk that reaches it
+falls into the same `default` arm it reached with a nil parent before.
+
+This is not in the three findings and the audit does not currently exercise it;
+it is closed because the fix claims to model interface boxing, and a claim with
+a known hole in it is worse than no claim. The corpus allocation census is
+**byte-identical** to the revision before it -- 385 programs, frame 9 735 471,
+heap 509 920, and a per-site diff of zero -- so it costs nothing.
+
+## 8. Two residuals this change deliberately does not close
+
+Stated so nobody reads section 3 as "interface publication is now fully
+modelled". Neither is one of the three findings, and neither produces a finding
+on today's corpus.
+
+**8a. A pointer-shaped value in a heap variadic backing array.**
+`isDirectInterfaceType` values -- pointers, maps, channels, funcs -- are stored
+straight into the two-word interface descriptor, which is a frame allocation, so
+`boxedIntoInterface` correctly reports no box. But `buildVariadicSlice`
+allocates the `[]any` backing array with `allocateTyped` unless the caller is
+`NoSplit` or non-allocating, and copies the descriptor's two words into it. So
+`f(&local)` for a variadic `f(...any)` can put a frame address in the heap
+without any boxing having happened. What stops it today is the callee summary:
+`fmt.Println`'s parameter escapes, so the walk answers "escapes" for the whole
+argument. A variadic callee that provably retains nothing would not be stopped.
+Closing this properly means modelling the variadic backing array as a
+publication, which would make every `&local` passed to any non-retaining
+variadic function escape -- a much larger cost than this change, and a separate
+decision.
+
+**8b. `nonEscapingAddress` remains cruder than the walk.** Section 5.1. The two
+now agree by construction, which is what the correctness argument needs; they
+agree at the conservative end.
+
+## 9. Reduced tests, and the proof they discriminate
+
+`goc/escape_publication_test.go`, three tests, one per shape. A regression test
+that passes on the broken tree is decoration, so each was run against
+`61ba39d`'s `goc/compile.go` with the rest of the tree unchanged:
+
+| test | on 61ba39d | on the fix |
+|---|---|---|
+| `TestValueBoxedIntoAnInterfaceEscapes` | FAIL — `interface_box.go:17:10: main.boxed: barrier %t3 into memory reached through a call result $runtime.newobject` | PASS |
+| `TestCompositeLiteralAddressCarriesItsElementsToTheHeap` | FAIL — `literal_address.go:19:27: main.passedToACall: barrier %t3 into ... $runtime.newobject` | PASS |
+| `TestParameterLeakingToAnInterfaceResultEscapes` | FAIL | PASS |
+
+The third also fails on `6245dbb`, the revision *after* the main fix and
+*before* section 7's hardening, which is the regression it exists to guard.
+
+Each test carries a control that a fix which simply made every slice escape
+would break:
+
+* a slice never converted to an interface keeps its frame backing array and
+  calls no allocator;
+* a literal address `nonEscapingAddress` keeps in the frame -- `(&box{limbs:
+  limbs}).limbs` -- does not drag its element to the heap;
+* leaking only to a *slice*-typed result copies no storage, so the backing array
+  stays in the frame.
+
+The third test asserts on where the allocation landed rather than on
+`opt.FrameEscapes`, and the reason is worth recording: the publishing store is
+inside the callee, where the address arrives as a *parameter* rather than as one
+of that function's own frame allocations. `FrameEscapes` is a per-function
+may-analysis over `OAlloc`-derived values, so it structurally cannot report that
+shape. The corpus audit passing was never evidence about it.
 
 # Independent verification run — `ccwork/escape-frame-publication` @ `ddd03eb`
 
