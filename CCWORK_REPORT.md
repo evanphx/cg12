@@ -408,3 +408,103 @@ that used to run stopped running.
 `TestFrameEscapeAudit` reads 0.00s because `TestAllocationCensus` ran first and
 paid for the shared corpus compile -- section 5's "one compile, both analyses,
 whichever test asks first pays", visible in the timings.
+
+## 11. The failure output, checked on the final tree against a real change
+
+Item 4 of this job: confirm the failure output still names the sites and the
+direction rather than reporting a count. The rebase could not have degraded it --
+the rebased tree's code is byte-identical to the branch tip (section 8) -- but
+"could not have" is not "did not", so it was made to fire on the final tree.
+
+Not with a synthetic perturbation this time: **the publication fix itself was
+reverted** in a throwaway `git worktree`, leaving the accepted baseline in place,
+and the census was run against it. That is the closest available approximation of
+the situation this job's premise described.
+
+    $ git worktree add $TMPDIR/nofix HEAD
+    $ git revert --no-commit fc74294 && git revert --no-commit 6245dbb   # the fix, newest first
+    $ git diff --stat HEAD -- . ':!CCWORK_REPORT.md'
+     goc/compile.go                         | 351 +------------------------
+     goc/testdata/frame_escape_baseline.txt |   3 +
+    $ go test ./goc -run TestAllocationCensus
+    --- FAIL: TestAllocationCensus (150.33s)   exit 1
+
+The worktree was removed afterwards; the branch's own tree is clean and the
+baseline md5 is unchanged (`9a2ed8f8...`).
+
+### It named every site, with position, function, allocator, type and direction
+
+    testdata/alloc_census_baseline.txt lists an allocation site the compiler no longer has.
+    That is fine if the code is gone, and is a silent heap-to-frame move if the object is now
+    an ordinary front-end frame slot -- which this census does not record and so cannot tell
+    you apart. Read the source at each site below before rerunning with
+    -update-alloc-census-baseline.
+      stdlib/src/crypto/internal/fips140/bigmod/nat.go:939:24  crypto/internal/fips140/bigmod.Nat.Mul       runtime.newobject  64_uint
+            was on the heap, now absent
+      stdlib/src/crypto/x509/verify.go:1059:39  .goc.global.initfunc.124.crypto/x509.anyPolicyOID  runtime.newobject  5_uint64
+            was on the heap, now absent
+      stdlib/src/crypto/x509/verify.go:1059:39  .goc.global.initfunc.130.crypto/x509.anyPolicyOID  runtime.newobject  5_uint64
+            was on the heap, now absent
+      stdlib/src/crypto/x509/verify.go:1059:39  .goc.global.initfunc.75.crypto/x509.anyPolicyOID   runtime.newobject  5_uint64
+            was on the heap, now absent
+      testdata/runtime_debug_gc_controls.go:15:28  main.main  runtime.newobject  128__int
+            was on the heap, now absent
+      testdata/runtime_range_target_order.go:144:13  main.targetAliasingTheRangeExpression  runtime.newobject  3_int
+            was on the heap, now absent
+      testdata/runtime_range_target_order.go:152:12  main.targetAliasingTheRangeExpression  runtime.newobject  3_int
+            was on the heap, now absent
+      testdata/runtime_slice_pointer_append_gc.go:10:31  main.main  runtime.newobject  4__main_record
+            was on the heap, now absent
+      testdata/stdlib_signal_during_gc.go:23:28  main.main.func.17.5  runtime.newobject  1024__int
+            was on the heap, now absent
+
+**Verdict on item 4: the failure output is intact and useful.** Every site is
+named with its source position, its containing function after inlining, its
+allocator and its type, and each carries its own direction line. A reviewer can
+open every one of these files at the named line. No count-only reporting anywhere.
+
+Note the first entry: `bigmod.Nat.Mul`, which `main`'s own fix report identified
+as the fix's `+5.8%` cost site. The census found it independently, from the
+finished IR, without being told to look.
+
+### What this measures about the "22 sites"
+
+The four buckets came out **9 vanished, 0 moved heap->frame, 0 moved
+frame->heap, 0 appeared** (only the `vanished` assertion at
+`alloccensus_test.go:118` fired; the other three were empty).
+
+Read in the direction of the fix rather than of the revert: **the publication fix
+adds 9 heap-allocation records at 7 distinct source positions** across the
+385-program corpus, as this instrument scopes allocations. The three
+`x509/verify.go:1059:39` records are one source site inlined into three different
+`initfunc`s -- the split-site effect of section 4.
+
+**This does not reproduce the "22 sites moved frame->heap" figure in this job's
+premise, and I am not going to write around that.** Two things are true and I
+can only distinguish them by measurement I did not run:
+
+1. **9, not 22, is what this census counts.** The number 22 came from the earlier
+   ad-hoc census, which is not this instrument and did not have to scope
+   allocations the same way. Section 2 states the scoping precisely and section 4
+   explains why one source position can produce several records; a differently
+   scoped count over the same change can legitimately differ.
+2. **The direction is recorded as "vanished", not "frame -> heap"** -- and that is
+   the documented limitation, not a defect appearing now. Before the fix these
+   objects were ordinary front-end frame slots, which this census deliberately
+   does not record (section 2), so the pre-fix side of the move is invisible to it
+   and the move reads as a site appearing rather than a placement changing. The
+   site, function and type are still named, which is what a reviewer needs.
+
+**Neither of these changes the answer in section 9.** The rebase carried no
+compiler change, the regenerated baseline is byte-identical, and whatever the
+correct headline number for the fix is -- 9 by this instrument, 22 by the ad-hoc
+one -- it was already recorded in the accepted baseline before this job started.
+What matters for the question asked is that **no unexplained site appeared**, and
+none did.
+
+**Reported, not fixed** (this job was told not to change compiler behaviour, and
+did not): the discrepancy between 9 and 22 is worth one person-hour from whoever
+produced the 22, because the two instruments disagreeing about the size of a
+known change is exactly the kind of thing a census exists to surface. Nothing
+here suggests the compiler is wrong -- both runs of the corpus suite pass -- only
+that the two counts are not measuring the same set.
