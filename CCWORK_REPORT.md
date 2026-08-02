@@ -1037,6 +1037,29 @@ For contrast, the corpus program the same code came from --
 verify does not touch these sites enough times to measure. Reporting that number
 alone would have been true and useless.
 
+## 10.4 What it costs at compile time: +1.76%
+
+`go test ./goc -run TestEscapeSummaryCost`, `testdata/stdlib_crypto_ecdsa.go`,
+6 965 functions with a body, mean of 3 compiles each way:
+
+| | |
+|---|---:|
+| compile, summaries off | 6.097 s |
+| compile, summaries on | 6.204 s (**+1.76%**) |
+| `ComputeEscapeFacts` alone | 0.258 s (4.23% of the compile) |
+
+The two do not add up -- +0.107 s of compile against a 0.258 s table -- and the
+difference is within run-to-run noise on a box that was compiling the corpus at
+the same time. Take +1.76% as the figure and 0.258 s as an upper bound on where
+it comes from.
+
+**This is a cost with no compile-time saving to set against it, and that is a
+direct consequence of dropping the migration.** §5.3 named compile time as the
+strongest case for moving placement onto the IR: the AST walk is 0.456 s of a
+6.47 s compile, 0.28 s of it rebuilding parent maps 12 612 times to answer 1 485
+distinct questions. None of that is recovered here. The walk stays, and the table
+is paid for on top of it. What is bought is §10.3.
+
 
 ## 11. The migration machinery stays, with a different job
 
@@ -1075,3 +1098,57 @@ to place -- and, concretely, the harness both §6 regression tests assert agains
 `TestEscapeSummaryFacts` uses it to assert that the fixed point is never less
 precise than breaking every cycle at "escapes", which is a monotonicity check on
 the transfer function and not a migration measurement.
+
+## 12. What landed, and what is left
+
+### 12.1 The change
+
+| file | what |
+|---|---|
+| `opt/escapegraph.go` | hole one: `escapeGraph.call` publishes a summarised argument's pointee at depth 1 |
+| `opt/escape.go` | hole two: `trackedPointerStore`, so the base propagation follows a write barrier; hole three: a call result already bound to one candidate is re-checked against a second; `EscapeSummaries` defaults on; `promotionsBlockedByALoop` |
+| `opt/escapesummary.go` | why `//go:noescape` keeps the strong reading |
+| `opt/escapeshadow.go` | `allocationsInLoops` shared with the pass; the diff's purpose restated |
+| `ir/alloc.go` | `AllocDecision.BlockedByLoop` |
+| `goc/compile.go` | `registerNoEscapeDirectives`' comment, which said the attribute changed no output |
+| tests | 8 new, 5 of which fail on the analysis without the fix they test |
+| baselines | census and shadow regenerated; frame-escape untouched, and it passes |
+
+### 12.2 The tests that would have caught each defect
+
+| defect | test | fails without the fix as |
+|---|---|---|
+| hole one | `opt.TestEscapeFactsPointerPassedInsideAFrameAggregateEscapes` | `hold`'s parameter reads `noescape` |
+| hole one, through the front end | `goc.TestEscapeSummaryPointerPassedInsideAStructEscapes` | `main.hold: 0:noescape`, and a `heap -> frame` row at `stash` |
+| hole two | `opt.TestLowerHeapAllocationsTracksEscapeThroughAWriteBarrieredLocalSlot` | the object is promoted to `OAlloc8` |
+| hole two, through the front end | `goc.TestEscapeSummarySliceBackingBarrieredIntoItsHeaderIsStillTracked` | a `heap -> frame` row at the slice backing |
+| hole three | `opt.TestLowerHeapAllocationsEscapesBothCandidatesReachingOneResult` | the second candidate is promoted |
+| the loop rule | `opt.TestLowerHeapAllocationsRefusesToPromoteInsideALoop` | (new behaviour, not a regression) |
+
+Three more are controls, and they matter as much: without
+`TestEscapeFactsForwardedPointerStillDoesNotEscape` the depth-one fix could have
+been "publish everything" and still passed;
+`TestLowerHeapAllocationsAllowsAWriteBarrieredLocalSlot` says the newly-followed
+slot did not become a slot the analysis gives up on;
+`TestLowerHeapAllocationsEscapesACandidateInASlotHandedToANoescapeCallee` pins
+the `aliasInfo` invariant that makes `ParamNoEscape` safe to consume on the
+candidate side at all -- load-bearing, invisible, and nothing else asserted it.
+
+### 12.3 What is not done
+
+- **The compile pays for the table and keeps the AST walk** (§10.4). The
+  0.456 s walk is still there; the 0.258 s table is new. Dropping the migration
+  is what gives that up, and it is the right trade on §5.2's numbers, but it is
+  a cost.
+- **The loop rule does not see irreducible loops** (§8.3).
+- **Six withdrawn promotions are attributed but not individually convicted**
+  (§10.2). I established by experiment that hole two's fix withdrew them; I did
+  not chase which corpus program held each frame copy.
+- **The 267 conservative shadow rows are untouched.** §5.2 prices fixing all of
+  them at +0.24 points over the AST walk, so they are not worth chasing for
+  placement -- but each one is still a fact the summary table does not have, and
+  the table now feeds real promotions. A conservative row is a missed promotion,
+  not a hazard, which is why none of this job went there.
+- **`opt.FrameEscapes` is still blind to both classes** this job fixed, by
+  construction. Nothing here changes that; the point is that neither is now
+  reachable.
