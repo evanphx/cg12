@@ -583,3 +583,36 @@ correctness fix would make both harder to review and harder to revert. The
 conservative rule shipped here is consistent by construction: element placement
 and literal placement are now decided by the *same* function, so they cannot
 disagree again whichever way that function is later made more precise.
+
+## 6. Suite b: `TestFrameEscapeAudit` alone, `-count=1`
+
+    $ go test ./goc -run TestFrameEscapeAudit -count=1 -v
+    === RUN   TestFrameEscapeAudit
+    --- PASS: TestFrameEscapeAudit (146.70s)
+    ok  github.com/evanphx/cg12/goc  147.198s
+
+PASS, at the same 147s it took to fail on 61ba39d, so it compiled the same 385
+programs. **No baseline additions.** Three baseline lines were *removed* -- the
+test fails on a vanished publication as well as on a new one, and it reported
+these three when the fix landed:
+
+    testdata/runtime_range_target_order.go:147:34  main.targetAliasingTheRangeExpression  barrier  ... $runtime.newobject
+    testdata/runtime_range_target_order.go:155:34  main.targetAliasingTheRangeExpression  barrier  ... $runtime.newobject
+    testdata/stdlib_signal_during_gc.go:29:23      main.main.func.17.5                    barrier  ... $runtime.newobject
+
+Each is the same defect as the three the gate found, and each is genuinely
+fixed, not merely renumbered:
+
+* `runtime_range_target_order.go:147` and `:155` are
+  `fmt.Sprintf("%v|", numbers)`; column 34 is `numbers`, a `[]int` boxed into
+  `Sprintf`'s `...any`. The literal's backing array was on the frame. Hole 3a.
+* `stdlib_signal_during_gc.go:29` is `runtime.KeepAlive(values)`; column 23 is
+  `values`, `make([]*int, 1024)`. Hole 3a, byte-identical in shape to the two
+  findings the gate reported -- the same defect was *already in the baseline*
+  before this branch, which is why the baseline being a record and not a
+  certificate matters.
+
+The corpus allocation census in section 5 is the independent confirmation: those
+three functions are exactly `main.targetAliasingTheRangeExpression` (+2 heap) and
+`main.main.func.17.5` (frame 9 to 8, heap 2 to 3). The publications are gone
+because the storage moved, not because the code did.
