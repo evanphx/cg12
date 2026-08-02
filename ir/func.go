@@ -178,6 +178,12 @@ type Func struct {
 	// offsets from that allocation.
 	StackPointerWords map[uint32]map[int]bool
 
+	// PlacedAllocs records the front end's own placement decisions, keyed by the
+	// result temporary of the allocation it placed. It is diagnostic only --
+	// nothing reads it during compilation -- and exists so the two escape
+	// analyses can be compared at the same allocation. See PlacedAlloc.
+	PlacedAllocs map[uint32]PlacedAlloc
+
 	// ForceInline is set when the source marked the function
 	// __attribute__((always_inline)) -- the inliner then inlines every call to it
 	// regardless of its size budget (an interpreter's hot fast-path helpers rely on
@@ -373,6 +379,12 @@ const (
 	// such as a Go defer registration or return. Inlining must not relocate it into
 	// a different frame.
 	SymFrameScoped
+	// SymNoEscape marks a callee that retains no pointer argument past the call.
+	// It carries //go:noescape from a bodiless declaration, which is the only
+	// escape fact about such a function that exists anywhere: an ir.Func with no
+	// body has no directives and no code to analyse, so without this the escape
+	// summary would have to assume the worst about all 619 of them in stdlib/src.
+	SymNoEscape
 )
 
 // Has reports whether a includes every attribute in b.

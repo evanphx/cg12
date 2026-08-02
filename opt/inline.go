@@ -813,6 +813,23 @@ func spliceCall(caller *ir.Func, b *ir.Block, idx int, callee *ir.Func, cg *call
 		}
 		caller.StackPointerWords[mapped.ID] = clonedWords
 	}
+	// The front end's placement records follow their allocation into the caller,
+	// the same way the pointer-word map does. A constructor inlined into three
+	// callers is three allocations, each decided separately, so each copy keeps
+	// the record of what the front end chose for it.
+	for id, placed := range callee.PlacedAllocs {
+		if int(id) >= nTemps {
+			continue
+		}
+		mapped := tempMap[id]
+		if mapped.Kind != ir.RefTemp {
+			continue
+		}
+		if caller.PlacedAllocs == nil {
+			caller.PlacedAllocs = make(map[uint32]ir.PlacedAlloc)
+		}
+		caller.PlacedAllocs[mapped.ID] = placed
+	}
 	constMap := make([]ir.Ref, nConsts)
 	for i := 0; i < nConsts; i++ {
 		constMap[i] = cloneConst(caller, callee.Consts[i])

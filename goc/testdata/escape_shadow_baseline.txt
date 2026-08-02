@@ -1,0 +1,390 @@
+# Every allocation goc's AST escape walk and the summary-fed IR escape analysis
+# place differently, over the whole corpus, one per line:
+#
+#     source position <TAB> function <TAB> decision site <TAB> front end -> IR <TAB> reason
+#
+# Nothing here changes what the compiler emits. The corpus is compiled exactly as
+# it ships and opt.ShadowPlacement then asks the IR analysis what it would have
+# decided about each allocation the front end placed itself. The reason field is
+# empty when the IR analysis kept the object in a frame -- there is no single use
+# to name for that -- and otherwise names the use that escaped it.
+#
+# The two directions are not the same kind of news:
+#
+#   frame -> heap  the IR analysis is more conservative. Each line is an
+#                  allocation that would appear if that site were routed through
+#                  the neutral op, so the count is the price of the migration.
+#
+#   heap -> frame  the IR analysis is more permissive. Each line is either a
+#                  pessimisation in the AST walk or a hole in the new analysis,
+#                  and until it is known which, it is a potential miscompile of
+#                  exactly the shape 2724ac7 and 9f76498 were.
+#
+# Regenerate with
+#
+#     go test ./goc -run TestEscapeShadowPlacement -update-escape-shadow-baseline
+#
+# and read the diff.
+?	crypto/tls.Config.getCertificate	escaping-typed	heap -> frame	
+?	crypto/tls.Conn.getClientCertificate	escaping-typed	heap -> frame	
+?	crypto/tls.pickECHConfig	escaping-typed	heap -> frame	
+?	main.main	escaping-typed	heap -> frame	
+stdlib/src/archive/tar/writer.go:593:14	archive/tar.sparseFileWriter.Write	composite-literal	frame -> heap	call to $archive/tar.zeroWriter.Write with scalarised aggregate arguments
+stdlib/src/crypto/internal/fips140/aes/cast.go:16:10	crypto/internal/fips140/aes.init.0.func.15.26	slice-literal-backing	frame -> heap	call to $crypto/internal/fips140/aes.New with scalarised aggregate arguments
+stdlib/src/crypto/internal/fips140/aes/gcm/cast.go:19:10	crypto/internal/fips140/aes/gcm.init.0.func.18.29	slice-literal-backing	frame -> heap	call to $crypto/internal/fips140/aes.New with scalarised aggregate arguments
+stdlib/src/crypto/internal/fips140/bigmod/nat.go:1158:14	crypto/internal/fips140/bigmod.extendedGCD	composite-literal	heap -> frame	
+stdlib/src/crypto/internal/fips140/bigmod/nat.go:1159:14	crypto/internal/fips140/bigmod.extendedGCD	composite-literal	heap -> frame	
+stdlib/src/crypto/internal/fips140/bigmod/nat.go:1162:14	crypto/internal/fips140/bigmod.extendedGCD	composite-literal	heap -> frame	
+stdlib/src/crypto/internal/fips140/bigmod/nat.go:1163:14	crypto/internal/fips140/bigmod.extendedGCD	composite-literal	heap -> frame	
+stdlib/src/crypto/internal/fips140/bigmod/nat.go:73:9	crypto/internal/fips140/bigmod.Nat.Exp	composite-literal	heap -> frame	
+stdlib/src/crypto/internal/fips140/bigmod/nat.go:73:9	crypto/internal/fips140/bigmod.Nat.ExpShortVarTime	composite-literal	heap -> frame	
+stdlib/src/crypto/internal/fips140/bigmod/nat.go:73:9	crypto/internal/fips140/bigmod.Nat.Mul	composite-literal	heap -> frame	
+stdlib/src/crypto/internal/fips140/bigmod/nat.go:73:9	crypto/internal/fips140/bigmod.Nat.Sub	composite-literal	heap -> frame	
+stdlib/src/crypto/internal/fips140/bigmod/nat.go:73:9	crypto/internal/fips140/bigmod.Nat.SubOne	composite-literal	heap -> frame	
+stdlib/src/crypto/internal/fips140/bigmod/nat.go:73:9	crypto/internal/fips140/bigmod.Nat.maybeSubtractModulus	composite-literal	heap -> frame	
+stdlib/src/crypto/internal/fips140/bigmod/nat.go:73:9	crypto/internal/fips140/bigmod.Nat.montgomeryReduction	composite-literal	heap -> frame	
+stdlib/src/crypto/internal/fips140/bigmod/nat.go:73:9	crypto/internal/fips140/bigmod.Nat.shiftIn	composite-literal	heap -> frame	
+stdlib/src/crypto/internal/fips140/bigmod/nat.go:73:9	crypto/internal/fips140/bigmod.extendedGCD	composite-literal	heap -> frame	
+stdlib/src/crypto/internal/fips140/bigmod/nat.go:73:9	crypto/internal/fips140/ecdsa.precomputeParams[*crypto/internal/fips140/nistec.P224Point]	composite-literal	heap -> frame	
+stdlib/src/crypto/internal/fips140/bigmod/nat.go:73:9	crypto/internal/fips140/ecdsa.precomputeParams[*crypto/internal/fips140/nistec.P256Point]	composite-literal	heap -> frame	
+stdlib/src/crypto/internal/fips140/bigmod/nat.go:73:9	crypto/internal/fips140/ecdsa.precomputeParams[*crypto/internal/fips140/nistec.P384Point]	composite-literal	heap -> frame	
+stdlib/src/crypto/internal/fips140/bigmod/nat.go:73:9	crypto/internal/fips140/ecdsa.precomputeParams[*crypto/internal/fips140/nistec.P521Point]	composite-literal	heap -> frame	
+stdlib/src/crypto/internal/fips140/bigmod/nat.go:73:9	crypto/internal/fips140/rsa.checkPrivateKey	composite-literal	heap -> frame	
+stdlib/src/crypto/internal/fips140/bigmod/nat.go:73:9	crypto/internal/fips140/rsa.decrypt	composite-literal	heap -> frame	
+stdlib/src/crypto/internal/fips140/bigmod/nat.go:73:9	crypto/internal/fips140/rsa.encrypt	composite-literal	heap -> frame	
+stdlib/src/crypto/internal/fips140/bigmod/nat.go:73:9	crypto/internal/fips140/rsa.newPrivateKey	composite-literal	heap -> frame	
+stdlib/src/crypto/internal/fips140/bigmod/nat.go:788:24	crypto/internal/fips140/bigmod.Nat.montgomeryMul	make-slice-backing	frame -> heap	call to $crypto/internal/fips140/bigmod.addMulVVW with scalarised aggregate arguments
+stdlib/src/crypto/internal/fips140/bigmod/nat.go:951:16	crypto/internal/fips140/bigmod.Nat.Mul	composite-literal	heap -> frame	
+stdlib/src/crypto/internal/fips140/bigmod/nat.go:961:16	crypto/internal/fips140/bigmod.Nat.Mul	composite-literal	heap -> frame	
+stdlib/src/crypto/internal/fips140/bigmod/nat.go:968:16	crypto/internal/fips140/bigmod.Nat.Mul	composite-literal	heap -> frame	
+stdlib/src/crypto/internal/fips140/bigmod/nat.go:975:16	crypto/internal/fips140/bigmod.Nat.Mul	composite-literal	heap -> frame	
+stdlib/src/crypto/internal/fips140/drbg/ctrdrbg.go:50:20	crypto/internal/fips140/drbg.NewCounter	make-slice-backing	frame -> heap	call to $crypto/internal/fips140/aes.New with scalarised aggregate arguments
+stdlib/src/crypto/internal/fips140/drbg/ctrdrbg.go:51:20	crypto/internal/fips140/drbg.NewCounter	make-slice-backing	frame -> heap	call to $crypto/internal/fips140/aes.NewCTR with scalarised aggregate arguments
+stdlib/src/crypto/internal/fips140/drbg/ctrdrbg.go:51:20	crypto/internal/fips140/drbg.NewCounter	make-slice-backing	frame -> heap	call to $crypto/internal/fips140/aes.newCTR with scalarised aggregate arguments
+stdlib/src/crypto/internal/fips140/drbg/ctrdrbg.go:72:23	crypto/internal/fips140/drbg.Counter.update	make-slice-backing	frame -> heap	call to $crypto/internal/fips140/aes.CTR.XORKeyStream with scalarised aggregate arguments
+stdlib/src/crypto/internal/fips140/ecdh/cast.go:18:17	.goc.global.initfunc.12.crypto/internal/fips140/ecdh.fipsSelfTest.func.17.36	slice-literal-backing	frame -> heap	store into non-local storage
+stdlib/src/crypto/internal/fips140/ecdh/cast.go:18:17	.goc.global.initfunc.16.crypto/internal/fips140/ecdh.fipsSelfTest.func.17.36	slice-literal-backing	frame -> heap	store into non-local storage
+stdlib/src/crypto/internal/fips140/ecdh/cast.go:18:17	.goc.global.initfunc.17.crypto/internal/fips140/ecdh.fipsSelfTest.func.17.36	slice-literal-backing	frame -> heap	store into non-local storage
+stdlib/src/crypto/internal/fips140/ecdh/cast.go:18:17	.goc.global.initfunc.35.crypto/internal/fips140/ecdh.fipsSelfTest.func.17.36	slice-literal-backing	frame -> heap	store into non-local storage
+stdlib/src/crypto/internal/fips140/ecdh/cast.go:18:17	.goc.global.initfunc.41.crypto/internal/fips140/ecdh.fipsSelfTest.func.17.36	slice-literal-backing	frame -> heap	store into non-local storage
+stdlib/src/crypto/internal/fips140/ecdh/cast.go:18:17	.goc.global.initfunc.9.crypto/internal/fips140/ecdh.fipsSelfTest.func.17.36	slice-literal-backing	frame -> heap	store into non-local storage
+stdlib/src/crypto/internal/fips140/ecdh/cast.go:24:16	.goc.global.initfunc.12.crypto/internal/fips140/ecdh.fipsSelfTest.func.17.36	slice-literal-backing	frame -> heap	store into non-local storage
+stdlib/src/crypto/internal/fips140/ecdh/cast.go:24:16	.goc.global.initfunc.16.crypto/internal/fips140/ecdh.fipsSelfTest.func.17.36	slice-literal-backing	frame -> heap	store into non-local storage
+stdlib/src/crypto/internal/fips140/ecdh/cast.go:24:16	.goc.global.initfunc.17.crypto/internal/fips140/ecdh.fipsSelfTest.func.17.36	slice-literal-backing	frame -> heap	store into non-local storage
+stdlib/src/crypto/internal/fips140/ecdh/cast.go:24:16	.goc.global.initfunc.35.crypto/internal/fips140/ecdh.fipsSelfTest.func.17.36	slice-literal-backing	frame -> heap	store into non-local storage
+stdlib/src/crypto/internal/fips140/ecdh/cast.go:24:16	.goc.global.initfunc.41.crypto/internal/fips140/ecdh.fipsSelfTest.func.17.36	slice-literal-backing	frame -> heap	store into non-local storage
+stdlib/src/crypto/internal/fips140/ecdh/cast.go:24:16	.goc.global.initfunc.9.crypto/internal/fips140/ecdh.fipsSelfTest.func.17.36	slice-literal-backing	frame -> heap	store into non-local storage
+stdlib/src/crypto/internal/fips140/ecdh/ecdh.go:294:29	crypto/internal/fips140/ecdh.isLess	make-slice-backing	frame -> heap	call to $crypto/internal/fips140deps/byteorder.LEUint64 with scalarised aggregate arguments
+stdlib/src/crypto/internal/fips140/ecdh/ecdh.go:294:47	crypto/internal/fips140/ecdh.isLess	make-slice-backing	frame -> heap	call to $crypto/internal/fips140deps/byteorder.LEUint64 with scalarised aggregate arguments
+stdlib/src/crypto/internal/fips140/ecdsa/cast.go:111:7	.goc.global.initfunc.18.crypto/internal/fips140/ecdsa.fipsSelfTestDeterministic.func.107.47	slice-literal-backing	frame -> heap	store into non-local storage
+stdlib/src/crypto/internal/fips140/ecdsa/cast.go:111:7	.goc.global.initfunc.23.crypto/internal/fips140/ecdsa.fipsSelfTestDeterministic.func.107.47	slice-literal-backing	frame -> heap	store into non-local storage
+stdlib/src/crypto/internal/fips140/ecdsa/cast.go:111:7	.goc.global.initfunc.41.crypto/internal/fips140/ecdsa.fipsSelfTestDeterministic.func.107.47	slice-literal-backing	frame -> heap	store into non-local storage
+stdlib/src/crypto/internal/fips140/ecdsa/cast.go:111:7	.goc.global.initfunc.47.crypto/internal/fips140/ecdsa.fipsSelfTestDeterministic.func.107.47	slice-literal-backing	frame -> heap	store into non-local storage
+stdlib/src/crypto/internal/fips140/ecdsa/cast.go:116:10	.goc.global.initfunc.18.crypto/internal/fips140/ecdsa.fipsSelfTestDeterministic.func.107.47	slice-literal-backing	frame -> heap	store into non-local storage
+stdlib/src/crypto/internal/fips140/ecdsa/cast.go:116:10	.goc.global.initfunc.23.crypto/internal/fips140/ecdsa.fipsSelfTestDeterministic.func.107.47	slice-literal-backing	frame -> heap	store into non-local storage
+stdlib/src/crypto/internal/fips140/ecdsa/cast.go:116:10	.goc.global.initfunc.41.crypto/internal/fips140/ecdsa.fipsSelfTestDeterministic.func.107.47	slice-literal-backing	frame -> heap	store into non-local storage
+stdlib/src/crypto/internal/fips140/ecdsa/cast.go:116:10	.goc.global.initfunc.47.crypto/internal/fips140/ecdsa.fipsSelfTestDeterministic.func.107.47	slice-literal-backing	frame -> heap	store into non-local storage
+stdlib/src/crypto/internal/fips140/ecdsa/cast.go:79:7	.goc.global.initfunc.17.crypto/internal/fips140/ecdsa.fipsSelfTest.func.67.55	slice-literal-backing	frame -> heap	store into non-local storage
+stdlib/src/crypto/internal/fips140/ecdsa/cast.go:79:7	.goc.global.initfunc.22.crypto/internal/fips140/ecdsa.fipsSelfTest.func.67.55	slice-literal-backing	frame -> heap	store into non-local storage
+stdlib/src/crypto/internal/fips140/ecdsa/cast.go:79:7	.goc.global.initfunc.40.crypto/internal/fips140/ecdsa.fipsSelfTest.func.67.55	slice-literal-backing	frame -> heap	store into non-local storage
+stdlib/src/crypto/internal/fips140/ecdsa/cast.go:79:7	.goc.global.initfunc.46.crypto/internal/fips140/ecdsa.fipsSelfTest.func.67.55	slice-literal-backing	frame -> heap	store into non-local storage
+stdlib/src/crypto/internal/fips140/ecdsa/cast.go:84:10	.goc.global.initfunc.17.crypto/internal/fips140/ecdsa.fipsSelfTest.func.67.55	slice-literal-backing	frame -> heap	store into non-local storage
+stdlib/src/crypto/internal/fips140/ecdsa/cast.go:84:10	.goc.global.initfunc.22.crypto/internal/fips140/ecdsa.fipsSelfTest.func.67.55	slice-literal-backing	frame -> heap	store into non-local storage
+stdlib/src/crypto/internal/fips140/ecdsa/cast.go:84:10	.goc.global.initfunc.40.crypto/internal/fips140/ecdsa.fipsSelfTest.func.67.55	slice-literal-backing	frame -> heap	store into non-local storage
+stdlib/src/crypto/internal/fips140/ecdsa/cast.go:84:10	.goc.global.initfunc.46.crypto/internal/fips140/ecdsa.fipsSelfTest.func.67.55	slice-literal-backing	frame -> heap	store into non-local storage
+stdlib/src/crypto/internal/fips140/ecdsa/ecdsa.go:79:37	crypto/internal/fips140/ecdsa.precomputeParams[*crypto/internal/fips140/nistec.P224Point]	slice-literal-backing	frame -> heap	call to $crypto/internal/fips140/bigmod.Nat.SetBytes with scalarised aggregate arguments
+stdlib/src/crypto/internal/fips140/ecdsa/ecdsa.go:79:37	crypto/internal/fips140/ecdsa.precomputeParams[*crypto/internal/fips140/nistec.P256Point]	slice-literal-backing	frame -> heap	call to $crypto/internal/fips140/bigmod.Nat.SetBytes with scalarised aggregate arguments
+stdlib/src/crypto/internal/fips140/ecdsa/ecdsa.go:79:37	crypto/internal/fips140/ecdsa.precomputeParams[*crypto/internal/fips140/nistec.P384Point]	slice-literal-backing	frame -> heap	call to $crypto/internal/fips140/bigmod.Nat.SetBytes with scalarised aggregate arguments
+stdlib/src/crypto/internal/fips140/ecdsa/ecdsa.go:79:37	crypto/internal/fips140/ecdsa.precomputeParams[*crypto/internal/fips140/nistec.P521Point]	slice-literal-backing	frame -> heap	call to $crypto/internal/fips140/bigmod.Nat.SetBytes with scalarised aggregate arguments
+stdlib/src/crypto/internal/fips140/ecdsa/hmacdrbg.go:67:21	crypto/internal/fips140/ecdsa.newDRBG[*crypto/internal/fips140/sha512.Digest]	slice-literal-backing	frame -> heap	call to $bytes.Repeat with scalarised aggregate arguments
+stdlib/src/crypto/internal/fips140/ecdsa/hmacdrbg.go:67:21	crypto/internal/fips140/ecdsa.newDRBG[hash.Hash]	slice-literal-backing	frame -> heap	call to $bytes.Repeat with scalarised aggregate arguments
+stdlib/src/crypto/internal/fips140/ed25519/cast.go:53:17	.goc.global.initfunc.24.crypto/internal/fips140/ed25519.fipsSelfTest.func.46.42	string-conversion-buffer	frame -> heap	argument 0 of $runtime.stringtoslicebyte escapes
+stdlib/src/crypto/internal/fips140/ed25519/cast.go:53:17	.goc.global.initfunc.42.crypto/internal/fips140/ed25519.fipsSelfTest.func.46.42	string-conversion-buffer	frame -> heap	argument 0 of $runtime.stringtoslicebyte escapes
+stdlib/src/crypto/internal/fips140/ed25519/cast.go:53:17	.goc.global.initfunc.48.crypto/internal/fips140/ed25519.fipsSelfTest.func.46.42	string-conversion-buffer	frame -> heap	argument 0 of $runtime.stringtoslicebyte escapes
+stdlib/src/crypto/internal/fips140/ed25519/cast.go:53:17	.goc.global.initfunc.9.crypto/internal/fips140/ed25519.fipsSelfTest.func.46.42	string-conversion-buffer	frame -> heap	argument 0 of $runtime.stringtoslicebyte escapes
+stdlib/src/crypto/internal/fips140/ed25519/cast.go:64:8	.goc.global.initfunc.24.crypto/internal/fips140/ed25519.fipsSelfTest.func.46.42	composite-literal	frame -> heap	argument 0 of $crypto/internal/fips140/ed25519.precomputePrivateKey escapes
+stdlib/src/crypto/internal/fips140/ed25519/cast.go:64:8	.goc.global.initfunc.42.crypto/internal/fips140/ed25519.fipsSelfTest.func.46.42	composite-literal	frame -> heap	argument 0 of $crypto/internal/fips140/ed25519.precomputePrivateKey escapes
+stdlib/src/crypto/internal/fips140/ed25519/cast.go:64:8	.goc.global.initfunc.48.crypto/internal/fips140/ed25519.fipsSelfTest.func.46.42	composite-literal	frame -> heap	argument 0 of $crypto/internal/fips140/ed25519.precomputePrivateKey escapes
+stdlib/src/crypto/internal/fips140/ed25519/cast.go:64:8	.goc.global.initfunc.9.crypto/internal/fips140/ed25519.fipsSelfTest.func.46.42	composite-literal	frame -> heap	argument 0 of $crypto/internal/fips140/ed25519.precomputePrivateKey escapes
+stdlib/src/crypto/internal/fips140/ed25519/ed25519.go:219:19	crypto/internal/fips140/ed25519.signWithDom	string-conversion-buffer	frame -> heap	argument 0 of $runtime.stringtoslicebyte escapes
+stdlib/src/crypto/internal/fips140/ed25519/ed25519.go:220:12	crypto/internal/fips140/ed25519.signWithDom	slice-literal-backing	frame -> heap	call to $crypto/internal/fips140/sha512.Digest.Write with scalarised aggregate arguments
+stdlib/src/crypto/internal/fips140/ed25519/ed25519.go:221:19	crypto/internal/fips140/ed25519.signWithDom	string-conversion-buffer	frame -> heap	argument 0 of $runtime.stringtoslicebyte escapes
+stdlib/src/crypto/internal/fips140/ed25519/ed25519.go:225:35	crypto/internal/fips140/ed25519.signWithDom	make-slice-backing	frame -> heap	call to $crypto/internal/fips140/sha512.Digest.Sum with scalarised aggregate arguments
+stdlib/src/crypto/internal/fips140/ed25519/ed25519.go:236:19	crypto/internal/fips140/ed25519.signWithDom	string-conversion-buffer	frame -> heap	argument 0 of $runtime.stringtoslicebyte escapes
+stdlib/src/crypto/internal/fips140/ed25519/ed25519.go:237:12	crypto/internal/fips140/ed25519.signWithDom	slice-literal-backing	frame -> heap	call to $crypto/internal/fips140/sha512.Digest.Write with scalarised aggregate arguments
+stdlib/src/crypto/internal/fips140/ed25519/ed25519.go:238:19	crypto/internal/fips140/ed25519.signWithDom	string-conversion-buffer	frame -> heap	argument 0 of $runtime.stringtoslicebyte escapes
+stdlib/src/crypto/internal/fips140/ed25519/ed25519.go:243:32	crypto/internal/fips140/ed25519.signWithDom	make-slice-backing	frame -> heap	call to $crypto/internal/fips140/sha512.Digest.Sum with scalarised aggregate arguments
+stdlib/src/crypto/internal/fips140/ed25519/ed25519.go:301:19	crypto/internal/fips140/ed25519.verifyWithDom	string-conversion-buffer	frame -> heap	argument 0 of $runtime.stringtoslicebyte escapes
+stdlib/src/crypto/internal/fips140/ed25519/ed25519.go:302:12	crypto/internal/fips140/ed25519.verifyWithDom	slice-literal-backing	frame -> heap	call to $crypto/internal/fips140/sha512.Digest.Write with scalarised aggregate arguments
+stdlib/src/crypto/internal/fips140/ed25519/ed25519.go:303:19	crypto/internal/fips140/ed25519.verifyWithDom	string-conversion-buffer	frame -> heap	argument 0 of $runtime.stringtoslicebyte escapes
+stdlib/src/crypto/internal/fips140/ed25519/ed25519.go:308:32	crypto/internal/fips140/ed25519.verifyWithDom	make-slice-backing	frame -> heap	call to $crypto/internal/fips140/sha512.Digest.Sum with scalarised aggregate arguments
+stdlib/src/crypto/internal/fips140/edwards25519/edwards25519.go:227:40	.goc.global.initfunc.10.crypto/internal/fips140/edwards25519.d	slice-literal-backing	frame -> heap	call to $crypto/internal/fips140/edwards25519/field.Element.SetBytes with scalarised aggregate arguments
+stdlib/src/crypto/internal/fips140/edwards25519/edwards25519.go:227:40	.goc.global.initfunc.25.crypto/internal/fips140/edwards25519.d	slice-literal-backing	frame -> heap	call to $crypto/internal/fips140/edwards25519/field.Element.SetBytes with scalarised aggregate arguments
+stdlib/src/crypto/internal/fips140/edwards25519/edwards25519.go:227:40	.goc.global.initfunc.43.crypto/internal/fips140/edwards25519.d	slice-literal-backing	frame -> heap	call to $crypto/internal/fips140/edwards25519/field.Element.SetBytes with scalarised aggregate arguments
+stdlib/src/crypto/internal/fips140/edwards25519/edwards25519.go:227:40	.goc.global.initfunc.49.crypto/internal/fips140/edwards25519.d	slice-literal-backing	frame -> heap	call to $crypto/internal/fips140/edwards25519/field.Element.SetBytes with scalarised aggregate arguments
+stdlib/src/crypto/internal/fips140/edwards25519/edwards25519.go:67:39	.goc.global.initfunc.14.crypto/internal/fips140/edwards25519.identity	slice-literal-backing	frame -> heap	call to $crypto/internal/fips140/edwards25519.Point.SetBytes with scalarised aggregate arguments
+stdlib/src/crypto/internal/fips140/edwards25519/edwards25519.go:67:39	.goc.global.initfunc.29.crypto/internal/fips140/edwards25519.identity	slice-literal-backing	frame -> heap	call to $crypto/internal/fips140/edwards25519.Point.SetBytes with scalarised aggregate arguments
+stdlib/src/crypto/internal/fips140/edwards25519/edwards25519.go:67:39	.goc.global.initfunc.47.crypto/internal/fips140/edwards25519.identity	slice-literal-backing	frame -> heap	call to $crypto/internal/fips140/edwards25519.Point.SetBytes with scalarised aggregate arguments
+stdlib/src/crypto/internal/fips140/edwards25519/edwards25519.go:67:39	.goc.global.initfunc.53.crypto/internal/fips140/edwards25519.identity	slice-literal-backing	frame -> heap	call to $crypto/internal/fips140/edwards25519.Point.SetBytes with scalarised aggregate arguments
+stdlib/src/crypto/internal/fips140/edwards25519/edwards25519.go:78:40	.goc.global.initfunc.13.crypto/internal/fips140/edwards25519.generator	slice-literal-backing	frame -> heap	call to $crypto/internal/fips140/edwards25519.Point.SetBytes with scalarised aggregate arguments
+stdlib/src/crypto/internal/fips140/edwards25519/edwards25519.go:78:40	.goc.global.initfunc.28.crypto/internal/fips140/edwards25519.generator	slice-literal-backing	frame -> heap	call to $crypto/internal/fips140/edwards25519.Point.SetBytes with scalarised aggregate arguments
+stdlib/src/crypto/internal/fips140/edwards25519/edwards25519.go:78:40	.goc.global.initfunc.46.crypto/internal/fips140/edwards25519.generator	slice-literal-backing	frame -> heap	call to $crypto/internal/fips140/edwards25519.Point.SetBytes with scalarised aggregate arguments
+stdlib/src/crypto/internal/fips140/edwards25519/edwards25519.go:78:40	.goc.global.initfunc.52.crypto/internal/fips140/edwards25519.generator	slice-literal-backing	frame -> heap	call to $crypto/internal/fips140/edwards25519.Point.SetBytes with scalarised aggregate arguments
+stdlib/src/crypto/internal/fips140/mlkem/cast.go:23:11	.goc.global.initfunc.17.crypto/internal/fips140/mlkem.fipsSelfTest.func.16.29	composite-literal	heap -> frame	
+stdlib/src/crypto/internal/fips140/mlkem/cast.go:23:11	.goc.global.initfunc.48.crypto/internal/fips140/mlkem.fipsSelfTest.func.16.29	composite-literal	heap -> frame	
+stdlib/src/crypto/internal/fips140/mlkem/cast.go:23:11	.goc.global.initfunc.5.crypto/internal/fips140/mlkem.fipsSelfTest.func.16.29	composite-literal	heap -> frame	
+stdlib/src/crypto/internal/fips140/mlkem/cast.go:23:11	.goc.global.initfunc.54.crypto/internal/fips140/mlkem.fipsSelfTest.func.16.29	composite-literal	heap -> frame	
+stdlib/src/crypto/internal/fips140/mlkem/cast.go:41:9	.goc.global.initfunc.17.crypto/internal/fips140/mlkem.fipsSelfTest.func.16.29	composite-literal	frame -> heap	argument 0 of $crypto/internal/fips140/mlkem.kemKeyGen escapes
+stdlib/src/crypto/internal/fips140/mlkem/cast.go:41:9	.goc.global.initfunc.48.crypto/internal/fips140/mlkem.fipsSelfTest.func.16.29	composite-literal	frame -> heap	argument 0 of $crypto/internal/fips140/mlkem.kemKeyGen escapes
+stdlib/src/crypto/internal/fips140/mlkem/cast.go:41:9	.goc.global.initfunc.5.crypto/internal/fips140/mlkem.fipsSelfTest.func.16.29	composite-literal	frame -> heap	argument 0 of $crypto/internal/fips140/mlkem.kemKeyGen escapes
+stdlib/src/crypto/internal/fips140/mlkem/cast.go:41:9	.goc.global.initfunc.54.crypto/internal/fips140/mlkem.fipsSelfTest.func.16.29	composite-literal	frame -> heap	argument 0 of $crypto/internal/fips140/mlkem.kemKeyGen escapes
+stdlib/src/crypto/internal/fips140/mlkem/field.go:399:20	crypto/internal/fips140/mlkem.samplePolyCBD	make-slice-backing	frame -> heap	call to $crypto/internal/fips140/sha3.SHAKE.Read with scalarised aggregate arguments
+stdlib/src/crypto/internal/fips140/nistec/fiat/p224.go:42:23	crypto/internal/fips140/nistec/fiat.P224Element.IsZero	make-slice-backing	frame -> heap	call to $crypto/internal/fips140/subtle.ConstantTimeCompare with scalarised aggregate arguments
+stdlib/src/crypto/internal/fips140/nistec/fiat/p256.go:42:23	crypto/internal/fips140/nistec/fiat.P256Element.IsZero	make-slice-backing	frame -> heap	call to $crypto/internal/fips140/subtle.ConstantTimeCompare with scalarised aggregate arguments
+stdlib/src/crypto/internal/fips140/nistec/fiat/p384.go:42:23	crypto/internal/fips140/nistec/fiat.P384Element.IsZero	make-slice-backing	frame -> heap	call to $crypto/internal/fips140/subtle.ConstantTimeCompare with scalarised aggregate arguments
+stdlib/src/crypto/internal/fips140/nistec/fiat/p521.go:42:23	crypto/internal/fips140/nistec/fiat.P521Element.IsZero	make-slice-backing	frame -> heap	call to $crypto/internal/fips140/subtle.ConstantTimeCompare with scalarised aggregate arguments
+stdlib/src/crypto/internal/fips140/nistec/p224.go:115:46	crypto/internal/fips140/nistec.p224B.func.114.16	slice-literal-backing	frame -> heap	call to $crypto/internal/fips140/nistec/fiat.P224Element.SetBytes with scalarised aggregate arguments
+stdlib/src/crypto/internal/fips140/nistec/p224.go:29:9	crypto/internal/fips140/nistec.P224Point.ScalarBaseMult	composite-literal	heap -> frame	
+stdlib/src/crypto/internal/fips140/nistec/p224.go:29:9	crypto/internal/fips140/nistec.P224Point.ScalarMult	composite-literal	heap -> frame	
+stdlib/src/crypto/internal/fips140/nistec/p224.go:29:9	crypto/internal/fips140/nistec.P224Point.SetBytes	composite-literal	heap -> frame	
+stdlib/src/crypto/internal/fips140/nistec/p224.go:29:9	crypto/internal/fips140/nistec.P224Point.generatorTable.func.393.28	composite-literal	heap -> frame	
+stdlib/src/crypto/internal/fips140/nistec/p224.go:29:9	crypto/internal/fips140/nistec.p224Table.Select	composite-literal	heap -> frame	
+stdlib/src/crypto/internal/fips140/nistec/p224.go:38:15	crypto/internal/fips140/nistec.P224Point.SetGenerator	slice-literal-backing	frame -> heap	call to $crypto/internal/fips140/nistec/fiat.P224Element.SetBytes with scalarised aggregate arguments
+stdlib/src/crypto/internal/fips140/nistec/p224.go:39:15	crypto/internal/fips140/nistec.P224Point.SetGenerator	slice-literal-backing	frame -> heap	call to $crypto/internal/fips140/nistec/fiat.P224Element.SetBytes with scalarised aggregate arguments
+stdlib/src/crypto/internal/fips140/nistec/p224_sqrt.go:31:24	crypto/internal/fips140/nistec.p224SqrtCandidate.func.27.16	slice-literal-backing	frame -> heap	call to $crypto/internal/fips140/nistec/fiat.P224Element.SetBytes with scalarised aggregate arguments
+stdlib/src/crypto/internal/fips140/nistec/p256.go:121:46	crypto/internal/fips140/nistec.p256B.func.120.16	slice-literal-backing	frame -> heap	call to $crypto/internal/fips140/nistec/fiat.P256Element.SetBytes with scalarised aggregate arguments
+stdlib/src/crypto/internal/fips140/nistec/p384.go:115:46	crypto/internal/fips140/nistec.p384B.func.114.16	slice-literal-backing	frame -> heap	call to $crypto/internal/fips140/nistec/fiat.P384Element.SetBytes with scalarised aggregate arguments
+stdlib/src/crypto/internal/fips140/nistec/p384.go:29:9	crypto/internal/fips140/nistec.P384Point.ScalarBaseMult	composite-literal	heap -> frame	
+stdlib/src/crypto/internal/fips140/nistec/p384.go:29:9	crypto/internal/fips140/nistec.P384Point.ScalarMult	composite-literal	heap -> frame	
+stdlib/src/crypto/internal/fips140/nistec/p384.go:29:9	crypto/internal/fips140/nistec.P384Point.SetBytes	composite-literal	heap -> frame	
+stdlib/src/crypto/internal/fips140/nistec/p384.go:29:9	crypto/internal/fips140/nistec.P384Point.generatorTable.func.393.28	composite-literal	heap -> frame	
+stdlib/src/crypto/internal/fips140/nistec/p384.go:29:9	crypto/internal/fips140/nistec.p384Table.Select	composite-literal	heap -> frame	
+stdlib/src/crypto/internal/fips140/nistec/p384.go:38:15	crypto/internal/fips140/nistec.P384Point.SetGenerator	slice-literal-backing	frame -> heap	call to $crypto/internal/fips140/nistec/fiat.P384Element.SetBytes with scalarised aggregate arguments
+stdlib/src/crypto/internal/fips140/nistec/p384.go:39:15	crypto/internal/fips140/nistec.P384Point.SetGenerator	slice-literal-backing	frame -> heap	call to $crypto/internal/fips140/nistec/fiat.P384Element.SetBytes with scalarised aggregate arguments
+stdlib/src/crypto/internal/fips140/nistec/p521.go:115:46	crypto/internal/fips140/nistec.p521B.func.114.16	slice-literal-backing	frame -> heap	call to $crypto/internal/fips140/nistec/fiat.P521Element.SetBytes with scalarised aggregate arguments
+stdlib/src/crypto/internal/fips140/nistec/p521.go:29:9	crypto/internal/fips140/nistec.P521Point.ScalarBaseMult	composite-literal	heap -> frame	
+stdlib/src/crypto/internal/fips140/nistec/p521.go:29:9	crypto/internal/fips140/nistec.P521Point.ScalarMult	composite-literal	heap -> frame	
+stdlib/src/crypto/internal/fips140/nistec/p521.go:29:9	crypto/internal/fips140/nistec.P521Point.SetBytes	composite-literal	heap -> frame	
+stdlib/src/crypto/internal/fips140/nistec/p521.go:29:9	crypto/internal/fips140/nistec.P521Point.generatorTable.func.393.28	composite-literal	heap -> frame	
+stdlib/src/crypto/internal/fips140/nistec/p521.go:29:9	crypto/internal/fips140/nistec.p521Table.Select	composite-literal	heap -> frame	
+stdlib/src/crypto/internal/fips140/nistec/p521.go:38:15	crypto/internal/fips140/nistec.P521Point.SetGenerator	slice-literal-backing	frame -> heap	call to $crypto/internal/fips140/nistec/fiat.P521Element.SetBytes with scalarised aggregate arguments
+stdlib/src/crypto/internal/fips140/nistec/p521.go:39:15	crypto/internal/fips140/nistec.P521Point.SetGenerator	slice-literal-backing	frame -> heap	call to $crypto/internal/fips140/nistec/fiat.P521Element.SetBytes with scalarised aggregate arguments
+stdlib/src/crypto/internal/fips140/rsa/cast.go:101:28	crypto/internal/fips140/rsa.testPrivateKey	slice-literal-backing	frame -> heap	call to $crypto/internal/fips140/bigmod.NewModulus with scalarised aggregate arguments
+stdlib/src/crypto/internal/fips140/rsa/cast.go:118:38	crypto/internal/fips140/rsa.testPrivateKey	slice-literal-backing	frame -> heap	call to $crypto/internal/fips140/bigmod.Nat.SetBytes with scalarised aggregate arguments
+stdlib/src/crypto/internal/fips140/rsa/cast.go:182:11	.goc.global.initfunc.12.crypto/internal/fips140/rsa.fipsSelfTest.func.180.60	slice-literal-backing	frame -> heap	call to $crypto/internal/fips140/rsa.signPKCS1v15 with scalarised aggregate arguments
+stdlib/src/crypto/internal/fips140/rsa/cast.go:182:11	.goc.global.initfunc.34.crypto/internal/fips140/rsa.fipsSelfTest.func.180.60	slice-literal-backing	frame -> heap	call to $crypto/internal/fips140/rsa.signPKCS1v15 with scalarised aggregate arguments
+stdlib/src/crypto/internal/fips140/rsa/cast.go:182:11	.goc.global.initfunc.53.crypto/internal/fips140/rsa.fipsSelfTest.func.180.60	slice-literal-backing	frame -> heap	call to $crypto/internal/fips140/rsa.signPKCS1v15 with scalarised aggregate arguments
+stdlib/src/crypto/internal/fips140/rsa/cast.go:182:11	.goc.global.initfunc.59.crypto/internal/fips140/rsa.fipsSelfTest.func.180.60	slice-literal-backing	frame -> heap	call to $crypto/internal/fips140/rsa.signPKCS1v15 with scalarised aggregate arguments
+stdlib/src/crypto/internal/fips140/rsa/cast.go:18:28	crypto/internal/fips140/rsa.testPrivateKey	slice-literal-backing	frame -> heap	call to $crypto/internal/fips140/bigmod.NewModulus with scalarised aggregate arguments
+stdlib/src/crypto/internal/fips140/rsa/cast.go:51:35	crypto/internal/fips140/rsa.testPrivateKey	slice-literal-backing	frame -> heap	call to $crypto/internal/fips140/bigmod.Nat.SetBytes with scalarised aggregate arguments
+stdlib/src/crypto/internal/fips140/rsa/cast.go:84:28	crypto/internal/fips140/rsa.testPrivateKey	slice-literal-backing	frame -> heap	call to $crypto/internal/fips140/bigmod.NewModulus with scalarised aggregate arguments
+stdlib/src/crypto/internal/fips140/rsa/keygen.go:115:13	crypto/internal/fips140/rsa.GenerateKey.func.114.43	slice-literal-backing	frame -> heap	call to $crypto/internal/fips140/rsa.signPKCS1v15 with scalarised aggregate arguments
+stdlib/src/crypto/internal/fips140/sha256/cast.go:15:12	crypto/internal/fips140/sha256.init.0.func.14.27	slice-literal-backing	frame -> heap	call to $crypto/internal/fips140/sha256.Digest.Write with scalarised aggregate arguments
+stdlib/src/crypto/internal/fips140/sha512/cast.go:15:12	crypto/internal/fips140/sha512.init.0.func.14.27	slice-literal-backing	frame -> heap	call to $crypto/internal/fips140/sha512.Digest.Write with scalarised aggregate arguments
+stdlib/src/crypto/internal/fips140/subtle/constant_time.go:51:22	crypto/internal/fips140/subtle.ConstantTimeLessOrEqBytes	make-slice-backing	frame -> heap	call to $crypto/internal/fips140deps/byteorder.BEUint64 with scalarised aggregate arguments
+stdlib/src/crypto/internal/fips140/subtle/constant_time.go:52:22	crypto/internal/fips140/subtle.ConstantTimeLessOrEqBytes	make-slice-backing	frame -> heap	call to $crypto/internal/fips140deps/byteorder.BEUint64 with scalarised aggregate arguments
+stdlib/src/crypto/internal/fips140/tls12/cast.go:21:17	crypto/internal/fips140/tls12.init.0.func.16.35	slice-literal-backing	frame -> heap	call to $crypto/internal/fips140/tls12.MasterSecret[*crypto/internal/fips140/sha256.Digest] with scalarised aggregate arguments
+stdlib/src/crypto/internal/fips140/tls13/cast.go:17:12	crypto/internal/fips140/tls13.init.0.func.16.35	slice-literal-backing	frame -> heap	call to $crypto/internal/fips140/sha256.Digest.Write with scalarised aggregate arguments
+stdlib/src/crypto/tls/auth.go:259:14	crypto/tls.selectSignatureScheme	slice-literal-backing	heap -> frame	
+stdlib/src/crypto/tls/auth.go:58:15	crypto/tls.verifyHandshakeSignature	composite-literal	frame -> heap	call to $crypto/rsa.VerifyPSS with scalarised aggregate arguments
+stdlib/src/crypto/tls/common.go:1379:12	crypto/tls.ClientHelloInfo.SupportsCertificate	composite-literal	frame -> heap	store into non-local storage
+stdlib/src/crypto/tls/handshake_client.go:328:9	crypto/tls.Conn.clientHandshake	composite-literal	frame -> heap	argument 0 of $crypto/tls.clientHandshakeStateTLS13.handshake escapes
+stdlib/src/crypto/tls/handshake_client.go:342:8	crypto/tls.Conn.clientHandshake	composite-literal	frame -> heap	argument 0 of $crypto/tls.clientHandshakeState.handshake escapes
+stdlib/src/crypto/tls/handshake_client.go:497:62	crypto/tls.Conn.loadSession	method-value-descriptor	frame -> heap	call to $crypto/tls.computeAndUpdatePSK, whose argument list does not match its parameters
+stdlib/src/crypto/tls/handshake_client.go:510:49	crypto/tls.Conn.pickTLSVersion	slice-literal-backing	frame -> heap	call to $crypto/tls.Config.mutualVersion with scalarised aggregate arguments
+stdlib/src/crypto/tls/handshake_client.go:785:17	crypto/tls.clientHandshakeState.doFullHandshake	composite-literal	frame -> heap	store into non-local storage
+stdlib/src/crypto/tls/handshake_client_tls13.go:353:67	crypto/tls.clientHandshakeStateTLS13.processHelloRetryRequest	method-value-descriptor	frame -> heap	call to $crypto/tls.computeAndUpdatePSK, whose argument list does not match its parameters
+stdlib/src/crypto/tls/handshake_client_tls13.go:811:14	crypto/tls.clientHandshakeStateTLS13.sendClientFinished	composite-literal	frame -> heap	store into non-local storage
+stdlib/src/crypto/tls/handshake_client_tls13.go:868:27	crypto/tls.Conn.handleNewSessionTicket	method-value-descriptor	frame -> heap	call to $crypto/internal/fips140/tls13.ExpandLabel[hash.Hash] with scalarised aggregate arguments
+stdlib/src/crypto/tls/handshake_server.go:401:76	crypto/tls.serverHandshakeState.pickCipherSuite	method-value-descriptor	frame -> heap	call to $crypto/tls.selectCipherSuite with scalarised aggregate arguments
+stdlib/src/crypto/tls/handshake_server.go:509:29	crypto/tls.serverHandshakeState.checkForResumption	slice-literal-backing	frame -> heap	call to $crypto/tls.selectCipherSuite with scalarised aggregate arguments
+stdlib/src/crypto/tls/handshake_server.go:510:37	crypto/tls.serverHandshakeState.checkForResumption	method-value-descriptor	frame -> heap	call to $crypto/tls.selectCipherSuite with scalarised aggregate arguments
+stdlib/src/crypto/tls/handshake_server_tls13.go:893:14	crypto/tls.serverHandshakeStateTLS13.sendServerFinished	composite-literal	frame -> heap	store into non-local storage
+stdlib/src/crypto/tls/handshake_server_tls13.go:978:27	crypto/tls.Conn.sendSessionTicket	method-value-descriptor	frame -> heap	call to $crypto/internal/fips140/tls13.ExpandLabel[hash.Hash] with scalarised aggregate arguments
+stdlib/src/crypto/tls/key_schedule.go:24:27	crypto/tls.cipherSuiteTLS13.nextTrafficSecret	method-value-descriptor	frame -> heap	call to $crypto/internal/fips140/tls13.ExpandLabel[hash.Hash] with scalarised aggregate arguments
+stdlib/src/crypto/tls/key_schedule.go:29:26	crypto/tls.cipherSuiteTLS13.trafficKey	method-value-descriptor	frame -> heap	call to $crypto/internal/fips140/tls13.ExpandLabel[hash.Hash] with scalarised aggregate arguments
+stdlib/src/crypto/tls/key_schedule.go:30:25	crypto/tls.cipherSuiteTLS13.trafficKey	method-value-descriptor	frame -> heap	call to $crypto/internal/fips140/tls13.ExpandLabel[hash.Hash] with scalarised aggregate arguments
+stdlib/src/crypto/tls/key_schedule.go:38:35	crypto/tls.cipherSuiteTLS13.finishedHash	method-value-descriptor	frame -> heap	call to $crypto/internal/fips140/tls13.ExpandLabel[hash.Hash] with scalarised aggregate arguments
+stdlib/src/crypto/tls/prf.go:126:29	crypto/tls.extMasterFromPreMasterSecret	method-value-descriptor	frame -> heap	call to $crypto/internal/fips140/tls12.MasterSecret[hash.Hash] with scalarised aggregate arguments
+stdlib/src/crypto/x509/parser.go:1011:40	crypto/x509.parseCertificate	composite-literal	heap -> frame	
+stdlib/src/crypto/x509/root_unix.go:37:11	crypto/x509.loadSystemRoots	slice-literal-backing	heap -> frame	
+stdlib/src/crypto/x509/verify.go:1295:56	crypto/x509.policiesValid	string-conversion-buffer	frame -> heap	argument 0 of $runtime.stringtoslicebyte escapes
+stdlib/src/encoding/base64/base64.go:431:36	encoding/base64.Encoding.DecodeString	string-conversion-buffer	frame -> heap	argument 0 of $runtime.stringtoslicebyte escapes
+stdlib/src/encoding/binary/binary.go:285:7	encoding/binary.Read	composite-literal	frame -> heap	argument 0 of $encoding/binary.decoder.value escapes
+stdlib/src/encoding/binary/binary.go:430:7	encoding/binary.Write	composite-literal	frame -> heap	argument 0 of $encoding/binary.encoder.value escapes
+stdlib/src/encoding/hex/hex.go:140:31	encoding/hex.DecodeString	string-conversion-buffer	frame -> heap	argument 0 of $runtime.stringtoslicebyte escapes
+stdlib/src/encoding/xml/marshal.go:1118:28	encoding/xml.parentStack.push	composite-literal	heap -> frame	
+stdlib/src/image/png/reader.go:970:7	image/png.Decode	composite-literal	frame -> heap	argument 0 of $image/png.decoder.checkHeader escapes
+stdlib/src/image/png/reader.go:994:7	image/png.DecodeConfig	composite-literal	frame -> heap	argument 0 of $image/png.decoder.checkHeader escapes
+stdlib/src/internal/poll/splice_linux.go:198:15	internal/poll.newPoolPipe.func.197.36	composite-literal	heap -> frame	
+stdlib/src/internal/runtime/cgroup/cgroup.go:79:38	internal/runtime/cgroup.parseV2Limit	string-conversion-buffer	frame -> heap	argument 0 of $runtime.stringtoslicebyte escapes
+stdlib/src/internal/strconv/atoi.go:107:27	internal/strconv.ParseUint	string-conversion-buffer	frame -> heap	argument 0 of $runtime.stringtoslicebyte escapes
+stdlib/src/internal/strconv/atoi.go:230:29	internal/strconv.Atoi	string-conversion-buffer	frame -> heap	argument 0 of $runtime.stringtoslicebyte escapes
+stdlib/src/math/big/int.go:920:10	math/big.nat.modInverse	composite-literal	heap -> frame	
+stdlib/src/math/big/int.go:920:35	math/big.nat.modInverse	composite-literal	heap -> frame	
+stdlib/src/mime/grammar.go:79:27	mime.isToken	string-conversion-buffer	frame -> heap	argument 0 of $runtime.stringtoslicebyte escapes
+stdlib/src/net/dial.go:544:8	net.Dialer.DialContext	composite-literal	frame -> heap	call to $net.sysDialer.dialParallel, whose argument list does not match its parameters
+stdlib/src/net/dial.go:879:8	net.ListenConfig.Listen	composite-literal	frame -> heap	call to $net.sysListener.listenMPTCP, whose argument list does not match its parameters
+stdlib/src/net/http/client.go:429:50	net/http.basicAuth	string-conversion-buffer	frame -> heap	argument 0 of $runtime.stringtoslicebyte escapes
+stdlib/src/net/http/h2_bundle.go:10726:12	net/http.http2Transport.dialTLSWithContext	composite-literal	frame -> heap	call to $crypto/tls.Dialer.DialContext, whose argument list does not match its parameters
+stdlib/src/net/http/h2_bundle.go:10988:49	net/http.http2writeResHeaders.writeFrame	method-value-descriptor	frame -> heap	call to $net/http.http2splitHeaderBlock, whose argument list does not match its parameters
+stdlib/src/net/http/h2_bundle.go:11037:49	net/http.http2writePushPromise.writeFrame	method-value-descriptor	frame -> heap	call to $net/http.http2splitHeaderBlock, whose argument list does not match its parameters
+stdlib/src/net/http/h2_bundle.go:4324:7	net/http.http2ConfigureServer.func.4316.51	method-value-descriptor	heap -> frame	
+stdlib/src/net/http/h2_bundle.go:4404:10	net/http.http2Server.ServeConn	composite-literal	frame -> heap	call to $net/http.http2Server.serveConn, whose argument list does not match its parameters
+stdlib/src/net/http/h2_bundle.go:4949:53	net/http.http2serverConn.serve	method-value-descriptor	heap -> frame	
+stdlib/src/net/http/h2_bundle.go:4955:59	net/http.http2serverConn.serve	method-value-descriptor	heap -> frame	
+stdlib/src/net/http/h2_bundle.go:4959:5	net/http.http2serverConn.serve	method-value-descriptor	heap -> frame	
+stdlib/src/net/http/h2_bundle.go:4961:61	net/http.http2serverConn.serve	method-value-descriptor	heap -> frame	
+stdlib/src/net/http/h2_bundle.go:5496:39	net/http.http2serverConn.shutDownIn	method-value-descriptor	heap -> frame	
+stdlib/src/net/http/h2_bundle.go:6101:55	net/http.http2serverConn.processHeaders	method-value-descriptor	heap -> frame	
+stdlib/src/net/http/h2_bundle.go:6128:28	net/http.http2serverConn.upgradeRequest	method-value-descriptor	frame -> heap	write barrier into non-local storage
+stdlib/src/net/http/h2_bundle.go:6199:57	net/http.http2serverConn.newStream	method-value-descriptor	heap -> frame	
+stdlib/src/net/http/h2_bundle.go:6705:43	net/http.http2responseWriterState.writeChunk	composite-literal	heap -> frame	
+stdlib/src/net/http/h2_bundle.go:6740:43	net/http.http2responseWriterState.writeChunk	composite-literal	heap -> frame	
+stdlib/src/net/http/h2_bundle.go:6822:63	net/http.http2responseWriter.SetReadDeadline.func.6812.26	method-value-descriptor	heap -> frame	
+stdlib/src/net/http/h2_bundle.go:6848:64	net/http.http2responseWriter.SetWriteDeadline.func.6838.26	method-value-descriptor	heap -> frame	
+stdlib/src/net/http/h2_bundle.go:6878:12	net/http.http2responseWriter.FlushError	composite-literal	frame -> heap	call to $net/http.http2chunkWriter.Write with scalarised aggregate arguments
+stdlib/src/net/http/h2_bundle.go:6966:37	net/http.http2responseWriterState.writeHeader	composite-literal	heap -> frame	
+stdlib/src/net/http/h2_bundle.go:7223:29	net/http.http2serverConn.startPush.func.7180.24	method-value-descriptor	frame -> heap	write barrier into non-local storage
+stdlib/src/net/http/h2_bundle.go:7548:7	net/http.http2configureTransports.func.7545.15	method-value-descriptor	heap -> frame	
+stdlib/src/net/http/h2_bundle.go:7555:7	net/http.http2configureTransports.func.7545.15	method-value-descriptor	heap -> frame	
+stdlib/src/net/http/h2_bundle.go:7572:7	net/http.http2configureTransports.func.7569.52	method-value-descriptor	heap -> frame	
+stdlib/src/net/http/h2_bundle.go:8143:21	net/http.http2Transport.newClientConn	slice-literal-backing	frame -> heap	call to $net/http.http2Framer.WriteSettings with scalarised aggregate arguments
+stdlib/src/net/http/h2_bundle.go:8168:36	net/http.http2Transport.newClientConn	method-value-descriptor	heap -> frame	
+stdlib/src/net/http/h2_bundle.go:8171:5	net/http.http2Transport.newClientConn	method-value-descriptor	heap -> frame	
+stdlib/src/net/http/h2_bundle.go:8426:44	net/http.http2ClientConn.closeConn	method-value-descriptor	heap -> frame	
+stdlib/src/net/http/h2_bundle.go:9417:8	net/http.http2ClientConn.readLoop	composite-literal	frame -> heap	write barrier into a candidate
+stdlib/src/net/http/h2_bundle.go:9547:39	net/http.http2clientConnReadLoop.run	method-value-descriptor	heap -> frame	
+stdlib/src/net/http/httptest/server.go:260:38	net/http/httptest.Server.Close	method-value-descriptor	heap -> frame	
+stdlib/src/net/http/internal/httpcommon/httpcommon.go:79:12	net/http/internal/httpcommon.buildCommonHeaderMaps	slice-literal-backing	heap -> frame	
+stdlib/src/net/http/servemux121.go:196:7	net/http.serveMux121.shouldRedirectRLocked	slice-literal-backing	heap -> frame	
+stdlib/src/net/http/server.go:2073:3	net/http.conn.serve	composite-literal	frame -> heap	call to $net/http.serverHandler.ServeHTTP, whose argument list does not match its parameters
+stdlib/src/net/http/server.go:698:5	net/http.connReader.startBackgroundRead	method-value-descriptor	heap -> frame	
+stdlib/src/net/http/transport.go:1164:56	net/http.Transport.tryPutIdleConn	method-value-descriptor	heap -> frame	
+stdlib/src/net/http/transport.go:1214:8	net/http.Transport.queueForIdleConn	method-value-descriptor	heap -> frame	
+stdlib/src/net/http/transport.go:1802:8	net/http.Transport.dialConn	method-value-descriptor	heap -> frame	
+stdlib/src/net/http/transport.go:1994:5	net/http.Transport.dialConn	method-value-descriptor	heap -> frame	
+stdlib/src/net/http/transport.go:1995:5	net/http.Transport.dialConn	method-value-descriptor	heap -> frame	
+stdlib/src/net/ipsock_posix.go:45:15	net.ipStackCapabilities.probe	slice-literal-backing	heap -> frame	
+stdlib/src/net/mail/message.go:238:10	net/mail.ParseAddress	composite-literal	heap -> frame	
+stdlib/src/net/textproto/reader.go:439:22	net/textproto.Reader.closeDot	make-slice-backing	frame -> heap	call to $net/textproto.dotReader.Read with scalarised aggregate arguments
+stdlib/src/net/udpsock.go:300:8	net.dialUDP	composite-literal	frame -> heap	call to $net.sysDialer.dialUDP, whose argument list does not match its parameters
+stdlib/src/net/udpsock.go:329:8	net.ListenUDP	composite-literal	frame -> heap	call to $net.sysListener.listenUDP, whose argument list does not match its parameters
+stdlib/src/net/unixsock_posix.go:139:8	net.UnixConn.writeTo	composite-literal	frame -> heap	store into non-local storage
+stdlib/src/net/url/url.go:198:27	net/url.escape	string-conversion-buffer	frame -> heap	argument 0 of $runtime.stringtoslicebyte escapes
+stdlib/src/net/url/url.go:233:27	net/url.escape	string-conversion-buffer	frame -> heap	argument 0 of $runtime.stringtoslicebyte escapes
+stdlib/src/os/exec_posix.go:39:13	os.startProcess	composite-literal	frame -> heap	call to $syscall.StartProcess with scalarised aggregate arguments
+stdlib/src/reflect/type.go:1914:26	reflect.initFuncTypes	slice-literal-backing	frame -> heap	call to $reflect.StructOf with scalarised aggregate arguments
+stdlib/src/reflect/type.go:2473:22	reflect.StructOf	slice-literal-backing	frame -> heap	call to $reflect.StructOf with scalarised aggregate arguments
+stdlib/src/regexp/regexp.go:694:27	regexp.init.0	string-conversion-buffer	frame -> heap	argument 0 of $runtime.stringtoslicebyte escapes
+stdlib/src/runtime/fds_unix.go:25:20	runtime.checkfds	string-conversion-buffer	frame -> heap	argument 0 of $runtime.stringtoslicebyte escapes
+stdlib/src/runtime/panic.go:1365:14	runtime.recovery	composite-literal	frame -> heap	write barrier into non-local storage
+stdlib/src/runtime/print.go:202:16	runtime.printquoted	string-conversion-buffer	frame -> heap	argument 0 of $runtime.stringtoslicebyte escapes
+stdlib/src/runtime/print.go:206:18	runtime.printquoted	string-conversion-buffer	frame -> heap	argument 0 of $runtime.stringtoslicebyte escapes
+stdlib/src/runtime/print.go:209:18	runtime.printquoted	string-conversion-buffer	frame -> heap	argument 0 of $runtime.stringtoslicebyte escapes
+stdlib/src/runtime/print.go:212:18	runtime.printquoted	string-conversion-buffer	frame -> heap	argument 0 of $runtime.stringtoslicebyte escapes
+stdlib/src/runtime/print.go:216:11	runtime.printquoted	slice-literal-backing	frame -> heap	call to $runtime.gwrite with scalarised aggregate arguments
+stdlib/src/runtime/print.go:221:11	runtime.printquoted	slice-literal-backing	frame -> heap	call to $runtime.gwrite with scalarised aggregate arguments
+stdlib/src/runtime/print.go:233:9	runtime.printquoted	slice-literal-backing	frame -> heap	call to $runtime.gwrite with scalarised aggregate arguments
+stdlib/src/runtime/rand.go:68:24	runtime.randinit	make-slice-backing	frame -> heap	call to $internal/byteorder.BEPutUint64 with scalarised aggregate arguments
+stdlib/src/runtime/signal_unix.go:546:10	runtime.sigprofNonGoPC	slice-literal-backing	frame -> heap	call to $runtime.cpuProfile.addNonGo with scalarised aggregate arguments
+stdlib/src/runtime/signal_unix.go:651:7	runtime.sighandler	composite-literal	frame -> heap	argument 0 of $runtime.noescape escapes
+stdlib/src/runtime/string.go:66:28	runtime.concatstring2	slice-literal-backing	frame -> heap	call to $runtime.concatstrings with scalarised aggregate arguments
+stdlib/src/runtime/traceevent.go:76:47	runtime.traceLocker.startPC	slice-literal-backing	frame -> heap	call to $runtime.traceStackTable.put with scalarised aggregate arguments
+stdlib/src/strings/replace.go:86:45	strings.Replacer.build	slice-literal-backing	heap -> frame	
+stdlib/src/strings/strings.go:1093:28	strings.TrimSpace	string-conversion-buffer	frame -> heap	argument 0 of $runtime.stringtoslicebyte escapes
+stdlib/src/syscall/exec_linux.go:264:17	syscall.forkAndExecInChild1	string-conversion-buffer	frame -> heap	argument 0 of $runtime.stringtoslicebyte escapes
+stdlib/src/syscall/exec_linux.go:269:23	syscall.forkAndExecInChild1	string-conversion-buffer	frame -> heap	argument 0 of $runtime.stringtoslicebyte escapes
+stdlib/src/syscall/exec_linux.go:270:17	syscall.forkAndExecInChild1	string-conversion-buffer	frame -> heap	argument 0 of $runtime.stringtoslicebyte escapes
+stdlib/src/syscall/exec_linux.go:273:23	syscall.forkAndExecInChild1	string-conversion-buffer	frame -> heap	argument 0 of $runtime.stringtoslicebyte escapes
+stdlib/src/syscall/exec_linux.go:275:23	syscall.forkAndExecInChild1	string-conversion-buffer	frame -> heap	argument 0 of $runtime.stringtoslicebyte escapes
+stdlib/src/syscall/exec_linux.go:721:17	syscall.writeSetgroups	string-conversion-buffer	frame -> heap	argument 0 of $runtime.stringtoslicebyte escapes
+stdlib/src/syscall/exec_linux.go:723:17	syscall.writeSetgroups	string-conversion-buffer	frame -> heap	argument 0 of $runtime.stringtoslicebyte escapes
+stdlib/src/syscall/netlink_linux.go:66:8	syscall.NetlinkRIB	composite-literal	frame -> heap	store into non-local storage
+stdlib/src/testing/fstest/testfs.go:611:9	testing/fstest.fsTester.checkBadPath	slice-literal-backing	heap -> frame	
+stdlib/src/text/template/exec.go:216:11	text/template.Template.execute	composite-literal	frame -> heap	call to $text/template.state.errorf with scalarised aggregate arguments
+stdlib/src/text/template/exec.go:219:9	text/template.Template.execute	slice-literal-backing	frame -> heap	store into non-local storage
+stdlib/src/time/format_rfc3339.go:89:28	time.parseRFC3339[string].func.88.15	string-conversion-buffer	frame -> heap	argument 0 of $runtime.stringtoslicebyte escapes
+stdlib/src/time/zoneinfo_read.go:546:52	time.loadLocation	string-conversion-buffer	frame -> heap	argument 0 of $runtime.stringtoslicebyte escapes
+testdata/append_make.go:17:24	main.main	make-slice-backing	frame -> heap	call to $main.growBytes with scalarised aggregate arguments
+testdata/bytealg_compare.go:12:32	main.checkBytes	string-conversion-buffer	frame -> heap	argument 0 of $runtime.stringtoslicebyte escapes
+testdata/bytealg_compare.go:12:46	main.checkBytes	string-conversion-buffer	frame -> heap	argument 0 of $runtime.stringtoslicebyte escapes
+testdata/bytealg_compare.go:26:35	main.checkIndex	string-conversion-buffer	frame -> heap	argument 0 of $runtime.stringtoslicebyte escapes
+testdata/bytealg_compare.go:26:53	main.checkIndex	string-conversion-buffer	frame -> heap	argument 0 of $runtime.stringtoslicebyte escapes
+testdata/bytealg_compare.go:54:39	main.checkIndexByte	string-conversion-buffer	frame -> heap	argument 0 of $runtime.stringtoslicebyte escapes
+testdata/bytealg_compare.go:65:35	main.checkCount	string-conversion-buffer	frame -> heap	argument 0 of $runtime.stringtoslicebyte escapes
+testdata/bytes_grow_allocs.go:10:7	main.main	slice-literal-backing	frame -> heap	call to $bytes.Repeat with scalarised aggregate arguments
+testdata/bytes_grow_allocs.go:11:28	main.main	make-slice-backing	frame -> heap	call to $bytes.Buffer.Read with scalarised aggregate arguments
+testdata/bytes_grow_allocs.go:12:16	main.main	slice-literal-backing	heap -> frame	
+testdata/bytes_grow_allocs.go:13:15	main.main	slice-literal-backing	heap -> frame	
+testdata/bytes_grow_allocs.go:9:7	main.main	slice-literal-backing	frame -> heap	call to $bytes.Repeat with scalarised aggregate arguments
+testdata/bytes_grow_capacity.go:7:27	main.main	slice-literal-backing	frame -> heap	call to $bytes.Repeat with scalarised aggregate arguments
+testdata/bytes_grow_compare.go:34:25	main.runCase	slice-literal-backing	frame -> heap	call to $bytes.Repeat with scalarised aggregate arguments
+testdata/bytes_grow_compare.go:36:28	main.runCase	make-slice-backing	frame -> heap	call to $bytes.Buffer.Read with scalarised aggregate arguments
+testdata/bytes_grow_compare.go:38:25	main.runCase	slice-literal-backing	frame -> heap	call to $bytes.Repeat with scalarised aggregate arguments
+testdata/bytes_grow_stats.go:10:27	main.main	slice-literal-backing	frame -> heap	call to $bytes.Repeat with scalarised aggregate arguments
+testdata/bytes_grow_stats.go:9:41	main.main	slice-literal-backing	frame -> heap	call to $bytes.Repeat with scalarised aggregate arguments
+testdata/bytes_replace_allocs.go:15:24	main.main	string-conversion-buffer	frame -> heap	argument 0 of $runtime.stringtoslicebyte escapes
+testdata/md5_assembly.go:6:27	main.main	string-conversion-buffer	frame -> heap	argument 0 of $runtime.stringtoslicebyte escapes
+testdata/runtime_append_self_overlap.go:4:12	main.main	slice-literal-backing	heap -> frame	
+testdata/runtime_append_variadic_pointer_gc.go:19:48	main.main	make-slice-backing	frame -> heap	argument 1 of $runtime.typedslicecopy escapes
+testdata/runtime_closure_captured_string.go:285:14	main.controls	slice-literal-backing	frame -> heap	store into non-local storage
+testdata/runtime_copy_interface_slice_gc.go:11:32	main.main	make-slice-backing	frame -> heap	argument 3 of $runtime.typedslicecopy escapes
+testdata/runtime_core_types.go:24:12	main.main	slice-literal-backing	frame -> heap	write barrier into non-local storage
+testdata/runtime_core_types.go:28:12	main.main	slice-literal-backing	frame -> heap	write barrier into non-local storage
+testdata/runtime_defer_closure_stack_gc.go:11:11	main.recurse	composite-literal	frame -> heap	store into non-local storage
+testdata/runtime_defer_method_value_order.go:13:12	main.main	method-value-descriptor	frame -> heap	store into non-local storage
+testdata/runtime_keepalive_stack_root.go:59:10	main.keepStackItem	composite-literal	frame -> heap	store into non-local storage
+testdata/runtime_loopvar_value_shapes.go:33:17	main.main	slice-literal-backing	heap -> frame	
+testdata/runtime_loopvar_value_shapes.go:73:34	main.main	slice-literal-backing	frame -> heap	store into non-local storage
+testdata/runtime_loopvar_value_shapes.go:73:39	main.main	slice-literal-backing	frame -> heap	store into non-local storage
+testdata/runtime_many_goroutines_gc.go:16:10	main.worker	composite-literal	frame -> heap	store into non-local storage
+testdata/runtime_map_struct_value_replace.go:12:12	main.main	slice-literal-backing	frame -> heap	write barrier into non-local storage
+testdata/runtime_panic_recover_identity.go:8:9	main.main	composite-literal	heap -> frame	
+testdata/runtime_range_target_forms.go:149:20	main.sliceTargets	slice-literal-backing	frame -> heap	store into non-local storage
+testdata/runtime_range_target_forms.go:149:25	main.sliceTargets	slice-literal-backing	frame -> heap	store into non-local storage
+testdata/runtime_range_target_forms.go:149:33	main.sliceTargets	slice-literal-backing	frame -> heap	store into non-local storage
+testdata/runtime_range_target_forms.go:384:29	main.iteratorTargets	make-slice-backing	frame -> heap	store into non-local storage
+testdata/runtime_range_target_forms.go:46:13	main.sliceTargets	slice-literal-backing	heap -> frame	
+testdata/runtime_range_target_order.go:160:13	main.targetAliasingTheRangeExpression	slice-literal-backing	heap -> frame	
+testdata/runtime_reflect_call_aggregate_probe.go:36:10	main.main	slice-literal-backing	frame -> heap	write barrier into non-local storage
+testdata/runtime_reflect_select.go:10:11	main.main	slice-literal-backing	frame -> heap	call to $reflect.Select with scalarised aggregate arguments
+testdata/runtime_reflect_value_instruction_op.go:53:10	main.main	slice-literal-backing	frame -> heap	store into non-local storage
+testdata/runtime_slice_copy_overlap.go:4:12	main.main	slice-literal-backing	heap -> frame	
+testdata/runtime_stack_argument_roots.go:125:11	main.main	slice-literal-backing	frame -> heap	call to $main.stacked, whose argument list does not match its parameters
+testdata/runtime_stack_scan_syscall.go:129:48	main.main	string-conversion-buffer	frame -> heap	argument 0 of $runtime.stringtoslicebyte escapes
+testdata/runtime_string_byte_round_trip.go:5:18	main.main	string-conversion-buffer	frame -> heap	argument 0 of $runtime.stringtoslicebyte escapes
+testdata/runtime_type_param_method_shapes.go:229:18	main.main	composite-literal	heap -> frame	
+testdata/runtime_type_param_method_shapes.go:232:18	main.main	composite-literal	heap -> frame	
+testdata/runtime_type_param_method_shapes.go:236:15	main.main	composite-literal	heap -> frame	
+testdata/runtime_type_param_method_shapes.go:239:15	main.main	composite-literal	heap -> frame	
+testdata/runtime_unsafe_struct_field.go:12:10	main.main	composite-literal	frame -> heap	used by add
+testdata/sha1_assembly.go:6:28	main.main	string-conversion-buffer	frame -> heap	argument 0 of $runtime.stringtoslicebyte escapes
+testdata/stdlib_bytes_buffer.go:9:22	main.main	string-conversion-buffer	frame -> heap	argument 0 of $runtime.stringtoslicebyte escapes
+testdata/stdlib_container_heap.go:31:12	main.main	slice-literal-backing	frame -> heap	store into non-local storage
+testdata/stdlib_container_heap.go:31:27	main.main	composite-literal-descriptor	frame -> heap	store into non-local storage
+testdata/stdlib_crypto_des_rc4.go:38:41	main.main	string-conversion-buffer	frame -> heap	argument 0 of $runtime.stringtoslicebyte escapes
+testdata/stdlib_crypto_hkdf.go:19:35	main.main	slice-literal-backing	frame -> heap	call to $bytes.Repeat with scalarised aggregate arguments
+testdata/stdlib_crypto_x509_ed25519.go:49:20	main.main	string-conversion-buffer	frame -> heap	argument 0 of $runtime.stringtoslicebyte escapes
+testdata/stdlib_encoding_base64.go:20:46	main.main	slice-literal-backing	frame -> heap	call to $encoding/base64.Encoding.EncodeToString with scalarised aggregate arguments
+testdata/stdlib_encoding_pem.go:11:17	main.main	string-conversion-buffer	frame -> heap	argument 0 of $runtime.stringtoslicebyte escapes
+testdata/stdlib_encoding_pem.go:6:11	main.main	composite-literal	frame -> heap	argument 0 of $encoding/pem.EncodeToMemory escapes
+testdata/stdlib_http_cookiejar.go:16:27	main.main	slice-literal-backing	frame -> heap	call to $net/http/cookiejar.Jar.SetCookies with scalarised aggregate arguments
+testdata/stdlib_http_parse_roundtrip.go:48:14	main.main	composite-literal	frame -> heap	call to $net/http.Response.Write, whose argument list does not match its parameters
+testdata/stdlib_image_gif_animation.go:26:15	main.main	composite-literal	frame -> heap	call to $image/gif.EncodeAll, whose argument list does not match its parameters
+testdata/stdlib_image_gif_animation.go:27:14	main.main	slice-literal-backing	frame -> heap	store into non-local storage
+testdata/stdlib_image_gif_animation.go:28:14	main.main	slice-literal-backing	frame -> heap	store into non-local storage
+testdata/stdlib_image_gif_animation.go:30:14	main.main	slice-literal-backing	frame -> heap	store into non-local storage
+testdata/stdlib_io_readall_limited_reader.go:9:12	main.main	composite-literal	frame -> heap	store into non-local storage
+testdata/stdlib_maps_slices.go:27:27	main.main	slice-literal-backing	frame -> heap	call to $slices.Equal[[]int,int] with scalarised aggregate arguments
+testdata/stdlib_maps_slices.go:39:28	main.main	slice-literal-backing	frame -> heap	call to $slices.Equal[[]int,int] with scalarised aggregate arguments
+testdata/stdlib_netpoll_stress_udp_burst.go:20:14	main.main	slice-literal-backing	frame -> heap	call to $net.UDPConn.WriteToUDP with scalarised aggregate arguments
+testdata/stdlib_netpoll_stress_udp_burst.go:27:25	main.main	make-slice-backing	frame -> heap	call to $net.UDPConn.ReadFromUDP with scalarised aggregate arguments
+testdata/stdlib_netpoll_syscall_socket_listen.go:19:13	main.main	composite-literal	frame -> heap	store into non-local storage
+testdata/stdlib_netpoll_udp_deadline.go:22:25	main.main	make-slice-backing	frame -> heap	call to $net.UDPConn.ReadFromUDP with scalarised aggregate arguments
+testdata/stdlib_netpoll_udp_loopback.go:16:20	main.main	string-conversion-buffer	frame -> heap	argument 0 of $runtime.stringtoslicebyte escapes
+testdata/stdlib_rand_shuffle_permutation.go:13:27	main.main	slice-literal-backing	frame -> heap	call to $slices.Equal[[]int,int] with scalarised aggregate arguments
+testdata/stdlib_slices_string_sort.go:8:25	main.main	slice-literal-backing	frame -> heap	call to $slices.Equal[[]string,string] with scalarised aggregate arguments
+testdata/stdlib_slog_structured.go:24:13	main.main	composite-literal	frame -> heap	call to $log/slog.NewJSONHandler, whose argument list does not match its parameters
+testdata/stdlib_sort_find_edges.go:6:12	main.main	slice-literal-backing	frame -> heap	store into non-local storage
+testdata/stdlib_testing_quick.go:39:19	main.main	composite-literal	frame -> heap	call to $testing/quick.Check, whose argument list does not match its parameters

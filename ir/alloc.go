@@ -44,3 +44,30 @@ type AllocDecision struct {
 	// Placement is where it landed.
 	Placement AllocPlacement
 }
+
+// PlacedAlloc records one allocation the *front end* placed itself, without
+// routing it through the neutral OHeapAlloc candidate form -- the sites where a
+// source-level escape analysis decided, and where the IR pass therefore never
+// gets a say.
+//
+// It is diagnostic only, and for exactly one purpose: comparing the two
+// analyses. An allocation the front end committed to a frame is an ordinary
+// OAlloc that nothing distinguishes from a local variable's slot, and one it
+// committed to the heap is an allocator call that nothing distinguishes from a
+// candidate the IR pass lowered. Without a record made at the moment of the
+// decision, neither can be found again, and "would the IR pass have agreed" is
+// a question with no way to ask it. See opt.ShadowPlacement.
+//
+// Nothing in the compiler reads these records and a module with none compiles
+// to the same code.
+type PlacedAlloc struct {
+	// Site names the front-end decision site, so a disagreement can be
+	// attributed to the predicate that made it.
+	Site string
+	// Placement is where the front end put the object.
+	Placement AllocPlacement
+	// Type is the type-descriptor symbol, when the site had one.
+	Type string
+	// Pos is the source position of the decision.
+	Pos SrcPos
+}

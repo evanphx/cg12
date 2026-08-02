@@ -342,6 +342,7 @@ func compile(name string, src []byte, options compileOptions) (*ir.Module, error
 		reachableGlobals:        reachableGlobals,
 	}
 	g.mod.File(name)
+	registerNoEscapeDirectives(g)
 	for _, d := range file.Decls {
 		if gd, ok := d.(*ast.GenDecl); ok && gd.Tok == token.VAR {
 			g.globalDecl(gd)
@@ -1383,6 +1384,33 @@ func registerSymAttrs(mod *ir.Module) {
 		"runtime.deferprocat", "runtime.deferreturn",
 	} {
 		mod.SymAttrs[sym] |= ir.SymFrameScoped
+	}
+}
+
+// registerNoEscapeDirectives carries //go:noescape onto the IR symbols it was
+// written on.
+//
+// It is the one escape fact about a bodiless function that exists at all. The
+// AST walk reads the directive off the declaration (parameterDoesNotEscape,
+// receiverDoesNotEscape); an ir.Func with no body has no declaration and no
+// code, so without this an IR-level summary would have to assume the worst
+// about every one of the 619 functions in stdlib/src that carry it.
+//
+// The attribute is analysis input only: nothing in the compiler's output
+// depends on it, ir.Module.SymAttrs is not serialised, and the two attributes
+// that are read (SymAtomicPointerStore, SymFrameScoped) are tested by bit.
+func registerNoEscapeDirectives(g *gen) {
+	if g.mod.SymAttrs == nil {
+		g.mod.SymAttrs = map[string]ir.SymAttr{}
+	}
+	for function, declaration := range g.functionDecls {
+		if declaration.decl == nil || declaration.decl.Body != nil {
+			continue
+		}
+		if !hasCompilerDirective(declaration.decl, "go:noescape") {
+			continue
+		}
+		g.mod.SymAttrs[g.functionSymbol(function)] |= ir.SymNoEscape
 	}
 }
 
@@ -10802,6 +10830,9 @@ func (g *gen) expr(e ast.Expr) (result ir.Ref) {
 					storage := g.localAllocTyped(literalType)
 					if heap {
 						storage = g.allocateEscapingTyped(literalType)
+						g.recordPlacement(storage, "composite-literal-descriptor", ir.AllocOnHeap)
+					} else {
+						g.recordPlacement(storage, "composite-literal-descriptor", ir.AllocInFrame)
 					}
 					if isSliceType(literalType) {
 						g.storeInlineValue(value, storage, literalType)
@@ -11615,6 +11646,9 @@ func (g *gen) methodValue(expression *ast.SelectorExpr, selection *types.Selecti
 	descriptor := g.localAllocTyped(descriptorType)
 	if !g.valueDoesNotEscape(expression) {
 		descriptor = g.allocateEscapingTyped(descriptorType)
+		g.recordPlacement(descriptor, "method-value-descriptor", ir.AllocOnHeap)
+	} else {
+		g.recordPlacement(descriptor, "method-value-descriptor", ir.AllocInFrame)
 	}
 	g.cur.Store(g.fn.Sym(wrapperName, 0), g.offset(descriptor, descriptorOffsets[0]))
 	receiverValue := g.methodReceiver(expression, selection, method)
@@ -11649,7 +11683,10 @@ func (g *gen) compositeLiteral(literal *ast.CompositeLit, heap bool) ir.Ref {
 		var backing ir.Ref
 		if heap {
 			backing = g.allocateEscapingTyped(pointer.Elem())
+			g.recordPlacement(backing, "composite-literal", ir.AllocOnHeap)
 		} else {
+			// The neutral candidate form: opt.LowerHeapAllocations decides this
+			// one, so there is no front-end placement to record.
 			backing = g.allocateTyped(pointer.Elem())
 		}
 		g.zero(backing, pointer.Elem())
@@ -11707,6 +11744,9 @@ func (g *gen) compositeLiteral(literal *ast.CompositeLit, heap bool) ir.Ref {
 		})
 		if heap || !g.valueDoesNotEscape(literal) {
 			backing = g.allocateEscapingTyped(backingType)
+			g.recordPlacement(backing, "slice-literal-backing", ir.AllocOnHeap)
+		} else {
+			g.recordPlacement(backing, "slice-literal-backing", ir.AllocInFrame)
 		}
 		g.zero(backing, types.NewArray(elementType, length))
 		for i, expression := range literal.Elts {
@@ -11742,6 +11782,9 @@ func (g *gen) compositeLiteral(literal *ast.CompositeLit, heap bool) ir.Ref {
 	})
 	if heap {
 		backing = g.allocateEscapingTyped(t)
+		g.recordPlacement(backing, "composite-literal", ir.AllocOnHeap)
+	} else {
+		g.recordPlacement(backing, "composite-literal", ir.AllocInFrame)
 	}
 	memset := g.fn.Sym("goc_memset", 0)
 	g.cur.Call(ir.ClsP, memset, backing, g.fn.Word(0), g.fn.Long(size))
@@ -12724,6 +12767,7 @@ func (g *gen) stringSlice(expression ast.Expr, targetType types.Type) ir.Ref {
 					bufferSize *= typeSize(types.Typ[types.Int32])
 				}
 				buffer = g.localAlloc(8, int(bufferSize))
+				g.recordPlacement(buffer, "string-conversion-buffer", ir.AllocInFrame)
 			}
 		}
 		signature := conversionSignature([]types.Type{bufferType, types.Typ[types.String]}, resultType)
@@ -12988,9 +13032,33 @@ func (g *gen) allocateEscapingTyped(valueType types.Type) ir.Ref {
 			g.fn.Sym("runtime.newobject", 0),
 			g.runtimeType(valueType),
 		)
+		g.recordPlacement(allocation, "escaping-typed", ir.AllocOnHeap)
 		return g.fn.MarkGCRef(allocation)
 	}
-	return g.cur.Call(ir.ClsP, g.fn.Sym("calloc", 0), g.fn.Long(1), g.fn.Long(typeSize(valueType)))
+	allocation := g.cur.Call(ir.ClsP, g.fn.Sym("calloc", 0), g.fn.Long(1), g.fn.Long(typeSize(valueType)))
+	g.recordPlacement(allocation, "escaping-typed", ir.AllocOnHeap)
+	return allocation
+}
+
+// recordPlacement notes that the front end placed one allocation itself rather
+// than emitting the neutral OHeapAlloc candidate form and letting
+// opt.LowerHeapAllocations decide.
+//
+// These are the allocations the IR pass never gets a say in, and they are the
+// ones the escape rearchitecture has to move. Recording them is what makes the
+// question "would the IR pass have agreed" askable at all: a committed frame
+// placement is an OAlloc indistinguishable from a local variable's slot, and a
+// committed heap placement is an allocator call indistinguishable from a
+// lowered candidate. The record is diagnostic only -- see ir.PlacedAlloc -- and
+// nothing in the compiler reads it.
+func (g *gen) recordPlacement(storage ir.Ref, site string, placement ir.AllocPlacement) {
+	if storage.Kind != ir.RefTemp || g.fn == nil {
+		return
+	}
+	if g.fn.PlacedAllocs == nil {
+		g.fn.PlacedAllocs = make(map[uint32]ir.PlacedAlloc)
+	}
+	g.fn.PlacedAllocs[storage.ID] = ir.PlacedAlloc{Site: site, Placement: placement}
 }
 
 func (g *gen) allocateZeroed(size ir.Ref) ir.Ref {
@@ -13059,6 +13127,7 @@ func (g *gen) builtinCall(call *ast.CallExpr, builtin *types.Builtin) ir.Ref {
 					alignment = 4
 				}
 				data = g.localAlloc(alignment, int(fixedCapacity*elementSize))
+				g.recordPlacement(data, "make-slice-backing", ir.AllocInFrame)
 				backingType := types.NewArray(sliceType.Elem(), fixedCapacity)
 				visitPointerWords(backingType, 0, func(offset int64) {
 					g.markStackPointerWord(data, int(offset))

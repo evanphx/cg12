@@ -31,6 +31,17 @@ type corpusAudit struct {
 	frameEscapes map[string]string
 	// allocations is opt.AllocationCensus's records. See TestAllocationCensus.
 	allocations map[string]string
+	// shadow is opt.ShadowPlacement's disagreements: every allocation goc's AST
+	// walk and the summary-fed IR analysis place differently. See
+	// TestEscapeShadowPlacement.
+	shadow map[string]string
+	// placements is every front-end placement by site identity, which is the
+	// denominator the distinct disagreement count belongs over.
+	placements map[string]string
+	// shadowCounts is the totals those disagreements came out of, summed over
+	// the corpus. A program compiled twice contributes twice, which is what makes
+	// it a total rather than a count of distinct sites.
+	shadowCounts opt.ShadowCounts
 	// failures is every program that did not compile; either audit is
 	// meaningless if this is not empty.
 	failures []string
@@ -82,6 +93,8 @@ func compileCorpusForAudits(programs []string) *corpusAudit {
 		programs:     len(programs),
 		frameEscapes: make(map[string]string),
 		allocations:  make(map[string]string),
+		shadow:       make(map[string]string),
+		placements:   make(map[string]string),
 	}
 
 	var mutex sync.Mutex
@@ -114,6 +127,11 @@ func compileCorpusForAudits(programs []string) *corpusAudit {
 				}
 				escapes := opt.FrameEscapes(module)
 				census := opt.AllocationCensus(module)
+				// Shadow mode reads the finished module and changes nothing in
+				// it: the compile above ran with the knob off, so what is being
+				// compared is the code the compiler actually emitted against
+				// what the summary-fed IR analysis would have chosen.
+				disagreements, counts := opt.ShadowPlacement(module, opt.ComputeEscapeFacts(module))
 				name := filepath.Base(program)
 				mutex.Lock()
 				for _, escape := range escapes {
@@ -122,6 +140,18 @@ func compileCorpusForAudits(programs []string) *corpusAudit {
 				for _, allocation := range census {
 					note(audit.allocations, normalizeCorpusKey(allocation.Key()), name)
 				}
+				for _, disagreement := range disagreements {
+					note(audit.shadow, normalizeCorpusKey(disagreement.Key()), name)
+				}
+				for _, site := range opt.FrontEndPlacementSites(module) {
+					note(audit.placements, normalizeCorpusKey(site), name)
+				}
+				audit.shadowCounts.Placements += counts.Placements
+				audit.shadowCounts.FrontFrame += counts.FrontFrame
+				audit.shadowCounts.FrontHeap += counts.FrontHeap
+				audit.shadowCounts.Agree += counts.Agree
+				audit.shadowCounts.FrameToIRHeap += counts.FrameToIRHeap
+				audit.shadowCounts.HeapToIRFrame += counts.HeapToIRFrame
 				mutex.Unlock()
 			}
 		}()
