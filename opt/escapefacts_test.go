@@ -353,3 +353,66 @@ func TestEscapeFactsDataSymbolIsNotAClosure(t *testing.T) {
 
 	assert.Equal(t, ParamNoEscape, facts.Param("f", 0).Escape)
 }
+
+// A pointer handed to a callee inside an aggregate the caller owns is retained
+// by that callee, and the summary has to say so.
+//
+// This is CCWORK_REPORT.md section 2.2's reduction as IR, and it is the shape
+// goc's calling convention produces for any struct wider than a couple of
+// words: the argument is the address of a frame slot, and what the callee keeps
+// is a pointer it loads out of that slot. publish's own summary is correct and
+// nearly useless -- it does not retain the address it was handed -- and reading
+// that as "publish retains nothing" is what let a package-level variable end up
+// holding a dead frame's address three calls away.
+func TestEscapeFactsPointerPassedInsideAFrameAggregateEscapes(t *testing.T) {
+	module := ir.NewModule()
+
+	publish := module.NewFuncVoid("publish")
+	request := publish.Param("r", ir.ClsP)
+	publishing := publish.Entry()
+	publishing.Store(publishing.Load(ir.ClsP, request), publish.Sym("sink", 0))
+	publishing.RetVoid()
+
+	hold := module.NewFuncVoid("hold")
+	pointer := hold.Param("x", ir.ClsP)
+	holding := hold.Entry()
+	aggregate := holding.Alloc(8, 8)
+	holding.Store(pointer, aggregate)
+	holding.CallVoid(hold.Sym("publish", 0), aggregate)
+	holding.RetVoid()
+
+	facts := ComputeEscapeFacts(module)
+
+	assert.Equal(t, ParamNoEscape, facts.Param("publish", 0).Escape,
+		"publish keeps the pointer it loads out of r, not r itself, which is what a depth of one means")
+	assert.Equal(t, ParamEscapes, facts.Param("hold", 0).Escape,
+		"x is written into an aggregate publish loads through, so publish retains x past the call")
+}
+
+// The precision control for the previous test. Forwarding an ordinary pointer
+// parameter to a callee that does not retain it must still summarise as
+// noescape: publishing the argument's pointee at depth one is a statement about
+// what the pointer points at, and a parameter reached at depth one is exactly
+// the answer ParamNoEscape stands for.
+//
+// Without this, the fix to the semantics would collapse the whole table to
+// "everything escapes" and the summaries would be worth nothing.
+func TestEscapeFactsForwardedPointerStillDoesNotEscape(t *testing.T) {
+	module := ir.NewModule()
+
+	inner := module.NewFunc("inner", ir.ClsL)
+	innerParameter := inner.Param("p", ir.ClsP)
+	innerEntry := inner.Entry()
+	innerEntry.Ret(innerEntry.Load(ir.ClsL, innerParameter))
+
+	outer := module.NewFunc("outer", ir.ClsL)
+	outerParameter := outer.Param("p", ir.ClsP)
+	outerEntry := outer.Entry()
+	outerEntry.Ret(outerEntry.Call(ir.ClsL, outer.Sym("inner", 0), outerParameter))
+
+	facts := ComputeEscapeFacts(module)
+
+	assert.Equal(t, ParamNoEscape, facts.Param("inner", 0).Escape)
+	assert.Equal(t, ParamNoEscape, facts.Param("outer", 0).Escape,
+		"forwarding a pointer to a callee that only reads through it retains nothing")
+}

@@ -337,9 +337,30 @@ func (graph *escapeGraph) call(instruction ir.Instr) {
 			graph.flow(escapeHeapLoc, argument, 0)
 			continue
 		}
+		// Whatever the summary says, it is a claim about the pointer value and
+		// about nothing else: summary() reads a parameter as ParamNoEscape
+		// exactly when the heap reaches it at a dereference count of one or
+		// more, which is to say "the callee keeps something reachable through
+		// this, but not this". Consuming that as "the callee keeps nothing"
+		// loses the difference, and the difference is the whole point of
+		// carrying a depth (see this file's doc comment).
+		//
+		// It goes wrong wherever the argument is the address of storage this
+		// frame owns -- goc's calling convention for any aggregate wider than a
+		// couple of words, and every &x -- because then "reachable through the
+		// argument" is the frame slot's contents. Publishing the pointee at
+		// depth 1 states the summary's actual claim: I believe you do not keep
+		// the pointer, I do not believe you keep nothing it points at.
+		//
+		// It costs no precision on an ordinary pointer argument. A parameter
+		// forwarded to a noescape callee is still reached at depth 1 and still
+		// summarises as ParamNoEscape; a pointer loaded out of a frame slot is
+		// reached at depth 2. Only an address handed over directly is affected,
+		// which is exactly the case that was wrong.
+		graph.flow(escapeHeapLoc, argument, 1)
 		switch fact := graph.facts.Param(callee, index); fact.Escape {
 		case ParamNoEscape:
-			// Nothing to record: the callee cannot make it outlive the call.
+			// Nothing further: the callee cannot retain the pointer itself.
 		case ParamLeaksToResult:
 			if callLeaksToTrackedResult(instruction, target, fact) {
 				graph.flow(graph.tempLoc(instruction.To.ID), argument, 0)

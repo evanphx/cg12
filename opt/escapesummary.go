@@ -115,6 +115,13 @@ func leakedCallResultBase(
 // It is checked before the module lookup because the functions that carry the
 // directive are exactly the ones with no Go body -- assembly, or a runtime
 // intrinsic -- which need not appear as an ir.Func at all.
+//
+// This is read as the strong claim -- nothing reachable through an argument is
+// retained -- where a computed ParamNoEscape is read as the weak one (see
+// escapeGraph.call). The difference is deliberate: a directive is a promise
+// about the whole argument written by whoever wrote the assembly, which is how
+// gc reads it too, whereas a computed summary is a dereference depth this
+// analysis derived and must not be rounded up into a stronger promise.
 func calleeRetainsNothing(function *ir.Func, callee string) bool {
 	if callee == "" {
 		return false

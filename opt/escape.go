@@ -253,9 +253,9 @@ func analyzeCandidateEscapes(function *ir.Func, byName map[string]*ir.Func, fact
 						}
 					}
 				}
-				if instruction.Op.IsStore() {
-					base, tracked := heapBase(instruction.Arg(0), bases)
-					location := aliases.locOf(instruction.Arg(1), 1)
+				if value, address, isPointerStore := trackedPointerStore(function, instruction); isPointerStore {
+					base, tracked := heapBase(value, bases)
+					location := aliases.locOf(address, 1)
 					if !tracked || location.class != cLocal {
 						continue
 					}
@@ -464,6 +464,32 @@ func phiHeapBase(phi *ir.Phi, bases map[uint32]uint32) (uint32, bool, bool) {
 		found = true
 	}
 	return base, found, false
+}
+
+// trackedPointerStore names the value and the destination address of a store
+// the base propagation has to follow.
+//
+// goc writes a pointer into a frame slot two ways: a plain store, and a call to
+// the write barrier, which is what it emits for every pointer field of every
+// pointer-bearing local before escape lowering knows whether the enclosing
+// object is stack-local. Both put a candidate in that slot, and a later load
+// recovers it.
+//
+// Modelling only the first is how a candidate used to lose its identity. The
+// marking switch in analyzeCandidateEscapes already understands the barrier --
+// isAtomicPointerStore is one of its cases -- so the two halves of the same
+// analysis disagreed about what a barrier is: a candidate stored through one
+// got no slotBases entry, the reload got no base, and every use of the reloaded
+// pointer, including a publication into a heap object, was invisible. See
+// TestLowerHeapAllocationsTracksEscapeThroughAWriteBarrieredLocalSlot.
+func trackedPointerStore(function *ir.Func, instruction ir.Instr) (value, address ir.Ref, ok bool) {
+	if instruction.Op.IsStore() {
+		return instruction.Arg(0), instruction.Arg(1), true
+	}
+	if isAtomicPointerStore(function, instruction) {
+		return instruction.Arg(2), instruction.Arg(1), true
+	}
+	return ir.R, ir.R, false
 }
 
 func isAtomicPointerStore(function *ir.Func, instruction ir.Instr) bool {

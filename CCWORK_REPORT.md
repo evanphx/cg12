@@ -520,3 +520,87 @@ On these numbers the justification is **not** promotion count. It is:
 A migration proposal that leads with "3.1% -> 3.7%" is defensible. One that
 leads with "the IR places better than the walk" is not, on this evidence.
 
+
+---
+
+# LANDING (job `escape-summaries-land`, continuing at `41af1be`)
+
+Sections 6 onward. The decision is settled by sections 2-5 and is not
+relitigated here: the AST walk stays the placer, the IR migration is dropped,
+and what lands is the summary table feeding `LowerHeapAllocations`' own
+candidate population. Everything below is measured on this tree.
+
+## 6. Both safety holes are fixed, and both reductions fail on the unfixed tree
+
+### 6.1 Hole one: `ParamNoEscape` now means the same thing on both sides
+
+`opt/escapegraph.go`'s `call` used to consume its own output as a stronger claim
+than it produces. Fixed by taking §2.4's second option -- the consumer states
+the summary's actual claim rather than rounding it up:
+
+```go
+// escapeGraph.call, for every argument of a call with a usable summary
+graph.flow(escapeHeapLoc, argument, 1)   // "I do not believe you keep nothing it points at"
+switch fact := graph.facts.Param(callee, index); fact.Escape {
+case ParamNoEscape:
+        // Nothing further: the callee cannot retain the pointer itself.
+```
+
+Depth 1 is the exact statement of what `summary()` produces: a parameter is
+`ParamNoEscape` when the heap reaches it at a dereference count of **one or
+more**, so the pointee is published and the pointer is not. `ParamEscapes`
+already flows at depth 0, which subsumes it.
+
+**Why it costs almost nothing.** The extra edge only bites where the argument is
+one dereference *below* storage the caller owns -- an `OAlloc` slot address,
+which is goc's convention for any aggregate wider than a couple of words, and
+every `&x`. An ordinary pointer parameter forwarded to a callee is still reached
+at depth 1 and still summarises `ParamNoEscape`; a pointer loaded out of a frame
+slot is reached at depth 2. `TestEscapeFactsForwardedPointerStillDoesNotEscape`
+is the control that says so, and it is what distinguishes this fix from
+collapsing the table to "everything escapes".
+
+`//go:noescape` is deliberately *not* changed: `calleeRetainsNothing` keeps the
+strong reading, because a directive is a promise about the whole argument
+written by whoever wrote the assembly -- which is how gc reads it -- whereas a
+computed summary is a depth this analysis derived. The existing
+`TestEscapeFactsDataSymbolIsNotAClosure` encodes that reading and still passes.
+
+### 6.2 Hole two: the base propagation now knows what a write barrier is
+
+`opt/escape.go`'s propagation recognised two ways a candidate enters a frame
+slot, `Op.IsStore()` and `memoryCopyOperands`, and a write barrier is an `OCall`
+so it was neither -- while the *marking* switch in the same function has
+understood the barrier all along. New `trackedPointerStore` gives both halves one
+answer:
+
+```go
+func trackedPointerStore(function *ir.Func, instruction ir.Instr) (value, address ir.Ref, ok bool) {
+	if instruction.Op.IsStore() {
+		return instruction.Arg(0), instruction.Arg(1), true
+	}
+	if isAtomicPointerStore(function, instruction) {
+		return instruction.Arg(2), instruction.Arg(1), true   // dst is Arg(1), value Arg(2)
+	}
+	return ir.R, ir.R, false
+}
+```
+
+This one is **not summary-dependent**: it runs with `facts == nil`, so it is a
+fix to the pass `main` ships today, not only to the new path.
+
+### 6.3 The reductions, as tests that fail on the unfixed analysis
+
+Four new tests, stated as IR because that is what the analysis reads:
+
+| test | file | on the unfixed tree |
+|---|---|---|
+| `TestEscapeFactsPointerPassedInsideAFrameAggregateEscapes` | `opt/escapefacts_test.go` | **FAILS**: `hold`'s parameter is `noescape` (`0x2`), must be `escapes` (`0x0`) |
+| `TestEscapeFactsForwardedPointerStillDoesNotEscape` | `opt/escapefacts_test.go` | passes -- it is the precision control |
+| `TestLowerHeapAllocationsTracksEscapeThroughAWriteBarrieredLocalSlot` | `opt/escape_test.go` | **FAILS**: the object is promoted (`OAlloc8`, `0x22`), must stay an allocator call (`OCall`, `0x37`) |
+| `TestLowerHeapAllocationsAllowsAWriteBarrieredLocalSlot` | `opt/escape_test.go` | passes -- the control that the newly-followed slot did not become a slot the analysis gives up on |
+
+Verified by reverting `opt/escape.go`, `opt/escapegraph.go` and
+`opt/escapesummary.go` to `41af1be` with the tests in place: exactly the two
+regression tests fail, exactly the two controls pass. `go test ./opt` is green
+with the fixes in.

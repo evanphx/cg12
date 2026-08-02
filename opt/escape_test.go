@@ -307,3 +307,60 @@ func TestLowerHeapAllocationsAllowsGrowSliceToObserveCandidate(t *testing.T) {
 	require.True(t, LowerHeapAllocations(module))
 	assert.Equal(t, ir.OAlloc8, block.Instrs[0].Op)
 }
+
+// A candidate stored into a frame slot through the write barrier, reloaded, and
+// published into a heap object must not be promoted.
+//
+// This is CCWORK_REPORT.md section 3.5's second hole. goc emits a write barrier
+// -- not a plain store -- for every pointer field of every pointer-bearing
+// local, so this is the ordinary shape of putting an object in a local variable,
+// not an exotic one. The marking switch below understood the barrier and the
+// base propagation did not, so the reload recovered no base, the publication
+// marked nothing, and the object was promoted into a frame whose address a live
+// heap object then held.
+//
+// It is the barrier that makes this test different from
+// TestLowerHeapAllocationsKeepsPointerLoadedFromLocalSlotWhenStoredIntoCandidate,
+// which stores the same pointer into the same slot with an ordinary store.
+func TestLowerHeapAllocationsTracksEscapeThroughAWriteBarrieredLocalSlot(t *testing.T) {
+	module := ir.NewModule()
+	module.SymAttrs = map[string]ir.SymAttr{"goc_storep": ir.SymAtomicPointerStore}
+	function := module.NewFunc("captureThroughBarrier", ir.ClsP)
+	block := function.Entry()
+
+	objectType := function.Sym("type.object", 0)
+	object := block.HeapAlloc(function.Sym("runtime.newobject", 0), objectType, 8, 8)
+	objectSlot := block.Alloc(8, 8)
+	block.CallVoid(function.Sym("goc_storep", 0), objectSlot, object)
+
+	descriptorType := function.Sym("type.descriptor", 0)
+	descriptor := block.HeapAlloc(function.Sym("runtime.newobject", 0), descriptorType, 16, 8)
+	receiverField := block.Add(ir.ClsP, descriptor, function.Long(8))
+	loadedObject := block.Load(ir.ClsP, objectSlot)
+	block.CallVoid(function.Sym("goc_storep", 0), receiverField, loadedObject)
+	block.Ret(descriptor)
+
+	require.True(t, LowerHeapAllocations(module))
+	assert.Equal(t, ir.OCall, block.Instrs[0].Op,
+		"the object is reachable from the returned descriptor and cannot live in this frame")
+	assert.Equal(t, ir.OCall, block.Instrs[3].Op)
+}
+
+// The control: the same barrier into the same slot, with nothing publishing the
+// reload, still promotes. A slot the analysis now follows must not become a slot
+// the analysis gives up on.
+func TestLowerHeapAllocationsAllowsAWriteBarrieredLocalSlot(t *testing.T) {
+	module := ir.NewModule()
+	module.SymAttrs = map[string]ir.SymAttr{"goc_storep": ir.SymAtomicPointerStore}
+	function := module.NewFunc("holdThroughBarrier", ir.ClsL)
+	block := function.Entry()
+
+	object := block.HeapAlloc(function.Sym("runtime.newobject", 0), function.Sym("type.object", 0), 8, 8)
+	objectSlot := block.Alloc(8, 8)
+	block.CallVoid(function.Sym("goc_storep", 0), objectSlot, object)
+	block.Store(function.Long(42), object)
+	block.Ret(block.Load(ir.ClsL, block.Load(ir.ClsP, objectSlot)))
+
+	require.True(t, LowerHeapAllocations(module))
+	assert.Equal(t, ir.OAlloc8, block.Instrs[0].Op)
+}
