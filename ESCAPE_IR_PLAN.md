@@ -372,6 +372,15 @@ converges to the **greatest** fixed point — which is the correct semantics for
 anywhere in the mutually recursive set publishes this" and is strictly more precise than
 today. A direct publication (`global = p`) demotes on the first round and propagates.
 
+**Be suspicious of this stage in a way the others do not need.** Optimistic initialisation
+is a *permissive* change: if the transfer function turns out not to be monotone in some
+corner — and `objectDoesNotEscape` carries mutable state (`objectEscapeChecks`,
+`enterCalleeBody`) that a purely functional transfer would not — the fixed point can
+settle on "does not escape" for something that does, and that is a silent miscompile in
+exactly the class 2724ac7 and 9f76498 were. It is the one stage in this plan that must not
+land without the shadow diff (stage 5) reading clean in the permissive direction, and
+without an argument for why the state the walk carries does not break monotonicity.
+
 ### 4.3 The representation
 
     // opt/escapefacts.go  (new)
@@ -429,7 +438,7 @@ baseline.
 ## 5. Answer to question 4: loop depth — confirmed absent, and it is a miscompile today
 
 `goc/compile.go`'s walk has no notion of iteration. `*ast.RangeStmt` appears twice, both
-times as a context to climb through (`:2634` returns `parent.X == current`; `:3266`
+times as a context to climb through (`:2638` returns `parent.X == current`; `:3270`
 recurses into the value variable). `*ast.ForStmt` appears in neither switch.
 `opt/escape.go` has no loop concept either.
 
