@@ -9810,7 +9810,28 @@ func (g *gen) stableReturnValue(value ir.Ref, resultType types.Type, registerAgg
 		nilResult.Goto(done)
 
 		g.cur = concreteResult
-		stable := g.allocateTyped(resultType)
+		// registerAggregate is the same claim the inline-aggregate arm below
+		// rests on: an interface result has a two-pointer ir.AggType, so
+		// lowerGoAggregateReturn loads both words out of this pointer into the
+		// result registers inside the returning block, before the epilogue
+		// tears the frame down. The caller never sees the pointer, so the
+		// storage need only outlive the load, and a frame slot does.
+		//
+		// Without it the storage has to outlive the frame, so it is a heap
+		// object -- one runtime.newobject for every non-nil interface a
+		// function returns anywhere in the program. sync.Pool.Get is one, which
+		// is why fmt.Sprintf paid an allocation that has nothing to do with its
+		// arguments.
+		//
+		// opt.FrameEscapes agrees rather than merely tolerating this: its
+		// return rule is skipped outright when RetAgg is non-nil, for exactly
+		// this reason.
+		stable := ir.R
+		if registerAggregate {
+			stable = g.localAllocTyped(resultType)
+		} else {
+			stable = g.allocateTyped(resultType)
+		}
 		g.storeInlineValue(value, stable, resultType)
 		concreteResult = g.cur
 		g.cur.Goto(done)
