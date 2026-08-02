@@ -393,3 +393,130 @@ not establish -- the corpus evidence here is about front-end-placed allocations,
 which the shipping pass never sees. **It needs its own check before the fix in
 section 2.4 is written, because a fix to the summary side would not touch it.**
 
+## 4. THE KNOB IS INERT. Byte-identical, corpus-wide, both `-O` settings.
+
+Two independent proofs, one by reading and one by measuring, plus a control that
+shows the measurement has power.
+
+### 4.1 By reading: nothing off the knob reaches the emitted code
+
+`opt.EscapeSummaries` is read from the environment once, at package
+initialisation (`opt/escape.go:22`), and has exactly **one** consumer
+(`opt/escape.go:68`). With it false, `LowerHeapAllocations` passes `facts == nil`
+to `lowerHeapAllocations`, and then:
+
+- `moduleFuncsByName` returns `nil` without building the index;
+- the new summary arm of `analyzeCandidateEscapes` is guarded
+  `case facts != nil && instruction.Op == ir.OCall && ...` -- **unreachable**,
+  so every call falls into the same assume-the-worst `default` arm it always did;
+- `leakedCallResultBase` is called only under `if !ok && facts != nil`.
+
+Everything else the branch adds to the default path writes diagnostic state that
+nothing in the compiler reads:
+
+| addition | read by |
+|---|---|
+| `ir.Func.PlacedAllocs` (`goc/compile.go` `recordPlacement`, 11 sites) | `opt.ShadowPlacement` and `opt.AllocationCensus` only |
+| `ir.Module.AllocDecisions` (`recordAllocDecision`) | `opt.HeapAllocLoweringStats`, `opt.AllocationCensus` only |
+| `ir.SymNoEscape` (`registerNoEscapeDirectives`) | `opt/escapefacts.go:185,318` and `opt/escapesummary.go:126` -- **both in the summary path only**. `ir.Module.SymAttrs` is not serialised (`goc/compile.go:1400`). |
+| `opt/inline.go` +17 lines | copies `PlacedAllocs` onto the inlined temporaries; touches nothing else |
+
+`grep` for `EscapeSummaries` over the tree returns four hits: the declaration,
+the one consumer, and the test that toggles it around its own corpus run.
+
+### 4.2 By measuring: 770 linked executables, byte for byte
+
+Two `cmd/goc` binaries, one from `main` (`05946f2`) and one from this branch,
+each built from `git archive` unpacked at **the same absolute path**
+(`$TMPDIR/build`) -- necessary because `goc/source_import.go:334` bakes in
+`runtime.Caller(0)`'s path to find `stdlib/`, and a different build directory
+puts different file-name strings in the image and changes 930 485 bytes of an
+otherwise identical binary. With the path held equal:
+
+- every `goc/testdata/*.go` -- **385 programs** -- compiled and **linked to a
+  final executable** by both compilers, with `GOC_ESCAPE_SUMMARIES` unset;
+- once without `-O` and once with;
+- **770 of 770 pairs are sha256-identical. Zero differences, zero compile
+  failures on either side.**
+
+The comparison is the linked executable, not the IR: it includes the data
+section, relocations, pointer-word maps and the typelink flags that
+`ir.Module.String()` omits.
+
+**The control.** The same 770 compiles with `GOC_ESCAPE_SUMMARIES=1` differ from
+`main`'s output in **770 of 770** cases. So the harness is comparing something
+that can move, and the knob is what moves it. (`goc` itself is deterministic:
+two runs of the branch compiler on the same input give the same sha256.)
+
+### 4.3 A third witness, already committed
+
+`goc/testdata/alloc_census_baseline.txt` -- 18 713 lines, one per allocation
+site in the corpus with where it landed -- is **byte-identical between this
+branch and `origin/ccwork/escape-alloc-census`**, a branch that contains no
+summary code at all (`git diff origin/ccwork/escape-alloc-census HEAD --
+goc/testdata/alloc_census_baseline.txt` is empty). With the knob off, not one
+allocation in the corpus moved.
+
+**Verdict: airtight. The branch can sit on `main` unfinished.**
+
+---
+
+## 5. The prize, quantified -- and it is not where the plan expects it
+
+### 5.1 On the candidate population: 3.09% -> 3.72%
+
+`go test ./goc -run TestEscapeSummaryPromotionRate -escape-promotion-rate`,
+the whole corpus compiled twice (302 s):
+
+| | promoted | lowered | rate |
+|---|---:|---:|---:|
+| knob off | 14 433 | 453 319 | **3.09%** |
+| knob on | 17 414 | 450 338 | **3.72%** |
+
+Same 467 752 candidates both runs. **+2 981 objects, +20.7% relative, +0.63
+points absolute.** The table is doing real work -- an intraprocedural pass
+cannot promote a candidate that reaches any call -- but the population it works
+on is small, because it is *only what the front end already declined to place*.
+
+### 5.2 On the population the migration would actually move: the summaries LOSE
+
+The corpus shadow run over the same 385 programs:
+
+```
+front-end placements evaluated: 189094  (frame 157641, heap 31453)
+agree 180626;  front frame -> IR heap 8008;  front heap -> IR frame 460
+distinct front-end placement sites: 5469 (frame 2986, heap 2483)
+distinct disagreement sites: 341
+```
+
+The front end frames **157 641 of 189 094 = 83.4%** of its own placements. Route
+every one of those decision sites through the IR and the summary-fed analysis
+frames `157641 - 8008 + 460 = 150 093 = 79.4%`.
+
+> **The migration as it stands is worth -7 548 frame placements, or -4.0 points,
+> on the population it moves.** Adding §5.1's +2 981 on the candidate side, the
+> whole-program net is **-4 567 objects moved from frame to heap**. Today's
+> arrangement -- AST walk places, IR pass decides the leftovers -- promotes more
+> than an all-IR pass with these summaries would.
+
+And the ceiling is low: fix *every one* of the 267 conservative sites and the IR
+frames 158 101 of 189 094 = 83.6%, **+0.24 points** over the AST walk. The
+placement population is not where the win is.
+
+### 5.3 So what is the hybrid for?
+
+On these numbers the justification is **not** promotion count. It is:
+
+- **compile time** -- §0's measurement, unchanged and still the strongest case:
+  the AST walk is 0.456 s of a 6.47 s compile (7.1%), 0.28 s of it rebuilding
+  parent maps 12 612 times to answer 1 485 distinct questions; the IR fixed
+  point over the same 6 965 functions is 0.134 s and answers each question once;
+- **one analysis instead of two**, with the placement decision expressible in
+  the IR at all (today a committed frame placement is an `OAlloc`
+  indistinguishable from a variable slot, which is why the census had to be
+  invented to ask the question);
+- **+2 981 objects** on the candidates, which is the honest optimisation figure.
+
+A migration proposal that leads with "3.1% -> 3.7%" is defensible. One that
+leads with "the IR places better than the walk" is not, on this evidence.
+
