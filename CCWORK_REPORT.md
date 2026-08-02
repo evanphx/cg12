@@ -222,3 +222,21 @@ blind spot is not.
 
     $ go test ./goc -run TestCompilingTheSameSourceTwiceGivesTheSameModule
     ok  4.657s
+
+## 5. A corpus program for the direction the census cannot otherwise see
+
+`goc/testdata/loop_alias_frame_local.go` is the over-correction ratchet. Three
+allocations in loop bodies, each finished with before its iteration ends:
+
+    framed          var a [2]int; addTo(&a, i); q := &a    (address to a
+                                                            non-retaining callee
+                                                            and back to a local)
+    consumedWithin  x := i * 2; p := &x; total += *p
+    literalWithin   p := &point{x: i, y: i * 2}
+
+Zero `runtime.newobject` in all three, on main and after the fix, checked on
+the emitted IR. Output matches the host toolchain. Because the program is in
+the corpus, a future change that heaps loop-body allocations without asking
+whether anything retains them adds three lines to
+`alloc_census_baseline.txt` -- which is the only way that direction gets
+noticed, since a frame slot that is *correct* is not a census line at all.

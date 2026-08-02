@@ -57,6 +57,13 @@ var loopAliasPrograms = []struct {
 	// loop; it rides along because it is the third reduction the spike built
 	// and the same placement code decides it.
 	{"variadic_backing.go", "1\n"},
+	// The other direction. Three allocations in loop bodies that are finished
+	// with before the iteration ends and so need no more than the one frame
+	// slot they already have. A rule that heaped loop-body allocations without
+	// asking whether anything retains them would move all three and nothing
+	// here would fail -- which is why the program is also in the corpus, where
+	// TestAllocationCensus would gain a runtime.newobject line for each.
+	{"loop_alias_frame_local.go", "framed:  18\nwithin:  12\nliteral: 18\n"},
 }
 
 // TestLoopBodyAllocationsAreDistinctPerIteration runs each reduction and
