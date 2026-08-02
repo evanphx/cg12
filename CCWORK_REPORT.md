@@ -71,3 +71,154 @@ nowhere: `var a [2]int` and `&cell{v: i}` are committed frame placements, and
 the census does not record ordinary front-end frame slots. The instrument is
 blind to the defect from the frame side; it will only see the fix from the heap
 side.
+
+## 3. The fix: approach (a), with the per-iteration question asked by the walk
+   that is already there
+
+**Approach (b) was rejected on evidence, not taste.** (b) is "make `allocLocal`
+and `nonEscapingAddress` emit IR candidates so the loop rule in
+`LowerHeapAllocations` covers them". The loop rule is
+`promotionsBlockedByALoop`, and it is blunt by design: *any* promotable
+candidate whose defining instruction sits in a natural loop is sent to the
+allocator, with no test of whether anything retains it. That is affordable
+today because candidates are rare — 441 blocked promotions over the whole
+corpus. It is not affordable at these two sites. From the spike's own census:
+
+| decision site | committed frame placements, corpus-wide |
+|---|---|
+| `&CompositeLit` (`nonEscapingAddress`) | 2 062 |
+| local variable (`allocLocal`) | **4 685 295** |
+
+`allocLocal` is *the* path for every array and struct local in the runtime and
+the standard library. Handing those to a rule that heaps everything in a loop
+would put `var b [64]byte` on the heap on every trip round every loop that
+declares a scratch buffer, whether or not its address goes anywhere — a large,
+silent performance regression, and exactly the over-correction step 3 warns
+about. Making the rule precise enough to avoid that means rewriting the rule
+the 441 existing fires depend on.
+
+So the fix is (a): ask the per-iteration question at the two committing sites.
+What makes it small is that **the question does not need a new analysis**.
+
+`objectDoesNotEscape` already refuses to answer for an object whose uses it
+cannot all see — `escapeWalkSeesEveryUse` demands the object be declared inside
+the body being walked. Run the *existing* walk with the **loop body** as the
+scope instead of the function body, and it answers a different question with no
+new code: an address is fine if it reaches only things the loop itself
+declares, and outlives the iteration the moment it reaches anything further
+out. The scope has to be tightened at both ends — `escapeWalkOuterObjects`
+lists the function's parameters and results, which are storage that outlives
+the iteration — so the iteration walk trusts nothing but the loop's own locals.
+
+    goc/compile.go   findIterationCaptures      the variable site (allocLocal)
+                     addressOutlivesItsIteration the &T{...} site
+                     enclosingLoopBody / loopBodiesWithin
+
+    +160 lines, 120 of them comment; 6 lines changed at the call sites.
+
+It inherits the walk's interprocedural parameter summaries, which is why it
+does not over-correct: `var b [64]byte; n, _ := r.Read(b[:])` in a loop reaches
+a parameter the callee does not let escape, so it stays in its frame slot,
+which is where Go puts it too. Only an address that reaches storage declared
+further out moves — the same comparison gc makes with loop depths.
+
+Nested loops need no special case: widening the scope can only make the walk
+trust *more* objects and so report *fewer* captures, so the innermost scope
+gives the strongest answer and the union over a function's loops is exactly
+that answer.
+
+### 3.1 All four forms now match the host toolchain
+
+    $ go test ./goc -run 'TestLoopBodyAllocationsAreDistinctPerIteration|TestLoopAliasExpectationsMatchTheHostToolchain'
+    ok      github.com/evanphx/cg12/goc     17.153s
+
+All six subtests pass — the two that were already right stay right, so the
+existing loop rule was not disturbed.
+
+| form | host | goc before | goc after |
+|---|---|---|---|
+| `new(int)` | `1 2` | `1 2` | `1 2` |
+| `make([]int, 0, 4)` | `1 2` | `1 2` | `1 2` |
+| `var a [2]int; &a` | `1 2` | **`2 2`** | **`1 2`** |
+| `&cell{v: i}` | `1 2` | **`2 2`** | **`1 2`** |
+| `variadic_backing` | `1` | `1` | `1` |
+
+### 3.2 It costs no measurable compile time
+
+Full executable build of `stdlib_crypto_ecdsa.go` (the program the spike
+measured the AST walk on), three runs each:
+
+    main   11.99  11.98  12.06     mean 12.01 s
+    fixed  11.90  12.16  12.09     mean 12.05 s
+
++0.3%, inside the run-to-run spread. The extra walk is per loop body rather
+than per function, and a loop body is a small fraction of a function.
+
+## 4. What it moves: two allocations, both of them the defect
+
+    $ go test ./goc -run 'TestAllocationCensus$|TestEscapeShadowPlacement$|TestFrameEscapeAudit$'
+    --- FAIL: TestAllocationCensus (168.13s)
+    --- FAIL: TestEscapeShadowPlacement
+    --- PASS: TestFrameEscapeAudit
+
+**`TestFrameEscapeAudit` is clean.** Zero new frame-address publications across
+388 programs, and none of the 209 the tree already makes went away.
+
+The census, over 388 programs each linking the whole standard library and
+runtime, reports **two new sites and nothing else**:
+
+    testdata/loop_alias_composite.go:9:8   main.alternate  runtime.newobject  main_cell   now on the heap
+    testdata/loop_alias_forms.go:37:3      main.viaArray   runtime.newobject  2_int       now on the heap
+
+    moved frame -> heap:  0        moved heap -> frame:  0        vanished:  0
+
+They read as "appeared" rather than "frame -> heap" because a committed
+front-end frame slot is not a census line at all; the same fact from the frame
+side is invisible. **Corpus-wide, this change moves exactly two allocations,
+and they are the two the bug is about.** The existing loop rule blocks 441
+promotions; this adds two allocations. Nothing in the standard library or the
+runtime changed placement.
+
+That the census sees exactly two is also a proof that no fire was silently
+undone: a variable this rule heap-lifts becomes an `OHeapAlloc` candidate, and
+had `LowerHeapAllocations` promoted one back to a frame the census would list
+it as a new `frame` site. There are none.
+
+### 4.1 Why two is the right number, checked by hand rather than assumed
+
+A rule that never fires and a rule that is not wired up produce the same zero,
+so the "does not over-correct" half was checked directly against the host
+toolchain and against the emitted IR, not inferred from the census being quiet.
+
+| probe | shape | host | goc | `newobject` in the loop, main -> fixed |
+|---|---|---|---|---|
+| stays | `var a [2]int; addTo(&a, i); q := &a` | `18` | `18` | **0 -> 0** |
+| nested | inner-loop `var t node`, kept in the *outer* loop's local | `12 12` | `12 12` | 0 -> **2** |
+| within | `var x int; p := &x; total += *p` | `12` | `12` | 0 -> 0 |
+| range | `x := new(int)` in a `range` loop, kept across iterations | `2 3` | `2 3` | already heap |
+
+`stays` is the over-correction test: the address is taken, passed to a callee
+and re-taken, and it keeps its frame slot exactly as it did before, because the
+callee does not let it escape. `nested` is the precision test in the other
+direction: an allocation in an *inner* loop kept in a variable declared in the
+*outer* loop body outlives the inner iteration but not the outer one, and it is
+the innermost scope that answers, so it moves.
+
+### 4.2 One new shadow disagreement, and it is the IR analysis being wrong
+
+`TestEscapeShadowPlacement` gains one line:
+
+    loop_alias_composite.go:9:8  main.alternate  composite-literal  heap -> frame  in a loop
+
+Shadow mode asks what the summary-fed IR analysis would have chosen for a
+placement the front end kept for itself. The front end now says heap; the IR
+analysis says frame, because nothing about the pointer outlives the *frame*.
+The `in a loop` column on the same line is the flag that says why acting on
+that would be wrong. This is the IR analysis's existing blind spot showing up
+against a front end that no longer shares it -- the disagreement is new, the
+blind spot is not.
+
+### 4.3 Determinism
+
+    $ go test ./goc -run TestCompilingTheSameSourceTwiceGivesTheSameModule
+    ok  4.657s

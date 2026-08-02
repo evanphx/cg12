@@ -1665,6 +1665,7 @@ type gen struct {
 	stackAddresses                map[uint32]bool
 	heapCaptures                  map[types.Object]ir.Ref
 	escapingCaptures              map[types.Object]bool
+	iterationCaptures             map[types.Object]bool
 	referenceCaptures             map[types.Object]bool
 	objectEscapeChecks            map[types.Object]bool
 	resultLeakBody                *ast.BlockStmt
@@ -1740,6 +1741,7 @@ func (g *gen) derive() *gen {
 	derived.heapCaptures = make(map[types.Object]ir.Ref)
 	derived.initializingGlobals = make(map[types.Object]bool)
 	derived.escapingCaptures = nil
+	derived.iterationCaptures = nil
 	derived.referenceCaptures = nil
 	derived.objectEscapeChecks = nil
 	derived.resultLeakBody = nil
@@ -5537,7 +5539,12 @@ func (g *gen) variableStorage(object types.Object, valueType types.Type) ir.Ref 
 	if storage, exists := g.vars[object]; exists {
 		return storage
 	}
-	if g.runtimeAllocation && g.escapingCaptures[object] {
+	// escapingCaptures is storage that outlives the frame; iterationCaptures is
+	// storage that outlives one iteration of the loop that declares it. Both
+	// need an allocation rather than a frame slot, and for the same reason: a
+	// frame slot is one object, and each of these needs more than one. See
+	// findIterationCaptures.
+	if g.runtimeAllocation && (g.escapingCaptures[object] || g.iterationCaptures[object]) {
 		var storage ir.Ref
 		if isMemoryValue(valueType) {
 			backing := g.allocateTyped(valueType)
@@ -7757,6 +7764,7 @@ func (g *gen) funcDecl(fd *ast.FuncDecl) {
 	predeclaredVariables := signatureVariables(originalSignature)
 	g.escapeWalkOuterObjects = predeclaredVariables
 	g.escapingCaptures = g.findEscapingCaptures(fd.Body, predeclaredVariables...)
+	g.iterationCaptures = g.findIterationCaptures(fd.Body)
 	g.referenceCaptures = g.findReferenceCaptures(fd.Body, predeclaredVariables...)
 	keepAliveObjects, orderedKeepAliveObjects := g.findKeepAliveObjects(fd.Body)
 	g.keepAliveObjects = keepAliveObjects
@@ -9464,6 +9472,7 @@ func (g *gen) iteratorRangeStmt(statement *ast.RangeStmt, label string, iterator
 	}
 	child.escapeWalkOuterObjects = rangeVariables
 	child.escapingCaptures = child.findEscapingCaptures(statement.Body, rangeVariables...)
+	child.iterationCaptures = child.findIterationCaptures(statement.Body)
 	child.referenceCaptures = child.findReferenceCaptures(statement.Body, rangeVariables...)
 	ast.Inspect(statement.Body, func(node ast.Node) bool {
 		if _, nestedFunction := node.(*ast.FuncLit); nestedFunction {
@@ -10821,7 +10830,10 @@ func (g *gen) expr(e ast.Expr) (result ir.Ref) {
 		}
 		if n.Op == token.AND {
 			if literal, ok := n.X.(*ast.CompositeLit); ok {
-				heap := !g.nonEscapingAddress(n)
+				// The pointer may stay inside the frame and still have to name
+				// a different object on every trip round a loop, which frame
+				// storage cannot do. See addressOutlivesItsIteration.
+				heap := !g.nonEscapingAddress(n) || g.addressOutlivesItsIteration(n)
 				if g.noWriteBarrier {
 					heap = false
 				}
@@ -11961,6 +11973,7 @@ func (g *gen) functionLiteral(literal *ast.FuncLit) ir.Ref {
 	predeclaredVariables = append(predeclaredVariables, resultObjects...)
 	child.escapeWalkOuterObjects = predeclaredVariables
 	child.escapingCaptures = child.findEscapingCaptures(literal.Body, predeclaredVariables...)
+	child.iterationCaptures = child.findIterationCaptures(literal.Body)
 	child.referenceCaptures = child.findReferenceCaptures(literal.Body, predeclaredVariables...)
 	keepAliveObjects, orderedKeepAliveObjects := child.findKeepAliveObjects(literal.Body)
 	child.keepAliveObjects = keepAliveObjects
@@ -12468,6 +12481,163 @@ func (g *gen) bodyLocals(body *ast.BlockStmt, predeclared ...types.Object) map[t
 		return true
 	})
 	return locals
+}
+
+// findIterationCaptures returns the locals declared inside a loop body whose
+// storage has to be a different object in every iteration.
+//
+// # The question the rest of the escape walk does not ask
+//
+// findEscapingCaptures asks whether a local's storage outlives the *frame*. An
+// allocation can be entirely frame-local by that test and still need one object
+// per iteration: Go gives a variable declared in a loop body one instance per
+// trip round the loop, so
+//
+//	var p, q *[2]int
+//	for i := 0; i < n; i++ {
+//		var a [2]int
+//		a[0] = i
+//		p, q = q, &a
+//	}
+//	return p[0], q[0]      // Go: 1 2
+//
+// has two live arrays at the end, not one. Giving `a` a single frame slot makes
+// `p` and `q` the same pointer and the function returns `2 2`. Nothing escapes
+// the frame, so neither escape analysis objects and opt.FrameEscapes -- a
+// may-analysis over publications -- has nothing to report either. It is an
+// aliasing defect, and the missing fact is the one gc's escape analysis calls
+// loop depth.
+//
+// # How it is asked here
+//
+// It is the same walk with a smaller scope. objectDoesNotEscape refuses to
+// answer for an object whose uses it cannot all see (escapeWalkSeesEveryUse),
+// and with the loop body as the scope that is exactly the objects declared
+// inside the loop. So running the existing walk against the loop body asks
+// "does this address reach anything that is not itself per-iteration", which is
+// the question, and it inherits the walk's interprocedural parameter summaries
+// rather than restating them.
+//
+// The scope has to be tightened at both ends: escapeWalkOuterObjects lists the
+// function's parameters and results, which the walk normally trusts because it
+// sees the whole body. Under a loop-body scope they are storage that outlives
+// the iteration and their uses are mostly not in view, so nothing may be
+// trusted but what the loop declares.
+//
+// # Why this is not "heap everything in a loop"
+//
+// A scratch buffer in a loop body -- `var b [64]byte; n, _ := r.Read(b[:])` --
+// reaches only the loop's own locals and a parameter the callee does not let
+// escape, so it stays in its frame slot, which is also where Go puts it. Only
+// an address that reaches storage declared further out is moved, which is the
+// same rule gc applies when it compares loop depths.
+//
+// Nested loops need no special handling. Widening the scope can only make the
+// walk trust more objects and so report fewer captures, so for a local declared
+// in an inner loop the innermost scope gives the strongest answer and the union
+// over all the loops in the function is exactly that answer.
+func (g *gen) findIterationCaptures(body *ast.BlockStmt) map[types.Object]bool {
+	loops := loopBodiesWithin(body)
+	if len(loops) == 0 {
+		return nil
+	}
+
+	savedBody := g.currentBody
+	savedOuter := g.escapeWalkOuterObjects
+	defer func() {
+		g.currentBody = savedBody
+		g.escapeWalkOuterObjects = savedOuter
+	}()
+
+	var captures map[types.Object]bool
+	for _, loop := range loops {
+		g.currentBody = loop
+		g.escapeWalkOuterObjects = nil
+		for object := range g.findEscapingCaptures(loop) {
+			if captures == nil {
+				captures = make(map[types.Object]bool)
+			}
+			captures[object] = true
+		}
+	}
+	return captures
+}
+
+// loopBodiesWithin lists the bodies of the `for` and `range` statements a
+// function body runs itself, outermost first. A loop inside a function literal
+// belongs to that literal's own frame and is found when the literal is lowered.
+func loopBodiesWithin(body *ast.BlockStmt) []*ast.BlockStmt {
+	var loops []*ast.BlockStmt
+	ast.Inspect(body, func(node ast.Node) bool {
+		switch node := node.(type) {
+		case *ast.FuncLit:
+			return false
+		case *ast.ForStmt:
+			loops = append(loops, node.Body)
+		case *ast.RangeStmt:
+			loops = append(loops, node.Body)
+		}
+		return true
+	})
+	return loops
+}
+
+// addressOutlivesItsIteration reports whether an address taken inside a loop
+// body reaches storage that is still there on the next trip round the loop.
+//
+// It is findIterationCaptures's question asked about one address rather than
+// about a variable, for the allocations that have no variable to ask about: the
+// storage behind `&T{...}` is committed to the frame by the emitter, on
+// nonEscapingAddress's word that the pointer does not outlive the function, and
+// `c := &cell{v: i}` in a loop body is the same aliasing defect with the
+// allocation named by nothing.
+func (g *gen) addressOutlivesItsIteration(address *ast.UnaryExpr) bool {
+	loop := g.enclosingLoopBody(address)
+	if loop == nil {
+		return false
+	}
+
+	savedBody := g.currentBody
+	savedOuter := g.escapeWalkOuterObjects
+	g.currentBody = loop
+	g.escapeWalkOuterObjects = nil
+	defer func() {
+		g.currentBody = savedBody
+		g.escapeWalkOuterObjects = savedOuter
+	}()
+
+	return g.addressEscapesWithin(address, g.info, g.parents, loop, make(map[parameterKey]bool))
+}
+
+// enclosingLoopBody returns the body of the innermost loop a node sits in, or
+// nil if it is not in one.
+//
+// Only the body counts. A `for` clause's init statement runs once, and its
+// condition and post statement are evaluated between iterations rather than
+// inside one, so the per-iteration question does not arise for storage
+// committed there. The climb stops at a function literal because that literal's
+// body is a different frame, allocated afresh on every call.
+func (g *gen) enclosingLoopBody(node ast.Node) *ast.BlockStmt {
+	current := node
+	for {
+		parent := g.parents[current]
+		if parent == nil {
+			return nil
+		}
+		switch parent := parent.(type) {
+		case *ast.FuncLit:
+			return nil
+		case *ast.ForStmt:
+			if parent.Body == current {
+				return parent.Body
+			}
+		case *ast.RangeStmt:
+			if parent.Body == current {
+				return parent.Body
+			}
+		}
+		current = parent
+	}
 }
 
 func (g *gen) findEscapingCaptures(body *ast.BlockStmt, predeclared ...types.Object) map[types.Object]bool {

@@ -314,6 +314,7 @@ testdata/bytes_grow_compare.go:38:25	main.runCase	slice-literal-backing	frame ->
 testdata/bytes_grow_stats.go:10:27	main.main	slice-literal-backing	frame -> heap		call to $bytes.Repeat with scalarised aggregate arguments
 testdata/bytes_grow_stats.go:9:41	main.main	slice-literal-backing	frame -> heap		call to $bytes.Repeat with scalarised aggregate arguments
 testdata/bytes_replace_allocs.go:15:24	main.main	string-conversion-buffer	frame -> heap		argument 0 of $runtime.stringtoslicebyte escapes
+testdata/loop_alias_composite.go:9:8	main.alternate	composite-literal	heap -> frame	in a loop	
 testdata/md5_assembly.go:6:27	main.main	string-conversion-buffer	frame -> heap		argument 0 of $runtime.stringtoslicebyte escapes
 testdata/runtime_append_self_overlap.go:4:12	main.main	slice-literal-backing	heap -> frame		
 testdata/runtime_append_variadic_pointer_gc.go:19:48	main.main	make-slice-backing	frame -> heap		argument 1 of $runtime.typedslicecopy escapes
