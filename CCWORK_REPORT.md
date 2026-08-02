@@ -269,10 +269,36 @@ deal of headroom, and an IR pass with summaries should promote far more than tha
 is the only route by which this rearchitecture ends up with *fewer* allocations than
 today rather than more.
 
-## 7. Acceptance criteria
+## 7. The scaffolding changes no compiler behaviour, checked two ways
+
+Everything in §2 and §3 required adding counters to `goc/compile.go` and `opt/escape.go`.
+A measurement that perturbs the thing it measures is worse than no measurement, so this
+was checked rather than asserted:
+
+1. **The corpus allocation census is byte-identical to the reference.** frame 9 735 471 /
+   heap 509 920, which is exactly what the escape-frame-publication report recorded for
+   `ddd03eb` with a different tool. If any placement decision had moved, this would not
+   match.
+2. **`TestFrameEscapeAudit` passes.**
+
+        $ go test ./goc -run TestFrameEscapeAudit -count=1 -v
+        --- PASS: TestFrameEscapeAudit (148.99s)
+        ok  github.com/evanphx/cg12/goc  149.461s
+
+   No baseline additions and no vanished lines, at the same 147–149 s the audit took on
+   `ddd03eb`, so it compiled the same 385 programs.
+
+`go build ./...`, `go vet ./goc ./opt ./ir ./analysis` and `gofmt -l` are clean, and
+`go test ./opt ./ir ./analysis ./lift ./lower` passes.
+
+One caveat, stated because it is inside a number I quote: the walk timer's own `defer` is
+counted in the 0.460 s it reports. The `astParents` figure (0.42 s) comes from a profile
+taken before the timers were added and is not.
+
+## 8. Acceptance criteria
 
 See `ESCAPE_IR_PLAN.md` §8.
 
-## 8. Recommendation
+## 9. Recommendation
 
 RECOMMEND HYBRID. Stated in full at the end of `ESCAPE_IR_PLAN.md`.
