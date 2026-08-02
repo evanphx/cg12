@@ -921,6 +921,122 @@ call. This is precisely the promotion the summaries exist to make -- an
 intraprocedural pass has to assume `Get` retains everything it is handed -- and
 it is exactly the kind that has to be read rather than accepted.
 
+### 10.2 The 20 that moved onto the heap, attributed by experiment
+
+This is the direction that is a stop-and-report, so every one of the 20 is
+accounted for -- not by argument, by reverting one change at a time and
+recompiling the corpus.
+
+| cause | sites | how it was established |
+|---|---:|---|
+| the loop rule | **14** | `ir.AllocDecision.BlockedByLoop`, read back over all 385 programs |
+| hole two (the write barrier) | **6** | corpus census with only hole two reverted |
+| **unexplained** | **0** | |
+
+**The 14.** A corpus-wide sweep for `BlockedByLoop` finds 18 distinct sites the
+rule blocked; 14 of them are these census lines and the other 4
+(`ecdsa_legacy.go:121:11`, `p224_sqrt.go:124:8`, `p256.go:538:10`, `:648:10`)
+were already on the heap in the accepted baseline, so blocking them moved
+nothing. The 14:
+
+```
+archive/zip/writer.go:93:3, :111:4     archive/zip.Writer.Close
+encoding/json/fold.go:18:2             decodeState.object, typeFields
+encoding/xml/marshal.go:896:4          printer.marshalStruct
+encoding/xml (no position)             Decoder.unmarshal
+mime/multipart/formdata.go:140:3       Reader.readForm
+net/http/h2_bundle.go:9189:5           http2clientStream.writeRequestBody
+reflect/value.go:2983:4                reflect.Select
+runtime/mfinal.go:238:5                runtime.runFinalizers
+testdata/runtime_goroutine_entry_stack_map.go:101:3, :108:3
+testdata/runtime_loopvar_three_clause.go:86:7
+testdata/stdlib_errors_join_is_as.go:26:3
+```
+
+Each is an allocation in a loop body that the escape analysis was willing to
+promote. `runtime.runFinalizers` allocating one `internal_abi_RegArgs` per
+finalizer, and `reflect.Select` one `reflect.Value` per case, are the two worth
+noticing: both would have shared a single frame slot across iterations.
+
+**The 6.** Compiling the whole corpus with only hole two reverted moves exactly
+six sites back into a frame, and they are exactly the six the loop rule does not
+account for:
+
+```
+crypto/md5.digest.MarshalBinary          error
+crypto/sha1.digest.MarshalBinary         error
+hash/adler32.digest.MarshalBinary        error
+math/rand/v2.ChaCha8.MarshalBinary       error
+net.IP.MarshalText                       error
+golang.org/x/crypto/chacha20.newUnauthenticatedCipher   error
+```
+
+All six are compiler-generated `error` interface boxes, and the IR says what
+happens to one (`crypto/md5.digest.MarshalBinary`, `md5_assembly.go`):
+
+```
+%t23 =p call $runtime.newobject($...type.error)   ; the candidate
+call $goc_storep(p %t23, p %t28)                  ; fill the box, through the barrier
+%t32 =p phi @returninterfacenil7 0, @callinterfaceend15 %t23
+call $goc_storep(p %result1, p %t32)              ; the box's address into the result area
+%t33 =p loadl %result1
+```
+
+The box's address goes into the caller's result area through `goc_storep` -- and
+`result1` is a frame slot of the caller once this body is inlined, which is the
+`frame+heap` split these sites had: the un-inlined copy escaped through a
+parameter, the inlined copy stored into a `cLocal` slot and, before the fix, was
+lost there.
+
+What is established: hole two's fix withdrew these six promotions, by experiment.
+What is not: I did not chase which corpus program held each frame copy, so I
+cannot say per copy that it was reachable after the frame died. The general point
+does not need it -- hole two is a soundness fix with a test that fails without it,
+and a promotion the analysis made while unable to see the candidate's stores is
+not a promotion it earned.
+
+**No site in this direction is unexplained, and none was accepted on the grounds
+that the analysis says so.**
+
+## 10.3 What it is worth at run time: a benchmark, not an estimate
+
++2 947 objects out of 467 752 candidates is a small static number, so the honest
+expectation was "no measurable change". That is not what happened, because the
+211 sites that moved are not spread evenly -- they are the elliptic-curve point
+arithmetic, and a program that uses it hits them in a loop.
+
+`$TMPDIR/ecdsabench.go`, 200 P-256 `ecdsa.VerifyASN1` calls with
+`runtime.ReadMemStats` around them, compiled by `cmd/goc -O` twice from the same
+source, once with `GOC_ESCAPE_SUMMARIES=0`:
+
+| | allocations | bytes allocated | wall clock |
+|---|---:|---:|---:|
+| summaries off | 717 612 | 39 866 640 | 1.954 s |
+| summaries on | 183 000 | 22 448 000 | 1.851 s |
+| | **-74.5%** | **-43.7%** | **-5.3%** |
+
+Three runs each, medians. The allocation counts are effectively noiseless -- the
+summaries-on build reports 183 000 and 22 448 000 exactly on every run, the
+summaries-off build varies by 18 mallocs in 717 612 -- so the two allocation
+columns are the measurement and the wall clock is corroboration. The box was
+compiling the corpus at the same time, so -5.3% is a floor rather than a
+headline; what it says is that the direction is right and the effect is not
+hidden by the collector getting the work back somewhere else.
+
+Both binaries verify the signature 200 times and exit 0, so they are doing the
+same work.
+
+**The corpus-wide figure and this one are not in tension.** §8.1 counts static
+decisions across 385 programs; this counts dynamic allocations in a loop that
+runs through the sites that moved. A whole-corpus average is the wrong instrument
+for asking what a change is worth to a program that uses the code it changed.
+
+For contrast, the corpus program the same code came from --
+`goc/testdata/stdlib_crypto_ecdsa.go`, which signs and verifies once -- runs in
+41 ms and shows **+0.5%, inside its own noise**. A single key generation and one
+verify does not touch these sites enough times to measure. Reporting that number
+alone would have been true and useless.
+
 
 ## 11. The migration machinery stays, with a different job
 
