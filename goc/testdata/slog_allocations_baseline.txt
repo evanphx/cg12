@@ -1,0 +1,66 @@
+# What log/slog's allocation-avoidance designs actually cost, measured under goc
+# and under the host Go toolchain, one case per line. Regenerate with
+#
+#     go test ./goc -run TestSlogAllocationsAgainstGC \
+#         -slog-allocations -update-slog-allocations
+#
+# and read the diff. The run needs a Go toolchain and a system linker; it takes
+# about a minute, most of which is goc compiling log/slog once.
+#
+# Both columns come from the same program -- goc/testdata/slog_allocations --
+# compiled by both compilers and run once per case, so the two answers are
+# produced by the same measurement and not by two benchmarks that happen to be
+# named alike. That program's doc comment is where the method is written down.
+# The short version: each case is a closure called through a func value, run to
+# warm up and then measured over several rounds of runtime.MemStats deltas,
+# keeping the round with the fewest mallocs.
+#
+# "crash" is not a zero. It means the compiled program died before it printed
+# the row; the reason is listed under the table. A row that changes from a
+# number to "crash" is the most serious diff this file can carry.
+#
+# gc's numbers are the reference, so they should not move unless the host
+# toolchain did; this file records the toolchain it was produced against for
+# exactly that reason.
+#
+host toolchain: go version go1.26.1 linux/arm64
+measurement:    iterations=2000 rounds=5
+
+case                             goc a/op    gc a/op   goc B/op    gc B/op
+control/empty-body                   0.00       0.00        0.0        0.0
+control/new-64-byte-object           1.00       1.00       64.0       64.0
+control/any-int-small                1.00       0.00        8.0        0.0
+control/any-int-large                1.00       1.00        8.0        8.0
+control/any-bool                     1.00       0.00        1.0        0.0
+control/any-string-constant          1.00       0.00       16.0        0.0
+control/any-string-variable          1.00       1.00       16.0       16.0
+control/any-pointer                  0.00       0.00        0.0        0.0
+control/variadic-0-args              0.00       0.00        0.0        0.0
+control/variadic-6-preboxed          1.00       0.00       96.0        0.0
+control/variadic-6-literal           1.00       0.00      176.0        0.0
+control/return-interface             1.00       0.00       16.0        0.0
+control/return-int                   0.00       0.00        0.0        0.0
+control/context-background           1.00       0.00       16.0        0.0
+control/handler-enabled              1.00       0.00       16.0        0.0
+attr/slog.Int                        1.00       0.00        8.0        0.0
+attr/slog.String                     0.00       0.00        0.0        0.0
+attr/slog.Bool                       1.00       0.00        8.0        0.0
+attr/slog.Duration                   1.00       0.00        8.0        0.0
+attr/slog.Float64                    1.00       0.00        8.0        0.0
+info/1-attr                          5.00       0.00      120.0        0.0
+info/3-attr                          7.00       0.00      248.0        0.0
+info/5-attr                          9.00       0.00      376.0        0.0
+info/6-attr                         11.00       1.00      496.0       48.0
+info/3-attr-large-ints               7.00       3.00      248.0       24.0
+logattrs/3-attr                      6.00       0.00      184.0        0.0
+logattrs/6-attr                     11.00       1.00      416.0       48.0
+disabled/no-attrs                    2.00       0.00       32.0        0.0
+disabled/3-attr                      3.00       0.00      208.0        0.0
+disabled/logattrs-3-attr             5.00       0.00      168.0        0.0
+json/kv-4-pairs                     crash       2.00      crash       24.0
+json/logattrs-4-attrs               crash       0.00      crash        0.0
+
+cases that did not run:
+
+  json/kv-4-pairs                goc  fatal error: invalid pointer found on stack (runtime: bad pointer in frame log_slog_handleState_appendAttr at 0x?: 0xc8)
+  json/logattrs-4-attrs          goc  fatal error: invalid pointer found on stack (runtime: bad pointer in frame main_func_304_28 at 0x?: 0x3)
