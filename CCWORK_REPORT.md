@@ -2250,3 +2250,116 @@ is not a judgement call -- it is a crash.
 The change is not committed. §R3.1's description, §R3.2's reduced program and
 §R3.3's root cause are the deliverable, so that the next person to consider this
 starts from a diagnosis instead of from the same idea.
+
+## R4. The benchmark, so this cannot go stale again
+
+The reason the +5.8% was unverifiable for a year of compiler changes is that
+nothing measured it. This tree counts allocations
+(`alloc_census_baseline.txt`), counts them against the reference compiler
+(`escape_gc_differential.txt`), and counts slog's
+(`slog_allocations_baseline.txt`). It measured no time at all.
+
+**One command:**
+
+    make bench-crypto
+
+and to accept a movement, `make bench-crypto-update` and read the diff. Opt-in
+behind `-crypto-bench`, exactly the way `-slog-allocations` and
+`-escape-gc-differential` are, and for the same reason plus one of its own: it
+is the only instrument here whose answer depends on what else the machine is
+doing, which is not something a parallel `go test ./...` should be deciding.
+It takes 65 seconds.
+
+Committed as:
+
+    goc/testdata/crypto_signing_bench/main.go            the program
+    goc/cryptobench_test.go                              the comparison
+    goc/testdata/crypto_signing_bench_baseline.txt       the measured numbers
+    Makefile                                             bench-crypto{,-update}
+
+### R4.1 What it measures, and why it is an index
+
+Five cases, and every one of them is there to answer something:
+
+| case | what it is for |
+|---|---|
+| `p256/sign-verify` | the headline: 200 round trips, the same quantity §R1 and §R2 measured |
+| `p256/verify` | verification alone, so a movement can be placed in one half of the round trip |
+| `p384/sign-verify` | the same `bigmod` `default` arm at six limbs; a real `Nat.Mul` change moves both |
+| `rsa2048/sign-verify` | the control on the crypto side: the specialised 2048-bit arm, which is not the shape that regressed |
+| `control/spin-fixed-work`, `control/empty-body` | the instrument, checked before anything measured with it is believed |
+
+Nanoseconds are a property of the machine as much as of the compiler, so the
+committed number is each case divided by `control/spin-fixed-work` measured in
+the same binary in the same process. That is not a cosmetic choice, it is what
+makes the file checkable: ten consecutive runs of the same binary put the raw
+p256 time **3.7% peak to peak** and its index **1.38% peak to peak (sd 0.46%)**.
+Dividing by a control measured microseconds away removes the machine's drift.
+
+The tolerance is 0.04 — three times the measured spread, and small enough to
+have caught either number anyone has attached to this path (the reported +5.8%,
+and the -4.9% §R2 found between `main` and the pre-fix commit).
+
+### R4.2 It fails in both directions, and that was verified rather than asserted
+
+The committed baseline was perturbed 10% each way and the gate run against it:
+
+    baseline index reduced 10%  ->  FAIL "the crypto signing path costs more than the baseline says"
+    baseline index raised 10%   ->  FAIL "the crypto signing path costs less than the baseline says"
+    baseline unmodified         ->  PASS (62s)
+
+Faster failing is deliberate and is the same rule the allocation census uses.
+The cheap way to make this path faster is to stop heap-allocating something, and
+from a timer that is indistinguishable between an escape analysis that got
+better and one that got permissive about an object that outlives its frame --
+which is exactly what §R3.2 is. A drop here with no matching HEAP -> FRAME line
+in the census diff is the combination that should worry someone, and each
+failure message says so.
+
+## R5. Guards
+
+No compiler code changed in this branch. What landed is one benchmark program
+(in a subdirectory, so the corpus globs -- `filepath.Glob("testdata/*.go")` in
+`corpusaudit_test.go`, `gcdiff_test.go` and `escapesummary_test.go` -- cannot
+see it), one test, one baseline, two Makefile targets and this report. The
+guards were run anyway, because "it cannot have moved" and "it did not move" are
+different statements.
+
+| guard | result |
+|---|---|
+| `TestFrameEscapeAudit -count=1` | **PASS**, no baseline change |
+| `TestAllocationCensus -count=1` | **PASS**, and regenerating with `-update-alloc-census-baseline` produces a **byte-identical file**: `git diff` on it is empty, so the site-by-site review is over zero sites |
+| `TestLoopBodyAllocationsAreDistinctPerIteration` | **PASS** (6 programs × 2 arms) |
+| `TestLoopAliasExpectationsMatchTheHostToolchain` | **PASS** |
+| `TestCompilingTheSameSourceTwiceGivesTheSameModule` | **PASS** |
+| `TestTypeGCMasksArePaddedToAPointerWord` | **PASS** |
+| `runtime_gc_type_mask_padding.go`, `GOGC=10 GOMAXPROCS=3`, 20 serial runs | **0/20 failed** |
+
+Not run here, by instruction: `go test ./goc/...` as a whole, the capability
+matrix, and `make test-unit`. The dependent gate job runs those.
+
+## R6. Summary
+
+1. **The lost analysis is restored** (§R1), verbatim from
+   `ccwork/escape-frame-publication`, including §R1.1's reasoning about the fix
+   that was declined -- the part that could not be recovered from the diff.
+
+2. **The regression is gone, and not in the way expected** (§R2). Re-running the
+   same two historical compilers today gives **+0.04%, 95% CI [-1.37%, +1.46%]**
+   on 200 P-256 sign+verify, against a run-to-run spread of 3.4–3.8%. That is
+   not a small regression, it is no regression. It is also not "later changes
+   closed the gap": the `before`/`after` pair is unchanged and today shows
+   nothing. Separately, `main` is **4.9% faster** than either (CI [-6.1%,
+   -3.8%]).
+
+3. **The alternative fix is not worth taking, and the question is closed**
+   (§R3). Implemented as §R1.1 describes it, it removes 5 of `Nat.Mul`'s 10
+   `runtime.newobject` calls and then dies in `os` package initialisation with
+   `SetFinalizer: pointer not in allocated block`, because
+   `addressEscapesWithin` has no `*ast.UnaryExpr` case and so answers "does not
+   escape" for the inner literal of `&outer{&inner{...}}`. The payoff it existed
+   for is measured at zero. §R3.2's nine-line reduction and §R3.3's root cause
+   are recorded so the next person starts from a diagnosis.
+
+4. **`make bench-crypto` now watches it** (§R4), fails in both directions, and
+   carries its measured numbers as a committed baseline.
