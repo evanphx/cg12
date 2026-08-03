@@ -1686,3 +1686,56 @@ early return saves nothing because everything it was meant to save has already
 been paid at the call site. Essentially none of slog's designed allocation
 avoidance survives compilation by goc — and on the one path that exercises a
 real handler, the compiled program does not survive either.
+
+---
+
+# A `slog.Attr` in a frame is scanned as a pointer: the mis-classification, found and fixed
+
+Job `ccwork/slog-attr-gcmask`, branched off `main` `4a6fd96`. The subject is the
+miscompile RUNTIME_PLAN §26 left open and CCWORK_REPORT §5a reported without
+fixing: a `slog.Attr` live in a frame across a collection dies with
+
+    runtime: bad pointer in frame main_main at 0x...: 0xc8
+    fatal error: invalid pointer found on stack
+
+## 0. Reproduced on main before anything was changed
+
+    go run ./cmd/goc -run goc/testdata/slog_allocations/miscompiles/attr_bad_pointer.go
+    runtime: bad pointer in frame main_main at 0x31b432e07d50: 0xc8
+    fatal error: invalid pointer found on stack
+    runtime_adjustpointers <- runtime_adjustframe <- runtime_copystack
+      <- runtime_shrinkstack <- runtime_scanstack <- markroot <- gcDrain
+
+0xc8 is 200, the integer `slog.Int("k", 200)` packs into `Value.num`. Note the
+walker in this trace: `shrinkstack` inside `scanstack`, so the collector's own
+stack scan reached it through the copier.
+
+## 1. The reduction landed as a corpus test, failing (commit below)
+
+Four programs in `goc/testdata/`, run by `goc/slogattrframe_test.go`
+unoptimized and optimized, plus a run of each under
+`GODEBUG=cg12checkstackcopy=1`, plus a check that every expectation is `go run`'s
+own output rather than a belief about it. On `main`'s compiler, before any
+change:
+
+    --- FAIL: TestSlogAttrInFrameIsNotScannedAsAPointer (52.10s)
+        --- FAIL: .../slog_attr_frame_gcmask.go              (7.98s)
+        --- FAIL: .../slog_attr_frame_gcmask.go -O           (7.89s)
+        --- FAIL: .../slog_attr_frame_gcmask_stackcopy.go    (7.49s)
+        --- FAIL: .../slog_attr_frame_gcmask_stackcopy.go -O (7.99s)
+        --- FAIL: .../slog_attr_frame_gcmask_kinds.go        (7.54s)
+        --- FAIL: .../slog_attr_frame_gcmask_kinds.go -O     (7.92s)
+        --- PASS: .../slog_attr_frame_gcmask_control.go      (2.55s)
+        --- PASS: .../slog_attr_frame_gcmask_control.go -O   (2.74s)
+    --- FAIL: TestSlogAttrInFrameSurvivesTheStackCopyChecker (24.95s)
+        --- FAIL: .../slog_attr_frame_gcmask.go              (7.46s)
+        --- FAIL: .../slog_attr_frame_gcmask_stackcopy.go    (7.50s)
+        --- FAIL: .../slog_attr_frame_gcmask_kinds.go        (7.49s)
+        --- PASS: .../slog_attr_frame_gcmask_control.go      (2.50s)
+    --- PASS: TestSlogAttrFrameExpectationsMatchTheHostToolchain (0.33s)
+
+Every failure is `run: runtime: bad pointer in frame main_main at 0x...: 0xc8`.
+The fourth program (`_kinds`) holds an Int64, a Bool, a Duration and a Float64
+in one frame at once, because `num` carries all five packed kinds and a map that
+claims that word claims it for every one of them.
+
