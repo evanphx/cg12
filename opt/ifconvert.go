@@ -325,6 +325,7 @@ func convertRegion(f *ir.Func, H *ir.Block, preds map[*ir.Block][]*ir.Block, fre
 		fi := indexOf(phi.Blocks, falsePred)
 		tVal, fVal := phi.Args[ti], phi.Args[fi] // OSel yields tVal when cond != 0
 		sel := f.NewTemp("", phi.Cls)
+		f.InheritGCRef(sel, tVal, fVal) // the select stands for whichever value it picks
 		H.Instrs = append(H.Instrs, ir.Instr{Op: ir.OSel, Cls: phi.Cls, To: sel, Args: []ir.Ref{cond, tVal, fVal}})
 		// Replace both side edges with a single edge from H carrying the select.
 		na, nb := phi.Args[:0], phi.Blocks[:0]

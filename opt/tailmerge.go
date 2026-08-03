@@ -82,6 +82,9 @@ func TailMerge(f *ir.Func) bool {
 			}
 		}
 	}
+	if !void {
+		f.InheritGCRef(phi.To, phi.Args...) // the merged result stands for each returned value
+	}
 	// The old return blocks are now unreachable; the following SimplifyCFG drops them.
 	return true
 }

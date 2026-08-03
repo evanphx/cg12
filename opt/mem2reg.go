@@ -120,6 +120,14 @@ func Mem2Reg(f *ir.Func) bool {
 				continue // dead here; a phi would only create a spurious live range
 			}
 			p := &ir.Phi{Cls: v.cls, To: f.NewTemp(uniq(varBase(v.name)), v.cls)}
+			// A phi for a slot that held a managed pointer holds one too. The slot's
+			// own marking is what the frame map would have described had the slot
+			// survived, so carrying it onto the phi is what keeps promotion from
+			// changing which values the collector can find. See the promotable.managed
+			// comment for why the class alone cannot answer this.
+			if v.managed {
+				f.MarkGCRefType(p.To, v.gcType)
+			}
 			b.Phis = append(b.Phis, p)
 			if phiOf[b] == nil {
 				phiOf[b] = map[int]*ir.Phi{}
@@ -159,6 +167,20 @@ func Mem2Reg(f *ir.Func) bool {
 type promotable struct {
 	cls  ir.Cls
 	name string // the alloc temp's name, so phis can inherit it (readability)
+
+	// managed records that the slot held a garbage-collected pointer, so the phis
+	// that replace it must be reported as GC roots.
+	//
+	// The access class cannot answer this on its own. A frontend that types managed
+	// pointers as [ir.ClsM] is served by ir.LowerPointers, which marks every ClsM
+	// temporary a GC reference on the way into the backend. goc does not: it types
+	// every pointer ClsP and marks the managed ones itself, so a ClsP phi minted
+	// here would reach the backend unmarked, and a ClsP that is genuinely not
+	// managed (a frame address, a C pointer) must stay unmarked. The alloc temp's
+	// own flag is the frontend's answer for this slot, and it is exactly what the
+	// safepoint map reports while the slot exists.
+	managed bool
+	gcType  uint32
 }
 
 // sameSlotClass reports whether two access classes on one stack slot are compatible
@@ -270,7 +292,13 @@ func findPromotable(f *ir.Func) ([]promotable, map[uint32]int) {
 				continue
 			}
 			varOf[id] = len(vars)
-			vars = append(vars, promotable{cls: class[id], name: f.Temps[id].Name})
+			slot := f.Temps[id]
+			vars = append(vars, promotable{
+				cls:     class[id],
+				name:    slot.Name,
+				managed: slot.GCRef || class[id].IsManaged(),
+				gcType:  slot.GCType,
+			})
 		}
 	}
 	return vars, varOf
