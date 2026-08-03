@@ -1,3 +1,579 @@
+# Wave 3 — integration gate report
+
+`integration/wave3` = `main` (6b9fbb0) + three changes, merged in the order
+given, plus one commit regenerating the baselines the merge could not resolve.
+
+Host toolchain `go1.26.1 linux/arm64`, 64 cores. Every number below was
+produced by a process this job started and watched exit; anything not watched
+to completion is marked UNVERIFIED and named as such.
+
+    main 6b9fbb0
+      ├── ccwork/gc-stackscan-gogc10             (change 1)  fast-forward
+      ├── ccwork/dead-slots-and-census-direction (change 2)  merge a4ec2cf
+      └── ccwork/slog-residual-allocation        (change 3)  merge e2aa32c
+                                                 baselines   e67d38a
+
+All three branches carry a real compiler change; none ended empty.
+
+  - change 1 — `arm64/regalloc.go`, `arm64/mc.go`: a call's result home is no
+    longer described as a GC root at that call.
+  - change 2 — `goc/compile.go`, `ir/alloc.go`, `opt/alloccensus.go`: dead frame
+    slots are not emitted, and the census names the direction of a placement.
+  - change 3 — `goc/compile.go`, `opt/escapegraph.go`, `opt/escapesummary.go`:
+    a constant boxed into an interface without allocating, plus four escape
+    precision defects.
+
+## Merge conflicts and how they were resolved
+
+    CCWORK_REPORT.md                        text conflict x2  — both sides kept,
+                                                                doc only
+    goc/testdata/alloc_census_baseline.txt  text conflict     — REGENERATED
+    goc/testdata/escape_gc_differential.txt auto-merged       — REGENERATED
+    goc/testdata/escape_shadow_baseline.txt auto-merged       — regenerated,
+                                                                byte-identical
+    goc/testdata/slog_allocations_baseline.txt auto-merged    — regenerated,
+                                                                byte-identical
+    goc/testdata/frame_escape_baseline.txt  auto-merged       — see item 4
+    goc/compile.go                          auto-merged clean (both sides edit it)
+
+`go build ./...` and `go vet ./goc/... ./opt/... ./ir/... ./arm64/...` are clean
+on the merged tree.
+
+## Root build artefacts: CLEAN
+
+`git ls-files` at the repo root on `integration/wave3` is 14 entries. The only
+non-source entries are the four pre-existing ones named in the brief — `cg12`
+(5.1 MB ELF), `viz` (7.2 MB ELF), `cs.trace`, `RUNTIME_PLAN.md.orig` — all
+present on `main` at 6b9fbb0 and left alone. **No new artefact was introduced by
+any of the three branches.** Nothing was removed.
+
+---
+
+## Baseline regeneration
+
+All four were regenerated from the merged tree with the command in their own
+header, after the merge and before any test run.
+
+| baseline | regenerated | vs. the merge result |
+|---|---|---|
+| `alloc_census_baseline.txt` | `go test ./goc -run TestAllocationCensus -update-alloc-census-baseline` (181 s) | **differs** — 3 598 lines |
+| `escape_gc_differential.txt` | `go test ./goc -run TestEscapeDifferentialAgainstGC -escape-gc-differential -update-escape-gc-differential` (11 s) | **differs** — 3 984 lines |
+| `escape_shadow_baseline.txt` | `go test ./goc -run TestEscapeShadowPlacement -update-escape-shadow-baseline` (181 s) | byte-identical |
+| `slog_allocations_baseline.txt` | `go test ./goc -run TestSlogAllocationsAgainstGC -slog-allocations -update-slog-allocations` (20 s) | byte-identical |
+
+Only change 3 touched the shadow and slog baselines, so the merge result was
+that branch's version and regeneration confirms it is still correct in the
+merged tree. The census and the differential are the two that no side had right.
+
+### The census, site by site
+
+Data lines (header excluded):
+
+    main       14 846
+    change 1   14 849   (+3, -0)      its new reducer's three heap sites
+    change 2   17 822   (+2 976, -0)  front-end frame placements now recorded
+    change 3   11 551   (+149, -3 444)
+
+Composing the three deltas onto `main` predicts **14 530** lines. The merged
+tree actually produces **14 533**. The residue is 5 lines, and both directions
+are cross-terms between two branches — neither is a surprise, but both are only
+visible in the integration:
+
+**4 lines present that neither branch predicted** — all `frame`, all in
+`goc/testdata/allocation_counts.go`, the corpus program change 3 adds:
+
+    allocation_counts.go:219:10  main.packOne                          main_packed  frame
+    allocation_counts.go:221:10  main.packOne                          main_packed  frame
+    allocation_counts.go:223:10  main.packOne                          main_packed  frame
+    allocation_counts.go:252:32  .goc.global.initfunc.49.main.theStringer  main_reason  frame
+
+Change 2 taught the census to record front-end frame placements; change 3 added
+a program with four of them. Neither branch could see this because change 2's
+census predates the file and change 3's census predates the recording. This is
+the product of the two changes and is correct.
+
+**1 line predicted that is absent** — in `goc/testdata/runtime_gc_stale_result_alloca.go`,
+the corpus program change 1 adds:
+
+    runtime_gc_stale_result_alloca.go:63:9  main.main  runtime.newobject  string  heap
+
+Line 63 is `panic("the loop did not build every string")`. Change 3's first
+commit, "box a constant into an interface without allocating", removes the
+allocation entirely, so the site stops existing rather than moving to a frame.
+Change 1 reported three heap sites for its reducer; in the merged tree it has
+two. That is change 3 improving change 1's program, and it is the only
+placement in the corpus that one branch's fix erased from another branch's
+new code.
+
+No line changed *direction* unexpectedly: the 5-line residue is 4 additions and
+1 deletion, and every one of the 14 528 lines both predictions share agrees on
+its `frame`/`heap` field.
+
+---
+
+# 1. `go test -timeout 40m -parallel 10 ./goc/...`
+
+Run with `-count=1 -v` on `integration/wave3` and on a `main` control worktree,
+both watched to exit. Neither log contains `(cached)`.
+
+    integration/wave3   1022.0 s   324 top-level, 348 subtests, 672 results
+                                   667 PASS   1 FAIL   4 SKIP     -> FAIL
+    main 6b9fbb0        1013.5 s   324 top-level, 348 subtests, 672 results
+                                   668 PASS   0 FAIL   4 SKIP     -> ok
+
+**Subtest census: the two trees run exactly the same 672 tests.** The name sets
+are identical — no branch adds or removes a test under `./goc/...`, so there is
+nothing to attribute. (Change 2's new tests are in `./opt`, change 1's in
+`./arm64` and `./cmd/goc`; change 3's `goc/testdata/allocation_counts.go` is a
+new corpus program consumed by existing tests, not a new test.) The four SKIPs
+are the same four on both trees: `TestEscapeDifferentialAgainstGC`,
+`TestEscapeDifferentialProgram`, `TestEscapeSummaryPromotionRate`,
+`TestSlogAllocationsAgainstGC` — all gated behind their own flags.
+
+`TestDeriveClassifiesEveryGenField`: **PASS.** It did not recur; `main` at
+6b9fbb0 already extended `fullyPopulatedGen()` for `variadicPayloadSlot`, and
+none of the three branches adds a field to `gen`.
+
+## The one failure
+
+    --- FAIL: TestCompileExecutableKeepsRuntimeSelectgoStackSliceHeadersOnStack
+        compile_test.go:484: runtime.selectgo runtime.newobject calls = 0,
+                             want only the send-on-closed panic allocation
+
+**Attributed to change 3 alone, and it is a stale assertion, not a miscompile.**
+Run on each branch head in its own worktree:
+
+    ccwork/gc-stackscan-gogc10              ok
+    ccwork/dead-slots-and-census-direction  ok
+    ccwork/slog-residual-allocation         FAIL, same message, same count 0
+
+So this is not a merge interaction — change 3 carries it on its own. That
+branch's report says `go test ./goc/...` was "not run here, by instruction",
+which is why it landed unnoticed.
+
+The test asserts `newObjectCalls != 1` is a failure: it wants the two `selectgo`
+stack slice headers off the heap and tolerates exactly one allocation, the
+`panic(plainError("send on closed channel"))` box. Change 3's first commit,
+"box a constant into an interface without allocating", removes that last one, so
+the count is 0 — **strictly better than what the test demands**, and the test
+fails only because it pins an exact count instead of an upper bound.
+
+Confirmed the panic itself is intact rather than optimised away, compiled with
+goc from the merged tree and run against the host toolchain on the same program:
+
+    goc:   recovered: send on closed channel
+    go:    recovered: send on closed channel
+
+Fixing it is a one-character change (`!= 1` -> `> 1`) in
+`goc/compile_test.go:483`. Per this job's brief that fix is **not** applied here;
+it is diagnosed and left.
+
+---
+
+# 2. `make test-goc-status` and `make test-goc-status-opt`
+
+Both arms, both trees, all four runs with `GOFLAGS=-v`, each watched to exit.
+No `(cached)` in any log. Capability sets, not counts:
+
+    default arm   integration/wave3   366 capabilities   366 PASS   0 FAIL   ok (252 s)
+                  main 6b9fbb0        365 capabilities   365 PASS   0 FAIL   ok (250 s)
+
+    -O arm        integration/wave3   366 capabilities   365 PASS   1 FAIL   FAIL (267 s)
+                  main 6b9fbb0        365 capabilities   364 PASS   1 FAIL   FAIL (263 s)
+
+**The capability set difference between the two trees is exactly one name, in
+both arms:** `gc-invariants/stale-result-home`, added by change 1 as the guard
+for its own fix. It PASSES in both arms. Nothing else was added, removed or
+renamed, and no capability changed verdict.
+
+Note for the record: **`main`'s default arm measures 365/365 here, not the
+364/364 the brief quotes.** I did not establish which capability accounts for
+the difference — the 364 figure predates 6b9fbb0 and I have no list to diff it
+against. Every comparison above is against the control measured on this box at
+6b9fbb0, not against the quoted figure.
+
+## The `-O` arm is NOT clean. `stack-scan/loop-safepoints` still fails.
+
+    -O FAIL set, integration/wave3:   { stack-scan/loop-safepoints }
+    -O FAIL set, main 6b9fbb0:        { stack-scan/loop-safepoints }
+
+Same single member on both sides. **None of the three merged branches fixed it**
+— and the diagnostic is not merely the same category, it is the same output:
+
+    runtime_stack_scan_loop_safepoints.go should pass: exit status 2
+      cg12scanroots: main_carried local slot 27 ... retains ... size 16 head 0x7272616300000062
+      cg12scanroots: main_carried local slot 41 ... retains ... size 16 head 0x7272616300000062
+      collected while live: carried-0 at carried before rewrite
+      panic: a stack slot live across a loop back edge was not a GC root
+
+byte-identical between the two trees but for the addresses. Same slot numbers
+(27 and 41), same object, same head word. The standing failure is untouched.
+
+In the **default** arm `stack-scan/loop-safepoints` PASSES on both trees, as it
+did before; it is only the `-O` configuration that fails.
+
+---
+
+# 3. `make test-unit`
+
+Both trees, `GOFLAGS=-v`, watched to exit, no `(cached)`.
+
+    integration/wave3   1614 PASS   0 FAIL   339 SKIP   25/25 packages ok
+    main 6b9fbb0        1607 PASS   0 FAIL   339 SKIP   25/25 packages ok
+
+**+7 tests, 0 failures, and every one of the 7 is a new test a merged branch
+adds:**
+
+    change 1, arm64/unit_test.go
+      TestGoStackMapsOmitAggregateResultHomeAtItsOwnCall
+      TestGoStackMapsKeepAllocationWrittenOnOnlyOnePath
+      TestUndefinedAllocationsCoverTheWindowBeforeTheFirstStore
+
+    change 2, opt/alloccensus_test.go
+      TestAllocationCensusOmitsFrontEndFrameSlotsByDefault
+      TestAllocationCensusPairsAFrontEndFrameSlotWithItsHeapForm
+      TestAllocationCensusDoesNotDoubleCountAFrontEndHeapPlacement
+      TestAllocationCensusOmitsAFrontEndFrameSlotWithNoAllocator
+
+No test was removed or renamed, and the SKIP set is the same 339 on both trees.
+
+`main` measures **1607**, not the 1598 the brief quotes; as with the capability
+matrix, the quoted figure is older than 6b9fbb0. The delta above is against the
+measured control.
+
+---
+
+# 4. `TestFrameEscapeAudit -count=1`
+
+    integration/wave3   --- PASS: TestFrameEscapeAudit (182.29s)   no (cached)
+
+**Zero new publications. The hard requirement holds.**
+
+Entry count **moved, downward: 193 on `main` -> 192 on `integration/wave3`.**
+The whole diff against `main`, five lines:
+
+    - ?  main.derive  barrier  memory reached through a call result $runtime.newobject
+    ~ stdlib/src/internal/strconv/atof.go:609:9 -> :609:3   internal/strconv.atof32
+    ~ stdlib/src/internal/strconv/atof.go:660:9 -> :660:3   internal/strconv.atof64
+    ~ stdlib/src/syscall/exec_unix.go:231:10    -> :231:4   syscall.forkExec
+    ~ .../x/net/idna/idna10.0.0.go:492:11       -> :492:5   golang.org/x/net/idna.validateAndMap
+
+Keyed on (function, how the address left, what received it) with the position
+column dropped, the diff is **one removal and nothing else** — the four
+remaining lines are the same publication at a shifted column, not new ones:
+
+    < main.derive  barrier  memory reached through a call result $runtime.newobject
+
+**Why it moved.** The merged tree's audit output is byte-identical to change 3's
+committed `frame_escape_baseline.txt` (192 entries), and change 3 is the only
+branch that touched the file. So both the removal and the four column shifts are
+change 3's escape-precision work: `main.derive`'s call result is no longer a
+`runtime.newobject` whose address reaches a barrier, so the publication stops
+existing. The column shifts are the position now attributed to the `return`
+statement rather than to the expression inside it.
+
+The audit passing on the merged tree against change 3's file is also the
+statement that **change 1 and change 2 introduce no frame-address publication at
+all** — had either done so, the file would not have matched.
+
+---
+
+# 5. The allocation census, twice
+
+`go test ./goc -run '^TestAllocationCensus$' -count=1 -v`, run twice back to
+back against the committed (regenerated) baseline. No `(cached)`.
+
+    run A   --- PASS: TestAllocationCensus (182.04s)
+    run B   --- PASS: TestAllocationCensus (181.03s)
+
+`sha256sum goc/testdata/alloc_census_baseline.txt` after each:
+
+    A  5e8ab8ef6a3f5637c9edafd3035814951d10c9f0d091434c9035a73f779fa8cf
+    B  5e8ab8ef6a3f5637c9edafd3035814951d10c9f0d091434c9035a73f779fa8cf
+
+Identical, and identical to what the `-update` run produced. **Stable.**
+
+---
+
+# 6. Determinism — 399/399 over 798 compiles
+
+    scripts/determinism-check.sh -corpus -rounds 2 -j 24
+
+    programs=399 rounds=2 workers=24 optimize=false pack=""
+    round 0: 399 programs in 112.9s, 0 failed
+    round 1: 399 programs in 111.4s, 0 failed
+    failed to compile: 0
+    content varies between rounds: 0
+    image varies, content identical (layout only): 0
+    reproducible=399 varying=0 failed=0 of 399 over 2 rounds
+
+`main`'s reference is 398/398 over 796 compiles. The corpus gained exactly one
+program — `goc/testdata/runtime_gc_stale_result_alloca.go`, change 1's reducer —
+and it is reproducible like the rest. Layout residue is 0. **No determinism
+regression.**
+
+`TestCompilingTheSameSourceTwiceGivesTheSameModule` (the front-end half of the
+same property) also PASSes, in 4.71 s.
+
+---
+
+# 7. Loop aliasing
+
+`TestLoopAliasExpectationsMatchTheHostToolchain` and
+`TestLoopBodyAllocationsAreDistinctPerIteration`, `-count=1 -v`, no `(cached)`:
+**all PASS**, including every `-O` subtest. Loop-aliasing programs still match
+the host toolchain.
+
+`loop_alias_frame_local.go`'s allocations are still in frame slots. The
+regenerated census records for it, in full:
+
+    testdata/loop_alias_frame_local.go:53:8  main.literalWithin  runtime.newobject  main_point  frame
+
+**One line, and it says `frame`. There is no `heap` line for that file.** On
+`main` the census had no line for it at all — change 2's front-end frame-slot
+recording is what makes the placement visible, so the merged tree states
+positively what `main` could only state by absence. `framed`'s `var a [2]int`
+and `consumedWithin`'s `x` are ordinary local variable slots, the category the
+census excludes by design, and neither has acquired an allocator.
+
+---
+
+# 10. The gc differential
+
+Regenerated from the merged tree (change 3 never regenerated it, so the merge
+result was `main`'s file plus change 2's, and neither was right).
+
+    coverage: 399 corpus programs, 395 compared, 1840 census rows joined,
+              3443 gc decisions joined, 0 gc diagnostics the parser did not know
+
+## The new confusion matrix
+
+      goc\gc      frame     heap    mixed   absent    total
+      frame         139       33       14      105      291
+      heap          134      573      173      168     1048
+      mixed          13       86       24       16      139
+      absent        402     1269       22        0     1693
+      total         688     1961      233      289     3171
+
+`main`, for comparison:
+
+      goc\gc      frame     heap    mixed   absent    total
+      frame          37        3        3       30       73
+      heap          172     1778      175      170     2295
+      mixed          14       56       30       13      113
+      absent        463      121       23        0      607
+      total         686     1958      231      213     3088
+
+## "goc heaps what gc keeps in a frame": 172 -> **134**
+
+It moved, downward, and it decomposes **exactly**. Extracting the `heap -> frame`
+key set from each tree's own differential:
+
+    main                                    172
+    change 2 alone                          164   (-8,  +0)
+    change 3 alone                          141   (-32, +1)
+    predicted composition                   134
+    integration/wave3, measured             134
+
+and not merely the same size — **the same 134 source lines, element for
+element**. Nothing in that cell is a surprise and nothing was introduced by the
+integration. Change 1 adds no line to it: its new corpus program contributes two
+differential entries, both `absent -> heap`.
+
+## The two big movements, and why neither is a defect
+
+`goc absent / gc heap` goes **121 -> 1269**, and PERMISSIVE with it, 236 -> 1448.
+**1142 of those 1269 are `panic("...")` lines** — gc heap-allocates the boxed
+string constant and goc, since change 3's "box a constant into an interface
+without allocating", allocates nothing at all. This is goc doing *less* than the
+reference, not goc keeping something in a frame that gc could not prove
+frame-safe. The `frame_escape_baseline` audit (item 4) is the check that would
+catch the dangerous reading of the same number, and it is clean.
+
+`goc heap / gc heap` goes **1778 -> 573**, and PESSIMISTIC 574 -> 528. That is
+the same fix plus change 3's four escape-precision defects, seen from the other
+side: a large block of lines where both compilers heaped now has goc allocating
+nothing.
+
+---
+
+# 9. The slog numbers, taken fresh
+
+    go test ./goc -run '^TestSlogAllocationsAgainstGC$' -slog-allocations -count=1 -v
+    --- PASS: TestSlogAllocationsAgainstGC (18.47s)   32 cases   no (cached)
+    host toolchain: go version go1.26.1 linux/arm64
+    measurement:    iterations=2000 rounds=5
+
+Then re-run with `-update-slog-allocations`: the file's SHA-256 is unchanged
+(`181eabab…`) and `git status` reports it clean, so the numbers below are the
+fresh measurement, not a re-read of a committed table.
+
+Every row, goc against gc, with `main` alongside (a/op; B/op in brackets):
+
+    case                      main a/op   NEW a/op    gc a/op   NEW B/op    gc B/op
+    control/empty-body             0.00       0.00       0.00        0.0        0.0
+    control/new-64-byte-object     1.00       1.00       1.00       64.0       64.0
+    control/any-int-small          0.00       0.00       0.00        0.0        0.0
+    control/any-int-large          1.00       1.00       1.00        8.0        8.0
+    control/any-bool               0.00       0.00       0.00        0.0        0.0
+    control/any-string-constant    1.00       0.00 *     0.00        0.0        0.0
+    control/any-string-variable    1.00       1.00       1.00       16.0       16.0
+    control/any-pointer            0.00       0.00       0.00        0.0        0.0
+    control/variadic-0-args        0.00       0.00       0.00        0.0        0.0
+    control/variadic-6-preboxed    0.00       0.00       0.00        0.0        0.0
+    control/variadic-6-literal     0.00       0.00       0.00        0.0        0.0
+    control/return-interface       0.00       0.00       0.00        0.0        0.0
+    control/return-int             0.00       0.00       0.00        0.0        0.0
+    control/context-background     0.00       0.00       0.00        0.0        0.0
+    control/handler-enabled        0.00       0.00       0.00        0.0        0.0
+    attr/slog.Int                  0.00       0.00       0.00        0.0        0.0
+    attr/slog.String               0.00       0.00       0.00        0.0        0.0
+    attr/slog.Bool                 0.00       0.00       0.00        0.0        0.0
+    attr/slog.Duration             0.00       0.00       0.00        0.0        0.0
+    attr/slog.Float64              0.00       0.00       0.00        0.0        0.0
+    info/1-attr                    1.00       0.00 *     0.00        0.0        0.0
+    info/3-attr                    1.00       0.00 *     0.00        0.0        0.0
+    info/5-attr                    1.00       0.00 *     0.00        0.0        0.0
+    info/6-attr                    2.00       1.00 *     1.00       48.0       48.0
+    info/3-attr-large-ints         1.00       1.00       3.00      128.0       24.0
+    logattrs/3-attr                1.00       0.00 *     0.00        0.0        0.0
+    logattrs/6-attr                3.00       2.00 *     1.00       96.0       48.0
+    disabled/no-attrs              0.00       0.00       0.00        0.0        0.0
+    disabled/3-attr                1.00       0.00 *     0.00        0.0        0.0
+    disabled/logattrs-3-attr       1.00       0.00 *     0.00        0.0        0.0
+    json/kv-4-pairs                5.00       5.00       2.00      256.0       24.0
+    json/logattrs-4-attrs          5.00       4.00 *     0.00       80.0        0.0
+
+    * = improved against main.   32 rows: 10 improved, 0 regressed, 22 unchanged.
+    28 of 32 rows are now at exact parity with gc on a/op (main: 21).
+
+**`info/5-attr` is 0.00 against gc's 0.00.** It was 1.00 / 288 B on `main`; it
+is now zero allocations and zero bytes, which is gc's number. So is
+`info/1-attr`, `info/3-attr`, `logattrs/3-attr`, `disabled/3-attr` and
+`disabled/logattrs-3-attr`. `info/6-attr` is at exact parity on both columns,
+1.00 / 48 B. Change 3's report claimed exactly these seven rows and every one of
+them reproduces here.
+
+**No row got worse, on either column.** Four rows remain off gc:
+
+    info/3-attr-large-ints   1.00 vs 3.00   goc allocates FEWER times than gc,
+                                            but 128 B against gc's 24 B
+    logattrs/6-attr          2.00 vs 1.00   96 B against 48 B
+    json/kv-4-pairs          5.00 vs 2.00   256 B against 24 B
+    json/logattrs-4-attrs    4.00 vs 0.00   80 B against 0 B
+
+All four improved or held against `main` (400->48, 336->96, 320->256, 240->80 B);
+none is a regression this integration introduced.
+
+---
+
+# 8. The GC reducer — `runtime_gc_type_mask_padding.go`
+
+The point of change 1. Both trees' binaries built once with
+`go run ./cmd/goc -o <bin> goc/testdata/runtime_gc_type_mask_padding.go`, then
+run **serially, one process at a time, on an idle box** (load average 4.6 and
+falling at the start; nothing else of this job's was running), `GOMAXPROCS=3` as
+the capability matrix sets it, 180 s timeout per run. A run counts as a pass
+only if it exits 0 *and* prints exactly `type mask padding ok`.
+
+**Both trees, both settings:**
+
+    tree                GOGC=10            GOGC default
+    main 6bb0           10/40 FAILED        0/20 failed
+    integration/wave3    0/40 failed        0/20 failed
+
+The `GOGC=10` figures are two independent blocks of 20, run in the order
+main-20, integration-20, main-20, integration-20:
+
+    main         block 1: 5/20 failed    block 2: 5/20 failed    -> 10/40
+    integration  block 1: 0/20 failed    block 2: 0/20 failed    ->  0/40
+
+**Change 1 fixes it.** `main`'s failure rate at `GOGC=10` reproduces at 25 %
+(10/40), close to the 6/40 the brief records and clearly non-zero; at that rate,
+40 clean runs on the integration tree would happen by chance about 1 time in
+700. Every `main` failure is the same defect, e.g.
+
+    runtime: pointer 0x5b7e718daca8 to unused region of span
+             span.base()=0x5b7e717e0000 span.limit=0x5b7e717e2000 span.state=1
+    runtime: found in object at *(0x5b7e7179fc90+0x208)
+    object=... s.state=mSpanManual
+
+— the same `+0x208` offset into an `mSpanManual` object on every one of the ten.
+
+At **default `GOGC` both trees are 0/20**, as the brief says: the defect only
+shows under aggressive collection, and change 1 does not disturb the default
+arm. `gc-invariants/type-mask-padding` also PASSes in both capability arms on
+both trees (item 2).
+
+For the record, and as the brief instructs: **`main` is 10/40 at `GOGC=10`, not
+0/20.** It fails, repeatedly and reproducibly.
+
+---
+
+# Summary
+
+| # | item | result |
+|---|---|---|
+| — | merge of the three branches | clean; 2 doc conflicts + 1 baseline conflict, all resolved |
+| — | root build artefacts | **clean** — no new ones; the four pre-existing left alone |
+| — | four generated baselines regenerated | census and differential changed; shadow and slog byte-identical |
+| — | census composition | 14 533 lines vs 14 530 predicted; **5-line residue, both cross-terms explained** |
+| 1 | `go test ./goc/...` | **1 FAIL** — 667 PASS / 1 FAIL / 4 SKIP vs main's 668 / 0 / 4 |
+| 2 | capability matrix, default arm | 366/366 PASS (main 365/365) |
+| 2 | capability matrix, `-O` arm | 365/366 — `stack-scan/loop-safepoints` **still fails**, as on main |
+| 3 | `make test-unit` | 1614 PASS / 0 FAIL (main 1607 / 0); +7 tests, all from the branches |
+| 4 | `TestFrameEscapeAudit` | **PASS, zero new publications**; 193 -> 192 entries |
+| 5 | allocation census x2 | PASS, PASS, byte-identical output |
+| 6 | determinism | **399/399 over 798 compiles**, 0 varying, 0 layout residue |
+| 7 | loop aliasing | PASS; `loop_alias_frame_local.go` framed, no heap line |
+| 8 | GC reducer at `GOGC=10` | **main 10/40 FAIL, integration 0/40** — change 1 works |
+| 8 | GC reducer at default `GOGC` | 0/20 on both |
+| 9 | slog table, fresh | 28/32 rows at gc parity (main 21); **`info/5-attr` 0.00 vs gc 0.00**; 0 regressions |
+| 10 | gc differential | goc-heaps-what-gc-frames **172 -> 134**, decomposes exactly |
+
+## The two things worth carrying forward
+
+**The `-O` arm was not fixed.** `stack-scan/loop-safepoints` fails on
+`integration/wave3` exactly as it fails on `main` — same slots, same object,
+same panic. None of the three branches touched it. The brief's hope that one of
+them had is not borne out.
+
+**One test is red, and it is a fixture, not a miscompile.**
+`TestCompileExecutableKeepsRuntimeSelectgoStackSliceHeadersOnStack` asserts
+`runtime.selectgo` makes *exactly one* `runtime.newobject` call, the
+send-on-closed panic box. Change 3 removed that allocation, so the count is 0 —
+better than the test demands. Reproduced on `ccwork/slog-residual-allocation`
+alone, so it is not a merge interaction; that branch's report says
+`go test ./goc/...` was not run there, which is why it shipped. The panic still
+carries its message under goc, checked against the host toolchain. The fix is
+`compile_test.go:483`, `!= 1` -> `> 1`, and per this job's brief it was
+diagnosed and **not applied**.
+
+## Verdict
+
+Every one of the ten items ran to completion and was watched to exit. Nothing is
+UNVERIFIED. The compiler evidence is good in every direction that matters: zero
+new frame-address publications, determinism intact at 399/399, no capability
+regression in either arm, the GC reducer's `GOGC=10` failure gone from 10/40 to
+0/40, ten slog rows improved and none regressed, and both regenerated baselines
+composing from the three branches' own reported deltas with a residue of five
+lines that are fully accounted for.
+
+But `go test ./goc/...` is red on the integration branch, and merging it would
+make `main` red.
+
+**NOT SAFE TO MERGE TO MAIN** — one test fails,
+`TestCompileExecutableKeepsRuntimeSelectgoStackSliceHeadersOnStack`, because
+`ccwork/slog-residual-allocation` improved `runtime.selectgo` past an exact-count
+assertion (`newobject calls = 0`, test wants exactly 1) without updating it. It
+is a one-character fixture change at `goc/compile_test.go:483` and no compiler
+defect was found behind it; with that one line changed, everything in this
+report says merge.
+
+---
+
+# Appendix — the three merged branches' own reports
+
 # Dead frame slots, and the direction the allocation record reports
 
 Branch `ccwork/dead-slots-and-census-direction`, off `main` (6b9fbb0).
