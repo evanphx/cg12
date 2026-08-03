@@ -1943,3 +1943,90 @@ while the front end stays conservative and its placement is what is emitted.
 
 Not run here, by instruction: `go test ./goc/...` as a whole, the capability
 matrix, and `make test-unit`. The dependent gate job runs those.
+
+---
+
+# Recovered: the `bigmod.Nat.Mul` cost of the escape publication fix
+
+**Provenance.** The text in §R1 below is verbatim from `CCWORK_REPORT.md` on
+branch `ccwork/escape-frame-publication`, section 5, "Cost: what moved, and one
+hot path that regresses". It was written by the job that landed 6245dbb ("goc:
+copying a value into fresh heap storage publishes it") and survives at that
+branch's head, ddd03eb. A later job consolidated `CCWORK_REPORT.md` into one
+document and dropped the section; "bigmod.Nat.Mul" appeared zero times in the
+file on `main` @ 9cdc2d8 before this restore. It is restored here because the
+reasoning in §R1.1 -- why the conservative fix was taken and the faster one
+declined -- is the expensive part and is not recoverable from the diff.
+
+Recover it yourself with:
+
+    git show origin/ccwork/escape-frame-publication:CCWORK_REPORT.md | sed -n '523,586p'
+
+The measurement in §R1 is **from 2 Aug 2026 and is stale**; §R2 re-measures it.
+Read §R1 for the reasoning, not for the number.
+
+## R1. Cost: what moved, and one hot path that regresses (verbatim, 6245dbb)
+
+
+Measured by compiling all 385 corpus programs with each compiler and counting,
+per function, frame allocations (`OAlloc*`, `OAllocN`) against allocator calls
+(`runtime.newobject`, `newarray`, `makeslice`, `mallocgc`, `makemap`,
+`makechan`, and any residual `OHeapAlloc`).
+
+    corpus totals   before: frame 9 735 484   heap 509 897
+                    after:  frame 9 735 471   heap 509 920
+
+**22 (program, function) allocation sites move from frame to heap. None moves
+the other way.** They are six distinct source sites, in eight distinct
+functions:
+
+| source site | functions | corpus programs |
+|---|---|---|
+| `bigmod/nat.go:939` `T := make([]uint, 0, preallocLimbs*2)` | `bigmod.Nat.Mul` | 10 |
+| `x509/verify.go:1059` `[]uint64{2,5,29,32,0}` in `var anyPolicyOID = mustNewOIDFromInts(...)` | 3 `initfunc`s | 8 |
+| `runtime_slice_pointer_append_gc.go:10` `make([]*record,0,4)` | `main.main` | 1 |
+| `runtime_debug_gc_controls.go:15` `make([]*int,0,128)` | `main.main` | 1 |
+| `stdlib_signal_during_gc.go:23` `make([]*int,1024)` | `main.main.func.17.5` | 1 |
+| `runtime_range_target_order.go:144,152` two `[]int{...}` literals | `main.targetAliasingTheRangeExpression` | 1 |
+
+Five of the six are the defect sites themselves. The sixth, the x509 one, is a
+new-but-correct answer: `mustNewOIDFromInts` does
+`panic(fmt.Sprintf("OIDFromInts(%v) unexpected error: %v", ints, err))`, so its
+parameter is boxed into a `[]any` on the panic path and the walk is right to
+stop. It is a package `init`, run once.
+
+**One hot path regresses: `bigmod.Nat.Mul`'s `default` arm, and therefore
+ECDSA.** 200 P-256 sign+verify round trips, `goc -O`, native arm64, eight runs
+alternating:
+
+    before  2.74 2.68 2.63 2.65 2.71 2.66 2.69 2.75   mean 2.689 s
+    after   2.87 2.86 2.81 2.81 2.87 2.87 2.85 2.81   mean 2.844 s
+
+**+5.8%.** The ranges do not overlap. `Nat.Mul` is the only changed function
+this program reaches, so the cause is unambiguous: one 512-byte
+`runtime.newobject` per call into the `default` arm, which P-256's four-limb
+scalar arithmetic takes. RSA is not affected -- it uses the specialised
+1024/1536/2048-bit arms, which allocate `T` the same way before and after.
+
+That cost is real and I am not hiding it, but the store it removes is a
+goroutine-stack address in a heap object, so the trade is not close.
+
+### R1.1 Why I did not take the faster fix
+
+There is a fix that would make `Nat.Mul` *faster* than the baseline rather than
+slower: `&Nat{limbs: T}` does not actually escape -- `Nat.Mod` only reads its
+`x`, and `addressEscapesWithin`, the walk `findEscapingCaptures` already uses
+for `&localVar`, says so. Teaching `nonEscapingAddress` that same question would
+keep the `Nat` in the frame *and* keep `T` in the frame, removing one heap
+allocation rather than adding one.
+
+I did not do it. It changes where `&T{...}` is placed for every composite
+literal address in the tree, in the permissive direction -- the direction
+2724ac7 and 9f76498 both got wrong -- and validating it means the whole matrix
+plus a search for the cases where `parameterDoesNotEscape` is optimistic. That
+is a separate change with a separate risk budget, and pairing it with a GC
+correctness fix would make both harder to review and harder to revert. The
+conservative rule shipped here is consistent by construction: element placement
+and literal placement are now decided by the *same* function, so they cannot
+disagree again whichever way that function is later made more precise.
+
