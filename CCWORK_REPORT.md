@@ -2033,3 +2033,21 @@ look like a consequence of this work — flagged explicitly because it is not mi
 `TestCheckedRuntimeCoverageBaseline` and
 `TestRuntimeCorpusCoverageReportsCategoryResources` all pass now.
 
+## The one way this fix could be wrong, checked directly
+
+Suppressing a word is only safe if nothing needs it. The thing that would need it
+is stack copying: `runtime.adjustframe` relocates exactly the frame words a
+safepoint's map marks, so dropping a word that holds an interior stack address
+would leave a stale old-stack pointer behind. Two things say it does not happen:
+
+- the fix keeps the allocation's **own address** in the map (the unit test pins
+  this: `{0}` remains, only `{2}` goes), so the spilled `&home` a growing stack
+  depends on is still relocated;
+- sixteen stack-copy-sensitive programs run under
+  **`GODEBUG=cg12checkstackcopy=1`**, which throws at a stale old-stack pointer
+  instead of leaving it to be found later: the five `slog_attr_frame_gcmask*`
+  programs (§28), `stack-growth`, `stack-copy-roots`, `assist-stack-growth`,
+  `finalizer-stack-growth`, `goroutine-closure-gc`, `goroutine-entry-stack-map`,
+  `many-defers-stack`, `many-goroutines-gc`, `defer-closure-stack-gc`, and both
+  reducers. **16/16 pass.**
+
