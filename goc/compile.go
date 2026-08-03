@@ -325,6 +325,7 @@ func compile(name string, src []byte, options compileOptions) (*ir.Module, error
 		runtimeAllocation:       compileRuntime,
 		typeTags:                typeTags,
 		functionDescriptors:     make(map[string]string),
+		summaryParents:          make(map[ast.Node]map[ast.Node]ast.Node),
 		literalData:             make(map[string]string),
 		contentSymbols:          make(map[string]string),
 		runtimeTypes:            runtimeTypes,
@@ -1623,6 +1624,19 @@ type gen struct {
 	// they point at, which is also what names them. Shared with derived
 	// generators, since derive copies the struct and so the map header.
 	functionDescriptors map[string]string
+	// summaryParents caches the parent map of each declaration a summary
+	// question is asked about. The walk asks the same callee's summary once per
+	// caller and once per argument position, and each question used to rebuild
+	// the callee's parent map from its whole declaration -- over the corpus,
+	// several times the program's own AST rebuilt to answer a few thousand
+	// distinct questions. A parent map is a pure function of the syntax it was
+	// built from and nothing writes into one after astParents returns, so
+	// keeping it is a compile-time saving and nothing else.
+	//
+	// Shared with derived generators, since derive copies the struct and so the
+	// map header, which is the point: the callers are in other functions and
+	// often in other packages.
+	summaryParents map[ast.Node]map[ast.Node]ast.Node
 	// literalData interns byte-valued data symbols by their contents, so a
 	// literal appearing twice is emitted once and is named the same way in
 	// every module that contains it.
@@ -2302,6 +2316,19 @@ func collectNoWriteBarrierFunctions(declarations map[*types.Func]functionDecl) m
 		})
 	}
 	return disabled
+}
+
+// declarationParents is astParents memoised per declaration. See
+// gen.summaryParents for why the same declaration is asked about many times.
+func (g *gen) declarationParents(declaration ast.Node) map[ast.Node]ast.Node {
+	if cached, ok := g.summaryParents[declaration]; ok {
+		return cached
+	}
+	parents := astParents(declaration)
+	if g.summaryParents != nil {
+		g.summaryParents[declaration] = parents
+	}
+	return parents
 }
 
 func astParents(root ast.Node) map[ast.Node]ast.Node {
@@ -3719,7 +3746,7 @@ func (g *gen) parameterDoesNotEscape(function *types.Func, index int, checking m
 	// reach the result, and a result of interface type boxes the value into
 	// fresh heap storage on the way out; boxedIntoInterface needs the
 	// signature to see that.
-	parents := astParents(declaration.decl)
+	parents := g.declarationParents(declaration.decl)
 	return g.objectDoesNotEscape(signature.Params().At(index), declaration.info, parents, declaration.decl.Body, checking)
 }
 
@@ -3764,7 +3791,7 @@ func (g *gen) parameterLeaksOnlyToResult(function *types.Func, index int, checki
 	// reach the result, and a result of interface type boxes the value into
 	// fresh heap storage on the way out; boxedIntoInterface needs the
 	// signature to see that.
-	parents := astParents(declaration.decl)
+	parents := g.declarationParents(declaration.decl)
 	answer := g.objectDoesNotEscape(signature.Params().At(index), declaration.info, parents, declaration.decl.Body, checking)
 	reportResultLeakSummary(function, index, answer)
 	return answer
@@ -3828,7 +3855,7 @@ func (g *gen) receiverDoesNotEscape(function *types.Func, checking map[parameter
 	// reach the result, and a result of interface type boxes the value into
 	// fresh heap storage on the way out; boxedIntoInterface needs the
 	// signature to see that.
-	parents := astParents(declaration.decl)
+	parents := g.declarationParents(declaration.decl)
 	return g.objectDoesNotEscape(signature.Recv(), declaration.info, parents, declaration.decl.Body, checking)
 }
 
