@@ -2041,3 +2041,44 @@ function-valued parameters.
   frames things the summary-fed IR analysis would still heap, so the recorded
   disagreements moved. Front-end placements in frames went 83.4% -> **83.9%**
   (165750 of 197518).
+
+## 4. The slog rows
+
+`slog_allocations_baseline.txt` had 4 of 32 rows off gc. Two of them moved on
+this branch:
+
+    json/kv-4-pairs        5.00 -> 3.00 allocs/op, 256.0 -> 208.0 B/op  (gc 2.00, 24.0)
+    json/logattrs-4-attrs  4.00 -> 2.00 allocs/op,  80.0 ->  32.0 B/op  (gc 0.00,  0.0)
+
+**Same causes.** Compiling `goc/testdata/slog_allocations/main.go` with the
+branch point's compiler and with this branch's, 24 heap sites in that program
+stopped being allocations, and they are the number-formatting buffers the JSON
+handler runs once per attribute:
+
+    internal/strconv.formatBits            newobject 65_byte   append(dst, a[i:]...)
+    internal/strconv.FormatInt/AppendUint  newobject 24_byte   same
+    time.Duration.String                   newobject 32_byte   string(buf[w:])
+    time.Time.Format                       newobject 64_byte
+    io/fs.FileMode.String                  newobject 32_byte   string(buf[:w])
+    log.itoa, runtime.appendIntStr         newobject 20_byte   append spread
+
+-- that is, exactly two of the causes behind the 134: append's spread operand
+and the []byte-to-string conversion.
+
+The residue is in the same families as the 134's remaining groups, not in new
+ones. In the program's own census, `json/kv-4-pairs`'s call site is one heap
+object, `struct_values__8_any__payload1_string__payload3_...` -- goc folds the
+`...any` backing array and the payloads it boxes into a single allocation, where
+gc frames the array and boxes each escaping value separately. The two remaining
+allocations in `json/logattrs-4-attrs` are 32 B in two objects, the size and
+shape of `log/slog.Value.Any`'s `newobject string` payloads: interface payloads,
+which goc has no frame form of (zero `convT64 ... frame` and zero
+`newobject <payload> frame` rows in the whole census).
+
+`info/3-attr-large-ints` is the same folding seen from the other side: goc 1.00
+alloc / 128 B against gc's 3.00 / 24 B. It is off gc and it is not a regression
+-- one combined object instead of three boxes.
+
+`logattrs/6-attr` (goc 2.00 / 48 B over gc's 1.00) is the variadic backing array
+for `...Attr`, which is the documented variadic-summary gap and is group G10
+below.

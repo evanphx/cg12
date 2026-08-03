@@ -57,5 +57,5 @@ logattrs/6-attr                      2.00       1.00       96.0       48.0
 disabled/no-attrs                    0.00       0.00        0.0        0.0
 disabled/3-attr                      0.00       0.00        0.0        0.0
 disabled/logattrs-3-attr             0.00       0.00        0.0        0.0
-json/kv-4-pairs                      5.00       2.00      256.0       24.0
-json/logattrs-4-attrs                4.00       0.00       80.0        0.0
+json/kv-4-pairs                      3.00       2.00      208.0       24.0
+json/logattrs-4-attrs                2.00       0.00       32.0        0.0
