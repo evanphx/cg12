@@ -25,15 +25,15 @@ host toolchain: go version go1.26.1 linux/arm64
 corpus programs                             390
 compared (host toolchain built them)        386
 not compared                                  4
-census rows joined                         2706
+census rows joined                         2716
 census rows lost to an unbuilt program       37
 census rows with no source position        1738  (never joinable)
   of those, in a corpus program's own code    31  (31 on the heap: the bound on how
                                                   wrong the join can be about goc)
 census rows outside the corpus directory  10189  (vendored stdlib; never joinable)
-gc decisions joined                        3388
+gc decisions joined                        3393
   of which synthesized by the chan rule     136
-gc decisions at an inlining call site       845  (excluded; see package gcdiff)
+gc decisions at an inlining call site       850  (excluded; see package gcdiff)
 gc diagnostics outside the program         3503  (excluded; wrappers and instantiations)
 gc diagnostics the parser did not know        0  (must be 0)
 
@@ -52,10 +52,10 @@ same as "it put the object in a frame" -- see gcdiff.Absent.
 
   goc\gc      frame     heap    mixed   absent    total
   frame          35        3        2       30       70
-  heap          179     1768      192      174     2313
+  heap          183     1769      192      174     2318
   mixed           3       54        8        7       72
   absent        457      119       23        0      599
-  total         674     1944      225      211     3054
+  total         678     1945      225      211     3059
 
 ## PERMISSIVE: 209 lines
 
@@ -69,20 +69,22 @@ not record ordinary front-end frame slots, so "no record" is consistent with
 by construct (goc allocators on the line | gc constructs on the line):
 
     108  - | object/heap
-     53  newobject/frame,newobject/heap | object/heap
+     52  newobject/frame,newobject/heap | object/heap
      22  - | object/frame,object/heap
      10  - | slice/heap
-      5  newobject/frame,newobject/heap | object/heap,slice/frame
+      4  convT64/heap,newobject/frame | object/heap,slice/frame
       3  newobject/frame | object/heap
       2  newobject/frame,newobject/heap | object/frame,object/heap,slice/frame
       1  - | object/heap,slice/heap
       1  - | slice/frame,slice/heap
+      1  convT64/heap,newobject/frame | object/heap
+      1  convT64/heap,newobject/frame,newobject/heap | object/heap,slice/frame
       1  newobject/frame | object/heap,slice/frame
       1  newobject/frame | slice/frame,slice/heap
       1  newobject/frame,newobject/heap | object/frame,object/heap
       1  newobject/frame,newobject/heap | object/heap,slice/heap
 
-allocation_counts.go:124	mixed -> heap
+allocation_counts.go:159	mixed -> heap
 	src  return func(times int) {
 	goc  col 9  frame  runtime.newobject  struct_code_uintptr__capture0_unsafe_Pointer  [main.main]
 	goc  col 9  heap  runtime.newobject  struct_code_uintptr__capture0_unsafe_Pointer  [main.repeat]
@@ -276,8 +278,8 @@ runtime_loopvar_three_clause.go:85	frame -> heap
 runtime_loopvar_value_shapes.go:25	mixed -> heap
 	src  for boxed := any(0); boxed.(int) < 3; boxed = boxed.(int) + 1 {
 	goc  col 6  frame  runtime.newobject  any  [main.main]
-	goc  col 19  heap  runtime.newobject  int  [main.main]
-	goc  col 62  heap  runtime.newobject  int  [main.main]
+	goc  col 19  heap  runtime.convT64  int  [main.main]
+	goc  col 62  heap  runtime.convT64  int  [main.main]
 	gc   col 19  heap  object  any(0)
 	gc   col 60  heap  object  boxed.(int) + 1
 runtime_loopvar_value_shapes.go:26	mixed -> mixed
@@ -295,10 +297,10 @@ runtime_loopvar_value_shapes.go:33	mixed -> heap
 	gc   col 61  heap  object  append
 runtime_loopvar_value_shapes.go:65	mixed -> mixed
 	src  for _, boxed := range []any{1, "two", true} {
-	goc  col 30  heap  runtime.newobject  int  [main.main]
+	goc  col 30  heap  runtime.convT64  int  [main.main]
 	goc  col 33  heap  runtime.newobject  string  [main.main]
+	goc  col 40  heap  runtime.convT64  bool  [main.main]
 	goc  col 40  frame  runtime.newobject  any  [main.main]
-	goc  col 40  heap  runtime.newobject  bool  [main.main]
 	gc   col 29  frame  slice  []any{...}
 	gc   col 30  heap  object  1
 	gc   col 33  heap  object  "two"
@@ -363,25 +365,25 @@ runtime_reflect_interface_method.go:14	absent -> heap
 runtime_reflect_make_values.go:8	mixed -> mixed
 	src  slice = reflect.Append(slice, reflect.ValueOf(17))
 	goc  col 25  frame  runtime.newobject  1_reflect_Value  [main.main]
-	goc  col 48  heap  runtime.newobject  int  [main.main]
+	goc  col 48  heap  runtime.convT64  int  [main.main]
 	gc   col 24  frame  slice  ... argument
 	gc   col 48  heap  object  17
 runtime_reflect_make_values.go:9	mixed -> mixed
 	src  slice = reflect.Append(slice, reflect.ValueOf(25))
 	goc  col 25  frame  runtime.newobject  1_reflect_Value  [main.main]
-	goc  col 48  heap  runtime.newobject  int  [main.main]
+	goc  col 48  heap  runtime.convT64  int  [main.main]
 	gc   col 24  frame  slice  ... argument
 	gc   col 48  heap  object  25
 runtime_reflect_map_slice.go:21	mixed -> mixed
 	src  slice = reflect.Append(slice, reflect.ValueOf(19))
 	goc  col 25  frame  runtime.newobject  1_reflect_Value  [main.main]
-	goc  col 48  heap  runtime.newobject  int  [main.main]
+	goc  col 48  heap  runtime.convT64  int  [main.main]
 	gc   col 24  frame  slice  ... argument
 	gc   col 48  heap  object  19
 runtime_reflect_map_slice.go:22	mixed -> mixed
 	src  slice = reflect.Append(slice, reflect.ValueOf(23))
 	goc  col 25  frame  runtime.newobject  1_reflect_Value  [main.main]
-	goc  col 48  heap  runtime.newobject  int  [main.main]
+	goc  col 48  heap  runtime.convT64  int  [main.main]
 	gc   col 24  frame  slice  ... argument
 	gc   col 48  heap  object  23
 runtime_reflect_value_instruction_op.go:53	absent -> heap
@@ -910,7 +912,7 @@ sync_pool_interface.go:43	absent -> heap
 	src  pool := sync.Pool{New: constructor}
 	gc   col 2  heap  object  pool
 
-## PESSIMISTIC: 563 lines
+## PESSIMISTIC: 567 lines
 
 every source line goc puts on the heap and gc does not. This is the
 performance direction and nothing worse: each line is an allocation, a zeroing
@@ -918,20 +920,27 @@ and a collector's attention that the reference implementation does not pay.
 
 by construct (goc allocators on the line | gc constructs on the line):
 
-    174  newobject/heap | -
-    123  newobject/heap | object/heap,slice/frame
-     81  newobject/heap | object/frame
-     53  newobject/heap | object/frame,object/heap
+    171  newobject/heap | -
+    122  newobject/heap | object/heap,slice/frame
+     64  newobject/heap | object/frame
+     52  newobject/heap | object/frame,object/heap
      47  newobject/heap | slice/frame
      35  makemap/heap | map/frame
+     19  convT64/heap | object/frame
      14  newobject/heap | object/frame,object/heap,slice/frame
-      8  newobject/heap | object/frame,slice/frame
       7  newobject/frame,newobject/heap | -
+      7  newobject/heap | object/frame,slice/frame
       5  makeslice/heap | slice/frame
-      5  newobject/frame,newobject/heap | object/heap,slice/frame
+      4  convT64/heap,newobject/frame | object/heap,slice/frame
+      3  convT64/heap | -
+      2  convT64/heap,newobject/heap | object/frame
       2  makemap/heap | object/frame
       2  newobject/frame,newobject/heap | object/frame,object/heap,slice/frame
       2  newobject/frame,newobject/heap | slice/frame
+      1  convT64/heap | object/frame,object/heap
+      1  convT64/heap | object/frame,slice/frame
+      1  convT64/heap,newobject/frame,newobject/heap | object/heap,slice/frame
+      1  convT64/heap,newobject/heap | object/heap,slice/frame
       1  makechan/heap | chan/heap,object/frame
       1  makemap/heap | map/frame,object/frame
       1  makemap/heap,newobject/frame | map/frame
@@ -942,37 +951,57 @@ adler32_marshal_loop.go:21	heap -> frame
 	src  appendedState, err := hash.(encoding.BinaryAppender).AppendBinary(make([]byte, 4, 32))
 	goc  col 85  heap  runtime.newobject  32_byte  [main.main]
 	gc   col 73  frame  slice  make([]byte, 4, 32)
-allocation_counts.go:35	heap -> mixed
+allocation_counts.go:52	heap -> mixed
 	src  func sprintfInt() { sinkString = fmt.Sprintf("value=%d", theInt) }
 	goc  col 46  heap  runtime.newobject  struct_values__1_any__payload0_int  [main.sprintfInt]
 	gc   col 45  frame  slice  ... argument
 	gc   col 58  heap  object  theInt
-allocation_counts.go:38	heap -> mixed
+allocation_counts.go:55	heap -> mixed
 	src  func sprintfString() { sinkString = fmt.Sprintf("value=%s", theString) }
 	goc  col 49  heap  runtime.newobject  struct_values__1_any__payload0_string  [main.sprintfString]
 	gc   col 48  frame  slice  ... argument
 	gc   col 61  heap  object  theString
-allocation_counts.go:41	heap -> mixed
+allocation_counts.go:58	heap -> mixed
 	src  func sprintfStruct() { sinkString = fmt.Sprintf("value=%v", theStruct) }
 	goc  col 49  heap  runtime.newobject  struct_values__1_any__payload0_main_pair  [main.sprintfStruct]
 	gc   col 48  frame  slice  ... argument
 	gc   col 61  heap  object  theStruct
-allocation_counts.go:67	heap -> frame
+allocation_counts.go:84	heap -> frame
 	src  func boxSmallInt() { sinkInt = takeAny(theInt) }
-	goc  col 40  heap  runtime.newobject  int  [main.boxSmallInt]
-	goc  col 40  heap  runtime.newobject  int  [main.boxSmallInt.gointernal.funcvalue.main_boxSmallInt_func___func.2bd20984f844d8b2]
+	goc  col 40  heap  runtime.convT64  int  [main.boxSmallInt]
+	goc  col 40  heap  runtime.convT64  int  [main.boxSmallInt.gointernal.funcvalue.main_boxSmallInt_func___func.2bd20984f844d8b2]
 	gc   col 40  frame  object  theInt
-allocation_counts.go:96	heap -> mixed
+allocation_counts.go:87	heap -> frame
+	src  func boxLargeInt() { sinkInt = takeAny(theLargeInt) }
+	goc  col 40  heap  runtime.convT64  int  [main.boxLargeInt]
+	goc  col 40  heap  runtime.convT64  int  [main.boxLargeInt.gointernal.funcvalue.main_boxLargeInt_func___func.a16c6e1c5cf183bb]
+	gc   col 40  frame  object  theLargeInt
+allocation_counts.go:90	heap -> frame
+	src  func boxBool() { sinkInt = takeAny(theBool) }
+	goc  col 36  heap  runtime.convT64  bool  [main.boxBool]
+	goc  col 36  heap  runtime.convT64  bool  [main.boxBool.gointernal.funcvalue.main_boxBool_func___func.0d8fc648ce25aec3]
+	gc   col 36  frame  object  theBool
+allocation_counts.go:93	heap -> frame
+	src  func boxFloat64() { sinkInt = takeAny(theFloat) }
+	goc  col 39  heap  runtime.convT64  float64  [main.boxFloat64]
+	goc  col 39  heap  runtime.convT64  float64  [main.boxFloat64.gointernal.funcvalue.main_boxFloat64_func___func.da0d1d2eb48b134f]
+	gc   col 39  frame  object  theFloat
+allocation_counts.go:96	heap -> frame
+	src  func boxString() { sinkInt = takeAny(theString) }
+	goc  col 38  heap  runtime.newobject  string  [main.boxString]
+	goc  col 38  heap  runtime.newobject  string  [main.boxString.gointernal.funcvalue.main_boxString_func___func.95d97f7d236f074b]
+	gc   col 38  frame  object  theString
+allocation_counts.go:131	heap -> mixed
 	src  sinkString = fmt.Sprintf("value=%d", theInt)
 	goc  col 28  heap  runtime.newobject  struct_values__1_any__payload0_int  [main.sprintfInLoop]
 	gc   col 27  frame  slice  ... argument
 	gc   col 40  heap  object  theInt
-allocation_counts.go:103	heap -> frame
+allocation_counts.go:138	heap -> frame
 	src  sinkInt = variadicInts(theInt, theInt)
 	goc  col 13  heap  runtime.newobject  2_int  [main.variadicIntsInLoop]
 	goc  col 13  heap  runtime.newobject  2_int  [main.variadicIntsInLoop.gointernal.funcvalue.main_variadicIntsInLoop_func_times_int__func_tim.df534ff08f4f4fc7]
 	gc   col 25  frame  slice  ... argument
-allocation_counts.go:123	heap -> absent
+allocation_counts.go:158	heap -> absent
 	src  func repeat(operation func()) func(int) {
 	goc  col 1  heap  runtime.newobject  func  [main.main]
 	goc  col 1  heap  runtime.newobject  func  [main.repeat]
@@ -1003,17 +1032,17 @@ gc_struct.go:25	heap -> frame
 	gc   col 13  frame  object  new(record)
 interface_slice_equality.go:4	heap -> frame
 	src  values := []any{1}
-	goc  col 18  heap  runtime.newobject  int  [main.main]
+	goc  col 18  heap  runtime.convT64  int  [main.main]
 	gc   col 17  frame  slice  []any{...}
 	gc   col 18  frame  object  1
 interface_slice_equality.go:6	heap -> frame
 	src  if value != values[0] {
-	goc  col 5  heap  runtime.newobject  int  [main.main]
+	goc  col 5  heap  runtime.convT64  int  [main.main]
 	gc   col 5  frame  object  1
 interface_slice_equality.go:9	heap -> frame
 	src  if value == any(2) {
-	goc  col 5  heap  runtime.newobject  int  [main.main]
-	goc  col 18  heap  runtime.newobject  int  [main.main]
+	goc  col 5  heap  runtime.convT64  int  [main.main]
+	goc  col 18  heap  runtime.convT64  int  [main.main]
 	gc   col 5  frame  object  1
 	gc   col 18  frame  object  any(2)
 nested_defer.go:13	heap -> absent
@@ -1156,7 +1185,7 @@ runtime_assign_target_forms.go:114	heap -> mixed
 	gc   col 38  heap  object  box.found
 runtime_assign_target_forms.go:116	heap -> frame
 	src  var boxed any = 11
-	goc  col 18  heap  runtime.newobject  int  [main.twoResultTargets]
+	goc  col 18  heap  runtime.convT64  int  [main.twoResultTargets]
 	gc   col 18  frame  object  11
 runtime_assign_target_forms.go:119	heap -> mixed
 	src  fmt.Sprintf("%d/%v", box.index, box.found), "11/true")
@@ -1281,7 +1310,7 @@ runtime_cleanup_stop.go:14	heap -> absent
 	goc  col 1  heap  runtime.newobject  chan_struct  [main.registerStoppedCleanup]
 runtime_closure_captured_header_values.go:47	heap -> absent
 	src  scalar = value + 1
-	goc  col 20  heap  runtime.newobject  int  [main.interfaceValues.func.46.18]
+	goc  col 20  heap  runtime.convT64  int  [main.interfaceValues.func.46.18]
 runtime_closure_captured_header_values.go:55	heap -> absent
 	src  text = "a" + suffix
 	goc  col 16  heap  runtime.newobject  string  [main.interfaceValues.func.54.16]
@@ -1293,7 +1322,7 @@ runtime_closure_captured_header_values.go:71	heap -> absent
 	goc  col 24  heap  runtime.newobject  struct_values__1_any__payload0_string  [main.interfaceValues.func.70.19]
 runtime_closure_captured_header_values.go:79	heap -> absent
 	src  counted = value
-	goc  col 13  heap  runtime.newobject  int  [main.interfaceValues.rangefunc.78.2]
+	goc  col 13  heap  runtime.convT64  int  [main.interfaceValues.rangefunc.78.2]
 runtime_closure_captured_header_values.go:93	heap -> mixed
 	src  fmt.Sprintf("%g %g", real(value), imag(value)), "3 4")
 	goc  col 15  heap  runtime.newobject  struct_values__2_any__payload0_float64__payload1  [main.complexValues]
@@ -1960,10 +1989,10 @@ runtime_loopvar_value_shapes.go:58	heap -> mixed
 	gc   col 79  heap  object  point.y
 runtime_loopvar_value_shapes.go:65	mixed -> mixed
 	src  for _, boxed := range []any{1, "two", true} {
-	goc  col 30  heap  runtime.newobject  int  [main.main]
+	goc  col 30  heap  runtime.convT64  int  [main.main]
 	goc  col 33  heap  runtime.newobject  string  [main.main]
+	goc  col 40  heap  runtime.convT64  bool  [main.main]
 	goc  col 40  frame  runtime.newobject  any  [main.main]
-	goc  col 40  heap  runtime.newobject  bool  [main.main]
 	gc   col 29  frame  slice  []any{...}
 	gc   col 30  heap  object  1
 	gc   col 33  heap  object  "two"
@@ -2133,7 +2162,7 @@ runtime_println_operand_separation.go:88	heap -> frame
 	gc   col 57  frame  map  map[int]int{}
 runtime_println_operand_separation.go:96	heap -> frame
 	src  empty = 42
-	goc  col 10  heap  runtime.newobject  int  [main.main]
+	goc  col 10  heap  runtime.convT64  int  [main.main]
 	gc   col 10  frame  object  42
 runtime_println_operand_separation.go:147	heap -> absent
 	src  defer os.Remove(file.Name())
@@ -2255,9 +2284,9 @@ runtime_range_target_forms.go:130	heap -> mixed
 	gc   col 64  heap  object  box.nested.text
 runtime_range_target_forms.go:134	heap -> mixed
 	src  boxed := []any{1, "x", true}
-	goc  col 17  heap  runtime.newobject  int  [main.sliceTargets]
+	goc  col 17  heap  runtime.convT64  int  [main.sliceTargets]
 	goc  col 20  heap  runtime.newobject  string  [main.sliceTargets]
-	goc  col 25  heap  runtime.newobject  bool  [main.sliceTargets]
+	goc  col 25  heap  runtime.convT64  bool  [main.sliceTargets]
 	gc   col 16  frame  slice  []any{...}
 	gc   col 17  heap  object  1
 	gc   col 20  heap  object  "x"
@@ -2268,7 +2297,7 @@ runtime_range_target_forms.go:137	heap -> frame
 	gc   col 26  frame  slice  ... argument
 runtime_range_target_forms.go:143	heap -> absent
 	src  for _, box.value = range numbers {
-	goc  col 9  heap  runtime.newobject  int  [main.sliceTargets]
+	goc  col 9  heap  runtime.convT64  int  [main.sliceTargets]
 runtime_range_target_forms.go:144	heap -> frame
 	src  observed += fmt.Sprintf("%v|", box.value)
 	goc  col 27  heap  runtime.newobject  1_any  [main.sliceTargets]
@@ -2573,13 +2602,13 @@ runtime_reflect_make_values.go:6	heap -> frame
 runtime_reflect_make_values.go:8	mixed -> mixed
 	src  slice = reflect.Append(slice, reflect.ValueOf(17))
 	goc  col 25  frame  runtime.newobject  1_reflect_Value  [main.main]
-	goc  col 48  heap  runtime.newobject  int  [main.main]
+	goc  col 48  heap  runtime.convT64  int  [main.main]
 	gc   col 24  frame  slice  ... argument
 	gc   col 48  heap  object  17
 runtime_reflect_make_values.go:9	mixed -> mixed
 	src  slice = reflect.Append(slice, reflect.ValueOf(25))
 	goc  col 25  frame  runtime.newobject  1_reflect_Value  [main.main]
-	goc  col 48  heap  runtime.newobject  int  [main.main]
+	goc  col 48  heap  runtime.convT64  int  [main.main]
 	gc   col 24  frame  slice  ... argument
 	gc   col 48  heap  object  25
 runtime_reflect_make_values.go:11	heap -> frame
@@ -2599,13 +2628,13 @@ runtime_reflect_map_slice.go:19	heap -> frame
 runtime_reflect_map_slice.go:21	mixed -> mixed
 	src  slice = reflect.Append(slice, reflect.ValueOf(19))
 	goc  col 25  frame  runtime.newobject  1_reflect_Value  [main.main]
-	goc  col 48  heap  runtime.newobject  int  [main.main]
+	goc  col 48  heap  runtime.convT64  int  [main.main]
 	gc   col 24  frame  slice  ... argument
 	gc   col 48  heap  object  19
 runtime_reflect_map_slice.go:22	mixed -> mixed
 	src  slice = reflect.Append(slice, reflect.ValueOf(23))
 	goc  col 25  frame  runtime.newobject  1_reflect_Value  [main.main]
-	goc  col 48  heap  runtime.newobject  int  [main.main]
+	goc  col 48  heap  runtime.convT64  int  [main.main]
 	gc   col 24  frame  slice  ... argument
 	gc   col 48  heap  object  23
 runtime_reflect_method_metadata.go:14	heap -> frame
@@ -2638,11 +2667,11 @@ runtime_reflect_value_indirect_call.go:29	heap -> frame
 	gc   col 11  frame  object  &reflectValueState{}
 runtime_reflect_value_indirect_call.go:30	heap -> frame
 	src  value := reflect.ValueOf(42)
-	goc  col 27  heap  runtime.newobject  int  [main.main]
+	goc  col 27  heap  runtime.convT64  int  [main.main]
 	gc   col 27  frame  object  42
 runtime_reflect_value_int.go:9	heap -> frame
 	src  value := reflect.ValueOf(42)
-	goc  col 27  heap  runtime.newobject  int  [main.main]
+	goc  col 27  heap  runtime.convT64  int  [main.main]
 	gc   col 27  frame  object  42
 runtime_scheduler_gc_churn.go:22	heap -> absent
 	src  worker := worker
@@ -2762,11 +2791,11 @@ runtime_sync_cond_rwmutex.go:7	heap -> absent
 	goc  col 2  heap  runtime.newobject  sync_Cond  [main.main]
 runtime_sync_map.go:11	heap -> frame
 	src  values.Delete(3)
-	goc  col 16  heap  runtime.newobject  int  [main.main]
+	goc  col 16  heap  runtime.convT64  int  [main.main]
 	gc   col 16  frame  object  3
 runtime_sync_map.go:12	heap -> frame
 	src  values.Delete(9)
-	goc  col 16  heap  runtime.newobject  int  [main.main]
+	goc  col 16  heap  runtime.convT64  int  [main.main]
 	gc   col 16  frame  object  9
 runtime_sync_map.go:14	heap -> absent
 	src  total := 0
@@ -2776,7 +2805,7 @@ runtime_sync_map.go:15	heap -> absent
 	goc  col 2  heap  runtime.newobject  int  [main.main]
 runtime_sync_map.go:27	heap -> frame
 	src  value, ok := values.Load(11)
-	goc  col 27  heap  runtime.newobject  int  [main.main]
+	goc  col 27  heap  runtime.convT64  int  [main.main]
 	gc   col 27  frame  object  11
 runtime_sync_mutex_defer.go:12	heap -> absent
 	src  defer mutex.Unlock()
@@ -2858,7 +2887,7 @@ runtime_type_param_method_shapes.go:218	heap -> mixed
 	gc   col 57  heap  object  &pointerCounterB{...}
 runtime_type_switch_pointer_values.go:17	heap -> mixed
 	src  values = append(values, index)
-	goc  col 27  heap  runtime.newobject  int  [main.main]
+	goc  col 27  heap  runtime.convT64  int  [main.main]
 	gc   col 18  frame  object  append
 	gc   col 27  heap  object  index
 runtime_type_switch_pointer_values.go:18	heap -> mixed
@@ -3285,7 +3314,7 @@ stdlib_signal_atomic_contention.go:32	heap -> frame
 	gc   col 32  frame  object  syscall.Signal(10)
 stdlib_signal_atomic_contention.go:39	heap -> frame
 	src  if received != syscall.SIGUSR1 {
-	goc  col 19  heap  runtime.newobject  syscall_Signal  [main.main]
+	goc  col 19  heap  runtime.convT64  syscall_Signal  [main.main]
 	gc   col 26  frame  object  syscall.Signal(10)
 stdlib_signal_during_gc.go:13	heap -> frame
 	src  signal.Notify(signals, syscall.SIGUSR1)
@@ -3305,7 +3334,7 @@ stdlib_signal_during_gc.go:29	heap -> frame
 	gc   col 23  frame  object  values
 stdlib_signal_during_gc.go:40	heap -> frame
 	src  if received != syscall.SIGUSR1 {
-	goc  col 19  heap  runtime.newobject  syscall_Signal  [main.main]
+	goc  col 19  heap  runtime.convT64  syscall_Signal  [main.main]
 	gc   col 26  frame  object  syscall.Signal(10)
 stdlib_signal_during_netpoll.go:16	heap -> absent
 	src  defer listener.Close()
@@ -3329,7 +3358,7 @@ stdlib_signal_during_netpoll.go:41	heap -> absent
 	goc  col 2  heap  runtime.newobject  struct_code_uintptr__function_func_c_chan___os_S  [main.main]
 stdlib_signal_during_netpoll.go:47	heap -> frame
 	src  if received != syscall.SIGUSR1 {
-	goc  col 18  heap  runtime.newobject  syscall_Signal  [main.main]
+	goc  col 18  heap  runtime.convT64  syscall_Signal  [main.main]
 	gc   col 25  frame  object  syscall.Signal(10)
 stdlib_signal_notify_context.go:13	heap -> frame
 	src  signal.Notify(signals, syscall.SIGUSR1)
@@ -3338,7 +3367,7 @@ stdlib_signal_notify_context.go:13	heap -> frame
 	gc   col 32  frame  object  syscall.Signal(10)
 stdlib_signal_notify_context.go:19	heap -> frame
 	src  if received != syscall.SIGUSR1 {
-	goc  col 18  heap  runtime.newobject  syscall_Signal  [main.main]
+	goc  col 18  heap  runtime.convT64  syscall_Signal  [main.main]
 	gc   col 25  frame  object  syscall.Signal(10)
 stdlib_signal_repeated_stop_reset.go:29	heap -> frame
 	src  signal.Notify(first, syscall.SIGUSR1)
@@ -3347,7 +3376,7 @@ stdlib_signal_repeated_stop_reset.go:29	heap -> frame
 	gc   col 30  frame  object  syscall.Signal(10)
 stdlib_signal_repeated_stop_reset.go:32	heap -> frame
 	src  waitForSignal(first, syscall.SIGUSR1)
-	goc  col 24  heap  runtime.newobject  syscall_Signal  [main.main]
+	goc  col 24  heap  runtime.convT64  syscall_Signal  [main.main]
 	gc   col 31  frame  object  syscall.Signal(10)
 stdlib_signal_repeated_stop_reset.go:36	heap -> frame
 	src  signal.Ignore(syscall.SIGUSR1)
@@ -3364,7 +3393,7 @@ stdlib_signal_repeated_stop_reset.go:46	heap -> frame
 	gc   col 31  frame  object  syscall.Signal(10)
 stdlib_signal_repeated_stop_reset.go:48	heap -> frame
 	src  waitForSignal(second, syscall.SIGUSR1)
-	goc  col 24  heap  runtime.newobject  syscall_Signal  [main.main]
+	goc  col 24  heap  runtime.convT64  syscall_Signal  [main.main]
 	gc   col 31  frame  object  syscall.Signal(10)
 stdlib_slices_string_sort.go:6	heap -> frame
 	src  keys := []string{"gamma", "alpha", "beta"}
@@ -3388,13 +3417,13 @@ stdlib_slog_structured.go:44	heap -> frame
 stdlib_slog_structured.go:47	heap -> frame
 	src  if record["component"] != "cg12" || record["success"] != true {
 	goc  col 28  heap  runtime.newobject  string  [main.main]
-	goc  col 59  heap  runtime.newobject  bool  [main.main]
+	goc  col 59  heap  runtime.convT64  bool  [main.main]
 	gc   col 28  frame  object  "cg12"
 	gc   col 59  frame  object  true
 stdlib_slog_structured.go:54	heap -> frame
 	src  if state["package"] != "runtime" || state["files"] != float64(42) {
 	goc  col 25  heap  runtime.newobject  string  [main.main]
-	goc  col 56  heap  runtime.newobject  float64  [main.main]
+	goc  col 56  heap  runtime.convT64  float64  [main.main]
 	gc   col 25  frame  object  "runtime"
 	gc   col 63  frame  object  42
 stdlib_smtp_session.go:15	heap -> absent

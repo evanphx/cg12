@@ -30,6 +30,31 @@ var heapAllocators = map[string]int{
 	"runtime.makemap_small": -1,
 }
 
+// conversionHelpers are the runtime entry points LowerHeapAllocations calls in
+// place of an allocator when a candidate that leaves the frame is an interface
+// payload it can build directly -- see ir.Block.HeapAllocConverted.
+//
+// They are counted as heap placements here, and are listed separately from
+// heapAllocators for two reasons. The first is mechanical: the call the pass
+// emits carries the value rather than a type descriptor, so the type has to come
+// from the AllocDecision instead of being read back out of the IR.
+//
+// The second is what a reader of this file needs to know. A conversion helper
+// allocates only for a value the runtime's static table cannot hold: the same
+// site is an allocation for one value and free for the next, and neither
+// "frame" nor "heap" is true of it on its own. The placement recorded is "heap"
+// because that is the escape decision -- the payload did not stay in the frame,
+// which is exactly what gc's -m reports at the same source line -- and the
+// allocator column names the helper, so the nuance is on the line rather than
+// lost. Dropping these sites instead was measured: it removed 552 rows and moved
+// 33 corpus lines into the gc differential's permissive set, which is the set
+// that is supposed to mean "goc framed something gc could not".
+var conversionHelpers = map[string]bool{
+	"runtime.convT16": true,
+	"runtime.convT32": true,
+	"runtime.convT64": true,
+}
+
 // Allocation is one allocation site in a compiled module together with where
 // the object it allocates was placed.
 //
@@ -125,10 +150,13 @@ func AllocationCensus(module *ir.Module) []Allocation {
 	}
 
 	for _, decision := range module.AllocDecisions {
-		if decision.Placement != ir.AllocInFrame {
+		if decision.Placement != ir.AllocInFrame && !conversionHelpers[decision.Allocator] {
 			// Heap placements are read out of the finished IR below, so that a
 			// candidate lowered to a call and a call the front end emitted itself
-			// produce the same record rather than two spellings of one site.
+			// produce the same record rather than two spellings of one site. A
+			// conversion helper is the exception: its call carries the value
+			// instead of a type descriptor, so this is the only place the type
+			// still exists.
 			continue
 		}
 		record(Allocation{
@@ -137,7 +165,7 @@ func AllocationCensus(module *ir.Module) []Allocation {
 			File:      module.FileName(decision.Pos.File),
 			Allocator: decision.Allocator,
 			Type:      AllocationTypeName(decision.Type),
-			Placement: ir.AllocInFrame,
+			Placement: decision.Placement,
 		})
 	}
 

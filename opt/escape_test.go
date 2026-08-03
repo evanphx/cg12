@@ -583,3 +583,34 @@ func TestLowerHeapAllocationsIgnoresAConversionWithoutItsStore(t *testing.T) {
 	assert.Equal(t, []ir.Ref{function.Sym("runtime.newobject", 0), function.Sym("type.int", 0)},
 		block.Instrs[0].Args, "an unrecognised shape falls back to the allocator")
 }
+
+// The census cannot read a conversion helper's type back out of the finished
+// IR: the call carries the value where an allocator call carries a type
+// descriptor. The decision record is the only place it survives, so the
+// lowering has to write the helper and the type into it.
+func TestLowerHeapAllocationsRecordsTheConversionHelperAsTheAllocator(t *testing.T) {
+	module := ir.NewModule()
+	function := module.NewFunc("escape", ir.ClsP)
+	block := function.Entry()
+	value := function.Long(42)
+	object := block.HeapAllocConverted(
+		function.Sym("runtime.newobject", 0),
+		function.Sym("type.int", 0),
+		function.Sym("runtime.convT64", 0),
+		value, 8, 8)
+	block.Store(value, object)
+	block.Ret(object)
+
+	require.True(t, LowerHeapAllocations(module))
+	require.Len(t, module.AllocDecisions, 1)
+	decision := module.AllocDecisions[0]
+	assert.Equal(t, "runtime.convT64", decision.Allocator)
+	assert.Equal(t, "type.int", decision.Type)
+	assert.Equal(t, ir.AllocOnHeap, decision.Placement,
+		"the payload left the frame, which is the decision this record is about")
+
+	census := AllocationCensus(module)
+	require.Len(t, census, 1, "a conversion site is a census site; dropping it hides a whole class")
+	assert.Equal(t, "runtime.convT64", census[0].Allocator)
+	assert.Equal(t, ir.AllocOnHeap, census[0].Placement)
+}

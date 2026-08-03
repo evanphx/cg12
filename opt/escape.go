@@ -484,12 +484,17 @@ func rewriteHeapAllocations(function *ir.Func, analysis *candidateEscapes, loopB
 				continue
 			}
 			if escaped[instruction.To.ID] {
-				recordAllocDecision(decisions, function, original, ir.AllocOnHeap, loopBlocked[instruction.To.ID])
 				if convertsItsObject(original) && initializesCandidate(block, index+1, original.To) {
 					// The helper returns storage already holding the value, so
 					// the initializing store has nothing left to do -- and must
 					// not run, because for a small value the helper hands back a
 					// pointer into a read-only table.
+					//
+					// The decision is recorded against the helper rather than
+					// against the allocator the candidate also carries, because
+					// the allocator is now the road not taken and the census has
+					// no other way to know which sites these are.
+					recordConvertedAllocDecision(decisions, function, original, loopBlocked[instruction.To.ID])
 					droppedStore = index + 1
 					instruction.Op = ir.OCall
 					instruction.Args = []ir.Ref{original.Args[3], original.Args[4]}
@@ -497,6 +502,7 @@ func rewriteHeapAllocations(function *ir.Func, analysis *candidateEscapes, loopB
 					lowered = append(lowered, instruction)
 					continue
 				}
+				recordAllocDecision(decisions, function, original, ir.AllocOnHeap, loopBlocked[instruction.To.ID])
 				instruction.Op = ir.OCall
 				instruction.Args = instruction.Args[:2]
 				instruction.Aux = 0
@@ -584,6 +590,25 @@ func recordAllocDecision(decisions *[]ir.AllocDecision, function *ir.Func, candi
 		Allocator:     constSymbolName(function, candidate.Args[0]),
 		Type:          constSymbolName(function, candidate.Args[1]),
 		Placement:     placement,
+		BlockedByLoop: blockedByLoop,
+	})
+}
+
+// recordConvertedAllocDecision notes a candidate that left the frame and was
+// built by its conversion helper rather than by an allocator. The placement is
+// AllocOnHeap because the object did not stay in the frame, which is the
+// decision this record is about; whether the helper allocates for a given value
+// is up to the value, and opt.conversionHelpers is where that is written down.
+func recordConvertedAllocDecision(decisions *[]ir.AllocDecision, function *ir.Func, candidate ir.Instr, blockedByLoop bool) {
+	if decisions == nil {
+		return
+	}
+	*decisions = append(*decisions, ir.AllocDecision{
+		Func:          function.Name,
+		Pos:           candidate.Pos,
+		Allocator:     constSymbolName(function, candidate.Args[3]),
+		Type:          constSymbolName(function, candidate.Args[1]),
+		Placement:     ir.AllocOnHeap,
 		BlockedByLoop: blockedByLoop,
 	})
 }
