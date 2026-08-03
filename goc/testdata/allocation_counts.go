@@ -329,6 +329,34 @@ func declareInterfaceFromPointer() {
 	}
 }
 
+// link is a two-node chain written as one nested literal, which is the shape
+// the row below is about.
+type link struct {
+	value int
+	next  *link
+}
+
+// nestedCompositeLiteralAddress writes an address into a struct literal that is
+// itself behind an address. The inner object lives wherever the outer one does,
+// so both are frame storage or neither is.
+//
+//go:noinline
+func nestedCompositeLiteralAddress() {
+	root := &link{value: theInt, next: &link{value: 2}}
+	sinkInt = root.value + root.next.value
+}
+
+// appendFromSpreadSource appends a slice to itself. The elements are copied out
+// of the spread operand, so the operand's backing array is not retained by the
+// call and does not have to outlive the frame.
+//
+//go:noinline
+func appendFromSpreadSource() {
+	values := []int{1, 2, 3, 4}
+	values = append(values[:1], values[2:]...)
+	sinkInt = len(values)
+}
+
 const iterations = 1000
 
 // measure runs the operation `iterations` times after a warm-up of the same
@@ -381,6 +409,8 @@ func main() {
 	measure("range_slice_literal", repeat(rangeSliceLiteral))
 	measure("compare_byte_slice_as_string", repeat(compareByteSliceAsString))
 	measure("declare_interface_from_pointer", repeat(declareInterfaceFromPointer))
+	measure("nested_composite_literal_address", repeat(nestedCompositeLiteralAddress))
+	measure("append_from_spread_source", repeat(appendFromSpreadSource))
 	measure("sprintf_in_loop", sprintfInLoop)
 	measure("variadic_ints_in_loop", variadicIntsInLoop)
 }

@@ -174,6 +174,15 @@ var gocAllocationCounts = []struct {
 	// other spelling -- was answered. Nothing is boxed here: a pointer is its own
 	// interface payload.
 	{"declare_interface_from_pointer", 0, 0, "a var declaration answers what an assignment answers"},
+	// An address written into a struct literal that is itself behind an address.
+	// The inner object lives wherever the outer one does, so the question is the
+	// outer literal's -- which nonEscapingAddressWithin can answer, and had no
+	// case for. `root := &item{next: &item{...}}` cost one allocation per link.
+	{"nested_composite_literal_address", 0, 0, "an element of a struct literal lives where the literal does"},
+	// append copies the elements out of its `xs...` operand, so the operand's
+	// backing array is not retained. The walk had no case for the spread
+	// position and fell through to "the callee is a builtin, so who knows".
+	{"append_from_spread_source", 0, 0, "append reads its spread operand and does not keep it"},
 	// The two rows written inside a loop body. opt.promotionsBlockedByALoop
 	// refuses to promote an allocation in a loop, because a frame slot is one
 	// object and each iteration may need its own -- see

@@ -2367,6 +2367,24 @@ func (g *gen) nonEscapingAddressWithin(
 		case *ast.SelectorExpr:
 			selection := info.Selections[parent]
 			return parent.X == current && selection != nil && selection.Kind() == types.FieldVal
+		case *ast.KeyValueExpr:
+			if parent.Value != current {
+				return false
+			}
+			current = parent
+		case *ast.CompositeLit:
+			// The pointer is written into the literal's storage, so the object
+			// it points at has to outlive whatever that storage is and nothing
+			// more. compositeElementDoesNotEscape hands the question on only
+			// for a struct or array literal, where the literal's value *is* the
+			// storage; a slice or map literal has backing storage of its own
+			// whose placement is decided at its own site.
+			//
+			// This is the `root := &item{index: i, next: &item{index: i + 1}}`
+			// shape. Without it the inner address had no case here and took the
+			// conservative answer, so a linked pair that gc keeps entirely in
+			// the frame cost one allocation per link.
+			return g.compositeElementDoesNotEscape(parent, info, parents, body, checking)
 		default:
 			return false
 		}
@@ -2769,6 +2787,9 @@ func (g *gen) valueDoesNotEscapeWithin(
 				current = parent
 				continue
 			}
+			if appendSpreadSource(parent, current, info) {
+				return true
+			}
 			if info.Types[parent.Fun].IsType() {
 				if expression, isExpression := current.(ast.Expr); isExpression &&
 					conversionCopiesOperand(parent, expression, info) {
@@ -2853,6 +2874,23 @@ func (g *gen) leakedCallResultDoesNotEscape(
 
 func singleResultFunction(function *types.Func) bool {
 	return function.Type().(*types.Signature).Results().Len() == 1
+}
+
+// appendSpreadSource reports that an argument is the `xs...` operand of an
+// append: the elements are copied out of it into the destination's backing
+// array, so the operand's own storage is not retained by the call. What the
+// elements *point at* does become reachable from the destination, but that is a
+// question about those objects and not about this one.
+func appendSpreadSource(call *ast.CallExpr, argument ast.Node, info *types.Info) bool {
+	if call.Ellipsis == token.NoPos || len(call.Args) != 2 || call.Args[1] != argument {
+		return false
+	}
+	identifier, isIdentifier := call.Fun.(*ast.Ident)
+	if !isIdentifier {
+		return false
+	}
+	builtin, isBuiltin := info.Uses[identifier].(*types.Builtin)
+	return isBuiltin && builtin.Name() == "append"
 }
 
 // appendDestination reports that expression is the destination slice of an
@@ -3495,6 +3533,9 @@ func (g *gen) nonEscapingObjectUse(
 		}
 		if appendDestination(parent, identifier, info) {
 			return g.valueDoesNotEscapeWithin(parent, info, parents, body, checking)
+		}
+		if appendSpreadSource(parent, identifier, info) {
+			return true
 		}
 		if info.Types[parent.Fun].IsType() {
 			convertedType := info.Types[parent].Type
