@@ -93,12 +93,6 @@ func LowerHeapAllocationsWithFacts(module *ir.Module, facts *EscapeFacts) bool {
 
 func lowerHeapAllocations(module *ir.Module, facts *EscapeFacts) bool {
 	byName := moduleFuncsByName(module, facts)
-	if diagFacts != "" {
-		for _, function := range module.Funcs {
-			diagFuncs[function.Name] = function
-		}
-		diagDumpFacts(facts)
-	}
 	changed := false
 	for _, function := range module.Funcs {
 		if function.Start == nil {
@@ -205,7 +199,6 @@ func lowerFunctionHeapAllocations(function *ir.Func, byName map[string]*ir.Func,
 	if len(seeds) == 0 {
 		return false
 	}
-	diagCandidates(function, byName, facts, seeds)
 	escapes := analyzeCandidateEscapes(function, byName, facts, seeds, false)
 	blocked := promotionsBlockedByALoop(function, seeds, escapes)
 	// After the loop rule, because the loop rule is one of the ways a payload
