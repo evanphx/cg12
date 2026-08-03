@@ -3497,8 +3497,10 @@ the callee's own deep answer for that position, is a second walk with a
 `deep` mode -- the AST equivalent of `opt.ParamFact.Deep`. Every rule in the
 existing walk that answers "this use carries nothing" has to be re-answered for
 it, because most of them are true of the object and false of its contents. That
-is a piece of work of its own, and the same machinery is what G12 (aggregate
-copies) needs; it is written up under "What is irreducible" below.
+is a piece of work of its own. It is also what `logattrs/6-attr` in the slog
+table needs: `Record.AddAttrs` ranges over its `...Attr` with a value variable
+and copies each element into `r.front`, which retains nothing -- and a range with
+a value variable is exactly what the whitelist refuses.
 
 Row: `address_into_a_non_retaining_variadic` 1.00 -> 0 (gc 0).
 `variadic_element_address_retention.go`'s `local` is still on the heap, and the
@@ -3748,3 +3750,48 @@ already in the frame.
 
     allocation_counts.go:273  runtime_range_target_forms.go:137, :144
 
+
+# The four slog rows
+
+`slog_allocations_baseline.txt` still has 4 of 32 rows off gc. Two of them cost
+one allocation more than they did at the branch point, and that is this branch's
+receiver-retention fix.
+
+    case                    goc a/op   gc a/op   goc B/op   gc B/op
+    info/3-attr-large-ints      1.00      3.00      128.0      24.0
+    logattrs/6-attr             2.00      1.00       96.0      48.0
+    json/kv-4-pairs             4.00      2.00      272.0      24.0   (was 3.00 / 208.0)
+    json/logattrs-4-attrs       3.00      0.00       96.0       0.0   (was 2.00 /  32.0)
+
+**Are they among the groups? Three of the four causes are, and one is not a
+defect at all.**
+
+- **`info/3-attr-large-ints` -- not a defect, and not a group.** goc allocates
+  *fewer* than gc: one combined object for the `...any` backing array and its
+  boxed payloads, where gc frames the array and boxes each large int separately.
+  128 B in one allocation against 24 B in three. It is off gc in the direction
+  nobody needs to chase.
+
+- **`logattrs/6-attr` -- the deep variadic question, which this branch opened but
+  did not finish.** The `[6]Attr` backing array goes to the heap because
+  `variadicParameterHoldsItsElements` refuses `Record.AddAttrs`, whose body
+  ranges over the parameter with a value variable. That refusal is correct for
+  the narrow rule and wrong about this callee, which copies each element into
+  `r.front` and retains nothing. It needs the wider rule described above.
+
+- **`json/kv-4-pairs` and `json/logattrs-4-attrs` -- G4 plus G8, and now the two
+  of them together.** The base cost is G4: `kv-4-pairs`'s call site is one heap
+  object, `struct_values__8_any__payload1_string__payload3_...`, because goc has
+  no frame form for an interface payload and folds the array and the payloads it
+  boxes into one allocation; `logattrs-4-attrs`'s two allocations are 32 B of
+  `log/slog.Value.Any` string payloads, the same cause. The **+64 B, +1
+  allocation each** on this branch is `log/slog.handleState`, which is 64 bytes
+  and moved to the heap when an immediately called method stopped being free.
+  It is G8: `appendAttr` and `appendAttrs` are mutually recursive, so the
+  summary's cycle-breaking answer is the only one available for the receiver,
+  and the optimistic assumption that would fix it is the one the frame-escape
+  audit refuted -- on this exact object.
+
+So: **not a separate cause.** `handleState` is G8, the JSON base cost is G4,
+`logattrs/6-attr` is the variadic element question, and `info/3-attr-large-ints`
+is goc being ahead.
