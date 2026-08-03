@@ -29,38 +29,38 @@ measurement:    iterations=2000 rounds=5
 case                             goc a/op    gc a/op   goc B/op    gc B/op
 control/empty-body                   0.00       0.00        0.0        0.0
 control/new-64-byte-object           1.00       1.00       64.0       64.0
-control/any-int-small                1.00       0.00        8.0        0.0
+control/any-int-small                0.00       0.00        0.0        0.0
 control/any-int-large                1.00       1.00        8.0        8.0
-control/any-bool                     1.00       0.00        1.0        0.0
+control/any-bool                     0.00       0.00        0.0        0.0
 control/any-string-constant          1.00       0.00       16.0        0.0
 control/any-string-variable          1.00       1.00       16.0       16.0
 control/any-pointer                  0.00       0.00        0.0        0.0
 control/variadic-0-args              0.00       0.00        0.0        0.0
-control/variadic-6-preboxed          1.00       0.00       96.0        0.0
-control/variadic-6-literal           1.00       0.00      176.0        0.0
-control/return-interface             1.00       0.00       16.0        0.0
+control/variadic-6-preboxed          0.00       0.00        0.0        0.0
+control/variadic-6-literal           0.00       0.00        0.0        0.0
+control/return-interface             0.00       0.00        0.0        0.0
 control/return-int                   0.00       0.00        0.0        0.0
-control/context-background           1.00       0.00       16.0        0.0
-control/handler-enabled              1.00       0.00       16.0        0.0
-attr/slog.Int                        1.00       0.00        8.0        0.0
+control/context-background           0.00       0.00        0.0        0.0
+control/handler-enabled              0.00       0.00        0.0        0.0
+attr/slog.Int                        0.00       0.00        0.0        0.0
 attr/slog.String                     0.00       0.00        0.0        0.0
-attr/slog.Bool                       1.00       0.00        8.0        0.0
-attr/slog.Duration                   1.00       0.00        8.0        0.0
-attr/slog.Float64                    1.00       0.00        8.0        0.0
-info/1-attr                          5.00       0.00      120.0        0.0
-info/3-attr                          7.00       0.00      248.0        0.0
-info/5-attr                          9.00       0.00      376.0        0.0
-info/6-attr                         11.00       1.00      496.0       48.0
-info/3-attr-large-ints               7.00       3.00      248.0       24.0
-logattrs/3-attr                      6.00       0.00      184.0        0.0
-logattrs/6-attr                     11.00       1.00      416.0       48.0
-disabled/no-attrs                    2.00       0.00       32.0        0.0
-disabled/3-attr                      3.00       0.00      208.0        0.0
-disabled/logattrs-3-attr             5.00       0.00      168.0        0.0
+attr/slog.Bool                       0.00       0.00        0.0        0.0
+attr/slog.Duration                   0.00       0.00        0.0        0.0
+attr/slog.Float64                    0.00       0.00        0.0        0.0
+info/1-attr                          1.00       0.00       64.0        0.0
+info/3-attr                          1.00       0.00      176.0        0.0
+info/5-attr                          1.00       0.00      288.0        0.0
+info/6-attr                          2.00       1.00      400.0       48.0
+info/3-attr-large-ints               1.00       3.00      176.0       24.0
+logattrs/3-attr                      1.00       0.00      128.0        0.0
+logattrs/6-attr                      3.00       1.00      336.0       48.0
+disabled/no-attrs                    0.00       0.00        0.0        0.0
+disabled/3-attr                      1.00       0.00      176.0        0.0
+disabled/logattrs-3-attr             1.00       0.00      128.0        0.0
 json/kv-4-pairs                     crash       2.00      crash       24.0
 json/logattrs-4-attrs               crash       0.00      crash        0.0
 
 cases that did not run:
 
   json/kv-4-pairs                goc  fatal error: invalid pointer found on stack (runtime: bad pointer in frame log_slog_handleState_appendAttr at 0x?: 0xc8)
-  json/logattrs-4-attrs          goc  fatal error: invalid pointer found on stack (runtime: bad pointer in frame main_func_304_28 at 0x?: 0x3)
+  json/logattrs-4-attrs          goc  fatal error: invalid pointer found on stack (runtime: bad pointer in frame main_func_311_28 at 0x?: 0x3)
