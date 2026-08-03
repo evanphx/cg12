@@ -3262,3 +3262,41 @@ This gate's branch is pushed as **`origin/integration/wave4-gate`** (and mirrore
 else's branch was not this job's call.
 
 NOT SAFE TO MERGE TO MAIN -- `go test ./goc/...` fails on `TestDeriveClassifiesEveryGenField`, because `ccwork/parity-remaining-134` added the `gen` field `summaryParents` without adding it to `fullyPopulatedGen()` and `wholeCompilationGenFields` in `goc/derive_test.go`; every other item passed and the fix is two lines in that test file.
+
+# parity-113 (branch ccwork/parity-113, off d113d4a)
+
+Task: close as much as remains of the 113 lines where goc heaps what gc frames;
+settle the variadic-summary question; say whether the 4 slog rows are the same
+causes; record what is irreducible.
+
+## Instrument
+
+A scratch driver compiles the 71 corpus files that carry the 113 lines and
+prints `opt.AllocationCensusWith(..., IncludeFrontEndFrameSlots: true)` plus
+`opt.FrameEscapes` for each. Scoring "how many of the 113 lines still carry only
+heap rows" against it **reproduces 113/113 exactly** and takes 32 s, against
+181 s for a full census regeneration and a further 11 s for the differential. It
+is used below to bound each candidate fix before writing it, and every number it
+produces is confirmed at the end by regenerating the committed census and
+differential for real.
+
+## Correction to the previous classification: G9 is the loop rule, not variadic
+
+The previous job filed three lines under "a variadic parameter has no summary":
+
+    allocation_counts.go:273        sinkInt = variadicInts(theInt, theInt)
+    runtime_range_target_forms.go:137/144   observed += fmt.Sprintf("%v|", box.value)
+
+All three carry `BlockedByLoop` on their allocation decision. They are the loop
+rule -- `opt.promotionsBlockedByALoop` -- and not the summary gap. The proof is
+in the corpus itself: `allocation_counts.go:67`
+
+    func callVariadicInts() { sinkInt = variadicInts(theInt, theInt) }
+
+is the *same call* outside a loop and the census already places its `[2]int`
+backing array **in the frame**. Line 273 is that call inside a `for`, and the
+census places it on the heap. Nothing about the variadic summary differs between
+the two lines.
+
+Every one of the 113 was checked for this: joining `ir.AllocDecision.BlockedByLoop`
+against the 113 lines gives exactly those three and no others.
