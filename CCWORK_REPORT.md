@@ -464,7 +464,14 @@ written not to:
    framed array might cost two. A profile-free improvement would need to know
    the values; a profile-guided one would not.
 
-4. **The `slog.Attr` frame pointer map is still wrong.** Both reductions still
+4. **The gc differential's pessimism headline cannot see this change.** A
+   `convT` site is recorded as heap because the payload left the frame, so a
+   `fmt.Sprintf("%d", n)` line stays pessimistic while its cost halves. Splitting
+   the record into "left the frame" and "called an allocator" would let the file
+   say which of the 573 lines cost anything, and 552 of them are conversion
+   sites.
+
+5. **The `slog.Attr` frame pointer map is still wrong.** Both reductions still
    reproduce at this HEAD and `json/logattrs-4-attrs` still dies. `json/kv-4-pairs`
    running again is a layout coincidence, not a fix, and it will stop being one.
 
@@ -474,8 +481,8 @@ written not to:
 It was 2.00. The `[1]any` is a frame slot, which is where gc has always kept it,
 and the one allocation both compilers pay is the result string.
 
-**`log/slog` is unchanged: `info/5-attr` 1.00 against gc's 0.00, `disabled/3-attr`
-1.00 against gc's 0.00.** Thirty-one of the thirty-two slog rows are byte-identical
+**`log/slog` is unchanged: `info/5-attr` 1.00 against gc's 0.00,
+`disabled/3-attr` 1.00 against gc's 0.00.** Thirty-one of the thirty-two slog rows are byte-identical
 to the base commit. That is a result rather than a non-result: the build that
 split unconditionally measured `info/3-attr-large-ints` at 4.00 against gc's 3.00,
 and the fold-back is what holds slog level while `fmt` improves. slog's array
