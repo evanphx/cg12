@@ -184,6 +184,7 @@ stdlib/src/net/http/h2_bundle.go:11037:49	net/http.http2writePushPromise.writeFr
 stdlib/src/net/http/h2_bundle.go:4404:10	net/http.http2Server.ServeConn	composite-literal	frame -> heap		call to $net/http.http2Server.serveConn, whose argument list does not match its parameters
 stdlib/src/net/http/h2_bundle.go:6128:28	net/http.http2serverConn.upgradeRequest	method-value-descriptor	frame -> heap		write barrier into non-local storage
 stdlib/src/net/http/h2_bundle.go:7223:29	net/http.http2serverConn.startPush.func.7180.24	method-value-descriptor	frame -> heap		write barrier into non-local storage
+stdlib/src/net/http/h2_bundle.go:8143:21	net/http.http2Transport.newClientConn	slice-literal-backing	heap -> frame		
 stdlib/src/net/http/h2_bundle.go:9417:8	net/http.http2ClientConn.readLoop	composite-literal	frame -> heap		write barrier into a candidate
 stdlib/src/net/http/internal/httpcommon/httpcommon.go:79:12	net/http/internal/httpcommon.buildCommonHeaderMaps	slice-literal-backing	heap -> frame		
 stdlib/src/net/http/servemux121.go:196:7	net/http.serveMux121.shouldRedirectRLocked	slice-literal-backing	heap -> frame		
