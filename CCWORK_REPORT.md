@@ -1747,7 +1747,26 @@ run as well.
 
 ---
 
-# Residual slog allocation: diagnosis in progress
+# Residual slog allocation: the combined variadic object
+
+**The 64-byte allocation on `info/1-attr` was goc's combined variadic object for
+`Logger.Info`'s `...any` argument list** --
+`struct { values [2]any; payload0 string; payload1 int }`, 56 bytes in the
+64-byte size class: a `[2]any` backing array plus a reserved slot for the boxed
+key `"a"` and one for the boxed value `1`. Not a Record, not a Value, not an
+Attr copy. gc keeps the array in the frame and makes both payloads static
+symbols, so it allocates nothing.
+
+**It is fixed.** Two independent things held it on the heap and both had to go:
+the object pointed into itself (a `string` payload has no runtime conversion
+helper, so it is laid out as a field of the array's own object), and goc's
+escape summary said `Logger.Info` retains the pointer where gc says only its
+contents leak. `info/1-attr`, `info/3-attr`, `info/5-attr`, `logattrs/3-attr`,
+`disabled/3-attr` and `disabled/logattrs-3-attr` are now 0.00 allocations, which
+is gc's number, and `info/6-attr` is at exact parity at 1.00 / 48 B. The full
+table is below.
+
+The rest of this section is the diagnosis in the order it was done.
 
 Baseline re-run at 6b9fbb0 reproduces the committed table exactly
 (`go test ./goc -run TestSlogAllocationsAgainstGC -slog-allocations`, PASS, 19.6s).

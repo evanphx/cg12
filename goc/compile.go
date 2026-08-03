@@ -6168,19 +6168,25 @@ func (g *gen) staticInterfacePayload(source ast.Node, sourceType types.Type) (st
 	// Keyed by the type as well as the value: `int32(1)` and `int64(1)` are the
 	// same constant and different objects, and the type is also what decides
 	// which type descriptor word 0 of the interface gets.
+	//
+	// Interned by hand rather than through internSymbol, because the name may
+	// not be recorded until the contents have been built: staticValueItems
+	// answering no after the name was interned would leave a second conversion
+	// of the same constant resolving to a name nothing emitted.
+	// staticInterfacePayloadKind is meant to make that unreachable; not
+	// interning early is what makes a gap between the two a missed
+	// optimization instead.
+	const payloadPrefix = ".goc.ifacedata"
 	key := runtimeTypeKey(g.fset, sourceType) + "=" + constantValue.ExactString()
-	name, emit := g.internSymbol(".goc.ifacedata", key)
-	if !emit {
+	if name := g.contentSymbols[payloadPrefix+":"+key]; name != "" {
 		return name, true
 	}
+	name := contentSymbolName(payloadPrefix, key)
 	items, built := g.staticValueItems(name, sourceType, expression)
 	if !built || len(items) == 0 {
-		// staticInterfacePayloadKind is meant to have ruled this out. Failing
-		// closed rather than emitting a symbol with no contents keeps a gap
-		// between the two a missed optimization instead of a dangling reference;
-		// the interned name is simply never referenced.
 		return "", false
 	}
+	g.contentSymbols[payloadPrefix+":"+key] = name
 	g.mod.Data = append(g.mod.Data, &ir.Data{
 		Name:         name,
 		Align:        int(typeAlign(sourceType)),
