@@ -2155,3 +2155,21 @@ sites where the IR analysis now reaches the answer gc reaches --
 `readDirectoryHeader(&File{}, rs)`, `jpeg.Encode(..., &jpeg.Options{Quality: 95})`,
 `(&edwards25519.Point{}).ScalarBaseMult(s)`, `append([]byte{0}, pskIDHash...)` --
 while the front end stays conservative and its placement is what is emitted.
+
+### Guard results against the regenerated baselines
+
+    TestAllocationCensus                            PASS
+    TestFrameEscapeAudit                            PASS
+    TestEscapeShadowPlacement                       PASS
+    TestAllocationCounts                            PASS
+    TestAllocationCountsAgainstTheHostToolchain     PASS
+    TestExecutionCorpus                             PASS
+    TestEscapeSummaryFacts                          PASS
+    TestCompilingTheSameSourceTwiceGivesTheSameModule  PASS
+    TestLoopBodyAllocationsAreDistinctPerIteration  PASS
+    TestLoopAliasExpectationsMatchTheHostToolchain  PASS
+    TestSlogAttrInFrameIsNotScannedAsAPointer       PASS
+    TestSlogAllocationsAgainstGC                    PASS
+
+Not run here, by instruction: `go test ./goc/...` as a whole, the capability
+matrix, and `make test-unit`. The dependent gate job runs those.

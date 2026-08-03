@@ -476,10 +476,11 @@ func (graph *escapeGraph) call(instruction ir.Instr) {
 		// the contents of that storage at depth 1 republished everything the
 		// callee had just written into it -- for log/slog.Record.Add, the very
 		// slice the summary had just proved stays in the frame.
-		if fact := graph.facts.Param(callee, index); !fact.Deep {
+		fact := graph.facts.Param(callee, index)
+		if !fact.Deep {
 			graph.flow(escapeHeapLoc, argument, 1)
 		}
-		switch fact := graph.facts.Param(callee, index); fact.Escape {
+		switch fact.Escape {
 		case ParamNoEscape:
 			// Nothing further: the callee cannot retain the pointer itself.
 		case ParamLeaksToResult:
