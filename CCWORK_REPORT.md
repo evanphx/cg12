@@ -299,30 +299,52 @@ is a real measurement and not a program that quietly stopped working.
 
 ### 4.3 The gc differential
 
-Regenerated `goc/testdata/escape_gc_differential.txt`.
+Regenerated `goc/testdata/escape_gc_differential.txt`, and verified to reproduce
+itself: two `-update` runs produce byte-identical files, and the test passes
+against the committed one without `-update`.
 
 |  | base | this branch |
 |---|---|---|
-| **PESSIMISTIC** (goc heaps, gc does not) | 567 lines | **571** |
-| PERMISSIVE (gc heaps, goc does not) | 209 lines | 220 |
-| confusion matrix, goc heap × gc frame | 183 | 177 |
-| joined source lines | 3 059 | 3 080 |
+| **PESSIMISTIC** (goc heaps, gc does not) | 567 lines | **573** |
+| PERMISSIVE (gc heaps, goc does not) | 209 lines | **233** |
+| confusion matrix, goc heap × gc frame | 183 | **172** |
+| confusion matrix, goc mixed × gc mixed | 8 | **30** |
+| joined source lines | 3 059 | 3 070 |
 
-**Every line that entered or left either set is in a file this branch adds or
-edits**: 4 pessimistic and 9 permissive in `allocation_counts.go`, 2 in
-`variadic_element_retention.go`, 1 in `variadic_element_address_retention.go`,
-1 permissive line left `allocation_counts.go`. Nothing in the stdlib, the
-runtime, or any untouched corpus program moved in either direction.
+**The permissive set grows by 25 lines, and this is the direction that has to be
+argued rather than counted.** Five are in files this branch adds or edits. The
+other **20 are all one shape, with no exceptions** — checked by pattern over the
+file, not by sampling:
 
-**The pessimism set does not shrink, and that is a property of the instrument
-rather than a disappointment.** `opt.conversionHelpers` records a `convT` site as
-*heap* — because the payload did leave the frame, which is the escape decision
-gc's `-m` reports at the same line — whether or not the value it is handed makes
-the helper allocate. A `fmt.Sprintf("%d", n)` line has a `convT64` on it either
-way, so the line-level verdict is unchanged while the measured cost halves. The
-differential measures placement; `allocation_counts.go` measures cost. This is
-the same disagreement the `iface-convt-fastpath` branch reported for the same
-reason, and it is why both instruments are kept.
+    fmt_sprintf.go:6   mixed -> mixed
+        src  formatted := fmt.Sprintf("value=%d", 42)
+        goc  col 27  frame  runtime.newobject  struct_values__1_any__payload0_int
+        goc  col 39  heap   runtime.convT64    int
+        gc   col 26  frame  slice   ... argument
+        gc   col 39  heap   object  42
+
+goc frames the `[N]any` at the call's column and heaps the box at the argument's
+column. **So does gc, at the same two columns.** These lines are goc's verdict
+moving from `heap` to `mixed` and landing on gc's, which is why `mixed × mixed`
+goes from 8 to 30 while `heap × frame` falls from 183 to 172. Every one of the 20
+has a goc `frame … struct_values__*` decision paired with a gc `frame slice …
+argument` decision; the classifier calls it permissive because a line-level rule
+cannot tell one decision on a line from the other one.
+
+The pessimistic set grows by 15 and loses 9. Fourteen of the 15 are in this
+branch's own files; the fifteenth is `variadic_backing.go:8`, which is section
+3.2's refusal — the same site the census reports, seen from the other
+instrument.
+
+**The pessimism headline does not shrink, and that is a property of the
+instrument rather than a disappointment.** `opt.conversionHelpers` records a
+`convT` site as *heap*, because the payload did leave the frame, which is the
+escape decision gc's `-m` reports at the same line — whether or not the value it
+is handed makes the helper allocate. A `fmt.Sprintf("%d", n)` line has a
+`convT64` on it either way, so the line stays in the pessimistic set while its
+measured cost halves. The differential measures placement; `allocation_counts.go`
+measures cost. This is the same disagreement the `iface-convt-fastpath` branch
+reported for the same reason, and it is why both instruments are kept.
 
 ## 5. The guards
 
