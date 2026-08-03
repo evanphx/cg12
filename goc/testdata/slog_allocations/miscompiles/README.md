@@ -70,6 +70,14 @@ thing it can say.
 
 ## pkginit_dispatch.go — an interface built in a package-level initializer
 
+**Fixed.** `goc` prints `json ok` for this program as of the
+`iface-init-dispatch` job; `goc/reach.go`'s two reachability walks kept separate
+lists of the sites where a value is implicitly converted to an interface, and
+the package-level initializer walk's list was missing call arguments. The
+program stays here as the reduction it was; the regression test that covers it
+and six sibling shapes is `goc/testdata/runtime_package_initializer_dispatch.go`,
+in the corpus. The rest of this section is the finding as it was recorded.
+
     cg12: interface dispatch failed for dynamic type 0x...
     fatal error: cg12: interface dispatch failure
       log_slog_Handler_Enabled

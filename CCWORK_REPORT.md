@@ -90,4 +90,55 @@ The same divergence explains E through J: any implicit-conversion site inside a
 package-scope composite literal or function literal is inside an initializer
 expression, so it is walked by `enqueueGlobal`, which did not know about it.
 
-(The fix and the guard results land below as they are produced.)
+The user's framing was that the pass collecting itabs and dispatch wrappers
+"walks function bodies but misses, or mis-scopes, the synthesized initializer
+function". That is close but not quite it, and the difference matters for where
+the fix goes. `interfaceItabs`, `interfaceMethods`, `interfaceCallWrappers` and
+`interfaceDispatchers` in `goc/compile.go` are all downstream: the itab and the
+call wrapper are made on demand at the conversion site, and the dispatcher's
+candidate list is filtered in `interfaceMethodCandidates` by whether the
+candidate method is in the *reachable* set. So none of those four maps was
+wrong. The reachable set was, and it was wrong in `goc/reach.go`, one pass
+earlier. The initializer is not mis-scoped either -- it has its own walk,
+`enqueueGlobal`, which runs and does find things. It just had a shorter list of
+sites than the walk next to it.
+
+## 3. The fix
+
+`goc/reach.go`: the two site lists are now one list, `enqueueStatementConversions`
+plus `enqueueConversionCall` and `enqueueCallConversions`, called from both
+walks. The function-body walk's behaviour is unchanged -- the extracted code is
+the code that was there, called from the same points in the same order, so the
+queue order it produces is byte-identical. The initializer walk gains the sites
+it was missing.
+
+131 lines added, 91 removed, all in `goc/reach.go`.
+
+After the fix, all eleven shapes from the survey pass under goc, as does the
+original reduction:
+
+    $ go run ./cmd/goc -run goc/testdata/slog_allocations/miscompiles/pkginit_dispatch.go
+    json ok
+
+The regression test is `goc/testdata/runtime_package_initializer_dispatch.go`,
+in the corpus, with a `core-types/package-initializer-dispatch` entry in the
+capability matrix. It carries seven of the shapes, each with a *different*
+interface and a *different* standard-library concrete type -- `io.Reader` and
+`*strings.Reader`, `io.Writer` and `*bytes.Buffer`, `fmt.Stringer` and
+`fs.FileMode`, `io.ByteReader` and `*bytes.Reader`, `io.ByteWriter` and
+`*bufio.Writer`, `io.StringWriter` and `*strings.Builder`, `io.RuneReader` and
+`*bufio.Reader` -- so that no shape can pass on another shape's registration.
+It was committed failing (`0f80c37`), ahead of the fix (`5c10aa4`).
+
+### What is still only in the function-body walk
+
+`enqueueGlobal` still does not enqueue the runtime helpers the body walk
+enqueues for channel operations, `make`/`new`/`close`, string-slice conversions
+and `range` over a string or map. I probed that: a package-scope function
+literal that makes a buffered channel and sends on it, and one that round-trips
+`[]byte` through `string`, both run correctly on `main` and after the fix, so
+those helpers are reaching the link some other way and this is not a second
+latent miscompile of the same shape. It is left alone rather than "fixed"
+speculatively.
+
+## 4. Guards
