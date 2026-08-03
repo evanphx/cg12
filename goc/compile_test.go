@@ -480,8 +480,13 @@ func main() {
 			}
 		}
 	}
-	if newObjectCalls != 1 {
-		t.Fatalf("runtime.selectgo runtime.newobject calls = %d, want only the send-on-closed panic allocation", newObjectCalls)
+	// This was 1 -- the send-on-closed panic box -- until constant payloads
+	// stopped being boxed at runtime, which erased it. Zero is now correct, and
+	// pinning the exact count rather than an upper bound is deliberate: a slice
+	// header escaping to the heap and the panic box coming back are both things
+	// someone should look at, not silently absorb.
+	if newObjectCalls != 0 {
+		t.Fatalf("runtime.selectgo runtime.newobject calls = %d, want 0", newObjectCalls)
 	}
 }
 
