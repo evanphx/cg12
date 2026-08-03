@@ -1,4 +1,29 @@
-# Merge gate: `integration/escape-wave2` at 53c1c5c
+# Escape wave 2 — integration report
+
+`integration/escape-wave2` merges four changes onto `main` (`4a6fd96`) through
+three merge commits, plus this job's baseline regeneration and gate run.
+
+    main 4a6fd96
+      ├── ccwork/iface-convt-fastpath ──── ccwork/variadic-escape-question   (change 1)
+      ├── ccwork/slog-attr-gcmask                                            (change 2)
+      └── ccwork/iface-init-dispatch                                         (change 3)
+
+`iface-convt-fastpath` is contained in `variadic-escape-question` and is reported
+on together with it below; its own standalone report is at
+`19488ee:CCWORK_REPORT.md`.
+
+Contents:
+
+  - **Part 0** — the merge gate: everything run against the integrated tree.
+  - **Part 1** — asking the escape question for a variadic call.
+  - **Part 2** — a `slog.Attr` in a frame scanned as a pointer.
+  - **Part 3** — the package-initializer dispatch miscompile.
+
+Host toolchain throughout: `go1.26.1 linux/arm64`.
+
+---
+
+# Part 0 — merge gate
 
 Verification of the four-change integration branch (`iface-convt-fastpath` →
 `variadic-escape-question`, `slog-attr-gcmask`, `iface-init-dispatch`) against
@@ -518,24 +543,14 @@ is pre-existing on `main`:
 
 ---
 
-# Asking the escape question for a variadic call: splitting the object that made it unanswerable
-
-# The package-initializer dispatch miscompile: what the registration walk missed
+# Part 1 — Asking the escape question for a variadic call: splitting the object that made it unanswerable
 
 Branch `ccwork/variadic-escape-question`, off `ccwork/iface-convt-fastpath`
 (`19488ee`). The previous jobs' reports are at `19488ee:CCWORK_REPORT.md` and
 `4a6fd96:CCWORK_REPORT.md`.
 
-Branch `ccwork/iface-init-dispatch`, off `main` (`4a6fd96`). The reduction this
-starts from was committed, unfixed, by the `slog-allocations` job and lives at
-`goc/testdata/slog_allocations/miscompiles/pkginit_dispatch.go`. Earlier jobs'
-reports are at `4a6fd96:CCWORK_REPORT.md`.
-
 Status: COMPLETE. Every number below was measured, under goc built from this
 branch and under `go run`, and watched to completion.
-
-Status: IN PROGRESS. Everything below was watched to completion unless marked
-UNVERIFIED.
 
 **Headline: `fmt.Sprintf("value=%d", 42)` costs goc 1.00 allocations against
 gc's 1.00 — exact parity, from 2.00. The `[N]any` backing
@@ -1094,9 +1109,10 @@ been paid at the call site. Essentially none of slog's designed allocation
 avoidance survives compilation by goc — and on the one path that exercises a
 real handler, the compiled program does not survive either.
 
+
 ---
 
-# A `slog.Attr` in a frame is scanned as a pointer: the mis-classification, found and fixed
+# Part 2 — A `slog.Attr` in a frame is scanned as a pointer: the mis-classification, found and fixed
 
 Job `ccwork/slog-attr-gcmask`, branched off `main` `4a6fd96`. The subject is the
 miscompile RUNTIME_PLAN §26 left open and CCWORK_REPORT §5a reported without
@@ -1521,6 +1537,17 @@ implied — the corpus-wide run, the matrix, and the unit suites are that job's
 result, not this one's.
 
 Host toolchain: go1.26.1 linux/arm64.
+
+---
+
+# Part 3 — The package-initializer dispatch miscompile: what the registration walk missed
+
+Branch `ccwork/iface-init-dispatch`, off `main` (`4a6fd96`). The reduction this
+starts from was committed, unfixed, by the `slog-allocations` job and lives at
+`goc/testdata/slog_allocations/miscompiles/pkginit_dispatch.go`. Earlier jobs'
+reports are at `4a6fd96:CCWORK_REPORT.md`.
+
+Status: COMPLETE, as of that branch's own run; the integrated tree is Part 0.
 
 ## 0. The defect, reproduced on main before anything was changed
 
