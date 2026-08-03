@@ -3368,3 +3368,5 @@ Runs, `-O` + `-O` pack, the matrix's configuration:
 | --- | --- | --- |
 | `goc/testdata/runtime_stack_scan_loop_safepoints.go` (`GODEBUG=cg12scanroots=1`) | 3/3 fail | **3/3 pass** |
 | `goc/testdata/runtime_opt_loop_carried_root.go` (`GODEBUG=clobberfree=1`) | 3/3 fault on `0xdeadbeefdeadbeef` | **3/3 pass** |
+- **`make test-goc-status-opt`**: **366 PASS, 0 FAIL, 0 SKIP** (`-v`, unsharded,
+  95 s). `stack-scan/loop-safepoints` passes. The arm was 365/366 before.
