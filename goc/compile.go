@@ -11186,12 +11186,19 @@ func (g *gen) expr(e ast.Expr) (result ir.Ref) {
 				_, isMap := literalType.Underlying().(*types.Map)
 				if isSliceType(literalType) || isMap {
 					value := g.compositeLiteral(literal, heap)
-					storage := g.localAllocTyped(literalType)
+					// The frame slot is emitted only in the arm that keeps it. A
+					// slot allocated before the decision and then written over is
+					// still in the finished IR with no uses, and nothing later
+					// removes it: goc's pipeline has no DCE, and opt.Optimize runs
+					// only under -O and gives up on any function with a secondary
+					// entry.
+					var storage ir.Ref
 					if heap {
 						storage = g.allocateEscapingTyped(literalType)
-						g.recordPlacement(storage, "composite-literal-descriptor", ir.AllocOnHeap)
+						g.recordPlacement(storage, "composite-literal-descriptor", ir.AllocOnHeap, literalType)
 					} else {
-						g.recordPlacement(storage, "composite-literal-descriptor", ir.AllocInFrame)
+						storage = g.localAllocTyped(literalType)
+						g.recordPlacement(storage, "composite-literal-descriptor", ir.AllocInFrame, literalType)
 					}
 					if isSliceType(literalType) {
 						g.storeInlineValue(value, storage, literalType)
@@ -12002,12 +12009,16 @@ func (g *gen) methodValue(expression *ast.SelectorExpr, selection *types.Selecti
 		result := wrapper.callWithSignature(resultClass, callee, arguments, methodSignature, receiverType)
 		wrapper.returnValue(result, signature.Results().At(0).Type())
 	}
-	descriptor := g.localAllocTyped(descriptorType)
+	// See the composite-literal descriptor above: the slot is emitted in the arm
+	// that keeps it, because a slot written over after the decision stays in the
+	// IR with no uses.
+	var descriptor ir.Ref
 	if !g.valueDoesNotEscape(expression) {
 		descriptor = g.allocateEscapingTyped(descriptorType)
-		g.recordPlacement(descriptor, "method-value-descriptor", ir.AllocOnHeap)
+		g.recordPlacement(descriptor, "method-value-descriptor", ir.AllocOnHeap, descriptorType)
 	} else {
-		g.recordPlacement(descriptor, "method-value-descriptor", ir.AllocInFrame)
+		descriptor = g.localAllocTyped(descriptorType)
+		g.recordPlacement(descriptor, "method-value-descriptor", ir.AllocInFrame, descriptorType)
 	}
 	g.cur.Store(g.fn.Sym(wrapperName, 0), g.offset(descriptor, descriptorOffsets[0]))
 	receiverValue := g.methodReceiver(expression, selection, method)
@@ -12042,7 +12053,7 @@ func (g *gen) compositeLiteral(literal *ast.CompositeLit, heap bool) ir.Ref {
 		var backing ir.Ref
 		if heap {
 			backing = g.allocateEscapingTyped(pointer.Elem())
-			g.recordPlacement(backing, "composite-literal", ir.AllocOnHeap)
+			g.recordPlacement(backing, "composite-literal", ir.AllocOnHeap, pointer.Elem())
 		} else {
 			// The neutral candidate form: opt.LowerHeapAllocations decides this
 			// one, so there is no front-end placement to record.
@@ -12096,16 +12107,22 @@ func (g *gen) compositeLiteral(literal *ast.CompositeLit, heap bool) ir.Ref {
 			alignment = 4
 		}
 		backingSize := length * elementSize
-		backing := g.localAlloc(alignment, int(backingSize))
 		backingType := types.NewArray(elementType, length)
-		visitPointerWords(backingType, 0, func(offset int64) {
-			g.markStackPointerWord(backing, int(offset))
-		})
+		// The frame slot, and the stack pointer words that describe it to the
+		// collector, belong to the arm that keeps the slot. Allocating first and
+		// overwriting on escape left an OAlloc with no uses in the finished IR
+		// and an ir.Func.StackPointerWords entry for a temporary no instruction
+		// defines any more.
+		var backing ir.Ref
 		if heap || !g.valueDoesNotEscape(literal) {
 			backing = g.allocateEscapingTyped(backingType)
-			g.recordPlacement(backing, "slice-literal-backing", ir.AllocOnHeap)
+			g.recordPlacement(backing, "slice-literal-backing", ir.AllocOnHeap, backingType)
 		} else {
-			g.recordPlacement(backing, "slice-literal-backing", ir.AllocInFrame)
+			backing = g.localAlloc(alignment, int(backingSize))
+			visitPointerWords(backingType, 0, func(offset int64) {
+				g.markStackPointerWord(backing, int(offset))
+			})
+			g.recordPlacement(backing, "slice-literal-backing", ir.AllocInFrame, backingType)
 		}
 		g.zero(backing, types.NewArray(elementType, length))
 		for i, expression := range literal.Elts {
@@ -12135,15 +12152,18 @@ func (g *gen) compositeLiteral(literal *ast.CompositeLit, heap bool) ir.Ref {
 	if size < 8 {
 		align = 4
 	}
-	backing := g.localAlloc(align, int(size))
-	visitPointerWords(t, 0, func(offset int64) {
-		g.markStackPointerWord(backing, int(offset))
-	})
+	// As above: the slot and its stack pointer words are emitted by the arm that
+	// keeps them, so an escaping literal leaves no unused OAlloc behind.
+	var backing ir.Ref
 	if heap {
 		backing = g.allocateEscapingTyped(t)
-		g.recordPlacement(backing, "composite-literal", ir.AllocOnHeap)
+		g.recordPlacement(backing, "composite-literal", ir.AllocOnHeap, t)
 	} else {
-		g.recordPlacement(backing, "composite-literal", ir.AllocInFrame)
+		backing = g.localAlloc(align, int(size))
+		visitPointerWords(t, 0, func(offset int64) {
+			g.markStackPointerWord(backing, int(offset))
+		})
+		g.recordPlacement(backing, "composite-literal", ir.AllocInFrame, t)
 	}
 	memset := g.fn.Sym("goc_memset", 0)
 	g.cur.Call(ir.ClsP, memset, backing, g.fn.Word(0), g.fn.Long(size))
@@ -13284,7 +13304,7 @@ func (g *gen) stringSlice(expression ast.Expr, targetType types.Type) ir.Ref {
 					bufferSize *= typeSize(types.Typ[types.Int32])
 				}
 				buffer = g.localAlloc(8, int(bufferSize))
-				g.recordPlacement(buffer, "string-conversion-buffer", ir.AllocInFrame)
+				g.recordPlacement(buffer, "string-conversion-buffer", ir.AllocInFrame, nil)
 			}
 		}
 		signature := conversionSignature([]types.Type{bufferType, types.Typ[types.String]}, resultType)
@@ -13549,11 +13569,11 @@ func (g *gen) allocateEscapingTyped(valueType types.Type) ir.Ref {
 			g.fn.Sym("runtime.newobject", 0),
 			g.runtimeType(valueType),
 		)
-		g.recordPlacement(allocation, "escaping-typed", ir.AllocOnHeap)
+		g.recordPlacement(allocation, "escaping-typed", ir.AllocOnHeap, valueType)
 		return g.fn.MarkGCRef(allocation)
 	}
 	allocation := g.cur.Call(ir.ClsP, g.fn.Sym("calloc", 0), g.fn.Long(1), g.fn.Long(typeSize(valueType)))
-	g.recordPlacement(allocation, "escaping-typed", ir.AllocOnHeap)
+	g.recordPlacement(allocation, "escaping-typed", ir.AllocOnHeap, valueType)
 	return allocation
 }
 
@@ -13568,14 +13588,52 @@ func (g *gen) allocateEscapingTyped(valueType types.Type) ir.Ref {
 // committed heap placement is an allocator call indistinguishable from a
 // lowered candidate. The record is diagnostic only -- see ir.PlacedAlloc -- and
 // nothing in the compiler reads it.
-func (g *gen) recordPlacement(storage ir.Ref, site string, placement ir.AllocPlacement) {
+//
+// valueType is the type of the object placed, or nil at a site that has none.
+// It is what lets a frame record name the same census site as the heap record
+// the same site produces when the decision goes the other way, which is what
+// makes "this object moved from a frame to the heap" expressible rather than
+// arriving as one site vanishing and an unrelated one appearing. Recording it
+// does not emit the descriptor: the symbol name is a pure function of the type.
+func (g *gen) recordPlacement(storage ir.Ref, site string, placement ir.AllocPlacement, valueType types.Type) {
 	if storage.Kind != ir.RefTemp || g.fn == nil {
 		return
 	}
 	if g.fn.PlacedAllocs == nil {
 		g.fn.PlacedAllocs = make(map[uint32]ir.PlacedAlloc)
 	}
-	g.fn.PlacedAllocs[storage.ID] = ir.PlacedAlloc{Site: site, Placement: placement}
+	g.fn.PlacedAllocs[storage.ID] = ir.PlacedAlloc{
+		Site:      site,
+		Placement: placement,
+		Allocator: g.placementAllocator(valueType),
+		Type:      g.placementTypeSymbol(valueType),
+	}
+}
+
+// placementAllocator names the allocator a placement of valueType calls on the
+// heap, or would have called from a frame. It is empty when the site has no
+// type, and when the build allocates with calloc rather than the Go runtime --
+// a calloc call is not one of the allocators the census counts, so a frame
+// record naming it could never pair with anything.
+func (g *gen) placementAllocator(valueType types.Type) string {
+	if valueType == nil || !g.runtimeAllocation {
+		return ""
+	}
+	return "runtime.newobject"
+}
+
+// placementTypeSymbol is the symbol runtimeTypeSymbol would intern valueType's
+// descriptor under, computed without emitting the descriptor.
+//
+// Emitting it would be wrong twice over: a diagnostic record must not change
+// the module, and a frame placement is precisely the case where no descriptor
+// is needed, so asking for one would add data to every program that has a
+// composite literal in a frame.
+func (g *gen) placementTypeSymbol(valueType types.Type) string {
+	if valueType == nil {
+		return ""
+	}
+	return contentSymbolName(".goc.runtime.type", goTypeKey(g.fset, valueType))
 }
 
 func (g *gen) allocateZeroed(size ir.Ref) ir.Ref {
@@ -13643,9 +13701,9 @@ func (g *gen) builtinCall(call *ast.CallExpr, builtin *types.Builtin) ir.Ref {
 				if alignment < 4 {
 					alignment = 4
 				}
-				data = g.localAlloc(alignment, int(fixedCapacity*elementSize))
-				g.recordPlacement(data, "make-slice-backing", ir.AllocInFrame)
 				backingType := types.NewArray(sliceType.Elem(), fixedCapacity)
+				data = g.localAlloc(alignment, int(fixedCapacity*elementSize))
+				g.recordPlacement(data, "make-slice-backing", ir.AllocInFrame, backingType)
 				visitPointerWords(backingType, 0, func(offset int64) {
 					g.markStackPointerWord(data, int(offset))
 				})

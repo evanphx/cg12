@@ -138,10 +138,52 @@ func (allocation Allocation) location() string {
 // The census therefore covers every heap allocation and every frame allocation
 // that came from an escape decision. It does not cover ordinary front-end frame
 // slots, which are not decisions and outnumber everything else here by two
-// orders of magnitude. A front-end change that turns a heap allocation into such
-// a slot still fails the baseline -- the heap line disappears -- it just reads as
-// a site that went away rather than a site that moved.
+// orders of magnitude.
+//
+// It does cover the frame slots the front end chose deliberately, when
+// AllocationCensusOptions.IncludeFrontEndFrameSlots asks for them. Those are not
+// ordinary local slots -- see there for why the distinction matters and what
+// leaving them out cost.
 func AllocationCensus(module *ir.Module) []Allocation {
+	return AllocationCensusWith(module, AllocationCensusOptions{})
+}
+
+// AllocationCensusOptions selects what AllocationCensusWith counts.
+type AllocationCensusOptions struct {
+	// IncludeFrontEndFrameSlots adds the frame placements goc's AST walk made
+	// itself: ir.Func.PlacedAllocs with placement "frame".
+	//
+	// Without it the census sees only one side of a front-end frame slot. The
+	// heap side of such a site is an allocator call and is read out of the IR, so
+	// an object that moves from a front-end frame slot to the heap has no line
+	// before and a heap line after -- which the reporter files under "appeared",
+	// a bucket that means "new code or a new allocation", when the truth is
+	// "frame -> heap". Measured over the whole corpus against a run that made
+	// every front-end escape predicate answer "escapes": 451 moves, all 451
+	// reported as "appeared", and the frame-to-heap bucket empty. With this
+	// option, 317 of them are named "frame -> heap" and the rest are local
+	// variable slots, which are the ordinary kind and still not recorded.
+	// CCWORK_REPORT.md, "Part 2", has the tables.
+	//
+	// These are not the ordinary front-end frame slots the census leaves out.
+	// Those are local variables' storage: no type, no allocator, no decision, and
+	// tens of thousands per program. These are the sites where a source-level
+	// escape predicate chose a frame over a call, each carrying the type it
+	// placed and the allocator it declined -- which is what lets the frame record
+	// and the heap record of one site share an identity, so the move is one line
+	// changing rather than two lines swapping.
+	//
+	// A front-end frame placement with no allocator is still left out, because
+	// there is nothing for it to pair with: the string-conversion buffer's heap
+	// form is a nil argument and an allocation inside the runtime helper, which
+	// is not a census site on either side.
+	IncludeFrontEndFrameSlots bool
+}
+
+// AllocationCensusWith is AllocationCensus with the counting rules stated
+// explicitly. See AllocationCensus for what a census is and AllocationCensusOptions
+// for what the options change.
+func AllocationCensusWith(module *ir.Module, options AllocationCensusOptions) []Allocation {
 	seen := make(map[string]Allocation)
 	record := func(allocation Allocation) {
 		if _, exists := seen[allocation.Key()]; !exists {
@@ -199,12 +241,60 @@ func AllocationCensus(module *ir.Module) []Allocation {
 		}
 	}
 
+	if options.IncludeFrontEndFrameSlots {
+		for _, function := range module.Funcs {
+			if function.Start == nil || len(function.PlacedAllocs) == 0 {
+				continue
+			}
+			positions := allocationDefinitions(function, function.PlacedAllocs)
+			for _, id := range sortedAllocationIDs(function.PlacedAllocs) {
+				placed := function.PlacedAllocs[id]
+				if placed.Placement != ir.AllocInFrame {
+					// A front-end heap placement is an allocator call and was read
+					// out of the IR above, where it is one record whether the front
+					// end or the IR pass put it there.
+					continue
+				}
+				if _, counted := heapAllocators[placed.Allocator]; !counted {
+					// No allocator, or one the census does not count: there is no
+					// heap record this frame record could ever pair with, so a line
+					// for it could not express a direction either.
+					continue
+				}
+				position := positions[id]
+				record(Allocation{
+					Func:      function.Name,
+					Pos:       position,
+					File:      module.FileName(position.File),
+					Allocator: placed.Allocator,
+					Type:      AllocationTypeName(placed.Type),
+					Placement: ir.AllocInFrame,
+				})
+			}
+		}
+	}
+
 	census := make([]Allocation, 0, len(seen))
 	for _, allocation := range seen {
 		census = append(census, allocation)
 	}
 	sort.Slice(census, func(i, j int) bool { return census[i].Key() < census[j].Key() })
 	return census
+}
+
+// sortedAllocationIDs orders a PlacedAllocs map's keys, so that a census built
+// from it does not depend on Go's map iteration order. The result is
+// deduplicated by key and sorted before it is returned, so the order only
+// decides which of two identical records is kept -- but a census whose
+// determinism rests on "the duplicates happened to be identical" is one
+// unexamined field away from being non-reproducible.
+func sortedAllocationIDs(placed map[uint32]ir.PlacedAlloc) []uint32 {
+	ids := make([]uint32, 0, len(placed))
+	for id := range placed {
+		ids = append(ids, id)
+	}
+	sort.Slice(ids, func(i, j int) bool { return ids[i] < ids[j] })
+	return ids
 }
 
 // typeSymbolHash matches the content hash contentSymbolName appends to an

@@ -72,15 +72,21 @@ const allocCensusBaselinePath = "testdata/alloc_census_baseline.txt"
 //
 //  3. For each site that DISAPPEARED, ask whether the allocation is gone or the
 //     code is gone. A site vanishing because the function stopped being reachable
-//     is fine; a heap site vanishing because the object is now an ordinary
-//     front-end frame slot is the 9f76498 failure and is question 1 in disguise.
-//     The census cannot tell these apart on its own -- it does not record
-//     ordinary front-end frame slots (see opt.AllocationCensus) -- so this is the
-//     case that needs the source looked at.
+//     is fine. It used to also be how a heap site becoming an ordinary front-end
+//     frame slot showed up -- the 9f76498 failure, question 1 in disguise, which
+//     the census could not tell from dead code because it did not record the
+//     front end's own frame placements. It does now
+//     (opt.AllocationCensusOptions.IncludeFrontEndFrameSlots), so that case
+//     arrives as "heap -> frame" instead and this question is back to being
+//     about reachability. What is still invisible is an object that becomes an
+//     *ordinary* frame slot -- a local variable's storage, no type, no decision
+//     -- which no record is made of anywhere.
 //
 //  4. For each site that APPEARED, ask whether it is new code or a new
 //     allocation in old code. Adding corpus programs adds sites; that is expected
-//     and the diff should be confined to those programs' own files.
+//     and the diff should be confined to those programs' own files. An allocation
+//     that moved out of a front-end frame slot is no longer one of these: it is
+//     reported as "frame -> heap", which is what it is.
 //
 //  5. Ask whether the size of the diff matches the size of the change. A
 //     one-line escape-analysis fix that moves four hundred sites has done
@@ -256,10 +262,11 @@ const allocCensusBaselineHeader = `# Where every allocation in the corpus lands,
 # is truncated at 48 characters by the symbol mangler.
 #
 # The census covers every heap allocation and every frame allocation that came
-# out of an escape decision. It does not cover ordinary front-end frame slots;
-# there are tens of thousands of those per program, they carry no type, and they
-# are not decisions. See opt.AllocationCensus for what that does and does not
-# leave visible.
+# out of an escape decision -- both the ones opt.LowerHeapAllocations decided and
+# the ones goc's AST walk committed to itself. It does not cover ordinary
+# front-end frame slots; there are tens of thousands of those per program, they
+# carry no type, and they are not decisions. See opt.AllocationCensus and
+# opt.AllocationCensusOptions for what that does and does not leave visible.
 #
 # This is a record of what the compiler does, not a list of decisions that are
 # correct. Regenerate with
