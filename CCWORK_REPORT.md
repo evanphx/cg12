@@ -430,6 +430,30 @@ written not to:
   that becomes its own allocation still consumes its reserved field in the order
   the argument list gives.
 
+### 5.6 The verification at HEAD
+
+Every instrument re-run against the final commit, after the branch's temporary
+diagnostic was deleted and every baseline regenerated:
+
+```
+$ go test ./goc -run 'TestFrameEscapeAudit|TestAllocationCensus|TestLoopBodyAllocations|
+                      TestLoopAlias|TestAllocationCounts|TestDeterminism|TestLoopVar|
+                      TestEscapeShadowPlacement'
+ok  github.com/evanphx/cg12/goc  217.448s
+
+$ go test ./opt ./ir ./lower
+ok  github.com/evanphx/cg12/opt   ok github.com/evanphx/cg12/ir   ok github.com/evanphx/cg12/lower
+
+$ go test ./goc -run TestSlogAllocationsAgainstGC   -slog-allocations
+ok  github.com/evanphx/cg12/goc   17.818s
+
+$ go test ./goc -run TestEscapeDifferentialAgainstGC -escape-gc-differential
+ok  github.com/evanphx/cg12/goc   10.611s
+```
+
+Both opt-in baselines re-derive their own committed output without `-update`,
+and the differential is byte-identical across two independent `-update` runs.
+
 ## 6. What was committed
 
 | file | what |
