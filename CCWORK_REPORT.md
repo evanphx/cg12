@@ -3,14 +3,17 @@
 Branch `ccwork/iface-convt-fastpath`, off `main` (`4a6fd96`). The previous jobs'
 reports are at `4a6fd96:CCWORK_REPORT.md`.
 
-Status: IN PROGRESS. Numbers land here as they are produced. Anything not
-watched to completion is marked UNVERIFIED.
+Status: COMPLETE. Every number here was watched to completion.
 
 **Headline: `any(7)` cost goc one 8-byte allocation and now costs none, and the
 five-attribute `slog.Info` call went from 9.00 allocations to 1.00 against gc's
 0.00. `slog.Int`, `slog.Bool`, `slog.Duration` and `slog.Float64` are each at
 exact parity with go1.26.1, and `slog.Info` at a disabled level is at 0.00
-against gc's 0.00.**
+against gc's 0.00. The gc differential's pessimism set does *not* shrink — 563
+to 567, and all four are lines in the corpus program this branch edits — because
+this changes no escape decision, only what a payload that already lost that
+argument costs. Wall clock: 8.9× on a boxing microbenchmark, 8.2% on a
+`fmt.Sprintf` workload, 1.5% on slog.**
 
 ## 0. The host toolchain, pinned
 
