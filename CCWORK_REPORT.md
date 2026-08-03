@@ -1833,3 +1833,83 @@ The alternative -- teaching `ir.Field` to distinguish "zero elements" from
 scalar field leaves `Count` at 0 and means one. The representation cannot say
 zero, so the producer must not ask it to.
 
+Also fixed, because the first change exposed it: gc gives a struct whose last
+field is zero-sized one byte of padding so that a pointer to that field is not
+past the end of the object, and `typeSize` implements that rule. The phantom
+element used to supply that byte by accident. `goABIAggregate` now appends an
+explicit byte-wide scalar instead -- never a pointer. That case was **already
+wrong on main** for a trailing empty struct, which never had a phantom element:
+`struct{ n uint64; _ struct{} }` laid out as 8 bytes where the type is 16.
+
+## 3.1 The guard: the two descriptions of a type, checked against each other
+
+`goc/goabi_layout_test.go`. A Go type is described to the collector twice --
+`walkPointerWords` builds the heap mask from `go/types` offsets, and
+`goABIAggregate` builds the aggregate the frame's map and the frame's slot size
+come from -- by two pieces of code that share nothing. The test asserts they
+agree on size, alignment and pointer words, over shapes with a zero-sized field
+in every position and over every named type in `log/slog`.
+
+On main it fails, and what it prints is the defect:
+
+    Value:  aggregate 32 bytes, pointer offsets [0 16 24], type: 24, [8 16]
+    Attr:   aggregate 48 bytes, pointer offsets [0 16 32 40], type: 40, [0 24 32]
+    Record: aggregate 328 bytes, 23 pointer words, type: 288, 18 words
+    Alone/Empty/Leading/Middle/Trailing/EmptyArrayOfStruct/TrailingEmptyStruct
+
+With the fix, both tests pass.
+
+## 4. The reduction after the fix, through both walkers
+
+    --- PASS: TestSlogAttrInFrameIsNotScannedAsAPointer (63.72s)   10/10 subtests
+    --- PASS: TestSlogAttrInFrameSurvivesTheStackCopyChecker (29.06s) 5/5
+    --- PASS: TestSlogAttrFrameExpectationsMatchTheHostToolchain (0.57s) 5/5
+
+That is every program unoptimized and optimized, every program again under
+`GODEBUG=cg12checkstackcopy=1` (which validates each word the map claims as the
+stack is copied rather than waiting for one to look like an address), and the
+collector reached through `runtime.GC()` in three of them.
+
+## 5. The slog baseline: the two JSON rows
+
+Regenerated with
+
+    go test ./goc -run TestSlogAllocationsAgainstGC -slog-allocations \
+        -update-slog-allocations
+
+and then re-run without the update flag, which passes, so the file reproduces.
+
+**Attribution first, because the diff against the committed file is misleading.**
+The committed baseline predates the `ccwork/variadic-allocations` merge that is
+already on `main`, so a plain diff shows twelve rows improving that this work did
+not touch. Regenerating on pristine `main` (`4a6fd96`, in a separate worktree)
+produces those same improved numbers with the JSON rows still `crash`. Against
+*that* -- main's compiler measured today -- the diff from this fix is exactly:
+
+    -json/kv-4-pairs                     crash       2.00      crash       24.0
+    -json/logattrs-4-attrs               crash       0.00      crash        0.0
+    -
+    -cases that did not run:
+    -
+    -  json/kv-4-pairs        goc  fatal error: invalid pointer found on stack
+    -                              (bad pointer in frame log_slog_handleState_appendAttr: 0xc8)
+    -  json/logattrs-4-attrs  goc  fatal error: invalid pointer found on stack
+    -                              (bad pointer in frame main_func_311_28: 0x3)
+    +json/kv-4-pairs                      8.00       2.00      344.0       24.0
+    +json/logattrs-4-attrs                8.00       0.00      264.0        0.0
+
+Nothing else moves. **The numbers that appear where `crash` was:**
+
+| case | goc a/op | gc a/op | goc B/op | gc B/op |
+| --- | ---: | ---: | ---: | ---: |
+| `json/kv-4-pairs` | **8.00** | 2.00 | **344.0** | 24.0 |
+| `json/logattrs-4-attrs` | **8.00** | 0.00 | **264.0** | 0.0 |
+
+The section listing cases that did not run is now empty and gone: every case in
+the table runs.
+
+For scale, the earlier report recorded one whole-program observation of
+`json/kv-4-pairs` at 15.00 allocations / 456.0 bytes before the process died on
+the next case. The committed one-case-per-process harness now measures it at
+8.00 / 344.0.
+
