@@ -342,24 +342,27 @@ func (facts *frameFacts) propagate() bool {
 				if !derived {
 					continue
 				}
-				slot, inFrame := facts.frameSlot(instruction.Arg(1))
-				if !inFrame {
-					continue
-				}
-				if _, known := facts.slots[slot]; !known {
-					facts.slots[slot] = allocation
-					changed = true
-				}
+				facts.eachFrameSlot(instruction.Arg(1), func(slot localSlot) {
+					if _, known := facts.slots[slot]; !known {
+						facts.slots[slot] = allocation
+						changed = true
+					}
+				})
 				continue
 			}
 			if !instruction.Op.IsLoad() {
 				continue
 			}
-			slot, inFrame := facts.frameSlot(instruction.Arg(0))
-			if !inFrame {
-				continue
-			}
-			allocation, known := facts.slots[slot]
+			var allocation uint32
+			known := false
+			facts.eachFrameSlot(instruction.Arg(0), func(slot localSlot) {
+				if known {
+					return
+				}
+				if candidate, tracked := facts.slots[slot]; tracked {
+					allocation, known = candidate, true
+				}
+			})
 			if !known {
 				continue
 			}
@@ -438,16 +441,101 @@ func (facts *frameFacts) isFrameAddress(reference ir.Ref) bool {
 	return location.keyKind == keyLocal || location.keyKind == keyEscaped
 }
 
-// frameSlot resolves a pointer to the frame slot it names, when it names one.
-func (facts *frameFacts) frameSlot(reference ir.Ref) (localSlot, bool) {
-	location := facts.aliases.locOf(reference, 1)
-	if location.keyKind != keyLocal && location.keyKind != keyEscaped {
-		return localSlot{}, false
+// eachFrameSlot calls visit for every frame slot a pointer may name.
+//
+// A pointer that arrived through a phi names one slot per incoming value, and
+// aliasInfo resolves no phi at all: locOf walks def, def indexes only the
+// instruction lists, so a frame slot reached through a phi comes back as
+// unknown memory and is not tracked. That loses the address in both directions
+// -- a frame address parked in such a slot is not recorded, and one read back
+// out of it is not recognised -- so the publication that follows is not
+// reported. Recovering the incoming values is what closes it.
+func (facts *frameFacts) eachFrameSlot(reference ir.Ref, visit func(localSlot)) {
+	facts.walkFrameSlots(reference, 0, visit, nil)
+}
+
+func (facts *frameFacts) walkFrameSlots(reference ir.Ref, carried int64, visit func(localSlot), visiting map[uint32]bool) {
+	base, offset := facts.stripToBase(reference)
+	offset += carried
+
+	location := facts.aliases.locOf(base, 1)
+	if location.keyKind == keyLocal || location.keyKind == keyEscaped {
+		if location.offKnown {
+			visit(localSlot{base: location.key(), offset: location.offset + offset})
+		}
+		return
 	}
-	if !location.offKnown {
-		return localSlot{}, false
+
+	arguments := facts.mergeArguments(base)
+	if len(arguments) == 0 {
+		return
 	}
-	return localSlot{base: location.key(), offset: location.offset}, true
+	if visiting == nil {
+		visiting = make(map[uint32]bool)
+	}
+	if visiting[base.ID] {
+		return
+	}
+	visiting[base.ID] = true
+	defer delete(visiting, base.ID)
+	for _, argument := range arguments {
+		facts.walkFrameSlots(argument, offset, visit, visiting)
+	}
+}
+
+// mergeArguments returns the incoming values of the merge that defines a
+// reference -- a phi, or the select a phi becomes when the branches fold away
+// -- and nil when it is not one.
+func (facts *frameFacts) mergeArguments(reference ir.Ref) []ir.Ref {
+	if phi := facts.aliases.phiFor(reference); phi != nil {
+		return phi.Args
+	}
+	if reference.Kind != ir.RefTemp || int(reference.ID) >= len(facts.aliases.def) {
+		return nil
+	}
+	definition := facts.aliases.def[reference.ID]
+	if definition == nil || definition.Op != ir.OSel {
+		return nil
+	}
+	return definition.Args[1:]
+}
+
+// stripToBase peels the copies, casts and constant displacements off a pointer,
+// returning what is left and how far into it the original pointed. It is
+// pointerBase with locOf's displacement kept, so a slot reached at a constant
+// offset through a merge stays the slot it actually is.
+func (facts *frameFacts) stripToBase(reference ir.Ref) (ir.Ref, int64) {
+	current := reference
+	var offset int64
+	for current.Kind == ir.RefTemp && int(current.ID) < len(facts.aliases.def) {
+		definition := facts.aliases.def[current.ID]
+		if definition == nil {
+			return current, offset
+		}
+		if definition.Op == ir.OCopy || definition.Op == ir.OCast {
+			current = definition.Arg(0)
+			continue
+		}
+		if definition.Op != ir.OAdd && definition.Op != ir.OSub {
+			return current, offset
+		}
+		if value, constant := constInt(facts.function, definition.Arg(1)); constant {
+			if definition.Op == ir.OAdd {
+				offset += value
+			} else {
+				offset -= value
+			}
+			current = definition.Arg(0)
+			continue
+		}
+		if value, constant := constInt(facts.function, definition.Arg(0)); constant && definition.Op == ir.OAdd {
+			offset += value
+			current = definition.Arg(1)
+			continue
+		}
+		return current, offset
+	}
+	return current, offset
 }
 
 // classify names the category of storage a publication reached, and the callee

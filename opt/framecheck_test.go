@@ -176,6 +176,73 @@ func TestFrameEscapesReportsAFrameAddressStoredThroughAMergedDestination(t *test
 	assert.Equal(t, "runtime.newobject", escapes[0].Callee)
 }
 
+// The other half of the same hole, and the one the corpus actually hits: the
+// address of the *slot* arrives through a phi. aliasInfo resolves no phi, so
+// the frame slot looks like unknown memory, nothing records that a frame
+// address was parked in it, and the value read back out is not recognised as
+// one. The publication that follows is invisible.
+func TestFrameEscapesFollowsAFrameAddressThroughASlotReachedByAPhi(t *testing.T) {
+	module := ir.NewModule()
+	function := module.NewFuncVoid("publish")
+	entry := function.Entry()
+	other := function.NewBlock("other")
+	join := function.NewBlock("join")
+
+	local := entry.Alloc(8, 8)
+	first := entry.Alloc(8, 8)
+	second := entry.Alloc(8, 8)
+	entry.Jnz(function.Word(1), other, join)
+	other.Goto(join)
+	slot := join.Phi(ir.ClsP,
+		ir.PhiEdge{From: entry, Val: first},
+		ir.PhiEdge{From: other, Val: second},
+	)
+	join.Store(local, slot)
+	object := join.Call(ir.ClsP, function.Sym("runtime.newobject", 0), function.Sym("type.ptr", 0))
+	join.Store(join.Load(ir.ClsP, slot), object)
+	join.RetVoid()
+
+	escapes := FrameEscapes(module)
+	require.Len(t, escapes, 1)
+	assert.Equal(t, FrameEscapeStore, escapes[0].Kind)
+	assert.Equal(t, FrameEscapeIntoCallResult, escapes[0].Destination)
+	assert.Equal(t, "runtime.newobject", escapes[0].Callee)
+}
+
+// A frame slot reached through a merge at a constant offset is that slot, not
+// the one at offset zero. Resolving the merge without carrying the
+// displacement would park the address in the wrong slot and then read a
+// different one back, which reports nothing and looks like a clean run.
+func TestFrameEscapesKeepsTheDisplacementOfASlotReachedByAPhi(t *testing.T) {
+	module := ir.NewModule()
+	function := module.NewFuncVoid("publish")
+	entry := function.Entry()
+	other := function.NewBlock("other")
+	join := function.NewBlock("join")
+
+	local := entry.Alloc(8, 8)
+	first := entry.Alloc(8, 32)
+	second := entry.Alloc(8, 32)
+	entry.Jnz(function.Word(1), other, join)
+	other.Goto(join)
+	aggregate := join.Phi(ir.ClsP,
+		ir.PhiEdge{From: entry, Val: first},
+		ir.PhiEdge{From: other, Val: second},
+	)
+	field := join.Add(ir.ClsP, aggregate, function.Long(16))
+	join.Store(local, field)
+	object := join.Call(ir.ClsP, function.Sym("runtime.newobject", 0), function.Sym("type.ptr", 0))
+	// The publication reads the field that was written. Reading offset 0
+	// instead must not produce a finding.
+	join.Store(join.Load(ir.ClsP, join.Add(ir.ClsP, aggregate, function.Long(0))), object)
+	join.Store(join.Load(ir.ClsP, join.Add(ir.ClsP, aggregate, function.Long(16))), object)
+	join.RetVoid()
+
+	escapes := FrameEscapes(module)
+	require.Len(t, escapes, 1)
+	assert.Equal(t, FrameEscapeIntoCallResult, escapes[0].Destination)
+}
+
 // A select is the same merge with the branches folded away, so it hides the
 // same publication.
 func TestFrameEscapesReportsAFrameAddressStoredThroughASelectedDestination(t *testing.T) {
