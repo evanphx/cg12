@@ -258,16 +258,17 @@ this branch's to lower.
 
 ### 4.2 `log/slog` — the cases the brief named
 
-Regenerated `goc/testdata/slog_allocations_baseline.txt`. **Every allocation
-count is identical to the base commit.**
+Regenerated `goc/testdata/slog_allocations_baseline.txt`. **Thirty-one of the
+thirty-two rows are byte-identical to the base commit**, allocation counts and
+byte counts alike; the diff against the base is one row, discussed below.
 
 | case | goc | gc |
 |---|---|---|
-| `info/5-attr` | 1.00 / 240 B | 0.00 |
-| `disabled/3-attr` | 1.00 / 144 B | 0.00 |
-| `info/3-attr-large-ints` | 1.00 / 176 B | 3.00 |
-| `control/variadic-6-preboxed` | 0.00 | 0.00 |
-| `control/variadic-6-literal` | 0.00 | 0.00 |
+| **`info/5-attr`** | **1.00 / 288 B** | **0.00** |
+| **`disabled/3-attr`** | **1.00 / 176 B** | **0.00** |
+| `info/3-attr-large-ints` | 1.00 / 176 B | 3.00 / 24 B — goc is cheaper |
+| `control/variadic-6-preboxed` | 0.00 | 0.00 — parity |
+| `control/variadic-6-literal` | 0.00 | 0.00 — parity |
 
 **slog does not improve, and the reason is not the representation.**
 `log/slog.Logger.Info`'s `args` slice escapes at **depth 0** — the summary says
@@ -282,7 +283,7 @@ unconditionally measured `info/3-attr-large-ints` at **4.00 against gc's 3.00**,
 which is what the fold-back exists to prevent.
 
 One row is not identical: **`json/kv-4-pairs` used to kill the program under goc
-and now runs**, at 3.00 allocations / 272 B against gc's 2.00 / 24 B. That is
+and now runs**, at 5.00 allocations / 320 B against gc's 2.00 / 24 B. That is
 **not a fix**. The two reductions the slog job committed
 (`goc/testdata/slog_allocations/miscompiles/attr_bad_pointer.go` and
 `attr_bad_pointer_stackcopy.go`) still reproduce at this HEAD, byte for byte —
@@ -393,3 +394,77 @@ written not to:
   that becomes its own allocation still consumes its reserved field in the order
   the argument list gives.
 
+## 6. What was committed
+
+| file | what |
+|---|---|
+| `ir/build.go` | `Block.HeapAllocConvertedField`, and the contract it adds to `HeapAllocConverted`'s two |
+| `goc/compile.go` | `variadicPayloadStorage` and the slot it hands to the interface conversion; `parameterDoesNotEscape`'s refusal |
+| `opt/escape.go` | declared containment, `containedAllocationsEscape`, the read-out cases, `foldSplitPayloadsBackIn`, the fold in the rewrite |
+| `opt/escapesummary.go` | `markContents`: a `!Deep` argument escapes what it holds, not itself |
+| `opt/escape_test.go` | five unit tests over the shape, including the retention case and the read-out |
+| `goc/testdata/variadic_element_retention.go` | the retained element, surviving a stack copy |
+| `goc/testdata/variadic_element_address_retention.go` | the front-end reduction: a frame address the collector rejects |
+| `goc/testdata/allocation_counts.go`, `goc/alloccount_test.go` | four new rows and the headline's new number |
+| `goc/loopalias_test.go` | the two new programs, expectations checked against the host |
+| `goc/testdata/alloc_census_baseline.txt`, `escape_gc_differential.txt`, `slog_allocations_baseline.txt` | regenerated |
+
+## 7. What is left
+
+1. **`log/slog` is still 1.00 against gc's 0.00**, and the reason is
+   `Logger.Info`'s `args` slice escaping at depth 0 through `Record.Add`'s
+   loop-carried `argsToAttr` leak-to-result. That is a summary problem in
+   `opt.escapeGraph`, not a representation one, and it is the next thing worth
+   doing for slog. It would turn `disabled/3-attr` free.
+
+2. **The front end's refusal costs precision on a spread call**, `f(xs...)`,
+   where handing the parameter over as itself does make the parameter's own
+   summary the right question. All five callers of `parameterDoesNotEscape` have
+   the `*ast.CallExpr` in scope, so passing `call.Ellipsis.IsValid()` would
+   recover it. Two census sites is what it is worth today.
+
+3. **`fmt.Sprintf("%d/%d", small, small)` is 2.00 against gc's 1.00**, because
+   the fold-back compares upper bounds and two convertible payloads out of a
+   framed array might cost two. A profile-free improvement would need to know
+   the values; a profile-guided one would not.
+
+4. **The `slog.Attr` frame pointer map is still wrong.** Both reductions still
+   reproduce at this HEAD and `json/logattrs-4-attrs` still dies. `json/kv-4-pairs`
+   running again is a layout coincidence, not a fix, and it will stop being one.
+
+## 8. The answer
+
+**`fmt.Sprintf("value=%d", 42)` costs goc 1.00 allocations against gc's 1.00.**
+It was 2.00. The `[1]any` is a frame slot, which is where gc has always kept it,
+and the one allocation both compilers pay is the result string.
+
+**`log/slog` is unchanged: `info/5-attr` 1.00 against gc's 0.00, `disabled/3-attr`
+1.00 against gc's 0.00.** Thirty-one of the thirty-two slog rows are byte-identical
+to the base commit. That is a result rather than a non-result: the build that
+split unconditionally measured `info/3-attr-large-ints` at 4.00 against gc's 3.00,
+and the fold-back is what holds slog level while `fmt` improves. slog's array
+escapes at depth 0 and no variadic representation can help it.
+
+**The combined object was split, partially and by construction.** A payload the
+runtime has a conversion helper for is its own allocation candidate; a payload
+without one stays a field. `opt` folds a split payload back to `container+offset`
+whenever the container escaped anyway or more than one payload escaped out of a
+container that did not, so the representation is chosen where the escape answer
+is known and never where it is guessed.
+
+**The retention hole is not avoided, it is unrepresentable.** The thing the
+callee keeps — the box — is a different allocation from the thing that stays in
+the frame — the array — so "the callee retains an element" and "the callee
+retains the slice" are two answers rather than one, and `ParamFact.Deep` is what
+tells them apart. What the split owes back is that everything inside an escaping
+object escapes with it, which `containedAllocationsEscape` settles after the mark
+loop, after the loop rule, and after the fold-back — the loop rule being the one
+that would otherwise leave a promoted payload inside a heap container.
+
+**One thing found along the way is worth more than the numbers.** The front end's
+`parameterDoesNotEscape` was answering about the *slice* for an argument that is
+an *element* of it, so a local whose address a variadic callee retained was left
+in a frame that returned. The collector says `found bad pointer in Go heap`. It
+reproduces on the base commit and on `main`, the reduction is committed with its
+expected output checked against the host toolchain, and the walk now refuses the
+question the predicate beside it always refused. It costs two census sites.
