@@ -2087,3 +2087,28 @@ byte-wide scalar.
 
 and `goc/testdata/slog_allocations_baseline.txt` has no "cases that did not run"
 section any more.
+
+## 11. Verification at the committed HEAD
+
+Everything committed, working tree clean, no update flags:
+
+    go test ./goc -run 'TestSlogAttr|TestGoABIAggregate'
+    --- PASS: TestGoABIAggregateAgreesWithTheTypeLayout (0.00s)
+    --- PASS: TestGoABIAggregatesAgreeWithTheirTypesInTheStdlib (2.07s)
+    --- PASS: TestSlogAttrInFrameIsNotScannedAsAPointer (58.14s)
+    --- PASS: TestSlogAttrInFrameSurvivesTheStackCopyChecker (27.78s)
+    --- PASS: TestSlogAttrFrameExpectationsMatchTheHostToolchain (0.39s)
+    ok  github.com/evanphx/cg12/goc  88.441s
+
+and the two reductions this started from, run straight from the miscompiles
+directory under the fixed compiler:
+
+    goc -run .../attr_bad_pointer.go            -> 200
+    goc -run .../attr_bad_pointer_stackcopy.go  -> 200
+    goc -run .../attr_bad_pointer_control.go    -> 200
+
+`go test ./goc/...`, the capability matrix and `make test-unit` were not run
+here: a dependent job runs them, and running them twice on a loaded box helps
+nobody. What that leaves unchecked from this tree is stated plainly rather than
+implied — the corpus-wide run, the matrix, and the unit suites are that job's
+result, not this one's.
