@@ -279,17 +279,7 @@ func analyzeCandidateEscapes(function *ir.Func, byName map[string]*ir.Func, fact
 	}
 
 	escaped := make(map[uint32]bool)
-	contains := make(map[uint32]map[uint32]bool)
-	// noteContainment records that one tracked allocation's address was written
-	// into another, and reports that it did. A caller that gets false has a
-	// publication on its hands and must escape the value itself.
-	noteContainment := func(value, destination ir.Ref) bool {
-		valueBase, valueTracked := heapBase(value, bases)
-		if !valueTracked {
-			return false
-		}
-		return noteContainmentOf(contains, valueBase, destination, bases)
-	}
+	contains := declaredContainment(function, bases)
 	var reasons map[uint32]string
 	if wantReasons {
 		reasons = make(map[uint32]string)
@@ -365,15 +355,14 @@ func analyzeCandidateEscapes(function *ir.Func, byName map[string]*ir.Func, fact
 								continue
 							}
 							if destinationLocation.class != cLocal {
-								// A block copy out of a frame slot holding a
-								// tracked pointer into another tracked
-								// allocation is the same containment the store
-								// case records: goc builds a variadic `...any`
+								// The copy that puts a boxed payload into its
+								// container: goc builds a variadic `...any`
 								// element by copying a two-word interface
 								// descriptor out of a frame slot into the
 								// backing array, and the payload pointer rides
-								// along in it.
-								if !noteContainmentOf(contains, base, destination, bases) {
+								// along in it. That is containment, declared by
+								// the candidate itself, not a publication.
+								if !declaredContainedBase(contains, base, destination, bases) {
 									escaped[base] = true
 								}
 								continue
@@ -449,6 +438,11 @@ func analyzeCandidateEscapes(function *ir.Func, byName map[string]*ir.Func, fact
 		}
 	}
 
+	// Read again now that the fixed point has resolved every base a container
+	// could be named through. The first reading, before the loop, is what the
+	// block-copy case above needed; this one is what the mark loop gets.
+	contains = declaredContainment(function, bases)
+
 	// Which tracked allocations hold a pointer into themselves. Collected in its
 	// own pass rather than as the mark loop meets them, because a call can
 	// precede in program order the store that makes its argument
@@ -464,10 +458,8 @@ func analyzeCandidateEscapes(function *ir.Func, byName map[string]*ir.Func, fact
 			switch {
 			case isAtomicPointerStore(function, instruction):
 				noteSelfReference(instruction.Arg(2), instruction.Arg(1))
-				noteContainment(instruction.Arg(2), instruction.Arg(1))
 			case instruction.Op.IsStore():
 				noteSelfReference(instruction.Arg(0), instruction.Arg(1))
-				noteContainment(instruction.Arg(0), instruction.Arg(1))
 			}
 		}
 	}
@@ -525,7 +517,14 @@ func analyzeCandidateEscapes(function *ir.Func, byName map[string]*ir.Func, fact
 				// a pointer the object could be reached through: only a
 				// register-shaped, pointer-free type has a helper at all.
 			case instruction.Op.IsLoad():
-				// Reading through the candidate keeps it local.
+				// Reading through the candidate keeps it local -- but reading a
+				// declared payload's pointer back *out* of its container does
+				// not, because the loaded value is not tracked and nothing marks
+				// what is done with it afterwards. goc never emits that for the
+				// shape this exists for: it fills the backing array and hands it
+				// straight to the callee. If some later pass ever does, the
+				// contents escape here rather than silently outliving the frame.
+				markContents(instruction.Arg(0), "read back out of the object holding it")
 			case instruction.Op == ir.OCmp:
 				// Comparing a pointer observes its value but cannot retain it.
 			case instruction.Op.IsStore():
@@ -539,7 +538,7 @@ func analyzeCandidateEscapes(function *ir.Func, byName map[string]*ir.Func, fact
 				// known.
 				if aliases.locOf(instruction.Arg(1), 1).class != cLocal &&
 					!storesIntoItself(instruction.Arg(0), instruction.Arg(1), bases) &&
-					!containedIn(contains, instruction.Arg(0), instruction.Arg(1), bases) {
+					!declaredContained(contains, instruction.Arg(0), instruction.Arg(1), bases) {
 					mark(instruction.Arg(0), "store into non-local storage")
 				}
 			case facts != nil && instruction.Op == ir.OCall &&
@@ -558,14 +557,19 @@ func analyzeCandidateEscapes(function *ir.Func, byName map[string]*ir.Func, fact
 				destination := instruction.Arg(1)
 				if _, localCandidate := heapBase(destination, bases); localCandidate {
 					if !storesIntoItself(instruction.Arg(2), destination, bases) &&
-						!containedIn(contains, instruction.Arg(2), destination, bases) {
+						!declaredContained(contains, instruction.Arg(2), destination, bases) {
 						mark(instruction.Arg(2), "write barrier into a candidate")
 					}
 				} else if aliases.locOf(destination, 1).class != cLocal {
 					mark(instruction.Arg(2), "write barrier into non-local storage")
 				}
 			case benignMemoryCall(function, instruction):
-				// memcpy/memset observe the storage but do not retain its address.
+				// memcpy/memset observe the storage but do not retain its
+				// address. A block copy *out* of a container is a read-out all
+				// the same, and is answered the same way the load case is.
+				for _, argument := range memoryCallReadsOut(function, instruction) {
+					markContents(argument, "block-copied out of the object holding it")
+				}
 			default:
 				for _, argument := range instruction.Args {
 					mark(argument, instructionReason(function, instruction))
@@ -588,33 +592,63 @@ func analyzeCandidateEscapes(function *ir.Func, byName map[string]*ir.Func, fact
 	return analysis
 }
 
-// noteContainmentOf records that the allocation named by valueBase was written
-// into whatever tracked allocation destination names, and reports whether there
-// was one. Self-containment is not recorded: storesIntoItself already answers
-// that shape, and an edge from a base to itself would say nothing.
-func noteContainmentOf(contains map[uint32]map[uint32]bool, valueBase uint32, destination ir.Ref, bases map[uint32]uint32) bool {
-	destinationBase, destinationTracked := heapBase(destination, bases)
-	if !destinationTracked || destinationBase == valueBase {
-		return false
+// declaredContainment reads the containment edges out of the candidates that
+// declare them: a candidate emitted by ir.Block.HeapAllocConvertedField says
+// which allocation reserved storage for it, and therefore which allocation it is
+// logically a field of.
+//
+// Containment is taken from the declaration rather than inferred from stores on
+// purpose. Inferring it -- "a tracked pointer written into another tracked
+// allocation is contained, not published" -- is true, and it is *not* enough on
+// its own: a pointer loaded back out of the container and published from there
+// would then escape neither. Every place a container's contents can be read out
+// would have to be found and answered, and getting that list wrong is a dangling
+// pointer rather than a lost optimisation. The declared form is a closed set --
+// goc emits these candidates at one site, for one shape, and passes the
+// container straight to the callee without ever reading it back -- and
+// containerContentsAreReadOut is the check that the shape really is that closed.
+func declaredContainment(function *ir.Func, bases map[uint32]uint32) map[uint32]map[uint32]bool {
+	var contains map[uint32]map[uint32]bool
+	for _, block := range function.Blocks {
+		for _, instruction := range block.Instrs {
+			container, _, folds := foldsIntoContainer(function, instruction)
+			if !folds || instruction.To.Kind != ir.RefTemp {
+				continue
+			}
+			containerBase, tracked := heapBase(container, bases)
+			if !tracked || containerBase == instruction.To.ID {
+				continue
+			}
+			if contains == nil {
+				contains = make(map[uint32]map[uint32]bool, 1)
+			}
+			held := contains[containerBase]
+			if held == nil {
+				held = make(map[uint32]bool, 1)
+				contains[containerBase] = held
+			}
+			held[instruction.To.ID] = true
+		}
 	}
-	held := contains[destinationBase]
-	if held == nil {
-		held = make(map[uint32]bool, 1)
-		contains[destinationBase] = held
-	}
-	held[valueBase] = true
-	return true
+	return contains
 }
 
-// containedIn reports that a store writes one tracked allocation's address into
-// another, which noteContainment has already recorded. The mark loop asks so it
-// can leave the value alone: containedAllocationsEscape settles it later, once
-// the container's own answer is known.
-func containedIn(contains map[uint32]map[uint32]bool, value, destination ir.Ref, bases map[uint32]uint32) bool {
+// declaredContained reports that a store writes a declared payload's address
+// into the container that declared it. The mark loop asks so it can leave the
+// value alone: containedAllocationsEscape settles it later, once the container's
+// own answer is known.
+func declaredContained(contains map[uint32]map[uint32]bool, value, destination ir.Ref, bases map[uint32]uint32) bool {
+	if len(contains) == 0 {
+		return false
+	}
 	valueBase, valueTracked := heapBase(value, bases)
 	if !valueTracked {
 		return false
 	}
+	return declaredContainedBase(contains, valueBase, destination, bases)
+}
+
+func declaredContainedBase(contains map[uint32]map[uint32]bool, valueBase uint32, destination ir.Ref, bases map[uint32]uint32) bool {
 	destinationBase, destinationTracked := heapBase(destination, bases)
 	if !destinationTracked || destinationBase == valueBase {
 		return false
@@ -1001,6 +1035,32 @@ func benignMemoryCall(function *ir.Func, instruction ir.Instr) bool {
 	default:
 		return false
 	}
+}
+
+// memoryCallReadsOut names the operands of a benign memory call whose pointee is
+// copied somewhere the call's own storage does not reach: the source of a block
+// copy, and -- conservatively, since its argument order is not modelled here --
+// every operand of a growslice.
+//
+// A memset writes and a memcmp compares, so neither can carry a pointer out of
+// the object it was handed. A copy's destination cannot either: filling an
+// object is how a container gets its contents in the first place, and treating
+// that as a read-out would escape every payload goc puts into a variadic call.
+func memoryCallReadsOut(function *ir.Func, instruction ir.Instr) []ir.Ref {
+	if _, source, _, isCopy := memoryCopyOperands(function, instruction); isCopy {
+		return []ir.Ref{source}
+	}
+	switch constSymbolName(function, instruction.Arg(0)) {
+	case "memset", "goc_memset", "memcmp", "goc_memcmp":
+		return nil
+	case "memcpy", "memmove", "goc_memcpy", "goc_memmove":
+		// A copy whose size is not a constant, so memoryCopyOperands did not
+		// recognise it. The operand order is the same; only the size is unknown.
+		if len(instruction.Args) == 4 {
+			return []ir.Ref{instruction.Arg(2)}
+		}
+	}
+	return instruction.Args[1:]
 }
 
 func memoryCopyOperands(function *ir.Func, instruction ir.Instr) (ir.Ref, ir.Ref, int64, bool) {
