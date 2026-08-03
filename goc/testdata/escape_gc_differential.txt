@@ -22,18 +22,18 @@ host toolchain: go version go1.26.1 linux/arm64
 
 ## coverage
 
-corpus programs                             392
-compared (host toolchain built them)        388
+corpus programs                             398
+compared (host toolchain built them)        394
 not compared                                  4
-census rows joined                         2778
+census rows joined                         2791
 census rows lost to an unbuilt program       37
 census rows with no source position        1739  (never joinable)
   of those, in a corpus program's own code    32  (32 on the heap: the bound on how
                                                   wrong the join can be about goc)
-census rows outside the corpus directory  10280  (vendored stdlib; never joinable)
-gc decisions joined                        3414
+census rows outside the corpus directory  10279  (vendored stdlib; never joinable)
+gc decisions joined                        3434
   of which synthesized by the chan rule     136
-gc decisions at an inlining call site       854  (excluded; see package gcdiff)
+gc decisions at an inlining call site       867  (excluded; see package gcdiff)
 gc diagnostics outside the program         3503  (excluded; wrappers and instantiations)
 gc diagnostics the parser did not know        0  (must be 0)
 
@@ -52,12 +52,12 @@ same as "it put the object in a frame" -- see gcdiff.Absent.
 
   goc\gc      frame     heap    mixed   absent    total
   frame          37        3        3       30       73
-  heap          172     1769      175      169     2285
-  mixed          14       55       30       13      112
-  absent        458      119       23        0      600
-  total         681     1946      231      212     3070
+  heap          172     1778      175      170     2295
+  mixed          14       56       30       13      113
+  absent        463      121       23        0      607
+  total         686     1958      231      213     3088
 
-## PERMISSIVE: 233 lines
+## PERMISSIVE: 236 lines
 
 every source line gc puts on the heap and goc does not. This is the
 correctness-critical direction: goc keeping in a frame something gc could not
@@ -68,8 +68,8 @@ not record ordinary front-end frame slots, so "no record" is consistent with
 
 by construct (goc allocators on the line | gc constructs on the line):
 
-    108  - | object/heap
-     53  newobject/frame,newobject/heap | object/heap
+    110  - | object/heap
+     54  newobject/frame,newobject/heap | object/heap
      22  - | object/frame,object/heap
      18  convT64/heap,newobject/frame | object/heap,slice/frame
      10  - | slice/heap
@@ -459,6 +459,17 @@ runtime_map_struct_value_replace.go:18	absent -> heap
 runtime_new_composite_gc.go:14	absent -> heap
 	src  head.items = append(head.items, 3, 5, 7)
 	gc   col 21  heap  object  append
+runtime_package_initializer_dispatch.go:43	mixed -> heap
+	src  var variadicArgument = firstWriter(new(bytes.Buffer))
+	goc  col 24  frame  runtime.newobject  1_io_Writer  [.goc.global.initfunc.68.main.variadicArgument]
+	goc  col 36  heap  runtime.newobject  bytes_Buffer  [.goc.global.initfunc.68.main.variadicArgument]
+	gc   col 39  heap  object  new(bytes.Buffer)
+runtime_package_initializer_dispatch.go:50	absent -> heap
+	src  return passByteReader(bytes.NewReader([]byte("F")))
+	gc   col 47  heap  object  ([]byte)("F")
+runtime_package_initializer_dispatch.go:77	absent -> heap
+	src  if count, err := variadicArgument.Write([]byte("I")); count != 1 || err != nil {
+	gc   col 49  heap  object  ([]byte)("I")
 runtime_println_operand_separation.go:173	absent -> heap
 	src  return string(buffer[:read])
 	gc   col 22  heap  object  string(buffer[:read])
@@ -1089,7 +1100,7 @@ variadic_element_retention.go:39	mixed -> mixed
 	gc   col 38  frame  slice  ... argument
 	gc   col 39  heap  object  24301
 
-## PESSIMISTIC: 573 lines
+## PESSIMISTIC: 574 lines
 
 every source line goc puts on the heap and gc does not. This is the
 performance direction and nothing worse: each line is an allocation, a zeroing
@@ -1119,6 +1130,7 @@ by construct (goc allocators on the line | gc constructs on the line):
       2  makemap/heap | object/frame
       2  newobject/frame,newobject/heap | object/frame,object/heap,slice/frame
       2  newobject/frame,newobject/heap | slice/frame
+      1  convT32/heap,newobject/heap | -
       1  convT64/heap | object/frame,object/heap
       1  convT64/heap | object/frame,slice/frame
       1  convT64/heap,newobject/heap | object/heap,slice/frame
@@ -2332,6 +2344,10 @@ runtime_opt_loop_carried_root.go:45	heap -> mixed
 	goc  col 23  heap  runtime.newobject  main_node  [main.churn]
 	gc   col 16  frame  object  append
 	gc   col 23  heap  object  &node{...}
+runtime_package_initializer_dispatch.go:46	heap -> absent
+	src  var insideComposite = []fmt.Stringer{passStringer(fs.FileMode(0o644))}
+	goc  col 23  heap  runtime.newobject  1_fmt_Stringer  [.goc.global.initfunc.65.main.insideComposite]
+	goc  col 51  heap  runtime.convT32  io_fs_FileMode  [.goc.global.initfunc.65.main.insideComposite]
 runtime_panic_deep_unwind.go:18	heap -> frame
 	src  if value != "deep panic" {
 	goc  col 15  heap  runtime.newobject  string  [main.main.func.16.8]

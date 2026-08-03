@@ -1,3 +1,116 @@
+# Merge gate: `integration/escape-wave2` at 53c1c5c
+
+Verification of the four-change integration branch (`iface-convt-fastpath` →
+`variadic-escape-question`, `slog-attr-gcmask`, `iface-init-dispatch`) against
+`main` (4a6fd96). Every number below was produced by a process this job started
+and watched exit. Host toolchain `go1.26.1 linux/arm64`, 64 cores.
+
+## 0. Topology, restated correctly
+
+    main 4a6fd96
+      ├── ccwork/iface-convt-fastpath ──── ccwork/variadic-escape-question
+      ├── ccwork/slog-attr-gcmask
+      └── ccwork/iface-init-dispatch
+
+`git merge-base main <branch>` is 4a6fd96 for all three merged heads.
+`variadic-escape-question` *contains* `iface-convt-fastpath` (b798af9…19488ee are
+in its history); `slog-attr-gcmask` and `iface-init-dispatch` are independent of
+both. So the merge composes four changes through three merge commits.
+
+## 1. The four regenerated baselines
+
+All four were regenerated from this tree with the command in each file's header,
+each run waited on to exit rc=0.
+
+### 1.1 `slog_allocations_baseline.txt` — WAS STALE, now correct
+
+    go test ./goc -run TestSlogAllocationsAgainstGC -slog-allocations -update-slog-allocations
+    → rc=0, 32 cases, 20.9s
+
+The committed file was byte-identical to `slog-attr-gcmask`'s version, i.e.
+measured on a tree **without** the convT fast path. The merge resolved the
+conflict to that side. Regenerating moves 16 rows, all downward:
+
+    case                        committed   regenerated   host gc
+    control/any-int-small          1.00        0.00        0.00
+    control/any-bool               1.00        0.00        0.00
+    attr/slog.Int                  1.00        0.00        0.00
+    attr/slog.Bool                 1.00        0.00        0.00
+    attr/slog.Duration             1.00        0.00        0.00
+    attr/slog.Float64              1.00        0.00        0.00
+    info/1-attr                    2.00        1.00        0.00
+    info/3-attr                    4.00        1.00        0.00
+    info/5-attr                    6.00        1.00        0.00
+    info/6-attr                    8.00        2.00        1.00
+    info/3-attr-large-ints         4.00        1.00        3.00
+    logattrs/3-attr                4.00        1.00        0.00
+    logattrs/6-attr                9.00        3.00        1.00
+    disabled/logattrs-3-attr       4.00        1.00        0.00
+    json/kv-4-pairs                8.00        5.00        2.00
+    json/logattrs-4-attrs          8.00        5.00        0.00
+
+**Settled: the merged tree really does achieve the convT branch's 1.00 on
+`info/5-attr`.** The 6.00 was a stale generated file, exactly as hypothesised.
+No row moved *up*, and no row became `crash`.
+
+### 1.2 `alloc_census_baseline.txt` — one stale line, and it is explicable
+
+    go test ./goc -run TestAllocationCensus -update-alloc-census-baseline
+    → rc=0, 188.2s
+
+Regenerating changes **exactly one line** of 14846, and totals are unchanged
+(14846 sites, 13676 heap, 1170 frame, before and after):
+
+    - runtime_package_initializer_dispatch.go:46:51  …insideComposite  runtime.newobject  io_fs_FileMode  heap
+    + runtime_package_initializer_dispatch.go:46:51  …insideComposite  runtime.convT32    io_fs_FileMode  heap
+
+Site by site composition check. Taking each branch's own census delta against
+`main` as a multiset of lines and applying them together:
+
+    expected = main − removed(variadic) − removed(init) + added(variadic) + added(init)
+
+gives 14846 lines that match the regenerated file **line for line except that
+single pair**. (`slog-attr-gcmask` has a zero census delta; `iface-convt-fastpath`
+is subsumed by `variadic`.) So:
+
+    branch                     census lines   added vs main   removed vs main
+    main                          14670            —               —
+    iface-convt-fastpath          14680           562             552
+    variadic-escape-question      14834           843             679
+    slog-attr-gcmask              14670             0               0
+    iface-init-dispatch           14682            24              12
+    merged (regenerated)          14846           867             691
+
+**The one unexplained line is the cross-branch interaction, and it is benign.**
+`iface-init-dispatch` adds `runtime_package_initializer_dispatch.go`, which at
+line 46 converts `fs.FileMode(0o644)` (a uint32) to `fmt.Stringer` inside a
+package-scope composite literal. Its branch measured that site off `main`, where
+the box is built by `runtime.newobject`. With `iface-convt-fastpath` also merged,
+the same site is built by `runtime.convT32` — which is what that branch does to
+every boxing site (its own delta is 552 `newobject` rows out, 466 `convT64` +
+70 `convT32` + 16 `newobject` + 10 `convT16` rows in). Same position, same
+function, same type, **same `heap` decision**; only the helper changed. Nothing
+in the composition is unaccounted for.
+
+### 1.3 `escape_shadow_baseline.txt` — was already correct
+
+    go test ./goc -run TestEscapeShadowPlacement -update-escape-shadow-baseline
+    → rc=0, 187.7s. Regenerated file is byte-identical to the committed one.
+
+The merge resolution happened to take the right side here.
+
+### 1.4 `escape_gc_differential.txt` — WAS STALE (see §9)
+
+    go test ./goc -run TestEscapeDifferentialAgainstGC -escape-gc-differential -update-escape-gc-differential
+    → rc=0, 10.8s
+
+The committed file compared 388 corpus programs; this tree has 398, of which the
+host builds 394. It was generated by `variadic-escape-question` before the other
+two branches (which add 6 further corpus programs) were merged. Regenerated
+numbers are in §9.
+
+---
+
 # Asking the escape question for a variadic call: splitting the object that made it unanswerable
 
 # The package-initializer dispatch miscompile: what the registration walk missed

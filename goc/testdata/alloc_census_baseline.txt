@@ -13131,7 +13131,7 @@ testdata/runtime_package_initializer_dispatch.go:100:9	main.main	runtime.newobje
 testdata/runtime_package_initializer_dispatch.go:43:24	.goc.global.initfunc.68.main.variadicArgument	runtime.newobject	1_io_Writer	frame
 testdata/runtime_package_initializer_dispatch.go:43:36	.goc.global.initfunc.68.main.variadicArgument	runtime.newobject	bytes_Buffer	heap
 testdata/runtime_package_initializer_dispatch.go:46:23	.goc.global.initfunc.65.main.insideComposite	runtime.newobject	1_fmt_Stringer	heap
-testdata/runtime_package_initializer_dispatch.go:46:51	.goc.global.initfunc.65.main.insideComposite	runtime.newobject	io_fs_FileMode	heap
+testdata/runtime_package_initializer_dispatch.go:46:51	.goc.global.initfunc.65.main.insideComposite	runtime.convT32	io_fs_FileMode	heap
 testdata/runtime_package_initializer_dispatch.go:62:9	.goc.global.initfunc.67.main.returnedFromFunctionLiteral.func.61.35	runtime.newobject	strings_Builder	heap
 testdata/runtime_package_initializer_dispatch.go:72:25	main.main	runtime.newobject	1_byte	heap
 testdata/runtime_package_initializer_dispatch.go:74:9	main.main	runtime.newobject	string	heap
