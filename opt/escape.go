@@ -367,6 +367,27 @@ func analyzeCandidateEscapes(function *ir.Func, byName map[string]*ir.Func, fact
 		}
 	}
 
+	// Which tracked allocations hold a pointer into themselves. Collected in its
+	// own pass rather than as the mark loop meets them, because a call can
+	// precede in program order the store that makes its argument
+	// self-referential, and the answer has to be the same either way.
+	selfReferential := make(map[uint32]bool)
+	noteSelfReference := func(value, destination ir.Ref) {
+		if base, tracked := heapBase(value, bases); tracked && storesIntoItself(value, destination, bases) {
+			selfReferential[base] = true
+		}
+	}
+	for _, block := range function.Blocks {
+		for _, instruction := range block.Instrs {
+			switch {
+			case isAtomicPointerStore(function, instruction):
+				noteSelfReference(instruction.Arg(2), instruction.Arg(1))
+			case instruction.Op.IsStore():
+				noteSelfReference(instruction.Arg(0), instruction.Arg(1))
+			}
+		}
+	}
+
 	mark := func(reference ir.Ref, why string) {
 		if reference.Kind == ir.RefTemp {
 			if base, ok := bases[reference.ID]; ok {
@@ -398,7 +419,8 @@ func analyzeCandidateEscapes(function *ir.Func, byName map[string]*ir.Func, fact
 				// Frontend variables live in ordinary stack allocations. Saving a
 				// candidate in a non-escaping local slot does not make the pointed-to
 				// object escape; storing it anywhere externally reachable does.
-				if aliases.locOf(instruction.Arg(1), 1).class != cLocal {
+				if aliases.locOf(instruction.Arg(1), 1).class != cLocal &&
+					!storesIntoItself(instruction.Arg(0), instruction.Arg(1), bases) {
 					mark(instruction.Arg(0), "store into non-local storage")
 				}
 			case facts != nil && instruction.Op == ir.OCall &&
@@ -407,7 +429,7 @@ func analyzeCandidateEscapes(function *ir.Func, byName map[string]*ir.Func, fact
 				// a publication when the callee's summary says the callee can retain
 				// it. This is the entire behavioural difference the fact table makes,
 				// and with facts nil the case cannot be reached.
-				markSummarisedCall(function, byName, facts, instruction, mark)
+				markSummarisedCall(function, byName, facts, instruction, bases, selfReferential, mark)
 			case isTrackedHeapDerivation(instruction, bases):
 				// Copies, casts, and constant pointer offsets preserve locality.
 			case isAtomicPointerStore(function, instruction):
@@ -416,7 +438,9 @@ func analyzeCandidateEscapes(function *ir.Func, byName map[string]*ir.Func, fact
 				// escape lowering knows whether the enclosing object is stack-local.
 				destination := instruction.Arg(1)
 				if _, localCandidate := heapBase(destination, bases); localCandidate {
-					mark(instruction.Arg(2), "write barrier into a candidate")
+					if !storesIntoItself(instruction.Arg(2), destination, bases) {
+						mark(instruction.Arg(2), "write barrier into a candidate")
+					}
 				} else if aliases.locOf(destination, 1).class != cLocal {
 					mark(instruction.Arg(2), "write barrier into non-local storage")
 				}
@@ -483,6 +507,23 @@ func rewriteHeapAllocations(function *ir.Func, analysis *candidateEscapes, loopB
 		}
 		block.Instrs = lowered
 	}
+}
+
+// storesIntoItself reports a store whose value and whose destination are both
+// derived from the same tracked allocation: the object is being made to point
+// at part of itself.
+//
+// Nothing outside can reach the object any more easily for it, so the store
+// says nothing about whether the object escapes -- "it escapes if it escapes"
+// is all it means. Marking it a publication instead is what kept a variadic
+// `...any` call's backing object on the heap: the front end packs the `[]any`
+// array and the boxed payloads it points at into one allocation, so writing
+// each element's data word writes a pointer into that object, into that same
+// object.
+func storesIntoItself(value, destination ir.Ref, bases map[uint32]uint32) bool {
+	valueBase, valueTracked := heapBase(value, bases)
+	destinationBase, destinationTracked := heapBase(destination, bases)
+	return valueTracked && destinationTracked && valueBase == destinationBase
 }
 
 // recordAllocDecision notes where one heap-allocation candidate landed.

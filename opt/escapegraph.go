@@ -75,6 +75,10 @@ type escapeGraph struct {
 	// reached from the heap; resultLeak[i] is the same per result index.
 	heapLeak   []int32
 	resultLeak []map[int]int32
+
+	// definitions is the instruction that defines each temporary, for
+	// scalarValue's walk back through copies and casts.
+	definitions map[uint32]ir.Instr
 }
 
 func analyzeFunction(byName map[string]*ir.Func, function *ir.Func, facts *EscapeFacts) []ParamFact {
@@ -189,14 +193,72 @@ func (graph *escapeGraph) addEdge(dst, src int, derefs int32) {
 // flow records that dereferencing src derefs times produces a value assigned to
 // dst. Only temporaries carry values here; a constant symbol is a global
 // address, which no parameter can be.
+//
+// A src that scalarValue rules out as a pointer carries nothing at derefs 0 and
+// is not recorded.
+//
+// Dropping those edges matters because regions here are field-insensitive. A
+// slice parameter is reconstructed into one frame slot, so the load of its
+// length and the load of its data pointer come out of the same node, and
+// without the test any arithmetic on the length -- `len(a) - 1`, which is what
+// a reslice computes -- published the data pointer. That was enough to make
+// every `[]any` parameter in fmt escape, and with it every variadic call to
+// fmt.
 func (graph *escapeGraph) flow(dst int, src ir.Ref, derefs int32) {
 	if src.Kind != ir.RefTemp {
+		return
+	}
+	if derefs == 0 && graph.scalarValue(src) {
 		return
 	}
 	graph.addEdge(dst, graph.tempLoc(src.ID), derefs)
 }
 
+// scalarValue reports that a value cannot be a pointer, so publishing it
+// publishes nothing.
+//
+// cg12 keeps a distinct abstract pointer class, ir.ClsP, right up to the
+// backend's LowerPointers, so a value of any other class is nominally an
+// integer, a length, a float. The class alone is not enough to conclude
+// anything, though: the front end coerces a pointer into a width class when it
+// feeds one to a width-typed intrinsic, and sync/atomic.StorePointer really does
+// end `%p =p load ...; %l =l copy %p; intrinsic atomic.store.l`. Reading that
+// copy as a scalar loses the store, leaves the pointed-at object in a frame,
+// and hands the caller a dangling pointer -- which is exactly what it did, to
+// log.Logger.SetPrefix.
+//
+// So the answer is no if any copy or cast the value was narrowed from is of
+// pointer class. Everything else -- an arithmetic result, a load the front end
+// typed as a scalar, a constant -- is a value this function computed rather
+// than a pointer wearing a different class, and a parameter or phi, whose
+// definition is not an instruction, is answered conservatively.
+func (graph *escapeGraph) scalarValue(value ir.Ref) bool {
+	for hops := 0; hops < 32; hops++ {
+		if value.Kind != ir.RefTemp || graph.function.ClassOf(value) == ir.ClsP {
+			return false
+		}
+		definition, defined := graph.definitions[value.ID]
+		if !defined {
+			return false
+		}
+		if definition.Op != ir.OCopy && definition.Op != ir.OCast {
+			return true
+		}
+		value = definition.Arg(0)
+	}
+	return false
+}
+
 func (graph *escapeGraph) build() {
+	graph.definitions = make(map[uint32]ir.Instr, len(graph.function.Temps))
+	for _, block := range graph.function.Blocks {
+		for _, instruction := range block.Instrs {
+			if instruction.To.Kind == ir.RefTemp {
+				graph.definitions[instruction.To.ID] = instruction
+			}
+		}
+	}
+
 	// A temporary that names storage in this frame holds that storage's
 	// address, so it is one dereference *below* the slot it names. This is the
 	// edge that connects the memory form frontend variables have -- an OAlloc
@@ -542,13 +604,25 @@ func (graph *escapeGraph) summary() []ParamFact {
 				leaked = result
 			}
 		}
+		// Deep is the same question one dereference further out: is anything
+		// reachable through the parameter retained, rather than the pointer
+		// itself. heapLeak is the smallest depth at which the heap reaches the
+		// parameter, so "greater than one" is "not even the pointee", and the
+		// result leaks have to clear the same bar.
+		deep := graph.heapLeak[index] > 1
+		for _, distance := range graph.resultLeak[index] {
+			if distance <= 1 {
+				deep = false
+				break
+			}
+		}
 		switch {
 		case multiple:
 			facts[index] = ParamFact{Escape: ParamEscapes}
 		case leaked >= 0:
 			facts[index] = ParamFact{Escape: ParamLeaksToResult, Result: leaked}
 		default:
-			facts[index] = ParamFact{Escape: ParamNoEscape}
+			facts[index] = ParamFact{Escape: ParamNoEscape, Deep: deep}
 		}
 	}
 	return facts

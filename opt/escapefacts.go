@@ -43,6 +43,18 @@ type ParamFact struct {
 	// Result is the result index a ParamLeaksToResult parameter reaches. It is
 	// meaningless for the other two answers.
 	Result int
+	// Deep is the strong claim: nothing reachable *through* this parameter is
+	// retained either, not merely the pointer itself.
+	//
+	// The three answers above are about the pointer at dereference depth 0,
+	// which is the right question when the pointee is a different allocation
+	// with an escape decision of its own. It is the wrong question when the
+	// pointee is inside the same object -- goc packs a variadic `...any` call's
+	// backing array and the payloads its elements point at into one allocation,
+	// so a callee that retains an *element* retains the whole object, and a
+	// depth-0 ParamNoEscape does not say it does not. See selfReferential in
+	// escape.go, which is the only consumer.
+	Deep bool
 }
 
 // EscapeFacts is a whole program's parameter summary table, keyed by IR symbol
@@ -246,7 +258,7 @@ func solveRecursiveComponent(byName map[string]*ir.Func, component []*ir.Func, f
 		}
 		optimistic := make([]ParamFact, len(function.Params))
 		for index := range optimistic {
-			optimistic[index] = ParamFact{Escape: ParamNoEscape}
+			optimistic[index] = ParamFact{Escape: ParamNoEscape, Deep: true}
 		}
 		facts.params[function.Name] = optimistic
 	}
@@ -300,6 +312,10 @@ func meetFacts(previous, next []ParamFact) ([]ParamFact, bool) {
 			case candidate.Escape == before.Escape &&
 				before.Escape == ParamLeaksToResult && candidate.Result != before.Result:
 				after = ParamFact{Escape: ParamEscapes}
+			case candidate.Escape == before.Escape:
+				// Same answer at depth 0; the deep claim is the conjunction, so
+				// one round giving it up gives it up for the component.
+				after.Deep = before.Deep && candidate.Deep
 			}
 		}
 		if after != before {
@@ -319,7 +335,9 @@ func declaredFacts(module *ir.Module, function *ir.Func, stats *EscapeFactStats)
 		return facts
 	}
 	for index := range facts {
-		facts[index] = ParamFact{Escape: ParamNoEscape}
+		// //go:noescape is the strong claim by construction: whoever wrote the
+		// assembly is promising nothing reachable through the argument is kept.
+		facts[index] = ParamFact{Escape: ParamNoEscape, Deep: true}
 		stats.Directives++
 	}
 	return facts

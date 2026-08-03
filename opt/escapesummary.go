@@ -27,6 +27,8 @@ func markSummarisedCall(
 	byName map[string]*ir.Func,
 	facts *EscapeFacts,
 	instruction ir.Instr,
+	bases map[uint32]uint32,
+	selfReferential map[uint32]bool,
 	mark func(ir.Ref, string),
 ) {
 	mark(instruction.Arg(0), "callee of an indirect call")
@@ -44,6 +46,14 @@ func markSummarisedCall(
 	}
 	for index, argument := range arguments {
 		fact := facts.Param(callee, index)
+		if needsDeepSummary(argument, bases, selfReferential) && !fact.Deep {
+			// The allocation holds a pointer into itself, so "the callee does
+			// not retain the pointer it was handed" is not enough: retaining
+			// anything reachable through it retains the object. Only the deep
+			// claim answers the question that is actually being asked.
+			mark(argument, fmt.Sprintf("argument %d of $%s may retain something inside a self-referential object", index, callee))
+			continue
+		}
 		switch fact.Escape {
 		case ParamNoEscape:
 			// The callee cannot make the argument outlive the call.
@@ -133,15 +143,40 @@ func calleeRetainsNothing(function *ir.Func, callee string) bool {
 	return module.SymAttrOf(callee).Has(ir.SymNoEscape)
 }
 
+// needsDeepSummary reports that an argument names a tracked allocation that
+// contains a pointer into itself, so a depth-0 summary about it is not the
+// question the caller needs answered.
+//
+// storesIntoItself is right that such a store publishes nothing on its own. The
+// consequence it carries, though, is that the object's own contents are no
+// longer a separate allocation with an escape decision of their own: goc packs a
+// variadic `...any` call's backing array and the boxed payloads its elements
+// point at into one object, so a callee that retains an *element* -- `sink =
+// args[0]` -- retains the whole object. ParamNoEscape says only that the
+// pointer handed over is not kept; ParamFact.Deep is the claim that covers this.
+func needsDeepSummary(argument ir.Ref, bases map[uint32]uint32, selfReferential map[uint32]bool) bool {
+	base, tracked := heapBase(argument, bases)
+	return tracked && selfReferential[base]
+}
+
 // summarisedCallee resolves a call to the module function it names together
 // with its value arguments, and reports whether the argument list lines up with
 // the callee's parameter list one for one.
 //
-// It has to line up exactly. An aggregate result passed as a result0 parameter,
-// or an aggregate argument already scalarised into several entries, breaks the
-// identity between argument position and parameter index, and a summary read at
-// the wrong index is a wrong answer in the permissive direction. The inliner
-// guards its own parameter substitution with the same test.
+// It has to line up exactly. An aggregate result passed as a result0 parameter
+// breaks the identity between argument position and parameter index, and a
+// summary read at the wrong index is a wrong answer in the permissive
+// direction. The inliner guards its own parameter substitution with the same
+// test.
+//
+// A scalarised aggregate argument does not have to break it. The fact table is
+// indexed by ir.Func.Params position, which is the *flattened* list -- a slice
+// parameter is three entries there, an interface two -- so when the call
+// scalarises its arguments the same way the callee scalarised its parameters,
+// position still names the same value on both sides. scalarisedArgumentsAlign
+// is that check; without it every call taking a slice or an interface was
+// answered conservatively, which is why a variadic call's backing array could
+// never be promoted however plainly the callee dropped it.
 func summarisedCallee(byName map[string]*ir.Func, callee string, instruction ir.Instr) (*ir.Func, []ir.Ref, bool) {
 	arguments := instruction.Args
 	if len(arguments) > 0 {
@@ -157,10 +192,38 @@ func summarisedCallee(byName map[string]*ir.Func, callee string, instruction ir.
 	if len(target.Params) != len(arguments) {
 		return target, arguments, false
 	}
-	if len(instruction.ArgGroups) > 0 {
+	if !scalarisedArgumentsAlign(target, instruction) {
 		return target, arguments, false
 	}
 	return target, arguments, true
+}
+
+// scalarisedArgumentsAlign reports that a call's scalarised aggregate arguments
+// occupy exactly the argument-list positions the callee's parameter list gives
+// the same values, so argument index and parameter index name the same thing.
+//
+// Both ir.ValueGroup lists are indexed relative to their own list -- the
+// callee's to ir.Func.Params, the call's to Args[1:] -- and the caller has
+// already checked those two lists are the same length. Equal (Index, Count)
+// runs in the same order therefore means the two flattenings coincide
+// everywhere: same starts, same widths, and so the same scalars in between.
+//
+// A call with no groups at all is left alone rather than compared against the
+// callee's, so this can only widen what the summaries answer, never narrow it.
+func scalarisedArgumentsAlign(target *ir.Func, instruction ir.Instr) bool {
+	if len(instruction.ArgGroups) == 0 {
+		return true
+	}
+	if len(target.ParamGroups) != len(instruction.ArgGroups) {
+		return false
+	}
+	for index, argument := range instruction.ArgGroups {
+		parameter := target.ParamGroups[index]
+		if parameter.Index != argument.Index || parameter.Count != argument.Count {
+			return false
+		}
+	}
+	return true
 }
 
 // summaryUnavailableReason says why a call had to be answered conservatively,
@@ -175,7 +238,7 @@ func summaryUnavailableReason(callee string, target *ir.Func, instruction ir.Ins
 	case len(target.Params) != len(instruction.Args)-1:
 		return "call to $" + callee + ", whose argument list does not match its parameters"
 	default:
-		return "call to $" + callee + " with scalarised aggregate arguments"
+		return "call to $" + callee + " with misaligned scalarised aggregate arguments"
 	}
 }
 
