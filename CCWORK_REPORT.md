@@ -3503,3 +3503,56 @@ copies) needs; it is written up under "What is irreducible" below.
 Row: `address_into_a_non_retaining_variadic` 1.00 -> 0 (gc 0).
 `variadic_element_address_retention.go`'s `local` is still on the heap, and the
 program still passes.
+
+## Measured and **not** landed: the optimistic cycle assumption (G8)
+
+`parameterDoesNotEscape` and `receiverDoesNotEscape` break a recursive cycle by
+answering "escapes". That is the *pessimistic* answer, and for a least-fixpoint
+computation the *optimistic* one is the correct one: the edge back into a walk
+that is already running leads to exactly the uses that walk is enumerating, and
+that walk reports its own escapes, so the edge adds no route it will not find.
+The whole change is two `return false` becoming `return true`.
+
+Both halves were implemented and measured.
+
+**The parameter half is clean and buys 6 lines.**
+
+    lines where goc heaps what gc frames    106 -> 100
+
+    runtime_interface_stack_gc.go:31   runtime_panic_stack_gc.go:23
+    runtime_stack_growth.go:24, :26    stdlib_maps_slices.go:25
+    stdlib_slices_string_sort.go:6     stdlib_sort_search_slice.go:6
+
+plus 22 stdlib and corpus objects that stop being census records at all (heap ->
+ordinary frame slot), and one frame-address publication *removed*
+(`crypto/tls.serverHandshakeStateTLS13.processClientHello`). `TestFrameEscapeAudit`
+reports **no new publication**, and every affected program runs -- including the
+three that are GC-stress tests about stack scanning.
+
+**The receiver half publishes a frame address, and the audit caught it.** Same
+one-line change, applied to `receiverDoesNotEscape`:
+
+    stdlib/src/log/slog/handler.go:120:8  log/slog.defaultHandler.Handle
+    stdlib/src/log/slog/handler.go:239:8  log/slog.commonHandler.withAttrs
+    stdlib/src/log/slog/handler.go:272:8  log/slog.commonHandler.handle
+        barrier  memory reached through a call result $runtime.newobject
+
+`log/slog`'s `handleState` goes back into the frame -- `appendAttr` and
+`appendAttrs` are mutually recursive, which is why the pessimistic answer could
+never place it -- and its address is then written into a heap object. It is
+reproducible on one corpus file (`slog_attr_frame_gcmask.go`) in 30 s, which is
+how the two halves were separated.
+
+**Neither half is landed.** The parameter half survives every instrument this
+tree has; what it does not survive is the argument, because the argument covered
+both halves equally and one of them is false. "No counterexample in 400
+programs" is not the standard this tree uses for the direction that publishes
+frame addresses -- it is the standard the receiver half also met on 21 of its 24
+sites.
+
+What would make it landable is a real fixpoint rather than an assumption:
+compute answers optimistically, record which of them depended on an assumption,
+and iterate until nothing moves. Answers only ever move from "does not escape"
+to "escapes", so it terminates. That is the piece of work G8 needs, and it would
+also close the two `log/slog` rows below, which are `handleState` and nothing
+else.
