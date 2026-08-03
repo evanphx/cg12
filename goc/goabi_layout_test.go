@@ -188,32 +188,47 @@ type Mixed struct {
 	}
 }
 
-// TestGoABIAggregatesAgreeWithTheirTypesInLogSlog runs the same invariant over
-// every named type log/slog declares, using the same source the compiler
-// compiles rather than a copy of the shapes. slog.Value is the type the defect
-// was found on, and the package around it is full of structs that hold it.
-func TestGoABIAggregatesAgreeWithTheirTypesInLogSlog(t *testing.T) {
-	fset := token.NewFileSet()
-	loader := newSourceLoader(fset, HostTarget())
-	pkg, err := loader.Import("log/slog")
-	if err != nil {
-		t.Skipf("log/slog source unavailable: %v", err)
-	}
+// TestGoABIAggregatesAgreeWithTheirTypesInTheStdlib runs the same invariant
+// over every named type of the standard-library packages that actually declare
+// a zero-length array field, using the source the compiler compiles rather than
+// a copy of the shapes.
+//
+//	log/slog     Value    _ [0]func()   the type the defect was found on
+//	sync/atomic  Pointer  _ [0]*T
+//	weak         Pointer  _ [0]*T
+//	runtime      PanicNilError  _ [0]*PanicNilError
+//
+// Every one of those elements is pointer-shaped, so every one of them used to
+// claim a pointer word over whatever followed it. slog.Value is the one where
+// what followed it was a uint64 holding a number, which is why that is the one
+// that killed programs.
+func TestGoABIAggregatesAgreeWithTheirTypesInTheStdlib(t *testing.T) {
+	packages := []string{"log/slog", "sync/atomic", "weak", "runtime"}
+	for _, path := range packages {
+		t.Run(path, func(t *testing.T) {
+			fset := token.NewFileSet()
+			loader := newSourceLoader(fset, HostTarget())
+			pkg, err := loader.Import(path)
+			if err != nil {
+				t.Skipf("%s source unavailable: %v", path, err)
+			}
 
-	g := aggregateProbeGen(fset)
-	checked := 0
-	for _, name := range pkg.Scope().Names() {
-		typeName, ok := pkg.Scope().Lookup(name).(*types.TypeName)
-		if !ok {
-			continue
-		}
-		requireAggregateMatchesType(t, g, "log/slog."+name, typeName.Type())
-		checked++
-	}
-	if checked == 0 {
-		t.Fatal("log/slog declared no types, so nothing was checked")
-	}
-	if value := pkg.Scope().Lookup("Value"); value == nil {
-		t.Fatal("log/slog.Value was not found, so the type this test exists for was not checked")
+			g := aggregateProbeGen(fset)
+			checked := 0
+			for _, name := range pkg.Scope().Names() {
+				typeName, ok := pkg.Scope().Lookup(name).(*types.TypeName)
+				if !ok {
+					continue
+				}
+				requireAggregateMatchesType(t, g, path+"."+name, typeName.Type())
+				checked++
+			}
+			if checked == 0 {
+				t.Fatalf("%s declared no types, so nothing was checked", path)
+			}
+			if path == "log/slog" && pkg.Scope().Lookup("Value") == nil {
+				t.Fatal("log/slog.Value was not found, so the type this test exists for was not checked")
+			}
+		})
 	}
 }
