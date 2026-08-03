@@ -4963,6 +4963,25 @@ func (g *gen) goABIAggregate(valueType types.Type) *ir.AggType {
 	var fields []ir.Field
 	switch value := valueType.Underlying().(type) {
 	case *types.Array:
+		if value.Len() == 0 {
+			// A zero-length array holds no elements and occupies no storage, and
+			// ir.Field.Count cannot say so: Count is 0 for every ordinary scalar
+			// field as well, so ir.Field.count() reads 0 as one element. A field
+			// emitted here would be a phantom element of the element's size and
+			// shape, sitting at the offset of whatever field follows the array
+			// and displacing every later field by that much.
+			//
+			// When the element is pointer-shaped that phantom is a pointer word
+			// claimed over a scalar, which is a frame word the collector and the
+			// stack copier will walk as an address. log/slog's Value leads with
+			// [0]func() to make itself incomparable and follows it with the
+			// uint64 that carries every packed kind, so the claimed word is
+			// exactly that integer. See goc/testdata/slog_attr_frame_gcmask.go.
+			//
+			// Contributing no field is both the correct layout and the only one
+			// Count can express.
+			break
+		}
 		field, ok := g.goABIField(value.Elem())
 		if !ok {
 			return nil
@@ -4983,6 +5002,19 @@ func (g *gen) goABIAggregate(valueType types.Type) *ir.AggType {
 				return nil
 			}
 			fields = append(fields, field)
+		}
+		if trailingZeroSizedFieldNeedsPadding(value) {
+			// gc gives a struct whose last field is zero-sized one byte of
+			// padding, so that a pointer to that field does not point past the
+			// end of the object; typeSize reproduces the rule. The aggregate has
+			// to agree, or the frame slot it sizes is short of the value the
+			// front end copies into it.
+			//
+			// The padding is a byte-wide scalar and never a pointer. A
+			// zero-length array of a pointer-shaped element used to supply this
+			// size by being emitted as a whole phantom element, which put a
+			// claimed pointer word in the padding.
+			fields = append(fields, ir.Field{Sub: ir.SubUB})
 		}
 	case *types.Interface:
 		fields = []ir.Field{
@@ -14903,6 +14935,26 @@ func typeSize(t types.Type) int64 {
 	}
 	sizes := goTypeSizes()
 	return sizes.Sizeof(t)
+}
+
+// trailingZeroSizedFieldNeedsPadding reports whether structure ends in a
+// zero-sized field that follows something, which is the condition under which
+// gc -- and typeSize above -- gives the struct an extra byte so that the address
+// of that last field is still inside the object.
+//
+// It is asked by goABIAggregate, whose fields carry no size of their own for the
+// zero-sized cases: an empty struct, an empty array, or a named type of either
+// all flatten to nothing.
+func trailingZeroSizedFieldNeedsPadding(structure *types.Struct) bool {
+	fields := structFields(structure)
+	if len(fields) == 0 {
+		return false
+	}
+	last := fields[len(fields)-1]
+	if typeSize(last.Type()) != 0 {
+		return false
+	}
+	return structOffsets(fields)[len(fields)-1] > 0
 }
 
 func typeAlign(t types.Type) int64 {

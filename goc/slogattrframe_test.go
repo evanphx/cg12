@@ -43,9 +43,13 @@ var slogAttrFramePrograms = []struct {
 	{"slog_attr_frame_gcmask_stackcopy.go", "200\n"},
 	// Every kind that packs into num, live in one frame at once.
 	{"slog_attr_frame_gcmask_kinds.go", "200 true 3000000000 3\n"},
-	// The control: slog.Value's shape hand-written in the program's own
-	// package. It passes on main, so it is here to fail if a fix for the
-	// programs above is one that breaks the ordinary case.
+	// The same shape with no log/slog anywhere in the program: a zero-length
+	// array field ahead of a scalar, held across a stack copy.
+	{"slog_attr_frame_gcmask_shape.go", "200\n"},
+	// That shape held across a collection instead. It passes on main -- the
+	// mark phase walks past the claimed word rather than throwing on it -- so
+	// it is here to fail if a fix for the programs above breaks the case that
+	// already worked.
 	{"slog_attr_frame_gcmask_control.go", "200\n"},
 }
 

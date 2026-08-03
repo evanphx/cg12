@@ -1739,3 +1739,97 @@ The fourth program (`_kinds`) holds an Int64, a Bool, a Duration and a Float64
 in one frame at once, because `num` carries all five packed kinds and a map that
 claims that word claims it for every one of them.
 
+## 2. Where the mis-classification is
+
+Not in the type descriptor, and not in the stack-map machinery. It is one line
+of the front end's translation of a Go type into the **Go-ABI aggregate**
+(`ir.AggType`) that the frame's pointer map is built from.
+
+`goc/compile.go`'s `goABIAggregate` turns an array type into one field carrying
+the element's shape and the array's length:
+
+    case *types.Array:
+        field, ok := g.goABIField(value.Elem())
+        ...
+        field.Count = int(value.Len())
+
+`ir.Field.Count` cannot express zero. `Count` is 0 for an ordinary scalar field
+too -- every `ir.Field{Sub: ir.SubL}` literal in the tree leaves it unset -- so
+`ir.Field.count()` reads 0 as **one element**:
+
+    func (f Field) count() int {
+        if f.Count > 1 { return f.Count }
+        return 1
+    }
+
+A `[0]func()` therefore becomes one pointer-shaped element of eight bytes. Every
+consumer of the aggregate then agrees on the wrong answer. Measured directly on
+the shape (`ir` unit probe, since removed):
+
+    [0]func()   size=8  align=8                    Go says 0/8
+    slog.Value  size=32 pointer offsets [0 16 24]  Go says 24, [8 16]
+    slog.Attr   size=48 pointer offsets [0 16 32]  Go says 40, [0 24 32]
+
+Offset 16 of `slog.Attr` is `Value.num`. The phantom element sits at the offset
+of the field that follows it and shifts every later field by a word.
+
+Confirmed end-to-end in the compiled program, with a temporary dump of each
+frame's marked words (`arm64/mc.go`'s `goLocalPointerWords`, instrumentation
+since removed), compiling the reduction:
+
+    framemap main.main: localwords=[... 22 ...]
+      alloc t41 at frame+176 marks=[0 16 32 40]
+
+`marks` are byte offsets within the attribute's frame slot and are exactly
+`ir.AggregatePointerOffsets` of the phantom aggregate. Frame+176+16 is local
+word 22, and that word holds 200.
+
+The heap path is **not** affected: `walkPointerWords`, which builds the
+`abi.Type` GCData mask, iterates `for index := 0; index < value.Len()` and so
+emits nothing for a zero-length array, and it takes struct offsets from
+`go/types`. The two descriptions of the same type disagreed, and only the frame
+one was wrong.
+
+## 2.1 The control was not a control
+
+The reduction's control -- `slog.Value`'s shape hand-written in the program's
+own package -- passes on main, and the earlier report read that as evidence that
+the shape is not the trigger. It is not evidence. Its frame map is **identical**:
+
+    framemap main.main (control): alloc t41 at frame+176 marks=[0 16 32 40]
+
+and the word it claims holds 200 there too. It survives only because nothing in
+that program copies `main`'s stack while the attribute is live: the mark phase
+tolerates 200 (`findObject` on an address that was never heap returns silently),
+and only `adjustpointers` throws on it. Replacing its `runtime.GC()` with the
+same deep recursion the stack-copy reduction uses makes it fail identically:
+
+    runtime: bad pointer in frame main_main at 0x42c9ee193d50: 0xc8
+
+with no `log/slog` import anywhere in the program. So the trigger is the shape
+after all -- a zero-length array field ahead of a scalar -- and log/slog is
+where it appears in ordinary code.
+
+## 3. The fix
+
+`goc/compile.go`, `goABIAggregate`, one branch:
+
+    case *types.Array:
+        if value.Len() == 0 {
+            // ... contributing no field is both the correct layout and the
+            // only one Count can express.
+            break
+        }
+        field, ok := g.goABIField(value.Elem())
+        ...
+
+A zero-length array contributes no field to the Go-ABI aggregate. The nested
+aggregate it produces is empty, so it lays out as zero bytes at the alignment
+`typeAlign` gives it, which is what Go says, and it contributes no part to
+`FlattenAggregate` and no offset to `AggregatePointerOffsets`.
+
+The alternative -- teaching `ir.Field` to distinguish "zero elements" from
+"unset" -- would have to touch every `ir.Field` literal in the tree, since a
+scalar field leaves `Count` at 0 and means one. The representation cannot say
+zero, so the producer must not ask it to.
+
