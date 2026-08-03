@@ -3248,4 +3248,17 @@ Also worth a look before merge, though neither blocks: the `rsa2048/sign-verify`
 in item 11, and the "Three rows" comments in `goc/alloccount_test.go` and
 `goc/testdata/allocation_counts.go` that introduce five.
 
+## Pushing
+
+`origin/integration/wave4` already exists and is an **unrelated, divergent line** --
+tip d10f0c6 "integration: reconcile wave 4 and correct a coordinator error", dated
+2026-07-28, which does not contain `main` (9cdc2d8) as an ancestor. It is a different
+effort's wave-4 branch. It was not force-pushed over.
+
+This gate's branch is pushed as **`origin/integration/wave4-gate`** (and mirrored to
+`origin/ccwork/wave4-gate`), tip e3cf71c. Locally it is the branch named
+`integration/wave4` built from `main` as specified. Whoever owns the older
+`integration/wave4` needs to decide what happens to it; renaming or deleting someone
+else's branch was not this job's call.
+
 NOT SAFE TO MERGE TO MAIN -- `go test ./goc/...` fails on `TestDeriveClassifiesEveryGenField`, because `ccwork/parity-remaining-134` added the `gen` field `summaryParents` without adding it to `fullyPopulatedGen()` and `wholeCompilationGenFields` in `goc/derive_test.go`; every other item passed and the fix is two lines in that test file.
