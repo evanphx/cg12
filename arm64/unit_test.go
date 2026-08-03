@@ -2108,3 +2108,131 @@ func TestMovImmPatterns(t *testing.T) {
 	assert.Contains(t, out, "movz x3, #0xabcd")          // 0x1234ABCD: low chunk
 	assert.Contains(t, out, "movk x3, #0x1234, lsl #16") // ... then high chunk
 }
+
+// pointerBearingAllocationWord returns the single pointer-bearing stack
+// allocation's frame word, failing if a test function has more than one. Frame
+// words are counted from the locals base, which sits two words below x29 (the
+// saved frame pointer and link register).
+func pointerBearingAllocationWord(t *testing.T, function *ir.Func, machine *machineCode) int {
+	t.Helper()
+	word := -1
+	for id, offset := range machine.m.stackAllocTmp {
+		if len(function.StackPointerWords[id]) == 0 {
+			continue
+		}
+		require.Equal(t, -1, word, "the test function must have exactly one pointer-bearing allocation")
+		word = (offset - 16) / 8
+	}
+	require.NotEqual(t, -1, word, "the test function has no pointer-bearing allocation")
+	return word
+}
+
+// The frame slot a call homes its aggregate result into is not a root at that
+// call: the call is what defines it, exactly as the call's own To is. Reporting
+// it there described whatever the slot last held, which in a loop is the
+// previous iteration's result -- RUNTIME_PLAN.md section 26's residue, reduced
+// by goc/testdata/runtime_gc_stale_result_alloca.go.
+func TestGoStackMapsOmitAggregateResultHomeAtItsOwnCall(t *testing.T) {
+	stringType := &ir.AggType{Name: "string", Align: 8, Fields: []ir.Field{
+		{Sub: ir.SubL, Pointer: true},
+		{Sub: ir.SubL},
+	}}
+	function := ir.NewModule().NewFuncVoid("aggregate_result_home")
+	function.CallConv = ir.CallConvGoInternal
+	function.ManagedFrame = true
+	entry := function.Entry()
+	home := entry.Call(ir.ClsP, function.Sym("maketext", 0))
+	entry.Instrs[len(entry.Instrs)-1].RetAgg = stringType
+	// The home is read after the second call, so it is live across both and the
+	// difference between them is only whether it has been written yet.
+	entry.CallVoid(function.Sym("observe", 0))
+	entry.Store(entry.Load(ir.ClsP, home), function.Sym("sink", 0))
+	entry.RetVoid()
+
+	machine := compileGoFunctionForStackMaps(t, function)
+	information, err := goFunctionInfoFor(function, "aggregate_result_home", machine)
+	require.NoError(t, err)
+	homeWord := pointerBearingAllocationWord(t, function, machine)
+
+	pointerMaps, indexPoints, _ := gometa.FunctionStackMaps(information)
+	require.Len(t, indexPoints, 2)
+	assert.NotContains(t, pointerMaps[indexPoints[0].Index], homeWord,
+		"the result home cannot hold the result while the call that produces it is running")
+	assert.Contains(t, pointerMaps[indexPoints[1].Index], homeWord,
+		"the result home holds the result at every later safepoint")
+}
+
+// The rule the emitted map follows, stated over the IR the analysis reads: an
+// OAlloc undefines its allocation, and the union merge means only an allocation
+// no path has written since its OAlloc is suppressed.
+//
+// It is tested on unlowered IR because lower.HoistAllocas moves every
+// constant-size front-end alloca to the entry block before the Go ABI lowering
+// runs. After that hoist a front-end local has one OAlloc for the whole
+// function, so its per-iteration freshness is no longer in the IR to see. The
+// allocations that keep an OAlloc inside a loop are the ones the Go ABI lowering
+// creates in place -- the aggregate result homes -- which is the case that
+// faults.
+func TestUndefinedAllocationsCoverTheWindowBeforeTheFirstStore(t *testing.T) {
+	function := ir.NewModule().NewFuncVoid("loop_allocation")
+	function.CallConv = ir.CallConvGoInternal
+	function.ManagedFrame = true
+	input := function.ParamRef("input")
+	condition := function.Param("condition", ir.ClsW)
+	entry := function.Entry()
+	head := function.NewBlock("head")
+	exit := function.NewBlock("exit")
+
+	entry.Goto(head)
+	local := head.Alloc(8, 8)
+	function.MarkGCRef(local)
+	function.StackPointerWords = map[uint32]map[int]bool{local.ID: {0: true}}
+	head.CallVoid(function.Sym("before", 0))
+	head.Store(input, local)
+	head.CallVoid(function.Sym("after", 0))
+	head.Jnz(condition, head, exit)
+	exit.RetVoid()
+
+	undefined := undefinedAllocationsAtSafepoints(function, analysis.BuildCFG(function))
+	before := &head.Instrs[1]
+	after := &head.Instrs[3]
+	require.Equal(t, ir.OCall, before.Op)
+	require.Equal(t, ir.OCall, after.Op)
+	assert.True(t, undefined[before][int(local.ID)],
+		"the slot holds the previous iteration's pointer before this iteration writes it")
+	assert.False(t, undefined[after][int(local.ID)])
+}
+
+// Suppression merges by union, not intersection. A slot written on one path into
+// a join is still described at the join, so a word holding an interior stack
+// address is never dropped from a map the copying stack needs for relocation.
+func TestGoStackMapsKeepAllocationWrittenOnOnlyOnePath(t *testing.T) {
+	function := ir.NewModule().NewFuncVoid("one_path_allocation")
+	function.CallConv = ir.CallConvGoInternal
+	function.ManagedFrame = true
+	input := function.ParamRef("input")
+	condition := function.Param("condition", ir.ClsW)
+	entry := function.Entry()
+	write := function.NewBlock("write")
+	join := function.NewBlock("join")
+
+	local := entry.Alloc(8, 8)
+	function.MarkGCRef(local)
+	function.StackPointerWords = map[uint32]map[int]bool{local.ID: {0: true}}
+	entry.Jnz(condition, write, join)
+	write.Store(input, local)
+	write.Goto(join)
+	join.CallVoid(function.Sym("observe", 0))
+	join.Store(join.Load(ir.ClsP, local), function.Sym("sink", 0))
+	join.RetVoid()
+
+	machine := compileGoFunctionForStackMaps(t, function)
+	information, err := goFunctionInfoFor(function, "one_path_allocation", machine)
+	require.NoError(t, err)
+	localWord := pointerBearingAllocationWord(t, function, machine)
+
+	pointerMaps, indexPoints, _ := gometa.FunctionStackMaps(information)
+	require.Len(t, indexPoints, 1)
+	assert.Contains(t, pointerMaps[indexPoints[0].Index], localWord,
+		"one path writes the slot, so the join must still describe it")
+}

@@ -1744,3 +1744,180 @@ up in this shape too.
 `escape_shadow_baseline.txt` (`TestEscapeShadowPlacement`) and
 `escape_gc_differential.txt` (`TestEscapeDifferentialAgainstGC`), so both were
 run as well.
+
+---
+
+# gc-stackscan-gogc10 — precise stack scan defect (RUNTIME_PLAN §26 residue)
+
+## Reproduction (baseline, before any change)
+
+Tree: `ccwork/gc-stackscan-gogc10` off `main` `6b9fbb0`. Box load ~0.9 at start.
+Reducer `goc/testdata/runtime_gc_type_mask_padding.go`, built with a plain
+`goc -o repro.bin`, run sequentially, `GOMAXPROCS=3`.
+
+| setting | rate |
+| --- | ---: |
+| `GOGC=10` | **10/40 fail** |
+
+Every failure has the identical stack:
+
+```
+runtime_throw <- runtime_badPointer <- runtime_findObject <- runtime_scanblock
+  <- runtime_scanframeworker <- runtime_scanstack <- markroot <- gcDrainN
+  <- gcAssistAlloc1 <- systemstack
+```
+
+and the identical shape: the containing "object" is a **goroutine stack**
+(`s.state=mSpanManual`, `s.elemsize=8192`), the reported word is a heap address
+whose span is `state=0` (returned to the page allocator), and the neighbouring
+words are small integers (`0x3`, `0x4`, `0x1f5`, `0x25f`, `0x120`, `0x6`).
+This is the precise stack scan, not a bulk barrier — §26's open residue, not the
+type-mask padding bug the reducer is named for (that one is closed).
+
+## Localisation: one frame, one PC, one slot — every time
+
+A scratch diagnostic (per-`m` record of the frame `scanframeworker` is walking,
+printed from `badPointer`) names it identically in 8/8 failures:
+
+```
+cg12badframe: fn=main_buildGraph entry=0x558244 pc=0x5586a4 pcoff=0x460
+              sp=... fp=... varp=fp argp=fp locals=76 args=1
+cg12badframe: localsbase=... slot=65
+```
+
+The PC is a single call site. Disassembling `main_buildGraph`:
+
+```
+  558694:  add  x16, x29, #0x218     ; x16 = &tmp, the alloca for string(rune(..))
+  558698:  str  x16, [x29, #184]     ; spill the address across the call
+  55869c:  mov  x0, #0
+  5586a0:  bl   runtime_intstring    ; <-- SAFEPOINT, return pc = 0x5586a4
+  5586a4:  ldr  x17, [x29, #184]
+  5586a8:  str  x0, [x17]            ; NOW the alloca gets its data pointer
+  5586b0:  add  x9, x16, #8
+  5586b4:  str  x1, [x9]             ; ... and its length
+```
+
+`x29+0x218` is local slot 65 (localsbase = `x29+0x10`). The prologue does zero it
+(`str xzr, [x29, #536]` at `0x55831c`). The crash dump confirms the identity of
+the slot: slot 65 = pointer, slot 66 = `0x1` — a one-rune string header — and
+slots 67/68 are the `"node-"+r` header with length `0x6`.
+
+So the slot is only **written after the call returns**, yet it is claimed as a GC
+root *at* the call. `buildGraph`'s body is a loop, so on every iteration after
+the first the slot still holds **the previous iteration's `string(rune(...))`
+header**, long dead. When a collection catches the goroutine exactly at
+`0x5586a4` and that dead string's span has already been returned to the page
+allocator, `findObject` throws.
+
+## Root cause
+
+`arm64/goabi.go:lowerGoAggregateResult` (and its `lowerGoValueResult` twin)
+lowers a call that returns an aggregate as
+
+```go
+slot := f.AllocAggregate(aggregate, out)   // alloc emitted BEFORE the call
+for _, part := range parts {
+        pin := newPinned(f, part.reg, ...)      // result register
+        address := offsetAddr(f, slot, part.offset, &post)
+        post = append(post, Store{pin -> address})   // written AFTER the call
+}
+post = append(post, Copy{To: destination, Args: []ir.Ref{slot}})
+```
+
+`AllocAggregate` calls `MarkAggregatePointerWords`, so `slot`'s pointer words
+land in `f.StackPointerWords`. `arm64/regalloc.go:computeSafepointRoots` then
+reports the allocation at the call, because `pointerAllocationSources` maps the
+live `slot` temporary to its allocation and `slot` **is** live across the call —
+its only uses are the post-call result stores.
+
+The existing code already removes `instruction.To` and `instruction.Defs` at a
+call, on the grounds that "a result does not exist until after its defining
+instruction". The aggregate result *home* is a definition of the call in exactly
+the same sense, and it is not removed.
+
+Straight-line code survives this because the prologue zeroes every
+pointer-bearing allocation word, so an unwritten home reads as nil. **A loop does
+not**: the `alloc` is inside the loop body, the slot is never re-zeroed, and on
+iteration *n* the home still holds iteration *n-1*'s value at the moment the call
+is entered. If a collection catches the goroutine there and that value's span has
+already been released, `findObject` throws `found bad pointer in Go heap`.
+
+The general statement, of which the result home is one instance:
+
+> A frame allocation is reported as a GC root at safepoints between its `alloc`
+> and its first store. Inside a loop those safepoints see the previous
+> iteration's pointer, which the collector is under no obligation to keep alive.
+
+This is an **over**-reporting defect: an extra, stale root. `stack-scan/loop-safepoints`
+is an **under**-reporting defect ("a stack slot live across a loop back edge was
+not a GC root", `-O` only, `opt.Mem2Reg` promotes the pointer out of the frame and
+no promoted value is reported). Opposite polarity, different mechanism — see
+below for the measurement.
+
+## The fix
+
+`arm64/regalloc.go`, new `undefinedAllocationsAtSafepoints`, plus one guard in
+`arm64/mc.go:recordSafepoint`.
+
+A forward may-dataflow over "the program has written this allocation since its
+`OAlloc`":
+
+- entry: every allocation **defined** (the prologue zeroes their pointer words);
+- an `OAlloc` **undefines** its own allocation — this is what cuts the loop back
+  edge, because the `OAlloc` names a fresh local each iteration;
+- anything that touches an address into an allocation, other than deriving a
+  further address from it, defines it — deliberately coarser than "writes it";
+- merge by **union**, so an allocation written on one path into a join is still
+  reported at the join. Only an allocation *no* path has written since its
+  `OAlloc` is suppressed, and such a slot holds nothing the program may read.
+- allocations whose address escapes the frame (`frameEscapingAllocations`) are
+  excluded from the analysis and stay reported at every safepoint: a callee handed
+  `&local` can fill it, so "no write seen here" says nothing about their contents.
+
+`recordSafepoint` then skips the **pointer words** of an allocation that is
+undefined at that safepoint. The allocation's own address (its register or spill
+slot) is still reported, so stack copying keeps relocating the interior pointer
+that a growing stack inside the call depends on.
+
+## Rates after the fix (same box, `GOMAXPROCS=3`, sequential)
+
+| build | `GOGC=10` | default `GOGC` |
+| --- | ---: | ---: |
+| `main` `6b9fbb0` | **10/40 fail** | 0/20 (measured previously) |
+| this tree | **0/200 fail** | **0/60 fail** |
+
+At the observed pre-fix rate of 10/40 = 0.25, a clean run of 200 has a
+probability of `0.75^200 ≈ 1e-25` of happening by chance.
+
+## Confirmed final rates (clean tree, no scratch diagnostics)
+
+`goc/testdata/runtime_gc_type_mask_padding.go`, `GOMAXPROCS=3`, sequential:
+
+| tree | `GOGC=10` | default `GOGC` |
+| --- | ---: | ---: |
+| `main` `6b9fbb0` | 10/40 fail | 0/20 (given) |
+| this tree | **0/200 fail** | **0/100 fail** |
+
+`goc/testdata/runtime_gc_stale_result_alloca.go` (the new reducer), 0/30 at
+`GOGC=10`, and 0/25 at each of `GOMAXPROCS` 1, 2, 3 and 8 at the default `GOGC`.
+On the compiler before the fix it is **100/100** across those same four
+`GOMAXPROCS` values and 20/20 at `GOGC=10` — deterministic, not statistical.
+
+Registered as `gc-invariants/stale-result-home`, `runtimeCapabilityMustPass`.
+
+## Deterministic compiler-level tests (arm64)
+
+- `TestGoStackMapsOmitAggregateResultHomeAtItsOwnCall` — the emitted map at the
+  call that produces an aggregate result does not contain the home's pointer
+  word, and the map at the next safepoint does. Verified to fail without the
+  `recordSafepoint` guard: the map there is `{0, 2}` instead of `{0}`. Word 0 is
+  the home's own *address* spill slot, which the fix deliberately keeps, so a
+  stack that grows inside the call still gets the interior pointer relocated.
+- `TestUndefinedAllocationsCoverTheWindowBeforeTheFirstStore` — the analysis's
+  rule stated over unlowered IR.
+- `TestGoStackMapsKeepAllocationWrittenOnOnlyOnePath` — the union merge: a slot
+  written on one path into a join is still described at the join. This is the
+  guard against a future "tighten it to intersection" change, which would drop a
+  word the copying stack needs.
+

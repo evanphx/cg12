@@ -2779,10 +2779,15 @@ func (m *mc) emitCall(in *ir.Instr) {
 // for an explicit OSafepoint it is invoked at the marker (which emits no code).
 func (m *mc) recordSafepoint(in *ir.Instr) {
 	roots := m.alloc.safeRoots[in]
+	undefined := m.alloc.undefinedAllocs[in]
 	locs := make([]rootLoc, 0, len(roots))
 	for _, id := range roots {
 		t := m.f.Temps[id]
-		if allocationOffset, ok := m.stackAllocTmp[uint32(id)]; ok {
+		// An allocation the program has not written since it was entered holds the
+		// previous incarnation's words; describing them here hands the collector a
+		// pointer the program abandoned. The allocation's own address is still
+		// reported below, so stack copying keeps relocating it.
+		if allocationOffset, ok := m.stackAllocTmp[uint32(id)]; ok && !undefined[id] {
 			for wordOffset := range m.f.StackPointerWords[uint32(id)] {
 				locs = append(locs, rootLoc{
 					kind: rootFrame,

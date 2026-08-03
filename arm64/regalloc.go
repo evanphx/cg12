@@ -20,6 +20,12 @@ type allocation struct {
 	posInstr  []*ir.Instr         // numbering position -> instruction (nil at block ends)
 	safeRoots map[*ir.Instr][]int // safepoint (call or OSafepoint) -> live GC-ref temps
 
+	// undefinedAllocs names, per safepoint, the stack allocations whose contents
+	// the program has not written since the allocation was (re-)entered. Their
+	// pointer words hold the previous incarnation's values, so the collector must
+	// not read them there; the allocation's own address is still reported.
+	undefinedAllocs map[*ir.Instr]map[int]bool
+
 	// remat maps a spilled-but-rematerialisable temp to the rule for recomputing it
 	// at each use (it has no spill slot).
 	remat map[int]rematRule
@@ -96,6 +102,7 @@ func regAlloc(f *ir.Func) (*allocation, error) {
 	alloc.intervals = buildIntervals(f, cfg, live, num)
 	alloc.posInstr = num.posInstr
 	alloc.safeRoots = computeSafepointRoots(f, cfg, live)
+	alloc.undefinedAllocs = undefinedAllocationsAtSafepoints(f, cfg)
 	maybeDumpRanges(f, alloc, num, cfg, freq)
 	dumpPressureReport(f, alloc, num, cfg, live, freq)
 	return alloc, nil
@@ -163,6 +170,210 @@ func computeSafepointRoots(f *ir.Func, cfg *analysis.CFG, liveness *analysis.Liv
 		}
 	}
 	return roots
+}
+
+// undefinedAllocationsAtSafepoints reports, per safepoint, which pointer-bearing
+// stack allocations still hold whatever the previous incarnation of the same
+// slot left there.
+//
+// computeSafepointRoots reports an allocation wherever an address into it is
+// live, and an address is live from the OAlloc that produces it. Between that
+// OAlloc and the first write, the slot's pointer words are not the local's
+// value: in straight-line code they are the zeroes the prologue wrote, which is
+// harmless, but an OAlloc inside a loop names a fresh local on every iteration
+// while the words still hold the last one. A collection that lands on a
+// safepoint in that window reads a pointer the program has already abandoned,
+// and if its span has since been released `findObject` throws.
+//
+// The clearest instance is the home an aggregate-returning call's result is
+// stored into (arm64/goabi.go's lowerGoAggregateResult): the OAlloc precedes the
+// call and the stores that fill it follow the call, so the home is *always*
+// reported at the one safepoint where it cannot yet hold the result. A loop
+// around such a call therefore reports the previous call's result. That is what
+// `goc/testdata/runtime_gc_stale_result_alloca.go` reduces.
+//
+// The analysis is a forward may-dataflow over "the program has written this
+// allocation since its OAlloc":
+//
+//   - the function entry starts every allocation defined, because the prologue
+//     zeroes the pointer words of each one;
+//   - an OAlloc undefines its own allocation, which is what cuts a loop's back
+//     edge;
+//   - anything that touches an address into an allocation, other than deriving a
+//     further address from it, defines it. That is deliberately coarser than
+//     "writes it": a load or a comparison marks the allocation defined too, and
+//     erring that way only keeps a word being scanned that already was.
+//
+// Merging by union, not intersection, is what makes suppression safe. An
+// allocation written on one path into a join and not on another is still
+// reported at the join, so a word holding an interior stack address is never
+// dropped from a map some path needs for relocation. Only an allocation no path
+// has written since its OAlloc is suppressed, and such a slot holds nothing the
+// program can legitimately read.
+//
+// Allocations whose address escapes the frame are excluded from the analysis
+// entirely and stay reported at every safepoint. Their writes need not be
+// visible here at all -- a callee handed &local can fill it -- so "no write seen"
+// says nothing about their contents.
+//
+// What it does not reach: lower.HoistAllocas moves every constant-size front-end
+// alloca to the entry block before the Go ABI lowering runs, so after that hoist
+// a source-level local has one OAlloc for the whole function and its
+// per-iteration freshness is no longer in the IR. Such a slot is suppressed only
+// in the window between the entry-block OAlloc and its first store, which the
+// prologue has zeroed anyway. The allocations that keep an OAlloc inside a loop
+// are the ones the Go ABI lowering creates in place, and those are exactly the
+// ones with the dangerous shape: reported at the call that defines them and not
+// reported afterwards once the address is dead, which is the window in which the
+// object they name gets collected.
+func undefinedAllocationsAtSafepoints(f *ir.Func, cfg *analysis.CFG) map[*ir.Instr]map[int]bool {
+	if !f.UsesManagedFrame() || len(f.StackPointerWords) == 0 {
+		return nil
+	}
+	allocationsOf := pointerAllocationSources(f)
+	escaping := frameEscapingAllocations(f, allocationsOf)
+
+	tracked := map[uint32]bool{}
+	for _, block := range f.Blocks {
+		for index := range block.Instrs {
+			instruction := &block.Instrs[index]
+			if !instruction.Op.IsAlloc() || instruction.To.Kind != ir.RefTemp {
+				continue
+			}
+			if len(f.StackPointerWords[instruction.To.ID]) == 0 {
+				continue
+			}
+			if escaping[int(instruction.To.ID)] {
+				continue
+			}
+			tracked[instruction.To.ID] = true
+		}
+	}
+	if len(tracked) == 0 {
+		return nil
+	}
+
+	// definesAllocations returns the tracked allocations an instruction's operands
+	// make defined. A pure address derivation carries the address onward without
+	// touching the memory, so it defines nothing; every other operand use does.
+	definesAllocations := func(instruction *ir.Instr) []int {
+		var defined []int
+		if derivation := addressDerivationBases(f, instruction); len(derivation) == 0 && !instruction.Op.IsLifetime() {
+			for _, use := range instruction.Uses() {
+				if use.Kind != ir.RefTemp {
+					continue
+				}
+				for _, allocation := range allocationsOf[int(use.ID)] {
+					if tracked[uint32(allocation)] {
+						defined = append(defined, allocation)
+					}
+				}
+			}
+		}
+		// A call that returns its aggregate on the stack has the emitted code copy
+		// the outgoing result area into StackResult afterwards. That write is the
+		// allocation's definition and appears in no operand list.
+		if instruction.Op == ir.OCall && instruction.StackResult.Kind == ir.RefTemp {
+			for _, allocation := range allocationsOf[int(instruction.StackResult.ID)] {
+				if tracked[uint32(allocation)] {
+					defined = append(defined, allocation)
+				}
+			}
+		}
+		return defined
+	}
+
+	entry := map[uint32]bool{}
+	for allocation := range tracked {
+		entry[allocation] = true
+	}
+
+	// Union merge over a finite lattice with monotone block transfer functions, so
+	// the round loop drains; RPO order keeps the number of rounds small. The
+	// per-safepoint answer is only read out once the states have settled.
+	inState := map[*ir.Block]map[uint32]bool{}
+	outState := map[*ir.Block]map[uint32]bool{}
+	for changed := true; changed; {
+		changed = false
+		for _, block := range cfg.RPO {
+			state := map[uint32]bool{}
+			if len(block.Preds) == 0 {
+				for allocation := range entry {
+					state[allocation] = true
+				}
+			}
+			for _, predecessor := range block.Preds {
+				for allocation := range outState[predecessor] {
+					state[allocation] = true
+				}
+			}
+			if previous, seen := inState[block]; seen && sameAllocationSet(previous, state) {
+				continue
+			}
+			inState[block] = state
+			outState[block] = transferAllocationDefinitions(block, state, tracked, definesAllocations, nil)
+			changed = true
+		}
+	}
+
+	undefined := map[*ir.Instr]map[int]bool{}
+	for _, block := range cfg.RPO {
+		transferAllocationDefinitions(block, inState[block], tracked, definesAllocations, undefined)
+	}
+	return undefined
+}
+
+// transferAllocationDefinitions walks a block from the given entry state,
+// returning the state after it. When record is non-nil it also notes, at each
+// safepoint, the tracked allocations that are undefined there.
+func transferAllocationDefinitions(
+	block *ir.Block,
+	state map[uint32]bool,
+	tracked map[uint32]bool,
+	definesAllocations func(*ir.Instr) []int,
+	record map[*ir.Instr]map[int]bool,
+) map[uint32]bool {
+	current := map[uint32]bool{}
+	for allocation := range state {
+		current[allocation] = true
+	}
+	for index := range block.Instrs {
+		instruction := &block.Instrs[index]
+		if record != nil && (instruction.Op == ir.OCall || instruction.Op == ir.OSafepoint) {
+			var stale map[int]bool
+			for allocation := range tracked {
+				if current[allocation] {
+					continue
+				}
+				if stale == nil {
+					stale = map[int]bool{}
+				}
+				stale[int(allocation)] = true
+			}
+			if stale != nil {
+				record[instruction] = stale
+			}
+		}
+		for _, allocation := range definesAllocations(instruction) {
+			current[uint32(allocation)] = true
+		}
+		if instruction.Op.IsAlloc() && instruction.To.Kind == ir.RefTemp && tracked[instruction.To.ID] {
+			delete(current, instruction.To.ID)
+		}
+	}
+	return current
+}
+
+func sameAllocationSet(a, b map[uint32]bool) bool {
+	if len(a) != len(b) {
+		return false
+	}
+	for key := range a {
+		if !b[key] {
+			return false
+		}
+	}
+	return true
 }
 
 // isSafepointRoot reports whether a live temporary has to be described at a

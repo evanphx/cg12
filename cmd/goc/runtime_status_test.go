@@ -2453,6 +2453,22 @@ func runtimeCapabilities() []runtimeCapability {
 			timeout:     180 * time.Second,
 			exclusive:   true,
 		},
+		// The frame slot a call homes its aggregate result into was described as
+		// a GC root at that very call, so a loop around such a call reported the
+		// previous iteration's result. This is the precise stack scan's half of
+		// RUNTIME_PLAN.md section 26 -- what type-mask-padding still tripped at
+		// GOGC=10 after the mask padding closed the bulk-barrier half. Unlike
+		// that one it is deterministic: it parks the caller at the safepoint and
+		// sweeps the previous round's string first, so it fails on every run of
+		// the compiler that reported the home.
+		{
+			category:    "gc-invariants",
+			name:        "stale-result-home",
+			source:      "runtime_gc_stale_result_alloca.go",
+			expectation: runtimeCapabilityMustPass,
+			timeout:     180 * time.Second,
+			exclusive:   true,
+		},
 	}
 }
 
