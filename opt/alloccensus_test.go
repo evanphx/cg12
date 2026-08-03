@@ -166,3 +166,122 @@ func TestAllocationTypeNameStripsPrefixAndDigest(t *testing.T) {
 	// Not one of goc's interned descriptors: leave it alone rather than guess.
 	assert.Equal(t, "type.int", AllocationTypeName("type.int"))
 }
+
+// censusKeysWith is censusKeys with the counting rules chosen explicitly.
+func censusKeysWith(module *ir.Module, options AllocationCensusOptions) []string {
+	census := AllocationCensusWith(module, options)
+	keys := make([]string, 0, len(census))
+	for _, allocation := range census {
+		keys = append(keys, allocation.Key())
+	}
+	return keys
+}
+
+// The whole point of recording a front-end frame slot is that the record names
+// the same site the heap record of the same decision would name. If the two
+// identities differ by so much as the allocator column, an object moving from
+// the frame to the heap still reads as one site vanishing and another appearing,
+// which is the reporting defect this option exists to fix.
+func TestAllocationCensusPairsAFrontEndFrameSlotWithItsHeapForm(t *testing.T) {
+	position := func(module *ir.Module) ir.SrcPos {
+		return ir.SrcPos{File: module.File("a.go"), Line: 11, Col: 6}
+	}
+	options := AllocationCensusOptions{IncludeFrontEndFrameSlots: true}
+
+	framed := ir.NewModule()
+	function := framed.NewFunc("literal", ir.ClsP)
+	block := function.Entry()
+	slot := block.At(position(framed)).Alloc(8, 8)
+	function.PlacedAllocs = map[uint32]ir.PlacedAlloc{slot.ID: {
+		Site:      "composite-literal",
+		Placement: ir.AllocInFrame,
+		Allocator: "runtime.newobject",
+		Type:      typeSymbol("main_T"),
+	}}
+	block.Ret(slot)
+
+	heaped := ir.NewModule()
+	function = heaped.NewFunc("literal", ir.ClsP)
+	block = function.Entry()
+	object := block.At(position(heaped)).
+		Call(ir.ClsP, function.Sym("runtime.newobject", 0), function.Sym(typeSymbol("main_T"), 0))
+	function.PlacedAllocs = map[uint32]ir.PlacedAlloc{object.ID: {
+		Site:      "composite-literal",
+		Placement: ir.AllocOnHeap,
+		Allocator: "runtime.newobject",
+		Type:      typeSymbol("main_T"),
+	}}
+	block.Ret(object)
+
+	before := censusKeysWith(framed, options)
+	after := censusKeysWith(heaped, options)
+	require.Equal(t, []string{"a.go:11:6\tliteral\truntime.newobject\tmain_T\tframe"}, before)
+	require.Equal(t, []string{"a.go:11:6\tliteral\truntime.newobject\tmain_T\theap"}, after)
+
+	beforeSite := AllocationCensusWith(framed, options)[0].Site()
+	afterSite := AllocationCensusWith(heaped, options)[0].Site()
+	assert.Equal(t, beforeSite, afterSite,
+		"a front-end frame slot and the heap allocation the same decision makes when it\n"+
+			"goes the other way must be one site, or the move cannot be reported as one")
+}
+
+// Without the option the frame half of that pair is not recorded at all, which
+// is the state in which a frame-to-heap move arrives as a site appearing.
+func TestAllocationCensusOmitsFrontEndFrameSlotsByDefault(t *testing.T) {
+	module := ir.NewModule()
+	function := module.NewFunc("literal", ir.ClsP)
+	block := function.Entry()
+	slot := block.At(ir.SrcPos{File: module.File("a.go"), Line: 11, Col: 6}).Alloc(8, 8)
+	function.PlacedAllocs = map[uint32]ir.PlacedAlloc{slot.ID: {
+		Site:      "composite-literal",
+		Placement: ir.AllocInFrame,
+		Allocator: "runtime.newobject",
+		Type:      typeSymbol("main_T"),
+	}}
+	block.Ret(slot)
+
+	assert.Empty(t, censusKeys(module))
+	assert.Equal(t,
+		[]string{"a.go:11:6\tliteral\truntime.newobject\tmain_T\tframe"},
+		censusKeysWith(module, AllocationCensusOptions{IncludeFrontEndFrameSlots: true}))
+}
+
+// A front-end frame placement whose heap form is not an allocator call has
+// nothing to pair with -- the string-conversion buffer's alternative is a nil
+// argument and an allocation inside runtime.stringtoslicebyte, which is not a
+// census site on either side. Recording it would add a line that can only ever
+// vanish, never move.
+func TestAllocationCensusOmitsAFrontEndFrameSlotWithNoAllocator(t *testing.T) {
+	module := ir.NewModule()
+	function := module.NewFunc("convert", ir.ClsP)
+	block := function.Entry()
+	buffer := block.At(ir.SrcPos{File: module.File("a.go"), Line: 4, Col: 2}).Alloc(8, 32)
+	function.PlacedAllocs = map[uint32]ir.PlacedAlloc{buffer.ID: {
+		Site:      "string-conversion-buffer",
+		Placement: ir.AllocInFrame,
+	}}
+	block.Ret(buffer)
+
+	assert.Empty(t, censusKeysWith(module, AllocationCensusOptions{IncludeFrontEndFrameSlots: true}))
+}
+
+// A front-end heap placement is an allocator call and is read out of the IR, so
+// the option must not record it a second time under a different spelling.
+func TestAllocationCensusDoesNotDoubleCountAFrontEndHeapPlacement(t *testing.T) {
+	module := ir.NewModule()
+	function := module.NewFunc("escapes", ir.ClsP)
+	block := function.Entry()
+	object := block.At(ir.SrcPos{File: module.File("a.go"), Line: 8, Col: 9}).
+		Call(ir.ClsP, function.Sym("runtime.newobject", 0), function.Sym(typeSymbol("main_T"), 0))
+	function.PlacedAllocs = map[uint32]ir.PlacedAlloc{object.ID: {
+		Site:      "escaping-typed",
+		Placement: ir.AllocOnHeap,
+		Allocator: "runtime.newobject",
+		Type:      typeSymbol("main_T"),
+	}}
+	block.Ret(object)
+
+	assert.Equal(t,
+		[]string{"a.go:8:9\tescapes\truntime.newobject\tmain_T\theap"},
+		censusKeysWith(module, AllocationCensusOptions{IncludeFrontEndFrameSlots: true}))
+}

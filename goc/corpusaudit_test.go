@@ -126,7 +126,14 @@ func compileCorpusForAudits(programs []string) *corpusAudit {
 					continue
 				}
 				escapes := opt.FrameEscapes(module)
-				census := opt.AllocationCensus(module)
+				// The census records the front end's own frame placements as well
+				// as the IR pass's, so that an object moving between a front-end
+				// frame slot and the heap is one line changing placement rather
+				// than a line vanishing and an unrelated one appearing. See
+				// opt.AllocationCensusOptions.
+				census := opt.AllocationCensusWith(module, opt.AllocationCensusOptions{
+					IncludeFrontEndFrameSlots: true,
+				})
 				// Shadow mode reads the finished module and changes nothing in
 				// it. The compile above is the shipping configuration --
 				// summaries on -- so what is being compared is the code the

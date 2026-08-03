@@ -72,7 +72,20 @@ type PlacedAlloc struct {
 	Site string
 	// Placement is where the front end put the object.
 	Placement AllocPlacement
-	// Type is the type-descriptor symbol, when the site had one.
+	// Allocator names the runtime allocator this object would have been passed
+	// to had the front end sent it to the heap -- and, when Placement is
+	// AllocOnHeap, the one it was passed to.
+	//
+	// It is empty at a site whose heap form is not an allocator call at all: the
+	// string-conversion buffer's alternative is passing nil and letting
+	// runtime.stringtoslicebyte allocate internally, which is not a placement
+	// decision anyone can see from outside. A frame record with no allocator
+	// cannot be paired with the heap record it would become, so it is not a
+	// census site; see opt.AllocationCensusOptions.
+	Allocator string
+	// Type is the type-descriptor symbol, when the site had one. It is the
+	// symbol the descriptor would be interned under, computed without emitting
+	// it, so that recording a frame placement adds no data to the module.
 	Type string
 	// Pos is the source position of the decision.
 	Pos SrcPos
