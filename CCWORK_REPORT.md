@@ -1,3 +1,30 @@
+# Closing the phi blind spot in `opt.FrameEscapes`
+
+Branch `ccwork/framecheck-phi-blindspot`, off `main` (d113d4a). Everything below
+this section is the previous job's report, kept for reference.
+
+## 1. The hole is real — proved before any fix
+
+`opt/framecheck_test.go: TestFrameEscapesReportsAFrameAddressStoredThroughAMergedDestination`
+builds the shape a variadic call takes when its backing array is chosen at run
+time: one path a frame-resident array, one path a heap array, joined by a phi,
+and the frame address stored through the merged pointer.
+
+On unmodified `main` the checker reports **zero** findings for it:
+
+```
+--- FAIL: TestFrameEscapesReportsAFrameAddressStoredThroughAMergedDestination
+    framecheck_test.go:173: "[]" should have 1 item(s), but has 0
+```
+
+A frame address reaches a heap object and the audit says nothing. Every "the
+audit is clean" statement made this week has to be read with that in mind.
+
+(Cause, fix, corpus triage and residual blind spots follow as they are
+established.)
+
+---
+
 # Wave 3 — integration gate report
 
 `integration/wave3` = `main` (6b9fbb0) + three changes, merged in the order

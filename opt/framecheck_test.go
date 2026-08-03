@@ -144,6 +144,38 @@ func TestFrameEscapesFollowsAFrameAddressThroughAPhi(t *testing.T) {
 	assert.Equal(t, FrameEscapeIntoGlobal, escapes[0].Destination)
 }
 
+// A destination that is a phi is only sometimes a frame address. This is the
+// shape a variadic call takes when the backing array is chosen at run time: one
+// path uses a frame-resident array, the other a heap one, and the store that
+// fills the array sees a merged pointer. Skipping the store because the
+// destination *may* be part of the frame hides the path where it is not, so the
+// publication into the heap array goes unreported.
+func TestFrameEscapesReportsAFrameAddressStoredThroughAMergedDestination(t *testing.T) {
+	module := ir.NewModule()
+	function := module.NewFuncVoid("publish")
+	entry := function.Entry()
+	heapPath := function.NewBlock("heap")
+	join := function.NewBlock("join")
+
+	local := entry.Alloc(8, 8)
+	frameArray := entry.Alloc(8, 16)
+	entry.Jnz(function.Word(1), heapPath, join)
+	heapArray := heapPath.Call(ir.ClsP, function.Sym("runtime.newobject", 0), function.Sym("type.array", 0))
+	heapPath.Goto(join)
+	array := join.Phi(ir.ClsP,
+		ir.PhiEdge{From: entry, Val: frameArray},
+		ir.PhiEdge{From: heapPath, Val: heapArray},
+	)
+	join.Store(local, array)
+	join.RetVoid()
+
+	escapes := FrameEscapes(module)
+	require.Len(t, escapes, 1)
+	assert.Equal(t, FrameEscapeStore, escapes[0].Kind)
+	assert.Equal(t, FrameEscapeIntoCallResult, escapes[0].Destination)
+	assert.Equal(t, "runtime.newobject", escapes[0].Callee)
+}
+
 // Passing &local to a callee is how Go is written, and whether the callee
 // retains it is a question about the callee's own body. The audit reports the
 // store the callee makes, not the argument.
