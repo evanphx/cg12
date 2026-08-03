@@ -10,9 +10,13 @@ import (
 
 // A frame's pointer map says which of the frame's words the collector may treat
 // as addresses. A word it claims wrongly is not a missed root, which merely
-// collects something early: it is a scalar handed to runtime.findObject as an
-// address, and both walkers that read the map -- runtime.scanframeworker for
-// the mark phase and runtime.adjustframe for the copier -- throw on it.
+// collects something early: it is a scalar handed to the runtime as an address.
+// What that costs depends on the value and on which of the two walkers that
+// read the map gets there. runtime.adjustpointers, which the stack copier runs,
+// throws on any non-zero value below the lowest legal pointer; the mark phase's
+// runtime.findObject returns silently for an address that was never part of the
+// heap. So a frame map can be wrong for a long time before a program dies of
+// it, which is what the last program in the table records.
 //
 // log/slog is where that goes from a theoretical hazard to a crash in ordinary
 // code. slog.Value packs int64, uint64, bool, time.Duration and float64 into a

@@ -1768,7 +1768,7 @@ the shape (`ir` unit probe, since removed):
 
     [0]func()   size=8  align=8                    Go says 0/8
     slog.Value  size=32 pointer offsets [0 16 24]  Go says 24, [8 16]
-    slog.Attr   size=48 pointer offsets [0 16 32]  Go says 40, [0 24 32]
+    slog.Attr   size=48 pointer offsets [0 16 32 40]  Go says 40, [0 24 32]
 
 Offset 16 of `slog.Attr` is `Value.num`. The phantom element sits at the offset
 of the field that follows it and shifts every later field by a word.
@@ -1912,4 +1912,130 @@ For scale, the earlier report recorded one whole-program observation of
 `json/kv-4-pairs` at 15.00 allocations / 456.0 bytes before the process died on
 the next case. The committed one-case-per-process harness now measures it at
 8.00 / 344.0.
+
+
+## 6. How wide the defect was
+
+`log/slog` is not the only user of the shape. Every standard-library type that
+puts a zero-length array field in a struct uses a **pointer-shaped** element, so
+every one of them claimed a pointer word over whatever followed it. Measured on
+`main` by the same guard:
+
+| type | goc's aggregate | the type |
+| --- | --- | --- |
+| `log/slog.Value` | 32 bytes, pointers `[0 16 24]` | 24, `[8 16]` |
+| `log/slog.Attr` | 48 bytes, pointers `[0 16 32 40]` | 40, `[0 24 32]` |
+| `log/slog.Record` | 328 bytes, 23 pointer words | 288, 18 |
+| `sync/atomic.Pointer[T]` | 16 bytes, pointers `[0 8]` | 8, `[0]` |
+| `weak.Pointer[T]` | 16 bytes, pointers `[0 8]` | 8, `[0]` |
+| `runtime.PanicNilError` | 8 bytes, pointers `[0]` | 0, none |
+
+`slog.Value` is the one that killed programs, because the field after its
+`[0]func()` is the `uint64` carrying a number small enough for
+`runtime.adjustpointers` to reject. `atomic.Pointer` and `weak.Pointer` claimed
+a word one *past* the value, which is a frame word belonging to something else:
+whatever it holds is walked as an address, and it is only luck that no corpus
+program has died of it.
+
+With the fix, the invariant holds for every named type in all four packages,
+`runtime` included whole.
+
+## 7. Guards
+
+### 7.1 The loop-aliasing programs still match the host toolchain
+
+    --- PASS: TestLoopBodyAllocationsAreDistinctPerIteration (22.83s)  8/8
+    --- PASS: TestLoopAliasExpectationsMatchTheHostToolchain (0.59s)   4/4
+
+### 7.2 `TestFrameEscapeAudit` — clean
+
+    --- PASS: TestFrameEscapeAudit (0.00s)
+
+Zero new publications: no frame address the compiler emits reaches a global, a
+heap object, a result area or anything through a parameter that it did not
+already reach on `main`. Expected -- this change describes existing storage
+differently, it does not move any object -- and checked rather than assumed.
+
+### 7.3 The allocation census delta: empty
+
+    --- PASS: TestAllocationCensus (187.10s)
+    --- PASS: TestEscapeShadowPlacement (0.00s)
+
+The census compares site by site in four directions -- heap→frame, frame→heap,
+appeared, vanished -- and all four are empty, over a corpus that now has five
+more programs in it. So there is no delta to review: no allocation moved, no
+site appeared, none vanished.
+
+That five new corpus programs add no census line is worth one sentence rather
+than suspicion. The census records heap allocations and the frame allocations
+that came out of an escape decision, keyed by site identity and deduplicated
+across the corpus; the new programs' own `main`s allocate nothing, and every
+line of `log/slog` and `runtime` they reach was already reached by
+`stdlib_slog_structured.go`.
+
+Regenerated anyway, literally, because the brief asks for the file and not for
+an argument about it:
+
+    go test ./goc -run TestAllocationCensus$ -update-alloc-census-baseline
+    ok  github.com/evanphx/cg12/goc  275.989s
+
+`git status` reports `goc/testdata/alloc_census_baseline.txt` unmodified. The
+regenerated file is byte-identical to the committed one, so there is no site to
+review and nothing unexplained.
+
+Two GC-path smoke tests, since this change touches every aggregate the compiler
+builds and `sync/atomic.Pointer` is in the runtime's own code:
+
+    goc/testdata/runtime_gc_type_mask_padding.go  -> "type mask padding ok"
+    goc/testdata/runtime_stack_copy_roots.go      -> "stack copy roots ok"
+      (the second under GODEBUG=cg12checkstackcopy=1)
+
+## 8. The same collision in the C front end, measured and deliberately not fixed
+
+`cc/agg.go`'s `fieldOf` builds the same kind of field from a C array:
+`ir.Field{Sub: subOfType(elem), Count: int(at.Len())}`. A GNU zero-length array
+member hits the identical `Count == 0` collision. It does **not** produce a bad
+map, and it is not silent:
+
+    struct s { long n; char buf[0]; };
+    long g(struct s v);
+
+    cc: cannot pass struct.s by value: cg12 lays it out as 16 bytes (align 8)
+    but C says 8 (align 8) -- a bitfield, which cg12's aggregate types cannot
+    yet express
+
+`checkAggLayout` compares the aggregate against C's own size and refuses. C
+frames are not managed, so no stack map is built from these aggregates and there
+is no word to mis-classify; the consequence is a rejected program with a
+misleading diagnostic ("a bitfield").
+
+Not fixed here, for three reasons that are a scope judgement and not a
+measurement: it is loud rather than silent, C's rule for a trailing zero-sized
+member is *not* Go's (C says 8 where gc says 16, so the same padding would be
+wrong there), and `fieldOf` returns one field per member so skipping one means
+changing its caller. It is one line plus its caller for whoever wants it, and
+the error message it produces is the wrong one for the cause.
+
+## 9. What was committed
+
+| commit | what |
+| --- | --- |
+| `240d720` | the reduction as five corpus programs and `goc/slogattrframe_test.go`, failing on main |
+| `c613b4c` | the fix in `goABIAggregate`, the trailing-zero-size padding, and the aggregate/type agreement test |
+| `9a76dd3` | the regenerated slog baseline, RUNTIME_PLAN §28, the corrected miscompiles README |
+| `9e0f9a3` | the agreement test extended to `sync/atomic`, `weak` and `runtime` |
+
+The compiler change is 20 lines in one function plus a 15-line helper next to the
+size rule it mirrors. Everything else is tests, baselines and prose.
+
+### 7.4 Determinism
+
+    scripts/determinism-check.sh -corpus -rounds 3 -j 24
+    programs=395 rounds=3 workers=24 optimize=false
+    round 0: 395 programs in 120.7s, 0 failed
+    round 1: 395 programs in 121.7s, 0 failed
+    round 2: 395 programs in 125.7s, 0 failed
+    content varies between rounds: 0
+    image varies, content identical (layout only): 0
+    reproducible=395 varying=0 failed=0 of 395 over 3 rounds
 
