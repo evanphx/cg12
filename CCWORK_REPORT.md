@@ -1,853 +1,404 @@
-# Loop-body allocation aliasing: a live miscompile in goc
+# Verification of `ccwork/variadic-allocations`
 
-# A differential yardstick: goc's escape decisions against the Go compiler's
+Job: run the suites to completion against the branch and report. No fixing, no
+refactoring. Findings are appended as each suite exits.
 
-Branch `ccwork/loop-aliasing-fix`, off `main` (`efcd4d4`). The previous job's
-report (cross-function escape summaries) is at `efcd4d4:CCWORK_REPORT.md`.
+## What is under test
 
-Branch `ccwork/escape-gc-differential`, off `main` (`efcd4d4`).
-
-Status: IN PROGRESS. Numbers land here as they are produced. Anything not
-watched to completion is marked UNVERIFIED.
-
-Status: IN PROGRESS. Numbers land here as they are produced. Anything I have
-not watched to completion is marked UNVERIFIED.
-
-## 0. The defect, reproduced on main before anything was changed
-
-## 0. The host toolchain, pinned
-
-Host toolchain is `go1.26.1 linux/arm64`; goc built from `efcd4d4`, run as
-`goc -run`.
-
-| program | form | host `go run` | `goc -run` on main |
-
-```
-go version go1.26.1 linux/arm64
-```
-
-`-gcflags=-m`'s wording is not stable across releases, so every number below is
-against **go1.26.1** and a rerun on another release has to re-derive them. The
-harness records the version string in its output file for exactly this reason.
-
-## 1. What was already measured, and why it did not answer the question
-
-Everything measured in this effort so far compares two of goc's own analyses:
-the AST walk frames 83.4% of placements, the summary-fed IR pass 79.4%. That
-says the walk beats goc's own alternative. It says nothing about whether either
-is good. `go` is installed on this box and prints its escape decisions on
-request; this branch asks it.
-
-## 2. The comparable universe
-
-goc compiles a vendored stdlib out of `stdlib/src`; the host `go` compiles its
-own. Positions in those two trees do not correspond, so no join across them is
-possible. The comparable universe is therefore exactly **the allocations whose
-source text is written in the corpus program's own file** — `goc/testdata/*.go`,
-which both compilers read byte-for-byte identically.
-
-Sizing that, from the checked-in census (`goc/testdata/alloc_census_baseline.txt`,
-18 664 rows):
-
-| | rows |
-|---|---|
-| census rows total | 18 664 |
-| …at a `goc/testdata/*.go` position | **2 707** (14.5%) |
-| …at a `stdlib/src/**` position | 10 094 |
-| …with no position at all (`?`) | 5 863 |
-
-The 2 707 comparable rows split **109 frame / 2 598 heap** and cover 378 of the
-385 corpus programs.
-
-## 3. What was built
-
-Two files, both committed, plus one committed output:
-
-- `internal/gcdiff/` — parses `-gcflags=-m`, parses the census baseline, joins
-  them, renders the report. Unit-tested against a pinned sample of every `-m`
-  message shape go1.26.1 produces over this corpus (`go test ./internal/gcdiff`,
-  10 ms, runs in ordinary CI).
-- `goc/gcdiff_test.go` — the corpus driver, opt-in exactly as
-  `TestEscapeSummaryPromotionRate` is, because it depends on the host toolchain.
-- `goc/testdata/escape_gc_differential.txt` — the output, checked in.
-
-One command:
-
-```
-go test ./goc -run TestEscapeDifferentialAgainstGC \
-    -escape-gc-differential -update-escape-gc-differential
-```
-
-It takes **10 seconds**, not minutes: it compiles nothing with goc, reading
-goc's side out of the already-committed `alloc_census_baseline.txt`, so it
-measures the census *as committed* rather than a second census built beside it.
-Run without `-update` it re-derives the file and fails on any difference.
-
-A second, per-program mode explains one line instead of counting the corpus:
-
-```
-go test ./goc -run TestEscapeDifferentialProgram \
-    -escape-gc-differential-program=testdata/runtime_loopvar_address_gc.go -v
-```
-
-which prints every `ir.AllocDecision` goc recorded for that program (including
-the heap placements the loop rule forced and the ones with no source position),
-every census row, every frame address `opt.FrameEscapes` can prove it publishes,
-and `-m`'s decisions for the same file, side by side. §6 is what that tool
-found; it is the difference between a count and a triage.
-
-## 4. The methodology traps, each answered
-
-**Vendored stdlib.** Not handled by correction — handled by exclusion. Only
-allocations whose *source text is written in the corpus program's own file*
-are comparable, because that file is the one thing both compilers read
-byte-for-byte identically. **10 094 census rows are dropped for being in
-`stdlib/src`** and **5 863 for having no position at all**. 2 707 remain.
-
-**Inlining.** The two compilers have opposite conventions, and I checked both
-rather than assumed. goc's inliner clones each instruction with the *callee's*
-position (`opt/inline.go`'s `Pos: in.Pos`), so an inlined allocation stays
-attributed to the line it is written on. `cmd/compile` prints `-m` at the
-*outermost* position, so an inlined allocation is reported at the call site —
-verified directly: `gc_struct.go` reports `&record{...} escapes to heap` at both
-`16:13` (where it is written) and `31:17` (where `allocateGarbage` is inlined).
-
-The join key drops the containing function entirely and keys on
-**(corpus file, source line)**. On the gc side, a decision printed at a position
-that also carries an `inlining call to` diagnostic is a copy of an allocation
-written elsewhere — usually in the *host* stdlib, which goc records under
-`stdlib/src` where this join cannot see it — so it is excluded and counted:
-**834 excluded**.
-
-**Columns, which is the trap nobody named.** They do not correspond either, and
-no offset fixes them. goc records `new(record)` at the column of `new` and gc at
-the column of `(`; a map literal at `map` vs at `{`; a boxed `index * 7` at `7`
-vs at `*`. Measured: an exact `(line, column)` join matches 1 559 of 2 607 census
-positions where the line alone matches 2 115 of 2 473, and the residual deltas
-run from −18 to +17 with no mode. Hence the line, not the column.
-
-**Programs that do not build.** **381 of 385 compared.** The 4 that do not are
-`abi0_assembly.go`, `bytealg_compare.go`, `chacha8rand_assembly.go` and
-`runtime_atomic_assembly.go`, all rejected by the same rule — `use of internal
-package internal/… not allowed` — because they import runtime-internal packages
-a normal module may not. They cost **37 census rows**, and the coverage table
-names each program and the rows it costs, so the denominator can never shrink
-quietly.
-
-**Different lowering.** Classified, not counted as disagreement. The
-largest single case is channels: `cmd/compile` prints **no** `-m` diagnostic for
-`make(chan …)` in any form and has no stack path for one — verified with
-`-gcflags=-S`, where a provably non-escaping `make(chan int, 1)` still calls
-`runtime.makechan`. So gc heap-allocates every channel unconditionally. Without
-that rule all **136** of goc's comparable channel sites would have joined against
-nothing and read as "goc allocates something gc does not", which is exactly
-backwards — the two compilers agree completely about channels. The harness
-supplies the decision, marks it synthesized, and reports the count.
-
-**What counts as a site.** One source position in one function after inlining,
-deduplicated, then folded up to the line, because the column and the function
-are not portable. A line carrying two allocations the compilers split differently
-gets the verdict `mixed` and its own row in the matrix; it is never folded into
-either direction, because folding it would be a guess about which object is
-which.
-
-**One trap I found that was not on the list, and it is the important one.**
-5 863 census rows have no source position. **89 of them are in a corpus
-program's own functions, 88 of those on the heap.** A positionless row cannot
-join, so a line can read as "goc allocated nothing here" when goc allocated
-something anonymous — and §6 shows this is not hypothetical: it is the entire
-explanation of the loop-variable class. 88 is the hard bound on how wrong the
-position join can be about goc, and it is now printed in the coverage table.
-
-## 5. The confusion matrix
-
-**381 of 385 programs. 2 670 census rows. 3 357 gc decisions. 3 029 joined
-source lines.**
-
-```
-  goc\gc      frame     heap    mixed   absent    total
-  frame          15        3        2       17       37
-  heap          194     1762      194      186     2336
-  mixed           3       53        1        7       64
-  absent        449      119       24        0      592
-  total         661     1937      221      210     3029
-```
-
-`absent` means "this compiler reported no allocation on this line", which is
-*not* "it put the object in a frame". On goc's side the census records every
-heap allocation but only those frame placements that came out of an escape
-decision — an ordinary front-end slot is invisible. On gc's side `-m` says
-nothing about a local it never had to think about. The row and column exist
-because pretending otherwise would be the lie.
-
-Read off the matrix:
-
-- **1 762 lines both compilers put on the heap** and **15 both put in a frame**:
-  the agreement diagonal, 1 777 lines.
-- **585 lines goc heaps and gc does not** — the pessimistic direction. §7.
-- **202 lines gc heaps and goc does not** — the permissive direction, and the
-  answer to the question this job exists to ask. §6.
-
-## 6. PERMISSIVE — 202 lines gc heaps and goc does not
-
-This is the set the job exists to produce: every one is a candidate frame
-address outliving its frame. **202 source lines**, and they are not one thing.
-Split by what the census can actually see:
-
-| | lines |
-|---|---|
-| goc has a **frame** census row on the line | **59** |
-| goc has **no census row at all** on the line | **143** |
-
-The second group is not evidence of anything on its own — the census does not
-record ordinary front-end frame slots, and several constructs allocate through
-runtime helpers the census deliberately does not track. Both groups are
-triaged below; the classification is mechanical where the census supports it
-and by reading the emitted decisions where it does not.
-
-### 6.1 The 59 with a frame census row
-
-| class | lines | verdict |
+| | commit | |
 |---|---|---|
-| `var x T` where goc records **both** a frame and a heap row at the same position | 50 | **not a hole** |
-| loop header whose variable's address escapes (`for index := …; { … &index … }`) | 8 | **not a hole** — a join artefact |
-| a pair of closures returned together (`runtime_closure_captured_string.go:296`) | 1 | **not a hole** — see below |
+| branch | `034e58c` | `origin/ccwork/variadic-allocations` |
+| control | `a535466` | `main` (the actual merge target) |
+| merge-base | `e7c8e33` | what the task's reference numbers were taken at |
 
-**The `var x T` class (50 lines).** `var buffer bytes.Buffer` and its
-relatives — `strings.Builder`, `sync.WaitGroup`, `atomic.Value`, `debug.GCStats`.
-`-m` says `moved to heap: buffer`. goc records **two** decisions at that one
-position in that one function, one heap and one frame, so the line folds to
-`mixed`. Ran the per-program tool on `stdlib_log_buffer.go` and
-`io_write_string.go`: goc heap-allocates the object whose address escapes and
-frames a second temporary of the same type at the same position, and
-`opt.FrameEscapes` reports nothing for either program. The escaping object is on
-the heap. The line-level join cannot separate the two, which is a limit of the
-join, not a defect in goc.
+`main` has moved since the reference numbers were quoted: `a535466` merged
+`origin/ccwork/escape-gc-differential`, which added `internal/gcdiff` and
+`goc/gcdiff_test.go`. Reference figures quoted at `e7c8e33` therefore do not
+match a fresh `main` run, and every difference below is reconciled against the
+commit that caused it rather than accepted.
 
-**The closure-pair line (1 line).** `return func(suffix string) { … }, func() string { … }`
-returns two closures over a captured string. goc records four rows at that one
-line: both closures framed in `main.controls` and both heaped in
-`main.stringPair`, which is the same source line decided separately in two
-functions. The framing function is the one that does not return them past its
-own frame; `opt.FrameEscapes` reports no publication anywhere in the program,
-and the program runs correctly under goc (`closure captured string ok`).
-
-**The loop-variable class (8 lines, and the calibration case).** The harness
-flagged `runtime_loopvar_address_gc.go:18`, `:36`, `:48`,
-`runtime_loopvar_three_clause.go:38`, `:85` and
-`runtime_loopvar_value_shapes.go:25` — the family the brief named as the live
-calibration example. Good: it means the join works. But the finding does not
-survive triage, and the reason is worth recording because it is the sharpest
-methodological trap in the whole job.
-
-Reduced `for index := 0; index < 4; index++ { pointers = append(pointers, &index) }`
-to `escape_gc_differential/loopaddr.go`. Both compilers print `DISTINCT` and
-`0 1 2 3`; goc allocates four cells. The per-program tool shows why the census
-disagrees:
+Branch content relative to `main` (`git diff main origin/ccwork/variadic-allocations`):
 
 ```
-== goc allocation decisions in loopaddr.go
-  5:6   frame  runtime.newobject  int  main.main
-== positionless census rows in this program's own functions
-  ?     main.main  runtime.newobject  int  heap
+ goc/alloccount_test.go                  |  173 ++      (new)
+ goc/testdata/allocation_counts.go       |  145 ++      (new)
+ goc/compile.go                          |   38 +-
+ opt/escape.go                           |   47 +-
+ opt/escapefacts.go                      |   22 +-
+ opt/escapegraph.go                      |   76 +-
+ opt/escapesummary.go                    |   77 +-
+ goc/testdata/alloc_census_baseline.txt  | 4923 +-      (regenerated)
+ goc/testdata/escape_shadow_baseline.txt |  253 +-      (regenerated)
+ goc/testdata/escape_gc_differential.txt |  284 +-      (regenerated)
 ```
 
-goc records a **frame** decision at the loop header and a **positionless heap
-allocation** for the per-iteration copy. The join is on position, the
-positionless row cannot join, and so the line reads as "goc frames what gc
-heaps" when goc heaps the thing that escapes. **88 positionless heap rows exist
-in corpus-program functions**, and that number is now in the coverage table as
-the bound on this effect.
-
-### 6.2 The 143 with no census row
-
-Classified by the construct `-m` named, which is the only description of the
-allocation gc gives:
-
-| class | lines | what goc does | verdict |
-|---|---|---|---|
-| `loop_alias_forms.go` | `new(int)` | `new:   1 2` | `new:   1 2` |
-| `loop_alias_forms.go` | `make([]int, 0, 4)` | `make:  1 2` | `make:  1 2` |
-| `loop_alias_forms.go` | `var a [2]int; &a` | `array: 1 2` | **`array: 2 2`** |
-| `loop_alias_composite.go` | `&cell{v: i}` | `alternate: 1 2` + `distinct` | **`alternate: 2 2`** + **`ALIASED: the two iterations share one allocation`** |
-| `variadic_backing.go` | `retainNothing(&x)` | `1` | `1` |
-
-| string concatenation (`a + b`) | 49 | `runtime.concatstring2`, always with a nil buffer (`goc/compile.go`) — always heap | **agreement**, invisible to the census |
-| `append` | 25 | `runtime.growslice` — always heap, and explicitly excluded from the census by `opt/alloccensus.go` | **agreement**, invisible by design |
-| `[]byte(string)` / `[]rune(string)` | 33 | `runtime.stringtoslicebyte` with a **32-byte stack buffer** when goc's walk says the conversion does not escape | **candidate** — see below |
-| `string(byteslice)` | 6 | `runtime.slicebytetostring` | candidate, same reason |
-| slice literal `[]T{…}` | 12 | ordinary front-end slot | **candidate** |
-| composite literal `&T{…}` / `T{…}` | 11 | ordinary front-end slot | **candidate** |
-| `func literal` given to `runtime.AddCleanup` | 10 | goc has a frame path for closures (`gen.localAlloc`) | **candidate** |
-| `var x T` with no census row at all | 10 | ordinary front-end slot | candidate |
-| string literal boxed into an interface | 4 | | candidate |
-| `make(…)` | 2 | | candidate |
-
-Confirmed exactly as the brief states: two forms are already fixed by the loop
-rule inside `opt.LowerHeapAllocations`, two are live. `variadic_backing.go`
-already agrees with the host; it lands as a regression guard, not as a failing
-case.
-
-Three of these classes are **not** census blind spots — they are constructs the
-census can see and simply has no row for, which means goc placed them as
-ordinary front-end frame slots that were never escape candidates. Those are the
-ones worth a discriminating program, and they are where the strongest signal in
-this whole job is.
-
-## 1. The three programs, landed as failing corpus tests (commit `f343e38`)
-
-### 6.3 The strongest signal: the differential rediscovers goc's own findings
-
-`goc/loopalias_test.go` compiles each program, links it against the
-cg12-compiled Go runtime, runs it and compares everything it printed against
-what Go prints. Each program is run twice, unoptimized and optimized, because
-the placement is decided in two different places and a fix in one leaves the
-other untouched.
-
-`goc/testdata/frame_escape_baseline.txt` records **8 frame-address publications
-in corpus programs** that `opt.FrameEscapes` can prove. The differential, which
-knows nothing about that file and derives its answer from `cmd/compile`, flags
-**3 of the 8** in its permissive direction:
-
-    $ go test ./goc -run TestLoopBodyAllocationsAreDistinctPerIteration -count=1
-    --- FAIL: .../loop_alias_forms.go        got "array: 2 2", want "array: 1 2"
-    --- FAIL: .../loop_alias_forms.go_-O     got "array: 2 2", want "array: 1 2"
-    --- FAIL: .../loop_alias_composite.go    got "alternate: 2 2\nALIASED: ..."
-    --- FAIL: .../loop_alias_composite.go_-O got "alternate: 2 2\nALIASED: ..."
-    --- PASS: .../variadic_backing.go
-    --- PASS: .../variadic_backing.go_-O
-
-```
-runtime_core_types.go:24              -> IN PERMISSIVE
-runtime_core_types.go:28              -> IN PERMISSIVE
-runtime_map_struct_value_replace.go:12 -> IN PERMISSIVE
-```
-
-`TestLoopAliasExpectationsMatchTheHostToolchain` passes: the expectations are
-`go run`'s own output, not a belief about it.
-
-Same class in all three: a `[]int{…}` composite-literal backing array left in
-the frame, whose address is stored through the write barrier into a heap object
-(`barrier / memory reached through a call result $runtime.newobject`). Two
-independent instruments, one of them a different compiler, pointing at the same
-lines.
-
-## 2. What the three new corpus programs cost the baselines, before any fix
-
-### 6.4 What the discriminating programs found
-
-The programs are in `goc/testdata/`, which the corpus audits glob, so they are
-also 3 new programs in the census. Regenerated on the **unfixed** compiler so
-that the fix's own diff is attributable:
-
-Six reductions, committed under `goc/testdata/escape_gc_differential/` with a
-README recording both compilers' current answers. They are outside
-`testdata/*.go`, so the corpus glob, the census and every baseline are
-untouched.
-
-    $ go test ./goc -run 'TestAllocationCensus$|TestEscapeShadowPlacement$|TestFrameEscapeAudit$' \
-        -update-alloc-census-baseline -update-escape-shadow-baseline -update-frame-escape-baseline
-    ok  166.549s, 388 programs
-
-- **`mapliteral.go`** — `runtime_core_types.go`'s map moved into a callee that
-  returns, with the map escaping to a global. goc **heap-allocates both backing
-  arrays**, agreeing with `-m` completely. So goc's frame placement in the
-  corpus program happens only when the whole structure stays local to the frame:
-  goc is being *more precise* than gc, which heaps map-stored values
-  unconditionally.
-
-| baseline | delta |
-|---|---|
-| `alloc_census_baseline.txt` | **+5 lines**, all in the three new files, all `heap` |
-| `escape_shadow_baseline.txt` | unchanged |
-| `frame_escape_baseline.txt` | **unchanged** — the new programs publish no frame address |
-
-- **`stackmove_goroutine.go`** — the sharpest test I could construct. Same map
-  built on a **goroutine** stack, so the backing arrays are in a frame that is
-  not `main`'s. `opt.FrameEscapes` confirms both addresses are stored into heap
-  objects; `-m` heaps both. The goroutine then grows its stack by 400 frames of
-  `[512]int` and collects. A stack copy relocates pointers found *on* the stack;
-  nothing scans the heap for pointers *into* the stack, so this is where an
-  unsafe frame placement has to show. **It does not.** Both print `intact`.
-
-- **`stackmoved.go`** — the control, because the test above means nothing if the
-  stack did not move. Both compilers print `stack moved`, so the copy really
-  happened.
-
-- **`bytesconv.go`**, **`cleanupclosure.go`**, **`loopaddr.go`** — the
-  `[]byte(string)`-escapes, `AddCleanup`-closure and loop-variable classes. All
-  three agree with the host.
-
-**Verdict on the permissive set: 0 confirmed holes, and one class I could not
-clear.** The `[]int{…}`-inside-a-heap-object class is a confirmed *difference*
-that two independent instruments agree on, and an unconfirmed *hole*: I built
-the program that should break it, proved the precondition it needs (a real stack
-copy) is met, and it did not break. What would settle it is an answer to why
-goc's stack copier leaves a heap-held pointer into a moved frame valid — a
-question for whoever owns that code, not something this harness can answer.
-
-## 7. PESSIMISTIC — 585 lines goc heaps and gc does not
-
-The performance direction. 585 of 3 029 joined lines — **19.3%** of every line
-either compiler decides — cost an allocation, a zeroing and the collector's
-attention that the reference implementation does not pay. Ranked, with the
-number of distinct corpus programs each class appears in, since I did not
-profile execution counts and breadth is the honest proxy I do have:
-
-| lines | programs | class |
-|---|---|---|
-| **146** | 18 | **variadic call**: goc packs the `...` slice *and* its payloads into one heap object; gc keeps the `...` array in the frame |
-| **146** | 95 | other single objects: `new(T)` gc frames, values goc boxes on the heap |
-| **138** | 89 | **closures**: `go f(x)`, `defer x.Done()`, `defer runtime.GOMAXPROCS(…)` |
-| **91** | 59 | fixed-size backing stores: `[]int{1, 2, 3, 4}` and friends, heaped as `N_int`/`N_byte` |
-| **39** | 28 | maps goc heaps and gc frames (`map[string]int{}`, `map[[3]int]string{…}`) |
-| **19** | 13 | strings boxed into an interface that gc keeps in a frame |
-| **6** | 5 | slices: `make([]byte, n)` gc frames |
-
-Two of these are worth more than their line counts.
-
-**Variadic calls are the largest single class and cost a measured 3×.** Every
-`fmt.Sprintf`, `fmt.Println` and `fmt.Sprint` in the corpus is one. The shapes
-differ exactly as the differential says:
-
-The five lines are worth reading, because of what is *not* there:
-
-```
-fmt_sprintf.go:6      heap -> mixed
-  src  formatted := fmt.Sprintf("value=%d", 42)
-  goc  col 27  heap   newobject  struct_values__1_any__payload0_int
-  gc   col 26  frame  slice      ... argument
-  gc   col 39  heap   object     42
-```
-
-    loop_alias_forms.go:7:8    viaNew     newobject int    heap   <- new(int),  loop rule
-    loop_alias_forms.go:22:23  viaMake    newobject 4_int  heap   <- make(...), loop rule
-    variadic_backing.go:9:9    (x3)       newobject 1_any  heap
-
-Measured with `runtime.MemStats` over 1 000 calls, compiled and run by each
-compiler (`escape_gc_differential/`-style probe, not committed):
-
-The two forms that are already correct appear as `heap`, which is the loop rule
-in `opt.LowerHeapAllocations` doing its job. The two **broken** forms appear
-nowhere: `var a [2]int` and `&cell{v: i}` are committed frame placements, and
-the census does not record ordinary front-end frame slots. The instrument is
-blind to the defect from the frame side; it will only see the fix from the heap
-side.
-
-## 3. The fix: approach (a), with the per-iteration question asked by the walk
-   that is already there
-
-**Approach (b) was rejected on evidence, not taste.** (b) is "make `allocLocal`
-and `nonEscapingAddress` emit IR candidates so the loop rule in
-`LowerHeapAllocations` covers them". The loop rule is
-`promotionsBlockedByALoop`, and it is blunt by design: *any* promotable
-candidate whose defining instruction sits in a natural loop is sent to the
-allocator, with no test of whether anything retains it. That is affordable
-today because candidates are rare — 441 blocked promotions over the whole
-corpus. It is not affordable at these two sites. From the spike's own census:
-
-| | host go1.26.1 | goc |
-|---|---|---|
-| `fmt.Sprintf("value=%d", 42)` | **1.00** allocations/call | **3.00** |
-| `fmt.Sprintf("value=%d", counter)` | **1.74** | **3.00** |
-
-| decision site | committed frame placements, corpus-wide |
-|---|---|
-| `&CompositeLit` (`nonEscapingAddress`) | 2 062 |
-| local variable (`allocLocal`) | **4 685 295** |
-
-`allocLocal` is *the* path for every array and struct local in the runtime and
-the standard library. Handing those to a rule that heaps everything in a loop
-would put `var b [64]byte` on the heap on every trip round every loop that
-declares a scratch buffer, whether or not its address goes anywhere — a large,
-silent performance regression, and exactly the over-correction step 3 warns
-about. Making the rule precise enough to avoid that means rewriting the rule
-the 441 existing fires depend on.
-
-So the fix is (a): ask the per-iteration question at the two committing sites.
-What makes it small is that **the question does not need a new analysis**.
-
-`objectDoesNotEscape` already refuses to answer for an object whose uses it
-cannot all see — `escapeWalkSeesEveryUse` demands the object be declared inside
-the body being walked. Run the *existing* walk with the **loop body** as the
-scope instead of the function body, and it answers a different question with no
-new code: an address is fine if it reaches only things the loop itself
-declares, and outlives the iteration the moment it reaches anything further
-out. The scope has to be tightened at both ends — `escapeWalkOuterObjects`
-lists the function's parameters and results, which are storage that outlives
-the iteration — so the iteration walk trusts nothing but the loop's own locals.
-
-    goc/compile.go   findIterationCaptures      the variable site (allocLocal)
-                     addressOutlivesItsIteration the &T{...} site
-                     enclosingLoopBody / loopBodiesWithin
-
-    +160 lines, 120 of them comment; 6 lines changed at the call sites.
-
-It inherits the walk's interprocedural parameter summaries, which is why it
-does not over-correct: `var b [64]byte; n, _ := r.Read(b[:])` in a loop reaches
-a parameter the callee does not let escape, so it stays in its frame slot,
-which is where Go puts it too. Only an address that reaches storage declared
-further out moves — the same comparison gc makes with loop depths.
-
-Nested loops need no special case: widening the scope can only make the walk
-trust *more* objects and so report *fewer* captures, so the innermost scope
-gives the strongest answer and the union over a function's loops is exactly
-that answer.
-
-### 3.1 All four forms now match the host toolchain
-
-    $ go test ./goc -run 'TestLoopBodyAllocationsAreDistinctPerIteration|TestLoopAliasExpectationsMatchTheHostToolchain'
-    ok      github.com/evanphx/cg12/goc     17.153s
-
-All six subtests pass — the two that were already right stay right, so the
-existing loop rule was not disturbed.
-
-| form | host | goc before | goc after |
-|---|---|---|---|
-| `new(int)` | `1 2` | `1 2` | `1 2` |
-| `make([]int, 0, 4)` | `1 2` | `1 2` | `1 2` |
-| `var a [2]int; &a` | `1 2` | **`2 2`** | **`1 2`** |
-| `&cell{v: i}` | `1 2` | **`2 2`** | **`1 2`** |
-| `variadic_backing` | `1` | `1` | `1` |
-
-### 3.2 It costs no measurable compile time
-
-Full executable build of `stdlib_crypto_ecdsa.go` (the program the spike
-measured the AST walk on), three runs each:
-
-    main   11.99  11.98  12.06     mean 12.01 s
-    fixed  11.90  12.16  12.09     mean 12.05 s
-
-+0.3%, inside the run-to-run spread. The extra walk is per loop body rather
-than per function, and a loop body is a small fraction of a function.
-
-## 4. What it moves: two allocations, both of them the defect
-
-    $ go test ./goc -run 'TestAllocationCensus$|TestEscapeShadowPlacement$|TestFrameEscapeAudit$'
-    --- FAIL: TestAllocationCensus (168.13s)
-    --- FAIL: TestEscapeShadowPlacement
-    --- PASS: TestFrameEscapeAudit
-
-**`TestFrameEscapeAudit` is clean.** Zero new frame-address publications across
-388 programs, and none of the 209 the tree already makes went away.
-
-The census, over 388 programs each linking the whole standard library and
-runtime, reports **two new sites and nothing else**:
-
-    testdata/loop_alias_composite.go:9:8   main.alternate  runtime.newobject  main_cell   now on the heap
-    testdata/loop_alias_forms.go:37:3      main.viaArray   runtime.newobject  2_int       now on the heap
-
-    moved frame -> heap:  0        moved heap -> frame:  0        vanished:  0
-
-They read as "appeared" rather than "frame -> heap" because a committed
-front-end frame slot is not a census line at all; the same fact from the frame
-side is invisible. **Corpus-wide, this change moves exactly two allocations,
-and they are the two the bug is about.** The existing loop rule blocks 441
-promotions; this adds two allocations. Nothing in the standard library or the
-runtime changed placement.
-
-That the census sees exactly two is also a proof that no fire was silently
-undone: a variable this rule heap-lifts becomes an `OHeapAlloc` candidate, and
-had `LowerHeapAllocations` promoted one back to a frame the census would list
-it as a new `frame` site. There are none.
-
-### 4.1 Why two is the right number, checked by hand rather than assumed
-
-A rule that never fires and a rule that is not wired up produce the same zero,
-so the "does not over-correct" half was checked directly against the host
-toolchain and against the emitted IR, not inferred from the census being quiet.
-
-| probe | shape | host | goc | `newobject` in the loop, main -> fixed |
-|---|---|---|---|---|
-| stays | `var a [2]int; addTo(&a, i); q := &a` | `18` | `18` | **0 -> 0** |
-| nested | inner-loop `var t node`, kept in the *outer* loop's local | `12 12` | `12 12` | 0 -> **2** |
-| within | `var x int; p := &x; total += *p` | `12` | `12` | 0 -> 0 |
-| range | `x := new(int)` in a `range` loop, kept across iterations | `2 3` | `2 3` | already heap |
-
-`stays` is the over-correction test: the address is taken, passed to a callee
-and re-taken, and it keeps its frame slot exactly as it did before, because the
-callee does not let it escape. `nested` is the precision test in the other
-direction: an allocation in an *inner* loop kept in a variable declared in the
-*outer* loop body outlives the inner iteration but not the outer one, and it is
-the innermost scope that answers, so it moves.
-
-### 4.2 One new shadow disagreement, and it is the IR analysis being wrong
-
-`TestEscapeShadowPlacement` gains one line:
-
-    loop_alias_composite.go:9:8  main.alternate  composite-literal  heap -> frame  in a loop
-
-Shadow mode asks what the summary-fed IR analysis would have chosen for a
-placement the front end kept for itself. The front end now says heap; the IR
-analysis says frame, because nothing about the pointer outlives the *frame*.
-The `in a loop` column on the same line is the flag that says why acting on
-that would be wrong. This is the IR analysis's existing blind spot showing up
-against a front end that no longer shares it -- the disagreement is new, the
-blind spot is not.
-
-### 4.3 Determinism
-
-    $ go test ./goc -run TestCompilingTheSameSourceTwiceGivesTheSameModule
-    ok  4.657s
-
-## 5. A corpus program for the direction the census cannot otherwise see
-
-`goc/testdata/loop_alias_frame_local.go` is the over-correction ratchet. Three
-allocations in loop bodies, each finished with before its iteration ends:
-
-    framed          var a [2]int; addTo(&a, i); q := &a    (address to a
-                                                            non-retaining callee
-                                                            and back to a local)
-    consumedWithin  x := i * 2; p := &x; total += *p
-    literalWithin   p := &point{x: i, y: i * 2}
-
-Zero `runtime.newobject` in all three, on main and after the fix, checked on
-the emitted IR. Output matches the host toolchain. Because the program is in
-the corpus, a future change that heaps loop-body allocations without asking
-whether anything retains them adds three lines to
-`alloc_census_baseline.txt` -- which is the only way that direction gets
-noticed, since a frame slot that is *correct* is not a census line at all.
-
-## 6. How general the fix is: four more forms, probed against the host
-
-The two forms named in the brief are not the whole of what was broken. Because
-the rule is asked at the variable site rather than at one syntax, the same walk
-fixes shapes nobody had reduced:
-
-| shape | host | goc on main | goc fixed |
-|---|---|---|---|
-| `var b box; b.set(i); q = &b` (pointer method) | `1 2` | **`2 2`** | `1 2` |
-| the same inside `for _, v := range values` | `2 3` | **`3 3`** | `2 3` |
-| `s := []int{i, i*2}` kept across iterations | `1 2` | `1 2` | `1 2` |
-| `b := []byte("ab")` kept across iterations | `49 50` | `49 50` | `49 50` |
-
-The first two were live miscompiles on main, found by asking the fix what else
-it covered. The last two are the other frame-committing sites the spike's
-census names -- slice-literal backing and the `string`->`[]byte` buffer -- and
-they were already correct, so nothing was needed there.
-
-## 7. The existing loop rule is untouched, measured on the same corpus
-
-The brief's scale is "the existing loop rule fires 441 times corpus-wide".
-That number was measured on 385 programs; this branch has 389. So the fix was
-priced against **the pre-fix tree carrying the same four new programs**
-(`a3efe11` in a scratch worktree, `loop_alias_frame_local.go` copied in), which
-makes the difference the fix and nothing else:
-
-    $ go test ./goc -run TestEscapeSummaryPromotionRate -escape-promotion-rate
-
-| summaries on | pre-fix, 389 programs | fixed, 389 programs | delta |
-|---|---|---|---|
-| promoted to a frame slot | 17 005 | 17 005 | **0** |
-| lowered to an allocator | 452 128 | 452 130 | **+2** |
-| promotion rate | 3.62% | 3.62% | — |
-| blocked by the loop rule | 447 | 448 | **+1** |
-
-| summaries off | pre-fix | fixed | delta |
-|---|---|---|---|
-| promoted | 14 054 | 14 054 | **0** |
-| lowered | 455 079 | 455 081 | +2 |
-| blocked by the loop rule | 413 | 414 | +1 |
-
-**Not one candidate changed from promoted to lowered or back.** The existing
-rule decides exactly what it decided before; the corpus gains two allocations
-and one more loop-rule fire, which is the arithmetic of the two new heap
-objects: `alternate`'s `cell` becomes an `OHeapAlloc` candidate inside a loop
-and is blocked by the rule (+1), and `viaArray`'s `[2]int` is escaped by the
-analysis on its own before the rule is consulted.
-
-(441 -> 447 is the four added corpus programs, measured before the fix; the fix
-itself is 447 -> 448.)
-
-## 8. The committed tree, checked with no update flags
-
-    $ go test ./goc -run 'TestAllocationCensus$|TestEscapeShadowPlacement$|TestFrameEscapeAudit$'
-    --- PASS: TestAllocationCensus (175.20s)
-    --- PASS: TestEscapeShadowPlacement (0.00s)
-    --- PASS: TestFrameEscapeAudit (0.00s)
-    ok  175.531s
-
-    $ go test ./goc -run 'TestLoopBodyAllocationsAreDistinctPerIteration|TestLoopAliasExpectationsMatchTheHostToolchain'
-    ok  21.433s   (8 + 4 subtests, all pass)
-
-    $ go test ./goc -run TestCompilingTheSameSourceTwiceGivesTheSameModule
-    ok  4.657s
-
-Per the brief, `go test ./goc/...`, the capability matrix and `make test-unit`
-were **not** run here; a dependent verification job does that.
-
-## 9. What this does not cover
-
-Stated so nobody reads the four green rows as more than they are.
-
-1. **Loops are recognised syntactically** -- the bodies of `for` and `range`
-   statements. A loop built out of a backward `goto` is not one of those, and
-   the AST rule will not see it. The IR loop rule still covers any
-   `OHeapAlloc` candidate inside it.
-2. **Only the loop body.** Storage committed in a `for` clause's init runs once
-   and is right as it is; its condition and post statement are between
-   iterations rather than inside one and are not asked.
-3. **`//go:nowritebarrier` functions keep the defect at the `&T{...}` site.**
-   `heap = false` is forced there, before and after this change, because those
-   functions must not allocate. The variable site has no such gate -- the
-   escaping-capture arm it shares never had one -- so it *can* now heap-lift in
-   such a function. Across 389 programs it never did: the census gained no site
-   outside the two reduction programs.
-4. **Freestanding builds are unaffected**, like the rest of the escape
-   machinery, which is gated on `runtimeAllocation`.
-5. **The rule is as precise as the walk it reuses.** Where the walk cannot
-   prove containment it answers "escapes", which under a loop-body scope means
-   "outlives the iteration" and sends the object to the heap. That is the safe
-   direction, and §4 and §7 are what it costs: two allocations.
+`goc/testdata/frame_escape_baseline.txt` is **not** in that diff. The
+`TestFrameEscapeAudit` ratchet is therefore unmodified by the branch: a pass
+means zero new publications *and* zero vanished ones, checked against main's own
+file.
+
+Environment: `aarch64` Linux, host toolchain `go1.26.1`, 64 cores. Both
+worktrees built clean (`go build ./...`).
 
 ---
 
-## Result
+## Suite results
 
-**Approach taken: (a)** -- the per-iteration question is asked at the two
-committing sites in the AST front end. It was chosen over (b) on the spike's
-own census: (b) hands those sites to `promotionsBlockedByALoop`, which heaps
-*every* promotable candidate in a loop with no test of whether anything retains
-it, and `allocLocal` is 4 685 295 committed frame placements corpus-wide --
-every array and struct local in the runtime and standard library. That would
-have heaped every scratch buffer declared in every loop. Making the rule
-precise enough to avoid it means rewriting the rule the existing 441 fires
-depend on. (a) needed no new analysis: `objectDoesNotEscape` already refuses to
-answer for an object whose uses it cannot all see, so running the existing walk
-with the loop body as its scope asks the per-iteration question and inherits
-the walk's interprocedural parameter summaries. The brief's one point for (b)
--- census visibility -- is answered anyway: what the rule moves becomes a heap
-allocation, and heap allocations are exactly what the census records.
+### 4. `make test-unit` — PASS (both)
 
-**All four forms now match the host toolchain**, at `-O0` and `-O`, and so do
-two further shapes that were also broken on main and that nobody had reduced (a
-struct local reached through a pointer method, and the same inside a `range`
-loop).
+Run as `go test -count=1 -json <UNIT_PKGS>` (the `-json` form of the Makefile
+target; `-count=1` so nothing could come back `(cached)` — zero `(cached)`
+markers in either log).
 
-**Census delta: 2 allocations, both in the reduction programs.** Zero sites
-moved frame->heap or heap->frame anywhere in the standard library or runtime
-across 389 programs; the promotion count is identical to the pre-fix tree
-(17 005), so the existing loop rule was not disturbed -- it gains exactly one
-fire, 447 -> 448. Compile time is unchanged within the run-to-run spread
-(12.01 s -> 12.05 s on `stdlib_crypto_ecdsa.go`).
+| | PASS | FAIL | SKIP |
+|---|---|---|---|
+| branch `034e58c` | **1598** | 0 | 339 |
+| main `a535466` | **1598** | 0 | 339 |
 
-**`TestFrameEscapeAudit` is clean**: zero new frame-address publications, and
-none of the 209 already listed went away.
+Reconciliation with the quoted 1591: main at `a535466` also reports 1598, so the
++7 is not the branch. The `internal/gcdiff` package contributes exactly 7
+passing tests and was added by `e235e32` ("goc: a differential harness comparing
+goc's allocation placement against gc's") in the `e7c8e33..a535466` range.
+1591 + 7 = 1598. The branch changes the unit census by **0**.
 
-gc pays one allocation for the constant case — the result string. Its `...`
-array is in the frame and a small integer boxes to `runtime.staticuint64s` with
-no allocation at all. goc pays three. That is the single largest concrete
-performance gap this comparison found, and it sits on the most-used formatting
-path in the tree.
+### 2. `make test-goc-status` — PASS (both), identical set
 
-**Closures (138 lines, 89 programs) are `go` and `defer`.** `defer wait.Done()`
-and `go worker(done)` allocate a closure object on the heap in goc; gc frames
-the argument struct, because a `defer`'s closure provably dies with the frame
-and a `go` statement's argument struct is copied by the runtime. 89 of 381
-compared programs contain the pattern, so it is not a corner.
+Run as the Makefile target with `-count=1 -v` so the per-capability set is
+visible and nothing can be cached (`ok github.com/evanphx/cg12/cmd/goc 164.8s`
+on the branch — a real run, not a cache hit).
 
-Nothing here is a correctness question, and none of it is a bug this branch
-should fix. It is the ranked list of where goc's escape analysis costs something
-measurable against the reference, and the first two entries are worth more than
-the remaining five put together.
+| | PASS | FAIL | total |
+|---|---|---|---|
+| branch `034e58c` | **364** | 0 | 364 |
+| main `a535466` | **364** | 0 | 364 |
 
-## 8. Proof that nothing in the compiler changed
+The two 364-line subtest sets are **byte-identical** after sorting
+(`diff` empty), so this is a set match and not merely a count match. Matches the
+known-good 364/364.
 
-The brief says report bugs, do not fix them, and prove it. Every file this
-branch changes is either this report or a new file: `git diff --stat main..HEAD`
-lists `CCWORK_REPORT.md` and thirteen additions, and nothing under `parse/`,
-`ir/`, `opt/`, `lower/`, `arm64/`, `amd64/` or `goc/compile.go` is among them.
-The corpus is still 385 programs — the discriminating reductions live in a
-subdirectory that `filepath.Glob("testdata/*.go")` does not match.
+### 3. `make test-goc-status-opt` — 363 PASS / 1 FAIL on **both**
 
-The observable proof is that the baselines that record what the compiler does
-still reproduce, byte for byte, at this HEAD:
+| | PASS | FAIL | total |
+|---|---|---|---|
+| branch `034e58c` | 363 | 1 | 364 |
+| main `a535466` | 363 | 1 | 364 |
+
+The single failure on each side is the same one:
 
 ```
-$ go test ./goc -run 'TestAllocationCensus|TestFrameEscapeAudit|TestEscapeShadowPlacement' -timeout 90m
-ok  github.com/evanphx/cg12/goc  165.943s
+FAIL: TestARM64RuntimeCapabilityStatus/stack-scan/loop-safepoints
 ```
 
-All three: the 18 664-row allocation census, the 193-line frame-escape audit,
-and the escape shadow-placement baseline. Plus `go test ./internal/gcdiff`
-(10 ms) and the differential re-deriving its own committed output without
-`-update`.
+Sorted subtest sets are identical between branch and main. The pre-existing
+failure was **not inherited from the task description** — the main control was
+run here and reproduces it. The branch adds no `-O` capability failure and fixes
+none.
 
-## 9. What was committed
+### 1. `go test -timeout 40m -parallel 10 ./goc/...` — PASS (both)
 
-| file | what |
-|---|---|
-| `internal/gcdiff/gcdiff.go` | `-m` parser and census reader, with the join documented at length |
-| `internal/gcdiff/join.go` | the join, the verdict folding, the two directions |
-| `internal/gcdiff/report.go` | the rendered, diffable output |
-| `internal/gcdiff/gcdiff_test.go` | unit tests pinning the go1.26.1 `-m` grammar; ordinary CI, 10 ms |
-| `goc/gcdiff_test.go` | the corpus driver and the per-program triage mode, both opt-in |
-| `goc/testdata/escape_gc_differential.txt` | the output, 4 100 lines, checked in |
-| `goc/testdata/escape_gc_differential/` | six discriminating programs and a README recording both compilers' answers |
+Run with `-count=1 -json`. Zero `(cached)` markers in either log; branch wall
+clock ~19 min, main ~19 min (they shared the box).
 
-Two commands, both documented in the files themselves:
+| | PASS | FAIL | SKIP | total |
+|---|---|---|---|---|
+| branch `034e58c` | **632** | 0 | 3 | 635 |
+| main `a535466` | **628** | 0 | 3 | 631 |
 
-```
-go test ./goc -run TestEscapeDifferentialAgainstGC \
-    -escape-gc-differential -update-escape-gc-differential          # 10 s
+(top-level only: branch 314 P / 3 S, main 312 P / 3 S)
 
-go test ./goc -run TestEscapeDifferentialProgram \
-    -escape-gc-differential-program=testdata/<program>.go -v        # ~2 min
-```
+The three skips are the same on both sides and are opt-in measurements, not
+silent losses: `TestEscapeSummaryPromotionRate`, `TestEscapeDifferentialAgainstGC`
+and `TestEscapeDifferentialProgram` all `t.Skip` unless their flag is passed.
+`TestEscapeDifferentialAgainstGC` is run explicitly under §10 below.
 
-Neither runs in CI: both need a host Go toolchain, and pinning the build
-machine's go version into the contract is exactly what makes an
-externally-dependent test a liability. The output is committed so the numbers
-can be diffed instead of reconstructed, which is what the earlier ad-hoc
-measurement in this effort failed to do.
-
-## 10. The answer
-
-**381 of 385 corpus programs compared** (the 4 excluded are named, with the 37
-census rows they cost). **2 670 census rows and 3 357 gc decisions joined into
-3 029 source lines.**
+**Reconciliation of the +4.** The exact test-name sets were diffed, not just the
+counts. Nothing present on main is missing on the branch (the "only in main" set
+is empty). The branch-only set is exactly:
 
 ```
-  goc\gc      frame     heap    mixed   absent    total
-  frame          15        3        2       17       37
-  heap          194     1762      194      186     2336
-  mixed           3       53        1        7       64
-  absent        449      119       24        0      592
-  total         661     1937      221      210     3029
+TestAllocationCounts
+TestAllocationCounts/allocation_counts.go
+TestAllocationCounts/allocation_counts.go_-O
+TestAllocationCountsAgainstTheHostToolchain
 ```
 
-- **1 777 lines agree** (1 762 both heap, 15 both frame).
-- **585 lines goc heaps and gc does not** — pessimism. Largest class is the
-  variadic call, measured at **3.00 allocations per `fmt.Sprintf` against gc's
-  1.00**.
-- **202 lines gc heaps and goc does not** — the number this job exists to
-  produce.
+all four added by `fb7fb90` ("test: hold the allocation counts of the calls Go
+programs make most often") in `goc/alloccount_test.go`. 628 + 4 = 632.
 
-**Of those 202: 59 have a hard frame row in goc's census, 143 have no census row
-at all. Every one was triaged, and none is a confirmed hole.**
+Reconciliation back to the quoted `e7c8e33` reference: `git diff e7c8e33 a535466
+-- goc/` adds only `goc/gcdiff_test.go` and its testdata. That file's two tests
+both skip by default, so `main@e7c8e33` would report the same 628 passes with 1
+skip instead of 3. The passing census is unchanged from `e7c8e33` to `a535466`;
+the whole `./goc/...` delta on this branch is the four new tests it ships.
 
-- 50 of the 59 are `var x bytes.Buffer`-shaped, where goc records a heap
-  allocation *and* a frame temporary at the same position; the escaping object
-  is on the heap and the line-level join cannot separate the two.
-- 8 of the 59 are loop headers, including the calibration case the brief
-  named — and the harness flagging them is a sign it works, but they are a join
-  artefact: goc records a frame decision at the loop header and a
-  **positionless** heap allocation for the per-iteration copy, which cannot
-  join on position. 88 such positionless heap rows exist corpus-wide, and that
-  bound is now printed in the coverage table.
-- 74 of the 143 are string concatenation and `append`, which goc always heaps
-  through runtime helpers the census does not track: agreement the census
-  cannot see.
-- The remaining 69 are candidates, and the strongest of them —
-  `[]int{…}` left in a frame with its address stored into a heap object — is a
-  class the differential and goc's own `opt.FrameEscapes` audit **independently
-  agree on**, 3 lines of it. I built the program that should break it, proved
-  its precondition (a real goroutine stack copy) is met, and it did not break.
+### 7. Determinism — PASS (both)
 
-So: **goc is not more dangerous than the reference on this corpus — it is
-different, and measurably more expensive.** The permissive direction has one
-open question, stated precisely and with a committed program that will answer it
-the day goc's stack copier stops covering for it. The pessimistic direction has
-a ranked, quantified list of where the 585 lines cost real allocations.
+`scripts/determinism-check.sh -corpus -rounds 2 -j 16`, which compiles every
+`goc/testdata/*.go` twice through `goc compile-batch` and byte-compares the
+linked images, separating a layout residue from a real difference in generated
+code.
 
-The yardstick exists, it is one command, and its output is in the tree.
+| | reproducible | varying | failed | compiles |
+|---|---|---|---|---|
+| branch `034e58c` | **390 / 390** | 0 | 0 | 780 |
+| main `a535466` | **389 / 389** | 0 | 0 | 778 |
+
+Main reproduces the quoted reference exactly (389/389 over 778). The branch's
++1 program is `goc/testdata/allocation_counts.go`, which the branch adds.
+`content varies between rounds: 0` and `image varies, content identical (layout
+only): 0` on both sides — so the branch's changed output is still bit-for-bit
+reproducible.
+
+### 5. `TestFrameEscapeAudit -count=1` — PASS
+
+```
+--- PASS: TestFrameEscapeAudit (187.45s)
+ok  github.com/evanphx/cg12/goc  187.84s
+```
+
+`goc/testdata/frame_escape_baseline.txt` is untouched by the branch, and the
+test is a two-way ratchet: it fails on any publication not already listed *and*
+on any listed publication that has gone away. A pass against main's own file is
+therefore the strong statement — **zero new publications and zero vanished
+ones**, over the whole corpus, with the branch's placement changes in effect.
+
+This is the hard requirement in the task and it is met. Note that the branch
+does move real objects into frames (see §7's frame/heap table below: corpus-wide
+`frame` placements go 37 → 70 and `heap` 2341 → 2313), so the audit was
+genuinely exercised rather than trivially clean.
+
+### 6. Allocation census against its regenerated baseline, twice — PASS, stable
+
+Two independent `-count=1` runs of `TestAllocationCensus` against the branch's
+regenerated `goc/testdata/alloc_census_baseline.txt`:
+
+```
+run 1:  --- PASS: TestAllocationCensus (187.45s)   ok ... 187.787s
+run 2:  --- PASS: TestAllocationCensus (174.89s)   ok ... 175.318s
+```
+
+Two different wall clocks, so these are two real compilations of the whole
+corpus, not one run and one cache hit. The census is an exact whole-file
+comparison, so a pass means every one of the corpus's allocation sites landed
+where the committed baseline says it does, twice — the placement is stable, not
+merely correct once.
+
+Direct check of §8's frame-slot requirement, read off that same baseline:
+`loop_alias_frame_local.go` contributes **0** lines to the census on the branch
+and **0** on main. The census records every heap allocation and every frame
+allocation that came out of an escape decision, so zero lines for that file means
+none of its three loop-body allocations were heaped — they are still ordinary
+frame slots, exactly as on main. `loop_alias_forms.go`,
+`loop_alias_composite.go` and `variadic_backing.go` together contribute 7 lines
+on the branch and 7 on main, unchanged.
+
+### 8. Loop-aliasing programs — PASS, all forms
+
+```
+--- PASS: TestLoopBodyAllocationsAreDistinctPerIteration (24.84s)
+    --- PASS: .../loop_alias_forms.go            (3.53s)
+    --- PASS: .../loop_alias_forms.go_-O         (3.34s)
+    --- PASS: .../loop_alias_composite.go        (3.05s)
+    --- PASS: .../loop_alias_composite.go_-O     (3.18s)
+    --- PASS: .../variadic_backing.go            (2.84s)
+    --- PASS: .../variadic_backing.go_-O         (3.03s)
+    --- PASS: .../loop_alias_frame_local.go      (2.87s)
+    --- PASS: .../loop_alias_frame_local.go_-O   (3.01s)
+--- PASS: TestLoopAliasExpectationsMatchTheHostToolchain (0.23s)
+    --- PASS: .../loop_alias_forms.go            (0.06s)
+    --- PASS: .../loop_alias_composite.go        (0.06s)
+    --- PASS: .../variadic_backing.go            (0.05s)
+    --- PASS: .../loop_alias_frame_local.go      (0.06s)
+```
+
+All four forms in `loop_alias_forms.go` (`new(int)`, `make([]int,0,4)`,
+`&a` on an array, run through the one program) and `loop_alias_composite.go`
+still print what the language says, unoptimized *and* `-O`, and
+`TestLoopAliasExpectationsMatchTheHostToolchain` re-derives those expectations
+from `go run` on this host rather than trusting the committed literals.
+
+`loop_alias_frame_local.go` still prints `framed: 18 / within: 12 / literal: 18`
+and is still in the corpus, so `TestAllocationCensus` (§6) is what holds its
+three loop-body allocations to frame slots — a regression there would show up as
+a new `runtime.newobject` line for that file, and the census passes. The
+per-iteration rule is undisturbed.
+
+### 9. `runtime_gc_type_mask_padding.go`, 20× under `GOGC=10` — 0/20, both
+
+Compiled with each side's own `goc` (`goc -o out goc/testdata/runtime_gc_type_mask_padding.go`;
+the two executables differ byte-wise, as expected for a branch that changes
+emitted code), then executed 20 times each:
+
+| config | branch `034e58c` | main `a535466` |
+|---|---|---|
+| `GOGC=10` | **0/20 failed** | 0/20 failed |
+
+The required 0/20 holds.
+
+The `GOGC=10 GOMAXPROCS=3` configuration was also tested, because the branch
+moves objects into frames and that is the config the task flags as already
+unsound. It fails on **both** sides, and the branch is not the worse of the two:
+
+| config | branch | main |
+|---|---|---|
+| `GOGC=10 GOMAXPROCS=3`, n=20 | 4/20 | 2/20 |
+| `GOGC=10 GOMAXPROCS=3`, n=60 | **7/60** (11.7%) | **11/60** (18.3%) |
+
+Every failure on both sides is `fatal error: found bad pointer in Go heap`.
+(One 20-run branch sample also produced two `found pointer to free object`, which
+did not recur in the 60-run sample; it is the same heap corruption surfacing at a
+different check, not a distinct branch-only mode — the 60-run sample is the one
+with enough draws to compare.) On the larger sample the branch fails *less*
+often than main. This is the pre-existing GC unsoundness, attributed against a
+main control run here rather than inherited from the task description, and the
+branch neither introduces nor fixes it.
+
+### 10. Branch allocation-count test and gc differential
+
+**The branch's own regression test — PASS:**
+
+```
+--- PASS: TestAllocationCounts (14.73s)
+    --- PASS: TestAllocationCounts/allocation_counts.go     (7.51s)
+    --- PASS: TestAllocationCounts/allocation_counts.go_-O  (7.22s)
+--- PASS: TestAllocationCountsAgainstTheHostToolchain (0.08s)
+```
+
+**The improvement, measured independently.** Rather than take the branch's table
+on trust, `goc/testdata/allocation_counts.go` was compiled and run with *main's*
+`goc` as well (a scratch probe in the main worktree, since main has no such
+test; removed afterwards, worktree left clean). Both columns below are numbers a
+process printed in this job. Units are allocations per call × 100.
+
+| row | main `a535466` | branch `034e58c` | host go1.26.1 |
+|---|---|---|---|
+| `sprintf_int` | **300** | **200** | 100 |
+| `sprintf_string` | 300 | 200 | 200 |
+| `sprintf_struct` | 300 | 200 | 200 |
+| `sprintf_no_args` | 200 | 100 | 100 |
+| `variadic_ints` | 100 | **0** | 0 |
+| `variadic_any` | 100 | **0** | 0 |
+| `box_small_int` | 100 | 100 | 0 |
+| `box_pointer` | 0 | 0 | 0 |
+| `return_any_from_int` | 200 | 100 | 0 |
+| `return_any_from_pointer` | 100 | **0** | 0 |
+| `sync_pool_round_trip` | 100 | **0** | 0 |
+| `sprintf_in_loop` | 300 | 200 | 100 |
+| `variadic_ints_in_loop` | 100 | 100 | 0 |
+
+The headline claim checks out: `fmt.Sprintf("value=%d", 42)` cost **3.00**
+allocations under main's goc and costs **2.00** under the branch, against **1.00**
+on the host. So the improvement is real and independently reproduced, and it is
+**partial, not a closure** — the residual 1.00 is `box_small_int`, which the host
+serves out of `runtime.staticuint64s` and goc has no equivalent for. The branch's
+own comments say exactly this; the numbers agree with them. No row regressed;
+nine of thirteen improved. `variadic_ints` and `variadic_any` reach host parity
+(the `...` backing array becomes a frame slot), which is the change the branch is
+named for.
+
+**The gc differential harness — PASS on the branch, and it fails on main:**
+
+| | corpus | compared | census rows | gc decisions | permissive | pessimistic | result |
+|---|---|---|---|---|---|---|---|
+| branch `034e58c` | 390 | 386 | 2706 | 3388 | 209 | **563** | PASS |
+| main `a535466` | 389 | 385 | 2677 | 3366 | 202 | 586 | **FAIL** |
+
+Main's failure is **pre-existing and not the branch's doing.** `main` is a merge
+(`a535466`) of `origin/ccwork/escape-gc-differential` whose committed
+`goc/testdata/escape_gc_differential.txt` records `corpus programs 385`, while
+main's corpus is now 389: the other parent of the merge added four corpus
+programs after the baseline was recorded, and nothing regenerated it. Regenerating
+on a clean main worktree produces a 39-line diff whose entire content is the
+corpus-size counters and the row totals that follow from them. Verified on a
+clean checkout after removing the probe files, so it is not contamination from
+this job's own measurements. The branch regenerates the file (`348e87f`,
+`f9decd3`) and therefore passes.
+
+Reading the differential itself, main-regenerated vs branch-committed:
+
+```
+                frame    heap   mixed  absent   total
+  main             37    2341      64     596    3038
+  branch           70    2313      72     599    3054
+```
+
+Pessimistic lines (goc heaps where gc does not — pure cost) fall **586 → 563**.
+Permissive lines (goc keeps in a frame where gc heaps — the direction that can be
+*unsound*) rise **202 → 209**. That rise is the thing worth naming: it is the
+branch doing what it set out to do, and the check on it is §5's
+`TestFrameEscapeAudit`, which passes with an unmodified baseline, plus the corpus
+actually executing (§1: 632/0, §2: 364/364).
+
+---
+
+## Summary
+
+Every suite in the brief ran to completion and was waited on. Nothing is
+UNVERIFIED.
+
+| # | suite | branch `034e58c` | main `a535466` control |
+|---|---|---|---|
+| 1 | `go test -timeout 40m -parallel 10 ./goc/...` | 632 P / 0 F / 3 S | 628 P / 0 F / 3 S |
+| 2 | `make test-goc-status` | 364 PASS, 0 FAIL | 364 PASS, 0 FAIL (identical set) |
+| 3 | `make test-goc-status-opt` | 363 P / 1 F | 363 P / 1 F (identical set) |
+| 4 | `make test-unit` | 1598 P / 0 F | 1598 P / 0 F |
+| 5 | `TestFrameEscapeAudit -count=1` | PASS | (baseline unchanged) |
+| 6 | allocation census ×2 | PASS, PASS | — |
+| 7 | determinism, 2 rounds | 390/390 over 780 | 389/389 over 778 |
+| 8 | loop-aliasing programs | 12/12 PASS | — |
+| 9 | GC reducer 20× `GOGC=10` | 0/20 | 0/20 |
+| 10 | alloc-count test + gc differential | PASS / PASS | — / **FAIL (pre-existing)** |
+
+Every count above came out of a process run in this job. `-count=1` everywhere;
+zero `(cached)` markers in any `-json` log.
+
+**Three differences from the numbers quoted in the brief, all reconciled to a
+commit rather than accepted:**
+
+1. `test-unit` reads 1598, not 1591. Main reads 1598 too. `internal/gcdiff`,
+   added by `e235e32` between `e7c8e33` and `a535466`, contributes exactly 7.
+2. `./goc/...` reads 632 on the branch against 628 on main. The name-set diff is
+   exactly the four tests `fb7fb90` adds; the "present on main, missing on the
+   branch" set is empty.
+3. Determinism reads 390/390 over 780 compiles, not 389/389 over 778. Main
+   reproduces 389/389 over 778 exactly; the +1 program is the branch's own
+   `allocation_counts.go`.
+
+**Two failures observed, both pre-existing and both attributed by running main
+here rather than by inheriting the claim:**
+
+- `test-goc-status-opt` / `stack-scan/loop-safepoints` fails identically on main.
+- `TestEscapeDifferentialAgainstGC` fails on a clean main worktree because
+  `a535466`'s merge left the committed differential recording a 385-program
+  corpus against main's current 389. The branch regenerates that file and passes.
+
+**One thing to have an opinion about, not a failure.** The branch really does
+move objects into frames — corpus-wide `frame` placements go 37 → 70, `heap`
+goes 2341 → 2313 — and permissive lines in the gc differential (goc frames what
+gc heaps, the direction that can be unsound) rise 202 → 209. That is the change
+working as intended, and the instruments aimed at it all held:
+`TestFrameEscapeAudit` passes against an **unmodified** baseline in both
+directions, the corpus executes clean (632/0), the capability matrix is
+set-identical at 364/364, and the GC reducer is 0/20 at `GOGC=10` and *less*
+flaky than main at the known-broken `GOMAXPROCS=3` (7/60 vs 11/60).
+
+The headline claim was reproduced independently against main's compiler rather
+than read off the branch's table: `fmt.Sprintf("value=%d", 42)` costs 3.00
+allocations on main and 2.00 on the branch, host 1.00. The improvement is real
+and partial; the residual is `runtime.staticuint64s`, which goc does not have.
+
+Method notes: two `git worktree`s (`wt-branch` at `034e58c`, `wt-main` at
+`a535466`), both built clean, suites run detached and each waited on to exit.
+Two scratch probe files were written into the worktrees to measure main's
+allocation counts and were removed; `git status --porcelain` is empty in both,
+and the gc-differential failure on main was re-confirmed on a clean tree
+afterwards.
+
+---
+
+**SAFE TO MERGE TO MAIN.**
+
+No suite regressed against a main control run in this job. Both failures seen
+are reproducible on main without the branch, and one of them (the stale gc
+differential baseline) the branch actually repairs.
+
