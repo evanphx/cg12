@@ -448,7 +448,13 @@ func reachableFunctions(fset *token.FileSet, roots []*ast.FuncDecl, rootFiles []
 		queue = append(queue, initializers...)
 		queue = append(queue, genericRuntimeMethods...)
 		for _, name := range []string{
-			"args", "atomicstorep", "c128equal", "c64equal", "check", "concatstring2", "deferproc", "deferreturn", "f32equal", "f64equal", "gopanic", "gorecover", "growslice",
+			// The convT helpers are named by opt.LowerHeapAllocations rather than
+			// by any Go source the walk can see: the front end emits an
+			// allocation candidate and the helper only becomes the callee if the
+			// payload turns out to leave the frame. Nothing reaches them through
+			// a call in the AST, so they are roots or they are absent.
+			"args", "atomicstorep", "c128equal", "c64equal", "check", "concatstring2", "convT16", "convT32", "convT64",
+			"deferproc", "deferreturn", "f32equal", "f64equal", "gopanic", "gorecover", "growslice",
 			"goPanicSliceConvert", "interequal", "interhash", "main", "makeslice", "mallocgc",
 			"getitab", "gocInterfaceDispatchFailure", "inheap", "inHeapOrStack", "makemap", "mapclear", "mapdelete",
 			"memclrHasPointers",

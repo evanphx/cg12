@@ -410,7 +410,11 @@ func analyzeCandidateEscapes(function *ir.Func, byName map[string]*ir.Func, fact
 		for _, instruction := range block.Instrs {
 			switch {
 			case instruction.Op == ir.OHeapAlloc:
-				// The allocator, type descriptor, and size are not uses of the result.
+				// The allocator, type descriptor, size, and -- on a converted
+				// candidate -- the helper and the value it is handed are not
+				// uses of the result. The value is one the helper copies, never
+				// a pointer the object could be reached through: only a
+				// register-shaped, pointer-free type has a helper at all.
 			case instruction.Op.IsLoad():
 				// Reading through the candidate keeps it local.
 			case instruction.Op == ir.OCmp:
@@ -463,12 +467,17 @@ func analyzeCandidateEscapes(function *ir.Func, byName map[string]*ir.Func, fact
 // rewriteHeapAllocations legalises every candidate in function according to the
 // analysis: promoted candidates become frame allocations with the zeroing the
 // allocator used to do, and the rest become the allocator call the instruction
-// was already shaped like.
+// was already shaped like -- or, for a candidate that named a conversion
+// helper, the call to that helper.
 func rewriteHeapAllocations(function *ir.Func, analysis *candidateEscapes, loopBlocked map[uint32]bool, decisions *[]ir.AllocDecision) {
 	escaped := analysis.escaped
 	for _, block := range function.Blocks {
 		lowered := make([]ir.Instr, 0, len(block.Instrs))
-		for _, original := range block.Instrs {
+		droppedStore := -1
+		for index, original := range block.Instrs {
+			if index == droppedStore {
+				continue
+			}
 			instruction := original
 			if instruction.Op != ir.OHeapAlloc || instruction.To.Kind != ir.RefTemp {
 				lowered = append(lowered, instruction)
@@ -476,6 +485,18 @@ func rewriteHeapAllocations(function *ir.Func, analysis *candidateEscapes, loopB
 			}
 			if escaped[instruction.To.ID] {
 				recordAllocDecision(decisions, function, original, ir.AllocOnHeap, loopBlocked[instruction.To.ID])
+				if convertsItsObject(original) && initializesCandidate(block, index+1, original.To) {
+					// The helper returns storage already holding the value, so
+					// the initializing store has nothing left to do -- and must
+					// not run, because for a small value the helper hands back a
+					// pointer into a read-only table.
+					droppedStore = index + 1
+					instruction.Op = ir.OCall
+					instruction.Args = []ir.Ref{original.Args[3], original.Args[4]}
+					instruction.Aux = 0
+					lowered = append(lowered, instruction)
+					continue
+				}
 				instruction.Op = ir.OCall
 				instruction.Args = instruction.Args[:2]
 				instruction.Aux = 0
@@ -507,6 +528,30 @@ func rewriteHeapAllocations(function *ir.Func, analysis *candidateEscapes, loopB
 		}
 		block.Instrs = lowered
 	}
+}
+
+// convertsItsObject reports whether a candidate names a runtime conversion
+// helper that can build its object without an allocator. ir.Block's
+// HeapAllocConverted is what puts one there, and its doc comment carries the
+// contract; everything this function needs is the two extra arguments.
+func convertsItsObject(candidate ir.Instr) bool {
+	return len(candidate.Args) == 5
+}
+
+// initializesCandidate reports whether the instruction at index is the store
+// that gives a freshly allocated candidate its first value.
+//
+// The candidate's result is a temporary the emitter has just made, so a store
+// through it is the initialization and nothing else; requiring the store to sit
+// immediately after the candidate is what makes that true of the *only* store
+// this looks at, rather than of some later write the emitter did not promise
+// anything about.
+func initializesCandidate(block *ir.Block, index int, candidate ir.Ref) bool {
+	if index >= len(block.Instrs) {
+		return false
+	}
+	store := block.Instrs[index]
+	return store.Op.IsStore() && len(store.Args) == 2 && store.Args[1] == candidate
 }
 
 // storesIntoItself reports a store whose value and whose destination are both

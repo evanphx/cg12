@@ -6007,7 +6007,7 @@ func (g *gen) adaptValueToInterface(value ir.Ref, sourceType, targetType types.T
 		return descriptor
 	}
 	if payload == ir.R {
-		payload = g.allocateTyped(sourceType)
+		payload = g.allocateInterfacePayload(value, sourceType)
 	}
 	if isAddressRepresentedInterfacePayload(sourceType) {
 		g.storeInlineValue(value, payload, sourceType)
@@ -6021,6 +6021,144 @@ func (g *gen) adaptValueToInterface(value ir.Ref, sourceType, targetType types.T
 	g.cur.Store(typeWord, descriptor)
 	g.cur.Store(payload, g.offset(descriptor, 8))
 	return descriptor
+}
+
+// allocateInterfacePayload makes the storage an interface's data word points
+// at, for a source type that is not pointer-shaped and so needs storage at all.
+//
+// It is allocateTyped plus one thing: where the runtime has a conversion helper
+// for the source type, the candidate records it, and opt.LowerHeapAllocations
+// calls the helper instead of the allocator for the payloads that have to leave
+// the frame. runtime.convT64 and its siblings return a pointer into
+// runtime.staticuint64s for a value that fits in a byte, so `any(7)` costs
+// nothing rather than an 8-byte object. The frame case is untouched: a payload
+// that stays local is still a frame slot, which is cheaper than any call.
+//
+// The store that follows this call in adaptValueToInterface is the
+// initialization ir.Block.HeapAllocConverted's contract requires to sit
+// immediately after the candidate. Nothing may be emitted between them.
+func (g *gen) allocateInterfacePayload(value ir.Ref, sourceType types.Type) ir.Ref {
+	conversion, ok := g.interfaceConversionHelper(sourceType)
+	if !ok {
+		return g.allocateTyped(sourceType)
+	}
+	payload := g.cur.HeapAllocConverted(
+		g.fn.Sym("runtime.newobject", 0),
+		g.runtimeType(sourceType),
+		g.fn.Sym(conversion.symbol, 0),
+		g.convertedPayloadValue(conversion, value),
+		int(typeSize(sourceType)),
+		int(typeAlign(sourceType)),
+	)
+	// A converted payload's type has no pointer words -- interfaceConversionHelper
+	// only accepts types that have none -- so there is nothing here to mark.
+	return payload
+}
+
+// interfaceConversion names one runtime conversion helper and how the value has
+// to be presented to it.
+type interfaceConversion struct {
+	symbol string
+	// size is the payload width the helper is being used for. gc picks its
+	// helper by size and alignment rather than by kind, and a target whose int
+	// was not eight bytes wide would pair the wrong helper with the kinds below,
+	// so the kind that chose the helper also states the layout it assumed and
+	// interfaceConversionHelper checks it against the layout goc computed.
+	size int64
+	// form is what has to happen to the source value to become the helper's
+	// argument. The helper takes an unsigned integer and reads it as a small
+	// non-negative number when deciding whether it can use the static table, so
+	// a byte-wide payload has to arrive zero-extended and a float has to arrive
+	// as its bits rather than as its value.
+	form payloadArgumentForm
+}
+
+type payloadArgumentForm int
+
+const (
+	payloadArgumentAsIs payloadArgumentForm = iota
+	payloadArgumentZeroExtendByte
+	payloadArgumentZeroExtendHalfword
+	payloadArgumentFloatBits32
+	payloadArgumentFloatBits64
+)
+
+// interfaceConversionHelper reports the runtime helper that builds the
+// interface payload for sourceType, if there is one.
+//
+// This is cmd/compile's dataWordFuncName, narrowed twice.
+//
+// The first narrowing is to types goc holds in a register. convT16/convT32/
+// convT64 take the value itself, so a payload goc represents as an address --
+// a struct, an array, a string, a slice -- would have to be spilled and read
+// back to be passed, which is the copy the fast path exists to avoid. gc's
+// convT/convTnoptr/convTstring/convTslice cover those, and are deliberately not
+// wired here: measured against go1.26.1, convTstring and convTslice allocate
+// for every value except the empty one, so they would buy no allocation goc is
+// not already paying. See CCWORK_REPORT.md.
+//
+// The second is to targets where runtime.staticuint64s exists. It is defined in
+// runtime/ints.s, and only the ARM64 translator consumes that file; on a target
+// that does not, the array is a zero-filled Go var and the helper would hand
+// back a pointer to a zero for every value below 256. That is a wrong answer,
+// not a slow one, so the fast path is off there.
+//
+// It answers only about types isDirectInterfaceType rejects. adaptValueToInterface
+// asks it after that question, and a pointer-shaped value never reaches storage
+// at all.
+func (g *gen) interfaceConversionHelper(sourceType types.Type) (interfaceConversion, bool) {
+	if !g.runtimeAllocation || g.target != TargetARM64 {
+		return interfaceConversion{}, false
+	}
+	if isDirectInterfaceType(sourceType) || isAddressRepresentedInterfacePayload(sourceType) {
+		return interfaceConversion{}, false
+	}
+	basic, ok := sourceType.Underlying().(*types.Basic)
+	if !ok {
+		return interfaceConversion{}, false
+	}
+	var conversion interfaceConversion
+	switch basic.Kind() {
+	case types.Bool, types.Int8, types.Uint8:
+		// The runtime has no convT8. gc inlines the &staticuint64s[value] lookup
+		// for a one-byte payload instead; convT64 handed a zero-extended byte
+		// computes the same address, is always on the table's fast path because
+		// the table has 256 entries, and reads back correctly because the
+		// payload type's own size is what a reader uses.
+		conversion = interfaceConversion{symbol: "runtime.convT64", size: 1, form: payloadArgumentZeroExtendByte}
+	case types.Int16, types.Uint16:
+		conversion = interfaceConversion{symbol: "runtime.convT16", size: 2, form: payloadArgumentZeroExtendHalfword}
+	case types.Int32, types.Uint32:
+		conversion = interfaceConversion{symbol: "runtime.convT32", size: 4, form: payloadArgumentAsIs}
+	case types.Float32:
+		conversion = interfaceConversion{symbol: "runtime.convT32", size: 4, form: payloadArgumentFloatBits32}
+	case types.Int, types.Uint, types.Int64, types.Uint64, types.Uintptr:
+		conversion = interfaceConversion{symbol: "runtime.convT64", size: 8, form: payloadArgumentAsIs}
+	case types.Float64:
+		conversion = interfaceConversion{symbol: "runtime.convT64", size: 8, form: payloadArgumentFloatBits64}
+	default:
+		return interfaceConversion{}, false
+	}
+	if typeSize(sourceType) != conversion.size || typeAlign(sourceType) != conversion.size {
+		return interfaceConversion{}, false
+	}
+	return conversion, true
+}
+
+// convertedPayloadValue puts a source value into the class and width its
+// conversion helper takes its argument in.
+func (g *gen) convertedPayloadValue(conversion interfaceConversion, value ir.Ref) ir.Ref {
+	switch conversion.form {
+	case payloadArgumentZeroExtendByte:
+		return g.cur.Extub(ir.ClsL, value)
+	case payloadArgumentZeroExtendHalfword:
+		return g.cur.Extuh(ir.ClsW, value)
+	case payloadArgumentFloatBits32:
+		return g.cur.Cast(ir.ClsW, value)
+	case payloadArgumentFloatBits64:
+		return g.cur.Cast(ir.ClsL, value)
+	}
+	return value
 }
 
 func interfaceHasMethods(valueType types.Type) bool {
