@@ -355,3 +355,83 @@ on a formatting workload; this is worth **8.2% on the same shape of workload,
 measurable" — the control run is what establishes that — but on the realistic
 workloads it is a single-digit percentage, and the allocation counts move far
 more than the clock does.
+
+## 8. Guards
+
+Everything below was run to completion at the committed HEAD.
+
+| guard | result |
+|---|---|
+| `TestFrameEscapeAudit` | **ok**, and `goc/testdata/frame_escape_baseline.txt` is byte-identical to `4a6fd96` |
+| `TestAllocationCensus` (checking, not updating) | ok against the regenerated baseline |
+| `TestEscapeDifferentialAgainstGC` (checking) | ok |
+| `TestSlogAllocationsAgainstGC` (checking) | ok |
+| `TestAllocationCounts`, unoptimized and `-O` | ok |
+| `TestAllocationCountsAgainstTheHostToolchain` | ok |
+| `TestInterfaceConversionsCallTheRuntimeHelpers` | ok |
+| `TestLoopAliasExpectationsMatchTheHostToolchain` | ok |
+| `TestLoopBodyAllocationsAreDistinctPerIteration` | ok |
+| `TestCompilingTheSameSourceTwiceGivesTheSameModule` | ok |
+| `go test ./opt ./ir` | ok |
+
+The frame-escape baseline not moving is the one worth stating on its own. A
+`runtime.staticuint64s` entry is static read-only data, not heap memory and not
+frame memory, so nothing about this change can publish a frame address — and the
+audit, which reads the stores the compiler actually emitted rather than what the
+analysis believes, agrees: not one line added, not one removed.
+
+### Run-time correctness, beyond the baselines
+
+Two programs written for this, run under goc unoptimized, under `goc -O`, and
+under the host toolchain, all three agreeing:
+
+- **A round trip of every eligible type**, 32 cases: `int` at 0, 7, 255, 256,
+  2^20, −1 and −2^62; `int8` at −128, −1, 127; `uint8` at 0 and 255; `int16` at
+  −300 and 32767; `uint16` at 65535; `int32` at −70000; `uint32` and `uint64` at
+  their maxima; `uintptr`; `float64` at 0, 3.5 and −2.25; `float32` at 1.5 and
+  −0.5; `bool` both ways; `rune` at `'A'` and 0x10FFFF; a named `int64`. Plus
+  the aliasing property the static table creates: two boxes of the same small
+  value compare equal, two boxes of different values do not, and each reads back
+  its own value.
+- **A collector stress**: 900 boxed values (small ints, bools, floats) appended
+  into a heap slice, 300 more in a linked list of heap nodes, 26 in a map, three
+  full `runtime.GC()` cycles with 5000 intervening allocations, then every value
+  read back and checked. This is the one that matters for a payload pointing at
+  static data: it goes through the write barrier on the way into each heap
+  object, and the marker has to not mistake `&staticuint64s[i]` for an object
+  base. It does not.
+
+## 9. What is left
+
+1. **The four `box_*` rows where gc pays nothing and goc pays one.** All four are
+   goc's escape analysis, not the static table: `takeAny` does not leak its
+   parameter and gc frames the payload. goc heaps it, and now heaps it for free
+   when the value is small and for an allocation when it is not. This is the
+   563-line pessimism set from section 6 in miniature, and it is the next thing
+   worth doing on this path.
+2. **`sprintf_int` at 200 against gc's 100.** The remaining allocation is the
+   `...` object, which goc puts on the heap because fmt's `doPrintf` assigns each
+   element to a field of a heap-allocated printer. Unchanged by this branch.
+3. **The 8.2% in section 7 is unattributed.** It is measured, reproducible, and
+   controlled, and I do not know which instruction it is.
+4. **Three pre-existing float defects**, all reproduced at `4a6fd96` and none
+   touched here: a package-level `float64` initialized to a constant is zero; a
+   package-level `float64` with a dynamic initializer is zero; a package-level
+   `float64` initialized from a function call goes through a `float32`. The first
+   one is why `theFloat` in the testdata is assigned in `init()`. These look
+   worth a job of their own — a float constant that silently becomes zero is a
+   miscompile with no diagnostic.
+5. **`convTstring` / `convTslice` / `convT` / `convTnoptr`**, and the fast path on
+   amd64 once `staticuint64s` exists there. Section 2 says why neither is worth
+   doing yet.
+
+## 10. What was committed
+
+| commit | what |
+|---|---|
+| `b798af9` | `goc`: build small interface payloads with `runtime.convT*` |
+| `5d4d7ec` | `goc`: pin what each interface conversion costs and which helper builds it |
+| `9753f6b` | `slog`: regenerate the allocation baseline |
+| `a19c63d` | `opt`: a conversion site is a census site |
+
+Status: **COMPLETE.** Every number in this report was watched to completion.
