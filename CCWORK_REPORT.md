@@ -281,3 +281,77 @@ The measurement that would have reported a 24-line shrink is in section 5, and
 it is the one that fabricates 33 correctness-critical entries. The brief asked
 how much the set shrinks; the honest answer is that it does not, and that the
 number which says otherwise is an artifact of the census going blind.
+
+## 7. Wall clock
+
+Timed inside each program with `time.Since` so process startup is not in the
+number, `GOMAXPROCS=1`, binaries built once with each compiler and run five
+times alternating. Load average was 5.8 at the start of the run. The ranges
+below are the full spread of the runs, not a standard deviation.
+
+**A control workload with no interface conversion in it** — twelve rounds of
+integer mixing and `append` into a reused buffer — is flat, which is what says
+the numbers below are the change and not the box or code layout:
+
+| | ns/op | allocations/op |
+|---|---|---|
+| goc @ `4a6fd96` | 202–204 | 0.00 |
+| goc @ this branch | 201–202 | 0.00 |
+
+**Boxing-dominated: 64 `any(smallInt)` conversions through a `//go:noinline`
+consumer, per round.** This is the bound, not a workload anyone runs:
+
+| | ns/round | allocations/round | GC cycles |
+|---|---|---|---|
+| goc @ `4a6fd96` | 8867–8883 | 64.00 | 283 |
+| goc @ this branch | **990–1003** | **0.00** | **0** |
+
+**8.9× faster**, and the collector is not asked to run at all.
+
+**`fmt.Sprintf("id=%d name=%s score=%d", 42, "widget", 7)` through a
+`strings.Builder`, 100 000 calls** — the workload the previous job's 12% was
+measured on:
+
+| | ns/op | allocations/op | GC cycles |
+|---|---|---|---|
+| goc @ `4a6fd96` | 3044–3068 | 3.00 | 3 |
+| goc @ this branch | **2790–2822** | 3.00 | 3 |
+
+**8.2% faster with an unchanged allocation count.** Two variants were run to
+find out what that is:
+
+- the same call with `id` and `score` past the static table: 2966–3136 →
+  2860–2928, a smaller and noisier difference.
+- the same call with the integers removed (`"name=%s"`, one argument):
+  1775–1793 → 1772–1922. **No difference.**
+
+So the saving is attributable to the integer arguments and not to the string,
+the `...` array, or the result — but it is *not* an allocation, because the
+count is 3.00 in both. I did not isolate which instruction inside `fmt` it is;
+the two candidates are the work at a conversion site itself (`newobject` zeroes
+through `mallocgc(size, typ, true)` where `convT64` returns a table pointer or
+calls `mallocgc(8, uint64Type, false)` and stores) and inlining decisions inside
+`fmt` shifting because the module has three more functions in it. **This part is
+measured and reproducible but unattributed.**
+
+**`slog.Info("msg", "a", 1, … "e", 5)` to a no-op handler, 200 000 calls:**
+
+| | ns/op | allocations/op | GC cycles |
+|---|---|---|---|
+| goc @ `4a6fd96` | 80524–81474 | 6.00 | 17 |
+| goc @ this branch | **79536–80469** | **1.00** | **15** |
+
+**1.5%.** Six allocations out of seven are gone and the wall clock barely moves,
+because goc's `slog` path costs 80 µs per call — roughly two orders of magnitude
+more than the host toolchain — and whatever dominates that is not allocation.
+Saying this plainly matters more than the 1.5%: on the workload this change was
+aimed at, the allocation win is real, large, and almost entirely invisible in
+time. The next person to work on `slog` under goc should profile it rather than
+count allocations.
+
+To answer the brief's question directly: the interface-return fix was worth 12%
+on a formatting workload; this is worth **8.2% on the same shape of workload,
+8.9× on a boxing microbenchmark, and 1.5% on slog**. It is not "not
+measurable" — the control run is what establishes that — but on the realistic
+workloads it is a single-digit percentage, and the allocation counts move far
+more than the clock does.
