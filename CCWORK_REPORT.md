@@ -1953,3 +1953,31 @@ fails only with a prebuilt `-O` pack.** A monolithic `goc -O` build of the same
 program passes 5/5 on `main` and 3/3 here. Whatever §6.1 is, it needs the split
 build, not just `-O`.
 
+## Guards
+
+- **`TestFrameEscapeAudit`**: PASS (182 s). It globs `testdata/*.go`, so it covers
+  the new program too.
+- **`goc/testdata/alloc_census_baseline.txt`**: moved, and regenerated. The delta
+  is **three added lines, all in the new corpus program**
+  (`41:27` twice — the 8 MB global backing array — and `63:9`, the `panic`
+  string). No existing site changed in either direction, so the safepoint change
+  moves **no** allocation decision. `escape_gc_differential.txt` is opt-in
+  (`-escape-gc-differential`) and joins against the census by source line; it is
+  not regenerated here, and its only staleness is the three new lines.
+- **Loop aliasing against the host toolchain**:
+  `TestLoopBodyAllocationsAreDistinctPerIteration` and
+  `TestLoopAliasExpectationsMatchTheHostToolchain` both PASS, all subtests, in
+  both the plain and `-O` arms.
+- **`arm64` stack-map tests**: the three new ones pass, and the map test is
+  verified to fail with the guard removed.
+- **Targeted runtime programs**, compiled with the fixed compiler against a
+  prebuilt runtime pack and run at `GOMAXPROCS=3`: the twelve
+  `runtime_cleanup_*` / `runtime_finalizer_*` programs, and the eighteen
+  `runtime_gc_*` / `runtime_stack_*` / `runtime_stack_scan_*` programs including
+  `mark-workers`, `checkmark`, `concurrent-mark`, `assist-stack-growth`,
+  `stack-copy-roots`, `stack-growth`, `blocked-goroutines`, `panic-unwind` and
+  `syscall`. **30/30 pass, 0 fail.**
+- The defect is **arm64-only**: `amd64/regalloc.go`'s `computeSafepointRoots`
+  reports only `GCRef` temporaries and `amd64` has no `stackAllocTmp` or
+  `StackPointerWords` reporting at all, so there is nothing there to suppress.
+
