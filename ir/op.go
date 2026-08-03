@@ -80,6 +80,12 @@ const (
 	// allocator, its type descriptor, and the constant byte size; Aux is the
 	// required alignment. The escape pass promotes local candidates to OAlloc*
 	// and lowers the rest to calls before target lowering.
+	//
+	// A candidate built by Block.HeapAllocConverted carries two further args --
+	// a conversion helper and the value to hand it -- and one further rule: the
+	// instruction after it initializes the candidate, and the helper's result
+	// already holds that same value, so lowering to the helper drops the store.
+	// See Block.HeapAllocConverted for the whole contract.
 	OHeapAlloc
 
 	// Memory-to-memory copy of Aux bytes from Args[1] to Args[0].

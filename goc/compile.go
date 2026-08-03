@@ -1654,6 +1654,10 @@ type gen struct {
 	typeArguments                 []types.Type
 	noWriteBarrier                bool
 	forceStackVariadic            bool
+	// variadicPayloadSlot is the reserved storage the payload about to be boxed
+	// can be folded back into; nil for every conversion that is not one variadic
+	// argument of a call being built. See variadicPayloadStorage.
+	variadicPayloadSlot *variadicPayloadSlot
 	resultSlot                    ir.Ref
 	resultType                    types.Type
 	resultObjects                 map[types.Object]bool
@@ -1723,6 +1727,7 @@ func (g *gen) derive() *gen {
 	derived.typeArguments = nil
 	derived.noWriteBarrier = false
 	derived.forceStackVariadic = false
+	derived.variadicPayloadSlot = nil
 
 	// Its result shape.
 	derived.resultSlot = ir.R
@@ -3503,6 +3508,26 @@ func (g *gen) parameterDoesNotEscape(function *types.Func, index int, checking m
 	}
 	if declaration.decl.Body == nil {
 		return hasCompilerDirective(declaration.decl, "go:noescape")
+	}
+	if signature.Variadic() && index == signature.Params().Len()-1 {
+		// The callers of this walk hand it an argument position, and for a
+		// variadic call every argument from the last parameter on is an
+		// *element* of a slice the callee builds -- not the parameter. Answering
+		// them with the parameter's own summary answers a different question:
+		// `func keep(args ...*T) { sink = args[0] }` retains no pointer it was
+		// handed, and retains everything they point at.
+		//
+		// Positions past the parameter list are already refused above, so this
+		// is the one that used to slip through, and getting it wrong left a
+		// package-level variable pointing at a caller's frame. The refusal is
+		// the whole answer for a walk that has no notion of dereference depth;
+		// the fact table in opt does have one, and ParamFact.Deep is where the
+		// question is really answered -- see opt.markSummarisedCall.
+		//
+		// A spread call, f(xs...), does hand the parameter over as itself and
+		// loses precision here. That is the price of one predicate serving both,
+		// and it is the safe direction.
+		return false
 	}
 	key := parameterKey{function: function, index: index}
 	if checking[key] {
@@ -6007,7 +6032,7 @@ func (g *gen) adaptValueToInterface(value ir.Ref, sourceType, targetType types.T
 		return descriptor
 	}
 	if payload == ir.R {
-		payload = g.allocateTyped(sourceType)
+		payload = g.allocateInterfacePayload(value, sourceType)
 	}
 	if isAddressRepresentedInterfacePayload(sourceType) {
 		g.storeInlineValue(value, payload, sourceType)
@@ -6021,6 +6046,163 @@ func (g *gen) adaptValueToInterface(value ir.Ref, sourceType, targetType types.T
 	g.cur.Store(typeWord, descriptor)
 	g.cur.Store(payload, g.offset(descriptor, 8))
 	return descriptor
+}
+
+// allocateInterfacePayload makes the storage an interface's data word points
+// at, for a source type that is not pointer-shaped and so needs storage at all.
+//
+// It is allocateTyped plus one thing: where the runtime has a conversion helper
+// for the source type, the candidate records it, and opt.LowerHeapAllocations
+// calls the helper instead of the allocator for the payloads that have to leave
+// the frame. runtime.convT64 and its siblings return a pointer into
+// runtime.staticuint64s for a value that fits in a byte, so `any(7)` costs
+// nothing rather than an 8-byte object. The frame case is untouched: a payload
+// that stays local is still a frame slot, which is cheaper than any call.
+//
+// The store that follows this call in adaptValueToInterface is the
+// initialization ir.Block.HeapAllocConverted's contract requires to sit
+// immediately after the candidate. Nothing may be emitted between them.
+func (g *gen) allocateInterfacePayload(value ir.Ref, sourceType types.Type) ir.Ref {
+	conversion, ok := g.interfaceConversionHelper(sourceType)
+	if !ok {
+		return g.allocateTyped(sourceType)
+	}
+	// Consumed rather than read: the slot belongs to one payload of one variadic
+	// call, and the conversion below is that payload. Leaving it set would offer
+	// the same reserved bytes to whatever the next conversion in this call
+	// happens to be.
+	slot := g.variadicPayloadSlot
+	g.variadicPayloadSlot = nil
+	if slot != nil {
+		payload := g.cur.HeapAllocConvertedField(
+			g.fn.Sym("runtime.newobject", 0),
+			g.runtimeType(sourceType),
+			g.fn.Sym(conversion.symbol, 0),
+			g.convertedPayloadValue(conversion, value),
+			slot.container,
+			slot.offset,
+			int(typeSize(sourceType)),
+			int(typeAlign(sourceType)),
+		)
+		return payload
+	}
+	payload := g.cur.HeapAllocConverted(
+		g.fn.Sym("runtime.newobject", 0),
+		g.runtimeType(sourceType),
+		g.fn.Sym(conversion.symbol, 0),
+		g.convertedPayloadValue(conversion, value),
+		int(typeSize(sourceType)),
+		int(typeAlign(sourceType)),
+	)
+	// A converted payload's type has no pointer words -- interfaceConversionHelper
+	// only accepts types that have none -- so there is nothing here to mark.
+	return payload
+}
+
+// interfaceConversion names one runtime conversion helper and how the value has
+// to be presented to it.
+type interfaceConversion struct {
+	symbol string
+	// size is the payload width the helper is being used for. gc picks its
+	// helper by size and alignment rather than by kind, and a target whose int
+	// was not eight bytes wide would pair the wrong helper with the kinds below,
+	// so the kind that chose the helper also states the layout it assumed and
+	// interfaceConversionHelper checks it against the layout goc computed.
+	size int64
+	// form is what has to happen to the source value to become the helper's
+	// argument. The helper takes an unsigned integer and reads it as a small
+	// non-negative number when deciding whether it can use the static table, so
+	// a byte-wide payload has to arrive zero-extended and a float has to arrive
+	// as its bits rather than as its value.
+	form payloadArgumentForm
+}
+
+type payloadArgumentForm int
+
+const (
+	payloadArgumentAsIs payloadArgumentForm = iota
+	payloadArgumentZeroExtendByte
+	payloadArgumentZeroExtendHalfword
+	payloadArgumentFloatBits32
+	payloadArgumentFloatBits64
+)
+
+// interfaceConversionHelper reports the runtime helper that builds the
+// interface payload for sourceType, if there is one.
+//
+// This is cmd/compile's dataWordFuncName, narrowed twice.
+//
+// The first narrowing is to types goc holds in a register. convT16/convT32/
+// convT64 take the value itself, so a payload goc represents as an address --
+// a struct, an array, a string, a slice -- would have to be spilled and read
+// back to be passed, which is the copy the fast path exists to avoid. gc's
+// convT/convTnoptr/convTstring/convTslice cover those, and are deliberately not
+// wired here: measured against go1.26.1, convTstring and convTslice allocate
+// for every value except the empty one, so they would buy no allocation goc is
+// not already paying. See CCWORK_REPORT.md.
+//
+// The second is to targets where runtime.staticuint64s exists. It is defined in
+// runtime/ints.s, and only the ARM64 translator consumes that file; on a target
+// that does not, the array is a zero-filled Go var and the helper would hand
+// back a pointer to a zero for every value below 256. That is a wrong answer,
+// not a slow one, so the fast path is off there.
+//
+// It answers only about types isDirectInterfaceType rejects. adaptValueToInterface
+// asks it after that question, and a pointer-shaped value never reaches storage
+// at all.
+func (g *gen) interfaceConversionHelper(sourceType types.Type) (interfaceConversion, bool) {
+	if !g.runtimeAllocation || g.target != TargetARM64 {
+		return interfaceConversion{}, false
+	}
+	if isDirectInterfaceType(sourceType) || isAddressRepresentedInterfacePayload(sourceType) {
+		return interfaceConversion{}, false
+	}
+	basic, ok := sourceType.Underlying().(*types.Basic)
+	if !ok {
+		return interfaceConversion{}, false
+	}
+	var conversion interfaceConversion
+	switch basic.Kind() {
+	case types.Bool, types.Int8, types.Uint8:
+		// The runtime has no convT8. gc inlines the &staticuint64s[value] lookup
+		// for a one-byte payload instead; convT64 handed a zero-extended byte
+		// computes the same address, is always on the table's fast path because
+		// the table has 256 entries, and reads back correctly because the
+		// payload type's own size is what a reader uses.
+		conversion = interfaceConversion{symbol: "runtime.convT64", size: 1, form: payloadArgumentZeroExtendByte}
+	case types.Int16, types.Uint16:
+		conversion = interfaceConversion{symbol: "runtime.convT16", size: 2, form: payloadArgumentZeroExtendHalfword}
+	case types.Int32, types.Uint32:
+		conversion = interfaceConversion{symbol: "runtime.convT32", size: 4, form: payloadArgumentAsIs}
+	case types.Float32:
+		conversion = interfaceConversion{symbol: "runtime.convT32", size: 4, form: payloadArgumentFloatBits32}
+	case types.Int, types.Uint, types.Int64, types.Uint64, types.Uintptr:
+		conversion = interfaceConversion{symbol: "runtime.convT64", size: 8, form: payloadArgumentAsIs}
+	case types.Float64:
+		conversion = interfaceConversion{symbol: "runtime.convT64", size: 8, form: payloadArgumentFloatBits64}
+	default:
+		return interfaceConversion{}, false
+	}
+	if typeSize(sourceType) != conversion.size || typeAlign(sourceType) != conversion.size {
+		return interfaceConversion{}, false
+	}
+	return conversion, true
+}
+
+// convertedPayloadValue puts a source value into the class and width its
+// conversion helper takes its argument in.
+func (g *gen) convertedPayloadValue(conversion interfaceConversion, value ir.Ref) ir.Ref {
+	switch conversion.form {
+	case payloadArgumentZeroExtendByte:
+		return g.cur.Extub(ir.ClsL, value)
+	case payloadArgumentZeroExtendHalfword:
+		return g.cur.Extuh(ir.ClsW, value)
+	case payloadArgumentFloatBits32:
+		return g.cur.Cast(ir.ClsW, value)
+	case payloadArgumentFloatBits64:
+		return g.cur.Cast(ir.ClsL, value)
+	}
+	return value
 }
 
 func interfaceHasMethods(valueType types.Type) bool {
@@ -6440,6 +6622,7 @@ func (g *gen) callArguments(arguments []ast.Expr, hasEllipsis bool, signature *t
 	arrayType := types.NewArray(elementType, length)
 	var backing ir.Ref
 	interfacePayloads := make(map[int]ir.Ref)
+	interfacePayloadSlots := make(map[int]variadicPayloadSlot)
 	stackAllocateVariadic := !g.runtimeAllocation || g.fn.NoSplit || g.forceStackVariadic
 	if !stackAllocateVariadic {
 		allocationType := types.Type(arrayType)
@@ -6456,9 +6639,13 @@ func (g *gen) callArguments(arguments []ast.Expr, hasEllipsis bool, signature *t
 				if !g.interfaceAssignmentNeedsPayload(argument) {
 					continue
 				}
-				payloadFields = append(payloadFields, variadicPayloadField{argument: index, field: len(fields)})
-				fieldName := fmt.Sprintf("payload%d", index)
 				fieldType := g.typeAndValue(argument).Type
+				payloadFields = append(payloadFields, variadicPayloadField{
+					argument: index,
+					field:    len(fields),
+					split:    g.variadicPayloadStorage(fieldType) == payloadStorageOwnAllocation,
+				})
+				fieldName := fmt.Sprintf("payload%d", index)
 				fields = append(fields, types.NewVar(token.NoPos, nil, fieldName, fieldType))
 			}
 		}
@@ -6468,6 +6655,17 @@ func (g *gen) callArguments(arguments []ast.Expr, hasEllipsis bool, signature *t
 			offsets := structOffsets(fields)
 			backing = g.allocateTyped(allocationType)
 			for _, payloadField := range payloadFields {
+				if payloadField.split {
+					// The payload gets an allocation of its own so its placement
+					// is decided apart from the array's, and the field stays
+					// reserved so opt.LowerHeapAllocations can fold it back in
+					// when the array turned out to be on the heap anyway.
+					interfacePayloadSlots[payloadField.argument] = variadicPayloadSlot{
+						container: backing,
+						offset:    offsets[payloadField.field],
+					}
+					continue
+				}
 				interfacePayloads[payloadField.argument] = g.offset(backing, offsets[payloadField.field])
 			}
 		} else {
@@ -6481,7 +6679,12 @@ func (g *gen) callArguments(arguments []ast.Expr, hasEllipsis bool, signature *t
 	}
 	elementSize := typeSize(elementType)
 	for index, argument := range variadicArguments {
+		previousSlot := g.variadicPayloadSlot
+		if slot, split := interfacePayloadSlots[index]; split {
+			g.variadicPayloadSlot = &slot
+		}
 		value := g.assignmentValueWithInterfacePayload(argument, elementType, interfacePayloads[index])
+		g.variadicPayloadSlot = previousSlot
 		elementAddress := g.offset(backing, int64(index)*elementSize)
 		if isInlineAggregate(elementType) || isInterfaceValue(elementType) {
 			g.storeInlineValue(value, elementAddress, elementType)
@@ -6499,6 +6702,80 @@ func (g *gen) callArguments(arguments []ast.Expr, hasEllipsis bool, signature *t
 type variadicPayloadField struct {
 	argument int
 	field    int
+	// split marks a payload emitted as an allocation of its own, whose reserved
+	// field is somewhere for opt.LowerHeapAllocations to fold it back into. See
+	// variadicPayloadStorage.
+	split bool
+}
+
+// variadicPayloadSlot is the storage reserved inside a variadic call's combined
+// object for one boxed payload that is being emitted as a separate allocation.
+// It travels on gen because the payload is allocated several frames down, inside
+// the interface conversion, and only that call knows the payload's type and
+// value.
+type variadicPayloadSlot struct {
+	container ir.Ref
+	offset    int64
+}
+
+// payloadStorage says where a variadic `...any` argument's boxed payload lives.
+type payloadStorage int
+
+const (
+	// payloadStorageCombinedField puts the payload in a field of the same object
+	// as the `[N]any` backing array, so the whole call costs one allocation.
+	payloadStorageCombinedField payloadStorage = iota
+	// payloadStorageOwnAllocation gives the payload an allocation candidate of
+	// its own, so opt.LowerHeapAllocations decides where it goes separately from
+	// the backing array.
+	payloadStorageOwnAllocation
+)
+
+// variadicPayloadStorage decides which of the two a payload of the given type
+// gets, and is the whole of goc's answer to "does this variadic call's backing
+// array have to be on the heap".
+//
+// # Why there is a choice at all
+//
+// One object is one placement. While the array and every payload were fields of
+// a single allocation, a callee that retains an *element* -- which is the boxed
+// payload, not the array -- retained the array too, because they are the same
+// object. That is not a conservatism that better analysis can remove: it is
+// true of the representation. fmt.pp.doPrintf assigns each element to p.arg, a
+// field of a heap-allocated printer, so every `fmt.Sprintf` with an argument
+// paid a heap allocation for its `[N]any` even though gc keeps that array in
+// the frame and always has. Splitting the payload out is what makes the two
+// decidable apart.
+//
+// # Why not split every payload
+//
+// Because the merge is worth something when the array does go to the heap. A
+// callee that retains the slice itself -- log/slog.Logger.Info does, through
+// Record.Add -- escapes the array whatever this decides, and then N+1 objects
+// cost N+1 allocations where one combined object costs one. Splitting
+// unconditionally turns the five-attribute slog call from one allocation into
+// six.
+//
+// So the split is taken exactly where it cannot lose. A payload the runtime has
+// a conversion helper for costs at most one allocation on its own and often
+// none -- runtime.convT64 hands back a pointer into runtime.staticuint64s for a
+// value below 256 -- which is the same shape gc emits; and those types are
+// pointer-free by construction, so a split payload never needs a frame pointer
+// map entry the combined object was carrying. A payload with no helper stays in
+// the combined object, where the old arithmetic still holds.
+//
+// A mixed call keeps the array's fate tied to its unsplittable payloads, which
+// is why the test is per-payload rather than per-call: splitting the int out of
+// `fmt.Sprintf("%s %d", s, n)` while the string payload keeps the array on the
+// heap would add an allocation rather than remove one.
+func (g *gen) variadicPayloadStorage(payloadType types.Type) payloadStorage {
+	if !g.runtimeAllocation {
+		return payloadStorageCombinedField
+	}
+	if _, hasHelper := g.interfaceConversionHelper(payloadType); hasHelper {
+		return payloadStorageOwnAllocation
+	}
+	return payloadStorageCombinedField
 }
 
 func (g *gen) interfaceAssignmentNeedsPayload(expression ast.Expr) bool {

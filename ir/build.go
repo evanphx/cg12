@@ -506,6 +506,72 @@ func (b *Block) AtomicFence() { b.IntrinsicVoid("atomic.fence") }
 // it to a stack allocation when its result cannot escape and otherwise lowers
 // it to allocator(typeDescriptor).
 func (b *Block) HeapAlloc(allocator, typeDescriptor Ref, size, align int) Ref {
+	return b.heapAlloc([]Ref{allocator, typeDescriptor, b.fn.Long(int64(size))}, size, align)
+}
+
+// HeapAllocConverted emits a heap-allocation candidate whose object, if it does
+// have to leave the frame, can be built by a runtime conversion helper instead
+// of by an allocator: converter(value) returns storage already holding value,
+// and for a small enough value it returns a pointer into a static table and
+// allocates nothing at all. runtime.convT64 and its siblings are the helpers
+// this exists for.
+//
+// The candidate carries the allocator and type descriptor as well, because
+// promoting it to the frame has to produce exactly what HeapAlloc's promotion
+// produces; the helper is only consulted on the path where the object would
+// otherwise have been allocated.
+//
+// Two rules bind the emitter and [opt.LowerHeapAllocations] together, and both
+// are the emitter's to keep:
+//
+//   - The instruction immediately after the candidate must be the store that
+//     initializes it. The lowering drops that store when it calls the helper,
+//     because the helper's result already holds the value, and the storage it
+//     returns for a small value is read-only.
+//
+//   - value must carry the same bytes the store writes, in the class the helper
+//     takes its argument in. A widening or a bit reinterpretation between the
+//     stored value and value is fine -- the store writes the low bytes of the
+//     object and the helper is handed the whole register -- but they cannot be
+//     two different values.
+//
+// If either rule is broken the lowering does not fire, and the candidate is
+// lowered as an ordinary allocation, so a mistake here costs an allocation
+// rather than correctness.
+func (b *Block) HeapAllocConverted(allocator, typeDescriptor, converter, value Ref, size, align int) Ref {
+	args := []Ref{allocator, typeDescriptor, b.fn.Long(int64(size)), converter, value}
+	return b.heapAlloc(args, size, align)
+}
+
+// HeapAllocConvertedField is HeapAllocConverted for an object that has somewhere
+// to go if it cannot be its own allocation: storage at offset bytes into the
+// object container allocates, reserved for exactly this.
+//
+// It exists because one object is one placement, and a variadic `...any` call
+// has two questions to answer, not one. The `[N]any` backing array escapes when
+// the callee retains the *slice*; a boxed payload escapes when the callee
+// retains an *element*. Packing both into one object -- which is what container
+// still is for every payload with no conversion helper -- forces the array to
+// the answer the payload got, and that is why `fmt.Sprintf("value=%d", n)` cost
+// a heap allocation for an array gc has always kept in a frame.
+//
+// Emitting the payload separately lets the two be decided apart, and carrying
+// the reserved field lets [opt.LowerHeapAllocations] undo the separation when
+// it did not pay: with the container on the heap, N+1 objects cost N+1
+// allocations where the combined one costs one. The pass folds the payload back
+// to container+offset in that case, and the initializing store the contract
+// above requires -- which HeapAllocConverted's helper path drops -- is kept,
+// because there is no helper call to have written the value.
+//
+// The emitter owes one thing beyond HeapAllocConverted's two rules: container's
+// allocated type must really have offset bytes of storage of this object's type
+// there, since the fold makes the payload alias it.
+func (b *Block) HeapAllocConvertedField(allocator, typeDescriptor, converter, value, container Ref, offset int64, size, align int) Ref {
+	args := []Ref{allocator, typeDescriptor, b.fn.Long(int64(size)), converter, value, container, b.fn.Long(offset)}
+	return b.heapAlloc(args, size, align)
+}
+
+func (b *Block) heapAlloc(args []Ref, size, align int) Ref {
 	if size < 0 {
 		panic("ir: negative heap allocation size")
 	}
@@ -519,7 +585,7 @@ func (b *Block) HeapAlloc(allocator, typeDescriptor Ref, size, align int) Ref {
 	in := Instr{
 		Op:   OHeapAlloc,
 		Cls:  ClsP,
-		Args: []Ref{allocator, typeDescriptor, b.fn.Long(int64(size))},
+		Args: args,
 		Aux:  int64(align),
 		Pos:  b.curPos,
 	}

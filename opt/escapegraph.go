@@ -299,7 +299,9 @@ func (graph *escapeGraph) instruction(instruction ir.Instr) {
 	switch {
 	case instruction.Op == ir.OHeapAlloc || instruction.Op.IsAlloc() || instruction.Op == ir.OAllocN:
 		// Fresh storage. The operands are an allocator, a type descriptor and a
-		// size, none of which is a use of a pointer this function was handed.
+		// size -- and, on a converted candidate, a conversion helper and the
+		// pointer-free value it is handed -- none of which is a use of a pointer
+		// this function was handed.
 	case instruction.Op.IsLoad():
 		graph.flow(result, instruction.Arg(0), 1)
 	case instruction.Op.IsStore():

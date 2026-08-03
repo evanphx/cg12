@@ -27,7 +27,24 @@ var (
 	theString = "answer"
 	theStruct = pair{1, 2}
 	thePtr    = &theInt
+
+	// theLargeInt is past the last entry of runtime.staticuint64s, and
+	// theFloat's bit pattern is far past it, so boxing either has to allocate
+	// where boxing theInt does not. They are here to hold the fast path to
+	// being about the value and not about the type.
+	theLargeInt = 1 << 20
+	theBool     = true
+
+	// theFloat is assigned in init rather than in its declaration. goc compiles
+	// a package-level float64 initialized to a constant to zero -- a defect that
+	// predates this file's float row and has nothing to do with boxing -- and
+	// zero's bit pattern does fit staticuint64s, so declaring it here would make
+	// this row measure any(0.0) and quietly report a fast path that is not
+	// running.
+	theFloat float64
 )
+
+func init() { theFloat = 3.5 }
 
 type pair struct{ a, b int }
 
@@ -55,6 +72,43 @@ func variadicAny(values ...any) int { return len(values) }
 //go:noinline
 func callVariadicAny() { sinkInt = variadicAny(theInt, theString) }
 
+// The variadic rows that are about *retention*, which is the question the
+// backing array and the payload it points at have to be able to answer
+// separately. keepElement stores one element into a package-level variable, so
+// the boxed payload outlives the call and the `[N]any` array does not; a
+// compiler that cannot tell those apart has to heap both, and one that gets it
+// backwards leaves sinkAny holding a pointer into a returned frame.
+//
+// theRetained is past runtime.staticuint64s deliberately: a value inside the
+// table would be boxed to a pointer into read-only memory whatever the escape
+// analysis decided, and the row would pass without measuring anything.
+var theRetained = 0x5eed
+
+//go:noinline
+func keepElement(args ...any) { sinkAny = args[0] }
+
+//go:noinline
+func retainVariadicElement() { keepElement(theRetained) }
+
+//go:noinline
+func keepStructElement(args ...any) { sinkAny = args[0] }
+
+//go:noinline
+func retainVariadicStructElement() { keepStructElement(theStruct) }
+
+// Two convertible payloads in one call, which is where splitting them out of
+// the combined object can cost rather than save: gc allocates one box each and
+// goc used to allocate one object for both. With values inside
+// runtime.staticuint64s both boxes are free and the split wins; with values
+// outside it the split matches gc instead of beating it. Both rows are here so
+// the trade is a number rather than an argument.
+//
+//go:noinline
+func sprintfTwoSmallInts() { sinkString = fmt.Sprintf("%d/%d", theInt, theInt) }
+
+//go:noinline
+func sprintfTwoLargeInts() { sinkString = fmt.Sprintf("%d/%d", theLargeInt, theLargeInt) }
+
 //go:noinline
 func takeAny(value any) int {
 	if value == nil {
@@ -67,16 +121,34 @@ func takeAny(value any) int {
 func boxSmallInt() { sinkInt = takeAny(theInt) }
 
 //go:noinline
+func boxLargeInt() { sinkInt = takeAny(theLargeInt) }
+
+//go:noinline
+func boxBool() { sinkInt = takeAny(theBool) }
+
+//go:noinline
+func boxFloat64() { sinkInt = takeAny(theFloat) }
+
+//go:noinline
+func boxString() { sinkInt = takeAny(theString) }
+
+//go:noinline
 func boxPointer() { sinkInt = takeAny(thePtr) }
 
 //go:noinline
 func returnAnyFromInt(value int) any { return value }
 
 //go:noinline
+func returnAnyFromLargeInt(value int) any { return value }
+
+//go:noinline
 func returnAnyFromPointer(value *int) any { return value }
 
 //go:noinline
 func callReturnAnyFromInt() { sinkAny = returnAnyFromInt(theInt) }
+
+//go:noinline
+func callReturnAnyFromLargeInt() { sinkAny = returnAnyFromLargeInt(theLargeInt) }
 
 //go:noinline
 func callReturnAnyFromPointer() { sinkAny = returnAnyFromPointer(thePtr) }
@@ -135,9 +207,18 @@ func main() {
 	measure("sprintf_no_args", repeat(sprintfNoArgs))
 	measure("variadic_ints", repeat(callVariadicInts))
 	measure("variadic_any", repeat(callVariadicAny))
+	measure("variadic_retained_element", repeat(retainVariadicElement))
+	measure("variadic_retained_struct_element", repeat(retainVariadicStructElement))
+	measure("sprintf_two_small_ints", repeat(sprintfTwoSmallInts))
+	measure("sprintf_two_large_ints", repeat(sprintfTwoLargeInts))
 	measure("box_small_int", repeat(boxSmallInt))
+	measure("box_large_int", repeat(boxLargeInt))
+	measure("box_bool", repeat(boxBool))
+	measure("box_float64", repeat(boxFloat64))
+	measure("box_string", repeat(boxString))
 	measure("box_pointer", repeat(boxPointer))
 	measure("return_any_from_int", repeat(callReturnAnyFromInt))
+	measure("return_any_from_large_int", repeat(callReturnAnyFromLargeInt))
 	measure("return_any_from_pointer", repeat(callReturnAnyFromPointer))
 	measure("sync_pool_round_trip", repeat(poolRoundTrip))
 	measure("sprintf_in_loop", sprintfInLoop)

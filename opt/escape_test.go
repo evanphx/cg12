@@ -502,3 +502,312 @@ func TestLowerHeapAllocationsEscapesACandidateInASlotHandedToANoescapeCallee(t *
 	assert.Equal(t, ir.OCall, block.Instrs[0].Op,
 		"peek may retain what it loads out of the slot, which is this object")
 }
+
+// The three tests below cover ir.Block.HeapAllocConverted, whose contract binds
+// the emitter and this pass together: a candidate that names a conversion helper
+// is lowered to that helper instead of to the allocator, and the store that
+// would have initialized the object is dropped, because the helper's result
+// already holds the value -- and, for a small value, points into a read-only
+// table that must not be written.
+
+func TestLowerHeapAllocationsCallsTheConversionHelperForAnEscapingObject(t *testing.T) {
+	module := ir.NewModule()
+	function := module.NewFunc("escape", ir.ClsP)
+	block := function.Entry()
+	value := function.Long(42)
+	object := block.HeapAllocConverted(
+		function.Sym("runtime.newobject", 0),
+		function.Sym("type.int", 0),
+		function.Sym("runtime.convT64", 0),
+		value, 8, 8)
+	block.Store(value, object)
+	block.Ret(object)
+
+	require.True(t, LowerHeapAllocations(module))
+	require.Equal(t, ir.OCall, block.Instrs[0].Op)
+	assert.Equal(t, []ir.Ref{function.Sym("runtime.convT64", 0), value}, block.Instrs[0].Args)
+	assert.Equal(t, ir.ClsP, block.Instrs[0].Cls, "the helper still returns the object's address")
+	for _, instruction := range block.Instrs {
+		assert.False(t, instruction.Op.IsStore(),
+			"the initializing store has to go: convT64's result may be in read-only memory")
+	}
+}
+
+func TestLowerHeapAllocationsPromotesAConvertedCandidateWithItsStore(t *testing.T) {
+	module := ir.NewModule()
+	function := module.NewFunc("local", ir.ClsL)
+	block := function.Entry()
+	value := function.Long(42)
+	object := block.HeapAllocConverted(
+		function.Sym("runtime.newobject", 0),
+		function.Sym("type.int", 0),
+		function.Sym("runtime.convT64", 0),
+		value, 8, 8)
+	block.Store(value, object)
+	block.Ret(block.Load(ir.ClsL, object))
+
+	require.True(t, LowerHeapAllocations(module))
+	assert.Equal(t, ir.OAlloc8, block.Instrs[0].Op,
+		"a payload that stays in the frame is cheaper than any call to a helper")
+	assert.Len(t, block.Instrs[0].Args, 1)
+	stores := 0
+	for _, instruction := range block.Instrs {
+		if instruction.Op.IsStore() {
+			stores++
+		}
+	}
+	assert.Equal(t, 1, stores, "the promoted object still has to be given its value")
+}
+
+// A converted candidate whose next instruction is not its initializing store is
+// the one case the lowering has to refuse: dropping some other instruction, or
+// calling the helper and leaving a store to a table entry behind, are both
+// wrong, and an ordinary allocation is always right.
+func TestLowerHeapAllocationsIgnoresAConversionWithoutItsStore(t *testing.T) {
+	module := ir.NewModule()
+	function := module.NewFunc("escape", ir.ClsP)
+	block := function.Entry()
+	value := function.Long(42)
+	object := block.HeapAllocConverted(
+		function.Sym("runtime.newobject", 0),
+		function.Sym("type.int", 0),
+		function.Sym("runtime.convT64", 0),
+		value, 8, 8)
+	other := block.Alloc(8, 8)
+	block.Store(value, other)
+	block.Store(value, object)
+	block.Ret(object)
+
+	require.True(t, LowerHeapAllocations(module))
+	require.Equal(t, ir.OCall, block.Instrs[0].Op)
+	assert.Equal(t, []ir.Ref{function.Sym("runtime.newobject", 0), function.Sym("type.int", 0)},
+		block.Instrs[0].Args, "an unrecognised shape falls back to the allocator")
+}
+
+// The census cannot read a conversion helper's type back out of the finished
+// IR: the call carries the value where an allocator call carries a type
+// descriptor. The decision record is the only place it survives, so the
+// lowering has to write the helper and the type into it.
+func TestLowerHeapAllocationsRecordsTheConversionHelperAsTheAllocator(t *testing.T) {
+	module := ir.NewModule()
+	function := module.NewFunc("escape", ir.ClsP)
+	block := function.Entry()
+	value := function.Long(42)
+	object := block.HeapAllocConverted(
+		function.Sym("runtime.newobject", 0),
+		function.Sym("type.int", 0),
+		function.Sym("runtime.convT64", 0),
+		value, 8, 8)
+	block.Store(value, object)
+	block.Ret(object)
+
+	require.True(t, LowerHeapAllocations(module))
+	require.Len(t, module.AllocDecisions, 1)
+	decision := module.AllocDecisions[0]
+	assert.Equal(t, "runtime.convT64", decision.Allocator)
+	assert.Equal(t, "type.int", decision.Type)
+	assert.Equal(t, ir.AllocOnHeap, decision.Placement,
+		"the payload left the frame, which is the decision this record is about")
+
+	census := AllocationCensus(module)
+	require.Len(t, census, 1, "a conversion site is a census site; dropping it hides a whole class")
+	assert.Equal(t, "runtime.convT64", census[0].Allocator)
+	assert.Equal(t, ir.AllocOnHeap, census[0].Placement)
+}
+
+// The five tests below cover ir.Block.HeapAllocConvertedField, which is what
+// lets a variadic `...any` call's backing array and the boxed payload one of its
+// elements points at be two answers rather than one.
+//
+// Each builds the shape goc emits: a container allocated for the array plus a
+// reserved field, a payload candidate that declares that field, the payload's
+// address written into the container, and the container handed to a callee. The
+// callee's summary is what moves between them.
+
+// variadicShape builds that program. The callee's body is written by retain,
+// which is handed the parameter naming the container.
+// definitionOf finds the instruction that defines a reference after the pass has
+// rewritten it in place, so a test can assert on it without counting the
+// instructions a promotion inserts around it.
+func definitionOf(t *testing.T, block *ir.Block, reference ir.Ref) ir.Instr {
+	t.Helper()
+	for _, instruction := range block.Instrs {
+		if instruction.To == reference {
+			return instruction
+		}
+	}
+	t.Fatalf("no instruction defines %v", reference)
+	return ir.Instr{}
+}
+
+func variadicShape(t *testing.T, retain func(callee *ir.Func, block *ir.Block, parameter ir.Ref)) (*ir.Module, *ir.Func, *ir.Block, ir.Ref, ir.Ref) {
+	t.Helper()
+	module := ir.NewModule()
+
+	callee := module.NewFunc("callee", ir.ClsL)
+	parameter := callee.Param("args", ir.ClsP)
+	calleeEntry := callee.Entry()
+	retain(callee, calleeEntry, parameter)
+
+	function := module.NewFunc("caller", ir.ClsL)
+	block := function.Entry()
+	container := block.HeapAlloc(function.Sym("runtime.newobject", 0), function.Sym("type.combined", 0), 24, 8)
+	value := function.Long(42)
+	payload := block.HeapAllocConvertedField(
+		function.Sym("runtime.newobject", 0),
+		function.Sym("type.int", 0),
+		function.Sym("runtime.convT64", 0),
+		value, container, 16, 8, 8)
+	block.Store(value, payload)
+	block.Store(payload, block.Add(ir.ClsP, container, function.Long(8)))
+	block.Ret(block.Call(ir.ClsL, function.Sym("callee", 0), container))
+	return module, function, block, container, payload
+}
+
+// The whole point: a callee that keeps nothing lets both objects stay in the
+// frame, and the payload is not folded back into a container that did not move.
+func TestLowerHeapAllocationsKeepsBothWhenTheCalleeRetainsNothing(t *testing.T) {
+	module, _, block, container, payload := variadicShape(t, func(callee *ir.Func, entry *ir.Block, parameter ir.Ref) {
+		entry.Ret(entry.Load(ir.ClsL, parameter))
+	})
+
+	facts := ComputeEscapeFacts(module)
+	require.Equal(t, ParamNoEscape, facts.Param("callee", 0).Escape)
+	require.True(t, facts.Param("callee", 0).Deep, "the callee keeps nothing it points at either")
+
+	require.True(t, LowerHeapAllocationsWithFacts(module, facts))
+	assert.Equal(t, ir.OAlloc8, definitionOf(t, block, container).Op, "the container stays in the frame")
+	assert.Equal(t, ir.OAlloc8, definitionOf(t, block, payload).Op, "and so does the payload")
+}
+
+// The case that broke the previous attempt at this. The callee stores what it
+// loads through the parameter into a global, so it keeps an element and not the
+// slice: the payload has to leave the frame and the container does not have to
+// go with it.
+func TestLowerHeapAllocationsEscapesOnlyThePayloadWhenTheCalleeRetainsAnElement(t *testing.T) {
+	module, function, block, container, payload := variadicShape(t, func(callee *ir.Func, entry *ir.Block, parameter ir.Ref) {
+		entry.Store(entry.Load(ir.ClsP, parameter), callee.Sym("global", 0))
+		entry.Ret(callee.Long(0))
+	})
+
+	facts := ComputeEscapeFacts(module)
+	require.Equal(t, ParamNoEscape, facts.Param("callee", 0).Escape,
+		"the pointer handed over is not what is kept")
+	require.False(t, facts.Param("callee", 0).Deep,
+		"what it points at is")
+
+	require.True(t, LowerHeapAllocationsWithFacts(module, facts))
+	assert.Equal(t, ir.OAlloc8, definitionOf(t, block, container).Op, "the array is not what the callee kept")
+	built := definitionOf(t, block, payload)
+	require.Equal(t, ir.OCall, built.Op, "the payload is")
+	assert.Equal(t, function.Sym("runtime.convT64", 0), built.Arg(0),
+		"and it is built by the conversion helper, which is free for a small value")
+}
+
+// A callee that keeps the pointer itself takes the payload with it, and the
+// payload is folded back into the container rather than allocated twice.
+func TestLowerHeapAllocationsFoldsThePayloadBackWhenTheContainerEscapes(t *testing.T) {
+	module, function, block, container, payload := variadicShape(t, func(callee *ir.Func, entry *ir.Block, parameter ir.Ref) {
+		entry.Store(parameter, callee.Sym("global", 0))
+		entry.Ret(callee.Long(0))
+	})
+
+	facts := ComputeEscapeFacts(module)
+	require.Equal(t, ParamEscapes, facts.Param("callee", 0).Escape)
+
+	require.True(t, LowerHeapAllocationsWithFacts(module, facts))
+	assert.Equal(t, ir.OCall, definitionOf(t, block, container).Op, "the container is on the heap")
+	folded := definitionOf(t, block, payload)
+	require.Equal(t, ir.OAdd, folded.Op,
+		"and the payload is a field of it, not a second allocation")
+	assert.Equal(t, container, folded.Arg(0))
+	assert.Equal(t, int64(16), function.Consts[folded.Arg(1).ID].Int)
+	initialized := false
+	for _, instruction := range block.Instrs {
+		if instruction.Op.IsStore() && instruction.Arg(1) == payload {
+			initialized = true
+		}
+	}
+	assert.True(t, initialized,
+		"the initializing store stays: no helper ran to write the value")
+	for _, decision := range module.AllocDecisions {
+		assert.NotEqual(t, "runtime.convT64", decision.Allocator,
+			"a folded payload is a field of an allocation, not an allocation site")
+	}
+}
+
+// Containment is declared, not inferred, so that reading a payload back out of
+// a container the analysis is about to promote cannot leave a global pointing
+// into a dead frame. goc does not emit that shape; this is the check that the
+// answer would be safe if something ever did.
+func TestLowerHeapAllocationsEscapesAPayloadReadBackOutOfItsContainer(t *testing.T) {
+	module := ir.NewModule()
+
+	callee := module.NewFunc("callee", ir.ClsL)
+	parameter := callee.Param("args", ir.ClsP)
+	calleeEntry := callee.Entry()
+	calleeEntry.Ret(calleeEntry.Load(ir.ClsL, parameter))
+
+	function := module.NewFunc("caller", ir.ClsL)
+	block := function.Entry()
+	container := block.HeapAlloc(function.Sym("runtime.newobject", 0), function.Sym("type.combined", 0), 24, 8)
+	value := function.Long(42)
+	payload := block.HeapAllocConvertedField(
+		function.Sym("runtime.newobject", 0),
+		function.Sym("type.int", 0),
+		function.Sym("runtime.convT64", 0),
+		value, container, 16, 8, 8)
+	block.Store(value, payload)
+	block.Store(payload, block.Add(ir.ClsP, container, function.Long(8)))
+	block.Call(ir.ClsL, function.Sym("callee", 0), container)
+	// The read-out: the payload pointer comes back out of the container and is
+	// published from there, which nothing tracks through the load.
+	block.Store(block.Load(ir.ClsP, block.Add(ir.ClsP, container, function.Long(8))), function.Sym("global", 0))
+	block.Ret(function.Long(0))
+
+	facts := ComputeEscapeFacts(module)
+	require.True(t, LowerHeapAllocationsWithFacts(module, facts))
+	built := definitionOf(t, block, payload)
+	require.Equal(t, ir.OCall, built.Op,
+		"a payload that can be read back out of its container has to be on the heap")
+	assert.Equal(t, function.Sym("runtime.convT64", 0), built.Arg(0))
+}
+
+// Two escaping payloads out of a framed container cost two allocations where
+// the combined object costs one, so the container is sent to the heap and takes
+// them back.
+func TestLowerHeapAllocationsFoldsBackWhenMoreThanOnePayloadEscapes(t *testing.T) {
+	module := ir.NewModule()
+
+	callee := module.NewFunc("callee", ir.ClsL)
+	parameter := callee.Param("args", ir.ClsP)
+	calleeEntry := callee.Entry()
+	calleeEntry.Store(calleeEntry.Load(ir.ClsP, parameter), callee.Sym("global", 0))
+	calleeEntry.Ret(callee.Long(0))
+
+	function := module.NewFunc("caller", ir.ClsL)
+	block := function.Entry()
+	container := block.HeapAlloc(function.Sym("runtime.newobject", 0), function.Sym("type.combined", 0), 32, 8)
+	value := function.Long(42)
+	first := block.HeapAllocConvertedField(
+		function.Sym("runtime.newobject", 0), function.Sym("type.int", 0),
+		function.Sym("runtime.convT64", 0), value, container, 16, 8, 8)
+	block.Store(value, first)
+	second := block.HeapAllocConvertedField(
+		function.Sym("runtime.newobject", 0), function.Sym("type.int", 0),
+		function.Sym("runtime.convT64", 0), value, container, 24, 8, 8)
+	block.Store(value, second)
+	block.Store(first, block.Add(ir.ClsP, container, function.Long(0)))
+	block.Store(second, block.Add(ir.ClsP, container, function.Long(8)))
+	block.Ret(block.Call(ir.ClsL, function.Sym("callee", 0), container))
+
+	facts := ComputeEscapeFacts(module)
+	require.False(t, facts.Param("callee", 0).Deep)
+	require.Equal(t, ParamNoEscape, facts.Param("callee", 0).Escape,
+		"the container itself would have stayed in the frame")
+
+	require.True(t, LowerHeapAllocationsWithFacts(module, facts))
+	assert.Equal(t, ir.OCall, definitionOf(t, block, container).Op, "one allocation for all of it")
+	assert.Equal(t, ir.OAdd, definitionOf(t, block, first).Op)
+	assert.Equal(t, ir.OAdd, definitionOf(t, block, second).Op)
+}
