@@ -2019,3 +2019,25 @@ is missing. goc's walk runs on the AST before any inlining and structurally
 cannot see through a call to a function-valued parameter. Irreducible without
 either an inliner ahead of the walk or a whole-program resolution of
 function-valued parameters.
+
+## Guards
+
+- GC reducer `runtime_gc_type_mask_padding.go`: **0/20 failures at GOGC=10**
+  (compiled with the branch's compiler, run 20 times).
+- `TestFrameEscapeAudit`: clean. `frame_escape_baseline.txt` is unchanged by the
+  whole branch -- no new frame address reaches non-local storage.
+- Census regenerated and reviewed site by site: **73 heap -> frame, 0
+  frame -> heap, 50 vanished (all previously heap), 0 appeared**, ignoring the
+  line-number shifts in `testdata/allocation_counts.go`, which this branch edits.
+  The 50 vanished are the direction the census cannot see both sides of: the
+  object became an ordinary front-end frame slot, which carries no allocator and
+  is not recorded. Spot-checked: `crypto/sha1.digest.Sum`'s `newobject 20_byte`
+  is `hash` in `return append(in, hash[:]...)`, a local `[20]byte` whose storage
+  the spread operand used to publish. The 73 that moved are mostly
+  `bytes.Equal([]byte{...}, ...)` in the FIPS self-tests (23 in
+  crypto/internal), which move because `bytes.Equal` is
+  `string(a) == string(b)`.
+- `TestEscapeShadowPlacement` needed its baseline regenerated: the front end now
+  frames things the summary-fed IR analysis would still heap, so the recorded
+  disagreements moved. Front-end placements in frames went 83.4% -> **83.9%**
+  (165750 of 197518).

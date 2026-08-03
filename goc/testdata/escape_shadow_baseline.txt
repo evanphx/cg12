@@ -49,7 +49,10 @@ stdlib/src/crypto/ecdsa/ecdsa.go:529:37	crypto/ecdsa.verifyFIPS[*crypto/internal
 stdlib/src/crypto/ecdsa/ecdsa.go:529:37	crypto/ecdsa.verifyFIPS[*crypto/internal/fips140/nistec.P384Point]	composite-literal	heap -> frame		
 stdlib/src/crypto/ecdsa/ecdsa.go:529:37	crypto/ecdsa.verifyFIPS[*crypto/internal/fips140/nistec.P521Point]	composite-literal	heap -> frame		
 stdlib/src/crypto/ed25519/ed25519.go:222:52	crypto/ed25519.Verify	composite-literal	heap -> frame		
+stdlib/src/crypto/hpke/hpke.go:257:35	crypto/hpke.suiteID	string-conversion-buffer	frame -> heap		argument 0 of $runtime.stringtoslicebyte leaks to a result the caller cannot follow
 stdlib/src/crypto/hpke/hpke.go:91:22	crypto/hpke.newContext	slice-literal-backing	heap -> frame		
+stdlib/src/crypto/hpke/kdf.go:87:41	crypto/hpke.hkdfKDF.labeledExtract	string-conversion-buffer	frame -> heap		argument 0 of $runtime.stringtoslicebyte leaks to a result the caller cannot follow
+stdlib/src/crypto/hpke/kdf.go:97:43	crypto/hpke.hkdfKDF.labeledExpand	string-conversion-buffer	frame -> heap		argument 0 of $runtime.stringtoslicebyte leaks to a result the caller cannot follow
 stdlib/src/crypto/hpke/kem.go:320:62	crypto/hpke.dhKEM.DeriveKeyPair	slice-literal-backing	heap -> frame	in a loop	
 stdlib/src/crypto/internal/fips140/bigmod/nat.go:1158:14	crypto/internal/fips140/bigmod.extendedGCD	composite-literal	heap -> frame	in a loop	
 stdlib/src/crypto/internal/fips140/bigmod/nat.go:1159:14	crypto/internal/fips140/bigmod.extendedGCD	composite-literal	heap -> frame	in a loop	
@@ -78,6 +81,7 @@ stdlib/src/crypto/internal/fips140/bigmod/nat.go:951:16	crypto/internal/fips140/
 stdlib/src/crypto/internal/fips140/bigmod/nat.go:961:16	crypto/internal/fips140/bigmod.Nat.Mul	composite-literal	heap -> frame		
 stdlib/src/crypto/internal/fips140/bigmod/nat.go:968:16	crypto/internal/fips140/bigmod.Nat.Mul	composite-literal	heap -> frame		
 stdlib/src/crypto/internal/fips140/bigmod/nat.go:975:16	crypto/internal/fips140/bigmod.Nat.Mul	composite-literal	heap -> frame		
+stdlib/src/crypto/internal/fips140/drbg/cast.go:43:11	crypto/internal/fips140/drbg.init.0.func.18.27	slice-literal-backing	frame -> heap		argument 3 of $bytes.Equal escapes
 stdlib/src/crypto/internal/fips140/ecdh/cast.go:18:17	.goc.global.initfunc.12.crypto/internal/fips140/ecdh.fipsSelfTest.func.17.36	slice-literal-backing	frame -> heap		store into non-local storage
 stdlib/src/crypto/internal/fips140/ecdh/cast.go:18:17	.goc.global.initfunc.16.crypto/internal/fips140/ecdh.fipsSelfTest.func.17.36	slice-literal-backing	frame -> heap		store into non-local storage
 stdlib/src/crypto/internal/fips140/ecdh/cast.go:18:17	.goc.global.initfunc.17.crypto/internal/fips140/ecdh.fipsSelfTest.func.17.36	slice-literal-backing	frame -> heap		store into non-local storage
@@ -90,6 +94,12 @@ stdlib/src/crypto/internal/fips140/ecdh/cast.go:24:16	.goc.global.initfunc.17.cr
 stdlib/src/crypto/internal/fips140/ecdh/cast.go:24:16	.goc.global.initfunc.35.crypto/internal/fips140/ecdh.fipsSelfTest.func.17.36	slice-literal-backing	frame -> heap		store into non-local storage
 stdlib/src/crypto/internal/fips140/ecdh/cast.go:24:16	.goc.global.initfunc.41.crypto/internal/fips140/ecdh.fipsSelfTest.func.17.36	slice-literal-backing	frame -> heap		store into non-local storage
 stdlib/src/crypto/internal/fips140/ecdh/cast.go:24:16	.goc.global.initfunc.9.crypto/internal/fips140/ecdh.fipsSelfTest.func.17.36	slice-literal-backing	frame -> heap		store into non-local storage
+stdlib/src/crypto/internal/fips140/ecdh/cast.go:35:11	.goc.global.initfunc.12.crypto/internal/fips140/ecdh.fipsSelfTest.func.17.36	slice-literal-backing	frame -> heap		argument 3 of $bytes.Equal escapes
+stdlib/src/crypto/internal/fips140/ecdh/cast.go:35:11	.goc.global.initfunc.16.crypto/internal/fips140/ecdh.fipsSelfTest.func.17.36	slice-literal-backing	frame -> heap		argument 3 of $bytes.Equal escapes
+stdlib/src/crypto/internal/fips140/ecdh/cast.go:35:11	.goc.global.initfunc.17.crypto/internal/fips140/ecdh.fipsSelfTest.func.17.36	slice-literal-backing	frame -> heap		argument 3 of $bytes.Equal escapes
+stdlib/src/crypto/internal/fips140/ecdh/cast.go:35:11	.goc.global.initfunc.35.crypto/internal/fips140/ecdh.fipsSelfTest.func.17.36	slice-literal-backing	frame -> heap		argument 3 of $bytes.Equal escapes
+stdlib/src/crypto/internal/fips140/ecdh/cast.go:35:11	.goc.global.initfunc.41.crypto/internal/fips140/ecdh.fipsSelfTest.func.17.36	slice-literal-backing	frame -> heap		argument 3 of $bytes.Equal escapes
+stdlib/src/crypto/internal/fips140/ecdh/cast.go:35:11	.goc.global.initfunc.9.crypto/internal/fips140/ecdh.fipsSelfTest.func.17.36	slice-literal-backing	frame -> heap		argument 3 of $bytes.Equal escapes
 stdlib/src/crypto/internal/fips140/ecdsa/cast.go:111:7	.goc.global.initfunc.18.crypto/internal/fips140/ecdsa.fipsSelfTestDeterministic.func.107.47	slice-literal-backing	frame -> heap		store into non-local storage
 stdlib/src/crypto/internal/fips140/ecdsa/cast.go:111:7	.goc.global.initfunc.23.crypto/internal/fips140/ecdsa.fipsSelfTestDeterministic.func.107.47	slice-literal-backing	frame -> heap		store into non-local storage
 stdlib/src/crypto/internal/fips140/ecdsa/cast.go:111:7	.goc.global.initfunc.41.crypto/internal/fips140/ecdsa.fipsSelfTestDeterministic.func.107.47	slice-literal-backing	frame -> heap		store into non-local storage
@@ -110,6 +120,10 @@ stdlib/src/crypto/internal/fips140/ed25519/cast.go:53:17	.goc.global.initfunc.24
 stdlib/src/crypto/internal/fips140/ed25519/cast.go:53:17	.goc.global.initfunc.42.crypto/internal/fips140/ed25519.fipsSelfTest.func.46.42	string-conversion-buffer	frame -> heap		argument 0 of $runtime.stringtoslicebyte leaks to a result the caller cannot follow
 stdlib/src/crypto/internal/fips140/ed25519/cast.go:53:17	.goc.global.initfunc.48.crypto/internal/fips140/ed25519.fipsSelfTest.func.46.42	string-conversion-buffer	frame -> heap		argument 0 of $runtime.stringtoslicebyte leaks to a result the caller cannot follow
 stdlib/src/crypto/internal/fips140/ed25519/cast.go:53:17	.goc.global.initfunc.9.crypto/internal/fips140/ed25519.fipsSelfTest.func.46.42	string-conversion-buffer	frame -> heap		argument 0 of $runtime.stringtoslicebyte leaks to a result the caller cannot follow
+stdlib/src/crypto/internal/fips140/ed25519/cast.go:54:11	.goc.global.initfunc.24.crypto/internal/fips140/ed25519.fipsSelfTest.func.46.42	slice-literal-backing	frame -> heap		argument 3 of $bytes.Equal escapes
+stdlib/src/crypto/internal/fips140/ed25519/cast.go:54:11	.goc.global.initfunc.42.crypto/internal/fips140/ed25519.fipsSelfTest.func.46.42	slice-literal-backing	frame -> heap		argument 3 of $bytes.Equal escapes
+stdlib/src/crypto/internal/fips140/ed25519/cast.go:54:11	.goc.global.initfunc.48.crypto/internal/fips140/ed25519.fipsSelfTest.func.46.42	slice-literal-backing	frame -> heap		argument 3 of $bytes.Equal escapes
+stdlib/src/crypto/internal/fips140/ed25519/cast.go:54:11	.goc.global.initfunc.9.crypto/internal/fips140/ed25519.fipsSelfTest.func.46.42	slice-literal-backing	frame -> heap		argument 3 of $bytes.Equal escapes
 stdlib/src/crypto/internal/fips140/ed25519/cast.go:64:8	.goc.global.initfunc.24.crypto/internal/fips140/ed25519.fipsSelfTest.func.46.42	composite-literal	frame -> heap		argument 0 of $crypto/internal/fips140/ed25519.precomputePrivateKey escapes
 stdlib/src/crypto/internal/fips140/ed25519/cast.go:64:8	.goc.global.initfunc.42.crypto/internal/fips140/ed25519.fipsSelfTest.func.46.42	composite-literal	frame -> heap		argument 0 of $crypto/internal/fips140/ed25519.precomputePrivateKey escapes
 stdlib/src/crypto/internal/fips140/ed25519/cast.go:64:8	.goc.global.initfunc.48.crypto/internal/fips140/ed25519.fipsSelfTest.func.46.42	composite-literal	frame -> heap		argument 0 of $crypto/internal/fips140/ed25519.precomputePrivateKey escapes
@@ -127,6 +141,8 @@ stdlib/src/crypto/internal/fips140/ed25519/ed25519.go:303:19	crypto/internal/fip
 stdlib/src/crypto/internal/fips140/ed25519/ed25519.go:308:32	crypto/internal/fips140/ed25519.verifyWithDom	make-slice-backing	frame -> heap		argument 1 of $crypto/internal/fips140/sha512.Digest.Sum leaks to a result the caller cannot follow
 stdlib/src/crypto/internal/fips140/ed25519/ed25519.go:321:13	crypto/internal/fips140/ed25519.verifyWithDom	composite-literal	heap -> frame		
 stdlib/src/crypto/internal/fips140/ed25519/ed25519.go:322:8	crypto/internal/fips140/ed25519.verifyWithDom	composite-literal	heap -> frame		
+stdlib/src/crypto/internal/fips140/hkdf/cast.go:21:11	crypto/internal/fips140/hkdf.init.0.func.16.32	slice-literal-backing	frame -> heap		argument 3 of $bytes.Equal escapes
+stdlib/src/crypto/internal/fips140/hmac/cast.go:20:11	crypto/internal/fips140/hmac.init.0.func.15.32	slice-literal-backing	frame -> heap		argument 3 of $bytes.Equal escapes
 stdlib/src/crypto/internal/fips140/mlkem/cast.go:23:11	.goc.global.initfunc.17.crypto/internal/fips140/mlkem.fipsSelfTest.func.16.29	composite-literal	heap -> frame		
 stdlib/src/crypto/internal/fips140/mlkem/cast.go:23:11	.goc.global.initfunc.48.crypto/internal/fips140/mlkem.fipsSelfTest.func.16.29	composite-literal	heap -> frame		
 stdlib/src/crypto/internal/fips140/mlkem/cast.go:23:11	.goc.global.initfunc.5.crypto/internal/fips140/mlkem.fipsSelfTest.func.16.29	composite-literal	heap -> frame		
@@ -150,50 +166,76 @@ stdlib/src/crypto/internal/fips140/nistec/p521.go:29:9	crypto/internal/fips140/n
 stdlib/src/crypto/internal/fips140/nistec/p521.go:29:9	crypto/internal/fips140/nistec.P521Point.SetBytes	composite-literal	heap -> frame		
 stdlib/src/crypto/internal/fips140/nistec/p521.go:29:9	crypto/internal/fips140/nistec.P521Point.generatorTable.func.393.28	composite-literal	heap -> frame		
 stdlib/src/crypto/internal/fips140/nistec/p521.go:29:9	crypto/internal/fips140/nistec.p521Table.Select	composite-literal	heap -> frame		
-stdlib/src/crypto/tls/auth.go:259:14	crypto/tls.selectSignatureScheme	slice-literal-backing	heap -> frame		
+stdlib/src/crypto/internal/fips140/pbkdf2/cast.go:28:11	crypto/internal/fips140/pbkdf2.init.0.func.23.25	slice-literal-backing	frame -> heap		argument 3 of $bytes.Equal escapes
+stdlib/src/crypto/internal/fips140/rsa/cast.go:188:11	.goc.global.initfunc.12.crypto/internal/fips140/rsa.fipsSelfTest.func.180.60	slice-literal-backing	frame -> heap		argument 3 of $bytes.Equal escapes
+stdlib/src/crypto/internal/fips140/rsa/cast.go:188:11	.goc.global.initfunc.34.crypto/internal/fips140/rsa.fipsSelfTest.func.180.60	slice-literal-backing	frame -> heap		argument 3 of $bytes.Equal escapes
+stdlib/src/crypto/internal/fips140/rsa/cast.go:188:11	.goc.global.initfunc.53.crypto/internal/fips140/rsa.fipsSelfTest.func.180.60	slice-literal-backing	frame -> heap		argument 3 of $bytes.Equal escapes
+stdlib/src/crypto/internal/fips140/rsa/cast.go:188:11	.goc.global.initfunc.59.crypto/internal/fips140/rsa.fipsSelfTest.func.180.60	slice-literal-backing	frame -> heap		argument 3 of $bytes.Equal escapes
+stdlib/src/crypto/internal/fips140/sha256/cast.go:19:11	crypto/internal/fips140/sha256.init.0.func.14.27	slice-literal-backing	frame -> heap		argument 3 of $bytes.Equal escapes
+stdlib/src/crypto/internal/fips140/sha3/cast.go:19:11	crypto/internal/fips140/sha3.init.0.func.14.28	slice-literal-backing	frame -> heap		argument 3 of $bytes.Equal escapes
+stdlib/src/crypto/internal/fips140/sha512/cast.go:19:11	crypto/internal/fips140/sha512.init.0.func.14.27	slice-literal-backing	frame -> heap		argument 3 of $bytes.Equal escapes
+stdlib/src/crypto/internal/fips140/tls12/cast.go:25:11	crypto/internal/fips140/tls12.init.0.func.16.35	slice-literal-backing	frame -> heap		argument 3 of $bytes.Equal escapes
+stdlib/src/crypto/internal/fips140/tls13/cast.go:21:11	crypto/internal/fips140/tls13.init.0.func.16.35	slice-literal-backing	frame -> heap		argument 3 of $bytes.Equal escapes
 stdlib/src/crypto/tls/common.go:1379:12	crypto/tls.ClientHelloInfo.SupportsCertificate	composite-literal	frame -> heap		store into non-local storage
 stdlib/src/crypto/tls/conn.go:1349:10	crypto/tls.Conn.handleKeyUpdate	composite-literal	frame -> heap		argument 0 of $crypto/tls.keyUpdateMsg.marshal escapes
+stdlib/src/crypto/tls/ech.go:368:46	crypto/tls.decodeInnerClientHello	slice-literal-backing	frame -> heap		argument 3 of $bytes.Equal escapes
 stdlib/src/crypto/tls/handshake_client.go:1058:8	crypto/tls.clientHandshakeState.saveSessionTicket	composite-literal	heap -> frame		
 stdlib/src/crypto/tls/handshake_client.go:328:9	crypto/tls.Conn.clientHandshake	composite-literal	frame -> heap		argument 0 of $crypto/tls.clientHandshakeStateTLS13.handshake escapes
 stdlib/src/crypto/tls/handshake_client.go:342:8	crypto/tls.Conn.clientHandshake	composite-literal	frame -> heap		argument 0 of $crypto/tls.clientHandshakeState.handshake escapes
+stdlib/src/crypto/tls/handshake_client.go:358:54	crypto/tls.Conn.loadSession	slice-literal-backing	frame -> heap		argument 3 of $bytes.Equal escapes
 stdlib/src/crypto/tls/handshake_client.go:785:17	crypto/tls.clientHandshakeState.doFullHandshake	composite-literal	frame -> heap		store into non-local storage
 stdlib/src/crypto/tls/handshake_client_tls13.go:811:14	crypto/tls.clientHandshakeStateTLS13.sendClientFinished	composite-literal	frame -> heap		store into non-local storage
 stdlib/src/crypto/tls/handshake_client_tls13.go:881:8	crypto/tls.Conn.handleNewSessionTicket	composite-literal	heap -> frame		
 stdlib/src/crypto/tls/handshake_server_tls13.go:893:14	crypto/tls.serverHandshakeStateTLS13.sendServerFinished	composite-literal	frame -> heap		store into non-local storage
 stdlib/src/crypto/x509/parser.go:1011:40	crypto/x509.parseCertificate	composite-literal	heap -> frame		
-stdlib/src/crypto/x509/pkix/pkix.go:235:27	crypto/x509/pkix.Name.ToRDNSequence	slice-literal-backing	heap -> frame		
-stdlib/src/crypto/x509/pkix/pkix.go:238:27	crypto/x509/pkix.Name.ToRDNSequence	slice-literal-backing	heap -> frame		
-stdlib/src/crypto/x509/root_unix.go:37:11	crypto/x509.loadSystemRoots	slice-literal-backing	heap -> frame		
-stdlib/src/crypto/x509/verify.go:1239:17	crypto/x509.policiesValid	slice-literal-backing	heap -> frame	in a loop	
 stdlib/src/crypto/x509/verify.go:1295:56	crypto/x509.policiesValid	string-conversion-buffer	frame -> heap	in a loop	argument 0 of $runtime.stringtoslicebyte leaks to a result the caller cannot follow
-stdlib/src/crypto/x509/verify.go:1299:61	crypto/x509.policiesValid	slice-literal-backing	heap -> frame	in a loop	
+stdlib/src/crypto/x509/verify.go:909:16	crypto/x509.toLowerCaseASCII	string-conversion-buffer	frame -> heap		argument 0 of $runtime.stringtoslicebyte leaks to a result the caller cannot follow
 stdlib/src/crypto/x509/x509.go:1020:59	crypto/x509.checkSignature	composite-literal	heap -> frame		
+stdlib/src/encoding/asn1/asn1.go:236:25	encoding/asn1.ObjectIdentifier.String	make-slice-backing	frame -> heap		argument 0 of $strconv.AppendInt escapes
 stdlib/src/encoding/base64/base64.go:431:36	encoding/base64.Encoding.DecodeString	string-conversion-buffer	frame -> heap		argument 0 of $runtime.stringtoslicebyte leaks to a result the caller cannot follow
 stdlib/src/encoding/hex/hex.go:140:31	encoding/hex.DecodeString	string-conversion-buffer	frame -> heap		argument 0 of $runtime.stringtoslicebyte leaks to a result the caller cannot follow
 stdlib/src/encoding/xml/marshal.go:1118:28	encoding/xml.parentStack.push	composite-literal	heap -> frame	in a loop	
+stdlib/src/encoding/xml/marshal.go:364:36	encoding/xml.printer.createAttrPrefix	string-conversion-buffer	frame -> heap		argument 0 of $runtime.stringtoslicebyte leaks to a result the caller cannot follow
 stdlib/src/image/png/reader.go:970:7	image/png.Decode	composite-literal	frame -> heap		argument 0 of $image/png.decoder.checkHeader escapes
 stdlib/src/image/png/reader.go:994:7	image/png.DecodeConfig	composite-literal	frame -> heap		argument 0 of $image/png.decoder.checkHeader escapes
+stdlib/src/internal/filepathlite/path.go:195:14	internal/filepathlite.replaceStringByte	string-conversion-buffer	frame -> heap		argument 0 of $runtime.stringtoslicebyte leaks to a result the caller cannot follow
 stdlib/src/internal/poll/splice_linux.go:198:15	internal/poll.newPoolPipe.func.197.36	composite-literal	heap -> frame		
+stdlib/src/internal/runtime/cgroup/cgroup.go:386:32	internal/runtime/cgroup.parseCPUMount	string-conversion-buffer	frame -> heap	in a loop	argument 0 of $runtime.stringtoslicebyte leaks to a result the caller cannot follow
 stdlib/src/internal/runtime/cgroup/cgroup.go:79:38	internal/runtime/cgroup.parseV2Limit	string-conversion-buffer	frame -> heap		argument 0 of $runtime.stringtoslicebyte leaks to a result the caller cannot follow
 stdlib/src/internal/strconv/atoi.go:107:27	internal/strconv.ParseUint	string-conversion-buffer	frame -> heap		argument 0 of $runtime.stringtoslicebyte leaks to a result the caller cannot follow
 stdlib/src/internal/strconv/atoi.go:230:29	internal/strconv.Atoi	string-conversion-buffer	frame -> heap		argument 0 of $runtime.stringtoslicebyte leaks to a result the caller cannot follow
 stdlib/src/math/big/int.go:920:10	math/big.nat.modInverse	composite-literal	heap -> frame		
 stdlib/src/math/big/int.go:920:35	math/big.nat.modInverse	composite-literal	heap -> frame		
+stdlib/src/math/rand/v2/chacha8.go:75:37	math/rand/v2.ChaCha8.UnmarshalBinary	string-conversion-buffer	frame -> heap		argument 0 of $runtime.stringtoslicebyte leaks to a result the caller cannot follow
 stdlib/src/mime/grammar.go:79:27	mime.isToken	string-conversion-buffer	frame -> heap		argument 0 of $runtime.stringtoslicebyte leaks to a result the caller cannot follow
 stdlib/src/net/dial.go:544:8	net.Dialer.DialContext	composite-literal	frame -> heap		argument 0 of $net.sysDialer.dialParallel escapes
 stdlib/src/net/dial.go:879:8	net.ListenConfig.Listen	composite-literal	frame -> heap		argument 0 of $net.sysListener.listenMPTCP escapes
+stdlib/src/net/dnsclient_unix.go:177:14	net.Resolver.exchange	slice-literal-backing	frame -> heap		
+stdlib/src/net/dnsclient_unix.go:179:14	net.Resolver.exchange	slice-literal-backing	frame -> heap		
+stdlib/src/net/dnsclient_unix.go:643:12	net.Resolver.goLookupIPCNAMEOrder	slice-literal-backing	frame -> heap		
+stdlib/src/net/dnsclient_unix.go:649:12	net.Resolver.goLookupIPCNAMEOrder	slice-literal-backing	frame -> heap		
+stdlib/src/net/dnsclient_unix.go:651:12	net.Resolver.goLookupIPCNAMEOrder	slice-literal-backing	frame -> heap		
+stdlib/src/net/hosts.go:135:24	net.lookupStaticHost	string-conversion-buffer	frame -> heap		argument 0 of $runtime.stringtoslicebyte leaks to a result the caller cannot follow
+stdlib/src/net/hosts.go:94:19	net.readHosts	string-conversion-buffer	frame -> heap	in a loop	argument 0 of $runtime.stringtoslicebyte leaks to a result the caller cannot follow
 stdlib/src/net/http/client.go:429:50	net/http.basicAuth	string-conversion-buffer	frame -> heap		argument 0 of $runtime.stringtoslicebyte leaks to a result the caller cannot follow
 stdlib/src/net/http/h2_bundle.go:4303:21	net/http.http2ConfigureServer.func.4287.18	composite-literal	heap -> frame		
+stdlib/src/net/http/h2_bundle.go:4562:39	net/http.http2serverConn.rejectConn	string-conversion-buffer	frame -> heap		argument 0 of $runtime.stringtoslicebyte leaks to a result the caller cannot follow
 stdlib/src/net/http/h2_bundle.go:6128:28	net/http.http2serverConn.upgradeRequest	method-value-descriptor	frame -> heap		write barrier into non-local storage
 stdlib/src/net/http/h2_bundle.go:6303:10	net/http.http2serverConn.newWriterAndRequestNoBody	composite-literal	heap -> frame		
 stdlib/src/net/http/h2_bundle.go:7223:29	net/http.http2serverConn.startPush.func.7180.24	method-value-descriptor	frame -> heap		write barrier into non-local storage
 stdlib/src/net/http/h2_bundle.go:8143:21	net/http.http2Transport.newClientConn	slice-literal-backing	heap -> frame		
 stdlib/src/net/http/h2_bundle.go:9417:8	net/http.http2ClientConn.readLoop	composite-literal	frame -> heap		write barrier into a candidate
-stdlib/src/net/http/internal/httpcommon/httpcommon.go:79:12	net/http/internal/httpcommon.buildCommonHeaderMaps	slice-literal-backing	heap -> frame		
-stdlib/src/net/http/servemux121.go:196:7	net/http.serveMux121.shouldRedirectRLocked	slice-literal-backing	heap -> frame		
 stdlib/src/net/http/server.go:1307:27	net/http.chunkWriter.writeHeader	method-value-descriptor	frame -> heap	in a loop	argument 1 of $net/http.foreachHeaderElement escapes
 stdlib/src/net/http/server.go:3772:10	net/http.Server.onceSetNextProtoDefaults	composite-literal	frame -> heap		argument 1 of $net/http.http2ConfigureServer escapes
+stdlib/src/net/ip.go:309:25	net.IP.String	make-slice-backing	frame -> heap		
+stdlib/src/net/ip.go:312:25	net.IP.String	make-slice-backing	frame -> heap		
 stdlib/src/net/ipsock_posix.go:45:15	net.ipStackCapabilities.probe	slice-literal-backing	heap -> frame		
+stdlib/src/net/netip/netip.go:857:25	net/netip.Addr.string4	make-slice-backing	frame -> heap		argument 1 of $net/netip.Addr.appendTo4 escapes
+stdlib/src/net/netip/netip.go:875:25	net/netip.Addr.string4In6	make-slice-backing	frame -> heap		argument 1 of $net/netip.Addr.appendTo4In6 escapes
+stdlib/src/net/netip/netip.go:904:25	net/netip.Addr.string6	make-slice-backing	frame -> heap		argument 1 of $net/netip.Addr.appendTo6 escapes
+stdlib/src/net/nss.go:237:20	net.parseCriteria.func.223.24	string-conversion-buffer	frame -> heap		argument 0 of $runtime.stringtoslicebyte leaks to a result the caller cannot follow
+stdlib/src/net/textproto/reader.go:662:41	net/textproto.CanonicalMIMEHeaderKey	string-conversion-buffer	frame -> heap		argument 0 of $runtime.stringtoslicebyte leaks to a result the caller cannot follow
+stdlib/src/net/textproto/reader.go:666:41	net/textproto.CanonicalMIMEHeaderKey	string-conversion-buffer	frame -> heap		argument 0 of $runtime.stringtoslicebyte leaks to a result the caller cannot follow
 stdlib/src/net/udpsock.go:300:8	net.dialUDP	composite-literal	frame -> heap		argument 0 of $net.sysDialer.dialUDP escapes
 stdlib/src/net/udpsock.go:329:8	net.ListenUDP	composite-literal	frame -> heap		argument 0 of $net.sysListener.listenUDP escapes
 stdlib/src/net/unixsock_posix.go:139:8	net.UnixConn.writeTo	composite-literal	frame -> heap		store into non-local storage
@@ -202,13 +244,14 @@ stdlib/src/net/url/url.go:233:27	net/url.escape	string-conversion-buffer	frame -
 stdlib/src/reflect/iter.go:130:11	reflect.Value.Seq2.func.126.10	slice-literal-backing	heap -> frame		
 stdlib/src/reflect/iter.go:44:11	reflect.Value.Seq.func.40.10	slice-literal-backing	heap -> frame		
 stdlib/src/regexp/regexp.go:694:27	regexp.init.0	string-conversion-buffer	frame -> heap		argument 0 of $runtime.stringtoslicebyte leaks to a result the caller cannot follow
+stdlib/src/runtime/error.go:184:23	runtime.boundsError.Error	make-slice-backing	frame -> heap		argument 0 of $runtime.appendIntStr leaks to a result the caller cannot follow
 stdlib/src/runtime/fds_unix.go:25:20	runtime.checkfds	string-conversion-buffer	frame -> heap		argument 0 of $runtime.stringtoslicebyte leaks to a result the caller cannot follow
 stdlib/src/runtime/panic.go:1365:14	runtime.recovery	composite-literal	frame -> heap		write barrier into non-local storage
 stdlib/src/runtime/print.go:202:16	runtime.printquoted	string-conversion-buffer	frame -> heap		argument 0 of $runtime.stringtoslicebyte leaks to a result the caller cannot follow
 stdlib/src/runtime/print.go:206:18	runtime.printquoted	string-conversion-buffer	frame -> heap	in a loop	argument 0 of $runtime.stringtoslicebyte leaks to a result the caller cannot follow
 stdlib/src/runtime/print.go:209:18	runtime.printquoted	string-conversion-buffer	frame -> heap	in a loop	argument 0 of $runtime.stringtoslicebyte leaks to a result the caller cannot follow
 stdlib/src/runtime/print.go:212:18	runtime.printquoted	string-conversion-buffer	frame -> heap	in a loop	argument 0 of $runtime.stringtoslicebyte leaks to a result the caller cannot follow
-stdlib/src/strings/replace.go:86:45	strings.Replacer.build	slice-literal-backing	heap -> frame	in a loop	
+stdlib/src/strings/replace.go:446:18	strings.byteReplacer.Replace	string-conversion-buffer	frame -> heap	in a loop	argument 0 of $runtime.stringtoslicebyte leaks to a result the caller cannot follow
 stdlib/src/strings/strings.go:1093:28	strings.TrimSpace	string-conversion-buffer	frame -> heap		argument 0 of $runtime.stringtoslicebyte leaks to a result the caller cannot follow
 stdlib/src/syscall/exec_linux.go:264:17	syscall.forkAndExecInChild1	string-conversion-buffer	frame -> heap		argument 0 of $runtime.stringtoslicebyte leaks to a result the caller cannot follow
 stdlib/src/syscall/exec_linux.go:269:23	syscall.forkAndExecInChild1	string-conversion-buffer	frame -> heap		argument 0 of $runtime.stringtoslicebyte leaks to a result the caller cannot follow
@@ -218,44 +261,46 @@ stdlib/src/syscall/exec_linux.go:275:23	syscall.forkAndExecInChild1	string-conve
 stdlib/src/syscall/exec_linux.go:721:17	syscall.writeSetgroups	string-conversion-buffer	frame -> heap		argument 0 of $runtime.stringtoslicebyte leaks to a result the caller cannot follow
 stdlib/src/syscall/exec_linux.go:723:17	syscall.writeSetgroups	string-conversion-buffer	frame -> heap		argument 0 of $runtime.stringtoslicebyte leaks to a result the caller cannot follow
 stdlib/src/syscall/netlink_linux.go:66:8	syscall.NetlinkRIB	composite-literal	frame -> heap		store into non-local storage
-stdlib/src/testing/fstest/testfs.go:611:9	testing/fstest.fsTester.checkBadPath	slice-literal-backing	heap -> frame		
 stdlib/src/text/template/exec.go:216:11	text/template.Template.execute	composite-literal	frame -> heap		argument 0 of $text/template.state.walk escapes
 stdlib/src/text/template/exec.go:219:9	text/template.Template.execute	slice-literal-backing	frame -> heap		store into non-local storage
 stdlib/src/text/template/exec.go:866:17	text/template.state.evalCall	slice-literal-backing	heap -> frame		
-stdlib/src/text/template/exec.go:945:51	text/template.state.evalArg	slice-literal-backing	heap -> frame		
+stdlib/src/time/format.go:559:26	time.Time.String	make-slice-backing	frame -> heap		argument 0 of $time.appendInt leaks to a result the caller cannot follow
+stdlib/src/time/format.go:582:25	time.Time.GoString	make-slice-backing	frame -> heap		argument 0 of $time.appendInt leaks to a result the caller cannot follow
 stdlib/src/time/format_rfc3339.go:89:28	time.parseRFC3339[string].func.88.15	string-conversion-buffer	frame -> heap		argument 0 of $runtime.stringtoslicebyte leaks to a result the caller cannot follow
 stdlib/src/time/zoneinfo_read.go:546:52	time.loadLocation	string-conversion-buffer	frame -> heap		argument 0 of $runtime.stringtoslicebyte leaks to a result the caller cannot follow
-stdlib/src/time/zoneinfo_unix.go:39:39	time.initLocal	slice-literal-backing	heap -> frame		
-stdlib/src/time/zoneinfo_unix.go:50:34	time.initLocal	slice-literal-backing	heap -> frame		
+testdata/allocation_counts.go:312:12	main.compareByteSliceAsString	slice-literal-backing	frame -> heap		argument 0 of $runtime.slicebytetostringtmp leaks to a result the caller cannot follow
+testdata/allocation_counts.go:325:9	main.declareInterfaceFromPointer	composite-literal	frame -> heap		store into non-local storage
+testdata/allocation_counts.go:345:37	main.nestedCompositeLiteralAddress	composite-literal	frame -> heap		store into non-local storage
 testdata/bytealg_compare.go:12:32	main.checkBytes	string-conversion-buffer	frame -> heap		argument 0 of $runtime.stringtoslicebyte leaks to a result the caller cannot follow
 testdata/bytealg_compare.go:12:46	main.checkBytes	string-conversion-buffer	frame -> heap		argument 0 of $runtime.stringtoslicebyte leaks to a result the caller cannot follow
 testdata/bytealg_compare.go:26:35	main.checkIndex	string-conversion-buffer	frame -> heap		argument 0 of $runtime.stringtoslicebyte leaks to a result the caller cannot follow
 testdata/bytealg_compare.go:26:53	main.checkIndex	string-conversion-buffer	frame -> heap		argument 0 of $runtime.stringtoslicebyte leaks to a result the caller cannot follow
 testdata/bytealg_compare.go:54:39	main.checkIndexByte	string-conversion-buffer	frame -> heap		argument 0 of $runtime.stringtoslicebyte leaks to a result the caller cannot follow
 testdata/bytealg_compare.go:65:35	main.checkCount	string-conversion-buffer	frame -> heap		argument 0 of $runtime.stringtoslicebyte leaks to a result the caller cannot follow
-testdata/bytes_grow_allocs.go:12:16	main.main	slice-literal-backing	heap -> frame		
-testdata/bytes_grow_allocs.go:13:15	main.main	slice-literal-backing	heap -> frame		
 testdata/bytes_replace_allocs.go:15:24	main.main	string-conversion-buffer	frame -> heap		argument 0 of $runtime.stringtoslicebyte leaks to a result the caller cannot follow
 testdata/loop_alias_composite.go:9:8	main.alternate	composite-literal	heap -> frame	in a loop	
 testdata/md5_assembly.go:6:27	main.main	string-conversion-buffer	frame -> heap		argument 0 of $runtime.stringtoslicebyte leaks to a result the caller cannot follow
-testdata/runtime_append_self_overlap.go:4:12	main.main	slice-literal-backing	heap -> frame		
+testdata/runtime_append_self_overlap.go:13:18	main.main	string-conversion-buffer	frame -> heap		argument 0 of $runtime.stringtoslicebyte leaks to a result the caller cannot follow
 testdata/runtime_closure_captured_string.go:285:14	main.controls	slice-literal-backing	frame -> heap		store into non-local storage
+testdata/runtime_copy_string_to_bytes.go:4:12	main.main	slice-literal-backing	frame -> heap		argument 0 of $runtime.slicebytetostringtmp leaks to a result the caller cannot follow
 testdata/runtime_core_types.go:24:12	main.main	slice-literal-backing	frame -> heap		write barrier into non-local storage
 testdata/runtime_core_types.go:28:12	main.main	slice-literal-backing	frame -> heap		write barrier into non-local storage
 testdata/runtime_defer_closure_stack_gc.go:11:11	main.recurse	composite-literal	frame -> heap		store into non-local storage
 testdata/runtime_defer_method_value_order.go:13:12	main.main	method-value-descriptor	frame -> heap		store into non-local storage
+testdata/runtime_goroutine_entry_stack_map.go:88:10	main.carry	composite-literal	frame -> heap		store into non-local storage
+testdata/runtime_interface_pointer_equality_gc.go:10:10	main.main	composite-literal	frame -> heap		store into non-local storage
 testdata/runtime_keepalive_stack_root.go:59:10	main.keepStackItem	composite-literal	frame -> heap		store into non-local storage
+testdata/runtime_keepalive_stack_root.go:61:10	main.keepStackItem	composite-literal	frame -> heap		store into non-local storage
 testdata/runtime_loopvar_value_shapes.go:73:34	main.main	slice-literal-backing	frame -> heap		store into non-local storage
 testdata/runtime_loopvar_value_shapes.go:73:39	main.main	slice-literal-backing	frame -> heap		store into non-local storage
 testdata/runtime_many_goroutines_gc.go:16:10	main.worker	composite-literal	frame -> heap		store into non-local storage
+testdata/runtime_many_goroutines_gc.go:18:10	main.worker	composite-literal	frame -> heap		store into non-local storage
 testdata/runtime_map_struct_value_replace.go:12:12	main.main	slice-literal-backing	frame -> heap		write barrier into non-local storage
 testdata/runtime_println_operand_separation.go:82:54	main.main.func.82.37	slice-literal-backing	heap -> frame		
 testdata/runtime_range_target_forms.go:149:20	main.sliceTargets	slice-literal-backing	frame -> heap		store into non-local storage
 testdata/runtime_range_target_forms.go:149:25	main.sliceTargets	slice-literal-backing	frame -> heap		store into non-local storage
 testdata/runtime_range_target_forms.go:149:33	main.sliceTargets	slice-literal-backing	frame -> heap		store into non-local storage
 testdata/runtime_range_target_forms.go:384:29	main.iteratorTargets	make-slice-backing	frame -> heap		store into non-local storage
-testdata/runtime_range_target_forms.go:46:13	main.sliceTargets	slice-literal-backing	heap -> frame		
-testdata/runtime_range_target_order.go:160:13	main.targetAliasingTheRangeExpression	slice-literal-backing	heap -> frame		
 testdata/runtime_reflect_call_aggregate.go:31:27	main.main	slice-literal-backing	heap -> frame		
 testdata/runtime_reflect_call_aggregate_function_probe.go:31:27	main.Test	slice-literal-backing	heap -> frame		
 testdata/runtime_reflect_call_aggregate_matrix.go:70:44	main.callReflectAggregateMatrix	slice-literal-backing	heap -> frame		
@@ -266,21 +311,30 @@ testdata/runtime_reflect_interface_method.go:20:25	main.main	slice-literal-backi
 testdata/runtime_reflect_method_metadata.go:27:30	main.main	slice-literal-backing	heap -> frame		
 testdata/runtime_reflect_value_call.go:11:15	main.main	slice-literal-backing	heap -> frame		
 testdata/runtime_reflect_value_instruction_op.go:53:10	main.main	slice-literal-backing	frame -> heap		store into non-local storage
-testdata/runtime_slice_copy_overlap.go:4:12	main.main	slice-literal-backing	heap -> frame		
+testdata/runtime_scheduler_gc_churn.go:29:13	main.main.func.23.6	composite-literal	frame -> heap	in a loop	store into non-local storage
+testdata/runtime_stack_scan_syscall.go:101:26	main.main.func.99.5	make-slice-backing	frame -> heap		argument 0 of $runtime.slicebytetostringtmp leaks to a result the caller cannot follow
 testdata/runtime_stack_scan_syscall.go:129:48	main.main	string-conversion-buffer	frame -> heap		argument 0 of $runtime.stringtoslicebyte leaks to a result the caller cannot follow
+testdata/runtime_string_byte_round_trip.go:17:18	main.main	string-conversion-buffer	frame -> heap		argument 0 of $runtime.stringtoslicerune leaks to a result the caller cannot follow
 testdata/runtime_string_byte_round_trip.go:5:18	main.main	string-conversion-buffer	frame -> heap		argument 0 of $runtime.stringtoslicebyte leaks to a result the caller cannot follow
 testdata/runtime_type_param_method_shapes.go:229:18	main.main	composite-literal	heap -> frame		
 testdata/runtime_type_param_method_shapes.go:232:18	main.main	composite-literal	heap -> frame		
 testdata/runtime_type_param_method_shapes.go:236:15	main.main	composite-literal	heap -> frame		
 testdata/runtime_type_param_method_shapes.go:239:15	main.main	composite-literal	heap -> frame		
 testdata/runtime_unsafe_struct_field.go:12:10	main.main	composite-literal	frame -> heap		used by add
+testdata/runtime_unsafe_struct_field.go:15:10	main.main	composite-literal	frame -> heap		store into non-local storage
 testdata/sha1_assembly.go:6:28	main.main	string-conversion-buffer	frame -> heap		argument 0 of $runtime.stringtoslicebyte leaks to a result the caller cannot follow
+testdata/stdlib_archive_zip_roundtrip.go:74:23	main.main	slice-literal-backing	frame -> heap		argument 3 of $bytes.Equal escapes
 testdata/stdlib_bytes_buffer.go:9:22	main.main	string-conversion-buffer	frame -> heap		argument 0 of $runtime.stringtoslicebyte leaks to a result the caller cannot follow
+testdata/stdlib_bytes_reader_unread.go:18:25	main.main	make-slice-backing	frame -> heap		argument 0 of $runtime.slicebytetostringtmp leaks to a result the caller cannot follow
 testdata/stdlib_container_heap.go:31:12	main.main	slice-literal-backing	frame -> heap		store into non-local storage
 testdata/stdlib_container_heap.go:31:27	main.main	composite-literal-descriptor	frame -> heap		store into non-local storage
 testdata/stdlib_crypto_des_rc4.go:38:41	main.main	string-conversion-buffer	frame -> heap		argument 0 of $runtime.stringtoslicebyte leaks to a result the caller cannot follow
+testdata/stdlib_crypto_des_rc4.go:42:32	main.main	make-slice-backing	frame -> heap		argument 0 of $bytes.Equal escapes
+testdata/stdlib_crypto_des_rc4.go:43:47	main.main	string-conversion-buffer	frame -> heap		argument 0 of $runtime.stringtoslicebyte leaks to a result the caller cannot follow
 testdata/stdlib_crypto_x509_ed25519.go:49:20	main.main	string-conversion-buffer	frame -> heap		argument 0 of $runtime.stringtoslicebyte leaks to a result the caller cannot follow
-testdata/stdlib_encoding_hex.go:6:12	main.main	slice-literal-backing	heap -> frame		
+testdata/stdlib_encoding_ascii85.go:6:19	main.main	string-conversion-buffer	frame -> heap		argument 0 of $runtime.stringtoslicebyte leaks to a result the caller cannot follow
+testdata/stdlib_encoding_base32.go:6:19	main.main	string-conversion-buffer	frame -> heap		argument 0 of $runtime.stringtoslicebyte leaks to a result the caller cannot follow
+testdata/stdlib_encoding_base64.go:6:19	main.main	string-conversion-buffer	frame -> heap		argument 0 of $runtime.stringtoslicebyte leaks to a result the caller cannot follow
 testdata/stdlib_encoding_pem.go:11:17	main.main	string-conversion-buffer	frame -> heap		argument 0 of $runtime.stringtoslicebyte leaks to a result the caller cannot follow
 testdata/stdlib_http_redirect_keepalive.go:24:29	main.main.func.16.48	composite-literal	heap -> frame		
 testdata/stdlib_image_gif_animation.go:27:14	main.main	slice-literal-backing	frame -> heap		store into non-local storage
@@ -289,7 +343,12 @@ testdata/stdlib_image_gif_animation.go:30:14	main.main	slice-literal-backing	fra
 testdata/stdlib_image_jpeg_roundtrip.go:18:42	main.main	composite-literal	heap -> frame		
 testdata/stdlib_io_readall_limited_reader.go:9:12	main.main	composite-literal	frame -> heap		store into non-local storage
 testdata/stdlib_maps_slices.go:25:12	main.main	slice-literal-backing	heap -> frame		
+testdata/stdlib_maps_slices.go:31:13	main.main	slice-literal-backing	frame -> heap		store into non-local storage
+testdata/stdlib_mime_quotedprintable.go:12:18	main.main	string-conversion-buffer	frame -> heap		argument 0 of $runtime.stringtoslicebyte leaks to a result the caller cannot follow
 testdata/stdlib_netpoll_syscall_socket_listen.go:19:13	main.main	composite-literal	frame -> heap		store into non-local storage
 testdata/stdlib_netpoll_udp_loopback.go:16:20	main.main	string-conversion-buffer	frame -> heap		argument 0 of $runtime.stringtoslicebyte leaks to a result the caller cannot follow
+testdata/stdlib_netpoll_udp_loopback.go:21:25	main.main	make-slice-backing	frame -> heap		argument 0 of $runtime.slicebytetostringtmp leaks to a result the caller cannot follow
 testdata/stdlib_slices_string_sort.go:6:10	main.main	slice-literal-backing	heap -> frame		
 testdata/stdlib_sort_find_edges.go:6:12	main.main	slice-literal-backing	frame -> heap		store into non-local storage
+testdata/stdlib_strings_reader_seek.go:15:25	main.main	make-slice-backing	frame -> heap		argument 0 of $runtime.slicebytetostringtmp leaks to a result the caller cannot follow
+testdata/stdlib_testing_quick.go:29:22	main.main.func.24.14	string-conversion-buffer	frame -> heap		argument 0 of $runtime.stringtoslicebyte leaks to a result the caller cannot follow
