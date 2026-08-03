@@ -211,6 +211,11 @@ var gocAllocationCounts = []struct {
 	// a frame object. 1.00 -> 0. The walk used to accept only an immediately
 	// called method selector and answered "escapes" for everything else.
 	{"method_value_receiver", 0, 0, "the receiver is in the closure, and the closure is a frame object"},
+	// A call through a function-typed local. 1.00 -> 0. The identifier carries no
+	// *types.Func, so there was no summary to ask and the argument took the
+	// conservative answer; a local assigned once from a named function, never
+	// assigned again and never addressed, calls that function and nothing else.
+	{"call_through_a_function_variable", 0, 0, "the local resolves to one callee, whose parameter does not escape"},
 	{"sprintf_in_loop", 200, 100, "loop rule blocks the `...` promotion"},
 	{"variadic_ints_in_loop", 100, 0, "loop rule blocks the `...` promotion"},
 }

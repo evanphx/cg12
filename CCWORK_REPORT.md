@@ -3383,3 +3383,35 @@ compiler and this branch's:
 
     interface_local_method_call   1.00 -> 0     (gc 0)
     method_retains_receiver       0    -> 1.00  (gc 1.00)
+
+## G11 and G6, fixed: a method value, and a call through a function variable
+
+**G11 -- a method value (2 lines). Previous verdict "gc is right"; it was right,
+and the walk can now say so.** `record := recorder.Add` is a closure over the
+receiver, so the receiver is in the closure and nowhere else. The walk accepted
+only an *immediately called* method selector and answered "escapes" for
+everything else. It now asks both halves: what the method does with the receiver
+(the rule above) and where the closure goes.
+
+**G6 -- a call through a function-typed local (3 of the 8).** `var f
+func(...) = callback; f(arg, ...)` had no `*types.Func` on the identifier, so
+there was no summary to ask. `resolvedCallee` resolves a local that is assigned
+exactly once from a named function, never assigned again and never addressed.
+All three conditions are load-bearing: a second assignment makes the callee
+undecidable here, an address lets other code assign through it, and a variable
+whose uses the walk cannot all see -- a parameter, a capture -- is assigned
+somewhere this body does not contain.
+
+    runtime_reflect_value_indirect_call.go:28,29
+    runtime_timer_callback_shape.go:16
+    runtime_defer_method_value_order.go:12   (G11)
+    runtime_method_value_gc.go:16            (G11)
+
+    lines where goc heaps what gc frames    111 -> 106
+
+The remaining 5 of G6 are an interface method the walk devirtualises to a
+retaining implementation, and a function literal passed to a call -- neither is
+a func-value resolution.
+
+Rows: `method_value_receiver` 1.00 -> 0 (gc 0),
+`call_through_a_function_variable` 1.00 -> 0 (gc 0).

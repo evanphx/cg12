@@ -2397,6 +2397,93 @@ func (g *gen) nonEscapingAddress(address *ast.UnaryExpr) bool {
 // parameterDoesNotEscape runs, so a method with no declaration the compiler can
 // see -- an interface method, an assembly method, a generic instantiation --
 // gets the conservative answer rather than a guess.
+
+// resolvedCallee names the function a call expression calls, resolving a call
+// through a function-typed local variable to the function assigned to it.
+//
+// The escape walk stopped at `f(arg)` where f is a `var f func(...)` -- there is
+// no *types.Func on the identifier, so there was no summary to ask and the
+// answer was the conservative one. gc reaches these by devirtualisation, and goc
+// compiling whole-program can do at least as well: a local that is assigned once
+// from a named function, never assigned again and never addressed, calls that
+// function and nothing else.
+//
+// The three conditions are all load-bearing. More than one assignment and the
+// call is not decided here; an address means some other code can assign through
+// it; and a variable the walk cannot see every use of -- a parameter, a capture
+// -- is assigned somewhere this body does not contain.
+func (g *gen) resolvedCallee(
+	fun ast.Expr,
+	info *types.Info,
+	parents map[ast.Node]ast.Node,
+	body *ast.BlockStmt,
+) *types.Func {
+	if function := calledFunction(fun, info); function != nil {
+		return function
+	}
+	identifier, isIdentifier := fun.(*ast.Ident)
+	if !isIdentifier || body == nil {
+		return nil
+	}
+	variable, isVariable := info.Uses[identifier].(*types.Var)
+	if !isVariable || variable.Pkg() == nil {
+		return nil
+	}
+	if _, global := g.globals[variable]; global {
+		return nil
+	}
+	if !g.escapeWalkSeesEveryUse(variable, body) {
+		return nil
+	}
+	var assigned ast.Expr
+	assignments := 0
+	addressed := false
+	ast.Inspect(body, func(node ast.Node) bool {
+		other, ok := node.(*ast.Ident)
+		if !ok || (info.Uses[other] != variable && info.Defs[other] != variable) {
+			return true
+		}
+		switch parent := parents[other].(type) {
+		case *ast.AssignStmt:
+			for index, target := range parent.Lhs {
+				if target != other {
+					continue
+				}
+				assignments++
+				if len(parent.Rhs) == len(parent.Lhs) {
+					assigned = parent.Rhs[index]
+				} else {
+					assigned = nil
+				}
+			}
+		case *ast.ValueSpec:
+			for index, name := range parent.Names {
+				if name != other {
+					continue
+				}
+				assignments++
+				if index < len(parent.Values) {
+					assigned = parent.Values[index]
+				} else {
+					// `var f func()` with no value is the nil function, and a call
+					// through it panics rather than reaching anything. Counting it
+					// as an assignment keeps the "exactly one" test honest.
+					assigned = nil
+				}
+			}
+		case *ast.UnaryExpr:
+			if parent.Op == token.AND {
+				addressed = true
+			}
+		}
+		return true
+	})
+	if addressed || assignments != 1 || assigned == nil {
+		return nil
+	}
+	return calledFunction(assigned, info)
+}
+
 func (g *gen) methodCallDoesNotRetainReceiver(
 	selector *ast.SelectorExpr,
 	info *types.Info,
@@ -2658,7 +2745,7 @@ func (g *gen) addressEscapesWithin(
 			if argumentIndex < 0 {
 				return false
 			}
-			function := calledFunction(parent.Fun, info)
+			function := g.resolvedCallee(parent.Fun, info, parents, body)
 			if function == nil {
 				return true
 			}
@@ -3014,7 +3101,7 @@ func (g *gen) valueDoesNotEscapeWithin(
 				current = parent
 				continue
 			}
-			function := calledFunction(parent.Fun, info)
+			function := g.resolvedCallee(parent.Fun, info, parents, body)
 			if function == nil {
 				return false
 			}
@@ -3773,7 +3860,7 @@ func (g *gen) nonEscapingObjectUse(
 			}
 			return g.valueDoesNotEscapeWithin(parent, info, parents, body, checking)
 		}
-		function := calledFunction(parent.Fun, info)
+		function := g.resolvedCallee(parent.Fun, info, parents, body)
 		if function == nil {
 			return false
 		}

@@ -412,6 +412,25 @@ func methodValueReceiver() {
 	sinkInt = scoreOnce()
 }
 
+// consumeBox is the callee the row below reaches through a function-typed local.
+//
+//go:noinline
+func consumeBox(box *scoreBox) int { return box.value }
+
+// callThroughAFunctionVariable calls a function through a local of function
+// type. The local is assigned once from a named function, never assigned again
+// and never addressed, so the call reaches that function and nothing else --
+// which is what lets the argument's summary be asked at all. Before the walk
+// resolved this, `f(box)` had no *types.Func to ask about and took the
+// conservative answer.
+//
+//go:noinline
+func callThroughAFunctionVariable() {
+	var consume func(*scoreBox) int = consumeBox
+	box := &scoreBox{value: theInt}
+	sinkInt = consume(box)
+}
+
 const iterations = 1000
 
 // measure runs the operation `iterations` times after a warm-up of the same
@@ -468,6 +487,7 @@ func main() {
 	measure("append_from_spread_source", repeat(appendFromSpreadSource))
 	measure("interface_local_method_call", repeat(interfaceLocalMethodCall))
 	measure("method_value_receiver", repeat(methodValueReceiver))
+	measure("call_through_a_function_variable", repeat(callThroughAFunctionVariable))
 	measure("method_retains_receiver", repeat(methodRetainsReceiver))
 	measure("sprintf_in_loop", sprintfInLoop)
 	measure("variadic_ints_in_loop", variadicIntsInLoop)
