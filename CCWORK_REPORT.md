@@ -3695,15 +3695,30 @@ worth an allocation on every small non-constant make in the program.**
     runtime_copy_interface_slice_gc.go:23  runtime_gc_mark_workers.go:117
     runtime_loopvar_range.go:112           stdlib_encoding_ascii85.go:7, :10
 
-**G12 -- an aggregate copied whole, or a map lookup key (5). VERDICT: goc is
-over-conservative; reducible, but only with the deep walk.** `copy := source`
-where source is `[4]*T` is a copy, and `copyAliasesStorage` refuses arrays.
-Making it accept them is **not** enough and was checked here: the walk's
-`IndexExpr` case answers "does not escape" for a *read* of an element, so
-`source := [4]*T{...}; globalPtr = source[0]` would be framed with a live global
-pointer into it. What holds that together today is precisely the refusal that
-costs these five lines. The pair is the deep walk described under the variadic
-section, and G12 and the wider variadic rule need the same machinery.
+**G12 -- a pointer stored into an array (4) and a map lookup key (1). VERDICT:
+goc is over-conservative; reducible, and it is opt's, not the walk's.** The
+previous classification read the four `runtime_array_copy_pointer_gc.go` lines as
+the *copy* -- `copy := source` where source is `[4]*T`, which `copyAliasesStorage`
+refuses. That was checked here and it is wrong twice over. Extending
+`copyAliasesStorage` to arrays and structs moves nothing, and deleting the copy
+from the program does not change the answer either:
+
+    source := [4]*acBox{{value: 3}, {value: 5}, {value: 7}, {value: 11}}
+    total := 0
+    for _, b := range source { total += b.value }     // no copy at all
+
+still puts all four boxes on the heap. The array itself is a **front-end frame
+slot**, and the four boxes carry `ir.AllocDecision` records -- they are
+`opt.LowerHeapAllocations`' answer, not the AST walk's. The cause is containment:
+`candidateEscapes.contains` records the edge only between two *tracked*
+allocations, and a plain `OAlloc` frame slot is not one, so a pointer stored into
+the array is a store the analysis cannot place. Teaching it that a store into a
+function-local slot is containment in an object that cannot outlive the frame is
+the fix, and it is in `opt/escape.go`.
+
+The fifth line, `values[&mapPointerKey{value: 17}]`, is a lookup key that
+`mapaccess` does not retain, and is the walk's -- and it needs care about the
+direction, because a map *assignment* key is retained.
 
     runtime_array_copy_pointer_gc.go:11, :12, :13, :14
     runtime_map_pointer_keys.go:27
