@@ -172,9 +172,6 @@ stdlib/src/encoding/gob/dec_helpers.go:132:28	encoding/gob.decComplex128Slice	ba
 stdlib/src/internal/strconv/atof.go:609:3	internal/strconv.atof32	barrier	the caller's result area
 stdlib/src/internal/strconv/atof.go:660:3	internal/strconv.atof64	barrier	the caller's result area
 stdlib/src/internal/syscall/unix/copy_file_range_unix.go:25:9	internal/syscall/unix.CopyFileRange	barrier	the caller's result area
-stdlib/src/log/slog/handler.go:120:8	log/slog.defaultHandler.Handle	barrier	memory reached through a call result $runtime.newobject
-stdlib/src/log/slog/handler.go:239:8	log/slog.commonHandler.withAttrs	barrier	memory reached through a call result $runtime.newobject
-stdlib/src/log/slog/handler.go:272:8	log/slog.commonHandler.handle	barrier	memory reached through a call result $runtime.newobject
 stdlib/src/net/dial.go:691:5	net.sysDialer.dialParallel	barrier	memory reached through a call result $runtime.newobject
 stdlib/src/net/dial.go:702:7	net.sysDialer.dialParallel	barrier	memory reached through a call result $runtime.newobject
 stdlib/src/net/http/client.go:384:14	net/http.setRequestCancel	barrier	memory reached through a call result $runtime.newobject
