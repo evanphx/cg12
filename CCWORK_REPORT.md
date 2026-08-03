@@ -1981,3 +1981,35 @@ build, not just `-O`.
   reports only `GCRef` temporaries and `amd64` has no `stackAllocTmp` or
   `StackPointerWords` reporting at all, so there is nothing there to suppress.
 
+## Determinism
+
+`scripts/determinism-check.sh -corpus -j 16`, over the 399-program corpus
+(the 398 that were there plus the new reducer):
+
+| arm | rounds | reproducible | varying | failed | content varies | layout only |
+| --- | ---: | ---: | ---: | ---: | ---: | ---: |
+| no `-O` | 3 | 399 | 0 | 0 | 0 | 0 |
+| `-O` | 2 | 399 | 0 | 0 | 0 | 0 |
+
+## Head-to-head rate, same box, back to back
+
+`runtime_gc_type_mask_padding.go`, `GOMAXPROCS=3`, sequential, 60 runs each,
+the four cells run one after another so they see the same machine:
+
+| tree | `GOGC=10` | default `GOGC` |
+| --- | ---: | ---: |
+| `main` `6b9fbb0` | **10/60 fail** | 0/60 |
+| this tree | **0/60 fail** | 0/60 |
+
+Together with the earlier 200-run batch, this tree is **0/260 at `GOGC=10`** and
+**0/160 at the default**. Against the measured pre-fix rate of 20/100 = 0.20,
+a clean 260 has probability `0.8^260 ~ 1e-25`.
+
+## Cost
+
+`goc -o /dev/null goc/testdata/runtime_gc_mark_workers.go`, three alternating
+runs of each compiler: 3.99/4.06/4.11 s before, 4.11/4.13/4.35 s after — about
+3-4% on a whole-runtime compile. The analysis is a forward may-dataflow that
+converges in two or three rounds over blocks, and it runs only on managed frames
+that have pointer-bearing, non-escaping allocations.
+
