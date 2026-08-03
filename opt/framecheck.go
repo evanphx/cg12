@@ -155,6 +155,16 @@ type frameFacts struct {
 	// slots maps a frame slot to a frame allocation its contents can name. A
 	// load from such a slot can produce that address again.
 	slots map[localSlot]uint32
+	// merged holds the temporaries whose frame-derivation is only partial: a
+	// phi or a select that takes a frame address on one incoming path and
+	// something else on another, and anything that carries such a value on.
+	//
+	// base cannot express this. It answers "which frame allocation can this
+	// value name", which is the right question for the value being stored and
+	// the wrong one for the destination receiving it: a destination is a safe
+	// place to park a frame address only if it is frame storage on every path,
+	// and a merge of a frame array with a heap one is frame storage on one.
+	merged map[uint32]bool
 }
 
 func frameEscapesIn(module *ir.Module, function *ir.Func) []FrameEscape {
@@ -213,6 +223,7 @@ func newFrameFacts(function *ir.Func) *frameFacts {
 		aliases:  newAliasInfo(function),
 		base:     make(map[uint32]uint32),
 		slots:    make(map[localSlot]uint32),
+		merged:   make(map[uint32]bool),
 	}
 	for _, block := range function.Blocks {
 		for _, instruction := range block.Instrs {
@@ -227,7 +238,84 @@ func newFrameFacts(function *ir.Func) *frameFacts {
 	for changed := true; changed; {
 		changed = facts.propagate()
 	}
+	// The merge marks are read off the finished base map. Running them in the
+	// same fixed point would mark a phi partial on the round before its last
+	// argument became frame-derived, and nothing would ever take the mark back.
+	for changed := true; changed; {
+		changed = facts.propagateMerges()
+	}
 	return facts
+}
+
+// propagateMerges runs one round of the merge fixed point, returning whether it
+// learned anything new. It reads base, which has already converged, and only
+// ever adds marks.
+func (facts *frameFacts) propagateMerges() bool {
+	changed := false
+	for _, block := range facts.function.Blocks {
+		for _, phi := range block.Phis {
+			if facts.mergesFrameAddresses(phi.Args) && facts.markMerged(phi.To) {
+				changed = true
+			}
+		}
+		for _, instruction := range block.Instrs {
+			if instruction.To.Kind != ir.RefTemp {
+				continue
+			}
+			if _, derived := facts.frameBase(instruction.To); !derived {
+				continue
+			}
+			var partial bool
+			switch instruction.Op {
+			case ir.OSel:
+				// A select is a merge that stayed inside one block; it has the
+				// same two incoming values a phi would have had.
+				partial = facts.mergesFrameAddresses(instruction.Args[1:])
+			case ir.OCopy, ir.OCast:
+				partial = facts.isMerged(instruction.Arg(0))
+			case ir.OAdd:
+				// One operand is the pointer and the other the displacement, so
+				// this carries a merge rather than making one.
+				partial = facts.isMerged(instruction.Arg(0)) || facts.isMerged(instruction.Arg(1))
+			case ir.OSub:
+				partial = facts.isMerged(instruction.Arg(0))
+			case ir.OCall:
+				partial = returnsItsDestination(facts.function, instruction) && facts.isMerged(instruction.Arg(1))
+			}
+			if partial && facts.markMerged(instruction.To) {
+				changed = true
+			}
+		}
+	}
+	return changed
+}
+
+// mergesFrameAddresses reports whether a set of incoming values makes its
+// result only sometimes a frame address: either the values disagree about it,
+// or one of them is already partial.
+func (facts *frameFacts) mergesFrameAddresses(arguments []ir.Ref) bool {
+	frameAddresses := 0
+	for _, argument := range arguments {
+		if facts.isMerged(argument) {
+			return true
+		}
+		if _, derived := facts.frameBase(argument); derived {
+			frameAddresses++
+		}
+	}
+	return frameAddresses > 0 && frameAddresses < len(arguments)
+}
+
+func (facts *frameFacts) markMerged(reference ir.Ref) bool {
+	if reference.Kind != ir.RefTemp || facts.merged[reference.ID] {
+		return false
+	}
+	facts.merged[reference.ID] = true
+	return true
+}
+
+func (facts *frameFacts) isMerged(reference ir.Ref) bool {
+	return reference.Kind == ir.RefTemp && facts.merged[reference.ID]
 }
 
 // propagate runs one round of the fixed point, returning whether it learned
@@ -335,7 +423,14 @@ func (facts *frameFacts) frameBase(reference ir.Ref) (uint32, bool) {
 
 // isFrameAddress reports whether a pointer provably names storage belonging to
 // this function's frame, which is where a frame address may be stored.
+//
+// "Provably" is the whole point: this decides which stores are silently
+// dropped, so it has to hold on every path. A merged pointer does not, which is
+// why it is rejected here even though base can name a frame allocation for it.
 func (facts *frameFacts) isFrameAddress(reference ir.Ref) bool {
+	if facts.isMerged(reference) {
+		return false
+	}
 	if _, derived := facts.frameBase(reference); derived {
 		return true
 	}
@@ -359,34 +454,86 @@ func (facts *frameFacts) frameSlot(reference ir.Ref) (localSlot, bool) {
 // when the destination came straight out of a direct call. The category is part
 // of the finding's identity, so it must not mention a temporary number.
 func (facts *frameFacts) classify(reference ir.Ref) (FrameEscapeDestination, string) {
+	destination, callee, known := facts.classifyThrough(reference, make(map[uint32]bool))
+	if !known {
+		return FrameEscapeIntoOpaque, ""
+	}
+	return destination, callee
+}
+
+// classifyThrough is classify, carrying the set of merges already being
+// resolved so a loop-carried destination terminates. The third result is false
+// when the walk learned nothing -- it came back to a merge it was already
+// inside -- which is different from learning that the destination is opaque.
+func (facts *frameFacts) classifyThrough(reference ir.Ref, visiting map[uint32]bool) (FrameEscapeDestination, string, bool) {
 	location := facts.aliases.locOf(reference, 1)
 	switch location.keyKind {
 	case keyGlobal:
-		return FrameEscapeIntoGlobal, location.keySym
+		return FrameEscapeIntoGlobal, location.keySym, true
 	case keyConst:
-		return FrameEscapeIntoOpaque, ""
+		return FrameEscapeIntoOpaque, "", true
 	}
 	base := facts.pointerBase(reference)
 	if base.Kind != ir.RefTemp {
-		return FrameEscapeIntoOpaque, ""
+		return FrameEscapeIntoOpaque, "", true
+	}
+	if phi := facts.aliases.phiFor(base); phi != nil {
+		return facts.classifyMerge(phi.Args, base.ID, visiting)
+	}
+	if definition := facts.aliases.def[base.ID]; definition != nil && definition.Op == ir.OSel {
+		return facts.classifyMerge(definition.Args[1:], base.ID, visiting)
 	}
 	if name, isParameter := facts.parameterName(base); isParameter {
 		if strings.HasPrefix(name, "result") {
-			return FrameEscapeIntoResult, ""
+			return FrameEscapeIntoResult, "", true
 		}
-		return FrameEscapeIntoParameter, ""
+		return FrameEscapeIntoParameter, "", true
 	}
 	definition := facts.aliases.def[base.ID]
 	if definition == nil {
-		return FrameEscapeIntoOpaque, ""
+		return FrameEscapeIntoOpaque, "", true
 	}
 	switch {
 	case definition.Op == ir.OCall:
-		return FrameEscapeIntoCallResult, calleeSymbol(facts.function, *definition)
+		return FrameEscapeIntoCallResult, calleeSymbol(facts.function, *definition), true
 	case definition.Op.IsLoad():
-		return FrameEscapeIntoLoaded, ""
+		return FrameEscapeIntoLoaded, "", true
 	}
-	return FrameEscapeIntoOpaque, ""
+	return FrameEscapeIntoOpaque, "", true
+}
+
+// classifyMerge names the category a merged destination reached. Only the
+// incoming values that are not this frame's own storage are classified: those
+// are the paths the address is actually published down, and the frame-resident
+// path is the benign one the finding is not about. When they disagree there is
+// no one category to name, and the finding says so rather than picking one.
+func (facts *frameFacts) classifyMerge(arguments []ir.Ref, result uint32, visiting map[uint32]bool) (FrameEscapeDestination, string, bool) {
+	if visiting[result] {
+		return FrameEscapeIntoOpaque, "", false
+	}
+	visiting[result] = true
+	defer delete(visiting, result)
+
+	var destination FrameEscapeDestination
+	var callee string
+	classified := false
+	for _, argument := range arguments {
+		if facts.isFrameAddress(argument) {
+			continue
+		}
+		argumentDestination, argumentCallee, known := facts.classifyThrough(argument, visiting)
+		if !known {
+			continue
+		}
+		if !classified {
+			destination, callee, classified = argumentDestination, argumentCallee, true
+			continue
+		}
+		if destination != argumentDestination || callee != argumentCallee {
+			return FrameEscapeIntoOpaque, "", true
+		}
+	}
+	return destination, callee, classified
 }
 
 // pointerBase strips the constant pointer arithmetic locOf already accounted

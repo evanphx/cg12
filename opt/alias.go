@@ -25,6 +25,7 @@ const (
 type aliasInfo struct {
 	f             *ir.Func
 	def           []*ir.Instr // temp -> defining instruction
+	phiDef        []*ir.Phi   // temp -> defining phi, for the temps a phi defines
 	allocBasePlus []uint32    // alloc-derived pointer temp -> alloc temp id + 1; 0 means none
 	escaped       []bool      // alloc ids whose address escapes
 }
@@ -55,6 +56,7 @@ func newAliasInfo(f *ir.Func) *aliasInfo {
 	ai := &aliasInfo{
 		f:             f,
 		def:           make([]*ir.Instr, len(f.Temps)),
+		phiDef:        make([]*ir.Phi, len(f.Temps)),
 		allocBasePlus: make([]uint32, len(f.Temps)),
 		escaped:       make([]bool, len(f.Temps)),
 	}
@@ -63,6 +65,11 @@ func newAliasInfo(f *ir.Func) *aliasInfo {
 			in := &b.Instrs[index]
 			if in.To.Kind == ir.RefTemp {
 				ai.def[in.To.ID] = in
+			}
+		}
+		for _, p := range b.Phis {
+			if p.To.Kind == ir.RefTemp && int(p.To.ID) < len(ai.phiDef) {
+				ai.phiDef[p.To.ID] = p
 			}
 		}
 	}
@@ -191,6 +198,18 @@ func (ai *aliasInfo) computeEscape() {
 			mark(argument)
 		}
 	}
+}
+
+// phiFor returns the phi that defines a reference, or nil. aliasInfo resolves
+// no phi to a base region: buildAllocBase walks def, def indexes only the
+// instruction lists, and a phi result has no defining instruction, so locOf
+// answers keyTemp for every value a phi produces. This index is what lets a
+// caller ask about the incoming values instead and decide for itself.
+func (ai *aliasInfo) phiFor(r ir.Ref) *ir.Phi {
+	if r.Kind != ir.RefTemp || int(r.ID) >= len(ai.phiDef) {
+		return nil
+	}
+	return ai.phiDef[r.ID]
 }
 
 func (ai *aliasInfo) tracked(r ir.Ref) bool {
