@@ -31,3 +31,5 @@ core.*
 
 # Build artifacts left by corpus runs
 runtime_closure_captured_string
+pkginit_dispatch
+runtime_package_initializer_dispatch
