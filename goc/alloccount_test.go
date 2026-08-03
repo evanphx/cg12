@@ -216,6 +216,16 @@ var gocAllocationCounts = []struct {
 	// conservative answer; a local assigned once from a named function, never
 	// assigned again and never addressed, calls that function and nothing else.
 	{"call_through_a_function_variable", 0, 0, "the local resolves to one callee, whose parameter does not escape"},
+	// A local's address handed to a variadic callee that keeps nothing. 1.00 -> 0.
+	// The summary used to refuse to describe a variadic parameter at all, because
+	// an argument there is an element of a slice the callee builds and the
+	// parameter's own summary answers a different question. It now answers the
+	// question that is asked -- can the callee reach an element -- for the callees
+	// where that is decidable by inspection. See
+	// goc.gen.variadicParameterHoldsItsElements, and
+	// testdata/variadic_element_address_retention.go for the program that says
+	// why the parameter's own summary is not the answer.
+	{"address_into_a_non_retaining_variadic", 0, 0, "the callee's only use of the `...` parameter is len, so no element is reachable"},
 	{"sprintf_in_loop", 200, 100, "loop rule blocks the `...` promotion"},
 	{"variadic_ints_in_loop", 100, 0, "loop rule blocks the `...` promotion"},
 }

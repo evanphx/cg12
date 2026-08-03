@@ -431,6 +431,26 @@ func callThroughAFunctionVariable() {
 	sinkInt = consume(box)
 }
 
+// retainNothingVariadic is the callee the row below hands an address to. Its
+// only use of the `...` parameter is len, so it cannot reach an element and the
+// address does not escape through the call.
+//
+//go:noinline
+func retainNothingVariadic(args ...any) int { return len(args) }
+
+// addressIntoANonRetainingVariadic hands a local's address to a variadic callee
+// that keeps nothing. The escape summary used to refuse to describe a variadic
+// parameter at all -- an argument there is an element of a slice the callee
+// builds, and the parameter's own summary answers a different question -- so
+// every such address went to the heap. It now answers the question that is
+// actually being asked: can the callee reach an element.
+//
+//go:noinline
+func addressIntoANonRetainingVariadic() {
+	value := theInt
+	sinkInt = retainNothingVariadic(&value)
+}
+
 const iterations = 1000
 
 // measure runs the operation `iterations` times after a warm-up of the same
@@ -488,6 +508,7 @@ func main() {
 	measure("interface_local_method_call", repeat(interfaceLocalMethodCall))
 	measure("method_value_receiver", repeat(methodValueReceiver))
 	measure("call_through_a_function_variable", repeat(callThroughAFunctionVariable))
+	measure("address_into_a_non_retaining_variadic", repeat(addressIntoANonRetainingVariadic))
 	measure("method_retains_receiver", repeat(methodRetainsReceiver))
 	measure("sprintf_in_loop", sprintfInLoop)
 	measure("variadic_ints_in_loop", variadicIntsInLoop)

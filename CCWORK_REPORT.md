@@ -3442,3 +3442,64 @@ Zero gain against an unreviewed correctness-critical delta is a bad trade in a
 branch about placement, so it is written down here rather than landed. It is a
 real capability and the next person should take it on its own, with the census
 delta reviewed site by site -- which is the review it did not get here.
+
+## The variadic summary gap: measured, then closed
+
+### It accounts for none of the 113
+
+The three lines the previous classification filed under it are the loop rule
+(above). To be sure the group was not simply mislabelled, the refusal was
+*removed* -- `parameterDoesNotEscape` and `parameterLeaksOnlyToResult` made to
+answer a variadic position with the parameter's own summary -- and the corpus
+rescored: **113 of 113 still on the heap**. Over the whole corpus that change
+moves 9 census rows, and 4 of them are
+`testdata/variadic_element_address_retention.go`, which is the program that
+exists to prove the answer is wrong.
+
+So the honest answer to "does the gap account for some of the 113" is **no**.
+It does account for allocations elsewhere: `testdata/variadic_backing.go:8`,
+whose `x := 42` goc put on the heap and gc keeps in the frame, is in the
+differential's `heap -> absent` bucket rather than `heap -> frame`.
+
+### It can be described, and now is -- but not by the parameter's own summary
+
+The reason the refusal was right is worth stating precisely, because it is not
+"variadic parameters are undescribable":
+
+    func keep(args ...*T) { sink = args[0] }
+
+retains **no pointer it was handed** -- `args` itself is dropped at the return --
+and retains **everything they point at**. The summary the walk computes for every
+other parameter position is the shallow question, "is this object carried out of
+the function". For a variadic position the caller is asking the deep one, "is
+anything reachable *through* this slice retained". The two differ for any
+parameter that holds references, and the walk's own rules make the gap concrete:
+`F3` (a previous branch's fix) says ranging over an object carries it nowhere,
+which is true of the slice and false of its elements, so
+`func keep(args ...*T) { for _, a := range args { sink = a } }` would have been
+answered "does not escape" by the shallow walk.
+
+`variadicParameterHoldsItsElements` answers the deep question directly, as a
+whitelist rather than a walk. A use of the `...` parameter is accepted only where
+it provably cannot produce an element:
+
+    len(args)   cap(args)   args == nil   args != nil   for i := range args
+
+Anything else -- an index, a slice expression, a range with a value variable, a
+`copy`, being passed on, stored or returned -- is rejected. That is deliberately
+narrow: `func retainNothing(args ...any) int { return len(args) }` is the shape
+it exists for, and it is enough to move `variadic_backing.go`'s `x := 42` into
+the frame, where gc has always kept it.
+
+**What the alternative is, for a wider rule.** Following an element out of an
+index or a range into the uses of the value it produces, and through a call into
+the callee's own deep answer for that position, is a second walk with a
+`deep` mode -- the AST equivalent of `opt.ParamFact.Deep`. Every rule in the
+existing walk that answers "this use carries nothing" has to be re-answered for
+it, because most of them are true of the object and false of its contents. That
+is a piece of work of its own, and the same machinery is what G12 (aggregate
+copies) needs; it is written up under "What is irreducible" below.
+
+Row: `address_into_a_non_retaining_variadic` 1.00 -> 0 (gc 0).
+`variadic_element_address_retention.go`'s `local` is still on the heap, and the
+program still passes.

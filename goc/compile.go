@@ -3991,31 +3991,29 @@ func (g *gen) parameterDoesNotEscape(function *types.Func, index int, checking m
 		return false
 	}
 	signature := function.Type().(*types.Signature)
-	if index < 0 || index >= signature.Params().Len() {
+	if index < 0 {
+		return false
+	}
+	if index >= signature.Params().Len() && !signature.Variadic() {
 		return false
 	}
 	if declaration.decl.Body == nil {
 		return hasCompilerDirective(declaration.decl, "go:noescape")
 	}
-	if signature.Variadic() && index == signature.Params().Len()-1 {
+	if signature.Variadic() && index >= signature.Params().Len()-1 {
 		// The callers of this walk hand it an argument position, and for a
 		// variadic call every argument from the last parameter on is an
 		// *element* of a slice the callee builds -- not the parameter. Answering
 		// them with the parameter's own summary answers a different question:
 		// `func keep(args ...*T) { sink = args[0] }` retains no pointer it was
-		// handed, and retains everything they point at.
+		// handed, and retains everything they point at. That is what
+		// testdata/variadic_element_address_retention.go is; answering it from
+		// the parameter's own summary left a package-level variable pointing at a
+		// caller's frame.
 		//
-		// Positions past the parameter list are already refused above, so this
-		// is the one that used to slip through, and getting it wrong left a
-		// package-level variable pointing at a caller's frame. The refusal is
-		// the whole answer for a walk that has no notion of dereference depth;
-		// the fact table in opt does have one, and ParamFact.Deep is where the
-		// question is really answered -- see opt.markSummarisedCall.
-		//
-		// A spread call, f(xs...), does hand the parameter over as itself and
-		// loses precision here. That is the price of one predicate serving both,
-		// and it is the safe direction.
-		return false
+		// So the question asked here is the deep one -- can the callee reach an
+		// element at all -- and variadicParameterHoldsItsElements is the answer.
+		return g.variadicParameterHoldsItsElements(declaration, signature)
 	}
 	key := parameterKey{function: function, index: index}
 	if checking[key] {
@@ -4035,6 +4033,101 @@ func (g *gen) parameterDoesNotEscape(function *types.Func, index int, checking m
 	return g.objectDoesNotEscape(signature.Params().At(index), declaration.info, parents, declaration.decl.Body, checking)
 }
 
+
+// variadicParameterHoldsItsElements reports that a variadic callee cannot reach
+// an element of its `...` parameter, so an argument in a variadic position does
+// not escape through the call.
+//
+// This is the deep question -- "is anything reachable *through* this slice
+// retained" -- and the walk that answers every other position answers only the
+// shallow one: whether the object itself is carried out. The two are not the
+// same for a slice. `func keep(args ...*T) { for _, a := range args { sink = a } }`
+// carries `args` nowhere, and carries out everything it points at.
+//
+// So this is a whitelist rather than a walk. A use of the parameter is accepted
+// only where it provably cannot produce an element:
+//
+//   - len(args), cap(args)
+//   - args == nil, args != nil
+//   - for i := range args, with no value variable
+//
+// Everything else -- an index, a slice expression, a range with a value
+// variable, a copy, being passed on, being stored, being returned -- is
+// rejected. `func retainNothing(args ...any) int { return len(args) }` is the
+// shape this exists for, and it is the shape a caller could not learn anything
+// about before: testdata/variadic_backing.go's `retainNothing(&x)` put x on the
+// heap, where gc keeps it in the frame.
+//
+// A wider rule is possible and is a walk of its own: it would have to follow an
+// element out of an index or a range into the uses of the value it produced, and
+// through a call into the callee's own deep answer for that position. That is
+// the machinery ParamFact.Deep is in opt, and it is not this predicate.
+func (g *gen) variadicParameterHoldsItsElements(declaration functionDecl, signature *types.Signature) bool {
+	body := declaration.decl.Body
+	if body == nil {
+		return false
+	}
+	parameter := signature.Params().At(signature.Params().Len() - 1)
+	if parameter.Name() == "" || parameter.Name() == "_" {
+		// Unnamed: the body cannot mention it, so no element is reachable.
+		return true
+	}
+	info := declaration.info
+	parents := g.declarationParents(declaration.decl)
+	reachable := false
+	ast.Inspect(body, func(node ast.Node) bool {
+		if reachable {
+			return false
+		}
+		identifier, isIdentifier := node.(*ast.Ident)
+		if !isIdentifier || info.Uses[identifier] != parameter {
+			return true
+		}
+		if !variadicUseCannotReachAnElement(identifier, info, parents) {
+			reachable = true
+		}
+		return true
+	})
+	return !reachable
+}
+
+// variadicUseCannotReachAnElement is variadicParameterHoldsItsElements' whitelist,
+// asked of one use.
+func variadicUseCannotReachAnElement(identifier *ast.Ident, info *types.Info, parents map[ast.Node]ast.Node) bool {
+	switch parent := parents[identifier].(type) {
+	case *ast.CallExpr:
+		if parent.Fun == identifier {
+			return false
+		}
+		called, isIdentifier := parent.Fun.(*ast.Ident)
+		if !isIdentifier {
+			return false
+		}
+		builtin, isBuiltin := info.Uses[called].(*types.Builtin)
+		if !isBuiltin {
+			return false
+		}
+		// copy is deliberately absent: it moves the elements into the
+		// destination, which is exactly the thing this predicate is about.
+		return builtin.Name() == "len" || builtin.Name() == "cap"
+	case *ast.BinaryExpr:
+		if parent.Op != token.EQL && parent.Op != token.NEQ {
+			return false
+		}
+		other := parent.Y
+		if other == identifier {
+			other = parent.X
+		}
+		nilIdentifier, isIdentifier := other.(*ast.Ident)
+		return isIdentifier && nilIdentifier.Name == "nil"
+	case *ast.RangeStmt:
+		// The index carries nothing. A value variable is a copy of an element and
+		// carries everything the element points at.
+		return parent.X == identifier && parent.Value == nil
+	}
+	return false
+}
+
 // parameterLeaksOnlyToResult reports that a parameter's storage cannot outlive
 // the call except through the call's own result. It asks exactly the question
 // parameterDoesNotEscape asks, with one difference: returning the parameter, or
@@ -4042,11 +4135,14 @@ func (g *gen) parameterDoesNotEscape(function *types.Func, index int, checking m
 // caller that gets this answer must therefore continue its walk from the call
 // expression -- the storage escapes exactly when the result does.
 //
-// The summary does not describe a variadic parameter, whose argument is an
-// element of a slice the callee builds rather than the parameter itself. A
-// caller that gets the answer for a function with more than one result cannot
-// simply continue from the call expression, because that expression does not
-// stand for one value; see leakedCallResultDoesNotEscape.
+// It does not describe a variadic parameter. parameterDoesNotEscape does, by a
+// different question -- variadicParameterHoldsItsElements -- and there is no
+// "leaks only to the result" form of that question here: an element reaching the
+// result is an element reaching *out*, and the whitelist that answers the deep
+// question has no case that produces an element at all. A caller that gets this
+// answer for a function with more than one result cannot simply continue from
+// the call expression, because that expression does not stand for one value; see
+// leakedCallResultDoesNotEscape.
 func (g *gen) parameterLeaksOnlyToResult(function *types.Func, index int, checking map[parameterKey]bool) bool {
 	declaration, ok := g.functionDecls[function]
 	if !ok || declaration.decl.Body == nil {
