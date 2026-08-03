@@ -3415,3 +3415,30 @@ a func-value resolution.
 
 Rows: `method_value_receiver` 1.00 -> 0 (gc 0),
 `call_through_a_function_variable` 1.00 -> 0 (gc 0).
+
+## Measured and **not** landed: walking the generic declaration for an instantiated callee
+
+`functionDecls` is keyed by the `*types.Func` a declaration defines, which for a
+generic function is the uninstantiated one, while `calledFunction` hands back the
+instantiation. So every call to a generic callee -- `slices.Sort`,
+`slices.Contains`, `maps.Keys` -- missed the map and took the conservative
+answer. Falling back to `function.Origin()`'s declaration (and to its signature,
+since the instantiated signature's parameter objects are not the ones the body's
+identifiers resolve to) makes the walk enter those bodies.
+
+It was implemented, measured, and reverted:
+
+- It moves **0** of the 106. `slices.Sort` still loses the argument, one frame
+  deeper -- `slices/sort.go:18` hands `x` to `pdqsortOrdered`, which loses it at
+  `zsortordered.go:123`. The generic barrier was not what stopped it.
+- It moves a lot of stdlib in the direction that needs review and did not get it:
+  `crypto/ecdsa.privateKeyToFIPS`'s four instantiations, `crypto/ed25519.sign`'s
+  and `PrivateKey.Sign`'s promoted `PrivateKey` parameters, and
+  `net/http.routingNode.matchingMethodsPath`'s map and string all stop being heap
+  records -- 41 census rows removed against 15 added, most of them heap rows
+  becoming ordinary frame slots.
+
+Zero gain against an unreviewed correctness-critical delta is a bad trade in a
+branch about placement, so it is written down here rather than landed. It is a
+real capability and the next person should take it on its own, with the census
+delta reviewed site by site -- which is the review it did not get here.
