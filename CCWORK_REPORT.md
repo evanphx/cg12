@@ -2030,3 +2030,223 @@ conservative rule shipped here is consistent by construction: element placement
 and literal placement are now decided by the *same* function, so they cannot
 disagree again whichever way that function is later made more precise.
 
+
+## R2. Re-measured, 3 Aug 2026: the +5.8% does not reproduce
+
+### R2.1 Method
+
+A benchmark program, committed at `goc/testdata/crypto_signing_bench/main.go`,
+generates one P-256 key outside the timer and then times 200 `SignASN1` +
+`VerifyASN1` round trips as one round. It runs one untimed warm-up round and
+then five timed rounds and reports the fastest. The minimum is the right
+estimator for elapsed time: preemption, GC and any other machine noise can only
+make a round slower, never faster, so the fastest round is the least
+contaminated.
+
+Three compilers were built from source and each compiled that same program with
+`goc -O`:
+
+| arm | commit | what it is |
+|---|---|---|
+| `before` | 61ba39d | the commit immediately before the publication fix |
+| `after` | 6245dbb | the publication fix itself, "copying a value into fresh heap storage publishes it" |
+| `main` | 9cdc2d8 | current `main`, seven compiler changes later |
+
+plus the host toolchain (go1.26.1 linux/arm64) as a reference. The four binaries
+were then run **interleaved**, one process per measurement, ten repetitions of
+`before, after, main, gc` in that order -- 40 processes -- so that any drift in
+the machine's state over the twenty minutes falls on all four arms equally
+rather than on whichever one happened to run last. Host: linux/arm64, 64 cores,
+otherwise idle. Each process reports its own fastest-of-five, so each of the ten
+numbers per arm is itself a minimum; the interval below is over those ten.
+
+### R2.2 The instrument was checked before it was believed
+
+An A/B is worth nothing if the two binaries do not actually differ in the way
+the hypothesis says. `-emit-ir` on all three, restricted to
+`$crypto/internal/fips140/bigmod.Nat.Mul`:
+
+    before   9 runtime.newobject calls
+    after   10
+    main    10
+
+The one `after` adds and `before` does not have is
+`runtime.newobject($.goc.runtime.type.64_uint)` at the top of the `default` arm
+-- 64 `uint`s, 512 bytes, which is `T := make([]uint, 0, preallocLimbs*2)`.
+That is precisely the allocation §R1 attributes the regression to, it is present
+in `main` too, and the A/B is therefore measuring the thing it claims to.
+
+### R2.3 The numbers
+
+200 P-256 sign+verify, seconds, n=10 per arm:
+
+| arm | mean | sd | 95% CI | min | max |
+|---|---|---|---|---|---|
+| `before` 61ba39d | 2.6722 | 30 ms | [2.6508, 2.6936] | 2.6307 | 2.7206 |
+| `after` 6245dbb | 2.6729 | 34 ms | [2.6487, 2.6970] | 2.6321 | 2.7346 |
+| `main` 9cdc2d8 | 2.5398 | 33 ms | [2.5165, 2.5631] | 2.4965 | 2.5896 |
+| host go1.26.1 | 0.0547 | 0.1 ms | [0.0546, 0.0548] | 0.0545 | 0.0549 |
+
+**Run-to-run spread is 3.4%–3.8% peak to peak under goc** (sd ≈ 1.2% of the
+mean) and 0.7% under the host toolchain. The goc arms are noisier because a
+2.6-second round has GC in it and a 55-millisecond one barely does.
+
+Paired by repetition, so each comparison is between two processes that ran
+seconds apart:
+
+    after vs before   +0.04%   95% CI [-1.37%, +1.46%]
+    main  vs before   -4.94%   95% CI [-6.13%, -3.75%]
+    main  vs after    -4.97%   95% CI [-6.13%, -3.80%]
+
+### R2.4 What that says
+
+**The publication fix costs nothing measurable.** +0.04% with a confidence
+interval of ±1.4% is not a regression; it is a null result whose interval is
+three times narrower than the +5.8% it was supposed to confirm. A regression
+smaller than the noise is not a regression, and this one is smaller than the
+interval as well.
+
+Note carefully what this is *not*. It is not "later changes closed the gap": the
+`before`/`after` pair here is the same pair of compilers that produced the
++5.8%, rebuilt from the same two commits, and re-run today they are
+indistinguishable. Whatever produced the original separation was a property of
+that measurement or of that machine, not of the two compilers. §R1's ranges do
+not overlap, so it was not a small effect misread as large -- but a
+non-overlapping range from eight alternating runs of a whole-process timer is
+exactly what a machine with a slow drift in it produces, and this measurement
+was built to be immune to that (interleaved, fastest-of-five inside each
+process, key generation outside the timer).
+
+Separately and solidly: **`main` is 4.9% faster than either historical arm**
+(CI [-6.1%, -3.8%]), so the seven changes since have been worth about 5% on this
+path even though none of them was aiming at it.
+
+For reference, goc's compiled code on this path is **46× slower than the host
+toolchain's** (2.54 s against 0.055 s). That is the number worth being unhappy
+about, and it is not what this job was asked about.
+
+## R3. The alternative fix: implemented, measured, and **not taken**
+
+§R1.1 declined a faster fix and said why. I implemented it anyway, because
+"is it still worth taking" cannot be answered from the prose alone, and because
+the two reasons to reconsider -- the regression may have grown, or the tree may
+have changed underneath it -- both needed checking.
+
+### R3.1 What was implemented
+
+Exactly what §R1.1 describes: `nonEscapingAddressWithin` keeps its shape rule,
+and when the shape rule says nothing it now asks the dataflow question --
+`!addressEscapesWithin(...)`, the walk `findEscapingCaptures` already uses for
+`&localVar` -- instead of answering "heap" by default. Restricted to `&T{...}`,
+with a recursion guard, since `addressEscapesWithin` can climb to an assignment
+and walk back to the same address.
+
+It does what §R1.1 predicted, and more. `bigmod.Nat.Mul`'s `runtime.newobject`
+count, from `-emit-ir`:
+
+    before 61ba39d   9
+    after  6245dbb  10
+    main   9cdc2d8  10
+    alt              5
+
+It removes the 512-byte `T` **and** all four `&Nat{limbs: T}` literals -- the
+specialised RSA arms' as well as the `default` arm's.
+
+### R3.2 It miscompiles `os`, and the first program built with it dies
+
+The benchmark compiled with it does not reach `main`:
+
+    fatal error: runtime.SetFinalizer: pointer not in allocated block
+
+    runtime_SetFinalizer()
+    os_newFile()
+    os_NewFile()
+    _goc_global_initfunc_140_os_Stdin()
+    runtime_doInit1()
+
+`os.newFile` (file_unix.go) is `f := &File{&file{...}}` followed by
+`runtime.SetFinalizer(f.file, (*file).close)` and `return f`. The permissive
+rule put the inner `&file{...}` in the frame.
+
+Reduced to nine lines, and this is the whole defect:
+
+```go
+type inner struct{ n int }
+type outer struct{ p *inner }
+
+var sink *outer
+
+func makeOuter() *outer {
+	o := &outer{&inner{1}}
+	runtime.SetFinalizer(o.p, func(*inner) {})
+	return o
+}
+```
+
+`main` @ 9cdc2d8, correct:
+
+    %t2 =p call $runtime.newobject(main_outer)
+    %t4 =p call $runtime.newobject(main_inner)      ; heap
+    call $goc_storep(p %t2, p %t4)
+
+with the alternative fix:
+
+    %t2 =p call $runtime.newobject(main_outer)
+    %t4 =p alloc8 8                                 ; FRAME
+    call $goc_storep(p %t2, p %t4)                  ; frame address into a heap object,
+                                                    ; through the write barrier
+
+That is a dead frame address inside a live heap object -- the exact defect
+2724ac7 left behind, which §R1.1 named as the risk and which surfaced then, as
+now, minutes away from the change that caused it.
+
+### R3.3 The root cause, which §R1.1 could not have known
+
+The reason is not that the analysis is too optimistic in some diffuse way. It is
+one missing case:
+
+**`addressEscapesWithin` has no `*ast.UnaryExpr` case.** Climbing from
+`&inner{1}` it reaches the enclosing `outer{...}` composite literal, then that
+literal's parent -- `&outer{...}`, a `*ast.UnaryExpr` -- and falls into
+`default: return false`, which in that predicate means *does not escape*.
+
+That is not a bug in `addressEscapesWithin`. It is asked about `&localVar`,
+where an `&` directly above the address expression cannot occur, so the case was
+never needed. Reusing it to place `&T{...}` walks it into a form it was never
+written for, and the form it was never written for is precisely the nested
+literal.
+
+So §R1.1's cost estimate was understated. It is not "the whole matrix plus a
+search for the cases where `parameterDoesNotEscape` is optimistic". The
+predicate being reused is structurally incomplete for the new question, and
+making it complete is a change to the escape walk's shape, not a revalidation of
+it.
+
+### R3.4 The decision: do not take it, and close the question
+
+Three reasons, in the order they matter.
+
+1. **The payoff is zero, measured.** The alternative fix's entire purpose was to
+   reverse the +5.8% and go past it. §R2 shows there is no +5.8% to reverse:
+   +0.04%, 95% CI [-1.37%, +1.46%]. And the payoff beyond that is bounded by the
+   same measurement -- the largest of the five allocations it removes is the
+   512-byte `T`, and removing that one is worth 0.0% ± 1.4% on this path. Four
+   smaller ones cannot be worth much more.
+
+2. **The cost is a miscompile, demonstrated, not hypothesised.** §R3.2. The very
+   first program compiled with it dies in `os` package initialisation.
+
+3. **Making it correct is a different change.** §R3.3. It needs a new case in a
+   predicate that other things depend on, and then the validation §R1.1 already
+   described. That is a reasonable piece of work for someone who wants goc's
+   escape analysis to be more precise -- and it should be justified by precision,
+   with the census as its evidence, not by a performance number that does not
+   exist.
+
+**§R1.1's judgement stands, for a better reason than it had.** It declined the
+fix on risk with the payoff assumed real. The payoff is not real, and the risk
+is not a judgement call -- it is a crash.
+
+The change is not committed. §R3.1's description, §R3.2's reduced program and
+§R3.3's root cause are the deliverable, so that the next person to consider this
+starts from a diagnosis instead of from the same idea.

@@ -1,0 +1,52 @@
+# Elapsed time on the crypto signing path under goc and under the host Go
+# toolchain. Regenerate with
+#
+#     make bench-crypto-update
+#
+# and read the diff; check it with
+#
+#     make bench-crypto
+#
+# The run needs a Go toolchain and a system linker, and takes about 65 seconds,
+# most of which is the goc-built binary doing real P-256 arithmetic. Run it on an
+# idle machine: unlike every other baseline in this directory it measures time,
+# so a loaded box produces a number about the box.
+#
+# Both columns come from the same program -- goc/testdata/crypto_signing_bench --
+# compiled by both compilers, so the two answers are produced by the same
+# measurement rather than by two benchmarks that happen to be named alike. That
+# program's doc comment is where the method is written down.
+#
+# # Why an index and not nanoseconds
+#
+# Nanoseconds are a property of the machine as much as of the compiler, and a
+# baseline of raw times could only ever be checked on the one box it was taken
+# on. Every case is therefore divided by control/spin-fixed-work, a fixed amount
+# of integer arithmetic measured in the same binary in the same process, and it
+# is that ratio -- the index column -- that is committed and compared. A machine
+# twice as fast changes both numbers and does not change the index.
+#
+# The raw nanoseconds are printed alongside so the index can be sanity-checked,
+# but they are not compared; they are expected to differ between machines.
+#
+# # Why this file exists
+#
+# The escape publication fix (6245dbb) was measured at +5.8% on 200 P-256
+# sign+verify when it landed. Nothing in this tree measured elapsed time, so that
+# number went unchecked across the seven compiler changes that followed it and
+# had to be re-established from scratch. See CCWORK_REPORT.md, "Recovered: the
+# bigmod.Nat.Mul cost of the escape publication fix".
+#
+# gc's index is the reference. It should not move unless the host toolchain did;
+# this file records the toolchain it was produced against for that reason.
+#
+host toolchain: go version go1.26.1 linux/arm64
+measurement:    rounds=5 fastest-of signVerifyRounds=200
+index:          case time / control/spin-fixed-work time, same binary, same process
+tolerance:      0.04 of the index, both directions
+
+case                        goc index     gc index   goc ns (fyi)    gc ns (fyi)
+p256/sign-verify              45.7581       1.6310     2501162550       54623227
+p256/verify                   33.7479       1.1637     1844676016       38973083
+p384/sign-verify              40.3662       2.8733     2206437207       96228482
+rsa2048/sign-verify           12.3879       0.5925      677130146       19841163

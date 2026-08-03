@@ -63,9 +63,13 @@ COVERAGE_BASELINE := cmd/goc/testdata/runtime_coverage_linux_arm64.json
 # compiler time per run at the current matrix size.
 COVERAGE_TIMEOUT  ?= 180m
 
+# The crypto signing benchmark compiles one program with each compiler and then
+# runs real P-256 and RSA arithmetic under both; the goc-built half dominates.
+CRYPTO_BENCH_TIMEOUT ?= 20m
+
 .PHONY: all build test test-unit test-goc-corpus test-goc-cmd test-goc-status \
         test-goc-status-opt test-goc-coverage runtime-cover-diff test-ruby \
-        test-cruby fmt vet clean
+        test-cruby bench-crypto bench-crypto-update fmt vet clean
 
 # The default local check: build, then the whole suite.
 all: build test
@@ -130,6 +134,24 @@ test-ruby:
 # performance against a reference build. Out of tree — see the script.
 test-cruby:
 	./scripts/cruby-diff.sh
+
+# The crypto signing path's elapsed cost, against its committed baseline.
+#
+# This is the tree's only instrument that measures time rather than counting
+# something, which is why it is a target of its own and not part of `test`: it
+# needs an idle machine to mean anything, and it takes a few minutes. It exists
+# because the one performance regression this tree has a record of -- the escape
+# publication fix's effect on bigmod.Nat.Mul -- went unwatched and its number
+# went stale. It fails in both directions; see goc/cryptobench_test.go for why
+# faster is also news.
+bench-crypto:
+	$(GO) test -timeout $(CRYPTO_BENCH_TIMEOUT) -run '^TestCryptoSigningBench$$' ./goc -crypto-bench -v
+
+# Rewrite the baseline from this run. Deliberately separate: the value of the
+# file is that a movement gets looked at by a person.
+bench-crypto-update:
+	$(GO) test -timeout $(CRYPTO_BENCH_TIMEOUT) -run '^TestCryptoSigningBench$$' ./goc \
+		-crypto-bench -update-crypto-bench -v
 
 fmt:
 	$(GO) fmt ./...
