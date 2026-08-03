@@ -1744,3 +1744,125 @@ up in this shape too.
 `escape_shadow_baseline.txt` (`TestEscapeShadowPlacement`) and
 `escape_gc_differential.txt` (`TestEscapeDifferentialAgainstGC`), so both were
 run as well.
+
+---
+
+# Residual slog allocation: diagnosis in progress
+
+Baseline re-run at 6b9fbb0 reproduces the committed table exactly
+(`go test ./goc -run TestSlogAllocationsAgainstGC -slog-allocations`, PASS, 19.6s).
+
+## First arithmetic on the byte counts
+
+The bytes/op column identifies the object before any IR is dumped. Under goc:
+
+    info/1-attr   64 B    info/3-attr  176 B    info/5-attr  288 B
+
+Differences are 112 B per two attributes -- 56 B per attribute, with 8 B of slack
+at the bottom. Fitting the size classes:
+
+    n attrs  ->  variadic []any backing array   32n B   (2n elements, 16 B each)
+             +   boxed payload slot per string  16n B
+             +   boxed payload slot per int      8n B
+             =                                  56n B  -> 56, 168, 280
+             -> Go size classes                          64, 176, 288   MATCH
+
+`info/3-attr-large-ints` is 176 B too, which the fit predicts (the payload slot
+is reserved whether or not staticuint64s ends up being used), and gc's 3x8 B
+there confirms the 8 B int slot is the right unit.
+
+`logattrs/3-attr` is 128 B: 3 x sizeof(slog.Attr)=40 = 120 -> class 128. That is
+the `...Attr` variadic backing array with no payload slots, since Attr is not an
+interface. Same shape, same cause.
+
+So the single residual allocation is NOT a Record, NOT a Value box, and NOT an
+Attr copy. It is **the combined variadic object -- the `...any` backing array
+plus its reserved boxing payload slots -- being heap-allocated at the call site
+instead of living in the caller's frame.**
+
+That explains `disabled/3-attr` costing 176 B while `disabled/no-attrs` costs 0:
+the cost is paid building the argument list before `Logger.log` is entered and
+before the level is ever checked. It is attribute-related because a call with no
+attributes has no backing array to build.
+
+Still to establish: why goc's escape question answers "escapes" for
+`slog.Logger.Info` when it answers "does not escape" for the in-package
+`noRetain(...)` control (0.00) and for `fmt.Sprintf` (parity at 1.00).
+
+## Confirmed from the IR: what the 64-byte object is
+
+Reduction (`hot` is `//go:noinline` so the call site is isolated):
+
+    //go:noinline
+    func hot() { logger.Info("msg", "a", 1) }
+
+`goc -O -emit-ir` gives, in `$main.hot`:
+
+    %t9 =p call $runtime.newobject(
+        p $.goc.runtime.type.struct_values__2_any__payload0_string__payload1_...)
+    %t10 =p add %t9, 32      ; &payload0  -- the boxed "a"
+    ...
+    %t23 =p add %t9, 48      ; &payload1  -- the boxed 1
+    storel 1, %t23
+    call $log/slog.Logger.Info(p %t1, <msg> %t4, p %t9, l 2, l 2)
+
+and the type descriptor records its size directly:
+
+    data $.goc.runtime.type.struct_values__2_any__payload0_string__payload1_... =
+        align 8 { l 64 56, ... }        ; size 56, ptrdata 64-class
+
+**The 64-byte allocation is goc's combined variadic object for `Logger.Info`'s
+`...any` argument list**: `struct { values [2]any; payload0 string; payload1 int }`
+-- a 32-byte `[2]any` backing array, a 16-byte reserved slot holding the boxed
+key `"a"`, and an 8-byte reserved slot holding the boxed value `1`. 56 bytes,
+allocated by `runtime.newobject` into the 64-byte size class. gc keeps the
+`[2]any` in the frame and makes both payloads static symbols, so it allocates
+nothing.
+
+## Why it goes to the heap
+
+Traced by instrumenting `opt.lowerFunctionHeapAllocations` to report
+`candidateEscapes.reason` (temporary; not committed):
+
+    main.hot: t8  escaped=true reason="argument 2 of $log/slog.Logger.Info
+                  may retain something inside a self-referential object"
+    main.hot: t22 escaped=true reason="argument 2 of $log/slog.Logger.Info
+                  may retain something it points at"
+
+Two independent constraints, and **both** have to be removed:
+
+1. **The object is self-referential.** Element 0's data word points at
+   `payload0`, a field of the same allocation. `opt.markSummarisedCall` runs
+   `needsDeepSummary` before it ever consults the escape verdict: a callee that
+   may retain an *element* retains the whole object, because they are one
+   object. `string` is what makes this true here -- `variadicPayloadStorage`
+   splits a payload out only when `interfaceConversionHelper` has one (bool,
+   int8..int64, uint*, uintptr, float32/64), and there is no `convTstring`.
+
+2. **The summary itself says the array escapes.** goc's fact table:
+
+       $log/slog.Logger.Info: 0:escapes 1:noescape 2:escapes 3:escapes 4:escapes
+                                                   ^ the args backing-array pointer
+       $log/slog.Record.Add:  0:noescape 1:escapes 2:escapes 3:escapes
+       $log/slog.argsToAttr:  0:leaks-to-result(0) 1:leaks-to-result(0) ...
+
+   gc, for the identical source (`go build -gcflags=-m log/slog`):
+
+       logger.go:208:35: leaking param content: args      # (*Logger).Info
+       record.go:129:22: leaking param content: args      # (*Record).Add
+       record.go:168:17: leaking param content: args      # argsToAttr
+       record.go:168:17: leaking param: args to result ~r0 level=1
+       record.go:168:17: leaking param: args to result ~r1 level=0
+
+   gc says *content* leaks and the pointer does not. goc has exactly that
+   vocabulary -- `ParamFact.Deep` is the level distinction -- but its
+   leaks-to-result edge has no level, so `Any(x, args[1])`, which is a *load*
+   through `args`, propagates the array pointer instead of its contents. From
+   `argsToAttr` the imprecision walks up through `Record.Add`, `Logger.log` and
+   `Logger.Info`.
+
+Neither fix helps alone: remove (1) and the verdict in (2) still escapes the
+array; remove (2) and `needsDeepSummary` still escapes it. That is why this
+survived three previous rounds -- it is not a variant of the convT, variadic-
+escape-question, or interface-return causes, all of which are confirmed closed
+by the control rows in the same table.
