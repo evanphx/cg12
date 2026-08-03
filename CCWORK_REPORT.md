@@ -2436,3 +2436,26 @@ than the maps is the remaining move there, and it is not free: an answer
 produced while a `checking` cycle was broken is not the same answer as one
 produced from a clean stack, so it would need a "did this computation hit a
 cycle" flag before anything could be cached.
+
+## Summary
+
+    lines where goc heaps what gc frames    134 -> 113
+    lines where both frame                  139 -> 165
+    groups the 134 fell into                17  (5 fixed, 12 remaining)
+    irreducible or not a real difference    15  (G2 pre-inlining, G3 measurement)
+    blocked on a representation change      55  (G1 maps, G4 interface payloads)
+    ordinary analysis work remaining        43
+
+    slog rows off gc                        4 -> 4, two of them much closer
+                                            (json/kv-4-pairs 5.00 -> 3.00,
+                                             json/logattrs-4-attrs 4.00 -> 2.00),
+                                            from two of the same causes
+
+    census                                  73 heap -> frame, 0 frame -> heap,
+                                            50 vanished into ordinary frame slots,
+                                            0 appeared
+    front-end placements in frames          83.4% -> 83.9%
+    TestFrameEscapeAudit                    clean, baseline unchanged
+    determinism, loop aliasing, GC masks    pass
+    GC reducer at GOGC=10                   0/20
+    allocation-count rows added             5, each failing before its own fix
