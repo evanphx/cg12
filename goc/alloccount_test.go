@@ -47,9 +47,11 @@ import (
 //
 // TestAllocationCountsAgainstTheHostToolchain runs the same program through the
 // host `go` and holds it to the host column of this table, so the *gap* is
-// recorded and
-// not just goc's side of it. Two rows below are goc paying less than gc, which
-// is as much a thing to notice on a diff as paying more.
+// recorded and not just goc's side of it. Every row where the two differ is goc
+// paying more, and each says why; a row that starts paying less is as much a
+// thing to look at on a diff as one that starts paying more, because the way an
+// allocation stops happening can be an object moving into a frame it should not
+// be in.
 var gocAllocationCounts = []struct {
 	name string
 	// count is allocations per call times 100, under goc.
@@ -59,14 +61,13 @@ var gocAllocationCounts = []struct {
 	host int
 	why  string
 }{
-	// The headline. Both compilers keep the `...` array off the heap and both
-	// pay for the result string. The remaining difference is the boxed
-	// argument: fmt's doPrintf assigns each element to p.arg, a field of a
-	// heap-allocated printer, so the box has to be on the heap under goc --
-	// see needsDeepSummary. gc pays nothing for this particular one because 42
-	// is small enough to box into runtime.staticuint64s, which goc has no
-	// equivalent of; with a value of 300 instead, gc pays for it too.
-	{"sprintf_int", 200, 100, "the result string, and the boxed int fmt retains"},
+	// The headline. Both compilers pay for the result string. The remaining
+	// difference is the `...` array: gc keeps it in the frame, and goc packs it
+	// together with the boxed argument into one heap object, because fmt's
+	// doPrintf assigns each element to p.arg, a field of a heap-allocated
+	// printer -- see needsDeepSummary. The box itself is no longer the
+	// difference: 42 fits runtime.staticuint64s under both compilers now.
+	{"sprintf_int", 200, 100, "the result string, and the `...` object holding the boxed int"},
 	// Parity: the result string plus one box each, for the same reason.
 	{"sprintf_string", 200, 200, "the result string, and the boxed string fmt retains"},
 	{"sprintf_struct", 200, 200, "the result string, and the boxed struct fmt retains"},
@@ -78,13 +79,31 @@ var gocAllocationCounts = []struct {
 	// backing array question was really about. Both are now free.
 	{"variadic_ints", 0, 0, "the `...` backing array is a frame slot"},
 	{"variadic_any", 0, 0, "backing array and boxed payloads, one frame object"},
-	// goc has no convT64/staticuint64s fast path: every interface conversion of
-	// a non-pointer value that has to be on the heap is a runtime.newobject.
-	// gc returns a pointer into a static table for a small integer and
-	// allocates nothing. This is the whole of the remaining sprintf_int gap.
-	{"box_small_int", 100, 0, "no staticuint64s fast path in goc"},
+	// The six shapes of `any(x)`, and what each one costs once goc builds an
+	// escaping payload with runtime.convT* instead of runtime.newobject.
+	//
+	// The fast path is about the *value*, not the type: convT64 hands back a
+	// pointer into runtime.staticuint64s for anything below 256 and calls the
+	// allocator for everything else. box_small_int and box_bool are on the free
+	// side of that line and box_large_int and box_float64 -- 3.5's bit pattern
+	// is nowhere near it -- are not. Nothing here would notice if the fast path
+	// were wired to fire on the type instead, which is what the two rows either
+	// side of the line are for.
+	//
+	// The four zeros in the host column that goc does not match are gc's escape
+	// analysis, not gc's static table: `-gcflags=-m` says "theLargeInt does not
+	// escape" at each of them, because takeAny does not leak its parameter, so
+	// gc puts the payload in a frame and never reaches a conversion helper at
+	// all. return_any_from_large_int is the same value in a shape gc cannot
+	// frame, and there the two agree exactly.
+	{"box_small_int", 0, 0, "convT64 returns a pointer into staticuint64s"},
+	{"box_large_int", 100, 0, "past the static table, so convT64 allocates; gc frames it"},
+	{"box_bool", 0, 0, "a bool is a byte, and every byte is in the static table"},
+	{"box_float64", 100, 0, "3.5's bits are past the static table; gc frames it"},
+	{"box_string", 100, 0, "a string payload has no register-shaped helper; gc frames it"},
 	{"box_pointer", 0, 0, "a pointer is its own interface payload"},
-	{"return_any_from_int", 100, 0, "the box; the descriptor is a frame slot"},
+	{"return_any_from_int", 0, 0, "convT64 returns a pointer into staticuint64s"},
+	{"return_any_from_large_int", 100, 100, "it escapes and it is past the table, so both allocate"},
 	{"return_any_from_pointer", 0, 0, "nothing to box, nothing to allocate"},
 	{"sync_pool_round_trip", 0, 0, "Get's interface result is returned in registers"},
 	// The two rows written inside a loop body. opt.promotionsBlockedByALoop

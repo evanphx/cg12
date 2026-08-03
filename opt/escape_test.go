@@ -502,3 +502,84 @@ func TestLowerHeapAllocationsEscapesACandidateInASlotHandedToANoescapeCallee(t *
 	assert.Equal(t, ir.OCall, block.Instrs[0].Op,
 		"peek may retain what it loads out of the slot, which is this object")
 }
+
+// The three tests below cover ir.Block.HeapAllocConverted, whose contract binds
+// the emitter and this pass together: a candidate that names a conversion helper
+// is lowered to that helper instead of to the allocator, and the store that
+// would have initialized the object is dropped, because the helper's result
+// already holds the value -- and, for a small value, points into a read-only
+// table that must not be written.
+
+func TestLowerHeapAllocationsCallsTheConversionHelperForAnEscapingObject(t *testing.T) {
+	module := ir.NewModule()
+	function := module.NewFunc("escape", ir.ClsP)
+	block := function.Entry()
+	value := function.Long(42)
+	object := block.HeapAllocConverted(
+		function.Sym("runtime.newobject", 0),
+		function.Sym("type.int", 0),
+		function.Sym("runtime.convT64", 0),
+		value, 8, 8)
+	block.Store(value, object)
+	block.Ret(object)
+
+	require.True(t, LowerHeapAllocations(module))
+	require.Equal(t, ir.OCall, block.Instrs[0].Op)
+	assert.Equal(t, []ir.Ref{function.Sym("runtime.convT64", 0), value}, block.Instrs[0].Args)
+	assert.Equal(t, ir.ClsP, block.Instrs[0].Cls, "the helper still returns the object's address")
+	for _, instruction := range block.Instrs {
+		assert.False(t, instruction.Op.IsStore(),
+			"the initializing store has to go: convT64's result may be in read-only memory")
+	}
+}
+
+func TestLowerHeapAllocationsPromotesAConvertedCandidateWithItsStore(t *testing.T) {
+	module := ir.NewModule()
+	function := module.NewFunc("local", ir.ClsL)
+	block := function.Entry()
+	value := function.Long(42)
+	object := block.HeapAllocConverted(
+		function.Sym("runtime.newobject", 0),
+		function.Sym("type.int", 0),
+		function.Sym("runtime.convT64", 0),
+		value, 8, 8)
+	block.Store(value, object)
+	block.Ret(block.Load(ir.ClsL, object))
+
+	require.True(t, LowerHeapAllocations(module))
+	assert.Equal(t, ir.OAlloc8, block.Instrs[0].Op,
+		"a payload that stays in the frame is cheaper than any call to a helper")
+	assert.Len(t, block.Instrs[0].Args, 1)
+	stores := 0
+	for _, instruction := range block.Instrs {
+		if instruction.Op.IsStore() {
+			stores++
+		}
+	}
+	assert.Equal(t, 1, stores, "the promoted object still has to be given its value")
+}
+
+// A converted candidate whose next instruction is not its initializing store is
+// the one case the lowering has to refuse: dropping some other instruction, or
+// calling the helper and leaving a store to a table entry behind, are both
+// wrong, and an ordinary allocation is always right.
+func TestLowerHeapAllocationsIgnoresAConversionWithoutItsStore(t *testing.T) {
+	module := ir.NewModule()
+	function := module.NewFunc("escape", ir.ClsP)
+	block := function.Entry()
+	value := function.Long(42)
+	object := block.HeapAllocConverted(
+		function.Sym("runtime.newobject", 0),
+		function.Sym("type.int", 0),
+		function.Sym("runtime.convT64", 0),
+		value, 8, 8)
+	other := block.Alloc(8, 8)
+	block.Store(value, other)
+	block.Store(value, object)
+	block.Ret(object)
+
+	require.True(t, LowerHeapAllocations(module))
+	require.Equal(t, ir.OCall, block.Instrs[0].Op)
+	assert.Equal(t, []ir.Ref{function.Sym("runtime.newobject", 0), function.Sym("type.int", 0)},
+		block.Instrs[0].Args, "an unrecognised shape falls back to the allocator")
+}

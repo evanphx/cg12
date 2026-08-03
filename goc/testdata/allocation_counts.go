@@ -27,7 +27,24 @@ var (
 	theString = "answer"
 	theStruct = pair{1, 2}
 	thePtr    = &theInt
+
+	// theLargeInt is past the last entry of runtime.staticuint64s, and
+	// theFloat's bit pattern is far past it, so boxing either has to allocate
+	// where boxing theInt does not. They are here to hold the fast path to
+	// being about the value and not about the type.
+	theLargeInt = 1 << 20
+	theBool     = true
+
+	// theFloat is assigned in init rather than in its declaration. goc compiles
+	// a package-level float64 initialized to a constant to zero -- a defect that
+	// predates this file's float row and has nothing to do with boxing -- and
+	// zero's bit pattern does fit staticuint64s, so declaring it here would make
+	// this row measure any(0.0) and quietly report a fast path that is not
+	// running.
+	theFloat float64
 )
+
+func init() { theFloat = 3.5 }
 
 type pair struct{ a, b int }
 
@@ -67,16 +84,34 @@ func takeAny(value any) int {
 func boxSmallInt() { sinkInt = takeAny(theInt) }
 
 //go:noinline
+func boxLargeInt() { sinkInt = takeAny(theLargeInt) }
+
+//go:noinline
+func boxBool() { sinkInt = takeAny(theBool) }
+
+//go:noinline
+func boxFloat64() { sinkInt = takeAny(theFloat) }
+
+//go:noinline
+func boxString() { sinkInt = takeAny(theString) }
+
+//go:noinline
 func boxPointer() { sinkInt = takeAny(thePtr) }
 
 //go:noinline
 func returnAnyFromInt(value int) any { return value }
 
 //go:noinline
+func returnAnyFromLargeInt(value int) any { return value }
+
+//go:noinline
 func returnAnyFromPointer(value *int) any { return value }
 
 //go:noinline
 func callReturnAnyFromInt() { sinkAny = returnAnyFromInt(theInt) }
+
+//go:noinline
+func callReturnAnyFromLargeInt() { sinkAny = returnAnyFromLargeInt(theLargeInt) }
 
 //go:noinline
 func callReturnAnyFromPointer() { sinkAny = returnAnyFromPointer(thePtr) }
@@ -136,8 +171,13 @@ func main() {
 	measure("variadic_ints", repeat(callVariadicInts))
 	measure("variadic_any", repeat(callVariadicAny))
 	measure("box_small_int", repeat(boxSmallInt))
+	measure("box_large_int", repeat(boxLargeInt))
+	measure("box_bool", repeat(boxBool))
+	measure("box_float64", repeat(boxFloat64))
+	measure("box_string", repeat(boxString))
 	measure("box_pointer", repeat(boxPointer))
 	measure("return_any_from_int", repeat(callReturnAnyFromInt))
+	measure("return_any_from_large_int", repeat(callReturnAnyFromLargeInt))
 	measure("return_any_from_pointer", repeat(callReturnAnyFromPointer))
 	measure("sync_pool_round_trip", repeat(poolRoundTrip))
 	measure("sprintf_in_loop", sprintfInLoop)
