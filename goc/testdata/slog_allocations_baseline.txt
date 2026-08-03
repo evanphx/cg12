@@ -57,10 +57,9 @@ logattrs/6-attr                      3.00       1.00      336.0       48.0
 disabled/no-attrs                    0.00       0.00        0.0        0.0
 disabled/3-attr                      1.00       0.00      176.0        0.0
 disabled/logattrs-3-attr             1.00       0.00      128.0        0.0
-json/kv-4-pairs                     crash       2.00      crash       24.0
+json/kv-4-pairs                      5.00       2.00      320.0       24.0
 json/logattrs-4-attrs               crash       0.00      crash        0.0
 
 cases that did not run:
 
-  json/kv-4-pairs                goc  fatal error: invalid pointer found on stack (runtime: bad pointer in frame log_slog_handleState_appendAttr at 0x?: 0xc8)
   json/logattrs-4-attrs          goc  fatal error: invalid pointer found on stack (runtime: bad pointer in frame main_func_311_28 at 0x?: 0x3)

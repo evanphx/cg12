@@ -320,3 +320,76 @@ differential measures placement; `allocation_counts.go` measures cost. This is
 the same disagreement the `iface-convt-fastpath` branch reported for the same
 reason, and it is why both instruments are kept.
 
+## 5. The guards
+
+### 5.1 `TestFrameEscapeAudit` — clean
+
+`ok github.com/evanphx/cg12/goc`. Zero new frame-address publications and none
+of the listed ones went away, at every intermediate state of this branch as well
+as the final one. The brief warned that a failure here would be a real
+correctness finding rather than a baseline to update; it did not fail, and the
+one place where it *would* have is written into the code:
+`promotionsBlockedByALoop` escapes candidates after the analysis has finished,
+so `containedAllocationsEscape` runs again after it. A container the loop rule
+sends to the heap with a promoted payload still inside it is exactly the
+publication this audit exists to catch.
+
+### 5.2 The allocation census — regenerated and read site by site
+
+`goc/testdata/alloc_census_baseline.txt`. Three groups, and the whole diff is
+one class.
+
+**128 sites moved heap → frame, and every one is a `struct_values__*`** — the
+synthesized combined type a variadic call allocates. Nothing else in the corpus,
+the stdlib or the runtime moved in that direction: not one `new(T)`, map, slice
+backing or closure. **127 of the 128 pair with a new `runtime.convT*` site on
+the same source line and in the same function**, which is the split made
+visible: the array went into the frame and the payload it used to contain became
+a conversion call a few columns to the right. The 128th is
+`runtime_range_target_order.go:88:15`, whose payload site is positionless and so
+cannot join on location; it is there, under `?`.
+
+**22 sites vanished, all in `testdata/allocation_counts.go`** — the corpus
+program this branch adds four cases to, so every line number below the insertion
+moved. No site vanished anywhere else.
+
+**174 sites appeared.** 127 of them are the split payloads paired above. 43 are
+in the three files this branch adds or edits. **Four are neither, and they are
+the price of section 3.2's refusal**, in the frame → heap direction:
+
+    net/http.http2Transport.newClientConn   h2_bundle.go:8143:21  [2]http2Setting
+    main.leaky (and two inlined copies)     variadic_backing.go:8:2  int
+
+Both are a value passed as a variadic *element* to a callee that keeps nothing,
+which the AST walk could prove before and now declines to answer. Two distinct
+source lines across 385 corpus programs and the whole vendored stdlib is what
+the refusal costs, against a `fatal error: found bad pointer in Go heap` it
+buys. Recovering the precision needs a walk that can ask about dereference
+depth, which `opt`'s fact table has and the AST walk does not.
+
+### 5.3 Loop aliasing — the programs still match the host
+
+`TestLoopBodyAllocationsAreDistinctPerIteration` and
+`TestLoopAliasExpectationsMatchTheHostToolchain` pass, over the existing five
+programs and the two this branch adds. `variadic_backing.go` still prints `1`
+even though it now costs an allocation it did not, which is the point of having
+both instruments: the census saw the cost and the program proves the answer.
+
+`TestLoopVarPerIteration`, `TestEscapeShadowPlacement`, `TestAllocationCounts`,
+`TestAllocationCountsAgainstTheHostToolchain` and the `opt` and `ir` unit suites
+all pass. `go test ./goc/...` in full, the capability matrix and `make test-unit`
+were deliberately not run: a dependent job does that.
+
+### 5.4 Determinism
+
+`TestDeterminism` passes. Two places in this branch could have broken it and are
+written not to:
+
+- `foldSplitPayloadsBackIn` visits containers **in first-appearance order**, not
+  in map order, so which container is folded first cannot depend on hash
+  iteration.
+- The front end already recorded payload fields in argument order rather than in
+  a map, for the same reason, and the split respects that ordering: a payload
+  that becomes its own allocation still consumes its reserved field in the order
+  the argument list gives.
+
