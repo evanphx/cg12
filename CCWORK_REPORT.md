@@ -471,3 +471,21 @@ in a frame that returned. The collector says `found bad pointer in Go heap`. It
 reproduces on the base commit and on `main`, the reduction is committed with its
 expected output checked against the host toolchain, and the walk now refuses the
 question the predicate beside it always refused. It costs two census sites.
+### 5.5 Corpus output differential — mine, not one the brief asked for
+
+All **392 corpus programs** compiled, linked and run by goc built from the base
+commit and by goc built from this branch, `-O` both times, stdout and stderr
+compared byte for byte. **388 identical.** The four that differ:
+
+| program | difference |
+|---|---|
+| `allocation_counts.go` | the program this branch adds four cases to; the diff **is** the table in 4.1 |
+| `variadic_element_address_retention.go` | **dies under the base compiler and runs under this branch** — section 3.2's fix, from the outside |
+| `bytes_grow_compare.go` | not a difference: identical on a serial re-run. The parallel harness raced on the linked binary's name |
+| `bytes_grow_stats.go` | prints raw `runtime.MemStats`. **Not deterministic under either compiler**: three runs of the *base* give `mallocs 220`, `226`, `220`, and three of this branch give the same three values |
+
+So: zero unexplained output differences, and the one real one is the bug being
+fixed. This is the instrument the `variadic-allocations` job's dangling pointer
+did *not* show up in — 387 of 390 were identical then too — which is why it is
+run alongside the census and the audit rather than instead of them.
+
