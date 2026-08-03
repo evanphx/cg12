@@ -543,6 +543,34 @@ func (b *Block) HeapAllocConverted(allocator, typeDescriptor, converter, value R
 	return b.heapAlloc(args, size, align)
 }
 
+// HeapAllocConvertedField is HeapAllocConverted for an object that has somewhere
+// to go if it cannot be its own allocation: storage at offset bytes into the
+// object container allocates, reserved for exactly this.
+//
+// It exists because one object is one placement, and a variadic `...any` call
+// has two questions to answer, not one. The `[N]any` backing array escapes when
+// the callee retains the *slice*; a boxed payload escapes when the callee
+// retains an *element*. Packing both into one object -- which is what container
+// still is for every payload with no conversion helper -- forces the array to
+// the answer the payload got, and that is why `fmt.Sprintf("value=%d", n)` cost
+// a heap allocation for an array gc has always kept in a frame.
+//
+// Emitting the payload separately lets the two be decided apart, and carrying
+// the reserved field lets [opt.LowerHeapAllocations] undo the separation when
+// it did not pay: with the container on the heap, N+1 objects cost N+1
+// allocations where the combined one costs one. The pass folds the payload back
+// to container+offset in that case, and the initializing store the contract
+// above requires -- which HeapAllocConverted's helper path drops -- is kept,
+// because there is no helper call to have written the value.
+//
+// The emitter owes one thing beyond HeapAllocConverted's two rules: container's
+// allocated type must really have offset bytes of storage of this object's type
+// there, since the fold makes the payload alias it.
+func (b *Block) HeapAllocConvertedField(allocator, typeDescriptor, converter, value, container Ref, offset int64, size, align int) Ref {
+	args := []Ref{allocator, typeDescriptor, b.fn.Long(int64(size)), converter, value, container, b.fn.Long(offset)}
+	return b.heapAlloc(args, size, align)
+}
+
 func (b *Block) heapAlloc(args []Ref, size, align int) Ref {
 	if size < 0 {
 		panic("ir: negative heap allocation size")

@@ -207,7 +207,12 @@ func lowerFunctionHeapAllocations(function *ir.Func, byName map[string]*ir.Func,
 	}
 	diagCandidates(function, byName, facts, seeds)
 	escapes := analyzeCandidateEscapes(function, byName, facts, seeds, false)
-	rewriteHeapAllocations(function, escapes, promotionsBlockedByALoop(function, seeds, escapes), decisions)
+	blocked := promotionsBlockedByALoop(function, seeds, escapes)
+	// After the loop rule, because the loop rule is one of the ways a payload
+	// ends up escaping out of a framed array, and the count it is comparing has
+	// to be the final one.
+	foldSplitPayloadsBackIn(function, escapes)
+	rewriteHeapAllocations(function, escapes, blocked, decisions)
 	return true
 }
 
@@ -636,6 +641,28 @@ func rewriteHeapAllocations(function *ir.Func, analysis *candidateEscapes, loopB
 				lowered = append(lowered, instruction)
 				continue
 			}
+			if container, offset, folds := foldsIntoContainer(function, original); folds {
+				containerBase, tracked := heapBase(container, analysis.bases)
+				if tracked && escaped[containerBase] {
+					// The container is on the heap and has storage reserved for
+					// this object, so being a separate allocation buys nothing.
+					// The initializing store is left where it is: unlike the
+					// helper path below there is no call that has already
+					// written the value.
+					//
+					// No decision is recorded: a folded payload is not an
+					// allocation site any more, it is a field of one, and the
+					// container's own decision already says where it went. That
+					// keeps the census for a merged variadic call exactly what it
+					// was before payloads could be split out at all.
+					instruction.Op = ir.OAdd
+					instruction.Cls = ir.ClsP
+					instruction.Args = []ir.Ref{container, function.Long(offset)}
+					instruction.Aux = 0
+					lowered = append(lowered, instruction)
+					continue
+				}
+			}
 			if escaped[instruction.To.ID] {
 				if convertsItsObject(original) && initializesCandidate(block, index+1, original.To) {
 					// The helper returns storage already holding the value, so
@@ -694,7 +721,90 @@ func rewriteHeapAllocations(function *ir.Func, analysis *candidateEscapes, loopB
 // HeapAllocConverted is what puts one there, and its doc comment carries the
 // contract; everything this function needs is the two extra arguments.
 func convertsItsObject(candidate ir.Instr) bool {
-	return len(candidate.Args) == 5
+	return len(candidate.Args) >= 5
+}
+
+// foldsIntoContainer reports whether a candidate has storage reserved for it
+// inside another allocation, and names that allocation and the byte offset. See
+// ir.Block.HeapAllocConvertedField.
+func foldsIntoContainer(function *ir.Func, candidate ir.Instr) (ir.Ref, int64, bool) {
+	if candidate.Op != ir.OHeapAlloc || len(candidate.Args) != 7 {
+		return ir.R, 0, false
+	}
+	offset, ok := constIntValue(function, candidate.Args[6])
+	if !ok {
+		return ir.R, 0, false
+	}
+	return candidate.Args[5], offset, true
+}
+
+// constIntValue reads an integer constant out of a reference.
+func constIntValue(function *ir.Func, reference ir.Ref) (int64, bool) {
+	if reference.Kind != ir.RefConst || int(reference.ID) >= len(function.Consts) {
+		return 0, false
+	}
+	constant := function.Consts[reference.ID]
+	if constant.Sym != "" {
+		return 0, false
+	}
+	return constant.Int, true
+}
+
+// foldSplitPayloadsBackIn decides, per variadic call, whether separating the
+// boxed payloads from the `[N]any` array paid, and gives back the ones that did
+// not by escaping the array they came out of.
+//
+// Splitting is free when the array stays in the frame and the payload stays with
+// it, and it is a win when the array stays in the frame and one payload leaves:
+// the payload is at most one allocation on its own, against one for the whole
+// combined object, and a value inside runtime.staticuint64s makes it none.
+//
+// It stops being a win at two. K escaping payloads out of a framed array cost K
+// allocations where the combined object costs exactly one, so past one the
+// arithmetic reverses and the array is sent to the heap to take them back.
+// `log/slog`'s three-large-integer call is the case that made this necessary:
+// it costs one allocation combined and four split, against gc's three.
+//
+// The upper bound is what is compared, not the expected cost. A conversion
+// helper allocates nothing for a small value, so K split payloads may well cost
+// nothing at all -- but which values a call site sees is not something a
+// compiler knows, and choosing the representation on a guess about them would
+// make the cost of a `%d` depend on how big the number turned out to be.
+func foldSplitPayloadsBackIn(function *ir.Func, escapes *candidateEscapes) {
+	var containers []uint32
+	escapingPayloads := make(map[uint32]int)
+	for _, block := range function.Blocks {
+		for _, instruction := range block.Instrs {
+			container, _, folds := foldsIntoContainer(function, instruction)
+			if !folds || instruction.To.Kind != ir.RefTemp {
+				continue
+			}
+			base, tracked := heapBase(container, escapes.bases)
+			if !tracked || escapes.escaped[base] || !escapes.escaped[instruction.To.ID] {
+				continue
+			}
+			if _, seen := escapingPayloads[base]; !seen {
+				containers = append(containers, base)
+			}
+			escapingPayloads[base]++
+		}
+	}
+	// Ordered by first appearance rather than by map iteration, so the decisions
+	// a module's compile makes do not depend on hash order.
+	folded := false
+	for _, base := range containers {
+		if escapingPayloads[base] < 2 {
+			continue
+		}
+		if escapes.reasons != nil {
+			escapes.reasons[base] = "holds more separately-allocated payloads than it costs to hold them"
+		}
+		escapes.escaped[base] = true
+		folded = true
+	}
+	if folded {
+		escapes.containedAllocationsEscape()
+	}
 }
 
 // initializesCandidate reports whether the instruction at index is the store

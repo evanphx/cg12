@@ -72,6 +72,43 @@ func variadicAny(values ...any) int { return len(values) }
 //go:noinline
 func callVariadicAny() { sinkInt = variadicAny(theInt, theString) }
 
+// The variadic rows that are about *retention*, which is the question the
+// backing array and the payload it points at have to be able to answer
+// separately. keepElement stores one element into a package-level variable, so
+// the boxed payload outlives the call and the `[N]any` array does not; a
+// compiler that cannot tell those apart has to heap both, and one that gets it
+// backwards leaves sinkAny holding a pointer into a returned frame.
+//
+// theRetained is past runtime.staticuint64s deliberately: a value inside the
+// table would be boxed to a pointer into read-only memory whatever the escape
+// analysis decided, and the row would pass without measuring anything.
+var theRetained = 0x5eed
+
+//go:noinline
+func keepElement(args ...any) { sinkAny = args[0] }
+
+//go:noinline
+func retainVariadicElement() { keepElement(theRetained) }
+
+//go:noinline
+func keepStructElement(args ...any) { sinkAny = args[0] }
+
+//go:noinline
+func retainVariadicStructElement() { keepStructElement(theStruct) }
+
+// Two convertible payloads in one call, which is where splitting them out of
+// the combined object can cost rather than save: gc allocates one box each and
+// goc used to allocate one object for both. With values inside
+// runtime.staticuint64s both boxes are free and the split wins; with values
+// outside it the split matches gc instead of beating it. Both rows are here so
+// the trade is a number rather than an argument.
+//
+//go:noinline
+func sprintfTwoSmallInts() { sinkString = fmt.Sprintf("%d/%d", theInt, theInt) }
+
+//go:noinline
+func sprintfTwoLargeInts() { sinkString = fmt.Sprintf("%d/%d", theLargeInt, theLargeInt) }
+
 //go:noinline
 func takeAny(value any) int {
 	if value == nil {
@@ -170,6 +207,10 @@ func main() {
 	measure("sprintf_no_args", repeat(sprintfNoArgs))
 	measure("variadic_ints", repeat(callVariadicInts))
 	measure("variadic_any", repeat(callVariadicAny))
+	measure("variadic_retained_element", repeat(retainVariadicElement))
+	measure("variadic_retained_struct_element", repeat(retainVariadicStructElement))
+	measure("sprintf_two_small_ints", repeat(sprintfTwoSmallInts))
+	measure("sprintf_two_large_ints", repeat(sprintfTwoLargeInts))
 	measure("box_small_int", repeat(boxSmallInt))
 	measure("box_large_int", repeat(boxLargeInt))
 	measure("box_bool", repeat(boxBool))

@@ -61,13 +61,15 @@ var gocAllocationCounts = []struct {
 	host int
 	why  string
 }{
-	// The headline. Both compilers pay for the result string. The remaining
-	// difference is the `...` array: gc keeps it in the frame, and goc packs it
-	// together with the boxed argument into one heap object, because fmt's
-	// doPrintf assigns each element to p.arg, a field of a heap-allocated
-	// printer -- see needsDeepSummary. The box itself is no longer the
-	// difference: 42 fits runtime.staticuint64s under both compilers now.
-	{"sprintf_int", 200, 100, "the result string, and the `...` object holding the boxed int"},
+	// The headline, and parity. Both compilers pay for the result string and
+	// nothing else. fmt's doPrintf assigns each element to p.arg, a field of a
+	// heap-allocated printer, so the boxed 42 genuinely is retained and goes to
+	// the heap -- where runtime.convT64 hands back a pointer into
+	// runtime.staticuint64s and allocates nothing. The `...` array does not go
+	// with it any more: it is a frame slot, which is where gc has always kept
+	// it. See goc.gen.variadicPayloadStorage for why those are two answers now
+	// and not one.
+	{"sprintf_int", 100, 100, "the result string; the `...` array is a frame slot and the box is in the static table"},
 	// Parity: the result string plus one box each, for the same reason.
 	{"sprintf_string", 200, 200, "the result string, and the boxed string fmt retains"},
 	{"sprintf_struct", 200, 200, "the result string, and the boxed struct fmt retains"},
@@ -78,7 +80,31 @@ var gocAllocationCounts = []struct {
 	// The variadic call to a callee that keeps nothing, which is what the `...`
 	// backing array question was really about. Both are now free.
 	{"variadic_ints", 0, 0, "the `...` backing array is a frame slot"},
-	{"variadic_any", 0, 0, "backing array and boxed payloads, one frame object"},
+	{"variadic_any", 0, 0, "backing array and boxed payloads, all in the frame"},
+	// The retention rows, which are the ones a wrong answer here shows up in.
+	// keepElement stores args[0] into a package-level variable, so the boxed
+	// payload outlives the call and the `[N]any` array does not. Both compilers
+	// pay for the box and neither pays for the array. This is the case an
+	// earlier attempt at this got wrong in the dangerous direction -- it
+	// promoted the whole combined object, leaving a global holding a pointer
+	// into a returned frame -- and the reason it can be answered now is that the
+	// array and the payload are separate allocations with separate answers.
+	{"variadic_retained_element", 100, 100, "the retained box; the `...` array stays in the frame"},
+	// The same retention with a payload the runtime has no conversion helper
+	// for, which therefore stays a field of the combined object. The array goes
+	// to the heap with it, because they are one object -- the old arithmetic,
+	// still exactly right for this shape, and still one allocation rather than
+	// two.
+	{"variadic_retained_struct_element", 100, 100, "one combined object; the struct payload cannot be split out"},
+	// Two convertible payloads in one call, which is where splitting stops
+	// paying: two escaping payloads out of a framed array cost two allocations
+	// where the combined object costs one, so opt.foldSplitPayloadsBackIn sends
+	// the array to the heap and takes them back. goc therefore pays 2 for both
+	// rows, and the two host numbers either side of it are what that is being
+	// compared against: gc splits unconditionally, which wins when the values
+	// are inside runtime.staticuint64s and loses when they are not.
+	{"sprintf_two_small_ints", 200, 100, "the result string and the combined object; gc's two boxes are both free"},
+	{"sprintf_two_large_ints", 200, 300, "the result string and the combined object; gc allocates a box each"},
 	// The six shapes of `any(x)`, and what each one costs once goc builds an
 	// escaping payload with runtime.convT* instead of runtime.newobject.
 	//

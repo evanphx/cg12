@@ -1654,6 +1654,10 @@ type gen struct {
 	typeArguments                 []types.Type
 	noWriteBarrier                bool
 	forceStackVariadic            bool
+	// variadicPayloadSlot is the reserved storage the payload about to be boxed
+	// can be folded back into; nil for every conversion that is not one variadic
+	// argument of a call being built. See variadicPayloadStorage.
+	variadicPayloadSlot *variadicPayloadSlot
 	resultSlot                    ir.Ref
 	resultType                    types.Type
 	resultObjects                 map[types.Object]bool
@@ -1723,6 +1727,7 @@ func (g *gen) derive() *gen {
 	derived.typeArguments = nil
 	derived.noWriteBarrier = false
 	derived.forceStackVariadic = false
+	derived.variadicPayloadSlot = nil
 
 	// Its result shape.
 	derived.resultSlot = ir.R
@@ -6042,6 +6047,25 @@ func (g *gen) allocateInterfacePayload(value ir.Ref, sourceType types.Type) ir.R
 	if !ok {
 		return g.allocateTyped(sourceType)
 	}
+	// Consumed rather than read: the slot belongs to one payload of one variadic
+	// call, and the conversion below is that payload. Leaving it set would offer
+	// the same reserved bytes to whatever the next conversion in this call
+	// happens to be.
+	slot := g.variadicPayloadSlot
+	g.variadicPayloadSlot = nil
+	if slot != nil {
+		payload := g.cur.HeapAllocConvertedField(
+			g.fn.Sym("runtime.newobject", 0),
+			g.runtimeType(sourceType),
+			g.fn.Sym(conversion.symbol, 0),
+			g.convertedPayloadValue(conversion, value),
+			slot.container,
+			slot.offset,
+			int(typeSize(sourceType)),
+			int(typeAlign(sourceType)),
+		)
+		return payload
+	}
 	payload := g.cur.HeapAllocConverted(
 		g.fn.Sym("runtime.newobject", 0),
 		g.runtimeType(sourceType),
@@ -6578,6 +6602,7 @@ func (g *gen) callArguments(arguments []ast.Expr, hasEllipsis bool, signature *t
 	arrayType := types.NewArray(elementType, length)
 	var backing ir.Ref
 	interfacePayloads := make(map[int]ir.Ref)
+	interfacePayloadSlots := make(map[int]variadicPayloadSlot)
 	stackAllocateVariadic := !g.runtimeAllocation || g.fn.NoSplit || g.forceStackVariadic
 	if !stackAllocateVariadic {
 		allocationType := types.Type(arrayType)
@@ -6595,10 +6620,11 @@ func (g *gen) callArguments(arguments []ast.Expr, hasEllipsis bool, signature *t
 					continue
 				}
 				fieldType := g.typeAndValue(argument).Type
-				if g.variadicPayloadStorage(fieldType) == payloadStorageOwnAllocation {
-					continue
-				}
-				payloadFields = append(payloadFields, variadicPayloadField{argument: index, field: len(fields)})
+				payloadFields = append(payloadFields, variadicPayloadField{
+					argument: index,
+					field:    len(fields),
+					split:    g.variadicPayloadStorage(fieldType) == payloadStorageOwnAllocation,
+				})
 				fieldName := fmt.Sprintf("payload%d", index)
 				fields = append(fields, types.NewVar(token.NoPos, nil, fieldName, fieldType))
 			}
@@ -6609,6 +6635,17 @@ func (g *gen) callArguments(arguments []ast.Expr, hasEllipsis bool, signature *t
 			offsets := structOffsets(fields)
 			backing = g.allocateTyped(allocationType)
 			for _, payloadField := range payloadFields {
+				if payloadField.split {
+					// The payload gets an allocation of its own so its placement
+					// is decided apart from the array's, and the field stays
+					// reserved so opt.LowerHeapAllocations can fold it back in
+					// when the array turned out to be on the heap anyway.
+					interfacePayloadSlots[payloadField.argument] = variadicPayloadSlot{
+						container: backing,
+						offset:    offsets[payloadField.field],
+					}
+					continue
+				}
 				interfacePayloads[payloadField.argument] = g.offset(backing, offsets[payloadField.field])
 			}
 		} else {
@@ -6622,7 +6659,12 @@ func (g *gen) callArguments(arguments []ast.Expr, hasEllipsis bool, signature *t
 	}
 	elementSize := typeSize(elementType)
 	for index, argument := range variadicArguments {
+		previousSlot := g.variadicPayloadSlot
+		if slot, split := interfacePayloadSlots[index]; split {
+			g.variadicPayloadSlot = &slot
+		}
 		value := g.assignmentValueWithInterfacePayload(argument, elementType, interfacePayloads[index])
+		g.variadicPayloadSlot = previousSlot
 		elementAddress := g.offset(backing, int64(index)*elementSize)
 		if isInlineAggregate(elementType) || isInterfaceValue(elementType) {
 			g.storeInlineValue(value, elementAddress, elementType)
@@ -6640,6 +6682,20 @@ func (g *gen) callArguments(arguments []ast.Expr, hasEllipsis bool, signature *t
 type variadicPayloadField struct {
 	argument int
 	field    int
+	// split marks a payload emitted as an allocation of its own, whose reserved
+	// field is somewhere for opt.LowerHeapAllocations to fold it back into. See
+	// variadicPayloadStorage.
+	split bool
+}
+
+// variadicPayloadSlot is the storage reserved inside a variadic call's combined
+// object for one boxed payload that is being emitted as a separate allocation.
+// It travels on gen because the payload is allocated several frames down, inside
+// the interface conversion, and only that call knows the payload's type and
+// value.
+type variadicPayloadSlot struct {
+	container ir.Ref
+	offset    int64
 }
 
 // payloadStorage says where a variadic `...any` argument's boxed payload lives.
