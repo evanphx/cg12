@@ -22,16 +22,16 @@ host toolchain: go version go1.26.1 linux/arm64
 
 ## coverage
 
-corpus programs                             400
-compared (host toolchain built them)        396
+corpus programs                             401
+compared (host toolchain built them)        397
 not compared                                  4
-census rows joined                         1851
+census rows joined                         1852
 census rows lost to an unbuilt program        4
 census rows with no source position        1740  (never joinable)
   of those, in a corpus program's own code    33  (29 on the heap: the bound on how
                                                   wrong the join can be about goc)
 census rows outside the corpus directory  10911  (vendored stdlib; never joinable)
-gc decisions joined                        3465
+gc decisions joined                        3472
   of which synthesized by the chan rule     136
 gc decisions at an inlining call site       881  (excluded; see package gcdiff)
 gc diagnostics outside the program         3505  (excluded; wrappers and instantiations)
@@ -52,12 +52,12 @@ same as "it put the object in a frame" -- see gcdiff.Absent.
 
   goc\gc      frame     heap    mixed   absent    total
   frame         177       30       14      105      326
-  heap          106      577      173      167     1023
+  heap          106      578      173      167     1024
   mixed          13       89       24       13      139
-  absent        407     1271       22        0     1700
-  total         703     1967      233      285     3188
+  absent        409     1275       22        0     1706
+  total         705     1972      233      285     3195
 
-## PERMISSIVE: 1450 lines
+## PERMISSIVE: 1454 lines
 
 every source line gc puts on the heap and goc does not. This is the
 correctness-critical direction: goc keeping in a frame something gc could not
@@ -68,7 +68,7 @@ not record ordinary front-end frame slots, so "no record" is consistent with
 
 by construct (goc allocators on the line | gc constructs on the line):
 
-   1268  - | object/heap
+   1272  - | object/heap
      80  newobject/frame,newobject/heap | object/heap
      22  - | object/frame,object/heap
      19  newobject/frame | object/heap
@@ -168,6 +168,18 @@ fmt_sprintf.go:6	frame -> mixed
 fmt_sprintf.go:8	absent -> heap
 	src  panic("fmt.Sprintf returned incorrect output")
 	gc   col 9  heap  object  "fmt.Sprintf returned incorrect output"
+function_parameter_callee.go:33	absent -> heap
+	src  panic("empty box")
+	gc   col 9  heap  object  "empty box"
+function_parameter_callee.go:64	absent -> heap
+	src  panic("the box did not survive the frame it was passed from")
+	gc   col 9  heap  object  "the box did not survive the frame it was passed from"
+function_parameter_callee.go:67	absent -> heap
+	src  panic("the box did not survive the frame it was passed from")
+	gc   col 9  heap  object  "the box did not survive the frame it was passed from"
+function_parameter_callee.go:70	absent -> heap
+	src  panic("the frame was not overwritten")
+	gc   col 9  heap  object  "the frame was not overwritten"
 gc_struct.go:43	absent -> heap
 	src  panic("garbage collector corrupted a live object")
 	gc   col 9  heap  object  "garbage collector corrupted a live object"

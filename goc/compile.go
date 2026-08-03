@@ -2432,7 +2432,12 @@ func (g *gen) resolvedCallee(
 	if _, global := g.globals[variable]; global {
 		return nil
 	}
-	if !g.escapeWalkSeesEveryUse(variable, body) {
+	// Declared inside this body, not merely visible from it. A *parameter* of
+	// function type passes escapeWalkSeesEveryUse -- signatureVariables puts it in
+	// escapeWalkOuterObjects -- and its first value comes from the caller, so
+	// `func f(g func()) { g(); g = h }` has exactly one assignment in the body and
+	// the call is not to h.
+	if variable.Pos() < body.Pos() || variable.Pos() >= body.End() {
 		return nil
 	}
 	var assigned ast.Expr

@@ -12762,6 +12762,7 @@ testdata/chacha8rand_assembly.go:25:2	main.main	runtime.newobject	internal_chach
 testdata/chacha8rand_assembly.go:8:10	main.main	runtime.newobject	4_uint64	frame
 testdata/fmt_println.go:6:2	main.main	runtime.newobject	2_any	frame
 testdata/fmt_sprintf.go:6:27	main.main	runtime.newobject	1_any	frame
+testdata/function_parameter_callee.go:39:9	main.viaParameter	runtime.newobject	main_parameterCalleeBox	heap
 testdata/gc_struct.go:16:13	main.allocateGarbage	runtime.newobject	main_record	heap
 testdata/gc_struct.go:25:10	main.Test	runtime.newobject	main_record	heap
 testdata/gc_struct.go:28:14	main.Test	runtime.newobject	main_record	heap
