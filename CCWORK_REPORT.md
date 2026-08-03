@@ -1907,7 +1907,7 @@ that the payload *field* disappears:
 so the argument object no longer points into itself and `needsDeepSummary` no
 longer has to escape it.
 
-### 2. opt: three precision defects in the escape summary
+### 2. opt: four precision defects in the escape summary (e6999bd)
 
 Found by comparing goc's fact table against `go build -gcflags=-m log/slog`
 line by line.
