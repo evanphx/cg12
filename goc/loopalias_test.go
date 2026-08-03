@@ -57,6 +57,14 @@ var loopAliasPrograms = []struct {
 	// loop; it rides along because it is the third reduction the spike built
 	// and the same placement code decides it.
 	{"variadic_backing.go", "1\n"},
+	// The other half of it: a callee that keeps an *element*. The array belongs
+	// in the caller's frame and the boxed payload does not, and the two are
+	// separate allocations so that both can be said. If the payload is left in
+	// the frame the package-level variable holding it points into a frame that
+	// has returned, been written over by a deep recursion and then relocated by
+	// a stack copy -- so a wrong answer here is a wrong number rather than a
+	// crash, which is why it is a printed value and not an audit.
+	{"variadic_element_retention.go", "first  48879\nsecond 51966\nlength true\n"},
 	// The other direction. Three allocations in loop bodies that are finished
 	// with before the iteration ends and so need no more than the one frame
 	// slot they already have. A rule that heaped loop-body allocations without
