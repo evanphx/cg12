@@ -21,7 +21,9 @@ that payload goes to the heap while the array does not.**
 
 Two instruments, both on the base commit.
 
-`goc/compile.go:6581` decides between a frame `[N]any` and a heap one:
+`goc/compile.go:6581` on the base commit (`goc/compile.go:6626` here, and
+`:6428` on `main` before the interface-conversion branch moved it) decides
+between a frame `[N]any` and a heap one:
 
     stackAllocateVariadic := !g.runtimeAllocation || g.fn.NoSplit || g.forceStackVariadic
 
@@ -31,9 +33,9 @@ never asks. That is true and it is not the whole story: the heap arm emits the
 unconditionally, `goc/compile.go:488`, not only under `-O` — does ask. The
 question is asked; the representation is what made it unanswerable.
 
-`goc/compile.go:6591-6613` builds one synthesized `struct{values [N]any;
-payload0 T0; ...}` per call site and allocates the backing array and every boxed
-payload as a single object. One object is one placement.
+The lines under it build one synthesized `struct{values [N]any; payload0 T0;
+...}` per call site and allocate the backing array and every boxed payload as a
+single object. One object is one placement.
 
 A diagnostic added to `opt` for this job (`GOC_DIAG_ESCAPE`, deleted before the
 branch closes) prints where each candidate landed and the first use that escaped
