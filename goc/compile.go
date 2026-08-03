@@ -2604,6 +2604,50 @@ func (g *gen) valueDoesNotEscape(expression ast.Expr) bool {
 	)
 }
 
+// conversionCopiesOperand reports whether a type conversion builds its result
+// out of storage of its own, so that the operand's storage cannot be reached
+// from the result and the operand does not escape through the conversion.
+//
+// Only the conversions between a string and a slice of bytes or runes do that.
+// Every other conversion in Go either reinterprets the operand's own storage --
+// T(s) where T and the operand share an underlying type hands back the same
+// backing array -- or carries no storage at all, and the walk has to keep
+// asking about the result.
+//
+// slicebytetostring and stringtoslicebyte copy. The slicebytetostringtmp form
+// does alias the operand, and sliceString picks it only where the string cannot
+// outlive the conversion's own use -- a comparison, a len, or an argument to a
+// callee whose parameter provably does not escape -- so the operand's storage
+// is bounded there too. Without this rule every `string(buffer)` in a
+// comparison forced buffer's backing array onto the heap: the walk asked
+// whether the *string* escaped, which is not the question.
+func conversionCopiesOperand(call *ast.CallExpr, operand ast.Expr, info *types.Info) bool {
+	if len(call.Args) != 1 || call.Args[0] != operand || !info.Types[call.Fun].IsType() {
+		return false
+	}
+	sourceType, targetType := info.TypeOf(operand), info.TypeOf(call)
+	if sourceType == nil || targetType == nil {
+		return false
+	}
+	return stringToCharacterSlice(sourceType, targetType) || stringToCharacterSlice(targetType, sourceType)
+}
+
+// stringToCharacterSlice reports that converting from stringType to sliceType
+// is the string-to-[]byte or string-to-[]rune conversion, which the runtime
+// performs by copying.
+func stringToCharacterSlice(stringType, sliceType types.Type) bool {
+	basic, isBasic := stringType.Underlying().(*types.Basic)
+	if !isBasic || basic.Kind() != types.String {
+		return false
+	}
+	slice, isSlice := sliceType.Underlying().(*types.Slice)
+	if !isSlice {
+		return false
+	}
+	element, isElementBasic := slice.Elem().Underlying().(*types.Basic)
+	return isElementBasic && (element.Kind() == types.Uint8 || element.Kind() == types.Int32)
+}
+
 func (g *gen) valueDoesNotEscapeWithin(
 	expression ast.Expr,
 	info *types.Info,
@@ -2668,6 +2712,36 @@ func (g *gen) valueDoesNotEscapeWithin(
 				return false
 			}
 			current = parent
+		case *ast.TypeAssertExpr:
+			// i.(T) reads the interface's payload, so the value the walk is
+			// following is reachable from the asserted value and from nothing
+			// else. Keep climbing. Without this the walk stopped at the
+			// conservative default, which is how a local interface that is only
+			// ever asserted and read still put its payload on the heap.
+			if parent.X != current {
+				return false
+			}
+			current = parent
+		case *ast.SelectorExpr:
+			// The same rule nonEscapingObjectUse applies to x.f: reading a field
+			// copies it out and carries nothing, while taking the field's
+			// address makes an interior pointer that keeps the whole object
+			// alive, so the object escapes exactly when that pointer does. A
+			// method value is a closure over the receiver and is answered by
+			// asking where the closure goes; only an immediate call is free.
+			if parent.X != current {
+				return false
+			}
+			selection := info.Selections[parent]
+			if selection == nil {
+				return true
+			}
+			if selection.Kind() == types.FieldVal {
+				address := addressedExpression(parent, parents, info)
+				return address == nil || !g.addressEscapesWithin(address, info, parents, body, checking)
+			}
+			call, calledImmediately := parents[parent].(*ast.CallExpr)
+			return calledImmediately && call.Fun == parent
 		case *ast.RangeStmt:
 			return parent.X == current
 		case *ast.ReturnStmt:
@@ -2696,6 +2770,10 @@ func (g *gen) valueDoesNotEscapeWithin(
 				continue
 			}
 			if info.Types[parent.Fun].IsType() {
+				if expression, isExpression := current.(ast.Expr); isExpression &&
+					conversionCopiesOperand(parent, expression, info) {
+					return true
+				}
 				current = parent
 				continue
 			}
@@ -3300,22 +3378,28 @@ func (g *gen) nonEscapingObjectUse(
 		return calledImmediately && call.Fun == parent
 	case *ast.StarExpr:
 		return parent.X == identifier
-	case *ast.RangeStmt:
+	case *ast.TypeAssertExpr:
+		// See valueDoesNotEscapeWithin's case: the payload is reachable from
+		// the asserted value, so the question continues from there.
 		if parent.X != identifier {
 			return false
 		}
-		valueIdentifier, hasValue := parent.Value.(*ast.Ident)
-		if !hasValue || valueIdentifier.Name == "_" {
-			return true
-		}
-		valueObject := info.Defs[valueIdentifier]
-		if valueObject == nil {
-			valueObject = info.Uses[valueIdentifier]
-		}
-		if valueObject == nil {
-			return true
-		}
-		return g.objectDoesNotEscape(valueObject, info, parents, body, checking)
+		return g.valueDoesNotEscapeWithin(parent, info, parents, body, checking)
+	case *ast.RangeStmt:
+		// Ranging over an object does not carry it anywhere. The clause's value
+		// variable is not this object and does not alias it: declareRangeVariable
+		// gives the variable storage of its own and storeAssignmentTarget copies
+		// the element into it, for aggregates as much as for scalars. What the
+		// copy carries away -- a pointer, a slice header, an interface -- names
+		// some other object, whose placement is decided where that object was
+		// made, and says nothing about where the range expression's own storage
+		// has to live.
+		//
+		// This used to ask where the value variable went and charge the answer
+		// to the range expression. That cost `for _, n := range []int{...}` its
+		// backing array as soon as n reached anything the walk could not follow,
+		// which for an int is every call, since an int has no storage to leak.
+		return parent.X == identifier
 	case *ast.BinaryExpr:
 		return parent.Op == token.EQL || parent.Op == token.NEQ
 	case *ast.AssignStmt:
@@ -3352,10 +3436,38 @@ func (g *gen) nonEscapingObjectUse(
 		if _, global := g.globals[leftObject]; global {
 			return false
 		}
-		if !isPointerLikeObject(rightObject) || !isPointerLikeObject(leftObject) {
+		if !copyAliasesStorage(rightObject) || !copyAliasesStorage(leftObject) {
 			return false
 		}
 		return g.objectDoesNotEscape(leftObject, info, parents, body, checking)
+	case *ast.ValueSpec:
+		// `var x T = y` asks exactly what `x = y` asks above: the source's
+		// storage is reachable from the destination, so it escapes exactly when
+		// the destination does. Without this case the walk fell through to the
+		// conservative default and a declaration form that an assignment form
+		// answers put the object on the heap.
+		valueIndex := -1
+		for index, value := range parent.Values {
+			if value == identifier {
+				valueIndex = index
+				break
+			}
+		}
+		if valueIndex < 0 || valueIndex >= len(parent.Names) {
+			return false
+		}
+		declared := info.Defs[parent.Names[valueIndex]]
+		source := info.Uses[identifier]
+		if declared == nil || declared == source || declared.Pkg() == nil || g.resultObjects[declared] {
+			return false
+		}
+		if _, global := g.globals[declared]; global {
+			return false
+		}
+		if !copyAliasesStorage(source) || !copyAliasesStorage(declared) {
+			return false
+		}
+		return g.objectDoesNotEscape(declared, info, parents, body, checking)
 	case *ast.CallExpr:
 		if _, asynchronous := parents[parent].(*ast.GoStmt); asynchronous {
 			return false
@@ -3388,6 +3500,9 @@ func (g *gen) nonEscapingObjectUse(
 			convertedType := info.Types[parent].Type
 			basic, ok := convertedType.Underlying().(*types.Basic)
 			if ok && basic.Kind() == types.Uintptr {
+				return true
+			}
+			if conversionCopiesOperand(parent, identifier, info) {
 				return true
 			}
 			return g.valueDoesNotEscapeWithin(parent, info, parents, body, checking)
@@ -3453,6 +3568,26 @@ func isPointerLikeObject(object types.Object) bool {
 	}
 	basic, ok := object.Type().Underlying().(*types.Basic)
 	return ok && basic.Kind() == types.UnsafePointer
+}
+
+// copyAliasesStorage reports that assigning one object to another hands the
+// destination a reference to the same storage, so that "does the source escape"
+// can be answered by asking the same of the destination. A pointer-shaped
+// object does; so does an interface, which holds the pointer in its data word.
+//
+// An interface destination has to be included or `var value any = node` --
+// where node is already pointer-shaped, so nothing is boxed and no storage is
+// made -- has no answer but the conservative one, and every pointer put in a
+// local interface goes to the heap however that interface is used.
+func copyAliasesStorage(object types.Object) bool {
+	if isPointerLikeObject(object) {
+		return true
+	}
+	if object == nil {
+		return false
+	}
+	_, isInterface := object.Type().Underlying().(*types.Interface)
+	return isInterface
 }
 
 func calledFunction(expression ast.Expr, info *types.Info) *types.Func {

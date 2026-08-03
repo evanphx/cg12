@@ -1943,3 +1943,79 @@ while the front end stays conservative and its placement is what is emitted.
 
 Not run here, by instruction: `go test ./goc/...` as a whole, the capability
 matrix, and `make test-unit`. The dependent gate job runs those.
+
+---
+
+# parity-remaining-134 (branch ccwork/parity-remaining-134, off 9cdc2d8)
+
+Task: classify the 134 source lines where goc heaps what gc frames, fix the
+systematic classes, say what is irreducible.
+
+## Status log
+
+- Extracted the 134 `heap -> frame` entries from the PESSIMISTIC section of
+  `goc/testdata/escape_gc_differential.txt`. They span 86 corpus files; the
+  goc-side allocators are 142 sites in total (some lines carry two).
+
+## Classification of the 134
+
+Method: a scratch driver (`censusdump`) compiles one corpus program and prints
+`opt.AllocationCensusWith(..., IncludeFrontEndFrameSlots: true)`, the same census
+the committed baseline is built from. Running it over the 86 corpus files that
+carry the 134 lines reproduces all 142 goc allocation sites on those 134 lines
+exactly, so a fix can be attributed by re-running and diffing rather than by
+reading. `GOC_DEBUG_ESCAPE=2` names the use that decided each object escapes; a
+temporary level-3 patch also named the rule that rejected it.
+
+Split by allocator (goc side) and construct (gc side):
+
+     43  newobject | slice     fixed-size backing arrays
+     41  newobject | object    &T{...}, new(T), interface payloads
+     35  makemap   | map
+      6  convT64   | object    boxed scalars
+      5  makeslice | slice     non-constant-length make
+      2  makemap   | object    named map types (url.Values, textproto.MIMEHeader)
+      1  newobject | object,slice
+      1  makemap   | map,object
+
+The 134 fall into these groups. Verdict = which compiler is right.
+
+### Progress (lines where goc heaps what gc frames, over the 86 affected files)
+
+    134  baseline
+    127  after F1: a string<->[]byte/[]rune conversion copies, so the operand
+         does not escape through it   (-7)
+    126  after F2: `var x T = y` answers what `x = y` answers; interfaces alias
+         the storage they hold; i.(T) and p.f keep the walk going   (-1)
+    120  after F3: ranging over an object does not carry it anywhere   (-6)
+
+## Verdicts, group by group
+
+Numbers are lines of the 134.
+
+**G1 -- no frame-allocated map header (38).** `makemap|map` 35, `makemap|object`
+2 (`url.Values{}`, `textproto.MIMEHeader{}`), `makemap|map,object` 1. The whole
+committed census contains **zero** `runtime.makemap ... frame` rows, and zero
+for `makeslice`, `makechan` and `convT*` as well: `newobject` is the only
+allocator goc has a frame form of. `gen.allocateMap` calls
+`runtime.makemap(t, hint, 0)` unconditionally, so the escape analysis is never
+consulted for a map at all. gc stack-allocates the `maps.Map` header when the
+map does not escape, and one group with it when the hint is small; the vendored
+runtime already supports it (`runtime/map.go`: "If m != nil, the map can be
+created directly in m"). VERDICT: gc is right. This is a representation gap, not
+an analysis defect, and it is the single largest group.
+
+**G2 -- pre-inlining vs post-inlining (8).** Every `make([]byte, N)` handed to
+`(*os.File).Read`: the six netpoll programs, `stdlib_os_file_roundtrip`,
+`stdlib_os_pipe_goroutine_close`, `runtime_println_operand_separation:168`,
+`runtime_stack_scan_syscall:115`. goc's walk stops at
+`internal/poll.ignoringEINTRIO`, which calls `fn(fd, p)` through a
+function-typed *parameter*. Measured against the host toolchain:
+`fd_unix.go:736:70: leaking param: p` -- **gc's own summary for that function
+leaks p too**. gc reaches "p does not escape" only because it inlines
+`ignoringEINTRIO` first and the call becomes a static `syscall.Read`, whose
+summary is clean. VERDICT: gc is right about the buffer, but not by a rule goc
+is missing. goc's walk runs on the AST before any inlining and structurally
+cannot see through a call to a function-valued parameter. Irreducible without
+either an inliner ahead of the walk or a whole-program resolution of
+function-valued parameters.

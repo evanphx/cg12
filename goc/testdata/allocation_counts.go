@@ -274,6 +274,61 @@ func variadicIntsInLoop(times int) {
 	}
 }
 
+// The three rows below are about what a *local* object's uses say about where
+// it has to live, rather than about boxing or the `...` array. Each one is a
+// shape whose backing storage the reference implementation keeps in the frame,
+// and each was an allocation under goc until the escape walk learned the rule
+// named in its comment.
+
+// consumeInt takes its argument and hands it straight back, which is the least
+// a callee can do with a parameter. It is //go:noinline so the call survives to
+// the escape walk, and its parameter is an int so there is nothing about the
+// caller's storage for it to retain.
+//
+//go:noinline
+func consumeInt(value int) int { return value }
+
+// rangeSliceLiteral ranges over a slice literal and passes each element to a
+// call. The element is a copy, so where the copy goes says nothing about where
+// the backing array lives.
+//
+//go:noinline
+func rangeSliceLiteral() {
+	values := []int{1, 2, 3, 4}
+	total := 0
+	for _, value := range values {
+		total += consumeInt(value)
+	}
+	sinkInt = total
+}
+
+// compareByteSliceAsString converts a byte slice to a string and compares it.
+// The conversion builds the string out of storage of its own -- or, where the
+// compiler is allowed to alias, out of a string that cannot outlive the
+// comparison -- so the slice's backing array is not carried anywhere.
+//
+//go:noinline
+func compareByteSliceAsString() {
+	buffer := []byte{'a', 'b', 'c'}
+	if string(buffer) == theString {
+		sinkInt++
+	}
+}
+
+// declareInterfaceFromPointer puts a pointer in an interface declared with var.
+// Nothing is boxed -- a pointer is its own interface payload -- so the question
+// is where the interface goes, which is the question the assignment form of the
+// same statement has always been answered by.
+//
+//go:noinline
+func declareInterfaceFromPointer() {
+	box := &pair{theInt, 2}
+	var value any = box
+	if value == sinkAny {
+		sinkInt++
+	}
+}
+
 const iterations = 1000
 
 // measure runs the operation `iterations` times after a warm-up of the same
@@ -323,6 +378,9 @@ func main() {
 	measure("return_any_from_large_int", repeat(callReturnAnyFromLargeInt))
 	measure("return_any_from_pointer", repeat(callReturnAnyFromPointer))
 	measure("sync_pool_round_trip", repeat(poolRoundTrip))
+	measure("range_slice_literal", repeat(rangeSliceLiteral))
+	measure("compare_byte_slice_as_string", repeat(compareByteSliceAsString))
+	measure("declare_interface_from_pointer", repeat(declareInterfaceFromPointer))
 	measure("sprintf_in_loop", sprintfInLoop)
 	measure("variadic_ints_in_loop", variadicIntsInLoop)
 }

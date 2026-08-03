@@ -152,6 +152,28 @@ var gocAllocationCounts = []struct {
 	{"return_any_from_large_int", 100, 100, "it escapes and it is past the table, so both allocate"},
 	{"return_any_from_pointer", 0, 0, "nothing to box, nothing to allocate"},
 	{"sync_pool_round_trip", 0, 0, "Get's interface result is returned in registers"},
+	// Three rows about what a local object's *uses* say about where it has to
+	// live. Each is a shape gc has always framed and goc heaped, and each stopped
+	// allocating when one rule in the escape walk was corrected. They are here
+	// because the census records where a site landed and this records what the
+	// shape costs, and because each of the three was a whole family of lines in
+	// testdata/escape_gc_differential.txt rather than one program's quirk.
+	//
+	// The walk asked where the range clause's value variable went and charged the
+	// answer to the range expression. The value variable is a copy -- range gives
+	// it storage of its own -- so passing the copy to a callee that retains it
+	// says nothing about the backing array, and passing an int to anything says
+	// nothing at all.
+	{"range_slice_literal", 0, 0, "ranging over a slice does not carry its backing array anywhere"},
+	// string(b) builds the string out of storage of its own, or out of an alias
+	// that cannot outlive the comparison. Either way the walk was asking where
+	// the *string* went, which is not a question about the byte slice.
+	{"compare_byte_slice_as_string", 0, 0, "a []byte-to-string conversion copies, so the operand stays put"},
+	// `var value any = box` had no case in the walk at all and fell through to
+	// the conservative answer, while `value := box` -- the same statement in the
+	// other spelling -- was answered. Nothing is boxed here: a pointer is its own
+	// interface payload.
+	{"declare_interface_from_pointer", 0, 0, "a var declaration answers what an assignment answers"},
 	// The two rows written inside a loop body. opt.promotionsBlockedByALoop
 	// refuses to promote an allocation in a loop, because a frame slot is one
 	// object and each iteration may need its own -- see
