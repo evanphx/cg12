@@ -178,3 +178,106 @@ The two `json/*` rows still crash. That is the separate slog miscompile
 frame name in the message (`main_func_304_28` → `main_func_311_28`), which is
 generated-function numbering shifting because the runtime now compiles three
 more functions.
+
+## 5. The allocation census: 552 sites changed hands, nothing moved
+
+`goc/testdata/alloc_census_baseline.txt`, regenerated per its header. Against
+`4a6fd96`, classified the way `TestAllocationCensus`'s doc comment asks:
+
+```
+before rows: 14253   after rows: 14263
+moved heap->frame:   0
+moved frame->heap:   0
+vanished:          552
+appeared:          562
+```
+
+**Zero sites moved in either direction**, which is the whole of question 1 and
+question 2. The 552/562 is one substitution: every `runtime.newobject T heap`
+line at a conversion site became `runtime.convT{16,32,64} T heap` at the same
+position, in the same function, with the same type. Reviewed by type:
+
+| count | type | helper |
+|---|---|---|
+| 196 | `syscall.Errno` (`uintptr`) | convT64 |
+| 86 | `int` | convT64 |
+| 48 | `net/http.http2ConnectionError` (`uint32`) | convT32 |
+| 41 | `uint8` | convT64 |
+| 27 | `internal/strconv.Error` (`int`) | convT64 |
+| 14 | `crypto/tls.alert` (`uint8`) | convT64 |
+| 14 | `bool` | convT64 |
+| 12 | `compress/flate.CorruptInputError` (`int64`) | convT64 |
+| 8 | `float64` | convT64 |
+| 8 | `uint16` | convT16 |
+| … | 30 more named integer types | |
+
+Every one is a named integer, a bool, or a float — `interfaceConversionHelper`'s
+whole domain. The two that were not obviously so, `internal/strconv.Error` and
+`os/user.UnknownUserIdError`, were checked in the source: both are `type X int`.
+`syscall.Errno` at 196 sites is the single biggest beneficiary in the tree, and
+it is exactly the case the static table exists for — an errno is a small number
+boxed into `error`.
+
+Sixteen rows appeared and eighteen vanished in `goc/testdata/allocation_counts.go`
+itself, which is question 4: fourteen are the same sites at new line numbers
+because the program grew, two are the new `boxString` function's payload, and
+four are `boxSmallInt`'s and `returnAnyFromInt`'s old `newobject` rows becoming
+conversion rows.
+
+### The census had to be taught about the helpers, and why that is not a dodge
+
+The first regeneration let the conversion sites fall out of the census entirely
+— a `convT64` call names no allocator the census knows and carries no type
+descriptor, so 552 rows simply disappeared. That was measured and rejected:
+
+| | pessimistic | permissive |
+|---|---|---|
+| `4a6fd96` | 563 | 209 |
+| conversion sites dropped from the census | 539 | **241** |
+| conversion sites recorded | 567 | 209 |
+
+Dropping them shrinks the pessimism set by 24 and adds **33 lines to the
+permissive set**, which is the set that means "goc kept in a frame something gc
+could not prove frame-safe" — the tree's correctness-critical direction. Not one
+of those 33 was real: goc's escape decision at each is unchanged and still says
+heap, and only the census had stopped saying so. `container/list`,
+`container/heap`, `encoding/gob`, the type switches and the reflect probes were
+all about to be listed as goc framing something gc heaps, because a diagnostic
+lost sight of them.
+
+So `opt.AllocationCensus` records a conversion site as a heap placement with the
+helper in the allocator column. The placement is the escape decision — the
+payload did not stay in the frame, which is exactly what gc's `-m` reports at the
+same source line — and the allocator column carries the part neither "frame" nor
+"heap" can say: this site allocates for a value past the static table and not for
+one inside it.
+
+## 6. The gc differential: 563 → 567, and not one line changed its verdict
+
+`goc/testdata/escape_gc_differential.txt`, regenerated per its header, against
+the same `go1.26.1 linux/arm64`.
+
+```
+permissive (gc heaps, goc does not):  209 -> 209
+pessimistic (goc heaps, gc does not): 563 -> 567
+```
+
+**The pessimism set does not shrink. It grows by four, and every line that moved
+in either set is in `goc/testdata/allocation_counts.go`** — the one corpus
+program this branch edits. Outside that file the differential is identical to
+main: the allocator column changes `newobject` to `convT64` on 
+the lines that changed helper, and not a single line changes its verdict between
+frame, heap, mixed and absent.
+
+That is the correct result and it is worth being plain about why. The
+differential measures escape *decisions*: which objects each compiler proves can
+stay in a frame. This change makes no escape decision differently. It changes
+what a payload that has already lost that argument costs — from an allocation to
+a pointer into a static table. A pessimistic escape analysis that is free at
+runtime is still pessimistic, and the 563 lines are still 563 things worth
+fixing; they are just worth less than they were yesterday.
+
+The measurement that would have reported a 24-line shrink is in section 5, and
+it is the one that fabricates 33 correctness-critical entries. The brief asked
+how much the set shrinks; the honest answer is that it does not, and that the
+number which says otherwise is an artifact of the census going blind.
