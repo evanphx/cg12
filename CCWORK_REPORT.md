@@ -1712,7 +1712,7 @@ stack scan reached it through the copier.
 
 ## 1. The reduction landed as a corpus test, failing (commit below)
 
-Four programs in `goc/testdata/`, run by `goc/slogattrframe_test.go`
+The programs in `goc/testdata/`, run by `goc/slogattrframe_test.go`
 unoptimized and optimized, plus a run of each under
 `GODEBUG=cg12checkstackcopy=1`, plus a check that every expectation is `go run`'s
 own output rather than a belief about it. On `main`'s compiler, before any
@@ -1735,9 +1735,16 @@ change:
     --- PASS: TestSlogAttrFrameExpectationsMatchTheHostToolchain (0.33s)
 
 Every failure is `run: runtime: bad pointer in frame main_main at 0x...: 0xc8`.
-The fourth program (`_kinds`) holds an Int64, a Bool, a Duration and a Float64
-in one frame at once, because `num` carries all five packed kinds and a map that
-claims that word claims it for every one of them.
+The `_kinds` program holds an Int64, a Bool, a Duration and a Float64 in one
+frame at once, because `num` carries all of them and a map that claims that word
+claims it for every one.
+
+A fifth program, `slog_attr_frame_gcmask_shape.go`, was added later -- it is
+section 2.1's finding, the same shape with no `log/slog` import -- and was
+checked against main's compiler the same way, by building it with `goc/compile.go`
+reverted to `4a6fd96`:
+
+    runtime: bad pointer in frame main_main at 0x7c2da5013d50: 0xc8
 
 ## 2. Where the mis-classification is
 
@@ -2039,3 +2046,44 @@ size rule it mirrors. Everything else is tests, baselines and prose.
     image varies, content identical (layout only): 0
     reproducible=395 varying=0 failed=0 of 395 over 3 rounds
 
+and again optimized, which is the arm where the placement passes run:
+
+    scripts/determinism-check.sh -corpus -rounds 2 -j 24 -O
+    programs=395 rounds=2 workers=24 optimize=true
+    round 0: 395 programs in 126.0s, 0 failed
+    round 1: 395 programs in 132.4s, 0 failed
+    content varies between rounds: 0
+    image varies, content identical (layout only): 0
+    reproducible=395 varying=0 failed=0 of 395 over 2 rounds
+
+Same depth as section 26's: 3 rounds without `-O`, 2 with.
+
+## 10. The answer
+
+**Where the mis-classification was.** Not in the type descriptor's pointer mask,
+which was right, and not in how the stack map is built from what it is given.
+It was one line earlier than either: `goABIAggregate` in `goc/compile.go`
+translating a Go array type into an `ir.Field` with `Count = int(value.Len())`.
+`ir.Field.Count` has no way to say zero — it is 0 for every ordinary scalar
+field too, and `ir.Field.count()` reads that as one element — so a `[0]func()`
+became one **pointer-shaped element of eight bytes**, sitting at the offset of
+the field after it. In `slog.Value` that field is the `uint64` `log/slog` packs
+int64, uint64, bool, `time.Duration` and float64 into, so the frame's pointer
+map claimed the integer the attribute was carrying, and both the collector's
+stack walk and the stack copier walked 200 as an address. It was never a
+`log/slog` bug and never a JSON-handler bug: `sync/atomic.Pointer[T]`,
+`weak.Pointer[T]` and `runtime.PanicNilError` had the same phantom word.
+
+A zero-length array now contributes no field, which is the correct layout and
+the only one `Count` can express, and the gc padding rule for a struct ending in
+a zero-sized field — which the phantom used to supply by accident, and which was
+already wrong on `main` for a trailing empty struct — is applied explicitly as a
+byte-wide scalar.
+
+**The slog JSON rows.** Both were `crash`. They now run:
+
+    json/kv-4-pairs         8.00 a/op, 344.0 B/op   (gc 2.00, 24.0)
+    json/logattrs-4-attrs   8.00 a/op, 264.0 B/op   (gc 0.00,  0.0)
+
+and `goc/testdata/slog_allocations_baseline.txt` has no "cases that did not run"
+section any more.
