@@ -3795,3 +3795,69 @@ defect at all.**
 So: **not a separate cause.** `handleState` is G8, the JSON base cost is G4,
 `logattrs/6-attr` is the variadic element question, and `info/3-attr-large-ints`
 is goc being ahead.
+
+# What is irreducible, and why
+
+Stated so nobody re-litigates it. "Irreducible" here means *in this analysis, at
+this pipeline position*; every one of these is reachable by building something
+that does not exist yet, and where that is true it says what.
+
+**Genuinely irreducible without moving the walk (10 lines).**
+
+- **G2, the Read buffer (10).** gc's answer comes from inlining
+  `internal/poll.ignoringEINTRIO` before escape analysis; its own un-inlined
+  summary is `leaking param: p`, which *agrees with goc*. goc's walk runs on the
+  AST before any inlining and the call is through a function-typed **parameter**,
+  which no whole-program resolution can pin down -- the value comes from the
+  caller. Closing it needs an inliner ahead of the walk. This is a
+  pipeline-position difference, not a missing rule, and it has now survived two
+  branches looking at it.
+
+**Blocked on a representation goc does not have (55 lines).**
+
+- **G1, maps (38).** Four pieces, listed in the classification, one of which is a
+  change to the census itself. It is a task of its own.
+- **G4, boxing (17).** Reducible only after interface payloads have a frame form.
+  Fixing the walk's half alone is worse than leaving it: a frame-charged source
+  paired with a heap payload is a placement that disagrees with itself.
+
+**Reducible, with the work named (41 lines).**
+
+- **G7 (11)** -- one callee at a time; three of them fall to the fixpoint below.
+- **G10 (6)** -- a composite literal handed to a call whose per-package summary
+  gc has and goc's walk cannot reconstruct. Deep, not blocked.
+- **G5 (5)** -- five singletons that share a spelling. Left alone deliberately.
+- **G3 (5)** -- **not** a measurement artifact, which is what the previous
+  classification recorded. gc emits a bounded frame buffer *and* a runtime length
+  test for a non-escaping non-constant `make`; goc has no form of that. A codegen
+  capability, and worth an allocation per small make in every program.
+- **G12 (5)** -- `opt`'s containment edge does not cross a front-end frame slot.
+  In `opt/escape.go`, not in the walk.
+- **G8 (3)** -- needs a real fixpoint: optimistic answers, a record of which
+  depended on an assumption, and iteration to convergence. The one-line
+  assumption without the iteration was measured and refuted; see above.
+- **G9 (3)** -- `opt.promotionsBlockedByALoop` blocks every promotable candidate
+  in a natural loop. The refinement is to block only a candidate whose pointer
+  can be observed after its iteration. goc's IR has no phi, so a value crossing
+  the back edge must pass through a store, which makes the condition checkable:
+  the candidate's pointer is never the value operand of a store and every use is
+  inside the loop. **What has to be proved before it can be trusted** is that a
+  callee handed the pointer cannot store it into another of the caller's frame
+  slots without the escape analysis already having escaped it -- that is the one
+  route the "never stored here" test does not cover, and it was not settled here.
+  It is worth more than three lines: it is what `sprintf_in_loop` (2.00 against
+  gc's 1.00) and `variadic_ints_in_loop` (1.00 against 0) cost on every trip.
+- **G6, the last three (3)** -- three separate causes.
+
+**The two things this branch measured and deliberately did not land** are the
+generic-origin fallback and the optimistic cycle assumption. Both are written up
+above with what they move and what stopped them. Neither should be re-derived;
+both should be taken up on purpose.
+
+**And one thing that is not in the count at all.** The 106 is the pessimistic
+direction. The permissive direction -- goc framing what gc heaps, 1450 lines --
+is where the correctness risk lives, and this branch removed two of them
+(`stdlib_io_readall_limited_reader.go:9`,
+`stdlib_netpoll_syscall_socket_listen.go:19`) as a side effect of the
+receiver-retention fix, along with three frame-address publications in
+`log/slog`. Those are worth more than the seven lines it moved the other way.
