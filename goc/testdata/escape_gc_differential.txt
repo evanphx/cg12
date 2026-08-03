@@ -22,19 +22,19 @@ host toolchain: go version go1.26.1 linux/arm64
 
 ## coverage
 
-corpus programs                             399
-compared (host toolchain built them)        395
+corpus programs                             400
+compared (host toolchain built them)        396
 not compared                                  4
-census rows joined                         1846
+census rows joined                         1851
 census rows lost to an unbuilt program        4
 census rows with no source position        1740  (never joinable)
   of those, in a corpus program's own code    33  (29 on the heap: the bound on how
                                                   wrong the join can be about goc)
 census rows outside the corpus directory  10911  (vendored stdlib; never joinable)
-gc decisions joined                        3451
+gc decisions joined                        3465
   of which synthesized by the chan rule     136
-gc decisions at an inlining call site       876  (excluded; see package gcdiff)
-gc diagnostics outside the program         3504  (excluded; wrappers and instantiations)
+gc decisions at an inlining call site       881  (excluded; see package gcdiff)
+gc diagnostics outside the program         3505  (excluded; wrappers and instantiations)
 gc diagnostics the parser did not know        0  (must be 0)
 
 programs the host toolchain would not build, and the census rows each costs:
@@ -51,13 +51,13 @@ rows are goc's verdict for the line, columns are gc's.
 same as "it put the object in a frame" -- see gcdiff.Absent.
 
   goc\gc      frame     heap    mixed   absent    total
-  frame         167       30       14      105      316
-  heap          111      575      173      168     1027
+  frame         177       30       14      105      326
+  heap          106      577      173      167     1023
   mixed          13       89       24       13      139
-  absent        404     1267       22        0     1693
-  total         695     1961      233      286     3175
+  absent        407     1271       22        0     1700
+  total         703     1967      233      285     3188
 
-## PERMISSIVE: 1446 lines
+## PERMISSIVE: 1450 lines
 
 every source line gc puts on the heap and goc does not. This is the
 correctness-critical direction: goc keeping in a frame something gc could not
@@ -68,7 +68,7 @@ not record ordinary front-end frame slots, so "no record" is consistent with
 
 by construct (goc allocators on the line | gc constructs on the line):
 
-   1264  - | object/heap
+   1268  - | object/heap
      80  newobject/frame,newobject/heap | object/heap
      22  - | object/frame,object/heap
      19  newobject/frame | object/heap
@@ -114,7 +114,7 @@ allocation_counts.go:228	mixed -> mixed
 	goc  col 38  heap  runtime.convT64  int  [main.packVariadicElement.gointernal.funcvalue.main_packVariadicElement_func___func.61d42cd012e19ff7]
 	gc   col 37  frame  slice  ... argument
 	gc   col 38  heap  object  theInt
-allocation_counts.go:377	mixed -> heap
+allocation_counts.go:471	mixed -> heap
 	src  return func(times int) {
 	goc  col 9  frame  runtime.newobject  struct_code_uintptr__capture0_unsafe_Pointer  [main.main]
 	goc  col 9  heap  runtime.newobject  struct_code_uintptr__capture0_unsafe_Pointer  [main.repeat]
@@ -287,6 +287,18 @@ io_write_string.go:25	absent -> heap
 md5_assembly.go:13	absent -> heap
 	src  panic("md5 assembly returned the wrong digest")
 	gc   col 9  heap  object  "md5 assembly returned the wrong digest"
+method_receiver_retention.go:38	absent -> heap
+	src  panic("the method did not see its receiver")
+	gc   col 9  heap  object  "the method did not see its receiver"
+method_receiver_retention.go:61	absent -> heap
+	src  panic("the retained receiver did not survive its frame")
+	gc   col 9  heap  object  "the retained receiver did not survive its frame"
+method_receiver_retention.go:64	absent -> heap
+	src  panic("the retained receiver did not survive its frame")
+	gc   col 9  heap  object  "the retained receiver did not survive its frame"
+method_receiver_retention.go:67	absent -> heap
+	src  panic("the frame was not overwritten")
+	gc   col 9  heap  object  "the frame was not overwritten"
 nested_defer.go:15	absent -> heap
 	src  panic("unexpected value")
 	gc   col 9  heap  object  "unexpected value"
@@ -4859,7 +4871,7 @@ variadic_element_retention.go:42	frame -> mixed
 	gc   col 39  heap  object  48879
 	gc   col 47  heap  object  51966
 
-## PESSIMISTIC: 502 lines
+## PESSIMISTIC: 496 lines
 
 every source line goc puts on the heap and gc does not. This is the
 performance direction and nothing worse: each line is an allocation, a zeroing
@@ -4867,11 +4879,11 @@ and a collector's attention that the reference implementation does not pay.
 
 by construct (goc allocators on the line | gc constructs on the line):
 
-    165  newobject/heap | -
+    164  newobject/heap | -
     109  newobject/heap | object/heap,slice/frame
      52  newobject/heap | object/frame,object/heap
      35  makemap/heap | map/frame
-     33  newobject/heap | object/frame
+     28  newobject/heap | object/frame
      28  newobject/heap | slice/frame
      13  convT64/heap,newobject/frame | object/heap,slice/frame
       8  newobject/heap | object/frame,object/heap,slice/frame
@@ -4994,7 +5006,7 @@ allocation_counts.go:273	heap -> frame
 	goc  col 13  heap  runtime.newobject  2_int  [main.variadicIntsInLoop]
 	goc  col 13  heap  runtime.newobject  2_int  [main.variadicIntsInLoop.gointernal.funcvalue.main_variadicIntsInLoop_func_times_int__func_tim.df534ff08f4f4fc7]
 	gc   col 25  frame  slice  ... argument
-allocation_counts.go:376	heap -> absent
+allocation_counts.go:470	heap -> absent
 	src  func repeat(operation func()) func(int) {
 	goc  col 1  heap  runtime.newobject  func  [main.main]
 	goc  col 1  heap  runtime.newobject  func  [main.repeat]
@@ -5393,10 +5405,6 @@ runtime_defer_argument_evaluation.go:10	heap -> absent
 runtime_defer_argument_evaluation.go:12	heap -> absent
 	src  defer appendValue(&values, current)
 	goc  col 2  heap  runtime.newobject  struct_code_uintptr__argument0____int__argument1  [main.collect]
-runtime_defer_method_value_order.go:12	heap -> frame
-	src  recorder := &deferMethodRecorder{}
-	goc  col 14  heap  runtime.newobject  main_deferMethodRecorder  [main.main]
-	gc   col 14  frame  object  &deferMethodRecorder{}
 runtime_defer_method_value_order.go:16	heap -> absent
 	src  defer record(1)
 	goc  col 3  heap  runtime.newobject  struct_code_uintptr__function_func_value_int___a  [main.main.func.15.2]
@@ -6040,10 +6048,6 @@ runtime_method_expression.go:20	mixed -> absent
 	goc  col 2  frame  runtime.newobject  main_methodExpressionCounter  [main.main]
 	goc  col 2  heap  runtime.newobject  main_methodExpressionCounter  [main.main]
 	goc  col 13  frame  runtime.newobject  main_methodExpressionCounter  [main.main]
-runtime_method_value_gc.go:16	heap -> frame
-	src  counter := &methodValueCounter{value: 17}
-	goc  col 13  heap  runtime.newobject  main_methodValueCounter  [main.main]
-	gc   col 13  frame  object  &methodValueCounter{...}
 runtime_opt_loop_carried_root.go:45	heap -> mixed
 	src  sink = append(sink, &node{value: index})
 	goc  col 23  heap  runtime.newobject  main_node  [main.churn]
@@ -6549,14 +6553,6 @@ runtime_reflect_value_call.go:11	heap -> frame
 	src  arguments := []reflect.Value{
 	goc  col 15  heap  runtime.newobject  2_reflect_Value  [main.main]
 	gc   col 30  frame  slice  []reflect.Value{...}
-runtime_reflect_value_indirect_call.go:28	heap -> frame
-	src  instruction := &reflectValueInstruction{field: 5}
-	goc  col 17  heap  runtime.newobject  main_reflectValueInstruction  [main.main]
-	gc   col 17  frame  object  &reflectValueInstruction{...}
-runtime_reflect_value_indirect_call.go:29	heap -> frame
-	src  state := &reflectValueState{}
-	goc  col 11  heap  runtime.newobject  main_reflectValueState  [main.main]
-	gc   col 11  frame  object  &reflectValueState{}
 runtime_scheduler_gc_churn.go:22	heap -> absent
 	src  worker := worker
 	goc  col 3  heap  runtime.newobject  int  [main.main]
@@ -6687,10 +6683,6 @@ runtime_ticker_stop.go:7	heap -> absent
 runtime_time_afterfunc.go:10	heap -> absent
 	src  defer timer.Stop()
 	goc  col 8  heap  runtime.newobject  struct_code_uintptr__receiver__time_Timer  [main.main]
-runtime_timer_callback_shape.go:16	heap -> frame
-	src  box := &callbackBox{value: 10}
-	goc  col 9  heap  runtime.newobject  main_callbackBox  [main.main]
-	gc   col 9  frame  object  &callbackBox{...}
 runtime_type_param_method_shapes.go:185	heap -> mixed
 	src  if bumpTwice(func() *pointerCounterA { return &pointerCounterA{} }) != 2 {
 	goc  col 48  heap  runtime.newobject  main_pointerCounterA  [main.main.func.185.15]
@@ -7175,9 +7167,4 @@ stdlib_url_values_encode.go:6	heap -> frame
 	src  values := url.Values{}
 	goc  col 12  heap  runtime.makemap  map_string___string  [main.main]
 	gc   col 22  frame  object  url.Values{}
-variadic_backing.go:8	heap -> absent
-	src  x := 42
-	goc  col 2  heap  runtime.newobject  int  [main.leaky]
-	goc  col 2  heap  runtime.newobject  int  [main.main]
-	goc  col 2  heap  runtime.newobject  int  [main.main.gointernal.funcvalue.main_main_func___func.83860b9e97d614a8]
 

@@ -12717,10 +12717,17 @@ testdata/allocation_counts.go:325:9	main.declareInterfaceFromPointer	runtime.new
 testdata/allocation_counts.go:345:10	main.nestedCompositeLiteralAddress	runtime.newobject	main_link	frame
 testdata/allocation_counts.go:345:37	main.nestedCompositeLiteralAddress	runtime.newobject	main_link	frame
 testdata/allocation_counts.go:355:12	main.appendFromSpreadSource	runtime.newobject	4_int	frame
-testdata/allocation_counts.go:376:1	main.main	runtime.newobject	func	heap
-testdata/allocation_counts.go:376:1	main.repeat	runtime.newobject	func	heap
-testdata/allocation_counts.go:377:9	main.main	runtime.newobject	struct_code_uintptr__capture0_unsafe_Pointer	frame
-testdata/allocation_counts.go:377:9	main.repeat	runtime.newobject	struct_code_uintptr__capture0_unsafe_Pointer	heap
+testdata/allocation_counts.go:379:18	main.interfaceLocalMethodCall	runtime.newobject	main_scoreBox	frame
+testdata/allocation_counts.go:398:11	main.methodRetainsReceiver	runtime.newobject	main_retainedReceiver	heap
+testdata/allocation_counts.go:410:11	main.methodValueReceiver	runtime.newobject	main_scoreBox	frame
+testdata/allocation_counts.go:411:15	main.methodValueReceiver	runtime.newobject	struct_code_uintptr__receiver__main_scoreBox	frame
+testdata/allocation_counts.go:430:9	main.callThroughAFunctionVariable	runtime.newobject	main_scoreBox	frame
+testdata/allocation_counts.go:451:12	main.addressIntoANonRetainingVariadic	runtime.newobject	1_any	frame
+testdata/allocation_counts.go:451:12	main.addressIntoANonRetainingVariadic.gointernal.funcvalue.main_addressIntoANonRetainingVariadic_func___fun.df0c030a105d4475	runtime.newobject	1_any	frame
+testdata/allocation_counts.go:470:1	main.main	runtime.newobject	func	heap
+testdata/allocation_counts.go:470:1	main.repeat	runtime.newobject	func	heap
+testdata/allocation_counts.go:471:9	main.main	runtime.newobject	struct_code_uintptr__capture0_unsafe_Pointer	frame
+testdata/allocation_counts.go:471:9	main.repeat	runtime.newobject	struct_code_uintptr__capture0_unsafe_Pointer	heap
 testdata/allocation_counts.go:52:46	main.sprintfInt	runtime.newobject	struct_values__1_any__payload0_int	frame
 testdata/allocation_counts.go:52:58	main.sprintfInt	runtime.convT64	int	heap
 testdata/allocation_counts.go:55:49	main.sprintfString	runtime.newobject	struct_values__1_any__payload0_string	heap
@@ -12779,6 +12786,7 @@ testdata/loop_alias_forms.go:37:3	main.viaArray	runtime.newobject	2_int	heap
 testdata/loop_alias_forms.go:7:8	main.viaNew	runtime.newobject	int	heap
 testdata/loop_alias_frame_local.go:53:8	main.literalWithin	runtime.newobject	main_point	frame
 testdata/md5_assembly.go:7:10	main.main	runtime.newobject	16_byte	frame
+testdata/method_receiver_retention.go:36:11	main.retainReceiverInAFrame	runtime.newobject	main_retainedReceiver	heap
 testdata/nested_defer.go:12:25	main.main	runtime.makechan	.goc.channel.type.int	heap
 testdata/nested_defer.go:13:2	main.main	runtime.newobject	struct_code_uintptr__argument0_chan_int	heap
 testdata/reflect_makefunc.go:8:48	main.add	runtime.convT64	int64	heap
@@ -13072,7 +13080,7 @@ testdata/runtime_defer_argument_evaluation.go:10:2	main.collect	runtime.newobjec
 testdata/runtime_defer_argument_evaluation.go:12:2	main.collect	runtime.newobject	struct_code_uintptr__argument0____int__argument1	heap
 testdata/runtime_defer_argument_evaluation.go:8:11	main.collect	runtime.newobject	0_int	heap
 testdata/runtime_defer_closure_stack_gc.go:11:11	main.recurse	runtime.newobject	main_deferredNode	frame
-testdata/runtime_defer_method_value_order.go:12:14	main.main	runtime.newobject	main_deferMethodRecorder	heap
+testdata/runtime_defer_method_value_order.go:12:14	main.main	runtime.newobject	main_deferMethodRecorder	frame
 testdata/runtime_defer_method_value_order.go:13:12	main.main	runtime.newobject	struct_code_uintptr__receiver__main_deferMethodR	frame
 testdata/runtime_defer_method_value_order.go:16:3	main.main.func.15.2	runtime.newobject	struct_code_uintptr__function_func_value_int___a	heap
 testdata/runtime_defer_method_value_order.go:17:3	main.main.func.15.2	runtime.newobject	struct_code_uintptr__function_func_value_int___a	heap
@@ -13530,7 +13538,7 @@ testdata/runtime_map_struct_value_replace.go:9:11	main.main	runtime.makemap	map_
 testdata/runtime_method_expression.go:20:13	main.main	runtime.newobject	main_methodExpressionCounter	frame
 testdata/runtime_method_expression.go:20:2	main.main	runtime.newobject	main_methodExpressionCounter	frame
 testdata/runtime_method_expression.go:20:2	main.main	runtime.newobject	main_methodExpressionCounter	heap
-testdata/runtime_method_value_gc.go:16:13	main.main	runtime.newobject	main_methodValueCounter	heap
+testdata/runtime_method_value_gc.go:16:13	main.main	runtime.newobject	main_methodValueCounter	frame
 testdata/runtime_method_value_gc.go:17:10	main.main	runtime.newobject	struct_code_uintptr__receiver__main_methodValueC	frame
 testdata/runtime_new_composite_gc.go:12:10	main.main	runtime.newobject	main_newCompositeNode	frame
 testdata/runtime_new_composite_gc.go:16:14	main.main	runtime.newobject	main_newCompositeNode	heap
@@ -13777,8 +13785,8 @@ testdata/runtime_reflect_set_fields.go:11:13	main.main	runtime.newobject	main_re
 testdata/runtime_reflect_type_metadata.go:11:30	main.main	runtime.newobject	main_metadataPayload	frame
 testdata/runtime_reflect_type_metadata.go:11:30	main.main	runtime.newobject	main_metadataPayload	heap
 testdata/runtime_reflect_value_call.go:11:15	main.main	runtime.newobject	2_reflect_Value	heap
-testdata/runtime_reflect_value_indirect_call.go:28:17	main.main	runtime.newobject	main_reflectValueInstruction	heap
-testdata/runtime_reflect_value_indirect_call.go:29:11	main.main	runtime.newobject	main_reflectValueState	heap
+testdata/runtime_reflect_value_indirect_call.go:28:17	main.main	runtime.newobject	main_reflectValueInstruction	frame
+testdata/runtime_reflect_value_indirect_call.go:29:11	main.main	runtime.newobject	main_reflectValueState	frame
 testdata/runtime_reflect_value_instruction_op.go:52:12	main.main	runtime.newobject	main_reflectInstructionEngine	frame
 testdata/runtime_reflect_value_instruction_op.go:53:10	main.main	runtime.newobject	1_main_reflectInstruction	frame
 testdata/runtime_reflect_value_instruction_op.go:54:4	main.main	runtime.newobject	main_reflectInstruction	frame
@@ -13949,7 +13957,7 @@ testdata/runtime_time_afterfunc.go:10:8	main.main	runtime.newobject	struct_code_
 testdata/runtime_time_afterfunc.go:6:2	main.main	runtime.newobject	chan_int	heap
 testdata/runtime_time_afterfunc.go:6:25	main.main	runtime.makechan	.goc.channel.type.int	heap
 testdata/runtime_time_afterfunc.go:7:44	main.main	runtime.newobject	struct_code_uintptr__capture0_unsafe_Pointer	heap
-testdata/runtime_timer_callback_shape.go:16:9	main.main	runtime.newobject	main_callbackBox	heap
+testdata/runtime_timer_callback_shape.go:16:9	main.main	runtime.newobject	main_callbackBox	frame
 testdata/runtime_timer_gc_channel.go:9:35	main.main	runtime.newobject	8__time_Timer	frame
 testdata/runtime_timer_select_churn.go:6:11	main.main	runtime.makechan	.goc.channel.type.int	heap
 testdata/runtime_type_assertions_switch.go:34:20	main.main	runtime.newobject	main_boxed	frame
@@ -14512,9 +14520,6 @@ testdata/sync_pool_interface.go:31:3	main.main.func.30.17	runtime.newobject	byte
 testdata/sync_pool_interface.go:43:10	main.main	runtime.newobject	sync_Pool	frame
 testdata/sync_pool_interface.go:43:2	main.main	runtime.newobject	sync_Pool	frame
 testdata/sync_pool_interface.go:43:2	main.main	runtime.newobject	sync_Pool	heap
-testdata/variadic_backing.go:8:2	main.leaky	runtime.newobject	int	heap
-testdata/variadic_backing.go:8:2	main.main	runtime.newobject	int	heap
-testdata/variadic_backing.go:8:2	main.main.gointernal.funcvalue.main_main_func___func.83860b9e97d614a8	runtime.newobject	int	heap
 testdata/variadic_backing.go:9:9	main.leaky	runtime.newobject	1_any	frame
 testdata/variadic_backing.go:9:9	main.main	runtime.newobject	1_any	frame
 testdata/variadic_backing.go:9:9	main.main.gointernal.funcvalue.main_main_func___func.83860b9e97d614a8	runtime.newobject	1_any	frame
