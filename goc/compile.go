@@ -6594,9 +6594,12 @@ func (g *gen) callArguments(arguments []ast.Expr, hasEllipsis bool, signature *t
 				if !g.interfaceAssignmentNeedsPayload(argument) {
 					continue
 				}
+				fieldType := g.typeAndValue(argument).Type
+				if g.variadicPayloadStorage(fieldType) == payloadStorageOwnAllocation {
+					continue
+				}
 				payloadFields = append(payloadFields, variadicPayloadField{argument: index, field: len(fields)})
 				fieldName := fmt.Sprintf("payload%d", index)
-				fieldType := g.typeAndValue(argument).Type
 				fields = append(fields, types.NewVar(token.NoPos, nil, fieldName, fieldType))
 			}
 		}
@@ -6637,6 +6640,66 @@ func (g *gen) callArguments(arguments []ast.Expr, hasEllipsis bool, signature *t
 type variadicPayloadField struct {
 	argument int
 	field    int
+}
+
+// payloadStorage says where a variadic `...any` argument's boxed payload lives.
+type payloadStorage int
+
+const (
+	// payloadStorageCombinedField puts the payload in a field of the same object
+	// as the `[N]any` backing array, so the whole call costs one allocation.
+	payloadStorageCombinedField payloadStorage = iota
+	// payloadStorageOwnAllocation gives the payload an allocation candidate of
+	// its own, so opt.LowerHeapAllocations decides where it goes separately from
+	// the backing array.
+	payloadStorageOwnAllocation
+)
+
+// variadicPayloadStorage decides which of the two a payload of the given type
+// gets, and is the whole of goc's answer to "does this variadic call's backing
+// array have to be on the heap".
+//
+// # Why there is a choice at all
+//
+// One object is one placement. While the array and every payload were fields of
+// a single allocation, a callee that retains an *element* -- which is the boxed
+// payload, not the array -- retained the array too, because they are the same
+// object. That is not a conservatism that better analysis can remove: it is
+// true of the representation. fmt.pp.doPrintf assigns each element to p.arg, a
+// field of a heap-allocated printer, so every `fmt.Sprintf` with an argument
+// paid a heap allocation for its `[N]any` even though gc keeps that array in
+// the frame and always has. Splitting the payload out is what makes the two
+// decidable apart.
+//
+// # Why not split every payload
+//
+// Because the merge is worth something when the array does go to the heap. A
+// callee that retains the slice itself -- log/slog.Logger.Info does, through
+// Record.Add -- escapes the array whatever this decides, and then N+1 objects
+// cost N+1 allocations where one combined object costs one. Splitting
+// unconditionally turns the five-attribute slog call from one allocation into
+// six.
+//
+// So the split is taken exactly where it cannot lose. A payload the runtime has
+// a conversion helper for costs at most one allocation on its own and often
+// none -- runtime.convT64 hands back a pointer into runtime.staticuint64s for a
+// value below 256 -- which is the same shape gc emits; and those types are
+// pointer-free by construction, so a split payload never needs a frame pointer
+// map entry the combined object was carrying. A payload with no helper stays in
+// the combined object, where the old arithmetic still holds.
+//
+// A mixed call keeps the array's fate tied to its unsplittable payloads, which
+// is why the test is per-payload rather than per-call: splitting the int out of
+// `fmt.Sprintf("%s %d", s, n)` while the string payload keeps the array on the
+// heap would add an allocation rather than remove one.
+func (g *gen) variadicPayloadStorage(payloadType types.Type) payloadStorage {
+	if !g.runtimeAllocation {
+		return payloadStorageCombinedField
+	}
+	if _, hasHelper := g.interfaceConversionHelper(payloadType); hasHelper {
+		return payloadStorageOwnAllocation
+	}
+	return payloadStorageCombinedField
 }
 
 func (g *gen) interfaceAssignmentNeedsPayload(expression ast.Expr) bool {

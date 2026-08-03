@@ -1,440 +1,66 @@
-# Wiring goc's interface-conversion fast paths: what `convT*` was worth
-
-Branch `ccwork/iface-convt-fastpath`, off `main` (`4a6fd96`). The previous jobs'
-reports are at `4a6fd96:CCWORK_REPORT.md`.
-
-Status: COMPLETE. Every number here was watched to completion.
-
-**Headline: `any(7)` cost goc one 8-byte allocation and now costs none, and the
-five-attribute `slog.Info` call went from 9.00 allocations to 1.00 against gc's
-0.00. `slog.Int`, `slog.Bool`, `slog.Duration` and `slog.Float64` are each at
-exact parity with go1.26.1, and `slog.Info` at a disabled level is at 0.00
-against gc's 0.00. The gc differential's pessimism set does *not* shrink — 563
-to 567, and all four are lines in the corpus program this branch edits — because
-this changes no escape decision, only what a payload that already lost that
-argument costs. Wall clock: 8.9× on a boxing microbenchmark, 8.2% on a
-`fmt.Sprintf` workload, 1.5% on slog.**
-
-## 0. The host toolchain, pinned
-
-Host toolchain is `go1.26.1 linux/arm64`; goc built from this branch and from
-`4a6fd96` for the before/after columns, run as `goc -run`.
-
-## 1. The defect, confirmed on main before anything was changed
-
-`runtime.convT16/convT32/convT64` are vendored in at
-`stdlib/src/runtime/iface.go:366,379,400`, and `runtime.staticuint64s` — the
-256-entry read-only table they hand back a pointer into for a value that fits in
-a byte — is defined in `stdlib/src/runtime/ints.s`, which the ARM64 translator
-does assemble (`plan9asm.SupportsARM64File("runtime", "ints.s")` is true).
-Nothing in goc's codegen called any of them.
-
-Measured on `4a6fd96` with `goc -run`, allocations per 100 calls:
-
-```
-box_small_int        100      # takeAny(theInt), theInt = 42
-box_bool             100      # takeAny(theBool)
-return_any_from_int  100      # func(v int) any { return v }
-```
-
-The host toolchain pays 0 for all three.
-
-## 2. What was built
-
-The escape decision has to be made before the conversion helper is a good idea,
-because a payload that stays in the frame is cheaper than any call — and
-`convT64` handed a value past the table *allocates*, so calling it
-unconditionally would have turned free frame slots into allocations. gc has the
-same ordering: `walkConvInterface` tries a stack temporary first and only reaches
-`dataWordFuncName` when the value escapes.
-
-So the choice is made where the escape decision already lives:
-
-- `ir.Block.HeapAllocConverted` (`ir/build.go`) emits the same allocation
-  candidate as before, carrying two more operands: the helper that could build
-  the object, and the value to hand it. Its doc comment carries the two rules
-  the emitter has to keep.
-- `opt.rewriteHeapAllocations` (`opt/escape.go`) promotes such a candidate to a
-  frame slot exactly as before when it can, and calls the helper instead of the
-  allocator when it cannot — dropping the store that would have initialized the
-  object, because the helper's result already holds the value and, for a small
-  value, points into read-only memory that must not be written.
-- `gen.interfaceConversionHelper` (`goc/compile.go`) is the predicate. It is
-  `cmd/compile`'s `dataWordFuncName` narrowed to types goc holds in a register,
-  and it is asked *after* `isDirectInterfaceType`, inside the same branch of
-  `adaptValueToInterface` that already decides direct versus indirect — so there
-  is one direct/indirect predicate, not two.
-- `goc/reach.go` roots the three helpers. Nothing in any AST calls them; they
-  only become callees during lowering, so they are roots or they are absent —
-  which is what the first build failed on.
-
-### What is deliberately not wired
-
-`convT`, `convTnoptr`, `convTstring` and `convTslice`. Their payloads are not
-register-shaped, so passing one to a helper means spilling it and reading it
-back, which is the copy the fast path exists to avoid. More to the point, they
-buy nothing here: measured against go1.26.1, `convTstring` and `convTslice`
-allocate for every value except the empty one, and goc already pays exactly one
-allocation for those — `control/any-string-variable` is 1.00/16 B under both
-compilers. gc's 0.00 on `any("literal")` comes from its readonly-global path,
-not from `convTstring`.
-
-The fast path is also off for targets other than arm64, because `staticuint64s`
-is defined in `ints.s` and only the ARM64 translator consumes that file. On a
-target that does not, the array is a zero-filled Go `var` and the helper would
-hand back a pointer to a zero for every value below 256 — a wrong answer, not a
-slow one. That is a note for whoever finishes the amd64 Go target.
-
-## 3. Allocation counts: before, after, and gc
-
-`goc/testdata/allocation_counts.go` and the table in `goc/alloccount_test.go`,
-regenerated per their headers. Allocations per 100 calls.
-
-| row | goc @4a6fd96 | goc now | gc |
-|---|---|---|---|
-| `box_small_int` | 100 | **0** | 0 |
-| `box_bool` | 100 | **0** | 0 |
-| `box_large_int` | 100 | 100 | 0 |
-| `box_float64` | 100 | 100 | 0 |
-| `box_string` | 100 | 100 | 0 |
-| `box_pointer` | 0 | 0 | 0 |
-| `return_any_from_int` | 100 | **0** | 0 |
-| `return_any_from_large_int` | 100 | 100 | 100 |
-| `return_any_from_pointer` | 0 | 0 | 0 |
-| `sprintf_int` | 200 | 200 | 100 |
-| `variadic_any` | 0 | 0 | 0 |
-
-Read the four rows where goc still pays and gc does not carefully: they are gc's
-*escape analysis*, not gc's static table. `-gcflags=-m` says "theLargeInt does
-not escape", "theFloat does not escape", "theString does not escape" at each of
-them, because `takeAny` does not leak its parameter, so gc puts the payload in a
-frame and never reaches a conversion helper at all. `return_any_from_large_int`
-is the same large value in a shape gc cannot frame, and there the two agree
-exactly at 100 — which is the row that proves goc's fast path is about the value
-and not about the type. `box_pointer` and `return_any_from_pointer` stay at 0:
-a pointer-shaped value goes in the interface word with no box at all, and
-`TestInterfaceConversionsCallTheRuntimeHelpers` asserts it calls no helper.
-
-The new table fails at `4a6fd96`: run there, `TestAllocationCounts` reports
-`box_small_int costs 100 allocations per 100 calls under goc, and this table
-says 0`.
-
-`sprintf_int` does not move. Its remaining allocation is not the box — 42 fits
-the static table under both compilers now — it is the `...` object, which goc
-packs the array and the boxed payload into and puts on the heap because fmt's
-`doPrintf` assigns each element to a field of a heap-allocated printer.
-
-### A fixture that had to change, and why
-
-`theFloat` in the testdata is assigned in `init()` rather than in its
-declaration. **goc compiles a package-level `float64` initialized to a constant
-to zero.** That is a pre-existing defect — it reproduces identically at
-`4a6fd96` — and it has nothing to do with boxing, but zero's bit pattern *does*
-fit the static table, so declaring `theFloat = 3.5` the ordinary way made the
-float row measure `any(0.0)` and report a fast path that was not running.
-
-Two more pre-existing float defects turned up next to it, both reproduced at
-`4a6fd96` and neither touched here:
-
-- `var fromInt = float64(theInt) / 12` at package scope is also zero.
-- `var fromCall = makeFloat()` at package scope, where `makeFloat` returns
-  `3.5`, is `3.500000477186404` — the value has been through a `float32`.
-
-## 4. log/slog: the numbers this was really about
-
-`goc/testdata/slog_allocations_baseline.txt`, regenerated per its header.
-Allocations per operation, goc against gc.
-
-| case | goc before | goc now | gc |
-|---|---|---|---|
-| `control/any-int-small` | 1.00 | **0.00** | 0.00 |
-| `control/any-int-large` | 1.00 | 1.00 | 1.00 |
-| `control/any-bool` | 1.00 | **0.00** | 0.00 |
-| `control/return-interface` | 1.00 | **0.00** | 0.00 |
-| `control/context-background` | 1.00 | **0.00** | 0.00 |
-| `control/handler-enabled` | 1.00 | **0.00** | 0.00 |
-| `control/variadic-6-preboxed` | 1.00 | **0.00** | 0.00 |
-| `control/variadic-6-literal` | 1.00 | **0.00** | 0.00 |
-| `attr/slog.Int` | 1.00 | **0.00** | 0.00 |
-| `attr/slog.Bool` | 1.00 | **0.00** | 0.00 |
-| `attr/slog.Duration` | 1.00 | **0.00** | 0.00 |
-| `attr/slog.Float64` | 1.00 | **0.00** | 0.00 |
-| `info/1-attr` | 5.00 | **1.00** | 0.00 |
-| `info/3-attr` | 7.00 | **1.00** | 0.00 |
-| `info/5-attr` | 9.00 | **1.00** | 0.00 |
-| `info/6-attr` | 11.00 | **2.00** | 1.00 |
-| `info/3-attr-large-ints` | 7.00 | **1.00** | 3.00 |
-| `logattrs/3-attr` | 6.00 | **1.00** | 0.00 |
-| `logattrs/6-attr` | 11.00 | **3.00** | 1.00 |
-| `disabled/no-attrs` | 2.00 | **0.00** | 0.00 |
-| `disabled/3-attr` | 3.00 | **1.00** | 0.00 |
-| `disabled/logattrs-3-attr` | 5.00 | **1.00** | 0.00 |
-
-`attr/slog.Float64` reaching 0.00 is not the float fast path: `slog.Float64`
-stores the float in `Value.num` and boxes the *Kind*, which is a small integer.
-`info/3-attr-large-ints` is goc paying **less** than gc — three values past the
-static table cost gc three `convT64` allocations, where goc packs all three
-payloads into the one `...` object it was already allocating.
-
-The two `json/*` rows still crash. That is the separate slog miscompile
-`slog-attr-gcmask` is fixing on another branch; the only thing that moved is the
-frame name in the message (`main_func_304_28` → `main_func_311_28`), which is
-generated-function numbering shifting because the runtime now compiles three
-more functions.
-
-## 5. The allocation census: 552 sites changed hands, nothing moved
-
-`goc/testdata/alloc_census_baseline.txt`, regenerated per its header. Against
-`4a6fd96`, classified the way `TestAllocationCensus`'s doc comment asks:
-
-```
-before rows: 14253   after rows: 14263
-moved heap->frame:   0
-moved frame->heap:   0
-vanished:          552
-appeared:          562
-```
-
-**Zero sites moved in either direction**, which is the whole of question 1 and
-question 2. The 552/562 is one substitution: every `runtime.newobject T heap`
-line at a conversion site became `runtime.convT{16,32,64} T heap` at the same
-position, in the same function, with the same type. Reviewed by type:
-
-| count | type | helper |
-|---|---|---|
-| 196 | `syscall.Errno` (`uintptr`) | convT64 |
-| 86 | `int` | convT64 |
-| 48 | `net/http.http2ConnectionError` (`uint32`) | convT32 |
-| 41 | `uint8` | convT64 |
-| 27 | `internal/strconv.Error` (`int`) | convT64 |
-| 14 | `crypto/tls.alert` (`uint8`) | convT64 |
-| 14 | `bool` | convT64 |
-| 12 | `compress/flate.CorruptInputError` (`int64`) | convT64 |
-| 8 | `float64` | convT64 |
-| 8 | `uint16` | convT16 |
-| … | 30 more named integer types | |
-
-Every one is a named integer, a bool, or a float — `interfaceConversionHelper`'s
-whole domain. The two that were not obviously so, `internal/strconv.Error` and
-`os/user.UnknownUserIdError`, were checked in the source: both are `type X int`.
-`syscall.Errno` at 196 sites is the single biggest beneficiary in the tree, and
-it is exactly the case the static table exists for — an errno is a small number
-boxed into `error`.
-
-Sixteen rows appeared and eighteen vanished in `goc/testdata/allocation_counts.go`
-itself, which is question 4: fourteen are the same sites at new line numbers
-because the program grew, two are the new `boxString` function's payload, and
-four are `boxSmallInt`'s and `returnAnyFromInt`'s old `newobject` rows becoming
-conversion rows.
-
-### The census had to be taught about the helpers, and why that is not a dodge
-
-The first regeneration let the conversion sites fall out of the census entirely
-— a `convT64` call names no allocator the census knows and carries no type
-descriptor, so 552 rows simply disappeared. That was measured and rejected:
-
-| | pessimistic | permissive |
-|---|---|---|
-| `4a6fd96` | 563 | 209 |
-| conversion sites dropped from the census | 539 | **241** |
-| conversion sites recorded | 567 | 209 |
-
-Dropping them shrinks the pessimism set by 24 and adds **33 lines to the
-permissive set**, which is the set that means "goc kept in a frame something gc
-could not prove frame-safe" — the tree's correctness-critical direction. Not one
-of those 33 was real: goc's escape decision at each is unchanged and still says
-heap, and only the census had stopped saying so. `container/list`,
-`container/heap`, `encoding/gob`, the type switches and the reflect probes were
-all about to be listed as goc framing something gc heaps, because a diagnostic
-lost sight of them.
-
-So `opt.AllocationCensus` records a conversion site as a heap placement with the
-helper in the allocator column. The placement is the escape decision — the
-payload did not stay in the frame, which is exactly what gc's `-m` reports at the
-same source line — and the allocator column carries the part neither "frame" nor
-"heap" can say: this site allocates for a value past the static table and not for
-one inside it.
-
-## 6. The gc differential: 563 → 567, and not one line changed its verdict
-
-`goc/testdata/escape_gc_differential.txt`, regenerated per its header, against
-the same `go1.26.1 linux/arm64`.
-
-```
-permissive (gc heaps, goc does not):  209 -> 209
-pessimistic (goc heaps, gc does not): 563 -> 567
-```
-
-**The pessimism set does not shrink. It grows by four, and every line that moved
-in either set is in `goc/testdata/allocation_counts.go`** — the one corpus
-program this branch edits. Outside that file the differential is identical to
-main: the allocator column changes `newobject` to `convT64` on 
-the lines that changed helper, and not a single line changes its verdict between
-frame, heap, mixed and absent.
-
-That is the correct result and it is worth being plain about why. The
-differential measures escape *decisions*: which objects each compiler proves can
-stay in a frame. This change makes no escape decision differently. It changes
-what a payload that has already lost that argument costs — from an allocation to
-a pointer into a static table. A pessimistic escape analysis that is free at
-runtime is still pessimistic, and the 563 lines are still 563 things worth
-fixing; they are just worth less than they were yesterday.
-
-The measurement that would have reported a 24-line shrink is in section 5, and
-it is the one that fabricates 33 correctness-critical entries. The brief asked
-how much the set shrinks; the honest answer is that it does not, and that the
-number which says otherwise is an artifact of the census going blind.
-
-## 7. Wall clock
-
-Timed inside each program with `time.Since` so process startup is not in the
-number, `GOMAXPROCS=1`, binaries built once with each compiler and run five
-times alternating. Load average was 5.8 at the start of the run. The ranges
-below are the full spread of the runs, not a standard deviation.
-
-**A control workload with no interface conversion in it** — twelve rounds of
-integer mixing and `append` into a reused buffer — is flat, which is what says
-the numbers below are the change and not the box or code layout:
-
-| | ns/op | allocations/op |
-|---|---|---|
-| goc @ `4a6fd96` | 202–204 | 0.00 |
-| goc @ this branch | 201–202 | 0.00 |
-
-**Boxing-dominated: 64 `any(smallInt)` conversions through a `//go:noinline`
-consumer, per round.** This is the bound, not a workload anyone runs:
-
-| | ns/round | allocations/round | GC cycles |
-|---|---|---|---|
-| goc @ `4a6fd96` | 8867–8883 | 64.00 | 283 |
-| goc @ this branch | **990–1003** | **0.00** | **0** |
-
-**8.9× faster**, and the collector is not asked to run at all.
-
-**`fmt.Sprintf("id=%d name=%s score=%d", 42, "widget", 7)` through a
-`strings.Builder`, 100 000 calls** — the workload the previous job's 12% was
-measured on:
-
-| | ns/op | allocations/op | GC cycles |
-|---|---|---|---|
-| goc @ `4a6fd96` | 3044–3068 | 3.00 | 3 |
-| goc @ this branch | **2790–2822** | 3.00 | 3 |
-
-**8.2% faster with an unchanged allocation count.** Two variants were run to
-find out what that is:
-
-- the same call with `id` and `score` past the static table: 2966–3136 →
-  2860–2928, a smaller and noisier difference.
-- the same call with the integers removed (`"name=%s"`, one argument):
-  1775–1793 → 1772–1922. **No difference.**
-
-So the saving is attributable to the integer arguments and not to the string,
-the `...` array, or the result — but it is *not* an allocation, because the
-count is 3.00 in both. I did not isolate which instruction inside `fmt` it is;
-the two candidates are the work at a conversion site itself (`newobject` zeroes
-through `mallocgc(size, typ, true)` where `convT64` returns a table pointer or
-calls `mallocgc(8, uint64Type, false)` and stores) and inlining decisions inside
-`fmt` shifting because the module has three more functions in it. **This part is
-measured and reproducible but unattributed.**
-
-**`slog.Info("msg", "a", 1, … "e", 5)` to a no-op handler, 200 000 calls:**
-
-| | ns/op | allocations/op | GC cycles |
-|---|---|---|---|
-| goc @ `4a6fd96` | 80524–81474 | 6.00 | 17 |
-| goc @ this branch | **79536–80469** | **1.00** | **15** |
-
-**1.5%.** Six allocations out of seven are gone and the wall clock barely moves,
-because goc's `slog` path costs 80 µs per call — roughly two orders of magnitude
-more than the host toolchain — and whatever dominates that is not allocation.
-Saying this plainly matters more than the 1.5%: on the workload this change was
-aimed at, the allocation win is real, large, and almost entirely invisible in
-time. The next person to work on `slog` under goc should profile it rather than
-count allocations.
-
-To answer the brief's question directly: the interface-return fix was worth 12%
-on a formatting workload; this is worth **8.2% on the same shape of workload,
-8.9× on a boxing microbenchmark, and 1.5% on slog**. It is not "not
-measurable" — the control run is what establishes that — but on the realistic
-workloads it is a single-digit percentage, and the allocation counts move far
-more than the clock does.
-
-## 8. Guards
-
-Everything below was run to completion at the committed HEAD.
-
-| guard | result |
-|---|---|
-| `TestFrameEscapeAudit` | **ok**, and `goc/testdata/frame_escape_baseline.txt` is byte-identical to `4a6fd96` |
-| `TestAllocationCensus` (checking, not updating) | ok against the regenerated baseline |
-| `TestEscapeDifferentialAgainstGC` (checking) | ok |
-| `TestSlogAllocationsAgainstGC` (checking) | ok |
-| `TestAllocationCounts`, unoptimized and `-O` | ok |
-| `TestAllocationCountsAgainstTheHostToolchain` | ok |
-| `TestInterfaceConversionsCallTheRuntimeHelpers` | ok |
-| `TestLoopAliasExpectationsMatchTheHostToolchain` | ok |
-| `TestLoopBodyAllocationsAreDistinctPerIteration` | ok |
-| `TestCompilingTheSameSourceTwiceGivesTheSameModule` | ok |
-| `go test ./opt ./ir` | ok |
-
-The frame-escape baseline not moving is the one worth stating on its own. A
-`runtime.staticuint64s` entry is static read-only data, not heap memory and not
-frame memory, so nothing about this change can publish a frame address — and the
-audit, which reads the stores the compiler actually emitted rather than what the
-analysis believes, agrees: not one line added, not one removed.
-
-### Run-time correctness, beyond the baselines
-
-Two programs written for this, run under goc unoptimized, under `goc -O`, and
-under the host toolchain, all three agreeing:
-
-- **A round trip of every eligible type**, 32 cases: `int` at 0, 7, 255, 256,
-  2^20, −1 and −2^62; `int8` at −128, −1, 127; `uint8` at 0 and 255; `int16` at
-  −300 and 32767; `uint16` at 65535; `int32` at −70000; `uint32` and `uint64` at
-  their maxima; `uintptr`; `float64` at 0, 3.5 and −2.25; `float32` at 1.5 and
-  −0.5; `bool` both ways; `rune` at `'A'` and 0x10FFFF; a named `int64`. Plus
-  the aliasing property the static table creates: two boxes of the same small
-  value compare equal, two boxes of different values do not, and each reads back
-  its own value.
-- **A collector stress**: 900 boxed values (small ints, bools, floats) appended
-  into a heap slice, 300 more in a linked list of heap nodes, 26 in a map, three
-  full `runtime.GC()` cycles with 5000 intervening allocations, then every value
-  read back and checked. This is the one that matters for a payload pointing at
-  static data: it goes through the write barrier on the way into each heap
-  object, and the marker has to not mistake `&staticuint64s[i]` for an object
-  base. It does not.
-
-## 9. What is left
-
-1. **The four `box_*` rows where gc pays nothing and goc pays one.** All four are
-   goc's escape analysis, not the static table: `takeAny` does not leak its
-   parameter and gc frames the payload. goc heaps it, and now heaps it for free
-   when the value is small and for an allocation when it is not. This is the
-   563-line pessimism set from section 6 in miniature, and it is the next thing
-   worth doing on this path.
-2. **`sprintf_int` at 200 against gc's 100.** The remaining allocation is the
-   `...` object, which goc puts on the heap because fmt's `doPrintf` assigns each
-   element to a field of a heap-allocated printer. Unchanged by this branch.
-3. **The 8.2% in section 7 is unattributed.** It is measured, reproducible, and
-   controlled, and I do not know which instruction it is.
-4. **Three pre-existing float defects**, all reproduced at `4a6fd96` and none
-   touched here: a package-level `float64` initialized to a constant is zero; a
-   package-level `float64` with a dynamic initializer is zero; a package-level
-   `float64` initialized from a function call goes through a `float32`. The first
-   one is why `theFloat` in the testdata is assigned in `init()`. These look
-   worth a job of their own — a float constant that silently becomes zero is a
-   miscompile with no diagnostic.
-5. **`convTstring` / `convTslice` / `convT` / `convTnoptr`**, and the fast path on
-   amd64 once `staticuint64s` exists there. Section 2 says why neither is worth
-   doing yet.
-
-## 10. What was committed
-
-| commit | what |
-|---|---|
-| `b798af9` | `goc`: build small interface payloads with `runtime.convT*` |
-| `5d4d7ec` | `goc`: pin what each interface conversion costs and which helper builds it |
-| `9753f6b` | `slog`: regenerate the allocation baseline |
-| `a19c63d` | `opt`: a conversion site is a census site |
-
-Status: **COMPLETE.** Every number in this report was watched to completion.
+# Asking the escape question for a variadic call: splitting the object that made it unanswerable
+
+Branch `ccwork/variadic-escape-question`, off `ccwork/iface-convt-fastpath`
+(`19488ee`). The previous jobs' reports are at `19488ee:CCWORK_REPORT.md` and
+`4a6fd96:CCWORK_REPORT.md`.
+
+Status: IN PROGRESS — numbers below are measured unless marked otherwise.
+
+**Headline (provisional): `fmt.Sprintf("value=%d", 42)` costs goc 1.00
+allocations against gc's 1.00 — exact parity, from 2.00. The `[N]any` backing
+array of a variadic call is now a frame slot wherever the callee does not retain
+the slice itself, and the boxed payload an element points at is decided
+separately from it. The combined object was split, partially and deliberately;
+section 2 prices both directions. The retention hole that forced the previous
+attempt back to 2.00 is closed by construction rather than by an extra rule: the
+callee that keeps `args[0]` now keeps a payload that is its own allocation, and
+that payload goes to the heap while the array does not.**
+
+## 1. What was actually wrong, confirmed before anything was changed
+
+Two instruments, both on the base commit.
+
+`goc/compile.go:6581` decides between a frame `[N]any` and a heap one:
+
+    stackAllocateVariadic := !g.runtimeAllocation || g.fn.NoSplit || g.forceStackVariadic
+
+and `forceStackVariadic` comes from a two-symbol allowlist. So the front end
+never asks. That is true and it is not the whole story: the heap arm emits the
+*neutral* `ir.OHeapAlloc` candidate, and `opt.LowerHeapAllocations` — which runs
+unconditionally, `goc/compile.go:488`, not only under `-O` — does ask. The
+question is asked; the representation is what made it unanswerable.
+
+`goc/compile.go:6591-6613` builds one synthesized `struct{values [N]any;
+payload0 T0; ...}` per call site and allocates the backing array and every boxed
+payload as a single object. One object is one placement.
+
+A diagnostic added to `opt` for this job (`GOC_DIAG_ESCAPE`, deleted before the
+branch closes) prints where each candidate landed and the first use that escaped
+it. On the base commit, for `fmt.Sprintf("value=%d", n)`:
+
+    main.doSprintf .goc.runtime.type.struct_values__1_any__payload0_int  heap
+        argument 1 of $fmt.Sprintf may retain something inside a self-referential object
+
+and with the `needsDeepSummary` rule switched off, the same object is `frame`.
+So **`fmt.Sprintf`'s `a []any` parameter does not escape at depth 0** — the
+array was on the heap solely because the box inside it is retained.
+`fmt.pp.doPrintf` assigns each element to `p.arg`, a field of a heap-allocated
+printer, so the box genuinely is retained: this is not a conservatism to be
+analysed away.
+
+For `log/slog.Logger.Info` the same diagnostic says something different:
+
+    argument 2 of $log/slog.Logger.Info escapes            (with the deep rule off)
+
+and the parameter table agrees:
+
+    FACT log/slog.Logger.Info param 2 "args.0" = escapes deep=false
+
+The slice **itself** escapes there, through `Logger.log` → `Record.Add` →
+`argsToAttr`, which returns a slice derived from `args` in a loop. That
+difference decides the design, and section 2 is about it.
+
+## 2. Pricing the two representations
+
+(filled in below as the numbers land)
+

@@ -30,6 +30,7 @@ func markSummarisedCall(
 	bases map[uint32]uint32,
 	selfReferential map[uint32]bool,
 	mark func(ir.Ref, string),
+	markContents func(ir.Ref, string),
 ) {
 	mark(instruction.Arg(0), "callee of an indirect call")
 	callee := constSymbolName(function, instruction.Arg(0))
@@ -46,11 +47,32 @@ func markSummarisedCall(
 	}
 	for index, argument := range arguments {
 		fact := facts.Param(callee, index)
+		if !fact.Deep {
+			// The depth-1 half of the summary, and the one a variadic parameter
+			// needs. ParamNoEscape is a claim about the pointer handed over;
+			// what a `...any` callee retains is an *element*, which is the boxed
+			// payload the element's data word points at and not the backing
+			// array at all. Everything the argument holds therefore escapes,
+			// and the argument itself is left to the switch below.
+			//
+			// markContents walks the containment edges the mark loop recorded,
+			// so it names the payloads goc allocated for this call and nothing
+			// else. For an argument holding nothing it does nothing, which is
+			// why this can run on every call rather than only on the shapes it
+			// was written for.
+			markContents(argument, fmt.Sprintf("argument %d of $%s may retain something it points at", index, callee))
+		}
 		if needsDeepSummary(argument, bases, selfReferential) && !fact.Deep {
 			// The allocation holds a pointer into itself, so "the callee does
 			// not retain the pointer it was handed" is not enough: retaining
 			// anything reachable through it retains the object. Only the deep
 			// claim answers the question that is actually being asked.
+			//
+			// This is the case markContents cannot express, because there is no
+			// separate object to escape: the payload is a field of the argument.
+			// Every payload goc can build with a conversion helper is emitted as
+			// an allocation of its own for exactly this reason -- see
+			// goc.gen.variadicPayloadStorage.
 			mark(argument, fmt.Sprintf("argument %d of $%s may retain something inside a self-referential object", index, callee))
 			continue
 		}

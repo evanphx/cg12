@@ -93,6 +93,12 @@ func LowerHeapAllocationsWithFacts(module *ir.Module, facts *EscapeFacts) bool {
 
 func lowerHeapAllocations(module *ir.Module, facts *EscapeFacts) bool {
 	byName := moduleFuncsByName(module, facts)
+	if diagFacts != "" {
+		for _, function := range module.Funcs {
+			diagFuncs[function.Name] = function
+		}
+		diagDumpFacts(facts)
+	}
 	changed := false
 	for _, function := range module.Funcs {
 		if function.Start == nil {
@@ -129,6 +135,9 @@ type candidateEscapes struct {
 	function *ir.Func
 	bases    map[uint32]uint32
 	escaped  map[uint32]bool
+	// contains records, per tracked allocation, the other tracked allocations
+	// whose address was written into it. See containedAllocationsEscape.
+	contains map[uint32]map[uint32]bool
 	// reasons names, per escaped allocation, the first use that escaped it. It
 	// is only filled when asked for: the pass itself does not need it and the
 	// strings would be built on every compile.
@@ -136,6 +145,46 @@ type candidateEscapes struct {
 }
 
 func (analysis *candidateEscapes) escapes(id uint32) bool { return analysis.escaped[id] }
+
+// containedAllocationsEscape propagates escape through containment: an object
+// reachable from one that escapes has escaped too.
+//
+// Writing one tracked allocation's address into another is not a publication on
+// its own -- nothing outside can reach the pointee any more easily than it can
+// reach the container -- so the mark loop records the edge instead of escaping
+// the pointee. That is what lets a variadic call's `[N]any` backing array stay
+// in the frame while the boxed payload one of its elements points at goes to the
+// heap, which is the placement gc makes and the one goc could not express while
+// the array and its payloads were a single object.
+//
+// The debt that defers is settled here, and it has to be settled every time
+// anything is added to escaped: promotionsBlockedByALoop escapes candidates
+// after the mark loop has finished, and a container sent to the heap by the loop
+// rule with a promoted pointee inside it is a frame address published into a
+// heap object -- exactly what TestFrameEscapeAudit exists to catch.
+func (analysis *candidateEscapes) containedAllocationsEscape() {
+	if len(analysis.contains) == 0 {
+		return
+	}
+	for updated := true; updated; {
+		updated = false
+		for container, contained := range analysis.contains {
+			if !analysis.escaped[container] {
+				continue
+			}
+			for base := range contained {
+				if analysis.escaped[base] {
+					continue
+				}
+				if analysis.reasons != nil {
+					analysis.reasons[base] = "stored into an object that escapes"
+				}
+				analysis.escaped[base] = true
+				updated = true
+			}
+		}
+	}
+}
 
 func (analysis *candidateEscapes) reason(id uint32) string {
 	if analysis.reasons == nil {
@@ -156,6 +205,7 @@ func lowerFunctionHeapAllocations(function *ir.Func, byName map[string]*ir.Func,
 	if len(seeds) == 0 {
 		return false
 	}
+	diagCandidates(function, byName, facts, seeds)
 	escapes := analyzeCandidateEscapes(function, byName, facts, seeds, false)
 	rewriteHeapAllocations(function, escapes, promotionsBlockedByALoop(function, seeds, escapes), decisions)
 	return true
@@ -197,6 +247,12 @@ func promotionsBlockedByALoop(function *ir.Func, seeds []uint32, escapes *candid
 	for id := range blocked {
 		escapes.escaped[id] = true
 	}
+	// The loop rule adds to escaped after the mark loop has finished, and a
+	// container it sends to the heap takes everything inside it along. Leaving
+	// that unsettled would promote a payload into a frame slot and leave its
+	// address inside a heap object -- a frame-address publication, and the one
+	// direction this analysis must never get wrong.
+	escapes.containedAllocationsEscape()
 	return blocked
 }
 
@@ -218,6 +274,17 @@ func analyzeCandidateEscapes(function *ir.Func, byName map[string]*ir.Func, fact
 	}
 
 	escaped := make(map[uint32]bool)
+	contains := make(map[uint32]map[uint32]bool)
+	// noteContainment records that one tracked allocation's address was written
+	// into another, and reports that it did. A caller that gets false has a
+	// publication on its hands and must escape the value itself.
+	noteContainment := func(value, destination ir.Ref) bool {
+		valueBase, valueTracked := heapBase(value, bases)
+		if !valueTracked {
+			return false
+		}
+		return noteContainmentOf(contains, valueBase, destination, bases)
+	}
 	var reasons map[uint32]string
 	if wantReasons {
 		reasons = make(map[uint32]string)
@@ -293,7 +360,17 @@ func analyzeCandidateEscapes(function *ir.Func, byName map[string]*ir.Func, fact
 								continue
 							}
 							if destinationLocation.class != cLocal {
-								escaped[base] = true
+								// A block copy out of a frame slot holding a
+								// tracked pointer into another tracked
+								// allocation is the same containment the store
+								// case records: goc builds a variadic `...any`
+								// element by copying a two-word interface
+								// descriptor out of a frame slot into the
+								// backing array, and the payload pointer rides
+								// along in it.
+								if !noteContainmentOf(contains, base, destination, bases) {
+									escaped[base] = true
+								}
 								continue
 							}
 							destinationSlot := localSlot{
@@ -382,8 +459,10 @@ func analyzeCandidateEscapes(function *ir.Func, byName map[string]*ir.Func, fact
 			switch {
 			case isAtomicPointerStore(function, instruction):
 				noteSelfReference(instruction.Arg(2), instruction.Arg(1))
+				noteContainment(instruction.Arg(2), instruction.Arg(1))
 			case instruction.Op.IsStore():
 				noteSelfReference(instruction.Arg(0), instruction.Arg(1))
+				noteContainment(instruction.Arg(0), instruction.Arg(1))
 			}
 		}
 	}
@@ -395,6 +474,31 @@ func analyzeCandidateEscapes(function *ir.Func, byName map[string]*ir.Func, fact
 					reasons[base] = why
 				}
 				escaped[base] = true
+			}
+		}
+	}
+	// markContents escapes what a tracked allocation holds without escaping the
+	// allocation. It is the depth-1 half of a summary: a callee that may retain
+	// an *element* of a `...any` slice retains the boxed payload the element
+	// points at, and nothing else. Transitive, because containment is.
+	markContents := func(reference ir.Ref, why string) {
+		base, tracked := heapBase(reference, bases)
+		if !tracked {
+			return
+		}
+		frontier := []uint32{base}
+		for len(frontier) > 0 {
+			container := frontier[len(frontier)-1]
+			frontier = frontier[:len(frontier)-1]
+			for held := range contains[container] {
+				if escaped[held] {
+					continue
+				}
+				if reasons != nil {
+					reasons[held] = why
+				}
+				escaped[held] = true
+				frontier = append(frontier, held)
 			}
 		}
 	}
@@ -423,8 +527,14 @@ func analyzeCandidateEscapes(function *ir.Func, byName map[string]*ir.Func, fact
 				// Frontend variables live in ordinary stack allocations. Saving a
 				// candidate in a non-escaping local slot does not make the pointed-to
 				// object escape; storing it anywhere externally reachable does.
+				//
+				// Storing it into another tracked allocation is neither: it is
+				// containment, recorded before this loop ran, and settled by
+				// containedAllocationsEscape once the container's own answer is
+				// known.
 				if aliases.locOf(instruction.Arg(1), 1).class != cLocal &&
-					!storesIntoItself(instruction.Arg(0), instruction.Arg(1), bases) {
+					!storesIntoItself(instruction.Arg(0), instruction.Arg(1), bases) &&
+					!containedIn(contains, instruction.Arg(0), instruction.Arg(1), bases) {
 					mark(instruction.Arg(0), "store into non-local storage")
 				}
 			case facts != nil && instruction.Op == ir.OCall &&
@@ -433,7 +543,7 @@ func analyzeCandidateEscapes(function *ir.Func, byName map[string]*ir.Func, fact
 				// a publication when the callee's summary says the callee can retain
 				// it. This is the entire behavioural difference the fact table makes,
 				// and with facts nil the case cannot be reached.
-				markSummarisedCall(function, byName, facts, instruction, bases, selfReferential, mark)
+				markSummarisedCall(function, byName, facts, instruction, bases, selfReferential, mark, markContents)
 			case isTrackedHeapDerivation(instruction, bases):
 				// Copies, casts, and constant pointer offsets preserve locality.
 			case isAtomicPointerStore(function, instruction):
@@ -442,7 +552,8 @@ func analyzeCandidateEscapes(function *ir.Func, byName map[string]*ir.Func, fact
 				// escape lowering knows whether the enclosing object is stack-local.
 				destination := instruction.Arg(1)
 				if _, localCandidate := heapBase(destination, bases); localCandidate {
-					if !storesIntoItself(instruction.Arg(2), destination, bases) {
+					if !storesIntoItself(instruction.Arg(2), destination, bases) &&
+						!containedIn(contains, instruction.Arg(2), destination, bases) {
 						mark(instruction.Arg(2), "write barrier into a candidate")
 					}
 				} else if aliases.locOf(destination, 1).class != cLocal {
@@ -461,7 +572,49 @@ func analyzeCandidateEscapes(function *ir.Func, byName map[string]*ir.Func, fact
 			mark(argument, "returned")
 		}
 	}
-	return &candidateEscapes{function: function, bases: bases, escaped: escaped, reasons: reasons}
+	analysis := &candidateEscapes{
+		function: function,
+		bases:    bases,
+		escaped:  escaped,
+		contains: contains,
+		reasons:  reasons,
+	}
+	analysis.containedAllocationsEscape()
+	return analysis
+}
+
+// noteContainmentOf records that the allocation named by valueBase was written
+// into whatever tracked allocation destination names, and reports whether there
+// was one. Self-containment is not recorded: storesIntoItself already answers
+// that shape, and an edge from a base to itself would say nothing.
+func noteContainmentOf(contains map[uint32]map[uint32]bool, valueBase uint32, destination ir.Ref, bases map[uint32]uint32) bool {
+	destinationBase, destinationTracked := heapBase(destination, bases)
+	if !destinationTracked || destinationBase == valueBase {
+		return false
+	}
+	held := contains[destinationBase]
+	if held == nil {
+		held = make(map[uint32]bool, 1)
+		contains[destinationBase] = held
+	}
+	held[valueBase] = true
+	return true
+}
+
+// containedIn reports that a store writes one tracked allocation's address into
+// another, which noteContainment has already recorded. The mark loop asks so it
+// can leave the value alone: containedAllocationsEscape settles it later, once
+// the container's own answer is known.
+func containedIn(contains map[uint32]map[uint32]bool, value, destination ir.Ref, bases map[uint32]uint32) bool {
+	valueBase, valueTracked := heapBase(value, bases)
+	if !valueTracked {
+		return false
+	}
+	destinationBase, destinationTracked := heapBase(destination, bases)
+	if !destinationTracked || destinationBase == valueBase {
+		return false
+	}
+	return contains[destinationBase][valueBase]
 }
 
 // rewriteHeapAllocations legalises every candidate in function according to the
