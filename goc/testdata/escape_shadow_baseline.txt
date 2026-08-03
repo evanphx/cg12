@@ -153,7 +153,6 @@ stdlib/src/crypto/tls/handshake_client.go:785:17	crypto/tls.clientHandshakeState
 stdlib/src/crypto/tls/handshake_client_tls13.go:353:67	crypto/tls.clientHandshakeStateTLS13.processHelloRetryRequest	method-value-descriptor	frame -> heap		call to $crypto/tls.computeAndUpdatePSK, whose argument list does not match its parameters
 stdlib/src/crypto/tls/handshake_client_tls13.go:811:14	crypto/tls.clientHandshakeStateTLS13.sendClientFinished	composite-literal	frame -> heap		store into non-local storage
 stdlib/src/crypto/tls/handshake_server_tls13.go:893:14	crypto/tls.serverHandshakeStateTLS13.sendServerFinished	composite-literal	frame -> heap		store into non-local storage
-stdlib/src/crypto/x509/constraints.go:515:9	crypto/x509.checkChainConstraints	composite-literal	heap -> frame	in a loop	
 stdlib/src/crypto/x509/parser.go:1011:40	crypto/x509.parseCertificate	composite-literal	heap -> frame		
 stdlib/src/crypto/x509/pkix/pkix.go:235:27	crypto/x509/pkix.Name.ToRDNSequence	slice-literal-backing	heap -> frame		
 stdlib/src/crypto/x509/pkix/pkix.go:238:27	crypto/x509/pkix.Name.ToRDNSequence	slice-literal-backing	heap -> frame		
