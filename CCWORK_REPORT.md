@@ -4,10 +4,11 @@ Branch `ccwork/variadic-escape-question`, off `ccwork/iface-convt-fastpath`
 (`19488ee`). The previous jobs' reports are at `19488ee:CCWORK_REPORT.md` and
 `4a6fd96:CCWORK_REPORT.md`.
 
-Status: IN PROGRESS — numbers below are measured unless marked otherwise.
+Status: COMPLETE. Every number below was measured, under goc built from this
+branch and under `go run`, and watched to completion.
 
-**Headline (provisional): `fmt.Sprintf("value=%d", 42)` costs goc 1.00
-allocations against gc's 1.00 — exact parity, from 2.00. The `[N]any` backing
+**Headline: `fmt.Sprintf("value=%d", 42)` costs goc 1.00 allocations against
+gc's 1.00 — exact parity, from 2.00. The `[N]any` backing
 array of a variadic call is now a frame slot wherever the callee does not retain
 the slice itself, and the boxed payload an element points at is decided
 separately from it. The combined object was split, partially and deliberately;
