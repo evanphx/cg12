@@ -153,6 +153,104 @@ func callReturnAnyFromLargeInt() { sinkAny = returnAnyFromLargeInt(theLargeInt) 
 //go:noinline
 func callReturnAnyFromPointer() { sinkAny = returnAnyFromPointer(thePtr) }
 
+// The constant conversions. A compile-time constant boxed into an interface has
+// no storage to allocate: the payload's contents are known while compiling and
+// nothing may write to the value inside an interface, so one read-only object
+// serves every conversion of that constant in the program. gc has always done
+// this, which is why every host number below is zero and why the string row is
+// the one that used to differ.
+//
+// The large integer is here as well as the string because the two reach it
+// differently. The string has no runtime conversion helper and used to be an
+// allocation outright; the integer has one and was free at run time already,
+// but only by calling convT64 and reading runtime.staticuint64s -- a call, and
+// a payload that still had to be given somewhere to live.
+
+//go:noinline
+func boxStringConstant() { sinkInt = takeAny("a string constant") }
+
+//go:noinline
+func boxLargeIntConstant() { sinkInt = takeAny(1 << 20) }
+
+// The `...any` shape log/slog is built out of, reduced to what makes it work.
+//
+// packAll walks its arguments two at a time through packNext, which returns
+// both the converted value and the remainder of the slice -- the shape of
+// log/slog.argsToAttr, and on the IR an aggregate return plus a result-area
+// out-parameter. packOne keeps the *value* rather than where it lives for the
+// kinds it knows, which is log/slog.Value's packed representation, and boxes
+// only what it does not know. Nothing retains the array, so gc keeps it in a
+// frame; goc could not, because its summary for packAll said the pointer
+// escaped where gc said only its contents did.
+//
+// One argument, not two: a call with two escaping payloads costs two
+// allocations split against one combined, and opt.foldSplitPayloadsBackIn
+// correctly sends the array back to the heap to take them. That rule is
+// measured by sprintf_two_small_ints; this row is measuring the placement.
+type packed struct {
+	key string
+	num uint64
+	box any
+}
+
+var sinkPacked packed
+
+//go:noinline
+func packAll(args ...any) {
+	for len(args) > 0 {
+		var one packed
+		one, args = packNext(args)
+		sinkPacked = one
+	}
+}
+
+//go:noinline
+func packNext(args []any) (packed, []any) {
+	if key, isKey := args[0].(string); isKey && len(args) > 1 {
+		return packOne(key, args[1]), args[2:]
+	}
+	return packOne("", args[0]), args[1:]
+}
+
+//go:noinline
+func packOne(key string, value any) packed {
+	switch typed := value.(type) {
+	case int:
+		return packed{key: key, num: uint64(typed)}
+	case string:
+		return packed{key: key, num: uint64(len(typed))}
+	default:
+		return packed{key: key, box: value}
+	}
+}
+
+//go:noinline
+func packVariadicElement() { packAll(theInt) }
+
+// The same call reached through a forwarder that also passes an interface,
+// which is the shape log/slog.Logger.Info is in: it calls Logger.log with a
+// context.Context alongside the arguments it was handed. goc's parameter
+// builder flattens an interface parameter into two words while its call emitter
+// hands the interface over as one descriptor value, so the two lists have
+// different lengths and every summary about the call used to be discarded --
+// including the one about the backing array, which is not the argument that
+// failed to line up.
+
+//go:noinline
+func packThrough(reason fmt.Stringer, args ...any) {
+	sinkInt = len(reason.String())
+	packAll(args...)
+}
+
+//go:noinline
+func forwardVariadicPastAnInterface() { packThrough(theStringer, theInt) }
+
+type reason struct{ text string }
+
+func (r reason) String() string { return r.text }
+
+var theStringer fmt.Stringer = reason{"because"}
+
 var pool = sync.Pool{New: func() any { return new(pair) }}
 
 //go:noinline
@@ -217,6 +315,10 @@ func main() {
 	measure("box_float64", repeat(boxFloat64))
 	measure("box_string", repeat(boxString))
 	measure("box_pointer", repeat(boxPointer))
+	measure("box_string_constant", repeat(boxStringConstant))
+	measure("box_large_int_constant", repeat(boxLargeIntConstant))
+	measure("pack_variadic_element", repeat(packVariadicElement))
+	measure("forward_variadic_past_an_interface", repeat(forwardVariadicPastAnInterface))
 	measure("return_any_from_int", repeat(callReturnAnyFromInt))
 	measure("return_any_from_large_int", repeat(callReturnAnyFromLargeInt))
 	measure("return_any_from_pointer", repeat(callReturnAnyFromPointer))

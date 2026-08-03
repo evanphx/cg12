@@ -1866,3 +1866,143 @@ array; remove (2) and `needsDeepSummary` still escapes it. That is why this
 survived three previous rounds -- it is not a variant of the convT, variadic-
 escape-question, or interface-return causes, all of which are confirmed closed
 by the control rows in the same table.
+
+## The fix, in two parts
+
+Both blockers had to go, and neither is a variant of a previously closed cause.
+
+### 1. goc: box a compile-time constant without payload storage (34a4275)
+
+A constant conversion has no storage to allocate. cmd/compile emits a read-only
+`stmp_N` symbol (or `&runtime.staticuint64s[c]`); goc allocated. Now goc emits
+one read-only object per distinct (type, value) pair, reusing the same
+`staticValueItems` renderer the package-level static-initializer path already
+had, so the pointer-word metadata and the per-kind rendering are shared.
+
+That removes `control/any-string-constant`'s 16 bytes, but the larger effect is
+that the payload *field* disappears:
+
+    before: newobject(struct{ values [2]any; payload0 string; payload1 int })
+    after:  [2]any                                       -- 56 bytes down to 32
+
+so the argument object no longer points into itself and `needsDeepSummary` no
+longer has to escape it.
+
+### 2. opt: three precision defects in the escape summary
+
+Found by comparing goc's fact table against `go build -gcflags=-m log/slog`
+line by line.
+
+  a. **Merged result nodes.** `resultCount` took the *larger* of "values
+     returned" and "result-area out-parameters" instead of the sum, and numbered
+     the out-parameters from zero on top of the returns. `argsToAttr` returns
+     `(Attr, []any)` -- an aggregate return plus one `%result1` out-parameter --
+     so its two results were one node, and gc's
+
+         args to result ~r0 level=1     (the Attr: content only)
+         args to result ~r1 level=0     (the slice: the pointer)
+
+     collapsed into a single level-0 leak. Now they are disjoint nodes.
+
+  b. **A leak into caller-owned storage read as a publication.** With (a) fixed,
+     `argsToAttr` says "leaks to result 1", and result 1 is storage the *caller*
+     passed in. The caller now models that as a store into that argument --
+     which for a frame slot keeps it in the frame -- instead of giving up.
+
+  c. **The depth-1 publication applied to a callee that had already disclaimed
+     it.** Every call published `flow(heap, argument, 1)`: "I do not believe you
+     keep nothing this points at." `ParamFact.Deep` is exactly the disclaimer
+     that makes it unnecessary, and the out-slot's own summary carries it. Left
+     in, it republished everything the callee had just written into the result
+     area -- including the slice (b) had just proved stays in the frame.
+
+  d. **Aggregate arguments that the callee had scalarised.** goc's parameter
+     builder flattens an interface parameter into two words; its call emitter
+     hands the interface over as one descriptor. `Logger.Info` calling
+     `Logger.log(ctx, level, msg, args...)` therefore passes seven values to
+     eight parameters, and `summarisedCallee` threw the whole call's summary
+     away over the one argument that did not line up -- the backing array being
+     one of the other six. An aggregate argument is now repeated once per
+     parameter it carries, so each consumer asks about it once per parameter and
+     gets the worse answer, which is the right answer for a value holding both
+     words.
+
+After all four, goc's table says what gc's does:
+
+    $log/slog.Logger.Info: 0:noescape 1:noescape 2:noescape 3:noescape 4:noescape
+    $log/slog.Record.Add:  0:noescape 1:noescape 2:noescape 3:noescape
+    $log/slog.argsToAttr:  0:leaks-to-result(1) ... 3:noescape
+
+    logger.go:208:35: leaking param content: args    <- gc, same conclusion
+
+and `main.hot` allocates nothing: the `[2]any` is `alloc8 32` in the frame.
+
+## The JSON rows: one row is the same cause, the rest is not
+
+Decomposed by running the two JSON cases under goc with `runtime.MemProfileRate = 1`
+and reading `runtime.MemProfile` stacks, then reading the source position off the
+`newobject` call in the emitted IR.
+
+    json/logattrs-4-attrs   goc 4.00 / 80 B    gc 0.00 / 0
+      2 x 16 B  log/slog/handler.go:272 and :321 -- `defer state.free()` and
+                `defer h.mu.Unlock()`. goc heap-allocates a deferred call's
+                closure environment, struct{code uintptr; receiver ...}; gc
+                open-codes the defer and allocates nothing.
+      2 x 24 B  internal/strconv/itoa.go:72 -- `var a [24]byte` in AppendUint,
+                once for the status int and once for the duration. It is passed
+                to formatBase10 as a[:] and goc cannot place it in the frame.
+
+    json/kv-4-pairs         goc 5.00 / 256 B   gc 2.00 / 24 B
+      the same four, 80 B, plus
+      1 x 176 B  the combined variadic object, size 168:
+                 struct{ values [8]any; payload1 string; payload3 ... }
+
+`main.attrs` emits no `runtime.newobject` at all -- its `[4]Attr` is
+`alloc8 160` in the frame -- so **none** of `json/logattrs-4-attrs` is this
+cause. Four allocations in the handler and in strconv, neither of which slog's
+allocation-avoidance design has anything to do with.
+
+`json/kv-4-pairs`'s extra 176 bytes **is** the same cause, unfixed for the one
+reason that survives: `method` is a string *variable*. A non-constant payload
+with no runtime conversion helper -- and there is no `convTstring` --
+still gets a field inside the array's own object, so the object still points
+into itself and `needsDeepSummary` still sends it to the heap. gc pays one
+16-byte box for the same value and keeps its array in the frame.
+
+Closing that last one means either giving `string` a conversion helper (which
+costs an allocation per split payload, and `foldSplitPayloadsBackIn` would pull
+two or more back into the array anyway) or teaching LowerHeapAllocations to
+split a combined object late, when the array turns out not to escape but a
+payload does. Neither is this change.
+
+## Every slog row against gc, regenerated
+
+`goc/testdata/slog_allocations_baseline.txt`, rewritten from a fresh run
+(go1.26.1 linux/arm64, iterations=2000 rounds=5). allocations/op then bytes/op,
+goc first, gc second.
+
+    case                        before (goc)      after (goc)        gc
+    control/any-string-constant  1.00   16 B      0.00    0 B      0.00   0 B   parity
+    info/1-attr                  1.00   64 B      0.00    0 B      0.00   0 B   parity
+    info/3-attr                  1.00  176 B      0.00    0 B      0.00   0 B   parity
+    info/5-attr                  1.00  288 B      0.00    0 B      0.00   0 B   parity
+    info/6-attr                  2.00  400 B      1.00   48 B      1.00  48 B   parity
+    info/3-attr-large-ints       1.00  176 B      1.00  128 B      3.00  24 B   goc allocates less
+    logattrs/3-attr              1.00  128 B      0.00    0 B      0.00   0 B   parity
+    logattrs/6-attr              3.00  336 B      2.00   96 B      1.00  48 B   one over
+    disabled/no-attrs            0.00    0 B      0.00    0 B      0.00   0 B   parity
+    disabled/3-attr              1.00  176 B      0.00    0 B      0.00   0 B   parity
+    disabled/logattrs-3-attr     1.00  128 B      0.00    0 B      0.00   0 B   parity
+    json/kv-4-pairs              5.00  320 B      5.00  256 B      2.00  24 B   three over
+    json/logattrs-4-attrs        5.00  240 B      4.00   80 B      0.00   0 B   four over
+
+Every other row in the file is unchanged and already at parity. The three rows
+that are not at parity are accounted for above: `logattrs/6-attr` and
+`json/*` are the spill slice and the handler/strconv sites, and
+`json/kv-4-pairs`'s 176 bytes is the one remaining instance of this cause, held
+open by a non-constant string payload.
+
+`info/3-attr-large-ints` is goc allocating *less* than gc -- one combined object
+against gc's three separate boxes -- which is `opt.foldSplitPayloadsBackIn`
+deliberately choosing one allocation over three. It is on the table because the
+bytes are worse, not the count.

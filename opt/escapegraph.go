@@ -112,7 +112,8 @@ func newEscapeGraph(byName map[string]*ir.Func, function *ir.Func, facts *Escape
 		}
 		graph.paramIndex[graph.tempBase+parameter.ID] = index
 	}
-	next := 0
+	returned, _ := resultNodeCounts(function)
+	next := returned
 	for _, parameter := range function.Params {
 		if parameter == nil || !strings.HasPrefix(parameter.Name, "result") {
 			continue
@@ -123,28 +124,72 @@ func newEscapeGraph(byName map[string]*ir.Func, function *ir.Func, facts *Escape
 	return graph
 }
 
-// resultCount is how many result nodes the function needs: one per scalar
-// return value, or one for an aggregate returned through a buffer, plus one per
-// result-area parameter.
+// resultCount is how many result nodes the function needs.
 func resultCount(function *ir.Func) int {
-	count := 0
+	returned, area := resultNodeCounts(function)
+	return returned + area
+}
+
+// resultNodeCounts splits that count into the two kinds of result a function
+// can have: the values it returns, and the caller-owned storage it writes
+// through a result-area parameter.
+//
+// They have to be counted separately and given disjoint node ids. A function
+// with both -- log/slog.argsToAttr returns (Attr, []any), which on the IR is an
+// aggregate return plus one %result1 out-parameter -- previously had its two
+// results collapsed onto node 0, because the count was the larger of the two
+// rather than the sum and the out-parameters were numbered from zero on top of
+// the returns. gc keeps them apart and says so directly:
+//
+//	record.go:168:17: leaking param: args to result ~r0 level=1
+//	record.go:168:17: leaking param: args to result ~r1 level=0
+//
+// -- the slice result carries the pointer, the Attr result carries only what it
+// points at. Merged onto one node those are one leak at level 0, so `args`
+// summarised as reaching a result the caller could not follow, and every
+// `...any` call reaching Record.Add put its backing array on the heap.
+//
+// The old numbering was never unsound: merging results can only make a leak
+// look like it goes somewhere it does not, and every consumer treats an
+// unfollowable result as a publication. It was imprecise, which for this
+// analysis is the same as being wrong about the thing it exists to decide.
+func resultNodeCounts(function *ir.Func) (returned, area int) {
 	for _, parameter := range function.Params {
 		if parameter != nil && strings.HasPrefix(parameter.Name, "result") {
-			count++
+			area++
 		}
 	}
 	if function.HasRet || function.RetAgg != nil {
-		parts := 1
+		returned = 1
 		for _, block := range function.Blocks {
-			if block.Jmp.Kind == ir.JmpRet && 1+len(block.Jmp.Args) > parts {
-				parts = 1 + len(block.Jmp.Args)
+			if block.Jmp.Kind == ir.JmpRet && 1+len(block.Jmp.Args) > returned {
+				returned = 1 + len(block.Jmp.Args)
 			}
 		}
-		if parts > count {
-			count = parts
-		}
 	}
-	return count
+	return returned, area
+}
+
+// resultAreaParam maps a result index back to the callee parameter that
+// delivers it, for the results written through caller-owned storage. A result
+// the function returns has no such parameter and answers false.
+func resultAreaParam(function *ir.Func, result int) (int, bool) {
+	returned, _ := resultNodeCounts(function)
+	if result < returned {
+		return 0, false
+	}
+	wanted := result - returned
+	seen := 0
+	for index, parameter := range function.Params {
+		if parameter == nil || !strings.HasPrefix(parameter.Name, "result") {
+			continue
+		}
+		if seen == wanted {
+			return index, true
+		}
+		seen++
+	}
+	return 0, false
 }
 
 func (graph *escapeGraph) resultLoc(index int) int {
@@ -421,11 +466,32 @@ func (graph *escapeGraph) call(instruction ir.Instr) {
 		// summarises as ParamNoEscape; a pointer loaded out of a frame slot is
 		// reached at depth 2. Only an address handed over directly is affected,
 		// which is exactly the case that was wrong.
-		graph.flow(escapeHeapLoc, argument, 1)
+		//
+		// ParamFact.Deep is the one answer that makes it unnecessary. It is the
+		// claim this publication exists to withhold belief in -- nothing
+		// reachable through the parameter is retained either -- so a callee that
+		// has it needs nothing published on its behalf. Withholding it anyway is
+		// what kept `...any` calls on the heap: goc passes a multi-result
+		// callee's extra results through caller-owned storage, and publishing
+		// the contents of that storage at depth 1 republished everything the
+		// callee had just written into it -- for log/slog.Record.Add, the very
+		// slice the summary had just proved stays in the frame.
+		if fact := graph.facts.Param(callee, index); !fact.Deep {
+			graph.flow(escapeHeapLoc, argument, 1)
+		}
 		switch fact := graph.facts.Param(callee, index); fact.Escape {
 		case ParamNoEscape:
 			// Nothing further: the callee cannot retain the pointer itself.
 		case ParamLeaksToResult:
+			if slot, throughStorage := resultAreaArgument(target, arguments, fact.Result); throughStorage {
+				// The callee writes it into storage this call handed over, so
+				// where it ends up is decided here rather than by the callee:
+				// a frame slot of this function keeps it local, and the store
+				// rule answers everything else the same way an ordinary
+				// assignment through a pointer is answered.
+				graph.store(slot, argument)
+				continue
+			}
 			if callLeaksToTrackedResult(instruction, target, fact) {
 				graph.flow(graph.tempLoc(instruction.To.ID), argument, 0)
 				continue
@@ -435,6 +501,24 @@ func (graph *escapeGraph) call(instruction ir.Instr) {
 			graph.flow(escapeHeapLoc, argument, 0)
 		}
 	}
+}
+
+// resultAreaArgument names the argument that carries a leaked-to result, when
+// the result is one the callee writes through a result-area parameter rather
+// than one it returns.
+//
+// The caller has already established that the argument list lines up with the
+// parameter list one for one -- summarisedCallee's check -- so the parameter
+// index indexes the arguments too.
+func resultAreaArgument(target *ir.Func, arguments []ir.Ref, result int) (ir.Ref, bool) {
+	if target == nil {
+		return ir.R, false
+	}
+	index, throughStorage := resultAreaParam(target, result)
+	if !throughStorage || index >= len(arguments) {
+		return ir.R, false
+	}
+	return arguments[index], true
 }
 
 // closureEnvironment reports that a value being stored is a function symbol,

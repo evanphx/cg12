@@ -211,13 +211,100 @@ func summarisedCallee(byName map[string]*ir.Func, callee string, instruction ir.
 	if target == nil {
 		return nil, arguments, false
 	}
-	if len(target.Params) != len(arguments) {
+	if len(target.Params) == len(arguments) {
+		if !scalarisedArgumentsAlign(target, instruction) {
+			return target, arguments, false
+		}
+		return target, arguments, true
+	}
+	widened, aligned := argumentsWidenedToParameters(target, instruction, arguments)
+	if !aligned {
 		return target, arguments, false
 	}
-	if !scalarisedArgumentsAlign(target, instruction) {
-		return target, arguments, false
+	return target, widened, true
+}
+
+// argumentsWidenedToParameters lines a call up with its callee when the two
+// disagree about which aggregates to scalarise, by repeating an aggregate
+// argument once for each parameter it carries.
+//
+// The disagreement is real and ordinary. goc's parameter builder flattens an
+// interface parameter into two words and a slice into three, while its call
+// emitter scalarises the slice and hands the interface over as one descriptor
+// value -- so `Logger.Info` calling `Logger.log(ctx, level, msg, args...)`
+// passes seven values to eight parameters, and every summary about that call
+// was thrown away over the one argument that did not line up. The variadic
+// backing array is one of the seven.
+//
+// Repeating the reference is the whole trick. The consumers all walk the
+// returned list against parameter index, so an aggregate that appears twice is
+// asked about twice and gets whatever the worse of its two parameters says --
+// which is exactly the right answer for a value that carries both words. No
+// consumer needs to learn that spans exist.
+//
+// It only runs when the plain counts already fail to match, so a call that was
+// answered before is answered identically now.
+func argumentsWidenedToParameters(target *ir.Func, instruction ir.Instr, arguments []ir.Ref) ([]ir.Ref, bool) {
+	parameterGroups := make(map[int]ir.ValueGroup, len(target.ParamGroups))
+	for _, group := range target.ParamGroups {
+		parameterGroups[group.Index] = group
 	}
-	return target, arguments, true
+	argumentGroups := make(map[int]ir.ValueGroup, len(instruction.ArgGroups))
+	for _, group := range instruction.ArgGroups {
+		argumentGroups[group.Index] = group
+	}
+
+	widened := make([]ir.Ref, 0, len(target.Params))
+	parameter := 0
+	for index := 0; index < len(arguments); {
+		if group, scalarised := argumentGroups[index]; scalarised {
+			// The call already broke this aggregate into scalars. The callee has
+			// to have broken the same one, at the same place, the same way.
+			callee, flattened := parameterGroups[parameter]
+			if !flattened || callee.Count != group.Count || callee.Type != group.Type {
+				return nil, false
+			}
+			if group.Count <= 0 || index+group.Count > len(arguments) {
+				return nil, false
+			}
+			widened = append(widened, arguments[index:index+group.Count]...)
+			index += group.Count
+			parameter += group.Count
+			continue
+		}
+		width := 1
+		if aggregate := aggregateArgumentType(instruction, index); aggregate != nil {
+			if callee, flattened := parameterGroups[parameter]; flattened {
+				if callee.Type != aggregate || callee.Count <= 0 {
+					return nil, false
+				}
+				width = callee.Count
+			}
+		} else if _, flattened := parameterGroups[parameter]; flattened {
+			// The callee scalarised something the call is passing as a plain
+			// value, and nothing here says how many parameters it covers.
+			return nil, false
+		}
+		for repeat := 0; repeat < width; repeat++ {
+			widened = append(widened, arguments[index])
+		}
+		index++
+		parameter += width
+	}
+	if parameter != len(target.Params) || len(widened) != len(target.Params) {
+		return nil, false
+	}
+	return widened, true
+}
+
+// aggregateArgumentType names the aggregate one value argument carries, or nil
+// when the argument is an ordinary scalar. ir.Instr.AggArgs is indexed over the
+// value arguments, which is the same indexing the callers use.
+func aggregateArgumentType(instruction ir.Instr, index int) *ir.AggType {
+	if index < 0 || index >= len(instruction.AggArgs) {
+		return nil
+	}
+	return instruction.AggArgs[index]
 }
 
 // scalarisedArgumentsAlign reports that a call's scalarised aggregate arguments
