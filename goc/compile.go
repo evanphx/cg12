@@ -3509,6 +3509,26 @@ func (g *gen) parameterDoesNotEscape(function *types.Func, index int, checking m
 	if declaration.decl.Body == nil {
 		return hasCompilerDirective(declaration.decl, "go:noescape")
 	}
+	if signature.Variadic() && index == signature.Params().Len()-1 {
+		// The callers of this walk hand it an argument position, and for a
+		// variadic call every argument from the last parameter on is an
+		// *element* of a slice the callee builds -- not the parameter. Answering
+		// them with the parameter's own summary answers a different question:
+		// `func keep(args ...*T) { sink = args[0] }` retains no pointer it was
+		// handed, and retains everything they point at.
+		//
+		// Positions past the parameter list are already refused above, so this
+		// is the one that used to slip through, and getting it wrong left a
+		// package-level variable pointing at a caller's frame. The refusal is
+		// the whole answer for a walk that has no notion of dereference depth;
+		// the fact table in opt does have one, and ParamFact.Deep is where the
+		// question is really answered -- see opt.markSummarisedCall.
+		//
+		// A spread call, f(xs...), does hand the parameter over as itself and
+		// loses precision here. That is the price of one predicate serving both,
+		// and it is the safe direction.
+		return false
+	}
 	key := parameterKey{function: function, index: index}
 	if checking[key] {
 		return false

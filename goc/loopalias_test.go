@@ -65,6 +65,13 @@ var loopAliasPrograms = []struct {
 	// a stack copy -- so a wrong answer here is a wrong number rather than a
 	// crash, which is why it is a printed value and not an audit.
 	{"variadic_element_retention.go", "first  48879\nsecond 51966\nlength true\n"},
+	// The same question asked of the front end's AST walk instead of opt's fact
+	// table, and it used to get it wrong: parameterDoesNotEscape was consulted
+	// at the variadic *parameter* for an argument that is an *element* of it, so
+	// a local whose address the callee keeps was left in a frame. The collector
+	// finds the resulting pointer and throws; before the walk was taught to
+	// refuse the question, this program did not print at all.
+	{"variadic_element_address_retention.go", "true true true true\nchurned true\n"},
 	// The other direction. Three allocations in loop bodies that are finished
 	// with before the iteration ends and so need no more than the one frame
 	// slot they already have. A rule that heaped loop-body allocations without
