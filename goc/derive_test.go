@@ -118,6 +118,7 @@ func fullyPopulatedGen() *gen {
 		typeArguments:                 []types.Type{types.Typ[types.Int]},
 		noWriteBarrier:                true,
 		forceStackVariadic:            true,
+		variadicPayloadSlot:           &variadicPayloadSlot{container: ir.Ref{Kind: ir.RefTemp, ID: 3}, offset: 8},
 		resultSlot:                    ir.Ref{Kind: ir.RefTemp, ID: 1},
 		resultType:                    types.Typ[types.Int],
 		resultObjects:                 map[types.Object]bool{},
