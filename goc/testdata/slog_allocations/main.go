@@ -69,10 +69,13 @@
 // of ...any, so it costs the record without costing the boxing.
 //
 // The controls are sized so the slog rows can be decomposed rather than merely
-// compared. Under goc at the time this was written, every one of them adds up:
-// info/5-attr's nine allocations are context.Background's result, Logger.Handler's
-// result, Handle's error result, one combined object holding the variadic array
-// and its five boxed payloads, and one boxed Kind per attribute.
+// compared, and every row has been decomposed that way at least once. When this
+// program was written, info/5-attr's nine allocations under goc were
+// context.Background's result, Logger.Handler's result, Handle's error result,
+// one combined object holding the variadic array and its five boxed payloads,
+// and one boxed Kind per attribute. All nine are gone; the row is 0.00, which
+// is gc's number. What the remaining non-zero rows are made of is written down
+// in the branch report rather than here, because it changes as they are closed.
 package main
 
 import (

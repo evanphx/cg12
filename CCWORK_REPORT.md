@@ -938,3 +938,432 @@ would leave a stale old-stack pointer behind. Two things say it does not happen:
   frame placements now recorded, of which 210 land on sites that already carried
   a heap line; +5 are one inlining decision Part 1 changed, reviewed in 1.5. No
   line was removed and no placement changed direction.
+
+---
+
+# Residual slog allocation: the combined variadic object
+
+**The 64-byte allocation on `info/1-attr` was goc's combined variadic object for
+`Logger.Info`'s `...any` argument list** --
+`struct { values [2]any; payload0 string; payload1 int }`, 56 bytes in the
+64-byte size class: a `[2]any` backing array plus a reserved slot for the boxed
+key `"a"` and one for the boxed value `1`. Not a Record, not a Value, not an
+Attr copy. gc keeps the array in the frame and makes both payloads static
+symbols, so it allocates nothing.
+
+**It is fixed.** Two independent things held it on the heap and both had to go:
+the object pointed into itself (a `string` payload has no runtime conversion
+helper, so it is laid out as a field of the array's own object), and goc's
+escape summary said `Logger.Info` retains the pointer where gc says only its
+contents leak. `info/1-attr`, `info/3-attr`, `info/5-attr`, `logattrs/3-attr`,
+`disabled/3-attr` and `disabled/logattrs-3-attr` are now 0.00 allocations, which
+is gc's number, and `info/6-attr` is at exact parity at 1.00 / 48 B. The full
+table is below.
+
+The rest of this section is the diagnosis in the order it was done.
+
+Baseline re-run at 6b9fbb0 reproduces the committed table exactly
+(`go test ./goc -run TestSlogAllocationsAgainstGC -slog-allocations`, PASS, 19.6s).
+
+## First arithmetic on the byte counts
+
+The bytes/op column identifies the object before any IR is dumped. Under goc:
+
+    info/1-attr   64 B    info/3-attr  176 B    info/5-attr  288 B
+
+Differences are 112 B per two attributes -- 56 B per attribute, with 8 B of slack
+at the bottom. Fitting the size classes:
+
+    n attrs  ->  variadic []any backing array   32n B   (2n elements, 16 B each)
+             +   boxed payload slot per string  16n B
+             +   boxed payload slot per int      8n B
+             =                                  56n B  -> 56, 168, 280
+             -> Go size classes                          64, 176, 288   MATCH
+
+`info/3-attr-large-ints` is 176 B too, which the fit predicts (the payload slot
+is reserved whether or not staticuint64s ends up being used), and gc's 3x8 B
+there confirms the 8 B int slot is the right unit.
+
+`logattrs/3-attr` is 128 B: 3 x sizeof(slog.Attr)=40 = 120 -> class 128. That is
+the `...Attr` variadic backing array with no payload slots, since Attr is not an
+interface. Same shape, same cause.
+
+So the single residual allocation is NOT a Record, NOT a Value box, and NOT an
+Attr copy. It is **the combined variadic object -- the `...any` backing array
+plus its reserved boxing payload slots -- being heap-allocated at the call site
+instead of living in the caller's frame.**
+
+That explains `disabled/3-attr` costing 176 B while `disabled/no-attrs` costs 0:
+the cost is paid building the argument list before `Logger.log` is entered and
+before the level is ever checked. It is attribute-related because a call with no
+attributes has no backing array to build.
+
+Still to establish: why goc's escape question answers "escapes" for
+`slog.Logger.Info` when it answers "does not escape" for the in-package
+`noRetain(...)` control (0.00) and for `fmt.Sprintf` (parity at 1.00).
+
+## Confirmed from the IR: what the 64-byte object is
+
+Reduction (`hot` is `//go:noinline` so the call site is isolated):
+
+    //go:noinline
+    func hot() { logger.Info("msg", "a", 1) }
+
+`goc -O -emit-ir` gives, in `$main.hot`:
+
+    %t9 =p call $runtime.newobject(
+        p $.goc.runtime.type.struct_values__2_any__payload0_string__payload1_...)
+    %t10 =p add %t9, 32      ; &payload0  -- the boxed "a"
+    ...
+    %t23 =p add %t9, 48      ; &payload1  -- the boxed 1
+    storel 1, %t23
+    call $log/slog.Logger.Info(p %t1, <msg> %t4, p %t9, l 2, l 2)
+
+and the type descriptor records its size directly:
+
+    data $.goc.runtime.type.struct_values__2_any__payload0_string__payload1_... =
+        align 8 { l 64 56, ... }        ; size 56, ptrdata 64-class
+
+**The 64-byte allocation is goc's combined variadic object for `Logger.Info`'s
+`...any` argument list**: `struct { values [2]any; payload0 string; payload1 int }`
+-- a 32-byte `[2]any` backing array, a 16-byte reserved slot holding the boxed
+key `"a"`, and an 8-byte reserved slot holding the boxed value `1`. 56 bytes,
+allocated by `runtime.newobject` into the 64-byte size class. gc keeps the
+`[2]any` in the frame and makes both payloads static symbols, so it allocates
+nothing.
+
+## Why it goes to the heap
+
+Traced by instrumenting `opt.lowerFunctionHeapAllocations` to report
+`candidateEscapes.reason` (temporary; not committed):
+
+    main.hot: t8  escaped=true reason="argument 2 of $log/slog.Logger.Info
+                  may retain something inside a self-referential object"
+    main.hot: t22 escaped=true reason="argument 2 of $log/slog.Logger.Info
+                  may retain something it points at"
+
+Two independent constraints, and **both** have to be removed:
+
+1. **The object is self-referential.** Element 0's data word points at
+   `payload0`, a field of the same allocation. `opt.markSummarisedCall` runs
+   `needsDeepSummary` before it ever consults the escape verdict: a callee that
+   may retain an *element* retains the whole object, because they are one
+   object. `string` is what makes this true here -- `variadicPayloadStorage`
+   splits a payload out only when `interfaceConversionHelper` has one (bool,
+   int8..int64, uint*, uintptr, float32/64), and there is no `convTstring`.
+
+2. **The summary itself says the array escapes.** goc's fact table:
+
+       $log/slog.Logger.Info: 0:escapes 1:noescape 2:escapes 3:escapes 4:escapes
+                                                   ^ the args backing-array pointer
+       $log/slog.Record.Add:  0:noescape 1:escapes 2:escapes 3:escapes
+       $log/slog.argsToAttr:  0:leaks-to-result(0) 1:leaks-to-result(0) ...
+
+   gc, for the identical source (`go build -gcflags=-m log/slog`):
+
+       logger.go:208:35: leaking param content: args      # (*Logger).Info
+       record.go:129:22: leaking param content: args      # (*Record).Add
+       record.go:168:17: leaking param content: args      # argsToAttr
+       record.go:168:17: leaking param: args to result ~r0 level=1
+       record.go:168:17: leaking param: args to result ~r1 level=0
+
+   gc says *content* leaks and the pointer does not. goc has exactly that
+   vocabulary -- `ParamFact.Deep` is the level distinction -- but its
+   leaks-to-result edge has no level, so `Any(x, args[1])`, which is a *load*
+   through `args`, propagates the array pointer instead of its contents. From
+   `argsToAttr` the imprecision walks up through `Record.Add`, `Logger.log` and
+   `Logger.Info`.
+
+Neither fix helps alone: remove (1) and the verdict in (2) still escapes the
+array; remove (2) and `needsDeepSummary` still escapes it. That is why this
+survived three previous rounds -- it is not a variant of the convT, variadic-
+escape-question, or interface-return causes, all of which are confirmed closed
+by the control rows in the same table.
+
+## The fix, in two parts
+
+Both blockers had to go, and neither is a variant of a previously closed cause.
+
+### 1. goc: box a compile-time constant without payload storage (34a4275)
+
+A constant conversion has no storage to allocate. cmd/compile emits a read-only
+`stmp_N` symbol (or `&runtime.staticuint64s[c]`); goc allocated. Now goc emits
+one read-only object per distinct (type, value) pair, reusing the same
+`staticValueItems` renderer the package-level static-initializer path already
+had, so the pointer-word metadata and the per-kind rendering are shared.
+
+That removes `control/any-string-constant`'s 16 bytes, but the larger effect is
+that the payload *field* disappears:
+
+    before: newobject(struct{ values [2]any; payload0 string; payload1 int })
+    after:  [2]any                                       -- 56 bytes down to 32
+
+so the argument object no longer points into itself and `needsDeepSummary` no
+longer has to escape it.
+
+### 2. opt: four precision defects in the escape summary (e6999bd)
+
+Found by comparing goc's fact table against `go build -gcflags=-m log/slog`
+line by line.
+
+  a. **Merged result nodes.** `resultCount` took the *larger* of "values
+     returned" and "result-area out-parameters" instead of the sum, and numbered
+     the out-parameters from zero on top of the returns. `argsToAttr` returns
+     `(Attr, []any)` -- an aggregate return plus one `%result1` out-parameter --
+     so its two results were one node, and gc's
+
+         args to result ~r0 level=1     (the Attr: content only)
+         args to result ~r1 level=0     (the slice: the pointer)
+
+     collapsed into a single level-0 leak. Now they are disjoint nodes.
+
+  b. **A leak into caller-owned storage read as a publication.** With (a) fixed,
+     `argsToAttr` says "leaks to result 1", and result 1 is storage the *caller*
+     passed in. The caller now models that as a store into that argument --
+     which for a frame slot keeps it in the frame -- instead of giving up.
+
+  c. **The depth-1 publication applied to a callee that had already disclaimed
+     it.** Every call published `flow(heap, argument, 1)`: "I do not believe you
+     keep nothing this points at." `ParamFact.Deep` is exactly the disclaimer
+     that makes it unnecessary, and the out-slot's own summary carries it. Left
+     in, it republished everything the callee had just written into the result
+     area -- including the slice (b) had just proved stays in the frame.
+
+  d. **Aggregate arguments that the callee had scalarised.** goc's parameter
+     builder flattens an interface parameter into two words; its call emitter
+     hands the interface over as one descriptor. `Logger.Info` calling
+     `Logger.log(ctx, level, msg, args...)` therefore passes seven values to
+     eight parameters, and `summarisedCallee` threw the whole call's summary
+     away over the one argument that did not line up -- the backing array being
+     one of the other six. An aggregate argument is now repeated once per
+     parameter it carries, so each consumer asks about it once per parameter and
+     gets the worse answer, which is the right answer for a value holding both
+     words.
+
+After all four, goc's table says what gc's does:
+
+    $log/slog.Logger.Info: 0:noescape 1:noescape 2:noescape 3:noescape 4:noescape
+    $log/slog.Record.Add:  0:noescape 1:noescape 2:noescape 3:noescape
+    $log/slog.argsToAttr:  0:leaks-to-result(1) ... 3:noescape
+
+    logger.go:208:35: leaking param content: args    <- gc, same conclusion
+
+and `main.hot` allocates nothing: the `[2]any` is `alloc8 32` in the frame.
+
+## The JSON rows: one row is the same cause, the rest is not
+
+Decomposed by running the two JSON cases under goc with `runtime.MemProfileRate = 1`
+and reading `runtime.MemProfile` stacks, then reading the source position off the
+`newobject` call in the emitted IR.
+
+    json/logattrs-4-attrs   goc 4.00 / 80 B    gc 0.00 / 0
+      2 x 16 B  log/slog/handler.go:272 and :321 -- `defer state.free()` and
+                `defer h.mu.Unlock()`. goc heap-allocates a deferred call's
+                closure environment, struct{code uintptr; receiver ...}; gc
+                open-codes the defer and allocates nothing.
+      2 x 24 B  internal/strconv/itoa.go:72 -- `var a [24]byte` in AppendUint,
+                once for the status int and once for the duration. It is passed
+                to formatBase10 as a[:] and goc cannot place it in the frame.
+
+    json/kv-4-pairs         goc 5.00 / 256 B   gc 2.00 / 24 B
+      the same four, 80 B, plus
+      1 x 176 B  the combined variadic object, size 168:
+                 struct{ values [8]any; payload1 string; payload3 ... }
+
+`main.attrs` emits no `runtime.newobject` at all -- its `[4]Attr` is
+`alloc8 160` in the frame -- so **none** of `json/logattrs-4-attrs` is this
+cause. Four allocations in the handler and in strconv, neither of which slog's
+allocation-avoidance design has anything to do with.
+
+`json/kv-4-pairs`'s extra 176 bytes **is** the same cause, unfixed for the one
+reason that survives: `method` is a string *variable*. A non-constant payload
+with no runtime conversion helper -- and there is no `convTstring` --
+still gets a field inside the array's own object, so the object still points
+into itself and `needsDeepSummary` still sends it to the heap. gc pays one
+16-byte box for the same value and keeps its array in the frame.
+
+Closing that last one means either giving `string` a conversion helper (which
+costs an allocation per split payload, and `foldSplitPayloadsBackIn` would pull
+two or more back into the array anyway) or teaching LowerHeapAllocations to
+split a combined object late, when the array turns out not to escape but a
+payload does. Neither is this change.
+
+## Every slog row against gc, regenerated
+
+`goc/testdata/slog_allocations_baseline.txt`, rewritten from a fresh run
+(go1.26.1 linux/arm64, iterations=2000 rounds=5). allocations/op then bytes/op,
+goc first, gc second.
+
+    case                        before (goc)      after (goc)        gc
+    control/any-string-constant  1.00   16 B      0.00    0 B      0.00   0 B   parity
+    info/1-attr                  1.00   64 B      0.00    0 B      0.00   0 B   parity
+    info/3-attr                  1.00  176 B      0.00    0 B      0.00   0 B   parity
+    info/5-attr                  1.00  288 B      0.00    0 B      0.00   0 B   parity
+    info/6-attr                  2.00  400 B      1.00   48 B      1.00  48 B   parity
+    info/3-attr-large-ints       1.00  176 B      1.00  128 B      3.00  24 B   goc allocates less
+    logattrs/3-attr              1.00  128 B      0.00    0 B      0.00   0 B   parity
+    logattrs/6-attr              3.00  336 B      2.00   96 B      1.00  48 B   one over
+    disabled/no-attrs            0.00    0 B      0.00    0 B      0.00   0 B   parity
+    disabled/3-attr              1.00  176 B      0.00    0 B      0.00   0 B   parity
+    disabled/logattrs-3-attr     1.00  128 B      0.00    0 B      0.00   0 B   parity
+    json/kv-4-pairs              5.00  320 B      5.00  256 B      2.00  24 B   three over
+    json/logattrs-4-attrs        5.00  240 B      4.00   80 B      0.00   0 B   four over
+
+Every other row in the file is unchanged and already at parity. The three rows
+that are not at parity are accounted for above: `logattrs/6-attr` and
+`json/*` are the spill slice and the handler/strconv sites, and
+`json/kv-4-pairs`'s 176 bytes is the one remaining instance of this cause, held
+open by a non-constant string payload.
+
+`info/3-attr-large-ints` is goc allocating *less* than gc -- one combined object
+against gc's three separate boxes -- which is `opt.foldSplitPayloadsBackIn`
+deliberately choosing one allocation over three. It is on the table because the
+bytes are worse, not the count.
+
+## Guards
+
+    TestExecutionCorpus                             PASS
+    TestAllocationCounts                            PASS  (four new rows, table unchanged otherwise)
+    TestAllocationCountsAgainstTheHostToolchain     PASS
+    TestCompilingTheSameSourceTwiceGivesTheSameModule  PASS   determinism holds
+    TestLoopBodyAllocationsAreDistinctPerIteration  PASS   loop-aliasing programs match the host
+    TestLoopAliasExpectationsMatchTheHostToolchain  PASS
+    TestSlogAttrInFrameIsNotScannedAsAPointer       PASS
+    TestSlogAllocationsAgainstGC                    PASS after regenerating the baseline
+    TestFrameEscapeAudit                            baseline moved -- reviewed below
+    TestEscapeShadowPlacement                       baseline moved -- reviewed below
+
+### TestFrameEscapeAudit, site by site
+
+Five entries vanished and four appeared. Every appeared entry pairs with a
+vanished one: same function, same kind (`barrier`), same destination (the
+caller's result area), same source *line*, and a column that moved from the
+right-hand side of the assignment to the assignment itself.
+
+    -  internal/strconv/atof.go:609:9   atof32           ->  609:3
+    -  internal/strconv/atof.go:660:9   atof64           ->  660:3
+    -  syscall/exec_unix.go:231:10      forkExec         ->  231:4
+    -  x/net/idna/idna10.0.0.go:492:11  validateAndMap   ->  492:5
+
+Reading the four lines: `err = ErrRange`, `err = ErrRange`, `err = EPIPE`,
+`err = runeError(utf8.RuneError)`. Column 3/4/5 is `err`; column 9/10/11 is the
+right-hand side. `FrameEscape.Pos` is the position of the *publishing
+instruction*, and goc emits a `loc` only when it changes, so removing the
+payload allocate-and-store that a boxed right-hand side used to emit leaves the
+statement's own position in effect at the store. Same publication, same
+statement, relabelled.
+
+These are the documented pre-existing hazard the baseline header names: cg12
+returns an error by writing the address of a sixteen-byte frame slot into the
+caller's result area (RUNTIME_PLAN.md 5.15's residual). **No function acquired a
+publication it did not already make**, which is the form of the check that
+matters: a newly-framed object published somewhere new would show as a triple
+that appears with no partner.
+
+The fifth, with no partner, is a publication that stopped:
+
+    -  ?  main.derive  barrier  memory reached through a call result $runtime.newobject
+
+`derive` is the shared generic body in
+goc/testdata/runtime_type_param_method_dispatch.go, returning `(int, error)`. A
+frame address that used to be barrier-stored into a heap object is not stored
+there any more. That is the safe direction, and it is the only unpaired change.
+
+### The allocation census, reviewed by category
+
+`goc/testdata/alloc_census_baseline.txt`: **3444 lines removed, 149 added.**
+That is a large diff for two changes, so it needs the fifth review question
+answered first -- does the size match the change?
+
+**3429 of the 3429 removed heap sites are one thing: a constant that no longer
+needs a payload object.** Grouped by what was being allocated:
+
+    2146  runtime.newobject  string                     a boxed string constant
+     701  runtime.newobject  runtime_errorString        panic("...") in the runtime
+     177  runtime.convT64    syscall_Errno              `err = EPIPE` and friends
+      48  runtime.convT64    int
+      47  runtime.convT32    net_http_http2ConnectionError
+      40  runtime.convT64    uint8
+      36  runtime.newobject  image_jpeg_FormatError
+      27  runtime.convT64    internal_strconv_Error
+      22  runtime.newobject  compress_bzip2_StructuralError
+      ... 14 x struct_values__2_any__payload0_string__payload1_ and the rest,
+          all constant conversions or the payload fields of one
+
+Every stdlib package that panics with a string constant or returns a typed
+constant error is in there once per site. 3429 is what "goc allocated for every
+constant conversion in the program and now does not" looks like.
+
+Census review question 3 asks whether a vanished site means the allocation is
+gone or the *code* is gone -- the 9f76498 failure being a heap site vanishing
+because the object quietly became a frame slot. Neither applies: the object
+moved to **read-only data**, which outlives every frame and every heap object,
+so publishing its address is safe by construction wherever it was safe to
+publish the heap object's.
+
+The 149 added lines are 47 placement moves plus 102 new site keys:
+
+  - **47 sites moved heap -> frame** (question 1, the correctness-critical
+    direction). They are the variadic combined objects the change is about
+    (`net/http.http2summarizeFrame`, `testing.BenchmarkResult.String`,
+    `chunkWriter.Write`, `http2FrameHeader.writeDebug`), ordinary objects the
+    more precise summary now proves local (`crypto/tls.Dialer.DialContext`'s
+    `net.Dialer`, `crypto/ecdsa.verifyLegacy`'s `big.Int`,
+    `errors.AsType[...]`, `crypto/x509.checkConstraints[...]`), and nine
+    closure environments in `net`/`os` -- the `ctrlCtxFn` literals passed to
+    `internetSocket`, which call them and return.
+
+  - **102 new site keys**, of which the ones under `.goc.global.initfunc.*` are
+    package initializers whose allocation used to be attributed to a site that
+    also had a constant conversion on it, and the `convT64`/`convT32` ones are
+    the other half of the moves above: the payload that used to be a field of
+    the combined object is now its own conversion-helper call at the same
+    source line. `net/http.http2summarizeFrame` appears in both lists for
+    exactly that reason.
+
+What backs the heap -> frame direction, since "the analysis says so" is not an
+answer:
+
+  - `TestFrameEscapeAudit` reads the **emitted stores**, not the analysis, and
+    is clean: across the whole corpus not one frame address is published
+    anywhere new, and one publication that used to happen has stopped.
+  - The retention rows in `TestAllocationCounts` -- `variadic_retained_element`
+    and `variadic_retained_struct_element`, written for the earlier attempt that
+    got this wrong in the dangerous direction -- are unchanged at 100.
+  - A direct check of the closure shape: a closure literal passed to a callee
+    that stores it in a global stays on the heap, and one passed to a callee
+    that only calls it stays in the frame, identically before and after.
+  - `TestExecutionCorpus`, the loop-aliasing suite and the slog-attr-frame
+    suite all pass.
+
+I did not hand-prove all 47 individually. The stdlib corpus programs these sites
+live in are executed by the capability matrix, which this job does not run.
+
+### TestEscapeShadowPlacement
+
+19 lines added, 21 removed. This test changes nothing the compiler emits: it
+asks what the IR analysis *would* have decided about allocations the front end
+placed itself, and `goc.gen.recordPlacement`'s own comment says those are "the
+allocations the IR pass never gets a say in". The new `heap -> frame` lines are
+sites where the IR analysis now reaches the answer gc reaches --
+`readDirectoryHeader(&File{}, rs)`, `jpeg.Encode(..., &jpeg.Options{Quality: 95})`,
+`(&edwards25519.Point{}).ScalarBaseMult(s)`, `append([]byte{0}, pskIDHash...)` --
+while the front end stays conservative and its placement is what is emitted.
+
+### Guard results against the regenerated baselines
+
+    TestAllocationCensus                            PASS
+    TestFrameEscapeAudit                            PASS
+    TestEscapeShadowPlacement                       PASS
+    TestAllocationCounts                            PASS
+    TestAllocationCountsAgainstTheHostToolchain     PASS
+    TestExecutionCorpus                             PASS
+    TestEscapeSummaryFacts                          PASS
+    TestCompilingTheSameSourceTwiceGivesTheSameModule  PASS
+    TestLoopBodyAllocationsAreDistinctPerIteration  PASS
+    TestLoopAliasExpectationsMatchTheHostToolchain  PASS
+    TestSlogAttrInFrameIsNotScannedAsAPointer       PASS
+    TestSlogAllocationsAgainstGC                    PASS
+
+Not run here, by instruction: `go test ./goc/...` as a whole, the capability
+matrix, and `make test-unit`. The dependent gate job runs those.

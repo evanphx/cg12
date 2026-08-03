@@ -6036,20 +6036,65 @@ func (g *gen) assignmentValueWithInterfacePayload(expression ast.Expr, targetTyp
 		return g.fn.ConstInt(ir.ClsP, 0)
 	}
 	sourceType := g.typeAndValue(expression).Type
+	if payload == ir.R {
+		// Ahead of g.expr, not after it: emitting the constant would build the
+		// frame descriptor a string literal is otherwise materialised into, and
+		// nothing downstream would read it. See staticInterfaceDescriptor.
+		if descriptor, static := g.staticInterfaceDescriptor(expression, sourceType, targetType); static {
+			return descriptor
+		}
+	}
 	value := g.expr(expression)
 	return g.adaptValueToInterface(value, sourceType, targetType, payload, expression)
+}
+
+// staticInterfaceDescriptor builds the whole interface value for a constant
+// conversion -- type word and a data word pointing at read-only storage -- and
+// reports whether the conversion was one it could build.
+func (g *gen) staticInterfaceDescriptor(source ast.Node, sourceType, targetType types.Type) (ir.Ref, bool) {
+	if sourceType == nil {
+		return ir.R, false
+	}
+	if _, alreadyInterface := sourceType.Underlying().(*types.Interface); alreadyInterface {
+		return ir.R, false
+	}
+	if isDirectInterfaceType(sourceType) {
+		return ir.R, false
+	}
+	symbol, static := g.staticInterfacePayload(source, sourceType)
+	if !static {
+		return ir.R, false
+	}
+	// Nothing is stored into the payload: it already exists, in read-only data,
+	// with the value it will always have.
+	descriptor := g.localAlloc(8, 16)
+	g.markStackPointerWord(descriptor, 0)
+	g.markStackPointerWord(descriptor, 8)
+	g.markTransientInterfaceDescriptor(descriptor)
+	g.cur.Store(g.interfaceTypeWordFor(sourceType, targetType), descriptor)
+	g.cur.Store(g.fn.Sym(symbol, 0), g.offset(descriptor, 8))
+	return descriptor, true
+}
+
+// interfaceTypeWordFor is word 0 of an interface value holding a value of the
+// statically known sourceType: the itab for an interface with methods, and the
+// plain type descriptor otherwise. interfaceTypeWord is the same question asked
+// of a type only known at run time, and staticInterfaceTypeWord is this one
+// answered as a data item rather than as an operand.
+func (g *gen) interfaceTypeWordFor(sourceType, targetType types.Type) ir.Ref {
+	typeTag := g.ensureTypeTag(sourceType)
+	g.ensureRuntimeTypeEqual(sourceType, typeTag)
+	if g.runtimeAllocation && interfaceHasMethods(targetType) {
+		return g.fn.Sym(g.ensureInterfaceItab(sourceType, targetType), 0)
+	}
+	return g.fn.Sym(typeTag, 0)
 }
 
 func (g *gen) adaptValueToInterface(value ir.Ref, sourceType, targetType types.Type, payload ir.Ref, source ast.Node) ir.Ref {
 	if _, alreadyInterface := sourceType.Underlying().(*types.Interface); alreadyInterface {
 		return g.adaptInterfaceToInterface(value, sourceType, targetType)
 	}
-	typeTag := g.ensureTypeTag(sourceType)
-	g.ensureRuntimeTypeEqual(sourceType, typeTag)
-	typeWord := g.fn.Sym(typeTag, 0)
-	if g.runtimeAllocation && interfaceHasMethods(targetType) {
-		typeWord = g.fn.Sym(g.ensureInterfaceItab(sourceType, targetType), 0)
-	}
+	typeWord := g.interfaceTypeWordFor(sourceType, targetType)
 	if isDirectInterfaceType(sourceType) {
 		descriptor := g.localAlloc(8, 16)
 		g.markStackPointerWord(descriptor, 0)
@@ -6064,6 +6109,9 @@ func (g *gen) adaptValueToInterface(value ir.Ref, sourceType, targetType types.T
 		return descriptor
 	}
 	if payload == ir.R {
+		if descriptor, static := g.staticInterfaceDescriptor(source, sourceType, targetType); static {
+			return descriptor
+		}
 		payload = g.allocateInterfacePayload(value, sourceType)
 	}
 	if isAddressRepresentedInterfacePayload(sourceType) {
@@ -6078,6 +6126,109 @@ func (g *gen) adaptValueToInterface(value ir.Ref, sourceType, targetType types.T
 	g.cur.Store(typeWord, descriptor)
 	g.cur.Store(payload, g.offset(descriptor, 8))
 	return descriptor
+}
+
+// staticInterfacePayload names the read-only object an interface's data word
+// can point at when the value being boxed is a compile-time constant, and
+// reports whether there is one.
+//
+// A constant conversion has no storage to allocate. The payload's contents are
+// known at compile time and an interface payload is immutable by the language's
+// own rules -- there is no way to obtain an addressable reference to the value
+// inside an interface -- so one object per distinct (type, value) pair in
+// read-only data serves every conversion of that constant in the program. This
+// is what cmd/compile does; its equivalents are the `stmp_N` symbols it emits
+// for a constant conversion and the &runtime.staticuint64s[c] it uses for a
+// small integer one, and it is why gc reports zero allocations for `any("a")`
+// where goc, until this existed, reported one 16-byte object.
+//
+// The gain is larger than the object it removes, because of what a payload
+// costs elsewhere. A payload with no runtime conversion helper is laid out as a
+// field of the same allocation as its variadic call's `[N]any` backing array
+// (see variadicPayloadStorage), which makes that object point into itself, and
+// opt.markSummarisedCall must send an object that points into itself to the
+// heap whenever the callee may retain an element. A payload that has a helper is
+// split out, but then counts against foldSplitPayloadsBackIn's budget and can
+// pull the array to the heap that way instead. A constant needs no payload at
+// all, so it does neither: `logger.Info("msg", "a", 1)` has nothing left in its
+// argument object except the array, and the array stays in the frame.
+//
+// Only basic types are eligible. A constant of any other type either has no
+// constant representation to emit (a nil pointer is pointer-shaped and never
+// reaches here) or is not something go/types hands back a constant.Value for.
+func (g *gen) staticInterfacePayload(source ast.Node, sourceType types.Type) (string, bool) {
+	expression, isExpression := source.(ast.Expr)
+	if !isExpression || sourceType == nil {
+		return "", false
+	}
+	constantValue := g.typeAndValue(expression).Value
+	if constantValue == nil || !staticInterfacePayloadKind(sourceType, constantValue) {
+		return "", false
+	}
+	// Keyed by the type as well as the value: `int32(1)` and `int64(1)` are the
+	// same constant and different objects, and the type is also what decides
+	// which type descriptor word 0 of the interface gets.
+	//
+	// Interned by hand rather than through internSymbol, because the name may
+	// not be recorded until the contents have been built: staticValueItems
+	// answering no after the name was interned would leave a second conversion
+	// of the same constant resolving to a name nothing emitted.
+	// staticInterfacePayloadKind is meant to make that unreachable; not
+	// interning early is what makes a gap between the two a missed
+	// optimization instead.
+	const payloadPrefix = ".goc.ifacedata"
+	key := runtimeTypeKey(g.fset, sourceType) + "=" + constantValue.ExactString()
+	if name := g.contentSymbols[payloadPrefix+":"+key]; name != "" {
+		return name, true
+	}
+	name := contentSymbolName(payloadPrefix, key)
+	items, built := g.staticValueItems(name, sourceType, expression)
+	if !built || len(items) == 0 {
+		return "", false
+	}
+	g.contentSymbols[payloadPrefix+":"+key] = name
+	g.mod.Data = append(g.mod.Data, &ir.Data{
+		Name:         name,
+		Align:        int(typeAlign(sourceType)),
+		Items:        items,
+		PointerWords: pointerWordIndices(sourceType),
+	})
+	return name, true
+}
+
+// staticInterfacePayloadKind reports whether staticValueItems will render a
+// constant of this type, without emitting anything.
+//
+// It has to be asked separately because the symbol's name is interned before
+// its contents are built -- a second conversion of the same constant must reuse
+// the first object rather than emit a second -- and a name interned for a
+// payload that then could not be built would be a reference to a symbol that
+// does not exist.
+func staticInterfacePayloadKind(sourceType types.Type, constantValue constant.Value) bool {
+	basic, isBasic := sourceType.Underlying().(*types.Basic)
+	if !isBasic || basic.Info()&types.IsUntyped != 0 {
+		// An untyped constant has no runtime type to name in word 0. In an
+		// assignment to an interface go/types has already given the operand its
+		// default type, so this only excludes places that have not.
+		return false
+	}
+	switch {
+	case basic.Kind() == types.String:
+		return constantValue.Kind() == constant.String
+	case basic.Info()&types.IsComplex != 0:
+		// Two words wide and address-represented; staticValueItems has no case
+		// for it.
+		return false
+	case basic.Info()&types.IsFloat != 0:
+		return true
+	case basic.Kind() == types.UnsafePointer:
+		// Pointer-shaped, so it is never given payload storage in the first
+		// place, and there is no constant of the type to render.
+		return false
+	default:
+		_, representable := subOf(sourceType)
+		return representable
+	}
 }
 
 // allocateInterfacePayload makes the storage an interface's data word points
@@ -6819,6 +6970,12 @@ func (g *gen) interfaceAssignmentNeedsPayload(expression ast.Expr) bool {
 		return false
 	}
 	if _, alreadyInterface := sourceType.Underlying().(*types.Interface); alreadyInterface {
+		return false
+	}
+	if _, static := g.staticInterfacePayload(expression, sourceType); static {
+		// The payload is already in read-only data, so the combined object needs
+		// no field for it. This is what keeps `logger.Info("msg", "a", 1)` from
+		// building an object that points into itself; see staticInterfacePayload.
 		return false
 	}
 	return !isDirectInterfaceType(sourceType)

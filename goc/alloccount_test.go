@@ -128,6 +128,26 @@ var gocAllocationCounts = []struct {
 	{"box_float64", 100, 0, "3.5's bits are past the static table; gc frames it"},
 	{"box_string", 100, 0, "a string payload has no register-shaped helper; gc frames it"},
 	{"box_pointer", 0, 0, "a pointer is its own interface payload"},
+	// The constant conversions, which allocate nothing under either compiler
+	// because the payload is in read-only data and was written there while
+	// compiling. Both were 100 before goc.gen.staticInterfacePayload existed:
+	// the string had no conversion helper and allocated outright, and the large
+	// integer had one but was past runtime.staticuint64s, so convT64 called the
+	// allocator for a value that never changes.
+	{"box_string_constant", 0, 0, "the payload is a read-only symbol"},
+	{"box_large_int_constant", 0, 0, "the payload is a read-only symbol, past the static table or not"},
+	// The `...any` shape log/slog is built out of: a callee that walks its
+	// arguments through a helper returning `(value, rest)` and keeps only what
+	// each value *is*. Nothing retains the array. gc has always framed it; goc
+	// framed it once its summary stopped reading a leak into caller-owned result
+	// storage as a publication -- see opt.resultNodeCounts. Both were 100.
+	{"pack_variadic_element", 0, 0, "the `...` array is a frame slot and the box is in the static table"},
+	// The same call one forwarder further out, with an interface parameter
+	// alongside it. goc's parameter builder scalarises an interface and its call
+	// emitter does not, so the argument list was one shorter than the parameter
+	// list and the whole call's summary was discarded over an argument that has
+	// nothing to do with the array. See opt.argumentsWidenedToParameters.
+	{"forward_variadic_past_an_interface", 0, 0, "the summary survives an aggregate argument the callee scalarised"},
 	{"return_any_from_int", 0, 0, "convT64 returns a pointer into staticuint64s"},
 	{"return_any_from_large_int", 100, 100, "it escapes and it is past the table, so both allocate"},
 	{"return_any_from_pointer", 0, 0, "nothing to box, nothing to allocate"},
