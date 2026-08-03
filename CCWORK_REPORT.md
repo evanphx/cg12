@@ -3370,3 +3370,26 @@ Runs, `-O` + `-O` pack, the matrix's configuration:
 | `goc/testdata/runtime_opt_loop_carried_root.go` (`GODEBUG=clobberfree=1`) | 3/3 fault on `0xdeadbeefdeadbeef` | **3/3 pass** |
 - **`make test-goc-status-opt`**: **366 PASS, 0 FAIL, 0 SKIP** (`-v`, unsharded,
   95 s). `stack-scan/loop-safepoints` passes. The arm was 365/366 before.
+- **`make test-goc-status` (the default arm)**: **366 PASS, 0 FAIL, 0 SKIP**,
+  unchanged. Expected by construction — without `-O` no `opt` pass runs — and
+  measured rather than assumed.
+
+## Both arms, after
+
+| arm | before | after |
+| --- | --- | --- |
+| `make test-goc-status-opt` | 365/366 (`stack-scan/loop-safepoints`) | **366/366** |
+| `make test-goc-status` | 366/366 | **366/366** |
+
+## Not investigated
+
+`Temp.GCRef` is a per-temporary flag with no invariant enforcing it, and the same
+"a transform mints a temporary and the value stops being a root" shape could
+exist wherever one value is substituted for another. The two substituting passes
+worth a look are `opt.LoadElim` (forwards a store's value to a later load, and
+`ir.Block.Load` marks every `ClsP` load a GC reference while the stored value's
+own temporary may not be) and `opt.Copy`. Neither is implicated by anything
+measured here — the `-O` arm is 366/366 and both reducers pass 3/3 — and this
+change deliberately did not touch them. A checker that asserts the closure
+("a temporary whose value comes from a managed one is managed") would settle it
+properly; that is a piece of work, not a patch.
