@@ -3300,3 +3300,42 @@ the two lines.
 
 Every one of the 113 was checked for this: joining `ir.AllocDecision.BlockedByLoop`
 against the 113 lines gives exactly those three and no others.
+
+## A miscompile found on the way, and fixed: a method that retains its receiver
+
+Triaging G6 turned up a hole that is **not** a parity question. The escape walk
+answered every *immediately called* method selector with "does not escape",
+whatever the method did with the receiver:
+
+    call, calledImmediately := parents[parent].(*ast.CallExpr)
+    return calledImmediately && call.Fun == parent
+
+`goc/compile.go` had that in two places -- `nonEscapingObjectUse` and
+`valueDoesNotEscapeWithin`. So this program
+
+    func (b *rbox) keep() int { sink = b; return b.a }
+
+    func direct() {
+        value := &rbox{a: 0x1111, b: 0x2222, c: 0x3333, d: 0x4444}
+        if value.keep() != 0x1111 { panic("keep") }
+    }
+
+left `value` in `direct`'s frame with a package-level pointer into it. Compiled
+at the branch point (d113d4a) and run, after 200 frames of recursion and a
+`runtime.GC()`:
+
+    goc               false false false false
+    host toolchain    true true true true
+
+The host toolchain's own analysis says the same thing goc should have:
+`./recv2.go:10:7: leaking param: b`, `&rbox{...} escapes to heap`.
+
+`opt.FrameEscapes` is structurally blind to it: the publication happens inside
+`keep`, through a parameter, one function away from the frame that owns the
+storage. The census records the site as a frame placement, which is what it was
+asked for.
+
+The fix asks the receiver the same question every other argument gets --
+`receiverDoesNotEscape` -- instead of treating the call syntax as the answer.
+`goc/testdata/method_receiver_retention.go` is the program above, and it is in
+the corpus so the audit runs it.

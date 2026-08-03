@@ -2375,11 +2375,18 @@ func (g *gen) nonEscapingAddressWithin(
 	body *ast.BlockStmt,
 	checking map[parameterKey]bool,
 ) bool {
-	if g.assignedNodeDoesNotEscapeWithin(address, info, parents, body, checking) {
-		return true
-	}
 	var current ast.Node = address
 	for {
+		// Asked at every step rather than only of the address itself, because the
+		// climb below turns the address into the expression that contains it and
+		// the containing expression is the one an assignment sees. `value :=
+		// scorer(&scoreBox{...})` climbs the conversion and then meets the
+		// assignment; without the retry the assignment was the loop's default case
+		// and every literal converted to an interface on the way into a local went
+		// to the heap.
+		if g.assignedNodeDoesNotEscapeWithin(current, info, parents, body, checking) {
+			return true
+		}
 		parent := parents[current]
 		switch parent := parent.(type) {
 		case *ast.ParenExpr:
