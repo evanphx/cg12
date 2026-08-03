@@ -133,6 +133,31 @@ func (escape FrameEscape) destination() string {
 // callee is the ordinary way Go code is written, and whether the callee retains
 // it is exactly the interprocedural question the front end already answers.
 // What is reported is the store the callee, or the caller, actually performs.
+//
+// A clean run means clean of the shapes below and no others, which is what a
+// reader of "the audit is clean" needs to know. It cannot see:
+//
+//   - a publication made by a callee with no body in this module -- assembly,
+//     runtime C, or an intrinsic whose registry entry is wrong;
+//   - loop-carried aliasing, where two iterations share one frame slot and
+//     nothing is published at all (goc/loopalias_test.go is the instrument for
+//     that, and it is a run-and-compare, not an audit);
+//   - a bulk copy. Only stores and the atomic-pointer-store barrier are
+//     inspected, so a memcpy of a frame struct containing a frame pointer into
+//     a heap object publishes it with no store naming the address;
+//   - a frame address returned as one part of an aggregate result: the return
+//     check is skipped when RetAgg is set, and otherwise reads Jmp.Arg alone;
+//   - a frame slot reached at a run-time offset. slots is keyed by an exactly
+//     known displacement, so an address parked in frameArray[i] is neither
+//     recorded nor recognised;
+//   - a frame slot that also holds heap pointers. slots is first-write-wins: it
+//     records that a slot can hold a frame allocation and never that something
+//     else is stored there too, so a load out of it is treated as a frame
+//     address on every path. That is the same may-for-must confusion the merged
+//     values below fix in SSA, still open through memory.
+//
+// And where it does report, the destination category degrades to opaque under a
+// run-time displacement, because pointerBase strips constant offsets only.
 func FrameEscapes(module *ir.Module) []FrameEscape {
 	var escapes []FrameEscape
 	for _, function := range module.Funcs {

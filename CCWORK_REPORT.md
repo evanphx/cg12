@@ -20,8 +20,219 @@ On unmodified `main` the checker reports **zero** findings for it:
 A frame address reaches a heap object and the audit says nothing. Every "the
 audit is clean" statement made this week has to be read with that in mind.
 
-(Cause, fix, corpus triage and residual blind spots follow as they are
-established.)
+Six shapes were built. Every one of them reports **nothing** on `main`
+(d113d4a) and reports correctly after the fix. Verified by copying the finished
+test file into a worktree of unmodified `main` and running it there:
+
+    --- FAIL: TestFrameEscapesReportsAFrameAddressStoredThroughAMergedDestination
+    --- FAIL: TestFrameEscapesFollowsAFrameAddressThroughASlotReachedByAPhi
+    --- FAIL: TestFrameEscapesKeepsTheDisplacementOfASlotReachedByAPhi
+    --- FAIL: TestFrameEscapesReportsAFrameAddressStoredThroughASelectedDestination
+    --- FAIL: TestFrameEscapesReportsAFrameAddressStoredAtAVariableOffsetOfAMergedDestination
+    --- FAIL: TestFrameEscapesReportsAFrameAddressStoredThroughALoopCarriedMergedDestination
+
+The seventh new test, `...AllowsAFrameAddressStoredThroughAMergeOfFrameSlots`,
+passes on both trees: a merge whose every incoming value is this frame's own
+storage must stay silent, and it does.
+
+## 2. What `aliasInfo` could not resolve
+
+`aliasInfo` resolves **no phi at all**, and it is structural rather than
+incidental. `newAliasInfo` builds `def` by walking `b.Instrs`; phis live in
+`b.Phis` and are never indexed. `buildAllocBase` walks `def`, so it never gives
+a phi result an alloc base, so `locOf` returns `keyTemp`/`cUnknown` for every
+pointer a phi produces. The checker then fell through to two different wrong
+answers depending on which question it was asking.
+
+**(a) `isFrameAddress` read a may-fact as a must-fact.** With `locOf` unable to
+help, it fell back to `frameFacts.base` — the map that answers *which frame
+allocation can this value name*. `propagate` records a phi result there if **any**
+argument is frame-derived. That is exactly right for the value being stored and
+exactly wrong for the destination receiving it. A backing array chosen at run
+time between a frame array and a heap one is in `base`, so
+`isFrameAddress(destination)` said yes and `frameEscapesIn` dropped the store
+without a word. A store into a heap object, silently discarded.
+
+**(b) `frameSlot` lost the slot entirely.** It resolved a pointer through
+`locOf`, so any frame slot reached through a phi came back as unknown memory.
+Nothing recorded that a frame address had been parked in such a slot, and
+nothing recognised the value read back out of it, so the publication downstream
+of the reload was invisible.
+
+## 3. How it is resolved
+
+Three commits on top of `main`:
+
+| commit | what |
+|---|---|
+| `7bc27e6` | the failing tests, on their own, so the hole is on the record before anything moves |
+| `535e942` | `aliasInfo.phiFor`; the `merged` marks; `isFrameAddress` and `classify` |
+| `fc0e410` | `eachFrameSlot` — frame slots reached through a merge |
+
+- **`aliasInfo.phiFor`** is a new `phiDef` index, temp → defining phi. It is
+  purely additive: `locOf`, `buildAllocBase` and `computeEscape` are untouched,
+  so `escapegraph` and `escapeshadow`, which share `aliasInfo`, see exactly what
+  they saw before.
+- **`merged`** is a second fixed point run over the *converged* `base` map. A phi
+  or select is marked when its incoming values disagree about being a frame
+  address; copies, casts, `add`, `sub` and the destination-returning memory
+  helpers carry the mark on, so `array[i]` at a run-time index inherits it. It
+  runs after `base` converges rather than inside it: marking a phi partial on the
+  round before its last argument became frame-derived would be a mark nothing
+  ever takes back.
+- **`isFrameAddress`** rejects a merged pointer. It is the predicate that decides
+  which stores are dropped in silence, so it now has to hold on every path.
+- **`eachFrameSlot`** walks a pointer to every frame slot it may name, descending
+  into phi and select arguments, carrying the constant displacement so a slot
+  reached at an offset through a merge stays the slot it actually is. Both the
+  parking store and the reload go through it.
+- **`classify`** follows merges too, classifying only the incoming values that are
+  *not* frame storage — those are the paths the address is actually published
+  down — so a merged destination names `runtime.newobject` instead of degrading
+  to "an opaque pointer". A back edge contributes no information rather than
+  poisoning the answer, which is what the third result of `classifyThrough` is
+  for.
+
+## 4. What it has been hiding: nothing, in this corpus
+
+**The audit is clean, and the baseline file is untouched at 192 entries.**
+
+    go test ./goc -run 'TestFrameEscapeAudit$|TestAllocationCensus$' -count=1
+    ok  github.com/evanphx/cg12/goc  181.126s
+
+Zero new publications. Zero vanished. Nothing was added to
+`goc/testdata/frame_escape_baseline.txt`, so there is no entry to justify and no
+unexplained entry accepted. **Triage list: empty.**
+
+That result is worth exactly as much as the proof that the fix is not inert, so
+here is the proof. The checker was instrumented and run over all 399 corpus
+programs; the instrumentation was then removed (it is in no commit).
+
+| count over the corpus | value |
+|---|---|
+| temporaries marked partially frame-derived | **431,033** |
+| slot resolutions that descended into a merge | **879,749** |
+| load/store addresses that are phi-defined, so `aliasInfo` resolves nothing | **424,798** |
+| ...of those, ones naming a frame slot on **every** incoming edge | **23,038** |
+| stores of a frame address whose destination is a merge | **0** |
+| frame slots recorded only because a merge was resolved | **0** |
+| loads whose frame address was recovered only through a merge | **0** |
+
+Both halves of the fix fire constantly — 431k marks, 880k merge walks, and
+23,038 frame slots that `main` could not resolve and this tree can. What the
+corpus does not contain is a single frame address parked behind one of them. The
+192 is a fact about the corpus, not a fit; nothing was tuned to reach it.
+
+### The reduction that does not exist
+
+Four Go programs were written to try to reach the shape from source: a direct
+`if cond { p = &frameArray } else { p = new([1]*int) }` merge, the same with the
+heap array behind a `//go:noinline` call, the same with the heap path publishing
+to a global, and a variadic call made at two different arities on two paths.
+None produced a finding, because in every one goc's escape analysis correctly
+moved `x` to the heap.
+
+That is the honest shape of the result. Reaching this blind spot needs two
+things at once — the merged destination *and* a wrong "does not escape" — and
+the second is precisely what the checker exists to catch. So the hole is
+**latent**: it is not hiding a publication goc makes today, and it would have
+hidden an entire class of them the next time the escape decision regressed in
+that shape. Which is the same thing the original publication bug was.
+
+## 5. What this checker still cannot see
+
+`opt.FrameEscapes` is a may-analysis over the emitted IR, one function at a
+time. With the phi holes closed, these remain structurally invisible. A future
+"the audit is clean" means clean *of these shapes only*.
+
+1. **Anything a callee does that is not in the module.** Values reaching a call
+   are deliberately never reported; the finding is supposed to appear in the
+   callee instead. If the callee is assembly, runtime C, or an intrinsic whose
+   registry entry is wrong, there is no callee body to look at. Already recorded
+   in `goc/escape_publication_test.go`.
+2. **Loop-carried aliasing.** As the brief says: nothing is published, both
+   pointers stay in the frame and are simply the same pointer. `goc/loopalias_test.go`
+   is the instrument for it, and it is a run-and-compare, not an audit.
+3. **Bulk copies.** `frameEscapesIn` inspects `Op.IsStore()` and the
+   atomic-pointer-store barrier, nothing else. A `memcpy`/`memmove` that copies a
+   frame struct *containing* a frame pointer into a heap object publishes the
+   address with no store instruction naming it. `returnsItsDestination` tracks the
+   pointer such a helper returns, never the bytes it moved.
+4. **Aggregate returns.** The return check is skipped outright when
+   `function.RetAgg != nil`, and otherwise reads only `block.Jmp.Arg`, never
+   `Jmp.Args`. A frame address returned as one part of a multi-part result is not
+   reported as a `return`. The common case is caught as a store into the caller's
+   result area — 149 of the 192 baseline entries are that — but the return kind
+   itself is blind here.
+5. **Frame slots at a run-time offset.** `slots` is keyed by an exactly-known
+   displacement. An address parked in `frameArray[i]` for variable `i` is not
+   recorded, and one read back at a variable index is not recognised. The new
+   merge walk carries *constant* displacements only, so it does not change this.
+6. **The same may/must confusion one level down, through memory.** `slots` is
+   first-write-wins: it records that a slot *can* hold a frame allocation and
+   never records that a heap pointer is also stored there. A load out of such a
+   slot is therefore treated as a frame address unconditionally, and a store
+   *through* that loaded pointer is suppressed by `isFrameAddress` — the same
+   mistake this job fixed for phis, made through memory instead of through SSA.
+   Measured at **0 occurrences** in the corpus today, so it hides nothing now.
+   It is open, and it is the next one to close.
+7. **Path insensitivity — the new over-approximation.** A merged destination is
+   now reported even if the value stored is a frame address only on the path
+   where the destination is frame storage; the checker does not correlate the two
+   phis. This is the false-positive direction of the fix. None was observed,
+   because the corpus has no merged-destination stores at all, but it is the
+   shape to expect if one ever appears, and it would be an acceptable
+   over-approximation: a may-analysis that reports a correlated pair is asking a
+   human to look at a genuinely confusing piece of code.
+8. **Destination naming degrades under a variable displacement.** `pointerBase`
+   strips constant offsets only, so a publication into `heapArray[i]` is reported
+   but classified "memory reached through an opaque pointer" instead of naming
+   the allocator. Pre-existing, unchanged, and documented by
+   `TestFrameEscapesReportsAFrameAddressStoredAtAVariableOffsetOfAMergedDestination`.
+9. **Only `OAlloc`-rooted values are frame addresses.** An address that arrived
+   as a parameter belongs to another frame and is not this function's business,
+   by design — so a publication chain is only ever seen one hop at a time.
+10. **It does not say anything is correct.** The 192 entries are what the
+    compiler does. Several are known hazards, including the sixteen-byte
+    result-area returns in RUNTIME_PLAN.md 5.15's residual.
+
+## 6. Guards
+
+| guard | result |
+|---|---|
+| `TestFrameEscapeAudit` | **PASS**, 192 entries, 0 appeared, 0 vanished, file unchanged |
+| `TestAllocationCensus` | **PASS**; census did **not** move, so nothing was regenerated |
+| emitted code vs `main` | **byte-identical** — same binary hash, built from the same directory |
+| GC reducer, `GOGC=10`, `GOMAXPROCS=3`, 20 serial runs | **0/20 failed** |
+| GC reducer, default `GOGC`, `GOMAXPROCS=3`, 20 serial runs | **0/20 failed** |
+| loop-aliasing programs vs the host toolchain | **PASS** — both `TestLoopBodyAllocationsAreDistinctPerIteration` and `TestLoopAliasExpectationsMatchTheHostToolchain` |
+| determinism | **PASS** — `TestCompilingTheSameSourceTwiceGivesTheSameModule`; and `FrameEscapes`' own output was byte-identical across two independent corpus runs from two different builds (6,839 finding lines each) |
+| `go test ./opt` | **PASS** |
+| `gofmt`, `go vet ./opt ./ir`, `go build ./...` | clean |
+
+On the binary comparison: a first attempt compared a build from the repo against
+a build from a `git worktree` and got two different hashes. That is the checkout
+path, which goc embeds in the image — the same absolute paths
+`normalizeCorpusKey` strips out of a finding. Rebuilding both from the *same*
+directory gives `2399e5a6…` for both `d113d4a` and `fc0e410`. The change cannot
+affect emitted code in any case: `FrameEscapes` is read-only and called only from
+tests and audits, and the `aliasInfo` change adds an index no other pass reads.
+
+Per the brief, `go test ./goc/...`, the capability matrix and `make test-unit`
+were **not** run; a dependent gate job runs those.
+
+## 7. Answer
+
+**Zero** new publications. The fixed checker found none in the 399-program
+corpus, and that is a measured fact about the corpus rather than a tuned result:
+the new machinery fires 431,033 times marking merged values and 879,749 times
+resolving slots through merges, recovering 23,038 frame slots `main` could not
+resolve, and not one of them ever holds a frame address. **Zero real, zero false
+positives, nothing added to the baseline.** What the checker still cannot see is
+the ten items in section 5 — most sharply, publications made by bulk memory
+copies, by callees with no body in the module, by aggregate returns, and the
+identical may/must confusion in the slot map that this job fixed in SSA and left
+open through memory.
 
 ---
 
