@@ -1921,3 +1921,35 @@ Registered as `gc-invariants/stale-result-home`, `runtimeCapabilityMustPass`.
   guard against a future "tighten it to intersection" change, which would drop a
   word the copying stack needs.
 
+## `stack-scan/loop-safepoints` is a different defect, and is not fixed
+
+Reproduced in the matrix's own `-O` configuration — a prebuilt runtime pack built
+with `goc build-runtime -O`, then `goc -O -runtime <pack>`, run with
+`GODEBUG=cg12scanroots=1`:
+
+| build | `stack-scan/loop-safepoints` |
+| --- | --- |
+| `main` `6b9fbb0`, `-O` + pack | **3/3 fail** |
+| this tree, `-O` + pack | **3/3 fail** — unchanged |
+| this tree, no `-O`, + pack | 3/3 pass |
+
+The panic is `a stack slot live across a loop back edge was not a GC root`,
+preceded by `collected while live: carried-0`. That is the opposite polarity from
+the defect fixed here: `loop-safepoints` is a **missing** root (a live pointer is
+collected), this was an **extra, stale** root (a dead pointer is followed).
+Section 6.1's narrowing still stands — under `-O` `opt.Mem2Reg` promotes the
+pointer out of the frame and no promoted value is reported at the safepoint at
+all, so there is no allocation for this analysis to say anything about. The two
+are not the same bug and one change does not fix both.
+
+`goc/testdata/runtime_opt_loop_carried_root.go`, §6.1's reducer for the same
+defect, likewise fails 3/3 with `-O` + pack on both trees. (Its symptom shape
+moved — `main` reports the truncated chain, this tree faults on
+`0xdeadbeefdeadbeef` under `clobberfree` — but both are the same premature
+collection and both fail on every run.)
+
+One measurement worth recording for whoever picks §6.1 up: **`loop-safepoints`
+fails only with a prebuilt `-O` pack.** A monolithic `goc -O` build of the same
+program passes 5/5 on `main` and 3/3 here. Whatever §6.1 is, it needs the split
+build, not just `-O`.
+
