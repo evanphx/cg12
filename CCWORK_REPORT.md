@@ -3556,3 +3556,180 @@ and iterate until nothing moves. Answers only ever move from "does not escape"
 to "escapes", so it terminates. That is the piece of work G8 needs, and it would
 also close the two `log/slog` rows below, which are `handleState` and nothing
 else.
+
+# The classification of the 106, group by group
+
+The 113 this branch started from fell into 12 groups. Seven lines moved, closing
+one group and part of another, and one group was renamed because its cause was
+misattributed. The 106 that remain, by allocator: 57 `newobject`, 38 `makemap`,
+6 `convT*`, 5 `makeslice`. Every line is in exactly one group and the groups sum
+to 106.
+
+## Closed on this branch
+
+**G11 -- a method value (2 of 2). VERDICT: gc was right, and the walk can now
+say so.** `record := recorder.Add` is a closure over the receiver. Both lines
+gone.
+
+    runtime_defer_method_value_order.go:12   runtime_method_value_gc.go:16
+
+**G6 -- the callee is a func value or an interface method (5 of 8). VERDICT: gc
+is right where it devirtualises, and goc devirtualises better.** Two lines were
+an address converted to an interface type on the way into a local; three were a
+call through a function-typed local.
+
+    runtime_interface_method_gc.go:23, :25   runtime_reflect_value_indirect_call.go:28, :29
+    runtime_timer_callback_shape.go:16
+
+## The 11 groups that remain
+
+**G1 -- maps have no frame-allocated header (38). VERDICT: gc is right. Not
+attempted; it is not an analysis fix.** `gen.allocateMap` calls
+`runtime.makemap(t, hint, 0)` unconditionally, so the escape analysis is never
+asked about a map, and the whole census contains zero `makemap ... frame` rows.
+
+The previous classification called this "a representation change". Confirmed,
+and there is a second half it did not name: **the census cannot express the
+answer either.** `opt.AllocationCensus` reads heap placements out of the IR as
+calls to a named allocator, and gc's own stack-allocated map still calls
+`runtime.makemap` -- with `m` and sometimes `m.dirPtr` non-nil instead of nil.
+So a goc that stack-allocated the header would still produce a `makemap` census
+row and the line would read `mixed`, not `frame`. Closing G1 is therefore four
+pieces, not one:
+
+    1. the front end asks the escape question for a map at all
+    2. it can name internal/runtime/maps.Map's layout and its dirPtr pointer word
+    3. the frame slot carries a correct GC pointer map for that word
+    4. the census learns that a makemap with a non-nil m is a frame placement
+
+38 lines, and the largest single thing left.
+
+**G4 -- a value boxed into an interface (17). VERDICT: gc is right; two causes,
+both structural.** Twelve are the *payload*: goc has no frame form for one, so
+`convT64` and the `newobject` behind a boxed string or array are always heap.
+Five are the *source*: `boxedIntoInterface` is unconditional, so a slice whose
+header is copied into a box that provably dies at the call --
+`runtime.KeepAlive(values)`, `reflect.TypeOf([]int{})` -- is charged with the
+box's escape. Asking the right question there needs the payload to have a frame
+form first, or the two halves disagree.
+
+    allocation_counts.go:121, :124, :127, :130, :133
+    interface_slice_equality.go:6, :9
+    runtime_debug_gc_controls.go:15, :32
+    runtime_panic_stack_gc.go:19        runtime_panic_stack_recover_gc.go:19
+    runtime_reflect_make_values.go:6    runtime_reflect_map_slice.go:19
+    runtime_slice_pointer_append_gc.go:10, :25
+    stdlib_signal_during_gc.go:23, :29
+
+**G7 -- a stdlib summary the walk could not get through (11). VERDICT: gc is
+right, one callee at a time.** `slices.Sort`, `sort.Search`, `maps` helpers,
+`reflect.ValueOf(...).Call`, `runtime.SetFinalizer`,
+`crypto/mlkem.NewDecapsulationKey768`, `encoding.BinaryAppender.AppendBinary`.
+They are not one cause and fixing them is not one change. Three of them --
+`stdlib_maps_slices.go:25`, `stdlib_slices_string_sort.go:6`,
+`stdlib_sort_search_slice.go:6` -- are reachable by the optimistic cycle
+assumption written up above, which is not landed.
+
+    adler32_marshal_loop.go:21               runtime_closure_captured_string.go:94
+    runtime_finalizer_basic.go:22            runtime_reflect_call_aggregate_matrix.go:70
+    runtime_reflect_method_metadata.go:27    runtime_reflect_set_fields.go:11
+    runtime_reflect_value_call.go:11         stdlib_crypto_mlkem.go:9
+    stdlib_maps_slices.go:25                 stdlib_slices_string_sort.go:6
+    stdlib_sort_search_slice.go:6
+
+**G2 -- the Read buffer (10). VERDICT: gc is right, but not by a rule goc is
+missing. IRREDUCIBLE.** `internal/poll.ignoringEINTRIO`'s own gc summary is
+`leaking param: p`; gc gets "does not escape" by inlining it first. goc's walk
+runs on the AST before any inlining and cannot see through `fn(fd, p)` where
+`fn` is a function-typed *parameter*. The func-value resolution this branch
+added does not reach it: it resolves a local assigned once from a named
+function, and a parameter is assigned by the caller.
+
+    runtime_println_operand_separation.go:168  runtime_stack_scan_syscall.go:115
+    stdlib_netpoll_pipe_afterfunc_close.go:24  stdlib_netpoll_pipe_close_unblocks_read.go:17
+    stdlib_netpoll_pipe_deadline.go:23         stdlib_netpoll_pipe_past_deadline.go:23
+    stdlib_netpoll_stress_pipe_close_churn.go:17
+    stdlib_netpoll_stress_pipe_deadline_reset.go:22
+    stdlib_os_file_roundtrip.go:26             stdlib_os_pipe_goroutine_close.go:24
+
+**G10 -- a composite literal handed to a call the walk cannot follow (6).
+VERDICT: gc is right.** The four `&http.Cookie{...}` in a `[]*http.Cookie`
+passed to `(*cookiejar.Jar).SetCookies`, plus one more cookie and
+`&jpeg.Options{...}`. Reachable in principle, deep in practice.
+
+    stdlib_http_cookiejar.go:17, :18, :19, :20
+    stdlib_http_redirect_keepalive.go:24       stdlib_image_jpeg_roundtrip.go:18
+
+**G5 -- new(T) (5). VERDICT: gc is right; five separate causes, not a group.**
+Re-examined rather than inherited. `gc_struct.go:25`'s `new(record)` is written
+into by `root.left = &record{...}` and survives a `runtime.GC()`;
+`runtime_println_operand_separation.go:84`'s is captured by a closure passed to
+a call; `runtime_range_target_forms.go:369`'s is a `for _, *pointer = range`
+target; `stdlib_math_big_rat_int.go:15` is `new(big.Rat).Sub(...)`. They share
+the spelling `new(T)` and nothing else. Singletons; left alone as the brief asks.
+
+    gc_struct.go:25                     runtime_println_operand_separation.go:84
+    runtime_range_target_forms.go:369   runtime_span_metadata_barrier.go:47
+    stdlib_math_big_rat_int.go:15
+
+**G3 -- non-constant `make([]T, n)` (5). VERDICT: gc is right, and the previous
+classification was wrong about this.** It recorded these as a measurement
+artifact -- "both compilers heap-allocate, and `gcdiff` maps gc's `does not
+escape` to Frame unconditionally". That was checked here and it is not what gc
+does. For a non-escaping `make` with a non-constant length gc emits **both**: a
+frame buffer and a runtime length test.
+
+    CMP  $4, R2
+    BHI  64                      // n > 4: call makeslice
+    MOVD $main..autotmp_4-32(SP), R0    // n <= 4: use the 32-byte frame buffer
+    ...
+    CALL runtime.makeslice(SB)
+
+So gc really does keep the small case in the frame and the ruler is right. goc
+has no form of this at all: `makeslice` unconditionally. It is a codegen
+capability -- a bounded frame buffer plus a runtime length test -- not an
+analysis fix, and goc would land in `mixed` rather than `frame` because both
+placements would be on the line, exactly as they are for gc. **Reducible, and
+worth an allocation on every small non-constant make in the program.**
+
+    runtime_copy_interface_slice_gc.go:23  runtime_gc_mark_workers.go:117
+    runtime_loopvar_range.go:112           stdlib_encoding_ascii85.go:7, :10
+
+**G12 -- an aggregate copied whole, or a map lookup key (5). VERDICT: goc is
+over-conservative; reducible, but only with the deep walk.** `copy := source`
+where source is `[4]*T` is a copy, and `copyAliasesStorage` refuses arrays.
+Making it accept them is **not** enough and was checked here: the walk's
+`IndexExpr` case answers "does not escape" for a *read* of an element, so
+`source := [4]*T{...}; globalPtr = source[0]` would be framed with a live global
+pointer into it. What holds that together today is precisely the refusal that
+costs these five lines. The pair is the deep walk described under the variadic
+section, and G12 and the wider variadic rule need the same machinery.
+
+    runtime_array_copy_pointer_gc.go:11, :12, :13, :14
+    runtime_map_pointer_keys.go:27
+
+**G6 -- the remaining three. VERDICT: mixed.** An interface conversion into a
+second interface, a slice literal inside a closure passed to a call, and a
+`[]byte` literal handed to `compress/lzw`. Not one cause.
+
+    runtime_interface_to_interface.go:29  runtime_println_operand_separation.go:82
+    stdlib_compress_zlib_lzw.go:72
+
+**G8 -- a recursive callee has no summary (3). VERDICT: gc is right; reducible
+only with a real fixpoint.** `parameterDoesNotEscape` breaks its cycle by
+answering "escapes". The optimistic assumption is written up above: it takes
+these three plus three of G7, and it is not landed because the same one-line
+change applied to the receiver publishes a frame address.
+
+    runtime_panic_stack_gc.go:23  runtime_stack_growth.go:24, :26
+
+**G9 -- the loop rule (3). VERDICT: goc is over-conservative, and this group was
+misattributed.** Filed before as "a variadic parameter has no summary". It is
+`opt.promotionsBlockedByALoop`: every promotable candidate inside a natural loop
+is sent to the heap, because neither analysis has a notion of iteration. All
+three lines are variadic backing arrays, which is what made the old label look
+right; `allocation_counts.go:67` is the *same call* outside a loop and is
+already in the frame.
+
+    allocation_counts.go:273  runtime_range_target_forms.go:137, :144
+
