@@ -2006,3 +2006,133 @@ open by a non-constant string payload.
 against gc's three separate boxes -- which is `opt.foldSplitPayloadsBackIn`
 deliberately choosing one allocation over three. It is on the table because the
 bytes are worse, not the count.
+
+## Guards
+
+    TestExecutionCorpus                             PASS
+    TestAllocationCounts                            PASS  (four new rows, table unchanged otherwise)
+    TestAllocationCountsAgainstTheHostToolchain     PASS
+    TestCompilingTheSameSourceTwiceGivesTheSameModule  PASS   determinism holds
+    TestLoopBodyAllocationsAreDistinctPerIteration  PASS   loop-aliasing programs match the host
+    TestLoopAliasExpectationsMatchTheHostToolchain  PASS
+    TestSlogAttrInFrameIsNotScannedAsAPointer       PASS
+    TestSlogAllocationsAgainstGC                    PASS after regenerating the baseline
+    TestFrameEscapeAudit                            baseline moved -- reviewed below
+    TestEscapeShadowPlacement                       baseline moved -- reviewed below
+
+### TestFrameEscapeAudit, site by site
+
+Five entries vanished and four appeared. Every appeared entry pairs with a
+vanished one: same function, same kind (`barrier`), same destination (the
+caller's result area), same source *line*, and a column that moved from the
+right-hand side of the assignment to the assignment itself.
+
+    -  internal/strconv/atof.go:609:9   atof32           ->  609:3
+    -  internal/strconv/atof.go:660:9   atof64           ->  660:3
+    -  syscall/exec_unix.go:231:10      forkExec         ->  231:4
+    -  x/net/idna/idna10.0.0.go:492:11  validateAndMap   ->  492:5
+
+Reading the four lines: `err = ErrRange`, `err = ErrRange`, `err = EPIPE`,
+`err = runeError(utf8.RuneError)`. Column 3/4/5 is `err`; column 9/10/11 is the
+right-hand side. `FrameEscape.Pos` is the position of the *publishing
+instruction*, and goc emits a `loc` only when it changes, so removing the
+payload allocate-and-store that a boxed right-hand side used to emit leaves the
+statement's own position in effect at the store. Same publication, same
+statement, relabelled.
+
+These are the documented pre-existing hazard the baseline header names: cg12
+returns an error by writing the address of a sixteen-byte frame slot into the
+caller's result area (RUNTIME_PLAN.md 5.15's residual). **No function acquired a
+publication it did not already make**, which is the form of the check that
+matters: a newly-framed object published somewhere new would show as a triple
+that appears with no partner.
+
+The fifth, with no partner, is a publication that stopped:
+
+    -  ?  main.derive  barrier  memory reached through a call result $runtime.newobject
+
+`derive` is the shared generic body in
+goc/testdata/runtime_type_param_method_dispatch.go, returning `(int, error)`. A
+frame address that used to be barrier-stored into a heap object is not stored
+there any more. That is the safe direction, and it is the only unpaired change.
+
+### The allocation census, reviewed by category
+
+`goc/testdata/alloc_census_baseline.txt`: **3444 lines removed, 149 added.**
+That is a large diff for two changes, so it needs the fifth review question
+answered first -- does the size match the change?
+
+**3429 of the 3429 removed heap sites are one thing: a constant that no longer
+needs a payload object.** Grouped by what was being allocated:
+
+    2146  runtime.newobject  string                     a boxed string constant
+     701  runtime.newobject  runtime_errorString        panic("...") in the runtime
+     177  runtime.convT64    syscall_Errno              `err = EPIPE` and friends
+      48  runtime.convT64    int
+      47  runtime.convT32    net_http_http2ConnectionError
+      40  runtime.convT64    uint8
+      36  runtime.newobject  image_jpeg_FormatError
+      27  runtime.convT64    internal_strconv_Error
+      22  runtime.newobject  compress_bzip2_StructuralError
+      ... 14 x struct_values__2_any__payload0_string__payload1_ and the rest,
+          all constant conversions or the payload fields of one
+
+Every stdlib package that panics with a string constant or returns a typed
+constant error is in there once per site. 3429 is what "goc allocated for every
+constant conversion in the program and now does not" looks like.
+
+Census review question 3 asks whether a vanished site means the allocation is
+gone or the *code* is gone -- the 9f76498 failure being a heap site vanishing
+because the object quietly became a frame slot. Neither applies: the object
+moved to **read-only data**, which outlives every frame and every heap object,
+so publishing its address is safe by construction wherever it was safe to
+publish the heap object's.
+
+The 149 added lines are 47 placement moves plus 102 new site keys:
+
+  - **47 sites moved heap -> frame** (question 1, the correctness-critical
+    direction). They are the variadic combined objects the change is about
+    (`net/http.http2summarizeFrame`, `testing.BenchmarkResult.String`,
+    `chunkWriter.Write`, `http2FrameHeader.writeDebug`), ordinary objects the
+    more precise summary now proves local (`crypto/tls.Dialer.DialContext`'s
+    `net.Dialer`, `crypto/ecdsa.verifyLegacy`'s `big.Int`,
+    `errors.AsType[...]`, `crypto/x509.checkConstraints[...]`), and nine
+    closure environments in `net`/`os` -- the `ctrlCtxFn` literals passed to
+    `internetSocket`, which call them and return.
+
+  - **102 new site keys**, of which the ones under `.goc.global.initfunc.*` are
+    package initializers whose allocation used to be attributed to a site that
+    also had a constant conversion on it, and the `convT64`/`convT32` ones are
+    the other half of the moves above: the payload that used to be a field of
+    the combined object is now its own conversion-helper call at the same
+    source line. `net/http.http2summarizeFrame` appears in both lists for
+    exactly that reason.
+
+What backs the heap -> frame direction, since "the analysis says so" is not an
+answer:
+
+  - `TestFrameEscapeAudit` reads the **emitted stores**, not the analysis, and
+    is clean: across the whole corpus not one frame address is published
+    anywhere new, and one publication that used to happen has stopped.
+  - The retention rows in `TestAllocationCounts` -- `variadic_retained_element`
+    and `variadic_retained_struct_element`, written for the earlier attempt that
+    got this wrong in the dangerous direction -- are unchanged at 100.
+  - A direct check of the closure shape: a closure literal passed to a callee
+    that stores it in a global stays on the heap, and one passed to a callee
+    that only calls it stays in the frame, identically before and after.
+  - `TestExecutionCorpus`, the loop-aliasing suite and the slog-attr-frame
+    suite all pass.
+
+I did not hand-prove all 47 individually. The stdlib corpus programs these sites
+live in are executed by the capability matrix, which this job does not run.
+
+### TestEscapeShadowPlacement
+
+19 lines added, 21 removed. This test changes nothing the compiler emits: it
+asks what the IR analysis *would* have decided about allocations the front end
+placed itself, and `goc.gen.recordPlacement`'s own comment says those are "the
+allocations the IR pass never gets a say in". The new `heap -> frame` lines are
+sites where the IR analysis now reaches the answer gc reaches --
+`readDirectoryHeader(&File{}, rs)`, `jpeg.Encode(..., &jpeg.Options{Quality: 95})`,
+`(&edwards25519.Point{}).ScalarBaseMult(s)`, `append([]byte{0}, pskIDHash...)` --
+while the front end stays conservative and its placement is what is emitted.

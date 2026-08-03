@@ -49,7 +49,6 @@
 ?	io.copyBuffer	barrier	the caller's result area
 ?	io.multiWriter.Write	barrier	the caller's result area
 ?	io.multiWriter.WriteString	barrier	the caller's result area
-?	main.derive	barrier	memory reached through a call result $runtime.newobject
 ?	math/big.Float.scan	barrier	the caller's result area
 ?	math/big.nat.scan	barrier	the caller's result area
 ?	math/big.scanExponent	barrier	the caller's result area
@@ -170,8 +169,8 @@ stdlib/src/encoding/asn1/asn1.go:892:21	encoding/asn1.parseField	barrier	the cal
 stdlib/src/encoding/asn1/asn1.go:963:27	encoding/asn1.parseField	barrier	the caller's result area
 stdlib/src/encoding/base64/base64.go:378:28	encoding/base64.Encoding.decodeQuantum	barrier	the caller's result area
 stdlib/src/encoding/gob/dec_helpers.go:132:28	encoding/gob.decComplex128Slice	barrier	memory reached through an opaque pointer
-stdlib/src/internal/strconv/atof.go:609:9	internal/strconv.atof32	barrier	the caller's result area
-stdlib/src/internal/strconv/atof.go:660:9	internal/strconv.atof64	barrier	the caller's result area
+stdlib/src/internal/strconv/atof.go:609:3	internal/strconv.atof32	barrier	the caller's result area
+stdlib/src/internal/strconv/atof.go:660:3	internal/strconv.atof64	barrier	the caller's result area
 stdlib/src/internal/syscall/unix/copy_file_range_unix.go:25:9	internal/syscall/unix.CopyFileRange	barrier	the caller's result area
 stdlib/src/log/slog/handler.go:120:8	log/slog.defaultHandler.Handle	barrier	memory reached through a call result $runtime.newobject
 stdlib/src/log/slog/handler.go:239:8	log/slog.commonHandler.withAttrs	barrier	memory reached through a call result $runtime.newobject
@@ -194,10 +193,10 @@ stdlib/src/regexp/syntax/parse.go:901:46	regexp/syntax.parse.func.892.8	barrier	
 stdlib/src/runtime/cgocall.go:440:16	runtime.cgocallbackg1	barrier	memory reached through a call result $runtime.newobject
 stdlib/src/runtime/panic.go:1372:52	runtime.recovery	barrier	memory reached through a loaded pointer
 stdlib/src/syscall/exec_unix.go:228:16	syscall.forkExec	barrier	the caller's result area
-stdlib/src/syscall/exec_unix.go:231:10	syscall.forkExec	barrier	the caller's result area
+stdlib/src/syscall/exec_unix.go:231:4	syscall.forkExec	barrier	the caller's result area
 stdlib/src/text/template/exec.go:211:20	text/template.Template.execute	barrier	memory reached through a call result $runtime.newobject
 stdlib/src/text/template/parse/node.go:665:30	text/template/parse.Tree.newNumber	barrier	memory reached through a loaded pointer
-stdlib/src/vendor/golang.org/x/net/idna/idna10.0.0.go:492:11	golang.org/x/net/idna.validateAndMap	barrier	the caller's result area
+stdlib/src/vendor/golang.org/x/net/idna/idna10.0.0.go:492:5	golang.org/x/net/idna.validateAndMap	barrier	the caller's result area
 stdlib/src/vendor/golang.org/x/net/idna/idna10.0.0.go:507:21	golang.org/x/net/idna.validateAndMap	barrier	the caller's result area
 testdata/runtime_core_types.go:24:21	main.main	barrier	memory reached through a call result $runtime.newobject
 testdata/runtime_core_types.go:28:18	main.main	barrier	memory reached through a call result $runtime.newobject

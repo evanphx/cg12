@@ -152,8 +152,13 @@ func leakedCallResultBase(
 // retained -- where a computed ParamNoEscape is read as the weak one (see
 // escapeGraph.call). The difference is deliberate: a directive is a promise
 // about the whole argument written by whoever wrote the assembly, which is how
-// gc reads it too, whereas a computed summary is a dereference depth this
-// analysis derived and must not be rounded up into a stronger promise.
+// gc reads it too, whereas a computed ParamNoEscape is a claim about the
+// pointer at depth 0 and must not be rounded up into a stronger promise.
+//
+// The strong claim does have a computed form -- ParamFact.Deep, which is the
+// heap failing to reach the parameter at depth 1 as well as at depth 0 -- and
+// escapeGraph.call honours it where it is set. That is not a rounding-up: it is
+// the answer to the stronger question, computed as such.
 func calleeRetainsNothing(function *ir.Func, callee string) bool {
 	if callee == "" {
 		return false
