@@ -28,6 +28,10 @@
       "reason": "added to the capability matrix after the accepted baseline run; it enters the baseline at the next full-corpus rerun"
     },
     {
+      "capability": "core-types/package-initializer-dispatch",
+      "reason": "added to the capability matrix after the accepted baseline run; it enters the baseline at the next full-corpus rerun"
+    },
+    {
       "capability": "gc-invariants/checkmark",
       "reason": "added to the capability matrix after the accepted baseline run; it enters the baseline at the next full-corpus rerun"
     },
@@ -37,6 +41,10 @@
     },
     {
       "capability": "gc-invariants/metadata-hugepages",
+      "reason": "added to the capability matrix after the accepted baseline run; it enters the baseline at the next full-corpus rerun"
+    },
+    {
+      "capability": "gc-invariants/stale-result-home",
       "reason": "added to the capability matrix after the accepted baseline run; it enters the baseline at the next full-corpus rerun"
     },
     {

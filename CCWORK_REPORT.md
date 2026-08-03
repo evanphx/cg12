@@ -2013,3 +2013,23 @@ runs of each compiler: 3.99/4.06/4.11 s before, 4.11/4.13/4.35 s after — about
 converges in two or three rounds over blocks, and it runs only on managed frames
 that have pointer-bearing, non-escaping allocations.
 
+## Capability bookkeeping, and one pre-existing failure fixed with it
+
+Registering a new capability requires an entry in the accepted coverage baseline
+or in `cmd/goc/testdata/runtime_coverage_baseline_pending.json`;
+`TestCheckedRuntimeCoverageBaselineDenominator` reconciles the two against the
+matrix. `gc-invariants/stale-result-home` is now listed there.
+
+While doing that, the same test turned out to be **already failing on `main`
+(`6b9fbb0`)**, on an unrelated capability: `core-types/package-initializer-dispatch`,
+added to the matrix by `0f80c37` ("goc: the reduction, as a corpus program that
+fails", 2026-08-03) without the matching pending entry. Verified by running the
+test in a clean worktree at `main`. It is the same one-line bookkeeping omission,
+in the file this change already touches, so it is fixed here rather than left to
+look like a consequence of this work — flagged explicitly because it is not mine.
+`TestCheckedRuntimeCoverageBaselineDenominator`,
+`TestRuntimeCapabilityMatrixIsWellFormed`,
+`TestRuntimeCapabilityExclusiveClassification`,
+`TestCheckedRuntimeCoverageBaseline` and
+`TestRuntimeCorpusCoverageReportsCategoryResources` all pass now.
+
