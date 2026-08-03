@@ -142,3 +142,66 @@ latent miscompile of the same shape. It is left alone rather than "fixed"
 speculatively.
 
 ## 4. Guards
+
+**Loop aliasing against the host toolchain: clean.**
+
+    $ go test ./goc -run 'TestLoopAliasExpectationsMatchTheHostToolchain|TestLoopBodyAllocationsAreDistinctPerIteration' -count=1
+    ok  github.com/evanphx/cg12/goc
+
+All four programs -- `loop_alias_forms.go`, `loop_alias_composite.go`,
+`variadic_backing.go`, `loop_alias_frame_local.go` -- pass, unoptimised and
+under `-O`.
+
+**Determinism: holds.**
+
+    $ go test ./goc -run TestCompilingTheSameSourceTwiceGivesTheSameModule -count=1
+    --- PASS (4.94s)
+
+**`TestFrameEscapeAudit`: clean.**
+
+    $ go test ./goc -run TestFrameEscapeAudit -count=1
+    ok  github.com/evanphx/cg12/goc	184.174s
+
+`goc/testdata/frame_escape_baseline.txt` is unchanged: nothing in the corpus
+publishes a frame address anywhere it did not before, and nothing stopped.
+
+**`TestAllocationCensus`: moved, regenerated, delta reviewed.**
+
+`goc/testdata/alloc_census_baseline.txt` gains 24 lines and loses 12. The delta
+is two things and no third thing.
+
+*Twelve lines become eleven, all in `net/http`'s bundled HTTP/2, all renames.*
+Every removed line has an added line with the same file, the same line and
+column, the same allocator, the same type and the same `heap` decision:
+
+    - h2_bundle.go:5083:29  net/http.methodvalue...onSettingsTimer.4961.61.5026  ...  heap
+    + h2_bundle.go:5083:29  net/http.methodvalue...onSettingsTimer.4961.61.5000  ...  heap
+
+Only the trailing number moves. That number is the generated-symbol counter, a
+running count of emitted items, so enqueueing more implementations -- and
+enqueueing them earlier -- renumbers it. Nothing moved between the frame and the
+heap, which `TestFrameEscapeAudit` says independently.
+
+Twelve lines became eleven because two of the three programs that build an
+`onShutdownTimer` method value now land on the *same* counter, and the census is
+a set of keys. I checked that rather than assuming it: compiling the three
+programs one at a time and listing their `onShutdownTimer` census records gives
+three records each, all `heap`, in all three -- and
+`stdlib_http_redirect_keepalive.go` and `stdlib_http_client_server.go` now both
+name theirs `...5496.39.4753`. No allocation was lost; two names collided.
+
+*Twelve added lines are the new corpus program.* All at sites in
+`testdata/runtime_package_initializer_dispatch.go` -- one per `panic`-guard
+string, one per value the initializers build. The one worth naming is
+
+    testdata/runtime_package_initializer_dispatch.go:43:24
+        .goc.global.initfunc.68.main.variadicArgument  runtime.newobject  1_io_Writer  frame
+
+-- the variadic backing array for `firstWriter(new(bytes.Buffer))` stays on the
+frame inside a package initializer, which is the earlier variadic work holding
+up in this shape too.
+
+**Two baselines the brief did not name.** Adding a corpus program can also move
+`escape_shadow_baseline.txt` (`TestEscapeShadowPlacement`) and
+`escape_gc_differential.txt` (`TestEscapeDifferentialAgainstGC`), so both were
+run as well.
