@@ -325,6 +325,7 @@ func compile(name string, src []byte, options compileOptions) (*ir.Module, error
 		runtimeAllocation:       compileRuntime,
 		typeTags:                typeTags,
 		functionDescriptors:     make(map[string]string),
+		summaryParents:          make(map[ast.Node]map[ast.Node]ast.Node),
 		literalData:             make(map[string]string),
 		contentSymbols:          make(map[string]string),
 		runtimeTypes:            runtimeTypes,
@@ -1623,6 +1624,19 @@ type gen struct {
 	// they point at, which is also what names them. Shared with derived
 	// generators, since derive copies the struct and so the map header.
 	functionDescriptors map[string]string
+	// summaryParents caches the parent map of each declaration a summary
+	// question is asked about. The walk asks the same callee's summary once per
+	// caller and once per argument position, and each question used to rebuild
+	// the callee's parent map from its whole declaration -- over the corpus,
+	// several times the program's own AST rebuilt to answer a few thousand
+	// distinct questions. A parent map is a pure function of the syntax it was
+	// built from and nothing writes into one after astParents returns, so
+	// keeping it is a compile-time saving and nothing else.
+	//
+	// Shared with derived generators, since derive copies the struct and so the
+	// map header, which is the point: the callers are in other functions and
+	// often in other packages.
+	summaryParents map[ast.Node]map[ast.Node]ast.Node
 	// literalData interns byte-valued data symbols by their contents, so a
 	// literal appearing twice is emitted once and is named the same way in
 	// every module that contains it.
@@ -2304,6 +2318,19 @@ func collectNoWriteBarrierFunctions(declarations map[*types.Func]functionDecl) m
 	return disabled
 }
 
+// declarationParents is astParents memoised per declaration. See
+// gen.summaryParents for why the same declaration is asked about many times.
+func (g *gen) declarationParents(declaration ast.Node) map[ast.Node]ast.Node {
+	if cached, ok := g.summaryParents[declaration]; ok {
+		return cached
+	}
+	parents := astParents(declaration)
+	if g.summaryParents != nil {
+		g.summaryParents[declaration] = parents
+	}
+	return parents
+}
+
 func astParents(root ast.Node) map[ast.Node]ast.Node {
 	parents := make(map[ast.Node]ast.Node)
 	var stack []ast.Node
@@ -2367,6 +2394,24 @@ func (g *gen) nonEscapingAddressWithin(
 		case *ast.SelectorExpr:
 			selection := info.Selections[parent]
 			return parent.X == current && selection != nil && selection.Kind() == types.FieldVal
+		case *ast.KeyValueExpr:
+			if parent.Value != current {
+				return false
+			}
+			current = parent
+		case *ast.CompositeLit:
+			// The pointer is written into the literal's storage, so the object
+			// it points at has to outlive whatever that storage is and nothing
+			// more. compositeElementDoesNotEscape hands the question on only
+			// for a struct or array literal, where the literal's value *is* the
+			// storage; a slice or map literal has backing storage of its own
+			// whose placement is decided at its own site.
+			//
+			// This is the `root := &item{index: i, next: &item{index: i + 1}}`
+			// shape. Without it the inner address had no case here and took the
+			// conservative answer, so a linked pair that gc keeps entirely in
+			// the frame cost one allocation per link.
+			return g.compositeElementDoesNotEscape(parent, info, parents, body, checking)
 		default:
 			return false
 		}
@@ -2604,6 +2649,50 @@ func (g *gen) valueDoesNotEscape(expression ast.Expr) bool {
 	)
 }
 
+// conversionCopiesOperand reports whether a type conversion builds its result
+// out of storage of its own, so that the operand's storage cannot be reached
+// from the result and the operand does not escape through the conversion.
+//
+// Only the conversions between a string and a slice of bytes or runes do that.
+// Every other conversion in Go either reinterprets the operand's own storage --
+// T(s) where T and the operand share an underlying type hands back the same
+// backing array -- or carries no storage at all, and the walk has to keep
+// asking about the result.
+//
+// slicebytetostring and stringtoslicebyte copy. The slicebytetostringtmp form
+// does alias the operand, and sliceString picks it only where the string cannot
+// outlive the conversion's own use -- a comparison, a len, or an argument to a
+// callee whose parameter provably does not escape -- so the operand's storage
+// is bounded there too. Without this rule every `string(buffer)` in a
+// comparison forced buffer's backing array onto the heap: the walk asked
+// whether the *string* escaped, which is not the question.
+func conversionCopiesOperand(call *ast.CallExpr, operand ast.Expr, info *types.Info) bool {
+	if len(call.Args) != 1 || call.Args[0] != operand || !info.Types[call.Fun].IsType() {
+		return false
+	}
+	sourceType, targetType := info.TypeOf(operand), info.TypeOf(call)
+	if sourceType == nil || targetType == nil {
+		return false
+	}
+	return stringToCharacterSlice(sourceType, targetType) || stringToCharacterSlice(targetType, sourceType)
+}
+
+// stringToCharacterSlice reports that converting from stringType to sliceType
+// is the string-to-[]byte or string-to-[]rune conversion, which the runtime
+// performs by copying.
+func stringToCharacterSlice(stringType, sliceType types.Type) bool {
+	basic, isBasic := stringType.Underlying().(*types.Basic)
+	if !isBasic || basic.Kind() != types.String {
+		return false
+	}
+	slice, isSlice := sliceType.Underlying().(*types.Slice)
+	if !isSlice {
+		return false
+	}
+	element, isElementBasic := slice.Elem().Underlying().(*types.Basic)
+	return isElementBasic && (element.Kind() == types.Uint8 || element.Kind() == types.Int32)
+}
+
 func (g *gen) valueDoesNotEscapeWithin(
 	expression ast.Expr,
 	info *types.Info,
@@ -2668,6 +2757,36 @@ func (g *gen) valueDoesNotEscapeWithin(
 				return false
 			}
 			current = parent
+		case *ast.TypeAssertExpr:
+			// i.(T) reads the interface's payload, so the value the walk is
+			// following is reachable from the asserted value and from nothing
+			// else. Keep climbing. Without this the walk stopped at the
+			// conservative default, which is how a local interface that is only
+			// ever asserted and read still put its payload on the heap.
+			if parent.X != current {
+				return false
+			}
+			current = parent
+		case *ast.SelectorExpr:
+			// The same rule nonEscapingObjectUse applies to x.f: reading a field
+			// copies it out and carries nothing, while taking the field's
+			// address makes an interior pointer that keeps the whole object
+			// alive, so the object escapes exactly when that pointer does. A
+			// method value is a closure over the receiver and is answered by
+			// asking where the closure goes; only an immediate call is free.
+			if parent.X != current {
+				return false
+			}
+			selection := info.Selections[parent]
+			if selection == nil {
+				return true
+			}
+			if selection.Kind() == types.FieldVal {
+				address := addressedExpression(parent, parents, info)
+				return address == nil || !g.addressEscapesWithin(address, info, parents, body, checking)
+			}
+			call, calledImmediately := parents[parent].(*ast.CallExpr)
+			return calledImmediately && call.Fun == parent
 		case *ast.RangeStmt:
 			return parent.X == current
 		case *ast.ReturnStmt:
@@ -2695,7 +2814,14 @@ func (g *gen) valueDoesNotEscapeWithin(
 				current = parent
 				continue
 			}
+			if appendSpreadSource(parent, current, info) {
+				return true
+			}
 			if info.Types[parent.Fun].IsType() {
+				if expression, isExpression := current.(ast.Expr); isExpression &&
+					conversionCopiesOperand(parent, expression, info) {
+					return true
+				}
 				current = parent
 				continue
 			}
@@ -2775,6 +2901,23 @@ func (g *gen) leakedCallResultDoesNotEscape(
 
 func singleResultFunction(function *types.Func) bool {
 	return function.Type().(*types.Signature).Results().Len() == 1
+}
+
+// appendSpreadSource reports that an argument is the `xs...` operand of an
+// append: the elements are copied out of it into the destination's backing
+// array, so the operand's own storage is not retained by the call. What the
+// elements *point at* does become reachable from the destination, but that is a
+// question about those objects and not about this one.
+func appendSpreadSource(call *ast.CallExpr, argument ast.Node, info *types.Info) bool {
+	if call.Ellipsis == token.NoPos || len(call.Args) != 2 || call.Args[1] != argument {
+		return false
+	}
+	identifier, isIdentifier := call.Fun.(*ast.Ident)
+	if !isIdentifier {
+		return false
+	}
+	builtin, isBuiltin := info.Uses[identifier].(*types.Builtin)
+	return isBuiltin && builtin.Name() == "append"
 }
 
 // appendDestination reports that expression is the destination slice of an
@@ -3300,22 +3443,28 @@ func (g *gen) nonEscapingObjectUse(
 		return calledImmediately && call.Fun == parent
 	case *ast.StarExpr:
 		return parent.X == identifier
-	case *ast.RangeStmt:
+	case *ast.TypeAssertExpr:
+		// See valueDoesNotEscapeWithin's case: the payload is reachable from
+		// the asserted value, so the question continues from there.
 		if parent.X != identifier {
 			return false
 		}
-		valueIdentifier, hasValue := parent.Value.(*ast.Ident)
-		if !hasValue || valueIdentifier.Name == "_" {
-			return true
-		}
-		valueObject := info.Defs[valueIdentifier]
-		if valueObject == nil {
-			valueObject = info.Uses[valueIdentifier]
-		}
-		if valueObject == nil {
-			return true
-		}
-		return g.objectDoesNotEscape(valueObject, info, parents, body, checking)
+		return g.valueDoesNotEscapeWithin(parent, info, parents, body, checking)
+	case *ast.RangeStmt:
+		// Ranging over an object does not carry it anywhere. The clause's value
+		// variable is not this object and does not alias it: declareRangeVariable
+		// gives the variable storage of its own and storeAssignmentTarget copies
+		// the element into it, for aggregates as much as for scalars. What the
+		// copy carries away -- a pointer, a slice header, an interface -- names
+		// some other object, whose placement is decided where that object was
+		// made, and says nothing about where the range expression's own storage
+		// has to live.
+		//
+		// This used to ask where the value variable went and charge the answer
+		// to the range expression. That cost `for _, n := range []int{...}` its
+		// backing array as soon as n reached anything the walk could not follow,
+		// which for an int is every call, since an int has no storage to leak.
+		return parent.X == identifier
 	case *ast.BinaryExpr:
 		return parent.Op == token.EQL || parent.Op == token.NEQ
 	case *ast.AssignStmt:
@@ -3352,10 +3501,38 @@ func (g *gen) nonEscapingObjectUse(
 		if _, global := g.globals[leftObject]; global {
 			return false
 		}
-		if !isPointerLikeObject(rightObject) || !isPointerLikeObject(leftObject) {
+		if !copyAliasesStorage(rightObject) || !copyAliasesStorage(leftObject) {
 			return false
 		}
 		return g.objectDoesNotEscape(leftObject, info, parents, body, checking)
+	case *ast.ValueSpec:
+		// `var x T = y` asks exactly what `x = y` asks above: the source's
+		// storage is reachable from the destination, so it escapes exactly when
+		// the destination does. Without this case the walk fell through to the
+		// conservative default and a declaration form that an assignment form
+		// answers put the object on the heap.
+		valueIndex := -1
+		for index, value := range parent.Values {
+			if value == identifier {
+				valueIndex = index
+				break
+			}
+		}
+		if valueIndex < 0 || valueIndex >= len(parent.Names) {
+			return false
+		}
+		declared := info.Defs[parent.Names[valueIndex]]
+		source := info.Uses[identifier]
+		if declared == nil || declared == source || declared.Pkg() == nil || g.resultObjects[declared] {
+			return false
+		}
+		if _, global := g.globals[declared]; global {
+			return false
+		}
+		if !copyAliasesStorage(source) || !copyAliasesStorage(declared) {
+			return false
+		}
+		return g.objectDoesNotEscape(declared, info, parents, body, checking)
 	case *ast.CallExpr:
 		if _, asynchronous := parents[parent].(*ast.GoStmt); asynchronous {
 			return false
@@ -3384,10 +3561,16 @@ func (g *gen) nonEscapingObjectUse(
 		if appendDestination(parent, identifier, info) {
 			return g.valueDoesNotEscapeWithin(parent, info, parents, body, checking)
 		}
+		if appendSpreadSource(parent, identifier, info) {
+			return true
+		}
 		if info.Types[parent.Fun].IsType() {
 			convertedType := info.Types[parent].Type
 			basic, ok := convertedType.Underlying().(*types.Basic)
 			if ok && basic.Kind() == types.Uintptr {
+				return true
+			}
+			if conversionCopiesOperand(parent, identifier, info) {
 				return true
 			}
 			return g.valueDoesNotEscapeWithin(parent, info, parents, body, checking)
@@ -3453,6 +3636,26 @@ func isPointerLikeObject(object types.Object) bool {
 	}
 	basic, ok := object.Type().Underlying().(*types.Basic)
 	return ok && basic.Kind() == types.UnsafePointer
+}
+
+// copyAliasesStorage reports that assigning one object to another hands the
+// destination a reference to the same storage, so that "does the source escape"
+// can be answered by asking the same of the destination. A pointer-shaped
+// object does; so does an interface, which holds the pointer in its data word.
+//
+// An interface destination has to be included or `var value any = node` --
+// where node is already pointer-shaped, so nothing is boxed and no storage is
+// made -- has no answer but the conservative one, and every pointer put in a
+// local interface goes to the heap however that interface is used.
+func copyAliasesStorage(object types.Object) bool {
+	if isPointerLikeObject(object) {
+		return true
+	}
+	if object == nil {
+		return false
+	}
+	_, isInterface := object.Type().Underlying().(*types.Interface)
+	return isInterface
 }
 
 func calledFunction(expression ast.Expr, info *types.Info) *types.Func {
@@ -3543,7 +3746,7 @@ func (g *gen) parameterDoesNotEscape(function *types.Func, index int, checking m
 	// reach the result, and a result of interface type boxes the value into
 	// fresh heap storage on the way out; boxedIntoInterface needs the
 	// signature to see that.
-	parents := astParents(declaration.decl)
+	parents := g.declarationParents(declaration.decl)
 	return g.objectDoesNotEscape(signature.Params().At(index), declaration.info, parents, declaration.decl.Body, checking)
 }
 
@@ -3588,7 +3791,7 @@ func (g *gen) parameterLeaksOnlyToResult(function *types.Func, index int, checki
 	// reach the result, and a result of interface type boxes the value into
 	// fresh heap storage on the way out; boxedIntoInterface needs the
 	// signature to see that.
-	parents := astParents(declaration.decl)
+	parents := g.declarationParents(declaration.decl)
 	answer := g.objectDoesNotEscape(signature.Params().At(index), declaration.info, parents, declaration.decl.Body, checking)
 	reportResultLeakSummary(function, index, answer)
 	return answer
@@ -3652,7 +3855,7 @@ func (g *gen) receiverDoesNotEscape(function *types.Func, checking map[parameter
 	// reach the result, and a result of interface type boxes the value into
 	// fresh heap storage on the way out; boxedIntoInterface needs the
 	// signature to see that.
-	parents := astParents(declaration.decl)
+	parents := g.declarationParents(declaration.decl)
 	return g.objectDoesNotEscape(signature.Recv(), declaration.info, parents, declaration.decl.Body, checking)
 }
 
