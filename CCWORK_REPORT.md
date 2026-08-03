@@ -2877,3 +2877,375 @@ cycle" flag before anything could be cached.
     determinism, loop aliasing, GC masks    pass
     GC reducer at GOGC=10                   0/20
     allocation-count rows added             5, each failing before its own fix
+
+## Item 1a -- `TestDeriveClassifiesEveryGenField` FAILS (fixture gap, not a miscompile)
+
+It failed a third time this week, and it is the predicted failure:
+
+```
+derive_test.go:240: fullyPopulatedGen leaves [summaryParents] zero, so derive's
+handling of those fields is untested; a new gen field has to be given a non-zero
+value there and classified in wholeCompilationGenFields
+```
+
+**The field is `summaryParents`**, `map[ast.Node]map[ast.Node]ast.Node`, added to the
+`gen` struct at `goc/compile.go:1639` by `ccwork/parity-remaining-134` commit 158721b
+("goc: build each callee's parent map once, not once per question"). It is the
+memoisation cache for `astParents` per declaration.
+
+This is not merge-induced -- `ccwork/bigmod-regression-settle` does not touch
+`compile.go`, so the branch fails this test on its own.
+
+It is a fixture gap, not a defect in the change. `derive()` copies the `gen` struct by
+value, so the map header is carried to derived generators for free, which is what the
+field's own doc comment says it relies on. The compiler behaviour is right; only the
+test's two hand-maintained lists were not extended. The gap is two lines in
+`goc/derive_test.go`:
+
+* add `"summaryParents"` to `wholeCompilationGenFields` (it is whole-compilation state
+  -- callers are in other functions and often other packages, and a derived generator
+  starting from an empty cache would silently rebuild every parent map, losing exactly
+  the saving the commit was made for);
+* add `summaryParents: map[ast.Node]map[ast.Node]ast.Node{}` to the whole-compilation
+  block of `fullyPopulatedGen()`.
+
+Not repaired here, as instructed. Every other result below is from a tree with this
+failure present.
+
+### `goc/testdata/escape_shadow_baseline.txt` -- regenerated, **no diff**
+
+`go test ./goc -run TestEscapeShadowPlacement -update-escape-shadow-baseline` (178s):
+byte-identical to branch 2's committed version. +79/-20 lines against main.
+
+### `goc/testdata/slog_allocations_baseline.txt` -- regenerated, **no diff**
+
+`go test ./goc -run TestSlogAllocationsAgainstGC -slog-allocations
+-update-slog-allocations` (19s): byte-identical to branch 2's committed version.
+
+### `goc/testdata/escape_gc_differential.txt` -- regenerated, **no diff**
+
+`go test ./goc -run TestEscapeDifferentialAgainstGC -escape-gc-differential
+-update-escape-gc-differential` (11s): byte-identical to branch 2's committed version.
+Host toolchain go1.26.1 linux/arm64, same as main's, so the diff is goc's.
+
+**All four generated files regenerate from the merged tree exactly as
+`ccwork/parity-remaining-134` committed them. No side had to be picked; there is
+nothing to reconcile.**
+
+## Item 10 -- the gc differential
+
+Confusion matrix, merged tree (rows goc, columns gc), with main's value in parentheses
+where it moved:
+
+```
+  goc\gc      frame     heap    mixed   absent    total
+  frame         165       33       14      105      317
+              (139)     (33)     (14)    (105)    (291)
+  heap          113       573      173      168     1027
+              (134)    (573)    (173)    (168)   (1048)
+  mixed          13        86       24       13      136
+               (13)     (86)     (24)     (16)    (139)
+  absent        404      1269       22        0     1695
+              (402)   (1269)     (22)      (0)   (1693)
+  total         695      1961      233      286     3175
+              (688)   (1961)    (233)    (289)   (3171)
+```
+
+**Lines where goc heaps what gc frames: 113, down from 134 on main.** That is the
+branch's own target number and 21 of the 134 are gone. The PESSIMISTIC section (every
+line goc heaps and gc does not, a superset) goes 528 -> 504.
+
+**The correctness-critical direction did not move at all.** PERMISSIVE -- every line gc
+heaps and goc does not -- is 1448 on both. Every cell in gc's `heap` column is
+unchanged: 33 / 573 / 86 / 1269. Nothing new was moved into a frame that gc could not
+prove frame-safe.
+
+The lines that left the pessimistic set are the five shapes the branch names, visible in
+the removed hunks: `[]int{...}` / `[]byte{...}` / `[]string{...}` slice literals that
+are only ranged over or copied from (`bytes_grow_allocs.go:12,13`,
+`runtime_append_self_overlap.go:4`, `runtime_copy_string_to_bytes.go:4`,
+`runtime_slice_copy_overlap.go:4`, `runtime_range_target_forms.go:46`,
+`runtime_range_target_order.go:160`), and `&link{next: &link{...}}` nested-literal
+chains (`runtime_goroutine_entry_stack_map.go:88`, `runtime_keepalive_stack_root.go:61`,
+`runtime_many_goroutines_gc.go:18`, `runtime_scheduler_gc_churn.go:29`), plus
+`runtime_interface_pointer_equality_gc.go:10`. Each now matches gc's `frame`.
+
+Coverage moved only as the new corpus program explains: joined gc decisions 3443 ->
+3451, inlining-call-site exclusions 871 -> 876, census rows outside the corpus directory
+10949 -> 10856 (the 93-line census shrink). `gc diagnostics the parser did not know` is
+0, as it must be.
+
+## Item 9 -- the slog benchmark, every row against gc
+
+32 rows, measured under both compilers from the same program
+(`goc/testdata/slog_allocations`), host toolchain go1.26.1 linux/arm64,
+iterations=2000 rounds=5. Numbers below are the regenerated file, which matches the
+committed one exactly.
+
+**28 of 32 rows at allocation-count parity with gc, and `info/5-attr` is 0.00 -- both
+reference figures hold.** The four rows not at parity:
+
+| case | goc a/op | gc a/op | goc B/op | gc B/op |
+|---|---|---|---|---|
+| `info/3-attr-large-ints` | 1.00 | 3.00 | 128.0 | 24.0 |
+| `logattrs/6-attr` | 2.00 | 1.00 | 96.0 | 48.0 |
+| `json/kv-4-pairs` | 3.00 | 2.00 | 208.0 | 24.0 |
+| `json/logattrs-4-attrs` | 2.00 | 0.00 | 32.0 | 0.0 |
+
+(`info/3-attr-large-ints` is goc *below* gc on count and above on bytes -- one larger
+allocation instead of three small ones.)
+
+Change against main: two rows improved, none regressed.
+
+* `json/kv-4-pairs` 5.00 -> 3.00 a/op, 256.0 -> 208.0 B/op
+* `json/logattrs-4-attrs` 4.00 -> 2.00 a/op, 80.0 -> 32.0 B/op
+
+The parity count is unchanged at 28/32 -- both improved rows were already off-parity and
+remain so, they are just closer. Every other row is byte-identical to main.
+
+## Item 1 -- `go test -timeout 40m -parallel 10 ./goc/...`
+
+Both runs are full runs; `(cached)` appears zero times in either log.
+
+| | main control | integration/wave4 |
+|---|---|---|
+| wall clock | 1031s | 990s |
+| top-level PASS | 320 | 319 |
+| top-level FAIL | 0 | **1** |
+| top-level SKIP | 4 | 5 |
+| top-level total | 324 | 325 |
+| subtest PASS / FAIL / SKIP | 348 / 0 / 0 | 348 / 0 / 0 |
+| **all test results** | **672** | **673** |
+
+`./goc/...` is one package (`github.com/evanphx/cg12/goc`).
+
+**Census delta: exactly one test, and it is attributable.** Diffing the sorted name sets:
+
+* top level, one addition: **`TestCryptoSigningBench`**, added by
+  `ccwork/bigmod-regression-settle` commit c640102. It skips without `-crypto-bench`,
+  which is why the SKIP count goes 4 -> 5. Run separately as item 11.
+* subtests: the two name sets are **identical**. `ccwork/parity-remaining-134` adds five
+  rows to `gocAllocationCounts` and five functions to `testdata/allocation_counts.go`,
+  but `TestAllocationCounts` runs one subtest per corpus file
+  (`allocation_counts.go`, `allocation_counts.go_-O`), not one per row, so the row count
+  changes without the subtest count changing. Both subtests **PASS**, so the five new
+  rows -- `range_slice_literal`, `compare_byte_slice_as_string`,
+  `declare_interface_from_pointer`, `nested_composite_literal_address`,
+  `append_from_spread_source`, all asserted at 0 allocations under both goc and `goc -O`
+  -- are verified by this run.
+
+**The one failure is `TestDeriveClassifiesEveryGenField`, diagnosed above: the
+`summaryParents` fixture gap.** Nothing else fails. Main is 0 failures.
+
+## Item 4 -- `TestFrameEscapeAudit -count=1`
+
+Baseline `goc/testdata/frame_escape_baseline.txt` is **192 entries on main and 192 on
+the merged tree** -- the reference figure, and the merge does not touch the file
+(`git diff main` is empty for it).
+
+**Zero new publications.** The test fails on any publication not listed *and* on any
+listed publication that has gone away, so a pass at an unchanged file is the strongest
+form of this result: the count did not change because the set did not change, not
+because two changes cancelled. It passed inside both full suite runs above and again
+standalone with `-count=1` (see below).
+
+Standalone, on the merged tree: `go test ./goc -run TestFrameEscapeAudit -count=1 -v`
+-> `--- PASS: TestFrameEscapeAudit (203.33s)`, not cached.
+
+## Controls are measured, not quoted
+
+Both generated files whose numbers this report quotes for main were regenerated in the
+`main` worktree and came back byte-identical to what main has committed
+(`git diff --stat` empty for `alloc_census_baseline.txt` and for
+`escape_gc_differential.txt`). So main's committed 134 is a measured control, not a
+stale figure, and the 113 above is a real 21-line improvement.
+
+## Item 2 -- `make test-goc-status` and `make test-goc-status-opt` (both `-v`)
+
+Run with `GOFLAGS="-v -count=1"`; `(cached)` appears zero times in any of the four logs.
+Counts are subtests of `TestARM64RuntimeCapabilityStatus` (the parent line is excluded).
+
+| arm | main control | integration/wave4 |
+|---|---|---|
+| default (`make test-goc-status`) | **366/366 PASS**, 0 FAIL | **366/366 PASS**, 0 FAIL |
+| `-O` (`make test-goc-status-opt`) | 365/366 PASS, **1 FAIL** | 365/366 PASS, **1 FAIL** |
+
+**PASS/FAIL SETS**
+
+* Default arm: the 366 passing capability names on the merged tree are **identical as a
+  set** to main's 366. Nothing gained, nothing lost.
+* `-O` arm: the 366 names are identical as a set on both trees, and the single failing
+  member is the same on both:
+
+  ```
+  --- FAIL: TestARM64RuntimeCapabilityStatus/stack-scan/loop-safepoints
+  ```
+
+**The `-O` arm did not come back clean.** The standing failure `stack-scan/loop-safepoints`
+is still failing, on the merged tree and on the main control measured in the same
+session. Both reference figures (366/366 and 365/366 with that one failure) are
+confirmed against measured controls, and the merge changes neither arm.
+
+## Item 3 -- `make test-unit`
+
+**PASS**, `MAKE_EXIT=0` on the merged tree, 25 package result lines, no `FAIL` line,
+`(cached)` zero times. Main control likewise `MAKE_EXIT=0`.
+
+## Item 7 -- loop aliasing
+
+`go test ./goc -run 'TestLoopAliasExpectationsMatchTheHostToolchain|TestLoopBodyAllocationsAreDistinctPerIteration' -count=1 -v` -> **PASS**, exit 0.
+
+* `TestLoopAliasExpectationsMatchTheHostToolchain`: all 6 programs PASS --
+  `loop_alias_forms.go`, `loop_alias_composite.go`, `variadic_backing.go`,
+  `variadic_element_retention.go`, `variadic_element_address_retention.go`,
+  `loop_alias_frame_local.go`. goc still agrees with the host toolchain on every one.
+* `TestLoopBodyAllocationsAreDistinctPerIteration`: all programs PASS in both the plain
+  and the `-O` configuration, including `loop_alias_frame_local.go` and
+  `loop_alias_frame_local.go_-O`.
+
+**`loop_alias_frame_local.go`'s allocations stay in frame slots.** Its census footprint
+is one site and it is a frame:
+
+```
+testdata/loop_alias_frame_local.go:53:8  main.literalWithin  runtime.newobject  main_point  frame
+```
+
+Identical on main and on the merged tree -- one frame entry, zero heap entries, on both.
+The escape-walk changes did not move it in either direction.
+
+## Item 5 -- allocation census run twice, for stability
+
+Two independent `-update-alloc-census-baseline` runs on the merged tree (174s and 240s,
+`-count=1` on the second so neither could be a cache hit):
+
+```
+1eff10f7f77b3dce2e5bec8143280988  run 1
+1eff10f7f77b3dce2e5bec8143280988  run 2
+```
+
+**Byte-identical**, and both identical to the committed file. The census is stable, so
+the 14,440-line delta reported above is a property of the compiler and not of a
+particular run.
+
+## Item 6 -- determinism
+
+`scripts/determinism-check.sh -corpus -rounds 2 -j 24` on the merged tree:
+
+```
+programs=399 rounds=2 workers=24 optimize=false pack=""
+round 0: 399 programs in 116.3s, 0 failed
+round 1: 399 programs in 117.3s, 0 failed
+failed to compile: 0
+content varies between rounds: 0
+image varies, content identical (layout only): 0
+reproducible=399 varying=0 failed=0 of 399 over 2 rounds
+```
+
+**399/399 reproducible over 798 compiles, exit 0** -- the reference figure exactly. Zero
+programs varying, zero layout-only residue, zero failures. `TestCompilingTheSameSourceTwiceGivesTheSameModule`
+also passes standalone (4.20s).
+
+## Item 11 -- the crypto benchmark added by branch 1
+
+Branch 1 does add one: `TestCryptoSigningBench`, plus `make bench-crypto` /
+`make bench-crypto-update` and `goc/testdata/crypto_signing_bench_baseline.txt`.
+
+**`make bench-crypto` on the merged tree: PASS, exit 0** (87.45s), every case inside the
+0.04 index tolerance against the committed baseline. Host toolchain go1.26.1
+linux/arm64, the one the baseline records.
+
+Because the committed baseline was taken with main's compiler and the merged tree has
+branch 2's, an index movement needs attributing. The control is
+`ccwork/bigmod-regression-settle` itself -- main's compiler plus the benchmark -- in its
+own worktree. Three alternating `bench-crypto-update` rounds per tree, on an idle box
+(load < 2 before each), the baseline restored after each round:
+
+| case | control (main compiler), 3 runs | merged, 3 runs | mean shift |
+|---|---|---|---|
+| `p256/sign-verify` | 46.9720 / 46.4544 / 46.0376 | 46.4392 / 47.7128 / 47.3240 | +1.44% |
+| `p256/verify` | 34.7770 / 33.7966 / 34.2778 | 34.0762 / 34.5273 / 34.6555 | +0.40% |
+| `p384/sign-verify` | 40.5054 / 40.3111 / 40.1714 | 39.8859 / 40.4381 / 41.5954 | -0.06% |
+| `rsa2048/sign-verify` | 12.3427 / 12.2749 / 12.2599 | 12.5803 / 12.5406 / 12.6569 | **+2.45%** |
+
+gc's index is flat across all six runs (`p256/sign-verify` 1.6251-1.6334), so the host
+toolchain reference did not move and the box behaved.
+
+**One real movement: `rsa2048/sign-verify` is about 2.4% slower on the merged tree.**
+The two trees' three-run ranges do not overlap -- control 12.2599-12.3427, merged
+12.5406-12.6569 -- so this is not noise, and it is attributable to
+`ccwork/parity-remaining-134`'s escape-walk change, since that is the only compiler
+change in the merge. It is well inside the 0.04 tolerance and does not fail the gate.
+Recorded rather than actioned, per the test's own note that a tolerance is not a licence
+to let the number drift.
+
+The other three cases are not separable from run-to-run spread: `p384` is flat, and both
+`p256` cases have overlapping ranges across the two trees.
+
+## Root artefacts -- final audit of the merged tree
+
+`git ls-files` at the repo root, after the merge:
+
+```
+.gitignore  AGENTS.md  AMD64_PARITY_PLAN.md  CCWORK_REPORT.md  GO_INTEGRATION_PLAN.md
+Makefile  README.md  RUNTIME_PLAN.md  RUNTIME_PLAN.md.orig  cg12  cs.trace  go.mod
+go.sum  viz
+```
+
+Everything there is source or documentation except the four pre-existing artefacts
+(`cg12`, `viz`, `cs.trace`, `RUNTIME_PLAN.md.orig`), which are left as instructed. **No
+new artefact is on the branch**: the one that arrived with `ccwork/parity-remaining-134`
+(`allocation_counts`, 10,750,776-byte aarch64 ELF) was removed in the merge commit.
+
+The full set of files the branch changes against main is 12, all source, generated
+baselines, or reports -- no binaries anywhere in the tree, not just at the root:
+
+```
+M CCWORK_REPORT.md                              M goc/testdata/allocation_counts.go
+M Makefile                                      A goc/testdata/crypto_signing_bench/main.go
+M goc/alloccount_test.go                        A goc/testdata/crypto_signing_bench_baseline.txt
+M goc/compile.go                                M goc/testdata/escape_gc_differential.txt
+A goc/cryptobench_test.go                       M goc/testdata/escape_shadow_baseline.txt
+M goc/testdata/alloc_census_baseline.txt        M goc/testdata/slog_allocations_baseline.txt
+```
+
+Note for whoever fixes this: `.gitignore` does not cover `allocation_counts`, and more
+generally does not cover the working-directory binary `go run ./cmd/goc -run` leaves
+behind. Nothing stops the fifth one.
+
+## Every run in this report was watched to exit
+
+Nothing was left running. Every number above came out of a process whose exit file this
+job polled for and read. `(cached)` appears zero times in any log
+(`goc/...` x2, both status arms x2 trees, `test-unit` x2). Nothing is UNVERIFIED.
+
+## Summary
+
+| # | item | result |
+|---|---|---|
+| 1 | `go test -parallel 10 ./goc/...` | 673 results, **1 FAIL** (`TestDeriveClassifiesEveryGenField`); main control 672, 0 FAIL; delta is `TestCryptoSigningBench` from branch 1 |
+| 2 | `make test-goc-status` / `-opt` | 366/366 and 365/366; sets identical to main; standing `-O` failure `stack-scan/loop-safepoints` still failing on both |
+| 3 | `make test-unit` | PASS |
+| 4 | `TestFrameEscapeAudit -count=1` | PASS, 192 entries, file unchanged, zero new publications |
+| 5 | census x2 | byte-identical, and identical to committed |
+| 6 | determinism | 399/399 over 798 compiles, 0 varying |
+| 7 | loop aliasing | PASS; `loop_alias_frame_local.go` still 1 frame / 0 heap |
+| 8 | GC reducer 20x, GOGC=10 and default, both trees | 0/20 in all four cells; 160 runs total, 0 failures |
+| 9 | slog | 28/32 at parity, `info/5-attr` 0.00; two rows improved, none regressed |
+| 10 | gc differential | goc-heaps-what-gc-frames **134 -> 113**; correctness direction unmoved (PERMISSIVE 1448 both) |
+| 11 | crypto benchmark | `make bench-crypto` PASS; `rsa2048/sign-verify` +2.4% against a same-session control |
+
+**What the merge does:** removes 126 heap allocations from the corpus, moves 21 of the
+134 goc-heaps-gc-frames lines to parity, improves two slog rows, adds no publication,
+changes no capability, and stays deterministic.
+
+**What is wrong with it:** one test fails. `TestDeriveClassifiesEveryGenField` is red
+because `ccwork/parity-remaining-134` added the `summaryParents` field to `gen` without
+extending `fullyPopulatedGen()` and `wholeCompilationGenFields` in `goc/derive_test.go`.
+It is a two-line fixture gap with no effect on emitted code, and it is the third time
+this week -- but the branch as it stands would turn `main` red.
+
+Also worth a look before merge, though neither blocks: the `rsa2048/sign-verify` +2.4%
+in item 11, and the "Three rows" comments in `goc/alloccount_test.go` and
+`goc/testdata/allocation_counts.go` that introduce five.
+
+NOT SAFE TO MERGE TO MAIN -- `go test ./goc/...` fails on `TestDeriveClassifiesEveryGenField`, because `ccwork/parity-remaining-134` added the `gen` field `summaryParents` without adding it to `fullyPopulatedGen()` and `wholeCompilationGenFields` in `goc/derive_test.go`; every other item passed and the fix is two lines in that test file.
