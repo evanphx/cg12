@@ -215,3 +215,108 @@ worthwhile follow-up; it is not attempted here alongside the rest.
 
 (filled in below as the numbers land)
 
+## 4. The numbers
+
+Host toolchain `go version go1.26.1 linux/arm64`, pinned in both baseline files.
+Every number below was produced by running the program, under goc built from
+this branch and under `go run`, not by reasoning about the generated code.
+
+### 4.1 `goc/testdata/allocation_counts.go` — allocations per call
+
+| call | base | **this branch** | gc |
+|---|---|---|---|
+| **`fmt.Sprintf("value=%d", 42)`** | 2.00 | **1.00** | **1.00** — parity |
+| `fmt.Sprintf("value=%s", s)` | 2.00 | 2.00 | 2.00 — parity |
+| `fmt.Sprintf("value=%v", struct)` | 2.00 | 2.00 | 2.00 — parity |
+| `fmt.Sprintf("a constant format")` | 1.00 | 1.00 | 1.00 — parity |
+| `f(...int)` with 2 args | 0.00 | 0.00 | 0.00 — parity |
+| `f(...any)` with an int and a string | 0.00 | 0.00 | 0.00 — parity |
+| **`keepElement(0x5eed)`, callee stores `args[0]` into a global** | 1.00 | **1.00** | 1.00 — parity |
+| **the same with a struct payload** | 1.00 | **1.00** | 1.00 — parity |
+| `fmt.Sprintf("%d/%d", 42, 42)` | 2.00 | 2.00 | 1.00 |
+| `fmt.Sprintf("%d/%d", 1<<20, 1<<20)` | 2.00 | 2.00 | 3.00 — goc is cheaper |
+| `fmt.Sprintf` inside a loop body | 2.00 | 2.00 | 1.00 |
+| `f(...int)` inside a loop body | 1.00 | 1.00 | 0.00 |
+
+The six `box_*` rows, the three `return_any_*` rows and `sync_pool_round_trip`
+are unchanged in both columns; nothing outside the variadic rows moved.
+
+**The headline row is at parity and the whole of it is the split.** The array is
+a frame slot and the box is built by `runtime.convT64`, which for 42 returns a
+pointer into `runtime.staticuint64s` and allocates nothing. gc's one allocation
+and goc's are the same object: the result string.
+
+The two `%d/%d` rows are the fold-back being visible. goc pays two allocations
+for both — the result string and one combined object — where gc splits
+unconditionally and pays one or three depending on the values. The row that
+matters for judging the rule is the second: goc is *cheaper* than gc there, and
+splitting unconditionally would have given that up to win the first.
+
+The two `_in_loop` rows are unchanged and remain the price of
+`opt.promotionsBlockedByALoop`, which is the loop-aliasing job's rule and not
+this branch's to lower.
+
+### 4.2 `log/slog` — the cases the brief named
+
+Regenerated `goc/testdata/slog_allocations_baseline.txt`. **Every allocation
+count is identical to the base commit.**
+
+| case | goc | gc |
+|---|---|---|
+| `info/5-attr` | 1.00 / 240 B | 0.00 |
+| `disabled/3-attr` | 1.00 / 144 B | 0.00 |
+| `info/3-attr-large-ints` | 1.00 / 176 B | 3.00 |
+| `control/variadic-6-preboxed` | 0.00 | 0.00 |
+| `control/variadic-6-literal` | 0.00 | 0.00 |
+
+**slog does not improve, and the reason is not the representation.**
+`log/slog.Logger.Info`'s `args` slice escapes at **depth 0** — the summary says
+`escapes`, not `noescape`+`!Deep` — through `Logger.log` → `Record.Add` →
+`argsToAttr`, which returns a slice derived from `args` and assigns it back in a
+loop. The array therefore goes to the heap however the payloads are represented,
+and the one allocation slog pays is that array with every payload folded into
+it. Improving it means making that chain's summary answer `noescape`, which is a
+summary problem in `Record.Add`'s loop-carried leak-to-result and not something
+the variadic call site can fix. The intermediate build that split
+unconditionally measured `info/3-attr-large-ints` at **4.00 against gc's 3.00**,
+which is what the fold-back exists to prevent.
+
+One row is not identical: **`json/kv-4-pairs` used to kill the program under goc
+and now runs**, at 3.00 allocations / 272 B against gc's 2.00 / 24 B. That is
+**not a fix**. The two reductions the slog job committed
+(`goc/testdata/slog_allocations/miscompiles/attr_bad_pointer.go` and
+`attr_bad_pointer_stackcopy.go`) still reproduce at this HEAD, byte for byte —
+`bad pointer in frame main_main at 0x…: 0xc8`. The frame pointer map is still
+wrong for a `slog.Attr`; this branch moved the objects around it enough that
+this particular program stops meeting a collection with one live in a frame.
+`json/logattrs-4-attrs` still crashes. The JSON output goc now produces for that
+shape is byte-identical to the host toolchain's, checked separately, so the row
+is a real measurement and not a program that quietly stopped working.
+
+### 4.3 The gc differential
+
+Regenerated `goc/testdata/escape_gc_differential.txt`.
+
+|  | base | this branch |
+|---|---|---|
+| **PESSIMISTIC** (goc heaps, gc does not) | 567 lines | **571** |
+| PERMISSIVE (gc heaps, goc does not) | 209 lines | 220 |
+| confusion matrix, goc heap × gc frame | 183 | 177 |
+| joined source lines | 3 059 | 3 080 |
+
+**Every line that entered or left either set is in a file this branch adds or
+edits**: 4 pessimistic and 9 permissive in `allocation_counts.go`, 2 in
+`variadic_element_retention.go`, 1 in `variadic_element_address_retention.go`,
+1 permissive line left `allocation_counts.go`. Nothing in the stdlib, the
+runtime, or any untouched corpus program moved in either direction.
+
+**The pessimism set does not shrink, and that is a property of the instrument
+rather than a disappointment.** `opt.conversionHelpers` records a `convT` site as
+*heap* — because the payload did leave the frame, which is the escape decision
+gc's `-m` reports at the same line — whether or not the value it is handed makes
+the helper allocate. A `fmt.Sprintf("%d", n)` line has a `convT64` on it either
+way, so the line-level verdict is unchanged while the measured cost halves. The
+differential measures placement; `allocation_counts.go` measures cost. This is
+the same disagreement the `iface-convt-fastpath` branch reported for the same
+reason, and it is why both instruments are kept.
+
