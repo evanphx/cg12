@@ -24,6 +24,19 @@ program here prints its answer under gc; a future goc run that prints the same
 answer is the fix, and a future run that prints something else again is a new
 finding.
 
+**`attr_bad_pointer.go` and `attr_bad_pointer_stackcopy.go` are fixed** (see
+RUNTIME_PLAN.md section 28) and both print `200` under goc now. They are kept
+here because this file is the record of what was found; the programs that hold
+the fix down live in the corpus as `goc/testdata/slog_attr_frame_gcmask*.go`,
+where they run on every test pass. `pkginit_dispatch.go` is not fixed.
+
+One thing this file said is wrong, and section 28 records why: the control below
+does not show that the shape is innocent. Its frame map is bad in exactly the
+same way; it survives because nothing in it copies `main`'s stack while the
+value is live, and the mark phase walks past a claimed word holding 200 without
+complaint where `runtime.adjustpointers` throws on it. The corpus keeps that
+program *and* the same shape with a stack copy, which failed.
+
 ## attr_bad_pointer.go — a `slog.Attr` in a frame across a collection
 
     fatal error: invalid pointer found on stack
@@ -56,17 +69,21 @@ the stack. `runtime.adjustpointers` rejects the same word. Both halves of the
 runtime that walk a frame -- the collector and the stack copier -- disagree with
 the pointer map, so this is the map being wrong and not one walker being wrong.
 
-### attr_bad_pointer_control.go — the control, which works
+### attr_bad_pointer_control.go — the control, which works, and does not mean what it looks like
 
 `slog.Value`'s exact shape, hand-written in the program's own package: a
 `_ [0]func()` field, a `uint64`, an `any`, wrapped in a struct with a leading
 `string` key, returned by value from a `//go:noinline` constructor, held across
 a `runtime.GC()`. It prints `200` under both compilers.
 
-So the zero-length function field is not on its own enough to produce the bad
-map, and neither is returning the struct by value from a non-inlined function.
-Whatever the trigger is, this control does not have it, which is the most useful
-thing it can say.
+That was read as "the zero-length function field is not on its own enough to
+produce the bad map". It is not. Dumping the frame maps of both programs gives
+the same claimed words for the same slot — `marks=[0 16 32 40]` on a slot whose
+word 16 holds 200 — and this program survives only because nothing in it copies
+`main`'s stack while the value is live. Replacing its `runtime.GC()` with the
+deep recursion `attr_bad_pointer_stackcopy.go` uses makes it fail identically,
+with no `log/slog` import anywhere. The zero-length field was the whole trigger;
+see RUNTIME_PLAN.md section 28.
 
 ## pkginit_dispatch.go — an interface built in a package-level initializer
 

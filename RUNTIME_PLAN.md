@@ -5140,3 +5140,114 @@ program's own code is identical in the two builds and only the *linked* runtime
 differs: the pack's is compiled by a separate `build-runtime` process from a
 generated root, the monolithic one alongside `main`. The mechanism is not
 established and is not guessed at here.
+
+
+## 28. A zero-length array field claimed a pointer word inside the frame (2026-08-03)
+
+`log/slog` packs `int64`, `uint64`, `bool`, `time.Duration` and `float64` into
+`slog.Value`'s `num uint64` field precisely so those kinds never become
+heap-boxed interfaces, and puts a `_ [0]func()` ahead of it to make the struct
+incomparable. Under goc, an attribute carrying 200 that was live in a frame when
+the runtime walked that frame died:
+
+    runtime: bad pointer in frame main_main at 0x...: 0xc8
+    fatal error: invalid pointer found on stack
+
+0xc8 is 200. Both `json/*` rows of `goc/testdata/slog_allocations_baseline.txt`
+were `crash` because of it, and §5a of `CCWORK_REPORT.md` reported it without a
+mechanism.
+
+### The defect
+
+`goc/compile.go`'s `goABIAggregate` turned an array type into one `ir.Field`
+carrying the element's shape and the array's length:
+
+```go
+	case *types.Array:
+		field, ok := g.goABIField(value.Elem())
+		field.Count = int(value.Len())
+```
+
+`ir.Field.Count` cannot express zero. It is 0 for every ordinary scalar field as
+well — `ir.Field{Sub: ir.SubL}` leaves it unset — so `ir.Field.count()` reads 0
+as **one element**:
+
+```go
+func (f Field) count() int {
+	if f.Count > 1 { return f.Count }
+	return 1
+}
+```
+
+A `[0]func()` therefore became one pointer-shaped element of eight bytes, at the
+offset of the field that follows it, displacing every later field by a word:
+
+| type | goc's aggregate | the type |
+| --- | --- | --- |
+| `[0]func()` | 8 bytes | 0 |
+| `slog.Value` | 32 bytes, pointers at `[0 16 24]` | 24, `[8 16]` |
+| `slog.Attr` | 48 bytes, pointers at `[0 16 32 40]` | 40, `[0 24 32]` |
+| `slog.Record` | 328 bytes, 23 pointer words | 288, 18 |
+
+Byte 16 of `slog.Attr` is `Value.num`. `ir.AggregatePointerOffsets` feeds
+`MarkAggregatePointerWords`, which writes those offsets into
+`f.StackPointerWords`, which the backend turns into the frame's stack map. Dumped
+from the compiled reduction:
+
+    framemap main.main: localwords=[... 22 ...]
+      alloc t41 at frame+176 marks=[0 16 32 40]
+
+Frame+176+16 is local word 22, and that word holds 200.
+
+### What was not wrong
+
+The **heap** description of the same types. `walkPointerWords`, which builds the
+`abi.Type` GCData mask, iterates `for index := 0; index < value.Len()` and emits
+nothing for a zero-length array, and takes struct offsets from `go/types`. Two
+pieces of code describe every type to the collector and only the frame one was
+wrong — which is why §26's mask padding, a defect in the other description, did
+not move this.
+
+Distinct from §26 in shape as well: that produced phantom pointer words *past*
+the end of a mask, read out of the next symbol. This one mis-classified a word
+*inside* the map, at a real offset, over a real scalar.
+
+### The fix
+
+A zero-length array contributes no field. That is both the correct layout and
+the only one `Count` can express; making `Count` able to say zero would mean
+touching every `ir.Field` literal in the tree.
+
+That left the size rule gc applies to a struct whose last field is zero-sized —
+one byte of padding, so that a pointer to that field is not past the end of the
+object — with nothing to carry it, since the phantom element used to supply the
+space by accident. `goABIAggregate` now appends an explicit byte-wide scalar,
+never a pointer. **That case was already wrong on `main`** for a trailing empty
+struct, which never had a phantom element: `struct{ n uint64; _ struct{} }` laid
+out as 8 bytes where the type is 16.
+
+### Why the control was not a control
+
+`attr_bad_pointer_control.go` — `slog.Value`'s shape hand-written in the
+program's own package, held across a `runtime.GC()` — passes on `main`, and that
+was read as evidence that the shape is not the trigger. It is not evidence. Both
+programs get the same frame map, `marks=[0 16 32 40]`, over the same 200. The
+control survives because nothing in it copies `main`'s stack while the value is
+live: `runtime.findObject` returns silently for an address that was never heap,
+so the mark phase walks past a claimed word holding 200, and only
+`runtime.adjustpointers` throws on it. Replacing its collection with a deep
+recursion makes it fail identically with no `log/slog` import in the program.
+
+A frame map can be wrong for a long time before a program dies of it. The
+programs that hold this down are in the corpus:
+`goc/testdata/slog_attr_frame_gcmask{,_stackcopy,_kinds,_shape,_control}.go`,
+run unoptimized, optimized, and under `GODEBUG=cg12checkstackcopy=1`.
+
+### The guard
+
+`goc.TestGoABIAggregateAgreesWithTheTypeLayout` and
+`TestGoABIAggregatesAgreeWithTheirTypesInLogSlog` assert that the two
+descriptions of a type agree on size, alignment and pointer words — over shapes
+with a zero-sized field in every position, and over every named type in
+`log/slog`. On `main` they fail, naming `Value`, `Attr`, `Record` and six of the
+eight synthetic shapes.

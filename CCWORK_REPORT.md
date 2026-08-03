@@ -553,3 +553,439 @@ fixed. This is the instrument the `variadic-allocations` job's dangling pointer
 did *not* show up in — 387 of 390 were identical then too — which is why it is
 run alongside the census and the audit rather than instead of them.
 
+
+
+`disabled/3-attr`: **goc 3.00 allocations/op, gc 0.00**. `info/5-attr`: **goc
+9.00 allocations/op, gc 0.00**. Of the three designs `log/slog` bets on the
+compiler for, the inline `[5]Attr` still spills in the right place and buys
+nothing else, the packed `Value` buys nothing at all, and the disabled-level
+early return saves nothing because everything it was meant to save has already
+been paid at the call site. Essentially none of slog's designed allocation
+avoidance survives compilation by goc — and on the one path that exercises a
+real handler, the compiled program does not survive either.
+
+---
+
+# A `slog.Attr` in a frame is scanned as a pointer: the mis-classification, found and fixed
+
+Job `ccwork/slog-attr-gcmask`, branched off `main` `4a6fd96`. The subject is the
+miscompile RUNTIME_PLAN §26 left open and CCWORK_REPORT §5a reported without
+fixing: a `slog.Attr` live in a frame across a collection dies with
+
+    runtime: bad pointer in frame main_main at 0x...: 0xc8
+    fatal error: invalid pointer found on stack
+
+## 0. Reproduced on main before anything was changed
+
+    go run ./cmd/goc -run goc/testdata/slog_allocations/miscompiles/attr_bad_pointer.go
+    runtime: bad pointer in frame main_main at 0x31b432e07d50: 0xc8
+    fatal error: invalid pointer found on stack
+    runtime_adjustpointers <- runtime_adjustframe <- runtime_copystack
+      <- runtime_shrinkstack <- runtime_scanstack <- markroot <- gcDrain
+
+0xc8 is 200, the integer `slog.Int("k", 200)` packs into `Value.num`. Note the
+walker in this trace: `shrinkstack` inside `scanstack`, so the collector's own
+stack scan reached it through the copier.
+
+## 1. The reduction landed as a corpus test, failing (commit below)
+
+The programs in `goc/testdata/`, run by `goc/slogattrframe_test.go`
+unoptimized and optimized, plus a run of each under
+`GODEBUG=cg12checkstackcopy=1`, plus a check that every expectation is `go run`'s
+own output rather than a belief about it. On `main`'s compiler, before any
+change:
+
+    --- FAIL: TestSlogAttrInFrameIsNotScannedAsAPointer (52.10s)
+        --- FAIL: .../slog_attr_frame_gcmask.go              (7.98s)
+        --- FAIL: .../slog_attr_frame_gcmask.go -O           (7.89s)
+        --- FAIL: .../slog_attr_frame_gcmask_stackcopy.go    (7.49s)
+        --- FAIL: .../slog_attr_frame_gcmask_stackcopy.go -O (7.99s)
+        --- FAIL: .../slog_attr_frame_gcmask_kinds.go        (7.54s)
+        --- FAIL: .../slog_attr_frame_gcmask_kinds.go -O     (7.92s)
+        --- PASS: .../slog_attr_frame_gcmask_control.go      (2.55s)
+        --- PASS: .../slog_attr_frame_gcmask_control.go -O   (2.74s)
+    --- FAIL: TestSlogAttrInFrameSurvivesTheStackCopyChecker (24.95s)
+        --- FAIL: .../slog_attr_frame_gcmask.go              (7.46s)
+        --- FAIL: .../slog_attr_frame_gcmask_stackcopy.go    (7.50s)
+        --- FAIL: .../slog_attr_frame_gcmask_kinds.go        (7.49s)
+        --- PASS: .../slog_attr_frame_gcmask_control.go      (2.50s)
+    --- PASS: TestSlogAttrFrameExpectationsMatchTheHostToolchain (0.33s)
+
+Every failure is `run: runtime: bad pointer in frame main_main at 0x...: 0xc8`.
+The `_kinds` program holds an Int64, a Bool, a Duration and a Float64 in one
+frame at once, because `num` carries all of them and a map that claims that word
+claims it for every one.
+
+A fifth program, `slog_attr_frame_gcmask_shape.go`, was added later -- it is
+section 2.1's finding, the same shape with no `log/slog` import -- and was
+checked against main's compiler the same way, by building it with `goc/compile.go`
+reverted to `4a6fd96`:
+
+    runtime: bad pointer in frame main_main at 0x7c2da5013d50: 0xc8
+
+## 2. Where the mis-classification is
+
+Not in the type descriptor, and not in the stack-map machinery. It is one line
+of the front end's translation of a Go type into the **Go-ABI aggregate**
+(`ir.AggType`) that the frame's pointer map is built from.
+
+`goc/compile.go`'s `goABIAggregate` turns an array type into one field carrying
+the element's shape and the array's length:
+
+    case *types.Array:
+        field, ok := g.goABIField(value.Elem())
+        ...
+        field.Count = int(value.Len())
+
+`ir.Field.Count` cannot express zero. `Count` is 0 for an ordinary scalar field
+too -- every `ir.Field{Sub: ir.SubL}` literal in the tree leaves it unset -- so
+`ir.Field.count()` reads 0 as **one element**:
+
+    func (f Field) count() int {
+        if f.Count > 1 { return f.Count }
+        return 1
+    }
+
+A `[0]func()` therefore becomes one pointer-shaped element of eight bytes. Every
+consumer of the aggregate then agrees on the wrong answer. Measured directly on
+the shape (`ir` unit probe, since removed):
+
+    [0]func()   size=8  align=8                    Go says 0/8
+    slog.Value  size=32 pointer offsets [0 16 24]  Go says 24, [8 16]
+    slog.Attr   size=48 pointer offsets [0 16 32 40]  Go says 40, [0 24 32]
+
+Offset 16 of `slog.Attr` is `Value.num`. The phantom element sits at the offset
+of the field that follows it and shifts every later field by a word.
+
+Confirmed end-to-end in the compiled program, with a temporary dump of each
+frame's marked words (`arm64/mc.go`'s `goLocalPointerWords`, instrumentation
+since removed), compiling the reduction:
+
+    framemap main.main: localwords=[... 22 ...]
+      alloc t41 at frame+176 marks=[0 16 32 40]
+
+`marks` are byte offsets within the attribute's frame slot and are exactly
+`ir.AggregatePointerOffsets` of the phantom aggregate. Frame+176+16 is local
+word 22, and that word holds 200.
+
+The heap path is **not** affected: `walkPointerWords`, which builds the
+`abi.Type` GCData mask, iterates `for index := 0; index < value.Len()` and so
+emits nothing for a zero-length array, and it takes struct offsets from
+`go/types`. The two descriptions of the same type disagreed, and only the frame
+one was wrong.
+
+## 2.1 The control was not a control
+
+The reduction's control -- `slog.Value`'s shape hand-written in the program's
+own package -- passes on main, and the earlier report read that as evidence that
+the shape is not the trigger. It is not evidence. Its frame map is **identical**:
+
+    framemap main.main (control): alloc t41 at frame+176 marks=[0 16 32 40]
+
+and the word it claims holds 200 there too. It survives only because nothing in
+that program copies `main`'s stack while the attribute is live: the mark phase
+tolerates 200 (`findObject` on an address that was never heap returns silently),
+and only `adjustpointers` throws on it. Replacing its `runtime.GC()` with the
+same deep recursion the stack-copy reduction uses makes it fail identically:
+
+    runtime: bad pointer in frame main_main at 0x42c9ee193d50: 0xc8
+
+with no `log/slog` import anywhere in the program. So the trigger is the shape
+after all -- a zero-length array field ahead of a scalar -- and log/slog is
+where it appears in ordinary code.
+
+## 3. The fix
+
+`goc/compile.go`, `goABIAggregate`, one branch:
+
+    case *types.Array:
+        if value.Len() == 0 {
+            // ... contributing no field is both the correct layout and the
+            // only one Count can express.
+            break
+        }
+        field, ok := g.goABIField(value.Elem())
+        ...
+
+A zero-length array contributes no field to the Go-ABI aggregate. The nested
+aggregate it produces is empty, so it lays out as zero bytes at the alignment
+`typeAlign` gives it, which is what Go says, and it contributes no part to
+`FlattenAggregate` and no offset to `AggregatePointerOffsets`.
+
+The alternative -- teaching `ir.Field` to distinguish "zero elements" from
+"unset" -- would have to touch every `ir.Field` literal in the tree, since a
+scalar field leaves `Count` at 0 and means one. The representation cannot say
+zero, so the producer must not ask it to.
+
+Also fixed, because the first change exposed it: gc gives a struct whose last
+field is zero-sized one byte of padding so that a pointer to that field is not
+past the end of the object, and `typeSize` implements that rule. The phantom
+element used to supply that byte by accident. `goABIAggregate` now appends an
+explicit byte-wide scalar instead -- never a pointer. That case was **already
+wrong on main** for a trailing empty struct, which never had a phantom element:
+`struct{ n uint64; _ struct{} }` laid out as 8 bytes where the type is 16.
+
+## 3.1 The guard: the two descriptions of a type, checked against each other
+
+`goc/goabi_layout_test.go`. A Go type is described to the collector twice --
+`walkPointerWords` builds the heap mask from `go/types` offsets, and
+`goABIAggregate` builds the aggregate the frame's map and the frame's slot size
+come from -- by two pieces of code that share nothing. The test asserts they
+agree on size, alignment and pointer words, over shapes with a zero-sized field
+in every position and over every named type in `log/slog`.
+
+On main it fails, and what it prints is the defect:
+
+    Value:  aggregate 32 bytes, pointer offsets [0 16 24], type: 24, [8 16]
+    Attr:   aggregate 48 bytes, pointer offsets [0 16 32 40], type: 40, [0 24 32]
+    Record: aggregate 328 bytes, 23 pointer words, type: 288, 18 words
+    Alone/Empty/Leading/Middle/Trailing/EmptyArrayOfStruct/TrailingEmptyStruct
+
+With the fix, both tests pass.
+
+## 4. The reduction after the fix, through both walkers
+
+    --- PASS: TestSlogAttrInFrameIsNotScannedAsAPointer (63.72s)   10/10 subtests
+    --- PASS: TestSlogAttrInFrameSurvivesTheStackCopyChecker (29.06s) 5/5
+    --- PASS: TestSlogAttrFrameExpectationsMatchTheHostToolchain (0.57s) 5/5
+
+That is every program unoptimized and optimized, every program again under
+`GODEBUG=cg12checkstackcopy=1` (which validates each word the map claims as the
+stack is copied rather than waiting for one to look like an address), and the
+collector reached through `runtime.GC()` in three of them.
+
+## 5. The slog baseline: the two JSON rows
+
+Regenerated with
+
+    go test ./goc -run TestSlogAllocationsAgainstGC -slog-allocations \
+        -update-slog-allocations
+
+and then re-run without the update flag, which passes, so the file reproduces.
+
+**Attribution first, because the diff against the committed file is misleading.**
+The committed baseline predates the `ccwork/variadic-allocations` merge that is
+already on `main`, so a plain diff shows twelve rows improving that this work did
+not touch. Regenerating on pristine `main` (`4a6fd96`, in a separate worktree)
+produces those same improved numbers with the JSON rows still `crash`. Against
+*that* -- main's compiler measured today -- the diff from this fix is exactly:
+
+    -json/kv-4-pairs                     crash       2.00      crash       24.0
+    -json/logattrs-4-attrs               crash       0.00      crash        0.0
+    -
+    -cases that did not run:
+    -
+    -  json/kv-4-pairs        goc  fatal error: invalid pointer found on stack
+    -                              (bad pointer in frame log_slog_handleState_appendAttr: 0xc8)
+    -  json/logattrs-4-attrs  goc  fatal error: invalid pointer found on stack
+    -                              (bad pointer in frame main_func_311_28: 0x3)
+    +json/kv-4-pairs                      8.00       2.00      344.0       24.0
+    +json/logattrs-4-attrs                8.00       0.00      264.0        0.0
+
+Nothing else moves. **The numbers that appear where `crash` was:**
+
+| case | goc a/op | gc a/op | goc B/op | gc B/op |
+| --- | ---: | ---: | ---: | ---: |
+| `json/kv-4-pairs` | **8.00** | 2.00 | **344.0** | 24.0 |
+| `json/logattrs-4-attrs` | **8.00** | 0.00 | **264.0** | 0.0 |
+
+The section listing cases that did not run is now empty and gone: every case in
+the table runs.
+
+For scale, the earlier report recorded one whole-program observation of
+`json/kv-4-pairs` at 15.00 allocations / 456.0 bytes before the process died on
+the next case. The committed one-case-per-process harness now measures it at
+8.00 / 344.0.
+
+
+## 6. How wide the defect was
+
+`log/slog` is not the only user of the shape. Every standard-library type that
+puts a zero-length array field in a struct uses a **pointer-shaped** element, so
+every one of them claimed a pointer word over whatever followed it. Measured on
+`main` by the same guard:
+
+| type | goc's aggregate | the type |
+| --- | --- | --- |
+| `log/slog.Value` | 32 bytes, pointers `[0 16 24]` | 24, `[8 16]` |
+| `log/slog.Attr` | 48 bytes, pointers `[0 16 32 40]` | 40, `[0 24 32]` |
+| `log/slog.Record` | 328 bytes, 23 pointer words | 288, 18 |
+| `sync/atomic.Pointer[T]` | 16 bytes, pointers `[0 8]` | 8, `[0]` |
+| `weak.Pointer[T]` | 16 bytes, pointers `[0 8]` | 8, `[0]` |
+| `runtime.PanicNilError` | 8 bytes, pointers `[0]` | 0, none |
+
+`slog.Value` is the one that killed programs, because the field after its
+`[0]func()` is the `uint64` carrying a number small enough for
+`runtime.adjustpointers` to reject. `atomic.Pointer` and `weak.Pointer` claimed
+a word one *past* the value, which is a frame word belonging to something else:
+whatever it holds is walked as an address, and it is only luck that no corpus
+program has died of it.
+
+With the fix, the invariant holds for every named type in all four packages,
+`runtime` included whole.
+
+## 7. Guards
+
+### 7.1 The loop-aliasing programs still match the host toolchain
+
+    --- PASS: TestLoopBodyAllocationsAreDistinctPerIteration (22.83s)  8/8
+    --- PASS: TestLoopAliasExpectationsMatchTheHostToolchain (0.59s)   4/4
+
+### 7.2 `TestFrameEscapeAudit` — clean
+
+    --- PASS: TestFrameEscapeAudit (0.00s)
+
+Zero new publications: no frame address the compiler emits reaches a global, a
+heap object, a result area or anything through a parameter that it did not
+already reach on `main`. Expected -- this change describes existing storage
+differently, it does not move any object -- and checked rather than assumed.
+
+### 7.3 The allocation census delta: empty
+
+    --- PASS: TestAllocationCensus (187.10s)
+    --- PASS: TestEscapeShadowPlacement (0.00s)
+
+The census compares site by site in four directions -- heap→frame, frame→heap,
+appeared, vanished -- and all four are empty, over a corpus that now has five
+more programs in it. So there is no delta to review: no allocation moved, no
+site appeared, none vanished.
+
+That five new corpus programs add no census line is worth one sentence rather
+than suspicion. The census records heap allocations and the frame allocations
+that came out of an escape decision, keyed by site identity and deduplicated
+across the corpus; the new programs' own `main`s allocate nothing, and every
+line of `log/slog` and `runtime` they reach was already reached by
+`stdlib_slog_structured.go`.
+
+Regenerated anyway, literally, because the brief asks for the file and not for
+an argument about it:
+
+    go test ./goc -run TestAllocationCensus$ -update-alloc-census-baseline
+    ok  github.com/evanphx/cg12/goc  275.989s
+
+`git status` reports `goc/testdata/alloc_census_baseline.txt` unmodified. The
+regenerated file is byte-identical to the committed one, so there is no site to
+review and nothing unexplained.
+
+Two GC-path smoke tests, since this change touches every aggregate the compiler
+builds and `sync/atomic.Pointer` is in the runtime's own code:
+
+    goc/testdata/runtime_gc_type_mask_padding.go  -> "type mask padding ok"
+    goc/testdata/runtime_stack_copy_roots.go      -> "stack copy roots ok"
+      (the second under GODEBUG=cg12checkstackcopy=1)
+
+## 8. The same collision in the C front end, measured and deliberately not fixed
+
+`cc/agg.go`'s `fieldOf` builds the same kind of field from a C array:
+`ir.Field{Sub: subOfType(elem), Count: int(at.Len())}`. A GNU zero-length array
+member hits the identical `Count == 0` collision. It does **not** produce a bad
+map, and it is not silent:
+
+    struct s { long n; char buf[0]; };
+    long g(struct s v);
+
+    cc: cannot pass struct.s by value: cg12 lays it out as 16 bytes (align 8)
+    but C says 8 (align 8) -- a bitfield, which cg12's aggregate types cannot
+    yet express
+
+`checkAggLayout` compares the aggregate against C's own size and refuses. C
+frames are not managed, so no stack map is built from these aggregates and there
+is no word to mis-classify; the consequence is a rejected program with a
+misleading diagnostic ("a bitfield").
+
+Not fixed here, for three reasons that are a scope judgement and not a
+measurement: it is loud rather than silent, C's rule for a trailing zero-sized
+member is *not* Go's (C says 8 where gc says 16, so the same padding would be
+wrong there), and `fieldOf` returns one field per member so skipping one means
+changing its caller. It is one line plus its caller for whoever wants it, and
+the error message it produces is the wrong one for the cause.
+
+## 9. What was committed
+
+| commit | what |
+| --- | --- |
+| `240d720` | the reduction as five corpus programs and `goc/slogattrframe_test.go`, failing on main |
+| `c613b4c` | the fix in `goABIAggregate`, the trailing-zero-size padding, and the aggregate/type agreement test |
+| `9a76dd3` | the regenerated slog baseline, RUNTIME_PLAN §28, the corrected miscompiles README |
+| `9e0f9a3` | the agreement test extended to `sync/atomic`, `weak` and `runtime` |
+
+The compiler change is 20 lines in one function plus a 15-line helper next to the
+size rule it mirrors. Everything else is tests, baselines and prose.
+
+### 7.4 Determinism
+
+    scripts/determinism-check.sh -corpus -rounds 3 -j 24
+    programs=395 rounds=3 workers=24 optimize=false
+    round 0: 395 programs in 120.7s, 0 failed
+    round 1: 395 programs in 121.7s, 0 failed
+    round 2: 395 programs in 125.7s, 0 failed
+    content varies between rounds: 0
+    image varies, content identical (layout only): 0
+    reproducible=395 varying=0 failed=0 of 395 over 3 rounds
+
+and again optimized, which is the arm where the placement passes run:
+
+    scripts/determinism-check.sh -corpus -rounds 2 -j 24 -O
+    programs=395 rounds=2 workers=24 optimize=true
+    round 0: 395 programs in 126.0s, 0 failed
+    round 1: 395 programs in 132.4s, 0 failed
+    content varies between rounds: 0
+    image varies, content identical (layout only): 0
+    reproducible=395 varying=0 failed=0 of 395 over 2 rounds
+
+Same depth as section 26's: 3 rounds without `-O`, 2 with.
+
+## 10. The answer
+
+**Where the mis-classification was.** Not in the type descriptor's pointer mask,
+which was right, and not in how the stack map is built from what it is given.
+It was one line earlier than either: `goABIAggregate` in `goc/compile.go`
+translating a Go array type into an `ir.Field` with `Count = int(value.Len())`.
+`ir.Field.Count` has no way to say zero — it is 0 for every ordinary scalar
+field too, and `ir.Field.count()` reads that as one element — so a `[0]func()`
+became one **pointer-shaped element of eight bytes**, sitting at the offset of
+the field after it. In `slog.Value` that field is the `uint64` `log/slog` packs
+int64, uint64, bool, `time.Duration` and float64 into, so the frame's pointer
+map claimed the integer the attribute was carrying, and both the collector's
+stack walk and the stack copier walked 200 as an address. It was never a
+`log/slog` bug and never a JSON-handler bug: `sync/atomic.Pointer[T]`,
+`weak.Pointer[T]` and `runtime.PanicNilError` had the same phantom word.
+
+A zero-length array now contributes no field, which is the correct layout and
+the only one `Count` can express, and the gc padding rule for a struct ending in
+a zero-sized field — which the phantom used to supply by accident, and which was
+already wrong on `main` for a trailing empty struct — is applied explicitly as a
+byte-wide scalar.
+
+**The slog JSON rows.** Both were `crash`. They now run:
+
+    json/kv-4-pairs         8.00 a/op, 344.0 B/op   (gc 2.00, 24.0)
+    json/logattrs-4-attrs   8.00 a/op, 264.0 B/op   (gc 0.00,  0.0)
+
+and `goc/testdata/slog_allocations_baseline.txt` has no "cases that did not run"
+section any more.
+
+## 11. Verification at the committed HEAD
+
+Everything committed, working tree clean, no update flags:
+
+    go test ./goc -run 'TestSlogAttr|TestGoABIAggregate'
+    --- PASS: TestGoABIAggregateAgreesWithTheTypeLayout (0.00s)
+    --- PASS: TestGoABIAggregatesAgreeWithTheirTypesInTheStdlib (2.07s)
+    --- PASS: TestSlogAttrInFrameIsNotScannedAsAPointer (58.14s)
+    --- PASS: TestSlogAttrInFrameSurvivesTheStackCopyChecker (27.78s)
+    --- PASS: TestSlogAttrFrameExpectationsMatchTheHostToolchain (0.39s)
+    ok  github.com/evanphx/cg12/goc  88.441s
+
+and the two reductions this started from, run straight from the miscompiles
+directory under the fixed compiler:
+
+    goc -run .../attr_bad_pointer.go            -> 200
+    goc -run .../attr_bad_pointer_stackcopy.go  -> 200
+    goc -run .../attr_bad_pointer_control.go    -> 200
+
+`go test ./goc/...`, the capability matrix and `make test-unit` were not run
+here: a dependent job runs them, and running them twice on a loaded box helps
+nobody. What that leaves unchecked from this tree is stated plainly rather than
+implied — the corpus-wide run, the matrix, and the unit suites are that job's
+result, not this one's.

@@ -129,6 +129,15 @@ func TestLoopAliasExpectationsMatchTheHostToolchain(t *testing.T) {
 // stderr. println writes to stderr, so the two are read together.
 func runCorpusProgramOutput(t *testing.T, source string, optimized bool) string {
 	t.Helper()
+	return runCorpusProgramOutputWithEnv(t, source, optimized)
+}
+
+// runCorpusProgramOutputWithEnv is runCorpusProgramOutput with extra
+// environment variables for the run itself, so a program can be run under a
+// runtime diagnostic such as GODEBUG=cg12checkstackcopy=1. The compilation is
+// unaffected by them.
+func runCorpusProgramOutputWithEnv(t *testing.T, source string, optimized bool, environment ...string) string {
+	t.Helper()
 	if runtime.GOOS != "linux" || runtime.GOARCH != "arm64" {
 		t.Skip("Go runtime execution test requires Linux ARM64")
 	}
@@ -167,7 +176,7 @@ func runCorpusProgramOutput(t *testing.T, source string, optimized bool) string 
 	require.NoError(t, err, "link executable: %s", output)
 
 	run := exec.Command(executable)
-	run.Env = append(os.Environ(), "GOMAXPROCS=1")
+	run.Env = append(append(os.Environ(), "GOMAXPROCS=1"), environment...)
 	output, err = run.CombinedOutput()
 	require.NoError(t, err, "run: %s", output)
 	return string(output)
