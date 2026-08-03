@@ -4937,6 +4937,12 @@ concurrent measurement loops. It is the same open item §5.10 records under
 "Residual runtime faults"; this section narrows it to a frame and a slot and
 nothing further.
 
+**Closed by §29 (2026-08-03).** The next step was to ask what instruction writes
+that slot: it is the home an aggregate-returning call's result is stored into,
+reported as a GC root at the very call that fills it, so a loop around such a
+call describes the previous iteration's result. §29 has the mechanism, a
+deterministic reducer, and the fix.
+
 ### §26 suites
 
 - `make test-unit`: green.
