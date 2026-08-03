@@ -379,10 +379,21 @@ programs and the two this branch adds. `variadic_backing.go` still prints `1`
 even though it now costs an allocation it did not, which is the point of having
 both instruments: the census saw the cost and the program proves the answer.
 
-`TestLoopVarPerIteration`, `TestEscapeShadowPlacement`, `TestAllocationCounts`,
+`TestLoopVarPerIteration`, `TestAllocationCounts`,
 `TestAllocationCountsAgainstTheHostToolchain` and the `opt` and `ir` unit suites
 all pass. `go test ./goc/...` in full, the capability matrix and `make test-unit`
 were deliberately not run: a dependent job does that.
+
+`TestEscapeShadowPlacement` gains **one line**, and it is the same site 5.2's
+last paragraph is about:
+
+    net/http.http2Transport.newClientConn  slice-literal-backing  heap -> frame
+
+The AST walk now places that `[2]http2Setting` on the heap and the IR analysis
+would keep it in a frame. That is the "front end heap, IR frame" direction — a
+latent pessimisation in the walk, deliberately introduced, with the object on
+the heap either way, and the same class already has lines in the baseline from
+`httpcommon.go` and `servemux121.go`. Nothing moved in the other direction.
 
 ### 5.4 Determinism
 
