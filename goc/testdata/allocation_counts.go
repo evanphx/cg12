@@ -399,6 +399,19 @@ func methodRetainsReceiver() {
 	sinkInt = value.keep()
 }
 
+// methodValueReceiver takes a method value rather than calling the method. The
+// value is a closure over the receiver, so the receiver is in the closure and
+// nowhere else; the closure is a frame object here, so the receiver can be one
+// too. This used to be answered "escapes" because the walk accepted only an
+// immediately called method selector.
+//
+//go:noinline
+func methodValueReceiver() {
+	value := &scoreBox{value: theInt}
+	scoreOnce := value.score
+	sinkInt = scoreOnce()
+}
+
 const iterations = 1000
 
 // measure runs the operation `iterations` times after a warm-up of the same
@@ -454,6 +467,7 @@ func main() {
 	measure("nested_composite_literal_address", repeat(nestedCompositeLiteralAddress))
 	measure("append_from_spread_source", repeat(appendFromSpreadSource))
 	measure("interface_local_method_call", repeat(interfaceLocalMethodCall))
+	measure("method_value_receiver", repeat(methodValueReceiver))
 	measure("method_retains_receiver", repeat(methodRetainsReceiver))
 	measure("sprintf_in_loop", sprintfInLoop)
 	measure("variadic_ints_in_loop", variadicIntsInLoop)

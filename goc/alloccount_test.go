@@ -206,6 +206,11 @@ var gocAllocationCounts = []struct {
 	// testdata/method_receiver_retention.go for the program that reads the
 	// object back out of the reused frame.
 	{"method_retains_receiver", 100, 100, "the method publishes its receiver, so the object is on the heap"},
+	// A method value rather than a method call. The value is a closure over the
+	// receiver, so the receiver goes where the closure goes -- and the closure is
+	// a frame object. 1.00 -> 0. The walk used to accept only an immediately
+	// called method selector and answered "escapes" for everything else.
+	{"method_value_receiver", 0, 0, "the receiver is in the closure, and the closure is a frame object"},
 	{"sprintf_in_loop", 200, 100, "loop rule blocks the `...` promotion"},
 	{"variadic_ints_in_loop", 100, 0, "loop rule blocks the `...` promotion"},
 }

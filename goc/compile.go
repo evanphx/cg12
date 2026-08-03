@@ -2954,8 +2954,8 @@ func (g *gen) valueDoesNotEscapeWithin(
 			// address makes an interior pointer that keeps the whole object
 			// alive, so the object escapes exactly when that pointer does. A
 			// method value is a closure over the receiver and is answered by
-			// asking where the closure goes; an immediate call is answered by
-			// asking what the method does with the receiver.
+			// asking both what the method does with the receiver and where the
+			// closure goes; an immediate call asks only the first.
 			if parent.X != current {
 				return false
 			}
@@ -2967,11 +2967,15 @@ func (g *gen) valueDoesNotEscapeWithin(
 				address := addressedExpression(parent, parents, info)
 				return address == nil || !g.addressEscapesWithin(address, info, parents, body, checking)
 			}
-			call, calledImmediately := parents[parent].(*ast.CallExpr)
-			if !calledImmediately || call.Fun != parent {
+			if !g.methodCallDoesNotRetainReceiver(parent, info, checking) {
 				return false
 			}
-			return g.methodCallDoesNotRetainReceiver(parent, info, checking)
+			if call, calledImmediately := parents[parent].(*ast.CallExpr); calledImmediately && call.Fun == parent {
+				return true
+			}
+			// See nonEscapingObjectUse: a method value is a closure over the
+			// receiver, and the receiver goes where the closure goes.
+			current = parent
 		case *ast.RangeStmt:
 			return parent.X == current
 		case *ast.ReturnStmt:
@@ -3624,11 +3628,17 @@ func (g *gen) nonEscapingObjectUse(
 			address := addressedExpression(parent, parents, info)
 			return address == nil || !g.addressEscapesWithin(address, info, parents, body, checking)
 		}
-		call, calledImmediately := parents[parent].(*ast.CallExpr)
-		if !calledImmediately || call.Fun != parent {
+		if !g.methodCallDoesNotRetainReceiver(parent, info, checking) {
 			return false
 		}
-		return g.methodCallDoesNotRetainReceiver(parent, info, checking)
+		if call, calledImmediately := parents[parent].(*ast.CallExpr); calledImmediately && call.Fun == parent {
+			return true
+		}
+		// A method value is a closure over the receiver, so the receiver is
+		// wherever the closure is: `record := recorder.Add` puts recorder in
+		// record and nowhere else. The method's own answer above already covers
+		// what the call does with it; this covers where the closure goes.
+		return g.valueDoesNotEscapeWithin(parent, info, parents, body, checking)
 	case *ast.StarExpr:
 		return parent.X == identifier
 	case *ast.TypeAssertExpr:
