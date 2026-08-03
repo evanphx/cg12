@@ -524,3 +524,73 @@ number under goc, unoptimized and optimized, and fails on exact inequality in
 change that has to be understood before it is written down.
 `TestAllocationCountsAgainstTheHostToolchain` holds the gc column to `go run`,
 so the gap is a measurement and not a belief about one.
+
+## 9. Verification at the committed HEAD
+
+Every baseline in the tree reproduces at `4ae184c` without `-update`:
+
+```
+$ go test ./goc -run TestFrameEscapeAudit -count=1 -timeout 90m
+ok  github.com/evanphx/cg12/goc  279.069s
+
+$ go test ./goc -run 'TestAllocationCensus$|TestEscapeShadowPlacement$' -count=1 -timeout 90m
+ok  github.com/evanphx/cg12/goc  174.634s
+
+$ go test ./goc -run 'TestAllocationCounts' -count=1
+ok  github.com/evanphx/cg12/goc  12.751s
+
+$ go test ./goc -run 'TestLoopBodyAllocationsAreDistinctPerIteration|TestLoopAliasExpectationsMatchTheHostToolchain' -count=1
+ok  github.com/evanphx/cg12/goc  22.882s
+```
+
+`go test ./goc/...`, the capability matrix and `make test-unit` were deliberately
+not run: the brief assigns them to a dependent verification job.
+
+## 10. The answer
+
+**The three allocations in `fmt.Sprintf("value=%d", 42)` were:** one heap object
+holding the `...` backing array and the boxed argument together; one 16-byte
+interface descriptor, allocated because `sync.Pool.Get` returns `any` and goc
+heap-allocated a descriptor at every non-nil interface return in the program;
+and the result string, which gc pays for too and which is the whole of gc's
+1.00. The brief's framing of this as one class was the thing worth correcting:
+the backing array and the interface box were already merged into a single
+allocation, and the second allocation had nothing to do with variadic calls at
+all.
+
+**Two of the three are gone.** The interface-return descriptor is a frame slot —
+4 124 heap allocation sites removed across the compiled program, 2 783 of them
+`error` returns. The `...` backing array is a frame slot wherever the callee
+does not retain what it was handed, which is the case gc frames too.
+
+**The new `fmt.Sprintf("value=%d", 42)` count is 2.00 against gc's 1.00**, down
+from 3.00. The remaining one is the boxed argument, which has to be on the heap
+because `fmt.pp.doPrintf` assigns each element into a heap-allocated printer;
+gc pays nothing for it only because 42 fits in `runtime.staticuint64s`, and
+measures **1.74** on the same call with a value that does not. Seven of the
+thirteen measured calls now match go1.26.1 exactly, including every variadic
+call whose callee retains nothing, `fmt.Sprintf` with no variadic arguments,
+`fmt.Sprintf` of a string and of a struct, and the `sync.Pool` round trip.
+
+**The 585-line pessimism set shrank to 563** — 22 lines, or 29 net of the new
+corpus program's own lines. That number is small because the differential joins
+on source line and **4 125 census rows stopped being positionless**: the
+interface descriptors this branch removed have no source line, never joined, and
+cannot appear in either direction of that instrument. The permissive set went
+202 → 209 and all eight new lines were read; none is a frame address outliving
+its frame.
+
+**It is measurable in wall clock: 12%.** 100 000 `fmt.Sprintf` calls through a
+`strings.Builder` go from 348 ms to 302 ms, four runs each with non-overlapping
+ranges, one fewer GC cycle. goc now allocates less than gc on that workload
+(2.03 against 3.34) and is still 9× slower, so this closes part of an allocation
+gap and none of the performance gap behind it.
+
+**One thing found along the way is worth more than the numbers.** Section 3.6 is
+a dangling pointer this branch created and then removed: a callee retaining an
+*element* of a variadic `...any` call retains the whole merged object, and a
+depth-0 `ParamNoEscape` does not say it does not. The program printed the right
+answer, the frame-escape audit was clean, 387 of 390 corpus outputs were
+identical, and the only instrument that showed it was the gc differential's
+permissive column — read by hand, one line at a time, because that is what the
+column is for.
