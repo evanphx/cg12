@@ -52,6 +52,11 @@ var wholeCompilationGenFields = []string{
 	// something the parent had already emitted.
 	"contentSymbols",
 	"functionDescriptors",
+	// summaryParents is a pure cache of parent maps keyed by the syntax they
+	// were built from, so sharing it across derived generators is the point of
+	// having it -- the callers asking a summary question are in other functions
+	// and often other packages.
+	"summaryParents",
 	"literalData",
 	"runtimeTypes",
 	"goABITypes",
@@ -94,6 +99,7 @@ func fullyPopulatedGen() *gen {
 		typeTags:                    map[string]string{},
 		contentSymbols:              map[string]string{},
 		functionDescriptors:         map[string]string{},
+		summaryParents:              map[ast.Node]map[ast.Node]ast.Node{},
 		literalData:                 map[string]string{},
 		runtimeTypes:                map[string]types.Type{},
 		goABITypes:                  map[string]*ir.AggType{},

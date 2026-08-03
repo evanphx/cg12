@@ -33,3 +33,11 @@ core.*
 runtime_closure_captured_string
 pkginit_dispatch
 runtime_package_initializer_dispatch
+
+# goc-built corpus binaries. `go run ./cmd/goc -run` and the corpus harnesses
+# drop an executable named after the program in the working directory; four have
+# been committed by accident. These have no extension, so match them by name.
+/allocation_counts
+/pkginit_dispatch
+/runtime_package_initializer_dispatch
+/runtime_closure_captured_string
