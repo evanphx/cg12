@@ -2082,3 +2082,357 @@ alloc / 128 B against gc's 3.00 / 24 B. It is off gc and it is not a regression
 `logattrs/6-attr` (goc 2.00 / 48 B over gc's 1.00) is the variadic backing array
 for `...Attr`, which is the documented variadic-summary gap and is group G10
 below.
+- `TestCompilingTheSameSourceTwiceGivesTheSameModule` (determinism): PASS.
+- `TestLoopBodyAllocationsAreDistinctPerIteration` and
+  `TestLoopAliasExpectationsMatchTheHostToolchain`: PASS -- loop-aliasing
+  programs still match the host toolchain.
+- `TestAllocationCounts` and `TestAllocationCountsAgainstTheHostToolchain`:
+  PASS, including the five new rows.
+- `TestTypeGCMasksArePaddedToAPointerWord`: PASS.
+
+## The classification, group by group
+
+The 134 fell into **17 groups**: 5 that this branch fixed, and 12 that remain.
+Every line is in exactly one group; the lists below are generated from the
+regenerated differential and sum to 113 + 21 = 134.
+
+### The 12 groups that remain (113 lines)
+
+**G1 -- maps have no frame-allocated header (38). VERDICT: gc is right.**
+`gen.allocateMap` calls `runtime.makemap(t, hint, 0)` unconditionally, so the
+escape analysis is never asked about a map. The whole census contains zero
+`makemap ... frame` rows. gc stack-allocates the `maps.Map` header when the map
+does not escape and one group with it when the hint is small, and the vendored
+runtime already accepts it (`runtime/map.go`: "If m != nil, the map can be
+created directly in m"). This is a representation gap, not an analysis defect,
+and it is the largest single group by a factor of two. Closing it means giving
+the front end `internal/runtime/maps.Map`'s layout, a pointer-word mark for its
+`dirPtr`, and an escape question for map variables that has never been asked
+once -- which would move hundreds of census sites in the correctness-critical
+direction at one go. It is a task of its own and I did not attempt it here.
+
+**G4 -- a value boxed into an interface (17). VERDICT: gc is right; two causes,
+both structural.** Twelve of these are the *payload*: goc has no frame form for
+one, so `convT64` and the `newobject` behind a boxed string or array are always
+heap (zero `convT64 ... frame` rows in the census). Five are the *source*: the
+walk's `boxedIntoInterface` is unconditional, so a slice whose header is copied
+into a box that provably dies at the call -- `runtime.KeepAlive(values)`,
+`reflect.TypeOf([]int{})` -- is charged with the box's escape. Boxing copies, so
+the right question is where the box goes; asking it needs the payload to have a
+frame form first, or the two halves disagree.
+
+**G2 -- the Read buffer (10). VERDICT: gc is right, but not by a rule goc is
+missing.** Measured above: `internal/poll.ignoringEINTRIO`'s own gc summary is
+`leaking param: p`. gc gets "does not escape" by inlining it first. goc's walk
+runs on the AST before any inlining and cannot see through `fn(fd, p)` where
+`fn` is a function-typed parameter. **Irreducible** without an inliner ahead of
+the walk or a whole-program resolution of function-valued parameters.
+
+**G7 -- a stdlib summary the walk could not get through (11). VERDICT: gc is
+right, one callee at a time.** `slices.Sort`, `sort.Ints`, `reflect.ValueOf`,
+`(reflect.Value).Call`, `runtime.SetFinalizer`, `runtime/metrics.Read`,
+`crypto/mlkem.NewDecapsulationKey768`, `(*zip.Writer).CreateHeader`. Each is one
+callee whose body defeats the walk somewhere; they are not one cause and fixing
+them is not one change. Reducible, slowly.
+
+**G6 -- the callee is a func value, an interface method, or a literal the walk
+places on the heap (8). VERDICT: gc is right where it devirtualises.** `f(arg,
+...)` through a `var f func(...)` assigned once, `(cipher.Block).Encrypt`,
+`(io.Writer).Write`. gc resolves these by devirtualisation, which goc, compiling
+whole-program, could do better than gc -- but does not do at all in this walk.
+
+**G10 -- a composite literal handed to a call the walk cannot follow (6).
+VERDICT: gc is right.** The four `&http.Cookie{...}` in a `[]*http.Cookie`
+passed to `(*cookiejar.Jar).SetCookies`, plus `&jpeg.Options{...}` and one more
+cookie. gc's per-package summaries say the callee copies out of them. Reachable
+in principle, deep in practice.
+
+**G5 -- `new(T)` (5). VERDICT: gc is right; wrong lever.** `new(T)` and boxed
+payloads are emitted as the neutral `HeapAlloc` candidate and decided by
+`opt.LowerHeapAllocations`, not by the AST walk. These five are the IR pass's
+answers and nothing in this branch's area moves them.
+
+**G3 -- non-constant `make([]T, n)` (5). VERDICT: neither compiler frames these;
+the line is not a real difference.** Measured against the host toolchain:
+`make([]int, n)` with non-constant n gets `does not escape` from `-m` *and* a
+`CALL runtime.makeslice`. `gcdiff` maps "does not escape" to Frame
+unconditionally (`gcdiff.go:363`), so these five count as a difference when both
+compilers allocate. **A measurement artifact.** I left the ruler alone rather
+than change the join in the same branch that changes the compiler; narrowing it
+to "not a make with a non-constant length" is a clean follow-up that would take
+the count to 108.
+
+**G12 -- an aggregate copied whole, or a map lookup key (5). VERDICT: goc is
+over-conservative, reducible.** `copy := source` where source is `[4]*T` is a
+copy, and `copyAliasesStorage` refuses arrays; `values[&mapPointerKey{...}]` is
+a lookup key that `mapaccess` does not retain, and `nonEscapingAddressWithin`
+has no index case. Both are small, and both need care about the assignment
+direction (a map *assignment* key is retained).
+
+**G8 -- a recursive callee has no summary (3). VERDICT: gc is right.**
+`parameterDoesNotEscape` breaks its cycle by answering "escapes". A fixpoint
+would answer these; the cycle-breaking answer is the safe direction and the walk
+has no fixpoint.
+
+**G9 -- a variadic parameter has no summary (3). VERDICT: gc is right.** The
+documented gap at `goc/compile.go`'s `parameterDoesNotEscape`: the summary
+refuses variadic positions because an argument there is an element of a slice
+the callee builds. Still open, and it is what `logattrs/6-attr` costs in the
+slog table.
+
+**G11 -- a method value (2). VERDICT: gc is right.** `record := recorder.Add`
+makes a closure over the receiver; the receiver escapes exactly when the closure
+does, and the walk answers only the immediately-called case.
+
+### The 5 groups this branch fixed (21 lines)
+
+    F1  a string <-> []byte/[]rune conversion copies                    7 lines
+    F3  ranging over an object does not carry it anywhere               6 lines
+    F4  an address that is an element of a struct or array literal      5 lines
+    F5  append reads its `xs...` operand and does not keep it           2 lines
+    F2  `var x T = y`; interfaces alias; i.(T) and p.f keep going       1 line
+
+Each has an allocation-count row in `goc/testdata/allocation_counts.go` measured
+under both compilers, and each row is 1 allocation per call before its change
+and 0 after -- verified by removing that one change and re-running.
+
+**G1 -- maps have no frame-allocated header (38)**
+
+```
+runtime_array_map_key.go                          4  makemap    table := map[[3]int]string{
+runtime_assign_target_forms.go                   42  makemap    counts := map[string]int{}
+runtime_assign_target_forms.go                   47  makemap    counts = map[string]int{}
+runtime_assign_target_forms.go                   59  makemap    counts := map[string]int{"k": 10}
+runtime_assign_target_forms.go                   97  makemap    counts := map[string]int{"a": 3}
+runtime_assign_target_forms.go                  125  makemap    texts := map[int]string{1: "one"}
+runtime_core_types.go                            21  makemap    buckets := map[string]*bucket{
+runtime_interface_comparable_map.go               9  makemap    table := map[interface{}]int{
+runtime_loopvar_range.go                         46  makemap    counts := map[string]int{"a": 1, "b": 2, "c": 3}
+runtime_map_clear.go                              4  makemap    counts := map[string]int{
+runtime_map_delete_iter_gc.go                    11  makemap    values := make(map[int]*payload)
+runtime_map_growth_gc.go                         12  makemap    values := make(map[int]*entry)
+runtime_map_interface_keys_gc.go                 11  makemap    values := make(map[any]int)
+runtime_map_interface_values_gc.go               11  makemap    values := make(map[int]interface{})
+runtime_map_iter_delete_insert.go                 4  makemap    values := map[int]int{
+runtime_map_pointer_keys.go                      12  makemap    values := map[*mapPointerKey]int{
+runtime_map_pointer_values_gc.go                 11  makemap    values := make(map[int]*mapPointerBox)
+runtime_map_range_delete_all.go                   4  makemap    values := make(map[int]int)
+runtime_map_range_insert_growth.go                4  makemap    values := make(map[int]int)
+runtime_map_struct_value_replace.go               9  makemap    items := map[string]mapStructValue{
+runtime_println_operand_separation.go            88  makemap    assertShape("map", capture(func() { println(map[int]
+runtime_range_target_forms.go                    78  makemap    counts := map[string]int{}
+runtime_range_target_forms.go                   227  makemap    single := map[int]string{7: "x"}
+runtime_range_target_forms.go                   236  makemap    weights := map[int]int{1: 10, 2: 20, 3: 30}
+runtime_range_target_forms.go                   243  makemap    source := map[int]int{7: 9}
+runtime_range_target_forms.go                   244  makemap    destination := map[int]int{}
+runtime_range_target_order.go                    69  makemap    counts := map[string]int{}
+runtime_range_target_order.go                   102  makemap    runes := map[int]rune{}
+runtime_reflect_make_values.go                   11  makemap    mapType := reflect.TypeOf(map[string]int{})
+runtime_reflect_map_slice.go                      6  makemap    mapType := reflect.TypeOf(map[string]int{})
+runtime_string_rune_map.go                        4  makemap    counts := map[rune]int{}
+stdlib_encoding_pem.go                            8  makemap    Headers: map[string]string{
+stdlib_maps_keys.go                               6  makemap    scores := map[string]int{
+stdlib_maps_keys.go                              12  makemap    seen := map[string]bool{}
+stdlib_maps_slices.go                             9  makemap    scores := map[string]int{
+stdlib_maps_slices.go                            14  makemap    clone := map[string]int{}
+stdlib_net_mail_textproto.go                     20  makemap    header := textproto.MIMEHeader{}
+stdlib_url_values_encode.go                       6  makemap    values := url.Values{}
+```
+
+**G4 -- a value boxed into an interface (17)**
+
+```
+allocation_counts.go                            121  convT64    func boxSmallInt() { sinkInt = takeAny(theInt) }
+allocation_counts.go                            124  convT64    func boxLargeInt() { sinkInt = takeAny(theLargeInt) 
+allocation_counts.go                            127  convT64    func boxBool() { sinkInt = takeAny(theBool) }
+allocation_counts.go                            130  convT64    func boxFloat64() { sinkInt = takeAny(theFloat) }
+allocation_counts.go                            133  newobject  func boxString() { sinkInt = takeAny(theString) }
+interface_slice_equality.go                       6  convT64    if value != values[0] {
+interface_slice_equality.go                       9  convT64    if value == any(2) {
+runtime_debug_gc_controls.go                     15  newobject  values := make([]*int, 0, 128)
+runtime_debug_gc_controls.go                     32  newobject  runtime.KeepAlive(values)
+runtime_panic_stack_gc.go                        19  newobject  runtime.KeepAlive(scratch)
+runtime_panic_stack_recover_gc.go                19  newobject  runtime.KeepAlive(scratch)
+runtime_reflect_make_values.go                    6  newobject  sliceType := reflect.TypeOf([]int{})
+runtime_reflect_map_slice.go                     19  newobject  sliceType := reflect.TypeOf([]int{})
+runtime_slice_pointer_append_gc.go               10  newobject  values := make([]*record, 0, 4)
+runtime_slice_pointer_append_gc.go               25  newobject  runtime.KeepAlive(values)
+stdlib_signal_during_gc.go                       23  newobject  values := make([]*int, 1024)
+stdlib_signal_during_gc.go                       29  newobject  runtime.KeepAlive(values)
+```
+
+**G2 -- the Read buffer: gc inlines before escape analysis, goc cannot (10)**
+
+```
+runtime_println_operand_separation.go           168  newobject  buffer := make([]byte, 8192)
+runtime_stack_scan_syscall.go                   115  newobject  buffer := make([]byte, 4)
+stdlib_netpoll_pipe_afterfunc_close.go           24  newobject  buffer := make([]byte, 1)
+stdlib_netpoll_pipe_close_unblocks_read.go       17  newobject  buffer := make([]byte, 1)
+stdlib_netpoll_pipe_deadline.go                  23  newobject  buffer := make([]byte, 1)
+stdlib_netpoll_pipe_past_deadline.go             23  newobject  buffer := make([]byte, 1)
+stdlib_netpoll_stress_pipe_close_churn.go        17  newobject  buffer := make([]byte, 1)
+stdlib_netpoll_stress_pipe_deadline_reset.go     22  newobject  buffer := make([]byte, 1)
+stdlib_os_file_roundtrip.go                      26  newobject  buffer := make([]byte, 10)
+stdlib_os_pipe_goroutine_close.go                24  newobject  buffer := make([]byte, 8)
+```
+
+**G7 -- a stdlib summary the walk could not get through (11)**
+
+```
+adler32_marshal_loop.go                          21  newobject  appendedState, err := hash.(encoding.BinaryAppender)
+runtime_closure_captured_string.go               94  newobject  assignBytes([]byte{'a', 'z'})
+runtime_finalizer_basic.go                       22  newobject  runtime.SetFinalizer(value, func(item *finalizable) 
+runtime_reflect_call_aggregate_matrix.go         70  newobject  results := reflect.ValueOf(function).Call([]reflect.
+runtime_reflect_method_metadata.go               27  newobject  results := method.Func.Call([]reflect.Value{
+runtime_reflect_set_fields.go                    11  newobject  payload := &reflectSetPayload{}
+runtime_reflect_value_call.go                    11  newobject  arguments := []reflect.Value{
+stdlib_crypto_mlkem.go                            9  newobject  seed := make([]byte, mlkem.SeedSize)
+stdlib_maps_slices.go                            25  newobject  values := []int{5, 1, 3, 2, 4}
+stdlib_slices_string_sort.go                      6  newobject  keys := []string{"gamma", "alpha", "beta"}
+stdlib_sort_search_slice.go                       6  newobject  values := []int{9, 1, 5, 3, 7}
+```
+
+**G6 -- the callee is a func value, an interface method, or an escaping literal (8)**
+
+```
+runtime_interface_method_gc.go                   23  newobject  value := scorer(&scoreBox{
+runtime_interface_method_gc.go                   25  newobject  next:  &scoreBox{value: 25},
+runtime_interface_to_interface.go                29  newobject  var combined interfaceReadCloser = &interfaceResourc
+runtime_println_operand_separation.go            82  newobject  assertShape("empty slice", capture(func() { println(
+runtime_reflect_value_indirect_call.go           28  newobject  instruction := &reflectValueInstruction{field: 5}
+runtime_reflect_value_indirect_call.go           29  newobject  state := &reflectValueState{}
+runtime_timer_callback_shape.go                  16  newobject  box := &callbackBox{value: 10}
+stdlib_compress_zlib_lzw.go                      72  newobject  lowWidthInput := []byte{0, 1, 2, 3, 0, 2, 1, 3, 3, 2
+```
+
+**G10 -- a composite literal handed to a call the walk cannot follow (6)**
+
+```
+stdlib_http_cookiejar.go                         17  newobject  {Name: "host", Value: "api", Path: "/"},
+stdlib_http_cookiejar.go                         18  newobject  {Name: "account", Value: "private", Path: "/account"
+stdlib_http_cookiejar.go                         19  newobject  {Name: "secure", Value: "yes", Path: "/", Secure: tr
+stdlib_http_cookiejar.go                         20  newobject  {Name: "expired", Value: "gone", Path: "/", Expires:
+stdlib_http_redirect_keepalive.go                24  newobject  http.SetCookie(response, &http.Cookie{
+stdlib_image_jpeg_roundtrip.go                   18  newobject  if err := jpeg.Encode(&encoded, source, &jpeg.Option
+```
+
+**G5 -- new(T): the decision is the IR pass’s, not the walk’s (5)**
+
+```
+gc_struct.go                                     25  newobject  root := new(record)
+runtime_println_operand_separation.go            84  newobject  pointer := new(int)
+runtime_range_target_forms.go                   369  newobject  pointer := new(string)
+runtime_span_metadata_barrier.go                 47  newobject  root := new(spanRecord)
+stdlib_math_big_rat_int.go                       15  newobject  delta := new(big.Rat).Sub(denominator, numerator)
+```
+
+**G3 -- non-constant make([]T, n): both compilers heap-allocate (5)**
+
+```
+runtime_copy_interface_slice_gc.go               23  makeslice  destination := make([]interface{}, len(source))
+runtime_gc_mark_workers.go                      117  makeslice  expected := make([]int, len(retained))
+runtime_loopvar_range.go                        112  makeslice  values := make([]string, 0, len(closures))
+stdlib_encoding_ascii85.go                        7  makeslice  encoded := make([]byte, ascii85.MaxEncodedLen(len(so
+stdlib_encoding_ascii85.go                       10  makeslice  decoded := make([]byte, len(source)+4)
+```
+
+**G12 -- an aggregate copied whole, or a map lookup key (5)**
+
+```
+runtime_array_copy_pointer_gc.go                 11  newobject  {value: 3},
+runtime_array_copy_pointer_gc.go                 12  newobject  {value: 5},
+runtime_array_copy_pointer_gc.go                 13  newobject  {value: 7},
+runtime_array_copy_pointer_gc.go                 14  newobject  {value: 11},
+runtime_map_pointer_keys.go                      27  newobject  if values[&mapPointerKey{value: 17}] != 0 {
+```
+
+**G8 -- a recursive callee has no summary (3)**
+
+```
+runtime_panic_stack_gc.go                        23  newobject  retained := &marker{value: 42}
+runtime_stack_growth.go                          24  newobject  root := &payload{
+runtime_stack_growth.go                          26  newobject  next:  &payload{value: 25},
+```
+
+**G9 -- a variadic parameter has no summary (3)**
+
+```
+allocation_counts.go                            273  newobject  sinkInt = variadicInts(theInt, theInt)
+runtime_range_target_forms.go                   137  newobject  observed += fmt.Sprintf("%v|", box.value)
+runtime_range_target_forms.go                   144  newobject  observed += fmt.Sprintf("%v|", box.value)
+```
+
+**G11 -- a method value (2)**
+
+```
+runtime_defer_method_value_order.go              12  newobject  recorder := &deferMethodRecorder{}
+runtime_method_value_gc.go                       16  newobject  counter := &methodValueCounter{value: 17}
+```
+
+Total: 113
+
+
+## The 21 lines this branch moved into a frame
+
+```
+bytes_grow_allocs.go                             12  newobject  startSizes := []int{0, 100, 1000, 10000, 100000}
+bytes_grow_allocs.go                             13  newobject  growSizes := []int{10000, 100000}
+runtime_append_self_overlap.go                    4  newobject  values := []int{1, 2, 3, 4}
+runtime_copy_string_to_bytes.go                   4  newobject  buffer := []byte{'x', 'x', 'x', 'x', 'x'}
+runtime_goroutine_entry_stack_map.go             88  newobject  next:  &link{index: index + 1},
+runtime_interface_pointer_equality_gc.go         10  newobject  node := &interfacePointerEqualityNode{value: 42}
+runtime_keepalive_stack_root.go                  61  newobject  next:  &keptItem{index: index + 1},
+runtime_many_goroutines_gc.go                    18  newobject  next:  &item{index: index + 1},
+runtime_range_target_forms.go                    46  newobject  letters := []string{"a", "b", "c"}
+runtime_range_target_order.go                   160  newobject  letters := []string{"a", "b", "c"}
+runtime_scheduler_gc_churn.go                    29  newobject  next:  &schedulerGCNode{value: round},
+runtime_slice_copy_overlap.go                     4  newobject  values := []int{1, 2, 3, 4, 5, 6}
+runtime_stack_scan_syscall.go                   101  newobject  buffer := make([]byte, 4)
+runtime_unsafe_struct_field.go                   15  newobject  next:  &unsafeFieldNode{left: 13, right: 17},
+stdlib_archive_zip_roundtrip.go                  74  newobject  if !bytes.Equal(raw, []byte{1, 3, 5, 7, 9}) {
+stdlib_bytes_reader_unread.go                    18  newobject  buffer := make([]byte, 3)
+stdlib_crypto_des_rc4.go                         42  newobject  rc4Ciphertext := make([]byte, len("Plaintext"))
+stdlib_encoding_hex.go                            6  newobject  source := []byte{0, 1, 2, 10, 15, 16, 255}
+stdlib_maps_slices.go                            31  newobject  numbers := []int{1, 2, 3, 4}
+stdlib_netpoll_udp_loopback.go                   21  newobject  buffer := make([]byte, 8)
+stdlib_strings_reader_seek.go                    15  newobject  buffer := make([]byte, 3)
+```
+
+## What is irreducible, and why
+
+- **G2, the Read buffer (10).** Irreducible in this walk. gc's answer comes from
+  inlining, and its own un-inlined summary for the same function agrees with
+  goc. This is a pipeline-position difference, not a missing rule.
+- **G3, non-constant makes (5).** Not a difference at all. Both compilers call
+  `runtime.makeslice`; the join reads gc's "does not escape" as "frame".
+- **G8, recursion (3).** Irreducible without a fixpoint. The cycle-breaking
+  answer is the safe one.
+- **G1, maps (38).** Reducible, and the biggest thing left, but it is a
+  representation change with a GC-safety obligation, not an analysis fix.
+- **G4, boxing (17).** Reducible only after interface payloads have a frame
+  form; fixing the walk's half alone would let a frame-charged source pair with
+  a heap payload.
+- Everything else (G5, G6, G7, G9, G10, G11, G12 -- 40 lines) is reducible by
+  ordinary work, one cause at a time, with no representation change needed.
+
+So of the 113: **15 are irreducible or not real** (G2 + G3), **55 need a
+representation change first** (G1 + G4), and **43 are ordinary analysis work**.
+
+## Compile time
+
+The escape walk asks a callee's summary once per caller and once per argument
+position and rebuilt that callee's parent map every time. Compiling
+`testdata/allocation_counts.go` asked 8812 such questions with 734 distinct
+answers; the cache removes 8078 of the 8812 rebuilds.
+
+Measured: ~0.1s of CPU and about 2% of wall on that program (6.43s -> 6.28s
+median of five), and inside the noise on `stdlib_http_redirect_keepalive.go`
+(75.3s vs 75.6s user, 33.0s vs 32.8s wall), whose compile is dominated by
+everything else. That is less than the 60%-of-7.1% the brief expected, and the
+profile says why: after the cache, `astParents` is 0.14s cumulative of a 20s
+CPU profile, and what is left is the per-function parent maps that lowering
+needs and that were never the repeated ones. Memoising the *answers* rather
+than the maps is the remaining move there, and it is not free: an answer
+produced while a `checking` cycle was broken is not the same answer as one
+produced from a clean stack, so it would need a "did this computation hit a
+cycle" flag before anything could be cached.
