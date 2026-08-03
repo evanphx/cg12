@@ -248,6 +248,13 @@ func runtimeCapabilities() []runtimeCapability {
 		},
 		{
 			category:    "core-types",
+			name:        "package-initializer-dispatch",
+			source:      "runtime_package_initializer_dispatch.go",
+			expectation: runtimeCapabilityMustPass,
+			note:        "interface conversions reached only through a package-level variable initializer",
+		},
+		{
+			category:    "core-types",
 			name:        "slice-to-array-pointer",
 			source:      "runtime_slice_to_array_pointer.go",
 			expectation: runtimeCapabilityMustPass,

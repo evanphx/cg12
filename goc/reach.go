@@ -376,6 +376,129 @@ func reachableFunctions(fset *token.FileSet, roots []*ast.FuncDecl, rootFiles []
 			}
 		}
 	}
+	// enqueueStatementConversions and enqueueCallConversions are the complete
+	// list of the sites where a value is implicitly converted to an interface,
+	// and so the complete list of the places a concrete type earns a dispatch
+	// entry without anyone writing its name.
+	//
+	// Two walks in this file need that list: the one over function bodies below
+	// and the one over package-level variable initializers just after. They used
+	// to keep a list each, and the initializer's was the shorter one -- it knew
+	// about composite literals and explicit T(x) conversions, but not about a
+	// concrete value handed to a call whose parameter is an interface, which is
+	// how nearly every package-level interface value is actually built. A
+	// program whose only value of some type came from a `var x = f(v)` at
+	// package scope therefore reached the linker with no dispatch entry for that
+	// type, and died at the first call through the interface with
+	// gocInterfaceDispatchFailure. One list, called from both walks, is what
+	// stops the two from drifting apart again.
+	//
+	// parents and enclosing describe the function whose body is being walked: the
+	// parent map is how a return statement finds the function literal it belongs
+	// to, and enclosing is the signature to use when it belongs to none. An
+	// initializer expression is inside no function, so that walk passes the
+	// expression's own parent map and a nil signature -- a return there can only
+	// be inside a function literal, which carries its own.
+	enqueueStatementConversions := func(node ast.Node, info *types.Info, parents map[ast.Node]ast.Node, enclosing *types.Signature) {
+		switch statement := node.(type) {
+		case *ast.CompositeLit:
+			enqueueCompositeImplementations(statement, info)
+		case *ast.AssignStmt:
+			if len(statement.Lhs) == len(statement.Rhs) {
+				for index, value := range statement.Rhs {
+					targetType := info.Types[statement.Lhs[index]].Type
+					enqueueValueImplementation(value, targetType, info)
+				}
+			} else if len(statement.Rhs) == 1 && len(statement.Lhs) > 1 {
+				call, ok := statement.Rhs[0].(*ast.CallExpr)
+				if !ok {
+					break
+				}
+				signature, ok := info.Types[call.Fun].Type.Underlying().(*types.Signature)
+				if !ok || signature.Results().Len() != len(statement.Lhs) {
+					break
+				}
+				for index, lhs := range statement.Lhs {
+					targetType := info.Types[lhs].Type
+					sourceType := signature.Results().At(index).Type()
+					enqueueTypeImplementation(sourceType, targetType)
+				}
+			}
+		case *ast.ValueSpec:
+			for index, value := range statement.Values {
+				if index >= len(statement.Names) {
+					continue
+				}
+				object := info.Defs[statement.Names[index]]
+				if object == nil {
+					object = info.Uses[statement.Names[index]]
+				}
+				if object != nil {
+					enqueueValueImplementation(value, object.Type(), info)
+				}
+			}
+		case *ast.ReturnStmt:
+			signature := enclosing
+			for parent := ast.Node(statement); parent != nil; parent = parents[parent] {
+				if function, ok := parent.(*ast.FuncLit); ok {
+					signature, _ = info.Types[function.Type].Type.(*types.Signature)
+					break
+				}
+			}
+			if signature != nil && len(statement.Results) == signature.Results().Len() {
+				for index, value := range statement.Results {
+					enqueueValueImplementation(value, signature.Results().At(index).Type(), info)
+				}
+			} else if signature != nil && len(statement.Results) == 1 {
+				call, ok := statement.Results[0].(*ast.CallExpr)
+				if ok {
+					forwarded, ok := info.Types[call.Fun].Type.Underlying().(*types.Signature)
+					if ok && forwarded.Results().Len() == signature.Results().Len() {
+						for index := 0; index < forwarded.Results().Len(); index++ {
+							sourceType := forwarded.Results().At(index).Type()
+							targetType := signature.Results().At(index).Type()
+							enqueueTypeImplementation(sourceType, targetType)
+						}
+					}
+				}
+			}
+		case *ast.SendStmt:
+			if channelType, ok := info.Types[statement.Chan].Type.Underlying().(*types.Chan); ok {
+				enqueueValueImplementation(statement.Value, channelType.Elem(), info)
+			}
+		}
+	}
+	// enqueueConversionCall covers the explicit T(x) form, which is a call node
+	// rather than a statement.
+	enqueueConversionCall := func(call *ast.CallExpr, info *types.Info) {
+		if info.Types[call.Fun].IsType() && len(call.Args) == 1 {
+			enqueueValueImplementation(call.Args[0], info.Types[call].Type, info)
+		}
+	}
+	// enqueueCallConversions covers an argument passed to an interface
+	// parameter, including the elements of a variadic one.
+	enqueueCallConversions := func(call *ast.CallExpr, info *types.Info) {
+		signature, ok := info.Types[call.Fun].Type.Underlying().(*types.Signature)
+		if !ok {
+			return
+		}
+		for argumentIndex, argument := range call.Args {
+			parameterIndex := argumentIndex
+			if signature.Variadic() && parameterIndex >= signature.Params().Len()-1 {
+				parameterIndex = signature.Params().Len() - 1
+			}
+			if parameterIndex < 0 || parameterIndex >= signature.Params().Len() {
+				continue
+			}
+			parameterType := signature.Params().At(parameterIndex).Type()
+			if signature.Variadic() && !call.Ellipsis.IsValid() && parameterIndex == signature.Params().Len()-1 {
+				parameterType = parameterType.Underlying().(*types.Slice).Elem()
+			}
+			if interfaceType, ok := parameterType.Underlying().(*types.Interface); ok {
+				enqueueImplementation(info.Types[argument].Type, interfaceType)
+			}
+		}
+	}
 	seenGlobals := make(map[types.Object]bool)
 	var enqueueGlobal func(types.Object)
 	enqueueGlobal = func(object types.Object) {
@@ -389,13 +512,13 @@ func reachableFunctions(fset *token.FileSet, roots []*ast.FuncDecl, rootFiles []
 		}
 		for _, expression := range initializer.expressions {
 			enqueueValueImplementation(expression, object.Type(), initializer.info)
+			parents := astParents(expression)
 			ast.Inspect(expression, func(node ast.Node) bool {
-				if call, ok := node.(*ast.CallExpr); ok && len(call.Args) == 1 && initializer.info.Types[call.Fun].IsType() {
-					enqueueValueImplementation(call.Args[0], initializer.info.Types[call].Type, initializer.info)
+				if call, ok := node.(*ast.CallExpr); ok {
+					enqueueConversionCall(call, initializer.info)
+					enqueueCallConversions(call, initializer.info)
 				}
-				if literal, ok := node.(*ast.CompositeLit); ok {
-					enqueueCompositeImplementations(literal, initializer.info)
-				}
+				enqueueStatementConversions(node, initializer.info, parents, nil)
 				identifier, ok := node.(*ast.Ident)
 				if !ok {
 					return true
@@ -502,73 +625,7 @@ func reachableFunctions(fset *token.FileSet, roots []*ast.FuncDecl, rootFiles []
 			currentSignature, _ := currentFunction.Type().(*types.Signature)
 			parents := astParents(current.decl.Body)
 			ast.Inspect(current.decl.Body, func(node ast.Node) bool {
-				switch statement := node.(type) {
-				case *ast.CompositeLit:
-					enqueueCompositeImplementations(statement, current.info)
-				case *ast.AssignStmt:
-					if len(statement.Lhs) == len(statement.Rhs) {
-						for index, value := range statement.Rhs {
-							targetType := current.info.Types[statement.Lhs[index]].Type
-							enqueueValueImplementation(value, targetType, current.info)
-						}
-					} else if len(statement.Rhs) == 1 && len(statement.Lhs) > 1 {
-						call, ok := statement.Rhs[0].(*ast.CallExpr)
-						if !ok {
-							break
-						}
-						signature, ok := current.info.Types[call.Fun].Type.Underlying().(*types.Signature)
-						if !ok || signature.Results().Len() != len(statement.Lhs) {
-							break
-						}
-						for index, lhs := range statement.Lhs {
-							targetType := current.info.Types[lhs].Type
-							sourceType := signature.Results().At(index).Type()
-							enqueueTypeImplementation(sourceType, targetType)
-						}
-					}
-				case *ast.ValueSpec:
-					for index, value := range statement.Values {
-						if index >= len(statement.Names) {
-							continue
-						}
-						object := current.info.Defs[statement.Names[index]]
-						if object == nil {
-							object = current.info.Uses[statement.Names[index]]
-						}
-						if object != nil {
-							enqueueValueImplementation(value, object.Type(), current.info)
-						}
-					}
-				case *ast.ReturnStmt:
-					signature := currentSignature
-					for parent := ast.Node(statement); parent != nil; parent = parents[parent] {
-						if function, ok := parent.(*ast.FuncLit); ok {
-							signature, _ = current.info.Types[function.Type].Type.(*types.Signature)
-							break
-						}
-					}
-					if signature != nil && len(statement.Results) == signature.Results().Len() {
-						for index, value := range statement.Results {
-							enqueueValueImplementation(value, signature.Results().At(index).Type(), current.info)
-						}
-					} else if signature != nil && len(statement.Results) == 1 {
-						call, ok := statement.Results[0].(*ast.CallExpr)
-						if ok {
-							forwarded, ok := current.info.Types[call.Fun].Type.Underlying().(*types.Signature)
-							if ok && forwarded.Results().Len() == signature.Results().Len() {
-								for index := 0; index < forwarded.Results().Len(); index++ {
-									sourceType := forwarded.Results().At(index).Type()
-									targetType := signature.Results().At(index).Type()
-									enqueueTypeImplementation(sourceType, targetType)
-								}
-							}
-						}
-					}
-				case *ast.SendStmt:
-					if channelType, ok := current.info.Types[statement.Chan].Type.Underlying().(*types.Chan); ok {
-						enqueueValueImplementation(statement.Value, channelType.Elem(), current.info)
-					}
-				}
+				enqueueStatementConversions(node, current.info, parents, currentSignature)
 				if statement, ok := node.(*ast.RangeStmt); ok {
 					rangeType := current.info.Types[statement.X].Type
 					if basic, ok := rangeType.Underlying().(*types.Basic); ok && (basic.Kind() == types.String || basic.Kind() == types.UntypedString) {
@@ -633,15 +690,13 @@ func reachableFunctions(fset *token.FileSet, roots []*ast.FuncDecl, rootFiles []
 					}
 				}
 				if call, ok := node.(*ast.CallExpr); ok {
-					if current.info.Types[call.Fun].IsType() && len(call.Args) == 1 {
-						enqueueValueImplementation(call.Args[0], current.info.Types[call].Type, current.info)
-						if runtimeAllocation {
-							source, sourceIsBasic := current.info.Types[call.Args[0]].Type.Underlying().(*types.Basic)
-							target, targetIsBasic := current.info.Types[call].Type.Underlying().(*types.Basic)
-							if sourceIsBasic && targetIsBasic && source.Info()&types.IsInteger != 0 && target.Kind() == types.String {
-								if intstring, exists := runtimeFunctions["intstring"]; exists {
-									queue = append(queue, intstring)
-								}
+					enqueueConversionCall(call, current.info)
+					if runtimeAllocation && current.info.Types[call.Fun].IsType() && len(call.Args) == 1 {
+						source, sourceIsBasic := current.info.Types[call.Args[0]].Type.Underlying().(*types.Basic)
+						target, targetIsBasic := current.info.Types[call].Type.Underlying().(*types.Basic)
+						if sourceIsBasic && targetIsBasic && source.Info()&types.IsInteger != 0 && target.Kind() == types.String {
+							if intstring, exists := runtimeFunctions["intstring"]; exists {
+								queue = append(queue, intstring)
 							}
 						}
 					}
@@ -687,24 +742,7 @@ func reachableFunctions(fset *token.FileSet, roots []*ast.FuncDecl, rootFiles []
 							}
 						}
 					}
-					if signature, ok := current.info.Types[call.Fun].Type.Underlying().(*types.Signature); ok {
-						for argumentIndex, argument := range call.Args {
-							parameterIndex := argumentIndex
-							if signature.Variadic() && parameterIndex >= signature.Params().Len()-1 {
-								parameterIndex = signature.Params().Len() - 1
-							}
-							if parameterIndex < 0 || parameterIndex >= signature.Params().Len() {
-								continue
-							}
-							parameterType := signature.Params().At(parameterIndex).Type()
-							if signature.Variadic() && !call.Ellipsis.IsValid() && parameterIndex == signature.Params().Len()-1 {
-								parameterType = parameterType.Underlying().(*types.Slice).Elem()
-							}
-							if interfaceType, ok := parameterType.Underlying().(*types.Interface); ok {
-								enqueueImplementation(current.info.Types[argument].Type, interfaceType)
-							}
-						}
-					}
+					enqueueCallConversions(call, current.info)
 					if identifier, ok := call.Fun.(*ast.Ident); ok {
 						if builtin, ok := current.info.Uses[identifier].(*types.Builtin); ok {
 							switch builtin.Name() {
