@@ -191,6 +191,21 @@ var gocAllocationCounts = []struct {
 	// the object past the iteration, and for a variadic backing array nothing
 	// does. These numbers are the price of that bluntness, and lowering them is
 	// a real optimisation someone could do.
+	// An address converted to an interface type on the way into a local, then
+	// only called through. Parity. Two rules meet here: the emitter's
+	// nonEscapingAddress now asks the assignment question at every step of its
+	// climb rather than only of the address itself, so the conversion no longer
+	// ends the walk at its default case; and the method call is answered by
+	// asking every implementation the program can dispatch to. 1.00 -> 0.
+	{"interface_local_method_call", 0, 0, "the object goes where the local goes, and the one implementation keeps nothing"},
+	// The direction that got *more* expensive, and had to. `keep` stores its
+	// receiver in a package-level variable, so the object cannot be in the
+	// caller's frame -- and it was, because an immediately called method used to
+	// be free whatever the method did with the receiver. 0 -> 1.00, which is
+	// what gc charges for the same program. See
+	// testdata/method_receiver_retention.go for the program that reads the
+	// object back out of the reused frame.
+	{"method_retains_receiver", 100, 100, "the method publishes its receiver, so the object is on the heap"},
 	{"sprintf_in_loop", 200, 100, "loop rule blocks the `...` promotion"},
 	{"variadic_ints_in_loop", 100, 0, "loop rule blocks the `...` promotion"},
 }

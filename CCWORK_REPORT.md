@@ -3339,3 +3339,47 @@ The fix asks the receiver the same question every other argument gets --
 `receiverDoesNotEscape` -- instead of treating the call syntax as the answer.
 `goc/testdata/method_receiver_retention.go` is the program above, and it is in
 the corpus so the audit runs it.
+
+### The fix, and what it cost
+
+Three changes, measured together because they are one question:
+
+1. **`nonEscapingAddressWithin` asks the assignment question at every step of
+   its climb**, not only of the address itself. `value := scorer(&scoreBox{...})`
+   climbs the conversion and then met the assignment as the loop's *default*
+   case, so every literal converted to an interface on the way into a local went
+   to the heap.
+2. **An immediately called method asks `receiverDoesNotEscape`** instead of
+   treating the call syntax as the answer. This is the correctness fix above.
+3. **An interface method call is devirtualised whole-program.** goc knows the
+   complete set of types that can reach any interface -- it builds the
+   dispatcher out of that set, and a type missing from it reaches
+   `runtime_gocInterfaceDispatchFailure` rather than being dispatched wrongly --
+   so "does this interface method retain its receiver" is answered by asking
+   every implementation. The interface asked about is the one the *call site*
+   names, not the one the method is declared on: `heap.Interface` embeds
+   `sort.Interface`, and asking about `sort.Interface` drags in every sorter in
+   the program. An embedded-interface implementation (`sort.reverse` is
+   `struct{ Interface }`) recurses, with a cycle-breaking entry of its own since
+   an interface method has no body for `receiverDoesNotEscape` to guard on.
+
+Without (3), (2) costs 4 corpus lines and 67 stdlib sites. With it, 2 corpus
+lines and 58 stdlib sites -- and both of the corpus lines were **permissive**
+lines that goc was getting wrong in the correctness direction:
+
+    stdlib_io_readall_limited_reader.go:9    frame -> heap   (gc: escapes to heap)
+    stdlib_netpoll_syscall_socket_listen.go:19  frame -> heap   (gc: escapes to heap)
+
+`stdlib_container_heap.go:31` is the one devirtualisation kept in the frame, and
+there goc is right where gc is conservative: `heap.Init`'s `h.Len/Less/Swap/Push/Pop`
+have exactly one implementation in that program and none of them retains the
+receiver, which gc cannot see from inside `container/heap`.
+
+    lines where goc heaps what gc frames    113 -> 111
+    lines where goc frames what gc heaps   1448 -> 1446
+
+Rows in `testdata/allocation_counts.go`, measured with the branch point's
+compiler and this branch's:
+
+    interface_local_method_call   1.00 -> 0     (gc 0)
+    method_retains_receiver       0    -> 1.00  (gc 1.00)

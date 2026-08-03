@@ -341,6 +341,8 @@ func compile(name string, src []byte, options compileOptions) (*ir.Module, error
 		lastModuleSymbol:        lastModuleSymbolFor(options.runtimeSplit),
 		dynamicTypes:            dynamicTypes,
 		reachableGlobals:        reachableGlobals,
+		reachableFunctions:      functions,
+		interfaceCandidates:     make(map[interfaceCandidateKey][]interfaceMethodCandidate),
 	}
 	g.mod.File(name)
 	registerNoEscapeDirectives(g)
@@ -1615,6 +1617,14 @@ type gen struct {
 	// so getting this wrong means the program's package init never runs.
 	lastModuleSymbol  string
 	dynamicTypes      []types.Type
+	// reachableFunctions is the set addInterfaceMethodWrappers dispatches over,
+	// kept so the escape walk can ask the same question about an interface
+	// method call that the dispatcher answers about it.
+	reachableFunctions []functionDecl
+	// interfaceCandidates memoises interfaceMethodCandidates, which is O(dynamic
+	// types x reachable declarations) and would otherwise be recomputed at every
+	// interface method call the escape walk meets.
+	interfaceCandidates map[interfaceCandidateKey][]interfaceMethodCandidate
 	reachableGlobals  map[types.Object]bool
 	filterGlobals     bool
 	emitRuntimeTables bool
@@ -2368,6 +2378,170 @@ func (g *gen) nonEscapingAddress(address *ast.UnaryExpr) bool {
 // inside the literal is in whichever of the two the emitter chose. Asking the
 // walk's own, more precise question there instead is what left
 // bigmod.Nat.Mul's T on the frame while its &Nat{limbs: T} went to the heap.
+// methodCallDoesNotRetainReceiver reports that calling this method cannot make
+// the receiver's storage outlive the call.
+//
+// An immediately called method selector used to be free: `x.m()` answered "does
+// not escape" whatever m did with x. It is not free. A method is a function
+// whose first argument is the receiver, and
+//
+//	func (b *rbox) keep() int { sink = b; return b.a }
+//
+// publishes it. The caller's `value := &rbox{...}` was left in the frame with a
+// package-level pointer into it, and after the frame was reused the program read
+// back junk where the reference implementation read back the values. gc says the
+// same thing about the same function -- "leaking param: b" -- and puts the
+// literal on the heap.
+//
+// The answer comes from receiverDoesNotEscape, which is the same walk
+// parameterDoesNotEscape runs, so a method with no declaration the compiler can
+// see -- an interface method, an assembly method, a generic instantiation --
+// gets the conservative answer rather than a guess.
+func (g *gen) methodCallDoesNotRetainReceiver(
+	selector *ast.SelectorExpr,
+	info *types.Info,
+	checking map[parameterKey]bool,
+) bool {
+	method, ok := info.Uses[selector.Sel].(*types.Func)
+	if !ok {
+		return false
+	}
+	// The interface the *call site* names, which is narrower than the one the
+	// method is declared on whenever the declaration is an embedded interface:
+	// heap.Interface embeds sort.Interface, so `h.Less(...)` inside container/heap
+	// resolves to (sort.Interface).Less and asking about sort.Interface drags in
+	// every sorter in the program. The dynamic type has to implement the static
+	// type, so narrowing to it is sound and strictly smaller.
+	if static, isInterface := receiverInterfaceAtCallSite(selector, info); isInterface {
+		return g.interfaceMethodDoesNotRetainReceiver(method, static, checking)
+	}
+	return g.methodDoesNotRetainReceiver(method, checking)
+}
+
+// receiverInterfaceAtCallSite names the interface type of the expression a
+// method is being called on, for a call through an interface value.
+func receiverInterfaceAtCallSite(selector *ast.SelectorExpr, info *types.Info) (*types.Interface, bool) {
+	receiverType := info.TypeOf(selector.X)
+	if receiverType == nil {
+		return nil, false
+	}
+	interfaceType, isInterface := receiverType.Underlying().(*types.Interface)
+	return interfaceType, isInterface
+}
+
+// methodDoesNotRetainReceiver is methodCallDoesNotRetainReceiver with the method
+// already resolved, so that an interface implementation which is itself an
+// embedded interface method can be asked the same question recursively.
+// sort.reverse is that shape -- struct{ Interface } -- and its Len is the
+// embedded interface's, which has no body to walk.
+func (g *gen) methodDoesNotRetainReceiver(method *types.Func, checking map[parameterKey]bool) bool {
+	if interfaceType, isInterfaceMethod := methodsInterface(method); isInterfaceMethod {
+		return g.interfaceMethodDoesNotRetainReceiver(method, interfaceType, checking)
+	}
+	if receiverIsAPointerFreeCopy(method) {
+		// The callee is handed a copy of a value that holds no reference to
+		// anything, so there is nothing about the caller's storage for it to
+		// retain and no body to walk. Without this, `t.Sub(u)` on a time.Time and
+		// every other pointer-free value method fell to the conservative answer.
+		return true
+	}
+	return g.receiverDoesNotEscape(method, checking)
+}
+
+// methodsInterface reports the interface a method is declared on, for a method
+// reached through an interface value rather than through a concrete type.
+func methodsInterface(method *types.Func) (*types.Interface, bool) {
+	signature, ok := method.Type().(*types.Signature)
+	if !ok || signature.Recv() == nil {
+		return nil, false
+	}
+	interfaceType, isInterface := signature.Recv().Type().Underlying().(*types.Interface)
+	return interfaceType, isInterface
+}
+
+// interfaceMethodDoesNotRetainReceiver answers "does calling this interface
+// method retain the receiver" by asking every implementation the program can
+// dispatch to.
+//
+// This is devirtualisation, and it is the one place in the escape walk where
+// goc can be *more* precise than cmd/compile rather than less: gc devirtualises
+// a call whose concrete type it can see in one function, while goc compiles the
+// whole program and knows the complete set of types that can reach any interface.
+//
+// The set is interfaceMethodCandidates', which is the same set
+// addInterfaceMethodWrappers builds the dispatcher out of. A type missing from
+// it does not merely get a conservative escape answer -- it reaches
+// runtime_gocInterfaceDispatchFailure and the program stops -- so believing it
+// here adds no failure mode the dispatcher does not already have.
+//
+// An empty candidate list is answered "retains", not vacuously "does not": an
+// interface the walk could find no implementation of is a question this has no
+// information about, and the conservative answer is the one that keeps the
+// object on the heap.
+func (g *gen) interfaceMethodDoesNotRetainReceiver(
+	method *types.Func,
+	interfaceType *types.Interface,
+	checking map[parameterKey]bool,
+) bool {
+	// An interface method has no body, so receiverDoesNotEscape's cycle-breaking
+	// entry is never reached for one and a chain of embedded interfaces would
+	// recurse without end. This is that entry, taken on the interface method
+	// itself.
+	key := parameterKey{function: method, index: -1}
+	if checking[key] {
+		return false
+	}
+	checking[key] = true
+	defer delete(checking, key)
+
+	cacheKey := interfaceCandidateKey{method: method, interfaceType: interfaceType.String()}
+	candidates, cached := g.interfaceCandidates[cacheKey]
+	if !cached {
+		candidates = interfaceMethodCandidates(g, g.reachableFunctions, method, interfaceType)
+		g.interfaceCandidates[cacheKey] = candidates
+	}
+	if escapeDebugLevel() >= 2 {
+		fmt.Fprintf(os.Stderr, "escape devirt: %s on %s -> %d candidates\n", method.FullName(), interfaceType.String(), len(candidates))
+	}
+	if len(candidates) == 0 {
+		return false
+	}
+	for _, candidate := range candidates {
+		if !g.methodDoesNotRetainReceiver(candidate.function, checking) {
+			return false
+		}
+	}
+	return true
+}
+
+// interfaceCandidateKey names one devirtualisation question: a method, and the
+// interface the call site named. The same method asked about two interfaces has
+// two answers, because the narrower interface has fewer implementations.
+type interfaceCandidateKey struct {
+	method        *types.Func
+	interfaceType string
+}
+
+// receiverIsAPointerFreeCopy reports that this method's receiver is passed by
+// value and carries no pointer, so the callee cannot reach the caller's storage
+// through it however it is used.
+func receiverIsAPointerFreeCopy(method *types.Func) bool {
+	signature, ok := method.Type().(*types.Signature)
+	if !ok || signature.Recv() == nil {
+		return false
+	}
+	receiverType := signature.Recv().Type()
+	if _, isPointer := receiverType.Underlying().(*types.Pointer); isPointer {
+		return false
+	}
+	if _, isInterface := receiverType.Underlying().(*types.Interface); isInterface {
+		return false
+	}
+	pointers := false
+	visitPointerWords(receiverType, 0, func(int64) { pointers = true })
+	return !pointers
+}
+
 func (g *gen) nonEscapingAddressWithin(
 	address *ast.UnaryExpr,
 	info *types.Info,
@@ -2780,7 +2954,8 @@ func (g *gen) valueDoesNotEscapeWithin(
 			// address makes an interior pointer that keeps the whole object
 			// alive, so the object escapes exactly when that pointer does. A
 			// method value is a closure over the receiver and is answered by
-			// asking where the closure goes; only an immediate call is free.
+			// asking where the closure goes; an immediate call is answered by
+			// asking what the method does with the receiver.
 			if parent.X != current {
 				return false
 			}
@@ -2793,7 +2968,10 @@ func (g *gen) valueDoesNotEscapeWithin(
 				return address == nil || !g.addressEscapesWithin(address, info, parents, body, checking)
 			}
 			call, calledImmediately := parents[parent].(*ast.CallExpr)
-			return calledImmediately && call.Fun == parent
+			if !calledImmediately || call.Fun != parent {
+				return false
+			}
+			return g.methodCallDoesNotRetainReceiver(parent, info, checking)
 		case *ast.RangeStmt:
 			return parent.X == current
 		case *ast.ReturnStmt:
@@ -3447,7 +3625,10 @@ func (g *gen) nonEscapingObjectUse(
 			return address == nil || !g.addressEscapesWithin(address, info, parents, body, checking)
 		}
 		call, calledImmediately := parents[parent].(*ast.CallExpr)
-		return calledImmediately && call.Fun == parent
+		if !calledImmediately || call.Fun != parent {
+			return false
+		}
+		return g.methodCallDoesNotRetainReceiver(parent, info, checking)
 	case *ast.StarExpr:
 		return parent.X == identifier
 	case *ast.TypeAssertExpr:
@@ -3863,7 +4044,11 @@ func (g *gen) receiverDoesNotEscape(function *types.Func, checking map[parameter
 	// fresh heap storage on the way out; boxedIntoInterface needs the
 	// signature to see that.
 	parents := g.declarationParents(declaration.decl)
-	return g.objectDoesNotEscape(signature.Recv(), declaration.info, parents, declaration.decl.Body, checking)
+	answer := g.objectDoesNotEscape(signature.Recv(), declaration.info, parents, declaration.decl.Body, checking)
+	if escapeDebugLevel() >= 2 {
+		fmt.Fprintf(os.Stderr, "escape receiver: %s does not escape: %v\n", function.FullName(), answer)
+	}
+	return answer
 }
 
 func constInt(v constant.Value) int64 {

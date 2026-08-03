@@ -25,12 +25,12 @@ host toolchain: go version go1.26.1 linux/arm64
 corpus programs                             399
 compared (host toolchain built them)        395
 not compared                                  4
-census rows joined                         1840
+census rows joined                         1846
 census rows lost to an unbuilt program        4
 census rows with no source position        1740  (never joinable)
   of those, in a corpus program's own code    33  (29 on the heap: the bound on how
                                                   wrong the join can be about goc)
-census rows outside the corpus directory  10856  (vendored stdlib; never joinable)
+census rows outside the corpus directory  10911  (vendored stdlib; never joinable)
 gc decisions joined                        3451
   of which synthesized by the chan rule     136
 gc decisions at an inlining call site       876  (excluded; see package gcdiff)
@@ -51,13 +51,13 @@ rows are goc's verdict for the line, columns are gc's.
 same as "it put the object in a frame" -- see gcdiff.Absent.
 
   goc\gc      frame     heap    mixed   absent    total
-  frame         165       33       14      105      317
-  heap          113      573      173      168     1027
-  mixed          13       86       24       13      136
-  absent        404     1269       22        0     1695
+  frame         167       30       14      105      316
+  heap          111      575      173      168     1027
+  mixed          13       89       24       13      139
+  absent        404     1267       22        0     1693
   total         695     1961      233      286     3175
 
-## PERMISSIVE: 1448 lines
+## PERMISSIVE: 1446 lines
 
 every source line gc puts on the heap and goc does not. This is the
 correctness-critical direction: goc keeping in a frame something gc could not
@@ -68,10 +68,10 @@ not record ordinary front-end frame slots, so "no record" is consistent with
 
 by construct (goc allocators on the line | gc constructs on the line):
 
-   1266  - | object/heap
-     77  newobject/frame,newobject/heap | object/heap
+   1264  - | object/heap
+     80  newobject/frame,newobject/heap | object/heap
      22  - | object/frame,object/heap
-     22  newobject/frame | object/heap
+     19  newobject/frame | object/heap
      13  convT64/heap,newobject/frame | object/heap,slice/frame
      12  newobject/frame | object/heap,slice/frame
      11  newobject/frame | slice/heap
@@ -3066,8 +3066,10 @@ stdlib_encoding_base64.go:17	absent -> heap
 stdlib_encoding_base64.go:22	absent -> heap
 	src  panic("raw URL base64 encoded wrong string")
 	gc   col 9  heap  object  "raw URL base64 encoded wrong string"
-stdlib_encoding_binary.go:21	absent -> heap
+stdlib_encoding_binary.go:21	mixed -> heap
 	src  var buffer bytes.Buffer
+	goc  col 2  frame  runtime.newobject  bytes_Buffer  [main.main]
+	goc  col 2  heap  runtime.newobject  bytes_Buffer  [main.main]
 	gc   col 6  heap  object  buffer
 stdlib_encoding_binary.go:23	absent -> heap
 	src  panic("binary Write failed")
@@ -3634,10 +3636,6 @@ stdlib_io_pipe_roundtrip.go:25	absent -> heap
 stdlib_io_pipe_roundtrip.go:29	absent -> heap
 	src  panic("Pipe delivered wrong contents")
 	gc   col 9  heap  object  "Pipe delivered wrong contents"
-stdlib_io_readall_limited_reader.go:9	frame -> heap
-	src  reader := &io.LimitedReader{
-	goc  col 12  frame  runtime.newobject  io_LimitedReader  [main.main]
-	gc   col 12  heap  object  &io.LimitedReader{...}
 stdlib_io_readall_limited_reader.go:10	absent -> heap
 	src  R: bytes.NewReader([]byte("abcdef")),
 	gc   col 29  heap  object  ([]byte)("abcdef")
@@ -3986,10 +3984,6 @@ stdlib_netpoll_stress_udp_burst.go:42	absent -> heap
 stdlib_netpoll_syscall_socket_listen.go:15	absent -> heap
 	src  panic("socket failed")
 	gc   col 9  heap  object  "socket failed"
-stdlib_netpoll_syscall_socket_listen.go:19	frame -> heap
-	src  address := &syscall.SockaddrInet4{
-	goc  col 13  frame  runtime.newobject  syscall_SockaddrInet4  [main.main]
-	gc   col 13  heap  object  &syscall.SockaddrInet4{...}
 stdlib_netpoll_syscall_socket_listen.go:25	absent -> heap
 	src  panic("bind failed")
 	gc   col 9  heap  object  "bind failed"
@@ -4689,8 +4683,10 @@ stdlib_testing_quick.go:24	absent -> mixed
 stdlib_text_template_execute.go:17	absent -> heap
 	src  panic("template Parse failed")
 	gc   col 9  heap  object  "template Parse failed"
-stdlib_text_template_execute.go:24	absent -> heap
+stdlib_text_template_execute.go:24	mixed -> heap
 	src  var output bytes.Buffer
+	goc  col 2  frame  runtime.newobject  bytes_Buffer  [main.main]
+	goc  col 2  heap  runtime.newobject  bytes_Buffer  [main.main]
 	gc   col 6  heap  object  output
 stdlib_text_template_execute.go:26	absent -> heap
 	src  panic("template Execute failed")
@@ -4818,8 +4814,10 @@ sync_pool_interface.go:37	absent -> heap
 sync_pool_interface.go:40	absent -> heap
 	src  panic("function value interface result has the wrong slice length")
 	gc   col 9  heap  object  "function value interface result has the wrong slice length"
-sync_pool_interface.go:43	frame -> heap
+sync_pool_interface.go:43	mixed -> heap
 	src  pool := sync.Pool{New: constructor}
+	goc  col 2  frame  runtime.newobject  sync_Pool  [main.main]
+	goc  col 2  heap  runtime.newobject  sync_Pool  [main.main]
 	goc  col 10  frame  runtime.newobject  sync_Pool  [main.main]
 	gc   col 2  heap  object  pool
 sync_pool_interface.go:47	absent -> heap
@@ -4861,7 +4859,7 @@ variadic_element_retention.go:42	frame -> mixed
 	gc   col 39  heap  object  48879
 	gc   col 47  heap  object  51966
 
-## PESSIMISTIC: 504 lines
+## PESSIMISTIC: 502 lines
 
 every source line goc puts on the heap and gc does not. This is the
 performance direction and nothing worse: each line is an allocation, a zeroing
@@ -4873,7 +4871,7 @@ by construct (goc allocators on the line | gc constructs on the line):
     109  newobject/heap | object/heap,slice/frame
      52  newobject/heap | object/frame,object/heap
      35  makemap/heap | map/frame
-     35  newobject/heap | object/frame
+     33  newobject/heap | object/frame
      28  newobject/heap | slice/frame
      13  convT64/heap,newobject/frame | object/heap,slice/frame
       8  newobject/heap | object/frame,object/heap,slice/frame
@@ -5541,14 +5539,6 @@ runtime_interface_comparable_map.go:16	mixed -> frame
 	goc  col 17  frame  runtime.newobject  main_comparableKey  [main.main]
 	goc  col 53  heap  runtime.newobject  main_comparableKey  [main.main]
 	gc   col 30  frame  object  comparableKey{...}
-runtime_interface_method_gc.go:23	heap -> frame
-	src  value := scorer(&scoreBox{
-	goc  col 18  heap  runtime.newobject  main_scoreBox  [main.main]
-	gc   col 18  frame  object  &scoreBox{...}
-runtime_interface_method_gc.go:25	heap -> frame
-	src  next:  &scoreBox{value: 25},
-	goc  col 10  heap  runtime.newobject  main_scoreBox  [main.main]
-	gc   col 10  frame  object  &scoreBox{...}
 runtime_interface_to_interface.go:29	heap -> frame
 	src  var combined interfaceReadCloser = &interfaceResource{base: 31}
 	goc  col 37  heap  runtime.newobject  main_interfaceResource  [main.main]
