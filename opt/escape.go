@@ -269,14 +269,25 @@ func candidatesTooLargeForAFrame(function *ir.Func, escapes *candidateEscapes) {
 			if instruction.Op != ir.OHeapAlloc || instruction.To.Kind != ir.RefTemp {
 				continue
 			}
-			if escapes.escaped[instruction.To.ID] {
-				continue
-			}
 			// The candidate form carries its byte size as a constant argument;
 			// a candidate whose size is not a constant is not one this rule can
 			// answer, and there are none -- see ir.OHeapAlloc's contract.
 			size, ok := constIntValue(function, instruction.Args[2])
 			if !ok || size <= MaxImplicitFrameSize {
+				continue
+			}
+			// Only a candidate the analysis was willing to promote is explained
+			// by its size. An object that is on the heap because the program
+			// publishes it is on the heap for that reason; the size is also true
+			// of it and is not why it went there.
+			//
+			// This was tried the other way, so that goc would say `too-large`
+			// wherever gc does. It does not converge, because gc does not order
+			// the two reasons either: cmd/compile prints `too large for stack`
+			// for a returned 160 KB make and prints the assignment for an 8 MB
+			// package-level one. Two lines of the reason differential are that
+			// difference and they stay there; see CCWORK_REPORT.md.
+			if escapes.escaped[instruction.To.ID] {
 				continue
 			}
 			if escapes.reasons != nil {
