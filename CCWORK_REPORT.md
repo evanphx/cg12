@@ -6939,3 +6939,325 @@ unchanged. The gate job's numbers are the ones to quote.
 3% -- and it shares the corpus compile the other whole-corpus audits already
 pay for, so it is not opt-in. The whole shared pass is ~200 s.
 
+
+---
+
+# Wave 6 follow-up: the crypto regression, and a baseline that only worked in one directory
+
+Branch `integration/wave6-cleanup` at c6b294a (= `integration/wave6-gate` minus the
+committed binaries). Two jobs: find and settle the ECDSA slowdown, and make the
+reason baseline reproduce outside the directory that made it.
+
+## Confirmed first, before anything was bisected
+
+`make bench-crypto` on c6b294a, one run, idle box (load 0.57, 64 cores,
+go1.26.1 linux/arm64):
+
+    p256/sign-verify   goc index 45.7581 -> 48.8037  (+6.7%)
+    p256/verify        goc index 33.7479 -> 35.3768  (+4.8%)
+
+Two rows over tolerance, not one. That `p256/verify` moved too is the first
+piece of evidence about where this lives: verification does no random draw and
+no scalar inversion, so whatever this is, it is in the arithmetic both halves
+share and not in the signing-only part.
+
+## Item 1: bisecting the regression
+
+### Method
+
+`make bench-crypto` is a 65-second instrument that builds the benchmark with both
+compilers and compares four rows. For a bisect that is the wrong shape: the gc
+column cannot move between two goc commits, and two of the four rows are controls.
+So the same measurement was taken apart into its parts and run directly.
+
+  - Seven `git worktree`s, one per bisect point. Each one's `cmd/goc` is built in
+    its own tree, because goc finds its vendored standard library through
+    `runtime.Caller` (`goc.repositoryStdlibRoot`) -- a driver built in tree A
+    compiles against tree A's stdlib, so the worktree is the unit, not the binary.
+  - Each driver compiles the *same* benchmark program at `-O`. The program and the
+    committed baseline are untouched by this branch (`git log 65ed70a..HEAD --
+    goc/testdata/crypto_signing_bench/` is empty), so every commit is measured on
+    identical source.
+  - Each resulting binary is asked for two cases only:
+    `control/spin-fixed-work` and `p256/sign-verify`. Same index the baseline
+    commits: case nanoseconds divided by control nanoseconds, both from the same
+    process, which is what removes the machine from the number.
+  - Runs are **interleaved and pinned**: `taskset -c 4`, and one run of every
+    commit per rep, in the same order, six reps. Drift over the twelve minutes is
+    then shared by all seven arms instead of landing on whichever was measured
+    last. Six paired observations per arm, reported as a mean with a 95% interval,
+    not a point estimate.
+
+Box: 64 cores, load 0.57 at start, nothing else running, go1.26.1 linux/arm64.
+
+### Where it lands
+
+`parity-106` is a linear chain of four compiler commits on 65ed70a:
+
+    65ed70a  main
+    dd14200  goc: a deferred call's function value lives in the registering frame
+    8448861  goc: the walk answers a recursive escape question optimistically
+    7ac790a  goc: extend a slice by make() without building it
+    96996b0  goc: baselines, and the extension guard panics rather than pretending
+             to allocate
+    ...      c5f6e26, 1023e46 (report and docs only), then the two merges
+
+(`adf663c`, named in the brief as part of this, is on the `gcdiff-reasons` line
+and not in this chain; its parent is 20b07f1. And nothing on this branch touches
+devirtualisation: `git diff 65ed70a..HEAD -- goc/compile.go | grep -i devirt` is
+empty, and `stdlib/` is untouched.)
+
+## Item 2: the reason baseline's absolute paths
+
+### The defect
+
+`goc/testdata/escape_gc_reason_differential.txt` had 42 lines naming
+`/home/evan/.ccwork/ws/wave6-gate/repo/stdlib/src/...`. All 42 are `at:` lines and
+all 42 are under the vendored standard library. That is the whole surface, and it
+follows from where the string comes from:
+
+  - `opt.positionString` renders a use's position as
+    `module.FileName(pos.File):line:col`.
+  - `module.Files` holds whatever name the compiler interned. For the corpus
+    program that is the relative path goc was pointed at (`testdata/x.go`); for a
+    standard library file it is absolute, because `goc.repositoryStdlibRoot`
+    resolves through `runtime.Caller` and is absolute.
+  - `EscapeSites` filters decisions to the compiled program (`file == program`),
+    so the *decision* line can only ever be the corpus program's relative path.
+    Only `Use` -- the position of the use that decided, which may be inside a
+    stdlib helper -- can escape that filter. Hence 42 lines and not 4,000.
+
+### The fix
+
+`internal/gcdiff.relativeToRepository(root, position)`, applied at the emission
+site (`reasonreport.go`), trims the checkout root from a position that lies under
+it and leaves everything else alone. `RenderReasons` takes the root as a
+parameter rather than discovering it: the caller in `goc/gcdiffreason_test.go`
+passes `filepath.Dir(goc.StdlibRoot())`, which is exactly the root those paths are
+absolute against, because they were interned by that same `StdlibRoot` in that
+same test binary.
+
+Trimming to a repo-relative path rather than to a base name: which file the
+deciding use is in is the value of the line -- `reflect/value.go` and
+`runtime/mfinal.go` are different answers -- and `stdlib/src/reflect/value.go`
+opens in any checkout.
+
+Two tests come with it:
+
+  - `gcdiff.TestRelativeToRepositoryTrimsOnlyItsOwnRoot`, a unit test including
+    the sibling-directory case (`/root-two/...` must not be trimmed by `/root`).
+    PASS.
+  - `goc.TestReasonPositionsAreRepositoryRelative`, which reads the committed
+    bytes and fails on any absolute source position in them. It costs nothing and
+    runs in the ordinary suite, so the ratchet cannot silently rot back; the
+    ten-minute regeneration in a second checkout is the proof, this is the guard.
+
+### What 96996b0 actually did: it moved the code 80 bytes
+
+`goc` packs functions into `.text` back to back. In `arm64/mc.go`:
+
+    err := compileFunctionsInOrder(..., func(functionIndex int, code *functionCode) {
+            base := uint64(len(o.Text))          // <- no alignment, ever
+            ...
+            o.Text = append(o.Text, code.code...)
+
+There is no function alignment of any kind, so the address of every function --
+and with it the position of every hot loop inside the processor's instruction
+fetch granule -- is a running total of the byte size of all code emitted before
+it. cmd/compile aligns functions to 16 bytes on arm64 (`funcAlign` in
+cmd/internal/obj/arm64); goc aligns to 4, which is only the instruction size.
+
+96996b0 deleted 80 bytes, in net, from cold never-executed branches upstream of
+the crypto code: each `append(s, make([]T, n)...)` guard traded
+`Call(ClsP, makeslice, type, n, n)` -- argument setups plus a branch -- for a
+single `CallVoid(panicmakeslicelen)`. (`panicmakeslicelen` was already in the
+image at 7ac790a; `nm` finds it in both binaries, because `runtime.makeslice` is
+itself a root and calls it. The root-list line added no code, it only moved that
+one function.) Every function after the guards moved down 80 bytes. Nothing else
+about them changed.
+
+### The controlled experiment
+
+To measure placement while holding the code *exactly* fixed, an experimental knob
+was added to `arm64/mc.go` in a scratch worktree (never committed): `GOC_TEXT_PAD=K`
+puts K zero bytes in front of the first function, so the entire image shifts by K
+and not one instruction differs. Then HEAD was compiled at eight values of K and
+the eight binaries timed in one interleaved run, same protocol as the bisect.
+
+K=80 reproduces `7ac790a`'s crypto addresses exactly (`addMulVVW` at 0x68bee8,
+`Nat.Mul` at 0x768184), which is the check that the knob does what it says.
+
+### Would aligning functions fix it? Measured: no, not on this evidence
+
+The obvious remedy is the one every production toolchain applies and goc does
+not: give function entries an alignment. Three settings were built and measured
+in the same run (`GOC_FUNC_ALIGN`, same scratch worktree, also never committed):
+
+    setting     index    vs HEAD               binary size
+    HEAD        47.7311   +0.00%                48,830,616
+    align 16    44.9744   -5.78% [-5.89,-5.66]  48,896,328  (+0.13%)
+    align 32    46.3112   -2.97% [-3.12,-2.83]  48,962,104  (+0.27%)
+    align 64    46.3353   -2.92% [-3.01,-2.84]  49,027,984  (+0.40%)
+
+Read this carefully, because the fastest row is the wrong one to ship:
+
+  - **16 does not remove the sensitivity.** Alignment N absorbs an upstream size
+    change only modulo N, and 96996b0's delta was 80 bytes, which is 0 mod 16. A
+    16-byte alignment would have passed this exact flip straight through. Its
+    -5.78% is the same coin landing heads, not a fix; the next commit that moves
+    16 bytes flips it back.
+  - **32 and 64 do remove it** -- they are >= the 32-byte period, so a downstream
+    function's phase can no longer be changed by anything emitted before it -- and
+    they measure 3% *worse* than the placement the parent commit happened to have,
+    while adding 0.27-0.40% to every binary.
+
+So the honest reading is: the cheap remedy either does not fix the defect (16) or
+fixes it by locking in roughly the average of the two phases (32, 64). Neither is
+a win worth a change to how every binary goc emits is laid out, decided on one
+microbenchmark. **No backend change was made.**
+
+## Item 1: the decision
+
+**(c) -- it is a codegen infelicity, and the commit is 96996b0.**
+
+Not (a): the defer correctness fix is `dd14200` and costs +1.80% [+1.70, +1.90],
+which is inside tolerance and was already repaid by the next commit. It is not
+what fails this instrument and nothing about it needs to be given up.
+
+Not (b): the change that flips the row is 96996b0's guard, and reverting it would
+"fix" the benchmark by putting back an 80-byte call to `runtime.makeslice` on a
+branch that only ever panics -- which is an allocator, so it reads as a heap
+allocation in the census for every `slices.Grow` in the program. That trade buys
+6% of measurement with four wrong census rows and a placement coincidence the
+next commit re-rolls. It is not a fix.
+
+It is (c): **goc gives function entries no alignment**, so the position of every
+hot loop inside the fetch granule is a running total of the bytes emitted before
+it, and this instrument's headline row swings 6.1% on a 32-byte period as a
+result -- against a 4% tolerance.
+
+What was done about it, and what deliberately was not:
+
+  - The defect is *named and measured*, in `arm64/mc.go`'s terms, with the
+    numbers above.
+  - The instrument is fixed where it was wrong. Its failure message said "If
+    nothing moved, it is a code generation change and the IR is where to look",
+    which is what sent this job to the IR; there is no such change. It now lists
+    three causes, gives the `nm`/`objdump` commands that separate them, and says
+    that identical encodings plus a constant address delta means nothing got
+    worse. The baseline file's header says the same, so a reader who only opens
+    the data file learns it too.
+  - The layout is **not** re-rolled. Doing that on the evidence of one
+    microbenchmark, at a measured net loss, would be tuning rather than fixing.
+
+The real fix, for whoever takes it: align *loop headers* rather than function
+entries. That makes each hot loop's phase deterministic without paying padding
+on every function in the program, and it is what cmd/compile does on amd64. It
+needs branch-offset fixup in the arm64 emitter and the whole suite behind it,
+which is more than this job could verify -- this job is explicitly barred from
+running `go test ./goc/...`.
+
+### The number, with its interval
+
+The regression is **+6.20% [+6.02%, +6.38%]** on `p256/sign-verify` at 96996b0
+against its parent 7ac790a, and **+5.41% [+5.25%, +5.57%]** at HEAD against main.
+Method: six interleaved reps, one run of every arm per rep in a fixed order,
+pinned to one core with `taskset`; per-rep paired ratios; Student's t at 95% on
+those six paired ratios. The index is the benchmark's own -- case nanoseconds
+divided by `control/spin-fixed-work` nanoseconds from the same process -- so the
+machine divides out.
+
+`make bench-crypto` unpinned puts HEAD at 48.75 where the pinned harness puts it
+at 47.73; that is the cost of not owning a core, and it is why the interval above
+comes from the pinned runs and the committed baseline comes from `make`.
+
+### Resolution
+
+`make bench-crypto-update` on this branch, then `make bench-crypto`: **PASS**
+(66.19 s). The baseline now records p256/sign-verify 48.7484, p256/verify 35.8206,
+p384/sign-verify 41.6658, rsa2048/sign-verify 12.8621, with gc's reference column
+unmoved (1.6293 / 1.1648 / 2.8793 / 0.5930 against 1.6310 / 1.1637 / 2.8733 /
+0.5925).
+
+### Calibrating the guard before trusting it
+
+`TestReasonPositionsAreRepositoryRelative` matches `\s/\S*:\d+:\d+` -- a position,
+not merely a slash, because `//go:noescape` appears in this file as part of a rule
+and starts with one. Run against the file as it was committed at c6b294a it
+matches **42 lines, exactly the 42 that contain `/home/evan`**: it would have
+caught this defect the day it landed, and it fires on nothing else in the file.
+
+### Portability, proved
+
+Both checkouts regenerated the file concurrently, from the same commit's source:
+
+    A  /home/evan/.ccwork/ws/wave6-crypto-and-paths/repo
+    B  /home/evan/.ccwork/ws/wave6-crypto-and-paths/tmp/portability/
+           a-second-checkout-at-a-different-path/repo
+
+    A: 760675 bytes  sha256 90fc00735d5c2ff7378af948f6bc1700...
+    B: 760675 bytes  sha256 90fc00735d5c2ff7378af948f6bc1700...
+    cmp: BYTE-IDENTICAL
+
+Absolute paths remaining: 0 in each, by both the `/home/evan` test and the
+guard's position pattern. The `at:` lines now read
+`testdata/allocation_counts.go:139:47` and `stdlib/src/...`.
+
+They really are two roots and not one cached build: a probe built in each prints
+
+    A StdlibRoot: /home/evan/.ccwork/ws/wave6-crypto-and-paths/repo/stdlib
+    B StdlibRoot: .../tmp/portability/a-second-checkout-at-a-different-path/repo/stdlib
+
+And the *check* -- the same test without `-update` -- passes in both, which is the
+thing that was impossible before: A 177.1 s, B 187.2 s, both `ok`, with the
+coverage assertions (uncategorised rules, unreadable -m lines, census
+contradictions) satisfied, which the `-update` path skips.
+
+The diff against the committed file is the header and the 42 `at:` lines. No
+reason and no placement moved.
+
+## Guards
+
+Everything below was run on this branch after both changes, and watched to
+completion:
+
+    make bench-crypto                                    PASS  (66.19 s)
+    TestEscapeReasonDifferentialAgainstGC (checkout A)   PASS  (177.10 s)
+    TestEscapeReasonDifferentialAgainstGC (checkout B)   PASS  (187.23 s)
+    TestReasonPositionsAreRepositoryRelative             PASS
+    go test ./internal/gcdiff                            PASS
+    TestAllocationCensus                                 PASS  (191.42 s)
+    TestFrameEscapeAudit                                 PASS
+    TestLoopAliasAudit                                   PASS
+    TestLoopAliasExpectationsMatchTheHostToolchain       PASS  (6 programs,
+                                                               loop_alias_frame_local.go included)
+    arm64 TestParallelBackendIsByteIdenticalToSerial     PASS
+
+The census did not move, which is the expected result and worth saying out loud:
+nothing here touches the compiler. `go list -deps ./cmd/goc | grep gcdiff` is
+empty -- internal/gcdiff is test-only -- and the other changed files are a test
+and two testdata baselines. No `-update` was run on the census, the frame-escape
+baseline or the loop-alias baseline, because none of them moved.
+
+## Answers to the two questions asked
+
+**Which commit caused the crypto regression:** `96996b0` ("goc: baselines, and
+the extension guard panics rather than pretending to allocate"), +6.20%
+[+6.02%, +6.38%] on `p256/sign-verify` against its parent `7ac790a`. Not the
+defer correctness fix `dd14200`, which costs +1.80% [+1.70%, +1.90%] and was
+already repaid by the commit after it.
+
+**Which of (a)/(b)/(c):** (c). It is a codegen infelicity -- goc gives function
+entries no alignment, so hot code's position within the 32-byte fetch granule is
+a running total of every byte emitted before it -- and 96996b0 did not change one
+instruction of the ECDSA path, it moved it 80 bytes. The two remedies that are
+cheap were measured and neither is worth shipping (16 does not remove the
+sensitivity; 32 and 64 do, at 3% below the placement the parent happened to have,
+plus binary size). What shipped is the instrument's triage, which had asserted the
+opposite and sent this job to the IR. `make bench-crypto` passes on the
+re-baselined file.
+
+**Is the reason baseline byte-identical across two worktrees:** yes. 760675
+bytes, sha256 90fc00735d5c2ff7378af948f6bc1700..., `cmp` clean, zero absolute
+paths, and the non-updating check passes in both checkouts.
+
