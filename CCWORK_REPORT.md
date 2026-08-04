@@ -4030,3 +4030,153 @@ recorded, and where the decision and the record are separated by other escape
 questions -- the `&T{...}` path, which asks about the literal's elements in
 between -- it is carried through explicitly (`recordPlacementWhy`,
 `compositeLiteral`'s new `why` parameter) rather than re-read.
+
+## 3. Using it on something real
+
+Target: **`allocation_counts.go:273`**, one of the 106 lines where goc heaps what
+gc frames. The branch point's own report had already re-classified it: filed
+originally as "a variadic parameter has no summary", corrected to the loop rule
+after joining `ir.AllocDecision.BlockedByLoop` against all 113 lines. That
+correction cost a scratch driver, a corpus compile of 71 files, and a hand-built
+join. The diagnostic answers it in one command:
+
+    $ goc -m=2 goc/testdata/allocation_counts.go
+
+    allocation_counts.go:67:37: 2_int does not escape
+    	ir pass: heap-alloc-candidate in main.callVariadicInts
+
+    allocation_counts.go:273:13: 2_int escapes to heap
+    	ir pass: heap-alloc-candidate in main.variadicIntsInLoop
+    	rule: allocated in a loop; one frame slot cannot hold one object per iteration
+    	at:   allocation_counts.go:272:14
+
+Line 67 and line 273 are the *same call* -- `sinkInt = variadicInts(theInt,
+theInt)` -- one outside a loop and one inside. The diagnostic prints the control
+and the case side by side, names the rule, and points at line 272, which is the
+`for`. That is the whole of the previous job's finding, without the driver.
+
+### The finding about the diagnostic, and the fix
+
+First run, level 2 printed no `at:` line for this site at all: the loop rule set
+a reason and no position, so `-m=2` had nothing to add over `-m=1` for exactly
+the rule the reader most wants located. "It is in a loop" without saying which
+loop is the same shape of unhelpfulness as "it escapes" without the path.
+
+Fixed by having `allocationsInLoops` return each blocked allocation's loop-header
+position alongside the flag it already returns, and `promotionsBlockedByALoop`
+record it with the reason. The map is only built when the diagnostic is on.
+
+### Rule coverage over that program
+
+68 heap sites, **0 of them fell back to the generic "the walk found a use it
+could not prove local"**. Every one carries a rule from the branch that decided:
+
+     35  write barrier into a candidate
+     15  store into non-local storage
+      8  argument N of F may retain something (it points at | inside a self-referential object)
+      3  allocated in a loop; one frame slot cannot hold one object per iteration
+      2  holds more separately-allocated payloads than it costs to hold them
+      1  write barrier into non-local storage
+      1  returned
+      1  assigned to the package-level variable retainedSink
+      1  argument 2 of $main.packThrough may retain something it points at
+
+## 4. Is goc's output parseable by internal/gcdiff?
+
+**Placements: yes, today, with no change to either side.** goc's `-m` output goes
+through `gcdiff.ParseGCFlagM` -- the strict parser for cmd/compile's `-m`, which
+refuses to skip a diagnostic it has not been taught -- with **zero Unknown
+lines**. 127 decisions parsed out of the `allocation_counts.go` report, 59 frame
+and 68 heap. That is what the gc-shaped decision line and the tab-indented
+continuations are for: gc uses a leading tab for its own continuations and the
+parser already skips them. `TestEscapeDiagnosticParsesAsGCFlagM` pins it.
+
+**Reasons: mechanically yes, and not worth doing across compilers.**
+
+Two changes stand between here and a reason-aware differential, and they are very
+different sizes:
+
+1. *`Kind` is wrong on goc's side; the fix is a few lines.* `gcdiff.subjectKind`
+   classifies gc's source-expression vocabulary (`make(chan `, `map[`,
+   `... argument`) and goc's subject is a type-descriptor symbol, so everything
+   comes out `KindObject`. gcdiff already has the right mapping for goc on the
+   census side of the join -- `CensusRow.Kind()` classifies by allocator.
+
+2. *Keeping the reasons is mechanical; comparing them is not meaningful.*
+   `ParseGCFlagM` drops tab lines, so goc's `rule:`/`from:`/`at:` are discarded;
+   adding a `Reason` to `GCDecision` and reading them is a small change. But gc's
+   `-m=2` vocabulary and goc's describe different analyses -- gc says
+   `leaking param: p to result ~r0 level=0`, goc says `passed to F, which may
+   retain argument 0` -- and there is no mapping between them. A differential
+   that compared the two strings would report a disagreement on every joined
+   line. **Do not compare reasons across compilers.**
+
+**What is worth doing is classifying goc's own disagreements by goc's rule.** The
+last two triage jobs sorted the 113/106 lines into twelve groups by hand, by
+reading `goc/compile.go` and reasoning about which branch must have fired. Those
+groups *are* goc rules. `GROUP BY rule` over this diagnostic produces the same
+classification mechanically. The concrete change: have
+`TestEscapeDifferentialAgainstGC` compile each corpus program with `GOC_M=1`
+alongside the census it already reads, join on `(file, line)` as it already does,
+and print each disagreement class with its goc rule. No new analysis, one new
+column. That is the return on making the output parseable, and it is a different
+change from making gcdiff read goc's reasons.
+
+## 5. Guards
+
+Host `go1.26.1 linux/arm64`. Every run below was started by this job and watched
+to exit.
+
+| guard | result |
+| --- | --- |
+| `TestCompilingTheSameSourceTwiceGivesTheSameModule` | **PASS** (4.29s) |
+| `TestAllocationCensus` | **PASS** (175.02s) -- the whole corpus, against the committed baseline, unmodified |
+| `TestFrameEscapeAudit` | **PASS** -- clean, no new publication and none vanished |
+| `TestEscapeDiagnostic*` (6 new) | **PASS** (11.0s) |
+| `go build ./...`, `go vet ./goc ./opt ./ir ./cmd/goc ./internal/gcdiff`, `gofmt` | clean |
+
+`goc/testdata/alloc_census_baseline.txt` and
+`goc/testdata/frame_escape_baseline.txt` are **byte-unchanged** on this branch:
+the census run passed without `-update-alloc-census-baseline`, which means every
+one of the corpus's allocation sites is where the baseline says it is.
+
+The byte-identity claim is also stated directly as a test rather than only
+inferred from the baselines. `TestEscapeDiagnosticDoesNotChangeTheEmittedModule`
+compiles the same source at level 0 and level 2 and compares
+`ir.Module.MarshalBinary` hashes; they are equal. The comparison is exact rather
+than filtered, because `ir.Module`'s binary encoding does not carry
+`PlacedAllocs` or `AllocDecisions` at all -- everything the diagnostic writes is
+outside it by construction.
+
+Two care points that make the off-path identical rather than merely equal in
+practice:
+
+- `analyzeCandidateEscapes`'s reason map is write-only. The `escaped` set is
+  populated identically whether or not reasons are asked for; nothing in the
+  pass reads a reason. The one behavioural-looking edit --
+  `if heap || !g.valueDoesNotEscape(literal)` rewritten as
+  `local := !heap && g.valueDoesNotEscape(literal)` -- preserves the
+  short-circuit exactly: `valueDoesNotEscape` is called on the same inputs in
+  the same cases.
+- `gen.srcPos` looks a file name up in `ir.Module.Files` rather than interning
+  it. `ir.Module.File` *appends*, and a diagnostic must not add anything to the
+  module, not even a position-table entry no instruction points at. A lookup
+  that misses names a file with no code in it, and the record carries no
+  position rather than an invented one.
+
+## 6. What the diagnostic still does not say
+
+- **The IR pass has no chain.** Its reason is one string and one position -- the
+  marking instruction -- so `-m=2` adds an `at:` and nothing more for an
+  `ir pass` site. The pass's analysis genuinely is one mark loop over one
+  function, so there is no multi-link path to print; what is missing is the
+  *interprocedural* step, where a summary said a callee may retain an argument.
+  `markSummarisedCall` knows the callee and could name the summary's own reason.
+- **Frame placements carry no rule.** Deliberate, and the same choice gc makes:
+  a frame placement is the absence of a publication. It does mean `-m` cannot
+  answer "why did this one stay" for a site a reader expected to escape.
+- **The subject is a type-descriptor symbol, not a source expression.** goc has
+  no rendering of the source expression at the point it decides. This is the
+  same reason `internal/gcdiff` does not join on the subject.
+- **Level 2 chains only exist for the AST walk**, so a `new(T)` -- decided by the
+  IR pass -- gets a rule and a position but never a path.
