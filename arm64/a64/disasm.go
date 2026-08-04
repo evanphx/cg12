@@ -763,6 +763,12 @@ func disasmSystem(w uint32) string {
 	if w&0xffe0001f == 0xd4000001 {
 		return fmt.Sprintf("svc #%d", bits(w, 20, 5))
 	}
+	// NOP, which is HINT #0. The backend emits it as alignment padding between
+	// functions, so it has to read back as an instruction rather than as `.inst`;
+	// Decode has always known it.
+	if w == 0xd503201f {
+		return "nop"
+	}
 	// The barrier group: DMB/DSB/ISB share the reserved bits and differ in the
 	// low opcode field (bits 7:5), with the domain in CRm (bits 11:8).
 	if w&0xfffff0df == 0xd50330df && bits(w, 7, 5) == 6 {
