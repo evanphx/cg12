@@ -88,6 +88,18 @@ stdlib/src/crypto/internal/fips140/bigmod/nat.go:961:16	crypto/internal/fips140/
 stdlib/src/crypto/internal/fips140/bigmod/nat.go:968:16	crypto/internal/fips140/bigmod.Nat.Mul	composite-literal	heap -> frame		
 stdlib/src/crypto/internal/fips140/bigmod/nat.go:975:16	crypto/internal/fips140/bigmod.Nat.Mul	composite-literal	heap -> frame		
 stdlib/src/crypto/internal/fips140/drbg/cast.go:43:11	crypto/internal/fips140/drbg.init.0.func.18.27	slice-literal-backing	frame -> heap		argument 3 of $bytes.Equal escapes
+stdlib/src/crypto/internal/fips140/ecdh/cast.go:18:17	.goc.global.initfunc.12.crypto/internal/fips140/ecdh.fipsSelfTest.func.17.36	slice-literal-backing	heap -> frame		
+stdlib/src/crypto/internal/fips140/ecdh/cast.go:18:17	.goc.global.initfunc.16.crypto/internal/fips140/ecdh.fipsSelfTest.func.17.36	slice-literal-backing	heap -> frame		
+stdlib/src/crypto/internal/fips140/ecdh/cast.go:18:17	.goc.global.initfunc.17.crypto/internal/fips140/ecdh.fipsSelfTest.func.17.36	slice-literal-backing	heap -> frame		
+stdlib/src/crypto/internal/fips140/ecdh/cast.go:18:17	.goc.global.initfunc.35.crypto/internal/fips140/ecdh.fipsSelfTest.func.17.36	slice-literal-backing	heap -> frame		
+stdlib/src/crypto/internal/fips140/ecdh/cast.go:18:17	.goc.global.initfunc.41.crypto/internal/fips140/ecdh.fipsSelfTest.func.17.36	slice-literal-backing	heap -> frame		
+stdlib/src/crypto/internal/fips140/ecdh/cast.go:18:17	.goc.global.initfunc.9.crypto/internal/fips140/ecdh.fipsSelfTest.func.17.36	slice-literal-backing	heap -> frame		
+stdlib/src/crypto/internal/fips140/ecdh/cast.go:24:16	.goc.global.initfunc.12.crypto/internal/fips140/ecdh.fipsSelfTest.func.17.36	slice-literal-backing	heap -> frame		
+stdlib/src/crypto/internal/fips140/ecdh/cast.go:24:16	.goc.global.initfunc.16.crypto/internal/fips140/ecdh.fipsSelfTest.func.17.36	slice-literal-backing	heap -> frame		
+stdlib/src/crypto/internal/fips140/ecdh/cast.go:24:16	.goc.global.initfunc.17.crypto/internal/fips140/ecdh.fipsSelfTest.func.17.36	slice-literal-backing	heap -> frame		
+stdlib/src/crypto/internal/fips140/ecdh/cast.go:24:16	.goc.global.initfunc.35.crypto/internal/fips140/ecdh.fipsSelfTest.func.17.36	slice-literal-backing	heap -> frame		
+stdlib/src/crypto/internal/fips140/ecdh/cast.go:24:16	.goc.global.initfunc.41.crypto/internal/fips140/ecdh.fipsSelfTest.func.17.36	slice-literal-backing	heap -> frame		
+stdlib/src/crypto/internal/fips140/ecdh/cast.go:24:16	.goc.global.initfunc.9.crypto/internal/fips140/ecdh.fipsSelfTest.func.17.36	slice-literal-backing	heap -> frame		
 stdlib/src/crypto/internal/fips140/ecdh/cast.go:35:11	.goc.global.initfunc.12.crypto/internal/fips140/ecdh.fipsSelfTest.func.17.36	slice-literal-backing	frame -> heap		argument 3 of $bytes.Equal escapes
 stdlib/src/crypto/internal/fips140/ecdh/cast.go:35:11	.goc.global.initfunc.16.crypto/internal/fips140/ecdh.fipsSelfTest.func.17.36	slice-literal-backing	frame -> heap		argument 3 of $bytes.Equal escapes
 stdlib/src/crypto/internal/fips140/ecdh/cast.go:35:11	.goc.global.initfunc.17.crypto/internal/fips140/ecdh.fipsSelfTest.func.17.36	slice-literal-backing	frame -> heap		argument 3 of $bytes.Equal escapes
@@ -212,6 +224,7 @@ stdlib/src/crypto/x509/root.go:34:8	crypto/x509.systemRootsPool	method-value-des
 stdlib/src/crypto/x509/root.go:40:8	crypto/x509.initSystemRoots	method-value-descriptor	frame -> heap		argument 0 of $runtime.deferproc escapes
 stdlib/src/crypto/x509/verify.go:1064:22	crypto/x509.newPolicyGraph	slice-literal-backing	heap -> frame		
 stdlib/src/crypto/x509/verify.go:1295:56	crypto/x509.policiesValid	string-conversion-buffer	frame -> heap	in a loop	argument 0 of $runtime.stringtoslicebyte leaks to a result the caller cannot follow
+stdlib/src/crypto/x509/verify.go:375:14	crypto/x509.parseRFC2821Mailbox	slice-literal-backing	frame -> heap		argument 3 of $bytes.Contains escapes
 stdlib/src/crypto/x509/verify.go:909:16	crypto/x509.toLowerCaseASCII	string-conversion-buffer	frame -> heap		argument 0 of $runtime.stringtoslicebyte leaks to a result the caller cannot follow
 stdlib/src/crypto/x509/x509.go:1020:59	crypto/x509.checkSignature	composite-literal	heap -> frame		
 stdlib/src/encoding/asn1/asn1.go:236:25	encoding/asn1.ObjectIdentifier.String	make-slice-backing	frame -> heap		argument 0 of $strconv.AppendInt escapes
@@ -555,6 +568,7 @@ stdlib/src/net/url/url.go:198:27	net/url.escape	string-conversion-buffer	frame -
 stdlib/src/net/url/url.go:233:27	net/url.escape	string-conversion-buffer	frame -> heap		argument 0 of $runtime.stringtoslicebyte leaks to a result the caller cannot follow
 stdlib/src/os/dir.go:119:8	os.ReadDir	method-value-descriptor	frame -> heap		argument 0 of $runtime.deferproc escapes
 stdlib/src/os/dir_unix.go:63:8	os.File.readdir	method-value-descriptor	frame -> heap		argument 0 of $runtime.deferproc escapes
+stdlib/src/os/exec/exec.go:424:38	os/exec.Command	string-conversion-buffer	frame -> heap		argument 0 of $runtime.stringtoslicebyte leaks to a result the caller cannot follow
 stdlib/src/os/exec_unix.go:102:8	os.Process.pidSignal	method-value-descriptor	frame -> heap		argument 0 of $runtime.deferproc escapes
 stdlib/src/os/file.go:869:8	os.ReadFile	method-value-descriptor	frame -> heap		argument 0 of $runtime.deferproc escapes
 stdlib/src/os/pidfd_linux.go:101:8	os.Process.pidfdWait	method-value-descriptor	frame -> heap		argument 0 of $runtime.deferproc escapes
@@ -567,6 +581,7 @@ stdlib/src/os/signal/signal.go:54:8	os/signal.cancel	method-value-descriptor	fra
 stdlib/src/os/sys_linux.go:42:8	os.hostname	method-value-descriptor	frame -> heap		argument 0 of $runtime.deferproc escapes
 stdlib/src/os/user/lookup_unix.go:214:8	os/user.lookupGroupId	method-value-descriptor	frame -> heap		argument 0 of $runtime.deferproc escapes
 stdlib/src/os/user/lookup_unix.go:232:8	os/user.lookupUserId	method-value-descriptor	frame -> heap		argument 0 of $runtime.deferproc escapes
+stdlib/src/os/user/lookup_unix.go:63:43	os/user.readColonFile	slice-literal-backing	frame -> heap	in a loop	argument 3 of $bytes.Count escapes
 stdlib/src/path/filepath/match.go:333:8	path/filepath.glob	method-value-descriptor	frame -> heap		argument 0 of $runtime.deferproc escapes
 stdlib/src/reflect/iter.go:130:11	reflect.Value.Seq2.func.126.10	slice-literal-backing	heap -> frame		
 stdlib/src/reflect/iter.go:44:11	reflect.Value.Seq.func.40.10	slice-literal-backing	heap -> frame		
@@ -619,6 +634,7 @@ stdlib/src/testing/testing.go:1056:8	testing.common.destination	method-value-des
 stdlib/src/testing/testing.go:1074:8	testing.common.callSite	method-value-descriptor	frame -> heap		argument 0 of $runtime.deferproc escapes
 stdlib/src/testing/testing.go:1099:9	testing.common.flushPartial.func.1097.13	method-value-descriptor	frame -> heap		argument 0 of $runtime.deferproc escapes
 stdlib/src/testing/testing.go:1147:8	testing.outputWriter.Write	method-value-descriptor	frame -> heap		argument 0 of $runtime.deferproc escapes
+stdlib/src/testing/testing.go:1150:38	testing.outputWriter.Write	string-conversion-buffer	frame -> heap		argument 0 of $runtime.stringtoslicebyte leaks to a result the caller cannot follow
 stdlib/src/testing/testing.go:1265:8	testing.common.Skipped	method-value-descriptor	frame -> heap		argument 0 of $runtime.deferproc escapes
 stdlib/src/testing/testing.go:1277:8	testing.common.Helper	method-value-descriptor	frame -> heap		argument 0 of $runtime.deferproc escapes
 stdlib/src/testing/testing.go:1306:10	testing.common.Cleanup.func.1304.9	method-value-descriptor	frame -> heap		argument 0 of $runtime.deferproc escapes
@@ -649,7 +665,6 @@ stdlib/src/time/format.go:559:26	time.Time.String	make-slice-backing	frame -> he
 stdlib/src/time/format.go:582:25	time.Time.GoString	make-slice-backing	frame -> heap		argument 0 of $time.appendInt leaks to a result the caller cannot follow
 stdlib/src/time/format_rfc3339.go:89:28	time.parseRFC3339[string].func.88.15	string-conversion-buffer	frame -> heap		argument 0 of $runtime.stringtoslicebyte leaks to a result the caller cannot follow
 stdlib/src/time/zoneinfo_read.go:408:2	time.loadTzinfoFromZip	deferred-call-closure	frame -> heap		argument 0 of $runtime.deferproc escapes
-stdlib/src/time/zoneinfo_read.go:546:52	time.loadLocation	string-conversion-buffer	frame -> heap		argument 0 of $runtime.stringtoslicebyte leaks to a result the caller cannot follow
 stdlib/src/time/zoneinfo_read.go:580:2	time.readFile	deferred-call-closure	frame -> heap		argument 0 of $runtime.deferproc escapes
 stdlib/src/unique/canonmap.go:111:8	unique.canonMap.LoadOrStore[main.uniqueRecord]	method-value-descriptor	frame -> heap		argument 0 of $runtime.deferproc escapes
 stdlib/src/unique/canonmap.go:111:8	unique.canonMap.LoadOrStore[net/netip.addrDetail]	method-value-descriptor	frame -> heap		argument 0 of $runtime.deferproc escapes
@@ -667,6 +682,8 @@ testdata/bytealg_compare.go:26:53	main.checkIndex	string-conversion-buffer	frame
 testdata/bytealg_compare.go:54:39	main.checkIndexByte	string-conversion-buffer	frame -> heap		argument 0 of $runtime.stringtoslicebyte leaks to a result the caller cannot follow
 testdata/bytealg_compare.go:65:35	main.checkCount	string-conversion-buffer	frame -> heap		argument 0 of $runtime.stringtoslicebyte leaks to a result the caller cannot follow
 testdata/bytes_grow_compare.go:10:2	main.measuredAllocsPerRun	deferred-call-closure	frame -> heap		argument 0 of $runtime.deferproc escapes
+testdata/bytes_replace_allocs.go:13:18	main.main	string-conversion-buffer	frame -> heap		argument 0 of $runtime.stringtoslicebyte leaks to a result the caller cannot follow
+testdata/bytes_replace_allocs.go:14:18	main.main	string-conversion-buffer	frame -> heap		argument 0 of $runtime.stringtoslicebyte leaks to a result the caller cannot follow
 testdata/bytes_replace_allocs.go:15:24	main.main	string-conversion-buffer	frame -> heap		argument 0 of $runtime.stringtoslicebyte leaks to a result the caller cannot follow
 testdata/loop_alias_composite.go:9:8	main.alternate	composite-literal	heap -> frame	in a loop	
 testdata/md5_assembly.go:6:27	main.main	string-conversion-buffer	frame -> heap		argument 0 of $runtime.stringtoslicebyte leaks to a result the caller cannot follow
@@ -717,6 +734,7 @@ testdata/runtime_loopvar_value_shapes.go:73:39	main.main	slice-literal-backing	f
 testdata/runtime_many_goroutines_gc.go:14:8	main.worker	method-value-descriptor	frame -> heap		argument 0 of $runtime.deferproc escapes
 testdata/runtime_many_goroutines_gc.go:16:10	main.worker	composite-literal	frame -> heap		store into non-local storage
 testdata/runtime_many_goroutines_gc.go:18:10	main.worker	composite-literal	frame -> heap		store into non-local storage
+testdata/runtime_map_pointer_keys.go:27:12	main.main	composite-literal	frame -> heap		store into non-local storage
 testdata/runtime_map_struct_value_replace.go:12:12	main.main	slice-literal-backing	frame -> heap		write barrier into non-local storage
 testdata/runtime_new_composite_gc.go:16:14	main.main	composite-literal	heap -> frame		
 testdata/runtime_panic_error_recover.go:15:2	main.errorRecoverParser.parse	deferred-call-closure	frame -> heap		argument 0 of $runtime.deferproc escapes
@@ -764,6 +782,7 @@ testdata/runtime_type_param_method_shapes.go:232:18	main.main	composite-literal	
 testdata/runtime_type_param_method_shapes.go:236:15	main.main	composite-literal	heap -> frame		
 testdata/runtime_type_param_method_shapes.go:239:15	main.main	composite-literal	heap -> frame		
 testdata/runtime_unsafe_struct_field.go:12:10	main.main	composite-literal	frame -> heap		used by add
+testdata/runtime_unsafe_struct_field.go:15:10	main.main	composite-literal	heap -> frame		
 testdata/runtime_waitgroup_reuse.go:11:10	main.runWaitGroupRound.func.10.6	method-value-descriptor	frame -> heap		argument 0 of $runtime.deferproc escapes
 testdata/sha1_assembly.go:6:28	main.main	string-conversion-buffer	frame -> heap		argument 0 of $runtime.stringtoslicebyte leaks to a result the caller cannot follow
 testdata/stdlib_archive_zip_roundtrip.go:74:23	main.main	slice-literal-backing	frame -> heap		argument 3 of $bytes.Equal escapes
@@ -777,6 +796,7 @@ testdata/stdlib_crypto_x509_ed25519.go:49:20	main.main	string-conversion-buffer	
 testdata/stdlib_encoding_ascii85.go:6:19	main.main	string-conversion-buffer	frame -> heap		argument 0 of $runtime.stringtoslicebyte leaks to a result the caller cannot follow
 testdata/stdlib_encoding_base32.go:6:19	main.main	string-conversion-buffer	frame -> heap		argument 0 of $runtime.stringtoslicebyte leaks to a result the caller cannot follow
 testdata/stdlib_encoding_base64.go:6:19	main.main	string-conversion-buffer	frame -> heap		argument 0 of $runtime.stringtoslicebyte leaks to a result the caller cannot follow
+testdata/stdlib_encoding_json_roundtrip.go:33:36	main.main	string-conversion-buffer	frame -> heap		argument 0 of $runtime.stringtoslicebyte leaks to a result the caller cannot follow
 testdata/stdlib_encoding_pem.go:11:17	main.main	string-conversion-buffer	frame -> heap		argument 0 of $runtime.stringtoslicebyte leaks to a result the caller cannot follow
 testdata/stdlib_filepath_glob_clean.go:13:2	main.main	deferred-call-closure	frame -> heap		argument 0 of $runtime.deferproc escapes
 testdata/stdlib_http_multipart_form.go:38:8	main.main	method-value-descriptor	frame -> heap		argument 0 of $runtime.deferproc escapes
