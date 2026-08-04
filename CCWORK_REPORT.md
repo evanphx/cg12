@@ -7261,3 +7261,69 @@ re-baselined file.
 bytes, sha256 90fc00735d5c2ff7378af948f6bc1700..., `cmp` clean, zero absolute
 paths, and the non-updating check passes in both checkouts.
 
+
+---
+
+# parity-reasons (branch `ccwork/parity-reasons`, off main cae1430)
+
+Three items, in the order the brief set them: the 309 lines where the two
+compilers agree on placement and disagree on the reason; the 96 remaining
+placement lines; the last two slog rows.
+
+## Item 1, finding 1: **goc has no stack-size bound at all, and it is a crash**
+
+`escape_gc_reason_differential.txt` records two lines as `returned -> too-large`
+-- goc keeps a 20 000- and a 24 576-element slice in a frame *because they are
+returned*, gc heaps them *because they will not fit*. The previous branch found
+this, called it "the flagship", proved it costs a 1.6 MB frame, and deliberately
+did not fix it because its guards forbade moving an allocation.
+
+**The accident is broken, and the consequence is worse than a large frame.**
+gc's rule is not one rule but five (`escape.HeapAllocReason`, go1.26.1):
+
+| shape | gc's bound | goc |
+| --- | --- | --- |
+| `var v T` / `v := T{}` (explicit) | `MaxStackVarSize` = 128 KB | none |
+| `new(T)`, `&T{}` (implicit) | `MaxImplicitStackVarSize` = 64 KB | none |
+| `make([]T, n)`, n constant | `n > 64 KB / sizeof(T)` | none |
+| closure, method value | 64 KB | none |
+| any of the above, `align > 8` | "too aligned for stack" | none |
+
+goc implements none of them: `grep` for a size comparison across `goc/` and
+`opt/` finds nothing. Measured, one function per shape:
+
+    make([]int, 0, 200000)   goc frame   gc heap
+    new(big)      1.6 MB     goc frame   gc heap
+    &big{}        1.6 MB     goc frame   gc heap
+    var v big     1.6 MB     goc frame   gc heap   (> 128 KB, the explicit bound)
+
+**The program that breaks the accident**, and it does not merely cost memory --
+it turns a working program into a fatal error:
+
+```go
+type block struct{ data [65536]int } // 512 KB: gc heaps it, > 64 KB implicit
+
+//go:noinline
+func descend(depth int, sink *int) int {
+	b := new(block)
+	b.data[0] = depth
+	if depth > 0 {
+		b.data[1] = descend(depth-1, sink)
+	}
+	*sink += b.data[0] & 1
+	return b.data[0] + b.data[1]
+}
+
+func main() { sink := 0; println(descend(4000, &sink), sink) }
+```
+
+    host gc:  prints "8002000 2000", exit 0
+    goc:      runtime: goroutine stack exceeds 1000000000-byte limit
+              fatal error: stack overflow          exit 2
+
+`b` never leaves `descend`, so every escape analysis in the world says "does not
+escape" -- and gc heaps it anyway, because 4000 x 512 KB does not fit in a
+goroutine stack and 4000 x 512 KB on the heap does. That is what the 64 KB bound
+is for, and it is the whole content of the two `returned -> too-large` lines:
+the placements agree only because these two particular slices happened to be
+returned.
