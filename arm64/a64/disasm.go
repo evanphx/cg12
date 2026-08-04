@@ -694,8 +694,20 @@ func disasmFP(w uint32) string {
 			return fmt.Sprintf("fabs %s, %s", fpr(dbl, rd), fpr(dbl, rn))
 		case 0b000010:
 			return fmt.Sprintf("fneg %s, %s", fpr(dbl, rd), fpr(dbl, rn))
+		case 0b000011:
+			return fmt.Sprintf("fsqrt %s, %s", fpr(dbl, rd), fpr(dbl, rn))
 		case 0b000100, 0b000101: // FCVT to the other width
 			return fmt.Sprintf("fcvt %s, %s", fpr(!dbl, rd), fpr(dbl, rn))
+		case 0b001000:
+			return fmt.Sprintf("frintn %s, %s", fpr(dbl, rd), fpr(dbl, rn))
+		case 0b001001:
+			return fmt.Sprintf("frintp %s, %s", fpr(dbl, rd), fpr(dbl, rn))
+		case 0b001010:
+			return fmt.Sprintf("frintm %s, %s", fpr(dbl, rd), fpr(dbl, rn))
+		case 0b001011:
+			return fmt.Sprintf("frintz %s, %s", fpr(dbl, rd), fpr(dbl, rn))
+		case 0b001100:
+			return fmt.Sprintf("frinta %s, %s", fpr(dbl, rd), fpr(dbl, rn))
 		}
 		return ""
 

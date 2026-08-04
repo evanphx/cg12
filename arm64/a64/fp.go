@@ -31,6 +31,29 @@ func fpDP1(ft, opcode uint32, rd, rn Reg) uint32 {
 // Fneg encodes FNEG rd, rn.
 func Fneg(dbl bool, rd, rn Reg) uint32 { return fpDP1(ftype(dbl), 0b000010, rd, rn) }
 
+// Fabs encodes FABS rd, rn: the magnitude of rn, which is the sign bit cleared
+// and every other bit -- NaN payloads included -- carried through.
+func Fabs(dbl bool, rd, rn Reg) uint32 { return fpDP1(ftype(dbl), 0b000001, rd, rn) }
+
+// Fsqrt encodes FSQRT rd, rn: the correctly-rounded IEEE 754 square root.
+func Fsqrt(dbl bool, rd, rn Reg) uint32 { return fpDP1(ftype(dbl), 0b000011, rd, rn) }
+
+// The FRINT family rounds to an integral value in the floating-point format,
+// each with the rounding mode named in the mnemonic rather than the one in
+// FPCR. That is what makes them usable as Go's math.Floor and friends, whose
+// rounding is fixed by the specification and not by the machine's state.
+//
+//	Frintn -- to nearest, ties to even   (math.RoundToEven)
+//	Frintp -- toward +Inf                (math.Ceil)
+//	Frintm -- toward -Inf                (math.Floor)
+//	Frintz -- toward zero                (math.Trunc)
+//	Frinta -- to nearest, ties away from zero (math.Round)
+func Frintn(dbl bool, rd, rn Reg) uint32 { return fpDP1(ftype(dbl), 0b001000, rd, rn) }
+func Frintp(dbl bool, rd, rn Reg) uint32 { return fpDP1(ftype(dbl), 0b001001, rd, rn) }
+func Frintm(dbl bool, rd, rn Reg) uint32 { return fpDP1(ftype(dbl), 0b001010, rd, rn) }
+func Frintz(dbl bool, rd, rn Reg) uint32 { return fpDP1(ftype(dbl), 0b001011, rd, rn) }
+func Frinta(dbl bool, rd, rn Reg) uint32 { return fpDP1(ftype(dbl), 0b001100, rd, rn) }
+
 // FmovReg encodes FMOV rd, rn (register-to-register float copy).
 func FmovReg(dbl bool, rd, rn Reg) uint32 { return fpDP1(ftype(dbl), 0b000000, rd, rn) }
 

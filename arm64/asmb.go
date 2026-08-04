@@ -51,6 +51,7 @@ type asmb interface {
 	// Floating point.
 	fop(op floatOp, dbl bool, rd, rn, rm Reg)
 	fneg(dbl bool, rd, rn Reg)
+	funary(op floatUnaryOp, dbl bool, rd, rn Reg)
 	fcvtStoD(rd, rn Reg)
 	fcvtDtoS(rd, rn Reg)
 	fcvtzs(dstW64, srcDbl bool, rd, rn Reg)
@@ -206,6 +207,23 @@ const (
 	fSub
 	fMul
 	fDiv
+)
+
+// floatUnaryOp names a one-source floating-point instruction whose result is a
+// function of its operand alone: the square root, the magnitude, and the four
+// integral roundings whose mode is fixed by the mnemonic rather than read out
+// of FPCR. They back the math intrinsics; see arm64/select.go.
+type floatUnaryOp uint8
+
+const (
+	fSqrt floatUnaryOp = iota
+	fAbs
+	// The roundings, named for the direction each one takes.
+	fRoundEven // to nearest, ties to even
+	fRoundAway // to nearest, ties away from zero
+	fRoundUp   // toward +Inf
+	fRoundDown // toward -Inf
+	fRoundZero // toward zero
 )
 
 // extOp names a sub-word sign/zero extend: sxtb/uxtb/sxth/uxth/sxtw.
@@ -383,8 +401,28 @@ func (b *mcAsm) fop(op floatOp, dbl bool, rd, rn, rm Reg) {
 	b.prog.Emit(enc(dbl, mreg(rd), mreg(rn), mreg(rm)))
 }
 func (b *mcAsm) fneg(dbl bool, rd, rn Reg) { b.prog.Emit(a64.Fneg(dbl, mreg(rd), mreg(rn))) }
-func (b *mcAsm) fcvtStoD(rd, rn Reg)       { b.prog.Emit(a64.FcvtStoD(mreg(rd), mreg(rn))) }
-func (b *mcAsm) fcvtDtoS(rd, rn Reg)       { b.prog.Emit(a64.FcvtDtoS(mreg(rd), mreg(rn))) }
+func (b *mcAsm) funary(op floatUnaryOp, dbl bool, rd, rn Reg) {
+	var enc func(bool, a64.Reg, a64.Reg) uint32
+	switch op {
+	case fSqrt:
+		enc = a64.Fsqrt
+	case fAbs:
+		enc = a64.Fabs
+	case fRoundEven:
+		enc = a64.Frintn
+	case fRoundAway:
+		enc = a64.Frinta
+	case fRoundUp:
+		enc = a64.Frintp
+	case fRoundDown:
+		enc = a64.Frintm
+	case fRoundZero:
+		enc = a64.Frintz
+	}
+	b.prog.Emit(enc(dbl, mreg(rd), mreg(rn)))
+}
+func (b *mcAsm) fcvtStoD(rd, rn Reg) { b.prog.Emit(a64.FcvtStoD(mreg(rd), mreg(rn))) }
+func (b *mcAsm) fcvtDtoS(rd, rn Reg) { b.prog.Emit(a64.FcvtDtoS(mreg(rd), mreg(rn))) }
 func (b *mcAsm) fcvtzs(dstW64, srcDbl bool, rd, rn Reg) {
 	b.prog.Emit(a64.Fcvtzs(dstW64, srcDbl, mreg(rd), mreg(rn)))
 }

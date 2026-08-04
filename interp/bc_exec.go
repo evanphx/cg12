@@ -147,6 +147,12 @@ func (mc *Machine) vmLoop(bf *bcFunc, base uint32, va []Value) (Value, error) {
 			case ii.name == "constant_p":
 				// Unresolved __builtin_constant_p (opt settles it in a normal build): 0.
 				mc.regs[base+uint32(ii.dst)] = W(0)
+			case strings.HasPrefix(ii.name, "float."):
+				res, ok := floatMathOp(ii.name, mc.regs[base+uint32(ii.args[0])])
+				if !ok {
+					return Value{}, mc.trapf("bytecode: unknown float intrinsic %q", ii.name)
+				}
+				mc.regs[base+uint32(ii.dst)] = res
 			case strings.HasPrefix(ii.name, "atomic."):
 				args := make([]Value, len(ii.args))
 				for i, r := range ii.args {
