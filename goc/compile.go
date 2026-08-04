@@ -2855,6 +2855,45 @@ func (g *gen) makeResultDoesNotEscape(call *ast.CallExpr) bool {
 	return g.assignedResultDoesNotEscape(call)
 }
 
+// sliceBackingFitsInAFrame bounds the backing array a fixed-capacity make can be
+// given in the frame. Without it the front end committed a frame slot of any
+// size at all -- a make of 200 000 ints took 1.6 MB of the caller's frame, and
+// the same shape in a recursive function overflowed the goroutine stack on a
+// program the host toolchain runs.
+//
+// The comparison is cmd/compile's, in the form cmd/compile writes it: capacity
+// against MaxImplicitFrameSize/elementSize rather than capacity*elementSize
+// against MaxImplicitFrameSize, because the division truncates and the two
+// forms disagree for every element size that is not a power of two. The point
+// of the bound is to place the same objects gc places, so the arithmetic has to
+// be the same arithmetic.
+//
+// A zero-sized element is not bounded here. gc sends those to the heap
+// ("zero-sized element"), by a TODO that says it would rather not; a frame slot
+// of no bytes costs nothing and copying the TODO would move allocations for no
+// reason.
+// fitsInAFrame bounds one implicitly allocated object: storage the source did
+// not name, which is new(T), &T{} and a make's backing array. See
+// opt.MaxImplicitFrameSize.
+func fitsInAFrame(valueType types.Type) bool {
+	return typeSize(valueType) <= opt.MaxImplicitFrameSize
+}
+
+// tooLargeForAFrame is the rule fitsInAFrame states when it refuses, in the same
+// words opt/escape.go's copy of the bound states it, so a reader who meets the
+// rule does not have to know which of the two analyses placed the object.
+func tooLargeForAFrame(valueType types.Type) string {
+	return fmt.Sprintf("%d bytes is larger than the %d a frame will hold", typeSize(valueType), opt.MaxImplicitFrameSize)
+}
+
+func sliceBackingFitsInAFrame(elementType types.Type, capacity int64) bool {
+	elementSize := typeSize(elementType)
+	if elementSize <= 0 {
+		return true
+	}
+	return capacity <= opt.MaxImplicitFrameSize/elementSize
+}
+
 func (g *gen) assignedResultDoesNotEscape(expression ast.Expr) bool {
 	return g.assignedNodeDoesNotEscape(expression)
 }
@@ -12132,7 +12171,22 @@ func (g *gen) expr(e ast.Expr) (result ir.Ref) {
 				// The pointer may stay inside the frame and still have to name
 				// a different object on every trip round a loop, which frame
 				// storage cannot do. See addressOutlivesItsIteration.
+				//
+				// And it may stay inside the frame and be too big for one. A
+				// pointer composite literal is storage the source never named,
+				// so it carries cmd/compile's implicit bound; see
+				// opt.MaxImplicitFrameSize for why a frame slot of any size at
+				// all is not merely wasteful.
+				literalType := g.typeAndValue(literal).Type
 				heap := !g.nonEscapingAddress(n) || g.addressOutlivesItsIteration(n)
+				if !heap && !fitsInAFrame(literalType) {
+					heap = true
+					// The size supersedes the climb rather than joining it: the
+					// walk has just answered "no publication", which is true and
+					// is no longer the reason.
+					g.diagRuleOverride(func() string { return tooLargeForAFrame(literalType) })
+					g.diagUse(n)
+				}
 				// Harvested here, at the decision, because everything between
 				// this line and the recordPlacement calls below asks the walk
 				// further questions about the literal's elements.
@@ -12141,7 +12195,6 @@ func (g *gen) expr(e ast.Expr) (result ir.Ref) {
 					heap = false
 					why = escapeExplanation{}
 				}
-				literalType := g.typeAndValue(literal).Type
 				_, isMap := literalType.Underlying().(*types.Map)
 				if isSliceType(literalType) || isMap {
 					value := g.compositeLiteral(literal, heap, why)
@@ -14735,7 +14788,7 @@ func (g *gen) builtinCall(call *ast.CallExpr, builtin *types.Builtin) ir.Ref {
 			}
 			fixedCapacity, hasFixedCapacity := g.fixedSliceCapacity(call)
 			var data ir.Ref
-			if hasFixedCapacity && fixedCapacity > 0 && g.makeResultDoesNotEscape(call) {
+			if hasFixedCapacity && fixedCapacity > 0 && sliceBackingFitsInAFrame(sliceType.Elem(), fixedCapacity) && g.makeResultDoesNotEscape(call) {
 				elementSize := typeSize(sliceType.Elem())
 				alignment := int(typeAlign(sliceType.Elem()))
 				if alignment < 4 {

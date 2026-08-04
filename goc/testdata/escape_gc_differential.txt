@@ -51,13 +51,13 @@ rows are goc's verdict for the line, columns are gc's.
 same as "it put the object in a frame" -- see gcdiff.Absent.
 
   goc\gc      frame     heap    mixed   absent    total
-  frame         189       31       14      193      427
-  heap           96      579      172       81      928
+  frame         189       30       14      193      426
+  heap           96      580      172       81      929
   mixed          13       88       24       13      138
   absent        420     1287       24        0     1731
   total         718     1985      234      287     3224
 
-## PERMISSIVE: 1468 lines
+## PERMISSIVE: 1467 lines
 
 every source line gc puts on the heap and goc does not. This is the
 correctness-critical direction: goc keeping in a frame something gc could not
@@ -74,7 +74,7 @@ by construct (goc allocators on the line | gc constructs on the line):
      20  newobject/frame | object/heap
      13  convT64/heap,newobject/frame | object/heap,slice/frame
      12  newobject/frame | object/heap,slice/frame
-     11  newobject/frame | slice/heap
+     10  newobject/frame | slice/heap
       7  newobject/frame,newobject/heap | slice/heap
       6  convT64/heap,newobject/frame,newobject/heap | object/frame,object/heap,slice/frame
       2  - | object/heap,slice/frame
@@ -991,10 +991,6 @@ runtime_gc_heap_growth_shrink.go:98	absent -> heap
 runtime_gc_heap_growth_shrink.go:101	absent -> heap
 	src  panic("a transient object's payload was corrupted while it was live")
 	gc   col 10  heap  object  "a transient object's payload was corrupted while it was live"
-runtime_gc_heap_growth_shrink.go:105	frame -> heap
-	src  small := make([]*resident, 0, 65536)
-	goc  col 32  frame  runtime.newobject  65536__main_resident  [main.grow]
-	gc   col 15  heap  slice  make([]*resident, 0, 65536)
 runtime_gc_heap_growth_shrink.go:110	absent -> heap
 	src  panic("the transient small allocation was truncated")
 	gc   col 9  heap  object  "the transient small allocation was truncated"

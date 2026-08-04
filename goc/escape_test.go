@@ -1347,3 +1347,69 @@ func main() {
 	assert.True(t, callsSymbol(global, "runtime.newobject"),
 		"a closure stored in a package global stayed on the frame")
 }
+
+// TestObjectsTooLargeForAFrameGoToTheHeap covers the bound the escape analysis
+// does not answer: an object whose address demonstrably never leaves its
+// function, and which still must not be a frame slot because it will not fit in
+// one.
+//
+// The shapes are the three cmd/compile bounds with MaxImplicitStackVarSize, and
+// they are decided in two different places -- new(T) and the make backing array
+// reach opt.LowerHeapAllocations as candidates, &T{} is placed by the front end
+// -- so all three are checked rather than one standing for the others.
+//
+// The pair just under the bound is what makes this a test of the bound and not
+// of "large things go to the heap": 8 192 pointers is exactly 64 KB, which is
+// the largest backing array cmd/compile keeps, and it has to stay in the frame.
+func TestObjectsTooLargeForAFrameGoToTheHeap(t *testing.T) {
+	module, err := goc.Compile("escape.go", []byte(`
+package main
+
+import "runtime"
+
+type block struct{ data [65536]int }
+
+func bigNew() int {
+	value := new(block)
+	value.data[0] = 7
+	return value.data[0]
+}
+
+func bigLiteral() int {
+	value := &block{}
+	value.data[1] = 11
+	return value.data[1]
+}
+
+func bigMake() int {
+	values := make([]*int, 0, 65537)
+	values = append(values, nil)
+	return len(values)
+}
+
+func atTheBound() int {
+	values := make([]*int, 0, 8192)
+	values = append(values, nil)
+	return len(values)
+}
+
+func main() {
+	runtime.GC()
+	println(bigNew() + bigLiteral() + bigMake() + atTheBound())
+}
+`))
+	require.NoError(t, err)
+
+	for _, name := range []string{"main.bigNew", "main.bigLiteral", "main.bigMake"} {
+		function := functionWithSuffix(t, module, name)
+		assert.True(t, callsSymbol(function, "runtime.newobject"),
+			"%s kept an object larger than 64 KB in its frame", name)
+	}
+
+	bounded := functionWithSuffix(t, module, "main.atTheBound")
+	assert.False(t, callsSymbol(bounded, "runtime.newobject"),
+		"a backing array of exactly 64 KB was sent to the heap; the bound is inclusive")
+	assert.True(t, containsInstruction(bounded, func(instruction ir.Instr) bool {
+		return instruction.Op.IsAlloc()
+	}), "a backing array of exactly 64 KB did not get a frame slot")
+}

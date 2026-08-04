@@ -383,6 +383,10 @@ func TestReasonTaxonomyCoversBothVocabularies(t *testing.T) {
 		{"the walk found a use it could not prove local", gcdiff.ReasonUnexplained},
 		{"node is used here in a way the walk cannot prove keeps it local", gcdiff.ReasonUnexplained},
 		{"counter is captured by a function literal that escapes", gcdiff.ReasonClosureCaptured},
+		// Both analyses word the size bound the same way, and both start it
+		// with the object's own size, so neither has a fixed prefix.
+		{"1600000 bytes is larger than the 65536 a frame will hold", gcdiff.ReasonTooLarge},
+		{"524288 bytes is larger than the 65536 a frame will hold", gcdiff.ReasonTooLarge},
 		{"", ""},
 	} {
 		reason, known := gcdiff.ClassifyGocRule(testCase.rule)
