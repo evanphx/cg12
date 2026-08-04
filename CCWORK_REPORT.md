@@ -7531,6 +7531,17 @@ policy, and more than aligning every function entry -- for a 1.14% median spread
 which is not better. The intuition that loop heads are the frugal place to spend
 padding is wrong here: a function has one entry and several back-edge targets.
 
+A note on how that question can and cannot be asked. "Align loop heads only" is
+not a policy this backend can have: a block's offset within a function is an
+address only once you know where the function landed, so aligning a loop header
+to 32 inside a function whose entry is at an arbitrary offset aligns it relative
+to nothing -- the same defect, one level down, that `.text`'s `sh_addralign = 4`
+was. The `head32` arm is therefore loop-head alignment *on top of* aligned
+entries, which is the cheapest form in which the idea is coherent, and it is the
+one measured. Its answer is that the entry alignment was already doing the work:
+a loop whose function starts at 0 mod 32 already has a phase that nothing
+upstream can change, and moving it to 0 mod 32 as well buys nothing measurable.
+
 Why not 64: it is the best row in the spread table (0.65% median) and it costs
 5.04% of `.text`, seven times the shipped policy, for 0.35 points of a statistic
 whose floor is 0.08. It is worth revisiting on a machine with a 64-byte fetch
