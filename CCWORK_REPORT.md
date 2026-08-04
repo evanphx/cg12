@@ -7327,3 +7327,64 @@ goroutine stack and 4000 x 512 KB on the heap does. That is what the 64 KB bound
 is for, and it is the whole content of the two `returned -> too-large` lines:
 the placements agree only because these two particular slices happened to be
 returned.
+
+## Item 1, finding 2: **the walk has no read-out rule, and it is six live miscompiles in `main`**
+
+This is what the 309 were supposed to produce and it came out of them the way
+the brief said it would: not from a line in the file, but from breaking one.
+
+**Where it came from.** Two of the 309's groups are the walk answering
+`unexplained` on a line where gc names a mechanism: 41 `unexplained ->
+stored-in-object` and 43 `unexplained -> call-retains`. `unexplained` is the
+walk's conservative default -- it watched the object escape and could not name
+the use -- so on those lines goc is right *because it could not prove locality*,
+which is exactly "right without gc's knowledge". The question that follows is:
+what happens on a shape where the walk *can* prove locality by one of its
+positive rules, and the object escapes anyway? Sixteen such shapes were written,
+one per rule in `gen.nonEscapingObjectUse` that answers true. Six of them are
+wrong, and all six are one defect.
+
+**The defect.** The walk's rules about a container answer *"the container's own
+storage does not escape"*. Two callers consume that answer as *"nothing inside
+the container escapes"*. A pointer read back out of a frame-local container is
+published without the container's storage ever leaving the frame, and the walk
+never sees it.
+
+`compositeElementDoesNotEscape` is the first consumer -- "the element escapes
+exactly when the composite value does" -- which is true of *storage* and false
+of a *pointer* element, because the array holds the address and not the object.
+`appendSpreadSource` and the `copy` builtin are the second: both answer true
+because the operand's own storage is not retained, which is correct and is not
+the question when the object being asked about is one of the elements.
+
+**Six programs, each right under the host toolchain and wrong under `goc`.**
+Every one publishes into a package-level variable and then calls a function that
+reuses the frame:
+
+```go
+type node struct{ value int }
+type holder struct{ p *node }
+var sink *node
+var published []*node
+
+func viaFieldRead()        { n := &node{1}; h := holder{p: n};  sink = h.p }
+func viaArrayIndexRead()   { n := &node{2}; arr := [1]*node{n}; sink = arr[0] }
+func viaSliceOfArrayIndex(){ n := &node{3}; arr := [1]*node{n}; s := arr[:]; sink = s[0] }
+func viaAppendElement()    { n := &node{4}; arr := [1]*node{n}; published = append(published[:0], arr[0]) }
+func viaAppendSpread()     { n := &node{9}; arr := [1]*node{n}; published = append(published[:0], arr[:]...) }
+func viaCopy()             { n := &node{7}; arr := [1]*node{n}; copy(published, arr[:]) }
+```
+
+    host gc:  field read: 1   array index: 2   slice index: 3   append elem: 4   append spread: 9   copy: 7
+    goc:      field read: 0   array index: 0   slice index: 0   append elem: 0   append spread: 0   copy: 0
+
+`goc -m` on the first: `readout.go:11:7: main_node does not escape`, where gc
+says `&node{...} escapes to heap`. The zeros are the frame being reused; `sink`
+is a package-level variable and cannot itself be clobbered, so what it points at
+is a dead frame.
+
+**It is the `read-out` category, which goc already has -- on the other side.**
+`opt/escape.go` says `read back out of the object holding it` and
+`block-copied out of the object holding it`, and the reason taxonomy has
+`ReasonReadOut` for both compilers. The IR pass knows the rule. The front-end
+walk does not, and the front-end walk is what places a composite literal.
