@@ -115,6 +115,18 @@ const cryptoBenchHeader = `# Elapsed time on the crypto signing path under goc a
 # gc's index is the reference. It should not move unless the host toolchain did;
 # this file records the toolchain it was produced against for that reason.
 #
+# # A movement is not automatically a regression
+#
+# goc gives function entries no alignment, so where the crypto code lands inside
+# the processor's 32-byte instruction fetch granule is decided by the total size
+# of everything emitted before it. Measured on the box this baseline was taken
+# on, with the compiled program held byte-for-byte identical and only the text
+# section shifted, this index is a square wave in that shift: period 32 bytes,
+# amplitude 6.1%, which is more than the tolerance. Before treating a movement
+# here as a regression, check whether the path's instruction *encodings* changed
+# at all -- goc/cryptobench_test.go's failure message gives the commands. A
+# movement with identical encodings is a placement flip and nothing got worse.
+#
 `
 
 // TestCryptoSigningBench holds the elapsed cost of the crypto signing path to a
@@ -146,6 +158,32 @@ const cryptoBenchHeader = `# Elapsed time on the crypto signing path under goc a
 // gate. It watches one path, chosen because that path is where the tree's one
 // known regression was, and it makes a number that used to exist only in a
 // report into a number that a command reproduces.
+//
+// # The third cause, which is not in the failure message's first two
+//
+// A movement here has three possible causes and not two. The first two are the
+// ones this file was built for: an allocation moved, or the code generated for
+// the path changed. The third is that the code did not change at all and *moved*.
+//
+// It is not a small effect and it is not hypothetical. Measured on this box,
+// holding the compiled program byte-for-byte identical and shifting the whole
+// text section by K bytes, the p256/sign-verify index is a square wave in K with
+// a period of 32 bytes -- the Neoverse-N1 instruction fetch granule -- and an
+// amplitude of 6.1%:
+//
+//	K mod 32 = 0    index 47.72 - 47.86
+//	K mod 32 = 16   index 44.79 - 44.83
+//
+// The tolerance is 0.04. So a change anywhere in the program that alters the
+// number of bytes emitted before the crypto code -- including a change to a cold
+// branch in an unrelated package, which is what 96996b0 was -- can move this row
+// by more than the tolerance while the ECDSA path's instructions are unchanged.
+// goc gives function entries no alignment (arm64/mc.go lays each function down at
+// len(o.Text)), so which half of the wave a build lands in is decided by the
+// running total of every byte emitted before it.
+//
+// Which is to say: this row failing is not by itself evidence that anything got
+// worse. compareCryptoBench's message says how to tell the three apart.
 func TestCryptoSigningBench(t *testing.T) {
 	if !*measureCryptoBench && !*updateCryptoBench {
 		t.Skip("pass -crypto-bench to build goc/testdata/crypto_signing_bench with both compilers and compare elapsed time")
@@ -380,11 +418,24 @@ func compareCryptoBench(t *testing.T, accepted, found []cryptoBenchRow) {
 
 	assert.Empty(t, slower,
 		"the crypto signing path costs more than the baseline says. This is paid by every ECDSA\n"+
-			"operation in every program goc compiles. Before accepting it, diff\n"+
-			"testdata/alloc_census_baseline.txt: if a bigmod site moved FRAME -> HEAP, that is the\n"+
-			"cause and it is the same shape as the regression this file was created for. If nothing\n"+
-			"moved, it is a code generation change and the IR is where to look. Then rerun with\n"+
-			"-update-crypto-bench.\n  %s", strings.Join(slower, "\n  "))
+			"operation in every program goc compiles. There are three causes and they are\n"+
+			"distinguishable; work down the list before accepting or reverting anything.\n\n"+
+			"  1. An allocation moved. Diff testdata/alloc_census_baseline.txt: a bigmod site that\n"+
+			"     went FRAME -> HEAP is the same shape as the regression this file was created for.\n\n"+
+			"  2. The generated code changed. Build the benchmark with the suspect compiler and\n"+
+			"     with its parent, and compare the *encoded instruction words* of the functions on\n"+
+			"     the path -- bigmod.addMulVVW, Nat.montgomeryMul, Nat.Mul:\n\n"+
+			"         nm -S bench.a | grep bigmod        # addresses and sizes\n"+
+			"         objdump -d --start-address=A --stop-address=B bench.a | awk '{print $2}'\n\n"+
+			"     Compare the encoding column, not objdump's rendering: it prints absolute branch\n"+
+			"     targets, which differ whenever the text shifts even if the code is identical.\n\n"+
+			"  3. Nothing changed and the code moved. If (2) says the bytes are identical and the\n"+
+			"     symbol addresses differ by a constant, this is a code placement flip, and the\n"+
+			"     honest answer is that nothing got worse. See TestCryptoSigningBench's doc: the\n"+
+			"     index is a square wave in the text offset, period 32 bytes, amplitude 6.1%%, and\n"+
+			"     the tolerance is 4%%. This is what happened at 96996b0.\n\n"+
+			"Only (1) and (2) are regressions. Then rerun with -update-crypto-bench.\n  %s",
+		strings.Join(slower, "\n  "))
 	assert.Empty(t, faster,
 		"the crypto signing path costs less than the baseline says. That is the good direction and\n"+
 			"it is still a change someone has to look at: the cheap way to get it is to stop\n"+

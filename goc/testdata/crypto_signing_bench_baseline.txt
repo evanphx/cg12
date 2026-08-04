@@ -40,13 +40,25 @@
 # gc's index is the reference. It should not move unless the host toolchain did;
 # this file records the toolchain it was produced against for that reason.
 #
+# # A movement is not automatically a regression
+#
+# goc gives function entries no alignment, so where the crypto code lands inside
+# the processor's 32-byte instruction fetch granule is decided by the total size
+# of everything emitted before it. Measured on the box this baseline was taken
+# on, with the compiled program held byte-for-byte identical and only the text
+# section shifted, this index is a square wave in that shift: period 32 bytes,
+# amplitude 6.1%, which is more than the tolerance. Before treating a movement
+# here as a regression, check whether the path's instruction *encodings* changed
+# at all -- goc/cryptobench_test.go's failure message gives the commands. A
+# movement with identical encodings is a placement flip and nothing got worse.
+#
 host toolchain: go version go1.26.1 linux/arm64
 measurement:    rounds=5 fastest-of signVerifyRounds=200
 index:          case time / control/spin-fixed-work time, same binary, same process
 tolerance:      0.04 of the index, both directions
 
 case                        goc index     gc index   goc ns (fyi)    gc ns (fyi)
-p256/sign-verify              45.7581       1.6310     2501162550       54623227
-p256/verify                   33.7479       1.1637     1844676016       38973083
-p384/sign-verify              40.3662       2.8733     2206437207       96228482
-rsa2048/sign-verify           12.3879       0.5925      677130146       19841163
+p256/sign-verify              48.7484       1.6293     2664038161       54516168
+p256/verify                   35.8206       1.1648     1957550355       38972417
+p384/sign-verify              41.6658       2.8793     2276980080       96341317
+rsa2048/sign-verify           12.8621       0.5930      702897785       19840330
