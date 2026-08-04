@@ -291,10 +291,8 @@ on 34 of them. Grouped by what a row can actually see:
 
 **Cannot**, and this is the honest part:
 
-- **Nothing under 5 % anywhere.** The 5 % floor is code placement, not noise: it
-  is set above the residue the tree has measured after 32-byte loop alignment
-  (0.4 % once, 2.73 % once on the crypto path, and up to 4.4 % on these programs).
-  A 3 % regression passes green on every row. No instrument on this box both sees
+- **Nothing under 5 % anywhere.** The 5 % floor is code placement, not noise. A
+  3 % regression passes green on every row. No instrument on this box both sees
   3 % and does not fire at random.
 - **The three worst rows are effectively report-only.** `text/sprintf` cannot
   fail on less than a 36 % movement. It is kept because the committed number
@@ -305,10 +303,24 @@ on 34 of them. Grouped by what a row can actually see:
   repetitions: each run is a fresh process with a fresh physical page mapping for
   a 64 MiB ring, and DRAM latency depends on it. It earns its place as a
   calibration row that reads 1.03, not as a sensitive one.
-- **One row has a thin placement margin.** `regexp/anchored-lines` fires at 5.4 %
-  and its committed placement residue is 4.42 %. A pure rebuild that moved code
-  could in the worst case land within one point of firing it. Every other row's
-  residue is below half its detect threshold.
+- **A pure rebuild cannot fire it — checked, not assumed.** The placement sweep
+  already in the tree measured, for each of these programs, how far its number
+  moves when the text is shifted by 4…28 bytes and *not one instruction changes*.
+  Compared against this suite's thresholds, all 17 reused case rows clear:
+
+  | row | placement residue | detect |
+  |---|---:|---:|
+  | `text/sprintf` | 21.72 % | 36.0 % |
+  | `text/format-append` | 15.62 % | 26.1 % |
+  | `regexp/anchored-lines` | **4.48 %** | **5.4 %** ← thin |
+  | `json/marshal` | 3.95 % | 7.0 % |
+  | `map/build-probe` | 2.95 % | 13.3 % |
+  | the other 12 | ≤ 2.3 % | ≥ 5.1 % |
+
+  `regexp/anchored-lines` is the one thin margin: 4.48 % against a 5.4 % bar. A
+  rebuild that moved code unluckily could land within a point of firing it. The
+  four new programs have no such measurement — the sweep predates them — so their
+  residue is assumed to resemble their neighbours' and is not known.
 - **A change that slows the host toolchain reads as goc getting faster.** The
   denominator is the host. The host version is in the baseline header and a
   movement is reported in its own bucket with that stated.
@@ -471,6 +483,28 @@ Read with care: this is a reading of one function, sampled across ~90 of its 964
 instructions plus the whole-function memory-op count. It is a strong hint about
 where a large constant factor lives, not a diagnosis of the register allocator.
 
+### Where goc is obviously doing something wrong, in order
+
+The brief asked whether any workload shows a ratio far out of line with the
+others. Three do, and one is a factor of a hundred:
+
+| finding | ratio | against the 1.63× floor |
+|---|---:|---:|
+| `math.Sqrt` is not lowered to `FSQRT` | **171×** | 105× the floor |
+| goroutine create + join | **38×** | 24× |
+| the interpreter dispatch loop | **21×** | 13× |
+| reflective marshalling (`json/marshal`) | **17×** | 11× |
+| map build + probe, `fmt` formatting, `flate` | 7–12× | 4–7× |
+| sorting, interface/callback dispatch | 3.7–4.9× | 2–3× |
+| uncontended mutex, int↔float conversion | 1.5–1.9× | ≈ 1× |
+| identical assembly, or memory-bound | 1.01–1.03× | — |
+
+The bottom two rows are the ones that make the top row believable: the suite can
+produce 1.00 when 1.00 is the right answer.
+
+`math.Sqrt` is the one to fix first. It is one instruction on this architecture,
+the fix is local, and it is a hundred times the cost of everything around it.
+
 ### P-256 is 45×, and that is assembly against Go, not codegen against codegen
 
     p256/sign-verify   goc 293.1 ms   host 6.58 ms    44.6×
@@ -480,3 +514,41 @@ The host toolchain uses the hand-written P-256 assembly; goc runs the generic Go
 path. It is reported here and deliberately **not** made a row of this suite:
 `make bench-crypto` already watches that path, and a second gate on the same code
 means two red lights for one cause.
+
+## What this does not do
+
+- It does not run in CI. It is opt-in behind `-perf-bench` for the same reason
+  the placement comparison and the slog benchmark are — a host Go toolchain —
+  plus one of its own: it measures time, so a loaded box produces a number about
+  the box. A parallel `go test ./...` is exactly the wrong place for it.
+- It does not say what any ratio *ought* to be. Several rows are far from 1.00
+  for reasons that are not defects. The baseline's job is to hold each row where
+  it is and say when it moved.
+- It does not measure parallel behaviour. Every run is pinned to one core.
+- It does not cover the ECDSA path. `make bench-crypto` does, and the two use the
+  same core-selection convention offset by one so they can run at the same time
+  on one box.
+
+## The line
+
+Eleven workloads, `make bench-perf`, ~10.5 minutes, committed baseline, fails
+both ways:
+
+| workload | goc/host | noise floor | detect |
+|---|---:|---:|---:|
+| `interp` bytecode dispatch | 21.46× | 0.05 % | 5.1 % |
+| `sha` SHA-256 / HMAC | 1.008× / 1.016× | 0.07 / 0.09 % | 5.1 % |
+| `regexp` match / replace | 6.14–7.95× | 0.35–2.20 % | 5.4–9.0 % |
+| `json` marshal / unmarshal | 17.18× / 11.29× | 1.71 / 4.75 % | 7.0 / 19.4 % |
+| `sortmap` sort / map | 3.74–7.88× | 0.13–3.26 % | 5.1–13.3 % |
+| `flate` compress / decompress | 6.86× / 7.59× | 0.79 / 0.17 % | 5.9 / 5.2 % |
+| `text` parse / utf8 / sprintf | 4.41–11.17× | 0.16–8.81 % | 5.2–36.0 % |
+| `chase` L1 / pointer / DRAM | 1.457× / 1.010× / 1.027× | 0.35–6.23 % | 5.4–25.5 % |
+| `conc` mutex / chan / goroutine | 1.86–38.45× | 0.04–4.27 % | 5.0–17.4 % |
+| `gcpress` churn / barrier | 8.47–11.70× | 0.73–4.33 % | 5.8–17.7 % |
+| `float` convert / mandelbrot / sqrt | 1.547–171.22× | 0.03–0.29 % | 5.0–5.3 % |
+| *the control, in all eleven* | 1.630–1.633 | 0.04–0.22 % | 5.0–5.2 % |
+
+**The smallest regression the suite can detect is 5.0 %**, on 27 of its 42 rows,
+and ≤ 6.0 % on 34 of them. Three rows cannot see less than 25 %, and the baseline
+prints that number next to each of them.
