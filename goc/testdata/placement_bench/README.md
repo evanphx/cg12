@@ -42,3 +42,23 @@ have nothing to do with the code it is benchmarking.
 
 `GOC_FUNC_ALIGN`, `GOC_ALIGN_LOOP_FUNCS_ONLY` and `GOC_LOOP_ALIGN` select the
 placement policy to measure that spread under. See `arm64/align.go`.
+
+## The measurements
+
+`results_shift_phase.tsv` is the grid at shifts 0, 4, ... 28, which move a
+function's address *and* its phase inside the 32-byte fetch granule.
+`results_shift_address.tsv` is the control: shifts 32, 64, 96, 128, which are all
+0 mod 32 and so move only the address. Both are three reps of every cell, one run
+of every binary per rep in a shuffled order, pinned to one core. Columns are
+program, policy, shift, case, rep, nanoseconds.
+
+`analysis_shift_phase.txt` and `analysis_shift_address.txt` are `analyze.py`'s
+output on each. The conclusion drawn from them is in CCWORK_REPORT.md, "Should
+goc align function entries".
+
+Regenerating them needs the environment knobs in `arm64/align.go` and about an
+hour on a quiet machine:
+
+    go build -o "$TMPDIR/goc" ./cmd/goc
+    python3 sweep.py build && python3 sweep.py run 3
+    python3 analyze.py

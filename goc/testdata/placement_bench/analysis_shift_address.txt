@@ -1,0 +1,134 @@
+
+# Placement-induced spread, index (case / control, same process): (max-min)/min across shifts [32, 64, 96, 128]
+program   case                         none      a16      a32      a64   loop32   head32    noise
+p256      p256/sign-verify            0.69%       --    0.24%       --    0.75%       --    0.93%
+p256      p256/verify                 0.36%       --    0.24%       --    0.51%       --    0.69%
+sha       sha/hmac-1mib               0.10%       --    0.09%       --    0.16%       --    0.23%
+sha       sha/sha256-1mib             0.07%       --    0.06%       --    0.06%       --    0.13%
+interp    interp/bytecode-loop        3.72%       --    9.08%       --    1.43%       --    0.29%
+regexp    regexp/anchored-lines       0.70%       --    2.10%       --    2.87%       --    2.48%
+regexp    regexp/find-submatch        0.08%       --    4.80%       --    4.27%       --    0.45%
+regexp    regexp/replace              1.70%       --    5.55%       --    5.72%       --    2.09%
+json      json/marshal                2.95%       --    1.16%       --    0.88%       --    4.64%
+json      json/unmarshal              4.21%       --    0.74%       --    1.72%       --    3.21%
+sortmap   map/build-probe             1.25%       --    4.09%       --    2.80%       --   17.01%
+sortmap   sort/ints                   0.08%       --    0.07%       --    0.22%       --    0.36%
+sortmap   sort/slice-callback         0.25%       --    0.40%       --    0.88%       --    1.63%
+flate     flate/compress              0.93%       --    1.92%       --    1.13%       --    0.61%
+flate     flate/decompress            0.07%       --    0.09%       --    0.18%       --    0.21%
+text      text/format-append          9.54%       --   17.78%       --    7.73%       --   15.59%
+text      text/parse                  0.35%       --    0.32%       --    0.62%       --    0.53%
+text      text/sprintf               13.79%       --    4.03%       --    3.55%       --   17.20%
+text      text/utf8-decode            0.44%       --    0.16%       --    1.09%       --    0.40%
+p256      control/spin-fixed-work     0.00%       --    0.00%       --    0.00%       --    0.06%  (control)
+sha       control/spin-fixed-work     0.00%       --    0.00%       --    0.00%       --    0.10%  (control)
+interp    control/spin-fixed-work     0.00%       --    0.00%       --    0.00%       --    0.10%  (control)
+regexp    control/spin-fixed-work     0.00%       --    0.00%       --    0.00%       --    0.06%  (control)
+json      control/spin-fixed-work     0.00%       --    0.00%       --    0.00%       --    0.09%  (control)
+sortmap   control/spin-fixed-work     0.00%       --    0.00%       --    0.00%       --    0.11%  (control)
+flate     control/spin-fixed-work     0.00%       --    0.00%       --    0.00%       --    0.09%  (control)
+text      control/spin-fixed-work     0.00%       --    0.00%       --    0.00%       --    0.21%  (control)
+
+# Spread summary over the 19 timed cases, index (case / control, same process)
+policy       median      mean       p90     worst
+none          0.69%     2.17%     9.54%    13.79%
+a32           0.74%     2.79%     9.08%    17.78%
+loop32        1.09%     1.93%     5.72%     7.73%
+CONTROLS      0.00%     0.00%     0.00%     0.00%
+           ^ the controls under every policy: the measurement floor
+
+# Placement-induced spread, raw nanoseconds: (max-min)/min across shifts [32, 64, 96, 128]
+program   case                         none      a16      a32      a64   loop32   head32    noise
+p256      p256/sign-verify            0.72%       --    0.31%       --    0.77%       --    0.93%
+p256      p256/verify                 0.31%       --    0.29%       --    0.48%       --    0.69%
+sha       sha/hmac-1mib               0.08%       --    0.07%       --    0.17%       --    0.23%
+sha       sha/sha256-1mib             0.03%       --    0.05%       --    0.09%       --    0.13%
+interp    interp/bytecode-loop        3.74%       --    9.09%       --    1.48%       --    0.29%
+regexp    regexp/anchored-lines       0.71%       --    2.12%       --    2.91%       --    2.48%
+regexp    regexp/find-submatch        0.09%       --    4.79%       --    4.21%       --    0.45%
+regexp    regexp/replace              1.68%       --    5.55%       --    5.66%       --    2.09%
+json      json/marshal                2.98%       --    1.19%       --    0.89%       --    4.64%
+json      json/unmarshal              3.56%       --    0.76%       --    1.75%       --    3.21%
+sortmap   map/build-probe             1.25%       --    4.11%       --    2.89%       --   17.01%
+sortmap   sort/ints                   0.04%       --    0.05%       --    0.15%       --    0.36%
+sortmap   sort/slice-callback         0.28%       --    0.41%       --    0.94%       --    1.63%
+flate     flate/compress              0.94%       --    1.95%       --    1.16%       --    0.61%
+flate     flate/decompress            0.06%       --    0.11%       --    0.22%       --    0.21%
+text      text/format-append          9.56%       --   17.79%       --    7.71%       --   15.59%
+text      text/parse                  0.37%       --    0.32%       --    0.60%       --    0.53%
+text      text/sprintf               13.81%       --    4.02%       --    3.57%       --   17.20%
+text      text/utf8-decode            0.39%       --    0.16%       --    1.05%       --    0.40%
+p256      control/spin-fixed-work     0.07%       --    0.07%       --    0.06%       --    0.06%  (control)
+sha       control/spin-fixed-work     0.04%       --    0.02%       --    0.07%       --    0.10%  (control)
+interp    control/spin-fixed-work     0.06%       --    0.03%       --    0.07%       --    0.10%  (control)
+regexp    control/spin-fixed-work     0.02%       --    0.02%       --    0.07%       --    0.06%  (control)
+json      control/spin-fixed-work     0.65%       --    0.06%       --    0.04%       --    0.09%  (control)
+sortmap   control/spin-fixed-work     0.04%       --    0.02%       --    0.08%       --    0.11%  (control)
+flate     control/spin-fixed-work     0.04%       --    0.06%       --    0.05%       --    0.09%  (control)
+text      control/spin-fixed-work     0.06%       --    0.01%       --    0.04%       --    0.21%  (control)
+
+# Spread summary over the 19 timed cases, raw nanoseconds
+policy       median      mean       p90     worst
+none          0.71%     2.14%     9.56%    13.81%
+a32           0.76%     2.80%     9.09%    17.79%
+loop32        1.05%     1.93%     5.66%     7.71%
+CONTROLS      0.06%     0.07%     0.07%     0.65%
+           ^ the controls under every policy: the measurement floor
+
+# Mean cost per case, geometric mean of the index over the 4 shifts, vs none
+program   case                          none       a16       a32       a64    loop32    head32
+p256      p256/sign-verify             5.363        --    +0.10%        --    -0.15%        --
+p256      p256/verify                  3.903        --    +0.40%        --    +0.30%        --
+sha       sha/hmac-1mib                0.752        --    +0.02%        --    +0.03%        --
+sha       sha/sha256-1mib              1.239        --    +0.02%        --    -0.00%        --
+interp    interp/bytecode-loop        12.767        --    -1.51%        --    -3.40%        --
+regexp    regexp/anchored-lines        3.075        --    +1.10%        --    +1.00%        --
+regexp    regexp/find-submatch         6.838        --    +3.14%        --    +4.03%        --
+regexp    regexp/replace               7.166        --    +2.11%        --    +2.76%        --
+json      json/marshal                 4.401        --    -6.50%        --    -7.88%        --
+json      json/unmarshal               6.709        --    -9.20%        --    -9.33%        --
+sortmap   map/build-probe              3.682        --    -1.52%        --    +1.05%        --
+sortmap   sort/ints                    4.053        --    -1.50%        --    -0.19%        --
+sortmap   sort/slice-callback          1.620        --    -1.10%        --    -1.29%        --
+flate     flate/compress               3.409        --    -0.89%        --    -0.27%        --
+flate     flate/decompress             6.399        --    +0.59%        --    -0.24%        --
+text      text/format-append           3.373        --    -2.22%        --    -3.28%        --
+text      text/parse                   4.243        --    -2.20%        --    -2.38%        --
+text      text/sprintf                 4.752        --    -1.72%        --    -2.03%        --
+text      text/utf8-decode             2.385        --    +0.31%        --    -0.53%        --
+
+# Mean over the 19 timed cases (geometric), vs none
+a32         -1.12%   faster on 10 of 19 cases, slower on 9
+loop32      -1.20%   faster on 13 of 19 cases, slower on 6
+
+# Index by shift under `none`, as a %% of the shift-0 value
+program   case                          32      64      96     128
+p256      p256/sign-verify            0.0%   -0.6%   -0.7%   -0.6%
+p256      p256/verify                 0.0%   -0.3%   -0.2%    0.1%
+sha       sha/hmac-1mib               0.0%    0.1%    0.0%    0.1%
+sha       sha/sha256-1mib             0.0%    0.0%   -0.0%   -0.0%
+interp    interp/bytecode-loop        0.0%    3.1%   -0.5%    1.4%
+regexp    regexp/anchored-lines       0.0%   -0.3%   -0.3%   -0.7%
+regexp    regexp/find-submatch        0.0%   -0.1%   -0.0%   -0.1%
+regexp    regexp/replace              0.0%   -0.7%   -1.6%    0.1%
+json      json/marshal                0.0%   -1.1%   -0.3%    1.8%
+json      json/unmarshal              0.0%   -4.0%   -3.8%   -2.0%
+sortmap   map/build-probe             0.0%   -1.2%   -0.8%   -0.8%
+sortmap   sort/ints                   0.0%   -0.0%    0.0%    0.0%
+sortmap   sort/slice-callback         0.0%    0.1%   -0.2%   -0.1%
+flate     flate/compress              0.0%    0.9%    0.1%    0.3%
+flate     flate/decompress            0.0%   -0.1%   -0.0%   -0.0%
+text      text/format-append          0.0%   -0.2%    7.9%    9.3%
+text      text/parse                  0.0%   -0.1%   -0.1%    0.2%
+text      text/sprintf                0.0%   -6.0%   -2.8%    7.0%
+text      text/utf8-decode            0.0%    0.4%    0.1%    0.1%
+p256      control/spin-fixed-work     0.0%    0.0%    0.0%    0.0%
+sha       control/spin-fixed-work     0.0%    0.0%    0.0%    0.0%
+interp    control/spin-fixed-work     0.0%    0.0%    0.0%    0.0%
+regexp    control/spin-fixed-work     0.0%    0.0%    0.0%    0.0%
+json      control/spin-fixed-work     0.0%    0.0%    0.0%    0.0%
+sortmap   control/spin-fixed-work     0.0%    0.0%    0.0%    0.0%
+flate     control/spin-fixed-work     0.0%    0.0%    0.0%    0.0%
+text      control/spin-fixed-work     0.0%    0.0%    0.0%    0.0%
+
+# 324 of 648 (program, policy, shift, case) cells measured
