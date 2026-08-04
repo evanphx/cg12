@@ -29,6 +29,10 @@ type corpusAudit struct {
 	programs int
 	// frameEscapes is opt.FrameEscapes's findings. See TestFrameEscapeAudit.
 	frameEscapes map[string]string
+	// loopAliases is opt.LoopAliases's findings: every allocation a loop body
+	// leaves in a frame slot whose address outlives the iteration that made it.
+	// See TestLoopAliasAudit.
+	loopAliases map[string]string
 	// allocations is opt.AllocationCensus's records. See TestAllocationCensus.
 	allocations map[string]string
 	// shadow is opt.ShadowPlacement's disagreements: every allocation goc's AST
@@ -92,6 +96,7 @@ func compileCorpusForAudits(programs []string) *corpusAudit {
 	audit := &corpusAudit{
 		programs:     len(programs),
 		frameEscapes: make(map[string]string),
+		loopAliases:  make(map[string]string),
 		allocations:  make(map[string]string),
 		shadow:       make(map[string]string),
 		placements:   make(map[string]string),
@@ -126,6 +131,12 @@ func compileCorpusForAudits(programs []string) *corpusAudit {
 					continue
 				}
 				escapes := opt.FrameEscapes(module)
+				// The other half of the escape decision's correctness, and the
+				// half FrameEscapes is structurally blind to: an allocation left
+				// in a frame slot inside a loop body whose address outlives the
+				// iteration. Nothing is published in that case, so there is no
+				// store for a publication audit to look at. See opt.LoopAliases.
+				aliases := opt.LoopAliases(module)
 				// The census records the front end's own frame placements as well
 				// as the IR pass's, so that an object moving between a front-end
 				// frame slot and the heap is one line changing placement rather
@@ -145,6 +156,9 @@ func compileCorpusForAudits(programs []string) *corpusAudit {
 				mutex.Lock()
 				for _, escape := range escapes {
 					note(audit.frameEscapes, normalizeCorpusKey(escape.Key()), name)
+				}
+				for _, alias := range aliases {
+					note(audit.loopAliases, normalizeCorpusKey(alias.Key()), name)
 				}
 				for _, allocation := range census {
 					note(audit.allocations, normalizeCorpusKey(allocation.Key()), name)

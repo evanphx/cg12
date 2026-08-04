@@ -6096,3 +6096,247 @@ is what says the two have drifted apart.
 | uncategorised, either side | **0** |
 | goc heap rules that are goc declining to answer | 227 of 1 192 |
 | gc heap allocations the placement differential cannot see | 110 |
+---
+
+# The loop-carried aliasing audit
+
+Branch: `ccwork/loop-alias-audit`, built on `main` = 65ed70a.
+
+`opt.FrameEscapes` reports every place a frame address is published into storage
+that outlives the frame. It is blind by construction to the defect where an
+allocation inside a loop body gets one frame slot shared by every iteration:
+nothing is published, both pointers stay inside the frame and are simply the
+same pointer, so there is no store for a publication audit to look at. The
+allocation census is blind to it from the other side -- one frame slot per loop
+is exactly what it expects to see. That defect was a live miscompile on this
+tree two days ago (`2 2` where Go prints `1 2`, four allocation forms, both -O
+settings) and until now the only thing guarding the fix was three reduction
+programs that are run and compared against `go run`.
+
+This job adds the audit: `opt.LoopAliases`, run over the whole corpus by
+`TestLoopAliasAudit` against `goc/testdata/loop_alias_baseline.txt`, failing in
+both directions.
+
+## The formulation, and why this one
+
+An allocation is reported when all three hold:
+
+1. it is a **frame allocation** -- `OAlloc*` or `OAllocN`, the same
+   `isFrameAllocation` predicate `FrameEscapes` uses -- so it is one object, not
+   one per iteration;
+2. the instruction making it is **inside the body of a natural loop**, so the
+   source expects one object per trip;
+3. an address derived from it reaches **storage the next iteration does not
+   re-create**: either a frame slot whose own allocation is outside that loop
+   body (*parked*), or a phi at the loop header taking it in along a back edge
+   (*carried*).
+
+Clause 3 is the whole calibration, and it is deliberately **the IR-level shadow
+of the rule the fix itself enforces**. goc's `findIterationCaptures` runs the
+escape walk with the loop body as its scope, so an address that reaches storage
+declared outside the loop is an address that outlives the iteration; clause 3 is
+that same question asked of the emitted IR. Auditing against the rule the fix
+implements is the point -- a finding is a place the fix did not reach.
+
+Three things are deliberately **not** findings:
+
+- **A store into a slot the loop body itself allocates.** That slot is a
+  variable the source re-declares on every trip, so goc emits its initialising
+  store inside the loop too and the next iteration overwrites it before it can
+  be read. This is what keeps `loop_alias_frame_local.go`'s three loop-body
+  allocations out of the report, and what stops the rule firing on every scratch
+  buffer in every loop.
+- **A destination that is not this frame's own storage.** A loop-body frame
+  address stored into a global, a heap object or memory reached through a
+  parameter has left the frame altogether: that is `FrameEscapes`' finding and a
+  worse one, and reporting it here as well would put one defect in two
+  baselines. The two audits partition the space rather than overlapping.
+- **A store in the loop's exit region** -- a block reached from inside an
+  iteration that cannot reach a latch. No further iteration follows it, so the
+  address it parks is the last iteration's, which one slot represents
+  faithfully.
+
+A bare SSA use after the loop is not a finding either, for the same reason: it
+names the final iteration's object. "Escaping the loop entirely" is only
+observable when it goes through storage, which is the *parked* arm.
+
+## Proving it fires: the reverted tree
+
+An audit that has never fired is not evidence of anything, so the rule was run
+against a tree with the per-iteration rule taken out. It is in two halves and
+they were reverted separately, because they catch different forms.
+
+**Half one, the front end** (`goc/compile.go`: the three
+`findIterationCaptures` call sites, and `addressOutlivesItsIteration` in the
+`&CompositeLit` path). The audit reports **two** of the four forms:
+
+    loop_alias_forms.go:37:3      main.viaArray    var a [2]int      -> p at 39:7, q at 40:8
+    loop_alias_composite.go:9:8   main.alternate   &cell{v: i}       -> p at 10:7, q at 11:7
+
+**Half two, the IR pass** (`opt/escape.go`: `promotionsBlockedByALoop`). With
+both reverted the audit reports **all four**, adding the two whose placement the
+IR pass owns:
+
+    loop_alias_forms.go:7:8       main.viaNew      new(int)          -> p at 9:7,  q at 10:7
+    loop_alias_forms.go:22:23     main.viaMake     make([]int, 0, 4) -> p at 24:7, q at 25:7
+
+Each is reported twice because the address reaches both carriers, which is what
+`p, q = q, &a` does.
+
+The findings are the miscompile, not a proxy for it. On that same tree
+`TestLoopBodyAllocationsAreDistinctPerIteration` fails, unoptimized and
+optimized:
+
+    new:   2 2      alternate: 2 2
+    make:  2 2      ALIASED: the two iterations share one allocation
+    array: 2 2
+
+`loop_alias_frame_local.go`, whose three loop-body allocations are legitimately
+frame-local, produces **zero** findings in its own code on every one of the
+three trees -- fixed, half-reverted and fully reverted.
+
+The `carried` arm (a header phi taking the address along a back edge) is the
+same defect after mem2reg. Nothing in the corpus reaches it, because the audit
+runs on unoptimized IR where goc's variables are still slots, so it is asserted
+in `opt/loopalias_test.go` against a hand-built loop rather than left unexercised.
+
+## Triage: what it reports on the real corpus
+
+**589 findings, over 297 functions, from 401 corpus programs. All 589 are false
+positives, and all 589 are the same shape.** No real loop-aliasing bug was
+found. Four independent measurements say it is one class:
+
+| measurement | result |
+|---|---|
+| allocation / slot size | `alloc=16 slot=8` -- 589 of 589 |
+| distinct holders per flagged allocation | exactly 1 -- 589 of 589 (the four real defects have 2 each) |
+| allocation position vs crossing position | identical in 556; of the 33 that differ, 28 have a positionless block on one side and the rest are two columns or one line of a single statement |
+| source read | 13 functions read by hand; every one the same construct |
+
+The construct is goc's **indirect representation of a string or interface
+variable**. A `string`, an `error`, any interface or a `complex128` local is an
+eight-byte slot holding a pointer to a sixteen-byte inline value
+(`isIndirectVariableValue`). Assigning to such a variable materialises the new
+value in a fresh sixteen-byte temporary at the assignment site and points the
+slot at it. When the variable is declared outside a loop and assigned inside it
+-- `s = s[i:]`, `observed += ...`, `err = x.Unwrap()`, `for _, s := range xs` --
+the temporary is a loop-body frame allocation whose address is parked in an
+outer slot, which is exactly the rule's shape.
+
+It is benign for a reason the audit deliberately does not try to prove: the
+temporary is a *copy of a value* rather than an object with identity, it has
+exactly one holder, and it is rewritten at the same site that re-points that
+holder, so the value read at the top of the next iteration is the one the
+previous iteration wrote. The real defect is the opposite -- `&a` is an
+*address*, so two carriers end up naming one object.
+
+That argument was also checked by running rather than by reasoning. Eight corpus
+programs are flagged in their own `main.*` code, six of them written
+specifically to probe loop-variable and range-target semantics
+(`runtime_range_target_forms.go`, `runtime_range_target_order.go`,
+`runtime_loopvar_range.go`, `runtime_loopvar_shared_scope.go`,
+`runtime_loopvar_value_shapes.go`, `runtime_loopvar_three_clause.go`,
+`runtime_println_statement_atomicity.go`, `stdlib_crypto_hash_hmac.go`). All
+eight compile, link and print **exactly** what the host toolchain prints, both
+unoptimized and optimized.
+
+### One imprecision was found and fixed, not tuned away
+
+`runtime.getGCMaskOnDemand` was reported and should not have been: it parks a
+loop-body local's address in a closure environment on the path that *returns*.
+That block is reached from inside an iteration but cannot reach a latch, so no
+further iteration follows it and the address it parks is the last iteration's.
+The rule now requires the storing block to be in the loop body. This tightens
+without re-admitting anything: if no further iteration can follow the store,
+there is no next iteration to alias with. It is asserted in
+`opt/loopalias_test.go`.
+
+### Why the remaining 589 were not tuned away
+
+Distinguishing them would need the value-semantics-and-single-holder argument
+above, which is a liveness and uniqueness claim about memory, not a may-analysis
+fact -- and `FrameEscapes` makes no equivalent claim for its own baseline
+either. More to the point, `goc/compile.go`'s `variableStorage` records that
+this very representation *is* fatal when a nested function reaches the variable
+through a closure environment: assigning then leaves the enclosing frame
+addressing the closure's dead frame. A rule that dismissed the shape wholesale
+would dismiss that case with it. The signal-to-noise is workable as a ratchet:
+589 lines out of roughly eight million frame placements corpus-wide (about
+18,000 per program, of which ~2,200 are inside a loop body), all of one
+recognisable shape, so a new line that is *not* that shape stands out.
+
+## What this audit still cannot see
+
+A clean run means clean of the shapes below and no others.
+
+- **A publication past the frame.** A loop-body frame address stored into a
+  global, a heap object or memory reached through a parameter is deliberately
+  left to `FrameEscapes`. The two audits partition the space; neither reports
+  the other's findings.
+- **A slot that holds more than one thing.** The slot tracking is `frameFacts`',
+  which is first-write-wins: a slot written with some other frame allocation
+  before the loop-body one records only the first, so an address read back out
+  of it is attributed to the wrong allocation or to none.
+- **A slot reached at a run-time offset**, for the same reason `FrameEscapes`
+  cannot: slots are keyed by an exactly known displacement, so an address parked
+  in `frameArray[i]` is neither recorded nor recognised.
+- **A destination reached through a pointer loaded from memory.** It is not
+  provably this frame's storage, so it is left to `FrameEscapes` -- which skips
+  it too when its own slot tracking says the loaded pointer is a frame address.
+  Neither audit reports it.
+- **A bulk copy.** Only stores are inspected, so a `memcpy` of a frame struct
+  holding a loop-body address into an outer slot carries it out unseen.
+- **A loop the front end lowered into a separate function** -- a
+  range-over-function body, or any loop inside a closure. The allocation and the
+  loop are then in different `ir.Func`s and this is a per-function analysis.
+- **An irreducible loop, or one whose latch phi was folded.** The `carried` arm
+  only looks at phis in a natural loop's header.
+- **Whether the aliasing is observable.** This is a may-analysis: it reports
+  that two iterations' objects can be the same object, not that any program
+  reads both. That is the standard `FrameEscapes` holds itself to.
+
+One reporting limitation is worth knowing when reading the file: 33 of the 589
+lines have a `?` for one of their two positions and 7 have `?` for both, because
+the front end emitted the block with no source position at all. Those lines are
+correspondingly weaker as identities -- two distinct aliases in one such
+function would collapse to one baseline line.
+
+## Guards
+
+No compiler behaviour change was expected and none happened. The diff adds
+`opt/loopalias.go`, `opt/loopalias_test.go`, `goc/loopaliasaudit_test.go` and
+`goc/testdata/loop_alias_baseline.txt`, and touches one existing file,
+`goc/corpusaudit_test.go`, which is a test. `opt.LoopAliases` has no caller
+outside tests.
+
+| guard | result |
+|---|---|
+| `scripts/determinism-check.sh` | 5 programs, cold and warm, 2 rounds: every hash identical |
+| `TestCompilingTheSameSourceTwiceGivesTheSameModule` | PASS |
+| `TestAllocationCensus` | PASS -- reproduces `alloc_census_baseline.txt` exactly |
+| `TestFrameEscapeAudit` | PASS -- clean, `frame_escape_baseline.txt` unchanged |
+| `TestLoopAliasAudit` | PASS against the new baseline |
+| `go test ./opt -run TestLoopAlias` | 9 tests PASS |
+| emitted IL, `main` vs this branch | 8 programs x 2 `-O` settings: all 16 module digests identical |
+
+The ratchet was checked in **both** directions in one run: with one real line
+deleted from the baseline and one fabricated line added, the test failed on the
+deleted line as *appeared* and on the fabricated line as *vanished*.
+
+The census and frame-escape baselines reproducing is the strongest of these: between
+them they fingerprint every allocation placement and every frame-address
+publication in the whole corpus, and neither moved.
+
+**The runtime-capability matrix was not run** -- the job note reserves it, `make
+test-unit` and `go test ./goc/...` for the dependent gate job. Its result is
+therefore `main`'s, which is what the evidence above says it must be: the
+compiler emits identical IL and both whole-corpus placement baselines are
+unchanged. The gate job's numbers are the ones to quote.
+
+## Cost
+
+`opt.LoopAliases` costs about what `opt.FrameEscapes` costs -- 64 ms against a
+2.5 s compile for `hello.go`, 130 ms against 4.1 s for `fmt_sprintf.go`, roughly
+3% -- and it shares the corpus compile the other whole-corpus audits already
+pay for, so it is not opt-in. The whole shared pass is ~200 s.
+
