@@ -1,3 +1,597 @@
+# Wave 5 merge gate
+
+Branch: `integration/wave5-gate`, built on `main` = d113d4a.
+
+## Merge
+
+All four merged cleanly (single trivial text conflict in `CCWORK_REPORT.md`, both
+sides appended at the end; resolved as a union, no content dropped).
+
+| # | branch | merge commit | conflict |
+|---|--------|--------------|----------|
+| 1 | `ccwork/opt-loop-safepoints` | clean | none |
+| 2 | `ccwork/framecheck-phi-blindspot` | clean | none |
+| 3 | `ccwork/parity-113` | clean except report | CCWORK_REPORT.md, union-resolved |
+| 4 | `ccwork/escape-diagnostics` | clean | none |
+
+Note: branch 4 (`escape-diagnostics`) is *based on* branch 3 (`parity-113`) --
+it contains 88c276f and every parity-113 commit. So merge 4 was largely a
+fast-forward of already-merged content plus the diagnostic itself.
+
+`go build ./...` and `go vet ./goc/... ./opt/... ./ir/...` both clean on the
+merged tree.
+
+
+## Root artefacts (item: `git ls-files` the root)
+
+Tracked files at the repo root on the merged tree:
+
+```
+.gitignore  AGENTS.md  AMD64_PARITY_PLAN.md  CCWORK_REPORT.md  GO_INTEGRATION_PLAN.md
+Makefile  README.md  RUNTIME_PLAN.md  RUNTIME_PLAN.md.orig  cg12  cs.trace  go.mod  go.sum  viz
+```
+
+**Identical to `main`'s set. No new artefact.** Everything is source or
+documentation except the four pre-existing ones (`cg12`, `viz` -- aarch64 ELF
+executables; `cs.trace` -- ASCII text; `RUNTIME_PLAN.md.orig`), left alone as
+instructed. `git status` on the merged tree is clean apart from this report.
+
+Near miss, recorded because it is the exact failure mode being watched for:
+`ccwork/parity-113` committed a 6,898,024-byte goc-built binary named **`recv2`**
+at the root in cd08331 and removed it again in 1eb8080 on the same branch, so the
+merge is clean. `recv2` is **not** in `.gitignore` -- it is the fifth name, and it
+got in and out under its own author's eye. `.gitignore` still has no rule that
+covers the general case (a working-directory binary named after the program).
+Advisory, not a blocker.
+
+## Committed generated baselines, merged tree vs main (before regeneration)
+
+| file | main | merged | mover |
+|---|---|---|---|
+| `alloc_census_baseline.txt` | 14471 | 14538 | parity-113 |
+| `escape_gc_differential.txt` | 7193 | 7182 | parity-113 |
+| `escape_shadow_baseline.txt` | 354 | 363 | parity-113 |
+| `frame_escape_baseline.txt` | 208 (192 entries) | 205 (**189 entries**) | parity-113 |
+| `slog_allocations_baseline.txt` | 61 | 61 | parity-113 (2 rows changed) |
+| `crypto_signing_bench_baseline.txt` | 52 | 52 | untouched |
+
+`framecheck-phi-blindspot` changes **no** generated file. Its own report claims
+zero additions to `frame_escape_baseline.txt`; the merged committed file in fact
+*removes* three (parity-113's `log/slog.handleState` publications). All six are
+regenerated from the merged tree below rather than accepted as committed.
+
+## Item 1a -- `TestDeriveClassifiesEveryGenField` **FAILS** (the fourth time this week)
+
+Watched to failure in the branch's own `go test -v ./goc/...` run; the `main`
+control passes it.
+
+```
+=== RUN   TestDeriveClassifiesEveryGenField
+    derive_test.go:246: fullyPopulatedGen leaves [escapeDiag interfaceCandidates
+    reachableFunctions] zero, so derive's handling of those fields is untested; a
+    new gen field has to be given a non-zero value there and classified in
+    wholeCompilationGenFields
+--- FAIL: TestDeriveClassifiesEveryGenField (0.00s)
+```
+
+**Three fields this time, from two different branches.** `goc/derive_test.go` is
+byte-unchanged from `main` on every one of the four branches.
+
+| new `gen` field | added by | commit | does `derive` reset it? | so it belongs in |
+|---|---|---|---|---|
+| `reachableFunctions` | `ccwork/parity-113` | 856f0eb "ask a method what it does with the receiver, and devirtualise" | **No** | `wholeCompilationGenFields` |
+| `interfaceCandidates` | `ccwork/parity-113` | 856f0eb (same) | **No** | `wholeCompilationGenFields` |
+| `escapeDiag` | `ccwork/escape-diagnostics` | 499444e "a -m-style escape diagnostic that says why" | **No** | `wholeCompilationGenFields` |
+
+All three are set once when `gen` is constructed (`goc/compile.go:365-367`) and
+`(*gen).derive()` never touches them, so a derived generator inherits all three.
+That is correct behaviour and matches their doc comments -- `reachableFunctions`
+is the module-wide reachable set, `interfaceCandidates` is a memo over it, and
+`escapeDiag` is the compilation's diagnostic state. So the fix is on both lists:
+give each a non-zero value in `fullyPopulatedGen()` **and** add all three names to
+`wholeCompilationGenFields`. If they were only added to the populated fixture and
+not to `wholeCompilationGenFields`, the test would then fail the other way
+("derive inherited it").
+
+**This is a fixture gap, not a miscompile.** `derive_test.go` is a test file; no
+emitted code depends on it. But it turns `main` red, so it blocks the merge as it
+stands.
+
+
+## Item 2 -- capability matrix, both arms, `-v`, against a measured `main` control
+
+All four runs `GOFLAGS="-v -count=1"`, each watched to exit. **`(cached)` appears
+zero times in any of the four logs.** Counts are subtests of
+`TestARM64RuntimeCapabilityStatus`; the parent line is excluded.
+
+| arm | `main` control | `integration/wave5-gate` |
+|---|---|---|
+| default (`make test-goc-status`) | **366 PASS / 0 FAIL / 0 SKIP**, exit 0 | **366 PASS / 0 FAIL / 0 SKIP**, exit 0 |
+| `-O` (`make test-goc-status-opt`) | **365 PASS / 1 FAIL**, exit 2 | **366 PASS / 0 FAIL / 0 SKIP**, exit 0 |
+
+### *** BRANCH 1 WORKED: the `-O` arm is now 366/366. ***
+
+The set of capability names is identical across all four runs (366 in every one),
+so nothing was gained or lost by renaming or skipping. The PASS *sets* differ in
+exactly one member:
+
+```
+$ diff st-main-opt.pass st-branch-opt.pass
+205a206
+> stack-scan/loop-safepoints
+```
+
+and the control was measured in this same session, on this same box, failing:
+
+```
+main, make test-goc-status-opt:
+    --- FAIL: TestARM64RuntimeCapabilityStatus/stack-scan/loop-safepoints (0.02s)
+FAIL	github.com/evanphx/cg12/cmd/goc	276.890s
+make: *** [Makefile:113: test-goc-status-opt] Error 1
+```
+
+**Confirmed against a control that it was failing before.** `ccwork/opt-loop-safepoints`
+is a real fix, not a report-only branch: it closes the standing `-O` failure and
+its own root cause (`opt.Mem2Reg` minting a `ClsP` phi with `GCRef == false`, so
+a loop-carried pointer is not a safepoint root) matches the observed behaviour.
+The default arm is unchanged at 366/366, exactly as the branch predicts (without
+`-O`, no `opt` pass runs).
+
+## Item 1 -- `go test -timeout 40m -parallel 10 -count=1 -v ./goc/...`, with a `main` control
+
+Both watched to exit. **`(cached)` appears zero times in either log.**
+
+| tree | result lines | unique test/subtest names | FAIL | wall |
+|---|---|---|---|---|
+| `main` control | 673 | 673 | **0** | 1158.8s, exit 0 |
+| `integration/wave5-gate` | 679 | 679 | **1** | 1189.4s, exit 1 |
+
+**Subtest census: +6, all additions, nothing lost.** The six names present on the
+branch and absent on `main`, attributed to the commits that add them:
+
+| new test | branch | commit / file |
+|---|---|---|
+| `TestOptimizedLoopCarriedPointerStaysAGCRoot` | 1 `opt-loop-safepoints` | b685c82, `goc/optgcroot_test.go` |
+| `TestEscapeDiagnosticNamesWhereEachAllocationWent` | 4 `escape-diagnostics` | 499444e, `goc/escapediag_test.go` |
+| `TestEscapeDiagnosticLevelOneCarriesNoChain` | 4 | 499444e |
+| `TestEscapeDiagnosticLevelTwoNamesTheChain` | 4 | 499444e |
+| `TestEscapeDiagnosticParsesAsGCFlagM` | 4 | 499444e |
+| `TestEscapeDiagnosticDoesNotChangeTheEmittedModule` | 4 | 499444e |
+
+All six PASS. Branch 2 (`framecheck-phi-blindspot`) adds seven tests but they are
+in `./opt`, not `./goc/...`, so they do not appear in this census; branch 3
+(`parity-113`) adds two corpus programs and five `allocation_counts` rows, which
+the corpus tests iterate rather than register as `t.Run` subtests, so its
+additions likewise do not change the name count. Both are covered elsewhere in
+this report.
+
+**The single failure is `TestDeriveClassifiesEveryGenField`, detailed above.**
+Nothing else fails, on either tree.
+
+## Item 3 -- `make test-unit`
+
+| tree | exit | `(cached)` |
+|---|---|---|
+| `main` control | **0 (PASS)** | 0 |
+| `integration/wave5-gate` | **0 (PASS)** | 0 |
+
+
+## Generated baselines -- regenerated from the merged tree, not picked from a side
+
+All five updatable baselines were regenerated **on the merged tree** and, as a
+control, **on the `main` worktree**, each run watched to exit (all exit 0):
+
+```
+-run TestAllocationCensus            -update-alloc-census-baseline      185.0s / 179.7s
+-run TestFrameEscapeAudit            -update-frame-escape-baseline      185.2s / 179.6s
+-run TestEscapeShadowPlacement       -update-escape-shadow-baseline     184.8s / 179.7s
+-run TestEscapeDifferentialAgainstGC -escape-gc-differential ...         10.8s /  11.2s
+-run TestSlogAllocationsAgainstGC    -slog-allocations ...               19.0s /  18.3s
+```
+
+**Result: `git status` is clean in both trees afterwards.** Every regenerated
+file is byte-identical to what that tree had committed. So
+
+* the merged tree's committed baselines are correct -- regeneration reproduces
+  them exactly, there is no side that got picked wrongly, and
+* `main`'s committed baselines are a **measured** control, not a stale figure.
+
+### Composition -- the delta is exactly parity-113's, with zero residue
+
+md5 of each generated file, per tree:
+
+| file | main (regen) | merged (regen) | parity-113 | escape-diagnostics | framecheck | opt-loop-safepoints |
+|---|---|---|---|---|---|---|
+| `alloc_census_baseline.txt` | `1eff10f7` | `28b8a87c` | `28b8a87c` | `28b8a87c` | `1eff10f7` | `1eff10f7` |
+| `escape_gc_differential.txt` | `be1ecc71` | `cf4a1ff7` | `cf4a1ff7` | `cf4a1ff7` | `be1ecc71` | `be1ecc71` |
+| `escape_shadow_baseline.txt` | `62cb8e05` | `8d4630a9` | `8d4630a9` | `8d4630a9` | `62cb8e05` | `62cb8e05` |
+| `frame_escape_baseline.txt` | `7292b915` | `b9a43ba6` | `b9a43ba6` | `b9a43ba6` | `7292b915` | `7292b915` |
+| `slog_allocations_baseline.txt` | `8c978bd0` | `c3080413` | `c3080413` | `c3080413` | `8c978bd0` | `8c978bd0` |
+| `crypto_signing_bench_baseline.txt` | `2923155d` | `2923155d` | `2923155d` | `2923155d` | `2923155d` | `2923155d` |
+
+**Every generated file on the merged tree is byte-identical to `ccwork/parity-113`'s
+own version, and branches 1, 2 and 4 contribute nothing to any of them.** Branch 4
+inherits parity-113's; branches 1 and 2 carry `main`'s unchanged. So the merged
+delta *is* parity-113's delta, and there is no cross-branch interaction residue at
+all -- the strongest form of "it composes".
+
+Row-level census delta, merged vs the measured `main` control:
+
+| direction | measured here | parity-113's own report | residue |
+|---|---|---|---|
+| moved heap -> frame | **7** | 7 | 0 |
+| moved frame -> heap | **27** | 27 | 0 |
+| appeared (new sites) | **44** | 44 | 0 |
+| vanished (sites gone) | **7** | 7 | 0 |
+| net rows | 14440 -> 14507 (**+67**) | -- | -- |
+
+## Item 4 -- `TestFrameEscapeAudit`, and the SPECIAL HANDLING for branch 2
+
+Baseline entry counts (non-comment lines), both regenerated in this session:
+
+| tree | entries |
+|---|---|
+| `main` control | **192** -- the reference figure, measured |
+| `integration/wave5-gate` | **189** |
+
+```
+$ diff <(main entries, sorted) <(merged entries, sorted) | grep '^>'
+(no output)
+```
+
+### ZERO entries were added. The NOT-SAFE condition for branch 2 does not fire.
+
+`ccwork/framecheck-phi-blindspot` adds **no** line to
+`goc/testdata/frame_escape_baseline.txt`, so there is no addition needing a
+justification and none was accepted unjustified. Its report says the same and the
+regeneration confirms it: the fix is real but **latent** on this corpus. Its own
+instrumentation over all 399 programs backs that -- 431,033 values marked
+partially frame-derived, 879,749 slot resolutions descending into a merge, 23,038
+frame slots `main` could not resolve and this tree can, and **0** stores of a
+frame address through a merged destination. The machinery fires constantly and
+finds nothing to report, which is a fact about the corpus rather than a tuned
+result.
+
+The three **removals** all come from `ccwork/parity-113` and are the same object:
+
+```
+- stdlib/src/log/slog/handler.go:120:8  log/slog.defaultHandler.Handle    barrier  ...newobject
+- stdlib/src/log/slog/handler.go:239:8  log/slog.commonHandler.withAttrs  barrier  ...newobject
+- stdlib/src/log/slog/handler.go:272:8  log/slog.commonHandler.handle     barrier  ...newobject
+```
+
+`log/slog.handleState`, whose address a write barrier was putting into a heap
+object. parity-113's report justifies these as the effect of its
+receiver-retention fix (an immediately-called method now asks
+`receiverDoesNotEscape`), which it files as a miscompile fix. Removals are the
+safe direction and are justified in writing.
+
+## Item 10 -- gc differential, new confusion matrix
+
+Both matrices regenerated in this session. `gc diagnostics the parser did not
+know: 0` on both (the file's own must-be-zero check).
+
+`main` control:
+
+```
+  goc\gc      frame     heap    mixed   absent    total
+  frame         165       33       14      105      317
+  heap          113      573      173      168     1027
+  mixed          13       86       24       13      136
+  absent        404     1269       22        0     1695
+  total         695     1961      233      286     3175
+```
+
+`integration/wave5-gate`:
+
+```
+  goc\gc      frame     heap    mixed   absent    total
+  frame         177       30       14      105      326
+  heap          106      578      173      167     1024
+  mixed          13       89       24       13      139
+  absent        409     1275       22        0     1706
+  total         705     1972      233      285     3195
+```
+
+**Lines where goc heaps what gc frames: `main` = 113 (the reference figure,
+confirmed against a measured control) -> merged = 106.** A 7-line improvement,
+exactly the number `ccwork/parity-113` claims and exactly the 7 census rows that
+moved heap -> frame.
+
+The correctness-relevant direction moves the wrong way slightly and is accounted
+for: PERMISSIVE (gc heaps, goc does not) 1448 -> **1454**, +6; parity-113's report
+states 1448 -> 1454 and attributes it to -2 real (both fixed by the receiver rule)
+and +8 panic-string lines in its two new corpus programs that goc has no census
+row for. PESSIMISTIC 504 -> **496**, -8. Coverage grew from 395/399 to 397/401
+programs compared, which is the two new corpus programs.
+
+## Item 7 -- loop aliasing
+
+From the branch's own `go test -v ./goc/...` run (not cached):
+
+* `TestLoopAliasExpectationsMatchTheHostToolchain` -- **PASS**, all 6 programs:
+  `loop_alias_forms.go`, `loop_alias_composite.go`, `variadic_backing.go`,
+  `variadic_element_retention.go`, `variadic_element_address_retention.go`,
+  `loop_alias_frame_local.go`. goc still agrees with the host toolchain on every
+  one.
+* `TestLoopBodyAllocationsAreDistinctPerIteration` -- **PASS**, all 12 subtests
+  (each program plain and `-O`).
+
+`loop_alias_frame_local.go` in the regenerated census, merged tree:
+
+```
+testdata/loop_alias_frame_local.go:53:8	main.literalWithin	runtime.newobject	main_point	frame
+```
+
+**One frame row, zero heap rows** -- and byte-identical to the `main` control's
+row. Unmoved in either direction.
+
+## Item 9 -- slog benchmark, every row against gc
+
+Both baselines regenerated in this session against the same host toolchain
+(go1.26.1 linux/arm64, `iterations=2000 rounds=5`).
+
+| tree | rows at a/op parity | off-parity rows |
+|---|---|---|
+| `main` control | **28/32** | `info/3-attr-large-ints`, `logattrs/6-attr`, `json/kv-4-pairs`, `json/logattrs-4-attrs` |
+| `integration/wave5-gate` | **28/32** | the same four |
+
+**28/32 at parity -- the reference figure, confirmed against a measured control.
+`info/5-attr` is 0.00 goc / 0.00 gc on both trees.** No row crashed; no row moved
+into or out of parity.
+
+Two of the four off-parity rows got **worse** on the merged tree:
+
+```
+- json/kv-4-pairs          3.00  2.00  208.0  24.0     (main)
++ json/kv-4-pairs          4.00  2.00  272.0  24.0     (merged)   +1 alloc, +64 B
+- json/logattrs-4-attrs    2.00  0.00   32.0   0.0     (main)
++ json/logattrs-4-attrs    3.00  0.00   96.0   0.0     (merged)   +1 alloc, +64 B
+```
+
+**Justified in writing, by `ccwork/parity-113`**, which predicts these two exact
+numbers: the +64 B / +1 allocation each is `log/slog.handleState` (64 bytes)
+moving to the heap because its receiver-retention fix stopped treating an
+immediately-called method's receiver as free. That is the same object whose three
+frame-address publications the fix *removed* from `frame_escape_baseline.txt`, so
+the two results are one change seen from two sides: a publication traded for an
+allocation. Recorded as a known, explained cost, not an unexplained regression.
+
+## Item 12 -- branch 4's `-m` diagnostic: inert when off, useful when on
+
+Branch 4 **did** land a diagnostic (`goc -m=1` / `-m=2`, environment form
+`GOC_M`), and it is off by default.
+
+### Inert when off: byte-identical, measured
+
+The same program compiled four ways with the merged tree's `goc`, `-c` to a
+relocatable object:
+
+```
+off                dfb873a9e92cf2c6c0e9e4031df35a79
+-m=1               dfb873a9e92cf2c6c0e9e4031df35a79
+-m=2               dfb873a9e92cf2c6c0e9e4031df35a79
+GOC_M=1            dfb873a9e92cf2c6c0e9e4031df35a79
+```
+
+**All four objects are byte-identical**, so the diagnostic does not perturb
+emitted code even when it is *on*, let alone when it is off. With it off, goc
+writes **0 bytes to stdout and 0 bytes to stderr**. Branch 4's own
+`TestEscapeDiagnosticDoesNotChangeTheEmittedModule` passes in the suite run as
+well.
+
+### Exercised once, and it says something useful
+
+```
+$ goc -m=2 -c prog.go
+prog.go:9:7: main_point does not escape
+	front end: composite-literal in main.framed
+prog.go:14:7: main_point escapes to heap
+	front end: composite-literal in main.escapes
+	rule: assigned to the package-level variable sink
+	from: p, declared at prog.go:14:2
+	at:   prog.go:15:2
+prog.go:24:8: main_point escapes to heap
+	front end: composite-literal in main.inLoop
+	rule: assigned to the package-level variable sink
+	from: p, declared at prog.go:24:3
+	at:   prog.go:25:3
+```
+
+Correct on all three sites, names the rule, and level 2 adds the chain and the
+deciding position. `-m=1` prints the same without the `from:`/`at:` lines.
+
+### One defect found, in the CLI rather than the compiler
+
+**The documented invocation `goc -m file.go` does not work.**
+
+```
+$ goc -m prog.go
+invalid value "/.../prog.go" for flag -m: parse error
+exit status 2
+```
+
+`-m` is declared `flag.Int` (`cmd/goc/main.go:48`), so Go's flag package requires
+`-m=N`; a bare `-m` swallows the next argument. But `docs/escape-diagnostics.md`
+documents
+
+```
+    goc -m   file.go        # placements, and the rule that decided each one
+```
+
+and the usage string the branch rewrote advertises `[-m[=2]]`, which reads as
+"bare `-m` works, `=2` optional". Both are wrong. `-m=1` and `GOC_M=1` work.
+Diagnosed, not repaired, per the brief. Not a miscompile and not a gate blocker
+on its own -- it is a `flag.Int` that should be a custom `flag.Value` with
+`IsBoolFlag`, as `cmd/compile` does -- but every documented example of the
+feature is unrunnable as written.
+
+## Item 4 (verify run) -- `TestFrameEscapeAudit -count=1`, no `-update`
+
+```
+--- PASS: TestFrameEscapeAudit (222.45s)
+ok  	github.com/evanphx/cg12/goc	222.818s
+```
+
+exit 0, `(cached)` zero times. The audit passes against the regenerated
+189-entry baseline. The test fails on any publication not listed *and* on any
+listed publication that has gone away, so a pass here means the set is exactly
+189, not merely 189 in count.
+
+## Item 5 -- allocation census twice, for stability
+
+Two independent `-update-alloc-census-baseline` runs on the merged tree
+(185.0s and a second full run, both `-count=1`, neither cached):
+
+```
+28b8a87c977a775dea315c46a687cb04   run 1
+28b8a87c977a775dea315c46a687cb04   run 2
+```
+
+**Byte-identical, and identical to the committed file.** A third run without
+`-update` verifies it: `--- PASS: TestAllocationCensus (176.25s)`, exit 0. The
+census is a property of the compiler, not of a particular run, so the +67-row
+delta above is real.
+
+## Item 6 -- determinism, compile twice and byte-compare
+
+`scripts/determinism-check.sh -corpus -rounds 2 -j 16`, both trees, each watched
+to exit 0:
+
+| tree | result |
+|---|---|
+| `main` control | `reproducible=399 varying=0 failed=0 of 399 over 2 rounds` |
+| `integration/wave5-gate` | `reproducible=401 varying=0 failed=0 of 401 over 2 rounds` |
+
+**`main` reproduces the reference figure exactly: 399/399 over 798 compiles.**
+The merged tree is **401/401 over 802 compiles** -- zero varying, zero
+layout-only residue, zero failures. The +2 programs are `ccwork/parity-113`'s two
+new corpus files (`method_receiver_retention.go`, `function_parameter_callee.go`),
+which is the whole of the difference; the reference number did not shrink.
+`TestCompilingTheSameSourceTwiceGivesTheSameModule` also passes in the suite run.
+
+## Item 8 -- GC reducer `runtime_gc_type_mask_padding.go`, 20x at `GOGC=10` and default, both trees
+
+Both binaries built once with `go run ./cmd/goc -o <bin>
+goc/testdata/runtime_gc_type_mask_padding.go`. Run **serially, one process at a
+time, on an idle box** (1-minute load average 3.93 at the start and 3.83 at the
+end; nothing else of this job's was running), `GOMAXPROCS=3` as the capability
+matrix sets it, 180 s timeout per run. A run counts as a pass only if it exits 0
+**and** prints exactly `type mask padding ok`. Order: main-20, branch-20 at
+`GOGC=10`, then main-20, branch-20 at default.
+
+| tree | `GOGC=10` | default `GOGC` |
+|---|---|---|
+| `main` control | **0/20 failed** | **0/20 failed** |
+| `integration/wave5-gate` | **0/20 failed** | **0/20 failed** |
+
+**80 runs, zero failures.** `main` is 0/20 at both, as the brief states, so the
+control is clean and there is no regression to attribute. `gc-invariants/type-mask-padding`
+also passes in both capability arms on both trees (item 2).
+
+## Item 11 -- `make bench-crypto` against its baseline
+
+`goc/testdata/crypto_signing_bench_baseline.txt` is **byte-identical on `main`
+and on all four branches** (`2923155d`), so the merge does not touch it and the
+committed figures are the reference for both trees.
+
+| tree | `make bench-crypto` | wall | `(cached)` |
+|---|---|---|---|
+| `main` control | **PASS**, exit 0 | 68.6s | 0 |
+| `integration/wave5-gate` | **PASS**, exit 0 | 65.4s | 0 |
+
+Every case is inside the file's 0.04 index tolerance on both trees.
+
+To put a number on the movement rather than only a pass, one
+`bench-crypto-update` round was taken per tree on an idle box (1-minute load 1.15
+at the start), the baseline restored after each:
+
+| case | `main` index | merged index | shift |
+|---|---|---|---|
+| `p256/sign-verify` | 47.1033 | 45.8513 | -2.7% (merged faster) |
+| `p256/verify` | 34.3695 | 34.2755 | -0.3% |
+| `p384/sign-verify` | 40.4864 | 40.4779 | -0.0% |
+| `rsa2048/sign-verify` | 12.4855 | 12.3516 | -1.1% |
+
+gc's index is flat across both runs (`p256/sign-verify` 1.6326 vs 1.6327), so the
+host toolchain reference did not move and the box behaved. **One round per tree
+is not enough to separate any of these from run-to-run spread** -- the previous
+gate measured a 46.0-47.7 range for `p256/sign-verify` alone across three rounds
+on one tree -- so the honest reading is: nothing regressed, and every movement is
+in the favourable direction or flat. Both trees left clean; the baseline was
+restored.
+
+## What each branch actually did
+
+| # | branch | verdict |
+|---|---|---|
+| 1 | `ccwork/opt-loop-safepoints` | **A real fix that works.** `-O` arm 365/366 -> 366/366 against a control measured failing in this session. |
+| 2 | `ccwork/framecheck-phi-blindspot` | **A real fix, latent on this corpus.** Closes the phi hole in `opt.FrameEscapes`; adds **zero** baseline entries, so nothing needs justifying. Its machinery fires 431k/880k times and finds no frame address behind a merge. |
+| 3 | `ccwork/parity-113` | **A real fix.** 113 -> 106 on goc-heaps-what-gc-frames, 3 frame-address publications removed, +67 census rows; carries every generated-baseline change in the merge. Costs 2 slog rows one allocation each, explained. Introduced 2 of the 3 `gen` fields that break `derive_test.go`. |
+| 4 | `ccwork/escape-diagnostics` | **A real feature, inert when off.** `goc -m=1/-m=2`/`GOC_M`; byte-identical objects on and off. Introduced the third breaking `gen` field, and its documented `goc -m file.go` invocation does not parse. |
+
+None is report-only; all four changed the compiler or the driver.
+
+## Every run in this report was watched to exit
+
+Nothing was left running and no number here was taken from a branch's report
+without being re-measured. `(cached)` appears **zero** times in any log: the two
+`./goc/...` suites, the four capability-matrix runs, both `test-unit` runs, ten
+baseline regenerations, the frame-audit and census verify runs, both crypto
+benchmark runs. Every long run was launched detached and polled for its exit
+file.
+
+## Summary
+
+| # | item | result |
+|---|---|---|
+| 1 | `go test -parallel 10 ./goc/...` | 679 results, **1 FAIL** (`TestDeriveClassifiesEveryGenField`); `main` control 673, 0 FAIL; +6 subtests attributed to branches 1 and 4 |
+| 2 | capability matrix, both arms | default 366/366 both trees; **`-O` 365/366 on `main` -> 366/366 on the merge** -- branch 1's fix confirmed against a measured control |
+| 3 | `make test-unit` | PASS both trees |
+| 4 | `TestFrameEscapeAudit -count=1` | PASS; 192 (main) -> **189**; **0 entries added**, 3 removed and justified |
+| 5 | census x2 | byte-identical, and identical to committed |
+| 6 | determinism | `main` 399/399; merged **401/401 over 802 compiles**, 0 varying |
+| 7 | loop aliasing | PASS, all 6 host comparisons; `loop_alias_frame_local.go` still **1 frame / 0 heap** |
+| 8 | GC reducer 20x, `GOGC=10` and default, both trees | **0/20 in all four cells**, 80 runs, 0 failures; `main` 0/20 as stated |
+| 9 | slog | **28/32 at parity** both trees; `info/5-attr` 0.00; 2 JSON rows +1 alloc each, explained by parity-113 |
+| 10 | gc differential | goc-heaps-what-gc-frames **113 (main, measured) -> 106**; PERMISSIVE 1448 -> 1454, explained |
+| 11 | `make bench-crypto` | PASS both trees, every case inside tolerance; no regression |
+| 12 | `-m` diagnostic | **inert when off** (byte-identical objects), useful when on; documented `goc -m file.go` form does not parse |
+| -- | generated baselines | all six regenerated on the merged tree: **byte-identical to committed**, and the delta is exactly parity-113's with **zero residue** |
+| -- | root artefacts | identical set to `main`; **no new binary** |
+
+## Verdict
+
+**NOT SAFE TO MERGE TO MAIN.**
+
+`go test ./goc/...` fails on `TestDeriveClassifiesEveryGenField`. Three new `gen`
+fields were added without extending the fixture: `reachableFunctions` and
+`interfaceCandidates` by `ccwork/parity-113` (856f0eb) and `escapeDiag` by
+`ccwork/escape-diagnostics` (499444e). `derive()` resets none of them, correctly
+-- all three are whole-compilation state -- so the fix is to give each a non-zero
+value in `fullyPopulatedGen()` **and** add all three names to
+`wholeCompilationGenFields` in `goc/derive_test.go`. It is a fixture gap, not a
+miscompile; no emitted code depends on it. But it turns `main` red, and this is
+the fourth time this week, so it is a blocker as it stands.
+
+Everything else in the gate passes, and two results are worth carrying forward
+regardless of the above:
+
+* **Branch 1 works.** The `-O` arm's standing `stack-scan/loop-safepoints`
+  failure is gone, confirmed against a `main` control measured failing in the
+  same session on the same box.
+* **Branch 2 added no baseline entry**, so no previously-invisible publication
+  was absorbed into a baseline unjustified.
+
+Two non-blocking items for whoever lands this: `goc -m file.go` does not parse
+(item 12), and `.gitignore` still has no rule covering a working-directory binary
+named after the program -- `ccwork/parity-113` committed one called `recv2` and
+removed it again on its own branch.
+
+---
+
+*Everything below this line is the four merged branches' own reports and the previous gates', kept verbatim.*
+
 # Closing the phi blind spot in `opt.FrameEscapes`
 
 Branch `ccwork/framecheck-phi-blindspot`, off `main` (d113d4a). Everything below
