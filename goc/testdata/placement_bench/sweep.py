@@ -109,9 +109,13 @@ def run(reps):
         for n, (program, policy, pad) in enumerate(order):
             out = subprocess.run(['taskset', '-c', CORE, binary(program, policy, pad)],
                                  capture_output=True)
-            if out.returncode != 0:
-                sys.exit('run failed: %s %s %d\n%s' % (
-                    program, policy, pad, out.stderr.decode()))
+            # A run that dies is recorded for the cases it had already printed and
+            # noted, not treated as a failure of the sweep. goc miscompiles
+            # something on compress/flate's collector path -- see the report -- at
+            # the same rate with and without alignment, so it is noise here rather
+            # than a result, but silently dropping it would hide it.
+            if out.returncode != 0 or b'runtime:' in out.stderr:
+                print('  died: %s %s %d' % (program, policy, pad), flush=True)
             for line in out.stdout.decode().splitlines():
                 if '\t' not in line or line.startswith('#'):
                     continue

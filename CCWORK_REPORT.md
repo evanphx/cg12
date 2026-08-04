@@ -7320,3 +7320,50 @@ fastest of N rounds, a fixed integer-arithmetic control in the same process):
 19 timed cases in total, plus a control per program.
 
 The grid is 6 policies x 8 shifts (0,4,...,28) x 8 programs = 384 binaries.
+
+### What each policy does to placement, before any timing
+
+Two facts about the grid, established from the binaries themselves rather than
+from a clock. Take one hot symbol -- `internal_strconv_formatBits` in the `text`
+program -- and read its address out of each of the 48 builds:
+
+    policy    address mod 32, at shifts 0 4 8 12 16 20 24 28
+    none        8  12  16  20  24  28   0   4
+    a16        16   0   0   0   0  16  16  16
+    a32         0   0   0   0   0   0   0   0
+    loop32      0   0   0   0   0   0   0   0
+
+and count how many distinct binaries the eight shifts produce:
+
+    none 8    a16 3    a32 2    a64 2    loop32 2    head32 2
+
+So `none` turns eight different upstream size changes into eight different
+placements; 32-byte alignment turns them into two builds that differ by a whole
+granule and therefore have the same phase. `a16` is the interesting row: it
+halves the number of placements and still leaves the phase flipping between 0 and
+16, which is the structural form of the thing last night's job inferred from one
+number -- a 16-byte alignment absorbs an upstream change only modulo 16, and the
+fetch granule is 32.
+
+### What alignment costs in code bytes
+
+Whole-binary file size is quantised by segment padding and hides this; `.text`
+section size does not. Summed over the eight programs' `.text`:
+
+    policy    .text bytes    vs none
+    none       28,054,752    +0.00%
+    loop32     28,257,600    +0.72%
+    a16        28,339,600    +1.02%
+    a32        28,720,736    +2.37%
+    head32     29,288,672    +4.40%
+    a64        29,469,024    +5.04%
+
+The ordering is worth stopping on, because it contradicts the cheap intuition
+that loop headers are the frugal place to spend padding. Aligning *only* the
+entries of functions that contain a backward branch (`loop32`) costs a third of
+what aligning every entry costs: most functions in a Go program have no loop in
+them. But aligning every loop *header* on top of that (`head32`) costs more than
+aligning every function entry, and nearly as much as 64-byte entry alignment.
+A function has one entry and often several back-edge targets -- Go's range loops
+and bounds-check re-entry produce a lot of them -- so there are more loop heads
+in this corpus than there are functions.
