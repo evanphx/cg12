@@ -45,10 +45,17 @@ func main() {
 	prebuiltRuntime := flag.String("runtime", "", "link against the prebuilt runtimes written by `goc build-runtime`, comma-separated; the richest usable one is chosen")
 	cpuProfile := flag.String("cpuprofile", "", "write a CPU profile of the compile to this file")
 	targetName := flag.String("target", defaultTargetName(), "arm64 | amd64")
+	escapeDiag := flag.Int("m", 0, "print escape decisions: 1 the rule that placed each allocation, 2 also the chain to the deciding use")
 	flag.Parse()
 	if flag.NArg() != 1 {
-		fmt.Fprintln(os.Stderr, "usage: goc [-O] [-target arch] [-o out] [-runtime runtime.gocrt] [-cpuprofile prof] [-c|-S|-emit-ir|-run] file.go")
+		fmt.Fprintln(os.Stderr, "usage: goc [-O] [-m[=2]] [-target arch] [-o out] [-runtime runtime.gocrt] [-cpuprofile prof] [-c|-S|-emit-ir|-run] file.go")
 		os.Exit(2)
+	}
+	// -m overrides GOC_M, which opt read at init. Off is the default in both, and
+	// with it off nothing below behaves differently in any way -- see
+	// docs/escape-diagnostics.md.
+	if *escapeDiag > 0 {
+		opt.SetEscapeDiagLevel(*escapeDiag)
 	}
 	if *cpuProfile != "" {
 		check(startCPUProfile(*cpuProfile))

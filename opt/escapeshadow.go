@@ -153,7 +153,7 @@ func ShadowPlacement(module *ir.Module, facts *EscapeFacts) ([]PlacementDisagree
 			placed[id] = true
 		}
 		definitions := allocationDefinitions(function, function.PlacedAllocs)
-		loops := allocationsInLoops(function, placed)
+		loops, _ := allocationsInLoops(function, placed)
 		escapes := analyzeCandidateEscapes(function, byName, facts, seeds, true)
 		for _, id := range seeds {
 			placed := function.PlacedAllocs[id]
@@ -234,15 +234,24 @@ func FrontEndPlacementSites(module *ir.Module) []string {
 // be safe (see PlacementDisagreement.InLoop), and LowerHeapAllocations acts on
 // it (see promotionsBlockedByALoop). A rule reported one way and enforced
 // another is worse than no rule.
-func allocationsInLoops(function *ir.Func, allocations map[uint32]bool) map[uint32]bool {
+// It also reports where each such loop starts, but only when the escape
+// diagnostic is on: "in a loop" is the whole of the rule and a reader who has to
+// go and find which loop is being told less than the compiler knows. The map is
+// not built otherwise, since nothing else asks.
+func allocationsInLoops(function *ir.Func, allocations map[uint32]bool) (map[uint32]bool, map[uint32]ir.SrcPos) {
 	cfg := analysis.BuildCFG(function)
 	if len(cfg.RPO) == 0 {
-		return nil
+		return nil, nil
 	}
 	forest := cfg.LoopForest(cfg.Dominators())
 	inLoop := make(map[uint32]bool)
+	var headers map[uint32]ir.SrcPos
+	if EscapeDiagLevel() > 0 {
+		headers = make(map[uint32]ir.SrcPos)
+	}
 	for _, block := range function.Blocks {
-		if forest.In[block] == nil {
+		loop := forest.In[block]
+		if loop == nil {
 			continue
 		}
 		for _, instruction := range block.Instrs {
@@ -251,10 +260,27 @@ func allocationsInLoops(function *ir.Func, allocations map[uint32]bool) map[uint
 			}
 			if allocations[instruction.To.ID] {
 				inLoop[instruction.To.ID] = true
+				if headers != nil {
+					headers[instruction.To.ID] = blockPosition(loop.Header)
+				}
 			}
 		}
 	}
-	return inLoop
+	return inLoop, headers
+}
+
+// blockPosition is the first source position in a block, which for a loop header
+// is where the loop is written.
+func blockPosition(block *ir.Block) ir.SrcPos {
+	if block == nil {
+		return ir.SrcPos{}
+	}
+	for _, instruction := range block.Instrs {
+		if instruction.Pos.Valid() {
+			return instruction.Pos
+		}
+	}
+	return ir.SrcPos{}
 }
 
 // allocationDefinitions finds the source position of each placed allocation, by

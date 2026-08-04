@@ -89,6 +89,27 @@ func reportNoSplitViolations(module *ir.Module) {
 	}
 }
 
+// reportEscapeDiagnostics prints goc's -m report: every allocation site in the
+// compiled program, where the object went, and which rule put it there. -m on
+// the command line and GOC_M in the environment turn it on, and it is off
+// otherwise -- see opt.EscapeDiagLevel and docs/escape-diagnostics.md.
+//
+// It runs here, after opt.LowerHeapAllocations, because that is the first point
+// at which both placers have decided: the AST walk recorded its placements while
+// it lowered, and the IR pass has just recorded the rest.
+//
+// program is the file the compiler was pointed at, and the report is restricted
+// to it. gc's -m reports the package being compiled; goc compiles the vendored
+// standard library along with the program, and a report that included it would
+// bury the lines the reader asked for under ten thousand others.
+func reportEscapeDiagnostics(module *ir.Module, program string) {
+	level := opt.EscapeDiagLevel()
+	if level < 1 {
+		return
+	}
+	opt.WriteEscapeDiagnostics(os.Stderr, module, program, level)
+}
+
 // reportFrameEscapes audits the finished escape decision: every allocation the
 // front end or opt.LowerHeapAllocations left in a frame, checked against the
 // stores the compiler actually emitted. GOC_DEBUG_ESCAPECHECK=1 enables it.
@@ -343,6 +364,7 @@ func compile(name string, src []byte, options compileOptions) (*ir.Module, error
 		reachableGlobals:        reachableGlobals,
 		reachableFunctions:      functions,
 		interfaceCandidates:     make(map[interfaceCandidateKey][]interfaceMethodCandidate),
+		escapeDiag:              newEscapeDiagnostics(),
 	}
 	g.mod.File(name)
 	registerNoEscapeDirectives(g)
@@ -489,6 +511,7 @@ func compile(name string, src []byte, options compileOptions) (*ir.Module, error
 	}
 	opt.InlineHeapAllocations(mod)
 	opt.LowerHeapAllocations(mod)
+	reportEscapeDiagnostics(mod, name)
 	reportFrameEscapes(mod)
 	if compileRuntime {
 		setAAPCS64CallConvention(mod)
@@ -1615,8 +1638,8 @@ type gen struct {
 	// also runtime.firstmoduledata. A prebuilt runtime module is followed by the
 	// program module, and runtime.main stops its per-module init loop at the tail,
 	// so getting this wrong means the program's package init never runs.
-	lastModuleSymbol  string
-	dynamicTypes      []types.Type
+	lastModuleSymbol string
+	dynamicTypes     []types.Type
 	// reachableFunctions is the set addInterfaceMethodWrappers dispatches over,
 	// kept so the escape walk can ask the same question about an interface
 	// method call that the dispatcher answers about it.
@@ -1625,6 +1648,9 @@ type gen struct {
 	// types x reachable declarations) and would otherwise be recomputed at every
 	// interface method call the escape walk meets.
 	interfaceCandidates map[interfaceCandidateKey][]interfaceMethodCandidate
+	// escapeDiag is the escape diagnostic's explanation state, and is nil unless
+	// -m is on. See goc/escapediag.go.
+	escapeDiag        *escapeDiagnostics
 	reachableGlobals  map[types.Object]bool
 	filterGlobals     bool
 	emitRuntimeTables bool
@@ -1669,19 +1695,19 @@ type gen struct {
 	pkg  *types.Package
 
 	// Per-function state. Reset by derive.
-	fn                            *ir.Func
-	cur                           *ir.Block
-	seq                           int
-	err                           error
-	functionName                  string
-	currentFunction               *types.Func
-	typeArguments                 []types.Type
-	noWriteBarrier                bool
-	forceStackVariadic            bool
+	fn                 *ir.Func
+	cur                *ir.Block
+	seq                int
+	err                error
+	functionName       string
+	currentFunction    *types.Func
+	typeArguments      []types.Type
+	noWriteBarrier     bool
+	forceStackVariadic bool
 	// variadicPayloadSlot is the reserved storage the payload about to be boxed
 	// can be folded back into; nil for every conversion that is not one variadic
 	// argument of a call being built. See variadicPayloadStorage.
-	variadicPayloadSlot *variadicPayloadSlot
+	variadicPayloadSlot           *variadicPayloadSlot
 	resultSlot                    ir.Ref
 	resultType                    types.Type
 	resultObjects                 map[types.Object]bool
@@ -2362,13 +2388,16 @@ func astParents(root ast.Node) map[ast.Node]ast.Node {
 // only as the storage for an immediately reinterpreted or selected value. The
 // heap-allocation IR pass handles the remaining, dataflow-dependent cases.
 func (g *gen) nonEscapingAddress(address *ast.UnaryExpr) bool {
-	return g.nonEscapingAddressWithin(
+	saved := g.diagQuestion()
+	local := g.nonEscapingAddressWithin(
 		address,
 		g.info,
 		g.parents,
 		g.currentBody,
 		make(map[parameterKey]bool),
 	)
+	g.diagResolve(saved, !local, nil)
+	return local
 }
 
 // nonEscapingAddressWithin is nonEscapingAddress asked about a body other than
@@ -2696,13 +2725,16 @@ func (g *gen) nonEscapingAddressWithin(
 // bootstrap storage because promoting it through runtime.newobject would make
 // the allocator recursively depend on itself.
 func (g *gen) addressEscapesFunction(address *ast.UnaryExpr) bool {
-	return g.addressEscapesWithin(
+	saved := g.diagQuestion()
+	escapes := g.addressEscapesWithin(
 		address,
 		g.info,
 		g.parents,
 		g.currentBody,
 		make(map[parameterKey]bool),
 	)
+	g.diagResolve(saved, escapes, nil)
+	return escapes
 }
 
 func (g *gen) addressEscapesWithin(
@@ -2752,12 +2784,20 @@ func (g *gen) addressEscapesWithin(
 			}
 			function := g.resolvedCallee(parent.Fun, info, parents, body)
 			if function == nil {
+				g.diagRule(func() string {
+					return "passed to a call the walk cannot resolve to a single function"
+				})
+				g.diagUse(parent)
 				return true
 			}
 			if g.parameterDoesNotEscape(function, argumentIndex, checking) {
 				return false
 			}
 			if !g.parameterLeaksOnlyToResult(function, argumentIndex, checking) {
+				g.diagRule(func() string {
+					return fmt.Sprintf("passed to %s, which may retain argument %d", function.FullName(), argumentIndex)
+				})
+				g.diagUse(parent)
 				return true
 			}
 			if !singleResultFunction(function) {
@@ -2783,7 +2823,12 @@ func (g *gen) addressEscapesWithin(
 			}
 			return !g.objectDoesNotEscape(object, info, parents, body, checking)
 		case *ast.ReturnStmt:
-			return !g.resultLeakIsAllowed(parent, parents)
+			allowed := g.resultLeakIsAllowed(parent, parents)
+			if !allowed {
+				g.diagRule(func() string { return "returned" })
+				g.diagUse(parent)
+			}
+			return !allowed
 		default:
 			return false
 		}
@@ -2815,13 +2860,16 @@ func (g *gen) assignedResultDoesNotEscape(expression ast.Expr) bool {
 }
 
 func (g *gen) assignedNodeDoesNotEscape(expression ast.Node) bool {
-	return g.assignedNodeDoesNotEscapeWithin(
+	saved := g.diagQuestion()
+	local := g.assignedNodeDoesNotEscapeWithin(
 		expression,
 		g.info,
 		g.parents,
 		g.currentBody,
 		make(map[parameterKey]bool),
 	)
+	g.diagResolve(saved, !local, nil)
+	return local
 }
 
 func (g *gen) assignedNodeDoesNotEscapeWithin(
@@ -2913,13 +2961,16 @@ func (g *gen) destinationDoesNotEscape(
 // are ordinary stack temporaries in Go, and allocating one on every range
 // iteration can make runtime code allocate while scanning the stack.
 func (g *gen) valueDoesNotEscape(expression ast.Expr) bool {
-	return g.valueDoesNotEscapeWithin(
+	saved := g.diagQuestion()
+	local := g.valueDoesNotEscapeWithin(
 		expression,
 		g.info,
 		g.parents,
 		g.currentBody,
 		make(map[parameterKey]bool),
 	)
+	g.diagResolve(saved, !local, nil)
+	return local
 }
 
 // conversionCopiesOperand reports whether a type conversion builds its result
@@ -3261,6 +3312,15 @@ func (g *gen) boxedIntoInterface(node ast.Node, info *types.Info, parents map[as
 		return false
 	}
 	_, isInterface := targetType.Underlying().(*types.Interface)
+	if isInterface {
+		// Every caller of this predicate treats true as "escapes", so this is a
+		// deciding branch and names itself as one. See goc/escapediag.go.
+		g.diagRule(func() string {
+			return fmt.Sprintf("converted to %s, and boxing a %s makes fresh storage for the payload",
+				targetType, sourceType)
+		})
+		g.diagUse(expression)
+	}
 	return isInterface
 }
 
@@ -3518,13 +3578,31 @@ func (g *gen) escapeWalkSeesEveryUse(object types.Object, body *ast.BlockStmt) b
 }
 
 func (g *gen) objectDoesNotEscape(object types.Object, info *types.Info, parents map[ast.Node]ast.Node, body *ast.BlockStmt, checking map[parameterKey]bool) bool {
+	saved := g.diagQuestion()
+	local := g.objectDoesNotEscapeUnexplained(object, info, parents, body, checking)
+	g.diagResolve(saved, !local, func() string {
+		return fmt.Sprintf("%s, declared at %s", object.Name(), g.diagPosition(object.Pos()))
+	})
+	return local
+}
+
+// objectDoesNotEscapeUnexplained is objectDoesNotEscape's body; the split is
+// gen.diagQuestion's, so that the walk over this object's uses is one link of
+// the reported chain whatever branch inside it decides.
+func (g *gen) objectDoesNotEscapeUnexplained(object types.Object, info *types.Info, parents map[ast.Node]ast.Node, body *ast.BlockStmt, checking map[parameterKey]bool) bool {
 	if !g.escapeWalkSeesEveryUse(object, body) {
+		g.diagRule(func() string {
+			return fmt.Sprintf("%s is declared outside the body the walk can see every use in", object.Name())
+		})
 		return false
 	}
 	if g.objectEscapeChecks == nil {
 		g.objectEscapeChecks = make(map[types.Object]bool)
 	}
 	if g.objectEscapeChecks[object] {
+		g.diagRule(func() string {
+			return fmt.Sprintf("the walk is already inside the question about %s: it breaks the cycle by answering \"escapes\"", object.Name())
+		})
 		return false
 	}
 	g.objectEscapeChecks[object] = true
@@ -3789,6 +3867,10 @@ func (g *gen) nonEscapingObjectUse(
 			return false
 		}
 		if _, global := g.globals[leftObject]; global {
+			g.diagRule(func() string {
+				return fmt.Sprintf("assigned to the package-level variable %s", leftObject.Name())
+			})
+			g.diagUse(parent)
 			return false
 		}
 		if !copyAliasesStorage(rightObject) || !copyAliasesStorage(leftObject) {
@@ -3991,8 +4073,23 @@ func (g *gen) enterCalleeBody(signature *types.Signature, resultLeakBody *ast.Bl
 }
 
 func (g *gen) parameterDoesNotEscape(function *types.Func, index int, checking map[parameterKey]bool) bool {
+	saved := g.diagQuestion()
+	local := g.parameterDoesNotEscapeUnexplained(function, index, checking)
+	g.diagResolve(saved, !local, func() string {
+		return fmt.Sprintf("argument %d of the call to %s", index, function.FullName())
+	})
+	return local
+}
+
+// parameterDoesNotEscapeUnexplained is parameterDoesNotEscape's body. The split
+// exists so that the answer can be bracketed once -- see gen.diagQuestion -- and
+// every refusal below can name itself without each one having to remember to.
+func (g *gen) parameterDoesNotEscapeUnexplained(function *types.Func, index int, checking map[parameterKey]bool) bool {
 	declaration, ok := g.functionDecls[function]
 	if !ok {
+		g.diagRule(func() string {
+			return fmt.Sprintf("passed to %s, whose declaration this compilation does not have", function.FullName())
+		})
 		return false
 	}
 	signature := function.Type().(*types.Signature)
@@ -4003,7 +4100,13 @@ func (g *gen) parameterDoesNotEscape(function *types.Func, index int, checking m
 		return false
 	}
 	if declaration.decl.Body == nil {
-		return hasCompilerDirective(declaration.decl, "go:noescape")
+		noescape := hasCompilerDirective(declaration.decl, "go:noescape")
+		if !noescape {
+			g.diagRule(func() string {
+				return fmt.Sprintf("passed to %s, which has no Go body and is not marked //go:noescape", function.FullName())
+			})
+		}
+		return noescape
 	}
 	if signature.Variadic() && index >= signature.Params().Len()-1 {
 		// The callers of this walk hand it an argument position, and for a
@@ -4018,10 +4121,19 @@ func (g *gen) parameterDoesNotEscape(function *types.Func, index int, checking m
 		//
 		// So the question asked here is the deep one -- can the callee reach an
 		// element at all -- and variadicParameterHoldsItsElements is the answer.
-		return g.variadicParameterHoldsItsElements(declaration, signature)
+		held := g.variadicParameterHoldsItsElements(declaration, signature)
+		if !held {
+			g.diagRule(func() string {
+				return fmt.Sprintf("passed in the variadic position of %s, whose ... parameter the walk cannot prove does not hold its elements", function.FullName())
+			})
+		}
+		return held
 	}
 	key := parameterKey{function: function, index: index}
 	if checking[key] {
+		g.diagRule(func() string {
+			return fmt.Sprintf("passed to %s, which the walk is already inside: it breaks the recursion by answering \"escapes\"", function.FullName())
+		})
 		return false
 	}
 	checking[key] = true
@@ -4037,7 +4149,6 @@ func (g *gen) parameterDoesNotEscape(function *types.Func, index int, checking m
 	parents := g.declarationParents(declaration.decl)
 	return g.objectDoesNotEscape(signature.Params().At(index), declaration.info, parents, declaration.decl.Body, checking)
 }
-
 
 // variadicParameterHoldsItsElements reports that a variadic callee cannot reach
 // an element of its `...` parameter, so an argument in a variadic position does
@@ -4179,6 +4290,11 @@ func (g *gen) parameterLeaksOnlyToResult(function *types.Func, index int, checki
 	// signature to see that.
 	parents := g.declarationParents(declaration.decl)
 	answer := g.objectDoesNotEscape(signature.Params().At(index), declaration.info, parents, declaration.decl.Body, checking)
+	if !answer {
+		g.diagRule(func() string {
+			return fmt.Sprintf("passed to %s, whose parameter %d reaches more than the result", function.FullName(), index)
+		})
+	}
 	reportResultLeakSummary(function, index, answer)
 	return answer
 }
@@ -4209,6 +4325,12 @@ func reportResultLeakSummary(function *types.Func, index int, leaksOnlyToResult 
 }
 
 func (g *gen) reportEscapingUse(object types.Object, use ast.Node) {
+	// The escape diagnostic hangs off the same call, because this is already the
+	// one place the walk announces that a use decided.
+	g.diagUse(use)
+	g.diagRule(func() string {
+		return fmt.Sprintf("%s is used here in a way the walk cannot prove keeps it local", object.Name())
+	})
 	if escapeDebugLevel() < 2 {
 		return
 	}
@@ -4243,6 +4365,11 @@ func (g *gen) receiverDoesNotEscape(function *types.Func, checking map[parameter
 	// signature to see that.
 	parents := g.declarationParents(declaration.decl)
 	answer := g.objectDoesNotEscape(signature.Recv(), declaration.info, parents, declaration.decl.Body, checking)
+	if !answer {
+		g.diagRule(func() string {
+			return fmt.Sprintf("used as the receiver of %s, which may retain it", function.FullName())
+		})
+	}
 	if escapeDebugLevel() >= 2 {
 		fmt.Fprintf(os.Stderr, "escape receiver: %s does not escape: %v\n", function.FullName(), answer)
 	}
@@ -11929,13 +12056,18 @@ func (g *gen) expr(e ast.Expr) (result ir.Ref) {
 				// a different object on every trip round a loop, which frame
 				// storage cannot do. See addressOutlivesItsIteration.
 				heap := !g.nonEscapingAddress(n) || g.addressOutlivesItsIteration(n)
+				// Harvested here, at the decision, because everything between
+				// this line and the recordPlacement calls below asks the walk
+				// further questions about the literal's elements.
+				why := g.escapeWhy(placementOf(heap))
 				if g.noWriteBarrier {
 					heap = false
+					why = escapeExplanation{}
 				}
 				literalType := g.typeAndValue(literal).Type
 				_, isMap := literalType.Underlying().(*types.Map)
 				if isSliceType(literalType) || isMap {
-					value := g.compositeLiteral(literal, heap)
+					value := g.compositeLiteral(literal, heap, why)
 					// The frame slot is emitted only in the arm that keeps it. A
 					// slot allocated before the decision and then written over is
 					// still in the finished IR with no uses, and nothing later
@@ -11945,7 +12077,7 @@ func (g *gen) expr(e ast.Expr) (result ir.Ref) {
 					var storage ir.Ref
 					if heap {
 						storage = g.allocateEscapingTyped(literalType)
-						g.recordPlacement(storage, "composite-literal-descriptor", ir.AllocOnHeap, literalType)
+						g.recordPlacementWhy(storage, "composite-literal-descriptor", ir.AllocOnHeap, literalType, why)
 					} else {
 						storage = g.localAllocTyped(literalType)
 						g.recordPlacement(storage, "composite-literal-descriptor", ir.AllocInFrame, literalType)
@@ -11957,7 +12089,7 @@ func (g *gen) expr(e ast.Expr) (result ir.Ref) {
 					}
 					return storage
 				}
-				return g.compositeLiteral(literal, heap)
+				return g.compositeLiteral(literal, heap, why)
 			}
 			// Interface values are represented by an address to their two-word
 			// runtime header. Taking the address of one must expose that header,
@@ -11999,7 +12131,7 @@ func (g *gen) expr(e ast.Expr) (result ir.Ref) {
 		}
 		return g.load(pointer, starType)
 	case *ast.CompositeLit:
-		return g.compositeLiteral(n, false)
+		return g.compositeLiteral(n, false, escapeExplanation{})
 	case *ast.FuncLit:
 		return g.functionLiteral(n)
 	case *ast.CallExpr:
@@ -12031,7 +12163,7 @@ func (g *gen) expr(e ast.Expr) (result ir.Ref) {
 			if basic, ok := tv.Type.Underlying().(*types.Basic); ok && basic.Kind() == types.UnsafePointer {
 				if address, ok := n.Args[0].(*ast.UnaryExpr); ok && address.Op == token.AND {
 					if literal, ok := address.X.(*ast.CompositeLit); ok {
-						return g.compositeLiteral(literal, false)
+						return g.compositeLiteral(literal, false, escapeExplanation{})
 					}
 				}
 			}
@@ -12792,7 +12924,11 @@ func methodValueWrapperName(packagePath, methodSymbol string, position token.Pos
 	)
 }
 
-func (g *gen) compositeLiteral(literal *ast.CompositeLit, heap bool) ir.Ref {
+// compositeLiteral emits a composite literal into heap or frame storage. heap is
+// the caller's escape decision, and why is that decision's explanation -- carried
+// rather than re-asked, because between the decision and the placement recorded
+// below the emitter asks other escape questions about the literal's elements.
+func (g *gen) compositeLiteral(literal *ast.CompositeLit, heap bool, why escapeExplanation) ir.Ref {
 	t := g.typeAndValue(literal).Type
 	if pointer, isPointer := t.Underlying().(*types.Pointer); isPointer {
 		structure, isStructure := pointer.Elem().Underlying().(*types.Struct)
@@ -12803,7 +12939,7 @@ func (g *gen) compositeLiteral(literal *ast.CompositeLit, heap bool) ir.Ref {
 		var backing ir.Ref
 		if heap {
 			backing = g.allocateEscapingTyped(pointer.Elem())
-			g.recordPlacement(backing, "composite-literal", ir.AllocOnHeap, pointer.Elem())
+			g.recordPlacementWhy(backing, "composite-literal", ir.AllocOnHeap, pointer.Elem(), why)
 		} else {
 			// The neutral candidate form: opt.LowerHeapAllocations decides this
 			// one, so there is no front-end placement to record.
@@ -12864,9 +13000,14 @@ func (g *gen) compositeLiteral(literal *ast.CompositeLit, heap bool) ir.Ref {
 		// and an ir.Func.StackPointerWords entry for a temporary no instruction
 		// defines any more.
 		var backing ir.Ref
-		if heap || !g.valueDoesNotEscape(literal) {
+		local := !heap && g.valueDoesNotEscape(literal)
+		sliceWhy := why
+		if !heap {
+			sliceWhy = g.escapeWhy(placementOf(!local))
+		}
+		if !local {
 			backing = g.allocateEscapingTyped(backingType)
-			g.recordPlacement(backing, "slice-literal-backing", ir.AllocOnHeap, backingType)
+			g.recordPlacementWhy(backing, "slice-literal-backing", ir.AllocOnHeap, backingType, sliceWhy)
 		} else {
 			backing = g.localAlloc(alignment, int(backingSize))
 			visitPointerWords(backingType, 0, func(offset int64) {
@@ -12907,7 +13048,7 @@ func (g *gen) compositeLiteral(literal *ast.CompositeLit, heap bool) ir.Ref {
 	var backing ir.Ref
 	if heap {
 		backing = g.allocateEscapingTyped(t)
-		g.recordPlacement(backing, "composite-literal", ir.AllocOnHeap, t)
+		g.recordPlacementWhy(backing, "composite-literal", ir.AllocOnHeap, t, why)
 	} else {
 		backing = g.localAlloc(align, int(size))
 		visitPointerWords(t, 0, func(offset int64) {
@@ -13333,13 +13474,16 @@ func (g *gen) fieldListObjects(fields *ast.FieldList) []types.Object {
 }
 
 func (g *gen) functionLiteralEscapes(literal *ast.FuncLit) bool {
-	return g.functionLiteralEscapesWithin(
+	saved := g.diagQuestion()
+	escapes := g.functionLiteralEscapesWithin(
 		literal,
 		g.info,
 		g.parents,
 		g.currentBody,
 		make(map[parameterKey]bool),
 	)
+	g.diagResolve(saved, escapes, nil)
+	return escapes
 }
 
 func (g *gen) functionLiteralEscapesWithin(
@@ -13721,7 +13865,21 @@ func (g *gen) addressOutlivesItsIteration(address *ast.UnaryExpr) bool {
 		g.escapeWalkOuterObjects = savedOuter
 	}()
 
-	return g.addressEscapesWithin(address, g.info, g.parents, loop, make(map[parameterKey]bool))
+	saved := g.diagQuestion()
+	outlives := g.addressEscapesWithin(address, g.info, g.parents, loop, make(map[parameterKey]bool))
+	if outlives {
+		// The rule the loop imposes is not the one the climb found: the climb
+		// answered about the enclosing loop body rather than about the function,
+		// and what it means is that the storage is still reachable on the next
+		// trip round. Named here rather than left to whichever branch of the
+		// climb returned, which would report a publication that does not on its
+		// own force the allocation out of the frame.
+		g.diagRuleOverride(func() string {
+			return "its address is still reachable on the next iteration of the enclosing loop"
+		})
+	}
+	g.diagResolve(saved, outlives, nil)
+	return outlives
 }
 
 // enclosingLoopBody returns the body of the innermost loop a node sits in, or
@@ -14346,18 +14504,40 @@ func (g *gen) allocateEscapingTyped(valueType types.Type) ir.Ref {
 // arriving as one site vanishing and an unrelated one appearing. Recording it
 // does not emit the descriptor: the symbol name is a pure function of the type.
 func (g *gen) recordPlacement(storage ir.Ref, site string, placement ir.AllocPlacement, valueType types.Type) {
+	g.recordPlacementWhy(storage, site, placement, valueType, g.escapeWhy(placement))
+}
+
+// recordPlacementWhy is recordPlacement for a site whose decision was taken
+// further back than the line above it, so that the explanation belongs to the
+// question that placed this object and not to whichever one the emitter asked
+// most recently on the way here. why comes from gen.escapeWhy, called at the
+// decision. It is the zero value when the escape diagnostic is off.
+func (g *gen) recordPlacementWhy(storage ir.Ref, site string, placement ir.AllocPlacement, valueType types.Type, why escapeExplanation) {
 	if storage.Kind != ir.RefTemp || g.fn == nil {
 		return
 	}
 	if g.fn.PlacedAllocs == nil {
 		g.fn.PlacedAllocs = make(map[uint32]ir.PlacedAlloc)
 	}
+	rule, use, chain := g.placedFor(why)
 	g.fn.PlacedAllocs[storage.ID] = ir.PlacedAlloc{
 		Site:      site,
 		Placement: placement,
 		Allocator: g.placementAllocator(valueType),
 		Type:      g.placementTypeSymbol(valueType),
+		Rule:      rule,
+		Use:       use,
+		Chain:     chain,
 	}
+}
+
+// placementOf names the placement a heap/frame decision came to, so that a
+// decision taken as a bool can be handed to gen.escapeWhy.
+func placementOf(heap bool) ir.AllocPlacement {
+	if heap {
+		return ir.AllocOnHeap
+	}
+	return ir.AllocInFrame
 }
 
 // placementAllocator names the allocator a placement of valueType calls on the

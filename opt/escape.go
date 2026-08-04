@@ -132,10 +132,12 @@ type candidateEscapes struct {
 	// contains records, per tracked allocation, the other tracked allocations
 	// whose address was written into it. See containedAllocationsEscape.
 	contains map[uint32]map[uint32]bool
-	// reasons names, per escaped allocation, the first use that escaped it. It
-	// is only filled when asked for: the pass itself does not need it and the
-	// strings would be built on every compile.
-	reasons map[uint32]string
+	// reasons names, per escaped allocation, the first use that escaped it, and
+	// reasonPositions is where that use is written. Both are only filled when
+	// asked for: the pass itself does not need them and the strings would be
+	// built on every compile.
+	reasons         map[uint32]string
+	reasonPositions map[uint32]ir.SrcPos
 }
 
 func (analysis *candidateEscapes) escapes(id uint32) bool { return analysis.escaped[id] }
@@ -172,6 +174,7 @@ func (analysis *candidateEscapes) containedAllocationsEscape() {
 				}
 				if analysis.reasons != nil {
 					analysis.reasons[base] = "stored into an object that escapes"
+					analysis.reasonPositions[base] = analysis.reasonPositions[container]
 				}
 				analysis.escaped[base] = true
 				updated = true
@@ -187,6 +190,15 @@ func (analysis *candidateEscapes) reason(id uint32) string {
 	return analysis.reasons[id]
 }
 
+// reasonPosition is where the use named by reason is written, when the marking
+// instruction carried a position.
+func (analysis *candidateEscapes) reasonPosition(id uint32) ir.SrcPos {
+	if analysis.reasonPositions == nil {
+		return ir.SrcPos{}
+	}
+	return analysis.reasonPositions[id]
+}
+
 func lowerFunctionHeapAllocations(function *ir.Func, byName map[string]*ir.Func, facts *EscapeFacts, decisions *[]ir.AllocDecision) bool {
 	var seeds []uint32
 	for _, block := range function.Blocks {
@@ -199,7 +211,11 @@ func lowerFunctionHeapAllocations(function *ir.Func, byName map[string]*ir.Func,
 	if len(seeds) == 0 {
 		return false
 	}
-	escapes := analyzeCandidateEscapes(function, byName, facts, seeds, false)
+	// Reasons are asked for exactly when the diagnostic is on. They are written
+	// as the mark loop marks and read back by the diagnostic; nothing in the
+	// pass consults them, and with the diagnostic off the map is never
+	// allocated. See EscapeDiagLevel.
+	escapes := analyzeCandidateEscapes(function, byName, facts, seeds, EscapeDiagLevel() > 0)
 	blocked := promotionsBlockedByALoop(function, seeds, escapes)
 	// After the loop rule, because the loop rule is one of the ways a payload
 	// ends up escaping out of a framed array, and the count it is comparing has
@@ -241,8 +257,12 @@ func promotionsBlockedByALoop(function *ir.Func, seeds []uint32, escapes *candid
 		// the common case: most candidates reach something that escapes them.
 		return nil
 	}
-	blocked := allocationsInLoops(function, promotable)
+	blocked, loopHeaders := allocationsInLoops(function, promotable)
 	for id := range blocked {
+		if escapes.reasons != nil {
+			escapes.reasons[id] = "allocated in a loop; one frame slot cannot hold one object per iteration"
+			escapes.reasonPositions[id] = loopHeaders[id]
+		}
 		escapes.escaped[id] = true
 	}
 	// The loop rule adds to escaped after the mark loop has finished, and a
@@ -274,8 +294,10 @@ func analyzeCandidateEscapes(function *ir.Func, byName map[string]*ir.Func, fact
 	escaped := make(map[uint32]bool)
 	contains := declaredContainment(function, bases)
 	var reasons map[uint32]string
+	var reasonPositions map[uint32]ir.SrcPos
 	if wantReasons {
 		reasons = make(map[uint32]string)
+		reasonPositions = make(map[uint32]ir.SrcPos)
 	}
 	slotBases := make(map[localSlot]uint32)
 	conflictedSlots := make(map[localSlot]bool)
@@ -457,11 +479,16 @@ func analyzeCandidateEscapes(function *ir.Func, byName map[string]*ir.Func, fact
 		}
 	}
 
-	mark := func(reference ir.Ref, why string) {
+	// at is the position of the instruction being marked from, so that the
+	// diagnostic can point at the use rather than only name it. It is the
+	// marking instruction's own position, taken here rather than looked up
+	// afterwards -- the rewrite below replaces these instructions.
+	mark := func(reference ir.Ref, why string, at ir.SrcPos) {
 		if reference.Kind == ir.RefTemp {
 			if base, ok := bases[reference.ID]; ok {
 				if reasons != nil && !escaped[base] {
 					reasons[base] = why
+					reasonPositions[base] = at
 				}
 				escaped[base] = true
 			}
@@ -471,7 +498,7 @@ func analyzeCandidateEscapes(function *ir.Func, byName map[string]*ir.Func, fact
 	// allocation. It is the depth-1 half of a summary: a callee that may retain
 	// an *element* of a `...any` slice retains the boxed payload the element
 	// points at, and nothing else. Transitive, because containment is.
-	markContents := func(reference ir.Ref, why string) {
+	markContents := func(reference ir.Ref, why string, at ir.SrcPos) {
 		base, tracked := heapBase(reference, bases)
 		if !tracked {
 			return
@@ -486,6 +513,7 @@ func analyzeCandidateEscapes(function *ir.Func, byName map[string]*ir.Func, fact
 				}
 				if reasons != nil {
 					reasons[held] = why
+					reasonPositions[held] = at
 				}
 				escaped[held] = true
 				frontier = append(frontier, held)
@@ -498,7 +526,9 @@ func analyzeCandidateEscapes(function *ir.Func, byName map[string]*ir.Func, fact
 				continue
 			}
 			for _, argument := range phi.Args {
-				mark(argument, "phi")
+				// A phi carries no position of its own; the reason names the
+				// construct and there is no instruction to point at.
+				mark(argument, "phi", ir.SrcPos{})
 			}
 		}
 		for _, instruction := range block.Instrs {
@@ -517,7 +547,7 @@ func analyzeCandidateEscapes(function *ir.Func, byName map[string]*ir.Func, fact
 				// shape this exists for: it fills the backing array and hands it
 				// straight to the callee. If some later pass ever does, the
 				// contents escape here rather than silently outliving the frame.
-				markContents(instruction.Arg(0), "read back out of the object holding it")
+				markContents(instruction.Arg(0), "read back out of the object holding it", instruction.Pos)
 			case instruction.Op == ir.OCmp:
 				// Comparing a pointer observes its value but cannot retain it.
 			case instruction.Op.IsStore():
@@ -532,7 +562,7 @@ func analyzeCandidateEscapes(function *ir.Func, byName map[string]*ir.Func, fact
 				if aliases.locOf(instruction.Arg(1), 1).class != cLocal &&
 					!storesIntoItself(instruction.Arg(0), instruction.Arg(1), bases) &&
 					!declaredContained(contains, instruction.Arg(0), instruction.Arg(1), bases) {
-					mark(instruction.Arg(0), "store into non-local storage")
+					mark(instruction.Arg(0), "store into non-local storage", instruction.Pos)
 				}
 			case facts != nil && instruction.Op == ir.OCall &&
 				!isAtomicPointerStore(function, instruction) && !benignMemoryCall(function, instruction):
@@ -540,7 +570,10 @@ func analyzeCandidateEscapes(function *ir.Func, byName map[string]*ir.Func, fact
 				// a publication when the callee's summary says the callee can retain
 				// it. This is the entire behavioural difference the fact table makes,
 				// and with facts nil the case cannot be reached.
-				markSummarisedCall(function, byName, facts, instruction, bases, selfReferential, mark, markContents)
+				at := instruction.Pos
+				markSummarisedCall(function, byName, facts, instruction, bases, selfReferential,
+					func(reference ir.Ref, why string) { mark(reference, why, at) },
+					func(reference ir.Ref, why string) { markContents(reference, why, at) })
 			case isTrackedHeapDerivation(instruction, bases):
 				// Copies, casts, and constant pointer offsets preserve locality.
 			case isAtomicPointerStore(function, instruction):
@@ -551,35 +584,37 @@ func analyzeCandidateEscapes(function *ir.Func, byName map[string]*ir.Func, fact
 				if _, localCandidate := heapBase(destination, bases); localCandidate {
 					if !storesIntoItself(instruction.Arg(2), destination, bases) &&
 						!declaredContained(contains, instruction.Arg(2), destination, bases) {
-						mark(instruction.Arg(2), "write barrier into a candidate")
+						mark(instruction.Arg(2), "write barrier into a candidate", instruction.Pos)
 					}
 				} else if aliases.locOf(destination, 1).class != cLocal {
-					mark(instruction.Arg(2), "write barrier into non-local storage")
+					mark(instruction.Arg(2), "write barrier into non-local storage", instruction.Pos)
 				}
 			case benignMemoryCall(function, instruction):
 				// memcpy/memset observe the storage but do not retain its
 				// address. A block copy *out* of a container is a read-out all
 				// the same, and is answered the same way the load case is.
 				for _, argument := range memoryCallReadsOut(function, instruction) {
-					markContents(argument, "block-copied out of the object holding it")
+					markContents(argument, "block-copied out of the object holding it", instruction.Pos)
 				}
 			default:
 				for _, argument := range instruction.Args {
-					mark(argument, instructionReason(function, instruction))
+					mark(argument, instructionReason(function, instruction), instruction.Pos)
 				}
 			}
 		}
-		mark(block.Jmp.Arg, "returned")
+		// A block terminator carries no position either.
+		mark(block.Jmp.Arg, "returned", ir.SrcPos{})
 		for _, argument := range block.Jmp.Args {
-			mark(argument, "returned")
+			mark(argument, "returned", ir.SrcPos{})
 		}
 	}
 	analysis := &candidateEscapes{
-		function: function,
-		bases:    bases,
-		escaped:  escaped,
-		contains: contains,
-		reasons:  reasons,
+		function:        function,
+		bases:           bases,
+		escaped:         escaped,
+		contains:        contains,
+		reasons:         reasons,
+		reasonPositions: reasonPositions,
 	}
 	analysis.containedAllocationsEscape()
 	return analysis
@@ -701,7 +736,7 @@ func rewriteHeapAllocations(function *ir.Func, analysis *candidateEscapes, loopB
 					// against the allocator the candidate also carries, because
 					// the allocator is now the road not taken and the census has
 					// no other way to know which sites these are.
-					recordConvertedAllocDecision(decisions, function, original, loopBlocked[instruction.To.ID])
+					recordConvertedAllocDecision(decisions, function, original, loopBlocked[instruction.To.ID], analysis.reason(instruction.To.ID), analysis.reasonPosition(instruction.To.ID))
 					droppedStore = index + 1
 					instruction.Op = ir.OCall
 					instruction.Args = []ir.Ref{original.Args[3], original.Args[4]}
@@ -709,14 +744,14 @@ func rewriteHeapAllocations(function *ir.Func, analysis *candidateEscapes, loopB
 					lowered = append(lowered, instruction)
 					continue
 				}
-				recordAllocDecision(decisions, function, original, ir.AllocOnHeap, loopBlocked[instruction.To.ID])
+				recordAllocDecision(decisions, function, original, ir.AllocOnHeap, loopBlocked[instruction.To.ID], analysis.reason(instruction.To.ID), analysis.reasonPosition(instruction.To.ID))
 				instruction.Op = ir.OCall
 				instruction.Args = instruction.Args[:2]
 				instruction.Aux = 0
 				lowered = append(lowered, instruction)
 				continue
 			}
-			recordAllocDecision(decisions, function, original, ir.AllocInFrame, false)
+			recordAllocDecision(decisions, function, original, ir.AllocInFrame, false, "", ir.SrcPos{})
 
 			size := instruction.Args[2]
 			switch instruction.Aux {
@@ -870,7 +905,7 @@ func storesIntoItself(value, destination ir.Ref, bases map[uint32]uint32) bool {
 // recordAllocDecision notes where one heap-allocation candidate landed.
 // candidate must still be the unrewritten OHeapAlloc, whose first two arguments
 // are the allocator and the type descriptor.
-func recordAllocDecision(decisions *[]ir.AllocDecision, function *ir.Func, candidate ir.Instr, placement ir.AllocPlacement, blockedByLoop bool) {
+func recordAllocDecision(decisions *[]ir.AllocDecision, function *ir.Func, candidate ir.Instr, placement ir.AllocPlacement, blockedByLoop bool, reason string, use ir.SrcPos) {
 	if decisions == nil {
 		return
 	}
@@ -881,6 +916,8 @@ func recordAllocDecision(decisions *[]ir.AllocDecision, function *ir.Func, candi
 		Type:          constSymbolName(function, candidate.Args[1]),
 		Placement:     placement,
 		BlockedByLoop: blockedByLoop,
+		Reason:        reason,
+		Use:           use,
 	})
 }
 
@@ -889,7 +926,7 @@ func recordAllocDecision(decisions *[]ir.AllocDecision, function *ir.Func, candi
 // AllocOnHeap because the object did not stay in the frame, which is the
 // decision this record is about; whether the helper allocates for a given value
 // is up to the value, and opt.conversionHelpers is where that is written down.
-func recordConvertedAllocDecision(decisions *[]ir.AllocDecision, function *ir.Func, candidate ir.Instr, blockedByLoop bool) {
+func recordConvertedAllocDecision(decisions *[]ir.AllocDecision, function *ir.Func, candidate ir.Instr, blockedByLoop bool, reason string, use ir.SrcPos) {
 	if decisions == nil {
 		return
 	}
@@ -900,6 +937,8 @@ func recordConvertedAllocDecision(decisions *[]ir.AllocDecision, function *ir.Fu
 		Type:          constSymbolName(function, candidate.Args[1]),
 		Placement:     ir.AllocOnHeap,
 		BlockedByLoop: blockedByLoop,
+		Reason:        reason,
+		Use:           use,
 	})
 }
 

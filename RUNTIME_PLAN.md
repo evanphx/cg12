@@ -5015,6 +5015,14 @@ tracks the compiler rather than drifting from it. It is in package `goc`, so
 `-O` arm records what happens to a configuration nothing exercises.
 `GOC_DEBUG_ESCAPECHECK=1` prints the same findings from any `goc` compilation.
 
+The audit answers "is a placement wrong". The question that follows it -- why is
+this placement what it is, and which rule made it -- is `goc -m` and `goc -m=2`,
+documented in `docs/escape-diagnostics.md`. It prints every allocation site, its
+placement, the rule that decided, and at level 2 the chain to the use that
+decided; it reports both placers (the AST walk and `opt.LowerHeapAllocations`),
+takes its reasons from the decision rather than recomputing them, and is off by
+default.
+
 Cost: 2m20s wall, 24 CPU-minutes at 8 workers, essentially all of it compiling
 the corpus. The analysis is linear in instruction count and does not register.
 `opt.FrameEscapes` is not called during a normal compilation.

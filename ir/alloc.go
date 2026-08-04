@@ -49,6 +49,18 @@ type AllocDecision struct {
 	// per iteration. It is the only case where Placement is not what the escape
 	// analysis decided, so it is recorded rather than inferred.
 	BlockedByLoop bool
+	// Reason names the use that escaped the candidate, in the analysis's own
+	// words, or is empty for a frame placement -- there is no single use to name
+	// for one.
+	//
+	// It is empty unless the escape diagnostic is on. The strings are built by
+	// the mark loop as it marks, so what is printed is what decided; nothing
+	// re-derives them afterwards. Off, the map they come from is never allocated
+	// and no string is ever formatted. See opt.EscapeDiagLevel.
+	Reason string
+	// Use is where that use is written, when the marking instruction carried a
+	// position. Like Reason it is empty unless the diagnostic is on.
+	Use SrcPos
 }
 
 // PlacedAlloc records one allocation the *front end* placed itself, without
@@ -89,4 +101,20 @@ type PlacedAlloc struct {
 	Type string
 	// Pos is the source position of the decision.
 	Pos SrcPos
+	// Rule names the predicate in the AST walk that answered, and Use is the
+	// position of the use that answered it -- for a heap placement, the
+	// publication the walk found; for a frame placement, nothing.
+	//
+	// Chain is the sequence of questions between the object and that use, from
+	// the use outwards: the summary walk into a callee's parameter, the callee's
+	// own local, and so on. It is what makes "it escapes" actionable, and it is
+	// only filled at diagnostic level 2.
+	//
+	// All three are empty unless the escape diagnostic is on. They are captured
+	// by the walk at the moment it answers rather than recomputed, so a
+	// diagnostic that disagrees with the placement beside it is impossible.
+	// See opt.EscapeDiagLevel.
+	Rule  string
+	Use   SrcPos
+	Chain []string
 }
