@@ -586,7 +586,7 @@ func reachableFunctions(fset *token.FileSet, roots []*ast.FuncDecl, rootFiles []
 			"morestackc", "newobject", "newstack", "nilinterequal", "nilinterhash", "osinit", "persistentalloc", "unreachableMethod",
 			"printbool", "printcomplex64", "printcomplex128", "printeface", "printfloat32", "printfloat64",
 			"printhex", "printiface", "printint", "printlock", "printnl", "printquoted", "printslice",
-			"printsp", "printstring", "printuint", "printunlock",
+			"printsp", "printstring", "printuint", "printunlock", "panicmakeslicelen",
 			"schedinit", "strequal", "typehash", "typedslicecopy",
 		} {
 			if declaration, exists := runtimeFunctions[name]; exists {

@@ -6,6 +6,7 @@ import (
 	"os"
 	"sort"
 	"strconv"
+	"strings"
 	"sync/atomic"
 
 	"github.com/evanphx/cg12/ir"
@@ -101,6 +102,34 @@ func SetEscapeDiagLevel(level int) {
 	escapeDiagLevel.Store(int32(level))
 }
 
+// escapeDiagMatch widens the report past the compiled file. Empty means the
+// default, which is the compiled file and nothing else.
+var escapeDiagMatch atomic.Pointer[string]
+
+func init() {
+	SetEscapeDiagMatch(os.Getenv("GOC_M_MATCH"))
+}
+
+// EscapeDiagMatch reports the substring a source path must contain to be
+// included in the report, or "" for the default restriction to the compiled
+// file.
+//
+// The default exists because goc compiles a whole program: without it the lines
+// the reader asked for are lost among the vendored standard library's. But the
+// question that matters is often *about* the standard library -- "why is
+// log/slog's handleState on the heap" is not answerable from the program's own
+// file -- and before this there was no way to ask it without editing the
+// compiler. `-m-match log/slog` is that question.
+func EscapeDiagMatch() string {
+	if match := escapeDiagMatch.Load(); match != nil {
+		return *match
+	}
+	return ""
+}
+
+// SetEscapeDiagMatch sets the substring. cmd/goc's -m-match calls it.
+func SetEscapeDiagMatch(match string) { escapeDiagMatch.Store(&match) }
+
 // EscapeSite is one allocation site as the diagnostic reports it: where it is,
 // where the object went, and which of the two placers decided.
 type EscapeSite struct {
@@ -181,9 +210,16 @@ func (site EscapeSite) sortKey() string {
 // being compiled and not the standard library it imported, and goc compiles a
 // whole program including a vendored standard library, so without the
 // restriction the useful lines are lost among ten thousand others.
+//
+// EscapeDiagMatch overrides that restriction with a substring test on the source
+// path, which is how a reader asks about a package the program merely imported.
 func EscapeSites(module *ir.Module, program string) []EscapeSite {
 	var sites []EscapeSite
+	match := EscapeDiagMatch()
 	keep := func(file string) bool {
+		if match != "" {
+			return strings.Contains(file, match)
+		}
 		return program == "" || file == program
 	}
 

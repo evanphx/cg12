@@ -44,6 +44,12 @@
 ?	crypto/tls.pickECHConfig	escaping-typed	heap -> frame	in a loop	
 ?	main.main	escaping-typed	heap -> frame	in a loop	
 stdlib/src/archive/zip/reader.go:639:26	archive/zip.readDirectoryEnd	composite-literal	heap -> frame		
+stdlib/src/archive/zip/register.go:47:8	archive/zip.pooledFlateWriter.Write	method-value-descriptor	frame -> heap		argument 0 of $runtime.deferproc escapes
+stdlib/src/archive/zip/register.go:56:8	archive/zip.pooledFlateWriter.Close	method-value-descriptor	frame -> heap		argument 0 of $runtime.deferproc escapes
+stdlib/src/archive/zip/register.go:85:8	archive/zip.pooledFlateReader.Read	method-value-descriptor	frame -> heap		argument 0 of $runtime.deferproc escapes
+stdlib/src/archive/zip/register.go:94:8	archive/zip.pooledFlateReader.Close	method-value-descriptor	frame -> heap		argument 0 of $runtime.deferproc escapes
+stdlib/src/context/context.go:454:8	context.cancelCtx.Done	method-value-descriptor	frame -> heap		argument 0 of $runtime.deferproc escapes
+stdlib/src/context/context.go:650:8	context.WithDeadlineCause	method-value-descriptor	frame -> heap		argument 0 of $runtime.deferproc escapes
 stdlib/src/crypto/ecdsa/ecdsa.go:529:37	crypto/ecdsa.verifyFIPS[*crypto/internal/fips140/nistec.P224Point]	composite-literal	heap -> frame		
 stdlib/src/crypto/ecdsa/ecdsa.go:529:37	crypto/ecdsa.verifyFIPS[*crypto/internal/fips140/nistec.P256Point]	composite-literal	heap -> frame		
 stdlib/src/crypto/ecdsa/ecdsa.go:529:37	crypto/ecdsa.verifyFIPS[*crypto/internal/fips140/nistec.P384Point]	composite-literal	heap -> frame		
@@ -82,40 +88,28 @@ stdlib/src/crypto/internal/fips140/bigmod/nat.go:961:16	crypto/internal/fips140/
 stdlib/src/crypto/internal/fips140/bigmod/nat.go:968:16	crypto/internal/fips140/bigmod.Nat.Mul	composite-literal	heap -> frame		
 stdlib/src/crypto/internal/fips140/bigmod/nat.go:975:16	crypto/internal/fips140/bigmod.Nat.Mul	composite-literal	heap -> frame		
 stdlib/src/crypto/internal/fips140/drbg/cast.go:43:11	crypto/internal/fips140/drbg.init.0.func.18.27	slice-literal-backing	frame -> heap		argument 3 of $bytes.Equal escapes
-stdlib/src/crypto/internal/fips140/ecdh/cast.go:18:17	.goc.global.initfunc.12.crypto/internal/fips140/ecdh.fipsSelfTest.func.17.36	slice-literal-backing	frame -> heap		store into non-local storage
-stdlib/src/crypto/internal/fips140/ecdh/cast.go:18:17	.goc.global.initfunc.16.crypto/internal/fips140/ecdh.fipsSelfTest.func.17.36	slice-literal-backing	frame -> heap		store into non-local storage
-stdlib/src/crypto/internal/fips140/ecdh/cast.go:18:17	.goc.global.initfunc.17.crypto/internal/fips140/ecdh.fipsSelfTest.func.17.36	slice-literal-backing	frame -> heap		store into non-local storage
-stdlib/src/crypto/internal/fips140/ecdh/cast.go:18:17	.goc.global.initfunc.35.crypto/internal/fips140/ecdh.fipsSelfTest.func.17.36	slice-literal-backing	frame -> heap		store into non-local storage
-stdlib/src/crypto/internal/fips140/ecdh/cast.go:18:17	.goc.global.initfunc.41.crypto/internal/fips140/ecdh.fipsSelfTest.func.17.36	slice-literal-backing	frame -> heap		store into non-local storage
-stdlib/src/crypto/internal/fips140/ecdh/cast.go:18:17	.goc.global.initfunc.9.crypto/internal/fips140/ecdh.fipsSelfTest.func.17.36	slice-literal-backing	frame -> heap		store into non-local storage
-stdlib/src/crypto/internal/fips140/ecdh/cast.go:24:16	.goc.global.initfunc.12.crypto/internal/fips140/ecdh.fipsSelfTest.func.17.36	slice-literal-backing	frame -> heap		store into non-local storage
-stdlib/src/crypto/internal/fips140/ecdh/cast.go:24:16	.goc.global.initfunc.16.crypto/internal/fips140/ecdh.fipsSelfTest.func.17.36	slice-literal-backing	frame -> heap		store into non-local storage
-stdlib/src/crypto/internal/fips140/ecdh/cast.go:24:16	.goc.global.initfunc.17.crypto/internal/fips140/ecdh.fipsSelfTest.func.17.36	slice-literal-backing	frame -> heap		store into non-local storage
-stdlib/src/crypto/internal/fips140/ecdh/cast.go:24:16	.goc.global.initfunc.35.crypto/internal/fips140/ecdh.fipsSelfTest.func.17.36	slice-literal-backing	frame -> heap		store into non-local storage
-stdlib/src/crypto/internal/fips140/ecdh/cast.go:24:16	.goc.global.initfunc.41.crypto/internal/fips140/ecdh.fipsSelfTest.func.17.36	slice-literal-backing	frame -> heap		store into non-local storage
-stdlib/src/crypto/internal/fips140/ecdh/cast.go:24:16	.goc.global.initfunc.9.crypto/internal/fips140/ecdh.fipsSelfTest.func.17.36	slice-literal-backing	frame -> heap		store into non-local storage
 stdlib/src/crypto/internal/fips140/ecdh/cast.go:35:11	.goc.global.initfunc.12.crypto/internal/fips140/ecdh.fipsSelfTest.func.17.36	slice-literal-backing	frame -> heap		argument 3 of $bytes.Equal escapes
 stdlib/src/crypto/internal/fips140/ecdh/cast.go:35:11	.goc.global.initfunc.16.crypto/internal/fips140/ecdh.fipsSelfTest.func.17.36	slice-literal-backing	frame -> heap		argument 3 of $bytes.Equal escapes
 stdlib/src/crypto/internal/fips140/ecdh/cast.go:35:11	.goc.global.initfunc.17.crypto/internal/fips140/ecdh.fipsSelfTest.func.17.36	slice-literal-backing	frame -> heap		argument 3 of $bytes.Equal escapes
 stdlib/src/crypto/internal/fips140/ecdh/cast.go:35:11	.goc.global.initfunc.35.crypto/internal/fips140/ecdh.fipsSelfTest.func.17.36	slice-literal-backing	frame -> heap		argument 3 of $bytes.Equal escapes
 stdlib/src/crypto/internal/fips140/ecdh/cast.go:35:11	.goc.global.initfunc.41.crypto/internal/fips140/ecdh.fipsSelfTest.func.17.36	slice-literal-backing	frame -> heap		argument 3 of $bytes.Equal escapes
 stdlib/src/crypto/internal/fips140/ecdh/cast.go:35:11	.goc.global.initfunc.9.crypto/internal/fips140/ecdh.fipsSelfTest.func.17.36	slice-literal-backing	frame -> heap		argument 3 of $bytes.Equal escapes
-stdlib/src/crypto/internal/fips140/ecdsa/cast.go:111:7	.goc.global.initfunc.18.crypto/internal/fips140/ecdsa.fipsSelfTestDeterministic.func.107.47	slice-literal-backing	frame -> heap		store into non-local storage
-stdlib/src/crypto/internal/fips140/ecdsa/cast.go:111:7	.goc.global.initfunc.23.crypto/internal/fips140/ecdsa.fipsSelfTestDeterministic.func.107.47	slice-literal-backing	frame -> heap		store into non-local storage
-stdlib/src/crypto/internal/fips140/ecdsa/cast.go:111:7	.goc.global.initfunc.41.crypto/internal/fips140/ecdsa.fipsSelfTestDeterministic.func.107.47	slice-literal-backing	frame -> heap		store into non-local storage
-stdlib/src/crypto/internal/fips140/ecdsa/cast.go:111:7	.goc.global.initfunc.47.crypto/internal/fips140/ecdsa.fipsSelfTestDeterministic.func.107.47	slice-literal-backing	frame -> heap		store into non-local storage
-stdlib/src/crypto/internal/fips140/ecdsa/cast.go:116:10	.goc.global.initfunc.18.crypto/internal/fips140/ecdsa.fipsSelfTestDeterministic.func.107.47	slice-literal-backing	frame -> heap		store into non-local storage
-stdlib/src/crypto/internal/fips140/ecdsa/cast.go:116:10	.goc.global.initfunc.23.crypto/internal/fips140/ecdsa.fipsSelfTestDeterministic.func.107.47	slice-literal-backing	frame -> heap		store into non-local storage
-stdlib/src/crypto/internal/fips140/ecdsa/cast.go:116:10	.goc.global.initfunc.41.crypto/internal/fips140/ecdsa.fipsSelfTestDeterministic.func.107.47	slice-literal-backing	frame -> heap		store into non-local storage
-stdlib/src/crypto/internal/fips140/ecdsa/cast.go:116:10	.goc.global.initfunc.47.crypto/internal/fips140/ecdsa.fipsSelfTestDeterministic.func.107.47	slice-literal-backing	frame -> heap		store into non-local storage
-stdlib/src/crypto/internal/fips140/ecdsa/cast.go:79:7	.goc.global.initfunc.17.crypto/internal/fips140/ecdsa.fipsSelfTest.func.67.55	slice-literal-backing	frame -> heap		store into non-local storage
-stdlib/src/crypto/internal/fips140/ecdsa/cast.go:79:7	.goc.global.initfunc.22.crypto/internal/fips140/ecdsa.fipsSelfTest.func.67.55	slice-literal-backing	frame -> heap		store into non-local storage
-stdlib/src/crypto/internal/fips140/ecdsa/cast.go:79:7	.goc.global.initfunc.40.crypto/internal/fips140/ecdsa.fipsSelfTest.func.67.55	slice-literal-backing	frame -> heap		store into non-local storage
-stdlib/src/crypto/internal/fips140/ecdsa/cast.go:79:7	.goc.global.initfunc.46.crypto/internal/fips140/ecdsa.fipsSelfTest.func.67.55	slice-literal-backing	frame -> heap		store into non-local storage
-stdlib/src/crypto/internal/fips140/ecdsa/cast.go:84:10	.goc.global.initfunc.17.crypto/internal/fips140/ecdsa.fipsSelfTest.func.67.55	slice-literal-backing	frame -> heap		store into non-local storage
-stdlib/src/crypto/internal/fips140/ecdsa/cast.go:84:10	.goc.global.initfunc.22.crypto/internal/fips140/ecdsa.fipsSelfTest.func.67.55	slice-literal-backing	frame -> heap		store into non-local storage
-stdlib/src/crypto/internal/fips140/ecdsa/cast.go:84:10	.goc.global.initfunc.40.crypto/internal/fips140/ecdsa.fipsSelfTest.func.67.55	slice-literal-backing	frame -> heap		store into non-local storage
-stdlib/src/crypto/internal/fips140/ecdsa/cast.go:84:10	.goc.global.initfunc.46.crypto/internal/fips140/ecdsa.fipsSelfTest.func.67.55	slice-literal-backing	frame -> heap		store into non-local storage
+stdlib/src/crypto/internal/fips140/ecdsa/cast.go:111:7	.goc.global.initfunc.18.crypto/internal/fips140/ecdsa.fipsSelfTestDeterministic.func.107.47	slice-literal-backing	frame -> heap		argument 3 of $bytes.Equal escapes
+stdlib/src/crypto/internal/fips140/ecdsa/cast.go:111:7	.goc.global.initfunc.23.crypto/internal/fips140/ecdsa.fipsSelfTestDeterministic.func.107.47	slice-literal-backing	frame -> heap		argument 3 of $bytes.Equal escapes
+stdlib/src/crypto/internal/fips140/ecdsa/cast.go:111:7	.goc.global.initfunc.41.crypto/internal/fips140/ecdsa.fipsSelfTestDeterministic.func.107.47	slice-literal-backing	frame -> heap		argument 3 of $bytes.Equal escapes
+stdlib/src/crypto/internal/fips140/ecdsa/cast.go:111:7	.goc.global.initfunc.47.crypto/internal/fips140/ecdsa.fipsSelfTestDeterministic.func.107.47	slice-literal-backing	frame -> heap		argument 3 of $bytes.Equal escapes
+stdlib/src/crypto/internal/fips140/ecdsa/cast.go:116:10	.goc.global.initfunc.18.crypto/internal/fips140/ecdsa.fipsSelfTestDeterministic.func.107.47	slice-literal-backing	frame -> heap		argument 3 of $bytes.Equal escapes
+stdlib/src/crypto/internal/fips140/ecdsa/cast.go:116:10	.goc.global.initfunc.23.crypto/internal/fips140/ecdsa.fipsSelfTestDeterministic.func.107.47	slice-literal-backing	frame -> heap		argument 3 of $bytes.Equal escapes
+stdlib/src/crypto/internal/fips140/ecdsa/cast.go:116:10	.goc.global.initfunc.41.crypto/internal/fips140/ecdsa.fipsSelfTestDeterministic.func.107.47	slice-literal-backing	frame -> heap		argument 3 of $bytes.Equal escapes
+stdlib/src/crypto/internal/fips140/ecdsa/cast.go:116:10	.goc.global.initfunc.47.crypto/internal/fips140/ecdsa.fipsSelfTestDeterministic.func.107.47	slice-literal-backing	frame -> heap		argument 3 of $bytes.Equal escapes
+stdlib/src/crypto/internal/fips140/ecdsa/cast.go:79:7	.goc.global.initfunc.17.crypto/internal/fips140/ecdsa.fipsSelfTest.func.67.55	slice-literal-backing	frame -> heap		argument 3 of $bytes.Equal escapes
+stdlib/src/crypto/internal/fips140/ecdsa/cast.go:79:7	.goc.global.initfunc.22.crypto/internal/fips140/ecdsa.fipsSelfTest.func.67.55	slice-literal-backing	frame -> heap		argument 3 of $bytes.Equal escapes
+stdlib/src/crypto/internal/fips140/ecdsa/cast.go:79:7	.goc.global.initfunc.40.crypto/internal/fips140/ecdsa.fipsSelfTest.func.67.55	slice-literal-backing	frame -> heap		argument 3 of $bytes.Equal escapes
+stdlib/src/crypto/internal/fips140/ecdsa/cast.go:79:7	.goc.global.initfunc.46.crypto/internal/fips140/ecdsa.fipsSelfTest.func.67.55	slice-literal-backing	frame -> heap		argument 3 of $bytes.Equal escapes
+stdlib/src/crypto/internal/fips140/ecdsa/cast.go:84:10	.goc.global.initfunc.17.crypto/internal/fips140/ecdsa.fipsSelfTest.func.67.55	slice-literal-backing	frame -> heap		argument 3 of $bytes.Equal escapes
+stdlib/src/crypto/internal/fips140/ecdsa/cast.go:84:10	.goc.global.initfunc.22.crypto/internal/fips140/ecdsa.fipsSelfTest.func.67.55	slice-literal-backing	frame -> heap		argument 3 of $bytes.Equal escapes
+stdlib/src/crypto/internal/fips140/ecdsa/cast.go:84:10	.goc.global.initfunc.40.crypto/internal/fips140/ecdsa.fipsSelfTest.func.67.55	slice-literal-backing	frame -> heap		argument 3 of $bytes.Equal escapes
+stdlib/src/crypto/internal/fips140/ecdsa/cast.go:84:10	.goc.global.initfunc.46.crypto/internal/fips140/ecdsa.fipsSelfTest.func.67.55	slice-literal-backing	frame -> heap		argument 3 of $bytes.Equal escapes
 stdlib/src/crypto/internal/fips140/ed25519/cast.go:53:17	.goc.global.initfunc.24.crypto/internal/fips140/ed25519.fipsSelfTest.func.46.42	string-conversion-buffer	frame -> heap		argument 0 of $runtime.stringtoslicebyte leaks to a result the caller cannot follow
 stdlib/src/crypto/internal/fips140/ed25519/cast.go:53:17	.goc.global.initfunc.42.crypto/internal/fips140/ed25519.fipsSelfTest.func.46.42	string-conversion-buffer	frame -> heap		argument 0 of $runtime.stringtoslicebyte leaks to a result the caller cannot follow
 stdlib/src/crypto/internal/fips140/ed25519/cast.go:53:17	.goc.global.initfunc.48.crypto/internal/fips140/ed25519.fipsSelfTest.func.46.42	string-conversion-buffer	frame -> heap		argument 0 of $runtime.stringtoslicebyte leaks to a result the caller cannot follow
@@ -182,8 +176,28 @@ stdlib/src/crypto/internal/fips140/sha3/cast.go:19:11	crypto/internal/fips140/sh
 stdlib/src/crypto/internal/fips140/sha512/cast.go:19:11	crypto/internal/fips140/sha512.init.0.func.14.27	slice-literal-backing	frame -> heap		argument 3 of $bytes.Equal escapes
 stdlib/src/crypto/internal/fips140/tls12/cast.go:25:11	crypto/internal/fips140/tls12.init.0.func.16.35	slice-literal-backing	frame -> heap		argument 3 of $bytes.Equal escapes
 stdlib/src/crypto/internal/fips140/tls13/cast.go:21:11	crypto/internal/fips140/tls13.init.0.func.16.35	slice-literal-backing	frame -> heap		argument 3 of $bytes.Equal escapes
+stdlib/src/crypto/internal/sysrand/rand.go:42:9	crypto/internal/sysrand.Read	method-value-descriptor	frame -> heap		argument 0 of $runtime.deferproc escapes
+stdlib/src/crypto/tls/common.go:1001:8	crypto/tls.Config.Clone	method-value-descriptor	frame -> heap		argument 0 of $runtime.deferproc escapes
+stdlib/src/crypto/tls/common.go:1056:8	crypto/tls.Config.initLegacySessionTicketKeyRLocked	method-value-descriptor	frame -> heap		argument 0 of $runtime.deferproc escapes
+stdlib/src/crypto/tls/common.go:1058:8	crypto/tls.Config.initLegacySessionTicketKeyRLocked	method-value-descriptor	frame -> heap		argument 0 of $runtime.deferproc escapes
+stdlib/src/crypto/tls/common.go:1102:8	crypto/tls.Config.ticketKeys	method-value-descriptor	frame -> heap		argument 0 of $runtime.deferproc escapes
+stdlib/src/crypto/tls/common.go:1117:8	crypto/tls.Config.ticketKeys	method-value-descriptor	frame -> heap		argument 0 of $runtime.deferproc escapes
+stdlib/src/crypto/tls/common.go:1119:8	crypto/tls.Config.ticketKeys	method-value-descriptor	frame -> heap		argument 0 of $runtime.deferproc escapes
 stdlib/src/crypto/tls/common.go:1379:12	crypto/tls.ClientHelloInfo.SupportsCertificate	composite-literal	frame -> heap		store into non-local storage
+stdlib/src/crypto/tls/conn.go:1056:8	crypto/tls.Conn.writeHandshakeRecord	method-value-descriptor	frame -> heap		argument 0 of $runtime.deferproc escapes
+stdlib/src/crypto/tls/conn.go:1073:8	crypto/tls.Conn.writeChangeCipherRecord	method-value-descriptor	frame -> heap		argument 0 of $runtime.deferproc escapes
+stdlib/src/crypto/tls/conn.go:1213:2	crypto/tls.Conn.Write	deferred-call-closure	frame -> heap		argument 0 of $runtime.deferproc escapes
+stdlib/src/crypto/tls/conn.go:1213:8	crypto/tls.Conn.Write	method-value-descriptor	frame -> heap		store into non-local storage
+stdlib/src/crypto/tls/conn.go:1220:8	crypto/tls.Conn.Write	method-value-descriptor	frame -> heap		argument 0 of $runtime.deferproc escapes
+stdlib/src/crypto/tls/conn.go:1294:8	crypto/tls.Conn.handleRenegotiation	method-value-descriptor	frame -> heap		argument 0 of $runtime.deferproc escapes
+stdlib/src/crypto/tls/conn.go:1347:9	crypto/tls.Conn.handleKeyUpdate	method-value-descriptor	frame -> heap		argument 0 of $runtime.deferproc escapes
 stdlib/src/crypto/tls/conn.go:1349:10	crypto/tls.Conn.handleKeyUpdate	composite-literal	frame -> heap		argument 0 of $crypto/tls.keyUpdateMsg.marshal escapes
+stdlib/src/crypto/tls/conn.go:1390:8	crypto/tls.Conn.Read	method-value-descriptor	frame -> heap		argument 0 of $runtime.deferproc escapes
+stdlib/src/crypto/tls/conn.go:1473:8	crypto/tls.Conn.closeNotify	method-value-descriptor	frame -> heap		argument 0 of $runtime.deferproc escapes
+stdlib/src/crypto/tls/conn.go:1550:8	crypto/tls.Conn.handshakeContext	method-value-descriptor	frame -> heap		argument 0 of $runtime.deferproc escapes
+stdlib/src/crypto/tls/conn.go:1560:8	crypto/tls.Conn.handshakeContext	method-value-descriptor	frame -> heap		argument 0 of $runtime.deferproc escapes
+stdlib/src/crypto/tls/conn.go:1610:8	crypto/tls.Conn.ConnectionState	method-value-descriptor	frame -> heap		argument 0 of $runtime.deferproc escapes
+stdlib/src/crypto/tls/conn.go:867:8	crypto/tls.Conn.sendAlert	method-value-descriptor	frame -> heap		argument 0 of $runtime.deferproc escapes
 stdlib/src/crypto/tls/ech.go:368:46	crypto/tls.decodeInnerClientHello	slice-literal-backing	frame -> heap		argument 3 of $bytes.Equal escapes
 stdlib/src/crypto/tls/handshake_client.go:1058:8	crypto/tls.clientHandshakeState.saveSessionTicket	composite-literal	heap -> frame		
 stdlib/src/crypto/tls/handshake_client.go:328:9	crypto/tls.Conn.clientHandshake	composite-literal	frame -> heap		argument 0 of $crypto/tls.clientHandshakeStateTLS13.handshake escapes
@@ -192,62 +206,377 @@ stdlib/src/crypto/tls/handshake_client.go:785:17	crypto/tls.clientHandshakeState
 stdlib/src/crypto/tls/handshake_client_tls13.go:811:14	crypto/tls.clientHandshakeStateTLS13.sendClientFinished	composite-literal	frame -> heap		store into non-local storage
 stdlib/src/crypto/tls/handshake_client_tls13.go:881:8	crypto/tls.Conn.handleNewSessionTicket	composite-literal	heap -> frame		
 stdlib/src/crypto/tls/handshake_server_tls13.go:893:14	crypto/tls.serverHandshakeStateTLS13.sendServerFinished	composite-literal	frame -> heap		store into non-local storage
+stdlib/src/crypto/tls/quic.go:511:8	crypto/tls.Conn.quicWaitForSignal	method-value-descriptor	frame -> heap		argument 0 of $runtime.deferproc escapes
 stdlib/src/crypto/x509/parser.go:1011:40	crypto/x509.parseCertificate	composite-literal	heap -> frame		
+stdlib/src/crypto/x509/root.go:34:8	crypto/x509.systemRootsPool	method-value-descriptor	frame -> heap		argument 0 of $runtime.deferproc escapes
+stdlib/src/crypto/x509/root.go:40:8	crypto/x509.initSystemRoots	method-value-descriptor	frame -> heap		argument 0 of $runtime.deferproc escapes
+stdlib/src/crypto/x509/verify.go:1064:22	crypto/x509.newPolicyGraph	slice-literal-backing	heap -> frame		
 stdlib/src/crypto/x509/verify.go:1295:56	crypto/x509.policiesValid	string-conversion-buffer	frame -> heap	in a loop	argument 0 of $runtime.stringtoslicebyte leaks to a result the caller cannot follow
 stdlib/src/crypto/x509/verify.go:909:16	crypto/x509.toLowerCaseASCII	string-conversion-buffer	frame -> heap		argument 0 of $runtime.stringtoslicebyte leaks to a result the caller cannot follow
 stdlib/src/crypto/x509/x509.go:1020:59	crypto/x509.checkSignature	composite-literal	heap -> frame		
 stdlib/src/encoding/asn1/asn1.go:236:25	encoding/asn1.ObjectIdentifier.String	make-slice-backing	frame -> heap		argument 0 of $strconv.AppendInt escapes
 stdlib/src/encoding/base64/base64.go:431:36	encoding/base64.Encoding.DecodeString	string-conversion-buffer	frame -> heap		argument 0 of $runtime.stringtoslicebyte leaks to a result the caller cannot follow
-stdlib/src/encoding/binary/binary.go:285:7	encoding/binary.Read	composite-literal	heap -> frame		
-stdlib/src/encoding/binary/binary.go:430:7	encoding/binary.Write	composite-literal	heap -> frame		
+stdlib/src/encoding/gob/decode.go:1090:8	encoding/gob.Decoder.typeString	method-value-descriptor	frame -> heap		argument 0 of $runtime.deferproc escapes
+stdlib/src/encoding/gob/decode.go:1134:2	encoding/gob.Decoder.compileDec	deferred-call-closure	frame -> heap		argument 0 of $runtime.deferproc escapes
+stdlib/src/encoding/gob/decode.go:1230:2	encoding/gob.Decoder.decodeValue	deferred-call-closure	frame -> heap		argument 0 of $runtime.deferproc escapes
+stdlib/src/encoding/gob/decode.go:455:2	encoding/gob.Decoder.decodeSingle	deferred-call-closure	frame -> heap		argument 0 of $runtime.deferproc escapes
+stdlib/src/encoding/gob/decode.go:455:8	encoding/gob.Decoder.decodeSingle	method-value-descriptor	frame -> heap		store into non-local storage
+stdlib/src/encoding/gob/decode.go:471:2	encoding/gob.Decoder.decodeStruct	deferred-call-closure	frame -> heap		argument 0 of $runtime.deferproc escapes
+stdlib/src/encoding/gob/decode.go:471:8	encoding/gob.Decoder.decodeStruct	method-value-descriptor	frame -> heap		store into non-local storage
+stdlib/src/encoding/gob/decode.go:504:2	encoding/gob.Decoder.ignoreStruct	deferred-call-closure	frame -> heap		argument 0 of $runtime.deferproc escapes
+stdlib/src/encoding/gob/decode.go:504:8	encoding/gob.Decoder.ignoreStruct	method-value-descriptor	frame -> heap		store into non-local storage
+stdlib/src/encoding/gob/decode.go:528:2	encoding/gob.Decoder.ignoreSingle	deferred-call-closure	frame -> heap		argument 0 of $runtime.deferproc escapes
+stdlib/src/encoding/gob/decode.go:528:8	encoding/gob.Decoder.ignoreSingle	method-value-descriptor	frame -> heap		store into non-local storage
+stdlib/src/encoding/gob/decoder.go:225:8	encoding/gob.Decoder.DecodeValue	method-value-descriptor	frame -> heap		argument 0 of $runtime.deferproc escapes
+stdlib/src/encoding/gob/encode.go:291:2	encoding/gob.Encoder.encodeSingle	deferred-call-closure	frame -> heap		argument 0 of $runtime.deferproc escapes
+stdlib/src/encoding/gob/encode.go:291:8	encoding/gob.Encoder.encodeSingle	method-value-descriptor	frame -> heap		store into non-local storage
+stdlib/src/encoding/gob/encode.go:311:2	encoding/gob.Encoder.encodeStruct	deferred-call-closure	frame -> heap		argument 0 of $runtime.deferproc escapes
+stdlib/src/encoding/gob/encode.go:311:8	encoding/gob.Encoder.encodeStruct	method-value-descriptor	frame -> heap		store into non-local storage
+stdlib/src/encoding/gob/encode.go:335:2	encoding/gob.Encoder.encodeArray	deferred-call-closure	frame -> heap		argument 0 of $runtime.deferproc escapes
+stdlib/src/encoding/gob/encode.go:335:8	encoding/gob.Encoder.encodeArray	method-value-descriptor	frame -> heap		store into non-local storage
+stdlib/src/encoding/gob/encode.go:645:8	encoding/gob.buildEncEngine	method-value-descriptor	frame -> heap		argument 0 of $runtime.deferproc escapes
+stdlib/src/encoding/gob/encode.go:659:2	encoding/gob.Encoder.encode	deferred-call-closure	frame -> heap		argument 0 of $runtime.deferproc escapes
+stdlib/src/encoding/gob/encoder.go:229:8	encoding/gob.Encoder.EncodeValue	method-value-descriptor	frame -> heap		argument 0 of $runtime.deferproc escapes
+stdlib/src/encoding/gob/type.go:732:8	encoding/gob.buildTypeInfo	method-value-descriptor	frame -> heap		argument 0 of $runtime.deferproc escapes
 stdlib/src/encoding/hex/hex.go:140:31	encoding/hex.DecodeString	string-conversion-buffer	frame -> heap		argument 0 of $runtime.stringtoslicebyte leaks to a result the caller cannot follow
+stdlib/src/encoding/json/encode.go:207:2	encoding/json.Marshal	deferred-call-closure	frame -> heap		argument 0 of $runtime.deferproc escapes
+stdlib/src/encoding/json/encode.go:207:8	encoding/json.Marshal	method-value-descriptor	frame -> heap		store into non-local storage
+stdlib/src/encoding/json/encode.go:778:3	encoding/json.mapEncoder.encode	deferred-call-closure	frame -> heap		argument 0 of $runtime.deferproc escapes
+stdlib/src/encoding/json/encode.go:861:3	encoding/json.sliceEncoder.encode	deferred-call-closure	frame -> heap		argument 0 of $runtime.deferproc escapes
+stdlib/src/encoding/json/encode.go:917:3	encoding/json.ptrEncoder.encode	deferred-call-closure	frame -> heap		argument 0 of $runtime.deferproc escapes
+stdlib/src/encoding/json/indent.go:131:2	encoding/json.appendIndent	deferred-call-closure	frame -> heap		argument 0 of $runtime.deferproc escapes
+stdlib/src/encoding/json/indent.go:54:2	encoding/json.appendCompact	deferred-call-closure	frame -> heap		argument 0 of $runtime.deferproc escapes
+stdlib/src/encoding/json/stream.go:210:2	encoding/json.Encoder.Encode	deferred-call-closure	frame -> heap		argument 0 of $runtime.deferproc escapes
+stdlib/src/encoding/json/stream.go:210:8	encoding/json.Encoder.Encode	method-value-descriptor	frame -> heap		store into non-local storage
 stdlib/src/encoding/xml/marshal.go:1118:28	encoding/xml.parentStack.push	composite-literal	heap -> frame	in a loop	
 stdlib/src/encoding/xml/marshal.go:364:36	encoding/xml.printer.createAttrPrefix	string-conversion-buffer	frame -> heap		argument 0 of $runtime.stringtoslicebyte leaks to a result the caller cannot follow
+stdlib/src/encoding/xml/typeinfo.go:82:26	encoding/xml.getTypeInfo	slice-literal-backing	heap -> frame	in a loop	
+stdlib/src/fmt/print.go:640:3	fmt.pp.handleMethods	deferred-call-closure	frame -> heap		argument 0 of $runtime.deferproc escapes
+stdlib/src/fmt/print.go:640:9	fmt.pp.handleMethods	method-value-descriptor	frame -> heap		store into non-local storage
+stdlib/src/fmt/print.go:649:10	fmt.pp.handleMethods	method-value-descriptor	frame -> heap		store into non-local storage
+stdlib/src/fmt/print.go:649:4	fmt.pp.handleMethods	deferred-call-closure	frame -> heap		argument 0 of $runtime.deferproc escapes
+stdlib/src/fmt/print.go:667:11	fmt.pp.handleMethods	method-value-descriptor	frame -> heap		store into non-local storage
+stdlib/src/fmt/print.go:667:5	fmt.pp.handleMethods	deferred-call-closure	frame -> heap		argument 0 of $runtime.deferproc escapes
+stdlib/src/fmt/print.go:673:11	fmt.pp.handleMethods	method-value-descriptor	frame -> heap		store into non-local storage
+stdlib/src/fmt/print.go:673:5	fmt.pp.handleMethods	deferred-call-closure	frame -> heap		argument 0 of $runtime.deferproc escapes
+stdlib/src/fmt/scan.go:1071:2	fmt.ss.doScan	deferred-call-closure	frame -> heap		argument 0 of $runtime.deferproc escapes
+stdlib/src/image/gif/reader.go:426:8	image/gif.decoder.readImageDescriptor	method-value-descriptor	frame -> heap		argument 0 of $runtime.deferproc escapes
+stdlib/src/image/png/reader.go:368:8	image/png.decoder.decode	method-value-descriptor	frame -> heap		argument 0 of $runtime.deferproc escapes
+stdlib/src/image/png/writer.go:309:8	image/png.encoder.writeImage	method-value-descriptor	frame -> heap		argument 0 of $runtime.deferproc escapes
+stdlib/src/image/png/writer.go:609:3	image/png.Encoder.Encode	deferred-call-closure	frame -> heap		argument 0 of $runtime.deferproc escapes
+stdlib/src/image/png/writer.go:609:9	image/png.Encoder.Encode	method-value-descriptor	frame -> heap		store into non-local storage
 stdlib/src/internal/filepathlite/path.go:195:14	internal/filepathlite.replaceStringByte	string-conversion-buffer	frame -> heap		argument 0 of $runtime.stringtoslicebyte leaks to a result the caller cannot follow
+stdlib/src/internal/godebug/godebug.go:235:8	internal/godebug.update	method-value-descriptor	frame -> heap		argument 0 of $runtime.deferproc escapes
+stdlib/src/internal/poll/copy_file_range_unix.go:58:8	internal/poll.copyFileRange	method-value-descriptor	frame -> heap		argument 0 of $runtime.deferproc escapes
+stdlib/src/internal/poll/copy_file_range_unix.go:62:8	internal/poll.copyFileRange	method-value-descriptor	frame -> heap		argument 0 of $runtime.deferproc escapes
+stdlib/src/internal/poll/fd_poll_runtime.go:157:8	internal/poll.setDeadlineImpl	method-value-descriptor	frame -> heap		argument 0 of $runtime.deferproc escapes
+stdlib/src/internal/poll/fd_posix.go:28:8	internal/poll.FD.Shutdown	method-value-descriptor	frame -> heap		argument 0 of $runtime.deferproc escapes
+stdlib/src/internal/poll/fd_posix.go:60:8	internal/poll.FD.RawControl	method-value-descriptor	frame -> heap		argument 0 of $runtime.deferproc escapes
+stdlib/src/internal/poll/fd_unix.go:125:8	internal/poll.FD.SetBlocking	method-value-descriptor	frame -> heap		argument 0 of $runtime.deferproc escapes
+stdlib/src/internal/poll/fd_unix.go:145:8	internal/poll.FD.Read	method-value-descriptor	frame -> heap		argument 0 of $runtime.deferproc escapes
+stdlib/src/internal/poll/fd_unix.go:202:8	internal/poll.FD.ReadFrom	method-value-descriptor	frame -> heap		argument 0 of $runtime.deferproc escapes
+stdlib/src/internal/poll/fd_unix.go:229:8	internal/poll.FD.ReadFromInet4	method-value-descriptor	frame -> heap		argument 0 of $runtime.deferproc escapes
+stdlib/src/internal/poll/fd_unix.go:256:8	internal/poll.FD.ReadFromInet6	method-value-descriptor	frame -> heap		argument 0 of $runtime.deferproc escapes
+stdlib/src/internal/poll/fd_unix.go:364:8	internal/poll.FD.Write	method-value-descriptor	frame -> heap		argument 0 of $runtime.deferproc escapes
+stdlib/src/internal/poll/fd_unix.go:442:8	internal/poll.FD.WriteToInet4	method-value-descriptor	frame -> heap		argument 0 of $runtime.deferproc escapes
+stdlib/src/internal/poll/fd_unix.go:468:8	internal/poll.FD.WriteToInet6	method-value-descriptor	frame -> heap		argument 0 of $runtime.deferproc escapes
+stdlib/src/internal/poll/fd_unix.go:494:8	internal/poll.FD.WriteTo	method-value-descriptor	frame -> heap		argument 0 of $runtime.deferproc escapes
+stdlib/src/internal/poll/fd_unix.go:598:8	internal/poll.FD.Accept	method-value-descriptor	frame -> heap		argument 0 of $runtime.deferproc escapes
+stdlib/src/internal/poll/fd_unix.go:643:8	internal/poll.FD.Fstat	method-value-descriptor	frame -> heap		argument 0 of $runtime.deferproc escapes
+stdlib/src/internal/poll/fd_unix.go:702:8	internal/poll.FD.RawRead	method-value-descriptor	frame -> heap		argument 0 of $runtime.deferproc escapes
+stdlib/src/internal/poll/fd_unix.go:721:8	internal/poll.FD.RawWrite	method-value-descriptor	frame -> heap		argument 0 of $runtime.deferproc escapes
+stdlib/src/internal/poll/fd_unixjs.go:45:8	internal/poll.FD.Fchdir	method-value-descriptor	frame -> heap		argument 0 of $runtime.deferproc escapes
+stdlib/src/internal/poll/fd_unixjs.go:56:8	internal/poll.FD.ReadDirent	method-value-descriptor	frame -> heap		argument 0 of $runtime.deferproc escapes
+stdlib/src/internal/poll/fd_unixjs.go:77:8	internal/poll.FD.Seek	method-value-descriptor	frame -> heap		argument 0 of $runtime.deferproc escapes
+stdlib/src/internal/poll/fstatat_unix.go:18:8	internal/poll.FD.Fstatat	method-value-descriptor	frame -> heap		argument 0 of $runtime.deferproc escapes
+stdlib/src/internal/poll/sendfile_unix.go:66:8	internal/poll.sendFile	method-value-descriptor	frame -> heap		argument 0 of $runtime.deferproc escapes
+stdlib/src/internal/poll/sockopt.go:16:8	internal/poll.FD.SetsockoptInt	method-value-descriptor	frame -> heap		argument 0 of $runtime.deferproc escapes
+stdlib/src/internal/poll/splice_linux.go:131:8	internal/poll.splicePump	method-value-descriptor	frame -> heap		argument 0 of $runtime.deferproc escapes
 stdlib/src/internal/poll/splice_linux.go:198:15	internal/poll.newPoolPipe.func.197.36	composite-literal	heap -> frame		
+stdlib/src/internal/poll/splice_linux.go:38:2	internal/poll.Splice	deferred-call-closure	frame -> heap		argument 0 of $runtime.deferproc escapes
+stdlib/src/internal/poll/splice_linux.go:90:8	internal/poll.spliceDrain	method-value-descriptor	frame -> heap		argument 0 of $runtime.deferproc escapes
+stdlib/src/internal/poll/writev.go:20:8	internal/poll.FD.Writev	method-value-descriptor	frame -> heap		argument 0 of $runtime.deferproc escapes
 stdlib/src/internal/runtime/cgroup/cgroup.go:386:32	internal/runtime/cgroup.parseCPUMount	string-conversion-buffer	frame -> heap	in a loop	argument 0 of $runtime.stringtoslicebyte leaks to a result the caller cannot follow
 stdlib/src/internal/runtime/cgroup/cgroup.go:79:38	internal/runtime/cgroup.parseV2Limit	string-conversion-buffer	frame -> heap		argument 0 of $runtime.stringtoslicebyte leaks to a result the caller cannot follow
+stdlib/src/internal/runtime/exithook/hooks.go:63:2	internal/runtime/exithook.Run	deferred-call-closure	frame -> heap		argument 0 of $runtime.deferproc escapes
+stdlib/src/internal/runtime/exithook/hooks.go:63:8	internal/runtime/exithook.Run	method-value-descriptor	frame -> heap		store into non-local storage
+stdlib/src/internal/runtime/exithook/hooks.go:65:2	internal/runtime/exithook.Run	deferred-call-closure	frame -> heap		argument 0 of $runtime.deferproc escapes
+stdlib/src/internal/runtime/exithook/hooks.go:65:8	internal/runtime/exithook.Run	method-value-descriptor	frame -> heap		store into non-local storage
+stdlib/src/internal/singleflight/singleflight.go:113:8	internal/singleflight.Group.ForgetUnshared	method-value-descriptor	frame -> heap		argument 0 of $runtime.deferproc escapes
 stdlib/src/internal/strconv/atoi.go:107:27	internal/strconv.ParseUint	string-conversion-buffer	frame -> heap		argument 0 of $runtime.stringtoslicebyte leaks to a result the caller cannot follow
 stdlib/src/internal/strconv/atoi.go:230:29	internal/strconv.Atoi	string-conversion-buffer	frame -> heap		argument 0 of $runtime.stringtoslicebyte leaks to a result the caller cannot follow
+stdlib/src/internal/sync/hashtriemap.go:141:8	internal/sync.HashTrieMap.LoadOrStore[*internal/abi.Type,any]	method-value-descriptor	frame -> heap		argument 0 of $runtime.deferproc escapes
+stdlib/src/internal/sync/hashtriemap.go:141:8	internal/sync.HashTrieMap.LoadOrStore[any,any]	method-value-descriptor	frame -> heap		argument 0 of $runtime.deferproc escapes
+stdlib/src/internal/sync/hashtriemap.go:249:8	internal/sync.HashTrieMap.Swap[any,any]	method-value-descriptor	frame -> heap		argument 0 of $runtime.deferproc escapes
+stdlib/src/internal/sync/hashtriemap.go:290:9	internal/sync.HashTrieMap.CompareAndSwap[any,any]	method-value-descriptor	frame -> heap		argument 0 of $runtime.deferproc escapes
+stdlib/src/internal/sync/hashtriemap.go:39:8	internal/sync.HashTrieMap.initSlow[*internal/abi.Type,any]	method-value-descriptor	frame -> heap		argument 0 of $runtime.deferproc escapes
+stdlib/src/internal/sync/hashtriemap.go:39:8	internal/sync.HashTrieMap.initSlow[any,any]	method-value-descriptor	frame -> heap		argument 0 of $runtime.deferproc escapes
+stdlib/src/internal/sysinfo/cpuinfo_linux.go:20:8	internal/sysinfo.readLinuxProcCPUInfo	method-value-descriptor	frame -> heap		argument 0 of $runtime.deferproc escapes
+stdlib/src/internal/testlog/exit.go:19:8	internal/testlog.PanicOnExit0	method-value-descriptor	frame -> heap		argument 0 of $runtime.deferproc escapes
+stdlib/src/io/fs/readdir.go:38:8	io/fs.ReadDir	method-value-descriptor	frame -> heap		argument 0 of $runtime.deferproc escapes
+stdlib/src/io/fs/readfile.go:41:8	io/fs.ReadFile	method-value-descriptor	frame -> heap		argument 0 of $runtime.deferproc escapes
+stdlib/src/io/fs/stat.go:29:8	io/fs.Stat	method-value-descriptor	frame -> heap		argument 0 of $runtime.deferproc escapes
+stdlib/src/io/pipe.go:23:8	io.onceError.Store	method-value-descriptor	frame -> heap		argument 0 of $runtime.deferproc escapes
+stdlib/src/io/pipe.go:31:8	io.onceError.Load	method-value-descriptor	frame -> heap		argument 0 of $runtime.deferproc escapes
+stdlib/src/io/pipe.go:82:9	io.pipe.write	method-value-descriptor	frame -> heap		argument 0 of $runtime.deferproc escapes
+stdlib/src/log/log.go:235:2	log.Logger.output	deferred-call-closure	frame -> heap		argument 0 of $runtime.deferproc escapes
+stdlib/src/log/log.go:243:8	log.Logger.output	method-value-descriptor	frame -> heap		argument 0 of $runtime.deferproc escapes
+stdlib/src/log/log.go:82:8	log.Logger.SetOutput	method-value-descriptor	frame -> heap		argument 0 of $runtime.deferproc escapes
+stdlib/src/log/slog/handler.go:120:8	log/slog.defaultHandler.Handle	method-value-descriptor	frame -> heap		argument 0 of $runtime.deferproc escapes
+stdlib/src/log/slog/handler.go:239:8	log/slog.commonHandler.withAttrs	method-value-descriptor	frame -> heap		argument 0 of $runtime.deferproc escapes
+stdlib/src/log/slog/handler.go:272:8	log/slog.commonHandler.handle	method-value-descriptor	frame -> heap		argument 0 of $runtime.deferproc escapes
+stdlib/src/log/slog/handler.go:321:8	log/slog.commonHandler.handle	method-value-descriptor	frame -> heap		argument 0 of $runtime.deferproc escapes
+stdlib/src/math/big/float.go:1367:8	math/big.Float.uquo	method-value-descriptor	frame -> heap		argument 0 of $runtime.deferproc escapes
 stdlib/src/math/big/int.go:920:10	math/big.nat.modInverse	composite-literal	heap -> frame		
 stdlib/src/math/big/int.go:920:35	math/big.nat.modInverse	composite-literal	heap -> frame		
+stdlib/src/math/big/nat.go:661:9	math/big.nat.expNN	method-value-descriptor	frame -> heap		argument 0 of $runtime.deferproc escapes
+stdlib/src/math/big/nat.go:812:2	math/big.nat.expNNWindowed	deferred-call-closure	frame -> heap		argument 0 of $runtime.deferproc escapes
+stdlib/src/math/big/nat.go:812:8	math/big.nat.expNNWindowed	method-value-descriptor	frame -> heap		store into non-local storage
+stdlib/src/math/big/natconv.go:359:9	math/big.nat.itoa	method-value-descriptor	frame -> heap		argument 0 of $runtime.deferproc escapes
+stdlib/src/math/big/natdiv.go:509:2	math/big.nat.rem	deferred-call-closure	frame -> heap		argument 0 of $runtime.deferproc escapes
+stdlib/src/math/big/natdiv.go:509:8	math/big.nat.rem	method-value-descriptor	frame -> heap		store into non-local storage
+stdlib/src/math/big/natdiv.go:540:9	math/big.nat.div	method-value-descriptor	frame -> heap		argument 0 of $runtime.deferproc escapes
+stdlib/src/math/big/natdiv.go:605:2	math/big.nat.divLarge	deferred-call-closure	frame -> heap		argument 0 of $runtime.deferproc escapes
+stdlib/src/math/big/natdiv.go:605:8	math/big.nat.divLarge	method-value-descriptor	frame -> heap		store into non-local storage
+stdlib/src/math/big/natdiv.go:650:2	math/big.nat.divBasic	deferred-call-closure	frame -> heap		argument 0 of $runtime.deferproc escapes
+stdlib/src/math/big/natdiv.go:650:8	math/big.nat.divBasic	method-value-descriptor	frame -> heap		store into non-local storage
+stdlib/src/math/big/natdiv.go:783:2	math/big.nat.divRecursiveStep	deferred-call-closure	frame -> heap		argument 0 of $runtime.deferproc escapes
+stdlib/src/math/big/natdiv.go:783:8	math/big.nat.divRecursiveStep	method-value-descriptor	frame -> heap		store into non-local storage
+stdlib/src/math/big/natmul.go:120:2	math/big.basicSqr	deferred-call-closure	frame -> heap		argument 0 of $runtime.deferproc escapes
+stdlib/src/math/big/natmul.go:120:8	math/big.basicSqr	method-value-descriptor	frame -> heap		store into non-local storage
+stdlib/src/math/big/natmul.go:203:2	math/big.karatsuba	deferred-call-closure	frame -> heap		argument 0 of $runtime.deferproc escapes
+stdlib/src/math/big/natmul.go:203:8	math/big.karatsuba	method-value-descriptor	frame -> heap		store into non-local storage
 stdlib/src/math/big/natmul.go:204:8	math/big.karatsuba	composite-literal	heap -> frame		
 stdlib/src/math/big/natmul.go:205:8	math/big.karatsuba	composite-literal	heap -> frame		
 stdlib/src/math/big/natmul.go:206:8	math/big.karatsuba	composite-literal	heap -> frame		
+stdlib/src/math/big/natmul.go:291:2	math/big.karatsubaSqr	deferred-call-closure	frame -> heap		argument 0 of $runtime.deferproc escapes
+stdlib/src/math/big/natmul.go:291:8	math/big.karatsubaSqr	method-value-descriptor	frame -> heap		store into non-local storage
 stdlib/src/math/big/natmul.go:292:8	math/big.karatsubaSqr	composite-literal	heap -> frame		
 stdlib/src/math/big/natmul.go:293:8	math/big.karatsubaSqr	composite-literal	heap -> frame		
+stdlib/src/math/big/natmul.go:44:9	math/big.nat.mul	method-value-descriptor	frame -> heap		argument 0 of $runtime.deferproc escapes
+stdlib/src/math/big/natmul.go:54:3	math/big.nat.mul	deferred-call-closure	frame -> heap		argument 0 of $runtime.deferproc escapes
+stdlib/src/math/big/natmul.go:54:9	math/big.nat.mul	method-value-descriptor	frame -> heap		store into non-local storage
+stdlib/src/math/big/natmul.go:97:9	math/big.nat.sqr	method-value-descriptor	frame -> heap		argument 0 of $runtime.deferproc escapes
+stdlib/src/math/big/rat.go:445:9	math/big.Rat.norm	method-value-descriptor	frame -> heap		argument 0 of $runtime.deferproc escapes
+stdlib/src/math/big/rat.go:513:8	math/big.Rat.Sub	method-value-descriptor	frame -> heap		argument 0 of $runtime.deferproc escapes
+stdlib/src/math/big/ratconv.go:167:8	math/big.Rat.SetString	method-value-descriptor	frame -> heap		argument 0 of $runtime.deferproc escapes
 stdlib/src/math/rand/v2/chacha8.go:75:37	math/rand/v2.ChaCha8.UnmarshalBinary	string-conversion-buffer	frame -> heap		argument 0 of $runtime.stringtoslicebyte leaks to a result the caller cannot follow
 stdlib/src/mime/grammar.go:79:27	mime.isToken	string-conversion-buffer	frame -> heap		argument 0 of $runtime.stringtoslicebyte leaks to a result the caller cannot follow
+stdlib/src/mime/type.go:256:8	mime.setExtensionType	method-value-descriptor	frame -> heap		argument 0 of $runtime.deferproc escapes
+stdlib/src/mime/type_unix.go:39:8	mime.loadMimeGlobsFile	method-value-descriptor	frame -> heap		argument 0 of $runtime.deferproc escapes
+stdlib/src/mime/type_unix.go:84:8	mime.loadMimeFile	method-value-descriptor	frame -> heap		argument 0 of $runtime.deferproc escapes
+stdlib/src/net/dial.go:661:2	net.sysDialer.dialParallel	deferred-call-closure	frame -> heap		argument 0 of $runtime.deferproc escapes
+stdlib/src/net/dial.go:695:8	net.sysDialer.dialParallel	method-value-descriptor	frame -> heap		argument 0 of $runtime.deferproc escapes
 stdlib/src/net/dnsclient_unix.go:177:14	net.Resolver.exchange	slice-literal-backing	frame -> heap		
 stdlib/src/net/dnsclient_unix.go:179:14	net.Resolver.exchange	slice-literal-backing	frame -> heap		
+stdlib/src/net/dnsclient_unix.go:399:8	net.resolverConfig.tryUpdate	method-value-descriptor	frame -> heap		argument 0 of $runtime.deferproc escapes
 stdlib/src/net/dnsclient_unix.go:643:12	net.Resolver.goLookupIPCNAMEOrder	slice-literal-backing	frame -> heap		
 stdlib/src/net/dnsclient_unix.go:649:12	net.Resolver.goLookupIPCNAMEOrder	slice-literal-backing	frame -> heap		
 stdlib/src/net/dnsclient_unix.go:651:12	net.Resolver.goLookupIPCNAMEOrder	slice-literal-backing	frame -> heap		
+stdlib/src/net/dnsclient_unix.go:659:10	net.Resolver.goLookupIPCNAMEOrder.func.657.16	method-value-descriptor	frame -> heap		argument 0 of $runtime.deferproc escapes
+stdlib/src/net/dnsconfig_unix.go:32:8	net.dnsReadConfig	method-value-descriptor	frame -> heap		argument 0 of $runtime.deferproc escapes
+stdlib/src/net/fd_unix.go:82:10	net.netFD.connect	method-value-descriptor	frame -> heap		store into non-local storage
+stdlib/src/net/fd_unix.go:82:4	net.netFD.connect	deferred-call-closure	frame -> heap		argument 0 of $runtime.deferproc escapes
+stdlib/src/net/hosts.go:131:8	net.lookupStaticHost	method-value-descriptor	frame -> heap		argument 0 of $runtime.deferproc escapes
 stdlib/src/net/hosts.go:135:24	net.lookupStaticHost	string-conversion-buffer	frame -> heap		argument 0 of $runtime.stringtoslicebyte leaks to a result the caller cannot follow
+stdlib/src/net/hosts.go:76:9	net.readHosts	method-value-descriptor	frame -> heap		argument 0 of $runtime.deferproc escapes
 stdlib/src/net/hosts.go:94:19	net.readHosts	string-conversion-buffer	frame -> heap	in a loop	argument 0 of $runtime.stringtoslicebyte leaks to a result the caller cannot follow
 stdlib/src/net/http/client.go:429:50	net/http.basicAuth	string-conversion-buffer	frame -> heap		argument 0 of $runtime.stringtoslicebyte leaks to a result the caller cannot follow
+stdlib/src/net/http/cookiejar/jar.go:208:8	net/http/cookiejar.Jar.cookies	method-value-descriptor	frame -> heap		argument 0 of $runtime.deferproc escapes
+stdlib/src/net/http/cookiejar/jar.go:286:8	net/http/cookiejar.Jar.setCookies	method-value-descriptor	frame -> heap		argument 0 of $runtime.deferproc escapes
+stdlib/src/net/http/h2_bundle.go:10063:9	net/http.http2clientConnReadLoop.endStream	method-value-descriptor	frame -> heap		argument 0 of $runtime.deferproc escapes
+stdlib/src/net/http/h2_bundle.go:10084:8	net/http.http2clientConnReadLoop.streamByID	method-value-descriptor	frame -> heap		argument 0 of $runtime.deferproc escapes
+stdlib/src/net/http/h2_bundle.go:10127:8	net/http.http2clientConnReadLoop.processSettings	method-value-descriptor	frame -> heap		argument 0 of $runtime.deferproc escapes
+stdlib/src/net/http/h2_bundle.go:10141:8	net/http.http2clientConnReadLoop.processSettingsNoWrite	method-value-descriptor	frame -> heap		argument 0 of $runtime.deferproc escapes
+stdlib/src/net/http/h2_bundle.go:10143:8	net/http.http2clientConnReadLoop.processSettingsNoWrite	method-value-descriptor	frame -> heap		argument 0 of $runtime.deferproc escapes
+stdlib/src/net/http/h2_bundle.go:10232:8	net/http.http2clientConnReadLoop.processWindowUpdate	method-value-descriptor	frame -> heap		argument 0 of $runtime.deferproc escapes
+stdlib/src/net/http/h2_bundle.go:10296:9	net/http.http2ClientConn.Ping.func.10294.5	method-value-descriptor	frame -> heap		argument 0 of $runtime.deferproc escapes
+stdlib/src/net/http/h2_bundle.go:10322:9	net/http.http2clientConnReadLoop.processPing	method-value-descriptor	frame -> heap		argument 0 of $runtime.deferproc escapes
+stdlib/src/net/http/h2_bundle.go:10324:9	net/http.http2clientConnReadLoop.processPing	method-value-descriptor	frame -> heap		argument 0 of $runtime.deferproc escapes
+stdlib/src/net/http/h2_bundle.go:10340:8	net/http.http2clientConnReadLoop.processPing	method-value-descriptor	frame -> heap		argument 0 of $runtime.deferproc escapes
+stdlib/src/net/http/h2_bundle.go:10473:8	net/http.http2gzipReader.acquire	method-value-descriptor	frame -> heap		argument 0 of $runtime.deferproc escapes
+stdlib/src/net/http/h2_bundle.go:10491:8	net/http.http2gzipReader.release	method-value-descriptor	frame -> heap		argument 0 of $runtime.deferproc escapes
+stdlib/src/net/http/h2_bundle.go:10503:8	net/http.http2gzipReader.close	method-value-descriptor	frame -> heap		argument 0 of $runtime.deferproc escapes
+stdlib/src/net/http/h2_bundle.go:10516:2	net/http.http2gzipReader.Read	deferred-call-closure	frame -> heap		argument 0 of $runtime.deferproc escapes
+stdlib/src/net/http/h2_bundle.go:10516:8	net/http.http2gzipReader.Read	method-value-descriptor	frame -> heap		store into non-local storage
+stdlib/src/net/http/h2_bundle.go:10597:8	net/http.http2netHTTPClientConn.Err	method-value-descriptor	frame -> heap		argument 0 of $runtime.deferproc escapes
+stdlib/src/net/http/h2_bundle.go:10605:8	net/http.http2netHTTPClientConn.Reserve	method-value-descriptor	frame -> heap		argument 0 of $runtime.deferproc escapes
+stdlib/src/net/http/h2_bundle.go:10607:8	net/http.http2netHTTPClientConn.Reserve	method-value-descriptor	frame -> heap		argument 0 of $runtime.deferproc escapes
+stdlib/src/net/http/h2_bundle.go:10616:8	net/http.http2netHTTPClientConn.Release	method-value-descriptor	frame -> heap		argument 0 of $runtime.deferproc escapes
+stdlib/src/net/http/h2_bundle.go:10618:8	net/http.http2netHTTPClientConn.Release	method-value-descriptor	frame -> heap		argument 0 of $runtime.deferproc escapes
+stdlib/src/net/http/h2_bundle.go:10630:8	net/http.http2netHTTPClientConn.Available	method-value-descriptor	frame -> heap		argument 0 of $runtime.deferproc escapes
+stdlib/src/net/http/h2_bundle.go:10636:8	net/http.http2netHTTPClientConn.InFlight	method-value-descriptor	frame -> heap		argument 0 of $runtime.deferproc escapes
+stdlib/src/net/http/h2_bundle.go:11093:3	net/http.http2encodeHeaders	deferred-call-closure	frame -> heap		argument 0 of $runtime.deferproc escapes
+stdlib/src/net/http/h2_bundle.go:11093:9	net/http.http2encodeHeaders	method-value-descriptor	frame -> heap		store into non-local storage
+stdlib/src/net/http/h2_bundle.go:3206:2	net/http.http2Framer.readMetaFrame	deferred-call-closure	frame -> heap		argument 0 of $runtime.deferproc escapes
+stdlib/src/net/http/h2_bundle.go:3206:8	net/http.http2Framer.readMetaFrame	method-value-descriptor	frame -> heap		store into non-local storage
+stdlib/src/net/http/h2_bundle.go:3364:2	net/http.http2curGoroutineID	deferred-call-closure	frame -> heap		argument 0 of $runtime.deferproc escapes
+stdlib/src/net/http/h2_bundle.go:3364:8	net/http.http2curGoroutineID	method-value-descriptor	frame -> heap		store into non-local storage
+stdlib/src/net/http/h2_bundle.go:3889:8	net/http.http2pipe.setBuffer	method-value-descriptor	frame -> heap		argument 0 of $runtime.deferproc escapes
+stdlib/src/net/http/h2_bundle.go:3898:8	net/http.http2pipe.Len	method-value-descriptor	frame -> heap		argument 0 of $runtime.deferproc escapes
+stdlib/src/net/http/h2_bundle.go:3909:8	net/http.http2pipe.Read	method-value-descriptor	frame -> heap		argument 0 of $runtime.deferproc escapes
+stdlib/src/net/http/h2_bundle.go:3941:8	net/http.http2pipe.Write	method-value-descriptor	frame -> heap		argument 0 of $runtime.deferproc escapes
+stdlib/src/net/http/h2_bundle.go:3945:8	net/http.http2pipe.Write	method-value-descriptor	frame -> heap		argument 0 of $runtime.deferproc escapes
+stdlib/src/net/http/h2_bundle.go:3979:8	net/http.http2pipe.closeWithError	method-value-descriptor	frame -> heap		argument 0 of $runtime.deferproc escapes
+stdlib/src/net/http/h2_bundle.go:3983:8	net/http.http2pipe.closeWithError	method-value-descriptor	frame -> heap		argument 0 of $runtime.deferproc escapes
 stdlib/src/net/http/h2_bundle.go:4303:21	net/http.http2ConfigureServer.func.4287.18	composite-literal	heap -> frame		
+stdlib/src/net/http/h2_bundle.go:4446:2	net/http.http2Server.serveConn	deferred-call-closure	frame -> heap		argument 0 of $runtime.deferproc escapes
+stdlib/src/net/http/h2_bundle.go:4446:8	net/http.http2Server.serveConn	method-value-descriptor	frame -> heap		store into non-local storage
 stdlib/src/net/http/h2_bundle.go:4562:39	net/http.http2serverConn.rejectConn	string-conversion-buffer	frame -> heap		argument 0 of $runtime.stringtoslicebyte leaks to a result the caller cannot follow
+stdlib/src/net/http/h2_bundle.go:4893:9	net/http.http2serverConn.notePanic	method-value-descriptor	frame -> heap		argument 0 of $runtime.deferproc escapes
+stdlib/src/net/http/h2_bundle.go:4906:8	net/http.http2serverConn.serve	method-value-descriptor	frame -> heap		argument 0 of $runtime.deferproc escapes
+stdlib/src/net/http/h2_bundle.go:4907:8	net/http.http2serverConn.serve	method-value-descriptor	frame -> heap		argument 0 of $runtime.deferproc escapes
+stdlib/src/net/http/h2_bundle.go:4908:8	net/http.http2serverConn.serve	method-value-descriptor	frame -> heap		argument 0 of $runtime.deferproc escapes
+stdlib/src/net/http/h2_bundle.go:4909:8	net/http.http2serverConn.serve	method-value-descriptor	frame -> heap		argument 0 of $runtime.deferproc escapes
+stdlib/src/net/http/h2_bundle.go:4910:2	net/http.http2serverConn.serve	deferred-call-closure	frame -> heap		argument 0 of $runtime.deferproc escapes
+stdlib/src/net/http/h2_bundle.go:4950:9	net/http.http2serverConn.serve	method-value-descriptor	frame -> heap		argument 0 of $runtime.deferproc escapes
+stdlib/src/net/http/h2_bundle.go:4956:9	net/http.http2serverConn.serve	method-value-descriptor	frame -> heap		argument 0 of $runtime.deferproc escapes
+stdlib/src/net/http/h2_bundle.go:4962:8	net/http.http2serverConn.serve	method-value-descriptor	frame -> heap		argument 0 of $runtime.deferproc escapes
+stdlib/src/net/http/h2_bundle.go:5129:8	net/http.http2serverConn.readPreface	method-value-descriptor	frame -> heap		argument 0 of $runtime.deferproc escapes
 stdlib/src/net/http/h2_bundle.go:6128:28	net/http.http2serverConn.upgradeRequest	method-value-descriptor	frame -> heap		write barrier into non-local storage
 stdlib/src/net/http/h2_bundle.go:6303:10	net/http.http2serverConn.newWriterAndRequestNoBody	composite-literal	heap -> frame		
+stdlib/src/net/http/h2_bundle.go:6388:2	net/http.http2serverConn.runHandler	deferred-call-closure	frame -> heap		argument 0 of $runtime.deferproc escapes
+stdlib/src/net/http/h2_bundle.go:6388:8	net/http.http2serverConn.runHandler	method-value-descriptor	frame -> heap		store into non-local storage
 stdlib/src/net/http/h2_bundle.go:7223:29	net/http.http2serverConn.startPush.func.7180.24	method-value-descriptor	frame -> heap		write barrier into non-local storage
+stdlib/src/net/http/h2_bundle.go:7762:8	net/http.http2clientStream.abortStream	method-value-descriptor	frame -> heap		argument 0 of $runtime.deferproc escapes
+stdlib/src/net/http/h2_bundle.go:7784:8	net/http.http2clientStream.abortRequestBodyWrite	method-value-descriptor	frame -> heap		argument 0 of $runtime.deferproc escapes
 stdlib/src/net/http/h2_bundle.go:8143:21	net/http.http2Transport.newClientConn	slice-literal-backing	heap -> frame		
-stdlib/src/net/http/h2_bundle.go:9417:8	net/http.http2ClientConn.readLoop	composite-literal	frame -> heap		write barrier into a candidate
+stdlib/src/net/http/h2_bundle.go:8194:8	net/http.http2ClientConn.SetDoNotReuse	method-value-descriptor	frame -> heap		argument 0 of $runtime.deferproc escapes
+stdlib/src/net/http/h2_bundle.go:8200:8	net/http.http2ClientConn.setGoAway	method-value-descriptor	frame -> heap		argument 0 of $runtime.deferproc escapes
+stdlib/src/net/http/h2_bundle.go:8240:8	net/http.http2ClientConn.CanTakeNewRequest	method-value-descriptor	frame -> heap		argument 0 of $runtime.deferproc escapes
+stdlib/src/net/http/h2_bundle.go:8249:8	net/http.http2ClientConn.ReserveNewRequest	method-value-descriptor	frame -> heap		argument 0 of $runtime.deferproc escapes
+stdlib/src/net/http/h2_bundle.go:8427:8	net/http.http2ClientConn.closeConn	method-value-descriptor	frame -> heap		argument 0 of $runtime.deferproc escapes
+stdlib/src/net/http/h2_bundle.go:8592:8	net/http.http2ClientConn.decrStreamReservations	method-value-descriptor	frame -> heap		argument 0 of $runtime.deferproc escapes
+stdlib/src/net/http/h2_bundle.go:8849:9	net/http.http2clientStream.writeRequest	method-value-descriptor	frame -> heap		argument 0 of $runtime.deferproc escapes
+stdlib/src/net/http/h2_bundle.go:8880:8	net/http.http2clientStream.encodeAndWriteHeaders	method-value-descriptor	frame -> heap		argument 0 of $runtime.deferproc escapes
+stdlib/src/net/http/h2_bundle.go:9169:3	net/http.http2clientStream.writeRequestBody	deferred-call-closure	frame -> heap		argument 0 of $runtime.deferproc escapes
+stdlib/src/net/http/h2_bundle.go:9169:9	net/http.http2clientStream.writeRequestBody	method-value-descriptor	frame -> heap		store into non-local storage
+stdlib/src/net/http/h2_bundle.go:9173:3	net/http.http2clientStream.writeRequestBody	deferred-call-closure	frame -> heap		argument 0 of $runtime.deferproc escapes
+stdlib/src/net/http/h2_bundle.go:9173:9	net/http.http2clientStream.writeRequestBody	method-value-descriptor	frame -> heap		store into non-local storage
+stdlib/src/net/http/h2_bundle.go:9261:8	net/http.http2clientStream.writeRequestBody	method-value-descriptor	frame -> heap		argument 0 of $runtime.deferproc escapes
+stdlib/src/net/http/h2_bundle.go:9291:8	net/http.http2clientStream.awaitFlowControl	method-value-descriptor	frame -> heap		argument 0 of $runtime.deferproc escapes
+stdlib/src/net/http/h2_bundle.go:9403:9	net/http.http2ClientConn.forgetStreamID	method-value-descriptor	frame -> heap		argument 0 of $runtime.deferproc escapes
+stdlib/src/net/http/h2_bundle.go:9417:8	net/http.http2ClientConn.readLoop	composite-literal	frame -> heap		store into non-local storage
+stdlib/src/net/http/h2_bundle.go:9418:8	net/http.http2ClientConn.readLoop	method-value-descriptor	frame -> heap		argument 0 of $runtime.deferproc escapes
+stdlib/src/net/http/h2_bundle.go:9450:8	net/http.http2clientConnReadLoop.cleanup	method-value-descriptor	frame -> heap		argument 0 of $runtime.deferproc escapes
+stdlib/src/net/http/h2_bundle.go:9451:2	net/http.http2clientConnReadLoop.cleanup	deferred-call-closure	frame -> heap		argument 0 of $runtime.deferproc escapes
+stdlib/src/net/http/h2_bundle.go:953:8	net/http.http2clientConnPool.MarkDead	method-value-descriptor	frame -> heap		argument 0 of $runtime.deferproc escapes
+stdlib/src/net/http/h2_bundle.go:971:8	net/http.http2clientConnPool.closeIdleConnections	method-value-descriptor	frame -> heap		argument 0 of $runtime.deferproc escapes
+stdlib/src/net/http/h2_bundle.go:9885:9	net/http.http2transportResponseBody.Read	method-value-descriptor	frame -> heap		argument 0 of $runtime.deferproc escapes
+stdlib/src/net/http/httptest/server.go:261:9	net/http/httptest.Server.Close	method-value-descriptor	frame -> heap		argument 0 of $runtime.deferproc escapes
+stdlib/src/net/http/httptest/server.go:284:8	net/http/httptest.Server.logCloseHangDebugInfo	method-value-descriptor	frame -> heap		argument 0 of $runtime.deferproc escapes
+stdlib/src/net/http/httptest/server.go:310:8	net/http/httptest.Server.CloseClientConnections	method-value-descriptor	frame -> heap		argument 0 of $runtime.deferproc escapes
+stdlib/src/net/http/httptest/server.go:340:9	net/http/httptest.Server.goServe.func.339.5	method-value-descriptor	frame -> heap		argument 0 of $runtime.deferproc escapes
+stdlib/src/net/http/httptest/server.go:351:9	net/http/httptest.Server.wrap.func.349.23	method-value-descriptor	frame -> heap		argument 0 of $runtime.deferproc escapes
+stdlib/src/net/http/httptest/server.go:396:11	net/http/httptest.Server.wrap.func.349.23	method-value-descriptor	frame -> heap		argument 0 of $runtime.deferproc escapes
+stdlib/src/net/http/request.go:1081:2	net/http.readRequest	deferred-call-closure	frame -> heap		argument 0 of $runtime.deferproc escapes
+stdlib/src/net/http/servemux121.go:142:8	net/http.serveMux121.handler	method-value-descriptor	frame -> heap		argument 0 of $runtime.deferproc escapes
 stdlib/src/net/http/server.go:1307:27	net/http.chunkWriter.writeHeader	method-value-descriptor	frame -> heap	in a loop	argument 1 of $net/http.foreachHeaderElement escapes
+stdlib/src/net/http/server.go:2212:8	net/http.response.Hijack	method-value-descriptor	frame -> heap		argument 0 of $runtime.deferproc escapes
+stdlib/src/net/http/server.go:2241:8	net/http.response.closeNotify	method-value-descriptor	frame -> heap		argument 0 of $runtime.deferproc escapes
+stdlib/src/net/http/server.go:2723:8	net/http.ServeMux.matchOrRedirect	method-value-descriptor	frame -> heap		argument 0 of $runtime.deferproc escapes
+stdlib/src/net/http/server.go:2802:8	net/http.ServeMux.matchingMethods	method-value-descriptor	frame -> heap		argument 0 of $runtime.deferproc escapes
+stdlib/src/net/http/server.go:3103:8	net/http.Server.Close	method-value-descriptor	frame -> heap		argument 0 of $runtime.deferproc escapes
+stdlib/src/net/http/server.go:312:8	net/http.conn.hijacked	method-value-descriptor	frame -> heap		argument 0 of $runtime.deferproc escapes
+stdlib/src/net/http/server.go:3203:8	net/http.Server.closeIdleConns	method-value-descriptor	frame -> heap		argument 0 of $runtime.deferproc escapes
+stdlib/src/net/http/server.go:3411:8	net/http.Server.Serve	method-value-descriptor	frame -> heap		argument 0 of $runtime.deferproc escapes
+stdlib/src/net/http/server.go:3420:2	net/http.Server.Serve	deferred-call-closure	frame -> heap		argument 0 of $runtime.deferproc escapes
+stdlib/src/net/http/server.go:3420:8	net/http.Server.Serve	method-value-descriptor	frame -> heap		store into non-local storage
+stdlib/src/net/http/server.go:3577:8	net/http.Server.trackListener	method-value-descriptor	frame -> heap		argument 0 of $runtime.deferproc escapes
+stdlib/src/net/http/server.go:3596:8	net/http.Server.trackConn	method-value-descriptor	frame -> heap		argument 0 of $runtime.deferproc escapes
+stdlib/src/net/http/server.go:3894:8	net/http.timeoutWriter.Write	method-value-descriptor	frame -> heap		argument 0 of $runtime.deferproc escapes
+stdlib/src/net/http/server.go:4000:8	net/http.newLoggingConn	method-value-descriptor	frame -> heap		argument 0 of $runtime.deferproc escapes
+stdlib/src/net/http/server.go:591:2	net/http.response.ReadFrom	deferred-call-closure	frame -> heap		argument 0 of $runtime.deferproc escapes
+stdlib/src/net/http/server.go:683:8	net/http.connReader.releaseConn	method-value-descriptor	frame -> heap		argument 0 of $runtime.deferproc escapes
+stdlib/src/net/http/server.go:689:8	net/http.connReader.startBackgroundRead	method-value-descriptor	frame -> heap		argument 0 of $runtime.deferproc escapes
+stdlib/src/net/http/server.go:743:8	net/http.connReader.abortPendingRead	method-value-descriptor	frame -> heap		argument 0 of $runtime.deferproc escapes
+stdlib/src/net/http/socks_bundle.go:34:3	net/http.socksDialer.connect	deferred-call-closure	frame -> heap		argument 0 of $runtime.deferproc escapes
+stdlib/src/net/http/socks_bundle.go:34:9	net/http.socksDialer.connect	method-value-descriptor	frame -> heap		store into non-local storage
+stdlib/src/net/http/transfer.go:1014:8	net/http.body.didEarlyClose	method-value-descriptor	frame -> heap		argument 0 of $runtime.deferproc escapes
+stdlib/src/net/http/transfer.go:1022:8	net/http.body.bodyRemains	method-value-descriptor	frame -> heap		argument 0 of $runtime.deferproc escapes
+stdlib/src/net/http/transfer.go:1028:8	net/http.body.registerOnHitEOF	method-value-descriptor	frame -> heap		argument 0 of $runtime.deferproc escapes
+stdlib/src/net/http/transfer.go:415:2	net/http.transferWriter.doBodyCopy	deferred-call-closure	frame -> heap		argument 0 of $runtime.deferproc escapes
+stdlib/src/net/http/transfer.go:833:8	net/http.body.Read	method-value-descriptor	frame -> heap		argument 0 of $runtime.deferproc escapes
+stdlib/src/net/http/transfer.go:973:8	net/http.body.Close	method-value-descriptor	frame -> heap		argument 0 of $runtime.deferproc escapes
+stdlib/src/net/http/transport.go:1074:9	net/http.Transport.tryPutIdleConn	method-value-descriptor	frame -> heap		argument 0 of $runtime.deferproc escapes
+stdlib/src/net/http/transport.go:1088:8	net/http.Transport.tryPutIdleConn	method-value-descriptor	frame -> heap		argument 0 of $runtime.deferproc escapes
+stdlib/src/net/http/transport.go:1180:8	net/http.Transport.queueForIdleConn	method-value-descriptor	frame -> heap		argument 0 of $runtime.deferproc escapes
+stdlib/src/net/http/transport.go:1266:8	net/http.Transport.removeIdleConn	method-value-descriptor	frame -> heap		argument 0 of $runtime.deferproc escapes
+stdlib/src/net/http/transport.go:1355:8	net/http.wantConn.waiting	method-value-descriptor	frame -> heap		argument 0 of $runtime.deferproc escapes
+stdlib/src/net/http/transport.go:1363:8	net/http.wantConn.getCtxForDial	method-value-descriptor	frame -> heap		argument 0 of $runtime.deferproc escapes
+stdlib/src/net/http/transport.go:1371:8	net/http.wantConn.tryDeliver	method-value-descriptor	frame -> heap		argument 0 of $runtime.deferproc escapes
+stdlib/src/net/http/transport.go:1598:8	net/http.Transport.queueForDial	method-value-descriptor	frame -> heap		argument 0 of $runtime.deferproc escapes
+stdlib/src/net/http/transport.go:1631:9	net/http.Transport.startDialConnForLocked.func.1628.5	method-value-descriptor	frame -> heap		argument 0 of $runtime.deferproc escapes
+stdlib/src/net/http/transport.go:1669:8	net/http.Transport.decConnsPerHost	method-value-descriptor	frame -> heap		argument 0 of $runtime.deferproc escapes
+stdlib/src/net/http/transport.go:1900:4	net/http.Transport.dialConn.func.1899.6	deferred-call-closure	frame -> heap		argument 0 of $runtime.deferproc escapes
+stdlib/src/net/http/transport.go:2194:8	net/http.persistConn.canceled	method-value-descriptor	frame -> heap		argument 0 of $runtime.deferproc escapes
+stdlib/src/net/http/transport.go:2208:8	net/http.persistConn.cancelRequest	method-value-descriptor	frame -> heap		argument 0 of $runtime.deferproc escapes
+stdlib/src/net/http/transport.go:2219:8	net/http.persistConn.closeConnIfStillIdle	method-value-descriptor	frame -> heap		argument 0 of $runtime.deferproc escapes
+stdlib/src/net/http/transport.go:2320:2	net/http.persistConn.readLoop	deferred-call-closure	frame -> heap		argument 0 of $runtime.deferproc escapes
+stdlib/src/net/http/transport.go:2587:9	net/http.persistConn.waitForContinue.func.2585.9	method-value-descriptor	frame -> heap		argument 0 of $runtime.deferproc escapes
+stdlib/src/net/http/transport.go:2650:2	net/http.persistConn.writeLoop	deferred-call-closure	frame -> heap		argument 0 of $runtime.deferproc escapes
+stdlib/src/net/http/transport.go:2715:9	net/http.persistConn.wroteRequest	method-value-descriptor	frame -> heap		argument 0 of $runtime.deferproc escapes
+stdlib/src/net/http/transport.go:2873:2	net/http.persistConn.roundTrip	deferred-call-closure	frame -> heap		argument 0 of $runtime.deferproc escapes
+stdlib/src/net/http/transport.go:2988:8	net/http.persistConn.close	method-value-descriptor	frame -> heap		argument 0 of $runtime.deferproc escapes
+stdlib/src/net/http/transport.go:3078:9	net/http.bodyEOFSignal.Read	method-value-descriptor	frame -> heap		argument 0 of $runtime.deferproc escapes
+stdlib/src/net/http/transport.go:3089:8	net/http.bodyEOFSignal.Close	method-value-descriptor	frame -> heap		argument 0 of $runtime.deferproc escapes
+stdlib/src/net/http/transport.go:3153:8	net/http.gzipReader.acquire	method-value-descriptor	frame -> heap		argument 0 of $runtime.deferproc escapes
+stdlib/src/net/http/transport.go:3171:8	net/http.gzipReader.release	method-value-descriptor	frame -> heap		argument 0 of $runtime.deferproc escapes
+stdlib/src/net/http/transport.go:3183:8	net/http.gzipReader.close	method-value-descriptor	frame -> heap		argument 0 of $runtime.deferproc escapes
+stdlib/src/net/http/transport.go:3196:2	net/http.gzipReader.Read	deferred-call-closure	frame -> heap		argument 0 of $runtime.deferproc escapes
+stdlib/src/net/http/transport.go:3196:8	net/http.gzipReader.Read	method-value-descriptor	frame -> heap		store into non-local storage
+stdlib/src/net/http/transport.go:880:8	net/http.Transport.RegisterProtocol	method-value-descriptor	frame -> heap		argument 0 of $runtime.deferproc escapes
+stdlib/src/net/interface.go:199:8	net.ipv6ZoneCache.update	method-value-descriptor	frame -> heap		argument 0 of $runtime.deferproc escapes
 stdlib/src/net/ip.go:309:25	net.IP.String	make-slice-backing	frame -> heap		
 stdlib/src/net/ip.go:312:25	net.IP.String	make-slice-backing	frame -> heap		
 stdlib/src/net/ipsock_posix.go:45:15	net.ipStackCapabilities.probe	slice-literal-backing	heap -> frame		
+stdlib/src/net/lookup_unix.go:22:8	.goc.global.initfunc.115.net.readProtocolsOnce.func.17.39	method-value-descriptor	frame -> heap		argument 0 of $runtime.deferproc escapes
+stdlib/src/net/lookup_unix.go:22:8	.goc.global.initfunc.145.net.readProtocolsOnce.func.17.39	method-value-descriptor	frame -> heap		argument 0 of $runtime.deferproc escapes
+stdlib/src/net/lookup_unix.go:22:8	.goc.global.initfunc.226.net.readProtocolsOnce.func.17.39	method-value-descriptor	frame -> heap		argument 0 of $runtime.deferproc escapes
+stdlib/src/net/lookup_unix.go:22:8	.goc.global.initfunc.279.net.readProtocolsOnce.func.17.39	method-value-descriptor	frame -> heap		argument 0 of $runtime.deferproc escapes
+stdlib/src/net/lookup_unix.go:22:8	.goc.global.initfunc.333.net.readProtocolsOnce.func.17.39	method-value-descriptor	frame -> heap		argument 0 of $runtime.deferproc escapes
+stdlib/src/net/lookup_unix.go:22:8	.goc.global.initfunc.337.net.readProtocolsOnce.func.17.39	method-value-descriptor	frame -> heap		argument 0 of $runtime.deferproc escapes
 stdlib/src/net/netip/netip.go:857:25	net/netip.Addr.string4	make-slice-backing	frame -> heap		argument 1 of $net/netip.Addr.appendTo4 escapes
 stdlib/src/net/netip/netip.go:875:25	net/netip.Addr.string4In6	make-slice-backing	frame -> heap		argument 1 of $net/netip.Addr.appendTo4In6 escapes
 stdlib/src/net/netip/netip.go:904:25	net/netip.Addr.string6	make-slice-backing	frame -> heap		argument 1 of $net/netip.Addr.appendTo6 escapes
+stdlib/src/net/nss.go:154:8	net.parseNSSConfFile	method-value-descriptor	frame -> heap		argument 0 of $runtime.deferproc escapes
 stdlib/src/net/nss.go:237:20	net.parseCriteria.func.223.24	string-conversion-buffer	frame -> heap		argument 0 of $runtime.stringtoslicebyte leaks to a result the caller cannot follow
+stdlib/src/net/nss.go:56:8	net.nsswitchConfig.tryUpdate	method-value-descriptor	frame -> heap		argument 0 of $runtime.deferproc escapes
+stdlib/src/net/pipe.go:192:8	net.pipe.write	method-value-descriptor	frame -> heap		argument 0 of $runtime.deferproc escapes
+stdlib/src/net/pipe.go:33:8	net.pipeDeadline.set	method-value-descriptor	frame -> heap		argument 0 of $runtime.deferproc escapes
+stdlib/src/net/pipe.go:69:8	net.pipeDeadline.wait	method-value-descriptor	frame -> heap		argument 0 of $runtime.deferproc escapes
+stdlib/src/net/port_unix.go:23:8	net.readServices	method-value-descriptor	frame -> heap		argument 0 of $runtime.deferproc escapes
+stdlib/src/net/smtp/smtp.go:116:2	net/smtp.Client.cmd	deferred-call-closure	frame -> heap		argument 0 of $runtime.deferproc escapes
+stdlib/src/net/smtp/smtp.go:116:8	net/smtp.Client.cmd	method-value-descriptor	frame -> heap		store into non-local storage
+stdlib/src/net/sock_linux.go:38:8	net.maxListenerBacklog	method-value-descriptor	frame -> heap		argument 0 of $runtime.deferproc escapes
 stdlib/src/net/textproto/reader.go:662:41	net/textproto.CanonicalMIMEHeaderKey	string-conversion-buffer	frame -> heap		argument 0 of $runtime.stringtoslicebyte leaks to a result the caller cannot follow
 stdlib/src/net/textproto/reader.go:666:41	net/textproto.CanonicalMIMEHeaderKey	string-conversion-buffer	frame -> heap		argument 0 of $runtime.stringtoslicebyte leaks to a result the caller cannot follow
 stdlib/src/net/url/url.go:198:27	net/url.escape	string-conversion-buffer	frame -> heap		argument 0 of $runtime.stringtoslicebyte leaks to a result the caller cannot follow
 stdlib/src/net/url/url.go:233:27	net/url.escape	string-conversion-buffer	frame -> heap		argument 0 of $runtime.stringtoslicebyte leaks to a result the caller cannot follow
+stdlib/src/os/dir.go:119:8	os.ReadDir	method-value-descriptor	frame -> heap		argument 0 of $runtime.deferproc escapes
+stdlib/src/os/dir_unix.go:63:8	os.File.readdir	method-value-descriptor	frame -> heap		argument 0 of $runtime.deferproc escapes
+stdlib/src/os/exec_unix.go:102:8	os.Process.pidSignal	method-value-descriptor	frame -> heap		argument 0 of $runtime.deferproc escapes
+stdlib/src/os/file.go:869:8	os.ReadFile	method-value-descriptor	frame -> heap		argument 0 of $runtime.deferproc escapes
+stdlib/src/os/pidfd_linux.go:101:8	os.Process.pidfdWait	method-value-descriptor	frame -> heap		argument 0 of $runtime.deferproc escapes
+stdlib/src/os/pidfd_linux.go:134:8	os.Process.pidfdSendSignal	method-value-descriptor	frame -> heap		argument 0 of $runtime.deferproc escapes
+stdlib/src/os/pidfd_linux.go:168:2	os.checkPidfd	deferred-call-closure	frame -> heap		argument 0 of $runtime.deferproc escapes
+stdlib/src/os/removeall_at.go:54:8	os.removeAll	method-value-descriptor	frame -> heap		argument 0 of $runtime.deferproc escapes
+stdlib/src/os/signal/signal.go:128:8	os/signal.Notify	method-value-descriptor	frame -> heap		argument 0 of $runtime.deferproc escapes
+stdlib/src/os/signal/signal.go:240:8	os/signal.process	method-value-descriptor	frame -> heap		argument 0 of $runtime.deferproc escapes
+stdlib/src/os/signal/signal.go:54:8	os/signal.cancel	method-value-descriptor	frame -> heap		argument 0 of $runtime.deferproc escapes
+stdlib/src/os/sys_linux.go:42:8	os.hostname	method-value-descriptor	frame -> heap		argument 0 of $runtime.deferproc escapes
+stdlib/src/os/user/lookup_unix.go:214:8	os/user.lookupGroupId	method-value-descriptor	frame -> heap		argument 0 of $runtime.deferproc escapes
+stdlib/src/os/user/lookup_unix.go:232:8	os/user.lookupUserId	method-value-descriptor	frame -> heap		argument 0 of $runtime.deferproc escapes
+stdlib/src/path/filepath/match.go:333:8	path/filepath.glob	method-value-descriptor	frame -> heap		argument 0 of $runtime.deferproc escapes
 stdlib/src/reflect/iter.go:130:11	reflect.Value.Seq2.func.126.10	slice-literal-backing	heap -> frame		
 stdlib/src/reflect/iter.go:44:11	reflect.Value.Seq.func.40.10	slice-literal-backing	heap -> frame		
+stdlib/src/reflect/type.go:1904:8	reflect.initFuncTypes	method-value-descriptor	frame -> heap		argument 0 of $runtime.deferproc escapes
+stdlib/src/reflect/type.go:1989:8	reflect.FuncOf	method-value-descriptor	frame -> heap		argument 0 of $runtime.deferproc escapes
+stdlib/src/reflect/type.go:2527:8	reflect.StructOf	method-value-descriptor	frame -> heap		argument 0 of $runtime.deferproc escapes
 stdlib/src/regexp/regexp.go:694:27	regexp.init.0	string-conversion-buffer	frame -> heap		argument 0 of $runtime.stringtoslicebyte leaks to a result the caller cannot follow
+stdlib/src/runtime/cgocall.go:416:3	runtime.cgocallbackg1	deferred-call-closure	frame -> heap		argument 0 of $runtime.deferproc escapes
+stdlib/src/runtime/cgocall.go:440:2	runtime.cgocallbackg1	deferred-call-closure	frame -> heap		argument 0 of $runtime.deferproc escapes
+stdlib/src/runtime/coro.go:74:2	runtime.corostart	deferred-call-closure	frame -> heap		argument 0 of $runtime.deferproc escapes
 stdlib/src/runtime/error.go:184:23	runtime.boundsError.Error	make-slice-backing	frame -> heap		argument 0 of $runtime.appendIntStr leaks to a result the caller cannot follow
 stdlib/src/runtime/fds_unix.go:25:20	runtime.checkfds	string-conversion-buffer	frame -> heap		argument 0 of $runtime.stringtoslicebyte leaks to a result the caller cannot follow
 stdlib/src/runtime/panic.go:1365:14	runtime.recovery	composite-literal	frame -> heap		write barrier into non-local storage
@@ -255,8 +584,19 @@ stdlib/src/runtime/print.go:202:16	runtime.printquoted	string-conversion-buffer	
 stdlib/src/runtime/print.go:206:18	runtime.printquoted	string-conversion-buffer	frame -> heap	in a loop	argument 0 of $runtime.stringtoslicebyte leaks to a result the caller cannot follow
 stdlib/src/runtime/print.go:209:18	runtime.printquoted	string-conversion-buffer	frame -> heap	in a loop	argument 0 of $runtime.stringtoslicebyte leaks to a result the caller cannot follow
 stdlib/src/runtime/print.go:212:18	runtime.printquoted	string-conversion-buffer	frame -> heap	in a loop	argument 0 of $runtime.stringtoslicebyte leaks to a result the caller cannot follow
+stdlib/src/runtime/trace/annotation.go:140:2	runtime/trace.WithRegion	deferred-call-closure	frame -> heap		argument 0 of $runtime.deferproc escapes
+stdlib/src/runtime/trace/subscribe.go:70:8	runtime/trace.traceMultiplexer.subscribeTraceStartWriter	method-value-descriptor	frame -> heap		argument 0 of $runtime.deferproc escapes
+stdlib/src/runtime/trace/subscribe.go:91:8	runtime/trace.traceMultiplexer.unsubscribeTraceStartWriter	method-value-descriptor	frame -> heap		argument 0 of $runtime.deferproc escapes
 stdlib/src/strings/replace.go:446:18	strings.byteReplacer.Replace	string-conversion-buffer	frame -> heap	in a loop	argument 0 of $runtime.stringtoslicebyte leaks to a result the caller cannot follow
 stdlib/src/strings/strings.go:1093:28	strings.TrimSpace	string-conversion-buffer	frame -> heap		argument 0 of $runtime.stringtoslicebyte leaks to a result the caller cannot follow
+stdlib/src/sync/once.go:75:8	sync.Once.doSlow	method-value-descriptor	frame -> heap		argument 0 of $runtime.deferproc escapes
+stdlib/src/sync/once.go:77:3	sync.Once.doSlow	deferred-call-closure	frame -> heap		argument 0 of $runtime.deferproc escapes
+stdlib/src/sync/once.go:77:9	sync.Once.doSlow	method-value-descriptor	frame -> heap		store into non-local storage
+stdlib/src/sync/pool.go:228:8	sync.Pool.pinSlow	method-value-descriptor	frame -> heap		argument 0 of $runtime.deferproc escapes
+stdlib/src/syscall/env_unix.go:108:8	syscall.Setenv	method-value-descriptor	frame -> heap		argument 0 of $runtime.deferproc escapes
+stdlib/src/syscall/env_unix.go:138:8	syscall.Environ	method-value-descriptor	frame -> heap		argument 0 of $runtime.deferproc escapes
+stdlib/src/syscall/env_unix.go:56:8	syscall.Unsetenv	method-value-descriptor	frame -> heap		argument 0 of $runtime.deferproc escapes
+stdlib/src/syscall/env_unix.go:73:8	syscall.Getenv	method-value-descriptor	frame -> heap		argument 0 of $runtime.deferproc escapes
 stdlib/src/syscall/exec_linux.go:264:17	syscall.forkAndExecInChild1	string-conversion-buffer	frame -> heap		argument 0 of $runtime.stringtoslicebyte leaks to a result the caller cannot follow
 stdlib/src/syscall/exec_linux.go:269:23	syscall.forkAndExecInChild1	string-conversion-buffer	frame -> heap		argument 0 of $runtime.stringtoslicebyte leaks to a result the caller cannot follow
 stdlib/src/syscall/exec_linux.go:270:17	syscall.forkAndExecInChild1	string-conversion-buffer	frame -> heap		argument 0 of $runtime.stringtoslicebyte leaks to a result the caller cannot follow
@@ -264,47 +604,129 @@ stdlib/src/syscall/exec_linux.go:273:23	syscall.forkAndExecInChild1	string-conve
 stdlib/src/syscall/exec_linux.go:275:23	syscall.forkAndExecInChild1	string-conversion-buffer	frame -> heap		argument 0 of $runtime.stringtoslicebyte leaks to a result the caller cannot follow
 stdlib/src/syscall/exec_linux.go:721:17	syscall.writeSetgroups	string-conversion-buffer	frame -> heap		argument 0 of $runtime.stringtoslicebyte leaks to a result the caller cannot follow
 stdlib/src/syscall/exec_linux.go:723:17	syscall.writeSetgroups	string-conversion-buffer	frame -> heap		argument 0 of $runtime.stringtoslicebyte leaks to a result the caller cannot follow
+stdlib/src/syscall/exec_linux.go:803:2	os.checkClonePidfd	deferred-call-closure	frame -> heap		argument 0 of $runtime.deferproc escapes
+stdlib/src/syscall/forkpipe2.go:41:8	syscall.acquireForkLock	method-value-descriptor	frame -> heap		argument 0 of $runtime.deferproc escapes
+stdlib/src/syscall/forkpipe2.go:86:8	syscall.releaseForkLock	method-value-descriptor	frame -> heap		argument 0 of $runtime.deferproc escapes
+stdlib/src/syscall/netlink_linux.go:65:2	syscall.NetlinkRIB	deferred-call-closure	frame -> heap		argument 0 of $runtime.deferproc escapes
+stdlib/src/syscall/netlink_linux.go:85:2	syscall.NetlinkRIB	deferred-call-closure	frame -> heap		argument 0 of $runtime.deferproc escapes
+stdlib/src/syscall/netlink_linux.go:85:8	syscall.NetlinkRIB	method-value-descriptor	frame -> heap		store into non-local storage
+stdlib/src/testing/allocs.go:24:2	testing.AllocsPerRun	deferred-call-closure	frame -> heap		argument 0 of $runtime.deferproc escapes
+stdlib/src/testing/fstest/testfs.go:203:8	testing/fstest.fsTester.checkDir	method-value-descriptor	frame -> heap		argument 0 of $runtime.deferproc escapes
+stdlib/src/testing/fstest/testfs.go:215:8	testing/fstest.fsTester.checkDir	method-value-descriptor	frame -> heap		argument 0 of $runtime.deferproc escapes
+stdlib/src/testing/fstest/testfs.go:585:8	testing/fstest.fsTester.checkFile	method-value-descriptor	frame -> heap		argument 0 of $runtime.deferproc escapes
+stdlib/src/testing/fuzz.go:112:8	testing.F.Helper	method-value-descriptor	frame -> heap		argument 0 of $runtime.deferproc escapes
+stdlib/src/testing/testing.go:1056:8	testing.common.destination	method-value-descriptor	frame -> heap		argument 0 of $runtime.deferproc escapes
+stdlib/src/testing/testing.go:1074:8	testing.common.callSite	method-value-descriptor	frame -> heap		argument 0 of $runtime.deferproc escapes
+stdlib/src/testing/testing.go:1099:9	testing.common.flushPartial.func.1097.13	method-value-descriptor	frame -> heap		argument 0 of $runtime.deferproc escapes
+stdlib/src/testing/testing.go:1147:8	testing.outputWriter.Write	method-value-descriptor	frame -> heap		argument 0 of $runtime.deferproc escapes
+stdlib/src/testing/testing.go:1265:8	testing.common.Skipped	method-value-descriptor	frame -> heap		argument 0 of $runtime.deferproc escapes
+stdlib/src/testing/testing.go:1277:8	testing.common.Helper	method-value-descriptor	frame -> heap		argument 0 of $runtime.deferproc escapes
+stdlib/src/testing/testing.go:1306:10	testing.common.Cleanup.func.1304.9	method-value-descriptor	frame -> heap		argument 0 of $runtime.deferproc escapes
+stdlib/src/testing/testing.go:1321:8	testing.common.Cleanup	method-value-descriptor	frame -> heap		argument 0 of $runtime.deferproc escapes
+stdlib/src/testing/testing.go:601:8	testing.chattyPrinter.Updatef	method-value-descriptor	frame -> heap		argument 0 of $runtime.deferproc escapes
+stdlib/src/testing/testing.go:615:8	testing.chattyPrinter.Printf	method-value-descriptor	frame -> heap		argument 0 of $runtime.deferproc escapes
+stdlib/src/testing/testing.go:966:8	testing.common.Fail	method-value-descriptor	frame -> heap		argument 0 of $runtime.deferproc escapes
+stdlib/src/testing/testing.go:977:8	testing.common.Failed	method-value-descriptor	frame -> heap		argument 0 of $runtime.deferproc escapes
+stdlib/src/text/template/exec.go:211:2	text/template.Template.execute	deferred-call-closure	frame -> heap		argument 0 of $runtime.deferproc escapes
+stdlib/src/text/template/exec.go:216:11	text/template.Template.execute	composite-literal	frame -> heap		argument 0 of $text/template.state.walk escapes
+stdlib/src/text/template/exec.go:300:2	text/template.state.walkIfOrWith	deferred-call-closure	frame -> heap		argument 0 of $runtime.deferproc escapes
+stdlib/src/text/template/exec.go:300:8	text/template.state.walkIfOrWith	method-value-descriptor	frame -> heap		store into non-local storage
+stdlib/src/text/template/exec.go:359:2	text/template.state.walkRange	deferred-call-closure	frame -> heap		argument 0 of $runtime.deferproc escapes
+stdlib/src/text/template/exec.go:359:8	text/template.state.walkRange	method-value-descriptor	frame -> heap		store into non-local storage
+stdlib/src/text/template/exec.go:388:3	text/template.state.walkRange.func.363.18	deferred-call-closure	frame -> heap		argument 0 of $runtime.deferproc escapes
+stdlib/src/text/template/exec.go:388:9	text/template.state.walkRange.func.363.18	method-value-descriptor	frame -> heap		store into non-local storage
+stdlib/src/text/template/exec.go:513:18	text/template.state.walkTemplate	slice-literal-backing	heap -> frame		
 stdlib/src/text/template/exec.go:866:17	text/template.state.evalCall	slice-literal-backing	heap -> frame		
+stdlib/src/text/template/funcs.go:134:9	text/template.findFunction	method-value-descriptor	frame -> heap		argument 0 of $runtime.deferproc escapes
+stdlib/src/text/template/parse/parse.go:259:2	text/template/parse.Tree.Parse	deferred-call-closure	frame -> heap		argument 0 of $runtime.deferproc escapes
+stdlib/src/text/template/parse/parse.go:259:8	text/template/parse.Tree.Parse	method-value-descriptor	frame -> heap		store into non-local storage
+stdlib/src/text/template/parse/parse.go:386:9	text/template/parse.Tree.textOrAction	method-value-descriptor	frame -> heap		argument 0 of $runtime.deferproc escapes
+stdlib/src/text/template/parse/parse.go:538:2	text/template/parse.Tree.parseControl	deferred-call-closure	frame -> heap		argument 0 of $runtime.deferproc escapes
+stdlib/src/text/template/parse/parse.go:538:8	text/template/parse.Tree.parseControl	method-value-descriptor	frame -> heap		store into non-local storage
+stdlib/src/text/template/template.go:130:8	text/template.Template.AddParseTree	method-value-descriptor	frame -> heap		argument 0 of $runtime.deferproc escapes
+stdlib/src/text/template/template.go:191:8	text/template.Template.Lookup	method-value-descriptor	frame -> heap		argument 0 of $runtime.deferproc escapes
 stdlib/src/time/format.go:559:26	time.Time.String	make-slice-backing	frame -> heap		argument 0 of $time.appendInt leaks to a result the caller cannot follow
 stdlib/src/time/format.go:582:25	time.Time.GoString	make-slice-backing	frame -> heap		argument 0 of $time.appendInt leaks to a result the caller cannot follow
 stdlib/src/time/format_rfc3339.go:89:28	time.parseRFC3339[string].func.88.15	string-conversion-buffer	frame -> heap		argument 0 of $runtime.stringtoslicebyte leaks to a result the caller cannot follow
+stdlib/src/time/zoneinfo_read.go:408:2	time.loadTzinfoFromZip	deferred-call-closure	frame -> heap		argument 0 of $runtime.deferproc escapes
 stdlib/src/time/zoneinfo_read.go:546:52	time.loadLocation	string-conversion-buffer	frame -> heap		argument 0 of $runtime.stringtoslicebyte leaks to a result the caller cannot follow
+stdlib/src/time/zoneinfo_read.go:580:2	time.readFile	deferred-call-closure	frame -> heap		argument 0 of $runtime.deferproc escapes
+stdlib/src/unique/canonmap.go:111:8	unique.canonMap.LoadOrStore[main.uniqueRecord]	method-value-descriptor	frame -> heap		argument 0 of $runtime.deferproc escapes
+stdlib/src/unique/canonmap.go:111:8	unique.canonMap.LoadOrStore[net/netip.addrDetail]	method-value-descriptor	frame -> heap		argument 0 of $runtime.deferproc escapes
 testdata/allocation_counts.go:312:12	main.compareByteSliceAsString	slice-literal-backing	frame -> heap		argument 0 of $runtime.slicebytetostringtmp leaks to a result the caller cannot follow
 testdata/allocation_counts.go:325:9	main.declareInterfaceFromPointer	composite-literal	frame -> heap		store into non-local storage
-testdata/allocation_counts.go:345:37	main.nestedCompositeLiteralAddress	composite-literal	frame -> heap		store into non-local storage
 testdata/allocation_counts.go:379:18	main.interfaceLocalMethodCall	composite-literal	frame -> heap		store into non-local storage
-testdata/allocation_counts.go:410:11	main.methodValueReceiver	composite-literal	frame -> heap		store into non-local storage
-testdata/allocation_counts.go:430:9	main.callThroughAFunctionVariable	composite-literal	frame -> heap		indirect call
+testdata/allocation_counts.go:463:8	main.deferMutexUnlock	method-value-descriptor	frame -> heap		argument 0 of $runtime.deferproc escapes
+testdata/allocation_counts.go:476:8	main.deferMethodOnALocal	method-value-descriptor	frame -> heap		argument 0 of $runtime.deferproc escapes
+testdata/allocation_counts.go:485:2	main.deferCallWithArguments	deferred-call-closure	frame -> heap		argument 0 of $runtime.deferproc escapes
+testdata/allocation_counts.go:528:9	main.callThroughAFunctionVariable	composite-literal	frame -> heap		indirect call
 testdata/bytealg_compare.go:12:32	main.checkBytes	string-conversion-buffer	frame -> heap		argument 0 of $runtime.stringtoslicebyte leaks to a result the caller cannot follow
 testdata/bytealg_compare.go:12:46	main.checkBytes	string-conversion-buffer	frame -> heap		argument 0 of $runtime.stringtoslicebyte leaks to a result the caller cannot follow
 testdata/bytealg_compare.go:26:35	main.checkIndex	string-conversion-buffer	frame -> heap		argument 0 of $runtime.stringtoslicebyte leaks to a result the caller cannot follow
 testdata/bytealg_compare.go:26:53	main.checkIndex	string-conversion-buffer	frame -> heap		argument 0 of $runtime.stringtoslicebyte leaks to a result the caller cannot follow
 testdata/bytealg_compare.go:54:39	main.checkIndexByte	string-conversion-buffer	frame -> heap		argument 0 of $runtime.stringtoslicebyte leaks to a result the caller cannot follow
 testdata/bytealg_compare.go:65:35	main.checkCount	string-conversion-buffer	frame -> heap		argument 0 of $runtime.stringtoslicebyte leaks to a result the caller cannot follow
+testdata/bytes_grow_compare.go:10:2	main.measuredAllocsPerRun	deferred-call-closure	frame -> heap		argument 0 of $runtime.deferproc escapes
 testdata/bytes_replace_allocs.go:15:24	main.main	string-conversion-buffer	frame -> heap		argument 0 of $runtime.stringtoslicebyte leaks to a result the caller cannot follow
 testdata/loop_alias_composite.go:9:8	main.alternate	composite-literal	heap -> frame	in a loop	
 testdata/md5_assembly.go:6:27	main.main	string-conversion-buffer	frame -> heap		argument 0 of $runtime.stringtoslicebyte leaks to a result the caller cannot follow
+testdata/runtime_append_make_extension.go:84:23	main.main	slice-literal-backing	frame -> heap		argument 0 of $slices.Grow[[]int,int] leaks to a result the caller cannot follow
 testdata/runtime_append_self_overlap.go:13:18	main.main	string-conversion-buffer	frame -> heap		argument 0 of $runtime.stringtoslicebyte leaks to a result the caller cannot follow
+testdata/runtime_atomic_counter.go:15:10	main.main.func.14.6	method-value-descriptor	frame -> heap		argument 0 of $runtime.deferproc escapes
 testdata/runtime_closure_captured_string.go:285:14	main.controls	slice-literal-backing	frame -> heap		store into non-local storage
 testdata/runtime_copy_string_to_bytes.go:4:12	main.main	slice-literal-backing	frame -> heap		argument 0 of $runtime.slicebytetostringtmp leaks to a result the caller cannot follow
 testdata/runtime_core_types.go:24:12	main.main	slice-literal-backing	frame -> heap		write barrier into non-local storage
 testdata/runtime_core_types.go:28:12	main.main	slice-literal-backing	frame -> heap		write barrier into non-local storage
+testdata/runtime_defer_argument_evaluation.go:10:2	main.collect	deferred-call-closure	frame -> heap		argument 0 of $runtime.deferproc escapes
+testdata/runtime_defer_argument_evaluation.go:12:2	main.collect	deferred-call-closure	frame -> heap		argument 0 of $runtime.deferproc escapes
 testdata/runtime_defer_closure_stack_gc.go:11:11	main.recurse	composite-literal	frame -> heap		store into non-local storage
 testdata/runtime_defer_method_value_order.go:12:14	main.main	composite-literal	frame -> heap		store into non-local storage
 testdata/runtime_defer_method_value_order.go:13:12	main.main	method-value-descriptor	frame -> heap		store into non-local storage
-testdata/runtime_goroutine_entry_stack_map.go:88:10	main.carry	composite-literal	frame -> heap		store into non-local storage
+testdata/runtime_defer_method_value_order.go:16:3	main.main.func.15.2	deferred-call-closure	frame -> heap		argument 0 of $runtime.deferproc escapes
+testdata/runtime_defer_method_value_order.go:17:3	main.main.func.15.2	deferred-call-closure	frame -> heap		argument 0 of $runtime.deferproc escapes
+testdata/runtime_defer_method_value_order.go:17:9	main.main.func.15.2	method-value-descriptor	frame -> heap		store into non-local storage
+testdata/runtime_defer_method_value_order.go:18:3	main.main.func.15.2	deferred-call-closure	frame -> heap		argument 0 of $runtime.deferproc escapes
+testdata/runtime_defer_receiver_gc.go:32:8	main.work	method-value-descriptor	frame -> heap		argument 0 of $runtime.deferproc escapes
+testdata/runtime_gc_assist_credit.go:85:2	main.main	deferred-call-closure	frame -> heap		argument 0 of $runtime.deferproc escapes
+testdata/runtime_gc_assist_credit.go:98:10	main.main.func.97.6	method-value-descriptor	frame -> heap		argument 0 of $runtime.deferproc escapes
+testdata/runtime_gc_assist_stack_growth.go:37:8	main.assistWorker	method-value-descriptor	frame -> heap		argument 0 of $runtime.deferproc escapes
+testdata/runtime_gc_checkmark.go:111:2	main.main	deferred-call-closure	frame -> heap		argument 0 of $runtime.deferproc escapes
+testdata/runtime_gc_checkmark.go:129:10	main.main.func.128.6	method-value-descriptor	frame -> heap		argument 0 of $runtime.deferproc escapes
+testdata/runtime_gc_checkmark.go:158:9	main.main.func.157.5	method-value-descriptor	frame -> heap		argument 0 of $runtime.deferproc escapes
+testdata/runtime_gc_concurrent_mark.go:156:2	main.main	deferred-call-closure	frame -> heap		argument 0 of $runtime.deferproc escapes
+testdata/runtime_gc_concurrent_mark.go:178:10	main.main.func.177.6	method-value-descriptor	frame -> heap		argument 0 of $runtime.deferproc escapes
+testdata/runtime_gc_concurrent_mark.go:193:9	main.main.func.192.5	method-value-descriptor	frame -> heap		argument 0 of $runtime.deferproc escapes
+testdata/runtime_gc_heap_growth_shrink.go:140:2	main.main	deferred-call-closure	frame -> heap		argument 0 of $runtime.deferproc escapes
+testdata/runtime_gc_mark_workers.go:126:10	main.main.func.125.6	method-value-descriptor	frame -> heap		argument 0 of $runtime.deferproc escapes
+testdata/runtime_gc_metadata_hugepages.go:104:2	main.main	deferred-call-closure	frame -> heap		argument 0 of $runtime.deferproc escapes
+testdata/runtime_gc_scavenge_release.go:92:2	main.main	deferred-call-closure	frame -> heap		argument 0 of $runtime.deferproc escapes
+testdata/runtime_gc_sweep_pacing.go:154:2	main.main	deferred-call-closure	frame -> heap		argument 0 of $runtime.deferproc escapes
+testdata/runtime_goroutine_entry_stack_map.go:75:8	main.seasonWorker	method-value-descriptor	frame -> heap		argument 0 of $runtime.deferproc escapes
+testdata/runtime_goroutine_entry_stack_map.go:84:8	main.carry	method-value-descriptor	frame -> heap		argument 0 of $runtime.deferproc escapes
 testdata/runtime_interface_method_gc.go:23:18	main.main	composite-literal	frame -> heap		store into non-local storage
 testdata/runtime_interface_method_gc.go:25:10	main.main	composite-literal	frame -> heap		store into non-local storage
+testdata/runtime_interface_method_value.go:17:35	main.main	composite-literal	heap -> frame		
 testdata/runtime_interface_pointer_equality_gc.go:10:10	main.main	composite-literal	frame -> heap		store into non-local storage
+testdata/runtime_interface_stack_gc.go:31:11	main.main	composite-literal	frame -> heap		store into non-local storage
 testdata/runtime_keepalive_stack_root.go:59:10	main.keepStackItem	composite-literal	frame -> heap		store into non-local storage
 testdata/runtime_keepalive_stack_root.go:61:10	main.keepStackItem	composite-literal	frame -> heap		store into non-local storage
+testdata/runtime_loopvar_goroutine_defer.go:26:10	main.goroutinesSeeTheirOwnIteration.func.25.6	method-value-descriptor	frame -> heap		argument 0 of $runtime.deferproc escapes
+testdata/runtime_loopvar_goroutine_defer.go:41:10	main.goroutinesSeeTheirOwnIteration.func.40.6	method-value-descriptor	frame -> heap		argument 0 of $runtime.deferproc escapes
 testdata/runtime_loopvar_value_shapes.go:73:34	main.main	slice-literal-backing	frame -> heap		store into non-local storage
 testdata/runtime_loopvar_value_shapes.go:73:39	main.main	slice-literal-backing	frame -> heap		store into non-local storage
+testdata/runtime_many_goroutines_gc.go:14:8	main.worker	method-value-descriptor	frame -> heap		argument 0 of $runtime.deferproc escapes
 testdata/runtime_many_goroutines_gc.go:16:10	main.worker	composite-literal	frame -> heap		store into non-local storage
 testdata/runtime_many_goroutines_gc.go:18:10	main.worker	composite-literal	frame -> heap		store into non-local storage
 testdata/runtime_map_struct_value_replace.go:12:12	main.main	slice-literal-backing	frame -> heap		write barrier into non-local storage
-testdata/runtime_method_value_gc.go:16:13	main.main	composite-literal	frame -> heap		store into non-local storage
+testdata/runtime_new_composite_gc.go:16:14	main.main	composite-literal	heap -> frame		
+testdata/runtime_panic_error_recover.go:15:2	main.errorRecoverParser.parse	deferred-call-closure	frame -> heap		argument 0 of $runtime.deferproc escapes
+testdata/runtime_panic_error_recover.go:15:8	main.errorRecoverParser.parse	method-value-descriptor	frame -> heap		store into non-local storage
+testdata/runtime_panic_stack_gc.go:23:14	main.main	composite-literal	frame -> heap		store into non-local storage
+testdata/runtime_println_operand_separation.go:147:2	main.capture	deferred-call-closure	frame -> heap		argument 0 of $runtime.deferproc escapes
+testdata/runtime_println_operand_separation.go:148:8	main.capture	method-value-descriptor	frame -> heap		argument 0 of $runtime.deferproc escapes
 testdata/runtime_println_operand_separation.go:82:54	main.main.func.82.37	slice-literal-backing	heap -> frame		
+testdata/runtime_println_statement_atomicity.go:36:2	main.main	deferred-call-closure	frame -> heap		argument 0 of $runtime.deferproc escapes
+testdata/runtime_println_statement_atomicity.go:50:10	main.main.func.49.6	method-value-descriptor	frame -> heap		argument 0 of $runtime.deferproc escapes
 testdata/runtime_range_target_forms.go:149:20	main.sliceTargets	slice-literal-backing	frame -> heap		store into non-local storage
 testdata/runtime_range_target_forms.go:149:25	main.sliceTargets	slice-literal-backing	frame -> heap		store into non-local storage
 testdata/runtime_range_target_forms.go:149:33	main.sliceTargets	slice-literal-backing	frame -> heap		store into non-local storage
@@ -313,31 +735,40 @@ testdata/runtime_reflect_call_aggregate.go:31:27	main.main	slice-literal-backing
 testdata/runtime_reflect_call_aggregate_function_probe.go:31:27	main.Test	slice-literal-backing	heap -> frame		
 testdata/runtime_reflect_call_aggregate_matrix.go:70:44	main.callReflectAggregateMatrix	slice-literal-backing	heap -> frame		
 testdata/runtime_reflect_call_aggregate_matrix.go:85:27	main.callReflectMixedAggregateDirect	slice-literal-backing	heap -> frame		
-testdata/runtime_reflect_call_aggregate_probe.go:36:10	main.main	slice-literal-backing	frame -> heap		write barrier into non-local storage
+testdata/runtime_reflect_call_aggregate_probe.go:36:10	main.main	slice-literal-backing	frame -> heap		store into non-local storage
 testdata/runtime_reflect_call_aggregate_probe.go:50:27	main.main	slice-literal-backing	heap -> frame		
 testdata/runtime_reflect_interface_method.go:20:25	main.main	slice-literal-backing	heap -> frame		
 testdata/runtime_reflect_method_metadata.go:27:30	main.main	slice-literal-backing	heap -> frame		
 testdata/runtime_reflect_value_call.go:11:15	main.main	slice-literal-backing	heap -> frame		
 testdata/runtime_reflect_value_indirect_call.go:28:17	main.main	composite-literal	frame -> heap		indirect call
 testdata/runtime_reflect_value_indirect_call.go:29:11	main.main	composite-literal	frame -> heap		indirect call
-testdata/runtime_reflect_value_instruction_op.go:53:10	main.main	slice-literal-backing	frame -> heap		store into non-local storage
-testdata/runtime_scheduler_gc_churn.go:29:13	main.main.func.23.6	composite-literal	frame -> heap	in a loop	store into non-local storage
+testdata/runtime_reflect_value_instruction_op.go:53:10	main.main	slice-literal-backing	frame -> heap		indirect call
+testdata/runtime_scheduler_gc_churn.go:24:10	main.main.func.23.6	method-value-descriptor	frame -> heap		argument 0 of $runtime.deferproc escapes
+testdata/runtime_stack_growth.go:24:10	main.main	composite-literal	frame -> heap		store into non-local storage
+testdata/runtime_stack_growth.go:26:10	main.main	composite-literal	frame -> heap		store into non-local storage
+testdata/runtime_stack_scan_loop_safepoints.go:73:8	main.stillLive	method-value-descriptor	frame -> heap		argument 0 of $runtime.deferproc escapes
 testdata/runtime_stack_scan_syscall.go:101:26	main.main.func.99.5	make-slice-backing	frame -> heap		argument 0 of $runtime.slicebytetostringtmp leaks to a result the caller cannot follow
 testdata/runtime_stack_scan_syscall.go:129:48	main.main	string-conversion-buffer	frame -> heap		argument 0 of $runtime.stringtoslicebyte leaks to a result the caller cannot follow
 testdata/runtime_string_byte_round_trip.go:17:18	main.main	string-conversion-buffer	frame -> heap		argument 0 of $runtime.stringtoslicerune leaks to a result the caller cannot follow
 testdata/runtime_string_byte_round_trip.go:5:18	main.main	string-conversion-buffer	frame -> heap		argument 0 of $runtime.stringtoslicebyte leaks to a result the caller cannot follow
+testdata/runtime_sync_mutex_defer.go:12:10	main.main.func.10.3	method-value-descriptor	frame -> heap		argument 0 of $runtime.deferproc escapes
+testdata/runtime_sync_once_concurrent.go:13:10	main.main.func.12.6	method-value-descriptor	frame -> heap		argument 0 of $runtime.deferproc escapes
+testdata/runtime_sync_rwmutex_readers.go:14:10	main.main.func.13.6	method-value-descriptor	frame -> heap		argument 0 of $runtime.deferproc escapes
+testdata/runtime_sync_waitgroup_mutex.go:17:10	main.main.func.16.6	method-value-descriptor	frame -> heap		argument 0 of $runtime.deferproc escapes
+testdata/runtime_ticker_multi_tick.go:7:8	main.main	method-value-descriptor	frame -> heap		argument 0 of $runtime.deferproc escapes
+testdata/runtime_ticker_stop.go:7:8	main.main	method-value-descriptor	frame -> heap		argument 0 of $runtime.deferproc escapes
+testdata/runtime_time_afterfunc.go:10:8	main.main	method-value-descriptor	frame -> heap		argument 0 of $runtime.deferproc escapes
 testdata/runtime_timer_callback_shape.go:16:9	main.main	composite-literal	frame -> heap		store into non-local storage
 testdata/runtime_type_param_method_shapes.go:229:18	main.main	composite-literal	heap -> frame		
 testdata/runtime_type_param_method_shapes.go:232:18	main.main	composite-literal	heap -> frame		
 testdata/runtime_type_param_method_shapes.go:236:15	main.main	composite-literal	heap -> frame		
 testdata/runtime_type_param_method_shapes.go:239:15	main.main	composite-literal	heap -> frame		
 testdata/runtime_unsafe_struct_field.go:12:10	main.main	composite-literal	frame -> heap		used by add
-testdata/runtime_unsafe_struct_field.go:15:10	main.main	composite-literal	frame -> heap		store into non-local storage
+testdata/runtime_waitgroup_reuse.go:11:10	main.runWaitGroupRound.func.10.6	method-value-descriptor	frame -> heap		argument 0 of $runtime.deferproc escapes
 testdata/sha1_assembly.go:6:28	main.main	string-conversion-buffer	frame -> heap		argument 0 of $runtime.stringtoslicebyte leaks to a result the caller cannot follow
 testdata/stdlib_archive_zip_roundtrip.go:74:23	main.main	slice-literal-backing	frame -> heap		argument 3 of $bytes.Equal escapes
 testdata/stdlib_bytes_buffer.go:9:22	main.main	string-conversion-buffer	frame -> heap		argument 0 of $runtime.stringtoslicebyte leaks to a result the caller cannot follow
 testdata/stdlib_bytes_reader_unread.go:18:25	main.main	make-slice-backing	frame -> heap		argument 0 of $runtime.slicebytetostringtmp leaks to a result the caller cannot follow
-testdata/stdlib_container_heap.go:31:12	main.main	slice-literal-backing	frame -> heap		store into non-local storage
 testdata/stdlib_container_heap.go:31:27	main.main	composite-literal-descriptor	frame -> heap		store into non-local storage
 testdata/stdlib_crypto_des_rc4.go:38:41	main.main	string-conversion-buffer	frame -> heap		argument 0 of $runtime.stringtoslicebyte leaks to a result the caller cannot follow
 testdata/stdlib_crypto_des_rc4.go:42:32	main.main	make-slice-backing	frame -> heap		argument 0 of $bytes.Equal escapes
@@ -347,17 +778,54 @@ testdata/stdlib_encoding_ascii85.go:6:19	main.main	string-conversion-buffer	fram
 testdata/stdlib_encoding_base32.go:6:19	main.main	string-conversion-buffer	frame -> heap		argument 0 of $runtime.stringtoslicebyte leaks to a result the caller cannot follow
 testdata/stdlib_encoding_base64.go:6:19	main.main	string-conversion-buffer	frame -> heap		argument 0 of $runtime.stringtoslicebyte leaks to a result the caller cannot follow
 testdata/stdlib_encoding_pem.go:11:17	main.main	string-conversion-buffer	frame -> heap		argument 0 of $runtime.stringtoslicebyte leaks to a result the caller cannot follow
+testdata/stdlib_filepath_glob_clean.go:13:2	main.main	deferred-call-closure	frame -> heap		argument 0 of $runtime.deferproc escapes
+testdata/stdlib_http_multipart_form.go:38:8	main.main	method-value-descriptor	frame -> heap		argument 0 of $runtime.deferproc escapes
+testdata/stdlib_http_multipart_form.go:47:8	main.main	method-value-descriptor	frame -> heap		argument 0 of $runtime.deferproc escapes
 testdata/stdlib_http_redirect_keepalive.go:24:29	main.main.func.16.48	composite-literal	heap -> frame		
-testdata/stdlib_image_gif_animation.go:27:14	main.main	slice-literal-backing	frame -> heap		store into non-local storage
-testdata/stdlib_image_gif_animation.go:28:14	main.main	slice-literal-backing	frame -> heap		store into non-local storage
-testdata/stdlib_image_gif_animation.go:30:14	main.main	slice-literal-backing	frame -> heap		store into non-local storage
 testdata/stdlib_image_jpeg_roundtrip.go:18:42	main.main	composite-literal	heap -> frame		
-testdata/stdlib_maps_slices.go:25:12	main.main	slice-literal-backing	heap -> frame		
+testdata/stdlib_ioutil_tempfile.go:13:2	main.main	deferred-call-closure	frame -> heap		argument 0 of $runtime.deferproc escapes
 testdata/stdlib_maps_slices.go:31:13	main.main	slice-literal-backing	frame -> heap		store into non-local storage
 testdata/stdlib_mime_quotedprintable.go:12:18	main.main	string-conversion-buffer	frame -> heap		argument 0 of $runtime.stringtoslicebyte leaks to a result the caller cannot follow
+testdata/stdlib_netpoll_close_unblocks_read.go:14:8	main.main	method-value-descriptor	frame -> heap		argument 0 of $runtime.deferproc escapes
+testdata/stdlib_netpoll_close_unblocks_read.go:30:8	main.main	method-value-descriptor	frame -> heap		argument 0 of $runtime.deferproc escapes
+testdata/stdlib_netpoll_pipe_afterfunc_close.go:13:8	main.main	method-value-descriptor	frame -> heap		argument 0 of $runtime.deferproc escapes
+testdata/stdlib_netpoll_pipe_afterfunc_close.go:22:8	main.main	method-value-descriptor	frame -> heap		argument 0 of $runtime.deferproc escapes
+testdata/stdlib_netpoll_pipe_close_unblocks_read.go:13:8	main.main	method-value-descriptor	frame -> heap		argument 0 of $runtime.deferproc escapes
+testdata/stdlib_netpoll_pipe_deadline.go:13:8	main.main	method-value-descriptor	frame -> heap		argument 0 of $runtime.deferproc escapes
+testdata/stdlib_netpoll_pipe_deadline.go:14:8	main.main	method-value-descriptor	frame -> heap		argument 0 of $runtime.deferproc escapes
+testdata/stdlib_netpoll_pipe_past_deadline.go:13:8	main.main	method-value-descriptor	frame -> heap		argument 0 of $runtime.deferproc escapes
+testdata/stdlib_netpoll_pipe_past_deadline.go:14:8	main.main	method-value-descriptor	frame -> heap		argument 0 of $runtime.deferproc escapes
+testdata/stdlib_netpoll_pipe_roundtrip.go:13:8	main.main	method-value-descriptor	frame -> heap		argument 0 of $runtime.deferproc escapes
+testdata/stdlib_netpoll_pipe_roundtrip.go:14:8	main.main	method-value-descriptor	frame -> heap		argument 0 of $runtime.deferproc escapes
+testdata/stdlib_netpoll_stress_tcp_churn.go:16:8	main.main	method-value-descriptor	frame -> heap		argument 0 of $runtime.deferproc escapes
+testdata/stdlib_netpoll_stress_tcp_churn.go:65:8	main.serveTCPStressConnection	method-value-descriptor	frame -> heap		argument 0 of $runtime.deferproc escapes
+testdata/stdlib_netpoll_stress_udp_burst.go:16:8	main.main	method-value-descriptor	frame -> heap		argument 0 of $runtime.deferproc escapes
+testdata/stdlib_netpoll_syscall_socket_listen.go:17:2	main.main	deferred-call-closure	frame -> heap		argument 0 of $runtime.deferproc escapes
+testdata/stdlib_netpoll_tcp_accept_deadline.go:13:8	main.main	method-value-descriptor	frame -> heap		argument 0 of $runtime.deferproc escapes
+testdata/stdlib_netpoll_tcp_concurrent_clients.go:14:8	main.main	method-value-descriptor	frame -> heap		argument 0 of $runtime.deferproc escapes
+testdata/stdlib_netpoll_tcp_concurrent_clients.go:25:11	main.main.func.24.7	method-value-descriptor	frame -> heap		argument 0 of $runtime.deferproc escapes
+testdata/stdlib_netpoll_tcp_concurrent_clients.go:43:10	main.main.func.38.6	method-value-descriptor	frame -> heap		argument 0 of $runtime.deferproc escapes
+testdata/stdlib_netpoll_tcp_echo.go:16:8	main.main	method-value-descriptor	frame -> heap		argument 0 of $runtime.deferproc escapes
+testdata/stdlib_netpoll_tcp_echo.go:26:9	main.main.func.19.5	method-value-descriptor	frame -> heap		argument 0 of $runtime.deferproc escapes
+testdata/stdlib_netpoll_tcp_echo.go:52:8	main.main	method-value-descriptor	frame -> heap		argument 0 of $runtime.deferproc escapes
+testdata/stdlib_netpoll_tcp_read_deadline.go:13:8	main.main	method-value-descriptor	frame -> heap		argument 0 of $runtime.deferproc escapes
+testdata/stdlib_netpoll_tcp_read_deadline.go:28:8	main.main	method-value-descriptor	frame -> heap		argument 0 of $runtime.deferproc escapes
+testdata/stdlib_netpoll_tcp_read_deadline.go:31:8	main.main	method-value-descriptor	frame -> heap		argument 0 of $runtime.deferproc escapes
+testdata/stdlib_netpoll_udp_deadline.go:17:8	main.main	method-value-descriptor	frame -> heap		argument 0 of $runtime.deferproc escapes
+testdata/stdlib_netpoll_udp_loopback.go:14:8	main.main	method-value-descriptor	frame -> heap		argument 0 of $runtime.deferproc escapes
 testdata/stdlib_netpoll_udp_loopback.go:16:20	main.main	string-conversion-buffer	frame -> heap		argument 0 of $runtime.stringtoslicebyte leaks to a result the caller cannot follow
 testdata/stdlib_netpoll_udp_loopback.go:21:25	main.main	make-slice-backing	frame -> heap		argument 0 of $runtime.slicebytetostringtmp leaks to a result the caller cannot follow
-testdata/stdlib_slices_string_sort.go:6:10	main.main	slice-literal-backing	heap -> frame		
+testdata/stdlib_os_file_roundtrip.go:13:2	main.main	deferred-call-closure	frame -> heap		argument 0 of $runtime.deferproc escapes
+testdata/stdlib_os_readdir_walkdir.go:14:2	main.main	deferred-call-closure	frame -> heap		argument 0 of $runtime.deferproc escapes
+testdata/stdlib_os_rename_stat.go:13:2	main.main	deferred-call-closure	frame -> heap		argument 0 of $runtime.deferproc escapes
+testdata/stdlib_signal_atomic_contention.go:19:10	main.main.func.18.6	method-value-descriptor	frame -> heap		argument 0 of $runtime.deferproc escapes
+testdata/stdlib_signal_during_gc.go:14:2	main.main	deferred-call-closure	frame -> heap		argument 0 of $runtime.deferproc escapes
+testdata/stdlib_signal_during_netpoll.go:16:8	main.main	method-value-descriptor	frame -> heap		argument 0 of $runtime.deferproc escapes
+testdata/stdlib_signal_during_netpoll.go:22:8	main.main	method-value-descriptor	frame -> heap		argument 0 of $runtime.deferproc escapes
+testdata/stdlib_signal_during_netpoll.go:28:8	main.main	method-value-descriptor	frame -> heap		argument 0 of $runtime.deferproc escapes
+testdata/stdlib_signal_during_netpoll.go:41:2	main.main	deferred-call-closure	frame -> heap		argument 0 of $runtime.deferproc escapes
+testdata/stdlib_smtp_session.go:50:8	main.serveSMTP	method-value-descriptor	frame -> heap		argument 0 of $runtime.deferproc escapes
 testdata/stdlib_sort_find_edges.go:6:12	main.main	slice-literal-backing	frame -> heap		store into non-local storage
+testdata/stdlib_sort_search_slice.go:6:12	main.main	slice-literal-backing	frame -> heap		argument 0 of $sort.SearchInts escapes
 testdata/stdlib_strings_reader_seek.go:15:25	main.main	make-slice-backing	frame -> heap		argument 0 of $runtime.slicebytetostringtmp leaks to a result the caller cannot follow
 testdata/stdlib_testing_quick.go:29:22	main.main.func.24.14	string-conversion-buffer	frame -> heap		argument 0 of $runtime.stringtoslicebyte leaks to a result the caller cannot follow

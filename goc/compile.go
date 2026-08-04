@@ -3132,6 +3132,9 @@ func (g *gen) valueDoesNotEscapeWithin(
 				}
 			}
 			if argumentIndex < 0 {
+				if parent.Fun == current {
+					return g.deferredFunctionValueStaysInFrame(parent, parents, body)
+				}
 				return false
 			}
 			if calledIdentifier, ok := parent.Fun.(*ast.Ident); ok {
@@ -4131,10 +4134,9 @@ func (g *gen) parameterDoesNotEscapeUnexplained(function *types.Func, index int,
 	}
 	key := parameterKey{function: function, index: index}
 	if checking[key] {
-		g.diagRule(func() string {
-			return fmt.Sprintf("passed to %s, which the walk is already inside: it breaks the recursion by answering \"escapes\"", function.FullName())
-		})
-		return false
+		// The recursive edge is answered "does not escape", which is the
+		// *optimistic* answer and the correct one. See recursiveEscapeAnswer.
+		return recursiveEscapeAnswer
 	}
 	checking[key] = true
 	defer delete(checking, key)
@@ -4337,6 +4339,48 @@ func (g *gen) reportEscapingUse(object types.Object, use ast.Node) {
 	fmt.Fprintf(os.Stderr, "escape use: %s escapes at %s\n", object.Name(), g.fset.Position(use.Pos()))
 }
 
+// recursiveEscapeAnswer is what parameterDoesNotEscape and receiverDoesNotEscape
+// answer for the edge back into a question they are already inside.
+//
+// It is `true` -- "does not escape" -- and that is not an assumption. The walk
+// computes, for one object, "does some chain of uses reach a use that publishes
+// it". Written as a system of equations it is a pure monotone OR: a use is bad
+// on its own, or it forwards the question to another parameter, and the object
+// escapes exactly when some chain of forwards ends at a bad use. The answer that
+// system defines is its *least* fixpoint, and a depth-first walk that answers the
+// back edge "false" computes that fixpoint exactly, with no iteration:
+//
+//   - it never answers "escapes" without evidence. A `false` answer is only
+//     returned by the branch that met a real publishing use, so every escape it
+//     reports is a real chain of uses ending at a real bad use, which is a
+//     derivation in the least fixpoint.
+//   - it never answers "does not escape" without having checked everything. The
+//     walk short-circuits only *after* something escaped, so an object it clears
+//     was cleared with every one of its uses examined -- and the set of questions
+//     visited on that walk is closed: each one's uses are either harmless or
+//     forward to another question in the set, which was also cleared. Assigning
+//     "does not escape" to all of them is consistent, so the least fixpoint
+//     assigns it too.
+//
+// Answering the back edge "escapes" instead is sound but strictly weaker: it
+// invents a publication that no use performs, and every question that forwards
+// through the cycle inherits it. `log/slog`'s handleState is the case -- appendAttr
+// and appendAttrs are mutually recursive, so the receiver could never be placed.
+//
+// The previous branch measured this change, found three frame-address
+// publications in log/slog, and did not land it. Those publications were `defer
+// state.free()` and had nothing to do with the cycle: see
+// deferredFunctionValueStaysInFrame, which fixes them at the source and makes
+// them reproducible with no compiler change at all.
+//
+// Everything else in the walk keeps its pessimistic break --
+// interfaceMethodDoesNotRetainReceiver, parameterLeaksOnlyToResult, and
+// objectDoesNotEscape's own per-object one all still answer "escapes" for a
+// cycle. Mixing them is safe in one direction only, and this is that direction:
+// a pessimistic break can only add escapes to a least fixpoint, never remove
+// one.
+const recursiveEscapeAnswer = true
+
 func (g *gen) receiverDoesNotEscape(function *types.Func, checking map[parameterKey]bool) bool {
 	declaration, ok := g.functionDecls[function]
 	if !ok {
@@ -4351,7 +4395,8 @@ func (g *gen) receiverDoesNotEscape(function *types.Func, checking map[parameter
 	}
 	key := parameterKey{function: function, index: -1}
 	if checking[key] {
-		return false
+		// See recursiveEscapeAnswer, and the receiver half of the note there.
+		return recursiveEscapeAnswer
 	}
 	checking[key] = true
 	defer delete(checking, key)
@@ -10179,7 +10224,18 @@ func (g *gen) callClosure(call *ast.CallExpr, wrapperPrefix string) ir.Ref {
 	}
 	wrapper.cur.RetVoid()
 
-	closure := g.allocateTyped(closureType)
+	var closure ir.Ref
+	if g.deferredFunctionValueStaysInFrame(call, g.parents, g.currentBody) {
+		// Zeroed rather than merely reserved: the pointer words below are in the
+		// frame's stack map from the moment the slot exists, and the argument
+		// expressions that fill them can contain calls, so a safepoint can scan
+		// the slot before any of them has been written.
+		closure = g.localAllocTyped(closureType)
+		g.zero(closure, closureType)
+		g.recordPlacement(closure, "deferred-call-closure", ir.AllocInFrame, closureType)
+	} else {
+		closure = g.allocateTyped(closureType)
+	}
 	g.cur.Store(g.fn.Sym(wrapperName, 0), closure)
 	if !directTarget {
 		functionValue := g.expr(call.Fun)
@@ -13554,6 +13610,39 @@ func (g *gen) functionLiteralEscapesWithin(
 	return true
 }
 
+// deferredFunctionValueStaysInFrame reports that the function value a call is
+// made through is the function value of a *directly deferred* call, and can
+// therefore live in the registering frame.
+//
+// It is functionLiteralEscapesWithin's rule for `defer func(){...}()`, asked of
+// the other two shapes the same statement can take. `defer mu.Unlock()` builds a
+// method value -- a descriptor holding the receiver -- and `defer f(x)` builds a
+// deferwrap closure holding the arguments; both are handed to
+// runtime.deferproc, which stores them in a _defer record that deferreturn pops
+// before this frame is torn down. Neither outlives the frame, so neither has to
+// be in the heap, and putting the method value there is worse than a wasted
+// allocation: the descriptor holds the *address* of a frame-local receiver, so a
+// heap descriptor is a frame address published into a heap object. See the
+// deferred-receiver case in escape_publication_test.go.
+//
+// The condition is the literal's: a defer that can be registered more than once
+// needs a fresh descriptor per registration, because one frame slot cannot hold
+// two.
+func (g *gen) deferredFunctionValueStaysInFrame(call *ast.CallExpr, parents map[ast.Node]ast.Node, body *ast.BlockStmt) bool {
+	deferStatement, deferred := parents[call].(*ast.DeferStmt)
+	if !deferred {
+		return false
+	}
+	if !g.runtimeAllocation {
+		// Without a runtime there is no _defer record: runDefers replays the
+		// statement inline at every exit out of one frame slot per defer
+		// statement, so the descriptor is frame-scoped however often the
+		// statement is reached.
+		return true
+	}
+	return !deferStatementRepeats(deferStatement, parents, body)
+}
+
 // deferStatementRepeats reports whether one execution of the enclosing frame can
 // reach the same defer statement more than once.
 //
@@ -15108,6 +15197,86 @@ func (g *gen) keepAlive(function *types.Func, argument ast.Expr) {
 	}
 }
 
+// appendedMakeLength recognises `append(s, make([]T, n)...)` and names the
+// length expression.
+//
+// The idiom is how Go grows a slice by n zero elements, and the standard library
+// relies on it costing one allocation: slices.Grow is written
+//
+//	s = append(s[:cap(s)], make([]E, n)...)[:len(s)]
+//
+// with the comment "This expression allocates only once (see test)". Compiled
+// literally it allocates twice -- once for the fresh slice and once for the
+// grown destination -- and the elements copied out of the fresh slice are every
+// one of them zero. cmd/compile rewrites it (walk's extendslice); goc did not,
+// so every slices.Grow in the program cost an allocation that the source says it
+// does not. It is what `logattrs/6-attr` pays over gc in the slog benchmark.
+//
+// Only the two-argument make qualifies. `make([]T, n, m)` asks for a capacity as
+// well, and the extension has no way to honour it.
+func appendedMakeLength(call *ast.CallExpr, info *types.Info) (ast.Expr, bool) {
+	if !call.Ellipsis.IsValid() || len(call.Args) != 2 {
+		return nil, false
+	}
+	made, isCall := call.Args[1].(*ast.CallExpr)
+	if !isCall || len(made.Args) != 2 || made.Ellipsis.IsValid() {
+		return nil, false
+	}
+	identifier, isIdentifier := made.Fun.(*ast.Ident)
+	if !isIdentifier {
+		return nil, false
+	}
+	builtin, isBuiltin := info.Uses[identifier].(*types.Builtin)
+	if !isBuiltin || builtin.Name() != "make" {
+		return nil, false
+	}
+	madeType := info.TypeOf(made)
+	if madeType == nil {
+		return nil, false
+	}
+	if _, isSlice := madeType.Underlying().(*types.Slice); !isSlice {
+		return nil, false
+	}
+	return made.Args[1], true
+}
+
+// guardExtensionLength keeps `append(s, make([]T, n)...)` panicking on a negative
+// n, which is what the make it replaced did.
+//
+// It matters more here than it would as a bounds check. A negative n makes the
+// new length smaller than the old, so the grow branch is not taken and the clear
+// below runs against the *existing* backing array with a byte count that is
+// negative as a signed number and enormous as the unsigned one memset reads. The
+// branch is emitted rather than the check inlined so that the panic is
+// runtime.makeslice's own, with the message the source would have produced.
+func (g *gen) guardExtensionLength(made ast.Expr, length ir.Ref) {
+	if !g.runtimeAllocation {
+		// Without a runtime there is no runtime panic to raise, and this mode
+		// already builds `make([]T, n)` out of an unchecked byte count.
+		return
+	}
+	bad := g.block("appendextendbad")
+	ok := g.block("appendextendok")
+	negative := g.cur.Cmp(ir.CmpSlt, ir.ClsL, length, g.fn.Long(0))
+	g.cur.Jnz(negative, bad, ok)
+	g.cur = bad
+	// runtime.panicmakeslicelen rather than runtime.makeslice, which would panic
+	// the same way. makeslice is an *allocator*, so a call to it is an allocation
+	// census row -- and one on a branch that only ever panics reads as "goc
+	// allocates on the heap here" for every slices.Grow in the program, which is
+	// what the first version of this guard produced and what the gc differential
+	// then counted. This is the same panic makeslice would raise, with its
+	// message, and nothing reads it as a placement.
+	//
+	// Positioned at the make it stands in for: a fresh block carries no source
+	// position until one is set.
+	g.at(made)
+	g.cur.CallVoid(g.fn.Sym("runtime.panicmakeslicelen", 0))
+	g.cur.Goto(ok)
+	g.cur = ok
+	g.at(made)
+}
+
 func (g *gen) appendCall(call *ast.CallExpr) ir.Ref {
 	sliceType := g.typeAndValue(call).Type.Underlying().(*types.Slice)
 	elementType := sliceType.Elem()
@@ -15118,15 +15287,26 @@ func (g *gen) appendCall(call *ast.CallExpr) ir.Ref {
 	var sourceData ir.Ref
 	var values []ir.Ref
 	var added ir.Ref
+	zeroFill := false
 	if call.Ellipsis.IsValid() {
-		source := g.expr(call.Args[1])
-		sourceType := g.typeAndValue(call.Args[1]).Type.Underlying()
-		basicType, isBasic := sourceType.(*types.Basic)
-		if isBasic && basicType.Kind() == types.String {
-			sourceData = g.cur.Load(ir.ClsP, source)
-			added = g.cur.Load(ir.ClsL, g.offset(source, 8))
+		if length, extends := appendedMakeLength(call, g.info); extends {
+			// append(s, make([]T, n)...) -- see appendedMakeLength. The elements
+			// copied out of the fresh slice are all zero, so the fresh slice is
+			// not built at all and the destination's new region is cleared
+			// instead.
+			added = g.expr(length)
+			g.guardExtensionLength(call.Args[1], added)
+			zeroFill = true
 		} else {
-			sourceData, added, _ = g.sliceParts(source)
+			source := g.expr(call.Args[1])
+			sourceType := g.typeAndValue(call.Args[1]).Type.Underlying()
+			basicType, isBasic := sourceType.(*types.Basic)
+			if isBasic && basicType.Kind() == types.String {
+				sourceData = g.cur.Load(ir.ClsP, source)
+				added = g.cur.Load(ir.ClsL, g.offset(source, 8))
+			} else {
+				sourceData, added, _ = g.sliceParts(source)
+			}
 		}
 	} else {
 		values = make([]ir.Ref, 0, len(call.Args)-1)
@@ -15205,7 +15385,27 @@ func (g *gen) appendCall(call *ast.CallExpr) ir.Ref {
 		byteOffset = g.cur.Mul(ir.ClsL, oldLength, g.fn.Long(elementSize))
 	}
 	writeAt := g.cur.Add(ir.ClsP, resultData, byteOffset)
-	if sourceData != ir.R {
+	if zeroFill {
+		byteLength := added
+		if elementSize != 1 {
+			byteLength = g.cur.Mul(ir.ClsL, added, g.fn.Long(elementSize))
+		}
+		// The new region has to be cleared on both paths and not only the
+		// growing one. runtime.growslice clears [newLen, cap) and leaves
+		// [oldLen, newLen) alone for a pointer-free element type, because the
+		// append that called it is expected to overwrite exactly that; and the
+		// non-growing path is reusing a backing array whose tail holds whatever
+		// a previous, longer life of the slice left there.
+		//
+		// A pointer-bearing element type is cleared through the barrier, for
+		// the same reason `clear` is: zeroing a pointer word is a deletion and
+		// the collector has to see it.
+		if g.runtimeAllocation && !g.noWriteBarrier && len(pointerWordIndices(elementType)) != 0 {
+			g.cur.CallVoid(g.fn.Sym("runtime.memclrHasPointers", 0), writeAt, byteLength)
+		} else {
+			g.cur.Call(ir.ClsP, g.fn.Sym("goc_memset", 0), writeAt, g.fn.Word(0), byteLength)
+		}
+	} else if sourceData != ir.R {
 		if g.runtimeAllocation && !g.noWriteBarrier && len(pointerWordIndices(elementType)) != 0 {
 			g.cur.Call(
 				ir.ClsL,

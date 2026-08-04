@@ -49,9 +49,10 @@ func main() {
 	var escapeDiagLevel escapeDiagFlag
 	flag.Var(&escapeDiagLevel, "m", "print escape decisions: 1 the rule that placed each allocation, 2 also the chain to the deciding use")
 	escapeDiag := (*int)(&escapeDiagLevel)
+	escapeDiagMatch := flag.String("m-match", "", "with -m, report every source path containing this `substring` instead of only the compiled file")
 	flag.Parse()
 	if flag.NArg() != 1 {
-		fmt.Fprintln(os.Stderr, "usage: goc [-O] [-m[=2]] [-target arch] [-o out] [-runtime runtime.gocrt] [-cpuprofile prof] [-c|-S|-emit-ir|-run] file.go")
+		fmt.Fprintln(os.Stderr, "usage: goc [-O] [-m[=2]] [-m-match pkg] [-target arch] [-o out] [-runtime runtime.gocrt] [-cpuprofile prof] [-c|-S|-emit-ir|-run] file.go")
 		os.Exit(2)
 	}
 	// -m overrides GOC_M, which opt read at init. Off is the default in both, and
@@ -59,6 +60,12 @@ func main() {
 	// docs/escape-diagnostics.md.
 	if *escapeDiag > 0 {
 		opt.SetEscapeDiagLevel(*escapeDiag)
+	}
+	// Likewise for -m-match over GOC_M_MATCH. An empty value is the default
+	// restriction to the compiled file, so an unset flag leaves the environment's
+	// answer alone rather than clearing it.
+	if *escapeDiagMatch != "" {
+		opt.SetEscapeDiagMatch(*escapeDiagMatch)
 	}
 	if *cpuProfile != "" {
 		check(startCPUProfile(*cpuProfile))

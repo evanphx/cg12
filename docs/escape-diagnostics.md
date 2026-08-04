@@ -14,6 +14,30 @@ It is off by default and costs nothing off. See "Cost when off" below.
 `-m` on the command line overrides `GOC_M`. The report goes to stderr, as gc's
 does.
 
+## Asking about a package the program only imported
+
+By default the report covers the file the compiler was pointed at and nothing
+else, because goc compiles a whole program including a vendored standard library
+and the lines a reader asked for would otherwise be lost among ten thousand
+others.
+
+The question that matters is often about the standard library, though -- "why is
+`log/slog`'s `handleState` on the heap" is not answerable from the program's own
+file. `-m-match` takes a substring and reports every source path containing it:
+
+    goc -m=2 -m-match log/slog prog.go
+    GOC_M=2 GOC_M_MATCH=slices/slices.go goc prog.go
+
+    stdlib/src/log/slog/handler.go:119:2: log_slog_handleState does not escape
+    	ir pass: heap-alloc-candidate in log/slog.defaultHandler.Handle
+    stdlib/src/log/slog/handler.go:120:8: struct_code_uintptr__receiver__log_slog_handleSt does not escape
+    	front end: method-value-descriptor in log/slog.defaultHandler.Handle
+
+The match replaces the default restriction rather than adding to it, so
+`-m-match log/slog` does not report the program's own file. `-m-match ""` is the
+default; there is no way to ask for everything, and asking for it would not be
+useful.
+
 ## Why it exists
 
 Every escape-analysis defect found in this tree so far was found by building a
@@ -202,6 +226,9 @@ differential**, and they are not the same size:
 | the level, and the only reader of it | `opt.EscapeDiagLevel` / `opt.SetEscapeDiagLevel` (`opt/escapediag.go`) |
 | `GOC_M` | read once at `opt` package init |
 | `-m` | `cmd/goc/main.go`, overrides `GOC_M` |
+| the file filter | `opt.EscapeDiagMatch` / `opt.SetEscapeDiagMatch`, read by `opt.EscapeSites` |
+| `GOC_M_MATCH` | read once at `opt` package init |
+| `-m-match` | `cmd/goc/main.go`, overrides `GOC_M_MATCH` when non-empty |
 | the report | `opt.WriteEscapeDiagnostics`, called from `goc.compile` after `opt.LowerHeapAllocations` |
 | the AST walk's half | `goc/escapediag.go` |
 | the IR pass's half | `opt/escape.go`'s `candidateEscapes.reasons` |
