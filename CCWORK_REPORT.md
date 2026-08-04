@@ -7589,3 +7589,101 @@ variadic case needs, since `Record.Add` ranges over its parameter. The two
 should be one question, and the reason to say so carefully is that the variadic
 whitelist is conservative and the walk is a follow: unifying them relaxes a rule,
 which is the direction the nine miscompiles came from.
+
+## Item 2: the 96, and what moved
+
+**The count is 96 again.** The read-out fix put it at 97 and G12 brought it back
+to 96; `PESSIMISTIC` is 399, exactly the number the branch started from. What
+changed underneath is one line out and one line in, and both are worth having.
+
+**G12 -- a map lookup key (1 of 1). CLOSED. VERDICT: goc was wrong, gc is
+right.** `values[&mapPointerKey{value: 17}]` is a key `mapaccess` hashes,
+compares and forgets. The walk had no case for the index position of a map
+expression at all -- in any of the three places that answer the question -- so it
+fell to the conservative default.
+
+The previous classification said "it needs care about direction, because a map
+*assignment* key is retained", and that is exactly what the rule now says in both
+directions: `mapaccess` and `mapdelete` keep nothing, `mapassign` copies the key
+into the bucket. `runtime_map_pointer_keys.go` is the proof that the care was
+taken, because all three shapes are in that one program: **line 27's lookup key
+moves to the frame and lines 10 and 11's map-literal keys do not.**
+`delete(m, k)` came with it -- its key reaches the walk as a builtin call rather
+than as an index, so it needed its own case.
+
+**+1: `runtime_unsafe_struct_field.go:15`.** The inner half of a nested literal
+whose outer half the program then walks with `unsafe.Pointer` arithmetic. gc
+frames both; goc now heaps both. VERDICT: **gc is right and goc is
+over-conservative**, and it is the price of finding 2 -- one allocation in one
+program, against nine that were wrong.
+
+**The other nine groups are unchanged, and the previous classification's verdicts
+stand.** They were re-read against this branch's tree and none of them moved:
+
+| group | n | verdict, unchanged |
+| --- | --- | --- |
+| G1 maps have no frame-allocated header | 38 | **gc is right.** Not an analysis fix: four pieces, one of them a change to the census. Still the largest single thing left. |
+| G4 a value boxed into an interface | 17 | **gc is right.** Blocked on a frame form for a payload that survives the call -- and this is the group `json/kv-4-pairs` belongs to. |
+| G2 the `Read` buffer | 10 | **gc is right, and it is irreducible here.** Needs an inliner ahead of the walk. Four branches have now reached this answer; it should not be looked at a fifth time without one. |
+| G7 a stdlib summary the walk could not get through | 8 | **gc is right, one callee at a time.** |
+| G10 a composite literal handed to a call the walk cannot follow | 6 | **gc is right.** Deep, not blocked. |
+| G5 `new(T)` | 5 | **gc is right; five singletons that share a spelling.** Left alone, deliberately. |
+| G3 non-constant `make([]T, n)` | 5 | **gc is right, and it is a codegen capability**, not an analysis fix: gc emits a bounded frame buffer plus a runtime length test and goc has neither. |
+| G9 the loop rule | 3 | **goc is over-conservative; reducible, and the thing to prove first is still not proved.** Not touched, on purpose. |
+| G6 three separate causes | 3 | mixed. |
+
+**Why G3 was not taken even though it is the systematic one left.** It is the
+only remaining group that is one change rather than N, and the change is in the
+`make` lowering -- which this branch has already modified once, for the size
+bound. Adding the hybrid form would put a bounded frame buffer plus a length test
+into *every* non-constant make in every program, which is a census movement of a
+different order from anything else here and wants the allocation-count
+differential as its arbiter. Naming it as the next systematic group, with the
+size bound already in place beside it, is the useful thing this branch can do
+for it.
+
+## Guards
+
+| guard | result |
+| --- | --- |
+| `TestFrameEscapeAudit` | **PASS** |
+| `TestAllocationCensus` | **PASS**; regenerated, 36 lines, reviewed site by site above |
+| `TestLoopAliasAudit` | **PASS** |
+| `TestLoopAlias*` (loop-aliasing vs the host toolchain) | **PASS**; `loop_alias_frame_local.go` still `framed: 18 / within: 12 / literal: 18` |
+| `TestCompilingTheSameSourceTwiceGivesTheSameModule` | **PASS** |
+| `TestEscapeDiagnostic*` | **PASS** |
+| capability matrix, default arm | **PASS** (`make test-goc-status`) |
+| capability matrix, `-O` arm | **PASS** (`make test-goc-status-opt`) |
+| GC reducer `runtime_gc_type_mask_padding.go`, `GOGC=10`, `GOMAXPROCS=3`, 20 serial runs | **0/20 failed** |
+| GC reducer, default `GOGC`, `GOMAXPROCS=3`, 20 serial runs | **0/20 failed** |
+| `slog_allocations_baseline.txt` | **PASS**, unchanged by any of this |
+| `escape_gc_differential.txt`, `escape_gc_reason_differential.txt` | regenerated, diffs reviewed above |
+
+### `make bench-crypto`: it got 6% **faster**, and it is code placement
+
+The instrument fails in both directions and this run failed downward:
+`p256/verify` 35.82 -> 33.59 (-6.2%), `rsa2048/sign-verify` 12.86 -> 12.11
+(-5.8%). Its own message says to check the census for sites that moved
+HEAP -> FRAME and prove each one cannot outlive the frame. **There are none in
+the crypto path**: the whole branch moves 36 census lines, and the only ones in
+`crypto`, `bigmod`, `nistec` or `fips` are the twelve `fips140/ecdh` CAST sites
+moving frame -> **heap** -- the slow direction, in a `sync.OnceFunc` self-test
+that runs once and is not on the per-operation signing path.
+
+What did happen is the third cause the committed triage note names. **One source
+tree, two compilers** -- `main`'s `goc` and this branch's, both run over
+`goc/testdata/crypto_signing_bench/main.go` from `main`'s checkout, so the only
+variable is the compiler:
+
+    symbol                                        main        this branch   delta
+    crypto_internal_fips140_bigmod_addMulVVW      0x69d140    0x69d150      +16
+    crypto_internal_fips140_bigmod_addMulVVW2048  0x69cee8    0x69cef8      +16
+    crypto_internal_fips140_bigmod_Nat_Mul        0x77e754    0x77e768      +20
+    crypto_internal_fips140_nistec_p256Sqrt       0x791884    0x791898      +20
+
+goc gives function entries no alignment beyond the 4-byte instruction size, so
+every hot loop's phase inside the fetch granule is a running total of the bytes
+emitted before it. The hot crypto loops moved 16 to 20 bytes and no allocation
+left the heap on the measured path. This is the same coin the note describes,
+landing the other way up; the baseline is updated and the layout is not re-rolled,
+for the reasons that note gives.
