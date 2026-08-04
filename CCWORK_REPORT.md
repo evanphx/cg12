@@ -7649,15 +7649,19 @@ for it.
 | `TestFrameEscapeAudit` | **PASS** |
 | `TestAllocationCensus` | **PASS**; regenerated, 36 lines, reviewed site by site above |
 | `TestLoopAliasAudit` | **PASS** |
-| `TestLoopAlias*` (loop-aliasing vs the host toolchain) | **PASS**; `loop_alias_frame_local.go` still `framed: 18 / within: 12 / literal: 18` |
+| `TestLoopAlias*` (loop-aliasing vs the host toolchain) | **PASS**; `loop_alias_frame_local.go` still prints `framed: 18 / within: 12 / literal: 18` under both `-O` and not, and still has exactly one census line, `frame` -- 1 frame / 0 heap |
 | `TestCompilingTheSameSourceTwiceGivesTheSameModule` | **PASS** |
 | `TestEscapeDiagnostic*` | **PASS** |
-| capability matrix, default arm | **PASS** (`make test-goc-status`) |
-| capability matrix, `-O` arm | **PASS** (`make test-goc-status-opt`) |
+| capability matrix, default arm | **366/366 PASS**, 0 fail, 0 skip |
+| capability matrix, `-O` arm | **366/366 PASS**, 0 fail, 0 skip |
 | GC reducer `runtime_gc_type_mask_padding.go`, `GOGC=10`, `GOMAXPROCS=3`, 20 serial runs | **0/20 failed** |
 | GC reducer, default `GOGC`, `GOMAXPROCS=3`, 20 serial runs | **0/20 failed** |
 | `slog_allocations_baseline.txt` | **PASS**, unchanged by any of this |
-| `escape_gc_differential.txt`, `escape_gc_reason_differential.txt` | regenerated, diffs reviewed above |
+| `escape_gc_differential.txt`, `escape_gc_reason_differential.txt` | regenerated, diffs reviewed above; both reproduce on a second no-`-update` run |
+| `TestParallelBackendIsByteIdenticalToSerial` (`./arm64`) | **PASS** |
+| `go test ./opt ./internal/gcdiff ./ir` | **PASS** |
+| `gofmt -l`, `go vet` | clean |
+| `make bench-crypto` | **PASS** after the baseline update below |
 
 ### `make bench-crypto`: it got 6% **faster**, and it is code placement
 
@@ -7687,3 +7691,65 @@ emitted before it. The hot crypto loops moved 16 to 20 bytes and no allocation
 left the heap on the measured path. This is the same coin the note describes,
 landing the other way up; the baseline is updated and the layout is not re-rolled,
 for the reasons that note gives.
+
+## The three answers the brief asked for
+
+**1. How many of the 309 were real defects, and what were they.**
+
+**Two, and both are fixed.** They are not two lines of the file; they are two
+defects the file's 309 lines led to, and the second is much larger than the
+first.
+
+- **`returned -> too-large`, 2 lines: goc had no stack-size bound of any kind.**
+  The placements agreed only because those two slices happen to be returned.
+  Breaking the accident -- a 512 KB `new(T)` in a function that recurses 4 000
+  deep, which never leaves its frame -- gives a program the host toolchain runs
+  to completion and goc kills with `fatal error: stack overflow`. Fixed by
+  matching cmd/compile's `MaxImplicitStackVarSize`, 64 KB, in both places that
+  place implicit storage. One census site moved.
+
+- **`unexplained -> *`, 113 lines, which are not defects and are what said where
+  to look: the walk had no read-out rule, and that is nine live miscompiles in
+  `main`.** Those 113 are goc reaching the right answer by declining to prove the
+  wrong one, so the question they pose is what happens where a *positive* rule
+  fires. Sixteen programs, one per such rule; six failed, three more followed,
+  and all nine are one defect: the walk answered "the container's own storage
+  does not escape" to a question that asked "does anything the container holds
+  escape". A pointer read back out of a frame-local struct or array -- by a field
+  read, an index, a slice, `copy`, an `append` spread, or a callee doing any of
+  those -- was published with the container never leaving the frame. Every one
+  of the nine prints the right answer under gc and a clobbered frame under goc.
+  Fixed, at a cost of one new pessimistic line.
+
+The other 194 are not defects: 170 are goc's IR pass naming the store its
+lowering emitted where gc names the construct the source wrote -- both true,
+and the categorisation is what needs work; 11 are goc reaching gc's answer
+without gc's knowledge, in the safe direction; 8 are goc knowing more than gc;
+5 are goc's blanket loop rule against gc's flow edge for the same loop.
+
+**2. The new placement count.**
+
+**96**, the number the branch started from, reached by a different route: G12
+closed (a map lookup key, `-1`) and finding 2 added one
+(`runtime_unsafe_struct_field.go:15`, `+1`). `PESSIMISTIC` is 399 and
+`PERMISSIVE` is 1467, both unchanged; inside the permissive direction two lines
+that only gc explained are now placed the way gc places them, so the reason
+file's one-sided gc section drops 1329 -> 1327.
+
+**3. Are the two slog rows closed.**
+
+**No, and both are diagnosed to a named cause with a controlled experiment
+behind each.**
+
+- `info/3-attr-large-ints` is `foldSplitPayloadsBackIn`'s threshold, whose
+  calibration has expired: it was set against a split that cost four allocations
+  and the split costs three now. `GOC_PAYLOAD_FOLD=0` puts the row at
+  **3.00 / 24.0 B, which is gc exactly**. Not changed, because turning the fold
+  off moves 152 containers into frames and splits 348 payloads out across the
+  corpus, and that trade's arbiter is the allocation-count differential, not this
+  row.
+- `json/kv-4-pairs` is the deep variadic question -- `argument 2 of
+  $log/slog.Logger.Info may retain something inside a self-referential object` --
+  and it is **shared with both (1) and (2)**: the same `needsDeepSummary` refusal
+  as the 47-line variadic-container group in the differential, and the same
+  missing capability as G4 in the 96.

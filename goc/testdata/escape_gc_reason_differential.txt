@@ -94,9 +94,9 @@ confines the comparison to lines both compilers put on the heap.
 
 programs with reasons on both sides            399
 goc -m decisions at joinable positions        1797
-  of those on the heap                        1104
-  of those carrying a rule                    1104  (must equal the line above)
-  of those goc could not explain               172  (the "unexplained" category: goc saw the
+  of those on the heap                        1103
+  of those carrying a rule                    1103  (must equal the line above)
+  of those goc could not explain               171  (the "unexplained" category: goc saw the
                                                     object escape and could not name the use)
 goc -m decisions with no source position         0  (never joinable; so is the census)
 gc -m=2 explained blocks parsed               3014
@@ -422,8 +422,8 @@ columns what their explanations amount to. "neither" is almost entirely lines
 both compilers keep in a frame, which neither explains.
 
   placement                agree    differ  goc only   gc only   neither     total
-  agrees                     143       309        44        17       279       792
-  disagrees                   84       176       160      1327       685      2432
+  agrees                     143       309        44        17       280       793
+  disagrees                   84       176       159      1327       685      2431
 
 ## AGREE ON PLACEMENT, DISAGREE ON REASON: 309 lines
 
@@ -3698,7 +3698,7 @@ stdlib_slog_structured.go:58	mixed -> heap	stored-in-object -> stored-in-object
 	gc   col 6  heap  object  textOutput
 	     stored-in-object {storage for &slog.commonHandler{...}} <- slog.w via address-of -> interface-converted -> assign-pair -> struct literal element
 
-## PLACEMENT DISAGREES, ONLY goc EXPLAINED: 160 lines
+## PLACEMENT DISAGREES, ONLY goc EXPLAINED: 159 lines
 
 goc heaps something here that gc does not, so goc is the only compiler with
 anything to say. Grouped by goc's category, this is the pessimistic direction
@@ -3708,7 +3708,7 @@ hand before the diagnostic existed.
      91  stored-in-object
      25  call-retains
      23  closure-captured
-     13  unexplained
+     12  unexplained
       4  loop-carried
       2  stored-in-object,interface-boxed
       1  call-opaque
@@ -4214,11 +4214,6 @@ runtime_map_interface_keys_gc.go:20	mixed -> frame	stored-in-object -> -
 	     stored-in-object store into non-local storage
 	     at               testdata/runtime_map_interface_keys_gc.go:20:40
 	gc   col 22  frame  object  key{...}
-runtime_map_pointer_keys.go:27	heap -> frame	unexplained -> -
-	src  if values[&mapPointerKey{value: 17}] != 0 {
-	goc  col 12  heap  main_mapPointerKey  [front end: composite-literal in main.main]
-	     unexplained      the walk found a use it could not prove local
-	gc   col 12  frame  object  &mapPointerKey{...}
 runtime_method_expression.go:20	mixed -> absent	stored-in-object -> -
 	src  counter := methodExpressionCounter{base: 30}
 	goc  col 2  frame  main_methodExpressionCounter  [ir pass: heap-alloc-candidate in main.main]
