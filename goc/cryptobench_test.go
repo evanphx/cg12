@@ -117,15 +117,21 @@ const cryptoBenchHeader = `# Elapsed time on the crypto signing path under goc a
 #
 # # A movement is not automatically a regression
 #
-# goc gives function entries no alignment, so where the crypto code lands inside
-# the processor's 32-byte instruction fetch granule is decided by the total size
-# of everything emitted before it. Measured on the box this baseline was taken
-# on, with the compiled program held byte-for-byte identical and only the text
-# section shifted, this index is a square wave in that shift: period 32 bytes,
-# amplitude 6.1%, which is more than the tolerance. Before treating a movement
-# here as a regression, check whether the path's instruction *encodings* changed
-# at all -- goc/cryptobench_test.go's failure message gives the commands. A
-# movement with identical encodings is a placement flip and nothing got worse.
+# This used to be the main thing to know about this file. goc gave function
+# entries no alignment, so where the crypto code landed inside the processor's
+# 32-byte instruction fetch granule was decided by the total size of everything
+# emitted before it, and this index was a square wave in that shift with an
+# amplitude of 6.1% -- larger than the tolerance. goc now places a function that
+# contains a loop on a 32-byte boundary, which pins the phase, and the same
+# experiment moves this index by 0.4%.
+#
+# It is not zero. Alignment fixes a function's phase, not its address: two builds
+# still put the code in different cache sets, and a function with no loop in it
+# is still placed wherever the previous one ended. So before treating a movement
+# here as a regression, still check whether the path's instruction *encodings*
+# changed at all -- goc/cryptobench_test.go's failure message gives the commands.
+# A movement with identical encodings is a placement effect and nothing got
+# worse; it is now merely a much smaller one.
 #
 `
 
@@ -165,22 +171,30 @@ const cryptoBenchHeader = `# Elapsed time on the crypto signing path under goc a
 // ones this file was built for: an allocation moved, or the code generated for
 // the path changed. The third is that the code did not change at all and *moved*.
 //
-// It is not a small effect and it is not hypothetical. Measured on this box,
-// holding the compiled program byte-for-byte identical and shifting the whole
-// text section by K bytes, the p256/sign-verify index is a square wave in K with
-// a period of 32 bytes -- the Neoverse-N1 instruction fetch granule -- and an
-// amplitude of 6.1%:
+// It used to be a large effect. Measured on this box, holding the compiled
+// program byte-for-byte identical and shifting the whole text section by K
+// bytes, the p256/sign-verify index was a square wave in K with a period of 32
+// bytes -- the Neoverse-N1 instruction fetch granule -- and an amplitude of 6.1%
+// against a tolerance of 0.04:
 //
 //	K mod 32 = 0    index 47.72 - 47.86
 //	K mod 32 = 16   index 44.79 - 44.83
 //
-// The tolerance is 0.04. So a change anywhere in the program that alters the
-// number of bytes emitted before the crypto code -- including a change to a cold
-// branch in an unrelated package, which is what 96996b0 was -- can move this row
-// by more than the tolerance while the ECDSA path's instructions are unchanged.
-// goc gives function entries no alignment (arm64/mc.go lays each function down at
-// len(o.Text)), so which half of the wave a build lands in is decided by the
-// running total of every byte emitted before it.
+// So a change anywhere in the program that altered the number of bytes emitted
+// before the crypto code -- a cold branch in an unrelated package, which is what
+// 96996b0 was -- could move this row by more than the tolerance while the ECDSA
+// path's instructions were unchanged.
+//
+// goc now aligns the entry of every function that contains a loop to 32 bytes
+// (arm64/align.go), which is >= the granule, so a function's phase no longer
+// depends on anything emitted before it. The same K sweep now moves this index
+// by 0.4%, and across the eight-program corpus at goc/testdata/placement_bench
+// the median case moves 1.0% where it used to move 14.6%. CCWORK_REPORT.md,
+// "Should goc align function entries", is the measurement.
+//
+// The residue is not zero and is not expected to be. Alignment pins a phase, not
+// an address: two builds put the code in different cache sets, and a function
+// with no loop in it is still laid down wherever the previous one ended.
 //
 // Which is to say: this row failing is not by itself evidence that anything got
 // worse. compareCryptoBench's message says how to tell the three apart.
@@ -430,10 +444,12 @@ func compareCryptoBench(t *testing.T, accepted, found []cryptoBenchRow) {
 			"     Compare the encoding column, not objdump's rendering: it prints absolute branch\n"+
 			"     targets, which differ whenever the text shifts even if the code is identical.\n\n"+
 			"  3. Nothing changed and the code moved. If (2) says the bytes are identical and the\n"+
-			"     symbol addresses differ by a constant, this is a code placement flip, and the\n"+
-			"     honest answer is that nothing got worse. See TestCryptoSigningBench's doc: the\n"+
-			"     index is a square wave in the text offset, period 32 bytes, amplitude 6.1%%, and\n"+
-			"     the tolerance is 4%%. This is what happened at 96996b0.\n\n"+
+			"     symbol addresses differ, this is a code placement effect and the honest answer\n"+
+			"     is that nothing got worse. This is what happened at 96996b0, when it was worth\n"+
+			"     6.1%% because functions had no alignment at all. goc now places a function with a\n"+
+			"     loop in it on a 32-byte boundary, so the same shift is worth about 0.4%% and (3)\n"+
+			"     is no longer a likely explanation for a movement past a 4%% tolerance. Check the\n"+
+			"     addresses anyway -- alignment fixes a phase, not an address.\n\n"+
 			"Only (1) and (2) are regressions. Then rerun with -update-crypto-bench.\n  %s",
 		strings.Join(slower, "\n  "))
 	assert.Empty(t, faster,

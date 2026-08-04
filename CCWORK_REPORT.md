@@ -7474,3 +7474,64 @@ shipped policy it moves 1.89%, and it is 14% faster.
 `sha` is the useful negative: SHA-256's compression loop is small and its spread
 is 0.23% with no alignment at all. Not everything is sensitive, and a corpus is
 how you find that out.
+
+### The control: shifts that move the address without moving the phase
+
+The sweep above shifts by 0, 4, ... 28 bytes, which changes both a function's
+address and its position inside the 32-byte fetch granule. Run the same grid at
+shifts of 32, 64, 96 and 128 -- all 0 mod 32, so under *no* alignment at all the
+phase is untouched and only the address moves -- and the effect very nearly
+vanishes:
+
+    shifts            none median   none worst
+    0,4,...,28        14.62%        44.18%     phase and address both move
+    32,64,96,128       0.71%        13.81%     only the address moves
+
+`interp/bytecode-loop`, the cleanest case in the corpus (noise 0.29%), is 44.11%
+under the first and 3.74% under the second.
+
+So the thing that makes a goc-built benchmark's number depend on unrelated code
+is the fetch granule, and it is not cache-set aliasing wearing a disguise. That
+matters for the decision, because alignment addresses exactly the first and does
+nothing about the second: on the phase-preserving shifts, `none`, `a32` and
+`loop32` have spreads of 0.71%, 0.76% and 1.05% -- the same number -- and
+alignment is worth only -1.1% on the mean rather than -3.0%. The rest of the
+-3.0% is what pinning the phase to 0 buys.
+
+## The decision: yes, align the entry of every function that contains a loop
+
+`arm64/align.go`, shipped defaults: `funcAlign = 32`, `loopFuncsOnly = true`,
+`loopAlign = 0`. The trade, stated plainly:
+
+  - **What it buys.** The spread a benchmark's number has for reasons unrelated
+    to the code being benchmarked falls from a 14.6% median to 1.0%, against a
+    0.08% measurement floor -- and on 13 of the 19 cases the remainder is at or
+    below that case's own run-to-run noise, which is as far as this instrument
+    can see. The specific failure that produced this job -- a commit that touched
+    no line of the ECDSA path being reported as a 6.2% regression -- is worth
+    0.4% after this change.
+  - **What it costs.** 0.72% of `.text`, which is 0.12% of a linked binary.
+  - **What it also does.** It is 2.95% faster on the geometric mean of the 19
+    cases and faster on all 19, because phase 0 is better than the average phase
+    rather than merely more predictable.
+
+Why 32 and not 16: 16 is smaller than the granule, so it absorbs an upstream size
+change only modulo 16 and leaves the phase flipping between 0 and 16. Measured,
+it is worth 1.93% median spread against 32's 1.00%, and it is the reason last
+night's 16-byte experiment looked like a 5.78% *win* -- it was the same coin
+landing the other way.
+
+Why only functions with a loop: aligning every function costs 2.37% of `.text`
+instead of 0.72% and measures the same -- 1.00% median spread against 1.01%,
+-3.42% mean against -2.95%, both differences inside the noise on every case whose
+noise is small enough to say. A function with no backward branch is fetched once.
+
+Why not loop headers as well: it costs 4.40% of `.text` -- six times the shipped
+policy, and more than aligning every function entry -- for a 1.14% median spread,
+which is not better. The intuition that loop heads are the frugal place to spend
+padding is wrong here: a function has one entry and several back-edge targets.
+
+Why not 64: it is the best row in the spread table (0.65% median) and it costs
+5.04% of `.text`, seven times the shipped policy, for 0.35 points of a statistic
+whose floor is 0.08. It is worth revisiting on a machine with a 64-byte fetch
+granule; this one has 32.
