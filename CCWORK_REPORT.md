@@ -5207,3 +5207,320 @@ recovered from the flow's source.
 only possible where both compilers put the object on the heap.** That is a
 property of the two instruments, not a choice made here, and it is what makes
 "agree on placement, disagree on reason" mean specifically "both heap".
+
+## 2. What landed
+
+| what | where |
+| --- | --- |
+| the taxonomy, and both classifiers | `internal/gcdiff/reasons.go` |
+| the two new parsers: gc's `-m=2` flow chains, goc's own `-m` | `internal/gcdiff/explain.go` |
+| the join, and the coverage accounting | `internal/gcdiff/reasonjoin.go` |
+| the rendered file | `internal/gcdiff/reasonreport.go` |
+| the driver, opt-in behind a flag | `goc/gcdiffreason_test.go` |
+| the committed output, 10 990 lines | `goc/testdata/escape_gc_reason_differential.txt` |
+| a knob so a concurrent driver can take each report separately | `opt.SetEscapeDiagWriter` |
+
+**Re-running it after a merge is one command**, documented in the file's own
+header:
+
+    go test ./goc -run TestEscapeReasonDifferentialAgainstGC -timeout 60m \
+        -escape-gc-reason-differential -update-escape-gc-reason-differential
+
+It takes about 3 minutes on this machine and fails in both directions: the test
+asserts the rendered file equals the committed one, so a disagreement that
+appears and a disagreement that goes away both fail.
+
+**The placement comparison is untouched.** `escape_gc_differential.txt` is
+byte-identical, `ParseGCFlagM` is not modified, and the reason side is a second
+pass over the result the placement join already produced. gc's reasons come
+from a *second* host build at `-m=2` rather than from parsing placements out of
+`-m=2`, which would have been one build instead of two but would have put a
+baseline several jobs have accepted at the mercy of a parser change.
+
+### The categories
+
+Twelve, naming the mechanism by which the object outlives its frame:
+`call-retains`, `stored-in-object`, `interface-boxed`, `closure-captured`,
+`returned`, `channel-send`, `read-out`, `too-large` (gc only), `loop-carried`,
+`folded`, `call-opaque`, `unexplained` (the last four goc only), plus
+`uncategorised` for anything that falls out.
+
+The four goc-only categories are goc-only *structurally*. gc's escape analysis
+is complete over the package it compiles plus the summaries in export data, so
+it never has to answer "I could not tell"; where it cannot see, it has a fact.
+
+One translation in the table is not a lookup, and it is documented as such: goc
+lowers `go f(x)`, `defer f(x)` and `ch <- x` to calls into the runtime *before*
+its escape analysis runs, so its reason for them names `$runtime.newproc`,
+`$runtime.deferproc` or `$runtime.chansend`. gc's analysis runs on a tree that
+still has the construct. Mapping those three callees back to the construct is a
+translation between vocabularies; without it, 111 corpus sites where the two
+compilers agree completely would read as disagreeing about a call. The list is
+closed at three -- any other runtime entry point is a call like any other.
+
+## 3. THE DELIVERABLE: 309 lines agree on placement and disagree on reason
+
+Both compilers put something on the line on the heap; the mechanisms they name
+have nothing in common. **206 of the 309 carry exactly one explained allocation
+on each side**, so the two explanations are certainly about the same object; the
+other 103 carry more than one, and there the pairing is the line rather than the
+allocation. Both are listed and each line says which it is.
+
+The whole distribution, goc's category then gc's:
+
+```
+  116  stored-in-object                   call-retains
+   42  unexplained                        call-retains
+   41  unexplained                        stored-in-object
+   37  stored-in-object                   closure-captured
+   15  unexplained                        returned
+   12  call-opaque                        call-retains
+    9  stored-in-object                   returned
+    9  unexplained                        channel-send
+    8  stored-in-object                   interface-boxed
+    3  loop-carried                       stored-in-object
+    3  stored-in-object,loop-carried      call-retains
+    3  unexplained                        stored-in-object,channel-send
+    2  call-retains                       stored-in-object
+    2  returned                           too-large
+    1  each of seven other pairs
+```
+
+### Triage: what these actually are
+
+**(a) 153 lines -- goc explains the machine, gc explains the language.**
+`stored-in-object -> call-retains` (116) and `stored-in-object ->
+closure-captured` (37). Both descriptions are true of the same event, at
+different levels. Two representative pairs:
+
+    runtime_atomic_counter.go:10   var counter int64
+      goc  write barrier into a candidate     at runtime_atomic_counter.go:14:6
+      gc   {storage for func literal} <- &counter via captured by a closure
+
+    runtime_cleanup_frame_retention_masked.go:47   panic(label + ": cleanup did not run")
+      goc  store into non-local storage
+      gc   {heap} <- &{storage for label + ...} via spill -> call parameter
+
+goc's IR pass names the store its lowering emitted; gc names the construct the
+source wrote. In the first, goc's `at:` position (14:6) *is* the closure
+literal -- the pass already knows where the destination came from, it just does
+not say what the destination is. This is the single most fixable class in the
+file and is where an improvement to goc's diagnostic should go.
+
+**(b) 110 lines -- goc has no explanation, and says so.**
+Every `unexplained -> *` row. goc's rule is `the walk found a use it could not
+prove local` or `<name> is used here in a way the walk cannot prove keeps it
+local`; the first carries no `at:` either, so there is no rule *and* no
+position. gc, on the same lines, names an assignment, a call parameter, a
+return or a channel send. These are not disagreements about the program. They
+are goc declining to answer where gc answers.
+
+**(c) 12 lines -- goc reached gc's answer without gc's knowledge.**
+`call-opaque -> call-retains`: goc heaps because it cannot see into the callee
+(no declaration in this compilation, no Go body and no `//go:noescape`, or a
+recursion it cut by answering "escapes"); gc heaps because it *knows* the
+callee retains the argument. Same placement, and only one of them is an
+analysis result.
+
+**(d) 8 lines -- goc knows something gc does not, and is more specific.**
+The `runtime_cleanup_*` programs: goc says `assigned to the package-level
+variable escapeSink`, with an `at:` pointing into
+`stdlib/src/internal/abi/escape.go:30:3`, where gc says only `call parameter`.
+goc compiles the whole program from source and followed the pointer into the
+vendored helper; gc stops at the call. This is the direction the file was
+built to be able to see, and it is the smallest class in it.
+
+**(e) 2 lines -- the flagship. `returned -> too-large`, and goc has no size
+rule at all.**
+
+    runtime_gc_memory_limit.go:44        out := make([]*tenant, 0, tenantCount)   // 20 000
+    runtime_gc_metadata_hugepages.go:50  out := make([]*record, 0, liveRecords)   // 24 576
+
+gc heaps both because they will not fit in a frame. goc heaps both because they
+are returned. The placements agree, so `escape_gc_differential.txt` sees
+nothing; the reasons agree about nothing, and the coincidence is doing all the
+work.
+
+`goc/compile.go`'s `make` lowering places a fixed-capacity backing array in the
+frame whenever `makeResultDoesNotEscape(call)` -- with **no size bound of any
+kind**. `grep` for one across `opt/` and `goc/` finds nothing. cmd/compile's
+equivalent bound is 64 KB for an implicit variable.
+
+It is reachable in the committed corpus without the coincidence:
+
+    runtime_gc_heap_growth_shrink.go:105   small := make([]*resident, 0, 65536)
+      goc  frame   (65536 x 8 = 512 KB in main.grow's frame)
+      gc   heap    "too large for stack"
+
+and it scales without limit. A synthetic probe:
+
+    func sum() int { buffer := make([]int, 0, 200000); ...; return buffer[0] }
+
+    goc -m:  200000_int does not escape
+    objdump: sub x17, x17, #0x186, lsl #12 ; sub x17, x17, #0xad0   -> 1 600 208 bytes
+
+**Severity, stated precisely: this is not a corruption.** goc emits the stack-
+growth prologue, so `runtime.morestack` grows the goroutine stack and the
+program runs correctly -- the probe above exits 0. The cost is a 1.6 MB
+goroutine stack, zeroed on every call, and a stack copy at the growth point.
+That is what gc's 64 KB rule exists to prevent.
+
+**Deliberately not fixed here.** Adding a size bound moves allocations, and the
+guards for this job are "no compiler behaviour change". It wants its own change
+with its own census diff.
+
+## 4. The reverse: 85 lines disagree on placement and agree on reason
+
+The literal reverse question is nearly empty *by construction*, and the file
+says so rather than reporting a small number as if it were a measurement:
+**neither compiler explains a frame placement.** gc prints `does not escape` and
+stops; goc prints the same and stops, deliberately and for the same stated
+reason. So on a line the two place differently, the compiler that framed has
+said nothing there is anything to agree with.
+
+The 85 that exist are therefore all `heap -> mixed` or `mixed -> heap`: a line
+carrying more than one allocation, where the shared category comes from
+something else on the line. 47 of them are one shape:
+
+    allocation_counts.go:55   func sprintfString() { sinkString = fmt.Sprintf("value=%s", theString) }
+      goc  heap   the []any backing array
+           call-retains  argument 1 of $fmt.Sprintf may retain something inside a self-referential object
+      gc   frame  the "... argument" slice
+           heap   the boxed theString
+           call-retains  {heap} <- {storage for ... argument} via slice-literal-element -> call parameter
+
+**Same reason, different object.** goc heaps the variadic container; gc frames
+the container and heaps only the payload inside it. goc's `needsDeepSummary`
+path -- "may retain something inside a self-referential object" -- forces the
+whole container out where gc separates the container from its contents. That is
+"one compiler simply knows more", with the rule that costs it named.
+
+The *useful* form of the reverse question is the one-sided sections, and they
+are the best triage in the file:
+
+- **`PLACEMENT DISAGREES, ONLY gc EXPLAINED`: 1 316 lines.** 1 250 are `absent
+  -> heap` (the census records nothing on the line) and **44 are the sharp
+  permissive set: `frame -> heap` (30) and `frame -> mixed` (14), where goc
+  definitely framed.** Every one now carries gc's own statement of what it
+  thinks publishes the object: 35 `call-retains`, 3 `stored-in-object`, 2
+  `interface-boxed`, 2 `closure-captured`, 1 `too-large`, 1 both. Two worth
+  looking at first: `runtime_loopvar_three_clause.go:38` and `:85`, where gc
+  says `captured by a closure` about a loop variable goc frames -- the known
+  per-iteration-copy artefact, and now visibly so rather than by inference --
+  and `runtime_gc_heap_growth_shrink.go:105`, which is finding (e) above with
+  the placements disagreeing.
+- **`PLACEMENT DISAGREES, ONLY goc EXPLAINED`: 255 lines** (167 `heap ->
+  absent`, 63 `heap -> frame`, 25 mixed), grouped by goc's own rule: 98
+  `stored-in-object`, 70 `unexplained`, 45 `closure-captured`, 26
+  `call-retains`, 7 `call-opaque`, 4 `loop-carried`. This is `GROUP BY rule`
+  over the pessimistic direction -- the thing two earlier triage jobs did by
+  hand.
+
+## 5. Uncategorised: 0 on both sides
+
+Nothing fell out of the taxonomy: 0 goc rules, 0 gc flow edges, 0 lines of
+goc's own `-m` the parser could not read. The test fails while any exist, and
+prints each with its position.
+
+That is a claim about coverage, not about completeness, and the file separates
+the two. What the taxonomy covers is every reason either compiler *gave*. What
+it cannot cover is a reason not given, and there are three such holes, all
+counted in the file:
+
+1. **227 of goc's 1 192 heap rules (19%) are the `unexplained` category** --
+   goc watched the object escape and could not name the use. 134 of the ones
+   listed carry no `at:` position either.
+2. **154 heap lines goc's `-m` gives no rule for at all.** All of them are
+   `make(chan)` (93), `make(map)` (49) or `make([]T)` (13) -- allocators goc
+   never considers for a frame, so the placement is not a decision and there is
+   no rule to print. gc is the same about channels, which is why this join has
+   to synthesize them.
+3. **169 gc heap decisions with no `-m=2` explanation**, 136 of them the
+   synthesized channel decisions, leaving 33 real ones.
+
+## 6. Two things the instrument found about the instruments
+
+**(i) The placement differential is blind to 110 gc heap allocations.**
+`-m=2` explains two things `-m` prints no verdict for at all: the closure a
+`go` or `defer` statement builds (40 corpus sites) and the backing array an
+escaping `append` reallocates (70). `escape_gc_differential.txt` reads level 1,
+so on those lines it records gc as having nothing -- and a line where goc heaps
+the same object therefore reads through that join as *goc being pessimistic*
+when the two compilers agree. The full list is in the reason file under
+`NOT IN -m`. Fixing it means changing the placement differential, which this
+job was told not to do.
+
+**(ii) goc's two instruments do not record the same set of allocations, and now
+say so.** Over the joined lines: 1 335 both record and agree, 153 only the
+census records, 18 only `-m` records, and **1 contradiction** --
+`runtime_loopvar_goroutine_defer.go:38`, where the census has a heap
+`runtime.makemap` at column 26 that `-m` does not report. That is case (2)
+above, not drift. The test asserts on contradictions only; the two one-sided
+counts are scope differences and are reported rather than asserted.
+
+## 7. Does goc's diagnostic need to say more? Yes -- four things, in order
+
+1. **Name what the store's destination is.** The IR pass's `write barrier into a
+   candidate` (338 rules) and `store into non-local storage` (166) are the
+   largest source of disagreement in the file (153 lines) and both are true
+   descriptions of an event gc describes better. The pass has the destination
+   reference in hand at the moment it marks. Saying "into the closure created at
+   X" / "into the result area" / "into a global" would close most of the 153.
+   This is the highest-value change and it is in `opt/escape.go`.
+2. **Reduce the 19% the walk cannot explain.** `the walk found a use it could
+   not prove local` is `escapeWhy`'s fallback for when no branch on the failing
+   path named itself. Each such branch is a `diagRule` call that does not exist
+   yet.
+3. **Report positionless decisions.** `EscapeSites` filters by file, and a site
+   with no position has no file, so `goc -m` never mentions the per-iteration
+   copies the loop rule makes -- which are the largest documented caveat on the
+   placement differential. The catch is real and should be weighed: `?: subject
+   escapes to heap` does not parse as a cmd/compile diagnostic, so reporting
+   them costs the gc-shaped property the diagnostic was built for.
+4. **`gcdiff.subjectKind` is wrong for goc's subjects** (everything comes out
+   `KindObject`, since goc's subject is a type-descriptor symbol). The reason
+   join does not use `Kind`, so this cost nothing here; anything joining two
+   `GCReport`s will pay it.
+
+**One improvement landed** (adf663c): the walk's `reportEscapingUse` has two
+callers and one of them knows more than "a use decided" -- the use is inside a
+function literal the walk has just proved escapes, so the mechanism is closure
+capture and it now says so. Worth exactly **one** corpus site, and the reason it
+is only one is itself the finding: goc's front-end walk almost never reaches
+closure capture by that path. The 37 closure-capture disagreements come from the
+IR pass, which is item 1 above.
+
+## 8. GUARDS
+
+All re-run after the `goc/compile.go` change, on the final tree:
+
+| guard | result |
+| --- | --- |
+| `TestCompilingTheSameSourceTwiceGivesTheSameModule` | PASS |
+| `TestParallelBackendIsByteIdenticalToSerial` (`./arm64`) | PASS |
+| `TestEscapeDiagnostic*` (incl. `DoesNotChangeTheEmittedModule`, `ParsesAsGCFlagM`) | PASS |
+| `TestAllocationCensus` -- reproduces `alloc_census_baseline.txt` | PASS |
+| `TestFrameEscapeAudit` -- reproduces `frame_escape_baseline.txt` | PASS |
+| `escape_gc_differential.txt` | untouched, `git diff` empty |
+
+No allocation moved. The only compiler-visible change is one diagnostic string,
+emitted only when `-m` is on, which is off by default.
+
+`go test ./goc/...`, the capability matrix and `make test-unit` were **not** run
+here, as instructed -- the dependent gate job runs those.
+
+## 9. Numbers, for the merge
+
+Re-run the one command in section 2 after the placement branch merges; the
+placement half of this file comes from the committed census and the reason half
+is compiled fresh, and the coverage table's "lines both record and contradict"
+is what says the two have drifted apart.
+
+| | |
+| --- | --- |
+| agree on placement, disagree on reason | **309** (206 unambiguous) |
+| most common such disagreement | **`stored-in-object` vs `call-retains`, 116 lines** |
+| disagree on placement, agree on reason | 85 (all multi-allocation lines) |
+| uncategorised, either side | **0** |
+| goc heap rules that are goc declining to answer | 227 of 1 192 |
+| gc heap allocations the placement differential cannot see | 110 |

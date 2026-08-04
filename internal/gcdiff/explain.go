@@ -182,6 +182,15 @@ type GocSite struct {
 	Use   string
 }
 
+// sortKey is a total order over the sites on one line, so that the rendered
+// differential does not depend on which order an unstable sort left two sites
+// the key cannot tell apart. It mirrors opt.EscapeSite.sortKey, which orders
+// the report this parser reads.
+func (site GocSite) sortKey() string {
+	return fmt.Sprintf("%09d|%s|%s|%s|%s|%s|%s",
+		site.Col, site.Subject, site.Placer, site.Site, site.Func, site.Placement, site.Rule)
+}
+
 // GocReport is what ParseGocFlagM got out of one program's -m.
 type GocReport struct {
 	// Program is the corpus program's base name.

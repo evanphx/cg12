@@ -113,8 +113,11 @@ lines only the census records                 153  (an allocation goc's own -m c
                                                     explain at all)
 lines only goc -m records                      18  (expected: the census omits ordinary
                                                     front-end frame slots)
-lines both record and contradict                1  (this one means the tree moved under
-                                                    the committed census)
+lines one records a subset of the other        1  (the same scope difference, arriving on
+                                                    a line where the two also overlap)
+lines both record and contradict               0  (neither instrument's placements contain
+                                                    the other's: this one means the tree
+                                                    moved under the committed census)
 heap lines goc -m gives no rule for           154  (the blind spot: a heap allocation this
                                                     file cannot speak for. They are listed
                                                     below; in the committed run all of them
@@ -125,7 +128,7 @@ heap lines goc -m gives no rule for           154  (the blind spot: a heap alloc
                                                     gc is the same about channels, which is
                                                     why this join synthesizes them)
 
-  CONTRADICTION: runtime_loopvar_goroutine_defer.go:38: census says mixed, goc -m says frame
+  SUBSET: runtime_loopvar_goroutine_defer.go:38: census says mixed, goc -m says frame
 
   NO RULE: append_make.go:11: census says heap, goc -m gives no heap rule
   NO RULE: nested_defer.go:12: census says heap, goc -m gives no heap rule
@@ -1241,21 +1244,21 @@ runtime_goroutine_entry_stack_map.go:69	heap -> heap	unexplained -> stored-in-ob
 runtime_goroutine_entry_stack_map.go:101	heap -> heap	stored-in-object,loop-carried -> call-retains
 	src  var seasoning sync.WaitGroup
 	goc  col 3  heap  sync_WaitGroup  [ir pass: heap-alloc-candidate in main.main]
-	     stored-in-object write barrier into a candidate
-	     at               testdata/runtime_goroutine_entry_stack_map.go:101:3
-	goc  col 3  heap  sync_WaitGroup  [ir pass: heap-alloc-candidate in main.main]
 	     loop-carried     allocated in a loop; one frame slot cannot hold one object per iteration
 	     at               testdata/runtime_goroutine_entry_stack_map.go:100:18
+	goc  col 3  heap  sync_WaitGroup  [ir pass: heap-alloc-candidate in main.main]
+	     stored-in-object write barrier into a candidate
+	     at               testdata/runtime_goroutine_entry_stack_map.go:101:3
 	gc   col 7  heap  object  seasoning
 	     call-retains     {heap} <- &seasoning via address-of -> call parameter
 runtime_goroutine_entry_stack_map.go:108	heap -> heap	stored-in-object,loop-carried -> call-retains
 	src  var wait sync.WaitGroup
 	goc  col 3  heap  sync_WaitGroup  [ir pass: heap-alloc-candidate in main.main]
-	     stored-in-object write barrier into a candidate
-	     at               testdata/runtime_goroutine_entry_stack_map.go:108:3
-	goc  col 3  heap  sync_WaitGroup  [ir pass: heap-alloc-candidate in main.main]
 	     loop-carried     allocated in a loop; one frame slot cannot hold one object per iteration
 	     at               testdata/runtime_goroutine_entry_stack_map.go:100:18
+	goc  col 3  heap  sync_WaitGroup  [ir pass: heap-alloc-candidate in main.main]
+	     stored-in-object write barrier into a candidate
+	     at               testdata/runtime_goroutine_entry_stack_map.go:108:3
 	gc   col 7  heap  object  wait
 	     call-retains     {heap} <- &wait via address-of -> call parameter
 runtime_gosched_progress.go:7	heap -> heap	stored-in-object -> closure-captured
@@ -2548,11 +2551,11 @@ stdlib_errors_join_is_as.go:20	heap -> heap	stored-in-object -> call-retains
 stdlib_errors_join_is_as.go:26	heap -> heap	stored-in-object,loop-carried -> call-retains
 	src  var extracted customError
 	goc  col 3  heap  main_customError  [ir pass: heap-alloc-candidate in main.main]
-	     stored-in-object write barrier into a candidate
-	     at               testdata/stdlib_errors_join_is_as.go:26:3
-	goc  col 3  heap  main_customError  [ir pass: heap-alloc-candidate in main.main]
 	     loop-carried     allocated in a loop; one frame slot cannot hold one object per iteration
 	     at               testdata/stdlib_errors_join_is_as.go:17:22
+	goc  col 3  heap  main_customError  [ir pass: heap-alloc-candidate in main.main]
+	     stored-in-object write barrier into a candidate
+	     at               testdata/stdlib_errors_join_is_as.go:26:3
 	gc   col 7  heap  object  extracted
 	     call-retains     {heap} <- &extracted via address-of -> interface-converted -> call parameter
 stdlib_flag_parse.go:11	heap -> heap	unexplained -> call-retains
@@ -3498,34 +3501,34 @@ runtime_range_target_order.go:155	heap -> mixed	call-retains -> call-retains
 	     call-retains     {heap} <- {storage for ... argument} via spill -> slice-literal-element -> spill -> call parameter
 stdlib_archive_tar_roundtrip.go:26	mixed -> heap	stored-in-object -> stored-in-object
 	src  var archive bytes.Buffer
+	goc  col 2  frame  bytes_Buffer  [ir pass: heap-alloc-candidate in main.main]
 	goc  col 2  heap  bytes_Buffer  [ir pass: heap-alloc-candidate in main.main]
 	     stored-in-object write barrier into a candidate
 	     at               testdata/stdlib_archive_tar_roundtrip.go:26:2
-	goc  col 2  frame  bytes_Buffer  [ir pass: heap-alloc-candidate in main.main]
 	gc   col 6  heap  object  archive
 	     stored-in-object {storage for &tar.Writer{...}} <- tar.w via address-of -> interface-converted -> assign-pair -> struct literal element
 stdlib_archive_zip_roundtrip.go:12	mixed -> heap	stored-in-object -> stored-in-object
 	src  var archive bytes.Buffer
+	goc  col 2  frame  bytes_Buffer  [ir pass: heap-alloc-candidate in main.main]
 	goc  col 2  heap  bytes_Buffer  [ir pass: heap-alloc-candidate in main.main]
 	     stored-in-object write barrier into a candidate
 	     at               testdata/stdlib_archive_zip_roundtrip.go:12:2
-	goc  col 2  frame  bytes_Buffer  [ir pass: heap-alloc-candidate in main.main]
 	gc   col 6  heap  object  archive
 	     stored-in-object {storage for &zip.countWriter{...}} <- ~r0 via address-of -> interface-converted -> assign-pair -> assign-pair -> assign-pair -> dot -> assign-pair-dot-type -> assign-pair -> assign-pair -> assign-pair -> interface-converted -> struct literal element
 stdlib_bufio_reader_writer.go:9	mixed -> heap	stored-in-object -> stored-in-object
 	src  var backing bytes.Buffer
+	goc  col 2  frame  bytes_Buffer  [ir pass: heap-alloc-candidate in main.main]
 	goc  col 2  heap  bytes_Buffer  [ir pass: heap-alloc-candidate in main.main]
 	     stored-in-object write barrier into a candidate
 	     at               testdata/stdlib_bufio_reader_writer.go:9:2
-	goc  col 2  frame  bytes_Buffer  [ir pass: heap-alloc-candidate in main.main]
 	gc   col 6  heap  object  backing
 	     stored-in-object {heap} <- bufio.r via address-of -> interface-converted -> assign-pair -> assign-pair -> struct literal element -> assign
 stdlib_http_multipart_form.go:11	mixed -> heap	stored-in-object -> stored-in-object
 	src  var encoded bytes.Buffer
+	goc  col 2  frame  bytes_Buffer  [ir pass: heap-alloc-candidate in main.main]
 	goc  col 2  heap  bytes_Buffer  [ir pass: heap-alloc-candidate in main.main]
 	     stored-in-object write barrier into a candidate
 	     at               testdata/stdlib_http_multipart_form.go:11:2
-	goc  col 2  frame  bytes_Buffer  [ir pass: heap-alloc-candidate in main.main]
 	gc   col 6  heap  object  encoded
 	     stored-in-object {storage for &multipart.Writer{...}} <- multipart.w via address-of -> interface-converted -> assign-pair -> struct literal element
 stdlib_image_gif_animation.go:12	mixed -> heap	stored-in-object -> stored-in-object
@@ -3570,10 +3573,10 @@ stdlib_image_jpeg_roundtrip.go:15	mixed -> heap	stored-in-object -> stored-in-ob
 	     stored-in-object {storage for &image.Uniform{...}} <- image.c via spill -> assign-pair -> struct literal element
 stdlib_io_tee_reader.go:10	mixed -> heap	stored-in-object -> stored-in-object
 	src  var tapped bytes.Buffer
+	goc  col 2  frame  bytes_Buffer  [ir pass: heap-alloc-candidate in main.main]
 	goc  col 2  heap  bytes_Buffer  [ir pass: heap-alloc-candidate in main.main]
 	     stored-in-object write barrier into a candidate
 	     at               testdata/stdlib_io_tee_reader.go:10:2
-	goc  col 2  frame  bytes_Buffer  [ir pass: heap-alloc-candidate in main.main]
 	gc   col 6  heap  object  tapped
 	     stored-in-object {storage for &io.teeReader{...}} <- io.w via address-of -> interface-converted -> assign-pair -> struct literal element
 stdlib_iter_pull.go:6	heap -> mixed	call-retains,returned -> returned
@@ -3589,10 +3592,10 @@ stdlib_iter_pull.go:6	heap -> mixed	call-retains,returned -> returned
 	gc   col 14  frame  object  yield
 stdlib_mime_quotedprintable.go:10	mixed -> heap	stored-in-object -> stored-in-object
 	src  var encoded bytes.Buffer
+	goc  col 2  frame  bytes_Buffer  [ir pass: heap-alloc-candidate in main.main]
 	goc  col 2  heap  bytes_Buffer  [ir pass: heap-alloc-candidate in main.main]
 	     stored-in-object write barrier into a candidate
 	     at               testdata/stdlib_mime_quotedprintable.go:10:2
-	goc  col 2  frame  bytes_Buffer  [ir pass: heap-alloc-candidate in main.main]
 	gc   col 6  heap  object  encoded
 	     stored-in-object {heap} <- bufio.r via address-of -> interface-converted -> assign-pair -> assign-pair -> assign-pair -> assign-pair -> struct literal element -> assign
 stdlib_os_exec_goroutine_shape.go:41	heap -> mixed	stored-in-object,closure-captured -> closure-captured
@@ -3652,18 +3655,18 @@ stdlib_os_pipe_returned_closure_close.go:28	heap -> mixed	stored-in-object,closu
 	gc   col 10  frame  object  fn
 stdlib_slog_structured.go:23	mixed -> heap	stored-in-object -> stored-in-object
 	src  var jsonOutput bytes.Buffer
+	goc  col 2  frame  bytes_Buffer  [ir pass: heap-alloc-candidate in main.main]
 	goc  col 2  heap  bytes_Buffer  [ir pass: heap-alloc-candidate in main.main]
 	     stored-in-object write barrier into a candidate
 	     at               testdata/stdlib_slog_structured.go:23:2
-	goc  col 2  frame  bytes_Buffer  [ir pass: heap-alloc-candidate in main.main]
 	gc   col 6  heap  object  jsonOutput
 	     stored-in-object {storage for &slog.commonHandler{...}} <- slog.w via address-of -> interface-converted -> assign-pair -> struct literal element
 stdlib_slog_structured.go:58	mixed -> heap	stored-in-object -> stored-in-object
 	src  var textOutput bytes.Buffer
+	goc  col 2  frame  bytes_Buffer  [ir pass: heap-alloc-candidate in main.main]
 	goc  col 2  heap  bytes_Buffer  [ir pass: heap-alloc-candidate in main.main]
 	     stored-in-object write barrier into a candidate
 	     at               testdata/stdlib_slog_structured.go:58:2
-	goc  col 2  frame  bytes_Buffer  [ir pass: heap-alloc-candidate in main.main]
 	gc   col 6  heap  object  textOutput
 	     stored-in-object {storage for &slog.commonHandler{...}} <- slog.w via address-of -> interface-converted -> assign-pair -> struct literal element
 stdlib_sort_search_slice.go:26	heap -> mixed	call-retains,stored-in-object -> call-retains
@@ -4268,27 +4271,27 @@ runtime_loopvar_three_clause.go:86	heap -> absent	loop-carried -> -
 	     loop-carried     allocated in a loop; one frame slot cannot hold one object per iteration
 runtime_loopvar_value_shapes.go:41	mixed -> absent	stored-in-object -> -
 	src  for point := (coordinate{x: 0, y: 9}); point.x < 3; point.x++ {
+	goc  col 6  frame  main_coordinate  [ir pass: heap-alloc-candidate in main.main]
 	goc  col 6  heap  main_coordinate  [ir pass: heap-alloc-candidate in main.main]
 	     stored-in-object write barrier into a candidate
 	     at               testdata/runtime_loopvar_value_shapes.go:41:6
-	goc  col 6  frame  main_coordinate  [ir pass: heap-alloc-candidate in main.main]
 	goc  col 16  frame  main_coordinate  [front end: composite-literal in main.main]
 runtime_loopvar_value_shapes.go:49	mixed -> absent	stored-in-object -> -
 	src  for pair := ([2]int{0, 5}); pair[0] < 3; pair[0]++ {
+	goc  col 6  frame  2_int  [ir pass: heap-alloc-candidate in main.main]
 	goc  col 6  heap  2_int  [ir pass: heap-alloc-candidate in main.main]
 	     stored-in-object write barrier into a candidate
 	     at               testdata/runtime_loopvar_value_shapes.go:49:6
-	goc  col 6  frame  2_int  [ir pass: heap-alloc-candidate in main.main]
 	goc  col 15  frame  2_int  [front end: composite-literal in main.main]
 runtime_loopvar_value_shapes.go:57	mixed -> frame	stored-in-object -> -
 	src  for _, point := range []coordinate{{1, 2}, {3, 4}} {
 	goc  col 24  frame  2_main_coordinate  [front end: slice-literal-backing in main.main]
 	goc  col 37  frame  main_coordinate  [front end: composite-literal in main.main]
 	goc  col 45  frame  main_coordinate  [front end: composite-literal in main.main]
+	goc  col 49  frame  main_coordinate  [ir pass: heap-alloc-candidate in main.main]
 	goc  col 49  heap  main_coordinate  [ir pass: heap-alloc-candidate in main.main]
 	     stored-in-object write barrier into a candidate
 	     at               testdata/runtime_loopvar_value_shapes.go:57:49
-	goc  col 49  frame  main_coordinate  [ir pass: heap-alloc-candidate in main.main]
 	gc   col 36  frame  slice  []coordinate{...}
 runtime_loopvar_value_shapes.go:81	mixed -> frame	stored-in-object -> -
 	src  for _, pair := range [][2]int{{1, 2}, {3, 4}} {
@@ -4331,10 +4334,10 @@ runtime_map_pointer_keys.go:27	heap -> frame	unexplained -> -
 	gc   col 12  frame  object  &mapPointerKey{...}
 runtime_method_expression.go:20	mixed -> absent	stored-in-object -> -
 	src  counter := methodExpressionCounter{base: 30}
+	goc  col 2  frame  main_methodExpressionCounter  [ir pass: heap-alloc-candidate in main.main]
 	goc  col 2  heap  main_methodExpressionCounter  [ir pass: heap-alloc-candidate in main.main]
 	     stored-in-object write barrier into a candidate
 	     at               testdata/runtime_method_expression.go:20:2
-	goc  col 2  frame  main_methodExpressionCounter  [ir pass: heap-alloc-candidate in main.main]
 	goc  col 13  frame  main_methodExpressionCounter  [front end: composite-literal in main.main]
 runtime_package_initializer_dispatch.go:46	heap -> absent	unexplained -> -
 	src  var insideComposite = []fmt.Stringer{passStringer(fs.FileMode(0o644))}
@@ -4703,10 +4706,10 @@ stdlib_crypto_mlkem.go:9	heap -> frame	call-retains -> -
 	gc   col 14  frame  slice  make([]byte, 64)
 stdlib_encoding_binary.go:26	mixed -> absent	stored-in-object -> -
 	src  var decoded binaryRecord
+	goc  col 2  frame  main_binaryRecord  [ir pass: heap-alloc-candidate in main.main]
 	goc  col 2  heap  main_binaryRecord  [ir pass: heap-alloc-candidate in main.main]
 	     stored-in-object write barrier into a candidate
 	     at               testdata/stdlib_encoding_binary.go:26:2
-	goc  col 2  frame  main_binaryRecord  [ir pass: heap-alloc-candidate in main.main]
 stdlib_encoding_gob_roundtrip.go:21	mixed -> frame	stored-in-object -> -
 	src  gob.Register(gobPayload{})
 	goc  col 15  frame  main_gobPayload  [front end: composite-literal in main.main]

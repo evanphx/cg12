@@ -144,8 +144,11 @@ func writeReasonCoverage(out *strings.Builder, coverage ReasonCoverage) {
 	out.WriteString("                                                    explain at all)\n")
 	fmt.Fprintf(out, "lines only goc -m records                  %6d  (expected: the census omits ordinary\n", coverage.GocLinesDiagnosticOnly)
 	out.WriteString("                                                    front-end frame slots)\n")
-	fmt.Fprintf(out, "lines both record and contradict           %6d  (this one means the tree moved under\n", coverage.GocLinesContradicting)
-	out.WriteString("                                                    the committed census)\n")
+	fmt.Fprintf(out, "lines one records a subset of the other   %6d  (the same scope difference, arriving on\n", coverage.GocLinesPartial)
+	out.WriteString("                                                    a line where the two also overlap)\n")
+	fmt.Fprintf(out, "lines both record and contradict          %6d  (neither instrument's placements contain\n", coverage.GocLinesContradicting)
+	out.WriteString("                                                    the other's: this one means the tree\n")
+	out.WriteString("                                                    moved under the committed census)\n")
 	fmt.Fprintf(out, "heap lines goc -m gives no rule for        %6d  (the blind spot: a heap allocation this\n", coverage.GocHeapLinesWithNoRule)
 	out.WriteString("                                                    file cannot speak for. They are listed\n")
 	out.WriteString("                                                    below; in the committed run all of them\n")
@@ -156,6 +159,12 @@ func writeReasonCoverage(out *strings.Builder, coverage ReasonCoverage) {
 	out.WriteString("                                                    gc is the same about channels, which is\n")
 	out.WriteString("                                                    why this join synthesizes them)\n")
 	out.WriteString("\n")
+	for _, partial := range coverage.GocLinesPartialList {
+		fmt.Fprintf(out, "  SUBSET: %s\n", partial)
+	}
+	if len(coverage.GocLinesPartialList) > 0 {
+		out.WriteString("\n")
+	}
 	for _, conflict := range coverage.GocLinesContradictingList {
 		fmt.Fprintf(out, "  CONTRADICTION: %s\n", conflict)
 	}

@@ -162,8 +162,18 @@ type ReasonCoverage struct {
 	// front-end frame slots, which have no allocator and are not decisions,
 	// while -m reports every placement either placer made.
 	GocLinesDiagnosticOnly int
-	// GocLinesContradicting is lines both record and disagree about, with
-	// GocLinesContradictingList naming them. This is the one that means drift.
+	// GocLinesPartial is lines both record where one instrument's placements are
+	// a strict subset of the other's -- the census says frame+heap and -m says
+	// frame, because the heap half is a make(map) whose placement is not a
+	// decision and so has no rule to print. A subset is the same scope
+	// difference as the two one-sided counts above, arriving on a line where the
+	// two instruments also overlap.
+	GocLinesPartial     int
+	GocLinesPartialList []string
+	// GocLinesContradicting is lines both record where neither instrument's
+	// placements contain the other's, so one of them puts an object somewhere
+	// the other does not. This is the one that means drift, and the only one
+	// asserted on.
 	GocLinesContradicting     int
 	GocLinesContradictingList []string
 	// GocHeapLinesWithNoRule is lines the census puts an allocation on the heap
@@ -264,11 +274,13 @@ func JoinReasons(result *Result, programs []Program) {
 		accountExplanations(program, &result.ReasonCoverage)
 	}
 	for key, sites := range gocByLine {
+		// A total order, for the reason opt.EscapeSite.sortKey gives: two sites
+		// this cannot tell apart come out in whichever order an unstable sort
+		// left them, and the rendered file is meant to be diffed. One position
+		// in one function holds both a frame and a heap decision often enough
+		// that column and subject alone are not enough.
 		sort.Slice(sites, func(i, j int) bool {
-			if sites[i].Col != sites[j].Col {
-				return sites[i].Col < sites[j].Col
-			}
-			return sites[i].Subject < sites[j].Subject
+			return sites[i].sortKey() < sites[j].sortKey()
 		})
 		gocByLine[key] = sites
 		frame, heap := false, false
@@ -320,6 +332,10 @@ func JoinReasons(result *Result, programs []Program) {
 			coverage.GocLinesDiagnosticOnly++
 		case diagnostic == line.Goc:
 			coverage.GocLinesAgree++
+		case placementsContain(line.Goc, diagnostic) || placementsContain(diagnostic, line.Goc):
+			coverage.GocLinesPartial++
+			coverage.GocLinesPartialList = append(coverage.GocLinesPartialList,
+				fmt.Sprintf("%s: census says %s, goc -m says %s", key, line.Goc, diagnostic))
 		default:
 			coverage.GocLinesContradicting++
 			coverage.GocLinesContradictingList = append(coverage.GocLinesContradictingList,
@@ -333,6 +349,7 @@ func JoinReasons(result *Result, programs []Program) {
 		result.ReasonMatrix[line.ReasonPair()]++
 	}
 	sort.Strings(result.ReasonCoverage.GocLinesContradictingList)
+	sort.Strings(result.ReasonCoverage.GocLinesPartialList)
 	sort.Strings(result.ReasonCoverage.GocHeapLinesWithNoRuleList)
 	sort.Strings(result.ReasonCoverage.UncategorisedGocRules)
 	sort.Strings(result.ReasonCoverage.UncategorisedGCFlows)
@@ -407,6 +424,32 @@ func attachGCFlow(decision *GCDecision, explanations *GCExplanations, coverage *
 		coverage.UncategorisedGCFlows = append(coverage.UncategorisedGCFlows,
 			fmt.Sprintf("%s:%d:%d: %s", decision.File, decision.Line, decision.Col, strings.ReplaceAll(flow.Text, "\n", " | ")))
 	}
+}
+
+// placementsContain reports whether the placements one verdict stands for
+// include every placement the other stands for.
+//
+// The two instruments on goc's side record different subsets of the same
+// allocations -- the census omits ordinary front-end frame slots, and -m omits
+// every allocator whose placement was never a decision -- so a line where one
+// reports strictly less than the other is a scope difference. Only a line where
+// neither contains the other is a placement the two disagree about.
+func placementsContain(outer, inner Verdict) bool {
+	outerFrame, outerHeap := placementsOf(outer)
+	innerFrame, innerHeap := placementsOf(inner)
+	return (outerFrame || !innerFrame) && (outerHeap || !innerHeap)
+}
+
+func placementsOf(verdict Verdict) (frame, heap bool) {
+	switch verdict {
+	case VerdictFrame:
+		return true, false
+	case VerdictHeap:
+		return false, true
+	case VerdictMixed:
+		return true, true
+	}
+	return false, false
 }
 
 // ReasonDisagreements is the deliverable: every line the two compilers place

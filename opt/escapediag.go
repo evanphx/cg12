@@ -201,9 +201,19 @@ func (site EscapeSite) verdict() string {
 	return "escapes to heap"
 }
 
+// sortKey orders the report. It has to be a total order over the sites that
+// actually occur, not merely a sensible one: sort.Slice is not stable, so two
+// sites the key cannot tell apart come out in whichever order the sort happened
+// to leave them, and a report that reorders between runs cannot be diffed.
+//
+// Placement and Rule are in the key for exactly that reason. One source
+// position in one function can hold both a frame decision and a heap one --
+// opt.LowerHeapAllocations converts a candidate and records the site twice --
+// and everything before Placement is equal for that pair.
 func (site EscapeSite) sortKey() string {
-	return fmt.Sprintf("%s|%09d|%09d|%s|%s|%s|%s",
-		site.File, site.Line, site.Col, site.Func, site.Decider, site.Site, site.Subject())
+	return fmt.Sprintf("%s|%09d|%09d|%s|%s|%s|%s|%s|%s",
+		site.File, site.Line, site.Col, site.Func, site.Decider, site.Site, site.Subject(),
+		site.Placement, site.Rule)
 }
 
 // EscapeSites collects every placement decision in module, from both placers.
