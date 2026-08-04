@@ -15249,9 +15249,9 @@ func appendedMakeLength(call *ast.CallExpr, info *types.Info) (ast.Expr, bool) {
 // negative as a signed number and enormous as the unsigned one memset reads. The
 // branch is emitted rather than the check inlined so that the panic is
 // runtime.makeslice's own, with the message the source would have produced.
-func (g *gen) guardExtensionLength(made ast.Expr, length ir.Ref, elementType types.Type) {
+func (g *gen) guardExtensionLength(made ast.Expr, length ir.Ref) {
 	if !g.runtimeAllocation {
-		// Without a runtime there is no makeslice to panic, and this mode
+		// Without a runtime there is no runtime panic to raise, and this mode
 		// already builds `make([]T, n)` out of an unchecked byte count.
 		return
 	}
@@ -15260,12 +15260,18 @@ func (g *gen) guardExtensionLength(made ast.Expr, length ir.Ref, elementType typ
 	negative := g.cur.Cmp(ir.CmpSlt, ir.ClsL, length, g.fn.Long(0))
 	g.cur.Jnz(negative, bad, ok)
 	g.cur = bad
-	// Positioned at the make it stands in for. A fresh block carries no source
-	// position until one is set, and an allocator call with none is a census row
-	// nobody can locate -- which is what the first version of this produced, for
-	// every slices.Grow in the program.
+	// runtime.panicmakeslicelen rather than runtime.makeslice, which would panic
+	// the same way. makeslice is an *allocator*, so a call to it is an allocation
+	// census row -- and one on a branch that only ever panics reads as "goc
+	// allocates on the heap here" for every slices.Grow in the program, which is
+	// what the first version of this guard produced and what the gc differential
+	// then counted. This is the same panic makeslice would raise, with its
+	// message, and nothing reads it as a placement.
+	//
+	// Positioned at the make it stands in for: a fresh block carries no source
+	// position until one is set.
 	g.at(made)
-	g.cur.Call(ir.ClsP, g.fn.Sym("runtime.makeslice", 0), g.runtimeType(elementType), length, length)
+	g.cur.CallVoid(g.fn.Sym("runtime.panicmakeslicelen", 0))
 	g.cur.Goto(ok)
 	g.cur = ok
 	g.at(made)
@@ -15289,7 +15295,7 @@ func (g *gen) appendCall(call *ast.CallExpr) ir.Ref {
 			// not built at all and the destination's new region is cleared
 			// instead.
 			added = g.expr(length)
-			g.guardExtensionLength(call.Args[1], added, elementType)
+			g.guardExtensionLength(call.Args[1], added)
 			zeroFill = true
 		} else {
 			source := g.expr(call.Args[1])

@@ -25,15 +25,15 @@ host toolchain: go version go1.26.1 linux/arm64
 corpus programs                             403
 compared (host toolchain built them)        399
 not compared                                  4
-census rows joined                         1853
+census rows joined                         1859
 census rows lost to an unbuilt program        4
-census rows with no source position        1757  (never joinable)
-  of those, in a corpus program's own code    37  (33 on the heap: the bound on how
+census rows with no source position        1740  (never joinable)
+  of those, in a corpus program's own code    33  (29 on the heap: the bound on how
                                                   wrong the join can be about goc)
 census rows outside the corpus directory  10865  (vendored stdlib; never joinable)
-gc decisions joined                        3506
+gc decisions joined                        3511
   of which synthesized by the chan rule     136
-gc decisions at an inlining call site       889  (excluded; see package gcdiff)
+gc decisions at an inlining call site       891  (excluded; see package gcdiff)
 gc diagnostics outside the program         3514  (excluded; wrappers and instantiations)
 gc diagnostics the parser did not know        0  (must be 0)
 
@@ -51,11 +51,11 @@ rows are goc's verdict for the line, columns are gc's.
 same as "it put the object in a frame" -- see gcdiff.Absent.
 
   goc\gc      frame     heap    mixed   absent    total
-  frame         187       31       14      193      425
+  frame         189       31       14      193      427
   heap           96      579      172       81      928
   mixed          13       88       24       13      138
   absent        420     1287       24        0     1731
-  total         716     1985      234      287     3222
+  total         718     1985      234      287     3224
 
 ## PERMISSIVE: 1468 lines
 
@@ -115,7 +115,7 @@ allocation_counts.go:228	mixed -> mixed
 	goc  col 38  heap  runtime.convT64  int  [main.packVariadicElement.gointernal.funcvalue.main_packVariadicElement_func___func.61d42cd012e19ff7]
 	gc   col 37  frame  slice  ... argument
 	gc   col 38  heap  object  theInt
-allocation_counts.go:544	mixed -> heap
+allocation_counts.go:569	mixed -> heap
 	src  return func(times int) {
 	goc  col 9  frame  runtime.newobject  struct_code_uintptr__capture0_unsafe_Pointer  [main.main]
 	goc  col 9  heap  runtime.newobject  struct_code_uintptr__capture0_unsafe_Pointer  [main.repeat]
@@ -5061,7 +5061,7 @@ allocation_counts.go:273	heap -> frame
 	goc  col 13  heap  runtime.newobject  2_int  [main.variadicIntsInLoop]
 	goc  col 13  heap  runtime.newobject  2_int  [main.variadicIntsInLoop.gointernal.funcvalue.main_variadicIntsInLoop_func_times_int__func_tim.df534ff08f4f4fc7]
 	gc   col 25  frame  slice  ... argument
-allocation_counts.go:543	heap -> absent
+allocation_counts.go:568	heap -> absent
 	src  func repeat(operation func()) func(int) {
 	goc  col 1  heap  runtime.newobject  func  [main.main]
 	goc  col 1  heap  runtime.newobject  func  [main.repeat]

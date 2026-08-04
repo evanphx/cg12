@@ -53,9 +53,9 @@ info/5-attr                          0.00       0.00        0.0        0.0
 info/6-attr                          1.00       1.00       48.0       48.0
 info/3-attr-large-ints               1.00       3.00      128.0       24.0
 logattrs/3-attr                      0.00       0.00        0.0        0.0
-logattrs/6-attr                      2.00       1.00       96.0       48.0
+logattrs/6-attr                      1.00       1.00       48.0       48.0
 disabled/no-attrs                    0.00       0.00        0.0        0.0
 disabled/3-attr                      0.00       0.00        0.0        0.0
 disabled/logattrs-3-attr             0.00       0.00        0.0        0.0
-json/kv-4-pairs                      4.00       2.00      272.0       24.0
-json/logattrs-4-attrs                3.00       0.00       96.0        0.0
+json/kv-4-pairs                      1.00       2.00      176.0       24.0
+json/logattrs-4-attrs                0.00       0.00        0.0        0.0

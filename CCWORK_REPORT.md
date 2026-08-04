@@ -5315,3 +5315,276 @@ and **3 of G7's 11**:
     runtime_panic_stack_gc.go:23      runtime_stack_growth.go:24, :26
     stdlib_maps_slices.go:25          stdlib_slices_string_sort.go:6
     stdlib_sort_search_slice.go:6
+
+# The classification of the 96, group by group
+
+The 106 this branch started from fell into eleven groups. **Ten lines moved and
+two groups closed.** Every line is in exactly one group and the groups sum to 96.
+
+By allocator: 38 `makemap`, 5 `makeslice`, 6 `convT*`, 47 `newobject`.
+
+## Closed on this branch
+
+**G8 -- a recursive callee has no summary (3 of 3). VERDICT: goc was
+over-conservative, and the fix is one line plus a proof.** The cycle break now
+answers "does not escape", which is the least fixpoint of the system the walk
+actually solves. See the section above for the argument in both directions and
+for why the previous branch's counterexample was `defer`, not the cycle.
+
+    runtime_panic_stack_gc.go:23  runtime_stack_growth.go:24, :26
+
+**G12 -- a pointer stored into an array (4 of 5). VERDICT: goc was
+over-conservative, and it was not the copy.** The previous classification had
+already corrected itself once here (from "the copy" to "opt's containment edge");
+the real cause is a third thing. goc gives an aggregate local a slot holding the
+*address* of its backing storage and reads that slot back at every use;
+`aliasInfo` resolves a load to no allocation at all, so the store read as a store
+into storage the analysis did not own. `opt/escapeindirect.go`.
+
+    runtime_array_copy_pointer_gc.go:11, :12, :13, :14
+
+**G7 -- three of eleven, taken by the fixpoint.**
+
+    stdlib_maps_slices.go:25  stdlib_slices_string_sort.go:6  stdlib_sort_search_slice.go:6
+
+## The nine groups that remain
+
+**G1 -- maps have no frame-allocated header (38). VERDICT: gc is right. Not
+attempted; it is not an analysis fix.** Unchanged from the previous
+classification, which is right and worth not re-deriving: `gen.allocateMap` calls
+`runtime.makemap` unconditionally, so the escape question is never asked about a
+map, and closing it is four pieces -- ask the question, name
+`internal/runtime/maps.Map`'s layout and its `dirPtr` pointer word, give the frame
+slot a correct GC pointer map for that word, and teach the census that a
+`makemap` with a non-nil `m` is a frame placement. Confirmed independently here:
+`map_literal_local` costs goc 2 allocations against gc's 0 for
+`m := map[string]int{"a": 1}`. **38 lines, and still the largest single thing
+left.**
+
+**G4 -- a value boxed into an interface (17). VERDICT: gc is right; and the
+*local* half of it is now closed, which these 17 are not.** This branch made
+`var v any = T{...}` a frame placement (`value_boxed_into_a_local_interface`,
+1.00 -> 0), and it moved **none** of these seventeen. That is the useful finding:
+the 17 are not "goc has no frame form for a payload" as a blanket statement, they
+are payloads that are boxed and then *passed on* -- into `fmt`, into `reflect`,
+into a `[]any` handed to a call. The remaining work is the one the previous
+classification named -- a frame form for a payload that survives the call -- and
+it is unchanged in size.
+
+    allocation_counts.go:121, :124, :127, :130, :133
+    interface_slice_equality.go:6, :9
+    runtime_debug_gc_controls.go:15, :32
+    runtime_panic_stack_gc.go:19        runtime_panic_stack_recover_gc.go:19
+    runtime_reflect_make_values.go:6    runtime_reflect_map_slice.go:19
+    runtime_slice_pointer_append_gc.go:10, :25
+    stdlib_signal_during_gc.go:23, :29
+
+**G2 -- the Read buffer (10). VERDICT: gc is right, but not by a rule goc is
+missing. IRREDUCIBLE at this pipeline position.** Unchanged and re-confirmed:
+`internal/poll.ignoringEINTRIO`'s own gc summary is `leaking param: p`, and gc
+gets "does not escape" by inlining it first. The call is through a
+function-typed **parameter**, whose value comes from the caller, so no
+whole-program resolution can pin it down. It needs an inliner ahead of the walk.
+Three branches have now looked at this and reached the same answer.
+
+    runtime_println_operand_separation.go:168  runtime_stack_scan_syscall.go:115
+    stdlib_netpoll_pipe_afterfunc_close.go:24  stdlib_netpoll_pipe_close_unblocks_read.go:17
+    stdlib_netpoll_pipe_deadline.go:23         stdlib_netpoll_pipe_past_deadline.go:23
+    stdlib_netpoll_stress_pipe_close_churn.go:17
+    stdlib_netpoll_stress_pipe_deadline_reset.go:22
+    stdlib_os_file_roundtrip.go:26             stdlib_os_pipe_goroutine_close.go:24
+
+**G7 -- a stdlib summary the walk could not get through (8). VERDICT: gc is
+right, one callee at a time.** `reflect.ValueOf(...).Call`, `runtime.SetFinalizer`,
+`crypto/mlkem.NewDecapsulationKey768`, `encoding.BinaryAppender.AppendBinary`,
+and three more. Not one cause and not one change; the three the fixpoint could
+reach are gone.
+
+    adler32_marshal_loop.go:21               runtime_closure_captured_string.go:94
+    runtime_finalizer_basic.go:22            runtime_reflect_call_aggregate_matrix.go:70
+    runtime_reflect_method_metadata.go:27    runtime_reflect_set_fields.go:11
+    runtime_reflect_value_call.go:11         stdlib_crypto_mlkem.go:9
+
+**G10 -- a composite literal handed to a call the walk cannot follow (6).
+VERDICT: gc is right.** Unchanged. Four `&http.Cookie{...}` in a `[]*http.Cookie`
+passed to `(*cookiejar.Jar).SetCookies`, one more cookie, and `&jpeg.Options{...}`.
+Reachable in principle, deep in practice.
+
+    stdlib_http_cookiejar.go:17, :18, :19, :20
+    stdlib_http_redirect_keepalive.go:24       stdlib_image_jpeg_roundtrip.go:18
+
+**G5 -- new(T) (5). VERDICT: gc is right; five separate causes, not a group.**
+Unchanged, and deliberately left alone: they share the spelling `new(T)` and
+nothing else. Singletons.
+
+    gc_struct.go:25                     runtime_println_operand_separation.go:84
+    runtime_range_target_forms.go:369   runtime_span_metadata_barrier.go:47
+    stdlib_math_big_rat_int.go:15
+
+**G3 -- non-constant `make([]T, n)` (5). VERDICT: gc is right, and it is a
+codegen capability rather than an analysis fix.** Unchanged and re-confirmed
+here by direct measurement: `make_slice_nonconst_local` costs goc one allocation
+against gc's zero, because for a non-escaping `make` with a non-constant length gc
+emits **both** a bounded frame buffer and a runtime length test and goc has
+neither. Worth an allocation on every small non-constant make in the program --
+though note that the single biggest caller of that shape in the standard library,
+`slices.Grow`, is now free for a different reason, which is the append rewrite
+above and not this.
+
+    runtime_copy_interface_slice_gc.go:23  runtime_gc_mark_workers.go:117
+    runtime_loopvar_range.go:112           stdlib_encoding_ascii85.go:7, :10
+
+**G9 -- the loop rule (3). VERDICT: goc is over-conservative; reducible, and the
+thing that has to be proved first is still not proved.** Unchanged.
+`opt.promotionsBlockedByALoop` sends every promotable candidate in a natural loop
+to the heap, because neither analysis has a notion of iteration. The refinement
+is to block only a candidate whose pointer can be observed after its iteration,
+and what has to be settled before it can be trusted is that a callee handed the
+pointer cannot store it into another of the caller's frame slots without the
+escape analysis having escaped it already. **Not attempted here, on purpose:** it
+is the one remaining group whose failure mode is two source-level objects
+becoming one, which no static audit in this tree can see --
+`opt.FrameEscapes` is structurally blind to it, as its own comment says.
+
+    allocation_counts.go:273  runtime_range_target_forms.go:137, :144
+
+**G12 -- a map lookup key (1). VERDICT: goc is over-conservative.** The array half
+is closed; this is the remaining line. `values[&mapPointerKey{value: 17}]` is a
+key `mapaccess` does not retain, and it is the walk's -- and it needs care about
+direction, because a map *assignment* key is retained.
+
+    runtime_map_pointer_keys.go:27
+
+**G6 -- three separate causes (3). VERDICT: mixed.** Unchanged. An interface
+conversion into a second interface, a slice literal inside a closure passed to a
+call, and a `[]byte` literal handed to `compress/lzw`.
+
+    runtime_interface_to_interface.go:29  runtime_println_operand_separation.go:82
+    stdlib_compress_zlib_lzw.go:72
+
+# What is irreducible, and why
+
+Stated so nobody re-litigates it. "Irreducible" means *in this analysis, at this
+pipeline position*; where a group is reachable by building something that does
+not exist yet, it says what.
+
+**Genuinely irreducible without moving the walk (10 lines).**
+
+- **G2, the Read buffer (10).** gc's answer comes from inlining
+  `internal/poll.ignoringEINTRIO` before escape analysis; its own un-inlined
+  summary is `leaking param: p`, which *agrees with goc*. The call is through a
+  function-typed **parameter**, so no whole-program resolution can pin it down --
+  the value comes from the caller. It needs an inliner ahead of the walk. Three
+  branches have now reached this answer independently; it should not be looked at
+  a fourth time without an inliner in hand.
+
+**Blocked on a representation goc does not have (55 lines).**
+
+- **G1, maps (38).** Four pieces, one of which is a change to the census itself.
+  A task of its own, and the largest one left.
+- **G4, boxing (17).** Narrowed but not smaller. The *local* half is closed --
+  `var v any = T{...}` is a frame placement now -- and none of the 17 moved,
+  which says what they are: payloads boxed and then passed on, into `fmt`,
+  `reflect`, or a `[]any` handed to a call. They need a frame form for a payload
+  that survives the call, and fixing the walk's half without it is worse than
+  leaving it: a frame-charged source paired with a heap payload is a placement
+  that disagrees with itself.
+
+**Reducible, with the work named (31 lines).**
+
+- **G7 (8)** -- one callee at a time.
+- **G10 (6)** -- deep, not blocked.
+- **G5 (5)** -- five singletons that share a spelling. Left alone deliberately.
+- **G3 (5)** -- a codegen capability: a bounded frame buffer plus a runtime length
+  test, which is what gc emits for a non-escaping non-constant `make`. Measured
+  again here as `make_slice_nonconst_local`, 1.00 against gc's 0.
+- **G9 (3)** -- `opt.promotionsBlockedByALoop`. **The one group this branch
+  deliberately did not touch.** Its failure mode is two source-level objects
+  becoming one object, and that is invisible to every static instrument in this
+  tree: `opt.FrameEscapes` asks whether a frame address was published past its
+  frame, and in the aliasing case none is -- both pointers stay inside the frame
+  and are simply the same pointer. A clean audit would say nothing. What has to be
+  proved first is that a callee handed the pointer cannot store it into another of
+  the caller's frame slots without the escape analysis having escaped it already,
+  and that was not settled here either. It is worth more than three lines --
+  `sprintf_in_loop` (2.00 against gc's 1.00) and `variadic_ints_in_loop` (1.00
+  against 0) pay it on every trip -- and it should be taken up on purpose, with an
+  instrument built for it first.
+- **G6 (3)** -- three separate causes.
+- **G12 (1)** -- a map lookup key; the walk's, and it needs care about direction.
+
+## And the part of the gap the 96 does not measure
+
+This is the finding this branch would most want carried forward. **Two of the
+three things it fixed were invisible to the corpus differential**, and one of
+them was a live miscompile:
+
+- `defer x.m()` publishing a frame address -- the differential shows goc and gc
+  both allocating nothing on that source line, because gc's `-m` has no
+  diagnostic for a defer record and goc's census row for the method value sits on
+  the *statement*, not on the object gc would name. It took `opt.FrameEscapes` on
+  a five-line program to see it, and running that program twenty times to prove
+  it.
+- `append(s, make([]T, n)...)` -- the cost is paid inside `slices.Grow`, which
+  is vendored standard library. The differential's own coverage table counts
+  10911 census rows "outside the corpus directory (vendored stdlib; never
+  joinable)". A cost a corpus program pays *through* the standard library cannot
+  appear in a join keyed on (corpus file, source line).
+
+The instrument that found both was the crudest one available: write the idiom,
+compile it with both compilers, run it, and compare `runtime.MemStats.Mallocs`.
+Forty idioms took twenty minutes and found six disagreements, four of which were
+already-known groups. That sweep is worth repeating whenever this work is picked
+up again, and it belongs alongside the differential rather than after it.
+
+The sweep's own results, for the record -- everything not listed matched gc
+exactly:
+
+    range_over_map_local          goc 3.00  gc 0     G1
+    local_array_of_pointers       goc 4.00  gc 0     fixed here
+    slice_literal_of_pointers     goc 2.00  gc 0     open: the same indirection
+                                                     through a slice header, not
+                                                     taken (see below)
+    map_literal_local             goc 2.00  gc 0     G1
+    interface_value_method        goc 1.00  gc 0     fixed here
+    type_switch_on_any            goc 1.00  gc 0     fixed here
+    slice_of_interfaces           goc 1.00  gc 0     G4
+    make_slice_nonconst_local     goc 1.00  gc 0     G3
+
+**`slice_literal_of_pointers`, measured and deliberately not taken.**
+`items := []*T{{...},{...}}` is the same indirection one level further on: the
+backing array's address is in the slice header's data word rather than in a
+one-word variable slot. Extending `indirectionSlots` to key on (slot, offset)
+rather than requiring offset 0 reaches it -- and it is *not* safe by the same
+argument. A one-word variable slot is disqualified the moment its own address
+escapes, which is what makes the backing confined; a slice header's *contents*
+can leave the frame without its address doing so, by being copied into a return
+value or another header, and the confinement check in `dropUnconfinedBacking`
+looks at uses of the backing and would not see it. Closing it needs the header's
+contents tracked, not just its address, and that is a different piece of work.
+The offset-0 restriction is what excludes slice headers today, and it excludes
+them by construction rather than by accident: a header takes three stores, so the
+single-writer test fails on it anyway.
+
+# A note for whoever reads the shadow baseline diff next
+
+`escape_shadow_baseline.txt` gains a block of lines that look alarming and are
+not:
+
+    .../archive/zip/register.go:47:8  archive/zip.pooledFlateWriter.Write
+        method-value-descriptor  frame -> heap  argument 0 of $runtime.deferproc escapes
+
+Every one is the defer rule. The front end now frames a non-repeating deferred
+call's function value; the IR analysis, asked in shadow mode what it would have
+decided, still says heap -- because all it has is `runtime.deferproc`'s summary,
+which correctly reports that the callee stores its argument. The reasoning that
+makes the frame placement right is about the *defer mechanism* (deferreturn pops
+the record inside the frame that registered it) and not about deferproc's body,
+so it cannot be expressed as a parameter fact.
+
+These are `frame -> heap` lines, which the baseline's own header calls the safe
+direction: the IR analysis being more conservative than the placer. They are the
+price of the rule living in the front end, and closing that gap means either
+teaching the summary table about deferproc specifically or moving the rule --
+neither of which is this branch's business, and both of which would need
+`promotionsBlockedByALoop` to take over from `deferStatementRepeats`.

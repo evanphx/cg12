@@ -116,15 +116,20 @@ func main() {
 			"a `...any` object that stays in the frame should not be built by a call to %s", helper)
 	}
 
-	// goc's escape analysis does not frame this one, though nothing outside
-	// localInt can observe the payload: the box is passed to the type assertion
-	// through storage the analysis gives up on. That is a pessimism this change
-	// does not fix -- it makes it free. The row is here so that if the analysis
-	// ever does frame it, the reader of the diff is told which of the two
-	// happened.
+	// This one used to be the pessimism this file recorded rather than fixed:
+	// nothing outside localInt can observe the payload, and goc framed neither
+	// it nor the interface variable, because `var boxed any = value` writes the
+	// payload through the variable's own storage -- a slot holding the address
+	// of its backing bytes -- and the escape analysis could not see through the
+	// reload. It framed the payload from the moment opt/escapeindirect.go could.
+	//
+	// So neither a helper nor an allocator is called now, which is what
+	// framedVariadic above has always asserted for the `...any` shape. The row
+	// stays, with the opposite expectation: a return to convT64 here would mean
+	// the indirection resolution stopped reaching a case it used to.
 	localInt := functionWithSuffix(t, module, "main.localInt")
-	assert.True(t, callsSymbol(localInt, "runtime.convT64"),
-		"a payload goc's analysis will not frame is at least built without allocating")
-	assert.False(t, callsSymbol(localInt, "runtime.newobject"),
-		"the payload goc will not frame is no longer an allocation either")
+	for _, helper := range []string{"runtime.convT16", "runtime.convT32", "runtime.convT64", "runtime.newobject"} {
+		assert.False(t, callsSymbol(localInt, helper),
+			"a payload nothing outside the function can observe stays in the frame, unbuilt by %s", helper)
+	}
 }
