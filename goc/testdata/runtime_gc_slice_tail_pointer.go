@@ -92,6 +92,24 @@ func checkPointers() {
 		panic("a slice with capacity left lost its offset")
 	}
 
+	// Constant indices take the other path: the capacity of a fixed-size array
+	// sliced at a constant is known at compile time, so the answer is folded
+	// rather than masked. It has to be the same answer.
+	var fixed [64]byte
+	fixedBase := sliceData(fixed[:])
+	if got := sliceData(fixed[64:]); got != fixedBase {
+		println("a[64:] on a [64]byte is", int64(got-fixedBase), "bytes past the start")
+		panic("a constant-index slice with no capacity left points outside its array")
+	}
+	if got := sliceData(fixed[16:16:16]); got != fixedBase {
+		println("a[16:16:16] on a [64]byte is", int64(got-fixedBase), "bytes past the start")
+		panic("a constant three-index slice with no capacity left kept its offset")
+	}
+	if got := sliceData(fixed[32:]); got != fixedBase+32 {
+		println("a[32:] on a [64]byte is", int64(got-fixedBase), "bytes past the start, want 32")
+		panic("a constant-index slice with capacity left lost its offset")
+	}
+
 	// A string has no capacity, so its length is the only evidence of whether
 	// any of the source's bytes are still referred to.
 	text := string(make([]byte, 64))

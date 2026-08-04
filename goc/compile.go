@@ -12694,13 +12694,23 @@ func (g *gen) expr(e ast.Expr) (result ir.Ref) {
 			sourceCapacity = sourceLength
 		}
 		low := g.fn.Long(0)
-		lowIsZero := true
+		lowConstant := knownExtent{value: 0, known: true}
 		if n.Low != nil {
-			lowIsZero = isConstantZero(g.typeAndValue(n.Low).Value)
+			lowConstant = constantIndexValue(g.typeAndValue(n.Low).Value)
 			low = g.widenIndex(g.expr(n.Low), g.typeAndValue(n.Low).Type)
 		}
 		high := ir.R
 		capacity := ir.R
+		highConstant := knownExtent{}
+		if n.High != nil {
+			highConstant = constantIndexValue(g.typeAndValue(n.High).Value)
+		} else if array, ok := sourceType.Underlying().(*types.Array); ok {
+			highConstant = knownExtent{value: array.Len(), known: true}
+		} else if pointer, ok := sourceType.Underlying().(*types.Pointer); ok {
+			if array, isArray := pointer.Elem().Underlying().(*types.Array); isArray {
+				highConstant = knownExtent{value: array.Len(), known: true}
+			}
+		}
 		if n.High != nil {
 			high = g.widenIndex(g.expr(n.High), g.typeAndValue(n.High).Type)
 		} else if array, ok := sourceType.Underlying().(*types.Array); ok {
@@ -12719,8 +12729,8 @@ func (g *gen) expr(e ast.Expr) (result ir.Ref) {
 			length := g.cur.Sub(ir.ClsL, high, low)
 			// A string has no capacity, so its length is what decides whether the
 			// result still refers to any of the source's bytes. See
-			// zeroExtentOffset.
-			data := g.cur.Add(ir.ClsP, base, g.zeroExtentOffset(low, length, lowIsZero))
+			// sliceDataOffset.
+			data := g.cur.Add(ir.ClsP, base, g.sliceDataOffset(low, length, lowConstant, highConstant.minus(lowConstant)))
 			return g.stringDescriptor(data, length)
 		}
 		slice, ok := resultType.Underlying().(*types.Slice)
@@ -12729,13 +12739,17 @@ func (g *gen) expr(e ast.Expr) (result ir.Ref) {
 			return ir.R
 		}
 		element := slice.Elem()
+		capacityConstant := knownExtent{}
 		if n.Max != nil {
 			maximum := g.widenIndex(g.expr(n.Max), g.typeAndValue(n.Max).Type)
+			capacityConstant = constantIndexValue(g.typeAndValue(n.Max).Value).minus(lowConstant)
 			capacity = g.cur.Sub(ir.ClsL, maximum, low)
 		} else if array, ok := sourceType.Underlying().(*types.Array); ok {
+			capacityConstant = knownExtent{value: array.Len(), known: true}.minus(lowConstant)
 			capacity = g.cur.Sub(ir.ClsL, g.fn.Long(array.Len()), low)
 		} else if pointer, ok := sourceType.Underlying().(*types.Pointer); ok {
 			array := pointer.Elem().Underlying().(*types.Array)
+			capacityConstant = knownExtent{value: array.Len(), known: true}.minus(lowConstant)
 			capacity = g.cur.Sub(ir.ClsL, g.fn.Long(array.Len()), low)
 		} else {
 			capacity = g.cur.Sub(ir.ClsL, sourceCapacity, low)
@@ -12745,7 +12759,12 @@ func (g *gen) expr(e ast.Expr) (result ir.Ref) {
 		if size != 1 {
 			dataOffset = g.cur.Mul(ir.ClsL, low, g.fn.Long(size))
 		}
-		data := g.cur.Add(ir.ClsP, base, g.zeroExtentOffset(dataOffset, capacity, lowIsZero))
+		if size == 0 {
+			// Every element is at the same address, so the offset is zero
+			// whatever the indices are.
+			lowConstant = knownExtent{value: 0, known: true}
+		}
+		data := g.cur.Add(ir.ClsP, base, g.sliceDataOffset(dataOffset, capacity, lowConstant, capacityConstant))
 		length := g.cur.Sub(ir.ClsL, high, low)
 		return g.sliceDescriptor(data, length, capacity)
 	case *ast.TypeAssertExpr:
@@ -14763,7 +14782,36 @@ func (g *gen) widenIndex(index ir.Ref, indexType types.Type) ir.Ref {
 	return index
 }
 
-// zeroExtentOffset returns the byte offset a slice expression may add to its
+// knownExtent is what the compiler already knows about one of a slice
+// expression's indices or extents. An unknown one is a runtime value.
+type knownExtent struct {
+	value int64
+	known bool
+}
+
+// minus subtracts a known low index from a known bound. Either side being a
+// runtime value leaves the result unknown.
+func (e knownExtent) minus(low knownExtent) knownExtent {
+	if !e.known || !low.known {
+		return knownExtent{}
+	}
+	return knownExtent{value: e.value - low.value, known: true}
+}
+
+// constantIndexValue returns the value of a type-checked index operand when the
+// type checker folded it to a constant.
+func constantIndexValue(value constant.Value) knownExtent {
+	if value == nil {
+		return knownExtent{}
+	}
+	amount, exact := constant.Int64Val(constant.ToInt(value))
+	if !exact {
+		return knownExtent{}
+	}
+	return knownExtent{value: amount, known: true}
+}
+
+// sliceDataOffset returns the byte offset a slice expression may add to its
 // source's data pointer: the requested offset when the result still refers to
 // some of the source's storage, and zero when it does not.
 //
@@ -14780,33 +14828,36 @@ func (g *gen) widenIndex(index ir.Ref, indexType types.Type) ir.Ref {
 // The result cannot be a nil pointer either -- that would turn a non-nil empty
 // slice into a nil one, which is observable -- so the offset is masked instead
 // of the pointer: the result points at the start of the source's storage, which
-// is a pointer the collector already accepts. This is what the host toolchain
-// does, in ssagen's slice(): "the masking is to make sure that we don't generate
-// a slice that points to the next object in memory".
+// is a pointer the collector already accepts, and which keeps that storage
+// reachable, which a pointer past the end does not. This is what the host
+// toolchain does, in ssagen's slice(): "the masking is to make sure that we
+// don't generate a slice that points to the next object in memory".
 //
 // extent is the result's capacity for a slice and its length for a string,
 // matching the host: a string has no capacity, so its length is the only
 // evidence of whether any of the source's bytes are still referred to.
 //
-// lowIsZero skips the mask when the source offset is a constant zero, where the
-// pointer cannot move and there is nothing to mask.
-func (g *gen) zeroExtentOffset(offset, extent ir.Ref, lowIsZero bool) ir.Ref {
-	if lowIsZero {
+// The two constant cases are not an optimization for its own sake. Slicing a
+// fixed-size array at a constant index -- crypto's `copy(b[32:], k.z[:])` -- has
+// a capacity the compiler can read off the type, and emitting a mask there put
+// three instructions into small functions that the inliner then declined to
+// inline, which moved allocation sites the census watches.
+func (g *gen) sliceDataOffset(offset, extent ir.Ref, low, capacity knownExtent) ir.Ref {
+	if low.known && low.value == 0 {
+		// The pointer cannot move, so there is nothing to mask.
+		return offset
+	}
+	if capacity.known {
+		if capacity.value == 0 {
+			return g.fn.Long(0)
+		}
+		// The result keeps storage, so the offset is inside the source.
 		return offset
 	}
 	// mask is 0 when extent is 0 and -1 otherwise. Bounds checking has already
 	// established that extent is not negative.
 	mask := g.cur.Sar(ir.ClsL, g.cur.Neg(ir.ClsL, extent), g.fn.Long(63))
 	return g.cur.And(ir.ClsL, offset, mask)
-}
-
-// isConstantZero reports whether a type-checked operand is the constant 0.
-func isConstantZero(value constant.Value) bool {
-	if value == nil {
-		return false
-	}
-	amount, exact := constant.Int64Val(constant.ToInt(value))
-	return exact && amount == 0
 }
 
 func (g *gen) sliceDescriptor(data, length, capacity ir.Ref) ir.Ref {
