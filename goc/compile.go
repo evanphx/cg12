@@ -3619,7 +3619,7 @@ func (g *gen) objectDoesNotEscapeUnexplained(object types.Object, info *types.In
 				identifier, ok := literalNode.(*ast.Ident)
 				if ok && info.Uses[identifier] == object {
 					escaped = true
-					g.reportEscapingUse(object, identifier)
+					g.reportEscapingCapture(object, identifier)
 					return false
 				}
 				return !escaped
@@ -4331,6 +4331,27 @@ func (g *gen) reportEscapingUse(object types.Object, use ast.Node) {
 	g.diagRule(func() string {
 		return fmt.Sprintf("%s is used here in a way the walk cannot prove keeps it local", object.Name())
 	})
+	g.traceEscapingUse(object, use)
+}
+
+// reportEscapingCapture is reportEscapingUse for the one caller that knows more
+// than "a use decided": the use is inside a function literal the walk has just
+// proved escapes, so the mechanism is closure capture and the walk can say so.
+//
+// The distinction is worth making because the differential against cmd/compile
+// reads these rules as categories, and "the walk cannot prove this keeps it
+// local" is not a category -- it is goc declining to answer, on a line where gc
+// says `captured by a closure` and means it. This turns those lines from a
+// disagreement about nothing into an agreement.
+func (g *gen) reportEscapingCapture(object types.Object, use ast.Node) {
+	g.diagUse(use)
+	g.diagRule(func() string {
+		return fmt.Sprintf("%s is captured by a function literal that escapes", object.Name())
+	})
+	g.traceEscapingUse(object, use)
+}
+
+func (g *gen) traceEscapingUse(object types.Object, use ast.Node) {
 	if escapeDebugLevel() < 2 {
 		return
 	}

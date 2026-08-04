@@ -87,7 +87,7 @@ programs with reasons on both sides            397
 goc -m decisions at joinable positions        1770
   of those on the heap                        1192
   of those carrying a rule                    1192  (must equal the line above)
-  of those goc could not explain               228  (the "unexplained" category: goc saw the
+  of those goc could not explain               227  (the "unexplained" category: goc saw the
                                                     object escape and could not name the use)
 goc -m decisions with no source position         0  (never joinable; so is the census)
 gc -m=2 explained blocks parsed               2995
@@ -96,7 +96,8 @@ gc -m=2 explained blocks parsed               2995
     reaching a joined line                    2185
     for a decision the matrix excludes         425  (printed at an inlining call site; see
                                                     package gcdiff. Not a gap)
-    matching no -m decision at all             110  (must be 0)
+    matching no -m decision at all             110  (a gc heap allocation the placement
+                                                    differential cannot see; listed below)
 gc decisions carrying an explanation          2252
 gc heap decisions with no -m=2 explanation     169
   of those synthesized by the chan rule        136  (expected: gc prints nothing at all
@@ -114,8 +115,15 @@ lines only goc -m records                      18  (expected: the census omits o
                                                     front-end frame slots)
 lines both record and contradict                1  (this one means the tree moved under
                                                     the committed census)
-heap lines goc -m gives no rule for           154  (the blind spot that matters: a heap
-                                                    allocation this file cannot speak for)
+heap lines goc -m gives no rule for           154  (the blind spot: a heap allocation this
+                                                    file cannot speak for. They are listed
+                                                    below; in the committed run all of them
+                                                    are make(chan), make(map) or make([]T),
+                                                    allocators goc never considers for a
+                                                    frame -- so the placement is not a
+                                                    decision and there is no rule to print.
+                                                    gc is the same about channels, which is
+                                                    why this join synthesizes them)
 
   CONTRADICTION: runtime_loopvar_goroutine_defer.go:38: census says mixed, goc -m says frame
 
@@ -4267,10 +4275,10 @@ runtime_loopvar_value_shapes.go:41	mixed -> absent	stored-in-object -> -
 	goc  col 16  frame  main_coordinate  [front end: composite-literal in main.main]
 runtime_loopvar_value_shapes.go:49	mixed -> absent	stored-in-object -> -
 	src  for pair := ([2]int{0, 5}); pair[0] < 3; pair[0]++ {
-	goc  col 6  frame  2_int  [ir pass: heap-alloc-candidate in main.main]
 	goc  col 6  heap  2_int  [ir pass: heap-alloc-candidate in main.main]
 	     stored-in-object write barrier into a candidate
 	     at               testdata/runtime_loopvar_value_shapes.go:49:6
+	goc  col 6  frame  2_int  [ir pass: heap-alloc-candidate in main.main]
 	goc  col 15  frame  2_int  [front end: composite-literal in main.main]
 runtime_loopvar_value_shapes.go:57	mixed -> frame	stored-in-object -> -
 	src  for _, point := range []coordinate{{1, 2}, {3, 4}} {

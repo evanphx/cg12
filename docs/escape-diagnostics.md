@@ -157,43 +157,58 @@ which refuses to skip a diagnostic it has not been taught — with zero
 `Unknown` lines. That is what the decision line's wording and the tab-indented
 continuations are for, and `TestEscapeDiagnosticParsesAsGCFlagM` pins it.
 
-**Two things would have to change to make it useful for a reason-level
-differential**, and they are not the same size:
+**Yes for reasons too, as of `internal/gcdiff`'s reason differential** —
+`goc/testdata/escape_gc_reason_differential.txt`, regenerated with
 
-1. **`Kind` is wrong on goc's side, and the fix is small.**
-   `gcdiff.subjectKind` classifies gc's *source-expression* vocabulary —
-   `make(chan `, `map[`, `make([]`, `... argument` — and goc's subject is a
-   type-descriptor symbol, so everything comes out `KindObject`. gcdiff already
-   has the right mapping for goc on the other side of the join:
-   `CensusRow.Kind()` classifies by allocator. Emitting the allocator in goc's
-   subject, or teaching `subjectKind` to recognise it, is a few lines. Worth
-   doing if anything ever joins two `GCReport`s.
+    go test ./goc -run TestEscapeReasonDifferentialAgainstGC -timeout 60m \
+        -escape-gc-reason-differential -update-escape-gc-reason-differential
 
-2. **Reasons are dropped, and keeping them is not the hard part.**
-   `ParseGCFlagM` skips every tab-indented line, so goc's `rule:`, `from:` and
-   `at:` are discarded. Adding a `Reason` field to `GCDecision` and reading those
-   lines is mechanical.
+`gcdiff.ParseGocFlagM` keeps the `rule:`, `from:` and `at:` lines
+`ParseGCFlagM` skips, and joins them against the flow chains `cmd/compile`
+prints at `-m=2`.
 
-   What is *not* mechanical is what you would do with it. gc's `-m=2` reason
-   vocabulary and goc's are different vocabularies describing different
-   analyses: gc says `leaking param: p to result ~r0 level=0` and
-   `flow: {heap} = &{storage for ...}`, goc says `passed to F, which may retain
-   argument 0` and `write barrier into non-local storage`. There is no mapping
-   between them, and a differential that compared the two strings would report a
-   disagreement on every joined line. **Comparing reasons across compilers is not
-   worth doing.**
+This document used to say, in this section, that **comparing reasons across
+compilers was not worth doing**, on the grounds that the two vocabularies are
+not translations of each other and a differential comparing the strings would
+report a disagreement on every joined line. The first half of that is right and
+the conclusion did not follow: what is comparable is not the string but the
+*mechanism* it names, and there are twelve of those. `internal/gcdiff/reasons.go`
+documents them. Over the corpus the taxonomy leaves nothing uncategorised on
+either side, and the comparison finds 309 source lines where the two compilers
+place the object identically and name incompatible mechanisms — lines no
+placement comparison can see, since both its cells say "heap".
 
-   **Classifying goc's own disagreements by goc's reason is worth doing**, and it
-   is what the last two triage jobs did by hand: the 113 lines where goc heaps
-   what gc frames were sorted into twelve groups, and the groups are goc rules.
-   That grouping is exactly `GROUP BY rule` over this diagnostic. Doing it would
-   turn a day of reading `goc/compile.go` into a run of the differential, which
-   is the actual return on making the output parseable.
+What the differential then says about *this* diagnostic is worth reading before
+extending it:
 
-   The concrete change: have `TestEscapeDifferentialAgainstGC` compile each
-   corpus program with `GOC_M=1` alongside the census it already reads, join by
-   `(file, line)` as it already does, and print the disagreement classes with
-   their goc rule. No new analysis, one new column.
+- **19% of goc's heap rules are the walk declining to answer.** 227 of 1 192
+  are `the walk found a use it could not prove local` or `<name> is used here in
+  a way the walk cannot prove keeps it local`, and the first of those carries no
+  `at:` either — no rule, no position. They are the largest single obstacle to
+  the comparison saying anything.
+- **The IR pass explains the machine where gc explains the language.** Its
+  reasons are stores (`write barrier into a candidate`, `store into non-local
+  storage`) where gc names the construct (`captured by a closure`, `call
+  parameter`, `return`). 153 of the 309 disagreements are that mismatch and
+  nothing else: both descriptions are true of the same event. Naming what the
+  store's destination *is* — a closure object, a result slot, a global — would
+  close most of them.
+- **A positionless allocation is dropped, not reported.** `EscapeSites` filters
+  by file and a site with no position has no file, so goc's `-m` never mentions
+  the per-iteration copies the loop rule makes — which are the largest
+  documented caveat on the placement differential. Reporting them costs the
+  property this whole section is about: `?: subject escapes to heap` does not
+  parse as a `cmd/compile` diagnostic.
+- **`Kind` is still wrong on goc's side** for anything that joins two
+  `GCReport`s. `gcdiff.subjectKind` classifies gc's source-expression vocabulary
+  and goc's subject is a type-descriptor symbol, so everything comes out
+  `KindObject`. The reason differential does not join on `Kind` and so does not
+  care; anything that does will.
+
+**Classifying goc's own disagreements by goc's reason** — the thing this
+document did recommend — is in the same file, under `PLACEMENT DISAGREES, ONLY
+goc EXPLAINED`: the pessimistic direction grouped by the rule that caused it,
+which is what two earlier triage jobs did by hand.
 
 ## Where the flag is wired
 
@@ -203,6 +218,7 @@ differential**, and they are not the same size:
 | `GOC_M` | read once at `opt` package init |
 | `-m` | `cmd/goc/main.go`, overrides `GOC_M` |
 | the report | `opt.WriteEscapeDiagnostics`, called from `goc.compile` after `opt.LowerHeapAllocations` |
+| where the report goes | `opt.EscapeDiagWriter` / `opt.SetEscapeDiagWriter`, `os.Stderr` unless redirected. The reason differential redirects the compiler's own copy to `io.Discard` and calls `WriteEscapeDiagnostics` per module, because the level is process-wide and the corpus compiles concurrently |
 | the AST walk's half | `goc/escapediag.go` |
 | the IR pass's half | `opt/escape.go`'s `candidateEscapes.reasons` |
 

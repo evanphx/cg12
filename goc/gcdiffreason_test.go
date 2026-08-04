@@ -340,6 +340,7 @@ func TestReasonTaxonomyCoversBothVocabularies(t *testing.T) {
 		{"block-copied out of the object holding it", gcdiff.ReasonReadOut},
 		{"the walk found a use it could not prove local", gcdiff.ReasonUnexplained},
 		{"node is used here in a way the walk cannot prove keeps it local", gcdiff.ReasonUnexplained},
+		{"counter is captured by a function literal that escapes", gcdiff.ReasonClosureCaptured},
 		{"", ""},
 	} {
 		reason, known := gcdiff.ClassifyGocRule(testCase.rule)

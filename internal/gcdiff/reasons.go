@@ -254,6 +254,9 @@ func ClassifyGocRule(rule string) (Reason, bool) {
 	// able to name the use: "<name> is used here in a way the walk cannot prove
 	// keeps it local". It starts with the object's name, so it cannot be matched
 	// by a prefix.
+	if strings.Contains(rule, " is captured by a function literal that escapes") {
+		return ReasonClosureCaptured, true
+	}
 	if strings.Contains(rule, " is used here in a way the walk cannot prove keeps it local") ||
 		strings.Contains(rule, " is declared outside the body the walk can see every use in") {
 		return ReasonUnexplained, true
