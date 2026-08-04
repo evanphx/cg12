@@ -191,6 +191,41 @@ var gocAllocationCounts = []struct {
 	// the object past the iteration, and for a variadic backing array nothing
 	// does. These numbers are the price of that bluntness, and lowering them is
 	// a real optimisation someone could do.
+	// An address converted to an interface type on the way into a local, then
+	// only called through. Parity. Two rules meet here: the emitter's
+	// nonEscapingAddress now asks the assignment question at every step of its
+	// climb rather than only of the address itself, so the conversion no longer
+	// ends the walk at its default case; and the method call is answered by
+	// asking every implementation the program can dispatch to. 1.00 -> 0.
+	{"interface_local_method_call", 0, 0, "the object goes where the local goes, and the one implementation keeps nothing"},
+	// The direction that got *more* expensive, and had to. `keep` stores its
+	// receiver in a package-level variable, so the object cannot be in the
+	// caller's frame -- and it was, because an immediately called method used to
+	// be free whatever the method did with the receiver. 0 -> 1.00, which is
+	// what gc charges for the same program. See
+	// testdata/method_receiver_retention.go for the program that reads the
+	// object back out of the reused frame.
+	{"method_retains_receiver", 100, 100, "the method publishes its receiver, so the object is on the heap"},
+	// A method value rather than a method call. The value is a closure over the
+	// receiver, so the receiver goes where the closure goes -- and the closure is
+	// a frame object. 1.00 -> 0. The walk used to accept only an immediately
+	// called method selector and answered "escapes" for everything else.
+	{"method_value_receiver", 0, 0, "the receiver is in the closure, and the closure is a frame object"},
+	// A call through a function-typed local. 1.00 -> 0. The identifier carries no
+	// *types.Func, so there was no summary to ask and the argument took the
+	// conservative answer; a local assigned once from a named function, never
+	// assigned again and never addressed, calls that function and nothing else.
+	{"call_through_a_function_variable", 0, 0, "the local resolves to one callee, whose parameter does not escape"},
+	// A local's address handed to a variadic callee that keeps nothing. 1.00 -> 0.
+	// The summary used to refuse to describe a variadic parameter at all, because
+	// an argument there is an element of a slice the callee builds and the
+	// parameter's own summary answers a different question. It now answers the
+	// question that is asked -- can the callee reach an element -- for the callees
+	// where that is decidable by inspection. See
+	// goc.gen.variadicParameterHoldsItsElements, and
+	// testdata/variadic_element_address_retention.go for the program that says
+	// why the parameter's own summary is not the answer.
+	{"address_into_a_non_retaining_variadic", 0, 0, "the callee's only use of the `...` parameter is len, so no element is reachable"},
 	{"sprintf_in_loop", 200, 100, "loop rule blocks the `...` promotion"},
 	{"variadic_ints_in_loop", 100, 0, "loop rule blocks the `...` promotion"},
 }

@@ -341,6 +341,8 @@ func compile(name string, src []byte, options compileOptions) (*ir.Module, error
 		lastModuleSymbol:        lastModuleSymbolFor(options.runtimeSplit),
 		dynamicTypes:            dynamicTypes,
 		reachableGlobals:        reachableGlobals,
+		reachableFunctions:      functions,
+		interfaceCandidates:     make(map[interfaceCandidateKey][]interfaceMethodCandidate),
 	}
 	g.mod.File(name)
 	registerNoEscapeDirectives(g)
@@ -1615,6 +1617,14 @@ type gen struct {
 	// so getting this wrong means the program's package init never runs.
 	lastModuleSymbol  string
 	dynamicTypes      []types.Type
+	// reachableFunctions is the set addInterfaceMethodWrappers dispatches over,
+	// kept so the escape walk can ask the same question about an interface
+	// method call that the dispatcher answers about it.
+	reachableFunctions []functionDecl
+	// interfaceCandidates memoises interfaceMethodCandidates, which is O(dynamic
+	// types x reachable declarations) and would otherwise be recomputed at every
+	// interface method call the escape walk meets.
+	interfaceCandidates map[interfaceCandidateKey][]interfaceMethodCandidate
 	reachableGlobals  map[types.Object]bool
 	filterGlobals     bool
 	emitRuntimeTables bool
@@ -2368,6 +2378,262 @@ func (g *gen) nonEscapingAddress(address *ast.UnaryExpr) bool {
 // inside the literal is in whichever of the two the emitter chose. Asking the
 // walk's own, more precise question there instead is what left
 // bigmod.Nat.Mul's T on the frame while its &Nat{limbs: T} went to the heap.
+// methodCallDoesNotRetainReceiver reports that calling this method cannot make
+// the receiver's storage outlive the call.
+//
+// An immediately called method selector used to be free: `x.m()` answered "does
+// not escape" whatever m did with x. It is not free. A method is a function
+// whose first argument is the receiver, and
+//
+//	func (b *rbox) keep() int { sink = b; return b.a }
+//
+// publishes it. The caller's `value := &rbox{...}` was left in the frame with a
+// package-level pointer into it, and after the frame was reused the program read
+// back junk where the reference implementation read back the values. gc says the
+// same thing about the same function -- "leaking param: b" -- and puts the
+// literal on the heap.
+//
+// The answer comes from receiverDoesNotEscape, which is the same walk
+// parameterDoesNotEscape runs, so a method with no declaration the compiler can
+// see -- an interface method, an assembly method, a generic instantiation --
+// gets the conservative answer rather than a guess.
+
+// resolvedCallee names the function a call expression calls, resolving a call
+// through a function-typed local variable to the function assigned to it.
+//
+// The escape walk stopped at `f(arg)` where f is a `var f func(...)` -- there is
+// no *types.Func on the identifier, so there was no summary to ask and the
+// answer was the conservative one. gc reaches these by devirtualisation, and goc
+// compiling whole-program can do at least as well: a local that is assigned once
+// from a named function, never assigned again and never addressed, calls that
+// function and nothing else.
+//
+// The three conditions are all load-bearing. More than one assignment and the
+// call is not decided here; an address means some other code can assign through
+// it; and a variable the walk cannot see every use of -- a parameter, a capture
+// -- is assigned somewhere this body does not contain.
+func (g *gen) resolvedCallee(
+	fun ast.Expr,
+	info *types.Info,
+	parents map[ast.Node]ast.Node,
+	body *ast.BlockStmt,
+) *types.Func {
+	if function := calledFunction(fun, info); function != nil {
+		return function
+	}
+	identifier, isIdentifier := fun.(*ast.Ident)
+	if !isIdentifier || body == nil {
+		return nil
+	}
+	variable, isVariable := info.Uses[identifier].(*types.Var)
+	if !isVariable || variable.Pkg() == nil {
+		return nil
+	}
+	if _, global := g.globals[variable]; global {
+		return nil
+	}
+	// Declared inside this body, not merely visible from it. A *parameter* of
+	// function type passes escapeWalkSeesEveryUse -- signatureVariables puts it in
+	// escapeWalkOuterObjects -- and its first value comes from the caller, so
+	// `func f(g func()) { g(); g = h }` has exactly one assignment in the body and
+	// the call is not to h.
+	if variable.Pos() < body.Pos() || variable.Pos() >= body.End() {
+		return nil
+	}
+	var assigned ast.Expr
+	assignments := 0
+	addressed := false
+	ast.Inspect(body, func(node ast.Node) bool {
+		other, ok := node.(*ast.Ident)
+		if !ok || (info.Uses[other] != variable && info.Defs[other] != variable) {
+			return true
+		}
+		switch parent := parents[other].(type) {
+		case *ast.AssignStmt:
+			for index, target := range parent.Lhs {
+				if target != other {
+					continue
+				}
+				assignments++
+				if len(parent.Rhs) == len(parent.Lhs) {
+					assigned = parent.Rhs[index]
+				} else {
+					assigned = nil
+				}
+			}
+		case *ast.ValueSpec:
+			for index, name := range parent.Names {
+				if name != other {
+					continue
+				}
+				assignments++
+				if index < len(parent.Values) {
+					assigned = parent.Values[index]
+				} else {
+					// `var f func()` with no value is the nil function, and a call
+					// through it panics rather than reaching anything. Counting it
+					// as an assignment keeps the "exactly one" test honest.
+					assigned = nil
+				}
+			}
+		case *ast.UnaryExpr:
+			if parent.Op == token.AND {
+				addressed = true
+			}
+		}
+		return true
+	})
+	if addressed || assignments != 1 || assigned == nil {
+		return nil
+	}
+	return calledFunction(assigned, info)
+}
+
+func (g *gen) methodCallDoesNotRetainReceiver(
+	selector *ast.SelectorExpr,
+	info *types.Info,
+	checking map[parameterKey]bool,
+) bool {
+	method, ok := info.Uses[selector.Sel].(*types.Func)
+	if !ok {
+		return false
+	}
+	// The interface the *call site* names, which is narrower than the one the
+	// method is declared on whenever the declaration is an embedded interface:
+	// heap.Interface embeds sort.Interface, so `h.Less(...)` inside container/heap
+	// resolves to (sort.Interface).Less and asking about sort.Interface drags in
+	// every sorter in the program. The dynamic type has to implement the static
+	// type, so narrowing to it is sound and strictly smaller.
+	if static, isInterface := receiverInterfaceAtCallSite(selector, info); isInterface {
+		return g.interfaceMethodDoesNotRetainReceiver(method, static, checking)
+	}
+	return g.methodDoesNotRetainReceiver(method, checking)
+}
+
+// receiverInterfaceAtCallSite names the interface type of the expression a
+// method is being called on, for a call through an interface value.
+func receiverInterfaceAtCallSite(selector *ast.SelectorExpr, info *types.Info) (*types.Interface, bool) {
+	receiverType := info.TypeOf(selector.X)
+	if receiverType == nil {
+		return nil, false
+	}
+	interfaceType, isInterface := receiverType.Underlying().(*types.Interface)
+	return interfaceType, isInterface
+}
+
+// methodDoesNotRetainReceiver is methodCallDoesNotRetainReceiver with the method
+// already resolved, so that an interface implementation which is itself an
+// embedded interface method can be asked the same question recursively.
+// sort.reverse is that shape -- struct{ Interface } -- and its Len is the
+// embedded interface's, which has no body to walk.
+func (g *gen) methodDoesNotRetainReceiver(method *types.Func, checking map[parameterKey]bool) bool {
+	if interfaceType, isInterfaceMethod := methodsInterface(method); isInterfaceMethod {
+		return g.interfaceMethodDoesNotRetainReceiver(method, interfaceType, checking)
+	}
+	if receiverIsAPointerFreeCopy(method) {
+		// The callee is handed a copy of a value that holds no reference to
+		// anything, so there is nothing about the caller's storage for it to
+		// retain and no body to walk. Without this, `t.Sub(u)` on a time.Time and
+		// every other pointer-free value method fell to the conservative answer.
+		return true
+	}
+	return g.receiverDoesNotEscape(method, checking)
+}
+
+// methodsInterface reports the interface a method is declared on, for a method
+// reached through an interface value rather than through a concrete type.
+func methodsInterface(method *types.Func) (*types.Interface, bool) {
+	signature, ok := method.Type().(*types.Signature)
+	if !ok || signature.Recv() == nil {
+		return nil, false
+	}
+	interfaceType, isInterface := signature.Recv().Type().Underlying().(*types.Interface)
+	return interfaceType, isInterface
+}
+
+// interfaceMethodDoesNotRetainReceiver answers "does calling this interface
+// method retain the receiver" by asking every implementation the program can
+// dispatch to.
+//
+// This is devirtualisation, and it is the one place in the escape walk where
+// goc can be *more* precise than cmd/compile rather than less: gc devirtualises
+// a call whose concrete type it can see in one function, while goc compiles the
+// whole program and knows the complete set of types that can reach any interface.
+//
+// The set is interfaceMethodCandidates', which is the same set
+// addInterfaceMethodWrappers builds the dispatcher out of. A type missing from
+// it does not merely get a conservative escape answer -- it reaches
+// runtime_gocInterfaceDispatchFailure and the program stops -- so believing it
+// here adds no failure mode the dispatcher does not already have.
+//
+// An empty candidate list is answered "retains", not vacuously "does not": an
+// interface the walk could find no implementation of is a question this has no
+// information about, and the conservative answer is the one that keeps the
+// object on the heap.
+func (g *gen) interfaceMethodDoesNotRetainReceiver(
+	method *types.Func,
+	interfaceType *types.Interface,
+	checking map[parameterKey]bool,
+) bool {
+	// An interface method has no body, so receiverDoesNotEscape's cycle-breaking
+	// entry is never reached for one and a chain of embedded interfaces would
+	// recurse without end. This is that entry, taken on the interface method
+	// itself.
+	key := parameterKey{function: method, index: -1}
+	if checking[key] {
+		return false
+	}
+	checking[key] = true
+	defer delete(checking, key)
+
+	cacheKey := interfaceCandidateKey{method: method, interfaceType: interfaceType.String()}
+	candidates, cached := g.interfaceCandidates[cacheKey]
+	if !cached {
+		candidates = interfaceMethodCandidates(g, g.reachableFunctions, method, interfaceType)
+		g.interfaceCandidates[cacheKey] = candidates
+	}
+	if escapeDebugLevel() >= 2 {
+		fmt.Fprintf(os.Stderr, "escape devirt: %s on %s -> %d candidates\n", method.FullName(), interfaceType.String(), len(candidates))
+	}
+	if len(candidates) == 0 {
+		return false
+	}
+	for _, candidate := range candidates {
+		if !g.methodDoesNotRetainReceiver(candidate.function, checking) {
+			return false
+		}
+	}
+	return true
+}
+
+// interfaceCandidateKey names one devirtualisation question: a method, and the
+// interface the call site named. The same method asked about two interfaces has
+// two answers, because the narrower interface has fewer implementations.
+type interfaceCandidateKey struct {
+	method        *types.Func
+	interfaceType string
+}
+
+// receiverIsAPointerFreeCopy reports that this method's receiver is passed by
+// value and carries no pointer, so the callee cannot reach the caller's storage
+// through it however it is used.
+func receiverIsAPointerFreeCopy(method *types.Func) bool {
+	signature, ok := method.Type().(*types.Signature)
+	if !ok || signature.Recv() == nil {
+		return false
+	}
+	receiverType := signature.Recv().Type()
+	if _, isPointer := receiverType.Underlying().(*types.Pointer); isPointer {
+		return false
+	}
+	if _, isInterface := receiverType.Underlying().(*types.Interface); isInterface {
+		return false
+	}
+	pointers := false
+	visitPointerWords(receiverType, 0, func(int64) { pointers = true })
+	return !pointers
+}
+
 func (g *gen) nonEscapingAddressWithin(
 	address *ast.UnaryExpr,
 	info *types.Info,
@@ -2375,11 +2641,18 @@ func (g *gen) nonEscapingAddressWithin(
 	body *ast.BlockStmt,
 	checking map[parameterKey]bool,
 ) bool {
-	if g.assignedNodeDoesNotEscapeWithin(address, info, parents, body, checking) {
-		return true
-	}
 	var current ast.Node = address
 	for {
+		// Asked at every step rather than only of the address itself, because the
+		// climb below turns the address into the expression that contains it and
+		// the containing expression is the one an assignment sees. `value :=
+		// scorer(&scoreBox{...})` climbs the conversion and then meets the
+		// assignment; without the retry the assignment was the loop's default case
+		// and every literal converted to an interface on the way into a local went
+		// to the heap.
+		if g.assignedNodeDoesNotEscapeWithin(current, info, parents, body, checking) {
+			return true
+		}
 		parent := parents[current]
 		switch parent := parent.(type) {
 		case *ast.ParenExpr:
@@ -2477,7 +2750,7 @@ func (g *gen) addressEscapesWithin(
 			if argumentIndex < 0 {
 				return false
 			}
-			function := calledFunction(parent.Fun, info)
+			function := g.resolvedCallee(parent.Fun, info, parents, body)
 			if function == nil {
 				return true
 			}
@@ -2773,7 +3046,8 @@ func (g *gen) valueDoesNotEscapeWithin(
 			// address makes an interior pointer that keeps the whole object
 			// alive, so the object escapes exactly when that pointer does. A
 			// method value is a closure over the receiver and is answered by
-			// asking where the closure goes; only an immediate call is free.
+			// asking both what the method does with the receiver and where the
+			// closure goes; an immediate call asks only the first.
 			if parent.X != current {
 				return false
 			}
@@ -2785,8 +3059,15 @@ func (g *gen) valueDoesNotEscapeWithin(
 				address := addressedExpression(parent, parents, info)
 				return address == nil || !g.addressEscapesWithin(address, info, parents, body, checking)
 			}
-			call, calledImmediately := parents[parent].(*ast.CallExpr)
-			return calledImmediately && call.Fun == parent
+			if !g.methodCallDoesNotRetainReceiver(parent, info, checking) {
+				return false
+			}
+			if call, calledImmediately := parents[parent].(*ast.CallExpr); calledImmediately && call.Fun == parent {
+				return true
+			}
+			// See nonEscapingObjectUse: a method value is a closure over the
+			// receiver, and the receiver goes where the closure goes.
+			current = parent
 		case *ast.RangeStmt:
 			return parent.X == current
 		case *ast.ReturnStmt:
@@ -2825,7 +3106,7 @@ func (g *gen) valueDoesNotEscapeWithin(
 				current = parent
 				continue
 			}
-			function := calledFunction(parent.Fun, info)
+			function := g.resolvedCallee(parent.Fun, info, parents, body)
 			if function == nil {
 				return false
 			}
@@ -3439,8 +3720,17 @@ func (g *gen) nonEscapingObjectUse(
 			address := addressedExpression(parent, parents, info)
 			return address == nil || !g.addressEscapesWithin(address, info, parents, body, checking)
 		}
-		call, calledImmediately := parents[parent].(*ast.CallExpr)
-		return calledImmediately && call.Fun == parent
+		if !g.methodCallDoesNotRetainReceiver(parent, info, checking) {
+			return false
+		}
+		if call, calledImmediately := parents[parent].(*ast.CallExpr); calledImmediately && call.Fun == parent {
+			return true
+		}
+		// A method value is a closure over the receiver, so the receiver is
+		// wherever the closure is: `record := recorder.Add` puts recorder in
+		// record and nowhere else. The method's own answer above already covers
+		// what the call does with it; this covers where the closure goes.
+		return g.valueDoesNotEscapeWithin(parent, info, parents, body, checking)
 	case *ast.StarExpr:
 		return parent.X == identifier
 	case *ast.TypeAssertExpr:
@@ -3575,7 +3865,7 @@ func (g *gen) nonEscapingObjectUse(
 			}
 			return g.valueDoesNotEscapeWithin(parent, info, parents, body, checking)
 		}
-		function := calledFunction(parent.Fun, info)
+		function := g.resolvedCallee(parent.Fun, info, parents, body)
 		if function == nil {
 			return false
 		}
@@ -3706,31 +3996,29 @@ func (g *gen) parameterDoesNotEscape(function *types.Func, index int, checking m
 		return false
 	}
 	signature := function.Type().(*types.Signature)
-	if index < 0 || index >= signature.Params().Len() {
+	if index < 0 {
+		return false
+	}
+	if index >= signature.Params().Len() && !signature.Variadic() {
 		return false
 	}
 	if declaration.decl.Body == nil {
 		return hasCompilerDirective(declaration.decl, "go:noescape")
 	}
-	if signature.Variadic() && index == signature.Params().Len()-1 {
+	if signature.Variadic() && index >= signature.Params().Len()-1 {
 		// The callers of this walk hand it an argument position, and for a
 		// variadic call every argument from the last parameter on is an
 		// *element* of a slice the callee builds -- not the parameter. Answering
 		// them with the parameter's own summary answers a different question:
 		// `func keep(args ...*T) { sink = args[0] }` retains no pointer it was
-		// handed, and retains everything they point at.
+		// handed, and retains everything they point at. That is what
+		// testdata/variadic_element_address_retention.go is; answering it from
+		// the parameter's own summary left a package-level variable pointing at a
+		// caller's frame.
 		//
-		// Positions past the parameter list are already refused above, so this
-		// is the one that used to slip through, and getting it wrong left a
-		// package-level variable pointing at a caller's frame. The refusal is
-		// the whole answer for a walk that has no notion of dereference depth;
-		// the fact table in opt does have one, and ParamFact.Deep is where the
-		// question is really answered -- see opt.markSummarisedCall.
-		//
-		// A spread call, f(xs...), does hand the parameter over as itself and
-		// loses precision here. That is the price of one predicate serving both,
-		// and it is the safe direction.
-		return false
+		// So the question asked here is the deep one -- can the callee reach an
+		// element at all -- and variadicParameterHoldsItsElements is the answer.
+		return g.variadicParameterHoldsItsElements(declaration, signature)
 	}
 	key := parameterKey{function: function, index: index}
 	if checking[key] {
@@ -3750,6 +4038,101 @@ func (g *gen) parameterDoesNotEscape(function *types.Func, index int, checking m
 	return g.objectDoesNotEscape(signature.Params().At(index), declaration.info, parents, declaration.decl.Body, checking)
 }
 
+
+// variadicParameterHoldsItsElements reports that a variadic callee cannot reach
+// an element of its `...` parameter, so an argument in a variadic position does
+// not escape through the call.
+//
+// This is the deep question -- "is anything reachable *through* this slice
+// retained" -- and the walk that answers every other position answers only the
+// shallow one: whether the object itself is carried out. The two are not the
+// same for a slice. `func keep(args ...*T) { for _, a := range args { sink = a } }`
+// carries `args` nowhere, and carries out everything it points at.
+//
+// So this is a whitelist rather than a walk. A use of the parameter is accepted
+// only where it provably cannot produce an element:
+//
+//   - len(args), cap(args)
+//   - args == nil, args != nil
+//   - for i := range args, with no value variable
+//
+// Everything else -- an index, a slice expression, a range with a value
+// variable, a copy, being passed on, being stored, being returned -- is
+// rejected. `func retainNothing(args ...any) int { return len(args) }` is the
+// shape this exists for, and it is the shape a caller could not learn anything
+// about before: testdata/variadic_backing.go's `retainNothing(&x)` put x on the
+// heap, where gc keeps it in the frame.
+//
+// A wider rule is possible and is a walk of its own: it would have to follow an
+// element out of an index or a range into the uses of the value it produced, and
+// through a call into the callee's own deep answer for that position. That is
+// the machinery ParamFact.Deep is in opt, and it is not this predicate.
+func (g *gen) variadicParameterHoldsItsElements(declaration functionDecl, signature *types.Signature) bool {
+	body := declaration.decl.Body
+	if body == nil {
+		return false
+	}
+	parameter := signature.Params().At(signature.Params().Len() - 1)
+	if parameter.Name() == "" || parameter.Name() == "_" {
+		// Unnamed: the body cannot mention it, so no element is reachable.
+		return true
+	}
+	info := declaration.info
+	parents := g.declarationParents(declaration.decl)
+	reachable := false
+	ast.Inspect(body, func(node ast.Node) bool {
+		if reachable {
+			return false
+		}
+		identifier, isIdentifier := node.(*ast.Ident)
+		if !isIdentifier || info.Uses[identifier] != parameter {
+			return true
+		}
+		if !variadicUseCannotReachAnElement(identifier, info, parents) {
+			reachable = true
+		}
+		return true
+	})
+	return !reachable
+}
+
+// variadicUseCannotReachAnElement is variadicParameterHoldsItsElements' whitelist,
+// asked of one use.
+func variadicUseCannotReachAnElement(identifier *ast.Ident, info *types.Info, parents map[ast.Node]ast.Node) bool {
+	switch parent := parents[identifier].(type) {
+	case *ast.CallExpr:
+		if parent.Fun == identifier {
+			return false
+		}
+		called, isIdentifier := parent.Fun.(*ast.Ident)
+		if !isIdentifier {
+			return false
+		}
+		builtin, isBuiltin := info.Uses[called].(*types.Builtin)
+		if !isBuiltin {
+			return false
+		}
+		// copy is deliberately absent: it moves the elements into the
+		// destination, which is exactly the thing this predicate is about.
+		return builtin.Name() == "len" || builtin.Name() == "cap"
+	case *ast.BinaryExpr:
+		if parent.Op != token.EQL && parent.Op != token.NEQ {
+			return false
+		}
+		other := parent.Y
+		if other == identifier {
+			other = parent.X
+		}
+		nilIdentifier, isIdentifier := other.(*ast.Ident)
+		return isIdentifier && nilIdentifier.Name == "nil"
+	case *ast.RangeStmt:
+		// The index carries nothing. A value variable is a copy of an element and
+		// carries everything the element points at.
+		return parent.X == identifier && parent.Value == nil
+	}
+	return false
+}
+
 // parameterLeaksOnlyToResult reports that a parameter's storage cannot outlive
 // the call except through the call's own result. It asks exactly the question
 // parameterDoesNotEscape asks, with one difference: returning the parameter, or
@@ -3757,11 +4140,14 @@ func (g *gen) parameterDoesNotEscape(function *types.Func, index int, checking m
 // caller that gets this answer must therefore continue its walk from the call
 // expression -- the storage escapes exactly when the result does.
 //
-// The summary does not describe a variadic parameter, whose argument is an
-// element of a slice the callee builds rather than the parameter itself. A
-// caller that gets the answer for a function with more than one result cannot
-// simply continue from the call expression, because that expression does not
-// stand for one value; see leakedCallResultDoesNotEscape.
+// It does not describe a variadic parameter. parameterDoesNotEscape does, by a
+// different question -- variadicParameterHoldsItsElements -- and there is no
+// "leaks only to the result" form of that question here: an element reaching the
+// result is an element reaching *out*, and the whitelist that answers the deep
+// question has no case that produces an element at all. A caller that gets this
+// answer for a function with more than one result cannot simply continue from
+// the call expression, because that expression does not stand for one value; see
+// leakedCallResultDoesNotEscape.
 func (g *gen) parameterLeaksOnlyToResult(function *types.Func, index int, checking map[parameterKey]bool) bool {
 	declaration, ok := g.functionDecls[function]
 	if !ok || declaration.decl.Body == nil {
@@ -3856,7 +4242,11 @@ func (g *gen) receiverDoesNotEscape(function *types.Func, checking map[parameter
 	// fresh heap storage on the way out; boxedIntoInterface needs the
 	// signature to see that.
 	parents := g.declarationParents(declaration.decl)
-	return g.objectDoesNotEscape(signature.Recv(), declaration.info, parents, declaration.decl.Body, checking)
+	answer := g.objectDoesNotEscape(signature.Recv(), declaration.info, parents, declaration.decl.Body, checking)
+	if escapeDebugLevel() >= 2 {
+		fmt.Fprintf(os.Stderr, "escape receiver: %s does not escape: %v\n", function.FullName(), answer)
+	}
+	return answer
 }
 
 func constInt(v constant.Value) int64 {

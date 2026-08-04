@@ -357,6 +357,100 @@ func appendFromSpreadSource() {
 	sinkInt = len(values)
 }
 
+// scoreBox and its interface are the shape a value takes on the way into a
+// local: an address converted to an interface type and then only called
+// through. Nothing is boxed -- a pointer is its own interface payload -- so the
+// only question is where the object goes, and it goes wherever the local does.
+type scoreBox struct{ value int }
+
+func (box *scoreBox) score() int { return box.value }
+
+type scorer interface{ score() int }
+
+// interfaceLocalMethodCall converts an address to an interface on the way into
+// a local and then calls a method on it. The emitter's nonEscapingAddress climbs
+// the conversion and used to meet the assignment as its default case, which put
+// every such literal on the heap; and the method call is answered by asking
+// every implementation the program can dispatch to, which is one -- and it does
+// not retain its receiver.
+//
+//go:noinline
+func interfaceLocalMethodCall() {
+	value := scorer(&scoreBox{value: theInt})
+	sinkInt = value.score()
+}
+
+// retainedReceiver's method stores the receiver in a package-level variable, so
+// the object has to be on the heap. This row is the direction that got *more*
+// expensive: an immediately called method used to be free whatever the method
+// did, which left the object in the frame with a live pointer into it.
+type retainedReceiver struct{ value int }
+
+var retainedSink *retainedReceiver
+
+func (box *retainedReceiver) keep() int {
+	retainedSink = box
+	return box.value
+}
+
+//go:noinline
+func methodRetainsReceiver() {
+	value := &retainedReceiver{value: theInt}
+	sinkInt = value.keep()
+}
+
+// methodValueReceiver takes a method value rather than calling the method. The
+// value is a closure over the receiver, so the receiver is in the closure and
+// nowhere else; the closure is a frame object here, so the receiver can be one
+// too. This used to be answered "escapes" because the walk accepted only an
+// immediately called method selector.
+//
+//go:noinline
+func methodValueReceiver() {
+	value := &scoreBox{value: theInt}
+	scoreOnce := value.score
+	sinkInt = scoreOnce()
+}
+
+// consumeBox is the callee the row below reaches through a function-typed local.
+//
+//go:noinline
+func consumeBox(box *scoreBox) int { return box.value }
+
+// callThroughAFunctionVariable calls a function through a local of function
+// type. The local is assigned once from a named function, never assigned again
+// and never addressed, so the call reaches that function and nothing else --
+// which is what lets the argument's summary be asked at all. Before the walk
+// resolved this, `f(box)` had no *types.Func to ask about and took the
+// conservative answer.
+//
+//go:noinline
+func callThroughAFunctionVariable() {
+	var consume func(*scoreBox) int = consumeBox
+	box := &scoreBox{value: theInt}
+	sinkInt = consume(box)
+}
+
+// retainNothingVariadic is the callee the row below hands an address to. Its
+// only use of the `...` parameter is len, so it cannot reach an element and the
+// address does not escape through the call.
+//
+//go:noinline
+func retainNothingVariadic(args ...any) int { return len(args) }
+
+// addressIntoANonRetainingVariadic hands a local's address to a variadic callee
+// that keeps nothing. The escape summary used to refuse to describe a variadic
+// parameter at all -- an argument there is an element of a slice the callee
+// builds, and the parameter's own summary answers a different question -- so
+// every such address went to the heap. It now answers the question that is
+// actually being asked: can the callee reach an element.
+//
+//go:noinline
+func addressIntoANonRetainingVariadic() {
+	value := theInt
+	sinkInt = retainNothingVariadic(&value)
+}
+
 const iterations = 1000
 
 // measure runs the operation `iterations` times after a warm-up of the same
@@ -411,6 +505,11 @@ func main() {
 	measure("declare_interface_from_pointer", repeat(declareInterfaceFromPointer))
 	measure("nested_composite_literal_address", repeat(nestedCompositeLiteralAddress))
 	measure("append_from_spread_source", repeat(appendFromSpreadSource))
+	measure("interface_local_method_call", repeat(interfaceLocalMethodCall))
+	measure("method_value_receiver", repeat(methodValueReceiver))
+	measure("call_through_a_function_variable", repeat(callThroughAFunctionVariable))
+	measure("address_into_a_non_retaining_variadic", repeat(addressIntoANonRetainingVariadic))
+	measure("method_retains_receiver", repeat(methodRetainsReceiver))
 	measure("sprintf_in_loop", sprintfInLoop)
 	measure("variadic_ints_in_loop", variadicIntsInLoop)
 }

@@ -3631,3 +3631,710 @@ measured here — the `-O` arm is 366/366 and both reducers pass 3/3 — and thi
 change deliberately did not touch them. A checker that asserts the closure
 ("a temporary whose value comes from a managed one is managed") would settle it
 properly; that is a piece of work, not a patch.
+# parity-113 (branch ccwork/parity-113, off d113d4a)
+
+Task: close as much as remains of the 113 lines where goc heaps what gc frames;
+settle the variadic-summary question; say whether the 4 slog rows are the same
+causes; record what is irreducible.
+
+## Instrument
+
+A scratch driver compiles the 71 corpus files that carry the 113 lines and
+prints `opt.AllocationCensusWith(..., IncludeFrontEndFrameSlots: true)` plus
+`opt.FrameEscapes` for each. Scoring "how many of the 113 lines still carry only
+heap rows" against it **reproduces 113/113 exactly** and takes 32 s, against
+181 s for a full census regeneration and a further 11 s for the differential. It
+is used below to bound each candidate fix before writing it, and every number it
+produces is confirmed at the end by regenerating the committed census and
+differential for real.
+
+## Correction to the previous classification: G9 is the loop rule, not variadic
+
+The previous job filed three lines under "a variadic parameter has no summary":
+
+    allocation_counts.go:273        sinkInt = variadicInts(theInt, theInt)
+    runtime_range_target_forms.go:137/144   observed += fmt.Sprintf("%v|", box.value)
+
+All three carry `BlockedByLoop` on their allocation decision. They are the loop
+rule -- `opt.promotionsBlockedByALoop` -- and not the summary gap. The proof is
+in the corpus itself: `allocation_counts.go:67`
+
+    func callVariadicInts() { sinkInt = variadicInts(theInt, theInt) }
+
+is the *same call* outside a loop and the census already places its `[2]int`
+backing array **in the frame**. Line 273 is that call inside a `for`, and the
+census places it on the heap. Nothing about the variadic summary differs between
+the two lines.
+
+Every one of the 113 was checked for this: joining `ir.AllocDecision.BlockedByLoop`
+against the 113 lines gives exactly those three and no others.
+
+## A miscompile found on the way, and fixed: a method that retains its receiver
+
+Triaging G6 turned up a hole that is **not** a parity question. The escape walk
+answered every *immediately called* method selector with "does not escape",
+whatever the method did with the receiver:
+
+    call, calledImmediately := parents[parent].(*ast.CallExpr)
+    return calledImmediately && call.Fun == parent
+
+`goc/compile.go` had that in two places -- `nonEscapingObjectUse` and
+`valueDoesNotEscapeWithin`. So this program
+
+    func (b *rbox) keep() int { sink = b; return b.a }
+
+    func direct() {
+        value := &rbox{a: 0x1111, b: 0x2222, c: 0x3333, d: 0x4444}
+        if value.keep() != 0x1111 { panic("keep") }
+    }
+
+left `value` in `direct`'s frame with a package-level pointer into it. Compiled
+at the branch point (d113d4a) and run, after 200 frames of recursion and a
+`runtime.GC()`:
+
+    goc               false false false false
+    host toolchain    true true true true
+
+The host toolchain's own analysis says the same thing goc should have:
+`./recv2.go:10:7: leaking param: b`, `&rbox{...} escapes to heap`.
+
+`opt.FrameEscapes` is structurally blind to it: the publication happens inside
+`keep`, through a parameter, one function away from the frame that owns the
+storage. The census records the site as a frame placement, which is what it was
+asked for.
+
+The fix asks the receiver the same question every other argument gets --
+`receiverDoesNotEscape` -- instead of treating the call syntax as the answer.
+`goc/testdata/method_receiver_retention.go` is the program above, and it is in
+the corpus so the audit runs it.
+
+### The fix, and what it cost
+
+Three changes, measured together because they are one question:
+
+1. **`nonEscapingAddressWithin` asks the assignment question at every step of
+   its climb**, not only of the address itself. `value := scorer(&scoreBox{...})`
+   climbs the conversion and then met the assignment as the loop's *default*
+   case, so every literal converted to an interface on the way into a local went
+   to the heap.
+2. **An immediately called method asks `receiverDoesNotEscape`** instead of
+   treating the call syntax as the answer. This is the correctness fix above.
+3. **An interface method call is devirtualised whole-program.** goc knows the
+   complete set of types that can reach any interface -- it builds the
+   dispatcher out of that set, and a type missing from it reaches
+   `runtime_gocInterfaceDispatchFailure` rather than being dispatched wrongly --
+   so "does this interface method retain its receiver" is answered by asking
+   every implementation. The interface asked about is the one the *call site*
+   names, not the one the method is declared on: `heap.Interface` embeds
+   `sort.Interface`, and asking about `sort.Interface` drags in every sorter in
+   the program. An embedded-interface implementation (`sort.reverse` is
+   `struct{ Interface }`) recurses, with a cycle-breaking entry of its own since
+   an interface method has no body for `receiverDoesNotEscape` to guard on.
+
+Without (3), (2) costs 4 corpus lines and 67 stdlib sites. With it, 2 corpus
+lines and 58 stdlib sites -- and both of the corpus lines were **permissive**
+lines that goc was getting wrong in the correctness direction:
+
+    stdlib_io_readall_limited_reader.go:9    frame -> heap   (gc: escapes to heap)
+    stdlib_netpoll_syscall_socket_listen.go:19  frame -> heap   (gc: escapes to heap)
+
+`stdlib_container_heap.go:31` is the one devirtualisation kept in the frame, and
+there goc is right where gc is conservative: `heap.Init`'s `h.Len/Less/Swap/Push/Pop`
+have exactly one implementation in that program and none of them retains the
+receiver, which gc cannot see from inside `container/heap`.
+
+    lines where goc heaps what gc frames    113 -> 111
+    lines where goc frames what gc heaps   1448 -> 1446
+
+Rows in `testdata/allocation_counts.go`, measured with the branch point's
+compiler and this branch's:
+
+    interface_local_method_call   1.00 -> 0     (gc 0)
+    method_retains_receiver       0    -> 1.00  (gc 1.00)
+
+## G11 and G6, fixed: a method value, and a call through a function variable
+
+**G11 -- a method value (2 lines). Previous verdict "gc is right"; it was right,
+and the walk can now say so.** `record := recorder.Add` is a closure over the
+receiver, so the receiver is in the closure and nowhere else. The walk accepted
+only an *immediately called* method selector and answered "escapes" for
+everything else. It now asks both halves: what the method does with the receiver
+(the rule above) and where the closure goes.
+
+**G6 -- a call through a function-typed local (3 of the 8).** `var f
+func(...) = callback; f(arg, ...)` had no `*types.Func` on the identifier, so
+there was no summary to ask. `resolvedCallee` resolves a local that is assigned
+exactly once from a named function, never assigned again and never addressed.
+All three conditions are load-bearing: a second assignment makes the callee
+undecidable here, an address lets other code assign through it, and a variable
+whose uses the walk cannot all see -- a parameter, a capture -- is assigned
+somewhere this body does not contain.
+
+    runtime_reflect_value_indirect_call.go:28,29
+    runtime_timer_callback_shape.go:16
+    runtime_defer_method_value_order.go:12   (G11)
+    runtime_method_value_gc.go:16            (G11)
+
+    lines where goc heaps what gc frames    111 -> 106
+
+The remaining 5 of G6 are an interface method the walk devirtualises to a
+retaining implementation, and a function literal passed to a call -- neither is
+a func-value resolution.
+
+Rows: `method_value_receiver` 1.00 -> 0 (gc 0),
+`call_through_a_function_variable` 1.00 -> 0 (gc 0).
+
+## Measured and **not** landed: walking the generic declaration for an instantiated callee
+
+`functionDecls` is keyed by the `*types.Func` a declaration defines, which for a
+generic function is the uninstantiated one, while `calledFunction` hands back the
+instantiation. So every call to a generic callee -- `slices.Sort`,
+`slices.Contains`, `maps.Keys` -- missed the map and took the conservative
+answer. Falling back to `function.Origin()`'s declaration (and to its signature,
+since the instantiated signature's parameter objects are not the ones the body's
+identifiers resolve to) makes the walk enter those bodies.
+
+It was implemented, measured, and reverted:
+
+- It moves **0** of the 106. `slices.Sort` still loses the argument, one frame
+  deeper -- `slices/sort.go:18` hands `x` to `pdqsortOrdered`, which loses it at
+  `zsortordered.go:123`. The generic barrier was not what stopped it.
+- It moves a lot of stdlib in the direction that needs review and did not get it:
+  `crypto/ecdsa.privateKeyToFIPS`'s four instantiations, `crypto/ed25519.sign`'s
+  and `PrivateKey.Sign`'s promoted `PrivateKey` parameters, and
+  `net/http.routingNode.matchingMethodsPath`'s map and string all stop being heap
+  records -- 41 census rows removed against 15 added, most of them heap rows
+  becoming ordinary frame slots.
+
+Zero gain against an unreviewed correctness-critical delta is a bad trade in a
+branch about placement, so it is written down here rather than landed. It is a
+real capability and the next person should take it on its own, with the census
+delta reviewed site by site -- which is the review it did not get here.
+
+## The variadic summary gap: measured, then closed
+
+### It accounts for none of the 113
+
+The three lines the previous classification filed under it are the loop rule
+(above). To be sure the group was not simply mislabelled, the refusal was
+*removed* -- `parameterDoesNotEscape` and `parameterLeaksOnlyToResult` made to
+answer a variadic position with the parameter's own summary -- and the corpus
+rescored: **113 of 113 still on the heap**. Over the whole corpus that change
+moves 9 census rows, and 4 of them are
+`testdata/variadic_element_address_retention.go`, which is the program that
+exists to prove the answer is wrong.
+
+So the honest answer to "does the gap account for some of the 113" is **no**.
+It does account for allocations elsewhere: `testdata/variadic_backing.go:8`,
+whose `x := 42` goc put on the heap and gc keeps in the frame, is in the
+differential's `heap -> absent` bucket rather than `heap -> frame`.
+
+### It can be described, and now is -- but not by the parameter's own summary
+
+The reason the refusal was right is worth stating precisely, because it is not
+"variadic parameters are undescribable":
+
+    func keep(args ...*T) { sink = args[0] }
+
+retains **no pointer it was handed** -- `args` itself is dropped at the return --
+and retains **everything they point at**. The summary the walk computes for every
+other parameter position is the shallow question, "is this object carried out of
+the function". For a variadic position the caller is asking the deep one, "is
+anything reachable *through* this slice retained". The two differ for any
+parameter that holds references, and the walk's own rules make the gap concrete:
+`F3` (a previous branch's fix) says ranging over an object carries it nowhere,
+which is true of the slice and false of its elements, so
+`func keep(args ...*T) { for _, a := range args { sink = a } }` would have been
+answered "does not escape" by the shallow walk.
+
+`variadicParameterHoldsItsElements` answers the deep question directly, as a
+whitelist rather than a walk. A use of the `...` parameter is accepted only where
+it provably cannot produce an element:
+
+    len(args)   cap(args)   args == nil   args != nil   for i := range args
+
+Anything else -- an index, a slice expression, a range with a value variable, a
+`copy`, being passed on, stored or returned -- is rejected. That is deliberately
+narrow: `func retainNothing(args ...any) int { return len(args) }` is the shape
+it exists for, and it is enough to move `variadic_backing.go`'s `x := 42` into
+the frame, where gc has always kept it.
+
+**What the alternative is, for a wider rule.** Following an element out of an
+index or a range into the uses of the value it produces, and through a call into
+the callee's own deep answer for that position, is a second walk with a
+`deep` mode -- the AST equivalent of `opt.ParamFact.Deep`. Every rule in the
+existing walk that answers "this use carries nothing" has to be re-answered for
+it, because most of them are true of the object and false of its contents. That
+is a piece of work of its own. It is also what `logattrs/6-attr` in the slog
+table needs: `Record.AddAttrs` ranges over its `...Attr` with a value variable
+and copies each element into `r.front`, which retains nothing -- and a range with
+a value variable is exactly what the whitelist refuses.
+
+Row: `address_into_a_non_retaining_variadic` 1.00 -> 0 (gc 0).
+`variadic_element_address_retention.go`'s `local` is still on the heap, and the
+program still passes.
+
+## Measured and **not** landed: the optimistic cycle assumption (G8)
+
+`parameterDoesNotEscape` and `receiverDoesNotEscape` break a recursive cycle by
+answering "escapes". That is the *pessimistic* answer, and for a least-fixpoint
+computation the *optimistic* one is the correct one: the edge back into a walk
+that is already running leads to exactly the uses that walk is enumerating, and
+that walk reports its own escapes, so the edge adds no route it will not find.
+The whole change is two `return false` becoming `return true`.
+
+Both halves were implemented and measured.
+
+**The parameter half is clean and buys 6 lines.**
+
+    lines where goc heaps what gc frames    106 -> 100
+
+    runtime_interface_stack_gc.go:31   runtime_panic_stack_gc.go:23
+    runtime_stack_growth.go:24, :26    stdlib_maps_slices.go:25
+    stdlib_slices_string_sort.go:6     stdlib_sort_search_slice.go:6
+
+plus 22 stdlib and corpus objects that stop being census records at all (heap ->
+ordinary frame slot), and one frame-address publication *removed*
+(`crypto/tls.serverHandshakeStateTLS13.processClientHello`). `TestFrameEscapeAudit`
+reports **no new publication**, and every affected program runs -- including the
+three that are GC-stress tests about stack scanning.
+
+**The receiver half publishes a frame address, and the audit caught it.** Same
+one-line change, applied to `receiverDoesNotEscape`:
+
+    stdlib/src/log/slog/handler.go:120:8  log/slog.defaultHandler.Handle
+    stdlib/src/log/slog/handler.go:239:8  log/slog.commonHandler.withAttrs
+    stdlib/src/log/slog/handler.go:272:8  log/slog.commonHandler.handle
+        barrier  memory reached through a call result $runtime.newobject
+
+`log/slog`'s `handleState` goes back into the frame -- `appendAttr` and
+`appendAttrs` are mutually recursive, which is why the pessimistic answer could
+never place it -- and its address is then written into a heap object. It is
+reproducible on one corpus file (`slog_attr_frame_gcmask.go`) in 30 s, which is
+how the two halves were separated.
+
+**Neither half is landed.** The parameter half survives every instrument this
+tree has; what it does not survive is the argument, because the argument covered
+both halves equally and one of them is false. "No counterexample in 400
+programs" is not the standard this tree uses for the direction that publishes
+frame addresses -- it is the standard the receiver half also met on 21 of its 24
+sites.
+
+What would make it landable is a real fixpoint rather than an assumption:
+compute answers optimistically, record which of them depended on an assumption,
+and iterate until nothing moves. Answers only ever move from "does not escape"
+to "escapes", so it terminates. That is the piece of work G8 needs, and it would
+also close the two `log/slog` rows below, which are `handleState` and nothing
+else.
+
+# The classification of the 106, group by group
+
+The 113 this branch started from fell into 12 groups. Seven lines moved, closing
+one group and part of another, and one group was renamed because its cause was
+misattributed. The 106 that remain, by allocator: 57 `newobject`, 38 `makemap`,
+6 `convT*`, 5 `makeslice`. Every line is in exactly one group and the groups sum
+to 106.
+
+## Closed on this branch
+
+**G11 -- a method value (2 of 2). VERDICT: gc was right, and the walk can now
+say so.** `record := recorder.Add` is a closure over the receiver. Both lines
+gone.
+
+    runtime_defer_method_value_order.go:12   runtime_method_value_gc.go:16
+
+**G6 -- the callee is a func value or an interface method (5 of 8). VERDICT: gc
+is right where it devirtualises, and goc devirtualises better.** Two lines were
+an address converted to an interface type on the way into a local; three were a
+call through a function-typed local.
+
+    runtime_interface_method_gc.go:23, :25   runtime_reflect_value_indirect_call.go:28, :29
+    runtime_timer_callback_shape.go:16
+
+## The 11 groups that remain
+
+**G1 -- maps have no frame-allocated header (38). VERDICT: gc is right. Not
+attempted; it is not an analysis fix.** `gen.allocateMap` calls
+`runtime.makemap(t, hint, 0)` unconditionally, so the escape analysis is never
+asked about a map, and the whole census contains zero `makemap ... frame` rows.
+
+The previous classification called this "a representation change". Confirmed,
+and there is a second half it did not name: **the census cannot express the
+answer either.** `opt.AllocationCensus` reads heap placements out of the IR as
+calls to a named allocator, and gc's own stack-allocated map still calls
+`runtime.makemap` -- with `m` and sometimes `m.dirPtr` non-nil instead of nil.
+So a goc that stack-allocated the header would still produce a `makemap` census
+row and the line would read `mixed`, not `frame`. Closing G1 is therefore four
+pieces, not one:
+
+    1. the front end asks the escape question for a map at all
+    2. it can name internal/runtime/maps.Map's layout and its dirPtr pointer word
+    3. the frame slot carries a correct GC pointer map for that word
+    4. the census learns that a makemap with a non-nil m is a frame placement
+
+38 lines, and the largest single thing left.
+
+**G4 -- a value boxed into an interface (17). VERDICT: gc is right; two causes,
+both structural.** Twelve are the *payload*: goc has no frame form for one, so
+`convT64` and the `newobject` behind a boxed string or array are always heap.
+Five are the *source*: `boxedIntoInterface` is unconditional, so a slice whose
+header is copied into a box that provably dies at the call --
+`runtime.KeepAlive(values)`, `reflect.TypeOf([]int{})` -- is charged with the
+box's escape. Asking the right question there needs the payload to have a frame
+form first, or the two halves disagree.
+
+    allocation_counts.go:121, :124, :127, :130, :133
+    interface_slice_equality.go:6, :9
+    runtime_debug_gc_controls.go:15, :32
+    runtime_panic_stack_gc.go:19        runtime_panic_stack_recover_gc.go:19
+    runtime_reflect_make_values.go:6    runtime_reflect_map_slice.go:19
+    runtime_slice_pointer_append_gc.go:10, :25
+    stdlib_signal_during_gc.go:23, :29
+
+**G7 -- a stdlib summary the walk could not get through (11). VERDICT: gc is
+right, one callee at a time.** `slices.Sort`, `sort.Search`, `maps` helpers,
+`reflect.ValueOf(...).Call`, `runtime.SetFinalizer`,
+`crypto/mlkem.NewDecapsulationKey768`, `encoding.BinaryAppender.AppendBinary`.
+They are not one cause and fixing them is not one change. Three of them --
+`stdlib_maps_slices.go:25`, `stdlib_slices_string_sort.go:6`,
+`stdlib_sort_search_slice.go:6` -- are reachable by the optimistic cycle
+assumption written up above, which is not landed.
+
+    adler32_marshal_loop.go:21               runtime_closure_captured_string.go:94
+    runtime_finalizer_basic.go:22            runtime_reflect_call_aggregate_matrix.go:70
+    runtime_reflect_method_metadata.go:27    runtime_reflect_set_fields.go:11
+    runtime_reflect_value_call.go:11         stdlib_crypto_mlkem.go:9
+    stdlib_maps_slices.go:25                 stdlib_slices_string_sort.go:6
+    stdlib_sort_search_slice.go:6
+
+**G2 -- the Read buffer (10). VERDICT: gc is right, but not by a rule goc is
+missing. IRREDUCIBLE.** `internal/poll.ignoringEINTRIO`'s own gc summary is
+`leaking param: p`; gc gets "does not escape" by inlining it first. goc's walk
+runs on the AST before any inlining and cannot see through `fn(fd, p)` where
+`fn` is a function-typed *parameter*. The func-value resolution this branch
+added does not reach it: it resolves a local assigned once from a named
+function, and a parameter is assigned by the caller.
+
+    runtime_println_operand_separation.go:168  runtime_stack_scan_syscall.go:115
+    stdlib_netpoll_pipe_afterfunc_close.go:24  stdlib_netpoll_pipe_close_unblocks_read.go:17
+    stdlib_netpoll_pipe_deadline.go:23         stdlib_netpoll_pipe_past_deadline.go:23
+    stdlib_netpoll_stress_pipe_close_churn.go:17
+    stdlib_netpoll_stress_pipe_deadline_reset.go:22
+    stdlib_os_file_roundtrip.go:26             stdlib_os_pipe_goroutine_close.go:24
+
+**G10 -- a composite literal handed to a call the walk cannot follow (6).
+VERDICT: gc is right.** The four `&http.Cookie{...}` in a `[]*http.Cookie`
+passed to `(*cookiejar.Jar).SetCookies`, plus one more cookie and
+`&jpeg.Options{...}`. Reachable in principle, deep in practice.
+
+    stdlib_http_cookiejar.go:17, :18, :19, :20
+    stdlib_http_redirect_keepalive.go:24       stdlib_image_jpeg_roundtrip.go:18
+
+**G5 -- new(T) (5). VERDICT: gc is right; five separate causes, not a group.**
+Re-examined rather than inherited. `gc_struct.go:25`'s `new(record)` is written
+into by `root.left = &record{...}` and survives a `runtime.GC()`;
+`runtime_println_operand_separation.go:84`'s is captured by a closure passed to
+a call; `runtime_range_target_forms.go:369`'s is a `for _, *pointer = range`
+target; `stdlib_math_big_rat_int.go:15` is `new(big.Rat).Sub(...)`. They share
+the spelling `new(T)` and nothing else. Singletons; left alone as the brief asks.
+
+    gc_struct.go:25                     runtime_println_operand_separation.go:84
+    runtime_range_target_forms.go:369   runtime_span_metadata_barrier.go:47
+    stdlib_math_big_rat_int.go:15
+
+**G3 -- non-constant `make([]T, n)` (5). VERDICT: gc is right, and the previous
+classification was wrong about this.** It recorded these as a measurement
+artifact -- "both compilers heap-allocate, and `gcdiff` maps gc's `does not
+escape` to Frame unconditionally". That was checked here and it is not what gc
+does. For a non-escaping `make` with a non-constant length gc emits **both**: a
+frame buffer and a runtime length test.
+
+    CMP  $4, R2
+    BHI  64                      // n > 4: call makeslice
+    MOVD $main..autotmp_4-32(SP), R0    // n <= 4: use the 32-byte frame buffer
+    ...
+    CALL runtime.makeslice(SB)
+
+So gc really does keep the small case in the frame and the ruler is right. goc
+has no form of this at all: `makeslice` unconditionally. It is a codegen
+capability -- a bounded frame buffer plus a runtime length test -- not an
+analysis fix, and goc would land in `mixed` rather than `frame` because both
+placements would be on the line, exactly as they are for gc. **Reducible, and
+worth an allocation on every small non-constant make in the program.**
+
+    runtime_copy_interface_slice_gc.go:23  runtime_gc_mark_workers.go:117
+    runtime_loopvar_range.go:112           stdlib_encoding_ascii85.go:7, :10
+
+**G12 -- a pointer stored into an array (4) and a map lookup key (1). VERDICT:
+goc is over-conservative; reducible, and it is opt's, not the walk's.** The
+previous classification read the four `runtime_array_copy_pointer_gc.go` lines as
+the *copy* -- `copy := source` where source is `[4]*T`, which `copyAliasesStorage`
+refuses. That was checked here and it is wrong twice over. Extending
+`copyAliasesStorage` to arrays and structs moves nothing, and deleting the copy
+from the program does not change the answer either:
+
+    source := [4]*acBox{{value: 3}, {value: 5}, {value: 7}, {value: 11}}
+    total := 0
+    for _, b := range source { total += b.value }     // no copy at all
+
+still puts all four boxes on the heap. The array itself is a **front-end frame
+slot**, and the four boxes carry `ir.AllocDecision` records -- they are
+`opt.LowerHeapAllocations`' answer, not the AST walk's. The cause is containment:
+`candidateEscapes.contains` records the edge only between two *tracked*
+allocations, and a plain `OAlloc` frame slot is not one, so a pointer stored into
+the array is a store the analysis cannot place. Teaching it that a store into a
+function-local slot is containment in an object that cannot outlive the frame is
+the fix, and it is in `opt/escape.go`.
+
+The fifth line, `values[&mapPointerKey{value: 17}]`, is a lookup key that
+`mapaccess` does not retain, and is the walk's -- and it needs care about the
+direction, because a map *assignment* key is retained.
+
+    runtime_array_copy_pointer_gc.go:11, :12, :13, :14
+    runtime_map_pointer_keys.go:27
+
+**G6 -- the remaining three. VERDICT: mixed.** An interface conversion into a
+second interface, a slice literal inside a closure passed to a call, and a
+`[]byte` literal handed to `compress/lzw`. Not one cause.
+
+    runtime_interface_to_interface.go:29  runtime_println_operand_separation.go:82
+    stdlib_compress_zlib_lzw.go:72
+
+**G8 -- a recursive callee has no summary (3). VERDICT: gc is right; reducible
+only with a real fixpoint.** `parameterDoesNotEscape` breaks its cycle by
+answering "escapes". The optimistic assumption is written up above: it takes
+these three plus three of G7, and it is not landed because the same one-line
+change applied to the receiver publishes a frame address.
+
+    runtime_panic_stack_gc.go:23  runtime_stack_growth.go:24, :26
+
+**G9 -- the loop rule (3). VERDICT: goc is over-conservative, and this group was
+misattributed.** Filed before as "a variadic parameter has no summary". It is
+`opt.promotionsBlockedByALoop`: every promotable candidate inside a natural loop
+is sent to the heap, because neither analysis has a notion of iteration. All
+three lines are variadic backing arrays, which is what made the old label look
+right; `allocation_counts.go:67` is the *same call* outside a loop and is
+already in the frame.
+
+    allocation_counts.go:273  runtime_range_target_forms.go:137, :144
+
+
+# The four slog rows
+
+`slog_allocations_baseline.txt` still has 4 of 32 rows off gc. Two of them cost
+one allocation more than they did at the branch point, and that is this branch's
+receiver-retention fix.
+
+    case                    goc a/op   gc a/op   goc B/op   gc B/op
+    info/3-attr-large-ints      1.00      3.00      128.0      24.0
+    logattrs/6-attr             2.00      1.00       96.0      48.0
+    json/kv-4-pairs             4.00      2.00      272.0      24.0   (was 3.00 / 208.0)
+    json/logattrs-4-attrs       3.00      0.00       96.0       0.0   (was 2.00 /  32.0)
+
+**Are they among the groups? Three of the four causes are, and one is not a
+defect at all.**
+
+- **`info/3-attr-large-ints` -- not a defect, and not a group.** goc allocates
+  *fewer* than gc: one combined object for the `...any` backing array and its
+  boxed payloads, where gc frames the array and boxes each large int separately.
+  128 B in one allocation against 24 B in three. It is off gc in the direction
+  nobody needs to chase.
+
+- **`logattrs/6-attr` -- the deep variadic question, which this branch opened but
+  did not finish.** The `[6]Attr` backing array goes to the heap because
+  `variadicParameterHoldsItsElements` refuses `Record.AddAttrs`, whose body
+  ranges over the parameter with a value variable. That refusal is correct for
+  the narrow rule and wrong about this callee, which copies each element into
+  `r.front` and retains nothing. It needs the wider rule described above.
+
+- **`json/kv-4-pairs` and `json/logattrs-4-attrs` -- G4 plus G8, and now the two
+  of them together.** The base cost is G4: `kv-4-pairs`'s call site is one heap
+  object, `struct_values__8_any__payload1_string__payload3_...`, because goc has
+  no frame form for an interface payload and folds the array and the payloads it
+  boxes into one allocation; `logattrs-4-attrs`'s two allocations are 32 B of
+  `log/slog.Value.Any` string payloads, the same cause. The **+64 B, +1
+  allocation each** on this branch is `log/slog.handleState`, which is 64 bytes
+  and moved to the heap when an immediately called method stopped being free.
+  It is G8: `appendAttr` and `appendAttrs` are mutually recursive, so the
+  summary's cycle-breaking answer is the only one available for the receiver,
+  and the optimistic assumption that would fix it is the one the frame-escape
+  audit refuted -- on this exact object.
+
+So: **not a separate cause.** `handleState` is G8, the JSON base cost is G4,
+`logattrs/6-attr` is the variadic element question, and `info/3-attr-large-ints`
+is goc being ahead.
+
+# What is irreducible, and why
+
+Stated so nobody re-litigates it. "Irreducible" here means *in this analysis, at
+this pipeline position*; every one of these is reachable by building something
+that does not exist yet, and where that is true it says what.
+
+**Genuinely irreducible without moving the walk (10 lines).**
+
+- **G2, the Read buffer (10).** gc's answer comes from inlining
+  `internal/poll.ignoringEINTRIO` before escape analysis; its own un-inlined
+  summary is `leaking param: p`, which *agrees with goc*. goc's walk runs on the
+  AST before any inlining and the call is through a function-typed **parameter**,
+  which no whole-program resolution can pin down -- the value comes from the
+  caller. Closing it needs an inliner ahead of the walk. This is a
+  pipeline-position difference, not a missing rule, and it has now survived two
+  branches looking at it.
+
+**Blocked on a representation goc does not have (55 lines).**
+
+- **G1, maps (38).** Four pieces, listed in the classification, one of which is a
+  change to the census itself. It is a task of its own.
+- **G4, boxing (17).** Reducible only after interface payloads have a frame form.
+  Fixing the walk's half alone is worse than leaving it: a frame-charged source
+  paired with a heap payload is a placement that disagrees with itself.
+
+**Reducible, with the work named (41 lines).**
+
+- **G7 (11)** -- one callee at a time; three of them fall to the fixpoint below.
+- **G10 (6)** -- a composite literal handed to a call whose per-package summary
+  gc has and goc's walk cannot reconstruct. Deep, not blocked.
+- **G5 (5)** -- five singletons that share a spelling. Left alone deliberately.
+- **G3 (5)** -- **not** a measurement artifact, which is what the previous
+  classification recorded. gc emits a bounded frame buffer *and* a runtime length
+  test for a non-escaping non-constant `make`; goc has no form of that. A codegen
+  capability, and worth an allocation per small make in every program.
+- **G12 (5)** -- `opt`'s containment edge does not cross a front-end frame slot.
+  In `opt/escape.go`, not in the walk.
+- **G8 (3)** -- needs a real fixpoint: optimistic answers, a record of which
+  depended on an assumption, and iteration to convergence. The one-line
+  assumption without the iteration was measured and refuted; see above.
+- **G9 (3)** -- `opt.promotionsBlockedByALoop` blocks every promotable candidate
+  in a natural loop. The refinement is to block only a candidate whose pointer
+  can be observed after its iteration. goc's IR has no phi, so a value crossing
+  the back edge must pass through a store, which makes the condition checkable:
+  the candidate's pointer is never the value operand of a store and every use is
+  inside the loop. **What has to be proved before it can be trusted** is that a
+  callee handed the pointer cannot store it into another of the caller's frame
+  slots without the escape analysis already having escaped it -- that is the one
+  route the "never stored here" test does not cover, and it was not settled here.
+  It is worth more than three lines: it is what `sprintf_in_loop` (2.00 against
+  gc's 1.00) and `variadic_ints_in_loop` (1.00 against 0) cost on every trip.
+- **G6, the last three (3)** -- three separate causes.
+
+**The two things this branch measured and deliberately did not land** are the
+generic-origin fallback and the optimistic cycle assumption. Both are written up
+above with what they move and what stopped them. Neither should be re-derived;
+both should be taken up on purpose.
+
+**And one thing that is not in the count at all.** The 106 is the pessimistic
+direction. The permissive direction -- goc framing what gc heaps, 1450 lines --
+is where the correctness risk lives, and this branch removed two of them
+(`stdlib_io_readall_limited_reader.go:9`,
+`stdlib_netpoll_syscall_socket_listen.go:19`) as a side effect of the
+receiver-retention fix, along with three frame-address publications in
+`log/slog`. Those are worth more than the seven lines it moved the other way.
+
+# Guards, on the tree as shipped
+
+Every one of these was run on the final tree, after the last change, and watched
+to exit.
+
+| guard | result |
+| --- | --- |
+| `TestFrameEscapeAudit -count=1` | **PASS** against the regenerated baseline. Over the branch: **3 publications removed, 0 added** -- `log/slog`'s `handleState` in `defaultHandler.Handle`, `commonHandler.withAttrs` and `commonHandler.handle` is no longer a frame object whose address a write barrier puts into a heap object |
+| `TestAllocationCensus -count=1` | **PASS**. Regenerated and reviewed site by site; the delta against the branch point is below |
+| `TestEscapeDifferentialAgainstGC -escape-gc-differential` | **PASS**. 106 `heap -> frame`, from 113 |
+| `TestEscapeShadowPlacement -count=1` | **PASS** against the regenerated baseline. Front-end placements in frames 165861 of 197849 (83.83 %) |
+| `TestSlogAllocationsAgainstGC -slog-allocations` | **PASS** against the regenerated baseline; the two rows that moved are explained above |
+| `TestAllocationCounts`, `TestAllocationCountsAgainstTheHostToolchain` | **PASS**, including the five new rows, under `-O` and without |
+| `TestLoopBodyAllocationsAreDistinctPerIteration` | **PASS** -- 6 programs, with and without `-O` |
+| `TestLoopAliasExpectationsMatchTheHostToolchain` | **PASS** -- the loop-aliasing programs still match the host toolchain |
+| `TestCompilingTheSameSourceTwiceGivesTheSameModule` | **PASS** -- determinism holds |
+| `TestTypeGCMasksArePaddedToAPointerWord` | **PASS** |
+| `TestEscapeSummaryFacts`, `TestEscapeSummaryCost` | **PASS** |
+| GC reducer `runtime_gc_type_mask_padding.go` | **0/20 at `GOGC=10`, 0/20 at default `GOGC`**, `GOMAXPROCS=3`, serially, 180 s timeout, a run counting as a pass only if it exits 0 *and* prints exactly `type mask padding ok` |
+
+## The census delta, reviewed
+
+Against the branch point (d113d4a), by direction:
+
+    moved heap -> frame     7    every one a corpus program, every one run
+    moved frame -> heap    27    the receiver-retention fix; the safe direction
+    appeared              44    mostly sites that now hold both placements, plus
+                                the new rows in the two new programs and in
+                                allocation_counts.go
+    vanished               7    6 with a heap row: 3 are line shifts in
+                                allocation_counts.go, 3 are variadic_backing.go's
+                                `x := 42` becoming an ordinary frame slot
+
+The **7 heap -> frame** are the correctness-critical direction and were each
+checked by compiling and running the program:
+
+    runtime_defer_method_value_order.go:12   runtime_interface_method_gc.go:23, :25
+    runtime_method_value_gc.go:16            runtime_reflect_value_indirect_call.go:28, :29
+    runtime_timer_callback_shape.go:16
+
+The **27 frame -> heap** are `x := &T{}` followed by a method call whose receiver
+the walk can no longer prove non-retaining: `math/big.karatsuba`'s three `&Int{}`,
+`net.sysDialer`/`net.sysListener`, `crypto/tls.clientHandshakeState`,
+`image/png.decoder`, `encoding/binary`'s coders, and the two corpus lines that
+were **permissive** -- `stdlib_io_readall_limited_reader.go:9` and
+`stdlib_netpoll_syscall_socket_listen.go:19`, which gc also puts on the heap and
+goc was framing.
+
+## Compile time
+
+The receiver question runs at every method call and devirtualisation runs at
+every interface method call, both new work. `TestAllocationCensus`, which
+compiles all 401 corpus programs, takes **176 s** on this tree against **177 s**
+at the branch point -- inside the noise. `interfaceMethodCandidates` is
+O(dynamic types x reachable declarations) and is memoised per (method, call-site
+interface); without the memo it would be recomputed at every interface method
+call the walk meets.
+
+# Summary
+
+    lines where goc heaps what gc frames    113 -> 106
+    lines where goc frames what gc heaps   1448 -> 1454: -2 real (both fixed by
+                                           the receiver rule), +8 panic-string
+                                           lines in the two new corpus programs,
+                                           which goc has no census row for
+    groups the 113 fell into                12 (1 closed, 1 partly, 1 renamed)
+    frame-address publications             -3, +0
+
+## What changed in the compiler
+
+| change | lines it moved |
+| --- | --- |
+| `nonEscapingAddressWithin` asks the assignment question at every step of its climb | 2 |
+| an immediately called method asks `receiverDoesNotEscape` (**a miscompile fix**) | -2 permissive, -3 publications |
+| an interface method call is devirtualised whole-program, narrowed to the call site's interface | pays for the above |
+| a method value is a closure over the receiver | 2 |
+| a call through a function-typed local resolves to its one callee | 3 |
+| the escape summary describes a variadic parameter | 0 of the 106; `variadic_backing.go`'s `x := 42` |
+| a function-typed *parameter* is not resolvable (**a hole in the line above**) | guard only |
+
+Five new rows in `testdata/allocation_counts.go`, each measured with the branch
+point's compiler and this branch's:
+
+    interface_local_method_call             1.00 -> 0      (gc 0)
+    method_value_receiver                   1.00 -> 0      (gc 0)
+    call_through_a_function_variable        1.00 -> 0      (gc 0)
+    address_into_a_non_retaining_variadic   1.00 -> 0      (gc 0)
+    method_retains_receiver                 0    -> 1.00   (gc 1.00)
+
+Two new corpus programs, each of which fails at the branch point and passes here:
+
+    method_receiver_retention.go    panics: the receiver did not survive its frame
+    function_parameter_callee.go    dies: pointer to unallocated span, under runtime.GC()
+
+## The three answers the brief asked for
+
+1. **The count is 106**, down from 113.
+2. **Variadic parameters are described now**, by `variadicParameterHoldsItsElements`.
+   The gap accounted for **none** of the 113 -- measured by removing the refusal
+   outright and rescoring -- and the three lines the previous classification
+   filed under it are the loop rule. What it did cost is
+   `testdata/variadic_backing.go`, which is in the `heap -> absent` bucket.
+3. **Irreducible: 10 lines** (G2, the Read buffer -- gc reaches it by inlining
+   and its own un-inlined summary agrees with goc). **Blocked on a
+   representation: 55** (G1 maps 38, G4 boxing 17). **Reducible with the work
+   named: 41.** Two changes were measured and deliberately not landed -- the
+   generic-origin fallback and the optimistic cycle assumption -- and both are
+   written up with what they move and what stopped them.
