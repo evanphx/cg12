@@ -12694,7 +12694,9 @@ func (g *gen) expr(e ast.Expr) (result ir.Ref) {
 			sourceCapacity = sourceLength
 		}
 		low := g.fn.Long(0)
+		lowIsZero := true
 		if n.Low != nil {
+			lowIsZero = isConstantZero(g.typeAndValue(n.Low).Value)
 			low = g.widenIndex(g.expr(n.Low), g.typeAndValue(n.Low).Type)
 		}
 		high := ir.R
@@ -12714,8 +12716,11 @@ func (g *gen) expr(e ast.Expr) (result ir.Ref) {
 			high = sourceLength
 		}
 		if basic, ok := resultType.Underlying().(*types.Basic); ok && basic.Kind() == types.String {
-			data := g.cur.Add(ir.ClsP, base, low)
 			length := g.cur.Sub(ir.ClsL, high, low)
+			// A string has no capacity, so its length is what decides whether the
+			// result still refers to any of the source's bytes. See
+			// zeroExtentOffset.
+			data := g.cur.Add(ir.ClsP, base, g.zeroExtentOffset(low, length, lowIsZero))
 			return g.stringDescriptor(data, length)
 		}
 		slice, ok := resultType.Underlying().(*types.Slice)
@@ -12740,7 +12745,7 @@ func (g *gen) expr(e ast.Expr) (result ir.Ref) {
 		if size != 1 {
 			dataOffset = g.cur.Mul(ir.ClsL, low, g.fn.Long(size))
 		}
-		data := g.cur.Add(ir.ClsP, base, dataOffset)
+		data := g.cur.Add(ir.ClsP, base, g.zeroExtentOffset(dataOffset, capacity, lowIsZero))
 		length := g.cur.Sub(ir.ClsL, high, low)
 		return g.sliceDescriptor(data, length, capacity)
 	case *ast.TypeAssertExpr:
@@ -14756,6 +14761,52 @@ func (g *gen) widenIndex(index ir.Ref, indexType types.Type) ir.Ref {
 		index = g.cur.Copy(ir.ClsL, index)
 	}
 	return index
+}
+
+// zeroExtentOffset returns the byte offset a slice expression may add to its
+// source's data pointer: the requested offset when the result still refers to
+// some of the source's storage, and zero when it does not.
+//
+// A slice expression whose result has no storage left -- `b[len(b):]`, whose
+// capacity is zero, or `s[len(s):]` on a string, whose length is zero -- would
+// otherwise land its data pointer one byte past the end of the allocation. That
+// is not a pointer the collector will accept: findObject looks the address up in
+// the page it lands on, which is the *next* allocation's page, and either finds
+// a span the address is outside of or an unallocated one, and calls badPointer.
+// A slice value like that lives on until it is overwritten, so it does not have
+// to be scanned in the moment it is made; compress/flate's decompressor stores
+// `f.toRead = f.toRead[n:]` into a heap object and dies whole cycles later.
+//
+// The result cannot be a nil pointer either -- that would turn a non-nil empty
+// slice into a nil one, which is observable -- so the offset is masked instead
+// of the pointer: the result points at the start of the source's storage, which
+// is a pointer the collector already accepts. This is what the host toolchain
+// does, in ssagen's slice(): "the masking is to make sure that we don't generate
+// a slice that points to the next object in memory".
+//
+// extent is the result's capacity for a slice and its length for a string,
+// matching the host: a string has no capacity, so its length is the only
+// evidence of whether any of the source's bytes are still referred to.
+//
+// lowIsZero skips the mask when the source offset is a constant zero, where the
+// pointer cannot move and there is nothing to mask.
+func (g *gen) zeroExtentOffset(offset, extent ir.Ref, lowIsZero bool) ir.Ref {
+	if lowIsZero {
+		return offset
+	}
+	// mask is 0 when extent is 0 and -1 otherwise. Bounds checking has already
+	// established that extent is not negative.
+	mask := g.cur.Sar(ir.ClsL, g.cur.Neg(ir.ClsL, extent), g.fn.Long(63))
+	return g.cur.And(ir.ClsL, offset, mask)
+}
+
+// isConstantZero reports whether a type-checked operand is the constant 0.
+func isConstantZero(value constant.Value) bool {
+	if value == nil {
+		return false
+	}
+	amount, exact := constant.Int64Val(constant.ToInt(value))
+	return exact && amount == 0
 }
 
 func (g *gen) sliceDescriptor(data, length, capacity ir.Ref) ir.Ref {

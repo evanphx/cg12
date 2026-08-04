@@ -2453,6 +2453,22 @@ func runtimeCapabilities() []runtimeCapability {
 			timeout:     180 * time.Second,
 			exclusive:   true,
 		},
+		// A slice expression that consumes all of its source -- b[len(b):] --
+		// put its data pointer one byte past the end of the allocation, which
+		// the collector rejects and which retains nothing, so the buffer was
+		// freed underneath a slice that was still reachable. goc-built
+		// compress/flate died of exactly this, in the decompressor's toRead
+		// field, often enough that the performance suite had to retry runs.
+		// The first half of the reducer reads the generated pointer and fails on
+		// every run; the second half is the collector consequence.
+		{
+			category:    "gc-invariants",
+			name:        "slice-tail-pointer",
+			source:      "runtime_gc_slice_tail_pointer.go",
+			expectation: runtimeCapabilityMustPass,
+			timeout:     180 * time.Second,
+			exclusive:   true,
+		},
 		// The frame slot a call homes its aggregate result into was described as
 		// a GC root at that very call, so a loop around such a call reported the
 		// previous iteration's result. This is the precise stack scan's half of
