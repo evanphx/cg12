@@ -5162,3 +5162,68 @@ either side -- `gcdiff.ParseGCFlagM` reads goc's output with zero Unknown lines
 teaching the parser to keep them is mechanical, comparing them against gc's
 `-m=2` vocabulary is not worth doing, and grouping goc's own gc-differential
 disagreements by goc's rule is.
+
+---
+
+# The loop-carried aliasing audit
+
+Branch: `ccwork/loop-alias-audit`, built on `main` = 65ed70a.
+
+`opt.FrameEscapes` reports every place a frame address is published into storage
+that outlives the frame. It is blind by construction to the defect where an
+allocation inside a loop body gets one frame slot shared by every iteration:
+nothing is published, both pointers stay inside the frame and are simply the
+same pointer, so there is no store for a publication audit to look at. The
+allocation census is blind to it from the other side -- one frame slot per loop
+is exactly what it expects to see. That defect was a live miscompile on this
+tree two days ago (`2 2` where Go prints `1 2`, four allocation forms, both -O
+settings) and until now the only thing guarding the fix was three reduction
+programs that are run and compared against `go run`.
+
+This job adds the audit: `opt.LoopAliases`, run over the whole corpus by
+`TestLoopAliasAudit` against `goc/testdata/loop_alias_baseline.txt`, failing in
+both directions.
+
+## The formulation, and why this one
+
+An allocation is reported when all three hold:
+
+1. it is a **frame allocation** -- `OAlloc*` or `OAllocN`, the same
+   `isFrameAllocation` predicate `FrameEscapes` uses -- so it is one object, not
+   one per iteration;
+2. the instruction making it is **inside the body of a natural loop**, so the
+   source expects one object per trip;
+3. an address derived from it reaches **storage the next iteration does not
+   re-create**: either a frame slot whose own allocation is outside that loop
+   body (*parked*), or a phi at the loop header taking it in along a back edge
+   (*carried*).
+
+Clause 3 is the whole calibration, and it is deliberately **the IR-level shadow
+of the rule the fix itself enforces**. goc's `findIterationCaptures` runs the
+escape walk with the loop body as its scope, so an address that reaches storage
+declared outside the loop is an address that outlives the iteration; clause 3 is
+that same question asked of the emitted IR. Auditing against the rule the fix
+implements is the point -- a finding is a place the fix did not reach.
+
+Three things are deliberately **not** findings:
+
+- **A store into a slot the loop body itself allocates.** That slot is a
+  variable the source re-declares on every trip, so goc emits its initialising
+  store inside the loop too and the next iteration overwrites it before it can
+  be read. This is what keeps `loop_alias_frame_local.go`'s three loop-body
+  allocations out of the report, and what stops the rule firing on every scratch
+  buffer in every loop.
+- **A destination that is not this frame's own storage.** A loop-body frame
+  address stored into a global, a heap object or memory reached through a
+  parameter has left the frame altogether: that is `FrameEscapes`' finding and a
+  worse one, and reporting it here as well would put one defect in two
+  baselines. The two audits partition the space rather than overlapping.
+- **A store in the loop's exit region** -- a block reached from inside an
+  iteration that cannot reach a latch. No further iteration follows it, so the
+  address it parks is the last iteration's, which one slot represents
+  faithfully.
+
+A bare SSA use after the loop is not a finding either, for the same reason: it
+names the final iteration's object. "Escaping the loop entirely" is only
+observable when it goes through storage, which is the *parked* arm.
+
