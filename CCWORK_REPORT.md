@@ -3970,3 +3970,63 @@ Two new corpus programs, each of which fails at the branch point and passes here
    named: 41.** Two changes were measured and deliberately not landed -- the
    generic-origin fallback and the optimistic cycle assumption -- and both are
    written up with what they move and what stopped them.
+
+
+# escape-diagnostics (branch ccwork/escape-diagnostics, off ccwork/parity-113 88c276f)
+
+Task: give goc a `-m`-style diagnostic that explains its escape decisions.
+
+## 1. What was built
+
+**Flag: `goc -m` / `goc -m=2`, environment form `GOC_M`.** Off by default.
+`opt.EscapeDiagLevel()` is the single reader; `cmd/goc`'s `-m` overrides `GOC_M`.
+
+**Output shape** -- cmd/compile's `-m` wording on the decision line, with
+everything goc has to add on tab-indented continuation lines:
+
+    escape_diagnostic.go:13:7: main_point does not escape
+    	front end: composite-literal in main.framed
+    escape_diagnostic.go:18:7: main_point escapes to heap
+    	front end: composite-literal in main.throughCall
+    	rule: assigned to the package-level variable keptPointer
+    	from: p, declared at escape_diagnostic.go:8:18
+    	from: argument 0 of the call to main.keepPointer
+    	from: p, declared at escape_diagnostic.go:18:2
+    	at:   escape_diagnostic.go:8:30
+
+Level 1 is the decision line, the placer, and the rule. Level 2 adds the `from:`
+chain and the `at:` position of the deciding use. The chain reads from the
+deciding use outwards: the callee's parameter, the argument position, the
+caller's own object.
+
+**Both placers report.** goc places allocations in two places and the diagnostic
+covers both:
+
+  - `front end` -- goc's AST walk, recorded in `ir.PlacedAlloc`
+  - `ir pass`   -- `opt.LowerHeapAllocations`, recorded in `ir.AllocDecision`
+
+## 2. Where the answers come from
+
+Not from a re-derivation. Both records already existed and are already written at
+the moment of the decision; this adds a reason field to each, written by the
+branch that decides:
+
+  - IR pass: `candidateEscapes.reasons` already existed for shadow mode and is
+    written by the mark loop as it marks (`opt/escape.go`'s `mark`/`markContents`
+    closures). The pass now asks for it exactly when the diagnostic is on, and
+    `recordAllocDecision` carries it into the record. A position was added
+    alongside, taken from the marking instruction -- it has to be taken there,
+    because the rewrite that follows replaces those instructions.
+  - AST walk: `goc/escapediag.go` holds an explanation the walk deposits as it
+    answers. `diagRule` is called from inside the branch that returns, first
+    write wins (the walk short-circuits, so the first branch to name itself is
+    the deepest one reached, which is the one that decided). `diagQuestion` /
+    `diagResolve` bracket each sub-question: one that answers "does not escape"
+    decided nothing and its findings are dropped; one that answers "escapes"
+    keeps them and adds itself to the chain.
+
+The explanation is harvested by `gen.escapeWhy` at the instant the placement is
+recorded, and where the decision and the record are separated by other escape
+questions -- the `&T{...}` path, which asks about the literal's elements in
+between -- it is carried through explicitly (`recordPlacementWhy`,
+`compositeLiteral`'s new `why` parameter) rather than re-read.
