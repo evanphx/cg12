@@ -144,6 +144,212 @@ func TestFrameEscapesFollowsAFrameAddressThroughAPhi(t *testing.T) {
 	assert.Equal(t, FrameEscapeIntoGlobal, escapes[0].Destination)
 }
 
+// A destination that is a phi is only sometimes a frame address. This is the
+// shape a variadic call takes when the backing array is chosen at run time: one
+// path uses a frame-resident array, the other a heap one, and the store that
+// fills the array sees a merged pointer. Skipping the store because the
+// destination *may* be part of the frame hides the path where it is not, so the
+// publication into the heap array goes unreported.
+func TestFrameEscapesReportsAFrameAddressStoredThroughAMergedDestination(t *testing.T) {
+	module := ir.NewModule()
+	function := module.NewFuncVoid("publish")
+	entry := function.Entry()
+	heapPath := function.NewBlock("heap")
+	join := function.NewBlock("join")
+
+	local := entry.Alloc(8, 8)
+	frameArray := entry.Alloc(8, 16)
+	entry.Jnz(function.Word(1), heapPath, join)
+	heapArray := heapPath.Call(ir.ClsP, function.Sym("runtime.newobject", 0), function.Sym("type.array", 0))
+	heapPath.Goto(join)
+	array := join.Phi(ir.ClsP,
+		ir.PhiEdge{From: entry, Val: frameArray},
+		ir.PhiEdge{From: heapPath, Val: heapArray},
+	)
+	join.Store(local, array)
+	join.RetVoid()
+
+	escapes := FrameEscapes(module)
+	require.Len(t, escapes, 1)
+	assert.Equal(t, FrameEscapeStore, escapes[0].Kind)
+	assert.Equal(t, FrameEscapeIntoCallResult, escapes[0].Destination)
+	assert.Equal(t, "runtime.newobject", escapes[0].Callee)
+}
+
+// The other half of the same hole, and the one the corpus actually hits: the
+// address of the *slot* arrives through a phi. aliasInfo resolves no phi, so
+// the frame slot looks like unknown memory, nothing records that a frame
+// address was parked in it, and the value read back out is not recognised as
+// one. The publication that follows is invisible.
+func TestFrameEscapesFollowsAFrameAddressThroughASlotReachedByAPhi(t *testing.T) {
+	module := ir.NewModule()
+	function := module.NewFuncVoid("publish")
+	entry := function.Entry()
+	other := function.NewBlock("other")
+	join := function.NewBlock("join")
+
+	local := entry.Alloc(8, 8)
+	first := entry.Alloc(8, 8)
+	second := entry.Alloc(8, 8)
+	entry.Jnz(function.Word(1), other, join)
+	other.Goto(join)
+	slot := join.Phi(ir.ClsP,
+		ir.PhiEdge{From: entry, Val: first},
+		ir.PhiEdge{From: other, Val: second},
+	)
+	join.Store(local, slot)
+	object := join.Call(ir.ClsP, function.Sym("runtime.newobject", 0), function.Sym("type.ptr", 0))
+	join.Store(join.Load(ir.ClsP, slot), object)
+	join.RetVoid()
+
+	escapes := FrameEscapes(module)
+	require.Len(t, escapes, 1)
+	assert.Equal(t, FrameEscapeStore, escapes[0].Kind)
+	assert.Equal(t, FrameEscapeIntoCallResult, escapes[0].Destination)
+	assert.Equal(t, "runtime.newobject", escapes[0].Callee)
+}
+
+// A frame slot reached through a merge at a constant offset is that slot, not
+// the one at offset zero. Resolving the merge without carrying the
+// displacement would park the address in the wrong slot and then read a
+// different one back, which reports nothing and looks like a clean run.
+func TestFrameEscapesKeepsTheDisplacementOfASlotReachedByAPhi(t *testing.T) {
+	module := ir.NewModule()
+	function := module.NewFuncVoid("publish")
+	entry := function.Entry()
+	other := function.NewBlock("other")
+	join := function.NewBlock("join")
+
+	local := entry.Alloc(8, 8)
+	first := entry.Alloc(8, 32)
+	second := entry.Alloc(8, 32)
+	entry.Jnz(function.Word(1), other, join)
+	other.Goto(join)
+	aggregate := join.Phi(ir.ClsP,
+		ir.PhiEdge{From: entry, Val: first},
+		ir.PhiEdge{From: other, Val: second},
+	)
+	field := join.Add(ir.ClsP, aggregate, function.Long(16))
+	join.Store(local, field)
+	object := join.Call(ir.ClsP, function.Sym("runtime.newobject", 0), function.Sym("type.ptr", 0))
+	// The publication reads the field that was written. Reading offset 0
+	// instead must not produce a finding.
+	join.Store(join.Load(ir.ClsP, join.Add(ir.ClsP, aggregate, function.Long(0))), object)
+	join.Store(join.Load(ir.ClsP, join.Add(ir.ClsP, aggregate, function.Long(16))), object)
+	join.RetVoid()
+
+	escapes := FrameEscapes(module)
+	require.Len(t, escapes, 1)
+	assert.Equal(t, FrameEscapeIntoCallResult, escapes[0].Destination)
+}
+
+// A select is the same merge with the branches folded away, so it hides the
+// same publication.
+func TestFrameEscapesReportsAFrameAddressStoredThroughASelectedDestination(t *testing.T) {
+	module := ir.NewModule()
+	function := module.NewFuncVoid("publish")
+	block := function.Entry()
+	local := block.Alloc(8, 8)
+	frameArray := block.Alloc(8, 16)
+	heapArray := block.Call(ir.ClsP, function.Sym("runtime.newobject", 0), function.Sym("type.array", 0))
+	array := block.Select(ir.ClsP, function.Word(1), frameArray, heapArray)
+	block.Store(local, array)
+	block.RetVoid()
+
+	escapes := FrameEscapes(module)
+	require.Len(t, escapes, 1)
+	assert.Equal(t, FrameEscapeIntoCallResult, escapes[0].Destination)
+	assert.Equal(t, "runtime.newobject", escapes[0].Callee)
+}
+
+// The merged destination is still reached through a variable index, which is
+// what filling element i of the backing array looks like. The displacement is
+// not a constant, so nothing upstream of the store resolves to a base region;
+// what matters is that the pointer it was added to is only sometimes in frame.
+func TestFrameEscapesReportsAFrameAddressStoredAtAVariableOffsetOfAMergedDestination(t *testing.T) {
+	module := ir.NewModule()
+	function := module.NewFuncVoid("publish")
+	entry := function.Entry()
+	heapPath := function.NewBlock("heap")
+	join := function.NewBlock("join")
+
+	local := entry.Alloc(8, 8)
+	frameArray := entry.Alloc(8, 16)
+	entry.Jnz(function.Word(1), heapPath, join)
+	heapArray := heapPath.Call(ir.ClsP, function.Sym("runtime.newobject", 0), function.Sym("type.array", 0))
+	heapPath.Goto(join)
+	array := join.Phi(ir.ClsP,
+		ir.PhiEdge{From: entry, Val: frameArray},
+		ir.PhiEdge{From: heapPath, Val: heapArray},
+	)
+	element := join.Add(ir.ClsP, array, join.Mul(ir.ClsL, function.Long(8), function.Long(1)))
+	join.Store(local, element)
+	join.RetVoid()
+
+	escapes := FrameEscapes(module)
+	require.Len(t, escapes, 1)
+	// The destination category is opaque, not the heap array. pointerBase only
+	// strips constant displacements, so no destination reached at a run-time
+	// offset is named -- with or without a merge. That is a separate limit; the
+	// publication itself is what this test is about.
+	assert.Equal(t, FrameEscapeIntoOpaque, escapes[0].Destination)
+}
+
+// A merge whose every incoming value is this frame's own storage is still this
+// frame's own storage. Rejecting it would turn every conditionally chosen local
+// into a false report.
+func TestFrameEscapesAllowsAFrameAddressStoredThroughAMergeOfFrameSlots(t *testing.T) {
+	module := ir.NewModule()
+	function := module.NewFuncVoid("keep")
+	entry := function.Entry()
+	other := function.NewBlock("other")
+	join := function.NewBlock("join")
+
+	local := entry.Alloc(8, 8)
+	first := entry.Alloc(8, 16)
+	second := entry.Alloc(8, 16)
+	entry.Jnz(function.Word(1), other, join)
+	other.Goto(join)
+	slot := join.Phi(ir.ClsP,
+		ir.PhiEdge{From: entry, Val: first},
+		ir.PhiEdge{From: other, Val: second},
+	)
+	join.Store(local, slot)
+	join.RetVoid()
+
+	assert.Empty(t, FrameEscapes(module))
+}
+
+// A loop-carried destination refers to itself: the array this iteration stores
+// into is whatever the last one ended with, starting from the frame array and
+// giving way to the heap one. Both the merge fixed point and the destination
+// classification have to terminate on that, and the answer must still name the
+// heap array rather than degrading to opaque.
+func TestFrameEscapesReportsAFrameAddressStoredThroughALoopCarriedMergedDestination(t *testing.T) {
+	module := ir.NewModule()
+	function := module.NewFuncVoid("publish")
+	entry := function.Entry()
+	body := function.NewBlock("body")
+	done := function.NewBlock("done")
+
+	local := entry.Alloc(8, 8)
+	frameArray := entry.Alloc(8, 16)
+	heapArray := entry.Call(ir.ClsP, function.Sym("runtime.newobject", 0), function.Sym("type.array", 0))
+	entry.Goto(body)
+
+	array := body.Phi(ir.ClsP, ir.PhiEdge{From: entry, Val: frameArray})
+	body.Store(local, array)
+	next := body.Select(ir.ClsP, function.Word(1), array, heapArray)
+	body.Phis[0].Add(body, next)
+	body.Jnz(function.Word(1), body, done)
+	done.RetVoid()
+
+	escapes := FrameEscapes(module)
+	require.Len(t, escapes, 1)
+	assert.Equal(t, FrameEscapeIntoCallResult, escapes[0].Destination)
+	assert.Equal(t, "runtime.newobject", escapes[0].Callee)
+}
+
 // Passing &local to a callee is how Go is written, and whether the callee
 // retains it is a question about the callee's own body. The audit reports the
 // store the callee makes, not the argument.
