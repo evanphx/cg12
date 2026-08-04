@@ -9,6 +9,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strconv"
 	"strings"
 
 	"github.com/evanphx/cg12/amd64"
@@ -45,7 +46,9 @@ func main() {
 	prebuiltRuntime := flag.String("runtime", "", "link against the prebuilt runtimes written by `goc build-runtime`, comma-separated; the richest usable one is chosen")
 	cpuProfile := flag.String("cpuprofile", "", "write a CPU profile of the compile to this file")
 	targetName := flag.String("target", defaultTargetName(), "arm64 | amd64")
-	escapeDiag := flag.Int("m", 0, "print escape decisions: 1 the rule that placed each allocation, 2 also the chain to the deciding use")
+	var escapeDiagLevel escapeDiagFlag
+	flag.Var(&escapeDiagLevel, "m", "print escape decisions: 1 the rule that placed each allocation, 2 also the chain to the deciding use")
+	escapeDiag := (*int)(&escapeDiagLevel)
 	flag.Parse()
 	if flag.NArg() != 1 {
 		fmt.Fprintln(os.Stderr, "usage: goc [-O] [-m[=2]] [-target arch] [-o out] [-runtime runtime.gocrt] [-cpuprofile prof] [-c|-S|-emit-ir|-run] file.go")
@@ -344,3 +347,27 @@ func check(err error) {
 		os.Exit(1)
 	}
 }
+
+// escapeDiagFlag makes -m behave the way gc's does: bare -m means level 1, and
+// -m=2 asks for the chain. A plain flag.Int cannot do this -- `goc -m file.go`
+// tries to parse the filename as the level and fails -- so this reports itself
+// as a boolean flag, which is what lets the flag package accept the bare form.
+type escapeDiagFlag int
+
+func (level *escapeDiagFlag) String() string { return strconv.Itoa(int(*level)) }
+
+func (level *escapeDiagFlag) Set(value string) error {
+	if value == "true" {
+		*level = 1
+		return nil
+	}
+	parsed, err := strconv.Atoi(value)
+	if err != nil {
+		return fmt.Errorf("escape diagnostic level: %w", err)
+	}
+	*level = escapeDiagFlag(parsed)
+	return nil
+}
+
+// IsBoolFlag lets `-m` stand alone. The flag package then passes "true" to Set.
+func (level *escapeDiagFlag) IsBoolFlag() bool { return true }

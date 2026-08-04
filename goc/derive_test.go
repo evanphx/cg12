@@ -57,6 +57,12 @@ var wholeCompilationGenFields = []string{
 	// having it -- the callers asking a summary question are in other functions
 	// and often other packages.
 	"summaryParents",
+	// All three are whole-program state the escape walk consults: the set the
+	// interface dispatcher dispatches over, a memoised O(dynamic types x reachable
+	// declarations) computation, and the -m diagnostic's single output sink.
+	"reachableFunctions",
+	"interfaceCandidates",
+	"escapeDiag",
 	"literalData",
 	"runtimeTypes",
 	"goABITypes",
@@ -100,6 +106,9 @@ func fullyPopulatedGen() *gen {
 		contentSymbols:              map[string]string{},
 		functionDescriptors:         map[string]string{},
 		summaryParents:              map[ast.Node]map[ast.Node]ast.Node{},
+		reachableFunctions:          []functionDecl{{}},
+		interfaceCandidates:         map[interfaceCandidateKey][]interfaceMethodCandidate{},
+		escapeDiag:                  &escapeDiagnostics{},
 		literalData:                 map[string]string{},
 		runtimeTypes:                map[string]types.Type{},
 		goABITypes:                  map[string]*ir.AggType{},
