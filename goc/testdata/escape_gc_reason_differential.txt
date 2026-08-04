@@ -57,7 +57,7 @@ which the object outlives its frame, which is what a category names.
   returned           leaves through one of the function's results
   channel-send       sent on a channel
   read-out           the object's contents are read back out of the container
-  too-large          will not fit in a frame                       (gc only)
+  too-large          will not fit in a frame
   loop-carried       one frame slot cannot hold one object per
                      iteration                                    (goc only)
   folded             the analysis stopped deciding this allocation on its own
@@ -93,9 +93,9 @@ confines the comparison to lines both compilers put on the heap.
 ## coverage
 
 programs with reasons on both sides            399
-goc -m decisions at joinable positions        1792
-  of those on the heap                        1101
-  of those carrying a rule                    1101  (must equal the line above)
+goc -m decisions at joinable positions        1797
+  of those on the heap                        1103
+  of those carrying a rule                    1103  (must equal the line above)
   of those goc could not explain               171  (the "unexplained" category: goc saw the
                                                     object escape and could not name the use)
 goc -m decisions with no source position         0  (never joinable; so is the census)
@@ -117,10 +117,10 @@ goc -m lines the parser did not know             0  (must be 0)
 
 the two instruments on goc's side, against each other:
 
-lines both record, and agree about            1340
+lines both record, and agree about            1341
 lines only the census records                 152  (an allocation goc's own -m cannot
                                                     explain at all)
-lines only goc -m records                      18  (expected: the census omits ordinary
+lines only goc -m records                      21  (expected: the census omits ordinary
                                                     front-end frame slots)
 lines one records a subset of the other        1  (the same scope difference, arriving on
                                                     a line where the two also overlap)
@@ -422,8 +422,8 @@ columns what their explanations amount to. "neither" is almost entirely lines
 both compilers keep in a frame, which neither explains.
 
   placement                agree    differ  goc only   gc only   neither     total
-  agrees                     142       309        44        17       280       792
-  disagrees                   84       175       159      1329       685      2432
+  agrees                     143       309        44        17       280       793
+  disagrees                   84       176       159      1327       685      2431
 
 ## AGREE ON PLACEMENT, DISAGREE ON REASON: 309 lines
 
@@ -4214,11 +4214,6 @@ runtime_map_interface_keys_gc.go:20	mixed -> frame	stored-in-object -> -
 	     stored-in-object store into non-local storage
 	     at               testdata/runtime_map_interface_keys_gc.go:20:40
 	gc   col 22  frame  object  key{...}
-runtime_map_pointer_keys.go:27	heap -> frame	unexplained -> -
-	src  if values[&mapPointerKey{value: 17}] != 0 {
-	goc  col 12  heap  main_mapPointerKey  [front end: composite-literal in main.main]
-	     unexplained      the walk found a use it could not prove local
-	gc   col 12  frame  object  &mapPointerKey{...}
 runtime_method_expression.go:20	mixed -> absent	stored-in-object -> -
 	src  counter := methodExpressionCounter{base: 30}
 	goc  col 2  frame  main_methodExpressionCounter  [ir pass: heap-alloc-candidate in main.main]
@@ -4480,6 +4475,12 @@ runtime_unbuffered_pingpong.go:13	heap -> absent	closure-captured -> -
 	goc  col 2  heap  struct_code_uintptr__argument0_chan_int__argumen  [ir pass: heap-alloc-candidate in main.main]
 	     closure-captured argument 0 of $runtime.newproc escapes
 	     at               testdata/runtime_unbuffered_pingpong.go:13:16
+runtime_unsafe_struct_field.go:15	heap -> frame	unexplained -> -
+	src  next:  &unsafeFieldNode{left: 13, right: 17},
+	goc  col 10  heap  main_unsafeFieldNode  [front end: composite-literal in main.main]
+	     unexplained      node is used here in a way the walk cannot prove keeps it local
+	     at               testdata/runtime_unsafe_struct_field.go:22:77
+	gc   col 10  frame  object  &unsafeFieldNode{...}
 runtime_waitgroup_reuse.go:5	heap -> absent	stored-in-object -> -
 	src  func runWaitGroupRound(round int) int {
 	goc  col 1  heap  int  [ir pass: heap-alloc-candidate in main.runWaitGroupRound]
@@ -4770,21 +4771,20 @@ stdlib_sync_once_map_cond.go:29	heap -> absent	stored-in-object -> -
 	     stored-in-object write barrier into a candidate
 	     at               testdata/stdlib_sync_once_map_cond.go:33:5
 
-## PLACEMENT DISAGREES, ONLY gc EXPLAINED: 1329 lines
+## PLACEMENT DISAGREES, ONLY gc EXPLAINED: 1327 lines
 
 gc heaps something here that goc does not, so gc is the only compiler with
 anything to say. This is the permissive direction, and gc's category is a direct
 statement of what it thinks publishes the object -- which is the fastest triage
 available for a line goc may be keeping in a frame wrongly.
 
-   1274  call-retains
+   1273  call-retains
      34  stored-in-object
       8  returned
       4  interface-boxed
       3  channel-send
       3  closure-captured
       2  call-retains,stored-in-object
-      1  too-large
 
 adler32_marshal_loop.go:23	absent -> heap	- -> call-retains
 	src  panic("appended state mismatch")
@@ -5770,11 +5770,6 @@ runtime_gc_heap_growth_shrink.go:101	absent -> heap	- -> call-retains
 	src  panic("a transient object's payload was corrupted while it was live")
 	gc   col 10  heap  object  "a transient object's payload was corrupted while it was live"
 	     call-retains     {heap} <- &{storage for "a transient object's payload was corrupted while it was live"} via spill -> call parameter
-runtime_gc_heap_growth_shrink.go:105	frame -> heap	- -> too-large
-	src  small := make([]*resident, 0, 65536)
-	goc  col 32  frame  65536__main_resident  [front end: make-slice-backing in main.grow]
-	gc   col 15  heap  slice  make([]*resident, 0, 65536)
-	     too-large        {heap} <- &{storage for make([]*resident, 0, 65536)} via too large for stack
 runtime_gc_heap_growth_shrink.go:110	absent -> heap	- -> call-retains
 	src  panic("the transient small allocation was truncated")
 	gc   col 9  heap  object  "the transient small allocation was truncated"
@@ -10053,10 +10048,6 @@ stdlib_text_template_execute.go:17	absent -> heap	- -> call-retains
 	src  panic("template Parse failed")
 	gc   col 9  heap  object  "template Parse failed"
 	     call-retains     {heap} <- &{storage for "template Parse failed"} via spill -> call parameter
-stdlib_text_template_execute.go:24	absent -> heap	- -> call-retains
-	src  var output bytes.Buffer
-	gc   col 6  heap  object  output
-	     call-retains     {heap} <- template.wr via address-of -> interface-converted -> assign-pair -> call parameter
 stdlib_text_template_execute.go:26	absent -> heap	- -> call-retains
 	src  panic("template Execute failed")
 	gc   col 9  heap  object  "template Execute failed"

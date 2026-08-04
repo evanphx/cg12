@@ -1722,6 +1722,7 @@ type gen struct {
 	iterationCaptures             map[types.Object]bool
 	referenceCaptures             map[types.Object]bool
 	objectEscapeChecks            map[types.Object]bool
+	escapeAsksWhatTheValueHolds   bool
 	resultLeakBody                *ast.BlockStmt
 	escapeWalkOuterObjects        []types.Object
 	keepAliveObjects              map[types.Object]bool
@@ -2608,7 +2609,7 @@ func (g *gen) interfaceMethodDoesNotRetainReceiver(
 	// entry is never reached for one and a chain of embedded interfaces would
 	// recurse without end. This is that entry, taken on the interface method
 	// itself.
-	key := parameterKey{function: method, index: -1}
+	key := parameterKey{function: method, index: -1, holds: g.escapeAsksWhatTheValueHolds}
 	if checking[key] {
 		return false
 	}
@@ -2663,6 +2664,68 @@ func receiverIsAPointerFreeCopy(method *types.Func) bool {
 	return !pointers
 }
 
+// deleteBuiltinRetainsNothing reports that an expression is an argument of the
+// delete builtin. mapdelete hashes the key and compares it and keeps nothing,
+// exactly as mapaccess does; the map argument is a map header the call cannot
+// retain either.
+func deleteBuiltinRetainsNothing(call *ast.CallExpr, node ast.Node, info *types.Info) bool {
+	identifier, isIdentifier := call.Fun.(*ast.Ident)
+	if !isIdentifier {
+		return false
+	}
+	builtin, isBuiltin := info.Uses[identifier].(*types.Builtin)
+	if !isBuiltin || builtin.Name() != "delete" {
+		return false
+	}
+	for _, argument := range call.Args {
+		if argument == node {
+			return true
+		}
+	}
+	return false
+}
+
+// mapLookupKeyIsNotRetained reports that an expression is the key of a map
+// *read* -- m[k], v, ok := m[k], delete(m, k) -- rather than of a map write.
+//
+// mapaccess and mapdelete hash the key and compare it and keep nothing; the
+// runtime takes a large key by address for the same reason a caller passes any
+// read-only aggregate by address, and cmd/compile's own runtime declarations say
+// so. mapassign is the other half and is the reason this asks: a map *write*
+// copies the key into the bucket, so `m[&key{}] = v` and the key of a map
+// literal both retain it, and testdata/runtime_map_pointer_keys.go has all three
+// shapes in one program.
+func mapLookupKeyIsNotRetained(node ast.Node, index *ast.IndexExpr, info *types.Info, parents map[ast.Node]ast.Node) bool {
+	if index.Index != node {
+		return false
+	}
+	baseType := info.TypeOf(index.X)
+	if baseType == nil {
+		return false
+	}
+	if _, isMap := baseType.Underlying().(*types.Map); !isMap {
+		return false
+	}
+	switch parent := parents[index].(type) {
+	case *ast.AssignStmt:
+		// m[k] = v and m[k] += v both call mapassign, which retains the key.
+		for _, destination := range parent.Lhs {
+			if destination == index {
+				return false
+			}
+		}
+		return true
+	case *ast.IncDecStmt:
+		return parent.X != index
+	case *ast.UnaryExpr:
+		// &m[k] does not compile, but a range over a map element or any other
+		// address-of form would be a write in disguise if it ever did.
+		return parent.Op != token.AND
+	default:
+		return true
+	}
+}
+
 func (g *gen) nonEscapingAddressWithin(
 	address *ast.UnaryExpr,
 	info *types.Info,
@@ -2687,12 +2750,17 @@ func (g *gen) nonEscapingAddressWithin(
 		case *ast.ParenExpr:
 			current = parent
 		case *ast.CallExpr:
+			if deleteBuiltinRetainsNothing(parent, current, info) {
+				return true
+			}
 			if len(parent.Args) != 1 || parent.Args[0] != current || !info.Types[parent.Fun].IsType() {
 				return false
 			}
 			current = parent
 		case *ast.StarExpr:
 			return parent.X == current
+		case *ast.IndexExpr:
+			return mapLookupKeyIsNotRetained(current, parent, info, parents)
 		case *ast.SelectorExpr:
 			selection := info.Selections[parent]
 			return parent.X == current && selection != nil && selection.Kind() == types.FieldVal
@@ -2853,6 +2921,45 @@ func (g *gen) fixedSliceCapacity(call *ast.CallExpr) (int64, bool) {
 
 func (g *gen) makeResultDoesNotEscape(call *ast.CallExpr) bool {
 	return g.assignedResultDoesNotEscape(call)
+}
+
+// sliceBackingFitsInAFrame bounds the backing array a fixed-capacity make can be
+// given in the frame. Without it the front end committed a frame slot of any
+// size at all -- a make of 200 000 ints took 1.6 MB of the caller's frame, and
+// the same shape in a recursive function overflowed the goroutine stack on a
+// program the host toolchain runs.
+//
+// The comparison is cmd/compile's, in the form cmd/compile writes it: capacity
+// against MaxImplicitFrameSize/elementSize rather than capacity*elementSize
+// against MaxImplicitFrameSize, because the division truncates and the two
+// forms disagree for every element size that is not a power of two. The point
+// of the bound is to place the same objects gc places, so the arithmetic has to
+// be the same arithmetic.
+//
+// A zero-sized element is not bounded here. gc sends those to the heap
+// ("zero-sized element"), by a TODO that says it would rather not; a frame slot
+// of no bytes costs nothing and copying the TODO would move allocations for no
+// reason.
+// fitsInAFrame bounds one implicitly allocated object: storage the source did
+// not name, which is new(T), &T{} and a make's backing array. See
+// opt.MaxImplicitFrameSize.
+func fitsInAFrame(valueType types.Type) bool {
+	return typeSize(valueType) <= opt.MaxImplicitFrameSize
+}
+
+// tooLargeForAFrame is the rule fitsInAFrame states when it refuses, in the same
+// words opt/escape.go's copy of the bound states it, so a reader who meets the
+// rule does not have to know which of the two analyses placed the object.
+func tooLargeForAFrame(valueType types.Type) string {
+	return fmt.Sprintf("%d bytes is larger than the %d a frame will hold", typeSize(valueType), opt.MaxImplicitFrameSize)
+}
+
+func sliceBackingFitsInAFrame(elementType types.Type, capacity int64) bool {
+	elementSize := typeSize(elementType)
+	if elementSize <= 0 {
+		return true
+	}
+	return capacity <= opt.MaxImplicitFrameSize/elementSize
 }
 
 func (g *gen) assignedResultDoesNotEscape(expression ast.Expr) bool {
@@ -3081,6 +3188,8 @@ func (g *gen) valueDoesNotEscapeWithin(
 				return false
 			}
 			current = parent
+		case *ast.IndexExpr:
+			return mapLookupKeyIsNotRetained(current, parent, info, parents)
 		case *ast.TypeAssertExpr:
 			// i.(T) reads the interface's payload, so the value the walk is
 			// following is reachable from the asserted value and from nothing
@@ -3108,7 +3217,16 @@ func (g *gen) valueDoesNotEscapeWithin(
 			}
 			if selection.Kind() == types.FieldVal {
 				address := addressedExpression(parent, parents, info)
-				return address == nil || !g.addressEscapesWithin(address, info, parents, body, checking)
+				if address != nil {
+					return !g.addressEscapesWithin(address, info, parents, body, checking)
+				}
+				if g.escapeAsksWhatTheValueHolds && typeCanCarryAnAddress(info.TypeOf(parent)) {
+					// See nonEscapingObjectUse: the field read carries out what
+					// the field holds, and the deep question is about that.
+					current = parent
+					continue
+				}
+				return true
 			}
 			if !g.methodCallDoesNotRetainReceiver(parent, info, checking) {
 				return false
@@ -3119,7 +3237,20 @@ func (g *gen) valueDoesNotEscapeWithin(
 			// See nonEscapingObjectUse: a method value is a closure over the
 			// receiver, and the receiver goes where the closure goes.
 			current = parent
+		case *ast.BinaryExpr:
+			// x == y and x != y read both operands and produce a bool. Nothing
+			// is retained, which is what nonEscapingObjectUse says about the
+			// same shape; this climb simply never reached a comparison before
+			// the deep question started following a field read out of a
+			// container, and runtime.hexdumper's `if h.mark != nil` is that
+			// shape.
+			return parent.Op == token.EQL || parent.Op == token.NEQ
 		case *ast.RangeStmt:
+			// See nonEscapingObjectUse's case: a value variable is a copy of an
+			// element, which carries what the element holds.
+			if g.escapeAsksWhatTheValueHolds && parent.Value != nil {
+				return false
+			}
 			return parent.X == current
 		case *ast.ReturnStmt:
 			return g.resultLeakIsAllowed(parent, parents)
@@ -3133,6 +3264,22 @@ func (g *gen) valueDoesNotEscapeWithin(
 			}
 			if argumentIndex < 0 {
 				if parent.Fun == current {
+					if g.escapeAsksWhatTheValueHolds {
+						// Calling a value consumes it and retains nothing, which
+						// is what nonEscapingObjectUse says about a use in this
+						// position. The deep question reaches here by following
+						// a field read to the func value it produced --
+						// runtime.hexdumpWords' h := hexdumper{mark: symMark}
+						// and the h.mark(...) inside h.run -- and that call is
+						// not where the closure goes.
+						if _, asynchronous := parents[parent].(*ast.GoStmt); asynchronous {
+							return false
+						}
+						if _, deferred := parents[parent].(*ast.DeferStmt); deferred {
+							return g.deferredFunctionValueStaysInFrame(parent, parents, body)
+						}
+						return true
+					}
 					return g.deferredFunctionValueStaysInFrame(parent, parents, body)
 				}
 				return false
@@ -3140,8 +3287,11 @@ func (g *gen) valueDoesNotEscapeWithin(
 			if calledIdentifier, ok := parent.Fun.(*ast.Ident); ok {
 				if builtin, ok := info.Uses[calledIdentifier].(*types.Builtin); ok {
 					switch builtin.Name() {
-					case "len", "cap", "copy":
+					case "len", "cap", "delete":
 						return true
+					case "copy":
+						// See nonEscapingObjectUse: copy moves the elements out.
+						return !g.escapeAsksWhatTheValueHolds
 					}
 				}
 			}
@@ -3150,7 +3300,7 @@ func (g *gen) valueDoesNotEscapeWithin(
 				continue
 			}
 			if appendSpreadSource(parent, current, info) {
-				return true
+				return !g.escapeAsksWhatTheValueHolds
 			}
 			if info.Types[parent.Fun].IsType() {
 				if expression, isExpression := current.(ast.Expr); isExpression &&
@@ -3188,6 +3338,12 @@ type parameterKey struct {
 	// own result". They recurse into each other, so they must not share a
 	// cycle-breaking entry.
 	summary bool
+	// holds distinguishes the shallow question from the deep one -- "is this
+	// value carried out" against "is anything this value holds carried out".
+	// See gen.escapeAsksWhatTheValueHolds. A shallow question can contain a
+	// deep one, and the recursion break answers optimistically, so sharing an
+	// entry would let a shallow answer stand in for a deep one.
+	holds bool
 }
 
 // resultLeakIsAllowed reports whether a return statement the escape walk has
@@ -3741,6 +3897,28 @@ func addressedVariableIdentifier(expression ast.Expr, info *types.Info) (*ast.Id
 	}
 }
 
+// gen.escapeAsksWhatTheValueHolds distinguishes the two questions this walk can
+// be asked about a value, which are not the same question and were answered by
+// the same code:
+//
+//   - the shallow one: can this value's own storage outlive the frame. Reading
+//     a field out of it, indexing it, ranging it, copying it or spreading it
+//     into an append all carry nothing of the value itself, so all of them are
+//     answered "no".
+//   - the deep one: can anything this value *holds* outlive the frame. Every
+//     one of those five produces what the value holds, so none of them answers
+//     "no" any more.
+//
+// It is set by compositeElementDoesNotEscape, which is where the walk climbs
+// from an object into a struct or array literal that holds its address. Before
+// it existed, `n := &node{}; h := holder{p: n}; sink = h.p` put n in the frame
+// and the package-level sink pointed at a dead frame -- and so did five other
+// spellings of reading a pointer back out of a frame-local container.
+//
+// variadicParameterHoldsItsElements is the same distinction, made for a
+// variadic parameter after the same kind of bug, and its comment is worth
+// reading alongside this one: it answers the deep question with a whitelist
+// where this answers it by following what was produced.
 func (g *gen) nonEscapingObjectUse(
 	identifier *ast.Ident,
 	info *types.Info,
@@ -3755,10 +3933,20 @@ func (g *gen) nonEscapingObjectUse(
 	switch parent := parent.(type) {
 	case *ast.IndexExpr:
 		if parent.X != identifier {
-			return false
+			return mapLookupKeyIsNotRetained(identifier, parent, info, parents)
 		}
 		address := addressedExpression(parent, parents, info)
-		return address == nil || !g.addressEscapesWithin(address, info, parents, body, checking)
+		if address != nil {
+			return !g.addressEscapesWithin(address, info, parents, body, checking)
+		}
+		if g.escapeAsksWhatTheValueHolds && typeCanCarryAnAddress(info.TypeOf(parent)) {
+			// v[i] produces what the element holds, and what it holds is what
+			// this question is about. Reading it out is not free the way
+			// reading out of the object itself is -- unless the element has no
+			// room for an address, in which case nothing came out with it.
+			return g.valueDoesNotEscapeWithin(parent, info, parents, body, checking)
+		}
+		return true
 	case *ast.SliceExpr:
 		// A slice can carry the referenced storage into a result, interface, or
 		// longer-lived aggregate, so the storage escapes exactly when the
@@ -3799,7 +3987,16 @@ func (g *gen) nonEscapingObjectUse(
 			// asks about &v[i]. Omitting it let a package-level slice hold the
 			// address of a field of a frame allocation.
 			address := addressedExpression(parent, parents, info)
-			return address == nil || !g.addressEscapesWithin(address, info, parents, body, checking)
+			if address != nil {
+				return !g.addressEscapesWithin(address, info, parents, body, checking)
+			}
+			// Reading a field carries nothing out of the *object*, and carries
+			// out exactly what the field holds. When the question is the deep
+			// one, that is the question.
+			if g.escapeAsksWhatTheValueHolds && typeCanCarryAnAddress(info.TypeOf(parent)) {
+				return g.valueDoesNotEscapeWithin(parent, info, parents, body, checking)
+			}
+			return true
 		}
 		if !g.methodCallDoesNotRetainReceiver(parent, info, checking) {
 			return false
@@ -3835,6 +4032,15 @@ func (g *gen) nonEscapingObjectUse(
 		// to the range expression. That cost `for _, n := range []int{...}` its
 		// backing array as soon as n reached anything the walk could not follow,
 		// which for an int is every call, since an int has no storage to leak.
+		//
+		// The deep question is the exception, and for the reason the paragraph
+		// above gives: the copy carries what the element points at, and that is
+		// precisely what the deep question is about. A range with a value
+		// variable produces elements, so it is refused rather than followed --
+		// the same line variadicUseCannotReachAnElement draws.
+		if g.escapeAsksWhatTheValueHolds && parent.Value != nil {
+			return false
+		}
 		return parent.X == identifier
 	case *ast.BinaryExpr:
 		return parent.Op == token.EQL || parent.Op == token.NEQ
@@ -3928,8 +4134,14 @@ func (g *gen) nonEscapingObjectUse(
 		if calledIdentifier, ok := parent.Fun.(*ast.Ident); ok {
 			if builtin, ok := info.Uses[calledIdentifier].(*types.Builtin); ok {
 				switch builtin.Name() {
-				case "len", "cap", "copy", "print", "println":
+				case "len", "cap", "print", "println", "delete":
 					return true
+				case "copy":
+					// copy moves the elements into the destination, which is
+					// the whole of what the deep question asks about. This is
+					// the case variadicUseCannotReachAnElement leaves out of
+					// its whitelist, with the same note.
+					return !g.escapeAsksWhatTheValueHolds
 				}
 			}
 		}
@@ -3937,7 +4149,10 @@ func (g *gen) nonEscapingObjectUse(
 			return g.valueDoesNotEscapeWithin(parent, info, parents, body, checking)
 		}
 		if appendSpreadSource(parent, identifier, info) {
-			return true
+			// The operand's own storage is not retained, which answers the
+			// shallow question. Its elements are copied into the destination,
+			// which is why it does not answer the deep one.
+			return !g.escapeAsksWhatTheValueHolds
 		}
 		if info.Types[parent.Fun].IsType() {
 			convertedType := info.Types[parent].Type
@@ -3995,6 +4210,17 @@ func (g *gen) compositeElementDoesNotEscape(
 	}
 	switch literalType.Underlying().(type) {
 	case *types.Struct, *types.Array:
+		// The deep question, not the shallow one. An element's address is
+		// *inside* the literal's value, so "the literal's own storage does not
+		// escape" is not enough: a pointer read back out of a frame-local
+		// struct or array is published without that storage ever leaving the
+		// frame. See gen.escapeAsksWhatTheValueHolds -- and see
+		// variadicParameterHoldsItsElements, which is the same distinction made
+		// for a variadic parameter, for the same reason, after the same kind of
+		// bug.
+		saved := g.escapeAsksWhatTheValueHolds
+		g.escapeAsksWhatTheValueHolds = true
+		defer func() { g.escapeAsksWhatTheValueHolds = saved }()
 		return g.valueDoesNotEscapeWithin(literal, info, parents, body, checking)
 	default:
 		return false
@@ -4132,7 +4358,7 @@ func (g *gen) parameterDoesNotEscapeUnexplained(function *types.Func, index int,
 		}
 		return held
 	}
-	key := parameterKey{function: function, index: index}
+	key := parameterKey{function: function, index: index, holds: g.escapeAsksWhatTheValueHolds}
 	if checking[key] {
 		// The recursive edge is answered "does not escape", which is the
 		// *optimistic* answer and the correct one. See recursiveEscapeAnswer.
@@ -4276,7 +4502,7 @@ func (g *gen) parameterLeaksOnlyToResult(function *types.Func, index int, checki
 	if signature.Variadic() && index == signature.Params().Len()-1 {
 		return false
 	}
-	key := parameterKey{function: function, index: index, summary: true}
+	key := parameterKey{function: function, index: index, summary: true, holds: g.escapeAsksWhatTheValueHolds}
 	if checking[key] {
 		return false
 	}
@@ -4414,7 +4640,7 @@ func (g *gen) receiverDoesNotEscape(function *types.Func, checking map[parameter
 	if declaration.decl.Body == nil {
 		return hasCompilerDirective(declaration.decl, "go:noescape")
 	}
-	key := parameterKey{function: function, index: -1}
+	key := parameterKey{function: function, index: -1, holds: g.escapeAsksWhatTheValueHolds}
 	if checking[key] {
 		// See recursiveEscapeAnswer, and the receiver half of the note there.
 		return recursiveEscapeAnswer
@@ -12132,7 +12358,22 @@ func (g *gen) expr(e ast.Expr) (result ir.Ref) {
 				// The pointer may stay inside the frame and still have to name
 				// a different object on every trip round a loop, which frame
 				// storage cannot do. See addressOutlivesItsIteration.
+				//
+				// And it may stay inside the frame and be too big for one. A
+				// pointer composite literal is storage the source never named,
+				// so it carries cmd/compile's implicit bound; see
+				// opt.MaxImplicitFrameSize for why a frame slot of any size at
+				// all is not merely wasteful.
+				literalType := g.typeAndValue(literal).Type
 				heap := !g.nonEscapingAddress(n) || g.addressOutlivesItsIteration(n)
+				if !heap && !fitsInAFrame(literalType) {
+					heap = true
+					// The size supersedes the climb rather than joining it: the
+					// walk has just answered "no publication", which is true and
+					// is no longer the reason.
+					g.diagRuleOverride(func() string { return tooLargeForAFrame(literalType) })
+					g.diagUse(n)
+				}
 				// Harvested here, at the decision, because everything between
 				// this line and the recordPlacement calls below asks the walk
 				// further questions about the literal's elements.
@@ -12141,7 +12382,6 @@ func (g *gen) expr(e ast.Expr) (result ir.Ref) {
 					heap = false
 					why = escapeExplanation{}
 				}
-				literalType := g.typeAndValue(literal).Type
 				_, isMap := literalType.Underlying().(*types.Map)
 				if isSliceType(literalType) || isMap {
 					value := g.compositeLiteral(literal, heap, why)
@@ -14735,7 +14975,7 @@ func (g *gen) builtinCall(call *ast.CallExpr, builtin *types.Builtin) ir.Ref {
 			}
 			fixedCapacity, hasFixedCapacity := g.fixedSliceCapacity(call)
 			var data ir.Ref
-			if hasFixedCapacity && fixedCapacity > 0 && g.makeResultDoesNotEscape(call) {
+			if hasFixedCapacity && fixedCapacity > 0 && sliceBackingFitsInAFrame(sliceType.Elem(), fixedCapacity) && g.makeResultDoesNotEscape(call) {
 				elementSize := typeSize(sliceType.Elem())
 				alignment := int(typeAlign(sliceType.Elem()))
 				if alignment < 4 {
@@ -15575,6 +15815,25 @@ func markPointerWords(valueType types.Type, base int64, mask []int64, lastPointe
 			*lastPointer = end
 		}
 	})
+}
+
+// typeCanCarryAnAddress reports that a value of this type has somewhere to put
+// an address. It is the escape walk's filter on what a read out of a container
+// can produce: reading a field or an element whose type has no pointer word in
+// it cannot carry the object the deep question is about, so the question stops
+// there rather than following an int out of a struct. See
+// gen.escapeAsksWhatTheValueHolds.
+//
+// It asks the metadata view -- unsafe.Pointer and a pointer to a not-in-heap
+// type both count -- because the question is "could an address be in there",
+// not "would the collector trace it".
+func typeCanCarryAnAddress(valueType types.Type) bool {
+	if valueType == nil {
+		return true
+	}
+	carries := false
+	visitPointerWords(valueType, 0, func(int64) { carries = true })
+	return carries
 }
 
 // visitPointerWords reports every pointer-sized word of valueType that the

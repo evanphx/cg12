@@ -1347,3 +1347,200 @@ func main() {
 	assert.True(t, callsSymbol(global, "runtime.newobject"),
 		"a closure stored in a package global stayed on the frame")
 }
+
+// TestObjectsTooLargeForAFrameGoToTheHeap covers the bound the escape analysis
+// does not answer: an object whose address demonstrably never leaves its
+// function, and which still must not be a frame slot because it will not fit in
+// one.
+//
+// The shapes are the three cmd/compile bounds with MaxImplicitStackVarSize, and
+// they are decided in two different places -- new(T) and the make backing array
+// reach opt.LowerHeapAllocations as candidates, &T{} is placed by the front end
+// -- so all three are checked rather than one standing for the others.
+//
+// The pair just under the bound is what makes this a test of the bound and not
+// of "large things go to the heap": 8 192 pointers is exactly 64 KB, which is
+// the largest backing array cmd/compile keeps, and it has to stay in the frame.
+func TestObjectsTooLargeForAFrameGoToTheHeap(t *testing.T) {
+	module, err := goc.Compile("escape.go", []byte(`
+package main
+
+import "runtime"
+
+type block struct{ data [65536]int }
+
+func bigNew() int {
+	value := new(block)
+	value.data[0] = 7
+	return value.data[0]
+}
+
+func bigLiteral() int {
+	value := &block{}
+	value.data[1] = 11
+	return value.data[1]
+}
+
+func bigMake() int {
+	values := make([]*int, 0, 65537)
+	values = append(values, nil)
+	return len(values)
+}
+
+func atTheBound() int {
+	values := make([]*int, 0, 8192)
+	values = append(values, nil)
+	return len(values)
+}
+
+func main() {
+	runtime.GC()
+	println(bigNew() + bigLiteral() + bigMake() + atTheBound())
+}
+`))
+	require.NoError(t, err)
+
+	for _, name := range []string{"main.bigNew", "main.bigLiteral", "main.bigMake"} {
+		function := functionWithSuffix(t, module, name)
+		assert.True(t, callsSymbol(function, "runtime.newobject"),
+			"%s kept an object larger than 64 KB in its frame", name)
+	}
+
+	bounded := functionWithSuffix(t, module, "main.atTheBound")
+	assert.False(t, callsSymbol(bounded, "runtime.newobject"),
+		"a backing array of exactly 64 KB was sent to the heap; the bound is inclusive")
+	assert.True(t, containsInstruction(bounded, func(instruction ir.Instr) bool {
+		return instruction.Op.IsAlloc()
+	}), "a backing array of exactly 64 KB did not get a frame slot")
+}
+
+// TestPointerReadBackOutOfAFrameLocalContainerEscapes covers the walk's deep
+// question: an object whose address is put into a struct or array literal, where
+// the literal's own storage never leaves the frame and a pointer is read back
+// out of it. The container is frame-local by the shallow question and every one
+// of these publishes the object anyway.
+//
+// Each was a live miscompile: goc placed the node in the frame, stored its
+// address in a package-level variable, and the next call over that frame
+// overwrote it. Six spellings, because the walk had two separate holes -- a read
+// out of the container, and a bulk copy of its elements -- and they are reached
+// by different rules.
+func TestPointerReadBackOutOfAFrameLocalContainerEscapes(t *testing.T) {
+	module, err := goc.Compile("readout.go", []byte(`
+package main
+
+import "runtime"
+
+type node struct{ value int }
+type holder struct{ p *node }
+
+var sink *node
+var published []*node
+
+func viaFieldRead()         { n := &node{value: 1}; h := holder{p: n}; sink = h.p }
+func viaArrayIndexRead()    { n := &node{value: 2}; a := [1]*node{n}; sink = a[0] }
+func viaSliceOfArrayIndex() { n := &node{value: 3}; a := [1]*node{n}; s := a[:]; sink = s[0] }
+func viaAppendElement()     { n := &node{value: 4}; a := [1]*node{n}; published = append(published[:0], a[0]) }
+func viaAppendSpread()      { n := &node{value: 5}; a := [1]*node{n}; published = append(published[:0], a[:]...) }
+func viaCopy()              { n := &node{value: 6}; a := [1]*node{n}; copy(published, a[:]) }
+
+func stashField(h holder)      { sink = h.p }
+func stashElement(a [1]*node)  { sink = a[0] }
+func viaCallReadsField()   { n := &node{value: 7}; stashField(holder{p: n}) }
+func viaCallReadsElement() { n := &node{value: 8}; stashElement([1]*node{n}) }
+
+func viaNestedLiteral() {
+	n := &node{value: 9}
+	outer := struct{ inner holder }{inner: holder{p: n}}
+	sink = outer.inner.p
+}
+
+// The shallow question is still answered shallowly: nothing is read out of
+// this one, so the node stays in the frame.
+func nothingIsReadOut() int {
+	n := &node{value: 10}
+	h := holder{p: n}
+	return h.p.value
+}
+
+func main() {
+	runtime.GC()
+	viaFieldRead()
+	viaArrayIndexRead()
+	viaSliceOfArrayIndex()
+	viaAppendElement()
+	viaAppendSpread()
+	viaCopy()
+	viaCallReadsField()
+	viaCallReadsElement()
+	viaNestedLiteral()
+	println(nothingIsReadOut())
+}
+`))
+	require.NoError(t, err)
+
+	for _, name := range []string{
+		"main.viaFieldRead", "main.viaArrayIndexRead", "main.viaSliceOfArrayIndex",
+		"main.viaAppendElement", "main.viaAppendSpread", "main.viaCopy",
+		"main.viaCallReadsField", "main.viaCallReadsElement", "main.viaNestedLiteral",
+	} {
+		function := functionWithSuffix(t, module, name)
+		assert.True(t, callsSymbol(function, "runtime.newobject"),
+			"%s kept in a frame an object whose address it published", name)
+	}
+
+	local := functionWithSuffix(t, module, "main.nothingIsReadOut")
+	assert.False(t, callsSymbol(local, "runtime.newobject"),
+		"the deep question sent a container's element to the heap with nothing read out of it")
+}
+
+// TestMapLookupKeyStaysInTheFrameAndAMapWriteKeyDoesNot covers both halves of
+// one rule, because the rule is only safe if both halves hold: mapaccess and
+// mapdelete keep nothing, and mapassign copies the key into the bucket.
+//
+// testdata/runtime_map_pointer_keys.go has all three shapes and was the line
+// this closes; the write half is what makes it the one group whose verdict says
+// "and it needs care about direction".
+func TestMapLookupKeyStaysInTheFrameAndAMapWriteKeyDoesNot(t *testing.T) {
+	module, err := goc.Compile("mapkey.go", []byte(`
+package main
+
+import "runtime"
+
+type key struct{ value int }
+
+var written = map[*key]int{}
+var read = map[*key]int{}
+
+func lookupKey() int   { return read[&key{value: 1}] }
+func deleteKey()       { delete(written, &key{value: 2}) }
+func assignKey()       { written[&key{value: 3}] = 3 }
+func compoundKey()     { written[&key{value: 4}] += 4 }
+func incrementKey()    { written[&key{value: 5}]++ }
+func literalKey() map[*key]int {
+	k := &key{value: 6}
+	return map[*key]int{k: 6}
+}
+
+func main() {
+	runtime.GC()
+	deleteKey()
+	assignKey()
+	compoundKey()
+	incrementKey()
+	println(lookupKey(), len(literalKey()))
+}
+`))
+	require.NoError(t, err)
+
+	for _, name := range []string{"main.lookupKey", "main.deleteKey"} {
+		function := functionWithSuffix(t, module, name)
+		assert.False(t, callsSymbol(function, "runtime.newobject"),
+			"%s sent a key the runtime does not retain to the heap", name)
+	}
+	for _, name := range []string{"main.assignKey", "main.compoundKey", "main.incrementKey", "main.literalKey"} {
+		function := functionWithSuffix(t, module, name)
+		assert.True(t, callsSymbol(function, "runtime.newobject"),
+			"%s kept in a frame a key mapassign copies into the map", name)
+	}
+}

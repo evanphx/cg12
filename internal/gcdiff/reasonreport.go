@@ -81,7 +81,7 @@ which the object outlives its frame, which is what a category names.
   returned           leaves through one of the function's results
   channel-send       sent on a channel
   read-out           the object's contents are read back out of the container
-  too-large          will not fit in a frame                       (gc only)
+  too-large          will not fit in a frame
   loop-carried       one frame slot cannot hold one object per
                      iteration                                    (goc only)
   folded             the analysis stopped deciding this allocation on its own

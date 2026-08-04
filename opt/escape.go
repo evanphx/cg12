@@ -1,6 +1,7 @@
 package opt
 
 import (
+	"fmt"
 	"os"
 
 	"github.com/evanphx/cg12/ir"
@@ -24,6 +25,42 @@ type localSlot struct {
 // It does not turn off the loop rule, which is a safety property of promotion
 // rather than part of the table -- see promotionsBlockedByALoop.
 var EscapeSummaries = os.Getenv("GOC_ESCAPE_SUMMARIES") != "0"
+
+// PayloadFold turns on foldSplitPayloadsBackIn. It is on, and GOC_PAYLOAD_FOLD=0
+// turns it off.
+//
+// Same reason as the knob above, and it has already earned it. The fold trades
+// K payload allocations for one combined object that takes the `[N]any` array to
+// the heap with them, and the threshold -- two -- was set by measuring log/slog's
+// three-large-integer call, where splitting was reported to cost four
+// allocations against gc's three. It costs three now. With the fold off,
+// slog_allocations_baseline.txt's info/3-attr-large-ints row is 3.00 / 24.0 B,
+// which is gc's number exactly, and with it on the row is 1.00 / 128.0 B. One
+// run each way is what says that, and it is not a thing the code can be read to
+// find out.
+//
+// The fold is still on, because turning it off moves 152 containers into frames
+// and splits 348 payloads out across the corpus -- see CCWORK_REPORT.md, which
+// says what would have to be measured to change it.
+var PayloadFold = os.Getenv("GOC_PAYLOAD_FOLD") != "0"
+
+// MaxImplicitFrameSize is the largest object goc will keep in a frame when the
+// source did not name it -- new(T), &T{}, a composite literal's backing storage,
+// a make's fixed-capacity backing array.
+//
+// It exists because "does the address outlive the frame" is not the whole
+// question. An object that never leaves its function can still be too big to
+// live on a stack that has to be copied when it grows and is zeroed on every
+// call, and a recursive function multiplies it by its depth. Without a bound,
+// goc kept a 512 KB new(T) in the frame of a function that recurses 4 000 deep
+// and the program died with "fatal error: stack overflow" on a shape the host
+// toolchain runs to completion -- an escape analysis that is right about the
+// escape and wrong about the program.
+//
+// The number is cmd/compile's ir.MaxImplicitStackVarSize and matching it is the
+// point: the two compilers' placements are compared per line, so a bound of our
+// own would read as a disagreement on every object between the two values.
+const MaxImplicitFrameSize = 64 * 1024
 
 // HeapAllocLowering counts what LowerHeapAllocations did with the candidates it
 // saw, which is the number that says whether the pass got smarter or just got
@@ -216,13 +253,75 @@ func lowerFunctionHeapAllocations(function *ir.Func, byName map[string]*ir.Func,
 	// pass consults them, and with the diagnostic off the map is never
 	// allocated. See EscapeDiagLevel.
 	escapes := analyzeCandidateEscapes(function, byName, facts, seeds, EscapeDiagLevel() > 0)
+	// Before the loop rule, so a candidate that is both too large and in a loop
+	// is reported as too large: the size is the property of the object and the
+	// loop is a property of where it sits, and the first is the one a reader can
+	// act on.
+	candidatesTooLargeForAFrame(function, escapes)
 	blocked := promotionsBlockedByALoop(function, seeds, escapes)
 	// After the loop rule, because the loop rule is one of the ways a payload
 	// ends up escaping out of a framed array, and the count it is comparing has
 	// to be the final one.
-	foldSplitPayloadsBackIn(function, escapes)
+	if PayloadFold {
+		foldSplitPayloadsBackIn(function, escapes)
+	}
 	rewriteHeapAllocations(function, escapes, blocked, decisions)
 	return true
+}
+
+// candidatesTooLargeForAFrame escapes every candidate whose object is bigger
+// than MaxImplicitFrameSize, whatever the escape analysis concluded about it.
+//
+// It is a rule about the object rather than about its uses, so it is applied to
+// the analysis' result rather than folded into the mark loop: nothing a use can
+// say makes a 512 KB frame slot a good idea, and nothing about the size makes a
+// published address safe. The two answers are combined the only way they can be
+// -- either one sends the object to the heap.
+//
+// Anything the object contains goes with it, for the same reason the loop rule
+// settles the same debt: a container on the heap holding the address of a
+// promoted frame slot is a frame-address publication, which is what
+// TestFrameEscapeAudit exists to catch.
+func candidatesTooLargeForAFrame(function *ir.Func, escapes *candidateEscapes) {
+	marked := false
+	for _, block := range function.Blocks {
+		for _, instruction := range block.Instrs {
+			if instruction.Op != ir.OHeapAlloc || instruction.To.Kind != ir.RefTemp {
+				continue
+			}
+			// The candidate form carries its byte size as a constant argument;
+			// a candidate whose size is not a constant is not one this rule can
+			// answer, and there are none -- see ir.OHeapAlloc's contract.
+			size, ok := constIntValue(function, instruction.Args[2])
+			if !ok || size <= MaxImplicitFrameSize {
+				continue
+			}
+			// Only a candidate the analysis was willing to promote is explained
+			// by its size. An object that is on the heap because the program
+			// publishes it is on the heap for that reason; the size is also true
+			// of it and is not why it went there.
+			//
+			// This was tried the other way, so that goc would say `too-large`
+			// wherever gc does. It does not converge, because gc does not order
+			// the two reasons either: cmd/compile prints `too large for stack`
+			// for a returned 160 KB make and prints the assignment for an 8 MB
+			// package-level one. Two lines of the reason differential are that
+			// difference and they stay there; see CCWORK_REPORT.md.
+			if escapes.escaped[instruction.To.ID] {
+				continue
+			}
+			if escapes.reasons != nil {
+				escapes.reasons[instruction.To.ID] = fmt.Sprintf(
+					"%d bytes is larger than the %d a frame will hold", size, MaxImplicitFrameSize)
+				escapes.reasonPositions[instruction.To.ID] = instruction.Pos
+			}
+			escapes.escaped[instruction.To.ID] = true
+			marked = true
+		}
+	}
+	if marked {
+		escapes.containedAllocationsEscape()
+	}
 }
 
 // promotionsBlockedByALoop escapes every candidate the analysis was willing to

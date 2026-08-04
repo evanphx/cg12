@@ -99,8 +99,10 @@ const (
 	// ReasonReadOut is: the object's contents are read back out of the container
 	// holding them, so the container's storage cannot be reused.
 	ReasonReadOut Reason = "read-out"
-	// ReasonTooLarge is: it will not fit in a frame. gc-only; goc has no size
-	// rule and no reason string for one.
+	// ReasonTooLarge is: it will not fit in a frame. Both compilers say it. It
+	// was gc-only for as long as goc had no size bound, which is what made the
+	// two `returned -> too-large` lines in the reason differential a coincidence
+	// rather than an agreement; see opt.MaxImplicitFrameSize.
 	ReasonTooLarge Reason = "too-large"
 	// ReasonFolded is: the analysis stopped deciding this allocation on its own
 	// and folded it in with others -- a phi that merges two allocations, or a
@@ -149,9 +151,12 @@ var (
 		ReasonFolded:      true,
 		ReasonUnexplained: true,
 	}
-	OnlyGC = map[Reason]bool{
-		ReasonTooLarge: true,
-	}
+	// OnlyGC is empty. too-large was in it until goc grew a size bound; the map
+	// stays because the asymmetry it names is real -- gc's analysis is complete
+	// over what it compiles and never has to answer "I could not tell", so the
+	// four goc-only categories have no gc counterpart and nothing has to move
+	// the other way.
+	OnlyGC = map[Reason]bool{}
 )
 
 // runtimeConstructCallees maps the runtime entry points goc lowers a language
@@ -254,6 +259,11 @@ func ClassifyGocRule(rule string) (Reason, bool) {
 	// able to name the use: "<name> is used here in a way the walk cannot prove
 	// keeps it local". It starts with the object's name, so it cannot be matched
 	// by a prefix.
+	// The size rule states the object's size first, so it has no fixed prefix.
+	// Both analyses word it identically; see goc.tooLargeForAFrame.
+	if strings.Contains(rule, " a frame will hold") {
+		return ReasonTooLarge, true
+	}
 	if strings.Contains(rule, " is captured by a function literal that escapes") {
 		return ReasonClosureCaptured, true
 	}
