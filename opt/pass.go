@@ -1,6 +1,10 @@
 package opt
 
-import "github.com/evanphx/cg12/ir"
+import (
+	"os"
+
+	"github.com/evanphx/cg12/ir"
+)
 
 // Pass is one step of the optimization pipeline over a module. Every pass
 // reports whether it changed anything, so pipelines (and [Fixpoint]) can iterate
@@ -160,11 +164,47 @@ func DefaultPipeline() []Pass {
 // BoundedPipeline is used for very large whole-runtime binaries where the full
 // pipeline's CFG and interprocedural passes can dominate peak memory. It keeps
 // only local linear-time cleanup passes that do not build CFGs or clone code.
+//
+// Every whole-program Go build takes this path, not DefaultPipeline's. The
+// program module carries the stdlib closure the prebuilt runtime pack did not
+// already hold, which even for a 168-line program is 5101 functions, 70160 blocks
+// and 297389 instructions against caps of 2048, 50000 and 200000 -- so this
+// pipeline is what `goc -O` means in practice. RUNTIME_PLAN.md:4282 records the
+// same fact from the other side: no goc module has ever run DefaultPipeline.
+//
+// That is where the performance suite's 1.63x floor comes from. Without mem2reg
+// every local stays in its frame slot and is reloaded and stored back on each
+// use, so a loop-carried dependence runs through store-to-load forwarding instead
+// of a register. The suite's control -- a two-variable integer multiply-add loop
+// -- takes 22 instructions per iteration here where the host toolchain takes 14,
+// and runs at 1.632x in all eleven programs that contain it. Promoting fixes it
+// outright: 30.99 ms against the host's 33.48 ms, a ratio of 0.926. The cost on
+// the five programs the budget was introduced for (48200ab) is nil -- compile
+// time unchanged or slightly better, peak RSS inside its own run-to-run spread,
+// every one still well under the 3 GiB ceiling.
+//
+// GOC_BOUNDED_MEM2REG=1 turns it on, and it is off by default because it is not
+// yet correct. mem2reg has never run on a Go-frontend module -- only on cg12cc's
+// C ones -- and with it on, the stdlib-netpoll-stress/tcp-churn capability dies
+// with "cg12: interface dispatch failed for dynamic type 0x0" in
+// net.Listener.Accept. Deterministic at GOMAXPROCS=1, unaffected by GOGC (no
+// collection runs at all in that program), and not code placement (the pre-fix
+// compiler survives the whole GOC_TEXT_PAD sweep). It needs promotion in main.main
+// and in at least two functions of package net simultaneously; promoting either
+// package alone is clean, and so is running mem2reg with the cleanup fixpoint
+// removed, which places the defect in the promotion itself and not in what fold,
+// copy and dce do to its phis. See CCWORK_REPORT.md for the bisection.
 func BoundedPipeline() []Pass {
 	clean := Fixpoint("bounded-clean",
 		FuncPass("fold", Fold),
 		FuncPass("copy", Copy),
 		FuncPass("dce", DCE),
 	)
-	return []Pass{clean}
+	if os.Getenv("GOC_BOUNDED_MEM2REG") == "" {
+		return []Pass{clean}
+	}
+	return []Pass{
+		FuncPass("mem2reg", Mem2Reg),
+		clean,
+	}
 }
