@@ -25,7 +25,7 @@ host toolchain: go version go1.26.1 linux/arm64
 corpus programs                             403
 compared (host toolchain built them)        399
 not compared                                  4
-census rows joined                         1859
+census rows joined                         1861
 census rows lost to an unbuilt program        4
 census rows with no source position        1740  (never joinable)
   of those, in a corpus program's own code    33  (29 on the heap: the bound on how
@@ -51,10 +51,10 @@ rows are goc's verdict for the line, columns are gc's.
 same as "it put the object in a frame" -- see gcdiff.Absent.
 
   goc\gc      frame     heap    mixed   absent    total
-  frame         189       30       14      193      426
-  heap           96      580      172       81      929
-  mixed          13       88       24       13      138
-  absent        420     1287       24        0     1731
+  frame         188       30       14      193      425
+  heap           97      580      172       81      930
+  mixed          13       89       24       13      139
+  absent        420     1286       24        0     1730
   total         718     1985      234      287     3224
 
 ## PERMISSIVE: 1467 lines
@@ -68,8 +68,8 @@ not record ordinary front-end frame slots, so "no record" is consistent with
 
 by construct (goc allocators on the line | gc constructs on the line):
 
-   1284  - | object/heap
-     79  newobject/frame,newobject/heap | object/heap
+   1283  - | object/heap
+     80  newobject/frame,newobject/heap | object/heap
      22  - | object/frame,object/heap
      20  newobject/frame | object/heap
      13  convT64/heap,newobject/frame | object/heap,slice/frame
@@ -4749,8 +4749,10 @@ stdlib_testing_quick.go:24	absent -> mixed
 stdlib_text_template_execute.go:17	absent -> heap
 	src  panic("template Parse failed")
 	gc   col 9  heap  object  "template Parse failed"
-stdlib_text_template_execute.go:24	absent -> heap
+stdlib_text_template_execute.go:24	mixed -> heap
 	src  var output bytes.Buffer
+	goc  col 2  frame  runtime.newobject  bytes_Buffer  [main.main]
+	goc  col 2  heap  runtime.newobject  bytes_Buffer  [main.main]
 	gc   col 6  heap  object  output
 stdlib_text_template_execute.go:26	absent -> heap
 	src  panic("template Execute failed")
@@ -4923,7 +4925,7 @@ variadic_element_retention.go:42	frame -> mixed
 	gc   col 39  heap  object  48879
 	gc   col 47  heap  object  51966
 
-## PESSIMISTIC: 399 lines
+## PESSIMISTIC: 400 lines
 
 every source line goc puts on the heap and gc does not. This is the
 performance direction and nothing worse: each line is an allocation, a zeroing
@@ -4936,7 +4938,7 @@ by construct (goc allocators on the line | gc constructs on the line):
      52  newobject/heap | object/frame,object/heap
      35  makemap/heap | map/frame
      25  newobject/heap | slice/frame
-     21  newobject/heap | object/frame
+     22  newobject/heap | object/frame
      13  convT64/heap,newobject/frame | object/heap,slice/frame
       8  newobject/heap | object/frame,object/heap,slice/frame
       7  newobject/frame,newobject/heap | -
@@ -6643,6 +6645,10 @@ runtime_type_switch_pointer_values.go:22	heap -> mixed
 runtime_unbuffered_pingpong.go:13	heap -> absent
 	src  go pong(left, right)
 	goc  col 2  heap  runtime.newobject  struct_code_uintptr__argument0_chan_int__argumen  [main.main]
+runtime_unsafe_struct_field.go:15	heap -> frame
+	src  next:  &unsafeFieldNode{left: 13, right: 17},
+	goc  col 10  heap  runtime.newobject  main_unsafeFieldNode  [main.main]
+	gc   col 10  frame  object  &unsafeFieldNode{...}
 runtime_waitgroup_reuse.go:5	heap -> absent
 	src  func runWaitGroupRound(round int) int {
 	goc  col 1  heap  runtime.newobject  int  [main.runWaitGroupRound]
