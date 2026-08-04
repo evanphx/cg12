@@ -22,19 +22,19 @@ host toolchain: go version go1.26.1 linux/arm64
 
 ## coverage
 
-corpus programs                             402
-compared (host toolchain built them)        398
+corpus programs                             403
+compared (host toolchain built them)        399
 not compared                                  4
-census rows joined                         1847
+census rows joined                         1853
 census rows lost to an unbuilt program        4
-census rows with no source position        1740  (never joinable)
-  of those, in a corpus program's own code    33  (29 on the heap: the bound on how
+census rows with no source position        1757  (never joinable)
+  of those, in a corpus program's own code    37  (33 on the heap: the bound on how
                                                   wrong the join can be about goc)
-census rows outside the corpus directory  10880  (vendored stdlib; never joinable)
-gc decisions joined                        3476
+census rows outside the corpus directory  10865  (vendored stdlib; never joinable)
+gc decisions joined                        3506
   of which synthesized by the chan rule     136
-gc decisions at an inlining call site       885  (excluded; see package gcdiff)
-gc diagnostics outside the program         3505  (excluded; wrappers and instantiations)
+gc decisions at an inlining call site       889  (excluded; see package gcdiff)
+gc diagnostics outside the program         3514  (excluded; wrappers and instantiations)
 gc diagnostics the parser did not know        0  (must be 0)
 
 programs the host toolchain would not build, and the census rows each costs:
@@ -51,13 +51,13 @@ rows are goc's verdict for the line, columns are gc's.
 same as "it put the object in a frame" -- see gcdiff.Absent.
 
   goc\gc      frame     heap    mixed   absent    total
-  frame         181       31       14      193      419
-  heap          100      577      173       81      931
+  frame         187       31       14      193      425
+  heap           96      579      172       81      928
   mixed          13       88       24       13      138
-  absent        414     1277       22        0     1713
-  total         708     1973      233      287     3201
+  absent        420     1287       24        0     1731
+  total         716     1985      234      287     3222
 
-## PERMISSIVE: 1456 lines
+## PERMISSIVE: 1468 lines
 
 every source line gc puts on the heap and goc does not. This is the
 correctness-critical direction: goc keeping in a frame something gc could not
@@ -68,7 +68,7 @@ not record ordinary front-end frame slots, so "no record" is consistent with
 
 by construct (goc allocators on the line | gc constructs on the line):
 
-   1274  - | object/heap
+   1284  - | object/heap
      79  newobject/frame,newobject/heap | object/heap
      22  - | object/frame,object/heap
      20  newobject/frame | object/heap
@@ -77,6 +77,7 @@ by construct (goc allocators on the line | gc constructs on the line):
      11  newobject/frame | slice/heap
       7  newobject/frame,newobject/heap | slice/heap
       6  convT64/heap,newobject/frame,newobject/heap | object/frame,object/heap,slice/frame
+      2  - | object/heap,slice/frame
       2  - | slice/heap
       2  convT64/heap,newobject/frame,newobject/heap | object/heap,slice/frame
       2  newobject/frame | slice/frame,slice/heap
@@ -114,7 +115,7 @@ allocation_counts.go:228	mixed -> mixed
 	goc  col 38  heap  runtime.convT64  int  [main.packVariadicElement.gointernal.funcvalue.main_packVariadicElement_func___func.61d42cd012e19ff7]
 	gc   col 37  frame  slice  ... argument
 	gc   col 38  heap  object  theInt
-allocation_counts.go:525	mixed -> heap
+allocation_counts.go:544	mixed -> heap
 	src  return func(times int) {
 	goc  col 9  frame  runtime.newobject  struct_code_uintptr__capture0_unsafe_Pointer  [main.main]
 	goc  col 9  heap  runtime.newobject  struct_code_uintptr__capture0_unsafe_Pointer  [main.repeat]
@@ -122,6 +123,10 @@ allocation_counts.go:525	mixed -> heap
 append_make.go:6	absent -> heap
 	src  panic("grow failed")
 	gc   col 10  heap  object  "grow failed"
+append_make.go:11	absent -> mixed
+	src  grown := append([]byte(nil), make([]byte, capacity)...)
+	gc   col 17  heap  object  append
+	gc   col 35  frame  slice  make([]byte, capacity)
 append_make.go:21	absent -> heap
 	src  panic("wrong grown slice")
 	gc   col 9  heap  object  "wrong grown slice"
@@ -329,6 +334,40 @@ runtime_accurate_gc_scalars.go:21	absent -> heap
 runtime_append_growth_pointer_elements.go:25	absent -> heap
 	src  panic("append growth pointer elements were corrupted")
 	gc   col 9  heap  object  "append growth pointer elements were corrupted"
+runtime_append_make_extension.go:43	absent -> heap
+	src  panic("grow shape wrong")
+	gc   col 9  heap  object  "grow shape wrong"
+runtime_append_make_extension.go:47	absent -> heap
+	src  panic("extension not zeroed")
+	gc   col 9  heap  object  "extension not zeroed"
+runtime_append_make_extension.go:56	absent -> heap
+	src  panic("wrong length after extension")
+	gc   col 9  heap  object  "wrong length after extension"
+runtime_append_make_extension.go:59	absent -> heap
+	src  panic("existing elements lost")
+	gc   col 9  heap  object  "existing elements lost"
+runtime_append_make_extension.go:62	absent -> heap
+	src  panic("reused capacity not cleared")
+	gc   col 9  heap  object  "reused capacity not cleared"
+runtime_append_make_extension.go:69	absent -> mixed
+	src  boxes = append(boxes, make([]*gcbox, 3)...)
+	gc   col 16  heap  object  append
+	gc   col 28  frame  slice  make([]*gcbox, 3)
+runtime_append_make_extension.go:74	absent -> heap
+	src  panic("retained pointer element corrupted")
+	gc   col 9  heap  object  "retained pointer element corrupted"
+runtime_append_make_extension.go:78	absent -> heap
+	src  panic("pointer extension not cleared")
+	gc   col 10  heap  object  "pointer extension not cleared"
+runtime_append_make_extension.go:86	absent -> heap
+	src  panic("slices.Grow wrong")
+	gc   col 9  heap  object  "slices.Grow wrong"
+runtime_append_make_extension.go:92	absent -> heap
+	src  panic("negative extension did not panic")
+	gc   col 10  heap  object  "negative extension did not panic"
+runtime_append_make_extension.go:98	absent -> heap
+	src  panic("unreachable")
+	gc   col 8  heap  object  "unreachable"
 runtime_append_self_overlap.go:7	absent -> heap
 	src  panic("self append produced wrong length")
 	gc   col 9  heap  object  "self append produced wrong length"
@@ -4888,7 +4927,7 @@ variadic_element_retention.go:42	frame -> mixed
 	gc   col 39  heap  object  48879
 	gc   col 47  heap  object  51966
 
-## PESSIMISTIC: 404 lines
+## PESSIMISTIC: 399 lines
 
 every source line goc puts on the heap and gc does not. This is the
 performance direction and nothing worse: each line is an allocation, a zeroing
@@ -4900,8 +4939,8 @@ by construct (goc allocators on the line | gc constructs on the line):
      78  newobject/heap | -
      52  newobject/heap | object/frame,object/heap
      35  makemap/heap | map/frame
-     25  newobject/heap | object/frame
      25  newobject/heap | slice/frame
+     21  newobject/heap | object/frame
      13  convT64/heap,newobject/frame | object/heap,slice/frame
       8  newobject/heap | object/frame,object/heap,slice/frame
       7  newobject/frame,newobject/heap | -
@@ -4921,7 +4960,6 @@ by construct (goc allocators on the line | gc constructs on the line):
       1  makechan/heap | chan/heap,object/frame
       1  makemap/heap | map/frame,object/frame
       1  makemap/heap,newobject/frame | map/frame
-      1  makeslice/heap | object/heap,slice/frame
       1  newobject/frame,newobject/heap | object/frame,object/heap
       1  newobject/heap | object/frame,slice/frame
 
@@ -5023,15 +5061,10 @@ allocation_counts.go:273	heap -> frame
 	goc  col 13  heap  runtime.newobject  2_int  [main.variadicIntsInLoop]
 	goc  col 13  heap  runtime.newobject  2_int  [main.variadicIntsInLoop.gointernal.funcvalue.main_variadicIntsInLoop_func_times_int__func_tim.df534ff08f4f4fc7]
 	gc   col 25  frame  slice  ... argument
-allocation_counts.go:524	heap -> absent
+allocation_counts.go:543	heap -> absent
 	src  func repeat(operation func()) func(int) {
 	goc  col 1  heap  runtime.newobject  func  [main.main]
 	goc  col 1  heap  runtime.newobject  func  [main.repeat]
-append_make.go:11	heap -> mixed
-	src  grown := append([]byte(nil), make([]byte, capacity)...)
-	goc  col 44  heap  runtime.makeslice  byte  [main.growBytes]
-	gc   col 17  heap  object  append
-	gc   col 35  frame  slice  make([]byte, capacity)
 gc_struct.go:25	heap -> frame
 	src  root := new(record)
 	goc  col 10  heap  runtime.newobject  main_record  [main.Test]
@@ -5063,22 +5096,6 @@ runtime_append_variadic_pointer_gc.go:13	heap -> mixed
 	goc  col 27  heap  runtime.newobject  main_appendVariadicNode  [main.main]
 	gc   col 18  frame  object  append
 	gc   col 27  heap  object  &appendVariadicNode{...}
-runtime_array_copy_pointer_gc.go:11	heap -> frame
-	src  {value: 3},
-	goc  col 3  heap  runtime.newobject  main_arrayCopyBox  [main.main]
-	gc   col 3  frame  object  &arrayCopyBox{...}
-runtime_array_copy_pointer_gc.go:12	heap -> frame
-	src  {value: 5},
-	goc  col 3  heap  runtime.newobject  main_arrayCopyBox  [main.main]
-	gc   col 3  frame  object  &arrayCopyBox{...}
-runtime_array_copy_pointer_gc.go:13	heap -> frame
-	src  {value: 7},
-	goc  col 3  heap  runtime.newobject  main_arrayCopyBox  [main.main]
-	gc   col 3  frame  object  &arrayCopyBox{...}
-runtime_array_copy_pointer_gc.go:14	heap -> frame
-	src  {value: 11},
-	goc  col 3  heap  runtime.newobject  main_arrayCopyBox  [main.main]
-	gc   col 3  frame  object  &arrayCopyBox{...}
 runtime_array_map_key.go:4	heap -> frame
 	src  table := map[[3]int]string{
 	goc  col 11  heap  runtime.makemap  map__3_int_string  [main.main]

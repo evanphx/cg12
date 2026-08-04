@@ -226,6 +226,21 @@ var gocAllocationCounts = []struct {
 	// testdata/variadic_element_address_retention.go for the program that says
 	// why the parameter's own summary is not the answer.
 	{"address_into_a_non_retaining_variadic", 0, 0, "the callee's only use of the `...` parameter is len, so no element is reachable"},
+	// One cause, two rows: a pointer written into a local array, and a value
+	// boxed into a local interface variable. 4.00 -> 0 and 1.00 -> 0. goc gives an
+	// aggregate local a slot holding the address of its backing storage and reads
+	// that slot back at every use; aliasInfo answers cUnknown for the pointer that
+	// comes out, so the escape mark loop read the store as a store into storage it
+	// did not own. See opt/escapeindirect.go, and
+	// testdata/runtime_array_copy_pointer_gc.go for the program.
+	{"pointer_into_a_local_array", 0, 0, "the array is frame storage, so a pointer written into it is not published"},
+	{"value_boxed_into_a_local_interface", 0, 0, "the interface variable is frame storage, and so is its payload"},
+	// `append(s, make([]T, n)...)` with a non-constant n, which is slices.Grow.
+	// 2.00 -> 1.00: the fresh slice is not built at all, which is what the
+	// standard library's "This expression allocates only once" comment says it
+	// costs and what cmd/compile's walk has always emitted. It is the row behind
+	// two of the four log/slog benchmark cases that were off gc.
+	{"append_make_extension", 100, 100, "the destination is extended and cleared; the make is never built"},
 	// The four defer rows. Three of them were 1.00 and are 0, because the
 	// function value goc hands runtime.deferproc now lives in the registering
 	// frame whatever shape it takes -- a rule the directly-deferred function

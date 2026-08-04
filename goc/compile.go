@@ -15197,6 +15197,80 @@ func (g *gen) keepAlive(function *types.Func, argument ast.Expr) {
 	}
 }
 
+// appendedMakeLength recognises `append(s, make([]T, n)...)` and names the
+// length expression.
+//
+// The idiom is how Go grows a slice by n zero elements, and the standard library
+// relies on it costing one allocation: slices.Grow is written
+//
+//	s = append(s[:cap(s)], make([]E, n)...)[:len(s)]
+//
+// with the comment "This expression allocates only once (see test)". Compiled
+// literally it allocates twice -- once for the fresh slice and once for the
+// grown destination -- and the elements copied out of the fresh slice are every
+// one of them zero. cmd/compile rewrites it (walk's extendslice); goc did not,
+// so every slices.Grow in the program cost an allocation that the source says it
+// does not. It is what `logattrs/6-attr` pays over gc in the slog benchmark.
+//
+// Only the two-argument make qualifies. `make([]T, n, m)` asks for a capacity as
+// well, and the extension has no way to honour it.
+func appendedMakeLength(call *ast.CallExpr, info *types.Info) (ast.Expr, bool) {
+	if !call.Ellipsis.IsValid() || len(call.Args) != 2 {
+		return nil, false
+	}
+	made, isCall := call.Args[1].(*ast.CallExpr)
+	if !isCall || len(made.Args) != 2 || made.Ellipsis.IsValid() {
+		return nil, false
+	}
+	identifier, isIdentifier := made.Fun.(*ast.Ident)
+	if !isIdentifier {
+		return nil, false
+	}
+	builtin, isBuiltin := info.Uses[identifier].(*types.Builtin)
+	if !isBuiltin || builtin.Name() != "make" {
+		return nil, false
+	}
+	madeType := info.TypeOf(made)
+	if madeType == nil {
+		return nil, false
+	}
+	if _, isSlice := madeType.Underlying().(*types.Slice); !isSlice {
+		return nil, false
+	}
+	return made.Args[1], true
+}
+
+// guardExtensionLength keeps `append(s, make([]T, n)...)` panicking on a negative
+// n, which is what the make it replaced did.
+//
+// It matters more here than it would as a bounds check. A negative n makes the
+// new length smaller than the old, so the grow branch is not taken and the clear
+// below runs against the *existing* backing array with a byte count that is
+// negative as a signed number and enormous as the unsigned one memset reads. The
+// branch is emitted rather than the check inlined so that the panic is
+// runtime.makeslice's own, with the message the source would have produced.
+func (g *gen) guardExtensionLength(made ast.Expr, length ir.Ref, elementType types.Type) {
+	if !g.runtimeAllocation {
+		// Without a runtime there is no makeslice to panic, and this mode
+		// already builds `make([]T, n)` out of an unchecked byte count.
+		return
+	}
+	bad := g.block("appendextendbad")
+	ok := g.block("appendextendok")
+	negative := g.cur.Cmp(ir.CmpSlt, ir.ClsL, length, g.fn.Long(0))
+	g.cur.Jnz(negative, bad, ok)
+	g.cur = bad
+	// Positioned at the make it stands in for. A fresh block carries no source
+	// position until one is set, and an allocator call with none is a census row
+	// nobody can locate -- which is what the first version of this produced, for
+	// every slices.Grow in the program.
+	g.at(made)
+	g.cur.Call(ir.ClsP, g.fn.Sym("runtime.makeslice", 0), g.runtimeType(elementType), length, length)
+	g.cur.Goto(ok)
+	g.cur = ok
+	g.at(made)
+}
+
 func (g *gen) appendCall(call *ast.CallExpr) ir.Ref {
 	sliceType := g.typeAndValue(call).Type.Underlying().(*types.Slice)
 	elementType := sliceType.Elem()
@@ -15207,15 +15281,26 @@ func (g *gen) appendCall(call *ast.CallExpr) ir.Ref {
 	var sourceData ir.Ref
 	var values []ir.Ref
 	var added ir.Ref
+	zeroFill := false
 	if call.Ellipsis.IsValid() {
-		source := g.expr(call.Args[1])
-		sourceType := g.typeAndValue(call.Args[1]).Type.Underlying()
-		basicType, isBasic := sourceType.(*types.Basic)
-		if isBasic && basicType.Kind() == types.String {
-			sourceData = g.cur.Load(ir.ClsP, source)
-			added = g.cur.Load(ir.ClsL, g.offset(source, 8))
+		if length, extends := appendedMakeLength(call, g.info); extends {
+			// append(s, make([]T, n)...) -- see appendedMakeLength. The elements
+			// copied out of the fresh slice are all zero, so the fresh slice is
+			// not built at all and the destination's new region is cleared
+			// instead.
+			added = g.expr(length)
+			g.guardExtensionLength(call.Args[1], added, elementType)
+			zeroFill = true
 		} else {
-			sourceData, added, _ = g.sliceParts(source)
+			source := g.expr(call.Args[1])
+			sourceType := g.typeAndValue(call.Args[1]).Type.Underlying()
+			basicType, isBasic := sourceType.(*types.Basic)
+			if isBasic && basicType.Kind() == types.String {
+				sourceData = g.cur.Load(ir.ClsP, source)
+				added = g.cur.Load(ir.ClsL, g.offset(source, 8))
+			} else {
+				sourceData, added, _ = g.sliceParts(source)
+			}
 		}
 	} else {
 		values = make([]ir.Ref, 0, len(call.Args)-1)
@@ -15294,7 +15379,27 @@ func (g *gen) appendCall(call *ast.CallExpr) ir.Ref {
 		byteOffset = g.cur.Mul(ir.ClsL, oldLength, g.fn.Long(elementSize))
 	}
 	writeAt := g.cur.Add(ir.ClsP, resultData, byteOffset)
-	if sourceData != ir.R {
+	if zeroFill {
+		byteLength := added
+		if elementSize != 1 {
+			byteLength = g.cur.Mul(ir.ClsL, added, g.fn.Long(elementSize))
+		}
+		// The new region has to be cleared on both paths and not only the
+		// growing one. runtime.growslice clears [newLen, cap) and leaves
+		// [oldLen, newLen) alone for a pointer-free element type, because the
+		// append that called it is expected to overwrite exactly that; and the
+		// non-growing path is reusing a backing array whose tail holds whatever
+		// a previous, longer life of the slice left there.
+		//
+		// A pointer-bearing element type is cleared through the barrier, for
+		// the same reason `clear` is: zeroing a pointer word is a deletion and
+		// the collector has to see it.
+		if g.runtimeAllocation && !g.noWriteBarrier && len(pointerWordIndices(elementType)) != 0 {
+			g.cur.CallVoid(g.fn.Sym("runtime.memclrHasPointers", 0), writeAt, byteLength)
+		} else {
+			g.cur.Call(ir.ClsP, g.fn.Sym("goc_memset", 0), writeAt, g.fn.Word(0), byteLength)
+		}
+	} else if sourceData != ir.R {
 		if g.runtimeAllocation && !g.noWriteBarrier && len(pointerWordIndices(elementType)) != 0 {
 			g.cur.Call(
 				ir.ClsL,

@@ -5265,3 +5265,53 @@ and every one is a `defer`.
 So the defect was not confined to `log/slog`: it was live in `net/http`,
 `text/template`, the cgo callback path, and two corpus programs written to test
 `defer` itself.
+
+# G8, and why it was never really blocked
+
+`parameterDoesNotEscape` and `receiverDoesNotEscape` now answer the edge back
+into a question they are already inside with "does not escape".
+
+The previous branch measured exactly this change, found three frame-address
+publications in `log/slog`, and did not land it -- writing that what would make
+it landable is "a real fixpoint rather than an assumption: compute answers
+optimistically, record which of them depended on an assumption, and iterate until
+nothing moves."
+
+**Neither half of that is right, and this branch checked both.**
+
+The counterexample was not the cycle. All three publications were `defer
+state.free()`, and they are reproducible on `main` with no compiler change at all
+-- see the defect above. With `deferredFunctionValueStaysInFrame` in, the same
+one-line change produces **7 publications removed and 0 added** over the whole
+corpus.
+
+And the iteration is not needed, because the optimistic DFS *is* the fixpoint.
+The walk asks, of one object, "does some chain of uses reach a use that publishes
+it". Written as equations that is a pure monotone OR: a use is bad on its own, or
+it forwards the question to another parameter. The answer such a system defines is
+its **least** fixpoint, and a depth-first walk that answers the back edge "false"
+computes it exactly:
+
+- it never says "escapes" without evidence -- a `false` is only returned by the
+  branch that met a real publishing use, so every escape reported is a real chain
+  ending at a real bad use, which is a derivation in the least fixpoint;
+- it never says "does not escape" without checking everything -- the walk
+  short-circuits only *after* something escaped, so an object it clears was
+  cleared with every use examined, and the set of questions visited on that walk
+  is closed: each one's uses are either harmless or forward to another question in
+  the set that was also cleared. Assigning "does not escape" to all of them is
+  consistent, so the least fixpoint assigns it too.
+
+An iterative solver would return the same answers, so none was written. The other
+three cycle breaks in the walk keep the pessimistic answer, which is safe in
+exactly one direction and this is it: a pessimistic break can add escapes to a
+least fixpoint, never remove one.
+
+    lines where goc heaps what gc frames    106 -> 100
+
+The six are the ones the previous branch predicted -- **G8 closed entirely** (3)
+and **3 of G7's 11**:
+
+    runtime_panic_stack_gc.go:23      runtime_stack_growth.go:24, :26
+    stdlib_maps_slices.go:25          stdlib_slices_string_sort.go:6
+    stdlib_sort_search_slice.go:6

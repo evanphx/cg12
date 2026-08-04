@@ -278,6 +278,15 @@ func promotionsBlockedByALoop(function *ir.Func, seeds []uint32, escapes *candid
 // allocations named by seeds.
 func analyzeCandidateEscapes(function *ir.Func, byName map[string]*ir.Func, facts *EscapeFacts, seeds []uint32, wantReasons bool) *candidateEscapes {
 	aliases := newAliasInfo(function)
+	// goc gives an aggregate local a slot holding the address of its backing
+	// storage, and every use of the variable reads that slot back. aliasInfo
+	// answers cUnknown for the pointer that comes out, so without this a store
+	// into a local array or struct reads as a store into storage the analysis
+	// does not own. See opt/escapeindirect.go.
+	indirect := resolveIndirectStorage(function, aliases)
+	locOf := func(reference ir.Ref, width int) locInfo {
+		return escapeLocOf(aliases, indirect, reference, width)
+	}
 	definitions := make(map[uint32]ir.Instr)
 	bases := make(map[uint32]uint32)
 	for _, block := range function.Blocks {
@@ -359,8 +368,8 @@ func analyzeCandidateEscapes(function *ir.Func, byName map[string]*ir.Func, fact
 			for _, instruction := range block.Instrs {
 				destination, source, size, memoryCopy := memoryCopyOperands(function, instruction)
 				if memoryCopy {
-					sourceLocation := aliases.locOf(source, int(size))
-					destinationLocation := aliases.locOf(destination, int(size))
+					sourceLocation := locOf(source, int(size))
+					destinationLocation := locOf(destination, int(size))
 					if sourceLocation.class == cLocal {
 						for sourceSlot, base := range slotBases {
 							if sourceSlot.base != sourceLocation.key() {
@@ -406,7 +415,7 @@ func analyzeCandidateEscapes(function *ir.Func, byName map[string]*ir.Func, fact
 				}
 				if value, address, isPointerStore := trackedPointerStore(function, instruction); isPointerStore {
 					base, tracked := heapBase(value, bases)
-					location := aliases.locOf(address, 1)
+					location := locOf(address, 1)
 					if !tracked || location.class != cLocal {
 						continue
 					}
@@ -431,7 +440,7 @@ func analyzeCandidateEscapes(function *ir.Func, byName map[string]*ir.Func, fact
 				if !instruction.Op.IsLoad() || instruction.To.Kind != ir.RefTemp {
 					continue
 				}
-				location := aliases.locOf(instruction.Arg(0), 1)
+				location := locOf(instruction.Arg(0), 1)
 				if location.class != cLocal {
 					continue
 				}
@@ -559,7 +568,7 @@ func analyzeCandidateEscapes(function *ir.Func, byName map[string]*ir.Func, fact
 				// containment, recorded before this loop ran, and settled by
 				// containedAllocationsEscape once the container's own answer is
 				// known.
-				if aliases.locOf(instruction.Arg(1), 1).class != cLocal &&
+				if locOf(instruction.Arg(1), 1).class != cLocal &&
 					!storesIntoItself(instruction.Arg(0), instruction.Arg(1), bases) &&
 					!declaredContained(contains, instruction.Arg(0), instruction.Arg(1), bases) {
 					mark(instruction.Arg(0), "store into non-local storage", instruction.Pos)
@@ -586,7 +595,7 @@ func analyzeCandidateEscapes(function *ir.Func, byName map[string]*ir.Func, fact
 						!declaredContained(contains, instruction.Arg(2), destination, bases) {
 						mark(instruction.Arg(2), "write barrier into a candidate", instruction.Pos)
 					}
-				} else if aliases.locOf(destination, 1).class != cLocal {
+				} else if locOf(destination, 1).class != cLocal {
 					mark(instruction.Arg(2), "write barrier into non-local storage", instruction.Pos)
 				}
 			case benignMemoryCall(function, instruction):
