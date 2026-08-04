@@ -7388,3 +7388,51 @@ is a dead frame.
 `block-copied out of the object holding it`, and the reason taxonomy has
 `ReasonReadOut` for both compilers. The IR pass knows the rule. The front-end
 walk does not, and the front-end walk is what places a composite literal.
+
+### The fix, and what it cost
+
+The walk now distinguishes the two questions. `gen.escapeAsksWhatTheValueHolds`
+is set from exactly one place -- `compositeElementDoesNotEscape`, the climb from
+an element into the struct or array literal holding its address -- and under it
+five answers change: a field read and an index read are *followed* to what they
+produced instead of dismissed; a range with a value variable, a `copy` and an
+`append` spread are refused. A read whose type has no room for an address is
+still dismissed, which is what keeps the runtime's uintptr-shaped containers
+where they were.
+
+Two supporting changes, both about where the deep question is allowed to stop:
+**being the callee of a plain call retains nothing**, and **`==` / `!=` retains
+nothing**. The second is an outright gap in the value climb -- `nonEscapingObjectUse`
+has the case and `valueDoesNotEscapeWithin` did not -- that nothing had reached
+before, because the shallow question stops earlier. It is worth naming because it
+is the one change that made goc *less* conservative, and it gave back two real
+placements: `crypto/x509`'s `bytes.Contains(localPartBytes, twoDots)` and
+`os/user`'s `bytes.Count(wholeLine, []byte{':'})`.
+
+**The census, reviewed site by site. 16 records move.**
+
+| direction | sites | what |
+| --- | --- | --- |
+| frame -> heap | 12 | `crypto/internal/fips140/ecdh`'s CAST: `privateKey`/`publicKey` byte slices stored into a `&PrivateKey{}`/`&PublicKey{}` handed to `ecdh()`. Six copies because the self-test is instantiated per init function. |
+| frame -> heap | 1 | `runtime_unsafe_struct_field.go:15`, the inner half of a nested literal the program then walks with `unsafe.Pointer` arithmetic. |
+| heap -> frame | 2 | the comparison gap: `crypto/x509/verify.go:375`, `os/user/lookup_unix.go:63`. Both are calls that provably retain nothing. |
+| new | 1 | `stdlib_text_template_execute.go:24`'s `bytes.Buffer`, which gc has always heaped (`absent -> heap` in the differential) and goc had no record for. |
+
+**The differential: the correctness-critical direction is unchanged at 1467 and
+the performance direction goes 399 -> 400.** The one new pessimistic line is
+`runtime_unsafe_struct_field.go:15`, where gc frames *both* halves of the nested
+literal and goc now heaps both. That is the whole price: one allocation in one
+program that does pointer arithmetic on its own struct, against nine programs
+that were silently wrong.
+
+**A note on the first attempt, because it is the interesting part.** Following a
+field read unconditionally cost five heap allocations on paths where allocation
+is forbidden -- `runtime.copystack`, `runtime.scanstack`, `runtime.gorecover`,
+`runtime._panic.nextFrame`, `runtime.tracebackHexdump` -- and made
+`TestFrameEscapeAudit` fail on a `crypto/tls` closure. `goc -m` did not explain
+it and `GOC_DEBUG_ESCAPE=2` did: three field reads, and two of them were
+`h.mark != nil` and `f._func != nil`. The deep question had walked into a
+comparison, and the value climb had no case for one, so it fell to the
+conservative default and dragged an unwinder onto the heap in `copystack`. The
+diagnostic that found it in one run is the one the brief asked about, and it
+found it because it prints the *use*, not the rule.
