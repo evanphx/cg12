@@ -552,3 +552,44 @@ both ways:
 **The smallest regression the suite can detect is 5.0 %**, on 27 of its 42 rows,
 and ≤ 6.0 % on 34 of them. Three rows cannot see less than 25 %, and the baseline
 prints that number next to each of them.
+
+## The compress/flate collector crash: reproduction
+
+The defect recorded in `44d76cf` and worked around by the performance suite
+(`perfBenchRunAttempts`) is reproducible on demand. It is not rare; it is
+*conditional*, and the condition is the backend's code-placement policy.
+
+| build of `goc/testdata/placement_bench/flate/main.go` | `GOGC=10`, pinned |
+|---|---|
+| `goc -O` (default alignment) | 0/15 |
+| `goc -O`, `GOC_FUNC_ALIGN=0 GOC_LOOP_ALIGN=0 GOC_ALIGN_LOOP_FUNCS_ONLY=0`, pad 0 | **14/15** |
+| the same, `GOC_TEXT_PAD=16` | **15/15** |
+| `goc` (no `-O`), alignment off, pad 0 | **10/10** |
+| the same, `GOC_TEXT_PAD=16` | **10/10** |
+| host `go build` | 0/15 |
+
+Two things follow immediately. It is not an optimizer bug -- the unoptimized
+build is the *more* reliable reproducer. And the perf suite's ~1-in-20 is the
+rate of the *default* configuration; with alignment off it is essentially every
+run, which is what makes this tractable.
+
+### What the crash says
+
+    runtime: pointer 0x36a7cfb36000 to unused region of span ...
+    runtime: found in object at *(0x36a7cfb20000+0x10f8)
+    object=... s.spanclass=90 s.elemsize=4864 s.state=mSpanInUse
+
+The object's first word is `_goc_runtime_type_compress_flate_decompressor_...`
+(resolved from the binary's symbol table), i.e. it is the Go 1.22 malloc header,
+so the *data* starts at object+8 and the reported offset `0x10f8` is field offset
+**4336** of `compress/flate.decompressor` -- the pointer word of `toRead []byte`.
+
+The type descriptor itself is correct. Decoded out of the binary:
+`Size_=4392`, `PtrBytes=4376`, and the GC mask names exactly the words
+`{0, 1, 2, 263, 524, 528, 529, 530, 537, 540, 541, 542, 545, 546}` -- which is
+byte-for-byte the true layout (`r` iface, `rBuf`, `h1.links`, `h2.links`,
+`bits`, `codebits`, `dict.hist`, `step`, `err`, `toRead`, `hl`, `hd`). So this is
+**not** a pointer-mask defect, and not a mask-padding defect: the mask is 72
+bytes for 549 significant words, correctly rounded.
+
+Root cause hunt continues from there.
