@@ -40,6 +40,16 @@ POLICIES = {
 
 PADS = [0, 4, 8, 12, 16, 20, 24, 28]
 
+# BENCH_PADS and BENCH_POLICIES narrow or widen the grid without editing this
+# file. The second sweep the report describes uses shifts that are all 0 mod 32,
+# which is the control for the first: under no alignment they leave the phase
+# alone and move only the address, so whatever they move is not a granule effect.
+if os.environ.get('BENCH_PADS'):
+    PADS = [int(p) for p in os.environ['BENCH_PADS'].split(',')]
+if os.environ.get('BENCH_POLICIES'):
+    POLICIES = {k: v for k, v in POLICIES.items()
+                if k in os.environ['BENCH_POLICIES'].split(',')}
+
 PARALLEL = 14
 
 
@@ -101,7 +111,7 @@ def drain(jobs, atleast):
 
 
 def run(reps):
-    results = open(os.path.join(WORK, 'results.tsv'), 'a')
+    results = open(os.path.join(WORK, os.environ.get('BENCH_RESULTS', 'results.tsv')), 'a')
     order = list(grid())
     for rep in range(reps):
         random.Random(rep).shuffle(order)

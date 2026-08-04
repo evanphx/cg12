@@ -7367,3 +7367,26 @@ aligning every function entry, and nearly as much as 64-byte entry alignment.
 A function has one entry and often several back-edge targets -- Go's range loops
 and bounds-check re-entry produce a lot of them -- so there are more loop heads
 in this corpus than there are functions.
+
+### First reading, one rep of the grid (superseded by the three-rep table below)
+
+Placement-induced spread, `(max-min)/min` of a case's index across the eight
+shifts, summarised over the 19 timed cases:
+
+    policy    median     mean      p90    worst
+    none      14.74%   17.87%   43.42%   50.15%
+    a16        2.73%    4.62%   20.13%   22.54%
+    a32        1.59%    5.03%   15.92%   28.61%
+    a64        0.85%    3.71%   19.81%   20.93%
+    loop32     1.64%    4.44%   15.15%   26.09%
+    head32     1.22%    5.01%   28.06%   28.10%
+    controls   0.15%    0.18%    0.26%    0.87%   <- the floor
+
+and every policy is *faster* on the mean, not slower: -3.3% to -3.7% geometric
+mean over the 19 cases, helping 18 or 19 of them. That is the opposite of last
+night's reading, and the reason is the comparison, not the machine: last night
+compared 32-byte alignment against the *one* placement HEAD happened to have.
+Averaged over eight placements, phase 0 is not an average phase -- a loop of k
+bytes starting at phase p spans `ceil((p+k)/32)` fetch granules, which is
+minimised at p = 0 -- so pinning every function there is worth something on the
+mean as well as on the variance.
