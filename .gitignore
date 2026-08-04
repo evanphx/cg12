@@ -44,3 +44,7 @@ runtime_package_initializer_dispatch
 /recv2
 /growcost
 /main
+
+# Python bytecode from the placement sweep helper
+__pycache__/
+*.pyc

@@ -1800,6 +1800,11 @@ func (g *gen) derive() *gen {
 	derived.iterationCaptures = nil
 	derived.referenceCaptures = nil
 	derived.objectEscapeChecks = nil
+	// Transient walk state, like its two neighbours here: it is set with a
+	// save/restore around one question, so a generator derived for a nested
+	// function must start from the shallow question rather than inherit
+	// whatever the parent was asking mid-walk.
+	derived.escapeAsksWhatTheValueHolds = false
 	derived.resultLeakBody = nil
 	derived.escapeWalkOuterObjects = nil
 	derived.keepAliveObjects = nil
