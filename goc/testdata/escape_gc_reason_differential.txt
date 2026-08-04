@@ -83,23 +83,23 @@ confines the comparison to lines both compilers put on the heap.
 
 ## coverage
 
-programs with reasons on both sides            397
-goc -m decisions at joinable positions        1770
-  of those on the heap                        1192
-  of those carrying a rule                    1192  (must equal the line above)
-  of those goc could not explain               227  (the "unexplained" category: goc saw the
+programs with reasons on both sides            399
+goc -m decisions at joinable positions        1792
+  of those on the heap                        1101
+  of those carrying a rule                    1101  (must equal the line above)
+  of those goc could not explain               171  (the "unexplained" category: goc saw the
                                                     object escape and could not name the use)
 goc -m decisions with no source position         0  (never joinable; so is the census)
-gc -m=2 explained blocks parsed               2995
-  distinct decisions they describe            2720  (gc explains an allocation once per
+gc -m=2 explained blocks parsed               3014
+  distinct decisions they describe            2739  (gc explains an allocation once per
                                                     function it was inlined into)
-    reaching a joined line                    2185
-    for a decision the matrix excludes         425  (printed at an inlining call site; see
+    reaching a joined line                    2201
+    for a decision the matrix excludes         426  (printed at an inlining call site; see
                                                     package gcdiff. Not a gap)
-    matching no -m decision at all             110  (a gc heap allocation the placement
+    matching no -m decision at all             112  (a gc heap allocation the placement
                                                     differential cannot see; listed below)
-gc decisions carrying an explanation          2252
-gc heap decisions with no -m=2 explanation     169
+gc decisions carrying an explanation          2268
+gc heap decisions with no -m=2 explanation     171
   of those synthesized by the chan rule        136  (expected: gc prints nothing at all
                                                     for make(chan))
 goc rules the classifier did not know            0  (must be 0)
@@ -108,8 +108,8 @@ goc -m lines the parser did not know             0  (must be 0)
 
 the two instruments on goc's side, against each other:
 
-lines both record, and agree about            1335
-lines only the census records                 153  (an allocation goc's own -m cannot
+lines both record, and agree about            1340
+lines only the census records                 152  (an allocation goc's own -m cannot
                                                     explain at all)
 lines only goc -m records                      18  (expected: the census omits ordinary
                                                     front-end frame slots)
@@ -118,7 +118,7 @@ lines one records a subset of the other        1  (the same scope difference, ar
 lines both record and contradict               0  (neither instrument's placements contain
                                                     the other's: this one means the tree
                                                     moved under the committed census)
-heap lines goc -m gives no rule for           154  (the blind spot: a heap allocation this
+heap lines goc -m gives no rule for           153  (the blind spot: a heap allocation this
                                                     file cannot speak for. They are listed
                                                     below; in the committed run all of them
                                                     are make(chan), make(map) or make([]T),
@@ -130,7 +130,6 @@ heap lines goc -m gives no rule for           154  (the blind spot: a heap alloc
 
   SUBSET: runtime_loopvar_goroutine_defer.go:38: census says mixed, goc -m says frame
 
-  NO RULE: append_make.go:11: census says heap, goc -m gives no heap rule
   NO RULE: nested_defer.go:12: census says heap, goc -m gives no heap rule
   NO RULE: runtime_array_map_key.go:4: census says heap, goc -m gives no heap rule
   NO RULE: runtime_assign_target_forms.go:106: census says heap, goc -m gives no heap rule
@@ -296,6 +295,8 @@ which is deliberately not touched here.
 
   NOT IN -m: append_make.go:11:17: append(([]byte)(nil), make([]byte, capacity)...)
   NOT IN -m: nested_defer.go:13:2: func literal
+  NOT IN -m: runtime_append_make_extension.go:67:16: append(boxes, &gcbox{...}, &gcbox{...}, &gcbox{...}, &gcbox{...})
+  NOT IN -m: runtime_append_make_extension.go:69:16: append(boxes, make([]*gcbox, 3)...)
   NOT IN -m: runtime_assign_target_forms.go:208:16: append(trace, fmt.Sprintf("%s%d", ... argument...))
   NOT IN -m: runtime_assign_target_forms.go:213:16: append(trace, "call")
   NOT IN -m: runtime_assign_target_forms.go:84:14: append(trace, fmt.Sprintf("%s%d", ... argument...))
@@ -412,8 +413,8 @@ columns what their explanations amount to. "neither" is almost entirely lines
 both compilers keep in a frame, which neither explains.
 
   placement                agree    differ  goc only   gc only   neither     total
-  agrees                     141       309        44        17       268       779
-  disagrees                   85       175       255      1316       585      2416
+  agrees                     142       309        44        17       280       792
+  disagrees                   84       175       159      1329       685      2432
 
 ## AGREE ON PLACEMENT, DISAGREE ON REASON: 309 lines
 
@@ -422,19 +423,19 @@ name have nothing in common. One of them is reaching the right placement by a
 route the other does not recognise, which no placement comparison can see. Read
 each one and decide which.
 
-of those, 206 carry exactly one explained allocation on each side, so the two
-explanations are about the same object; the other 103 carry more than one and the
+of those, 205 carry exactly one explained allocation on each side, so the two
+explanations are about the same object; the other 104 carry more than one and the
 pairing is the line, not the allocation. Both are listed; each line's own
 entries say which it is.
 
 by category pair (goc                                gc):
 
     116  stored-in-object                   call-retains
-     42  unexplained                        call-retains
+     43  unexplained                        call-retains
      41  unexplained                        stored-in-object
      37  stored-in-object                   closure-captured
      15  unexplained                        returned
-     12  call-opaque                        call-retains
+     11  call-opaque                        call-retains
       9  stored-in-object                   returned
       9  unexplained                        channel-send
       8  stored-in-object                   interface-boxed
@@ -537,6 +538,25 @@ runtime_append_growth_pointer_elements.go:15	heap -> heap	unexplained -> stored-
 	     unexplained      the walk found a use it could not prove local
 	gc   col 11  heap  object  &appendGrowthNode{...}
 	     stored-in-object {storage for &appendGrowthNode{...}} <- &{storage for &appendGrowthNode{...}} via spill -> struct literal element
+runtime_append_make_extension.go:67	heap -> heap	unexplained -> call-retains
+	src  boxes = append(boxes, &gcbox{1}, &gcbox{2}, &gcbox{3}, &gcbox{4})
+	goc  col 24  heap  main_gcbox  [front end: composite-literal in main.main]
+	     unexplained      the walk found a use it could not prove local
+	goc  col 35  heap  main_gcbox  [front end: composite-literal in main.main]
+	     unexplained      the walk found a use it could not prove local
+	goc  col 46  heap  main_gcbox  [front end: composite-literal in main.main]
+	     unexplained      the walk found a use it could not prove local
+	goc  col 57  heap  main_gcbox  [front end: composite-literal in main.main]
+	     unexplained      the walk found a use it could not prove local
+	gc   col 16  heap  object  append
+	gc   col 24  heap  object  &gcbox{...}
+	     call-retains     {heap} <- &{storage for &gcbox{...}} via spill -> call parameter
+	gc   col 35  heap  object  &gcbox{...}
+	     call-retains     {heap} <- &{storage for &gcbox{...}} via spill -> call parameter
+	gc   col 46  heap  object  &gcbox{...}
+	     call-retains     {heap} <- &{storage for &gcbox{...}} via spill -> call parameter
+	gc   col 57  heap  object  &gcbox{...}
+	     call-retains     {heap} <- &{storage for &gcbox{...}} via spill -> call parameter
 runtime_append_variadic_pointer_gc.go:15	heap -> heap	unexplained -> stored-in-object
 	src  next:  &appendVariadicNode{value: index + 100},
 	goc  col 11  heap  main_appendVariadicNode  [front end: composite-literal in main.main]
@@ -586,8 +606,7 @@ runtime_assign_target_forms.go:148	heap -> heap	stored-in-object -> interface-bo
 runtime_assign_target_forms.go:158	heap -> heap	stored-in-object -> call-retains
 	src  case box.value = <-numbers:
 	goc  col 7  heap  int  [ir pass: heap-alloc-candidate in main.selectTargets]
-	     stored-in-object write barrier into non-local storage
-	     at               testdata/runtime_assign_target_forms.go:158:7
+	     stored-in-object write barrier into a candidate
 	gc   col 19  heap  object  .autotmp_6
 	     call-retains     {heap} <- {storage for ... argument} via spill -> assign -> dot -> slice-literal-element -> spill -> call parameter
 runtime_assign_target_forms.go:179	heap -> heap	unexplained -> channel-send
@@ -715,20 +734,20 @@ runtime_cleanup_basic.go:15	heap -> heap	stored-in-object -> call-retains
 	src  box := &cleanupBox{value: 42}
 	goc  col 9  heap  main_cleanupBox  [front end: composite-literal in main.main]
 	     stored-in-object assigned to the package-level variable escapeSink
-	     at               /home/evan/.ccwork/ws/gcdiff-reasons/repo/stdlib/src/internal/abi/escape.go:30:3
+	     at               /home/evan/.ccwork/ws/wave6-gate/repo/stdlib/src/internal/abi/escape.go:30:3
 	goc  col 9  heap  main_cleanupBox  [front end: composite-literal in main.registerCleanup]
 	     stored-in-object assigned to the package-level variable escapeSink
-	     at               /home/evan/.ccwork/ws/gcdiff-reasons/repo/stdlib/src/internal/abi/escape.go:30:3
+	     at               /home/evan/.ccwork/ws/wave6-gate/repo/stdlib/src/internal/abi/escape.go:30:3
 	gc   col 9  heap  object  &cleanupBox{...}
 	     call-retains     {heap} <- box via spill -> assign -> call parameter
 runtime_cleanup_frame_retention.go:38	heap -> heap	stored-in-object -> call-retains
 	src  box := &retainedBox{value: 42}
 	goc  col 9  heap  main_retainedBox  [front end: composite-literal in main.main]
 	     stored-in-object assigned to the package-level variable escapeSink
-	     at               /home/evan/.ccwork/ws/gcdiff-reasons/repo/stdlib/src/internal/abi/escape.go:30:3
+	     at               /home/evan/.ccwork/ws/wave6-gate/repo/stdlib/src/internal/abi/escape.go:30:3
 	goc  col 9  heap  main_retainedBox  [front end: composite-literal in main.registerRetainedCleanup]
 	     stored-in-object assigned to the package-level variable escapeSink
-	     at               /home/evan/.ccwork/ws/gcdiff-reasons/repo/stdlib/src/internal/abi/escape.go:30:3
+	     at               /home/evan/.ccwork/ws/wave6-gate/repo/stdlib/src/internal/abi/escape.go:30:3
 	gc   col 9  heap  object  &retainedBox{...}
 	     call-retains     {heap} <- box via spill -> assign -> call parameter
 runtime_cleanup_frame_retention_masked.go:47	heap -> heap	stored-in-object -> call-retains
@@ -744,10 +763,10 @@ runtime_cleanup_frame_retention_masked.go:52	heap -> heap	stored-in-object -> ca
 	src  box := &maskedBox{value: 1}
 	goc  col 9  heap  main_maskedBox  [front end: composite-literal in main.main]
 	     stored-in-object assigned to the package-level variable escapeSink
-	     at               /home/evan/.ccwork/ws/gcdiff-reasons/repo/stdlib/src/internal/abi/escape.go:30:3
+	     at               /home/evan/.ccwork/ws/wave6-gate/repo/stdlib/src/internal/abi/escape.go:30:3
 	goc  col 9  heap  main_maskedBox  [front end: composite-literal in main.registerWithTrailingAllocation]
 	     stored-in-object assigned to the package-level variable escapeSink
-	     at               /home/evan/.ccwork/ws/gcdiff-reasons/repo/stdlib/src/internal/abi/escape.go:30:3
+	     at               /home/evan/.ccwork/ws/wave6-gate/repo/stdlib/src/internal/abi/escape.go:30:3
 	gc   col 9  heap  object  &maskedBox{...}
 	     call-retains     {heap} <- box via spill -> assign -> call parameter
 runtime_cleanup_frame_retention_masked.go:54	heap -> heap	unexplained -> stored-in-object
@@ -762,59 +781,59 @@ runtime_cleanup_frame_retention_masked.go:59	heap -> heap	stored-in-object -> ca
 	src  box := &maskedBox{value: 1}
 	goc  col 9  heap  main_maskedBox  [front end: composite-literal in main.registerWithKeepAlive]
 	     stored-in-object assigned to the package-level variable escapeSink
-	     at               /home/evan/.ccwork/ws/gcdiff-reasons/repo/stdlib/src/internal/abi/escape.go:30:3
+	     at               /home/evan/.ccwork/ws/wave6-gate/repo/stdlib/src/internal/abi/escape.go:30:3
 	gc   col 9  heap  object  &maskedBox{...}
 	     call-retains     {heap} <- box via spill -> assign -> call parameter
 runtime_cleanup_frame_retention_masked.go:66	heap -> heap	stored-in-object -> call-retains
 	src  first := &maskedBox{value: 1}
 	goc  col 11  heap  main_maskedBox  [front end: composite-literal in main.registerTwoObjects]
 	     stored-in-object assigned to the package-level variable escapeSink
-	     at               /home/evan/.ccwork/ws/gcdiff-reasons/repo/stdlib/src/internal/abi/escape.go:30:3
+	     at               /home/evan/.ccwork/ws/wave6-gate/repo/stdlib/src/internal/abi/escape.go:30:3
 	gc   col 11  heap  object  &maskedBox{...}
 	     call-retains     {heap} <- first via spill -> assign -> call parameter
 runtime_cleanup_frame_retention_masked.go:69	heap -> heap	stored-in-object -> call-retains
 	src  second := &maskedBox{value: 2}
 	goc  col 12  heap  main_maskedBox  [front end: composite-literal in main.registerTwoObjects]
 	     stored-in-object assigned to the package-level variable escapeSink
-	     at               /home/evan/.ccwork/ws/gcdiff-reasons/repo/stdlib/src/internal/abi/escape.go:30:3
+	     at               /home/evan/.ccwork/ws/wave6-gate/repo/stdlib/src/internal/abi/escape.go:30:3
 	gc   col 12  heap  object  &maskedBox{...}
 	     call-retains     {heap} <- second via spill -> assign -> call parameter
 runtime_cleanup_frame_retention_masked.go:75	heap -> heap	unexplained -> call-retains
 	src  box := &maskedBox{value: 1}
 	goc  col 9  heap  main_maskedBox  [front end: composite-literal in main.registerFinalizerOnly]
 	     unexplained      obj is used here in a way the walk cannot prove keeps it local
-	     at               /home/evan/.ccwork/ws/gcdiff-reasons/repo/stdlib/src/runtime/mfinal.go:448:16
+	     at               /home/evan/.ccwork/ws/wave6-gate/repo/stdlib/src/runtime/mfinal.go:448:16
 	gc   col 9  heap  object  &maskedBox{...}
 	     call-retains     {heap} <- box via spill -> assign -> interface-converted -> call parameter
 runtime_cleanup_frame_retention_scribble.go:38	heap -> heap	stored-in-object -> call-retains
 	src  box := &scribbledBox{value: 42}
 	goc  col 9  heap  main_scribbledBox  [front end: composite-literal in main.registerScribbledCleanup]
 	     stored-in-object assigned to the package-level variable escapeSink
-	     at               /home/evan/.ccwork/ws/gcdiff-reasons/repo/stdlib/src/internal/abi/escape.go:30:3
+	     at               /home/evan/.ccwork/ws/wave6-gate/repo/stdlib/src/internal/abi/escape.go:30:3
 	gc   col 9  heap  object  &scribbledBox{...}
 	     call-retains     {heap} <- box via spill -> assign -> call parameter
 runtime_cleanup_multiple.go:15	heap -> heap	stored-in-object -> call-retains
 	src  box := &multipleCleanupBox{value: 42}
 	goc  col 9  heap  main_multipleCleanupBox  [front end: composite-literal in main.main]
 	     stored-in-object assigned to the package-level variable escapeSink
-	     at               /home/evan/.ccwork/ws/gcdiff-reasons/repo/stdlib/src/internal/abi/escape.go:30:3
+	     at               /home/evan/.ccwork/ws/wave6-gate/repo/stdlib/src/internal/abi/escape.go:30:3
 	goc  col 9  heap  main_multipleCleanupBox  [front end: composite-literal in main.registerMultipleCleanups]
 	     stored-in-object assigned to the package-level variable escapeSink
-	     at               /home/evan/.ccwork/ws/gcdiff-reasons/repo/stdlib/src/internal/abi/escape.go:30:3
+	     at               /home/evan/.ccwork/ws/wave6-gate/repo/stdlib/src/internal/abi/escape.go:30:3
 	gc   col 9  heap  object  &multipleCleanupBox{...}
 	     call-retains     {heap} <- box via spill -> assign -> call parameter
 runtime_cleanup_stop.go:15	heap -> heap	stored-in-object -> call-retains
 	src  stoppedBox := &cleanupStopBox{value: 1}
 	goc  col 16  heap  main_cleanupStopBox  [front end: composite-literal in main.registerStoppedCleanup]
 	     stored-in-object assigned to the package-level variable escapeSink
-	     at               /home/evan/.ccwork/ws/gcdiff-reasons/repo/stdlib/src/internal/abi/escape.go:30:3
+	     at               /home/evan/.ccwork/ws/wave6-gate/repo/stdlib/src/internal/abi/escape.go:30:3
 	gc   col 16  heap  object  &cleanupStopBox{...}
 	     call-retains     {heap} <- stoppedBox via spill -> assign -> call parameter
 runtime_cleanup_stop.go:21	heap -> heap	stored-in-object -> call-retains
 	src  activeBox := &cleanupStopBox{value: 2}
 	goc  col 15  heap  main_cleanupStopBox  [front end: composite-literal in main.registerStoppedCleanup]
 	     stored-in-object assigned to the package-level variable escapeSink
-	     at               /home/evan/.ccwork/ws/gcdiff-reasons/repo/stdlib/src/internal/abi/escape.go:30:3
+	     at               /home/evan/.ccwork/ws/wave6-gate/repo/stdlib/src/internal/abi/escape.go:30:3
 	gc   col 15  heap  object  &cleanupStopBox{...}
 	     call-retains     {heap} <- activeBox via spill -> assign -> call parameter
 runtime_closure_captured_header_values.go:95	heap -> heap	stored-in-object -> closure-captured
@@ -934,35 +953,35 @@ runtime_finalizer_cleanup_order.go:15	heap -> heap	stored-in-object -> call-reta
 	src  box := &finalizerCleanupBox{value: 42}
 	goc  col 9  heap  main_finalizerCleanupBox  [front end: composite-literal in main.registerFinalizerAndCleanup]
 	     stored-in-object assigned to the package-level variable escapeSink
-	     at               /home/evan/.ccwork/ws/gcdiff-reasons/repo/stdlib/src/internal/abi/escape.go:30:3
+	     at               /home/evan/.ccwork/ws/wave6-gate/repo/stdlib/src/internal/abi/escape.go:30:3
 	gc   col 9  heap  object  &finalizerCleanupBox{...}
 	     call-retains     {heap} <- box via spill -> assign -> call parameter
 runtime_finalizer_dependency_order.go:14	heap -> heap	unexplained -> call-retains
 	src  child := &finalizerDependencyNode{value: 1}
 	goc  col 11  heap  main_finalizerDependencyNode  [front end: composite-literal in main.registerDependentFinalizers]
 	     unexplained      finalizer is used here in a way the walk cannot prove keeps it local
-	     at               /home/evan/.ccwork/ws/gcdiff-reasons/repo/stdlib/src/runtime/mfinal.go:493:16
+	     at               /home/evan/.ccwork/ws/wave6-gate/repo/stdlib/src/runtime/mfinal.go:493:16
 	gc   col 11  heap  object  &finalizerDependencyNode{...}
 	     call-retains     {heap} <- child via spill -> assign -> interface-converted -> call parameter
 runtime_finalizer_dependency_order.go:15	heap -> heap	unexplained -> call-retains
 	src  parent := &finalizerDependencyNode{
 	goc  col 12  heap  main_finalizerDependencyNode  [front end: composite-literal in main.registerDependentFinalizers]
 	     unexplained      finalizer is used here in a way the walk cannot prove keeps it local
-	     at               /home/evan/.ccwork/ws/gcdiff-reasons/repo/stdlib/src/runtime/mfinal.go:493:16
+	     at               /home/evan/.ccwork/ws/wave6-gate/repo/stdlib/src/runtime/mfinal.go:493:16
 	gc   col 12  heap  object  &finalizerDependencyNode{...}
 	     call-retains     {heap} <- parent via spill -> assign -> interface-converted -> call parameter
 runtime_finalizer_resurrect.go:17	heap -> heap	unexplained -> call-retains
 	src  object := &resurrectedObject{
 	goc  col 12  heap  main_resurrectedObject  [front end: composite-literal in main.main]
 	     unexplained      obj is used here in a way the walk cannot prove keeps it local
-	     at               /home/evan/.ccwork/ws/gcdiff-reasons/repo/stdlib/src/runtime/mfinal.go:448:16
+	     at               /home/evan/.ccwork/ws/wave6-gate/repo/stdlib/src/runtime/mfinal.go:448:16
 	gc   col 12  heap  object  &resurrectedObject{...}
 	     call-retains     {heap} <- object via spill -> assign -> interface-converted -> call parameter
 runtime_finalizer_resurrect.go:19	heap -> heap	unexplained -> stored-in-object
 	src  next:  &resurrectedObject{value: 1},
 	goc  col 10  heap  main_resurrectedObject  [front end: composite-literal in main.main]
 	     unexplained      obj is used here in a way the walk cannot prove keeps it local
-	     at               /home/evan/.ccwork/ws/gcdiff-reasons/repo/stdlib/src/runtime/mfinal.go:448:16
+	     at               /home/evan/.ccwork/ws/wave6-gate/repo/stdlib/src/runtime/mfinal.go:448:16
 	gc   col 10  heap  object  &resurrectedObject{...}
 	     stored-in-object {storage for &resurrectedObject{...}} <- &{storage for &resurrectedObject{...}} via spill -> struct literal element
 runtime_finalizer_resurrect.go:21	heap -> heap	stored-in-object -> call-retains
@@ -976,7 +995,7 @@ runtime_finalizer_stack_growth.go:36	heap -> heap	unexplained -> call-retains
 	src  node := &finalizerStackBox{
 	goc  col 10  heap  main_finalizerStackBox  [front end: composite-literal in main.allocateFinalizerAfterStackGrowth]
 	     unexplained      finalizer is used here in a way the walk cannot prove keeps it local
-	     at               /home/evan/.ccwork/ws/gcdiff-reasons/repo/stdlib/src/runtime/mfinal.go:493:16
+	     at               /home/evan/.ccwork/ws/wave6-gate/repo/stdlib/src/runtime/mfinal.go:493:16
 	gc   col 10  heap  object  &finalizerStackBox{...}
 	     call-retains     {heap} <- chain via spill -> assign -> call parameter -> interface-converted -> call parameter
 runtime_finalizer_tiny.go:19	heap -> heap	stored-in-object -> call-retains
@@ -1140,7 +1159,7 @@ runtime_gc_mark_workers.go:96	heap -> heap	call-opaque -> call-retains
 	src  samples := []metrics.Sample{
 	goc  col 13  heap  3_runtime_metrics_Sample  [front end: slice-literal-backing in main.readMarkCPU]
 	     call-opaque      passed to runtime/metrics.runtime_readMetrics, which has no Go body and is not marked //go:noescape
-	     at               /home/evan/.ccwork/ws/gcdiff-reasons/repo/stdlib/src/runtime/metrics/sample.go:46:2
+	     at               /home/evan/.ccwork/ws/wave6-gate/repo/stdlib/src/runtime/metrics/sample.go:46:2
 	gc   col 29  heap  slice  []metrics.Sample{...}
 	     call-retains     {heap} <- metrics.m via spill -> assign -> assign-pair -> dot of pointer -> address-of -> call parameter
 runtime_gc_mark_workers.go:122	heap -> heap	stored-in-object -> call-retains
@@ -1294,18 +1313,11 @@ runtime_interface_method_value.go:17	heap -> heap	unexplained -> stored-in-objec
 	     unexplained      the walk found a use it could not prove local
 	gc   col 35  heap  object  &methodValueState{...}
 	     stored-in-object {heap} <- {temp} via spill -> interface-converted -> assign
-runtime_interface_stack_gc.go:31	heap -> heap	call-opaque -> call-retains
-	src  value := &node{
-	goc  col 11  heap  main_node  [front end: composite-literal in main.main]
-	     call-opaque      passed to main.recurse, which the walk is already inside: it breaks the recursion by answering "escapes"
-	     at               testdata/runtime_interface_stack_gc.go:27:26
-	gc   col 11  heap  object  &node{...}
-	     call-retains     {heap} <- value via spill -> assign -> interface-converted -> call parameter
 runtime_keepalive_finalizer.go:37	heap -> heap	unexplained -> call-retains
 	src  box := &keepAliveBox{value: 42}
 	goc  col 9  heap  main_keepAliveBox  [front end: composite-literal in main.allocateAndKeep]
 	     unexplained      obj is used here in a way the walk cannot prove keeps it local
-	     at               /home/evan/.ccwork/ws/gcdiff-reasons/repo/stdlib/src/runtime/mfinal.go:448:16
+	     at               /home/evan/.ccwork/ws/wave6-gate/repo/stdlib/src/runtime/mfinal.go:448:16
 	gc   col 9  heap  object  &keepAliveBox{...}
 	     call-retains     {heap} <- box via spill -> assign -> interface-converted -> call parameter
 runtime_loopvar_address_gc.go:74	heap -> heap	stored-in-object -> call-retains
@@ -1803,7 +1815,7 @@ runtime_pinner_lifecycle.go:14	heap -> heap	unexplained -> call-retains
 	src  box := &pinnedBox{value: value}
 	goc  col 9  heap  main_pinnedBox  [front end: composite-literal in main.pinBox]
 	     unexplained      obj is used here in a way the walk cannot prove keeps it local
-	     at               /home/evan/.ccwork/ws/gcdiff-reasons/repo/stdlib/src/runtime/mfinal.go:448:16
+	     at               /home/evan/.ccwork/ws/wave6-gate/repo/stdlib/src/runtime/mfinal.go:448:16
 	gc   col 9  heap  object  &pinnedBox{...}
 	     call-retains     {heap} <- box via spill -> assign -> interface-converted -> call parameter
 runtime_println_operand_separation.go:114	heap -> heap	stored-in-object -> call-retains
@@ -1962,7 +1974,7 @@ runtime_setfinalizer_nil.go:14	heap -> heap	unexplained -> call-retains
 	src  box := &clearedFinalizerBox{value: 42}
 	goc  col 9  heap  main_clearedFinalizerBox  [front end: composite-literal in main.main]
 	     unexplained      obj is used here in a way the walk cannot prove keeps it local
-	     at               /home/evan/.ccwork/ws/gcdiff-reasons/repo/stdlib/src/runtime/mfinal.go:448:16
+	     at               /home/evan/.ccwork/ws/wave6-gate/repo/stdlib/src/runtime/mfinal.go:448:16
 	gc   col 9  heap  object  &clearedFinalizerBox{...}
 	     call-retains     {heap} <- box via spill -> assign -> interface-converted -> call parameter
 runtime_slice_struct_values_gc.go:15	heap -> heap	unexplained -> call-retains
@@ -1993,7 +2005,7 @@ runtime_stack_argument_roots.go:40	heap -> heap	stored-in-object -> call-retains
 	src  object := &payload{value: value}
 	goc  col 12  heap  main_payload  [front end: composite-literal in main.newPayload]
 	     stored-in-object assigned to the package-level variable escapeSink
-	     at               /home/evan/.ccwork/ws/gcdiff-reasons/repo/stdlib/src/internal/abi/escape.go:30:3
+	     at               /home/evan/.ccwork/ws/wave6-gate/repo/stdlib/src/internal/abi/escape.go:30:3
 	gc   col 12  heap  object  &payload{...}
 	     call-retains     {heap} <- object via spill -> assign -> call parameter
 runtime_stack_scan_blocked_goroutines.go:35	heap -> heap	unexplained -> returned
@@ -2071,14 +2083,14 @@ runtime_stack_scan_loop_safepoints.go:53	heap -> heap	stored-in-object -> call-r
 	src  object := &node{value: value, label: label}
 	goc  col 12  heap  main_node  [front end: composite-literal in main.newNode]
 	     stored-in-object assigned to the package-level variable escapeSink
-	     at               /home/evan/.ccwork/ws/gcdiff-reasons/repo/stdlib/src/internal/abi/escape.go:30:3
+	     at               /home/evan/.ccwork/ws/wave6-gate/repo/stdlib/src/internal/abi/escape.go:30:3
 	gc   col 12  heap  object  &node{...}
 	     call-retains     {heap} <- object via spill -> assign -> call parameter
 runtime_stack_scan_loop_safepoints.go:211	heap -> heap	stored-in-object -> call-retains
 	src  object := &node{value: -1, label: "dropped"}
 	goc  col 12  heap  main_node  [front end: composite-literal in main.dropped]
 	     stored-in-object assigned to the package-level variable escapeSink
-	     at               /home/evan/.ccwork/ws/gcdiff-reasons/repo/stdlib/src/internal/abi/escape.go:30:3
+	     at               /home/evan/.ccwork/ws/wave6-gate/repo/stdlib/src/internal/abi/escape.go:30:3
 	gc   col 12  heap  object  &node{...}
 	     call-retains     {heap} <- object via spill -> assign -> call parameter
 runtime_stack_scan_panic_unwind.go:31	heap -> heap	unexplained -> returned
@@ -2409,14 +2421,14 @@ stdlib_archive_zip_roundtrip.go:19	heap -> heap	unexplained -> call-retains
 	src  header := &zip.FileHeader{
 	goc  col 12  heap  archive_zip_FileHeader  [front end: composite-literal in main.main]
 	     unexplained      h is used here in a way the walk cannot prove keeps it local
-	     at               /home/evan/.ccwork/ws/gcdiff-reasons/repo/stdlib/src/archive/zip/writer.go:376:15
+	     at               /home/evan/.ccwork/ws/wave6-gate/repo/stdlib/src/archive/zip/writer.go:376:15
 	gc   col 12  heap  object  &zip.FileHeader{...}
 	     call-retains     {heap} <- header via spill -> assign -> call parameter
 stdlib_archive_zip_roundtrip.go:33	heap -> heap	unexplained -> call-retains
 	src  storedHeader := &zip.FileHeader{Name: "raw/value.bin", Method: zip.Store}
 	goc  col 18  heap  archive_zip_FileHeader  [front end: composite-literal in main.main]
 	     unexplained      h is used here in a way the walk cannot prove keeps it local
-	     at               /home/evan/.ccwork/ws/gcdiff-reasons/repo/stdlib/src/archive/zip/writer.go:376:15
+	     at               /home/evan/.ccwork/ws/wave6-gate/repo/stdlib/src/archive/zip/writer.go:376:15
 	gc   col 18  heap  object  &zip.FileHeader{...}
 	     call-retains     {heap} <- storedHeader via spill -> assign -> call parameter
 stdlib_archive_zip_roundtrip.go:39	heap -> heap	call-opaque -> call-retains
@@ -2429,7 +2441,7 @@ stdlib_compress_bzip2.go:12	heap -> heap	unexplained -> stored-in-object
 	src  encoded := []byte{
 	goc  col 13  heap  55_byte  [front end: slice-literal-backing in main.main]
 	     unexplained      b is used here in a way the walk cannot prove keeps it local
-	     at               /home/evan/.ccwork/ws/gcdiff-reasons/repo/stdlib/src/bytes/reader.go:159:51
+	     at               /home/evan/.ccwork/ws/wave6-gate/repo/stdlib/src/bytes/reader.go:159:51
 	gc   col 19  heap  slice  []byte{...}
 	     stored-in-object {storage for &bytes.Reader{...}} <- bytes.b via spill -> assign -> assign-pair -> struct literal element
 stdlib_container_heap.go:27	heap -> heap	stored-in-object -> returned
@@ -2474,8 +2486,8 @@ stdlib_crypto_x509_ed25519.go:36	heap -> heap	stored-in-object -> call-retains
 stdlib_encoding_asn1_roundtrip.go:22	heap -> heap	stored-in-object -> interface-boxed
 	src  Serial:  new(big.Int).SetUint64(0x123456789abcdef0),
 	goc  col 12  heap  math_big_Int  [ir pass: heap-alloc-candidate in main.main]
-	     stored-in-object write barrier into non-local storage
-	     at               testdata/stdlib_encoding_asn1_roundtrip.go:30:29
+	     stored-in-object write barrier into a candidate
+	     at               testdata/stdlib_encoding_asn1_roundtrip.go:33:31
 	gc   col 15  heap  object  new(big.Int)
 	     interface-boxed  {storage for original} <- original via spill -> assign-pair -> assign-pair -> struct literal element -> assign -> interface-converted
 stdlib_encoding_asn1_roundtrip.go:33	heap -> heap	stored-in-object -> call-retains
@@ -2562,7 +2574,7 @@ stdlib_flag_parse.go:11	heap -> heap	unexplained -> call-retains
 	src  err := flags.Parse([]string{"-name=cg12", "-count", "17", "-enabled", "extra"})
 	goc  col 21  heap  5_string  [front end: slice-literal-backing in main.main]
 	     unexplained      arguments is used here in a way the walk cannot prove keeps it local
-	     at               /home/evan/.ccwork/ws/gcdiff-reasons/repo/stdlib/src/flag/flag.go:1155:11
+	     at               /home/evan/.ccwork/ws/wave6-gate/repo/stdlib/src/flag/flag.go:1155:11
 	gc   col 29  heap  slice  []string{...}
 	     call-retains     {heap} <- &{storage for []string{...}} via spill -> call parameter
 stdlib_http_client_server.go:11	heap -> heap	stored-in-object -> closure-captured
@@ -2634,14 +2646,14 @@ stdlib_image_gif_animation.go:11	heap -> heap	unexplained -> call-retains
 	src  palette := color.Palette{
 	goc  col 13  heap  4_image_color_Color  [front end: slice-literal-backing in main.main]
 	     unexplained      p is used here in a way the walk cannot prove keeps it local
-	     at               /home/evan/.ccwork/ws/gcdiff-reasons/repo/stdlib/src/image/image.go:1287:12
+	     at               /home/evan/.ccwork/ws/wave6-gate/repo/stdlib/src/image/image.go:1287:12
 	gc   col 26  heap  object  color.Palette{...}
 	     call-retains     {heap} <- palette via spill -> assign -> call parameter
 stdlib_io_readall_limited_reader.go:9	heap -> heap	unexplained -> call-retains
 	src  reader := &io.LimitedReader{
 	goc  col 12  heap  io_LimitedReader  [front end: composite-literal in main.main]
 	     unexplained      r is used here in a way the walk cannot prove keeps it local
-	     at               /home/evan/.ccwork/ws/gcdiff-reasons/repo/stdlib/src/io/io.go:722:13
+	     at               /home/evan/.ccwork/ws/wave6-gate/repo/stdlib/src/io/io.go:722:13
 	gc   col 12  heap  object  &io.LimitedReader{...}
 	     call-retains     {heap} <- reader via spill -> assign -> interface-converted -> call parameter
 stdlib_netpoll_stress_tcp_churn.go:29	heap -> heap	call-opaque -> call-retains
@@ -2669,7 +2681,7 @@ stdlib_netpoll_syscall_socket_listen.go:19	heap -> heap	returned -> call-retains
 	src  address := &syscall.SockaddrInet4{
 	goc  col 13  heap  syscall_SockaddrInet4  [front end: composite-literal in main.main]
 	     returned         returned
-	     at               /home/evan/.ccwork/ws/gcdiff-reasons/repo/stdlib/src/syscall/syscall_linux.go:531:2
+	     at               /home/evan/.ccwork/ws/wave6-gate/repo/stdlib/src/syscall/syscall_linux.go:531:2
 	gc   col 13  heap  object  &syscall.SockaddrInet4{...}
 	     call-retains     {heap} <- address via spill -> assign -> interface-converted -> call parameter
 stdlib_netpoll_tcp_concurrent_clients.go:30	heap -> heap	call-opaque -> call-retains
@@ -2723,7 +2735,7 @@ stdlib_runtime_metrics_read.go:11	heap -> heap	call-opaque -> call-retains
 	src  samples := []metrics.Sample{
 	goc  col 13  heap  2_runtime_metrics_Sample  [front end: slice-literal-backing in main.main]
 	     call-opaque      passed to runtime/metrics.runtime_readMetrics, which has no Go body and is not marked //go:noescape
-	     at               /home/evan/.ccwork/ws/gcdiff-reasons/repo/stdlib/src/runtime/metrics/sample.go:46:2
+	     at               /home/evan/.ccwork/ws/wave6-gate/repo/stdlib/src/runtime/metrics/sample.go:46:2
 	gc   col 29  heap  slice  []metrics.Sample{...}
 	     call-retains     {heap} <- metrics.m via spill -> assign -> assign-pair -> dot of pointer -> address-of -> call parameter
 stdlib_signal_atomic_contention.go:13	heap -> heap	stored-in-object -> closure-captured
@@ -2809,11 +2821,11 @@ stdlib_weak_pointer.go:18	heap -> heap	stored-in-object -> call-retains
 	src  payload := &weakPayload{value: 42}
 	goc  col 13  heap  main_weakPayload  [front end: composite-literal in main.main]
 	     stored-in-object assigned to the package-level variable escapeSink
-	     at               /home/evan/.ccwork/ws/gcdiff-reasons/repo/stdlib/src/internal/abi/escape.go:30:3
+	     at               /home/evan/.ccwork/ws/wave6-gate/repo/stdlib/src/internal/abi/escape.go:30:3
 	gc   col 13  heap  object  &weakPayload{...}
 	     call-retains     {heap} <- payload via spill -> assign -> call parameter
 
-## DISAGREE ON PLACEMENT, AGREE ON REASON: 85 lines
+## DISAGREE ON PLACEMENT, AGREE ON REASON: 84 lines
 
 the two compilers place this line differently and still name a common
 mechanism. This can only happen on a line carrying more than one allocation:
@@ -2855,8 +2867,15 @@ allocation_counts.go:246	heap -> mixed	call-retains -> call-retains
 	gc   col 52  frame  slice  ... argument
 	gc   col 66  heap  object  theInt
 	     call-retains     {heap} <- {storage for ... argument} via spill -> slice-literal-element -> spill -> call parameter
-allocation_counts.go:471	mixed -> heap	returned -> returned
+allocation_counts.go:569	mixed -> heap	returned -> returned
 	src  return func(times int) {
+	goc  col 9  frame  struct_code_uintptr__capture0_unsafe_Pointer  [ir pass: heap-alloc-candidate in main.main]
+	goc  col 9  frame  struct_code_uintptr__capture0_unsafe_Pointer  [ir pass: heap-alloc-candidate in main.main]
+	goc  col 9  frame  struct_code_uintptr__capture0_unsafe_Pointer  [ir pass: heap-alloc-candidate in main.main]
+	goc  col 9  frame  struct_code_uintptr__capture0_unsafe_Pointer  [ir pass: heap-alloc-candidate in main.main]
+	goc  col 9  frame  struct_code_uintptr__capture0_unsafe_Pointer  [ir pass: heap-alloc-candidate in main.main]
+	goc  col 9  frame  struct_code_uintptr__capture0_unsafe_Pointer  [ir pass: heap-alloc-candidate in main.main]
+	goc  col 9  frame  struct_code_uintptr__capture0_unsafe_Pointer  [ir pass: heap-alloc-candidate in main.main]
 	goc  col 9  frame  struct_code_uintptr__capture0_unsafe_Pointer  [ir pass: heap-alloc-candidate in main.main]
 	goc  col 9  frame  struct_code_uintptr__capture0_unsafe_Pointer  [ir pass: heap-alloc-candidate in main.main]
 	goc  col 9  frame  struct_code_uintptr__capture0_unsafe_Pointer  [ir pass: heap-alloc-candidate in main.main]
@@ -3669,33 +3688,22 @@ stdlib_slog_structured.go:58	mixed -> heap	stored-in-object -> stored-in-object
 	     at               testdata/stdlib_slog_structured.go:58:2
 	gc   col 6  heap  object  textOutput
 	     stored-in-object {storage for &slog.commonHandler{...}} <- slog.w via address-of -> interface-converted -> assign-pair -> struct literal element
-stdlib_sort_search_slice.go:26	heap -> mixed	call-retains,stored-in-object -> call-retains
-	src  sort.Slice(records, func(left, right int) bool {
-	goc  col 13  heap  struct_name_string__score_int  [ir pass: heap-alloc-candidate in main.main]
-	     stored-in-object store into non-local storage
-	     at               testdata/stdlib_sort_search_slice.go:26:13
-	goc  col 22  heap  struct_code_uintptr__capture0_unsafe_Pointer  [ir pass: heap-alloc-candidate in main.main]
-	     call-retains     argument 2 of $sort.Slice escapes
-	     at               testdata/stdlib_sort_search_slice.go:26:2
-	gc   col 13  heap  object  records
-	     call-retains     {heap} <- &{storage for records} via spill -> call parameter
-	gc   col 22  frame  object  func literal
 
-## PLACEMENT DISAGREES, ONLY goc EXPLAINED: 255 lines
+## PLACEMENT DISAGREES, ONLY goc EXPLAINED: 159 lines
 
 goc heaps something here that gc does not, so goc is the only compiler with
 anything to say. Grouped by goc's category, this is the pessimistic direction
 sorted by cause -- the thing that took two jobs of reading goc/compile.go by
 hand before the diagnostic existed.
 
-     98  stored-in-object
-     70  unexplained
-     45  closure-captured
-     26  call-retains
-      7  call-opaque
+     91  stored-in-object
+     25  call-retains
+     23  closure-captured
+     12  unexplained
       4  loop-carried
-      3  stored-in-object,interface-boxed
-      2  closure-captured,unexplained
+      2  stored-in-object,interface-boxed
+      1  call-opaque
+      1  interface-boxed
 
 adler32_marshal_loop.go:21	heap -> frame	call-retains -> -
 	src  appendedState, err := hash.(encoding.BinaryAppender).AppendBinary(make([]byte, 4, 32))
@@ -3763,118 +3771,134 @@ allocation_counts.go:273	heap -> frame	loop-carried -> -
 	     loop-carried     allocated in a loop; one frame slot cannot hold one object per iteration
 	     at               testdata/allocation_counts.go:272:14
 	gc   col 25  frame  slice  ... argument
-allocation_counts.go:470	heap -> absent	stored-in-object -> -
+allocation_counts.go:568	heap -> absent	stored-in-object -> -
 	src  func repeat(operation func()) func(int) {
 	goc  col 1  heap  func  [ir pass: heap-alloc-candidate in main.main]
 	     stored-in-object write barrier into a candidate
-	     at               testdata/allocation_counts.go:471:9
+	     at               testdata/allocation_counts.go:569:9
 	goc  col 1  heap  func  [ir pass: heap-alloc-candidate in main.main]
 	     stored-in-object write barrier into a candidate
-	     at               testdata/allocation_counts.go:471:9
+	     at               testdata/allocation_counts.go:569:9
 	goc  col 1  heap  func  [ir pass: heap-alloc-candidate in main.main]
 	     stored-in-object write barrier into a candidate
-	     at               testdata/allocation_counts.go:471:9
+	     at               testdata/allocation_counts.go:569:9
 	goc  col 1  heap  func  [ir pass: heap-alloc-candidate in main.main]
 	     stored-in-object write barrier into a candidate
-	     at               testdata/allocation_counts.go:471:9
+	     at               testdata/allocation_counts.go:569:9
 	goc  col 1  heap  func  [ir pass: heap-alloc-candidate in main.main]
 	     stored-in-object write barrier into a candidate
-	     at               testdata/allocation_counts.go:471:9
+	     at               testdata/allocation_counts.go:569:9
 	goc  col 1  heap  func  [ir pass: heap-alloc-candidate in main.main]
 	     stored-in-object write barrier into a candidate
-	     at               testdata/allocation_counts.go:471:9
+	     at               testdata/allocation_counts.go:569:9
 	goc  col 1  heap  func  [ir pass: heap-alloc-candidate in main.main]
 	     stored-in-object write barrier into a candidate
-	     at               testdata/allocation_counts.go:471:9
+	     at               testdata/allocation_counts.go:569:9
 	goc  col 1  heap  func  [ir pass: heap-alloc-candidate in main.main]
 	     stored-in-object write barrier into a candidate
-	     at               testdata/allocation_counts.go:471:9
+	     at               testdata/allocation_counts.go:569:9
 	goc  col 1  heap  func  [ir pass: heap-alloc-candidate in main.main]
 	     stored-in-object write barrier into a candidate
-	     at               testdata/allocation_counts.go:471:9
+	     at               testdata/allocation_counts.go:569:9
 	goc  col 1  heap  func  [ir pass: heap-alloc-candidate in main.main]
 	     stored-in-object write barrier into a candidate
-	     at               testdata/allocation_counts.go:471:9
+	     at               testdata/allocation_counts.go:569:9
 	goc  col 1  heap  func  [ir pass: heap-alloc-candidate in main.main]
 	     stored-in-object write barrier into a candidate
-	     at               testdata/allocation_counts.go:471:9
+	     at               testdata/allocation_counts.go:569:9
 	goc  col 1  heap  func  [ir pass: heap-alloc-candidate in main.main]
 	     stored-in-object write barrier into a candidate
-	     at               testdata/allocation_counts.go:471:9
+	     at               testdata/allocation_counts.go:569:9
 	goc  col 1  heap  func  [ir pass: heap-alloc-candidate in main.main]
 	     stored-in-object write barrier into a candidate
-	     at               testdata/allocation_counts.go:471:9
+	     at               testdata/allocation_counts.go:569:9
 	goc  col 1  heap  func  [ir pass: heap-alloc-candidate in main.main]
 	     stored-in-object write barrier into a candidate
-	     at               testdata/allocation_counts.go:471:9
+	     at               testdata/allocation_counts.go:569:9
 	goc  col 1  heap  func  [ir pass: heap-alloc-candidate in main.main]
 	     stored-in-object write barrier into a candidate
-	     at               testdata/allocation_counts.go:471:9
+	     at               testdata/allocation_counts.go:569:9
 	goc  col 1  heap  func  [ir pass: heap-alloc-candidate in main.main]
 	     stored-in-object write barrier into a candidate
-	     at               testdata/allocation_counts.go:471:9
+	     at               testdata/allocation_counts.go:569:9
 	goc  col 1  heap  func  [ir pass: heap-alloc-candidate in main.main]
 	     stored-in-object write barrier into a candidate
-	     at               testdata/allocation_counts.go:471:9
+	     at               testdata/allocation_counts.go:569:9
 	goc  col 1  heap  func  [ir pass: heap-alloc-candidate in main.main]
 	     stored-in-object write barrier into a candidate
-	     at               testdata/allocation_counts.go:471:9
+	     at               testdata/allocation_counts.go:569:9
 	goc  col 1  heap  func  [ir pass: heap-alloc-candidate in main.main]
 	     stored-in-object write barrier into a candidate
-	     at               testdata/allocation_counts.go:471:9
+	     at               testdata/allocation_counts.go:569:9
 	goc  col 1  heap  func  [ir pass: heap-alloc-candidate in main.main]
 	     stored-in-object write barrier into a candidate
-	     at               testdata/allocation_counts.go:471:9
+	     at               testdata/allocation_counts.go:569:9
 	goc  col 1  heap  func  [ir pass: heap-alloc-candidate in main.main]
 	     stored-in-object write barrier into a candidate
-	     at               testdata/allocation_counts.go:471:9
+	     at               testdata/allocation_counts.go:569:9
 	goc  col 1  heap  func  [ir pass: heap-alloc-candidate in main.main]
 	     stored-in-object write barrier into a candidate
-	     at               testdata/allocation_counts.go:471:9
+	     at               testdata/allocation_counts.go:569:9
 	goc  col 1  heap  func  [ir pass: heap-alloc-candidate in main.main]
 	     stored-in-object write barrier into a candidate
-	     at               testdata/allocation_counts.go:471:9
+	     at               testdata/allocation_counts.go:569:9
 	goc  col 1  heap  func  [ir pass: heap-alloc-candidate in main.main]
 	     stored-in-object write barrier into a candidate
-	     at               testdata/allocation_counts.go:471:9
+	     at               testdata/allocation_counts.go:569:9
 	goc  col 1  heap  func  [ir pass: heap-alloc-candidate in main.main]
 	     stored-in-object write barrier into a candidate
-	     at               testdata/allocation_counts.go:471:9
+	     at               testdata/allocation_counts.go:569:9
 	goc  col 1  heap  func  [ir pass: heap-alloc-candidate in main.main]
 	     stored-in-object write barrier into a candidate
-	     at               testdata/allocation_counts.go:471:9
+	     at               testdata/allocation_counts.go:569:9
 	goc  col 1  heap  func  [ir pass: heap-alloc-candidate in main.main]
 	     stored-in-object write barrier into a candidate
-	     at               testdata/allocation_counts.go:471:9
+	     at               testdata/allocation_counts.go:569:9
 	goc  col 1  heap  func  [ir pass: heap-alloc-candidate in main.main]
 	     stored-in-object write barrier into a candidate
-	     at               testdata/allocation_counts.go:471:9
+	     at               testdata/allocation_counts.go:569:9
 	goc  col 1  heap  func  [ir pass: heap-alloc-candidate in main.main]
 	     stored-in-object write barrier into a candidate
-	     at               testdata/allocation_counts.go:471:9
+	     at               testdata/allocation_counts.go:569:9
 	goc  col 1  heap  func  [ir pass: heap-alloc-candidate in main.main]
 	     stored-in-object write barrier into a candidate
-	     at               testdata/allocation_counts.go:471:9
+	     at               testdata/allocation_counts.go:569:9
 	goc  col 1  heap  func  [ir pass: heap-alloc-candidate in main.main]
 	     stored-in-object write barrier into a candidate
-	     at               testdata/allocation_counts.go:471:9
+	     at               testdata/allocation_counts.go:569:9
 	goc  col 1  heap  func  [ir pass: heap-alloc-candidate in main.main]
 	     stored-in-object write barrier into a candidate
-	     at               testdata/allocation_counts.go:471:9
+	     at               testdata/allocation_counts.go:569:9
 	goc  col 1  heap  func  [ir pass: heap-alloc-candidate in main.main]
 	     stored-in-object write barrier into a candidate
-	     at               testdata/allocation_counts.go:471:9
+	     at               testdata/allocation_counts.go:569:9
 	goc  col 1  heap  func  [ir pass: heap-alloc-candidate in main.main]
 	     stored-in-object write barrier into a candidate
-	     at               testdata/allocation_counts.go:471:9
+	     at               testdata/allocation_counts.go:569:9
+	goc  col 1  heap  func  [ir pass: heap-alloc-candidate in main.main]
+	     stored-in-object write barrier into a candidate
+	     at               testdata/allocation_counts.go:569:9
+	goc  col 1  heap  func  [ir pass: heap-alloc-candidate in main.main]
+	     stored-in-object write barrier into a candidate
+	     at               testdata/allocation_counts.go:569:9
+	goc  col 1  heap  func  [ir pass: heap-alloc-candidate in main.main]
+	     stored-in-object write barrier into a candidate
+	     at               testdata/allocation_counts.go:569:9
+	goc  col 1  heap  func  [ir pass: heap-alloc-candidate in main.main]
+	     stored-in-object write barrier into a candidate
+	     at               testdata/allocation_counts.go:569:9
+	goc  col 1  heap  func  [ir pass: heap-alloc-candidate in main.main]
+	     stored-in-object write barrier into a candidate
+	     at               testdata/allocation_counts.go:569:9
+	goc  col 1  heap  func  [ir pass: heap-alloc-candidate in main.main]
+	     stored-in-object write barrier into a candidate
+	     at               testdata/allocation_counts.go:569:9
+	goc  col 1  heap  func  [ir pass: heap-alloc-candidate in main.main]
+	     stored-in-object write barrier into a candidate
+	     at               testdata/allocation_counts.go:569:9
 	goc  col 1  heap  func  [ir pass: heap-alloc-candidate in main.repeat]
 	     stored-in-object write barrier into a candidate
-	     at               testdata/allocation_counts.go:471:9
-bytes_grow_compare.go:10	heap -> absent	closure-captured -> -
-	src  defer runtime.GOMAXPROCS(runtime.GOMAXPROCS(1))
-	goc  col 2  heap  struct_code_uintptr__function_func_n_int__int__a  [ir pass: heap-alloc-candidate in main.measuredAllocsPerRun]
-	     closure-captured argument 0 of $runtime.deferproc escapes
-	     at               testdata/bytes_grow_compare.go:10:27
+	     at               testdata/allocation_counts.go:569:9
 gc_struct.go:25	heap -> frame	stored-in-object -> -
 	src  root := new(record)
 	goc  col 10  heap  main_record  [ir pass: heap-alloc-candidate in main.Test]
@@ -3906,34 +3930,6 @@ reflect_methods.go:10	mixed -> frame	stored-in-object -> -
 	     stored-in-object store into non-local storage
 	     at               testdata/reflect_methods.go:10:32
 	gc   col 42  frame  object  netip.Addr{}
-runtime_array_copy_pointer_gc.go:11	heap -> frame	stored-in-object -> -
-	src  {value: 3},
-	goc  col 3  heap  main_arrayCopyBox  [ir pass: heap-alloc-candidate in main.main]
-	     stored-in-object write barrier into non-local storage
-	     at               testdata/runtime_array_copy_pointer_gc.go:14:11
-	gc   col 3  frame  object  &arrayCopyBox{...}
-runtime_array_copy_pointer_gc.go:12	heap -> frame	stored-in-object -> -
-	src  {value: 5},
-	goc  col 3  heap  main_arrayCopyBox  [ir pass: heap-alloc-candidate in main.main]
-	     stored-in-object write barrier into non-local storage
-	     at               testdata/runtime_array_copy_pointer_gc.go:14:11
-	gc   col 3  frame  object  &arrayCopyBox{...}
-runtime_array_copy_pointer_gc.go:13	heap -> frame	stored-in-object -> -
-	src  {value: 7},
-	goc  col 3  heap  main_arrayCopyBox  [ir pass: heap-alloc-candidate in main.main]
-	     stored-in-object write barrier into non-local storage
-	     at               testdata/runtime_array_copy_pointer_gc.go:14:11
-	gc   col 3  frame  object  &arrayCopyBox{...}
-runtime_array_copy_pointer_gc.go:14	heap -> frame	stored-in-object -> -
-	src  {value: 11},
-	goc  col 3  heap  main_arrayCopyBox  [ir pass: heap-alloc-candidate in main.main]
-	     stored-in-object write barrier into non-local storage
-	     at               testdata/runtime_array_copy_pointer_gc.go:14:11
-	gc   col 3  frame  object  &arrayCopyBox{...}
-runtime_atomic_counter.go:15	heap -> absent	unexplained -> -
-	src  defer wait.Done()
-	goc  col 10  heap  struct_code_uintptr__receiver__sync_WaitGroup  [front end: method-value-descriptor in main.main.func.14.6]
-	     unexplained      the walk found a use it could not prove local
 runtime_channel_close_range.go:12	heap -> absent	closure-captured -> -
 	src  go produce(values)
 	goc  col 2  heap  struct_code_uintptr__argument0_chan_int  [ir pass: heap-alloc-candidate in main.main]
@@ -4066,38 +4062,11 @@ runtime_debug_gc_controls.go:32	heap -> frame	stored-in-object -> -
 	     stored-in-object store into non-local storage
 	     at               testdata/runtime_debug_gc_controls.go:32:20
 	gc   col 20  frame  object  values
-runtime_defer_argument_evaluation.go:10	heap -> absent	closure-captured -> -
-	src  defer appendValue(&values, current)
-	goc  col 2  heap  struct_code_uintptr__argument0____int__argument1  [ir pass: heap-alloc-candidate in main.collect]
-	     closure-captured argument 0 of $runtime.deferproc escapes
-	     at               testdata/runtime_defer_argument_evaluation.go:10:29
-runtime_defer_argument_evaluation.go:12	heap -> absent	closure-captured -> -
-	src  defer appendValue(&values, current)
-	goc  col 2  heap  struct_code_uintptr__argument0____int__argument1  [ir pass: heap-alloc-candidate in main.collect]
-	     closure-captured argument 0 of $runtime.deferproc escapes
-	     at               testdata/runtime_defer_argument_evaluation.go:12:29
-runtime_defer_method_value_order.go:16	heap -> absent	closure-captured -> -
-	src  defer record(1)
-	goc  col 3  heap  struct_code_uintptr__function_func_value_int___a  [ir pass: heap-alloc-candidate in main.main.func.15.2]
-	     closure-captured argument 0 of $runtime.deferproc escapes
-	     at               testdata/runtime_defer_method_value_order.go:16:16
-runtime_defer_method_value_order.go:17	heap -> absent	closure-captured,unexplained -> -
-	src  defer recorder.Add(2)
-	goc  col 3  heap  struct_code_uintptr__function_func_value_int___a  [ir pass: heap-alloc-candidate in main.main.func.15.2]
-	     closure-captured argument 0 of $runtime.deferproc escapes
-	     at               testdata/runtime_defer_method_value_order.go:17:22
-	goc  col 9  heap  struct_code_uintptr__receiver__main_deferMethodR  [front end: method-value-descriptor in main.main.func.15.2]
-	     unexplained      the walk found a use it could not prove local
-runtime_defer_method_value_order.go:18	heap -> absent	closure-captured -> -
-	src  defer record(3)
-	goc  col 3  heap  struct_code_uintptr__function_func_value_int___a  [ir pass: heap-alloc-candidate in main.main.func.15.2]
-	     closure-captured argument 0 of $runtime.deferproc escapes
-	     at               testdata/runtime_defer_method_value_order.go:18:16
 runtime_finalizer_basic.go:18	heap -> absent	unexplained -> -
 	src  value := &finalizable{
 	goc  col 12  heap  main_finalizable  [front end: composite-literal in main.main.func.17.2]
 	     unexplained      obj is used here in a way the walk cannot prove keeps it local
-	     at               /home/evan/.ccwork/ws/gcdiff-reasons/repo/stdlib/src/runtime/mfinal.go:448:16
+	     at               /home/evan/.ccwork/ws/wave6-gate/repo/stdlib/src/runtime/mfinal.go:448:16
 runtime_finalizer_basic.go:22	heap -> frame	stored-in-object -> -
 	src  runtime.SetFinalizer(value, func(item *finalizable) {
 	goc  col 31  heap  struct_code_uintptr__capture0_unsafe_Pointer  [ir pass: heap-alloc-candidate in main.main.func.17.2]
@@ -4119,19 +4088,6 @@ runtime_finalizer_stack_growth.go:35	heap -> absent	stored-in-object -> -
 	goc  col 1  heap  chan_int  [ir pass: heap-alloc-candidate in main.allocateFinalizerAfterStackGrowth]
 	     stored-in-object write barrier into a candidate
 	     at               testdata/runtime_finalizer_stack_growth.go:41:31
-runtime_gc_assist_credit.go:85	heap -> absent	closure-captured -> -
-	src  defer debug.SetGCPercent(previous)
-	goc  col 2  heap  struct_code_uintptr__function_func_percent_int__  [ir pass: heap-alloc-candidate in main.main]
-	     closure-captured argument 0 of $runtime.deferproc escapes
-	     at               testdata/runtime_gc_assist_credit.go:85:27
-runtime_gc_assist_credit.go:98	heap -> absent	unexplained -> -
-	src  defer running.Done()
-	goc  col 10  heap  struct_code_uintptr__receiver__sync_WaitGroup  [front end: method-value-descriptor in main.main.func.97.6]
-	     unexplained      the walk found a use it could not prove local
-runtime_gc_assist_stack_growth.go:37	heap -> absent	unexplained -> -
-	src  defer wait.Done()
-	goc  col 8  heap  struct_code_uintptr__receiver__sync_WaitGroup  [front end: method-value-descriptor in main.assistWorker]
-	     unexplained      the walk found a use it could not prove local
 runtime_gc_assist_stack_growth.go:56	heap -> absent	closure-captured -> -
 	src  go assistWorker(&wait)
 	goc  col 3  heap  struct_code_uintptr__argument0__sync_WaitGroup  [ir pass: heap-alloc-candidate in main.main.gointernal.funcvalue.main_main_func___func.83860b9e97d614a8]
@@ -4140,56 +4096,6 @@ runtime_gc_assist_stack_growth.go:56	heap -> absent	closure-captured -> -
 	goc  col 3  heap  struct_code_uintptr__argument0__sync_WaitGroup  [ir pass: heap-alloc-candidate in main.main]
 	     closure-captured argument 0 of $runtime.newproc escapes
 	     at               testdata/runtime_gc_assist_stack_growth.go:56:20
-runtime_gc_checkmark.go:111	heap -> absent	closure-captured -> -
-	src  defer debug.SetGCPercent(previous)
-	goc  col 2  heap  struct_code_uintptr__function_func_percent_int__  [ir pass: heap-alloc-candidate in main.main]
-	     closure-captured argument 0 of $runtime.deferproc escapes
-	     at               testdata/runtime_gc_checkmark.go:111:27
-runtime_gc_checkmark.go:129	heap -> absent	unexplained -> -
-	src  defer running.Done()
-	goc  col 10  heap  struct_code_uintptr__receiver__sync_WaitGroup  [front end: method-value-descriptor in main.main.func.128.6]
-	     unexplained      the walk found a use it could not prove local
-runtime_gc_checkmark.go:158	heap -> absent	unexplained -> -
-	src  defer collecting.Done()
-	goc  col 9  heap  struct_code_uintptr__receiver__sync_WaitGroup  [front end: method-value-descriptor in main.main.func.157.5]
-	     unexplained      the walk found a use it could not prove local
-runtime_gc_concurrent_mark.go:156	heap -> absent	closure-captured -> -
-	src  defer debug.SetGCPercent(previous)
-	goc  col 2  heap  struct_code_uintptr__function_func_percent_int__  [ir pass: heap-alloc-candidate in main.main]
-	     closure-captured argument 0 of $runtime.deferproc escapes
-	     at               testdata/runtime_gc_concurrent_mark.go:156:27
-runtime_gc_concurrent_mark.go:178	heap -> absent	unexplained -> -
-	src  defer running.Done()
-	goc  col 10  heap  struct_code_uintptr__receiver__sync_WaitGroup  [front end: method-value-descriptor in main.main.func.177.6]
-	     unexplained      the walk found a use it could not prove local
-runtime_gc_concurrent_mark.go:193	heap -> absent	unexplained -> -
-	src  defer collecting.Done()
-	goc  col 9  heap  struct_code_uintptr__receiver__sync_WaitGroup  [front end: method-value-descriptor in main.main.func.192.5]
-	     unexplained      the walk found a use it could not prove local
-runtime_gc_heap_growth_shrink.go:140	heap -> absent	closure-captured -> -
-	src  defer debug.SetGCPercent(previous)
-	goc  col 2  heap  struct_code_uintptr__function_func_percent_int__  [ir pass: heap-alloc-candidate in main.main]
-	     closure-captured argument 0 of $runtime.deferproc escapes
-	     at               testdata/runtime_gc_heap_growth_shrink.go:140:27
-runtime_gc_mark_workers.go:126	heap -> absent	unexplained -> -
-	src  defer running.Done()
-	goc  col 10  heap  struct_code_uintptr__receiver__sync_WaitGroup  [front end: method-value-descriptor in main.main.func.125.6]
-	     unexplained      the walk found a use it could not prove local
-runtime_gc_metadata_hugepages.go:104	heap -> absent	closure-captured -> -
-	src  defer debug.SetGCPercent(previous)
-	goc  col 2  heap  struct_code_uintptr__function_func_percent_int__  [ir pass: heap-alloc-candidate in main.main]
-	     closure-captured argument 0 of $runtime.deferproc escapes
-	     at               testdata/runtime_gc_metadata_hugepages.go:104:27
-runtime_gc_scavenge_release.go:92	heap -> absent	closure-captured -> -
-	src  defer debug.SetGCPercent(previous)
-	goc  col 2  heap  struct_code_uintptr__function_func_percent_int__  [ir pass: heap-alloc-candidate in main.main]
-	     closure-captured argument 0 of $runtime.deferproc escapes
-	     at               testdata/runtime_gc_scavenge_release.go:92:27
-runtime_gc_sweep_pacing.go:154	heap -> absent	closure-captured -> -
-	src  defer debug.SetGCPercent(previous)
-	goc  col 2  heap  struct_code_uintptr__function_func_percent_int__  [ir pass: heap-alloc-candidate in main.main]
-	     closure-captured argument 0 of $runtime.deferproc escapes
-	     at               testdata/runtime_gc_sweep_pacing.go:154:27
 runtime_goexit_defer.go:15	heap -> absent	closure-captured -> -
 	src  go worker(done)
 	goc  col 2  heap  struct_code_uintptr__argument0_chan_int  [ir pass: heap-alloc-candidate in main.main]
@@ -4200,14 +4106,6 @@ runtime_goroutine_channel.go:9	heap -> absent	closure-captured -> -
 	goc  col 2  heap  struct_code_uintptr__argument0_int__argument1_ch  [ir pass: heap-alloc-candidate in main.main]
 	     closure-captured argument 0 of $runtime.newproc escapes
 	     at               testdata/runtime_goroutine_channel.go:9:16
-runtime_goroutine_entry_stack_map.go:75	heap -> absent	unexplained -> -
-	src  defer wait.Done()
-	goc  col 8  heap  struct_code_uintptr__receiver__sync_WaitGroup  [front end: method-value-descriptor in main.seasonWorker]
-	     unexplained      the walk found a use it could not prove local
-runtime_goroutine_entry_stack_map.go:84	heap -> absent	unexplained -> -
-	src  defer wait.Done()
-	goc  col 8  heap  struct_code_uintptr__receiver__sync_WaitGroup  [front end: method-value-descriptor in main.carry]
-	     unexplained      the walk found a use it could not prove local
 runtime_goroutine_entry_stack_map.go:104	heap -> absent	closure-captured -> -
 	src  go seasonWorker(&seasoning)
 	goc  col 4  heap  struct_code_uintptr__argument0__sync_WaitGroup  [ir pass: heap-alloc-candidate in main.main]
@@ -4257,14 +4155,6 @@ runtime_loop_closure_gc.go:8	heap -> absent	stored-in-object -> -
 	goc  col 3  heap  int  [ir pass: heap-alloc-candidate in main.main]
 	     stored-in-object write barrier into a candidate
 	     at               testdata/runtime_loop_closure_gc.go:9:33
-runtime_loopvar_goroutine_defer.go:26	heap -> absent	unexplained -> -
-	src  defer group.Done()
-	goc  col 10  heap  struct_code_uintptr__receiver__sync_WaitGroup  [front end: method-value-descriptor in main.goroutinesSeeTheirOwnIteration.func.25.6]
-	     unexplained      the walk found a use it could not prove local
-runtime_loopvar_goroutine_defer.go:41	heap -> absent	unexplained -> -
-	src  defer group.Done()
-	goc  col 10  heap  struct_code_uintptr__receiver__sync_WaitGroup  [front end: method-value-descriptor in main.goroutinesSeeTheirOwnIteration.func.40.6]
-	     unexplained      the walk found a use it could not prove local
 runtime_loopvar_three_clause.go:86	heap -> absent	loop-carried -> -
 	src  for inner := 0; inner < 3; inner++ {
 	goc  col 7  heap  int  [ir pass: heap-alloc-candidate in main.main]
@@ -4303,18 +4193,6 @@ runtime_loopvar_value_shapes.go:81	mixed -> frame	stored-in-object -> -
 	     stored-in-object write barrier into a candidate
 	     at               testdata/runtime_loopvar_value_shapes.go:81:44
 	gc   col 31  frame  slice  [][2]int{...}
-runtime_many_defers_stack.go:18	heap -> absent	call-retains -> -
-	src  total := 0
-	goc  col 2  heap  int  [ir pass: heap-alloc-candidate in main.main.gointernal.funcvalue.main_main_func___func.83860b9e97d614a8]
-	     call-retains     argument 1 of $main.stackWithManyDefers escapes
-	     at               testdata/runtime_many_defers_stack.go:19:2
-	goc  col 2  heap  int  [ir pass: heap-alloc-candidate in main.main]
-	     call-retains     argument 1 of $main.stackWithManyDefers escapes
-	     at               testdata/runtime_many_defers_stack.go:19:2
-runtime_many_goroutines_gc.go:14	heap -> absent	unexplained -> -
-	src  defer wait.Done()
-	goc  col 8  heap  struct_code_uintptr__receiver__sync_WaitGroup  [front end: method-value-descriptor in main.worker]
-	     unexplained      the walk found a use it could not prove local
 runtime_many_goroutines_gc.go:33	heap -> absent	closure-captured -> -
 	src  go worker(index, &wait, results)
 	goc  col 3  heap  struct_code_uintptr__argument0_int__argument1__s  [ir pass: heap-alloc-candidate in main.main]
@@ -4343,25 +4221,12 @@ runtime_package_initializer_dispatch.go:46	heap -> absent	unexplained -> -
 	src  var insideComposite = []fmt.Stringer{passStringer(fs.FileMode(0o644))}
 	goc  col 23  heap  1_fmt_Stringer  [front end: slice-literal-backing in .goc.global.initfunc.65.main.insideComposite]
 	     unexplained      the walk found a use it could not prove local
-runtime_panic_error_recover.go:15	heap -> absent	closure-captured,unexplained -> -
-	src  defer p.recoverError(&err)
-	goc  col 2  heap  struct_code_uintptr__function_func_errp__error__  [ir pass: heap-alloc-candidate in main.errorRecoverParser.parse]
-	     closure-captured argument 0 of $runtime.deferproc escapes
-	     at               testdata/runtime_panic_error_recover.go:15:24
-	goc  col 8  heap  struct_code_uintptr__receiver__main_errorRecover  [front end: method-value-descriptor in main.errorRecoverParser.parse]
-	     unexplained      the walk found a use it could not prove local
 runtime_panic_stack_gc.go:19	heap -> frame	stored-in-object -> -
 	src  runtime.KeepAlive(scratch)
 	goc  col 20  heap  96_uintptr  [ir pass: heap-alloc-candidate in main.trigger]
 	     stored-in-object store into non-local storage
 	     at               testdata/runtime_panic_stack_gc.go:19:20
 	gc   col 20  frame  object  scratch
-runtime_panic_stack_gc.go:23	heap -> frame	call-opaque -> -
-	src  retained := &marker{value: 42}
-	goc  col 14  heap  main_marker  [front end: composite-literal in main.main]
-	     call-opaque      passed to main.trigger, which the walk is already inside: it breaks the recursion by answering "escapes"
-	     at               testdata/runtime_panic_stack_gc.go:18:19
-	gc   col 14  frame  object  &marker{...}
 runtime_panic_stack_recover_gc.go:19	heap -> frame	stored-in-object -> -
 	src  runtime.KeepAlive(scratch)
 	goc  col 20  heap  80_uintptr  [ir pass: heap-alloc-candidate in main.descend]
@@ -4385,30 +4250,12 @@ runtime_println_operand_separation.go:84	heap -> frame	stored-in-object -> -
 	     stored-in-object store into non-local storage
 	     at               testdata/runtime_println_operand_separation.go:84:13
 	gc   col 16  frame  object  new(int)
-runtime_println_operand_separation.go:147	heap -> absent	closure-captured -> -
-	src  defer os.Remove(file.Name())
-	goc  col 2  heap  struct_code_uintptr__function_func_name_string__  [ir pass: heap-alloc-candidate in main.capture]
-	     closure-captured argument 0 of $runtime.deferproc escapes
-	     at               testdata/runtime_println_operand_separation.go:147:18
-runtime_println_operand_separation.go:148	heap -> absent	unexplained -> -
-	src  defer file.Close()
-	goc  col 8  heap  struct_code_uintptr__receiver__os_File  [front end: method-value-descriptor in main.capture]
-	     unexplained      the walk found a use it could not prove local
 runtime_println_operand_separation.go:168	heap -> frame	call-retains -> -
 	src  buffer := make([]byte, 8192)
 	goc  col 25  heap  8192_byte  [ir pass: heap-alloc-candidate in main.capture]
 	     call-retains     argument 1 of $os.File.Read escapes
 	     at               testdata/runtime_println_operand_separation.go:169:25
 	gc   col 16  frame  slice  make([]byte, 8192)
-runtime_println_statement_atomicity.go:36	heap -> absent	closure-captured -> -
-	src  defer os.Remove(file.Name())
-	goc  col 2  heap  struct_code_uintptr__function_func_name_string__  [ir pass: heap-alloc-candidate in main.main]
-	     closure-captured argument 0 of $runtime.deferproc escapes
-	     at               testdata/runtime_println_statement_atomicity.go:36:18
-runtime_println_statement_atomicity.go:50	heap -> absent	unexplained -> -
-	src  defer wait.Done()
-	goc  col 10  heap  struct_code_uintptr__receiver__sync_WaitGroup  [front end: method-value-descriptor in main.main.func.49.6]
-	     unexplained      the walk found a use it could not prove local
 runtime_range_target_forms.go:98	mixed -> frame	call-retains -> -
 	src  expect("slice key into a package-level variable, read elsewhere", fmt.Sprintf("%d", readGlobalIndex()), "2")
 	goc  col 80  frame  struct_values__1_any__payload0_int  [ir pass: heap-alloc-candidate in main.sliceTargets]
@@ -4424,8 +4271,7 @@ runtime_range_target_forms.go:137	heap -> frame	loop-carried -> -
 runtime_range_target_forms.go:143	heap -> absent	stored-in-object -> -
 	src  for _, box.value = range numbers {
 	goc  col 9  heap  int  [ir pass: heap-alloc-candidate in main.sliceTargets]
-	     stored-in-object write barrier into non-local storage
-	     at               testdata/runtime_range_target_forms.go:143:9
+	     stored-in-object write barrier into a candidate
 runtime_range_target_forms.go:144	heap -> frame	loop-carried -> -
 	src  observed += fmt.Sprintf("%v|", box.value)
 	goc  col 27  heap  1_any  [ir pass: heap-alloc-candidate in main.sliceTargets]
@@ -4472,7 +4318,7 @@ runtime_reflect_call_aggregate_matrix.go:70	heap -> frame	unexplained -> -
 	src  results := reflect.ValueOf(function).Call([]reflect.Value{reflect.ValueOf(argument)})
 	goc  col 44  heap  1_reflect_Value  [front end: slice-literal-backing in main.callReflectAggregateMatrix]
 	     unexplained      in is used here in a way the walk cannot prove keeps it local
-	     at               /home/evan/.ccwork/ws/gcdiff-reasons/repo/stdlib/src/reflect/value.go:457:13
+	     at               /home/evan/.ccwork/ws/wave6-gate/repo/stdlib/src/reflect/value.go:457:13
 	gc   col 59  frame  slice  []reflect.Value{...}
 runtime_reflect_call_aggregate_matrix.go:105	heap -> absent	stored-in-object -> -
 	src  text:  "runtime",
@@ -4510,13 +4356,13 @@ runtime_reflect_method_metadata.go:27	heap -> frame	unexplained -> -
 	src  results := method.Func.Call([]reflect.Value{
 	goc  col 30  heap  2_reflect_Value  [front end: slice-literal-backing in main.main]
 	     unexplained      in is used here in a way the walk cannot prove keeps it local
-	     at               /home/evan/.ccwork/ws/gcdiff-reasons/repo/stdlib/src/reflect/value.go:457:13
+	     at               /home/evan/.ccwork/ws/wave6-gate/repo/stdlib/src/reflect/value.go:457:13
 	gc   col 45  frame  slice  []reflect.Value{...}
 runtime_reflect_set_fields.go:11	heap -> frame	unexplained -> -
 	src  payload := &reflectSetPayload{}
 	goc  col 13  heap  main_reflectSetPayload  [front end: composite-literal in main.main]
 	     unexplained      i is used here in a way the walk cannot prove keeps it local
-	     at               /home/evan/.ccwork/ws/gcdiff-reasons/repo/stdlib/src/reflect/value.go:159:45
+	     at               /home/evan/.ccwork/ws/wave6-gate/repo/stdlib/src/reflect/value.go:159:45
 	gc   col 13  frame  object  &reflectSetPayload{}
 runtime_reflect_type_metadata.go:11	mixed -> frame	stored-in-object -> -
 	src  valueType := reflect.TypeOf(metadataPayload{})
@@ -4529,17 +4375,13 @@ runtime_reflect_value_call.go:11	heap -> frame	unexplained -> -
 	src  arguments := []reflect.Value{
 	goc  col 15  heap  2_reflect_Value  [front end: slice-literal-backing in main.main]
 	     unexplained      in is used here in a way the walk cannot prove keeps it local
-	     at               /home/evan/.ccwork/ws/gcdiff-reasons/repo/stdlib/src/reflect/value.go:457:13
+	     at               /home/evan/.ccwork/ws/wave6-gate/repo/stdlib/src/reflect/value.go:457:13
 	gc   col 30  frame  slice  []reflect.Value{...}
 runtime_scheduler_gc_churn.go:22	heap -> absent	stored-in-object -> -
 	src  worker := worker
 	goc  col 3  heap  int  [ir pass: heap-alloc-candidate in main.main]
 	     stored-in-object write barrier into a candidate
 	     at               testdata/runtime_scheduler_gc_churn.go:23:6
-runtime_scheduler_gc_churn.go:24	heap -> absent	unexplained -> -
-	src  defer wait.Done()
-	goc  col 10  heap  struct_code_uintptr__receiver__sync_WaitGroup  [front end: method-value-descriptor in main.main.func.23.6]
-	     unexplained      the walk found a use it could not prove local
 runtime_scheduler_ring_handoff.go:16	heap -> absent	closure-captured -> -
 	src  go runRingWorker(input, output, done)
 	goc  col 3  heap  struct_code_uintptr__argument0___chan_int__argum  [ir pass: heap-alloc-candidate in main.main]
@@ -4583,18 +4425,6 @@ runtime_stack_copy_roots.go:152	heap -> absent	closure-captured -> -
 	goc  col 2  heap  struct_code_uintptr__argument0__sync_WaitGroup__  [ir pass: heap-alloc-candidate in main.main]
 	     closure-captured argument 0 of $runtime.newproc escapes
 	     at               testdata/runtime_stack_copy_roots.go:152:41
-runtime_stack_growth.go:24	heap -> frame	call-opaque -> -
-	src  root := &payload{
-	goc  col 10  heap  main_payload  [front end: composite-literal in main.main]
-	     call-opaque      passed to main.descend, which the walk is already inside: it breaks the recursion by answering "escapes"
-	     at               testdata/runtime_stack_growth.go:20:26
-	gc   col 10  frame  object  &payload{...}
-runtime_stack_growth.go:26	heap -> frame	call-opaque -> -
-	src  next:  &payload{value: 25},
-	goc  col 10  heap  main_payload  [front end: composite-literal in main.main]
-	     call-opaque      passed to main.descend, which the walk is already inside: it breaks the recursion by answering "escapes"
-	     at               testdata/runtime_stack_growth.go:20:26
-	gc   col 10  frame  object  &payload{...}
 runtime_stack_scan_blocked_goroutines.go:104	heap -> absent	stored-in-object -> -
 	src  condition := sync.NewCond(&condLock)
 	goc  col 2  heap  sync_Cond  [ir pass: heap-alloc-candidate in main.main]
@@ -4605,10 +4435,6 @@ runtime_stack_scan_callfree_loop.go:145	heap -> absent	closure-captured -> -
 	goc  col 2  heap  struct_code_uintptr__argument0___chan_struct____  [ir pass: heap-alloc-candidate in main.main]
 	     closure-captured argument 0 of $runtime.newproc escapes
 	     at               testdata/runtime_stack_scan_callfree_loop.go:145:22
-runtime_stack_scan_loop_safepoints.go:73	heap -> absent	unexplained -> -
-	src  defer live.Unlock()
-	goc  col 8  heap  struct_code_uintptr__receiver__sync_Mutex  [front end: method-value-descriptor in main.stillLive]
-	     unexplained      the walk found a use it could not prove local
 runtime_stack_scan_syscall.go:86	heap -> absent	stored-in-object -> -
 	src  polledReader, polledWriter, err := os.Pipe()
 	goc  col 2  heap  os_File  [ir pass: heap-alloc-candidate in main.main]
@@ -4635,39 +4461,11 @@ runtime_sync_map.go:15	heap -> absent	stored-in-object -> -
 	goc  col 2  heap  int  [ir pass: heap-alloc-candidate in main.main]
 	     stored-in-object write barrier into a candidate
 	     at               testdata/runtime_sync_map.go:16:15
-runtime_sync_mutex_defer.go:12	heap -> absent	unexplained -> -
-	src  defer mutex.Unlock()
-	goc  col 10  heap  struct_code_uintptr__receiver__sync_Mutex  [front end: method-value-descriptor in main.main.func.10.3]
-	     unexplained      the walk found a use it could not prove local
-runtime_sync_once_concurrent.go:13	heap -> absent	unexplained -> -
-	src  defer wait.Done()
-	goc  col 10  heap  struct_code_uintptr__receiver__sync_WaitGroup  [front end: method-value-descriptor in main.main.func.12.6]
-	     unexplained      the walk found a use it could not prove local
-runtime_sync_rwmutex_readers.go:14	heap -> absent	unexplained -> -
-	src  defer wait.Done()
-	goc  col 10  heap  struct_code_uintptr__receiver__sync_WaitGroup  [front end: method-value-descriptor in main.main.func.13.6]
-	     unexplained      the walk found a use it could not prove local
 runtime_sync_waitgroup_mutex.go:14	heap -> absent	stored-in-object -> -
 	src  index := index
 	goc  col 3  heap  int  [ir pass: heap-alloc-candidate in main.main]
 	     stored-in-object write barrier into a candidate
 	     at               testdata/runtime_sync_waitgroup_mutex.go:16:6
-runtime_sync_waitgroup_mutex.go:17	heap -> absent	unexplained -> -
-	src  defer wait.Done()
-	goc  col 10  heap  struct_code_uintptr__receiver__sync_WaitGroup  [front end: method-value-descriptor in main.main.func.16.6]
-	     unexplained      the walk found a use it could not prove local
-runtime_ticker_multi_tick.go:7	heap -> absent	unexplained -> -
-	src  defer ticker.Stop()
-	goc  col 8  heap  struct_code_uintptr__receiver__time_Ticker  [front end: method-value-descriptor in main.main]
-	     unexplained      the walk found a use it could not prove local
-runtime_ticker_stop.go:7	heap -> absent	unexplained -> -
-	src  defer ticker.Stop()
-	goc  col 8  heap  struct_code_uintptr__receiver__time_Ticker  [front end: method-value-descriptor in main.main]
-	     unexplained      the walk found a use it could not prove local
-runtime_time_afterfunc.go:10	heap -> absent	unexplained -> -
-	src  defer timer.Stop()
-	goc  col 8  heap  struct_code_uintptr__receiver__time_Timer  [front end: method-value-descriptor in main.main]
-	     unexplained      the walk found a use it could not prove local
 runtime_unbuffered_pingpong.go:13	heap -> absent	closure-captured -> -
 	src  go pong(left, right)
 	goc  col 2  heap  struct_code_uintptr__argument0_chan_int__argumen  [ir pass: heap-alloc-candidate in main.main]
@@ -4678,10 +4476,6 @@ runtime_waitgroup_reuse.go:5	heap -> absent	stored-in-object -> -
 	goc  col 1  heap  int  [ir pass: heap-alloc-candidate in main.runWaitGroupRound]
 	     stored-in-object write barrier into a candidate
 	     at               testdata/runtime_waitgroup_reuse.go:10:6
-runtime_waitgroup_reuse.go:11	heap -> absent	unexplained -> -
-	src  defer wait.Done()
-	goc  col 10  heap  struct_code_uintptr__receiver__sync_WaitGroup  [front end: method-value-descriptor in main.runWaitGroupRound.func.10.6]
-	     unexplained      the walk found a use it could not prove local
 runtime_worker_fanin_gc.go:26	heap -> absent	closure-captured -> -
 	src  go worker(input, output)
 	goc  col 3  heap  struct_code_uintptr__argument0___chan__main_fani  [ir pass: heap-alloc-candidate in main.main]
@@ -4717,16 +4511,6 @@ stdlib_encoding_gob_roundtrip.go:21	mixed -> frame	stored-in-object -> -
 	     stored-in-object store into non-local storage
 	     at               testdata/stdlib_encoding_gob_roundtrip.go:21:15
 	gc   col 25  frame  object  gobPayload{}
-stdlib_filepath_glob_clean.go:13	heap -> absent	closure-captured -> -
-	src  defer os.RemoveAll(directory)
-	goc  col 2  heap  struct_code_uintptr__function_func_path_string__  [ir pass: heap-alloc-candidate in main.main]
-	     closure-captured argument 0 of $runtime.deferproc escapes
-	     at               testdata/stdlib_filepath_glob_clean.go:13:21
-stdlib_fstest_mapfs.go:53	heap -> absent	stored-in-object -> -
-	src  var visited []string
-	goc  col 2  heap  string  [ir pass: heap-alloc-candidate in main.main]
-	     stored-in-object write barrier into a candidate
-	     at               testdata/stdlib_fstest_mapfs.go:54:36
 stdlib_http_cookiejar.go:17	heap -> frame	stored-in-object -> -
 	src  {Name: "host", Value: "api", Path: "/"},
 	goc  col 3  heap  net_http_Cookie  [ir pass: heap-alloc-candidate in main.main]
@@ -4751,14 +4535,6 @@ stdlib_http_cookiejar.go:20	heap -> frame	stored-in-object -> -
 	     stored-in-object store into non-local storage
 	     at               testdata/stdlib_http_cookiejar.go:20:56
 	gc   col 3  frame  object  &http.Cookie{...}
-stdlib_http_multipart_form.go:38	heap -> absent	unexplained -> -
-	src  defer request.MultipartForm.RemoveAll()
-	goc  col 8  heap  struct_code_uintptr__receiver__mime_multipart_Fo  [front end: method-value-descriptor in main.main]
-	     unexplained      the walk found a use it could not prove local
-stdlib_http_multipart_form.go:47	heap -> absent	unexplained -> -
-	src  defer upload.Close()
-	goc  col 8  heap  struct_code_uintptr__receiver_io_Closer  [front end: method-value-descriptor in main.main]
-	     unexplained      the walk found a use it could not prove local
 stdlib_http_redirect_keepalive.go:24	heap -> frame	unexplained -> -
 	src  http.SetCookie(response, &http.Cookie{
 	goc  col 29  heap  net_http_Cookie  [front end: composite-literal in main.main.func.16.48]
@@ -4774,11 +4550,6 @@ stdlib_io_pipe_roundtrip.go:6	heap -> absent	stored-in-object -> -
 	goc  col 2  heap  io_PipeReader  [ir pass: heap-alloc-candidate in main.main]
 	     stored-in-object write barrier into a candidate
 	     at               testdata/stdlib_io_pipe_roundtrip.go:9:5
-stdlib_ioutil_tempfile.go:13	heap -> absent	closure-captured -> -
-	src  defer os.RemoveAll(directory)
-	goc  col 2  heap  struct_code_uintptr__function_func_path_string__  [ir pass: heap-alloc-candidate in main.main]
-	     closure-captured argument 0 of $runtime.deferproc escapes
-	     at               testdata/stdlib_ioutil_tempfile.go:13:21
 stdlib_iter_pull.go:5	heap -> absent	stored-in-object -> -
 	src  func count(limit int) iter.Seq[int] {
 	goc  col 1  heap  int  [ir pass: heap-alloc-candidate in main.count]
@@ -4787,12 +4558,6 @@ stdlib_iter_pull.go:5	heap -> absent	stored-in-object -> -
 	goc  col 1  heap  int  [ir pass: heap-alloc-candidate in main.main]
 	     stored-in-object write barrier into a candidate
 	     at               testdata/stdlib_iter_pull.go:6:9
-stdlib_maps_slices.go:25	heap -> frame	call-opaque -> -
-	src  values := []int{5, 1, 3, 2, 4}
-	goc  col 12  heap  5_int  [front end: slice-literal-backing in main.main]
-	     call-opaque      passed to slices.pdqsortOrdered, which the walk is already inside: it breaks the recursion by answering "escapes"
-	     at               /home/evan/.ccwork/ws/gcdiff-reasons/repo/stdlib/src/slices/zsortordered.go:123:19
-	gc   col 17  frame  slice  []int{...}
 stdlib_math_big_rat_int.go:15	heap -> frame	call-retains -> -
 	src  delta := new(big.Rat).Sub(denominator, numerator)
 	goc  col 11  heap  math_big_Rat  [ir pass: heap-alloc-candidate in main.main]
@@ -4804,32 +4569,16 @@ stdlib_netpoll_close_unblocks_read.go:10	heap -> absent	stored-in-object -> -
 	goc  col 2  heap  net_Listener  [ir pass: heap-alloc-candidate in main.main]
 	     stored-in-object write barrier into a candidate
 	     at               testdata/stdlib_netpoll_close_unblocks_read.go:17:5
-stdlib_netpoll_close_unblocks_read.go:14	heap -> absent	unexplained -> -
-	src  defer listener.Close()
-	goc  col 8  heap  struct_code_uintptr__receiver_net_Listener  [front end: method-value-descriptor in main.main]
-	     unexplained      the walk found a use it could not prove local
 stdlib_netpoll_close_unblocks_read.go:25	heap -> absent	stored-in-object -> -
 	src  client, err := net.DialTimeout("tcp", listener.Addr().String(), time.Second)
 	goc  col 2  heap  net_Conn  [ir pass: heap-alloc-candidate in main.main]
 	     stored-in-object write barrier into a candidate
 	     at               testdata/stdlib_netpoll_close_unblocks_read.go:33:5
-stdlib_netpoll_close_unblocks_read.go:30	heap -> absent	unexplained -> -
-	src  defer server.Close()
-	goc  col 8  heap  struct_code_uintptr__receiver_net_Conn  [front end: method-value-descriptor in main.main]
-	     unexplained      the walk found a use it could not prove local
 stdlib_netpoll_pipe_afterfunc_close.go:9	heap -> absent	stored-in-object -> -
 	src  reader, writer, err := os.Pipe()
 	goc  col 2  heap  os_File  [ir pass: heap-alloc-candidate in main.main]
 	     stored-in-object write barrier into a candidate
 	     at               testdata/stdlib_netpoll_pipe_afterfunc_close.go:15:47
-stdlib_netpoll_pipe_afterfunc_close.go:13	heap -> absent	unexplained -> -
-	src  defer reader.Close()
-	goc  col 8  heap  struct_code_uintptr__receiver__os_File  [front end: method-value-descriptor in main.main]
-	     unexplained      the walk found a use it could not prove local
-stdlib_netpoll_pipe_afterfunc_close.go:22	heap -> absent	unexplained -> -
-	src  defer timer.Stop()
-	goc  col 8  heap  struct_code_uintptr__receiver__time_Timer  [front end: method-value-descriptor in main.main]
-	     unexplained      the walk found a use it could not prove local
 stdlib_netpoll_pipe_afterfunc_close.go:24	heap -> frame	call-retains -> -
 	src  buffer := make([]byte, 1)
 	goc  col 25  heap  1_byte  [ir pass: heap-alloc-candidate in main.main]
@@ -4841,38 +4590,18 @@ stdlib_netpoll_pipe_close_unblocks_read.go:9	heap -> absent	stored-in-object -> 
 	goc  col 2  heap  os_File  [ir pass: heap-alloc-candidate in main.main]
 	     stored-in-object write barrier into a candidate
 	     at               testdata/stdlib_netpoll_pipe_close_unblocks_read.go:16:5
-stdlib_netpoll_pipe_close_unblocks_read.go:13	heap -> absent	unexplained -> -
-	src  defer reader.Close()
-	goc  col 8  heap  struct_code_uintptr__receiver__os_File  [front end: method-value-descriptor in main.main]
-	     unexplained      the walk found a use it could not prove local
 stdlib_netpoll_pipe_close_unblocks_read.go:17	heap -> frame	call-retains -> -
 	src  buffer := make([]byte, 1)
 	goc  col 26  heap  1_byte  [ir pass: heap-alloc-candidate in main.main.func.16.5]
 	     call-retains     argument 1 of $os.File.Read escapes
 	     at               testdata/stdlib_netpoll_pipe_close_unblocks_read.go:18:25
 	gc   col 17  frame  slice  make([]byte, 1)
-stdlib_netpoll_pipe_deadline.go:13	heap -> absent	unexplained -> -
-	src  defer reader.Close()
-	goc  col 8  heap  struct_code_uintptr__receiver__os_File  [front end: method-value-descriptor in main.main]
-	     unexplained      the walk found a use it could not prove local
-stdlib_netpoll_pipe_deadline.go:14	heap -> absent	unexplained -> -
-	src  defer writer.Close()
-	goc  col 8  heap  struct_code_uintptr__receiver__os_File  [front end: method-value-descriptor in main.main]
-	     unexplained      the walk found a use it could not prove local
 stdlib_netpoll_pipe_deadline.go:23	heap -> frame	call-retains -> -
 	src  buffer := make([]byte, 1)
 	goc  col 25  heap  1_byte  [ir pass: heap-alloc-candidate in main.main]
 	     call-retains     argument 1 of $os.File.Read escapes
 	     at               testdata/stdlib_netpoll_pipe_deadline.go:24:23
 	gc   col 16  frame  slice  make([]byte, 1)
-stdlib_netpoll_pipe_past_deadline.go:13	heap -> absent	unexplained -> -
-	src  defer reader.Close()
-	goc  col 8  heap  struct_code_uintptr__receiver__os_File  [front end: method-value-descriptor in main.main]
-	     unexplained      the walk found a use it could not prove local
-stdlib_netpoll_pipe_past_deadline.go:14	heap -> absent	unexplained -> -
-	src  defer writer.Close()
-	goc  col 8  heap  struct_code_uintptr__receiver__os_File  [front end: method-value-descriptor in main.main]
-	     unexplained      the walk found a use it could not prove local
 stdlib_netpoll_pipe_past_deadline.go:23	heap -> frame	call-retains -> -
 	src  buffer := make([]byte, 1)
 	goc  col 25  heap  1_byte  [ir pass: heap-alloc-candidate in main.main]
@@ -4884,14 +4613,6 @@ stdlib_netpoll_pipe_roundtrip.go:9	heap -> absent	stored-in-object -> -
 	goc  col 2  heap  os_File  [ir pass: heap-alloc-candidate in main.main]
 	     stored-in-object write barrier into a candidate
 	     at               testdata/stdlib_netpoll_pipe_roundtrip.go:17:5
-stdlib_netpoll_pipe_roundtrip.go:13	heap -> absent	unexplained -> -
-	src  defer reader.Close()
-	goc  col 8  heap  struct_code_uintptr__receiver__os_File  [front end: method-value-descriptor in main.main]
-	     unexplained      the walk found a use it could not prove local
-stdlib_netpoll_pipe_roundtrip.go:14	heap -> absent	unexplained -> -
-	src  defer writer.Close()
-	goc  col 8  heap  struct_code_uintptr__receiver__os_File  [front end: method-value-descriptor in main.main]
-	     unexplained      the walk found a use it could not prove local
 stdlib_netpoll_stress_pipe_close_churn.go:10	heap -> absent	stored-in-object -> -
 	src  reader, writer, err := os.Pipe()
 	goc  col 3  heap  os_File  [ir pass: heap-alloc-candidate in main.main]
@@ -4909,91 +4630,26 @@ stdlib_netpoll_stress_pipe_deadline_reset.go:22	heap -> frame	call-retains -> -
 	     call-retains     argument 1 of $os.File.Read escapes
 	     at               testdata/stdlib_netpoll_stress_pipe_deadline_reset.go:23:24
 	gc   col 17  frame  slice  make([]byte, 1)
-stdlib_netpoll_stress_tcp_churn.go:16	heap -> absent	unexplained -> -
-	src  defer listener.Close()
-	goc  col 8  heap  struct_code_uintptr__receiver_net_Listener  [front end: method-value-descriptor in main.main]
-	     unexplained      the walk found a use it could not prove local
 stdlib_netpoll_stress_tcp_churn.go:21	heap -> absent	closure-captured -> -
 	src  go serveTCPStressConnection(listener, byte(index), done)
 	goc  col 3  heap  struct_code_uintptr__argument0_net_Listener__arg  [ir pass: heap-alloc-candidate in main.main]
 	     closure-captured argument 0 of $runtime.newproc escapes
 	     at               testdata/stdlib_netpoll_stress_tcp_churn.go:21:54
-stdlib_netpoll_stress_tcp_churn.go:65	heap -> absent	unexplained -> -
-	src  defer connection.Close()
-	goc  col 8  heap  struct_code_uintptr__receiver_net_Conn  [front end: method-value-descriptor in main.serveTCPStressConnection]
-	     unexplained      the walk found a use it could not prove local
-stdlib_netpoll_stress_udp_burst.go:16	heap -> absent	unexplained -> -
-	src  defer connection.Close()
-	goc  col 8  heap  struct_code_uintptr__receiver__net_conn  [front end: method-value-descriptor in main.main]
-	     unexplained      the walk found a use it could not prove local
-stdlib_netpoll_syscall_socket_listen.go:17	heap -> absent	closure-captured -> -
-	src  defer syscall.Close(fileDescriptor)
-	goc  col 2  heap  struct_code_uintptr__function_func_fd_int___err_  [ir pass: heap-alloc-candidate in main.main]
-	     closure-captured argument 0 of $runtime.deferproc escapes
-	     at               testdata/stdlib_netpoll_syscall_socket_listen.go:17:22
-stdlib_netpoll_tcp_accept_deadline.go:13	heap -> absent	unexplained -> -
-	src  defer listener.Close()
-	goc  col 8  heap  struct_code_uintptr__receiver_net_Listener  [front end: method-value-descriptor in main.main]
-	     unexplained      the walk found a use it could not prove local
 stdlib_netpoll_tcp_concurrent_clients.go:10	heap -> absent	stored-in-object -> -
 	src  listener, err := net.Listen("tcp", "127.0.0.1:0")
 	goc  col 2  heap  net_Listener  [ir pass: heap-alloc-candidate in main.main]
 	     stored-in-object write barrier into a candidate
 	     at               testdata/stdlib_netpoll_tcp_concurrent_clients.go:18:5
-stdlib_netpoll_tcp_concurrent_clients.go:14	heap -> absent	unexplained -> -
-	src  defer listener.Close()
-	goc  col 8  heap  struct_code_uintptr__receiver_net_Listener  [front end: method-value-descriptor in main.main]
-	     unexplained      the walk found a use it could not prove local
-stdlib_netpoll_tcp_concurrent_clients.go:25	heap -> absent	unexplained -> -
-	src  defer connection.Close()
-	goc  col 11  heap  struct_code_uintptr__receiver_net_Conn  [front end: method-value-descriptor in main.main.func.24.7]
-	     unexplained      the walk found a use it could not prove local
-stdlib_netpoll_tcp_concurrent_clients.go:43	heap -> absent	unexplained -> -
-	src  defer connection.Close()
-	goc  col 10  heap  struct_code_uintptr__receiver_net_Conn  [front end: method-value-descriptor in main.main.func.38.6]
-	     unexplained      the walk found a use it could not prove local
 stdlib_netpoll_tcp_echo.go:10	heap -> absent	stored-in-object -> -
 	src  listener, err := net.Listen("tcp", "127.0.0.1:0")
 	goc  col 2  heap  net_Listener  [ir pass: heap-alloc-candidate in main.main]
 	     stored-in-object write barrier into a candidate
 	     at               testdata/stdlib_netpoll_tcp_echo.go:19:5
-stdlib_netpoll_tcp_echo.go:16	heap -> absent	unexplained -> -
-	src  defer listener.Close()
-	goc  col 8  heap  struct_code_uintptr__receiver_net_Listener  [front end: method-value-descriptor in main.main]
-	     unexplained      the walk found a use it could not prove local
-stdlib_netpoll_tcp_echo.go:26	heap -> absent	unexplained -> -
-	src  defer connection.Close()
-	goc  col 9  heap  struct_code_uintptr__receiver_net_Conn  [front end: method-value-descriptor in main.main.func.19.5]
-	     unexplained      the walk found a use it could not prove local
-stdlib_netpoll_tcp_echo.go:52	heap -> absent	unexplained -> -
-	src  defer client.Close()
-	goc  col 8  heap  struct_code_uintptr__receiver_net_Conn  [front end: method-value-descriptor in main.main]
-	     unexplained      the walk found a use it could not prove local
 stdlib_netpoll_tcp_read_deadline.go:9	heap -> absent	stored-in-object -> -
 	src  listener, err := net.Listen("tcp", "127.0.0.1:0")
 	goc  col 2  heap  net_Listener  [ir pass: heap-alloc-candidate in main.main]
 	     stored-in-object write barrier into a candidate
 	     at               testdata/stdlib_netpoll_tcp_read_deadline.go:16:5
-stdlib_netpoll_tcp_read_deadline.go:13	heap -> absent	unexplained -> -
-	src  defer listener.Close()
-	goc  col 8  heap  struct_code_uintptr__receiver_net_Listener  [front end: method-value-descriptor in main.main]
-	     unexplained      the walk found a use it could not prove local
-stdlib_netpoll_tcp_read_deadline.go:28	heap -> absent	unexplained -> -
-	src  defer client.Close()
-	goc  col 8  heap  struct_code_uintptr__receiver_net_Conn  [front end: method-value-descriptor in main.main]
-	     unexplained      the walk found a use it could not prove local
-stdlib_netpoll_tcp_read_deadline.go:31	heap -> absent	unexplained -> -
-	src  defer server.Close()
-	goc  col 8  heap  struct_code_uintptr__receiver_net_Conn  [front end: method-value-descriptor in main.main]
-	     unexplained      the walk found a use it could not prove local
-stdlib_netpoll_udp_deadline.go:17	heap -> absent	unexplained -> -
-	src  defer connection.Close()
-	goc  col 8  heap  struct_code_uintptr__receiver__net_conn  [front end: method-value-descriptor in main.main]
-	     unexplained      the walk found a use it could not prove local
-stdlib_netpoll_udp_loopback.go:14	heap -> absent	unexplained -> -
-	src  defer connection.Close()
-	goc  col 8  heap  struct_code_uintptr__receiver__net_conn  [front end: method-value-descriptor in main.main]
-	     unexplained      the walk found a use it could not prove local
 stdlib_os_exec_goroutine_shape.go:9	heap -> absent	stored-in-object -> -
 	src  func writerDescriptor(writer io.Writer, goroutines []func() error) (*os.File, []func() error) {
 	goc  col 1  heap  io_Writer  [ir pass: heap-alloc-candidate in main.writerDescriptor]
@@ -5004,11 +4660,6 @@ stdlib_os_exec_goroutine_shape.go:10	heap -> absent	stored-in-object -> -
 	goc  col 2  heap  os_File  [ir pass: heap-alloc-candidate in main.writerDescriptor]
 	     stored-in-object write barrier into a candidate
 	     at               testdata/stdlib_os_exec_goroutine_shape.go:15:34
-stdlib_os_file_roundtrip.go:13	heap -> absent	closure-captured -> -
-	src  defer os.RemoveAll(directory)
-	goc  col 2  heap  struct_code_uintptr__function_func_path_string__  [ir pass: heap-alloc-candidate in main.main]
-	     closure-captured argument 0 of $runtime.deferproc escapes
-	     at               testdata/stdlib_os_file_roundtrip.go:13:21
 stdlib_os_file_roundtrip.go:26	heap -> frame	call-retains -> -
 	src  buffer := make([]byte, 10)
 	goc  col 25  heap  10_byte  [ir pass: heap-alloc-candidate in main.main]
@@ -5072,35 +4723,6 @@ stdlib_os_pipe_returned_closure_close.go:9	heap -> absent	stored-in-object -> -
 	goc  col 2  heap  os_File  [ir pass: heap-alloc-candidate in main.makeReaderCloser]
 	     stored-in-object write barrier into a candidate
 	     at               testdata/stdlib_os_pipe_returned_closure_close.go:14:17
-stdlib_os_readdir_walkdir.go:14	heap -> absent	closure-captured -> -
-	src  defer os.RemoveAll(directory)
-	goc  col 2  heap  struct_code_uintptr__function_func_path_string__  [ir pass: heap-alloc-candidate in main.main]
-	     closure-captured argument 0 of $runtime.deferproc escapes
-	     at               testdata/stdlib_os_readdir_walkdir.go:14:21
-stdlib_os_readdir_walkdir.go:35	heap -> absent	stored-in-object -> -
-	src  files := 0
-	goc  col 2  heap  int  [ir pass: heap-alloc-candidate in main.main]
-	     stored-in-object write barrier into a candidate
-	     at               testdata/stdlib_os_readdir_walkdir.go:37:36
-stdlib_os_readdir_walkdir.go:36	heap -> absent	stored-in-object -> -
-	src  directories := 0
-	goc  col 2  heap  int  [ir pass: heap-alloc-candidate in main.main]
-	     stored-in-object write barrier into a candidate
-	     at               testdata/stdlib_os_readdir_walkdir.go:37:36
-stdlib_os_rename_stat.go:13	heap -> absent	closure-captured -> -
-	src  defer os.RemoveAll(directory)
-	goc  col 2  heap  struct_code_uintptr__function_func_path_string__  [ir pass: heap-alloc-candidate in main.main]
-	     closure-captured argument 0 of $runtime.deferproc escapes
-	     at               testdata/stdlib_os_rename_stat.go:13:21
-stdlib_signal_atomic_contention.go:19	heap -> absent	unexplained -> -
-	src  defer workers.Done()
-	goc  col 10  heap  struct_code_uintptr__receiver__sync_WaitGroup  [front end: method-value-descriptor in main.main.func.18.6]
-	     unexplained      the walk found a use it could not prove local
-stdlib_signal_during_gc.go:14	heap -> absent	closure-captured -> -
-	src  defer signal.Stop(signals)
-	goc  col 2  heap  struct_code_uintptr__function_func_c_chan___os_S  [ir pass: heap-alloc-candidate in main.main]
-	     closure-captured argument 0 of $runtime.deferproc escapes
-	     at               testdata/stdlib_signal_during_gc.go:14:20
 stdlib_signal_during_gc.go:23	heap -> frame	stored-in-object -> -
 	src  values := make([]*int, 1024)
 	goc  col 28  heap  1024__int  [ir pass: heap-alloc-candidate in main.main.func.17.5]
@@ -5113,34 +4735,11 @@ stdlib_signal_during_gc.go:29	heap -> frame	stored-in-object -> -
 	     stored-in-object store into non-local storage
 	     at               testdata/stdlib_signal_during_gc.go:29:23
 	gc   col 23  frame  object  values
-stdlib_signal_during_netpoll.go:16	heap -> absent	unexplained -> -
-	src  defer listener.Close()
-	goc  col 8  heap  struct_code_uintptr__receiver_net_Listener  [front end: method-value-descriptor in main.main]
-	     unexplained      the walk found a use it could not prove local
-stdlib_signal_during_netpoll.go:22	heap -> absent	unexplained -> -
-	src  defer client.Close()
-	goc  col 8  heap  struct_code_uintptr__receiver_net_Conn  [front end: method-value-descriptor in main.main]
-	     unexplained      the walk found a use it could not prove local
 stdlib_signal_during_netpoll.go:24	heap -> absent	stored-in-object -> -
 	src  server, err := listener.Accept()
 	goc  col 17  heap  net_Conn  [ir pass: heap-alloc-candidate in main.main]
 	     stored-in-object write barrier into a candidate
 	     at               testdata/stdlib_signal_during_netpoll.go:31:5
-stdlib_signal_during_netpoll.go:28	heap -> absent	unexplained -> -
-	src  defer server.Close()
-	goc  col 8  heap  struct_code_uintptr__receiver_net_Conn  [front end: method-value-descriptor in main.main]
-	     unexplained      the walk found a use it could not prove local
-stdlib_signal_during_netpoll.go:41	heap -> absent	closure-captured -> -
-	src  defer signal.Stop(signals)
-	goc  col 2  heap  struct_code_uintptr__function_func_c_chan___os_S  [ir pass: heap-alloc-candidate in main.main]
-	     closure-captured argument 0 of $runtime.deferproc escapes
-	     at               testdata/stdlib_signal_during_netpoll.go:41:20
-stdlib_slices_string_sort.go:6	heap -> frame	call-opaque -> -
-	src  keys := []string{"gamma", "alpha", "beta"}
-	goc  col 10  heap  3_string  [front end: slice-literal-backing in main.main]
-	     call-opaque      passed to slices.pdqsortOrdered, which the walk is already inside: it breaks the recursion by answering "escapes"
-	     at               /home/evan/.ccwork/ws/gcdiff-reasons/repo/stdlib/src/slices/zsortordered.go:123:19
-	gc   col 18  frame  slice  []string{...}
 stdlib_slog_structured.go:35	heap -> absent	call-retains -> -
 	src  "compiled",
 	goc  col 3  heap  struct_values__4_any__payload1_main_compilerStat  [ir pass: heap-alloc-candidate in main.main]
@@ -5151,21 +4750,8 @@ stdlib_smtp_session.go:15	heap -> absent	closure-captured -> -
 	goc  col 2  heap  struct_code_uintptr__argument0_net_Conn__argumen  [ir pass: heap-alloc-candidate in main.main]
 	     closure-captured argument 0 of $runtime.newproc escapes
 	     at               testdata/stdlib_smtp_session.go:15:33
-stdlib_smtp_session.go:50	heap -> absent	unexplained -> -
-	src  defer protocol.Close()
-	goc  col 8  heap  struct_code_uintptr__receiver__net_textproto_Con  [front end: method-value-descriptor in main.serveSMTP]
-	     unexplained      the walk found a use it could not prove local
-stdlib_sort_search_slice.go:6	heap -> frame	call-opaque -> -
-	src  values := []int{9, 1, 5, 3, 7}
-	goc  col 12  heap  5_int  [front end: slice-literal-backing in main.main]
-	     call-opaque      passed to slices.pdqsortOrdered, which the walk is already inside: it breaks the recursion by answering "escapes"
-	     at               /home/evan/.ccwork/ws/gcdiff-reasons/repo/stdlib/src/slices/zsortordered.go:123:19
-	gc   col 17  frame  slice  []int{...}
-stdlib_sort_search_slice.go:19	heap -> absent	stored-in-object,interface-boxed -> -
+stdlib_sort_search_slice.go:19	heap -> absent	interface-boxed -> -
 	src  records := []struct {
-	goc  col 2  heap  struct_name_string__score_int  [ir pass: heap-alloc-candidate in main.main]
-	     stored-in-object write barrier into a candidate
-	     at               testdata/stdlib_sort_search_slice.go:26:22
 	goc  col 13  heap  2_struct_name_string__score_int  [front end: slice-literal-backing in main.main]
 	     interface-boxed  converted to any, and boxing a []struct{name string; score int} makes fresh storage for the payload
 	     at               testdata/stdlib_sort_search_slice.go:26:13
@@ -5175,14 +4761,14 @@ stdlib_sync_once_map_cond.go:29	heap -> absent	stored-in-object -> -
 	     stored-in-object write barrier into a candidate
 	     at               testdata/stdlib_sync_once_map_cond.go:33:5
 
-## PLACEMENT DISAGREES, ONLY gc EXPLAINED: 1316 lines
+## PLACEMENT DISAGREES, ONLY gc EXPLAINED: 1329 lines
 
 gc heaps something here that goc does not, so gc is the only compiler with
 anything to say. This is the permissive direction, and gc's category is a direct
 statement of what it thinks publishes the object -- which is the fastest triage
 available for a line goc may be keeping in a frame wrongly.
 
-   1261  call-retains
+   1274  call-retains
      34  stored-in-object
       8  returned
       4  interface-boxed
@@ -5465,6 +5051,46 @@ runtime_append_growth_pointer_elements.go:25	absent -> heap	- -> call-retains
 	src  panic("append growth pointer elements were corrupted")
 	gc   col 9  heap  object  "append growth pointer elements were corrupted"
 	     call-retains     {heap} <- &{storage for "append growth pointer elements were corrupted"} via spill -> call parameter
+runtime_append_make_extension.go:43	absent -> heap	- -> call-retains
+	src  panic("grow shape wrong")
+	gc   col 9  heap  object  "grow shape wrong"
+	     call-retains     {heap} <- &{storage for "grow shape wrong"} via spill -> call parameter
+runtime_append_make_extension.go:47	absent -> heap	- -> call-retains
+	src  panic("extension not zeroed")
+	gc   col 9  heap  object  "extension not zeroed"
+	     call-retains     {heap} <- &{storage for "extension not zeroed"} via spill -> call parameter
+runtime_append_make_extension.go:56	absent -> heap	- -> call-retains
+	src  panic("wrong length after extension")
+	gc   col 9  heap  object  "wrong length after extension"
+	     call-retains     {heap} <- &{storage for "wrong length after extension"} via spill -> call parameter
+runtime_append_make_extension.go:59	absent -> heap	- -> call-retains
+	src  panic("existing elements lost")
+	gc   col 9  heap  object  "existing elements lost"
+	     call-retains     {heap} <- &{storage for "existing elements lost"} via spill -> call parameter
+runtime_append_make_extension.go:62	absent -> heap	- -> call-retains
+	src  panic("reused capacity not cleared")
+	gc   col 9  heap  object  "reused capacity not cleared"
+	     call-retains     {heap} <- &{storage for "reused capacity not cleared"} via spill -> call parameter
+runtime_append_make_extension.go:74	absent -> heap	- -> call-retains
+	src  panic("retained pointer element corrupted")
+	gc   col 9  heap  object  "retained pointer element corrupted"
+	     call-retains     {heap} <- &{storage for "retained pointer element corrupted"} via spill -> call parameter
+runtime_append_make_extension.go:78	absent -> heap	- -> call-retains
+	src  panic("pointer extension not cleared")
+	gc   col 10  heap  object  "pointer extension not cleared"
+	     call-retains     {heap} <- &{storage for "pointer extension not cleared"} via spill -> call parameter
+runtime_append_make_extension.go:86	absent -> heap	- -> call-retains
+	src  panic("slices.Grow wrong")
+	gc   col 9  heap  object  "slices.Grow wrong"
+	     call-retains     {heap} <- &{storage for "slices.Grow wrong"} via spill -> call parameter
+runtime_append_make_extension.go:92	absent -> heap	- -> call-retains
+	src  panic("negative extension did not panic")
+	gc   col 10  heap  object  "negative extension did not panic"
+	     call-retains     {heap} <- &{storage for "negative extension did not panic"} via spill -> call parameter
+runtime_append_make_extension.go:98	absent -> heap	- -> call-retains
+	src  panic("unreachable")
+	gc   col 8  heap  object  "unreachable"
+	     call-retains     {heap} <- &{storage for "unreachable"} via spill -> call parameter
 runtime_append_self_overlap.go:7	absent -> heap	- -> call-retains
 	src  panic("self append produced wrong length")
 	gc   col 9  heap  object  "self append produced wrong length"
@@ -5923,6 +5549,10 @@ runtime_defer_order_panic.go:25	absent -> heap	- -> call-retains
 	src  panic("defer order panic result mismatch")
 	gc   col 9  heap  object  "defer order panic result mismatch"
 	     call-retains     {heap} <- &{storage for "defer order panic result mismatch"} via spill -> call parameter
+runtime_defer_receiver_gc.go:43	absent -> heap	- -> call-retains
+	src  panic("deferred receiver did not survive the collector")
+	gc   col 9  heap  object  "deferred receiver did not survive the collector"
+	     call-retains     {heap} <- &{storage for "deferred receiver did not survive the collector"} via spill -> call parameter
 runtime_defer_replace_panic.go:6	absent -> heap	- -> call-retains
 	src  panic("defer did not replace panic")
 	gc   col 9  heap  object  "defer did not replace panic"
@@ -6424,6 +6054,11 @@ runtime_interface_pointer_equality_gc.go:22	absent -> heap	- -> call-retains
 	src  panic("interface pointer payload was corrupted")
 	gc   col 9  heap  object  "interface pointer payload was corrupted"
 	     call-retains     {heap} <- &{storage for "interface pointer payload was corrupted"} via spill -> call parameter
+runtime_interface_stack_gc.go:31	frame -> heap	- -> call-retains
+	src  value := &node{
+	goc  col 11  frame  main_node  [front end: composite-literal in main.main]
+	gc   col 11  heap  object  &node{...}
+	     call-retains     {heap} <- value via spill -> assign -> interface-converted -> call parameter
 runtime_interface_stack_gc.go:38	absent -> heap	- -> call-retains
 	src  panic("interface stack GC result mismatch")
 	gc   col 9  heap  object  "interface stack GC result mismatch"
@@ -10409,6 +10044,10 @@ stdlib_text_template_execute.go:17	absent -> heap	- -> call-retains
 	src  panic("template Parse failed")
 	gc   col 9  heap  object  "template Parse failed"
 	     call-retains     {heap} <- &{storage for "template Parse failed"} via spill -> call parameter
+stdlib_text_template_execute.go:24	absent -> heap	- -> call-retains
+	src  var output bytes.Buffer
+	gc   col 6  heap  object  output
+	     call-retains     {heap} <- template.wr via address-of -> interface-converted -> assign-pair -> call parameter
 stdlib_text_template_execute.go:26	absent -> heap	- -> call-retains
 	src  panic("template Execute failed")
 	gc   col 9  heap  object  "template Execute failed"

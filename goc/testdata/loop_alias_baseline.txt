@@ -20,7 +20,7 @@
 #     go test ./goc -run TestLoopAliasAudit -update-loop-alias-baseline
 #
 # and read the diff: every added line is an object two iterations can share.
-fabricated.go:1:1	main.nowhere	parked	a frame slot the loop does not re-create	fabricated.go:2:2
+?	bufio.Writer.WriteString	parked	a frame slot the loop does not re-create	?
 ?	encoding/gob.implementsInterface	parked	a frame slot the loop does not re-create	?
 ?	encoding/gob.isSent	parked	a frame slot the loop does not re-create	?
 ?	encoding/gob.validUserType	parked	a frame slot the loop does not re-create	?
