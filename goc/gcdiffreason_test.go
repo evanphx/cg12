@@ -7,6 +7,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"regexp"
 	"runtime"
 	"sort"
 	"strings"
@@ -62,6 +63,15 @@ const gcReasonDifferentialHeader = `# What each compiler says is the REASON an o
 # of each other and gc's is internal notation that moves between releases. The
 # host toolchain is recorded below for that reason; a diff against a run on a
 # different release is not a change in goc.
+#
+# Every position here is relative to the repository root, including the "at"
+# lines, which name the use that decided and can be inside the vendored standard
+# library. goc interns those absolutely -- it finds stdlib/ through
+# runtime.Caller -- so rendering them as the compiler produced them wrote the
+# generating machine's checkout into 42 lines of this file, and the same commit
+# in another directory then failed the comparison on paths alone. This file is
+# meant to be regenerable by anyone, anywhere; if a diff of it shows a path,
+# that has stopped being true.
 #
 `
 
@@ -121,7 +131,14 @@ func TestEscapeReasonDifferentialAgainstGC(t *testing.T) {
 	t.Logf("agree on placement, disagree on reason: %d lines", len(result.ReasonDisagreements()))
 	t.Logf("disagree on placement, agree on reason: %d lines", len(result.ReasonAgreementsAcrossPlacements()))
 
-	rendered := gcdiff.RenderReasons(gcReasonDifferentialHeader, goVersion, result)
+	// filepath.Dir of the vendored standard library is this checkout's root, and
+	// it is the root the `at:` positions are absolute against: the paths in them
+	// were interned by the same goc.StdlibRoot, in this same binary. Passing it
+	// is what keeps the rendered file the same bytes in every directory -- see
+	// gcdiff.relativeToRepository, and TestReasonPositionsAreRepositoryRelative
+	// below for the assertion that no absolute path survives.
+	rendered := gcdiff.RenderReasons(gcReasonDifferentialHeader, goVersion,
+		filepath.Dir(goc.StdlibRoot()), result)
 	if *updateGCReasonDifferential {
 		require.NoError(t, os.WriteFile(gcReasonDifferentialPath, []byte(rendered), 0o644))
 		t.Skip("output rewritten; rerun without -update-escape-gc-reason-differential to check it")
@@ -154,6 +171,31 @@ func TestEscapeReasonDifferentialAgainstGC(t *testing.T) {
 			"file, that is the whole explanation and the fix is to rerun with\n"+
 			"-update-escape-gc-reason-differential. Otherwise either goc's explanation for a\n"+
 			"placement changed or the placement did, and the diff says which lines.")
+}
+
+// TestReasonPositionsAreRepositoryRelative is the cheap half of the guarantee
+// that TestEscapeReasonDifferentialAgainstGC reproduces outside the directory it
+// was generated in.
+//
+// The expensive half is regenerating the file in a second checkout at a
+// different path and diffing the two, which is what proves it and which takes
+// ten minutes twice. This reads the committed bytes instead and takes no time at
+// all, so it runs in the ordinary suite: an absolute position in this file means
+// the generator has started emitting the generating machine's paths again, and
+// the next person to run the differential anywhere else fails on path noise
+// rather than on a compiler change. It was true of 42 lines before
+// gcdiff.relativeToRepository existed.
+func TestReasonPositionsAreRepositoryRelative(t *testing.T) {
+	text, err := os.ReadFile(gcReasonDifferentialPath)
+	require.NoError(t, err)
+
+	// A position, not merely a path: `//go:noescape` appears in this file as
+	// part of a rule and begins with a slash too.
+	absolutePosition := regexp.MustCompile(`(?m)^.*[\s]/\S*:\d+:\d+.*$`)
+	assert.Empty(t, absolutePosition.FindAllString(string(text), -1),
+		"%s names an absolute source position, so it records the directory it was generated\n"+
+			"in and nobody else can reproduce it. Every position in it should be relative to\n"+
+			"the repository root; see gcdiff.relativeToRepository.", gcReasonDifferentialPath)
 }
 
 // addGCExplanations fills in each program's -m=2 explanations, from a second
@@ -532,4 +574,3 @@ func TestGocFlagMStillParsesAsGCFlagM(t *testing.T) {
 				"a decision against an explanation of a different decision")
 	}
 }
-

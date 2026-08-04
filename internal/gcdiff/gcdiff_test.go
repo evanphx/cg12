@@ -211,3 +211,28 @@ func TestJoinCanKeepInlinedDecisionsForTriage(t *testing.T) {
 	require.Len(t, result.Lines, 1)
 	assert.Equal(t, [2]Verdict{Absent, VerdictHeap}, result.Lines[0].Cell())
 }
+
+func TestRelativeToRepositoryTrimsOnlyItsOwnRoot(t *testing.T) {
+	const root = "/home/someone/checkout"
+	for _, testCase := range []struct{ name, position, want string }{
+		{"under the root",
+			root + "/stdlib/src/runtime/mfinal.go:448:16", "stdlib/src/runtime/mfinal.go:448:16"},
+		{"already relative",
+			"testdata/hello.go:11:9", "testdata/hello.go:11:9"},
+		{"under a different root, which is not this report's to rewrite",
+			"/usr/lib/go/src/runtime/mfinal.go:448:16", "/usr/lib/go/src/runtime/mfinal.go:448:16"},
+		{"a sibling directory whose name starts with the root's",
+			root + "-two/stdlib/src/io/io.go:722:13", root + "-two/stdlib/src/io/io.go:722:13"},
+		{"the root itself, which names no file",
+			root, root},
+		{"no root known", "", ""},
+	} {
+		t.Run(testCase.name, func(t *testing.T) {
+			assert.Equal(t, testCase.want, relativeToRepository(root, testCase.position))
+		})
+	}
+
+	// An empty root is "do not rewrite", not "everything is under it".
+	assert.Equal(t, "/home/someone/checkout/stdlib/src/io/io.go:722:13",
+		relativeToRepository("", "/home/someone/checkout/stdlib/src/io/io.go:722:13"))
+}

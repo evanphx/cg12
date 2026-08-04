@@ -28,6 +28,15 @@
 # host toolchain is recorded below for that reason; a diff against a run on a
 # different release is not a change in goc.
 #
+# Every position here is relative to the repository root, including the "at"
+# lines, which name the use that decided and can be inside the vendored standard
+# library. goc interns those absolutely -- it finds stdlib/ through
+# runtime.Caller -- so rendering them as the compiler produced them wrote the
+# generating machine's checkout into 42 lines of this file, and the same commit
+# in another directory then failed the comparison on paths alone. This file is
+# meant to be regenerable by anyone, anywhere; if a diff of it shows a path,
+# that has stopped being true.
+#
 host toolchain: go version go1.26.1 linux/arm64
 
 ## the categories
@@ -734,20 +743,20 @@ runtime_cleanup_basic.go:15	heap -> heap	stored-in-object -> call-retains
 	src  box := &cleanupBox{value: 42}
 	goc  col 9  heap  main_cleanupBox  [front end: composite-literal in main.main]
 	     stored-in-object assigned to the package-level variable escapeSink
-	     at               /home/evan/.ccwork/ws/wave6-gate/repo/stdlib/src/internal/abi/escape.go:30:3
+	     at               stdlib/src/internal/abi/escape.go:30:3
 	goc  col 9  heap  main_cleanupBox  [front end: composite-literal in main.registerCleanup]
 	     stored-in-object assigned to the package-level variable escapeSink
-	     at               /home/evan/.ccwork/ws/wave6-gate/repo/stdlib/src/internal/abi/escape.go:30:3
+	     at               stdlib/src/internal/abi/escape.go:30:3
 	gc   col 9  heap  object  &cleanupBox{...}
 	     call-retains     {heap} <- box via spill -> assign -> call parameter
 runtime_cleanup_frame_retention.go:38	heap -> heap	stored-in-object -> call-retains
 	src  box := &retainedBox{value: 42}
 	goc  col 9  heap  main_retainedBox  [front end: composite-literal in main.main]
 	     stored-in-object assigned to the package-level variable escapeSink
-	     at               /home/evan/.ccwork/ws/wave6-gate/repo/stdlib/src/internal/abi/escape.go:30:3
+	     at               stdlib/src/internal/abi/escape.go:30:3
 	goc  col 9  heap  main_retainedBox  [front end: composite-literal in main.registerRetainedCleanup]
 	     stored-in-object assigned to the package-level variable escapeSink
-	     at               /home/evan/.ccwork/ws/wave6-gate/repo/stdlib/src/internal/abi/escape.go:30:3
+	     at               stdlib/src/internal/abi/escape.go:30:3
 	gc   col 9  heap  object  &retainedBox{...}
 	     call-retains     {heap} <- box via spill -> assign -> call parameter
 runtime_cleanup_frame_retention_masked.go:47	heap -> heap	stored-in-object -> call-retains
@@ -763,10 +772,10 @@ runtime_cleanup_frame_retention_masked.go:52	heap -> heap	stored-in-object -> ca
 	src  box := &maskedBox{value: 1}
 	goc  col 9  heap  main_maskedBox  [front end: composite-literal in main.main]
 	     stored-in-object assigned to the package-level variable escapeSink
-	     at               /home/evan/.ccwork/ws/wave6-gate/repo/stdlib/src/internal/abi/escape.go:30:3
+	     at               stdlib/src/internal/abi/escape.go:30:3
 	goc  col 9  heap  main_maskedBox  [front end: composite-literal in main.registerWithTrailingAllocation]
 	     stored-in-object assigned to the package-level variable escapeSink
-	     at               /home/evan/.ccwork/ws/wave6-gate/repo/stdlib/src/internal/abi/escape.go:30:3
+	     at               stdlib/src/internal/abi/escape.go:30:3
 	gc   col 9  heap  object  &maskedBox{...}
 	     call-retains     {heap} <- box via spill -> assign -> call parameter
 runtime_cleanup_frame_retention_masked.go:54	heap -> heap	unexplained -> stored-in-object
@@ -781,59 +790,59 @@ runtime_cleanup_frame_retention_masked.go:59	heap -> heap	stored-in-object -> ca
 	src  box := &maskedBox{value: 1}
 	goc  col 9  heap  main_maskedBox  [front end: composite-literal in main.registerWithKeepAlive]
 	     stored-in-object assigned to the package-level variable escapeSink
-	     at               /home/evan/.ccwork/ws/wave6-gate/repo/stdlib/src/internal/abi/escape.go:30:3
+	     at               stdlib/src/internal/abi/escape.go:30:3
 	gc   col 9  heap  object  &maskedBox{...}
 	     call-retains     {heap} <- box via spill -> assign -> call parameter
 runtime_cleanup_frame_retention_masked.go:66	heap -> heap	stored-in-object -> call-retains
 	src  first := &maskedBox{value: 1}
 	goc  col 11  heap  main_maskedBox  [front end: composite-literal in main.registerTwoObjects]
 	     stored-in-object assigned to the package-level variable escapeSink
-	     at               /home/evan/.ccwork/ws/wave6-gate/repo/stdlib/src/internal/abi/escape.go:30:3
+	     at               stdlib/src/internal/abi/escape.go:30:3
 	gc   col 11  heap  object  &maskedBox{...}
 	     call-retains     {heap} <- first via spill -> assign -> call parameter
 runtime_cleanup_frame_retention_masked.go:69	heap -> heap	stored-in-object -> call-retains
 	src  second := &maskedBox{value: 2}
 	goc  col 12  heap  main_maskedBox  [front end: composite-literal in main.registerTwoObjects]
 	     stored-in-object assigned to the package-level variable escapeSink
-	     at               /home/evan/.ccwork/ws/wave6-gate/repo/stdlib/src/internal/abi/escape.go:30:3
+	     at               stdlib/src/internal/abi/escape.go:30:3
 	gc   col 12  heap  object  &maskedBox{...}
 	     call-retains     {heap} <- second via spill -> assign -> call parameter
 runtime_cleanup_frame_retention_masked.go:75	heap -> heap	unexplained -> call-retains
 	src  box := &maskedBox{value: 1}
 	goc  col 9  heap  main_maskedBox  [front end: composite-literal in main.registerFinalizerOnly]
 	     unexplained      obj is used here in a way the walk cannot prove keeps it local
-	     at               /home/evan/.ccwork/ws/wave6-gate/repo/stdlib/src/runtime/mfinal.go:448:16
+	     at               stdlib/src/runtime/mfinal.go:448:16
 	gc   col 9  heap  object  &maskedBox{...}
 	     call-retains     {heap} <- box via spill -> assign -> interface-converted -> call parameter
 runtime_cleanup_frame_retention_scribble.go:38	heap -> heap	stored-in-object -> call-retains
 	src  box := &scribbledBox{value: 42}
 	goc  col 9  heap  main_scribbledBox  [front end: composite-literal in main.registerScribbledCleanup]
 	     stored-in-object assigned to the package-level variable escapeSink
-	     at               /home/evan/.ccwork/ws/wave6-gate/repo/stdlib/src/internal/abi/escape.go:30:3
+	     at               stdlib/src/internal/abi/escape.go:30:3
 	gc   col 9  heap  object  &scribbledBox{...}
 	     call-retains     {heap} <- box via spill -> assign -> call parameter
 runtime_cleanup_multiple.go:15	heap -> heap	stored-in-object -> call-retains
 	src  box := &multipleCleanupBox{value: 42}
 	goc  col 9  heap  main_multipleCleanupBox  [front end: composite-literal in main.main]
 	     stored-in-object assigned to the package-level variable escapeSink
-	     at               /home/evan/.ccwork/ws/wave6-gate/repo/stdlib/src/internal/abi/escape.go:30:3
+	     at               stdlib/src/internal/abi/escape.go:30:3
 	goc  col 9  heap  main_multipleCleanupBox  [front end: composite-literal in main.registerMultipleCleanups]
 	     stored-in-object assigned to the package-level variable escapeSink
-	     at               /home/evan/.ccwork/ws/wave6-gate/repo/stdlib/src/internal/abi/escape.go:30:3
+	     at               stdlib/src/internal/abi/escape.go:30:3
 	gc   col 9  heap  object  &multipleCleanupBox{...}
 	     call-retains     {heap} <- box via spill -> assign -> call parameter
 runtime_cleanup_stop.go:15	heap -> heap	stored-in-object -> call-retains
 	src  stoppedBox := &cleanupStopBox{value: 1}
 	goc  col 16  heap  main_cleanupStopBox  [front end: composite-literal in main.registerStoppedCleanup]
 	     stored-in-object assigned to the package-level variable escapeSink
-	     at               /home/evan/.ccwork/ws/wave6-gate/repo/stdlib/src/internal/abi/escape.go:30:3
+	     at               stdlib/src/internal/abi/escape.go:30:3
 	gc   col 16  heap  object  &cleanupStopBox{...}
 	     call-retains     {heap} <- stoppedBox via spill -> assign -> call parameter
 runtime_cleanup_stop.go:21	heap -> heap	stored-in-object -> call-retains
 	src  activeBox := &cleanupStopBox{value: 2}
 	goc  col 15  heap  main_cleanupStopBox  [front end: composite-literal in main.registerStoppedCleanup]
 	     stored-in-object assigned to the package-level variable escapeSink
-	     at               /home/evan/.ccwork/ws/wave6-gate/repo/stdlib/src/internal/abi/escape.go:30:3
+	     at               stdlib/src/internal/abi/escape.go:30:3
 	gc   col 15  heap  object  &cleanupStopBox{...}
 	     call-retains     {heap} <- activeBox via spill -> assign -> call parameter
 runtime_closure_captured_header_values.go:95	heap -> heap	stored-in-object -> closure-captured
@@ -953,35 +962,35 @@ runtime_finalizer_cleanup_order.go:15	heap -> heap	stored-in-object -> call-reta
 	src  box := &finalizerCleanupBox{value: 42}
 	goc  col 9  heap  main_finalizerCleanupBox  [front end: composite-literal in main.registerFinalizerAndCleanup]
 	     stored-in-object assigned to the package-level variable escapeSink
-	     at               /home/evan/.ccwork/ws/wave6-gate/repo/stdlib/src/internal/abi/escape.go:30:3
+	     at               stdlib/src/internal/abi/escape.go:30:3
 	gc   col 9  heap  object  &finalizerCleanupBox{...}
 	     call-retains     {heap} <- box via spill -> assign -> call parameter
 runtime_finalizer_dependency_order.go:14	heap -> heap	unexplained -> call-retains
 	src  child := &finalizerDependencyNode{value: 1}
 	goc  col 11  heap  main_finalizerDependencyNode  [front end: composite-literal in main.registerDependentFinalizers]
 	     unexplained      finalizer is used here in a way the walk cannot prove keeps it local
-	     at               /home/evan/.ccwork/ws/wave6-gate/repo/stdlib/src/runtime/mfinal.go:493:16
+	     at               stdlib/src/runtime/mfinal.go:493:16
 	gc   col 11  heap  object  &finalizerDependencyNode{...}
 	     call-retains     {heap} <- child via spill -> assign -> interface-converted -> call parameter
 runtime_finalizer_dependency_order.go:15	heap -> heap	unexplained -> call-retains
 	src  parent := &finalizerDependencyNode{
 	goc  col 12  heap  main_finalizerDependencyNode  [front end: composite-literal in main.registerDependentFinalizers]
 	     unexplained      finalizer is used here in a way the walk cannot prove keeps it local
-	     at               /home/evan/.ccwork/ws/wave6-gate/repo/stdlib/src/runtime/mfinal.go:493:16
+	     at               stdlib/src/runtime/mfinal.go:493:16
 	gc   col 12  heap  object  &finalizerDependencyNode{...}
 	     call-retains     {heap} <- parent via spill -> assign -> interface-converted -> call parameter
 runtime_finalizer_resurrect.go:17	heap -> heap	unexplained -> call-retains
 	src  object := &resurrectedObject{
 	goc  col 12  heap  main_resurrectedObject  [front end: composite-literal in main.main]
 	     unexplained      obj is used here in a way the walk cannot prove keeps it local
-	     at               /home/evan/.ccwork/ws/wave6-gate/repo/stdlib/src/runtime/mfinal.go:448:16
+	     at               stdlib/src/runtime/mfinal.go:448:16
 	gc   col 12  heap  object  &resurrectedObject{...}
 	     call-retains     {heap} <- object via spill -> assign -> interface-converted -> call parameter
 runtime_finalizer_resurrect.go:19	heap -> heap	unexplained -> stored-in-object
 	src  next:  &resurrectedObject{value: 1},
 	goc  col 10  heap  main_resurrectedObject  [front end: composite-literal in main.main]
 	     unexplained      obj is used here in a way the walk cannot prove keeps it local
-	     at               /home/evan/.ccwork/ws/wave6-gate/repo/stdlib/src/runtime/mfinal.go:448:16
+	     at               stdlib/src/runtime/mfinal.go:448:16
 	gc   col 10  heap  object  &resurrectedObject{...}
 	     stored-in-object {storage for &resurrectedObject{...}} <- &{storage for &resurrectedObject{...}} via spill -> struct literal element
 runtime_finalizer_resurrect.go:21	heap -> heap	stored-in-object -> call-retains
@@ -995,7 +1004,7 @@ runtime_finalizer_stack_growth.go:36	heap -> heap	unexplained -> call-retains
 	src  node := &finalizerStackBox{
 	goc  col 10  heap  main_finalizerStackBox  [front end: composite-literal in main.allocateFinalizerAfterStackGrowth]
 	     unexplained      finalizer is used here in a way the walk cannot prove keeps it local
-	     at               /home/evan/.ccwork/ws/wave6-gate/repo/stdlib/src/runtime/mfinal.go:493:16
+	     at               stdlib/src/runtime/mfinal.go:493:16
 	gc   col 10  heap  object  &finalizerStackBox{...}
 	     call-retains     {heap} <- chain via spill -> assign -> call parameter -> interface-converted -> call parameter
 runtime_finalizer_tiny.go:19	heap -> heap	stored-in-object -> call-retains
@@ -1159,7 +1168,7 @@ runtime_gc_mark_workers.go:96	heap -> heap	call-opaque -> call-retains
 	src  samples := []metrics.Sample{
 	goc  col 13  heap  3_runtime_metrics_Sample  [front end: slice-literal-backing in main.readMarkCPU]
 	     call-opaque      passed to runtime/metrics.runtime_readMetrics, which has no Go body and is not marked //go:noescape
-	     at               /home/evan/.ccwork/ws/wave6-gate/repo/stdlib/src/runtime/metrics/sample.go:46:2
+	     at               stdlib/src/runtime/metrics/sample.go:46:2
 	gc   col 29  heap  slice  []metrics.Sample{...}
 	     call-retains     {heap} <- metrics.m via spill -> assign -> assign-pair -> dot of pointer -> address-of -> call parameter
 runtime_gc_mark_workers.go:122	heap -> heap	stored-in-object -> call-retains
@@ -1317,7 +1326,7 @@ runtime_keepalive_finalizer.go:37	heap -> heap	unexplained -> call-retains
 	src  box := &keepAliveBox{value: 42}
 	goc  col 9  heap  main_keepAliveBox  [front end: composite-literal in main.allocateAndKeep]
 	     unexplained      obj is used here in a way the walk cannot prove keeps it local
-	     at               /home/evan/.ccwork/ws/wave6-gate/repo/stdlib/src/runtime/mfinal.go:448:16
+	     at               stdlib/src/runtime/mfinal.go:448:16
 	gc   col 9  heap  object  &keepAliveBox{...}
 	     call-retains     {heap} <- box via spill -> assign -> interface-converted -> call parameter
 runtime_loopvar_address_gc.go:74	heap -> heap	stored-in-object -> call-retains
@@ -1815,7 +1824,7 @@ runtime_pinner_lifecycle.go:14	heap -> heap	unexplained -> call-retains
 	src  box := &pinnedBox{value: value}
 	goc  col 9  heap  main_pinnedBox  [front end: composite-literal in main.pinBox]
 	     unexplained      obj is used here in a way the walk cannot prove keeps it local
-	     at               /home/evan/.ccwork/ws/wave6-gate/repo/stdlib/src/runtime/mfinal.go:448:16
+	     at               stdlib/src/runtime/mfinal.go:448:16
 	gc   col 9  heap  object  &pinnedBox{...}
 	     call-retains     {heap} <- box via spill -> assign -> interface-converted -> call parameter
 runtime_println_operand_separation.go:114	heap -> heap	stored-in-object -> call-retains
@@ -1974,7 +1983,7 @@ runtime_setfinalizer_nil.go:14	heap -> heap	unexplained -> call-retains
 	src  box := &clearedFinalizerBox{value: 42}
 	goc  col 9  heap  main_clearedFinalizerBox  [front end: composite-literal in main.main]
 	     unexplained      obj is used here in a way the walk cannot prove keeps it local
-	     at               /home/evan/.ccwork/ws/wave6-gate/repo/stdlib/src/runtime/mfinal.go:448:16
+	     at               stdlib/src/runtime/mfinal.go:448:16
 	gc   col 9  heap  object  &clearedFinalizerBox{...}
 	     call-retains     {heap} <- box via spill -> assign -> interface-converted -> call parameter
 runtime_slice_struct_values_gc.go:15	heap -> heap	unexplained -> call-retains
@@ -2005,7 +2014,7 @@ runtime_stack_argument_roots.go:40	heap -> heap	stored-in-object -> call-retains
 	src  object := &payload{value: value}
 	goc  col 12  heap  main_payload  [front end: composite-literal in main.newPayload]
 	     stored-in-object assigned to the package-level variable escapeSink
-	     at               /home/evan/.ccwork/ws/wave6-gate/repo/stdlib/src/internal/abi/escape.go:30:3
+	     at               stdlib/src/internal/abi/escape.go:30:3
 	gc   col 12  heap  object  &payload{...}
 	     call-retains     {heap} <- object via spill -> assign -> call parameter
 runtime_stack_scan_blocked_goroutines.go:35	heap -> heap	unexplained -> returned
@@ -2083,14 +2092,14 @@ runtime_stack_scan_loop_safepoints.go:53	heap -> heap	stored-in-object -> call-r
 	src  object := &node{value: value, label: label}
 	goc  col 12  heap  main_node  [front end: composite-literal in main.newNode]
 	     stored-in-object assigned to the package-level variable escapeSink
-	     at               /home/evan/.ccwork/ws/wave6-gate/repo/stdlib/src/internal/abi/escape.go:30:3
+	     at               stdlib/src/internal/abi/escape.go:30:3
 	gc   col 12  heap  object  &node{...}
 	     call-retains     {heap} <- object via spill -> assign -> call parameter
 runtime_stack_scan_loop_safepoints.go:211	heap -> heap	stored-in-object -> call-retains
 	src  object := &node{value: -1, label: "dropped"}
 	goc  col 12  heap  main_node  [front end: composite-literal in main.dropped]
 	     stored-in-object assigned to the package-level variable escapeSink
-	     at               /home/evan/.ccwork/ws/wave6-gate/repo/stdlib/src/internal/abi/escape.go:30:3
+	     at               stdlib/src/internal/abi/escape.go:30:3
 	gc   col 12  heap  object  &node{...}
 	     call-retains     {heap} <- object via spill -> assign -> call parameter
 runtime_stack_scan_panic_unwind.go:31	heap -> heap	unexplained -> returned
@@ -2421,14 +2430,14 @@ stdlib_archive_zip_roundtrip.go:19	heap -> heap	unexplained -> call-retains
 	src  header := &zip.FileHeader{
 	goc  col 12  heap  archive_zip_FileHeader  [front end: composite-literal in main.main]
 	     unexplained      h is used here in a way the walk cannot prove keeps it local
-	     at               /home/evan/.ccwork/ws/wave6-gate/repo/stdlib/src/archive/zip/writer.go:376:15
+	     at               stdlib/src/archive/zip/writer.go:376:15
 	gc   col 12  heap  object  &zip.FileHeader{...}
 	     call-retains     {heap} <- header via spill -> assign -> call parameter
 stdlib_archive_zip_roundtrip.go:33	heap -> heap	unexplained -> call-retains
 	src  storedHeader := &zip.FileHeader{Name: "raw/value.bin", Method: zip.Store}
 	goc  col 18  heap  archive_zip_FileHeader  [front end: composite-literal in main.main]
 	     unexplained      h is used here in a way the walk cannot prove keeps it local
-	     at               /home/evan/.ccwork/ws/wave6-gate/repo/stdlib/src/archive/zip/writer.go:376:15
+	     at               stdlib/src/archive/zip/writer.go:376:15
 	gc   col 18  heap  object  &zip.FileHeader{...}
 	     call-retains     {heap} <- storedHeader via spill -> assign -> call parameter
 stdlib_archive_zip_roundtrip.go:39	heap -> heap	call-opaque -> call-retains
@@ -2441,7 +2450,7 @@ stdlib_compress_bzip2.go:12	heap -> heap	unexplained -> stored-in-object
 	src  encoded := []byte{
 	goc  col 13  heap  55_byte  [front end: slice-literal-backing in main.main]
 	     unexplained      b is used here in a way the walk cannot prove keeps it local
-	     at               /home/evan/.ccwork/ws/wave6-gate/repo/stdlib/src/bytes/reader.go:159:51
+	     at               stdlib/src/bytes/reader.go:159:51
 	gc   col 19  heap  slice  []byte{...}
 	     stored-in-object {storage for &bytes.Reader{...}} <- bytes.b via spill -> assign -> assign-pair -> struct literal element
 stdlib_container_heap.go:27	heap -> heap	stored-in-object -> returned
@@ -2574,7 +2583,7 @@ stdlib_flag_parse.go:11	heap -> heap	unexplained -> call-retains
 	src  err := flags.Parse([]string{"-name=cg12", "-count", "17", "-enabled", "extra"})
 	goc  col 21  heap  5_string  [front end: slice-literal-backing in main.main]
 	     unexplained      arguments is used here in a way the walk cannot prove keeps it local
-	     at               /home/evan/.ccwork/ws/wave6-gate/repo/stdlib/src/flag/flag.go:1155:11
+	     at               stdlib/src/flag/flag.go:1155:11
 	gc   col 29  heap  slice  []string{...}
 	     call-retains     {heap} <- &{storage for []string{...}} via spill -> call parameter
 stdlib_http_client_server.go:11	heap -> heap	stored-in-object -> closure-captured
@@ -2646,14 +2655,14 @@ stdlib_image_gif_animation.go:11	heap -> heap	unexplained -> call-retains
 	src  palette := color.Palette{
 	goc  col 13  heap  4_image_color_Color  [front end: slice-literal-backing in main.main]
 	     unexplained      p is used here in a way the walk cannot prove keeps it local
-	     at               /home/evan/.ccwork/ws/wave6-gate/repo/stdlib/src/image/image.go:1287:12
+	     at               stdlib/src/image/image.go:1287:12
 	gc   col 26  heap  object  color.Palette{...}
 	     call-retains     {heap} <- palette via spill -> assign -> call parameter
 stdlib_io_readall_limited_reader.go:9	heap -> heap	unexplained -> call-retains
 	src  reader := &io.LimitedReader{
 	goc  col 12  heap  io_LimitedReader  [front end: composite-literal in main.main]
 	     unexplained      r is used here in a way the walk cannot prove keeps it local
-	     at               /home/evan/.ccwork/ws/wave6-gate/repo/stdlib/src/io/io.go:722:13
+	     at               stdlib/src/io/io.go:722:13
 	gc   col 12  heap  object  &io.LimitedReader{...}
 	     call-retains     {heap} <- reader via spill -> assign -> interface-converted -> call parameter
 stdlib_netpoll_stress_tcp_churn.go:29	heap -> heap	call-opaque -> call-retains
@@ -2681,7 +2690,7 @@ stdlib_netpoll_syscall_socket_listen.go:19	heap -> heap	returned -> call-retains
 	src  address := &syscall.SockaddrInet4{
 	goc  col 13  heap  syscall_SockaddrInet4  [front end: composite-literal in main.main]
 	     returned         returned
-	     at               /home/evan/.ccwork/ws/wave6-gate/repo/stdlib/src/syscall/syscall_linux.go:531:2
+	     at               stdlib/src/syscall/syscall_linux.go:531:2
 	gc   col 13  heap  object  &syscall.SockaddrInet4{...}
 	     call-retains     {heap} <- address via spill -> assign -> interface-converted -> call parameter
 stdlib_netpoll_tcp_concurrent_clients.go:30	heap -> heap	call-opaque -> call-retains
@@ -2735,7 +2744,7 @@ stdlib_runtime_metrics_read.go:11	heap -> heap	call-opaque -> call-retains
 	src  samples := []metrics.Sample{
 	goc  col 13  heap  2_runtime_metrics_Sample  [front end: slice-literal-backing in main.main]
 	     call-opaque      passed to runtime/metrics.runtime_readMetrics, which has no Go body and is not marked //go:noescape
-	     at               /home/evan/.ccwork/ws/wave6-gate/repo/stdlib/src/runtime/metrics/sample.go:46:2
+	     at               stdlib/src/runtime/metrics/sample.go:46:2
 	gc   col 29  heap  slice  []metrics.Sample{...}
 	     call-retains     {heap} <- metrics.m via spill -> assign -> assign-pair -> dot of pointer -> address-of -> call parameter
 stdlib_signal_atomic_contention.go:13	heap -> heap	stored-in-object -> closure-captured
@@ -2821,7 +2830,7 @@ stdlib_weak_pointer.go:18	heap -> heap	stored-in-object -> call-retains
 	src  payload := &weakPayload{value: 42}
 	goc  col 13  heap  main_weakPayload  [front end: composite-literal in main.main]
 	     stored-in-object assigned to the package-level variable escapeSink
-	     at               /home/evan/.ccwork/ws/wave6-gate/repo/stdlib/src/internal/abi/escape.go:30:3
+	     at               stdlib/src/internal/abi/escape.go:30:3
 	gc   col 13  heap  object  &weakPayload{...}
 	     call-retains     {heap} <- payload via spill -> assign -> call parameter
 
@@ -4066,7 +4075,7 @@ runtime_finalizer_basic.go:18	heap -> absent	unexplained -> -
 	src  value := &finalizable{
 	goc  col 12  heap  main_finalizable  [front end: composite-literal in main.main.func.17.2]
 	     unexplained      obj is used here in a way the walk cannot prove keeps it local
-	     at               /home/evan/.ccwork/ws/wave6-gate/repo/stdlib/src/runtime/mfinal.go:448:16
+	     at               stdlib/src/runtime/mfinal.go:448:16
 runtime_finalizer_basic.go:22	heap -> frame	stored-in-object -> -
 	src  runtime.SetFinalizer(value, func(item *finalizable) {
 	goc  col 31  heap  struct_code_uintptr__capture0_unsafe_Pointer  [ir pass: heap-alloc-candidate in main.main.func.17.2]
@@ -4318,7 +4327,7 @@ runtime_reflect_call_aggregate_matrix.go:70	heap -> frame	unexplained -> -
 	src  results := reflect.ValueOf(function).Call([]reflect.Value{reflect.ValueOf(argument)})
 	goc  col 44  heap  1_reflect_Value  [front end: slice-literal-backing in main.callReflectAggregateMatrix]
 	     unexplained      in is used here in a way the walk cannot prove keeps it local
-	     at               /home/evan/.ccwork/ws/wave6-gate/repo/stdlib/src/reflect/value.go:457:13
+	     at               stdlib/src/reflect/value.go:457:13
 	gc   col 59  frame  slice  []reflect.Value{...}
 runtime_reflect_call_aggregate_matrix.go:105	heap -> absent	stored-in-object -> -
 	src  text:  "runtime",
@@ -4356,13 +4365,13 @@ runtime_reflect_method_metadata.go:27	heap -> frame	unexplained -> -
 	src  results := method.Func.Call([]reflect.Value{
 	goc  col 30  heap  2_reflect_Value  [front end: slice-literal-backing in main.main]
 	     unexplained      in is used here in a way the walk cannot prove keeps it local
-	     at               /home/evan/.ccwork/ws/wave6-gate/repo/stdlib/src/reflect/value.go:457:13
+	     at               stdlib/src/reflect/value.go:457:13
 	gc   col 45  frame  slice  []reflect.Value{...}
 runtime_reflect_set_fields.go:11	heap -> frame	unexplained -> -
 	src  payload := &reflectSetPayload{}
 	goc  col 13  heap  main_reflectSetPayload  [front end: composite-literal in main.main]
 	     unexplained      i is used here in a way the walk cannot prove keeps it local
-	     at               /home/evan/.ccwork/ws/wave6-gate/repo/stdlib/src/reflect/value.go:159:45
+	     at               stdlib/src/reflect/value.go:159:45
 	gc   col 13  frame  object  &reflectSetPayload{}
 runtime_reflect_type_metadata.go:11	mixed -> frame	stored-in-object -> -
 	src  valueType := reflect.TypeOf(metadataPayload{})
@@ -4375,7 +4384,7 @@ runtime_reflect_value_call.go:11	heap -> frame	unexplained -> -
 	src  arguments := []reflect.Value{
 	goc  col 15  heap  2_reflect_Value  [front end: slice-literal-backing in main.main]
 	     unexplained      in is used here in a way the walk cannot prove keeps it local
-	     at               /home/evan/.ccwork/ws/wave6-gate/repo/stdlib/src/reflect/value.go:457:13
+	     at               stdlib/src/reflect/value.go:457:13
 	gc   col 30  frame  slice  []reflect.Value{...}
 runtime_scheduler_gc_churn.go:22	heap -> absent	stored-in-object -> -
 	src  worker := worker

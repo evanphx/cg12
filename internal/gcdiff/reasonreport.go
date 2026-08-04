@@ -2,6 +2,7 @@ package gcdiff
 
 import (
 	"fmt"
+	"path/filepath"
 	"sort"
 	"strings"
 )
@@ -17,7 +18,11 @@ import (
 // than -m's placement wording -- it is internal notation, not a documented
 // diagnostic -- so a diff between runs on different releases means even less
 // here than it does there.
-func RenderReasons(header, goVersion string, result Result) string {
+//
+// root is the checkout the report was produced in, and the only thing it is used
+// for is [relativeToRepository]: see that function for why a committed file that
+// names it is a file only one directory can reproduce.
+func RenderReasons(header, goVersion, root string, result Result) string {
 	var out strings.Builder
 	out.WriteString(header)
 	fmt.Fprintf(&out, "host toolchain: %s\n\n", goVersion)
@@ -39,19 +44,19 @@ func RenderReasons(header, goVersion string, result Result) string {
 	out.WriteString("pairing is the line, not the allocation. Both are listed; each line's own\n")
 	out.WriteString("entries say which it is.\n\n")
 	writeReasonPairs(&out, disagreements)
-	writeReasonLines(&out, disagreements)
+	writeReasonLines(&out, root, disagreements)
 
 	agreements := result.ReasonAgreementsAcrossPlacements()
 	fmt.Fprintf(&out, "## DISAGREE ON PLACEMENT, AGREE ON REASON: %d lines\n\n%s\n", len(agreements), reasonAgreementHeader)
-	writeReasonLines(&out, agreements)
+	writeReasonLines(&out, root, agreements)
 
-	writeOneSided(&out, "PLACEMENT DISAGREES, ONLY goc EXPLAINED", placementDisagreesGocHeader,
+	writeOneSided(&out, root, "PLACEMENT DISAGREES, ONLY goc EXPLAINED", placementDisagreesGocHeader,
 		result.ReasonOneSided(ReasonsGocOnly, false), gocReasonKey)
-	writeOneSided(&out, "PLACEMENT DISAGREES, ONLY gc EXPLAINED", placementDisagreesGCHeader,
+	writeOneSided(&out, root, "PLACEMENT DISAGREES, ONLY gc EXPLAINED", placementDisagreesGCHeader,
 		result.ReasonOneSided(ReasonsGCOnly, false), gcReasonKey)
-	writeOneSided(&out, "PLACEMENT AGREES, ONLY goc EXPLAINED", placementAgreesGocHeader,
+	writeOneSided(&out, root, "PLACEMENT AGREES, ONLY goc EXPLAINED", placementAgreesGocHeader,
 		result.ReasonOneSided(ReasonsGocOnly, true), gocReasonKey)
-	writeOneSided(&out, "PLACEMENT AGREES, ONLY gc EXPLAINED", placementAgreesGCHeader,
+	writeOneSided(&out, root, "PLACEMENT AGREES, ONLY gc EXPLAINED", placementAgreesGCHeader,
 		result.ReasonOneSided(ReasonsGCOnly, true), gcReasonKey)
 
 	writeUncategorised(&out, result.ReasonCoverage)
@@ -287,19 +292,19 @@ func writeReasonPairs(out *strings.Builder, lines []Line) {
 func gocReasonKey(line Line) string { return line.GocReasons.String() }
 func gcReasonKey(line Line) string  { return line.GCReasons.String() }
 
-func writeOneSided(out *strings.Builder, name, header string, lines []Line, key func(Line) string) {
+func writeOneSided(out *strings.Builder, root, name, header string, lines []Line, key func(Line) string) {
 	fmt.Fprintf(out, "## %s: %d lines\n\n%s\n", name, len(lines), header)
 	for _, count := range CountReasons(lines, key) {
 		fmt.Fprintf(out, "  %5d  %s\n", count.Count, count.Name)
 	}
 	out.WriteString("\n")
-	writeReasonLines(out, lines)
+	writeReasonLines(out, root, lines)
 }
 
 // writeReasonLines prints every line in full: what each compiler placed where,
 // in its own words. The categories are what is compared; these are what is read
 // when a category is not enough, and the file exists to be read.
-func writeReasonLines(out *strings.Builder, lines []Line) {
+func writeReasonLines(out *strings.Builder, root string, lines []Line) {
 	for _, line := range lines {
 		fmt.Fprintf(out, "%s:%d\t%s -> %s\t%s -> %s\n",
 			line.File, line.Number, line.Goc, line.Gc, line.GocReasons.String(), line.GCReasons.String())
@@ -316,7 +321,7 @@ func writeReasonLines(out *strings.Builder, lines []Line) {
 				// The position of the use that decided, which is the thing gc's
 				// flow chain also names. Printed so the two explanations can be
 				// checked against each other rather than only counted.
-				fmt.Fprintf(out, "\t     %-16s %s\n", "at", site.Use)
+				fmt.Fprintf(out, "\t     %-16s %s\n", "at", relativeToRepository(root, site.Use))
 			}
 		}
 		for _, decision := range line.GC {
@@ -333,6 +338,36 @@ func writeReasonLines(out *strings.Builder, lines []Line) {
 		}
 	}
 	out.WriteString("\n")
+}
+
+// relativeToRepository rewrites a position inside the checkout that produced it
+// into one relative to that checkout.
+//
+// It exists because of one line of this report. Every other position here names
+// the corpus program, which the compiler was pointed at by a relative path
+// (testdata/x.go) and which therefore reads the same everywhere. The `at:` line
+// is different: it is the position of the *use* that decided, and a decision
+// reached inside a standard library helper names a file in the vendored tree,
+// whose path goc interns absolutely because goc.StdlibRoot is absolute. Rendered
+// as goc produced it, 42 lines of the committed baseline said
+// /home/evan/.ccwork/ws/wave6-gate/repo/stdlib/src/... -- so the same commit
+// checked out anywhere else failed the comparison on the paths alone, and the
+// ratchet only worked in the directory that made it.
+//
+// Stripping the root rather than reducing to a base name: which file a use is in
+// is the whole value of the line -- reflect/value.go and runtime/mfinal.go are
+// different answers -- and stdlib/src/reflect/value.go is a path a reader can
+// open in any checkout. A position already relative, or under some other root,
+// is returned untouched; this trims a prefix and parses nothing.
+func relativeToRepository(root, position string) string {
+	if root == "" {
+		return position
+	}
+	prefix := strings.TrimSuffix(root, string(filepath.Separator)) + string(filepath.Separator)
+	if !strings.HasPrefix(position, prefix) {
+		return position
+	}
+	return position[len(prefix):]
 }
 
 func joinEdges(edges []string) string {
