@@ -64,7 +64,7 @@ index:          case time / control/spin-fixed-work time, same binary, same proc
 tolerance:      0.04 of the index, both directions
 
 case                        goc index     gc index   goc ns (fyi)    gc ns (fyi)
-p256/sign-verify              45.8670       1.6271     2505752374       54418705
-p256/verify                   33.8050       1.1655     1846797694       38981144
-p384/sign-verify              40.0934       2.8793     2190334653       96301337
-rsa2048/sign-verify           12.1153       0.5932      661871209       19838573
+p256/sign-verify              45.7973       1.6287     2504982432       54456117
+p256/verify                   34.3805       1.1654     1880514637       38964849
+p384/sign-verify              40.5258       2.8764     2216646286       96175020
+rsa2048/sign-verify           12.5562       0.5933      686786950       19836767
