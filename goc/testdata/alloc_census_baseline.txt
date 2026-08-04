@@ -13497,7 +13497,7 @@ testdata/runtime_map_iter_delete_insert.go:4:12	main.main	runtime.makemap	map_in
 testdata/runtime_map_pointer_keys.go:10:11	main.main	runtime.newobject	main_mapPointerKey	heap
 testdata/runtime_map_pointer_keys.go:11:12	main.main	runtime.newobject	main_mapPointerKey	heap
 testdata/runtime_map_pointer_keys.go:12:12	main.main	runtime.makemap	map__main_mapPointerKey_int	heap
-testdata/runtime_map_pointer_keys.go:27:12	main.main	runtime.newobject	main_mapPointerKey	heap
+testdata/runtime_map_pointer_keys.go:27:12	main.main	runtime.newobject	main_mapPointerKey	frame
 testdata/runtime_map_pointer_values_gc.go:11:12	main.main	runtime.makemap	map_int__main_mapPointerBox	heap
 testdata/runtime_map_pointer_values_gc.go:13:19	main.main	runtime.newobject	main_mapPointerBox	heap
 testdata/runtime_map_pointer_values_gc.go:15:11	main.main	runtime.newobject	main_mapPointerBox	heap

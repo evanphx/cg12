@@ -51,8 +51,8 @@ rows are goc's verdict for the line, columns are gc's.
 same as "it put the object in a frame" -- see gcdiff.Absent.
 
   goc\gc      frame     heap    mixed   absent    total
-  frame         188       30       14      193      425
-  heap           97      580      172       81      930
+  frame         189       30       14      193      426
+  heap           96      580      172       81      929
   mixed          13       89       24       13      139
   absent        420     1286       24        0     1730
   total         718     1985      234      287     3224
@@ -4925,7 +4925,7 @@ variadic_element_retention.go:42	frame -> mixed
 	gc   col 39  heap  object  48879
 	gc   col 47  heap  object  51966
 
-## PESSIMISTIC: 400 lines
+## PESSIMISTIC: 399 lines
 
 every source line goc puts on the heap and gc does not. This is the
 performance direction and nothing worse: each line is an allocation, a zeroing
@@ -4938,7 +4938,7 @@ by construct (goc allocators on the line | gc constructs on the line):
      52  newobject/heap | object/frame,object/heap
      35  makemap/heap | map/frame
      25  newobject/heap | slice/frame
-     22  newobject/heap | object/frame
+     21  newobject/heap | object/frame
      13  convT64/heap,newobject/frame | object/heap,slice/frame
       8  newobject/heap | object/frame,object/heap,slice/frame
       7  newobject/frame,newobject/heap | -
@@ -5972,10 +5972,6 @@ runtime_map_pointer_keys.go:12	heap -> frame
 	src  values := map[*mapPointerKey]int{
 	goc  col 12  heap  runtime.makemap  map__main_mapPointerKey_int  [main.main]
 	gc   col 34  frame  map  map[*mapPointerKey]int{...}
-runtime_map_pointer_keys.go:27	heap -> frame
-	src  if values[&mapPointerKey{value: 17}] != 0 {
-	goc  col 12  heap  runtime.newobject  main_mapPointerKey  [main.main]
-	gc   col 12  frame  object  &mapPointerKey{...}
 runtime_map_pointer_values_gc.go:11	heap -> frame
 	src  values := make(map[int]*mapPointerBox)
 	goc  col 12  heap  runtime.makemap  map_int__main_mapPointerBox  [main.main]

@@ -1493,3 +1493,54 @@ func main() {
 	assert.False(t, callsSymbol(local, "runtime.newobject"),
 		"the deep question sent a container's element to the heap with nothing read out of it")
 }
+
+// TestMapLookupKeyStaysInTheFrameAndAMapWriteKeyDoesNot covers both halves of
+// one rule, because the rule is only safe if both halves hold: mapaccess and
+// mapdelete keep nothing, and mapassign copies the key into the bucket.
+//
+// testdata/runtime_map_pointer_keys.go has all three shapes and was the line
+// this closes; the write half is what makes it the one group whose verdict says
+// "and it needs care about direction".
+func TestMapLookupKeyStaysInTheFrameAndAMapWriteKeyDoesNot(t *testing.T) {
+	module, err := goc.Compile("mapkey.go", []byte(`
+package main
+
+import "runtime"
+
+type key struct{ value int }
+
+var written = map[*key]int{}
+var read = map[*key]int{}
+
+func lookupKey() int   { return read[&key{value: 1}] }
+func deleteKey()       { delete(written, &key{value: 2}) }
+func assignKey()       { written[&key{value: 3}] = 3 }
+func compoundKey()     { written[&key{value: 4}] += 4 }
+func incrementKey()    { written[&key{value: 5}]++ }
+func literalKey() map[*key]int {
+	k := &key{value: 6}
+	return map[*key]int{k: 6}
+}
+
+func main() {
+	runtime.GC()
+	deleteKey()
+	assignKey()
+	compoundKey()
+	incrementKey()
+	println(lookupKey(), len(literalKey()))
+}
+`))
+	require.NoError(t, err)
+
+	for _, name := range []string{"main.lookupKey", "main.deleteKey"} {
+		function := functionWithSuffix(t, module, name)
+		assert.False(t, callsSymbol(function, "runtime.newobject"),
+			"%s sent a key the runtime does not retain to the heap", name)
+	}
+	for _, name := range []string{"main.assignKey", "main.compoundKey", "main.incrementKey", "main.literalKey"} {
+		function := functionWithSuffix(t, module, name)
+		assert.True(t, callsSymbol(function, "runtime.newobject"),
+			"%s kept in a frame a key mapassign copies into the map", name)
+	}
+}

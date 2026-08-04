@@ -2664,6 +2664,68 @@ func receiverIsAPointerFreeCopy(method *types.Func) bool {
 	return !pointers
 }
 
+// deleteBuiltinRetainsNothing reports that an expression is an argument of the
+// delete builtin. mapdelete hashes the key and compares it and keeps nothing,
+// exactly as mapaccess does; the map argument is a map header the call cannot
+// retain either.
+func deleteBuiltinRetainsNothing(call *ast.CallExpr, node ast.Node, info *types.Info) bool {
+	identifier, isIdentifier := call.Fun.(*ast.Ident)
+	if !isIdentifier {
+		return false
+	}
+	builtin, isBuiltin := info.Uses[identifier].(*types.Builtin)
+	if !isBuiltin || builtin.Name() != "delete" {
+		return false
+	}
+	for _, argument := range call.Args {
+		if argument == node {
+			return true
+		}
+	}
+	return false
+}
+
+// mapLookupKeyIsNotRetained reports that an expression is the key of a map
+// *read* -- m[k], v, ok := m[k], delete(m, k) -- rather than of a map write.
+//
+// mapaccess and mapdelete hash the key and compare it and keep nothing; the
+// runtime takes a large key by address for the same reason a caller passes any
+// read-only aggregate by address, and cmd/compile's own runtime declarations say
+// so. mapassign is the other half and is the reason this asks: a map *write*
+// copies the key into the bucket, so `m[&key{}] = v` and the key of a map
+// literal both retain it, and testdata/runtime_map_pointer_keys.go has all three
+// shapes in one program.
+func mapLookupKeyIsNotRetained(node ast.Node, index *ast.IndexExpr, info *types.Info, parents map[ast.Node]ast.Node) bool {
+	if index.Index != node {
+		return false
+	}
+	baseType := info.TypeOf(index.X)
+	if baseType == nil {
+		return false
+	}
+	if _, isMap := baseType.Underlying().(*types.Map); !isMap {
+		return false
+	}
+	switch parent := parents[index].(type) {
+	case *ast.AssignStmt:
+		// m[k] = v and m[k] += v both call mapassign, which retains the key.
+		for _, destination := range parent.Lhs {
+			if destination == index {
+				return false
+			}
+		}
+		return true
+	case *ast.IncDecStmt:
+		return parent.X != index
+	case *ast.UnaryExpr:
+		// &m[k] does not compile, but a range over a map element or any other
+		// address-of form would be a write in disguise if it ever did.
+		return parent.Op != token.AND
+	default:
+		return true
+	}
+}
+
 func (g *gen) nonEscapingAddressWithin(
 	address *ast.UnaryExpr,
 	info *types.Info,
@@ -2688,12 +2750,17 @@ func (g *gen) nonEscapingAddressWithin(
 		case *ast.ParenExpr:
 			current = parent
 		case *ast.CallExpr:
+			if deleteBuiltinRetainsNothing(parent, current, info) {
+				return true
+			}
 			if len(parent.Args) != 1 || parent.Args[0] != current || !info.Types[parent.Fun].IsType() {
 				return false
 			}
 			current = parent
 		case *ast.StarExpr:
 			return parent.X == current
+		case *ast.IndexExpr:
+			return mapLookupKeyIsNotRetained(current, parent, info, parents)
 		case *ast.SelectorExpr:
 			selection := info.Selections[parent]
 			return parent.X == current && selection != nil && selection.Kind() == types.FieldVal
@@ -3121,6 +3188,8 @@ func (g *gen) valueDoesNotEscapeWithin(
 				return false
 			}
 			current = parent
+		case *ast.IndexExpr:
+			return mapLookupKeyIsNotRetained(current, parent, info, parents)
 		case *ast.TypeAssertExpr:
 			// i.(T) reads the interface's payload, so the value the walk is
 			// following is reachable from the asserted value and from nothing
@@ -3218,7 +3287,7 @@ func (g *gen) valueDoesNotEscapeWithin(
 			if calledIdentifier, ok := parent.Fun.(*ast.Ident); ok {
 				if builtin, ok := info.Uses[calledIdentifier].(*types.Builtin); ok {
 					switch builtin.Name() {
-					case "len", "cap":
+					case "len", "cap", "delete":
 						return true
 					case "copy":
 						// See nonEscapingObjectUse: copy moves the elements out.
@@ -3864,7 +3933,7 @@ func (g *gen) nonEscapingObjectUse(
 	switch parent := parent.(type) {
 	case *ast.IndexExpr:
 		if parent.X != identifier {
-			return false
+			return mapLookupKeyIsNotRetained(identifier, parent, info, parents)
 		}
 		address := addressedExpression(parent, parents, info)
 		if address != nil {
@@ -4065,7 +4134,7 @@ func (g *gen) nonEscapingObjectUse(
 		if calledIdentifier, ok := parent.Fun.(*ast.Ident); ok {
 			if builtin, ok := info.Uses[calledIdentifier].(*types.Builtin); ok {
 				switch builtin.Name() {
-				case "len", "cap", "print", "println":
+				case "len", "cap", "print", "println", "delete":
 					return true
 				case "copy":
 					// copy moves the elements into the destination, which is
