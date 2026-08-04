@@ -26,6 +26,24 @@ type localSlot struct {
 // rather than part of the table -- see promotionsBlockedByALoop.
 var EscapeSummaries = os.Getenv("GOC_ESCAPE_SUMMARIES") != "0"
 
+// PayloadFold turns on foldSplitPayloadsBackIn. It is on, and GOC_PAYLOAD_FOLD=0
+// turns it off.
+//
+// Same reason as the knob above, and it has already earned it. The fold trades
+// K payload allocations for one combined object that takes the `[N]any` array to
+// the heap with them, and the threshold -- two -- was set by measuring log/slog's
+// three-large-integer call, where splitting was reported to cost four
+// allocations against gc's three. It costs three now. With the fold off,
+// slog_allocations_baseline.txt's info/3-attr-large-ints row is 3.00 / 24.0 B,
+// which is gc's number exactly, and with it on the row is 1.00 / 128.0 B. One
+// run each way is what says that, and it is not a thing the code can be read to
+// find out.
+//
+// The fold is still on, because turning it off moves 152 containers into frames
+// and splits 348 payloads out across the corpus -- see CCWORK_REPORT.md, which
+// says what would have to be measured to change it.
+var PayloadFold = os.Getenv("GOC_PAYLOAD_FOLD") != "0"
+
 // MaxImplicitFrameSize is the largest object goc will keep in a frame when the
 // source did not name it -- new(T), &T{}, a composite literal's backing storage,
 // a make's fixed-capacity backing array.
@@ -244,7 +262,9 @@ func lowerFunctionHeapAllocations(function *ir.Func, byName map[string]*ir.Func,
 	// After the loop rule, because the loop rule is one of the ways a payload
 	// ends up escaping out of a framed array, and the count it is comparing has
 	// to be the final one.
-	foldSplitPayloadsBackIn(function, escapes)
+	if PayloadFold {
+		foldSplitPayloadsBackIn(function, escapes)
+	}
 	rewriteHeapAllocations(function, escapes, blocked, decisions)
 	return true
 }

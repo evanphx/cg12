@@ -7436,3 +7436,156 @@ comparison, and the value climb had no case for one, so it fell to the
 conservative default and dragged an unwinder onto the heap in `copystack`. The
 diagnostic that found it in one run is the one the brief asked about, and it
 found it because it prints the *use*, not the rule.
+
+## Item 1: the triage of all 309, group by group
+
+Every line is in exactly one group and the groups sum to 309. The numbers are
+from the file as regenerated on this branch. Where a verdict says a group is an
+artefact, it says what the categorisation would have to do instead.
+
+**A -- 170 lines. goc names the store its lowering emitted; gc names the
+construct the source wrote. VERDICT: both right, and the *categorisation* is
+what is wrong.**
+
+    111  stored-in-object -> call-retains
+     37  stored-in-object -> closure-captured
+      9  stored-in-object -> returned
+      8  stored-in-object -> interface-boxed
+      3  stored-in-object -> (mixed, incl. call-retains)
+      1  stored-in-object -> channel-send
+      1  stored-in-object -> call-retains + closure-captured
+
+212 of the 364 goc entries in the whole section come from the IR pass, and its
+two largest rules are `write barrier into a candidate` and `store into non-local
+storage`. Both describe an event that is really happening; neither says *what
+the destination is*, and the destination is precisely gc's answer -- the closure
+object, the result area, the argument area, the interface header. The pass has
+the destination reference in hand at the moment it marks. This is the previous
+branch's recommendation 1 and it is still the single largest thing in the file;
+it is a diagnostic change with no placement consequence, and it would move most
+of these 170 lines into agreement.
+
+**B -- 113 lines. goc has no explanation and says so. VERDICT: not a
+disagreement; goc is declining to answer, and the *shape of the decline* is what
+makes these safe.**
+
+    41  unexplained -> call-retains        15  unexplained -> returned
+    41  unexplained -> stored-in-object     9  unexplained -> channel-send
+     7  unexplained -> (mixed / other)
+
+`objectDoesNotEscape` is a prove-it-is-local walk whose default is "escapes", so
+every one of these is goc reaching the right answer *because it could not prove
+the wrong one*. That is the definition of right-without-gc's-knowledge, and it
+is also why none of them is a latent defect: the fallback cannot be broken by
+changing the program's shape, only by adding a rule that wrongly proves
+locality.
+
+**So the hunt went where such a rule could exist.** Sixteen programs, one per
+rule in `gen.nonEscapingObjectUse` that answers *true*, each keeping only the
+mechanism gc named. Six failed, and with three more found by following them, the
+nine are finding 2 above. That is the yield of this section: the 113 are not
+defects and they are what told you where to look.
+
+**C -- 11 lines. goc reached gc's answer without gc's knowledge.**
+`call-opaque -> call-retains`. goc heaps because it cannot see into the callee;
+gc heaps because it knows the callee retains. VERDICT: goc is conservative and
+gc is right; the placements agree and only one of them is an analysis result.
+Not a defect -- the failure mode is the *opposite* direction, and it cannot be
+reached from here: gaining the callee's body can only make goc answer a question
+it currently refuses.
+
+**D -- 8 lines. goc knows more than gc and is more specific.** The
+`runtime_cleanup_*` programs: goc says `assigned to the package-level variable
+escapeSink` with a position inside `stdlib/src/internal/abi/escape.go`, gc says
+`call parameter` and stops at the call. VERDICT: goc is right and gc is right,
+and goc is more useful. This is the direction the file was built to see.
+
+**E -- 5 lines. goc's blanket loop rule against gc's flow.**
+3 `loop-carried -> stored-in-object` and 2 `loop-carried,stored-in-object ->
+call-retains`. gc heaps these because the pointer is assigned to a variable
+declared outside the loop; goc heaps them because they are *in* a loop. VERDICT:
+both right, by rules that are cousins -- gc's loop reasoning is its
+assign-to-an-outer-scope edge, and it prints the edge. Not a defect, and the
+direction of goc's imprecision is the safe one.
+
+**F -- 2 lines. `returned -> too-large`, and this was the real defect.**
+`runtime_gc_memory_limit.go:44` and `runtime_gc_metadata_hugepages.go:50`.
+See finding 1: goc had no size bound at all, the placements agreed only because
+these two slices happen to be returned, and breaking the accident produced a
+program that runs under gc and dies under goc. **Fixed.** The two lines are
+*still* in the file, and that is now correct rather than a coincidence: goc's
+analysis decides them by the return, which is true, and its size rule is a
+second true reason that never has to fire. Making the size win was tried and
+reverted -- gc does not order the two consistently either, printing `too large
+for stack` for a returned 160 KB make and printing the assignment for an 8 MB
+package-level one.
+
+**Verdict on the categorisation, since the brief asks.** Two of the six groups
+are categorisation problems, and they are different problems. Group A is goc's
+diagnostic naming an event instead of a destination -- fixable in goc, worth 170
+lines. Group F is the *taxonomy* assuming one reason per placement when an
+object can have two that are both true; no diagnostic change fixes that, and a
+reason join that carried a set rather than a category would.
+
+## Item 3: the last two slog rows
+
+Both are at parity on *count* in the wrong direction or on nothing at all, and
+their causes are different. One is shared with (1) and (2); the other is not
+shared with anything and is a policy this tree chose.
+
+    case                    goc a/op   gc a/op   goc B/op   gc B/op
+    info/3-attr-large-ints      1.00      3.00      128.0      24.0
+    json/kv-4-pairs             1.00      2.00      176.0      24.0
+
+**`info/3-attr-large-ints` is `foldSplitPayloadsBackIn`, and its calibration has
+expired.** The fold sends a framed `[N]any` container to the heap when two or
+more of its payloads escape, on the arithmetic that K payload allocations cost
+more than one combined object. Its doc comment names this exact row as the case
+that made it necessary, at "one allocation combined and four split, against gc's
+three".
+
+**Measured, one run each way** -- `GOC_PAYLOAD_FOLD=0` is added as a bisection
+knob for exactly this, in the idiom of `GOC_ESCAPE_SUMMARIES`:
+
+    fold on   info/3-attr-large-ints   1.00 / 128.0 B
+    fold off  info/3-attr-large-ints   3.00 /  24.0 B     <- gc exactly
+    fold off  json/kv-4-pairs          1.00 / 176.0 B     <- unchanged
+
+**Splitting costs three now, not four.** The number the threshold was set
+against has moved -- the container can stay in a frame while a payload leaves,
+which is what `containedAllocationsEscape` was built for -- and with it off this
+row is gc's numbers exactly. **Not changed here, and the reason is a
+measurement:** turning the fold off moves 152 containers into frames and splits
+348 payloads out across the corpus, so it is +196 allocations and -152 heap
+arrays. That is a count-against-bytes trade over the whole corpus and the
+arbiter for it is the allocation-count differential against gc, not this
+benchmark. The row is one line of that trade and should not decide it.
+
+**`json/kv-4-pairs` is not the fold** -- it is unchanged with the fold off -- and
+it is the deep variadic question:
+
+    main.go:311:19: struct_values__8_any__payload1_string__payload3_ escapes to heap
+      rule: argument 2 of $log/slog.Logger.Info may retain something inside
+            a self-referential object
+
+**This one is shared, with both (1) and (2).** It is the same
+`needsDeepSummary` refusal as the 47-line `allocation_counts.go:55` group in the
+differential's `DISAGREE ON PLACEMENT, AGREE ON REASON` section -- "goc heaps the
+variadic container; gc frames the container and heaps only the payload inside
+it" -- and the same missing capability as **G4** in the 96, a frame form for a
+payload that survives the call. gc frames the `[8]any` array and boxes two
+payloads for 24 B; goc heaps one 176 B object holding array and payloads
+together.
+
+**And there is a new thing to say about it, from finding 2.**
+`variadicParameterHoldsItsElements`' comment says the wider rule "would have to
+follow an element out of an index or a range into the uses of the value it
+produced, and through a call into the callee's own deep answer for that
+position", and calls that machinery absent. Half of it now exists:
+`gen.escapeAsksWhatTheValueHolds` follows an element out of a field read and an
+index read, and through a call into the callee's walk. What it does *not* do is
+follow a range's value variable -- it refuses one -- which is the half the
+variadic case needs, since `Record.Add` ranges over its parameter. The two
+should be one question, and the reason to say so carefully is that the variadic
+whitelist is conservative and the walk is a follow: unifying them relaxes a rule,
+which is the direction the nine miscompiles came from.
