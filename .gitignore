@@ -42,3 +42,5 @@ runtime_package_initializer_dispatch
 /runtime_package_initializer_dispatch
 /runtime_closure_captured_string
 /recv2
+/growcost
+/main
