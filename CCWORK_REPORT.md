@@ -5452,10 +5452,16 @@ job was told not to do.
 
 **(ii) goc's two instruments do not record the same set of allocations, and now
 say so.** Over the joined lines: 1 335 both record and agree, 153 only the
-census records, 18 only `-m` records, and **1 contradiction** --
-`runtime_loopvar_goroutine_defer.go:38`, where the census has a heap
-`runtime.makemap` at column 26 that `-m` does not report. That is case (2)
-above, not drift. The test asserts on contradictions only; the two one-sided
+census records, 18 only `-m` records, **1 where one records a subset of the
+other**, and **0 contradictions**.
+
+The subset is `runtime_loopvar_goroutine_defer.go:38`: the census has a heap
+`runtime.makemap` at column 26 that `-m` does not report, because a map's
+placement is not a decision and there is no rule to print. That is case (2)
+above and not drift, and getting it classified correctly took a second pass --
+the first definition of "contradiction" was "the verdicts differ", which called
+this drift. Drift is a line where *neither* instrument's placements contain the
+other's, and that is what the test asserts on; subsets and the two one-sided
 counts are scope differences and are reported rather than asserted.
 
 ## 7. Does goc's diagnostic need to say more? Yes -- four things, in order
@@ -5501,10 +5507,22 @@ All re-run after the `goc/compile.go` change, on the final tree:
 | `TestEscapeDiagnostic*` (incl. `DoesNotChangeTheEmittedModule`, `ParsesAsGCFlagM`) | PASS |
 | `TestAllocationCensus` -- reproduces `alloc_census_baseline.txt` | PASS |
 | `TestFrameEscapeAudit` -- reproduces `frame_escape_baseline.txt` | PASS |
-| `escape_gc_differential.txt` | untouched, `git diff` empty |
+| `escape_gc_differential.txt` | untouched, `git diff main` empty |
+| `alloc_census_baseline.txt`, `frame_escape_baseline.txt` | untouched, `git diff main` empty |
+| the new baseline reproduces | PASS -- the no-`-update` run is clean |
+| the new baseline is reproducible | two consecutive regenerations byte-identical |
+| the new baseline fails on drift | PASS -- perturbing one character of the committed file fails the run with "the reason differential moved" |
 
-No allocation moved. The only compiler-visible change is one diagnostic string,
-emitted only when `-m` is on, which is off by default.
+No allocation moved. The only compiler-visible changes are one diagnostic string
+and a longer sort key, both reached only when `-m` is on, which is off by
+default.
+
+The reproducibility guard earned its place: the first version of this file
+reordered between runs. `opt.EscapeSite.sortKey` was not a total order -- one
+position in one function can hold both a frame decision and a heap one, and
+every field of the key was equal for that pair -- so an unstable `sort.Slice`
+left them in whichever order it happened to. Fixed at the root, in the
+diagnostic, so `goc -m` is stable too.
 
 `go test ./goc/...`, the capability matrix and `make test-unit` were **not** run
 here, as instructed -- the dependent gate job runs those.
