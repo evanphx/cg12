@@ -5588,3 +5588,132 @@ price of the rule living in the front end, and closing that gap means either
 teaching the summary table about deferproc specifically or moving the rule --
 neither of which is this branch's business, and both of which would need
 `promotionsBlockedByALoop` to take over from `deferStatementRepeats`.
+
+# Guards, on the tree as shipped
+
+Host `go1.26.1 linux/arm64`. Every run below was started by this job, on the
+final tree, after the last change, and watched to exit.
+
+| guard | result |
+| --- | --- |
+| `TestFrameEscapeAudit -count=1` | **PASS** against the regenerated baseline. Over the branch: **7 publications removed, 0 added** -- `crypto/tls`, `net/http`, `text/template`, `runtime.cgocallbackg1`, and three corpus programs, every one a `defer` |
+| `TestAllocationCensus -count=1` | **PASS**. Regenerated and reviewed site by site; the delta is below |
+| `TestEscapeDifferentialAgainstGC -escape-gc-differential` | **PASS**. **96** `heap -> frame`, from 106 |
+| `TestEscapeShadowPlacement -count=1` | **PASS** against the regenerated baseline. Front-end placements: **177221 frame of 202028 (87.72 %)**, from 83.83 % |
+| `TestSlogAllocationsAgainstGC -slog-allocations` | **PASS** against the regenerated baseline; **30 of 32 rows exactly at gc**, from 28 |
+| `TestAllocationCounts`, `TestAllocationCountsAgainstTheHostToolchain` | **PASS**, including the seven new rows |
+| `TestLoopBodyAllocationsAreDistinctPerIteration` | **PASS** |
+| `TestLoopAliasExpectationsMatchTheHostToolchain` | **PASS** -- the loop-aliasing programs still match the host toolchain |
+| `TestCompilingTheSameSourceTwiceGivesTheSameModule` | **PASS** -- determinism holds |
+| `TestTypeGCMasksArePaddedToAPointerWord` | **PASS** |
+| `TestEscapeSummaryFacts`, `TestEscapeSummaryCost`, `TestEscapeDiagnostic*` | **PASS** |
+| `go test ./opt` (whole package) | **PASS** |
+| `go test ./goc -run 'TestEscape\|TestAppend\|TestSlice\|TestVariadic\|TestDefer\|TestInterface\|TestClosure\|TestFrame\|TestAlloc\|TestRange\|TestMap\|TestGeneric\|TestMethod\|TestCorpus'` | **PASS** |
+| GC reducer `runtime_gc_type_mask_padding.go` | **0/20 at `GOGC=10`, 0/20 at default `GOGC`**, `GOMAXPROCS=3`, serially, 180 s timeout, a run counting as a pass only if it exits 0 *and* prints exactly `type mask padding ok` |
+| the three programs this branch's changes are about, 20 runs each at `GOGC=10` | **0/20 failures**: `runtime_defer_receiver_gc.go`, `runtime_append_make_extension.go`, `runtime_array_copy_pointer_gc.go` |
+| `go build ./...`, `go vet ./goc ./opt ./cmd/goc ./ir`, `gofmt` | clean |
+
+Not run here, per the brief: `go test ./goc/...` in full, the capability matrix
+and `make test-unit`, which the dependent gate job runs. The capability arms were
+366/366 at the branch point and nothing here removes a capability.
+
+## The 87.72 %, and the decision it is evidence for
+
+The brief says the migration of placement onto the IR is closed on measurement:
+the AST walk kept 83.4 % of 189094 placements in frames against the IR analysis's
+79.4 %, with a ceiling of 83.6 %. **The walk is now at 87.72 % of 202028** -- past
+the ceiling that measurement gave the IR analysis, on 7 % more placements. The
+decision was right and is now further out of reach; nothing here reopens it.
+
+## The census delta, reviewed
+
+Against the branch point (65ed70a), the whole of it:
+
+    478  moved heap -> frame, every one a closure or method-value descriptor
+         handed to runtime.deferproc
+      ~10 moved heap -> frame from the indirection resolution: the four
+         runtime_array_copy_pointer_gc.go boxes, reflect.SliceOf's unsafe.Pointer,
+         net/mail's closure, and the `var x any = T{}` payloads in
+         reflect.StructOf, reflect.ArrayOf and runtime.stkobjinit -- each of which
+         had a frame row already, from another corpus program, so the heap row
+         going away leaves no addition
+      17 makeslice rows removed with nothing added: the `make` inside
+         `append(s, make([]T, n)...)`, in slices.Grow, io.ReadAll, four digest
+         AppendBinary/MarshalBinary implementations, bytes.growSlice,
+         crypto/tls.encodeInnerClientHello and time.appendInt
+      ~20 new rows in the two new corpus programs and the seven new
+         allocation_counts rows
+
+Nothing moved frame -> heap, and no site appeared whose program was not new.
+
+## Compile time
+
+`TestAllocationCensus`, which compiles all 403 corpus programs, takes **178 s** on
+this tree against **176 s** at the branch point -- inside the noise. The
+indirection resolution is O(instructions) per function and is skipped entirely
+when a function has no single-writer pointer slot.
+
+# Summary
+
+    lines where goc heaps what gc frames    106 -> 96
+    slog rows exactly at gc                  28 -> 30 of 32
+    frame-address publications                7 removed, 0 added
+    front-end placements in frames        83.83 % -> 87.72 %
+    census sites moved heap -> frame        ~505
+    a nondeterministic miscompile in main    found, fixed, and pinned by a corpus
+                                             program that fails 12 of 20 runs at
+                                             the branch point
+
+## What changed in the compiler
+
+| change | what it is worth |
+| --- | --- |
+| a deferred call's function value lives in the registering frame | **a miscompile fix**; 7 publications; one allocation off every non-repeating `defer f(x)` and `defer x.m()` in every program |
+| `append(s, make([]T, n)...)` extends and clears rather than building | one allocation off every `slices.Grow`; two slog rows |
+| the escape walk sees through goc's aggregate-variable indirection | 4 differential lines; `[4]*T{...}` 4.00 -> 0; `var v any = T{}` 1.00 -> 0 |
+| a recursive escape question is answered optimistically | 6 differential lines; G8 closed |
+| `-m-match`, so `-m` can be pointed at a package the program imported | how the `log/slog` placements above were read |
+
+Seven new rows in `testdata/allocation_counts.go`, each measured with the branch
+point's compiler and this branch's:
+
+    pointer_into_a_local_array           4.00 -> 0      (gc 0)
+    value_boxed_into_a_local_interface   1.00 -> 0      (gc 0)
+    append_make_extension                2.00 -> 1.00   (gc 1.00)
+    defer_mutex_unlock                   1.00 -> 0      (gc 0)
+    defer_method_on_a_local              1.00 -> 0      (gc 0)
+    defer_call_with_arguments            1.00 -> 0      (gc 0)
+    defer_function_literal               0    -> 0      the control
+
+Two new corpus programs, each of which fails at the branch point and passes here:
+
+    runtime_defer_receiver_gc.go        12 of 20 runs wrong at the branch point
+    runtime_append_make_extension.go    the zero-fill, the barrier and the panic
+
+## The four slog rows, answered
+
+    case                    goc a/op   gc a/op   goc B/op   gc B/op
+    info/3-attr-large-ints      1.00      3.00      128.0      24.0
+    logattrs/6-attr             1.00      1.00       48.0      48.0   parity
+    json/kv-4-pairs             1.00      2.00      176.0      24.0
+    json/logattrs-4-attrs       0.00      0.00        0.0       0.0   parity
+
+- **`logattrs/6-attr` -- at parity.** It was `slices.Grow` inside
+  `Record.AddAttrs`, paying two allocations for the `append(s, make(...)...)`
+  idiom where the source says one. Not the variadic question the previous branch
+  filed it under: `variadicParameterHoldsItsElements` was never reached, and the
+  `[6]Attr` backing array was already in the frame.
+- **`json/logattrs-4-attrs` -- at parity, at zero.** Two allocations were the same
+  `slices.Grow`; the third was `handleState`, which the defer fix and then the
+  fixpoint together put back in the frame.
+- **`json/kv-4-pairs` -- 1.00 against gc's 2.00.** goc allocates *fewer*: one
+  combined object for the `...any` backing array and its boxed payloads where gc
+  frames the array and boxes two payloads separately. 176 B in one against 24 B
+  in two.
+- **`info/3-attr-large-ints` -- 1.00 against gc's 3.00.** The same shape, and it
+  was never a defect: 128 B in one allocation against 24 B in three.
+
+**So the two rows still off gc are both goc allocating fewer times in more
+bytes**, which is the combined-object representation working as designed and the
+same trade `sprintf_two_small_ints` / `sprintf_two_large_ints` already record in
+both directions. There is no remaining slog row where goc allocates more than gc.
