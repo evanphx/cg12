@@ -4180,3 +4180,23 @@ practice:
   same reason `internal/gcdiff` does not join on the subject.
 - **Level 2 chains only exist for the AST walk**, so a `new(T)` -- decided by the
   IR pass -- gets a rule and a position but never a path.
+
+## 7. Summary
+
+**Flag:** `goc -m` and `goc -m=2`; environment form `GOC_M`. Off by default,
+documented in `docs/escape-diagnostics.md` with a pointer from
+`RUNTIME_PLAN.md`'s escape-audit section and a line in `goc -h`.
+
+**What it prints:** one decision line per allocation site in the compiled file,
+in cmd/compile's `-m` wording (`<pos>: <subject> does not escape` /
+`escapes to heap`), with tab-indented continuations giving the placer (`front
+end` = goc's AST walk, `ir pass` = `opt.LowerHeapAllocations`), the rule that
+decided, and -- at level 2 -- the chain of questions from the deciding use
+outwards and the position of that use.
+
+**Parseable by internal/gcdiff:** yes for placements, today, with no change to
+either side -- `gcdiff.ParseGCFlagM` reads goc's output with zero Unknown lines
+(`TestEscapeDiagnosticParsesAsGCFlagM`). Reasons are dropped as continuations;
+teaching the parser to keep them is mechanical, comparing them against gc's
+`-m=2` vocabulary is not worth doing, and grouping goc's own gc-differential
+disagreements by goc's rule is.
