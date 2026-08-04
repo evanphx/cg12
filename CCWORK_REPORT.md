@@ -3861,3 +3861,61 @@ is where the correctness risk lives, and this branch removed two of them
 `stdlib_netpoll_syscall_socket_listen.go:19`) as a side effect of the
 receiver-retention fix, along with three frame-address publications in
 `log/slog`. Those are worth more than the seven lines it moved the other way.
+
+# Guards, on the tree as shipped
+
+Every one of these was run on the final tree, after the last change, and watched
+to exit.
+
+| guard | result |
+| --- | --- |
+| `TestFrameEscapeAudit -count=1` | **PASS** against the regenerated baseline. Over the branch: **3 publications removed, 0 added** -- `log/slog`'s `handleState` in `defaultHandler.Handle`, `commonHandler.withAttrs` and `commonHandler.handle` is no longer a frame object whose address a write barrier puts into a heap object |
+| `TestAllocationCensus -count=1` | **PASS**. Regenerated and reviewed site by site; the delta against the branch point is below |
+| `TestEscapeDifferentialAgainstGC -escape-gc-differential` | **PASS**. 106 `heap -> frame`, from 113 |
+| `TestEscapeShadowPlacement -count=1` | **PASS** against the regenerated baseline. Front-end placements in frames 165861 of 197849 (83.83 %) |
+| `TestSlogAllocationsAgainstGC -slog-allocations` | **PASS** against the regenerated baseline; the two rows that moved are explained above |
+| `TestAllocationCounts`, `TestAllocationCountsAgainstTheHostToolchain` | **PASS**, including the five new rows, under `-O` and without |
+| `TestLoopBodyAllocationsAreDistinctPerIteration` | **PASS** -- 6 programs, with and without `-O` |
+| `TestLoopAliasExpectationsMatchTheHostToolchain` | **PASS** -- the loop-aliasing programs still match the host toolchain |
+| `TestCompilingTheSameSourceTwiceGivesTheSameModule` | **PASS** -- determinism holds |
+| `TestTypeGCMasksArePaddedToAPointerWord` | **PASS** |
+| `TestEscapeSummaryFacts`, `TestEscapeSummaryCost` | **PASS** |
+| GC reducer `runtime_gc_type_mask_padding.go` | **0/20 at `GOGC=10`, 0/20 at default `GOGC`**, `GOMAXPROCS=3`, serially, 180 s timeout, a run counting as a pass only if it exits 0 *and* prints exactly `type mask padding ok` |
+
+## The census delta, reviewed
+
+Against the branch point (d113d4a), by direction:
+
+    moved heap -> frame     7    every one a corpus program, every one run
+    moved frame -> heap    27    the receiver-retention fix; the safe direction
+    appeared              44    mostly sites that now hold both placements, plus
+                                the new rows in the two new programs and in
+                                allocation_counts.go
+    vanished               7    6 with a heap row: 3 are line shifts in
+                                allocation_counts.go, 3 are variadic_backing.go's
+                                `x := 42` becoming an ordinary frame slot
+
+The **7 heap -> frame** are the correctness-critical direction and were each
+checked by compiling and running the program:
+
+    runtime_defer_method_value_order.go:12   runtime_interface_method_gc.go:23, :25
+    runtime_method_value_gc.go:16            runtime_reflect_value_indirect_call.go:28, :29
+    runtime_timer_callback_shape.go:16
+
+The **27 frame -> heap** are `x := &T{}` followed by a method call whose receiver
+the walk can no longer prove non-retaining: `math/big.karatsuba`'s three `&Int{}`,
+`net.sysDialer`/`net.sysListener`, `crypto/tls.clientHandshakeState`,
+`image/png.decoder`, `encoding/binary`'s coders, and the two corpus lines that
+were **permissive** -- `stdlib_io_readall_limited_reader.go:9` and
+`stdlib_netpoll_syscall_socket_listen.go:19`, which gc also puts on the heap and
+goc was framing.
+
+## Compile time
+
+The receiver question runs at every method call and devirtualisation runs at
+every interface method call, both new work. `TestAllocationCensus`, which
+compiles all 401 corpus programs, takes **176 s** on this tree against **177 s**
+at the branch point -- inside the noise. `interfaceMethodCandidates` is
+O(dynamic types x reachable declarations) and is memoised per (method, call-site
+interface); without the memo it would be recomputed at every interface method
+call the walk meets.
