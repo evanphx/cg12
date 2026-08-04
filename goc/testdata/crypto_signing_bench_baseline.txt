@@ -42,15 +42,21 @@
 #
 # # A movement is not automatically a regression
 #
-# goc gives function entries no alignment, so where the crypto code lands inside
-# the processor's 32-byte instruction fetch granule is decided by the total size
-# of everything emitted before it. Measured on the box this baseline was taken
-# on, with the compiled program held byte-for-byte identical and only the text
-# section shifted, this index is a square wave in that shift: period 32 bytes,
-# amplitude 6.1%, which is more than the tolerance. Before treating a movement
-# here as a regression, check whether the path's instruction *encodings* changed
-# at all -- goc/cryptobench_test.go's failure message gives the commands. A
-# movement with identical encodings is a placement flip and nothing got worse.
+# This used to be the main thing to know about this file. goc gave function
+# entries no alignment, so where the crypto code landed inside the processor's
+# 32-byte instruction fetch granule was decided by the total size of everything
+# emitted before it, and this index was a square wave in that shift with an
+# amplitude of 6.1% -- larger than the tolerance. goc now places a function that
+# contains a loop on a 32-byte boundary, which pins the phase, and the same
+# experiment moves this index by 0.4%.
+#
+# It is not zero. Alignment fixes a function's phase, not its address: two builds
+# still put the code in different cache sets, and a function with no loop in it
+# is still placed wherever the previous one ended. So before treating a movement
+# here as a regression, still check whether the path's instruction *encodings*
+# changed at all -- goc/cryptobench_test.go's failure message gives the commands.
+# A movement with identical encodings is a placement effect and nothing got
+# worse; it is now merely a much smaller one.
 #
 host toolchain: go version go1.26.1 linux/arm64
 measurement:    rounds=5 fastest-of signVerifyRounds=200
@@ -58,7 +64,7 @@ index:          case time / control/spin-fixed-work time, same binary, same proc
 tolerance:      0.04 of the index, both directions
 
 case                        goc index     gc index   goc ns (fyi)    gc ns (fyi)
-p256/sign-verify              48.7484       1.6293     2664038161       54516168
-p256/verify                   35.8206       1.1648     1957550355       38972417
-p384/sign-verify              41.6658       2.8793     2276980080       96341317
-rsa2048/sign-verify           12.8621       0.5930      702897785       19840330
+p256/sign-verify              45.8670       1.6271     2505752374       54418705
+p256/verify                   33.8050       1.1655     1846797694       38981144
+p384/sign-verify              40.0934       2.8793     2190334653       96301337
+rsa2048/sign-verify           12.1153       0.5932      661871209       19838573
