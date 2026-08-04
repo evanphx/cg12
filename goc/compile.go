@@ -4134,10 +4134,9 @@ func (g *gen) parameterDoesNotEscapeUnexplained(function *types.Func, index int,
 	}
 	key := parameterKey{function: function, index: index}
 	if checking[key] {
-		g.diagRule(func() string {
-			return fmt.Sprintf("passed to %s, which the walk is already inside: it breaks the recursion by answering \"escapes\"", function.FullName())
-		})
-		return false
+		// The recursive edge is answered "does not escape", which is the
+		// *optimistic* answer and the correct one. See recursiveEscapeAnswer.
+		return recursiveEscapeAnswer
 	}
 	checking[key] = true
 	defer delete(checking, key)
@@ -4340,6 +4339,48 @@ func (g *gen) reportEscapingUse(object types.Object, use ast.Node) {
 	fmt.Fprintf(os.Stderr, "escape use: %s escapes at %s\n", object.Name(), g.fset.Position(use.Pos()))
 }
 
+// recursiveEscapeAnswer is what parameterDoesNotEscape and receiverDoesNotEscape
+// answer for the edge back into a question they are already inside.
+//
+// It is `true` -- "does not escape" -- and that is not an assumption. The walk
+// computes, for one object, "does some chain of uses reach a use that publishes
+// it". Written as a system of equations it is a pure monotone OR: a use is bad
+// on its own, or it forwards the question to another parameter, and the object
+// escapes exactly when some chain of forwards ends at a bad use. The answer that
+// system defines is its *least* fixpoint, and a depth-first walk that answers the
+// back edge "false" computes that fixpoint exactly, with no iteration:
+//
+//   - it never answers "escapes" without evidence. A `false` answer is only
+//     returned by the branch that met a real publishing use, so every escape it
+//     reports is a real chain of uses ending at a real bad use, which is a
+//     derivation in the least fixpoint.
+//   - it never answers "does not escape" without having checked everything. The
+//     walk short-circuits only *after* something escaped, so an object it clears
+//     was cleared with every one of its uses examined -- and the set of questions
+//     visited on that walk is closed: each one's uses are either harmless or
+//     forward to another question in the set, which was also cleared. Assigning
+//     "does not escape" to all of them is consistent, so the least fixpoint
+//     assigns it too.
+//
+// Answering the back edge "escapes" instead is sound but strictly weaker: it
+// invents a publication that no use performs, and every question that forwards
+// through the cycle inherits it. `log/slog`'s handleState is the case -- appendAttr
+// and appendAttrs are mutually recursive, so the receiver could never be placed.
+//
+// The previous branch measured this change, found three frame-address
+// publications in log/slog, and did not land it. Those publications were `defer
+// state.free()` and had nothing to do with the cycle: see
+// deferredFunctionValueStaysInFrame, which fixes them at the source and makes
+// them reproducible with no compiler change at all.
+//
+// Everything else in the walk keeps its pessimistic break --
+// interfaceMethodDoesNotRetainReceiver, parameterLeaksOnlyToResult, and
+// objectDoesNotEscape's own per-object one all still answer "escapes" for a
+// cycle. Mixing them is safe in one direction only, and this is that direction:
+// a pessimistic break can only add escapes to a least fixpoint, never remove
+// one.
+const recursiveEscapeAnswer = true
+
 func (g *gen) receiverDoesNotEscape(function *types.Func, checking map[parameterKey]bool) bool {
 	declaration, ok := g.functionDecls[function]
 	if !ok {
@@ -4354,7 +4395,8 @@ func (g *gen) receiverDoesNotEscape(function *types.Func, checking map[parameter
 	}
 	key := parameterKey{function: function, index: -1}
 	if checking[key] {
-		return false
+		// See recursiveEscapeAnswer, and the receiver half of the note there.
+		return recursiveEscapeAnswer
 	}
 	checking[key] = true
 	defer delete(checking, key)
