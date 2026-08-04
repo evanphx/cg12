@@ -662,3 +662,75 @@ this tree that does it in a heap object, at scale, under GC pressure.
   unfixed compiler that alone dies with the same "found bad pointer in Go heap"
   on **14 of 20 runs at the default GOGC**. On the fixed compiler the tails
   retain their buffers and it passes.
+
+### The fix
+
+`goc/compile.go`, in the `*ast.SliceExpr` lowering: the byte offset added to the
+source's data pointer is masked with `0` when the result's extent is zero and
+`-1` otherwise -- `And(offset, Sar(Neg(extent), 63))` -- where the extent is the
+result's capacity for a slice and its length for a string. Three instructions,
+and only where the answer is not already known:
+
+- a constant-zero low index cannot move the pointer, so nothing is emitted;
+- a fixed-size array sliced at a constant index has a capacity the compiler reads
+  off the type, so the answer is folded: no mask when it is non-zero, a constant
+  zero offset when it is zero.
+
+That second case is not tidiness. Emitting the mask into `crypto`'s
+`copy(b[32:], k.z[:])` -- a `[64]byte` sliced at a constant -- grew three small
+`mlkem` functions past the inliner's budget, and the six allocation sites that
+`DecapsulationKey768.Bytes` and `DecapsulationKey1024.Bytes` contribute to their
+callers went out of the census. With the constant case folded, the census
+baseline's only change is the reducer's own five sites.
+
+Cost: `.text` of the goc-built `flate` benchmark grows **5120 bytes, +0.155%**.
+
+### Crash rate, before and after
+
+Every run pinned to its own core, as the perf suite pins. "suite configuration"
+is what `make bench-perf` builds and runs: `goc -O`, default alignment, default
+GOGC.
+
+| configuration | before | after |
+|---|---:|---:|
+| suite configuration | **15 / 200 = 7.5%** | **0 / 600** |
+| alignment off, `GOGC=10` | **95 / 100 = 95%** | **0 / 400** |
+| `runtime_gc_slice_tail_pointer` part two alone, default GOGC | **14 / 20 = 70%** | 0 / 40 |
+| host `go build`, `GOGC=10` | 0 / 15 | -- |
+
+The before figure in the suite's own configuration, 7.5%, is the number that
+branch measured independently at 6.9%; the two agree. After the fix, **0 crashes
+in 1000 runs** of the `flate` benchmark across the two configurations. At the
+before-rate of 7.5%, 600 clean runs of the suite configuration alone has
+probability 6e-21; the 95% upper bound on the remaining rate, from 600 runs with
+no event, is 0.5%.
+
+### Guards
+
+| guard | result |
+|---|---|
+| `runtime_gc_type_mask_padding` at `GOGC=10` and default, `-O` and not | 0/20 each, 4 arms, 80 runs |
+| `runtime_gc_slice_tail_pointer` at `GOGC=10` and default, `-O` and not | 0/20 each, 4 arms, 80 runs |
+| `TestFrameEscapeAudit` | pass |
+| `TestLoopAliasAudit` | pass |
+| `TestEscapeShadowPlacement` | pass |
+| `TestAllocationCensus` | pass; baseline gains the reducer's 5 sites and nothing else |
+| `TestCompilingTheSameSourceTwiceGivesTheSameModule` | pass |
+| capability matrix, both arms | see below |
+
+### Should the perf suite's retry stay?
+
+**The retry stays; the ceiling goes to zero.** They were one mechanism and they
+are now two different questions.
+
+The 20% ceiling existed to *excuse* a live defect: it was set five times the
+known flate rate so a green run would stay green. With the defect fixed, a
+ceiling that tolerates one run in six is a hole -- a new collector bug could kill
+a sixth of every program's runs and still print a table. `perfBenchCrashCeiling`
+is now `0`: any crash fails the run, with the dead run's stderr attached.
+
+The retry itself earns its place for a different reason than the one it was
+written for. A crash is a *missing* measurement rather than a slow one, so
+replacing it biases nothing, and retrying is what keeps one dead run from costing
+the other ten programs their eleven minutes. Failing at the end with the whole
+table and the whole crash report beats dying at repetition five with neither.
