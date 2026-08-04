@@ -3923,9 +3923,10 @@ call the walk meets.
 # Summary
 
     lines where goc heaps what gc frames    113 -> 106
-    lines where goc frames what gc heaps   1448 -> 1454, of which +4 are the two
-                                           new corpus programs' panic strings and
-                                           +2 were removed by the receiver fix
+    lines where goc frames what gc heaps   1448 -> 1454: -2 real (both fixed by
+                                           the receiver rule), +8 panic-string
+                                           lines in the two new corpus programs,
+                                           which goc has no census row for
     groups the 113 fell into                12 (1 closed, 1 partly, 1 renamed)
     frame-address publications             -3, +0
 
