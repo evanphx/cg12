@@ -594,6 +594,43 @@ Custom pipelines compose the same building blocks: `opt.Run(m, myPasses)`.
 go test ./...
 ```
 
+### Runtime performance
+
+Two instruments measure elapsed time rather than counting something. Both are
+opt-in, because both need a host Go toolchain and both need a quiet machine: a
+loaded box produces a number about the box.
+
+```
+make bench-crypto     # the ECDSA signing path, against its committed baseline
+make bench-perf       # eleven workloads, goc against the host Go toolchain
+```
+
+`bench-perf` is the general one. It compiles eleven programs with `goc -O` and
+with the host toolchain from identical source, times three arms of each —
+goc, the same goc binary again as a null, and the host — nine times over,
+interleaved and pinned to one core, and compares the goc/host **ratio** against
+`goc/testdata/perf_suite_baseline.txt`. It takes about eleven minutes and fails
+in both directions.
+
+The null arm is the point: it is one file measured against itself, so its true
+value is exactly 1.0000, and the spread around it is each row's noise floor
+measured in the same run and the same units as the thing it judges. Every row's
+tolerance comes from it, and the baseline prints per row the smallest movement
+that row can actually fail on — so a green run says what it proved.
+
+Update a baseline only after looking at the diff:
+
+```
+make bench-crypto-update
+make bench-perf-update
+```
+
+When one row moves, `goc/perfbench_test.go`'s failure message is the triage
+note: it separates an allocation that moved from generated code that changed
+from code that did not change and *moved*, with the commands for each. The two
+corpora are `goc/testdata/perf_bench` (see its README) and the seven programs
+reused from `goc/testdata/placement_bench`.
+
 ### Go runtime coverage
 
 On Linux/ARM64, `goc` can instrument the Go runtime basic blocks in an

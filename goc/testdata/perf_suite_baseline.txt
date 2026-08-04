@@ -1,0 +1,136 @@
+# goc against the host Go toolchain, on eleven workloads. Regenerate with
+#
+#     make bench-perf-update
+#
+# and read the diff; check it with
+#
+#     make bench-perf
+#
+# The run needs a Go toolchain and a system linker, and takes about eleven
+# minutes. Run it on an idle machine: like the crypto benchmark and unlike every
+# other baseline in this directory it measures time, so a loaded box produces a
+# number about the box. If another timing benchmark is running on the same
+# machine, set GOC_PERF_CORE to a core it is not using.
+#
+# # What is compared, and why it is a ratio and not a time
+#
+# Both columns come from the same program compiled by both compilers, and the
+# gated number is
+#
+#     ratio = goc nanoseconds / host nanoseconds
+#
+# formed inside one repetition, from two runs seconds apart on the same pinned
+# core, and then averaged over the repetitions. Machine speed divides out of it,
+# so the file is checkable on a box other than the one that produced it, and --
+# unlike an index formed against a control measured in the goc binary -- it does
+# not hide a change that made goc's control loop slower too. The crypto
+# benchmark uses that index and says so; this suite needs the other property,
+# because a change that costs 5% everywhere is exactly what it exists to catch.
+#
+# The raw nanoseconds are printed alongside so the ratio can be sanity-checked.
+# They are not compared; they are expected to differ between machines.
+#
+# # The noise columns, and the null
+#
+# Both binaries are fixed once built, so a row's true ratio does not change
+# between repetitions and every departure from its mean is this instrument
+# measuring itself. ratio-sd% is that departure -- one repetition's spread, not
+# the mean's -- and it is each row's noise floor and where its tolerance comes
+# from.
+#
+# The null is a second reading of the same thing from a different angle: every
+# repetition runs the goc binary twice and divides one run by the other. It is
+# the same file, so its true value is exactly 1.0000. Two things come out of it.
+# A run whose null is not 1.0000 to within its own interval has a systematic
+# artefact in how its runs were ordered, and none of its other columns should be
+# believed. And null-sd% against ratio-sd% says which side the noise is on: the
+# null sees goc-side noise only, so a row that is loud in ratio-sd% and quiet in
+# null-sd% is a row whose *host* binary is jittering -- usually because the host
+# finishes that case in a few milliseconds.
+#
+# # tol% and detect%
+#
+# tol% is how far this row's ratio may move from the committed value before the
+# run fails: three times ratio-sd%, or 5%, whichever is larger. The 5% floor is
+# for code placement, which neither noise column can see because both use one
+# pair of binaries, and which is not a regression; see goc/perfbench_test.go.
+#
+# detect% is the smallest movement this row can actually fail on, which is tol%
+# plus the interval a run draws around its own answer. It is the honest answer to
+# "what does a green run mean for this row". A row with a large detect% is not
+# blind below it, only silent: the baseline is committed, so a movement smaller
+# than detect% still appears as a changed number the next time someone runs
+# -update-perf-bench.
+#
+# # A movement is not automatically a regression
+#
+# There are three causes and they are distinguishable. An allocation moved, the
+# generated code changed, or the code did not change and moved. goc aligns the
+# entry of every function containing a loop to 32 bytes, which pins its phase in
+# the 32-byte fetch granule, but two builds still land code in different cache
+# sets. goc/perfbench_test.go's failure message has the commands that tell the
+# three apart.
+#
+# # The workloads, and what each is for
+#
+#   interp    a bytecode interpreter: a switch dispatch loop, the shape a real interpreter has
+#   sha       SHA-256 and HMAC over a buffer: one tight block loop, and the same assembly under both compilers
+#   regexp    regexp matching: a second, larger interpreter over a pointer-linked program
+#   json      encoding/json round trip: reflection, interface dispatch and a hand-written scanner
+#   sortmap   sort.Slice and map build/probe: indirect calls through a comparison callback, and hashing
+#   flate     compress/flate round trip: table-driven loops over byte slices
+#   text      strconv, fmt and strings.Builder: string building and formatting
+#   chase     dependent loads at three cache depths: the only workload here bound by memory latency
+#   conc      goroutines, channels and mutexes: cost paid inside goc's runtime rather than in emitted code
+#   gcpress   allocation churn, a live heap, the write barrier and slice growth: what an allocation costs
+#   float     floating-point arithmetic: a separate register file and a separate set of lowering decisions
+#
+host toolchain: go version go1.26.1 linux/arm64
+protocol:       9 interleaved repetitions, pinned to core 62 (the second of 64 this process is allowed, leaving the top one to make bench-crypto), mean with a 95% interval
+ratio:          goc nanoseconds / host nanoseconds, paired inside one repetition
+null:           the goc binary over itself, whose true value is exactly 1.0000
+tolerance:      per row, the larger of 3x the row's own ratio-sd% and 5%
+
+program   case                        ratio ratio+/-% ratio-sd%     null null+/-% null-sd%    tol%  detect%  goc ns (fyi) host ns (fyi)
+interp    control/spin-fixed-work    1.6303      0.16      0.21   0.9992     0.17     0.22     5.0      5.2      54605241      33493900
+interp    interp/bytecode-loop      21.4647      0.04      0.05   1.0002     0.04     0.05     5.0      5.1     677974546      31585580
+sha       control/spin-fixed-work    1.6307      0.17      0.22   0.9993     0.18     0.23     5.0      5.2      54616193      33492069
+sha       sha/hmac-1mib              1.0161      0.07      0.09   1.0000     0.05     0.07     5.0      5.1      41137162      40483479
+sha       sha/sha256-1mib            1.0077      0.05      0.07   1.0001     0.05     0.07     5.0      5.1      67762551      67241677
+regexp    control/spin-fixed-work    1.6327      0.04      0.06   1.0000     0.03     0.04     5.0      5.1      54668157      33482540
+regexp    regexp/anchored-lines      6.1430      0.27      0.35   1.0019     1.00     1.30     5.0      5.4     170771223      27799421
+regexp    regexp/find-submatch       7.9542      0.27      0.35   1.0011     0.22     0.29     5.0      5.4     381762244      47995309
+regexp    regexp/replace             7.0652      1.69      2.20   1.0078     1.22     1.59     6.6      9.0     400435330      56700935
+json      control/spin-fixed-work    1.6330      0.03      0.04   1.0001     0.05     0.06     5.0      5.0      54661824      33472985
+json      json/marshal              17.1777      1.31      1.71   0.9779     1.10     1.43     5.1      7.0     223615674      13018629
+json      json/unmarshal            11.2872      3.65      4.75   0.9930     1.19     1.55    14.2     19.4     332400360      29501695
+sortmap   control/spin-fixed-work    1.6322      0.04      0.05   0.9996     0.04     0.05     5.0      5.1      54659299      33488278
+sortmap   map/build-probe            7.8849      2.51      3.26   1.0110     4.60     5.99     9.8     13.3     210697073      26720958
+sortmap   sort/ints                  3.8231      0.10      0.13   0.9999     0.16     0.20     5.0      5.1     221532825      57945643
+sortmap   sort/slice-callback        3.7411      0.49      0.64   0.9997     0.19     0.24     5.0      5.7      87729882      23451339
+flate     control/spin-fixed-work    1.6322      0.07      0.10   0.9996     0.04     0.05     5.0      5.1      54665753      33491194
+flate     flate/compress             6.8562      0.61      0.79   0.9997     0.49     0.63     5.0      5.9     186839328      27252058
+flate     flate/decompress           7.5854      0.13      0.17   0.9996     0.09     0.11     5.0      5.2     349069921      46018838
+text      control/spin-fixed-work    1.6331      0.03      0.04   1.0001     0.01     0.02     5.0      5.0      54663251      33471091
+text      text/format-append        10.9927      4.91      6.39   1.0177     5.30     6.89    19.2     26.1     193716302      17648685
+text      text/parse                10.2019      0.13      0.16   1.0009     0.17     0.22     5.0      5.2     226438660      22195791
+text      text/sprintf              11.1728      6.77      8.81   0.9461     7.56     9.84    26.4     36.0     269043962      24080710
+text      text/utf8-decode           4.4129      0.17      0.22   0.9994     0.20     0.27     5.0      5.2     129368544      29315823
+chase     chase/dram                 1.0265      4.79      6.23   1.0125     3.57     4.65    18.7     25.5      84220777      82186221
+chase     chase/l1-resident          1.4574      0.27      0.35   1.0018     0.23     0.30     5.0      5.4       4737280       3250446
+chase     chase/pointer-node         1.0103      1.52      1.98   1.0014     0.92     1.20     5.9      8.1      48984989      48498307
+chase     control/spin-fixed-work    1.6322      0.06      0.07   1.0001     0.02     0.03     5.0      5.1      54664873      33490958
+conc      chan/pingpong-unbuffered   6.4916      0.72      0.93   0.9993     0.22     0.28     5.0      6.0      99527479      15332817
+conc      chan/send-buffered         4.8052      0.20      0.25   0.9996     0.13     0.16     5.0      5.3      40626951       8454839
+conc      control/spin-fixed-work    1.6322      0.04      0.05   1.0001     0.04     0.05     5.0      5.1      54660642      33489451
+conc      goroutine/spawn-join      38.4529      3.28      4.27   1.0013     0.16     0.21    12.8     17.4     472243809      12302203
+conc      mutex/uncontended          1.8632      0.03      0.04   1.0002     0.04     0.05     5.0      5.0      43646298      23425201
+gcpress   control/spin-fixed-work    1.6326      0.05      0.07   1.0003     0.04     0.05     5.0      5.1      54660619      33481051
+gcpress   gc/alloc-churn            11.6967      2.35      3.06   1.0227     1.70     2.21     9.2     12.5     149699730      12808232
+gcpress   gc/live-heap-churn         8.4655      3.33      4.33   1.0036     1.57     2.05    13.0     17.7     191596185      22666788
+gcpress   gc/pointer-write           9.3262      0.56      0.73   1.0028     0.70     0.91     5.0      5.8      19121959       2050347
+float     control/spin-fixed-work    1.6322      0.05      0.07   0.9998     0.03     0.04     5.0      5.1      54669148      33493394
+float     float/dot-product          4.9505      0.22      0.29   1.0023     0.31     0.41     5.0      5.3      43895961       8867050
+float     float/int-convert          1.5473      0.02      0.03   0.9997     0.02     0.02     5.0      5.0      82846642      53542365
+float     float/mandelbrot           2.5891      0.09      0.11   1.0000     0.05     0.06     5.0      5.1      34402002      13287101
+float     float/sqrt-sum           171.2179      0.10      0.14   1.0000     0.01     0.02     5.0      5.1     401435550       2344593

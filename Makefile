@@ -67,9 +67,16 @@ COVERAGE_TIMEOUT  ?= 180m
 # runs real P-256 and RSA arithmetic under both; the goc-built half dominates.
 CRYPTO_BENCH_TIMEOUT ?= 20m
 
+# The runtime performance suite builds eleven programs with each compiler and
+# times three arms of each, nine times over. About eleven minutes on an idle
+# box; the timeout is generous because a loaded one is slower and a run that
+# dies half way through says nothing at all.
+PERF_BENCH_TIMEOUT ?= 45m
+
 .PHONY: all build test test-unit test-goc-corpus test-goc-cmd test-goc-status \
         test-goc-status-opt test-goc-coverage runtime-cover-diff test-ruby \
-        test-cruby bench-crypto bench-crypto-update fmt vet clean
+        test-cruby bench-crypto bench-crypto-update bench-perf bench-perf-update \
+        fmt vet clean
 
 # The default local check: build, then the whole suite.
 all: build test
@@ -152,6 +159,34 @@ bench-crypto:
 bench-crypto-update:
 	$(GO) test -timeout $(CRYPTO_BENCH_TIMEOUT) -run '^TestCryptoSigningBench$$' ./goc \
 		-crypto-bench -update-crypto-bench -v
+
+# The runtime performance suite: goc against the host Go toolchain on eleven
+# workloads, against its committed baseline.
+#
+# `make bench-crypto` measures one path -- the ECDSA signing path -- because that
+# is where the tree's one known performance regression was. This measures the
+# rest: an interpreter dispatch loop, memory latency, goroutines and channels,
+# allocation and collection, floating point, string formatting, maps and sorting,
+# reflection, and two real library workloads (regexp and flate). It exists
+# because until it did, a change that cost 5% everywhere outside crypto and slog
+# would have landed green.
+#
+# Opt-in, like the placement comparison and the slog benchmark, because it needs
+# a host Go toolchain; and unlike them it measures time, so it needs a quiet
+# machine to mean anything. It fails in both directions and every row carries the
+# smallest movement it can see; see goc/perfbench_test.go and the baseline's
+# header for what a green run does and does not prove.
+#
+# It pins to the second-highest core it is allowed, leaving the top one to
+# bench-crypto, so the two can run at once. Set GOC_PERF_CORE for a third.
+bench-perf:
+	$(GO) test -timeout $(PERF_BENCH_TIMEOUT) -run '^TestPerformanceSuite$$' ./goc -perf-bench -v
+
+# Rewrite the baseline from this run. Deliberately separate: the value of the
+# file is that a movement gets looked at by a person.
+bench-perf-update:
+	$(GO) test -timeout $(PERF_BENCH_TIMEOUT) -run '^TestPerformanceSuite$$' ./goc \
+		-perf-bench -update-perf-bench -v
 
 fmt:
 	$(GO) fmt ./...
