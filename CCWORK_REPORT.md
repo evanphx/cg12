@@ -138,3 +138,24 @@ The residual gap against the host is the rest of the probe loop -- the integer
 to float conversion and the accumulate -- not these functions.
 
 (work in progress -- perf suite and guards next)
+
+## The tests fail before the change
+
+Verified by reverting only the implementation files to the parent commit and
+keeping the four new test files:
+
+    arm64/a64             build failed: undefined: Frintp, Frintm, Frinta, ...
+    arm64 (e2e on CPU)    arm64: unsupported intrinsic "float.trunc.s"
+    interp                ir: unknown intrinsic "float.abs.s" (not registered)
+    cmd/goc               no float.sqrt.d in the emitted IR: the call was not
+                          lowered to the instruction
+                          the software implementation is still called:
+                            %t3 =d call $math.archTrunc(d %t2)
+                            %t3 =d call $math.archCeil(d %t2)
+                            %t3 =d call $math.archFloor(d %t2)
+                            %t3 =d call $math.sqrt(d %t2)
+
+`TestARM64MathIntrinsicEdgeCasesExecute` -- the Go program that checks every
+documented special case through `math.Sqrt` and friends -- passes both before
+and after, and has to: both implementations are correct, which is the point.
+What fails before is the assertion that the call is gone.
