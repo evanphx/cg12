@@ -50,8 +50,9 @@ const loopAliasBaselinePath = "testdata/loop_alias_baseline.txt"
 // at a temporary the loop body allocates. Each was read and is benign for a
 // reason the audit deliberately does not try to prove: the temporary is a fresh
 // copy of a value rather than an object with identity, it has exactly one
-// holder, and it is rewritten at the same site that re-points the holder. See
-// the report in CCWORK_REPORT.md for the entry-by-entry triage.
+// holder, and it is rewritten at the same site that re-points the holder. Every
+// corpus program flagged in its own code prints exactly what the host toolchain
+// prints; CCWORK_REPORT.md records the triage and the measurements behind it.
 //
 // The test is a ratchet: it fails on an alias that is not already listed, and on
 // a listed alias that has gone away, so the file cannot drift away from what the
