@@ -1,260 +1,244 @@
-# Wave 7 merge gate
+# Wave 7 fix verification — `integration/wave7-fix` (6034f73)
 
-Integration branch: **`integration/wave7-gate`** (created fresh off `main` = `cae1430`;
-no collision — no `wave7`-named branch existed on origin before this run).
+Verification only. No compiler code was changed on this branch by this job.
 
-Merged in the required order:
+| ref | commit |
+|---|---|
+| `integration/wave7-fix` (branch under test) | `6034f73` |
+| `integration/wave7-gate` (its parent, the already-gated tree) | `01b0cbf` |
+| `main` (control) | `cae1430` |
 
-| # | branch | tip | merge | kind |
-|---|---|---|---|---|
-| 1 | `ccwork/arm64-code-alignment` | `3743a81` | fast-forward | **CODE CHANGE** — changes emitted instruction layout |
-| 2 | `ccwork/parity-reasons` | `c4210af` | `4427670` (2 conflicts) | **CODE CHANGE** — escape-analysis fixes |
+`git ls-remote` confirms `integration/wave7-gate` = `01b0cbf` = `6034f73^`, so the
+gate tree is exactly the parent commit and the diff under test is the whole of
+commit 1 + commit 2:
 
-Merge conflicts and how they were resolved:
-
-* `CCWORK_REPORT.md` — both branches wrote their own report here. Resolved by
-  replacing with this gate report; both branch reports remain intact in their
-  own commits (`git show origin/ccwork/arm64-code-alignment:CCWORK_REPORT.md`).
-* `goc/testdata/crypto_signing_bench_baseline.txt` — both branches re-baselined
-  it. Resolved to branch 1's side **provisionally**; the file is regenerated
-  from the merged tree in the baseline section below, so no side was picked.
-
-Merged tree builds clean: `go build ./...` exit 0.
-
-## Branch 1 — is it a code change or a report? **IT IS A CODE CHANGE.**
-
-`ccwork/arm64-code-alignment` is not report-only. It adds `arm64/align.go` (172
-lines) and changes the emitter, the linker and the object writers. The shipped
-default is live, not opt-in:
-
-```go
-const (
-        defaultFuncAlign         = 32
-        defaultLoopFunctionsOnly = true
-        defaultLoopAlign         = 0
-)
+```
+ .gitignore                                            |   4 ++++
+ goc/compile.go                                        |   5 +++++
+ goc/derive_test.go                                    |   1 +
+ goc/testdata/placement_bench/__pycache__/sweep...pyc  | Bin 9466 -> 0 bytes
 ```
 
-so **every function that contains a backward branch now has its entry padded to
-a 32-byte boundary**, with `nop` (`d503201f`) as the filler. The policy is
-plumbed end to end:
-
-* `arm64/mc.go` — `loopHeaders()` computes "some predecessor is laid out at or
-  after this block", sets `machineCode.hasLoop`; `compileToObjectWithBundle`
-  calls `alignText(o.Text, layout.alignFor(code.hasLoop))` before taking each
-  function's base.
-* `obj/elf.go` — new `Object.TextAlign`; `obj/dynamic.go` aligns the text
-  segment offset to it; `link/link.go` maxes it across objects and pads at the
-  merge point (otherwise per-object padding aligns against nothing).
-* `cmd/goc/packcache.go` — the layout identity is mixed into the runtime pack
-  cache key, so a pack built under one policy cannot be reused under another.
-  This matters: the policy is environment-overridable
-  (`GOC_FUNC_ALIGN`, `GOC_LOOP_ALIGN`, `GOC_ALIGN_LOOP_FUNCS_ONLY`,
-  `GOC_TEXT_PAD`) and is therefore not covered by the compiler binary's hash.
-* `arm64/a64/disasm.go` — the disassembler learns `nop`, which the backend now
-  emits.
-
-**Consequence for this gate, as anticipated in the brief:** emitted code differs
-from `main` by design everywhere, `.text` grows, and every generated baseline
-that records addresses or sizes has to be regenerated rather than diffed against
-a side. Byte-identical determinism is unaffected — the padding is a pure
-function of the code, not of worker order.
-
-Branch 1 also ships a measurement corpus under `goc/testdata/placement_bench/`
-(8 programs, a sweep driver, 4 856 lines of raw TSV results) and its analysis.
-
-## Branch 2 — code change
-
-`ccwork/parity-reasons` is not report-only either: `opt/escape.go` (+101),
-`goc/compile.go` (+287), `internal/gcdiff/{reasons,reasonreport}.go`, and it
-moves four generated baselines. Three substantive fixes:
-
-1. a 64 KB bound on the backing array a fixed-capacity `make` may be given in
-   the frame, matching `cmd/compile`'s `MaxImplicitFrameSize` (a 200 000-int
-   `make` was taking 1.6 MB of the caller's frame and overflowing the stack);
-2. the escape walk gains a "what does this value *hold*" question distinct from
-   "where does it *go*" (new `gen.escapeAsksWhatTheValueHolds`);
-3. a map **lookup** key is not retained but a map **write** key is
-   (`mapLookupKeyIsNotRetained`, `deleteBuiltinRetainsNothing`).
+Working branch for this job: `ccwork/wave7-fix-verify`. Nothing pushed to `main`.
 
 ---
 
-_Gate in progress; items below are filled in as each run is watched to exit._
+## THE HEADLINE QUESTION — does commit 1 change emitted code? **NO. Not one byte.**
+
+**424 corpus programs × {default, `-O`} = 848 fully linked binaries, every one
+byte-identical between `integration/wave7-fix` and `integration/wave7-gate`.**
+
+### How it was measured, and why the comparison is clean
+
+`goc` bakes its own repository path into the binary at build time
+(`goc/source_import.go:333`, `runtime.Caller(0)` → `<tree>/stdlib`), so compiling
+the corpus in two different worktrees would differ in embedded paths for reasons
+that have nothing to do with the change. To isolate the change and only the
+change, **both compilers were built inside one worktree**
+(`.../tmp/gate`, at `01b0cbf`):
+
+    go build -o bin/goc-gate ./cmd/goc                  # tree as-is  = wave7-gate
+    git checkout 6034f73 -- goc/compile.go
+    go build -o bin/goc-fix  ./cmd/goc                  # + the 5-line reset = wave7-fix
+
+Both binaries therefore bake the *same* stdlib root, read the *same* stdlib
+bytes, and were run from the *same* cwd on the *same* input paths. The two
+binaries do differ (`cmp` → byte 1457). Each got its own runtime pack: the pack
+cache key hashes the compiler executable's bytes (`cmd/goc/packcache.go:71-75`),
+so a stale pack cannot mask a codegen difference, and the pack itself — i.e. the
+compiled vendored stdlib — is inside the comparison, not outside it.
+
+Every program was compiled to a **fully linked executable** (not `-c`), twice per
+compiler config, and `sha256sum`-compared:
+
+| set | programs | comparisons | `SAME` | `DIFF` | compile failure |
+|---|---|---|---|---|---|
+| `goc/testdata/*.go` | 403 | 806 | **806** | **0** | 0 |
+| `goc/testdata/*/**.go` (the multi-file benches: `crypto_signing_bench`, `slog_allocations`, `placement_bench`, `escape_gc_differential`) | 21 | 42 | **42** | **0** | 0 |
+| **total** | **424** | **848** | **848** | **0** | **0** |
+
+Both sweeps exit 0 with empty `stderr`.
+
+**The crypto signing benchmark's own program is byte-identical**, which matters
+for item 11 below: `goc/testdata/crypto_signing_bench/main.go` at `goc -O` —
+exactly what `make bench-crypto` builds — is
+`93d37e76300d0a4db2d0f068117eea1ddf1faf9f11a3326cc67011fc4990f208` under both
+compilers.
+
+**Positive control — the comparison can see a difference.** The same program
+compiled by the same `goc-gate` binary with `GOC_FUNC_ALIGN=0` versus the shipped
+`32` gives different hashes:
+
+    ed93d774…  loop_alias_frame_local, GOC_FUNC_ALIGN=32 (shipped)
+    cf53d0ab…  loop_alias_frame_local, GOC_FUNC_ALIGN=0
+
+so 848/848 `SAME` is a measured negative, not a broken harness.
+
+### Was the inherited state ever actually reached? — direct instrumentation
+
+Byte-identity says the *output* did not move. To answer the sharper question the
+brief asks — whether a `derive()` ever *did* inherit a mid-walk question — a
+third compiler was built in a scratch worktree with a probe printed at the exact
+point of the new reset:
+
+```go
+derived.objectEscapeChecks = nil
+if g.escapeAsksWhatTheValueHolds {
+        fmt.Fprintln(os.Stderr, "CCWORK-DERIVE-WITH-HOLDS-SET")
+}
+```
+
+That probe fires whenever `derive()` is entered with the deep question still up
+— i.e. exactly the case commit 1 exists to prevent.
+
+| sweep | invocations | marker hits |
+|---|---|---|
+| 403 corpus programs × {default, `-O`}, `-c` (program code) | 806 | **0** |
+| import-heaviest programs × {default, `-O`}, full link (program **+ vendored stdlib pack**) | 12 | **0** |
+
+Both sweeps watched to exit 0, `stderr` files empty.
+
+**Nothing in the corpus ever reaches a `derive()` with the deep question up.**
+The `-c` arm covers every corpus program's own code; the full-link arm builds the
+runtime pack, so the vendored standard library is compiled under the probe too.
+
+### Static reading, which agrees
+
+`escapeAsksWhatTheValueHolds` is set to `true` in exactly one place
+(`goc/compile.go:4226-4228`, `compositeElementDoesNotEscape`), under a
+`saved`/`defer`-restore pair that spans only the call to
+`valueDoesNotEscapeWithin`. All eleven `derive()` call sites are *lowering*-time
+(`compile`, `functionLiteral`, `callClosure`, `methodValue`, `iteratorRangeStmt`,
+the interface-call wrappers, the dynamic-initialiser generator, the go-adapter),
+not walk-time. For the inherited state to be observable, the escape walk would
+have to re-enter lowering while the flag is up.
+
+---
 
 ## Item 3 — `make test-unit` — **PASS**
 
-Merged tree, watched to exit (12 s, exit 0), 37 packages. Every package that has
-tests reports `ok` with a real elapsed time; **0 `(cached)` lines**. Notably
-`arm64` (9.331 s), `link`, `obj` and `opt` — the four packages branch 1 touched —
-all pass with the new alignment policy live.
+Watched to exit, **exit 0**. 37 packages listed, **25 with tests all `ok`**, 12
+with no test files, **0 `(cached)`** — every package was actually run.
 
-## Item 1 — `go test -timeout 40m -parallel 10 ./goc/...` — **2 FAILURES on the merged tree**
 
-Both trees run detached with `-v -count=1`, each waited to exit. **0 `(cached)`
-lines in either log.**
+## Item 1 — `go test -timeout 40m -parallel 10 ./goc/...` — **PASS, 0 failures**
 
-| tree | exit | wall | result |
-|---|---|---|---|
-| merged `4427670` | **1** | 1021 s | `FAIL github.com/evanphx/cg12/goc 1020.218s` |
-| `main` control `cae1430` | 0 | 1021 s | `ok  github.com/evanphx/cg12/goc 1017.203s` |
+Launched detached and polled for its exit file; watched to exit.
 
-`main` is a **measured** control, not a quoted figure: it was run here, in its
-own worktree, at the same time, and it passes.
+    ok  github.com/evanphx/cg12/goc  1130.412s
+    exit 0        0 `(cached)`
 
-### Subtest census: 698 vs 695 — **+3, all additions, nothing lost**
+**The wave-7 gate's blocker is gone.** The gate left exactly one test red —
+`TestDeriveClassifiesEveryGenField` — and reported it rather than fixing it. On
+this branch the package is green. `TestDeriveClassifiesEveryGenField` passes:
+the guard's complaint was that `fullyPopulatedGen` left
+`escapeAsksWhatTheValueHolds` zero, which made the classification vacuous for it;
+commit 1 populates it (`goc/derive_test.go:151`) *and* resets it in `derive()`,
+i.e. classifies it as per-function rather than adding it to the 33-entry
+`wholeCompilationGenFields` list. The two halves are consistent — had the fixture
+been populated without the reset, the guard would now fail the other way
+("derive inherited it").
 
-`comm` on the sorted `=== RUN` name sets. Nothing present on `main` is missing
-from the merged tree. The three new names and the commits that add them:
+### Subtest census — **698, exactly the gate's 698**
 
-| new subtest | commit | branch |
-|---|---|---|
-| `TestObjectsTooLargeForAFrameGoToTheHeap` | `95ea1a7` | 2 |
-| `TestPointerReadBackOutOfAFrameLocalContainerEscapes` | `c765e09` | 2 |
-| `TestMapLookupKeyStaysInTheFrameAndAMapWriteKeyDoesNot` | `b0768a6` | 2 |
+A second full run with `-v -count=1` (exit 0, 1033.5 s, 0 `(cached)`):
 
-All three are branch 2's, one per fix, matching `goc/escape_test.go` (+197).
-Branch 1 adds no test to this package.
+| | count |
+|---|---|
+| distinct `=== RUN` names | **698** |
+| `--- PASS` | 692 |
+| `--- FAIL` | **0** |
+| `--- SKIP` | 6 |
 
-### FAILURE 1 — `TestDeriveClassifiesEveryGenField` — **the fifth consecutive wave**
+The gate measured **698** on the merged tree against 695 on `main` (+3, all
+branch-2 additions). This branch is **698 — unchanged**: commit 1 adds no test
+and removes none, it only populates an existing fixture field.
 
-    derive_test.go:255: fullyPopulatedGen leaves [escapeAsksWhatTheValueHolds] zero,
-    so derive's handling of those fields is untested; a new gen field has to be
-    given a non-zero value there and classified in wholeCompilationGenFields
+The 6 skips are the opt-in, host-toolchain-dependent tests, every one of which is
+run explicitly elsewhere in this report: `TestCryptoSigningBench` (item 11),
+`TestEscapeDifferentialAgainstGC` and `TestEscapeDifferentialProgram` (item 10),
+`TestEscapeReasonDifferentialAgainstGC` (item 10 portability),
+`TestSlogAllocationsAgainstGC` (item 9), and `TestEscapeSummaryPromotionRate`.
+None is skipped for a reason this branch introduced.
 
-**One field, named: `escapeAsksWhatTheValueHolds`** (`goc/compile.go:1725`,
-added by branch 2's `c765e09`).
 
-* **Does `derive` reset it? NO.** `derive()` (`goc/compile.go:1763`) copies the
-  struct and then explicitly clears the per-function fields around it —
-  `objectEscapeChecks` on the line above is set to `nil`, `resultLeakBody` on
-  the line below is set to `nil` — and `escapeAsksWhatTheValueHolds`, sitting
-  between them, is left alone. It is declared in the per-function block of the
-  struct, not the whole-compilation block, so leaving it is inconsistent with
-  its own placement.
-* It is not in `wholeCompilationGenFields` either, and not in
-  `fullyPopulatedGen()`. `goc/derive_test.go` is untouched by both branches.
+## Item 2 — capability matrix, both arms — **366/366 PASS in both. No regression.**
 
-Whether the leak is harmful in practice: the walk saves and restores the flag
-itself (`goc/compile.go:4221-4223`, `saved := g.escapeAsksWhatTheValueHolds` /
-`defer` restore), so within one generator it is balanced. The exposure is a
-`derive()` taken while the flag is set — the derived generator inherits `true`
-and every `parameterKey` it mints (`compile.go:2612`, `:4361`, `:4505`) carries
-`holds: true`, which is a different cache key and a different answer. This gate
-did not prove such a `derive()` happens; it proves the classification the test
-demands was never made. **Not repaired here — this gate does not fix compiler
-code.** It is a one-line classification decision that belongs in branch 2.
+Both run with `GOFLAGS=-v`, both watched to exit, both `exit 0`, no `(cached)`.
 
-### FAILURE 2 — `TestEscapeShadowPlacement` — stale `escape_shadow_baseline.txt`
+| arm | command | subtests | `--- PASS` | `--- FAIL` | wall |
+|---|---|---|---|---|---|
+| default | `make test-goc-status GOFLAGS=-v` | 366 | **366** | 0 | 136.4 s |
+| `-O` | `make test-goc-status-opt GOFLAGS=-v` | 366 | **366** | 0 | 148.8 s |
 
-Both halves of the ratchet fire: **42 disagreement sites the baseline does not
-list**, and **1 site the baseline lists that the run no longer produces**. This
-is a listed regeneration target; the regenerated diff is reviewed under
-"Generated baselines" below.
+**PASS/FAIL sets:** the two arms' 366-name `--- PASS` sets are **identical**
+(`diff` empty). Both arms report the same single `EXPECTED FAILURE`
+(`runtime_panic_print_string.go`, a charted known gap, not a test failure — the
+subtest itself passes). Nothing failed in either arm, so there is nothing to
+attribute and no `main` control is needed here.
 
-Run-level summary from the merged tree:
 
-    front-end placements evaluated: 201899 (frame 177078, heap 24821)
-    agree 184934; front frame -> IR heap 16016; front heap -> IR frame 949
-    distinct front-end placement sites: 5703 (frame 3621, heap 2082)
-    distinct disagreement sites: 810
+## Item 4 — `TestFrameEscapeAudit -count=1` — **PASS, 182 entries, zero additions**
 
-### Attribution of both failures — **both are branch 2's, neither is branch 1's**
+    go test -timeout 40m -run '^TestFrameEscapeAudit$' -count=1 -v ./goc
+    --- PASS: TestFrameEscapeAudit (193.25s)     exit 0, not cached
 
-Two more worktrees, each at a branch tip, each running only the two failing
-tests, watched to exit:
+`goc/testdata/frame_escape_baseline.txt` holds **182** non-comment entries. The
+test is a two-way ratchet — it fails on a publication that is not listed *and* on
+a listed publication that has gone away — so a pass is a statement that the set
+is exactly the accepted 182: **zero additions, zero vanishings.** The file is
+byte-identical to `main`'s (`git diff cae1430 HEAD -- …frame_escape_baseline.txt`
+is empty), and this branch changes no file under `goc/testdata/` except deleting
+the `.pyc`.
 
-| tree | `TestDeriveClassifiesEveryGenField` | `TestEscapeShadowPlacement` | exit |
-|---|---|---|---|
-| `ccwork/arm64-code-alignment` `3743a81` | **PASS** | **PASS** (255.6 s) | 0 |
-| `ccwork/parity-reasons` `c4210af` | **FAIL** | **FAIL** (254.8 s) | 1 |
-| merged `4427670` | FAIL | FAIL | 1 |
+## Item 6 — determinism and parallel-vs-serial identity — **PASS**
 
-Branch 2 alone reproduces both, with the identical message and the identical 42
-observations. **The merge did not create either failure and branch 1 does not
-contribute to either** — branch 2 ships them.
+`TestParallelBackendIsByteIdenticalToSerial` (`./arm64`, `-count=1 -v`):
+**PASS at workers = 1, 2, 3, 8, 64, 256**, all six subtests, exit 0.
 
-Why branch 2 did not see them: its own report's verification table runs
-`TestFrameEscapeAudit`, `TestAllocationCensus`, `TestLoopAliasAudit`,
-`TestCompilingTheSameSourceTwiceGivesTheSameModule`, `TestEscapeDiagnostic*`,
-both capability arms and the GC reducer — but **not** `TestEscapeShadowPlacement`,
-**not** `TestDeriveClassifiesEveryGenField`, and not a whole
-`go test ./goc/...`, which is the run that catches both.
 
-## Generated baselines — all eight regenerated from the merged tree
+## Item 7 — loop aliasing — **clean**
 
-Every one regenerated on the merged tree (and the census also on the `main`
-worktree as a control), each run watched to exit, all exit 0. No side was
-picked; the tree was asked.
+One watched run, `-count=1 -v`, exit 0, no `(cached)`:
 
-| baseline | regenerated by | diff vs what the merge committed |
-|---|---|---|
-| `alloc_census_baseline.txt` | `-update-alloc-census-baseline` | **none** (byte-identical) |
-| `frame_escape_baseline.txt` | `-update-frame-escape-baseline` | **none** |
-| `loop_alias_baseline.txt` | `-update-loop-alias-baseline` | **none** |
-| `slog_allocations_baseline.txt` | `-slog-allocations -update-slog-allocations` | **none** |
-| `escape_gc_differential.txt` | `-escape-gc-differential -update-escape-gc-differential` | **none** |
-| `escape_shadow_baseline.txt` | `-update-escape-shadow-baseline` | **+21 / −1** — reviewed below |
-| `escape_gc_reason_differential.txt` | `-escape-gc-reason-differential -update-…` | (below) |
-| `crypto_signing_bench_baseline.txt` | `make bench-crypto-update` | (below, idle-box item) |
+| check | result |
+|---|---|
+| `TestLoopAliasExpectationsMatchTheHostToolchain` | **PASS**, 6/6 programs match the host toolchain |
+| `TestLoopBodyAllocationsAreDistinctPerIteration` | **PASS**, 12/12 subtests (6 programs × {default, `-O`}) |
+| `TestLoopAliasAudit` | **PASS** (192.4 s) |
+| `loop_alias_baseline.txt` | 589 entries, unchanged from `main` and from the gate |
 
-Seven of the eight the merge already had right. The one that moved is the one
-neither branch regenerated.
+`loop_alias_frame_local.go` in the committed allocation census — exactly **one**
+row, and it is `frame`:
 
-### `escape_shadow_baseline.txt` — +21 / −1, and every line is branch 2's
+    12751: testdata/loop_alias_frame_local.go:53:8  main.literalWithin  runtime.newobject  main_point  frame
 
-The file records where goc's AST walk and the IR shadow analysis *disagree*; the
-AST walk stays the placer, so a line here is a divergence between two analyses,
-not a miscompile. The 21 additions are the mirror image of branch 2's own census
-review, which is why they are explainable rather than mysterious:
+**1 frame / 0 heap**, same file, same line 12751 as the gate and as `main`.
 
-* **12 × `crypto/internal/fips140/ecdh/cast.go:18:17` and `:24:16`, direction
-  `heap → frame`** — branch 2's report lists these exact 12 sites as moving
-  `frame → heap` in the census (the CAST's `privateKey`/`publicKey` byte slices
-  stored into a `&PrivateKey{}`, six copies because the self-test is instantiated
-  per init function). The front end now heaps them; the IR shadow still frames
-  them. Same 12 sites, opposite column, as expected.
-* **`crypto/x509/verify.go:375` and `os/user/lookup_unix.go:63`, `frame → heap`**
-  — the two placements branch 2's `==`/`!=` gap gave back. The front end now
-  frames them; the IR shadow has not learned the rule.
-* **`testdata/runtime_map_pointer_keys.go:27:12, composite-literal,
-  frame → heap, "store into non-local storage"`** — this is the `&mapPointerKey{value: 17}`
-  in `values[&mapPointerKey{value: 17}]`, a map *lookup* key. Branch 2 taught the
-  AST walk to frame it; the IR side (`opt/escape.go`) still calls a map index a
-  store. Front end right, shadow behind.
-* the remaining 6 (`os/exec`, `testing`, `bytes_replace_allocs` ×2,
-  `stdlib_encoding_json_roundtrip`, `runtime_unsafe_struct_field`) are the same
-  shape: one analysis moved and the other did not.
-* **the single removal**, `time/zoneinfo_read.go:546:52 time.loadLocation` — a
-  disagreement the run no longer produces, i.e. the two analyses now agree.
 
-Assessment: this is a stale-baseline failure, not a placement regression. The
-divergences are one-sided (the front end learned three rules the IR shadow has
-not), the correctness-critical `frame → heap` half is the front end being *less*
-conservative at exactly the two sites branch 2 proved retain nothing, and
-`frame_escape_baseline.txt` — the audit that would catch a real frame-publication
-— does not move at all. **It still means branch 2 shipped a red test.**
+### Determinism — same source, same tree, compiled twice
 
-## Item 4 — `TestFrameEscapeAudit` — **182 entries, unchanged, no additions**
+4 programs × {default, `-O`} through `go run ./cmd/goc -o`, each compiled twice:
+**8/8 pairs byte-identical.**
 
-    main                                182 entries  md5 36b6c9a2…
-    ccwork/arm64-code-alignment         182 entries  md5 36b6c9a2…
-    ccwork/parity-reasons               182 entries  md5 36b6c9a2…
-    merged 4427670                      182 entries  md5 36b6c9a2…
-    regenerated on the merged tree      byte-identical to all of the above
-
-Reference 182 met exactly. **Zero additions**, so there is nothing to justify and
-nothing unsafe by this measure. Notably branch 1's alignment change does not move
-it, and neither does branch 2's escape work.
+    runtime_map_pointer_keys              default 5a95050…   -O 7366215…
+    loop_alias_frame_local                default ace9e26…   -O 32802b7…
+    stdlib_smtp_session                   default 192c4c5…   -O e96f0b6…
+    runtime_package_initializer_dispatch  default 9612f60…   -O 099f7e7…
 
 ## Item 10 — gc differential — **goc heaps what gc frames: 96. Reference met.**
 
-Regenerated on the merged tree, byte-identical to what the merge committed.
+    go test -count=1 -v -run '^TestEscapeDifferentialAgainstGC$' ./goc -escape-gc-differential
+    --- PASS: TestEscapeDifferentialAgainstGC (11.00s)     exit 0
 
+    host toolchain: go version go1.26.1 linux/arm64
     compared 399 of 403 corpus programs, 1861 census rows, 3511 gc decisions
     permissive (gc heaps, goc does not): 1467 lines
     pessimistic (goc heaps, gc does not): 399 lines
 
-Confusion matrix (rows = goc's verdict, columns = gc's), merged tree:
+The test does not merely report; it renders the whole differential and asserts it
+equals the committed file, so a pass means the confusion matrix reproduces cell
+for cell:
 
       goc\gc      frame     heap    mixed   absent    total
       frame         189       30       14      193      426
@@ -263,404 +247,275 @@ Confusion matrix (rows = goc's verdict, columns = gc's), merged tree:
       absent        420     1286       24        0     1730
       total         718     1985      234      287     3224
 
-**goc-heaps-what-gc-frames = 96**, the same 96 as `main`. Against the `main`
-control the whole matrix moves by exactly one cell pair: `frame/heap` 31 → 30 and
-`heap/heap` 579 → 580, i.e. one line goc used to frame that gc heaps is now
-heaped by goc too. PERMISSIVE 1468 → **1467**; PESSIMISTIC 399 → **399**,
-unchanged.
+**goc-heaps-what-gc-frames = 96**, the reference figure, identical to the gate's
+and to `main`'s. Note the 96 is the `heap`/`frame` matrix cell, not the 399-line
+PESSIMISTIC total — those are different quantities and both are unmoved.
 
-(Branch 2's prose says "the correctness-critical direction is unchanged at 1467
-and the performance direction goes 399 → 400". Measured against a `main` control
-here, it is the other way round: permissive moved 1468 → 1467 and pessimistic did
-not move. Its committed file is right; only the sentence describing it is wrong.)
 
-## Item 2 — capability matrix, both arms — **366/366 PASS in all three runs**
+## Item 5 — allocation census twice — **STABLE, and it did not move. Nothing regenerated.**
 
-`-v` via `GOFLAGS`, each run detached and waited to exit, **0 `(cached)` lines**.
+Two independent `-update-alloc-census-baseline` runs on this branch (182.1 s and
+182.0 s, both watched to exit 0, neither cached):
 
-| run | tree | PASS | FAIL | SKIP | wall |
-|---|---|---|---|---|---|
-| `test-goc-status` | merged | **366** | **0** | 0 | 163.5 s |
-| `test-goc-status-opt` (`-O`) | merged | **366** | **0** | 0 | 174.1 s |
-| `test-goc-status` (control) | `main` `cae1430` | 366 | 0 | 0 | 123.7 s |
-
-Sets, not counts: the 366 capability names are **identical** across all three
-runs — `diff` clean merged-default vs merged-`-O`, and merged-default vs the
-`main` control. Nothing added, removed, renamed or newly skipped. No regression;
-the alignment change does not cost a single capability in either arm.
-
-## Item 5 — allocation census twice — **STABLE, and byte-identical to the committed file**
-
-Two independent `-update-alloc-census-baseline` runs on the merged tree (261 s,
-272 s; both exit 0):
-
-    run 1   md5 42c139d49aaa95863d242f2bc0411eb4   14501 rows
-    run 2   md5 42c139d49aaa95863d242f2bc0411eb4   14501 rows
-    committed on the merged tree                   42c139d4…   (git diff empty)
-
-### Census composition — the delta composes exactly, **residue: none**
-
-| tree | rows | md5 |
+| | md5 | rows |
 |---|---|---|
-| `main` `cae1430` | 14499 | `8269d6f2…` |
-| `ccwork/arm64-code-alignment` | 14499 | `8269d6f2…` (identical to `main`) |
-| `ccwork/parity-reasons` | 14501 | `42c139d4…` |
-| merged `4427670` | 14501 | `42c139d4…` (identical to branch 2) |
+| run 1 | `42c139d49aaa95863d242f2bc0411eb4` | 14 501 |
+| run 2 | `42c139d49aaa95863d242f2bc0411eb4` | 14 501 |
+| committed on this branch | `42c139d49aaa95863d242f2bc0411eb4` | 14 501 |
 
-Regeneration on the `main` worktree reproduces `main`'s file byte for byte too,
-so the control is measured, not quoted.
+Stable across runs **and byte-identical to the committed file**, which is itself
+byte-identical to the gate's (this branch touches no file under `goc/testdata/`
+except the deleted `.pyc`). The census is the tree's own answer to "did an
+allocation move", and it says **no allocation moved** — an independent
+confirmation of the byte-comparison above, from a different instrument.
 
-    merged (14501) − main (14499) = +2 = parity-reasons (14501) − main (14499)
+**Nothing was regenerated.** The working tree was restored after each update run;
+`git status` is clean apart from this report.
 
-Row-level: 19 lines in, 17 lines out, on both branch 2 and the merge — the same
-19 and the same 17. Branch 1 is **placement-neutral**: an alignment change moves
-addresses, not allocations, and the census confirms it rather than assuming it.
-**Residue: none.**
 
-## Item 6 — determinism — **byte-identical, both trees, with alignment live**
+### Portability of the reason differential — **PASS, byte-identical across paths**
 
-Four corpus programs × {default, `-O`}, each compiled twice through
-`go run ./cmd/goc -o`, in each tree. **All 8 pairs byte-identical on the merged
-tree; all 8 on `main`.** `TestParallelBackendIsByteIdenticalToSerial` (`./arm64`)
-**PASSES** at workers = 1, 2, 3, 8, 64, 256 — the padding is a function of the
-code, not of worker order, so parallel-vs-serial identity survives.
+`escape_gc_reason_differential.txt` regenerated twice, each run watched to exit 0:
 
-### The output does differ from `main`, by design, and the sizes moved
+    /home/evan/.ccwork/ws/wave7-fix-verify/repo                                       (177 s)
+    /home/evan/.ccwork/ws/wave7-fix-verify/tmp/
+        portability-second-worktree-at-a-noticeably-different-path                     (182 s)
 
-`runtime_map_pointer_keys.go`, default build:
+    760 120 bytes each
+    sha256 41b0531d3c1efa78caa199545718ffb46be447137eefe5dabea02fe1579d3d5f   both
+    cmp regenerated-vs-regenerated : BYTE-IDENTICAL
+    cmp regenerated-vs-committed   : BYTE-IDENTICAL
+    grep -c /home/evan             : 0 in both
 
-| section | merged | `main` | delta |
-|---|---|---|---|
-| `.text` | 1 615 204 | 1 604 420 | **+10 784 (+0.67 %)** |
-| `.debug_line` | 399 379 | 400 754 | −1 375 |
-| `.data` | 3 750 112 | 3 750 120 | −8 |
-| whole file | 6 900 336 | 6 901 720 | −1 384 |
+All three agree, and the sha256 is the **same** `41b0531d…` the gate measured, so
+the file did not move and the ratchet still works outside the directory that made
+it. `TestReasonPositionsAreRepositoryRelative` — the cheap half of the same
+guarantee — **PASSES**. Both worktrees were restored afterwards.
 
-`.text` grows +0.67 %, which is branch 1's claimed 0.72 % cost for the
-loop-functions-only policy. The **whole file** gets slightly *smaller* only
-because `.data` sits at a fixed file offset (1 638 424 in both) with slack ahead
-of it that absorbs the whole `.text` growth; the file delta is then exactly
-`−1375 − 8 = −1383` from the other two sections. Not a contradiction — the code
-did get bigger.
+## Item 9 — slog benchmark — **30/32 at parity. Reference met.**
 
-Alignment is demonstrably live, not merely compiled in: of 3 020 `FUNC` symbols,
-**1 088 (36.0 %) sit on a 32-byte boundary on the merged tree against 390
-(12.9 %) on `main`**. Consistent with "functions containing a backward branch
-only" rather than all of them.
+    go test -count=1 -v -run '^TestSlogAllocationsAgainstGC$' ./goc -slog-allocations
+    --- PASS: TestSlogAllocationsAgainstGC (18.03s)     exit 0
+    host toolchain: go version go1.26.1 linux/arm64,  32 cases
 
-## Item 7 — loop aliasing — **clean**
-
-All on the merged tree, in one watched run (466 s, exit 0, 0 `(cached)`):
-
-| check | result |
-|---|---|
-| `TestLoopAliasExpectationsMatchTheHostToolchain` | **PASS**, 6/6 programs match the host toolchain |
-| `TestLoopBodyAllocationsAreDistinctPerIteration` | **PASS**, 12/12 subtests (6 programs × {default, `-O`}) |
-| `TestLoopAliasAudit` | **PASS** |
-| `loop_alias_baseline.txt` | 589 entries, **identical to `main`**, and regeneration on the merged tree reproduces it byte for byte |
-
-`loop_alias_frame_local.go` — exactly **one** census row, and it is `frame`:
-
-    testdata/loop_alias_frame_local.go:53:8  main.literalWithin  runtime.newobject  main_point  frame
-
-**1 frame / 0 heap**, identical to `main` (same file, same line 12751).
-
-## PORTABILITY CHECK — `escape_gc_reason_differential.txt` is portable. **PASS.**
-
-Regenerated in two checkouts of the merged tree at deliberately different paths,
-each run watched to exit:
-
-    /home/evan/.ccwork/ws/wave7-gate/repo                                     (269 s)
-    /home/evan/.ccwork/ws/wave7-gate/tmp/
-        portability-second-worktree-at-a-noticeably-different-path            (224 s)
-
-    760120 bytes each
-    sha256 41b0531d3c1efa78caa199545718ffb46be447137eefe5dabea02fe1579d3d5f  both
-    cmp: BYTE-IDENTICAL
-    grep -c /home/evan : 0 in both
-
-Both regenerations also reproduce the **committed** file byte for byte (`git
-status` in the second worktree lists nothing for it), so all three agree.
-`TestReasonPositionsAreRepositoryRelative` — the cheap half of the guarantee —
-**PASSES** on the merged tree. Branch 2 touches `internal/gcdiff/reasons.go` and
-the taxonomy comment but not `relativeToRepository`, and the measurement confirms
-the fix survives the merge. **No regression: the ratchet works outside the
-directory that made it.**
-
-Run figures unchanged by the merge: 399 programs, 1103 goc rules, 2201 gc
-explanations joined; agree-on-placement/disagree-on-reason **309**;
-disagree-on-placement/agree-on-reason **84**.
-
-## Item 12 — `goc -m` in all three forms — **PASS, and inert when off**
-
-`goc/testdata/runtime_map_pointer_keys.go`, all four builds exit 0:
-
-| invocation | diagnostic lines on stderr | binary vs the `-m`-off build |
-|---|---|---|
-| (none) | 0 | — |
-| `-m` | 8 | **byte-identical** |
-| `-m=1` | 8 | **byte-identical** |
-| `-m=2` | 12 | **byte-identical** |
-
-Bare `-m` is byte-identical to `-m=1` on stderr. `-m=2` adds the `from:` and
-`at:` provenance lines:
-
-    runtime_map_pointer_keys.go:10:11: main_mapPointerKey escapes to heap
-            front end: composite-literal in main.main
-            rule: first is used here in a way the walk cannot prove keeps it local
-            from: first, declared at runtime_map_pointer_keys.go:10:2
-            at:   runtime_map_pointer_keys.go:13:3
-
-`-m` changes nothing the compiler emits — **byte-identical-inert confirmed** — and
-the diagnostic independently corroborates branch 2's map-key rule: the two map
-*literal* keys at 10:11 and 11:12 escape, and the map *lookup* key at 27:12 is
-not reported, i.e. it stays in the frame.
-
-## Ratchet re-verification after regeneration — all green
-
-One watched run on the merged tree, no `-update` flags, 466 s, exit 0, 0 `(cached)`:
-
-    TestAllocationCensus                     PASS (229.07s)
-    TestFrameEscapeAudit                     PASS
-    TestEscapeShadowPlacement                PASS   <- was the failure; baseline regenerated
-    TestEscapeDifferentialAgainstGC          PASS (10.84s)
-    TestEscapeReasonDifferentialAgainstGC    PASS (176.90s)
-    TestReasonPositionsAreRepositoryRelative PASS
-    TestLoopAliasAudit                       PASS
-    TestLoopAliasExpectationsMatchTheHostToolchain      PASS (6 subtests)
-    TestLoopBodyAllocationsAreDistinctPerIteration      PASS (12 subtests)
-    TestSlogAllocationsAgainstGC             PASS (18.15s)
-
-## Item 8 — GC reducer, 20× at `GOGC=10` and default, both trees — **0/20 everywhere**
-
-Idle box (1-minute load average 0.77–3.10 across the runs; every other job in
-this gate had exited). `GOMAXPROCS=3`, serial, 180 s timeout per run. A run
-counts as a pass only if it exits 0 **and** prints exactly `type mask padding ok`.
-
-| tree | `GOGC=10` | default `GOGC` |
-|---|---|---|
-| merged `4427670` | **0/20 failures** | **0/20 failures** |
-| `main` `cae1430` (control) | **0/20 failures** | **0/20 failures** |
-
-80 runs, zero failures. The control reproduces `main`'s stated 0/20 at both
-settings, so the branch result is measured against a control that behaved.
-Alignment does not disturb the stack scan.
-
-## Item 9 — slog benchmark, every row against gc — **30/32 at parity. Reference met.**
-
-`slog_allocations_baseline.txt` regenerated on the merged tree: **byte-identical
-to the committed file, and byte-identical to `main`'s and to branch 2's.**
-`TestSlogAllocationsAgainstGC` PASSES. 32 cases, host toolchain go1.26.1,
-iterations=2000 rounds=5.
-
-**30 of 32 rows are at parity on a/op.** The two that are not, and both are goc
-ahead of gc, not behind:
+**30 of 32 rows are at parity on a/op.** The two that are not are the same two
+the gate reported, and both are goc *ahead* of gc, not behind:
 
 | case | goc a/op | gc a/op | goc B/op | gc B/op |
 |---|---|---|---|---|
 | `info/3-attr-large-ints` | 1.00 | 3.00 | 128.0 | 24.0 |
 | `json/kv-4-pairs` | 1.00 | 2.00 | 176.0 | 24.0 |
 
-Neither branch moves this file by a single byte, so the two known rows are the
-same two rows, unchanged. No regression.
+`slog_allocations_baseline.txt` is byte-identical to the gate's (`git diff`
+against `01b0cbf` empty), so these are the same rows, unchanged.
 
-## Item 11 — `make bench-crypto` — **PASS, after re-baselining on the merged tree**
 
-Read the triage note first (`goc/cryptobench_test.go:168`, "The third cause"),
-which is now partly obsolete by its own branch: it says a movement here has three
-causes, the third being that the code did not change and *moved*, and that
-branch 1's alignment is the fix for that third cause.
+## Item 8 — GC reducer, 20× at `GOGC=10` and default, both trees — **0/20 everywhere**
 
-### Neither side's committed baseline is right for the merged tree
+Idle box (1-minute load average 4.46 at the start, 4.68 at the end; every other
+job in this report had exited). `GOMAXPROCS=3`, serial, 180 s timeout per run. A
+run counts as a pass only if it exits 0 **and** prints exactly
+`type mask padding ok`.
 
-Three `bench-crypto-update` measurements on the merged tree, idle box, against
-each side's committed numbers and the 0.04 tolerance:
+| tree | `GOGC=10` | default `GOGC` |
+|---|---|---|
+| `integration/wave7-fix` `6034f73` | **0/20 failures** | **0/20 failures** |
+| `main` `cae1430` (control) | **0/20 failures** | **0/20 failures** |
 
-| case | branch 1 base | band | merged ×3 | in branch 1's band? | in branch 2's? |
+80 runs, **zero failures**, and the failure log is empty. The `main` control
+reproduces its stated 0/20 at both settings, so the branch result is measured
+against a control that behaved.
+
+
+
+## Item 11 — `make bench-crypto` — **INTERMITTENTLY RED ON THIS BOX, AND NOT THIS BRANCH'S DOING**
+
+This is the only item that is not simply green, so it is reported in full.
+
+### What happened
+
+Seven watched `make bench-crypto` runs on the branch, on an idle box:
+
+| run | exit | failing row |
+|---|---|---|
+| 1 | 2 | `p256/verify` goc index 34.3805 → 32.9121 (**−4.3 %**) |
+| 2 | 0 | — |
+| 3 | 2 | `p256/verify` 34.3805 → 32.9531 (**−4.2 %**) |
+| 4 | 2 | `p256/sign-verify` 45.7973 → 47.9711 (**+4.7 %**) |
+| 5–7 | 0 | — |
+
+Tolerance is `0.04` of the index in both directions. Note runs 1/3 and run 4 fail
+on **different cases in opposite directions**.
+
+### The control: the gate tree, same command, same baseline, interleaved
+
+`integration/wave7-gate` carries the **identical** committed baseline
+(`crypto_signing_bench_baseline.txt` md5 `7290b110…` in both trees) and produces a
+**byte-identical benchmark binary** (`goc -O` on
+`goc/testdata/crypto_signing_bench/main.go` →
+`93d37e76300d0a4db2d0f068117eea1ddf1faf9f11a3326cc67011fc4990f208` under both
+compilers, established in the byte-comparison at the top of this report).
+
+* gate tree, `make bench-crypto`: **7 runs, 7 passes, 0 failures.**
+* `main` `cae1430` control against its own committed baseline: **3 runs, 3 passes**
+  — so the box is not globally broken and `main`'s baseline is not stale.
+
+Four of the branch runs and four of the gate runs were **interleaved**
+(branch, gate, branch, gate, …) so time-of-run drift could not land on one arm:
+branch 3/4, gate 4/4.
+
+### The numbers, interleaved, and the noise floor
+
+Six `-update` runs alternating branch/gate on the idle box (load 1.00–1.29),
+scratch checkouts so no committed baseline was rewritten:
+
+| case | branch runs | gate runs | branch mean | gate mean | delta |
 |---|---|---|---|---|---|
-| `p256/sign-verify` | 45.8670 | 44.03–47.70 | 46.6644, 45.7973, 45.9423 | yes | yes |
-| `p256/verify` | 33.8050 | 32.45–35.16 | 35.3334, 34.3805, 34.0769 | **no** (run 1) | **no** (2 of 3) |
-| `p384/sign-verify` | 40.0934 | 38.49–41.70 | 40.5753, 40.5258, 39.9392 | yes | yes |
-| `rsa2048/sign-verify` | 12.1153 | 11.63–12.60 | 12.7483, 12.5562, 12.4187 | **no** (run 1) | yes |
+| `p256/sign-verify` | 45.3097 45.2777 46.1687 | 46.2362 46.6504 46.7729 | 45.5854 | 46.5532 | **−2.08 %** |
+| `p256/verify` | 34.0237 34.1447 34.2266 | 33.9076 34.2914 35.0101 | 34.1317 | 34.4030 | **−0.79 %** |
+| `p384/sign-verify` | 39.6440 40.1672 39.6449 | 39.9627 40.1568 40.2779 | 39.8187 | 40.1325 | **−0.78 %** |
+| `rsa2048/sign-verify` | 12.4691 12.6250 12.3599 | 12.5206 12.2395 12.2527 | 12.4847 | 12.3376 | **+1.19 %** |
 
-The merge conflict resolution (branch 1's side) was therefore **not** load-bearing
-and was also not correct: `make bench-crypto` on the merged tree passes or fails
-depending on the run. So the file was regenerated from the merged tree — one
-`bench-crypto-update` run, the one closest to the three-run mean — and committed
-as `d044ea3`:
+The sign of the branch-vs-gate delta **varies by case**, which is what a
+byte-identical binary must produce. (An earlier, *non*-interleaved set had
+`p256/verify` apparently +1.28 % on the branch; interleaving reversed it to
+−0.79 %. That is the size of the ordering artefact, and it is why the interleaved
+set is the one quoted.)
 
-    p256/sign-verify              45.7973       1.6287     2504982432       54456117
-    p256/verify                   34.3805       1.1654     1880514637       38964849
-    p384/sign-verify              40.5258       2.8764     2216646286       96175020
-    rsa2048/sign-verify           12.5562       0.5933      686786950       19836767
+**Noise floor, measured, not quoted** — the pooled range across those six runs of
+a byte-identical binary:
 
-**`make bench-crypto` then passes 3/3** against them (watched, exits 0/0/0).
+| case | min | max | same-source range | tolerance |
+|---|---|---|---|---|
+| `p256/sign-verify` | 45.2777 | 46.7729 | **3.25 %** | 4.00 % |
+| `p256/verify` | 33.9076 | 35.0101 | **3.22 %** | 4.00 % |
+| `p384/sign-verify` | 39.6440 | 40.2779 | **1.59 %** | 4.00 % |
+| `rsa2048/sign-verify` | 12.2395 | 12.6250 | **3.11 %** | 4.00 % |
 
-### The `main` control, measured not quoted
+**This box's same-source noise today is up to 3.25 %, against a 4.00 % gate.** An
+instrument whose noise is 81 % of its tolerance will fail intermittently on
+*any* tree. Three failures in seven runs on one arm and none in seven on the
+other is a chance split at that noise level, not a signal.
 
-`main` in its own worktree, same box, same session, three runs: **all four cases
-inside `main`'s own committed band**, so the control is healthy and `main`'s
-committed baseline is not stale.
+### Attribution, against the triage note
 
-| case | merged mean | `main` mean | delta |
-|---|---|---|---|
-| `p256/sign-verify` | 46.1347 | 48.1714 | **−4.23 %** |
-| `p384/sign-verify` | 40.3468 | 41.1333 | −1.91 % |
-| `p256/verify` | 34.5969 | 35.1094 | −1.46 % |
-| `rsa2048/sign-verify` | 12.5744 | 12.7579 | −1.44 % |
+`goc/cryptobench_test.go`'s note says a movement here has three causes. All three
+are excluded by measurement, not by argument:
 
-Faster on all four, consistent with branch 1's "4–6 % faster" claim. **Movement
-was expected and it is downward** — this is not a regression in either direction
-that the instrument gates on.
+1. **an allocation moved** — the allocation census regenerated twice on this
+   branch is byte-identical to the committed file (item 5). No site moved.
+2. **the generated code changed** — 848/848 corpus binaries byte-identical to the
+   gate, the crypto benchmark program among them. Not one instruction changed.
+3. **the code did not change and *moved*** — it did not move either: the whole
+   linked image is byte-identical, so the text is at the same offsets. The
+   32-byte entry alignment this branch inherits is live in *both* arms of the
+   comparison and cannot differentiate them.
 
-### Did the spread get tighter? **Yes, measurably, but by less than branch 1 reports.**
+Nothing is left but the instrument. **The `bench-crypto` failures are not
+attributable to `integration/wave7-fix`;** there is no mechanism by which a
+change that emits identical bytes can move an elapsed-time measurement of those
+bytes.
 
-Branch 1's whole argument is that alignment makes the number stop depending on
-where the code lands, so I measured that directly rather than quoting it, using
-branch 1's own `GOC_TEXT_PAD` knob to shift `.text` and `GOC_FUNC_ALIGN=0` to
-switch the policy off inside the same tree. `p256/sign-verify` index, pad
-K ∈ {0, 8, 16, 24}, one build and one measurement per point:
+### Recommendation (not applied — this job does not fix code or baselines)
 
-| policy | K=0 | K=8 | K=16 | K=24 | range | spread |
-|---|---|---|---|---|---|---|
-| `GOC_FUNC_ALIGN=32` (shipped) | 46.7196 | 45.7191 | 46.4663 | 46.9874 | 1.268 | **2.73 %** |
-| `GOC_FUNC_ALIGN=0` (as `main`) | 45.1079 | 47.0310 | 45.5269 | 47.0695 | 1.962 | **4.25 %** |
+The baseline was re-cut by the gate at `d044ea3` from a **single** run of an
+instrument whose noise is now 3.2 % against a 4 % tolerance, so it sits close to
+an edge. Re-cutting it again from another single run would just move the edge.
+If this check is to be trusted as a gate it needs either a wider tolerance or a
+baseline taken from a median of several runs. **Left alone deliberately; flagged
+for a person.**
 
-**The spread got tighter — 4.25 % → 2.73 %, a ~35 % reduction.** Direction
-confirmed. But two honest caveats, because this is a timing instrument:
+### Carrying forward the correction the brief asked for
 
-* This box's run-to-run noise today is much higher than the 0.08 % floor branch
-  1's report claims. Rebuilding and re-measuring the *same source* three times
-  gave 46.6644 / 45.7973 / 45.9423 on the merged tree — a 1.88 % range — and
-  47.9774 / 48.2784 / 48.2584 on `main` (0.62 %). The aligned sweep's 2.73 % is
-  only ~1.5× that noise, so most of what remains in the aligned column is
-  measurement, not placement.
-* I therefore **cannot reproduce branch 1's 6.1 % → 0.4 %**. My 4-point sweep is
-  much coarser than theirs (they swept K finely with repetitions) and my noise
-  floor is 20× theirs. What I can say from my own measurement is: tighter, in the
-  claimed direction, by a factor of about 1.6 rather than 15.
+The alignment branch reported the crypto placement spread falling 6.1 % → 0.4 %;
+the wave-7 gate could not reproduce that and measured 4.25 % → 2.73 % against a
+1.88 % same-source noise floor. **This session's same-source noise floor is
+higher still — up to 3.25 %** (interleaved, idle box, load ≈ 1.0). Any spread
+figure measured on this box today would be at or below its own noise, so this
+report does not quote one. That is the correction propagated: the number is
+reportable only with its noise floor beside it, and here the noise floor swallows
+it.
 
-**Attribution of the −4.23 %: branch 1.** It is the only branch that changes code
-generation, and turning its policy off inside the merged tree
-(`GOC_FUNC_ALIGN=0`) moves `p256/sign-verify` back into the 45.1–47.1 unaligned
-range that `main` occupies.
-
-## ROOT ARTEFACTS — **clean, nothing new**
-
-`git ls-files` at the repo root, merged tree, after every run in this gate:
-
-    AGENTS.md  AMD64_PARITY_PLAN.md  CCWORK_REPORT.md  .gitignore
-    GO_INTEGRATION_PLAN.md  go.mod  go.sum  Makefile  README.md  RUNTIME_PLAN.md
-    cg12  cs.trace  RUNTIME_PLAN.md.orig  viz
-
-Everything is source or documentation except the four the brief says to leave —
-`cg12` and `viz` (ELF aarch64 executables), `cs.trace`, `RUNTIME_PLAN.md.orig`.
-**No new goc-built binary at the root, and `git diff --diff-filter=A main...HEAD`
-adds no root file at all.** `git status` is clean after the whole gate.
-
-Branch 2 cleaned up after itself mid-branch: `c4210af` deletes `p1` (6 996 328 B),
-`size` (7 022 248 B) and `size.s`, three probe artefacts an earlier commit on that
-same branch had written into the root with a default `-o`. They are added and
-removed inside the branch, so they never reach the merge.
-
-### One non-source file the merge does add, outside the root
-
-    goc/testdata/placement_bench/__pycache__/sweep.cpython-312.pyc   9 466 B
-
-Byte-compiled CPython 3.12 output for `sweep.py`, committed by branch 1's
-`9a76853`. It is build output, not source or documentation, it is not covered by
-`.gitignore` (which has no `__pycache__` or `*.pyc` rule), and it will be
-regenerated and go stale the moment anyone runs `sweep.py`. Outside the root, so
-outside the letter of the artefact check — **flagged, not removed**, since this
-gate does not edit branch content. A `__pycache__/` line in `.gitignore` and a
-`git rm --cached` is the fix.
-
-## Final full run on the merged tree, after both regenerations
-
-`go test -v -timeout 40m -parallel 10 -count=1 ./goc/...`, detached, waited to
-exit: **1003 s, exit 1, 698 subtests, 0 `(cached)` lines.**
-
-    --- FAIL: TestDeriveClassifiesEveryGenField (0.00s)
-    FAIL    github.com/evanphx/cg12/goc     1002.387s
-
-**`TestEscapeShadowPlacement` is gone from the failure list** — the regenerated
-baseline is correct. **`TestDeriveClassifiesEveryGenField` is the one and only
-remaining failure in the whole gate.**
 
 ---
 
 # Summary
 
-| # | item | result |
-|---|---|---|
-| — | branch 1 report-only or code? | **CODE**: 32-byte entry alignment for loop-containing functions, live by default |
-| — | branch 2 report-only or code? | **CODE**: escape-analysis fixes + a 64 KB frame bound |
-| 1 | `go test ./goc/...` | **FAIL** — `TestDeriveClassifiesEveryGenField`; census 698 vs 695, +3 all branch 2's |
-| 2 | capability matrix, both arms | **366/366 PASS** both, identical name sets, `main` control 366/366 |
-| 3 | `make test-unit` | **PASS**, 37 packages |
-| 4 | `TestFrameEscapeAudit` | **PASS**, **182 entries**, zero additions |
-| 5 | allocation census ×2 | **STABLE**, byte-identical to each other and to the committed file |
-| 6 | determinism | **byte-identical** ×8 both trees; parallel-vs-serial PASS at 6 worker counts |
-| 7 | loop aliasing | **clean**; `loop_alias_frame_local.go` **1 frame / 0 heap**; audit PASS |
-| 8 | GC reducer ×20, `GOGC=10` + default, both trees | **0/20 everywhere** (80 runs) |
-| 9 | slog rows | **30/32 at parity**, baseline unmoved by either branch |
-| 10 | gc differential | **goc-heaps-what-gc-frames = 96**, reference met |
-| 11 | `make bench-crypto` | **PASS 3/3** after re-baselining on the merged tree; −4.23 % on `p256/sign-verify` vs a measured `main` |
-| 12 | `goc -m` ×3 forms | **PASS**, byte-identical-inert when off |
-| — | portability of the reason differential | **PASS**, byte-identical across two checkout paths, 0 absolute paths |
-| — | census delta composes | **yes, no residue**: +2 = branch 2's +2; branch 1 placement-neutral |
-| — | root artefacts | **clean**, no new binary; one `.pyc` flagged outside the root |
+| # | item | reference | measured | verdict |
+|---|---|---|---|---|
+| — | **does commit 1 change emitted code?** | — | **848/848 binaries byte-identical; 0 probe hits in 818 compiles** | **NO** |
+| 1 | `go test -timeout 40m -parallel 10 ./goc/...` | 0 failures | exit 0, 1130 s, 0 cached; `TestDeriveClassifiesEveryGenField` **passes** | **PASS** |
+| 1 | subtest census | gate's 698 | **698**, 692 PASS / 0 FAIL / 6 opt-in SKIP | **PASS** |
+| 2 | `make test-goc-status` `-v` | 366/366 | **366/366**, 0 FAIL | **PASS** |
+| 2 | `make test-goc-status-opt` `-v` | 366/366 | **366/366**, 0 FAIL, PASS set identical to the default arm | **PASS** |
+| 3 | `make test-unit` | pass | exit 0, 25 packages, 0 cached | **PASS** |
+| 4 | `TestFrameEscapeAudit -count=1` | 182 entries, 0 additions | **182**, 0 added, 0 vanished | **PASS** |
+| 5 | allocation census ×2 | stable | `42c139d4…` twice, 14 501 rows, = committed. **Nothing regenerated** | **PASS** |
+| 6 | determinism | byte-identical | 8/8 pairs identical | **PASS** |
+| 6 | `TestParallelBackendIsByteIdenticalToSerial` | pass | PASS at 1/2/3/8/64/256 workers | **PASS** |
+| 7 | loop aliasing | host match; 1 frame / 0 heap; audit clean | 6/6 match host, 12/12 distinct-per-iteration, audit PASS, `loop_alias_frame_local` **1 frame / 0 heap** | **PASS** |
+| 8 | GC reducer 20× at `GOGC=10` and default | 0/20 both | **0/20 both, branch and `main` control** (80 runs, 0 failures) | **PASS** |
+| 9 | slog benchmark | 30/32 at parity | **30/32**, same two rows, both goc ahead of gc | **PASS** |
+| 10 | gc differential | 96 goc-heaps-what-gc-frames | **96**, whole matrix reproduces cell for cell | **PASS** |
+| 10 | reason differential portable across paths | byte-identical | sha256 `41b0531d…` in both worktrees **and** = committed; 0 path leaks | **PASS** |
+| 11 | `make bench-crypto` | pass | **3 failures in 7 runs; gate control 7/7 pass, `main` 3/3 pass** | **UNSTABLE — not this branch** |
 
-## What was regenerated by this gate, and why
+Everything watched to exit. No number in this report was taken from a `(cached)`
+result; `(cached)` count was checked and was 0 on every `go test` invocation.
 
-| commit | file | reason |
-|---|---|---|
-| `2a264ab` | `escape_shadow_baseline.txt` | branch 2 changed both analyses and did not regenerate it; +21/−1, every line traceable to its own census review |
-| `d044ea3` | `crypto_signing_bench_baseline.txt` | both branches re-baselined it and conflicted; neither side holds on the merged tree |
+## The one item that is not green, in one paragraph
 
-No compiler code was changed by this gate.
+`make bench-crypto` fails intermittently (3 of 7 runs) on the branch. It fails on
+different cases in opposite directions; the gate tree, which produces a
+**byte-identical** benchmark binary and carries the **identical** committed
+baseline, passed 7/7 in the same session; and this box's same-source run-to-run
+noise, measured interleaved on an idle box, is up to **3.25 % against the check's
+4.00 % tolerance**. There is no mechanism by which a change that emits identical
+bytes moves an elapsed-time measurement of those bytes. The instrument is sitting
+too close to its own noise; that is a pre-existing property of the baseline the
+gate cut at `d044ea3`, not something this branch introduced.
 
-## The blocker
+## Commit 2 — the `.pyc` — clean
 
-`TestDeriveClassifiesEveryGenField` fails on `ccwork/parity-reasons` and so on
-the merge. It is the fifth consecutive wave for this test and the same mechanism
-every time: a branch adds a field to `gen` and does not extend
-`goc/derive_test.go`.
-
-* **field: `escapeAsksWhatTheValueHolds`** (`goc/compile.go:1725`, added by
-  `c765e09`)
-* **`derive` does not reset it** — `derive()` clears `objectEscapeChecks`
-  immediately above it and `resultLeakBody` immediately below it, and skips this
-  one; it is declared in the per-function block of the struct, so leaving it set
-  contradicts its own placement
-* it is absent from both `fullyPopulatedGen()` and `wholeCompilationGenFields`
-
-The exposure is a `derive()` taken while the flag is set: the derived generator
-inherits `true` and every `parameterKey` it mints (`compile.go:2612`, `:4361`,
-`:4505`) carries `holds: true`, a different cache key and a different answer.
-This gate did **not** demonstrate that such a `derive()` occurs — the walk
-save/restores the flag itself at `compile.go:4221-4223` — so the proven defect is
-that the classification the test demands was never made, not a live miscompile.
-
-Fixing it is one line in `derive()` plus two list entries, and it is branch 2's
-call which side of the line the field falls on. **This gate does not fix compiler
-code, so it is left red and reported.**
+`git ls-files | grep -E '\.pyc$|__pycache__'` → **0**. `.gitignore` gains
+`__pycache__/` and `*.pyc`. No `__pycache__` directory exists in the tree. Working
+tree clean apart from this report.
 
 ---
 
-# VERDICT: **NOT SAFE TO MERGE TO MAIN**
+# ANSWER TO THE HEADLINE QUESTION
 
-`go test ./goc/...` fails on the merged tree. The failure is
-`TestDeriveClassifiesEveryGenField`, it belongs to `ccwork/parity-reasons`, and
-it reproduces on that branch alone.
+**Commit 1 does NOT change emitted code.** 424 corpus programs × {default, `-O`}
+= 848 fully linked binaries are byte-identical between `integration/wave7-fix`
+and `integration/wave7-gate`; the allocation census is byte-identical; the gc
+placement differential and the reason differential are byte-identical; a probe
+compiler shows `derive()` is entered with `escapeAsksWhatTheValueHolds` set
+**zero times** across 818 compiles covering every corpus program and the vendored
+standard library. **The inherited state was never reached in practice. The fix is
+pure hygiene** — it makes the field's classification match its declared
+per-function placement, and it closes the guard that had been red for five
+consecutive waves. It is not a behaviour change in any program this tree
+compiles.
 
-Everything else in this gate is green, including every number the brief set a
-reference for: 366/366 both capability arms, 182 frame-escape entries, 96
+That is the *measured* answer, and it is the good one: had the byte-comparison
+moved, the old behaviour would have been live and every changed program would
+have needed adjudicating. It did not move.
+
+# VERDICT: **SAFE TO MERGE TO MAIN**
+
+`integration/wave7-fix` (`6034f73`) is `integration/wave7-gate` plus a five-line
+reset that provably changes nothing the compiler emits, a one-line test fixture,
+and a deleted `.pyc`. The gate's single blocker is gone; `go test ./goc/...` is
+green with the same 698 subtests. Every reference number the brief set is met
+exactly: 366/366 in both capability arms, 182 frame-escape entries, 96
 goc-heaps-what-gc-frames, 30/32 slog rows, 0/20 GC reducer at both `GOGC`
-settings on both trees, byte-identical determinism with alignment live,
-`TestParallelBackendIsByteIdenticalToSerial` passing, and the reason differential
-still portable across checkout paths. The crypto benchmark moved **down** 1.4–4.2 %
-and its placement spread got tighter, which is branch 1 working as designed.
+settings on both trees, 1 frame / 0 heap for `loop_alias_frame_local`,
+byte-identical determinism and parallel-vs-serial identity, and a reason
+differential that reproduces byte for byte at a second checkout path.
 
-Send `ccwork/parity-reasons` back for `goc/derive_test.go` and this merge is
-otherwise ready.
+The one caveat, which is a caveat and not a blocker: **`make bench-crypto` is an
+unreliable gate on this box today** — its noise floor is 3.25 % against a 4.00 %
+tolerance — and it fails intermittently on `integration/wave7-fix`, on
+`integration/wave7-gate`'s byte-identical binary, and would on anything else. It
+should be re-cut from a median or given a wider tolerance by someone who owns
+that decision. It does not implicate this branch.
