@@ -3919,3 +3919,53 @@ at the branch point -- inside the noise. `interfaceMethodCandidates` is
 O(dynamic types x reachable declarations) and is memoised per (method, call-site
 interface); without the memo it would be recomputed at every interface method
 call the walk meets.
+
+# Summary
+
+    lines where goc heaps what gc frames    113 -> 106
+    lines where goc frames what gc heaps   1448 -> 1454, of which +4 are the two
+                                           new corpus programs' panic strings and
+                                           +2 were removed by the receiver fix
+    groups the 113 fell into                12 (1 closed, 1 partly, 1 renamed)
+    frame-address publications             -3, +0
+
+## What changed in the compiler
+
+| change | lines it moved |
+| --- | --- |
+| `nonEscapingAddressWithin` asks the assignment question at every step of its climb | 2 |
+| an immediately called method asks `receiverDoesNotEscape` (**a miscompile fix**) | -2 permissive, -3 publications |
+| an interface method call is devirtualised whole-program, narrowed to the call site's interface | pays for the above |
+| a method value is a closure over the receiver | 2 |
+| a call through a function-typed local resolves to its one callee | 3 |
+| the escape summary describes a variadic parameter | 0 of the 106; `variadic_backing.go`'s `x := 42` |
+| a function-typed *parameter* is not resolvable (**a hole in the line above**) | guard only |
+
+Five new rows in `testdata/allocation_counts.go`, each measured with the branch
+point's compiler and this branch's:
+
+    interface_local_method_call             1.00 -> 0      (gc 0)
+    method_value_receiver                   1.00 -> 0      (gc 0)
+    call_through_a_function_variable        1.00 -> 0      (gc 0)
+    address_into_a_non_retaining_variadic   1.00 -> 0      (gc 0)
+    method_retains_receiver                 0    -> 1.00   (gc 1.00)
+
+Two new corpus programs, each of which fails at the branch point and passes here:
+
+    method_receiver_retention.go    panics: the receiver did not survive its frame
+    function_parameter_callee.go    dies: pointer to unallocated span, under runtime.GC()
+
+## The three answers the brief asked for
+
+1. **The count is 106**, down from 113.
+2. **Variadic parameters are described now**, by `variadicParameterHoldsItsElements`.
+   The gap accounted for **none** of the 113 -- measured by removing the refusal
+   outright and rescoring -- and the three lines the previous classification
+   filed under it are the loop rule. What it did cost is
+   `testdata/variadic_backing.go`, which is in the `heap -> absent` bucket.
+3. **Irreducible: 10 lines** (G2, the Read buffer -- gc reaches it by inlining
+   and its own un-inlined summary agrees with goc). **Blocked on a
+   representation: 55** (G1 maps 38, G4 boxing 17). **Reducible with the work
+   named: 41.** Two changes were measured and deliberately not landed -- the
+   generic-origin fallback and the optimistic cycle assumption -- and both are
+   written up with what they move and what stopped them.
