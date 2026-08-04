@@ -7535,3 +7535,30 @@ Why not 64: it is the best row in the spread table (0.65% median) and it costs
 5.04% of `.text`, seven times the shipped policy, for 0.35 points of a statistic
 whose floor is 0.08. It is worth revisiting on a machine with a 64-byte fetch
 granule; this one has 32.
+
+### A defect the corpus found on its way past: compress/flate and the collector
+
+`goc/testdata/placement_bench/flate` dies in the collector, reliably enough to
+measure and not reliably enough to have been noticed:
+
+    GOGC=10, 15 runs each          crashes
+    flate, no alignment, shift 0     13/15
+    flate, 32-byte alignment, shift 0 13/15
+    flate, no alignment, shift 16    15/15
+
+The message is
+
+    runtime: pointer 0x…000 to unused region of span span.base()=0x…
+    runtime: found in object at *(0x…+0x10f8)
+    object=0x… s.spanclass=90 s.elemsize=4864 s.state=mSpanInUse
+
+-- a bad pointer inside a heap object, not on a stack, in a 4864-byte object,
+which is `flate`'s compressor state. At the default GOGC it fires on roughly one
+run in twenty, which is why the sweep's driver records what a dying run had
+already printed and says so rather than stopping.
+
+It is **not** this change: the rate is the same with and without alignment, and
+`none` at shift 0 is the byte-identical output of the compiler before it. It is a
+pre-existing miscompile on `compress/flate`'s path that nothing in the tree
+currently runs hard enough to see -- `gzip-roundtrip` is in the capability matrix
+and passes, because it does not allocate enough to collect. It wants its own job.
