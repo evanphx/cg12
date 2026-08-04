@@ -9,6 +9,7 @@ import (
 
 	"github.com/evanphx/cg12/arm64"
 	"github.com/evanphx/cg12/goc"
+	"github.com/evanphx/cg12/ir"
 	"github.com/evanphx/cg12/opt"
 	"github.com/stretchr/testify/require"
 )
@@ -138,6 +139,29 @@ func runCorpusProgramOutput(t *testing.T, source string, optimized bool) string 
 // unaffected by them.
 func runCorpusProgramOutputWithEnv(t *testing.T, source string, optimized bool, environment ...string) string {
 	t.Helper()
+	optimize := func(*ir.Module) {}
+	if optimized {
+		optimize = opt.OptimizeModule
+	}
+	return runCorpusProgramOutputOptimizedBy(t, source, optimize, environment...)
+}
+
+// runCorpusProgramOutputOptimizedBy is runCorpusProgramOutputWithEnv with the
+// optimization named explicitly rather than chosen by a bool.
+//
+// It exists because `optimized: true` above means opt.OptimizeModule on a whole
+// monolithic module, and a module carrying the Go runtime is over
+// opt.OptimizeModule's own budget, so that pipeline degrades to fold/copy/dce and
+// promotes nothing. A caller that needs the pipeline goc's `-O` actually applies
+// to a *program* module -- which is small, and gets mem2reg, inlining and the
+// rest -- passes it here instead.
+func runCorpusProgramOutputOptimizedBy(
+	t *testing.T,
+	source string,
+	optimize func(*ir.Module),
+	environment ...string,
+) string {
+	t.Helper()
 	if runtime.GOOS != "linux" || runtime.GOARCH != "arm64" {
 		t.Skip("Go runtime execution test requires Linux ARM64")
 	}
@@ -150,9 +174,7 @@ func runCorpusProgramOutputWithEnv(t *testing.T, source string, optimized bool, 
 	require.NoError(t, err)
 	module, err := goc.CompileExecutable(source, program)
 	require.NoError(t, err, "compile executable")
-	if optimized {
-		opt.OptimizeModule(module)
-	}
+	optimize(module)
 
 	directory := t.TempDir()
 	objectPath := filepath.Join(directory, "program.o")

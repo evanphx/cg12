@@ -326,7 +326,7 @@ func threadOne(f *ir.Func, c threadCand) {
 			continue
 		}
 		t := f.Temp(in.To)
-		clone[in.To.ID] = f.NewTemp(t.Name+".jt", t.Cls)
+		clone[in.To.ID] = f.InheritGCRef(f.NewTemp(t.Name+".jt", t.Cls), in.To)
 	}
 
 	// resolve rewrites a reference from b's namespace into b's clone: a non-folded
@@ -443,7 +443,9 @@ func reconstructThreaded(f *ir.Func, b, bp *ir.Block, vars []reconVar) {
 			if !live[x][vi] {
 				continue // dead here; a phi would only make a spurious live range
 			}
-			p := &ir.Phi{Cls: vars[vi].cls, To: f.NewTemp(f.Temp(vars[vi].t).Name+".jt", vars[vi].cls)}
+			source := vars[vi].t
+			p := &ir.Phi{Cls: vars[vi].cls, To: f.InheritGCRef(
+				f.NewTemp(f.Temp(source).Name+".jt", vars[vi].cls), source)}
 			x.Phis = append(x.Phis, p)
 			if phiOf[x] == nil {
 				phiOf[x] = map[int]*ir.Phi{}

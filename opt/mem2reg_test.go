@@ -274,3 +274,83 @@ func TestMem2RegPrunesDeadPhi(t *testing.T) {
 	require.True(t, Mem2Reg(f))
 	assert.Empty(t, join.Phis, "no phi for a variable that is dead at the join")
 }
+
+// TestMem2RegPhiForAManagedSlotIsAGCRoot is the property that makes promotion
+// safe for a garbage-collected frontend: the value a promoted pointer slot used
+// to hold is still findable by the collector afterwards.
+//
+// While the slot exists, the frame map describes it and the collector reads the
+// pointer out of the frame at every safepoint. Promotion moves that value into
+// SSA, where the backend reports it only if its temporary is marked GCRef -- and
+// a phi is the one place Mem2Reg has to mint a temporary rather than reuse the
+// stored value's own. An unmarked phi is a pointer live across a loop back edge
+// that is a root nowhere, which is a collected-while-live object.
+//
+// The class cannot stand in for the flag. goc types every pointer ClsP and marks
+// the managed ones itself; ir.LowerPointers marks only ClsM.
+func TestMem2RegPhiForAManagedSlotIsAGCRoot(t *testing.T) {
+	f := ir.NewModule().NewFunc("m", ir.ClsP)
+	initial := f.ParamRef("initial")
+	n := f.Param("n", ir.ClsW)
+	e := f.Entry()
+	slot := f.MarkGCRef(e.Alloc(8, 8)) // a frame slot holding a managed pointer
+	e.Store(initial, slot)
+
+	loop := f.NewBlock("loop")
+	body := f.NewBlock("body")
+	done := f.NewBlock("done")
+	e.Goto(loop)
+	i := loop.Phi(ir.ClsW, ir.PhiEdge{From: e, Val: f.Word(0)})
+	loop.Jnz(loop.Cmp(ir.CmpSge, ir.ClsW, i, n), done, body)
+
+	// The body reads the slot across a safepoint and writes a new value back, so
+	// the promoted variable needs a phi at the loop header.
+	body.Safepoint()
+	current := body.Load(ir.ClsP, slot)
+	body.Store(body.Add(ir.ClsP, current, f.Long(8)), slot)
+	next := body.Add(ir.ClsW, i, f.Word(1))
+	body.Goto(loop)
+	loop.Phis[0].Add(body, next)
+	done.Ret(done.Load(ir.ClsP, slot))
+
+	require.True(t, Mem2Reg(f))
+	var promoted *ir.Phi
+	for _, phi := range loop.Phis {
+		if phi.Cls == ir.ClsP {
+			promoted = phi
+		}
+	}
+	require.NotNil(t, promoted, "the pointer slot got a loop-header phi")
+	assert.True(t, f.Temp(promoted.To).GCRef,
+		"the phi for a managed slot is a GC root; unmarked, the collector frees what the loop carries")
+}
+
+// TestMem2RegPhiForAnUnmanagedSlotStaysUnmarked is the other half: the marking
+// follows the slot, it is not applied to every promoted pointer. A GCRef
+// temporary live across a safepoint is pinned to a stack slot for its whole life,
+// so marking a frame address or a plain integer would cost a spill for nothing.
+func TestMem2RegPhiForAnUnmanagedSlotStaysUnmarked(t *testing.T) {
+	f := ir.NewModule().NewFunc("m", ir.ClsW)
+	n := f.Param("n", ir.ClsW)
+	e := f.Entry()
+	slot := e.Alloc(8, 8) // no MarkGCRef: an ordinary counter
+	e.Store(f.Word(0), slot)
+
+	loop := f.NewBlock("loop")
+	body := f.NewBlock("body")
+	done := f.NewBlock("done")
+	e.Goto(loop)
+	i := loop.Phi(ir.ClsW, ir.PhiEdge{From: e, Val: f.Word(0)})
+	loop.Jnz(loop.Cmp(ir.CmpSge, ir.ClsW, i, n), done, body)
+	body.Safepoint()
+	body.Store(body.Add(ir.ClsW, body.Load(ir.ClsW, slot), f.Word(1)), slot)
+	next := body.Add(ir.ClsW, i, f.Word(1))
+	body.Goto(loop)
+	loop.Phis[0].Add(body, next)
+	done.Ret(done.Load(ir.ClsW, slot))
+
+	require.True(t, Mem2Reg(f))
+	for _, phi := range loop.Phis {
+		assert.False(t, f.Temp(phi.To).GCRef, "an unmanaged slot's phi is not made a root")
+	}
+}

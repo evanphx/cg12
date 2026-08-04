@@ -3262,3 +3262,134 @@ This gate's branch is pushed as **`origin/integration/wave4-gate`** (and mirrore
 else's branch was not this job's call.
 
 NOT SAFE TO MERGE TO MAIN -- `go test ./goc/...` fails on `TestDeriveClassifiesEveryGenField`, because `ccwork/parity-remaining-134` added the `gen` field `summaryParents` without adding it to `fullyPopulatedGen()` and `wholeCompilationGenFields` in `goc/derive_test.go`; every other item passed and the fix is two lines in that test file.
+
+---
+
+# `-O` arm: `stack-scan/loop-safepoints` — root cause (2026-08-03)
+
+**Reproduced** on `main` (`d113d4a`), 3/3, in the matrix's own configuration
+(`goc build-runtime -O` pack, then `goc -O -runtime <pack>`,
+`GODEBUG=cg12scanroots=1`): `collected while live: carried-0 at carried before
+rewrite`, then `panic: a stack slot live across a loop back edge was not a GC
+root`.
+
+## Root cause
+
+`opt.Mem2Reg` creates the phi temporaries it needs when it promotes an `alloc`
+slot to SSA with
+
+```go
+p := &ir.Phi{Cls: v.cls, To: f.NewTemp(uniq(varBase(v.name)), v.cls)}
+```
+
+(`opt/mem2reg.go:122`) and **never copies `Temp.GCRef` from the slot it is
+promoting**. The comment at `opt/mem2reg.go:198` states the assumption that makes
+this look safe — "the promoted value stays a pointer -- LowerPointers resolves its
+width and the GC still sees a managed reference" — and that assumption does not
+hold for goc. `ir.LowerPointers` sets `GCRef` only for `ClsM` (the *managed*
+pointer class); goc's front end never emits `ClsM`. It emits `ClsP` and marks
+managed values explicitly (`ir/build.go:334`, `Block.Load` marks every `ClsP`
+load a GC ref). So a `ClsP` phi minted by Mem2Reg has `GCRef == false`.
+
+The backend's `isSafepointRoot` (`arm64/regalloc.go:399`) is
+`GCRef || (UsesManagedFrame() && Cls == ir.ClsP)`, and its second disjunct is
+dead by the time it runs: `LowerPointers` has already rewritten every `ClsP` to
+`ClsL`. So the phi is not a safepoint root, `computeSafepointRoots` omits it,
+`recordSafepoint` never describes its slot, and the pointer the loop carries
+across its back edge is invisible to the collector.
+
+Measured directly, on `main.carried` in the reducer below (`TEMPS` dump of the
+optimized program module):
+
+```
+t11 name="t3.1"  cls=p gcref=true      <- the value the preheader stores
+t29 name="t20"   cls=p gcref=true      <- the value the back edge stores
+t38 name="t3"    cls=p gcref=false     <- the phi that joins them  ** the defect **
+```
+
+Only a phi loses the flag, which is exactly why the failure is loop-shaped:
+elsewhere Mem2Reg rewrites a load to the *stored value's own temp*, which already
+carries `GCRef`. A phi is the one place it must mint a new temp.
+
+## Why the default arm is green and why a monolithic `-O` build is too
+
+Without `-O` there is no Mem2Reg: the pointer stays in its `alloc` slot and is
+described by `Func.StackPointerWords`, so it is a root at every safepoint.
+
+A *monolithic* `goc -O` build of the same program also passes — but not because
+it is sound. `opt.OptimizeModule` (`opt/opt.go:45`) falls back to
+`BoundedPipeline()` when the module is over budget, and a monolithic build links
+the whole runtime into one module (2418 functions, over the 2048-function
+budget), so **Mem2Reg never runs on `main.carried` at all**. The split build's
+program module is small, takes `DefaultPipeline()`, and gets the bug. That is the
+whole of the "needs the split build, not just `-O`" observation recorded in
+RUNTIME_PLAN §6.1 — the split is not a second ingredient, it is just what lets
+the optimizer run.
+
+## Same defect, other sites
+
+`GCRef` is dropped the same way by every other opt pass that mints a temp for a
+value that may be a managed pointer:
+
+- `opt/ifconvert.go:327` — the select that replaces a phi
+- `opt/ifconvert.go:201` — the select that replaces a conditional value
+- `opt/jumpthread.go:446` — a phi it introduces; `:329` — a cloned instruction result
+- `opt/tailmerge.go:71` — the merged return-value phi
+
+`opt/inline.go:792` is the one that gets it right today (`cloned.GCRef = t.GCRef`).
+
+## The fix
+
+`opt/mem2reg.go` now records, per promoted slot, whether the slot held a managed
+pointer (`promotable.managed`, taken from the alloc temp's own `GCRef`, or from a
+`ClsM` access class for a frontend that types managed pointers), and marks each
+phi it mints accordingly. The slot's flag is exactly what the frame map described
+while the slot existed, so promotion no longer changes which values the collector
+can find.
+
+The same flag is now carried by every other transform that mints a temporary
+standing for values that already exist, via a new `ir.Func.InheritGCRef`:
+`opt/ifconvert.go` (phi → select), `opt/jumpthread.go` (cloned defs, and the phis
+its SSA reconstruction inserts) and `opt/tailmerge.go` (the merged return value).
+Those were latent before — no phi was ever a GC reference, so there was nothing
+for them to drop — and are live the moment Mem2Reg starts marking phis.
+
+Measured after the fix, same dump:
+
+```
+t38 name="t3"   cls=p gcref=true    <- the loop-carried pointer's phi
+t37 name="t2"   cls=l gcref=false   <- `total`, an int: still unmarked
+t39 name="t12"  cls=l gcref=false   <- `round`, an int: still unmarked
+```
+
+Runs, `-O` + `-O` pack, the matrix's configuration:
+
+| program | before | after |
+| --- | --- | --- |
+| `goc/testdata/runtime_stack_scan_loop_safepoints.go` (`GODEBUG=cg12scanroots=1`) | 3/3 fail | **3/3 pass** |
+| `goc/testdata/runtime_opt_loop_carried_root.go` (`GODEBUG=clobberfree=1`) | 3/3 fault on `0xdeadbeefdeadbeef` | **3/3 pass** |
+- **`make test-goc-status-opt`**: **366 PASS, 0 FAIL, 0 SKIP** (`-v`, unsharded,
+  95 s). `stack-scan/loop-safepoints` passes. The arm was 365/366 before.
+- **`make test-goc-status` (the default arm)**: **366 PASS, 0 FAIL, 0 SKIP**,
+  unchanged. Expected by construction — without `-O` no `opt` pass runs — and
+  measured rather than assumed.
+
+## Both arms, after
+
+| arm | before | after |
+| --- | --- | --- |
+| `make test-goc-status-opt` | 365/366 (`stack-scan/loop-safepoints`) | **366/366** |
+| `make test-goc-status` | 366/366 | **366/366** |
+
+## Not investigated
+
+`Temp.GCRef` is a per-temporary flag with no invariant enforcing it, and the same
+"a transform mints a temporary and the value stops being a root" shape could
+exist wherever one value is substituted for another. The two substituting passes
+worth a look are `opt.LoadElim` (forwards a store's value to a later load, and
+`ir.Block.Load` marks every `ClsP` load a GC reference while the stored value's
+own temporary may not be) and `opt.Copy`. Neither is implicated by anything
+measured here — the `-O` arm is 366/366 and both reducers pass 3/3 — and this
+change deliberately did not touch them. A checker that asserts the closure
+("a temporary whose value comes from a managed one is managed") would settle it
+properly; that is a piece of work, not a patch.

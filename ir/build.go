@@ -80,6 +80,38 @@ func (f *Func) MarkGCRef(r Ref) Ref {
 	return r
 }
 
+// InheritGCRef marks dst a managed reference when any of srcs is one, carrying
+// the first managed source's type descriptor with it.
+//
+// It is for a transform that mints a temporary standing for values that already
+// exist: a phi merging them, a select choosing between them, a clone of the
+// instruction that defined one. Managed-ness is a property of the value, not of
+// the temporary that happens to hold it, so such a temporary is managed exactly
+// when what it stands for is. A new temporary starts unmarked, and an unmarked
+// temporary holding a heap pointer is reported at no safepoint — the collector
+// frees an object the program is still going to use.
+func (f *Func) InheritGCRef(dst Ref, srcs ...Ref) Ref {
+	if dst.Kind != RefTemp {
+		return dst
+	}
+	for _, src := range srcs {
+		if src.Kind != RefTemp {
+			continue // a constant (a nil pointer) names no object
+		}
+		source := f.Temps[src.ID]
+		if source == nil || !source.GCRef {
+			continue
+		}
+		target := f.Temps[dst.ID]
+		target.GCRef = true
+		if target.GCType == 0 {
+			target.GCType = source.GCType
+		}
+		return dst
+	}
+	return dst
+}
+
 // MarkGCRefType flags a temporary as a managed reference and tags it with a type
 // descriptor, carried into the stack map for the runtime to interpret.
 func (f *Func) MarkGCRefType(r Ref, typeID uint32) Ref {
