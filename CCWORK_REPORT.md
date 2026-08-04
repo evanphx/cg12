@@ -7562,3 +7562,88 @@ It is **not** this change: the rate is the same with and without alignment, and
 pre-existing miscompile on `compress/flate`'s path that nothing in the tree
 currently runs hard enough to see -- `gzip-roundtrip` is in the capability matrix
 and passes, because it does not allocate enough to collect. It wants its own job.
+
+### The crypto benchmark's own before and after
+
+The corpus answers the general question; the instrument that started this
+answers the specific one. `goc/testdata/crypto_signing_bench` built at the same
+eight shifts, `p256/sign-verify` timed twice each, pinned:
+
+    policy          0        4        8       12       16       20       24       28   spread
+    none       47.759   44.981   45.207   45.091   44.817   44.834   44.840   46.142    6.57%
+    loop32     44.978   45.042   44.972   44.847   44.921   44.909   44.975   44.978    0.44%
+
+6.57% reproduces last night's 6.1% square wave on a second day. 0.44% is what is
+left of it. Note where the aligned row sits: at the *fast* end of the unaligned
+range, not in the middle of it.
+
+`make bench-crypto` therefore fails in the faster direction against the old
+baseline, and the baseline is regenerated:
+
+    case                   was        now
+    p256/sign-verify   48.7484    45.8670   -5.9%
+    p256/verify        35.8206    33.8050   -5.6%
+    p384/sign-verify   41.6658    40.0934   -3.8%
+    rsa2048/sign-verify 12.8621   12.1153   -5.8%
+
+with gc's reference column unmoved (1.6293 / 1.1648 / 2.8793 / 0.5930 against
+1.6271 / 1.1655 / 2.8793 / 0.5932), so it is goc that moved and not the box.
+
+The instrument's faster-direction message asks what proves this is not escape
+analysis becoming permissive. Two things do. First, the two builds' instruction
+streams are identical: disassembling the whole `.text` of the same program built
+with and without the change gives **1,168,119 instructions in each, in the same
+order, once the 7,928 alignment no-ops are removed**, and all 7,091 functions have
+identical sizes. Second, `TestAllocationCensus` passes unchanged. Nothing is
+allocated differently because nothing is compiled differently.
+
+### Build time
+
+Compile time is unchanged, which it should be -- the padding is an append per
+function. p256, best of three, serially:
+
+    none 12.11 s   a16 12.08 s   a32 12.06 s   a64 12.02 s   loop32 11.95 s   head32 12.05 s
+
+### Guards
+
+All run on this branch with the change in:
+
+    go build ./...                                    PASS
+    go test ./arm64/... ./obj/... ./link/...          PASS
+    TestParallelBackendIsByteIdenticalToSerial        PASS
+    TestFrameEscapeAudit                              PASS
+    scripts/determinism-check.sh (cold and warm)      PASS
+    capability matrix, default arm                    366/366 PASS, 0 FAIL
+    capability matrix, -O arm                         366/366 PASS, 0 FAIL
+    GC reducer runtime_gc_type_mask_padding.go        0/20 failed at GOGC=10
+                                                      0/20 failed at default GOGC
+    TestAllocationCensus                              PASS (183 s)
+    go test ./opt/... ./pe/... ./parse/... ./lower/...
+       ./ir/... ./analysis/... ./interp/...
+       ./plan9asm/... ./internal/... ./lift/...       PASS
+    make bench-crypto (after re-baselining)           PASS (67.7 s)
+
+One test had to change and it was right to fail:
+`arm64.TestDisasmKnowsEverythingTheBackendEmits` says nothing the backend emits
+may read back as `.inst`, and the padding made that false. `a64.Decode` has
+always known `0xd503201f` is a `HINT #0`; the textual disassembler did not, and
+now does.
+
+### Scope, said out loud
+
+The policy is a property of the arm64 backend, not of the Go driver, so it
+applies to everything the backend emits -- cg12's C output and the QBE and
+interpreter paths as well as goc's. That is the right blast radius for a defect
+that lives in `arm64/mc.go`, and the mechanism (a 32-byte fetch granule) knows
+nothing about source language. It does mean `test-cruby`'s performance column is
+expected to move, and it was not run here.
+
+Two things this does *not* fix, and neither is a reason to wait:
+
+  - A function with no backward branch is still laid down wherever the previous
+    one ended. If a hot leaf function turns out to matter, the knob to widen this
+    to every function exists and costs 2.37% of `.text` instead of 0.72%.
+  - Alignment pins a phase, not an address. Two builds still land the code in
+    different cache sets, and the control sweep measures that residue at a 0.71%
+    median -- ten times smaller than what was removed, and not something
+    alignment can address.
