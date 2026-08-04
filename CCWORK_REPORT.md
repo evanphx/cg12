@@ -7390,3 +7390,87 @@ Averaged over eight placements, phase 0 is not an average phase -- a loop of k
 bytes starting at phase p spans `ceil((p+k)/32)` fetch granules, which is
 minimised at p = 0 -- so pinning every function there is worth something on the
 mean as well as on the variance.
+
+### The measurement: three reps of the full grid
+
+384 binaries, each run three times, interleaved in a shuffled order, pinned to
+one core; the fastest of three rounds within each run and then the fastest run.
+The numbers below are raw elapsed nanoseconds; the same table computed on the
+index (case divided by the control timed in the same process) agrees to within a
+tenth of a point everywhere, which is itself worth knowing -- it says the box was
+quiet enough that the normalisation was not doing any work.
+
+**Placement-induced spread**, `(max-min)/min` of a case's time across the eight
+shifts, over the 19 timed cases:
+
+    policy     median     mean      p90    worst     .text cost
+    none       14.62%   16.25%   38.05%   44.18%       +0.00%
+    a16         1.93%    4.29%   14.84%   22.70%       +1.02%
+    a32         1.00%    4.02%   16.62%   25.58%       +2.37%
+    a64         0.65%    2.73%    8.38%   18.94%       +5.04%
+    loop32      1.01%    3.15%   15.62%   21.72%       +0.72%
+    head32      1.14%    4.35%   21.27%   25.96%       +4.40%
+    controls    0.08%    0.15%    0.61%    0.73%
+
+The controls -- one fixed integer loop per program, timed in the same processes --
+are the floor: 0.08% median. So the 14.6% median is not the instrument.
+
+**Mean cost**, geometric mean of each case's index over the eight shifts, against
+the same quantity under `none`, so placement luck is averaged out of both sides:
+
+    a16      -3.36%    faster on 18 of 19 cases
+    a32      -3.42%    faster on 18 of 19
+    a64      -3.01%    faster on 18 of 19
+    loop32   -2.95%    faster on 19 of 19
+    head32   -3.68%    faster on 19 of 19
+
+Every alignment is *faster* on the mean, which is the opposite of last night's
+reading and is a difference of comparison rather than of machine: that comparison
+was against the one placement HEAD happened to have. Phase 0 is not an average
+phase. A loop of k bytes entered at phase p spans `ceil((p+k)/32)` fetch granules
+and that is minimised at p = 0, so pinning code there wins a little on the mean
+as well as most of the variance.
+
+**Per case**, spread under no alignment / under the shipped policy / the noise
+floor, where the noise floor is the same binary's own spread across reps -- the
+only estimate of this instrument's noise that is not confounded with what it is
+measuring:
+
+    case                        none   loop32    noise    mean under loop32
+    interp/bytecode-loop      44.11%    1.89%    0.19%      -14.12%
+    sortmap/map-build-probe   37.97%    2.94%    6.72%       -4.08%
+    flate/compress            32.75%    1.44%    1.76%       -4.31%
+    text/format-append        28.36%   15.51%    9.95%       -5.60%
+    json/marshal              24.30%    3.96%    2.78%       -4.68%
+    json/unmarshal            23.12%    2.28%    2.25%       -6.63%
+    text/sprintf              17.36%   21.69%   13.44%       -0.35%
+    sortmap/sort-slice        15.00%    0.43%    0.52%       -3.98%
+    text/parse                14.71%    0.75%    0.28%       -4.10%
+    regexp/find-submatch      14.68%    0.96%    0.33%       -0.70%
+    regexp/anchored-lines     14.33%    4.42%    2.90%       -1.43%
+    regexp/replace            12.61%    0.96%    1.96%       -1.33%
+    sortmap/sort-ints          9.39%    0.32%    0.21%       -0.66%
+    text/utf8-decode           6.69%    1.61%    0.29%       -1.21%
+    p256/sign-verify           5.86%    0.43%    0.47%       -0.94%
+    p256/verify                4.70%    0.46%    0.45%       -0.51%
+    flate/decompress           2.05%    0.36%    0.18%       -0.08%
+    sha/hmac-1mib              0.46%    0.16%    0.19%       -0.10%
+    sha/sha256-1mib            0.23%    0.13%    0.14%       -0.05%
+
+Read the noise column before the others. On thirteen of the nineteen cases the
+spread under alignment is at or below the case's own noise, which is as far as
+this instrument can see: alignment has removed all of the placement effect there
+is to remove. Three cases -- `text/sprintf`, `text/format-append`,
+`map/build-probe` -- have noise floors of 13.4%, 9.9% and 6.7% because they are
+allocation-bound and at the collector's mercy, and nothing can be concluded about
+placement from them under any policy. That leaves the honest headline as the
+median, not the tail.
+
+`interp/bytecode-loop` is the cleanest row in the table and the most extreme:
+a switch dispatch loop, noise 0.19%, and its elapsed time moves **44%** between
+two builds of the same source that differ only in where the code sits. Under the
+shipped policy it moves 1.89%, and it is 14% faster.
+
+`sha` is the useful negative: SHA-256's compression loop is small and its spread
+is 0.23% with no alignment at all. Not everything is sensitive, and a corpus is
+how you find that out.

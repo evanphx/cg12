@@ -88,11 +88,31 @@ func (l textLayout) identity() string {
 // emit, for callers that cache compiled artifacts.
 func TextLayoutIdentity() string { return layout.identity() }
 
-// The shipped placement policy. See CCWORK_REPORT.md, "Should goc align function
-// entries", for the corpus measurement these were chosen from.
+// The shipped placement policy: a 32-byte entry for a function that contains a
+// backward branch, and nothing for one that does not.
+//
+// 32 because that is the instruction fetch granule on the Neoverse-N1 this was
+// measured on, and because absorbing an upstream size change requires an
+// alignment at least as large as the granule -- 16 halves the number of
+// placements a program can land in and leaves the phase flipping between 0 and
+// 16, which is not a fix.
+//
+// Only functions with a loop because that is where the difference is: a
+// straight-line function is fetched once, and restricting the padding to
+// looping functions costs 0.72% of .text against 2.37% for every function, for
+// the same measured result. See CCWORK_REPORT.md, "Should goc align function
+// entries", for the corpus this comes from: across 19 timed cases in eight
+// programs, the spread a case's elapsed time has when only its address moves
+// falls from a median of 14.6% to 1.0%, against a 0.08% measurement floor, and
+// the mean cost falls 2.95%.
+//
+// defaultLoopAlign is 0 because aligning loop *headers* as well measured no
+// better than not doing so and costs six times as much code: a function has one
+// entry and Go's range loops and bounds-check re-entry give it several
+// back-edge targets, so there are more loop heads in a program than functions.
 const (
-	defaultFuncAlign         = 0
-	defaultLoopFunctionsOnly = false
+	defaultFuncAlign         = 32
+	defaultLoopFunctionsOnly = true
 	defaultLoopAlign         = 0
 )
 

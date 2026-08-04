@@ -28,14 +28,22 @@ CORE = os.environ.get('BENCH_CORE', '50')
 PROGRAMS = ['p256', 'sha', 'interp', 'regexp', 'json', 'sortmap', 'flate', 'text']
 
 # name -> environment for the backend's placement policy.
+# 'none' names its settings explicitly rather than leaving them out. The
+# defaults in arm64/align.go are what this sweep exists to change, so a policy
+# that inherits them would stop meaning what it says the day they move.
 POLICIES = {
-    'none':   {},
-    'a16':    {'GOC_FUNC_ALIGN': '16'},
-    'a32':    {'GOC_FUNC_ALIGN': '32'},
-    'a64':    {'GOC_FUNC_ALIGN': '64'},
-    'loop32': {'GOC_FUNC_ALIGN': '32', 'GOC_ALIGN_LOOP_FUNCS_ONLY': '1'},
-    'head32': {'GOC_FUNC_ALIGN': '32', 'GOC_ALIGN_LOOP_FUNCS_ONLY': '1',
-               'GOC_LOOP_ALIGN': '32'},
+    'none':   {'GOC_FUNC_ALIGN': '0', 'GOC_LOOP_ALIGN': '0',
+               'GOC_ALIGN_LOOP_FUNCS_ONLY': '0'},
+    'a16':    {'GOC_FUNC_ALIGN': '16', 'GOC_LOOP_ALIGN': '0',
+               'GOC_ALIGN_LOOP_FUNCS_ONLY': '0'},
+    'a32':    {'GOC_FUNC_ALIGN': '32', 'GOC_LOOP_ALIGN': '0',
+               'GOC_ALIGN_LOOP_FUNCS_ONLY': '0'},
+    'a64':    {'GOC_FUNC_ALIGN': '64', 'GOC_LOOP_ALIGN': '0',
+               'GOC_ALIGN_LOOP_FUNCS_ONLY': '0'},
+    'loop32': {'GOC_FUNC_ALIGN': '32', 'GOC_LOOP_ALIGN': '0',
+               'GOC_ALIGN_LOOP_FUNCS_ONLY': '1'},
+    'head32': {'GOC_FUNC_ALIGN': '32', 'GOC_LOOP_ALIGN': '32',
+               'GOC_ALIGN_LOOP_FUNCS_ONLY': '1'},
 }
 
 PADS = [0, 4, 8, 12, 16, 20, 24, 28]

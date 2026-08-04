@@ -33,8 +33,9 @@ CONTROL = 'control/spin-fixed-work'
 
 
 def load(path):
-    """best[(program, policy, pad, case)] = fastest nanoseconds seen."""
-    best = {}
+    """best[(program, policy, pad, case)] = fastest nanoseconds seen, and
+    every[(...)] = the per-rep values behind it."""
+    best, every = {}, collections.defaultdict(list)
     for line in open(path):
         fields = line.rstrip('\n').split('\t')
         if len(fields) != 6:
@@ -42,9 +43,28 @@ def load(path):
         program, policy, pad, case, _, nanos = fields
         key = (program, policy, int(pad), case)
         value = int(nanos)
+        every[key].append(value)
         if key not in best or value < best[key]:
             best[key] = value
-    return best
+    return best, every
+
+
+def noise_floor(every, program, case):
+    """How far one binary's own measurement moves between reps.
+
+    The same executable run again is the only estimate of this instrument's
+    noise that is not confounded with the thing being measured, and it is
+    per-case: a case that allocates hard is at the collector's mercy in a way a
+    register-bound loop is not. Reported as the median over the grid's cells of
+    each cell's (max-min)/min across reps.
+    """
+    spreads = []
+    for (pr, _, _, ca), values in every.items():
+        if pr == program and ca == case and len(values) > 1:
+            spreads.append(spread(values))
+    if not spreads:
+        return None
+    return sorted(spreads)[len(spreads) // 2]
 
 
 def geomean(values):
@@ -67,7 +87,7 @@ def summarize(name, per_case):
 def main():
     path = sys.argv[1] if len(sys.argv) > 1 else os.path.join(
         os.environ.get('TMPDIR', '/tmp'), 'sweep', 'results.tsv')
-    best = load(path)
+    best, every = load(path)
     pads = sorted({pad for (_, _, pad, _) in best})
 
     cases, controls = [], []
@@ -90,7 +110,7 @@ def main():
         label = 'index (case / control, same process)' if indexed else 'raw nanoseconds'
         print()
         print('# Placement-induced spread, %s: (max-min)/min across shifts %s' % (label, pads))
-        print('%-9s %-24s%s' % ('program', 'case', ''.join('%9s' % p for p in POLICIES)))
+        print('%-9s %-24s%s%9s' % ('program', 'case', ''.join('%9s' % p for p in POLICIES), 'noise'))
         collected = collections.defaultdict(list)
         for program, case in cases + controls:
             row = []
@@ -105,8 +125,10 @@ def main():
                 else:
                     collected[policy + ' control'].append(value)
                 row.append('%8.2f%%' % value)
-            print('%-9s %-24s%s%s' % (program, case, ''.join(row),
-                                      '  (control)' if case == CONTROL else ''))
+            floor = noise_floor(every, program, case)
+            print('%-9s %-24s%s%8.2f%%%s' % (
+                program, case, ''.join(row), floor if floor is not None else 0.0,
+                '  (control)' if case == CONTROL else ''))
         print()
         print('# Spread summary over the %d timed cases, %s' % (len(cases), label))
         print('%-9s %9s %9s %9s %9s' % ('policy', 'median', 'mean', 'p90', 'worst'))
