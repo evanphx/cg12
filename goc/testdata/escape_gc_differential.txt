@@ -51,8 +51,8 @@ rows are goc's verdict for the line, columns are gc's.
 same as "it put the object in a frame" -- see gcdiff.Absent.
 
   goc\gc      frame     heap    mixed   absent    total
-  frame         177       30       14      105      326
-  heap          106      578      173      167     1024
+  frame         177       30       14      187      408
+  heap          106      578      173       85      942
   mixed          13       89       24       13      139
   absent        409     1275       22        0     1706
   total         705     1972      233      285     3195
@@ -4883,7 +4883,7 @@ variadic_element_retention.go:42	frame -> mixed
 	gc   col 39  heap  object  48879
 	gc   col 47  heap  object  51966
 
-## PESSIMISTIC: 496 lines
+## PESSIMISTIC: 414 lines
 
 every source line goc puts on the heap and gc does not. This is the
 performance direction and nothing worse: each line is an allocation, a zeroing
@@ -4891,8 +4891,8 @@ and a collector's attention that the reference implementation does not pay.
 
 by construct (goc allocators on the line | gc constructs on the line):
 
-    164  newobject/heap | -
     109  newobject/heap | object/heap,slice/frame
+     82  newobject/heap | -
      52  newobject/heap | object/frame,object/heap
      35  makemap/heap | map/frame
      28  newobject/heap | object/frame
@@ -5027,9 +5027,6 @@ append_make.go:11	heap -> mixed
 	goc  col 44  heap  runtime.makeslice  byte  [main.growBytes]
 	gc   col 17  heap  object  append
 	gc   col 35  frame  slice  make([]byte, capacity)
-bytes_grow_compare.go:10	heap -> absent
-	src  defer runtime.GOMAXPROCS(runtime.GOMAXPROCS(1))
-	goc  col 2  heap  runtime.newobject  struct_code_uintptr__function_func_n_int__int__a  [main.measuredAllocsPerRun]
 gc_struct.go:25	heap -> frame
 	src  root := new(record)
 	goc  col 10  heap  runtime.newobject  main_record  [main.Test]
@@ -5258,9 +5255,6 @@ runtime_assign_target_forms.go:208	heap -> mixed
 	gc   col 35  frame  slice  ... argument
 	gc   col 44  heap  object  what
 	gc   col 50  heap  object  value
-runtime_atomic_counter.go:15	heap -> absent
-	src  defer wait.Done()
-	goc  col 10  heap  runtime.newobject  struct_code_uintptr__receiver__sync_WaitGroup  [main.main.func.14.6]
 runtime_channel_buffer_roots.go:57	heap -> mixed
 	src  sink = append(sink, &box{value: index})
 	goc  col 23  heap  runtime.newobject  main_box  [main.churn]
@@ -5411,22 +5405,6 @@ runtime_debug_gc_controls.go:32	heap -> frame
 	src  runtime.KeepAlive(values)
 	goc  col 20  heap  runtime.newobject  int  [main.main]
 	gc   col 20  frame  object  values
-runtime_defer_argument_evaluation.go:10	heap -> absent
-	src  defer appendValue(&values, current)
-	goc  col 2  heap  runtime.newobject  struct_code_uintptr__argument0____int__argument1  [main.collect]
-runtime_defer_argument_evaluation.go:12	heap -> absent
-	src  defer appendValue(&values, current)
-	goc  col 2  heap  runtime.newobject  struct_code_uintptr__argument0____int__argument1  [main.collect]
-runtime_defer_method_value_order.go:16	heap -> absent
-	src  defer record(1)
-	goc  col 3  heap  runtime.newobject  struct_code_uintptr__function_func_value_int___a  [main.main.func.15.2]
-runtime_defer_method_value_order.go:17	heap -> absent
-	src  defer recorder.Add(2)
-	goc  col 3  heap  runtime.newobject  struct_code_uintptr__function_func_value_int___a  [main.main.func.15.2]
-	goc  col 9  heap  runtime.newobject  struct_code_uintptr__receiver__main_deferMethodR  [main.main.func.15.2]
-runtime_defer_method_value_order.go:18	heap -> absent
-	src  defer record(3)
-	goc  col 3  heap  runtime.newobject  struct_code_uintptr__function_func_value_int___a  [main.main.func.15.2]
 runtime_finalizer_basic.go:18	heap -> absent
 	src  value := &finalizable{
 	goc  col 12  heap  runtime.newobject  main_finalizable  [main.main.func.17.2]
@@ -5463,79 +5441,31 @@ runtime_finalizer_stack_growth.go:41	heap -> mixed
 	goc  col 31  heap  runtime.newobject  struct_code_uintptr__capture0_unsafe_Pointer  [main.allocateFinalizerAfterStackGrowth]
 	gc   col 31  heap  object  func literal
 	gc   col 36  frame  object  item
-runtime_gc_assist_credit.go:85	heap -> absent
-	src  defer debug.SetGCPercent(previous)
-	goc  col 2  heap  runtime.newobject  struct_code_uintptr__function_func_percent_int__  [main.main]
-runtime_gc_assist_credit.go:98	heap -> absent
-	src  defer running.Done()
-	goc  col 10  heap  runtime.newobject  struct_code_uintptr__receiver__sync_WaitGroup  [main.main.func.97.6]
-runtime_gc_assist_stack_growth.go:37	heap -> absent
-	src  defer wait.Done()
-	goc  col 8  heap  runtime.newobject  struct_code_uintptr__receiver__sync_WaitGroup  [main.assistWorker]
 runtime_gc_assist_stack_growth.go:56	heap -> absent
 	src  go assistWorker(&wait)
 	goc  col 3  heap  runtime.newobject  struct_code_uintptr__argument0__sync_WaitGroup  [main.main]
 	goc  col 3  heap  runtime.newobject  struct_code_uintptr__argument0__sync_WaitGroup  [main.main.gointernal.funcvalue.main_main_func___func.83860b9e97d614a8]
-runtime_gc_checkmark.go:111	heap -> absent
-	src  defer debug.SetGCPercent(previous)
-	goc  col 2  heap  runtime.newobject  struct_code_uintptr__function_func_percent_int__  [main.main]
-runtime_gc_checkmark.go:129	heap -> absent
-	src  defer running.Done()
-	goc  col 10  heap  runtime.newobject  struct_code_uintptr__receiver__sync_WaitGroup  [main.main.func.128.6]
-runtime_gc_checkmark.go:158	heap -> absent
-	src  defer collecting.Done()
-	goc  col 9  heap  runtime.newobject  struct_code_uintptr__receiver__sync_WaitGroup  [main.main.func.157.5]
-runtime_gc_concurrent_mark.go:156	heap -> absent
-	src  defer debug.SetGCPercent(previous)
-	goc  col 2  heap  runtime.newobject  struct_code_uintptr__function_func_percent_int__  [main.main]
-runtime_gc_concurrent_mark.go:178	heap -> absent
-	src  defer running.Done()
-	goc  col 10  heap  runtime.newobject  struct_code_uintptr__receiver__sync_WaitGroup  [main.main.func.177.6]
-runtime_gc_concurrent_mark.go:193	heap -> absent
-	src  defer collecting.Done()
-	goc  col 9  heap  runtime.newobject  struct_code_uintptr__receiver__sync_WaitGroup  [main.main.func.192.5]
 runtime_gc_heap_growth_shrink.go:107	heap -> mixed
 	src  small = append(small, &resident{value: index, label: "transient"})
 	goc  col 25  heap  runtime.newobject  main_resident  [main.grow]
 	gc   col 17  frame  object  append
 	gc   col 25  heap  object  &resident{...}
-runtime_gc_heap_growth_shrink.go:140	heap -> absent
-	src  defer debug.SetGCPercent(previous)
-	goc  col 2  heap  runtime.newobject  struct_code_uintptr__function_func_percent_int__  [main.main]
 runtime_gc_mark_workers.go:117	heap -> frame
 	src  expected := make([]int, len(retained))
 	goc  col 30  heap  runtime.makeslice  int  [main.main]
 	gc   col 18  frame  slice  make([]int, len(retained))
-runtime_gc_mark_workers.go:126	heap -> absent
-	src  defer running.Done()
-	goc  col 10  heap  runtime.newobject  struct_code_uintptr__receiver__sync_WaitGroup  [main.main.func.125.6]
-runtime_gc_metadata_hugepages.go:104	heap -> absent
-	src  defer debug.SetGCPercent(previous)
-	goc  col 2  heap  runtime.newobject  struct_code_uintptr__function_func_percent_int__  [main.main]
-runtime_gc_scavenge_release.go:92	heap -> absent
-	src  defer debug.SetGCPercent(previous)
-	goc  col 2  heap  runtime.newobject  struct_code_uintptr__function_func_percent_int__  [main.main]
 runtime_gc_sweep_pacing.go:62	heap -> mixed
 	src  node := &medium{value: index, label: "medium-" + string(rune('a'+index%26))}
 	goc  col 11  heap  runtime.newobject  main_medium  [main.allocateMedium]
 	gc   col 11  heap  object  &medium{...}
 	gc   col 50  heap  object  "medium-" + string(rune(97 + index % 26))
 	gc   col 63  frame  object  string(rune(97 + index % 26))
-runtime_gc_sweep_pacing.go:154	heap -> absent
-	src  defer debug.SetGCPercent(previous)
-	goc  col 2  heap  runtime.newobject  struct_code_uintptr__function_func_percent_int__  [main.main]
 runtime_goexit_defer.go:15	heap -> absent
 	src  go worker(done)
 	goc  col 2  heap  runtime.newobject  struct_code_uintptr__argument0_chan_int  [main.main]
 runtime_goroutine_channel.go:9	heap -> absent
 	src  go worker(40, done)
 	goc  col 2  heap  runtime.newobject  struct_code_uintptr__argument0_int__argument1_ch  [main.main]
-runtime_goroutine_entry_stack_map.go:75	heap -> absent
-	src  defer wait.Done()
-	goc  col 8  heap  runtime.newobject  struct_code_uintptr__receiver__sync_WaitGroup  [main.seasonWorker]
-runtime_goroutine_entry_stack_map.go:84	heap -> absent
-	src  defer wait.Done()
-	goc  col 8  heap  runtime.newobject  struct_code_uintptr__receiver__sync_WaitGroup  [main.carry]
 runtime_goroutine_entry_stack_map.go:104	heap -> absent
 	src  go seasonWorker(&seasoning)
 	goc  col 4  heap  runtime.newobject  struct_code_uintptr__argument0__sync_WaitGroup  [main.main]
@@ -5640,9 +5570,6 @@ runtime_loopvar_address_gc.go:72	heap -> mixed
 	gc   col 34  heap  object  index
 	gc   col 41  heap  object  "-"
 	gc   col 46  heap  object  index
-runtime_loopvar_goroutine_defer.go:26	heap -> absent
-	src  defer group.Done()
-	goc  col 10  heap  runtime.newobject  struct_code_uintptr__receiver__sync_WaitGroup  [main.goroutinesSeeTheirOwnIteration.func.25.6]
 runtime_loopvar_goroutine_defer.go:31	heap -> mixed
 	src  if fmt.Sprint(squares) != "[0 1 4 9]" {
 	goc  col 5  heap  runtime.newobject  struct_values__1_any__payload0___int  [main.goroutinesSeeTheirOwnIteration]
@@ -5662,9 +5589,6 @@ runtime_loopvar_goroutine_defer.go:38	mixed -> frame
 	goc  col 62  frame  runtime.newobject  int  [main.goroutinesSeeTheirOwnIteration]
 	goc  col 62  frame  runtime.newobject  string  [main.goroutinesSeeTheirOwnIteration]
 	gc   col 40  frame  map  map[string]int{...}
-runtime_loopvar_goroutine_defer.go:41	heap -> absent
-	src  defer group.Done()
-	goc  col 10  heap  runtime.newobject  struct_code_uintptr__receiver__sync_WaitGroup  [main.goroutinesSeeTheirOwnIteration.func.40.6]
 runtime_loopvar_goroutine_defer.go:43	mixed -> mixed
 	src  seen = append(seen, key+fmt.Sprint(value))
 	goc  col 28  frame  runtime.newobject  struct_values__1_any__payload0_int  [main.goroutinesSeeTheirOwnIteration.func.40.6]
@@ -5996,9 +5920,6 @@ runtime_many_defers_stack.go:18	heap -> absent
 	src  total := 0
 	goc  col 2  heap  runtime.newobject  int  [main.main]
 	goc  col 2  heap  runtime.newobject  int  [main.main.gointernal.funcvalue.main_main_func___func.83860b9e97d614a8]
-runtime_many_goroutines_gc.go:14	heap -> absent
-	src  defer wait.Done()
-	goc  col 8  heap  runtime.newobject  struct_code_uintptr__receiver__sync_WaitGroup  [main.worker]
 runtime_many_goroutines_gc.go:33	heap -> absent
 	src  go worker(index, &wait, results)
 	goc  col 3  heap  runtime.newobject  struct_code_uintptr__argument0_int__argument1__s  [main.main]
@@ -6068,10 +5989,6 @@ runtime_opt_loop_carried_root.go:45	heap -> mixed
 runtime_package_initializer_dispatch.go:46	heap -> absent
 	src  var insideComposite = []fmt.Stringer{passStringer(fs.FileMode(0o644))}
 	goc  col 23  heap  runtime.newobject  1_fmt_Stringer  [.goc.global.initfunc.65.main.insideComposite]
-runtime_panic_error_recover.go:15	heap -> absent
-	src  defer p.recoverError(&err)
-	goc  col 2  heap  runtime.newobject  struct_code_uintptr__function_func_errp__error__  [main.errorRecoverParser.parse]
-	goc  col 8  heap  runtime.newobject  struct_code_uintptr__receiver__main_errorRecover  [main.errorRecoverParser.parse]
 runtime_panic_stack_gc.go:19	heap -> frame
 	src  runtime.KeepAlive(scratch)
 	goc  col 20  heap  runtime.newobject  96_uintptr  [main.trigger]
@@ -6111,22 +6028,10 @@ runtime_println_operand_separation.go:88	heap -> frame
 	goc  col 46  heap  runtime.makemap  map_int_int  [main.main.func.88.29]
 	gc   col 29  frame  object  func literal
 	gc   col 57  frame  map  map[int]int{}
-runtime_println_operand_separation.go:147	heap -> absent
-	src  defer os.Remove(file.Name())
-	goc  col 2  heap  runtime.newobject  struct_code_uintptr__function_func_name_string__  [main.capture]
-runtime_println_operand_separation.go:148	heap -> absent
-	src  defer file.Close()
-	goc  col 8  heap  runtime.newobject  struct_code_uintptr__receiver__os_File  [main.capture]
 runtime_println_operand_separation.go:168	heap -> frame
 	src  buffer := make([]byte, 8192)
 	goc  col 25  heap  runtime.newobject  8192_byte  [main.capture]
 	gc   col 16  frame  slice  make([]byte, 8192)
-runtime_println_statement_atomicity.go:36	heap -> absent
-	src  defer os.Remove(file.Name())
-	goc  col 2  heap  runtime.newobject  struct_code_uintptr__function_func_name_string__  [main.main]
-runtime_println_statement_atomicity.go:50	heap -> absent
-	src  defer wait.Done()
-	goc  col 10  heap  runtime.newobject  struct_code_uintptr__receiver__sync_WaitGroup  [main.main.func.49.6]
 runtime_range_target_forms.go:51	heap -> mixed
 	src  observed += fmt.Sprintf("%d", box.index)
 	goc  col 27  heap  runtime.newobject  struct_values__1_any__payload0_int  [main.sliceTargets]
@@ -6568,9 +6473,6 @@ runtime_reflect_value_call.go:11	heap -> frame
 runtime_scheduler_gc_churn.go:22	heap -> absent
 	src  worker := worker
 	goc  col 3  heap  runtime.newobject  int  [main.main]
-runtime_scheduler_gc_churn.go:24	heap -> absent
-	src  defer wait.Done()
-	goc  col 10  heap  runtime.newobject  struct_code_uintptr__receiver__sync_WaitGroup  [main.main.func.23.6]
 runtime_scheduler_ring_handoff.go:16	heap -> absent
 	src  go runRingWorker(input, output, done)
 	goc  col 3  heap  runtime.newobject  struct_code_uintptr__argument0___chan_int__argum  [main.main]
@@ -6638,9 +6540,6 @@ runtime_stack_scan_callfree_loop.go:107	heap -> mixed
 runtime_stack_scan_callfree_loop.go:145	heap -> absent
 	src  go collector(stop, &collecting)
 	goc  col 2  heap  runtime.newobject  struct_code_uintptr__argument0___chan_struct____  [main.main]
-runtime_stack_scan_loop_safepoints.go:73	heap -> absent
-	src  defer live.Unlock()
-	goc  col 8  heap  runtime.newobject  struct_code_uintptr__receiver__sync_Mutex  [main.stillLive]
 runtime_stack_scan_panic_unwind.go:55	heap -> mixed
 	src  sink = append(sink, &carried{value: index, label: "churn"})
 	goc  col 23  heap  runtime.newobject  main_carried  [main.churn]
@@ -6671,30 +6570,9 @@ runtime_sync_map.go:14	heap -> absent
 runtime_sync_map.go:15	heap -> absent
 	src  count := 0
 	goc  col 2  heap  runtime.newobject  int  [main.main]
-runtime_sync_mutex_defer.go:12	heap -> absent
-	src  defer mutex.Unlock()
-	goc  col 10  heap  runtime.newobject  struct_code_uintptr__receiver__sync_Mutex  [main.main.func.10.3]
-runtime_sync_once_concurrent.go:13	heap -> absent
-	src  defer wait.Done()
-	goc  col 10  heap  runtime.newobject  struct_code_uintptr__receiver__sync_WaitGroup  [main.main.func.12.6]
-runtime_sync_rwmutex_readers.go:14	heap -> absent
-	src  defer wait.Done()
-	goc  col 10  heap  runtime.newobject  struct_code_uintptr__receiver__sync_WaitGroup  [main.main.func.13.6]
 runtime_sync_waitgroup_mutex.go:14	heap -> absent
 	src  index := index
 	goc  col 3  heap  runtime.newobject  int  [main.main]
-runtime_sync_waitgroup_mutex.go:17	heap -> absent
-	src  defer wait.Done()
-	goc  col 10  heap  runtime.newobject  struct_code_uintptr__receiver__sync_WaitGroup  [main.main.func.16.6]
-runtime_ticker_multi_tick.go:7	heap -> absent
-	src  defer ticker.Stop()
-	goc  col 8  heap  runtime.newobject  struct_code_uintptr__receiver__time_Ticker  [main.main]
-runtime_ticker_stop.go:7	heap -> absent
-	src  defer ticker.Stop()
-	goc  col 8  heap  runtime.newobject  struct_code_uintptr__receiver__time_Ticker  [main.main]
-runtime_time_afterfunc.go:10	heap -> absent
-	src  defer timer.Stop()
-	goc  col 8  heap  runtime.newobject  struct_code_uintptr__receiver__time_Timer  [main.main]
 runtime_type_param_method_shapes.go:185	heap -> mixed
 	src  if bumpTwice(func() *pointerCounterA { return &pointerCounterA{} }) != 2 {
 	goc  col 48  heap  runtime.newobject  main_pointerCounterA  [main.main.func.185.15]
@@ -6766,9 +6644,6 @@ runtime_unbuffered_pingpong.go:13	heap -> absent
 runtime_waitgroup_reuse.go:5	heap -> absent
 	src  func runWaitGroupRound(round int) int {
 	goc  col 1  heap  runtime.newobject  int  [main.runWaitGroupRound]
-runtime_waitgroup_reuse.go:11	heap -> absent
-	src  defer wait.Done()
-	goc  col 10  heap  runtime.newobject  struct_code_uintptr__receiver__sync_WaitGroup  [main.runWaitGroupRound.func.10.6]
 runtime_worker_fanin_gc.go:26	heap -> absent
 	src  go worker(input, output)
 	goc  col 3  heap  runtime.newobject  struct_code_uintptr__argument0___chan__main_fani  [main.main]
@@ -6810,9 +6685,6 @@ stdlib_encoding_pem.go:8	heap -> frame
 	src  Headers: map[string]string{
 	goc  col 12  heap  runtime.makemap  map_string_string  [main.main]
 	gc   col 29  frame  map  map[string]string{...}
-stdlib_filepath_glob_clean.go:13	heap -> absent
-	src  defer os.RemoveAll(directory)
-	goc  col 2  heap  runtime.newobject  struct_code_uintptr__function_func_path_string__  [main.main]
 stdlib_fstest_mapfs.go:53	heap -> absent
 	src  var visited []string
 	goc  col 2  heap  runtime.newobject  string  [main.main]
@@ -6832,12 +6704,6 @@ stdlib_http_cookiejar.go:20	heap -> frame
 	src  {Name: "expired", Value: "gone", Path: "/", Expires: time.Unix(1, 0)},
 	goc  col 3  heap  runtime.newobject  net_http_Cookie  [main.main]
 	gc   col 3  frame  object  &http.Cookie{...}
-stdlib_http_multipart_form.go:38	heap -> absent
-	src  defer request.MultipartForm.RemoveAll()
-	goc  col 8  heap  runtime.newobject  struct_code_uintptr__receiver__mime_multipart_Fo  [main.main]
-stdlib_http_multipart_form.go:47	heap -> absent
-	src  defer upload.Close()
-	goc  col 8  heap  runtime.newobject  struct_code_uintptr__receiver_io_Closer  [main.main]
 stdlib_http_redirect_keepalive.go:24	heap -> frame
 	src  http.SetCookie(response, &http.Cookie{
 	goc  col 29  heap  runtime.newobject  net_http_Cookie  [main.main.func.16.48]
@@ -6849,9 +6715,6 @@ stdlib_image_jpeg_roundtrip.go:18	heap -> frame
 stdlib_io_pipe_roundtrip.go:6	heap -> absent
 	src  reader, writer := io.Pipe()
 	goc  col 2  heap  runtime.newobject  io_PipeReader  [main.main]
-stdlib_ioutil_tempfile.go:13	heap -> absent
-	src  defer os.RemoveAll(directory)
-	goc  col 2  heap  runtime.newobject  struct_code_uintptr__function_func_path_string__  [main.main]
 stdlib_iter_pull.go:5	heap -> absent
 	src  func count(limit int) iter.Seq[int] {
 	goc  col 1  heap  runtime.newobject  int  [main.count]
@@ -6894,24 +6757,12 @@ stdlib_net_mail_textproto.go:20	heap -> frame
 stdlib_netpoll_close_unblocks_read.go:10	heap -> absent
 	src  listener, err := net.Listen("tcp", "127.0.0.1:0")
 	goc  col 2  heap  runtime.newobject  net_Listener  [main.main]
-stdlib_netpoll_close_unblocks_read.go:14	heap -> absent
-	src  defer listener.Close()
-	goc  col 8  heap  runtime.newobject  struct_code_uintptr__receiver_net_Listener  [main.main]
 stdlib_netpoll_close_unblocks_read.go:25	heap -> absent
 	src  client, err := net.DialTimeout("tcp", listener.Addr().String(), time.Second)
 	goc  col 2  heap  runtime.newobject  net_Conn  [main.main]
-stdlib_netpoll_close_unblocks_read.go:30	heap -> absent
-	src  defer server.Close()
-	goc  col 8  heap  runtime.newobject  struct_code_uintptr__receiver_net_Conn  [main.main]
 stdlib_netpoll_pipe_afterfunc_close.go:9	heap -> absent
 	src  reader, writer, err := os.Pipe()
 	goc  col 2  heap  runtime.newobject  os_File  [main.main]
-stdlib_netpoll_pipe_afterfunc_close.go:13	heap -> absent
-	src  defer reader.Close()
-	goc  col 8  heap  runtime.newobject  struct_code_uintptr__receiver__os_File  [main.main]
-stdlib_netpoll_pipe_afterfunc_close.go:22	heap -> absent
-	src  defer timer.Stop()
-	goc  col 8  heap  runtime.newobject  struct_code_uintptr__receiver__time_Timer  [main.main]
 stdlib_netpoll_pipe_afterfunc_close.go:24	heap -> frame
 	src  buffer := make([]byte, 1)
 	goc  col 25  heap  runtime.newobject  1_byte  [main.main]
@@ -6919,29 +6770,14 @@ stdlib_netpoll_pipe_afterfunc_close.go:24	heap -> frame
 stdlib_netpoll_pipe_close_unblocks_read.go:9	heap -> absent
 	src  reader, writer, err := os.Pipe()
 	goc  col 2  heap  runtime.newobject  os_File  [main.main]
-stdlib_netpoll_pipe_close_unblocks_read.go:13	heap -> absent
-	src  defer reader.Close()
-	goc  col 8  heap  runtime.newobject  struct_code_uintptr__receiver__os_File  [main.main]
 stdlib_netpoll_pipe_close_unblocks_read.go:17	heap -> frame
 	src  buffer := make([]byte, 1)
 	goc  col 26  heap  runtime.newobject  1_byte  [main.main.func.16.5]
 	gc   col 17  frame  slice  make([]byte, 1)
-stdlib_netpoll_pipe_deadline.go:13	heap -> absent
-	src  defer reader.Close()
-	goc  col 8  heap  runtime.newobject  struct_code_uintptr__receiver__os_File  [main.main]
-stdlib_netpoll_pipe_deadline.go:14	heap -> absent
-	src  defer writer.Close()
-	goc  col 8  heap  runtime.newobject  struct_code_uintptr__receiver__os_File  [main.main]
 stdlib_netpoll_pipe_deadline.go:23	heap -> frame
 	src  buffer := make([]byte, 1)
 	goc  col 25  heap  runtime.newobject  1_byte  [main.main]
 	gc   col 16  frame  slice  make([]byte, 1)
-stdlib_netpoll_pipe_past_deadline.go:13	heap -> absent
-	src  defer reader.Close()
-	goc  col 8  heap  runtime.newobject  struct_code_uintptr__receiver__os_File  [main.main]
-stdlib_netpoll_pipe_past_deadline.go:14	heap -> absent
-	src  defer writer.Close()
-	goc  col 8  heap  runtime.newobject  struct_code_uintptr__receiver__os_File  [main.main]
 stdlib_netpoll_pipe_past_deadline.go:23	heap -> frame
 	src  buffer := make([]byte, 1)
 	goc  col 25  heap  runtime.newobject  1_byte  [main.main]
@@ -6949,12 +6785,6 @@ stdlib_netpoll_pipe_past_deadline.go:23	heap -> frame
 stdlib_netpoll_pipe_roundtrip.go:9	heap -> absent
 	src  reader, writer, err := os.Pipe()
 	goc  col 2  heap  runtime.newobject  os_File  [main.main]
-stdlib_netpoll_pipe_roundtrip.go:13	heap -> absent
-	src  defer reader.Close()
-	goc  col 8  heap  runtime.newobject  struct_code_uintptr__receiver__os_File  [main.main]
-stdlib_netpoll_pipe_roundtrip.go:14	heap -> absent
-	src  defer writer.Close()
-	goc  col 8  heap  runtime.newobject  struct_code_uintptr__receiver__os_File  [main.main]
 stdlib_netpoll_stress_pipe_close_churn.go:10	heap -> absent
 	src  reader, writer, err := os.Pipe()
 	goc  col 3  heap  runtime.newobject  os_File  [main.main]
@@ -6966,66 +6796,18 @@ stdlib_netpoll_stress_pipe_deadline_reset.go:22	heap -> frame
 	src  buffer := make([]byte, 1)
 	goc  col 26  heap  runtime.newobject  1_byte  [main.main]
 	gc   col 17  frame  slice  make([]byte, 1)
-stdlib_netpoll_stress_tcp_churn.go:16	heap -> absent
-	src  defer listener.Close()
-	goc  col 8  heap  runtime.newobject  struct_code_uintptr__receiver_net_Listener  [main.main]
 stdlib_netpoll_stress_tcp_churn.go:21	heap -> absent
 	src  go serveTCPStressConnection(listener, byte(index), done)
 	goc  col 3  heap  runtime.newobject  struct_code_uintptr__argument0_net_Listener__arg  [main.main]
-stdlib_netpoll_stress_tcp_churn.go:65	heap -> absent
-	src  defer connection.Close()
-	goc  col 8  heap  runtime.newobject  struct_code_uintptr__receiver_net_Conn  [main.serveTCPStressConnection]
-stdlib_netpoll_stress_udp_burst.go:16	heap -> absent
-	src  defer connection.Close()
-	goc  col 8  heap  runtime.newobject  struct_code_uintptr__receiver__net_conn  [main.main]
-stdlib_netpoll_syscall_socket_listen.go:17	heap -> absent
-	src  defer syscall.Close(fileDescriptor)
-	goc  col 2  heap  runtime.newobject  struct_code_uintptr__function_func_fd_int___err_  [main.main]
-stdlib_netpoll_tcp_accept_deadline.go:13	heap -> absent
-	src  defer listener.Close()
-	goc  col 8  heap  runtime.newobject  struct_code_uintptr__receiver_net_Listener  [main.main]
 stdlib_netpoll_tcp_concurrent_clients.go:10	heap -> absent
 	src  listener, err := net.Listen("tcp", "127.0.0.1:0")
 	goc  col 2  heap  runtime.newobject  net_Listener  [main.main]
-stdlib_netpoll_tcp_concurrent_clients.go:14	heap -> absent
-	src  defer listener.Close()
-	goc  col 8  heap  runtime.newobject  struct_code_uintptr__receiver_net_Listener  [main.main]
-stdlib_netpoll_tcp_concurrent_clients.go:25	heap -> absent
-	src  defer connection.Close()
-	goc  col 11  heap  runtime.newobject  struct_code_uintptr__receiver_net_Conn  [main.main.func.24.7]
-stdlib_netpoll_tcp_concurrent_clients.go:43	heap -> absent
-	src  defer connection.Close()
-	goc  col 10  heap  runtime.newobject  struct_code_uintptr__receiver_net_Conn  [main.main.func.38.6]
 stdlib_netpoll_tcp_echo.go:10	heap -> absent
 	src  listener, err := net.Listen("tcp", "127.0.0.1:0")
 	goc  col 2  heap  runtime.newobject  net_Listener  [main.main]
-stdlib_netpoll_tcp_echo.go:16	heap -> absent
-	src  defer listener.Close()
-	goc  col 8  heap  runtime.newobject  struct_code_uintptr__receiver_net_Listener  [main.main]
-stdlib_netpoll_tcp_echo.go:26	heap -> absent
-	src  defer connection.Close()
-	goc  col 9  heap  runtime.newobject  struct_code_uintptr__receiver_net_Conn  [main.main.func.19.5]
-stdlib_netpoll_tcp_echo.go:52	heap -> absent
-	src  defer client.Close()
-	goc  col 8  heap  runtime.newobject  struct_code_uintptr__receiver_net_Conn  [main.main]
 stdlib_netpoll_tcp_read_deadline.go:9	heap -> absent
 	src  listener, err := net.Listen("tcp", "127.0.0.1:0")
 	goc  col 2  heap  runtime.newobject  net_Listener  [main.main]
-stdlib_netpoll_tcp_read_deadline.go:13	heap -> absent
-	src  defer listener.Close()
-	goc  col 8  heap  runtime.newobject  struct_code_uintptr__receiver_net_Listener  [main.main]
-stdlib_netpoll_tcp_read_deadline.go:28	heap -> absent
-	src  defer client.Close()
-	goc  col 8  heap  runtime.newobject  struct_code_uintptr__receiver_net_Conn  [main.main]
-stdlib_netpoll_tcp_read_deadline.go:31	heap -> absent
-	src  defer server.Close()
-	goc  col 8  heap  runtime.newobject  struct_code_uintptr__receiver_net_Conn  [main.main]
-stdlib_netpoll_udp_deadline.go:17	heap -> absent
-	src  defer connection.Close()
-	goc  col 8  heap  runtime.newobject  struct_code_uintptr__receiver__net_conn  [main.main]
-stdlib_netpoll_udp_loopback.go:14	heap -> absent
-	src  defer connection.Close()
-	goc  col 8  heap  runtime.newobject  struct_code_uintptr__receiver__net_conn  [main.main]
 stdlib_os_exec_goroutine_shape.go:9	heap -> absent
 	src  func writerDescriptor(writer io.Writer, goroutines []func() error) (*os.File, []func() error) {
 	goc  col 1  heap  runtime.newobject  io_Writer  [main.writerDescriptor]
@@ -7038,9 +6820,6 @@ stdlib_os_exec_goroutine_shape.go:41	heap -> mixed
 	goc  col 6  heap  runtime.newobject  struct_code_uintptr__capture0_unsafe_Pointer  [main.main]
 	gc   col 6  heap  object  func literal
 	gc   col 11  frame  object  fn
-stdlib_os_file_roundtrip.go:13	heap -> absent
-	src  defer os.RemoveAll(directory)
-	goc  col 2  heap  runtime.newobject  struct_code_uintptr__function_func_path_string__  [main.main]
 stdlib_os_file_roundtrip.go:26	heap -> frame
 	src  buffer := make([]byte, 10)
 	goc  col 25  heap  runtime.newobject  10_byte  [main.main]
@@ -7104,24 +6883,12 @@ stdlib_os_pipe_returned_closure_close.go:28	heap -> mixed
 	goc  col 5  heap  runtime.newobject  struct_code_uintptr__capture0_unsafe_Pointer  [main.main]
 	gc   col 5  heap  object  func literal
 	gc   col 10  frame  object  fn
-stdlib_os_readdir_walkdir.go:14	heap -> absent
-	src  defer os.RemoveAll(directory)
-	goc  col 2  heap  runtime.newobject  struct_code_uintptr__function_func_path_string__  [main.main]
 stdlib_os_readdir_walkdir.go:35	heap -> absent
 	src  files := 0
 	goc  col 2  heap  runtime.newobject  int  [main.main]
 stdlib_os_readdir_walkdir.go:36	heap -> absent
 	src  directories := 0
 	goc  col 2  heap  runtime.newobject  int  [main.main]
-stdlib_os_rename_stat.go:13	heap -> absent
-	src  defer os.RemoveAll(directory)
-	goc  col 2  heap  runtime.newobject  struct_code_uintptr__function_func_path_string__  [main.main]
-stdlib_signal_atomic_contention.go:19	heap -> absent
-	src  defer workers.Done()
-	goc  col 10  heap  runtime.newobject  struct_code_uintptr__receiver__sync_WaitGroup  [main.main.func.18.6]
-stdlib_signal_during_gc.go:14	heap -> absent
-	src  defer signal.Stop(signals)
-	goc  col 2  heap  runtime.newobject  struct_code_uintptr__function_func_c_chan___os_S  [main.main]
 stdlib_signal_during_gc.go:23	heap -> frame
 	src  values := make([]*int, 1024)
 	goc  col 28  heap  runtime.newobject  1024__int  [main.main.func.17.5]
@@ -7130,21 +6897,9 @@ stdlib_signal_during_gc.go:29	heap -> frame
 	src  runtime.KeepAlive(values)
 	goc  col 23  heap  runtime.newobject  int  [main.main.func.17.5]
 	gc   col 23  frame  object  values
-stdlib_signal_during_netpoll.go:16	heap -> absent
-	src  defer listener.Close()
-	goc  col 8  heap  runtime.newobject  struct_code_uintptr__receiver_net_Listener  [main.main]
-stdlib_signal_during_netpoll.go:22	heap -> absent
-	src  defer client.Close()
-	goc  col 8  heap  runtime.newobject  struct_code_uintptr__receiver_net_Conn  [main.main]
 stdlib_signal_during_netpoll.go:24	heap -> absent
 	src  server, err := listener.Accept()
 	goc  col 17  heap  runtime.newobject  net_Conn  [main.main]
-stdlib_signal_during_netpoll.go:28	heap -> absent
-	src  defer server.Close()
-	goc  col 8  heap  runtime.newobject  struct_code_uintptr__receiver_net_Conn  [main.main]
-stdlib_signal_during_netpoll.go:41	heap -> absent
-	src  defer signal.Stop(signals)
-	goc  col 2  heap  runtime.newobject  struct_code_uintptr__function_func_c_chan___os_S  [main.main]
 stdlib_slices_string_sort.go:6	heap -> frame
 	src  keys := []string{"gamma", "alpha", "beta"}
 	goc  col 10  heap  runtime.newobject  3_string  [main.main]
@@ -7155,9 +6910,6 @@ stdlib_slog_structured.go:35	heap -> absent
 stdlib_smtp_session.go:15	heap -> absent
 	src  go serveSMTP(serverConnection, serverResult)
 	goc  col 2  heap  runtime.newobject  struct_code_uintptr__argument0_net_Conn__argumen  [main.main]
-stdlib_smtp_session.go:50	heap -> absent
-	src  defer protocol.Close()
-	goc  col 8  heap  runtime.newobject  struct_code_uintptr__receiver__net_textproto_Con  [main.serveSMTP]
 stdlib_sort_search_slice.go:6	heap -> frame
 	src  values := []int{9, 1, 5, 3, 7}
 	goc  col 12  heap  runtime.newobject  5_int  [main.main]

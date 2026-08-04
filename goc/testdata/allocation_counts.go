@@ -399,6 +399,60 @@ func methodRetainsReceiver() {
 	sinkInt = value.keep()
 }
 
+// The four rows below are `defer`, one row per shape the statement can take.
+//
+// goc turns `defer x` into runtime.deferproc(fn), and builds fn three different
+// ways: a directly deferred function literal is its own closure, a deferred
+// method call is a *method value* holding the receiver, and a deferred call with
+// arguments is a `deferwrap` closure holding them. Only the first was ever placed
+// in a frame, so the other two cost an allocation per call -- and the method
+// value's is worse than a wasted allocation, because a heap descriptor holding
+// the address of a frame-local receiver is a frame address published into a heap
+// object. testdata/runtime_defer_receiver_gc.go is the program that dies from it.
+// See goc.gen.deferredFunctionValueStaysInFrame.
+
+var deferMutex sync.Mutex
+
+//go:noinline
+func deferMutexUnlock() {
+	deferMutex.Lock()
+	defer deferMutex.Unlock()
+	sinkInt++
+}
+
+// deferCounter's method is deferred on a frame-local receiver, which is the
+// shape that was a published frame address and not merely an allocation.
+type deferCounter struct{ n int }
+
+func (counter *deferCounter) add() { sinkInt += counter.n }
+
+//go:noinline
+func deferMethodOnALocal() {
+	counter := deferCounter{n: 1}
+	defer counter.add()
+	sinkInt += counter.n
+}
+
+//go:noinline
+func addToSink(value int) { sinkInt += value }
+
+//go:noinline
+func deferCallWithArguments() {
+	defer addToSink(theInt)
+	sinkInt++
+}
+
+// The control: a directly deferred function literal, which has had the frame
+// placement since it was written. It is here so that a change which took the
+// rule away from all four rather than giving it to three is visible as a
+// regression rather than as three rows going back to where they were.
+//
+//go:noinline
+func deferFunctionLiteral() {
+	defer func() { sinkInt++ }()
+	sinkInt++
+}
+
 // methodValueReceiver takes a method value rather than calling the method. The
 // value is a closure over the receiver, so the receiver is in the closure and
 // nowhere else; the closure is a frame object here, so the receiver can be one
@@ -510,6 +564,10 @@ func main() {
 	measure("call_through_a_function_variable", repeat(callThroughAFunctionVariable))
 	measure("address_into_a_non_retaining_variadic", repeat(addressIntoANonRetainingVariadic))
 	measure("method_retains_receiver", repeat(methodRetainsReceiver))
+	measure("defer_mutex_unlock", repeat(deferMutexUnlock))
+	measure("defer_method_on_a_local", repeat(deferMethodOnALocal))
+	measure("defer_call_with_arguments", repeat(deferCallWithArguments))
+	measure("defer_function_literal", repeat(deferFunctionLiteral))
 	measure("sprintf_in_loop", sprintfInLoop)
 	measure("variadic_ints_in_loop", variadicIntsInLoop)
 }

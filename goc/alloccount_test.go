@@ -226,6 +226,21 @@ var gocAllocationCounts = []struct {
 	// testdata/variadic_element_address_retention.go for the program that says
 	// why the parameter's own summary is not the answer.
 	{"address_into_a_non_retaining_variadic", 0, 0, "the callee's only use of the `...` parameter is len, so no element is reachable"},
+	// The four defer rows. Three of them were 1.00 and are 0, because the
+	// function value goc hands runtime.deferproc now lives in the registering
+	// frame whatever shape it takes -- a rule the directly-deferred function
+	// literal has always had and the other two never did. See
+	// goc.gen.deferredFunctionValueStaysInFrame.
+	//
+	// defer_method_on_a_local is the one that was a miscompile rather than a
+	// cost: the heap method value held the address of a frame-local receiver,
+	// which is a frame address in a heap object the collector scans.
+	// testdata/runtime_defer_receiver_gc.go fails at the branch point and passes
+	// here.
+	{"defer_mutex_unlock", 0, 0, "the method value for the deferred Unlock is a frame object"},
+	{"defer_method_on_a_local", 0, 0, "the method value holds the receiver's address, and both are in the frame"},
+	{"defer_call_with_arguments", 0, 0, "the deferwrap closure holding the arguments is a frame object"},
+	{"defer_function_literal", 0, 0, "the control: a directly deferred literal has always been a frame object"},
 	{"sprintf_in_loop", 200, 100, "loop rule blocks the `...` promotion"},
 	{"variadic_ints_in_loop", 100, 0, "loop rule blocks the `...` promotion"},
 }

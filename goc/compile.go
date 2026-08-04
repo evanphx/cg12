@@ -3132,6 +3132,9 @@ func (g *gen) valueDoesNotEscapeWithin(
 				}
 			}
 			if argumentIndex < 0 {
+				if parent.Fun == current {
+					return g.deferredFunctionValueStaysInFrame(parent, parents, body)
+				}
 				return false
 			}
 			if calledIdentifier, ok := parent.Fun.(*ast.Ident); ok {
@@ -10179,7 +10182,18 @@ func (g *gen) callClosure(call *ast.CallExpr, wrapperPrefix string) ir.Ref {
 	}
 	wrapper.cur.RetVoid()
 
-	closure := g.allocateTyped(closureType)
+	var closure ir.Ref
+	if g.deferredFunctionValueStaysInFrame(call, g.parents, g.currentBody) {
+		// Zeroed rather than merely reserved: the pointer words below are in the
+		// frame's stack map from the moment the slot exists, and the argument
+		// expressions that fill them can contain calls, so a safepoint can scan
+		// the slot before any of them has been written.
+		closure = g.localAllocTyped(closureType)
+		g.zero(closure, closureType)
+		g.recordPlacement(closure, "deferred-call-closure", ir.AllocInFrame, closureType)
+	} else {
+		closure = g.allocateTyped(closureType)
+	}
 	g.cur.Store(g.fn.Sym(wrapperName, 0), closure)
 	if !directTarget {
 		functionValue := g.expr(call.Fun)
@@ -13552,6 +13566,39 @@ func (g *gen) functionLiteralEscapesWithin(
 		return escapes
 	}
 	return true
+}
+
+// deferredFunctionValueStaysInFrame reports that the function value a call is
+// made through is the function value of a *directly deferred* call, and can
+// therefore live in the registering frame.
+//
+// It is functionLiteralEscapesWithin's rule for `defer func(){...}()`, asked of
+// the other two shapes the same statement can take. `defer mu.Unlock()` builds a
+// method value -- a descriptor holding the receiver -- and `defer f(x)` builds a
+// deferwrap closure holding the arguments; both are handed to
+// runtime.deferproc, which stores them in a _defer record that deferreturn pops
+// before this frame is torn down. Neither outlives the frame, so neither has to
+// be in the heap, and putting the method value there is worse than a wasted
+// allocation: the descriptor holds the *address* of a frame-local receiver, so a
+// heap descriptor is a frame address published into a heap object. See the
+// deferred-receiver case in escape_publication_test.go.
+//
+// The condition is the literal's: a defer that can be registered more than once
+// needs a fresh descriptor per registration, because one frame slot cannot hold
+// two.
+func (g *gen) deferredFunctionValueStaysInFrame(call *ast.CallExpr, parents map[ast.Node]ast.Node, body *ast.BlockStmt) bool {
+	deferStatement, deferred := parents[call].(*ast.DeferStmt)
+	if !deferred {
+		return false
+	}
+	if !g.runtimeAllocation {
+		// Without a runtime there is no _defer record: runDefers replays the
+		// statement inline at every exit out of one frame slot per defer
+		// statement, so the descriptor is frame-scoped however often the
+		// statement is reached.
+		return true
+	}
+	return !deferStatementRepeats(deferStatement, parents, body)
 }
 
 // deferStatementRepeats reports whether one execution of the enclosing frame can

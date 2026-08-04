@@ -5162,3 +5162,106 @@ either side -- `gcdiff.ParseGCFlagM` reads goc's output with zero Unknown lines
 teaching the parser to keep them is mechanical, comparing them against gc's
 `-m=2` vocabulary is not worth doing, and grouping goc's own gc-differential
 disagreements by goc's rule is.
+
+
+# parity-106 (branch ccwork/parity-106, off main 65ed70a)
+
+## A miscompile in `main`, found in the first hour: `defer x.method()` on a frame-local receiver
+
+Found while reproducing the previous branch's reason for **not** landing the
+optimistic cycle assumption. That branch recorded three frame-address
+publications appearing in `log/slog` when `receiverDoesNotEscape` answered a
+cycle optimistically, and concluded the assumption was unsound. All three sites
+are `defer state.free()`:
+
+    stdlib/src/log/slog/handler.go:120:8   defaultHandler.Handle
+    stdlib/src/log/slog/handler.go:239:8   commonHandler.withAttrs
+    stdlib/src/log/slog/handler.go:272:8   commonHandler.handle
+
+The cycle assumption did not cause them. It only moved `handleState` into a
+frame, where a *pre-existing* hole then published its address. The hole is
+reachable on `main` with no compiler change at all:
+
+    type box struct{ n int }
+    var sink int
+    func (b *box) done() { sink += b.n }
+
+    func work(n int) {
+        b := box{n: n}
+        defer b.done()
+        for i := 0; i < 8; i++ { runtime.GC() }
+    }
+
+`opt.FrameEscapes` on that program, built from `main` at 65ed70a:
+
+    deferbox.go:11:8: main.main: barrier %t4 into memory reached through a call
+                                result $runtime.newobject
+
+and the program is **wrong at runtime**, not merely suspicious. Compiled once
+with `main`'s `goc` and run 20 times, `sink` came out wrong on **10 of 20 runs**
+(exit 2, `panic: bad sink`); the same source under the host toolchain is
+deterministic. The walk asks `methodCallDoesNotRetainReceiver(done)`, gets "does
+not retain", and leaves `b` in the frame -- but the deferred call's receiver is
+stored in a defer record that goc allocates with `runtime.newobject`, so a frame
+address ends up in a heap object that the collector scans.
+
+This is why the previous branch's argument against the optimistic assumption
+does not hold: the counterexample it measured is a defect of `defer`, not of the
+fixpoint.
+
+## The fix, and what it is worth
+
+goc compiles `defer` two ways. Without a runtime (`-runtime` absent) `runDefers`
+replays the statement inline at every exit. With one -- which is every ordinary
+program -- the statement becomes `runtime.deferproc(fn)`, and `fn` is built three
+different ways depending on what is being deferred:
+
+| deferred | function value goc builds | where it was placed |
+| --- | --- | --- |
+| `defer func(){...}()` | the literal's own closure descriptor | **frame**, by `functionLiteralEscapesWithin` |
+| `defer mu.Unlock()` | a *method value* descriptor holding the receiver | heap |
+| `defer f(x)` | a `deferwrap` closure holding the arguments | heap |
+
+Only the first had the rule. `functionLiteralEscapesWithin` has said since it was
+written that a directly-deferred closure "runs during deferreturn, inside the
+frame that registered it, so it does not outlive that frame" -- and that
+reasoning is about `deferproc`, not about function literals. The other two shapes
+were never given it.
+
+The change gives it to them: `deferredFunctionValueStaysInFrame` is the same
+condition (`!deferStatementRepeats`), asked of the function value of any directly
+deferred call, and it is consulted in the two places that place these objects --
+`valueDoesNotEscapeWithin`'s call case, which is what `methodValue` asks, and
+`callClosure`, which now takes a frame slot for a non-repeating defer. The frame
+closure is **zeroed**, not merely reserved: its pointer words are in the stack map
+from the moment the slot exists and the argument expressions that fill them can
+contain calls, so a safepoint can scan it before any word has been written.
+
+Measured on `defer` in isolation (allocations per call x 100, `//go:noinline`,
+2000 iterations after a warm-up of the same length):
+
+    case                  goc before   goc after   gc
+    defer_mutex_unlock       100           0        0
+    defer_local_method       100           0        0
+    defer_func_literal         0           0        0
+    defer_with_args          100           0        0
+
+`defer mu.Unlock()` is not a corner of the language. It cost an allocation per
+call in every program goc compiled.
+
+The publication is gone with it -- `deferbox.go` reports no frame escape and runs
+**20 of 20** clean where `main` fails 10 of 20 -- and one *pre-existing* baseline
+publication went away as a side effect: `runtime.cgocallbackg1`.
+
+`TestFrameEscapeAudit` over the whole corpus: **6 publications removed, 0 added**,
+and every one is a `defer`.
+
+    stdlib/src/net/http/h2_bundle.go:9418:8   net/http.http2ClientConn.readLoop
+    stdlib/src/runtime/cgocall.go:440:16      runtime.cgocallbackg1
+    stdlib/src/text/template/exec.go:211:20   text/template.Template.execute
+    testdata/runtime_defer_argument_evaluation.go:10:20, :12:20   main.collect
+    testdata/runtime_panic_error_recover.go:15:24  main.errorRecoverParser.parse
+
+So the defect was not confined to `log/slog`: it was live in `net/http`,
+`text/template`, the cgo callback path, and two corpus programs written to test
+`defer` itself.
