@@ -251,6 +251,14 @@ type GCDecision struct {
 	// Synthesized records that no -m line said this and the decision comes from
 	// a documented gc rule instead. See channel handling in Join.
 	Synthesized bool
+	// Flow is the explanation -m=2 printed for this decision, when a level-2
+	// build was supplied and its explanation joined onto this decision. See
+	// ParseGCExplanations.
+	Flow *GCFlow
+	// Reason is Flow's category, empty when there is no explanation. Frame
+	// placements never have one: gc explains an escape and says nothing about a
+	// decision not to.
+	Reason Reason
 }
 
 // GCReport is everything ParseGCFlagM got out of one program's -m output.

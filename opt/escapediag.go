@@ -94,6 +94,38 @@ func parseEscapeDiagLevel(setting string) int {
 // the rule that decided them, 2 also the chain that led to the deciding use.
 func EscapeDiagLevel() int { return int(escapeDiagLevel.Load()) }
 
+// escapeDiagWriter is where a compile's own report goes. Unset means os.Stderr,
+// which is where gc's -m goes and where this went before there was anything
+// else to want.
+//
+// It is a pointer to a struct rather than an atomic.Value holding the io.Writer
+// directly because an atomic.Value panics when two stores have different
+// concrete types, and the whole point of the knob is to replace an *os.File
+// with something else.
+type escapeDiagSink struct{ writer io.Writer }
+
+var escapeDiagWriter atomic.Pointer[escapeDiagSink]
+
+// EscapeDiagWriter reports where a compile's -m report is written.
+func EscapeDiagWriter() io.Writer {
+	if sink := escapeDiagWriter.Load(); sink != nil && sink.writer != nil {
+		return sink.writer
+	}
+	return os.Stderr
+}
+
+// SetEscapeDiagWriter redirects the report.
+//
+// It exists for a driver that compiles many programs concurrently and wants
+// each one's report separately: the level has to be on for the reasons to be
+// recorded at all, so without this the only way to get one program's report is
+// to read it out of a stream 400 of them are interleaved on. internal/gcdiff's
+// reason differential is that driver -- it sends the compiler's own copy to
+// io.Discard and calls WriteEscapeDiagnostics per module instead.
+//
+// A nil writer restores os.Stderr.
+func SetEscapeDiagWriter(writer io.Writer) { escapeDiagWriter.Store(&escapeDiagSink{writer}) }
+
 // SetEscapeDiagLevel sets the level. cmd/goc's -m calls it; so do the tests.
 func SetEscapeDiagLevel(level int) {
 	if level < 0 {
@@ -198,9 +230,19 @@ func (site EscapeSite) verdict() string {
 	return "escapes to heap"
 }
 
+// sortKey orders the report. It has to be a total order over the sites that
+// actually occur, not merely a sensible one: sort.Slice is not stable, so two
+// sites the key cannot tell apart come out in whichever order the sort happened
+// to leave them, and a report that reorders between runs cannot be diffed.
+//
+// Placement and Rule are in the key for exactly that reason. One source
+// position in one function can hold both a frame decision and a heap one --
+// opt.LowerHeapAllocations converts a candidate and records the site twice --
+// and everything before Placement is equal for that pair.
 func (site EscapeSite) sortKey() string {
-	return fmt.Sprintf("%s|%09d|%09d|%s|%s|%s|%s",
-		site.File, site.Line, site.Col, site.Func, site.Decider, site.Site, site.Subject())
+	return fmt.Sprintf("%s|%09d|%09d|%s|%s|%s|%s|%s|%s",
+		site.File, site.Line, site.Col, site.Func, site.Decider, site.Site, site.Subject(),
+		site.Placement, site.Rule)
 }
 
 // EscapeSites collects every placement decision in module, from both placers.

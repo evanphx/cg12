@@ -47,9 +47,19 @@ type Line struct {
 	// GC is every decision -m printed for the line, including the ones marked
 	// Inlined when Join was asked to keep them.
 	GC []GCDecision
+	// GocSites is every decision goc's own -m printed for the line, when the
+	// caller supplied one. It is the reason side of goc: the placement side
+	// stays the census, so that the placement comparison is exactly the one that
+	// was already committed.
+	GocSites []GocSite
 	// Goc and Gc are the folded verdicts.
 	Goc Verdict
 	Gc  Verdict
+	// GocReasons and GCReasons are the categories each compiler gave for the
+	// heap placements on the line. Empty when the compiler placed nothing on the
+	// heap here, or explained nothing that it did.
+	GocReasons ReasonSet
+	GCReasons  ReasonSet
 	// Source is the line's text, for triage. Empty when the caller did not
 	// supply the program's source.
 	Source string
@@ -118,6 +128,11 @@ type Result struct {
 	Matrix Matrix
 	// Coverage says how much of the corpus the numbers rest on.
 	Coverage Coverage
+	// ReasonMatrix counts lines by the pair of explanation categories the two
+	// compilers gave. Empty unless JoinReasons ran.
+	ReasonMatrix ReasonMatrix
+	// ReasonCoverage says how much the reason comparison rests on.
+	ReasonCoverage ReasonCoverage
 }
 
 // Coverage is the denominator, stated rather than implied.
@@ -173,6 +188,14 @@ type Program struct {
 	// Report is what ParseGCFlagM got out of the host build, or nil if the host
 	// toolchain could not build the program.
 	Report *GCReport
+	// Explanations is what ParseGCExplanations got out of a second host build at
+	// -m=2, or nil when the caller did not ask for reasons. Supplying it turns
+	// the reason comparison on for this program and changes nothing about the
+	// placement comparison.
+	Explanations *GCExplanations
+	// Goc is what ParseGocFlagM got out of goc's own -m for this program, or nil
+	// when the caller did not ask for reasons.
+	Goc *GocReport
 	// BuildError is the reason it could not, when Report is nil.
 	BuildError string
 	// Source is the program's text, split into lines, for triage output. May be
