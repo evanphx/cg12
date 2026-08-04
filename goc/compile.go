@@ -107,7 +107,7 @@ func reportEscapeDiagnostics(module *ir.Module, program string) {
 	if level < 1 {
 		return
 	}
-	opt.WriteEscapeDiagnostics(os.Stderr, module, program, level)
+	opt.WriteEscapeDiagnostics(opt.EscapeDiagWriter(), module, program, level)
 }
 
 // reportFrameEscapes audits the finished escape decision: every allocation the

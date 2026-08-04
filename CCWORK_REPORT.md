@@ -5162,3 +5162,48 @@ either side -- `gcdiff.ParseGCFlagM` reads goc's output with zero Unknown lines
 teaching the parser to keep them is mechanical, comparing them against gc's
 `-m=2` vocabulary is not worth doing, and grouping goc's own gc-differential
 disagreements by goc's rule is.
+
+---
+
+# gcdiff: comparing the REASONS, not just the placements
+
+Branch: `ccwork/gcdiff-reasons`, based on `main` = 65ed70a.
+Host toolchain: `go version go1.26.1 linux/arm64` -- the same one the committed
+placement differential records, so the numbers below are comparable with it.
+
+## 1. What was measured before anything was built
+
+Both reason vocabularies were swept over the whole 401-program corpus before a
+line of the join was written, because a taxonomy invented from reading the
+source and not from the output is a taxonomy that fits the code rather than the
+data.
+
+**goc's side.** 401 programs compiled with the diagnostic at level 2 (in
+process, the same `goc.CompileExecutable` that produces the allocation census).
+1 780 decision lines: 1 193 heap and 587 frame. **Every one of the 1 193 heap
+placements carries a `rule:` line**, and no frame placement carries one -- goc
+does not explain a frame placement, deliberately, and neither does gc. 18
+distinct rule shapes after substituting identifiers; the four largest are
+`write barrier into a candidate` (338), `store into non-local storage` (166),
+`the walk found a use it could not prove local` (162) and
+`argument N of $CALLEE escapes` (158).
+
+**gc's side.** The reasons are not in `-m` at all; they are in `-m=2`, which
+prints an explained block per escaping object:
+
+    ./p.go:9:27: &bytes.Reader{...} escapes to heap in main:
+    ./p.go:9:27:   flow: {heap} <- &{storage for &bytes.Reader{...}}:
+    ./p.go:9:27:     from &bytes.Reader{...} (spill) at ./p.go:9:27
+    ./p.go:9:27:     from f(&bytes.Reader{...}) (call parameter) at ./p.go:9:27
+
+2 995 explained blocks at corpus-program positions. The reason lives in the
+parenthesised *edge kind* on the `from` lines: 26 distinct kinds corpus-wide.
+Reading the last non-artefact edge (skipping `spill`, `address-of` and
+`reference`, which are how an expression reaches its own storage rather than
+how it escapes) classifies 2 994 of the 2 995; the one that does not is
+recovered from the flow's source.
+
+`does not escape` gets no explanation from gc either. **So reason comparison is
+only possible where both compilers put the object on the heap.** That is a
+property of the two instruments, not a choice made here, and it is what makes
+"agree on placement, disagree on reason" mean specifically "both heap".
