@@ -10,6 +10,8 @@ import (
 	"path/filepath"
 	"sort"
 	"strings"
+
+	"github.com/evanphx/cg12/arm64"
 )
 
 // A prebuilt runtime pack that carries part of the standard library costs what
@@ -53,6 +55,10 @@ func packCacheDirectory() string {
 func packCacheKey(version int, target string, optimize bool, packages []string, stdlibRoot string) (string, error) {
 	digest := sha256.New()
 	fmt.Fprintf(digest, "packversion=%d;target=%s;optimize=%v;\n", version, target, optimize)
+	// The code placement policy, which the compiler binary's bytes do not cover:
+	// it can be overridden from the environment so a corpus can be built several
+	// ways, and a pack laid out under one policy is the wrong pack under another.
+	fmt.Fprintf(digest, "textlayout=%s;\n", arm64.TextLayoutIdentity())
 	sorted := append([]string(nil), packages...)
 	sort.Strings(sorted)
 	fmt.Fprintf(digest, "packages=%s;\n", strings.Join(sorted, ","))

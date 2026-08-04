@@ -221,7 +221,16 @@ func compileToObjectWithBundle(m *ir.Module, opts Options, bundle assemblyBundle
 	// output byte-identical regardless of the worker count: every address, symbol and
 	// relocation below is derived from the merge order, never from the order the
 	// workers happen to finish in.
+	o.TextAlign = layout.textAlign()
+	for padded := 0; padded < layout.textPad; padded += 4 {
+		o.Text = append(o.Text, alignmentNop...)
+	}
 	err := compileFunctionsInOrder(functions, opts, conventions, bundle, goRuntime, func(functionIndex int, code *functionCode) {
+		// Placement. Padding here, before base is taken, is what makes this
+		// function's address -- and with it every loop header inside it -- a
+		// property of the function rather than of the total size of everything
+		// emitted before it. See textLayout.
+		o.Text = alignText(o.Text, layout.alignFor(code.hasLoop))
 		base := uint64(len(o.Text))
 		if anchor == "" {
 			anchor = code.name
@@ -853,6 +862,7 @@ type mc struct {
 	useCount     []int                     // per-temp use count, for the fused compare-branch
 	nextBlock    *ir.Block                 // block laid out after the current one, for fall-through elision
 	preds        map[*ir.Block][]*ir.Block // predecessors, for cross-block flag reuse
+	hasLoop      bool                      // some block is the target of a backward branch
 	vaSeq        int
 	atomicSeq    int
 	currentBlock string
@@ -880,7 +890,33 @@ type machineCode struct {
 	inl        []inlSample
 	safepoints []safepoint
 	blockSyms  []blockSym // local symbols for address-taken blocks (&&label in data)
+	hasLoop    bool       // the function contains a backward branch
 	m          *mc        // retained so callers can query variable locations
+}
+
+// loopHeaders are the blocks reached by a backward branch: a block some
+// predecessor of which is laid out at or after it. That is a statement about the
+// emitted layout rather than about dominance, which is the right one here -- the
+// question being asked is which branch in the final code jumps backwards, because
+// that is the one whose target is re-fetched.
+func loopHeaders(order []*ir.Block, preds map[*ir.Block][]*ir.Block) map[*ir.Block]bool {
+	position := make(map[*ir.Block]int, len(order))
+	for i, b := range order {
+		position[b] = i
+	}
+	var heads map[*ir.Block]bool
+	for i, b := range order {
+		for _, p := range preds[b] {
+			if j, ok := position[p]; ok && j >= i {
+				if heads == nil {
+					heads = map[*ir.Block]bool{}
+				}
+				heads[b] = true
+				break
+			}
+		}
+	}
+	return heads
 }
 
 // blockSym is a local symbol placed at a block's byte offset within its function.
@@ -972,7 +1008,17 @@ func newEmitter(f *ir.Func, alloc *allocation, conventions calleeConventions, gc
 func (m *mc) emitBody() error {
 	m.prologue()
 	order := layoutBlocks(m.f)
+	heads := loopHeaders(order, m.preds)
+	m.hasLoop = len(heads) > 0
 	for i, b := range order {
+		// A loop header is where fetch pressure repeats, so it is the one place
+		// inside a function worth padding to a granule boundary. i > 0 because the
+		// entry block's address is the function's, already decided by alignFor.
+		if i > 0 && layout.loopAlign > 4 && heads[b] {
+			for (m.prog.Len()*4)%layout.loopAlign != 0 {
+				m.prog.Emit(a64.Hint(0))
+			}
+		}
 		m.prog.Label(b.Name)
 		if i+1 < len(order) {
 			m.nextBlock = order[i+1]
@@ -1029,7 +1075,7 @@ func emitMachine(f *ir.Func, alloc *allocation, conventions calleeConventions, g
 			blockSyms = append(blockSyms, blockSym{name: sanitize(b.Sym), off: off})
 		}
 	}
-	return &machineCode{code: code, relocs: m.relocs, rows: m.rows, inl: m.inl, safepoints: m.safepoints, blockSyms: blockSyms, m: m}, nil
+	return &machineCode{code: code, relocs: m.relocs, rows: m.rows, inl: m.inl, safepoints: m.safepoints, blockSyms: blockSyms, hasLoop: m.hasLoop, m: m}, nil
 }
 
 func (m *mc) inferFrameAddressOffsets() {

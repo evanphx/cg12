@@ -7261,3 +7261,62 @@ re-baselined file.
 bytes, sha256 90fc00735d5c2ff7378af948f6bc1700..., `cmp` clean, zero absolute
 paths, and the non-updating check passes in both checkouts.
 
+
+# Should goc align function entries? A corpus measurement
+
+Status: in progress. Written as each conclusion is reached.
+
+## What was set up
+
+`arm64/align.go` adds a placement policy to the backend, with the historical
+behaviour (no alignment at all) as the default and an environment override so a
+corpus can be built several ways:
+
+  - `GOC_FUNC_ALIGN=N`    -- place every function entry on an N-byte boundary
+  - `GOC_ALIGN_LOOP_FUNCS_ONLY=1` -- restrict that to functions containing a
+                            backward branch
+  - `GOC_LOOP_ALIGN=N`    -- also place loop header blocks inside a function on
+                            an N-byte boundary
+  - `GOC_TEXT_PAD=K`      -- put K bytes of no-ops in front of the first
+                            function, shifting the module's code by K and
+                            changing not one instruction
+
+Two things had to be fixed for alignment to mean anything in a linked image, and
+both are defects in their own right:
+
+  - `.text` was emitted with `sh_addralign = 4`. Padding a function to 32 inside
+    a section the linker may place on any 4-byte boundary aligns it relative to
+    nothing. `obj.Object` now carries `TextAlign` and the ELF writer uses it.
+  - `link/link.go` concatenated each object's text at `len(out.Text)` with no
+    alignment, which would have done the same thing to the internal-linker path.
+    It now pads to the object's `TextAlign`, as it already did for every data
+    section.
+
+Verified end to end: at `GOC_FUNC_ALIGN=32`, 7221 of the 7499 `.text` symbols in
+the goc-built crypto benchmark are at 0 mod 32 (the remainder are the assembly
+sidecar and C runtime, linked from objects goc does not lay out), and `.text`
+lands at 0x400500 with `sh_addralign 64`.
+
+The shift knob is verified to do what it says: `crypto_internal_fips140_bigmod_addMulVVW`
+sits at 0x68be98 at `GOC_TEXT_PAD=0` and 0x68bea8 at `GOC_TEXT_PAD=16`, exactly
+16 bytes apart, and at 0x69bec0 / 0x69bee0 under `GOC_FUNC_ALIGN=32` -- 32 apart,
+so the same phase.
+
+## The corpus
+
+Eight self-contained programs at `goc/testdata/placement_bench`, each following
+the crypto signing benchmark's method (closure per case, setup outside the timer,
+fastest of N rounds, a fixed integer-arithmetic control in the same process):
+
+    p256     ECDSA P-256 sign+verify -- bigmod limb arithmetic
+    sha      SHA-256 and HMAC over 1 MiB -- one tight block loop
+    interp   a bytecode interpreter -- a switch dispatch loop
+    regexp   regexp matching -- a second, larger interpreter
+    json     encoding/json round trip -- reflection and interfaces
+    sortmap  sort.Slice and map build/probe -- callbacks and hashing
+    flate    compress/flate round trip -- table-driven loops
+    text     strconv/fmt/strings.Builder -- formatting and parsing
+
+19 timed cases in total, plus a control per program.
+
+The grid is 6 policies x 8 shifts (0,4,...,28) x 8 programs = 384 binaries.

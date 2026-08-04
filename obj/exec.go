@@ -39,7 +39,7 @@ func (o *Object) WriteExecutable(entrySym string) ([]byte, error) {
 	}
 	note, noteDescOff := buildIDNote()
 	noteOff := alignUp(64+nph*56, 4)
-	textOff := alignUp(noteOff+len(note), 16)
+	textOff := alignUp(noteOff+len(note), max(16, alignOr(o.TextAlign, 4)))
 	textVaddr := uint64(execBase + textOff)
 
 	// .rodata follows .text in the read-only segment: the program may read it and

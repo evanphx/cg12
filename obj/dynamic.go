@@ -567,7 +567,7 @@ func (o *Object) writeDynImage(im dynImage) ([]byte, error) {
 	plt0Off := off
 	pltOff := off + plt0Sz
 	off = pltOff + nplt*stubSz
-	off = alignUp(off, 16)
+	off = alignUp(off, max(16, alignOr(o.TextAlign, 4)))
 	textOff := off
 	off += len(o.Text)
 	// .rodata belongs in the read-only region, which is what makes it read-only:

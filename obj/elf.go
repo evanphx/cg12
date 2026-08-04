@@ -197,6 +197,12 @@ type Object struct {
 	// nothing. Zero means no requirement.
 	//
 	// TlsAlign covers both .tdata and .tbss, which are one block per thread.
+	//
+	// TextAlign is the same requirement for code: a backend that pads function
+	// entries to a granule boundary has aligned them relative to the start of its
+	// own .text, and only a section placed at least that well turns that into an
+	// aligned address.
+	TextAlign   int
 	DataAlign   int
 	RodataAlign int
 	RelroAlign  int
@@ -500,7 +506,7 @@ func (o *Object) prepareELF() (*elfFile, error) {
 	// Assemble sections.
 	secs := make([]section, numSec)
 	secs[secNull] = section{}
-	secs[secText] = section{name: ".text", typ: shtProgbits, flags: shfAlloc | shfExecinstr, addralign: 4, data: o.Text}
+	secs[secText] = section{name: ".text", typ: shtProgbits, flags: shfAlloc | shfExecinstr, addralign: uint64(alignOr(o.TextAlign, 4)), data: o.Text}
 	secs[secRela] = section{name: ".rela.text", typ: shtRela, link: uint32(secSymtab), info: uint32(secText), addralign: 8, entsize: 24, data: rela.b}
 	secs[secData] = section{name: ".data", typ: shtProgbits, flags: shfAlloc | shfWrite, addralign: uint64(alignOr(o.DataAlign, 8)), data: o.Data}
 	if secRodata >= 0 {

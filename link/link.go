@@ -213,6 +213,7 @@ func merge(objs []*obj.Object) (*obj.Object, error) {
 		// for. Concatenating at whatever length the previous object happened to end
 		// at would shift every datum within by that much, undoing the padding the
 		// backend put in.
+		out.TextAlign = maxInt(out.TextAlign, o.TextAlign)
 		out.DataAlign = maxInt(out.DataAlign, o.DataAlign)
 		out.RodataAlign = maxInt(out.RodataAlign, o.RodataAlign)
 		out.RelroAlign = maxInt(out.RelroAlign, o.RelroAlign)
@@ -223,7 +224,7 @@ func merge(objs []*obj.Object) (*obj.Object, error) {
 		// this linker does not merge has no entry, which is what makes a symbol
 		// defined in one refuse to place rather than land at offset zero.
 		base := map[obj.SecKind]uint64{
-			obj.SecText:   uint64(len(out.Text)),
+			obj.SecText:   uint64(alignUp(len(out.Text), o.TextAlign)),
 			obj.SecData:   uint64(alignUp(len(out.Data), o.DataAlign)),
 			obj.SecRodata: uint64(alignUp(len(out.Rodata), o.RodataAlign)),
 			obj.SecRelro:  uint64(alignUp(len(out.Relro), o.RelroAlign)),
@@ -231,7 +232,7 @@ func merge(objs []*obj.Object) (*obj.Object, error) {
 			obj.SecBss:    uint64(alignUp(out.BssSize, o.BssAlign)),
 			obj.SecTbss:   uint64(alignUp(out.TbssSize, o.TlsAlign)),
 		}
-		out.Text = append(out.Text, o.Text...)
+		out.Text = append(padTo(out.Text, int(base[obj.SecText])), o.Text...)
 		out.Data = append(padTo(out.Data, int(base[obj.SecData])), o.Data...)
 		out.Rodata = append(padTo(out.Rodata, int(base[obj.SecRodata])), o.Rodata...)
 		out.Relro = append(padTo(out.Relro, int(base[obj.SecRelro])), o.Relro...)

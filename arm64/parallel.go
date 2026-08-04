@@ -33,6 +33,7 @@ type functionCode struct {
 	code       []byte
 	relocs     []obj.Reloc
 	blockSyms  []blockSym
+	hasLoop    bool
 	rows       []obj.LineRow
 	dwarf      obj.DwarfFunc
 	goFunction goFunctionInfo
@@ -81,6 +82,7 @@ func compileFunction(f *ir.Func, opts Options, conventions calleeConventions, bu
 		code:       mc.code,
 		relocs:     mc.relocs,
 		blockSyms:  mc.blockSyms,
+		hasLoop:    mc.hasLoop,
 		rows:       mc.rows,
 		dwarf:      dwarfFunction,
 		goFunction: goFunction,
