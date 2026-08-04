@@ -593,3 +593,72 @@ byte-for-byte the true layout (`r` iface, `rBuf`, `h1.links`, `h2.links`,
 bytes for 549 significant words, correctly rounded.
 
 Root cause hunt continues from there.
+
+### Root cause: a slice expression that consumes its source points past it
+
+The bad pointer is `toRead`'s data word, and the object dump says exactly what it
+is. Reading the dump with the malloc header subtracted:
+
+    *(object+4248) = 0x31e9f3d74000   dict.hist.ptr
+    *(object+4256) = 0x8000           dict.hist.len   = 32768
+    *(object+4264) = 0x8000           dict.hist.cap
+    ...
+    *(object+4344) = 0x31e9f3d7c000   toRead.ptr   <== the bad pointer
+    *(object+4352) = 0x0              toRead.len
+    *(object+4360) = 0x0              toRead.cap
+
+`0x31e9f3d74000 + 0x8000 = 0x31e9f3d7c000`. The bad pointer is **exactly one byte
+past the end of the 32 KiB history buffer**, with length and capacity zero. It is
+what `compress/flate`'s `decompressor.Read` leaves behind:
+
+    f.toRead = f.toRead[n:]      // n == len(f.toRead)
+
+The host toolchain does not generate that pointer. `cmd/compile`'s `ssagen.slice`
+masks the offset with `mask(rcap)` -- zero when the result's capacity is zero,
+all-ones otherwise -- and says why: *"The masking is to make sure that we don't
+generate a slice that points to the next object in memory."* goc emitted the
+unmasked `ptr + low*elemsize`. Measured side by side on the same source:
+
+| expression | host | goc before | goc after |
+|---|---:|---:|---:|
+| `b[len(b):]` (`len(b)=32768`) | delta 0 | **delta 32768** | delta 0 |
+| `b[16:16]` on a 16-byte slice | delta 0 | **delta 16** | delta 0 |
+| `b[5:5:5]` on a 16-byte slice | delta 0 | **delta 5** | delta 0 |
+| `b[5:5]` on a 16-byte slice (cap 11 left) | delta 5 | delta 5 | delta 5 |
+| `s[len(s):]` on a 10-byte string | delta 0 | **delta 10** | delta 0 |
+| `s[5:5]` on a 10-byte string | delta 0 | **delta 5** | delta 0 |
+
+Two distinct consequences, and the second is the one that kills:
+
+1. The collector rejects the pointer. `findObject` looks it up in the page it
+   lands on -- the *next* allocation's page -- and finds either a span the address
+   is outside of or an unallocated one, and calls `badPointer`.
+2. A one-past-the-end pointer **retains nothing**. The 32 KiB buffer is
+   unreachable the moment the flate reader's last real reference to it goes, even
+   though a live heap object still holds a slice of it. The buffer is freed and
+   its pages reused, and the crash is then a *dangling* pointer, which is why it
+   fires cycles later and looks timing-dependent.
+
+The mask, not a null: a masked pointer still refers to the source's first byte,
+so the empty slice keeps the buffer alive, which is the behaviour Go promises.
+Nulling it would turn a non-nil empty slice into a nil one, which is observable.
+
+It is not specific to `flate`. Any `b[len(b):]` or `s[len(s):]` stored where the
+collector can see it has the same two problems; `flate` is simply the workload in
+this tree that does it in a heap object, at scale, under GC pressure.
+
+### The reduction
+
+`goc/testdata/runtime_gc_slice_tail_pointer.go`, registered as the capability
+`gc-invariants/slice-tail-pointer`. It has two halves:
+
+- **Part one reads the generated pointer** and compares it against the source's
+  base. It is deterministic: it fails on **every** run of the unfixed compiler,
+  so the test's false-pass rate is **zero**. It also asserts the cases that must
+  *not* move -- `b[4096:]` with capacity left keeps its offset -- so the fix
+  cannot be "always mask".
+- **Part two is the collector consequence** with no `flate` involved: keep only
+  the empty tails of 48 large buffers, drop the buffers, and collect. On the
+  unfixed compiler that alone dies with the same "found bad pointer in Go heap"
+  on **14 of 20 runs at the default GOGC**. On the fixed compiler the tails
+  retain their buffers and it passes.
