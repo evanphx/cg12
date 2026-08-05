@@ -161,20 +161,45 @@ compiled monolithically:
 | `GOMAXPROCS=1` | 5/5 pass |
 | default `GOMAXPROCS` | 5/5 pass |
 
+## The capability, in the configuration the matrix uses
+
+The matrix's `-O` arm links against prebuilt runtime packs, and the packs are
+built with `-O` too. That is where the switch does its work in that arm: the
+program half is a module of its own and small enough for `DefaultPipeline`, so
+`main.main` is promoted either way, but package `net` is in the pack, and the
+pack is over budget and takes `BoundedPipeline`. Promoting the three `net`
+functions is exactly what the switch buys there.
+
+Reproduced and fixed in that configuration directly, packs built by the compiler
+under test with `GOC_BOUNDED_MEM2REG=1` into a private cache:
+
+| compiler | runs |
+|---|---|
+| pristine `7983abd` | **5/5 fail**, `cg12: interface dispatch failed for dynamic type 0x0` |
+| branch tip (`792d2f0`) | **0/5 fail** |
+
+**A trap worth recording**: `goc build-runtime`'s content-addressed pack cache
+keys on the compiler binary, the target, `-O` and the package list — **not on
+`GOC_BOUNDED_MEM2REG`**. Two matrix runs of the same tree that differ only in
+that variable therefore share a pack, and whichever ran first decides what is in
+it. A "switch on" matrix run that reuses a pack built without promotion measures
+nothing, and a "switch off" run that reuses one built with it is not a control.
+Every matrix number below was taken with `CG12_PACK_CACHE` pointed at a private
+directory per configuration.
+
 ## What else fails with promotion on
 
 Nothing in the capability matrix, and nothing in the corpus.
 
 The whole matrix, both arms, with `GOC_BOUNDED_MEM2REG=1`, on the tree with the
-fix (`go test -v -run TestARM64RuntimeCapabilityStatus ./cmd/goc/...`,
-`-runtime-status-compile-workers=14`):
+fix, private pack cache per arm:
 
 | arm | subtests | failures |
 |---|---:|---:|
 | `-runtime-opt`, switch **on** | 367 | **0** |
 | default, switch **on** | 367 | **0** |
 
-`stdlib-netpoll-stress/tcp-churn` is in that green `-O` arm. The default arm is
+`stdlib-netpoll-stress/tcp-churn` passes in that `-O` arm. The default arm is
 unchanged by construction — a build without `-O` never calls
 `opt.OptimizeModule`, so the switch cannot reach it — and is reported because it
 was asked for.
@@ -195,6 +220,7 @@ where it was. Everything below is on the branch tip with the fix and with
 |---|---|
 | capability matrix, default arm | **367/367**, 0 failures |
 | capability matrix, `-runtime-opt` arm | **367/367**, 0 failures |
+| capability matrix, both arms, second run before the pack-cache trap was found | **367/367** each, 0 failures |
 | GC reducer `gc/type-mask-padding`, `-O`, `GOMAXPROCS=3`, default `GOGC` | **0/20** fail |
 | GC reducer, `-O`, `GOGC=10` | **0/20** fail |
 | GC reducer, unoptimized, default `GOGC` | **0/20** fail |
