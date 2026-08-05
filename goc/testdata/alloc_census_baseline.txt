@@ -1050,6 +1050,7 @@
 ?	main.main.rangefunc.68.2	runtime.newobject	int	heap
 ?	main.main.rangefunc.76.2	runtime.newobject	int	heap
 ?	main.main.rangefunc.76.2	runtime.newobject	string	heap
+?	main.make2	runtime.newobject	error	heap
 ?	main.nestedDefersSeeTheirOwnIteration	runtime.newobject	int	heap
 ?	main.nestedDefersSeeTheirOwnIteration.func.85.3	runtime.newobject	int	heap
 ?	main.nilMapTargetIsNotAssignedWithoutIterations	runtime.convT64	int	heap
@@ -13176,6 +13177,14 @@ testdata/runtime_gc_metadata_hugepages.go:50:28	main.buildLive	runtime.newobject
 testdata/runtime_gc_metadata_hugepages.go:53:11	main.buildLive	runtime.newobject	main_record	heap
 testdata/runtime_gc_metadata_hugepages.go:87:12	main.heapGoal	runtime.newobject	1_runtime_metrics_Sample	heap
 testdata/runtime_gc_metadata_hugepages.go:87:29	main.heapGoal	runtime.newobject	runtime_metrics_Sample	frame
+testdata/runtime_gc_promoted_local_root.go:103:22	main.check	runtime.newobject	struct_values__3_any__payload0_int__payload1_int	heap
+testdata/runtime_gc_promoted_local_root.go:117:4	main.main	runtime.newobject	2_any	heap
+testdata/runtime_gc_promoted_local_root.go:121:2	main.main	runtime.newobject	1_any	frame
+testdata/runtime_gc_promoted_local_root.go:59:26	main.make2	runtime.newobject	struct_values__1_any__payload0_int	frame
+testdata/runtime_gc_promoted_local_root.go:59:46	main.make2	runtime.convT64	int	heap
+testdata/runtime_gc_promoted_local_root.go:61:7	main.make2	runtime.newobject	main_held	heap
+testdata/runtime_gc_promoted_local_root.go:76:11	main.churn	runtime.newobject	main_held	frame
+testdata/runtime_gc_promoted_local_root.go:99:21	main.check	runtime.newobject	struct_values__2_any__payload0_int__payload1_str	heap
 testdata/runtime_gc_scavenge_release.go:39:27	main.buildHeap	runtime.newobject	2048__main_block	heap
 testdata/runtime_gc_scavenge_release.go:41:11	main.buildHeap	runtime.newobject	main_block	heap
 testdata/runtime_gc_scavenge_release.go:92:2	main.main	runtime.newobject	struct_code_uintptr__function_func_percent_int__	frame
