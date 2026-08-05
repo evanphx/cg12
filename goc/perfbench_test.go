@@ -177,32 +177,33 @@ const perfBenchNoiseGrowthCeiling = 3.0
 // perfBenchRunAttempts is how many times one run of one binary is tried before
 // the whole suite gives up on it.
 //
-// It exists for a defect this tree already has written down. A goc-built
-// goc/testdata/placement_bench/flate dies in the collector -- "pointer to unused
-// region of span", inside compress/flate's 4864-byte compressor state -- on
-// roughly one run in twenty at the default GOGC. It is pre-existing and it is not
-// a placement effect; see CCWORK_REPORT.md, "A defect the corpus found on its way
-// past".
+// It was built for a defect this tree had written down: a goc-built
+// goc/testdata/placement_bench/flate died in the collector on about one run in
+// fifteen. That defect is fixed -- a slice expression that consumed its whole
+// source pointed one byte past the end of the allocation, so the collector was
+// handed a pointer it rejects and the buffer was freed under a live slice; see
+// CCWORK_REPORT.md, "Root cause: a slice expression that consumes its source
+// points past it". flate is 0 crashes in 600 runs since.
 //
-// One run in twenty is small enough to be invisible in a corpus that runs a
-// program once and large enough to be fatal here: this suite runs flate's goc
-// binary eighteen times, so at that rate three runs in five would die on
-// something that is not a performance regression at all. Retrying is the honest
-// way to keep the workload: a crash is not a slow measurement, it is a missing
-// one, and replacing it biases nothing.
+// The retry stays, because what it buys is not tolerance of that defect. It is
+// that one dead run does not cost the other ten programs their eleven minutes:
+// a crash is not a slow measurement, it is a missing one, so replacing it and
+// then failing at the end with the whole picture beats dying at repetition five
+// with no table at all.
 //
-// What must not happen is the retry hiding the crash, so every one is logged and
-// perfBenchCrashCeiling fails the run when they stop looking like the known rate.
+// What must not happen is the retry hiding a crash, so every one is logged and
+// perfBenchCrashCeiling now fails the run on any of them.
 const perfBenchRunAttempts = 3
 
-// perfBenchCrashCeiling is the fraction of one program's runs that may need
-// retrying before the suite fails rather than reports.
+// perfBenchCrashCeiling is the fraction of one program's runs that may die
+// before the suite fails rather than reports.
 //
-// The known flate rate puts about one crash in twenty-seven of that program's
-// runs, near 4%. 20% is five times that, so it does not fire on the defect that
-// is already known and does fire on a program that has started dying regularly --
-// which is a much more interesting result than any number in the table.
-const perfBenchCrashCeiling = 0.20
+// Zero. It was 20%, five times the flate rate, chosen so it would not fire on a
+// defect that was known and live. Nothing in this suite is expected to crash any
+// more, and a ceiling that excuses one run in six would let a new collector bug
+// print a green table for a long time. A run that dies is now a failure with the
+// dead run's stderr attached, whatever it was.
+const perfBenchCrashCeiling = 0.0
 
 // perfBenchNoiseGrowthFloor is the absolute noise below which the growth ceiling
 // is not applied. A row whose baseline noise is 0.05% and whose run noise is 0.2%
@@ -726,15 +727,14 @@ func runPerfBenchArm(t *testing.T, program perfBenchProgram, binary string, pin 
 	}
 	require.Fail(t, "a binary died on every attempt",
 		"%s did not complete a single run in %d attempts, so this repetition has no reading of it and the\n"+
-			"suite cannot go on. If this is goc-built flate, it is the known collector crash -- see\n"+
-			"CCWORK_REPORT.md, \"A defect the corpus found on its way past\" -- but %d in a row is far above its\n"+
-			"measured rate and is its own result. Otherwise a goc-built binary has started dying, which matters\n"+
-			"more than any timing in this table.\n\n%s",
-		program.name, perfBenchRunAttempts, perfBenchRunAttempts, strings.Join(failures, "\n\n"))
+			"suite cannot go on. No program in this suite is expected to crash: the collector crash that goc-built\n"+
+			"flate used to die of is fixed (CCWORK_REPORT.md, \"Root cause: a slice expression that consumes its\n"+
+			"source points past it\"), and flate has run 600 times since without one. A goc-built binary that has\n"+
+			"started dying matters more than any timing in this table -- read the stderr below first.\n\n%s",
+		program.name, perfBenchRunAttempts, strings.Join(failures, "\n\n"))
 }
 
-// checkPerfBenchCrashes fails the run when a program died more often than the one
-// known defect explains.
+// checkPerfBenchCrashes fails the run when a program died at all.
 func checkPerfBenchCrashes(t *testing.T, attempts, crashes map[string]int) {
 	t.Helper()
 
@@ -748,17 +748,17 @@ func checkPerfBenchCrashes(t *testing.T, attempts, crashes map[string]int) {
 		rate := float64(crashes[name]) / float64(attempts[name])
 		t.Logf("%s: %d of %d runs died and were retried (%.1f%%)", name, crashes[name], attempts[name], rate*100)
 		if rate > perfBenchCrashCeiling {
-			dying = append(dying, fmt.Sprintf("%s\n      %d of %d runs died (%.1f%%, ceiling %.1f%%)",
-				name, crashes[name], attempts[name], rate*100, perfBenchCrashCeiling*100))
+			dying = append(dying, fmt.Sprintf("%s\n      %d of %d runs died (%.1f%%)",
+				name, crashes[name], attempts[name], rate*100))
 		}
 	}
 	require.Empty(t, dying,
-		"a program's binary died more often than the one defect this suite knows how to excuse. goc-built flate\n"+
-			"crashes in the collector on about one run in twenty (CCWORK_REPORT.md, \"A defect the corpus found on\n"+
-			"its way past\"), which is why runs are retried at all. A rate above %.0f%% is not that, and a goc-built\n"+
-			"binary that has started dying is a bigger result than any timing here -- triage the crash first and\n"+
-			"come back to the numbers.\n  %s",
-		perfBenchCrashCeiling*100, strings.Join(dying, "\n  "))
+		"a program's binary died. Nothing in this suite is expected to: goc-built flate used to crash in the\n"+
+			"collector on about one run in fifteen, which is why runs are retried at all, and that defect is fixed\n"+
+			"(CCWORK_REPORT.md, \"Root cause: a slice expression that consumes its source points past it\").\n"+
+			"A goc-built binary that has started dying is a bigger result than any timing here -- the retry only\n"+
+			"exists so this run still produced a table. Triage the crash first and come back to the numbers.\n  %s",
+		strings.Join(dying, "\n  "))
 }
 
 // runPerfBenchOnce runs one binary once and returns every case it printed.

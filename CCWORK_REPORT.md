@@ -552,3 +552,264 @@ both ways:
 **The smallest regression the suite can detect is 5.0 %**, on 27 of its 42 rows,
 and ≤ 6.0 % on 34 of them. Three rows cannot see less than 25 %, and the baseline
 prints that number next to each of them.
+
+## The compress/flate collector crash: reproduction
+
+The defect recorded in `44d76cf` and worked around by the performance suite
+(`perfBenchRunAttempts`) is reproducible on demand. It is not rare; it is
+*conditional*, and the condition is the backend's code-placement policy.
+
+| build of `goc/testdata/placement_bench/flate/main.go` | `GOGC=10`, pinned |
+|---|---|
+| `goc -O` (default alignment) | 0/15 |
+| `goc -O`, `GOC_FUNC_ALIGN=0 GOC_LOOP_ALIGN=0 GOC_ALIGN_LOOP_FUNCS_ONLY=0`, pad 0 | **14/15** |
+| the same, `GOC_TEXT_PAD=16` | **15/15** |
+| `goc` (no `-O`), alignment off, pad 0 | **10/10** |
+| the same, `GOC_TEXT_PAD=16` | **10/10** |
+| host `go build` | 0/15 |
+
+Two things follow immediately. It is not an optimizer bug -- the unoptimized
+build is the *more* reliable reproducer. And the perf suite's ~1-in-20 is the
+rate of the *default* configuration; with alignment off it is essentially every
+run, which is what makes this tractable.
+
+### What the crash says
+
+    runtime: pointer 0x36a7cfb36000 to unused region of span ...
+    runtime: found in object at *(0x36a7cfb20000+0x10f8)
+    object=... s.spanclass=90 s.elemsize=4864 s.state=mSpanInUse
+
+The object's first word is `_goc_runtime_type_compress_flate_decompressor_...`
+(resolved from the binary's symbol table), i.e. it is the Go 1.22 malloc header,
+so the *data* starts at object+8 and the reported offset `0x10f8` is field offset
+**4336** of `compress/flate.decompressor` -- the pointer word of `toRead []byte`.
+
+The type descriptor itself is correct. Decoded out of the binary:
+`Size_=4392`, `PtrBytes=4376`, and the GC mask names exactly the words
+`{0, 1, 2, 263, 524, 528, 529, 530, 537, 540, 541, 542, 545, 546}` -- which is
+byte-for-byte the true layout (`r` iface, `rBuf`, `h1.links`, `h2.links`,
+`bits`, `codebits`, `dict.hist`, `step`, `err`, `toRead`, `hl`, `hd`). So this is
+**not** a pointer-mask defect, and not a mask-padding defect: the mask is 72
+bytes for 549 significant words, correctly rounded.
+
+Root cause hunt continues from there.
+
+### Root cause: a slice expression that consumes its source points past it
+
+The bad pointer is `toRead`'s data word, and the object dump says exactly what it
+is. Reading the dump with the malloc header subtracted:
+
+    *(object+4248) = 0x31e9f3d74000   dict.hist.ptr
+    *(object+4256) = 0x8000           dict.hist.len   = 32768
+    *(object+4264) = 0x8000           dict.hist.cap
+    ...
+    *(object+4344) = 0x31e9f3d7c000   toRead.ptr   <== the bad pointer
+    *(object+4352) = 0x0              toRead.len
+    *(object+4360) = 0x0              toRead.cap
+
+`0x31e9f3d74000 + 0x8000 = 0x31e9f3d7c000`. The bad pointer is **exactly one byte
+past the end of the 32 KiB history buffer**, with length and capacity zero. It is
+what `compress/flate`'s `decompressor.Read` leaves behind:
+
+    f.toRead = f.toRead[n:]      // n == len(f.toRead)
+
+The host toolchain does not generate that pointer. `cmd/compile`'s `ssagen.slice`
+masks the offset with `mask(rcap)` -- zero when the result's capacity is zero,
+all-ones otherwise -- and says why: *"The masking is to make sure that we don't
+generate a slice that points to the next object in memory."* goc emitted the
+unmasked `ptr + low*elemsize`. Measured side by side on the same source:
+
+| expression | host | goc before | goc after |
+|---|---:|---:|---:|
+| `b[len(b):]` (`len(b)=32768`) | delta 0 | **delta 32768** | delta 0 |
+| `b[16:16]` on a 16-byte slice | delta 0 | **delta 16** | delta 0 |
+| `b[5:5:5]` on a 16-byte slice | delta 0 | **delta 5** | delta 0 |
+| `b[5:5]` on a 16-byte slice (cap 11 left) | delta 5 | delta 5 | delta 5 |
+| `s[len(s):]` on a 10-byte string | delta 0 | **delta 10** | delta 0 |
+| `s[5:5]` on a 10-byte string | delta 0 | **delta 5** | delta 0 |
+
+Two distinct consequences, and the second is the one that kills:
+
+1. The collector rejects the pointer. `findObject` looks it up in the page it
+   lands on -- the *next* allocation's page -- and finds either a span the address
+   is outside of or an unallocated one, and calls `badPointer`.
+2. A one-past-the-end pointer **retains nothing**. The 32 KiB buffer is
+   unreachable the moment the flate reader's last real reference to it goes, even
+   though a live heap object still holds a slice of it. The buffer is freed and
+   its pages reused, and the crash is then a *dangling* pointer, which is why it
+   fires cycles later and looks timing-dependent.
+
+The mask, not a null: a masked pointer still refers to the source's first byte,
+so the empty slice keeps the buffer alive, which is the behaviour Go promises.
+Nulling it would turn a non-nil empty slice into a nil one, which is observable.
+
+It is not specific to `flate`. Any `b[len(b):]` or `s[len(s):]` stored where the
+collector can see it has the same two problems; `flate` is simply the workload in
+this tree that does it in a heap object, at scale, under GC pressure.
+
+### The reduction
+
+`goc/testdata/runtime_gc_slice_tail_pointer.go`, registered as the capability
+`gc-invariants/slice-tail-pointer`. It has two halves:
+
+- **Part one reads the generated pointer** and compares it against the source's
+  base. It is deterministic: it fails on **every** run of the unfixed compiler,
+  so the test's false-pass rate is **zero**. It also asserts the cases that must
+  *not* move -- `b[4096:]` with capacity left keeps its offset -- so the fix
+  cannot be "always mask".
+- **Part two is the collector consequence** with no `flate` involved: keep only
+  the empty tails of 48 large buffers, drop the buffers, and collect. On the
+  unfixed compiler that alone dies with the same "found bad pointer in Go heap"
+  on **14 of 20 runs at the default GOGC**. On the fixed compiler the tails
+  retain their buffers and it passes.
+
+### The fix
+
+`goc/compile.go`, in the `*ast.SliceExpr` lowering: the byte offset added to the
+source's data pointer is masked with `0` when the result's extent is zero and
+`-1` otherwise -- `And(offset, Sar(Neg(extent), 63))` -- where the extent is the
+result's capacity for a slice and its length for a string. Three instructions,
+and only where the answer is not already known:
+
+- a constant-zero low index cannot move the pointer, so nothing is emitted;
+- a fixed-size array sliced at a constant index has a capacity the compiler reads
+  off the type, so the answer is folded: no mask when it is non-zero, a constant
+  zero offset when it is zero.
+
+That second case is not tidiness. Emitting the mask into `crypto`'s
+`copy(b[32:], k.z[:])` -- a `[64]byte` sliced at a constant -- grew three small
+`mlkem` functions past the inliner's budget, and the six allocation sites that
+`DecapsulationKey768.Bytes` and `DecapsulationKey1024.Bytes` contribute to their
+callers went out of the census. With the constant case folded, the census
+baseline's only change is the reducer's own five sites.
+
+Cost: `.text` of the goc-built `flate` benchmark grows **5120 bytes, +0.155%**.
+
+### Crash rate, before and after
+
+Every run pinned to its own core, as the perf suite pins. "suite configuration"
+is what `make bench-perf` builds and runs: `goc -O`, default alignment, default
+GOGC.
+
+| configuration | before | after |
+|---|---:|---:|
+| suite configuration | **15 / 200 = 7.5%** | **0 / 600** |
+| alignment off, `GOGC=10` | **95 / 100 = 95%** | **0 / 400** |
+| `runtime_gc_slice_tail_pointer` part two alone, default GOGC | **14 / 20 = 70%** | 0 / 40 |
+| host `go build`, `GOGC=10` | 0 / 15 | -- |
+
+The before figure in the suite's own configuration, 7.5%, is the number that
+branch measured independently at 6.9%; the two agree. After the fix, **0 crashes
+in 1000 runs** of the `flate` benchmark across the two configurations. At the
+before-rate of 7.5%, 600 clean runs of the suite configuration alone has
+probability 6e-21; the 95% upper bound on the remaining rate, from 600 runs with
+no event, is 0.5%.
+
+### Guards
+
+| guard | result |
+|---|---|
+| `runtime_gc_type_mask_padding` at `GOGC=10` and default, `-O` and not | 0/20 each, 4 arms, 80 runs |
+| `runtime_gc_slice_tail_pointer` at `GOGC=10` and default, `-O` and not | 0/20 each, 4 arms, 80 runs |
+| `TestFrameEscapeAudit` | pass |
+| `TestLoopAliasAudit` | pass |
+| `TestEscapeShadowPlacement` | pass |
+| `TestAllocationCensus` | pass; baseline gains the reducer's 5 sites and nothing else |
+| `TestCompilingTheSameSourceTwiceGivesTheSameModule` | pass |
+| capability matrix, both arms | see below |
+
+### Should the perf suite's retry stay?
+
+**The retry stays; the ceiling goes to zero.** They were one mechanism and they
+are now two different questions.
+
+The 20% ceiling existed to *excuse* a live defect: it was set five times the
+known flate rate so a green run would stay green. With the defect fixed, a
+ceiling that tolerates one run in six is a hole -- a new collector bug could kill
+a sixth of every program's runs and still print a table. `perfBenchCrashCeiling`
+is now `0`: any crash fails the run, with the dead run's stderr attached.
+
+The retry itself earns its place for a different reason than the one it was
+written for. A crash is a *missing* measurement rather than a slow one, so
+replacing it biases nothing, and retrying is what keeps one dead run from costing
+the other ten programs their eleven minutes. Failing at the end with the whole
+table and the whole crash report beats dying at repetition five with neither.
+
+### One thing found on the way past, not fixed here
+
+A `badPointer` throw cannot finish printing its own object dump. The first dump
+in this investigation stopped at `*(object+248` and turned into a `SIGSEGV`:
+
+    runtime_atomicwb -> runtime_atomicstorep -> goc_storep -> runtime_bytes
+      -> runtime_printstring -> runtime_gcDumpObject -> runtime_badPointer
+      -> runtime_findObject -> runtime_wbBufFlush1 -> ... (repeat until the
+      stack is gone)
+
+`runtime.bytes`, which `printstring` calls, does `rp.array = sp.str` where `rp`
+is `(*slice)(unsafe.Pointer(&ret))` and `ret` is a local. goc emits a write
+barrier for that store; the host toolchain does not, because ssa's write-barrier
+pass asks `IsStackAddr` and follows the `unsafe.Pointer` chain back to a stack
+slot. Inside `badPointer` the barrier flushes, the flush re-finds the same bad
+pointer, and `badPointer` calls itself.
+
+That is a second, independent defect -- goc not eliding write barriers for
+stores it can prove target the stack -- and it makes every future bad-pointer
+diagnosis harder than it needs to be. The dumps in this report were obtained by
+setting `debug.invalidptr = 0` at the top of `badPointer` as a temporary patch,
+which was reverted. It is worth its own job; it is not touched here.
+
+### The capability matrix and what the mask costs
+
+The matrix ran in both arms, sharded eight ways (`index % 8`, so the eight shards
+cover the 367 capabilities exactly once each):
+
+    plain arm: 8/8 shards ok      opt arm (-runtime-opt): 8/8 shards ok
+
+367 capabilities, all passing in both arms. That is 366 before this branch plus
+the new `gc-invariants/slice-tail-pointer`.
+
+The mask's cost, measured on a quiet box, each binary pinned to one core, seven
+interleaved repetitions, fastest of each program's own three timed rounds:
+
+| case | after / before |
+|---|---:|
+| `flate/compress`, `flate/decompress` | 0.999, 0.996 |
+| `sort/ints`, `sort/slice-callback`, `map/build-probe` | 1.000, 0.998, 0.970 |
+| `text/parse`, `text/utf8-decode` | 0.999, **1.009** |
+| `json/marshal`, `json/unmarshal` | 0.999, 0.998 |
+| `regexp/find-submatch`, `anchored-lines`, `replace` | 0.999, **1.014**, 1.000 |
+| `control/spin-fixed-work` (all) | 1.000 |
+
+Nothing moves past the tolerance the perf suite draws around any of these rows;
+the two that rose, at +0.9% and +1.4%, are below their 5.2% and 5.4% detection
+floors. `text/format-append` and `text/sprintf` came out 12% and 9% *faster*,
+which is those two rows' documented 6.4% and 8.8% noise, not a result.
+
+`sortmap` was checked at four code placements (`GOC_TEXT_PAD` 0, 4, 16, 32)
+rather than one, because a first pass taken while the capability matrix was still
+running showed `sort/slice-callback` at 1.88× and `sort/ints` at 0.81× -- both
+artefacts of a loaded box. At each of the four placements, before and after agree
+to within 0.3%.
+
+The committed `perf_suite_baseline.txt` was **not** re-measured: that is an
+eleven-minute run whose whole method assumes a quiet machine, and this box shares
+work. Nothing above suggests it needs to move.
+
+### Verdict
+
+**Root cause.** goc lowered a slice expression's data pointer as
+`ptr + low*elemsize` with no mask. When the result has no capacity left --
+`b[len(b):]`, and in `compress/flate` the `f.toRead = f.toRead[n:]` in
+`decompressor.Read` -- that pointer lands one byte past the end of the
+allocation. The collector rejects such a pointer, and it retains nothing, so the
+32 KiB history buffer was freed under a slice that was still reachable from a
+live heap object. The host toolchain masks the offset to zero in exactly this
+case; goc now does too.
+
+**Rate.** In the perf suite's own configuration: **15 of 200 runs (7.5%) before,
+0 of 600 after**. In the worst configuration found -- alignment off at
+`GOGC=10` -- **95 of 100 (95%) before, 0 of 400 after**. 1000 post-fix runs of
+the `flate` benchmark, no crashes.
+
+**Reduction.** `goc/testdata/runtime_gc_slice_tail_pointer.go`, capability
+`gc-invariants/slice-tail-pointer`. Deterministic: false-pass rate zero.
