@@ -1624,3 +1624,86 @@ were an artefact of a shared box, not a property of any branch. (The wall-clock
 difference — 855.7s on `main` against 559.9s on the branch — is the *compiler*
 being 2.2x faster, §12a: the suite builds eleven programs with `goc` before it
 times anything.)
+
+### 9a. Addendum: the failure of §9 depends on how the build is split
+
+The capability matrix compiles `stdlib_os_exec_echo.go` (it is capability
+`runtime_status_test.go:1633`) and **passes it in both arms**, which looked like
+a contradiction. It is not:
+
+    goc -o out goc/testdata/stdlib_os_exec_echo.go                  -> FAILS (976 > 920)
+    goc -runtime pack.gocrt -o out goc/testdata/stdlib_os_exec_echo.go -> exit 0
+    goc build-runtime -packages "" -o pack.gocrt                    -> exit 0
+
+The chain's root, `syscall.runtime_AfterForkInChild` (frame 80) and
+`runtime.clearSignalHandlers` (64), sit *above* the part of the chain that lives
+in the runtime pack. Building the pack alone, the deepest chain through
+`runtime_sigaction` (frame 464, unchanged in both modes) is 832 and passes;
+compiling the program against a prebuilt pack, the walk stops at the module
+boundary; only the whole-program build sees all seven frames at once and
+computes 976.
+
+So the budget is a **per-module** check and its verdict is not invariant across
+the pack split. The linked capability binary contains the same seven functions
+with the same frames, so it carries the same 976-byte chain at run time — no
+build mode rejects it, and the one that would is the one nobody runs in CI.
+(That last step is inference from the frame sizes the two builds report, not a
+disassembly of the linked image.)
+
+This does not change §9's conclusion — a build that `main` accepts now fails —
+but it does mean the guarantee is narrower than "the budget keeps cg12's nosplit
+chains fitting".
+
+---
+
+## 14. Verdict
+
+Everything the brief asked for ran to completion and was watched. Nothing below
+is unverified.
+
+| # | check | result |
+|---|---|---|
+| 1 | `go test -timeout 60m -parallel 10 ./goc/...` | **PASS**, 1245.97s, 0 failures; `TestDeriveClassifiesEveryGenField` **PASS** |
+| 2 | capability matrix, both arms, `-v` | **368/368 each**, pass sets identical, 0 FAIL |
+| 3 | `make test-unit` | **PASS**, 38 packages |
+| 4 | four corpus audits, census twice | **PASS** ×2 real runs, byte-identical output |
+| 5 | determinism `-O` / unoptimised, parallel-vs-serial | **406/406 reproducible at `-O`**; 405 + 1 build failure unoptimised; `TestParallelBackendIsByteIdenticalToSerial` PASS |
+| 6 | GC reducer 20× × 2 `GOGC` × (branch, `main`) | **80 runs, 0 failures** |
+| 7 | crash loops (flate 250×2, p256 100, lock_osthread 400) | **1000 runs, 0 failures** |
+| 8 | byte-identity vs `main` | branch 1: **406/406 identical**; merged wave: 0/406 (branch 3 changes runtime code, as designed) |
+| 9 | compile time | **4.488x → 1.987x** (branch 1) / **2.043x** (wave). Peak RSS **unchanged** — keep the 5 GiB cap |
+| 10 | `make bench-perf` / `make bench-crypto` | **BOTH PASS** on branch *and* on `main` control; control ratio 0.9247–0.9272 vs 0.9260 |
+| — | 10 regenerated baselines | 8 **identical**; 2 timing files moved within their own noise |
+| — | `main` already over its nosplit reserve | **CONFIRMED**: 21 chains at `-O`, 48 unoptimised, deepest 3024, `nextFree` 184 over before inlining |
+| — | debt register is a floor, not a licence | **CONFIRMED** in four places; one structural caveat, not firing |
+| — | one thing that does not fit | **`goc` without `-O` can no longer build a program that uses `os/exec`** (§9) |
+
+### SAFE TO MERGE TO MAIN: **NOT SAFE — for one reason, with a one-line fix**
+
+Everything measurable about this wave is good. Branch 1 makes the compiler 2.2x
+cheaper and emits byte-identical code for all 406 corpus programs. Branch 2
+changes nothing, provably. Branch 3's budget is soundly built, its register is
+genuinely a floor, its inlining provably grows no over-limit chain, and it costs
+2.8% of compile time and nothing at run time. Every baseline in the tree
+regenerates identically; every audit, every capability, every determinism round,
+1000 crash-loop runs and both timing benchmarks are green.
+
+The one thing that stops it is §9: **the merged tree refuses to compile
+`goc/testdata/stdlib_os_exec_echo.go` without `-O`, and `main` compiles it.**
+The chain it rejects is real and pre-existing — that is the wave's own finding,
+confirmed here — but the consequence is that a program shape as ordinary as
+`os/exec` cannot be built unoptimised, and nothing in `make test` catches it,
+because the only guard that builds all 406 programs to an object is
+`scripts/determinism-check.sh -corpus`, which is not part of the suite.
+
+Merge as soon as one of these is done, and neither needs new measurement:
+
+1. add `"syscall_runtime_AfterForkInChild": 976` to `arm64/nosplit_debt.go`
+   (accepting the register's own premise for a chain the 22-configuration recipe
+   could not see), **and** widen the register's generation recipe so a corpus
+   whole-program sweep is one of its inputs; or
+2. shrink `runtime_sigaction`'s 464-byte frame, which brings the chain to 512
+   and is where the real fix lives.
+
+Either way, add the unoptimised whole-program corpus build to CI, since it is
+the only thing that runs the budget over every program.
