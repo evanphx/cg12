@@ -118,3 +118,77 @@ The cases a naive walk gets wrong, and what this one does:
 | a nosplit function calling a splittable one | the chain ends there, which is how chains are meant to end. |
 | a translated assembly function that is *not* `NOSPLIT` | ends the chain, and is counted in `Report.Unchecked` — 68 of them. This is a real hole: cg12's Plan 9 translator emits a bare `sub sp` prologue where Go's assembler inserts a split check, so those functions end a chain on a promise the toolchain does not keep. Treating them as nosplit instead is not the answer — `runtime·call1073741824` is a `WRAPPER` with a 1 GiB frame — but the gap is cg12's, it predates this branch, and it should be closed. |
 | an undefined callee | ends the chain, on the same assumption Go's linker makes for a symbol outside the link, and is listed in `Report.External` (4 of them). |
+
+## The restriction, lifted
+
+`opt.InlineIntoNoSplitCallers` is the last pass in `DefaultPipeline`. For each
+nosplit caller it:
+
+1. asks the backend for that caller's headroom — how many bytes its frame can
+   grow before the deepest chain running through it reaches 920, counting the
+   frames *above* it as well as below;
+2. takes a snapshot (`ir.CloneFunc`, through the binary unit format);
+3. runs the ordinary inliner into it;
+4. runs `opt.Optimize` on the result, so the measurement sees the code the
+   backend will see rather than the code the splice left behind;
+5. lays the frame out through the backend (`arm64.measureFunction` — the same
+   `computeFrame` the emitter calls, from the same register allocation) and
+   compares;
+6. restores the snapshot verbatim if the frame grew past the allowance.
+
+Nothing is estimated. The 16-byte `noSplitInlineSafetyBytes` held back from each
+allowance is one AArch64 slot pair, not a fudge factor for a guess.
+
+Cost: the backend measures only the nosplit functions (a splittable frame never
+enters a chain, so it goes into the graph as a name with no frame), which is
+about 600 of 15000 in a runtime module. Measured on
+`runtime_lock_osthread.go`: **18.8 s → 21.8 s**, +16% wall on a small program.
+
+### What it bought
+
+On `goc -O goc/testdata/runtime_lock_osthread.go` (`GOC_DEBUG_NOSPLIT=inline`):
+
+| outcome | callers |
+|---|---:|
+| inlined, frame measured, kept | **106** |
+| inlined, frame measured, **reverted** | 1 |
+| no headroom at all | 201 |
+
+The one revert is `runtime.debugCallWrap1.func`: measured +96 bytes against an
+88-byte allowance, restored from the snapshot. That single line is the
+difference between a bound and a guess.
+
+Most accepted callers got *smaller*, not larger — inlining removed the call and
+with it the caller's outgoing-argument area:
+`internal/runtime/atomic.Pointer.Load` 32 → 16, `Pointer.StoreNoWB` 48 → 16,
+`runtime.addGSyscallNoP` 48 → 16. The ones that grew stayed inside their
+measured allowance: `runtime.initsig` 80 → 208 of 424 allowed,
+`runtime.notetsleep_internal` 80 → 176 of 312, `runtime.sysMemStat_add`
+288 → 304 of 24 — that last one exactly at its limit and accepted for it.
+
+### What it did not buy, and this is the finding
+
+**The allocator fast paths get nothing, and the budget is right to refuse them.**
+
+    runtime.mcache.nextFree      headroom -184   (chain 1104 of 920)
+    runtime.mcache.refill        headroom -184
+    runtime.acquirem             headroom  <0
+    runtime.releasem             headroom  <0
+
+`nextFree`'s nosplit chain is 1104 bytes with *nothing* inlined into it. The
+crash this whole exercise started from — `nextFree`'s frame going 384 → 656 and
+the run reaching 976 — was not the inliner creating an overflowing chain. It was
+the inliner adding 272 bytes to a chain that was already 184 bytes over. The
+stopgap fixed the symptom and hid the condition.
+
+The part of the allocator path that does have room got its inlining back:
+`runtime.nextFreeFast` (headroom 888), `runtime.mspan.nextFreeIndex` (168, frame
+128 → 112), `runtime.spanQueue.refill` (536, frame 128 → 96).
+
+Getting `nextFree` back means bringing its chain under 920 first, which is a
+codegen-size problem (`nextFree` 368 + `refill` 352 + `consistentHeapStats.acquire`
+144 + `throw` 128 + `fatalthrow` 96 + `systemstack` 16), not an inliner problem.
+Upstream Go does not have this chain at all: gc inlines `nextFree` *into*
+`mallocgc`, which is splittable, so the frame is spent under a guard. That —
+inlining nextFree into its caller rather than inlining into nextFree — is the
+change that would actually recover the motivating case.
