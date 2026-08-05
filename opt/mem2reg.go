@@ -335,6 +335,7 @@ func renameBlock(
 		case in.Op.IsStore() && addrVar(&in, varOf) >= 0:
 			vi := addrVar(&in, varOf)
 			nameVal(in.Args[0], vi)
+			markManagedDef(f, in.Args[0], &vars[vi])
 			curDef[vi] = in.Args[0]
 		case in.Op.IsLoad() && loadVar(&in, varOf) >= 0:
 			sub[in.To.ID] = curDef[loadVar(&in, varOf)]
@@ -469,6 +470,41 @@ func variableLiveIn(f *ir.Func, cfg *analysis.CFG, varOf map[uint32]int) map[*ir
 		}
 	}
 	return liveIn
+}
+
+// markManagedDef marks a value that becomes a reaching definition of a promoted
+// managed variable as a managed reference, so the backend still reports it where
+// the slot used to be reported.
+//
+// This is the other half of the phi marking above, and it is the half that
+// matters more. A slot's pointer word is described for the whole span the slot is
+// live -- ir.InferStackPointerWords records the word, arm64's recordSafepoint
+// emits it at every safepoint the allocation reaches -- and the values that pass
+// through the slot need no marking of their own, because between the call that
+// produces one and the store that files it away nothing can collect. Promotion
+// deletes the slot and the loads, and then those same values are what carries the
+// variable across every safepoint in between. A value the frontend left unmarked
+// (goc marks a *load* from a managed slot, but not, for instance, the result of
+// nistec.P256Point.SetBytes) is then reported at no safepoint at all, and an
+// object the program is still going to use is freed under it.
+//
+// Marking here is exactly as conservative as the slot was, and no more: the
+// variable's own GCRef flag is the frontend's statement that this storage holds a
+// managed pointer, and it is what the frame map described. A type descriptor the
+// value already carries wins over the slot's, since the value's own definition
+// knows its type at least as precisely as the storage it was filed in.
+func markManagedDef(f *ir.Func, value ir.Ref, v *promotable) {
+	if !v.managed || value.Kind != ir.RefTemp {
+		return // a constant (the zero a variable starts at) names no object
+	}
+	t := f.Temps[value.ID]
+	if t == nil {
+		return
+	}
+	t.GCRef = true
+	if t.GCType == 0 {
+		t.GCType = v.gcType
+	}
 }
 
 func isVarAlloc(id uint32, varOf map[uint32]int) bool {
