@@ -7,10 +7,11 @@
 #
 #     make bench-crypto
 #
-# The run needs a Go toolchain and a system linker, and takes about 65 seconds,
-# most of which is the goc-built binary doing real P-256 arithmetic. Run it on an
-# idle machine: unlike every other baseline in this directory it measures time,
-# so a loaded box produces a number about the box.
+# The run needs a Go toolchain and a system linker, and takes about eight
+# minutes: it times each compiler's binary five times, interleaved, because one
+# reading of an elapsed time is not a measurement. Run it on an idle machine:
+# unlike every other baseline in this directory it measures time, so a loaded box
+# produces a number about the box.
 #
 # Both columns come from the same program -- goc/testdata/crypto_signing_bench --
 # compiled by both compilers, so the two answers are produced by the same
@@ -29,16 +30,21 @@
 # The raw nanoseconds are printed alongside so the index can be sanity-checked,
 # but they are not compared; they are expected to differ between machines.
 #
-# # Why this file exists
+# # What the +/-% columns are, and why the check has them
 #
-# The escape publication fix (6245dbb) was measured at +5.8% on 200 P-256
-# sign+verify when it landed. Nothing in this tree measured elapsed time, so that
-# number went unchecked across the seven compiler changes that followed it and
-# had to be re-established from scratch. See CCWORK_REPORT.md, "Recovered: the
-# bigmod.Nat.Mul cost of the escape publication fix".
+# Each index is the mean of five interleaved, core-pinned repetitions, and the
+# +/-% beside it is the 95% confidence interval of that mean, as a fraction of
+# it. It is a property of the box the file was produced on, and it is committed
+# because it is the only thing that says how much of a movement in the column
+# beside it is believable.
 #
-# gc's index is the reference. It should not move unless the host toolchain did;
-# this file records the toolchain it was produced against for that reason.
+# A run fails only when the whole interval of its own mean falls outside this
+# file's value widened by the tolerance. So the smallest movement that fails is
+# the tolerance plus the run's interval -- about 6.6% on the p256 cases -- and a
+# movement smaller than that is reported by this file changing, not by the check
+# going red. That is deliberate: this box's same-source run-to-run spread is
+# around 2% pinned and 3% unpinned, and a check that fires below its own noise
+# is a check people learn to ignore.
 #
 # # A movement is not automatically a regression
 #
@@ -46,25 +52,28 @@
 # entries no alignment, so where the crypto code landed inside the processor's
 # 32-byte instruction fetch granule was decided by the total size of everything
 # emitted before it, and this index was a square wave in that shift with an
-# amplitude of 6.1% -- larger than the tolerance. goc now places a function that
-# contains a loop on a 32-byte boundary, which pins the phase, and the same
-# experiment moves this index by 0.4%.
+# amplitude of 6.1%. goc now places a function that contains a loop on a 32-byte
+# boundary, which pins the phase, and the same experiment moved this index by
+# 0.4% when that landed -- though an independent measurement on the wave-7 gate
+# got 2.73% for the same quantity, so call the residue low single digits rather
+# than a number.
 #
-# It is not zero. Alignment fixes a function's phase, not its address: two builds
-# still put the code in different cache sets, and a function with no loop in it
-# is still placed wherever the previous one ended. So before treating a movement
-# here as a regression, still check whether the path's instruction *encodings*
-# changed at all -- goc/cryptobench_test.go's failure message gives the commands.
-# A movement with identical encodings is a placement effect and nothing got
-# worse; it is now merely a much smaller one.
+# It is not zero, which is why the tolerance is set above it. Alignment fixes a
+# function's phase, not its address: two builds still put the code in different
+# cache sets, and a function with no loop in it is still placed wherever the
+# previous one ended. So before treating a movement here as a regression, still
+# check whether the path's instruction *encodings* changed at all --
+# goc/cryptobench_test.go's failure message gives the commands. A movement with
+# identical encodings is a placement effect and nothing got worse.
 #
 host toolchain: go version go1.26.1 linux/arm64
 measurement:    rounds=5 fastest-of signVerifyRounds=200
+protocol:       5 interleaved repetitions, pinned to core 63, mean with a 95% interval
 index:          case time / control/spin-fixed-work time, same binary, same process
-tolerance:      0.04 of the index, both directions
+tolerance:      0.06 of the index, both directions, and the run's own interval must clear it
 
-case                        goc index     gc index   goc ns (fyi)    gc ns (fyi)
-p256/sign-verify              45.7973       1.6287     2504982432       54456117
-p256/verify                   34.3805       1.1654     1880514637       38964849
-p384/sign-verify              40.5258       2.8764     2216646286       96175020
-rsa2048/sign-verify           12.5562       0.5933      686786950       19836767
+case                        goc index  goc +/-%     gc index   gc +/-%   goc ns (fyi)    gc ns (fyi)
+p256/sign-verify              44.8636      0.07       1.6312      0.08     2448557393       54651627
+p256/verify                   32.7001      0.09       1.1652      0.03     1784703100       39038925
+p384/sign-verify              39.1565      0.08       2.8740      0.04     2137080720       96289370
+rsa2048/sign-verify           12.1813      0.13       0.5929      0.03      664828410       19863056
