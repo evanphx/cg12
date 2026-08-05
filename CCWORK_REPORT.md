@@ -620,3 +620,51 @@ does not reach them.
 This is the one number in this gate that is worse than `main` and is not the
 advertised price of the wave.
 
+
+## Does the compile-time cost break CI? Measured, and no.
+
+The 4.5x is the wave's advertised price, but CI has hard `timeout-minutes` on
+every job, so the price was checked against the budget rather than assumed to
+fit. A CI shard was simulated by pinning the job to **4 cores** (`taskset -c 0-3`,
+GitHub's `ubuntu-24.04-arm` runner size) with the same sharding CI uses, and with
+a **cold pack cache** (`CG12_PACK_CACHE` pointed at an empty directory), because a
+warm cache hides the pack build entirely:
+
+    taskset -c 0-3 make test-goc-status-opt STATUS_SHARDS=4 STATUS_SHARD=0
+
+| tree | 4-core shard, cold pack | CI budget |
+|---|---:|---:|
+| `main` 6034f73 | 216.5s | 25 min |
+| branch | **475.0s** | 25 min |
+
+**2.19x, and 7.9 minutes against a 25-minute budget.** Both passed. The reason
+the matrix costs so much less than the 4.5x whole-program figure is that every
+capability links a prebuilt pack, so the module `OptimizeModule` sees is the
+program and not the stdlib closure — which is also why the pack's own cost
+(cold-cache) is the part that grew most.
+
+A warm-cache run of the same shard took 175.4s on the branch and 213.2s on
+`main`; that pair is contaminated by the branch's pack already being in the
+shared cache from an earlier run here, and is recorded only so the cold-cache
+numbers above are not mistaken for the same measurement.
+
+
+### `main` control for item 1's cost
+
+`go test -timeout 60m -parallel 10 -count=1 ./goc/...` on the `main` worktree,
+same box, same flags:
+
+| | `main` 6034f73 | branch | ratio |
+|---|---:|---:|---:|
+| package wall | 1005.152s | 1347.907s | **1.34x** |
+| CPU (user+sys) | 4250.3s | 4740.2s | **1.12x** |
+| peak RSS | 13.60 GiB | 13.52 GiB | 0.99x |
+| failures | 0 | 0 | — |
+
+The suite costs 12% more CPU, not 4.5x, because almost all of it compiles
+*without* `-O` — `auditCorpus` and the corpus runner call `goc.CompileExecutable`
+and never reach `opt.OptimizeModule`. The handful of tests that do optimize
+(`goc/optgcroot_test.go`, `goc/loopalias_test.go`, `runCase(optimized: true)`)
+are long serial compiles, which is why wall clock grew 34% while CPU grew 12%.
+Part of even that is the three corpus programs the merge adds.
+
