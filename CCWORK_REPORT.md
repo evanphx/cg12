@@ -773,7 +773,7 @@ Two things are worse than `main` and neither is a correctness defect:
 Both are one-line changes to a constant and a workflow budget. Neither can
 produce a wrong answer from the compiler.
 
-Branch: **`integration/wave9-gate`**, SHA **(see below)**, pushed to `origin`.
+Branch: **`integration/wave9-gate`**, at **`b841ecf`** plus this line, pushed to `origin` (`ssh://github.com/evanphx/cg12.git`).
 Nothing was pushed to `main`.
 
 **Control ratio 0.9260x (confirming run 0.9259x; claim 0.9262x). Compile-time
