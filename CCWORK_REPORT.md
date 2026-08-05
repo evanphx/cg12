@@ -76,6 +76,12 @@ callee's frame into a caller's, including its GC roots), `deadalloc` and
 the campaign below runs every arm on the whole matrix, corpus, GC reducer, escape
 audits and flate loop rather than reasoning about it.
 
+That guess was half right, in a way worth recording. The third blocker *is*
+`inline`, and it *is* about a frame — but not about GC roots. It is that inlining
+grows a frame at all, in a function whose frame comes out of a fixed runtime
+reserve nothing in cg12 measures. Reasoning about which passes touch GC metadata
+would not have found it; the corpus differential did.
+
 ## 2. The change
 
 `opt.OptimizeModule` no longer consults a size budget at all. `moduleOptimizationOverBudget`
