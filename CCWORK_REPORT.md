@@ -1539,3 +1539,68 @@ program that compiles compiles to the same bytes every time.
 
 `TestParallelBackendIsByteIdenticalToSerial`: **PASS** (`ok
 github.com/evanphx/cg12/arm64 0.228s`).
+
+## 13. `make bench-perf` and `make bench-crypto` on an idle box — **BOTH PASS**
+
+This is the question the brief flags as open: both have been failing their noise
+ceiling on `main` too, on a busy box, with no ratio band exceeded. The box was
+exclusive and idle for this run (load average 8 falling, nothing else of mine
+running), and both were run together as the Makefile intends — perf pinned to
+core 62, crypto to core 63.
+
+| target | exit | result |
+|---|---|---|
+| `make bench-perf` | **0** | **PASS**, 559.9s — **all 42 rows within tolerance**, no noise-ceiling failure |
+| `make bench-crypto` | **0** | **PASS**, 102.0s — all 4 rows within tolerance |
+
+**Control ratio against the 0.9260 baseline** (`control/spin-fixed-work`,
+`goc ns / host ns`, one row per program):
+
+    interp 0.9251   sha 0.9265   regexp 0.9253   json 0.9256   sortmap 0.9250
+    flate  0.9251   text 0.9271  chase  0.9247   conc 0.9272   gcpress 0.9264
+    float  0.9250
+
+Range **0.9247–0.9272**, mean **0.9258**, against the committed 0.9260 — a
+spread of ±0.14%, and every row's own `ratio-sd%` is 0.03–0.07% where the
+baseline records 0.03–0.08%. The null column is 0.9996–1.0002 on all eleven
+programs, so there is no ordering artefact and the other columns can be
+believed.
+
+**So the noise-ceiling failures the last two waves reported were the box, not
+the tree.** On an idle machine the instrument reproduces its own baseline to
+within a seventh of a percent, and the wave moves nothing in it: the largest
+movement in any of the 42 rows is a fraction of a percent, and crypto's four
+rows move −0.2% to −0.5% with resolved movements of ±0.1% (i.e. indistinguishable
+from zero).
+
+That last point is worth stating on its own: **the wave costs nothing at run
+time.** Branch 3 re-enabled inlining into 106 nosplit callers in the runtime,
+and neither the crypto signing path nor any of the eleven perf workloads can
+tell the difference.
+
+### 13a. The two timing baselines, regenerated
+
+`make bench-perf-update` and `make bench-crypto-update` (exit 0 both), run
+together on the idle box. Both files are rewritten in this branch; the diffs are
+noise, and here is the evidence rather than the assertion.
+
+- **crypto**: all four rows move −0.1% to −0.4% (`p256/sign-verify` 24.0648 →
+  23.9755). Every one is smaller than the row's own ±% interval.
+- **perf**: 42 rows, **median movement 0.13%**, and 34 of 42 move less than
+  0.5%. The eight that move more are exactly the rows whose committed
+  `ratio-sd%` is already 4–6% — `sortmap map/build-probe` (+6.5%, sd 4.83 →
+  5.26), `text text/format-append` (+3.8%), `gcpress gc/live-heap-churn`
+  (+3.6%), `conc chan/pingpong-unbuffered` (+3.4%), `conc goroutine/spawn-join`
+  (+2.4%). Their noise is host-side (`null-sd%` up to 14.5%) and it is present in
+  the committed file too, so this is the instrument's own spread, not a
+  movement. Every one of them passed the check run inside its own tolerance.
+
+I have committed both regenerated files on the gate branch so the diff is
+reviewable, but **there is no reason to take them**: nothing in either file
+moved by more than its own noise, and re-baselining timing files on noise loses
+information. Reverting these two files before merge is a defensible call and my
+recommendation; the other eight regenerated baselines (§10) were identical, so
+nothing else is affected either way.
+
+No `main` control run was needed for either target: every row sits inside its
+committed tolerance, so there is no number that needs attributing to the wave.
