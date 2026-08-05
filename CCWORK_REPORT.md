@@ -1213,3 +1213,329 @@ Neither `stdlib/` nor `goc/testdata/` is touched by any of the three branches,
 so the byte-identity comparison in §8 compiles identical sources with two
 compilers.
 
+
+## 1. THE FINDING: does `main` already run over its nosplit reserve? — **YES, CONFIRMED**
+
+Measured by this job, not taken from the branch.
+
+The method matters, so it is stated first. `main`'s compiler contains no stack
+check, so it cannot report chain heights; the merged compiler can, but it also
+inlines into nosplit callers, which changes the code. `GOC_NO_NOSPLIT_INLINE=1`
+disables that pass and nothing else. So the measurement is only of `main` if
+that configuration reproduces `main`'s code exactly — **and it does, byte for
+byte**:
+
+| build of `goc/testdata/runtime_lock_osthread.go` | sha256 of the executable |
+|---|---|
+| `goc-main` (5b085d2), `-O` | `f5d5916dffbb8cc1…` |
+| merged + `GOC_NO_NOSPLIT_INLINE=1`, `-O` | `f5d5916dffbb8cc1…` — **identical** |
+| `goc-main` (5b085d2), no `-O` | `a7e7c4015e111722…` |
+| merged + `GOC_NO_NOSPLIT_INLINE=1`, no `-O` | `a7e7c4015e111722…` — **identical** |
+
+Both compilers were built from the same absolute path
+(`/home/evan/.ccwork/ws/wave10-gate/repo`), so nothing in the comparison turns
+on an embedded path.
+
+The heights that configuration reports (`GOC_DEBUG_NOSPLIT=heights`,
+`GOC_NOSPLIT_LIMIT=100000000` so the walk runs but nothing is rejected), against
+the 920-byte reserve:
+
+| arm | chains over 920 | deepest |
+|---|---:|---|
+| `main`, `-O`, whole program | **21** | **1824** `.Lruntime_asm_arm64_callRet` |
+| `main`, no `-O`, whole program | **48** | **3024** `runtime_doubleCheckTypePointersOfType` |
+
+and the function the whole line of work started from:
+
+    runtime_mcache_nextFree   1104   (-O)      — 184 bytes over, nothing inlined
+    runtime_mcache_nextFree   1216   (no -O)
+
+**The claim is confirmed.** `main` — today, unmodified, with no inlining into
+any nosplit caller — has tens of nosplit chains over the reserve, the deepest at
+3024 bytes (3.3x the reserve), and `mcache.nextFree` is over by exactly the 184
+bytes the branch reports *before anything is inlined into it*. The split-stack
+crash was one instance of a standing condition, not something the inliner
+created.
+
+Two corrections of detail, neither changing the conclusion:
+
+- The brief's headline numbers are **23** (`-O`) and **50** (no `-O`). On this
+  program I measure **21** and **48**. The register's own text gives ranges —
+  "every optimized build agrees on 22-24 over-limit chains; every unoptimized
+  one has 48-50" — over twenty configurations (seven pack roots ± `-O` and four
+  whole programs ± `-O`). My single whole-program build sits one below the
+  bottom of the `-O` range and inside the unoptimised one. The count is
+  configuration-dependent; the condition is not.
+- The 3024 deepest is an **unoptimised** figure. Under `-O`, which is how the
+  capability matrix and the crash both ran, the deepest is 1824.
+
+Worth stating plainly because the register does not: **`main` would fail the
+merged tree's own budget** if the debt register were empty. That is the finding,
+inverted — the wave does not introduce a passing build, it introduces the
+instrument that says the tree has been over its reserve all along, and then
+freezes what it found.
+
+One judgement in the instrument itself, flagged not faulted: the limit is 920,
+not Go's 792, on the argument that cg12's guarded prologue always subtracts its
+frame before comparing (`arm64/nosplit.go:23-47`). I read the derivation and it
+is sound *given* `goStackPrologue`; it is also 128 bytes of reserve that Go's
+own linker does not spend, and the file records 58 further chains between 792
+and 920 that a Go-strict limit would reject. If `goStackPrologue` ever grows
+Go's small-frame shortcut, `stackSmallReserved` must go to 0 in the same commit.
+That coupling is documented in the constant's comment but not enforced by a
+test.
+
+## 2. Is the debt register a floor or a licence? — **A FLOOR. Confirmed in code.**
+
+Four independent places have to be right for the register not to become
+spendable headroom. All four are:
+
+1. `stackcheck.Report.Headroom` is computed as `w.headroom(config.Limit)`
+   (`stackcheck.go:381`), and `walker.headroom` (`:707`) subtracts from the
+   passed limit only. It never consults `Config.Recorded`. Recorded heights are
+   used in exactly one place, `limitFor` (`:426`), which is reached only from
+   the over-limit test.
+2. The budget the **inliner** is handed is built by
+   `arm64.newNoSplitFrameBudget`, which calls `stackcheck.Check` with
+   `Config{Limit, CallSize}` and **no `Recorded` field at all**
+   (`arm64/nosplit_measure.go:76`). The inliner's `Headroom` therefore cannot
+   see the register even in principle.
+3. `opt.InlineIntoNoSplitCallers` takes `Headroom(name) - 16` and refuses any
+   caller with `allowance <= 0`, so a function on an over-limit chain (negative
+   headroom) is refused outright — which is why `mcache.nextFree` gets nothing
+   and is reported under "no headroom".
+4. Anything worse than recorded is rejected: `limitFor` returns the recorded
+   height and `Check` fails on `walk(name) > limitFor(name)` — strictly
+   greater, so recorded height passes and recorded+1 fails. `Recorded` is
+   attached only when `limit == noSplitLimit` (`arm64/nosplit.go:219`), so a
+   test that lowers the limit cannot be handed entries that outrank it.
+
+The safety property that matters is structural rather than per-entry: a function
+*interior* to an over-limit chain also has negative headroom, because
+`headroom` charges both the frames above it (`depthAbove`) and the chain below
+it (`walk`). There is no way to grow a frame anywhere on an over-limit chain.
+
+Covered by `stackcheck.TestRecordedDebtAllowsItsOwnHeightAndNotOneByteMore` and
+`TestRecordedDebtDoesNotWidenHeadroom`, plus
+`opt.TestNoSplitInlineRefusesACallerAlreadyOverTheReserve` — all three run in
+§ `make test-unit` below.
+
+## 3. `make test-unit` — **PASS**
+
+`make test-unit`, 38 packages (`go list ./...` minus `goc`, `cmd/goc`, `difftest`,
+`cc`), exit **0**, zero `FAIL` lines. Includes `stackcheck` (0.033s), `opt`
+(0.955s), `arm64` (9.497s), `ir`, `link`, `obj`, `plan9asm` — every package the
+wave touches. This is the run that carries
+`TestRecordedDebtAllowsItsOwnHeightAndNotOneByteMore`,
+`TestRecordedDebtDoesNotWidenHeadroom` and
+`TestNoSplitInlineRefusesACallerAlreadyOverTheReserve` from §2.
+
+## 4. Regenerating `arm64/nosplit_debt.go` from the merged tree — **IDENTICAL, 50/50**
+
+Regenerated exactly as the file documents: the shipping compiler
+(`GOC_DEBUG_NOSPLIT=heights`, real 920 limit, register active, `CG12_NOCACHE=1`
+so no pack is served from cache) over 22 configurations — seven capability
+matrix pack roots (`nil`, `net/http`, `net/smtp`, `crypto/x509`, `crypto/ecdsa`,
+`crypto/ecdh`, `crypto/hpke`) with and without `-O`, and whole-program builds of
+`runtime_lock_osthread`, `runtime_gc_concurrent_mark`,
+`stdlib_http_tls_client_server`, `stdlib_compress_zlib_lzw` with and without
+`-O`. Maximum height per symbol over all 22.
+
+- **All 22 builds exit 0.** The ratchet holds everywhere it was claimed to.
+- The regenerated register has **50 entries, the same 50 names, and every one at
+  the same height** as the committed file. Nothing to commit; no drift.
+- Per-configuration counts of chains over 920:
+
+| configuration | over-limit chains |
+|---|---:|
+| pack roots, no `-O` (7) | 48 (runtime-only) – 50 |
+| whole programs, no `-O` (4) | 48 – 50 |
+| pack roots, `-O` (7) | **25 – 27** |
+| whole programs, `-O` (4) | 21 – 23 |
+
+One correction to the register's own text, which says "every optimized build
+agrees on 22-24 over-limit chains": the optimized **pack** builds have 25-27.
+That is not a regression from the wave — I re-ran all seven optimized pack roots
+with `GOC_NO_NOSPLIT_INLINE=1` and got **the same counts, and byte-for-byte the
+same heights, for every one of the 50 chains** (`diff` over the height dumps: no
+differences in any of the 7 configurations). The optimized-pack figure was
+simply understated in the comment. The recorded heights themselves are
+unaffected — they come from the unoptimised builds, which are the worst case.
+
+**The inliner provably does not grow any over-limit chain.** That is the
+strongest statement available here and it is measured, not argued: same chains,
+same heights, with and without the new pass.
+
+What the pass does buy, on `runtime_lock_osthread -O`
+(`GOC_DEBUG_NOSPLIT=inline`): **106 callers accepted, 1 reverted after
+measuring, 201 with no headroom at all**. Most accepted callers *shrink*
+(`atomic.Pointer.Load` 32 → 16) because inlining removes the outgoing argument
+area. The 201 refused is the standing cost of the debt.
+
+### One structural caveat, not observed firing
+
+`opt.InlineIntoNoSplitCallers` computes the budget **once** and then walks every
+caller, spending `Headroom(name) - 16` per caller without recomputing. Two
+nosplit functions on the *same* chain can therefore each be granted the same
+slack. For a chain already over the reserve this cannot bite (every member has
+negative headroom). For a chain under it, the double spend would push the chain
+over 920 and the build would fail — unless the chain's root happens to be a name
+in the debt register whose recorded height came from the unoptimised worst case,
+in which case the register would absorb the growth silently. That is the one
+place the register could act as a licence.
+
+It does not fire on this tree: the height comparison above shows every recorded
+chain at exactly its no-inline height in all seven optimized pack builds. It is
+worth a test (two nosplit callers on one chain, each with headroom, both
+inlined) before someone changes the inliner's ordering. Not a merge blocker.
+
+## 5. Capability matrix, both arms, `-v` — **368/368 each, PASS SETS IDENTICAL**
+
+`go test -run '^TestARM64RuntimeCapabilityStatus$' ./cmd/goc/... -v` with
+`-runtime-status-shards=1`, and the same plus `-runtime-opt`.
+
+| arm | exit | subtests PASS | subtests FAIL | wall |
+|---|---|---:|---:|---:|
+| default | **0** | **368** | **0** | 102.113s |
+| `-O` | **0** | **368** | **0** | 144.398s |
+
+The two `--- PASS` name sets were diffed against each other: **identical, 368
+names, no difference in either direction**. Each arm carries exactly one
+`EXPECTED FAILURE` (`runtime_panic_print_string.go`) and zero
+`KNOWN GAP NOW PASSES`, matching what the branch reported.
+
+The `-O` arm is **1.41x** the default arm's wall clock (144.4s vs 102.1s), in
+line with the 1.39x the branch measured and far below the wave-9 gate's 2.21x.
+
+## 8. `go test -timeout 60m -parallel 10 ./goc/...` — **PASS, 0 failures**
+
+    ok  github.com/evanphx/cg12/goc  1245.971s      exit 0
+
+20.8 minutes, no `FAIL` line of any kind. That run carries the four corpus
+audits in check mode (`TestAllocationCensus`, `TestFrameEscapeAudit`,
+`TestLoopAliasAudit`, `TestEscapeShadowPlacement`) against the committed
+baselines, so §"audits" below is this run plus the explicit repeats.
+
+`TestDeriveClassifiesEveryGenField`, which the brief flags as having failed in
+five waves: **PASS**, re-run on its own to be sure
+(`--- PASS: TestDeriveClassifiesEveryGenField (0.00s)`). No unclassified `gen`
+field, so there is nothing to name. This is expected on inspection: the test
+fails when a field is added to `gen` without being classified as
+whole-compilation or per-function, and none of the three branches adds a field
+to `gen` — the wave does not touch `goc/derive.go` or the front end at all.
+
+## 9. THE THING I CANNOT EXPLAIN AWAY: the merged tree **fails to build a corpus program that `main` builds**
+
+Found by `scripts/determinism-check.sh -corpus` (unoptimised), which is the only
+guard in the tree that drives all 406 programs all the way to a written object.
+
+    $ goc -o out goc/testdata/stdlib_os_exec_echo.go        # merged tree
+    goc: nosplit frame budget: nosplit stack overflow:
+        syscall_runtime_AfterForkInChild -> runtime_clearSignalHandlers ->
+        runtime_setsig -> runtime_sigaction -> runtime_throw ->
+        runtime_fatalthrow -> runtime_systemstack
+      976 bytes of nosplit frames against a 920-byte limit, 56 over
+            80  syscall_runtime_AfterForkInChild
+            64  runtime_clearSignalHandlers
+           128  runtime_setsig
+           464  runtime_sigaction
+           128  runtime_throw
+            96  runtime_fatalthrow
+            16  runtime_systemstack
+    exit status 1
+
+    $ goc-main -o out goc/testdata/stdlib_os_exec_echo.go   # main 5b085d2
+    exit status 0
+
+Attribution, measured:
+
+- **The chain is not created by the wave.** With `GOC_NO_NOSPLIT_INLINE=1` —
+  the configuration proved byte-identical to `main` in §1 — the build fails
+  with the identical chain and the identical 976 bytes. `main` compiles this
+  program today and ships a 976-byte nosplit chain through the fork-in-child
+  path.
+- **`syscall_runtime_AfterForkInChild` is not in the debt register.** The
+  register was generated from 22 configurations (7 pack roots ± `-O`, 4 whole
+  programs ± `-O`), none of which reaches `os/exec`'s fork path. It is a 51st
+  chain the generation method never saw.
+- It is unoptimised-only: the same program at `-O` builds clean (mem2reg
+  shrinks `runtime_sigaction`'s 464-byte frame below the line).
+- Nothing else in the tree catches it. The corpus audits compile to IR and stop;
+  the budget runs in `compileToObjectWithBundle`, so a test that never writes an
+  object never runs it. The capability matrix passes both arms because no
+  capability program forks. `go test ./goc/...` passes. Only the determinism
+  corpus sweep builds all 406 to completion, and it is not part of `make test`.
+
+**Consequence: on the merged tree, `goc` without `-O` cannot compile a Go
+program that uses `os/exec`.** That is a hard build failure — the budget
+deliberately has no warning mode — on a program `main` compiles. One of 406
+corpus programs today; the shape (anything importing `os/exec`, or `syscall`'s
+fork path) is not exotic.
+
+This is the correct behaviour of the instrument and a regression in the tree's
+buildability at the same time. The fix is a one-line register entry
+(`"syscall_runtime_AfterForkInChild": 976`) *if* one accepts the register's
+premise, or a frame shrink on `runtime_sigaction` if one does not — but it is
+a decision for the wave's author, and the register's generation recipe should
+grow the program that exposes it, or the corpus, as an input.
+
+## 10. Regenerating the baselines from the merged tree — **ALL IDENTICAL**
+
+Every file regenerated from the merged tree with its own `-update-*` flag, in
+one sitting, then `git status`:
+
+| file | regenerated | diff against committed |
+|---|---|---|
+| `alloc_census_baseline.txt` | `-update-alloc-census-baseline` (257s) | **none** |
+| `frame_escape_baseline.txt` | `-update-frame-escape-baseline` | **none** |
+| `loop_alias_baseline.txt` | `-update-loop-alias-baseline` | **none** |
+| `escape_shadow_baseline.txt` | `-update-escape-shadow-baseline` | **none** |
+| `slog_allocations_baseline.txt` | `-slog-allocations -update-slog-allocations` (host go1.26.1) | **none** |
+| `escape_gc_differential.txt` | `-escape-gc-differential -update-…` | **none** |
+| `escape_gc_reason_differential.txt` | `-escape-gc-reason-differential -update-…` (236s) | **none** |
+| `arm64/nosplit_debt.go` | 22-configuration sweep, §4 | **none** (50/50 identical) |
+| `perf_suite_baseline.txt` | `make bench-perf-update` | see §13 |
+| `crypto_signing_bench_baseline.txt` | `make bench-crypto-update` | see §13 |
+
+All mtimes moved, so every file really was rewritten; `git status` afterwards
+shows only this report as modified. **The merged tree reproduces every
+committed baseline byte for byte** — no placement moved, no escape decision
+moved, no reason string moved, no frame publication appeared or disappeared, and
+the goc-vs-gc differential is unchanged (permissive 1483 lines, pessimistic 401;
+reason differential 315/85).
+
+That is the strongest available statement that branch 1's "same passes, same
+changes, 88.9% fewer invocations" claim did not alter a single optimisation
+outcome anywhere in the corpus, and that branch 3's inlining changes nothing the
+front end or the escape analysis can see.
+
+## 11. Audits (four, census twice) and determinism — **PASS, with the one exception above**
+
+Audits, check mode, run twice with `-count=1` so the second run is a real
+execution and not a cached result:
+
+| audit | run 1 | run 2 (`-count=1`) |
+|---|---|---|
+| `TestAllocationCensus` | **PASS** (244.5s) | **PASS** (182.6s) |
+| `TestFrameEscapeAudit` | **PASS** | **PASS** |
+| `TestLoopAliasAudit` | **PASS** | **PASS** |
+| `TestEscapeShadowPlacement` | **PASS** | **PASS** |
+
+Both runs' census and shadow diagnostics are **byte-identical to each other**
+(203,220 front-end placements, 5,706 distinct sites, 810 disagreement sites,
+both times). Plus the same four inside `go test ./goc/...` — three passes total.
+
+Determinism, `scripts/determinism-check.sh -corpus`, 406 programs × 4 rounds,
+24 workers:
+
+| arm | result | exit |
+|---|---|---|
+| unoptimised | **reproducible=405 varying=0 failed=1** | 1 |
+| `-O` | **reproducible=406 varying=0 failed=0**, 0 layout-only residues | 0 |
+
+**Zero non-determinism in either arm.** The unoptimised non-zero exit is the one
+compile failure of §9 (`stdlib_os_exec_echo.go`), not a varying image. Every
+program that compiles compiles to the same bytes every time.
+
+`TestParallelBackendIsByteIdenticalToSerial`: **PASS** (`ok
+github.com/evanphx/cg12/arm64 0.228s`).
