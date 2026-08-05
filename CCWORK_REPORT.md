@@ -1981,3 +1981,203 @@ re-baselining a timing file on noise loses the information it was cut for on an
 idle box. The other eight regenerated baselines were byte-identical, so nothing
 else is affected either way.
 
+
+## 6. Guards
+
+### 6a. Determinism, unoptimised corpus — **406/406, 0 failed** (this is the one that matters)
+
+    scripts/determinism-check.sh -corpus -j 30      (406 programs x 4 rounds)
+    reproducible=406 varying=0 failed=0 of 406 over 4 rounds
+    content varies between rounds: 0
+    image varies, content identical (layout only): 0
+    exit 0
+
+The gate's run was `reproducible=405 varying=0 failed=1`, the failure being
+`stdlib_os_exec_echo.go`. **The failure is gone and nothing else moved.**
+
+
+### 6b. Crash loops and GC reducers — **1080 runs, 0 failures**
+
+Run on an idle box (load average under 1), 8 at a time. Both bench programs
+`panic` on a wrong answer, so these are correctness loops and not only crash
+loops.
+
+| loop | runs | `GOGC` | failures |
+|---|---:|---|---:|
+| `placement_bench/flate` `-O` | 250 | 100 | **0** |
+| `placement_bench/flate` `-O` | 250 | 10 | **0** |
+| `placement_bench/p256` `-O` | 100 | 10 | **0** |
+| `runtime_lock_osthread` `-O` | 400 | 100 | **0** |
+| GC reducer `runtime_gc_promoted_local_root` `-O` | 20 | 100 | **0** |
+| GC reducer `runtime_gc_promoted_local_root` `-O` | 20 | 10 | **0** |
+| GC reducer `runtime_gc_type_mask_padding` `-O` | 20 | 100 | **0** |
+| GC reducer `runtime_gc_type_mask_padding` `-O` | 20 | 10 | **0** |
+
+### 6c. Package tests for everything this branch touches — **PASS**
+
+    ok  github.com/evanphx/cg12/opt         0.937s
+    ok  github.com/evanphx/cg12/stackcheck  0.005s
+    ok  github.com/evanphx/cg12/arm64       9.966s
+
+`arm64` carries `TestParallelBackendIsByteIdenticalToSerial` and the seven new
+sharing/charging tests; `opt` carries the two new double-spend tests and
+`TestNoSplitInlineRefusesACallerAlreadyOverTheReserve`; `stackcheck` carries
+`TestRecordedDebtAllowsItsOwnHeightAndNotOneByteMore` and
+`TestRecordedDebtDoesNotWidenHeadroom`. (`make test-unit` and
+`go test ./goc/...` were not run, as instructed.)
+
+
+## 7. The register is still a floor, not a licence — re-verified, including for the new entry
+
+The gate's four properties, re-checked on this tree, and none of them touched by
+the widened recipe or by `Charge`:
+
+1. `stackcheck.Report.Headroom` is `w.headroom(config.Limit)`
+   (`stackcheck.go:381`) and `walker.headroom` subtracts from the passed limit
+   only. `Config.Recorded` is read in exactly one place in the whole package,
+   `limitFor` (`:426`), reached only from the over-limit test. **Unchanged** --
+   this branch does not modify `stackcheck` at all.
+2. The inliner's budget is still built with `Config{Limit, CallSize}` and **no
+   `Recorded` field** (`arm64/nosplit_measure.go`). `Charge` only ever *subtracts*
+   from what `Headroom` returns, so it cannot open a door here.
+3. `Recorded` is still attached only when `limit == noSplitLimit`
+   (`arm64/nosplit.go:219`), so a test that lowers the limit cannot be handed
+   entries that outrank it.
+4. Recorded height passes, recorded+1 fails.
+
+Points 3 and 4 checked live on the **new** entry rather than argued. Setting it to
+975 -- one byte under the height it actually is -- and rebuilding:
+
+    goc: nosplit frame budget: nosplit stack overflow: syscall_runtime_AfterForkInChild -> ...
+      976 bytes of nosplit frames against a 975-byte limit, 1 over
+    exit status 1
+
+And every member of the new chain has negative headroom, so no pass can grow any
+of them (`GOC_DEBUG_NOSPLIT=headroom`, unoptimised):
+
+    -56  syscall_runtime_AfterForkInChild
+    -56  runtime_clearSignalHandlers
+   -488  runtime_setsig
+   -488  runtime_sigaction
+  -2104  runtime_throw / runtime_fatalthrow / runtime_systemstack
+
+The entry buys the chain the right to be exactly as deep as it already is, and
+nothing else.
+
+One more check the widened recipe makes possible and the old one did not: the
+register was regenerated twice, once with the double-spend fix and once without,
+over all 1638 configurations each time. **Both runs produce the same 51 entries at
+the same 51 heights.** The `Charge` change reduces inlining at `-O` and moves no
+recorded chain, which is the statement that matters -- a tightening that changed
+the floor would be a floor that was never one.
+
+
+### 6d. Determinism, `-O` corpus — **406/406, 0 failed**
+
+    scripts/determinism-check.sh -corpus -j 30 -O   (406 programs x 4 rounds)
+    failed to compile: 0
+    content varies between rounds: 0
+    image varies, content identical (layout only): 0
+    reproducible=406 varying=0 failed=0 of 406 over 4 rounds
+    exit 0
+
+Zero non-determinism in either arm, and now zero build failures in either arm.
+The `Charge` change moves generated code at `-O` (§3) and the `-O` corpus is
+still byte-reproducible across four rounds, including the layout-residue check.
+
+
+### 6e. Capability matrix, both arms, `-v` — **368/368 each, PASS SETS IDENTICAL**
+
+| arm | exit | subtests PASS | subtests FAIL | `EXPECTED FAILURE` | `KNOWN GAP NOW PASSES` | wall |
+|---|---|---:|---:|---:|---:|---:|
+| default | **0** | **368** | **0** | 1 | 0 | 71.1s |
+| `-runtime-opt` | **0** | **368** | **0** | 1 | 0 | 140.1s |
+
+The two `--- PASS` name sets were diffed against each other: **identical, 368
+names, no difference in either direction**. The one `EXPECTED FAILURE` is
+`runtime_panic_print_string.go` in both arms, matching the gate.
+
+Note that `stdlib_os_exec_echo.go` is one of the 368 in each arm and passed
+before this branch too -- the pack split hides the chain from the per-module walk
+(gate §9a). It is not the capability matrix that establishes the fix; §6a and §8
+are.
+
+
+### 6f. The four corpus audits, check mode — **PASS, two real corpus executions**
+
+    go test ./goc/ -run '^(TestAllocationCensus|TestFrameEscapeAudit|TestLoopAliasAudit|TestEscapeShadowPlacement)$' -count=1
+    --- PASS: TestAllocationCensus      (182.00s)
+    --- PASS: TestEscapeShadowPlacement (0.00s)
+    --- PASS: TestFrameEscapeAudit      (0.00s)
+    --- PASS: TestLoopAliasAudit        (0.00s)
+    ok  github.com/evanphx/cg12/goc  182.341s      exit 0
+
+The three at 0.00s share the corpus compile with whichever audit runs first, so
+that alone would not say they did anything. Re-run without the census, with
+`-count=1`, so a different one pays for the corpus:
+
+    --- PASS: TestEscapeShadowPlacement (182.05s)
+    --- PASS: TestFrameEscapeAudit      (0.00s)
+    --- PASS: TestLoopAliasAudit        (0.00s)
+    ok  github.com/evanphx/cg12/goc  182.422s      exit 0
+
+Two real corpus executions, four audits green in both, against the committed
+baselines -- which this branch does not touch. (`go test ./goc/...` in full was
+not run, as instructed; these are the four named audits only.)
+
+## 8. `goc/testdata/stdlib_os_exec_echo.go` — **builds and runs, both ways**
+
+    CG12_NOCACHE=1 goc     -o out goc/testdata/stdlib_os_exec_echo.go   exit 0   (10,129,264 bytes)
+    CG12_NOCACHE=1 goc -O  -o out goc/testdata/stdlib_os_exec_echo.go   exit 0   (13,082,352 bytes)
+
+and both binaries run to exit 0. `CG12_NOCACHE=1` matters: it is what forces the
+whole-program build, which is the only mode that sees all seven frames of the
+chain at once.
+
+
+## 9. Verdict
+
+Everything below ran to completion on this branch's tree and was watched. Nothing
+is unverified.
+
+| # | check | required | result |
+|---|---|---|---|
+| 1 | why 22 configurations missed it | explain | **module shape, not count**: 14 pack builds structurally cannot see a chain rooted above the runtime's own reachability (measured: 0 occurrences of `syscall_runtime_AfterForkInChild` and `clearSignalHandlers` in the runtime-only pack); the whole-program arm was 4 of 406 programs, and exactly 1 of the 406 imports `os/exec` |
+| 2 | widened recipe | every buildable configuration | `analysis/nosplitdebt` + `scripts/nosplit-debt-regen.sh`: **1638 builds** (14 pack, 812 whole-program, 812 pack-split, each ±`-O`), all compiling, ~10 min |
+| 3 | what it finds that the old one did not | report the count | **exactly 1** — `syscall_runtime_AfterForkInChild: 976`. The original 22 configurations, re-run inside the sweep, reproduce the committed 50 **exactly** |
+| 4 | shrink or record | prefer the shrink | **recorded.** The shrink was built and measured: extracting the `_cgo_sigaction` branch takes 976 -> **944**, still over. Splitting one frame on a chain into two that stack does not shorten the chain, and what is left is a six-line `runtime.sigaction` at 368 bytes without mem2reg |
+| 5 | register still a floor | 4 properties intact | **intact**, re-checked in code, and checked live on the new entry: at 975 the build fails "1 over"; every member of the chain has negative headroom |
+| 6 | the structural caveat | close if cheap | **closed, and it was firing** — 106 accepted callers becomes 101 at `-O`. `opt.FrameBudget.Charge`, 9 new tests, negative control run |
+| 7 | `stdlib_os_exec_echo.go` | builds ±`-O` | **exit 0 both**, and both binaries run |
+| 8 | `determinism-check.sh -corpus`, unoptimised | clean | **reproducible=406 varying=0 failed=0**, exit 0 (gate: 405 + 1 failure) |
+| 9 | `determinism-check.sh -corpus -O` | clean | **reproducible=406 varying=0 failed=0**, exit 0, 0 layout residues |
+| 10 | capability matrix, both arms | 368/368 | **368/368 each**, 0 FAIL, pass sets **identical** |
+| 11 | GC reducer | 0/20 at `GOGC=10` and default | **0/20 x 2 programs x 2 `GOGC`** |
+| 12 | crash loops | flate >=250, p256 >=100 @`GOGC=10`, lock_osthread >=400 | **1080 runs, 0 failures** |
+| 13 | four corpus audits | pass | **PASS**, two real corpus executions |
+| 14 | two timing baselines | revert | **reverted** to `2438919`; `git diff 2438919` empty for both |
+| — | `opt`, `stackcheck`, `arm64` package tests | pass | **ok** (incl. `TestParallelBackendIsByteIdenticalToSerial`) |
+
+### What is left, and is not this branch's to fix
+
+- **The budget is a per-module check and its verdict is not invariant across the
+  pack split** (gate §9a). The whole-program arm of the recipe now covers every
+  corpus program, so the register describes the union of what any single module
+  can contain -- but the *linked* image of a pack-split build carries frames from
+  two modules, and no walk measures that composition. The split arm found no
+  maximum over 812 configurations, so nothing is known to be wrong; the guarantee
+  is just narrower than it reads.
+- **The unoptimised whole-program corpus build is still not part of `make test`.**
+  It is now one `scripts/nosplit-debt-regen.sh` away from being runnable in ten
+  minutes, and `scripts/determinism-check.sh -corpus` is still the only thing in
+  the tree that drives every program to a written object. The gate's
+  recommendation to put one of them in CI stands.
+- **`stackSmallReserved` and `goStackPrologue` are still coupled by a comment and
+  not by a test** (gate §1). Untouched here.
+
+### Merge
+
+The one thing the gate found that stopped the merge is fixed, by the route it
+asked for: the recipe first, then the entry. `goc` without `-O` compiles every
+one of the 406 corpus programs again, and every guard the brief named is green.
+
