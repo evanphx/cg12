@@ -173,7 +173,7 @@ var passes = [...]pass{
 }
 ```
 
-59 entries, executed by `Compile(f *Func)` as a plain `for _, p := range passes`
+57 entries, executed by `Compile(f *Func)` as a plain `for _, p := range passes`
 (compile.go:439). **One traversal, no outer loop, no convergence test.** It is a
 fixed ordered list, exactly as the brief says.
 
@@ -181,8 +181,11 @@ Repetition is spelled out, with a distinct name per instance so it can be talked
 about: `deadcode` appears **8 times** (`early deadcode`, `pre-opt deadcode`,
 `opt deadcode`, `gcse deadcode`, `generic deadcode`, `lowered deadcode for cse`,
 `lowered deadcode`, `late deadcode`); the rewrite driver `opt` appears 3 times
-(`opt`, `middle opt`, `late opt`); `cse` 3 times; `fuse`, `copyelim` and
-`nilcheckelim` twice each.
+(`opt`, `middle opt`, `late opt`); the CSE function twice (`generic cse`,
+`lowered cse`, alongside a third zero-argument variant `zero arg cse`);
+`copyelim` twice; and a `fuse` and a `nilcheckelim` at each of two points
+(`early fuse`/`late fuse`, `nilcheckelim`/`late nilcheck`). Counted from the
+array: 8 `fn: deadcode`, 3 `fn: opt`, 2 `fn: cse`.
 
 The black magic is not only commented, it is **machine-checked**. `var passOrder
 = [...]constraint{…}` (compile.go:526) is a list of "a must come before b" pairs
@@ -461,9 +464,11 @@ time.** Two honest limits on that sentence. First, sensitivity: per-row
 `detect%` runs from 5.0% to 45%, so this suite would not see a uniform 2-3%
 regression, and the binary *is* 0.29% larger. Second, the run failed its noise
 gate — not on any ratio, but because `chase/pointer-node`'s one-repetition spread
-was 13.65% against 1.27% in the baseline, and that is my fault: I ran a
-`go build` and a `goc` compile on the box during its first two repetitions.
-`chase` is the memory-latency workload and is the one that would notice. The
+was 13.65% against 1.27% in the baseline. At least part of that is mine: I ran a
+`go build` and a `goc` compile on this box during its first repetitions, and
+`chase` is the memory-latency workload, the one that would notice. (This is a
+shared 64-core machine; the `perfunc3` run in §5.7 hit the same gate with no help
+from me at all.) The
 verdict table above is unaffected in direction (every row passed *despite* the
 extra noise, and noise can only hide a difference, not manufacture agreement),
 but the `chase/*` rows specifically should be read as "not measured cleanly".
