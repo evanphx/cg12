@@ -677,3 +677,24 @@ bisection, not as a fallback the tree relies on.
   nosplit fix. It is what found the third blocker. Re-running it on B would take
   another corpus pass in each arm; the matrix, the sweep and the 400-run
   `runtime_lock_osthread` loop cover B instead.
+
+### The perf baseline is checkable, not just written
+
+The re-cut baseline was verified by a second, independent run — build the eleven
+programs again from scratch, time them again, compare against the committed file:
+
+    --- PASS: TestPerformanceSuite (856.91s)
+
+The control reproduces to four decimal places across the two runs (`interp`
+0.9269 then 0.9263; `sha` 0.9270 then 0.9272; `regexp` 0.9249 then 0.9250). The
+baseline was written from a measurement and then held to by a run that did not
+produce it, which is the property `make bench-perf` needs from it.
+
+### Guards re-run on the fixed tree (B)
+
+| guard | `GOGC=10` | default `GOGC` |
+|-------|-----------|----------------|
+| `runtime_gc_type_mask_padding.go` | **0 / 20** | **0 / 20** |
+| `runtime_gc_promoted_local_root.go` | **0 / 20** | **0 / 20** |
+| `runtime_opt_promoted_interface_root.go` | **0 / 20** | **0 / 20** |
+| `runtime_opt_loop_carried_root.go` | **0 / 20** | **0 / 20** |
