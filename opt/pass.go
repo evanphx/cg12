@@ -30,9 +30,11 @@ type Pass interface {
 // fixpoint it had already reached.
 //
 // The rule that makes skipping sound: every pass entered through [FuncPass] is a
-// deterministic function of the one function it is handed -- the transform's
-// signature is func(*ir.Func) bool and nothing in the default pipeline reaches
-// past it. So if a pass ran on f and reported no change, and no pass has changed
+// deterministic function of the one function it is handed. The transform's
+// signature is func(*ir.Func) bool, and the only module state any of them reads
+// through it is ir.Module.SymAttrs -- LoadElim and DeadAlloc consult it through
+// isAtomicPointerStore -- which the front end writes once and no pass ever
+// touches. So if a pass ran on f and reported no change, and no pass has changed
 // f since, running it again would report no change again. Skipping a visit that
 // provably cannot change anything cannot change the compiler's output, and the
 // determinism and byte-identity checks say it does not.

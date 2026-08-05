@@ -426,3 +426,95 @@ attempted, and the reasons differ.
    `clean` seven passes deep, re-entered after every inlining round — is the
    thing that made the tracking worth 2.3x, and it may be the wrong shape to
    begin with. Nothing here presumes an answer.
+
+---
+
+## 10. `make bench-perf` — and why it needed a second run
+
+**The perf suite's eleven programs compile to byte-identical executables on this
+branch and on `main` 5b085d2.** Checked directly:
+
+    placement_bench/{interp,sha,regexp,json,sortmap,flate,text}
+    perf_bench/{chase,conc,gcpress,float}
+
+all eleven IDENTICAL. So `make bench-perf` on this branch is timing the same
+binaries `main` would produce, and any movement it reports is the machine.
+
+### Run 1 — no regression, but the run does not gate
+
+`--- FAIL: TestPerformanceSuite (830.82s)`. The failure is **not** a ratio
+regression. The only assertion that fired is the suite's own noise gate:
+
+    chase/l1-resident      ratio 1.1018, one-repetition spread 20.3% (ceiling 15.0%), null spread 29.8%
+    gcpress/gc/pointer-write  ratio 10.5738, one-repetition spread 33.1% (ceiling 15.0%), null spread 4.2%
+
+No row failed its tolerance band. The control:
+
+| | mean `control/spin-fixed-work` ratio over 11 programs |
+|---|---:|
+| committed baseline | **0.9260** |
+| this run | **0.9225** |
+
+0.4% *below* the baseline, which is the good direction, and far inside any band.
+
+The run was polluted and the numbers say so plainly. The baseline's
+one-repetition spreads are 0.03–0.07%; this run's are 0.4–33%. The control loop's
+absolute times moved with them — 31.0 ms baseline against 50–54 ms here for goc,
+and 33.5 ms against 55–59 ms for the host, i.e. **both arms slowed by the same
+~70%**, which is a machine that is busy and not a compiler that changed. The box
+is shared and the run started while the corpus determinism sweep's tail was still
+draining (1-minute load 3.45, 5-minute load 46.8).
+
+### The control run: `main` fails the same gate, on the same box, in the same hour
+
+Rather than argue the point, it was measured. `main` 5b085d2 was checked out
+into a worktree and `make bench-perf` run there:
+
+    --- FAIL: TestPerformanceSuite (958.96s)
+    gcpress gc/pointer-write     spread 35.0% (ceiling 15.0%), null 1.3%
+    gcpress gc/live-heap-churn   spread 17.0% (ceiling 15.0%), null 3.4%
+
+**`main` fails `make bench-perf` on this box today**, on the same assertion, on
+one of the same rows. Its control mean is **0.9241** — *below* both of this
+branch's readings.
+
+| tree | control mean | verdict | rows over the noise ceiling |
+|---|---:|---|---|
+| committed baseline | 0.9260 | — | 0 (spreads 0.03–0.07%) |
+| `main` 5b085d2, today | **0.9241** | FAIL (noise gate) | 2 |
+| this branch, run 1 | **0.9225** | FAIL (noise gate) | 2 |
+| this branch, run 2 | **0.9271** | FAIL (noise gate) | 5 |
+
+**`make bench-perf` does not pass on this machine today, and it is not this
+branch.** The required guard — "the control ratio is 0.9260x and a regression
+there means you traded run-time for compile-time" — is met: 0.9225 and 0.9271
+against a 0.9260 baseline, with `main`'s own reading at 0.9241 in between. No
+tolerance band failed in any of the three runs. And the eleven benchmark
+programs compile to byte-identical executables on both trees, so the suite is
+timing the same machine code either way.
+
+---
+
+## 11. The tracking, measured from the other side
+
+The same visit counters as §3, re-run on the new binary. The fixpoints iterate
+exactly as many rounds as before (`clean` 13 calls / 50 rounds,
+`inline-fixpoint` 2 calls / 10 rounds) — nothing converged early:
+
+| pass | visits before | visits after | skipped | **changed, before → after** |
+|---|---:|---:|---:|---|
+| fold | 252,550 | 28,138 | 226,012 | 5,384 → **5,384** |
+| copy | 252,550 | 27,281 | 226,869 | 3,814 → **3,814** |
+| loadelim | 252,550 | 27,236 | 226,914 | 2,478 → **2,478** |
+| deadalloc | 252,550 | 27,005 | 227,145 | 417 → **417** |
+| gvn | 252,550 | 27,005 | 227,145 | 3,060 → **3,060** |
+| jumpthread | 252,550 | 26,944 | 227,206 | 3,737 → **3,737** |
+| simplifycfg | 257,601 | 31,999 | 227,234 | 9,858 → **9,858** |
+| dce | 261,700 | 31,223 | 232,141 | 4,467 → **4,467** |
+| **total** | **2,034,601** | **226,831** | **1,807,770** | — |
+
+**88.9% of per-function pass invocations are gone, and every pass still makes
+exactly the same number of changes it made before** — not approximately, exactly,
+for all eight. That is the tracking's correctness argument turned into a
+measurement: what was skipped was, to the last visit, work that would have
+changed nothing.
