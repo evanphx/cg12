@@ -268,3 +268,48 @@ larger and riskier change than this one. It is not a scheduler change either.
 **No scheduler change is called for.** The scheduler in this tree is upstream
 Go's, unmodified, and the profile puts 11 samples out of 4,359 in it.
 
+## `make bench-perf`, before and after
+
+The full suite against its committed baseline, nine interleaved core-pinned
+repetitions, `go1.26.1 linux/arm64`, on the tree with the fix. It **failed in the
+faster direction on two rows and moved nothing else**:
+
+    program   case                      baseline  this run   change   resolved     tol verdict
+    conc      goroutine/spawn-join       38.4529    5.3188   -86.2%     +82.9%   12.8% PAST TOLERANCE
+    gcpress   gc/alloc-churn             11.6967    9.7386   -16.7%     +14.2%    9.2% PAST TOLERANCE
+
+`goroutine/spawn-join` is the row this branch went after: **38.45x → 5.32x**, a
+7.2x speedup, 471.6 ms → 65.5 ms on 20,000 spawn-and-joins.
+
+`gc/alloc-churn` is the one that was not aimed at and is the more interesting
+confirmation: **11.70x → 9.74x**. That row's cost is dominated by collections,
+and a collection scans every frame of every goroutine stack through
+`findfunc(frame.pc)`. It moved because the same scan was in it.
+
+Every other row held. All eleven copies of the control loop:
+
+    baseline  1.6303 1.6307 1.6322 1.6322 1.6322 1.6322 1.6322 1.6326 1.6327 1.6330 1.6331
+    this run  1.6281 1.6291 1.6291 1.6292 1.6292 1.6292 1.6294 1.6294 1.6296 1.6302 1.6307
+
+and the three `conc` rows that share the program with the one that moved:
+
+    conc      chan/pingpong-unbuffered    6.4916    6.5201    +0.4%   within tolerance
+    conc      chan/send-buffered          4.8052    4.7802    -0.5%   within tolerance
+    conc      mutex/uncontended           1.8632    1.8616    -0.1%   within tolerance
+    conc      control/spin-fixed-work     1.6322    1.6294    -0.2%   within tolerance
+
+The null arm read 0.9936–1.0118 across all 42 rows, so the protocol is honest for
+this run. `flate` died once in 28 runs (3.6%) and was retried — the known
+pre-existing defect the suite is built to survive, well under its 20% bar.
+
+### The instrument asked the right question, and here is the answer
+
+The failure message for a faster-than-baseline row says, correctly, that the
+cheap way to get faster is to stop heap-allocating something, and that an escape
+analysis which got *permissive* looks identical from here. It asks for the
+allocation census diff.
+
+The census does not move, and it cannot: the two binaries' `.text` is
+byte-identical (see above), so no allocation decision changed. `TestAllocationCensus`
+is in the guard table below.
+
