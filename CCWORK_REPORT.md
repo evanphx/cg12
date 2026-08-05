@@ -246,3 +246,98 @@ All 406 `goc/testdata/*.go` compiled with `goc -O` as whole-program builds:
 Zero compiler crashes, assertion failures or lowering errors on any of the 406.
 This is broader than the capability matrix's 368 — it covers the 38 corpus
 programs the matrix does not run — but it is a compile-only check.
+
+### A differential the existing suites do not run
+
+The audits above read unoptimized IR, and the capability matrix checks each
+program against its own expectation rather than against the other arm. Neither
+would notice a pass that changes a program's *answer* in a way the program itself
+does not assert on. So: every one of the 406 corpus programs was built twice —
+`GOC_OPT_PIPELINE=bounded` and the full default — and both binaries run, with the
+bounded build run twice first so a program that disagrees with itself is excluded
+as nondeterministic rather than reported as a miscompile. Results below.
+
+    SAME    403 / 406
+    NONDET    1  (bytes_grow_stats — disagrees with itself under the bounded build)
+    DIFF      2
+
+**`runtime_panic_print_string` — not a defect.** The only difference is a
+traceback PC offset: `runtime_gopanic() ?:0 +0xa3c` under bounded, `+0xb78`
+under full. `gopanic` is a different size when it is optimized, so the offset
+inside it differs. Both print `panic: boom` and exit 2 with the same frame list.
+
+**`runtime_lock_osthread` — a real defect, and the third blocker.**
+
+    bounded build: 0 failures / 100 runs
+    full build:   14 failures / 100 runs
+
+    fatal error: runtime: split stack overflow
+     runtime: split stack overflow: 0x1c4ca5fc87e0 < 0x1c4ca5fc8800
+    goroutine 3: runtime_mcentral_uncacheSpan <- runtime_mcache_refill
+      <- runtime_mcache_nextFree <- runtime_mallocgcSmallScanHeader
+      <- runtime_mallocgc <- runtime_allocm <- runtime_newm
+      <- runtime_LockOSThread <- main.main.func1
+
+The program is nine lines: a goroutine that calls `runtime.LockOSThread`,
+defers `UnlockOSThread` and sends 42 on a channel.
+
+*Attribution.* Bisected with `GOC_OPT_SKIP`, 100 runs per arm:
+
+| arm | failures / 100 |
+|-----|----------------|
+| `bounded` | 0 |
+| `promote` (bounded + mem2reg) | 0 |
+| full, `skip=inline` | **0** |
+| full, `skip=mem2reg` | 0 |
+| full, `skip=loadelim` | 0 |
+| full, `skip=simplifycfg` | 0 |
+| full, `skip=tailmerge` | 7 |
+| full, `skip=deadalloc` | 10 |
+| full, `skip=deadfunc` | 10 |
+| full, `skip=gcm` | 13 |
+| **full (nothing skipped)** | **14** |
+| full, `skip=ifconvert` | 17 |
+| full, `skip=jumpthread` | 21 |
+| full, `skip=gvn` | 23 |
+
+The arms that reach 0 are inline and the three passes that feed it (a function
+that is not promoted, load-forwarded and CFG-simplified is too big to inline, and
+too big for its callees to inline into it). The arms that make it *worse* are the
+ones that leave more code for the inliner to move. So: **inlining**.
+
+*Mechanism, measured from the emitted code.* Frame sizes of the chain, in bytes:
+
+| function | bounded | full, `skip=inline` | full |
+|----------|---------|---------------------|------|
+| `runtime_mcache_nextFree` | 384 | 368 | **656** |
+| `runtime_mcache_refill` | 368 | 352 | 320 |
+| `runtime_mallocgcSmallScanHeader` | 416 | 352 | 352 |
+
+`nextFree` and `refill` carry **no stack-growth guard in either build** — and
+they are not `//go:nosplit` in the Go source. `goc/compile.go:9487`
+`runtimeImplicitNoSplit` marks `nextFreeFast`, `nextFree`, `nextFreeIndex` and
+`refill` nosplit itself, with this reason: *"The upstream compiler normally
+inlines this allocator fast-path helper into mallocgc variants. cg12 keeps it
+outlined, so mark these helpers nosplit to preserve the same runtime invariant."*
+
+So the nosplit run between `mallocgcSmallScanHeader`'s guard and
+`mcentral_uncacheSpan`'s is `nextFree` + `refill`: **752 bytes under the bounded
+pipeline, 976 under the full one.** Go reserves ~800-928 bytes below
+`stackguard0` for exactly this. The bounded pipeline fit inside the reserve by
+about fifty bytes; inlining 288 bytes of callee locals into `nextFree` puts it
+outside, and the next guarded call finds `sp` already below `stack.lo`.
+
+It is intermittent because the chain is only entered when the mcache actually
+needs a refill.
+
+**This is not a miscompile of user code.** It is a missing constraint: cg12 has
+no nosplit stack-depth budget. Go's linker enforces one (`nosplit stack over 792
+byte limit` is a link-time error); `opt.AuditNoSplitCalls` checks only that a
+nosplit function does not *call* a splittable one, not how deep the nosplit run
+gets. The bounded pipeline never grew a frame enough to matter, so the gap was
+invisible.
+
+Note the capability matrix runs `runtime_lock_osthread.go` (`cmd/goc/runtime_status_test.go:660`)
+and passed it twice. At a 14% failure rate that is a 74% chance — the matrix was
+lucky, not clean. A one-shot matrix is not an instrument for a 14% defect, which
+is why the differential above exists.
