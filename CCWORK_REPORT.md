@@ -159,3 +159,65 @@ keeping the four new test files:
 documented special case through `math.Sqrt` and friends -- passes both before
 and after, and has to: both implementations are correct, which is the point.
 What fails before is the assertion that the call is gone.
+
+## One more candidate the brief did not name: math.FMA
+
+`math.FMA` has no architecture-specific arm in the Go source at all -- the
+gc compiler intrinsifies it -- so goc runs the portable 180-line software
+emulation. Measured the same way:
+
+    math.FMA    goc 153.60 ns    host 1.34 ns    115x
+
+AArch64 computes it in one instruction, `FMADD Dd, Dn, Dm, Da`, which is IEEE
+754's `fusedMultiplyAdd`, and that is exactly what `math.FMA` is specified to
+be. Checked against `stdlib/src/math/fma.go` copied out verbatim under another
+name, over 410,648 triples: all 12,167 combinations of 23 special values
+(both zeros, both infinities, four NaNs including a signalling one, the
+subnormal boundary, MaxFloat64), 200,000 random triples, and 200,000 triples
+built so the product very nearly cancels the addend -- which is precisely where
+a fused multiply-add and a separate multiply-then-add give different answers,
+so it is where a wrong lowering would show.
+
+    exact 410,398   nan-payload-only 250   disagree 0
+
+It is lowered too; see below for its measured effect.
+
+**Correction to the line above: FMA is not lowered here, and the reason is the
+backend, not the semantics.** `FMADD` is a three-operand floating-point
+instruction, and arm64 reserves exactly two floating-point scratch registers
+(`arm64/reg.go:287`, V30 and V31) against five integer ones. `sel.triReg` hands
+operands slots 0, 1 and 2, so a float three-operand form would index
+`floatScratchRegs[2]` and there is no such register; when the result is spilled,
+slot 0 is the destination's as well and only one operand can be staged at all.
+This is not an oversight I found by reading -- `arm64/lower.go`'s `foldMulAdd`
+declines to fuse a float multiply-add for the same reason, with `if
+in.Cls.IsFloat() { return }` as its first line.
+
+Lowering FMA therefore means reserving a third floating-point scratch register,
+which comes out of `floatAllocOrder` and changes register allocation for every
+float-using function in the tree. That is a change that deserves its own
+measurement rather than a ride on this one. The semantics are settled and the
+prize is quantified (153.60 ns -> about 1.3), so the work is scoped; it is just
+not this change.
+
+## The float/sqrt-sum ratio after
+
+First `make bench-perf` run, against the committed baseline:
+
+    float     float/sqrt-sum   ratio 1.1335   sd 0.49%   goc 53,169,582 ns   host 46,907,864 ns
+
+against the baseline's
+
+    float     float/sqrt-sum   ratio 171.2179 sd 0.14%   goc 401,435,550 ns  host 2,344,593 ns
+
+**171.22x -> 1.13x**, a factor of 151. (The raw nanoseconds are not comparable
+between the two lines: the workload now does 20,000,000 square roots a round
+rather than 1,000,000, since the count was only kept small because goc was slow.
+Per root: 2.66 ns against the host's 2.35 ns.)
+
+That run failed, but not on this row and not on any row's movement: it tripped
+the noise ceiling on `chase/pointer-node`, whose one-repetition spread read
+27.99% against its committed 1.98%, with the null equally loud -- the signature
+the suite's own message gives for a busy box. It was busy because of me: I was
+running the FMA differential and compiler builds beside it. The remaining runs
+were done with nothing else of mine on the machine.
