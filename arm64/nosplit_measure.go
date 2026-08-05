@@ -1,6 +1,8 @@
 package arm64
 
 import (
+	"sort"
+
 	"github.com/evanphx/cg12/ir"
 	"github.com/evanphx/cg12/opt"
 	"github.com/evanphx/cg12/stackcheck"
@@ -24,6 +26,12 @@ type noSplitFrameBudget struct {
 	headroom    map[string]int
 	conventions calleeConventions
 	bundle      assemblyBundle
+
+	// sharing is who lies on a chain with whom, and charged is what has already
+	// been spent on each function's chains. Together they are what keeps the
+	// headroom map from being spent twice; see Charge.
+	sharing map[string][]string
+	charged map[string]int
 }
 
 // newNoSplitFrameBudget measures every nosplit function in m, walks the chains
@@ -74,14 +82,21 @@ func newNoSplitFrameBudget(m *ir.Module) (opt.FrameBudget, error) {
 		}
 		facts = append(facts, measured)
 	}
-	report, _ := stackcheck.Check(noSplitBudgetInputs(facts, bundle, m.Data), stackcheck.Config{
+	inputs := noSplitBudgetInputs(facts, bundle, m.Data)
+	report, _ := stackcheck.Check(inputs, stackcheck.Config{
 		Limit:    noSplitLimitFromEnvironment(),
 		CallSize: noSplitCallSize,
 	})
 	if report == nil {
 		return nil, nil
 	}
-	return &noSplitFrameBudget{headroom: report.Headroom, conventions: conventions, bundle: bundle}, nil
+	return &noSplitFrameBudget{
+		headroom:    report.Headroom,
+		conventions: conventions,
+		bundle:      bundle,
+		sharing:     noSplitChainSharing(inputs),
+		charged:     map[string]int{},
+	}, nil
 }
 
 func (b *noSplitFrameBudget) Headroom(name string) int {
@@ -91,7 +106,87 @@ func (b *noSplitFrameBudget) Headroom(name string) int {
 		// measured. Offer it nothing.
 		return 0
 	}
-	return room
+	return room - b.charged[name]
+}
+
+// Charge takes bytes out of the headroom of name and of everything that shares a
+// nosplit chain with it.
+//
+// Two functions share a chain exactly when one can reach the other without a
+// stack check in between, so the set is name plus its nosplit descendants plus
+// its nosplit ancestors. Charging all three is what makes a sequence of
+// independent per-function decisions add up to a bound on the chain: whichever
+// function is asked next, the slack it is offered has every earlier grant on any
+// chain they have in common already subtracted.
+func (b *noSplitFrameBudget) Charge(name string, bytes int) {
+	if bytes <= 0 {
+		return
+	}
+	for _, shared := range b.sharing[name] {
+		b.charged[shared] += bytes
+	}
+}
+
+// noSplitChainSharing maps every nosplit function to the nosplit functions that
+// lie on a chain with it, itself included.
+//
+// The edges are the ones the walk itself follows (stackcheck.walker.calleesOf):
+// a splittable callee ends the chain and is not an edge, and an indirect call is
+// assumed to reach a function that checks its own stack, which is the same
+// default the budget is measured under. A relation built from any other edge set
+// would be charging against chains the check does not believe in.
+func noSplitChainSharing(funcs []stackcheck.Func) map[string][]string {
+	noSplit := make(map[string]bool, len(funcs))
+	for index := range funcs {
+		if funcs[index].NoSplit {
+			noSplit[funcs[index].Name] = true
+		}
+	}
+	callees := map[string][]string{}
+	callers := map[string][]string{}
+	for index := range funcs {
+		f := &funcs[index]
+		if !f.NoSplit {
+			continue
+		}
+		for _, callee := range f.Calls {
+			if !noSplit[callee] || callee == f.Name {
+				continue
+			}
+			callees[f.Name] = append(callees[f.Name], callee)
+			callers[callee] = append(callers[callee], f.Name)
+		}
+	}
+	sharing := make(map[string][]string, len(noSplit))
+	for name := range noSplit {
+		reached := map[string]bool{name: true}
+		reach(name, callees, reached)
+		reach(name, callers, reached)
+		shared := make([]string, 0, len(reached))
+		for other := range reached {
+			shared = append(shared, other)
+		}
+		sort.Strings(shared)
+		sharing[name] = shared
+	}
+	return sharing
+}
+
+// reach adds everything edges lead to from origin into visited. The origin is
+// already in visited, so a cycle back to it terminates rather than recursing.
+func reach(origin string, edges map[string][]string, visited map[string]bool) {
+	stack := []string{origin}
+	for len(stack) > 0 {
+		name := stack[len(stack)-1]
+		stack = stack[:len(stack)-1]
+		for _, next := range edges[name] {
+			if visited[next] {
+				continue
+			}
+			visited[next] = true
+			stack = append(stack, next)
+		}
+	}
 }
 
 func (b *noSplitFrameBudget) Symbol(f *ir.Func) string {

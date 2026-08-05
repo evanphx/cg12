@@ -1707,3 +1707,277 @@ Merge as soon as one of these is done, and neither needs new measurement:
 
 Either way, add the unoptimised whole-program corpus build to CI, since it is
 the only thing that runs the budget over every program.
+
+---
+
+# NOSPLIT REGISTER RECIPE — `ccwork/nosplit-register-recipe` off `integration/wave10-gate` (8e7642f)
+
+Job started. Host: aarch64 Linux. Everything below is measured by this job unless
+marked UNVERIFIED.
+
+## 0. Reproduced the blocker, first thing
+
+    $ CG12_NOCACHE=1 goc -o out goc/testdata/stdlib_os_exec_echo.go
+    goc: nosplit frame budget: nosplit stack overflow:
+        syscall_runtime_AfterForkInChild -> runtime_clearSignalHandlers ->
+        runtime_setsig -> runtime_sigaction -> runtime_throw ->
+        runtime_fatalthrow -> runtime_systemstack
+      976 bytes of nosplit frames against a 920-byte limit, 56 over
+    exit=1
+
+Identical to the gate's §9. Work proceeds in the order the brief sets: recipe
+first, chain second, floor-not-licence third.
+
+## 1. Why twenty-two configurations missed it — **the shape of the configurations, not their number**
+
+Two properties decide whether the budget can see a chain at all, and the original
+recipe held both of them fixed.
+
+**(a) The budget is a per-module walk, so a chain is only measured where every
+one of its frames is in the same module.** `goc build-runtime` compiles the
+runtime as a module of its own and prunes it to what is reachable from the
+runtime's own roots. `syscall.runtime_AfterForkInChild` is defined *in the
+runtime* (`stdlib/src/runtime/proc.go:5228`) but is reachable only through the
+`//go:linkname` that package `syscall` uses, and `runtime.clearSignalHandlers`
+is called from nothing else — so both are dead code in a runtime pack and both
+are dropped. Measured, not inferred, on the runtime-only pack this job built:
+
+| symbol | occurrences in `p0.gocrt` |
+|---|---:|
+| `syscall_runtime_AfterForkInChild` | **0** |
+| `clearSignalHandlers` | **0** |
+| `sigaction` | 16 |
+| `setsig` | 7 |
+
+The pack contains the bottom four frames of the chain and neither of the top
+two. Its deepest chain through `runtime_sigaction` is 832, which passes. **All
+fourteen pack configurations were structurally incapable of finding this entry**
+— not because the pack roots were the wrong seven, but because every one of them
+is a runtime-shaped module and the chain's root is above the runtime's own
+reachability. Adding pack roots would not have helped; a richer root carries
+`syscall`, but nothing in `net/http` calls `os.StartProcess`, so the fork path is
+still dead code.
+
+**(b) The whole-program arm was a four-program sample of a 406-program corpus.**
+`runtime_lock_osthread`, `runtime_gc_concurrent_mark`,
+`stdlib_http_tls_client_server`, `stdlib_compress_zlib_lzw` — none imports
+`os/exec`, and exactly **1 of the 406 corpus programs does**
+(`stdlib_os_exec_echo.go`). Building those four at two optimisation levels is
+eight configurations that sample one point of the space that actually matters,
+which is *which functions are in the module*.
+
+So "22 configurations" reads like breadth and is not: it is 2 module shapes x
+(7 pack roots or 4 programs) x 2 optimisation levels, and the axis that decides
+visibility — the program — has four values. The ±`-O` axis, which the register's
+comment spends most of its words on, changes the *heights* but cannot change
+*which chains exist*.
+
+
+## 3. The structural caveat: **it was firing.** Closed.
+
+The gate flagged `opt.InlineIntoNoSplitCallers` computing its budget once and then
+spending `Headroom(name) - 16` per caller without recomputing, and recorded it as
+"not observed firing". It fires. Measured on this tree by comparing the pass's
+own report before and after the fix, `goc/testdata/runtime_lock_osthread.go -O`:
+
+| | accepted | rejected after measuring | no headroom |
+|---|---:|---:|---:|
+| before (budget spent per function) | **106** | 1 | 201 |
+| after (growth charged to the chain) | **101** | 4 | 203 |
+
+Five callers had been granted slack that another function on the same chain had
+already spent -- `runtime_dieFromSignal` (+64 of 72 "allowed"),
+`runtime_needAndBindM` (+80 of 88), `runtime_fatalpanic`, and two more. Same
+result on `stdlib_http_tls_client_server -O`: 118 accepted becomes 113.
+**Unoptimised images are byte-identical before and after** (the pass finds almost
+nothing to inline there), so this is an `-O`-only change.
+
+It had not yet produced an overflow: the tightest under-limit chain on that
+program is 8 bytes of headroom (`runtime_write`) both before and after, and no
+non-recorded chain reaches the reserve in either build. What the double spend was
+eating is margin the budget believed it still had.
+
+**The fix.** `opt.FrameBudget` gains `Charge(name, bytes)`; the pass calls it when
+it keeps a growth, and `arm64.noSplitFrameBudget` subtracts those bytes from the
+headroom of every function that shares a nosplit chain with the one that grew.
+Two functions share a chain exactly when one can reach the other with no stack
+check in between, so the set is the function plus its nosplit ancestors plus its
+nosplit descendants, over the same edges the walk itself follows
+(`stackcheck.walker.calleesOf`: a splittable callee ends the chain, an indirect
+call is assumed to check its own stack). Any two functions on one path are
+related by ancestry along that path, so ancestors-plus-descendants is exactly the
+sharing relation -- not wider, which would cost inlining the tree can afford, and
+not narrower, which would leave the hole open.
+
+A shrink is not credited back. Most accepted callers do shrink, but the headroom
+map was measured before any of this and handing out bytes it never counted is the
+same mistake in the other direction.
+
+New tests, and the negative control that says they bind:
+
+- `opt.TestNoSplitInlineDoesNotSpendOneChainsHeadroomTwice` -- two nosplit
+  callers on one chain with room for one growth. With the `Charge` call removed
+  it fails with "accepted 2 callers on one chain with room for one", both having
+  grown 64 bytes against 72 of shared headroom. **Verified by running it with the
+  fix backed out.**
+- `opt.TestNoSplitInlineChargesTheWholeChain` -- the charge follows the chain and
+  the second caller's allowance is what the first left. Also fails backed out.
+- `arm64.TestChainSharing*` (5) -- the relation reaches up and down, stops at a
+  splittable function, keeps separate chains apart, ignores undefined callees,
+  terminates on a cycle.
+- `arm64.TestChargeSpendsTheChainOnceAndOnlyItsOwnChain`,
+  `TestChargeLeavesAnUnmeasuredFunctionWithNothing`.
+
+All 9 pass. This does not weaken the floor: `Charge` only ever *reduces* what
+`Headroom` returns, it is not consulted by `stackcheck` at all, and the register
+is still invisible to the inliner's budget (still `Config{Limit, CallSize}` with
+no `Recorded` field).
+
+## 2. The widened recipe, and what it finds — **exactly one entry**
+
+`analysis/nosplitdebt` (new), driven by `scripts/nosplit-debt-regen.sh` (new).
+It sweeps the product of both axes the original recipe held fixed:
+
+| arm | module shape | configurations |
+|---|---|---:|
+| `pack` | `goc build-runtime` per capability-matrix root, ±`-O` | **14** |
+| `whole` | `goc prog.go` — runtime, stdlib and program in one module, ±`-O` | **812** (406 x 2) |
+| `split` | `goc -runtime packs prog.go` — the boundary the matrix and the pack cache use, ±`-O` | **812** |
+| | | **1638** |
+
+Result, on the tree with the double-spend fix in:
+
+    configurations: 1638 total  pack=14  whole=812  split=812
+    outcomes: 1638 measured, 1 rejected by the budget (heights still valid), 0 failed to compile
+    register: committed=50  original-recipe=50  widened-recipe=51
+
+- **Every one of the 1638 configurations compiled.** The only non-zero exit in the
+  whole sweep is the known one, `whole stdlib_os_exec_echo.go`, and a build the
+  budget rejects still prints its heights from the finished walk before it fails
+  — which is what lets the recipe find the entry that fixes it.
+- **The original 22 configurations, re-run inside this sweep, reproduce the
+  committed register exactly**: same 50 names, same 50 heights. The committed
+  file was right about everything it could see.
+- **The widened recipe finds exactly one entry the original did not**:
+  `syscall_runtime_AfterForkInChild` at 976, first seen at
+  `whole stdlib_os_exec_echo.go`. Nothing raised, nothing lowered, nothing
+  removed.
+
+**So it is one, not twenty.** That is worth saying plainly: 406 whole programs
+and 406 pack-split builds at two optimisation levels — 1616 configurations the
+original recipe never ran — turn up a single chain. The blind spot was narrow.
+It was also exactly wide enough to block a merge, and it was invisible to
+everything in `make test`.
+
+Two design points in the driver, both load-bearing:
+
+- **It runs the shipping compiler at the real 920-byte limit**, not with
+  `GOC_NOSPLIT_LIMIT` raised. The raised limit is the obvious way to keep a
+  measurement run from failing, and it is wrong here:
+  `opt.InlineIntoNoSplitCallers` sizes its allowance from the same limit, so a
+  run with the limit raised inlines into nosplit callers far past what any
+  shipping build does and reports frames nobody ships.
+- **Running with the register in place is not circular.** The inliner's budget is
+  built with `Config{Limit, CallSize}` and no `Recorded` field
+  (`arm64/nosplit_measure.go`), so the register cannot change a single frame; it
+  only decides whether the finished walk is accepted. Heights are therefore
+  identical with and without any given entry, which is why one pass converges.
+
+### The `split` arm earns its place, but it found nothing
+
+By construction a pack-split build sees a subset of a whole-program build's
+chains — calls into the pack are undefined and end the walk. It is not *provably*
+dominated, because the inliner's headroom is computed per module and a program
+module on its own offers its nosplit functions a larger allowance, so a frame can
+be bigger there. Over 812 configurations that never happened: the split arm
+contributed no maximum. It is kept because it is the boundary the capability
+matrix and the pack cache actually compile at, and because §9a of the gate report
+is right that the *linked* image carries a chain no single module walk measures.
+
+
+## 4. The chain: **recorded as pre-existing debt, not shrunk.** Here is what the shrink was worth.
+
+I preferred the shrink and went looking for it. It is not there, and the
+measurement says so more clearly than the argument does.
+
+The chain, with the deepest edge out of each frame:
+
+    80   syscall_runtime_AfterForkInChild
+    64   runtime_clearSignalHandlers
+    128  runtime_setsig
+    464  runtime_sigaction        <- the one the gate named
+    128  runtime_throw
+    96   runtime_fatalthrow
+    16   runtime_systemstack      = 976 against 920, 56 over
+
+Read from the compiler rather than the source (a temporary `Calls` dump on
+`GOC_DEBUG_NOSPLIT=frames`, not committed):
+
+    runtime_sigaction  frame 464  calls=[sysSigaction fixSigactionForCgo callCgoSigaction systemstack memcpy throw]
+    runtime_sysSigaction        frame  96  calls=[rt_sigaction systemstack]
+    runtime_sysSigaction_func_548_16  frame 96  (address-taken)
+
+So upstream's own overflow workaround is intact — `sysSigaction`'s
+`systemstack(func(){ throw("sigaction failed") })` is a real closure reached
+through `systemstack`, and the walk ends the chain at it. `runtime.sigaction`
+reaches `throw` on a *different*, direct edge, and both of its branches sit above
+the same 240-byte `throw -> fatalthrow -> systemstack` tail.
+
+**The candidate shrink, built and measured.** Extract the `_cgo_sigaction` branch
+into its own `//go:nosplit //go:nowritebarrierrec` function — semantics
+preserved, the smallest contained change that moves those locals out of the
+frame:
+
+    before   ... setsig(128) -> sigaction(464) -> throw(128) -> fatalthrow(96) -> systemstack(16)   = 976
+    after    ... setsig(128) -> sigaction(368) -> sigactionViaCgo(192) -> sysSigaction(96) -> systemstack(16) = 944
+
+**944 against 920. Still 24 over, and the build still fails.** Moving code
+between two functions on one chain does not shorten the chain; it splits one
+frame into two that stack.
+
+The number that decides it is the 368. After the extraction, `runtime.sigaction`
+is a six-line function — four constant-folded sanitizer branches and one
+`if/else` that calls one of two helpers — and cg12 still lays it out at **368
+bytes** without `-O`. That is not a frame with 56 bytes of fat in it. It is what
+this backend costs for a function of that shape when mem2reg has not run, which
+is exactly what the register's own comment says about the other fifty entries:
+"Go's linker accepts them because gc's frames are a fraction of cg12's". The same
+source at `-O` compiles to a chain that fits, and always did.
+
+So the shrink was not worth it, for four reasons in descending order of weight:
+
+1. **It does not work.** The contained version measures 944 and still fails. To
+   get under 920 I would have to keep carving up `runtime.sigaction`,
+   `runtime.setsig` and the `throw` path with no principled stopping point.
+2. **It would be fixing the wrong layer.** The excess exists only in the
+   unoptimised build, and it is a property of cg12's frame layout, not of Go's
+   source. Editing vendored upstream runtime code to compensate would have to be
+   repeated for the other 50 entries — nobody proposes that, and it is the same
+   work each time.
+3. **It is the fork-in-child signal path.** `syscall.runtime_AfterForkInChild`
+   runs in a process that may still share its address space with its parent;
+   `clearSignalHandlers`, `setsig` and `sigaction` are all
+   `//go:nowritebarrierrec` for that reason. Divergence from upstream Go here
+   buys 32 bytes and costs a permanent local patch in the most delicate path in
+   the runtime.
+4. The blast radius is small but not zero — `cgo_sigaction.go` appears in none of
+   the four audit baselines, checked — and it changes runtime code for every
+   program in the tree for a 24-byte shortfall.
+
+**Recorded**, therefore: one entry, `"syscall_runtime_AfterForkInChild": 976`,
+generated by the widened recipe rather than typed in. The register goes 50 -> 51.
+It is a real chain that can overflow in production on the same terms as the other
+fifty, and the honest place to put that is the list that says so by name.
+
+
+## 5. The two timing baselines — **reverted**
+
+`goc/testdata/perf_suite_baseline.txt` and
+`goc/testdata/crypto_signing_bench_baseline.txt` are restored to their values at
+`2438919` (the merge point, before the gate's `bc80ec2`). `git diff` against
+`2438919` for both files is now empty. The gate's own recommendation, and the
+right one: nothing in either file moved by more than its own noise, and
+re-baselining a timing file on noise loses the information it was cut for on an
+idle box. The other eight regenerated baselines were byte-identical, so nothing
+else is affected either way.
+

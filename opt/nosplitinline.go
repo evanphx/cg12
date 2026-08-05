@@ -24,6 +24,18 @@ type FrameBudget interface {
 	// for a function with nothing to spend, and for one that is over already.
 	Headroom(name string) int
 
+	// Charge records that name's frame has grown by bytes and takes those bytes
+	// out of the headroom of every function that shares a nosplit chain with it.
+	//
+	// A budget is measured once and then spent many times, which is the one way
+	// the arithmetic above can be wrong. Headroom is a property of a chain, not
+	// of a function: two nosplit functions on the same chain are each told the
+	// chain's whole remaining slack, and a pass that believes both of them can
+	// spend it twice. Charging closes that -- after the first caller grows, every
+	// other function on its chains is offered what is left rather than what there
+	// was.
+	Charge(name string, bytes int)
+
 	// Frame lays f out as the backend would and returns its frame size in bytes.
 	// It must not disturb f.
 	Frame(f *ir.Func) (int, error)
@@ -145,6 +157,15 @@ func InlineIntoNoSplitCallersReporting(m *ir.Module) (*NoSplitInlineReport, bool
 			caller.ReplaceBodyFrom(snapshot)
 			report.Rejected = append(report.Rejected, result)
 			continue
+		}
+		if after > before {
+			// Take the growth out of every chain this caller sits on, so the next
+			// caller on the same chain is offered what is left. A caller that
+			// shrank -- most of them do, because inlining removes the outgoing
+			// argument area -- is not credited back: the headroom map was measured
+			// before any of this, and handing out bytes it never counted would be
+			// the same mistake in the other direction.
+			budget.Charge(name, after-before)
 		}
 		report.Accepted = append(report.Accepted, result)
 		changed = true
