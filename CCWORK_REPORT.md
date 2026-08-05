@@ -228,3 +228,19 @@ Not one instruction changed, which is why the other three `conc` rows sit still
 and why the triage note's step 2 — compare encoded instruction words — is
 answered before it is asked.
 
+## What else was on this path
+
+`findfunc` is not only the goroutine path. Every caller of it in a goc-built
+binary was paying the same scan:
+
+- **GC stack scanning.** `runtime.unwinder.init`/`next` calls `findfunc(frame.pc)`
+  once per frame, and `scanframeworker` needs the `funcInfo` it returns to reach
+  the frame's stack maps. Every frame of every goroutine, every cycle.
+- **Traceback, panic and `Goexit`.** Same unwinder.
+- **`runtime.Caller`, `runtime.Callers`, `runtime.FuncForPC`.**
+- **`gopanic`/`deferreturn`** reaching for a frame's `_func`.
+
+So the suite's `gcpress` rows and anything that panics were on it too. What that
+is worth is in the full-suite numbers below, which is the honest way to say it:
+this was not measured by reasoning about the call graph.
+
