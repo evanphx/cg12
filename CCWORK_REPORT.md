@@ -313,3 +313,42 @@ The census does not move, and it cannot: the two binaries' `.text` is
 byte-identical (see above), so no allocation decision changed. `TestAllocationCensus`
 is in the guard table below.
 
+## Guards
+
+All run on the final tree, after the fix and the re-baseline had landed.
+
+| guard | result |
+|---|---|
+| `make test-goc-status` (default arm) | **366 subtests, 0 failures, 0 skips** — 365 `PASS` plus the one capability whose expectation is `EXPECTED FAILURE` (`runtime_panic_print_string.go`), 100.4 s |
+| `make test-goc-status-opt` (`-O` arm) | **366 subtests, 0 failures, 0 skips**, same split, 93.3 s |
+| `TestAllocationCensus` | **ok**, 326.9 s — `alloc_census_baseline.txt` reproduces **unchanged**, `git diff` on it is empty |
+| `TestCompilingTheSameSourceTwiceGivesTheSameModule` | **ok**, 8.7 s |
+| GC reducer (`runtime_gc_type_mask_padding`), default `GOGC`, `GOMAXPROCS=3`, 20 runs | **0/20 failures** |
+| GC reducer, `GOGC=10`, `GOMAXPROCS=3`, 20 runs | **0/20 failures** |
+| `TestFrameEscapeAudit` | **ok**, 327.6 s |
+| `make bench-perf` after the re-baseline | the update run itself reported **PASS** on all 42 rows, 591 s |
+| working tree | only `goc/testdata/perf_suite_baseline.txt` changed by the benchmark, and it is committed |
+
+A reducer run counted as a pass only on exit 0 **and** the literal output
+`type mask padding ok`; the script is in the branch history of this report.
+
+Per the brief, `go test ./goc/...` and `make test-unit` were not run. The census,
+determinism and frame-escape guards were invoked with an explicit `-run` on the
+single test, which is how `make bench-crypto` is itself defined.
+`go test ./internal/gometa/` — a package neither of those two commands covers —
+was run, and its seven new tests plus the three existing bucket-count tests pass.
+
+The capability matrix is the guard that matters most here, because `findfunc` is
+what the GC reads a frame's stack maps through: a table that pointed one function
+too far would hand the collector the wrong pointer map, and 366 programs covering
+goroutines, channels, panics, defers, finalizers and GC stress are what would
+show it.
+
+## The line
+
+The 38x is `runtime.findfunc` scanning `functab` from index 0 on every lookup,
+because cg12 emitted `moduledata.findfunctab` as zeroes — twice per goroutine,
+through `isSystemGoroutine` in `newproc1` and `gdestroy`. It is fixed by building
+the table. `make bench-perf`: **`goroutine/spawn-join` 38.45x → 5.32x**, and
+`gc/alloc-churn` 11.70x → 9.74x for free, with nothing else moved and every guard
+green.
