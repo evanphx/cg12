@@ -8,6 +8,7 @@ import (
 	"github.com/evanphx/cg12/ir"
 	"github.com/evanphx/cg12/plan9asm"
 	plan9sem "github.com/evanphx/cg12/plan9asm/sem"
+	"github.com/evanphx/cg12/stackcheck"
 )
 
 type assemblyBundle struct {
@@ -20,14 +21,25 @@ type assemblyBundle struct {
 	lowered         []*ir.Func
 	loweredData     []*ir.Data
 	callConventions map[string]ir.CallConvention
+	// stack holds the nosplit frame budget's view of the translated assembly:
+	// frame size, split behaviour, and call edges. Assembly is the part of the
+	// graph cg12 does not compile, and the naive things to do with it -- assume
+	// the frames are zero, or that nothing is called -- are both wrong in the
+	// unsafe direction, because the runtime's nosplit assembly has frames and
+	// makes calls.
+	stack []stackcheck.Func
+	// stackAddressTaken names the symbols the translated assembly materializes as
+	// addresses, which makes them candidates for an indirect branch.
+	stackAddressTaken map[string]bool
 }
 
 func prepareAssembly(module *ir.Module) (assemblyBundle, error) {
 	bundle := assemblyBundle{
-		references:      make(map[string]bool),
-		abi0References:  make(map[string]bool),
-		definitions:     make(map[string]bool),
-		callConventions: make(map[string]ir.CallConvention),
+		references:        make(map[string]bool),
+		abi0References:    make(map[string]bool),
+		definitions:       make(map[string]bool),
+		callConventions:   make(map[string]ir.CallConvention),
+		stackAddressTaken: make(map[string]bool),
 	}
 	assemblyFunctions := make(map[string]bool)
 	var output strings.Builder
@@ -109,6 +121,30 @@ func prepareAssembly(module *ir.Module) (assemblyBundle, error) {
 				}
 			}
 			flags |= assemblyFunctionFlags(function.Name)
+			// Split behaviour comes from the TEXT flag, which is the same place
+			// Go's linker takes it from.
+			//
+			// cg12's translator emits no stack-growth check for *either* kind --
+			// its assembly prologue is a bare SP subtraction where Go's assembler
+			// would have inserted a split check. So a translated function that Go
+			// declares splittable ends a chain here on a promise this toolchain
+			// does not keep, and Unchecked says so: the budget reports the hole
+			// rather than being the thing that hides it. Treating those functions
+			// as nosplit instead is not the answer -- runtime.call1073741824 is a
+			// WRAPPER with a 1 GiB frame, and a budget that rejects on it has
+			// stopped describing the reserve.
+			noSplit := assemblyHasFlag(function.Flags, "NOSPLIT")
+			bundle.stack = append(bundle.stack, stackcheck.Func{
+				Name:      function.Name,
+				Frame:     function.Frame,
+				NoSplit:   noSplit,
+				Unchecked: !noSplit,
+				Calls:     function.Calls,
+				Indirect:  function.Indirect,
+			})
+			for _, target := range function.AddressTaken {
+				bundle.stackAddressTaken[target] = true
+			}
 			bundle.functions = append(bundle.functions, goFunctionInfo{
 				Name:            function.Name,
 				FrameSize:       function.Frame,
@@ -133,6 +169,19 @@ func prepareAssembly(module *ir.Module) (assemblyBundle, error) {
 	}
 	output.WriteString(wrappers)
 	bundle.functions = append(bundle.functions, wrapperFunctions...)
+	// Each generated ABI0 wrapper is a fixed frame and a single call to the
+	// ABIInternal function it wraps -- emitGoABI0AssemblyWrapper writes exactly
+	// one `bl`, to the name the wrapper is derived from. It emits no stack check,
+	// so it belongs to whatever nosplit chain reaches it.
+	for _, wrapper := range wrapperFunctions {
+		bundle.stack = append(bundle.stack, stackcheck.Func{
+			Name:    wrapper.Name,
+			Frame:   wrapper.FrameSize,
+			NoSplit: true,
+			Calls:   []string{strings.TrimSuffix(wrapper.Name, "_abi0")},
+		})
+	}
+
 	// The sidecar's text is the tail of the module's text, so the sidecar defines
 	// the symbol that bounds it. The name is per module: a second module sharing
 	// this one would take this module's text end as its own maxpc and
@@ -241,4 +290,16 @@ func assemblyFunctionFlags(name string) byte {
 func TranslateAssembly(module *ir.Module) (string, error) {
 	bundle, err := prepareAssembly(module)
 	return bundle.source, err
+}
+
+// assemblyHasFlag reports whether a translated TEXT declaration carried a Plan 9
+// flag. The translator canonicalizes the numeric forms, so "NOSPLIT" matches
+// both `NOSPLIT` and the `$4` it is spelled as in expanded macros.
+func assemblyHasFlag(flags []string, want string) bool {
+	for _, flag := range flags {
+		if flag == want {
+			return true
+		}
+	}
+	return false
 }

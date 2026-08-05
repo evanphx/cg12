@@ -294,7 +294,12 @@ TEXT ·readRegister(SB),NOSPLIT,$0-8
 	assert.Contains(t, translation.Assembly, ".global internal_cpu_readRegister_abi0")
 	assert.Contains(t, translation.Assembly, "\tstr x0, [sp, #8]")
 	require.Len(t, translation.Functions, 2)
-	assert.Equal(t, ARM64Function{Name: "internal_cpu_readRegister", Frame: 32, FrameStart: 4, Args: 8, Flags: []string{"NOSPLIT"}}, translation.Functions[0])
+	// The generated wrapper's one edge is the ABI0 entry it calls; the entry
+	// itself is a leaf. Both are what the nosplit frame budget walks.
+	assert.Equal(t, ARM64Function{
+		Name: "internal_cpu_readRegister", Frame: 32, FrameStart: 4, Args: 8,
+		Flags: []string{"NOSPLIT"}, Calls: []string{"internal_cpu_readRegister_abi0"},
+	}, translation.Functions[0])
 	assert.Equal(t, ARM64Function{Name: "internal_cpu_readRegister_abi0", Args: 8, Flags: []string{"NOSPLIT"}}, translation.Functions[1])
 }
 
@@ -537,6 +542,7 @@ func TestTranslateExactRuntimeAsyncPreempt(t *testing.T) {
 		Frame:      240,
 		FrameStart: 8,
 		Flags:      []string{"NOSPLIT", "NOFRAME"},
+		Calls:      []string{"runtime_asyncPreempt2_abi0"},
 	}, translation.Functions[0])
 	assert.Contains(t, translation.Assembly, ".hidden runtime_asyncPreempt_abi0")
 	assert.Contains(t, translation.Assembly, "\tmrs x0, nzcv")
@@ -673,13 +679,23 @@ func TestTranslateExactReflectAssembly(t *testing.T) {
 		Frame:      32,
 		FrameStart: 4,
 		Flags:      []string{"NOSPLIT", "WRAPPER"},
+		Calls:      []string{"reflect_makeFuncStub_abi0"},
 	}, translation.Functions[0])
+	// The four branches asserted against the assembly below, recorded as edges
+	// so the nosplit frame budget can walk through this function instead of
+	// treating it as a leaf.
 	assert.Equal(t, ARM64Function{
 		Name:            "reflect_makeFuncStub_abi0",
 		Frame:           448,
 		FrameStart:      4,
 		Flags:           []string{"NOSPLIT", "WRAPPER"},
 		NoLocalPointers: true,
+		Calls: []string{
+			"reflect_callReflect_abi0",
+			"reflect_moveMakeFuncArgPtrs",
+			"runtime_spillArgs_abi0",
+			"runtime_unspillArgs_abi0",
+		},
 	}, translation.Functions[1])
 	assert.Equal(t, "reflect_methodValueCall", translation.Functions[2].Name)
 	assert.Equal(t, "reflect_methodValueCall_abi0", translation.Functions[3].Name)

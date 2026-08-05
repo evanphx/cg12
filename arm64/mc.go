@@ -194,6 +194,7 @@ func compileToObjectWithBundle(m *ir.Module, opts Options, bundle assemblyBundle
 	var dfuncs []obj.DwarfFunc
 	var smFuncs []stackMapFunc
 	var goFunctions []goFunctionInfo
+	var stackFactsByFunction []stackFacts
 	anchor := ""
 	releaseFunctionIR := len(m.Funcs) > 2048
 	functions := make([]*ir.Func, 0, len(m.Funcs)+len(bundle.lowered))
@@ -237,6 +238,7 @@ func compileToObjectWithBundle(m *ir.Module, opts Options, bundle assemblyBundle
 		}
 		o.Text = append(o.Text, code.code...)
 		goFunctions = append(goFunctions, code.goFunction)
+		stackFactsByFunction = append(stackFactsByFunction, code.stack)
 		o.Syms = append(o.Syms, obj.Sym{
 			Name: code.name, Section: obj.SecText, Value: base,
 			Size: uint64(len(code.code)), Global: code.export || assemblyReferences[code.name], Func: true,
@@ -279,6 +281,17 @@ func compileToObjectWithBundle(m *ir.Module, opts Options, bundle assemblyBundle
 	dataDefinitions := make([]*ir.Data, 0, len(m.Data)+len(bundle.loweredData))
 	dataDefinitions = append(dataDefinitions, m.Data...)
 	dataDefinitions = append(dataDefinitions, bundle.loweredData...)
+	// The nosplit frame budget. Every frame in the module is now a number and
+	// every call edge has been recorded, which is the earliest point the walk can
+	// run -- and it runs before a byte of the object is committed, because a
+	// module whose nosplit chains do not fit must not produce an object at all.
+	// Only a Go-runtime module has nosplit chains in the sense the budget means:
+	// elsewhere there is no stack-growth check for a function to be exempt from.
+	if goRuntime {
+		if err := checkNoSplitBudget(noSplitBudgetInputs(stackFactsByFunction, bundle, dataDefinitions)); err != nil {
+			return nil, err
+		}
+	}
 	// The neutral emit loop above has produced the code and gathered per-function
 	// facts; the module data layout and any runtime metadata are the frontend's to
 	// finish. A Go runtime module lays its data out with the runtime's BSS/fixup

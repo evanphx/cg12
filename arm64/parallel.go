@@ -38,6 +38,7 @@ type functionCode struct {
 	dwarf      obj.DwarfFunc
 	goFunction goFunctionInfo
 	stackMap   *stackMapFunc
+	stack      stackFacts
 }
 
 // compileFunction lowers, allocates and emits one function. Every offset it
@@ -86,6 +87,11 @@ func compileFunction(f *ir.Func, opts Options, conventions calleeConventions, bu
 		rows:       mc.rows,
 		dwarf:      dwarfFunction,
 		goFunction: goFunction,
+		// The nosplit frame budget's facts are gathered here, in the worker,
+		// because a large module drops each function's IR as soon as it is merged
+		// (see releaseFunctionIR) and the call edges would be gone by the time the
+		// module-wide walk runs.
+		stack: stackFactsFor(f, name, mc.m.frameLayout, mc.m.frameless),
 	}
 	// A Go-runtime module carries the runtime's own stack-map metadata in
 	// moduledata/pclntab, so the legacy cg12 section is not emitted for it and its
