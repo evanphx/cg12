@@ -199,7 +199,61 @@ where it was. Everything below is on the branch tip with the fix and with
 | GC reducer, `-O`, `GOGC=10` | **0/20** fail |
 | GC reducer, unoptimized, default `GOGC` | **0/20** fail |
 | GC reducer, unoptimized, `GOGC=10` | **0/20** fail |
+| `goc.TestFrameEscapeAudit` | PASS, no baseline change |
+| `goc.TestEscapeShadowPlacement` | PASS, no baseline change |
+| `goc.TestLoopAliasAudit` | PASS, no baseline change |
+| `goc.TestAllocationCensus` | PASS after `-update-alloc-census-baseline` |
+| determinism, corpus, 3 rounds, no `-O` | **405/405 reproducible**, 0 varying, 0 failed, 0 content-varies, 0 layout-only |
+| determinism, corpus, 2 rounds, `-O` | **405/405 reproducible**, 0 varying, 0 failed, 0 content-varies, 0 layout-only |
 
-## Status of the remaining work
+The matrix is 367 capabilities on `integration/wave8`, one more than the 366 the
+job was written against.
 
-_(filled in below as each run lands)_
+The census moves by exactly four lines, all four in the new reducer and all four
+in the new file: the `&box` the interface return escapes, the channel header and
+its buffer, and the closure environment the goroutines are spawned through. **No
+existing site moved**, which is what says the change alters no allocation
+decision. `039129b`.
+
+## The other blocker: not reproduced, and no claim made
+
+The switch is also held back by the performance suite's `compress/flate`
+workload dying in the collector ("runtime: pointer ... to unused region of
+span"), measured at 3/5 by the job that added the switch. That is a different
+job's, and this change is not offered as a fix for it.
+
+It did not reproduce here. `goc/testdata/placement_bench/flate/main.go` built
+`goc -O` with `GOC_BOUNDED_MEM2REG=1` by a compiler from `7983abd` **without**
+this fix — the same compiler that fails tcp-churn 3/3, checked — ran clean:
+
+| build | runs |
+|---|---|
+| pre-fix, default `GOGC`, unpinned | 0/5 fail |
+| pre-fix, `GOGC=10`, unpinned | 0/8 fail |
+| pre-fix, default `GOGC`, pinned to one core | 0/36 fail |
+| pre-fix, `GOGC=10`, pinned to one core | 0/30 fail |
+| **with** this fix, default `GOGC`, pinned | 0/30 fail |
+
+79 pre-fix runs against a reported 3/5 says the crash needs something this did
+not do — `make bench-perf` runs the suite's own harness and this ran the program
+alone — or that something merged into `integration/wave8` since the switch
+landed has already closed it. Either way it is open until someone runs the suite,
+and nothing here should be read as having fixed it.
+
+## What is left
+
+- The switch stays **off**. Turning it on is a later job's call, and it should
+  not be made until the flate crash is either reproduced and fixed or shown to
+  be gone.
+- `markManagedDef` restores the invariant "promotion does not change what the
+  collector sees" for reaching definitions. The phi half was already there. The
+  same question has not been asked of the *backend* — what the arm64 stack maps
+  report for a marked temp the register allocator has put in a callee-saved
+  register rather than a spill slot — and the flate report points at exactly that
+  place. `TestGoStackMapsOmitAggregateResultHomeAtItsOwnCall` is the nearest
+  existing instrument.
+- The bisection scaffolding (`GOC_BOUNDED_MEM2REG_ONLY` / `_LIST` /
+  `_VARS` / `_VARLIST`) is deliberately not committed. Rebuilding it is a filter
+  in `BoundedPipeline`'s `Mem2Reg` wrapper plus a `mem2regVarFilter` hook in
+  `findPromotable`, and it is what makes a promotion miscompile answerable in
+  twenty minutes instead of a day.
