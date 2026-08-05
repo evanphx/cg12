@@ -115,10 +115,18 @@ budget was originally introduced to bound (against a 3 GiB ceiling). That is the
 one number in this whole exercise that is uncomfortably close to a limit, and it
 is called out again in the cost section.
 
-Note the matrix here has **368** capabilities, not the 366 the brief expected:
-the tree carried 367 before either prerequisite branch, and the two branches add
-one reducer each — `runtime_gc_promoted_local_root.go` and
-`runtime_opt_promoted_interface_root.go`. Both arms are 368/368, counted below.
+Note the matrix here has **368** capabilities, not the 366 the brief expected.
+The brief's number is right for `main`, which has exactly 366. The two extra
+come from the prerequisite branches:
+
+- both add `gc-invariants/slice-tail-pointer` (`runtime_gc_slice_tail_pointer.go`),
+  which the merge correctly keeps one copy of — verified, not assumed;
+- `mem2reg-gc-visibility` adds `gc-invariants/promoted-local-root`
+  (`runtime_gc_promoted_local_root.go`), its own reducer.
+
+`mem2reg-iface-dispatch`'s reducer (`runtime_opt_promoted_interface_root.go`) is
+a `./goc` test rather than a matrix capability, so it does not add a row. Both
+arms are 368/368, counted below.
 
 Counted, second run (packs warm, so the wall figures are the steady-state ones):
 
