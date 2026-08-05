@@ -339,3 +339,111 @@ pointer is the defect itself, and fires every time.
 | `flate` | on | `GOGC=10` | 250 | **0** |
 | `flate` | on | `GOGC=off` | 250 | **0** |
 
+## 7. The rest of the corpus, with promotion on
+
+**The capability matrix, all 368 programs, `-runtime-opt` + `GOC_BOUNDED_MEM2REG=1`:**
+
+| | before the fix | after |
+|---|---|---|
+| pass | 366 | **368** |
+| fail | 1 (`stdlib-netpoll-stress/tcp-churn`) | **0** |
+| (the matrix had 367 capabilities; this branch adds the reducer) | | |
+
+**Every benchmark program, 40 runs at the default collector setting and 40 at
+`GOGC=10`, 960 runs per pass:**
+
+| | before | after |
+|---|---|---|
+| `interp` `sha` `regexp` `json` `sortmap` `flate` `text` `chase` `conc` `gcpress` `float` | 0 failures | 0 |
+| `p256` at `GOGC=10` | **24 / 40** | **0** |
+| `p256` at default | 0 | 0 |
+
+`p256` was the only program in either corpus that showed the shape, and it showed
+it only above the default collection rate. That is worth saying plainly: **the
+whole corpus is run at the default `GOGC`, and at the default `GOGC` this defect
+is silent.** It took raising the collection rate to find it, and the failure it
+produces is a wrong answer rather than a crash.
+
+## 8. The other blocker on the switch is also gone
+
+The switch's second blocker — `stdlib-netpoll-stress/tcp-churn` dying with
+`cg12: interface dispatch failed for dynamic type 0x0`, which the wave-8 report
+assigned to a separate job — is fixed by the same change:
+
+| compiler | promotion | collector | runs | failures |
+|---|---|---|---|---|
+| before the fix | on | default | 20 | **18** |
+| before the fix | on | `GOGC=off` | 20 | **19** |
+| after the fix | on | default | 80 | **0** |
+
+**How much of that is established, and how much is not.** That it is fixed is
+measured — 0 in 80 runs against 18 in 20. *Why* is not fully established, and the
+`GOGC=off` row says it is not the mechanism found in `p256`: turning the collector
+off does not suppress it, so `tcp-churn` was not dying of a freed object. Marking
+a value `GCRef` does three other things in the backend besides putting it in the
+safepoint map, and any of them could be what `tcp-churn` needed:
+
+* `arm64/gcalloc.go` force-spills it to a stack slot for its whole life instead
+  of letting it live in a call-crossing register;
+* `coalesceSpillSlots` then gives it a **private** slot, where an unmarked temp's
+  slot is shared with other temps whose live ranges are believed disjoint;
+* the safepoint map is also what stack copying uses to relocate a growing frame,
+  and `tcp-churn` is the one workload here that grows stacks hard.
+
+The middle one is the most likely and is the one to look at first if it ever
+comes back. Someone should confirm which; this job did not.
+
+## 9. Guards
+
+All with `GOC_BOUNDED_MEM2REG` **unset**, on the fixed tree.
+
+| guard | result |
+|---|---|
+| capability matrix, default arm | **368 / 368 PASS** |
+| capability matrix, `-runtime-opt` arm | **368 / 368 PASS** |
+| `runtime_gc_type_mask_padding.go`, default `GOGC`, `GOMAXPROCS=3` | **0 / 20** |
+| `runtime_gc_type_mask_padding.go`, `GOGC=10`, `GOMAXPROCS=3` | **0 / 20** |
+| `TestFrameEscapeAudit` | PASS |
+| `TestAllocationCensus` | PASS (see below) |
+| `TestCompilingTheSameSourceTwiceGivesTheSameModule` | PASS |
+| `scripts/determinism-check.sh`, default and `-O` | 5 / 5 identical, both caching paths, both rounds |
+| goc output vs the pre-fix compiler, 4 programs × {default, `-O`} | **8 / 8 byte-identical** |
+| `make test-ruby` (mem2reg also runs in `DefaultPipeline`, which cg12's C frontend takes) | PASS |
+
+The matrix is **368**, not the 366 the brief expected: this branch's tree already
+carried 367 capabilities before I touched it (measured on `7983abd` with the
+switch off, both arms), and the reduction adds the 368th.
+
+**The census.** `goc/testdata/alloc_census_baseline.txt` gains nine lines, every
+one of them the new reducer's own allocation sites. No existing program's census
+moves — checked by filtering the diff to lines that do not name the new file, and
+there are none. The fix marks values the collector already had to see through the
+slot; it changes no allocation decision.
+
+**Determinism with promotion on**, which is not required but is what the next job
+will need: 4 programs (`interp`, `p256`, `gcpress`, `json`), compiled cold twice
+each at `-O` with the switch set — byte-identical, and each differs from its
+switch-off build, so promotion was genuinely running. `determinism-check.sh -O`
+with the switch set is 5/5 identical too, on a different set of hashes from the
+switch-off run.
+
+## 10. What this leaves
+
+The `flate` blocker was already fixed by someone else's change and nobody had
+re-measured. The real defect was one function away and one collector setting away,
+and it is fixed here with a deterministic reducer in the corpus.
+
+Both blockers named in `opt/pass.go`'s `BoundedPipeline` comment are now clean, so
+that comment is stale — it says the switch "is not yet correct" and names two
+failures that no longer happen. **I did not flip the switch**, because that is a
+later job's call and because turning it on changes every generated program; the
+comment is left as the record of why it was off. What a job flipping it now needs
+is the performance re-measurement (`make bench-perf`, `make bench-crypto`) and a
+compile-cost check, none of which is in scope here.
+
+One thing that would have found this years earlier, and is cheap: **the capability
+matrix runs every program once, at the default `GOGC`.** A defect that only frees
+an object the collector cannot see needs the collector to run, and the default
+setting collects too rarely. A `gc-invariants` arm at `GOGC=10` over the existing
+corpus — the setting that took `p256` from 0/40 to 24/40 — would have caught this
+without any new program being written.
