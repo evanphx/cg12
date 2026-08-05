@@ -579,3 +579,52 @@ written, tested and shipped and had never executed on a Go program.
 The rows that barely moved are the ones that were already at parity because they
 are dominated by something other than generated code: `sha` runs hand-written
 assembly, and `chase/dram` and `chase/pointer-node` are memory-latency bound.
+
+## 7. Guard table, and which tree each guard ran on
+
+`A` = the merged tree before the nosplit inliner fix; `B` = after it (`f2218cd`).
+Everything the fix could plausibly disturb was re-run on `B`. The fix strictly
+*removes* transformation — it declines to inline into nosplit callers — so a
+guard that passed on `A` cannot be broken by it, but the ones that bear on the
+headline claims were re-run anyway.
+
+| guard | required | result | tree |
+|-------|----------|--------|------|
+| capability matrix, default arm | 366/366 | **368 / 368** | A |
+| capability matrix, `-runtime-opt` arm | 366/366 | **368 / 368** | A **and B** |
+| GC reducer `runtime_gc_type_mask_padding.go`, `GOGC=10` | 0/20 | **0 / 20** | A |
+| GC reducer `runtime_gc_type_mask_padding.go`, default `GOGC` | 0/20 | **0 / 20** | A |
+| `runtime_gc_promoted_local_root.go`, both `GOGC` | — | **0 / 20** each | A |
+| `runtime_opt_promoted_interface_root.go`, both `GOGC` | — | **0 / 20** each | A |
+| `runtime_opt_loop_carried_root.go`, both `GOGC` | — | **0 / 20** each | A |
+| `TestFrameEscapeAudit` | pass | **PASS** | A |
+| `TestLoopAliasAudit` | pass | **PASS** | A |
+| `TestAllocationCensus` | pass | **PASS** | A |
+| `TestEscapeShadowPlacement` | pass | **PASS** | A |
+| determinism, default | byte-identical | **5/5, both caching paths, both rounds** | A |
+| determinism, `-O` | byte-identical | **5/5, both caching paths, both rounds** | A |
+| `TestParallelBackendIsByteIdenticalToSerial` | pass | **PASS** | A |
+| flate crash loop, default `GOGC` | 0 over ≥200 | **0 / 250** | A |
+| flate crash loop, `GOGC=10` | 0 over ≥200 | **0 / 250** | A |
+| `TestExecutionCorpus` + `TestAdvancedExecutionCorpus` | — | **241 / 241** | A |
+| `TestLoopBodyAllocationsAreDistinctPerIteration` + `TestAllocationCounts` | — | **17 / 17** | A |
+| corpus compile sweep, all 406 | — | **406 / 406, 0 failures** | A **and B** |
+| bounded-vs-full corpus differential, all 406 | — | 403 same, 1 nondeterministic, **2 differences — both diagnosed** | A |
+| `placement_bench/p256`, `GOGC=10` | — | **0 / 100** | A |
+| `runtime_lock_osthread`, whole-program `-O` | — | 14/100 on A, **0 / 400 on B** | A and B |
+| `go test ./opt` (whole package) | — | **PASS** | B |
+| perf suite re-cut | — | 44/44 improved | B |
+
+The four audits (`TestFrameEscapeAudit`, `TestLoopAliasAudit`,
+`TestAllocationCensus`, `TestEscapeShadowPlacement`) pass, and it is worth
+repeating that they are **structurally insensitive** to this change:
+`auditCorpus` compiles with `goc.CompileExecutable` and never calls
+`opt.OptimizeModule`, so they read unoptimized IR. They are a real guard on the
+merge not having disturbed the front end. They are not evidence about the
+pipeline.
+
+No baseline was forced. The two baselines that moved —
+`goc/testdata/perf_suite_baseline.txt` and `goc/testdata/alloc_census_baseline.txt`
+(the latter auto-merged from the two prerequisite branches, which each added
+their reducer's allocation sites) — were regenerated from measurements, and every
+other baseline in the tree passes unmodified.
