@@ -179,4 +179,48 @@ argued: identical sha256 and size, at **2.10x less wall time and 1.66x less
 CPU**. Half of cg12's fixpoint cost is not the fixpoint; it is testing
 convergence at module granularity when every transform is per-function.
 
-_(`make bench-perf` under `ordered` in progress; capped arm to follow)_
+### The identity holds on four programs
+
+`full` vs `perfunc`, whole-program `-O` builds, binaries compared byte for byte:
+
+| program | `full` wall/user | `perfunc` wall/user | binaries |
+|---|---:|---:|---|
+| `fmt_sprintf.go` | 41.59 / 82.41 | 20.21 / 48.48 | **identical** |
+| `placement_bench/interp` | 42.32 / 80.71 | 21.05 / 48.62 | **identical** |
+| `placement_bench/json` | 51.58 / 99.99 | 25.41 / 60.83 | **identical** |
+| `placement_bench/flate` | 46.80 / 88.98 | 22.12 / 52.60 | **identical** |
+
+Adding a 3-round cap on the two inline fixpoints (`perfunc3`) gives 17.92 /
+18.02 / 22.45 / 19.49 s wall — 2.3-2.4x `full` — for binaries 0.006-0.011%
+*smaller* than `full`'s.
+
+## 4. Code quality — `make bench-perf` under `ordered`
+
+`GOC_OPT_PIPELINE=ordered make bench-perf`, 42 rows, 9 interleaved repetitions,
+547 s. The committed baseline is the full-pipeline reference (`bb66b35`, re-cut
+on an idle box), and the gated number is a goc/host ratio formed inside one
+repetition, so it is comparable across runs by construction.
+
+**All 42 rows `within tolerance`.** Largest movements (lower ratio = better):
+
+| row | fixpoint | ordered | change | resolved | tol |
+|---|---:|---:|---:|---:|---:|
+| `sortmap map/build-probe` | 6.0921 | 5.3962 | −11.4% | +4.1% | 14.5% |
+| `regexp regexp/find-submatch` | 6.4397 | 6.2096 | −3.6% | +3.3% | 5.0% |
+| `flate flate/decompress` | 4.7187 | 4.5695 | −3.2% | +2.7% | 5.0% |
+| `text text/parse` | 7.7207 | 7.8860 | **+2.1%** | +1.7% | 5.0% |
+| `json json/marshal` | 14.7342 | 14.9770 | **+1.6%** | −0.7% | 5.5% |
+| `interp interp/bytecode-loop` | 19.0659 | 18.9109 | −0.8% | +0.7% | 5.0% |
+
+The eleven `control/spin-fixed-work` rows came back 0.9246–0.9265 against a
+baseline range of 0.9247–0.9284.
+
+The run's exit status is FAIL, and **not for a ratio**: the suite's noise gate
+tripped because `chase/pointer-node`'s one-repetition spread was 13.65% against
+1.27% in the baseline. That is my fault — I ran a `go build` and a `goc` compile
+on the box during repetitions 1-2, and `chase` is the memory-latency workload.
+Every row passed despite the extra noise (noise hides differences, it does not
+manufacture agreement), but the `chase/*` rows should be read as not cleanly
+measured.
+
+_(`make bench-perf` under `perfunc3` in progress)_

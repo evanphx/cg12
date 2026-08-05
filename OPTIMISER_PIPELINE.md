@@ -69,9 +69,8 @@ kinds of local iteration:
 1. **`cgscc(devirt<4>(...))`** — `DevirtSCCRepeatedPass`. It repeats the CGSCC
    body *only when a pass turned an indirect call into a direct one*, at most 4
    times. `devirt<4>` is printed at `-O1`, `-O2` and `-O3` alike. Its doc comment
-   (`llvm/Analysis/CGSCCPassManager.h`, installed at
-   `/usr/lib/llvm-18/include/llvm/Analysis/CGSCCPassManager.h:546`) states the
-   reason for the bound directly:
+   (`/usr/lib/llvm-18/include/llvm/Analysis/CGSCCPassManager.h:545-558`) states
+   the reason for the bound directly:
 
    > *"This repetition has the potential to be very large however, as each one
    > might refine a single call site. As a consequence, in practice we use an
@@ -80,10 +79,11 @@ kinds of local iteration:
 2. **The CGSCC walk itself revisits SCCs** as inlining reshapes the call graph —
    and LLVM explicitly *suppresses* redundant work when it does. The function
    simplification pipeline nested in the CGSCC walk is added with
-   `/*NoRerun=*/true` (`llvm/lib/Passes/PassBuilderPipelines.cpp`, in
-   `buildInlinerPipeline`; printed as `function<eager-inv;no-rerun>`), backed by
-   `ShouldNotRunFunctionPassesAnalysis`, whose comment is the whole idea in one
-   sentence:
+   `/*NoRerun=*/true` (`llvm/lib/Passes/PassBuilderPipelines.cpp:922`, inside
+   `buildInlinerPipeline`, which starts at :848; printed as
+   `function<eager-inv;no-rerun>`), backed by
+   `ShouldNotRunFunctionPassesAnalysis` (`CGSCCPassManager.h:531`), whose comment
+   is the whole idea in one sentence:
 
    > *"This is used to prevent running an expensive function pass (manager) on a
    > function multiple times if SCC mutations cause a function to be visited
@@ -122,6 +122,22 @@ construct of any kind**. Repetition is expressed by writing the pass down again;
 | `copyprop` | 5 |
 | `ccp` | 5 |
 | `forwprop` | 4 |
+
+Each repeat is placed where a *named* transform is known to leave debris —
+`passes.def:242`:
+
+```c
+/* Threading can leave many const/copy propagations in the IL.
+   Clean them up.  Failure to do so well can lead to false
+   positives from warnings for erroneous code.  */
+NEXT_PASS (pass_copy_prop);
+```
+
+```c
+/* All unswitching, final value replacement and splitting can expose
+   empty loops.  Remove them now.  */
+NEXT_PASS (pass_cd_dce, false /* update_address_taken_p */);
+```
 
 Where GCC iterates, it is inside one pass and is a *parameter of that instance*:
 
@@ -382,6 +398,7 @@ means shown). `full` is `main`'s behaviour.
 | `ordered` | every fixpoint collapsed to **one** traversal | **14.61** | 38.56 | 13,973,512 B (+0.29%) |
 | `ordered2` | hand-ordered, `clean` twice at chosen points (§6) | **16.91** | 42.04 | 13,920,456 B (−0.09%) |
 | `perfunc` | same passes, convergence moved **inside the per-function loop** | **20.24** | 49.33 | **byte-identical to `full`** |
+| `perfunc3` | `perfunc` + the inline fixpoints capped at 3 rounds | **17.92** | 44.66 | −904 B (−0.006%) |
 | `bounded` | fold/copy/dce only (the pre-2026-08 default) | 6.84 | 20.70 | 10,611,496 B |
 
 **The `perfunc` row is the finding of this job.** `clean`'s members are all pure
@@ -398,9 +415,83 @@ In other words, **half of cg12's fixpoint cost is not the fixpoint at all — it
 is testing convergence at the wrong granularity**, and removing it costs nothing
 whatsoever in code quality.
 
-### 5.5 Code quality: `make bench-perf`
+### 5.5 Code quality: `make bench-perf` under the ordered pipeline
 
-*(§5.5 filled in from the run — see the table below.)*
+`GOC_OPT_PIPELINE=ordered make bench-perf` — 11 programs, 42 rows, 9 interleaved
+repetitions pinned to core 62, 547 s. The committed baseline
+(`goc/testdata/perf_suite_baseline.txt`) *is* the full-pipeline reference: it was
+re-cut on the tree with the full pipeline on (`c7171de`, then `bb66b35` on the
+merged tree, "on an idle box"), and the gated number is a goc/host ratio formed
+inside one repetition, so machine speed divides out and the file is comparable
+across runs by construction.
+
+**Every one of the 42 rows came back `within tolerance`.** The biggest movements,
+with the "resolved" column (the part of the change that survives both intervals —
+negative means indistinguishable from zero):
+
+| row | baseline (fixpoint) | ordered | change | resolved | tol |
+|---|---:|---:|---:|---:|---:|
+| `sortmap map/build-probe` | 6.0921 | 5.3962 | −11.4% | +4.1% | 14.5% |
+| `regexp regexp/replace` | 5.9579 | 5.7107 | −4.1% | +0.0% | 10.7% |
+| `regexp regexp/find-submatch` | 6.4397 | 6.2096 | −3.6% | +3.3% | 5.0% |
+| `conc chan/send-buffered` | 2.8896 | 2.7914 | −3.4% | +3.1% | 5.0% |
+| `flate flate/decompress` | 4.7187 | 4.5695 | −3.2% | +2.7% | 5.0% |
+| `text text/format-append` | 7.6592 | 7.4131 | −3.2% | −5.6% | 12.8% |
+| `text text/parse` | 7.7207 | 7.8860 | **+2.1%** | +1.7% | 5.0% |
+| `json json/marshal` | 14.7342 | 14.9770 | **+1.6%** | −0.7% | 5.5% |
+| `interp interp/bytecode-loop` | 19.0659 | 18.9109 | −0.8% | +0.7% | 5.0% |
+
+(lower is better; ratio = goc ns / host ns.) Movements go both ways and are
+mostly not resolvable from zero. The eleven `control/spin-fixed-work` rows —
+byte-identical source in every program — came back 0.9246 to 0.9265 against a
+baseline range of 0.9247 to 0.9284, i.e. the instrument and the box agree with
+the day the baseline was cut.
+
+**So: on this instrument, the code the ordered pipeline produces is
+indistinguishable from the code the fixpoint produces, at 2.9x less compile
+time.** Two honest limits on that sentence. First, sensitivity: per-row
+`detect%` runs from 5.0% to 45%, so this suite would not see a uniform 2-3%
+regression, and the binary *is* 0.29% larger. Second, the run failed its noise
+gate — not on any ratio, but because `chase/pointer-node`'s one-repetition spread
+was 13.65% against 1.27% in the baseline, and that is my fault: I ran a
+`go build` and a `goc` compile on the box during its first two repetitions.
+`chase` is the memory-latency workload and is the one that would notice. The
+verdict table above is unaffected in direction (every row passed *despite* the
+extra noise, and noise can only hide a difference, not manufacture agreement),
+but the `chase/*` rows specifically should be read as "not measured cleanly".
+
+### 5.6 The `perfunc` result holds on four programs, and bounding the rest
+
+`perfunc` was checked against `full` on four whole-program builds, one
+compilation each, comparing the linked binaries byte for byte:
+
+| program | `full` wall / user | `perfunc` wall / user | binaries |
+|---|---:|---:|---|
+| `fmt_sprintf.go` | 41.59 / 82.41 | 20.21 / 48.48 | **identical** |
+| `placement_bench/interp` | 42.32 / 80.71 | 21.05 / 48.62 | **identical** |
+| `placement_bench/json` | 51.58 / 99.99 | 25.41 / 60.83 | **identical** |
+| `placement_bench/flate` | 46.80 / 88.98 | 22.12 / 52.60 | **identical** |
+
+2.0–2.1x on wall, 1.66–1.70x on CPU, byte-identical output every time.
+
+`perfunc3` adds a 3-round cap on the two inline fixpoints, on top of `perfunc`:
+
+| program | `perfunc3` wall / user | vs `full` | binary vs `full` |
+|---|---:|---:|---|
+| `fmt_sprintf.go` | 17.92 / 44.66 | 2.4x / 1.8x | −904 B (−0.006%) |
+| `placement_bench/interp` | 18.02 / 44.41 | 2.3x / 1.8x | −912 B (−0.007%) |
+| `placement_bench/json` | 22.45 / 54.93 | 2.3x / 1.8x | −1,704 B (−0.011%) |
+| `placement_bench/flate` | 19.49 / 47.90 | 2.4x / 1.9x | −1,240 B (−0.008%) |
+
+The cap is worth another 11% of wall time over `perfunc` and changes the binary
+by about a hundredth of a percent, in the direction of *less* code — which is
+what §5.3 predicts, since what rounds 4-7 add is a few dozen instructions of
+tail-end inlining. §5.7 measures whether that hundredth of a percent is visible
+in the perf suite.
+
+### 5.7 Code quality under the recommended arm (`perfunc3`)
+
+*(filled in below)*
 
 ---
 
@@ -428,8 +519,18 @@ deadfunc
 gcm ; dce
 ```
 
-That is the `ordered2` arm above: 16.91 s (2.5x faster than `full`), and a
-binary 0.09% *smaller* than the fixpoint's. Which passes genuinely need to run
+One reason the inliner genuinely needs more than one round, which is easy to miss
+and is not about exposing new opportunities: `inlineFuncBudget = 64`
+(`opt/inline.go:52`) caps how many call sites are inlined into one function *per
+pass*, and its own comment says "the pipeline's fixpoint applies more on later
+rounds if they remain worthwhile". So a function with more than 64 inlinable
+sites — an interpreter dispatch loop is exactly that — needs round 2 to finish
+what round 1 was capped out of. Any ordered or round-capped design inherits that:
+three inline rounds is 192 sites per function, and if that is not enough for
+some function the budget is the thing to raise, not the round count.
+
+The `ordered2` arm above is this pipeline: 16.91 s (2.5x faster than `full`), and
+a binary 0.09% *smaller* than the fixpoint's. Which passes genuinely need to run
 twice, from the round-2 firing counts in `clean#2`: `fold` (1,139 functions),
 `dce` (1,052), `simplifycfg` (920), `jumpthread` (859), `gvn` (478) — i.e.
 almost all of the clean set, which is why the unit of repetition should be the
