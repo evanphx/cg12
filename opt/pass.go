@@ -184,16 +184,28 @@ func DefaultPipeline() []Pass {
 // every one still well under the 3 GiB ceiling.
 //
 // GOC_BOUNDED_MEM2REG=1 turns it on, and it is off by default because it is not
-// yet correct. mem2reg has never run on a Go-frontend module -- only on cg12cc's
-// C ones -- and with it on, the stdlib-netpoll-stress/tcp-churn capability dies
-// with "cg12: interface dispatch failed for dynamic type 0x0" in
-// net.Listener.Accept. Deterministic at GOMAXPROCS=1, unaffected by GOGC (no
-// collection runs at all in that program), and not code placement (the pre-fix
-// compiler survives the whole GOC_TEXT_PAD sweep). It needs promotion in main.main
-// and in at least two functions of package net simultaneously; promoting either
-// package alone is clean, and so is running mem2reg with the cleanup fixpoint
-// removed, which places the defect in the promotion itself and not in what fold,
-// copy and dce do to its phis. See CCWORK_REPORT.md for the bisection.
+// yet correct. mem2reg has never run on a Go-frontend module -- only on cg12cc's C
+// ones -- and turning it on breaks two programs in two different ways.
+//
+// The performance suite's compress/flate workload dies with the collector finding
+// a pointer into a freed span ("runtime: pointer ... to unused region of span", in
+// scanObject). 3/5 runs with the collector on, 0/5 with GOGC=off, 0/5 with this
+// switch off, so it is a GC-visibility defect: a promoted managed pointer stops
+// being described to the collector once it lives in a register. promotable carries
+// managed and gcType forward, so the loss is downstream of this pass, in what the
+// arm64 backend records for a promoted temp the register allocator spills. That is
+// the one to fix first; its reproducer is deterministic and needs no network.
+//
+// The stdlib-netpoll-stress/tcp-churn capability dies with "cg12: interface
+// dispatch failed for dynamic type 0x0" in net.Listener.Accept. That one is not
+// the collector -- the program runs no collection at all -- and is deterministic
+// at GOMAXPROCS=1, and is not code placement (the pre-change compiler survives the
+// whole GOC_TEXT_PAD sweep). It needs promotion in main.main and in at least two
+// functions of package net simultaneously; promoting either package alone is
+// clean, and so is running mem2reg with the cleanup fixpoint removed, which places
+// the defect in the promotion and not in what fold, copy and dce do to its phis.
+//
+// CCWORK_REPORT.md has the bisection and the measurements.
 func BoundedPipeline() []Pass {
 	clean := Fixpoint("bounded-clean",
 		FuncPass("fold", Fold),
