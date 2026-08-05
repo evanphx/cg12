@@ -3,6 +3,7 @@ package opt
 import (
 	"os"
 	"strings"
+	"sync/atomic"
 
 	"github.com/evanphx/cg12/ir"
 )
@@ -15,33 +16,152 @@ type Pass interface {
 	Run(m *ir.Module) bool
 }
 
+// changeLog is the pipeline's record of which functions have moved since which
+// pass last looked at them, and it is why a whole-module compile does not
+// re-converge over the whole module on every fixpoint round.
+//
+// The pipeline's shape means most of a round's work is already known to be
+// wasted. `clean` is a seven-pass fixpoint; the two `inline-fixpoint` blocks
+// call it again after every inlining round; and each of those calls re-ran all
+// seven passes over all 5101 functions of a whole-program Go module. Measured on
+// goc/testdata/fmt_sprintf.go: 50 rounds of `clean` across 13 calls, 252,550
+// visits per pass, of which between 0.17% (deadalloc) and 3.8% (simplifycfg)
+// changed anything. Better than 96% of every pass's work was re-proving a
+// fixpoint it had already reached.
+//
+// The rule that makes skipping sound: every pass entered through [FuncPass] is a
+// deterministic function of the one function it is handed. The transform's
+// signature is func(*ir.Func) bool, and the only module state any of them reads
+// through it is ir.Module.SymAttrs -- LoadElim and DeadAlloc consult it through
+// isAtomicPointerStore -- which the front end writes once and no pass ever
+// touches. So if a pass ran on f and reported no change, and no pass has changed
+// f since, running it again would report no change again. Skipping a visit that
+// provably cannot change anything cannot change the compiler's output, and the
+// determinism and byte-identity checks say it does not.
+//
+// Passes that cannot say what they touched (any [ModulePass] but the inliner)
+// are handled the other way: if one reports a change, every function is marked
+// moved, and the next pass over them starts from scratch.
+type changeLog struct {
+	// version counts the changes made to a function. Any increment invalidates
+	// every pass's convergence on it.
+	version map[*ir.Func]uint32
+	// converged records, per (pass, function), the version at which that pass
+	// last ran and reported no change.
+	converged map[passFunc]uint32
+}
+
+type passFunc struct {
+	pass int32
+	fn   *ir.Func
+}
+
+func newChangeLog() *changeLog {
+	return &changeLog{
+		version:   map[*ir.Func]uint32{},
+		converged: map[passFunc]uint32{},
+	}
+}
+
+// settled reports whether pass has already converged on f at f's current
+// version, so that running it again cannot change anything.
+func (log *changeLog) settled(pass int32, f *ir.Func) bool {
+	if log == nil {
+		return false
+	}
+	at, ok := log.converged[passFunc{pass: pass, fn: f}]
+	return ok && at == log.version[f]
+}
+
+// record files the outcome of running pass on f.
+func (log *changeLog) record(pass int32, f *ir.Func, changed bool) {
+	if log == nil {
+		return
+	}
+	if changed {
+		log.version[f]++
+		return
+	}
+	log.converged[passFunc{pass: pass, fn: f}] = log.version[f]
+}
+
+// moveEverything marks every function as changed. It is what a pass that cannot
+// report which functions it touched costs.
+func (log *changeLog) moveEverything(m *ir.Module) {
+	if log == nil {
+		return
+	}
+	for _, f := range m.Funcs {
+		log.version[f]++
+	}
+}
+
+// tracked is the optional half of [Pass] for the passes that can take part in
+// change tracking: the per-function ones, the fixpoints built from them, and the
+// inliner, which knows which callers it spliced into. A pass that does not
+// implement it still runs, and is assumed to have changed everything.
+type tracked interface {
+	runTracked(m *ir.Module, log *changeLog) bool
+}
+
+// runPass applies one pipeline step, using change tracking where the pass
+// supports it.
+func runPass(p Pass, m *ir.Module, log *changeLog) bool {
+	if t, ok := p.(tracked); ok {
+		return t.runTracked(m, log)
+	}
+	if !p.Run(m) {
+		return false
+	}
+	log.moveEverything(m)
+	return true
+}
+
+// passIDs hands each constructed pass an identity, so that two positions in a
+// pipeline that happen to share a name (the default pipeline has three "dce"s)
+// keep their convergence records apart.
+var passIDs atomic.Int32
+
 // FuncPass lifts a per-function transform to a module pass by applying it to
 // every function with a body. Almost every optimization is intraprocedural and
 // enters the pipeline this way; only the interprocedural passes ([Inline],
 // [DeadFuncElim]) need to see the whole module and are [ModulePass]es.
 func FuncPass(name string, run func(*ir.Func) bool) Pass {
-	return funcPass{name: name, run: run}
+	return funcPass{id: passIDs.Add(1), name: name, run: run}
 }
 
 type funcPass struct {
+	id   int32
 	name string
 	run  func(*ir.Func) bool
 }
 
 func (p funcPass) Name() string { return p.name }
 
-func (p funcPass) Run(m *ir.Module) bool {
+// Run applies the transform to every function, without change tracking. It is
+// the entry point for callers outside a pipeline.
+func (p funcPass) Run(m *ir.Module) bool { return p.runTracked(m, nil) }
+
+func (p funcPass) runTracked(m *ir.Module, log *changeLog) bool {
 	changed := false
 	for _, f := range m.Funcs {
 		if f.Start == nil {
 			continue // a declaration with no body
 		}
+		if log.settled(p.id, f) {
+			continue // converged on exactly these bytes already
+		}
 		// CFG analyses currently model a single entry. Leave metadata-entered
 		// functions intact until those analyses grow an explicit virtual root.
+		// Declining to transform one is a settled outcome like any other, so the
+		// scan for it is not repeated until something changes the function.
 		if hasSecondaryEntry(f) {
+			log.record(p.id, f, false)
 			continue
 		}
-		if p.run(f) {
+		moved := p.run(f)
+		log.record(p.id, f, moved)
+		if moved {
 			changed = true
 		}
 	}
@@ -77,12 +197,16 @@ type fixpoint struct {
 
 func (fp fixpoint) Name() string { return fp.name }
 
-func (fp fixpoint) Run(m *ir.Module) bool {
+// Run iterates to a fixpoint without change tracking, for callers outside a
+// pipeline.
+func (fp fixpoint) Run(m *ir.Module) bool { return fp.runTracked(m, nil) }
+
+func (fp fixpoint) runTracked(m *ir.Module, log *changeLog) bool {
 	any := false
 	for {
 		round := false
 		for _, p := range fp.passes {
-			if p.Run(m) {
+			if runPass(p, m, log) {
 				round = true
 			}
 		}
@@ -93,10 +217,14 @@ func (fp fixpoint) Run(m *ir.Module) bool {
 	}
 }
 
-// Run applies a pipeline to a module in order.
+// Run applies a pipeline to a module in order, tracking which functions each
+// pass has already converged on across the whole pipeline -- so the `clean`
+// fixpoint the two inliner stages re-enter starts from the callers the inliner
+// actually spliced into, not from all 5101 functions of the module.
 func Run(m *ir.Module, pipeline []Pass) {
+	log := newChangeLog()
 	for _, p := range pipeline {
-		p.Run(m)
+		runPass(p, m, log)
 	}
 }
 
