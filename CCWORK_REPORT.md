@@ -1,714 +1,622 @@
-# Enable goc's full optimisation pipeline by default
-
-Branch: `ccwork/enable-full-pipeline` = `ccwork/mem2reg-iface-dispatch` + merge of
-`ccwork/mem2reg-gc-visibility` (merge commit 4803808).
-
-## Status: COMPLETE. Full optimisation is on by default. Three blockers found and
-fixed (two known, one new). Control loop 1.6294x the host toolchain -> 0.9262x.
-Compile time 4.5x. Written as work landed, not batched at the end.
-
-## Merge of the two prerequisite branches
-
-Both branches independently landed the *same* fix: `opt.markManagedDef` in
-`opt/mem2reg.go`, called from `renameBlock` on every store that becomes a promoted
-managed variable's reaching definition. The conflict was a genuine duplicate, not two
-halves of one change.
-
-Difference between the two versions, and what I kept:
-
-- `mem2reg-iface-dispatch`: returns early if the temp already has `GCRef`, else
-  `f.MarkGCRefType(value, v.gcType)`.
-- `mem2reg-gc-visibility`: always sets `GCRef = true`, and sets `GCType` only when
-  it is currently 0.
-
-I kept **gc-visibility's**: it is a strict superset. It preserves an existing
-type descriptor exactly as iface-dispatch does, and additionally fills in the slot's
-descriptor for a value that was marked `GCRef` with no type. `MarkGCRefType`
-overwrites `GCType` unconditionally (`ir/build.go:117`), so iface-dispatch's early
-return was the only thing stopping it from clobbering a more precise descriptor.
-
-Both branches' tests are kept: `goc/optgcroot_test.go` +
-`goc/testdata/runtime_opt_promoted_interface_root.go` (iface-dispatch) and
-`goc/testdata/runtime_gc_promoted_local_root.go` +
-`cmd/goc/runtime_status_test.go` (gc-visibility).
-
-Both branches claim their blocker fixed. gc-visibility additionally claims the
-flate crash was never mem2reg's — it was the zero-capacity-slice defect fixed in
-800f47f, whose *rate* promotion roughly doubled. Both claims are re-verified from
-scratch below, on the merged tree, rather than taken on trust.
-
-## 1. What the full pipeline contains that the bounded one does not
-
-`BoundedPipeline` is one fixpoint of three passes: **fold, copy, dce**. That is all
-`goc -O` has ever meant for a whole-program Go build.
-
-`DefaultPipeline` (`opt/pass.go:108`) is, in order:
-
-| # | pass | kind | in bounded? |
-|---|------|------|-------------|
-| 1 | `mem2reg` | func | no |
-| 2 | `clean` fixpoint: `fold`, `copy`, `loadelim`, `deadalloc`, `gvn`, `jumpthread`, `simplifycfg`, `dce` | func | fold/copy/dce only |
-| 3 | `inline` fixpoint: `inline` + `clean` | module + func | no |
-| 4 | `mem2reg` (again, to catch what inlining exposed) | func | no |
-| 5 | `clean` | | partial |
-| 6 | `unroll` (`UnrollRecursion`) | module | no |
-| 7 | `inline` fixpoint again | | no |
-| 8 | `constantp` (`ResolveConstantP`) | func | no |
-| 9 | `ifconvert` | func | no |
-| 10 | `clean` | | partial |
-| 11 | `tailmerge`, `simplifycfg`, `dce` | func | dce only |
-| 12 | `deadfunc` (`DeadFuncElim`) | module | no |
-| 13 | `gcm`, `dce` | func | dce only |
-
-So the bounded path skips **thirteen distinct passes**: mem2reg, loadelim,
-deadalloc, gvn, jumpthread, simplifycfg, inline, unroll, constantp, ifconvert,
-tailmerge, deadfunc, gcm. mem2reg is the one that was investigated; it is not the
-only one, and it is not even the expensive one.
-
-**Are the other twelve safe to enable?** They are not new code and they are not
-untested — every one of them has unit tests in `opt/`, and every one of them has
-been running on cg12cc's C modules (Ruby, miniruby, CRuby) for as long as it has
-existed. What is new is that they had never seen a *Go-frontend* module, which is
-where the two known blockers came from: both were mem2reg interacting with goc's
-GC metadata, a thing C modules do not have. The passes with a comparable exposure
-to Go-specific metadata are the ones that move or delete values across safepoints
-— `gcm` (schedules values, so it lengthens live ranges), `inline` (copies a
-callee's frame into a caller's, including its GC roots), `deadalloc` and
-`deadfunc` (delete allocations and functions). Those are where I looked hardest;
-the campaign below runs every arm on the whole matrix, corpus, GC reducer, escape
-audits and flate loop rather than reasoning about it.
-
-That guess was half right, in a way worth recording. The third blocker *is*
-`inline`, and it *is* about a frame — but not about GC roots. It is that inlining
-grows a frame at all, in a function whose frame comes out of a fixed runtime
-reserve nothing in cg12 measures. Reasoning about which passes touch GC metadata
-would not have found it; the corpus differential did.
-
-## 2. The change
-
-`opt.OptimizeModule` no longer consults a size budget at all. `moduleOptimizationOverBudget`
-and its four constants are deleted. The pipeline is chosen by `opt.ModulePipeline`:
-
-- `GOC_OPT_PIPELINE` unset / `full` / `default` → `DefaultPipeline` (**the new default**)
-- `GOC_OPT_PIPELINE=promote` → `BoundedPipeline` + mem2reg (the promotion-only arm)
-- `GOC_OPT_PIPELINE=bounded` → `BoundedPipeline` (the pre-change default; the bisection escape hatch)
-- an unrecognized value panics rather than silently selecting the default
-
-`GOC_OPT_SKIP=name1,name2` drops named passes from whichever arm was selected, at
-any nesting depth (it descends into fixpoints). The corpus and the capability
-matrix compile in-process or through `goc` subprocesses with fixed argv, so there
-is no compiler flag to thread through; an environment variable is the only handle
-an outside job has, and attributing a miscompile to one pass is the whole game
-here.
-
-## 3. The failure campaign
-
-### Capability matrix — both arms, full pipeline (368 capabilities in the table)
-
-| arm | result | wall |
-|-----|--------|------|
-| default (no `-O`) | **PASS** | 109.6 s |
-| `-runtime-opt`, `GOC_OPT_PIPELINE` default (= full) | **PASS** | 313.6 s |
-
-The `-O` arm is 2.9x the wall clock of the default arm, where before this change
-the two were close. Most of that is the prebuilt packs: `net/http` with the full
-pipeline takes ~240 s and peaks at **2.99 GiB RSS**, which is the memory the
-budget was originally introduced to bound (against a 3 GiB ceiling). That is the
-one number in this whole exercise that is uncomfortably close to a limit, and it
-is called out again in the cost section.
-
-Note the matrix here has **368** capabilities, not the 366 the brief expected.
-The brief's number is right for `main`, which has exactly 366. The two extra
-come from the prerequisite branches:
-
-- both add `gc-invariants/slice-tail-pointer` (`runtime_gc_slice_tail_pointer.go`),
-  which the merge correctly keeps one copy of — verified, not assumed;
-- `mem2reg-gc-visibility` adds `gc-invariants/promoted-local-root`
-  (`runtime_gc_promoted_local_root.go`), its own reducer.
-
-`mem2reg-iface-dispatch`'s reducer (`runtime_opt_promoted_interface_root.go`) is
-a `./goc` test rather than a matrix capability, so it does not add a row. Both
-arms are 368/368, counted below.
-
-Counted, second run (packs warm, so the wall figures are the steady-state ones):
-
-| arm | PASS | FAIL | wall |
-|-----|------|------|------|
-| default | **368** | 0 | 130.0 s |
-| `-runtime-opt`, full pipeline | **368** | 0 | 131.5 s |
-
-With the packs cached the two arms cost the same. The 313.6 s figure above is a
-cold-pack run and is paid once per tree, not per run.
-
-### GC reducers, full pipeline, 20 runs each
-
-`GOMAXPROCS=3`, both collector settings, `goc -O` whole-program builds:
-
-| reducer | `GOGC=10` | default `GOGC` |
-|---------|-----------|----------------|
-| `runtime_gc_type_mask_padding.go` | **0 / 20** | **0 / 20** |
-| `runtime_gc_promoted_local_root.go` (gc-visibility's reducer) | **0 / 20** | **0 / 20** |
-| `runtime_opt_promoted_interface_root.go` (iface-dispatch's reducer) | **0 / 20** | **0 / 20** |
-| `runtime_opt_loop_carried_root.go` | **0 / 20** | **0 / 20** |
-
-Both prerequisite branches' blockers are fixed on the merged tree, checked
-against their own reducers rather than taken on trust.
-
-### Loop-aliasing programs and allocation counts — full pipeline
-
-`TestLoopBodyAllocationsAreDistinctPerIteration` runs each loop-alias reduction
-unoptimized and optimized; the optimized arm is now `opt.OptimizeModule` over the
-whole monolithic module (runtime included), which before this change degraded to
-fold/copy/dce and promoted nothing. All 17 subtests PASS:
-
-    loop_alias_forms.go                     2.51s / -O 15.40s
-    loop_alias_composite.go                 2.54s / -O 28.15s
-    variadic_backing.go                     5.31s / -O 28.79s
-    variadic_element_retention.go           2.60s / -O 15.15s
-    variadic_element_address_retention.go   2.50s / -O 15.12s
-    loop_alias_frame_local.go               2.48s / -O 15.09s
-    allocation_counts.go                    6.50s / -O 39.01s
-    TestLoopAliasAudit                      268.48s (unoptimized; see below)
-
-The per-iteration allocation identity the loop rule exists to protect survives
-promotion, inlining and GCM. The `-O` column is 6-11x the unoptimized one; that
-is the compile-time cost again, in the goc suite this time.
-
-### Escape / census / shadow audits — PASS, and a caveat about what they prove
-
-| guard | result |
-|-------|--------|
-| `TestFrameEscapeAudit` | PASS |
-| `TestAllocationCensus` | PASS (183.85 s, the corpus compile) |
-| `TestEscapeShadowPlacement` | PASS |
-| `TestLoopAliasAudit` | PASS (268.48 s) |
-| `TestCompilingTheSameSourceTwiceGivesTheSameModule` | PASS |
-| `TestParallelBackendIsByteIdenticalToSerial` (`./arm64`) | PASS |
-
-**These four audits are insensitive to this change, and it is worth saying so
-rather than counting them as evidence.** `auditCorpus` (`goc/corpusaudit_test.go:130`)
-compiles each of the 406 corpus programs with `goc.CompileExecutable` and never
-calls `opt.OptimizeModule`; the escape, census, loop-alias and shadow analyses all
-read the unoptimized module. They are a real guard against the *merge* having
-disturbed the front end, and they are the guard the brief asked for, but a green
-run here says nothing about whether the full pipeline miscompiles. The evidence
-that bears on that is the capability matrix's `-O` arm, the reducers, the run
-loops and the sweep.
-
-### flate crash loop and p256, full pipeline
-
-| program | collector | runs | failures |
-|---------|-----------|------|----------|
-| `placement_bench/flate` | default | 250 | **0** |
-| `placement_bench/flate` | `GOGC=10` | 250 | **0** |
-| `placement_bench/p256` | `GOGC=10` | 100 | **0** |
-
-500 flate runs, twice the 200 the brief asked for, at two collector settings.
-p256 is the program the gc-visibility branch found the promotion defect in (35
-failures in 40 at `GOGC=10` before its fix); it is clean under the whole pipeline,
-not just under promotion.
-
-### Determinism — byte-identical, both configurations
-
-`scripts/determinism-check.sh`, five programs, cold (`CG12_NOCACHE=1`) and warm,
-two rounds each — four hashes per program, all four must agree:
-
-| configuration | result |
-|---------------|--------|
-| default (no `-O`) | 5/5 identical, both caching paths, both rounds |
-| `-O` (full pipeline) | 5/5 identical, both caching paths, both rounds |
-
-The `-O` hashes differ from the default ones, which is the check that the
-pipeline actually ran. `TestParallelBackendIsByteIdenticalToSerial` passes, and
-`TestMem2RegPlacesPhisInTheSameOrderEveryTime` — the opt-side determinism
-property, which `opt/determinism_test.go` recorded as unreachable from goc
-because every goc module took the bounded path — now guards goc builds too.
-
-### Compile sweep — every corpus program, `goc -O`, full pipeline
-
-All 406 `goc/testdata/*.go` compiled with `goc -O` as whole-program builds:
-
-    arm=full  compiled=406  failures=0  (mean 32.1 s, 13030 CPU-seconds total)
-
-Zero compiler crashes, assertion failures or lowering errors on any of the 406.
-This is broader than the capability matrix's 368 — it covers the 38 corpus
-programs the matrix does not run — but it is a compile-only check.
-
-### A differential the existing suites do not run
-
-The audits above read unoptimized IR, and the capability matrix checks each
-program against its own expectation rather than against the other arm. Neither
-would notice a pass that changes a program's *answer* in a way the program itself
-does not assert on. So: every one of the 406 corpus programs was built twice —
-`GOC_OPT_PIPELINE=bounded` and the full default — and both binaries run, with the
-bounded build run twice first so a program that disagrees with itself is excluded
-as nondeterministic rather than reported as a miscompile. Results below.
-
-    SAME    403 / 406
-    NONDET    1  (bytes_grow_stats — disagrees with itself under the bounded build)
-    DIFF      2
-
-**`runtime_panic_print_string` — not a defect.** The only difference is a
-traceback PC offset: `runtime_gopanic() ?:0 +0xa3c` under bounded, `+0xb78`
-under full. `gopanic` is a different size when it is optimized, so the offset
-inside it differs. Both print `panic: boom` and exit 2 with the same frame list.
-
-**`runtime_lock_osthread` — a real defect, and the third blocker.**
-
-    bounded build: 0 failures / 100 runs
-    full build:   14 failures / 100 runs
-
-    fatal error: runtime: split stack overflow
-     runtime: split stack overflow: 0x1c4ca5fc87e0 < 0x1c4ca5fc8800
-    goroutine 3: runtime_mcentral_uncacheSpan <- runtime_mcache_refill
-      <- runtime_mcache_nextFree <- runtime_mallocgcSmallScanHeader
-      <- runtime_mallocgc <- runtime_allocm <- runtime_newm
-      <- runtime_LockOSThread <- main.main.func1
-
-The program is nine lines: a goroutine that calls `runtime.LockOSThread`,
-defers `UnlockOSThread` and sends 42 on a channel.
-
-*Attribution.* Bisected with `GOC_OPT_SKIP`, 100 runs per arm:
-
-| arm | failures / 100 |
-|-----|----------------|
-| `bounded` | 0 |
-| `promote` (bounded + mem2reg) | 0 |
-| full, `skip=inline` | **0** |
-| full, `skip=mem2reg` | 0 |
-| full, `skip=loadelim` | 0 |
-| full, `skip=simplifycfg` | 0 |
-| full, `skip=tailmerge` | 7 |
-| full, `skip=deadalloc` | 10 |
-| full, `skip=deadfunc` | 10 |
-| full, `skip=gcm` | 13 |
-| **full (nothing skipped)** | **14** |
-| full, `skip=ifconvert` | 17 |
-| full, `skip=jumpthread` | 21 |
-| full, `skip=gvn` | 23 |
-
-The arms that reach 0 are inline and the three passes that feed it (a function
-that is not promoted, load-forwarded and CFG-simplified is too big to inline, and
-too big for its callees to inline into it). The arms that make it *worse* are the
-ones that leave more code for the inliner to move. So: **inlining**.
-
-*Mechanism, measured from the emitted code.* Frame sizes of the chain, in bytes:
-
-| function | bounded | full, `skip=inline` | full |
-|----------|---------|---------------------|------|
-| `runtime_mcache_nextFree` | 384 | 368 | **656** |
-| `runtime_mcache_refill` | 368 | 352 | 320 |
-| `runtime_mallocgcSmallScanHeader` | 416 | 352 | 352 |
-
-`nextFree` and `refill` carry **no stack-growth guard in either build** — and
-they are not `//go:nosplit` in the Go source. `goc/compile.go:9487`
-`runtimeImplicitNoSplit` marks `nextFreeFast`, `nextFree`, `nextFreeIndex` and
-`refill` nosplit itself, with this reason: *"The upstream compiler normally
-inlines this allocator fast-path helper into mallocgc variants. cg12 keeps it
-outlined, so mark these helpers nosplit to preserve the same runtime invariant."*
-
-So the nosplit run between `mallocgcSmallScanHeader`'s guard and
-`mcentral_uncacheSpan`'s is `nextFree` + `refill`: **752 bytes under the bounded
-pipeline, 976 under the full one.** Go reserves ~800-928 bytes below
-`stackguard0` for exactly this. The bounded pipeline fit inside the reserve by
-about fifty bytes; inlining 288 bytes of callee locals into `nextFree` puts it
-outside, and the next guarded call finds `sp` already below `stack.lo`.
-
-It is intermittent because the chain is only entered when the mcache actually
-needs a refill.
-
-**This is not a miscompile of user code.** It is a missing constraint: cg12 has
-no nosplit stack-depth budget. Go's linker enforces one (`nosplit stack over 792
-byte limit` is a link-time error); `opt.AuditNoSplitCalls` checks only that a
-nosplit function does not *call* a splittable one, not how deep the nosplit run
-gets. The bounded pipeline never grew a frame enough to matter, so the gap was
-invisible.
-
-Note the capability matrix runs `runtime_lock_osthread.go` (`cmd/goc/runtime_status_test.go:660`)
-and passed it twice. At a 14% failure rate that is a 74% chance — the matrix was
-lucky, not clean. A one-shot matrix is not an instrument for a 14% defect, which
-is why the differential above exists.
-
-*The fix.* `opt/inline.go`: `inlineModule` no longer inlines into a `NoSplit`
-caller (`frameIsSpentFromTheNoSplitReserve`). That is the conservative rule and
-the only one statable without a frame-size model — the inliner works on IR and
-cannot see a frame. `InlineNoSplitCalls` is untouched: it inlines *into* nosplit
-callers deliberately, to keep a stack check off a signal-entry path, and only
-small accessors.
-
-| | bounded | full, before the fix | full, after |
-|---|---|---|---|
-| `runtime_mcache_nextFree` frame | 384 B | 656 B | **368 B** |
-| `runtime_mcache_refill` frame | 368 B | 320 B | 352 B |
-| nosplit run | 752 B | 976 B | **720 B** |
-| `runtime_lock_osthread` failures | 0 / 100 | 14 / 100 | **0 / 400** |
-
-The fix leaves the chain smaller than the bounded pipeline left it.
-
-*What it costs, and what would let it come back.* Not inlining into nosplit
-functions costs the runtime's allocator fast paths their inlining, which is
-exactly where it would pay. Upstream Go inlines there freely and pays for it with
-a linker check cg12 does not have. **The fix that would let this come back is a
-nosplit frame budget in the backend** — arm64 knows every function's frame size
-after lowering and `opt.AuditNoSplitCalls` already builds the call graph, so the
-missing piece is walking nosplit runs and rejecting a build that overruns the
-reserve. That turns a 14%-of-runs fatal error into a compile-time error, which is
-the right shape. It is out of scope here and is the single most valuable
-follow-up this exercise found.
-
-`opt/inline_test.go:TestInliningDoesNotGrowANoSplitCaller` is the regression
-guard: deterministic, no runtime needed.
-
-*One caveat on that bisection table.* At the time it was taken, both inliner
-stages were `Fixpoint("inline", inline, clean)`, and `GOC_OPT_SKIP` matches a
-fixpoint's own name — so the `skip=inline` row also removed two rounds of
-cleanup. The attribution does not rest on that row: it rests on the fix, which
-removes only inlining-into-nosplit and takes `nextFree`'s frame from 656 bytes
-back to 368 and the failure rate from 14/100 to 0/400. The fixpoints are renamed
-`inline-fixpoint` (commit d1168d2) so the next bisection does not have the
-problem.
-
-## 4. Compile-time cost
-
-### One whole-program build
-
-`hello.go` (fmt.Println plus a multiply-add loop), `goc -O`, no prebuilt pack:
-
-| arm | wall | peak RSS |
-|-----|------|----------|
-| bounded | 6.69 s | 599 MB |
-| full | 30.99 s | 876 MB |
-
-**4.6x.** Where it goes, from the CPU profile — `opt.OptimizeModule` is 24.66 s of
-66.63 s of samples over 31.11 s wall (the compiler's own GC accounts for 36% of
-samples, running in parallel):
-
-    gvn         4.10 s      jumpthread   2.42 s      gcm        0.45 s
-    loadelim    3.87 s      fold         2.18 s      ifconvert  0.39 s
-    simplifycfg 3.39 s      deadalloc    1.92 s      copy       0.37 s
-    dce         3.19 s      inline       1.07 s      mem2reg    0.37 s
-
-mem2reg — the pass this whole exercise is about — is **0.37 s**, 1.5% of the
-optimizer's time. The cost is the `clean` fixpoint (gvn + loadelim + simplifycfg
-+ dce + jumpthread + fold + deadalloc = 21 s of the 24.7) run to convergence over
-5101 functions, and `DefaultPipeline` runs `clean` in four places plus twice more
-inside the inliner fixpoints. A secondary cost: the arm64 backend goes 7.0 s →
-11.1 s on the optimized IR, register allocation over longer live ranges.
-
-### The whole corpus
-
-Every `goc/testdata/*.go` compiled with `goc -O` as a whole-program build, 24 at
-a time on the 64-core box (so these are comparable to each other, not to a
-single-process figure):
-
-| arm | total | mean per program |
-|-----|-------|------------------|
-| bounded | 2877 CPU-s | 7.09 s |
-| full | 13030 CPU-s | 32.09 s |
-
-**4.53x across the corpus.** The distribution is not flat — the worst programs
-are the ones that already cost the most:
-
-    stdlib_http_tls_client_server   47.4 s -> 280.2 s   5.9x
-    stdlib_http_client_server       45.8 s -> 268.9 s   5.9x
-    stdlib_http_redirect_keepalive  46.0 s -> 268.7 s   5.9x
-    stdlib_http_cookiejar           43.6 s -> 254.5 s   5.8x
-    stdlib_http_parse_roundtrip     43.4 s -> 252.8 s   5.8x
-    stdlib_http_multipart_form      44.2 s -> 256.3 s   5.8x
-    stdlib_crypto_x509_ed25519      20.9 s -> 137.5 s   6.6x
-    stdlib_crypto_ecdsa             16.2 s -> 105.2 s   6.5x
-
-A single HTTP program now takes four and a half minutes to compile.
-
-### What it does *not* cost
-
-The capability matrix, with the prebuilt runtime packs warm, is **130.0 s on the
-default arm and 131.5 s on the `-O` arm** — the same. The pack build is where the
-`-O` arm's extra cost lives, and `goc build-runtime` caches on disk keyed by
-compiler bytes, stdlib contents and (now) the pipeline, so it is paid once per
-tree rather than per run. A cold matrix run is 313.6 s against the default arm's
-109.6 s.
-
-### The memory number, which is the uncomfortable one
-
-The `net/http` prebuilt pack under the full pipeline peaks at **2.99 GiB RSS** and
-takes about 240 s. The ceiling this project has worked against is 3 GiB, and the
-module budget I deleted (commit 48200ab, "goc: bound large runtime optimization
-memory") was introduced to hold three HTTP programs under it — they were at
-1.2-1.3 GiB with the budget in place.
-
-Two things keep this from being a regression to the state 48200ab fixed. The
-per-*function* budget in `opt/budget.go` is untouched and is the one that
-actually bounds the pathological cases: `gvn` (`opt/gvn.go:66`), `loadelim`
-(`opt/loadelim.go:96`) and `simplifycfg`'s block coalescing (`opt/cfg.go:233`)
-all skip any function over 200 blocks / 4000 temps / 1000 instructions — the
-three passes that build the big per-function structures. (`mem2reg`, `inline`,
-`gcm` and `dce` do not consult it; they do not build one.) And the whole
-368-program matrix, both arms, passes on this box. But 2.99 against 3.00 is not
-margin, and a box with a lower limit than this one will fail on the `net/http`
-pack. **If a memory ceiling has to be honoured, the thing to reinstate is a
-module budget on the pack build alone** (`internal/prebuilt.BuildRuntime`), not
-on program modules — which is where the whole performance prize is.
-
-### Where the compile time should be spent — a proposal, not a change
-
-4.5x is large and I am not going to describe it as fine. Three observations, in
-the order I would act on them:
-
-1. **The `clean` fixpoint is 85% of the cost, and most of its work is
-   re-examining functions nothing touched.** `DefaultPipeline` runs `clean` in
-   four places plus twice inside the inliner fixpoints, and each `clean` is
-   itself a fixpoint that re-runs seven passes over all 5101 functions until a
-   whole round changes nothing. A function the previous round did not modify
-   cannot have new opportunities in a purely intraprocedural pass. Tracking a
-   dirty set per function across `Fixpoint.Run` — and seeding it from the
-   inliner's list of modified callers between stages — is the change with by far
-   the best ratio here, and it is a change to `opt/pass.go` alone.
-
-2. **The module is 5101 functions, and about 4900 of them are stdlib the program
-   does not call.** `deadfunc` (`DeadFuncElim`) runs *last*. Running a
-   reachability pass first, before the first `clean`, would cut everything
-   downstream by whatever fraction of the module is dead — which for a
-   168-line program is most of it. The reason it is last today is presumably that
-   inlining can make functions dead; that argues for running it at both ends, not
-   only at the end.
-
-3. **The prebuilt pack path already fixes this for the matrix and should be the
-   default for corpus runs.** With packs warm the `-O` matrix costs the same as
-   the default arm. The programs that hurt (the `net/http` and crypto ones, 4-5
-   minutes each) are exactly the ones a pack exists for.
-
-None of these is a reason to keep the pipeline off. The 4.5x buys a control loop
-that goes from 1.63x the host toolchain to under 1.0 (below), and the matrix —
-the thing that runs in CI — does not get slower once its packs are built. But if
-somebody has to pay 4.5x on a laptop compiling one program, (1) is where to look.
-
-## Verdict on the two prerequisite branches
-
-The brief said to say so plainly if either failed to fix its blocker. **Both
-fixed theirs**, re-verified on the merged tree rather than taken on trust:
-
-| branch | its blocker | check on this tree |
-|--------|-------------|--------------------|
-| `mem2reg-iface-dispatch` | `stdlib-netpoll-stress/tcp-churn`, "interface dispatch failed for dynamic type 0x0" | capability **PASS** on the `-O` arm; its reducer `runtime_opt_promoted_interface_root.go` 0/20 at both GOGC settings |
-| `mem2reg-gc-visibility` | `placement_bench/p256` failing to verify its own signatures at `GOGC=10` | p256 **0 / 100 at `GOGC=10`**; its reducer `runtime_gc_promoted_local_root.go` 0/20 at both settings; the `gc-invariants/promoted-local-root` capability PASSes |
-
-gc-visibility's secondary claim — that the flate crash was never mem2reg's, but
-the zero-capacity-slice defect `800f47f` fixed, whose rate promotion doubled — is
-consistent with what I measure: flate is **0 failures in 500 runs** across the
-default collector setting and `GOGC=10`, with the whole pipeline on.
-
-Neither branch, however, was the whole set. The third blocker is above.
-
-## 5. Re-run of the campaign on the fixed tree
-
-Everything below is the tree with the nosplit inliner fix in it.
-
-### Capability matrix, `-runtime-opt`, full pipeline
-
-    368 PASS, 0 FAIL  (plus 1 EXPECTED FAILURE, defer-panic/panic-string-output)
-    ok  github.com/evanphx/cg12/cmd/goc  368.325s   (cold packs)
-
-### Compile sweep, whole corpus, on the fixed tree
-
-    arm=full  compiled=406  failures=0
-
-Zero compiler crashes, assertion failures or lowering errors on any of the 406
-corpus programs. (This run's mean of 40.9 s per program is *not* comparable to
-the 32.1 s above: it ran concurrently with the capability matrix. The 4.53x
-figure in section 4 comes from the bounded and full sweeps run back to back under
-the same load, which is the comparison that means something.)
-
-## 6. The performance number — `goc/testdata/perf_suite_baseline.txt` re-cut
-
-Re-cut on an idle box (load average 1.0-3.5, nothing else running), 9 interleaved
-repetitions pinned to core 62, host toolchain go1.26.1 linux/arm64. The build
-phase overlapped a corpus sweep for its first two minutes; the *timing* phase,
-which is what the numbers come from, did not — the suite builds all eleven
-programs before it times any of them.
-
-**All 44 measurements improved. None regressed.**
-
-### The control
-
-The control is the same 2-variable integer multiply-add loop, byte-identical
-source, compiled into all eleven programs:
-
-    goc / host ratio, control/spin-fixed-work
-      before:  1.6290  1.6289  1.6296  1.6300  1.6290  1.6299  1.6306  1.6295  1.6296  1.6282  1.6294
-      after:   0.9269  0.9270  0.9249  0.9263  0.9253  0.9250  0.9279  0.9264  0.9249  0.9281  0.9251
-
-**1.6294 → 0.9262 mean, a 43.2% improvement, and goc is now ahead of the host Go
-toolchain on this loop.** The spread across the eleven programs is 0.9249-0.9281,
-which is code placement, not measurement noise (each row's own ratio-sd% is
-0.04-0.09%).
-
-### Every row
+# Wave 9 merge gate — turning goc's real optimiser on
+
+`integration/wave9-gate`, built from `main` (6034f73) by merging, in order:
+
+| # | branch | tip | what it carries |
+|---|--------|-----|-----------------|
+| 1 | `ccwork/wave8-gate` | `73aee03` | the wave-8 verification; re-cut `perf_suite_baseline.txt` and `crypto_signing_bench_baseline.txt` (the latter converted 5 → 7 columns by a protocol change) |
+| 2 | `ccwork/wave8-differential-refresh` | `b4470ad` | regenerated escape differentials for the corpus program the flate fix added |
+| 3 | `ccwork/enable-full-pipeline` | `5c62311` | both mem2reg blocker fixes **and** the pipeline change |
+
+Merge result: `618427a`.
+
+## 0. The merge itself
+
+Merge 1 (`73aee03`) applied clean. Merge 2 (`b4470ad`) was a fast-forward — it
+descends from `73aee03`. Merge 3 (`5c62311`) conflicted in exactly two files:
+
+- `goc/testdata/perf_suite_baseline.txt` — both sides had re-cut it. **Not
+  resolved by picking a side**; the conflict was closed with a placeholder and
+  the file regenerated from the merged tree (§8).
+- `CCWORK_REPORT.md` — prose, rewritten as this document.
+
+Everything else auto-merged, including `goc/testdata/alloc_census_baseline.txt`
+(each prerequisite branch had added its own reducer's sites) and both escape
+differentials. **Auto-merged is not accepted**: every generated file listed in
+the brief was regenerated from the merged tree and its diff read (§§ below).
+
+`go build ./...` on the merged tree: clean.
+
+### Capability count, corrected
+
+The brief says the matrix goes 366 → 368 because "two capabilities were added by
+the mem2reg branches". The count is right, the attribution is not. Diffing
+`cmd/goc/runtime_status_test.go` against `main`, the two added `source:` entries
+are:
+
+- `runtime_gc_slice_tail_pointer.go` — from **wave 8**'s slice-tail fix, not a
+  mem2reg branch.
+- `runtime_gc_promoted_local_root.go` — from `ccwork/mem2reg-gc-visibility`.
+
+A third new corpus program, `runtime_opt_promoted_interface_root.go`
+(mem2reg-iface-dispatch), is in `goc/testdata` and so is in the four corpus
+audits, but it is **not** wired into the capability matrix. That is why the
+matrix gains two and the census gains three programs' worth of sites.
+
+---
+
+_(run in progress — sections appended as each item completes)_
+
+## Item 3 — `make test-unit`
+
+**PASS**, exit 0. 25 packages reported `ok`, 12 `[no test files]`, zero `FAIL`,
+and no line was `(cached)` — every package was compiled and run on this tree.
+
+
+## Item 4a — the four corpus audits, regenerated from the merged tree
+
+Regenerated in one corpus pass (they share `auditCorpus`'s `sync.Once`):
+
+    go test ./goc -run 'TestAllocationCensus|TestFrameEscapeAudit|TestLoopAliasAudit|TestEscapeShadowPlacement' \
+        -update-alloc-census-baseline -update-frame-escape-baseline \
+        -update-loop-alias-baseline -update-escape-shadow-baseline -v
+
+`ok github.com/evanphx/cg12/goc 201.305s`, exit 0, wall 3:23.67, peak RSS
+13.84 GiB (the corpus audit compiles the whole corpus in parallel).
+
+**All four regenerated files came out byte-identical to the merged tree's
+committed versions** — `git status goc/testdata/` was empty afterwards. The
+auto-merge of `alloc_census_baseline.txt` from the two prerequisite lines
+happened to be exactly right, but that is now a measured fact rather than a
+merge artefact.
+
+### What moved against `main`, and why
+
+| baseline | vs `main` |
+|---|---|
+| `frame_escape_baseline.txt` | **no change** |
+| `loop_alias_baseline.txt` | **no change** |
+| `escape_shadow_baseline.txt` | **no change** |
+| `alloc_census_baseline.txt` | **+19 lines, −0** |
+
+All 19 added census lines are in the three corpus programs the merge adds, and
+nothing else moved in any direction — no `HEAP -> FRAME`, no `FRAME -> HEAP`, no
+vanished site:
+
+- `runtime_gc_promoted_local_root.go` — 8 sites (mem2reg-gc-visibility's reducer)
+- `runtime_gc_slice_tail_pointer.go` — 6 sites (wave 8's slice-tail reducer)
+- `runtime_opt_promoted_interface_root.go` — 4 sites (mem2reg-iface-dispatch's reducer)
+
+The nineteenth is `?  main.make2  runtime.newobject  error  heap` — a site with
+no source position. `main.make2` exists only in
+`runtime_gc_promoted_local_root.go`, so it belongs to the same new program; it is
+a compiler-synthesized `error` boxing that carries no position. It is an
+addition, on the heap, in new code, so it raises none of the census's five
+review questions.
+
+**Why the optimiser changing placement did not show up here, and why that is
+correct**: `auditCorpus` compiles with `goc.CompileExecutable` and never calls
+`opt.OptimizeModule`, so all four audits read *unoptimized* IR. They are a real
+guard that the merge did not disturb the front end. They are **not** evidence
+about the pipeline, and a reader should not take their silence as such.
+
+
+## Item 2 — the capability matrix, both arms
+
+Run as `GOFLAGS=-v make test-goc-status` then `GOFLAGS=-v make test-goc-status-opt`,
+`STATUS_TIMEOUT=90m`, sequentially, each waited on to exit.
+
+### Default arm — `make test-goc-status`
+
+**368 PASS, 0 FAIL, 0 SKIP.** `--- PASS: TestARM64RuntimeCapabilityStatus (141.03s)`,
+`ok github.com/evanphx/cg12/cmd/goc 141.046s`, exit 0. Not cached.
+
+The two capabilities over `main`'s 366 are `gc-invariants/slice-tail-pointer`
+(wave 8) and `gc-invariants/promoted-local-root` (mem2reg-gc-visibility); both
+PASS. Note this arm compiles **without** `-O`, so `opt.OptimizeModule` never
+runs on it: it is a guard on the merge, not on the pipeline. The `-O` arm below
+is the one that exercises this wave's change.
+
+### `-O` arm — `make test-goc-status-opt`
+
+**368 PASS, 0 FAIL, 0 SKIP.** `--- PASS: TestARM64RuntimeCapabilityStatus (311.92s)`,
+`ok github.com/evanphx/cg12/cmd/goc 311.936s`, exit 0. Not cached.
+
+**The two PASS sets are identical, capability for capability** (diffed as sorted
+sets of subtest names: no line differs). This is the wave's central correctness
+guard: it is the arm that runs `DefaultPipeline` — thirteen passes that had never
+executed on a Go program — over every one of the 368 capability programs and the
+pack they link against, and it agrees exactly with the unoptimized arm.
+
+The `-O` arm took 311.92s against the default arm's 141.03s, a **2.21x
+wall-clock ratio on the whole matrix**, which is the compile-time cost of this
+wave showing up in the cheapest place to see it. (It is below the 4.5x
+single-program figure because the matrix's wall clock includes execution and
+its compiles run 64-wide.)
+
+
+## Items 6 and 7 — the GC reducer and the two crash loops
+
+All programs were built **with `-O`**, which is the configuration this wave
+changes: `opt.OptimizeModule` is only reached on an optimized build, so an
+unoptimized run of these programs would be a guard on nothing.
+
+### Item 6 — `runtime_gc_type_mask_padding.go`, 20 runs each, `GOMAXPROCS=3`
+
+| tree | default `GOGC` | `GOGC=10` |
+|---|---|---|
+| `integration/wave9-gate` (`-O`, full pipeline) | **0 / 20 failed** | **0 / 20 failed** |
+| `main` 6034f73 control (`-O`, bounded pipeline) | **0 / 20 failed** | **0 / 20 failed** |
+
+Both trees are clean, so the reducer attributes nothing to this wave — which is
+the expected and required result: it is the wave-7 mask-padding fix's guard, and
+turning the optimiser on must not reopen it. Every run's exit status was checked;
+the program `panic`s on a bad word, so a non-zero exit is the failure signal.
+
+### Item 7 — the two crash loops that motivated the blocker fixes
+
+| loop | required | measured |
+|---|---|---|
+| `placement_bench/flate`, `-O`, default `GOGC` | 0 over ≥250 | **0 / 250** |
+| `placement_bench/flate`, `-O`, `GOGC=10` | 0 over ≥250 | **0 / 250** |
+| `placement_bench/p256`, `-O`, `GOGC=10` | 0 over ≥100 | **0 / 100** |
+
+620 runs, zero non-zero exits. Both programs `panic` on a wrong answer
+(`"signature did not verify"` in p256; decompression mismatch in flate), so this
+is a correctness loop and not only a crash loop.
+
+These ran **while `go test ./goc/...` was saturating the box**, which makes the
+zero stronger rather than weaker: the collector was under more scheduling
+pressure than the branch's own 0/500 and 0/100 measurements had.
+
+
+## Item 1 — `go test -timeout 60m -parallel 10 ./goc/...`
+
+    ok  github.com/evanphx/cg12/goc  1347.907s
+
+exit 0, **0 failures**. Wall 22:28.51, 4589.94 user + 150.25 system CPU-seconds,
+351% average CPU, peak RSS 13.52 GiB. Run with `-count=1`; there is no `(cached)`
+line in the output and could not be — every test was compiled and executed on
+this tree.
+
+`TestDeriveClassifiesEveryGenField` **PASSES**. It has failed in five waves; it
+does not fail here. Re-run on its own to be sure it was not merely skipped:
+
+    === RUN   TestDeriveClassifiesEveryGenField
+    --- PASS: TestDeriveClassifiesEveryGenField (0.00s)
+
+`main` (6034f73) is the tree that fixed it — its head commit is *"goc: derive
+must reset the deep-escape question"* — so this wave inherits the fix rather than
+re-establishing it. There is no field to name.
+
+### Census differences attributable to the commits that add tests
+
+The only census movement in the whole merge is the +19 lines of §4a, and every
+one is in one of the three corpus programs the merge adds. The commits are
+`ccwork/mem2reg-gc-visibility` (`runtime_gc_promoted_local_root.go`),
+`ccwork/mem2reg-iface-dispatch` (`runtime_opt_promoted_interface_root.go`) and
+wave 8's slice-tail fix (`runtime_gc_slice_tail_pointer.go`). Nothing in the
+pre-existing corpus moved in either direction.
+
+**Control**: `main`'s four committed audit baselines were regenerated in the
+`main` worktree by the same command and came out **byte-identical** to what
+`main` has committed. The corpus audit is therefore reproducible on this box,
+which is what makes the +19 a real difference rather than run-to-run noise.
+
+## Item 5 — determinism and the parallel backend
+
+`TestParallelBackendIsByteIdenticalToSerial` (`./arm64`): **PASS**, all six
+worker counts (1, 2, 3, 8, 64, 256), `ok github.com/evanphx/cg12/arm64 0.223s`,
+exit 0, `-count=1`.
+
+`scripts/determinism-check.sh`, default arm — five programs, each built cold
+(`CG12_NOCACHE=1`) and warm, two rounds, all four hashes per program equal:
+
+    hello.go                            round1:identical(951709b19f9a626b)  round2:identical(951709b19f9a626b)
+    fmt_sprintf.go                      round1:identical(3230e0ac5b7cdebf)  round2:identical(3230e0ac5b7cdebf)
+    gc_struct.go                        round1:identical(e3f954773ded353a)  round2:identical(e3f954773ded353a)
+    runtime_cleanup_frame_retention.go  round1:identical(8a5f916a5cd5dec7)  round2:identical(8a5f916a5cd5dec7)
+    runtime_defer_capture_allocs.go     round1:identical(285733a189f227f8)  round2:identical(285733a189f227f8)
+    DEFAULT_EXIT 0
+
+**5/5, both caching paths, both rounds.** The `-O` arm is reported below.
+
+`scripts/determinism-check.sh -O` — the arm this wave actually changes, since
+`opt.OptimizeModule` is only reached on an optimized build:
+
+    hello.go                            round1:identical(72f3b26d6ea60972)  round2:identical(72f3b26d6ea60972)
+    fmt_sprintf.go                      round1:identical(0d5afdf8645bb423)  round2:identical(0d5afdf8645bb423)
+    gc_struct.go                        round1:identical(69e8abb19da304b3)  round2:identical(69e8abb19da304b3)
+    runtime_cleanup_frame_retention.go  round1:identical(09f3cc3645d5703f)  round2:identical(09f3cc3645d5703f)
+    runtime_defer_capture_allocs.go     round1:identical(3444a6675d7e01c6)  round2:identical(3444a6675d7e01c6)
+    OPT_EXIT 0
+
+**5/5, both caching paths, both rounds, with all thirteen passes running.** Every
+hash differs from the default arm's, which is the point: the optimiser changed
+the image and it changed it reproducibly.
+
+## Item 10 — the gc differential and the slog benchmark
+
+### `escape_gc_differential.txt` — regenerated, **+40 / −18**
+
+    go test ./goc -run TestEscapeDifferentialAgainstGC \
+        -escape-gc-differential -update-escape-gc-differential
+
+Check arm afterwards (no `-update`): **PASS**, `compared 402 of 406 corpus
+programs, 1879 census rows, 3548 gc decisions; permissive 1483, pessimistic 401`.
+
+**Every one of the 18 removed lines is a count** — a header total, a cell of the
+placement matrix, or a construct-histogram bucket. **Every added data row is in
+one of the two corpus programs the merge adds**, and no pre-existing line changed
+its classification:
+
+    runtime_gc_promoted_local_root.go:59     mixed  -> heap
+    runtime_gc_promoted_local_root.go:65     absent -> mixed
+    runtime_gc_promoted_local_root.go:121    frame  -> heap
+    runtime_opt_promoted_interface_root.go:61,64,77   absent -> heap
+
+The corpus count moves 404 → 406 exactly as expected: branch 2 had already
+refreshed this file for wave 8's `runtime_gc_slice_tail_pointer.go`, and the two
+mem2reg reducers are what is new.
+
+`runtime_gc_promoted_local_root.go:121 frame -> heap` is in the permissive
+(correctness-critical) direction and deserves the sentence the census asks for:
+goc frames a `1_any` at column 2 — the `[]any` backing for `fmt.Println` — while
+gc heaps the *string constant* at column 14. They are different objects joined
+only by sharing a source line, which is this instrument's documented coarseness
+(`internal/gcdiff`: the key is (file, line) because columns do not survive the
+trip). It joins the 1,483-line permissive population whose largest bucket,
+`- | object/heap` at 1,296, is exactly this pattern. `TestFrameEscapeAudit` — the
+instrument that reads the *emitted stores* rather than a line join — reports no
+new publication anywhere in the corpus.
+
+### `escape_gc_reason_differential.txt` — regenerated, **+93 / −26**
+
+Check arm: **PASS**, `reasons on both sides for 402 programs; 1115 goc rules,
+2227 gc explanations joined; agree-placement/disagree-reason 315,
+disagree-placement/agree-reason 85`. Same shape as above: all 26 removals are
+counts, all added rows are in the two new programs.
+
+### `slog_allocations_baseline.txt` — regenerated, **no change at all**
+
+    go test ./goc -run TestSlogAllocationsAgainstGC -slog-allocations -update-slog-allocations
+    32 cases; baseline rewritten
+    git status goc/testdata/ -> empty
+
+Check arm: **PASS** (11.93s, 32 cases).
+
+The brief expected this to move "because placement changed". **It did not, and
+the reason is structural rather than lucky**: `buildWithGoc` in
+`goc/slogalloc_test.go:204` invokes the driver as `driver -o binary program` —
+**no `-O`**. `opt.OptimizeModule` is never reached, so no pass in
+`DefaultPipeline` can touch this measurement. The same is true of
+`escape_gc_differential.txt`, which reads goc's side out of the committed census
+rather than compiling anything with goc.
+
+**This is worth stating plainly: of the nine generated files in the brief, only
+three are capable of seeing the pipeline change at all** — the two timing
+baselines (`perf_suite_baseline.txt`, `crypto_signing_bench_baseline.txt`) and
+nothing else. The six analysis baselines all read unoptimized IR or a
+pre-existing census by construction. A reviewer should not read their stability
+as evidence that the optimiser is safe; the matrix's `-O` arm, the `-O`
+determinism arm and the crash loops are that evidence.
+
+
+## Item 9 — compile-time cost, measured independently
+
+### Single small program, sequential, idle box, 3 repetitions per arm
+
+`goc -O -o out goc/testdata/fmt_sprintf.go` — a 10-line program whose module is
+the stdlib closure. Repetitions agree to within 1%, so the means below are the
+measurement, not a sample of one.
+
+| arm | wall (s) | user CPU (s) | peak RSS |
+|---|---:|---:|---:|
+| `main` 6034f73 (bounded pipeline was the default) | **6.63** | 20.66 | 0.59 GiB |
+| branch, default (full pipeline) | **41.37** | 81.57 | 0.90 GiB |
+| branch, `GOC_OPT_PIPELINE=bounded` | 6.66 | 20.75 | 0.57 GiB |
+| branch, `GOC_OPT_SKIP=mem2reg` | 31.50 | 66.40 | 0.85 GiB |
+| branch, `GOC_OPT_SKIP=clean` | 10.38 | 33.93 | 0.93 GiB |
+| branch, `GOC_OPT_SKIP=inline-fixpoint` | 10.70 | 25.48 | 0.56 GiB |
+| branch, `GOC_OPT_SKIP=inline` | 11.98 | 27.35 | — |
+| branch, `GOC_OPT_SKIP=mem2reg,inline` | 12.40 | 29.30 | — |
+| branch, `GOC_OPT_SKIP=gvn` | 35.45 | 72.93 | — |
+
+**6.24x on wall clock, 3.95x on CPU-seconds.** The brief's 4.5x sits between the
+two; both are reported here because they are different claims and the branch's
+figure does not say which it is.
+
+`GOC_OPT_PIPELINE=bounded` on the branch reproduces `main` to 0.5% (6.66 vs
+6.63). That matters: it says the entire cost is the pipeline selection and
+**nothing else the branch changed contributes measurably** — the mem2reg fixes,
+the nosplit inliner restriction and the pack-cache key are all free.
+
+### Attribution — the branch's diagnosis is right, with a correction
+
+The branch attributes the cost to the `clean` fixpoint re-converging over 5101
+functions, and explicitly **not** to mem2reg (0.37s of 24.7s). The skip arms
+above confirm the conclusion and sharpen the mechanism. Cost above the bounded
+floor is 41.37 − 6.66 = **34.71s**; each arm removes:
+
+| removed | seconds removed | share of the 34.71s |
+|---|---:|---:|
+| `clean` (the whole cleanup set, everywhere) | 30.99 | **89.3%** |
+| the two `inline-fixpoint` blocks | 30.67 | 88.4% |
+| the `inline` pass alone, leaving both cleanup fixpoints running | 29.39 | **84.7%** |
+| `gvn` | 5.92 | 17.1% |
+| `mem2reg` | 9.87 | 28.4% |
+
+The 84.7% row is the informative one. Removing **only the inliner** — every
+`clean` round still runs, over the same 5101 functions — removes 85% of the
+cost. So `clean` is where the cycles are spent, but `clean` over an un-inlined
+module costs only 5.3s (11.98 − 6.66); it is the inliner enlarging and dirtying
+the module that gives `clean` its work. The two are a product, and removing
+either collapses the cost.
+
+**The correction is to the mem2reg row.** Skipping mem2reg with the inliner *on*
+removes 9.87s (28%), which looks like it contradicts "0.37s of 24.7s". It does
+not: skipping mem2reg on top of skipping the inliner makes the compile *slower*,
+not faster (12.40s vs 11.98s). mem2reg's own cost really is negligible; the 9.87s
+is entirely mem2reg's **indirect** cost — promotion exposes inlining
+opportunities, and the inliner then does more work. A CPU profile's self-time for
+the pass (which is what 0.37s reads like) cannot see that, and an end-to-end skip
+cannot separate it. Both numbers are right about different questions.
+
+### Corpus-wide, 406 programs, `-O`, whole-program builds
+
+Each program compiled on its own at `GOMAXPROCS=1` (so CPU-seconds are the work
+done and not contention), 32 compiles concurrently. Restricted to the **403
+programs both trees have**:
+
+| tree | CPU-seconds (user+sys) |
+|---|---:|
+| `main` 6034f73 | **4,733.9** |
+| `integration/wave9-gate` | **21,157.7** |
+
+**4.469x.** The branch reported 2877 → 13030 CPU-seconds, which is **4.53x**.
+The ratio reproduces to within 1.5% on an independent harness; the absolute
+numbers differ because the per-compile concurrency differs, and the ratio is the
+claim. Confirmed.
+
+The cost is uniform, not concentrated: the ten heaviest programs all land between
+5.10x and 5.59x, and the biggest single compile
+(`stdlib_http_tls_client_server`) goes 73.6 → 380.5 CPU-seconds.
+
+### Memory — this is the finding that matters most in this section
+
+The brief asks to watch the `net/http` pack against a 3 GiB ceiling. Measured on
+both trees, `goc build-runtime -O -packages net/http`:
+
+| tree | wall | user CPU | **peak RSS** |
+|---|---:|---:|---:|
+| `main` | 29.34s | 70.84s | 2.06 GiB |
+| branch | 215.68s | 350.61s | **2.83 GiB** (2,965,428 kB) |
+
+That reproduces the branch's report (it quotes 2.99 GiB; the difference is GiB
+vs GB on the same measurement) and it is under 3 GiB.
+
+**But the pack is not the worst case, and the corpus sweep found the worse one.**
+Peak RSS of the whole-program `-O` compile, over all 403 common programs:
+
+| | `main` | branch |
+|---|---:|---:|
+| programs peaking over **3.0 GiB** | **0** | **6** |
+| largest single compile | 2.85 GiB (`stdlib_http_tls_client_server`) | **4.23 GiB** (same program) |
+
+The six are `stdlib_http_tls_client_server` (4.23), `stdlib_http_redirect_keepalive`
+(4.15), `stdlib_http_client_server` (4.06), `stdlib_http_cookiejar` (3.93),
+`stdlib_http_multipart_form` (3.88) and `stdlib_http_parse_roundtrip` (3.85).
+
+The module budget that this wave deletes was introduced (48200ab) to hold peak
+memory under a 3 GiB ceiling. On this tree, **six corpus programs are already
+over that ceiling on a whole-program Go build**, at up to 1.41 GiB above it,
+where `main` had none over it. The branch's own mitigation proposal — reinstate a
+module budget on `internal/prebuilt.BuildRuntime` alone — would **not** cover
+these, because they are program modules, not the pack. If the 3 GiB ceiling is
+real on any target machine, this is the thing that will hit it, and it is not
+what the branch is watching.
+
+
+## Item 8 — the two timing instruments, regenerated and checked
+
+Run on an idle box, sequentially, nothing else on the machine. `bench-perf` pins
+to core 62 and `bench-crypto` to core 63 and the tree says they may overlap; they
+were still run one at a time, because each rebuilds its programs with `goc -O`
+and a build phase is not pinned.
+
+### `perf_suite_baseline.txt` — regenerated (`make bench-perf-update`)
+
+`--- SKIP: TestPerformanceSuite (854.88s)` (the skip is how `-update` reports),
+exit 0. The merge conflict in this file was resolved by **this measurement**, not
+by either side.
+
+**Confirming run 1** — `make bench-perf` against the file just written:
+`--- PASS: TestPerformanceSuite (853.90s)`, exit 0, all 42 rows within tolerance.
+
+The regenerated file reproduces branch 3's committed values row for row within
+each row's own noise (e.g. `interp` control 0.9269 → 0.9265, `float/sqrt-sum`
+0.9991 → 0.9990, `json/marshal` 14.7980 → 14.7342). Two rows moved more than a
+percent and both are rows the file itself marks as loud: `sortmap/map/build-probe`
+(5.6277 → 6.0921, ratio-sd 4.83%, tol 14.5%) and `chase/dram` (1.0346 → 1.0196,
+tol 8.8%).
+
+### The control ratio, and every measurement
+
+**Control: 1.6296x → 0.9260x** (mean of the eleven `control/spin-fixed-work`
+rows, before = wave 8's baseline at `73aee03`, after = this run). The claim is
+0.9262x; it reproduces to 0.02%.
+
+**All 42 measurements improved. None regressed.** (The brief says 44; the suite
+has 42 rows — 11 controls plus 31 workload cases. Counted from both the before
+and after files.)
 
 | program | case | before | after | change |
-|---------|------|--------|-------|--------|
-| float | float/sqrt-sum | 171.0966 | **0.9991** | −99.4% |
-| float | float/dot-product | 4.9483 | 1.4997 | −69.7% |
-| sortmap | sort/ints | 3.8155 | 1.5381 | −59.7% |
-| text | text/utf8-decode | 4.4138 | 2.1322 | −51.7% |
-| float | float/mandelbrot | 2.5860 | 1.3030 | −49.6% |
-| gcpress | gc/live-heap-churn | 8.4273 | 4.7515 | −43.6% |
-| *(all eleven)* | control/spin-fixed-work | 1.6294 | **0.9262** | −43.2% |
-| conc | chan/send-buffered | 4.7903 | 2.8900 | −39.7% |
-| text | text/sprintf | 10.9538 | 6.7710 | −38.2% |
-| flate | flate/decompress | 7.5814 | 4.7209 | −37.7% |
-| float | float/int-convert | 1.5442 | 1.0002 | −35.2% |
-| conc | chan/pingpong-unbuffered | 6.4725 | 4.3562 | −32.7% |
-| regexp | regexp/anchored-lines | 6.0706 | 4.0879 | −32.7% |
-| chase | chase/l1-resident | 1.4548 | 1.0037 | −31.0% |
-| gcpress | gc/alloc-churn | 9.9635 | 5.9775 | −40.0% |
-| conc | mutex/uncontended | 1.8611 | 1.3157 | −29.3% |
-| text | text/format-append | 10.7884 | 7.7626 | −28.0% |
-| sortmap | map/build-probe | 7.7984 | 5.6277 | −27.8% |
-| flate | flate/compress | 6.8077 | 4.9377 | −27.5% |
-| text | text/parse | 10.2424 | 7.7281 | −24.5% |
-| conc | goroutine/spawn-join | 5.3773 | 4.0643 | −24.4% |
-| regexp | regexp/replace | 7.2193 | 5.8102 | −19.5% |
-| regexp | regexp/find-submatch | 7.9289 | 6.4148 | −19.1% |
-| gcpress | gc/pointer-write | 9.2633 | 7.5806 | −18.2% |
-| json | json/unmarshal | 11.2745 | 9.2682 | −17.8% |
-| sortmap | sort/slice-callback | 3.7419 | 3.1381 | −16.1% |
-| json | json/marshal | 17.6200 | 14.7980 | −16.0% |
-| interp | interp/bytecode-loop | 21.4164 | 19.0727 | −10.9% |
-| chase | chase/pointer-node | 1.0187 | 1.0023 | −1.6% |
-| chase | chase/dram | 1.0402 | 1.0346 | −0.5% |
-| sha | sha/hmac-1mib | 1.0146 | 1.0112 | −0.3% |
-| sha | sha/sha256-1mib | 1.0064 | 1.0057 | −0.1% |
+|---|---|---:|---:|---:|
+| float | float/dot-product | 4.9424 | **1.4991** | −69.7% |
+| sortmap | sort/ints | 3.8162 | **1.5375** | −59.7% |
+| text | text/utf8-decode | 4.4520 | **2.1409** | −51.9% |
+| float | float/mandelbrot | 2.5878 | **1.3026** | −49.7% |
+| gcpress | gc/live-heap-churn | 8.7016 | **4.6294** | −46.8% |
+| flate | control/spin-fixed-work | 1.6297 | **0.9247** | −43.3% |
+| chase | control/spin-fixed-work | 1.6298 | **0.9260** | −43.2% |
+| conc | control/spin-fixed-work | 1.6297 | **0.9249** | −43.2% |
+| float | control/spin-fixed-work | 1.6296 | **0.9251** | −43.2% |
+| json | control/spin-fixed-work | 1.6305 | **0.9262** | −43.2% |
+| regexp | control/spin-fixed-work | 1.6294 | **0.9247** | −43.2% |
+| sortmap | control/spin-fixed-work | 1.6295 | **0.9248** | −43.2% |
+| interp | control/spin-fixed-work | 1.6292 | **0.9265** | −43.1% |
+| sha | control/spin-fixed-work | 1.6294 | **0.9266** | −43.1% |
+| text | control/spin-fixed-work | 1.6303 | **0.9276** | −43.1% |
+| gcpress | control/spin-fixed-work | 1.6293 | **0.9284** | −43.0% |
+| conc | chan/send-buffered | 4.7826 | 2.8896 | −39.6% |
+| gcpress | gc/alloc-churn | 9.8475 | 5.9451 | −39.6% |
+| text | text/sprintf | 10.7332 | 6.6966 | −37.6% |
+| flate | flate/decompress | 7.5504 | 4.7187 | −37.5% |
+| float | float/int-convert | 1.5444 | **1.0004** | −35.2% |
+| conc | chan/pingpong-unbuffered | 6.6089 | 4.3782 | −33.8% |
+| regexp | regexp/anchored-lines | 6.0837 | 4.0798 | −32.9% |
+| chase | chase/l1-resident | 1.4566 | **1.0011** | −31.3% |
+| text | text/format-append | 10.9524 | 7.6592 | −30.1% |
+| conc | mutex/uncontended | 1.8626 | 1.3155 | −29.4% |
+| flate | flate/compress | 6.7972 | 4.9410 | −27.3% |
+| text | text/parse | 10.2902 | 7.7207 | −25.0% |
+| conc | goroutine/spawn-join | 5.3249 | 4.0102 | −24.7% |
+| sortmap | map/build-probe | 7.7366 | 6.0921 | −21.3% |
+| regexp | regexp/find-submatch | 7.9350 | 6.4397 | −18.8% |
+| gcpress | gc/pointer-write | 9.2299 | 7.5793 | −17.9% |
+| json | json/unmarshal | 11.2835 | 9.2838 | −17.7% |
+| regexp | regexp/replace | 7.1710 | 5.9579 | −16.9% |
+| sortmap | sort/slice-callback | 3.7323 | 3.1340 | −16.0% |
+| json | json/marshal | 17.4048 | 14.7342 | −15.3% |
+| float | float/sqrt-sum | 1.1289 | **0.9990** | −11.5% |
+| interp | interp/bytecode-loop | 21.3077 | 19.0659 | −10.5% |
+| chase | chase/dram | 1.0349 | 1.0196 | −1.5% |
+| chase | chase/pointer-node | 1.0121 | **0.9986** | −1.3% |
+| sha | sha/hmac-1mib | 1.0150 | 1.0110 | −0.4% |
+| sha | sha/sha256-1mib | 1.0068 | 1.0052 | −0.2% |
 
-`float/sqrt-sum` at 171x is worth a sentence: goc was calling a software square
-root where the host emits `fsqrt`. It is 0.9991 now — the intrinsic was always
-there, and the pipeline that recognized it had never run. That row alone says
-what this whole exercise was: not a tuning change, but thirteen passes that were
-written, tested and shipped and had never executed on a Go program.
+Seven rows are now at or below the host toolchain: all eleven controls, plus
+`float/sqrt-sum`, `float/int-convert`, `chase/pointer-node`, `chase/l1-resident`
+and (within noise) `chase/dram`.
 
-The rows that barely moved are the ones that were already at parity because they
-are dominated by something other than generated code: `sha` runs hand-written
-assembly, and `chase/dram` and `chase/pointer-node` are memory-latency bound.
+### A control for the headline, measured on this box from a different program
 
-## 7. Guard table, and which tree each guard ran on
+The "before" figure of 1.6294 comes from a baseline another job produced on
+another day. That is not a control, so one was measured here. `placement_bench/flate`
+contains the identical `control/spin-fixed-work` loop, is not part of the perf
+suite, and exists on both trees. Built with each tree's own compiler at `-O` and
+run alternately, pinned to core 61, three repetitions each:
 
-`A` = the merged tree before the nosplit inliner fix; `B` = after it (`f2218cd`).
-Everything the fix could plausibly disturb was re-run on `B`. The fix strictly
-*removes* transformation — it declines to inline into nosplit callers — so a
-guard that passed on `A` cannot be broken by it, but the ones that bear on the
-headline claims were re-run anyway.
+| tree | control/spin-fixed-work (ns) |
+|---|---:|
+| `main` 6034f73 (`goc-main -O`, bounded pipeline) | 54,681,364 / 54,744,324 / 54,717,964 |
+| branch (`goc-branch -O`, full pipeline) | 31,010,298 / 31,000,018 / 31,004,618 |
 
-| guard | required | result | tree |
-|-------|----------|--------|------|
-| capability matrix, default arm | 366/366 | **368 / 368** | A |
-| capability matrix, `-runtime-opt` arm | 366/366 | **368 / 368** | A **and B** |
-| GC reducer `runtime_gc_type_mask_padding.go`, `GOGC=10` | 0/20 | **0 / 20** | A |
-| GC reducer `runtime_gc_type_mask_padding.go`, default `GOGC` | 0/20 | **0 / 20** | A |
-| `runtime_gc_promoted_local_root.go`, both `GOGC` | — | **0 / 20** each | A |
-| `runtime_opt_promoted_interface_root.go`, both `GOGC` | — | **0 / 20** each | A |
-| `runtime_opt_loop_carried_root.go`, both `GOGC` | — | **0 / 20** each | A |
-| `TestFrameEscapeAudit` | pass | **PASS** | A |
-| `TestLoopAliasAudit` | pass | **PASS** | A |
-| `TestAllocationCensus` | pass | **PASS** | A |
-| `TestEscapeShadowPlacement` | pass | **PASS** | A |
-| determinism, default | byte-identical | **5/5, both caching paths, both rounds** | A |
-| determinism, `-O` | byte-identical | **5/5, both caching paths, both rounds** | A |
-| `TestParallelBackendIsByteIdenticalToSerial` | pass | **PASS** | A |
-| flate crash loop, default `GOGC` | 0 over ≥200 | **0 / 250** | A |
-| flate crash loop, `GOGC=10` | 0 over ≥200 | **0 / 250** | A |
-| `TestExecutionCorpus` + `TestAdvancedExecutionCorpus` | — | **241 / 241** | A |
-| `TestLoopBodyAllocationsAreDistinctPerIteration` + `TestAllocationCounts` | — | **17 / 17** | A |
-| corpus compile sweep, all 406 | — | **406 / 406, 0 failures** | A **and B** |
-| bounded-vs-full corpus differential, all 406 | — | 403 same, 1 nondeterministic, **2 differences — both diagnosed** | A |
-| `placement_bench/p256`, `GOGC=10` | — | **0 / 100** | A |
-| `runtime_lock_osthread`, whole-program `-O` | — | 14/100 on A, **0 / 400 on B** | A and B |
-| `go test ./opt` (whole package) | — | **PASS** | B |
-| perf suite re-cut | — | 44/44 improved | B |
+Means 54,714,551 and 31,004,978 — **1.765x faster**. Against the host control
+time this run measured for the same loop (33,500,642 ns), that is **1.633x before
+and 0.9255x after**, from a program the perf suite never touches. The headline is
+reproduced independently.
 
-The four audits (`TestFrameEscapeAudit`, `TestLoopAliasAudit`,
-`TestAllocationCensus`, `TestEscapeShadowPlacement`) pass, and it is worth
-repeating that they are **structurally insensitive** to this change:
-`auditCorpus` compiles with `goc.CompileExecutable` and never calls
-`opt.OptimizeModule`, so they read unoptimized IR. They are a real guard on the
-merge not having disturbed the front end. They are not evidence about the
-pipeline.
+**Confirming run 2** — `make bench-perf` again, fresh binaries, fresh timings:
+`--- PASS: TestPerformanceSuite (855.29s)`, exit 0. Its eleven controls mean
+**0.9259x** against the update run's 0.9260x. The baseline was written by one run
+and then held to by two runs that did not produce it.
 
-No baseline was forced. The two baselines that moved —
-`goc/testdata/perf_suite_baseline.txt` and `goc/testdata/alloc_census_baseline.txt`
-(the latter auto-merged from the two prerequisite branches, which each added
-their reducer's allocation sites) — were regenerated from measurements, and every
-other baseline in the tree passes unmodified.
+### `crypto_signing_bench_baseline.txt` — regenerated (`make bench-crypto-update`)
 
-## 8. What is on, what is gated, and what is left
+`--- SKIP: TestCryptoSigningBench (168.84s)`, exit 0. This file had **never** been
+re-cut with the pipeline on: wave 8 converted it from 5 columns to 7 and branch 3
+left it alone, so every row on the merged tree was far outside its 0.06 tolerance
+before this run.
 
-### On by default, for every Go program
+**Confirming runs 1 and 2** — `make bench-crypto` twice against the new file:
+`--- PASS (170.46s)` and `--- PASS (170.61s)`, exit 0 both, all four rows *within
+tolerance (6%)* in both, worst deviation 0.1% of the index.
 
-`DefaultPipeline` — all thirteen passes the bounded path skipped — runs on every
-module `goc -O` compiles, regardless of size. The module budget is deleted.
+| case | index before | index after | goc ns before | goc ns after | goc speedup |
+|---|---:|---:|---:|---:|---:|
+| p256/sign-verify | 44.8636 | **24.0648** | 2,448,557,393 | 745,617,014 | **3.28x** |
+| p256/verify | 32.7001 | **16.9991** | 1,784,703,100 | 526,695,764 | **3.39x** |
+| p384/sign-verify | 39.1565 | **20.3676** | 2,137,080,720 | 631,062,255 | **3.39x** |
+| rsa2048/sign-verify | 12.1813 | **2.3470** | 664,828,410 | 72,717,829 | **9.14x** |
 
-### Gated, and why
+The host columns are the internal control and they did not move: `gc index`
+1.6312 → 1.6290, 1.1652 → 1.1651, 2.8740 → 2.8738, 0.5929 → 0.5930, and host ns
+within 0.2% on every row. The entire movement is on goc's side.
 
-**One thing, and it is a restriction *inside* the full pipeline, not a pipeline
-that stayed off: the inliner will not inline into a `NoSplit` function.**
+### goc against the host, every measurement in both instruments
 
-That is not a precaution; it is the fix for a real fatal error (§3, third
-blocker). It costs the runtime's allocator fast paths their inlining, which is
-where inlining would pay most. It is gated rather than solved because solving it
-needs something cg12 does not have: a **nosplit stack-depth budget in the
-backend**, walking nosplit call runs after lowering (when frame sizes are known)
-and rejecting a build that overruns the runtime's reserve. Go's linker has
-exactly this. `opt.AuditNoSplitCalls` already builds the call graph it would
-need. **This is the single most valuable follow-up this exercise produced**, and
-until it exists, any pass that grows a runtime frame is one intermittent fatal
-error away from shipping.
+`crypto_signing_bench` is an index against each binary's own control, so the
+goc-versus-host ratio has to be formed from the raw nanoseconds:
 
-Nothing else is gated. `GOC_OPT_PIPELINE=bounded` and `=promote` exist for
-bisection, not as a fallback the tree relies on.
+| case | goc/host before | goc/host after |
+|---|---:|---:|
+| p256/sign-verify | 44.80x | **13.67x** |
+| p256/verify | 45.74x | **13.50x** |
+| p384/sign-verify | 22.20x | **6.56x** |
+| rsa2048/sign-verify | 33.48x | **3.66x** |
 
-### Left undone, deliberately
+For the performance suite the ratio *is* the reported number, so the 42-row table
+above is the goc-versus-host figure for every measurement in it. Combined, this
+gate reports 46 goc-versus-host measurements across the two instruments, and
+**every one of them improved**.
 
-- **The compile-time cost is not addressed, only measured and diagnosed** (§4).
-  4.5x on a whole-program build, ~85% of it the `clean` fixpoint re-examining
-  functions nothing touched. The proposal is there; the change is not, because it
-  is a change to pass scheduling and this branch had enough moving parts.
-- **The `net/http` prebuilt pack peaks at 2.99 GiB against a 3 GiB ceiling.**
-  If that ceiling is real on the target machine, the thing to reinstate is a
-  module budget on `internal/prebuilt.BuildRuntime` alone — the pack, not program
-  modules, which is where the performance is.
-- **The bounded-vs-full differential was run once**, on tree A, before the
-  nosplit fix. It is what found the third blocker. Re-running it on B would take
-  another corpus pass in each arm; the matrix, the sweep and the 400-run
-  `runtime_lock_osthread` loop cover B instead.
 
-### The perf baseline is checkable, not just written
+## Item 4b — the four audits in check mode, and the census run twice
 
-The re-cut baseline was verified by a second, independent run — build the eleven
-programs again from scratch, time them again, compare against the committed file:
+After the regeneration pass of §4a, the four audits were run again in **check**
+mode (no `-update`), which is a second, independent census over the corpus:
 
-    --- PASS: TestPerformanceSuite (856.91s)
+    --- PASS: TestAllocationCensus (184.07s)
+    --- PASS: TestEscapeShadowPlacement (0.00s)
+    --- PASS: TestFrameEscapeAudit (0.00s)
+    --- PASS: TestLoopAliasAudit (0.00s)
+    ok  github.com/evanphx/cg12/goc  184.407s
 
-The control reproduces to four decimal places across the two runs (`interp`
-0.9269 then 0.9263; `sha` 0.9270 then 0.9272; `regexp` 0.9249 then 0.9250). The
-baseline was written from a measurement and then held to by a run that did not
-produce it, which is the property `make bench-perf` needs from it.
+exit 0. So the census ran **twice** on this tree — once writing, once checking —
+plus a third time inside `go test ./goc/...` (§1), and all three agree. The
+shadow-placement totals are identical between the two passes (203,220 front-end
+placements, 186,155 agreements, 16,115 conservative and 950 permissive
+disagreements, 810 distinct disagreement sites), so the corpus audit is
+deterministic on this box.
 
-### Guards re-run on the fixed tree (B)
+The tests that read a regenerated file *unconditionally* were re-run after the
+regeneration, because `go test ./goc/...` had read the pre-regeneration versions:
+`TestReasonPositionsAreRepositoryRelative`, `TestReasonTaxonomyCoversBothVocabularies`,
+`TestGocFlagMParsesIntoSites`, `TestGCExplanationsParseTheFlowChain`,
+`TestGocFlagMStillParsesAsGCFlagM`, `TestCompareAllocationCensus*` — **all PASS**,
+`ok github.com/evanphx/cg12/goc 0.097s`.
 
-| guard | `GOGC=10` | default `GOGC` |
-|-------|-----------|----------------|
-| `runtime_gc_type_mask_padding.go` | **0 / 20** | **0 / 20** |
-| `runtime_gc_promoted_local_root.go` | **0 / 20** | **0 / 20** |
-| `runtime_opt_promoted_interface_root.go` | **0 / 20** | **0 / 20** |
-| `runtime_opt_loop_carried_root.go` | **0 / 20** | **0 / 20** |
 
-| guard (tree B) | result |
-|----------------|--------|
-| determinism, `-O` (full pipeline) | **5 / 5 identical**, both caching paths, both rounds |
-| determinism, default (no `-O`) | **5 / 5 identical**, both caching paths, both rounds |
-| flate crash loop, default `GOGC` | **0 / 250** |
+## The memory finding, stated on its own
 
-All five default-arm hashes are byte-for-byte the same as they were before this
-branch (`0e2122941ec6a0b1`, `b1a662c7c86266a9`, `0a676936cb1c67ff`,
-`1d23c544a91641dd`, `75b9099d0ad1709c`). That is the check that the non-`-O`
-path is untouched: it never calls `opt.OptimizeModule`, and the bytes agree. The
-`-O` hashes did move, which is the check that the pipeline actually ran.
+`cmd/goc/runtime_status_test.go:2915`:
+
+    // It is measured rather than guessed: the largest net/http program peaks at
+    // 2.65 GiB inside the matrix and 2.97 GiB compiled on its own, so the 2 GiB
+    // this used to assume was under-provisioned by a third. Under-provisioning
+    // here is not a slowdown -- the bound exists so an unbounded fan-out cannot
+    // swap or OOM a small machine, and a divisor below the real peak lets it do
+    // exactly that.
+    const compileRuntimeCapabilityPeakBytes = 3 << 30
+
+That constant is **live code**: `compileRuntimeCapabilityWorkers()` divides
+`MemAvailable` by it to decide how many compiles to run at once. On this tree the
+number it is measured from has moved, and the constant has not.
+
+`stdlib_http_tls_client_server.go`, compiled on its own with `-O`, peak RSS:
+
+| GOMAXPROCS | `main` 6034f73 | branch |
+|---|---:|---:|
+| 1 (the corpus sweep's setting) | 2.85 GiB | **4.23 GiB** |
+| default (64) | 2.46 GiB | **3.17 GiB** |
+
+Six corpus programs exceed 3 GiB on the branch at `GOMAXPROCS=1`; **none** do on
+`main`. The `net/http` *pack* the branch reports at 2.99 GiB is real and is under
+the line, but it is not the worst case — program modules are, and the branch's
+proposed mitigation (a module budget on `internal/prebuilt.BuildRuntime` alone)
+does not reach them.
+
+This is the one number in this gate that is worse than `main` and is not the
+advertised price of the wave.
+
