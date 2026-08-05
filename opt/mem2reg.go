@@ -304,6 +304,30 @@ func findPromotable(f *ir.Func) ([]promotable, map[uint32]int) {
 	return vars, varOf
 }
 
+// markManagedDef reports a value that becomes a promoted managed variable's
+// reaching definition as a garbage-collected reference.
+//
+// While the slot existed, the safepoint map described the slot, and every value
+// stored into it was described for as long as the program could still read it
+// back. Promotion replaces those loads with the stored value itself, which
+// extends the value's live range to the last load -- across calls, and so across
+// stack growth and collection. If the value's own temporary is not marked, the
+// pointer is invisible exactly where the slot used to be visible: it is not
+// adjusted when the stack is copied, and it does not keep its referent alive.
+// The phis promotion mints are marked for the same reason; a definition that
+// reaches a load without passing through a phi needs it just as much.
+func markManagedDef(f *ir.Func, value ir.Ref, variable promotable) {
+	if !variable.managed || value.Kind != ir.RefTemp {
+		return
+	}
+	if temp := f.Temps[value.ID]; temp == nil || temp.GCRef {
+		// Already described, and by whoever defined the value: that type
+		// descriptor is at least as precise as the slot's.
+		return
+	}
+	f.MarkGCRefType(value, variable.gcType)
+}
+
 func renameBlock(
 	f *ir.Func,
 	b *ir.Block,
@@ -335,6 +359,7 @@ func renameBlock(
 		case in.Op.IsStore() && addrVar(&in, varOf) >= 0:
 			vi := addrVar(&in, varOf)
 			nameVal(in.Args[0], vi)
+			markManagedDef(f, in.Args[0], vars[vi])
 			curDef[vi] = in.Args[0]
 		case in.Op.IsLoad() && loadVar(&in, varOf) >= 0:
 			sub[in.To.ID] = curDef[loadVar(&in, varOf)]

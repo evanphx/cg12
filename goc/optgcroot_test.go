@@ -37,6 +37,33 @@ func TestOptimizedLoopCarriedPointerStaysAGCRoot(t *testing.T) {
 	require.Contains(t, output, "opt loop carried root ok")
 }
 
+// The other half of the same question: a pointer local that `-O` promotes must
+// also survive the stack moving under it.
+//
+// The phi case above is the one a collection exposes. This is the one stack
+// growth exposes, and it needs no phi at all. A local of interface type is a
+// frame slot holding the address of the two-word descriptor, and for a
+// multi-result call that descriptor is the result home the call writes into --
+// an allocation in the caller's own frame. Promotion makes the call's result
+// temporary the value every later read sees, so a pointer the safepoint map
+// described while it sat in a frame slot now lives in an SSA value the map does
+// not mention. copystack walks the frame map, does not find it, and leaves the
+// local pointing into the freed stack.
+//
+// That is what stdlib-netpoll-stress/tcp-churn died of on the `-O` arm with
+// GOC_BOUNDED_MEM2REG=1: `cg12: interface dispatch failed for dynamic type 0x0`
+// in net.Listener.Accept, on a net.Listener whose descriptor main.main had read
+// out of a stack the runtime had already recycled. The reducer makes the
+// recycling explicit -- the fault address is the pattern its own goroutines
+// wrote -- so it fails the same way on every run rather than depending on what
+// happened to be left behind.
+func TestOptimizedInterfaceLocalSurvivesStackGrowth(t *testing.T) {
+	output := runCorpusProgramOutputOptimizedBy(t,
+		filepath.Join("testdata", "runtime_opt_promoted_interface_root.go"),
+		optimizeProgramFunctions)
+	require.Contains(t, output, "opt promoted interface root ok")
+}
+
 // optimizeProgramFunctions runs the intraprocedural pipeline over the program's
 // own functions, which is what goc's `-O` does to them and what a monolithic
 // opt.OptimizeModule on this module does not.
