@@ -489,3 +489,22 @@ consistent with what I measure: flate is **0 failures in 500 runs** across the
 default collector setting and `GOGC=10`, with the whole pipeline on.
 
 Neither branch, however, was the whole set. The third blocker is above.
+
+## 5. Re-run of the campaign on the fixed tree
+
+Everything below is the tree with the nosplit inliner fix in it.
+
+### Capability matrix, `-runtime-opt`, full pipeline
+
+    368 PASS, 0 FAIL  (plus 1 EXPECTED FAILURE, defer-panic/panic-string-output)
+    ok  github.com/evanphx/cg12/cmd/goc  368.325s   (cold packs)
+
+### Compile sweep, whole corpus, on the fixed tree
+
+    arm=full  compiled=406  failures=0
+
+Zero compiler crashes, assertion failures or lowering errors on any of the 406
+corpus programs. (This run's mean of 40.9 s per program is *not* comparable to
+the 32.1 s above: it ran concurrently with the capability matrix. The 4.53x
+figure in section 4 comes from the bounded and full sweeps run back to back under
+the same load, which is the comparison that means something.)
