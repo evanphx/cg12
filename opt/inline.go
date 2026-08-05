@@ -84,7 +84,7 @@ const inlineCallerInstrBudget = 2000
 // on the size budget.
 func Inline(m *ir.Module) bool {
 	done := false
-	return inlineModule(m, map[*ir.Func]int{}, &done)
+	return inlineModule(m, map[*ir.Func]int{}, &done, nil)
 }
 
 // InlinePass returns a module pass that inlines with a growth cap fixed to each
@@ -93,10 +93,38 @@ func Inline(m *ir.Module) bool {
 // recomputed against the already-grown body each round (which would let a single-site
 // cascade compound past the cap).
 func InlinePass() Pass {
-	base := map[*ir.Func]int{}
-	costDone := false
-	return ModulePass("inline", func(m *ir.Module) bool { return inlineModule(m, base, &costDone) })
+	return &inlinePass{base: map[*ir.Func]int{}}
 }
+
+// inlinePass is the inliner's pipeline form. Unlike the other interprocedural
+// passes it takes part in change tracking, because it is the pass that dirties
+// the module and the one whose cost the tracking exists to contain: a round of
+// inlining touches the callers it splices into and nothing else, so the `clean`
+// fixpoint that follows it need only revisit those.
+type inlinePass struct {
+	base     map[*ir.Func]int
+	costDone bool
+}
+
+func (p *inlinePass) Name() string { return "inline" }
+
+func (p *inlinePass) Run(m *ir.Module) bool { return p.runTracked(m, nil) }
+
+func (p *inlinePass) runTracked(m *ir.Module, log *changeLog) bool {
+	// A spliced call mutates the caller only -- spliceCall clones a snapshot of
+	// the callee's body -- so marking the callers is the whole of the damage.
+	var moved func(*ir.Func)
+	if log != nil {
+		moved = func(caller *ir.Func) { log.record(inlinePassID, caller, true) }
+	}
+	return inlineModule(m, p.base, &p.costDone, moved)
+}
+
+// inlinePassID is the identity the inliner files its changes under. Any value
+// distinct from the [FuncPass] ids works: the inliner never asks whether it has
+// converged on a function, it only reports that one moved, and [changeLog.record]
+// with changed set does not read the pass id.
+const inlinePassID = 0
 
 // forceInlineFromEnv marks the functions named in CG12_FORCE_INLINE (comma-
 // separated) as CostInline, standing in for the cost model that will eventually
@@ -215,7 +243,9 @@ func selectCostInline(m *ir.Module, cg *callGraph, scc *sccInfo) {
 	}
 }
 
-func inlineModule(m *ir.Module, base map[*ir.Func]int, costDone *bool) bool {
+// inlineModule inlines across the whole module. moved, when non-nil, is called
+// with each caller whose body inlining changed.
+func inlineModule(m *ir.Module, base map[*ir.Func]int, costDone *bool, moved func(*ir.Func)) bool {
 	forceInlineFromEnv(m)
 	cg := buildCallGraph(m)
 	scc := computeSCC(cg)
@@ -237,6 +267,9 @@ func inlineModule(m *ir.Module, base map[*ir.Func]int, costDone *bool) bool {
 		}
 		if inlineInto(f, cg, scc, sites, base) {
 			changed = true
+			if moved != nil {
+				moved(f)
+			}
 		}
 	}
 	return changed

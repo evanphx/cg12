@@ -45,6 +45,8 @@ func main() {
 	runtimeCoverMeta := flag.String("runtime-covermeta", "", "instrument runtime and write coverage metadata")
 	prebuiltRuntime := flag.String("runtime", "", "link against the prebuilt runtimes written by `goc build-runtime`, comma-separated; the richest usable one is chosen")
 	cpuProfile := flag.String("cpuprofile", "", "write a CPU profile of the compile to this file")
+	memProfile := flag.String("memprofile", "", "write a heap profile of the compile to this file")
+	memProfilePeak := flag.Bool("memprofile-peak", false, "with -memprofile, profile the compile's peak heap instead of what it retains at the end")
 	targetName := flag.String("target", defaultTargetName(), "arm64 | amd64")
 	var escapeDiagLevel escapeDiagFlag
 	flag.Var(&escapeDiagLevel, "m", "print escape decisions: 1 the rule that placed each allocation, 2 also the chain to the deciding use")
@@ -71,6 +73,28 @@ func main() {
 		check(startCPUProfile(*cpuProfile))
 		defer stopCPUProfile()
 	}
+	// The heap profile covers the same span as the CPU one -- the compile, not
+	// the link and not the compiled program -- so it is taken where the module is
+	// finished rather than at process exit. finishMemProfile is what marks that
+	// point, and every path that reaches a finished module calls it.
+	var peakProfiler *peakHeapProfiler
+	if *memProfile != "" && *memProfilePeak {
+		started, err := startPeakHeapProfile(*memProfile)
+		check(err)
+		peakProfiler = started
+		defer peakProfiler.Stop()
+	}
+	finishMemProfile := func() {
+		if *memProfile == "" {
+			return
+		}
+		if peakProfiler != nil {
+			peakProfiler.Stop()
+			peakProfiler = nil
+			return
+		}
+		check(writeHeapProfile(*memProfile, true))
+	}
 	// ParseTarget's message already names the command, so it is printed as-is
 	// rather than through check, which would prefix "goc: " a second time.
 	target, err := goc.ParseTarget(*targetName)
@@ -93,6 +117,7 @@ func main() {
 		packs, err := readPackSet(splitCommaList(*prebuiltRuntime))
 		check(err)
 		check(linkAgainstPrebuiltRuntime(target, packs, input, src, exe, *optimize, os.Stderr))
+		finishMemProfile()
 		if *run {
 			// The profile covers the compile, not the compiled program, and
 			// os.Exit does not run deferred functions.
@@ -122,6 +147,7 @@ func main() {
 	if *optimize {
 		opt.OptimizeModule(m)
 	}
+	finishMemProfile()
 	switch {
 	case *emitIR:
 		fmt.Print(m)

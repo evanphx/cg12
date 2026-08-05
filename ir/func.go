@@ -142,6 +142,57 @@ func (b *Block) Succs() []*Block {
 	return nil
 }
 
+// SuccCount and SuccAt walk the same sequence [Succs] returns, without
+// materialising it. SuccAt(i) equals Succs()[i] for every i below SuccCount,
+// nil entries included.
+//
+// They exist because Succs allocates for three of its four terminator kinds --
+// a fresh one- or two-element slice for a jump or a conditional branch, and a
+// fresh slice for a switch -- and the CFG walk calls it once per block per pass
+// per fixpoint round. Building the control-flow graph was a third of every byte
+// a `goc -O` compile allocated, and this is part of why.
+func (b *Block) SuccCount() int {
+	switch b.Jmp.Kind {
+	case JmpJmp:
+		if b.Jmp.To != nil {
+			return 1
+		}
+	case JmpJnz:
+		return 2
+	case JmpBr, JmpTable:
+		return len(b.Jmp.Targets)
+	case JmpSwitch:
+		return len(b.Jmp.Cases) + 1
+	}
+	return 0
+}
+
+// SuccAt returns the i'th successor. It panics for an index outside
+// [0, SuccCount), like the slice indexing it replaces.
+func (b *Block) SuccAt(i int) *Block {
+	switch b.Jmp.Kind {
+	case JmpJmp:
+		if i == 0 && b.Jmp.To != nil {
+			return b.Jmp.To
+		}
+	case JmpJnz:
+		switch i {
+		case 0:
+			return b.Jmp.To
+		case 1:
+			return b.Jmp.To2
+		}
+	case JmpBr, JmpTable:
+		return b.Jmp.Targets[i]
+	case JmpSwitch:
+		if i == 0 {
+			return b.Jmp.To // default
+		}
+		return b.Jmp.Cases[i-1].Blk
+	}
+	panic("ir: block successor index out of range")
+}
+
 // Func is a single function body in SSA form.
 type Func struct {
 	mod     *Module
