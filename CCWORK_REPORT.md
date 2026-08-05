@@ -3,7 +3,9 @@
 Branch: `ccwork/enable-full-pipeline` = `ccwork/mem2reg-iface-dispatch` + merge of
 `ccwork/mem2reg-gc-visibility` (merge commit 4803808).
 
-## Status: IN PROGRESS — this file is written as work lands, not at the end.
+## Status: COMPLETE. Full optimisation is on by default. Three blockers found and
+fixed (two known, one new). Control loop 1.6294x the host toolchain -> 0.9262x.
+Compile time 4.5x. Written as work landed, not batched at the end.
 
 ## Merge of the two prerequisite branches
 
