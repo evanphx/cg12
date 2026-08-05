@@ -734,3 +734,26 @@ written for. A crash is a *missing* measurement rather than a slow one, so
 replacing it biases nothing, and retrying is what keeps one dead run from costing
 the other ten programs their eleven minutes. Failing at the end with the whole
 table and the whole crash report beats dying at repetition five with neither.
+
+### One thing found on the way past, not fixed here
+
+A `badPointer` throw cannot finish printing its own object dump. The first dump
+in this investigation stopped at `*(object+248` and turned into a `SIGSEGV`:
+
+    runtime_atomicwb -> runtime_atomicstorep -> goc_storep -> runtime_bytes
+      -> runtime_printstring -> runtime_gcDumpObject -> runtime_badPointer
+      -> runtime_findObject -> runtime_wbBufFlush1 -> ... (repeat until the
+      stack is gone)
+
+`runtime.bytes`, which `printstring` calls, does `rp.array = sp.str` where `rp`
+is `(*slice)(unsafe.Pointer(&ret))` and `ret` is a local. goc emits a write
+barrier for that store; the host toolchain does not, because ssa's write-barrier
+pass asks `IsStackAddr` and follows the `unsafe.Pointer` chain back to a stack
+slot. Inside `badPointer` the barrier flushes, the flush re-finds the same bad
+pointer, and `badPointer` calls itself.
+
+That is a second, independent defect -- goc not eliding write barriers for
+stores it can prove target the stack -- and it makes every future bad-pointer
+diagnosis harder than it needs to be. The dumps in this report were obtained by
+setting `debug.invalidptr = 0` at the top of `badPointer` as a temporary patch,
+which was reverted. It is worth its own job; it is not touched here.
