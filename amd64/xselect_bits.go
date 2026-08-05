@@ -36,7 +36,7 @@ func selectBits(s *xsel, in *ir.Instr) bool {
 // with src or dst however those were assigned.
 func (s *xsel) clz(in *ir.Instr) {
 	w := in.Cls == ir.ClsL
-	rs := s.gpValue(in.Arg(0), gpScratch1)
+	rs := s.gpValue(in.Arg(0), s.gpScratch1)
 	d, commit := s.gpDst(in.To)
 	s.b.clzGP(w, d, rs, clzScratch, clzAux)
 	commit()
@@ -59,7 +59,7 @@ func (s *xsel) clz(in *ir.Instr) {
 // produces those two.
 func (s *xsel) mulh(in *ir.Instr, signed bool) {
 	w := in.Cls == ir.ClsL
-	rb := s.gpValue(in.Arg(1), gpScratch1)
+	rb := s.gpValue(in.Arg(1), s.gpScratch1)
 	s.gpInto(RAX, in.Arg(0))
 	s.b.mulhGP(w, signed, rb)
 	d, commit := s.gpDst(in.To)

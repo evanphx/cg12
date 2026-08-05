@@ -98,7 +98,7 @@ type xasmAtomic interface {
 const atomicLoopValue = RCX
 
 func (b *mcXasm) atomicLoad(addr ir.Ref, bytes int, dst Reg) {
-	mem, fixup := b.m.memAddr(addr, gpScratch1)
+	mem, fixup := b.m.memAddr(addr, b.m.gpScratch1)
 	d := dst.mreg()
 	// A narrow atomic load zero-extends, matching arm64's LDARB/LDARH and so
 	// giving the intrinsic one result across backends. The 32-bit form needs no
@@ -127,19 +127,19 @@ func (b *mcXasm) atomicXchg(addr ir.Ref, bytes int, val Reg) {
 }
 
 func (b *mcXasm) xchgMem(addr ir.Ref, bytes int, val Reg) {
-	mem, fixup := b.m.memAddr(addr, gpScratch1)
+	mem, fixup := b.m.memAddr(addr, b.m.gpScratch1)
 	b.m.emit(x64.Xchg(bytes*8, mem, val.mreg()))
 	fixup()
 }
 
 func (b *mcXasm) atomicXadd(addr ir.Ref, bytes int, val Reg) {
-	mem, fixup := b.m.memAddr(addr, gpScratch1)
+	mem, fixup := b.m.memAddr(addr, b.m.gpScratch1)
 	b.m.emit(x64.LockXadd(bytes*8, mem, val.mreg()))
 	fixup()
 }
 
 func (b *mcXasm) atomicALU(op string, addr ir.Ref, bytes int, val Reg) {
-	mem, fixup := b.m.memAddr(addr, gpScratch1)
+	mem, fixup := b.m.memAddr(addr, b.m.gpScratch1)
 	wbits := bytes * 8
 	switch op {
 	case "add":
@@ -183,7 +183,7 @@ func (b *mcXasm) atomicALU(op string, addr ir.Ref, bytes int, val Reg) {
 // On failure CMPXCHG has already reloaded RAX with what it found, so the branch
 // goes back to recomputing the replacement rather than to the load.
 func (b *mcXasm) atomicFetchALU(op string, addr ir.Ref, bytes int, val Reg) {
-	mem, fixup := b.m.memAddr(addr, gpScratch1)
+	mem, fixup := b.m.memAddr(addr, b.m.gpScratch1)
 	observed := RAX.mreg()
 	replacement := atomicLoopValue.mreg()
 	// The width the ALU step computes at. A byte or halfword operation computes in
@@ -233,7 +233,7 @@ func (b *mcXasm) atomicFetchALU(op string, addr ir.Ref, bytes int, val Reg) {
 }
 
 func (b *mcXasm) atomicCAS(addr ir.Ref, bytes int, replacement Reg) {
-	mem, fixup := b.m.memAddr(addr, gpScratch1)
+	mem, fixup := b.m.memAddr(addr, b.m.gpScratch1)
 	b.m.emit(x64.LockCmpxchg(bytes*8, mem, replacement.mreg()))
 	fixup()
 }

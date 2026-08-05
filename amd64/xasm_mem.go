@@ -42,7 +42,7 @@ func (b *mcXasm) loadGP(in *ir.Instr, w bool, dst Reg) {
 	fixup()
 }
 func (b *mcXasm) loadFP(op ir.Op, dst Reg, addr ir.Ref) {
-	mem, fixup := b.m.memAddr(addr, gpScratch1)
+	mem, fixup := b.m.memAddr(addr, b.m.gpScratch1)
 	if op == ir.OLoadd {
 		b.m.emit(x64.MovsdLoad(dst.mreg(), mem))
 	} else {
@@ -57,7 +57,7 @@ func (b *mcXasm) storeGP(in *ir.Instr, val Reg) {
 	fixup()
 }
 func (b *mcXasm) storeFP(op ir.Op, val Reg, addr ir.Ref) {
-	mem, fixup := b.m.memAddr(addr, gpScratch1)
+	mem, fixup := b.m.memAddr(addr, b.m.gpScratch1)
 	if op == ir.OStored {
 		b.m.emit(x64.MovsdStore(val.mreg(), mem))
 	} else {

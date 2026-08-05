@@ -46,7 +46,8 @@ func colorAlloc(f *ir.Func, cfg *analysis.CFG, live *analysis.Liveness, freq *an
 
 type colorGraph struct {
 	f    *ir.Func
-	freq *analysis.Freq // per-block execution frequency, for the spill cost model
+	cc   ir.CallConvention // the convention f's body is emitted against (emissionConvention)
+	freq *analysis.Freq    // per-block execution frequency, for the spill cost model
 
 	adj       []map[int]bool    // temp id -> interfering temp ids (nodes only; same class)
 	forb      []map[Reg]bool    // temp id -> physical registers it may not use
@@ -62,6 +63,7 @@ func newColorGraph(f *ir.Func) *colorGraph {
 	n := len(f.Temps)
 	g := &colorGraph{
 		f:         f,
+		cc:        emissionConvention(f),
 		adj:       make([]map[int]bool, n),
 		forb:      make([]map[Reg]bool, n),
 		node:      make([]bool, n),
@@ -351,14 +353,15 @@ func (g *colorGraph) assign() (*allocation, error) {
 		// crossFreq×2). preferCallee holds when the caller-saved bill is the larger, so
 		// the value tries callee-saved registers first; otherwise it takes caller-saved
 		// freely (cheap when the crossed calls are cold, the interpreter's case).
+		// A convention with no callee-saved registers (Go ABIInternal) has nothing
+		// to prefer: the whole callee-saved branch below would then reject every
+		// candidate and spill every call-crossing value, so the preference is
+		// switched off at the source rather than left to collapse.
 		crossing := g.crossFreq[t] > 0
-		preferCallee := crossing && g.crossFreq[t]*2 >= 2.0
+		preferCallee := crossing && g.crossFreq[t]*2 >= 2.0 && conventionABI(g.cc).savesCalleeRegs
 		pool := g.pool(t)
 		if preferCallee {
-			pool = intAllocOrderCalleeFirst
-			if f.Temps[t].Cls.IsFloat() {
-				pool = floatAllocOrderCalleeFirst
-			}
+			pool = g.poolCalleeFirst(t)
 		}
 		// Coalesce by biasing: prefer a register a move partner already holds. For a
 		// value whose crossings are hot, never bias onto a caller-saved register --
@@ -366,7 +369,7 @@ func (g *colorGraph) assign() (*allocation, error) {
 		prefer := map[Reg]bool{}
 		for _, p := range g.mv[t] {
 			if r := f.Temps[p].Reg; r != ir.NoReg {
-				if preferCallee && !calleeSavedReg(Reg(r)) {
+				if preferCallee && !calleeSavedFor(g.cc, Reg(r)) {
 					continue
 				}
 				prefer[Reg(r)] = true
@@ -390,7 +393,7 @@ func (g *colorGraph) assign() (*allocation, error) {
 		}
 		// If the only register a hot-crossing value could get is caller-saved, wrapping
 		// it costs crossFreq×2; spilling costs its reference weight. Take the cheaper.
-		if picked != Reg(ir.NoReg) && preferCallee && !calleeSavedReg(picked) &&
+		if picked != Reg(ir.NoReg) && preferCallee && !calleeSavedFor(g.cc, picked) &&
 			g.crossFreq[t]*2 >= g.cost[t] {
 			picked = Reg(ir.NoReg)
 		}
@@ -407,12 +410,23 @@ func (g *colorGraph) assign() (*allocation, error) {
 	return alloc, nil
 }
 
-// pool is the register allocation order for temp t's class.
+// pool is the register allocation order for temp t's class, under the convention
+// this function's body is emitted against.
 func (g *colorGraph) pool(t int) []Reg {
 	if g.f.Temps[t].Cls.IsFloat() {
-		return floatAllocOrder
+		return floatAllocOrderFor(g.cc)
 	}
-	return intAllocOrder
+	return intAllocOrderFor(g.cc)
+}
+
+// poolCalleeFirst is pool reordered so a call-crossing value tries callee-saved
+// registers first. Only reached when the convention has callee-saved registers at
+// all.
+func (g *colorGraph) poolCalleeFirst(t int) []Reg {
+	if g.f.Temps[t].Cls.IsFloat() {
+		return floatAllocOrderCalleeFirstFor(g.cc)
+	}
+	return intAllocOrderCalleeFirstFor(g.cc)
 }
 
 // spillRatio ranks spill candidates: spill cost per interfering neighbour freed. A

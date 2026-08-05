@@ -69,7 +69,7 @@ func selectImm(s *xsel, in *ir.Instr) bool {
 // first. dst and src being the same register is fine for the same reason.
 func (s *xsel) binImm(in *ir.Instr, w bool, reg ir.Ref, imm int32) {
 	if in.Op == ir.OMul {
-		rs := s.gpValue(reg, gpScratch1)
+		rs := s.gpValue(reg, s.gpScratch1)
 		d, commit := s.gpDst(in.To)
 		s.b.imulImmGP(w, d, rs, imm)
 		commit()
@@ -131,9 +131,9 @@ func (s *xsel) selInt(in *ir.Instr) {
 		s.gpInto(selCondScratch, in.Arg(0))
 		rc = selCondScratch
 	}
-	s.gpInto(gpScratch1, in.Arg(1)) // true arm, out of the destination's way
-	s.gpInto(d, in.Arg(2))          // false arm: CMOV's fall-through value
-	s.b.selGP(w, condW, d, gpScratch1, rc)
+	s.gpInto(s.gpScratch1, in.Arg(1)) // true arm, out of the destination's way
+	s.gpInto(d, in.Arg(2))            // false arm: CMOV's fall-through value
+	s.b.selGP(w, condW, d, s.gpScratch1, rc)
 	commit()
 }
 
@@ -155,12 +155,12 @@ func (s *xsel) selFloat(in *ir.Instr) {
 	condW := s.f.ClassOf(in.Arg(0)) == ir.ClsL
 
 	rc := s.gpValue(in.Arg(0), selCondScratch)
-	s.floatBitsGP(gpScratch1, in.Arg(1)) // true arm
-	s.floatBitsGP(gpScratch0, in.Arg(2)) // false arm
-	s.b.selGP(long, condW, gpScratch0, gpScratch1, rc)
+	s.floatBitsGP(s.gpScratch1, in.Arg(1)) // true arm
+	s.floatBitsGP(s.gpScratch0, in.Arg(2)) // false arm
+	s.b.selGP(long, condW, s.gpScratch0, s.gpScratch1, rc)
 
 	d, commit := s.fpDst(in.To)
-	s.b.castG2F(long, d, gpScratch0)
+	s.b.castG2F(long, d, s.gpScratch0)
 	commit()
 }
 

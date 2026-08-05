@@ -24,7 +24,7 @@ type xasmFlow interface {
 
 	// jmpTable emits an indexed branch through a PC-relative offset table placed
 	// just past the branch: target = table + (int32)table[idx]. idx is already
-	// bounds-checked. R10/R11 are free scratch at a terminator.
+	// bounds-checked. Both GP scratch registers are free at a terminator.
 	jmpTable(idx Reg, blk *ir.Block, targets []*ir.Block)
 
 	// Calls. callSym is a direct call to a named function (recorded as a PLT32
@@ -57,10 +57,10 @@ func (b *mcXasm) blockAddrLea(dst Reg, blk *ir.Block) {
 }
 func (b *mcXasm) jmpTable(idx Reg, blk *ir.Block, targets []*ir.Block) {
 	tbl := blk.Name + ".tbl"
-	b.m.prog.LeaLabel(true, gpScratch0.mreg(), tbl) // lea R10, [rip+tbl]
-	b.m.emit(x64.MovsxdLoad(gpScratch1.mreg(), x64.Mem{Base: gpScratch0.mreg(), Index: idx.mreg(), Scale: 4, HasIndex: true}))
-	b.m.emit(x64.AddReg(true, gpScratch0.mreg(), gpScratch1.mreg())) // add R10, R11
-	b.m.emit(x64.JmpReg(gpScratch0.mreg()))                          // jmp *R10
+	b.m.prog.LeaLabel(true, b.m.gpScratch0.mreg(), tbl) // lea scratch0, [rip+tbl]
+	b.m.emit(x64.MovsxdLoad(b.m.gpScratch1.mreg(), x64.Mem{Base: b.m.gpScratch0.mreg(), Index: idx.mreg(), Scale: 4, HasIndex: true}))
+	b.m.emit(x64.AddReg(true, b.m.gpScratch0.mreg(), b.m.gpScratch1.mreg())) // add scratch0, scratch1
+	b.m.emit(x64.JmpReg(b.m.gpScratch0.mreg()))                              // jmp *scratch0
 	b.m.prog.Label(tbl)
 	for _, t := range targets {
 		b.m.prog.DataWord(t.Name, tbl) // .long t - tbl

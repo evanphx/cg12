@@ -58,11 +58,18 @@ func (r Reg) mreg() x64.Reg {
 // These are the System V pair. Go's ABIInternal cannot use them -- R10 and R11
 // are its argument registers 8 and 9 -- and needs a different pair; see
 // scratchGPFor and the "no convention-independent scratch pair" note below.
+//
+// The `sysv` prefix is load-bearing rather than decorative. The emitter used to
+// spell these names bare at ~185 sites; they are now fields on mc/xsel
+// (scratchRegs, resolved per function through emissionConvention), and naming
+// the constants distinctly is what makes the compiler, not a reviewer, prove
+// that no site still reaches for the System V pair unconditionally. Do not
+// reintroduce unprefixed aliases.
 const (
-	gpScratch0 = R10
-	gpScratch1 = R11
-	fpScratch0 = XMM0 + 14
-	fpScratch1 = XMM0 + 15
+	sysvGPScratch0 = R10
+	sysvGPScratch1 = R11
+	sysvFPScratch0 = XMM0 + 14
+	sysvFPScratch1 = XMM0 + 15
 )
 
 // ---------------------------------------------------------------------------
@@ -144,21 +151,18 @@ func goFloatArgRegSpill(floatRegArgs int) bool { return floatRegArgs > len(goArg
 // prologue, paying two pushes and two pops on every function to avoid clobbering
 // a C caller's live value.
 //
-// NOTE: the emitter still spells gpScratch0/gpScratch1 directly at ~150 sites
-// and so implements only the System V row. That is correct for everything that
-// compiles today, because nothing yet asks for ABIInternal register assignment:
-// lowerParams and lowerCalls build platform assigners unconditionally, so a
-// function marked CallConvGoInternal is currently emitted as self-consistent
-// System V code. Threading the pair through the emitter is B2's work, and
-// TestGoABIScratchDoesNotAliasArgumentRegisters pins the reason it cannot be
-// skipped: the System V pair *is* ABIInternal's argument registers 8 and 9, so
-// wiring goArgGP in without also moving scratch would let the emitter clobber a
-// live argument while materializing a constant.
+// The emitter now reads this pair per function rather than spelling the System V
+// registers directly: emitMachine resolves it once into mc.scratchRegs (see
+// scratchRegsFor) and every emission site goes through that field.
+// TestGoABIScratchDoesNotAliasArgumentRegisters pins why the indirection cannot
+// be collapsed back: the System V pair *is* ABIInternal's argument registers 8
+// and 9, so wiring goArgGP in without also moving scratch would let the emitter
+// clobber a live argument while materializing a constant.
 func scratchGPFor(cc ir.CallConvention) (Reg, Reg) {
 	if cc == ir.CallConvGoInternal {
 		return R12, R13
 	}
-	return gpScratch0, gpScratch1
+	return sysvGPScratch0, sysvGPScratch1
 }
 
 // scratchFPFor returns the float scratch pair. Under System V, XMM14/XMM15 are
@@ -169,7 +173,25 @@ func scratchFPFor(cc ir.CallConvention) (Reg, Reg) {
 	if cc == ir.CallConvGoInternal {
 		return XMM(13), XMM(14)
 	}
-	return fpScratch0, fpScratch1
+	return sysvFPScratch0, sysvFPScratch1
+}
+
+// scratchRegs is the emitter's four scratch registers for one function, resolved
+// once from that function's emission convention. It is embedded in mc (the
+// per-function emitter state) and in xsel (which is constructed from an mc), so
+// every emission site spells m.gpScratch0 / s.fpScratch1 and so on -- the same
+// names the code used when they were package constants, now bound to a function
+// rather than to the platform.
+type scratchRegs struct {
+	gpScratch0, gpScratch1 Reg
+	fpScratch0, fpScratch1 Reg
+}
+
+// scratchRegsFor bundles the two pairs for a convention.
+func scratchRegsFor(cc ir.CallConvention) scratchRegs {
+	gp0, gp1 := scratchGPFor(cc)
+	fp0, fp1 := scratchFPFor(cc)
+	return scratchRegs{gpScratch0: gp0, gpScratch1: gp1, fpScratch0: fp0, fpScratch1: fp1}
 }
 
 // intAllocOrderFor returns the general-purpose allocation order for a calling
@@ -192,6 +214,50 @@ func intAllocOrderFor(cc ir.CallConvention) []Reg {
 // / callee-first split to make: every allocatable register is clobbered by a
 // call, and a value live across one is spilled either way.
 var goIntAllocOrder = []Reg{RBX, RSI, RDI, R8, R9, R10, R11, R15}
+
+// floatAllocOrderFor returns the XMM allocation order for a calling convention.
+// ABIInternal drops three registers from the System V order: X15 must hold zero
+// throughout Go code (regFloatZero) and X13/X14 are its float scratch pair. The
+// System V order does not list X15 either -- it is that convention's second
+// scratch register -- so the two differ only by X13 and X14.
+func floatAllocOrderFor(cc ir.CallConvention) []Reg {
+	if cc == ir.CallConvGoInternal {
+		return goFloatAllocOrder
+	}
+	return floatAllocOrder
+}
+
+// goFloatAllocOrder is the ABIInternal XMM allocation order.
+var goFloatAllocOrder = []Reg{
+	XMM(8), XMM(9), XMM(10), XMM(11), XMM(12),
+	XMM(0), XMM(1), XMM(2), XMM(3), XMM(4), XMM(5), XMM(6), XMM(7),
+}
+
+// intAllocOrderCalleeFirstFor / floatAllocOrderCalleeFirstFor return the
+// callee-saved-first orders a call-crossing value prefers. Under ABIInternal
+// there is nothing to put first, so they are the plain orders; colouring does not
+// reach them anyway, because it consults conventionABI(cc).savesCalleeRegs before
+// forming a callee-saved preference at all.
+func intAllocOrderCalleeFirstFor(cc ir.CallConvention) []Reg {
+	if cc == ir.CallConvGoInternal {
+		return goIntAllocOrder
+	}
+	return intAllocOrderCalleeFirst
+}
+
+func floatAllocOrderCalleeFirstFor(cc ir.CallConvention) []Reg {
+	if cc == ir.CallConvGoInternal {
+		return goFloatAllocOrder
+	}
+	return floatAllocOrderCalleeFirst
+}
+
+// callerClobberedForConv reports whether a call under convention cc clobbers r:
+// everything but that convention's callee-saved GP registers, which includes
+// every XMM (neither convention has a callee-saved XMM), so a float held across a
+// call is always caller-clobbered. Under ABIInternal, which preserves nothing, so
+// is everything else.
+func callerClobberedForConv(cc ir.CallConvention, r Reg) bool { return !calleeSavedFor(cc, r) }
 
 // reservedForFixedOps names the registers held out of allocation under every
 // convention because instruction encodings, not the ABI, demand them: the
@@ -255,11 +321,6 @@ var calleeSaved = map[Reg]bool{
 
 // calleeSavedReg reports whether r must be preserved across a call.
 func calleeSavedReg(r Reg) bool { return calleeSaved[r] }
-
-// callerClobbered reports whether a call clobbers register r: everything but the
-// callee-saved GP registers, which includes every XMM (System V has no
-// callee-saved XMM), so a float held across a call is always caller-clobbered.
-func callerClobbered(r Reg) bool { return !calleeSavedReg(r) }
 
 // intAllocOrderCalleeFirst / floatAllocOrderCalleeFirst try the callee-saved
 // registers first. A value that lives across a call prefers these -- one prologue

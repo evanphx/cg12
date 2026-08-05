@@ -78,18 +78,21 @@ func addAliases(o *obj.Object, aliases []*ir.Alias) error {
 // morestack prologue and its Go stack maps on UsesManagedFrame), so it is the
 // tripwire worth having, and it is the one rejected here.
 //
-// The Go internal calling convention is deliberately NOT rejected, even though
-// amd64 does not implement ABIInternal's register assignment either. CallConv is
-// not currently a trustworthy signal that a function needs Go's ABI: goc applies
-// CallConvGoInternal unconditionally to closure-shaped functions -- function
-// literals (goc/compile.go:10119), method-value wrappers (:9781) and funcvalue
-// adapters (:10638) -- which then pass their environment through an ordinary
-// fixed-register temporary (rdx via goc's closureRegister) rather than through the
-// convention's register assignment. Those bodies are self-consistent System V code
-// and are correct today; rejecting them catches no latent miscompile and instead
-// breaks working code (measured: 14 goc corpus subtests that build natively on
-// amd64). Check whether those frontend sites still over-apply the annotation
-// before tightening this.
+// The Go internal calling convention is not rejected, and as of B1 that is
+// because amd64 now implements it: emissionConvention returns f.CallConv, and
+// lowerParams/lowerCalls/lowerReturns place arguments and results by that
+// convention's tables. goc applies CallConvGoInternal unconditionally to
+// closure-shaped functions -- function literals (goc/compile.go:10119),
+// method-value wrappers (:9781) and funcvalue adapters (:10638) -- and those
+// bodies are now genuinely ABIInternal rather than self-consistent System V, with
+// both sides of every closure call flipping together. That is a real codegen
+// change on code that executes, so it is held by execution tests (the goc corpus
+// subtests that build natively on amd64), not by inspection.
+//
+// The frame axis is separate and stays rejected. ABIInternal says where the
+// arguments are; ManagedFrame says who owns the stack, and only the second needs
+// the morestack prologue, the argument home slots and the Go stack maps that this
+// backend still lacks.
 //
 // NoSplit and SystemStack are likewise not rejected. Neither describes the frame
 // on its own: they only tune the managed frame's stack-growth check (arm64 reads
@@ -107,14 +110,46 @@ func goABIUnsupported(f *ir.Func) error {
 	return nil
 }
 
+// goABIPrologueUnsupported rejects the one combination the ABIInternal flip left
+// behind: a Go-ABI function whose emission runs a prologue-emitting GC strategy.
+//
+// PrologueContext.liveArgGP/liveArgFP name the argument registers holding live
+// incoming values, so that PushCallerState can preserve them across a runtime
+// call made before the frame exists. Both read the *System V* tables, and the
+// count comes from namedCounts, which replays assignment with a platform
+// assigner. Under ABIInternal the arguments are in goArgGP -- RAX, RBX, RCX
+// first -- so the prologue would push and pop RDI, RSI, RDX and leave the real
+// arguments to be destroyed by the call it was protecting them from.
+//
+// This is not gated by goABIUnsupported: EmitPrologue keys off a GC strategy
+// being configured, not off UsesManagedFrame, so the managed-frame rejection
+// does not cover it. Making the two accessors convention-aware is genuinely
+// B2's -- it owns the prologue and the stack-growth strategy, and the same
+// registers have to be described to morestack's copy and to the retry path that
+// reloads them -- so this refuses by name until then rather than emitting a
+// prologue that silently protects the wrong registers.
+func goABIPrologueUnsupported(f *ir.Func, gc GCStrategy) error {
+	if emissionConvention(f) != ir.CallConvGoInternal {
+		return nil
+	}
+	if _, ok := gc.(PrologueEmitter); !ok {
+		return nil
+	}
+	return fmt.Errorf("amd64: function %q uses the Go internal calling convention with a "+
+		"prologue-emitting GC strategy, whose live-argument registers are still System V's", f.Name)
+}
+
 // rejectGoABI fails the whole module before any of it is compiled. It runs up
 // front rather than per function inside the emit loop because lowering rewrites
 // each function in place: bailing out midway would leave the caller's module
 // partly lowered.
-func rejectGoABI(m *ir.Module) error {
+func rejectGoABI(m *ir.Module, gc GCStrategy) error {
 	for _, f := range m.Funcs {
 		if err := goABIUnsupported(f); err != nil {
 			return fmt.Errorf("function %s: %w", f.Name, err)
+		}
+		if err := goABIPrologueUnsupported(f, gc); err != nil {
+			return err
 		}
 	}
 	return nil
@@ -125,9 +160,14 @@ func CompileToObjectWith(m *ir.Module, opts Options) (*obj.Object, error) {
 	// CompileToObject) and Backend.CompileModule funnels through here, so this is
 	// the one place codegen can be reached from and the one place the guard needs
 	// to sit.
-	if err := rejectGoABI(m); err != nil {
+	if err := rejectGoABI(m, opts.GC); err != nil {
 		return nil, err
 	}
+	// A direct call names its callee by symbol, and which ABI that call must be
+	// lowered against is a property of the callee, not of the function making the
+	// call. lower() therefore needs the whole module, which is why the index is
+	// built once here and threaded down rather than derived per function.
+	conventions := newCalleeConventions(m)
 	o := &obj.Object{Machine: obj.EM_X86_64}
 	var smFuncs []stackMapFunc
 	var rows []obj.LineRow
@@ -138,7 +178,7 @@ func CompileToObjectWith(m *ir.Module, opts Options) (*obj.Object, error) {
 		params := dwarfParams(f) // captured before lowering rewrites the params
 		paramTemps := paramTempIDs(f)
 		ir.LowerPointers(f, ir.ClsL)
-		if err := lower(f); err != nil {
+		if err := lower(f, conventions); err != nil {
 			return nil, fmt.Errorf("function %s: %w", f.Name, err)
 		}
 		alloc, err := regAlloc(f)
@@ -453,6 +493,14 @@ type mc struct {
 
 	frameLayout // the shared stack-frame plan
 
+	// The emitter's scratch registers for this function, resolved once from
+	// emissionConvention(f). They are per-function state rather than package
+	// constants because Go's ABIInternal passes arguments in R10/R11, the System V
+	// scratch pair: emitting a constant through a bare gpScratch0 inside an
+	// ABIInternal body would destroy argument 8. Every site that needs scratch
+	// spells m.gpScratch0 (or, from xsel, s.gpScratch0).
+	scratchRegs
+
 	gc GCStrategy // pluggable GC strategy, or nil
 
 	tlsModel TLSModel // how a thread-local's address is reached (see tls.go)
@@ -526,7 +574,11 @@ type blockSym struct {
 }
 
 func emitMachine(f *ir.Func, alloc *allocation, gc GCStrategy, tlsModel TLSModel) (*machineCode, error) {
-	m := &mc{f: f, alloc: alloc, gc: gc, tlsModel: tlsModel, prog: x64.NewProgram(), instrPC: map[*ir.Instr][2]uint64{}}
+	m := &mc{
+		f: f, alloc: alloc, gc: gc, tlsModel: tlsModel,
+		scratchRegs: scratchRegsFor(emissionConvention(f)),
+		prog:        x64.NewProgram(), instrPC: map[*ir.Instr][2]uint64{},
+	}
 	m.planFrame()
 	m.useCount = countTempUses(f)
 	m.prologue()
@@ -650,15 +702,23 @@ func (m *mc) saveVarargRegs() {
 	}
 }
 
+// sel builds an instruction selector over this function. It is the only place an
+// xsel is constructed, so the selector's scratch registers are always this
+// function's -- an xsel assembled by hand would silently get the zero Reg (RAX)
+// as its scratch pair.
+func (m *mc) sel() *xsel {
+	return &xsel{f: m.f, b: &mcXasm{m: m}, scratchRegs: m.scratchRegs}
+}
+
 // teardown restores callee-saved registers and unwinds the frame (mov rsp,rbp;
 // pop rbp), leaving rsp at the return address without returning. It is shared by
 // the return epilogue and the tail-call branch, and selected once through xsel.
 func (m *mc) teardown() {
-	(&xsel{f: m.f, b: &mcXasm{m: m}}).teardown(&m.frameLayout)
+	m.sel().teardown(&m.frameLayout)
 }
 
 func (m *mc) epilogue() {
-	(&xsel{f: m.f, b: &mcXasm{m: m}}).epilogue(&m.frameLayout)
+	m.sel().epilogue(&m.frameLayout)
 }
 
 // --- location abstraction --------------------------------------------------
@@ -825,23 +885,23 @@ func (m *mc) moveToMem(dst, src loc) {
 			m.emit(x64.Store(dst.size*8, src.reg.mreg(), mem))
 		}
 	case locMem:
-		scratch := gpScratch0
+		scratch := m.gpScratch0
 		m.moveToReg(regLoc(scratch, src.size, src.float), src)
 		m.moveToMem(dst, regLoc(scratch, dst.size, dst.float))
 	case locImm:
 		if dst.float {
-			m.materializeFloat(fpScratch0, src.val, src.size)
-			m.moveToMem(dst, regLoc(fpScratch0, dst.size, true))
+			m.materializeFloat(m.fpScratch0, src.val, src.size)
+			m.moveToMem(dst, regLoc(m.fpScratch0, dst.size, true))
 		} else {
-			m.movImm(gpScratch0, src.val, w64(dst.size))
-			m.emit(x64.Store(dst.size*8, gpScratch0.mreg(), mem))
+			m.movImm(m.gpScratch0, src.val, w64(dst.size))
+			m.emit(x64.Store(dst.size*8, m.gpScratch0.mreg(), mem))
 		}
 	case locSym:
-		m.materializeSym(gpScratch0, src.sym, src.symoff, src.tls)
-		m.emit(x64.Store(64, gpScratch0.mreg(), mem))
+		m.materializeSym(m.gpScratch0, src.sym, src.symoff, src.tls)
+		m.emit(x64.Store(64, m.gpScratch0.mreg(), mem))
 	case locFrameAddr:
-		m.emit(x64.Lea(true, gpScratch0.mreg(), x64.At(src.base.mreg(), src.off)))
-		m.emit(x64.Store(64, gpScratch0.mreg(), mem))
+		m.emit(x64.Lea(true, m.gpScratch0.mreg(), x64.At(src.base.mreg(), src.off)))
+		m.emit(x64.Store(64, m.gpScratch0.mreg(), mem))
 	}
 }
 
@@ -861,11 +921,11 @@ func (m *mc) movImm(d Reg, val int64, w bool) {
 // materializeFloat loads a float constant (given by its bit pattern) into an XMM.
 func (m *mc) materializeFloat(d Reg, bits int64, size int) {
 	if size == 8 {
-		m.movImm(gpScratch0, bits, true)
-		m.emit(x64.MovqToXmm(true, d.mreg(), gpScratch0.mreg()))
+		m.movImm(m.gpScratch0, bits, true)
+		m.emit(x64.MovqToXmm(true, d.mreg(), m.gpScratch0.mreg()))
 	} else {
-		m.movImm(gpScratch0, bits, false)
-		m.emit(x64.MovqToXmm(false, d.mreg(), gpScratch0.mreg()))
+		m.movImm(m.gpScratch0, bits, false)
+		m.emit(x64.MovqToXmm(false, d.mreg(), m.gpScratch0.mreg()))
 	}
 }
 
@@ -923,8 +983,8 @@ func (m *mc) gpDst(ref ir.Ref) (Reg, func()) {
 		return Reg(t.Reg), func() {}
 	}
 	size := t.Cls.Size()
-	return gpScratch0, func() {
-		m.emit(x64.Store(size*8, gpScratch0.mreg(), x64.At(RBP.mreg(), m.slotAddr(t.Slot))))
+	return m.gpScratch0, func() {
+		m.emit(x64.Store(size*8, m.gpScratch0.mreg(), x64.At(RBP.mreg(), m.slotAddr(t.Slot))))
 	}
 }
 
@@ -935,12 +995,12 @@ func (m *mc) fpDst(ref ir.Ref) (Reg, func()) {
 		return Reg(t.Reg), func() {}
 	}
 	size := t.Cls.Size()
-	return fpScratch0, func() {
+	return m.fpScratch0, func() {
 		mem := x64.At(RBP.mreg(), m.slotAddr(t.Slot))
 		if size == 8 {
-			m.emit(x64.MovsdStore(fpScratch0.mreg(), mem))
+			m.emit(x64.MovsdStore(m.fpScratch0.mreg(), mem))
 		} else {
-			m.emit(x64.MovssStore(fpScratch0.mreg(), mem))
+			m.emit(x64.MovssStore(m.fpScratch0.mreg(), mem))
 		}
 	}
 }
@@ -981,7 +1041,7 @@ func srcReadsDst(src, dst loc) bool {
 // parallelMove performs a set of simultaneous moves, selected once through the
 // shared xsel, which owns the ordering logic.
 func (m *mc) parallelMove(pairs []locPair) {
-	(&xsel{f: m.f, b: &mcXasm{m: m}}).parallelMove(pairs)
+	m.sel().parallelMove(pairs)
 }
 
 // --- block emission --------------------------------------------------------
@@ -1026,7 +1086,7 @@ func (m *mc) block(b *ir.Block) {
 		m.recordInline(in.Inl)
 		if in == fuseCmp {
 			// Emit the comparison as flags only (no setcc); term() branches on them.
-			(&xsel{f: m.f, b: &mcXasm{m: m}}).cmpFlags(in)
+			m.sel().cmpFlags(in)
 			m.instrPC[in] = [2]uint64{start, uint64(m.prog.Len())}
 			continue
 		}
@@ -1041,9 +1101,17 @@ func (m *mc) block(b *ir.Block) {
 		case ir.OCall:
 			m.emitArgs(argPending)
 			// System V requires AL = number of vector registers used, for variadic
-			// callees. Setting it before every call is harmless (rax is not an
-			// argument register) and lets us call variadic functions without knowing
-			// the callee's prototype.
+			// callees. Setting it before every System V call is harmless -- rax is
+			// not one of that convention's argument registers -- and lets us call
+			// variadic functions without knowing the callee's prototype.
+			//
+			// It is emphatically not harmless before a Go ABIInternal call, where RAX
+			// is argument register 0: the write would destroy the first argument
+			// between placing it and making the call. ABIInternal has no C-style
+			// varargs and no such hidden count, so the write is skipped there.
+			// lowerCalls records each call's own convention on the instruction, which
+			// is what lets this be decided per call: a System V body calling a closure
+			// is the ordinary shape in goc output.
 			nfloat := 0
 			for _, ai := range argPending {
 				if !ai.To.IsNone() && ai.Cls.IsFloat() {
@@ -1051,7 +1119,9 @@ func (m *mc) block(b *ir.Block) {
 				}
 			}
 			argPending = nil
-			m.emit(x64.MovImm32(false, RAX.mreg(), int32(nfloat)))
+			if !callIsGoInternal(in) {
+				m.emit(x64.MovImm32(false, RAX.mreg(), int32(nfloat)))
+			}
 			if in.Tail {
 				m.emitTailCall(in)
 				m.blockDone = true
@@ -1075,8 +1145,8 @@ func (m *mc) leaStackParam(to ir.Ref, off int32) {
 		m.emit(x64.Lea(true, dst.reg.mreg(), x64.At(RBP.mreg(), off)))
 		return
 	}
-	m.emit(x64.Lea(true, gpScratch0.mreg(), x64.At(RBP.mreg(), off)))
-	m.emit(x64.Store(64, gpScratch0.mreg(), x64.At(RBP.mreg(), dst.off)))
+	m.emit(x64.Lea(true, m.gpScratch0.mreg(), x64.At(RBP.mreg(), off)))
+	m.emit(x64.Store(64, m.gpScratch0.mreg(), x64.At(RBP.mreg(), dst.off)))
 }
 
 func (m *mc) emitArgs(args []*ir.Instr) {
@@ -1105,23 +1175,24 @@ func (m *mc) emitTailCall(in *ir.Instr) {
 		m.recordReloc(m.prog.Len()-4, c.Sym, obj.R_X86_64_PLT32, c.Int-4)
 		return
 	}
-	r := m.gpValue(callee, gpScratch1)
-	if r != gpScratch1 {
-		m.emit(x64.MovReg(true, gpScratch1.mreg(), r.mreg()))
+	r := m.gpValue(callee, m.gpScratch1)
+	if r != m.gpScratch1 {
+		m.emit(x64.MovReg(true, m.gpScratch1.mreg(), r.mreg()))
 	}
 	m.teardown()
-	m.emit(x64.JmpReg(gpScratch1.mreg()))
+	m.emit(x64.JmpReg(m.gpScratch1.mreg()))
 }
 
 func (m *mc) emitCall(in *ir.Instr) {
-	(&xsel{f: m.f, b: &mcXasm{m: m}}).call(in)
+	m.sel().call(in)
 }
 
 func (m *mc) term(b *ir.Block) {
 	if m.blockDone {
 		return // a tail call already emitted this block's exit
 	}
-	x := &xsel{f: m.f, b: &mcXasm{m: m}, next: m.nextBlock}
+	x := m.sel()
+	x.next = m.nextBlock
 	if fuse := m.fusableCmp(b); fuse != nil {
 		x.fusedBranch(b, fuse)
 		return
@@ -1195,7 +1266,7 @@ func countTempUses(f *ir.Func) []int {
 
 func (m *mc) instr(in *ir.Instr) {
 	// Two-operand integer arithmetic is selected once, through the shared builder.
-	if (&xsel{f: m.f, b: &mcXasm{m: m}}).selectInt(in) {
+	if m.sel().selectInt(in) {
 		return
 	}
 	switch in.Op {
@@ -1307,7 +1378,7 @@ func (m *mc) memFor(in *ir.Instr, ai int) (x64.Mem, func()) {
 		case locReg:
 			mem.Base = baseLoc.reg.mreg()
 		default:
-			mem.Base = m.gpValue(base, gpScratch1).mreg()
+			mem.Base = m.gpValue(base, m.gpScratch1).mreg()
 		}
 		return mem, func() {}
 	}
@@ -1318,7 +1389,7 @@ func (m *mc) memFor(in *ir.Instr, ai int) (x64.Mem, func()) {
 	// A pre-coloured temp could name gpScratch1 itself, in which case loading the
 	// base there would clobber it, so "the index has a register" means a register
 	// that is not the one the base would take.
-	indexHasReg := indexLoc.kind == locReg && indexLoc.reg != gpScratch1
+	indexHasReg := indexLoc.kind == locReg && indexLoc.reg != m.gpScratch1
 	switch {
 	case baseLoc.kind == locFrameAddr:
 		mem.Base, mem.Disp = baseLoc.base.mreg(), mem.Disp+baseLoc.off
@@ -1326,13 +1397,13 @@ func (m *mc) memFor(in *ir.Instr, ai int) (x64.Mem, func()) {
 		mem.Base = baseLoc.reg.mreg()
 	case indexHasReg:
 		// Only the base needs the scratch; loading it cannot disturb the index.
-		mem.Base = m.gpValue(base, gpScratch1).mreg()
+		mem.Base = m.gpValue(base, m.gpScratch1).mreg()
 	default:
 		m.addrIntoScratch(baseLoc, index, scale)
-		mem.Base = gpScratch1.mreg()
+		mem.Base = m.gpScratch1.mreg()
 		return mem, func() {}
 	}
-	mem.Index = m.gpValue(index, gpScratch1).mreg()
+	mem.Index = m.gpValue(index, m.gpScratch1).mreg()
 	mem.Scale = scale
 	mem.HasIndex = true
 	return mem, func() {}
@@ -1358,14 +1429,14 @@ func (m *mc) addrIntoScratch(baseLoc loc, index ir.Ref, scale byte) {
 		return
 	}
 	indexLoc := m.refLoc(index)
-	m.moveToReg(regLoc(gpScratch1, indexLoc.size, false), indexLoc)
+	m.moveToReg(regLoc(m.gpScratch1, indexLoc.size, false), indexLoc)
 	// The scale multiplies the whole 64-bit register, exactly as the SIB byte's
 	// scale would, so the shift is 64-bit even for a 32-bit index -- whose load
 	// zero-extended it, so the high half is the zero the SIB form would have seen.
 	if shift := scaleShift(scale); shift != 0 {
-		m.emit(x64.ShlImm(true, gpScratch1.mreg(), shift))
+		m.emit(x64.ShlImm(true, m.gpScratch1.mreg(), shift))
 	}
-	m.emit(x64.AddMem(true, gpScratch1.mreg(), x64.At(baseLoc.base.mreg(), baseLoc.off)))
+	m.emit(x64.AddMem(true, m.gpScratch1.mreg(), x64.At(baseLoc.base.mreg(), baseLoc.off)))
 }
 
 // scaleShift is the shift amount an index scale of 1, 2, 4 or 8 stands for, the
@@ -1420,14 +1491,14 @@ func (m *mc) emitAsm(in *ir.Instr) {
 	// lives in: a double in a GP register is not a double. They are counted
 	// separately so a template using both does not exhaust one by spending the
 	// other's budget.
-	gp := [...]Reg{gpScratch0, gpScratch1}
-	fp := [...]Reg{fpScratch0, fpScratch1}
+	gp := [...]Reg{m.gpScratch0, m.gpScratch1}
+	fp := [...]Reg{m.fpScratch0, m.fpScratch1}
 	gpN, fpN := 0, 0
 	next := func(float bool) Reg {
 		if float {
 			if fpN >= len(fp) {
 				m.fail(fmt.Errorf("amd64: inline asm needs more XMM scratch registers than are available"))
-				return fpScratch0
+				return m.fpScratch0
 			}
 			r := fp[fpN]
 			fpN++
@@ -1435,7 +1506,7 @@ func (m *mc) emitAsm(in *ir.Instr) {
 		}
 		if gpN >= len(gp) {
 			m.fail(fmt.Errorf("amd64: inline asm needs more scratch registers than are available"))
-			return gpScratch0
+			return m.gpScratch0
 		}
 		r := gp[gpN]
 		gpN++
@@ -1555,5 +1626,5 @@ func (m *mc) asmInputReg(ref ir.Ref, next func(float bool) Reg) (Reg, int) {
 		return r, 8
 	}
 	m.fail(fmt.Errorf("amd64: unsupported inline-asm operand %v", ref))
-	return gpScratch0, 8
+	return m.gpScratch0, 8
 }

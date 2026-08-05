@@ -25,16 +25,16 @@ func namedCounts(f *ir.Func) (ngp, nfp, stackBytes int) {
 // vaStart initializes a System V va_list at the buffer pointed to by Args[0]:
 // {gp_offset u32, fp_offset u32, overflow_arg_area ptr, reg_save_area ptr}.
 func (m *mc) vaStart(in *ir.Instr) {
-	m.gpInto(gpScratch0, in.Arg(0)) // r10 = &va_list
-	ap := gpScratch0.mreg()
+	m.gpInto(m.gpScratch0, in.Arg(0)) // scratch0 = &va_list
+	ap := m.gpScratch0.mreg()
 	ngp, nfp, stackBytes := namedCounts(m.f)
 
 	m.emit(x64.StoreImm32(32, x64.At(ap, 0), int32(8*ngp)))            // gp_offset
 	m.emit(x64.StoreImm32(32, x64.At(ap, 4), int32(vaGPBytes+16*nfp))) // fp_offset
-	m.emit(x64.Lea(true, gpScratch1.mreg(), x64.At(RBP.mreg(), int32(16+stackBytes))))
-	m.emit(x64.Store(64, gpScratch1.mreg(), x64.At(ap, 8))) // overflow_arg_area
-	m.emit(x64.Lea(true, gpScratch1.mreg(), x64.At(RBP.mreg(), int32(-m.regSaveDist))))
-	m.emit(x64.Store(64, gpScratch1.mreg(), x64.At(ap, 16))) // reg_save_area
+	m.emit(x64.Lea(true, m.gpScratch1.mreg(), x64.At(RBP.mreg(), int32(16+stackBytes))))
+	m.emit(x64.Store(64, m.gpScratch1.mreg(), x64.At(ap, 8))) // overflow_arg_area
+	m.emit(x64.Lea(true, m.gpScratch1.mreg(), x64.At(RBP.mreg(), int32(-m.regSaveDist))))
+	m.emit(x64.Store(64, m.gpScratch1.mreg(), x64.At(ap, 16))) // reg_save_area
 }
 
 // vaArg fetches the next variadic argument of the requested class, advancing the
@@ -49,9 +49,9 @@ func (m *mc) vaArg(in *ir.Instr) {
 		offField, bound, step = 4, int32(vaRegSaveSz), 16
 	}
 
-	m.gpInto(gpScratch0, in.Arg(0)) // r10 = &va_list
-	ap := gpScratch0.mreg()
-	off, addr := gpScratch1.mreg(), RDX.mreg()
+	m.gpInto(m.gpScratch0, in.Arg(0)) // scratch0 = &va_list
+	ap := m.gpScratch0.mreg()
+	off, addr := m.gpScratch1.mreg(), RDX.mreg()
 
 	m.vaSeq++
 	over := fmt.Sprintf("va%d_over", m.vaSeq)
