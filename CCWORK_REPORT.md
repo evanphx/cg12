@@ -1183,3 +1183,33 @@ no stack-growth check for a function to be exempt from, so
 no-ops. `cmd/cc` and `cmd/cg12` are unaffected, measured, not assumed.
 
 Branch: **`ccwork/nosplit-frame-budget`**, from `main` (`5b085d2`).
+
+---
+---
+
+# WAVE 10 GATE REPORT — `integration/wave10` (2438919) onto `main` (5b085d2)
+
+Gate job. Host: aarch64 Linux, 64 cores, 250 GiB RAM, **exclusive** (idle box).
+Everything below was watched to completion by this job unless explicitly marked
+UNVERIFIED. Sections are appended as each result lands.
+
+## 0. Scope of the merge (read, not measured)
+
+`git diff --stat 5b085d2..2438919`, per branch, code only (`.md` excluded):
+
+| branch | files touched |
+|---|---|
+| `compile-time-profiling` (ef2eb2e^2) | `analysis/cfg.go`, `cmd/goc/main.go`, `cmd/goc/profile.go`, `ir/func.go`, `opt/inline.go`, `opt/pass.go` |
+| `optimiser-pipeline-research` (d480d94^2) | **none — documentation only, confirmed** |
+| `nosplit-frame-budget` (2438919^2) | `arm64/{assembly,mc,nosplit,nosplit_debt,nosplit_measure,parallel}.go`, `ir/clone.go`, `opt/{inline,nosplitinline}.go`, `plan9asm/*`, `stackcheck/*`, tests |
+
+Claim 2 (`optimiser-pipeline-research` changes no behaviour) is **CONFIRMED by
+construction**: its diff against `main` contains no non-`.md` file at all. Note
+that `opt/pass.go` on the *merged* tree does differ from `main` — that is
+branch 1's per-function change tracking (142 lines) plus 6 lines from branch 3,
+not branch 2.
+
+Neither `stdlib/` nor `goc/testdata/` is touched by any of the three branches,
+so the byte-identity comparison in §8 compiles identical sources with two
+compilers.
+
