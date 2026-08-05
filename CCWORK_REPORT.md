@@ -371,3 +371,91 @@ follow-up this exercise found.
 
 `opt/inline_test.go:TestInliningDoesNotGrowANoSplitCaller` is the regression
 guard: deterministic, no runtime needed.
+
+*One caveat on that bisection table.* At the time it was taken, both inliner
+stages were `Fixpoint("inline", inline, clean)`, and `GOC_OPT_SKIP` matches a
+fixpoint's own name — so the `skip=inline` row also removed two rounds of
+cleanup. The attribution does not rest on that row: it rests on the fix, which
+removes only inlining-into-nosplit and takes `nextFree`'s frame from 656 bytes
+back to 368 and the failure rate from 14/100 to 0/400. The fixpoints are renamed
+`inline-fixpoint` (commit d1168d2) so the next bisection does not have the
+problem.
+
+## 4. Compile-time cost
+
+### One whole-program build
+
+`hello.go` (fmt.Println plus a multiply-add loop), `goc -O`, no prebuilt pack:
+
+| arm | wall | peak RSS |
+|-----|------|----------|
+| bounded | 6.69 s | 599 MB |
+| full | 30.99 s | 876 MB |
+
+**4.6x.** Where it goes, from the CPU profile — `opt.OptimizeModule` is 24.66 s of
+66.63 s of samples over 31.11 s wall (the compiler's own GC accounts for 36% of
+samples, running in parallel):
+
+    gvn         4.10 s      jumpthread   2.42 s      gcm        0.45 s
+    loadelim    3.87 s      fold         2.18 s      ifconvert  0.39 s
+    simplifycfg 3.39 s      deadalloc    1.92 s      copy       0.37 s
+    dce         3.19 s      inline       1.07 s      mem2reg    0.37 s
+
+mem2reg — the pass this whole exercise is about — is **0.37 s**, 1.5% of the
+optimizer's time. The cost is the `clean` fixpoint (gvn + loadelim + simplifycfg
++ dce + jumpthread + fold + deadalloc = 21 s of the 24.7) run to convergence over
+5101 functions, and `DefaultPipeline` runs `clean` in four places plus twice more
+inside the inliner fixpoints. A secondary cost: the arm64 backend goes 7.0 s →
+11.1 s on the optimized IR, register allocation over longer live ranges.
+
+### The whole corpus
+
+Every `goc/testdata/*.go` compiled with `goc -O` as a whole-program build, 24 at
+a time on the 64-core box (so these are comparable to each other, not to a
+single-process figure):
+
+| arm | total | mean per program |
+|-----|-------|------------------|
+| bounded | 2877 CPU-s | 7.09 s |
+| full | 13030 CPU-s | 32.09 s |
+
+**4.53x across the corpus.** The distribution is not flat — the worst programs
+are the ones that already cost the most:
+
+    stdlib_http_tls_client_server   47.4 s -> 280.2 s   5.9x
+    stdlib_http_client_server       45.8 s -> 268.9 s   5.9x
+    stdlib_http_redirect_keepalive  46.0 s -> 268.7 s   5.9x
+    stdlib_http_cookiejar           43.6 s -> 254.5 s   5.8x
+    stdlib_http_parse_roundtrip     43.4 s -> 252.8 s   5.8x
+    stdlib_http_multipart_form      44.2 s -> 256.3 s   5.8x
+    stdlib_crypto_x509_ed25519      20.9 s -> 137.5 s   6.6x
+    stdlib_crypto_ecdsa             16.2 s -> 105.2 s   6.5x
+
+A single HTTP program now takes four and a half minutes to compile.
+
+### What it does *not* cost
+
+The capability matrix, with the prebuilt runtime packs warm, is **130.0 s on the
+default arm and 131.5 s on the `-O` arm** — the same. The pack build is where the
+`-O` arm's extra cost lives, and `goc build-runtime` caches on disk keyed by
+compiler bytes, stdlib contents and (now) the pipeline, so it is paid once per
+tree rather than per run. A cold matrix run is 313.6 s against the default arm's
+109.6 s.
+
+### The memory number, which is the uncomfortable one
+
+The `net/http` prebuilt pack under the full pipeline peaks at **2.99 GiB RSS** and
+takes about 240 s. The ceiling this project has worked against is 3 GiB, and the
+module budget I deleted (commit 48200ab, "goc: bound large runtime optimization
+memory") was introduced to hold three HTTP programs under it — they were at
+1.2-1.3 GiB with the budget in place.
+
+Two things keep this from being a regression to the state 48200ab fixed. The
+per-*function* budget in `opt/budget.go` is untouched and is the one that
+actually bounds the pathological cases: `gvn`, `loadelim` and the CFG passes all
+skip any function over 200 blocks / 4000 temps / 1000 instructions. And the whole
+368-program matrix, both arms, passes on this box. But 2.99 against 3.00 is not
+margin, and a box with a lower limit than this one will fail on the `net/http`
+pack. **If a memory ceiling has to be honoured, the thing to reinstate is a
+module budget on the pack build alone** (`internal/prebuilt.BuildRuntime`), not
+on program modules — which is where the whole performance prize is.
