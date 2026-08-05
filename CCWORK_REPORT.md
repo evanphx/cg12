@@ -214,3 +214,17 @@ and, differentially, a 64-bit FNV chain over every one of those 766,244 answers:
 The zero-table build is the reference implementation — an unconditional linear
 scan — and the two agree on every PC in the image.
 
+### The change touches one table and nothing else
+
+The same program built either side of the fix, compared byte for byte:
+
+    same size          10,628,776 bytes both
+    differing bytes    270,438
+      inside .goc.go.findfunctab   270,418
+      .note.gnu.build-id            20   (a hash of the image)
+      .text                          0
+
+Not one instruction changed, which is why the other three `conc` rows sit still
+and why the triage note's step 2 — compare encoded instruction words — is
+answered before it is asked.
+
