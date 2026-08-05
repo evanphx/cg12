@@ -13523,6 +13523,10 @@ testdata/runtime_new_composite_gc.go:18:10	main.main	runtime.newobject	2_int	hea
 testdata/runtime_nil_channel_select.go:5:12	main.main	runtime.makechan	.goc.channel.type.int	heap
 testdata/runtime_opt_loop_carried_root.go:35:9	main.newNode	runtime.newobject	main_node	heap
 testdata/runtime_opt_loop_carried_root.go:45:23	main.churn	runtime.newobject	main_node	heap
+testdata/runtime_opt_promoted_interface_root.go:40:49	main.makeCounter	runtime.newobject	main_box	heap
+testdata/runtime_opt_promoted_interface_root.go:68:2	main.main	runtime.newobject	chan_int	heap
+testdata/runtime_opt_promoted_interface_root.go:68:25	main.main	runtime.makechan	.goc.channel.type.int	heap
+testdata/runtime_opt_promoted_interface_root.go:70:6	main.main	runtime.newobject	struct_code_uintptr__capture0_unsafe_Pointer	heap
 testdata/runtime_package_initializer_dispatch.go:43:24	.goc.global.initfunc.68.main.variadicArgument	runtime.newobject	1_io_Writer	frame
 testdata/runtime_package_initializer_dispatch.go:43:36	.goc.global.initfunc.68.main.variadicArgument	runtime.newobject	bytes_Buffer	heap
 testdata/runtime_package_initializer_dispatch.go:46:23	.goc.global.initfunc.65.main.insideComposite	runtime.newobject	1_fmt_Stringer	heap
