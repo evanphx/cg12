@@ -328,7 +328,7 @@ func (builder *Builder) Build(functions, translatedFunctions []FunctionInfo, mod
 	builder.align(4)
 
 	builder.label(".goc.go.findfunctab")
-	builder.data = append(builder.data, make([]byte, findFuncBuckets*20)...)
+	builder.data = append(builder.data, FindFuncTab(builder.object, functions, endSymbol, findFuncBuckets)...)
 	builder.align(8)
 
 	// moduledata.typelinks: one module-relative offset per complete Go type

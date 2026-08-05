@@ -30,6 +30,7 @@
 package gometa
 
 import (
+	"encoding/binary"
 	"fmt"
 	"sort"
 	"strings"
@@ -293,25 +294,173 @@ func sortFunctionsByTextOffset(object *obj.Object, functions []FunctionInfo) []F
 // floor is the safety net for that. But a module bounded entirely by its own
 // object -- which is what a program module compiled against a prebuilt runtime is
 // -- knows its span exactly, and paying the floor there costs 2.6 MB of zeroes in
-// every image. cg12 never populates the table (every bucket is zero and findfunc
-// falls back to a linear scan of functab from index 0), so its only requirement
-// is to be long enough to index.
+// every image.
 func findFuncBucketCount(object *obj.Object, functions []FunctionInfo, endSymbol string) int {
 	if len(functions) == 0 {
 		return minimumFindFuncBucketCap
 	}
-	offsets := make(map[string]uint64, len(functions)+1)
-	for _, symbol := range object.Syms {
-		if symbol.Section == obj.SecText && symbol.Func {
-			offsets[symbol.Name] = symbol.Value
-		}
-	}
+	offsets := textOffsets(object)
 	minPC, minFound := offsets[functions[0].Name]
 	endPC, endFound := offsets[endSymbol]
 	if !minFound || !endFound || endPC <= minPC {
 		return minimumFindFuncBucketCap
 	}
 	return int((endPC-minPC)/funcTabBucketSize) + 1
+}
+
+// textOffsets is every text symbol this object defines, by name, at its offset
+// within the object's single .text section.
+func textOffsets(object *obj.Object) map[string]uint64 {
+	offsets := make(map[string]uint64, len(object.Syms))
+	for _, symbol := range object.Syms {
+		if symbol.Section == obj.SecText && symbol.Func {
+			offsets[symbol.Name] = symbol.Value
+		}
+	}
+	return offsets
+}
+
+const (
+	// findFuncSubbuckets and findFuncSubbucketSize divide each bucket, matching
+	// runtime.findfuncbucket's [16]byte subbuckets.
+	findFuncSubbuckets    = 16
+	findFuncSubbucketSize = funcTabBucketSize / findFuncSubbuckets
+
+	// findFuncBucketBytes is sizeof(runtime.findfuncbucket): a uint32 base plus
+	// the sixteen byte-sized deltas.
+	findFuncBucketBytes = 4 + findFuncSubbuckets
+)
+
+// FindFuncTab builds moduledata.findfunctab: the table runtime.findfunc uses to
+// start its functab scan near the answer instead of at index 0.
+//
+// The runtime indexes it by the PC's distance above moduledata.minpc, in
+// 4096-byte buckets of sixteen 256-byte subbuckets, and reads
+//
+//	idx := bucket.idx + uint32(bucket.subbuckets[sub])
+//	for ftab[idx+1].entryoff <= pcOff { idx++ }
+//
+// so the stored index is a *lower bound* on the answer, and the error is
+// one-sided: an index below the true one only costs scan steps, while an index
+// above it returns the wrong function. Every choice below keeps to the low side
+// -- the clamp when a delta will not fit in a byte, the fill for a subbucket no
+// function starts in, and the buckets past the last function this object
+// defines.
+//
+// Leaving it zero, as cg12 did before, is the extreme of that safe side: every
+// lookup scans functab from index 0. That is O(functions in the image) per call,
+// which is 5,208 iterations in a hello-world-sized program, and
+// runtime.newproc1 and runtime.gdestroy each call findfunc once per goroutine
+// through isSystemGoroutine.
+//
+// The offsets are this object's, and moduledata.minpc is functions[0]; the two
+// agree at run time because a single .text input section is placed contiguously,
+// so every function in it moves by one common base. Functions this object does
+// not define -- on arm64 the translated Plan 9 assembly, which is linked as a
+// second object after this one -- have no offset here. They sort last, and the
+// buckets past the last known function hold that function's index, which is a
+// lower bound for every PC above it. runtime.moduledataverify1 rejects a functab
+// that is not in ascending entry order, so that ordering is checked at startup
+// rather than assumed.
+func FindFuncTab(object *obj.Object, functions []FunctionInfo, endSymbol string, buckets int) []byte {
+	table := make([]byte, buckets*findFuncBucketBytes)
+	if buckets == 0 || len(functions) == 0 {
+		return table
+	}
+	offsets := textOffsets(object)
+	minPC, found := offsets[functions[0].Name]
+	if !found {
+		return table
+	}
+
+	// The prefix of functions this object defines, in ascending text order.
+	// sortFunctionsByTextOffset has already put them first; a prefix that is not
+	// ascending would mean the two disagree, so give up rather than guess.
+	starts := make([]uint64, 0, len(functions))
+	for _, function := range functions {
+		offset, ok := offsets[function.Name]
+		if !ok {
+			break
+		}
+		if len(starts) > 0 && offset < starts[len(starts)-1] {
+			return table
+		}
+		starts = append(starts, offset)
+	}
+
+	// Where the known run ends. When this object defines every function, the
+	// module's text-end symbol says exactly; otherwise the last known function
+	// covers only the subbucket it starts in, and the constant fill takes over
+	// from there.
+	knownEnd := starts[len(starts)-1] + 1
+	if len(starts) == len(functions) {
+		if end, ok := offsets[endSymbol]; ok && end > starts[len(starts)-1] {
+			knownEnd = end
+		}
+	}
+
+	// Only the buckets the known run reaches are computed per subbucket; the
+	// rest take the constant record below.
+	filled := int((knownEnd-1-minPC)/(findFuncSubbucketSize*findFuncSubbuckets)) + 1
+	if filled > buckets {
+		filled = buckets
+	}
+	indexes := make([]int32, filled*findFuncSubbuckets)
+	for i := range indexes {
+		indexes[i] = -1
+	}
+	mark := func(subbucket int, index int32) {
+		if subbucket < 0 || subbucket >= len(indexes) {
+			return
+		}
+		if indexes[subbucket] < 0 || indexes[subbucket] > index {
+			indexes[subbucket] = index
+		}
+	}
+	for i, start := range starts {
+		end := knownEnd
+		if i+1 < len(starts) {
+			end = starts[i+1]
+		}
+		if end <= start {
+			end = start + 1
+		}
+		for p := start; p < end; p += findFuncSubbucketSize {
+			mark(int((p-minPC)/findFuncSubbucketSize), int32(i))
+		}
+		mark(int((end-1-minPC)/findFuncSubbucketSize), int32(i))
+	}
+
+	// A subbucket no function starts in belongs to whichever function was still
+	// running when it began, which is the previous subbucket's answer.
+	previous := int32(0)
+	for i := range indexes {
+		if indexes[i] < 0 {
+			indexes[i] = previous
+		}
+		previous = indexes[i]
+	}
+
+	for bucket := 0; bucket < buckets; bucket++ {
+		record := table[bucket*findFuncBucketBytes:]
+		if bucket >= filled {
+			binary.LittleEndian.PutUint32(record, uint32(previous))
+			continue
+		}
+		base := indexes[bucket*findFuncSubbuckets]
+		binary.LittleEndian.PutUint32(record, uint32(base))
+		for sub := 0; sub < findFuncSubbuckets; sub++ {
+			delta := indexes[bucket*findFuncSubbuckets+sub] - base
+			// A bucket spanning more than 256 functions cannot state its last
+			// ones exactly. 255 is still below every one of them, so the lookup
+			// stays correct and pays a few scan steps.
+			if delta > 255 {
+				delta = 255
+			}
+			record[4+sub] = byte(delta)
+		}
+	}
+	return table
 }
 
 // GCProgram encodes the pointer bitmap of the [dataStart, dataEnd) range as a

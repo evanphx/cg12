@@ -1,533 +1,348 @@
-# A runtime performance suite: goc against the host Go toolchain
+# Why creating and joining a goroutine costs 38x the host toolchain
 
-Branch: `ccwork/perf-suite-work`, off `ccwork/bench-crypto-noise` = `1af81e1`,
-whose measurement method this reuses rather than reinventing.
+Branch: `ccwork/goroutine-scheduler`, off `ccwork/perf-suite` = `d2855f5`, whose
+`make bench-perf` produced the measurement this investigates. That report is
+`git show d2855f5:CCWORK_REPORT.md`.
 
-Earlier reports on this file are superseded, not deleted — the bench-crypto-noise
-report is `git show 1af81e1:CCWORK_REPORT.md`.
+## The answer
 
-## What was missing
+`goroutine/spawn-join` is 38x because **`runtime.findfunc` is O(number of
+functions in the image)** in a goc-built binary, and the goroutine path calls it
+**twice per goroutine**.
 
-The tree measures allocation well and time badly. The allocation census, the
-placement comparison against gc, the frame-escape audit, the loop-aliasing audit
-and the slog allocation benchmark all count something. Exactly one instrument
-measures elapsed time — `make bench-crypto` — and it watches one path.
+cg12 emitted `moduledata.findfunctab` — the bucket table `findfunc` uses to start
+its `functab` scan near the answer — as all zeroes. Every lookup therefore
+started at index 0 and scanned forward. The program that produced these numbers
+is 150 lines of Go and its module holds **5,406** functions, because it links the
+whole runtime and the stdlib closure it reaches.
+`runtime.newproc1` and `runtime.gdestroy` each call `findfunc`
+once per goroutine through `isSystemGoroutine`, on a `startpc` that sits near the
+end of the text, so each goroutine paid two nearly full scans: **24 µs** against
+the host toolchain's **0.6 µs**.
 
-So a change that cost 5 % everywhere outside ECDSA would land green, and any
-performance work outside crypto and slog was unmeasurable. This adds
-`make bench-perf`: eleven programs, goc against the host Go toolchain on
-identical source, with a committed baseline and a per-row statement of what it
-can and cannot see.
+It is a **linker-metadata** problem. Not a scheduler-algorithm problem:
+`stdlib/src/runtime/proc.go`, `chan.go`, `lock_futex.go`, `malloc.go`,
+`select.go` and `sema.go` are byte-identical to the host toolchain's `go1.26.1`
+sources. Not a code-generation problem either: the emitted code for the
+scheduler is no worse than goc's code anywhere else.
+
+Fixed in `4bda6d7`, by building the table.
+
+| | before | after | host | ratio before | ratio after |
+|---|---:|---:|---:|---:|---:|
+| `goroutine/spawn-join` (20k spawn+join) | 471.6 ms | 63.7 ms | 12.1 ms | **38.9x** | **5.3x** |
+
+The other three `conc` rows do not move, which is the control on the change:
+
+| case | before | after | host |
+|---|---:|---:|---:|
+| `control/spin-fixed-work` | 54.67 ms | 54.57 ms | 33.50 ms |
+| `chan/pingpong-unbuffered` | 99.64 ms | 99.87 ms | 15.34 ms |
+| `chan/send-buffered` | 40.66 ms | 40.51 ms | 8.49 ms |
+| `mutex/uncontended` | 43.63 ms | 43.65 ms | 23.45 ms |
+
+## Where the channel rows sit, as asked
+
+They did not move, because they were never in this path: a channel operation
+does not create or destroy a goroutine, so it never calls `isSystemGoroutine`.
+
+    chan/send-buffered          4.81x     unchanged
+    chan/pingpong-unbuffered    6.49x     unchanged
+    goroutine/spawn-join       38.45x ->  ~5.3x
+
+After the fix goroutine creation sits *between* the two channel rows rather than
+six times above them, which is the shape the workload should have had: a
+`pingpong` round trip is two sends, two receives and two goroutine switches, and
+it costs more than one spawn+join.
+
+## How this was established
+
+### 1. Reproduced
+
+    goc:   goroutine/spawn-join  482.6 ms   (24.1 µs per goroutine)
+    host:  goroutine/spawn-join   11.9 ms   ( 0.6 µs per goroutine)
+
+40.6x on a single pinned run against the suite's committed 38.45x.
+
+Splitting the case apart shows the cost is the goroutine and not the WaitGroup:
+
+| variant | goc | host |
+|---|---:|---:|
+| `go func(){...}` + `WaitGroup` | 23.6 µs/op | 0.60 µs/op |
+| spawn one, join it, repeat | 25.3 µs/op | 0.68 µs/op |
+| the identical body called **inline**, same `WaitGroup` traffic | 0.066 µs/op | 0.019 µs/op |
+
+### 2. It is not syscalls
+
+`strace -c -f` over 2,000 spawn-and-join goroutines:
+
+    goc     297 syscalls total, of which 4 futex, 3 clone, 29 mmap
+    host    262 syscalls total, of which 10 futex, 3 clone, 23 mmap
+
+No per-goroutine futex, no per-goroutine `mmap`, no per-goroutine anything. The
+park/ready path named in the brief as a candidate is not involved: the whole
+25 ms of goc time is user space.
+
+### 3. Profiled
+
+`perf` is unusable on this box (`perf_event_paranoid` is 4) and `runtime/pprof`
+does not link under goc — `undefined reference to runtime_pprof_StartCPUProfile`
+— so the profile was taken with a ptrace sampler written for the job
+(`PTRACE_ATTACH` per thread, `PTRACE_GETREGSET`/`NT_PRSTATUS` for the PC,
+symbolised against the binary's ELF symbol table; the sampler has to be the
+target's parent because `yama/ptrace_scope` is 1).
+
+4,359 samples over the 20k-spawn loop. Three threads run, so the two idle ones —
+`sysmon` in `usleep` and a parked M in `futex` — take two thirds of the samples
+by construction. Of the working thread's third:
+
+    33.31%  runtime_usleep     <- sysmon, idle
+    33.33%  runtime_futex      <- parked M, idle
+    29.16%  runtime_findfunc   <- 87% of the one thread doing the work
+     0.67%  goc_memcpy
+     0.30%  goc_memset
+     0.12%  runtime_gfget
+     0.12%  runtime_isSystemGoroutine
+     0.09%  runtime_findRunnable
+     0.07%  runtime_newproc1
+     0.07%  runtime_execute
+
+The whole `isSystemGoroutine` chain is visible under it: `findmoduledatap`,
+`moduledata_textOff`, `funcname`, `gostringnocopy`, `findnull`,
+`stringslite_HasPrefix`. `findRunnable`, `runqget`, `runqput`, `schedule` and
+`execute` together account for **11 samples out of 4,359** — the scheduler proper
+is not where the time is.
+
+### 4. The mechanism, proved independently of the profile
+
+`runtime.FuncForPC` is `findfunc` with a wrapper, so the cost can be measured
+from user code at chosen PCs. Sweeping the module's whole text:
+
+| pc − minpc | goc, before | host |
+|---:|---:|---:|
+| 0 | 644 ns | 33 ns |
+| 549,882 | 3.74 µs | 22 ns |
+| 1,099,764 | 5.62 µs | 119 ns |
+| 1,649,647 | 7.46 µs | 22 ns |
+| 2,199,529 | 9.10 µs | 22 ns |
+| 2,749,412 (`main`) | 10.79 µs | 23 ns |
+
+A straight line in the PC's rank on one side, flat on the other. That is a linear
+scan, and the source says so in as many words —
+`internal/gometa/gometa.go`, before this branch:
+
+> cg12 never populates the table (every bucket is zero and findfunc falls back to
+> a linear scan of functab from index 0), so its only requirement is to be long
+> enough to index.
+
+Two scans of ~10.8 µs each is the 24 µs the goroutine case pays; `newproc1` at
+`stdlib/src/runtime/proc.go:5358` is one and `gdestroy` at `:4509` is the other.
+
+## Is it a compilation problem or a runtime-algorithm problem?
+
+Neither, and both alternatives were checked rather than assumed.
+
+- **Not the runtime algorithm.** The vendored scheduler is upstream's, byte for
+  byte: `diff go1.26.1/src/runtime/{proc,chan,lock_futex,malloc,select,sema}.go`
+  against `stdlib/src/runtime/` is empty. `newproc`, `findRunnable`, the run-next
+  slot, park/ready and the g free lists are the host's code.
+- **Not code generation.** goc's code quality is a real and separate problem —
+  the perf suite's own report measures the 1.63x floor on a bare loop and 21x on
+  an interpreter — but it is not what makes this row 38x. If it were, the row
+  would have moved with a code change; it moved with a **data** change, and the
+  two binaries either side of the fix have byte-identical text layout (same
+  `minpc`, same `maxpc`, same function count).
+- **It is the metadata.** One table, emitted as zeroes.
+
+The residue after the fix — 5.3x, against the suite's 1.63x floor — *is* the
+code-quality problem, and it is spread out rather than concentrated. Re-profiled
+after the fix (percentages of all samples, of which two thirds are the two idle
+threads, so multiply by three for the working thread's share): `goc_memcpy` 4.8%
+and `goc_memset` 2.3% — a goroutine's `g` and its stack being allocated and
+cleared — `findfunc` down from 29.16% to **0.66%**, and nothing else above 1.2%.
+
+## What was changed
+
+`internal/gometa`: build the table instead of emitting zeroes.
+`internal/gometa/builder.go` is a one-line change; the algorithm is
+`FindFuncTab` in `gometa.go`, which is upstream `cmd/link`'s
+`writeFindfunctab` adapted to what cg12 knows at object-emission time.
+
+Nothing under `stdlib/src/runtime/`, `arm64/`, `ir/`, `opt/`, `lower/`, `link/`
+or `cmd/` is touched. **No scheduler change, no runtime change, no code
+generation change.**
+
+### Why this is safe, in the terms the table itself sets
+
+`runtime.findfunc` reads
+
+    idx := bucket.idx + uint32(bucket.subbuckets[sub])
+    for ftab[idx+1].entryoff <= pcOff { idx++ }
+
+so the stored index is a **lower bound** and the error is one-sided: an index
+below the true one is corrected by the scan and costs steps, an index above it
+returns the wrong function. Every choice in the new code keeps to the low side —
+the clamp when a bucket spans more than 256 functions, the fill for a subbucket
+no function starts in, and the buckets past the last function the object defines.
+Leaving the table zero, as before, was the extreme of that same safe side.
+
+The one thing the code assumes is that a function's offset in the object equals
+its final address minus a single common base — i.e. that the linker places the
+object's single `.text` input section contiguously. That was measured, not
+assumed: across all **5,210** text symbols of `goc.o` in a linked binary, the
+object-offset-to-final-address delta takes exactly **one** distinct value
+(`0x400640`). Functions the object does not define — on arm64 the translated
+Plan 9 sidecar, linked as a second object — have no offset here; they sort last
+and land above every one of `goc.o`'s (measured: `goc.o` text ends at
+`0x6e9788`, the sidecar spans `0x6e9830`–`0x6eefd0`), and their buckets get the
+last known function's index, which is a lower bound for every PC above it.
+`runtime.moduledataverify1` already throws on a `functab` that is not in
+ascending entry order, so that ordering is checked at startup rather than taken
+on trust.
+
+### Correctness evidence for the table itself
+
+A sweep of **every 4th byte** of the module's 3.06 MB text — 766,244 lookups —
+asserting `FuncForPC(pc).Entry() <= pc` and that the answer never moves
+backwards. That is exactly the failure an over-large bucket index causes.
+
+    populated table   checked 766244 pcs, 5406 distinct functions, 0 violations
+    zero table (ref)  checked 766244 pcs, 5406 distinct functions, 0 violations
+
+and, differentially, a 64-bit FNV chain over every one of those 766,244 answers:
+
+    populated table   checksum 0x9bdeff57cbfb27ac
+    zero table (ref)  checksum 0x9bdeff57cbfb27ac
+
+The zero-table build is the reference implementation — an unconditional linear
+scan — and the two agree on every PC in the image.
+
+### The change touches one table and nothing else
+
+The same program built either side of the fix, compared byte for byte:
+
+    same size          10,628,776 bytes both
+    differing bytes    270,438
+      inside .goc.go.findfunctab   270,418
+      .note.gnu.build-id            20   (a hash of the image)
+      .text                          0
+
+Not one instruction changed, which is why the other three `conc` rows sit still
+and why the triage note's step 2 — compare encoded instruction words — is
+answered before it is asked.
+
+## What else was on this path
+
+`findfunc` is not only the goroutine path. Every caller of it in a goc-built
+binary was paying the same scan:
+
+- **GC stack scanning.** `runtime.unwinder.init`/`next` calls `findfunc(frame.pc)`
+  once per frame, and `scanframeworker` needs the `funcInfo` it returns to reach
+  the frame's stack maps. Every frame of every goroutine, every cycle.
+- **Traceback, panic and `Goexit`.** Same unwinder.
+- **`runtime.Caller`, `runtime.Callers`, `runtime.FuncForPC`.**
+- **`gopanic`/`deferreturn`** reaching for a frame's `_func`.
+
+So the suite's `gcpress` rows and anything that panics were on it too. What that
+is worth is in the full-suite numbers below, which is the honest way to say it:
+this was not measured by reasoning about the call graph.
+
+## What remains, and what would fix it
+
+After the fix `goroutine/spawn-join` is ~5.3x, against the suite's measured
+**1.63x floor** on a bare loop. The residue is 3.2 µs a goroutine against the
+host's 0.6 µs, and it is *not* one hotspot: re-profiled, the largest single
+entries are `goc_memcpy` at 4.8% of all samples and `goc_memset` at 2.3% — a
+goroutine's `g` and its 2 KB stack being allocated and cleared — `findfunc` at
+0.66%, and nothing else above 1.2%. Two thirds of every sample count here is the
+two idle threads, so those are roughly 14% and 7% of the thread doing the work.
+
+That is the general code-quality problem the perf suite already documents, and it
+has a known cause on record: `goc -O` exceeds its own optimization budget on
+every real program (`f1f7abf`: `funcs=5101 blocks=70160 instrs=297389` against
+caps of `2048/50000/200000/400000`), so `-O` degrades to fold+copy+DCE, every
+alloca-backed local stays in memory, and nothing stays in a register across a
+call. Raising or scoping that budget is the fix for the residue, and it is a much
+larger and riskier change than this one. It is not a scheduler change either.
+
+**No scheduler change is called for.** The scheduler in this tree is upstream
+Go's, unmodified, and the profile puts 11 samples out of 4,359 in it.
+
+## `make bench-perf`, before and after
+
+The full suite against its committed baseline, nine interleaved core-pinned
+repetitions, `go1.26.1 linux/arm64`, on the tree with the fix. It **failed in the
+faster direction on two rows and moved nothing else**:
+
+    program   case                      baseline  this run   change   resolved     tol verdict
+    conc      goroutine/spawn-join       38.4529    5.3188   -86.2%     +82.9%   12.8% PAST TOLERANCE
+    gcpress   gc/alloc-churn             11.6967    9.7386   -16.7%     +14.2%    9.2% PAST TOLERANCE
+
+`goroutine/spawn-join` is the row this branch went after: **38.45x → 5.32x**, a
+7.2x speedup, 471.6 ms → 65.5 ms on 20,000 spawn-and-joins.
+
+`gc/alloc-churn` is the one that was not aimed at and is the more interesting
+confirmation: **11.70x → 9.74x**. That row's cost is dominated by collections,
+and a collection scans every frame of every goroutine stack through
+`findfunc(frame.pc)`. It moved because the same scan was in it.
+
+Every other row held. All eleven copies of the control loop:
+
+    baseline  1.6303 1.6307 1.6322 1.6322 1.6322 1.6322 1.6322 1.6326 1.6327 1.6330 1.6331
+    this run  1.6281 1.6291 1.6291 1.6292 1.6292 1.6292 1.6294 1.6294 1.6296 1.6302 1.6307
+
+and the three `conc` rows that share the program with the one that moved:
+
+    conc      chan/pingpong-unbuffered    6.4916    6.5201    +0.4%   within tolerance
+    conc      chan/send-buffered          4.8052    4.7802    -0.5%   within tolerance
+    conc      mutex/uncontended           1.8632    1.8616    -0.1%   within tolerance
+    conc      control/spin-fixed-work     1.6322    1.6294    -0.2%   within tolerance
+
+The null arm read 0.9936–1.0118 across all 42 rows, so the protocol is honest for
+this run. `flate` died once in 28 runs (3.6%) and was retried — the known
+pre-existing defect the suite is built to survive, well under its 20% bar.
+
+### The instrument asked the right question, and here is the answer
+
+The failure message for a faster-than-baseline row says, correctly, that the
+cheap way to get faster is to stop heap-allocating something, and that an escape
+analysis which got *permissive* looks identical from here. It asks for the
+allocation census diff.
+
+The census does not move, and it cannot: the two binaries' `.text` is
+byte-identical (see above), so no allocation decision changed. `TestAllocationCensus`
+is in the guard table below.
 
 ## Guards
 
-All four run **on the final tree**, after everything below had landed:
+All run on the final tree, after the fix and the re-baseline had landed.
 
 | guard | result |
 |---|---|
-| `make test-goc-status` (default arm) | **366/366**, 0 failures, 0 skips |
-| `make test-goc-status-opt` (`-O` arm) | **366/366**, 0 failures, 0 skips |
-| `TestAllocationCensus` | **ok** — reproduces `alloc_census_baseline.txt` unchanged |
-| `TestCompilingTheSameSourceTwiceGivesTheSameModule` | **ok** |
-| working tree | no goc-built binary added; `git status` shows only the intended files |
-
-Both capability arms were also 366/366 on the starting tree, before any of this,
-so the number is a before-and-after and not a single reading.
-
-**No compiler behaviour change.** The diff is one test file, four programs under
-`goc/testdata/perf_bench`, one baseline, two Makefile targets and documentation.
-Nothing under `arm64/`, `ir/`, `opt/`, `lower/`, `link/`, `cmd/` or any other
-compiler package is touched:
-
-    CCWORK_REPORT.md                        |  453 +++-
-    Makefile                                |   37 +-
-    README.md                               |   37 +
-    goc/perfbench_test.go                   | 1210 ++++++++++++++++++++++
-    goc/testdata/perf_bench/README.md       |   91 ++
-    goc/testdata/perf_bench/chase/main.go   |  168 +++
-    goc/testdata/perf_bench/conc/main.go    |  150 +++
-    goc/testdata/perf_bench/float/main.go   |  169 +++
-    goc/testdata/perf_bench/gcpress/main.go |  206 ++++
-    goc/testdata/perf_suite_baseline.txt    |  136 ++
-
-(Per the brief, `go test ./goc/...` and `make test-unit` were not run. The census
-and determinism guards were invoked with an explicit `-run` on the single test,
-which is how `make bench-crypto` itself is defined.)
-
-## The suite validated against itself
-
-- `make bench-perf` against the committed baseline: **green in 10.5 minutes**,
-  every row within tolerance.
-- Reproducibility: two independent nine-repetition runs 25 minutes apart agree to
-  within **0.5 % on 32 of 42 rows**. The largest movement was +3.0 % on
-  `regexp/replace` (tolerance 6.6 %) and +2.9 % on `chase/dram` (tolerance
-  18.7 %). On 41 of 42 rows the movement did not survive the two intervals at
-  all — the "resolved" column is negative, meaning the run could not tell the
-  change from zero.
-- **It fails in both directions.** Proved by perturbing the committed baseline
-  and rerunning:
-
-        sha/hmac-1mib     baseline 0.8000 -> run 1.0157   +27.0%  PAST TOLERANCE  (slower bucket)
-        sha/sha256-1mib   baseline 1.3000 -> run 1.0075   -22.5%  PAST TOLERANCE  (faster bucket)
-        control/...       baseline 1.6307 -> run 1.6318    +0.1%  within tolerance
-
-  The two rows landed in the two separate failure buckets, each with its own
-  message; the unperturbed control row in the same program stayed green.
-
-## The suite
-
-One command:
-
-    make bench-perf
-
-Eleven programs, compiled by `goc -O` and by the host toolchain from identical
-source, timed nine times each, interleaved and pinned, against
-`goc/testdata/perf_suite_baseline.txt`. About twelve minutes. Fails in both
-directions. `make bench-perf-update` rewrites the baseline.
-
-### The workloads, and what each is for
-
-Seven are `goc/testdata/placement_bench`, reused **unmodified**; four are new in
-`goc/testdata/perf_bench`.
-
-| program   | what it presses |
-|-----------|-----------------|
-| `interp`  | a bytecode interpreter: a switch dispatch loop |
-| `sha`     | SHA-256 and HMAC over a buffer: one tight block loop, same assembly both sides |
-| `regexp`  | regexp matching: a second, larger interpreter over a pointer-linked program |
-| `json`    | `encoding/json` round trip: reflection, interface dispatch, a hand-written scanner |
-| `sortmap` | `sort.Slice` and map build/probe: indirect calls through a callback, and hashing |
-| `flate`   | `compress/flate` round trip: table-driven loops over byte slices |
-| `text`    | `strconv`, `fmt`, `strings.Builder`: string building and formatting |
-| `chase`   | dependent loads at three cache depths — the only memory-bound workload |
-| `conc`    | goroutines, channels, mutexes — cost paid inside goc's runtime |
-| `gcpress` | allocation churn, a live heap, the write barrier — what an allocation costs |
-| `float`   | floating-point arithmetic — a separate register file and lowering decisions |
-
-Reusing rather than copying the seven is the load-bearing decision. That corpus
-was built for a different question, but it was built to the crypto benchmark's
-method, its programs are deliberately unlike one another, and its committed sweep
-`analysis_shift_phase.txt` already records **each case's code-placement residue
-under the alignment policy that ships**. So when a row moves and the question is
-"did the code change or did it just move", the answer for those seven programs is
-already in the tree, for that exact program. A copy would have drifted.
-
-`placement_bench/p256` is the one program not taken: `make bench-crypto` gates
-that path already, and two gates on one path is two red lights for one cause.
-
-The four new ones fill what that corpus leaves out. Nothing there is bound by
-memory rather than instruction count, nothing there starts a goroutine, nothing
-there is *about* what an allocation costs, and nothing there executes a single
-floating-point instruction. Each found something; see the findings below.
-
-### What is gated: a ratio, not an index
-
-The crypto benchmark compares an **index** — a case divided by a control measured
-in the same binary — which is machine-independent and is right for what it does.
-This suite compares
-
-    ratio = goc nanoseconds / host nanoseconds
-
-formed inside one repetition, from two runs seconds apart on the same pinned
-core, then averaged over repetitions.
-
-The reason is specific. An index divides goc by goc, so a change that made goc's
-control loop slower *too* leaves every index flat — and "a change that quietly
-costs 5% everywhere" is precisely what this suite exists to catch. The ratio's
-denominator is a fixed reference that only moves when the host toolchain does,
-and the host version is recorded in the baseline so that case is separable.
-
-Pairing inside a repetition matters: a repetition's two readings share whatever
-the machine was doing in that minute, so dividing them there removes it.
-Averaging the two arms first and dividing after would divide one repetition's goc
-by another repetition's host.
-
-### The null arm, and where tolerances come from
-
-Every repetition runs the goc binary **twice** and divides one run by the other.
-It is the same file, so the answer is exactly 1.0000 by construction. Two things
-come out of that:
-
-- **A hard check that the protocol is honest.** A deviation from 1 that survives
-  its own confidence interval is not noise — it is a systematic artefact, one
-  position in the rotation running consistently warmer than another. The crypto
-  benchmark measured an artefact of exactly that kind at 1.28% before it
-  interleaved. If the null is not 1.0000, no other column in the run is believed.
-- **A split of the noise into goc-side and host-side.** The null sees goc-side
-  noise only.
-
-Tolerances come from the **ratio's** own spread and not the null's, and that
-correction was forced by measurement. On this box `json/marshal`'s ratio moves
-3.7% between repetitions while its null moves 1.0%; `goroutine/spawn-join`'s
-ratio moves 5.8% while its null moves 0.09%. The host-built binary finishes those
-cases in about 12 ms and it is the *host* run jittering. A tolerance drawn from
-the null would have been three to sixty times too tight on exactly those rows —
-and in the first full run of this suite it was, and four rows failed the
-instrument check because of it.
-
-So: `tolerance = max(3 × the row's own one-repetition spread, 5%)`, and the run
-fails only when the whole interval on the difference clears that band. The 5%
-floor is for code placement, which neither noise column can see, because both use
-one pair of binaries and placement changes between *builds*.
-
-### Two cases the instrument check condemned, and a finding in one of them
-
-The check that no row may be noisier than 15 % is not decorative. It rejected two
-baselines before it accepted one.
-
-`chase/pointer-node` had the shortest timed region in its program and the highest
-noise in it — 6.4 % spread. Its walk is now four times longer, and the row came
-back at **0.58 %**, a tenfold improvement. That is what the ceiling is for.
-
-`gc/slice-grow` — appending without a size hint — could not be fixed, and **that
-is itself a result**. Growing a 4 MB slice four times a round gave 19 % spread.
-Rewritten to the same total number of appends over forty ten-times-smaller
-growths, it got *worse*: **52 % on the ratio and 71 % on the null**. The null is
-the same goc binary against itself, so this is not a comparison artefact: the goc
-binary's own cost for this case moves by tens of percent from one process to the
-next. A 52 % spread earns a 157 % tolerance, which is a row that passes anything.
-
-It was dropped rather than carried. Under goc, the un-hinted append path's cost
-is dominated by when a collection lands, to the point where it cannot be measured
-on this box — which says something about goc's collector pacing and nothing about
-any compiler change. The sizes that were tried are recorded in `gcpress/main.go`
-so that whoever fixes the pacing can put the case back.
-
-### And a third the suite had to be built around: goc-built flate dies
-
-The first nine-repetition run got to repetition 5 and stopped, because the
-goc-built `flate` binary exited with status 2.
-
-That is the defect `44d76cf` already recorded: goc-built `placement_bench/flate`
-dies in the collector — *"pointer to unused region of span"*, inside
-`compress/flate`'s 4864-byte compressor state — on **about one run in twenty** at
-the default GOGC. It is pre-existing, it is not a placement effect, and nothing
-in this branch touches it.
-
-One run in twenty is invisible to a corpus that runs a program once and fatal to
-a suite that runs `flate`'s goc binary eighteen times: at that rate **three runs
-in five would die**, on something that is not a performance regression at all.
-
-So the suite retries a run that dies, up to three times, and:
-
-- logs every retry, with the last twelve lines of the dead run's stderr;
-- prints a per-program crash rate at the end of every run;
-- **fails** if any program's rate exceeds 20%, with a message that names the
-  known flate defect so a reader can tell it from a new one;
-- fails immediately if any binary dies three times in a row.
-
-A crashed run is a *missing* measurement, not a slow one, so replacing it biases
-nothing — unlike discarding a slow run, which would. The alternative was to drop
-`flate` from the suite, which would have removed a workload and quietly routed
-around a known miscompile.
-
-### The numbers: goc against the host, per workload
-
-Nine interleaved repetitions, pinned to core 62, `go1.26.1 linux/arm64`,
-Neoverse-N1. Full table with all 42 rows in
-`goc/testdata/perf_suite_baseline.txt`; "noise" is the row's one-repetition
-spread, "detect" the smallest movement the suite can fail on.
-
-| program | case | goc/host | noise | detect |
-|---|---|---:|---:|---:|
-| *all 11* | `control/spin-fixed-work` | **1.630–1.633** | 0.04–0.22 % | 5.0–5.2 % |
-| `interp` | `interp/bytecode-loop` | **21.46×** | 0.05 % | 5.1 % |
-| `sha` | `sha/sha256-1mib` | **1.008×** | 0.07 % | 5.1 % |
-| `sha` | `sha/hmac-1mib` | **1.016×** | 0.09 % | 5.1 % |
-| `regexp` | `regexp/find-submatch` | **7.95×** | 0.35 % | 5.4 % |
-| `regexp` | `regexp/anchored-lines` | **6.14×** | 0.35 % | 5.4 % |
-| `regexp` | `regexp/replace` | **7.07×** | 2.20 % | 9.0 % |
-| `json` | `json/marshal` | **17.18×** | 1.71 % | 7.0 % |
-| `json` | `json/unmarshal` | **11.29×** | 4.75 % | 19.4 % |
-| `sortmap` | `sort/ints` | **3.82×** | 0.13 % | 5.1 % |
-| `sortmap` | `sort/slice-callback` | **3.74×** | 0.64 % | 5.7 % |
-| `sortmap` | `map/build-probe` | **7.88×** | 3.26 % | 13.3 % |
-| `flate` | `flate/decompress` | **7.59×** | 0.17 % | 5.2 % |
-| `flate` | `flate/compress` | **6.86×** | 0.79 % | 5.9 % |
-| `text` | `text/parse` | **10.20×** | 0.16 % | 5.2 % |
-| `text` | `text/utf8-decode` | **4.41×** | 0.22 % | 5.2 % |
-| `text` | `text/format-append` | **10.99×** | 6.39 % | 26.1 % |
-| `text` | `text/sprintf` | **11.17×** | 8.81 % | 36.0 % |
-| `chase` | `chase/l1-resident` | **1.457×** | 0.35 % | 5.4 % |
-| `chase` | `chase/pointer-node` | **1.010×** | 1.98 % | 8.1 % |
-| `chase` | `chase/dram` | **1.027×** | 6.23 % | 25.5 % |
-| `conc` | `mutex/uncontended` | **1.863×** | 0.04 % | 5.0 % |
-| `conc` | `chan/send-buffered` | **4.81×** | 0.25 % | 5.3 % |
-| `conc` | `chan/pingpong-unbuffered` | **6.49×** | 0.93 % | 6.0 % |
-| `conc` | `goroutine/spawn-join` | **38.45×** | 4.27 % | 17.4 % |
-| `gcpress` | `gc/pointer-write` | **9.33×** | 0.73 % | 5.8 % |
-| `gcpress` | `gc/live-heap-churn` | **8.47×** | 4.33 % | 17.7 % |
-| `gcpress` | `gc/alloc-churn` | **11.70×** | 3.06 % | 12.5 % |
-| `float` | `float/int-convert` | **1.547×** | 0.03 % | 5.0 % |
-| `float` | `float/mandelbrot` | **2.589×** | 0.11 % | 5.1 % |
-| `float` | `float/dot-product` | **4.95×** | 0.29 % | 5.3 % |
-| `float` | `float/sqrt-sum` | **171.22×** | 0.14 % | 5.1 % |
-
-### The control row is eleven independent measurements of one loop
-
-The same 20 M-iteration multiply-add loop is compiled into all eleven programs
-from the same source, and lands in eleven differently laid out binaries. Its
-ratio across them:
-
-    1.6303  1.6307  1.6322  1.6322  1.6322  1.6322  1.6322  1.6326  1.6327  1.6330  1.6331
-
-Peak to peak, **0.17 %**. That is a direct measurement of how much *whole-program
-code placement* moves a number on this box for the alignment policy that ships,
-on a loop-containing function — and it is the strongest single piece of evidence
-that the instrument is sound, because eleven separate builds agreeing to two
-parts in a thousand is not something a noisy measurement does.
-
-### What a green run means, per workload
-
-**The suite fails on a real movement of 5.0 % on 27 of 42 rows** and on ≤ 6.0 %
-on 34 of them. Grouped by what a row can actually see:
-
-| detect | rows | what those rows are |
-|---:|---:|---|
-| 5.0–5.5 % | 27 | all eleven controls, `interp`, both `sha`, `sort/ints`, `text/parse`, `text/utf8-decode`, `chase/l1-resident`, `mutex`, all four `float`, `flate/decompress`, two `regexp` |
-| 5.5–10 % | 7 | `sort/slice-callback`, `flate/compress`, `gc/pointer-write`, `chan/pingpong`, `json/marshal`, `chase/pointer-node`, `regexp/replace` |
-| 10–20 % | 5 | `gc/alloc-churn`, `map/build-probe`, `goroutine/spawn-join`, `gc/live-heap-churn`, `json/unmarshal` |
-| > 20 % | 3 | `chase/dram` (25.5 %), `text/format-append` (26.1 %), `text/sprintf` (36.0 %) |
-
-**Cannot**, and this is the honest part:
-
-- **Nothing under 5 % anywhere.** The 5 % floor is code placement, not noise. A
-  3 % regression passes green on every row. No instrument on this box both sees
-  3 % and does not fire at random.
-- **The three worst rows are effectively report-only.** `text/sprintf` cannot
-  fail on less than a 36 % movement. It is kept because the committed number
-  still moves and a reader can see it, and because `text/parse` and
-  `text/utf8-decode` in the same program are two of the quietest rows in the
-  suite — the noise is in `fmt`'s path, not in the workload's design.
-- **`chase/dram` is noisy for a physical reason** and cannot be fixed by more
-  repetitions: each run is a fresh process with a fresh physical page mapping for
-  a 64 MiB ring, and DRAM latency depends on it. It earns its place as a
-  calibration row that reads 1.03, not as a sensitive one.
-- **A pure rebuild cannot fire it — checked, not assumed.** The placement sweep
-  already in the tree measured, for each of these programs, how far its number
-  moves when the text is shifted by 4…28 bytes and *not one instruction changes*.
-  Compared against this suite's thresholds, all 17 reused case rows clear:
-
-  | row | placement residue | detect |
-  |---|---:|---:|
-  | `text/sprintf` | 21.72 % | 36.0 % |
-  | `text/format-append` | 15.62 % | 26.1 % |
-  | `regexp/anchored-lines` | **4.48 %** | **5.4 %** ← thin |
-  | `json/marshal` | 3.95 % | 7.0 % |
-  | `map/build-probe` | 2.95 % | 13.3 % |
-  | the other 12 | ≤ 2.3 % | ≥ 5.1 % |
-
-  `regexp/anchored-lines` is the one thin margin: 4.48 % against a 5.4 % bar. A
-  rebuild that moved code unluckily could land within a point of firing it. The
-  four new programs have no such measurement — the sweep predates them — so their
-  residue is assumed to resemble their neighbours' and is not known.
-- **A change that slows the host toolchain reads as goc getting faster.** The
-  denominator is the host. The host version is in the baseline header and a
-  movement is reported in its own bucket with that stated.
-- **It says nothing about multi-core behaviour.** Every run is pinned to one
-  core, deliberately; `conc` measures the runtime's bookkeeping and context
-  switches, not parallel speedup.
-
-### Triage: when a row moves, which of three things happened
-
-This is the part that made the crypto benchmark's 6.20% placement flip solvable
-rather than argued about, so it is in the failure message where someone will hit
-it, not in a document they would have to know to look for. `PROGRAM` is the
-failing row's first column and `SOURCE` its path.
-
-**Before any of the three**, rerun the one program at high repetitions. It costs
-a minute instead of twelve and it is often the whole answer:
-
-    go test -run '^TestPerformanceSuite$' ./goc -perf-bench \
-        -perf-bench-only=PROGRAM -perf-bench-reps=25 -v
-
-**1. An allocation moved.**
-
-    go test -run '^TestAllocationCensus$' ./goc -v
-    git diff -- goc/testdata/alloc_census_baseline.txt
-
-A site that went `FRAME` → `HEAP` is the shape of the one regression this tree
-has a record of. The `gcpress` rows moving together with the failing row points
-here first.
-
-**2. The generated code changed.** Compare *encoded instruction words*, which do
-not move when the text does:
-
-    go build -o "$TMPDIR/goc.suspect" ./cmd/goc
-    git stash && go build -o "$TMPDIR/goc.parent" ./cmd/goc && git stash pop
-    for side in suspect parent; do
-      "$TMPDIR/goc.$side" -O -o "$TMPDIR/bench.$side" goc/SOURCE
-      objdump -d "$TMPDIR/bench.$side" |
-        awk '/^[0-9a-f]+ </{f=$2; next} /^ +[0-9a-f]+:/{print f, $2}' > "$TMPDIR/words.$side"
-    done
-    diff "$TMPDIR/words.parent" "$TMPDIR/words.suspect" | head -40
-
-The encoding column, not objdump's rendering: the rendering prints absolute
-branch targets, which differ whenever the text shifts even if the code is
-identical.
-
-**3. Nothing changed and the code moved.** If (2) says the words are identical,
-this is placement and nothing got worse:
-
-    nm "$TMPDIR/bench.parent"  | sort -k3 > "$TMPDIR/syms.parent"
-    nm "$TMPDIR/bench.suspect" | sort -k3 > "$TMPDIR/syms.suspect"
-    diff "$TMPDIR/syms.parent" "$TMPDIR/syms.suspect" | head
-
-Identical words plus different addresses is the signature. Then measure how big
-the effect is on that exact program with the sweep the tree already has —
-`GOC_TEXT_PAD=K` puts K bytes of no-ops in front of the first function and
-changes not one instruction:
-
-    for K in 0 4 8 12 16 20 24 28; do
-      GOC_TEXT_PAD=$K "$TMPDIR/goc.suspect" -O -o "$TMPDIR/pad.$K" goc/SOURCE
-      taskset -c "$GOC_PERF_CORE" "$TMPDIR/pad.$K"
-    done
-
-If the row swings across K by as much as the movement being triaged, the movement
-is placement. For the seven reused programs this is already measured:
-`placement_bench/analysis_shift_phase.txt`, the `loop32` column.
-
-Only (1) and (2) are regressions.
-
-## Findings
-
-Every number here is the mean of nine interleaved, core-pinned repetitions with
-its 95 % interval, taken with the suite itself.
-
-### goc's own control loop is 1.63× the host
-
-Every program contains the same control: a 20-million-iteration dependent
-integer multiply-add loop, byte-identical source in all eleven.
-
-    ratio 1.6322  [1.6303, 1.6331 across the eleven programs]
-
-That is the floor. It is a loop with no memory traffic, no allocation, no calls
-and no runtime involvement — the simplest thing a code generator can be asked to
-do — and goc takes 63 % longer. Every other ratio in the suite should be read
-against this number, not against 1.00.
-
-### `math.Sqrt` is not lowered to the hardware instruction: 171×
-
-    float/sqrt-sum   ratio 171.22x +/- 0.10%   (goc 401 ns/sqrt, host 2.34 ns/sqrt)
-
-The host's number is about seven cycles, which is `FSQRT D` throughput on this
-core. goc's is two orders of magnitude away, which is not a code-generation
-difference — it is a software square root being called per iteration. This is
-the "obviously wrong" finding the suite was asked to look for, and it was found
-by the first workload that pressed floating point at all.
-
-The case had to be shrunk from 20 M iterations to 1 M to make the suite
-runnable, because at 20 M the goc-built binary spent 7.7 seconds in this one case
-per round.
-
-### Goroutine creation is 38×, and channels are 5–6×
-
-    goroutine/spawn-join       38.45x +/- 3.28%     (20k spawn+join)
-    chan/pingpong-unbuffered    6.49x +/- 0.72%
-    chan/send-buffered          4.81x +/- 0.20%
-    mutex/uncontended           1.86x +/- 0.03%
-
-The mutex row is close to the 1.63× floor, so the atomic fast path is fine. The
-scheduler is not: spawning and joining a goroutine costs goc twenty times the
-floor.
-
-### The rows that read ≈ 1.00, and why that is the instrument working
-
-    sha/sha256-1mib    1.0077x +/- 0.05%
-    sha/hmac-1mib      1.0161x +/- 0.07%
-    chase/pointer-node 1.0103x +/- 1.52%
-    chase/dram         1.0265x +/- 4.79%
-
-`sha` reads 1.00 because both binaries run the *same* code: both contain 56
-ARMv8 SHA2 instructions, and goc's `crypto/internal/fips140/sha256.block`
-dispatches to the same hand-written assembly the host uses. `chase/dram` and
-`chase/pointer-node` read 1.00 because they are stalled on memory, which no
-compiler can help. These are the suite's calibration rows: they are *supposed* to
-read 1.00, so when they do not, the instrument is wrong before the compiler is.
-
-`sha/sha256-1mib` at 1.0077 ± 0.05 % is the sharpest of them. Two binaries
-running identical machine code for the timed work, measured on different
-processes minutes apart, agree to eight parts in a thousand.
-
-### The interpreter is 21×, and the reason is visible in the disassembly
-
-`interp` is the workload the brief pointed at as the most realistic single
-program available, and it is the one whose ratio is furthest out of line with
-what the rest of the suite would predict. It is a switch over an opcode in a
-loop: no allocation, no runtime calls, no memory traffic beyond two small local
-arrays. On the control loop goc is 1.63×. Here it is **21.46× ± 0.04 %** — one of
-the tightest intervals in the suite, so it is not a measurement artefact.
-
-    interp/bytecode-loop   21.46x +/- 0.04%   (goc 678.0 ms, host 31.6 ms)
-
-`goc -O` compiles `main.execute` to 964 instructions where the host toolchain
-uses 188, and **52 % of goc's are loads and stores against 22 % of the host's**.
-The pattern in the dispatch loop is a double indirection per local:
-
-    ldr  x17, [x29, #48]        // load the *address* of a local from a frame slot
-    ldr  x9,  [x17]             // load the local itself
-    ...
-    str  x9,  [x17]             // and store it straight back
-
-Every local — `pc`, `top`, and the base addresses of `stack [64]int64` and
-`registers [8]int64` — lives in a stack slot, is reloaded on each use, and is
-reached through a pointer that itself lives in another stack slot. Nothing stays
-in a register across an iteration.
-
-That is also the best available explanation for the 1.63× floor on the control
-loop, which is a single accumulator: 2.7 ns per iteration is about eight cycles,
-which is a multiply plus a store-load round trip, where the host's 1.67 ns is
-about five, which is a multiply in a register.
-
-Read with care: this is a reading of one function, sampled across ~90 of its 964
-instructions plus the whole-function memory-op count. It is a strong hint about
-where a large constant factor lives, not a diagnosis of the register allocator.
-
-### Where goc is obviously doing something wrong, in order
-
-The brief asked whether any workload shows a ratio far out of line with the
-others. Three do, and one is a factor of a hundred:
-
-| finding | ratio | against the 1.63× floor |
-|---|---:|---:|
-| `math.Sqrt` is not lowered to `FSQRT` | **171×** | 105× the floor |
-| goroutine create + join | **38×** | 24× |
-| the interpreter dispatch loop | **21×** | 13× |
-| reflective marshalling (`json/marshal`) | **17×** | 11× |
-| map build + probe, `fmt` formatting, `flate` | 7–12× | 4–7× |
-| sorting, interface/callback dispatch | 3.7–4.9× | 2–3× |
-| uncontended mutex, int↔float conversion | 1.5–1.9× | ≈ 1× |
-| identical assembly, or memory-bound | 1.01–1.03× | — |
-
-The bottom two rows are the ones that make the top row believable: the suite can
-produce 1.00 when 1.00 is the right answer.
-
-`math.Sqrt` is the one to fix first. It is one instruction on this architecture,
-the fix is local, and it is a hundred times the cost of everything around it.
-
-### P-256 is 45×, and that is assembly against Go, not codegen against codegen
-
-    p256/sign-verify   goc 293.1 ms   host 6.58 ms    44.6×
-    p256/verify        goc 213.8 ms   host 4.70 ms    45.5×
-
-The host toolchain uses the hand-written P-256 assembly; goc runs the generic Go
-path. It is reported here and deliberately **not** made a row of this suite:
-`make bench-crypto` already watches that path, and a second gate on the same code
-means two red lights for one cause.
-
-## What this does not do
-
-- It does not run in CI. It is opt-in behind `-perf-bench` for the same reason
-  the placement comparison and the slog benchmark are — a host Go toolchain —
-  plus one of its own: it measures time, so a loaded box produces a number about
-  the box. A parallel `go test ./...` is exactly the wrong place for it.
-- It does not say what any ratio *ought* to be. Several rows are far from 1.00
-  for reasons that are not defects. The baseline's job is to hold each row where
-  it is and say when it moved.
-- It does not measure parallel behaviour. Every run is pinned to one core.
-- It does not cover the ECDSA path. `make bench-crypto` does, and the two use the
-  same core-selection convention offset by one so they can run at the same time
-  on one box.
+| `make test-goc-status` (default arm) | **366 subtests, 0 failures, 0 skips** — 365 `PASS` plus the one capability whose expectation is `EXPECTED FAILURE` (`runtime_panic_print_string.go`), 100.4 s |
+| `make test-goc-status-opt` (`-O` arm) | **366 subtests, 0 failures, 0 skips**, same split, 93.3 s |
+| `TestAllocationCensus` | **ok**, 326.9 s — `alloc_census_baseline.txt` reproduces **unchanged**, `git diff` on it is empty |
+| `TestCompilingTheSameSourceTwiceGivesTheSameModule` | **ok**, 8.7 s |
+| GC reducer (`runtime_gc_type_mask_padding`), default `GOGC`, `GOMAXPROCS=3`, 20 runs | **0/20 failures** |
+| GC reducer, `GOGC=10`, `GOMAXPROCS=3`, 20 runs | **0/20 failures** |
+| `TestFrameEscapeAudit` | **ok**, 327.6 s |
+| `make bench-perf` after the re-baseline | the update run itself reported **PASS** on all 42 rows, 591 s |
+| working tree | only `goc/testdata/perf_suite_baseline.txt` changed by the benchmark, and it is committed |
+
+A reducer run counted as a pass only on exit 0 **and** the literal output
+`type mask padding ok`; the script is in the branch history of this report.
+
+Per the brief, `go test ./goc/...` and `make test-unit` were not run. The census,
+determinism and frame-escape guards were invoked with an explicit `-run` on the
+single test, which is how `make bench-crypto` is itself defined.
+`go test ./internal/gometa/` — a package neither of those two commands covers —
+was run, and its seven new tests plus the three existing bucket-count tests pass.
+
+The capability matrix is the guard that matters most here, because `findfunc` is
+what the GC reads a frame's stack maps through: a table that pointed one function
+too far would hand the collector the wrong pointer map, and 366 programs covering
+goroutines, channels, panics, defers, finalizers and GC stress are what would
+show it.
 
 ## The line
 
@@ -1181,3 +996,10 @@ Not lowered, with the reason:
   instruction and arm64 reserves only two floating-point scratch registers. It
   needs a third, which comes out of the allocation order and changes register
   allocation tree-wide. That is its own change, with its own measurement.
+
+The 38x is `runtime.findfunc` scanning `functab` from index 0 on every lookup,
+because cg12 emitted `moduledata.findfunctab` as zeroes — twice per goroutine,
+through `isSystemGoroutine` in `newproc1` and `gdestroy`. It is fixed by building
+the table. `make bench-perf`: **`goroutine/spawn-join` 38.45x → 5.32x**, and
+`gc/alloc-churn` 11.70x → 9.74x for free, with nothing else moved and every guard
+green.
