@@ -93,14 +93,14 @@ type stackFacts struct {
 // nothing else. A function without a managed frame emits no check either, so it
 // does not end a chain; NoSplit on such a function means nothing (the C path
 // sets it benignly) and is not consulted.
-func stackFactsFor(f *ir.Func, name string, m *mc) stackFacts {
+func stackFactsFor(f *ir.Func, name string, layout frameLayout, frameless bool) stackFacts {
 	facts := stackFacts{
 		name:         name,
-		frame:        m.frame,
+		frame:        layout.frame,
 		guarded:      f.UsesManagedFrame() && !f.NoSplit,
-		dynamicAlloc: m.hasDynAlloc,
+		dynamicAlloc: layout.hasDynAlloc,
 	}
-	if m.frameless {
+	if frameless {
 		// A frameless leaf never touches SP; its layout frame of 16 is the size
 		// the frame record *would* have had. Charging it would inflate every
 		// chain that ends in a small accessor, which in runtime code is most of
@@ -232,6 +232,8 @@ func checkNoSplitBudget(funcs []stackcheck.Func) error {
 		writeNoSplitFrames(os.Stderr, funcs)
 	case "heights":
 		writeNoSplitHeights(os.Stderr, report)
+	case "headroom":
+		writeNoSplitHeadroom(os.Stderr, report)
 	}
 	if err != nil {
 		return fmt.Errorf("nosplit frame budget: %w", err)
@@ -335,5 +337,26 @@ func writeNoSplitHeights(out io.Writer, report *stackcheck.Report) {
 	})
 	for _, e := range entries {
 		fmt.Fprintf(out, "goc: nosplit height: %8d  %s\n", e.height, e.name)
+	}
+}
+
+// writeNoSplitHeadroom lists how much room each nosplit frame has left, most
+// first.
+func writeNoSplitHeadroom(out io.Writer, report *stackcheck.Report) {
+	if report == nil {
+		return
+	}
+	names := make([]string, 0, len(report.Headroom))
+	for name := range report.Headroom {
+		names = append(names, name)
+	}
+	sort.Slice(names, func(left, right int) bool {
+		if report.Headroom[names[left]] != report.Headroom[names[right]] {
+			return report.Headroom[names[left]] > report.Headroom[names[right]]
+		}
+		return names[left] < names[right]
+	})
+	for _, name := range names {
+		fmt.Fprintf(out, "goc: nosplit headroom: %9d  %s\n", report.Headroom[name], name)
 	}
 }

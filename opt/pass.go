@@ -159,6 +159,12 @@ func DefaultPipeline() []Pass {
 		ModulePass("deadfunc", DeadFuncElim),
 		FuncPass("gcm", GCM),
 		FuncPass("dce", DCE),
+		// Last, because it measures. Inlining into a function that emits no
+		// stack-growth check is bounded by bytes of stack rather than by the size
+		// proxy the rest of the pipeline uses, and the only way to know the bytes
+		// is to lay the frame out -- which means the code being measured has to be
+		// the code the backend will see. Nothing runs after this but the backend.
+		ModulePass("inline-nosplit", InlineIntoNoSplitCallers),
 	}
 }
 

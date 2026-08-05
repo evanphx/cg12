@@ -91,7 +91,7 @@ func compileFunction(f *ir.Func, opts Options, conventions calleeConventions, bu
 		// because a large module drops each function's IR as soon as it is merged
 		// (see releaseFunctionIR) and the call edges would be gone by the time the
 		// module-wide walk runs.
-		stack: stackFactsFor(f, name, mc.m),
+		stack: stackFactsFor(f, name, mc.m.frameLayout, mc.m.frameless),
 	}
 	// A Go-runtime module carries the runtime's own stack-map metadata in
 	// moduledata/pclntab, so the legacy cg12 section is not emitted for it and its

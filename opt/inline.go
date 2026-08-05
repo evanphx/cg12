@@ -267,11 +267,23 @@ func inlineModule(m *ir.Module, base map[*ir.Func]int, costDone *bool) bool {
 //
 // Declining to inline into a nosplit caller is the conservative rule, and it is
 // the one that can be stated without a frame-size model: the inliner works on IR
-// and cannot see a frame. It costs the runtime's allocator fast paths their
-// inlining, which is a real cost -- upstream Go inlines there freely, and pays for
-// it with the linker check cg12 does not have. A frame-budget model in the
-// backend, rejecting the build rather than miscompiling it, is the fix that would
-// let this come back; CCWORK_REPORT.md says so at more length.
+// and cannot see a frame.
+//
+// cg12 now has the model. [InlineIntoNoSplitCallers] runs at the end of
+// [DefaultPipeline], asks the backend how many bytes of stack each nosplit
+// chain has left, inlines, measures the frame it produced, and keeps the result
+// only if it fits. So this rule is no longer the last word on nosplit callers --
+// it is the rule for the *unbounded* fixpoint above, which iterates inlining and
+// simplification without measuring anything and must therefore keep its hands
+// off frames that are spent from a reserve.
+//
+// What the measured pass found is that the reserve was already overspent. The
+// nosplit chain through nextFree is 1104 bytes against a 920-byte reserve with
+// nothing inlined into it at all; the crash this comment describes was that
+// chain being pushed further, not that chain being created. nextFree still gets
+// no inlining, and now for a stated reason with a number attached rather than
+// because the inliner cannot see. arm64/nosplit_debt.go has the rest of the
+// list; CCWORK_REPORT.md has the measurements.
 //
 // InlineNoSplitCalls is deliberately not covered by this. It exists for the
 // opposite reason -- a signal-entry path that must not reach a stack check at all
