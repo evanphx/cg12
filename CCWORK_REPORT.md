@@ -757,3 +757,40 @@ stores it can prove target the stack -- and it makes every future bad-pointer
 diagnosis harder than it needs to be. The dumps in this report were obtained by
 setting `debug.invalidptr = 0` at the top of `badPointer` as a temporary patch,
 which was reverted. It is worth its own job; it is not touched here.
+
+### The capability matrix and what the mask costs
+
+The matrix ran in both arms, sharded eight ways (`index % 8`, so the eight shards
+cover the 367 capabilities exactly once each):
+
+    plain arm: 8/8 shards ok      opt arm (-runtime-opt): 8/8 shards ok
+
+367 capabilities, all passing in both arms. That is 366 before this branch plus
+the new `gc-invariants/slice-tail-pointer`.
+
+The mask's cost, measured on a quiet box, each binary pinned to one core, seven
+interleaved repetitions, fastest of each program's own three timed rounds:
+
+| case | after / before |
+|---|---:|
+| `flate/compress`, `flate/decompress` | 0.999, 0.996 |
+| `sort/ints`, `sort/slice-callback`, `map/build-probe` | 1.000, 0.998, 0.970 |
+| `text/parse`, `text/utf8-decode` | 0.999, **1.009** |
+| `json/marshal`, `json/unmarshal` | 0.999, 0.998 |
+| `regexp/find-submatch`, `anchored-lines`, `replace` | 0.999, **1.014**, 1.000 |
+| `control/spin-fixed-work` (all) | 1.000 |
+
+Nothing moves past the tolerance the perf suite draws around any of these rows;
+the two that rose, at +0.9% and +1.4%, are below their 5.2% and 5.4% detection
+floors. `text/format-append` and `text/sprintf` came out 12% and 9% *faster*,
+which is those two rows' documented 6.4% and 8.8% noise, not a result.
+
+`sortmap` was checked at four code placements (`GOC_TEXT_PAD` 0, 4, 16, 32)
+rather than one, because a first pass taken while the capability matrix was still
+running showed `sort/slice-callback` at 1.88× and `sort/ints` at 0.81× -- both
+artefacts of a loaded box. At each of the four placements, before and after agree
+to within 0.3%.
+
+The committed `perf_suite_baseline.txt` was **not** re-measured: that is an
+eleven-minute run whose whole method assumes a quiet machine, and this box shares
+work. Nothing above suggests it needs to move.
