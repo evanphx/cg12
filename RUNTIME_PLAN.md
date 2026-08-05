@@ -4285,6 +4285,14 @@ are all `cg12cc` paths in practice. Cause 2 is fixed rather than deleted because
 residue. §5.10 records two more sites in the same class, found by the audit below
 and left for the Ruby/C validation cycle they belong to.
 
+> **No longer true as of `ccwork/enable-full-pipeline` (2026-08-05).** The budget
+> is deleted and `DefaultPipeline` is what every `goc -O` build runs;
+> `GOC_OPT_PIPELINE=bounded` restores the pipeline this paragraph describes. The
+> paragraph is kept because it is the record of *why* nobody had noticed: the
+> observation above was correct, and was only ever read as a bound on a bug's
+> blast radius, never as the statement that `goc -O` was three passes. See
+> `CCWORK_REPORT.md` and `opt.ModulePipeline`.
+
 ### The audit, so this is a class and not an instance
 
 Empirical sweeps only find what the corpus exercises. `golang.org/x/tools/go/packages`

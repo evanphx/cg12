@@ -65,17 +65,21 @@ func TestOptimizedInterfaceLocalSurvivesStackGrowth(t *testing.T) {
 }
 
 // optimizeProgramFunctions runs the intraprocedural pipeline over the program's
-// own functions, which is what goc's `-O` does to them and what a monolithic
-// opt.OptimizeModule on this module does not.
+// own functions only, leaving the runtime half of the module exactly as the
+// unoptimized corpus runs compile it.
 //
-// A goc executable module carries the whole Go runtime, which puts it over
-// opt.OptimizeModule's function budget, so that call degrades to
-// BoundedPipeline -- fold, copy, dce -- and never promotes a slot. The matrix's
-// `-O` arm does not have that problem: it compiles against a prebuilt runtime,
-// so the program is a module of its own, small enough for DefaultPipeline, and
-// mem2reg runs. Restricting the pipeline to the program's functions reproduces
-// that here without a prebuilt pack, and leaves the runtime half of the module
-// exactly as the unoptimized corpus runs compile it.
+// It was written when a monolithic opt.OptimizeModule could not do this: a goc
+// executable module carries the whole Go runtime, which put it over the function
+// budget, so the call degraded to BoundedPipeline -- fold, copy, dce -- and never
+// promoted a slot, while the matrix's `-O` arm (which compiles against a prebuilt
+// runtime, so the program is a small module of its own) did promote. The budget
+// is gone and opt.OptimizeModule would now promote here too, so the restriction
+// is no longer necessary to make these tests fail on the defect.
+//
+// It is kept anyway, and deliberately: holding the runtime half fixed is what
+// makes a failure here attributable to the program's own code. These two tests
+// are reductions of specific miscompiles, and a reduction that also recompiles
+// 5000 runtime functions is a reduction of less.
 func optimizeProgramFunctions(module *ir.Module) {
 	for _, function := range module.Funcs {
 		if function == nil || function.Start == nil {
