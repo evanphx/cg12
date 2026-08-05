@@ -73,3 +73,48 @@ Two consequences worth stating plainly:
    entered constantly at every stack depth; the other fifteen have not fired yet.
 2. **A budget calibrated at Go's 792 would reject this tree outright** — that is
    why the 920 derivation above matters, and it still is not enough.
+
+The register grew when it met the configurations the capability matrix builds.
+Heights are stable across *programs* — `runtime_lock_osthread`,
+`runtime_gc_concurrent_mark`, `stdlib_compress_zlib_lzw` and
+`stdlib_http_tls_client_server` agree to the byte — but not across
+*configurations*:
+
+| configuration | chains over 920 | deepest |
+|---|---:|---:|
+| `goc -O`, whole program | 21–23 | 1824 |
+| `goc build-runtime -O` (7 pack roots) | 22–24 | 1824 |
+| `goc` (no `-O`), whole program | 48–50 | 3024 |
+| `goc build-runtime` (no `-O`, 7 pack roots) | 48–50 | 3024 |
+
+**An unoptimized `goc` build is more than three times over the reserve.** Without
+mem2reg every local keeps its frame slot, so every frame on every chain roughly
+doubles: `runtime.bulkBarrierPreWrite` is 592 bytes with `-O` and 752 without,
+and `runtime.doubleCheckTypePointersOfType` — which whole-program `-O` builds
+drop as dead — is 1408 bytes on its own. That arm is what the default capability
+matrix runs, and it is the worst case `arm64/nosplit_debt.go` records: the
+register is the maximum over twenty configurations (seven pack roots × `-O` /
+no-`-O`, plus six whole-program builds), 50 entries.
+
+## What the budget rejects
+
+- A chain over the reserve whose root is not in the register.
+- A registered chain that grows past its recorded height.
+- A cycle among nosplit functions — infinite height, reported as such.
+- A nosplit frame with a dynamic stack allocation — unbounded, reported as such.
+
+There is no warn mode and no truncation. `arm64.checkNoSplitBudget` returns an
+error from `compileToObjectWithBundle` before any object bytes are produced, and
+`TestNoSplitBudgetProducesNoObject` holds it to that.
+
+The cases a naive walk gets wrong, and what this one does:
+
+| case | treatment |
+|---|---|
+| recursion / mutual recursion among nosplit functions | height is `stackcheck.Infinite`; reported as `unbounded nosplit stack ... (cycle)` and rejected. A function *below* a cycle keeps its own height — the sentinel is not memoized through the back edge. |
+| a cycle broken by a splittable function | not a cycle: the chain restarts at the guarded frame. |
+| call through a function pointer / interface / closure | Go's rule by default (`cmd/link` assumes the target checks its own stack), and the count of such sites plus the set of **address-taken nosplit functions** is reported, so the assumption is visible rather than hidden. `GOC_NOSPLIT_INDIRECT=strict` resolves the edge against that set instead; it is an audit mode, not a gate — on goc's runtime, 53 nosplit functions call indirectly and 149 are address-taken, and the closure of that relation closes cycles no execution takes (`systemstack` → its argument → `atomicwb` → `systemstack`), so every chain measures infinite. |
+| assembly | frames come from the `TEXT` directive and call edges from the `BL`/`CALL`/`B` operands, which `plan9asm` now records per function (`ARM64Function.Calls`). Assembly is not assumed to be a leaf: `runtime.systemstack`, `runtime.reflectcallmove` and the generated ABI0 wrappers all appear inside measured chains. |
+| a nosplit function calling a splittable one | the chain ends there, which is how chains are meant to end. |
+| a translated assembly function that is *not* `NOSPLIT` | ends the chain, and is counted in `Report.Unchecked` — 68 of them. This is a real hole: cg12's Plan 9 translator emits a bare `sub sp` prologue where Go's assembler inserts a split check, so those functions end a chain on a promise the toolchain does not keep. Treating them as nosplit instead is not the answer — `runtime·call1073741824` is a `WRAPPER` with a 1 GiB frame — but the gap is cg12's, it predates this branch, and it should be closed. |
+| an undefined callee | ends the chain, on the same assumption Go's linker makes for a symbol outside the link, and is listed in `Report.External` (4 of them). |
