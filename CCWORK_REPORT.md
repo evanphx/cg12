@@ -12,8 +12,10 @@ functions in the image)** in a goc-built binary, and the goroutine path calls it
 
 cg12 emitted `moduledata.findfunctab` — the bucket table `findfunc` uses to start
 its `functab` scan near the answer — as all zeroes. Every lookup therefore
-started at index 0 and scanned forward. In a hello-world-sized program that is
-5,208 functions. `runtime.newproc1` and `runtime.gdestroy` each call `findfunc`
+started at index 0 and scanned forward. The program that produced these numbers
+is 150 lines of Go and its module holds **5,406** functions, because it links the
+whole runtime and the stdlib closure it reaches.
+`runtime.newproc1` and `runtime.gdestroy` each call `findfunc`
 once per goroutine through `isSystemGoroutine`, on a `startpc` that sits near the
 end of the text, so each goroutine paid two nearly full scans: **24 µs** against
 the host toolchain's **0.6 µs**.
@@ -154,9 +156,10 @@ Neither, and both alternatives were checked rather than assumed.
 
 The residue after the fix — 5.3x, against the suite's 1.63x floor — *is* the
 code-quality problem, and it is spread out rather than concentrated. Re-profiled
-after the fix, the working thread's largest entries are `goc_memcpy` 4.8% and
-`goc_memset` 2.3% (a goroutine's stack and `g` being allocated and cleared),
-`findfunc` down to 0.66%, and nothing else above 1.2%.
+after the fix (percentages of all samples, of which two thirds are the two idle
+threads, so multiply by three for the working thread's share): `goc_memcpy` 4.8%
+and `goc_memset` 2.3% — a goroutine's `g` and its stack being allocated and
+cleared — `findfunc` down from 29.16% to **0.66%**, and nothing else above 1.2%.
 
 ## What was changed
 
@@ -248,10 +251,11 @@ this was not measured by reasoning about the call graph.
 
 After the fix `goroutine/spawn-join` is ~5.3x, against the suite's measured
 **1.63x floor** on a bare loop. The residue is 3.2 µs a goroutine against the
-host's 0.6 µs, and it is *not* one hotspot: re-profiled, the working thread's
-largest single entries are `goc_memcpy` at 4.8% and `goc_memset` at 2.3% — a
+host's 0.6 µs, and it is *not* one hotspot: re-profiled, the largest single
+entries are `goc_memcpy` at 4.8% of all samples and `goc_memset` at 2.3% — a
 goroutine's `g` and its 2 KB stack being allocated and cleared — `findfunc` at
-0.66%, and nothing else above 1.2%.
+0.66%, and nothing else above 1.2%. Two thirds of every sample count here is the
+two idle threads, so those are roughly 14% and 7% of the thread doing the work.
 
 That is the general code-quality problem the perf suite already documents, and it
 has a known cause on record: `goc -O` exceeds its own optimization budget on
