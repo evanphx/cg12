@@ -127,7 +127,7 @@ func DefaultPipeline() []Pass {
 	return []Pass{
 		FuncPass("mem2reg", Mem2Reg),
 		clean,
-		Fixpoint("inline",
+		Fixpoint("inline-fixpoint",
 			inline,
 			clean,
 		),
@@ -139,7 +139,7 @@ func DefaultPipeline() []Pass {
 		FuncPass("mem2reg", Mem2Reg),
 		clean,
 		ModulePass("unroll", UnrollRecursion), // bounded in-place recursion unrolling
-		Fixpoint("inline", // inline/simplify what unrolling exposed
+		Fixpoint("inline-fixpoint", // inline/simplify what unrolling exposed
 			inline,
 			clean,
 		),
@@ -225,6 +225,13 @@ func PromotePipeline() []Pass {
 // matrix compile in-process, so there is no compiler flag to thread through --
 // and it is the first thing to reach for when a program that passes under
 // GOC_OPT_PIPELINE=bounded fails under the default.
+//
+// A fixpoint's own name is skippable too, and drops everything inside it: "clean"
+// removes the whole cleanup set wherever it appears. The two inliner fixpoints
+// are called "inline-fixpoint" rather than "inline" precisely so that skipping
+// "inline" means the inliner and not also the two rounds of cleanup it is
+// bracketed with -- a bisection that removes more than it names is a bisection
+// that attributes to the wrong pass.
 //
 // An unrecognized GOC_OPT_PIPELINE value panics rather than silently selecting
 // the default: a typo in a bisection variable that quietly measures the default

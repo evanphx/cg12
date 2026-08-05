@@ -341,3 +341,33 @@ Note the capability matrix runs `runtime_lock_osthread.go` (`cmd/goc/runtime_sta
 and passed it twice. At a 14% failure rate that is a 74% chance — the matrix was
 lucky, not clean. A one-shot matrix is not an instrument for a 14% defect, which
 is why the differential above exists.
+
+*The fix.* `opt/inline.go`: `inlineModule` no longer inlines into a `NoSplit`
+caller (`frameIsSpentFromTheNoSplitReserve`). That is the conservative rule and
+the only one statable without a frame-size model — the inliner works on IR and
+cannot see a frame. `InlineNoSplitCalls` is untouched: it inlines *into* nosplit
+callers deliberately, to keep a stack check off a signal-entry path, and only
+small accessors.
+
+| | bounded | full, before the fix | full, after |
+|---|---|---|---|
+| `runtime_mcache_nextFree` frame | 384 B | 656 B | **368 B** |
+| `runtime_mcache_refill` frame | 368 B | 320 B | 352 B |
+| nosplit run | 752 B | 976 B | **720 B** |
+| `runtime_lock_osthread` failures | 0 / 100 | 14 / 100 | **0 / 400** |
+
+The fix leaves the chain smaller than the bounded pipeline left it.
+
+*What it costs, and what would let it come back.* Not inlining into nosplit
+functions costs the runtime's allocator fast paths their inlining, which is
+exactly where it would pay. Upstream Go inlines there freely and pays for it with
+a linker check cg12 does not have. **The fix that would let this come back is a
+nosplit frame budget in the backend** — arm64 knows every function's frame size
+after lowering and `opt.AuditNoSplitCalls` already builds the call graph, so the
+missing piece is walking nosplit runs and rejecting a build that overruns the
+reserve. That turns a 14%-of-runs fatal error into a compile-time error, which is
+the right shape. It is out of scope here and is the single most valuable
+follow-up this exercise found.
+
+`opt/inline_test.go:TestInliningDoesNotGrowANoSplitCaller` is the regression
+guard: deterministic, no runtime needed.
