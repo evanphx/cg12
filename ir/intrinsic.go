@@ -104,6 +104,40 @@ func init() {
 	RegisterIntrinsic("getcallersp", IntrinsicEffects{HasResult: true})
 
 	registerAtomics()
+	registerFloatMath()
+}
+
+// registerFloatMath registers the floating-point primitives that exist as a
+// single instruction on at least one target and would otherwise be a call into
+// a software implementation. Each one is a function of its operand and nothing
+// else -- no memory, no rounding mode read out of a control register, no
+// errno -- so each is Pure: shareable by value numbering and free to move.
+//
+// The width is encoded in the name ("float.sqrt.d"), the way the atomics encode
+// theirs, so no separate field is needed and the textual IL round-trips.
+//
+// Their semantics are IEEE 754's, which is also what the Go math package
+// specifies for the functions that lower to them; goc/compile.go is where that
+// correspondence is made and where it is justified.
+func registerFloatMath() {
+	pure := IntrinsicEffects{HasResult: true, Pure: true}
+	operations := []string{
+		"sqrt",
+		"abs",
+		// The integral roundings. Each names its rounding direction, because
+		// the point of these instructions is that the direction is fixed by the
+		// operation rather than by the machine's current rounding mode.
+		"roundeven", // to nearest, ties to even
+		"roundaway", // to nearest, ties away from zero
+		"ceil",      // toward +Inf
+		"floor",     // toward -Inf
+		"trunc",     // toward zero
+	}
+	for _, operation := range operations {
+		for _, width := range []string{"s", "d"} {
+			RegisterIntrinsic("float."+operation+"."+width, pure)
+		}
+	}
 }
 
 // registerAtomics registers the atomic memory operations. Each is a

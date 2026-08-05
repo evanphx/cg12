@@ -282,6 +282,8 @@ func (s *sel) selectData(in *ir.Instr) bool {
 			done()
 		case strings.HasPrefix(in.Intrin.Name, "atomic."):
 			s.atomic(in)
+		case strings.HasPrefix(in.Intrin.Name, "float."):
+			s.floatMath(in)
 		case in.Intrin.Name == "constant_p":
 			// An unresolved __builtin_constant_p (normally settled by opt): 0 is sound.
 			d, done := s.dst(in.To, in.Cls.Size())
@@ -881,6 +883,60 @@ func (s *sel) conv1(in *ir.Instr, emit func(rd, rn Reg)) {
 	rd, done := s.dst(in.To, in.Cls.Size())
 	emit(rd, rn)
 	done()
+}
+
+// floatMath emits one of the single-instruction floating-point primitives:
+// "float.<operation>.<width>", where the width is "s" or "d".
+//
+// Every one of them is a one-source instruction whose rounding is fixed by the
+// opcode, so there is nothing here but the operand, the destination and the
+// choice of mnemonic. The correspondence between each name and the Go math
+// function it implements is argued where the two are connected, in
+// goc/compile.go.
+func (s *sel) floatMath(in *ir.Instr) {
+	operation, width := floatMathParts(in.Intrin.Name)
+	var op floatUnaryOp
+	switch operation {
+	case "sqrt":
+		op = fSqrt
+	case "abs":
+		op = fAbs
+	case "roundeven":
+		op = fRoundEven
+	case "roundaway":
+		op = fRoundAway
+	case "ceil":
+		op = fRoundUp
+	case "floor":
+		op = fRoundDown
+	case "trunc":
+		op = fRoundZero
+	default:
+		s.b.fail("arm64: unsupported float intrinsic %q", in.Intrin.Name)
+		return
+	}
+	if width != 4 && width != 8 {
+		s.b.fail("arm64: float intrinsic %q has no scalar width", in.Intrin.Name)
+		return
+	}
+	rn := s.src(in.Args[0], 1, width)
+	rd, done := s.dst(in.To, width)
+	s.b.funary(op, width == 8, rd, rn)
+	done()
+}
+
+// floatMathParts splits a "float.<operation>.<width>" name into the operation
+// and the operand width in bytes, reporting a zero width for a name that does
+// not end in a scalar float suffix.
+func floatMathParts(name string) (operation string, width int) {
+	trimmed := strings.TrimPrefix(name, "float.")
+	switch {
+	case strings.HasSuffix(trimmed, ".s"):
+		return strings.TrimSuffix(trimmed, ".s"), 4
+	case strings.HasSuffix(trimmed, ".d"):
+		return strings.TrimSuffix(trimmed, ".d"), 8
+	}
+	return trimmed, 0
 }
 
 // extend emits an integer sub-word sign/zero extend.

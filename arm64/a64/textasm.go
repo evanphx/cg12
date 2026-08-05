@@ -196,6 +196,20 @@ func asmLine(p *Program, line string) error {
 		return a.fp3(Fdiv)
 	case "fneg":
 		return a.fp2(Fneg)
+	case "fabs":
+		return a.fp2(Fabs)
+	case "fsqrt":
+		return a.fp2(Fsqrt)
+	case "frintn":
+		return a.fp2(Frintn)
+	case "frintp":
+		return a.fp2(Frintp)
+	case "frintm":
+		return a.fp2(Frintm)
+	case "frintz":
+		return a.fp2(Frintz)
+	case "frinta":
+		return a.fp2(Frinta)
 	case "fcmp":
 		return a.fcmp()
 	case "fcvt":

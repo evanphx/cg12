@@ -73,6 +73,20 @@ func (mc *Machine) execIntrinsic(fr *frame, in *ir.Instr) error {
 		}
 		return nil
 	}
+	if strings.HasPrefix(in.Intrin.Name, "float.") {
+		a, err := mc.evalRef(fr, in.Arg(0))
+		if err != nil {
+			return err
+		}
+		res, ok := floatMathOp(in.Intrin.Name, a)
+		if !ok {
+			return mc.trapf("interp: unknown float intrinsic %q", in.Intrin.Name)
+		}
+		if !in.To.IsNone() {
+			fr.vals[in.To.ID] = res
+		}
+		return nil
+	}
 	if strings.HasPrefix(in.Intrin.Name, "atomic.") {
 		args := make([]Value, len(in.Args))
 		for i := range in.Args {

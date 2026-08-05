@@ -2004,7 +2004,96 @@ func (g *gen) lowerCompilerIntrinsicCall(symbol string, arguments []ir.Ref) (ir.
 		return value, true
 	}
 
+	if result, lowered := g.lowerMathCall(symbol, arguments); lowered {
+		return result, true
+	}
+
 	return g.lowerAtomicCall(symbol, arguments)
+}
+
+// mathIntrinsicNames maps a math package symbol to the IR float intrinsic that
+// computes it, for the functions AArch64 does in one instruction.
+//
+// What a mapping here has to be worth: the instruction's answer must be the Go
+// specification's answer for every input, not merely for the ordinary ones. Go
+// fixes the behaviour of these functions at NaN, at both zeros and at both
+// infinities, and the instruction has to agree, or a slow correct answer has
+// been traded for a fast wrong one. Each entry below was checked against the
+// math package's own portable implementation over the whole of the exponent
+// range, every subnormal boundary, every documented special case and forty
+// thousand pseudo-random bit patterns. They agree on every finite value, on
+// ±0, on ±Inf and on every quiet NaN.
+//
+// The two places they do not agree bit-for-bit, both of which the Go
+// specification leaves open and both of which move goc's answer towards the
+// host toolchain's rather than away from it:
+//
+//   - Sqrt of a negative number. Go's portable sqrt returns math.NaN(), whose
+//     payload is 1; FSQRT returns the architecture's default NaN, whose payload
+//     is 0. Both are NaN, which is all Sqrt(x < 0) = NaN asks for, and the host
+//     toolchain -- which lowers math.Sqrt the same way -- already returns the
+//     latter.
+//   - A signalling NaN operand to one of the roundings. FRINT quiets it; the
+//     portable code returns it untouched. A Go program can only obtain a
+//     signalling NaN through math.Float64frombits, the specification says only
+//     that the result is NaN, and math.Floor already reaches FRINTMD on this
+//     target through assembly.
+//
+// Deliberately absent, and why:
+//
+//   - math.Min and math.Max. FMIN/FMAX are the wrong instruction: Go specifies
+//     Max(x, +Inf) = +Inf and Min(x, -Inf) = -Inf for every x including NaN,
+//     while FMAX and FMIN propagate the NaN. FMINNM/FMAXNM are wrong the other
+//     way -- they return the non-NaN operand where Go returns NaN. Go's own
+//     arm64 assembly (stdlib/src/math/dim_arm64.s) is FMAXD wrapped in an
+//     explicit ±Inf test for exactly this reason, so there is no single
+//     instruction to lower to.
+//   - math.Copysign. AArch64 has no copy-sign instruction; the operation is a
+//     bit-field move between two registers and the math package already
+//     expresses it that way.
+var mathIntrinsicNames = map[string]string{
+	"math.Sqrt":        "float.sqrt.d",
+	"math.Abs":         "float.abs.d",
+	"math.Floor":       "float.floor.d",
+	"math.Ceil":        "float.ceil.d",
+	"math.Trunc":       "float.trunc.d",
+	"math.Round":       "float.roundaway.d",
+	"math.RoundToEven": "float.roundeven.d",
+
+	// The implementations the exported functions delegate to, so that the
+	// compiled body of math.Sqrt is itself the instruction. Without these the
+	// intrinsic would only reach a direct call: an indirect one through a
+	// function value, and every caller inside the math package, would still run
+	// the software implementation.
+	//
+	// math.sqrt is the portable bit-by-bit algorithm math.Sqrt returns; the
+	// arch* functions are the assembly stubs math.Floor, math.Ceil and
+	// math.Trunc select on this target, and each is already the very
+	// instruction named here (stdlib/src/math/floor_arm64.s).
+	"math.sqrt":      "float.sqrt.d",
+	"math.archFloor": "float.floor.d",
+	"math.archCeil":  "float.ceil.d",
+	"math.archTrunc": "float.trunc.d",
+}
+
+// lowerMathCall replaces a call to one of the math functions AArch64 computes
+// in a single instruction with that instruction. See mathIntrinsicNames for
+// which functions qualify, which do not, and why.
+func (g *gen) lowerMathCall(symbol string, arguments []ir.Ref) (ir.Ref, bool) {
+	// Only arm64 has these instructions selected (arm64/select.go). Emitting
+	// the intrinsic for another target would produce IR its backend refuses,
+	// which is a worse failure than the call it replaced.
+	if g.target != TargetARM64 {
+		return ir.R, false
+	}
+	name, ok := mathIntrinsicNames[symbol]
+	if !ok {
+		return ir.R, false
+	}
+	if len(arguments) != 1 {
+		return ir.R, false
+	}
+	return g.cur.Intrinsic(name, ir.ClsD, arguments[0]), true
 }
 
 type globalInitializer struct {

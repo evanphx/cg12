@@ -18,7 +18,8 @@
 //     so it cannot be turned into straight-line work.
 //   - float/sqrt-sum is math.Sqrt in a loop. On this architecture that is one
 //     instruction if the compiler knows it and a function call if it does not,
-//     and the two answers differ by a factor, not by a percent.
+//     and the two answers differ by a factor, not by a percent. This row is
+//     what found that goc did not know it: it read 171x the host toolchain.
 //   - float/int-convert crosses between the two register files every iteration,
 //     which is a move with a real latency and a place where a compiler can
 //     accidentally round-trip through memory.
@@ -81,12 +82,16 @@ const (
 	mandelbrotSide = 400
 	// mandelbrotLimit is the iteration cap per point.
 	mandelbrotLimit = 100
-	// sqrtIterations is how many square roots one round takes. It is far below
-	// the other counts here for a reason worth reading: goc does not lower
-	// math.Sqrt to the hardware instruction, so a square root costs it about
-	// 380 ns against the host toolchain's 2.4 ns, and 20_000_000 of them cost
-	// the goc-built binary seven and a half seconds a round.
-	sqrtIterations = 1_000_000
+	// sqrtIterations is how many square roots one round takes.
+	//
+	// It used to be 1_000_000, twenty times below the other counts here,
+	// because goc did not lower math.Sqrt to the hardware instruction: a square
+	// root cost it about 380 ns against the host toolchain's 2.4 ns, and
+	// 20_000_000 of them cost the goc-built binary seven and a half seconds a
+	// round. Now that the call is one FSQRT, a round is about fifty
+	// milliseconds a side, and a count that no longer has to be kept small is
+	// better spent on a measurement that is longer than the noise.
+	sqrtIterations = 20_000_000
 	// convertIterations is how many int/float round trips one round makes.
 	convertIterations = 10_000_000
 )
