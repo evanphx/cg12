@@ -32,6 +32,14 @@ compile, that costs about **2.1x** the compile time of the same passes run to th
 same result — because cg12 tests convergence over the whole module while every
 transform in the loop is per-function.
 
+**The recommendation, up front:** keep the iteration, move its convergence test
+inside the per-function loop (measured: byte-identical binaries, 2.1x faster),
+then cap the two interprocedural fixpoints at 3 rounds (measured: another 11%,
+binaries 0.01% smaller, no perf row beyond tolerance). That is 42.6 s → 17.9 s on
+the reference compile with no measurable change in the code produced. Converting
+the whole pipeline to a hand-ordered fixed list buys a further 1.23x and is not
+worth its maintenance cost yet. Evidence in §5, reasoning in §3 and §7.
+
 ---
 
 ## 2. What each compiler actually does
@@ -389,8 +397,8 @@ the time for 0.21% of the work.**
 
 ### 5.4 The arms: fixed order vs. convergence
 
-Same compile, five pipelines, 3 repetitions each (reps agree to within 1.5%;
-means shown). `full` is `main`'s behaviour.
+Same compile, six pipelines, 3 repetitions each (reps agree to within 1.5%; means
+shown) except `perfunc3`, which is one repetition. `full` is `main`'s behaviour.
 
 | arm | what it is | wall (s) | user CPU (s) | output binary |
 |---|---|---:|---:|---|
@@ -491,7 +499,35 @@ in the perf suite.
 
 ### 5.7 Code quality under the recommended arm (`perfunc3`)
 
-*(filled in below)*
+`GOC_OPT_PIPELINE=perfunc3 make bench-perf`, 42 rows, 9 repetitions, 589 s.
+**No row moved beyond its baseline tolerance** (checked row by row against
+`perf_suite_baseline.txt`; 0 of 42 over). Largest movements:
+
+| row | fixpoint | `perfunc3` | change | tol |
+|---|---:|---:|---:|---:|
+| `text text/format-append` | 7.6592 | 7.1840 | −6.2% | 12.8% |
+| `sortmap map/build-probe` | 6.0921 | 5.7513 | −5.6% | 14.5% |
+| `text text/sprintf` | 6.6966 | 6.8765 | **+2.7%** | 16.6% |
+| `gcpress gc/alloc-churn` | 5.9451 | 5.8320 | −1.9% | 9.5% |
+| `regexp regexp/anchored-lines` | 4.0798 | 4.0215 | −1.4% | 5.0% |
+| `json json/marshal` | 14.7342 | 14.8902 | **+1.1%** | 5.5% |
+| `interp interp/bytecode-loop` | 19.0659 | 19.0842 | +0.1% | 5.0% |
+
+Control rows 0.9252–0.9286 against a baseline range of 0.9247–0.9284.
+
+This run also exited FAIL on the noise gate, and this time it was not my doing:
+the box's 1-minute load average reached 20.5 during it (this is a shared
+64-core machine and other jobs started), and two rows —
+`sortmap map/build-probe` at 15.0% and `chase/pointer-node` at 16.4% — exceeded
+the suite's absolute 15% spread ceiling, which aborts before the verdict table is
+printed. The per-row ratios above are from the run's own table and the comparison
+was done by hand against the committed baseline; the two loud rows should be
+discounted, and neither is near its tolerance anyway.
+
+**Reading §5.5 and §5.7 together:** three pipelines — `full` (fixpoint),
+`ordered` (one traversal of everything), `perfunc3` (per-function convergence,
+inline capped at 3) — produce code this suite cannot tell apart, across 42
+workload rows, while the compile takes 42.6 s, 14.6 s and 17.9 s respectively.
 
 ---
 
@@ -549,9 +585,9 @@ traversal is cheap and evidently pays for itself in code size.
 the first step is not a trade-off at all.
 
 1. **Move `clean`'s convergence test inside the per-function loop** (the
-   `perfunc` arm). Measured: **byte-identical output**, 2.10x less wall time,
-   1.66x less CPU on the reference compile. There is no quality argument to have,
-   because there is no quality difference. This is what LLVM's
+   `perfunc` arm). Measured: **byte-identical output on all four programs
+   tried**, 2.0–2.1x less wall time, 1.66–1.70x less CPU. There is no quality
+   argument to have, because there is no quality difference. This is what LLVM's
    `ShouldNotRunFunctionPassesAnalysis` and Go's per-function `applyRewrite` loop
    are; cg12 is the only one of the four that re-walks 5,083 functions to learn
    that one of them changed.
@@ -561,15 +597,19 @@ the first step is not a trade-off at all.
    genuinely need more than one round — but not seven: rounds 4-7 buy 0.21% of
    the inlining for 37% of that fixpoint's time. Cap them at 3, as LLVM caps
    `devirt` at 4 and Go caps `applyRewrite` at `max(NumBlocks, 20)`. Measured
-   cost of the cap: §5.6.
+   (§5.6, §5.7): another 11% off the wall time, binaries 0.006–0.011% *smaller*,
+   and **no perf row beyond tolerance in 42**. Together (1)+(2) take the
+   reference compile from 42.6 s to 17.9 s — **2.4x** — with the perf suite
+   unable to tell the results apart.
 
 3. **Do not convert the pipeline to a strict fixed list**, on this evidence. The
-   `ordered` arm is 2.9x faster than `full` — but only 1.4x faster than the
-   *free* `perfunc` fix, and it is the only arm that made the binary bigger. The
-   remaining gap between `perfunc` and `ordered` is small enough that it is not
-   worth giving up the property that makes cg12's pipeline maintainable: nobody
-   has to keep the pass-interaction graph in their head while the pass set is
-   still changing every month. Revisit if the pass set stabilises.
+   `ordered` arm is 2.9x faster than `full` — but only **1.23x** faster than
+   (1)+(2), and it is the only arm that made the binary bigger (+0.29%). Buying
+   that last 23% means hand-maintaining a pass-interaction order — the thing
+   LLVM, GCC and Go each spent decades tuning and still annotate line by line —
+   while cg12's pass set is still changing month to month. Revisit when the pass
+   set stabilises; the round data in §5.3 is the input that design would need,
+   and §6 is a first draft of it that has already been measured.
 
 **The trade-off, stated plainly.** Recommendation (1) is free and should be done.
 Recommendation (2) trades a measured ~0.2% of inlining opportunity for a
@@ -588,8 +628,10 @@ skipping the inliner alone removes 85% of the cost above the floor, and mem2reg'
 inliner already off makes compiles *slower*). Those numbers say the cost is the
 total work the inliner creates, not only the re-convergence. The two fixes are
 independent: §5.4's arms cut re-traversal, and an inliner cost model would cut
-the work. Doing (1) and (2) takes the reference compile from 42.6 s to
-somewhere near 17 s; getting below that means inlining less, not iterating less.
+the work. Doing (1) and (2) takes the reference compile from 42.6 s to a measured
+17.9 s; getting below *that* means inlining less, not iterating less. If the
+corpus multiplier scales the same way — not measured here — 4.469x would land
+near 1.9x, and the rest of the gap is the inliner's own output.
 
 ---
 
@@ -615,9 +657,26 @@ behaviour was untouched (`GOC_OPT_TRACE` unset ⇒ one boolean test; the new arm
 are unreachable without `GOC_OPT_PIPELINE`). The patch is **not** part of this
 branch; `git diff main` on the delivered tree is this document alone.
 
-**Not measured, and so not claimed:** whether the `perfunc` result holds
-byte-for-byte on every program in the corpus (it was checked on the reference
-compile and on the programs in §5.4's identity check); whether the corpus-wide
-4.469x multiplier falls by the same 2.1x (only single-program compiles were
-timed here); and anything about `-O0`/`bounded` correctness, which this job did
-not touch.
+Two `make bench-perf` runs were done, under `ordered` and under `perfunc3`, 9
+repetitions each, ~9.5 minutes each. **Both exited FAIL on the suite's noise
+gate rather than on any ratio** — see §5.5 and §5.7 for which rows and why (mine
+in the first case, other jobs on this shared box in the second). Every row in
+both runs is within its baseline tolerance; the `perfunc3` comparison was done by
+hand because the noise gate aborts before the verdict table prints.
+
+**Not measured, and so not claimed:** whether the `perfunc` byte-identity holds
+on every program in the corpus (four whole-program builds were checked, §5.6);
+whether the corpus-wide 4.469x multiplier falls by the same factor (only
+single-program compiles were timed here); whether these arms preserve the
+allocation census, the escape differentials or determinism (the brief excluded
+running those suites, and no arm here is proposed for adoption without them);
+and anything about `bounded`, which this job did not touch.
+
+**Reproducing any of it.** The scaffolding is small: `collapse()` over
+`DefaultPipeline` gives `ordered`; `perfunc` is `DefaultPipeline` with the
+`clean` fixpoint replaced by a `FuncPass` that loops the same eight transforms
+on one function until that function stops changing; `perfunc3` adds a 3-round
+cap to the two `Fixpoint("inline-fixpoint", …)` wrappers. The round data comes
+from printing, per pass invocation, the fixpoint instance, the round number, the
+count of functions the pass changed, the elapsed time, and the module's
+instruction count before and after.

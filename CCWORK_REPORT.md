@@ -223,4 +223,46 @@ Every row passed despite the extra noise (noise hides differences, it does not
 manufacture agreement), but the `chase/*` rows should be read as not cleanly
 measured.
 
-_(`make bench-perf` under `perfunc3` in progress)_
+## 5. Code quality — `make bench-perf` under `perfunc3`
+
+`GOC_OPT_PIPELINE=perfunc3 make bench-perf`, 42 rows, 9 repetitions, 589 s.
+**0 of 42 rows exceed the baseline's own tolerance** (compared row by row by
+hand). Largest: `text/format-append` −6.2% (tol 12.8%), `map/build-probe` −5.6%
+(tol 14.5%), `text/sprintf` +2.7% (tol 16.6%), `json/marshal` +1.1% (tol 5.5%),
+`interp/bytecode-loop` +0.1% (tol 5.0%). Control rows 0.9252-0.9286 against a
+baseline range of 0.9247-0.9284.
+
+This run also exited FAIL on the noise gate, and this time not through anything
+I did: the box's 1-minute load average hit 20.5 (other jobs on this shared
+64-core machine), and two rows exceeded the suite's absolute 15% spread ceiling,
+which aborts before the verdict table prints. Hence the by-hand comparison.
+
+## 6. Verdict
+
+| pipeline | wall on the reference compile | code |
+|---|---:|---|
+| `full` (module fixpoint, shipped) | 42.6 s | reference |
+| `perfunc` (converge per function) | 20.2 s | **byte-identical**, 4/4 programs |
+| `perfunc3` (+ inline capped at 3 rounds) | 17.9 s | 0.01% smaller; 0/42 perf rows moved |
+| `ordered` (single traversal of everything) | 14.6 s | 0.29% larger; 0/42 perf rows moved |
+| `bounded` (fold/copy/dce) | 6.8 s | — |
+
+**Recommendation: keep the fixpoint, fix its granularity, then bound it.**
+Moving `clean`'s convergence test inside the per-function loop is free — the
+binaries are identical — and halves the compile. Capping the two inline
+fixpoints at 3 rounds takes another 11% and changes the binary by a hundredth of
+a percent. Converting the whole pipeline to a hand-ordered fixed list buys a
+further 1.23x and costs the maintenance of a pass-interaction order, which is
+not worth it while the pass set is still moving.
+
+Full argument, the three compilers' sources, and every measurement:
+`OPTIMISER_PIPELINE.md`.
+
+## Scaffolding
+
+The instrumentation and the alternative pipeline arms were an uncommitted patch
+(`opt/trace.go` plus four `case` lines in `opt/pass.go`'s `ModulePipeline`).
+They have been removed: `git diff --name-only main` on the delivered tree is
+`CCWORK_REPORT.md` and `OPTIMISER_PIPELINE.md`, and `go build ./...` is clean.
+No pipeline behaviour was changed, so the allocation census and determinism are
+untouched by construction (`opt/pass.go` is byte-identical to `main`'s).
