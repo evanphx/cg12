@@ -92,24 +92,24 @@ confines the comparison to lines both compilers put on the heap.
 
 ## coverage
 
-programs with reasons on both sides            400
-goc -m decisions at joinable positions        1803
-  of those on the heap                        1107
-  of those carrying a rule                    1107  (must equal the line above)
-  of those goc could not explain               172  (the "unexplained" category: goc saw the
+programs with reasons on both sides            402
+goc -m decisions at joinable positions        1814
+  of those on the heap                        1115
+  of those carrying a rule                    1115  (must equal the line above)
+  of those goc could not explain               174  (the "unexplained" category: goc saw the
                                                     object escape and could not name the use)
 goc -m decisions with no source position         0  (never joinable; so is the census)
-gc -m=2 explained blocks parsed               3027
-  distinct decisions they describe            2752  (gc explains an allocation once per
+gc -m=2 explained blocks parsed               3046
+  distinct decisions they describe            2771  (gc explains an allocation once per
                                                     function it was inlined into)
-    reaching a joined line                    2212
-    for a decision the matrix excludes         426  (printed at an inlining call site; see
+    reaching a joined line                    2227
+    for a decision the matrix excludes         430  (printed at an inlining call site; see
                                                     package gcdiff. Not a gap)
     matching no -m decision at all             114  (a gc heap allocation the placement
                                                     differential cannot see; listed below)
-gc decisions carrying an explanation          2279
-gc heap decisions with no -m=2 explanation     173
-  of those synthesized by the chan rule        136  (expected: gc prints nothing at all
+gc decisions carrying an explanation          2294
+gc heap decisions with no -m=2 explanation     174
+  of those synthesized by the chan rule        137  (expected: gc prints nothing at all
                                                     for make(chan))
 goc rules the classifier did not know            0  (must be 0)
 gc flows the classifier did not know             0  (must be 0)
@@ -117,7 +117,7 @@ goc -m lines the parser did not know             0  (must be 0)
 
 the two instruments on goc's side, against each other:
 
-lines both record, and agree about            1346
+lines both record, and agree about            1356
 lines only the census records                 152  (an allocation goc's own -m cannot
                                                     explain at all)
 lines only goc -m records                      21  (expected: the census omits ordinary
@@ -424,28 +424,28 @@ columns what their explanations amount to. "neither" is almost entirely lines
 both compilers keep in a frame, which neither explains.
 
   placement                agree    differ  goc only   gc only   neither     total
-  agrees                     143       311        44        17       281       796
-  disagrees                   84       176       161      1336       688      2445
+  agrees                     145       315        45        17       282       804
+  disagrees                   85       176       161      1341       689      2452
 
-## AGREE ON PLACEMENT, DISAGREE ON REASON: 311 lines
+## AGREE ON PLACEMENT, DISAGREE ON REASON: 315 lines
 
 both compilers put something on this line on the heap, and the mechanisms they
 name have nothing in common. One of them is reaching the right placement by a
 route the other does not recognise, which no placement comparison can see. Read
 each one and decide which.
 
-of those, 207 carry exactly one explained allocation on each side, so the two
-explanations are about the same object; the other 104 carry more than one and the
+of those, 210 carry exactly one explained allocation on each side, so the two
+explanations are about the same object; the other 105 carry more than one and the
 pairing is the line, not the allocation. Both are listed; each line's own
 entries say which it is.
 
 by category pair (goc                                gc):
 
     118  stored-in-object                   call-retains
-     43  unexplained                        call-retains
+     44  unexplained                        call-retains
      41  unexplained                        stored-in-object
      37  stored-in-object                   closure-captured
-     15  unexplained                        returned
+     16  unexplained                        returned
      11  call-opaque                        call-retains
       9  stored-in-object                   returned
       9  unexplained                        channel-send
@@ -454,9 +454,10 @@ by category pair (goc                                gc):
       3  stored-in-object,loop-carried      call-retains
       3  unexplained                        stored-in-object,channel-send
       2  call-retains                       stored-in-object
+      2  folded                             call-retains
       2  returned                           too-large
       1  call-retains                       returned
-      1  folded                             call-retains
+      1  loop-carried                       call-retains
       1  returned                           call-retains
       1  stored-in-object                   call-retains,closure-captured
       1  stored-in-object                   channel-send
@@ -1216,6 +1217,30 @@ runtime_gc_metadata_hugepages.go:53	heap -> heap	unexplained -> call-retains
 	     at               testdata/runtime_gc_metadata_hugepages.go:60:21
 	gc   col 11  heap  object  &record{...}
 	     call-retains     {heap} <- node via spill -> assign -> call parameter
+runtime_gc_promoted_local_root.go:61	heap -> heap	unexplained -> call-retains
+	src  h := &held{seed: seed, label: "held"}
+	goc  col 7  heap  main_held  [front end: composite-literal in main.make2]
+	     unexplained      obj is used here in a way the walk cannot prove keeps it local
+	     at               stdlib/src/runtime/mfinal.go:448:16
+	gc   col 7  heap  object  &held{...}
+	     call-retains     {heap} <- h via spill -> assign -> interface-converted -> call parameter
+runtime_gc_promoted_local_root.go:103	heap -> heap	folded -> call-retains
+	src  return fmt.Errorf("object was recycled: fill[%d]=%d want %d", i, h.fill[i], seed*1000+i)
+	goc  col 22  heap  struct_values__3_any__payload0_int__payload1_int  [ir pass: heap-alloc-candidate in main.check]
+	     folded           holds more separately-allocated payloads than it costs to hold them
+	gc   col 66  heap  object  i
+	     call-retains     {heap} <- *fmt.a via spill -> slice-literal-element -> spill -> assign-pair -> call parameter
+	gc   col 75  heap  object  h.fill[i]
+	     call-retains     {heap} <- *fmt.a via spill -> slice-literal-element -> spill -> assign-pair -> call parameter
+	gc   col 89  heap  object  seed * 1000 + i
+	     call-retains     {heap} <- *fmt.a via spill -> slice-literal-element -> spill -> assign-pair -> call parameter
+runtime_gc_promoted_local_root.go:117	heap -> heap	loop-carried -> call-retains
+	src  fmt.Println("promoted local lost:", err)
+	goc  col 4  heap  2_any  [ir pass: heap-alloc-candidate in main.main]
+	     loop-carried     allocated in a loop; one frame slot cannot hold one object per iteration
+	     at               testdata/runtime_gc_promoted_local_root.go:115:17
+	gc   col 16  heap  object  "promoted local lost:"
+	     call-retains     {heap} <- *fmt.a via spill -> slice-literal-element -> spill -> assign-pair -> call parameter
 runtime_gc_scavenge_release.go:41	heap -> heap	unexplained -> call-retains
 	src  node := &block{value: seed + index}
 	goc  col 11  heap  main_block  [front end: composite-literal in main.buildHeap]
@@ -1800,6 +1825,12 @@ runtime_opt_loop_carried_root.go:35	heap -> heap	unexplained -> returned
 	     unexplained      the walk found a use it could not prove local
 	gc   col 9  heap  object  &node{...}
 	     returned         ~r0 <- &{storage for &node{...}} via spill -> return
+runtime_opt_promoted_interface_root.go:40	heap -> heap	unexplained -> returned
+	src  func makeCounter(n int) (counter, int) { return &box{n: n}, n }
+	goc  col 49  heap  main_box  [front end: composite-literal in main.makeCounter]
+	     unexplained      the walk found a use it could not prove local
+	gc   col 49  heap  object  &box{...}
+	     returned         ~r0 <- &{storage for &box{...}} via spill -> interface-converted -> return
 runtime_package_initializer_dispatch.go:62	heap -> heap	stored-in-object -> returned
 	src  return new(strings.Builder)
 	goc  col 9  heap  strings_Builder  [ir pass: heap-alloc-candidate in .goc.global.initfunc.67.main.returnedFromFunctionLiteral.func.61.35]
@@ -2849,7 +2880,7 @@ stdlib_weak_pointer.go:18	heap -> heap	stored-in-object -> call-retains
 	gc   col 13  heap  object  &weakPayload{...}
 	     call-retains     {heap} <- payload via spill -> assign -> call parameter
 
-## DISAGREE ON PLACEMENT, AGREE ON REASON: 84 lines
+## DISAGREE ON PLACEMENT, AGREE ON REASON: 85 lines
 
 the two compilers place this line differently and still name a common
 mechanism. This can only happen on a line carrying more than one allocation:
@@ -3135,6 +3166,14 @@ runtime_closure_captured_string.go:283	heap -> mixed	call-retains -> call-retain
 	     call-retains     {heap} <- {storage for ... argument} via spill -> slice-literal-element -> spill -> call parameter
 	gc   col 76  heap  object  state.count
 	     call-retains     {heap} <- {storage for ... argument} via spill -> slice-literal-element -> spill -> call parameter
+runtime_gc_promoted_local_root.go:59	mixed -> heap	call-retains -> call-retains
+	src  return nil, fmt.Errorf("negative seed %d", seed)
+	goc  col 26  frame  struct_values__1_any__payload0_int  [ir pass: heap-alloc-candidate in main.make2]
+	goc  col 46  heap  int  [ir pass: heap-alloc-candidate in main.make2]
+	     call-retains     argument 1 of $fmt.Errorf may retain something it points at
+	     at               testdata/runtime_gc_promoted_local_root.go:59:15
+	gc   col 46  heap  object  seed
+	     call-retains     {heap} <- *fmt.a via spill -> slice-literal-element -> spill -> assign-pair -> call parameter
 runtime_interface_comparable_map.go:10	mixed -> heap	stored-in-object -> stored-in-object
 	src  comparableKey{name: "left", index: 1}:  17,
 	goc  col 3  frame  main_comparableKey  [front end: composite-literal in main.main]
@@ -4798,14 +4837,14 @@ stdlib_sync_once_map_cond.go:29	heap -> absent	stored-in-object -> -
 	     stored-in-object write barrier into a candidate
 	     at               testdata/stdlib_sync_once_map_cond.go:33:5
 
-## PLACEMENT DISAGREES, ONLY gc EXPLAINED: 1336 lines
+## PLACEMENT DISAGREES, ONLY gc EXPLAINED: 1341 lines
 
 gc heaps something here that goc does not, so gc is the only compiler with
 anything to say. This is the permissive direction, and gc's category is a direct
 statement of what it thinks publishes the object -- which is the fastest triage
 available for a line goc may be keeping in a frame wrongly.
 
-   1282  call-retains
+   1287  call-retains
      34  stored-in-object
       8  returned
       4  interface-boxed
@@ -5916,6 +5955,16 @@ runtime_gc_metadata_hugepages.go:131	absent -> heap	- -> call-retains
 	src  panic("the heap goal fell back below the threshold")
 	gc   col 9  heap  object  "the heap goal fell back below the threshold"
 	     call-retains     {heap} <- &{storage for "the heap goal fell back below the threshold"} via spill -> call parameter
+runtime_gc_promoted_local_root.go:65	absent -> mixed	- -> call-retains
+	src  runtime.SetFinalizer(h, func(dead *held) { finalized[dead.seed] = true })
+	gc   col 26  heap  object  func literal
+	     call-retains     {heap} <- &{storage for func literal} via spill -> interface-converted -> call parameter
+	gc   col 31  frame  object  dead
+runtime_gc_promoted_local_root.go:121	frame -> heap	- -> call-retains
+	src  fmt.Println("promoted local stayed visible")
+	goc  col 2  frame  1_any  [ir pass: heap-alloc-candidate in main.main]
+	gc   col 14  heap  object  "promoted local stayed visible"
+	     call-retains     {heap} <- *fmt.a via spill -> slice-literal-element -> spill -> assign-pair -> call parameter
 runtime_gc_scavenge_release.go:56	absent -> heap	- -> call-retains
 	src  panic("the heap lost blocks")
 	gc   col 9  heap  object  "the heap lost blocks"
@@ -6371,6 +6420,18 @@ runtime_opt_loop_carried_root.go:94	absent -> heap	- -> call-retains
 	src  panic("loop lost its chain")
 	gc   col 9  heap  object  "loop lost its chain"
 	     call-retains     {heap} <- &{storage for "loop lost its chain"} via spill -> call parameter
+runtime_opt_promoted_interface_root.go:61	absent -> heap	- -> call-retains
+	src  panic("makeCounter lost its second result")
+	gc   col 9  heap  object  "makeCounter lost its second result"
+	     call-retains     {heap} <- &{storage for "makeCounter lost its second result"} via spill -> call parameter
+runtime_opt_promoted_interface_root.go:64	absent -> heap	- -> call-retains
+	src  panic("deepen returned zero")
+	gc   col 9  heap  object  "deepen returned zero"
+	     call-retains     {heap} <- &{storage for "deepen returned zero"} via spill -> call parameter
+runtime_opt_promoted_interface_root.go:77	absent -> heap	- -> call-retains
+	src  panic("promoted interface lost its descriptor")
+	gc   col 9  heap  object  "promoted interface lost its descriptor"
+	     call-retains     {heap} <- &{storage for "promoted interface lost its descriptor"} via spill -> call parameter
 runtime_package_initializer_dispatch.go:50	absent -> heap	- -> stored-in-object
 	src  return passByteReader(bytes.NewReader([]byte("F")))
 	gc   col 47  heap  object  ([]byte)("F")
@@ -10320,14 +10381,14 @@ variadic_element_retention.go:42	frame -> mixed	- -> call-retains
 	gc   col 47  heap  object  51966
 	     call-retains     {heap} <- {storage for ... argument} via spill -> slice-literal-element -> spill -> call parameter
 
-## PLACEMENT AGREES, ONLY goc EXPLAINED: 44 lines
+## PLACEMENT AGREES, ONLY goc EXPLAINED: 45 lines
 
 the two compilers agree, and only goc explained. Either gc framed everything it
 reported on the line while goc heaped something -- the folded verdicts still
 match, which happens on mixed lines -- or gc's -m=2 printed no block for a
 decision it made.
 
-     44  stored-in-object
+     45  stored-in-object
 
 runtime_closure_captured_header_values.go:96	heap -> heap	stored-in-object -> -
 	src  done := make(chan struct{})
@@ -10412,6 +10473,12 @@ runtime_lock_osthread.go:6	heap -> heap	stored-in-object -> -
 	goc  col 2  heap  chan_int  [ir pass: heap-alloc-candidate in main.main]
 	     stored-in-object write barrier into a candidate
 	     at               testdata/runtime_lock_osthread.go:7:5
+	gc   col 0  heap  chan  make(chan ...)  (synthesized: channels are always heap-allocated by cmd/compile)
+runtime_opt_promoted_interface_root.go:68	heap -> heap	stored-in-object -> -
+	src  done := make(chan int, 64)
+	goc  col 2  heap  chan_int  [ir pass: heap-alloc-candidate in main.main]
+	     stored-in-object write barrier into a candidate
+	     at               testdata/runtime_opt_promoted_interface_root.go:70:6
 	gc   col 0  heap  chan  make(chan ...)  (synthesized: channels are always heap-allocated by cmd/compile)
 runtime_scheduler_gc_churn.go:17	heap -> heap	stored-in-object -> -
 	src  results := make(chan int, workers)

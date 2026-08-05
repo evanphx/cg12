@@ -22,18 +22,18 @@ host toolchain: go version go1.26.1 linux/arm64
 
 ## coverage
 
-corpus programs                             404
-compared (host toolchain built them)        400
+corpus programs                             406
+compared (host toolchain built them)        402
 not compared                                  4
-census rows joined                         1867
+census rows joined                         1879
 census rows lost to an unbuilt program        4
-census rows with no source position        1740  (never joinable)
-  of those, in a corpus program's own code    33  (29 on the heap: the bound on how
+census rows with no source position        1741  (never joinable)
+  of those, in a corpus program's own code    34  (30 on the heap: the bound on how
                                                   wrong the join can be about goc)
 census rows outside the corpus directory  10865  (vendored stdlib; never joinable)
-gc decisions joined                        3529
-  of which synthesized by the chan rule     136
-gc decisions at an inlining call site       891  (excluded; see package gcdiff)
+gc decisions joined                        3548
+  of which synthesized by the chan rule     137
+gc decisions at an inlining call site       900  (excluded; see package gcdiff)
 gc diagnostics outside the program         3514  (excluded; wrappers and instantiations)
 gc diagnostics the parser did not know        0  (must be 0)
 
@@ -51,13 +51,13 @@ rows are goc's verdict for the line, columns are gc's.
 same as "it put the object in a frame" -- see gcdiff.Absent.
 
   goc\gc      frame     heap    mixed   absent    total
-  frame         190       30       14      193      427
-  heap           97      582      172       81      932
-  mixed          13       89       24       14      140
-  absent        422     1296       24        0     1742
-  total         722     1997      234      288     3241
+  frame         191       31       14      193      429
+  heap           97      589      172       81      939
+  mixed          13       90       24       14      141
+  absent        423     1299       25        0     1747
+  total         724     2009      235      288     3256
 
-## PERMISSIVE: 1477 lines
+## PERMISSIVE: 1483 lines
 
 every source line gc puts on the heap and goc does not. This is the
 correctness-critical direction: goc keeping in a frame something gc could not
@@ -68,10 +68,10 @@ not record ordinary front-end frame slots, so "no record" is consistent with
 
 by construct (goc allocators on the line | gc constructs on the line):
 
-   1293  - | object/heap
+   1296  - | object/heap
      80  newobject/frame,newobject/heap | object/heap
-     22  - | object/frame,object/heap
-     20  newobject/frame | object/heap
+     23  - | object/frame,object/heap
+     21  newobject/frame | object/heap
      13  convT64/heap,newobject/frame | object/heap,slice/frame
      12  newobject/frame | object/heap,slice/frame
      10  newobject/frame | slice/heap
@@ -79,11 +79,11 @@ by construct (goc allocators on the line | gc constructs on the line):
       6  convT64/heap,newobject/frame,newobject/heap | object/frame,object/heap,slice/frame
       2  - | object/heap,slice/frame
       2  - | slice/heap
+      2  convT64/heap,newobject/frame | object/heap
       2  convT64/heap,newobject/frame,newobject/heap | object/heap,slice/frame
       2  newobject/frame | slice/frame,slice/heap
       2  newobject/frame,newobject/heap | object/frame,object/heap,slice/frame
       1  - | object/heap,slice/heap
-      1  convT64/heap,newobject/frame | object/heap
       1  newobject/frame,newobject/heap | object/frame,object/heap
       1  newobject/frame,newobject/heap | object/heap,slice/heap
 
@@ -1095,6 +1095,19 @@ runtime_gc_metadata_hugepages.go:109	absent -> heap
 runtime_gc_metadata_hugepages.go:131	absent -> heap
 	src  panic("the heap goal fell back below the threshold")
 	gc   col 9  heap  object  "the heap goal fell back below the threshold"
+runtime_gc_promoted_local_root.go:59	mixed -> heap
+	src  return nil, fmt.Errorf("negative seed %d", seed)
+	goc  col 26  frame  runtime.newobject  struct_values__1_any__payload0_int  [main.make2]
+	goc  col 46  heap  runtime.convT64  int  [main.make2]
+	gc   col 46  heap  object  seed
+runtime_gc_promoted_local_root.go:65	absent -> mixed
+	src  runtime.SetFinalizer(h, func(dead *held) { finalized[dead.seed] = true })
+	gc   col 26  heap  object  func literal
+	gc   col 31  frame  object  dead
+runtime_gc_promoted_local_root.go:121	frame -> heap
+	src  fmt.Println("promoted local stayed visible")
+	goc  col 2  frame  runtime.newobject  1_any  [main.main]
+	gc   col 14  heap  object  "promoted local stayed visible"
 runtime_gc_scavenge_release.go:47	absent -> heap
 	src  out = append(out, node)
 	gc   col 15  heap  object  append
@@ -1606,6 +1619,15 @@ runtime_opt_loop_carried_root.go:90	absent -> heap
 runtime_opt_loop_carried_root.go:94	absent -> heap
 	src  panic("loop lost its chain")
 	gc   col 9  heap  object  "loop lost its chain"
+runtime_opt_promoted_interface_root.go:61	absent -> heap
+	src  panic("makeCounter lost its second result")
+	gc   col 9  heap  object  "makeCounter lost its second result"
+runtime_opt_promoted_interface_root.go:64	absent -> heap
+	src  panic("deepen returned zero")
+	gc   col 9  heap  object  "deepen returned zero"
+runtime_opt_promoted_interface_root.go:77	absent -> heap
+	src  panic("promoted interface lost its descriptor")
+	gc   col 9  heap  object  "promoted interface lost its descriptor"
 runtime_package_initializer_dispatch.go:43	mixed -> heap
 	src  var variadicArgument = firstWriter(new(bytes.Buffer))
 	goc  col 24  frame  runtime.newobject  1_io_Writer  [.goc.global.initfunc.68.main.variadicArgument]
