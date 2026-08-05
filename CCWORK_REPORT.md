@@ -452,10 +452,46 @@ memory") was introduced to hold three HTTP programs under it — they were at
 
 Two things keep this from being a regression to the state 48200ab fixed. The
 per-*function* budget in `opt/budget.go` is untouched and is the one that
-actually bounds the pathological cases: `gvn`, `loadelim` and the CFG passes all
-skip any function over 200 blocks / 4000 temps / 1000 instructions. And the whole
+actually bounds the pathological cases: `gvn` (`opt/gvn.go:66`), `loadelim`
+(`opt/loadelim.go:96`) and `simplifycfg`'s block coalescing (`opt/cfg.go:233`)
+all skip any function over 200 blocks / 4000 temps / 1000 instructions — the
+three passes that build the big per-function structures. (`mem2reg`, `inline`,
+`gcm` and `dce` do not consult it; they do not build one.) And the whole
 368-program matrix, both arms, passes on this box. But 2.99 against 3.00 is not
 margin, and a box with a lower limit than this one will fail on the `net/http`
 pack. **If a memory ceiling has to be honoured, the thing to reinstate is a
 module budget on the pack build alone** (`internal/prebuilt.BuildRuntime`), not
 on program modules — which is where the whole performance prize is.
+
+### Where the compile time should be spent — a proposal, not a change
+
+4.5x is large and I am not going to describe it as fine. Three observations, in
+the order I would act on them:
+
+1. **The `clean` fixpoint is 85% of the cost, and most of its work is
+   re-examining functions nothing touched.** `DefaultPipeline` runs `clean` in
+   four places plus twice inside the inliner fixpoints, and each `clean` is
+   itself a fixpoint that re-runs seven passes over all 5101 functions until a
+   whole round changes nothing. A function the previous round did not modify
+   cannot have new opportunities in a purely intraprocedural pass. Tracking a
+   dirty set per function across `Fixpoint.Run` — and seeding it from the
+   inliner's list of modified callers between stages — is the change with by far
+   the best ratio here, and it is a change to `opt/pass.go` alone.
+
+2. **The module is 5101 functions, and about 4900 of them are stdlib the program
+   does not call.** `deadfunc` (`DeadFuncElim`) runs *last*. Running a
+   reachability pass first, before the first `clean`, would cut everything
+   downstream by whatever fraction of the module is dead — which for a
+   168-line program is most of it. The reason it is last today is presumably that
+   inlining can make functions dead; that argues for running it at both ends, not
+   only at the end.
+
+3. **The prebuilt pack path already fixes this for the matrix and should be the
+   default for corpus runs.** With packs warm the `-O` matrix costs the same as
+   the default arm. The programs that hurt (the `net/http` and crypto ones, 4-5
+   minutes each) are exactly the ones a pack exists for.
+
+None of these is a reason to keep the pipeline off. The 4.5x buys a control loop
+that goes from 1.63x the host toolchain to under 1.0 (below), and the matrix —
+the thing that runs in CI — does not get slower once its packs are built. But if
+somebody has to pay 4.5x on a laptop compiling one program, (1) is where to look.
