@@ -229,6 +229,9 @@ func inlineModule(m *ir.Module, base map[*ir.Func]int, costDone *bool) bool {
 		if f.Start == nil || hasSecondaryEntry(f) {
 			continue
 		}
+		if frameIsSpentFromTheNoSplitReserve(f) {
+			continue
+		}
 		if _, ok := base[f]; !ok {
 			base[f] = funcSize(f)
 		}
@@ -237,6 +240,44 @@ func inlineModule(m *ir.Module, base map[*ir.Func]int, costDone *bool) bool {
 		}
 	}
 	return changed
+}
+
+// frameIsSpentFromTheNoSplitReserve reports whether growing this function's frame
+// spends stack the runtime has already promised to something else, in which case
+// [inlineModule] leaves it alone.
+//
+// A nosplit function emits no stack-growth guard, so its frame is spent out of a
+// fixed reserve the runtime keeps below g.stackguard0 -- and so is the frame of
+// every nosplit function it goes on to call, until the next guarded call. Nothing
+// in cg12 measures that run. Go's linker does (`nosplit stack over 792 byte
+// limit` is a link-time error there); opt.AuditNoSplitCalls checks the different
+// question of whether a nosplit function calls a splittable one at all. So the
+// only thing keeping a cg12 nosplit chain inside the reserve is that nobody grows
+// those frames, which was true for as long as `goc -O` meant fold/copy/dce.
+//
+// It stopped being true the moment DefaultPipeline became the default.
+// runtime.mcache.nextFree -- which goc marks nosplit itself, in
+// runtimeImplicitNoSplit, because upstream Go inlines it into mallocgc and cg12
+// does not -- went from a 384-byte frame to a 656-byte one when the inliner
+// folded its callees in. That put the nextFree/refill nosplit run at 976 bytes
+// against a reserve of about 800, and goc/testdata/runtime_lock_osthread.go died
+// with "fatal error: runtime: split stack overflow" on 14 runs in 100, inside
+// LockOSThread -> newm -> allocm -> mallocgc -> nextFree -> refill. Intermittent
+// because the chain is only entered when the mcache actually needs a refill.
+//
+// Declining to inline into a nosplit caller is the conservative rule, and it is
+// the one that can be stated without a frame-size model: the inliner works on IR
+// and cannot see a frame. It costs the runtime's allocator fast paths their
+// inlining, which is a real cost -- upstream Go inlines there freely, and pays for
+// it with the linker check cg12 does not have. A frame-budget model in the
+// backend, rejecting the build rather than miscompiling it, is the fix that would
+// let this come back; CCWORK_REPORT.md says so at more length.
+//
+// InlineNoSplitCalls is deliberately not covered by this. It exists for the
+// opposite reason -- a signal-entry path that must not reach a stack check at all
+// -- and inlines only the small accessors that removes a check from.
+func frameIsSpentFromTheNoSplitReserve(function *ir.Func) bool {
+	return function.NoSplit
 }
 
 // callSiteCounts returns, per module function, the number of direct call sites that

@@ -67,9 +67,10 @@ func twoJoinDiamonds() *ir.Func {
 // walk of the iterated dominance frontier: that is a map keyed by block pointer,
 // and placing a phi calls f.NewTemp, so ranging it numbered the phi temporaries
 // differently on every compile -- and temporary ids reach register allocation and
-// slot assignment. RUNTIME_PLAN.md section 5.10 records this, and that it can only
-// reach cg12cc: every goc module is over opt's function budget and takes
-// BoundedPipeline, which does not run Mem2Reg at all.
+// slot assignment. RUNTIME_PLAN.md section 5.10 records this, and that at the time
+// it could only reach cg12cc: every goc module was over opt's function budget and
+// took BoundedPipeline, which does not run Mem2Reg at all. The budget is gone
+// (opt.ModulePipeline), so this property now guards goc builds too.
 //
 // The repeats are what makes this a test rather than a coin flip: with four phis
 // over a two-block frontier, one comparison passes by chance often enough that a

@@ -1029,3 +1029,55 @@ func TestUnrollSkipsCallWithMismatchedParameters(t *testing.T) {
 		assert.False(t, opt.UnrollRecursion(module))
 	})
 }
+
+// The general inliner must not grow a nosplit function's frame.
+//
+// A nosplit function has no stack-growth guard, so its frame and the frames of
+// the nosplit functions it calls all come out of the fixed reserve the runtime
+// keeps below g.stackguard0. Nothing in cg12 measures that run -- Go's linker
+// does, and rejects a build that overruns it, but cg12 has no equivalent -- so
+// the only thing holding a nosplit chain inside the reserve is that no pass
+// grows those frames.
+//
+// Turning DefaultPipeline on for Go builds broke that. Inlining took
+// runtime.mcache.nextFree's frame from 384 bytes to 656, put the nextFree/refill
+// nosplit run at 976 bytes against a reserve of about 800, and
+// goc/testdata/runtime_lock_osthread.go started dying with "fatal error:
+// runtime: split stack overflow" on 14 runs in 100. See
+// frameIsSpentFromTheNoSplitReserve.
+//
+// InlineNoSplitCalls is the deliberate exception and is checked separately by
+// TestInlineNoSplitCallsOnlyChangesNoSplitCallers: it inlines into nosplit
+// callers on purpose, to remove a stack check from a signal-entry path.
+func TestInliningDoesNotGrowANoSplitCaller(t *testing.T) {
+	module := ir.NewModule()
+	addHelper(module)
+
+	nosplitCaller := module.NewFunc("nosplitCaller", ir.ClsW).Export()
+	nosplitCaller.NoSplit = true
+	nosplitArgument := nosplitCaller.Param("value", ir.ClsW)
+	nosplitEntry := nosplitCaller.Entry()
+	nosplitEntry.Ret(nosplitEntry.Call(ir.ClsW, nosplitCaller.Sym("add3", 0), nosplitArgument))
+
+	splitCaller := module.NewFunc("splitCaller", ir.ClsW).Export()
+	splitArgument := splitCaller.Param("value", ir.ClsW)
+	splitEntry := splitCaller.Entry()
+	splitEntry.Ret(splitEntry.Call(ir.ClsW, splitCaller.Sym("add3", 0), splitArgument))
+
+	require.Equal(t, 2, countCalls(module))
+	opt.OptimizeModule(module)
+
+	assert.Equal(t, 1, countCalls(module),
+		"the split-stack caller's call to add3 should inline and the nosplit caller's should not")
+	assert.True(t, hasFunc(module, "add3"),
+		"add3 is still called by the nosplit caller, so it must not be dropped as dead")
+	remaining := 0
+	for _, block := range nosplitCaller.Blocks {
+		for index := range block.Instrs {
+			if block.Instrs[index].Op == ir.OCall {
+				remaining++
+			}
+		}
+	}
+	assert.Equal(t, 1, remaining, "the surviving call is the nosplit caller's")
+}

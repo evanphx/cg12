@@ -149,12 +149,15 @@ func runCorpusProgramOutputWithEnv(t *testing.T, source string, optimized bool, 
 // runCorpusProgramOutputOptimizedBy is runCorpusProgramOutputWithEnv with the
 // optimization named explicitly rather than chosen by a bool.
 //
-// It exists because `optimized: true` above means opt.OptimizeModule on a whole
-// monolithic module, and a module carrying the Go runtime is over
-// opt.OptimizeModule's own budget, so that pipeline degrades to fold/copy/dce and
-// promotes nothing. A caller that needs the pipeline goc's `-O` actually applies
-// to a *program* module -- which is small, and gets mem2reg, inlining and the
-// rest -- passes it here instead.
+// It exists because `optimized: true` above used to mean much less than it said.
+// opt.OptimizeModule had a size budget, and a module carrying the Go runtime was
+// over it, so the pipeline degraded to fold/copy/dce and promoted nothing; a
+// caller that needed the pipeline goc's `-O` really applied to a *program*
+// module passed the restriction explicitly here instead. The budget is gone
+// (opt.ModulePipeline), so `optimized: true` now runs the whole pipeline over
+// the whole module, runtime included. The hook is kept: restricting the pipeline
+// to the program's own functions is still the way to isolate a defect to the
+// program half of a monolithic build.
 func runCorpusProgramOutputOptimizedBy(
 	t *testing.T,
 	source string,

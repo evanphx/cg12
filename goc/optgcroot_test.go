@@ -37,18 +37,49 @@ func TestOptimizedLoopCarriedPointerStaysAGCRoot(t *testing.T) {
 	require.Contains(t, output, "opt loop carried root ok")
 }
 
-// optimizeProgramFunctions runs the intraprocedural pipeline over the program's
-// own functions, which is what goc's `-O` does to them and what a monolithic
-// opt.OptimizeModule on this module does not.
+// The other half of the same question: a pointer local that `-O` promotes must
+// also survive the stack moving under it.
 //
-// A goc executable module carries the whole Go runtime, which puts it over
-// opt.OptimizeModule's function budget, so that call degrades to
-// BoundedPipeline -- fold, copy, dce -- and never promotes a slot. The matrix's
-// `-O` arm does not have that problem: it compiles against a prebuilt runtime,
-// so the program is a module of its own, small enough for DefaultPipeline, and
-// mem2reg runs. Restricting the pipeline to the program's functions reproduces
-// that here without a prebuilt pack, and leaves the runtime half of the module
-// exactly as the unoptimized corpus runs compile it.
+// The phi case above is the one a collection exposes. This is the one stack
+// growth exposes, and it needs no phi at all. A local of interface type is a
+// frame slot holding the address of the two-word descriptor, and for a
+// multi-result call that descriptor is the result home the call writes into --
+// an allocation in the caller's own frame. Promotion makes the call's result
+// temporary the value every later read sees, so a pointer the safepoint map
+// described while it sat in a frame slot now lives in an SSA value the map does
+// not mention. copystack walks the frame map, does not find it, and leaves the
+// local pointing into the freed stack.
+//
+// That is what stdlib-netpoll-stress/tcp-churn died of on the `-O` arm with
+// GOC_BOUNDED_MEM2REG=1: `cg12: interface dispatch failed for dynamic type 0x0`
+// in net.Listener.Accept, on a net.Listener whose descriptor main.main had read
+// out of a stack the runtime had already recycled. The reducer makes the
+// recycling explicit -- the fault address is the pattern its own goroutines
+// wrote -- so it fails the same way on every run rather than depending on what
+// happened to be left behind.
+func TestOptimizedInterfaceLocalSurvivesStackGrowth(t *testing.T) {
+	output := runCorpusProgramOutputOptimizedBy(t,
+		filepath.Join("testdata", "runtime_opt_promoted_interface_root.go"),
+		optimizeProgramFunctions)
+	require.Contains(t, output, "opt promoted interface root ok")
+}
+
+// optimizeProgramFunctions runs the intraprocedural pipeline over the program's
+// own functions only, leaving the runtime half of the module exactly as the
+// unoptimized corpus runs compile it.
+//
+// It was written when a monolithic opt.OptimizeModule could not do this: a goc
+// executable module carries the whole Go runtime, which put it over the function
+// budget, so the call degraded to BoundedPipeline -- fold, copy, dce -- and never
+// promoted a slot, while the matrix's `-O` arm (which compiles against a prebuilt
+// runtime, so the program is a small module of its own) did promote. The budget
+// is gone and opt.OptimizeModule would now promote here too, so the restriction
+// is no longer necessary to make these tests fail on the defect.
+//
+// It is kept anyway, and deliberately: holding the runtime half fixed is what
+// makes a failure here attributable to the program's own code. These two tests
+// are reductions of specific miscompiles, and a reduction that also recompiles
+// 5000 runtime functions is a reduction of less.
 func optimizeProgramFunctions(module *ir.Module) {
 	for _, function := range module.Funcs {
 		if function == nil || function.Start == nil {

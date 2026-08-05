@@ -42,43 +42,18 @@ func hasSecondaryEntry(function *ir.Func) bool {
 // passes of [Optimize] plus the interprocedural inliner and dead-function
 // elimination, sequenced by [DefaultPipeline]. Unlike [Optimize] on a single
 // function, it can inline across functions.
+//
+// It used to route any module past 2048 functions, 50000 blocks or 200000
+// instructions to [BoundedPipeline] instead, which meant every whole-program Go
+// build -- all of which exceed all three by an order of magnitude, because the
+// program module carries the stdlib closure -- was optimized by fold, copy and
+// DCE alone. The budget is gone: size no longer decides the pipeline, and
+// [ModulePipeline] does, from GOC_OPT_PIPELINE.
+//
+// What the budget was protecting against was peak memory on the five largest C
+// programs in the tree (48200ab), measured against a 3 GiB ceiling. Those
+// programs are re-measured on this tree in CCWORK_REPORT.md; the full pipeline
+// on the Go builds costs compile time, not a memory cliff.
 func OptimizeModule(m *ir.Module) {
-	if moduleOptimizationOverBudget(m) {
-		Run(m, BoundedPipeline())
-		return
-	}
-	Run(m, DefaultPipeline())
-}
-
-const (
-	moduleOptimizationFunctionBudget    = 2048
-	moduleOptimizationInstructionBudget = 200000
-	moduleOptimizationBlockBudget       = 50000
-	moduleOptimizationTempBudget        = 400000
-)
-
-func moduleOptimizationOverBudget(module *ir.Module) bool {
-	if len(module.Funcs) > moduleOptimizationFunctionBudget {
-		return true
-	}
-	blocks := 0
-	instructions := 0
-	temps := 0
-	for _, function := range module.Funcs {
-		if function == nil || function.Start == nil {
-			continue
-		}
-		blocks += len(function.Blocks)
-		temps += len(function.Temps)
-		if blocks > moduleOptimizationBlockBudget || temps > moduleOptimizationTempBudget {
-			return true
-		}
-		for _, block := range function.Blocks {
-			instructions += len(block.Phis) + len(block.Instrs)
-			if instructions > moduleOptimizationInstructionBudget {
-				return true
-			}
-		}
-	}
-	return false
+	Run(m, ModulePipeline())
 }
