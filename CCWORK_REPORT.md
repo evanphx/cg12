@@ -220,7 +220,7 @@ where it was. Everything below is on the branch tip with the fix and with
 |---|---|
 | capability matrix, default arm | **367/367**, 0 failures |
 | capability matrix, `-runtime-opt` arm | **367/367**, 0 failures |
-| capability matrix, both arms, second run before the pack-cache trap was found | **367/367** each, 0 failures |
+| capability matrix, both arms, an earlier pair of runs that shared a pack cache | **367/367** each, 0 failures |
 | GC reducer `gc/type-mask-padding`, `-O`, `GOMAXPROCS=3`, default `GOGC` | **0/20** fail |
 | GC reducer, `-O`, `GOGC=10` | **0/20** fail |
 | GC reducer, unoptimized, default `GOGC` | **0/20** fail |
