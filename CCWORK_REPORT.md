@@ -794,3 +794,22 @@ to within 0.3%.
 The committed `perf_suite_baseline.txt` was **not** re-measured: that is an
 eleven-minute run whose whole method assumes a quiet machine, and this box shares
 work. Nothing above suggests it needs to move.
+
+### Verdict
+
+**Root cause.** goc lowered a slice expression's data pointer as
+`ptr + low*elemsize` with no mask. When the result has no capacity left --
+`b[len(b):]`, and in `compress/flate` the `f.toRead = f.toRead[n:]` in
+`decompressor.Read` -- that pointer lands one byte past the end of the
+allocation. The collector rejects such a pointer, and it retains nothing, so the
+32 KiB history buffer was freed under a slice that was still reachable from a
+live heap object. The host toolchain masks the offset to zero in exactly this
+case; goc now does too.
+
+**Rate.** In the perf suite's own configuration: **15 of 200 runs (7.5%) before,
+0 of 600 after**. In the worst configuration found -- alignment off at
+`GOGC=10` -- **95 of 100 (95%) before, 0 of 400 after**. 1000 post-fix runs of
+the `flate` benchmark, no crashes.
+
+**Reduction.** `goc/testdata/runtime_gc_slice_tail_pointer.go`, capability
+`gc-invariants/slice-tail-pointer`. Deterministic: false-pass rate zero.
