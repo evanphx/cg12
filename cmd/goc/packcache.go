@@ -12,6 +12,7 @@ import (
 	"strings"
 
 	"github.com/evanphx/cg12/arm64"
+	"github.com/evanphx/cg12/opt"
 )
 
 // A prebuilt runtime pack that carries part of the standard library costs what
@@ -24,6 +25,8 @@ import (
 // stale hit is not a slow build but a wrong one:
 //
 //   - the pack format version, and the target, -O and package list the caller asked for;
+//   - the code placement policy and the optimization pipeline, both of which the
+//     environment can override without changing a byte of the compiler;
 //   - the goc binary itself, hashed, which covers every compiler change;
 //   - the vendored standard library tree, hashed, which covers every source change;
 //   - the C toolchain's version banner, because `cc` assembles the Plan 9 sidecar
@@ -59,6 +62,11 @@ func packCacheKey(version int, target string, optimize bool, packages []string, 
 	// it can be overridden from the environment so a corpus can be built several
 	// ways, and a pack laid out under one policy is the wrong pack under another.
 	fmt.Fprintf(digest, "textlayout=%s;\n", arm64.TextLayoutIdentity())
+	// The optimization pipeline, for the same reason: GOC_OPT_PIPELINE and
+	// GOC_OPT_SKIP select which passes run, and a pack built by one pipeline is
+	// the wrong pack under another. Without this a bisection run would link the
+	// pack the previous run cached and measure the arm it was trying to rule out.
+	fmt.Fprintf(digest, "pipeline=%s;\n", opt.PipelineIdentity())
 	sorted := append([]string(nil), packages...)
 	sort.Strings(sorted)
 	fmt.Fprintf(digest, "packages=%s;\n", strings.Join(sorted, ","))

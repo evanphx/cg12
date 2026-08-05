@@ -2,6 +2,7 @@ package opt
 
 import (
 	"os"
+	"strings"
 
 	"github.com/evanphx/cg12/ir"
 )
@@ -161,52 +162,35 @@ func DefaultPipeline() []Pass {
 	}
 }
 
-// BoundedPipeline is used for very large whole-runtime binaries where the full
-// pipeline's CFG and interprocedural passes can dominate peak memory. It keeps
-// only local linear-time cleanup passes that do not build CFGs or clone code.
+// BoundedPipeline keeps only the local linear-time cleanup passes that do not
+// build CFGs or clone code: fold, copy and DCE. It is no longer what a build
+// gets by default; it is the bisection arm, selected by GOC_OPT_PIPELINE=bounded
+// (see [ModulePipeline]).
 //
-// Every whole-program Go build takes this path, not DefaultPipeline's. The
-// program module carries the stdlib closure the prebuilt runtime pack did not
-// already hold, which even for a 168-line program is 5101 functions, 70160 blocks
-// and 297389 instructions against caps of 2048, 50000 and 200000 -- so this
-// pipeline is what `goc -O` means in practice. RUNTIME_PLAN.md:4282 records the
-// same fact from the other side: no goc module has ever run DefaultPipeline.
+// It was the default for every whole-program Go build for as long as the module
+// budget existed. The program module carries the stdlib closure the prebuilt
+// runtime pack did not already hold, which even for a 168-line program is 5101
+// functions, 70160 blocks and 297389 instructions against caps of 2048, 50000
+// and 200000 -- so this three-pass pipeline was what `goc -O` meant in practice,
+// and no goc module had ever run [DefaultPipeline] (RUNTIME_PLAN.md:4282 records
+// the same fact from the other side).
 //
-// That is where the performance suite's 1.63x floor comes from. Without mem2reg
+// That is where the performance suite's 1.63x floor came from. Without mem2reg
 // every local stays in its frame slot and is reloaded and stored back on each
 // use, so a loop-carried dependence runs through store-to-load forwarding instead
 // of a register. The suite's control -- a two-variable integer multiply-add loop
-// -- takes 22 instructions per iteration here where the host toolchain takes 14,
-// and runs at 1.632x in all eleven programs that contain it. Promoting fixes it
-// outright: 30.99 ms against the host's 33.48 ms, a ratio of 0.926. The cost on
-// the five programs the budget was introduced for (48200ab) is nil -- compile
-// time unchanged or slightly better, peak RSS inside its own run-to-run spread,
-// every one still well under the 3 GiB ceiling.
+// -- took 22 instructions per iteration here where the host toolchain takes 14,
+// and ran at 1.632x in all eleven programs that contain it.
 //
-// GOC_BOUNDED_MEM2REG=1 turns it on. It went in off, because mem2reg had never
-// run on a Go-frontend module -- only on cg12cc's C ones -- and turning it on
-// broke two programs. Both are fixed; what is left before flipping it is
-// measurement, not correctness.
-//
-// The first was recorded as compress/flate dying in the collector, and was not
-// mem2reg's at all: it was the zero-capacity slice defect 800f47f fixed, whose
-// rate promotion roughly doubled. The tree it was measured on predates that fix.
-// With the fix in, flate is 0 crashes in 750 runs with promotion on, across
-// GOGC=off, the default, and GOGC=10.
-//
-// The one that was real is Mem2Reg's markManagedDef: a promoted managed local was
-// carried across every safepoint by a value nothing marked, so the collector freed
-// the object under it. It hid at the default GOGC and only showed above it --
-// placement_bench/p256 failed to verify its own signatures 35 runs in 40 at
-// GOGC=10 and 0 in 40 at the default -- which is why the corpus never saw it.
-// goc/testdata/runtime_gc_promoted_local_root.go is the reducer.
-//
-// The stdlib-netpoll-stress/tcp-churn capability ("cg12: interface dispatch failed
-// for dynamic type 0x0" in net.Listener.Accept) is fixed by the same change: 18/20
-// failures before, 0 in 80 after. Its mechanism is not the collector -- it failed
-// under GOGC=off too -- so what it needed is one of GCRef's other effects, most
-// likely the private, non-coalesced spill slot arm64/gcalloc.go then gives the
-// value. That is the place to look if it returns.
+// Two miscompiles had to be fixed before promotion could be turned on, both in
+// Mem2Reg's markManagedDef: a promoted managed local was carried across
+// safepoints by a value nothing described to the collector, so the object was
+// freed under it (placement_bench/p256 failed to verify its own signatures 35
+// runs in 40 at GOGC=10 and 0 in 40 at the default), and the same unmarked value
+// lost the private spill slot a GC root gets, which broke
+// stdlib-netpoll-stress/tcp-churn's interface dispatch under GOGC=off too. See
+// goc/testdata/runtime_gc_promoted_local_root.go and
+// goc/testdata/runtime_opt_promoted_interface_root.go for the reducers.
 //
 // CCWORK_REPORT.md has the bisections and the measurements.
 func BoundedPipeline() []Pass {
@@ -215,11 +199,109 @@ func BoundedPipeline() []Pass {
 		FuncPass("copy", Copy),
 		FuncPass("dce", DCE),
 	)
-	if os.Getenv("GOC_BOUNDED_MEM2REG") == "" {
-		return []Pass{clean}
+	return []Pass{clean}
+}
+
+// PromotePipeline is BoundedPipeline plus mem2reg: the promotion-only step
+// between the two, kept as a named arm so a failure can be attributed to
+// promotion or to the rest of [DefaultPipeline] without editing the compiler.
+// Selected by GOC_OPT_PIPELINE=promote.
+func PromotePipeline() []Pass {
+	return append([]Pass{FuncPass("mem2reg", Mem2Reg)}, BoundedPipeline()...)
+}
+
+// ModulePipeline chooses the pipeline a whole module is optimized with. The
+// default is [DefaultPipeline] for every module regardless of size.
+//
+// GOC_OPT_PIPELINE selects an arm explicitly:
+//
+//	full     (default) DefaultPipeline
+//	promote            BoundedPipeline plus mem2reg
+//	bounded            BoundedPipeline, the pre-2026-08 default
+//
+// GOC_OPT_SKIP is a comma-separated list of pass names dropped from whichever
+// pipeline was selected, at any nesting depth. It exists so a miscompile can be
+// attributed to one pass by an outside job -- the corpus and the capability
+// matrix compile in-process, so there is no compiler flag to thread through --
+// and it is the first thing to reach for when a program that passes under
+// GOC_OPT_PIPELINE=bounded fails under the default.
+//
+// An unrecognized GOC_OPT_PIPELINE value panics rather than silently selecting
+// the default: a typo in a bisection variable that quietly measures the default
+// arm is worse than a crash.
+func ModulePipeline() []Pass {
+	var pipeline []Pass
+	switch selected := os.Getenv("GOC_OPT_PIPELINE"); selected {
+	case "", "full", "default":
+		pipeline = DefaultPipeline()
+	case "promote":
+		pipeline = PromotePipeline()
+	case "bounded":
+		pipeline = BoundedPipeline()
+	default:
+		panic("opt: GOC_OPT_PIPELINE=" + selected + " is not one of full, promote, bounded")
 	}
-	return []Pass{
-		FuncPass("mem2reg", Mem2Reg),
-		clean,
+	return withoutPasses(pipeline, skippedPasses())
+}
+
+// PipelineIdentity names the pipeline [ModulePipeline] would select, in a form
+// stable enough to key a build cache on.
+//
+// It exists because the prebuilt runtime pack is cached by content
+// (cmd/goc/packcache.go), and the key covers the compiler binary's bytes rather
+// than the environment it runs in. GOC_OPT_PIPELINE and GOC_OPT_SKIP change what
+// the pack contains without changing a byte of the compiler, so without this a
+// bisection run under GOC_OPT_PIPELINE=bounded would silently link the
+// full-pipeline pack the previous run cached -- a stale hit that is not a slow
+// build but a wrong one, and one that would have quietly invalidated every
+// bisection this switch exists to make possible.
+func PipelineIdentity() string {
+	identity := os.Getenv("GOC_OPT_PIPELINE")
+	if identity == "" {
+		identity = "full"
 	}
+	if skip := os.Getenv("GOC_OPT_SKIP"); skip != "" {
+		identity += "-skip:" + skip
+	}
+	return identity
+}
+
+// skippedPasses parses GOC_OPT_SKIP.
+func skippedPasses() map[string]bool {
+	value := os.Getenv("GOC_OPT_SKIP")
+	if value == "" {
+		return nil
+	}
+	skipped := make(map[string]bool)
+	for _, name := range strings.Split(value, ",") {
+		name = strings.TrimSpace(name)
+		if name != "" {
+			skipped[name] = true
+		}
+	}
+	return skipped
+}
+
+// withoutPasses drops the named passes from a pipeline, descending into
+// fixpoints so that skipping "gvn" removes it from the clean set too.
+func withoutPasses(pipeline []Pass, skipped map[string]bool) []Pass {
+	if len(skipped) == 0 {
+		return pipeline
+	}
+	kept := make([]Pass, 0, len(pipeline))
+	for _, pass := range pipeline {
+		if skipped[pass.Name()] {
+			continue
+		}
+		if nested, ok := pass.(fixpoint); ok {
+			nested.passes = withoutPasses(nested.passes, skipped)
+			if len(nested.passes) == 0 {
+				continue
+			}
+			kept = append(kept, nested)
+			continue
+		}
+		kept = append(kept, pass)
+	}
+	return kept
 }

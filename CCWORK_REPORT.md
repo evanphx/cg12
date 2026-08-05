@@ -1,285 +1,123 @@
-# The interface-dispatch miscompile that keeps `goc -O`'s mem2reg switched off
+# Enable goc's full optimisation pipeline by default
 
-Branch: `ccwork/mem2reg-iface-dispatch`, off `integration/wave8` = `7983abd`.
-Fix: `792d2f0`.
+Branch: `ccwork/enable-full-pipeline` = `ccwork/mem2reg-iface-dispatch` + merge of
+`ccwork/mem2reg-gc-visibility` (merge commit 4803808).
 
-## The answer
+## Status: IN PROGRESS — this file is written as work lands, not at the end.
 
-**mem2reg described the phis it minted for a managed slot and nothing else.**
+## Merge of the two prerequisite branches
 
-`opt.Mem2Reg` already knew that promoting a pointer local changes who can see the
-pointer, and it carried the slot's GC marking onto every phi it created for that
-variable. It did not carry it onto the *other* kind of reaching definition — the
-value a store put into the slot, which after promotion is what every later load
-reads. For a local assigned once and read later, that value is the only
-definition there is, and no phi is involved at all.
+Both branches independently landed the *same* fix: `opt.markManagedDef` in
+`opt/mem2reg.go`, called from `renameBlock` on every store that becomes a promoted
+managed variable's reaching definition. The conflict was a genuine duplicate, not two
+halves of one change.
 
-So a pointer that the safepoint map described while it sat in a frame slot moved
-into an SSA value the map does not mention, and stayed there for the whole
-function.
+Difference between the two versions, and what I kept:
 
-`stdlib-netpoll-stress/tcp-churn` is what that costs. In `main.main`,
+- `mem2reg-iface-dispatch`: returns early if the temp already has `GCRef`, else
+  `f.MarkGCRefType(value, v.gcType)`.
+- `mem2reg-gc-visibility`: always sets `GCRef = true`, and sets `GCType` only when
+  it is currently 0.
 
-```go
-listener, err := net.Listen("tcp", "127.0.0.1:0")
-```
+I kept **gc-visibility's**: it is a strict superset. It preserves an existing
+type descriptor exactly as iface-dispatch does, and additionally fills in the slot's
+descriptor for a value that was marked `GCRef` with no type. `MarkGCRefType`
+overwrites `GCType` unconditionally (`ir/build.go:117`), so iface-dispatch's early
+return was the only thing stopping it from clobbering a more precise descriptor.
 
-is a local of interface type: a frame slot holding the *address* of the two-word
-`(itab, data)` descriptor. For a multi-result call the descriptor is the result
-home the call writes into — `ir.Func.AllocAggregate`'s slot, an allocation in
-`main.main`'s own frame, marked a GC reference precisely because "under a managed
-(copied) stack that interior pointer must be relocated". Promotion made the
-call's result temporary the value every later read of `listener` sees. That
-temporary is unmarked. `copystack` then walked `main.main`'s frame map, did not
-find the pointer, and left `listener` addressing the stack the runtime had
-already freed and handed to something else. The type word read back was zero:
+Both branches' tests are kept: `goc/optgcroot_test.go` +
+`goc/testdata/runtime_opt_promoted_interface_root.go` (iface-dispatch) and
+`goc/testdata/runtime_gc_promoted_local_root.go` +
+`cmd/goc/runtime_status_test.go` (gc-visibility).
 
-    cg12: interface dispatch failed for dynamic type 0x0
+Both branches claim their blocker fixed. gc-visibility additionally claims the
+flate crash was never mem2reg's — it was the zero-capacity-slice defect fixed in
+800f47f, whose *rate* promotion roughly doubled. Both claims are re-verified from
+scratch below, on the merged tree, rather than taken on trust.
 
-in `net.Listener.Accept`, reached from the goroutine `main.main` had handed the
-(by then already corrupt) descriptor to.
+## 1. What the full pipeline contains that the bounded one does not
 
-The fix is `opt/mem2reg.go`'s `markManagedDef`: every reaching definition of a
-managed promoted variable is marked, not just the phis. A definition that already
-carries a marking is left alone — its own type descriptor is at least as precise
-as the slot's.
+`BoundedPipeline` is one fixpoint of three passes: **fold, copy, dce**. That is all
+`goc -O` has ever meant for a whole-program Go build.
 
-**`stdlib-netpoll-stress/tcp-churn` passes on the `-O` arm with promotion on.**
+`DefaultPipeline` (`opt/pass.go:108`) is, in order:
 
-## The minimal reproducing set
+| # | pass | kind | in bounded? |
+|---|------|------|-------------|
+| 1 | `mem2reg` | func | no |
+| 2 | `clean` fixpoint: `fold`, `copy`, `loadelim`, `deadalloc`, `gvn`, `jumpthread`, `simplifycfg`, `dce` | func | fold/copy/dce only |
+| 3 | `inline` fixpoint: `inline` + `clean` | module + func | no |
+| 4 | `mem2reg` (again, to catch what inlining exposed) | func | no |
+| 5 | `clean` | | partial |
+| 6 | `unroll` (`UnrollRecursion`) | module | no |
+| 7 | `inline` fixpoint again | | no |
+| 8 | `constantp` (`ResolveConstantP`) | func | no |
+| 9 | `ifconvert` | func | no |
+| 10 | `clean` | | partial |
+| 11 | `tailmerge`, `simplifycfg`, `dce` | func | dce only |
+| 12 | `deadfunc` (`DeadFuncElim`) | module | no |
+| 13 | `gcm`, `dce` | func | dce only |
 
-Delta-debugging the set of functions mem2reg is allowed to promote, from the
-**3494** it promotes in that program down to a **1-minimal four**:
+So the bounded path skips **thirteen distinct passes**: mem2reg, loadelim,
+deadalloc, gvn, jumpthread, simplifycfg, inline, unroll, constantp, ifconvert,
+tailmerge, deadfunc, gcm. mem2reg is the one that was investigated; it is not the
+only one, and it is not even the expensive one.
 
-    main.main
-    net.ListenConfig.Listen
-    net.Resolver.lookupIPAddr
-    net.Resolver.resolveAddrList
+**Are the other twelve safe to enable?** They are not new code and they are not
+untested — every one of them has unit tests in `opt/`, and every one of them has
+been running on cg12cc's C modules (Ruby, miniruby, CRuby) for as long as it has
+existed. What is new is that they had never seen a *Go-frontend* module, which is
+where the two known blockers came from: both were mem2reg interacting with goc's
+GC metadata, a thing C modules do not have. The passes with a comparable exposure
+to Go-specific metadata are the ones that move or delete values across safepoints
+— `gcm` (schedules values, so it lengthens live ranges), `inline` (copies a
+callee's frame into a caller's, including its GC roots), `deadalloc` and
+`deadfunc` (delete allocations and functions). Those are where I looked hardest;
+the campaign below runs every arm on the whole matrix, corpus, GC reducer, escape
+audits and flate loop rather than reasoning about it.
 
-1-minimal is measured, not assumed: each of the four 3-element subsets was
-compiled and run, and all four are clean (`RUNS=3`, `GOMAXPROCS=1`).
+## 2. The change
 
-The set reads exactly as the root cause predicts. `main.main` is where the local
-lives — promote anything else and the local keeps its frame slot, which
-`copystack` adjusts. The other three are on the call path *inside* `net.Listen`,
-and what they contribute is frame size: they decide whether the stack has to grow
-after `net.Listen` returns rather than only while it is running. Promote fewer
-and the growth that would strand the pointer happens before there is a pointer to
-strand. That is the "at least two `net` functions at once" the previous job
-measured, and it is a threshold on stack depth, not a second semantic ingredient.
+`opt.OptimizeModule` no longer consults a size budget at all. `moduleOptimizationOverBudget`
+and its four constants are deleted. The pipeline is chosen by `opt.ModulePipeline`:
 
-The four-function build fails slightly differently from the whole-program one —
-`main.main` hands the goroutine a descriptor whose *both* words are zero, so
-`net.Listener.Accept` faults on `*(0+8)` instead of reaching the dispatch-failure
-report. Same corruption, same place, different garbage; the whole-program build
-is the one that prints `dynamic type 0x0`.
+- `GOC_OPT_PIPELINE` unset / `full` / `default` → `DefaultPipeline` (**the new default**)
+- `GOC_OPT_PIPELINE=promote` → `BoundedPipeline` + mem2reg (the promotion-only arm)
+- `GOC_OPT_PIPELINE=bounded` → `BoundedPipeline` (the pre-change default; the bisection escape hatch)
+- an unrecognized value panics rather than silently selecting the default
 
-## The reduction
+`GOC_OPT_SKIP=name1,name2` drops named passes from whichever arm was selected, at
+any nesting depth (it descends into fixpoints). The corpus and the capability
+matrix compile in-process or through `goc` subprocesses with fixed argv, so there
+is no compiler flag to thread through; an environment variable is the only handle
+an outside job has, and attributing a miscompile to one pass is the whole game
+here.
 
-`goc/testdata/runtime_opt_promoted_interface_root.go`, 75 lines and no network,
-run by `TestOptimizedInterfaceLocalSurvivesStackGrowth` in
-`goc/optgcroot_test.go`. It is the same shape stripped to nothing:
+## 4a. Compile-time cost — first measurement, whole-program build
 
-```go
-c, n := makeCounter(7)   // multi-result, so the descriptor is main's own result home
-deepen(600)              // grows the goroutine stack; main's frame moves
-...64 goroutines, each deepen(600)...   // the freed stacks are handed out and written over
-c.value()                // dispatch through whatever is there now
-```
+168-line `hello.go` (fmt.Println plus a 1000-iteration multiply-add loop),
+`goc -O`, whole-program (no prebuilt pack), on the 64-core box, load average ~4:
 
-`deepen` fills every frame it makes with `0x5e5e5e5e5e5e + depth`, so the failure
-names itself:
+| arm | wall | peak RSS |
+|-----|------|----------|
+| `GOC_OPT_PIPELINE=bounded` | 6.69 s | 599 MB |
+| `GOC_OPT_PIPELINE=full` | 30.99 s | 876 MB |
 
-    unexpected fault address 0x5e5e5e5e60bd
+**4.6x, and it is not mem2reg.** From a CPU profile of the full run
+(`opt.OptimizeModule` cum 24.66 s of 66.63 s samples over 31.11 s wall):
 
-That address *is* the pattern the goroutines wrote, which is what makes the
-reducer deterministic rather than dependent on what happened to be left behind.
+    gvn         4.10 s      jumpthread   2.42 s      gcm        0.45 s
+    loadelim    3.87 s      fold         2.18 s      ifconvert  0.39 s
+    simplifycfg 3.39 s      deadalloc    1.92 s      copy       0.37 s
+    dce         3.19 s      inline       1.07 s      mem2reg    0.37 s
 
-| configuration | result |
-|---|---|
-| `GOC_BOUNDED_MEM2REG=1 goc -O`, before the fix | faults 3/3 |
-| `GOC_BOUNDED_MEM2REG=1 goc -O`, after the fix | passes 3/3 |
-| `goc -O` (promotion off) | passes 3/3 |
-| `goc` (unoptimized) | passes 3/3 |
-| host `go run` | passes |
+mem2reg — the pass this whole exercise is about — costs 0.37 s. The cost is the
+`clean` fixpoint (gvn + loadelim + simplifycfg + dce + jumpthread + fold +
+deadalloc = 21 s) being re-run to a fixpoint over 5101 functions, four times over
+in the pipeline's shape. Two secondary costs: the arm64 backend goes 7.0 s → 11.1 s
+on the optimized IR (register allocation over longer live ranges), and 36% of all
+samples are the *compiler's own* GC — the pipeline allocates enough to make the
+Go runtime the largest single consumer.
 
-`go test ./goc -run TestOptimizedInterfaceLocalSurvivesStackGrowth` fails on the
-tree without `markManagedDef` and passes with it. It uses
-`optimizeProgramFunctions`, the existing harness that runs the real
-intraprocedural pipeline over the program's own functions, so the test does not
-depend on the environment switch and is live while the switch stays off.
-
-The two results in `makeCounter` are load-bearing. A single-result assignment
-goes through `adaptInterfaceToInterface`, which copies the descriptor into a
-fresh alloca first; the backend readdresses an alloca rather than keeping it in a
-value, so the promoted local cannot go stale. That is why the first reductions
-attempted passed, and why `net.Listen`'s `(Listener, error)` is the shape that
-breaks.
-
-## How it was found
-
-Bisecting *which functions get promoted* is what turned this from a guess into a
-measurement, and it is thirty lines of scaffolding:
-
-- wrap `Mem2Reg` in the bounded pipeline with a filter that consults a file of
-  function names (`GOC_BOUNDED_MEM2REG_ONLY`) and appends every function it
-  actually changed to another (`GOC_BOUNDED_MEM2REG_LIST`);
-- collect the 3494-name list from one whole-program compile;
-- run ddmin over it, ten candidate subsets at a time. One compile-and-run cycle
-  is 8.4 s, so the whole descent from 3494 to 4 took about twenty minutes.
-
-The scaffolding is not in the committed change — it puts environment-dependent
-behaviour inside a core pass — but it is worth rebuilding for the next
-promotion-shaped miscompile.
-
-Two runtime instruments then named the mechanism without any guessing:
-
-- a three-argument `gocInterfaceDispatchFailure` plus a nil-type-word guard in
-  the dispatcher wrapper, which reported `itab 0x0 word1 0x0` — the receiver was
-  wholly zero, not mis-paired, so no half of a two-word copy had gone missing;
-- `GODEBUG=cg12checkstackcopy=2`, already in the tree, which reports every word
-  left pointing into the old stack after `copystack`. It found **19** of them in
-  `main_main`'s frame, all with `marked=0` — the frame map did not describe them,
-  which is why nothing adjusted them and why the level-1 check (which throws only
-  on *marked* slots) stayed silent.
-
-## Measurements
-
-**Reproduction on `7983abd`** (before the fix), `stdlib-netpoll-stress/tcp-churn`
-compiled monolithically:
-
-| configuration | runs |
-|---|---|
-| `GOC_BOUNDED_MEM2REG=1`, `GOMAXPROCS=1` | 5/5 fail |
-| `GOC_BOUNDED_MEM2REG=1`, default `GOMAXPROCS` | 2/3 fail |
-| promotion off | clean |
-
-**After the fix**, same program, full promotion (all 3494 functions):
-
-| configuration | runs |
-|---|---|
-| `GOMAXPROCS=1` | 5/5 pass |
-| default `GOMAXPROCS` | 5/5 pass |
-
-## The capability, in the configuration the matrix uses
-
-The matrix's `-O` arm links against prebuilt runtime packs, and the packs are
-built with `-O` too. That is where the switch does its work in that arm: the
-program half is a module of its own and small enough for `DefaultPipeline`, so
-`main.main` is promoted either way, but package `net` is in the pack, and the
-pack is over budget and takes `BoundedPipeline`. Promoting the three `net`
-functions is exactly what the switch buys there.
-
-Reproduced and fixed in that configuration directly, packs built by the compiler
-under test with `GOC_BOUNDED_MEM2REG=1` into a private cache:
-
-| compiler | runs |
-|---|---|
-| pristine `7983abd` | **5/5 fail**, `cg12: interface dispatch failed for dynamic type 0x0` |
-| branch tip (`792d2f0`) | **0/5 fail** |
-
-**A trap worth recording**: `goc build-runtime`'s content-addressed pack cache
-keys on the compiler binary, the target, `-O` and the package list — **not on
-`GOC_BOUNDED_MEM2REG`**. Two matrix runs of the same tree that differ only in
-that variable therefore share a pack, and whichever ran first decides what is in
-it. A "switch on" matrix run that reuses a pack built without promotion measures
-nothing, and a "switch off" run that reuses one built with it is not a control.
-Every matrix number below was taken with `CG12_PACK_CACHE` pointed at a private
-directory per configuration.
-
-## What else fails with promotion on
-
-Nothing in the capability matrix, and nothing in the corpus.
-
-The whole matrix, both arms, with `GOC_BOUNDED_MEM2REG=1`, on the tree with the
-fix, private pack cache per arm:
-
-| arm | subtests | failures |
-|---|---:|---:|
-| `-runtime-opt`, switch **on** | 367 | **0** |
-| default, switch **on** | 367 | **0** |
-
-`stdlib-netpoll-stress/tcp-churn` passes in that `-O` arm. The default arm is
-unchanged by construction — a build without `-O` never calls
-`opt.OptimizeModule`, so the switch cannot reach it — and is reported because it
-was asked for.
-
-Every corpus program, not only the 366 the matrix registers: all **405** of
-`goc/testdata/*.go` compiled with `goc -O` and run, once with the switch on and
-once with it off, comparing outcomes program by program. **405/405 compile in
-both**, and the only non-zero exit in either sweep is
-`runtime_panic_print_string`, which panics on purpose and exits 2 in both.
-
-## Guards, with the switch off
-
-The switch stays off in this change, so these are the runs that show the tree is
-where it was. Everything below is on the branch tip with the fix and with
-`GOC_BOUNDED_MEM2REG` unset.
-
-| guard | result |
-|---|---|
-| capability matrix, default arm | **367/367**, 0 failures |
-| capability matrix, `-runtime-opt` arm | **367/367**, 0 failures |
-| capability matrix, both arms, an earlier pair of runs that shared a pack cache | **367/367** each, 0 failures |
-| GC reducer `gc/type-mask-padding`, `-O`, `GOMAXPROCS=3`, default `GOGC` | **0/20** fail |
-| GC reducer, `-O`, `GOGC=10` | **0/20** fail |
-| GC reducer, unoptimized, default `GOGC` | **0/20** fail |
-| GC reducer, unoptimized, `GOGC=10` | **0/20** fail |
-| `goc.TestFrameEscapeAudit` | PASS, no baseline change |
-| `goc.TestEscapeShadowPlacement` | PASS, no baseline change |
-| `goc.TestLoopAliasAudit` | PASS, no baseline change |
-| `goc.TestAllocationCensus` | PASS after `-update-alloc-census-baseline` |
-| determinism, corpus, 3 rounds, no `-O` | **405/405 reproducible**, 0 varying, 0 failed, 0 content-varies, 0 layout-only |
-| determinism, corpus, 2 rounds, `-O` | **405/405 reproducible**, 0 varying, 0 failed, 0 content-varies, 0 layout-only |
-
-The matrix is 367 capabilities on `integration/wave8`, one more than the 366 the
-job was written against.
-
-The census moves by exactly four lines, all four in the new reducer and all four
-in the new file: the `&box` the interface return escapes, the channel header and
-its buffer, and the closure environment the goroutines are spawned through. **No
-existing site moved**, which is what says the change alters no allocation
-decision. `039129b`.
-
-## The other blocker: not reproduced, and no claim made
-
-The switch is also held back by the performance suite's `compress/flate`
-workload dying in the collector ("runtime: pointer ... to unused region of
-span"), measured at 3/5 by the job that added the switch. That is a different
-job's, and this change is not offered as a fix for it.
-
-It did not reproduce here. `goc/testdata/placement_bench/flate/main.go` built
-`goc -O` with `GOC_BOUNDED_MEM2REG=1` by a compiler from `7983abd` **without**
-this fix — the same compiler that fails tcp-churn 3/3, checked — ran clean:
-
-| build | runs |
-|---|---|
-| pre-fix, default `GOGC`, unpinned | 0/5 fail |
-| pre-fix, `GOGC=10`, unpinned | 0/8 fail |
-| pre-fix, default `GOGC`, pinned to one core | 0/36 fail |
-| pre-fix, `GOGC=10`, pinned to one core | 0/30 fail |
-| **with** this fix, default `GOGC`, pinned | 0/30 fail |
-
-79 pre-fix runs against a reported 3/5 says the crash needs something this did
-not do — `make bench-perf` runs the suite's own harness and this ran the program
-alone — or that something merged into `integration/wave8` since the switch
-landed has already closed it. Either way it is open until someone runs the suite,
-and nothing here should be read as having fixed it.
-
-## What is left
-
-- The switch stays **off**. Turning it on is a later job's call, and it should
-  not be made until the flate crash is either reproduced and fixed or shown to
-  be gone.
-- `markManagedDef` restores the invariant "promotion does not change what the
-  collector sees" for reaching definitions. The phi half was already there. The
-  same question has not been asked of the *backend* — what the arm64 stack maps
-  report for a marked temp the register allocator has put in a callee-saved
-  register rather than a spill slot — and the flate report points at exactly that
-  place. `TestGoStackMapsOmitAggregateResultHomeAtItsOwnCall` is the nearest
-  existing instrument.
-- The bisection scaffolding (`GOC_BOUNDED_MEM2REG_ONLY` / `_LIST` /
-  `_VARS` / `_VARLIST`) is deliberately not committed. Rebuilding it is a filter
-  in `BoundedPipeline`'s `Mem2Reg` wrapper plus a `mem2regVarFilter` hook in
-  `findPromotable`, and it is what makes a promotion miscompile answerable in
-  twenty minutes instead of a day.
+Where the cost should be spent is discussed at the end, once the correctness
+campaign has said which passes have to stay.
