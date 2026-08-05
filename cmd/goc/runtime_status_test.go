@@ -2912,7 +2912,14 @@ type runtimeCapabilityCompilation struct {
 // used to assume was under-provisioned by a third. Under-provisioning here is not
 // a slowdown -- the bound exists so an unbounded fan-out cannot swap or OOM a
 // small machine, and a divisor below the real peak lets it do exactly that.
-const compileRuntimeCapabilityPeakBytes = 3 << 30
+//
+// Turning the full optimisation pipeline on raised those figures again. Measured
+// on the merged tree: 3.17 GiB at the default GOMAXPROCS and 4.23 GiB at
+// GOMAXPROCS=1, with six programs above 3 GiB where none had been. 5 GiB clears
+// the worst measured peak with room, which is the right side to err on -- the
+// cost of over-provisioning is a smaller worker pool, and the cost of
+// under-provisioning is the OOM this constant exists to prevent.
+const compileRuntimeCapabilityPeakBytes = 5 << 30
 
 // compileRuntimeCapabilityWorkers is how many programs to compile at once.
 //

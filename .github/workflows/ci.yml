@@ -40,9 +40,14 @@ jobs:
             target: test-unit
             timeout: 15
           # The goc corpus: compile, link, and run real Go programs.
+          # 40 rather than 25 because the full optimisation pipeline made
+          # compiles ~4.5x more expensive. Measured on a 4-core simulation:
+          # 29.4 min on the merged tree against 24.3 before it, so 25 was
+          # already at 97% of budget and would have started failing on timing
+          # noise alone.
           - name: goc-corpus
             target: test-goc-corpus
-            timeout: 25
+            timeout: 40
           # The goc driver end-to-end tests (minus the capability matrix).
           - name: goc-cmd
             target: test-goc-cmd
