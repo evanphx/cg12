@@ -518,3 +518,36 @@ exactly the same number of changes it made before** — not approximately, exact
 for all eight. That is the tracking's correctness argument turned into a
 measurement: what was skipped was, to the last visit, work that would have
 changed nothing.
+
+---
+
+## 12. The ledger
+
+| | `main` 5b085d2 | this branch |
+|---|---:|---:|
+| **corpus-wide CPU, 406 programs, `-O`, `GOMAXPROCS=1`** | 21,838.0 CPU-s | **9,590.2 CPU-s** |
+| **as a multiplier over the pre-pipeline floor** (`bounded`, 5,087.2 CPU-s) | **4.293x** | **1.885x** |
+| **peak RSS, largest program, `GOMAXPROCS=1`, isolated** | 4.207 GiB | **4.160 GiB** |
+| peak RSS, same program, 32-wide sweep | 4.231 GiB | 4.401 GiB |
+| peak RSS, per-program ratio, median | — | 0.953 |
+| corpus programs over 3 GiB | 6 | 6 |
+| small program (`fmt_sprintf.go`), wall | 41.63s | **15.87s** (2.62x) |
+| small program, user CPU | 82.07s | **39.89s** (2.06x) |
+| http program, wall, default GOMAXPROCS | 257.98s | **76.73s** (3.36x) |
+| bytes allocated, small / http | 11.76 GB / 69.18 GB | **4.26 GB / 17.75 GB** |
+| capability matrix, `-O` arm, wall | 311.92s (wave-9 gate) | **141.17s** |
+| corpus output images | — | **406/406 byte-identical** |
+
+**Peak RSS is the number that did not move, and §7 explains why: it is the live
+IR module times the GC's heap goal, and this branch removed garbage, not live
+data.** `compileRuntimeCapabilityPeakBytes = 5 GiB` still stands on its own
+evidence; nothing here justifies lowering it.
+
+### The single biggest remaining cost
+
+The garbage collector, at **36.4%** of the compile's CPU samples (15.09s of
+41.45s on the small program) — a larger *share* than before precisely because
+everything around it shrank, though 37.5% less in absolute seconds. After it,
+the **arm64 backend at 26.2%**, which nobody has profiled and this job did not
+touch. The optimiser, which was 46.6% and the whole subject of this job, is now
+22.7%.
