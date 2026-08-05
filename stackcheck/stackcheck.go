@@ -93,6 +93,21 @@ type Config struct {
 	// stack.
 	CallSize int
 
+	// Recorded is the debt register: nosplit chains that already exceed Limit
+	// when the budget is introduced, by function name, with the height each was
+	// measured at.
+	//
+	// A function listed here is allowed its recorded height and not one byte
+	// more; a function not listed is allowed Limit. Nothing else changes -- the
+	// walk, the error, and the refusal to produce an object are the same. It is a
+	// ratchet on debt that already exists, not an exemption: the chain the
+	// register is protecting is still over the reserve, and the register is the
+	// place that says so by name.
+	//
+	// It exists because the alternative was to ship a check that rejects every
+	// build of the tree it was written for. See arm64.noSplitDebt.
+	Recorded map[string]int
+
 	// StrictIndirect resolves a call through a function pointer against every
 	// address-taken nosplit function, instead of assuming the target checks its
 	// own stack.
@@ -161,6 +176,26 @@ type Report struct {
 	// declared splittable but that emit no stack-growth check. Each is a place
 	// the budget stops measuring on a promise the toolchain is not keeping.
 	Unchecked []string
+
+	// Headroom is, per nosplit function, how many bytes that function's frame
+	// could grow before the deepest chain running through it reaches the limit.
+	// It is negative for a function already over.
+	//
+	// This is what makes the budget something the compiler can be bounded *by*
+	// rather than only caught by. A pass that wants to grow a nosplit frame --
+	// inlining into a nosplit caller is the case this was built for -- asks here
+	// how much room it has, and the answer accounts for the frames above the
+	// function as well as the ones below it, because a chain does not care which
+	// end grew.
+	//
+	// Headroom deliberately measures against Config.Limit and never against the
+	// larger height Config.Recorded may permit: the register is an account of
+	// debt that already exists, not an allowance to spend.
+	Headroom map[string]int
+
+	// Heights is every nosplit function's chain height, which is what the debt
+	// register is generated from.
+	Heights map[string]int
 }
 
 // Error is a nosplit chain that does not fit. Its message names the chain, each
@@ -190,6 +225,10 @@ type Chain struct {
 	// Cycle names the function the path re-entered, when Unbounded is because of
 	// recursion.
 	Cycle string
+
+	// Limit is the height this chain was allowed, which is Config.Limit unless
+	// the debt register recorded a larger one for its root.
+	Limit int
 }
 
 // Frame is one function's contribution to a chain.
@@ -211,7 +250,7 @@ func (e *Error) Error() string {
 		if index > 0 {
 			out.WriteString("\n")
 		}
-		out.WriteString(chain.describe(e.Config.Limit))
+		out.WriteString(chain.describe())
 	}
 	if len(e.Chains) > 1 {
 		fmt.Fprintf(&out, "\n%d nosplit chains are over the %d-byte limit", len(e.Chains), e.Config.Limit)
@@ -219,7 +258,8 @@ func (e *Error) Error() string {
 	return out.String()
 }
 
-func (c Chain) describe(limit int) string {
+func (c Chain) describe() string {
+	limit := c.Limit
 	var out strings.Builder
 	head := "nosplit stack overflow"
 	if c.Unbounded {
@@ -332,12 +372,14 @@ func Check(funcs []Func, config Config) (*Report, error) {
 
 	var over []string
 	for _, name := range names {
-		if w.walk(name) > config.Limit {
+		if w.walk(name) > w.limitFor(name) {
 			over = append(over, name)
 		}
 	}
 
 	report := &Report{
+		Headroom:            w.headroom(config.Limit),
+		Heights:             w.noSplitHeights(),
 		External:            sortedKeys(w.external),
 		IndirectFromNoSplit: sortedKeys(w.indirect),
 		AddressTakenNoSplit: w.addressTaken,
@@ -366,7 +408,9 @@ func Check(funcs []Func, config Config) (*Report, error) {
 	roots := w.rootsOf(over)
 	failure := &Error{Config: config}
 	for _, root := range roots {
-		failure.Chains = append(failure.Chains, w.chainFrom(root))
+		chain := w.chainFrom(root)
+		chain.Limit = w.limitFor(root)
+		failure.Chains = append(failure.Chains, chain)
 	}
 	sort.SliceStable(failure.Chains, func(left, right int) bool {
 		return failure.Chains[left].Height > failure.Chains[right].Height
@@ -376,6 +420,15 @@ func Check(funcs []Func, config Config) (*Report, error) {
 
 // walk returns the stack height of name: the most stack that entering it can
 // consume before something checks the stack again.
+// limitFor is the height this function's chain is allowed. It is Config.Limit
+// unless the debt register records a larger height for it.
+func (w *walker) limitFor(name string) int {
+	if recorded, ok := w.config.Recorded[name]; ok && recorded > w.config.Limit {
+		return recorded
+	}
+	return w.config.Limit
+}
+
 func (w *walker) walk(name string) int {
 	if h, ok := w.height[name]; ok {
 		return h
@@ -641,4 +694,76 @@ func sortedKeys(set map[string]bool) []string {
 	}
 	sort.Strings(keys)
 	return keys
+}
+
+// headroom computes, for every nosplit function, how far its deepest containing
+// chain is from limit.
+//
+// A chain through f is (the frames above f) + (the height below and including
+// f). The second term is already memoized as f's height; the first is computed
+// here by walking the reverse graph, and is the largest total any nosplit caller
+// can put above f before calling it. A function with no nosplit caller has
+// nothing above it.
+func (w *walker) headroom(limit int) map[string]int {
+	callers := map[string][]string{}
+	for name, f := range w.funcs {
+		if !f.NoSplit {
+			continue
+		}
+		for _, callee := range w.calleesOf(name) {
+			callers[callee] = append(callers[callee], name)
+		}
+	}
+	above := make(map[string]int, len(w.funcs))
+	onPath := map[string]bool{}
+	var depthAbove func(string) int
+	depthAbove = func(name string) int {
+		if depth, ok := above[name]; ok {
+			return depth
+		}
+		if onPath[name] {
+			// A cycle above this function: nothing below it can be bounded.
+			return Infinite
+		}
+		onPath[name] = true
+		depth := 0
+		for _, caller := range callers[name] {
+			f, ok := w.funcs[caller]
+			if !ok || !f.NoSplit {
+				continue
+			}
+			if candidate := depthAbove(caller) + f.Frame + w.config.CallSize; candidate > depth {
+				depth = candidate
+			}
+		}
+		delete(onPath, name)
+		if depth > Infinite {
+			depth = Infinite
+		}
+		above[name] = depth
+		return depth
+	}
+	headroom := make(map[string]int, len(w.funcs))
+	for name, f := range w.funcs {
+		if !f.NoSplit {
+			continue
+		}
+		room := limit - (depthAbove(name) + w.walk(name))
+		if room < -Infinite {
+			room = -Infinite
+		}
+		headroom[name] = room
+	}
+	return headroom
+}
+
+// noSplitHeights is every nosplit function's memoized height.
+func (w *walker) noSplitHeights() map[string]int {
+	heights := make(map[string]int, len(w.funcs))
+	for name, f := range w.funcs {
+		if f.NoSplit {
+			heights[name] = w.height[name]
+		}
+	}
+	return heights
 }

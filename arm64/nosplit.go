@@ -210,17 +210,28 @@ func noSplitBudgetInputs(compiled []stackFacts, bundle assemblyBundle, data []*i
 // to be running -- and a build that proceeds with a warning produces exactly
 // that, only with a line of text in a log nobody reads.
 func checkNoSplitBudget(funcs []stackcheck.Func) error {
+	limit := noSplitLimitFromEnvironment()
 	config := stackcheck.Config{
-		Limit:          noSplitLimitFromEnvironment(),
+		Limit:          limit,
 		CallSize:       noSplitCallSize,
 		StrictIndirect: os.Getenv("GOC_NOSPLIT_INDIRECT") == "strict",
+	}
+	if limit == noSplitLimit {
+		// The register's heights were measured against the real reserve. A
+		// lowered limit is a test making the budget fire and must not be handed
+		// entries that outrank it; a raised one is a measurement run and has no
+		// use for them either.
+		config.Recorded = noSplitDebt
 	}
 	report, err := stackcheck.Check(funcs, config)
 	if debugNoSplit() {
 		writeNoSplitReport(os.Stderr, report, config)
 	}
-	if os.Getenv("GOC_DEBUG_NOSPLIT") == "frames" {
+	switch os.Getenv("GOC_DEBUG_NOSPLIT") {
+	case "frames":
 		writeNoSplitFrames(os.Stderr, funcs)
+	case "heights":
+		writeNoSplitHeights(os.Stderr, report)
 	}
 	if err != nil {
 		return fmt.Errorf("nosplit frame budget: %w", err)
@@ -297,5 +308,32 @@ func writeNoSplitFrames(out io.Writer, funcs []stackcheck.Func) {
 			continue
 		}
 		fmt.Fprintf(out, "goc: nosplit frame: %8d  %s\n", function.Frame, function.Name)
+	}
+}
+
+// writeNoSplitHeights lists every nosplit chain height over the limit, largest
+// first. It is how [noSplitDebt] is regenerated.
+func writeNoSplitHeights(out io.Writer, report *stackcheck.Report) {
+	if report == nil {
+		return
+	}
+	type entry struct {
+		name   string
+		height int
+	}
+	var entries []entry
+	for name, height := range report.Heights {
+		if height > noSplitLimit {
+			entries = append(entries, entry{name, height})
+		}
+	}
+	sort.Slice(entries, func(left, right int) bool {
+		if entries[left].height != entries[right].height {
+			return entries[left].height > entries[right].height
+		}
+		return entries[left].name < entries[right].name
+	})
+	for _, e := range entries {
+		fmt.Fprintf(out, "goc: nosplit height: %8d  %s\n", e.height, e.name)
 	}
 }
