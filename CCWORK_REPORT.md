@@ -628,3 +628,44 @@ No baseline was forced. The two baselines that moved —
 (the latter auto-merged from the two prerequisite branches, which each added
 their reducer's allocation sites) — were regenerated from measurements, and every
 other baseline in the tree passes unmodified.
+
+## 8. What is on, what is gated, and what is left
+
+### On by default, for every Go program
+
+`DefaultPipeline` — all thirteen passes the bounded path skipped — runs on every
+module `goc -O` compiles, regardless of size. The module budget is deleted.
+
+### Gated, and why
+
+**One thing, and it is a restriction *inside* the full pipeline, not a pipeline
+that stayed off: the inliner will not inline into a `NoSplit` function.**
+
+That is not a precaution; it is the fix for a real fatal error (§3, third
+blocker). It costs the runtime's allocator fast paths their inlining, which is
+where inlining would pay most. It is gated rather than solved because solving it
+needs something cg12 does not have: a **nosplit stack-depth budget in the
+backend**, walking nosplit call runs after lowering (when frame sizes are known)
+and rejecting a build that overruns the runtime's reserve. Go's linker has
+exactly this. `opt.AuditNoSplitCalls` already builds the call graph it would
+need. **This is the single most valuable follow-up this exercise produced**, and
+until it exists, any pass that grows a runtime frame is one intermittent fatal
+error away from shipping.
+
+Nothing else is gated. `GOC_OPT_PIPELINE=bounded` and `=promote` exist for
+bisection, not as a fallback the tree relies on.
+
+### Left undone, deliberately
+
+- **The compile-time cost is not addressed, only measured and diagnosed** (§4).
+  4.5x on a whole-program build, ~85% of it the `clean` fixpoint re-examining
+  functions nothing touched. The proposal is there; the change is not, because it
+  is a change to pass scheduling and this branch had enough moving parts.
+- **The `net/http` prebuilt pack peaks at 2.99 GiB against a 3 GiB ceiling.**
+  If that ceiling is real on the target machine, the thing to reinstate is a
+  module budget on `internal/prebuilt.BuildRuntime` alone — the pack, not program
+  modules, which is where the performance is.
+- **The bounded-vs-full differential was run once**, on tree A, before the
+  nosplit fix. It is what found the third blocker. Re-running it on B would take
+  another corpus pass in each arm; the matrix, the sweep and the 400-run
+  `runtime_lock_osthread` loop cover B instead.
