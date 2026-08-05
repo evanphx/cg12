@@ -261,3 +261,58 @@ So the honest statement is: **`make bench-perf` did not pass on this branch, and
 it does not pass on `main` either.** It is not a gate this box can currently
 satisfy. What it does say, through its ratios, is that goc's speed relative to
 the host toolchain is where it was.
+
+### The one row that looked like a regression, re-measured
+
+The second branch run put `gcpress gc/pointer-write` at 11.72 against `main`'s
+8.54, a 37% move — and it is a write-barrier workload, which is exactly where
+this branch inlined into nosplit functions
+(`internal/runtime/atomic.storePointer` 48 → 80 bytes,
+`runtime.maybeTraceablePtr.set` 64 → 112). So it was re-measured rather than
+explained away. A third branch run, same quiet box, puts it at **7.79 — below
+`main`**. The row's own spread is 26–27% on both trees; it is the row the suite
+refuses to gate.
+
+| row | `main` | branch run 2 | branch run 3 |
+|---|---:|---:|---:|
+| `gc/pointer-write` | 8.5427 | 11.7236 | **7.7878** |
+| `gc/live-heap-churn` | 4.5740 | 4.7328 | 4.5260 |
+| `chase/l1-resident` | 1.1382 | 1.0813 | 0.9755 |
+
+Run 3's own outliers are the four `sortmap` rows, *including its control row*
+(0.9273 → 1.0180), which nothing in this branch can affect — a transient on the
+box during that block, and all four failed the noise ceiling. Across three quiet
+runs the control mean is 0.9256 (`main`), 0.9244 and 0.9325 (branch), against
+the committed 0.9260, and the median row change from `main` is +0.32% and
++0.22%.
+
+**No measurable performance change.** That is the expected result: the inlining
+this branch re-enabled is inside nosplit runtime functions, and the deep
+allocator paths — the ones on these workloads' hot paths — got none of it,
+because their chains are over the reserve.
+
+## What this leaves behind
+
+Three things this branch found and did not fix, in the order they matter:
+
+1. **cg12's runtime nosplit chains are over the reserve, by up to 3.3×.** Fifty
+   of them, recorded in `arm64/nosplit_debt.go`. They are latent stack
+   overflows on the same terms `nextFree` was: a chain overflows when it is
+   entered from a guarded frame that only just cleared its own check. The
+   register makes the debt visible and stops it growing; it does not repay it.
+   The largest single contributors are `runtime.doubleCheckTypePointersOfType`
+   (1408 bytes), `runtime.bulkBarrierPreWrite` (592 with `-O`, 752 without) and
+   `runtime.mspan.typePointersOfUnchecked` (416/592).
+2. **cg12's Plan 9 assembly translator emits no stack-growth check at all**, for
+   any translated function, where Go's assembler inserts one for every non-NOSPLIT
+   `TEXT`. Sixty-eight functions end a nosplit chain here on a promise the
+   toolchain does not keep; the budget counts them (`Report.Unchecked`) rather
+   than pretending. `runtime·call1073741824` is a `WRAPPER` with a 1 GiB frame
+   and no check.
+3. **The motivating case needs the other inlining.** Getting the allocator fast
+   path its inlining back means inlining `nextFree` *into* `mallocgc`, which is
+   splittable — which is what gc does, and why upstream Go has no such chain —
+   rather than inlining into `nextFree`. cg12 marks `nextFree`/`refill`/
+   `nextFreeFast`/`nextFreeIndex` nosplit precisely because it cannot do that
+   (`goc.runtimeImplicitNoSplit`), and that decision is what creates the 864
+   bytes of chain before `throw` is even reached.
