@@ -192,3 +192,35 @@ Upstream Go does not have this chain at all: gc inlines `nextFree` *into*
 `mallocgc`, which is splittable, so the frame is spent under a guard. That —
 inlining nextFree into its caller rather than inlining into nextFree — is the
 change that would actually recover the motivating case.
+
+## Guards
+
+Every one of these ran on this branch's tree, watched to completion.
+
+| guard | required | result |
+|---|---|---|
+| capability matrix, default arm | 368/368 | **368 subtests PASS**, `make test-goc-status` `ok` |
+| capability matrix, `-O` arm | 368/368 | **368 subtests PASS**, `make test-goc-status-opt` `ok` |
+| `runtime_lock_osthread` crash loop | ≥400 runs, 0 crashes | **400 runs, 0 non-zero exits** |
+| GC reducer (`runtime_gc_promoted_local_root`) | 0/20 at `GOGC=10` | **20 runs, 0 failures** |
+| GC reducer | 0/20 at default `GOGC` | **20 runs, 0 failures** |
+| flate (`placement_bench/flate`) | 0/250 | **250 runs, 0 failures** |
+| the four corpus audits | pass | `TestAllocationCensus` `TestEscapeShadowPlacement` `TestFrameEscapeAudit` `TestLoopAliasAudit` — **all PASS** |
+| `TestParallelBackendIsByteIdenticalToSerial` | pass | **PASS** |
+| determinism, byte-identical | pass | see below |
+
+Determinism was checked at whole-artifact level, twice over and against a serial
+backend, since the new pass runs a second frame layout and could have introduced
+an order dependence:
+
+    a4a749c0…  runtime pack, run 1
+    a4a749c0…  runtime pack, run 2
+    a4a749c0…  runtime pack, GOC_BACKEND_WORKERS=1
+    2d93d9b4…  runtime_lock_osthread executable, run 1
+    2d93d9b4…  runtime_lock_osthread executable, run 2
+    2d93d9b4…  runtime_lock_osthread executable, GOC_BACKEND_WORKERS=1
+
+Unit tests on every package this branch touches: `opt`, `ir`, `stackcheck`,
+`plan9asm`, `plan9asm/sem`, `arm64`, `analysis`, `link`, `obj` — all `ok`.
+(`go test ./goc/...` and `make test-unit` were left to the gate job, as
+instructed; `go test ./goc -run TestNoSplitBudget` was run and passes.)
