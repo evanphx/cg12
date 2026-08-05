@@ -1003,3 +1003,424 @@ through `isSystemGoroutine` in `newproc1` and `gdestroy`. It is fixed by buildin
 the table. `make bench-perf`: **`goroutine/spawn-join` 38.45x → 5.32x**, and
 `gc/alloc-churn` 11.70x → 9.74x for free, with nothing else moved and every guard
 green.
+
+
+---
+
+# Investigation: the 1.63x floor and the double indirection (ccwork/locals-double-indirection)
+
+## Root cause, found in the first hour: `-O` does not run mem2reg on any real program
+
+`opt.OptimizeModule` picks between two pipelines by module size:
+
+    opt/opt.go:45   if moduleOptimizationOverBudget(m) { Run(m, BoundedPipeline()); return }
+    opt/opt.go:50   Run(m, DefaultPipeline())
+
+`DefaultPipeline` (opt/pass.go:104) begins with `FuncPass("mem2reg", Mem2Reg)` and runs
+it a second time after inlining. `BoundedPipeline` (opt/pass.go:163) is
+
+    Fixpoint("bounded-clean", fold, copy, dce)
+
+and contains **no mem2reg, no inlining, no loadelim, no GVN, no simplifycfg, no GCM**.
+
+The budgets are 2048 funcs / 50000 blocks / 200000 instrs / 400000 temps. Measured on
+the perf suite's `interp` program (a 168-line Go file) with a diagnostic added to
+`moduleOptimizationOverBudget`:
+
+    GOC_DEBUG_BUDGET: funcs=5101 blocks=70160 instrs=297389 temps=241206
+                      (caps 2048/50000/200000/400000)
+
+Three of the four caps are exceeded by 2.5x, 1.4x and 1.5x. **Every goc-compiled Go
+program is over budget**, because the program module carries the stdlib closure the
+prebuilt pack did not already contain. So `goc -O` on a real program is fold+copy+DCE.
+
+Consequence: every alloca-backed local stays in memory. That is the double indirection.
+
+## The evidence: the control loop, before and after
+
+`main.control` is the whole floor:
+
+    func control() {
+        accumulator := uint64(1)
+        for i := 0; i < 20_000_000; i++ {
+            accumulator = accumulator*6364136223846793005 + 1442695040888963407
+        }
+        sink = accumulator
+    }
+
+**`goc -O` today** (22 instructions in the loop; both locals live in frame slots and
+make a store-to-load round trip every iteration):
+
+    69ff08:  add  x17, x29, #0x18     // recompute &i
+    69ff0c:  ldr  x9,  [x17]          // load i
+    69ff10:  mov  x17, #0x2d00
+    69ff14:  movk x17, #0x131, lsl 16
+    69ff18:  cmp  x9,  x17
+    69ff1c:  b.lt 69ff4c
+    ...
+    69ff4c:  add  x17, x29, #0x10     // recompute &accumulator
+    69ff50:  ldr  x9,  [x17]          // load accumulator
+    69ff54-60: 4x mov/movk            // materialize 6364136223846793005
+    69ff64-70: 4x mov/movk            // materialize 1442695040888963407
+    69ff74:  madd x9,  x9, x17, x15
+    69ff78:  add  x17, x29, #0x10     // recompute &accumulator again
+    69ff7c:  str  x9,  [x17]          // store accumulator
+    69ff80:  add  x17, x29, #0x18
+    69ff84:  ldr  x9,  [x17]
+    69ff88:  add  x9,  x9, #0x1
+    69ff8c:  add  x17, x29, #0x18
+    69ff90:  str  x9,  [x17]
+    69ff94:  b    69ff08
+
+The loop-carried critical path is `ldr -> madd -> str -> ldr` (store-to-load forwarding),
+about 8 cycles; measured 2.73 ns/iteration. Note also that the address of each slot is
+re-materialized with `add x17, x29, #imm` instead of being folded into the load's
+base+offset addressing mode -- a second, smaller defect with the same origin.
+
+**The host** does the same work in 14 instructions with `accumulator` in x1 and `i` in
+x0, critical path `MUL -> ADD` ~5 cycles; measured 1.67 ns/iteration. (The host
+rematerializes the two 64-bit constants inside the loop too, so that is *not* the
+difference.)
+
+**`goc -O` with mem2reg forced on** -- 14 instructions, no memory traffic at all:
+
+    654fd4:  mov  x17, #0x2d00
+    654fd8:  movk x17, #0x131, lsl 16
+    654fdc:  cmp  x9,  x17
+    654fe0:  b.lt 655008
+    ...
+    655008-24: 8x mov/movk            // the two constants, as the host does
+    655028:  madd x10, x10, x17, x15  // accumulator stays in x10
+    65502c:  add  x9,  x9, #0x1       // i stays in x9
+    655030:  b    654fd4
+
+## Measured effect (single run, core-pinned, `placement_bench/interp`)
+
+    build                         control/spin-fixed-work    interp/bytecode-loop
+    goc -O (shipped)                     54.66 ms                677.77 ms
+    goc -O, bounded pipeline             54.63 ms                677.94 ms
+    goc -O, bounded + mem2reg            30.99 ms                646.45 ms
+    host go1.26.1                        33.48 ms                 31.59 ms
+
+**The 1.63x floor is entirely this.** With mem2reg the control ratio goes 1.632 -> 0.926:
+goc becomes *faster than the host* on that loop.
+
+**The interpreter row does NOT share the cause.** 21.46x -> 20.46x is a 4.6% improvement,
+nothing like the floor's 43%. The interpreter's gap is a different, still-open problem.
+
+Cost of turning mem2reg on for a bounded module: +0.27 s wall (6.65 -> 6.92) and +6 MiB
+peak RSS (604 -> 611 MiB) on this program. The budget exists (commit 48200ab) to keep
+large HTTP programs under a 3 GiB compile ceiling; mem2reg is not what costs that.
+
+## The interpreter's 21x is a different defect: a 16-byte struct copy becomes three calls
+
+`main.execute`'s dispatch head is `in := program[pc]`, where `instruction` is
+`{op int; operand int64}` -- sixteen bytes. `goc -O` lowers that to **three library
+calls per dispatched opcode**:
+
+    6548e8:  mov  w1, #0x0
+    6548ec:  mov  x2, #0x10
+    6548f0:  add  x0, x29, #0x2b0
+    6548f4:  bl   goc_memset          // zero `in` (16 bytes)
+    6548f8:  ldr  x17, [x29, #24]     // <- the double indirection: slot 24 holds &slot 0x58
+    6548fc:  ldr  x9,  [x17]          //    program.ptr
+    654900:  ldr  x17, [x29, #40]     //    pc
+    654904:  add  x1,  x9, x17, lsl #4
+    654908:  mov  x2, #0x10
+    65490c:  add  x0, x29, #0x2c0
+    654910:  bl   goc_memcpy          // program[pc] -> an unnamed 16-byte temp
+    654914:  mov  x2, #0x10
+    654918:  add  x0, x29, #0x2b0
+    65491c:  add  x1, x29, #0x2c0
+    654920:  bl   goc_memcpy          // that temp -> `in`
+
+The host loads the same sixteen bytes with one `LDP`.
+
+Causal test, no compiler change: rewrite the source to read the two fields directly
+(`inOp := program[pc].op; inOperand := program[pc].operand`) and recompile both sides.
+
+    build                                   interp/bytecode-loop     ratio
+    goc -O (shipped), struct copy               677.8 ms            21.46x
+    goc -O + mem2reg, struct copy               646.5 ms            20.46x
+    goc -O + mem2reg, no struct copy             39.7 ms             1.26x
+    host go1.26.1                                31.6 ms             1.00x
+
+So the interpreter row is ~95% one defect -- small aggregate copies lowered to
+memset+memcpy+memcpy -- and ~5% the missing mem2reg. **The floor and the interpreter
+row do not share a cause.** Fixing the floor leaves the interpreter at 20x; fixing the
+struct copy would take it to ~1.3x.
+
+(The `ldr x17,[x29,#24]; ldr x9,[x17]` pattern the perf-suite report called "double
+indirection" is real and is visible above, but it is a minor term: the two memcpy calls
+around it cost far more. The control loop's version of the defect is the plainer one --
+`add x17, x29, #imm; ldr x9, [x17]`, an address computed rather than folded, on a local
+that should not have been in memory at all.)
+
+## The tree already knew half of this
+
+`RUNTIME_PLAN.md:4282`, written while triaging a determinism bug's blast radius:
+
+> `opt.OptimizeModule` sends any module over `moduleOptimizationFunctionBudget`
+> (2048 functions) to `BoundedPipeline`, which is `fold`/`copy`/`dce` only. The
+> smallest program in the goc corpus, `hello.go`, emits **2,739** functions, because
+> every goc program links the runtime. **No goc module has ever run
+> `DefaultPipeline`**, so `inline`, `mem2reg`, `jumpthread`, `ifconvert` and `gcm`
+> are all `cg12cc` paths in practice.
+
+That was recorded as good news -- it bounded how far a bug in those passes could
+reach. Nobody connected it to what `goc -O` therefore costs at run time. It is the
+same fact; this job supplies the other half of it, and the measurement.
+
+It also means mem2reg has never run on a Go-frontend module in this tree, only on
+`cg12cc`'s C modules. That is why the guard set below matters more than usual, and
+in particular why `test-goc-status-opt` -- the only arm that passes `-O` -- is the
+one to read. The default arm never calls `opt.OptimizeModule` at all and is a pure
+control.
+
+## What would fix the interpreter, precisely
+
+Not attempted here -- it is a second, independent change with its own risk, and the
+brief says the floor is worth more. Stated so it can be picked up:
+
+**The defect.** `goc/compile.go:6576` (`storeInlineValue`) lowers *every* aggregate
+value copy to a `goc_memcpy` call, whatever the size, and `goc/compile.go:6598`
+(`storePointerAwareInlineValue`) does the same for the scalar runs between barriered
+pointer words. Nothing anywhere expands a constant-size call back into instructions.
+A 16-byte struct assignment therefore costs a function call; `in := program[pc]` in a
+dispatch loop costs three (a `goc_memset` to zero the destination, a `goc_memcpy` into
+an unnamed temporary, and a `goc_memcpy` out of it).
+
+**The fix.** An expansion of `goc_memcpy`/`goc_memset` with a constant length at or
+below a threshold (16 bytes is `ldp`/`stp`; 32 covers most Go struct assignment) into
+load/store pairs. Where it has to go is constrained from both sides:
+
+- *After* the front end, because `opt/escape.go:1171`, `opt/framecheck.go:742` and
+  `opt/loopalias.go` all recognise these calls **by name** and model them as
+  "reads/writes the memory it is given, retains no address". Expanding them earlier
+  turns each into raw stores of pointer words into frame slots, which those analyses
+  would read as publications. That would move `alloc_census_baseline.txt` and
+  possibly `frame_escape_baseline.txt`. (The corpus audits compile *without*
+  `opt.OptimizeModule` -- `goc/corpusaudit_test.go:127` -- so an optimizer-stage pass
+  is invisible to them, which is the property to preserve.)
+- *Before or during* arm64 lowering, and it must be checked against the precise stack
+  maps: RUNTIME_PLAN.md records one bug already in this area ("the frame slot a call
+  homes its aggregate result into was described as a GC root at that very call"). A
+  copy that moves a pointer word with `ldr`/`str` instead of inside `goc_memcpy`
+  changes which PCs have a pointer live in a register, which is what the stack map
+  describes.
+
+So: a `FuncPass` in `opt`, placed in both pipelines after everything else, or an
+expansion in the arm64 instruction selector. Perhaps 150-300 lines plus tests.
+
+**What it is worth.** Measured, by doing the equivalent transformation in the source
+instead of the compiler: `interp/bytecode-loop` 646.5 ms -> 39.7 ms, i.e. the row goes
+from 20.5x to **1.26x**. It should also move `json`, `sortmap`, `text` and `flate`,
+all of which copy small structs and interface headers in their inner loops -- but that
+is a prediction, not a measurement, and the honest thing is to measure it after
+building it.
+
+## The fix as committed causes one capability regression, and it is a real one
+
+    make test-goc-status       (no -O, pure control)   366 PASS  0 FAIL  0 SKIP  0 cached
+    make test-goc-status-opt   (-O, the arm that matters)  365 PASS  1 FAIL
+
+    --- FAIL: TestARM64RuntimeCapabilityStatus/stdlib-netpoll-stress/tcp-churn
+        cg12: interface dispatch failed for dynamic type 0x0
+        fatal error: cg12: interface dispatch failure
+        net_Listener_Accept()
+        main_serveTCPStressConnection()
+
+Not flaky, and it is mine. Rerun three times each, `-runtime-opt`, same command:
+
+    tree                            tcp-churn at -O
+    with mem2reg in the bounded pipeline   FAIL, FAIL, FAIL
+    d2855f5 (pre-fix control)              ok, ok, ok
+
+An interface value reaches a dispatch with a nil dynamic type. mem2reg has never run
+on Go-frontend IR before (RUNTIME_PLAN.md:4282), so this is a latent bug in the pass
+that only Go's two-word interface representation reaches. Triaging it now.
+
+Other guards, all clean on this tree:
+
+    TestFrameEscapeAudit          PASS  (unchanged, and structurally unaffected: the
+    TestLoopAliasAudit            PASS   corpus audits compile without OptimizeModule)
+    TestEscapeShadowPlacement     PASS
+    determinism, 4 programs x {default, -O}, compiled twice each:
+                                  8/8 byte-identical
+
+## The blocker, characterised
+
+The change is committed **off by default** (`GOC_BOUNDED_MEM2REG=1` turns it on),
+because it is not correct yet. With the switch unset the compiler's output is
+byte-identical to the pre-fix compiler's, checked on the interpreter program.
+
+What is established about the miscompile, each point measured:
+
+| question | answer | how |
+|---|---|---|
+| is it real, or flaky? | real | 3/3 fail with, 3/3 pass without, `-runtime-opt` |
+| deterministic? | **yes at GOMAXPROCS=1** | 15/15 fail; 13/25 at default GOMAXPROCS |
+| the garbage collector? | **no** | `GOGC=off` still fails 6/6; `gctrace=1` shows zero collections in this program either way |
+| code placement? | **no** | pre-fix compiler survives `GOC_TEXT_PAD` 0..28, 0/24 failures |
+| stack copying? | no evidence | the runtime's own `cg12 unadjusted stack pointer after copystack` audit never fires |
+| mem2reg, or the cleanup after it? | **mem2reg** | with fold/copy/dce removed and only mem2reg run, still 3/3 fail |
+| which functions? | **main.main + >=2 in package net** | promotion scoped by name and by a 1024-way hash of the name |
+
+The scoping is the part that makes it hard. Every single-package restriction is
+clean (`only=main.` 0/3, `only=net.` 0/3, `skip=runtime.` 3/3) and so is every
+half and quarter of package net on its own; `net` buckets `[0,256) + [512,768)`
+together with `main.main` fail 3/3, but splitting `[0,256)` in half makes both
+halves clean. So at least three promoted functions have to be present at once.
+That is a strange shape for an intraprocedural pass, and the shape is the clue:
+the only thing that couples two functions here is the calling convention, and the
+value that arrives wrong is a two-word interface. The next step is a delta-debug
+(ddmin) over the ~729 promoted `net` functions to get the minimal set, then read
+those functions' IR before and after promotion. Budget: an hour of machine time
+for the reduction, plus the read.
+
+## One correction to the brief's framing
+
+"Every goc-compiled program is at least 1.63x the host toolchain" is not what the
+suite measures. `control/spin-fixed-work` is **one program, byte-identical in all
+eleven sources** (`goc/perfbench_test.go:57` and each `main.go`'s `control()`), so
+eleven readings of 1.630-1.633 are eleven measurements of one loop, not eleven
+unrelated programs agreeing. The consistency is not evidence of a universal
+constant; it is evidence that the instrument is repeatable, which is what that row
+is for.
+
+The suite in fact contains rows at **1.008x** (`sha/sha256-1mib`, where both
+binaries run the same hand-written assembly) and **1.01-1.03x** (`chase/dram`,
+`chase/pointer-node`, memory-bound). So goc is not 1.63x everywhere.
+
+What is true, and is what the fix acts on: **code goc generates itself, for a loop
+over scalar locals, runs at about 1.63x** -- and that is a floor in the useful
+sense, because most of the suite's other rows sit above it. Fixing it moves that
+row to 0.926x.
+
+## Guard results
+
+### `make bench-perf`, before (switch off) -- reproduces the committed baseline
+
+Every row lands on its committed value: the eleven control rows read 1.6317-1.6332
+against a committed 1.6303-1.6331, `interp/bytecode-loop` 21.4712 against 21.4647,
+`float/sqrt-sum` 171.2507 against 171.2179, `sha/sha256-1mib` 1.0077 against 1.0077.
+
+The run exits non-zero on one row, and it is a noise-ceiling breach, not a ratio
+move: `chase/pointer-node` one-repetition spread 34.7% against a 15% ceiling, with
+its null spread at 33.8% -- i.e. the noise is on the goc side of a row whose true
+ratio is 1.01. I had `make bench-crypto` running on core 63 at the same time,
+which the suite's protocol allows but which visibly cost the quiet rows (`chase`
+and `gcpress` are all louder than their committed spreads). The after-run below was
+taken with the box otherwise idle.
+
+### `make bench-crypto` -- already failing on `ccwork/perf-suite`, before this change
+
+    Error: the program measures a case testdata/crypto_signing_bench_baseline.txt
+           does not list  [p256/sign-verify, p256/verify, p384/sign-verify,
+                           rsa2048/sign-verify]
+
+All four cases, i.e. every case there is -- and the indices themselves are on their
+committed values (45.96 vs 45.80, 33.40 vs 34.38, 39.88 vs 40.53, 12.31 vs 12.56).
+The committed baseline's header says `tolerance: 0.04` and the run says `0.06`, and
+the run's table carries two interval columns the file does not have: the perf-suite
+branch rewrote `goc/cryptobench_test.go` (663 lines) and did not regenerate
+`goc/testdata/crypto_signing_bench_baseline.txt`. Commit `1af81e1` touches the test
+and not the baseline; this branch touches neither.
+
+**Measured, not inferred.** A `git worktree` at `d2855f5` -- the perf-suite branch
+head, before any change of mine -- fails `make bench-crypto` with the identical
+error on the identical four cases (273.6 s, exit 2). The triage note was read as
+instructed and does not apply: this is not a single-digit timing swing that code
+placement could explain, it is every case in the file failing to be recognised at
+all, on a tree this branch has not modified.
+
+### The other guards
+
+| guard | result | note |
+|---|---|---|
+| `make test-goc-status` (no `-O`) | **366 PASS / 0 FAIL / 0 SKIP**, 0 cached | pure control; `-O` off means `opt.OptimizeModule` is never called |
+| `make test-goc-status-opt` (`-O`), switch **on** | **365 PASS / 1 FAIL** | `stdlib-netpoll-stress/tcp-churn`; this is why the switch exists |
+| `make test-goc-status-opt` (`-O`), switch **off** | see below | the compiler is byte-identical to pre-fix with the switch off |
+| `TestFrameEscapeAudit` | PASS | and structurally immune: the corpus audits compile without `opt.OptimizeModule` (`goc/corpusaudit_test.go:127`) |
+| `TestLoopAliasAudit` | PASS | same |
+| `TestEscapeShadowPlacement` | PASS (217 s) | same |
+| determinism | **8/8 byte-identical** | 4 programs x {default, `-O`}, each compiled twice |
+| `make bench-crypto` | FAIL, **pre-existing** | `1af81e1` rewrote `goc/cryptobench_test.go` (663 lines) and left `goc/testdata/crypto_signing_bench_baseline.txt` untouched; my branch touches neither file |
+
+### Guards, completed
+
+| guard | result |
+|---|---|
+| `make test-goc-status` (no `-O`) | **366 / 0 / 0**, 0 cached |
+| `make test-goc-status-opt` (`-O`), switch **off** (the shipped default) | **366 / 0 / 0**, 0 cached, 121.6 s |
+| `make test-goc-status-opt` (`-O`), switch **on** | 365 / **1** -- `stdlib-netpoll-stress/tcp-churn` |
+| GC reducer (`runtime_gc_type_mask_padding`), `GOGC=10`, 20 runs | **0/20 failures** |
+| GC reducer, default `GOGC`, 20 runs | **0/20 failures** |
+| determinism, 4 programs x {default, `-O`}, compiled twice each | **8/8 byte-identical** |
+| `TestFrameEscapeAudit` / `TestLoopAliasAudit` / `TestEscapeShadowPlacement` | **PASS** |
+| `TestAllocationCensus` | **PASS** (216.6 s), census reproduces the committed baseline |
+| compiler output with the switch off vs the pre-change compiler | **byte-identical** |
+
+The GC reducer ran under `GOMAXPROCS=3`, 180 s timeout, exactly 40 runs, each
+counted a pass only on exit 0 **and** the literal output `type mask padding ok`. The
+box was not idle for it (1-minute load average 41 on 64 cores, another job's), which
+matters for the reducer only in that a slower run is closer to its timeout; none
+came near it.
+
+## Verdict
+
+**1. The root cause of the double indirection.** `goc -O` never runs mem2reg on a
+Go program. `opt.OptimizeModule` sends any module past 2048 functions / 50000 blocks
+/ 200000 instructions to `BoundedPipeline`, which is fold, copy and DCE and nothing
+else; every whole-program Go build is past all three (5101 / 70160 / 297389 for a
+168-line source), because the program module carries the stdlib closure the prebuilt
+pack did not already hold. So every alloca-backed local stays in memory: `add x17,
+x29, #imm` then `ldr` on every read and `str` on every write, with the loop-carried
+dependence running through store-to-load forwarding. The tree already recorded half
+of this at `RUNTIME_PLAN.md:4282` -- "no goc module has ever run DefaultPipeline" --
+as a bound on a bug's blast radius, without connecting it to run-time cost.
+
+**2. The floor and the interpreter row do not share a cause.** Promotion takes the
+control loop from 1.632x to **0.926x** -- goc ahead of the host -- and takes the
+interpreter row only from 21.46x to 20.46x. The interpreter's 21x is `in :=
+program[pc]`, a sixteen-byte struct load that `goc/compile.go:6576` lowers to a
+`goc_memset` plus two `goc_memcpy` calls per dispatched opcode where the host uses
+one `LDP`. Doing that transformation in the source instead of the compiler takes the
+row to **1.26x**, which is the size of that finding.
+
+**3. The fix, and the numbers.** `BoundedPipeline` gains mem2reg, behind
+`GOC_BOUNDED_MEM2REG=1`, off by default. Sixteen rows measured across four programs,
+all sixteen improve: the floor 1.63 -> 0.93 in all four, `float/int-convert` 1.55 ->
+1.00, `float/mandelbrot` 2.59 -> 1.32, `text/utf8-decode` 4.42 -> 2.52,
+`map/build-probe` 7.57 -> 5.47, `text/sprintf` 10.30 -> 7.59. Compile cost is nil on
+the five programs the budget exists for.
+
+**4. Why it is off, and what would finish it.** Two distinct miscompiles, neither
+of which mem2reg had ever been in a position to cause before, because it had never
+run on a Go-frontend module:
+
+  * `compress/flate` dies with the collector finding a pointer into a freed span
+    (`runtime: pointer ... to unused region of span`, in `scanObject`). 3/5 with the
+    collector on, **0/5 with `GOGC=off`**, 0/5 with the switch off. This one is a
+    GC-visibility bug: a promoted managed pointer stops being described to the
+    collector once it lives in a register. `opt/mem2reg.go` carries `managed` and
+    `gcType` forward, so the loss is downstream, in what the arm64 backend records
+    for a spilled promoted temp. **This is the one to fix first** -- it has a
+    deterministic, single-purpose, network-free reproducer.
+  * `stdlib-netpoll-stress/tcp-churn` dies with `interface dispatch failed for
+    dynamic type 0x0`. Deterministic at `GOMAXPROCS=1`, and **not** the collector
+    (that program runs no collection at all). Needs promotion in `main.main` and in
+    at least two functions of package `net` at once; every single-package and
+    single-quarter restriction is clean. Next step is a delta-debug over the ~729
+    promoted `net` functions to get the minimal set.
+
+Estimate: the flate/GC half is a contained problem in how a promoted managed value
+is described to the stack map -- days, not weeks, and testable against the existing
+GC differential and reducer. The tcp-churn half is unknown until the minimal set is
+in hand; budget an hour of machine time for the reduction before estimating it.
+
+**5. One thing the brief got wrong, and it matters for what to measure next.**
+`control/spin-fixed-work` is one program compiled eleven times, not eleven programs
+agreeing, and the suite has rows at 1.008x and 1.01x. goc is not 1.63x everywhere.
+It is ~1.63x on code it generates for scalar loops, which is a floor in the useful
+sense -- most other rows sit above it -- and which this change removes.
