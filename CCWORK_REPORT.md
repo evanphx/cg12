@@ -698,3 +698,15 @@ produce it, which is the property `make bench-perf` needs from it.
 | `runtime_gc_promoted_local_root.go` | **0 / 20** | **0 / 20** |
 | `runtime_opt_promoted_interface_root.go` | **0 / 20** | **0 / 20** |
 | `runtime_opt_loop_carried_root.go` | **0 / 20** | **0 / 20** |
+
+| guard (tree B) | result |
+|----------------|--------|
+| determinism, `-O` (full pipeline) | **5 / 5 identical**, both caching paths, both rounds |
+| determinism, default (no `-O`) | **5 / 5 identical**, both caching paths, both rounds |
+| flate crash loop, default `GOGC` | **0 / 250** |
+
+All five default-arm hashes are byte-for-byte the same as they were before this
+branch (`0e2122941ec6a0b1`, `b1a662c7c86266a9`, `0a676936cb1c67ff`,
+`1d23c544a91641dd`, `75b9099d0ad1709c`). That is the check that the non-`-O`
+path is untouched: it never calls `opt.OptimizeModule`, and the bytes agree. The
+`-O` hashes did move, which is the check that the pipeline actually ran.
