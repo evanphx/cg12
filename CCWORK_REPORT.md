@@ -872,8 +872,15 @@ committed values (45.96 vs 45.80, 33.40 vs 34.38, 39.88 vs 40.53, 12.31 vs 12.56
 The committed baseline's header says `tolerance: 0.04` and the run says `0.06`, and
 the run's table carries two interval columns the file does not have: the perf-suite
 branch rewrote `goc/cryptobench_test.go` (663 lines) and did not regenerate
-`goc/testdata/crypto_signing_bench_baseline.txt`. Verified against the pre-change
-tree below.
+`goc/testdata/crypto_signing_bench_baseline.txt`. Commit `1af81e1` touches the test
+and not the baseline; this branch touches neither.
+
+**Measured, not inferred.** A `git worktree` at `d2855f5` -- the perf-suite branch
+head, before any change of mine -- fails `make bench-crypto` with the identical
+error on the identical four cases (273.6 s, exit 2). The triage note was read as
+instructed and does not apply: this is not a single-digit timing swing that code
+placement could explain, it is every case in the file failing to be recognised at
+all, on a tree this branch has not modified.
 
 ### The other guards
 
