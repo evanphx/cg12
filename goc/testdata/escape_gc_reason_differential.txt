@@ -92,23 +92,23 @@ confines the comparison to lines both compilers put on the heap.
 
 ## coverage
 
-programs with reasons on both sides            399
-goc -m decisions at joinable positions        1797
-  of those on the heap                        1103
-  of those carrying a rule                    1103  (must equal the line above)
-  of those goc could not explain               171  (the "unexplained" category: goc saw the
+programs with reasons on both sides            400
+goc -m decisions at joinable positions        1803
+  of those on the heap                        1107
+  of those carrying a rule                    1107  (must equal the line above)
+  of those goc could not explain               172  (the "unexplained" category: goc saw the
                                                     object escape and could not name the use)
 goc -m decisions with no source position         0  (never joinable; so is the census)
-gc -m=2 explained blocks parsed               3014
-  distinct decisions they describe            2739  (gc explains an allocation once per
+gc -m=2 explained blocks parsed               3027
+  distinct decisions they describe            2752  (gc explains an allocation once per
                                                     function it was inlined into)
-    reaching a joined line                    2201
+    reaching a joined line                    2212
     for a decision the matrix excludes         426  (printed at an inlining call site; see
                                                     package gcdiff. Not a gap)
-    matching no -m decision at all             112  (a gc heap allocation the placement
+    matching no -m decision at all             114  (a gc heap allocation the placement
                                                     differential cannot see; listed below)
-gc decisions carrying an explanation          2268
-gc heap decisions with no -m=2 explanation     171
+gc decisions carrying an explanation          2279
+gc heap decisions with no -m=2 explanation     173
   of those synthesized by the chan rule        136  (expected: gc prints nothing at all
                                                     for make(chan))
 goc rules the classifier did not know            0  (must be 0)
@@ -117,7 +117,7 @@ goc -m lines the parser did not know             0  (must be 0)
 
 the two instruments on goc's side, against each other:
 
-lines both record, and agree about            1341
+lines both record, and agree about            1346
 lines only the census records                 152  (an allocation goc's own -m cannot
                                                     explain at all)
 lines only goc -m records                      21  (expected: the census omits ordinary
@@ -339,6 +339,8 @@ which is deliberately not touched here.
   NOT IN -m: runtime_gc_memory_limit.go:54:15: append(out, node)
   NOT IN -m: runtime_gc_metadata_hugepages.go:60:15: append(out, node)
   NOT IN -m: runtime_gc_scavenge_release.go:47:15: append(out, node)
+  NOT IN -m: runtime_gc_slice_tail_pointer.go:149:20: append(retained, tail(buffer, len(buffer)))
+  NOT IN -m: runtime_gc_slice_tail_pointer.go:152:20: append(scenery, new([512]byte))
   NOT IN -m: runtime_gc_sweep_pacing.go:53:15: append(out, &small{...})
   NOT IN -m: runtime_gc_sweep_pacing.go:65:15: append(out, node)
   NOT IN -m: runtime_gc_sweep_pacing.go:77:15: append(out, node)
@@ -422,24 +424,24 @@ columns what their explanations amount to. "neither" is almost entirely lines
 both compilers keep in a frame, which neither explains.
 
   placement                agree    differ  goc only   gc only   neither     total
-  agrees                     143       309        44        17       280       793
-  disagrees                   84       176       159      1327       685      2431
+  agrees                     143       311        44        17       281       796
+  disagrees                   84       176       161      1336       688      2445
 
-## AGREE ON PLACEMENT, DISAGREE ON REASON: 309 lines
+## AGREE ON PLACEMENT, DISAGREE ON REASON: 311 lines
 
 both compilers put something on this line on the heap, and the mechanisms they
 name have nothing in common. One of them is reaching the right placement by a
 route the other does not recognise, which no placement comparison can see. Read
 each one and decide which.
 
-of those, 205 carry exactly one explained allocation on each side, so the two
+of those, 207 carry exactly one explained allocation on each side, so the two
 explanations are about the same object; the other 104 carry more than one and the
 pairing is the line, not the allocation. Both are listed; each line's own
 entries say which it is.
 
 by category pair (goc                                gc):
 
-    116  stored-in-object                   call-retains
+    118  stored-in-object                   call-retains
      43  unexplained                        call-retains
      41  unexplained                        stored-in-object
      37  stored-in-object                   closure-captured
@@ -1221,6 +1223,19 @@ runtime_gc_scavenge_release.go:41	heap -> heap	unexplained -> call-retains
 	     at               testdata/runtime_gc_scavenge_release.go:47:21
 	gc   col 11  heap  object  &block{...}
 	     call-retains     {heap} <- node via spill -> assign -> call parameter
+runtime_gc_slice_tail_pointer.go:145	heap -> heap	stored-in-object -> call-retains
+	src  buffer := make([]byte, size)
+	goc  col 26  heap  32768_byte  [ir pass: heap-alloc-candidate in main.checkCollector]
+	     stored-in-object write barrier into non-local storage
+	gc   col 17  heap  slice  make([]byte, 32768)
+	     call-retains     {heap} <- buffer via spill -> assign -> call parameter -> call parameter
+runtime_gc_slice_tail_pointer.go:152	heap -> heap	stored-in-object -> call-retains
+	src  scenery = append(scenery, new([512]byte))
+	goc  col 30  heap  512_byte  [ir pass: heap-alloc-candidate in main.checkCollector]
+	     stored-in-object write barrier into non-local storage
+	gc   col 20  heap  object  append
+	gc   col 33  heap  object  new([512]byte)
+	     call-retains     {heap} <- &{storage for new([512]byte)} via spill -> call parameter
 runtime_gc_sweep_pacing.go:53	heap -> heap	unexplained -> call-retains
 	src  out = append(out, &small{value: index})
 	goc  col 21  heap  main_small  [front end: composite-literal in main.allocateSmall]
@@ -3698,17 +3713,17 @@ stdlib_slog_structured.go:58	mixed -> heap	stored-in-object -> stored-in-object
 	gc   col 6  heap  object  textOutput
 	     stored-in-object {storage for &slog.commonHandler{...}} <- slog.w via address-of -> interface-converted -> assign-pair -> struct literal element
 
-## PLACEMENT DISAGREES, ONLY goc EXPLAINED: 159 lines
+## PLACEMENT DISAGREES, ONLY goc EXPLAINED: 161 lines
 
 goc heaps something here that gc does not, so goc is the only compiler with
 anything to say. Grouped by goc's category, this is the pessimistic direction
 sorted by cause -- the thing that took two jobs of reading goc/compile.go by
 hand before the diagnostic existed.
 
-     91  stored-in-object
+     92  stored-in-object
      25  call-retains
      23  closure-captured
-     12  unexplained
+     13  unexplained
       4  loop-carried
       2  stored-in-object,interface-boxed
       1  call-opaque
@@ -4105,6 +4120,18 @@ runtime_gc_assist_stack_growth.go:56	heap -> absent	closure-captured -> -
 	goc  col 3  heap  struct_code_uintptr__argument0__sync_WaitGroup  [ir pass: heap-alloc-candidate in main.main]
 	     closure-captured argument 0 of $runtime.newproc escapes
 	     at               testdata/runtime_gc_assist_stack_growth.go:56:20
+runtime_gc_slice_tail_pointer.go:76	heap -> frame	unexplained -> -
+	src  buffer := make([]byte, size)
+	goc  col 25  heap  32768_byte  [ir pass: heap-alloc-candidate in main.checkPointers]
+	     unexplained      used by sub
+	     at               testdata/runtime_gc_slice_tail_pointer.go:80:38
+	gc   col 16  frame  slice  make([]byte, 32768)
+runtime_gc_slice_tail_pointer.go:98	mixed -> absent	stored-in-object -> -
+	src  var fixed [64]byte
+	goc  col 2  frame  64_byte  [ir pass: heap-alloc-candidate in main.checkPointers]
+	goc  col 2  heap  64_byte  [ir pass: heap-alloc-candidate in main.checkPointers]
+	     stored-in-object write barrier into a candidate
+	     at               testdata/runtime_gc_slice_tail_pointer.go:98:2
 runtime_goexit_defer.go:15	heap -> absent	closure-captured -> -
 	src  go worker(done)
 	goc  col 2  heap  struct_code_uintptr__argument0_chan_int  [ir pass: heap-alloc-candidate in main.main]
@@ -4771,14 +4798,14 @@ stdlib_sync_once_map_cond.go:29	heap -> absent	stored-in-object -> -
 	     stored-in-object write barrier into a candidate
 	     at               testdata/stdlib_sync_once_map_cond.go:33:5
 
-## PLACEMENT DISAGREES, ONLY gc EXPLAINED: 1327 lines
+## PLACEMENT DISAGREES, ONLY gc EXPLAINED: 1336 lines
 
 gc heaps something here that goc does not, so gc is the only compiler with
 anything to say. This is the permissive direction, and gc's category is a direct
 statement of what it thinks publishes the object -- which is the fastest triage
 available for a line goc may be keeping in a frame wrongly.
 
-   1273  call-retains
+   1282  call-retains
      34  stored-in-object
       8  returned
       4  interface-boxed
@@ -5913,6 +5940,42 @@ runtime_gc_scavenge_release.go:111	absent -> heap	- -> call-retains
 	src  panic("more heap is reported released than is idle")
 	gc   col 9  heap  object  "more heap is reported released than is idle"
 	     call-retains     {heap} <- &{storage for "more heap is reported released than is idle"} via spill -> call parameter
+runtime_gc_slice_tail_pointer.go:81	absent -> heap	- -> call-retains
+	src  panic("a slice with no capacity left points outside its allocation")
+	gc   col 9  heap  object  "a slice with no capacity left points outside its allocation"
+	     call-retains     {heap} <- &{storage for "a slice with no capacity left points outside its allocation"} via spill -> call parameter
+runtime_gc_slice_tail_pointer.go:85	absent -> heap	- -> call-retains
+	src  panic("a three-index slice with no capacity left points outside its allocation")
+	gc   col 9  heap  object  "a three-index slice with no capacity left points outside its allocat...
+	     call-retains     {heap} <- &{storage for "a three-index slice with no capacity left points outside its allocat...} via spill -> call parameter
+runtime_gc_slice_tail_pointer.go:92	absent -> heap	- -> call-retains
+	src  panic("a slice with capacity left lost its offset")
+	gc   col 9  heap  object  "a slice with capacity left lost its offset"
+	     call-retains     {heap} <- &{storage for "a slice with capacity left lost its offset"} via spill -> call parameter
+runtime_gc_slice_tail_pointer.go:102	absent -> heap	- -> call-retains
+	src  panic("a constant-index slice with no capacity left points outside its array")
+	gc   col 9  heap  object  "a constant-index slice with no capacity left points outside its array"
+	     call-retains     {heap} <- &{storage for "a constant-index slice with no capacity left points outside its array"} via spill -> call parameter
+runtime_gc_slice_tail_pointer.go:106	absent -> heap	- -> call-retains
+	src  panic("a constant three-index slice with no capacity left kept its offset")
+	gc   col 9  heap  object  "a constant three-index slice with no capacity left kept its offset"
+	     call-retains     {heap} <- &{storage for "a constant three-index slice with no capacity left kept its offset"} via spill -> call parameter
+runtime_gc_slice_tail_pointer.go:110	absent -> heap	- -> call-retains
+	src  panic("a constant-index slice with capacity left lost its offset")
+	gc   col 9  heap  object  "a constant-index slice with capacity left lost its offset"
+	     call-retains     {heap} <- &{storage for "a constant-index slice with capacity left lost its offset"} via spill -> call parameter
+runtime_gc_slice_tail_pointer.go:119	absent -> heap	- -> call-retains
+	src  panic("an empty string slice points outside its allocation")
+	gc   col 9  heap  object  "an empty string slice points outside its allocation"
+	     call-retains     {heap} <- &{storage for "an empty string slice points outside its allocation"} via spill -> call parameter
+runtime_gc_slice_tail_pointer.go:123	absent -> heap	- -> call-retains
+	src  panic("a non-empty string slice lost its offset")
+	gc   col 9  heap  object  "a non-empty string slice lost its offset"
+	     call-retains     {heap} <- &{storage for "a non-empty string slice lost its offset"} via spill -> call parameter
+runtime_gc_slice_tail_pointer.go:169	absent -> heap	- -> call-retains
+	src  panic("a tail slice changed shape")
+	gc   col 10  heap  object  "a tail slice changed shape"
+	     call-retains     {heap} <- &{storage for "a tail slice changed shape"} via spill -> call parameter
 runtime_gc_stale_result_alloca.go:49	absent -> heap	- -> returned
 	src  return string(source[:(round+1)<<20])
 	gc   col 22  heap  object  string(source[:(round + 1) << uint(20)])
