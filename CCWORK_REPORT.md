@@ -495,3 +495,20 @@ None of these is a reason to keep the pipeline off. The 4.5x buys a control loop
 that goes from 1.63x the host toolchain to under 1.0 (below), and the matrix —
 the thing that runs in CI — does not get slower once its packs are built. But if
 somebody has to pay 4.5x on a laptop compiling one program, (1) is where to look.
+
+## Verdict on the two prerequisite branches
+
+The brief said to say so plainly if either failed to fix its blocker. **Both
+fixed theirs**, re-verified on the merged tree rather than taken on trust:
+
+| branch | its blocker | check on this tree |
+|--------|-------------|--------------------|
+| `mem2reg-iface-dispatch` | `stdlib-netpoll-stress/tcp-churn`, "interface dispatch failed for dynamic type 0x0" | capability **PASS** on the `-O` arm; its reducer `runtime_opt_promoted_interface_root.go` 0/20 at both GOGC settings |
+| `mem2reg-gc-visibility` | `placement_bench/p256` failing to verify its own signatures at `GOGC=10` | p256 **0 / 100 at `GOGC=10`**; its reducer `runtime_gc_promoted_local_root.go` 0/20 at both settings; the `gc-invariants/promoted-local-root` capability PASSes |
+
+gc-visibility's secondary claim — that the flate crash was never mem2reg's, but
+the zero-capacity-slice defect `800f47f` fixed, whose rate promotion doubled — is
+consistent with what I measure: flate is **0 failures in 500 runs** across the
+default collector setting and `GOGC=10`, with the whole pipeline on.
+
+Neither branch, however, was the whole set. The third blocker is above.
