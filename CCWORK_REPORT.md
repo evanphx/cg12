@@ -80,4 +80,116 @@ rejects, and the buffer is freed under a live slice. Turning the collector off
 suppresses it exactly as it suppresses a missing root. That arm did not
 discriminate between the two hypotheses.
 
-(sections 3–5 below are filled in as the runs complete)
+## 3. The hypothesis, tested directly and refuted
+
+The brief's hypothesis: *"if mem2reg promotes an alloca holding a pointer into an
+SSA temp, and the register allocator later spills that temp to a stack slot, the
+slot must appear in the safepoint map as holding a pointer. If it does not, the
+collector will not see the reference."*
+
+A zero crash rate does not refute that on its own — a latent missing record could
+simply be going unexercised. So the recording was inspected, and then counted on
+a real whole-program build.
+
+### What the backend actually does
+
+There is no separate path for a promoted temp. Every safepoint root goes through
+one function, `arm64/mc.go:2826 recordSafepoint`, which reads the root's binding
+straight off the temporary:
+
+```go
+if t.Reg != ir.NoReg {
+        locs = append(locs, rootLoc{kind: rootReg, val: int32(mreg(Reg(t.Reg))), typ: t.GCType})
+} else {
+        locs = append(locs, rootLoc{kind: rootFrame, val: int32(m.spillBase + t.Slot), typ: t.GCType})
+}
+```
+
+A spilled root *is* recorded, at `spillBase + Slot`, and that is the ordinary
+case rather than an exception. Two things upstream make it so:
+
+* `arm64/gcalloc.go:339` — the graph colourer force-spills a managed reference
+  before colouring begins: `if g.gc[t] || ((f.UsesManagedFrame() || …) && g.crossFreq[t] > 0) { spill(t); removed[t] = true }`. On a goc frame (every goc
+  function sets `ManagedFrame`), *anything* live across a call goes to a slot.
+  So a GC ref is not given a register and spilled later; it never gets one.
+* `arm64/gcalloc.go:49 coalesceSpillSlots` — spill slots are shared between
+  temporaries with disjoint live ranges to shrink the frame, and GC references
+  are explicitly excluded from that sharing and keep private slots, "their
+  whole-life stack home is part of the safepoint stack map".
+
+The membership question — which temporaries are roots at all — is
+`arm64/regalloc.go:399 isSafepointRoot`, and on a managed frame it is *wider*
+than `GCRef`: it reports **any** live pointer-class (`ClsP`) temporary, because a
+copying stack has to relocate interior frame addresses too. goc types pointers
+`ClsP` and never calls `ir.LowerPointers`, so that clause is live for goc code.
+
+### And what it does on a real build, counted
+
+`arm64` and `opt` were instrumented (env-gated, since reverted) to count, over a
+whole-program `goc -O` build of `goc/testdata/placement_bench/flate/main.go` —
+the program in question, with its full stdlib closure:
+
+| | promotion off | promotion **on** |
+|---|---|---|
+| safepoint roots recorded in a **register** (`rootReg`) | 23,986 | **18,368** |
+| … of those, carrying `GCRef` | 23,986 | 18,368 |
+| safepoint roots recorded in a **frame slot** (`rootFrame`) | 1,640,094 | 1,499,918 |
+
+Promotion does not create register roots — it *removes* 23 % of them, and every
+one that remains is `GCRef` and is emitted into the safepoint map as a `rootReg`
+entry. There is no population of "promoted managed pointers living in a register
+that the collector was not told about": the register roots that exist are
+frontend-fixed temporaries (the closure-context register and the like), they
+exist identically with the switch off, and they are recorded.
+
+The complementary question — does promotion turn a described slot into an
+undescribed value? — was counted the same way. Before promotion a managed local's
+slot word is described by `ir.InferStackPointerWords`, whose predicate is "the
+stored value is `GCRef`, or is itself an allocation address"
+(`ir/goabi.go:97`). After promotion the value itself must satisfy
+`isSafepointRoot`. Counting every reaching definition of every promoted managed
+variable that satisfies **neither**:
+
+| program | promoted managed variables | their reaching definitions | definitions no rule would report |
+|---|---|---|---|
+| `flate` | 7,491 | 8,217 | **1** |
+| `json` | 8,080 | 8,985 | **1** |
+| `gcpress` | 7,250 | 7,959 | **1** |
+
+The one, in all three, is the same value:
+
+    AUDIT promote-unrooted func=reflect.Value.UnsafePointer var=t49 value=t49 cls=l gcref=false
+
+`reflect.Value.UnsafePointer` returns an `unsafe.Pointer` that goc types `ClsL`,
+a plain word, and does not mark `GCRef`. It fails the post-promotion predicate —
+and it fails the pre-promotion one identically (`InferStackPointerWords` requires
+`GCRef` or an allocation address, and it is neither), so the slot word it was
+stored into was not described before promotion either. Promotion loses nothing
+there. It is also the whole population: **one value in ~8,000**, in a function
+none of these programs call.
+
+So the loss the brief hypothesised does not exist in this backend, in either
+direction: promoted managed pointers live in frame slots by construction, those
+slots are recorded, and there is no reaching definition of a promoted managed
+variable that promotion drops from the map.
+
+## 4. What the crash actually was
+
+The `flate` crash the switch was blocked on was **the zero-capacity slice defect
+that `800f47f` fixed**, running at roughly double its usual rate because
+promotion changes the program's allocation and timing. Three things say so:
+
+1. It reproduces on the pre-fix tree **with promotion off** (6/100), which a
+   promotion-introduced defect cannot do.
+2. Its message is `found bad pointer in Go heap` from `badPointer` via
+   `wbBufFlush1`/`findObject` — the collector *rejecting* a pointer handed to it.
+   A root the collector cannot see produces the opposite symptom: a silent free
+   and a later use of freed memory, with no complaint at collection time.
+3. It is gone on the fixed tree at three collector settings over 750 runs,
+   including `GOGC=10`, which collects far more often than the setting the 3/5
+   was measured at and would raise, not lower, a missing-root rate.
+
+The `GOGC=off` arm in the original measurement did not discriminate: the
+zero-capacity defect is *also* only visible when the collector runs.
+
+
