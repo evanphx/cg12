@@ -193,3 +193,36 @@ The `GOGC=off` arm in the original measurement did not discriminate: the
 zero-capacity defect is *also* only visible when the collector runs.
 
 
+## 5. It does still reproduce — in `p256`, not in `flate`
+
+Running the whole benchmark corpus with promotion on, 40 runs of each program at
+the default collector setting and 40 at `GOGC=10`, found one program that dies:
+`goc/testdata/placement_bench/p256/main.go`, an ECDSA P-256 sign/verify
+workload. It does not crash — it **silently computes the wrong answer**:
+
+    panic: signature did not verify
+
+The full control matrix, 40 runs per cell, same box, same source:
+
+| promotion | `GOGC` | failures / 40 |
+|---|---|---|
+| off | `off` … `10` | **0** at every setting |
+| on | `off` | 0 |
+| on | 100 (default) | 0 |
+| on | 50 | 4 |
+| on | 20 | 24 |
+| on | **10** | **35** |
+
+Monotone in how often the collector runs, zero when it never runs, and zero at
+every setting with promotion off. That is the shape the brief was looking for,
+and it is a much cleaner instrument than `flate` ever was: `flate`'s crash was
+never promotion-specific, and this one is, at every collection frequency.
+
+The symptom is the one a missing root produces. A root the collector cannot see
+is not reported as a bad pointer — the object is freed while a live reference
+still names it, the span is reused, and the program reads whatever is there now.
+A P-256 scalar or field element read after its backing array was recycled gives a
+signature that does not verify, with no diagnostic at all.
+
+The rest of this section is the root cause.
+
