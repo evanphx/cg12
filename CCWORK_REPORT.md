@@ -2,8 +2,6 @@
 
 Branch `ccwork/nosplit-frame-budget`, from `main` (`5b085d2`).
 
-_(run in progress — sections appended as each result lands)_
-
 ## What the budget is
 
 `stackcheck` (new package) walks the nosplit call graph and computes, for each
@@ -290,6 +288,45 @@ the committed 0.9260, and the median row change from `main` is +0.32% and
 this branch re-enabled is inside nosplit runtime functions, and the deep
 allocator paths — the ones on these workloads' hot paths — got none of it,
 because their chains are over the reserve.
+
+## The error, in full
+
+`goc -O` on a three-link nosplit chain of 512-byte frames
+(`goc/nosplitbudget_test.go` holds this shape as a test):
+
+    goc: nosplit frame budget: nosplit stack overflow: main_middle -> main_deepest -> goc_memset
+      1168 bytes of nosplit frames against a 920-byte limit, 248 over
+           576  main_middle
+           576  main_deepest
+            16  goc_memset
+      shrink a frame on this chain, or let one of these functions keep its stack-growth check
+
+Exit status 1, no object written. The chain, each frame in it, the total, the
+limit, how far over, and the two things a person can do about it.
+
+## Verdict
+
+**The budget fires on a constructed overflow** — `goc` exits 1 with the message
+above, and `TestNoSplitBudgetRejectsAnOverflowingChain` /
+`TestNoSplitBudgetProducesNoObject` hold it to rejecting rather than warning.
+It also fired on the tree it was written for, which was not expected: 23 chains
+over the reserve under `-O` and 50 without it, the deepest at 3024 bytes against
+920, with `runtime.mcache.nextFree` — the function that crashed
+`runtime_lock_osthread` — already 184 bytes over before anything is inlined into
+it.
+
+**Inlining into nosplit callers is re-enabled**, bounded by measured frames
+rather than by a proxy: `opt.InlineIntoNoSplitCallers` inlines, cleans up,
+measures the frame the backend will lay out, and restores the caller verbatim if
+it grew past its chain's headroom.
+
+**What it bought**: 106 nosplit callers got their inlining back on
+`runtime_lock_osthread`, one was measured and reverted, and 201 have no headroom
+at all. The allocator fast paths are in the third group and stay there — which
+is the right answer and the reason the stopgap looked like it worked. On the
+performance suite the change is not measurable: control 0.9244/0.9325 against
+`main`'s 0.9256 and the committed 0.9260, median row change +0.2 to +0.3%.
+
 
 ## What this leaves behind
 
