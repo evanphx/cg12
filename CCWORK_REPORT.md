@@ -226,3 +226,116 @@ signature that does not verify, with no diagnostic at all.
 
 The rest of this section is the root cause.
 
+### Bisection: one function, one local
+
+Promotion was scoped by function name (an FNV hash of the name into 1024 buckets,
+binary-searched) and then by variable index inside the function. Both searches
+converged, which is what says the cause is one thing and not an interaction:
+
+| scope | failures / 20 at `GOGC=10` |
+|---|---|
+| everything | 15–35 / 40 |
+| buckets `[0,511]` | 0 |
+| buckets `[512,1023]` | 13 / 16 |
+| … down to bucket `698` alone (8 functions) | 14 / 16 |
+| **`ecdsa.verifyGeneric[*nistec.P256Point]` alone** | **15 / 20** |
+| that function, promoted variable 3 (`Q`) alone | 10 / 20 |
+| that function, any of the other 11 variables alone | 0–2 / 20 |
+
+`Q` is `verifyGeneric`'s public-key point:
+
+```go
+Q, err := c.newPoint().SetBytes(pub.q)
+...                                    // ~66 safepoints: NewNat, SetBytes,
+...                                    // hashToNat, inverse, ScalarBaseMult
+p2, err := Q.ScalarMult(Q, w.Mul(r, c.N).Bytes(c.N))
+```
+
+### The safepoint maps, before and after promotion
+
+Dumping every safepoint's root list for `verifyGeneric` (env-gated
+instrumentation, since reverted) says it outright. **Without** promotion:
+
+    TEMP  t19 name=t14 cls=l gcref=true reg=NoReg slot=48
+    root  t19 name=t14 ... alloc=true@792 words=map[0:true]      x 66 safepoints
+
+The alloca for `Q` is a root at 66 safepoints, and word 0 of the allocation — the
+pointer itself — is in the frame map at each of them. **With** promotion:
+
+    TEMP  t19 name=t14 cls=l gcref=true reg=9 slot=-1
+    (no root line anywhere)
+
+Diffing the two root sets, promotion loses exactly three names: `t14` (the
+allocation) and `t313`/`t315` (the two loads of `Q`, which no longer exist). What
+replaces them is `%t24`, the result of `P256Point.SetBytes`:
+
+    TEMP  t29 name=t24 cls=l gcref=false reg=0 slot=-1
+
+**`gcref=false`.** `Q` is now carried across 66 safepoints by a value nothing
+reports.
+
+### Root cause
+
+`opt/mem2reg.go` carried the slot's managed-ness onto the **phis** it mints
+(`f.MarkGCRefType(p.To, v.gcType)`) and onto nothing else. That is half the
+invariant.
+
+A managed local's slot has its pointer word in the frame map for the whole span
+the allocation reaches, so the *values* that pass through the slot need no marking
+of their own: between the call that produces one and the store that files it away,
+nothing can collect. goc relies on that. It marks a **load** from a managed slot
+as a GC reference — `t313`/`t315` above are both `gcref=true` — and leaves a
+multi-result constructor's **result** unmarked.
+
+Promotion deletes the slot and the loads, and the unmarked value becomes what
+carries the variable across every safepoint in between.
+`arm64/regalloc.go isSafepointRoot` asks the value, not the storage, so it is
+reported at no safepoint; and `arm64/gcalloc.go`'s force-to-stack rule keys on
+`GCRef` too, so the allocator was free to leave it in `x9`. At `GOGC=10` the
+`P256Point` is freed and its span reused before `Q.ScalarMult(Q, …)` reads it, and
+ECDSA verification fails against a signature it just produced.
+
+This is not the mechanism the brief hypothesised — nothing is lost *because* a
+value was spilled, and the spill records are correct — but it is the same class of
+defect it was pointing at, one level up: promotion moved the question from "is
+this slot described?" to "is this value marked?", and the frontend only ever
+answered that question for loads.
+
+### The fix
+
+`opt/mem2reg.go`'s new `markManagedDef` marks every value that becomes a reaching
+definition of a promoted **managed** variable, not just the phis. That is exactly
+as conservative as the slot was and no more: the variable's own `GCRef` flag is
+the frontend's statement that this storage holds a managed pointer, and it is what
+the frame map described. A type descriptor the value already carries wins over the
+slot's.
+
+### The reduction
+
+`goc/testdata/runtime_gc_promoted_local_root.go`, added to the capability matrix
+as `gc-invariants/promoted-local-root`. A managed local assigned from a
+multi-result constructor and held across six collections with nothing else
+referring to it.
+
+| compiler | promotion | runs | failures |
+|---|---|---|---|
+| before the fix | **on** | 60 | **60** |
+| before the fix | off | 60 | 0 |
+| after the fix | **on** | 60 | 0 |
+| after the fix | off | 60 | 0 |
+
+It uses a finalizer as the detector rather than the object's corrupted contents. A
+freed object is not always overwritten, so checking its fields catches this about
+five runs in six; a finalizer that runs while the program is still holding the
+pointer is the defect itself, and fires every time.
+
+## 6. Rates after the fix
+
+| program | promotion | collector | runs | failures |
+|---|---|---|---|---|
+| `p256` | on | `GOGC=10` | 250 | **0** (was 35/40) |
+| `p256` | on | default | 250 | **0** |
+| `flate` | on | default | 250 | **0** |
+| `flate` | on | `GOGC=10` | 250 | **0** |
+| `flate` | on | `GOGC=off` | 250 | **0** |
+
