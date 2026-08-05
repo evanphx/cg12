@@ -26,6 +26,25 @@ type ARM64Function struct {
 	Args            int
 	Flags           []string
 	NoLocalPointers bool
+
+	// Calls are the symbols this function branches to with BL or CALL, spelled
+	// the way the emitted branch spells them (so an ABI0 entry appears under its
+	// wrapper's name where the translator rewrites it). Indirect reports a BL or
+	// B through a register.
+	//
+	// They exist for the nosplit frame budget, which has to walk through
+	// assembly: a NOSPLIT assembly function has a frame and makes calls, and a
+	// budget that treated it as a leaf would under-count every chain that reaches
+	// one. cg12 has no link stage that reads an assembled object's relocations
+	// the way Go's linker does, so the edges are taken here, from the source the
+	// translator is already walking.
+	Calls    []string
+	Indirect bool
+
+	// AddressTaken lists the symbols this function materializes as an address
+	// rather than branching to. A function among them is a possible target of an
+	// indirect call.
+	AddressTaken []string
 }
 
 // ARM64Translation is the complete result of parsing one source file for the
@@ -152,6 +171,9 @@ func CompileARM64(file *File, options ARM64Options) (ARM64Translation, error) {
 		functionCalls:     make(map[int]bool),
 		data:              make(map[string][]arm64DataValue),
 	}
+	translator.functionCallTargets = make(map[int][]string)
+	translator.functionIndirectCalls = make(map[int]bool)
+	translator.functionAddressTaken = make(map[int][]string)
 	translator.directABI0 = collectDirectABI0(file, translator.abi0Layouts)
 	globalDefinitions := make(map[string]bool)
 	functionIndex := -1
@@ -193,6 +215,7 @@ func CompileARM64(file *File, options ARM64Options) (ARM64Translation, error) {
 			}
 		}
 	}
+	translator.collectCallGraph(file)
 	for _, statement := range file.Statements {
 		directive, ok := statement.(*Directive)
 		if !ok || directive.Name != "DATA" {
@@ -241,4 +264,70 @@ func CompileARM64(file *File, options ARM64Options) (ARM64Translation, error) {
 func TranslateARM64(file *File, options ARM64Options) (string, error) {
 	translation, err := CompileARM64(file, options)
 	return translation.Assembly, err
+}
+
+// collectCallGraph records, per function, the symbols it branches to and the
+// symbols it materializes as addresses. It runs after the pass that decides
+// which ABI0 entry points are direct, because the name a branch is emitted with
+// depends on that decision, and a TEXT can be declared after a branch to it.
+//
+// The nosplit frame budget consumes this. cg12 has no link stage that reads a
+// finished object's relocations, so the only place these edges exist is the
+// assembly source, and the only pass that reads it is this one.
+func (t *arm64Translator) collectCallGraph(file *File) {
+	functionIndex := -1
+	for _, statement := range file.Statements {
+		switch statement := statement.(type) {
+		case *Text:
+			functionIndex++
+		case *Instruction:
+			if functionIndex < 0 {
+				continue
+			}
+			t.collectInstructionEdges(functionIndex, statement)
+		}
+	}
+}
+
+func (t *arm64Translator) collectInstructionEdges(functionIndex int, instruction *Instruction) {
+	// A branch to a symbol continues the chain whether or not it returns: BL is
+	// a call, and B to a symbol is a tail branch whose target's frame stacks on
+	// this one unless this one was torn down first. Counting both is the safe
+	// direction -- a tail branch is over-counted by one frame, never under.
+	isBranch := false
+	switch instruction.Opcode {
+	case "BL", "CALL", "B", "JMP":
+		isBranch = true
+	}
+	if isBranch && len(instruction.Operands) == 1 {
+		operand := instruction.Operands[0]
+		if symbol, ok := operandSymbol(operand); ok {
+			t.functionCallTargets[functionIndex] = append(t.functionCallTargets[functionIndex], t.branchSymbolName(symbol))
+			return
+		}
+		if operand.Kind == OperandRegister ||
+			operand.Kind == OperandMemory && operand.Offset == "" && operand.Index == "" && operand.Base != "PC" {
+			// Through a register: the target is whatever the program put there.
+			t.functionIndirectCalls[functionIndex] = true
+		}
+		// Anything else is a local label within this function.
+		return
+	}
+	// Not a branch. Any symbol it names is an address the program now holds, and
+	// so a candidate for someone else's indirect branch.
+	for _, operand := range instruction.Operands {
+		if symbol, ok := operandSymbol(operand); ok {
+			t.functionAddressTaken[functionIndex] = append(t.functionAddressTaken[functionIndex], t.branchSymbolName(symbol))
+		}
+	}
+}
+
+// branchSymbolName spells a branch target the way translateBranch spells it, so
+// the recorded edge names the symbol the emitted instruction actually reaches.
+func (t *arm64Translator) branchSymbolName(symbol Symbol) string {
+	name := t.symbol(symbol)
+	if !symbol.Static && symbol.ABI == "" && !t.directABI0Symbols[name] {
+		return abi0Symbol(name)
+	}
+	return name
 }

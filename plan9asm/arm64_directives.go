@@ -33,9 +33,12 @@ func (t *arm64Translator) translateText(text *Text) error {
 	t.currentSymbol = symbol
 	if t.directRawVforkSyscall() {
 		t.functions = append(t.functions, ARM64Function{
-			Name:  symbol,
-			Args:  argumentSize,
-			Flags: append([]string(nil), text.Flags...),
+			Name:         symbol,
+			Args:         argumentSize,
+			Flags:        append([]string(nil), text.Flags...),
+			Calls:        t.callTargets(),
+			Indirect:     t.functionIndirectCalls[t.functionIndex],
+			AddressTaken: t.addressTargets(),
 		})
 		t.emitRawVforkSyscall()
 		t.skipFunction = true
@@ -46,21 +49,28 @@ func (t *arm64Translator) translateText(text *Text) error {
 		if err != nil {
 			return err
 		}
+		// The wrapper's whole body is the one call to the ABI0 entry, so its edge
+		// is that name and nothing else; the body's own branches belong to the
+		// entry appended below.
 		t.functions = append(t.functions, ARM64Function{
 			Name:       symbol,
 			Frame:      wrapperFrame,
 			FrameStart: 4,
 			Args:       argumentSize,
 			Flags:      append([]string(nil), text.Flags...),
+			Calls:      []string{abi0Name},
 		})
 		symbol = abi0Name
 	}
 	t.functions = append(t.functions, ARM64Function{
-		Name:       symbol,
-		Frame:      t.assemblyFrameSize(symbol),
-		FrameStart: t.assemblyFrameStart(symbol),
-		Args:       argumentSize,
-		Flags:      append([]string(nil), text.Flags...),
+		Name:         symbol,
+		Frame:        t.assemblyFrameSize(symbol),
+		FrameStart:   t.assemblyFrameStart(symbol),
+		Args:         argumentSize,
+		Flags:        append([]string(nil), text.Flags...),
+		Calls:        t.callTargets(),
+		Indirect:     t.functionIndirectCalls[t.functionIndex],
+		AddressTaken: t.addressTargets(),
 	})
 	t.output.WriteString("\n.text\n")
 	fmt.Fprintf(&t.output, ".global %s\n", symbol)
@@ -393,4 +403,31 @@ func hasPlan9Flag(flags, want string) bool {
 		}
 	}
 	return false
+}
+
+// callTargets and addressTargets return the current function's branch targets
+// and materialized symbol addresses, deduplicated and in a stable order.
+func (t *arm64Translator) callTargets() []string {
+	return uniqueSortedSymbols(t.functionCallTargets[t.functionIndex])
+}
+
+func (t *arm64Translator) addressTargets() []string {
+	return uniqueSortedSymbols(t.functionAddressTaken[t.functionIndex])
+}
+
+func uniqueSortedSymbols(names []string) []string {
+	if len(names) == 0 {
+		return nil
+	}
+	seen := make(map[string]bool, len(names))
+	unique := make([]string, 0, len(names))
+	for _, name := range names {
+		if seen[name] {
+			continue
+		}
+		seen[name] = true
+		unique = append(unique, name)
+	}
+	sort.Strings(unique)
+	return unique
 }

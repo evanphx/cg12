@@ -23,6 +23,9 @@ type arm64Translator struct {
 	abi0Symbols             map[string]bool
 	directABI0Symbols       map[string]bool
 	functionCalls           map[int]bool
+	functionCallTargets     map[int][]string
+	functionIndirectCalls   map[int]bool
+	functionAddressTaken    map[int][]string
 	currentABI0             bool
 	currentDirectABI0       bool
 	currentABI0Layout       abi0Layout
