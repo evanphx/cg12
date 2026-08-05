@@ -224,3 +224,40 @@ Unit tests on every package this branch touches: `opt`, `ir`, `stackcheck`,
 `plan9asm`, `plan9asm/sem`, `arm64`, `analysis`, `link`, `obj` — all `ok`.
 (`go test ./goc/...` and `make test-unit` were left to the gate job, as
 instructed; `go test ./goc -run TestNoSplitBudget` was run and passes.)
+
+## `make bench-perf`, before and after
+
+Both arms were run on this box. The first attempt of each was worthless — the
+other two ccwork jobs on the machine had it at load average 188 on 64 cores, and
+the suite's own null arm (goc timed against goc) spread by up to 104%. Both arms
+were then re-run in a quiet window (load average under 4), which is what is
+reported here.
+
+**The control is unchanged.** `control/spin-fixed-work` is the fixed integer
+loop compiled by both compilers and appears in all eleven programs, so it is
+eleven independent readings of the same quantity:
+
+| tree | control mean | s.d. | committed control |
+|---|---:|---:|---:|
+| `main` 5b085d2 | **0.9256** | 0.0041 | 0.9260 |
+| branch | **0.9244** | 0.0075 | 0.9260 |
+
+Across all 42 rows, `main` → branch: **median +0.32%, mean +0.73%**. Thirty-nine
+of the 42 move by less than 8%.
+
+### Both trees fail `make bench-perf`, and neither failure is a ratio
+
+`main` at 5b085d2 fails it too, on a quiet box, for the same reason: rows whose
+own one-repetition spread exceeds the suite's 15% ceiling, which is the suite
+refusing to gate a row it cannot measure. No row on either tree failed a
+tolerance band against the committed baseline.
+
+| tree | rows over the noise ceiling |
+|---|---|
+| `main` | `chase/l1-resident` (24.0%, null 10.2%), `chase/pointer-node` (19.5%, null 31.1%), `gc/pointer-write` (26.9%, null 2.3%) |
+| branch | `chase/l1-resident` (32.2%, null 31.1%), `regexp/replace` (17.5%, null 1.4%), `gc/live-heap-churn` (17.0%, null 3.5%), `gc/pointer-write` (25.8%, null 4.3%) |
+
+So the honest statement is: **`make bench-perf` did not pass on this branch, and
+it does not pass on `main` either.** It is not a gate this box can currently
+satisfy. What it does say, through its ratios, is that goc's speed relative to
+the host toolchain is where it was.
