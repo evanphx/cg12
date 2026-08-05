@@ -1604,3 +1604,23 @@ nothing else is affected either way.
 
 No `main` control run was needed for either target: every row sits inside its
 committed tolerance, so there is no number that needs attributing to the wave.
+
+### 13b. `main` control — also passes, so the failure really was the box
+
+Ran on the same idle box, tree checked out at `main` 5b085d2 and restored
+afterwards:
+
+| target, `main` 5b085d2 | exit | result |
+|---|---|---|
+| `make bench-perf` | **0** | **PASS**, 855.7s, 42/42 rows within tolerance |
+| `make bench-crypto` | **0** | **PASS**, 170.4s |
+
+`main`'s control ratios: 0.9246–0.9284 (mean 0.9259) against the same 0.9260 —
+statistically the same spread as the branch's 0.9247–0.9272.
+
+**Both targets pass on `main` and on the merged tree on an idle machine, and
+failed on both on a loaded one.** The two previous waves' bench-perf failures
+were an artefact of a shared box, not a property of any branch. (The wall-clock
+difference — 855.7s on `main` against 559.9s on the branch — is the *compiler*
+being 2.2x faster, §12a: the suite builds eleven programs with `goc` before it
+times anything.)
