@@ -244,3 +244,23 @@ So the suite's `gcpress` rows and anything that panics were on it too. What that
 is worth is in the full-suite numbers below, which is the honest way to say it:
 this was not measured by reasoning about the call graph.
 
+## What remains, and what would fix it
+
+After the fix `goroutine/spawn-join` is ~5.3x, against the suite's measured
+**1.63x floor** on a bare loop. The residue is 3.2 µs a goroutine against the
+host's 0.6 µs, and it is *not* one hotspot: re-profiled, the working thread's
+largest single entries are `goc_memcpy` at 4.8% and `goc_memset` at 2.3% — a
+goroutine's `g` and its 2 KB stack being allocated and cleared — `findfunc` at
+0.66%, and nothing else above 1.2%.
+
+That is the general code-quality problem the perf suite already documents, and it
+has a known cause on record: `goc -O` exceeds its own optimization budget on
+every real program (`f1f7abf`: `funcs=5101 blocks=70160 instrs=297389` against
+caps of `2048/50000/200000/400000`), so `-O` degrades to fold+copy+DCE, every
+alloca-backed local stays in memory, and nothing stays in a register across a
+call. Raising or scoping that budget is the fix for the residue, and it is a much
+larger and riskier change than this one. It is not a scheduler change either.
+
+**No scheduler change is called for.** The scheduler in this tree is upstream
+Go's, unmodified, and the profile puts 11 samples out of 4,359 in it.
+
