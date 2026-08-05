@@ -2181,3 +2181,63 @@ The one thing the gate found that stopped the merge is fixed, by the route it
 asked for: the recipe first, then the entry. `goc` without `-O` compiles every
 one of the 406 corpus programs again, and every guard the brief named is green.
 
+
+# A pre-flight for the timing suites
+
+Branch `ccwork/bench-preflight-check`, off `main` (`c6cdd48`). Test-harness code
+only; no compiler behaviour changed and neither timing baseline was re-cut.
+
+## The problem
+
+`make bench-perf` and `make bench-crypto` both already refuse a contaminated
+run -- the noise-growth ceiling in `comparePerfBench` and the precision ceiling
+in `checkCryptoBenchInstrument` -- and both say the right thing: the box cannot
+support the tolerances the run is about to be judged against. They say it after
+the full measurement. That is eleven minutes for the perf suite and about eight
+for crypto, and during this effort it was paid repeatedly: two jobs ended up
+waiting for a quiet window and one abandoned its measurement.
+
+The information was available in the first two seconds and was collected in the
+last.
+
+## What was built
+
+`goc/benchpreflight_test.go`: `requireQuietBoxBefore`, called by both suites
+before a byte is compiled -- ahead of the builds as well as the timing, since
+the builds are a minute of their own and are equally wasted.
+
+It measures contention **on the core the run will pin to**, because that is what
+these suites are exposed to: every timed run is `taskset -c N binary`, so
+sixty-three busy cores and a free core N cost the instrument far less than one
+busy core N. Three readings from two independent sources, over one window of
+about 1.4 s:
+
+| reading | source | idle box | one competitor pinned to the same core | bound |
+| --- | --- | --- | --- | --- |
+| share of the core the calibration burst got | `wait4` rusage / wall clock | 99.5% | 50.2% | floor 90% |
+| the core's time that went to somebody else | `/proc/stat` per-CPU counters | 0.0% | 49.8% | ceiling 10% |
+| burst-to-burst wall-time spread | 6 bursts | 0.3% | 27.2% (intermittent load) | ceiling 12% |
+
+The burst is a child process -- this test binary re-executed, so no `go build` in
+the budget -- launched through **the suite's own pin prefix**, so it is pinned by
+the same mechanism to the same core. Its work is half register arithmetic and
+half a dependent chase through 8 MiB, so the spread reading is sensitive to a
+busy memory system as well as to a busy core. Its size is fitted from two short
+probes, so 200 ms per burst holds on a machine faster or slower than this one.
+
+A measured burst rather than a load average, per this tree's standing
+preference, and because the load average answers a different question: the whole
+box over the last minute. A run pinned to a quiet core on a loaded box is fine
+and a run sharing its core with one spinner on an idle box is not, and a load
+average cannot tell those apart. The count of busy cores box-wide is reported
+for context and deliberately not gated on.
+
+**Override:** `GOC_BENCH_PREFLIGHT=off`, documented in the Makefile and in the
+header of both committed baselines. The run then does exactly what it did before
+this check existed.
+
+**Not measured:** memory bandwidth and LLC pressure from cores this run is not
+on. Gating on those needs a throughput number against a per-machine reference,
+which is a second baseline with all of the first one's problems. The end-of-run
+ceilings are unchanged and remain the backstop, both for that and for a box that
+goes busy at minute two.

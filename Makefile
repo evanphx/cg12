@@ -67,6 +67,22 @@ COVERAGE_TIMEOUT  ?= 180m
 # runs real P-256 and RSA arithmetic under both; the goc-built half dominates.
 CRYPTO_BENCH_TIMEOUT ?= 20m
 
+# Both timing suites refuse to start on a box that cannot support a measurement.
+# The pre-flight costs about a second and a half: it times a calibration burst on
+# the very core the run is about to pin to, launched through the same taskset
+# prefix, and reads that core's /proc/stat counters around it. It exists because
+# the ceilings that catch a contaminated run catch it at the END, which cost this
+# tree eleven minutes an attempt to be told the machine was busy.
+#
+#   GOC_BENCH_PREFLIGHT=off   skip it and measure anyway. For when a number from a
+#                             busy box is wanted deliberately; the run then does
+#                             what it did before -- measures for its full duration
+#                             and refuses at the noise ceiling if the
+#                             contamination was large enough to show.
+#
+# goc/benchpreflight_test.go has what it measures and what it deliberately does
+# not.
+
 # The runtime performance suite builds eleven programs with each compiler and
 # times three arms of each, nine times over. About eleven minutes on an idle
 # box; the timeout is generous because a loaded one is slower and a run that

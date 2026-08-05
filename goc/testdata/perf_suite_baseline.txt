@@ -12,6 +12,12 @@
 # number about the box. If another timing benchmark is running on the same
 # machine, set GOC_PERF_CORE to a core it is not using.
 #
+# It will not start on a box that is not idle. A pre-flight measures the core the
+# run is about to pin to -- a calibration burst against /proc/stat, about a second
+# and a half -- and refuses there rather than eleven minutes later at the noise
+# ceiling. GOC_BENCH_PREFLIGHT=off skips it, for when a number from a busy box is
+# wanted deliberately; goc/benchpreflight_test.go says what it measures.
+#
 # # What is compared, and why it is a ratio and not a time
 #
 # Both columns come from the same program compiled by both compilers, and the

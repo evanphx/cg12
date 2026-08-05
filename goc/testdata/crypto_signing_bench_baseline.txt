@@ -13,6 +13,12 @@
 # unlike every other baseline in this directory it measures time, so a loaded box
 # produces a number about the box.
 #
+# It will not start on a box that is not idle. A pre-flight measures the core the
+# run is about to pin to -- a calibration burst against /proc/stat, about a second
+# and a half -- and refuses there rather than eight minutes later at the precision
+# ceiling. GOC_BENCH_PREFLIGHT=off skips it, for when a number from a busy box is
+# wanted deliberately; goc/benchpreflight_test.go says what it measures.
+#
 # Both columns come from the same program -- goc/testdata/crypto_signing_bench --
 # compiled by both compilers, so the two answers are produced by the same
 # measurement rather than by two benchmarks that happen to be named alike. That

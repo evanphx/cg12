@@ -183,6 +183,12 @@ const cryptoBenchHeader = `# Elapsed time on the crypto signing path under goc a
 # unlike every other baseline in this directory it measures time, so a loaded box
 # produces a number about the box.
 #
+# It will not start on a box that is not idle. A pre-flight measures the core the
+# run is about to pin to -- a calibration burst against /proc/stat, about a second
+# and a half -- and refuses there rather than eight minutes later at the precision
+# ceiling. GOC_BENCH_PREFLIGHT=off skips it, for when a number from a busy box is
+# wanted deliberately; goc/benchpreflight_test.go says what it measures.
+#
 # Both columns come from the same program -- goc/testdata/crypto_signing_bench --
 # compiled by both compilers, so the two answers are produced by the same
 # measurement rather than by two benchmarks that happen to be named alike. That
@@ -347,6 +353,20 @@ func TestCryptoSigningBench(t *testing.T) {
 		"-crypto-bench-reps=%d would produce an interval too wide to mean anything; %d is the fewest this check accepts",
 		reps, cryptoBenchMinimumReps)
 
+	// The pre-flight, before a byte is compiled: the precision ceiling below is
+	// what says this box was too busy to conclude anything from, and it says it
+	// after the whole run. Asking the same question of the machine first costs
+	// about a second and a half. The ceiling is unchanged and still has the last
+	// word, since it sees the run that was actually measured.
+	pin, pinNote := cryptoBenchPin()
+	requireQuietBoxBefore(t, benchPreflightSuite{
+		target:  "make bench-crypto",
+		cost:    "about eight minutes",
+		pin:     pin,
+		pinNote: pinNote,
+		coreVar: "GOC_BENCH_CORE",
+	})
+
 	goVersion := hostGoVersion(t)
 	t.Logf("host toolchain: %s", goVersion)
 
@@ -354,7 +374,6 @@ func TestCryptoSigningBench(t *testing.T) {
 	gcBinary := buildCryptoBenchWithHostToolchain(t, scratch)
 	gocBinary := buildCryptoBenchWithGoc(t, scratch)
 
-	pin, pinNote := cryptoBenchPin()
 	t.Logf("timing protocol: %d interleaved repetitions, %s", reps, pinNote)
 
 	gocRuns, gcRuns, method := runCryptoBenchInterleaved(t, gocBinary, gcBinary, pin, reps)
@@ -506,35 +525,11 @@ func cryptoBenchPin() (prefix []string, note string) {
 // a cpuset cgroup -- which is how this repository's jobs are run on a shared box
 // -- the process may own a slice of the machine and not the top of it.
 func highestAllowedCPU() (int, error) {
-	status, err := os.ReadFile("/proc/self/status")
+	cores, err := allowedCPUs()
 	if err != nil {
-		return 0, fmt.Errorf("could not read this process's CPU affinity: %w", err)
+		return 0, err
 	}
-	for _, line := range strings.Split(string(status), "\n") {
-		list, ok := strings.CutPrefix(line, "Cpus_allowed_list:")
-		if !ok {
-			continue
-		}
-		highest := -1
-		for _, span := range strings.Split(strings.TrimSpace(list), ",") {
-			last := span
-			if _, after, ranged := strings.Cut(span, "-"); ranged {
-				last = after
-			}
-			core, err := strconv.Atoi(strings.TrimSpace(last))
-			if err != nil {
-				return 0, fmt.Errorf("could not parse Cpus_allowed_list %q", strings.TrimSpace(list))
-			}
-			if core > highest {
-				highest = core
-			}
-		}
-		if highest < 0 {
-			return 0, fmt.Errorf("Cpus_allowed_list %q named no core", strings.TrimSpace(list))
-		}
-		return highest, nil
-	}
-	return 0, fmt.Errorf("/proc/self/status has no Cpus_allowed_list line")
+	return cores[len(cores)-1], nil
 }
 
 // runCryptoBenchInterleaved times both compilers' binaries reps times each, one

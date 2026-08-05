@@ -279,6 +279,12 @@ const perfBenchHeader = `# goc against the host Go toolchain, on eleven workload
 # number about the box. If another timing benchmark is running on the same
 # machine, set GOC_PERF_CORE to a core it is not using.
 #
+# It will not start on a box that is not idle. A pre-flight measures the core the
+# run is about to pin to -- a calibration burst against /proc/stat, about a second
+# and a half -- and refuses there rather than eleven minutes later at the noise
+# ceiling. GOC_BENCH_PREFLIGHT=off skips it, for when a number from a busy box is
+# wanted deliberately; goc/benchpreflight_test.go says what it measures.
+#
 # # What is compared, and why it is a ratio and not a time
 #
 # Both columns come from the same program compiled by both compilers, and the
@@ -423,6 +429,21 @@ func TestPerformanceSuite(t *testing.T) {
 	require.False(t, restricted && *updatePerfBench,
 		"-perf-bench-only and -update-perf-bench together would write a baseline missing every program the filter dropped")
 
+	// The pre-flight, before a byte is compiled: eleven minutes of measurement and
+	// the minute of building that precedes it are both wasted on a box that
+	// cannot support the tolerances this run is about to be judged against, and
+	// that is answerable in about a second and a half. The noise-growth ceiling in
+	// comparePerfBench is unchanged and still has the last word -- it sees the run
+	// that was actually measured, including a box that went busy at minute two.
+	pin, pinNote := perfBenchPin()
+	requireQuietBoxBefore(t, benchPreflightSuite{
+		target:  "make bench-perf",
+		cost:    "about eleven minutes",
+		pin:     pin,
+		pinNote: pinNote,
+		coreVar: "GOC_PERF_CORE",
+	})
+
 	goVersion := hostGoVersion(t)
 	t.Logf("host toolchain: %s", goVersion)
 
@@ -433,7 +454,6 @@ func TestPerformanceSuite(t *testing.T) {
 		binaries = append(binaries, buildPerfBenchProgram(t, scratch, driver, program))
 	}
 
-	pin, pinNote := perfBenchPin()
 	t.Logf("timing protocol: %d interleaved repetitions of three arms (goc, goc again as a null, host), %s",
 		reps, pinNote)
 
@@ -623,26 +643,10 @@ func allowedCPUs() ([]int, error) {
 		if !ok {
 			continue
 		}
-		trimmed := strings.TrimSpace(list)
-		var cores []int
-		for _, span := range strings.Split(trimmed, ",") {
-			first, last, ranged := strings.Cut(span, "-")
-			if !ranged {
-				last = first
-			}
-			low, lowErr := strconv.Atoi(strings.TrimSpace(first))
-			high, highErr := strconv.Atoi(strings.TrimSpace(last))
-			if lowErr != nil || highErr != nil || high < low {
-				return nil, fmt.Errorf("could not parse Cpus_allowed_list %q", trimmed)
-			}
-			for core := low; core <= high; core++ {
-				cores = append(cores, core)
-			}
+		cores, err := parseCPUList(list)
+		if err != nil {
+			return nil, fmt.Errorf("could not read this process's CPU affinity: %w", err)
 		}
-		if len(cores) == 0 {
-			return nil, fmt.Errorf("Cpus_allowed_list %q named no core", trimmed)
-		}
-		sort.Ints(cores)
 		return cores, nil
 	}
 	return nil, fmt.Errorf("/proc/self/status has no Cpus_allowed_list line")
