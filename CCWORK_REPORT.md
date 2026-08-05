@@ -99,35 +99,6 @@ is no compiler flag to thread through; an environment variable is the only handl
 an outside job has, and attributing a miscompile to one pass is the whole game
 here.
 
-## 4a. Compile-time cost — first measurement, whole-program build
-
-168-line `hello.go` (fmt.Println plus a 1000-iteration multiply-add loop),
-`goc -O`, whole-program (no prebuilt pack), on the 64-core box, load average ~4:
-
-| arm | wall | peak RSS |
-|-----|------|----------|
-| `GOC_OPT_PIPELINE=bounded` | 6.69 s | 599 MB |
-| `GOC_OPT_PIPELINE=full` | 30.99 s | 876 MB |
-
-**4.6x, and it is not mem2reg.** From a CPU profile of the full run
-(`opt.OptimizeModule` cum 24.66 s of 66.63 s samples over 31.11 s wall):
-
-    gvn         4.10 s      jumpthread   2.42 s      gcm        0.45 s
-    loadelim    3.87 s      fold         2.18 s      ifconvert  0.39 s
-    simplifycfg 3.39 s      deadalloc    1.92 s      copy       0.37 s
-    dce         3.19 s      inline       1.07 s      mem2reg    0.37 s
-
-mem2reg — the pass this whole exercise is about — costs 0.37 s. The cost is the
-`clean` fixpoint (gvn + loadelim + simplifycfg + dce + jumpthread + fold +
-deadalloc = 21 s) being re-run to a fixpoint over 5101 functions, four times over
-in the pipeline's shape. Two secondary costs: the arm64 backend goes 7.0 s → 11.1 s
-on the optimized IR (register allocation over longer live ranges), and 36% of all
-samples are the *compiler's own* GC — the pipeline allocates enough to make the
-Go runtime the largest single consumer.
-
-Where the cost should be spent is discussed at the end, once the correctness
-campaign has said which passes have to stay.
-
 ## 3. The failure campaign
 
 ### Capability matrix — both arms, full pipeline (368 capabilities in the table)
