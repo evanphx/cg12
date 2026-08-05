@@ -353,3 +353,16 @@ Three things this branch found and did not fix, in the order they matter:
    `nextFreeFast`/`nextFreeIndex` nosplit precisely because it cannot do that
    (`goc.runtimeImplicitNoSplit`), and that decision is what creates the 864
    bytes of chain before `throw` is even reached.
+
+## Scope
+
+arm64 only, which is where the Go runtime is. The walk in `stackcheck` is
+arch-neutral — it takes the limit and the call-push size as configuration — but
+only `arm64` supplies it facts. amd64 does not need it yet: a Go-runtime module
+does not reach that backend at all (`goc -target amd64` on a Go program fails in
+the frontend, on `main` and on this branch alike), and a platform-ABI module has
+no stack-growth check for a function to be exempt from, so
+`newNoSplitFrameBudget` returns no budget and the pass and the check are both
+no-ops. `cmd/cc` and `cmd/cg12` are unaffected, measured, not assumed.
+
+Branch: **`ccwork/nosplit-frame-budget`**, from `main` (`5b085d2`).
