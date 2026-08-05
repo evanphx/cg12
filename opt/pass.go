@@ -183,26 +183,32 @@ func DefaultPipeline() []Pass {
 // time unchanged or slightly better, peak RSS inside its own run-to-run spread,
 // every one still well under the 3 GiB ceiling.
 //
-// GOC_BOUNDED_MEM2REG=1 turns it on. It stays off by default until a job flips
-// it deliberately, and one of the two miscompiles that were holding it back is
-// still open.
+// GOC_BOUNDED_MEM2REG=1 turns it on. It went in off, because mem2reg had never
+// run on a Go-frontend module -- only on cg12cc's C ones -- and turning it on
+// broke two programs. Both are fixed; what is left before flipping it is
+// measurement, not correctness.
 //
-// The performance suite's compress/flate workload dies with the collector finding
-// a pointer into a freed span ("runtime: pointer ... to unused region of span", in
-// scanObject). 3/5 runs with the collector on, 0/5 with GOGC=off, 0/5 with this
-// switch off, so it is a GC-visibility defect: a promoted managed pointer stops
-// being described to the collector once it lives in a register.
+// The first was recorded as compress/flate dying in the collector, and was not
+// mem2reg's at all: it was the zero-capacity slice defect 800f47f fixed, whose
+// rate promotion roughly doubled. The tree it was measured on predates that fix.
+// With the fix in, flate is 0 crashes in 750 runs with promotion on, across
+// GOGC=off, the default, and GOGC=10.
 //
-// The stdlib-netpoll-stress/tcp-churn capability used to die with "cg12: interface
-// dispatch failed for dynamic type 0x0" in net.Listener.Accept. That one is fixed:
-// mem2reg described the phis it minted for a managed slot and nothing else, so a
-// definition reaching a load without passing through a phi -- here the result home
-// of `net.Listen`, an allocation in main.main's own frame -- lost the description
-// the slot used to carry, and copystack left it pointing into the freed stack. See
-// markManagedDef, and goc/testdata/runtime_opt_promoted_interface_root.go for the
-// reduction.
+// The one that was real is Mem2Reg's markManagedDef: a promoted managed local was
+// carried across every safepoint by a value nothing marked, so the collector freed
+// the object under it. It hid at the default GOGC and only showed above it --
+// placement_bench/p256 failed to verify its own signatures 35 runs in 40 at
+// GOGC=10 and 0 in 40 at the default -- which is why the corpus never saw it.
+// goc/testdata/runtime_gc_promoted_local_root.go is the reducer.
 //
-// CCWORK_REPORT.md has the bisection and the measurements.
+// The stdlib-netpoll-stress/tcp-churn capability ("cg12: interface dispatch failed
+// for dynamic type 0x0" in net.Listener.Accept) is fixed by the same change: 18/20
+// failures before, 0 in 80 after. Its mechanism is not the collector -- it failed
+// under GOGC=off too -- so what it needed is one of GCRef's other effects, most
+// likely the private, non-coalesced spill slot arm64/gcalloc.go then gives the
+// value. That is the place to look if it returns.
+//
+// CCWORK_REPORT.md has the bisections and the measurements.
 func BoundedPipeline() []Pass {
 	clean := Fixpoint("bounded-clean",
 		FuncPass("fold", Fold),

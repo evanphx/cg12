@@ -2485,6 +2485,25 @@ func runtimeCapabilities() []runtimeCapability {
 			timeout:     180 * time.Second,
 			exclusive:   true,
 		},
+		// A managed local that mem2reg promotes out of its stack slot has to
+		// stay described to the collector where the slot was. The frame map
+		// describes the slot's pointer word for the whole span the allocation
+		// reaches, so the values passing through it need no marking of their
+		// own; promotion makes one of those values carry the variable across
+		// every safepoint instead, and goc leaves a multi-result constructor's
+		// result unmarked. It was reported nowhere, and the object was freed
+		// under a pointer still in use -- goc-built placement_bench/p256 failed
+		// to verify its own signatures on 35 runs in 40 at GOGC=10. Only the
+		// -runtime-opt arm compiles this through mem2reg; the default arm runs
+		// it as a plain correctness check.
+		{
+			category:    "gc-invariants",
+			name:        "promoted-local-root",
+			source:      "runtime_gc_promoted_local_root.go",
+			expectation: runtimeCapabilityMustPass,
+			timeout:     180 * time.Second,
+			exclusive:   true,
+		},
 	}
 }
 
