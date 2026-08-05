@@ -183,29 +183,32 @@ func DefaultPipeline() []Pass {
 // time unchanged or slightly better, peak RSS inside its own run-to-run spread,
 // every one still well under the 3 GiB ceiling.
 //
-// GOC_BOUNDED_MEM2REG=1 turns it on, and it is off by default because it is not
-// yet correct. mem2reg has never run on a Go-frontend module -- only on cg12cc's C
-// ones -- and turning it on breaks two programs in two different ways.
+// GOC_BOUNDED_MEM2REG=1 turns it on. It went in off, because mem2reg had never
+// run on a Go-frontend module -- only on cg12cc's C ones -- and turning it on
+// broke two programs. Both are fixed; what is left before flipping it is
+// measurement, not correctness.
 //
-// The performance suite's compress/flate workload dies with the collector finding
-// a pointer into a freed span ("runtime: pointer ... to unused region of span", in
-// scanObject). 3/5 runs with the collector on, 0/5 with GOGC=off, 0/5 with this
-// switch off, so it is a GC-visibility defect: a promoted managed pointer stops
-// being described to the collector once it lives in a register. promotable carries
-// managed and gcType forward, so the loss is downstream of this pass, in what the
-// arm64 backend records for a promoted temp the register allocator spills. That is
-// the one to fix first; its reproducer is deterministic and needs no network.
+// The first was recorded as compress/flate dying in the collector, and was not
+// mem2reg's at all: it was the zero-capacity slice defect 800f47f fixed, whose
+// rate promotion roughly doubled. The tree it was measured on predates that fix.
+// With the fix in, flate is 0 crashes in 750 runs with promotion on, across
+// GOGC=off, the default, and GOGC=10.
 //
-// The stdlib-netpoll-stress/tcp-churn capability dies with "cg12: interface
-// dispatch failed for dynamic type 0x0" in net.Listener.Accept. That one is not
-// the collector -- the program runs no collection at all -- and is deterministic
-// at GOMAXPROCS=1, and is not code placement (the pre-change compiler survives the
-// whole GOC_TEXT_PAD sweep). It needs promotion in main.main and in at least two
-// functions of package net simultaneously; promoting either package alone is
-// clean, and so is running mem2reg with the cleanup fixpoint removed, which places
-// the defect in the promotion and not in what fold, copy and dce do to its phis.
+// The one that was real is Mem2Reg's markManagedDef: a promoted managed local was
+// carried across every safepoint by a value nothing marked, so the collector freed
+// the object under it. It hid at the default GOGC and only showed above it --
+// placement_bench/p256 failed to verify its own signatures 35 runs in 40 at
+// GOGC=10 and 0 in 40 at the default -- which is why the corpus never saw it.
+// goc/testdata/runtime_gc_promoted_local_root.go is the reducer.
 //
-// CCWORK_REPORT.md has the bisection and the measurements.
+// The stdlib-netpoll-stress/tcp-churn capability ("cg12: interface dispatch failed
+// for dynamic type 0x0" in net.Listener.Accept) is fixed by the same change: 18/20
+// failures before, 0 in 80 after. Its mechanism is not the collector -- it failed
+// under GOGC=off too -- so what it needed is one of GCRef's other effects, most
+// likely the private, non-coalesced spill slot arm64/gcalloc.go then gives the
+// value. That is the place to look if it returns.
+//
+// CCWORK_REPORT.md has the bisections and the measurements.
 func BoundedPipeline() []Pass {
 	clean := Fixpoint("bounded-clean",
 		FuncPass("fold", Fold),

@@ -1,15 +1,30 @@
-# The mem2reg GC-visibility blocker: it does not reproduce, and why
+# The mem2reg GC-visibility blocker: not in flate, and fixed
 
 Branch: `ccwork/mem2reg-gc-visibility`, off `integration/wave8` (`7983abd`).
 
-**Verdict up front.** The `compress/flate` collector crash that blocks
-`GOC_BOUNDED_MEM2REG=1` **no longer reproduces**: 0 crashes in 750 runs of the
-goc-built `flate` benchmark with promotion on, across three collector settings.
-It was the same zero-capacity-slice defect the wave-8 `flate-gc-crash` job fixed,
-amplified by promotion — not a distinct GC-visibility bug. The hypothesis it was
-handed to me under ("the backend does not record a spilled promoted temp in the
-safepoint map") is **refuted**, by measurement and by inspection of the code that
-does the recording.
+**Verdict up front.**
+
+* **It does not reproduce in `flate`.** 0 crashes in 750 runs with promotion on,
+  across three collector settings. That crash was the zero-capacity-slice defect
+  the wave-8 `flate-gc-crash` job fixed, amplified by promotion; the tree it was
+  measured on did not contain that fix.
+* **The hypothesis it was handed to me under is refuted.** Spilled promoted temps
+  *are* recorded in the safepoint map, that is the ordinary path, and promotion
+  puts 23 % *fewer* values in registers at safepoints, not more. Counted on a real
+  whole-program build, not argued.
+* **A real promotion-caused collector defect does exist, in `p256`,** and running
+  the corpus with promotion on at a raised collection rate is what found it:
+  ECDSA verification silently fails on **35 runs in 40 at `GOGC=10`**, 0 with the
+  collector off, 0 with promotion off. Root-caused to one local in one function,
+  fixed in `opt/mem2reg.go`, with a deterministic reducer that fails 60/60 before
+  the fix and 0/60 after.
+* **The switch's other blocker, `tcp-churn`, is fixed by the same change** — 18/20
+  failures before, 0 in 80 after — though *why* is only partly established; see
+  section 8.
+* **After: 0 failures in 500 runs of `p256`, 750 of `flate`, 960 of the whole
+  benchmark corpus, and 368/368 capabilities with the switch on.** Every guard is
+  green with the switch off, and goc's output with the switch off is byte-identical
+  to the pre-fix compiler's.
 
 Everything below is measured on this box, this branch.
 
@@ -434,12 +449,11 @@ re-measured. The real defect was one function away and one collector setting awa
 and it is fixed here with a deterministic reducer in the corpus.
 
 Both blockers named in `opt/pass.go`'s `BoundedPipeline` comment are now clean, so
-that comment is stale — it says the switch "is not yet correct" and names two
-failures that no longer happen. **I did not flip the switch**, because that is a
-later job's call and because turning it on changes every generated program; the
-comment is left as the record of why it was off. What a job flipping it now needs
-is the performance re-measurement (`make bench-perf`, `make bench-crypto`) and a
-compile-cost check, none of which is in scope here.
+that comment has been rewritten: it said the switch "is not yet correct" and named
+two failures that no longer happen. **I did not flip the switch** — that is a later
+job's call, and turning it on changes every generated program. What a job flipping
+it now needs is the performance re-measurement (`make bench-perf`,
+`make bench-crypto`) and a compile-cost check, none of which is in scope here.
 
 One thing that would have found this years earlier, and is cheap: **the capability
 matrix runs every program once, at the default `GOGC`.** A defect that only frees
