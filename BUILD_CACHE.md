@@ -333,12 +333,45 @@ whole-module stage cannot simply be skipped — its output differs from its inpu
 for 71% of surviving functions. The cache would have to reproduce that output,
 not bypass it.
 
-Not measured: the blast radius of editing a *widely inlined leaf* rather than
-the root. It is bounded above by the transitive set of functions that inlined
-the changed one, and it is exactly the case gc handles by folding the
-dependency's content hash into the importer's key. A design that copies that
-key is correct for it regardless of its size; a design that does not is unsound
-for it regardless of its size.
+### 2.4b The blast radius of a *leaf* change is 0.7% of the module
+
+The root-package edit above is the easy case: nothing inlines *out of* `main`.
+The hard case is a widely inlined leaf, which is exactly what gc's key is
+built for. Measured by temporarily editing `stdlib/src/runtime/stubs.go` and
+restoring it (the tree is byte-identical afterwards; `git status` was checked).
+The target was `runtime.alignUp`, a three-line `//go:nosplit` helper with 115
+call sites in the vendored runtime.
+
+Two edits, so the effect of changing the code can be separated from the effect
+of moving it:
+
+| edit | pre-opt changed | post-opt changed |
+|---|---:|---:|
+| **control** — two comment lines inserted above `alignUp`, nothing else | 4 of 5083 | **47 of 4131 (1.1%)** |
+| **treatment** — `alignUp`'s body rewritten to compute the same value in three statements (also +2 lines) | 4 of 5083 | 47 of 4131 |
+| **treatment vs control** — isolates the body rewrite | **1** (`runtime.alignUp`) | **28 of 4131 (0.7%)** |
+
+Two things fall out.
+
+**The real blast radius of changing a heavily inlined leaf is 28 functions, 0.7%
+of the module** — `alignUp`'s inline sites: the `mallocgcTiny*` family,
+`mallocgcSmallScanHeader`, `linearAlloc.alloc`, `SetFinalizer` and the rest.
+Whole-module optimisation does not smear a leaf change across the program
+either.
+
+**Positions propagate, and they propagate further than the code does.** The
+control changed no semantics at all, yet 4 pre-optimisation functions differ —
+`alignUp`, `alignDown`, `bool2int`, `divRoundUp`, i.e. everything below the
+insertion point in that file, because `ir.SrcPos` line numbers shifted — and
+after inlining that reaches 47 functions. So a content-addressed key over goc
+IR is line-shift-sensitive by construction, since positions are in the IR and
+have to be. gc has the identical property, which is why the §1.4 probe used a
+*trailing* comment: a comment that shifts no line numbers produces a
+byte-identical archive and cuts off, and one that shifts lines does not. This
+is a fact to design around, not a defect: it means the practical hit rate of
+any such cache is governed by how often edits move lines in files other people
+inline from, and in the common case — editing your own package — the answer
+measured in §2.4 is one function.
 
 ### 2.5 goc's IR already serializes, and it is fast
 
@@ -556,8 +589,9 @@ structured today. It is the ceiling, not an estimate of a first cut.
 
 **Option C — Option B plus a memoised whole-module stage and back end, keyed
 per function on its inline-dependency set.**
-The measurement in §2.4 gives the ceiling: after a root-package edit, 4130 of
-4131 post-optimisation functions are byte-identical, so an ideal memoiser would
+§2.4 and §2.4b give the ceiling: after a root-package edit 4130 of 4131
+post-optimisation functions are byte-identical, and after rewriting a leaf
+helper with 115 call sites 4103 of 4131 still are. So an ideal memoiser would
 skip essentially all of the whole-module remainder (8.58 s / 36.08 s) and the
 back end (2.05 s / 11.49 s). Ceiling, with Option B underneath it: 13.71 s of
 16.16 s = **85%** (small); 64.10 s of 74.4 s = **86%** (http).
@@ -570,6 +604,12 @@ Three passes do not fit the per-function model and need separate handling:
 its own comment runs last *because it measures frame layout*, so its input is
 the code the back end will see. Nothing here is measured as an implementation;
 only the ceiling is.
+
+And that ceiling is measured against the *monolithic* compile — the
+configuration packs already fix. Against a pack-linked compile there is almost
+nothing left for Option C to take: the module is 600 functions by then, the
+whole-module remainder costs 0.19 s and the back end 0.18 s. **Option C is only
+worth its cost if packs are given up or cannot be used.**
 
 **Option D — the existing whole-program packs.**
 Measured: 16.45 s → 5.02 s, **−69%**, for a 15.9 s one-off pack build.
@@ -605,6 +645,14 @@ touch**, because the split is subtractive and deliberately late. Option B is
 worth building precisely there. It takes the pack path from 5.02 s to about
 3.4 s on the small program — a further 33% — and its value grows with the
 program, because `funcDecl` is 7.78 s on http against 1.58 s on small.
+
+Option B, not Option C, is the complement to packs, even though C's ceiling is
+four times larger. C's 85% is measured against a monolithic compile; once a pack
+is in play the optimiser and back end it targets have already shrunk to 0.37 s
+combined, so C would be buying back tenths of a second for the hardest piece of
+machinery in this document. B targets the one stage a pack provably cannot
+touch. If packs were ever abandoned the ranking inverts, which is worth
+recording but is not the situation.
 
 Work items, in order:
 
@@ -672,6 +720,10 @@ go build -o /tmp/stagetime ./cmd/stagetime
 /tmp/stagetime -serialize=false -posthash a.post prog_a.go
 /tmp/stagetime -serialize=false -posthash b.post prog_b.go
 
+# leaf blast radius: edit stdlib/src/runtime/stubs.go, rerun, git checkout --
+#   control   = insert two comment lines above alignUp
+#   treatment = rewrite alignUp's body to compute the same value in 3 statements
+
 # what a pack does and does not save
 export CG12_PACK_CACHE=$(mktemp -d)
 goc build-runtime -O -packages fmt -o fmt.gocrt
@@ -681,7 +733,13 @@ goc build-runtime -O -packages fmt -o fmt.gocrt
 Per-pass and line-level attribution came from `-cpuprofile` plus
 `go tool pprof -top -cum` and `pprof -list='cg12/goc\.compile$'`.
 
-**Not measured, and flagged as such:** the blast radius of editing a widely
-inlined leaf package (§2.4); Option C as an implementation, only its ceiling
-(§3.4); the `net/http` pack's 154 s build cost, which is `packcache.go`'s own
-figure and was not re-run here.
+The leaf-change measurement in §2.4b temporarily edited
+`stdlib/src/runtime/stubs.go` and restored it with `git checkout --`; the
+working tree was verified byte-identical afterwards, and nothing in `stdlib/` is
+modified on this branch.
+
+**Not measured, and flagged as such:** Option C as an implementation — only its
+ceiling (§3.4); the `net/http` pack's 154 s build cost, which is
+`packcache.go`'s own figure and was not re-run here; the effect of any of this
+on `goc compile-batch`, which amortises pack reads across a batch and would
+change the arithmetic for a corpus run.
