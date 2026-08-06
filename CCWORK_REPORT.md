@@ -3240,8 +3240,12 @@ Option C's key can exist.**
 
 | edit | functions whose *input* moved | functions whose *output* genuinely changed | memos the recorded sets **invalidate** | ratio | memo hit rate |
 |---|---:|---:|---:|---:|---:|
-| root-package (`42`→`43` in `main`) | 1 (`main.main`) | **1** of 4131 | **2** of 4131 | 1.00x → **2.00x** | **99.95%** |
-| leaf helper (`runtime.alignUp` rewritten, 39 direct call sites) | 1 (`runtime.alignUp`) | **29** of 4131 | **31** of 4131 | **1.07x** | **99.25%** |
+| root-package (`42`→`43` in `main`) | 1 (`main.main`) | **1** of 4131 | **2** of 4131 | **2.00x** | **99.95%** |
+| leaf helper (`runtime.alignUp` rewritten) | 1 (`runtime.alignUp`) | **29** of 4131 | **31** of 4131 | **1.07x** | **99.25%** |
+
+(`alignUp` has 115 call sites in the vendored runtime source, which is the figure
+§2.4b quotes; goc's front end lowers only reachable functions, so the module the
+inliner sees carries **39** direct call sites to it.)
 
 The brief's decision rule was: ~30 invalidated means the ceiling is real, ~3000
 means Option C is worth roughly Option B. The measured answer is **31**.
