@@ -6013,9 +6013,9 @@ program asked for — which puts a whole-program fact in the key.
 | program | closure | declare generics | share of packages | **share of lowered functions** |
 |---|---:|---:|---:|---:|
 | `programSmall` (strconv only) | 34 | 8 | 24% | **89%** |
-| `programWide` (fmt, sort, errors, strings, strconv) | 62 | 19 | 31% | **82%** |
-| `fmt_sprintf.go` | 60 | 19 | 32% | **83%** |
-| `stdlib_http_tls_client_server.go` | 185 | 40 | 22% | **54%** |
+| `programWide` (fmt, sort, errors, strings, strconv) | 62 | 19 | 31% | **81%** |
+| `fmt_sprintf.go` | 60 | 19 | 32% | **82%** |
+| `stdlib_http_tls_client_server.go` | 185 | 40 | 22% | **52%** |
 
 **Counting packages understates the exclusion by a factor of two to four**,
 because `runtime` is one package and a third of the module, and `runtime`
@@ -6251,4 +6251,4 @@ the brief.
   which is what Stage 1 was for, but a Stage 2 unit format has to answer what a
   cached package contributes to `Module.Data` — this stage does not.
 - **Generics are the larger half of the remaining problem**, not a detail:
-  22–32% of packages, but 54–89% of lowered functions.
+  22–32% of packages, but 52–89% of lowered functions.
