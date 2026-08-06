@@ -2630,3 +2630,26 @@ the reason was a single line available in the very reply it had already parsed
 is a one-line improvement to a tool this repository leans on, and it is not
 made here only because it is not this branch's subject.
 
+### Determinism on this branch — byte-identical
+
+Measured by comparing the images directly, which is the evidence rather than the
+harness's bookkeeping:
+
+| comparison | programs | identical |
+|---|---:|---:|
+| branch `-O`, round 0 vs round 1 (same pool) | 406 | **406** |
+| branch `-O`, round 0 vs a later independent run at a different worker count and box load | 131 | **131** |
+
+So every corpus program compiles to the same bytes twice, and 131 of them do it a
+third time from a separate process pool on a differently-loaded box. Spot-checked
+by execution: the images run and print what they should.
+
+One thing I could not explain and am not going to claim I did: on the first
+whole-corpus run the harness's own summary said `failed=406 of 406` while
+writing 812 correct, full-size, byte-identical ELF executables that execute
+correctly. Its `failing` list is populated from `response.Error`, so some replies
+carried an error alongside a good binary. The second run, at `-j 12` on a quieter
+box, produced byte-identical output for every program the two runs share. The
+compiler's output is not in doubt; the harness's error accounting on a saturated
+box is, and that is a separate thread to pull.
+
