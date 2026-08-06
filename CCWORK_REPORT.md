@@ -2749,3 +2749,364 @@ Not run, as instructed: `go test ./goc/...` and `make test-unit` — a gate job
 does those. The three named guard tests were run individually with `-run`. No
 timing baseline was re-cut.
 
+
+---
+
+# Independent verification of `ccwork/default-compile-cache` (job `cache-gate`)
+
+Verifier's branch: `ccwork/cache-gate`. Branch under test: `ccwork/default-compile-cache`
+= `7c6b0be50c4a3ab455b6bd6b9d43c65d97cb304c`, confirmed byte-identical to this
+worktree's HEAD (`git diff HEAD ccwork/default-compile-cache` is empty). Control:
+`main` = `76069d91347f41e522e6bc18c500b986ff9c71dd`, checked out as a separate
+worktree so both compilers exist at once.
+
+Box: 64 cores, 250 GB RAM, linux/arm64, go1.26.1. Exclusive to this job.
+Shared pack cache at job start: `~/.cache/cg12/runtime-pack`, 999 entries,
+48,028,695,650 bytes (44.7 GiB) -- slightly more than the 985/45 GB the branch
+reports, which is a week-old measurement on a cache that has kept growing.
+
+Everything below is a number this job watched a process produce. Anything not
+watched to completion is marked UNVERIFIED and says so.
+
+## The key, verified by construction
+
+Method: a private cache directory (`CG12_PACK_CACHE`, which is one of the five
+control variables deliberately left out of the key), `GOC_AUTOPACK_DEBUG=1`, and a
+zero-import program, so the debug line prints the key the compile computed and
+whether it hit. A separate git worktree holds the compiler under test, so the
+stdlib tree and the compiler source can be mutated without touching the tree the
+long test runs are using.
+
+Baseline key for `tiny.go` (no imports, no `-O`): `c3d70f3803f3`.
+
+| change | key | verdict |
+|---|---|---|
+| baseline | `c3d70f3803f3` (hit) | -- |
+| `-O` | `a45d519fb890` | MISS ✓ |
+| `GOC_OPT_PIPELINE=none` | `3acefa887be1` | MISS ✓ |
+| `GOC_OPT_SKIP=inline` | `c1aff7c60925` | MISS ✓ |
+| `GOC_FUNC_ALIGN=64` (placement policy) | `d5ee64f3f3a8` | MISS ✓ |
+| `GOC_STDLIB_OVERLAY=off` | `248275221706` | MISS ✓ |
+| `GOC_ESCAPE_SUMMARIES=0` | `c30bdc5124c6` | MISS ✓ |
+| compiler binary changed (line-shift in `opt/pass.go`, binary sha256 confirmed different) | `245d63d89463` | MISS ✓ |
+| stdlib source changed (comment appended to `stdlib/src/runtime/malloc.go`) | `ce2e2520e391` | MISS ✓ |
+| stray non-Go file added under `stdlib/` | `0cbf6ec590c4` | MISS ✓ |
+| `CG12_PACK_CACHE_MAX_BYTES=99999999999` (a control variable) | `c3d70f3803f3` (hit) | correctly NOT in the key ✓ |
+
+Every mutation restored to the original key on revert, and the restored compiler
+binary was byte-identical to the original (`3fa4b6a8...`), so the Go build is
+reproducible and the key is a function of the inputs and not of the run.
+
+One thing worth recording because it looked like a failure and is not: appending a
+comment to the *end* of `opt/pass.go` produced a byte-identical `goc`, and
+therefore a hit. That is correct -- the compiler did not change -- and it is a
+useful reminder that the key covers the compiler's bytes, not its source.
+
+### Things I tried that are NOT gaps
+
+The pack is a function of exactly what the branch says it is, and I checked the
+obvious candidates for a non-key input by building the pack under each and
+comparing bytes (`goc build-runtime -o`, `CG12_NOCACHE=1`, runtime-only pack,
+3.2 s each):
+
+| variation | pack sha256 |
+|---|---|
+| baseline, run 1 | `353d453ff1ee5555…` |
+| baseline, run 2 | `353d453ff1ee5555…` |
+| `GOMAXPROCS=1` (vs 64) | `353d453ff1ee5555…` |
+| `TMPDIR=…/ta` | `353d453ff1ee5555…` |
+| `TMPDIR=…/tb` | `353d453ff1ee5555…` |
+
+So the pack build is deterministic, is invariant to the backend's worker count,
+and does not leak the temporary directory into the assembled sidecar -- the last
+of which the branch asserts in a comment and which I can now confirm. Also
+checked by reading: the only inputs the pack build reads are the goc binary, the
+tree under `goc.StdlibRoot()`, and `cc`/`as` (`internal/prebuilt/prebuilt.go`
+`assemble()` uses `exec.LookPath("cc")`, the same lookup the identity hashes --
+there is no `$CC` escape hatch on this path; `CG12_HOST_CC` is `cmd/cg12cc` only).
+An in-tree overlay edit misses correctly (`bf19db03e088`), because
+`stdlib/overlays/` is inside the hashed tree.
+
+### A sixth thing, and it is a real stale hit: an out-of-tree `GOC_STDLIB_OVERLAY`
+
+`GOC_STDLIB_OVERLAY` does not only mean off/default. `goc/stdlib_overlay.go:62`:
+
+    manifestPath := selection
+    if manifestPath == "" || manifestPath == "default" {
+        manifestPath = filepath.Join(root, "overlays", "manifest.json")
+    }
+
+Any other value is taken as a **path to a manifest**, and the replacement and
+addition files it names are resolved relative to *that manifest's directory* --
+which need not be under `stdlib/`. The key folds in the variable's **value**, not
+the manifest's contents. So pointing the variable outside the tree and then
+editing the overlay is invisible to the key.
+
+Demonstrated by construction. `cp -a stdlib/overlays $TMPDIR/ext-overlay`, then
+`GOC_STDLIB_OVERLAY=$TMPDIR/ext-overlay/manifest.json`:
+
+| step | key | pack sha256 |
+|---|---|---|
+| external overlay, as copied | `83f63bded6b7` (miss) | `538eaccaa892…` |
+| one line appended to `ext-overlay/linux_arm64/runtime/cg12_overlay_linux_arm64.go` | `83f63bded6b7` (**hit**) | `c6eec869f1d6…` |
+
+Same key, different pack. The second compile linked the pack built from the
+overlay as it was before the edit. That is the silent-miscompile direction, and it
+is the same class of bug the branch's own audit identified for the variable's
+existence and closed only for the in-tree case.
+
+Bounded, and worth being clear about how far: the default and `default`/`off`
+selections are all covered, so no ordinary compile and no test or gate in this
+tree is exposed. It bites the developer who points the variable at an alternative
+overlay and iterates on it -- which is the workflow the variable exists for.
+The fix is the same shape as the one already applied to the stdlib tree: hash the
+manifest and the files it names, not the path.
+
+### A seventh, latent: symlinks are invisible to the tree hash
+
+`hashTreeInto` skips anything `!info.Mode().IsRegular()`, and `filepath.Walk`
+lstats, so a symlinked file under `stdlib/` is not hashed -- and a symlinked
+*directory* is not descended into at all, taking its whole subtree out of the key.
+
+Demonstrated: replace `stdlib/src/runtime/malloc.go` with a symlink to a copy
+outside the tree, then edit the copy.
+
+| step | key | pack sha256 |
+|---|---|---|
+| original tree | `c3d70f3803f3` | `353d453ff1ee…` |
+| `malloc.go` is a symlink to an identical external copy | `788981426de5` (miss) | `353d453ff1ee…` |
+| external copy edited | `788981426de5` (**hit**) | `789cfb696aa1…` |
+
+Note the middle row: making the file a symlink changes the key (the path drops out
+of the hash) but not the pack -- a spurious miss, the safe direction. It is the
+third row that is wrong.
+
+There are **zero symlinks under `stdlib/` today** (`find stdlib -type l` is empty,
+5423 regular files), so this is latent rather than live. I am recording it because
+the tree hash is now on the critical path of every compile, and "someone symlinks
+a vendored subtree" is an ordinary thing to do.
+
+Neither finding blocks the merge on its own -- see the verdict -- but both are
+real, both are reachable without doing anything perverse, and neither is mentioned
+in the branch's audit.
+
+## Eviction: a half-written pack is safe, a *fully* written one in use is not
+
+Three questions were asked. Two answers are yes. The third is no, and it is the
+most serious thing in this report.
+
+### A half-written pack is never readable -- confirmed
+
+`writeFileAtomically` creates its temporary through `os.CreateTemp(dir,
+base+".*")`, so the name is `<key>.gocrt.<random>` -- it does **not** end in
+`.gocrt`. Every reader names a pack exactly (`cachedPackPath` = `<key>.gocrt`), and
+the sweep only considers names with the `.gocrt` suffix. So a partial pack is
+neither openable by name nor deletable by the sweep, and the pack appears whole at
+the rename. Nothing to fault here.
+
+Two small consequences worth recording rather than fixing: temporaries are not
+counted toward the budget while they exist, so the bound is exceeded transiently
+by the size of the packs being written; and a writer killed between `CreateTemp`
+and `Rename` leaves an orphan the sweep will never reclaim, because the sweep only
+looks at `.gocrt`. The shared cache on this box has no orphans today (999 entries,
+999 of them `.gocrt`), so this has not bitten yet.
+
+### A concurrent sweep and write cannot corrupt a pack -- confirmed
+
+The sweep only unlinks; the writer only renames into place. Neither writes into a
+file another process may be reading. Two sweeps at once cannot each over-delete,
+because the sweep takes a non-blocking `flock` on `trim.lock` and skips its pass
+if a peer holds it. Two writers of the same key both end with a whole file, by the
+rename. I could not construct a corruption from this and I do not believe one
+exists.
+
+### A pack in use CAN be evicted mid-compile, and the compile then FAILS -- not confirmed, refuted
+
+`trimPackCache`'s doc comment states the safety argument:
+
+    Unlinking a pack another process is reading is safe and is the reason this
+    needs no coordination with readers: the reader holds an open file, and POSIX
+    keeps the inode alive until it closes. A reader that has not opened it yet
+    fails its read and builds the pack again, which is a miss, not a fault.
+
+**The premise is false.** The reader does not hold the pack open across the
+compile. It opens it twice:
+
+  - `readPackSet` -> `runtimepack.ReadManifest(path)`, which is
+    `os.Open` + `defer file.Close()` (`internal/runtimepack/runtimepack.go:204`).
+    It reads the manifest and **closes the file**.
+  - much later, `packSet.packFor` -> `runtimepack.Read(path)`
+    (`cmd/goc/prebuilt.go:182`), a *second* open, made lazily when the compiler
+    has finished the front end and actually wants the objects.
+
+Between those two opens the file is not held by anyone. And the two failures land
+in different places:
+
+  - a failure at the *first* open is caught by `autoPackFor` ("unreadable pack"),
+    which returns nil and falls back to the whole-program compile. Safe.
+  - a failure at the *second* open is not `ErrNoUsablePrebuiltRuntime`, so
+    `cmd/goc/main.go` sends it to `check(err)`, which prints and **`os.Exit(1)`**.
+    The build fails. In `compile-batch` it becomes that program's compile error.
+
+Demonstrated two ways.
+
+**Forced.** Fresh private cache, `hello.go` warmed so the compile hits, then the
+pack unlinked by another process at a chosen offset into the compile. Ten trials
+at delays from 0.2 s to 4.0 s, every one of them:
+
+    delay=0.2s exit=1 [autopack: hit] err='goc: open …/b81faef6….gocrt: no such file or directory'
+    …
+    delay=4.0s exit=1 [autopack: hit] err='goc: open …/b81faef6….gocrt: no such file or directory'
+
+10/10 hard failures, exit 1, no fallback. The window is the whole compile, not an
+instant.
+
+**Unforced -- the real race, reproduced with nothing but goc.** Two programs with
+disjoint import lists (`sort`, `strings`), a budget that holds one pack
+(`CG12_PACK_CACHE_MAX_BYTES=14000000`, each pack 13.5 MB), and the two compiled
+concurrently, fourteen rounds. 28 compiles, **1 hard failure**, on round 1:
+
+    goc: autopack: miss abebd2098e3a for [sort]
+    goc: autopack: building pack abebd2098e3a for [sort]
+    goc: autopack: pack resolved in 3.059s
+    goc: open …/stresscache/abebd2098e3a….gocrt: no such file or directory
+
+That compile built its own pack, cached it, and then lost it to the peer's sweep
+before it got to read it back. The other 27 compiles were correct and their
+binaries ran correctly (13 hits, 15 misses), so the cache works; it is the
+over-budget sweep that is unsafe.
+
+The sequence, precisely: sweep S does `ReadDir` + `Info()` and snapshots pack Y as
+old; compile B calls `cachedPack(Y)`, which `Chtimes` it to now and reads its
+manifest; S's removal loop, still working from its stale snapshot, unlinks Y; B's
+`packFor` opens Y and fails; B exits 1.
+
+**How reachable is this at the shipped 20 GiB budget?** Narrower than the stress
+configuration, and not narrow enough to dismiss. The sweep evicts oldest-first and
+stops the moment it is inside budget, so the pack at risk has to be within the
+(total - budget) oldest bytes at snapshot time. What puts a pack there is simply
+not having been used for a while -- the other `-O` arm, or a compiler build you
+have come back to -- which is exactly the pack a starting compile is about to
+touch. And being over budget is not an edge case in this design: the branch's own
+reasoning is that the cache reached 45 GB in a week from opt-in use alone and that
+making it the default "multiplies that". Over budget is the steady state, so the
+sweep runs after essentially every cached write, forever.
+
+**Severity.** This is loud, not silent: a build failure, never a wrong binary. It
+is an intermittent compile error, which in a 368-program matrix reads as a flake.
+It is also the one case where the branch's central safety argument -- "every
+failure falls back to the old whole-program compile" -- does not hold, and the
+gap is the shape of one `errors.Is` clause or one "copy the pack out before
+using it".
+
+I did not fix it; diagnosing was the job.
+
+## 1. `go test -timeout 60m -parallel 10 ./goc/...` -- **PASS**
+
+    ok  github.com/evanphx/cg12/goc  1123.643s
+
+Exit 0, one line of output, zero occurrences of the string `FAIL` in the log.
+20.6 minutes wall clock, launched detached and waited on to write its exit file.
+
+## 2. Capability matrix, both arms -- **368/368 PASS each**
+
+| arm | command | subtests PASS | FAIL | SKIP | exit | wall |
+|---|---|---:|---:|---:|---:|---|
+| default | `go test -count=1 -run '^TestARM64RuntimeCapabilityStatus$' ./cmd/goc/... -v` | **368** | 0 | 0 | 0 | 101.5 s |
+| `-O` | the same plus `-runtime-opt` | **368** | 0 | 0 | 0 | 144.2 s |
+
+The PASS set is complete in both -- 368 subtests reported, 368 passed, nothing
+skipped, nothing failed, `PASS` / `ok github.com/evanphx/cg12/cmd/goc`.
+
+The third arm (`-runtime-status-prebuilt-runtime=false`, the one that exercises the
+new auto-pack path because the matrix then offers no `-runtime` and each batch
+worker picks its own pack) is running as this is written and is reported below.
+
+## Eviction actually happening: 48.0 GB -> 21.45 GB, exactly at the bound
+
+Observed on the real shared cache, not a contrivance. Before this job:
+
+    999 entries, 999 of them .gocrt, 48,028,695,650 bytes
+
+After the first arm's cached writes:
+
+    471 entries, 430 of them .gocrt, 21,454,296,404 bytes
+
+The budget is 20 GiB = 21,474,836,480 bytes, so the sweep landed 20,540,076 bytes
+(0.1%) under it. 569 packs and 26.6 GB were evicted on the first sweep. That is
+the branch's stated intent and it is harmless: those packs were written under the
+old key scheme by other compilers, no key this branch computes can name them, and
+the arm that triggered the trim passed 368/368 while it was happening.
+
+The 41 non-`.gocrt` entries are per-key `.lock` files and the `index/` directory.
+Lock files are created per key and never removed, and are not counted toward the
+budget. At one empty file per key that is noise, but it does grow without bound.
+
+### The third arm -- the one that exercises auto-packing -- **368/368 PASS**
+
+    go test -count=1 -run '^TestARM64RuntimeCapabilityStatus$' ./cmd/goc/... -v \
+      -args -runtime-status-prebuilt-runtime=false -runtime-status-shards=1 -runtime-status-shard=0
+
+368 subtests, 368 PASS, 0 FAIL, 0 SKIP, exit 0, `ok github.com/evanphx/cg12/cmd/goc
+113.609s`.
+
+This is the arm the branch says it added, and it is the important one: with
+`-runtime-status-prebuilt-runtime=false` the matrix offers no `-runtime` at all, so
+every `compile-batch` worker falls into `autoPackFor` and picks its own pack per
+program (`cmd/goc/batch.go:191`). Before this branch that arm meant compiling the
+whole runtime once per program. It now costs 113.6 s for 368 compile-and-run
+capabilities -- 12 s more than the arm that is handed six prebuilt packs, and the
+same 368 passes. The auto-pack path is doing the work and getting the same answers.
+
+## Something that assumed monolithic output: `scripts/nosplit-debt-regen.sh`
+
+The brief asked for anything that assumed a plain `goc file.go` produces a
+monolithic link. There is one, and it matters because it is a *baseline
+generator*.
+
+`analysis/nosplitdebt` drives three arms. Its `whole` arm exists, per its own doc
+comment, so that "the runtime, the standard library and the program are one module
+and every frame of every chain is visible to the walk at once" -- and it is
+implemented as (`analysis/nosplitdebt/main.go:238`):
+
+    arguments := []string{"-o", "/dev/null", program}
+    …
+    return compile(compiler, arguments)          // no -runtime, no CG12_NOCACHE
+
+No `-runtime`, and -- unlike the `pack` arm three functions above, which passes
+`CG12_NOCACHE=1` with the comment "CG12_NOCACHE keeps a pack from being served out
+of the cache" -- no cache suppression. On this branch that invocation now takes the
+auto-pack path, so the `whole` arm silently compiles **split**.
+
+Verified by construction on the program the script's own header names:
+
+    goc -o /dev/null goc/testdata/stdlib_os_exec_echo.go   with GOC_DEBUG_NOSPLIT=heights
+
+| arm | frame lines | `syscall.runtime_AfterForkInChild` |
+|---|---:|---|
+| `GOC_AUTOPACK=0` (what the script means by `whole`) | 484 | **present** |
+| the new default (auto-packed, warm) | 207 | **absent** |
+
+280 distinct frames appear only in the monolithic run. The missing one is exactly
+the chain the script's header cites as the reason the arm exists:
+
+    goc/testdata/stdlib_os_exec_echo.go stopped building because
+    syscall.runtime_AfterForkInChild's 976-byte chain was reachable from none of
+    them.
+
+So `scripts/nosplit-debt-regen.sh -update` run on this branch would regenerate
+`arm64/nosplit_debt.go` from a sweep whose `whole` arm is no longer whole, drop the
+debt entries only that arm can see, and re-open the failure the register was
+written to close. Nothing fails today -- the register is committed and the script
+is a human-run regeneration tool -- so this is a latent tooling break, not a broken
+gate. The fix is one environment variable on one arm.
+
+I looked for others and did not find any. Checked: `-c`, `-S`, `-emit-ir`,
+`-runtime-covermeta`, `-m`, an explicit `-runtime` and a non-arm64 target are all
+excluded by the guard at `cmd/goc/main.go:139` and by `autoPackFor` itself;
+`-cpuprofile` still stops through the `defer stopCPUProfile()` at
+`cmd/goc/main.go:75` on the new early `return`, and `-memprofile`/`-run` are handled
+the same way the pre-existing `-runtime` branch handles them;
+`scripts/determinism-check.sh` drives both cached and `CG12_NOCACHE=1` arms
+deliberately; `make bench-perf` and `make bench-crypto` are library tests in
+`./goc` and cannot reach `package main`'s auto-pack code at all.
