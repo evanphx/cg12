@@ -2424,3 +2424,130 @@ cloned temporary but not `ClosureContext` (`opt/inline.go:872`) — a callee
 carrying the temporary without the flag would have been cloned into a caller as
 an ordinary undefined value, and is now rejected at the source.
 
+The check earned itself immediately: two of the repository's own round-trip
+fixtures stated half the fact. `richModule`'s `vf` set `HasClosureContext` and
+marked no temporary; `TestTempRoundTripsEveryField`'s fixture marked a temporary
+and left the flag unset. Both go through `DecodeModule`, which is the front door
+a build cache would use, so a fixture that is not well-formed IR is a weaker
+fixture. One line each.
+
+## What now runs it, which is the part worth more than the fix
+
+`ir.Verify` was already there. Nothing on the path from the front end to the
+backend called it. Its only callers were `ir.DecodeModule`, the lifter
+(`lift/lift.go`), and `opt/jumpthread.go` under `CG12_JT_CHECK` — none of which
+a goc compile goes through. That is the whole reason a 4.2% defect could sit
+there: the instrument existed and was pointed somewhere else.
+
+`TestIRVerifyAudit` (`goc/irverifyaudit_test.go`) runs it over every function of
+every corpus program, inside the pass `TestFrameEscapeAudit`,
+`TestLoopAliasAudit` and `TestAllocationCensus` already share. It costs one
+linear walk per function against compiles that dominate everything in that pass.
+
+It has **no baseline file**, deliberately, and that is the difference between it
+and its neighbours. The escape and aliasing audits record what the compiler
+currently does, because what it does is not all correct and the record is what
+stops it drifting. This one has a single acceptable answer: IR that fails the
+verifier is IR no pass downstream is entitled to assume anything about. Its
+failure message says so, and says the thing that was actually hard here — decide
+whether the front end is emitting malformed IR or the verifier's model is
+missing a case, before changing either.
+
+## The round trip, which is what the caching work was waiting on
+
+`TestModuleRoundTripsThroughTheBinaryFormat` compiles a whole program, encodes
+it, decodes it and re-encodes the result, before and after `-O`. Measured
+directly on both programs, in all four configurations:
+
+| | functions | encoded | decode | re-encode |
+|---|---:|---:|---|---|
+| `hello.go`, as compiled | 2744 | 11.1 MiB | OK | **byte-identical** |
+| `hello.go`, `-O` | 2152 | 15.9 MiB | OK | **byte-identical** |
+| http, as compiled | 14568 | 106.4 MiB | OK | **byte-identical** |
+| http, `-O` | 12427 | 158.2 MiB | OK | **byte-identical** |
+
+**`ir.DecodeModule` round-trips a whole goc module.** Nothing else was missing:
+the encoding was never the problem, and `VerifyModule` at the end of
+`DecodeModule` was the only thing rejecting it.
+
+The re-encode is what makes it a claim rather than an absence of an error. A
+decode that merely returns without error proves nothing about fields it dropped;
+a re-encode that reproduces the original bytes proves the decoded module carries
+everything the encoder writes. And `ir/binary_total_test.go` already guards the
+other half — that the encoder writes every field the types carry — by requiring
+each field of its fixtures to be non-zero, so a newly added field fails the test
+by name rather than being silently dropped. Between the two, the round trip is
+guarded from both ends.
+
+Two things a cache still wants that this does not give it, both named by
+`BUILD_CACHE.md` and neither blocking: the format carries a version byte but no
+content digest, and there is no cache key. Those are cache design, not IR
+soundness.
+
+## Why the verifier and not the IR
+
+The instruction was not to assume the IR is at fault because it is the thing
+that changed less recently, so here is the case each way.
+
+**For "the IR is wrong."** The closure context could have been an entry in
+`f.Params`, and then nothing about the verifier would need to change. Or the IR
+could have given it an explicit defining pseudo-instruction at entry, so that
+"defined" meant one thing everywhere.
+
+**Against, and this is what settles it.** Neither alternative is available
+without making the IR worse:
+
+  - `f.Params` is the *argument* sequence. `lowerABI` walks it in order and
+    assigns argument registers and stack slots from it. Putting the closure
+    context there would consume an argument register it does not use and shift
+    every real argument by one. `arm64/goabi.go` already builds the closure
+    context's spill group in a separate block *after* the parameter loop, for
+    exactly this reason. It is not an argument, and the ABI code says so.
+  - There is no entry pseudo-op in this IR, for anything. Parameters themselves
+    have no defining instruction — `f.Params` is a list of temporaries, and what
+    makes them defined is being in that list. "A temporary the ABI supplies at
+    entry has no defining instruction" is therefore the *existing* convention,
+    not a deviation from it. The closure context follows it exactly. What was
+    missing was that `f.Params` is not the only list of such temporaries.
+
+So the IR is internally consistent and models the thing properly: `Func.HasClosureContext`
+and `Temp.ClosureContext` are first-class, the backend reads them
+(`stabilizeClosureContext`), the inliner reads them (`inlineClosureContext`), and
+the binary format carries both. Every consumer of the IR understood the closure
+context except the one whose job is to say what the IR is.
+
+**The one genuinely unusual thing, stated plainly:** the front end pins a
+physical register on that temporary (`Fixed`, `Reg = 26`) at construction, long
+before lowering, which is otherwise a lowering concern — `ir.Verify`'s own doc
+comment says it "does not check the things lowering establishes ... register
+assignments". That is a real oddity and it is how the dedicated register reaches
+the backend at all. It is not what the verifier objected to, and changing it is
+a different piece of work.
+
+The 4.2% is also not a coincidence of three shapes. All four — closure,
+`deferwrap`, `gowrap`, `methodvalue` — come through `(*gen).closureContext`, one
+function, four callers. One construction path, as the brief guessed.
+
+## A second instrument the defect had disabled
+
+`opt/jumpthread.go` verifies each function it threads, under `CG12_JT_CHECK`,
+and panics if threading broke SSA. That check could not be used at all:
+
+    $ CG12_JT_CHECK=1 goc -O goc/testdata/hello.go     # main, 76069d9
+    panic: jumpthread: runtime.timer.modify.func.638.16: threading
+      logicshort5->logicend6 broke SSA: ir: runtime.timer.modify.func.638.16:
+      start: add reads %0, which nothing defines
+
+Threading had broken nothing. The verifier was reporting the pre-existing
+closure-context reading, in the first closure the pass happened to touch, and
+the pass turned it into a panic. So the tree had two instruments pointed at this
+and both were silent for the same reason: one was never run, and the other
+crashed the compiler when it was, which amounts to the same thing.
+
+    $ CG12_JT_CHECK=1 goc -O goc/testdata/hello.go     # this branch
+    $ ./hello
+    hello from cg12 Go
+
+That is not a fix in its own right — it is the same one fix — but it is the
+second thing that was measurably unusable and is not any more.
+
