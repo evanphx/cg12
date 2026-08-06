@@ -3110,3 +3110,74 @@ the same way the pre-existing `-runtime` branch handles them;
 `scripts/determinism-check.sh` drives both cached and `CG12_NOCACHE=1` arms
 deliberately; `make bench-perf` and `make bench-crypto` are library tests in
 `./goc` and cannot reach `package main`'s auto-pack code at all.
+
+## Does the new default *run* the corpus correctly? -- **206/206, yes**
+
+The brief asks for more than "it compiles". So: 206 corpus programs -- every
+`goc/testdata/stdlib_*.go` (139, the ones with real standard library closures,
+which is what a pack carries) plus every fourth of the rest (67) -- each compiled
+**twice with the same compiler**: once the new way (a plain `goc file.go`, which
+now auto-packs and split-links) and once the old way (`CG12_NOCACHE=1`, the
+whole-program compile). Then both were run and their exit code, stdout and stderr
+compared. The old way is the oracle, so no expected-output files are needed and any
+divergence is real.
+
+| | |
+|---|---:|
+| programs | **206** |
+| compile failures (either way) | **0** |
+| exit-code mismatches | **0** |
+| stdout mismatches | **0** |
+| stderr mismatches | **0** |
+| binaries byte-identical split-vs-monolithic | 0 |
+| binaries differing split-vs-monolithic | **206** |
+
+The last two rows are the consequence the brief flags, stated plainly: **every one
+of the 206 binaries a plain `goc file.go` now produces is a different file from
+what it produced before.** And every one of them behaves identically. That is the
+trade this change makes, and on this corpus it is clean.
+
+## 6. Cold vs warm byte-identity -- **10/10 IDENTICAL**, and three more identities besides
+
+This is the property the brief calls the core of the change, so it was measured
+with the confound removed. Both compilers were built **in the same worktree at the
+same path** (`git worktree add --detach`, checked out to each ref in turn), because
+a pack embeds the source paths its line tables came from: two compilers built at
+different paths produce different pack bytes for reasons that have nothing to do
+with the change. With the path held fixed the comparison is exact.
+
+    compiler branch (7c6b0be) sha256=ab292fae6c6d422e   path=…/cmp
+    compiler main   (76069d9) sha256=6add5444355d6b05   path=…/cmp
+    stdlib trees identical between the two refs: 0 changed paths
+
+Five programs -- `hello` (fmt), `stdlib_encoding_json_roundtrip`,
+`stdlib_regexp_find_replace`, `stdlib_crypto_rsa`, `stdlib_http_client_server`
+(net/http) -- in both arms, default and `-O`. Ten configurations. Every cold
+compile was a real miss that built and cached its pack; every warm compile was a
+real hit:
+
+    10 × cold rc=0  [autopack: miss, autopack: building pack]
+    10 × warm rc=0  [autopack: hit]
+
+| comparison | want | result |
+|---|---|---|
+| **cold vs warm** (`branch-auto-cold` vs `branch-auto-warm`) | identical | **10/10 IDENTICAL** |
+| auto-pack link vs the explicit two-step (`goc build-runtime` + `goc -runtime`) | identical | **10/10 IDENTICAL** |
+| **branch `-runtime` vs `main` `-runtime`** -- is the split link unchanged? | identical | **10/10 IDENTICAL** |
+| branch monolithic vs `main` monolithic -- is the fallback unchanged? | identical | **10/10 IDENTICAL** |
+| the pack itself, built by the branch vs by `main` | identical | **10/10 IDENTICAL** |
+| the new default vs the old default (split vs monolithic) | differ | **10/10 DIFFER** |
+
+Then all six variants of all ten configurations were run: **50 runs, 50/50 agreeing
+with the monolithic build on both exit code and stdout, zero disagreements.**
+
+So, on the question the brief singles out -- "check that a split-linked binary is
+byte-identical to what `-runtime` produced before" -- the answer is yes, exactly:
+the branch's `-runtime` output is byte-for-byte what `main`'s `-runtime` output is,
+the pack is byte-for-byte the same artifact, and a plain `goc file.go` now produces
+that same file whether the pack was built a second ago or read from the cache.
+
+The sizes in the split-vs-monolithic rows show the scale of what changes for an
+ordinary user: e.g. `hello -O` 14,493,928 bytes (split) against 13,953,600
+(monolithic), `stdlib_http_client_server -O` 78,106,176 against 77,775,880. Different
+files, same behaviour.
