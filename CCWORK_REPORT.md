@@ -3339,3 +3339,64 @@ fingerprint to `ir/binary.go`; give the pack cache gc's 5-day trim; split
 cache after `mem2reg`+`clean`.
 
 Full document: `BUILD_CACHE.md`. Harness: `cmd/stagetime`.
+
+# Integration gate: `integration/cache-wave`
+
+Branch `integration/cache-wave`, cut from `main` (`76069d9`) and merging, in
+order, `ccwork/ir-verify-entry-blocks`, `ccwork/default-compile-cache` and
+`ccwork/build-cache-design-2`. Host: aarch64 Linux, 64 cores, 250 GiB RAM,
+go1.26.1, box exclusive to this run.
+
+## The merges
+
+Three merge commits, `--no-ff`, in the order given. The only conflict in any of
+the three was `CCWORK_REPORT.md`, where all three branches append their own
+section at the end of a file all three cut from the same commit. Resolved by
+keeping every side in merge order; no branch's prose was dropped or reworded.
+No source file conflicted. `go build ./...` is clean on the merged tree and
+`gofmt -l` reports nothing on any file the merge touched.
+
+## The defect: `nosplitdebt`'s `whole` arm was not whole
+
+`analysis/nosplitdebt/main.go` sweeps three module shapes and folds their
+measured nosplit chain heights into `arm64.noSplitDebt`, the register that
+decides which over-limit chains are tolerated. The `whole` arm's doc comment
+states its whole purpose: "the runtime, the standard library and the program are
+one module and every frame of every chain is visible to the walk at once". It
+ran `goc -o /dev/null program`.
+
+With `ccwork/default-compile-cache` merged, that command no longer means what it
+meant. A plain `goc file.go` now finds or builds a pack for the program's import
+list and links against it, which is the `split` arm's module boundary arriving
+without being asked for. The `pack` arm three functions above already guarded
+itself with `CG12_NOCACHE=1`; the `whole` arm guarded nothing.
+
+**Measured on the merged tree**, `goc/testdata/stdlib_os_exec_echo.go`, heights
+dumped with `GOC_DEBUG_NOSPLIT=heights`:
+
+| how it was compiled | over-reserve chains reported |
+|---|---|
+| whole-program (`GOC_AUTOPACK=0 CG12_NOCACHE=1`) | **51** |
+| plain `goc`, cold pack cache | 50 |
+| plain `goc`, warm pack cache | **0** |
+
+The warm row is the one that matters, and it is worse than "measures less". On a
+warm cache the program module alone has no chain over the reserve, so the arm
+reports *nothing at all* — and which row you get depends on whether some earlier
+compile in the same sweep happened to leave that import list's pack behind. The
+51 chains lost include `syscall_runtime_AfterForkInChild` at 976, which is the
+exact chain this recipe was widened to find and the reason the recipe exists in
+its present form.
+
+Because the register is a floor — a chain it does not name may not exceed the
+reserve at all — a regeneration from the split view would have *deleted* entries
+and turned them into build failures for the programs that contain them.
+
+**The fix** (`37d4225`): the `whole` arm now runs with `GOC_AUTOPACK=0` and
+`CG12_NOCACHE=1`. Both are named on purpose. `GOC_AUTOPACK=0` is the switch
+whose meaning is "do not choose a pack" and is the one that makes the module
+whole; `CG12_NOCACHE=1` is what the `pack` arm sets, for the same reason it sets
+it — nothing in this measurement may be served out of a cache some other
+compiler filled. The `split` arm needs no change: it passes `-runtime`
+explicitly, and `cmd/goc/main.go` returns on that path before auto-packing is
+considered.
