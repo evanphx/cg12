@@ -5593,3 +5593,89 @@ This one is the argument for item 5 of the brief in miniature. It was not on
 anyone's list, nobody had noticed it, and the only reason it is in this report is
 that extending `allFieldsSet` to `Block` and `Jmp` made the fixture enumerate the
 terminator's fields and the round trip refuse to return one of them.
+
+## Item 5 — `allFieldsSet`, finished, and made total in two directions
+
+The brief called this "worth more than any individual fix here", and the branch
+bears that out: **two of the seven drops on this report were not on anyone's list
+and exist in it only because the guard was extended** -- `Jmp.Likely`, and the
+`Func.nameSeq`/`lowered` pair that stopped the cache path assembling at all.
+
+The guard covered `Instr`, `AsmOp`, `InlineSite`, `IntrinOp` and `Temp`. It now
+covers the eight the brief named -- `Func`, `Module`, `Data`, `DataItem`,
+`Const`, `AggType`, `Field`, `Block` -- and, with them, every smaller record the
+format carries: `Linkage`, `Jmp`, `Phi`, `SwitchCase`, `ValueGroup`,
+`AggregateValue`, `Ref`, `SrcPos`, `Alias`, `AssemblyFile`, `AsmSignature`,
+`AsmSlot`. Twenty-five types, up from five.
+
+Two changes make it total rather than merely wider.
+
+**Unexported fields count.** They were exempt (`!f.IsExported()`), and two of the
+drops were hiding behind the exemption. Being unexported says who may *write* a
+field, not whether the format has to *carry* it. An exception now has to be
+spelled with its name in `skip`, next to the reason.
+
+**The set of guarded types is itself computed, not maintained.**
+`TestEveryTypeTheFormatCarriesIsGuarded` walks `ir.Module`'s type graph
+reflectively and requires every struct type it reaches either to have been
+through `allFieldsSet` or to be on `formatTypesNotCarried` **with a reason**.
+Extending `allFieldsSet` to a type stops a *field* being added and dropped;
+this stops a whole *type* being added with no guard at all, which is the same
+failure one level up, and the format has grown types before. Three are excused,
+each with its reason recorded in the source: `AllocDecision` and `PlacedAlloc`
+(diagnostic-only, as their own doc comments say) and `constKey` (derived from
+`Consts`, rebuilt on decode -- see drop 5).
+
+A companion, `TestGuardedTypesAreReallyGuarded`, checks the other direction: that
+nothing is both guarded and excused.
+
+**So: yes, `allFieldsSet` now covers every serialized type, and "every" is
+checked by the compiler's own reflection rather than asserted by me.**
+
+## Item 6 — a content digest in the format
+
+The header was a magic tag and a version byte. Magic says "this is a cg12 unit";
+version says "of a vintage I can read". Neither says *"and these are the bytes
+that were written"*, which is the question a cache actually has to answer. A
+truncated write, a half-flushed page, a file two writers raced on, a unit spliced
+from two others -- all keep the magic and the version. Before this, such a unit
+decoded into whatever the corruption happened to describe, and the compiler went
+on to emit code from it.
+
+The format now carries `sha256` of its payload, in the header, written after the
+payload is built and **checked before the payload is read**. Version is checked
+first, so a stale cache still reports as a stale cache and not as corruption.
+
+It is in the format rather than beside it because a fingerprint a caller has to
+remember to keep is a fingerprint some caller does not keep. `memo.FuncDigest`
+bolted `sha256` on from outside and got integrity for the memo's own reads;
+`ir.CloneFunc`, `cmd/cg12`, and anything a later cache grows got none. In the
+header the check is the decoder's, and it guards `DecodeModuleUnverified` too --
+which is the entry point a cache uses *precisely because* it cannot run the
+verifier, and so the entry point that had the least protection and needed the most.
+
+`sha256` and not a cheap checksum: these units are already content-addressed by
+sha256 elsewhere in the tree, and the cost is not where it looks. Measured:
+
+| | wall |
+|---|---:|
+| `hello.go`, plain compile, before the digest | 7.55 s |
+| after | 7.53 s, 7.47 s |
+
+Both objects byte-identical to before. The whole-module encode is 100 MB and
+hashes in tens of milliseconds against a compile measured in seconds, and
+`ir.CloneFunc`'s units are single functions of a few kilobytes.
+
+Four tests: a flipped byte at the end of the payload and one immediately after the
+header (so an off-by-one at the boundary cannot leave the first field unguarded),
+the same through `DecodeModuleUnverified`, a version mismatch that must still say
+"version" and not "digest", and determinism -- the digest is a function of the
+payload, so equal modules still encode to equal bytes.
+
+`binVersion` is **20 → 21**, once, for the whole change.
+
+**One follow-on, deliberately not taken.** `memo.FuncDigest` now hashes a blob
+that already contains a hash of itself, so the memo pays sha256 twice on that
+path. It could read the embedded digest instead and halve it. That changes what a
+`memo.Digest` *is* (payload rather than blob) and therefore every stored entry, so
+it belongs to whoever owns the memo's on-disk compatibility, not to this branch.
