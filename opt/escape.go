@@ -24,6 +24,17 @@ type localSlot struct {
 //
 // It does not turn off the loop rule, which is a safety property of promotion
 // rather than part of the table -- see promotionsBlockedByALoop.
+//
+// It is process-global, so WRITING it is not a local act: every compile running
+// anywhere in the process reads this variable, and one that reads it mid-flip
+// gets an analysis nobody asked for. goc/escapesummary_test.go writes it, which
+// is why goc/sequential_tests.txt has to keep that test out of the parallel
+// suite -- with it parallel, the placement tests report allocations on the heap
+// that a serial run keeps in a frame. `analysis/escapedrift` reduces that to two
+// goroutines and a handshake, and shows the drift follows this knob's default in
+// either direction: under GOC_ESCAPE_SUMMARIES=0 a concurrent compile places
+// into frames instead. Set it from the environment, or from a driver's main
+// before it compiles anything; do not move it under a running compile.
 var EscapeSummaries = os.Getenv("GOC_ESCAPE_SUMMARIES") != "0"
 
 // PayloadFold turns on foldSplitPayloadsBackIn. It is on, and GOC_PAYLOAD_FOLD=0

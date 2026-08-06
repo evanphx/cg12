@@ -25,11 +25,35 @@
 #            escape placement; nothing in production does that (goc compiles one
 #            program per process, and `goc compile-batch` compiles its stream
 #            strictly in sequence within each worker), so this is a constraint on
-#            how the suite may be parallelised rather than a shipped defect. The
-#            root cause is NOT isolated -- see CCWORK_REPORT.md.
+#            how the suite may be parallelised rather than a shipped defect.
 #            The set is deliberately over-broad: it is every test that reaches a
 #            placement assertion by any call path, not only the three that were
 #            observed to fail.
+#
+#            THE ROOT CAUSE IS NOW ISOLATED, and it is one line of test code, not
+#            the compiler. TestEscapeSummaryCost sets the package-global
+#            opt.EscapeSummaries to false across three whole-program compiles of
+#            stdlib_crypto_ecdsa.go to price the fact table; every compile in the
+#            process reads that variable at opt/escape.go, so anything compiling
+#            inside that window gets the analysis with no callee summaries -- the
+#            assume-every-call-escapes arm. `analysis/escapedrift` reduces it to
+#            two goroutines and a handshake and flips three placements every run.
+#            The drift is not intrinsically conservative: its direction follows
+#            GOC_ESCAPE_SUMMARIES, and under that variable's documented bisection
+#            setting the same reduction moves allocations INTO frames. Both knob
+#            settings are placements the compiler ships, so nothing unsound is
+#            reachable. See CCWORK_REPORT.md.
+#
+#            What that licenses, and what it does not: only the two tests that
+#            write the knob (TestEscapeSummaryCost, TestEscapeSummaryPromotionRate)
+#            need this tag for that reason, so most of the placement entries below
+#            could go back to parallel. That was NOT done here, because showing it
+#            means running the census, the audits and the corpus suite, which this
+#            job was scoped out of. Whoever narrows the list should run those three
+#            named tests at -parallel 32 first. The Test*Diagnostic* and
+#            TestEscapeReason*/TestGocFlagM* entries move opt's diagnostic level
+#            and writer instead; that is measurably placement-neutral, but they
+#            race each other, so they need a tag of their own rather than removal.
 # setenv     Calls t.Setenv, which mutates process-global state and panics if the
 #            test is parallel.
 # timing     Measures elapsed time on a pinned core and has a pre-flight that
