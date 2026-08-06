@@ -3649,3 +3649,150 @@ changed, allocation placement did not.
    longer load-bearing for closures, but the comment and the rule still
    contradict each other and someone should decide which is right.
 
+
+# Per-package build caching for goc (BUILD_CACHE.md)
+
+Branch `ccwork/build-cache-design-2`, from `main` (76069d9). Deliverable is
+`BUILD_CACHE.md`; this section records results as they land. Host: aarch64
+Linux, 64 cores, 250 GiB, go1.26.1. No caching behaviour was changed.
+
+## Measured: stage attribution, small program
+
+`goc/testdata/fmt_sprintf.go` (10 lines; 5083 functions after the stdlib
+closure), arm64, full pipeline, GOMAXPROCS=64. Wall and bytes allocated per
+stage, from a harness that runs exactly the stages `cmd/goc` runs:
+
+| stage | wall | allocated |
+|---|---:|---:|
+| frontend (parse + typecheck + IR lowering) | 4.05 s | 1.11 GiB |
+| `opt.OptimizeModule` (13-pass whole-module) | 9.80 s | 3.21 GiB |
+| backend + object (lower, regalloc, emit, ELF) | 2.05 s | 2.93 GiB |
+| **total** | **15.91 s** | **7.25 GiB** |
+
+Process total 17.0 s wall / 44.2 s CPU: the backend is parallel (10.4 CPU-s in
+2.05 s wall) and GC is 39% of all CPU samples.
+
+## Measured: goc's IR already serializes, and it is cheap
+
+`ir.Module.MarshalBinary`/`ir.DecodeModule` exist and are documented as a
+disk cache format. On the same module:
+
+| | size | marshal | decode |
+|---|---:|---:|---:|
+| pre-opt IR | 20.2 MiB | 0.14 s | 0.17 s |
+| post-opt IR | 35.8 MiB | 0.28 s | 0.36 s |
+
+Decoding the *entire* 5083-function pre-optimisation module costs 0.17 s
+against a 4.05 s front end.
+
+## Measured: the module goc produces does not satisfy goc's own IR verifier
+
+`ir.VerifyModule` on the pre-opt module fails immediately:
+`ir: time.deferwrap.580.8: start: add reads %0, which nothing defines`
+(net/http program: `net.methodvalue.net.file.close.22.8.2069`, same shape).
+`ir.DecodeModule` calls `VerifyModule` before returning, so the round trip
+fails on that gate, not on the encoding: marshal and decode themselves
+complete. This is a prerequisite for any IR-on-disk cache and it is currently
+broken.
+
+## Read, not recalled: what gc's cached artifact contains
+
+`cmd/compile/internal/noder/doc.go` defines Unified IR. `SectionBody` holds
+function bodies as encoded IR elements (`(*pkgWriter).bodyIdx`,
+`writer.go:1169`); reading one back materialises `ir` nodes
+(`reader.go:3462`). Nothing is re-parsed or re-typechecked to inline across a
+package boundary.
+
+The writer emits a body for *every* function. The pruning is done afterwards by
+`linker.exportBody` (`noder/linker.go:219`): drop it if `fn.Inl == nil` (i.e.
+`inline.CanInline` rejected it against `inlineMaxBudget = 80`), otherwise carry
+it if the function is local *or* if this compilation actually inlined it
+(`fn.Inl.HaveDcl`). `relocFuncExt` writes alongside it the definition ABI,
+per-parameter escape notes and the inline cost. The fingerprint is a sha256 of
+the payload from `(*PkgEncoder).DumpTo`; `cmd/link` refuses a mismatch
+(`ld/lib.go:2530`).
+
+### The brief's one wrong detail, corrected
+
+`buildActionID` (`cmd/go/internal/work/exec.go:261`) folds in
+`contentID(a1.buildID)` for each dependency -- the **content hash of the
+dependency's archive**, not its action ID. That is stronger, because it gives
+cutoff. Probed on this box with a two-package module and a fresh `GOCACHE`:
+
+| change to the leaf | recompiled |
+|---|---|
+| append a trailing comment (shifts no line numbers) | leaf only -- **the dependent was a cache hit** |
+| change an inlinable body | leaf **and** dependent |
+| change a constant inside a function far over the inline budget | leaf **and** dependent |
+
+Row 3 is the limit: the cut is at the whole archive, which contains the object
+as well as the export data, so gc buys soundness with a conservative key rather
+than a precise dependency analysis.
+
+Eviction: `DiskCache.Trim` is age-based with no size cap -- mtime refreshed on
+use at most hourly, trim at most daily, 5-day cutoff, over 256 subdirectories.
+
+## Measured: where the cacheable/non-cacheable line falls in goc
+
+`opt.DefaultPipeline` splits at the first inline fixpoint. Timed apart
+(`stagetime -split-opt`):
+
+| | small | http |
+|---|---:|---:|
+| per-function prefix (`mem2reg` + `clean`) | 1.44 s | 8.34 s |
+| whole-module remainder | 8.58 s | 36.08 s |
+| sum vs unsplit `OptimizeModule` | 10.02 vs 9.98 | 44.42 vs 43.91 |
+
+**85% of the optimiser is downstream of inlining.** Inside the front end,
+per-package work (`funcDecl` 1.58 s / 7.78 s, `globalDecl`, parse, typecheck) is
+61% on small and 53% on http; the rest is `reachableFunctions`,
+`collectDynamicTypes`, `addInterfaceMethodWrappers` and the heap-allocation
+module passes, which are whole-program by definition and consume ASTs, not IR.
+
+## Measured: blast radius under whole-module optimisation
+
+Control: two processes on the same source produce 5083/5083 and 4131/4131
+identical function IRs -- the compiler is deterministic.
+
+| change | pre-opt changed | post-opt changed |
+|---|---:|---:|
+| a constant, or an added statement, in the root package | 1 of 5083 | **1 of 4131** |
+| two comment lines above `runtime.alignUp` (no semantic change) | 4 | 47 (1.1%) |
+| `runtime.alignUp`'s body rewritten, net of the line shift | 1 | **28 (0.7%)** |
+
+Whole-module optimisation does not smear changes across the program. Position
+shifts propagate further than code changes do, because `ir.SrcPos` is in the IR
+and inlining carries it -- gc has the same property. The stdlib edit was
+reverted and the tree verified byte-identical.
+
+## Measured: what packs save, and what they cannot
+
+| | wall |
+|---|---:|
+| build a pack carrying `fmt` | 15.9 s, 20.8 MB |
+| small program, monolithic | **16.45 s** |
+| small program, against the pack | **5.02 s** (-69%) |
+| `fmt`+`sort`+`strings`, against the same pack | 5.08 s |
+| `os`-only program, against the same pack | **refused** ("none of the 1 prebuilt runtimes offered is usable"); falls back to 12.43 s |
+
+Stage split of the pack-linked compile: front end **4.20 s**, opt 0.19 s, back
+end 0.18 s. **The front end is 91% of what remains and is unchanged from the
+monolithic compile** -- the split is subtractive and deliberately late, so all
+5083 functions are lowered and then 4483 thrown away.
+
+`cmd/goc/packcache.go` has no eviction of any kind, and the key covers the
+hashed goc binary, so every compiler rebuild orphans every pack permanently.
+
+## Recommendation
+
+Keep packs. Per-package IR caching's measured ceiling in goc is 18-21% of a
+compile against the packs' measured 69%, because goc's cacheable stage ends
+before its optimiser's main work begins. Build the per-package unit anyway, but
+aimed at the pack's floor: removing `funcDecl`+`globalDecl` from the pack path
+takes it from 5.02 s to about 3.4 s, 79% off the monolithic compile. Work
+items, in order: fix the 211 functions failing `ir.Verify`; add a payload
+fingerprint to `ir/binary.go`; give the pack cache gc's 5-day trim; split
+`MarshalBinary` into per-package units with cross-unit `AggType` unification;
+cache after `mem2reg`+`clean`.
+
+Full document: `BUILD_CACHE.md`. Harness: `cmd/stagetime`.
