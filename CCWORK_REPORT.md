@@ -3836,3 +3836,103 @@ Incidentally, `stagetime` reports **`ir.Verify` fails on 0 of 5119 functions**
 on the merged tree. That is branch 3's tool independently confirming branch 1's
 fix, which is the defect branch 3's own `BUILD_CACHE.md` found and could not
 work around.
+
+## The capability matrix, re-run because branch 1 changes emitted code
+
+The interrupted gate confirmed both capability arms on branch 2 alone. Branch 1
+changes what the compiler emits for all 406 corpus programs, so "confirmed on
+branch 2" does not carry to the merge. Both arms re-run here:
+
+| arm | result |
+|---|---|
+| `make test-goc-status` (default) | **368/368 PASS**, 0 fail, 0 skip, 71.3 s |
+| `make test-goc-status-opt` (`-O`) | **368/368 PASS**, 0 fail, 0 skip, 140.8 s |
+
+(Both are much faster than they used to be — a warm pack cache is doing the work
+branch 2 built it to do.)
+
+# Verdict
+
+## What is green
+
+| | |
+|---|---|
+| three merges, one conflict, source clean | `go build ./...`, `gofmt`, `go vet` clean |
+| `go test ./goc/...` | **PASS**, 1142.3 s |
+| `make test-unit` package set (26 packages) | **PASS** |
+| `go test ./cmd/goc/...` minus the matrix | one pre-existing failure, identical on `main` |
+| both capability arms | **368/368** each |
+| the five audits, census in three separate processes | **PASS**, baselines reproduced |
+| determinism, 5 programs × 2 rounds × 2 opt levels | **20/20 identical** |
+| determinism, 406 programs × 4 rounds × 2 opt levels | **reproducible=406 varying=0 failed=0**, twice |
+| `TestParallelBackendIsByteIdenticalToSerial` | **PASS**, 4 worker counts |
+| crash loops and GC reducers | **1310 runs, 0 failures** |
+| the nosplit debt register, 1638 configurations | **0 rejected, 0 failed, register unchanged** |
+| all eight generated files | regenerated, **none moved** |
+| `make bench-crypto` | **PASS**, all four rows sub-1% |
+| compile time, cold/warm/monolithic | branch 2's table reproduced |
+| warm goc vs warm gc | **14× / 20× / 39×**, branch 2's 16/20/40 confirmed |
+
+## What is not
+
+**`make bench-perf` is red on the merged tree**, seven rows past tolerance,
+reproduced in two independent runs that agree to a third of a percentage point:
+`float/dot-product` +39.3%, `flate/decompress` +18.6%, `sort/ints` +13.2%,
+`mutex/uncontended` +13.1%, `flate/compress` +12.3%, `interp/bytecode-loop`
++8.1% slower, and `gc/pointer-write` 38.0% faster.
+
+The same suite on the same tree with `GOC_AUTOPACK=0` passes with every row
+within ±0.5% of baseline. So this is `ccwork/default-compile-cache` making the
+split link the default, not `ccwork/ir-verify-entry-blocks`, and not the box:
+the pre-flight passed both times and every `control/spin-fixed-work` denominator
+is within 0.3% of its baseline.
+
+It is code generation and not layout — `main_dotProduct`, a program-local
+function, goes from a 64-byte frame and 72 instructions to a **160-byte frame
+and 95 instructions**, spilling arguments and zeroing four more GC slots.
+
+## NOT SAFE TO MERGE
+
+Not because anything is incorrect — every correctness instrument in this tree is
+green, and several of them are stronger than they have ever been — but because
+merging this makes `make bench-perf` red on `main` and makes the default `goc`
+compile emit 8–39% slower code on six of eleven workloads. That is a trade a
+person has to make deliberately, and the three obvious ways to make it are all
+someone else's call:
+
+  1. Make auto-packing opt-in (`GOC_AUTOPACK=1`) rather than the default, which
+     keeps branch 2's cache and its 2.8–3.2× warm `-O` compile for whoever asks
+     for it and leaves emitted code alone. `goc` already has the switch.
+  2. Find and fix whatever the program module loses when the pack takes the
+     standard library out of it. The frame growth says it is an analysis
+     answering conservatively, most likely escape summaries; that is a
+     hypothesis and not a diagnosis.
+  3. Accept the runtime cost for the compile-time win and re-cut
+     `perf_suite_baseline.txt` with the reason written into its header.
+
+**Branches 1 and 3 are clean on their own terms.** Branch 1 changes emitted code
+on every corpus program and moves no baseline, no register entry, and no
+performance row — it is the best-measured of the three and I would merge it
+alone. Branch 3 is documentation and a tool, and the tool earned its keep in
+this gate.
+
+## Fixes made here
+
+  - `analysis/nosplitdebt/main.go` — the `whole` arm now compiles whole-program.
+    Without this the register would have been regenerated from the split view.
+  - `scripts/determinism-check.sh` — cold means an empty pack cache, not the
+    whole-program path. Without this the script reports five false determinism
+    failures on any tree carrying branch 2.
+
+## Left for someone else, deliberately
+
+  - `goc/perfbench_test.go`, `goc/cryptobench_test.go` and
+    `goc/slogalloc_test.go` build through the `goc` binary with no `-runtime`,
+    so all three now measure the split default. That is arguably what they
+    *should* measure — it is what a user gets — and changing it is the same
+    decision as item 1 above. Named here so it is decided rather than drifted
+    into.
+  - `perf_suite_baseline.txt` and `crypto_signing_bench_baseline.txt` were not
+    re-cut. A measurement did force attention on the first of them, and
+    re-cutting is the wrong answer to it: the baseline is the record that this
+    code used to be faster.
