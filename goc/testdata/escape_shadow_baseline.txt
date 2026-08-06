@@ -88,52 +88,16 @@ stdlib/src/crypto/internal/fips140/bigmod/nat.go:961:16	crypto/internal/fips140/
 stdlib/src/crypto/internal/fips140/bigmod/nat.go:968:16	crypto/internal/fips140/bigmod.Nat.Mul	composite-literal	heap -> frame		
 stdlib/src/crypto/internal/fips140/bigmod/nat.go:975:16	crypto/internal/fips140/bigmod.Nat.Mul	composite-literal	heap -> frame		
 stdlib/src/crypto/internal/fips140/drbg/cast.go:43:11	crypto/internal/fips140/drbg.init.0.func.18.27	slice-literal-backing	frame -> heap		argument 3 of $bytes.Equal escapes
-stdlib/src/crypto/internal/fips140/ecdh/cast.go:18:17	.goc.global.initfunc.12.crypto/internal/fips140/ecdh.fipsSelfTest.func.17.36	slice-literal-backing	heap -> frame		
-stdlib/src/crypto/internal/fips140/ecdh/cast.go:18:17	.goc.global.initfunc.16.crypto/internal/fips140/ecdh.fipsSelfTest.func.17.36	slice-literal-backing	heap -> frame		
-stdlib/src/crypto/internal/fips140/ecdh/cast.go:18:17	.goc.global.initfunc.17.crypto/internal/fips140/ecdh.fipsSelfTest.func.17.36	slice-literal-backing	heap -> frame		
-stdlib/src/crypto/internal/fips140/ecdh/cast.go:18:17	.goc.global.initfunc.35.crypto/internal/fips140/ecdh.fipsSelfTest.func.17.36	slice-literal-backing	heap -> frame		
-stdlib/src/crypto/internal/fips140/ecdh/cast.go:18:17	.goc.global.initfunc.41.crypto/internal/fips140/ecdh.fipsSelfTest.func.17.36	slice-literal-backing	heap -> frame		
-stdlib/src/crypto/internal/fips140/ecdh/cast.go:18:17	.goc.global.initfunc.9.crypto/internal/fips140/ecdh.fipsSelfTest.func.17.36	slice-literal-backing	heap -> frame		
-stdlib/src/crypto/internal/fips140/ecdh/cast.go:24:16	.goc.global.initfunc.12.crypto/internal/fips140/ecdh.fipsSelfTest.func.17.36	slice-literal-backing	heap -> frame		
-stdlib/src/crypto/internal/fips140/ecdh/cast.go:24:16	.goc.global.initfunc.16.crypto/internal/fips140/ecdh.fipsSelfTest.func.17.36	slice-literal-backing	heap -> frame		
-stdlib/src/crypto/internal/fips140/ecdh/cast.go:24:16	.goc.global.initfunc.17.crypto/internal/fips140/ecdh.fipsSelfTest.func.17.36	slice-literal-backing	heap -> frame		
-stdlib/src/crypto/internal/fips140/ecdh/cast.go:24:16	.goc.global.initfunc.35.crypto/internal/fips140/ecdh.fipsSelfTest.func.17.36	slice-literal-backing	heap -> frame		
-stdlib/src/crypto/internal/fips140/ecdh/cast.go:24:16	.goc.global.initfunc.41.crypto/internal/fips140/ecdh.fipsSelfTest.func.17.36	slice-literal-backing	heap -> frame		
-stdlib/src/crypto/internal/fips140/ecdh/cast.go:24:16	.goc.global.initfunc.9.crypto/internal/fips140/ecdh.fipsSelfTest.func.17.36	slice-literal-backing	heap -> frame		
-stdlib/src/crypto/internal/fips140/ecdh/cast.go:35:11	.goc.global.initfunc.12.crypto/internal/fips140/ecdh.fipsSelfTest.func.17.36	slice-literal-backing	frame -> heap		argument 3 of $bytes.Equal escapes
-stdlib/src/crypto/internal/fips140/ecdh/cast.go:35:11	.goc.global.initfunc.16.crypto/internal/fips140/ecdh.fipsSelfTest.func.17.36	slice-literal-backing	frame -> heap		argument 3 of $bytes.Equal escapes
-stdlib/src/crypto/internal/fips140/ecdh/cast.go:35:11	.goc.global.initfunc.17.crypto/internal/fips140/ecdh.fipsSelfTest.func.17.36	slice-literal-backing	frame -> heap		argument 3 of $bytes.Equal escapes
-stdlib/src/crypto/internal/fips140/ecdh/cast.go:35:11	.goc.global.initfunc.35.crypto/internal/fips140/ecdh.fipsSelfTest.func.17.36	slice-literal-backing	frame -> heap		argument 3 of $bytes.Equal escapes
-stdlib/src/crypto/internal/fips140/ecdh/cast.go:35:11	.goc.global.initfunc.41.crypto/internal/fips140/ecdh.fipsSelfTest.func.17.36	slice-literal-backing	frame -> heap		argument 3 of $bytes.Equal escapes
-stdlib/src/crypto/internal/fips140/ecdh/cast.go:35:11	.goc.global.initfunc.9.crypto/internal/fips140/ecdh.fipsSelfTest.func.17.36	slice-literal-backing	frame -> heap		argument 3 of $bytes.Equal escapes
-stdlib/src/crypto/internal/fips140/ecdsa/cast.go:111:7	.goc.global.initfunc.18.crypto/internal/fips140/ecdsa.fipsSelfTestDeterministic.func.107.47	slice-literal-backing	frame -> heap		argument 3 of $bytes.Equal escapes
-stdlib/src/crypto/internal/fips140/ecdsa/cast.go:111:7	.goc.global.initfunc.23.crypto/internal/fips140/ecdsa.fipsSelfTestDeterministic.func.107.47	slice-literal-backing	frame -> heap		argument 3 of $bytes.Equal escapes
-stdlib/src/crypto/internal/fips140/ecdsa/cast.go:111:7	.goc.global.initfunc.41.crypto/internal/fips140/ecdsa.fipsSelfTestDeterministic.func.107.47	slice-literal-backing	frame -> heap		argument 3 of $bytes.Equal escapes
-stdlib/src/crypto/internal/fips140/ecdsa/cast.go:111:7	.goc.global.initfunc.47.crypto/internal/fips140/ecdsa.fipsSelfTestDeterministic.func.107.47	slice-literal-backing	frame -> heap		argument 3 of $bytes.Equal escapes
-stdlib/src/crypto/internal/fips140/ecdsa/cast.go:116:10	.goc.global.initfunc.18.crypto/internal/fips140/ecdsa.fipsSelfTestDeterministic.func.107.47	slice-literal-backing	frame -> heap		argument 3 of $bytes.Equal escapes
-stdlib/src/crypto/internal/fips140/ecdsa/cast.go:116:10	.goc.global.initfunc.23.crypto/internal/fips140/ecdsa.fipsSelfTestDeterministic.func.107.47	slice-literal-backing	frame -> heap		argument 3 of $bytes.Equal escapes
-stdlib/src/crypto/internal/fips140/ecdsa/cast.go:116:10	.goc.global.initfunc.41.crypto/internal/fips140/ecdsa.fipsSelfTestDeterministic.func.107.47	slice-literal-backing	frame -> heap		argument 3 of $bytes.Equal escapes
-stdlib/src/crypto/internal/fips140/ecdsa/cast.go:116:10	.goc.global.initfunc.47.crypto/internal/fips140/ecdsa.fipsSelfTestDeterministic.func.107.47	slice-literal-backing	frame -> heap		argument 3 of $bytes.Equal escapes
-stdlib/src/crypto/internal/fips140/ecdsa/cast.go:79:7	.goc.global.initfunc.17.crypto/internal/fips140/ecdsa.fipsSelfTest.func.67.55	slice-literal-backing	frame -> heap		argument 3 of $bytes.Equal escapes
-stdlib/src/crypto/internal/fips140/ecdsa/cast.go:79:7	.goc.global.initfunc.22.crypto/internal/fips140/ecdsa.fipsSelfTest.func.67.55	slice-literal-backing	frame -> heap		argument 3 of $bytes.Equal escapes
-stdlib/src/crypto/internal/fips140/ecdsa/cast.go:79:7	.goc.global.initfunc.40.crypto/internal/fips140/ecdsa.fipsSelfTest.func.67.55	slice-literal-backing	frame -> heap		argument 3 of $bytes.Equal escapes
-stdlib/src/crypto/internal/fips140/ecdsa/cast.go:79:7	.goc.global.initfunc.46.crypto/internal/fips140/ecdsa.fipsSelfTest.func.67.55	slice-literal-backing	frame -> heap		argument 3 of $bytes.Equal escapes
-stdlib/src/crypto/internal/fips140/ecdsa/cast.go:84:10	.goc.global.initfunc.17.crypto/internal/fips140/ecdsa.fipsSelfTest.func.67.55	slice-literal-backing	frame -> heap		argument 3 of $bytes.Equal escapes
-stdlib/src/crypto/internal/fips140/ecdsa/cast.go:84:10	.goc.global.initfunc.22.crypto/internal/fips140/ecdsa.fipsSelfTest.func.67.55	slice-literal-backing	frame -> heap		argument 3 of $bytes.Equal escapes
-stdlib/src/crypto/internal/fips140/ecdsa/cast.go:84:10	.goc.global.initfunc.40.crypto/internal/fips140/ecdsa.fipsSelfTest.func.67.55	slice-literal-backing	frame -> heap		argument 3 of $bytes.Equal escapes
-stdlib/src/crypto/internal/fips140/ecdsa/cast.go:84:10	.goc.global.initfunc.46.crypto/internal/fips140/ecdsa.fipsSelfTest.func.67.55	slice-literal-backing	frame -> heap		argument 3 of $bytes.Equal escapes
-stdlib/src/crypto/internal/fips140/ed25519/cast.go:53:17	.goc.global.initfunc.24.crypto/internal/fips140/ed25519.fipsSelfTest.func.46.42	string-conversion-buffer	frame -> heap		argument 0 of $runtime.stringtoslicebyte leaks to a result the caller cannot follow
-stdlib/src/crypto/internal/fips140/ed25519/cast.go:53:17	.goc.global.initfunc.42.crypto/internal/fips140/ed25519.fipsSelfTest.func.46.42	string-conversion-buffer	frame -> heap		argument 0 of $runtime.stringtoslicebyte leaks to a result the caller cannot follow
-stdlib/src/crypto/internal/fips140/ed25519/cast.go:53:17	.goc.global.initfunc.48.crypto/internal/fips140/ed25519.fipsSelfTest.func.46.42	string-conversion-buffer	frame -> heap		argument 0 of $runtime.stringtoslicebyte leaks to a result the caller cannot follow
-stdlib/src/crypto/internal/fips140/ed25519/cast.go:53:17	.goc.global.initfunc.9.crypto/internal/fips140/ed25519.fipsSelfTest.func.46.42	string-conversion-buffer	frame -> heap		argument 0 of $runtime.stringtoslicebyte leaks to a result the caller cannot follow
-stdlib/src/crypto/internal/fips140/ed25519/cast.go:54:11	.goc.global.initfunc.24.crypto/internal/fips140/ed25519.fipsSelfTest.func.46.42	slice-literal-backing	frame -> heap		argument 3 of $bytes.Equal escapes
-stdlib/src/crypto/internal/fips140/ed25519/cast.go:54:11	.goc.global.initfunc.42.crypto/internal/fips140/ed25519.fipsSelfTest.func.46.42	slice-literal-backing	frame -> heap		argument 3 of $bytes.Equal escapes
-stdlib/src/crypto/internal/fips140/ed25519/cast.go:54:11	.goc.global.initfunc.48.crypto/internal/fips140/ed25519.fipsSelfTest.func.46.42	slice-literal-backing	frame -> heap		argument 3 of $bytes.Equal escapes
-stdlib/src/crypto/internal/fips140/ed25519/cast.go:54:11	.goc.global.initfunc.9.crypto/internal/fips140/ed25519.fipsSelfTest.func.46.42	slice-literal-backing	frame -> heap		argument 3 of $bytes.Equal escapes
-stdlib/src/crypto/internal/fips140/ed25519/cast.go:64:8	.goc.global.initfunc.24.crypto/internal/fips140/ed25519.fipsSelfTest.func.46.42	composite-literal	frame -> heap		argument 0 of $crypto/internal/fips140/ed25519.precomputePrivateKey escapes
-stdlib/src/crypto/internal/fips140/ed25519/cast.go:64:8	.goc.global.initfunc.42.crypto/internal/fips140/ed25519.fipsSelfTest.func.46.42	composite-literal	frame -> heap		argument 0 of $crypto/internal/fips140/ed25519.precomputePrivateKey escapes
-stdlib/src/crypto/internal/fips140/ed25519/cast.go:64:8	.goc.global.initfunc.48.crypto/internal/fips140/ed25519.fipsSelfTest.func.46.42	composite-literal	frame -> heap		argument 0 of $crypto/internal/fips140/ed25519.precomputePrivateKey escapes
-stdlib/src/crypto/internal/fips140/ed25519/cast.go:64:8	.goc.global.initfunc.9.crypto/internal/fips140/ed25519.fipsSelfTest.func.46.42	composite-literal	frame -> heap		argument 0 of $crypto/internal/fips140/ed25519.precomputePrivateKey escapes
+stdlib/src/crypto/internal/fips140/ecdh/cast.go:18:17	.goc.global.initfunc.crypto_internal_fips140_ecdh_fipsSelfTest.68ad597a4b925662.func.17.36	slice-literal-backing	heap -> frame		
+stdlib/src/crypto/internal/fips140/ecdh/cast.go:24:16	.goc.global.initfunc.crypto_internal_fips140_ecdh_fipsSelfTest.68ad597a4b925662.func.17.36	slice-literal-backing	heap -> frame		
+stdlib/src/crypto/internal/fips140/ecdh/cast.go:35:11	.goc.global.initfunc.crypto_internal_fips140_ecdh_fipsSelfTest.68ad597a4b925662.func.17.36	slice-literal-backing	frame -> heap		argument 3 of $bytes.Equal escapes
+stdlib/src/crypto/internal/fips140/ecdsa/cast.go:111:7	.goc.global.initfunc.crypto_internal_fips140_ecdsa_fipsSelfTestDeterm.6197a8f7f28fa675.func.107.47	slice-literal-backing	frame -> heap		argument 3 of $bytes.Equal escapes
+stdlib/src/crypto/internal/fips140/ecdsa/cast.go:116:10	.goc.global.initfunc.crypto_internal_fips140_ecdsa_fipsSelfTestDeterm.6197a8f7f28fa675.func.107.47	slice-literal-backing	frame -> heap		argument 3 of $bytes.Equal escapes
+stdlib/src/crypto/internal/fips140/ecdsa/cast.go:79:7	.goc.global.initfunc.crypto_internal_fips140_ecdsa_fipsSelfTest.0286d506a9f02152.func.67.55	slice-literal-backing	frame -> heap		argument 3 of $bytes.Equal escapes
+stdlib/src/crypto/internal/fips140/ecdsa/cast.go:84:10	.goc.global.initfunc.crypto_internal_fips140_ecdsa_fipsSelfTest.0286d506a9f02152.func.67.55	slice-literal-backing	frame -> heap		argument 3 of $bytes.Equal escapes
+stdlib/src/crypto/internal/fips140/ed25519/cast.go:53:17	.goc.global.initfunc.crypto_internal_fips140_ed25519_fipsSelfTest.29202c5a372b8bb2.func.46.42	string-conversion-buffer	frame -> heap		argument 0 of $runtime.stringtoslicebyte leaks to a result the caller cannot follow
+stdlib/src/crypto/internal/fips140/ed25519/cast.go:54:11	.goc.global.initfunc.crypto_internal_fips140_ed25519_fipsSelfTest.29202c5a372b8bb2.func.46.42	slice-literal-backing	frame -> heap		argument 3 of $bytes.Equal escapes
+stdlib/src/crypto/internal/fips140/ed25519/cast.go:64:8	.goc.global.initfunc.crypto_internal_fips140_ed25519_fipsSelfTest.29202c5a372b8bb2.func.46.42	composite-literal	frame -> heap		argument 0 of $crypto/internal/fips140/ed25519.precomputePrivateKey escapes
 stdlib/src/crypto/internal/fips140/ed25519/ed25519.go:100:8	crypto/internal/fips140/ed25519.precomputePrivateKey	composite-literal	heap -> frame		
 stdlib/src/crypto/internal/fips140/ed25519/ed25519.go:219:19	crypto/internal/fips140/ed25519.signWithDom	string-conversion-buffer	frame -> heap		argument 0 of $runtime.stringtoslicebyte leaks to a result the caller cannot follow
 stdlib/src/crypto/internal/fips140/ed25519/ed25519.go:221:19	crypto/internal/fips140/ed25519.signWithDom	string-conversion-buffer	frame -> heap		argument 0 of $runtime.stringtoslicebyte leaks to a result the caller cannot follow
@@ -154,14 +118,8 @@ stdlib/src/crypto/internal/fips140/edwards25519/scalarmult.go:50:10	crypto/inter
 stdlib/src/crypto/internal/fips140/edwards25519/scalarmult.go:51:10	crypto/internal/fips140/edwards25519.Point.ScalarBaseMult	composite-literal	heap -> frame		
 stdlib/src/crypto/internal/fips140/hkdf/cast.go:21:11	crypto/internal/fips140/hkdf.init.0.func.16.32	slice-literal-backing	frame -> heap		argument 3 of $bytes.Equal escapes
 stdlib/src/crypto/internal/fips140/hmac/cast.go:20:11	crypto/internal/fips140/hmac.init.0.func.15.32	slice-literal-backing	frame -> heap		argument 3 of $bytes.Equal escapes
-stdlib/src/crypto/internal/fips140/mlkem/cast.go:23:11	.goc.global.initfunc.17.crypto/internal/fips140/mlkem.fipsSelfTest.func.16.29	composite-literal	heap -> frame		
-stdlib/src/crypto/internal/fips140/mlkem/cast.go:23:11	.goc.global.initfunc.48.crypto/internal/fips140/mlkem.fipsSelfTest.func.16.29	composite-literal	heap -> frame		
-stdlib/src/crypto/internal/fips140/mlkem/cast.go:23:11	.goc.global.initfunc.5.crypto/internal/fips140/mlkem.fipsSelfTest.func.16.29	composite-literal	heap -> frame		
-stdlib/src/crypto/internal/fips140/mlkem/cast.go:23:11	.goc.global.initfunc.54.crypto/internal/fips140/mlkem.fipsSelfTest.func.16.29	composite-literal	heap -> frame		
-stdlib/src/crypto/internal/fips140/mlkem/cast.go:41:9	.goc.global.initfunc.17.crypto/internal/fips140/mlkem.fipsSelfTest.func.16.29	composite-literal	frame -> heap		argument 0 of $crypto/internal/fips140/mlkem.kemKeyGen escapes
-stdlib/src/crypto/internal/fips140/mlkem/cast.go:41:9	.goc.global.initfunc.48.crypto/internal/fips140/mlkem.fipsSelfTest.func.16.29	composite-literal	frame -> heap		argument 0 of $crypto/internal/fips140/mlkem.kemKeyGen escapes
-stdlib/src/crypto/internal/fips140/mlkem/cast.go:41:9	.goc.global.initfunc.5.crypto/internal/fips140/mlkem.fipsSelfTest.func.16.29	composite-literal	frame -> heap		argument 0 of $crypto/internal/fips140/mlkem.kemKeyGen escapes
-stdlib/src/crypto/internal/fips140/mlkem/cast.go:41:9	.goc.global.initfunc.54.crypto/internal/fips140/mlkem.fipsSelfTest.func.16.29	composite-literal	frame -> heap		argument 0 of $crypto/internal/fips140/mlkem.kemKeyGen escapes
+stdlib/src/crypto/internal/fips140/mlkem/cast.go:23:11	.goc.global.initfunc.crypto_internal_fips140_mlkem_fipsSelfTest.1b05d390b2e2c577.func.16.29	composite-literal	heap -> frame		
+stdlib/src/crypto/internal/fips140/mlkem/cast.go:41:9	.goc.global.initfunc.crypto_internal_fips140_mlkem_fipsSelfTest.1b05d390b2e2c577.func.16.29	composite-literal	frame -> heap		argument 0 of $crypto/internal/fips140/mlkem.kemKeyGen escapes
 stdlib/src/crypto/internal/fips140/nistec/p224.go:29:9	crypto/internal/fips140/nistec.P224Point.ScalarBaseMult	composite-literal	heap -> frame		
 stdlib/src/crypto/internal/fips140/nistec/p224.go:29:9	crypto/internal/fips140/nistec.P224Point.ScalarMult	composite-literal	heap -> frame		
 stdlib/src/crypto/internal/fips140/nistec/p224.go:29:9	crypto/internal/fips140/nistec.P224Point.SetBytes	composite-literal	heap -> frame		
@@ -179,10 +137,7 @@ stdlib/src/crypto/internal/fips140/nistec/p521.go:29:9	crypto/internal/fips140/n
 stdlib/src/crypto/internal/fips140/nistec/p521.go:29:9	crypto/internal/fips140/nistec.P521Point.generatorTable.func.393.28	composite-literal	heap -> frame		
 stdlib/src/crypto/internal/fips140/nistec/p521.go:29:9	crypto/internal/fips140/nistec.p521Table.Select	composite-literal	heap -> frame		
 stdlib/src/crypto/internal/fips140/pbkdf2/cast.go:28:11	crypto/internal/fips140/pbkdf2.init.0.func.23.25	slice-literal-backing	frame -> heap		argument 3 of $bytes.Equal escapes
-stdlib/src/crypto/internal/fips140/rsa/cast.go:188:11	.goc.global.initfunc.12.crypto/internal/fips140/rsa.fipsSelfTest.func.180.60	slice-literal-backing	frame -> heap		argument 3 of $bytes.Equal escapes
-stdlib/src/crypto/internal/fips140/rsa/cast.go:188:11	.goc.global.initfunc.34.crypto/internal/fips140/rsa.fipsSelfTest.func.180.60	slice-literal-backing	frame -> heap		argument 3 of $bytes.Equal escapes
-stdlib/src/crypto/internal/fips140/rsa/cast.go:188:11	.goc.global.initfunc.53.crypto/internal/fips140/rsa.fipsSelfTest.func.180.60	slice-literal-backing	frame -> heap		argument 3 of $bytes.Equal escapes
-stdlib/src/crypto/internal/fips140/rsa/cast.go:188:11	.goc.global.initfunc.59.crypto/internal/fips140/rsa.fipsSelfTest.func.180.60	slice-literal-backing	frame -> heap		argument 3 of $bytes.Equal escapes
+stdlib/src/crypto/internal/fips140/rsa/cast.go:188:11	.goc.global.initfunc.crypto_internal_fips140_rsa_fipsSelfTest.3cff8f6146162213.func.180.60	slice-literal-backing	frame -> heap		argument 3 of $bytes.Equal escapes
 stdlib/src/crypto/internal/fips140/sha256/cast.go:19:11	crypto/internal/fips140/sha256.init.0.func.14.27	slice-literal-backing	frame -> heap		argument 3 of $bytes.Equal escapes
 stdlib/src/crypto/internal/fips140/sha3/cast.go:19:11	crypto/internal/fips140/sha3.init.0.func.14.28	slice-literal-backing	frame -> heap		argument 3 of $bytes.Equal escapes
 stdlib/src/crypto/internal/fips140/sha512/cast.go:19:11	crypto/internal/fips140/sha512.init.0.func.14.27	slice-literal-backing	frame -> heap		argument 3 of $bytes.Equal escapes
@@ -214,10 +169,7 @@ stdlib/src/crypto/tls/ech.go:368:46	crypto/tls.decodeInnerClientHello	slice-lite
 stdlib/src/crypto/tls/handshake_client.go:1058:8	crypto/tls.clientHandshakeState.saveSessionTicket	composite-literal	heap -> frame		
 stdlib/src/crypto/tls/handshake_client.go:328:9	crypto/tls.Conn.clientHandshake	composite-literal	frame -> heap		argument 0 of $crypto/tls.clientHandshakeStateTLS13.handshake escapes
 stdlib/src/crypto/tls/handshake_client.go:358:54	crypto/tls.Conn.loadSession	slice-literal-backing	frame -> heap		argument 3 of $bytes.Equal escapes
-stdlib/src/crypto/tls/handshake_client.go:785:17	crypto/tls.clientHandshakeState.doFullHandshake	composite-literal	frame -> heap		store into non-local storage
-stdlib/src/crypto/tls/handshake_client_tls13.go:811:14	crypto/tls.clientHandshakeStateTLS13.sendClientFinished	composite-literal	frame -> heap		store into non-local storage
 stdlib/src/crypto/tls/handshake_client_tls13.go:881:8	crypto/tls.Conn.handleNewSessionTicket	composite-literal	heap -> frame		
-stdlib/src/crypto/tls/handshake_server_tls13.go:893:14	crypto/tls.serverHandshakeStateTLS13.sendServerFinished	composite-literal	frame -> heap		store into non-local storage
 stdlib/src/crypto/tls/quic.go:511:8	crypto/tls.Conn.quicWaitForSignal	method-value-descriptor	frame -> heap		argument 0 of $runtime.deferproc escapes
 stdlib/src/crypto/x509/parser.go:1011:40	crypto/x509.parseCertificate	composite-literal	heap -> frame		
 stdlib/src/crypto/x509/root.go:34:8	crypto/x509.systemRootsPool	method-value-descriptor	frame -> heap		argument 0 of $runtime.deferproc escapes
@@ -543,12 +495,7 @@ stdlib/src/net/interface.go:199:8	net.ipv6ZoneCache.update	method-value-descript
 stdlib/src/net/ip.go:309:25	net.IP.String	make-slice-backing	frame -> heap		
 stdlib/src/net/ip.go:312:25	net.IP.String	make-slice-backing	frame -> heap		
 stdlib/src/net/ipsock_posix.go:45:15	net.ipStackCapabilities.probe	slice-literal-backing	heap -> frame		
-stdlib/src/net/lookup_unix.go:22:8	.goc.global.initfunc.115.net.readProtocolsOnce.func.17.39	method-value-descriptor	frame -> heap		argument 0 of $runtime.deferproc escapes
-stdlib/src/net/lookup_unix.go:22:8	.goc.global.initfunc.145.net.readProtocolsOnce.func.17.39	method-value-descriptor	frame -> heap		argument 0 of $runtime.deferproc escapes
-stdlib/src/net/lookup_unix.go:22:8	.goc.global.initfunc.226.net.readProtocolsOnce.func.17.39	method-value-descriptor	frame -> heap		argument 0 of $runtime.deferproc escapes
-stdlib/src/net/lookup_unix.go:22:8	.goc.global.initfunc.279.net.readProtocolsOnce.func.17.39	method-value-descriptor	frame -> heap		argument 0 of $runtime.deferproc escapes
-stdlib/src/net/lookup_unix.go:22:8	.goc.global.initfunc.333.net.readProtocolsOnce.func.17.39	method-value-descriptor	frame -> heap		argument 0 of $runtime.deferproc escapes
-stdlib/src/net/lookup_unix.go:22:8	.goc.global.initfunc.337.net.readProtocolsOnce.func.17.39	method-value-descriptor	frame -> heap		argument 0 of $runtime.deferproc escapes
+stdlib/src/net/lookup_unix.go:22:8	.goc.global.initfunc.net_readProtocolsOnce.04fbb94010dc91ff.func.17.39	method-value-descriptor	frame -> heap		argument 0 of $runtime.deferproc escapes
 stdlib/src/net/netip/netip.go:857:25	net/netip.Addr.string4	make-slice-backing	frame -> heap		argument 1 of $net/netip.Addr.appendTo4 escapes
 stdlib/src/net/netip/netip.go:875:25	net/netip.Addr.string4In6	make-slice-backing	frame -> heap		argument 1 of $net/netip.Addr.appendTo4In6 escapes
 stdlib/src/net/netip/netip.go:904:25	net/netip.Addr.string6	make-slice-backing	frame -> heap		argument 1 of $net/netip.Addr.appendTo6 escapes
@@ -670,7 +617,6 @@ stdlib/src/unique/canonmap.go:111:8	unique.canonMap.LoadOrStore[main.uniqueRecor
 stdlib/src/unique/canonmap.go:111:8	unique.canonMap.LoadOrStore[net/netip.addrDetail]	method-value-descriptor	frame -> heap		argument 0 of $runtime.deferproc escapes
 testdata/allocation_counts.go:312:12	main.compareByteSliceAsString	slice-literal-backing	frame -> heap		argument 0 of $runtime.slicebytetostringtmp leaks to a result the caller cannot follow
 testdata/allocation_counts.go:325:9	main.declareInterfaceFromPointer	composite-literal	frame -> heap		store into non-local storage
-testdata/allocation_counts.go:379:18	main.interfaceLocalMethodCall	composite-literal	frame -> heap		store into non-local storage
 testdata/allocation_counts.go:463:8	main.deferMutexUnlock	method-value-descriptor	frame -> heap		argument 0 of $runtime.deferproc escapes
 testdata/allocation_counts.go:476:8	main.deferMethodOnALocal	method-value-descriptor	frame -> heap		argument 0 of $runtime.deferproc escapes
 testdata/allocation_counts.go:485:2	main.deferCallWithArguments	deferred-call-closure	frame -> heap		argument 0 of $runtime.deferproc escapes
@@ -720,11 +666,8 @@ testdata/runtime_gc_scavenge_release.go:92:2	main.main	deferred-call-closure	fra
 testdata/runtime_gc_sweep_pacing.go:154:2	main.main	deferred-call-closure	frame -> heap		argument 0 of $runtime.deferproc escapes
 testdata/runtime_goroutine_entry_stack_map.go:75:8	main.seasonWorker	method-value-descriptor	frame -> heap		argument 0 of $runtime.deferproc escapes
 testdata/runtime_goroutine_entry_stack_map.go:84:8	main.carry	method-value-descriptor	frame -> heap		argument 0 of $runtime.deferproc escapes
-testdata/runtime_interface_method_gc.go:23:18	main.main	composite-literal	frame -> heap		store into non-local storage
-testdata/runtime_interface_method_gc.go:25:10	main.main	composite-literal	frame -> heap		store into non-local storage
 testdata/runtime_interface_method_value.go:17:35	main.main	composite-literal	heap -> frame		
 testdata/runtime_interface_pointer_equality_gc.go:10:10	main.main	composite-literal	frame -> heap		store into non-local storage
-testdata/runtime_interface_stack_gc.go:31:11	main.main	composite-literal	frame -> heap		store into non-local storage
 testdata/runtime_keepalive_stack_root.go:59:10	main.keepStackItem	composite-literal	frame -> heap		store into non-local storage
 testdata/runtime_keepalive_stack_root.go:61:10	main.keepStackItem	composite-literal	frame -> heap		store into non-local storage
 testdata/runtime_loopvar_goroutine_defer.go:26:10	main.goroutinesSeeTheirOwnIteration.func.25.6	method-value-descriptor	frame -> heap		argument 0 of $runtime.deferproc escapes
@@ -781,6 +724,8 @@ testdata/runtime_type_param_method_shapes.go:229:18	main.main	composite-literal	
 testdata/runtime_type_param_method_shapes.go:232:18	main.main	composite-literal	heap -> frame		
 testdata/runtime_type_param_method_shapes.go:236:15	main.main	composite-literal	heap -> frame		
 testdata/runtime_type_param_method_shapes.go:239:15	main.main	composite-literal	heap -> frame		
+testdata/runtime_type_param_method_shapes.go:243:12	main.main	composite-literal	heap -> frame		
+testdata/runtime_type_param_method_shapes.go:248:10	main.main	composite-literal	heap -> frame		
 testdata/runtime_unsafe_struct_field.go:12:10	main.main	composite-literal	frame -> heap		used by add
 testdata/runtime_unsafe_struct_field.go:15:10	main.main	composite-literal	heap -> frame		
 testdata/runtime_waitgroup_reuse.go:11:10	main.runWaitGroupRound.func.10.6	method-value-descriptor	frame -> heap		argument 0 of $runtime.deferproc escapes
@@ -788,7 +733,6 @@ testdata/sha1_assembly.go:6:28	main.main	string-conversion-buffer	frame -> heap	
 testdata/stdlib_archive_zip_roundtrip.go:74:23	main.main	slice-literal-backing	frame -> heap		argument 3 of $bytes.Equal escapes
 testdata/stdlib_bytes_buffer.go:9:22	main.main	string-conversion-buffer	frame -> heap		argument 0 of $runtime.stringtoslicebyte leaks to a result the caller cannot follow
 testdata/stdlib_bytes_reader_unread.go:18:25	main.main	make-slice-backing	frame -> heap		argument 0 of $runtime.slicebytetostringtmp leaks to a result the caller cannot follow
-testdata/stdlib_container_heap.go:31:27	main.main	composite-literal-descriptor	frame -> heap		store into non-local storage
 testdata/stdlib_crypto_des_rc4.go:38:41	main.main	string-conversion-buffer	frame -> heap		argument 0 of $runtime.stringtoslicebyte leaks to a result the caller cannot follow
 testdata/stdlib_crypto_des_rc4.go:42:32	main.main	make-slice-backing	frame -> heap		argument 0 of $bytes.Equal escapes
 testdata/stdlib_crypto_des_rc4.go:43:47	main.main	string-conversion-buffer	frame -> heap		argument 0 of $runtime.stringtoslicebyte leaks to a result the caller cannot follow
