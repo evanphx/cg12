@@ -5,6 +5,7 @@ import (
 	"os"
 	"sort"
 	"strings"
+	"time"
 
 	"github.com/evanphx/cg12/ir"
 )
@@ -249,6 +250,7 @@ func selectCostInline(m *ir.Module, cg *callGraph, scc *sccInfo) {
 // inlineModule inlines across the whole module. moved, when non-nil, is called
 // with each caller whose body inlining changed.
 func inlineModule(m *ir.Module, base map[*ir.Func]int, costDone *bool, moved func(*ir.Func)) bool {
+	graphStart := time.Now()
 	forceInlineFromEnv(m)
 	cg := buildCallGraph(m)
 	scc := computeSCC(cg)
@@ -257,6 +259,9 @@ func inlineModule(m *ir.Module, base map[*ir.Func]int, costDone *bool, moved fun
 		*costDone = true
 	}
 	sites := callSiteCounts(m, cg.byName)
+	if activeDeps != nil {
+		activeDeps.noteGraph(time.Since(graphStart))
+	}
 	if activeDeps != nil && len(activeDeps.siteCounts) == 0 {
 		for f, n := range sites {
 			activeDeps.siteCounts[f] = n

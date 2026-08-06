@@ -171,6 +171,9 @@ func InlineIntoNoSplitCallersReporting(m *ir.Module) (*NoSplitInlineReport, bool
 			budget.Charge(name, after-before)
 		}
 		report.Accepted = append(report.Accepted, result)
+		if activeDeps != nil {
+			activeDeps.noSplitAccepted[caller] = true
+		}
 		changed = true
 	}
 	sort.Strings(report.NoRoom)

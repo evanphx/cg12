@@ -47,6 +47,9 @@ func unrollInto(caller *ir.Func, cg *callGraph, scc *sccInfo) bool {
 		}
 		depth := int(b.Instrs[idx].Unroll)
 		spliceCall(caller, b, idx, callee, cg, scc, depth)
+		if activeDeps != nil {
+			activeDeps.unrolled[caller] = true
+		}
 		changed = true
 	}
 	return changed

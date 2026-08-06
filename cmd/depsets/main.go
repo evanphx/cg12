@@ -60,10 +60,28 @@ func cleanFixpoint() opt.Pass {
 	)
 }
 
+// awkwardPassCost accumulates the wall time of the three passes BUILD_CACHE.md
+// §3.4 flags as not fitting the per-function memoisation model.
+//
+// They are timed by wrapping the transform rather than by splitting the pipeline
+// around them, so the pass objects, their identities and the changeLog they
+// share are exactly what an unmeasured compile has. Splitting would perturb the
+// thing being measured; -unsplit measures how much.
+var awkwardPassCost = map[string]time.Duration{}
+
+func timedModulePass(name string, run func(*ir.Module) bool) opt.Pass {
+	return opt.ModulePass(name, func(m *ir.Module) bool {
+		start := time.Now()
+		changed := run(m)
+		awkwardPassCost[name] += time.Since(start)
+		return changed
+	})
+}
+
 // wholeModuleStage is the rest of opt.DefaultPipeline, the stage Option C
 // memoises. It is reconstructed here rather than sliced off DefaultPipeline
 // because the two halves have to be separate opt.Run calls for the mid-stage
-// digest to exist at all; -unsplit checks that reconstructing it changes nothing.
+// digest to exist at all; -unsplit checks how much reconstructing it changes.
 func wholeModuleStage() []opt.Pass {
 	clean := cleanFixpoint()
 	inline := opt.InlinePass()
@@ -71,7 +89,7 @@ func wholeModuleStage() []opt.Pass {
 		opt.Fixpoint("inline-fixpoint", inline, clean),
 		opt.FuncPass("mem2reg", opt.Mem2Reg),
 		clean,
-		opt.ModulePass("unroll", opt.UnrollRecursion),
+		timedModulePass("unroll", opt.UnrollRecursion),
 		opt.Fixpoint("inline-fixpoint", inline, clean),
 		opt.FuncPass("constantp", opt.ResolveConstantP),
 		opt.FuncPass("ifconvert", opt.IfConvert),
@@ -79,10 +97,10 @@ func wholeModuleStage() []opt.Pass {
 		opt.FuncPass("tailmerge", opt.TailMerge),
 		opt.FuncPass("simplifycfg", opt.SimplifyCFG),
 		opt.FuncPass("dce", opt.DCE),
-		opt.ModulePass("deadfunc", opt.DeadFuncElim),
+		timedModulePass("deadfunc", opt.DeadFuncElim),
 		opt.FuncPass("gcm", opt.GCM),
 		opt.FuncPass("dce", opt.DCE),
-		opt.ModulePass("inline-nosplit", opt.InlineIntoNoSplitCallers),
+		timedModulePass("inline-nosplit", opt.InlineIntoNoSplitCallers),
 	}
 }
 
@@ -153,6 +171,12 @@ func writeDeps(path string, m *ir.Module, deps *opt.InlineDeps, ids map[*ir.Func
 	for _, f := range deps.NoSplitMeasured() {
 		fmt.Fprintf(w, "X %d\n", ids[f])
 	}
+	for _, f := range deps.NoSplitAccepted() {
+		fmt.Fprintf(w, "A %d\n", ids[f])
+	}
+	for _, f := range deps.Unrolled() {
+		fmt.Fprintf(w, "U %d\n", ids[f])
+	}
 	for _, f := range deps.CostInlineSelected() {
 		fmt.Fprintf(w, "K %d\n", ids[f])
 	}
@@ -177,6 +201,7 @@ func writeDeps(path string, m *ir.Module, deps *opt.InlineDeps, ids map[*ir.Func
 func main() {
 	outPrefix := flag.String("out", "", "write <prefix>.mid, <prefix>.post and <prefix>.deps")
 	unsplit := flag.Bool("unsplit", false, "run opt.OptimizeModule whole instead of splitting the pipeline (control for the split)")
+	record := flag.Bool("record", true, "record dependency sets (the control for whether recording perturbs the compile)")
 	flag.Parse()
 	if flag.NArg() != 1 || *outPrefix == "" {
 		fmt.Fprintln(os.Stderr, "usage: depsets -out prefix program.go")
@@ -224,11 +249,26 @@ func main() {
 	}
 
 	stageStart := time.Now()
-	deps := opt.Record(func() {
-		opt.Run(module, wholeModuleStage())
-	})
+	var deps *opt.InlineDeps
+	stage := func() { opt.Run(module, wholeModuleStage()) }
+	if *record {
+		deps = opt.Record(stage)
+	} else {
+		stage()
+	}
 	fmt.Fprintf(os.Stderr, "  whole-module stage %.2fs, %d funcs survive\n",
 		time.Since(stageStart).Seconds(), len(module.Funcs))
+	for _, name := range []string{"unroll", "deadfunc", "inline-nosplit"} {
+		fmt.Fprintf(os.Stderr, "    %-16s %.3fs\n", name, awkwardPassCost[name].Seconds())
+	}
+	if deps != nil {
+		fmt.Fprintf(os.Stderr, "    nosplit measured %d, accepted %d; unrolled %d; costinline %d\n",
+			len(deps.NoSplitMeasured()), len(deps.NoSplitAccepted()),
+			len(deps.Unrolled()), len(deps.CostInlineSelected()))
+		graphTime, graphBuilds := deps.GraphCost()
+		fmt.Fprintf(os.Stderr, "    call graph + SCC + site census: %.3fs over %d rebuilds (%.3fs each)\n",
+			graphTime.Seconds(), graphBuilds, graphTime.Seconds()/float64(max(graphBuilds, 1)))
+	}
 
 	// A function the stage created (none are expected: inlining clones bodies
 	// into existing functions) would have no identity, which the dependency file
@@ -244,9 +284,11 @@ func main() {
 		fmt.Fprintln(os.Stderr, err)
 		os.Exit(1)
 	}
-	if err := writeDeps(*outPrefix+".deps", module, deps, ids); err != nil {
-		fmt.Fprintln(os.Stderr, err)
-		os.Exit(1)
+	if deps != nil {
+		if err := writeDeps(*outPrefix+".deps", module, deps, ids); err != nil {
+			fmt.Fprintln(os.Stderr, err)
+			os.Exit(1)
+		}
 	}
 	fmt.Fprintf(os.Stderr, "  total %.2fs\n", time.Since(start).Seconds())
 }

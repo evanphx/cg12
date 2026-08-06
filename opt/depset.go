@@ -2,6 +2,7 @@ package opt
 
 import (
 	"sort"
+	"time"
 
 	"github.com/evanphx/cg12/ir"
 )
@@ -47,6 +48,11 @@ type InlineDeps struct {
 	// out for. They carry a dependency this file cannot express -- see
 	// [InlineDeps.NoSplitMeasured].
 	noSplitMeasured map[*ir.Func]bool
+	// noSplitAccepted names the functions whose measured frame fit, so the pass
+	// kept the inlining and charged the chain.
+	noSplitAccepted map[*ir.Func]bool
+	// unrolled names the functions UnrollRecursion spliced a back-edge into.
+	unrolled map[*ir.Func]bool
 	// costInlineSelected names the functions selectCostInline marked, a
 	// whole-module decision made once on the original call graph.
 	costInlineSelected map[*ir.Func]bool
@@ -54,6 +60,13 @@ type InlineDeps struct {
 	// first inlining round computed it. It is a whole-module quantity feeding a
 	// per-function decision, so it has to be reported separately from the sets.
 	siteCounts map[*ir.Func]int
+	// graphTime and graphBuilds account the whole-module analyses the inliner
+	// redoes on every round -- the call graph, its SCC condensation and the
+	// call-site census. They are the standing cost of Option C: no per-function
+	// memo can skip them, because they are what says which functions the memo is
+	// even allowed to be keyed on.
+	graphTime   time.Duration
+	graphBuilds int
 }
 
 // activeDeps is the recorder the hooks below write to, or nil.
@@ -78,6 +91,8 @@ func Record(compile func()) *InlineDeps {
 		consulted:          map[*ir.Func]map[*ir.Func]bool{},
 		spliced:            map[*ir.Func]map[*ir.Func]bool{},
 		noSplitMeasured:    map[*ir.Func]bool{},
+		noSplitAccepted:    map[*ir.Func]bool{},
+		unrolled:           map[*ir.Func]bool{},
 		costInlineSelected: map[*ir.Func]bool{},
 		siteCounts:         map[*ir.Func]int{},
 	}
@@ -144,6 +159,13 @@ func (d *InlineDeps) Spliced(f *ir.Func) []*ir.Func { return sorted(d.spliced[f]
 // expresses it.
 func (d *InlineDeps) NoSplitMeasured() []*ir.Func { return sorted(d.noSplitMeasured) }
 
+// NoSplitAccepted returns the functions whose measured frame fit, so the pass
+// kept what it inlined and charged the chain.
+func (d *InlineDeps) NoSplitAccepted() []*ir.Func { return sorted(d.noSplitAccepted) }
+
+// Unrolled returns the functions UnrollRecursion spliced a back-edge into.
+func (d *InlineDeps) Unrolled() []*ir.Func { return sorted(d.unrolled) }
+
 // CostInlineSelected returns the functions selectCostInline marked.
 func (d *InlineDeps) CostInlineSelected() []*ir.Func { return sorted(d.costInlineSelected) }
 
@@ -153,6 +175,16 @@ func (d *InlineDeps) SiteCount(f *ir.Func) int { return d.siteCounts[f] }
 
 // SiteCounts returns the whole recorded call-site table.
 func (d *InlineDeps) SiteCounts() map[*ir.Func]int { return d.siteCounts }
+
+// GraphCost returns the wall time the inliner spent rebuilding the call graph,
+// its SCC condensation and the call-site census, and how many times it did so.
+func (d *InlineDeps) GraphCost() (time.Duration, int) { return d.graphTime, d.graphBuilds }
+
+// noteGraph accounts one rebuild of the whole-module analyses.
+func (d *InlineDeps) noteGraph(elapsed time.Duration) {
+	d.graphTime += elapsed
+	d.graphBuilds++
+}
 
 func sorted(set map[*ir.Func]bool) []*ir.Func {
 	out := make([]*ir.Func, 0, len(set))
